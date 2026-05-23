@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/xgame-core",
+    "crates/xgame-math",
+    "crates/xgame-render",
+]

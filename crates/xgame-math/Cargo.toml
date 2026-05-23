@@ -1,0 +1,9 @@
+[package]
+name = "xgame-math"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine math library (glam re-export + Transform)"
+
+[dependencies]
+glam = "0.29"
+xgame-core = { path = "../xgame-core" }

@@ -1,0 +1,10 @@
+[package]
+name = "xgame-core"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine core types and traits"
+
+[dependencies]
+glam = "0.29"
+log = "0.4"
+thiserror = "2"
