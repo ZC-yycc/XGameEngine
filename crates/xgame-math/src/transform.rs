@@ -1,9 +1,10 @@
 use glam::{Mat4, Quat, Vec3};
+use serde::{Deserialize, Serialize};
 
 /// Hierarchical spatial transform (position, rotation, scale).
 ///
 /// Local-space matrix: `T * R * S`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
     pub translation: Vec3,
     pub rotation: Quat,

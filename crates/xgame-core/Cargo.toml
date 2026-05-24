@@ -5,6 +5,8 @@ edition = "2021"
 description = "XGameEngine core types and traits"
 
 [dependencies]
-glam = "0.29"
+glam = { version = "0.29", features = ["serde"] }
 log = "0.4"
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"

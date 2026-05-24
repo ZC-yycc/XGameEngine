@@ -1,0 +1,14 @@
+[package]
+name = "xgame-physics"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine physics (rapier3d integration)"
+
+[dependencies]
+rapier3d = "0.22"
+glam = { version = "0.29", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+
+xgame-core = { path = "../xgame-core" }
+xgame-math = { path = "../xgame-math" }

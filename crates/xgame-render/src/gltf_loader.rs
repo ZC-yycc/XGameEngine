@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use wgpu::util::DeviceExt;
 
+use crate::texture::Texture;
+
 /// One draw-call from a glTF mesh primitive.
 pub struct GltfPrimitive {
     pub vertex_buffer: wgpu::Buffer,
@@ -9,6 +11,8 @@ pub struct GltfPrimitive {
     pub num_indices: u32,
     pub index_format: wgpu::IndexFormat,
     pub num_vertices: u32,
+    /// Diffuse texture (white fallback if the model has none).
+    pub texture: Texture,
 }
 
 /// A collection of GPU-resident primitives loaded from a glTF file.
@@ -19,7 +23,7 @@ pub struct GltfMesh {
 }
 
 // ---------------------------------------------------------------------------
-// Host-side vertex (position + normal + colour)
+// Host-side vertex (position + normal + colour + tex_coord)
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -28,6 +32,7 @@ pub struct GltfVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 3],
+    pub tex_coord: [f32; 2],
 }
 
 impl GltfVertex {
@@ -35,8 +40,9 @@ impl GltfVertex {
         0 => Float32x3, // position
         1 => Float32x3, // normal
         2 => Float32x3, // colour
+        3 => Float32x2, // tex_coord
     ];
-    
+
     pub const STRIDE: wgpu::BufferAddress = std::mem::size_of::<Self>() as wgpu::BufferAddress;
 
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -49,76 +55,19 @@ impl GltfVertex {
 }
 
 // ---------------------------------------------------------------------------
-// Face-normal computation (used when glTF has no NORMAL attribute)
-// ---------------------------------------------------------------------------
-
-/// Accumulate per-face normals and average them into per-vertex smooth normals.
-fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
-    let vertex_count = positions.len();
-    let mut normals = vec![[0.0f32; 3]; vertex_count];
-
-    for tri in indices.chunks(3) {
-        if tri.len() < 3 {
-            break;
-        }
-        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-
-        let (ax, ay, az) = (
-            positions[i1][0] - positions[i0][0],
-            positions[i1][1] - positions[i0][1],
-            positions[i1][2] - positions[i0][2],
-        );
-        let (bx, by, bz) = (
-            positions[i2][0] - positions[i0][0],
-            positions[i2][1] - positions[i0][1],
-            positions[i2][2] - positions[i0][2],
-        );
-
-        // cross product
-        let (nx, ny, nz) = (
-            ay * bz - az * by,
-            az * bx - ax * bz,
-            ax * by - ay * bx,
-        );
-
-        normals[i0][0] += nx;
-        normals[i0][1] += ny;
-        normals[i0][2] += nz;
-        normals[i1][0] += nx;
-        normals[i1][1] += ny;
-        normals[i1][2] += nz;
-        normals[i2][0] += nx;
-        normals[i2][1] += ny;
-        normals[i2][2] += nz;
-    }
-
-    // Normalize all vertex normals
-    for n in &mut normals {
-        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        if len > 0.0 {
-            n[0] /= len;
-            n[1] /= len;
-            n[2] /= len;
-        } else {
-            *n = [0.0, 0.0, 1.0];
-        }
-    }
-
-    normals
-}
-
-// ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
 
 impl GltfMesh {
     /// Load a `.gltf` or `.glb` file and upload all mesh primitives to the GPU.
     ///
-    /// Missing vertex attributes are filled with sensible defaults:
-    ///   - normal → (0, 0, 1)   [pointing +Z]
-    ///   - colour → white
-    pub fn from_file(device: &wgpu::Device, path: impl AsRef<Path>) -> Result<Self> {
-        let (document, buffers, _images) =
+    /// Missing vertex attributes are filled with sensible defaults.
+    pub fn from_file(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let (document, buffers, images) =
             gltf::import(path.as_ref()).context("Failed to parse glTF file")?;
 
         let mut primitives = Vec::new();
@@ -127,34 +76,42 @@ impl GltfMesh {
             for primitive in mesh.primitives() {
                 let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
 
-                // --- positions (required by glTF spec) ---
+                // --- positions (required) ---
                 let positions: Vec<[f32; 3]> = reader
                     .read_positions()
-                    .context("Mesh primitive has no POSITION attribute")?
+                    .context("Missing POSITION attribute")?
                     .collect();
-
                 let vertex_count = positions.len();
 
-                // --- indices (read first — needed for normal computation) ---
+                // --- indices ---
                 let indices: Vec<u32> = reader
                     .read_indices()
                     .map(|iter| iter.into_u32().collect())
                     .unwrap_or_else(|| (0..vertex_count as u32).collect());
 
-                // --- normals (compute from faces if missing) ---
+                // --- normals ---
                 let normals: Vec<[f32; 3]> = match reader.read_normals() {
                     Some(iter) => iter.collect(),
                     None => {
-                        log::info!("No NORMAL attribute — computing flat normals from faces");
+                        log::info!("No NORMAL — computing flat normals");
                         compute_face_normals(&positions, &indices)
                     }
                 };
 
-                // --- vertex colours (optional, default: white) ---
+                // --- texture coordinates ---
+                let tex_coords: Vec<[f32; 2]> = reader
+                    .read_tex_coords(0)
+                    .map(|iter| iter.into_f32().collect())
+                    .unwrap_or_else(|| vec![[0.0, 0.0]; vertex_count]);
+
+                // --- vertex colours ---
                 let colors: Vec<[f32; 3]> = reader
                     .read_colors(0)
                     .map(|iter| iter.into_rgb_f32().collect())
                     .unwrap_or_else(|| vec![[1.0, 1.0, 1.0]; vertex_count]);
+
+                // --- texture ---
+                let texture = load_primitive_texture(device, queue, &primitive, &images);
 
                 // Interleave into GltfVertex array
                 let vertices: Vec<GltfVertex> = (0..vertex_count)
@@ -162,6 +119,7 @@ impl GltfMesh {
                         position: positions[i],
                         normal: normals[i],
                         color: colors[i],
+                        tex_coord: tex_coords[i],
                     })
                     .collect();
 
@@ -185,6 +143,7 @@ impl GltfMesh {
                     num_indices: indices.len() as u32,
                     index_format: wgpu::IndexFormat::Uint32,
                     num_vertices: vertex_count as u32,
+                    texture,
                 });
             }
         }
@@ -196,26 +155,30 @@ impl GltfMesh {
     }
 
     /// Build a unit cube as a fallback when glTF loading fails.
-    pub fn fallback_cube(device: &wgpu::Device) -> Self {
+    pub fn fallback_cube(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let (verts, _vtx_size, indices) = crate::mesh::create_coloured_cube();
 
         // Old format: [pos(f32×3), col(f32×3)] = 24 bytes
-        // New format: [pos(f32×3), normal(f32×3), col(f32×3)] = 36 bytes
-        // Default normal: forward (+Z) = (0, 0, 1)
+        // New format: [pos, normal, col, tex_coord] = 44 bytes
         let default_normal = f32::to_le_bytes(0.0)
             .into_iter()
             .chain(f32::to_le_bytes(0.0))
             .chain(f32::to_le_bytes(1.0))
             .collect::<Vec<u8>>();
+        let default_tex = f32::to_le_bytes(0.0)
+            .into_iter()
+            .chain(f32::to_le_bytes(0.0))
+            .collect::<Vec<u8>>();
 
         let old_vertex_count = verts.len() / 24;
-        let mut new_verts: Vec<u8> = Vec::with_capacity(old_vertex_count * 36);
+        let mut new_verts: Vec<u8> = Vec::with_capacity(old_vertex_count * 44);
 
         for i in 0..old_vertex_count {
             let base = i * 24;
             new_verts.extend_from_slice(&verts[base..base + 12]); // position
-            new_verts.extend_from_slice(&default_normal); // normal = (0,0,1)
+            new_verts.extend_from_slice(&default_normal); // normal
             new_verts.extend_from_slice(&verts[base + 12..base + 24]); // colour
+            new_verts.extend_from_slice(&default_tex); // tex_coord
         }
 
         let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -236,6 +199,7 @@ impl GltfMesh {
                 num_indices: indices.len() as u32,
                 index_format: wgpu::IndexFormat::Uint32,
                 num_vertices: old_vertex_count as u32,
+                texture: Texture::white(device, queue),
             }],
             vertex_size: GltfVertex::STRIDE,
         }
@@ -243,10 +207,66 @@ impl GltfMesh {
 }
 
 // ---------------------------------------------------------------------------
-// Face-normal computation (used when glTF has no NORMAL attribute)
+// Texture loading from glTF images
 // ---------------------------------------------------------------------------
 
-/// Accumulate per-face normals and average them into per-vertex smooth normals.
+fn load_primitive_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    primitive: &gltf::Primitive<'_>,
+    images: &[gltf::image::Data],
+) -> Texture {
+    // Try to get the base colour texture from the PBR material
+    let base_color_texture = primitive
+        .material()
+        .pbr_metallic_roughness()
+        .base_color_texture();
+
+    if let Some(info) = base_color_texture {
+        let gltf_texture = info.texture();
+        let source = gltf_texture.source();
+        let idx = source.index();
+
+        if let Some(data) = images.get(idx) {
+            if let Some(rgba) = decode_image_data(data) {
+                return Texture::from_rgba8(
+                    device, queue,
+                    data.width, data.height,
+                    &rgba, "glTF diffuse",
+                );
+            }
+        }
+    }
+
+    // Fallback: 1×1 white
+    Texture::white(device, queue)
+}
+
+/// Decode glTF image data to RGBA8 bytes.
+fn decode_image_data(data: &gltf::image::Data) -> Option<Vec<u8>> {
+    use gltf::image::Format;
+    match data.format {
+        Format::R8G8B8 => {
+            // Expand RGB → RGBA
+            let mut rgba = Vec::with_capacity((data.width * data.height * 4) as usize);
+            for chunk in data.pixels.chunks(3) {
+                rgba.extend_from_slice(chunk);
+                rgba.push(255);
+            }
+            Some(rgba)
+        }
+        Format::R8G8B8A8 => Some(data.pixels.clone()),
+        _ => {
+            log::warn!("Unsupported glTF image format: {:?}", data.format);
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Face-normal computation
+// ---------------------------------------------------------------------------
+
 fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let vertex_count = positions.len();
     let mut normals = vec![[0.0f32; 3]; vertex_count];
@@ -257,42 +277,26 @@ fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]
         }
         let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
 
-        let (ax, ay, az) = (
-            positions[i1][0] - positions[i0][0],
-            positions[i1][1] - positions[i0][1],
-            positions[i1][2] - positions[i0][2],
-        );
-        let (bx, by, bz) = (
-            positions[i2][0] - positions[i0][0],
-            positions[i2][1] - positions[i0][1],
-            positions[i2][2] - positions[i0][2],
-        );
+        let ax = positions[i1][0] - positions[i0][0];
+        let ay = positions[i1][1] - positions[i0][1];
+        let az = positions[i1][2] - positions[i0][2];
+        let bx = positions[i2][0] - positions[i0][0];
+        let by = positions[i2][1] - positions[i0][1];
+        let bz = positions[i2][2] - positions[i0][2];
 
-        // cross product
-        let (nx, ny, nz) = (
-            ay * bz - az * by,
-            az * bx - ax * bz,
-            ax * by - ay * bx,
-        );
+        let nx = ay * bz - az * by;
+        let ny = az * bx - ax * bz;
+        let nz = ax * by - ay * bx;
 
-        normals[i0][0] += nx;
-        normals[i0][1] += ny;
-        normals[i0][2] += nz;
-        normals[i1][0] += nx;
-        normals[i1][1] += ny;
-        normals[i1][2] += nz;
-        normals[i2][0] += nx;
-        normals[i2][1] += ny;
-        normals[i2][2] += nz;
+        normals[i0][0] += nx; normals[i0][1] += ny; normals[i0][2] += nz;
+        normals[i1][0] += nx; normals[i1][1] += ny; normals[i1][2] += nz;
+        normals[i2][0] += nx; normals[i2][1] += ny; normals[i2][2] += nz;
     }
 
-    // Normalize all vertex normals
     for n in &mut normals {
         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
         if len > 0.0 {
-            n[0] /= len;
-            n[1] /= len;
-            n[2] /= len;
+            n[0] /= len; n[1] /= len; n[2] /= len;
         } else {
             *n = [0.0, 0.0, 1.0];
         }

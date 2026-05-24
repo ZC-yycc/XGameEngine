@@ -4,4 +4,6 @@ members = [
     "crates/xgame-core",
     "crates/xgame-math",
     "crates/xgame-render",
+    "crates/xgame-physics",
+    "crates/xgame-editor",
 ]

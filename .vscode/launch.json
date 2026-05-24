@@ -4,115 +4,16 @@
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        
         {
-            "name": "Debug unit tests in library 'xgame_core'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--package=xgame-core"
-                ]
-            }
-        },
-        {
-            "name": "Debug unit tests in library 'xgame_math'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--package=xgame-math"
-                ]
-            }
-        },
-        {
-            "name": "Debug unit tests in library 'xgame_render'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--package=xgame-render"
-                ]
-            }
-        },
-        {
-            "name": "Debug example 'cube'",
+            "name": "Debug 'xgame-editor'",
             "type": "lldb",
             "request": "launch",
             "cargo": {
                 "args": [
                     "run",
-                    "--example=cube",
-                    "--package=xgame-render"
-                ]
-            },
-            "args": []
-        },
-        {
-            "name": "Debug unit tests in example 'cube'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--example=cube",
-                    "--package=xgame-render"
+                    "--package=xgame-editor"
                 ]
             }
         },
-        {
-            "name": "Debug example 'gltf_viewer'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "run",
-                    "--example=gltf_viewer",
-                    "--package=xgame-render"
-                ]
-            },
-            "args": []
-        },
-        {
-            "name": "Debug unit tests in example 'gltf_viewer'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--example=gltf_viewer",
-                    "--package=xgame-render",
-                    "-- Resources/Box.gltf"
-                ]
-            }
-        },
-        {
-            "name": "Debug example 'triangle'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "run",
-                    "--example=triangle",
-                    "--package=xgame-render"
-                ]
-            },
-            "args": []
-        },
-        {
-            "name": "Debug unit tests in example 'triangle'",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--example=triangle",
-                    "--package=xgame-render"
-                ]
-            }
-        }
     ]
 }

@@ -113,7 +113,8 @@ impl Camera {
 // Orbit camera controller
 // ---------------------------------------------------------------------------
 
-/// Mouse-driven orbit camera: drag to rotate, scroll to zoom.
+/// Mouse-driven orbit camera: drag to rotate, scroll to zoom,
+/// WASD to pan, Q/E to move up/down.
 #[derive(Debug, Clone)]
 pub struct OrbitCamera {
     pub camera: Camera,
@@ -129,6 +130,8 @@ pub struct OrbitCamera {
     pub zoom_speed: f32,
     pub min_distance: f32,
     pub max_distance: f32,
+    /// Pan speed in world units per second when W/A/S/D is held.
+    pub pan_speed: f32,
 }
 
 impl OrbitCamera {
@@ -150,6 +153,7 @@ impl OrbitCamera {
             zoom_speed: 0.5,
             min_distance: 0.5,
             max_distance: 50.0,
+            pan_speed: 5.0,
         }
     }
 
@@ -169,9 +173,11 @@ impl OrbitCamera {
             .clamp(self.min_distance, self.max_distance);
     }
 
-    /// Recompute camera position from spherical coordinates.
+    /// Recompute camera position from spherical coordinates,
+    /// relative to the current orbit target.
     pub fn update(&mut self) {
-        self.camera.eye = Self::spherical_to_cartesian(self.yaw, self.pitch, self.distance);
+        self.camera.eye = self.camera.target
+            + Self::spherical_to_cartesian(self.yaw, self.pitch, self.distance);
     }
 
     fn spherical_to_cartesian(yaw: f32, pitch: f32, distance: f32) -> Vec3 {
@@ -179,5 +185,35 @@ impl OrbitCamera {
         let y = distance * pitch.sin();
         let z = distance * pitch.cos() * yaw.sin();
         Vec3::new(x, y, z)
+    }
+
+    /// Pan the camera target (and eye) in the camera's right direction
+    /// (horizontal projected). `amount` is in world units per second,
+    /// modulated by `pan_speed`.
+    pub fn pan_right(&mut self, amount: f32, dt: f32) {
+        let fwd = (self.camera.target - self.camera.eye).normalize();
+        // fwd × up gives the camera‑right direction in a right‑handed Y‑up system.
+        let right = fwd.cross(self.camera.up).normalize();
+        let offset = right * amount * self.pan_speed * dt;
+        self.camera.target += offset;
+        self.camera.eye += offset;
+    }
+
+    /// Pan the camera target (and eye) forward/backward (horizontal
+    /// projection of the look direction).
+    pub fn pan_forward(&mut self, amount: f32, dt: f32) {
+        let fwd = self.camera.target - self.camera.eye;
+        // Project onto horizontal plane (ignore Y component).
+        let fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+        let offset = fwd_h * amount * self.pan_speed * dt;
+        self.camera.target += offset;
+        self.camera.eye += offset;
+    }
+
+    /// Move the camera target (and eye) in world-space up/down.
+    pub fn move_up(&mut self, amount: f32, dt: f32) {
+        let offset = Vec3::new(0.0, amount * self.pan_speed * dt, 0.0);
+        self.camera.target += offset;
+        self.camera.eye += offset;
     }
 }

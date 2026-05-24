@@ -6,6 +6,9 @@
 pub mod camera;
 pub mod gltf_loader;
 pub mod mesh;
+pub mod model;
+pub mod scene;
+pub mod texture;
 
 pub struct RenderContext {
     pub surface: wgpu::Surface<'static>,
