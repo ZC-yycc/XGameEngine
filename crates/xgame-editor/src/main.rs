@@ -38,6 +38,9 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── 0. Apply Unity dark theme ──
+        panels::theme::install(ctx);
+
         // ── 1. Toolbar (top) ──
         panels::toolbar::show(&mut self.state, ctx);
 

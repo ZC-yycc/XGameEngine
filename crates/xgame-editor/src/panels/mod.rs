@@ -7,5 +7,6 @@ pub mod console;
 pub mod hierarchy;
 pub mod inspector;
 pub mod scene_view;
-pub mod toolbar;
 pub mod state;
+pub mod theme;
+pub mod toolbar;
