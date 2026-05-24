@@ -4,6 +4,7 @@
 //! and renders its content. The main layout is assembled in `main.rs`.
 
 pub mod console;
+pub mod dock;
 pub mod hierarchy;
 pub mod inspector;
 pub mod scene_view;

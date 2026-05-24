@@ -1,36 +1,33 @@
-//! XGameEngine Editor — Unity-inspired editor interface.
+//! XGameEngine Editor — Unity-inspired editor interface with egui_tiles.
 //!
-//! Layout (from top to bottom):
+//! Layout:
 //!
 //! ┌──────────────────────────────────────────────────────────┐
 //! │ [Toolbar: ▶ Play | ⏸ Pause | ⏹ Stop | ↔↻⇔▭ | Grid]    │
-//! ├────────────┬──────────────────────────────┬──────────────┤
-//! │            │                              │              │
-//! │ Hierarchy  │     Scene View (3D)          │  Inspector   │
-//! │            │                              │  (selected   │
-//! │ Entity 1   │  ┌──────────────────────┐   │   entity)    │
-//! │ Entity 2   │  │  ╔══╗  grid  / gizmo │   │  ─────────   │
-//! │            │  │  ╚══╝                │   │  Position     │
-//! │            │  └──────────────────────┘   │  Rotation     │
-//! │            │                              │  Scale        │
-//! ├────────────┴──────────────────────────────┴──────────────┤
-//! │ Console (log messages with severity colors)              │
-//! ├──────────────────────────────────────────────────────────┤
-//! │ Status Bar: Editor Framework v0.1.0                      │
+//! ├────────────┬───────────────────────┬────────────────────┤
+//! │ Hierarchy  │  Scene View           │  Inspector         │
+//! │  (tab)     │  (tab)                │  (tab)             │
+//! │            ├───────────────────────┤  egui_tiles        │
+//! │            │  Console (tab)        │  manages splits    │
+//! ├────────────┴───────────────────────┴────────────────────┤
+//! │ Status Bar: v0.1.0 | Edit Mode | Scene: Untitled...     │
 //! └──────────────────────────────────────────────────────────┘
 //!
 //! Run with:  cargo run -p xgame-editor
 
 mod panels;
+
 use panels::state::EditorState;
 
 struct EditorApp {
+    tree: egui_tiles::Tree<panels::dock::PanelTab>,
     state: EditorState,
 }
 
 impl EditorApp {
     fn new() -> Self {
         Self {
+            tree: panels::dock::create_tile_tree(),
             state: EditorState::new(),
         }
     }
@@ -44,19 +41,15 @@ impl eframe::App for EditorApp {
         // ── 1. Toolbar (top) ──
         panels::toolbar::show(&mut self.state, ctx);
 
-        // ── 2. Hierarchy panel (left) ──
-        panels::hierarchy::show(&mut self.state, ctx);
+        // ── 2. Central dock area (tile tree with all panels) ──
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let mut behavior = panels::dock::EditorBehavior {
+                state: &mut self.state,
+            };
+            self.tree.ui(&mut behavior, ui);
+        });
 
-        // ── 3. Inspector panel (right) ──
-        panels::inspector::show(&mut self.state, ctx);
-
-        // ── 4. Scene view (center) ──
-        panels::scene_view::show(&mut self.state, ctx);
-
-        // ── 5. Console panel (bottom) ──
-        panels::console::show(&mut self.state, ctx);
-
-        // ── 6. Status bar (bottom-most) ──
+        // ── 3. Status bar (bottom) ──
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Editor Framework v0.1.0");
