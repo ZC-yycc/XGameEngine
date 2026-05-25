@@ -8,10 +8,14 @@ use egui_tiles::{
     Behavior, SimplificationOptions, Tiles, TileId, UiResponse, Tree,
     Linear, LinearDir,
 };
+use strum::Display;
+use xgame_derive::Panel;
 use crate::panels::state::EditorState;
 
+
+
 /// All dockable panel types in the editor.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Display, PartialEq, Panel)]
 pub enum PanelTab {
     Hierarchy,
     SceneView,
@@ -19,37 +23,6 @@ pub enum PanelTab {
     Console,
 }
 
-impl PanelTab {
-    pub fn title(&self) -> &'static str {
-        match self {
-            PanelTab::Hierarchy => "Hierarchy",
-            PanelTab::SceneView => "Scene View",
-            PanelTab::Inspector => "Inspector",
-            PanelTab::Console => "Console",
-        }
-    }
-
-    pub fn icon(&self) -> &'static str {
-        match self {
-            PanelTab::Hierarchy => "☰",
-            PanelTab::SceneView => "🎥",
-            PanelTab::Inspector => "🔍",
-            PanelTab::Console => "⎚",
-        }
-    }
-}
-
-/// Build the initial Unity-style tile tree with proper share ratios.
-///
-/// Layout (approximate width/height shares):
-///
-/// ┌────────────┬──────────────────────┬──────────────┐
-/// │ Hierarchy  │  Scene View          │  Inspector   │
-/// │  (20%)     │  (60% of remaining)  │  (20%)       │
-/// │            ├──────────────────────┤              │
-/// │            │  Console             │              │
-/// │            │  (25% of remaining)  │              │
-/// └────────────┴──────────────────────┴──────────────┘
 pub fn create_tile_tree() -> Tree<PanelTab> {
     let mut tiles = Tiles::default();
 
@@ -106,23 +79,18 @@ pub struct EditorBehavior<'a> {
 }
 
 impl Behavior<PanelTab> for EditorBehavior<'_> {
-    fn pane_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        _tile_id: TileId,
-        pane: &mut PanelTab,
-    ) -> UiResponse {
-        match pane {
-            PanelTab::Hierarchy => crate::panels::hierarchy::show_content(self.state, ui),
-            PanelTab::SceneView => crate::panels::scene_view::show_content(self.state, ui),
-            PanelTab::Inspector => crate::panels::inspector::show_content(self.state, ui),
-            PanelTab::Console => crate::panels::console::show_content(self.state, ui),
-        }
+    fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut PanelTab) -> UiResponse {
+        // 8px inner margin so panel elements don't sit flush against the tile edges.
+        egui::Frame::default()
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                pane.show(self.state, ui);
+            });
         UiResponse::None
     }
 
     fn tab_title_for_pane(&mut self, pane: &PanelTab) -> egui::WidgetText {
-        format!("{}  {}", pane.icon(), pane.title()).into()
+        format!("{}", pane).into()
     }
 
     fn is_tab_closable(&self, _tiles: &Tiles<PanelTab>, _tile_id: TileId) -> bool {

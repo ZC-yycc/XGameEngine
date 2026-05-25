@@ -9,6 +9,7 @@ name = "xgame-editor"
 path = "src/main.rs"
 
 [dependencies]
+strum = { version = "0.27", features = ["derive"] }
 eframe = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
@@ -29,6 +30,7 @@ ron = "0.8"
 glam = "0.29"
 
 xgame-core = { path = "../xgame-core" }
+xgame-derive = { path = "../xgame-derive" }
 xgame-math = { path = "../xgame-math" }
 xgame-render = { path = "../xgame-render" }
 xgame-physics = { path = "../xgame-physics" }

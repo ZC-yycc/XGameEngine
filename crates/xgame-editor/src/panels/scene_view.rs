@@ -9,8 +9,6 @@ use crate::panels::state::EditorState;
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // ── Top button strip ──
     ui.horizontal(|ui| {
-        ui.label("Scene");
-        ui.separator();
         ui.label(state.scene.name.clone());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let cam = &state.editor_camera;
@@ -113,7 +111,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         &format!(
             "{:.0} FPS | Tool: {}",
             ui.input(|i| i.predicted_dt).recip().round(),
-            state.tool_mode.label(),
+            state.tool_mode,
         ),
         egui::FontId::monospace(11.0),
         egui::Color32::from_gray(140),

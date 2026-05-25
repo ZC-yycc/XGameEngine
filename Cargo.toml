@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/xgame-core",
+    "crates/xgame-derive",
     "crates/xgame-math",
     "crates/xgame-render",
     "crates/xgame-physics",

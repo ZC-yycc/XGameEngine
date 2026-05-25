@@ -6,7 +6,6 @@ use crate::panels::state::EditorState;
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // ── Header with scene name + add button ──
     ui.horizontal(|ui| {
-        ui.heading("Hierarchy");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("+").clicked() {
                 state.create_entity();

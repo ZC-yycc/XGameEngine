@@ -4,7 +4,6 @@ use crate::panels::state::EditorState;
 
 /// Render the inspector panel content inside a `Ui`.
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
-    ui.heading("Inspector");
     ui.separator();
 
     if let Some(entity) = state.selected_entity_mut() {

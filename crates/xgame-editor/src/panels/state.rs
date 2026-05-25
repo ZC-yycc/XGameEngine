@@ -3,28 +3,19 @@
 //! All editor panels read from this state and write back through it,
 //! keeping the engine data model and the editor UI in sync.
 
+use eframe::glow::STENCIL_FAIL;
 use xgame_math::glam::Vec3;
 use xgame_math::Transform;
 use xgame_render::scene::{Entity, Scene};
+use strum::Display;
 
 /// Which transform tool is active in the scene view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Display, PartialEq, Eq)]
 pub enum ToolMode {
     Translate,
     Rotate,
     Scale,
     Rect,
-}
-
-impl ToolMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            ToolMode::Translate => "Translate",
-            ToolMode::Rotate => "Rotate",
-            ToolMode::Scale => "Scale",
-            ToolMode::Rect => "Rect",
-        }
-    }
 }
 
 /// Editor playback state.
@@ -43,6 +34,27 @@ pub enum LogLevel {
     Error,
     Success,
 }
+
+impl LogLevel {
+    pub fn log_level_color(&self) -> egui::Color32 {
+        match self {
+            LogLevel::Info => egui::Color32::WHITE,
+            LogLevel::Warning => egui::Color32::YELLOW,
+            LogLevel::Error => egui::Color32::RED,
+            LogLevel::Success => egui::Color32::GREEN,
+        }
+    }
+
+    pub fn log_level_icon(&self) -> &'static str {
+        match self {
+            LogLevel::Info => "ℹ",
+            LogLevel::Warning => "⚠",
+            LogLevel::Error => "✖",
+            LogLevel::Success => "✔",
+        }
+    }
+}
+
 
 /// A single console message.
 #[derive(Debug, Clone)]

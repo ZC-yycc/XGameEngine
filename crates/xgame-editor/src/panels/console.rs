@@ -6,9 +6,7 @@ use crate::panels::state::{EditorState, LogLevel};
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // ── Header with filter toggles ──
     ui.horizontal(|ui| {
-        ui.heading("Console");
-        ui.separator();
-
+        
         if ui.button("Clear").clicked() {
             state.console_messages.clear();
         }
@@ -28,13 +26,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         .stick_to_bottom(true)
         .show(ui, |ui| {
             for msg in &state.console_messages[start..] {
-                let (color, icon) = match msg.level {
-                    LogLevel::Info => (egui::Color32::WHITE, "ℹ"),
-                    LogLevel::Warning => (egui::Color32::YELLOW, "⚠"),
-                    LogLevel::Error => (egui::Color32::RED, "✖"),
-                    LogLevel::Success => (egui::Color32::GREEN, "✔"),
-                };
-
+                let (color, icon) = (msg.level.log_level_color(), msg.level.log_level_icon());
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(icon).color(color).monospace(),
