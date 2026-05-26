@@ -1,5 +1,4 @@
-//! Physics world — owns rapier3d internals, drives simulation steps,
-//! and provides a simple interface for game code.
+//! 物理世界——拥有 rapier3d 内部状态、驱动模拟步骤，为游戏代码提供简洁接口。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -22,17 +21,17 @@ use crate::collider::{Collider, ColliderShape};
 use crate::rigid_body::{RigidBody, RigidBodyType};
 
 // ---------------------------------------------------------------------------
-// Configuration
+// 配置
 // ---------------------------------------------------------------------------
 
-/// Global physics settings.
+/// 全局物理设置。
 #[derive(Debug, Clone)]
 pub struct PhysicsConfig {
-    /// Gravity vector (default: -Y, 9.81 m/s²).
+    /// 重力向量（默认：-Y，9.81 m/s²）。
     pub gravity: Vec3,
-    /// Number of sub-steps per `step()` call. Higher = more stable but slower.
+    /// 每次 `step()` 调用的子步数。越高越稳定但越慢。
     pub num_sub_steps: u32,
-    /// Maximum timestep per sub-step in seconds.
+    /// 每个子步的最大时间步长（秒）。
     pub timestep: f32,
 }
 
@@ -47,17 +46,17 @@ impl Default for PhysicsConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Collision event (our simplified view)
+// 碰撞事件（简化视图）
 // ---------------------------------------------------------------------------
 
-/// Simplified view of a contact event emitted by rapier3d.
+/// rapier3d 发出的接触事件的简化视图。
 #[derive(Debug, Clone)]
 pub struct CollisionEvent {
-    /// User-assigned ID of the first body involved.
+    /// 用户分配的第一个刚体 ID。
     pub body_a: u64,
-    /// User-assigned ID of the second body involved.
+    /// 用户分配的第二个刚体 ID。
     pub body_b: u64,
-    /// Whether the two bodies just started touching (`true`) or stopped (`false`).
+    /// 两个刚体刚接触 (`true`) 还是停止接触 (`false`)。
     pub started: bool,
 }
 
@@ -123,7 +122,7 @@ impl rapier3d::pipeline::EventHandler for RapierEventCollector {
 }
 
 // ---------------------------------------------------------------------------
-// Physics world
+// 物理世界
 // ---------------------------------------------------------------------------
 
 pub struct PhysicsWorld {
@@ -180,7 +179,7 @@ impl PhysicsWorld {
     // Body / collider management
     // -----------------------------------------------------------------------
 
-    /// Add a rigid body and return its user ID.
+    /// 添加刚体并返回其用户 ID。
     pub fn add_body(&mut self, body: RigidBody) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -225,7 +224,7 @@ impl PhysicsWorld {
         id
     }
 
-    /// Remove a rigid body and all its attached colliders.
+    /// 移除刚体及其所有附加的碰撞体。
     pub fn remove_body(&mut self, body_id: u64) {
         if let Some(record) = self.bodies.remove(&body_id) {
             self.colliders.retain(|_, cr| {
@@ -252,7 +251,7 @@ impl PhysicsWorld {
         }
     }
 
-    /// Attach a collider to an existing body. Returns the collider's user ID.
+    /// 将碰撞体附加到已有刚体。返回碰撞体的用户 ID。
     pub fn add_collider(&mut self, body_id: u64, collider: Collider) -> u64 {
         let cid = self.next_id;
         self.next_id += 1;
@@ -288,7 +287,7 @@ impl PhysicsWorld {
         cid
     }
 
-    /// Remove a single collider.
+    /// 移除单个碰撞体。
     pub fn remove_collider(&mut self, collider_id: u64) {
         if let Some(record) = self.colliders.remove(&collider_id) {
             self.collider_set.remove(
@@ -304,7 +303,7 @@ impl PhysicsWorld {
     // Simulation step
     // -----------------------------------------------------------------------
 
-    /// Advance the simulation by `dt` seconds using a fixed internal timestep.
+    /// 使用固定内部时间步长推进模拟 `dt` 秒。
     pub fn step(&mut self, _dt: f32) {
         self.integration_params.dt = self.config.timestep;
 
@@ -349,7 +348,7 @@ impl PhysicsWorld {
     // Query
     // -----------------------------------------------------------------------
 
-    /// Get the current world-space transform of a body.
+    /// 获取刚体的当前世界空间变换。
     pub fn body_transform(&self, body_id: u64) -> Option<Transform> {
         let record = self.bodies.get(&body_id)?;
         let rb = self.rigid_body_set.get(record.rapier_handle)?;
@@ -365,7 +364,7 @@ impl PhysicsWorld {
         })
     }
 
-    /// Get the current linear velocity of a body.
+    /// 获取刚体的当前线速度。
     pub fn body_velocity(&self, body_id: u64) -> Option<Vec3> {
         let record = self.bodies.get(&body_id)?;
         let rb = self.rigid_body_set.get(record.rapier_handle)?;
@@ -373,7 +372,7 @@ impl PhysicsWorld {
         Some(Vec3::new(v.x, v.y, v.z))
     }
 
-    /// Apply a world-space force to a dynamic body's centre of mass.
+    /// 对动态刚体的质心施加世界空间力。
     pub fn apply_force(&mut self, body_id: u64, force: Vec3) {
         if let Some(record) = self.bodies.get(&body_id) {
             if let Some(rb) = self.rigid_body_set.get_mut(record.rapier_handle) {
@@ -382,7 +381,7 @@ impl PhysicsWorld {
         }
     }
 
-    /// Apply a world-space impulse to a dynamic body's centre of mass.
+    /// 对动态刚体的质心施加世界空间脉冲。
     pub fn apply_impulse(&mut self, body_id: u64, impulse: Vec3) {
         if let Some(record) = self.bodies.get(&body_id) {
             if let Some(rb) = self.rigid_body_set.get_mut(record.rapier_handle) {
@@ -391,7 +390,7 @@ impl PhysicsWorld {
         }
     }
 
-    /// Apply a torque to a dynamic body.
+    /// 对动态刚体施加扭矩。
     pub fn apply_torque(&mut self, body_id: u64, torque: Vec3) {
         if let Some(record) = self.bodies.get(&body_id) {
             if let Some(rb) = self.rigid_body_set.get_mut(record.rapier_handle) {
@@ -400,7 +399,7 @@ impl PhysicsWorld {
         }
     }
 
-    /// Set gravity after construction.
+    /// 构建后设置重力。
     pub fn set_gravity(&mut self, gravity: Vec3) {
         self.config.gravity = gravity;
     }
@@ -409,14 +408,14 @@ impl PhysicsWorld {
     // Events
     // -----------------------------------------------------------------------
 
-    /// Drain all pending collision events.
+    /// 清空所有待处理的碰撞事件。
     ///
-    /// Call once per frame after `step()`.
+    /// 每帧在 `step()` 后调用一次。
     pub fn drain_events(&mut self) -> impl Iterator<Item = CollisionEvent> + '_ {
         self.pending_events.drain(..)
     }
 
-    /// Return the number of active bodies and colliders.
+    /// 返回活跃刚体和碰撞体的数量。
     pub fn stats(&self) -> (usize, usize) {
         (self.bodies.len(), self.colliders.len())
     }

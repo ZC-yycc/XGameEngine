@@ -1,9 +1,8 @@
-//! Central editor state — owns the scene, selection, camera, and tool settings.
+//! 中央编辑器状态——拥有场景、选择、相机和工具设置。
 //!
-//! All editor panels read from this state and write back through it,
-//! keeping the engine data model and the editor UI in sync.
+//! 所有编辑器面板从该状态读取并通过它写入，保持引擎数据模型和编辑器 UI 同步。
 
-use eframe::glow::STENCIL_FAIL;
+use std::collections::HashSet;
 use xgame_math::glam::Vec3;
 use xgame_math::Transform;
 use xgame_render::scene::{Entity, Scene};
@@ -74,49 +73,77 @@ impl LogMessage {
     }
 }
 
-/// Simplified editor orbit camera — used by the scene-view panel.
+/// Free‑fly camera — yaw/pitch controls orientation, `pan_*` moves position.
 #[derive(Debug, Clone)]
 pub struct EditorCamera {
     pub yaw: f32,
     pub pitch: f32,
-    pub distance: f32,
-    pub target: Vec3,
+    /// World‑space camera position.
+    pub position: Vec3,
     pub sensitivity: f32,
-    pub zoom_speed: f32,
+    /// Translation speed (world-units / s).
+    pub pan_speed: f32,
 }
 
 impl Default for EditorCamera {
     fn default() -> Self {
         Self {
-            yaw: std::f32::consts::FRAC_PI_4,
-            pitch: std::f32::consts::FRAC_PI_6,
-            distance: 8.0,
-            target: Vec3::ZERO,
+            yaw: -2.356,                // ≈ −135° — face the origin from (+, +, +)
+            pitch: -0.524,              // ≈ −30°  — slight downward look
+            position: Vec3::new(5.0, 5.0, 5.0),
             sensitivity: 0.005,
-            zoom_speed: 1.0,
+            pan_speed: 5.0,
         }
     }
 }
 
 impl EditorCamera {
+    /// Unit forward vector derived from yaw/pitch.
+    pub fn forward(&self) -> Vec3 {
+        Vec3::new(
+            self.pitch.cos() * self.yaw.cos(),
+            self.pitch.sin(),
+            self.pitch.cos() * self.yaw.sin(),
+        )
+        .normalize()
+    }
+
+    /// Eye position (= position in free‑fly mode).
     pub fn eye(&self) -> Vec3 {
-        let x = self.distance * self.pitch.cos() * self.yaw.cos();
-        let y = self.distance * self.pitch.sin();
-        let z = self.distance * self.pitch.cos() * self.yaw.sin();
-        self.target + Vec3::new(x, y, z)
+        self.position
     }
 
     pub fn rotate(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * self.sensitivity;
-        self.pitch += dy * self.sensitivity;
+        self.pitch -= dy * self.sensitivity;   // egui dy is +down, so negate
         self.pitch = self.pitch.clamp(
             -std::f32::consts::FRAC_PI_2 + 0.01,
             std::f32::consts::FRAC_PI_2 - 0.01,
         );
     }
 
+    /// Adjust movement speed with scroll wheel.
     pub fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance - delta * self.zoom_speed).max(0.3);
+        self.pan_speed = (self.pan_speed + delta * 0.5).clamp(0.5, 50.0);
+    }
+
+    /// 沿相机右方向平移（A / D）— 移动 position。
+    pub fn pan_right(&mut self, amount: f32, dt: f32) {
+        let fwd = self.forward();
+        let right = fwd.cross(Vec3::Y).normalize();
+        self.position += right * amount * self.pan_speed * dt;
+    }
+
+    /// 沿相机前方向的水平投影平移（W / S）— 移动 position。
+    pub fn pan_forward(&mut self, amount: f32, dt: f32) {
+        let fwd = self.forward();
+        let fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+        self.position += fwd_h * amount * self.pan_speed * dt;
+    }
+
+    /// 沿世界空间上/下方向升降（Q / E）。
+    pub fn move_up(&mut self, amount: f32, dt: f32) {
+        self.position.y += amount * self.pan_speed * dt;
     }
 }
 
@@ -135,6 +162,10 @@ pub struct EditorState {
     // -- Editor camera --
     pub editor_camera: EditorCamera,
 
+    // -- Camera input state (self-tracked to bypass OS key-repeat delay) --
+    /// Set of keys currently held down, updated from `KeyPressed`/`KeyReleased` events.
+    pub pressed_keys: HashSet<egui::Key>,
+
     // -- Tool state --
     pub tool_mode: ToolMode,
     pub play_mode: PlayMode,
@@ -148,6 +179,16 @@ pub struct EditorState {
 
     // -- New entity tracking --
     pub next_entity_id: u32,
+
+    // -- Scene view (viewport dimensions, set by scene_view.rs each frame) --
+    /// Viewport size in logical (egui) pixels.
+    pub viewport_logical_size: egui::Vec2,
+    /// Viewport size in physical pixels (= logical * pixels_per_point).
+    pub viewport_pixel_size: (u32, u32),
+
+    // -- Scene renderer (initialised by main.rs after state creation) --
+    /// Optional 3D scene renderer — `None` if the wgpu backend is unavailable.
+    pub scene_renderer: Option<crate::scene_renderer::SceneRenderer>,
 }
 
 impl EditorState {
@@ -157,30 +198,30 @@ impl EditorState {
         console.push(LogMessage::new(LogLevel::Success, "XGameEngine Editor started"));
         console.push(LogMessage::new(LogLevel::Info, "Loaded default scene"));
 
+        // 尝试加载 Scenes/scene.ron；失败时回退到默认场景。
+        let scene = load_scene_from_file("Scenes/scene.ron")
+            .unwrap_or_else(|e| {
+                log::warn!("无法加载 Scenes/scene.ron: {:#}", e);
+                default_editor_scene()
+            });
+
         Self {
-            scene: Scene {
-                name: "Untitled Scene".into(),
-                entities: vec![
-                    Entity {
-                        name: "Main Camera".into(),
-                        transform: Transform::from_translation(Vec3::new(0.0, 1.0, -5.0)),
-                        model: String::new(),
-                    },
-                    Entity {
-                        name: "Directional Light".into(),
-                        transform: Transform::IDENTITY,
-                        model: String::new(),
-                    },
-                ],
-            },
+            scene,
             selected_entity: None,
             editor_camera: EditorCamera::default(),
+            pressed_keys: HashSet::new(),
             tool_mode: ToolMode::Translate,
             play_mode: PlayMode::Edit,
             show_grid: true,
             show_physics_debug: false,
             console_messages: console,
             next_entity_id: 1,
+
+            viewport_logical_size: egui::Vec2::ZERO,
+            viewport_pixel_size: (0, 0),
+
+            // Scene renderer is injected by main.rs after state creation
+            scene_renderer: None,
         }
     }
 
@@ -267,5 +308,38 @@ impl EditorState {
 impl Default for EditorState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scene loading from RON file
+// ---------------------------------------------------------------------------
+
+/// Load a `Scene` from a `.ron` file on disk.
+///
+/// Returns an error string if the file cannot be read or parsed.
+fn load_scene_from_file(path: &str) -> Result<Scene, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("无法读取 '{}': {}", path, e))?;
+    ron::from_str(&content)
+        .map_err(|e| format!("无法解析 '{}': {:#}", path, e))
+}
+
+/// 创建编辑器默认场景（空场景 + 相机 + 方向光）。
+pub fn default_editor_scene() -> Scene {
+    Scene {
+        name: "Untitled Scene".into(),
+        entities: vec![
+            Entity {
+                name: "Main Camera".into(),
+                transform: Transform::from_translation(Vec3::new(0.0, 1.0, -5.0)),
+                model: String::new(),
+            },
+            Entity {
+                name: "Directional Light".into(),
+                transform: Transform::IDENTITY,
+                model: String::new(),
+            },
+        ],
     }
 }

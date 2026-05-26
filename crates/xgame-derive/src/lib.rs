@@ -1,16 +1,16 @@
-//! Proc-macros for XGameEngine.
+//! XGameEngine 过程宏。
 //!
-//! Currently provides `#[derive(Panel)]` which auto-generates
-//! a `show()` method on an enum of panel tabs, mapping each
-//! variant to `crate::panels::<snake_case>::show_content()`.
+//! 提供 `#[derive(Panel)]` 派生宏，自动为面板标签枚举生成
+//! `show()` 方法，将每个变体分发到
+//! `crate::panels::<蛇形命名>::show_content()`。
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
-/// Convert a CamelCase ident to snake_case.
+/// 将大驼峰标识符转换为蛇形命名。
 ///
-/// Examples:
+/// 示例：
 /// - `Hierarchy`  → `hierarchy`
 /// - `SceneView`  → `scene_view`
 /// - `Inspector`  → `inspector`
@@ -28,9 +28,9 @@ fn to_snake_case(name: &str) -> String {
     result
 }
 
-/// Derive macro that generates a `show()` method on a panel-tab enum.
+/// 派生宏，为面板标签枚举生成 `show()` 方法。
 ///
-/// Each variant is dispatched to `crate::panels::<snake_case>::show_content()`.
+/// 每个变体被分发到 `crate::panels::<蛇形>::show_content()`。
 ///
 /// # Example
 ///

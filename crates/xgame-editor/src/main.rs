@@ -1,4 +1,4 @@
-//! XGameEngine Editor — Unity-inspired editor interface with egui_tiles.
+//! XGameEngine 编辑器——类 Unity 编辑器界面，基于 egui_tiles。
 //!
 //! Layout:
 //!
@@ -16,6 +16,7 @@
 //! Run with:  cargo run -p xgame-editor
 
 mod panels;
+mod scene_renderer;
 
 use panels::state::EditorState;
 
@@ -25,10 +26,23 @@ struct EditorApp {
 }
 
 impl EditorApp {
-    fn new() -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut state = EditorState::new();
+
+        // Initialise the 3D scene renderer from the wgpu device that eframe
+        // already created for the egui-wgpu integration.
+        state.scene_renderer = cc.wgpu_render_state.as_ref().map(|rs| {
+            scene_renderer::SceneRenderer::new(
+                &rs.device,
+                &rs.queue,
+                rs.renderer.clone(),
+                rs.target_format,
+            )
+        });
+
         Self {
             tree: panels::dock::create_tile_tree(),
-            state: EditorState::new(),
+            state,
         }
     }
 }
@@ -42,6 +56,7 @@ impl eframe::App for EditorApp {
         panels::toolbar::show(&mut self.state, ctx);
 
         // ── 2. Central dock area (tile tree with all panels) ──
+        // Scene View panel triggers 3D rendering only when it is visible.
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut behavior = panels::dock::EditorBehavior {
                 state: &mut self.state,
@@ -87,6 +102,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "XGameEngine Editor",
         options,
-        Box::new(|_cc| Ok(Box::new(EditorApp::new()))),
+        Box::new(|cc| Ok(Box::new(EditorApp::new(cc)))),
     )
 }

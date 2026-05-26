@@ -1,8 +1,8 @@
-/// Top-level engine configuration.
+/// 引擎顶层配置。
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub window: WindowConfig,
-    /// Target frames per second. 0 = uncapped.
+    /// 目标帧率。0 = 不限制。
     pub target_fps: u32,
 }
 
@@ -15,7 +15,7 @@ impl Default for EngineConfig {
     }
 }
 
-/// Window creation settings.
+/// 窗口创建设置。
 #[derive(Debug, Clone)]
 pub struct WindowConfig {
     pub title: String,

@@ -1,6 +1,6 @@
-//! XGameEngine core types.
+//! XGameEngine 核心类型。
 //!
-//! Foundation layer: window config, color, engine settings, and base traits.
+//! 基础层：窗口配置、颜色、引擎设置和基础 trait。
 
 mod color;
 mod config;

@@ -1,6 +1,6 @@
-//! Unity-style Console panel — displays log messages with severity levels.
+//! 类 Unity 控制台面板——按严重等级显示日志消息。
 
-use crate::panels::state::{EditorState, LogLevel};
+use crate::panels::state::EditorState;
 
 /// Render the console panel content inside a `Ui`.
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {

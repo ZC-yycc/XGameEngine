@@ -4,26 +4,26 @@ use wgpu::util::DeviceExt;
 
 use crate::texture::Texture;
 
-/// One draw-call from a glTF mesh primitive.
+/// 一次 glTF 网格图元的绘制调用。
 pub struct GltfPrimitive {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
     pub index_format: wgpu::IndexFormat,
     pub num_vertices: u32,
-    /// Diffuse texture (white fallback if the model has none).
+    /// 漫反射纹理（模型无纹理时使用白色回退）。
     pub texture: Texture,
 }
 
-/// A collection of GPU-resident primitives loaded from a glTF file.
+/// 从 glTF 文件加载的 GPU 驻留图元集合。
 pub struct GltfMesh {
     pub primitives: Vec<GltfPrimitive>,
-    /// Vertex stride in bytes (uniform across all primitives).
+    /// 顶点步长（字节），所有图元统一。
     pub vertex_size: u64,
 }
 
 // ---------------------------------------------------------------------------
-// Host-side vertex (position + normal + colour + tex_coord)
+// 主机端顶点（位置 + 法线 + 颜色 + 纹理坐标）
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -55,13 +55,13 @@ impl GltfVertex {
 }
 
 // ---------------------------------------------------------------------------
-// Loader
+// 加载器
 // ---------------------------------------------------------------------------
 
 impl GltfMesh {
-    /// Load a `.gltf` or `.glb` file and upload all mesh primitives to the GPU.
+    /// 加载 `.gltf` 或 `.glb` 文件并将所有网格图元上传到 GPU。
     ///
-    /// Missing vertex attributes are filled with sensible defaults.
+    /// 缺失的顶点属性用合理默认值填充。
     pub fn from_file(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -76,20 +76,20 @@ impl GltfMesh {
             for primitive in mesh.primitives() {
                 let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
 
-                // --- positions (required) ---
+                // --- 位置（必需）---
                 let positions: Vec<[f32; 3]> = reader
                     .read_positions()
                     .context("Missing POSITION attribute")?
                     .collect();
                 let vertex_count = positions.len();
 
-                // --- indices ---
+                // --- 索引 ---
                 let indices: Vec<u32> = reader
                     .read_indices()
                     .map(|iter| iter.into_u32().collect())
                     .unwrap_or_else(|| (0..vertex_count as u32).collect());
 
-                // --- normals ---
+                // --- 法线 ---
                 let normals: Vec<[f32; 3]> = match reader.read_normals() {
                     Some(iter) => iter.collect(),
                     None => {
@@ -98,22 +98,22 @@ impl GltfMesh {
                     }
                 };
 
-                // --- texture coordinates ---
+                // --- 纹理坐标 ---
                 let tex_coords: Vec<[f32; 2]> = reader
                     .read_tex_coords(0)
                     .map(|iter| iter.into_f32().collect())
                     .unwrap_or_else(|| vec![[0.0, 0.0]; vertex_count]);
 
-                // --- vertex colours ---
+                // --- 顶点颜色 ---
                 let colors: Vec<[f32; 3]> = reader
                     .read_colors(0)
                     .map(|iter| iter.into_rgb_f32().collect())
                     .unwrap_or_else(|| vec![[1.0, 1.0, 1.0]; vertex_count]);
 
-                // --- texture ---
+                // --- 纹理 ---
                 let texture = load_primitive_texture(device, queue, &primitive, &images);
 
-                // Interleave into GltfVertex array
+                // 交错排列为 GltfVertex 数组
                 let vertices: Vec<GltfVertex> = (0..vertex_count)
                     .map(|i| GltfVertex {
                         position: positions[i],
@@ -154,12 +154,12 @@ impl GltfMesh {
         })
     }
 
-    /// Build a unit cube as a fallback when glTF loading fails.
+    /// 构建单位立方体作为 glTF 加载失败时的回退。
     pub fn fallback_cube(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let (verts, _vtx_size, indices) = crate::mesh::create_coloured_cube();
 
-        // Old format: [pos(f32×3), col(f32×3)] = 24 bytes
-        // New format: [pos, normal, col, tex_coord] = 44 bytes
+        // 旧格式：[pos×3, col×3] = 24 字节
+        // 新格式：[pos, normal, col, tex_coord] = 44 字节
         let default_normal = f32::to_le_bytes(0.0)
             .into_iter()
             .chain(f32::to_le_bytes(0.0))
@@ -207,7 +207,7 @@ impl GltfMesh {
 }
 
 // ---------------------------------------------------------------------------
-// Texture loading from glTF images
+// 从 glTF 图像加载纹理
 // ---------------------------------------------------------------------------
 
 fn load_primitive_texture(
@@ -238,16 +238,16 @@ fn load_primitive_texture(
         }
     }
 
-    // Fallback: 1×1 white
+    // 回退：1×1 白色
     Texture::white(device, queue)
 }
 
-/// Decode glTF image data to RGBA8 bytes.
+/// 将 glTF 图像数据解码为 RGBA8 字节。
 fn decode_image_data(data: &gltf::image::Data) -> Option<Vec<u8>> {
     use gltf::image::Format;
     match data.format {
         Format::R8G8B8 => {
-            // Expand RGB → RGBA
+            // 将 RGB 扩展为 RGBA
             let mut rgba = Vec::with_capacity((data.width * data.height * 4) as usize);
             for chunk in data.pixels.chunks(3) {
                 rgba.extend_from_slice(chunk);
@@ -264,7 +264,7 @@ fn decode_image_data(data: &gltf::image::Data) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Face-normal computation
+// 面法线计算
 // ---------------------------------------------------------------------------
 
 fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {

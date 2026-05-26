@@ -1,13 +1,11 @@
-//! Debug-draw lines for physics visualisation.
+//! 物理调试绘制线条。
 //!
-//! The physics engine can emit line segments representing collider outlines
-//! and contact points. The renderer can consume these to draw wireframe
-//! overlays.
+//! 物理引擎可输出表示碰撞体轮廓和接触点的线段。渲染器可消费这些数据绘制线框叠加层。
 
 use glam::Vec3;
 use xgame_core::Color;
 
-/// A single debug line segment with start / end points and a colour.
+/// 单个调试线段，包含起点、终点和颜色。
 #[derive(Debug, Clone, Copy)]
 pub struct DebugLine {
     pub start: Vec3,
@@ -21,10 +19,9 @@ impl DebugLine {
     }
 }
 
-/// Collects debug-draw primitives each frame.
+/// 每帧收集调试绘制图元。
 ///
-/// Call `clear()` at the start of a frame, then `emit_*` methods
-/// to record lines. The renderer can then consume `lines()`.
+/// 在每帧开始时调用 `clear()`，然后使用 `emit_*` 方法记录线条。渲染器通过 `lines()` 消费。
 #[derive(Debug, Clone, Default)]
 pub struct DebugDrawBuffer {
     lines: Vec<DebugLine>,
@@ -35,17 +32,17 @@ impl DebugDrawBuffer {
         Self { lines: Vec::new() }
     }
 
-    /// Clear all lines — call at the start of each frame before emitting.
+    /// 清除所有线条——在每帧输出前调用。
     pub fn clear(&mut self) {
         self.lines.clear();
     }
 
-    /// Emit a line segment.
+    /// 输出一条线段。
     pub fn add_line(&mut self, start: Vec3, end: Vec3, color: Color) {
         self.lines.push(DebugLine::new(start, end, color));
     }
 
-    /// Emit an axis-aligned box outline.
+    /// 输出一个轴对齐盒体的轮廓线。
     pub fn add_cuboid(&mut self, center: Vec3, half_extents: Vec3, color: Color) {
         let min = center - half_extents;
         let max = center + half_extents;
@@ -72,7 +69,7 @@ impl DebugDrawBuffer {
         }
     }
 
-    /// Emit a cross at a point (useful for contact points).
+    /// 在某个点输出十字标记（用于接触点）。
     pub fn add_cross(&mut self, position: Vec3, size: f32, color: Color) {
         let s = size * 0.5;
         self.add_line(

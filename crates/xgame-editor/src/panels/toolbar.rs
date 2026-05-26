@@ -1,4 +1,4 @@
-//! Unity-style toolbar — Play / Pause / Stop controls and transform tool selection.
+//! 类 Unity 工具栏——播放/暂停/停止控制和变换工具选择。
 
 use crate::panels::state::{EditorState, PlayMode, ToolMode};
 

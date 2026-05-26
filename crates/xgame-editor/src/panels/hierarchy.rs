@@ -1,11 +1,18 @@
-//! Unity-style Hierarchy panel — lists all entities in the scene as a tree.
+//! 类 Unity 层级面板——以树形列表显示场景中的所有实体。
 
 use crate::panels::state::EditorState;
 
 /// Render the hierarchy panel content inside a `Ui`.
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
-    // ── Header with scene name + add button ──
+
+    // ── Search filter ──
+    let mut filter = String::new();
     ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut filter)
+                .hint_text("Search...")
+                .desired_width(f32::INFINITY),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("+").clicked() {
                 state.create_entity();
@@ -14,13 +21,6 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     });
     ui.separator();
 
-    // ── Search filter ──
-    let mut filter = String::new();
-    ui.add(
-        egui::TextEdit::singleline(&mut filter)
-            .hint_text("Search...")
-            .desired_width(f32::INFINITY),
-    );
 
     // ── Entity list ──
     egui::ScrollArea::vertical().show(ui, |ui| {

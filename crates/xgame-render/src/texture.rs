@@ -1,4 +1,4 @@
-/// A GPU-resident texture with its view and sampler.
+/// GPU 驻留纹理，包含其视图和采样器。
 pub struct Texture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -6,7 +6,7 @@ pub struct Texture {
 }
 
 impl Texture {
-    /// Create a texture from raw RGBA8 pixel data.
+    /// 从原始 RGBA8 像素数据创建纹理。
     pub fn from_rgba8(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -67,7 +67,7 @@ impl Texture {
         }
     }
 
-    /// Create a 1×1 white fallback texture (used when a model has no textures).
+    /// 创建 1×1 白色回退纹理（当模型没有纹理时使用）。
     pub fn white(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         Self::from_rgba8(device, queue, 1, 1, &[255, 255, 255, 255], "fallback white")
     }

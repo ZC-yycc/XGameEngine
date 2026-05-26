@@ -1,8 +1,7 @@
-//! egui_tiles integration — panel tab types, tree layout, and behavior.
+//! egui_tiles 集成——面板标签类型、树布局和行为。
 //!
-//! Builds a Unity-inspired split layout with draggable tab headers.
-//! Each pane is wrapped in a `Tabs` container so the tab bar acts as
-//! a drag handle for docking / undocking.
+//! 构建类 Unity 的拆分布局，支持可拖拽的标签头。
+//! 每个面板包裹在 `Tabs` 容器中，标签栏作为停靠/取消停靠的拖拽手柄。
 
 use egui_tiles::{
     Behavior, SimplificationOptions, Tiles, TileId, UiResponse, Tree,

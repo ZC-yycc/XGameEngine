@@ -1,6 +1,6 @@
 use wgpu::util::DeviceExt;
 
-/// A GPU-resident mesh with vertex and index buffers.
+/// GPU 驻留网格，包含顶点和索引缓冲区。
 pub struct Mesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
@@ -9,7 +9,7 @@ pub struct Mesh {
 }
 
 impl Mesh {
-    /// Upload vertex and index data to the GPU.
+    /// 上传顶点和索引数据到 GPU。
     pub fn new(
         device: &wgpu::Device,
         label: &str,
@@ -39,9 +39,9 @@ impl Mesh {
     }
 }
 
-/// Create a unit-sized coloured cube mesh.
+/// 创建单位大小的彩色立方体网格。
 ///
-/// Returns (vertex bytes, vertex size in bytes, index array).
+/// 返回 (顶点字节, 顶点字节大小, 索引数组)。
 pub fn create_coloured_cube() -> (Vec<u8>, u64, Vec<u32>) {
     #[repr(C)]
     #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]

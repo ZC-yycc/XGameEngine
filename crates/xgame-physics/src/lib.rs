@@ -1,6 +1,6 @@
-//! XGameEngine physics layer.
+//! XGameEngine 物理层。
 //!
-//! Wraps rapier3d for rigid-body dynamics and collision detection.
+//! 封装 rapier3d 用于刚体动力学和碰撞检测。
 
 pub mod collider;
 pub mod debug_draw;

@@ -1,7 +1,6 @@
-//! XGameEngine wgpu-based renderer.
+//! XGameEngine 基于 wgpu 的渲染器。
 //!
-//! Provides window creation, swapchain management, camera, mesh,
-//! and a minimal rendering pipeline.
+//! 提供窗口创建、交换链管理、相机、网格和最小渲染管线。
 
 pub mod camera;
 pub mod gltf_loader;

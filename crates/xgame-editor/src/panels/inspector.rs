@@ -1,4 +1,4 @@
-//! Unity-style Inspector panel — shows properties of the selected entity.
+//! 类 Unity 检视面板——显示选中实体的属性。
 
 use crate::panels::state::EditorState;
 

@@ -1,7 +1,7 @@
-//! Unity-style editor panels.
+//! 类 Unity 编辑器面板。
 //!
-//! Each panel is a function that takes `(&mut EditorState, &egui::Context)`
-//! and renders its content. The main layout is assembled in `main.rs`.
+//! 每个面板都是一个函数，接收 `(&mut EditorState, &egui::Context)` 并渲染其内容。
+//! 主布局在 `main.rs` 中组装。
 
 pub mod console;
 pub mod dock;

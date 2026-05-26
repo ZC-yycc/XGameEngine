@@ -2,10 +2,10 @@ use xgame_math::glam::{Mat4, Vec3};
 use xgame_math::projection;
 
 // ---------------------------------------------------------------------------
-// GPU uniform (must match WGSL layout)
+// GPU 统一变量（必须与 WGSL 布局逐字节对齐）
 // ---------------------------------------------------------------------------
 
-/// Matches the WGSL `CameraUniform` struct byte-for-byte.
+/// 与 WGSL `CameraUniform` 结构体逐字节对齐。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
@@ -14,22 +14,22 @@ pub struct CameraUniform {
 }
 
 // ---------------------------------------------------------------------------
-// Light GPU uniform
+// 光源 GPU 统一变量
 // ---------------------------------------------------------------------------
 
-/// Matches the WGSL `LightUniform` struct.
+/// 与 WGSL `LightUniform` 结构体对齐。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightUniform {
-    /// World-space light direction. w = padding.
+    /// 世界空间光源方向。w = 填充。
     pub direction: [f32; 4],
-    /// Light colour (RGB). w = intensity multiplier.
+    /// 光源颜色 (RGB)。w = 强度倍率。
     pub color: [f32; 4],
-    /// Ambient colour (RGB). w = padding.
+    /// 环境光颜色 (RGB)。w = 填充。
     pub ambient: [f32; 4],
 }
 
-/// CPU-side directional light descriptor.
+/// CPU 端方向光描述符。
 #[derive(Debug, Clone)]
 pub struct DirectionalLight {
     pub direction: Vec3,
@@ -60,16 +60,16 @@ impl DirectionalLight {
 }
 
 // ---------------------------------------------------------------------------
-// Camera
+// 相机
 // ---------------------------------------------------------------------------
 
-/// A perspective camera with position, look-at target, and up vector.
+/// 透视相机，包含位置、观察目标和上方向。
 #[derive(Debug, Clone)]
 pub struct Camera {
     pub eye: Vec3,
     pub target: Vec3,
     pub up: Vec3,
-    /// Vertical field-of-view in radians.
+    /// 垂直视场角，单位为弧度。
     pub fov: f32,
     pub near: f32,
     pub far: f32,
@@ -110,27 +110,26 @@ impl Camera {
 }
 
 // ---------------------------------------------------------------------------
-// Orbit camera controller
+// 轨道相机控制器
 // ---------------------------------------------------------------------------
 
-/// Mouse-driven orbit camera: drag to rotate, scroll to zoom,
-/// WASD to pan, Q/E to move up/down.
+/// 鼠标驱动的轨道相机：拖拽旋转、滚轮缩放、WASD 平移、Q/E 升降。
 #[derive(Debug, Clone)]
 pub struct OrbitCamera {
     pub camera: Camera,
-    /// Horizontal rotation angle (radians).
+    /// 水平旋转角度（弧度）。
     pub yaw: f32,
-    /// Vertical rotation angle (radians), clamped to avoid gimbal lock.
+    /// 垂直旋转角度（弧度），限制以避免万向节锁定。
     pub pitch: f32,
-    /// Distance from the look-at target.
+    /// 到观察目标的距离。
     pub distance: f32,
-    /// Sensitivity for mouse drag (radians per pixel).
+    /// 鼠标拖拽灵敏度（弧度/像素）。
     pub sensitivity: f32,
-    /// Sensitivity for scroll zoom.
+    /// 滚轮缩放灵敏度。
     pub zoom_speed: f32,
     pub min_distance: f32,
     pub max_distance: f32,
-    /// Pan speed in world units per second when W/A/S/D is held.
+    /// 按住 WASD 时的平移速度（世界单位/秒）。
     pub pan_speed: f32,
 }
 
@@ -157,7 +156,7 @@ impl OrbitCamera {
         }
     }
 
-    /// Rotate by mouse delta (in pixels).
+    /// 按鼠标增量旋转（像素）。
     pub fn rotate(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * self.sensitivity;
         self.pitch += dy * self.sensitivity;
@@ -167,14 +166,13 @@ impl OrbitCamera {
         );
     }
 
-    /// Zoom by scroll delta.
+    /// 按滚轮增量缩放。
     pub fn zoom(&mut self, delta: f32) {
         self.distance = (self.distance - delta * self.zoom_speed)
             .clamp(self.min_distance, self.max_distance);
     }
 
-    /// Recompute camera position from spherical coordinates,
-    /// relative to the current orbit target.
+    /// 从球坐标重新计算相机位置，相对于当前轨道目标。
     pub fn update(&mut self) {
         self.camera.eye = self.camera.target
             + Self::spherical_to_cartesian(self.yaw, self.pitch, self.distance);
@@ -187,30 +185,28 @@ impl OrbitCamera {
         Vec3::new(x, y, z)
     }
 
-    /// Pan the camera target (and eye) in the camera's right direction
-    /// (horizontal projected). `amount` is in world units per second,
-    /// modulated by `pan_speed`.
+    /// 沿相机右方向平移目标和视点（水平投影）。
+    /// `amount` 是每帧的世界单位位移，受 `pan_speed` 调制。
     pub fn pan_right(&mut self, amount: f32, dt: f32) {
         let fwd = (self.camera.target - self.camera.eye).normalize();
-        // fwd × up gives the camera‑right direction in a right‑handed Y‑up system.
+        // fwd × up 得出右手 Y-up 系中的相机右方向。
         let right = fwd.cross(self.camera.up).normalize();
         let offset = right * amount * self.pan_speed * dt;
         self.camera.target += offset;
         self.camera.eye += offset;
     }
 
-    /// Pan the camera target (and eye) forward/backward (horizontal
-    /// projection of the look direction).
+    /// 沿相机前方向平移目标和视点（视线方向的水平投影）。
     pub fn pan_forward(&mut self, amount: f32, dt: f32) {
         let fwd = self.camera.target - self.camera.eye;
-        // Project onto horizontal plane (ignore Y component).
+        // 投影到水平面（忽略 Y 分量）。
         let fwd_h = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
         let offset = fwd_h * amount * self.pan_speed * dt;
         self.camera.target += offset;
         self.camera.eye += offset;
     }
 
-    /// Move the camera target (and eye) in world-space up/down.
+    /// 沿世界空间上/下方向移动相机目标和视点。
     pub fn move_up(&mut self, amount: f32, dt: f32) {
         let offset = Vec3::new(0.0, amount * self.pan_speed * dt, 0.0);
         self.camera.target += offset;

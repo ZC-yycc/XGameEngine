@@ -1,8 +1,7 @@
-//! Unity-inspired dark theme for the editor.
+//! 类 Unity 暗色编辑器主题。
 //!
-//! Call `install(ctx)` once at startup (or every frame) to apply
-//! dark backgrounds, blue accents, and sharp corners that resemble
-//! the Unity Editor colour scheme.
+//! 在启动时（或每帧）调用 `install(ctx)` 以应用深色背景、蓝色强调色和锐利边角，
+//! 仿照 Unity 编辑器的配色方案。
 
 use egui::Color32;
 

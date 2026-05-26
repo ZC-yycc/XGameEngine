@@ -1,46 +1,43 @@
-//! Rigid-body component types.
+//! 刚体组件类型。
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use xgame_math::Transform;
 
-/// The type of a rigid body determines how it interacts with forces.
+/// 刚体类型，决定其与力的交互方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RigidBodyType {
-    /// Immovable, infinite mass. Does not respond to forces.
+    /// 不可移动，无限质量。不响应力。
     Static,
-    /// Full dynamics simulation — affected by gravity, forces, collisions.
+    /// 全动力学模拟——受重力、力和碰撞影响。
     Dynamic,
-    /// User-controlled velocity. Affects dynamic bodies but is not
-    /// affected by them. Typical for moving platforms or player characters.
+    /// 用户控制速度。影响动态体但不受其影响。典型用于移动平台或玩家角色。
     KinematicVelocity,
-    /// Position-controlled. Like KinematicVelocity but set by direct
-    /// position updates each frame.
+    /// 位置控制。类似 KinematicVelocity，但通过每帧直接设置位置更新。
     KinematicPosition,
 }
 
-/// Describes a rigid body's physical properties.
+/// 描述刚体的物理属性。
 ///
-/// Stored on the CPU side; converted to a rapier3d `RigidBody` when
-/// added to the physics world.
+/// 存储在 CPU 端；添加到物理世界时转换为 rapier3d `RigidBody`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RigidBody {
     pub body_type: RigidBodyType,
-    /// Transform at time of creation or last sync.
+    /// 创建时或最后一次同步时的变换。
     pub transform: Transform,
-    /// Initial linear velocity (world-space). Used for Dynamic.
+    /// 初始线速度（世界空间）。用于 Dynamic 类型。
     pub linear_velocity: Vec3,
-    /// Initial angular velocity. Used for Dynamic.
+    /// 初始角速度。用于 Dynamic 类型。
     pub angular_velocity: Vec3,
-    /// Mass in kg. If `body_type` is Static, this is ignored.
+    /// 质量（千克）。若 `body_type` 为 Static，则忽略。
     pub mass: f32,
-    /// Angular inertia damping (0 = no damping, 1 = full stop).
+    /// 角惯性阻尼（0 = 无阻尼，1 = 完全停止）。
     pub angular_damping: f32,
     /// Linear damping.
     pub linear_damping: f32,
-    /// Whether gravity affects this body.
+    /// 重力是否影响该刚体。
     pub gravity_enabled: bool,
-    /// Whether this body can sleep (performance optimisation).
+    /// 该刚体是否可以休眠（性能优化）。
     pub can_sleep: bool,
 }
 
@@ -61,7 +58,7 @@ impl Default for RigidBody {
 }
 
 impl RigidBody {
-    /// Convenience: a static body at the given transform.
+    /// 便捷方法：在给定变换处创建静态刚体。
     pub fn static_at(transform: Transform) -> Self {
         Self {
             body_type: RigidBodyType::Static,
@@ -73,7 +70,7 @@ impl RigidBody {
         }
     }
 
-    /// Convenience: a dynamic body at the given transform.
+    /// 便捷方法：在给定变换处创建动态刚体。
     pub fn dynamic_at(transform: Transform) -> Self {
         Self {
             body_type: RigidBodyType::Dynamic,

@@ -1,27 +1,27 @@
-//! Collider component types.
+//! 碰撞体组件类型。
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-/// Supported collider shapes.
+/// 支持的碰撞体形状。
 ///
-/// All sizes use half-extents (e.g. a unit cube has `half_extents = (0.5, 0.5, 0.5)`).
+/// 所有尺寸使用半边长（例如单位立方体的 `half_extents = (0.5, 0.5, 0.5)`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ColliderShape {
-    /// Axis-aligned box with half-extents.
+    /// 轴对齐盒体，使用半边长。
     Cuboid { half_extents: Vec3 },
-    /// Sphere defined by radius.
+    /// 球体，由半径定义。
     Ball { radius: f32 },
-    /// Capsule aligned with the Y axis.
+    /// 胶囊体，沿 Y 轴对齐。
     Capsule { half_height: f32, radius: f32 },
-    /// Cylinder aligned with the Y axis.
+    /// 圆柱体，沿 Y 轴对齐。
     Cylinder { half_height: f32, radius: f32 },
-    /// Arbitrary triangle mesh (must be non-self-intersecting).
+    /// 任意三角形网格（必须不自交）。
     Trimesh {
         vertices: Vec<[f32; 3]>,
         indices: Vec<[u32; 3]>,
     },
-    /// Height-field collider (for terrain).
+    /// 高度场碰撞体（用于地形）。
     HeightField {
         heights: Vec<f32>,
         nx: u32,
@@ -48,21 +48,19 @@ impl ColliderShape {
     }
 }
 
-/// Describes a collision shape attached to a rigid body.
+/// 描述附加到刚体上的碰撞形状。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Collider {
     pub shape: ColliderShape,
-    /// Coulomb friction coefficient (0 = frictionless, 1 = high friction).
+    /// 库仑摩擦系数（0 = 无摩擦，1 = 高摩擦）。
     pub friction: f32,
-    /// Restitution (bounciness). 0 = inelastic, 1 = perfectly elastic.
+    /// 弹性系数（弹力）。0 = 完全非弹性，1 = 完全弹性。
     pub restitution: f32,
-    /// Whether this collider is a sensor (detects overlaps without
-    /// producing contact forces).
+    /// 是否为传感器（检测重叠但不产生接触力）。
     pub is_sensor: bool,
-    /// Density for automatic mass computation. Ignored when the parent
-    /// rigid body has a manually-specified mass > 0.
+    /// 密度，用于自动质量计算。当父刚体手动指定 mass > 0 时忽略。
     pub density: f32,
-    /// Local offset from the parent rigid body's origin.
+    /// 相对于父刚体原点的局部偏移。
     pub offset: Vec3,
 }
 

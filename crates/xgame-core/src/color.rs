@@ -1,6 +1,6 @@
 use glam::Vec4;
 
-/// RGBA color, stored as linear floating-point components.
+/// RGBA 颜色，以线性浮点分量存储。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
     pub r: f32,
