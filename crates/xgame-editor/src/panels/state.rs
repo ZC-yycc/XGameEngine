@@ -24,6 +24,34 @@ pub enum PlayMode {
     Paused,
 }
 
+/// Gizmo 交互操作柄标识（与 ToolMode 组合使用）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GizmoPart {
+    AxisX,
+    AxisY,
+    AxisZ,
+    PlaneXY,
+    PlaneXZ,
+    PlaneYZ,
+    Screen,
+    Uniform,
+    RingX,
+    RingY,
+    RingZ,
+}
+
+/// 活动拖拽状态。
+#[derive(Debug, Clone)]
+pub struct GizmoDrag {
+    /// 被拖拽的操作柄。
+    pub part: GizmoPart,
+    /// 拖拽起始时 entity transform 的对应值（translation / scale 的 Vec3，或 rotation Euler）。
+    pub start_value: Vec3,
+    /// 拖拽平面上首次命中点的世界坐标。
+    pub start_hit: Vec3,
+    pub start_screen_pos: egui::Pos2,
+}
+
 /// 控制台面板的日志级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -90,7 +118,7 @@ impl Default for EditorCamera {
             yaw: -2.356,                // ≈ −135° — 从 (+, +, +) 方向看向原点
             pitch: -0.524,              // ≈ −30°  — 略微向下
             position: Vec3::new(5.0, 5.0, 5.0),
-            sensitivity: 0.005,
+            sensitivity: 0.0025,
             pan_speed: 5.0,
         }
     }
@@ -199,6 +227,15 @@ pub struct EditorState {
     /// 游戏运行时——仅在 Play 模式下为 `Some`。
     /// 拥有物理世界并管理实体-刚体映射。
     pub game_runtime: Option<crate::game_runtime::GameRuntime>,
+
+    // -- Gizmo state --
+    /// 当前鼠标悬停的 gizmo 操作柄（用于高亮绘制）。
+    pub gizmo_hovered: Option<GizmoPart>,
+    /// 当前正在拖拽的操作柄状态（`Some` 时处于拖拽中）。
+    pub gizmo_active: Option<GizmoDrag>,
+    /// 拖拽捕捉步长（0 表示不捕捉）。
+    #[allow(dead_code)]
+    pub gizmo_snap: f32,
 }
 
 impl EditorState {
@@ -231,6 +268,10 @@ impl EditorState {
 
             scene_renderer: None,
             game_runtime: None,
+
+            gizmo_hovered: None,
+            gizmo_active: None,
+            gizmo_snap: 0.0,
         }
     }
 

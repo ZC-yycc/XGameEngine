@@ -18,6 +18,7 @@
 mod panels;
 mod game_runtime;
 mod scene_renderer;
+mod gizmo;
 
 use panels::state::{EditorState, PlayMode};
 

@@ -2,11 +2,13 @@
 
 > 从启动到关机，每一帧发生了什么。
 >
-> 入口：`cargo run -p xgame-editor`
+> 入口：`cargo run -p xgame-editor` | `cargo run -p xgame-game`
 
 ---
 
 ## 一、启动阶段
+
+### 编辑器 (`xgame-editor`)
 
 ```
 main()                           crates/xgame-editor/src/main.rs
@@ -22,11 +24,27 @@ EditorState::new()
   │     ├── 成功 → 解析为 Scene { name, entities }
   │     └── 失败 → 创建默认场景 (Main Camera + Directional Light)
   └── 从 eframe 的 wgpu device/queue 创建 SceneRenderer（离屏渲染器）
+        └── ScenePipeline::new()  共享渲染管线（位于 xgame-render）
+```
+
+### 独立游戏 (`xgame-game`)
+
+```
+main()                           crates/xgame-game/src/main.rs
+  └── EventLoop::new()
+       └── GameApp::new()        异步初始化
+             ├── wgpu Instance → Adapter → Device + Queue
+             ├── Surface → SurfaceConfiguration
+             ├── ScenePipeline::new()
+             ├── 加载 Scenes/scene.ron
+             └── PhysicsWorld::new() + entity→body 映射
 ```
 
 ---
 
 ## 二、每帧循环
+
+### 编辑器每帧
 
 eframe 每帧调用 `EditorApp::update(ctx)`，按序执行 5 个阶段：
 
@@ -38,7 +56,7 @@ eframe 每帧调用 `EditorApp::update(ctx)`，按序执行 5 个阶段：
  5  StatusBar                     底部状态栏
 ```
 
-### 阶段 1：主题
+#### 阶段 1：主题
 
 ```rust
 panels::theme::install(ctx);
@@ -46,7 +64,7 @@ panels::theme::install(ctx);
 
 深色背景 + 蓝色强调色，锐利边角，Unity 风格。每帧调用无副作用（`set_style` 覆盖）。
 
-### 阶段 2：Toolbar + 模式切换
+#### 阶段 2：Toolbar + 模式切换
 
 ```rust
 let prev_mode = self.state.play_mode;
@@ -70,7 +88,7 @@ Edit ──▶ [▶ Play] ──▶ Playing ──▶ [⏸ Pause] ──▶ Paus
 - **Paused**：暂停物理步进，场景视图保持最后状态
 - **Edit**：销毁 `GameRuntime` → 恢复保存的变换
 
-### 阶段 3：物理步进
+#### 阶段 3：物理步进
 
 仅在 `play_mode == Playing` 时执行：
 
@@ -89,7 +107,7 @@ pub fn fixed_update(&mut self, dt: f32, entities: &mut [Entity]) {
 物理与渲染帧率**完全解耦**。渲染 30fps 时物理仍跑 60Hz。
 `max_steps = 5` 防止死亡螺旋。
 
-### 阶段 4：四面板 Dock 布局
+#### 阶段 4：四面板 Dock 布局
 
 ```
 egui_tiles::Tree 布局
@@ -105,7 +123,7 @@ egui_tiles::Tree 布局
 
 每个面板通过 `#[derive(Panel)]` 派生宏自动分发到 `show_content()`。
 
-#### 4a. Hierarchy 面板
+##### 4a. Hierarchy 面板
 
 ```
 hierarchy::show_content(state, ui)
@@ -121,7 +139,7 @@ hierarchy::show_content(state, ui)
 **Play 模式守卫**：`create_entity()` / `duplicate_entity()` / `delete_selected()`
 在非 Edit 模式返回 early 并输出警告日志。
 
-#### 4b. Scene View 面板（核心）
+##### 4b. Scene View 面板（核心）
 
 ```
 scene_view::show_content(state, ui)
@@ -140,7 +158,7 @@ scene_view::show_content(state, ui)
   │   │     解析 glTF → 提取 position/normal/color/texcoord
   │   │     上传 GPU → 缓存于 model_cache
   │   │
-  │   ├── Phase 2: wgpu 渲染
+  │   ├── Phase 2: wgpu 渲染 (ScenePipeline::render)
   │   │     ├── 写入 CameraUniform (view_proj, camera_pos)
   │   │     ├── 开启 RenderPass (背景 #1E1E24)
   │   │     ├── 遍历 entities:
@@ -169,7 +187,7 @@ scene_view::show_content(state, ui)
         Speed: X.X (滚轮后短暂显示)
 ```
 
-**WGSL 着色器**（内联在 `scene_renderer.rs`）：
+**WGSL 着色器**（位于 `xgame-render/src/scene_pipeline.rs`）：
 
 ```wgsl
 // 顶点阶段
@@ -195,7 +213,7 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, screen_size: Vec2) -> Pos2 {
 }
 ```
 
-#### 4c. Inspector 面板
+##### 4c. Inspector 面板
 
 ```
 inspector::show_content(state, ui)
@@ -208,7 +226,7 @@ inspector::show_content(state, ui)
         └── Model: [TextEdit]
 ```
 
-#### 4d. Console 面板
+##### 4d. Console 面板
 
 ```
 console::show_content(state, ui)
@@ -218,7 +236,7 @@ console::show_content(state, ui)
   └── 最多保留 500 条
 ```
 
-### 阶段 5：状态栏
+#### 阶段 5：状态栏
 
 ```
 StatusBar
@@ -226,6 +244,28 @@ StatusBar
 
   Playing 时额外显示:
   "▶ Playing | ... | Bodies: 3 | Colliders: 3 | FPS: 60"
+```
+
+---
+
+### 独立游戏每帧 (`xgame-game`)
+
+```
+GameApp::update(dt)
+  ├── clock.tick(dt)
+  ├── while clock.consume_fixed_update():
+  │     physics.step(fixed_dt)
+  ├── clock.reset_step_counter()
+  └── sync_transforms()
+
+GameApp::render()
+  ├── 计算 view_proj 矩阵 (固定轨道相机: (5,5,5) → 原点)
+  ├── 惰性加载模型 (GltfMesh::from_file)
+  ├── surface.get_current_texture()
+  ├── encoder = device.create_command_encoder()
+  ├── ScenePipeline::render(queue, encoder, frame_view, depth_view,
+  │                         entities, model_cache, view_proj, camera_pos)
+  └── queue.submit() + frame.present()
 ```
 
 ---
@@ -252,11 +292,27 @@ EditorState（中央状态，所有面板共享可变引用）
   ├── show_physics_debug: bool
   │
   ├── scene_renderer: Option<SceneRenderer>  wgpu 离屏渲染器
+  │     └── pipeline: ScenePipeline          共享管线 (xgame-render)
+  │
   └── game_runtime: Option<GameRuntime>      物理运行时 (仅 Playing)
         ├── physics: PhysicsWorld             rapier3d 世界
         ├── entity_to_body                  实体索引 → 刚体 ID
         ├── saved_states                     备份变换 (退出时恢复)
         └── clock: GameClock                  固定步长 60Hz
+```
+
+**独立游戏状态**：
+
+```
+GameApp
+  ├── scene: Scene
+  ├── physics: PhysicsWorld
+  ├── entity_to_body: HashMap<usize, u64>
+  ├── clock: GameClock
+  ├── pipeline: ScenePipeline
+  ├── device / queue / surface / config
+  ├── depth_view / depth_texture
+  └── model_cache: HashMap<String, GltfMesh>
 ```
 
 **持久化**：`Scenes/scene.ron`
@@ -296,10 +352,11 @@ xgame-core     核心类型：Color,Config,Transform,Scene,Entity,Component,Game
     ↑
 xgame-math     glam 重导出 + projection 辅助
     ↑
-xgame-render   wgpu 管线、glTF 加载、网格、纹理、相机
+xgame-render   wgpu 管线、glTF 加载、ScenePipeline（共享渲染管线）
 xgame-physics  rapier3d 刚体、碰撞体、物理世界、调试绘制
     ↑
-xgame-editor   egui 面板、SceneRenderer、GameRuntime
+xgame-editor   egui 面板、SceneRenderer（ScenePipeline wrapper）、GameRuntime
+xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWorld）
 ```
 
 ---
@@ -308,15 +365,17 @@ xgame-editor   egui 面板、SceneRenderer、GameRuntime
 
 | 文件 | 行数 | 核心函数 |
 |---|---|---|
-| `main.rs` | 150 | `EditorApp::new()`、`update()` |
-| `state.rs` | 417 | `enter_play_mode()`、`create_entity()` |
-| `scene_renderer.rs` | 511 | `SceneRenderer::render()` |
-| `scene_view.rs` | 200 | `show_content()`、`project_to_screen()` |
-| `game_runtime.rs` | 100 | `start()`、`fixed_update()` |
-| `world.rs` | 573 | `step()`、`add_body()`、`debug_lines()` |
-| `hierarchy.rs` | 140 | `show_content()` |
-| `inspector.rs` | 137 | `show_content()` |
-| `toolbar.rs` | 80 | `show()` |
-| `console.rs` | 60 | `show_content()` |
-| `dock.rs` | 80 | `create_tile_tree()`、`EditorBehavior` |
-| `theme.rs` | 120 | `install()`、`unity_dark_visuals()` |
+| `editor/main.rs` | 150 | `EditorApp::new()`、`update()` |
+| `editor/state.rs` | 417 | `enter_play_mode()`、`create_entity()` |
+| `editor/scene_renderer.rs` | 214 | `SceneRenderer::new()`、`render()` |
+| `editor/scene_view.rs` | 200 | `show_content()`、`project_to_screen()` |
+| `editor/game_runtime.rs` | 100 | `start()`、`fixed_update()` |
+| `render/scene_pipeline.rs` | 376 | `ScenePipeline::new()`、`render()`（共享管线）|
+| `physics/world.rs` | 566 | `step()`、`add_body()`、`debug_lines()` |
+| `editor/hierarchy.rs` | 140 | `show_content()` |
+| `editor/inspector.rs` | 137 | `show_content()` |
+| `editor/toolbar.rs` | 80 | `show()` |
+| `editor/console.rs` | 60 | `show_content()` |
+| `editor/dock.rs` | 80 | `create_tile_tree()`、`EditorBehavior` |
+| `editor/theme.rs` | 120 | `install()`、`unity_dark_visuals()` |
+| `game/main.rs` | 331 | `GameApp::new()`、`update()`、`render()` |

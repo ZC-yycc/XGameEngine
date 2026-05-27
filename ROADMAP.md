@@ -64,8 +64,17 @@
 - [x] 场景视图（3D 渲染到纹理 → egui 显示）
 - [x] Hierarchy 树形面板（选择/可见性）
 - [x] Inspector 属性编辑（名称/Transform/可见性）
+- [x] Play / Pause / Stop 模式
+- [x] 渲染路径统一（ScenePipeline 共享渲染）
 - [ ] 资源浏览器
-- [ ] Play / Pause / Stop 模式
+- [ ] Gizmo 变换操作柄
+
+## 额外里程碑
+
+| 里程碑 | 状态 | 内容 |
+|---|---|---|
+| 共享渲染管线 | ✅ 完成 | 从 SceneRenderer 提取 ScenePipeline 到 xgame-render |
+| 独立游戏二进制 | ✅ 完成 | xgame-game crate，原生命令行运行 |
 
 ## 第七阶段：动画系统 ⬜
 
@@ -104,49 +113,71 @@
 
 ```
 XGameEngine/
-├── Cargo.toml                     # workspace
+├── Cargo.toml                     # workspace（含 xgame-game）
 ├── Resources/                     # 资源
 │   ├── Box.glb
-│   ├── Fox.gltf
-│   └── Texture.png
+│   └── Fox.gltf
 ├── Scenes/                        # 场景文件
 │   └── scene.ron
 ├── crates/
 │   ├── xgame-core/                # 核心类型
 │   │   └── src/
 │   │       ├── color.rs
-│   │       └── config.rs
+│   │       ├── config.rs
+│   │       ├── scene.rs           # Scene, Entity
+│   │       ├── transform.rs       # Transform
+│   │       ├── component.rs       # ComponentMap
+│   │       ├── id.rs              # EntityId
+│   │       ├── time.rs            # GameClock
+│   │       └── asset.rs           # AssetId
 │   ├── xgame-math/                # 数学库
 │   │   └── src/
 │   │       ├── projection.rs
 │   │       └── transform.rs
-│   └── xgame-render/              # 渲染器
+│   ├── xgame-render/              # 渲染器
+│   │   └── src/
+│   │       ├── lib.rs             # RenderContext
+│   │       ├── camera.rs          # Camera + OrbitCamera
+│   │       ├── mesh.rs            # Mesh 工具
+│   │       ├── gltf_loader.rs     # glTF 加载器
+│   │       ├── texture.rs         # GPU 纹理
+│   │       ├── model.rs           # ModelUniform
+│   │       ├── scene.rs           # 重新导出
+│   │       └── scene_pipeline.rs  # 共享渲染管线（新）
+│   ├── xgame-physics/             # 物理引擎
+│   │   └── src/
+│   │       ├── lib.rs             # crate root
+│   │       ├── rigid_body.rs      # RigidBody
+│   │       ├── collider.rs        # Collider
+│   │       ├── world.rs           # PhysicsWorld
+│   │       └── debug_draw.rs      # DebugDrawBuffer
+│   ├── xgame-editor/              # 编辑器（egui）
+│   │   └── src/
+│   │       ├── main.rs            # 编辑器入口
+│   │       ├── scene_renderer.rs  # 离屏渲染（ScenePipeline wrapper）
+│   │       ├── game_runtime.rs    # Play 模式运行时
+│   │       └── panels/
+│   │           ├── mod.rs
+│   │           ├── state.rs       # 中央状态
+│   │           ├── dock.rs        # 面板布局
+│   │           ├── toolbar.rs     # 顶部工具条
+│   │           ├── hierarchy.rs   # 实体列表
+│   │           ├── inspector.rs   # 属性编辑
+│   │           ├── scene_view.rs  # 3D 视口
+│   │           ├── console.rs     # 控制台
+│   │           └── theme.rs       # 暗色主题
+│   └── xgame-game/                # 独立游戏（新）
 │       └── src/
-│           ├── lib.rs             # RenderContext
-│           ├── camera.rs          # Camera + Light
-│           ├── mesh.rs            # Mesh
-│           ├── gltf_loader.rs     # glTF 加载器
-│           ├── texture.rs         # GPU 纹理
-│           ├── model.rs           # Model 矩阵
-│           └── scene.rs           # 场景类型
-│   └── xgame-editor/              # 编辑器（egui）
-│       └── src/
-│           └── main.rs             # 编辑器入口
-│   └── xgame-physics/             # 物理引擎
-│       └── src/
-│           ├── lib.rs             # crate root
-│           ├── rigid_body.rs      # RigidBody
-│           ├── collider.rs        # Collider
-│           ├── world.rs           # PhysicsWorld
-│           └── debug_draw.rs      # 调试绘制
-└── ROADMAP.md
+│           └── main.rs            # 游戏入口
+└── README.md
 ```
-
----
 
 ## 运行命令
 
 ```powershell
 # 编辑器
 cargo run -p xgame-editor
+
+# 独立游戏
+cargo run -p xgame-game
 ```
