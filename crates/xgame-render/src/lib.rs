@@ -7,6 +7,7 @@ pub mod gltf_loader;
 pub mod mesh;
 pub mod model;
 pub mod scene;
+pub mod scene_pipeline;
 pub mod texture;
 
 pub struct RenderContext {

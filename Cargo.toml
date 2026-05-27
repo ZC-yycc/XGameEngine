@@ -7,4 +7,5 @@ members = [
     "crates/xgame-render",
     "crates/xgame-physics",
     "crates/xgame-editor",
+    "crates/xgame-game",
 ]

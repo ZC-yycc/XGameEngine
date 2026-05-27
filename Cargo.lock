@@ -4797,6 +4797,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "xgame-game"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "env_logger",
+ "log",
+ "pollster 0.3.0",
+ "ron",
+ "serde",
+ "wgpu",
+ "winit",
+ "xgame-core",
+ "xgame-math",
+ "xgame-physics",
+ "xgame-render",
+]
+
+[[package]]
 name = "xgame-math"
 version = "0.1.0"
 dependencies = [

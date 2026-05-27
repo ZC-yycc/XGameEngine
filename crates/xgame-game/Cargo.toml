@@ -1,0 +1,25 @@
+[package]
+name = "xgame-game"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine standalone game binary"
+
+[[bin]]
+name = "xgame-game"
+path = "src/main.rs"
+
+[dependencies]
+wgpu = "23"
+winit = "0.30"
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+anyhow = "1"
+ron = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+xgame-core = { path = "../xgame-core" }
+xgame-math = { path = "../xgame-math" }
+xgame-render = { path = "../xgame-render" }
+xgame-physics = { path = "../xgame-physics" }
