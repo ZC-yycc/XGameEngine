@@ -2,9 +2,9 @@
 
 use crate::panels::state::EditorState;
 
-/// Render the console panel content inside a `Ui`.
+/// 在 `Ui` 内渲染控制台面板内容。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
-    // ── Header with filter toggles ──
+    // ── 标题栏带过滤器开关 ──
     ui.horizontal(|ui| {
         
         if ui.button("Clear").clicked() {
@@ -17,7 +17,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     });
     ui.separator();
 
-    // ── Message list ──
+    // ── 消息列表 ──
     let total = state.console_messages.len();
     let start = total.saturating_sub(500);
 

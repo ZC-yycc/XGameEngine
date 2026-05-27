@@ -13,7 +13,7 @@ use crate::panels::state::EditorState;
 
 
 
-/// All dockable panel types in the editor.
+/// 编辑器中所有可停靠的面板类型。
 #[derive(Debug, Clone, Display, PartialEq, Panel)]
 pub enum PanelTab {
     Hierarchy,
@@ -72,7 +72,7 @@ impl LinearBuilder for Linear {
 
 // ── Behavior ──
 
-/// egui_tiles [`Behavior`] — maps each panel tab to its content.
+/// egui_tiles 的 [`Behavior`]——将每个面板标签映射到其内容。
 pub struct EditorBehavior<'a> {
     pub state: &'a mut EditorState,
 }
@@ -96,8 +96,8 @@ impl Behavior<PanelTab> for EditorBehavior<'_> {
         false
     }
 
-    /// **Critical**: wrap every pane in a `Tabs` container so the tab bar
-    /// serves as a drag handle for reordering, splitting, and undocking.
+    /// **关键**：将每个面板包裹在 `Tabs` 容器中，使标签栏作为
+    /// 重排、拆分和取消停靠的拖拽手柄。
     fn simplification_options(&self) -> SimplificationOptions {
         SimplificationOptions {
             all_panes_must_have_tabs: true,

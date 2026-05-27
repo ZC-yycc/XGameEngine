@@ -2,16 +2,16 @@
 
 use crate::panels::state::{EditorState, PlayMode, ToolMode};
 
-/// Height of the toolbar in logical pixels.
+/// 工具栏高度（逻辑像素）。
 pub const TOOLBAR_HEIGHT: f32 = 32.0;
 
-/// Render the top toolbar.
+/// 渲染顶部工具栏。
 pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     egui::TopBottomPanel::top("toolbar")
         .min_height(TOOLBAR_HEIGHT)
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                // ── Playback controls ──
+                // ── 播放控制 ──
                 let play_btn = egui::Button::new(if state.play_mode == PlayMode::Playing {
                     "⏸  Playing"
                 } else {
@@ -47,7 +47,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
 
                 ui.separator();
 
-                // ── Transform tools ──
+                // ── 变换工具 ──
                 let tools = [
                     (ToolMode::Translate, "↔"),
                     (ToolMode::Rotate, "↻"),
@@ -65,7 +65,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
 
                 ui.separator();
 
-                // ── View toggles ──
+                // ── 视图开关 ──
                 let mut grid = state.show_grid;
                 if ui
                     .add(egui::Checkbox::new(&mut grid, "Grid"))

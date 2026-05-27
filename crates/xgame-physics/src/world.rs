@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use glam::{Quat, Vec3};
-use xgame_math::Transform;
+use xgame_core::{Color, Transform};
+use xgame_math::glam;
 
 use rapier3d::dynamics::{
     CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager,
@@ -18,6 +19,7 @@ use rapier3d::prelude::ActiveEvents;
 use rapier3d::pipeline::{PhysicsPipeline, QueryPipeline};
 
 use crate::collider::{Collider, ColliderShape};
+use crate::debug_draw::DebugLine;
 use crate::rigid_body::{RigidBody, RigidBodyType};
 
 // ---------------------------------------------------------------------------
@@ -52,11 +54,8 @@ impl Default for PhysicsConfig {
 /// rapier3d 发出的接触事件的简化视图。
 #[derive(Debug, Clone)]
 pub struct CollisionEvent {
-    /// 用户分配的第一个刚体 ID。
     pub body_a: u64,
-    /// 用户分配的第二个刚体 ID。
     pub body_b: u64,
-    /// 两个刚体刚接触 (`true`) 还是停止接触 (`false`)。
     pub started: bool,
 }
 
@@ -77,8 +76,6 @@ struct ColliderRecord {
 // Event collector
 // ---------------------------------------------------------------------------
 
-/// Implements rapier3d's `EventHandler` using a `Mutex<Vec<...>>` for
-/// interior mutability.  `Mutex` is `Send + Sync` so the trait bound is met.
 struct RapierEventCollector {
     events: Mutex<Vec<(ColliderHandle, ColliderHandle, bool)>>,
 }
@@ -117,7 +114,6 @@ impl rapier3d::pipeline::EventHandler for RapierEventCollector {
         _contact_pair: &rapier3d::geometry::ContactPair,
         _total_impulse: f32,
     ) {
-        // Not used for now
     }
 }
 
@@ -138,15 +134,11 @@ pub struct PhysicsWorld {
     ccd_solver: CCDSolver,
     query_pipeline: QueryPipeline,
 
-    /// Pending collision events to drain.
     pending_events: Vec<CollisionEvent>,
 
-    /// Config.
     config: PhysicsConfig,
 
-    /// Maps user ID → rapier3d rigid-body handle.
     bodies: HashMap<u64, BodyRecord>,
-    /// Maps user ID → rapier3d collider handle.
     colliders: HashMap<u64, ColliderRecord>,
     next_id: u64,
 }
@@ -166,9 +158,7 @@ impl PhysicsWorld {
             ccd_solver: CCDSolver::new(),
             query_pipeline: QueryPipeline::new(),
             pending_events: Vec::new(),
-
             config,
-
             bodies: HashMap::new(),
             colliders: HashMap::new(),
             next_id: 1,
@@ -179,7 +169,6 @@ impl PhysicsWorld {
     // Body / collider management
     // -----------------------------------------------------------------------
 
-    /// 添加刚体并返回其用户 ID。
     pub fn add_body(&mut self, body: RigidBody) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -208,7 +197,6 @@ impl PhysicsWorld {
             .can_sleep(body.can_sleep)
             .build();
 
-        // Set initial rotation via the position
         let mut pos = *rb.position();
         pos.rotation = rotation;
         rb.set_position(pos, true);
@@ -218,13 +206,10 @@ impl PhysicsWorld {
         }
 
         let rapier_handle = self.rigid_body_set.insert(rb);
-
         self.bodies.insert(id, BodyRecord { rapier_handle });
-
         id
     }
 
-    /// 移除刚体及其所有附加的碰撞体。
     pub fn remove_body(&mut self, body_id: u64) {
         if let Some(record) = self.bodies.remove(&body_id) {
             self.colliders.retain(|_, cr| {
@@ -251,15 +236,11 @@ impl PhysicsWorld {
         }
     }
 
-    /// 将碰撞体附加到已有刚体。返回碰撞体的用户 ID。
     pub fn add_collider(&mut self, body_id: u64, collider: Collider) -> u64 {
         let cid = self.next_id;
         self.next_id += 1;
 
-        let body_record = self
-            .bodies
-            .get(&body_id)
-            .expect("attach collider to unknown body");
+        let body_record = self.bodies.get(&body_id).expect("unknown body");
 
         let shape = collider_to_shared_shape(&collider.shape);
         let cb = ColliderBuilder::new(shape)
@@ -271,23 +252,13 @@ impl PhysicsWorld {
             .translation(glam_to_na_vec3(collider.offset));
 
         let rapier_handle = self.collider_set.insert_with_parent(
-            cb,
-            body_record.rapier_handle,
-            &mut self.rigid_body_set,
+            cb, body_record.rapier_handle, &mut self.rigid_body_set,
         );
 
-        self.colliders.insert(
-            cid,
-            ColliderRecord {
-                rapier_handle,
-                body_id,
-            },
-        );
-
+        self.colliders.insert(cid, ColliderRecord { rapier_handle, body_id });
         cid
     }
 
-    /// 移除单个碰撞体。
     pub fn remove_collider(&mut self, collider_id: u64) {
         if let Some(record) = self.colliders.remove(&collider_id) {
             self.collider_set.remove(
@@ -300,15 +271,12 @@ impl PhysicsWorld {
     }
 
     // -----------------------------------------------------------------------
-    // Simulation step
+    // Simulation
     // -----------------------------------------------------------------------
 
-    /// 使用固定内部时间步长推进模拟 `dt` 秒。
     pub fn step(&mut self, _dt: f32) {
         self.integration_params.dt = self.config.timestep;
-
         let gravity = glam_to_na_vec3(self.config.gravity);
-
         let event_collector = RapierEventCollector::new();
 
         let num_steps = self.config.num_sub_steps.max(1);
@@ -330,15 +298,12 @@ impl PhysicsWorld {
             );
         }
 
-        // Resolve events to body IDs
         for (c1, c2, started) in event_collector.drain() {
             let body_a = self.resolve_collider_body(c1);
             let body_b = self.resolve_collider_body(c2);
             if let (Some(a), Some(b)) = (body_a, body_b) {
                 self.pending_events.push(CollisionEvent {
-                    body_a: a,
-                    body_b: b,
-                    started,
+                    body_a: a, body_b: b, started,
                 });
             }
         }
@@ -348,7 +313,6 @@ impl PhysicsWorld {
     // Query
     // -----------------------------------------------------------------------
 
-    /// 获取刚体的当前世界空间变换。
     pub fn body_transform(&self, body_id: u64) -> Option<Transform> {
         let record = self.bodies.get(&body_id)?;
         let rb = self.rigid_body_set.get(record.rapier_handle)?;
@@ -357,14 +321,11 @@ impl PhysicsWorld {
         let rot = pos.rotation;
         Some(Transform {
             translation: Vec3::new(t.x, t.y, t.z),
-            rotation: Quat::from_xyzw(
-                rot.coords.x, rot.coords.y, rot.coords.z, rot.coords.w,
-            ),
+            rotation: Quat::from_xyzw(rot.coords.x, rot.coords.y, rot.coords.z, rot.coords.w),
             scale: Vec3::ONE,
         })
     }
 
-    /// 获取刚体的当前线速度。
     pub fn body_velocity(&self, body_id: u64) -> Option<Vec3> {
         let record = self.bodies.get(&body_id)?;
         let rb = self.rigid_body_set.get(record.rapier_handle)?;
@@ -372,7 +333,6 @@ impl PhysicsWorld {
         Some(Vec3::new(v.x, v.y, v.z))
     }
 
-    /// 对动态刚体的质心施加世界空间力。
     pub fn apply_force(&mut self, body_id: u64, force: Vec3) {
         if let Some(record) = self.bodies.get(&body_id) {
             if let Some(rb) = self.rigid_body_set.get_mut(record.rapier_handle) {
@@ -381,7 +341,6 @@ impl PhysicsWorld {
         }
     }
 
-    /// 对动态刚体的质心施加世界空间脉冲。
     pub fn apply_impulse(&mut self, body_id: u64, impulse: Vec3) {
         if let Some(record) = self.bodies.get(&body_id) {
             if let Some(rb) = self.rigid_body_set.get_mut(record.rapier_handle) {
@@ -390,7 +349,6 @@ impl PhysicsWorld {
         }
     }
 
-    /// 对动态刚体施加扭矩。
     pub fn apply_torque(&mut self, body_id: u64, torque: Vec3) {
         if let Some(record) = self.bodies.get(&body_id) {
             if let Some(rb) = self.rigid_body_set.get_mut(record.rapier_handle) {
@@ -399,23 +357,73 @@ impl PhysicsWorld {
         }
     }
 
-    /// 构建后设置重力。
     pub fn set_gravity(&mut self, gravity: Vec3) {
         self.config.gravity = gravity;
+    }
+
+    // -----------------------------------------------------------------------
+    // Debug draw
+    // -----------------------------------------------------------------------
+
+    /// 使用 rapier 的 `compute_aabb` 生成碰撞体线框调试线条。
+    pub fn debug_lines(&self) -> Vec<DebugLine> {
+        let mut lines = Vec::new();
+        let color = Color::WHITE;
+        let green = Color::new(0.0, 1.0, 0.0, 0.7);
+        let red = Color::new(1.0, 0.2, 0.2, 0.7);
+
+        for (_, record) in &self.colliders {
+            // 获取碰撞体及其形状
+            let Some(collider) = self.collider_set.get(record.rapier_handle) else { continue };
+
+            // 用形状 + 位置计算世界空间 AABB
+            let shape = collider.shape();
+            let pos = collider.position();
+            let aabb = shape.compute_aabb(pos);
+
+            let min = Vec3::new(aabb.mins.x, aabb.mins.y, aabb.mins.z);
+            let max = Vec3::new(aabb.maxs.x, aabb.maxs.y, aabb.maxs.z);
+
+            let corners = [
+                Vec3::new(min.x, min.y, min.z),
+                Vec3::new(max.x, min.y, min.z),
+                Vec3::new(max.x, max.y, min.z),
+                Vec3::new(min.x, max.y, min.z),
+                Vec3::new(min.x, min.y, max.z),
+                Vec3::new(max.x, min.y, max.z),
+                Vec3::new(max.x, max.y, max.z),
+                Vec3::new(min.x, max.y, max.z),
+            ];
+
+            const EDGES: [(usize, usize); 12] = [
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ];
+
+            // 判断是否为动态体（绿色）或静态体（红色）
+            let c = if let Some(body_record) = self.bodies.get(&record.body_id) {
+                if let Some(rb) = self.rigid_body_set.get(body_record.rapier_handle) {
+                    if rb.is_dynamic() { green } else { red }
+                } else { color }
+            } else { color };
+
+            for (a, b) in EDGES {
+                lines.push(DebugLine::new(corners[a], corners[b], c));
+            }
+        }
+
+        lines
     }
 
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
 
-    /// 清空所有待处理的碰撞事件。
-    ///
-    /// 每帧在 `step()` 后调用一次。
     pub fn drain_events(&mut self) -> impl Iterator<Item = CollisionEvent> + '_ {
         self.pending_events.drain(..)
     }
 
-    /// 返回活跃刚体和碰撞体的数量。
     pub fn stats(&self) -> (usize, usize) {
         (self.bodies.len(), self.colliders.len())
     }
@@ -459,32 +467,24 @@ fn collider_to_shared_shape(shape: &ColliderShape) -> rapier3d::geometry::Shared
         }
         ColliderShape::Ball { radius } => rapier3d::geometry::SharedShape::ball(*radius),
         ColliderShape::Capsule { half_height, radius } => {
-            rapier3d::geometry::SharedShape::capsule_y(*half_height, *radius)
+            rapier3d::geometry::SharedShape::capsule(
+                rapier3d::na::Point3::new(0.0, -*half_height, 0.0),
+                rapier3d::na::Point3::new(0.0, *half_height, 0.0),
+                *radius,
+            )
         }
         ColliderShape::Cylinder { half_height, radius } => {
             rapier3d::geometry::SharedShape::cylinder(*half_height, *radius)
         }
         ColliderShape::Trimesh { vertices, indices } => {
             rapier3d::geometry::SharedShape::trimesh(
-                vertices
-                    .iter()
-                    .map(|v| rapier3d::na::Point3::new(v[0], v[1], v[2]))
-                    .collect(),
+                vertices.iter().map(|v| rapier3d::na::Point3::new(v[0], v[1], v[2])).collect(),
                 indices.iter().map(|t| [t[0], t[1], t[2]]).collect(),
             )
         }
-        ColliderShape::HeightField {
-            heights,
-            nx,
-            nz,
-            scale,
-        } => {
-            let data =
-                rapier3d::na::DMatrix::from_row_slice(*nx as usize, *nz as usize, heights);
-            rapier3d::geometry::SharedShape::heightfield(
-                data,
-                na_vector(scale.x, scale.y, scale.z),
-            )
+        ColliderShape::HeightField { heights, nx, nz, scale } => {
+            let data = rapier3d::na::DMatrix::from_row_slice(*nx as usize, *nz as usize, heights);
+            rapier3d::geometry::SharedShape::heightfield(data, na_vector(scale.x, scale.y, scale.z))
         }
     }
 }
@@ -553,20 +553,13 @@ mod tests {
         }));
         world.add_collider(ball, Collider::ball(1.0));
 
-        // Simulate 2 seconds
         for _ in 0..120 {
             world.step(1.0 / 60.0);
         }
 
-        // The ball should have stopped on the floor
         let ball_pos = world.body_transform(ball).unwrap();
-        assert!(
-            ball_pos.translation.y > -0.5,
-            "ball y {} should be above floor",
-            ball_pos.translation.y
-        );
+        assert!(ball_pos.translation.y > -0.5);
 
-        // Collision events should have been emitted
         let events: Vec<_> = world.drain_events().collect();
         assert!(!events.is_empty(), "collision events should be non-empty");
     }

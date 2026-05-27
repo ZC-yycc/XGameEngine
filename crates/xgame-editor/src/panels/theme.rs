@@ -5,7 +5,7 @@
 
 use egui::Color32;
 
-/// Unity dark theme colour constants.
+/// Unity 暗色主题颜色常量。
 pub mod colors {
     use egui::Color32;
 
@@ -28,7 +28,7 @@ pub mod colors {
     pub const SEPARATOR: Color32 = Color32::from_rgb(50, 50, 50);
 }
 
-/// Build the Unity-dark egui `Visuals`.
+/// 构建 Unity 暗色 egui `Visuals`。
 pub fn unity_dark_visuals() -> egui::Visuals {
     use colors::*;
 
@@ -101,8 +101,8 @@ pub fn unity_dark_visuals() -> egui::Visuals {
     }
 }
 
-/// Apply the Unity dark theme to the egui context.
-/// Safe to call every frame.
+/// 将 Unity 暗色主题应用到 egui 上下文。
+/// 每帧调用安全。
 pub fn install(ctx: &egui::Context) {
     let style = egui::Style {
         spacing: egui::style::Spacing {

@@ -2,17 +2,12 @@
 //!
 //! 所有编辑器面板从该状态读取并通过它写入，保持引擎数据模型和编辑器 UI 同步。
 
-use std::collections::HashMap;
-
 use xgame_math::glam::Vec3;
-use xgame_math::Transform;
-use xgame_physics::{
-    Collider, PhysicsConfig, PhysicsWorld, RigidBody,
-};
-use xgame_render::scene::{Entity, Scene};
+use xgame_core::{Entity, Scene, Transform};
+use xgame_physics::DebugLine;
 use strum::Display;
 
-/// Which transform tool is active in the scene view.
+/// 场景视图中当前激活的变换工具。
 #[derive(Debug, Clone, Copy, Display, PartialEq, Eq)]
 pub enum ToolMode {
     Translate,
@@ -21,7 +16,7 @@ pub enum ToolMode {
     Rect,
 }
 
-/// Editor playback state.
+/// 编辑器播放状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayMode {
     Edit,
@@ -29,7 +24,7 @@ pub enum PlayMode {
     Paused,
 }
 
-/// Log severity for the console panel.
+/// 控制台面板的日志级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
     Info,
@@ -59,7 +54,7 @@ impl LogLevel {
 }
 
 
-/// A single console message.
+/// 单条控制台消息。
 #[derive(Debug, Clone)]
 pub struct LogMessage {
     pub level: LogLevel,
@@ -77,23 +72,23 @@ impl LogMessage {
     }
 }
 
-/// Free‑fly camera — yaw/pitch controls orientation, `pan_*` moves position.
+/// 自由飞行相机——yaw/pitch 控制朝向，`pan_*` 移动位置。
 #[derive(Debug, Clone)]
 pub struct EditorCamera {
     pub yaw: f32,
     pub pitch: f32,
-    /// World‑space camera position.
+    /// 世界空间中的相机位置。
     pub position: Vec3,
     pub sensitivity: f32,
-    /// Translation speed (world-units / s).
+    /// 平移速度（世界单位/秒）。
     pub pan_speed: f32,
 }
 
 impl Default for EditorCamera {
     fn default() -> Self {
         Self {
-            yaw: -2.356,                // ≈ −135° — face the origin from (+, +, +)
-            pitch: -0.524,              // ≈ −30°  — slight downward look
+            yaw: -2.356,                // ≈ −135° — 从 (+, +, +) 方向看向原点
+            pitch: -0.524,              // ≈ −30°  — 略微向下
             position: Vec3::new(5.0, 5.0, 5.0),
             sensitivity: 0.005,
             pan_speed: 5.0,
@@ -102,7 +97,7 @@ impl Default for EditorCamera {
 }
 
 impl EditorCamera {
-    /// Unit forward vector derived from yaw/pitch.
+    /// 由 yaw/pitch 计算的前方向单位向量。
     pub fn forward(&self) -> Vec3 {
         Vec3::new(
             self.pitch.cos() * self.yaw.cos(),
@@ -112,21 +107,21 @@ impl EditorCamera {
         .normalize()
     }
 
-    /// Eye position (= position in free‑fly mode).
+    /// 观察点位置（自由飞行模式下等于 position）。
     pub fn eye(&self) -> Vec3 {
         self.position
     }
 
     pub fn rotate(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * self.sensitivity;
-        self.pitch -= dy * self.sensitivity;   // egui dy is +down, so negate
+        self.pitch -= dy * self.sensitivity;   // egui 的 dy 向下为正，所以取反
         self.pitch = self.pitch.clamp(
             -std::f32::consts::FRAC_PI_2 + 0.01,
             std::f32::consts::FRAC_PI_2 - 0.01,
         );
     }
 
-    /// Adjust movement speed with scroll wheel.
+    /// 用滚轮调整移动速度。
     pub fn zoom(&mut self, delta: f32) {
         self.pan_speed = (self.pan_speed + delta * 0.05).clamp(0.5, 50.0);
     }
@@ -155,12 +150,12 @@ impl EditorCamera {
 // Editor state
 // ---------------------------------------------------------------------------
 
-/// Top-level editor state shared across all panels.
+/// 所有面板共享的顶层编辑器状态。
 pub struct EditorState {
     // -- Scene --
-    /// The currently loaded scene (entities + metadata).
+    /// 当前加载的场景（实体 + 元数据）。
     pub scene: Scene,
-    /// Index of the selected entity in `scene.entities`; `None` = nothing selected.
+    /// 当前选中实体在 `scene.entities` 中的索引；`None` = 未选中。
     pub selected_entity: Option<usize>,
 
     // -- Editor camera --
@@ -181,57 +176,51 @@ pub struct EditorState {
     pub next_entity_id: u32,
 
     // -- Scene view (viewport dimensions, set by scene_view.rs each frame) --
-    /// Viewport size in logical (egui) pixels.
+    /// 视口大小（egui 逻辑像素）。
     pub viewport_logical_size: egui::Vec2,
-    /// Viewport size in physical pixels (= logical * pixels_per_point).
+    /// 视口大小（物理像素 = 逻辑像素 x pixels_per_point）。
     pub viewport_pixel_size: (u32, u32),
 
     // -- Fly mode state --
-    /// `true` when the user holds right-click over the viewport.
-    /// Stays `true` until right-click is released, even if the mouse leaves the viewport.
-    /// Guards WASD/QE fly movement in scene_view.
+    /// 用户在视口上按住右键时为 `true`。
+    /// 即使鼠标离开视口，在右键释放前保持 `true`。
+    /// 控制 scene_view 中 WASD/QE 飞行移动的开关。
     pub fly_state: bool,
 
-    /// Countdown timer (seconds) for the zoom speed overlay.
-    /// When > 0, scene_view draws "Speed: X.X" on the viewport.
+    /// 缩放速度叠加层的倒计时（秒）。
+    /// 大于 0 时，scene_view 在视口上显示 "Speed: X.X"。
     pub zoom_indicator: f32,
 
     // -- Scene renderer (initialised by main.rs after state creation) --
-    /// Optional 3D scene renderer — `None` if the wgpu backend is unavailable.
+    /// 可选的 3D 场景渲染器——wgpu 后端不可用时为 `None`。
     pub scene_renderer: Option<crate::scene_renderer::SceneRenderer>,
 
-    // -- Physics (play mode) --
-    /// Physics world — `Some` only during Play mode.
-    pub physics_world: Option<PhysicsWorld>,
-    /// Maps entity index → physics body user ID.
-    pub entity_to_body: HashMap<usize, u64>,
-    /// Saved entity transforms before entering Play, for restore on Stop.
-    saved_states: Vec<Transform>,
+    // -- Game runtime (play mode) --
+    /// 游戏运行时——仅在 Play 模式下为 `Some`。
+    /// 拥有物理世界并管理实体-刚体映射。
+    pub game_runtime: Option<crate::game_runtime::GameRuntime>,
 }
 
 impl EditorState {
-    /// Create a fresh editor state with a default scene and a welcome console message.
     pub fn new() -> Self {
-        let mut console = Vec::new();
-        console.push(LogMessage::new(LogLevel::Success, "XGameEngine Editor started"));
-        console.push(LogMessage::new(LogLevel::Info, "Loaded default scene"));
-
-        // 尝试加载 Scenes/scene.ron；失败时回退到默认场景。
-        let scene = load_scene_from_file("Scenes/scene.ron")
-            .unwrap_or_else(|e| {
-                log::warn!("无法加载 Scenes/scene.ron: {:#}", e);
+        let scene = match load_scene_from_file("Scenes/scene.ron") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[EditorState] {e}");
                 default_editor_scene()
-            });
-
+            }
+        };
         Self {
             scene,
             selected_entity: None,
+
             editor_camera: EditorCamera::default(),
             tool_mode: ToolMode::Translate,
             play_mode: PlayMode::Edit,
             show_grid: true,
             show_physics_debug: false,
-            console_messages: console,
+
+            console_messages: Vec::new(),
             next_entity_id: 1,
 
             viewport_logical_size: egui::Vec2::ZERO,
@@ -240,71 +229,85 @@ impl EditorState {
             fly_state: false,
             zoom_indicator: 0.0,
 
-            // Scene renderer is injected by main.rs after state creation
             scene_renderer: None,
-
-            // Physics (initially None — created on Play)
-            physics_world: None,
-            entity_to_body: HashMap::new(),
-            saved_states: Vec::new(),
+            game_runtime: None,
         }
     }
 
-    // -- Selection helpers --
-
-    /// Return a mutable reference to the selected entity, if any.
-    pub fn selected_entity_mut(&mut self) -> Option<&mut Entity> {
-        self.selected_entity
-            .and_then(|i| self.scene.entities.get_mut(i))
+    /// 是否处于编辑模式（非 Play 且非 Pause）。
+    pub fn is_editing(&self) -> bool {
+        self.play_mode == PlayMode::Edit
     }
 
-    /// Return a reference to the selected entity, if any.
-    pub fn selected_entity_ref(&self) -> Option<&Entity> {
-        self.selected_entity
-            .and_then(|i| self.scene.entities.get(i))
+    pub fn entity(&self) -> Option<&Entity> {
+        self.selected_entity.map(|i| &self.scene.entities[i])
+    }
+
+    pub fn entity_mut(&mut self) -> Option<&mut Entity> {
+        let i = self.selected_entity?;
+        self.scene.entities.get_mut(i)
     }
 
     // -- Console helpers --
 
     pub fn log_info(&mut self, text: impl Into<String>) {
-        self.console_messages
-            .push(LogMessage::new(LogLevel::Info, text));
+        self.log(LogLevel::Info, text);
     }
 
     pub fn log_warning(&mut self, text: impl Into<String>) {
-        self.console_messages
-            .push(LogMessage::new(LogLevel::Warning, text));
+        self.log(LogLevel::Warning, text);
     }
 
     pub fn log_error(&mut self, text: impl Into<String>) {
-        self.console_messages
-            .push(LogMessage::new(LogLevel::Error, text));
+        self.log(LogLevel::Error, text);
     }
 
     pub fn log_success(&mut self, text: impl Into<String>) {
-        self.console_messages
-            .push(LogMessage::new(LogLevel::Success, text));
+        self.log(LogLevel::Success, text);
     }
 
-    // -- Entity manipulation --
+    pub fn log(&mut self, level: LogLevel, text: impl Into<String>) {
+        let text: String = text.into();
+        // Deduplicate consecutive identical messages
+        if let Some(last) = self.console_messages.last_mut() {
+            if last.level == level && last.text == text {
+                last.count += 1;
+                return;
+            }
+        }
+        self.console_messages
+            .push(LogMessage::new(level, text));
+    }
 
-    /// Add a new empty entity to the scene and return its index.
+    // -- 实体操作 --
+
+    /// 向场景添加一个新的空实体并返回其索引。
+    ///
+    /// 在 Play 模式下不可用。
     pub fn create_entity(&mut self) -> usize {
+        if !self.is_editing() {
+            self.log_warning("Cannot create entities while playing");
+            return usize::MAX;
+        }
         let id = self.next_entity_id;
         self.next_entity_id += 1;
         let idx = self.scene.entities.len();
-        self.scene.entities.push(Entity {
-            name: format!("GameObject ({})", id),
-            transform: Transform::IDENTITY,
-            model: String::new(),
-        });
+        self.scene.entities.push(
+            Entity::new(format!("GameObject ({})", id)),
+        );
         self.selected_entity = Some(idx);
         self.log_info(format!("Created new GameObject ({})", id));
         idx
     }
 
-    /// Duplicate the currently selected entity.
+    /// 复制当前选中的实体。
+    ///
+    /// 在 Play 模式下不可用。
     pub fn duplicate_entity(&mut self) {
+        if !self.is_editing() {
+            self.log_warning("Cannot duplicate entities while playing");
+            return;
+        }
         let idx = match self.selected_entity {
             Some(i) => i,
             None => return,
@@ -316,8 +319,14 @@ impl EditorState {
         self.log_info("Duplicated entity");
     }
 
-    /// Delete the currently selected entity.
+    /// 删除当前选中的实体。
+    ///
+    /// 在 Play 模式下不可用。
     pub fn delete_selected(&mut self) {
+        if !self.is_editing() {
+            self.log_warning("Cannot delete entities while playing");
+            return;
+        }
         if let Some(idx) = self.selected_entity {
             let removed = self.scene.entities.remove(idx);
             self.log_info(format!("Deleted '{}'", removed.name));
@@ -330,75 +339,48 @@ impl EditorState {
     }
 
     // -----------------------------------------------------------------------
-    // Physics (play mode)
+    // Game runtime (play mode)
     // -----------------------------------------------------------------------
 
-    /// Enter Play mode: save entity states, create physics world, add bodies.
+    /// 进入播放模式：启动游戏运行时并记录日志。
     pub fn enter_play_mode(&mut self) {
-        // Save every entity's current transform for later restore
-        self.saved_states = self.scene.entities.iter().map(|e| e.transform).collect();
-
-        // Create a fresh physics world
-        let mut physics = PhysicsWorld::new(PhysicsConfig::default());
-
-        // For each entity with a model, create a dynamic rigid body + cuboid collider
-        self.entity_to_body.clear();
-        for (i, entity) in self.scene.entities.iter().enumerate() {
-            if entity.model.is_empty() {
-                continue; // camera, light, empty objects skip physics
-            }
-            let body = RigidBody::dynamic_at(entity.transform);
-            let body_id = physics.add_body(body);
-
-            let half_extents = (entity.transform.scale * 0.5).max(Vec3::splat(0.01));
-            let collider = Collider::cuboid(half_extents);
-            physics.add_collider(body_id, collider);
-
-            self.entity_to_body.insert(i, body_id);
-        }
-
-        self.physics_world = Some(physics);
+        let runtime = crate::game_runtime::GameRuntime::start(&self.scene.entities);
+        self.game_runtime = Some(runtime);
         self.log_info("Entered Play mode — physics simulation started");
     }
 
-    /// Exit Play mode: restore saved transforms, clear physics world.
+    /// 退出播放模式：停止游戏运行时，恢复变换，记录日志。
     pub fn exit_play_mode(&mut self) {
-        // Restore every entity's pre-play transform
-        for (i, transform) in self.saved_states.iter().enumerate() {
-            if let Some(entity) = self.scene.entities.get_mut(i) {
-                entity.transform = *transform;
-            }
+        if let Some(runtime) = self.game_runtime.take() {
+            runtime.stop(&mut self.scene.entities);
         }
-
-        self.physics_world = None;
-        self.entity_to_body.clear();
-        self.saved_states.clear();
         self.log_info("Returned to Edit mode — states restored");
     }
 
-    /// Advance physics by `dt` seconds and sync transforms back to entities.
+    /// 将物理模拟推进 `dt` 秒（委托给 GameRuntime）。
     ///
-    /// Only call when `play_mode == PlayMode::Playing`.
+    /// 仅在 `play_mode == PlayMode::Playing` 时调用。
     pub fn physics_step(&mut self, dt: f32) {
-        let physics = match self.physics_world.as_mut() {
-            Some(p) => p,
-            None => return,
-        };
-        physics.step(dt);
+        if let Some(runtime) = self.game_runtime.as_mut() {
+            runtime.fixed_update(dt, &mut self.scene.entities);
+        }
+    }
 
-        // Sync position+rotation from physics bodies back to entities
-        // (scale is preserved from the current entity — physics has no scale concept)
-        let mapping: Vec<(usize, u64)> =
-            self.entity_to_body.iter().map(|(&i, &b)| (i, b)).collect();
-        for (entity_idx, body_id) in mapping {
-            if let Some(phys_transform) = physics.body_transform(body_id) {
-                if let Some(entity) = self.scene.entities.get_mut(entity_idx) {
-                    entity.transform.translation = phys_transform.translation;
-                    entity.transform.rotation = phys_transform.rotation;
-                    // scale intentionally NOT overwritten
-                }
+    /// 获取物理调试线条（用于 scene_view 叠加绘制）。
+    ///
+    /// 仅在 `show_physics_debug` 为 true 时调用。
+    pub fn debug_lines(&self) -> Vec<DebugLine> {
+        if self.show_physics_debug {
+            if let Some(runtime) = self.game_runtime.as_ref() {
+                return runtime.debug_lines();
             }
         }
+        Vec::new()
+    }
+
+    /// 获取物理统计（刚体数, 碰撞体数）。
+    pub fn physics_stats(&self) -> (usize, usize) {
+        self.game_runtime.as_ref().map_or((0, 0), |rt| rt.stats())
     }
 }
 
@@ -409,12 +391,12 @@ impl Default for EditorState {
 }
 
 // ---------------------------------------------------------------------------
-// Scene loading from RON file
+// 从 RON 文件加载场景
 // ---------------------------------------------------------------------------
 
-/// Load a `Scene` from a `.ron` file on disk.
+/// 从磁盘上的 `.ron` 文件加载 `Scene`。
 ///
-/// Returns an error string if the file cannot be read or parsed.
+/// 如果文件无法读取或解析，返回错误字符串。
 fn load_scene_from_file(path: &str) -> Result<Scene, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("无法读取 '{}': {}", path, e))?;
@@ -427,16 +409,9 @@ pub fn default_editor_scene() -> Scene {
     Scene {
         name: "Untitled Scene".into(),
         entities: vec![
-            Entity {
-                name: "Main Camera".into(),
-                transform: Transform::from_translation(Vec3::new(0.0, 1.0, -5.0)),
-                model: String::new(),
-            },
-            Entity {
-                name: "Directional Light".into(),
-                transform: Transform::IDENTITY,
-                model: String::new(),
-            },
+            Entity::new("Main Camera")
+                .with_transform(Transform::from_translation(Vec3::new(0.0, 1.0, -5.0))),
+            Entity::new("Directional Light"),
         ],
     }
 }

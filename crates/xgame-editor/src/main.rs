@@ -16,6 +16,7 @@
 //! Run with:  cargo run -p xgame-editor
 
 mod panels;
+mod game_runtime;
 mod scene_renderer;
 
 use panels::state::{EditorState, PlayMode};
@@ -60,7 +61,7 @@ impl eframe::App for EditorApp {
         panels::toolbar::show(&mut self.state, ctx);
         match (prev_mode, self.state.play_mode) {
             (PlayMode::Edit, PlayMode::Playing) | (PlayMode::Paused, PlayMode::Playing) => {
-                if self.state.physics_world.is_none() {
+                if self.state.game_runtime.is_none() {
                     self.state.enter_play_mode();
                 }
             }
@@ -93,19 +94,32 @@ impl eframe::App for EditorApp {
             ui.horizontal(|ui| {
                 ui.label("Editor Framework v0.1.0");
                 ui.separator();
+
+                // Play mode indicator
                 let btn_text = match self.state.play_mode {
                     panels::state::PlayMode::Edit => "Edit Mode",
-                    panels::state::PlayMode::Playing => "Playing",
-                    panels::state::PlayMode::Paused => "Paused",
+                    panels::state::PlayMode::Playing => "▶ Playing",
+                    panels::state::PlayMode::Paused => "⏸ Paused",
                 };
                 ui.label(btn_text);
                 ui.separator();
+
+                // Scene info
                 ui.label(format!(
                     "Scene: {} | {} entities",
                     self.state.scene.name,
                     self.state.scene.entities.len(),
                 ));
                 ui.separator();
+
+                // Physics stats (only when playing)
+                if self.state.play_mode != PlayMode::Edit {
+                    let (bodies, colliders) = self.state.physics_stats();
+                    ui.label(format!("Bodies: {} | Colliders: {}", bodies, colliders));
+                    ui.separator();
+                }
+
+                // FPS
                 ui.label(format!(
                     "FPS: {:.0}",
                     ctx.input(|i| i.predicted_dt).recip().round(),

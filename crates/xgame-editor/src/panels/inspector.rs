@@ -2,12 +2,12 @@
 
 use crate::panels::state::EditorState;
 
-/// Render the inspector panel content inside a `Ui`.
+/// 在 `Ui` 内渲染检视面板内容。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     ui.separator();
 
-    if let Some(entity) = state.selected_entity_mut() {
-        // ── Entity name ──
+    if let Some(entity) = state.entity_mut() {
+        // ── 实体名称 ──
         ui.horizontal(|ui| {
             ui.label("Name:");
             ui.add(
@@ -18,10 +18,10 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
         ui.separator();
 
-        // ── Transform section ──
+        // ── 变换组件 ──
         ui.heading("Transform");
         ui.indent("transform", |ui| {
-            // Translation
+            // 位置
             ui.label("Position");
             ui.horizontal(|ui| {
                 ui.label("X");
@@ -44,7 +44,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 );
             });
 
-            // Rotation (Euler angles)
+            // 旋转（欧拉角）
             ui.label("Rotation");
             let euler = entity.transform.rotation.to_euler(
                 xgame_math::glam::EulerRot::XYZ,
@@ -82,7 +82,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 );
             }
 
-            // Scale
+            // 缩放
             ui.label("Scale");
             ui.horizontal(|ui| {
                 ui.label("X");
@@ -108,7 +108,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
         ui.separator();
 
-        // ── Model path ──
+        // ── 模型路径 ──
         ui.heading("Mesh");
         ui.indent("mesh", |ui| {
             ui.horizontal(|ui| {
@@ -120,16 +120,16 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 );
                 if path != entity.model {
                     entity.model = path;
-                    // In the future: reload the mesh
+                    // 将来：重新加载网格
                 }
             });
         });
 
         ui.separator();
 
-        // ── Add Component button (placeholder) ──
+        // ── 添加组件按钮（占位符）──
         if ui.button("+  Add Component").clicked() {
-            // Placeholder — future: show component picker
+            // 占位符——将来：显示组件选择器
         }
     } else {
         ui.weak("Select an entity from the Hierarchy to inspect its properties.");

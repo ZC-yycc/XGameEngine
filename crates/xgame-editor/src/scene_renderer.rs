@@ -15,7 +15,7 @@ use wgpu::util::DeviceExt;
 const MAX_RENDER_ENTITIES: usize = 256;
 
 use xgame_render::gltf_loader::{GltfMesh, GltfVertex};
-use xgame_render::scene::Entity;
+use xgame_core::Entity;
 
 // ---------------------------------------------------------------------------
 // GPU uniform types (must match WGSL layout byte-for-byte)
