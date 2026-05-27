@@ -18,7 +18,7 @@
 mod panels;
 mod scene_renderer;
 
-use panels::state::EditorState;
+use panels::state::{EditorState, PlayMode};
 
 struct EditorApp {
     tree: egui_tiles::Tree<panels::dock::PanelTab>,
@@ -49,13 +49,37 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── 0. Apply Unity dark theme ──
+        // ── Keyboard state is read inline via ui.input(|i| i.key_down(...))
+        // in scene_view.rs — no manual pressed_keys tracking needed.
+
+        // ── 1. Apply Unity dark theme ──
         panels::theme::install(ctx);
 
-        // ── 1. Toolbar (top) ──
+        // ── 2. Detect play-mode transitions (toolbar may change play_mode) ──
+        let prev_mode = self.state.play_mode;
         panels::toolbar::show(&mut self.state, ctx);
+        match (prev_mode, self.state.play_mode) {
+            (PlayMode::Edit, PlayMode::Playing) | (PlayMode::Paused, PlayMode::Playing) => {
+                if self.state.physics_world.is_none() {
+                    self.state.enter_play_mode();
+                }
+            }
+            (PlayMode::Playing, PlayMode::Edit) | (PlayMode::Paused, PlayMode::Edit) => {
+                self.state.exit_play_mode();
+            }
+            _ => {}
+        }
 
-        // ── 2. Central dock area (tile tree with all panels) ──
+        // ── 3. Physics step (only when actively playing) ──
+        if self.state.play_mode == PlayMode::Playing {
+            let dt = ctx.input(|i| i.predicted_dt);
+            self.state.physics_step(dt);
+            // Force continuous repaint during play — eframe only repaints
+            // on input events by default, which would freeze physics.
+            ctx.request_repaint();
+        }
+
+        // ── 4. Central dock area (tile tree with all panels) ──
         // Scene View panel triggers 3D rendering only when it is visible.
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut behavior = panels::dock::EditorBehavior {
@@ -64,7 +88,7 @@ impl eframe::App for EditorApp {
             self.tree.ui(&mut behavior, ui);
         });
 
-        // ── 3. Status bar (bottom) ──
+        // ── 5. Status bar (bottom) ──
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Editor Framework v0.1.0");

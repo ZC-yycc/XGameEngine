@@ -11,20 +11,6 @@ use crate::panels::state::EditorState;
 
 /// Render the scene view content inside a `Ui`.
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
-    // ── Self‑tracked key state ──
-    // KeyPressed → pressed_keys insert; KeyReleased → remove.
-    // This avoids the frame-local nature of egui's key_down() which is rebuilt
-    // from scratch each frame and is empty when no keyboard events arrive.
-    ui.input(|i| {
-        for event in &i.events {
-            if let egui::Event::Key { key, pressed: true, .. } = event {
-                state.pressed_keys.insert(*key);
-            }
-            if let egui::Event::Key { key, pressed: false, .. } = event {
-                state.pressed_keys.remove(key);
-            }
-        }
-    });
     // ── Top bar: scene name + camera position ──
     ui.horizontal(|ui| {
         ui.label(&state.scene.name);
@@ -54,29 +40,41 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
     // ── Render 3D scene (only when viewport has a valid size) ──
     let tex_id = if vp_w > 0 && vp_h > 0 {
+        // 只有视口宽度和高度都大于 0 时才执行渲染
         state.scene_renderer.as_mut().map(|renderer| {
+            // 1. 设置渲染器的视口大小
             renderer.set_viewport_size(vp_w, vp_h);
 
+            // 2. 获取编辑器摄像机
             let cam = &state.editor_camera;
             let aspect = vp_w as f32 / vp_h as f32;
+
+            // 3. 创建透视投影矩阵（60度视野，最近0.1，最远100.0）
             let proj = xgame_math::projection::perspective(
                 60f32.to_radians(),
                 aspect,
                 0.1,
                 100.0,
             );
+
+            // 4. 创建视图矩阵（摄像机位置、朝向、上方向）
             let view = xgame_math::projection::look_at(
                 cam.position,
                 cam.position + cam.forward(),
                 glam::Vec3::Y,
             );
+
+            // 5. 合并为视图-投影矩阵
             let view_proj = proj * view;
 
+            // 6. 执行渲染，传入场景实体、矩阵和摄像机位置
             renderer.render(&state.scene.entities, &view_proj, &cam.eye());
+
+            // 7. 返回渲染结果的纹理 ID
             renderer.texture_id()
         })
     } else {
-        None
+        None  // 视口无效时不渲染
     };
 
     // ── Display the rendered texture ──
@@ -88,44 +86,74 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 36));
     }
 
-    // ── Camera control (hover over viewport required) ──
-    if response.hovered() {
+    // ── Fly mode state — updated every frame ──
+    let right_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
+    // Enter fly mode: right-click held over viewport
+    if response.hovered() && right_down {
+        state.fly_state = true;
+    }
+    // Exit fly mode: right-click released (regardless of hover)
+    if !right_down {
+        state.fly_state = false;
+    }
+
+    // ── Camera control ──
+    if state.fly_state {
+        // Force continuous repaint — egui pauses when no events arrive
+        // (mouse still, no keyboard repeats), which would stall key_down().
+        ui.ctx().request_repaint();
+
         let dt = ui.input(|i| i.predicted_dt);
 
-        // Right‑click drag to rotate
-        if ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
+        // Rotate via drag
+        if response.hovered() {
             let delta = ui.input(|i| i.pointer.delta());
             state.editor_camera.rotate(delta.x, delta.y);
         }
 
-        // Scroll to zoom
-        let scroll = ui.input(|i| i.raw_scroll_delta.y);
-        if scroll != 0.0 {
-            state.editor_camera.zoom(scroll);
-        }
-
         // WASD pan + QE lift (frame‑rate independent via dt)
-        // Uses self‑tracked key set, not OS key‑repeat, so hold is instant.
-        if state.pressed_keys.contains(&egui::Key::W) {
+        if ui.input(|i| i.key_down(egui::Key::W)) {
             state.editor_camera.pan_forward(1.0, dt);
         }
-        if state.pressed_keys.contains(&egui::Key::S) {
+        if ui.input(|i| i.key_down(egui::Key::S)) {
             state.editor_camera.pan_forward(-1.0, dt);
         }
-        if state.pressed_keys.contains(&egui::Key::A) {
+        if ui.input(|i| i.key_down(egui::Key::A)) {
             state.editor_camera.pan_right(-1.0, dt);
         }
-        if state.pressed_keys.contains(&egui::Key::D) {
+        if ui.input(|i| i.key_down(egui::Key::D)) {
             state.editor_camera.pan_right(1.0, dt);
         }
-        if state.pressed_keys.contains(&egui::Key::Q) {
+        if ui.input(|i| i.key_down(egui::Key::Q)) {
             state.editor_camera.move_up(-1.0, dt);
         }
-        if state.pressed_keys.contains(&egui::Key::E) {
+        if ui.input(|i| i.key_down(egui::Key::E)) {
             state.editor_camera.move_up(1.0, dt);
         }
+
+        // Scroll to zoom — active in fly mode (hover required).
+        if response.hovered() {
+            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll != 0.0 {
+                state.editor_camera.zoom(scroll);
+                state.zoom_indicator = 1.5;  // show speed overlay for 1.5 s
+            }
+        }
+
+        // Decrement zoom indicator
+        state.zoom_indicator = (state.zoom_indicator - dt).max(0.0);
     }
 
+    // ── Zoom speed overlay (briefly shown after scroll) ──
+    if state.zoom_indicator > 0.0 {
+        painter.text(
+            egui::pos2(rect.right() - 8.0, rect.bottom() - 28.0),
+            egui::Align2::RIGHT_BOTTOM,
+            &format!("Speed: {:.1}", state.editor_camera.pan_speed),
+            egui::FontId::monospace(12.0),
+            egui::Color32::from_rgb(180, 220, 255),
+        );
+    }
 
     // ── Bottom status overlay ──
     painter.text(

@@ -10,6 +10,10 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+/// Maximum number of entities rendered per frame.
+/// Each slot occupies `min_uniform_buffer_offset_alignment` bytes.
+const MAX_RENDER_ENTITIES: usize = 256;
+
 use xgame_render::gltf_loader::{GltfMesh, GltfVertex};
 use xgame_render::scene::Entity;
 
@@ -145,6 +149,9 @@ pub struct SceneRenderer {
 
     // Model cache (path -> GPU mesh)
     model_cache: HashMap<String, GltfMesh>,
+
+    /// Uniform buffer offset alignment (from device limits).
+    uniform_alignment: u64,
 }
 
 impl SceneRenderer {
@@ -185,7 +192,7 @@ impl SceneRenderer {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -210,11 +217,12 @@ impl SceneRenderer {
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let model_buffer_size = MAX_RENDER_ENTITIES as u64 * uniform_alignment;
+        let model_buffer_init = vec![0u8; model_buffer_size as usize];
         let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("editor_model_ub"),
-            contents: bytemuck::cast_slice(&[ModelUniform {
-                model: Mat4::IDENTITY.to_cols_array_2d(),
-            }]),
+            contents: &model_buffer_init,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -224,7 +232,16 @@ impl SceneRenderer {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: light_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: model_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &model_buffer,
+                        offset: 0,
+                        size: Some(std::num::NonZeroU64::new(
+                            std::mem::size_of::<ModelUniform>() as u64,
+                        ).unwrap()),
+                    }),
+                },
             ],
         });
 
@@ -247,6 +264,7 @@ impl SceneRenderer {
             _stale_textures: Vec::new(),
             texture_id: None,
             model_cache: HashMap::new(),
+            uniform_alignment,
         }
     }
 
@@ -455,9 +473,11 @@ impl SceneRenderer {
             });
 
             rpass.set_pipeline(&self.pipeline);
-            rpass.set_bind_group(0, &self.bind_group, &[]);
 
-            for entity in entities {
+            for (i, entity) in entities.iter().enumerate() {
+                if i >= MAX_RENDER_ENTITIES {
+                    break;
+                }
                 if entity.model.is_empty() {
                     continue;
                 }
@@ -465,15 +485,18 @@ impl SceneRenderer {
                     continue;
                 };
 
-                // Model matrix — write to the uniform buffer
+                // Model matrix — write to this entity's slot
                 let model_mat = entity.transform.local_matrix();
+                let offset = i as u64 * self.uniform_alignment;
                 self.queue.write_buffer(
                     &self.model_buffer,
-                    0,
+                    offset,
                     bytemuck::cast_slice(&[ModelUniform {
                         model: model_mat.to_cols_array_2d(),
                     }]),
                 );
+
+                rpass.set_bind_group(0, &self.bind_group, &[offset as u32]);
 
                 for prim in &mesh.primitives {
                     rpass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));

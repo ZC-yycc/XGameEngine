@@ -2,9 +2,13 @@
 //!
 //! 所有编辑器面板从该状态读取并通过它写入，保持引擎数据模型和编辑器 UI 同步。
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+
 use xgame_math::glam::Vec3;
 use xgame_math::Transform;
+use xgame_physics::{
+    Collider, PhysicsConfig, PhysicsWorld, RigidBody,
+};
 use xgame_render::scene::{Entity, Scene};
 use strum::Display;
 
@@ -124,7 +128,7 @@ impl EditorCamera {
 
     /// Adjust movement speed with scroll wheel.
     pub fn zoom(&mut self, delta: f32) {
-        self.pan_speed = (self.pan_speed + delta * 0.5).clamp(0.5, 50.0);
+        self.pan_speed = (self.pan_speed + delta * 0.05).clamp(0.5, 50.0);
     }
 
     /// 沿相机右方向平移（A / D）— 移动 position。
@@ -162,10 +166,6 @@ pub struct EditorState {
     // -- Editor camera --
     pub editor_camera: EditorCamera,
 
-    // -- Camera input state (self-tracked to bypass OS key-repeat delay) --
-    /// Set of keys currently held down, updated from `KeyPressed`/`KeyReleased` events.
-    pub pressed_keys: HashSet<egui::Key>,
-
     // -- Tool state --
     pub tool_mode: ToolMode,
     pub play_mode: PlayMode,
@@ -186,9 +186,27 @@ pub struct EditorState {
     /// Viewport size in physical pixels (= logical * pixels_per_point).
     pub viewport_pixel_size: (u32, u32),
 
+    // -- Fly mode state --
+    /// `true` when the user holds right-click over the viewport.
+    /// Stays `true` until right-click is released, even if the mouse leaves the viewport.
+    /// Guards WASD/QE fly movement in scene_view.
+    pub fly_state: bool,
+
+    /// Countdown timer (seconds) for the zoom speed overlay.
+    /// When > 0, scene_view draws "Speed: X.X" on the viewport.
+    pub zoom_indicator: f32,
+
     // -- Scene renderer (initialised by main.rs after state creation) --
     /// Optional 3D scene renderer — `None` if the wgpu backend is unavailable.
     pub scene_renderer: Option<crate::scene_renderer::SceneRenderer>,
+
+    // -- Physics (play mode) --
+    /// Physics world — `Some` only during Play mode.
+    pub physics_world: Option<PhysicsWorld>,
+    /// Maps entity index → physics body user ID.
+    pub entity_to_body: HashMap<usize, u64>,
+    /// Saved entity transforms before entering Play, for restore on Stop.
+    saved_states: Vec<Transform>,
 }
 
 impl EditorState {
@@ -209,7 +227,6 @@ impl EditorState {
             scene,
             selected_entity: None,
             editor_camera: EditorCamera::default(),
-            pressed_keys: HashSet::new(),
             tool_mode: ToolMode::Translate,
             play_mode: PlayMode::Edit,
             show_grid: true,
@@ -220,8 +237,16 @@ impl EditorState {
             viewport_logical_size: egui::Vec2::ZERO,
             viewport_pixel_size: (0, 0),
 
+            fly_state: false,
+            zoom_indicator: 0.0,
+
             // Scene renderer is injected by main.rs after state creation
             scene_renderer: None,
+
+            // Physics (initially None — created on Play)
+            physics_world: None,
+            entity_to_body: HashMap::new(),
+            saved_states: Vec::new(),
         }
     }
 
@@ -301,6 +326,78 @@ impl EditorState {
             } else {
                 Some(idx.min(self.scene.entities.len() - 1))
             };
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Physics (play mode)
+    // -----------------------------------------------------------------------
+
+    /// Enter Play mode: save entity states, create physics world, add bodies.
+    pub fn enter_play_mode(&mut self) {
+        // Save every entity's current transform for later restore
+        self.saved_states = self.scene.entities.iter().map(|e| e.transform).collect();
+
+        // Create a fresh physics world
+        let mut physics = PhysicsWorld::new(PhysicsConfig::default());
+
+        // For each entity with a model, create a dynamic rigid body + cuboid collider
+        self.entity_to_body.clear();
+        for (i, entity) in self.scene.entities.iter().enumerate() {
+            if entity.model.is_empty() {
+                continue; // camera, light, empty objects skip physics
+            }
+            let body = RigidBody::dynamic_at(entity.transform);
+            let body_id = physics.add_body(body);
+
+            let half_extents = (entity.transform.scale * 0.5).max(Vec3::splat(0.01));
+            let collider = Collider::cuboid(half_extents);
+            physics.add_collider(body_id, collider);
+
+            self.entity_to_body.insert(i, body_id);
+        }
+
+        self.physics_world = Some(physics);
+        self.log_info("Entered Play mode — physics simulation started");
+    }
+
+    /// Exit Play mode: restore saved transforms, clear physics world.
+    pub fn exit_play_mode(&mut self) {
+        // Restore every entity's pre-play transform
+        for (i, transform) in self.saved_states.iter().enumerate() {
+            if let Some(entity) = self.scene.entities.get_mut(i) {
+                entity.transform = *transform;
+            }
+        }
+
+        self.physics_world = None;
+        self.entity_to_body.clear();
+        self.saved_states.clear();
+        self.log_info("Returned to Edit mode — states restored");
+    }
+
+    /// Advance physics by `dt` seconds and sync transforms back to entities.
+    ///
+    /// Only call when `play_mode == PlayMode::Playing`.
+    pub fn physics_step(&mut self, dt: f32) {
+        let physics = match self.physics_world.as_mut() {
+            Some(p) => p,
+            None => return,
+        };
+        physics.step(dt);
+
+        // Sync position+rotation from physics bodies back to entities
+        // (scale is preserved from the current entity — physics has no scale concept)
+        let mapping: Vec<(usize, u64)> =
+            self.entity_to_body.iter().map(|(&i, &b)| (i, b)).collect();
+        for (entity_idx, body_id) in mapping {
+            if let Some(phys_transform) = physics.body_transform(body_id) {
+                if let Some(entity) = self.scene.entities.get_mut(entity_idx) {
+                    entity.transform.translation = phys_transform.translation;
+                    entity.transform.rotation = phys_transform.rotation;
+                    // scale intentionally NOT overwritten
+                }
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 //! 类 Unity 层级面板——以树形列表显示场景中的所有实体。
 
+use std::cell::Cell;
 use crate::panels::state::EditorState;
 
 /// Render the hierarchy panel content inside a `Ui`.
@@ -36,8 +37,20 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             .map(|(i, _)| i)
             .collect();
 
+        // Cell flag: set when the context menu deletes an entity, so
+        // subsequent iterations skip (filtered_indices may be stale).
+        let deleted = Cell::new(false);
+
         for &i in &filtered_indices {
-            let entity = &state.scene.entities[i];
+            if deleted.get() {
+                break;
+            }
+
+            // Safety guard: entity may have been removed by a prior
+            // context‑menu action that targeted a different index.
+            let Some(entity) = state.scene.entities.get(i) else {
+                continue;
+            };
             let is_selected = state.selected_entity == Some(i);
             let label = if entity.model.is_empty() {
                 format!("  {}", entity.name)
@@ -63,6 +76,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     ui.separator();
                     if ui.button("Delete").clicked() {
                         state.delete_selected();
+                        deleted.set(true);
                         ui.close_menu();
                     }
                 }
