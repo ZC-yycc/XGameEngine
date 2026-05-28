@@ -51,24 +51,24 @@ impl ModelTransform {
 
     /// Move the model in world-space directions.
     pub fn translate_local(&mut self, delta: Vec3) {
-        self.transform.translation += delta;
+        self.transform.position += delta;
     }
 
     /// 向前/向后移动（模型的局部 +Z 方向）。
     pub fn move_forward(&mut self, amount: f32, dt: f32) {
         let fwd = self.transform.forward();
-        self.transform.translation += fwd * amount * dt * self.move_speed;
+        self.transform.position += fwd * amount * dt * self.move_speed;
     }
 
     /// 向右/向左移动（模型的局部 +X 方向）。
     pub fn move_right(&mut self, amount: f32, dt: f32) {
         let right = self.transform.right();
-        self.transform.translation += right * amount * dt * self.move_speed;
+        self.transform.position += right * amount * dt * self.move_speed;
     }
 
     /// 向上/向下移动（世界 Y 方向）。
     pub fn move_up(&mut self, amount: f32, dt: f32) {
-        self.transform.translation.y += amount * dt * self.move_speed;
+        self.transform.position.y += amount * dt * self.move_speed;
     }
 
     /// 绕模型局部 Y 轴旋转。

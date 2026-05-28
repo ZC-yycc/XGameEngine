@@ -1,7 +1,7 @@
 //! 类 Unity 层级面板——以树形列表显示场景中的所有实体。
 
 use std::cell::Cell;
-use crate::panels::state::{EditorState, PlayMode};
+use crate::state::{EditorState, PlayMode};
 
 /// 在 `Ui` 内渲染层级面板内容。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {

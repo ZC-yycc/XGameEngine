@@ -1,6 +1,6 @@
 //! 类 Unity 工具栏——播放/暂停/停止控制和变换工具选择。
 
-use crate::panels::state::{EditorState, PlayMode, ToolMode};
+use crate::state::{EditorState, PlayMode, ToolMode};
 
 /// 工具栏高度（逻辑像素）。
 pub const TOOLBAR_HEIGHT: f32 = 32.0;

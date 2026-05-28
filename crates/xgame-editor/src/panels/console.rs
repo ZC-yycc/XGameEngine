@@ -1,6 +1,6 @@
 //! 类 Unity 控制台面板——按严重等级显示日志消息。
 
-use crate::panels::state::EditorState;
+use crate::state::EditorState;
 
 /// 在 `Ui` 内渲染控制台面板内容。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {

@@ -197,7 +197,7 @@ impl GameApp {
         for (entity_idx, body_id) in mapping {
             if let Some(phys_transform) = self.physics.body_transform(body_id) {
                 if let Some(entity) = self.scene.entities.get_mut(entity_idx) {
-                    entity.transform.translation = phys_transform.translation;
+                    entity.transform.position = phys_transform.position;
                     entity.transform.rotation = phys_transform.rotation;
                 }
             }

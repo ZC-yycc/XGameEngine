@@ -184,7 +184,7 @@ impl PhysicsWorld {
             }
         };
 
-        let translation = glam_to_na_vec3(body.transform.translation);
+        let translation = glam_to_na_vec3(body.transform.position);
         let rotation = glam_quat_to_na_rotation(body.transform.rotation);
 
         let mut rb = RigidBodyBuilder::new(rb_type)
@@ -320,7 +320,7 @@ impl PhysicsWorld {
         let t = pos.translation.vector;
         let rot = pos.rotation;
         Some(Transform {
-            translation: Vec3::new(t.x, t.y, t.z),
+            position: Vec3::new(t.x, t.y, t.z),
             rotation: Quat::from_xyzw(rot.coords.x, rot.coords.y, rot.coords.z, rot.coords.w),
             scale: Vec3::ONE,
         })
@@ -512,7 +512,7 @@ mod tests {
     fn gravity_pulls_downward() {
         let mut world = PhysicsWorld::new(PhysicsConfig::default());
         let body = world.add_body(RigidBody::dynamic_at(Transform {
-            translation: Vec3::new(0.0, 5.0, 0.0),
+            position: Vec3::new(0.0, 5.0, 0.0),
             ..Transform::IDENTITY
         }));
         world.add_collider(body, Collider::default());
@@ -520,14 +520,14 @@ mod tests {
             world.step(1.0 / 60.0);
         }
         let t = world.body_transform(body).unwrap();
-        assert!(t.translation.y < 5.0, "body should fall due to gravity");
+        assert!(t.position.y < 5.0, "body should fall due to gravity");
     }
 
     #[test]
     fn static_body_does_not_move() {
         let mut world = PhysicsWorld::new(PhysicsConfig::default());
         let body = world.add_body(RigidBody::static_at(Transform {
-            translation: Vec3::new(1.0, 2.0, 3.0),
+            position: Vec3::new(1.0, 2.0, 3.0),
             ..Transform::IDENTITY
         }));
         world.add_collider(body, Collider::default());
@@ -535,20 +535,20 @@ mod tests {
             world.step(1.0 / 60.0);
         }
         let t = world.body_transform(body).unwrap();
-        assert_eq!(t.translation, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(t.position, Vec3::new(1.0, 2.0, 3.0));
     }
 
     #[test]
     fn ball_collides_with_floor() {
         let mut world = PhysicsWorld::new(PhysicsConfig::default());
         let floor = world.add_body(RigidBody::static_at(Transform {
-            translation: Vec3::new(0.0, -1.0, 0.0),
+            position: Vec3::new(0.0, -1.0, 0.0),
             ..Transform::IDENTITY
         }));
         world.add_collider(floor, Collider::cuboid(Vec3::new(10.0, 0.5, 10.0)));
 
         let ball = world.add_body(RigidBody::dynamic_at(Transform {
-            translation: Vec3::new(0.0, 2.0, 0.0),
+            position: Vec3::new(0.0, 2.0, 0.0),
             ..Transform::IDENTITY
         }));
         world.add_collider(ball, Collider::ball(1.0));
@@ -558,7 +558,7 @@ mod tests {
         }
 
         let ball_pos = world.body_transform(ball).unwrap();
-        assert!(ball_pos.translation.y > -0.5);
+        assert!(ball_pos.position.y > -0.5);
 
         let events: Vec<_> = world.drain_events().collect();
         assert!(!events.is_empty(), "collision events should be non-empty");

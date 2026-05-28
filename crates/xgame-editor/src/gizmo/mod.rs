@@ -24,13 +24,17 @@
 mod math;
 mod shapes;
 mod draw;
+mod pick;
+mod drag;
 
 // ── 公共 API 重导出 ──
 
 pub use math::{gizmo_world_size, project_to_screen, screen_to_ray};
 pub use draw::draw_gizmo;
+pub use pick::{pick_gizmo, hit_position_on_axis, hit_position_on_plane};
+pub use drag::{compute_transform, TransformDelta};
 use xgame_math::glam::Vec3;
-use crate::panels::state::{GizmoDrag, GizmoPart};
+use crate::state::{GizmoDrag, GizmoPart};
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -164,7 +168,7 @@ pub(crate) fn base_part_color(part: GizmoPart) -> egui::Color32 {
         GizmoPart::PlaneXY => AXIS_COLORS[2], // XY 平面 → Z 轴色（蓝）
         GizmoPart::PlaneXZ => AXIS_COLORS[1], // XZ 平面 → Y 轴色（绿）
         GizmoPart::PlaneYZ => AXIS_COLORS[0], // YZ 平面 → X 轴色（红）
-        GizmoPart::Uniform | GizmoPart::Screen => UNIFORM_COLOR,
+        GizmoPart::Uniform => UNIFORM_COLOR,
     }
 }
 

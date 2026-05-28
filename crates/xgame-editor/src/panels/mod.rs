@@ -8,7 +8,6 @@ pub mod dock;
 pub mod hierarchy;
 pub mod inspector;
 pub mod scene_view;
-pub mod state;
 pub mod theme;
 pub mod toolbar;
 

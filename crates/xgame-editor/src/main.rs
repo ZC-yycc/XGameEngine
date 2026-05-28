@@ -19,8 +19,9 @@ mod panels;
 mod game_runtime;
 mod scene_renderer;
 mod gizmo;
-
-use panels::state::{EditorState, PlayMode};
+mod state;
+mod editor_input;
+use state::{EditorState, PlayMode};
 
 struct EditorApp {
     tree: egui_tiles::Tree<panels::dock::PanelTab>,
@@ -51,8 +52,6 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── Keyboard state is read inline via ui.input(|i| i.key_down(...))
-        // in scene_view.rs — no manual pressed_keys tracking needed.
 
         // ── 1. Apply Unity dark theme ──
         panels::theme::install(ctx);
@@ -98,9 +97,9 @@ impl eframe::App for EditorApp {
 
                 // Play mode indicator
                 let btn_text = match self.state.play_mode {
-                    panels::state::PlayMode::Edit => "Edit Mode",
-                    panels::state::PlayMode::Playing => "▶ Playing",
-                    panels::state::PlayMode::Paused => "⏸ Paused",
+                    state::PlayMode::Edit => "Edit Mode",
+                    state::PlayMode::Playing => "▶ Playing",
+                    state::PlayMode::Paused => "⏸ Paused",
                 };
                 ui.label(btn_text);
                 ui.separator();

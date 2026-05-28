@@ -1,6 +1,6 @@
 //! 类 Unity 检视面板——显示选中实体的属性。
 
-use crate::panels::state::EditorState;
+use crate::state::EditorState;
 
 /// 在 `Ui` 内渲染检视面板内容。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
@@ -26,19 +26,19 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.label("X");
                 ui.add(
-                    egui::DragValue::new(&mut entity.transform.translation.x)
+                    egui::DragValue::new(&mut entity.transform.position.x)
                         .speed(0.1)
                         .prefix("  "),
                 );
                 ui.label("Y");
                 ui.add(
-                    egui::DragValue::new(&mut entity.transform.translation.y)
+                    egui::DragValue::new(&mut entity.transform.position.y)
                         .speed(0.1)
                         .prefix("  "),
                 );
                 ui.label("Z");
                 ui.add(
-                    egui::DragValue::new(&mut entity.transform.translation.z)
+                    egui::DragValue::new(&mut entity.transform.position.z)
                         .speed(0.1)
                         .prefix("  "),
                 );

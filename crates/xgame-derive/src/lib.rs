@@ -68,7 +68,7 @@ pub fn panel_derive(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         impl #name {
             /// Dispatch to the corresponding panel's `show_content`.
-            pub fn show(&self, state: &mut crate::panels::state::EditorState, ui: &mut egui::Ui) {
+            pub fn show(&self, state: &mut crate::state::EditorState, ui: &mut egui::Ui) {
                 match self {
                     #(#match_arms)*
                 }

@@ -9,7 +9,7 @@ use egui_tiles::{
 };
 use strum::Display;
 use xgame_derive::Panel;
-use crate::panels::state::EditorState;
+use crate::state::EditorState;
 
 
 

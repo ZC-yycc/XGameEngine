@@ -12,7 +12,7 @@ use super::{
 };
 use super::math::{all_valid_screen, is_valid_screen, project_to_screen};
 use super::shapes::{TranslateShape, RotateShape, ScaleShape};
-use crate::panels::state::{GizmoDrag, GizmoPart, ToolMode};
+use crate::state::{GizmoDrag, GizmoPart, ToolMode};
 
 // ---------------------------------------------------------------------------
 // 公共绘制入口
@@ -20,15 +20,15 @@ use crate::panels::state::{GizmoDrag, GizmoPart, ToolMode};
 
 /// 绘制当前工具模式下的 gizmo。
 pub fn draw_gizmo(
-    painter: &egui::Painter,
-    view_proj: &Mat4,
-    entity_pos: Vec3,
-    screen_size: egui::Vec2,
-    tool_mode: ToolMode,
-    hovered: Option<GizmoPart>,
-    active: Option<&GizmoDrag>,
-    gizmo_size: f32,
-    screen_offset: egui::Vec2,
+    painter:                    &egui::Painter,
+    view_proj:                  &Mat4,
+    entity_pos:                 Vec3,
+    screen_size:                egui::Vec2,
+    tool_mode:                  ToolMode,
+    hovered:                    Option<GizmoPart>,
+    active:                     Option<&GizmoDrag>,
+    gizmo_size:                 f32,
+    screen_offset:              egui::Vec2,
 ) {
     let ctx = GizmoCtx {
         view_proj: *view_proj,
@@ -57,12 +57,12 @@ const MIN_AREA: f32 = 4.0;
 
 /// 绘制 3D 线段（投影后以 2D 线段渲染）。
 fn draw_line_3d(
-    painter: &egui::Painter,
-    from: Vec3,
-    to: Vec3,
-    ctx: &GizmoCtx,
-    color: egui::Color32,
-    width: f32,
+    painter:                    &egui::Painter,
+    from:                       Vec3,
+    to:                         Vec3,
+    ctx:                        &GizmoCtx,
+    color:                      egui::Color32,
+    width:                      f32,
 ) {
     let a = project_to_screen(from, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
     let b = project_to_screen(to, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
@@ -77,11 +77,11 @@ fn draw_line_3d(
 /// 额外检查投影后多边形的包围盒：若超过屏幕尺寸的 1.5 倍，说明顶点
 /// 位于屏幕远端边缘且构成巨型三角形，egui 不做视口裁剪，会污染全屏。
 fn draw_convex_poly_3d(
-    painter: &egui::Painter,
-    vertices_3d: &[Vec3],
-    ctx: &GizmoCtx,
-    fill: egui::Color32,
-    stroke: egui::Stroke,
+    painter:                    &egui::Painter,
+    vertices_3d:                &[Vec3],
+    ctx:                        &GizmoCtx,
+    fill:                       egui::Color32,
+    stroke:                     egui::Stroke,
 ) {
     let points: Vec<egui::Pos2> = vertices_3d
         .iter()
@@ -113,12 +113,12 @@ fn triangle_area(a: egui::Pos2, b: egui::Pos2, c: egui::Pos2) -> f32 {
 
 /// 三角形面积足够大时才绘制
 fn draw_triangle_if_valid(
-    painter: &egui::Painter,
-    a: egui::Pos2,
-    b: egui::Pos2,
-    c: egui::Pos2,
-    fill: egui::Color32,
-    min_area: f32,
+    painter:                    &egui::Painter,
+    a:                          egui::Pos2,
+    b:                          egui::Pos2,
+    c:                          egui::Pos2,
+    fill:                       egui::Color32,
+    min_area:                   f32,
 ) {
     if triangle_area(a, b, c) > min_area {
         painter.add(egui::Shape::convex_polygon(
@@ -131,13 +131,13 @@ fn draw_triangle_if_valid(
 
 /// 四边形面积足够大时才绘制（拆成两个三角形判断）
 fn draw_quad_if_valid(
-    painter: &egui::Painter,
-    a: egui::Pos2,
-    b: egui::Pos2,
-    c: egui::Pos2,
-    d: egui::Pos2,
-    fill: egui::Color32,
-    min_area: f32,
+    painter:                    &egui::Painter,
+    a:                          egui::Pos2,
+    b:                          egui::Pos2,
+    c:                          egui::Pos2,
+    d:                          egui::Pos2,
+    fill:                       egui::Color32,
+    min_area:                   f32,
 ) {
     let area = triangle_area(a, b, c) + triangle_area(a, c, d);
     if area > min_area {
@@ -185,11 +185,11 @@ fn polygon_bbox_too_large(points: &[egui::Pos2], screen_size: egui::Vec2) -> boo
 
 /// 在屏幕坐标绘制方块（3D 中心点 → 屏幕方块），带退化检测。
 fn draw_cube_at(
-    painter: &egui::Painter,
-    center_3d: Vec3,
-    ctx: &GizmoCtx,
-    fill: egui::Color32,
-    stroke_color: egui::Color32,
+    painter:                    &egui::Painter,
+    center_3d:                  Vec3,
+    ctx:                        &GizmoCtx,
+    fill:                       egui::Color32,
+    stroke_color:               egui::Color32,
 ) {
     let s_center = project_to_screen(center_3d, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
     if !is_valid_screen(s_center) {
@@ -267,11 +267,11 @@ fn draw_translate(painter: &egui::Painter, ctx: &GizmoCtx) {
 
 /// 绘制箭头头部，跳过退化面
 fn draw_arrow_head(
-    painter: &egui::Painter,
-    ctx: &GizmoCtx,
-    ah: &super::shapes::ArrowHead,
-    part: GizmoPart,
-    lw: f32,
+    painter:                    &egui::Painter,
+    ctx:                        &GizmoCtx,
+    ah:                         &super::shapes::ArrowHead,
+    part:                       GizmoPart,
+    lw:                         f32,
 ) {
     let axis_dir = part_axis(part);
     let half_base = ctx.gizmo_size * ARROW_HEAD_FRACTION * 0.4;

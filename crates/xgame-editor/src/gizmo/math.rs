@@ -32,7 +32,6 @@ pub fn gizmo_world_size(camera_pos: Vec3, entity_pos: Vec3) -> f32 {
 /// - `view_proj`: 预计算的 `projection * view` 矩阵
 /// - `screen_size`: 视口的逻辑像素尺寸
 /// - `screen_offset`: 视口在面板中的偏移（rect.min）
-// math.rs
 pub fn project_to_screen(
     point: Vec3,
     view_proj: &Mat4,
@@ -85,21 +84,39 @@ pub fn all_valid_screen(points: &[egui::Pos2]) -> bool {
 // 屏幕 → 3D 射线
 // ---------------------------------------------------------------------------
 
-/// 从视口相对鼠标坐标构建世界空间射线。
+/// 从屏幕绝对坐标构建世界空间射线。
+///
+/// 此函数接收**屏幕绝对坐标**（包含视口偏移量），内部会自动减去偏移量
+/// 转换为视口相对坐标后再计算射线。
+///
+/// # 参数
+///
+/// - `mouse_pos`: 屏幕绝对坐标（包含视口偏移）
+/// - `view_proj`: 预计算的 `projection * view` 矩阵
+/// - `screen_size`: 视口的逻辑像素尺寸
+/// - `screen_offset`: 视口在面板中的偏移（rect.min）
+///
+/// # 返回
 ///
 /// 返回 `(origin, direction)`。若逆矩阵奇异则返回零射线。
 pub fn screen_to_ray(
     mouse_pos: egui::Pos2,
     view_proj: &Mat4,
     screen_size: egui::Vec2,
+    screen_offset: egui::Vec2,
 ) -> (Vec3, Vec3) {
     let inv_vp = view_proj.inverse();
     if !inv_vp.is_finite() {
         return (Vec3::ZERO, Vec3::Z);
     }
 
-    let ndc_x = (mouse_pos.x / screen_size.x) * 2.0 - 1.0;
-    let ndc_y = (1.0 - mouse_pos.y / screen_size.y) * 2.0 - 1.0;
+    // 转换为视口相对坐标（NDC 计算需要）
+    let viewport_x = mouse_pos.x - screen_offset.x;
+    let viewport_y = mouse_pos.y - screen_offset.y;
+
+    // 计算 NDC 坐标（范围 -1 到 1）
+    let ndc_x = (viewport_x / screen_size.x) * 2.0 - 1.0;
+    let ndc_y = (1.0 - viewport_y / screen_size.y) * 2.0 - 1.0;
 
     let near = inv_vp * Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
     let far = inv_vp * Vec4::new(ndc_x, ndc_y, 1.0, 1.0);

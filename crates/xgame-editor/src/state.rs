@@ -6,6 +6,8 @@ use xgame_math::glam::Vec3;
 use xgame_core::{Entity, Scene, Transform};
 use xgame_physics::DebugLine;
 use strum::Display;
+use crate::editor_input::EditorInputManager;
+
 
 /// 场景视图中当前激活的变换工具。
 #[derive(Debug, Clone, Copy, Display, PartialEq, Eq)]
@@ -33,7 +35,6 @@ pub enum GizmoPart {
     PlaneXY,
     PlaneXZ,
     PlaneYZ,
-    Screen,
     Uniform,
     RingX,
     RingY,
@@ -125,6 +126,7 @@ impl Default for EditorCamera {
 }
 
 impl EditorCamera {
+    
     /// 由 yaw/pitch 计算的前方向单位向量。
     pub fn forward(&self) -> Vec3 {
         Vec3::new(
@@ -236,6 +238,9 @@ pub struct EditorState {
     /// 拖拽捕捉步长（0 表示不捕捉）。
     #[allow(dead_code)]
     pub gizmo_snap: f32,
+    
+    /// 输入管理器：跟踪键盘/鼠标状态以支持全局快捷键和复杂输入。
+    pub input_manager: EditorInputManager,
 }
 
 impl EditorState {
@@ -272,6 +277,8 @@ impl EditorState {
             gizmo_hovered: None,
             gizmo_active: None,
             gizmo_snap: 0.0,
+
+            input_manager: EditorInputManager::new(),
         }
     }
 
