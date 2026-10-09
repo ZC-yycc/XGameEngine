@@ -1,93 +1,114 @@
-//! 编辑器无关的游戏运行时。
+//! 编辑器内嵌的游戏运行时。
 //!
-//! 封装物理引擎状态管理和生命期，可在任何二进制中复用。
-//! 使用 `GameClock` 驱动固定步长物理模拟，与渲染帧率解耦。
+//! 这一层薄得几乎不存在 —— 真正的逻辑在 [`xgame_runtime::World`]，
+//! 编辑器按下「▶ Play」跑的**就是**打包出去的游戏那一份实现。
+//!
+//! # 为什么只留一层"薄壳"
+//!
+//! 早先这里自带一套物理步进 + 变换回写，与 `xgame-game` 里的另一套**并行存在**。
+//! 两份实现迟早会漂移（事实上漂过一次：一处漏了父世界矩阵的逆变换，
+//! 于是"父节点一动、子节点被物理拽着跑偏"）。现在只有一份，编辑器只是
+//! 多负责两件事：
+//!
+//! 1. **场景的所有权交换**：`World` 拥有场景，而编辑器的面板全都直接读
+//!    `state.scene`。见 [`GameRuntime::update_with_scene`] 的说明。
+//! 2. **脚本日志转发**：脚本的 `log()` 要进编辑器的 Console 面板。
 
-use std::collections::HashMap;
+use std::path::Path;
 
-use xgame_core::{Entity, GameClock, Transform};
-use xgame_math::glam::Vec3;
-use xgame_physics::{Collider, DebugLine, PhysicsConfig, PhysicsWorld, RigidBody};
+use xgame_core::Scene;
+use xgame_input::InputMap;
+use xgame_physics::DebugLine;
+use xgame_runtime::{FrameReport, ScriptLog, World, WorldConfig};
 
-/// 游戏运行时，拥有物理世界并管理实体-物理体映射。
+/// 项目根目录下输入映射的文件名。
+pub const INPUT_MAP_FILE: &str = "input.ron";
+
 pub struct GameRuntime {
-    physics: PhysicsWorld,
-    entity_to_body: HashMap<usize, u64>,
-    saved_states: Vec<Transform>,
-    /// 固定步长时钟（默认 60Hz）。
-    clock: GameClock,
+    world: World,
+    /// 上一帧的统计（状态栏读）。
+    report: FrameReport,
 }
 
 impl GameRuntime {
-    /// 进入 Play 模式：保存实体状态，创建物理世界。
-    pub fn start(entities: &[Entity]) -> Self {
-        let saved_states = entities.iter().map(|e| e.transform).collect();
-        let mut physics = PhysicsWorld::new(PhysicsConfig::default());
-        let mut entity_to_body = HashMap::new();
-
-        for (i, entity) in entities.iter().enumerate() {
-            if entity.model.is_empty() {
-                continue;
-            }
-            let body = RigidBody::dynamic_at(entity.transform);
-            let body_id = physics.add_body(body);
-
-            let half_extents = (entity.transform.scale * 0.5).max(Vec3::splat(0.01));
-            let collider = Collider::cuboid(half_extents);
-            physics.add_collider(body_id, collider);
-
-            entity_to_body.insert(i, body_id);
-        }
-
+    /// 用一份场景快照启动运行时。
+    ///
+    /// 收**快照**而不是借用编辑器的场景：Play 跑起来之后编辑器手里那份必须
+    /// 保持"进入 Play 之前的样子"，退出时才能原样恢复。
+    pub fn start(scene: Scene, project_root: &Path) -> Self {
+        let input_map = load_input_map(project_root);
+        let world = World::new(scene, project_root, WorldConfig::default())
+            .with_input_map(input_map);
         Self {
-            physics,
-            entity_to_body,
-            saved_states,
-            clock: GameClock::new().with_fixed_dt(1.0 / 60.0),
+            world,
+            report: FrameReport::default(),
         }
     }
 
-    /// 使用固定步长推进物理模拟，与渲染帧率解耦。
-    pub fn fixed_update(&mut self, dt: f32, entities: &mut [Entity]) {
-        self.clock.tick(dt);
-        while self.clock.consume_fixed_update() {
-            self.physics.step(self.clock.fixed_dt());
-        }
-        self.clock.reset_step_counter();
-
-        self.sync_transforms(entities);
+    /// 推进一帧，并把运行时里的场景内容**换回**编辑器持有的那份。
+    ///
+    /// # 这个"换"是怎么回事
+    ///
+    /// `World` 拥有场景，而编辑器的面板全都直接读 `state.scene.entities`。
+    /// 让面板改读 `runtime.scene()` 需要动几十处调用点；给场景包一层
+    /// `Rc<RefCell<_>>` 又会把借用检查挪到运行期。两者都不划算。
+    ///
+    /// 所以这里用 `std::mem::swap` 交换整个 `Scene`：它内部只有三个 `Vec`/`String`
+    /// 和一个小数组，交换是 **O(1)**（换指针，不是逐个元素搬），
+    /// 比"每帧克隆一份场景"便宜好几个数量级 —— 而后者正是本项目早就明令禁止的
+    /// 每帧副作用。
+    ///
+    /// 于是每帧的顺序是：
+    ///
+    /// ```text
+    /// swap      运行时拿到编辑器那份（内容与它自己那份一致）→ 编辑器侧暂时是旧内容
+    /// update    运行时推进物理 / 脚本，改的是同一批实体
+    /// swap      结果交回编辑器 → 面板 / 渲染读到的是最新状态
+    /// ```
+    ///
+    /// 中间那一小段"编辑器侧是旧内容"没有任何读者：`update` 期间没人访问
+    /// `state.scene`。这一点是这段代码成立的前提，改动帧序时要留意。
+    pub fn update_with_scene(&mut self, dt: f32, editor_scene: &mut Scene) {
+        std::mem::swap(editor_scene, self.world.scene_mut());
+        self.report = self.world.update(dt);
+        std::mem::swap(editor_scene, self.world.scene_mut());
     }
 
-    fn sync_transforms(&self, entities: &mut [Entity]) {
-        let mapping: Vec<(usize, u64)> =
-            self.entity_to_body.iter().map(|(&i, &b)| (i, b)).collect();
-
-        for (entity_idx, body_id) in mapping {
-            if let Some(phys_transform) = self.physics.body_transform(body_id) {
-                if let Some(entity) = entities.get_mut(entity_idx) {
-                    entity.transform.position = phys_transform.position;
-                    entity.transform.rotation = phys_transform.rotation;
-                }
-            }
-        }
+    /// 取走本帧脚本产生的日志。
+    pub fn take_logs(&mut self) -> Vec<ScriptLog> {
+        self.world.take_logs()
     }
 
-    /// 获取物理调试线条。
+    /// 重新编译所有脚本（脚本热重载）。
+    pub fn reload_scripts(&mut self) {
+        self.world.reload_scripts();
+    }
+
     pub fn debug_lines(&self) -> Vec<DebugLine> {
-        self.physics.debug_lines()
+        self.world.debug_lines()
     }
 
-    /// 返回刚体和碰撞体数量统计。
     pub fn stats(&self) -> (usize, usize) {
-        self.physics.stats()
+        (self.report.bodies, self.report.colliders)
     }
 
-    /// 退出 Play 模式。
-    pub fn stop(self, entities: &mut [Entity]) {
-        for (i, transform) in self.saved_states.iter().enumerate() {
-            if let Some(entity) = entities.get_mut(i) {
-                entity.transform = *transform;
-            }
+    /// 运行时输入（Play 模式下由 `input_bridge` 从 egui 灌进来）。
+    pub fn input_mut(&mut self) -> &mut xgame_input::Input {
+        self.world.input_mut()
+    }
+}
+
+/// 读项目根目录的 `input.ron`；没有就退回默认映射，坏了就报警再退回默认。
+///
+/// 「文件不存在」和「文件写坏了」是两件不同的事，前者正常、后者要提示作者。
+fn load_input_map(project_root: &Path) -> InputMap {
+    let path = project_root.join(INPUT_MAP_FILE);
+    match InputMap::load(&path) {
+        Ok(Some(map)) => map,
+        Ok(None) => InputMap::default_game(),
+        Err(e) => {
+            log::warn!("输入映射 {} 解析失败，改用默认映射: {e}", path.display());
+            InputMap::default_game()
         }
     }
 }

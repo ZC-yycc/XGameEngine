@@ -15,5 +15,31 @@
                 ]
             }
         },
+        {
+            "name": "Debug 'xgame-editor' (SampleScene)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--package=xgame-editor",
+                    "--",
+                    "projects/SampleScene"
+                ]
+            }
+        },
+        {
+            "name": "Debug 'xgame-game' (SampleScene)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--package=xgame-game",
+                    "--",
+                    "projects/SampleScene"
+                ]
+            }
+        },
     ]
 }

@@ -28,9 +28,14 @@ parking_lot = "0.12"
 anyhow = "1"
 ron = "0.8"
 glam = "0.29"
+# 原生文件对话框（项目枢纽里「打开项目 / 选择位置」用）。
+rfd = "0.17"
 
 xgame-core = { path = "../xgame-core" }
 xgame-derive = { path = "../xgame-derive" }
 xgame-math = { path = "../xgame-math" }
 xgame-render = { path = "../xgame-render" }
 xgame-physics = { path = "../xgame-physics" }
+xgame-input = { path = "../xgame-input" }
+xgame-script = { path = "../xgame-script" }
+xgame-runtime = { path = "../xgame-runtime" }

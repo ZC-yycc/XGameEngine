@@ -6,7 +6,7 @@
 use xgame_math::glam::{Quat, Vec3};
 use crate::state::{GizmoDrag, GizmoPart, ToolMode};
 use super::GizmoCtx;
-use super::pick::{hit_position_on_axis, hit_position_on_plane};
+use super::pick::hit_position_on_plane;
 
 /// 旋转拖拽的灵敏度倍率。
 const ROTATE_SENSITIVITY: f32 = 1.0;
@@ -23,8 +23,8 @@ const UNIFORM_SCALE_SENSITIVITY: f32 = 0.005;
 pub enum TransformDelta {
     /// 位置变化（Translate 工具）。
     Position(Vec3),
-    /// 旋转变化（Rotate 工具），四元数表示。
-    Rotation(Quat, Vec3), // 第二个 Vec3 用于传递旋转轴（仅在 Rotate 模式下使用）
+    /// 旋转变化（Rotate 工具），四元数表示的是**相对起始姿态的增量旋转**。
+    Rotation(Quat),
     /// 缩放变化（Scale 工具）。
     Scale(Vec3),
 }
@@ -59,15 +59,15 @@ fn compute_translate(
         // ── 轴拖拽 ──
         GizmoPart::AxisX | GizmoPart::AxisY | GizmoPart::AxisZ => {
             let axis = part_to_axis(drag.part);
-            let hit = hit_position_on_axis(mouse_pos, ctx, axis)?;
 
-            // 将 hit 点投影到轴上（相对于 entity_pos 的标量偏移）
-            let offset = hit - ctx.entity_pos;
-            let t = offset.dot(axis);
-
-            // 从 start_value 重新构建起始位置，加上沿轴的 delta
-            let start_pos = drag.start_value;
-            let new_pos = start_pos + axis * (t - drag.start_hit.dot(axis));
+            // 沿轴的位移 = 轴坐标的变化量。
+            //
+            // 必须用 `axis_param_under_mouse`（射线在轴对应的**直线**上的投影）。
+            // 旧实现拿 `hit_position_on_axis` 的平面交点再投影到轴上，那个投影
+            // **恒为 0**（交点在过实体、垂直于轴的平面上），于是位移恒等于
+            // `-entity_pos·axis` 这个与鼠标无关的常量 —— 表现就是"拖红箭头不动"。
+            let s_now = super::axis_param_under_mouse(mouse_pos, ctx, axis)?;
+            let new_pos = drag.start_value + axis * (s_now - drag.start_axis);
 
             Some(TransformDelta::Position(new_pos))
         }
@@ -139,7 +139,7 @@ fn compute_rotate(
     let rot = Quat::from_axis_angle(axis, delta_angle);
 
     // 返回旋转变化量（相对旋转）
-    Some(TransformDelta::Rotation(rot, Vec3::ZERO))
+    Some(TransformDelta::Rotation(rot))
 }
 
 // ---------------------------------------------------------------------------
@@ -171,20 +171,18 @@ fn compute_scale(
         // ── 轴缩放 ──
         GizmoPart::AxisX | GizmoPart::AxisY | GizmoPart::AxisZ => {
             let axis = part_to_axis(drag.part);
-            let hit = hit_position_on_axis(mouse_pos, ctx, axis)?;
+
+            // 与平移同理：轴上的位置只能用直线投影求。
+            // 旧实现用平面交点，`t` 恒为 0，`ratio` 于是恒为 `0 / 常量`，
+            // 被 `.max(0.01)` 夹住 → 一拖就塌成 1%（起点在原点时 start_t 也是 0，
+            // 于是完全不动）。两种表现都不对。
+            let s_now = super::axis_param_under_mouse(mouse_pos, ctx, axis)?;
 
             let start_scale = drag.start_value;
 
-            // 计算 hit 沿轴从中心向外的距离
-            let offset = hit - ctx.entity_pos;
-            let t = offset.dot(axis);
-
-            // 起始偏移量
-            let start_t = drag.start_hit.dot(axis);
-
-            // 缩放比值
-            let ratio = if start_t.abs() > 1e-8 {
-                (t / start_t).max(0.01)
+            // 抓住操作柄的位置就是起始轴坐标，比值即缩放比。
+            let ratio = if drag.start_axis.abs() > 1e-6 {
+                (s_now / drag.start_axis).max(0.01)
             } else {
                 1.0
             };
@@ -227,5 +225,171 @@ fn plane_normal(part: GizmoPart) -> Vec3 {
         GizmoPart::PlaneXZ => Vec3::Y,  // XZ 平面法线为 Y
         GizmoPart::PlaneYZ => Vec3::X,  // YZ 平面法线为 X
         _ => Vec3::Y,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gizmo::{axis_param_under_mouse, gizmo_world_size, hit_position_on_axis, project_to_screen};
+
+    /// 和编辑器默认视角一致：相机在 (5,5,5) 看向原点。
+    const EYE: Vec3 = Vec3::new(5.0, 5.0, 5.0);
+
+    fn test_ctx(entity_pos: Vec3) -> GizmoCtx {
+        let view_proj = xgame_math::projection::perspective(60f32.to_radians(), 4.0 / 3.0, 0.1, 100.0)
+            * xgame_math::projection::look_at(EYE, Vec3::ZERO, Vec3::Y);
+        GizmoCtx {
+            view_proj,
+            screen_size: egui::vec2(1200.0, 800.0),
+            screen_offset: egui::vec2(0.0, 24.0), // 顶栏占掉的高度
+            entity_pos,
+            gizmo_size: gizmo_world_size(EYE, entity_pos),
+            hovered: None,
+            active: None,
+        }
+    }
+
+    /// 世界点 → 屏幕点（用来"把鼠标放到某个世界位置"）。
+    fn at(ctx: &GizmoCtx, world: Vec3) -> egui::Pos2 {
+        project_to_screen(world, &ctx.view_proj, ctx.screen_size, ctx.screen_offset)
+    }
+
+    /// 轴上 `k` 倍 gizmo 长度处的世界点。
+    fn on_axis(ctx: &GizmoCtx, axis: Vec3, k: f32) -> Vec3 {
+        ctx.entity_pos + axis * ctx.gizmo_size * k
+    }
+
+    /// 造一个"已经抓住轴上某点"的拖拽状态（`scene_view` 里那套起始量的最小复刻）。
+    fn drag_on_axis(ctx: &GizmoCtx, axis: Vec3, at_k: f32, part: GizmoPart, start_value: Vec3) -> GizmoDrag {
+        let grab = at(ctx, on_axis(ctx, axis, at_k));
+        GizmoDrag {
+            part,
+            start_value,
+            start_hit: Vec3::ZERO,
+            start_axis: axis_param_under_mouse(grab, ctx, axis).expect("抓取点应当落在轴上"),
+            start_screen_pos: grab,
+            start_rotation: Quat::IDENTITY,
+        }
+    }
+
+    /// **根因记录**：`hit_position_on_axis` 给的是「过实体、以轴为法线」的平面交点，
+    /// 它到实体的位移**永远垂直于轴**，投影恒为 0。
+    ///
+    /// 所以拿它算轴坐标必然得到与鼠标无关的常量 —— 这正是平移"拖不动"、
+    /// 缩放"瞬间塌成 1%"的来源。轴坐标必须用 [`axis_param_under_mouse`]。
+    #[test]
+    fn plane_hit_projects_to_zero_on_the_axis() {
+        let ctx = test_ctx(Vec3::new(2.0, 0.0, 0.0));
+        for k in [0.3_f32, 0.7, 1.4] {
+            let screen = at(&ctx, on_axis(&ctx, Vec3::X, k));
+            let hit = hit_position_on_axis(screen, &ctx, Vec3::X).expect("应当有交点");
+            let along_axis = (hit - ctx.entity_pos).dot(Vec3::X);
+            assert!(
+                along_axis.abs() < 1e-3,
+                "平面交点在轴上的投影应当恒为 0，实得 {along_axis}"
+            );
+        }
+
+        // 而"直线投影"这个量是跟着 k 走的，不是常量。
+        let s1 = axis_param_under_mouse(at(&ctx, on_axis(&ctx, Vec3::X, 0.5)), &ctx, Vec3::X).unwrap();
+        let s2 = axis_param_under_mouse(at(&ctx, on_axis(&ctx, Vec3::X, 1.5)), &ctx, Vec3::X).unwrap();
+        assert!((s2 - s1).abs() > 1e-3, "轴坐标必须随鼠标位置变化: {s1} vs {s2}");
+    }
+
+    /// **回归**：沿轴平移必须跟着鼠标走。
+    ///
+    /// 旧实现里沿 X 拖红箭头，位置纹丝不动（位移恒等于 `-entity_pos·axis` 这个常量）。
+    #[test]
+    fn axis_translate_follows_the_mouse() {
+        let ctx = test_ctx(Vec3::ZERO);
+        let drag = drag_on_axis(&ctx, Vec3::X, 0.7, GizmoPart::AxisX, ctx.entity_pos);
+
+        // 把鼠标挪到轴上更远处（1.4 倍），位移应当约 0.7 倍 gizmo 长度
+        let moved = at(&ctx, on_axis(&ctx, Vec3::X, 1.4));
+        let delta = compute_transform(&drag, moved, &ctx, ToolMode::Translate).expect("应当算出位移");
+
+        match delta {
+            TransformDelta::Position(p) => {
+                let want = ctx.gizmo_size * 0.7;
+                assert!(
+                    (p.x - want).abs() < want * 0.05,
+                    "沿 X 的位移应当约 {want}，实得 {}",
+                    p.x
+                );
+                assert!(
+                    p.y.abs() < 1e-3 && p.z.abs() < 1e-3,
+                    "拖 X 轴只该改 x，实得 {p}"
+                );
+            }
+            other => panic!("应当是 Position，实得 {other:?}"),
+        }
+    }
+
+    /// **回归**：沿轴缩放要跟着抓取距离走，绝不能一拖就塌成 1%。
+    ///
+    /// 旧实现里 `t` 恒为 0，比值是 `0 / 常量`，被 `.max(0.01)` 夹住 → 物体瞬间缩到 1%。
+    #[test]
+    fn axis_scale_tracks_the_grab_distance() {
+        let ctx = test_ctx(Vec3::ZERO);
+        let drag = drag_on_axis(&ctx, Vec3::X, 0.8, GizmoPart::AxisX, Vec3::ONE);
+
+        // 鼠标退回一半距离 → 缩放约减半
+        let nearer = at(&ctx, on_axis(&ctx, Vec3::X, 0.4));
+        let delta = compute_transform(&drag, nearer, &ctx, ToolMode::Scale).expect("应当算出缩放");
+
+        match delta {
+            TransformDelta::Scale(s) => {
+                assert!((s.x - 0.5).abs() < 0.05, "缩放应当约减半，实得 {}", s.x);
+                assert!(s.x > 0.2, "绝不能塌成旧实现的 1%（0.01），实得 {}", s.x);
+                assert_eq!((s.y, s.z), (1.0, 1.0), "只该改被拖的那个轴");
+            }
+            other => panic!("应当是 Scale，实得 {other:?}"),
+        }
+    }
+
+    /// **回归**：旋转环拖拽必须给出有限的四元数。
+    ///
+    /// 旧实现在 `scene_view` 里给旋转环的 `start_hit` 是 `entity_pos` 本身，于是
+    /// `start_hit - entity_pos` 是零向量，`.normalize()` 得到 NaN，起始角度、增量
+    /// 四元数、实体旋转一路全变 NaN —— 表现为"拖一下环，物体从画面上消失"。
+    #[test]
+    fn ring_rotate_stays_finite() {
+        let ctx = test_ctx(Vec3::ZERO);
+        let r = ctx.gizmo_size * 0.8; // 与 RING_RADIUS 一致
+
+        // 起始：Z 环所在平面（XY 平面）上的 +X 方向
+        let grab_screen = at(&ctx, ctx.entity_pos + Vec3::X * r);
+        let start_hit =
+            hit_position_on_plane(grab_screen, &ctx, Vec3::Z).expect("射线应当与旋转平面相交");
+        let drag = GizmoDrag {
+            part: GizmoPart::RingZ,
+            start_value: Vec3::ZERO,
+            start_hit,
+            start_axis: 0.0,
+            start_screen_pos: grab_screen,
+            start_rotation: Quat::IDENTITY,
+        };
+
+        // 当前：转到 45° 方向
+        let cur = at(&ctx, ctx.entity_pos + (Vec3::X + Vec3::Y) * (r / 2f32.sqrt()));
+        let delta = compute_transform(&drag, cur, &ctx, ToolMode::Rotate).expect("应当算出旋转");
+
+        match delta {
+            TransformDelta::Rotation(q) => {
+                assert!(q.is_finite(), "旋转四元数不能是 NaN/Inf：{q:?}");
+                let (axis, angle) = q.to_axis_angle();
+                assert!(angle.abs() > 0.1, "转了 45° 应当有明显角度，实得 {angle}");
+                assert!(
+                    (axis.z.abs() - 1.0).abs() < 1e-3,
+                    "绕 Z 环应当绕 Z 轴转，实得轴 {axis}"
+                );
+            }
+            other => panic!("应当是 Rotation，实得 {other:?}"),
+        }
     }
 }

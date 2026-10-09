@@ -31,10 +31,23 @@ mod drag;
 
 pub use math::{gizmo_world_size, project_to_screen, screen_to_ray};
 pub use draw::draw_gizmo;
-pub use pick::{pick_gizmo, hit_position_on_axis, hit_position_on_plane};
+pub use pick::{pick_gizmo, axis_param_under_mouse, hit_position_on_axis, hit_position_on_plane};
 pub use drag::{compute_transform, TransformDelta};
 use xgame_math::glam::Vec3;
 use crate::state::{GizmoDrag, GizmoPart};
+
+/// 操作柄对应的世界轴方向。
+///
+/// 轴线与旋转环共用同一组方向（环是绕该轴转），平面与中心方块没有单一轴。
+/// 类 Unity 的 gizmo 都画在世界轴上、不跟物体自身旋转走，所以这里直接用主轴常量。
+pub fn handle_axis(part: GizmoPart) -> Option<Vec3> {
+    match part {
+        GizmoPart::AxisX | GizmoPart::RingX => Some(Vec3::X),
+        GizmoPart::AxisY | GizmoPart::RingY => Some(Vec3::Y),
+        GizmoPart::AxisZ | GizmoPart::RingZ => Some(Vec3::Z),
+        GizmoPart::PlaneXY | GizmoPart::PlaneXZ | GizmoPart::PlaneYZ | GizmoPart::Uniform => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 常量

@@ -1,4 +1,24 @@
 // editor_input.rs - 编辑器输入系统
+//
+// # 状态：预留模块，尚未接入
+//
+// 这一整套「输入绑定 → 动作」的抽象目前**没有被任何地方读取**：
+// `EditorState::input_manager` 只构造、从不调用 `update()`，编辑器实际的输入处理
+// 仍然散在 `panels/scene_view.rs`（相机 + gizmo + 拾取）和 `main.rs`（快捷键）里。
+//
+// 之所以整体 `allow(dead_code)` 而不是删掉：它带 4 个通过的单测，是明确写下来的
+// 脚手架，将来要把视口输入收敛成一张绑定表时会用到。留着的代价只是编译期多几十条
+// 死代码警告，而把几十条噪声混在真正的警告里，会让人错过真的问题 —— 所以在这里
+// 一次性静音，而不是逐项删。
+//
+// 接入前需要先修的几处（现在不影响运行，但直接用会出问题）：
+// 1. `check_drag_delta` 读的是**上一次**的 `self.drag_state`，不是本帧循环里刚算出的
+//    `new_drag_state` —— 拖拽增量会滞后一帧。
+// 2. `Pressed` 类绑定要求 `binding.modifiers == 当前修饰键`（全等），于是「不带修饰键」
+//    的绑定在按住 Ctrl 时整批失效；真实需求通常是「不关心修饰键」。
+// 3. `is_in_viewport` / `prev_mouse_buttons` 写入了但没人读，`TriggerType::Released`
+//    也没有任何默认绑定用到。
+#![allow(dead_code)]
 
 use egui::{Key, PointerButton, Pos2};
 
@@ -490,7 +510,7 @@ impl EditorInputManager {
     
     /// 检查是否在拖拽
     pub fn is_dragging(&self, button: PointerButton) -> bool {
-        self.drag_state.map_or(false, |(b, _)| b == button)
+        self.drag_state.is_some_and(|(b, _)| b == button)
     }
     
     /// 获取拖拽增量
@@ -582,10 +602,13 @@ fn check_released(
 }
 
 /// 检查拖拽是否开始
+///
+/// 这里不需要读旧的拖拽状态（松手后 `drag_state` 会被置回 `None`，
+/// 按下瞬间必定是从「无拖拽」进入），所以参数留占位符保签名一致。
 fn check_drag_start(
     input: &egui::InputState,
     mouse_button: Option<PointerButton>,
-    current_drag_state: &Option<(PointerButton, Pos2)>,
+    _current_drag_state: &Option<(PointerButton, Pos2)>,
 ) -> (bool, Option<(PointerButton, Pos2)>) {
     if let Some(button) = mouse_button {
         if input.pointer.button_clicked(button) {

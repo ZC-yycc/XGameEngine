@@ -23,3 +23,7 @@ xgame-core = { path = "../xgame-core" }
 xgame-math = { path = "../xgame-math" }
 xgame-render = { path = "../xgame-render" }
 xgame-physics = { path = "../xgame-physics" }
+# `winit` feature 才能把窗口库的键码翻译成本引擎的 KeyCode。
+xgame-input = { path = "../xgame-input", features = ["winit"] }
+xgame-script = { path = "../xgame-script" }
+xgame-runtime = { path = "../xgame-runtime" }

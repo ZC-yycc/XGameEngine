@@ -132,11 +132,53 @@ fn update_best(best: &mut Option<(GizmoPart, f32)>, part: GizmoPart, dist: f32) 
 // 轴心点命中检测：沿轴拖拽时使用的平面投影点
 // ---------------------------------------------------------------------------
 
+/// 鼠标射线投影到**轴所在直线**上的参数（沿 `axis` 从 `ctx.entity_pos` 起算的
+/// 有符号距离，世界单位）。轴拖拽真正需要的就是这个量。
+///
+/// # 为什么不能拿 [`hit_position_on_axis`] 的结果再投影到轴上
+///
+/// 那个函数求的是射线与「过 `entity_pos`、以 `axis` 为法线」平面的交点。按定义，
+/// 交点到 `entity_pos` 的位移**永远垂直于 `axis`**，投影到轴上恒为 0。用它算轴坐标
+/// 会得到与鼠标移动无关的常量增量，实测后果：
+///
+/// * 平移：`t - start_hit·axis ≡ 0`，沿红箭头拖拽物体**纹丝不动**；
+/// * 缩放：比值恒为 `0 / 常量`，被 `.max(0.01)` 夹住 → 物体**瞬间塌成 1%**。
+///
+/// 所以这里直接求「直线 P(s) = entity_pos + axis·s」与鼠标射线的最近点对
+/// （Ericson《Real-Time Collision Detection》里 ClosestPtSegmentRay 的直线版本）。
+pub fn axis_param_under_mouse(
+    mouse_pos: egui::Pos2,
+    ctx: &GizmoCtx,
+    axis: Vec3,
+) -> Option<f32> {
+    let (origin, ray) = screen_to_ray(mouse_pos, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
+    let len = ray.length();
+    if len < 1e-10 {
+        return None;
+    }
+    let d = ray / len; // 单位化，下面按 a = e = 1 化简
+
+    let r = ctx.entity_pos - origin;
+    let b = axis.dot(d); // = d1·d2
+    // denom = a·e − b² = 1 − b²（axis 与 d 都是单位向量）
+    let denom = 1.0 - b * b;
+    if denom.abs() < 1e-6 {
+        return None; // 视线几乎与轴平行，轴上位置不可判
+    }
+    let c = axis.dot(r); // = d1·r
+    let f = d.dot(r); // = d2·r
+    Some((b * f - c) / denom)
+}
+
 /// 计算鼠标射线与经过实体位置且垂直于指定轴的平面的交点。
 /// 用于确定拖拽轴时鼠标在轴上的投影位置。
 ///
 /// 注意：`mouse_pos` 应该是**屏幕绝对坐标**（包含偏移量），
 /// 因为 `screen_to_ray` 需要屏幕坐标来计算射线。
+///
+/// 注意：这个交点的位移**垂直于** `axis`，所以**不能**拿它算轴坐标 —— 需要轴坐标
+/// 请用 [`axis_param_under_mouse`]。这里保留它是给「旋转环起始方向」用的：
+/// 那是平面内的方向，正好需要平面上的点。
 pub fn hit_position_on_axis(
     mouse_pos: egui::Pos2,
     ctx: &GizmoCtx,

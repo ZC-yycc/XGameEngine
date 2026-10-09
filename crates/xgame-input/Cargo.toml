@@ -1,0 +1,19 @@
+[package]
+name = "xgame-input"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine input abstraction: device state, action mapping, axes"
+
+[dependencies]
+xgame-math = { path = "../xgame-math" }
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+
+# 可选：把窗口库的按键码翻译成本 crate 的 KeyCode。
+# 引擎层刻意不依赖 winit —— 输入抽象要能被无窗口的测试、回放、网络输入复用。
+# 只有编辑器 / 独立游戏这两个真正接窗口的二进制才打开这个 feature。
+winit = { version = "0.30", optional = true }
+
+[features]
+default = []
+winit = ["dep:winit"]

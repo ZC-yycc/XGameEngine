@@ -10,14 +10,15 @@
 |---|---|---|
 | **一** | ✅ 完成 | Workspace + 窗口 + 三角形 |
 | **二** | ✅ 完成 | 基础渲染（glTF、纹理、Blinn-Phong 光照） |
-| **三** | ✅ 完成 | Model 矩阵 + Transform 层级 |
+| **三** | ✅ 完成 | Model 矩阵 + 局部变换 |
 | **四** | ✅ 完成 | 场景系统（RON 序列化、多实体） |
 | **五** | ✅ 完成 | 物理集成（rapier3d） |
 | **六** | ✅ 完成 | 编辑器（egui 面板） |
+| **六·五** | ✅ 完成 | **玩法层：输入系统 + 脚本系统（Rhai）+ 统一运行时** |
 | **七** | ⬜ 待开始 | 动画系统 |
 | **八** | ⬜ 待开始 | 音频系统 |
 | **九** | ⬜ 待开始 | 后处理 + 阴影 |
-| **十** | ⬜ 待开始 | 脚本系统 + 热重载 |
+| ~~**十**~~ | ✅ 完成 | 脚本系统 + 热重载（已并入六·五） |
 
 ---
 
@@ -75,6 +76,70 @@
 |---|---|---|
 | 共享渲染管线 | ✅ 完成 | 从 SceneRenderer 提取 ScenePipeline 到 xgame-render |
 | 独立游戏二进制 | ✅ 完成 | xgame-game crate，原生命令行运行 |
+| 引擎 / 项目分离 | ✅ 完成 | `project.ron` + `ProjectHandle`；编辑器项目枢纽（新建 / 打开 / 最近项目）|
+| 一键构建 | ✅ 完成 | 发布构建脚本（双击 `一键构建.cmd` → `dist/`）；编辑器 Build 按钮把项目打包成独立游戏 |
+
+---
+
+## 商业引擎对齐（进行中）
+
+对照 Unity / Godot / Unreal 的必备能力，按「先补齐最显眼的短板」推进。
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| 纹理采样 | ✅ 完成 | 此前 glTF 贴图加载了却从不采样、模型全是顶点色；现已接上 `group(1)` 材质绑定组 |
+| Blinn-Phong 光照 | ✅ 完成 | 环境光 + 漫反射 + 半程向量高光（此前实为纯 Lambert，与文档描述不符） |
+| 多光源 | ✅ 完成 | 单帧最多 8 盏方向光 / 点光叠加；光源是场景级数据，随场景序列化 |
+| 材质参数 | ✅ 完成 | 读 glTF 的 base color factor / metallic / roughness，换算成高光强度与光泽度 |
+| Alpha 混合 | ✅ 完成 | 读 glTF `alphaMode`，独立混合管线；半透明按到相机距离远 → 近排序 |
+| 内置基础图元 | ✅ 完成 | Cube / Sphere / Plane / Cylinder，用 `builtin://cube` 标识，不依赖外部资产 |
+| 场景层级 | ✅ 完成 | `Entity::parent`（按 ID 引用）+ `Scene::world_matrix` 世界矩阵解算；批量解父子走 `Scene::hierarchy()` / `parent_indices()` / `child_map()`（O(n)，面板与渲染不再逐节点扫表）；层级面板是**可折叠的树**，拖拽重挂父节点保留世界变换并自动防环；渲染 / 物理 / Gizmo 全部走世界变换 |
+| Undo / Redo | ✅ 完成 | 快照式撤销栈，Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y；Inspector 拖拽与 **Gizmo 拖拽**都按「拖拽前快照、松手入栈」记成**一步** |
+| 复制 / 粘贴 | ✅ 完成 | Ctrl+C / Ctrl+V；剪贴板保存**整棵子树**快照，粘贴时重新分配 ID 并还原内部父子关系 |
+| 预制体（Prefab） | ✅ 完成 | 把一棵子树存成 `Prefabs/*.prefab.ron` 资产并可反复实例化；实例带**来源标记**（资产路径 + 资产内实体 ID），支持 **Apply**（实例改动写回资产）与 **Revert**（资产覆盖回实例，保留位置）；编辑器有 Prefabs 资源面板 |
+| 资源浏览器 | 🟨 部分 | 已有 **Prefabs 面板**（列资产 / 搜索 / 点击实例化 / 删除）；`Resources/` 里的模型尚未列出、也还不能拖拽入场景 |
+| 多场景管理 | ⬜ 待做 | 新建 / 切换 / 按场景保存（当前只认清单里的入口场景） |
+| 物理射线 / 角色控制器 | ⬜ 待做 | `QueryPipeline` 已创建但未暴露 API；无角色控制器 |
+| 游戏侧输入系统 | ⬜ 待做 | 独立游戏只认 Close / Resize / Esc，没有键鼠抽象与动作映射 |
+| 阴影 / 天空盒 / 后处理 | ⬜ 待做 | 方向光阴影贴图、CSM、Bloom、ACES、MSAA |
+| Gizmo 吸附 / Rect 工具 | ⬜ 待做 | `gizmo_snap` 字段已在但未接线；Rect 工具无实现 |
+
+---
+
+## 阶段六·五：玩法层（本轮完成）
+
+在"能摆场景"和"能做游戏"之间差着三样东西：**输入**、**脚本**、**一个统一的运行时**。
+这一轮把它们补齐，并且刻意按"编辑器 Play 与打包游戏共用同一段实现"来做。
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| 输入系统 | ✅ 完成 | 新增 `xgame-input`：与 winit 解耦的 `KeyCode`/`MouseButton`、`InputState`（按住 / 本帧按下 / 本帧松开三级语义、失焦自动释放、按键重复去重）、`InputMap` 动作映射（项目级 `input.ron`，支持一个动作多绑定 / 修饰键组合 / 双向轴）。窗口库的翻译只在编辑器与游戏两个二进制里发生 |
+| 脚本系统 | ✅ 完成 | 新增 `xgame-script`：嵌入式 Rhai，`Entity::scripts`（项目相对路径）→ 四个可选钩子 `start` / `update` / `fixed_update` / `on_destroy`；宿主 API 覆盖变换、实体增删、物理（射线 / 冲量 / 速度）、输入、时间、日志；`state_*` 提供**按 (实体, 脚本) 分开**的持久状态；编译缓存 + 热重载；脚本崩溃 / 死循环只记日志不拖垮引擎 |
+| 统一运行时 | ✅ 完成 | 新增 `xgame-runtime::World`：把场景 / 物理 / 输入 / 脚本编排成确定的帧管线（固定步长与渲染帧解耦），**编辑器 Play 与独立游戏跑的是同一段 `update`**，消掉了此前两份各自维护的物理同步实现 |
+| 声明式物理 | ✅ 完成 | `Entity::physics: Option<PhysicsBody>`（kind / shape / mass / friction / restitution / gravity_scale / sensor）。取代了"凡带模型即动态盒子"的旧行为；不声明 = 纯视觉实体。`PhysicsBody` → rapier 刚体的翻译收在 `xgame-physics::scene_body` |
+| 物理射线 | ✅ 完成 | `PhysicsWorld::raycast` / `raycast_with_filter`（`RaycastFilter`：忽略传感器 / 只打动态体 / 排除自身）。脚本里是 `raycast(ctx, ...)` |
+| 编辑器接入 | ✅ 完成 | Inspector 新增 **Scripts**（增删 / 从项目脚本列表选 / 重扫）与 **Physics**（类型 / 形状 / 形状参数 / 摩擦 / 弹性 / 质量 / 重力缩放 / 传感器）两个区块；Hierarchy 行加 `📜`（带数量）/`⚙` 徽标；工具栏加 `⟳ Scripts` 热重载；Console 直接收脚本日志；Play 时通过 `input_bridge` 把 egui 键鼠灌进运行时 |
+| 音频系统 | ⬜ 待做 | 尚未开始（`ContentConfig::audio_dir` 字段已在） |
+| 角色控制器 | 🟨 部分 | 射线有了；基于射线的胶囊体移动 / 台阶 / 坡度尚未实现 |
+| 后处理 / 阴影 | ⬜ 待做 | `Light::casts_shadow` / `shadow_resolution` 字段已进场景，渲染侧还没接 |
+
+> **文档修正**：`Scene` 现在带 `lights` / `ambient` 字段（旧场景文件靠
+> `#[serde(default)]` 自动补一盏默认方向光和一个默认环境光）；`Entity` 现在带
+> `id` / `parent` / `prefab` 三个字段，**已支持父子层级与预制体实例** ——
+> `transform` 存的是**局部**变换，世界变换由 `Scene::world_matrix` 沿父链解算；
+> `prefab` 为 `None` 时不会写进文件，旧场景 / 旧清单（缺 `prefabs_dir`）
+> 都能靠 serde 默认值原样加载。
+>
+> **已知缺口**：`crates/xgame-editor/src/editor_input.rs`（672 行）是一套
+> 「输入绑定表 → 动作」的抽象，**从未接入** —— `EditorState::input_manager` 只构造、
+> 没人读，实际输入仍散在 `scene_view` / `main` 里。模块自带 4 个单测，属有意保留的
+> 脚手架，已整体 `#![allow(dead_code)]`；接入前要先修它内部三处（拖拽增量滞后一帧、
+> 修饰键全等比较会让"不带修饰键"的绑定在按住 Ctrl 时整批失效、两个字段写了没人读）。
+>
+> **独立播放器的循环已迁到 winit 0.30 的正式入口**：`EventLoop::run(闭包)` 与
+> `EventLoop::create_window` 都已废弃，现在是 `run_app` + `ApplicationHandler`，
+> 窗口与 `GameApp` 都推迟到 `resumed` 里创建（`ActiveEventLoop::create_window`
+> 只在回调内可见）。`about_to_wait` 主动 `request_redraw()` 的连续帧机制不变。
 
 ## 第七阶段：动画系统 ⬜
 
@@ -112,24 +177,36 @@
 ## 当前项目结构
 
 ```
-XGameEngine/
-├── Cargo.toml                     # workspace（含 xgame-game）
-├── Resources/                     # 资源
-│   ├── Box.glb
-│   └── Fox.gltf
-├── Scenes/                        # 场景文件
-│   └── scene.ron
+XGameEngine/                       # 引擎源码仓库
+├── 一键构建.cmd                   # 一键构建入口（双击即可）
+├── Cargo.toml                     # workspace（含 xgame-editor / xgame-game）
+├── tools/
+│   └── build-release.ps1          # 发布构建：编译 + 收集产物到 dist/
+├── projects/                      # 游戏项目（默认位置，可放到任意目录）
+│   └── SampleScene/               # 示例项目
+│       ├── project.ron            # 项目清单
+│       ├── Scenes/
+│       │   └── scene.ron
+│       ├── Prefabs/
+│       │   └── Pillar.prefab.ron  # 预制体资产（示例）
+│       └── Resources/
+│           ├── Box.glb
+│           ├── Fox.gltf
+│           ├── Fox.bin
+│           └── Texture.png
 ├── crates/
 │   ├── xgame-core/                # 核心类型
 │   │   └── src/
 │   │       ├── color.rs
 │   │       ├── config.rs
 │   │       ├── scene.rs           # Scene, Entity
+│   │       ├── prefab.rs          # Prefab, PrefabInstanceRef（新）
 │   │       ├── transform.rs       # Transform
 │   │       ├── component.rs       # ComponentMap
 │   │       ├── id.rs              # EntityId
 │   │       ├── time.rs            # GameClock
-│   │       └── asset.rs           # AssetId
+│   │       ├── asset.rs           # AssetId
+│   │       └── project.rs         # Project / ProjectHandle（新）
 │   ├── xgame-math/                # 数学库
 │   │   └── src/
 │   │       ├── projection.rs
@@ -143,7 +220,7 @@ XGameEngine/
 │   │       ├── texture.rs         # GPU 纹理
 │   │       ├── model.rs           # ModelUniform
 │   │       ├── scene.rs           # 重新导出
-│   │       └── scene_pipeline.rs  # 共享渲染管线（新）
+│   │       └── scene_pipeline.rs  # 共享渲染管线
 │   ├── xgame-physics/             # 物理引擎
 │   │   └── src/
 │   │       ├── lib.rs             # crate root
@@ -153,31 +230,46 @@ XGameEngine/
 │   │       └── debug_draw.rs      # DebugDrawBuffer
 │   ├── xgame-editor/              # 编辑器（egui）
 │   │   └── src/
-│   │       ├── main.rs            # 编辑器入口
-│   │       ├── scene_renderer.rs  # 离屏渲染（ScenePipeline wrapper）
+│   │       ├── main.rs            # 入口 + 枢纽/编辑器两态（改）
+│   │       ├── hub.rs             # 项目枢纽：新建 / 打开 / 最近（新）
+│   │       ├── recents.rs         # 最近项目持久化（新）
+│   │       ├── builder.rs         # 项目构建：打包成独立游戏（新）
+│   │       ├── state.rs           # 中央状态（持有 ProjectHandle）
+│   │       ├── scene_renderer.rs  # 离屏渲染（按项目根解析模型）
 │   │       ├── game_runtime.rs    # Play 模式运行时
+│   │       ├── editor_input.rs    # 输入管理
+│   │       ├── gizmo/             # Gizmo 变换操作柄
 │   │       └── panels/
 │   │           ├── mod.rs
-│   │           ├── state.rs       # 中央状态
 │   │           ├── dock.rs        # 面板布局
-│   │           ├── toolbar.rs     # 顶部工具条
-│   │           ├── hierarchy.rs   # 实体列表
+│   │           ├── toolbar.rs     # 顶部工具条（含 ⌂ Projects）
+│   │           ├── hierarchy.rs   # 实体层级树
+│   │           ├── prefabs.rs     # 预制体资源面板（新）
 │   │           ├── inspector.rs   # 属性编辑
 │   │           ├── scene_view.rs  # 3D 视口
 │   │           ├── console.rs     # 控制台
 │   │           └── theme.rs       # 暗色主题
-│   └── xgame-game/                # 独立游戏（新）
+│   └── xgame-game/                # 独立游戏
 │       └── src/
-│           └── main.rs            # 游戏入口
+│           └── main.rs            # 游戏入口（参数 > exe 同目录项目 > 示例项目）
 └── README.md
 ```
 
 ## 运行命令
 
 ```powershell
-# 编辑器
+# 编辑器 —— 打开项目枢纽
 cargo run -p xgame-editor
 
-# 独立游戏
-cargo run -p xgame-game
+# 编辑器 —— 直接打开指定项目
+cargo run -p xgame-editor -- projects/SampleScene
+
+# 独立游戏 —— 运行指定项目（省略参数时默认 projects/SampleScene）
+cargo run -p xgame-game -- projects/SampleScene
+
+# 一键构建发布包到 dist\（等价于双击根目录的「一键构建.cmd」）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
+
+编辑器内的「🔨 Build」按钮则是把**当前项目**打包到 `<项目目录>/Build/<项目名>/`，
+产物里的 exe 双击即玩。

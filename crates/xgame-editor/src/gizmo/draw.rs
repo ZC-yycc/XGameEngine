@@ -2,7 +2,7 @@
 //!
 //! 所有绘制通过 `egui::Painter` 进行，绘制目标为视口之上的叠加层。
 
-use xgame_math::glam::{Mat4, Vec3};
+use xgame_math::glam::Vec3;
 
 use super::{
     GizmoCtx,
@@ -12,38 +12,22 @@ use super::{
 };
 use super::math::{all_valid_screen, is_valid_screen, project_to_screen};
 use super::shapes::{TranslateShape, RotateShape, ScaleShape};
-use crate::state::{GizmoDrag, GizmoPart, ToolMode};
+use crate::state::{GizmoPart, ToolMode};
 
 // ---------------------------------------------------------------------------
 // 公共绘制入口
 // ---------------------------------------------------------------------------
 
 /// 绘制当前工具模式下的 gizmo。
-pub fn draw_gizmo(
-    painter:                    &egui::Painter,
-    view_proj:                  &Mat4,
-    entity_pos:                 Vec3,
-    screen_size:                egui::Vec2,
-    tool_mode:                  ToolMode,
-    hovered:                    Option<GizmoPart>,
-    active:                     Option<&GizmoDrag>,
-    gizmo_size:                 f32,
-    screen_offset:              egui::Vec2,
-) {
-    let ctx = GizmoCtx {
-        view_proj: *view_proj,
-        screen_size,
-        screen_offset,
-        entity_pos,
-        gizmo_size,
-        hovered,
-        active: active.cloned(),
-    };
-
+///
+/// 只收「当帧算好的 ctx + 工具模式」：投影矩阵、视口尺寸、实体世界位置、gizmo 大小
+/// 这些输入本来就都在 [`GizmoCtx`] 里，早先从 ctx 里拆成 9 个参数传进来、进门第一件事
+/// 又是把它们原样装回一个 ctx —— 纯属来回倒手，还留了个"参数和 ctx 不同步"的口子。
+pub fn draw_gizmo(painter: &egui::Painter, ctx: &GizmoCtx, tool_mode: ToolMode) {
     match tool_mode {
-        ToolMode::Translate => draw_translate(painter, &ctx),
-        ToolMode::Rotate => draw_rotate(painter, &ctx),
-        ToolMode::Scale => draw_scale(painter, &ctx),
+        ToolMode::Translate => draw_translate(painter, ctx),
+        ToolMode::Rotate => draw_rotate(painter, ctx),
+        ToolMode::Scale => draw_scale(painter, ctx),
         ToolMode::Rect => {}
     }
 }
@@ -200,7 +184,7 @@ fn draw_cube_at(
     // 检查退化：如果方块在屏幕上太小，跳过填充只画十字线
     if half < 0.5 {
         // 退化时画一个小十字线代替
-        let stroke = egui::Stroke::new(1.5, stroke_color);
+        let stroke = egui::Stroke::new(1.5_f32, stroke_color);
         painter.add(egui::Shape::line_segment(
             [egui::pos2(s_center.x - 2.0, s_center.y), egui::pos2(s_center.x + 2.0, s_center.y)],
             stroke,
@@ -220,7 +204,7 @@ fn draw_cube_at(
             egui::pos2(s_center.x - half, s_center.y + half),
         ],
         fill,
-        egui::Stroke::new(1.5, stroke_color),
+        egui::Stroke::new(1.5_f32, stroke_color),
     ));
 }
 
@@ -245,7 +229,7 @@ fn draw_translate(painter: &egui::Painter, ctx: &GizmoCtx) {
         } else {
             PLANE_FILL
         };
-        let sw = if hl { 2.5 } else { 1.5 };
+        let sw = if hl { 2.5_f32 } else { 1.5_f32 };
         draw_convex_poly_3d(painter, &plane.corners, ctx, fill, egui::Stroke::new(sw, color));
     }
 

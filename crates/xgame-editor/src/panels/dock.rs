@@ -17,6 +17,7 @@ use crate::state::EditorState;
 #[derive(Debug, Clone, Display, PartialEq, Panel)]
 pub enum PanelTab {
     Hierarchy,
+    Prefabs,
     SceneView,
     Inspector,
     Console,
@@ -27,11 +28,20 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
 
     // Insert pane tiles
     let hier = tiles.insert_pane(PanelTab::Hierarchy);
+    let prefs = tiles.insert_pane(PanelTab::Prefabs);
     let scene = tiles.insert_pane(PanelTab::SceneView);
     let insp = tiles.insert_pane(PanelTab::Inspector);
     let cons = tiles.insert_pane(PanelTab::Console);
 
     // ── Build containers with custom shares ──
+
+    // Left column: Hierarchy (60%) | Prefabs (40%)
+    // 与 Unity 一致：层级树在上，资源浏览器（预制体）在下。
+    let left_column = tiles.insert_container(
+        Linear::new(LinearDir::Vertical, vec![hier, prefs])
+            .with_share(hier, 0.60)
+            .with_share(prefs, 0.40),
+    );
 
     // Top row: Scene View (75%) | Inspector (25%)
     let top_row = tiles.insert_container(
@@ -47,11 +57,11 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
             .with_share(cons, 0.25),
     );
 
-    // Root: Hierarchy (20%) | right_column (80%)
+    // Root: left_column (22%) | right_column (78%)
     let root = tiles.insert_container(
-        Linear::new(LinearDir::Horizontal, vec![hier, right_column])
-            .with_share(hier, 0.20)
-            .with_share(right_column, 0.80),
+        Linear::new(LinearDir::Horizontal, vec![left_column, right_column])
+            .with_share(left_column, 0.22)
+            .with_share(right_column, 0.78),
     );
 
     Tree::new("editor_tree", root, tiles)

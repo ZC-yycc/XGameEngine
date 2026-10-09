@@ -1,0 +1,21 @@
+[package]
+name = "xgame-script"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine scripting: embedded Rhai host with a game-facing API"
+
+[dependencies]
+xgame-core = { path = "../xgame-core" }
+xgame-math = { path = "../xgame-math" }
+xgame-input = { path = "../xgame-input" }
+xgame-physics = { path = "../xgame-physics" }
+# `f32_float` 是必须的，不是优化项：
+#
+# Rhai 默认用 f64 表示浮点，而引擎（glam / wgpu / rapier）里的一切都是 f32。
+# 后果是脚本里写 `set_pos(ctx, 5.0, 0.0, 0.0)` 会得到
+# "Function not found: set_pos (ScriptCtx, f64, f64, f64)" —— 参数类型对不上；
+# 更阴的是 `speed * delta(ctx)`（f64 字面量 × f32 返回值）也会在运行时炸。
+# 把 Rhai 的 FLOAT 也定成 f32，整条链路才是一致的，脚本作者也不用写 `5.0f32`。
+rhai = { version = "1", features = ["sync", "f32_float"] }
+log = "0.4"
+thiserror = "2"

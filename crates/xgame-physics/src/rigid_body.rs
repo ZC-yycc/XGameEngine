@@ -37,6 +37,12 @@ pub struct RigidBody {
     pub linear_damping: f32,
     /// 重力是否影响该刚体。
     pub gravity_enabled: bool,
+    /// 重力缩放系数（1 = 正常，0 = 失重，负数 = 反重力）。
+    ///
+    /// 与 `gravity_enabled` 并存而不是取代它：后者是给"要不要重力"这个
+    /// 二元问题的显式开关，前者负责连续调节。实际生效的重力 =
+    /// `gravity_enabled as f32 * gravity_scale * 世界重力`。
+    pub gravity_scale: f32,
     /// 该刚体是否可以休眠（性能优化）。
     pub can_sleep: bool,
 }
@@ -52,6 +58,7 @@ impl Default for RigidBody {
             angular_damping: 0.1,
             linear_damping: 0.1,
             gravity_enabled: true,
+            gravity_scale: 1.0,
             can_sleep: true,
         }
     }

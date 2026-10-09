@@ -11,41 +11,62 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
         .min_height(TOOLBAR_HEIGHT)
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
+                // ── 项目 ──
+                if ui
+                    .button("⌂  Projects")
+                    .on_hover_text("关闭当前项目，返回项目枢纽")
+                    .clicked()
+                {
+                    state.return_to_hub = true;
+                }
+
+                ui.separator();
+
                 // ── 播放控制 ──
                 let play_btn = egui::Button::new(if state.play_mode == PlayMode::Playing {
                     "⏸  Playing"
                 } else {
                     "▶  Play"
                 });
+                // 这里只切 `play_mode`；运行时的启停由主循环检测状态跃迁后执行
+                // （`enter_play_mode` / `exit_play_mode`）。日志也在那边记，
+                // 免得同一个动作在 Console 里出现两条。
                 if ui.add(play_btn).clicked() {
                     state.play_mode = match state.play_mode {
-                        PlayMode::Edit => {
-                            state.log_info("Entered Play mode");
-                            PlayMode::Playing
-                        }
+                        PlayMode::Edit => PlayMode::Playing,
                         PlayMode::Playing => PlayMode::Edit,
                         PlayMode::Paused => PlayMode::Playing,
                     };
                 }
 
                 let pause_btn = egui::Button::new("⏸  Pause");
-                if ui.add(pause_btn).clicked() {
-                    state.play_mode = match state.play_mode {
-                        PlayMode::Playing => {
-                            state.log_info("Play mode paused");
-                            PlayMode::Paused
-                        }
-                        _ => PlayMode::Paused,
-                    };
+                if ui.add(pause_btn).clicked() && state.play_mode == PlayMode::Playing {
+                    state.play_mode = PlayMode::Paused;
+                    state.log_info("⏸ Pause — 物理与脚本暂停，场景保持当前状态");
                 }
 
                 let stop_btn = egui::Button::new("⏹  Stop");
                 if ui.add(stop_btn).clicked() && state.play_mode != PlayMode::Edit {
                     state.play_mode = PlayMode::Edit;
-                    state.log_info("Returned to Edit mode");
                 }
 
                 ui.separator();
+
+                // ── 脚本热重载 ──
+                // 只在运行中有意义：编辑态没有运行时，脚本本来就没在跑。
+                if state.play_mode != PlayMode::Edit {
+                    if ui
+                        .button("⟳  Scripts")
+                        .on_hover_text(
+                            "重新编译项目里的全部 .rhai 脚本\n\
+                             改完脚本不用退出 Play，编译一次即刻生效",
+                        )
+                        .clicked()
+                    {
+                        state.reload_scripts();
+                    }
+                    ui.separator();
+                }
 
                 // ── 变换工具 ──
                 let tools = [
@@ -83,6 +104,33 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // ── 构建 ──
+                    // right_to_left 布局：先加的在最右边，所以先画构建按钮。
+                    if ui
+                        .button("🔨  Build")
+                        .on_hover_text(
+                            "把当前项目打包成可独立运行的游戏\n\
+                             输出到 <项目目录>/Build/<项目名>/，产物里的 exe 双击即玩",
+                        )
+                        .clicked()
+                    {
+                        state.build_project();
+                    }
+
+                    // 构建过之后才出现：直接打开产物目录
+                    if let Some(dir) = state.last_build_dir.clone() {
+                        if ui
+                            .button("📂")
+                            .on_hover_text(format!("打开输出目录\n{}", dir.display()))
+                            .clicked()
+                        {
+                            open_in_file_manager(&dir);
+                        }
+                    }
+
+                    ui.separator();
+                    ui.label(format!("Project: {}", state.project_name()));
+                    ui.separator();
                     ui.label(format!(
                         "{} | {} entities",
                         state.scene.name,
@@ -91,4 +139,16 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 });
             });
         });
+}
+
+/// 用系统文件管理器打开目录。
+///
+/// Windows 上 `explorer` 即使成功也可能返回非 0 退出码，所以这里**不检查**退出码。
+fn open_in_file_manager(dir: &std::path::Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
 }

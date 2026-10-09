@@ -10,10 +10,12 @@
 //! | `config` | 引擎/窗口/内容路径配置 |
 //! | `transform` | 层级空间变换（位置/旋转/缩放）|
 //! | `scene` | 场景图：`Scene`, `Entity` |
+//! | `prefab` | 预制体：`Prefab`, `PrefabInstanceRef`（可复用的实体子树模板）|
 //! | `id` | 稳定实体标识符 `EntityId` |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
 //! | `asset` | `AssetId` 轻量资产句柄 |
+//! | `project` | 项目清单 `Project` + 项目句柄 `ProjectHandle` |
 //!
 //! # 依赖方向
 //!
@@ -31,21 +33,34 @@ mod color;
 mod config;
 mod scene;
 mod transform;
+pub mod prefab;
+pub mod project;
 
 // 新增模块
 mod asset;
 mod component;
 mod id;
+mod light;
+pub mod physics;
+pub mod ray;
 mod time;
 
 // -- 导出：旧有类型（保持向后兼容）
 pub use color::Color;
 pub use config::{ContentConfig, EngineConfig, WindowConfig};
+pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
 pub use scene::{Entity, Scene};
 pub use transform::Transform;
+pub use project::{
+    Project, ProjectError, ProjectHandle, DEFAULT_ENTRY_SCENE, PROJECT_FILE_NAME,
+    PROJECT_FORMAT_VERSION,
+};
 
 // -- 导出：新增基础设施
 pub use asset::AssetId;
 pub use component::{Component, ComponentMap, ModelPath, Name};
 pub use id::{EntityId, EntityMap, EntitySet};
+pub use light::{Light, LightKind};
+pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
+pub use ray::{Ray, RayHit};
 pub use time::{GameClock, Stopwatch, Timer};

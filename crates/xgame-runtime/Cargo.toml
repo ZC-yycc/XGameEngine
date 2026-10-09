@@ -1,0 +1,13 @@
+[package]
+name = "xgame-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine runtime: the world that ties scene, physics, input and scripting together"
+
+[dependencies]
+xgame-core = { path = "../xgame-core" }
+xgame-math = { path = "../xgame-math" }
+xgame-input = { path = "../xgame-input" }
+xgame-physics = { path = "../xgame-physics" }
+xgame-script = { path = "../xgame-script" }
+log = "0.4"

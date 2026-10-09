@@ -1,0 +1,27 @@
+// SampleScene 的输入映射。
+//
+// 项目根目录放一个 `input.ron`，编辑器的 Play 模式和打包出来的游戏都会读它；
+// 没有这个文件就退回引擎内置的默认映射。改按键不用改脚本、更不用重编引擎。
+//
+// 格式：
+//   Key(...)   物理键位（与键盘布局无关），名字与 W3C `KeyboardEvent.code` 一致
+//   Mouse(...) 鼠标按键：Left / Right / Middle
+//   一个动作可以绑多个按键 —— 数组里每一项都是一个绑定
+//   axes 是双向轴：positive 减 negative，取值落在 -1..1
+//   Combo(...) 是「修饰键 + 主键」的组合，四个修饰位是**精确匹配**
+InputMap(
+    actions: {
+        "Jump": [Key(Space)],
+        "Fire": [Mouse(Left)],
+        "Aim": [Mouse(Right)],
+        "Sprint": [Key(ShiftLeft)],
+        "Interact": [Key(KeyE)],
+        "Reload": [Key(KeyR)],
+        "TogglePause": [Key(KeyP)],
+    },
+    axes: {
+        "MoveX": (positive: [Key(KeyD)], negative: [Key(KeyA)]),
+        "MoveY": (positive: [Key(KeyW)], negative: [Key(KeyS)]),
+        "Lift": (positive: [Key(KeyE)], negative: [Key(KeyQ)]),
+    },
+)

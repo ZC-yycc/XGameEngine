@@ -4,6 +4,38 @@
 
 ---
 
+## 零、引擎与游戏项目分离（已完成）
+
+引擎（本仓库 `crates/`）与游戏项目（磁盘上任意目录）彻底分家。编辑器启动后先进入
+**项目枢纽**，选定或新建项目之后才进编辑器主界面；所有资产路径都按**项目根目录**
+解析。编辑器与独立游戏都不再依赖进程当前工作目录，项目目录可以随便移动。
+
+```
+XGameEngine/                  # 引擎源码仓库
+├── crates/                   # 引擎 + 编辑器 + 游戏二进制
+└── projects/<项目名>/         # 游戏项目（默认位置，可放到任意目录）
+    ├── project.ron           # 项目清单：名称 / 入口场景 / 窗口 / 内容目录
+    ├── Scenes/
+    └── Resources/
+```
+
+关键改动：
+
+| 位置 | 内容 |
+|---|---|
+| `xgame-core::project` | `Project` 清单 + `ProjectHandle`（open / create / save / 路径解析） |
+| `xgame-editor::hub` | 项目枢纽界面：新建 / 打开 / 最近项目（原生目录选择器 `rfd`） |
+| `xgame-editor::recents` | 最近项目持久化（`%APPDATA%\XGameEngine\recent_projects.ron`） |
+| `xgame-editor::main` | `EditorApp` 拆成「项目枢纽 / 编辑器会话」两态 |
+| `xgame-editor::scene_renderer` | 按项目根目录解析 `entity.model` |
+| `xgame-game::main` | 接收项目路径，入口场景与资产均按项目根解析 |
+
+> 遗留：`GameRuntime`（`xgame-editor/src/game_runtime.rs`）与 `xgame-game` 的物理
+> 初始化 / 同步逻辑仍是两份重复实现。要彻底去重，需要把运行时提到独立 crate
+> （见架构原则 3）。
+
+---
+
 ## 一、现状：两个入口
 
 当前架构经过两次重构，有两个可运行的二进制：
@@ -106,6 +138,23 @@ Play 模式下 Hierarchy 面板禁用增删。
 
 状态栏显示 `Playing | 3 entities | 60.0 FPS | Bodies: 3 | Colliders: 3`
 
+### 3.7 场景层级 Scene Graph（已完成）
+
+`Entity::parent`（按 ID 单向引用）+ `Scene::world_matrix` / `world_matrices` 世界矩阵
+解算；层级面板是**可折叠的树**，拖拽重挂父节点保留世界变换并自动防环；渲染 / 物理 /
+Gizmo 全部走世界变换；复制 / 粘贴 / 删除是**子树**语义。
+
+### 3.8 预制体 Prefab（已完成）
+
+把一棵实体子树存成 `Prefabs/*.prefab.ron` 资产并反复实例化：
+
+- `xgame-core::prefab`：`Prefab { name, entities }` + `from_subtree()` 提取 +
+  `instantiate()` 实例化（重映射 ID / 父引用，并贴上 `PrefabInstanceRef` 来源标记）；
+- `Entity::prefab` 记录「来自哪份资产、对应资产里哪个实体、是不是实例根」；
+- 编辑器 Prefabs 面板：列资产 / 搜索 / 点击实例化 / 从选中创建 / 删除；
+- **Apply** 把实例改动写回资产，**Revert** 用资产覆盖回实例（保留实例根的世界位置）；
+- 构建（🔨 Build）会把 `Prefabs/` 一并打进产物。
+
 ---
 
 ## 四、阶段三：完整游戏管线
@@ -114,9 +163,19 @@ Play 模式下 Hierarchy 面板禁用增删。
 
 文件浏览器面板，拖拽 glTF 到场景中创建实体。
 
+> 进度：**Prefabs 面板已落地**（列资产 / 搜索 / 实例化 / 删除）；
+> 还缺 `Resources/` 里模型资产的列举与"拖进场景"。
+
 ### 4.2 Gizmo 变换工具
 
 Scene View 中的拖拽操作柄：平移 / 旋转 / 缩放。
+
+> 进度：三轴平移 / 旋转 / 缩放已可用（世界空间换算回局部）；**Rect 工具**与
+> **吸附**（`gizmo_snap`）尚未接线。
+>
+> 轴拖拽的数学见 [FLOW.md](FLOW.md) 的「Gizmo 的三个坑」——轴上的位移量必须由
+> **直线投影**（`axis_param_under_mouse`）求，不能用「过实体、垂直于轴的平面交点」，
+> 后者在轴上的投影恒为 0。一次拖拽进撤销栈**一步**（拖拽前快照，松手才入栈）。
 
 ### 4.3 编辑器 - 运行时互操作
 
@@ -141,6 +200,10 @@ Scene View 中的拖拽操作柄：平移 / 旋转 / 缩放。
 3. **GameRuntime 不依赖编辑器**：核心业务逻辑与 UI 解耦（当前位于 editor crate，后续可提取）
 4. **固定步长优先**：物理 / 未来动画系统使用固定时间步长
 5. **功能先于性能**：先跑通，再优化
+6. **引擎与项目解耦**：引擎不假设游戏内容在哪；`project.ron` + `ProjectHandle`
+   是访问资产的唯一入口，资产路径一律相对项目根目录解析
+7. **编辑器是工具，不是项目的一部分**：编辑器二进制可打开磁盘上任意项目，
+   游戏项目目录不出现在 `crates/` 里
 
 ---
 
@@ -155,7 +218,11 @@ Scene View 中的拖拽操作柄：平移 / 旋转 / 缩放。
 | `crates/xgame-editor/src/game_runtime.rs` | 一 | 编辑器无关的游戏运行时 |
 | `crates/xgame-render/src/scene_pipeline.rs` | 二 | 共享渲染管线（WGSL + pipeline + uniform）|
 | `crates/xgame-game/Cargo.toml` | 二 | 独立游戏二进制 |
-| `crates/xgame-game/src/main.rs` | 二 | 独立游戏循环 |
+| `crates/xgame-game/src/main.rs` | 二 | 独立游戏循环（现按项目根解析资产）|
+| `crates/xgame-core/src/project.rs` | 零 | 项目清单 + `ProjectHandle` |
+| `crates/xgame-editor/src/hub.rs` | 零 | 项目枢纽界面 |
+| `crates/xgame-editor/src/recents.rs` | 零 | 最近项目持久化 |
+| `projects/SampleScene/` | 零 | 从仓库根迁出的示例项目（原 `Scenes/` + `Resources/`）|
 
 ### 后续需创建
 
@@ -169,4 +236,70 @@ Scene View 中的拖拽操作柄：平移 / 旋转 / 缩放。
 |---|---|
 | `crates/xgame-editor/src/panels/state.rs` | Gizmo 状态 |
 | `crates/xgame-editor/src/panels/scene_view.rs` | Gizmo 交互叠加层 |
+
+---
+
+## 七、商业引擎对齐（本轮）
+
+对照商业引擎补齐了一批最显眼的短板，详见 `ROADMAP.md` 的「商业引擎对齐」表。
+
+关键改动：
+
+| 位置 | 内容 |
+|---|---|
+| `xgame-core/src/light.rs` | 新增 `Light` / `LightKind`；光源是场景级数据 |
+| `xgame-core/src/scene.rs` | `Scene` 增加 `lights` / `ambient`（`#[serde(default)]` 兼容旧文件）|
+| `xgame-render/src/scene_pipeline.rs` | 引入 `group(1)` 材质绑定组、Blinn-Phong、多光源数组、透明管线 |
+| `xgame-render/src/gltf_loader.rs` | 读 glTF 材质因子（base color / metallic / roughness / alphaMode）；新增 `GltfMesh::load` 统一入口 |
+| `xgame-render/src/mesh.rs` | 新增内置图元生成（Cube / Sphere / Plane / Cylinder）与 `BuiltinMesh` |
+| `xgame-editor/src/state.rs` | 新增 `UndoStack`（快照式撤销）、实体剪贴板、`create_primitive` |
+| `xgame-editor/src/panels/inspector.rs` | 所有属性编辑接入撤销栈；新增内置图元快捷切换 |
+| `xgame-editor/src/panels/hierarchy.rs` | 创建菜单加入 Create Primitive；新增 Copy / Paste 与快捷键 |
+
+> 渲染管线改动是**破坏性 API 变更**：`ScenePipeline::render` 现在多收
+> `device` 与 `SceneLighting` 两个参数，调用点（`scene_renderer.rs`、
+> `xgame-game/src/main.rs`）已同步更新。
+
+---
+
+## 八、玩法层（本轮完成）
+
+到目前为止引擎"能摆场景"，但还"不能做游戏"—— 缺的是**输入**、**脚本**，
+以及一个把各子系统编排起来的**运行时**。这一轮的四个新 crate：
+
+```
+core ← math ← {render, physics}
+  ↑        ↑
+  └── input / script        ← 设备抽象与脚本宿主
+             ↑
+         runtime            ← 编排：场景 + 物理 + 输入 + 脚本
+             ↑
+     editor(Play) / game    ← 两个宿主共用同一段 update
+```
+
+| 位置 | 内容 |
+|---|---|
+| `xgame-input` | `KeyCode`/`MouseButton`（与 winit 解耦）、`InputState`（按住 / 本帧按下 / 本帧松开）、`InputMap`（项目级 `input.ron`：多绑定 / 修饰键组合 / 双向轴）；窗口库翻译只在接窗口的二进制里发生 |
+| `xgame-script` | 嵌入式 Rhai；`ScriptHost` 负责编译缓存、生命周期派发、命令回收；宿主 API 覆盖变换 / 实体 / 物理 / 输入 / 时间 / 日志；`state_*` 提供按 `(实体, 脚本)` 分开的持久状态 |
+| `xgame-runtime` | `World`：唯一编排者。固定步长与渲染帧解耦；**动态体由物理驱动、运动学体由脚本驱动**；`FrameReport` 供 UI 读 |
+| `xgame-core` | `Entity::{scripts, physics}`、`PhysicsBody`/`CollisionShape`/`BodyKind`、`PhysicsHandle`（运行时组件）、`Ray`/`RayHit`、`Light::{casts_shadow, shadow_resolution}`、`ContentConfig::scripts_dir` |
+| `xgame-physics` | `scene_body::body_from_scene`（声明 → rapier 刚体）、`raycast` / `raycast_with_filter` / `RaycastFilter`、`set_velocity` / `teleport` / `set_rotation` / `sync_queries` |
+| `xgame-editor` | `game_runtime.rs` 变成 `World` 的薄壳（场景所有权用 `mem::swap` 交接，O(1)）；Inspector 的 Scripts / Physics 区块；Hierarchy 徽标；工具栏 `⟳ Scripts`；`input_bridge` 把 egui 键鼠灌进运行时 |
+| `xgame-game` | 改用 `World`；窗口事件翻译成引擎输入；读项目 `input.ron`；脚本日志转发到 `log` |
+
+### 两个刻意的取舍
+
+1. **场景所有权用 `mem::swap` 交接，而不是把场景包进 `Rc<RefCell<_>>`。**
+   `World` 拥有场景，但编辑器几十处面板代码都直接读 `state.scene`。改所有权模型
+   要动几十个调用点；包 `RefCell` 会把借用检查推到运行期。交换整个 `Scene` 是
+   **O(1)**（换三个指针），比每帧克隆整份场景便宜几个数量级。
+   前提是"`update` 期间没人读 `state.scene`"——这一点写在 `update_with_scene` 的注释里。
+
+2. **脚本的结构性改动立即生效，而不是攒成命令延后执行。**
+   延后执行会让 `let id = spawn_entity(...)` 之后的 `set_entity_pos(id, ...)`
+   静默失效 —— 而"先生成、再摆位置"是最自然的写法。立即执行之所以安全，
+   是因为派发脚本时遍历的是一份 `(实体 ID, 脚本路径)` 快照，且所有查找都按 ID，
+   增删实体最多让后面的脚本少看到一个实体。运行时通过一份**通知**
+   （`EntitySpawned` / `EntitiesRemoved` / `Reparented`）知道该补建 / 清理哪些刚体。
+
 <!-- markdownlint-disable-file -->

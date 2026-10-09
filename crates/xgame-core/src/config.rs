@@ -39,23 +39,16 @@ impl Default for WindowConfig {
 // ---------------------------------------------------------------------------
 
 /// 引擎顶层配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Default` 直接派生：每个字段的默认值就是它自己 `Default::default()` 的结果，
+/// 手写一份只是把同样的东西再抄一遍，抄漏一个字段还会静默变成"和别处不一样"。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineConfig {
     pub window: WindowConfig,
     /// 目标帧率。0 = 不限制。
     pub target_fps: u32,
     #[serde(default)]
     pub content: ContentConfig,
-}
-
-impl Default for EngineConfig {
-    fn default() -> Self {
-        Self {
-            window: WindowConfig::default(),
-            target_fps: 0,
-            content: ContentConfig::default(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -76,9 +69,35 @@ pub struct ContentConfig {
     /// 音频资产目录。
     pub audio_dir: String,
     /// 着色器资产目录。
+    #[serde(default = "default_shaders_dir")]
     pub shaders_dir: String,
+    /// 预制体资产目录。
+    ///
+    /// 带 `serde(default)`：这个字段是后加的，老项目的 `project.ron` 里没有它，
+    /// 反序列化时补默认值即可，不必强制升级清单文件。
+    #[serde(default = "default_prefabs_dir")]
+    pub prefabs_dir: String,
+    /// 脚本目录（`.rhai` 文件）。
+    ///
+    /// 同样带 serde 默认值：脚本是后加的能力，老清单里没有这一项。
+    /// 运行时也**只**用默认值兜底，不会因为目录不存在就报错 ——
+    /// 一个还没写脚本的项目完全合法。
+    #[serde(default = "default_scripts_dir")]
+    pub scripts_dir: String,
     /// 附加搜索路径列表。
     pub search_paths: Vec<String>,
+}
+
+fn default_shaders_dir() -> String {
+    "Shaders".into()
+}
+
+fn default_prefabs_dir() -> String {
+    "Prefabs".into()
+}
+
+fn default_scripts_dir() -> String {
+    "Scripts".into()
 }
 
 impl Default for ContentConfig {
@@ -88,7 +107,9 @@ impl Default for ContentConfig {
             models_dir: "Resources".into(),
             textures_dir: "Resources".into(),
             audio_dir: "Resources".into(),
-            shaders_dir: "Shaders".into(),
+            shaders_dir: default_shaders_dir(),
+            prefabs_dir: default_prefabs_dir(),
+            scripts_dir: default_scripts_dir(),
             search_paths: Vec::new(),
         }
     }

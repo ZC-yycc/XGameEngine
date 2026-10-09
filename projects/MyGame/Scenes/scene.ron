@@ -1,0 +1,27 @@
+(
+    name: "New Scene",
+    entities: [
+        (
+            name: "Main Camera",
+            transform: (
+                position: (0.0, 1.0, -5.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            model: "",
+            id: (1),
+        ),
+    ],
+    lights: [
+        (
+            name: "Directional Light",
+            kind: Directional,
+            direction: (0.5, -1.0, 0.5),
+            position: (0.0, 0.0, 0.0),
+            color: (1.0, 0.98, 0.95),
+            intensity: 3.0,
+            range: 10.0,
+        ),
+    ],
+    ambient: (0.06, 0.06, 0.08),
+)

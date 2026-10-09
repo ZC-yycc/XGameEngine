@@ -3,9 +3,26 @@ resolver = "2"
 members = [
     "crates/xgame-core",
     "crates/xgame-derive",
+    "crates/xgame-input",
     "crates/xgame-math",
+    "crates/xgame-script",
+    "crates/xgame-runtime",
     "crates/xgame-render",
     "crates/xgame-physics",
     "crates/xgame-editor",
     "crates/xgame-game",
 ]
+
+# 日常 `cargo run -p xgame-editor` 走的是 dev profile，默认 **零优化**。
+# 这对这个项目特别伤：一帧的开销几乎全在依赖里（egui 的排版/镶嵌、wgpu 的校验层、
+# glam 的数学），全量未优化时单帧能从个位数毫秒掉到几十毫秒 —— 表现出来正是
+# "拖一下窗口就卡"。上游 egui 的同类报告里，官方给的第一个建议也是这一条。
+#
+# 所以：自己的代码轻优化（保住编译速度），依赖全优化（运行时才是它撑着）。
+# 首次构建会因此多花几分钟重编依赖，之后是增量的。发布构建（一键构建.cmd 走的
+# release profile）不受影响。
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

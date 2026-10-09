@@ -3,10 +3,12 @@
 //! 场景是游戏世界的顶层容器，包含实体列表。实体现在拥有稳定 ID
 //! 和可选的运行时组件集合，向后兼容旧版 RON 场景文件。
 
+use glam::Mat4;
 use serde::{Deserialize, Serialize};
 
 use crate::component::ComponentMap;
 use crate::id::EntityId;
+use crate::light::Light;
 use crate::transform::Transform;
 
 /// 场景图中的单个游戏对象。
@@ -14,19 +16,51 @@ use crate::transform::Transform;
 /// 每个实体有一个稳定标识符（`id`）、名称、变换和关联模型路径。
 /// `components` 字段存储运行时组件，不会被序列化到场景文件中。
 ///
-/// 旧版 .ron 文件（不含 `id` 字段）仍可正确反序列化，因为
-/// `id` 使用 `#[serde(default)]`。
+/// 旧版 .ron 文件（不含 `id` / `parent` 字段）仍可正确反序列化，因为
+/// 两者都使用 `#[serde(default)]`：`id` 会分配一个新 ID，`parent` 补成
+/// `None`（即所有实体都落在场景根层）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
     /// 实体的显示名称。
     pub name: String,
-    /// 局部空间变换。
+    /// **局部空间**变换（相对父节点；没有父节点时即世界变换）。
     pub transform: Transform,
     /// glTF 模型路径（相对于工作区）。空字符串表示没有模型。
     pub model: String,
     /// 稳定唯一标识符。旧版文件反序列化时自动分配新 ID。
     #[serde(default)]
     pub id: EntityId,
+    /// 父实体的 ID。`None` = 场景根节点。
+    ///
+    /// 层级刻意**按 ID 单向引用**，而不是在每个实体里内嵌一份子节点列表：
+    /// 内嵌列表一旦与实体列表不同步（删除、粘贴、反序列化都可能踩），就会留下
+    /// "幽灵子节点"。这里子节点永远由 [`Scene::children`] 现算，唯一真相
+    /// 就是这一条 `parent`——牺牲一点查询开销，换掉一整类不一致 bug。
+    #[serde(default)]
+    pub parent: Option<EntityId>,
+    /// 预制体实例来源——只有「预制体实例」里的实体才带（见 [`crate::prefab`]）。
+    ///
+    /// `skip_serializing_if` 让普通实体的场景文件里完全不出现这个字段，
+    /// 场景文件不会被一行行 `prefab: None` 灌满；同时 `#[serde(default)]`
+    /// 保证旧文件（没这个字段）照常加载成 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefab: Option<crate::prefab::PrefabInstanceRef>,
+    /// 挂在这个实体上的脚本（项目相对路径，例如 `Scripts/Player.rhai`）。
+    ///
+    /// 存的是**路径**而不是脚本内容：脚本是资产，要能一改全生效、
+    /// 要在多个实体间共享、要能进版本库。把内容内联进场景文件，
+    /// 会让"改一次逻辑"变成"改几十个场景"。
+    ///
+    /// 顺序即执行顺序（同一实体内多个脚本按列表顺序跑），这是刻意保留的
+    /// 一个可控点：玩家脚本依赖另一个脚本先算出的状态时，能靠顺序表达。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<String>,
+    /// 物理属性。`None` = 不参与物理（纯视觉实体）。
+    ///
+    /// 旧场景文件没有这个字段，反序列化成 `None` —— 语义上正好等于
+    /// "老场景里的物体都是静态装饰"，与当时的行为一致，不会突然被重力拽走。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physics: Option<crate::physics::PhysicsBody>,
     /// 运行时组件集合（反序列化时默认为空）。
     #[serde(skip)]
     pub components: ComponentMap,
@@ -40,6 +74,10 @@ impl Entity {
             transform: Transform::IDENTITY,
             model: String::new(),
             id: EntityId::new(),
+            parent: None,
+            prefab: None,
+            scripts: Vec::new(),
+            physics: None,
             components: ComponentMap::new(),
         }
     }
@@ -59,6 +97,28 @@ impl Entity {
     pub fn with_transform(mut self, transform: Transform) -> Self {
         self.transform = transform;
         self
+    }
+
+    /// 挂一个脚本（追加到执行顺序末尾）。
+    pub fn with_script(mut self, script: impl Into<String>) -> Self {
+        self.scripts.push(script.into());
+        self
+    }
+
+    /// 设置物理属性。
+    pub fn with_physics(mut self, physics: crate::physics::PhysicsBody) -> Self {
+        self.physics = Some(physics);
+        self
+    }
+
+    /// 这个实体是否参与物理。
+    pub fn has_physics(&self) -> bool {
+        self.physics.is_some()
+    }
+
+    /// 是否有脚本。
+    pub fn has_scripts(&self) -> bool {
+        !self.scripts.is_empty()
     }
 
     /// 向实体添加一个运行时组件。
@@ -89,14 +149,38 @@ pub struct Scene {
     pub name: String,
     /// 场景中的实体列表。
     pub entities: Vec<Entity>,
+    /// 场景光源。旧场景文件没有这个字段，反序列化时补一盏默认方向光
+    /// （而不是空列表）——否则老工程一打开就是全黑，很容易被误判成
+    /// "渲染坏了"。
+    #[serde(default = "default_lights")]
+    pub lights: Vec<Light>,
+    /// 全局环境光（线性 RGB）。所有表面都能收到的最低亮度，
+    /// 用来避免背光面纯黑。
+    #[serde(default = "default_ambient")]
+    pub ambient: [f32; 3],
+}
+
+/// 旧场景（没有 `lights` 字段）的兜底：给一盏默认方向光。
+fn default_lights() -> Vec<Light> {
+    vec![Light::default()]
+}
+
+/// 旧场景（没有 `ambient` 字段）的兜底环境光。
+fn default_ambient() -> [f32; 3] {
+    [0.06, 0.06, 0.08]
 }
 
 impl Scene {
     /// 创建一个空白场景。
+    ///
+    /// 自带一盏默认方向光和一点环境光——全黑的空场景对新手太劝退，
+    /// 而且会让人以为相机或渲染管线出了问题。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             entities: Vec::new(),
+            lights: default_lights(),
+            ambient: default_ambient(),
         }
     }
 
@@ -117,13 +201,303 @@ impl Scene {
         id
     }
 
-    /// 按 ID 移除实体。
+    /// 按 ID 移除**单个**实体。
+    ///
+    /// 它的子节点会被提升到被删实体的父节点下（"删除中间节点、子树不散架"），
+    /// 而不是连坐删除。要连子树一起删，用 [`remove_subtree`](Self::remove_subtree)。
     pub fn remove_entity(&mut self, id: EntityId) -> Option<Entity> {
-        if let Some(idx) = self.find_entity(id) {
-            Some(self.entities.remove(idx))
-        } else {
-            None
+        let idx = self.find_entity(id)?;
+        let promote_to = self.entities[idx].parent;
+        for entity in &mut self.entities {
+            if entity.parent == Some(id) {
+                entity.parent = promote_to;
+            }
         }
+        Some(self.entities.remove(idx))
+    }
+
+    // -----------------------------------------------------------------------
+    // 层级（父子关系）
+    // -----------------------------------------------------------------------
+
+    /// 按 ID 取实体在 `entities` 中的索引。
+    ///
+    /// 与 [`find_entity`](Self::find_entity) 等价；提供这个名字是为了在层级相关
+    /// 代码里读起来更贴合语义（"把 id 换成索引"）。
+    pub fn index_of(&self, id: EntityId) -> Option<usize> {
+        self.entities.iter().position(|e| e.id == id)
+    }
+
+    /// 按索引查父节点在 `entities` 中的索引。
+    ///
+    /// 父 ID 指向一个不存在的实体（比如手工编辑过的场景文件）时返回 `None`，
+    /// 视作根节点——坏数据不应该让整棵树算不出来。
+    pub fn parent_index(&self, index: usize) -> Option<usize> {
+        let parent_id = self.entities.get(index)?.parent?;
+        self.index_of(parent_id).filter(|&p| p != index)
+    }
+
+    /// 某个实体的直接子节点索引列表（按实体顺序）。
+    ///
+    /// 每次调用都会扫一遍整张实体表（O(n)）。**在循环里遍历层级时不要调它**
+    /// ——那会把一次遍历退化成 O(n²)。那种场景请先用 [`child_map`](Self::child_map)
+    /// 一次性建好子节点索引，再按索引取。
+    pub fn children(&self, index: usize) -> Vec<usize> {
+        let Some(id) = self.entities.get(index).map(|e| e.id) else {
+            return Vec::new();
+        };
+        self.entities
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| *i != index && e.parent == Some(id))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// 一次性解算**所有**实体的父子关系，把「反复扫表」的层级算法收成 O(n)。
+    ///
+    /// 返回 `parent_indices`（父索引，`None` = 根）与 `child_map`（每个索引的子索引
+    /// 列表，顺序与 [`children`](Self::children) 一致）。
+    ///
+    /// 场景的父子关系只存了 `Entity::parent` 这一条 ID 引用（见 `Entity::parent`
+    /// 的说明），所以任何"按父找子"的算法天然是 O(n) 一次的；面板要逐帧遍历整棵树
+    /// 时，逐节点调 `children()` 就是 O(n²)。这里用一张 ID→索引表把两边都压到 O(n)。
+    pub fn hierarchy(&self) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
+        let n = self.entities.len();
+
+        // 快路径：整场没有任何父子关系时（平铺场景很常见）不必白建一张 ID 映射表。
+        // `world_matrices` 每帧都调这里，省掉这次哈希表分配是有意义的。
+        if self.entities.iter().all(|e| e.parent.is_none()) {
+            return (vec![None; n], vec![Vec::new(); n]);
+        }
+
+        let index_of: std::collections::HashMap<EntityId, usize> = self
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.id, i))
+            .collect();
+
+        // 父 ID 不存在 / 父就是自己 → 视作根，与 `parent_index` 的语义保持一致。
+        let parent_indices: Vec<Option<usize>> = self
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                e.parent
+                    .and_then(|pid| index_of.get(&pid).copied())
+                    .filter(|&p| p != i)
+            })
+            .collect();
+
+        let mut child_map: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, parent) in parent_indices.iter().enumerate() {
+            if let Some(p) = *parent {
+                child_map[p].push(i);
+            }
+        }
+
+        (parent_indices, child_map)
+    }
+
+    /// 一次性解算所有实体的父索引（与 `entities` 同序同长，`None` = 根）。
+    ///
+    /// 只需要父方向时用这个，比 [`hierarchy`](Self::hierarchy) 少建一半结构。
+    pub fn parent_indices(&self) -> Vec<Option<usize>> {
+        self.hierarchy().0
+    }
+
+    /// 一次性建好「每个索引 → 子索引列表」（顺序与 [`children`](Self::children) 一致）。
+    ///
+    /// 需要反复查子节点时（层级面板展开、子树操作）用它，别在循环里调 `children`。
+    pub fn child_map(&self) -> Vec<Vec<usize>> {
+        self.hierarchy().1
+    }
+
+    /// 根节点（没有父节点，或父节点不存在）的索引列表。O(n)。
+    pub fn roots(&self) -> Vec<usize> {
+        let (parent_indices, _) = self.hierarchy();
+        (0..self.entities.len())
+            .filter(|&i| parent_indices[i].is_none())
+            .collect()
+    }
+
+    /// `ancestor` 是否是 `node` 的祖先（严格向上，不含自身）。
+    pub fn is_ancestor(&self, ancestor: usize, node: usize) -> bool {
+        let mut current = node;
+        // 自环或手工构造的环会让朴素向上走陷入死循环，用步数上限兜底。
+        for _ in 0..self.entities.len().max(1) + 1 {
+            match self.parent_index(current) {
+                Some(p) => {
+                    if p == ancestor {
+                        return true;
+                    }
+                    current = p;
+                }
+                None => return false,
+            }
+        }
+        true // 步数内没走到根 = 存在环，保守认定为祖先，避免把它挂到自己子树下
+    }
+
+    /// 计算实体的**世界矩阵**（从根一路乘到该节点）。
+    ///
+    /// 中间带环检测：数据坏了也只是结果退化，绝不无限递归。
+    pub fn world_matrix(&self, index: usize) -> Mat4 {
+        if index >= self.entities.len() {
+            return Mat4::IDENTITY;
+        }
+        let mut chain: Vec<usize> = Vec::new();
+        let mut current = index;
+        loop {
+            if chain.contains(&current) {
+                break; // 环：就此打住，把当前节点当根
+            }
+            chain.push(current);
+            match self.parent_index(current) {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+        chain
+            .iter()
+            .rev()
+            .fold(Mat4::IDENTITY, |m, &i| m * self.entities[i].transform.local_matrix())
+    }
+
+    /// 一次性算出所有实体的世界矩阵（与 `entities` 同序同长）。
+    ///
+    /// 逐帧渲染、物理同步都要用，逐个调用 [`world_matrix`](Self::world_matrix)
+    /// 会在深树上退化成 O(n·深度)。这里自底向上带记忆化，整体 O(n)。
+    ///
+    /// 注意 `parent_indices` 必须**一次性**算好：直接调 [`parent_index`](Self::parent_index)
+    /// 每条边都要线性扫一遍实体表找父 ID，整个函数会退化成 O(n²)。
+    pub fn world_matrices(&self) -> Vec<Mat4> {
+        let n = self.entities.len();
+        let parent_indices = self.parent_indices();
+        let mut out: Vec<Option<Mat4>> = vec![None; n];
+        // 环保护用的"在当前链上"标记。之所以不用 `chain.contains()`：
+        // 那是 O(链长) 的逐次扫描，遇到"子节点排在父节点前面"的深链
+        // （实体 0 是叶子、n-1 是根）整条链会退化成 O(n²)。布尔表是 O(1)。
+        let mut on_chain: Vec<bool> = vec![false; n];
+
+        for i in 0..n {
+            if out[i].is_some() {
+                continue;
+            }
+            // 从 i 向上收集一条"还没算过"的链
+            let mut chain: Vec<usize> = Vec::new();
+            let mut current = i;
+            loop {
+                if out[current].is_some() || on_chain[current] {
+                    break;
+                }
+                chain.push(current);
+                on_chain[current] = true;
+                match parent_indices[current] {
+                    Some(p) => current = p,
+                    None => break,
+                }
+            }
+            // 链顶节点的父节点若已算过，就以它为基底；否则从单位阵起算
+            let mut base = chain
+                .last()
+                .and_then(|&last| parent_indices[last])
+                .and_then(|p| out[p])
+                .unwrap_or(Mat4::IDENTITY);
+
+            for &idx in chain.iter().rev() {
+                base *= self.entities[idx].transform.local_matrix();
+                out[idx] = Some(base);
+            }
+        }
+
+        out.into_iter().map(|m| m.unwrap_or(Mat4::IDENTITY)).collect()
+    }
+
+    /// 实体的世界变换（位置 / 旋转 / 缩放）。
+    pub fn world_transform(&self, index: usize) -> Transform {
+        Transform::from_matrix(self.world_matrix(index))
+    }
+
+    /// 重新挂载父节点，**保留世界变换**（Unity 的 "keep world transform" 语义）。
+    ///
+    /// 返回 `false` 表示这次挂载被拒绝：索引越界、挂到自己身上、或挂到自己的
+    /// 子孙节点下（会成环）。拒绝时不做任何改动。
+    pub fn set_parent(&mut self, child: usize, parent: Option<usize>) -> bool {
+        if child >= self.entities.len() {
+            return false;
+        }
+        if let Some(p) = parent {
+            if p >= self.entities.len() || p == child {
+                return false;
+            }
+            if self.is_ancestor(child, p) {
+                return false; // 不能把父节点挂进自己的子树
+            }
+        }
+
+        let world = self.world_matrix(child);
+        let parent_world = parent
+            .map(|p| self.world_matrix(p))
+            .unwrap_or(Mat4::IDENTITY);
+        // 局部 = 父世界⁻¹ · 世界。父世界不可逆时（含 0 缩放）退化成不改局部，
+        // 总比把实体扔到 NaN 坐标里强。
+        let det = parent_world.determinant();
+        let local = if det.abs() > 1e-12 {
+            parent_world.inverse() * world
+        } else {
+            self.entities[child].transform.local_matrix()
+        };
+
+        self.entities[child].parent = parent.map(|p| self.entities[p].id);
+        self.entities[child].transform = Transform::from_matrix(local);
+        true
+    }
+
+    /// 某个实体及其全部子孙的索引（前序，含自身）。
+    pub fn subtree(&self, index: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        if index >= self.entities.len() {
+            return out;
+        }
+        // 子节点索引一次建好：在循环里逐个调 `children()` 会把整次遍历拖成 O(n²)。
+        let child_map = self.child_map();
+        let mut visited = vec![false; self.entities.len()];
+        let mut stack = vec![index];
+        while let Some(i) = stack.pop() {
+            if visited[i] {
+                continue; // 环保护
+            }
+            visited[i] = true;
+            out.push(i);
+            for &child in &child_map[i] {
+                stack.push(child);
+            }
+        }
+        out
+    }
+
+    /// 删除某个实体**连同其整棵子树**，返回被删掉的实体。
+    ///
+    /// 这是编辑器 `Delete` 的语义（与 Unity 一致：删父节点，子节点一起走）。
+    pub fn remove_subtree(&mut self, index: usize) -> Vec<Entity> {
+        let doomed = self.subtree(index);
+        if doomed.is_empty() {
+            return Vec::new();
+        }
+        let ids: Vec<EntityId> = doomed.iter().map(|&i| self.entities[i].id).collect();
+        let mut removed = Vec::new();
+        let mut kept = Vec::with_capacity(self.entities.len());
+        for entity in std::mem::take(&mut self.entities) {
+            if ids.contains(&entity.id) {
+                removed.push(entity);
+            } else {
+                kept.push(entity);
+            }
+        }
+        self.entities = kept;
+        removed
     }
 
     /// 场景是否为空（无实体）。
@@ -140,6 +514,48 @@ impl Scene {
     pub fn entities_with_model(&self) -> impl Iterator<Item = &Entity> {
         self.entities.iter().filter(|e| e.has_model())
     }
+
+    // -----------------------------------------------------------------------
+    // 预制体实例
+    // -----------------------------------------------------------------------
+
+    /// 实例化预制体并把它追加到场景，返回**实例根**在 `entities` 中的索引。
+    ///
+    /// 预制体为空时返回 `None`（不产生任何改动）。追加的实体是一棵自包含的树，
+    /// 落在场景根层——调用方若想让它挂在某个父节点下，再调 [`set_parent`](Self::set_parent)
+    /// （会保留世界变换）。
+    pub fn instantiate_prefab(&mut self, prefab: &crate::prefab::Prefab, source: &str) -> Option<usize> {
+        if prefab.is_empty() {
+            return None;
+        }
+        let base = self.entities.len();
+        let new_entities = prefab.instantiate(source);
+        // 实例根在新增块里的偏移（正常只有一个）
+        let root_offset = new_entities
+            .iter()
+            .position(|e| e.prefab.as_ref().is_some_and(|p| p.is_root))?;
+        self.entities.extend(new_entities);
+        Some(base + root_offset)
+    }
+
+    /// 找实体所属的**预制体实例根**索引。
+    ///
+    /// 沿父链上溯，遇到第一个 `is_root` 的实体即为答案；自己就是实例内实体、
+    /// 或完全不属于任何实例时返回 `None`。
+    pub fn prefab_instance_root(&self, index: usize) -> Option<usize> {
+        let mut current = index;
+        // 步数上限兜底：数据坏了（成环）也不至于把 UI 卡死。
+        for _ in 0..self.entities.len().max(1) + 1 {
+            match self.entities.get(current)?.prefab.as_ref() {
+                Some(link) if link.is_root => return Some(current),
+                // 在实例内部但不是根：继续往上找根
+                Some(_) => current = self.parent_index(current)?,
+                // 不是实例实体：到此为止
+                None => return None,
+            }
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +565,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
 
     #[test]
     fn entity_new_has_id() {
@@ -181,5 +598,269 @@ mod tests {
         let a = EntityId::new();
         let b = EntityId::new();
         assert_ne!(a, b);
+    }
+
+    // -- 层级 -------------------------------------------------------------
+
+    /// 造一个带父子关系的场景：root -> child -> grandchild，各带平移。
+    fn hierarchy_scene() -> (Scene, [usize; 3]) {
+        let mut scene = Scene::new("Hierarchy");
+        let root = scene.add_entity(
+            Entity::new("Root").with_transform(Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))),
+        );
+        let child = scene.add_entity(
+            Entity::new("Child").with_transform(Transform::from_translation(Vec3::new(0.0, 2.0, 0.0))),
+        );
+        let grandchild = scene.add_entity(
+            Entity::new("Grandchild")
+                .with_transform(Transform::from_translation(Vec3::new(0.0, 0.0, 3.0))),
+        );
+        assert!(scene.set_parent(
+            scene.index_of(child).unwrap(),
+            Some(scene.index_of(root).unwrap())
+        ));
+        assert!(scene.set_parent(
+            scene.index_of(grandchild).unwrap(),
+            Some(scene.index_of(child).unwrap())
+        ));
+        let r = scene.index_of(root).unwrap();
+        let c = scene.index_of(child).unwrap();
+        let g = scene.index_of(grandchild).unwrap();
+        (scene, [r, c, g])
+    }
+
+    #[test]
+    fn world_matrix_composes_parent_chain() {
+        // 直接写 parent 字段（等价于场景文件里写死父子关系），不触发"保留世界变换"
+        // 的局部重算——这里要验证的正是矩阵级联本身。
+        let mut scene = Scene::new("Hierarchy");
+        let root_id = scene.add_entity(
+            Entity::new("Root").with_transform(Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))),
+        );
+        let child_id = scene.add_entity(
+            Entity::new("Child").with_transform(Transform::from_translation(Vec3::new(0.0, 2.0, 0.0))),
+        );
+        let grandchild_id = scene.add_entity(
+            Entity::new("Grandchild")
+                .with_transform(Transform::from_translation(Vec3::new(0.0, 0.0, 3.0))),
+        );
+        let ci = scene.index_of(child_id).unwrap();
+        let gi = scene.index_of(grandchild_id).unwrap();
+        scene.entities[ci].parent = Some(root_id);
+        scene.entities[gi].parent = Some(child_id);
+
+        // 世界位置 = 1 + 0 + 0, 0 + 2 + 0, 0 + 0 + 3
+        let world = scene.world_transform(gi);
+        assert!((world.position - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
+        // 父节点自身的世界变换不受影响
+        assert!((scene.world_transform(ci).position - Vec3::new(1.0, 2.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn world_matrices_batch_matches_single() {
+        let (scene, [r, c, g]) = hierarchy_scene();
+        let batch = scene.world_matrices();
+        for idx in [r, c, g] {
+            assert_eq!(batch[idx], scene.world_matrix(idx));
+        }
+    }
+
+    #[test]
+    fn children_and_roots() {
+        let (scene, [r, c, _]) = hierarchy_scene();
+        assert_eq!(scene.roots(), vec![r]);
+        assert_eq!(scene.children(r), vec![c]);
+        assert!(scene.children(c).len() == 1);
+    }
+
+    /// `hierarchy()` 是 `children()` / `roots()` / `parent_index()` 的批量版本，
+    /// 三条逐节点 API 是它的"逐条版"。二者必须完全一致 —— 不一致就等于层级解算
+    /// 有两套真相，面板显示的和实际渲染的会分家。
+    #[test]
+    fn hierarchy_batch_matches_per_node_apis() {
+        let (mut scene, [r, c, g]) = hierarchy_scene();
+
+        let check = |scene: &Scene| {
+            let (parent_indices, child_map) = scene.hierarchy();
+            for i in 0..scene.entities.len() {
+                assert_eq!(parent_indices[i], scene.parent_index(i), "父索引不一致: {i}");
+                assert_eq!(child_map[i], scene.children(i), "子列表不一致: {i}");
+            }
+            let roots: Vec<usize> = (0..scene.entities.len())
+                .filter(|&i| parent_indices[i].is_none())
+                .collect();
+            assert_eq!(roots, scene.roots());
+        };
+
+        check(&scene);
+        scene.set_parent(g, Some(r));
+        check(&scene);
+        scene.set_parent(c, None);
+        check(&scene);
+    }
+
+    /// 父 ID 指向不存在的实体（手工编辑过的场景文件）应当被当作根，
+    /// 而不是让整棵树的解算崩掉或挂到别人身上。
+    #[test]
+    fn hierarchy_treats_dangling_parent_as_root() {
+        let mut scene = Scene::new("dangling");
+        scene.add_entity(Entity::new("orphan"));
+        scene.entities[0].parent = Some(EntityId::new()); // 指向一个不存在的 ID
+
+        let (parent_indices, child_map) = scene.hierarchy();
+        assert_eq!(parent_indices[0], None);
+        assert!(child_map[0].is_empty());
+        assert_eq!(scene.roots(), vec![0]);
+        assert_eq!(scene.world_matrices().len(), 1);
+    }
+
+    #[test]
+    fn reparent_preserves_world_transform() {
+        let (mut scene, [r, c, g]) = hierarchy_scene();
+        let before = scene.world_transform(g);
+        // 把 grandchild 从 child 挪到 root 下
+        assert!(scene.set_parent(g, Some(r)));
+        let after = scene.world_transform(g);
+        assert!((before.position - after.position).length() < 1e-5, "世界位置应当保持不变");
+        assert_eq!(scene.children(r).len(), 2);
+
+        // 挪回根层（解除父子）
+        assert!(scene.set_parent(g, None));
+        let unparented = scene.world_transform(g);
+        assert!((before.position - unparented.position).length() < 1e-5);
+        assert_eq!(scene.roots().len(), 2);
+
+        // child 现在没有子节点了
+        assert!(scene.children(c).is_empty());
+    }
+
+    #[test]
+    fn reparent_rejects_cycles_and_self() {
+        let (mut scene, [r, c, g]) = hierarchy_scene();
+        // 不能把 root 挂到自己的子孙下
+        assert!(!scene.set_parent(r, Some(c)));
+        assert!(!scene.set_parent(r, Some(g)));
+        // 不能挂到自己身上
+        assert!(!scene.set_parent(c, Some(c)));
+        // 结构没被破坏
+        assert_eq!(scene.roots(), vec![r]);
+        assert_eq!(scene.children(r), vec![c]);
+    }
+
+    #[test]
+    fn remove_subtree_deletes_descendants() {
+        let (mut scene, [r, c, g]) = hierarchy_scene();
+        let removed = scene.remove_subtree(r);
+        assert_eq!(removed.len(), 3);
+        assert!(scene.entities.is_empty());
+        // 确认 id 对得上（顺序即原 entities 顺序）
+        let ids: Vec<EntityId> = removed.iter().map(|e| e.id).collect();
+        assert_eq!(ids.len(), 3);
+        let _ = (c, g);
+    }
+
+    #[test]
+    fn remove_entity_promotes_children() {
+        let (mut scene, [r, c, g]) = hierarchy_scene();
+        scene.remove_entity(scene.entities[c].id);
+        // grandchild 被提升到 root 下，而不是随 child 一起消失
+        assert_eq!(scene.entities.len(), 2);
+        assert_eq!(scene.children(r), vec![scene.index_of(scene.entities[1].id).unwrap()]);
+        let _ = g;
+    }
+
+    #[test]
+    fn old_scene_without_parent_field_loads() {
+        // 旧格式：没有 id / parent 字段，必须能解析且全部落在根层
+        let ron = r#"Scene(
+            name: "Old",
+            entities: [
+                (name: "A", transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: ""),
+                (name: "B", transform: (position: (1.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: ""),
+            ],
+        )"#;
+        let scene: Scene = ron::from_str(ron).expect("旧场景应当能反序列化");
+        assert_eq!(scene.entities.len(), 2);
+        assert!(scene.entities.iter().all(|e| e.parent.is_none()));
+        assert_eq!(scene.roots().len(), 2);
+    }
+
+    #[test]
+    fn hierarchy_roundtrips_through_ron() {
+        let (scene, _) = hierarchy_scene();
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        let restored: Scene = ron::from_str(&text).unwrap();
+        // 父引用按 ID 持久化，还原后结构不变
+        assert_eq!(restored.roots().len(), 1);
+        let root = restored.roots()[0];
+        let child = restored.children(root)[0];
+        assert_eq!(restored.children(child).len(), 1);
+    }
+
+    // -- 预制体实例 --------------------------------------------------------
+
+    #[test]
+    fn prefab_ref_survives_ron_roundtrip() {
+        let mut scene = Scene::new("P");
+        let mut entity = Entity::new("Inst");
+        entity.prefab = Some(crate::prefab::PrefabInstanceRef {
+            source: "Prefabs/A.prefab.ron".into(),
+            source_id: entity.id,
+            is_root: true,
+        });
+        scene.add_entity(entity);
+
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(text.contains("prefab"), "预制体来源必须落盘");
+        let restored: Scene = ron::from_str(&text).unwrap();
+        let link = restored.entities[0]
+            .prefab
+            .as_ref()
+            .expect("往返后来源仍在");
+        assert_eq!(link.source, "Prefabs/A.prefab.ron");
+        assert!(link.is_root);
+    }
+
+    #[test]
+    fn plain_entity_omits_prefab_field() {
+        // 普通实体不该把 `prefab: None` 写进场景文件——否则文件会被这种
+        // 无意义的行灌满，手工编辑时可读性极差。
+        let mut scene = Scene::new("P");
+        scene.add_entity(Entity::new("Plain"));
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("prefab"), "普通实体不该写出 prefab 字段");
+    }
+
+    #[test]
+    fn prefab_instance_root_walks_up_to_root() {
+        let mut scene = Scene::new("P");
+        let mut root = Entity::new("Root");
+        root.prefab = Some(crate::prefab::PrefabInstanceRef {
+            source: "x.prefab.ron".into(),
+            source_id: root.id,
+            is_root: true,
+        });
+        let rid = scene.add_entity(root);
+
+        let mut child = Entity::new("Child");
+        child.prefab = Some(crate::prefab::PrefabInstanceRef {
+            source: "x.prefab.ron".into(),
+            source_id: child.id,
+            is_root: false,
+        });
+        let cid = scene.add_entity(child);
+        let ci = scene.index_of(cid).unwrap();
+        scene.entities[ci].parent = Some(rid);
+        let ri = scene.index_of(rid).unwrap();
+
+        assert_eq!(scene.prefab_instance_root(ci), Some(ri), "内部节点应上溯到实例根");
+        assert_eq!(scene.prefab_instance_root(ri), Some(ri), "根解析到自身");
+
+        let nid = scene.add_entity(Entity::new("Plain"));
+        assert_eq!(
+            scene.prefab_instance_root(scene.index_of(nid).unwrap()),
+            None,
+            "普通实体不属于任何实例"
+        );
     }
 }

@@ -1,8 +1,48 @@
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use wgpu::util::DeviceExt;
 
 use crate::texture::Texture;
+
+/// 材质槽位的全局自增 ID。
+///
+/// 渲染管线用它缓存「材质绑定组」——同一个图元在每一帧之间复用同一个
+/// bind group，而不是每帧重建。ID 全局递增，所以不同模型里即使材质参数
+/// 完全一样也不会串台；代价是重复纹理各绑一份采样器，可接受。
+static NEXT_MATERIAL_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_material_id() -> u64 {
+    NEXT_MATERIAL_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 从 glTF 材质里提取的、渲染需要的参数。
+///
+/// 只覆盖 metallic-roughness 工作流里最关键的因子。normal / occlusion /
+/// emissive 贴图和 KHR 扩展暂时没接——那属于完整材质系统，等有了
+/// 材质资源再铺。
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialParams {
+    /// 基础色因子（线性 RGBA），会与 base color 贴图逐通道相乘。
+    pub base_color: [f32; 4],
+    /// 金属度，0 = 绝缘体，1 = 金属。
+    pub metallic: f32,
+    /// 粗糙度，0 = 镜面，1 = 完全漫反射。
+    pub roughness: f32,
+    /// 是否参与半透明混合（glTF `alphaMode == BLEND`）。
+    pub blend: bool,
+}
+
+impl Default for MaterialParams {
+    fn default() -> Self {
+        Self {
+            base_color: [1.0; 4],
+            metallic: 0.0,
+            roughness: 0.45,
+            blend: false,
+        }
+    }
+}
 
 /// 一次 glTF 网格图元的绘制调用。
 pub struct GltfPrimitive {
@@ -13,6 +53,10 @@ pub struct GltfPrimitive {
     pub num_vertices: u32,
     /// 漫反射纹理（模型无纹理时使用白色回退）。
     pub texture: Texture,
+    /// 该图元的材质因子。
+    pub material: MaterialParams,
+    /// 材质槽位 ID，渲染管线据此缓存绑定组。
+    pub material_id: u64,
 }
 
 /// 从 glTF 文件加载的 GPU 驻留图元集合。
@@ -113,6 +157,10 @@ impl GltfMesh {
                 // --- 纹理 ---
                 let texture = load_primitive_texture(device, queue, &primitive, &images);
 
+                // --- 材质因子 ---
+                let material = read_material(&primitive);
+                let material_id = next_material_id();
+
                 // 交错排列为 GltfVertex 数组
                 let vertices: Vec<GltfVertex> = (0..vertex_count)
                     .map(|i| GltfVertex {
@@ -144,6 +192,8 @@ impl GltfMesh {
                     index_format: wgpu::IndexFormat::Uint32,
                     num_vertices: vertex_count as u32,
                     texture,
+                    material,
+                    material_id,
                 });
             }
         }
@@ -200,15 +250,93 @@ impl GltfMesh {
                 index_format: wgpu::IndexFormat::Uint32,
                 num_vertices: old_vertex_count as u32,
                 texture: Texture::white(device, queue),
+                material: MaterialParams::default(),
+                material_id: next_material_id(),
             }],
             vertex_size: GltfVertex::STRIDE,
         }
+    }
+
+    /// 从 CPU 端网格数据构造 GPU 网格（内置基础图元的入口）。
+    pub fn from_mesh_data(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &crate::mesh::MeshData,
+        label: &str,
+    ) -> Self {
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(&data.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(&data.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Self {
+            primitives: vec![GltfPrimitive {
+                vertex_buffer,
+                index_buffer,
+                num_indices: data.indices.len() as u32,
+                index_format: wgpu::IndexFormat::Uint32,
+                num_vertices: data.vertices.len() as u32,
+                texture: Texture::white(device, queue),
+                material: MaterialParams::default(),
+                material_id: next_material_id(),
+            }],
+            vertex_size: GltfVertex::STRIDE,
+        }
+    }
+
+    /// 加载一个模型标识：内置图元（`builtin://...`）或磁盘上的 glTF 文件。
+    ///
+    /// 编辑器与游戏共用的**唯一**模型加载入口。"内置还是文件"的判断收在
+    /// 这一处，调用方不必各写一遍 if；将来增加内置图元也只需要改 [`BuiltinMesh`]。
+    ///
+    /// [`BuiltinMesh`]: crate::mesh::BuiltinMesh
+    pub fn load(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        project_root: &Path,
+        model: &str,
+    ) -> Result<Self> {
+        if let Some(builtin) = crate::mesh::BuiltinMesh::from_model_path(model) {
+            return Ok(Self::from_mesh_data(device, queue, &builtin.build(), builtin.label()));
+        }
+        Self::from_file(device, queue, project_root.join(model))
     }
 }
 
 // ---------------------------------------------------------------------------
 // 从 glTF 图像加载纹理
 // ---------------------------------------------------------------------------
+
+/// 读取图元的 PBR 材质因子。
+///
+/// `primitive.material().index() == None` 表示文件里**根本没写材质**——
+/// 这时 glTF 规范给的默认值是 metallic=1 / roughness=1，也就是"全金属全粗糙"，
+/// 渲出来又黑又平。示例模型大多是这种情况，所以这里换成一套看起来正常的
+/// 默认（绝缘体 + 中等粗糙），同时不改动模型的原始颜色。
+fn read_material(primitive: &gltf::Primitive<'_>) -> MaterialParams {
+    let material = primitive.material();
+    let pbr = material.pbr_metallic_roughness();
+    let blend = matches!(material.alpha_mode(), gltf::material::AlphaMode::Blend);
+
+    if material.index().is_none() {
+        return MaterialParams {
+            blend,
+            ..MaterialParams::default()
+        };
+    }
+
+    MaterialParams {
+        base_color: pbr.base_color_factor(),
+        metallic: pbr.metallic_factor(),
+        roughness: pbr.roughness_factor(),
+        blend,
+    }
+}
 
 fn load_primitive_texture(
     device: &wgpu::Device,

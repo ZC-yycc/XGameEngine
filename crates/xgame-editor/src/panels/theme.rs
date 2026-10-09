@@ -1,7 +1,9 @@
 //! 类 Unity 暗色编辑器主题。
 //!
-//! 在启动时（或每帧）调用 `install(ctx)` 以应用深色背景、蓝色强调色和锐利边角，
-//! 仿照 Unity 编辑器的配色方案。
+//! 在启动时调用 `install(ctx)` 以应用深色背景、蓝色强调色和锐利边角，
+//! 仿照 Unity 编辑器的配色方案；`install_fonts(ctx)` 负责挂上系统中文字体。
+
+use std::path::PathBuf;
 
 use egui::Color32;
 
@@ -37,7 +39,7 @@ pub fn unity_dark_visuals() -> egui::Visuals {
 
         window_rounding: egui::Rounding::ZERO,
         window_fill: WINDOW_BG,
-        window_stroke: egui::Stroke::new(1.0, SEPARATOR),
+        window_stroke: egui::Stroke::new(1.0_f32, SEPARATOR),
 
         panel_fill: PANEL_BG,
         faint_bg_color: PANEL_HEADER_BG,
@@ -51,47 +53,47 @@ pub fn unity_dark_visuals() -> egui::Visuals {
 
         selection: egui::style::Selection {
             bg_fill: SELECTION_BG,
-            stroke: egui::Stroke::new(1.0, ACCENT_BLUE),
+            stroke: egui::Stroke::new(1.0_f32, ACCENT_BLUE),
         },
 
         widgets: egui::style::Widgets {
             noninteractive: egui::style::WidgetVisuals {
                 bg_fill: PANEL_BG,
                 weak_bg_fill: INPUT_BG,
-                bg_stroke: egui::Stroke::new(1.0, SEPARATOR),
-                fg_stroke: egui::Stroke::new(1.0, TEXT_SECONDARY),
+                bg_stroke: egui::Stroke::new(1.0_f32, SEPARATOR),
+                fg_stroke: egui::Stroke::new(1.0_f32, TEXT_SECONDARY),
                 rounding: egui::Rounding::ZERO,
                 expansion: 0.0,
             },
             inactive: egui::style::WidgetVisuals {
                 bg_fill: BUTTON_BG,
                 weak_bg_fill: INPUT_BG,
-                bg_stroke: egui::Stroke::new(1.0, SEPARATOR),
-                fg_stroke: egui::Stroke::new(1.5, TEXT_PRIMARY),
+                bg_stroke: egui::Stroke::new(1.0_f32, SEPARATOR),
+                fg_stroke: egui::Stroke::new(1.5_f32, TEXT_PRIMARY),
                 rounding: egui::Rounding::ZERO,
                 expansion: 0.0,
             },
             hovered: egui::style::WidgetVisuals {
                 bg_fill: BUTTON_HOVER,
                 weak_bg_fill: Color32::from_rgb(50, 50, 60),
-                bg_stroke: egui::Stroke::new(1.0, ACCENT_BLUE),
-                fg_stroke: egui::Stroke::new(2.0, TEXT_PRIMARY),
+                bg_stroke: egui::Stroke::new(1.0_f32, ACCENT_BLUE),
+                fg_stroke: egui::Stroke::new(2.0_f32, TEXT_PRIMARY),
                 rounding: egui::Rounding::ZERO,
                 expansion: 1.0,
             },
             active: egui::style::WidgetVisuals {
                 bg_fill: ACCENT_BLUE,
                 weak_bg_fill: SELECTION_BG,
-                bg_stroke: egui::Stroke::new(1.0, ACCENT_LIGHT),
-                fg_stroke: egui::Stroke::new(2.0, Color32::WHITE),
+                bg_stroke: egui::Stroke::new(1.0_f32, ACCENT_LIGHT),
+                fg_stroke: egui::Stroke::new(2.0_f32, Color32::WHITE),
                 rounding: egui::Rounding::ZERO,
                 expansion: 1.0,
             },
             open: egui::style::WidgetVisuals {
                 bg_fill: BUTTON_ACTIVE,
                 weak_bg_fill: INPUT_BG,
-                bg_stroke: egui::Stroke::new(1.0, ACCENT_BLUE),
-                fg_stroke: egui::Stroke::new(2.0, TEXT_PRIMARY),
+                bg_stroke: egui::Stroke::new(1.0_f32, ACCENT_BLUE),
+                fg_stroke: egui::Stroke::new(2.0_f32, TEXT_PRIMARY),
                 rounding: egui::Rounding::ZERO,
                 expansion: 0.0,
             },
@@ -102,7 +104,11 @@ pub fn unity_dark_visuals() -> egui::Visuals {
 }
 
 /// 将 Unity 暗色主题应用到 egui 上下文。
-/// 每帧调用安全。
+///
+/// **必须每帧调用**：eframe 每帧会按**系统主题**（这台机器是浅色）重设 egui 的
+/// style，只在启动时设一次会被它顶掉 —— 界面会退回浅色。`set_style` 只是赋一个
+/// `Arc`，开销可以忽略；真正昂贵的是 [`install_fonts`] 里的 `set_fonts`
+/// （重建整张字形图集），那个只在启动时装一次。
 pub fn install(ctx: &egui::Context) {
     let style = egui::Style {
         spacing: egui::style::Spacing {
@@ -121,4 +127,137 @@ pub fn install(ctx: &egui::Context) {
     };
 
     ctx.set_style(style);
+}
+
+// ---------------------------------------------------------------------------
+// 中文字体
+// ---------------------------------------------------------------------------
+
+/// 中文字体候选，按优先级排列。取第一个「存在且文件头有效」的。
+///
+/// 微软雅黑排第一是因为它是 Windows 中文界面的标准字体；`.ttf` 单体字体
+/// （等线 / 黑体）排在 `.ttc` 集合后面只是习惯——两者都受支持。
+const CJK_FONT_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\msyh.ttc",   // 微软雅黑
+    r"C:\Windows\Fonts\Deng.ttf",   // 等线（较新系统自带）
+    r"C:\Windows\Fonts\simhei.ttf", // 黑体
+    r"C:\Windows\Fonts\simsun.ttc", // 宋体（兜底）
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+];
+
+/// 挂上系统中文字体，让界面能显示中文。
+///
+/// egui 内置字体（Ubuntu-Light / Hack）**不含任何 CJK 字形**，所以中文会渲染成
+/// 一排「豆腐块」□。修法是把系统中文字体加进 `FontDefinitions`，并且**追加到
+/// 字体族末尾**——西文和图标继续走 egui 自带字体（字形更精致、体积也更小），
+/// 只有内置字体缺字时才回退到中文字体。
+///
+/// 必须在第一帧之前调用，且**只能调用一次**：`set_fonts` 会重建整张字形图集，
+/// 每帧调用等于每帧重建一次。
+pub fn install_fonts(ctx: &egui::Context) {
+    let Some((path, bytes)) = load_cjk_font() else {
+        log::warn!(
+            "未找到可用的系统中文字体，界面中文会显示为方块。候选: {CJK_FONT_CANDIDATES:?}"
+        );
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "cjk".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
+
+    // 追加（而不是插入到最前），保留 egui 自带字体对西文/图标的主导权。
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.entry(family).or_default().push("cjk".to_owned());
+    }
+
+    ctx.set_fonts(fonts);
+    log::info!("已加载中文字体: {}", path.display());
+}
+
+/// 依次探测候选路径，返回第一个可用的字体文件。
+fn load_cjk_font() -> Option<(PathBuf, Vec<u8>)> {
+    for candidate in CJK_FONT_CANDIDATES {
+        let path = PathBuf::from(candidate);
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if !looks_like_font(&bytes) {
+            log::warn!("跳过文件头不像字体的候选: {}", path.display());
+            continue;
+        }
+        return Some((path, bytes));
+    }
+    None
+}
+
+/// 判断字节流是不是字体文件。
+///
+/// 这一步不是多余的谨慎：`epaint` 解析字体失败时**直接 panic**
+/// （`Error parsing ... TTF/OTF font file`），一旦把坏文件塞进 `FontDefinitions`，
+/// 编辑器会带着这个 panic 启动失败，用户侧的表现只是「双击没反应」，极难排查。
+/// 所以宁可先看一眼文件头（TrueType `0x00010000` / `true`、OpenType `OTTO`、
+/// 字体集合 `ttcf`），把明显不是字体的文件挡在外面。
+fn looks_like_font(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    let tag: [u8; 4] = bytes[..4].try_into().unwrap_or([0; 4]);
+    matches!(
+        tag,
+        [0x00, 0x01, 0x00, 0x00] | [b't', b'r', b'u', b'e'] | [b'O', b'T', b'T', b'O'] | [b't', b't', b'c', b'f']
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 界面上真实出现过的中文（枢纽 + 工具栏 + 状态栏）。
+    const SAMPLE: &str = "项目枢纽 新建 打开 最近 场景 资源 实体 构建 保存 关闭 位置 名称";
+
+    /// 测 `install_fonts` 之后，中文是否真的有字形 —— 而不是渲染成一排方块。
+    ///
+    /// 这条断言直接盯住症状「无法显示中文字符」：只要字体候选全部失效
+    /// （换系统 / 换机器），这里会先炸出来，而不是等用户看到方框才发现。
+    #[test]
+    fn installed_fonts_cover_chinese() {
+        let Some((path, _)) = load_cjk_font() else {
+            eprintln!("跳过：系统里找不到候选中文字体");
+            return;
+        };
+        println!("[font check] 使用 {}", path.display());
+
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+
+        // 字体只有在 `Context::run` 跑过第一帧之后才存在。
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |_| {});
+
+        let proportional = ctx.fonts(|f| f.has_glyphs(&egui::FontId::proportional(14.0), SAMPLE));
+        let monospace = ctx.fonts(|f| f.has_glyphs(&egui::FontId::monospace(14.0), SAMPLE));
+
+        assert!(proportional, "比例字体仍缺中文缺字");
+        assert!(monospace, "等宽字体仍缺中文缺字");
+    }
+
+    /// 明确守住「字体只装一次」这条：装两次不该出问题，但候选探测要能重复调用。
+    #[test]
+    fn font_candidate_probe_is_stable() {
+        let first = load_cjk_font().map(|(p, _)| p);
+        let second = load_cjk_font().map(|(p, _)| p);
+        assert_eq!(first, second, "候选探测结果不稳定");
+    }
 }
