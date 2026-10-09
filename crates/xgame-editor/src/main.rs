@@ -316,6 +316,16 @@ fn main() -> Result<(), eframe::Error> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
             .with_title("XGameEngine"),
+        // 交换链只留 1 帧在飞。
+        //
+        // 默认值（`None` → wgpu 用 2）会让 present 最多排 3 帧：连续输入时表现为
+        // "几帧挤在一起、然后一口气停 3 个 vsync"，鼠标悬停与拖窗口的手感就是
+        // 一顿一顿的（实测帧间隔是 1.6ms / 54ms 的双峰，而不是均匀的 16.7ms）。
+        // 收到 1 之后 present 最多等一个 vsync，输入到画面的延迟明显变小。
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
