@@ -366,6 +366,46 @@ scene_view::show_content(state, ui)
   └── ⑩ 叠加层：FPS | Tool: Translate | Speed: X.X（滚轮后短暂显示）
 ```
 
+### 编辑器「空闲时不重绘」是怎么保住的
+
+```text
+Windows 指针静止时仍会反复投递同一坐标的 WM_MOUSEMOVE
+  → egui-winit 逐条转成 Event::PointerMoved
+  → egui 帧末看到 !events.is_empty() → 请求**立即**重绘
+  → 编辑器 60fps 空转（实测空闲 CPU 5~7%）
+  → 窗口的模态移动/缩放循环抢不到消息线程 → 拖窗口卡顿
+```
+
+`EditorApp::update` 开头先过一道 `drop_redundant_pointer_moves`：丢掉**位置与上次
+放行位置相同**的 `PointerMoved`。位置相同的指针事件不携带新信息（egui 的指针状态本来
+就停在那儿），是语义上的 no-op；`PointerGone` 时把记录清空，否则"离开再回到同一点"
+会被误判成没动、悬停从此失效。
+
+> 判据只看"有没有真的动"。实测：空闲 0.00% CPU、鼠标移动时 ~8.7%（每帧重绘）。
+> 回归测试 `identical_pointer_moves_are_dropped_but_real_moves_pass` /
+> `pointer_returning_to_the_same_spot_passes_after_leaving`。
+
+**排查这类"谁在请求重绘"问题的正确工具是 `Context::repaint_causes()`**（egui 0.30 起，
+带调用点 `file:line`）。逐段插桩那一步在这里是**无效**的 —— 请求发生在我们 UI 代码之外，
+自己插的桩全都不认账。
+
+### 视口缩放：节流重建离屏目标
+
+`SceneRenderer::set_viewport_size` 在拖边框时每帧都被调。旧实现每次都重建 3 张纹理
+（单采样颜色 / **MSAA 颜色（4 倍采样）** / 深度）+ 注册新 egui 纹理 + 释放旧的，
+而且尺寸一变指纹必变 → 还要每帧全量重绘 3D。**实测一次拖拽重建 43 次。**
+
+现在由纯函数 `plan_resize` 决策（状态机与阈值集中在 `RESIZE_REBUILD_INTERVAL = 100ms`）：
+
+| 情况 | 动作 |
+|---|---|
+| 还没有渲染目标（首帧） | 重建（否则第一帧空白） |
+| 尺寸与上一帧请求相同 = 用户松手了 | 立刻按最终尺寸重建 |
+| 距上次重建超过 100ms（还在拖） | 重建，视口保持约 10Hz 更新 |
+| 其余 | 跳过 3D，调用方把上一帧纹理拉伸显示 |
+
+> 实测一次拖拽：重建 **43 → 1**；缩放结束后画面比例正确、无拉伸残留。
+
 > **帧序是视口手感的命门**：必须「先处理本帧输入 → 再按最新状态重画 3D → 最后画叠加层」。
 > 旧的顺序是"先重画、后处理输入"，于是这一帧画的是**上一帧**的相机与场景 —— 拖物体、
 > 转视角都白白慢一帧，手感发"黏"。而叠加层必须画在 3D 之上，只能排在渲染之后，
@@ -949,12 +989,12 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 
 | 文件 | 行数 | 核心函数 |
 |---|---|---|
-| `editor/main.rs` | 300 | `EditorApp::new()`、`update()`、`open_project()` |
+| `editor/main.rs` | 516 | `EditorApp::new()`、`update()`（开头过 `drop_redundant_pointer_moves`）、`open_project()`、`editor_ui()` |
 | `editor/hub.rs` | 352 | `ProjectHub::ui()`、`open_project_at()`、`create_project_at()` |
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
 | `editor/state.rs` | 1438 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
-| `editor/scene_renderer.rs` | 645 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`render()`（指纹排在解算世界矩阵之前）、`mesh_bounds()` |
+| `editor/scene_renderer.rs` | 804 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（指纹排在解算世界矩阵之前）、`mesh_bounds()` |
 | `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |

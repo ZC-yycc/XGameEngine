@@ -92,6 +92,8 @@ struct EditorApp {
     session: Option<EditorSession>,
     /// wgpu 资源句柄（wgpu 后端不可用时为 `None`）。
     gpu: Option<GpuHandles>,
+    /// 上一次放行过的指针位置，供 [`drop_redundant_pointer_moves`] 去重用。
+    last_pointer_pos: Option<egui::Pos2>,
 }
 
 impl EditorApp {
@@ -113,6 +115,7 @@ impl EditorApp {
             hub: ProjectHub::new(),
             session: None,
             gpu,
+            last_pointer_pos: None,
         };
 
         // 命令行参数：`xgame-editor <项目路径>` 直接进编辑器，跳过枢纽。
@@ -162,6 +165,22 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── 丢掉「位置没变」的指针移动事件 ──
+        //
+        // 这一条是**空闲时不再空转重绘**的关键。egui 在帧末只要看到「本帧有输入事件」
+        // 就会请求**立即**重绘（`InputState::wants_repaint_after` 的 `!events.is_empty()`
+        // 那一支）；而 Windows 在指针**停住**时依然会反复投递同一坐标的 `WM_MOUSEMOVE`，
+        // egui-winit 逐条转成 `PointerMoved`。实测空闲时约 160 条/秒 → 编辑器一直以
+        // 60fps 空转。
+        //
+        // 后果不只是费电：窗口的移动/缩放走的是 Windows 的模态循环，而应用每 16.7ms
+        // 就要 present 一次并等 vsync，模态循环抢不到消息线程 —— 表现就是
+        // **拖窗口卡顿**、拖拽/缩放窗口有延迟。
+        //
+        // 位置相同的 `PointerMoved` 不携带任何新信息（egui 的指针状态本来就已经停在
+        // 那个位置上），丢掉它是语义上的 no-op，却能让 egui 不再无谓地排下一帧。
+        drop_redundant_pointer_moves(ctx, &mut self.last_pointer_pos);
+
         // ── 主题：每帧重设，别挪走 ──
         // eframe 每帧会按**系统主题**（这台机器是浅色）覆盖 egui 的 style，
         // 只在启动时设一次的话，界面会被系统浅色主题顶掉 —— 枢纽和编辑器界面都一样。
@@ -190,7 +209,40 @@ impl eframe::App for EditorApp {
                 self.open_project(*project);
             }
         }
+
     }
+}
+
+// ---------------------------------------------------------------------------
+// 输入事件过滤
+// ---------------------------------------------------------------------------
+
+/// 丢掉位置与「上一次真正生效的位置」相同的 [`egui::Event::PointerMoved`]。
+///
+/// 为什么需要它见 [`EditorApp::update`] 顶部的说明：Windows 会在指针静止时反复
+/// 投递同一坐标的 `WM_MOUSEMOVE`，而 egui 把"本帧有事件"当作"需要立刻再画一帧"
+/// 的依据，于是空闲的编辑器也会 60fps 空转。
+///
+/// `PointerGone`（指针离开窗口）时要把记录清空 —— 否则指针离开再回到**同一个**
+/// 位置时，那条事件会被误判成"没动"而被丢掉，egui 就永远不知道指针回来了。
+fn drop_redundant_pointer_moves(ctx: &egui::Context, last_pos: &mut Option<egui::Pos2>) {
+    ctx.input_mut(|input| {
+        input.events.retain(|event| match event {
+            egui::Event::PointerMoved(pos) => {
+                if *last_pos == Some(*pos) {
+                    false // 位置没变：丢弃
+                } else {
+                    *last_pos = Some(*pos);
+                    true
+                }
+            }
+            egui::Event::PointerGone => {
+                *last_pos = None;
+                true
+            }
+            _ => true,
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -356,4 +408,109 @@ fn main() -> Result<(), eframe::Error> {
         options,
         Box::new(|cc| Ok(Box::new(EditorApp::new(cc)))),
     )
+}
+
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 跑一帧，返回过滤之后还剩几个输入事件。
+    ///
+    /// 把 `max_passes` 钉成 1：egui 默认允许一帧跑两遍（多遍布局），第二遍会拿同一份
+    /// 输入再走一次我们的过滤器 —— 那样测试量的就不是"过滤器本身"了。
+    fn frame(
+        ctx: &egui::Context,
+        last: &mut Option<egui::Pos2>,
+        events: Vec<egui::Event>,
+    ) -> usize {
+        ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::new(1).unwrap());
+        let mut kept = 0;
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                drop_redundant_pointer_moves(ctx, last);
+                kept = ctx.input(|i| i.events.len());
+            },
+        );
+        kept
+    }
+
+    /// 位置没变的 `PointerMoved` 必须被丢掉。
+    ///
+    /// 这是"空闲时不再 60fps 空转"的全部依据：Windows 在指针静止时会反复投递同一
+    /// 坐标的 `WM_MOUSEMOVE`，egui 又把"本帧有事件"当成"要立刻再画一帧"的信号。
+    /// 一旦这条过滤失效，编辑器在没人操作时也会一直重绘，窗口的移动/缩放模态循环
+    /// 就会一直跟 present 抢消息线程 —— 也就是用户报的"拖窗口卡顿"。
+    #[test]
+    fn identical_pointer_moves_are_dropped_but_real_moves_pass() {
+        let ctx = egui::Context::default();
+        let mut last = None;
+        let p = |x, y| egui::pos2(x, y);
+
+        // 第一次出现 → 放行
+        assert_eq!(
+            frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(10.0, 20.0))]),
+            1,
+            "首次出现的指针位置应当放行"
+        );
+        // 同一位置再来一次（Windows 的空转来源）→ 丢掉
+        assert_eq!(
+            frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(10.0, 20.0))]),
+            0,
+            "位置没变的 PointerMoved 应当被丢掉"
+        );
+        // 同帧内重复投递同一位置 → 只留一条
+        assert_eq!(
+            frame(
+                &ctx,
+                &mut last,
+                vec![
+                    egui::Event::PointerMoved(p(30.0, 40.0)),
+                    egui::Event::PointerMoved(p(30.0, 40.0)),
+                    egui::Event::PointerMoved(p(30.0, 40.0)),
+                ]
+            ),
+            1,
+            "同一帧里的重复指针位置只该留一条"
+        );
+        // 真的移动了 → 放行
+        assert_eq!(
+            frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(31.0, 40.0))]),
+            1,
+            "指针真的移动时必须放行，否则界面会卡住不跟手"
+        );
+        // 其它事件一律不受影响
+        assert_eq!(
+            frame(&ctx, &mut last, vec![egui::Event::WindowFocused(true)]),
+            1,
+            "非指针事件不该被过滤"
+        );
+    }
+
+    /// 指针离开窗口后再回到**同一个**位置，必须放行。
+    ///
+    /// 否则 `last_pos` 会一直留着旧值，那条"回来了"的事件被当成重复丢掉 ——
+    /// egui 会以为指针还在窗口外，悬停高亮全部失效。
+    #[test]
+    fn pointer_returning_to_the_same_spot_passes_after_leaving() {
+        let ctx = egui::Context::default();
+        let mut last = None;
+        let p = |x, y| egui::pos2(x, y);
+
+        assert_eq!(frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(5.0, 5.0))]), 1);
+        assert_eq!(frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(5.0, 5.0))]), 0);
+        assert_eq!(frame(&ctx, &mut last, vec![egui::Event::PointerGone]), 1);
+        assert_eq!(
+            frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(5.0, 5.0))]),
+            1,
+            "离开再回到同一点必须放行，否则悬停会失效"
+        );
+    }
 }

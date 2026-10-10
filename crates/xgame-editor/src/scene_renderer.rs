@@ -19,6 +19,52 @@ use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
 use xgame_core::{Entity, EntityId, Scene};
 
+/// 连续缩放窗口时，重建离屏渲染目标的最小间隔。
+///
+/// 太小 = 又变成"每帧重建"（一次拖拽 40+ 次纹理分配）；太大 = 视口在拖拽过程中
+/// 更新得太迟钝。100ms（约 10Hz）在"跟手"与"开销"之间是个稳妥的折中 ——
+/// 拖拽结束的那一帧无论如何都会重建一次，所以最终画质不受影响。
+const RESIZE_REBUILD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 视口尺寸变更时该做什么（纯函数，便于单测 —— 真实路径需要 GPU 设备，测不了）。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum ResizeDecision {
+    /// 什么都不用做（尺寸非法，或与当前渲染目标一致）。
+    Ignore,
+    /// 沿用旧渲染目标，本帧不重建。
+    Defer,
+    /// 按新尺寸重建渲染目标。
+    Rebuild,
+}
+
+/// 决定一次视口尺寸变更该怎么处理，见 [`ResizeDecision`]。
+///
+/// - `current` 当前渲染目标的尺寸；`asked` 本帧请求的尺寸。
+/// - `pending` 上一帧被推迟的请求尺寸（`Some(asked)` = 请求没变 → 用户停手了）。
+/// - `has_target` 是否已经有可用的渲染目标（首帧为假，不能等）。
+/// - `since_rebuild` 距上次重建过了多久（`None` = 从没建过）。
+pub(crate) fn plan_resize(
+    current: (u32, u32),
+    pending: Option<(u32, u32)>,
+    has_target: bool,
+    asked: (u32, u32),
+    since_rebuild: Option<std::time::Duration>,
+) -> ResizeDecision {
+    if asked.0 == 0 || asked.1 == 0 || current == asked {
+        return ResizeDecision::Ignore;
+    }
+    // 请求尺寸与上一帧相同 → 尺寸稳住了（用户松手了）。
+    let settled = pending == Some(asked);
+    // 距上次重建够久 → 即便还在拖，也让视口更新一次，不至于整段冻住。
+    let due = since_rebuild.is_none_or(|d| d >= RESIZE_REBUILD_INTERVAL);
+
+    if !has_target || settled || due {
+        ResizeDecision::Rebuild
+    } else {
+        ResizeDecision::Defer
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SceneRenderer
 // ---------------------------------------------------------------------------
@@ -44,6 +90,13 @@ pub struct SceneRenderer {
     msaa_color_view: Option<wgpu::TextureView>,
     /// 深度附件。采样数必须与颜色附件一致（MSAA 时也是多采样）。
     depth_view: Option<wgpu::TextureView>,
+    /// 上一帧请求过、但被推迟的视口尺寸（见 [`SceneRenderer::set_viewport_size`]）。
+    ///
+    /// `Some(尺寸)` 表示"尺寸还在变，这一帧先不重建"。`render` 在它为 `Some` 时
+    /// **跳过整段 3D 渲染**，只让调用方把上一帧的纹理拉伸到新矩形上。
+    pending_size: Option<(u32, u32)>,
+    /// 上一次重建渲染目标的时刻，用于给连续缩放节流。
+    last_target_rebuild: Option<std::time::Instant>,
     /// 主 pass 的采样数（1 = 未开 MSAA）。
     sample_count: u32,
     /// Keep old render-target textures alive so egui doesn't dangle.
@@ -82,6 +135,8 @@ impl SceneRenderer {
             render_view: None,
             msaa_color_view: None,
             depth_view: None,
+            pending_size: None,
+            last_target_rebuild: None,
             sample_count: sample_count.max(1),
             _stale_textures: Vec::new(),
             texture_id: None,
@@ -92,12 +147,44 @@ impl SceneRenderer {
 
     // -- Viewport management --
 
+    /// 视口尺寸变化时**不立刻**重建渲染目标，而是节流重建。
+    ///
+    /// 拖窗口边缘时这个函数每帧都会被调一次，而重建意味着新建 3 张纹理
+    /// （单采样颜色 / MSAA 颜色 / 深度 —— MSAA 那张是 4 倍采样，最贵）+ 注册一张
+    /// 新的 egui 原生纹理 + 释放旧的；而且尺寸一变**输入指纹必然变** → 每帧还要全量
+    /// 重绘一次 3D。实测拖一次边框（约 1.7 秒）会重建 **43 次**目标、重绘 43 帧 ——
+    /// 主线程被这些分配占满，Windows 的模态缩放循环抢不到消息线程，表现就是缩放发"黏"。
+    ///
+    /// 现在的策略：
+    /// - **尺寸还没稳定** → 先不重建，本帧跳过 3D（`render` 会直接返回）；
+    ///   但**最多等 [`RESIZE_REBUILD_INTERVAL`]**，到点就重建一次并重绘一帧 ——
+    ///   于是视口在拖拽过程中仍以约 10Hz 更新，不会像 Unity 那样整段冻住。
+    /// - **尺寸与上一帧相同** = 用户停手了 → 立刻按最终尺寸重建、全质量重绘一帧。
+    ///
+    /// 这样大部分帧只剩 egui 自己的开销，窗口缩放跟手；纹理开销也从"每帧一次"
+    /// 降到"每 100ms 一次"。
     pub fn set_viewport_size(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 || self.viewport_size == (width, height) {
-            return;
+        let decision = plan_resize(
+            self.viewport_size,
+            self.pending_size,
+            self.render_view.is_some(),
+            (width, height),
+            self.last_target_rebuild.map(|t| t.elapsed()),
+        );
+
+        match decision {
+            ResizeDecision::Ignore => {}
+            ResizeDecision::Defer => {
+                // 尺寸还在变、又没到重建时间：本帧不重建。
+                self.pending_size = Some((width, height));
+            }
+            ResizeDecision::Rebuild => {
+                self.viewport_size = (width, height);
+                self.pending_size = None;
+                self.last_target_rebuild = Some(std::time::Instant::now());
+                self.recreate_targets();
+            }
         }
-        self.viewport_size = (width, height);
-        self.recreate_targets();
     }
 
     fn recreate_targets(&mut self) {
@@ -316,6 +403,12 @@ impl SceneRenderer {
             return false;
         }
 
+        // 缩放窗口进行中：跳过整段 3D 渲染。调用方会拿上一帧那张纹理拉伸到新矩形 ——
+        // 观感与 Unity 一致，代价是这一帧几乎为零（见 `set_viewport_size`）。
+        if self.pending_size.is_some() {
+            return false;
+        }
+
         let entities = &scene.entities;
 
         // 先算指纹：**刻意排在解算世界矩阵之前**。
@@ -440,6 +533,72 @@ mod tests {
             &SceneLighting::new(ambient, lights),
             entities,
         )
+    }
+
+    // -- 缩放节流状态机 --
+
+    const D: std::time::Duration = std::time::Duration::from_millis(200);
+
+    /// 首帧：还没有渲染目标，必须立刻建，不能等。
+    #[test]
+    fn first_resize_builds_immediately() {
+        assert_eq!(
+            plan_resize((0, 0), None, false, (800, 600), None),
+            ResizeDecision::Rebuild
+        );
+    }
+
+    /// 尺寸没变 / 非法尺寸：什么也不做。
+    #[test]
+    fn unchanged_or_invalid_size_is_ignored() {
+        assert_eq!(
+            plan_resize((800, 600), None, true, (800, 600), Some(D)),
+            ResizeDecision::Ignore
+        );
+        assert_eq!(
+            plan_resize((800, 600), None, true, (0, 600), Some(D)),
+            ResizeDecision::Ignore
+        );
+    }
+
+    /// 连续拖拽中被推迟的尺寸：既没稳定、又刚重建过 → 本帧不重建。
+    #[test]
+    fn continuous_resize_is_deferred_within_the_throttle_window() {
+        assert_eq!(
+            plan_resize(
+                (800, 600),
+                Some((810, 610)),
+                true,
+                (820, 620),
+                Some(std::time::Duration::ZERO)
+            ),
+            ResizeDecision::Defer
+        );
+    }
+
+    /// 尺寸与上一帧相同 = 用户松手了 → 立刻按最终尺寸重建（否则画面会永远停在拉伸态）。
+    #[test]
+    fn settled_size_builds_immediately() {
+        assert_eq!(
+            plan_resize((800, 600), Some((820, 620)), true, (820, 620), Some(D)),
+            ResizeDecision::Rebuild
+        );
+    }
+
+    /// 还在拖，但距上次重建已经超过节流间隔 → 也重建一次，
+    /// 让视口在拖拽过程中保持约 10Hz 的更新，而不是整段冻住。
+    #[test]
+    fn slow_resize_still_refreshes_after_the_interval() {
+        assert_eq!(
+            plan_resize(
+                (800, 600),
+                Some((810, 610)),
+                true,
+                (820, 620),
+                Some(RESIZE_REBUILD_INTERVAL + std::time::Duration::from_millis(1))
+            ),
+            ResizeDecision::Rebuild
+        );
     }
 
     /// 同一份输入必须给出同一个指纹 —— 否则每帧都会白重画一次。
