@@ -35,7 +35,7 @@ pub enum BodyKind {
 ///
 /// 引擎内部还支持三角网格与高度场（见 `xgame-physics::ColliderShape`），
 /// 但那两种形状携带大块数据、通常由导入器生成而非手写，所以不进场景文件。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum CollisionShape {
     /// 轴对齐盒体（半边长）。
     Cuboid { half_extents: [f32; 3] },
@@ -50,13 +50,8 @@ pub enum CollisionShape {
     /// 这是**默认值**，也是新实体的常见情形：作者摆一个 1×1×1 的方块
     /// 缩放成 4×0.2×4 当平台，`Auto` 直接读它的变换，不用再手填一遍尺寸。
     /// 缩放的绝对值被用作盒子半边长 —— 与"视觉外观即碰撞形状"的直觉一致。
+    #[default]
     Auto,
-}
-
-impl Default for CollisionShape {
-    fn default() -> Self {
-        CollisionShape::Auto
-    }
 }
 
 /// 一个实体的物理属性。

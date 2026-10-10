@@ -462,6 +462,27 @@ fn collect_script_queue(scene: &Scene) -> Vec<(EntityId, String)> {
     queue
 }
 
+/// 从编译结果里找出定义了哪些钩子。
+///
+/// 用 AST 的元数据而不是"调用失败再看错误"：后者会把"钩子不存在"和
+/// "钩子内部调用了不存在的函数"混成一类，前者是正常的，后者必须报错。
+fn collect_hooks(ast: &AST) -> Hooks {
+    let mut hooks = Hooks::default();
+    for f in ast.iter_functions() {
+        if f.access.is_private() {
+            continue;
+        }
+        match f.name {
+            "start" => hooks.start = true,
+            "update" => hooks.update = true,
+            "fixed_update" => hooks.fixed_update = true,
+            "on_destroy" => hooks.destroy = true,
+            _ => {}
+        }
+    }
+    hooks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,25 +779,4 @@ mod tests {
         assert_eq!(report.removed.len(), 1);
         assert!(scene.find_by_name("victim").is_none());
     }
-}
-
-/// 从编译结果里找出定义了哪些钩子。
-///
-/// 用 AST 的元数据而不是"调用失败再看错误"：后者会把"钩子不存在"和
-/// "钩子内部调用了不存在的函数"混成一类，前者是正常的，后者必须报错。
-fn collect_hooks(ast: &AST) -> Hooks {
-    let mut hooks = Hooks::default();
-    for f in ast.iter_functions() {
-        if f.access.is_private() {
-            continue;
-        }
-        match f.name {
-            "start" => hooks.start = true,
-            "update" => hooks.update = true,
-            "fixed_update" => hooks.fixed_update = true,
-            "on_destroy" => hooks.destroy = true,
-            _ => {}
-        }
-    }
-    hooks
 }

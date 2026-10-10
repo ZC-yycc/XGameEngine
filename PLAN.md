@@ -303,3 +303,46 @@ core ← math ← {render, physics}
    （`EntitySpawned` / `EntitiesRemoved` / `Reparented`）知道该补建 / 清理哪些刚体。
 
 <!-- markdownlint-disable-file -->
+
+---
+
+## 九、渲染质量：方向光阴影（本轮）
+
+`Light::casts_shadow` / `shadow_resolution` 从"已进场景、渲染侧没接"变成真的生效。
+做法是经典 shadow mapping，落在共享的 `ScenePipeline` 里 —— 编辑器离屏渲染与独立
+游戏因此**同时**获得阴影，不需要各自接一遍。
+
+| 位置 | 内容 |
+|---|---|
+| `xgame-render/src/gltf_loader.rs` | 新增 `Bounds`（AABB）；`GltfMesh` 记录本地包围盒（三条构造路径都填） |
+| `xgame-render/src/scene_pipeline.rs` | 阴影深度图 + 比较采样器 + `ShadowUniform`；独立的深度-only 阴影 pass 与 `shadow_bgl` / `shadow_pipeline`；`GpuLight.shadow_params` 标记使用阴影的灯；主片元用 3×3 PCF；纯函数 `scene_bounds` / `fit_directional_shadow` / `pick_shadow_slot` |
+| `xgame-editor/src/scene_renderer.rs` | 指纹加入 `casts_shadow` / `shadow_resolution`（漏掉的话勾选后画面不动） |
+
+### 三个刻意的取舍（别推翻）
+
+1. **正交视锥按"场景世界包围盒的外接球"拟合**，而不是固定大小的盒子。阴影贴图分辨率
+   固定，视锥开太大 → 精度被稀释成噪点；开太小 → 边缘物体没影子。用球（而不是贴合
+   方向的盒）是因为光源角度任取时球在各个方向投影都一样大，不必为每个角度重算 ——
+   代价是浪费一些纹素，对"先把阴影做出来"是划算的。
+2. **只支持一盏方向光**（第一盏 `casts_shadow` 的方向光）。多盏各自的阴影贴图意味着
+   每盏一次全场景重绘。点光阴影（6 面立方体贴图）明确不在这一版范围内。
+3. **阴影 pass 用独立的 `shadow_bgl`**，不含深度贴图本身。若沿用全局布局，就会在
+   "把深度画进 `shadow_view`"的同时又在 group(0) 里绑同一张图 —— wgpu 判为
+   "同一资源既作渲染目标又作绑定"。
+
+### 验证
+
+- 单测 +12：`Bounds` 求并/变换/空盒退化；`fit_directional_shadow` 把场景包围盒的
+  八个角点全部映射进 NDC `[-1,1]²` 与深度 `[0,1]`（**这是阴影能工作的前提**）、
+  深度顺序与"离光源远近"一致、零方向不产生 NaN、空场景返回 `None`；
+  `pick_shadow_slot` 跳过点光与 `casts_shadow=false`；`build_lights` 把标记落在
+  正确的下标上。
+- 真机 A/B：同一场景、同一机位，只切 `casts_shadow` → 14343 像素变化，且差异区域
+  **正好**是柱子在地面上的投影范围。
+- 编辑器打开示例项目：60 FPS、无 wgpu 校验错误。
+
+### 遗留
+
+- **无色调映射**，太阳强度一高地面就过曝成纯白（示例项目 `intensity: 3.2` 就是）。
+  这属于第九阶段剩下的 ToneMapping（ACES）。
+- 阴影没有级联（CSM），大场景远处会糊。

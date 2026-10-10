@@ -312,12 +312,13 @@ scene_view::show_content(state, ui)
   │   │     上传 GPU → 缓存于 model_cache
   │   │
   │   ├── Phase 2: wgpu 渲染 (ScenePipeline::render)
-  │   │     ├── 写入 CameraUniform (view_proj, camera_pos)
-  │   │     ├── 开启 RenderPass (背景 #1E1E24)
-  │   │     ├── 遍历 entities:
+  │   │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
+  │   │     ├── 遍历实体收集绘制项，写 ModelUniform（世界矩阵，动态偏移）
+  │   │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
+  │   │     ├── 主 RenderPass (背景 #1E1E24)：
   │   │     │   ├── 跳过无模型 / 未加载实体
-  │   │     │   ├── transform → ModelUniform (T*R*S)
-  │   │     │   └── 逐 primitive: set_vb / set_ib / draw_indexed
+  │   │     │   ├── 逐 primitive: set_global_bg / set_material_bg / draw_indexed
+  │   │     │   └── 片元按灯叠加，被标记的灯查阴影图（3×3 PCF）
   │   │     └── 提交命令
   │   │
   │   └── 渲染结果 → egui 纹理 (离屏 Texture → TextureId)
@@ -375,7 +376,7 @@ _"moving a window doesn't warrant a repaint"_，后来被并进大组里丢了�
 "场景其实没变"的帧。
 
 `SceneRenderer::render` 因此先算一个**输入指纹**：相机矩阵与位置、视口尺寸、环境光、
-参与光照的光源、每个实体的模型标识与**世界矩阵**。这些正是着色器会读到的东西；选中态、
+参与光照的光源（含 `casts_shadow` / `shadow_resolution`）、每个实体的模型标识与**世界矩阵**。这些正是着色器会读到的东西；选中态、
 gizmo、网格开关、物理调试线都不在其中（它们画在 egui 叠加层上，与离屏纹理无关）。
 指纹与上一帧逐位相同 → 整段渲染跳过，`painter.image` 照旧贴上一帧那张纹理。
 
@@ -398,7 +399,9 @@ group(0)  全局，整帧一份            group(1)  材质，每个材质槽一
   binding 0  camera  uniform          binding 0  base color texture
   binding 1  lights  uniform          binding 1  sampler
   binding 2  model   uniform          binding 2  material uniform
-             （动态偏移：每实体一段）
+  binding 3  shadow  depth tex
+  binding 4  shadow  cmp sampler
+  binding 5  shadow  uniform
 ```
 
 ```wgsl
@@ -417,8 +420,25 @@ for 每盏灯:
     ndotl  = max(dot(N, L), 0)
     H      = normalize(L + V)                   // V = normalize(camera_pos - world_pos)
     spec   = pow(max(dot(N, H), 0), shininess) * specular * ndotl
-    color += albedo * ndotl * radiance + spec * radiance;
+    // 只有被标记的那盏灯查阴影图；3×3 PCF
+    shade  = shadow_params.x > 0.5 ? pcf_3x3(uv_light, depth_light - bias) : 1.0
+    color += (albedo * ndotl + spec) * radiance * shade;
 ```
+
+**阴影 pass**（在主 pass 之前，同一个 encoder 里）：
+
+```text
+if 有开阴影的方向光 且 场景包围盒非空:
+    1. CPU: fit_directional_shadow(dir, scene_bounds)
+            → 用场景外接球拟合正交视锥（proj · look_at）
+    2. GPU: 只画**不透明**图元 → 2048² Depth32Float（无片元管线，背面剔除）
+    3. 片元阶段把 world_pos 变换回光源裁剪空间，取 xyz/w 得 UV 与深度，
+       用比较采样器做 3×3 PCF（textureSampleCompareLevel，避开非一致控制流）
+```
+
+`shadow_bgl` 刻意**不含**深度贴图本身：阴影 pass 一边把深度画进 `shadow_view`、
+一边若在 group(0) 里绑同一张图，wgpu 会判成"同一资源既作渲染目标又作绑定资源"。
+用小布局绕开它。深度偏置用两处：着色器里的常数偏置 + 管线的硬件斜率偏置。
 
 材质绑定组按 `GltfPrimitive::material_id` **惰性创建并缓存**——模型加载一次之后，
 每帧只是查表 + `set_bind_group`，不会重复建 GPU 对象。
@@ -857,15 +877,15 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
 | `editor/state.rs` | 1226 | `EditorState::new()`、`UndoStack`、`GizmoDrag`（含 `start_axis`）、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作（`create_prefab_from_selection()` / `instantiate_prefab_by_path()` / `apply_prefab()` / `revert_prefab()`）|
-| `editor/scene_renderer.rs` | 336 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`、`render()` |
+| `editor/scene_renderer.rs` | 563 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（含阴影开关/分辨率）、`render()` |
 | `editor/scene_view.rs` | 997 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()` |
 | `editor/game_runtime.rs` | 93 | `start()`、`fixed_update()` |
 | `core/project.rs` | 685 | `ProjectHandle::open()`、`create()`、`path()`、`list_prefabs()`、`load_prefab()`、`write_prefab()` |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 826 | `Scene::world_matrices()`、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()` |
-| `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()` |
-| `render/scene_pipeline.rs` | 700 | `ScenePipeline::new()`、`render()`（收 `world_matrices`）、`build_lights()`、`material_binding()` |
-| `render/gltf_loader.rs` | 434 | `GltfMesh::from_file()`、`load()`、`read_material()` |
+| `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
+| `render/scene_pipeline.rs` | 1458 | `ScenePipeline::new()` / `render()`（含阴影 pass）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
+| `render/gltf_loader.rs` | 546 | `GltfMesh::from_file()` / `load()`、`read_material()`、`Bounds`（网格本地包围盒） |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |
 | `physics/world.rs` | 681 | `step(dt)`（按传入 dt 积分、子步均分 dt）、`add_body()`（维护 `body_handles` 反查表）、`debug_lines()` |
 | `editor/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|

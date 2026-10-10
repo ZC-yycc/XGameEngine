@@ -3,7 +3,107 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wgpu::util::DeviceExt;
 
+use xgame_math::glam::{Mat4, Vec3};
+
 use crate::texture::Texture;
+
+// ---------------------------------------------------------------------------
+// 轴对齐包围盒
+// ---------------------------------------------------------------------------
+
+/// 轴对齐包围盒（AABB）。
+///
+/// 目前唯一的用途是**拟合方向光的阴影正交视锥**——阴影贴图是一张固定分辨率的
+/// 深度图，它只覆盖一个有限的立方体区域，这个区域必须刚好罩住整个场景，
+/// 否则要么边缘的物体没有阴影，要么精度被稀释成一片噪点。
+///
+/// 用"空盒"（`min > max`）表示"还没并进任何点"，这样 [`union`](Self::union)
+/// 第一句就能自洽，不需要额外的 `Option` 或 `initialized` 标记。
+///
+/// [`union`]: Self::union
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bounds {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl Bounds {
+    /// 空盒。任何点并进来之后才有意义。
+    pub const EMPTY: Self = Self {
+        min: Vec3::splat(f32::INFINITY),
+        max: Vec3::splat(f32::NEG_INFINITY),
+    };
+
+    /// 是否为空盒（没有并进任何点）。
+    pub fn is_empty(&self) -> bool {
+        self.min.x > self.max.x || self.min.y > self.max.y || self.min.z > self.max.z
+    }
+
+    /// 由一组点求包围盒。
+    pub fn from_points(points: impl IntoIterator<Item = [f32; 3]>) -> Self {
+        points.into_iter().fold(Self::EMPTY, |b, p| {
+            let v = Vec3::from(p);
+            Self {
+                min: b.min.min(v),
+                max: b.max.max(v),
+            }
+        })
+    }
+
+    /// 求并（两个盒子的最小外壳）。
+    pub fn union(&self, other: &Bounds) -> Bounds {
+        Bounds {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
+    pub fn center(&self) -> Vec3 {
+        (self.min + self.max) * 0.5
+    }
+
+    pub fn half_extent(&self) -> Vec3 {
+        (self.max - self.min) * 0.5
+    }
+
+    /// 外接球半径：半边长向量的长度。拟合正交视锥时用它一句话定尺寸。
+    pub fn radius(&self) -> f32 {
+        self.half_extent().length()
+    }
+
+    /// 八个角点。变换包围盒只能变换角点再重新求盒（旋转之后无法用对角线直接推）。
+    pub fn corners(&self) -> [Vec3; 8] {
+        let (a, b) = (self.min, self.max);
+        [
+            Vec3::new(a.x, a.y, a.z),
+            Vec3::new(b.x, a.y, a.z),
+            Vec3::new(a.x, b.y, a.z),
+            Vec3::new(b.x, b.y, a.z),
+            Vec3::new(a.x, a.y, b.z),
+            Vec3::new(b.x, a.y, b.z),
+            Vec3::new(a.x, b.y, b.z),
+            Vec3::new(b.x, b.y, b.z),
+        ]
+    }
+
+    /// 用一个仿射矩阵（通常是世界矩阵）变换本盒，返回新的轴对齐盒。
+    pub fn transformed(&self, m: &Mat4) -> Bounds {
+        if self.is_empty() {
+            return *self;
+        }
+        Bounds::from_points(
+            self.corners()
+                .into_iter()
+                .map(|c| (*m * c.extend(1.0)).truncate().to_array()),
+        )
+    }
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
 
 /// 材质槽位的全局自增 ID。
 ///
@@ -64,6 +164,8 @@ pub struct GltfMesh {
     pub primitives: Vec<GltfPrimitive>,
     /// 顶点步长（字节），所有图元统一。
     pub vertex_size: u64,
+    /// 本地空间的包围盒（未施加任何变换）。阴影拟合时用世界矩阵把它变到世界空间。
+    pub bounds: Bounds,
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +217,8 @@ impl GltfMesh {
             gltf::import(path.as_ref()).context("Failed to parse glTF file")?;
 
         let mut primitives = Vec::new();
+        // 整个网格的本地包围盒：各图元的顶点位置并起来。阴影拟合只关心这个。
+        let mut bounds = Bounds::EMPTY;
 
         for mesh in document.meshes() {
             for primitive in mesh.primitives() {
@@ -126,6 +230,7 @@ impl GltfMesh {
                     .context("Missing POSITION attribute")?
                     .collect();
                 let vertex_count = positions.len();
+                bounds = bounds.union(&Bounds::from_points(positions.iter().copied()));
 
                 // --- 索引 ---
                 let indices: Vec<u32> = reader
@@ -201,6 +306,7 @@ impl GltfMesh {
         Ok(Self {
             primitives,
             vertex_size: GltfVertex::STRIDE,
+            bounds,
         })
     }
 
@@ -254,6 +360,11 @@ impl GltfMesh {
                 material_id: next_material_id(),
             }],
             vertex_size: GltfVertex::STRIDE,
+            // 回退立方体就是边长 1、中心在原点的单位盒。
+            bounds: Bounds {
+                min: Vec3::splat(-0.5),
+                max: Vec3::splat(0.5),
+            },
         }
     }
 
@@ -286,6 +397,7 @@ impl GltfMesh {
                 material_id: next_material_id(),
             }],
             vertex_size: GltfVertex::STRIDE,
+            bounds: Bounds::from_points(data.vertices.iter().map(|v| v.position)),
         }
     }
 

@@ -219,6 +219,10 @@ impl SceneRenderer {
             hash = mix_bits(hash, light.intensity.to_bits() as u64);
             hash = mix_f32s(hash, &light.position);
             hash = mix_f32s(hash, &light.normalized_direction());
+            // 阴影开关与分辨率也进指纹：它们决定深度图的内容/尺寸，
+            // 漏掉的话"在 Inspector 里勾掉 Casts Shadow"会看到画面纹丝不动。
+            hash = mix_bits(hash, light.casts_shadow as u64);
+            hash = mix_bits(hash, light.shadow_resolution as u64);
         }
         hash = mix_bits(hash, light_count);
 
@@ -493,6 +497,33 @@ mod tests {
             signature(&e, &[], ambient),
             signature(&e, &[off], ambient),
             "强度为 0 的灯不该参与指纹"
+        );
+    }
+
+    /// 阴影开关 / 分辨率进指纹：它们决定那张深度图的内容与尺寸，
+    /// 漏掉的话在 Inspector 里勾掉 `Casts Shadow` 会看到画面纹丝不动。
+    #[test]
+    fn signature_notices_shadow_settings() {
+        let e = [entity("Box", "builtin://cube", Vec3::ZERO)];
+        let ambient = [0.06, 0.06, 0.08];
+
+        let mut shadow_on = Light::directional("sun", [0.5, -1.0, 0.5], [1.0; 3], 1.0);
+        shadow_on.casts_shadow = true;
+        let mut shadow_off = shadow_on.clone();
+        shadow_off.casts_shadow = false;
+
+        assert_ne!(
+            signature(&e, &[shadow_on.clone()], ambient),
+            signature(&e, &[shadow_off], ambient),
+            "阴影开关没进指纹"
+        );
+
+        let mut hi_res = shadow_on.clone();
+        hi_res.shadow_resolution = 4096;
+        assert_ne!(
+            signature(&e, &[shadow_on], ambient),
+            signature(&e, &[hi_res], ambient),
+            "阴影分辨率没进指纹"
         );
     }
 

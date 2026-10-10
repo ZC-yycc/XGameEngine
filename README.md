@@ -90,6 +90,8 @@ core ← math ← {render, physics} ← editor / game
 - glTF 模型加载：顶点 / 法线 / 顶点色 / UV + base color 贴图 + PBR 材质因子
 - Blinn-Phong 光照：环境光 + 漫反射 + 半程向量高光，单帧最多 8 盏方向光 / 点光
 - 光照是**场景级数据**（`Scene::lights` / `Scene::ambient`），随场景一起存盘
+- **方向光阴影贴图**：`Light::casts_shadow` 打开后，那盏方向光会先渲染一遍场景深度，
+  主 pass 再用 3×3 PCF 比较出阴影；`shadow_resolution` 可调贴图分辨率（0 = 2048）
 - 半透明（glTF `alphaMode`）与不透明分两条管线，半透明按到相机距离远 → 近排序
 - 内置基础图元（Cube / Sphere / Plane / Cylinder）不依赖外部资产文件
 
@@ -104,6 +106,46 @@ core ← math ← {render, physics} ← editor / game
 - 撤销 / 重做：`Ctrl+Z` · `Ctrl+Shift+Z` · `Ctrl+Y`
 - 复制 / 粘贴：`Ctrl+C` · `Ctrl+V`；复制实体 / 删除：`Ctrl+D` · `Delete`
 - `Ctrl+S` 保存场景；🔨 Build 把项目打包成独立游戏
+
+## 阴影（方向光）
+
+场景里的方向光可以投射**实时阴影**——这正是给场景"压下去一层"、让物体之间产生
+空间关系的东西：
+
+```ron
+lights: [
+    (
+        name: "Sun",
+        kind: Directional,
+        direction: (0.45, -1.0, 0.35),   // 光**射出去**的方向
+        intensity: 3.2,
+        casts_shadow: true,              // 这盏灯投射阴影
+        shadow_resolution: 0,            // 0 = 引擎默认（2048²）
+    ),
+],
+```
+
+做法是经典的 **shadow mapping**，每次出帧多一个 pass：
+
+```text
+1. 阴影 pass   用光源的正交视图投影矩阵，只把深度画进一张 2048² 深度图
+               （场景世界包围盒 → 拟合正交视锥，见 fit_directional_shadow）
+2. 主 pass     片元变换回光源裁剪空间，与深度图比较（3×3 PCF 软化边缘），
+               被挡住的片元只留环境光
+```
+
+几个刻意的取舍：
+
+- **只做方向光**。点光阴影要 6 面立方体贴图，成本高得多；`Light::casts_shadow`
+  在点光上会被忽略。
+- **只做一盏**。第一盏开了 `casts_shadow` 的方向光是唯一投影的灯。多盏各自的
+  阴影贴图意味着每盏一次全场景重绘 —— 先把一盏做扎实，比铺开十几盏半成品值得。
+- **正交视锥按场景世界包围盒拟合**，而不是拍一个固定大小的盒子：贴图分辨率固定，
+  视锥开太大精度就被稀释成噪点，开太小边缘的物体直接没影子。
+- **半透明图元不投阴影**。玻璃本来也不该在地上投一块实心黑斑。
+- 没有开阴影的灯、或场景里没有任何带模型的实体时，整个阴影 pass 被跳过（零开销）。
+
+编辑器里在 Inspector 的光照区块就能勾 `casts_shadow`，改完立刻重画。
 
 ## 场景层级
 

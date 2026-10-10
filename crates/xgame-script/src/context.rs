@@ -19,6 +19,12 @@
 //! 而 Rhai（开启 `sync` feature）要求注册的类型 `Send + Sync`。
 //! `usize` + `PhantomData<fn() -> T>` 天然满足，不需要 `unsafe impl`。
 
+// 上面这一段解释了这个模块**为什么**要从 `&self` 里交出 `&mut`：`ScriptCtx` 是
+// 一个 Copy 的"地址束"，解释器按值拷来拷去，但每个副本指向的都是同一份活数据，
+// 所以访问器全都收 `&self`。clippy 的 `mut_from_ref` 针对的正是这个形状，但它
+// 看到的是签名、看不到上面那套调用窗口的约定 —— 在模块级别关掉它，并在此写明理由。
+#![allow(clippy::mut_from_ref)]
+
 use std::marker::PhantomData;
 
 use xgame_core::{EntityId, PhysicsBody, Scene};
