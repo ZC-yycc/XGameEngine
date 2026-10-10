@@ -128,6 +128,18 @@ impl LogLevel {
 }
 
 
+/// 控制台保留的最大消息条数。
+///
+/// 面板只渲染最近 500 条（见 `panels/console.rs`），所以这个上限纯粹是**内存**
+/// 护栏：一个每帧打日志的脚本不该把编辑器的内存拖垮。1000 条足够保留"刚才发生了什么"。
+const MAX_CONSOLE_MESSAGES: usize = 1000;
+
+/// 触顶时一次性丢弃的条数。
+///
+/// 不逐条丢：`Vec::remove(0)` 是 O(n) 的整表搬运，而 `log` 在脚本刷屏时是每帧
+/// 都会被调用的热点。成批丢把这次搬运摊到几百条日志上，代价可以忽略。
+const CONSOLE_TRIM_BATCH: usize = 200;
+
 /// 单条控制台消息。
 #[derive(Debug, Clone)]
 pub struct LogMessage {
@@ -745,6 +757,14 @@ impl EditorState {
                 return;
             }
         }
+        // 超上限就**成批**丢掉最旧的一批。
+        //
+        // 去重只挡得住"连续完全相同的消息"；一个每帧打一条**内容不同**日志的脚本
+        // 能在几分钟里把这张表撑到几十万条 —— 面板只渲染最近 500 条不会卡，但内存
+        // 是真的一直在涨。成批丢而不是逐条 `remove(0)`：后者每帧都要搬一次整表。
+        if self.console_messages.len() >= MAX_CONSOLE_MESSAGES {
+            self.console_messages.drain(..CONSOLE_TRIM_BATCH);
+        }
         self.console_messages
             .push(LogMessage::new(level, text));
     }
@@ -1338,3 +1358,81 @@ impl EditorState {
 //   - 加载：`ProjectHandle::load_entry_scene()`
 //   - 默认场景：`xgame_core::project::default_scene()`
 // 编辑器不再自己拼路径，也不再维护第二份「默认场景」定义。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一个挂在临时目录上的编辑器状态（用完记得删目录）。
+    fn temp_state(tag: &str) -> (EditorState, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "xgame_state_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let handle = xgame_core::ProjectHandle::create(&base, "StateTest").expect("创建临时项目");
+        (EditorState::new(handle), base)
+    }
+
+    /// 控制台消息表必须有上限。
+    ///
+    /// 每条内容都不一样，去重拦不住 —— 这正是"每帧打一条不同日志的脚本"的情形。
+    /// 没有上限的话，一张只增不减的表会把编辑器的内存一路推上去。
+    #[test]
+    fn console_history_is_capped() {
+        let (mut state, base) = temp_state("console_cap");
+
+        let total = MAX_CONSOLE_MESSAGES + 500;
+        for i in 0..total {
+            state.log_info(format!("msg {i}"));
+        }
+
+        assert!(
+            state.console_messages.len() <= MAX_CONSOLE_MESSAGES,
+            "控制台不该无限增长，实际 {} 条",
+            state.console_messages.len()
+        );
+        // 丢的是**最旧**的，最新那条必须在。
+        assert_eq!(
+            state.console_messages.last().unwrap().text,
+            format!("msg {}", total - 1),
+            "裁剪必须丢最旧的，而不是最新的"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 选中索引越界时 `clamp_selection` 必须把它收回合法范围 ——
+    /// 这是"改实体数量之后下一帧 `entities[idx]` 不 panic"的兜底。
+    #[test]
+    fn clamp_selection_rejects_out_of_range_index() {
+        let (mut state, base) = temp_state("clamp");
+
+        state.scene = xgame_core::Scene::new("clamp");
+        for i in 0..3 {
+            state.scene.add_entity(xgame_core::Entity::new(format!("e{i}")));
+        }
+
+        // 远越界 → 收到最后一个。
+        state.selected_entity = Some(99);
+        state.clamp_selection();
+        assert_eq!(state.selected_entity, Some(2));
+
+        // 场景清空 → 取消选中，而不是留下一个必然越界的索引。
+        state.scene.entities.clear();
+        state.clamp_selection();
+        assert_eq!(state.selected_entity, None);
+
+        // 合法值不该被动。
+        state.scene.add_entity(xgame_core::Entity::new("only"));
+        state.selected_entity = Some(0);
+        state.clamp_selection();
+        assert_eq!(state.selected_entity, Some(0));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

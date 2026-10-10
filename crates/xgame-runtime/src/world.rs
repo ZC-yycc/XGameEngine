@@ -87,6 +87,20 @@ pub struct World {
     root: PathBuf,
     /// 上一帧的统计，供 UI 读取。
     last_report: FrameReport,
+    /// `sync_bodies` 的复用暂存（"有 physics 但还没建刚体"的实体索引）。
+    ///
+    /// 做成字段而不是每次 `Vec::new()`：`sync_bodies` 每帧（每个固定步 + 每渲染帧）
+    /// 都要扫一遍，稳态下这个 `Vec` 一直是空的，但字面量写法会**每帧分配一次**。
+    /// 留着容量循环复用，稳态就是零分配。
+    scratch_physics_indices: Vec<usize>,
+    /// 场景里是否存在**运动学**刚体。
+    ///
+    /// 由 `sync_bodies` 那次扫描顺带记下，供 `push_kinematic_bodies` 早退用。
+    /// 没有它的话，"这个场景要不要推运动学体"就得每个固定步再单独扫一遍全场 ——
+    /// 纯静态 / 纯动态场景（很常见）白白付出一次 O(n)。
+    has_kinematic: bool,
+    /// 场景里是否存在**动态**刚体。同上，供 `pull_dynamic_bodies` 早退用。
+    has_dynamic: bool,
 }
 
 impl World {
@@ -115,6 +129,9 @@ impl World {
             body_of_entity: HashMap::new(),
             root,
             last_report: FrameReport::default(),
+            scratch_physics_indices: Vec::new(),
+            has_kinematic: false,
+            has_dynamic: false,
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
         world.sync_bodies();
@@ -308,24 +325,68 @@ impl World {
     }
 
     /// 让物理世界的刚体集合与场景里声明了 `physics` 的实体保持一致。
+    ///
+    /// # 稳态快路径（这条是性能的关键）
+    ///
+    /// 绝大多数帧里"哪些实体有刚体"根本没变。旧实现无条件跑完整的三段扫描：
+    /// 补建扫描 + 建一张 `HashSet` 的存活集 + 清理扫描，最后还无条件
+    /// `sync_queries()`（重建射线用的 BVH）。这在一个静态场景里是纯粹的浪费 ——
+    /// 而且 `physics.step()` 每步已经顺带维护了查询流水线，稳态再重建一次毫无收益。
+    ///
+    /// 现在先做**一次无分配的扫描**：既收集"待补建"的实体，也顺便数出物理实体总数。
+    /// 只要"待补建为空"且"总数与已有刚体数一致"，就能断定集合没有任何结构性变化，
+    /// 清理扫描与查询重建一起跳过。
+    ///
+    /// 这个判据是完备的：新增实体（无论是否带 physics）会让待补建非空或总数变化；
+    /// 删实体 / 去掉 physics 会让总数与刚体数不等；"一增一删抵消"的巧合里，
+    /// 新增那个的 id 一定不在映射表里 → 待补建非空。所以不存在漏判。
     fn sync_bodies(&mut self) {
-        // -- 补建 --
-        let mut to_create: Vec<usize> = Vec::new();
+        // 取走暂存（避免与下面的 `&self.scene` 借用打架），跑完再放回去。
+        let mut to_create = std::mem::take(&mut self.scratch_physics_indices);
+        to_create.clear();
+
+        let mut physics_count = 0usize;
+        let mut has_kinematic = false;
+        let mut has_dynamic = false;
         for (index, entity) in self.scene.entities.iter().enumerate() {
-            if entity.physics.is_some() && !self.body_of_entity.contains_key(&entity.id) {
-                to_create.push(index);
+            if let Some(def) = &entity.physics {
+                physics_count += 1;
+                // 顺带记下"有没有运动学 / 动态体"，省掉 push / pull 各自再扫一遍。
+                match def.kind {
+                    xgame_core::BodyKind::Kinematic => has_kinematic = true,
+                    xgame_core::BodyKind::Dynamic => has_dynamic = true,
+                    xgame_core::BodyKind::Static => {}
+                }
+                if !self.body_of_entity.contains_key(&entity.id) {
+                    to_create.push(index);
+                }
             }
         }
-        for index in to_create {
+        self.has_kinematic = has_kinematic;
+        self.has_dynamic = has_dynamic;
+
+        if to_create.is_empty() && physics_count == self.body_of_entity.len() {
+            // 稳态：没有任何结构性变化。刚体集合没动，查询结构也就不用重建。
+            self.scratch_physics_indices = to_create;
+            return;
+        }
+
+        // -- 补建 --
+        for index in to_create.drain(..) {
             let Some(def) = self.scene.entities[index].physics else {
                 continue;
             };
+            let id = self.scene.entities[index].id;
             let world = self.scene.world_transform(index);
             let (body, collider) = body_from_scene(&def, world);
             let body_id = self.physics.add_body(body);
-            self.physics.add_collider(body_id, collider);
+            // `body_id` 是上一行刚建出来的，必然存在；`add_collider` 这里返回 `None`
+            // 只可能是引擎内部状态不一致（那里已经记了警告）。退化成"没有碰撞体"，
+            // 而不是把整帧 panic 掉。
+            if self.physics.add_collider(body_id, collider).is_none() {
+                log::warn!("实体 {id} 的碰撞体挂载失败：该刚体将不参与碰撞");
+            }
 
-            let id = self.scene.entities[index].id;
             self.body_of_entity.insert(id, body_id);
             // 脚本要靠这个组件找到刚体（`apply_force` / `velocity` 等）。
             self.scene.entities[index]
@@ -356,10 +417,19 @@ impl World {
         // 碰撞体集合变了，射线用的加速结构要跟着刷 —— 否则编辑器在暂停状态
         // 下拾取会打到上一帧的包围体上。
         self.physics.sync_queries();
+
+        self.scratch_physics_indices = to_create;
     }
 
     /// 运动学体：把脚本 / 动画摆好的世界变换推给物理。
     fn push_kinematic_bodies(&mut self) {
+        // 场景里没有运动学体时，连世界矩阵都不必解算 —— 这是纯静态 / 纯动态场景
+        // （很常见）的稳态路径，省掉每固定步一次 O(n) 分配 + 矩阵连乘。
+        // `has_kinematic` 是 `sync_bodies`（本步稍早）那次扫描顺带记下的，不用再扫。
+        if !self.has_kinematic {
+            return;
+        }
+
         let world_matrices = self.scene.world_matrices();
         for (index, entity) in self.scene.entities.iter().enumerate() {
             let Some(def) = &entity.physics else { continue };
@@ -380,15 +450,15 @@ impl World {
 
     /// 动态体：把物理算出的世界变换写回实体的**局部**变换。
     fn pull_dynamic_bodies(&mut self) {
-        if self.body_of_entity.is_empty() {
+        // 没有动态体时不必解算层级（同上：静态场景的稳态路径；标志位复用免一次扫描）。
+        if !self.has_dynamic {
             return;
         }
 
-        // 父世界矩阵一次性解算（同 `GameRuntime::sync_transforms` 的理由：
-        // 逐条查会把整次回写拖成 O(n²)，而且借用检查器也不让同时借
-        // `&self.scene`（算父矩阵）与 `&mut self.scene`（写实体））。
-        let parent_indices = self.scene.parent_indices();
-        let world_matrices = self.scene.world_matrices();
+        // 父索引与世界矩阵一次解算同时拿到（见 `world_matrices_with_parents`）：
+        // 旧写法先 `parent_indices()` 再 `world_matrices()`，而后者内部又要算一遍
+        // 父索引 —— 每个固定步都白跑一次 `hierarchy()`。
+        let (parent_indices, world_matrices) = self.scene.world_matrices_with_parents();
 
         for index in 0..self.scene.entities.len() {
             let id = self.scene.entities[index].id;

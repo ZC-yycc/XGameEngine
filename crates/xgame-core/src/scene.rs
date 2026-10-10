@@ -264,31 +264,7 @@ impl Scene {
     /// 时，逐节点调 `children()` 就是 O(n²)。这里用一张 ID→索引表把两边都压到 O(n)。
     pub fn hierarchy(&self) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
         let n = self.entities.len();
-
-        // 快路径：整场没有任何父子关系时（平铺场景很常见）不必白建一张 ID 映射表。
-        // `world_matrices` 每帧都调这里，省掉这次哈希表分配是有意义的。
-        if self.entities.iter().all(|e| e.parent.is_none()) {
-            return (vec![None; n], vec![Vec::new(); n]);
-        }
-
-        let index_of: std::collections::HashMap<EntityId, usize> = self
-            .entities
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.id, i))
-            .collect();
-
-        // 父 ID 不存在 / 父就是自己 → 视作根，与 `parent_index` 的语义保持一致。
-        let parent_indices: Vec<Option<usize>> = self
-            .entities
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                e.parent
-                    .and_then(|pid| index_of.get(&pid).copied())
-                    .filter(|&p| p != i)
-            })
-            .collect();
+        let parent_indices = self.parent_indices();
 
         let mut child_map: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (i, parent) in parent_indices.iter().enumerate() {
@@ -302,9 +278,34 @@ impl Scene {
 
     /// 一次性解算所有实体的父索引（与 `entities` 同序同长，`None` = 根）。
     ///
-    /// 只需要父方向时用这个，比 [`hierarchy`](Self::hierarchy) 少建一半结构。
+    /// 只需要父方向时用这个，比 [`hierarchy`](Self::hierarchy) 少建一整张子表 ——
+    /// 平铺场景里子表是 n 个空 `Vec`，纯浪费。
     pub fn parent_indices(&self) -> Vec<Option<usize>> {
-        self.hierarchy().0
+        let n = self.entities.len();
+
+        // 快路径：整场没有任何父子关系时（平铺场景很常见）不必白建一张 ID 映射表。
+        // `world_matrices` 每帧都调这里，省掉这次哈希表分配是有意义的。
+        if self.entities.iter().all(|e| e.parent.is_none()) {
+            return vec![None; n];
+        }
+
+        let index_of: std::collections::HashMap<EntityId, usize> = self
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.id, i))
+            .collect();
+
+        // 父 ID 不存在 / 父就是自己 → 视作根，与 `parent_index` 的语义保持一致。
+        self.entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                e.parent
+                    .and_then(|pid| index_of.get(&pid).copied())
+                    .filter(|&p| p != i)
+            })
+            .collect()
     }
 
     /// 一次性建好「每个索引 → 子索引列表」（顺序与 [`children`](Self::children) 一致）。
@@ -373,23 +374,46 @@ impl Scene {
     /// 注意 `parent_indices` 必须**一次性**算好：直接调 [`parent_index`](Self::parent_index)
     /// 每条边都要线性扫一遍实体表找父 ID，整个函数会退化成 O(n²)。
     pub fn world_matrices(&self) -> Vec<Mat4> {
+        self.world_matrices_with_parents().1
+    }
+
+    /// 一次层级解算**同时**给出父索引与世界矩阵。
+    ///
+    /// `World::pull_dynamic_bodies` 每帧两样都要：父索引用来取父世界矩阵，世界矩阵
+    /// 用来把物理算出的世界变换换回局部。分开调 `parent_indices()` +
+    /// `world_matrices()` 会把 `hierarchy()` 跑**两遍**（后者内部也要父索引），
+    /// 而这是每帧每固定步都要走的路径。合起来只解算一次。
+    pub fn world_matrices_with_parents(&self) -> (Vec<Option<usize>>, Vec<Mat4>) {
         let n = self.entities.len();
         let parent_indices = self.parent_indices();
-        let mut out: Vec<Option<Mat4>> = vec![None; n];
+
+        // 先用 `Mat4::IDENTITY` 占位 + 一张"算过了没"的位图，而不是 `Vec<Option<Mat4>>`：
+        // `Mat4` 没有可用 niche，`Option<Mat4>` 会从 64 字节涨到 80，2000 个实体就是
+        // 多出 32KB 的内存搬运 —— 而这个函数在**每一次**解算的世界矩阵都在热路径上
+        // （游戏每帧、运行时每个固定步）。
+        let mut out: Vec<Mat4> = vec![Mat4::IDENTITY; n];
+        let mut done: Vec<bool> = vec![false; n];
         // 环保护用的"在当前链上"标记。之所以不用 `chain.contains()`：
         // 那是 O(链长) 的逐次扫描，遇到"子节点排在父节点前面"的深链
         // （实体 0 是叶子、n-1 是根）整条链会退化成 O(n²)。布尔表是 O(1)。
         let mut on_chain: Vec<bool> = vec![false; n];
 
+        // 链缓冲**提到循环外**复用。
+        //
+        // 这是本函数最容易踩的性能坑：写成循环体内的 `Vec::new()` 之后，**平铺场景**
+        // （所有实体都是根节点，非常常见）每算一个实体就要为一条长度为 1 的链分配一次，
+        // 整次调用就是 n 次小分配。热路径上的 n 次分配比那点矩阵乘法贵得多。
+        let mut chain: Vec<usize> = Vec::new();
+
         for i in 0..n {
-            if out[i].is_some() {
+            if done[i] {
                 continue;
             }
             // 从 i 向上收集一条"还没算过"的链
-            let mut chain: Vec<usize> = Vec::new();
+            chain.clear();
             let mut current = i;
             loop {
-                if out[current].is_some() || on_chain[current] {
+                if done[current] || on_chain[current] {
                     break;
                 }
                 chain.push(current);
@@ -403,16 +427,18 @@ impl Scene {
             let mut base = chain
                 .last()
                 .and_then(|&last| parent_indices[last])
-                .and_then(|p| out[p])
+                .filter(|&p| done[p])
+                .map(|p| out[p])
                 .unwrap_or(Mat4::IDENTITY);
 
             for &idx in chain.iter().rev() {
                 base *= self.entities[idx].transform.local_matrix();
-                out[idx] = Some(base);
+                out[idx] = base;
+                done[idx] = true;
             }
         }
 
-        out.into_iter().map(|m| m.unwrap_or(Mat4::IDENTITY)).collect()
+        (parent_indices, out)
     }
 
     /// 实体的世界变换（位置 / 旋转 / 缩放）。
@@ -663,6 +689,61 @@ mod tests {
         for idx in [r, c, g] {
             assert_eq!(batch[idx], scene.world_matrix(idx));
         }
+    }
+
+    /// 深链，且**子节点排在父节点前面**（实体 0 是叶子、最后一个是根）。
+    ///
+    /// 这是"链缓冲复用 + 环保护"最容易写错的形状：向上走时每一步都要跨过
+    /// 已经处理过的下标。两种顺序（父前 / 子前）都必须给出一致结果。
+    #[test]
+    fn world_matrices_handles_reversed_deep_chain() {
+        const DEPTH: usize = 64;
+        let mut scene = Scene::new("deep");
+        for i in 0..DEPTH {
+            scene.add_entity(
+                Entity::new(format!("n{i}"))
+                    .with_transform(Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))),
+            );
+        }
+        // n0 -> n1 -> ... -> n(DEPTH-1)，即子节点下标比父节点小。
+        for i in 0..DEPTH - 1 {
+            let parent = scene.entities[i + 1].id;
+            scene.entities[i].parent = Some(parent);
+        }
+
+        let m = scene.world_matrices();
+        // 每级平移 (1,0,0)，所以第 i 个节点的世界 x = 它到根的节点数。
+        assert!(
+            (m[0].w_axis.x - DEPTH as f32).abs() < 1e-4,
+            "叶子应当把整条链的平移累加起来，x = {}",
+            m[0].w_axis.x
+        );
+        assert!(
+            (m[DEPTH - 1].w_axis.x - 1.0).abs() < 1e-4,
+            "根节点只有自己那一级，x = {}",
+            m[DEPTH - 1].w_axis.x
+        );
+        // 批量结果必须与逐个解算完全一致 —— 一致性比数值本身更重要。
+        for (i, mat) in m.iter().enumerate() {
+            assert_eq!(*mat, scene.world_matrix(i), "第 {i} 个节点批量/单个结果不一致");
+        }
+    }
+
+    /// 数据坏了（父引用成环）也不该死循环或产出 NaN —— 退化成可用的结果即可。
+    /// `world_matrices` 在热路径上，任何一次"卡住"都等于整个编辑器冻死。
+    #[test]
+    fn world_matrices_survives_a_parent_cycle() {
+        let mut scene = Scene::new("cycle");
+        let a = scene.add_entity(Entity::new("a"));
+        let b = scene.add_entity(Entity::new("b"));
+        let ai = scene.index_of(a).unwrap();
+        let bi = scene.index_of(b).unwrap();
+        scene.entities[ai].parent = Some(b);
+        scene.entities[bi].parent = Some(a);
+
+        let m = scene.world_matrices();
+        assert_eq!(m.len(), 2);
+        assert!(m.iter().all(|mm| mm.is_finite()), "成环不该产出 NaN");
     }
 
     #[test]

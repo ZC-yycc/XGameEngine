@@ -207,7 +207,9 @@ let (want_undo, want_redo) = ctx.input(|i| { /* Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y *
 ```rust
 // 先把 egui 的键鼠状态灌进运行时 —— 必须在 physics_step 之前
 input_bridge::sync(ctx, runtime.input_mut());
-let dt = ctx.input(|i| i.predicted_dt);
+// 用**平滑过的真实帧间隔**推进，而不是 predicted_dt（那是"下一帧大概多久"的预测，
+// 预测偏了固定步长累加器就会多跑/少跑）。
+let dt = ctx.input(|i| i.stable_dt);
 session.state.physics_step(dt);
 ```
 
@@ -219,14 +221,26 @@ clock.tick(dt)
   └─ 固定步长循环（与渲染帧率解耦，max_steps = 5 防死亡螺旋）
        ├─ dispatch_fixed_update    脚本的 fixed_update
        ├─ 消费脚本通知             补建 / 清理刚体、重定位换过父节点的刚体
-       ├─ sync_bodies              声明了 physics 但没刚体的 → 建；反之 → 删
-       ├─ push_kinematic_bodies    运动学体：把脚本摆的世界变换推给物理
-       ├─ physics.step(fixed_dt)
-       └─ pull_dynamic_bodies      动态体：把物理的世界变换换算回**局部**写进实体
+       ├─ sync_bodies              一次无分配扫描：待补建为空 且 物理实体数 == 已有刚体数
+       │                             ⇒ 判定"集合没变"，清理扫描与 sync_queries 整段跳过
+       │                             顺带记下 has_kinematic / has_dynamic 供下面两步早退
+       ├─ push_kinematic_bodies    运动学体：把脚本摆的世界变换推给物理（无运动学体则直接返回）
+       ├─ physics.step(fixed_dt)   顺带维护查询流水线（所以稳态下不必再 sync_queries）
+       └─ pull_dynamic_bodies      动态体：物理世界变换 → 局部（无动态体则直接返回）
   ├─ dispatch_update               脚本的 update（每渲染帧一次）
   ├─ 消费脚本通知 / sync_bodies
   └─ input.end_frame()             清掉"仅本帧有效"的输入边沿
 ```
+
+> **`sync_bodies` 的稳态快路径是运行时性能的关键。** 绝大多数帧里"哪些实体有刚体"
+> 根本没变，而旧实现无条件跑完三段扫描（补建 + 建存活 `HashSet` + 清理）并重建射线
+> 加速结构 —— 在一个静态场景里是纯浪费。判据的完备性：新增实体一定会让"待补建"非空
+> 或总数变化；删实体 / 去掉 `physics` 会让总数与刚体数不等；"一增一删抵消"的巧合里，
+> 新增那个的 id 一定不在映射表里 ⇒ 待补建非空。
+>
+> 层级解算同理：`pull_dynamic_bodies` 原来先 `parent_indices()` 再 `world_matrices()`，
+> 而后者内部又要算一遍父索引 —— 每个固定步白跑一次 `hierarchy()`。现在
+> `world_matrices_with_parents()` 一次解算两样都给。
 
 **动态体由物理驱动、运动学体由脚本驱动** —— 这条分工决定了上面两个方向的数据流。
 一个刚体只属于其中一类，所以两者不会互相覆盖。
@@ -321,14 +335,18 @@ scene_view::show_content(state, ui)
   ├── ⑥ render_scene(用本帧最新的相机与场景)   ← **现在才重画**
   │   │
   │   ├── 【输入指纹】相机 / 视口尺寸 / 环境光 + 有效光源（含阴影开关）+
-  │   │     每个实体的 model + **世界矩阵**，收成一个 u64（逐位比较）
+  │   │     每个实体的 model + **局部变换** + **父引用**，收成一个 u64（逐位比较）
   │   │     └── 与上一帧**完全相同** → 直接 return false，下面全跳过 ★
+  │   │         ★ 指纹**排在解算世界矩阵之前**：静态帧连 `world_matrices()` 都省掉
+  │   │
+  │   ├── 世界矩阵解算（只有真要画了才做）
   │   │
   │   ├── Phase 1: 模型加载（惰性，entity.model → GltfMesh::load）
   │   │
   │   ├── Phase 2: wgpu 渲染 (ScenePipeline::render)
   │   │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
-  │   │     ├── 遍历实体收集绘制项，写 ModelUniform（世界矩阵，动态偏移）
+  │   │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
+  │   │     │   └── 攒完一次 `write_buffer` 写完整段（旧的逐实体写 = 每帧 N 次分配 + N 条命令）
   │   │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
   │   │     ├── 主 RenderPass (背景 #1E1E24)：
   │   │     │   ├── 颜色附件 = **多采样**纹理，resolve 到交给 egui 的单采样纹理
@@ -369,9 +387,19 @@ _"moving a window doesn't warrant a repaint"_，后来被并进大组里丢了�
 "场景其实没变"的帧。
 
 `SceneRenderer::render` 因此先算一个**输入指纹**：相机矩阵与位置、视口尺寸、环境光、
-参与光照的光源（含 `casts_shadow` / `shadow_resolution`）、每个实体的模型标识与**世界矩阵**。这些正是着色器会读到的东西；选中态、
-gizmo、网格开关、物理调试线都不在其中（它们画在 egui 叠加层上，与离屏纹理无关）。
+参与光照的光源（含 `casts_shadow` / `shadow_resolution`）、每个实体的模型标识、**局部变换**
+与**父引用**。这些正是着色器会读到的东西；选中态、gizmo、网格开关、物理调试线都不在其中
+（它们画在 egui 叠加层上，与离屏纹理无关）。
 指纹与上一帧逐位相同 → 整段渲染跳过，`painter.image` 照旧贴上一帧那张纹理。
+
+> **为什么收「局部变换 + 父引用」，而不是直接收世界矩阵。**
+> 着色器读的是世界矩阵，但世界矩阵是 `(局部变换, 层级)` 的**纯函数** —— 两者一样，
+> 世界矩阵必然一样，所以按前者哈希是**等价**的。收益是：不必为了算指纹先跑一遍
+> `Scene::world_matrices()`（那要分配几条长度为 n 的 `Vec` 并做 n 次矩阵连乘，是
+> 大场景里编辑器**每帧**的固定成本）；而且世界矩阵 16 个浮点、局部变换只要 10 个。
+> **父引用必须一起哈希**：只哈希局部变换的话，"把子节点挂到另一个父节点下"会漏掉
+> （子节点自己的局部变换一个字节没变，但世界矩阵变了）。回归测试
+> `signature_notices_reparenting` 盯的就是这条。
 
 > **实测**（2026-10-10，真机悬停流 + 进程内探针）：连续 666 次鼠标移动里，
 > 离屏 3D **只重画了 1 次**，渲染目标也只重建了 1 次（初始那次）。也就是说
@@ -925,20 +953,20 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 | `editor/hub.rs` | 352 | `ProjectHub::ui()`、`open_project_at()`、`create_project_at()` |
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
-| `editor/state.rs` | 1329 | `EditorState::new()`、`UndoStack`、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
-| `editor/scene_renderer.rs` | 575 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（含阴影开关/分辨率）、`render()`、`mesh_bounds()` |
+| `editor/state.rs` | 1438 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
+| `editor/scene_renderer.rs` | 645 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`render()`（指纹排在解算世界矩阵之前）、`mesh_bounds()` |
 | `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
 | `editor/game_runtime.rs` | 93 | `start()`、`fixed_update()` |
 | `core/project.rs` | 685 | `ProjectHandle::open()`、`create()`、`path()`、`list_prefabs()`、`load_prefab()`、`write_prefab()` |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
-| `core/scene.rs` | 826 | `Scene::world_matrices()`、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()` |
+| `core/scene.rs` | 947 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()` |
 | `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
-| `render/scene_pipeline.rs` | 1458 | `ScenePipeline::new()` / `render()`（含阴影 pass）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
+| `render/scene_pipeline.rs` | 1575 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
 | `render/gltf_loader.rs` | 546 | `GltfMesh::from_file()` / `load()`、`read_material()`、`Bounds`（网格本地包围盒） |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |
-| `physics/world.rs` | 681 | `step(dt)`（按传入 dt 积分、子步均分 dt）、`add_body()`（维护 `body_handles` 反查表）、`debug_lines()` |
+| `physics/world.rs` | 900 | `step(dt)`（按传入 dt 积分、子步均分 dt）、`add_body()`（维护 `body_handles` 反查表）、`add_collider()`（未知 body 只警告不 panic）、`debug_lines()` |
 | `editor/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|
 | `editor/inspector.rs` | 314 | `show_content()`（含撤销集成、父节点下拉、预制体区块）|
 | `editor/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|

@@ -313,11 +313,20 @@ impl PhysicsWorld {
         }
     }
 
-    pub fn add_collider(&mut self, body_id: u64, collider: Collider) -> u64 {
+    /// 给刚体挂一个碰撞体，返回碰撞体 ID。
+    ///
+    /// `body_id` 不存在时返回 `None` 并记一条警告 —— **不 panic**。
+    /// 早先这里是 `.expect("unknown body")`：一次笔误（脚本在刚体被删之后仍然
+    /// 挂碰撞体、或宿主把 body_id 传串了）就会把整个进程带走。引擎里没有任何
+    /// 一条路径值得为这种输入付出崩溃的代价，退化成"少一个碰撞体"就够了。
+    pub fn add_collider(&mut self, body_id: u64, collider: Collider) -> Option<u64> {
         let cid = self.next_id;
         self.next_id += 1;
 
-        let body_record = self.bodies.get(&body_id).expect("unknown body");
+        let Some(body_record) = self.bodies.get(&body_id) else {
+            log::warn!("add_collider: 未知的 body_id={body_id}，已忽略（不挂碰撞体）");
+            return None;
+        };
 
         let shape = collider_to_shared_shape(&collider.shape);
         let cb = ColliderBuilder::new(shape)
@@ -334,7 +343,7 @@ impl PhysicsWorld {
 
         self.colliders.insert(cid, ColliderRecord { rapier_handle, body_id });
         self.collider_handles.insert(rapier_handle, cid);
-        cid
+        Some(cid)
     }
 
     pub fn remove_collider(&mut self, collider_id: u64) {
@@ -736,9 +745,24 @@ mod tests {
     fn drop_body_frees_colliders() {
         let mut world = PhysicsWorld::new(PhysicsConfig::default());
         let body = world.add_body(RigidBody::dynamic_at(Transform::IDENTITY));
-        world.add_collider(body, Collider::default());
+        let _ = world.add_collider(body, Collider::default());
         assert_eq!(world.stats(), (1, 1));
         world.remove_body(body);
+        assert_eq!(world.stats(), (0, 0));
+    }
+
+    /// 给一个不存在的刚体挂碰撞体**不该** panic —— 早先这里是
+    /// `.expect("unknown body")`，一次传错 id 就能带走整个进程。
+    #[test]
+    fn add_collider_on_unknown_body_is_rejected_without_panicking() {
+        let mut world = PhysicsWorld::new(PhysicsConfig::default());
+        assert_eq!(world.add_collider(999, Collider::default()), None);
+        assert_eq!(world.stats(), (0, 0), "被拒绝的挂载不该留下任何记录");
+
+        // 删掉刚体之后再挂，同样只应被拒绝。
+        let body = world.add_body(RigidBody::dynamic_at(Transform::IDENTITY));
+        world.remove_body(body);
+        assert_eq!(world.add_collider(body, Collider::default()), None);
         assert_eq!(world.stats(), (0, 0));
     }
 
@@ -749,7 +773,7 @@ mod tests {
             position: Vec3::new(0.0, 5.0, 0.0),
             ..Transform::IDENTITY
         }));
-        world.add_collider(body, Collider::default());
+        let _ = world.add_collider(body, Collider::default());
         for _ in 0..10 {
             world.step(1.0 / 60.0);
         }
@@ -764,7 +788,7 @@ mod tests {
             position: Vec3::new(1.0, 2.0, 3.0),
             ..Transform::IDENTITY
         }));
-        world.add_collider(body, Collider::default());
+        let _ = world.add_collider(body, Collider::default());
         for _ in 0..10 {
             world.step(1.0 / 60.0);
         }
@@ -784,7 +808,7 @@ mod tests {
             ..Default::default()
         });
         let body = world.add_body(RigidBody::dynamic_at(Transform::IDENTITY));
-        world.add_collider(body, Collider::default());
+        let _ = world.add_collider(body, Collider::default());
 
         let dt = 1.0 / 30.0;
         world.step(dt);
@@ -810,7 +834,7 @@ mod tests {
             ..Default::default()
         });
         let a = single.add_body(RigidBody::dynamic_at(Transform::IDENTITY));
-        single.add_collider(a, Collider::default());
+        let _ = single.add_collider(a, Collider::default());
         single.step(dt);
 
         let mut subbed = PhysicsWorld::new(PhysicsConfig {
@@ -818,7 +842,7 @@ mod tests {
             ..Default::default()
         });
         let b = subbed.add_body(RigidBody::dynamic_at(Transform::IDENTITY));
-        subbed.add_collider(b, Collider::default());
+        let _ = subbed.add_collider(b, Collider::default());
         subbed.step(dt);
 
         let va = single.body_velocity(a).unwrap();
@@ -837,7 +861,7 @@ mod tests {
             position: Vec3::new(0.0, 5.0, 0.0),
             ..Transform::IDENTITY
         }));
-        world.add_collider(body, Collider::default());
+        let _ = world.add_collider(body, Collider::default());
 
         world.step(0.0);
         world.step(-1.0);
@@ -855,13 +879,13 @@ mod tests {
             position: Vec3::new(0.0, -1.0, 0.0),
             ..Transform::IDENTITY
         }));
-        world.add_collider(floor, Collider::cuboid(Vec3::new(10.0, 0.5, 10.0)));
+        let _ = world.add_collider(floor, Collider::cuboid(Vec3::new(10.0, 0.5, 10.0)));
 
         let ball = world.add_body(RigidBody::dynamic_at(Transform {
             position: Vec3::new(0.0, 2.0, 0.0),
             ..Transform::IDENTITY
         }));
-        world.add_collider(ball, Collider::ball(1.0));
+        let _ = world.add_collider(ball, Collider::ball(1.0));
 
         for _ in 0..120 {
             world.step(1.0 / 60.0);

@@ -17,7 +17,7 @@ use glam::{Mat4, Vec3};
 
 use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
-use xgame_core::{Entity, Scene};
+use xgame_core::{Entity, EntityId, Scene};
 
 // ---------------------------------------------------------------------------
 // SceneRenderer
@@ -220,12 +220,23 @@ impl SceneRenderer {
     /// # 覆盖范围
     ///
     /// 只收**着色器真正读到的东西**：相机矩阵与位置、视口尺寸、环境光、参与光照的
-    /// 光源，以及每个实体的模型标识与**世界矩阵**。选中态、gizmo、网格开关、物理
-    /// 调试线都不进来 —— 它们画在 egui 叠加层上，与这张离屏纹理无关。
+    /// 光源，以及每个实体的模型标识、**局部变换**与**父引用**。选中态、gizmo、
+    /// 网格开关、物理调试线都不进来 —— 它们画在 egui 叠加层上，与这张离屏纹理无关。
     ///
-    /// 这里特意收世界矩阵、而不是局部变换：父节点动一下，子节点的画面就变了，
-    /// 但子节点自己的局部变换一个字节都没变。按局部比会漏掉这种"父动子跟"的更新，
-    /// 画面上就是"拖动父物体、子物体纹丝不动"的脏帧。
+    /// # 为什么收「局部变换 + 父引用」，而不是直接收世界矩阵
+    ///
+    /// 着色器读的是**世界矩阵**，直觉上该直接哈希世界矩阵。但世界矩阵是
+    /// `(局部变换, 层级)` 的**纯函数** —— 两者一样，世界矩阵必然一样。所以按
+    /// (局部变换 + 父引用) 哈希是**等价**的，却有实打实的好处：
+    ///
+    /// - 不必为了算指纹先跑一遍 `Scene::world_matrices()`。那个函数每帧都要分配
+    ///   几条长度为 n 的 `Vec` 并做 n 次矩阵连乘；在 2000 实体的场景里，这是编辑器
+    ///   每一帧（哪怕什么都没动）都要付出的固定成本。现在静态帧的指纹是**零分配、
+    ///   零矩阵运算**的一次线性扫描。
+    /// - 世界矩阵要 16 个浮点，局部变换只要 10 个 —— 哈希本身也便宜。
+    ///
+    /// **父引用必须一起哈希**：只哈希局部变换的话，"把子节点挂到另一个父节点下"
+    /// 会漏掉（子节点自己的局部变换一个字节都没变，但它的世界矩阵变了）。
     ///
     /// 比对用**位模式**而不是浮点相等：`-0.0`/`NaN` 这类值按位比才是确定、稳定的，
     /// 而这里要的正是"和上一帧逐位相同"，多渲染一帧无害，少渲染一帧才是 bug。
@@ -235,7 +246,6 @@ impl SceneRenderer {
         camera_pos: &Vec3,
         lighting: &SceneLighting<'_>,
         entities: &[Entity],
-        world_matrices: &[Mat4],
     ) -> u64 {
         let mut hash = 0;
 
@@ -267,7 +277,7 @@ impl SceneRenderer {
         }
         hash = mix_bits(hash, light_count);
 
-        for (i, entity) in entities.iter().enumerate() {
+        for entity in entities.iter() {
             // 与管线保持一致：没有模型的实体根本不会被画出来。
             if entity.model.is_empty() {
                 continue;
@@ -276,12 +286,12 @@ impl SceneRenderer {
             for byte in entity.model.as_bytes() {
                 hash = mix_bits(hash, *byte as u64);
             }
-            // 世界矩阵（父节点变化会体现在这里）。长度不足时退回局部矩阵。
-            let world = world_matrices
-                .get(i)
-                .copied()
-                .unwrap_or_else(|| entity.transform.local_matrix());
-            hash = mix_f32s(hash, &world.to_cols_array());
+            // 层级：父引用（`EntityId` 非零，所以 0 是安全的"无父"哨兵）。
+            hash = mix_bits(hash, entity.parent.map_or(0, EntityId::raw));
+            // 局部变换 —— 加上父引用就等价于世界矩阵（见上面的说明）。
+            hash = mix_f32s(hash, &entity.transform.position.to_array());
+            hash = mix_f32s(hash, &entity.transform.rotation.to_array());
+            hash = mix_f32s(hash, &entity.transform.scale.to_array());
         }
 
         hash
@@ -306,21 +316,26 @@ impl SceneRenderer {
             return false;
         }
 
-        // 层级在 core 里解算：一次算出所有实体的世界矩阵，供指纹与管线共用。
-        let world_matrices = scene.world_matrices();
         let entities = &scene.entities;
 
+        // 先算指纹：**刻意排在解算世界矩阵之前**。
+        //
+        // 指纹只需要局部变换 + 父引用（等价于世界矩阵，见 `scene_signature` 的说明），
+        // 所以静态帧可以在这里直接返回 —— 连 `Scene::world_matrices()` 那几条 O(n)
+        // 的分配与矩阵连乘都省掉。编辑器绝大多数帧都是这种"什么都没动"的帧。
         let signature = Self::scene_signature(
             self.viewport_size,
             view_proj,
             camera_pos,
             &lighting,
             entities,
-            &world_matrices,
         );
         if self.last_signature == Some(signature) {
             return false;
         }
+
+        // 层级在 core 里解算：一次算出所有实体的世界矩阵，供指纹与管线共用。
+        let world_matrices = scene.world_matrices();
 
         // Phase 1: ensure all models are loaded (mutable borrow on model_cache)
         //
@@ -418,17 +433,12 @@ mod tests {
     /// 固定视口与相机，只让调用方关心实体/光源/环境光 —— 测的是"什么该进指纹"。
     /// 测试里的实体都没有父节点，世界矩阵即局部矩阵。
     fn signature(entities: &[Entity], lights: &[Light], ambient: [f32; 3]) -> u64 {
-        let world: Vec<Mat4> = entities
-            .iter()
-            .map(|e| e.transform.local_matrix())
-            .collect();
         SceneRenderer::scene_signature(
             (800, 600),
             &Mat4::IDENTITY,
             &Vec3::new(5.0, 5.0, 5.0),
             &SceneLighting::new(ambient, lights),
             entities,
-            &world,
         )
     }
 
@@ -442,7 +452,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// 这四样里任何一样变了都必须让指纹变 —— 它们是着色器真正读到的东西。
+    /// 这六样里任何一样变了都必须让指纹变 —— 它们是着色器真正读到的东西。
     /// 少认一样，画面上就是"改了不动"的脏帧。
     #[test]
     fn signature_notices_everything_the_shader_reads() {
@@ -455,7 +465,23 @@ mod tests {
         let moved = [entity("Box", "builtin://cube", Vec3::new(1.0, 0.0, 0.0))];
         assert_ne!(reference, signature(&moved, &lights, ambient), "变换没进指纹");
 
-        // 2. 模型标识
+        // 2. 旋转 / 缩放（同一位置，只有这两个分量变）
+        let mut rotated = entity("Box", "builtin://cube", Vec3::ZERO);
+        rotated.transform.rotation = xgame_math::glam::Quat::from_rotation_y(0.5);
+        assert_ne!(
+            reference,
+            signature(&[rotated], &lights, ambient),
+            "旋转没进指纹"
+        );
+        let mut scaled = entity("Box", "builtin://cube", Vec3::ZERO);
+        scaled.transform.scale = Vec3::new(2.0, 1.0, 1.0);
+        assert_ne!(
+            reference,
+            signature(&[scaled], &lights, ambient),
+            "缩放没进指纹"
+        );
+
+        // 3. 模型标识
         let other_model = [entity("Box", "builtin://sphere", Vec3::ZERO)];
         assert_ne!(
             reference,
@@ -463,37 +489,34 @@ mod tests {
             "模型标识没进指纹"
         );
 
-        // 3. 光源
+        // 4. 光源
         let dim = [Light::directional("sun", [0.5, -1.0, 0.5], [1.0; 3], 1.0)];
         assert_ne!(reference, signature(&base, &dim, ambient), "光源没进指纹");
 
-        // 4. 环境光
+        // 5. 环境光
         assert_ne!(
             reference,
             signature(&base, &lights, [0.5, 0.5, 0.5]),
             "环境光没进指纹"
         );
 
-        // 5. 相机（换一个 view_proj）
-        let world: Vec<Mat4> = base.iter().map(|e| e.transform.local_matrix()).collect();
+        // 6. 相机（换一个 view_proj）
         let moved_camera = SceneRenderer::scene_signature(
             (800, 600),
             &Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)),
             &Vec3::new(5.0, 5.0, 5.0),
             &SceneLighting::new(ambient, &lights),
             &base,
-            &world,
         );
         assert_ne!(reference, moved_camera, "相机矩阵没进指纹");
 
-        // 6. 视口尺寸
+        // 7. 视口尺寸
         let resized = SceneRenderer::scene_signature(
             (1024, 600),
             &Mat4::IDENTITY,
             &Vec3::new(5.0, 5.0, 5.0),
             &SceneLighting::new(ambient, &lights),
             &base,
-            &world,
         );
         assert_ne!(reference, resized, "视口尺寸没进指纹");
     }
@@ -569,37 +592,54 @@ mod tests {
         );
     }
 
-    /// 层级：父节点移动会让子节点的**世界矩阵**变化，即使子节点自身的局部变换
-    /// 一个字节都没动。指纹必须按世界矩阵算 —— 按局部比就会漏掉"父动子跟"，
-    /// 画面上正是拖着父物体、子物体纹丝不动的脏帧。
+    /// 层级：**父引用**必须进指纹。
+    ///
+    /// 这是"指纹收局部变换"这个取舍的关键补丁：把子节点挂到另一个父节点下时，
+    /// 子节点自己的局部变换一个字节都没变，但它的世界矩阵（= 着色器真正读到的
+    /// 东西）变了。指纹里不带父引用的话，画面上就是"改完层级画面不动"的脏帧。
     #[test]
-    fn signature_tracks_parent_motion_with_unchanged_child_local() {
-        use xgame_core::Scene;
-
-        let mut scene = Scene::new("Hierarchy");
-        let parent = entity("Parent", "builtin://cube", Vec3::ZERO);
-        let parent_id = scene.add_entity(parent);
-        let mut child = entity("Child", "builtin://cube", Vec3::ZERO);
-        child.parent = Some(parent_id);
-        scene.add_entity(child);
+    fn signature_notices_reparenting() {
+        let mut a = entity("A", "builtin://cube", Vec3::new(0.0, 5.0, 0.0));
+        let b = entity("B", "builtin://cube", Vec3::new(1.0, 0.0, 0.0));
+        a.parent = Some(EntityId::from_raw(42));
 
         let lights = [Light::default()];
         let ambient = [0.06, 0.06, 0.08];
-        let sig_of = |scene: &Scene| {
-            let wm = scene.world_matrices();
-            SceneRenderer::scene_signature(
-                (800, 600),
-                &Mat4::IDENTITY,
-                &Vec3::new(5.0, 5.0, 5.0),
-                &SceneLighting::new(ambient, &lights),
-                &scene.entities,
-                &wm,
-            )
-        };
 
-        let before = sig_of(&scene);
-        let pi = scene.index_of(parent_id).unwrap();
-        scene.entities[pi].transform.position.x += 2.0;
-        assert_ne!(before, sig_of(&scene), "父动子跟，指纹必须变化");
+        // 同样的实体、同样的局部变换，只有父引用不同。
+        let without_parent = vec![a.clone(), b.clone()];
+        let mut with_parent = without_parent.clone();
+        with_parent[1].parent = Some(EntityId::from_raw(42));
+
+        assert_ne!(
+            signature(&without_parent, &lights, ambient),
+            signature(&with_parent, &lights, ambient),
+            "父引用没进指纹 —— 重新挂载父节点后画面不会更新"
+        );
+    }
+
+    /// 父节点移动会让子节点的**世界矩阵**变化，即使子节点自身的局部变换一个
+    /// 字节都没动。指纹按 (局部变换 + 父引用) 哈希，父节点自己动了就必须变 ——
+    /// 否则画面上就是拖着父物体、子物体纹丝不动的脏帧。
+    #[test]
+    fn signature_tracks_parent_motion_with_unchanged_child_local() {
+        let mut parent = entity("Parent", "builtin://cube", Vec3::ZERO);
+        let child = entity("Child", "builtin://cube", Vec3::ZERO);
+        parent.parent = None;
+        let mut entities = vec![parent, child];
+        // 子节点挂在父节点下（父引用用 0 号实体的 id）。
+        entities[1].parent = Some(entities[0].id);
+
+        let lights = [Light::default()];
+        let ambient = [0.06, 0.06, 0.08];
+
+        let before = signature(&entities, &lights, ambient);
+        // 只动父节点。
+        entities[0].transform.position.x += 2.0;
+        assert_ne!(
+            before,
+            signature(&entities, &lights, ambient),
+            "父动子跟，指纹必须变化"
+        );
     }
 }

@@ -559,6 +559,17 @@ pub struct ScenePipeline {
     sample_count: u32,
 
     uniform_alignment: u64,
+
+    /// 模型矩阵的**复用暂存**：把所有实体的 `ModelUniform` 按 `uniform_alignment`
+    /// 排布在这里，最后一次性写进 `model_buffer`。
+    ///
+    /// 为什么会需要它：`Queue::write_buffer` 每调一次都要从 staging belt 上领一段、
+    /// 再记一条拷贝命令。逐实体调用的话，一个 256 实体的场景每帧就是 256 次小分配 +
+    /// 256 条命令。攒成一次写，开销与实体数解耦。
+    ///
+    /// 复用同一个 `Vec` 是为了稳态零分配：`clear()` + 按需 `resize(n, 0)` 会把要用的
+    /// 那段显式清零，容量留着下次接着用。
+    model_staging: Vec<u8>,
 }
 
 impl ScenePipeline {
@@ -793,6 +804,7 @@ impl ScenePipeline {
             material_cache: HashMap::new(),
             sample_count,
             uniform_alignment,
+            model_staging: Vec::new(),
         }
     }
 
@@ -1206,11 +1218,16 @@ impl ScenePipeline {
             }),
         );
 
-        // --- 收集绘制项，同时写 model uniform ---
+        // --- 收集绘制项，同时把所有模型矩阵攒进 staging ---
         // 不透明与半透明分开收集：半透明要按到相机的距离从远到近排序，
         // 否则两个半透明物体前后叠在一起时，谁的 alpha 生效取决于绘制顺序。
         let mut opaque: Vec<(usize, &GltfPrimitive)> = Vec::new();
         let mut blended: Vec<(f32, usize, &GltfPrimitive)> = Vec::new();
+
+        // 上一帧的残留先清掉。`clear()` 只把长度归零，下面按需 `resize(n, 0)` 会把
+        // 要用的那段显式清零 —— 于是"没被任何实体用到的槽位"也是确定性的 0，
+        // 而不是上一帧的旧矩阵（虽然那些槽位不会被绘制，但确定性更好排查问题）。
+        self.model_staging.clear();
 
         for (i, entity) in entities.iter().enumerate() {
             if i >= MAX_RENDER_ENTITIES {
@@ -1230,14 +1247,17 @@ impl ScenePipeline {
                 .copied()
                 .unwrap_or_else(|| entity.transform.local_matrix());
 
-            let offset = i as u64 * self.uniform_alignment;
-            queue.write_buffer(
-                &self.model_buffer,
-                offset,
-                bytemuck::cast_slice(&[ModelUniform {
-                    model: world.to_cols_array_2d(),
-                }]),
-            );
+            // 攒进 staging（而不是立刻 write_buffer）：偏移是 `i * alignment`，
+            // 实体按 i 递增遍历，所以只需要往后长。最后一次性上传。
+            let uniform = ModelUniform {
+                model: world.to_cols_array_2d(),
+            };
+            let bytes = bytemuck::bytes_of(&uniform);
+            let offset = i * self.uniform_alignment as usize;
+            if self.model_staging.len() < offset + bytes.len() {
+                self.model_staging.resize(offset + bytes.len(), 0);
+            }
+            self.model_staging[offset..offset + bytes.len()].copy_from_slice(bytes);
 
             // 半透明排序用的是**世界坐标**——实体被父节点挪过位置之后，
             // 局部坐标早就不是它在屏幕上的深度了。
@@ -1250,6 +1270,12 @@ impl ScenePipeline {
                     opaque.push((i, prim));
                 }
             }
+        }
+
+        // 一次写完整段模型矩阵（见 `model_staging` 的说明）。
+        // 空场景（一个可绘制实体都没有）时什么都不用写。
+        if !self.model_staging.is_empty() {
+            queue.write_buffer(&self.model_buffer, 0, &self.model_staging);
         }
 
         // 远 → 近。`partial_cmp` 对 NaN 返回 None，退化成"保持原序"即可，
