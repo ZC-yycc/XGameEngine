@@ -17,7 +17,7 @@ use glam::{Mat4, Vec3};
 
 use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
-use xgame_core::{Entity, EntityId, Scene};
+use xgame_core::{Entity, EntityId};
 
 /// 连续缩放窗口时，重建离屏渲染目标的最小间隔。
 ///
@@ -276,18 +276,6 @@ impl SceneRenderer {
         self.texture_id
     }
 
-    /// 某个模型标识对应的**本地**包围盒（已加载过才有）。
-    ///
-    /// 给视口拾取用：拾取要按实体的真实几何范围判定，而"包围球半径 = |scale|/2"
-    /// 对拉伸过的物体会严重高估 —— 一块 16×0.5×16 的地面半径会是 16，连相机都
-    /// 落在球里，于是点哪儿都先选中它。
-    ///
-    /// 返回 `Option` 而不是兜底：调用方（`pick_entity`）知道"内置图元就是单位盒"
-    /// 这个语义，让它自己决定怎么兜底，比在这里偷偷塞一个默认值清楚。
-    pub fn mesh_bounds(&self, model: &str) -> Option<Bounds> {
-        self.model_cache.get(model).map(|m| m.bounds)
-    }
-
     // -- Change detection --
 
     /// 算一帧离屏渲染的**输入指纹**。
@@ -327,7 +315,7 @@ impl SceneRenderer {
     ///
     /// 比对用**位模式**而不是浮点相等：`-0.0`/`NaN` 这类值按位比才是确定、稳定的，
     /// 而这里要的正是"和上一帧逐位相同"，多渲染一帧无害，少渲染一帧才是 bug。
-    fn scene_signature(
+    pub(crate) fn scene_signature(
         viewport: (u32, u32),
         view_proj: &Mat4,
         camera_pos: &Vec3,
@@ -388,34 +376,33 @@ impl SceneRenderer {
 
     /// 渲染一帧离屏场景。
     ///
-    /// 返回 `true` 表示这一帧确实重画了；返回 `false` 表示输入指纹与上一帧逐位相同，
-    /// **整段渲染被跳过**了 —— 此时上一帧的纹理仍然有效，调用方照常拿
-    /// [`texture_id`](Self::texture_id) 去画就行，画面上不会有任何区别。
+    /// 返回本帧**新加载模型的本地包围盒**（调用方回传给 UI 侧做拾取）；
+    /// 输入指纹与上一帧逐位相同时整段渲染被跳过，返回空 Vec —— 上一帧的纹理
+    /// 仍然有效，调用方照常拿 [`texture_id`](Self::texture_id) 用就行。
+    ///
+    /// 世界矩阵由调用方（UI 线程组装 `RenderJob` 时）算好传入：渲染线程不接触
+    /// `Scene`，指纹里已含的「局部变换 + 父引用」与这份矩阵天然一致。
     pub fn render(
         &mut self,
-        scene: &Scene,
+        entities: &[Entity],
+        world_matrices: &[Mat4],
         view_proj: &Mat4,
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
-    ) -> bool {
+    ) -> Vec<(String, Bounds)> {
         let (w, h) = self.viewport_size;
         if w == 0 || h == 0 {
-            return false;
+            return Vec::new();
         }
 
         // 缩放窗口进行中：跳过整段 3D 渲染。调用方会拿上一帧那张纹理拉伸到新矩形 ——
         // 观感与 Unity 一致，代价是这一帧几乎为零（见 `set_viewport_size`）。
         if self.pending_size.is_some() {
-            return false;
+            return Vec::new();
         }
 
-        let entities = &scene.entities;
-
-        // 先算指纹：**刻意排在解算世界矩阵之前**。
-        //
-        // 指纹只需要局部变换 + 父引用（等价于世界矩阵，见 `scene_signature` 的说明），
-        // 所以静态帧可以在这里直接返回 —— 连 `Scene::world_matrices()` 那几条 O(n)
-        // 的分配与矩阵连乘都省掉。编辑器绝大多数帧都是这种"什么都没动"的帧。
+        // 双保险：调用方（RenderHandle）已经按指纹拦过一次，这里再拦一层 ——
+        // 指纹比对是零分配线性扫描，而漏拦一次就是一整帧 GPU 白画。
         let signature = Self::scene_signature(
             self.viewport_size,
             view_proj,
@@ -424,17 +411,15 @@ impl SceneRenderer {
             entities,
         );
         if self.last_signature == Some(signature) {
-            return false;
+            return Vec::new();
         }
-
-        // 层级在 core 里解算：一次算出所有实体的世界矩阵，供指纹与管线共用。
-        let world_matrices = scene.world_matrices();
 
         // Phase 1: ensure all models are loaded (mutable borrow on model_cache)
         //
         // 放在指纹判断**之后**是有意的：模型标识本身就进了指纹，所以新加的实体、
         // 改过路径的实体一定会走到这里，不会漏加载；而指纹没变的帧连一次表查找都
         // 不做，更不会去反复读一个坏路径的磁盘文件 —— 那正是"静态界面也卡"的经典成因。
+        let mut loaded = Vec::new();
         for entity in entities {
             if !entity.model.is_empty() && !self.model_cache.contains_key(&entity.model) {
                 // entity.model 是项目相对路径（或内置图元标识）；缓存键保持原样不变，
@@ -446,6 +431,7 @@ impl SceneRenderer {
                             entity.model,
                             m.primitives.len()
                         );
+                        loaded.push((entity.model.clone(), m.bounds));
                         self.model_cache.insert(entity.model.clone(), m);
                     }
                     Err(e) => log::warn!("Failed to load model '{}': {:#}", entity.model, e),
@@ -455,10 +441,10 @@ impl SceneRenderer {
 
         // Phase 2: render via shared pipeline
         let Some(ref color_view) = self.render_view else {
-            return false;
+            return Vec::new();
         };
         let Some(ref depth_view) = self.depth_view else {
-            return false;
+            return Vec::new();
         };
 
         let mut encoder = self
@@ -475,7 +461,7 @@ impl SceneRenderer {
             self.msaa_color_view.as_ref(),
             depth_view,
             entities,
-            &world_matrices,
+            world_matrices,
             &self.model_cache,
             view_proj,
             camera_pos,
@@ -486,14 +472,14 @@ impl SceneRenderer {
 
         // 只有真画了才记账 —— 半路 return 的那些分支都没产出可用图像。
         self.last_signature = Some(signature);
-        true
+        loaded
     }
 }
 
 /// 把一个 64 位值搅进哈希（splitmix64 的收尾混合）。
 ///
 /// 自己写而不引第三方哈希库：这里只要"稳定 + 雪崩"，不需要抗碰撞，多一个依赖不划算。
-fn mix_bits(hash: u64, value: u64) -> u64 {
+pub(crate) fn mix_bits(hash: u64, value: u64) -> u64 {
     let mut x = hash ^ value.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 30;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -504,7 +490,7 @@ fn mix_bits(hash: u64, value: u64) -> u64 {
 }
 
 /// 把一串 f32 按**位模式**搅进哈希。
-fn mix_f32s(hash: u64, values: &[f32]) -> u64 {
+pub(crate) fn mix_f32s(hash: u64, values: &[f32]) -> u64 {
     values
         .iter()
         .fold(hash, |h, v| mix_bits(h, v.to_bits() as u64))

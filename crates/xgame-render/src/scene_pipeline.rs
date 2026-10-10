@@ -56,7 +56,11 @@ use xgame_core::{Entity, Light, LightKind};
 use crate::gltf_loader::{Bounds, GltfMesh, GltfPrimitive, GltfVertex, MaterialParams};
 
 /// 每帧最多渲染的实体数量。
-const MAX_RENDER_ENTITIES: usize = 256;
+///
+/// 模型 uniform 缓冲按这个上限一次性分配（4096 × 对齐后 stride ≈ 1~2 MB 显存，
+/// 常驻可忽略）。超出部分仍然静默不画 —— 真到这个规模，该上的是实例化/分批，
+/// 而不是继续放大这张表。
+const MAX_RENDER_ENTITIES: usize = 4096;
 
 /// 默认阴影贴图分辨率（正方形边长）。
 ///

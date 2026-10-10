@@ -25,7 +25,7 @@ main()                           crates/xgame-editor/src/main.rs
 
 ```
 GpuHandles::from(cc.wgpu_render_state)
-  └── 保留 device / queue / egui 渲染器    （打开项目后才用来建 SceneRenderer）
+  └── 保留 device / queue / egui 渲染器    （打开项目后才用来启动渲染线程）
 ProjectHub::new()
   ├── RecentProjects::load()              %APPDATA%\XGameEngine\recent_projects.ron
   └── 默认新建位置 = <cwd>/projects（cwd 不像引擎根目录时退回用户文档目录）
@@ -52,12 +52,17 @@ project.load_entry_scene()        路径 = 项目根 / project.entry_scene
   └── 失败 → xgame_core::project::default_scene()  (Main Camera + Directional Light)
 ```
 
-`EditorApp::open_project` 接着建离屏渲染器，并把**项目根目录**交给它：
+`EditorApp::open_project` 接着启动**渲染线程**，并把**项目根目录**交给它：
 
 ```
-scene_renderer::SceneRenderer::new(device, queue, egui_renderer, format, project_root)
-  └── ScenePipeline::new()        共享渲染管线（位于 xgame-render）
+render_thread::RenderHandle::spawn(device, queue, egui_renderer, format, project_root)
+  └── 线程内构造 scene_renderer::SceneRenderer
+        └── ScenePipeline::new()        共享渲染管线（位于 xgame-render）
 ```
+
+> 3D 视口渲染在**独立线程**上进行（2026-10-10 重构）：UI 线程只按输入指纹
+> 组装 `RenderJob` 发过去、再把渲染线程最近一次交卷的纹理贴到视口上。
+> 渲染慢不再阻塞输入响应 —— 这是视口手感对齐商业引擎的关键结构。
 
 > 项目枢纽的「新建项目」走 `ProjectHandle::create`：建 `Scenes/`、`Resources/`，
 > 写 `project.ron` 与默认场景「打开」走 `ProjectHandle::open`（读 `project.ron`）。
@@ -92,13 +97,10 @@ main()                           crates/xgame-game/src/main.rs
 
 eframe 每帧调用 `EditorApp::update(ctx)`。
 
-**进 `update` 的第一件事是两个界面都要做的**：重设 Unity 暗色主题。
-
-**没有打开项目时**，之后只画一帧项目枢纽：`ProjectHub::ui(ctx)`（最近项目列表、
-新建表单、打开表单）。**打开项目之后**，再走下面 8 步：
+**没有打开项目时**，只画一帧项目枢纽：`ProjectHub::ui(ctx)`（最近项目列表、
+新建表单、打开表单）。**打开项目之后**，走下面几步：
 
 ```
- 0  theme::install(ctx)           每帧重设 Unity 暗色主题（会被 eframe 的系统主题覆盖）
  1  ViewportCommand::Title        窗口标题带上项目名（仅项目名变化时发送）
  2  toolbar::show() + 模式切换     项目 / 播放暂停停止 / 变换工具
  3  Ctrl+S                        保存当前场景回项目入口场景
@@ -112,11 +114,12 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
 >
 > | 动作 | 频率 | 为什么 |
 > |---|---|---|
-> | `theme::install(ctx)` | **每帧** | eframe 每帧按**系统主题**重设 egui 的 style，只设一次会被顶掉（界面退回浅色）|
+> | `theme::install(ctx)` | **只启动时一次** | `ThemePreference::Dark` 固定后 egui 不再按系统主题覆盖 style（过去每帧重设就是在对抗那个覆盖）|
 > | `theme::install_fonts(ctx)` | **只启动时一次** | `set_fonts` 会重建整张字形图集，很贵 |
 > | `ViewportCommand::Title` | **仅项目名变化时** | 一路走到 winit 的 `SetWindowText`，是真实的系统调用 |
 > | 「最近项目」磁盘校验 | **仅列表变化时** | `is_file()` 是磁盘 IO，遇到失效的网络路径会阻塞 UI 线程 |
-> | 离屏 3D 渲染 | **仅输入指纹变化时** | 重绘的触发远多于「画面真的变了」，见「阶段 4b」 |
+> | 离屏 3D 渲染 | **仅输入指纹变化时** | 指纹没变就不发任务，渲染线程完全睡眠，见「阶段 4b」 |
+> | Hierarchy 行模型 | **仅结构指纹变化时** | 行缓存按 (指纹, 折叠版本, 过滤器) 复用，不变零 String 分配 |
 >
 > 最后一行是最容易踩的：**"这一帧要走一遍界面"不等于"这一帧要重画 3D"**。
 
@@ -332,32 +335,36 @@ scene_view::show_content(state, ui)
   │
   ├── ⑤ 工具快捷键 W/E/R —— 仅 Edit 且**非飞行模式**且已选中实体时生效
   │
-  ├── ⑥ render_scene(用本帧最新的相机与场景)   ← **现在才重画**
+  ├── ⑥ render_scene(用本帧最新的相机与场景)   ← **现在才发渲染任务**
   │   │
   │   ├── 【输入指纹】相机 / 视口尺寸 / 环境光 + 有效光源（含阴影开关）+
   │   │     每个实体的 model + **局部变换** + **父引用**，收成一个 u64（逐位比较）
-  │   │     └── 与上一帧**完全相同** → 直接 return false，下面全跳过 ★
+  │   │     └── 与上次发出的**完全相同** → 什么都不发，渲染线程继续睡 ★
   │   │         ★ 指纹**排在解算世界矩阵之前**：静态帧连 `world_matrices()` 都省掉
   │   │
-  │   ├── 世界矩阵解算（只有真要画了才做）
+  │   ├── 指纹变了 → 组装 RenderJob（实体快照 Arc + 世界矩阵 + 相机 + 光源）
+  │   │     try_send 给渲染线程；线程忙就丢帧（latest-wins，绝不排队）
   │   │
-  │   ├── Phase 1: 模型加载（惰性，entity.model → GltfMesh::load）
+  │   ├── 【渲染线程内】SceneRenderer::render
+  │   │     ├── Phase 1: 模型加载（惰性，entity.model → GltfMesh::load）
+  │   │     │   └── 新模型的包围盒随结果回传（UI 侧拾取用）
+  │   │     ├── Phase 2: wgpu 渲染 (ScenePipeline::render)
+  │   │     │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
+  │   │     │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
+  │   │     │     │   └── 攒完一次 `write_buffer` 写完整段（旧的逐实体写 = 每帧 N 次分配 + N 条命令）
+  │   │     │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
+  │   │     │     ├── 主 RenderPass (背景 #1E1E24)：
+  │   │     │     │   ├── 颜色附件 = **多采样**纹理，resolve 到交给 egui 的单采样纹理
+  │   │     │     │   ├── 逐 primitive: set_global_bg / set_material_bg / draw_indexed
+  │   │     │     │   └── 片元按灯叠加，被标记的灯查阴影图（3×3 PCF）
+  │   │     │     └── 提交命令
+  │   │     └── 交卷 FrameResult(TextureId + 新包围盒) → UI 的 poll() 收下
   │   │
-  │   ├── Phase 2: wgpu 渲染 (ScenePipeline::render)
-  │   │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
-  │   │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
-  │   │     │   └── 攒完一次 `write_buffer` 写完整段（旧的逐实体写 = 每帧 N 次分配 + N 条命令）
-  │   │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
-  │   │     ├── 主 RenderPass (背景 #1E1E24)：
-  │   │     │   ├── 颜色附件 = **多采样**纹理，resolve 到交给 egui 的单采样纹理
-  │   │     │   ├── 逐 primitive: set_global_bg / set_material_bg / draw_indexed
-  │   │     │   └── 片元按灯叠加，被标记的灯查阴影图（3×3 PCF）
-  │   │     └── 提交命令
-  │   │
-  │   └── 渲染结果 → egui 纹理 (离屏 Texture → TextureId)
+  │   └── 有任务在飞 → request_repaint_after(8ms) 保持轮询，
+  │         否则 Hybrid 停帧时新纹理到了也没人贴出来
   │
   ├── ⑦ painter.image(tex_id, rect, uv)      ← 叠加层，画在 3D 之上
-  │     └── 纹理不是本帧画的也没关系：上一帧那张还在，内容逐位等价
+  │     └── 贴的是渲染线程**最近一次交卷**的纹理：UI 线程永远不被 GPU 阻塞
   │
   ├── ⑧ draw_gizmo(painter, &ctx, tool_mode)
   │
@@ -914,9 +921,10 @@ EditorState（中央状态，所有面板共享可变引用）
   ├── show_physics_debug: bool
   ├── return_to_hub: bool                请求关闭项目回到枢纽
   │
-  ├── scene_renderer: Option<SceneRenderer>  wgpu 离屏渲染器
-  │     ├── project_root: PathBuf            模型路径解析基准
-  │     └── pipeline: ScenePipeline          共享管线 (xgame-render)
+  ├── render_thread: Option<RenderHandle>    渲染线程句柄（线程持有 SceneRenderer）
+  │     ├── latest_texture                   最近交卷的 egui 纹理（UI 贴它）
+  │     ├── bounds                           模型包围盒表（拾取用，线程回传累积）
+  │     └── in_flight                        在飞任务数（>0 时 UI 保持轮询）
   │
   └── game_runtime: Option<GameRuntime>      物理运行时 (仅 Playing)
         ├── physics: PhysicsWorld             rapier3d 世界
@@ -1044,7 +1052,8 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
 | `editor/state.rs` | 1438 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
-| `editor/scene_renderer.rs` | 804 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（指纹排在解算世界矩阵之前）、`mesh_bounds()` |
+| `editor/scene_renderer.rs` | 804 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（收实体+世界矩阵切片，返回新加载模型的包围盒） |
+| `editor/render_thread.rs` | 280 | `RenderHandle::spawn()`、`poll()`、`should_send()` / `submit()`（latest-wins）、`is_awaiting_frame()`；渲染线程主循环只画最新任务 |
 | `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |

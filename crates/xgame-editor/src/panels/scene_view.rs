@@ -9,7 +9,11 @@
 //!
 //! 在 Play 模式下，如果 `show_physics_debug` 启用，会叠加绘制碰撞体线框。
 
+use std::sync::Arc;
+
 use xgame_math::glam::{Mat4, Vec3};
+use crate::render_thread::RenderJob;
+use crate::scene_renderer::SceneRenderer;
 use crate::state::{EditorState, GizmoPart, ToolMode};
 use crate::gizmo;
 
@@ -132,31 +136,56 @@ fn build_view_projection(state: &EditorState, vp_w: u32, vp_h: u32) -> Mat4 {
     proj * view
 }
 
-/// 渲染 3D 场景并返回纹理 ID
+/// 向渲染线程提交本帧任务，并返回当前最新可用的纹理 ID。
+///
+/// 渲染不在 UI 线程上做（见 `render_thread` 模块）：这里只算输入指纹，
+/// 变了才组装 `RenderJob` 发出去；贴到视口上的是渲染线程**最近一次交卷**的
+/// 纹理。UI 线程因此永远不被 GPU 阻塞 —— 这是视口手感像商业引擎的关键。
 fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4) -> Option<egui::TextureId> {
-    // 记下"这一帧渲染用的是哪个相机"，供帧序回归测试断言（见 `show_content` 的帧序说明）。
+    // 记下"这一帧渲染请求用的是哪个相机"，供帧序回归测试断言（见 `show_content`
+    // 的帧序说明）。渲染虽然在线程池那边执行，但**请求**必须在本帧输入之后发出，
+    // 这条不变量与渲染线程化之前完全一致。
     #[cfg(test)]
     {
         state.last_render_view_proj = Some(*view_proj);
     }
 
-    if vp_w == 0 || vp_h == 0 {
-        return None;
-    }
-    
-    state.scene_renderer.as_mut().and_then(|renderer| {
-        renderer.set_viewport_size(vp_w, vp_h);
-        renderer.render(
-            &state.scene,
+    let handle = state.render_thread.as_mut()?;
+
+    // 先收卷：渲染线程可能已经完成了一帧，把它变成"当前纹理"。
+    handle.poll();
+
+    if vp_w > 0 && vp_h > 0 {
+        // 指纹含视口尺寸、相机、环境光、光源与每个实体的模型/局部变换/父引用。
+        // 没变就什么都不发 —— 静态场景时渲染线程完全睡眠。
+        let signature = SceneRenderer::scene_signature(
+            (vp_w, vp_h),
             view_proj,
             &state.editor_camera.eye(),
-            xgame_render::scene_pipeline::SceneLighting::new(
+            &xgame_render::scene_pipeline::SceneLighting::new(
                 state.scene.ambient,
                 &state.scene.lights,
             ),
+            &state.scene.entities,
         );
-        renderer.texture_id()
-    })
+
+        if handle.should_send(signature) {
+            // 世界矩阵只在"真的要发"时才算 —— 静态帧连这次 O(n) 分配都省掉。
+            let world_matrices = state.scene.world_matrices();
+            handle.submit(RenderJob {
+                signature,
+                size: (vp_w, vp_h),
+                view_proj: *view_proj,
+                camera_pos: state.editor_camera.eye(),
+                ambient: state.scene.ambient,
+                lights: state.scene.lights.clone(),
+                entities: Arc::new(state.scene.entities.clone()),
+                world_matrices: Arc::new(world_matrices),
+            });
+        }
+    }
+
+    handle.latest_texture()
 }
 
 /// 绘制渲染纹理或空白背景
@@ -252,10 +281,11 @@ fn pick_entity(
         let Some(world) = world_matrices.get(idx) else { continue };
 
         // 本地包围盒 → 世界 AABB（变换 8 个角点再求盒，旋转也能正确处理）。
+        // 包围盒由渲染线程加载模型后回传累积；还没加载过的退回单位盒。
         let local = state
-            .scene_renderer
+            .render_thread
             .as_ref()
-            .and_then(|r| r.mesh_bounds(&entity.model))
+            .and_then(|h| h.mesh_bounds(&entity.model))
             .unwrap_or(gizmo::UNIT_BOUNDS);
         let aabb = local.transformed(world);
 
@@ -660,9 +690,21 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         }
     }
 
-    // 4) 现在才重画离屏 3D —— 用的就是本帧最新的相机与场景。
+    // 4) 现在才向渲染线程发任务 —— 用的就是本帧最新的相机与场景。
     let tex_id = render_scene(state, vp_w, vp_h, &view_proj);
     draw_render_texture(&painter, viewport.rect, tex_id);
+
+    // 有渲染任务在飞：保持低速轮询（~8ms），渲染线程交卷后下一帧把新纹理
+    // 贴出来。否则 Hybrid 帧调度在"无输入"时停帧，新图到了也没人显示 ——
+    // 打开项目后视口会一直是占位底色，直到用户动一下鼠标。
+    if state
+        .render_thread
+        .as_ref()
+        .is_some_and(|h| h.is_awaiting_frame())
+    {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(8));
+    }
 
     // 5) 叠加层：画在 3D 之上。
     if let Some(ctx) = gizmo_ctx {

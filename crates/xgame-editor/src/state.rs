@@ -14,7 +14,6 @@ use xgame_core::project::ProjectHandle;
 use xgame_core::{Entity, EntityId, Scene, Transform};
 use xgame_physics::DebugLine;
 use strum::Display;
-use crate::editor_input::EditorInputManager;
 
 
 /// 场景视图中当前激活的变换工具。
@@ -370,9 +369,12 @@ pub struct EditorState {
     /// 大于 0 时，scene_view 在视口上显示 "Speed: X.X"。
     pub zoom_indicator: f32,
 
-    // -- Scene renderer (initialised by main.rs after state creation) --
-    /// 可选的 3D 场景渲染器——wgpu 后端不可用时为 `None`。
-    pub scene_renderer: Option<crate::scene_renderer::SceneRenderer>,
+    // -- Render thread (initialised by main.rs after state creation) --
+    /// 3D 视口的渲染线程句柄——wgpu 后端不可用时为 `None`。
+    ///
+    /// 渲染在独立线程上进行（见 `render_thread` 模块）：UI 线程只发任务、
+    /// 收最新纹理，永远不被 GPU 阻塞。
+    pub render_thread: Option<crate::render_thread::RenderHandle>,
     /// 本帧离屏渲染**实际用到**的视图投影矩阵（仅供测试）。
     ///
     /// 帧序是这个视口手感的核心不变量：**渲染必须发生在本帧输入之后**。反过来的话
@@ -455,12 +457,15 @@ pub struct EditorState {
     /// 拖拽捕捉步长（0 表示不捕捉）。
     #[allow(dead_code)]
     pub gizmo_snap: f32,
-    
-    /// 输入管理器：预留的「绑定表 → 动作」输入层，**目前尚未接入**（没有任何地方
-    /// 调用它的 `update()`，实际输入仍由 `scene_view` / `main` 直接处理）。
-    /// 详见 `editor_input.rs` 顶部的模块说明。
-    #[allow(dead_code)]
-    pub input_manager: EditorInputManager,
+
+    // -- Hierarchy panel cache --
+    /// 折叠集合的版本号：每次折叠/展开切换 +1。
+    ///
+    /// 层级面板的行缓存以它为 key 的一部分 —— 直接哈希 `HashSet` 不可靠
+    /// （迭代序随内部布局变），显式版本号既稳定又是 O(1)。
+    pub collapsed_version: u64,
+    /// 层级面板的行模型缓存（指纹没变就整段复用，见 `panels::hierarchy::RowCache`）。
+    pub hierarchy_cache: crate::panels::hierarchy::RowCache,
 }
 
 impl EditorState {
@@ -496,7 +501,7 @@ impl EditorState {
             fly_state: false,
             zoom_indicator: 0.0,
 
-            scene_renderer: None,
+            render_thread: None,
             #[cfg(test)]
             last_render_view_proj: None,
             game_runtime: None,
@@ -522,7 +527,8 @@ impl EditorState {
             gizmo_active: None,
             gizmo_snap: 0.0,
 
-            input_manager: EditorInputManager::new(),
+            collapsed_version: 0,
+            hierarchy_cache: crate::panels::hierarchy::RowCache::default(),
         };
 
         // 打开项目时先把资产清单扫出来，面板第一帧就有内容。

@@ -18,10 +18,11 @@ use std::collections::HashSet;
 
 use xgame_core::{EntityId, Scene};
 
+use crate::scene_renderer::mix_bits;
 use crate::state::{EditorState, PlayMode};
 
 /// 树的每一行：实体索引 + 显示深度。
-struct Row {
+pub struct Row {
     idx: usize,
     depth: usize,
     id: EntityId,
@@ -35,6 +36,101 @@ struct Row {
     script_count: usize,
     /// 是否参与物理。
     has_physics: bool,
+}
+
+// ---------------------------------------------------------------------------
+// 行模型缓存
+// ---------------------------------------------------------------------------
+
+/// 层级面板的行模型缓存。
+///
+/// # 为什么缓存
+///
+/// 旧实现每帧把整棵树重新压平、每行 `name.clone()` + 图标 `String` 拼接 ——
+/// 一场景几百个实体就是每帧几百次堆分配，而这棵树**绝大多数帧一个字节都没变**。
+/// 商业引擎的面板全是"数据变更才重建"（信号/脏标记）；这里用结构指纹达到同样
+/// 效果：零分配 O(n) 扫一遍算出指纹，与缓存 key 相同就整段复用上次的行模型，
+/// 不同才重建。指纹只覆盖**行显示真正读到**的字段 —— 变换、环境光之类的变化
+/// 不会让层级树白重建。
+#[derive(Default)]
+pub struct RowCache {
+    /// 当前 `rows` 对应的 key：`(结构指纹, 折叠版本, 过滤器)`。
+    key: Option<(u64, u64, String)>,
+    rows: Vec<Row>,
+}
+
+impl RowCache {
+    /// 取本帧要显示的行（把 Vec **移出**缓存交给调用方，用完经
+    /// [`give_back`](Self::give_back) 还回来 —— 面板要在持有行的同时 `&mut state`
+    /// 处理点击/右键菜单，直接借缓存里的行会撞借用检查器）。
+    fn take_rows(
+        &mut self,
+        scene: &Scene,
+        collapsed: &HashSet<EntityId>,
+        collapsed_version: u64,
+        filter: &str,
+    ) -> Vec<Row> {
+        let key = (structure_fingerprint(scene), collapsed_version, filter.to_owned());
+        if self.key.as_ref() == Some(&key) {
+            return std::mem::take(&mut self.rows);
+        }
+
+        // 父子关系一次解算好，本帧后面所有"按父找子"的查询都走它，不再逐个扫表。
+        let (parent_indices, child_map) = scene.hierarchy();
+        let flat = if filter.is_empty() {
+            flatten(scene, &parent_indices, &child_map, collapsed)
+        } else {
+            // 搜索态：摊平成匹配项列表（不按层级），与 Unity 的搜索行为一致。
+            scene
+                .entities
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.name.to_lowercase().contains(filter))
+                .map(|(i, _)| (i, 0usize))
+                .collect()
+        };
+        let rows = flat
+            .into_iter()
+            .map(|(idx, depth)| Row {
+                idx,
+                depth,
+                id: scene.entities[idx].id,
+                name: scene.entities[idx].name.clone(),
+                has_children: !child_map[idx].is_empty(),
+                has_model: !scene.entities[idx].model.is_empty(),
+                prefab_root: scene.entities[idx].prefab.as_ref().map(|p| p.is_root),
+                script_count: scene.entities[idx].scripts.len(),
+                has_physics: scene.entities[idx].physics.is_some(),
+            })
+            .collect();
+
+        self.key = Some(key);
+        rows
+    }
+
+    /// 把用完的行还回缓存（下一帧指纹没变就直接复用）。
+    fn give_back(&mut self, rows: Vec<Row>) {
+        self.rows = rows;
+    }
+}
+
+/// 行显示真正读到的字段的结构指纹（零分配线性扫描）。
+///
+/// 漏收一个字段 = 界面上"改了不重建"的脏行；多收无害（白重建一次）。
+fn structure_fingerprint(scene: &Scene) -> u64 {
+    let mut hash = 0u64;
+    for e in &scene.entities {
+        hash = mix_bits(hash, e.id.raw());
+        hash = mix_bits(hash, e.parent.map_or(0, EntityId::raw));
+        for byte in e.name.as_bytes() {
+            hash = mix_bits(hash, *byte as u64);
+        }
+        hash = mix_bits(hash, !e.model.is_empty() as u64);
+        hash = mix_bits(hash, e.prefab.as_ref().map_or(2, |p| p.is_root as u64));
+        hash = mix_bits(hash, e.scripts.len() as u64);
+        hash = mix_bits(hash, e.physics.is_some() as u64);
+    }
+    hash
 }
 
 /// 把场景层级压平成带深度的行列表（跳过被折叠节点的子树）。
@@ -114,39 +210,16 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     ui.separator();
 
     // ── 收集本帧要显示的行 ──
-    // 一次性把渲染所需的数据收集成 owned 值，之后整段 UI 里不再借用 `state.scene`。
-    // 否则面板内部（要改选中/折叠/拖拽状态）与"读场景"会撞借用检查器。
+    // 走行模型缓存：结构指纹没变就复用上一帧的（零 String 分配），见 `RowCache`。
+    // 行从缓存里**移出来**用，帧尾再还回去 —— 这样循环里要 `&mut state`（右键菜单
+    // 改场景）不会和"借缓存里的行"撞借用检查器。
     let filter = state.hierarchy_filter.trim().to_lowercase();
-    let rows: Vec<Row> = {
-        let scene = &state.scene;
-        // 父子关系一次解算好，本帧后面所有"按父找子"的查询都走它，不再逐个扫表。
-        let (parent_indices, child_map) = scene.hierarchy();
-        let flat = if filter.is_empty() {
-            flatten(scene, &parent_indices, &child_map, &state.collapsed_entities)
-        } else {
-            // 搜索态：摊平成匹配项列表（不按层级），与 Unity 的搜索行为一致。
-            scene
-                .entities
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.name.to_lowercase().contains(&filter))
-                .map(|(i, _)| (i, 0usize))
-                .collect()
-        };
-        flat.into_iter()
-            .map(|(idx, depth)| Row {
-                idx,
-                depth,
-                id: scene.entities[idx].id,
-                name: scene.entities[idx].name.clone(),
-                has_children: !child_map[idx].is_empty(),
-                has_model: !scene.entities[idx].model.is_empty(),
-                prefab_root: scene.entities[idx].prefab.as_ref().map(|p| p.is_root),
-                script_count: scene.entities[idx].scripts.len(),
-                has_physics: scene.entities[idx].physics.is_some(),
-            })
-            .collect()
-    };
+    let rows: Vec<Row> = state.hierarchy_cache.take_rows(
+        &state.scene,
+        &state.collapsed_entities,
+        state.collapsed_version,
+        &filter,
+    );
 
     let dragging = state.hierarchy_drag.is_some();
     let pointer = ui.ctx().pointer_interact_pos();
@@ -373,6 +446,8 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         if !state.collapsed_entities.remove(&id) {
             state.collapsed_entities.insert(id);
         }
+        // 折叠集合变了 → 版本号 +1，下一帧行缓存会按新 key 重建。
+        state.collapsed_version += 1;
     }
     if let Some(idx) = clicked_select {
         state.selected_entity = Some(idx);
@@ -440,4 +515,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             state.paste_entity();
         }
     }
+
+    // 行模型还回缓存：指纹没变的下一帧直接复用，零 String 分配。
+    state.hierarchy_cache.give_back(rows);
 }

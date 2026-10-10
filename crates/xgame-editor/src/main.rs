@@ -38,7 +38,6 @@
 //! ```
 
 mod builder;
-mod editor_input;
 mod frame_policy;
 mod frame_probe;
 mod game_runtime;
@@ -47,6 +46,7 @@ mod input_bridge;
 mod hub;
 mod panels;
 mod recents;
+mod render_thread;
 mod scene_renderer;
 mod state;
 
@@ -110,8 +110,16 @@ impl EditorApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // ── 字体：赶在第一帧之前装好，否则项目枢纽第一屏就是一片方块字 ──
         // 只装这一次 —— `set_fonts` 会重建整张字形图集，不能每帧来。
-        // （主题不在这里设：它必须**每帧**重设，见 `EditorApp::update`。）
         panels::theme::install_fonts(&cc.egui_ctx);
+        // ── 主题：也只装这一次 ──
+        // 关掉"跟随系统主题"：否则 egui 每帧都会按系统主题（这台机器是浅色）把
+        // style 顶掉，过去"每帧重设主题"就是为了对抗那个覆盖。关掉之后每帧重建
+        // 整个 `egui::Style` 纯属浪费。
+        cc.egui_ctx.options_mut(|o| {
+            // ThemePreference::Dark = 不跟随系统主题，固定用 dark_style。
+            o.theme_preference = egui::ThemePreference::Dark;
+        });
+        panels::theme::install(&cc.egui_ctx);
 
         let gpu = cc.wgpu_render_state.as_ref().map(|rs| GpuHandles {
             device: rs.device.clone(),
@@ -161,8 +169,8 @@ impl EditorApp {
                 &gpu.adapter,
                 gpu.target_format,
             );
-            log::info!("视口渲染：MSAA x{sample_count}");
-            state.scene_renderer = Some(scene_renderer::SceneRenderer::new(
+            log::info!("视口渲染：MSAA x{sample_count}（独立渲染线程）");
+            state.render_thread = Some(render_thread::RenderHandle::spawn(
                 &gpu.device,
                 &gpu.queue,
                 gpu.egui_renderer.clone(),
@@ -193,13 +201,6 @@ impl eframe::App for EditorApp {
         // 这一条**只是**为了别让这些幽灵事件干扰"本帧有没有真实输入"的判断 ——
         // 「要不要连续出帧」现在由 `frame_policy` 明确决策，不再靠这个副作用。
         drop_redundant_pointer_moves(ctx, &mut self.last_pointer_pos);
-
-        // ── 主题：每帧重设，别挪走 ──
-        // eframe 每帧会按**系统主题**（这台机器是浅色）覆盖 egui 的 style，
-        // 只在启动时设一次的话，界面会被系统浅色主题顶掉 —— 枢纽和编辑器界面都一样。
-        // `set_style` 只是赋一个 Arc，开销可以忽略；真正重的是 `set_fonts`，
-        // 那个在 `EditorApp::new` 里只做一次（重建字形图集很贵）。
-        panels::theme::install(ctx);
 
         // ── 帧调度（这一帧之后还要不要再排一帧）──
         //
