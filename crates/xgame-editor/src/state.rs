@@ -71,6 +71,25 @@ pub struct GizmoDrag {
     /// 与 `start_hit` 的分工见 [`crate::gizmo::axis_param_under_mouse`] 的说明：
     /// 轴上的位移量必须用直线投影，用平面交点会恒得零。
     pub start_axis: f32,
+    /// 轴拖拽参考线的**固定锚点**（世界坐标）——拖拽开始时实体的世界位置。
+    ///
+    /// # 为什么必须单独存一个锚点，不能直接用 `ctx.entity_pos`
+    ///
+    /// [`axis_param_under_mouse`](crate::gizmo::axis_param_under_mouse) 求的是
+    /// 「过 `ctx.entity_pos`、方向为轴」的直线与鼠标射线的最近点参数 `s`。
+    /// 而 `ctx` 是**每帧按当前位置重建**的，拖拽每帧又在改位置 —— 于是参考线
+    /// 跟着物体一起跑，`s` 里混进了"物体自己刚挪的那一段"：
+    ///
+    /// ```text
+    /// Δ_k = A_k − Δ_{k-1}        // A_k = 鼠标本帧"想"走的位移
+    /// ```
+    ///
+    /// 这是一个增益为 −1 的正反馈：极点落在 `z = −1`（奈奎斯特），物体在相邻两帧
+    /// 之间**来回跳**（拖拽抽搐），稳态只走到鼠标位移的一半，且把鼠标的像素级噪声
+    /// 放大成可见的抖动。
+    ///
+    /// 把参考线锚死在拖拽起点，`s_now` 就只是鼠标射线的函数，环断开。
+    pub axis_anchor: Vec3,
     pub start_screen_pos: egui::Pos2,
     /// 拖拽起始时实体的**世界**旋转。
     ///
@@ -664,9 +683,19 @@ impl EditorState {
         self.undo_stack.can_redo()
     }
 
-    /// 撤销/重做后实体数量可能变了，选中索引可能越界——收敛回合法范围，
-    /// 否则下一次 `entity()` 会 panic。
-    fn clamp_selection(&mut self) {
+    /// 实体数量变了之后，把选中索引收敛回合法范围。
+    ///
+    /// # 为什么必须是"每帧开头"这一道
+    ///
+    /// `selected_entity` 是**按位置**记的索引，而改变实体数量或顺序的操作有十几处
+    /// （撤销 / 重做 / 删除 / 复制 / 粘贴 / 预制体实例化与还原 / 从资产实例化……）。
+    /// 只要有一处忘了同步，下一帧 `entities[idx]` 就会**直接 panic，整个编辑器挂掉** ——
+    /// 这不是"显示不对"，是"进程没了"，与"像商业引擎一样稳定"直接冲突。
+    ///
+    /// 与其在十几处逐个补 `get()`，不如在每帧入口做一次 O(1) 收敛：越界就夹回
+    /// 合法的邻居（空场景则清空选择）。这层"总闸"让所有路径天然安全，新增操作
+    /// 也不必再记得维护它。
+    pub fn clamp_selection(&mut self) {
         if let Some(i) = self.selected_entity {
             if i >= self.scene.entities.len() {
                 self.selected_entity = if self.scene.entities.is_empty() {

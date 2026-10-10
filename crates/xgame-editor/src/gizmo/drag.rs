@@ -46,6 +46,24 @@ pub fn compute_transform(
     }
 }
 
+/// 以**拖拽起点的固定锚点**为参考线原点，求鼠标射线在轴上的坐标。
+///
+/// 这是修掉"拖拽抽搐"的关键：`ctx.entity_pos` 每帧都在变（就是物体被拖到的位置），
+/// 拿它当参考线原点会让 `s_now` 依赖自己上一帧的输出 —— 详情见
+/// [`GizmoDrag::axis_anchor`] 的推导。锚点固定之后，`s_now` 只由鼠标射线决定。
+fn axis_param_anchored(
+    mouse_pos: egui::Pos2,
+    ctx: &GizmoCtx,
+    axis: Vec3,
+    anchor: Vec3,
+) -> Option<f32> {
+    // `axis_param_under_mouse` 只读 ctx 的 view_proj / 视口尺寸 / 偏移 / entity_pos，
+    // 所以换掉 entity_pos 就是换参考线原点，不必改公共 API 签名。
+    let mut anchored = ctx.clone();
+    anchored.entity_pos = anchor;
+    super::axis_param_under_mouse(mouse_pos, &anchored, axis)
+}
+
 // ---------------------------------------------------------------------------
 // Translate 计算
 // ---------------------------------------------------------------------------
@@ -66,7 +84,12 @@ fn compute_translate(
             // 旧实现拿 `hit_position_on_axis` 的平面交点再投影到轴上，那个投影
             // **恒为 0**（交点在过实体、垂直于轴的平面上），于是位移恒等于
             // `-entity_pos·axis` 这个与鼠标无关的常量 —— 表现就是"拖红箭头不动"。
-            let s_now = super::axis_param_under_mouse(mouse_pos, ctx, axis)?;
+            //
+            // 参考线锚在 `drag.axis_anchor`（拖拽起点）而**不是** `ctx.entity_pos`：
+            // 后者每帧跟着物体走，会让位移变成 `Δ_k = A_k − Δ_{k-1}` 的正反馈 ——
+            // 物体在两点之间以帧率来回跳、且只走鼠标位移的一半。详见
+            // [`GizmoDrag::axis_anchor`]。
+            let s_now = axis_param_anchored(mouse_pos, ctx, axis, drag.axis_anchor)?;
             let new_pos = drag.start_value + axis * (s_now - drag.start_axis);
 
             Some(TransformDelta::Position(new_pos))
@@ -176,7 +199,10 @@ fn compute_scale(
             // 旧实现用平面交点，`t` 恒为 0，`ratio` 于是恒为 `0 / 常量`，
             // 被 `.max(0.01)` 夹住 → 一拖就塌成 1%（起点在原点时 start_t 也是 0，
             // 于是完全不动）。两种表现都不对。
-            let s_now = super::axis_param_under_mouse(mouse_pos, ctx, axis)?;
+            //
+            // 同样锚在拖拽起点：缩放本身不改位置，用 `ctx.entity_pos` 恰好也是稳定的，
+            // 但锚点固定后语义才与 `start_axis` 严格一致（后者正是按起点算的）。
+            let s_now = axis_param_anchored(mouse_pos, ctx, axis, drag.axis_anchor)?;
 
             let start_scale = drag.start_value;
 
@@ -272,6 +298,7 @@ mod tests {
             start_value,
             start_hit: Vec3::ZERO,
             start_axis: axis_param_under_mouse(grab, ctx, axis).expect("抓取点应当落在轴上"),
+            axis_anchor: ctx.entity_pos,
             start_screen_pos: grab,
             start_rotation: Quat::IDENTITY,
         }
@@ -371,6 +398,7 @@ mod tests {
             start_value: Vec3::ZERO,
             start_hit,
             start_axis: 0.0,
+            axis_anchor: ctx.entity_pos,
             start_screen_pos: grab_screen,
             start_rotation: Quat::IDENTITY,
         };
@@ -390,6 +418,104 @@ mod tests {
                 );
             }
             other => panic!("应当是 Rotation，实得 {other:?}"),
+        }
+    }
+
+    /// **回归（跨帧）**：沿轴拖拽必须 1:1 跟手，且不能自己来回跳。
+    ///
+    /// 上面那几条测试都用**固定的** ctx —— 那正是放过这个 bug 的盲区。真实交互里
+    /// `scene_view::handle_gizmo_interaction` 每帧都按**已被改过**的实体位置重建
+    /// ctx，再把 delta 应用回去。参考线若锚在 `ctx.entity_pos`，参考线就跟着物体
+    /// 一起跑，形成 `Δ_k = A_k − Δ_{k-1}` 的正反馈：极点落在 z = −1（奈奎斯特），
+    /// 物体在相邻帧之间来回跳、稳态只走鼠标位移的一半。这里逐帧复刻那个循环。
+    #[test]
+    fn axis_translate_follows_the_mouse_across_frames() {
+        let start = Vec3::new(1.0, 0.0, 2.0);
+        let base = test_ctx(start); // 相机固定，屏幕投影只由 view_proj 决定
+        let axis = Vec3::X;
+
+        let grab = at(&base, on_axis(&base, axis, 0.7));
+        let drag = GizmoDrag {
+            part: GizmoPart::AxisX,
+            start_value: start,
+            start_hit: Vec3::ZERO,
+            start_axis: axis_param_under_mouse(grab, &base, axis).expect("抓取点应当在轴上"),
+            axis_anchor: start,
+            start_screen_pos: grab,
+            start_rotation: Quat::IDENTITY,
+        };
+
+        // 鼠标沿轴正向逐帧前进 0.5；每帧：重建 ctx(当前位置) → 算 delta → 写回位置。
+        let mut pos = start;
+        let mut offsets = Vec::new();
+        for step in 1..=6 {
+            let want = step as f32 * 0.5;
+            // 目标世界点仍落在轴上，`at` 只依赖 view_proj，所以屏幕坐标是固定的。
+            let mouse = at(&base, on_axis(&base, axis, 0.7) + axis * want);
+
+            let mut ctx = base.clone();
+            ctx.entity_pos = pos; // ← 真实交互就是这么干的（这就是自反馈的来源）
+
+            match compute_transform(&drag, mouse, &ctx, ToolMode::Translate).expect("应当算出位移") {
+                TransformDelta::Position(p) => {
+                    // 世界位移只沿轴，且其余分量不动
+                    assert!(
+                        (p.y - start.y).abs() < 1e-3 && (p.z - start.z).abs() < 1e-3,
+                        "拖 X 轴不该动 y/z，实得 {p}"
+                    );
+                    pos = p;
+                }
+                other => panic!("应当是 Position，实得 {other:?}"),
+            }
+            offsets.push(pos.x - start.x);
+        }
+
+        // 1) 单调不移：正反馈的自激振荡会让它在两点之间来回跳。
+        for w in offsets.windows(2) {
+            assert!(w[1] >= w[0] - 1e-3, "位移必须单调前进，实得 {offsets:?}");
+        }
+        // 2) 1:1 跟手：正反馈的稳态增益只有 1/2，会明显落后。
+        for (i, got) in offsets.iter().enumerate() {
+            let want = (i + 1) as f32 * 0.5;
+            assert!(
+                (got - want).abs() < 0.02,
+                "第 {} 帧应当沿轴走 {want}，实得 {got}（整段 {offsets:?}）",
+                i + 1
+            );
+        }
+    }
+
+    /// **回归（跨帧）**：轴缩放的参考线同样必须锚定 —— 缩放不改位置，所以旧写法
+    /// 恰好也稳定，但一旦实体被别的机制挪动（父节点移动）就会重演平移的正反馈。
+    /// 这里显式每帧"挪一下实体"，确保缩放结果不依赖 `ctx.entity_pos`。
+    #[test]
+    fn axis_scale_ignores_where_the_entity_currently_is() {
+        let start = Vec3::new(0.0, 0.0, 0.0);
+        let base = test_ctx(start);
+        let axis = Vec3::X;
+        let grab = at(&base, on_axis(&base, axis, 0.8));
+
+        let drag = GizmoDrag {
+            part: GizmoPart::AxisX,
+            start_value: Vec3::ONE,
+            start_hit: Vec3::ZERO,
+            start_axis: axis_param_under_mouse(grab, &base, axis).expect("抓取点应当在轴上"),
+            axis_anchor: start,
+            start_screen_pos: grab,
+            start_rotation: Quat::IDENTITY,
+        };
+
+        // 目标：鼠标退回一半距离 → 缩放 0.5。故意把 ctx.entity_pos 放到别处，
+        // 模拟"实体被父节点挪走"。结果必须一模一样。
+        let mouse = at(&base, on_axis(&base, axis, 0.4));
+        let mut ctx = base.clone();
+        ctx.entity_pos = Vec3::new(37.0, -12.0, 5.0);
+
+        match compute_transform(&drag, mouse, &ctx, ToolMode::Scale).expect("应当算出缩放") {
+            TransformDelta::Scale(s) => {
+                assert!((s.x - 0.5).abs() < 0.05, "缩放应当约减半，实得 {}", s.x);
+            }
+            other => panic!("应当是 Scale，实得 {other:?}"),
         }
     }
 }

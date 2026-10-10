@@ -71,6 +71,19 @@ pub const DEFAULT_SHADOW_RESOLUTION: u32 = 2048;
 /// 零点几个世界单位 —— 宁可有一点 peter-panning，也不要满屏条纹。
 const SHADOW_DEPTH_BIAS: f32 = 0.0022;
 
+/// 阴影视锥半径的上限（世界单位）。
+///
+/// # 为什么必须封顶
+///
+/// 视锥是按**整场景的世界包围盒**拟合的。只要场景里有一个物体飞远（自由落体掉出
+/// 视野、被脚本扔出去、瞬移……），包围盒就会一路长大，半径跟着涨 —— 而阴影贴图
+/// 的分辨率是固定的，深度范围 `far - near` 一旦被拉长，整场景的深度值就挤进
+/// `[0,1]` 的一小段里，**精度当场崩掉**（表现为影子糊成一团或时隐时现）。
+///
+/// 商业引擎用级联（CSM）或"最大阴影视距"来处理同一件事；这里先做最简单的那个：
+/// 把半径夹住。超出这个范围的物体不投影 —— 比整个场景的阴影一起烂掉要好。
+const MAX_SHADOW_RADIUS: f32 = 120.0;
+
 /// 单帧支持的最大光源数。
 ///
 /// 这个值在三处必须一致：本常量、[`LightsUniform`] 的数组长度、WGSL 里的
@@ -264,8 +277,9 @@ pub fn fit_directional_shadow(direction: Vec3, scene: Bounds) -> Option<Mat4> {
     };
 
     let center = scene.center();
-    // 退化场景（只有一个点）时给个下限，否则正交矩阵会塌成一个奇异矩阵。
-    let radius = scene.half_extent().length().max(0.5);
+    // 退化场景（只有一个点）时给个下限，否则正交矩阵会塌成一个奇异矩阵；
+    // 上限见 `MAX_SHADOW_RADIUS`（防"有物体飞出视野"把深度精度吃光）。
+    let radius = scene.half_extent().length().clamp(0.5, MAX_SHADOW_RADIUS);
 
     // up 不能与视线平行（look_at 会算出 NaN）。光接近竖直时改用 Z 当上方向。
     let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
@@ -1408,6 +1422,28 @@ mod tests {
         let m = fit_directional_shadow(Vec3::ZERO, bounds).expect("degenerate dir still fits");
         let ndc = project(&m, Vec3::ZERO);
         assert!(ndc.is_finite(), "零方向拟合出了 NaN：{ndc:?}");
+    }
+
+    /// 视锥半径必须**封顶**：场景里只要有一个物体飞远（自由落体掉出视野、被脚本
+    /// 扔出去），整场景的包围盒就会被它拉大，深度范围随之拉长 —— 阴影贴图分辨率
+    /// 固定，精度会当场崩掉。夹住之后，超出范围的东西落在视锥外（不投影），
+    /// 而剩下的部分精度保得住。
+    #[test]
+    fn shadow_fit_bounds_the_frustum_for_runaway_scenes() {
+        // 一个"点了火"的场景：物体飞到了 x = 10_000。
+        let runaway = Bounds {
+            min: Vec3::new(-1.0, -1.0, -1.0),
+            max: Vec3::new(10_000.0, 1.0, 1.0),
+        };
+        let m = fit_directional_shadow(Vec3::new(0.0, -1.0, 0.0), runaway).unwrap();
+
+        // 视锥被夹到 MAX_SHADOW_RADIUS ⇒ "场景中心 + 3 倍上限"必然落在视锥外。
+        let outside = runaway.center() + Vec3::new(MAX_SHADOW_RADIUS * 3.0, 0.0, 0.0);
+        let ndc = project(&m, outside);
+        assert!(
+            ndc.x.abs() > 1.0 || ndc.y.abs() > 1.0,
+            "视锥没有被夹住（飞出的物体把半径撑大了）：ndc = {ndc:?}"
+        );
     }
 
     // -- 阴影光源挑选 --

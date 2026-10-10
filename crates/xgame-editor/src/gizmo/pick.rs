@@ -10,12 +10,53 @@
 
 use xgame_math::glam::Vec3;
 
+use xgame_render::gltf_loader::Bounds;
+
 use crate::state::GizmoPart;
 use super::{
     GizmoCtx, AXIS_DIRS, CUBE_SIZE,
     PLANE_HANDLE_SIZE, RING_RADIUS, RING_SEGMENTS,
 };
 use super::math::{all_valid_screen, is_valid_screen, project_to_screen, screen_to_ray};
+
+// ---------------------------------------------------------------------------
+// 射线 × 轴对齐包围盒（实体拾取用）
+// ---------------------------------------------------------------------------
+
+/// 单位立方体的本地包围盒。
+///
+/// 内置图元（Cube / Sphere / Plane / Cylinder）都是"单位尺寸、中心在原点"，
+/// 所以拿它当**拿不到网格包围盒时**的兜底是准确的，不是瞎猜。
+pub const UNIT_BOUNDS: Bounds = Bounds {
+    min: Vec3::splat(-0.5),
+    max: Vec3::splat(0.5),
+};
+
+/// 射线与轴对齐包围盒求交（slab 法），返回**进入**盒子的参数 `t`（沿 `dir`）。
+///
+/// `dir` 不必归一化，返回的 `t` 与它同一尺度；调用方只用来比较远近。
+///
+/// 几个刻意的细节：
+/// - 分量除零得到 `±inf` 是**刻意**的（射线平行于某个 slab 时的正确语义），
+///   不预先判断"dir 分量是否为 0"——那种写法在浮点边界上更容易出错。
+/// - 退化盒（某个轴的 min == max，例如内置 Plane 是一片零厚度的面）也能正确处理：
+///   平行且不在面上时 `tmin > tmax` 自然不相交。
+/// - 起点在盒内时返回 0（视为"命中"），负的 `tmax`（盒子整个在射线背后）返回 `None`。
+pub fn ray_aabb(origin: Vec3, dir: Vec3, b: &Bounds) -> Option<f32> {
+    let inv = Vec3::new(1.0 / dir.x, 1.0 / dir.y, 1.0 / dir.z);
+    let t0 = (b.min - origin) * inv;
+    let t1 = (b.max - origin) * inv;
+    // f32::min/max 遇到 NaN 会返回另一个操作数，所以 0 × inf 这种情况不会污染结果。
+    let tmin = t0.min(t1).max_element();
+    let tmax = t0.max(t1).min_element();
+    if !tmin.is_finite() && !tmax.is_finite() {
+        return None;
+    }
+    if tmax < tmin || tmax < 0.0 {
+        return None;
+    }
+    Some(tmin.max(0.0))
+}
 
 // ---------------------------------------------------------------------------
 // 阈值常量
@@ -445,4 +486,58 @@ fn point_in_convex_quad(
     let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0 || d4 > 0.0;
 
     !(has_neg && has_pos)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cube() -> Bounds {
+        Bounds {
+            min: Vec3::splat(-0.5),
+            max: Vec3::splat(0.5),
+        }
+    }
+
+    #[test]
+    fn ray_hits_the_near_face_of_the_box() {
+        let t = ray_aabb(Vec3::new(5.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0), &cube())
+            .expect("应当命中");
+        assert!((t - 4.5).abs() < 1e-5, "近面在 x=0.5，从 x=5 出发应当 t=4.5，实得 {t}");
+    }
+
+    #[test]
+    fn ray_parallel_outside_the_slab_misses() {
+        // 沿 +Y 走，但 x 已经在盒子外面 —— 应当不相交。
+        assert!(ray_aabb(Vec3::new(5.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), &cube()).is_none());
+    }
+
+    #[test]
+    fn ray_pointing_away_from_the_box_misses() {
+        // 盒子整个在射线背后。
+        assert!(ray_aabb(Vec3::new(5.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), &cube()).is_none());
+    }
+
+    #[test]
+    fn ray_starting_inside_hits_at_zero() {
+        assert_eq!(ray_aabb(Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), &cube()), Some(0.0));
+    }
+
+    /// 退化盒（某个轴零厚度，内置 Plane 就是这种）也要能正确求交 ——
+    /// 这是"不预先判断 dir 分量是否为 0"那条注释要保住的性质。
+    #[test]
+    fn ray_hits_a_zero_thickness_box() {
+        let flat = Bounds {
+            min: Vec3::new(-0.5, 0.0, -0.5),
+            max: Vec3::new(0.5, 0.0, 0.5),
+        };
+        let t = ray_aabb(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, -1.0, 0.0), &flat)
+            .expect("应当命中零厚度的面");
+        assert!((t - 5.0).abs() < 1e-5, "实得 {t}");
+
+        // 平行于这个面、且不在面上 → 不相交（tmin > tmax）
+        assert!(
+            ray_aabb(Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), &flat).is_none(),
+            "平行于平面且不在其上时不该命中"
+        );
+    }
 }

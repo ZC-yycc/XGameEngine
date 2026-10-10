@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 
-use xgame_render::gltf_loader::GltfMesh;
+use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
 use xgame_core::{Entity, Scene};
 
@@ -158,6 +158,18 @@ impl SceneRenderer {
 
     pub fn texture_id(&self) -> Option<egui::TextureId> {
         self.texture_id
+    }
+
+    /// 某个模型标识对应的**本地**包围盒（已加载过才有）。
+    ///
+    /// 给视口拾取用：拾取要按实体的真实几何范围判定，而"包围球半径 = |scale|/2"
+    /// 对拉伸过的物体会严重高估 —— 一块 16×0.5×16 的地面半径会是 16，连相机都
+    /// 落在球里，于是点哪儿都先选中它。
+    ///
+    /// 返回 `Option` 而不是兜底：调用方（`pick_entity`）知道"内置图元就是单位盒"
+    /// 这个语义，让它自己决定怎么兜底，比在这里偷偷塞一个默认值清楚。
+    pub fn mesh_bounds(&self, model: &str) -> Option<Bounds> {
+        self.model_cache.get(model).map(|m| m.bounds)
     }
 
     // -- Change detection --

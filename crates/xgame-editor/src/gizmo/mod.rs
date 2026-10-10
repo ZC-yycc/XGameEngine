@@ -31,7 +31,7 @@ mod drag;
 
 pub use math::{gizmo_world_size, project_to_screen, screen_to_ray};
 pub use draw::draw_gizmo;
-pub use pick::{pick_gizmo, axis_param_under_mouse, hit_position_on_axis, hit_position_on_plane};
+pub use pick::{pick_gizmo, axis_param_under_mouse, hit_position_on_axis, hit_position_on_plane, ray_aabb, UNIT_BOUNDS};
 pub use drag::{compute_transform, TransformDelta};
 use xgame_math::glam::Vec3;
 use crate::state::{GizmoDrag, GizmoPart};

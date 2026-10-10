@@ -33,29 +33,6 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, screen_size: egui::Vec2, scr
     gizmo::project_to_screen(point, view_proj, screen_size, screen_offset)
 }
 
-/// 检测 3D 射线与包围球是否相交。
-/// 返回沿射线的参数 t（最近交点）。
-fn ray_intersect_sphere(
-    ray_origin: Vec3,
-    ray_dir: Vec3,
-    center: Vec3,
-    radius: f32,
-) -> Option<f32> {
-    let oc = ray_origin - center;
-    let a = ray_dir.dot(ray_dir);
-    let b = 2.0 * oc.dot(ray_dir);
-    let c = oc.dot(oc) - radius * radius;
-    let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
-        return None;
-    }
-    let sqrt_disc = disc.sqrt();
-    let t1 = (-b - sqrt_disc) / (2.0 * a);
-    let t2 = (-b + sqrt_disc) / (2.0 * a);
-    let t = if t1 > 0.0 { t1 } else if t2 > 0.0 { t2 } else { return None };
-    Some(t)
-}
-
 // ============================================================================
 // 顶部栏相关
 // ============================================================================
@@ -236,7 +213,19 @@ fn draw_physics_debug_lines(
 // 实体拾取相关
 // ============================================================================
 
-/// 通过射线检测拾取实体
+/// 通过射线检测拾取实体。
+///
+/// # 为什么用「射线 × 世界 AABB」而不是「射线 × 包围球」
+///
+/// 旧实现给每个实体造一个包围球，半径取 `scale.length() * 0.5`。对**被拉伸过**
+/// 的物体这是灾难性的高估：一块 `16 × 0.5 × 16` 的地面半径会算成 16，而相机
+/// 离场景中心只有约 8.7 —— 相机直接落在球**内部**，射线永远与它相交，于是
+/// 无论点哪儿都先选中那块地面（真机表现：**想选的物体怎么点都选不中**）。
+///
+/// 现在改成逐实体拿**网格的本地包围盒**（`GltfMesh::bounds`）经世界矩阵变换成
+/// AABB 再做 slab 求交，取最近的交点。范围是"真实几何包住的那一块"，不是球。
+/// 拿不到网格数据（没加载过 / 无渲染器）时退回单位立方体 —— 内置图元本来就是
+/// 单位尺寸，这个兜底是准确的。
 fn pick_entity(
     state: &EditorState,
     mouse_pos: egui::Pos2,
@@ -244,7 +233,7 @@ fn pick_entity(
     screen_offset: egui::Vec2,
 ) -> Option<usize> {
     let (origin, dir) = gizmo::screen_to_ray(mouse_pos, view_proj, state.viewport_logical_size, screen_offset);
-    
+
     let mut closest_dist = f32::MAX;
     let mut closest_idx = None;
 
@@ -255,17 +244,23 @@ fn pick_entity(
             continue;
         }
         let Some(world) = world_matrices.get(idx) else { continue };
-        let (scale, _, translation) = world.to_scale_rotation_translation();
-        // 使用 scale 长度的一半作为包围球半径
-        let radius = scale.length().max(0.1) * 0.5;
-        if let Some(t) = ray_intersect_sphere(origin, dir, translation, radius) {
+
+        // 本地包围盒 → 世界 AABB（变换 8 个角点再求盒，旋转也能正确处理）。
+        let local = state
+            .scene_renderer
+            .as_ref()
+            .and_then(|r| r.mesh_bounds(&entity.model))
+            .unwrap_or(gizmo::UNIT_BOUNDS);
+        let aabb = local.transformed(world);
+
+        if let Some(t) = gizmo::ray_aabb(origin, dir, &aabb) {
             if t < closest_dist {
                 closest_dist = t;
                 closest_idx = Some(idx);
             }
         }
     }
-    
+
     closest_idx
 }
 
@@ -360,7 +355,12 @@ fn handle_gizmo_interaction(
                 // 中途每帧的中间值不占撤销位。
                 state.undo_pending = Some(state.scene.clone());
 
-                let entity = &state.scene.entities[selected_idx];
+                // 用 `get` 而不是裸索引：选中索引理论上由每帧入口的
+                // `clamp_selection` 收敛过，但这里再挡一层，任何漏网都会变成
+                // "这一帧不动"而不是"编辑器 panic 退出"。
+                let Some(entity) = state.scene.entities.get(selected_idx) else {
+                    return;
+                };
                 let start_value = match state.tool_mode {
                     // Translate 在世界空间进行，起始值用世界位置
                     ToolMode::Translate => entity_world.position,
@@ -409,6 +409,10 @@ fn handle_gizmo_interaction(
                     start_value,
                     start_hit,
                     start_axis,
+                    // 轴拖拽的参考线锚点 = 拖拽开始那一瞬实体的世界位置。
+                    // 绝不能让它跟着走 —— `handle_gizmo_interaction` 每帧都会按**当前**
+                    // 位置重建 ctx，锚点若取 ctx.entity_pos 就成了自反馈（拖拽抽搐）。
+                    axis_anchor: entity_pos,
                     start_screen_pos: mp,
                     start_rotation: entity_world.rotation,
                 });
@@ -431,18 +435,20 @@ fn handle_gizmo_interaction(
                     .unwrap_or(Mat4::IDENTITY);
                 let (_, parent_rot, _) = parent_world.to_scale_rotation_translation();
 
-                let entity = &mut state.scene.entities[selected_idx];
-                match delta {
-                    gizmo::TransformDelta::Position(new_world_pos) => {
-                        entity.transform.position = world_point_to_local(parent_world, new_world_pos);
+                // 同样用 `get_mut` 兜底（见上面对 `get` 的说明）。
+                if let Some(entity) = state.scene.entities.get_mut(selected_idx) {
+                    match delta {
+                        gizmo::TransformDelta::Position(new_world_pos) => {
+                            entity.transform.position = world_point_to_local(parent_world, new_world_pos);
+                        }
+                        gizmo::TransformDelta::Rotation(world_delta) => {
+                            // 世界旋转 = 增量 × 起始世界旋转；再左乘父旋转的逆得到局部值。
+                            // 按起始值重算（而不是往当前值上乘），一次拖拽才不会累积过头。
+                            let new_world_rot = world_delta * drag.start_rotation;
+                            entity.transform.rotation = parent_rot.inverse() * new_world_rot;
+                        }
+                        gizmo::TransformDelta::Scale(new_scale) => entity.transform.scale = new_scale,
                     }
-                    gizmo::TransformDelta::Rotation(world_delta) => {
-                        // 世界旋转 = 增量 × 起始世界旋转；再左乘父旋转的逆得到局部值。
-                        // 按起始值重算（而不是往当前值上乘），一次拖拽才不会累积过头。
-                        let new_world_rot = world_delta * drag.start_rotation;
-                        entity.transform.rotation = parent_rot.inverse() * new_world_rot;
-                    }
-                    gizmo::TransformDelta::Scale(new_scale) => entity.transform.scale = new_scale,
                 }
             }
         }
@@ -786,6 +792,20 @@ mod tests {
     /// 直接跑 `show_content`，覆盖「纯点击 → 拾取 → `selected_entity`」整条链路。
     /// 这正是「视口里点不中物体」那个 bug 的守卫：只要拾取又改回拿
     /// `drag_started_by` 驱动（而不是 `clicked()`），这条立刻变红。
+    /// 场景里**第一个实体**的世界中心投到屏幕上的位置 —— "点它就能选中它"的那个点。
+    ///
+    /// 别拿"视口正中"当替身：实体不一定正好落在正中，而拾取是按**真实几何范围**
+    /// （世界 AABB）判定的，点偏一点就是真的没打中。老测试用视口正中，是靠旧实现
+    /// 那个半径 0.866 的包围球侥幸蒙过的 —— 球比单位盒大得多，才把它兜住了。
+    fn entity_screen_pos(state: &EditorState, screen: egui::Rect) -> egui::Pos2 {
+        let vp = state.viewport_logical_size;
+        let rect = viewport_rect(screen, vp);
+        let (w, h) = state.viewport_pixel_size;
+        let view_proj = build_view_projection(state, w, h);
+        let center = state.scene.world_transform(0).position;
+        gizmo::project_to_screen(center, &view_proj, vp, rect.min.to_vec2())
+    }
+
     #[test]
     fn clicking_the_viewport_selects_the_entity_under_the_cursor() {
         let (mut state, base) = test_state("click_pick");
@@ -798,9 +818,9 @@ mod tests {
         assert!(vp.y > 0.0, "视口应当有非零尺寸");
         assert_eq!(state.selected_entity, None, "起始不该有选中");
 
-        // 立方体就摆在相机正前方，投影落在视口正中。
-        let top_bar_h = screen.height() - vp.y;
-        let center = egui::pos2(screen.width() * 0.5, top_bar_h + vp.y * 0.5);
+        // 光标要落到**立方体自己的投影位置**上，而不是"视口正中"这个替身。
+        let center = entity_screen_pos(&state, screen);
+        assert!(viewport_rect(screen, vp).contains(center), "立方体应当投影在视口内: {center:?}");
 
         // 第 2~4 帧：移过去 → 按下 → 原地松手（一次纯点击，没有任何拖动）。
         frame(&ctx, &mut state, vec![egui::Event::PointerMoved(center)], screen);
@@ -827,7 +847,7 @@ mod tests {
         frame(&ctx, &mut state, vec![], screen);
         let vp = state.viewport_logical_size;
         let top_bar_h = screen.height() - vp.y;
-        let center = egui::pos2(screen.width() * 0.5, top_bar_h + vp.y * 0.5);
+        let center = entity_screen_pos(&state, screen);
 
         // 先点中立方体
         frame(&ctx, &mut state, vec![egui::Event::PointerMoved(center)], screen);
@@ -878,9 +898,9 @@ mod tests {
         frame(&ctx, &mut state, vec![], screen);
         let vp = state.viewport_logical_size;
         let rect = viewport_rect(screen, vp);
-        let center = rect.center();
 
-        select_first_entity(&ctx, &mut state, screen, center);
+        let at = entity_screen_pos(&state, screen);
+        select_first_entity(&ctx, &mut state, screen, at);
         assert_eq!(state.selected_entity, Some(0), "先得选中才能拖 gizmo");
         assert!(!state.can_undo(), "选本身不该产生撤销点");
 
@@ -950,6 +970,131 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 在 X 轴上拖拽一次，返回物体的 X 位移。    ///
+    /// `step_px` 是鼠标的屏幕 X 增量序列（相对抓取点）。开头会先走一个小位移
+    /// 跨过 egui 的拖拽阈值 —— 那一帧只记录参考点、不产生位移，所以不计入。
+    fn drag_x_by(step_px: &[f32]) -> f32 {
+        let (mut state, base) = test_state("gizmo_fps");
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+
+        frame(&ctx, &mut state, vec![], screen);
+        let vp = state.viewport_logical_size;
+        let rect = viewport_rect(screen, vp);
+        let at = entity_screen_pos(&state, screen);
+        select_first_entity(&ctx, &mut state, screen, at);
+        assert_eq!(state.selected_entity, Some(0));
+
+        let (w, h) = state.viewport_pixel_size;
+        let view_proj = build_view_projection(&state, w, h);
+        let entity_pos = state.scene.world_transform(0).position;
+        let gz = gizmo::gizmo_world_size(state.editor_camera.eye(), entity_pos);
+        let on_axis = gizmo::project_to_screen(
+            entity_pos + Vec3::X * gz * 0.7,
+            &view_proj,
+            vp,
+            rect.min.to_vec2(),
+        );
+
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(on_axis)], screen);
+        frame(&ctx, &mut state, vec![button(on_axis, true)], screen);
+
+        // 跨过拖拽阈值的这一步：只记录参考点。
+        let mut cursor = on_axis + egui::vec2(8.0, 0.0);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(cursor)], screen);
+        assert!(state.gizmo_active.is_some(), "跨过阈值后应当进入拖拽态");
+        let at_drag_start = state.scene.entities[0].transform.position;
+
+        for dx in step_px {
+            cursor += egui::vec2(*dx, 0.0);
+            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(cursor)], screen);
+        }
+        frame(&ctx, &mut state, vec![button(cursor, false)], screen);
+
+        let after = state.scene.entities[0].transform.position;
+        let _ = std::fs::remove_dir_all(&base);
+        after.x - at_drag_start.x
+    }
+
+    /// **端到端回归（帧率无关性）**：同一段鼠标位移，拆成 1 大步和 6 小步必须落到
+    /// **同一个地方**。
+    ///
+    /// 这是"像商业引擎一样"的基本承诺 —— 拖拽结果只由"鼠标现在在哪"决定，不该
+    /// 依赖它被采样成了多少帧。而轴拖拽的正反馈（`Δ_k = A_k − Δ_{k-1}`）恰恰破坏
+    /// 这一点：参考线跟着物体跑，多帧的会少走（稳态只剩一半）且中途来回跳。
+    ///
+    /// 上面那条单测用的是固定 ctx、这条端到端旧版只断言"位置变了" —— 两个盲区
+    /// 合起来正好放过了它。
+    #[test]
+    fn gizmo_drag_is_frame_rate_independent() {
+        let one = drag_x_by(&[120.0]);
+        let six = drag_x_by(&[20.0, 20.0, 20.0, 20.0, 20.0, 20.0]);
+
+        assert!(one > 0.05, "向右拖 X 轴应当把物体挪到 +X，实得 {one}");
+        assert!(
+            (one - six).abs() < one.abs() * 0.05 + 1e-3,
+            "1 大步位移 {one} 与 6 小步 {six} 必须一致；差距大说明结果依赖帧数（正反馈）"
+        );
+    }
+
+    /// **端到端回归（拾取）**：拾取必须按**真实几何范围**判定，不能按包围球。
+    ///
+    /// # 旧实现的病灶
+    ///
+    /// 它给每个实体造一个包围球，半径取 `scale.length() * 0.5`。对**被拉伸过**的
+    /// 物体这是灾难性的高估：一块 `16 × 0.5 × 16` 的地面半径会算成 11.3，而相机
+    /// 离场景中心只有约 8.7 —— **相机直接落在球内部**，于是任何射线都命中它。
+    /// 后果是"点天空也选中地面"，也就是**取消选中根本做不到**；真机表现就是
+    /// "想选的选不中、想取消的取消不掉"。
+    ///
+    /// 现在按网格本地包围盒经世界矩阵变换出的 AABB 求交，空处就是空处。
+    /// 下面两条断言合起来才区分得开新旧实现 —— 只断言"点得中方块"是不够的
+    /// （旧的包围球在那个位置同样命得中，实测过）。
+    #[test]
+    fn picking_respects_real_geometry_not_bounding_spheres() {
+        let (mut state, base) = test_state("pick_ground");
+        // 换成"极扁极宽的地面 + 正上方一根细柱子"，与示例项目同款布局。
+        state.scene = xgame_core::Scene::new("PickGround");
+
+        let mut ground = xgame_core::Entity::new("Ground");
+        ground.model = "builtin://cube".into();
+        ground.transform.scale = Vec3::new(16.0, 0.5, 16.0);
+        ground.transform.position = Vec3::new(0.0, -0.25, 0.0);
+        state.scene.add_entity(ground);
+
+        let mut block = xgame_core::Entity::new("Block");
+        block.model = "builtin://cube".into();
+        block.transform.scale = Vec3::new(1.0, 3.0, 1.0);
+        block.transform.position = Vec3::new(-1.0, 1.5, 0.0);
+        state.scene.add_entity(block);
+
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        frame(&ctx, &mut state, vec![], screen);
+
+        let vp = state.viewport_logical_size;
+        let rect = viewport_rect(screen, vp);
+        let (w, h) = state.viewport_pixel_size;
+        let view_proj = build_view_projection(&state, w, h);
+
+        // ① 点在柱子上 → 必须选到柱子。
+        let block_center = state.scene.world_transform(1).position;
+        let on_block = gizmo::project_to_screen(block_center, &view_proj, vp, rect.min.to_vec2());
+        assert!(rect.contains(on_block), "柱子的屏幕位置应当落在视口里: {on_block:?}");
+        select_first_entity(&ctx, &mut state, screen, on_block);
+        assert_eq!(state.selected_entity, Some(1), "点在柱子上必须选中柱子");
+
+        // ② 点天空（视口左上角，那里只有背景）→ 必须取消选中。
+        let sky = egui::pos2(rect.min.x + 16.0, rect.min.y + 16.0);
+        select_first_entity(&ctx, &mut state, screen, sky);
+        assert_eq!(
+            state.selected_entity, None,
+            "点空处必须取消选中；仍选中地面说明拾取被那块大包围球吞了"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     fn key(k: egui::Key) -> egui::Event {
         egui::Event::Key {
             key: k,
@@ -972,10 +1117,11 @@ mod tests {
 
         frame(&ctx, &mut state, vec![], screen);
         let vp = state.viewport_logical_size;
-        let center = viewport_rect(screen, vp).center();
+        let _ = vp;
 
-        select_first_entity(&ctx, &mut state, screen, center);
-        assert_eq!(state.selected_entity, Some(0));
+        let at = entity_screen_pos(&state, screen);
+        select_first_entity(&ctx, &mut state, screen, at);
+        assert_eq!(state.selected_entity, Some(0), "工具快捷键测试要先选中一个实体");
 
         // 非飞行态：W 切到 Translate。
         state.tool_mode = ToolMode::Rotate;

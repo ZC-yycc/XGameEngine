@@ -188,6 +188,12 @@ impl eframe::App for EditorApp {
 
 /// 绘制编辑器主界面（工具栏 → 物理步进 → 停靠面板 → 状态栏）。
 fn editor_ui(session: &mut EditorSession, ctx: &egui::Context) {
+    // ── 0. 选中索引收敛 ──
+    // `selected_entity` 是按位置记的索引，而改实体数量/顺序的操作有十几处。任何一处
+    // 漏同步，下一帧的 `entities[idx]` 就会 panic 掉整个编辑器。在每帧入口夹一次
+    // 是 O(1) 的，把这类崩溃一次性堵死（详见 `EditorState::clamp_selection`）。
+    session.state.clamp_selection();
+
     // ── 1. 窗口标题带上项目名（仅变化时发，见 EditorSession::window_title）──
     let project_name = session.state.project_name();
     if session.window_title != project_name {

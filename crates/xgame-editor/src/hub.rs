@@ -437,13 +437,20 @@ mod tests {
     /// `wants_repaint() == true` 会让 eframe 改用 `ControlFlow::Poll` 一直出帧：
     /// 静态界面却在空转，CPU 白烧；一旦每帧还有点别的开销，立刻变成肉眼可见的卡顿。
     /// 这条断言专门盯住「项目选择页面极其卡顿」这个症状。
+    /// 项目枢纽在**界面稳定之后**不该再请求重绘 —— 否则编辑器会一直空转出帧。
+    ///
+    /// 这里必须给 egui 一个**显式的时钟**。枢纽里有一个 `ScrollArea`，它的滚动条
+    /// 做淡入淡出动画，动画期间请求重绘是正常的、短暂的。而旧写法用墙钟只跑 4 帧：
+    /// 帧跑得快就"动画还没结束"、跑得慢就"已经结束"，于是这条测试时灵时不灵
+    /// （实测：单独跑必挂，和几十个测试并行跑反而常过）。推进时间到动画结束再断言，
+    /// 测的才是真正想要的性质 —— "稳定之后不空转"。
     #[test]
     fn hub_is_quiet_when_idle() {
         let mut hub = ProjectHub::new();
         let ctx = egui::Context::default();
         crate::panels::theme::install_fonts(&ctx);
 
-        let input = egui::RawInput {
+        let mut input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(1440.0, 900.0),
@@ -451,18 +458,22 @@ mod tests {
             ..Default::default()
         };
 
-        for _ in 0..3 {
+        // 先推进足够长的时间，让滚动条淡入之类的动画彻底结束。
+        for i in 0..20 {
+            input.time = Some(i as f64 * 0.1);
             let _ = ctx.run(input.clone(), |ctx| {
                 let _ = hub.ui(ctx);
             });
         }
+        // 再看"已经稳定"的这一帧有没有请求重绘。
+        input.time = Some(2.0);
         let _ = ctx.run(input.clone(), |ctx| {
             let _ = hub.ui(ctx);
         });
 
         assert!(
             !ctx.has_requested_repaint(),
-            "项目枢纽在无交互时仍请求重绘 —— 编辑器会一直空转出帧"
+            "项目枢纽稳定后仍在请求重绘 —— 编辑器会一直空转出帧"
         );
     }
 

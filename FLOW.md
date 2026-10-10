@@ -341,7 +341,7 @@ scene_view::show_content(state, ui)
   │     ├── drag_stopped  → undo_pending 压进撤销栈（一次拖拽 = 一个撤销点）
   │     └── draw_gizmo(painter, &ctx, tool_mode)
   │
-  ├── 纯点击 → pick_entity(射线 × 包围球，用**世界**位置) → selected_entity
+  ├── 纯点击 → pick_entity(射线 × **世界 AABB**，取最近) → selected_entity
   │     └── 点在 gizmo 上时不拾取（gizmo_active / gizmo_hovered 有值时跳过）
   │
   ├── 工具快捷键 W/E/R —— 仅 Edit 且**非飞行模式**且已选中实体时生效
@@ -379,6 +379,11 @@ _"moving a window doesn't warrant a repaint"_，后来被并进大组里丢了�
 参与光照的光源（含 `casts_shadow` / `shadow_resolution`）、每个实体的模型标识与**世界矩阵**。这些正是着色器会读到的东西；选中态、
 gizmo、网格开关、物理调试线都不在其中（它们画在 egui 叠加层上，与离屏纹理无关）。
 指纹与上一帧逐位相同 → 整段渲染跳过，`painter.image` 照旧贴上一帧那张纹理。
+
+> **实测**（2026-10-10，真机悬停流 + 进程内探针）：连续 666 次鼠标移动里，
+> 离屏 3D **只重画了 1 次**，渲染目标也只重建了 1 次（初始那次）。也就是说
+> "悬停"这条最常见的路径上，3D 视图一分钱都不花；编辑器此时的开销就是 egui 的
+> 排版与镶嵌。
 
 两个容易写错的地方：
 
@@ -458,7 +463,7 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, screen_size: Vec2) -> Pos2 {
 }
 ```
 
-###### Gizmo 的三个坑（都踩过）
+###### Gizmo 的四个坑（都踩过）
 
 **一、点击和拖拽是两条互斥的路，信号不能混用。**
 
@@ -471,6 +476,13 @@ the pointer has moved a bit."*）。所以：
 
 拾取必须看 `clicked()`。早先拿 `drag_started_by(Primary)` 当"点击"用，结果**在视口里
 点一下永远选不中任何物体**，必须按住拖一下才行。
+
+**拾取的范围必须按真实几何算（世界 AABB），不能用"包围球"。** 旧实现给每个实体造一个
+球、半径取 `scale.length() * 0.5`，对**被拉伸过**的物体是灾难性高估：一块
+`16 × 0.5 × 16` 的地面半径算成 11.3，而相机离场景中心只有约 8.7 —— **相机落在球内部**，
+于是任何射线都命中它。后果是「点天空也选中地面」，也就是**取消选中根本做不到**；
+真机表现就是"想选的选不中、想取消的取消不掉"。现在拿 `GltfMesh::bounds`（网格本地
+包围盒）经世界矩阵变换成 AABB 再做 slab 求交，范围就是几何真正包住的那一块。
 
 **二、按住左键期间必须冻结 gizmo 悬停。**
 
@@ -498,6 +510,25 @@ the pointer has moved a bit."*）。所以：
 - `start_axis: f32` —— 轴坐标，供**平移 / 缩放**用；
 - `start_hit: Vec3` —— 平面交点，只供**平面拖拽**（求差得位移）与**旋转环**（求起始角度
   方向）用。
+
+**四、轴拖拽的参考线必须锚死在拖拽起点，不能跟着物体跑。**
+
+`axis_param_under_mouse` 求的是「过某个点、方向为轴」的直线与鼠标射线的最近点参数。
+那个"某个点"如果用**每帧重建**的 `ctx.entity_pos`（= 物体被拖到的当前位置），参考线
+就跟着物体一起走，`s_now` 里混进了"物体自己刚挪的那一段"：
+
+```text
+Δ_k = A_k − Δ_{k-1}        // A_k = 鼠标本帧"想"走的位移
+```
+
+这是增益 −1 的正反馈：极点在 `z = −1`（奈奎斯特）。**物体会在相邻两帧之间来回跳**
+（"拖拽抽搐"），稳态只走鼠标位移的一半，还把鼠标的像素级噪声放大成可见抖动。
+修法是把参考线锚在拖拽起点的世界位置（`GizmoDrag::axis_anchor`），`s_now` 于是只由
+鼠标射线决定，环断开 —— 结果只取决于"鼠标现在在哪"，与它被采样成多少帧无关。
+
+> 这个 bug 之前逃过测试，是因为**所有拖拽测试都用固定的 `ctx`**：它们复刻不了
+> "每帧按新位置重建 ctx"这一步。现在有两条跨帧测试盯它：`gizmo/drag.rs` 里逐帧
+> 重建 ctx 的那条，以及 `scene_view.rs` 里"1 大步与 6 小步必须落到同一位置"的端到端。
 
 ##### 4c. Inspector 面板
 
@@ -876,9 +907,11 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 | `editor/hub.rs` | 352 | `ProjectHub::ui()`、`open_project_at()`、`create_project_at()` |
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
-| `editor/state.rs` | 1226 | `EditorState::new()`、`UndoStack`、`GizmoDrag`（含 `start_axis`）、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作（`create_prefab_from_selection()` / `instantiate_prefab_by_path()` / `apply_prefab()` / `revert_prefab()`）|
-| `editor/scene_renderer.rs` | 563 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（含阴影开关/分辨率）、`render()` |
-| `editor/scene_view.rs` | 997 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()` |
+| `editor/state.rs` | 1329 | `EditorState::new()`、`UndoStack`、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
+| `editor/scene_renderer.rs` | 575 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（含阴影开关/分辨率）、`render()`、`mesh_bounds()` |
+| `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
+| `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
+| `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
 | `editor/game_runtime.rs` | 93 | `start()`、`fixed_update()` |
 | `core/project.rs` | 685 | `ProjectHandle::open()`、`create()`、`path()`、`list_prefabs()`、`load_prefab()`、`write_prefab()` |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
