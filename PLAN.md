@@ -628,3 +628,43 @@ WM_MOUSEMOVE(同一坐标) → PointerMoved → egui 认为"要再画一帧"
   零，需要 `SetWindowLongPtr` 子类化窗口、拦截 `WM_ENTERSIZEMOVE`/`WM_EXITSIZEMOVE`
   主动停帧 —— 平台相关且侵入，收益待量。
 - 游戏侧（`xgame-game`）本来就是连续出帧，未受影响。
+
+## 十四、帧调度器：frame_policy（本轮）
+
+### 一、问题
+
+用户报"鼠标没事件时 FPS 不刷新、编辑器用起来还是发涩"。定位：上一轮修掉空闲空转后，
+编辑器退化成**纯事件驱动**（eframe 默认）—— 全工程只剩 Play 模式与飞行相机两处
+`request_repaint`，Edit 模式下"来一个事件才算一帧"，鼠标一停画面冻住。
+
+### 二、方案
+
+- `crates/xgame-editor/src/frame_policy.rs`：三档策略（Always / Hybrid / Reactive，
+  `XGAME_FRAME_POLICY` 切换）+ `FrameClock`（宽限期 220ms）+ 纯函数 `plan()`。
+  决策输入：`playing` / `interacting`（指针任意键按住）/ `had_input` / 宽限期。
+- `frame_probe.rs`：`XGAME_FRAME_LOG` 每帧一行帧间隔日志（探针**不用 BufWriter**，
+  `taskkill /F` 收尾会丢尾段数据）。
+- `EditorApp::update` 统一决策，**全工程唯一的主动 `request_repaint`**；Play 模式与
+  飞行相机的散装请求全部移除。
+- 顺带修掉：`drop_redundant_pointer_moves` 同时丢弃 `Event::MouseMoved`（原始位移，
+  传感器噪声载体，实测指针静止时以它续命宽限期 ~16fps）。
+
+### 三、实测（同机同脚本三档对比）
+
+- 拖拽：Hybrid 61.2fps / p99 35.6ms ≈ Always（60.0 / 34.7）；Reactive（旧）58.6fps
+  但死时间 30%（发涩的量化）。
+- 空闲：Hybrid 帧数约为 Always 的 1/3；完全无输入时整段归零（实测 6.27s 零帧空档）。
+- 测量注意：这台机器有真实指针活动（漂移 + 偶发按键），idle 平均 fps 会被污染，
+  判"是否真停"要看有没有连续零帧空档。
+
+### 四、验证
+
+- clippy 0 警告；workspace 测试全绿（新增 frame_policy 7 条 + MouseMoved 过滤 1 条，
+  后者做过"禁用过滤即红"的对照）。
+- 真机冒烟：无 panic、无 GPU 校验错误。
+
+### 五、遗留
+
+- p90≈33ms 的双峰（vsync 相位）三档一致，属 eframe/vsync 层，策略管不到。
+- eframe 层"事件到达即请求重绘"无法从应用侧拦截（噪声事件仍会各触发一帧，
+  但不再连锁续命）。

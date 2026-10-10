@@ -519,8 +519,11 @@ fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Re
     if !state.fly_state {
         return;
     }
-    
-    ui.ctx().request_repaint();
+
+    // 这里**不再**手动 `request_repaint()`：飞行时指针是按着的，`frame_policy`
+    // 会因为 `interacting` 持续排帧（见 `frame_policy` 模块头）。把"什么时候出帧"
+    // 集中到一处决策，免得散落各处的 `request_repaint` 互相打架、也免得漏掉某一处
+    // （漏掉的那一处就表现为"这个操作画面不跟手"）。
     let dt = ui.input(|i| i.stable_dt);
     
     // 不再要求悬停：见上面第 1 条。

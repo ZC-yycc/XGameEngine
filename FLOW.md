@@ -313,7 +313,7 @@ scene_view::show_content(state, ui)
   │
   ├── ① handle_fly_camera(response)          ← **先处理输入**
   │     右键按下 → 飞行态；rotate(指针增量) | pan_forward(W/S) | pan_right(A/D)
-  │     move_up(Q/E) | zoom(scroll)；飞行态内 request_repaint() 维持连续帧
+  │     move_up(Q/E) | zoom(scroll)（连续帧由 frame_policy 统一维持，见后文）
   │
   ├── ② 用**本帧最新的相机**算 view_proj
   │     proj = perspective(60°, aspect, 0.1, 100)
@@ -381,13 +381,63 @@ Windows 指针静止时仍会反复投递同一坐标的 WM_MOUSEMOVE
 就停在那儿），是语义上的 no-op；`PointerGone` 时把记录清空，否则"离开再回到同一点"
 会被误判成没动、悬停从此失效。
 
+同一道过滤还丢掉 `Event::MouseMoved`（**相对位移**，来自 winit 的
+`DeviceEvent::MouseMotion` 原始输入，和绝对位置的 `PointerMoved` 是两回事）：
+光电鼠标的传感器噪声以 ±1~2 像素的 `MouseMoved` 持续灌进来，会把帧调度的"刚有输入"
+宽限期无限续命（2026-10-10 用事件日志实测：过滤掉它之前，指针完全静止时仍 ~16fps 出帧）。
+编辑器没有任何代码消费原始 delta（相机旋转用的是 `pointer.delta()`，由 `PointerMoved`
+产生），egui 内部也只把它累计进 `input.raw.motion`，丢弃是安全的。
+
 > 判据只看"有没有真的动"。实测：空闲 0.00% CPU、鼠标移动时 ~8.7%（每帧重绘）。
 > 回归测试 `identical_pointer_moves_are_dropped_but_real_moves_pass` /
-> `pointer_returning_to_the_same_spot_passes_after_leaving`。
+> `pointer_returning_to_the_same_spot_passes_after_leaving` /
+> `raw_mouse_motion_noise_is_dropped`。
 
 **排查这类"谁在请求重绘"问题的正确工具是 `Context::repaint_causes()`**（egui 0.30 起，
 带调用点 `file:line`）。逐段插桩那一步在这里是**无效**的 —— 请求发生在我们 UI 代码之外，
 自己插的桩全都不认账。
+
+### 帧调度：`frame_policy`（Hybrid 为默认）
+
+上面那道过滤只负责"别把噪声当成输入"；**"要不要连续出帧"是另一个问题**，由
+`frame_policy.rs` 集中决策。它存在的原因：eframe/egui 默认是**事件驱动重绘**，这对
+表单界面是对的，但编辑器里嵌着实时 3D 视口 —— 鼠标一停画面就冻住、状态栏 FPS 不再
+刷新、"来一个事件才算一帧"的节奏让操作发涩。反过来"永远满速"又会在真空闲时白烧 CPU
+（还和窗口移动/缩放的模态循环抢消息线程）。
+
+三档策略（环境变量 `XGAME_FRAME_POLICY` 切换，`always` / `hybrid` / `reactive`）：
+
+| 策略 | 行为 | 用途 |
+|---|---|---|
+| `Always` | 只要开着项目就一直满速 | 最跟手，空闲持续吃 CPU |
+| `Hybrid`（默认） | 交互中 / 刚交互过 220ms 内满速，其余停 | 兼顾跟手与空闲开销 |
+| `Reactive` | 纯事件驱动（eframe 默认） | 仅 A/B 对照 |
+
+决策是纯函数 `plan(policy, inputs, since_last_input) -> FramePlan`，四个输入
+`playing`（Play 模式物理必须按帧推进，绝不能停）/ `interacting`（指针任意键按住 ——
+用"按着键"这个单一信号，而不是分别去问 gizmo/相机/面板，漏一处就是"拖着拖着不跟手"）/
+`had_input`（本帧有真实输入事件）/ `since_last_input`（最后一次输入距今，即宽限期）。
+`FrameClock` 只负责维护"最后一次输入"的时间戳 —— 策略不持有时间，才好单测。
+
+`EditorApp::update` 每帧跑完 `drop_redundant_pointer_moves` 后算一次 `live`，为真就
+`ctx.request_repaint()`；`live` 同时传给状态栏（空闲时把 FPS 显示成"已空闲"，不再挂着
+上一帧的读数装死）。**全工程只有这一处主动 `request_repaint`** —— Play 模式与飞行
+相机都不再自己请求（散落多处的请求会互相打架、也难免漏）。
+
+> 实测（同一台机器、同一驱动脚本，三档对比）：拖拽阶段 Hybrid 与 Always 同为
+> ~60fps、p99 ≈ 35ms；Reactive（旧）拖拽中存在 30% 死时间 —— 这就是"操作发涩"的
+> 量化。Hybrid 空闲帧数只有 Always 的 ~1/3，且完全无输入时整段归零
+> （实测有 6.27s 的连续零帧空档）。
+> 回归测试在 `frame_policy.rs`：`reactive_only_fires_on_actual_input` /
+> `hybrid_keeps_running_while_interacting` / `hybrid_never_stops_during_play` /
+> `hybrid_keeps_running_within_the_grace_window` / `hybrid_idles_once_the_grace_window_expires`。
+
+> **量帧间隔用 `frame_probe.rs`**（环境变量 `XGAME_FRAME_LOG=<文件>`，每帧一行
+> `t_us/dt_us/live`）。两个坑都踩过：探针**不能**用 `BufWriter`（驱动脚本用
+> `taskkill /F` 收尾，进程没机会 flush，丢的恰好是被测的尾段）；统计要**只取阶段
+> 窗口**并排除窗口内第一帧的 dt（它是跨窗口边界算来的，会把"死时间"算出 >100%）。
+> 另外注意测量机环境里可能有**真实指针活动**（位置漂移、偶发按键），idle 档的数据
+> 会被它污染 —— 判定"空闲是否真停"以"有无连续零帧空档"为准，别看平均 fps。
 
 ### 视口缩放：节流重建离屏目标
 

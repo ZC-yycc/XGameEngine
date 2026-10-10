@@ -39,6 +39,8 @@
 
 mod builder;
 mod editor_input;
+mod frame_policy;
+mod frame_probe;
 mod game_runtime;
 mod gizmo;
 mod input_bridge;
@@ -50,7 +52,9 @@ mod state;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
+use frame_policy::{FrameClock, FrameInputs, FramePlan, FramePolicy};
 use hub::{HubAction, ProjectHub};
 use panels::dock::PanelTab;
 use state::{EditorState, PlayMode};
@@ -94,6 +98,12 @@ struct EditorApp {
     gpu: Option<GpuHandles>,
     /// 上一次放行过的指针位置，供 [`drop_redundant_pointer_moves`] 去重用。
     last_pointer_pos: Option<egui::Pos2>,
+    /// 帧调度策略（`XGAME_FRAME_POLICY` 可覆盖，缺省 Hybrid）。
+    policy: FramePolicy,
+    /// 帧调度状态：记住"最后一次输入"的时刻，用于连续出帧的宽限期。
+    clock: FrameClock,
+    /// 帧间隔探针（`XGAME_FRAME_LOG` 开关，默认关闭）。
+    probe: frame_probe::FrameProbe,
 }
 
 impl EditorApp {
@@ -111,11 +121,19 @@ impl EditorApp {
             adapter: rs.adapter.clone(),
         });
 
+        let now = Instant::now();
+        let policy = FramePolicy::from_env();
+        let probe = frame_probe::FrameProbe::from_env();
+        log::info!("帧调度策略：{policy:?}（探针{}）", if probe.enabled() { "开" } else { "关" });
+
         let mut app = Self {
             hub: ProjectHub::new(),
             session: None,
             gpu,
             last_pointer_pos: None,
+            policy,
+            clock: FrameClock::new(now),
+            probe,
         };
 
         // 命令行参数：`xgame-editor <项目路径>` 直接进编辑器，跳过枢纽。
@@ -167,18 +185,13 @@ impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── 丢掉「位置没变」的指针移动事件 ──
         //
-        // 这一条是**空闲时不再空转重绘**的关键。egui 在帧末只要看到「本帧有输入事件」
-        // 就会请求**立即**重绘（`InputState::wants_repaint_after` 的 `!events.is_empty()`
-        // 那一支）；而 Windows 在指针**停住**时依然会反复投递同一坐标的 `WM_MOUSEMOVE`，
-        // egui-winit 逐条转成 `PointerMoved`。实测空闲时约 160 条/秒 → 编辑器一直以
-        // 60fps 空转。
+        // egui 在帧末只要看到「本帧有输入事件」就会请求**立即**重绘；而 Windows 在指针
+        // **停住**时依然会反复投递同一坐标的 `WM_MOUSEMOVE`，egui-winit 逐条转成
+        // `PointerMoved`（实测空闲时约 160 条/秒）。位置相同的 `PointerMoved` 不携带任何
+        // 新信息（egui 的指针状态本来就已经停在那儿），丢掉它是语义上的 no-op。
         //
-        // 后果不只是费电：窗口的移动/缩放走的是 Windows 的模态循环，而应用每 16.7ms
-        // 就要 present 一次并等 vsync，模态循环抢不到消息线程 —— 表现就是
-        // **拖窗口卡顿**、拖拽/缩放窗口有延迟。
-        //
-        // 位置相同的 `PointerMoved` 不携带任何新信息（egui 的指针状态本来就已经停在
-        // 那个位置上），丢掉它是语义上的 no-op，却能让 egui 不再无谓地排下一帧。
+        // 这一条**只是**为了别让这些幽灵事件干扰"本帧有没有真实输入"的判断 ——
+        // 「要不要连续出帧」现在由 `frame_policy` 明确决策，不再靠这个副作用。
         drop_redundant_pointer_moves(ctx, &mut self.last_pointer_pos);
 
         // ── 主题：每帧重设，别挪走 ──
@@ -188,10 +201,36 @@ impl eframe::App for EditorApp {
         // 那个在 `EditorApp::new` 里只做一次（重建字形图集很贵）。
         panels::theme::install(ctx);
 
+        // ── 帧调度（这一帧之后还要不要再排一帧）──
+        //
+        // 编辑器里嵌着实时 3D 视口，不能像表单那样"没输入就不画"：那样鼠标一停画面就冻住，
+        // 交互也会因为"每个事件才算一帧"而发涩。但也不能无脑永远满速 —— 那会在真空闲时
+        // 白烧 CPU，还会和窗口移动/缩放的模态循环抢消息线程。
+        // 具体取舍见 `frame_policy` 模块头。
+        let now = Instant::now();
+        let had_input = ctx.input(|i| !i.events.is_empty());
+        if had_input {
+            self.clock.note_input(now);
+        }
+        let inputs = FrameInputs {
+            // 工具栏要等 `editor_ui` 跑完才知道用户点没点 Play，这里读的是本帧开始时的
+            // 状态 —— 差一帧无所谓：点 Play 本身就是输入，那一帧一定已经在连续出帧了。
+            playing: self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.state.play_mode == PlayMode::Playing),
+            interacting: ctx.input(|i| i.pointer.any_down()),
+            had_input,
+        };
+        let live = self.clock.plan(self.policy, inputs, now) == FramePlan::Now;
+        if live {
+            ctx.request_repaint();
+        }
+
         // ── 编辑器界面 ──
         let mut close_requested = false;
         if let Some(session) = self.session.as_mut() {
-            editor_ui(session, ctx);
+            editor_ui(session, ctx, live);
             if session.state.return_to_hub {
                 session.state.return_to_hub = false;
                 close_requested = true;
@@ -210,6 +249,7 @@ impl eframe::App for EditorApp {
             }
         }
 
+        self.probe.tick(now, live);
     }
 }
 
@@ -217,14 +257,22 @@ impl eframe::App for EditorApp {
 // 输入事件过滤
 // ---------------------------------------------------------------------------
 
-/// 丢掉位置与「上一次真正生效的位置」相同的 [`egui::Event::PointerMoved`]。
+/// 丢掉两类"不该算作用户输入"的指针事件。
 ///
-/// 为什么需要它见 [`EditorApp::update`] 顶部的说明：Windows 会在指针静止时反复
-/// 投递同一坐标的 `WM_MOUSEMOVE`，而 egui 把"本帧有事件"当作"需要立刻再画一帧"
-/// 的依据，于是空闲的编辑器也会 60fps 空转。
+/// 1. **位置没变的 [`egui::Event::PointerMoved`]**：Windows 在指针静止时反复投递
+///    同一坐标的 `WM_MOUSEMOVE`，而 egui 把"本帧有事件"当作"需要立刻再画一帧"
+///    的依据，于是空闲的编辑器也会 60fps 空转。
 ///
-/// `PointerGone`（指针离开窗口）时要把记录清空 —— 否则指针离开再回到**同一个**
-/// 位置时，那条事件会被误判成"没动"而被丢掉，egui 就永远不知道指针回来了。
+///    `PointerGone`（指针离开窗口）时要把记录清空 —— 否则指针离开再回到**同一个**
+///    位置时，那条事件会被误判成"没动"而被丢掉，egui 就永远不知道指针回来了。
+///
+/// 2. **[`egui::Event::MouseMoved`]（相对位移）**：来自 winit 的
+///    `DeviceEvent::MouseMotion` 原始输入，和 `PointerMoved`（绝对位置）是两回事。
+///    光电鼠标的传感器噪声会以 ±1~2 像素的 `MouseMoved` 持续灌进来，把帧调度的
+///    "刚有输入"宽限期无限续命 —— 实测指针完全静止时编辑器仍以 ~16fps 出帧，
+///    用事件日志定位源头就是它。编辑器没有任何地方消费原始 delta（相机旋转用的是
+///    `pointer.delta()`，由 `PointerMoved` 产生），egui 内部也只把它累计进
+///    `input.raw.motion`，丢弃是安全的。
 fn drop_redundant_pointer_moves(ctx: &egui::Context, last_pos: &mut Option<egui::Pos2>) {
     ctx.input_mut(|input| {
         input.events.retain(|event| match event {
@@ -236,6 +284,8 @@ fn drop_redundant_pointer_moves(ctx: &egui::Context, last_pos: &mut Option<egui:
                     true
                 }
             }
+            // 原始位移（传感器噪声的主要载体）：丢弃。
+            egui::Event::MouseMoved(_) => false,
             egui::Event::PointerGone => {
                 *last_pos = None;
                 true
@@ -250,7 +300,11 @@ fn drop_redundant_pointer_moves(ctx: &egui::Context, last_pos: &mut Option<egui:
 // ---------------------------------------------------------------------------
 
 /// 绘制编辑器主界面（工具栏 → 物理步进 → 停靠面板 → 状态栏）。
-fn editor_ui(session: &mut EditorSession, ctx: &egui::Context) {
+///
+/// `live` 是**本帧的帧调度决策**（要不要连续出帧）。状态栏用它把 FPS 显示成
+/// 「此刻在出帧」还是「已空闲」—— 免得空闲时把上一帧的最后一次读数一直挂在那儿，
+/// 看起来像卡死了。
+fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     // ── 0. 选中索引收敛 ──
     // `selected_entity` 是按位置记的索引，而改实体数量/顺序的操作有十几处。任何一处
     // 漏同步，下一帧的 `entities[idx]` 就会 panic 掉整个编辑器。在每帧入口夹一次
@@ -316,9 +370,9 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context) {
         // 快慢就跟着偏。
         let dt = ctx.input(|i| i.stable_dt);
         session.state.physics_step(dt);
-        // Force continuous repaint during play — eframe only repaints
-        // on input events by default, which would freeze physics.
-        ctx.request_repaint();
+        // 这里**不再**手动 `request_repaint()`：Play 模式下 `frame_policy` 会持续
+        // 排帧（见 `FrameInputs::playing`）。把"什么时候出帧"集中到一处决策，
+        // 免得散落在各处的 `request_repaint` 互相打架。
     }
 
     // ── 5. Central dock area (tile tree with all panels) ──
@@ -330,11 +384,11 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context) {
     });
 
     // ── 6. Status bar (bottom) ──
-    status_bar(ctx, &session.state);
+    status_bar(ctx, &session.state, live);
 }
 
 /// 底部状态栏。
-fn status_bar(ctx: &egui::Context, state: &EditorState) {
+fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label("Editor Framework v0.1.0");
@@ -369,12 +423,19 @@ fn status_bar(ctx: &egui::Context, state: &EditorState) {
             }
 
             // FPS
-            // FPS 读真实帧间隔（`stable_dt`），别用 `predicted_dt` —— 后者是预测值，
+            // 读真实帧间隔（`stable_dt`），别用 `predicted_dt` —— 后者是预测值，
             // 帧率真的掉下去时它可能仍然报 60，等于把卡顿藏起来。
-            ui.label(format!(
-                "FPS: {:.0}",
-                ctx.input(|i| i.stable_dt).recip().round(),
-            ));
+            //
+            // 空闲（帧调度已停）时不能继续显示上一次的读数 —— 那看起来像界面卡死了。
+            // 显式标成 `idle`，用户一眼就知道"不是卡、是它真的闲下来了"。
+            if live {
+                ui.label(format!(
+                    "FPS: {:.0}",
+                    ctx.input(|i| i.stable_dt).recip().round(),
+                ));
+            } else {
+                ui.label("FPS: idle");
+            }
         });
     });
 }
@@ -511,6 +572,45 @@ mod tests {
             frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(5.0, 5.0))]),
             1,
             "离开再回到同一点必须放行，否则悬停会失效"
+        );
+    }
+
+    /// 原始输入的相对位移（`Event::MouseMoved`，来自 `DeviceEvent::MouseMotion`）
+    /// 必须被丢弃。
+    ///
+    /// 光电鼠标的传感器噪声以 ±1~2 像素的 `MouseMoved` 持续灌进来 ——
+    /// 实测指针完全静止时编辑器仍以 ~16fps 出帧，事件日志定位源头就是它。
+    /// 它会把帧调度的"刚有输入"宽限期无限续命，让 Hybrid 策略永远停在
+    /// "活跃"档。一旦这条过滤失效，空闲出帧就会从"真正归零"退化成
+    /// "跟着传感器噪声走"。
+    #[test]
+    fn raw_mouse_motion_noise_is_dropped() {
+        let ctx = egui::Context::default();
+        let mut last = None;
+
+        // 传感器噪声的典型形状：±1~2 像素的相对位移。
+        assert_eq!(
+            frame(
+                &ctx,
+                &mut last,
+                vec![egui::Event::MouseMoved(egui::vec2(0.0, -1.0))]
+            ),
+            0,
+            "原始相对位移应当被丢弃 —— 没人消费它，留着只会续命宽限期"
+        );
+
+        // 混在真实指针移动里也一样被丢。
+        assert_eq!(
+            frame(
+                &ctx,
+                &mut last,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(100.0, 100.0)),
+                    egui::Event::MouseMoved(egui::vec2(1.0, 0.0)),
+                ]
+            ),
+            1,
+            "只有绝对位置事件该留下"
         );
     }
 }
