@@ -295,72 +295,65 @@ scene_view::show_content(state, ui)
   │
   ├── 顶部栏: 场景名称 + 相机坐标
   │
-  ├── 计算 view_proj 矩阵
+  ├── setup_viewport → 分配响应区，量出视口尺寸
+  │
+  ├── ① handle_fly_camera(response)          ← **先处理输入**
+  │     右键按下 → 飞行态；rotate(指针增量) | pan_forward(W/S) | pan_right(A/D)
+  │     move_up(Q/E) | zoom(scroll)；飞行态内 request_repaint() 维持连续帧
+  │
+  ├── ② 用**本帧最新的相机**算 view_proj
   │     proj = perspective(60°, aspect, 0.1, 100)
   │     view = look_at(eye, eye + forward, Y)
-  │     view_proj = proj * view
   │
-  ├── renderer.render(scene, view_proj, camera_pos) -> bool
+  ├── ③ PointerInput::read + handle_gizmo_interaction  ← 只改状态，**不落笔**
+  │     ├── 非 Edit 态 / 无选中 → 清 gizmo 状态（连同 undo_pending 一起丢）
+  │     ├── 悬停：primary_down 时**冻结**，只在没按住时重新 pick_gizmo
+  │     ├── drag_started → undo_pending = scene.clone()，记 start_value /
+  │     │                  start_hit / start_axis(+ axis_anchor) / start_rotation
+  │     ├── 每帧          → compute_transform() → 世界增量换算回局部变换写回
+  │     └── drag_stopped  → undo_pending 压进撤销栈（一次拖拽 = 一个撤销点）
+  │
+  ├── ④ 纯点击 → pick_entity(射线 × **世界 AABB**，取最近) → selected_entity
+  │     点在 gizmo 上时不拾取（gizmo_active / gizmo_hovered 有值时跳过）
+  │
+  ├── ⑤ 工具快捷键 W/E/R —— 仅 Edit 且**非飞行模式**且已选中实体时生效
+  │
+  ├── ⑥ render_scene(用本帧最新的相机与场景)   ← **现在才重画**
   │   │
-  │   ├── 【输入指纹】相机 / 视口尺寸 / 环境光 + 有效光源 / 每个实体的
-  │   │     model + **世界矩阵**，收成一个 u64（逐位比较，不是浮点比较）
+  │   ├── 【输入指纹】相机 / 视口尺寸 / 环境光 + 有效光源（含阴影开关）+
+  │   │     每个实体的 model + **世界矩阵**，收成一个 u64（逐位比较）
   │   │     └── 与上一帧**完全相同** → 直接 return false，下面全跳过 ★
   │   │
-  │   ├── Phase 1: 模型加载（惰性）
-  │   │     entity.model → GltfMesh::from_file()
-  │   │     解析 glTF → 提取 position/normal/color/texcoord
-  │   │     上传 GPU → 缓存于 model_cache
+  │   ├── Phase 1: 模型加载（惰性，entity.model → GltfMesh::load）
   │   │
   │   ├── Phase 2: wgpu 渲染 (ScenePipeline::render)
   │   │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
   │   │     ├── 遍历实体收集绘制项，写 ModelUniform（世界矩阵，动态偏移）
   │   │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
   │   │     ├── 主 RenderPass (背景 #1E1E24)：
-  │   │     │   ├── 跳过无模型 / 未加载实体
+  │   │     │   ├── 颜色附件 = **多采样**纹理，resolve 到交给 egui 的单采样纹理
   │   │     │   ├── 逐 primitive: set_global_bg / set_material_bg / draw_indexed
   │   │     │   └── 片元按灯叠加，被标记的灯查阴影图（3×3 PCF）
   │   │     └── 提交命令
   │   │
   │   └── 渲染结果 → egui 纹理 (离屏 Texture → TextureId)
   │
-  ├── painter.image(tex_id, rect, uv)  显示 3D 场景
+  ├── ⑦ painter.image(tex_id, rect, uv)      ← 叠加层，画在 3D 之上
   │     └── 纹理不是本帧画的也没关系：上一帧那张还在，内容逐位等价
   │
-  ├── PointerInput::read(response, ui, editing)   ← 把本帧鼠标信号一次读齐
-  │     ├── pos            指针在视口内的位置
-  │     ├── primary_down   左键是否按住（gizmo 悬停据此冻结）
-  │     ├── drag_started / drag_stopped   指针移动过阈值的那对「拖拽」信号
-  │     └── clicked        按下—几乎没移动—松手的「纯点击」信号
+  ├── ⑧ draw_gizmo(painter, &ctx, tool_mode)
   │
-  ├── handle_gizmo_interaction(state, painter, view_proj, viewport, pointer)
-  │     ├── 非 Edit 态 / 无选中 → 清 gizmo 状态（连同 undo_pending 一起丢）
-  │     ├── 悬停：primary_down 时**冻结**，只在没按住时重新 pick_gizmo
-  │     ├── drag_started → undo_pending = scene.clone()，记 start_value /
-  │     │                  start_hit / start_axis / start_rotation，建 GizmoDrag
-  │     ├── 每帧          → compute_transform() → 世界增量换算回局部变换写回
-  │     ├── drag_stopped  → undo_pending 压进撤销栈（一次拖拽 = 一个撤销点）
-  │     └── draw_gizmo(painter, &ctx, tool_mode)
+  ├── ⑨ [可选] Physics Debug 叠加（project_to_screen 把 3D 线投到 2D）
   │
-  ├── 纯点击 → pick_entity(射线 × **世界 AABB**，取最近) → selected_entity
-  │     └── 点在 gizmo 上时不拾取（gizmo_active / gizmo_hovered 有值时跳过）
-  │
-  ├── 工具快捷键 W/E/R —— 仅 Edit 且**非飞行模式**且已选中实体时生效
-  │
-  ├── [可选] Physics Debug 叠加
-  │   if show_physics_debug && game_runtime.is_some():
-  │     state.debug_lines() → Vec<DebugLine>
-  │     project_to_screen(start, view_proj) → egui Pos2
-  │     project_to_screen(end, view_proj)
-  │     painter.add(Shape::line_segment(..., 半透明白/绿/红))
-  │
-  ├── 飞行相机控制 (右键按住)
-  │     rotate(dx, dy)  |  pan_forward(W/S)  |  pan_right(A/D)
-  │     move_up(Q/E)    |  zoom(scroll)
-  │
-  └── 叠加层
-        FPS | Tool: Translate
-        Speed: X.X (滚轮后短暂显示)
+  └── ⑩ 叠加层：FPS | Tool: Translate | Speed: X.X（滚轮后短暂显示）
 ```
+
+> **帧序是视口手感的命门**：必须「先处理本帧输入 → 再按最新状态重画 3D → 最后画叠加层」。
+> 旧的顺序是"先重画、后处理输入"，于是这一帧画的是**上一帧**的相机与场景 —— 拖物体、
+> 转视角都白白慢一帧，手感发"黏"。而叠加层必须画在 3D 之上，只能排在渲染之后，
+> 所以 gizmo 被拆成"更新状态"（③）与"绘制"（⑧）两步。
+> 回归测试：`the_frame_is_rendered_after_this_frames_camera_input`（把渲染那一刻用的
+> `view_proj` 记录下来，断言它等于本帧输入处理完之后的相机矩阵）。
 
 ###### 为什么不是"每帧都重画一遍"
 
@@ -462,6 +455,31 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, screen_size: Vec2) -> Pos2 {
     egui::pos2(x, y)
 }
 ```
+
+**抗锯齿（MSAA）**：
+
+```text
+采样数 = supported_sample_count(adapter, format)   // 支持就 4×，否则退回 1
+  ├── 编辑器：多采样颜色纹理(RENDER_ATTACHMENT) + 多采样深度
+  │        渲染写多采样那张 → resolve_target = 交给 egui 的**单采样**纹理
+  │        （egui 只认单采样纹理，注册的必须是 resolve 之后那张）
+  └── 游戏：多采样颜色纹理 → resolve 到**交换链视图**
+           （交换链的视图本身不能是多采样，所以必须多这一张）
+```
+
+采样数**必须由适配器能力决定**：某些格式/后端不支持 4×，硬开会让管线创建直接失败。
+颜色附件与深度附件的采样数也必须与管线一致，否则渲染通道校验失败。阴影 pass 单独
+一条管线、永远是 1× —— 它只存深度，不需要抗锯齿。
+
+###### 飞行相机的两条手感规则
+
+- **转视角不能每帧都要求"指针压在视口上"。** 飞行态是在"右键按下且指针在视口里"
+  那一刻开启的；开启之后若还逐帧用 `response.hovered()` 当闸门，用户手一抖把光标
+  带出视口，旋转就会**卡住**，移回来又**跳一下** —— 快速转视角时表现就是"抽搐"。
+  飞行态一旦开着就一路转到松手。
+- **位移用 `stable_dt`（平滑过的真实帧间隔），不用 `predicted_dt`。** 后者是"下一帧
+  大概要多久"的预测；预测不准时同一段按键时长会走出不同距离，速度一冲一顿，平移与
+  旋转同时进行时最明显。编辑器的物理步进与 FPS 读数同理（FPS 用预测值会把卡顿藏起来）。
 
 ###### Gizmo 的四个坑（都踩过）
 

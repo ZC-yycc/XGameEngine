@@ -64,6 +64,26 @@ const MAX_RENDER_ENTITIES: usize = 256;
 /// Depth32Float 的 2048² 约 16 MB，单次全场景深度重绘也远轻于主 pass。
 pub const DEFAULT_SHADOW_RESOLUTION: u32 = 2048;
 
+/// 首选的多重采样数（MSAA）。
+///
+/// 没有它，模型与地面的交界全是**硬台阶**（俗称"锯齿"）—— 一个像素要么是物体、
+/// 要么是背景，没有中间值。4× 是画质与开销的常规折中（显存 ×4、光栅化贵一些，
+/// 但 resolve 之后带宽回到 1×）。
+pub const PREFERRED_SAMPLE_COUNT: u32 = 4;
+
+/// 在目标格式上挑一个可用的采样数：优先 [`PREFERRED_SAMPLE_COUNT`]，不支持就退回 1。
+///
+/// 采样数必须**由适配器能力决定**：某些格式/后端不支持 4×，硬开会让管线创建直接
+/// 失败（表现为启动就崩）。所以这里问一次能力，选好之后一路传下去。
+pub fn supported_sample_count(adapter: &wgpu::Adapter, format: wgpu::TextureFormat) -> u32 {
+    let flags = adapter.get_texture_format_features(format).flags;
+    if flags.sample_count_supported(PREFERRED_SAMPLE_COUNT) {
+        PREFERRED_SAMPLE_COUNT
+    } else {
+        1
+    }
+}
+
 /// 阴影深度比较的基础偏置（NDC 深度单位）。
 ///
 /// shadow mapping 的经典自遮挡（acne）来自"同一根光线上的表面深度量化误差"，
@@ -532,6 +552,12 @@ pub struct ScenePipeline {
     /// `material_id` → 材质槽 GPU 资源。
     material_cache: HashMap<u64, MaterialBinding>,
 
+    /// 主 pass 的采样数（1 = 关闭 MSAA）。
+    ///
+    /// 主 pass 与阴影 pass 的采样数**可以不同**：阴影图只存深度、不需要抗锯齿，
+    /// 所以它永远是 1。这个值只作用于两条主管线。
+    sample_count: u32,
+
     uniform_alignment: u64,
 }
 
@@ -539,7 +565,10 @@ impl ScenePipeline {
     /// 创建渲染管线、绑定组和 uniform 缓冲。
     ///
     /// `format` 是颜色附件的纹理格式（编辑器离屏或交换链）。
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    /// `sample_count` 是主 pass 的采样数（见 [`supported_sample_count`]）；
+    /// 传 1 就是关闭 MSAA。**调用方必须按同一个值准备颜色/深度附件**：
+    /// 采样数不匹配的话渲染通道直接校验失败。
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, sample_count: u32) -> Self {
         let global_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene_global_bgl"),
             entries: &[
@@ -740,8 +769,8 @@ impl ScenePipeline {
             &model_buffer,
         );
 
-        let pipeline = Self::build_pipeline(device, &global_bgl, &material_bgl, format, false);
-        let blend_pipeline = Self::build_pipeline(device, &global_bgl, &material_bgl, format, true);
+        let pipeline = Self::build_pipeline(device, &global_bgl, &material_bgl, format, sample_count, false);
+        let blend_pipeline = Self::build_pipeline(device, &global_bgl, &material_bgl, format, sample_count, true);
         let shadow_pipeline = Self::build_shadow_pipeline(device, &shadow_bgl);
 
         Self {
@@ -762,8 +791,14 @@ impl ScenePipeline {
             shadow_view,
             shadow_resolution,
             material_cache: HashMap::new(),
+            sample_count,
             uniform_alignment,
         }
+    }
+
+    /// 主 pass 使用的采样数（1 = 未开 MSAA）。
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
     }
 
     /// 创建一张阴影深度图（深度仅用作渲染目标 + 采样源）。
@@ -873,6 +908,7 @@ impl ScenePipeline {
         global_bgl: &wgpu::BindGroupLayout,
         material_bgl: &wgpu::BindGroupLayout,
         color_format: wgpu::TextureFormat,
+        sample_count: u32,
         blend: bool,
     ) -> wgpu::RenderPipeline {
         let vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -927,7 +963,11 @@ impl ScenePipeline {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count.max(1),
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview: None,
             cache: None,
         })
@@ -1076,6 +1116,15 @@ impl ScenePipeline {
     /// 写入 camera / lights / model uniform，按"先不透明、后半透明（远→近）"
     /// 的顺序发出绘制调用。调用者需提前用 `queue.submit()` 提交 `encoder`。
     ///
+    /// # 关于 `msaa_color_view`
+    ///
+    /// `color_view` 是**最终要被人看的那张**（交换链视图 / 交给 egui 的解析目标），
+    /// 它永远是 1 采样。开了 MSAA 时，渲染实际发生在 `msaa_color_view`（多采样），
+    /// 由 `resolve_target` 解析到 `color_view` —— 这就是 MSAA 的标准接法：
+    /// 光栅化按多采样做覆盖判断，最后一次性降采样，边缘于是有中间色而不是硬台阶。
+    ///
+    /// 采样数必须与管线一致，否则渲染通道直接校验失败。传 `None` 表示未开 MSAA。
+    ///
     /// # 关于 `world_matrices`
     ///
     /// 着色器要的是**世界矩阵**，而实体自己存的是**局部变换**（层级在
@@ -1090,6 +1139,7 @@ impl ScenePipeline {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
+        msaa_color_view: Option<&wgpu::TextureView>,
         depth_view: &wgpu::TextureView,
         entities: &[Entity],
         world_matrices: &[Mat4],
@@ -1237,11 +1287,16 @@ impl ScenePipeline {
         }
 
         // --- 渲染通道 ---
+        // 开了 MSAA 就把渲染目标换成多采样那张，并把最终视图设为 resolve target。
+        let (pass_view, resolve_target) = match msaa_color_view {
+            Some(msaa) => (msaa, Some(color_view)),
+            None => (color_view, None),
+        };
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: color_view,
-                resolve_target: None,
+                view: pass_view,
+                resolve_target,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.12, g: 0.12, b: 0.14, a: 1.0,

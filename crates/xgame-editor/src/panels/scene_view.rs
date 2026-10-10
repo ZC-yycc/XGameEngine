@@ -134,6 +134,12 @@ fn build_view_projection(state: &EditorState, vp_w: u32, vp_h: u32) -> Mat4 {
 
 /// 渲染 3D 场景并返回纹理 ID
 fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4) -> Option<egui::TextureId> {
+    // 记下"这一帧渲染用的是哪个相机"，供帧序回归测试断言（见 `show_content` 的帧序说明）。
+    #[cfg(test)]
+    {
+        state.last_render_view_proj = Some(*view_proj);
+    }
+
     if vp_w == 0 || vp_h == 0 {
         return None;
     }
@@ -292,13 +298,27 @@ fn build_gizmo_ctx(
 /// `drag_started` / `drag_stopped` 是**真正判定成拖拽**的那一对信号，与"点击"无关：
 /// egui 对 `click_and_drag` 的控件要等指针移动过一段距离才认定拖拽开始，所以
 /// "按住不放、原地松手"不会走到这里 —— 那属于拾取（见 `show_content`）。
+/// 处理 Gizmo 交互（悬停、拖拽开始、逐帧更新、释放）—— **只改状态，不落笔**。
+///
+/// # 为什么要和绘制拆开
+///
+/// `show_content` 的帧序是「先处理输入 → 再重画离屏 3D → 最后画叠加层」。
+/// Gizmo 是叠加层，必须画在 3D 之上，所以它得等离屏渲染之后再落笔；而它的
+/// **状态更新**必须发生在那之前（否则这一帧的拖拽要等下一帧才看得见，白白多
+/// 一帧延迟 —— 拖物体、转视角都会"黏手"）。拆成"更新"与"绘制"两步是唯一
+/// 能同时满足这两条的做法。
+///
+/// 返回本帧最终的 [`GizmoCtx`]；`None` 表示当前不该画（非编辑态 / 没选中）。
+///
+/// `drag_started` / `drag_stopped` 是**真正判定成拖拽**的那一对信号，与"点击"无关：
+/// egui 对 `click_and_drag` 的控件要等指针移动过一段距离才认定拖拽开始，所以
+/// "按住不放、原地松手"不会走到这里 —— 那属于拾取（见 `show_content`）。
 fn handle_gizmo_interaction(
     state: &mut EditorState,
-    painter: &egui::Painter,
     view_proj: Mat4,
     viewport: &ViewportInfo,
     pointer: &PointerInput,
-) {
+) -> Option<gizmo::GizmoCtx> {
     let PointerInput {
         pos: mouse_pos,
         primary_down,
@@ -311,16 +331,16 @@ fn handle_gizmo_interaction(
         // 否则它会在下一次任意拖拽松手时被推入撤销栈，撤销就"跳"到别的状态上。
         state.gizmo_active = None;
         state.undo_pending = None;
-        return;
+        return None;
     }
-    
+
     let Some(selected_idx) = state.selected_entity else {
         // 没有选中实体时清除 gizmo 状态
         state.gizmo_hovered = None;
         if state.gizmo_active.take().is_some() {
             state.undo_pending = None;
         }
-        return;
+        return None;
     };
     
     let entity_world = state.scene.world_transform(selected_idx);
@@ -359,7 +379,7 @@ fn handle_gizmo_interaction(
                 // `clamp_selection` 收敛过，但这里再挡一层，任何漏网都会变成
                 // "这一帧不动"而不是"编辑器 panic 退出"。
                 let Some(entity) = state.scene.entities.get(selected_idx) else {
-                    return;
+                    return Some(build_gizmo_ctx(state, view_proj, screen_offset, entity_pos));
                 };
                 let start_value = match state.tool_mode {
                     // Translate 在世界空间进行，起始值用世界位置
@@ -462,12 +482,12 @@ fn handle_gizmo_interaction(
         }
     }
     
-    // ── 绘制 Gizmo ──
+    // ── 返回最终 ctx 供调用方绘制 ──
     // ctx 是函数开头建的快照，本帧里 hovered / active 都被改过（刚悬停、刚开始
-    // 或刚结束拖拽），画之前同步回最新值，避免比实际状态晚一帧。
+    // 或刚结束拖拽），交出去之前同步回最新值，避免比实际状态晚一帧。
     ctx.hovered = state.gizmo_hovered;
     ctx.active = state.gizmo_active.clone();
-    gizmo::draw_gizmo(painter, &ctx, state.tool_mode);
+    Some(ctx)
 }
 
 // ============================================================================
@@ -475,6 +495,17 @@ fn handle_gizmo_interaction(
 // ============================================================================
 
 /// 处理飞行模式相机控制
+///
+/// # 两个手感上的细节（都踩过）
+///
+/// 1. **转视角不能每帧都要求"指针压在视口上"。**
+///    飞行态是在"右键按下且指针在视口里"那一刻开启的；开启之后若还逐帧用
+///    `response.hovered()` 当闸门，用户手一抖把光标带出视口（划过 Hierarchy 或
+///    拖到屏幕边上），旋转就会**卡住**，移回来又**跳一下** —— 连续快速转视角时
+///    表现就是"抽搐"。飞行态一旦开着就一路转到松手，才和商业引擎一致。
+/// 2. **位移用 `stable_dt`（平滑过的真实帧间隔），不用 `predicted_dt`。**
+///    `predicted_dt` 是"下一帧大概要多久"的预测，预测不准时同一段按键时长会走出
+///    不同的距离，速度跟着一冲一顿 —— 平移和旋转同时进行时最容易看出来。
 fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Response) {
     let right_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
     
@@ -490,12 +521,11 @@ fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Re
     }
     
     ui.ctx().request_repaint();
-    let dt = ui.input(|i| i.predicted_dt);
+    let dt = ui.input(|i| i.stable_dt);
     
-    if response.hovered() {
-        let delta = ui.input(|i| i.pointer.delta());
-        state.editor_camera.rotate(delta.x, delta.y);
-    }
+    // 不再要求悬停：见上面第 1 条。
+    let delta = ui.input(|i| i.pointer.delta());
+    state.editor_camera.rotate(delta.x, delta.y);
     
     // 键盘移动
     if ui.input(|i| i.key_down(egui::Key::W)) {
@@ -558,7 +588,7 @@ fn draw_bottom_status_bar(state: &EditorState, painter: &egui::Painter, rect: eg
     };
     
     // 提前计算 FPS，避免在 painter.text 中借用 ui
-    let fps = ui.input(|i| i.predicted_dt).recip().round();
+    let fps = ui.input(|i| i.stable_dt).recip().round();
     
     painter.text(
         egui::pos2(rect.left() + 8.0, rect.bottom() - 8.0),
@@ -577,28 +607,31 @@ fn draw_bottom_status_bar(state: &EditorState, painter: &egui::Painter, rect: eg
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 顶部栏
     draw_top_bar(state, ui);
-    
+
     // 视口区域
     let viewport = setup_viewport(ui, state);
-    let painter = ui.painter();
-    
-    // 构建视图投影矩阵
+    // painter 内部只是一堆 Arc，克隆很便宜；后面要跨越对 `ui` 的多次借用。
+    let painter = ui.painter().clone();
+
+    // ── 帧序：这里是整个视口手感的命门 ──
+    //
+    // 顺序必须是 **先处理本帧输入 → 再按最新状态重画离屏 3D → 最后画叠加层**。
+    //
+    // 旧顺序是"先重画、后处理输入"，代价是相机与拖拽都白白慢一帧 —— 这一帧画出来的
+    // 是上一帧的相机与场景，于是拖物体、转视角时画面永远差一帧，手感就是"黏"。
+    // 而叠加层（gizmo / 调试线 / HUD）必须画在 3D 之上，只能排在离屏渲染之后；
+    // 这也正是 gizmo 的"更新状态"与"绘制"被拆成两步的原因。
+
+    // 1) 飞行相机：先把本帧的旋转 / 平移落到相机上。
+    handle_fly_camera(state, ui, &viewport.response);
+
+    // 2) 用**最新**相机算视图投影矩阵，后面的交互与渲染共用这一份。
     let (vp_w, vp_h) = viewport.pixel_size;
     let view_proj = build_view_projection(state, vp_w, vp_h);
-    
-    // 渲染 3D 场景
-    let tex_id = render_scene(state, vp_w, vp_h, &view_proj);
-    draw_render_texture(painter, viewport.rect, tex_id);
-    
-    // 物理调试线框
-    draw_physics_debug_lines(state, painter, &view_proj, viewport.rect);
-    
-    // ── 鼠标信号 ──
-    // 拖拽（指针移动过一段距离才算）交给 gizmo；纯点击交给拾取。两者互斥，
-    // 别拿 drag_started 当「按下」用。
-    let pointer = PointerInput::read(&viewport.response, ui, state.is_editing());
 
-    handle_gizmo_interaction(state, painter, view_proj, &viewport, &pointer);
+    // 3) 鼠标信号 → gizmo 拖拽 / 拾取 / 工具快捷键（只改状态，不落笔）。
+    let pointer = PointerInput::read(&viewport.response, ui, state.is_editing());
+    let gizmo_ctx = handle_gizmo_interaction(state, view_proj, &viewport, &pointer);
 
     // 实体拾取（左键纯点击，且没点在 gizmo 上）
     if pointer.clicked
@@ -610,9 +643,10 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             state.selected_entity = pick_entity(state, mp, &view_proj, screen_offset);
         }
     }
-    
-    // ── 工具切换快捷键（有选中实体且未进入飞行模式时生效）──
+
+    // 工具切换快捷键（有选中实体且未进入飞行模式时生效）
     // 飞行模式下 W/A/S/D/Q/E 是相机移动键，必须让位，否则按 W 会同时平移相机和切工具。
+    // 注意 `fly_state` 已在本帧第 1 步更新过，这里读到的才是**当前**帧的状态。
     if state.is_editing() && !state.fly_state && state.selected_entity.is_some() {
         if ui.input(|i| i.key_pressed(egui::Key::W)) {
             state.tool_mode = ToolMode::Translate;
@@ -623,12 +657,17 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         }
     }
 
-    // 相机控制
-    handle_fly_camera(state, ui, &viewport.response);
-    
-    // UI 叠加层
-    draw_zoom_indicator(state, painter, viewport.rect);
-    draw_bottom_status_bar(state, painter, viewport.rect, ui);
+    // 4) 现在才重画离屏 3D —— 用的就是本帧最新的相机与场景。
+    let tex_id = render_scene(state, vp_w, vp_h, &view_proj);
+    draw_render_texture(&painter, viewport.rect, tex_id);
+
+    // 5) 叠加层：画在 3D 之上。
+    if let Some(ctx) = gizmo_ctx {
+        gizmo::draw_gizmo(&painter, &ctx, state.tool_mode);
+    }
+    draw_physics_debug_lines(state, &painter, &view_proj, viewport.rect);
+    draw_zoom_indicator(state, &painter, viewport.rect);
+    draw_bottom_status_bar(state, &painter, viewport.rect, ui);
 }
 
 // ============================================================================
@@ -1037,6 +1076,60 @@ mod tests {
         );
     }
 
+    /// **回归（帧序）**：同一帧里，离屏渲染必须发生在输入处理**之后**。
+    ///
+    /// 旧顺序是"先重画、后处理输入" —— 这一帧画出来的是**上一帧**的相机与场景，
+    /// 所以拖物体、转视角都永远差一帧，手感发"黏"。这条不变量在无头环境里从渲染
+    /// 结果上看不出来，于是把"渲染那一刻用的 view_proj"记进
+    /// `EditorState::last_render_view_proj`，断言它等于**本帧输入处理完之后**的相机矩阵。
+    #[test]
+    fn the_frame_is_rendered_after_this_frames_camera_input() {
+        let (mut state, base) = test_state("frame_order");
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+
+        frame(&ctx, &mut state, vec![], screen);
+        let vp = state.viewport_logical_size;
+        let rect = viewport_rect(screen, vp);
+        let p0 = rect.center();
+
+        // 右键在视口里按下 → 开启飞行态。
+        frame(
+            &ctx,
+            &mut state,
+            vec![
+                egui::Event::PointerMoved(p0),
+                egui::Event::PointerButton {
+                    pos: p0,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            screen,
+        );
+        assert!(state.fly_state, "右键在视口里按下应当进入飞行态");
+
+        // 下一帧把指针横着挪一段：这一帧的相机应当**立刻**转起来。
+        let yaw_before = state.editor_camera.yaw;
+        state.last_render_view_proj = None;
+        let p1 = p0 + egui::vec2(60.0, 0.0);
+        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p1)], screen);
+        assert_ne!(state.editor_camera.yaw, yaw_before, "这一帧应当已经转过视角");
+
+        // 关键断言：渲染用的矩阵必须是**转过之后**那台相机算出来的。
+        let (w, h) = state.viewport_pixel_size;
+        let expected = build_view_projection(&state, w, h);
+        let got = state.last_render_view_proj.expect("这一帧应当渲染过离屏场景");
+        let (a, b) = (got.to_cols_array(), expected.to_cols_array());
+        assert!(
+            a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-6),
+            "渲染用的是上一帧的相机 —— 帧序反了（先重画、后处理输入），会白白慢一帧"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// **端到端回归（拾取）**：拾取必须按**真实几何范围**判定，不能按包围球。
     ///
     /// # 旧实现的病灶
@@ -1117,7 +1210,7 @@ mod tests {
 
         frame(&ctx, &mut state, vec![], screen);
         let vp = state.viewport_logical_size;
-        let _ = vp;
+        let rect = viewport_rect(screen, vp);
 
         let at = entity_screen_pos(&state, screen);
         select_first_entity(&ctx, &mut state, screen, at);
@@ -1125,13 +1218,32 @@ mod tests {
 
         // 非飞行态：W 切到 Translate。
         state.tool_mode = ToolMode::Rotate;
-        state.fly_state = false;
         frame(&ctx, &mut state, vec![key(egui::Key::W)], screen);
         assert_eq!(state.tool_mode, ToolMode::Translate, "非飞行态 W 应当切工具");
 
         // 飞行态：W 只用来推相机，不该动工具。
+        //
+        // `fly_state` 是**每帧由"右键是否按住"推导**出来的，不是可以随手写死的外部
+        // 状态（`handle_fly_camera` 会在每帧开头重新判定），所以这里必须真的造出
+        // "右键按住"这件事 —— 否则测的就不是真实路径。
+        let p = rect.center();
+        frame(
+            &ctx,
+            &mut state,
+            vec![
+                egui::Event::PointerMoved(p),
+                egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            screen,
+        );
+        assert!(state.fly_state, "按住右键应当进入飞行态");
+
         state.tool_mode = ToolMode::Rotate;
-        state.fly_state = true;
         frame(&ctx, &mut state, vec![key(egui::Key::W)], screen);
         assert_eq!(
             state.tool_mode,

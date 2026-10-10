@@ -68,6 +68,9 @@ struct GpuHandles {
     queue: Arc<wgpu::Queue>,
     egui_renderer: Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>,
     target_format: wgpu::TextureFormat,
+    /// 适配器。留着是为了查询**目标格式支持哪些采样数** —— MSAA 的采样数必须由
+    /// 设备能力决定，硬开 4× 在不支持的格式上会让管线创建直接失败。
+    adapter: Arc<wgpu::Adapter>,
 }
 
 /// 打开项目之后进入的编辑器会话。
@@ -103,6 +106,7 @@ impl EditorApp {
             queue: rs.queue.clone(),
             egui_renderer: rs.renderer.clone(),
             target_format: rs.target_format,
+            adapter: rs.adapter.clone(),
         });
 
         let mut app = Self {
@@ -131,12 +135,19 @@ impl EditorApp {
 
         if let Some(gpu) = &self.gpu {
             let project_root = state.project.root().to_path_buf();
+            // MSAA 的采样数由设备能力决定：不支持的格式上硬开 4× 会让管线创建失败。
+            let sample_count = xgame_render::scene_pipeline::supported_sample_count(
+                &gpu.adapter,
+                gpu.target_format,
+            );
+            log::info!("视口渲染：MSAA x{sample_count}");
             state.scene_renderer = Some(scene_renderer::SceneRenderer::new(
                 &gpu.device,
                 &gpu.queue,
                 gpu.egui_renderer.clone(),
                 gpu.target_format,
                 project_root,
+                sample_count,
             ));
         }
 
@@ -248,7 +259,10 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context) {
             input_bridge::sync(ctx, runtime.input_mut());
         }
 
-        let dt = ctx.input(|i| i.predicted_dt);
+        // 用**平滑过的真实帧间隔**推进物理，而不是 `predicted_dt`（那是"下一帧
+        // 大概要多久"的预测）：固定步长累加器吃的就是这个 dt，预测偏了模拟的
+        // 快慢就跟着偏。
+        let dt = ctx.input(|i| i.stable_dt);
         session.state.physics_step(dt);
         // Force continuous repaint during play — eframe only repaints
         // on input events by default, which would freeze physics.
@@ -303,9 +317,11 @@ fn status_bar(ctx: &egui::Context, state: &EditorState) {
             }
 
             // FPS
+            // FPS 读真实帧间隔（`stable_dt`），别用 `predicted_dt` —— 后者是预测值，
+            // 帧率真的掉下去时它可能仍然报 60，等于把卡顿藏起来。
             ui.label(format!(
                 "FPS: {:.0}",
-                ctx.input(|i| i.predicted_dt).recip().round(),
+                ctx.input(|i| i.stable_dt).recip().round(),
             ));
         });
     });

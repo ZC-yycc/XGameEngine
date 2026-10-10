@@ -38,8 +38,14 @@ pub struct SceneRenderer {
 
     // Render target (recreated when viewport size changes)
     viewport_size: (u32, u32),
+    /// 最终交给 egui 的**单采样**颜色纹理。
     render_view: Option<wgpu::TextureView>,
+    /// 开了 MSAA 时的多采样颜色目标；渲染写它，再 resolve 到 `render_view`。
+    msaa_color_view: Option<wgpu::TextureView>,
+    /// 深度附件。采样数必须与颜色附件一致（MSAA 时也是多采样）。
     depth_view: Option<wgpu::TextureView>,
+    /// 主 pass 的采样数（1 = 未开 MSAA）。
+    sample_count: u32,
     /// Keep old render-target textures alive so egui doesn't dangle.
     _stale_textures: Vec<wgpu::Texture>,
     texture_id: Option<egui::TextureId>,
@@ -58,11 +64,12 @@ impl SceneRenderer {
         egui_renderer: Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>,
         surface_format: wgpu::TextureFormat,
         project_root: PathBuf,
+        sample_count: u32,
     ) -> Self {
         let device = Arc::clone(device);
         let queue = Arc::clone(queue);
 
-        let pipeline = ScenePipeline::new(&device, surface_format);
+        let pipeline = ScenePipeline::new(&device, surface_format, sample_count);
 
         Self {
             device,
@@ -73,7 +80,9 @@ impl SceneRenderer {
             project_root,
             viewport_size: (0, 0),
             render_view: None,
+            msaa_color_view: None,
             depth_view: None,
+            sample_count: sample_count.max(1),
             _stale_textures: Vec::new(),
             texture_id: None,
             last_signature: None,
@@ -105,6 +114,7 @@ impl SceneRenderer {
             self.egui_renderer.write().free_texture(&old_id);
         }
         self.render_view = None;
+        self.msaa_color_view = None;
         self.depth_view = None;
         // 尺寸变了，之前那张纹理的内容已经作废，下一帧无论如何都要重画。
         self.last_signature = None;
@@ -128,11 +138,29 @@ impl SceneRenderer {
         });
         let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // 开了 MSAA 就再要一张多采样颜色目标：渲染写它、resolve 到上面的单采样图。
+        // 另外把旧纹理塞进 `_stale_textures` 只是为了让它们别在飞行中的提交还没
+        // 完成时就被销毁（egui 那边还引用着上一帧的 texture id）。
+        let msaa_color = (self.sample_count > 1).then(|| {
+            let t = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("editor_scene_color_msaa"),
+                size,
+                mip_level_count: 1,
+                sample_count: self.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            t.create_view(&wgpu::TextureViewDescriptor::default())
+        });
+
+        // 深度附件的采样数**必须**与颜色附件一致，否则渲染通道校验失败。
         let depth = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("editor_scene_depth"),
             size,
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: self.sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -140,13 +168,14 @@ impl SceneRenderer {
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Register with egui-wgpu
+        // Register with egui-wgpu（注册的必须是**单采样**那张 —— egui 只认它）
         let tid = self
             .egui_renderer
             .write()
             .register_native_texture(&self.device, &color_view, wgpu::FilterMode::Linear);
 
         self.render_view = Some(color_view);
+        self.msaa_color_view = msaa_color;
         self.depth_view = Some(depth_view);
         self.texture_id = Some(tid);
         self._stale_textures.push(color);
@@ -335,6 +364,7 @@ impl SceneRenderer {
             &self.queue,
             &mut encoder,
             color_view,
+            self.msaa_color_view.as_ref(),
             depth_view,
             entities,
             &world_matrices,

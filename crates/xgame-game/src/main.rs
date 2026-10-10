@@ -103,6 +103,11 @@ struct GameApp {
     config: wgpu::SurfaceConfiguration,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
+    /// 主 pass 的采样数（1 = 未开 MSAA，见 `supported_sample_count`）。
+    sample_count: u32,
+    /// 开了 MSAA 时的多采样颜色目标：渲染写它，再 resolve 到交换链。
+    /// 交换链的视图本身**不能**是多采样的，所以必须多这一张。
+    msaa_color: Option<(wgpu::Texture, wgpu::TextureView)>,
     model_cache: HashMap<String, GltfMesh>,
 }
 
@@ -161,10 +166,22 @@ impl GameApp {
         };
         surface.configure(&device, &config);
 
-        let (depth_texture, depth_view) =
-            Self::create_depth_texture(&device, size.width.max(1), size.height.max(1));
+        // 采样数由设备能力决定：不支持的格式上硬开 4× 会让管线创建失败。
+        let sample_count =
+            xgame_render::scene_pipeline::supported_sample_count(&adapter, config.format);
+        log::info!("渲染：MSAA x{sample_count}");
 
-        let pipeline = ScenePipeline::new(&device, config.format);
+        let (depth_texture, depth_view) =
+            Self::create_depth_texture(&device, size.width.max(1), size.height.max(1), sample_count);
+        let msaa_color = Self::create_msaa_color(
+            &device,
+            config.format,
+            size.width.max(1),
+            size.height.max(1),
+            sample_count,
+        );
+
+        let pipeline = ScenePipeline::new(&device, config.format, sample_count);
 
         // -- 场景（路径都按项目根解析）--
         let scene = match project.load_entry_scene() {
@@ -203,14 +220,47 @@ impl GameApp {
             config,
             depth_view,
             depth_texture,
+            sample_count,
+            msaa_color,
             model_cache: HashMap::new(),
         }
+    }
+
+    /// 建多采样颜色目标（`sample_count == 1` 时返回 `None`）。
+    fn create_msaa_color(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        sample_count: u32,
+    ) -> Option<(wgpu::Texture, wgpu::TextureView)> {
+        if sample_count <= 1 {
+            return None;
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("game_msaa_color"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            // 只当渲染目标：resolve 之后才是交换链那张，这张不需要被采样。
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Some((texture, view))
     }
 
     fn create_depth_texture(
         device: &wgpu::Device,
         width: u32,
         height: u32,
+        sample_count: u32,
     ) -> (wgpu::Texture, wgpu::TextureView) {
         let size = wgpu::Extent3d {
             width,
@@ -221,7 +271,8 @@ impl GameApp {
             label: Some("game_depth"),
             size,
             mip_level_count: 1,
-            sample_count: 1,
+            // 深度附件的采样数必须与颜色附件一致，否则渲染通道校验失败。
+            sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -239,9 +290,17 @@ impl GameApp {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
 
-        let (tex, view) = Self::create_depth_texture(&self.device, width, height);
+        let (tex, view) = Self::create_depth_texture(&self.device, width, height, self.sample_count);
         self.depth_texture = tex;
         self.depth_view = view;
+        // 多采样颜色目标也得跟着换尺寸（它的尺寸必须与交换链一致）。
+        self.msaa_color = Self::create_msaa_color(
+            &self.device,
+            self.config.format,
+            width,
+            height,
+            self.sample_count,
+        );
     }
 
     /// 把窗口事件翻译成引擎输入。
@@ -364,6 +423,7 @@ impl GameApp {
             &self.queue,
             &mut encoder,
             &frame_view,
+            self.msaa_color.as_ref().map(|(_, v)| v),
             &self.depth_view,
             &scene.entities,
             &world_matrices,

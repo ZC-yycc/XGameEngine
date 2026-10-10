@@ -361,6 +361,15 @@ pub struct EditorState {
     // -- Scene renderer (initialised by main.rs after state creation) --
     /// 可选的 3D 场景渲染器——wgpu 后端不可用时为 `None`。
     pub scene_renderer: Option<crate::scene_renderer::SceneRenderer>,
+    /// 本帧离屏渲染**实际用到**的视图投影矩阵（仅供测试）。
+    ///
+    /// 帧序是这个视口手感的核心不变量：**渲染必须发生在本帧输入之后**。反过来的话
+    /// 画面永远是"上一帧的相机 / 场景"，拖物体、转视角都会白白慢一帧。这条不变量在
+    /// 无头环境里没法从渲染结果上观察，所以把渲染那一刻的矩阵记下来，让测试能断言
+    /// "渲染看到的就是本帧处理完的相机"。
+    #[cfg(test)]
+    pub(crate) last_render_view_proj: Option<glam::Mat4>,
+
 
     // -- Game runtime (play mode) --
     /// 游戏运行时——仅在 Play 模式下为 `Some`。
@@ -476,6 +485,8 @@ impl EditorState {
             zoom_indicator: 0.0,
 
             scene_renderer: None,
+            #[cfg(test)]
+            last_render_view_proj: None,
             game_runtime: None,
             play_snapshot: None,
 

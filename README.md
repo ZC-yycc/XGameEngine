@@ -92,6 +92,8 @@ core ← math ← {render, physics} ← editor / game
 - 光照是**场景级数据**（`Scene::lights` / `Scene::ambient`），随场景一起存盘
 - **方向光阴影贴图**：`Light::casts_shadow` 打开后，那盏方向光会先渲染一遍场景深度，
   主 pass 再用 3×3 PCF 比较出阴影；`shadow_resolution` 可调贴图分辨率（0 = 2048）
+- **MSAA 4×**：颜色附件走多采样、resolve 回单采样纹理，物体轮廓不再是硬台阶。
+  采样数由适配器能力决定（不支持的格式自动退回 1×）
 - 半透明（glTF `alphaMode`）与不透明分两条管线，半透明按到相机距离远 → 近排序
 - 内置基础图元（Cube / Sphere / Plane / Cylinder）不依赖外部资产文件
 
@@ -108,6 +110,8 @@ core ← math ← {render, physics} ← editor / game
 - 撤销 / 重做：`Ctrl+Z` · `Ctrl+Shift+Z` · `Ctrl+Y`
 - 复制 / 粘贴：`Ctrl+C` · `Ctrl+V`；复制实体 / 删除：`Ctrl+D` · `Delete`
 - `Ctrl+S` 保存场景；🔨 Build 把项目打包成独立游戏
+- **帧序**：每帧"先处理输入（飞行相机 / 拖拽 / 拾取）→ 再按最新状态重画 3D → 最后画叠加层"，
+  拖物体与转视角都不会多慢一帧
 
 ## 阴影（方向光）
 
