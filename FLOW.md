@@ -25,7 +25,7 @@ main()                           crates/xgame-editor/src/main.rs
 
 ```
 GpuHandles::from(cc.wgpu_render_state)
-  └── 保留 device / queue / egui 渲染器    （打开项目后才用来启动渲染线程）
+  └── 保留 device / queue / egui 渲染器    （打开项目后才用来构造视口渲染器）
 ProjectHub::new()
   ├── RecentProjects::load()              %APPDATA%\XGameEngine\recent_projects.ron
   └── 默认新建位置 = <cwd>/projects（cwd 不像引擎根目录时退回用户文档目录）
@@ -52,17 +52,18 @@ project.load_entry_scene()        路径 = 项目根 / project.entry_scene
   └── 失败 → xgame_core::project::default_scene()  (Main Camera + Directional Light)
 ```
 
-`EditorApp::open_project` 接着启动**渲染线程**，并把**项目根目录**交给它：
+`EditorApp::open_project` 接着构造**视口渲染器**，并把**项目根目录**交给它：
 
 ```
-render_thread::RenderHandle::spawn(device, queue, egui_renderer, format, project_root)
-  └── 线程内构造 scene_renderer::SceneRenderer
-        └── ScenePipeline::new()        共享渲染管线（位于 xgame-render）
+scene_renderer::SceneRenderer::new(device, queue, egui_renderer, format, project_root)
+  └── ScenePipeline::new()        共享渲染管线（位于 xgame-render）
 ```
 
-> 3D 视口渲染在**独立线程**上进行（2026-10-10 重构）：UI 线程只按输入指纹
-> 组装 `RenderJob` 发过去、再把渲染线程最近一次交卷的纹理贴到视口上。
-> 渲染慢不再阻塞输入响应 —— 这是视口手感对齐商业引擎的关键结构。
+> 3D 视口渲染在 **UI 线程上同步进行**：本帧输入处理完 → 重画离屏 3D → 同帧上屏。
+> 编辑器视口必须让"输入到像素"零管线延迟（拖 gizmo、转视角时物体要钉在光标下），
+> 而输入指纹门控让静态帧整帧跳过、稳态渲染实测单帧 CPU 仅 ~0.4ms —— 同步渲染
+> 又快又没有第二个线程与窗口的模态移动循环抢资源。
+> （2026-10-12 曾短暂改为独立渲染线程 + 有界等待，实测引入一帧滞后与 UI 阻塞，已回退。）
 
 > 项目枢纽的「新建项目」走 `ProjectHandle::create`：建 `Scenes/`、`Resources/`，
 > 写 `project.ron` 与默认场景「打开」走 `ProjectHandle::open`（读 `project.ron`）。
@@ -118,7 +119,7 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
 > | `theme::install_fonts(ctx)` | **只启动时一次** | `set_fonts` 会重建整张字形图集，很贵 |
 > | `ViewportCommand::Title` | **仅项目名变化时** | 一路走到 winit 的 `SetWindowText`，是真实的系统调用 |
 > | 「最近项目」磁盘校验 | **仅列表变化时** | `is_file()` 是磁盘 IO，遇到失效的网络路径会阻塞 UI 线程 |
-> | 离屏 3D 渲染 | **仅输入指纹变化时** | 指纹没变就不发任务，渲染线程完全睡眠，见「阶段 4b」 |
+> | 离屏 3D 渲染 | **仅输入指纹变化时** | 指纹没变整段渲染跳过，连世界矩阵都不解算，见「阶段 4b」 |
 > | Hierarchy 行模型 | **仅结构指纹变化时** | 行缓存按 (指纹, 折叠版本, 过滤器) 复用，不变零 String 分配 |
 >
 > 最后一行是最容易踩的：**"这一帧要走一遍界面"不等于"这一帧要重画 3D"**。
@@ -335,19 +336,16 @@ scene_view::show_content(state, ui)
   │
   ├── ⑤ 工具快捷键 W/E/R —— 仅 Edit 且**非飞行模式**且已选中实体时生效
   │
-  ├── ⑥ render_scene(用本帧最新的相机与场景)   ← **现在才发渲染任务**
+  ├── ⑥ render_scene(用本帧最新的相机与场景)   ← **现在才画 3D（UI 线程同步）**
   │   │
   │   ├── 【输入指纹】相机 / 视口尺寸 / 环境光 + 有效光源（含阴影开关）+
   │   │     每个实体的 model + **局部变换** + **父引用**，收成一个 u64（逐位比较）
-  │   │     └── 与上次发出的**完全相同** → 什么都不发，渲染线程继续睡 ★
+  │   │     └── 与上次**完全相同** → 整段跳过 ★
   │   │         ★ 指纹**排在解算世界矩阵之前**：静态帧连 `world_matrices()` 都省掉
   │   │
-  │   ├── 指纹变了 → 组装 RenderJob（实体快照 Arc + 世界矩阵 + 相机 + 光源）
-  │   │     try_send 给渲染线程；线程忙就丢帧（latest-wins，绝不排队）
-  │   │
-  │   ├── 【渲染线程内】SceneRenderer::render
-  │   │     ├── Phase 1: 模型加载（惰性，entity.model → GltfMesh::load）
-  │   │     │   └── 新模型的包围盒随结果回传（UI 侧拾取用）
+  │   ├── 指纹变了 → SceneRenderer::render（本帧输入之后、同一帧内完成）
+  │   │     ├── 解算世界矩阵 + Phase 1: 模型加载（惰性，entity.model → GltfMesh::load）
+  │   │     │   └── 新模型的包围盒记入 model_cache（拾取 mesh_bounds 读这里）
   │   │     ├── Phase 2: wgpu 渲染 (ScenePipeline::render)
   │   │     │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
   │   │     │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
@@ -357,14 +355,16 @@ scene_view::show_content(state, ui)
   │   │     │     │   ├── 颜色附件 = **多采样**纹理，resolve 到交给 egui 的单采样纹理
   │   │     │     │   ├── 逐 primitive: set_global_bg / set_material_bg / draw_indexed
   │   │     │     │   └── 片元按灯叠加，被标记的灯查阴影图（3×3 PCF）
-  │   │     │     └── 提交命令
-  │   │     └── 交卷 FrameResult(TextureId + 新包围盒) → UI 的 poll() 收下
+  │   │     │     └── 提交命令（queue.submit）
+  │   │     │
+  │   │     └── eframe 上屏与离屏 pass 同在一条队列、按入队顺序执行 →
+  │   │           **贴出来的必是本帧纹理**（输入→像素零管线延迟；
+  │   │           稳态单帧 CPU 实测 ~0.4ms，无渲染线程、无在飞任务）
   │   │
-  │   └── 有任务在飞 → request_repaint_after(8ms) 保持轮询，
-  │         否则 Hybrid 停帧时新纹理到了也没人贴出来
+  │   └── 没有跨帧状态：不存在贴旧图、轮询交卷或等待预算
   │
   ├── ⑦ painter.image(tex_id, rect, uv)      ← 叠加层，画在 3D 之上
-  │     └── 贴的是渲染线程**最近一次交卷**的纹理：UI 线程永远不被 GPU 阻塞
+  │     └── 贴的就是本帧 render 的纹理：输入到像素在同一线程同一帧内闭环
   │
   ├── ⑧ draw_gizmo(painter, &ctx, tool_mode)
   │
@@ -921,10 +921,10 @@ EditorState（中央状态，所有面板共享可变引用）
   ├── show_physics_debug: bool
   ├── return_to_hub: bool                请求关闭项目回到枢纽
   │
-  ├── render_thread: Option<RenderHandle>    渲染线程句柄（线程持有 SceneRenderer）
-  │     ├── latest_texture                   最近交卷的 egui 纹理（UI 贴它）
-  │     ├── bounds                           模型包围盒表（拾取用，线程回传累积）
-  │     └── in_flight                        在飞任务数（>0 时 UI 保持轮询）
+  ├── scene_renderer: Option<SceneRenderer>   视口渲染器（UI 线程同步渲染，主循环内构造）
+  │     ├── model_cache                      模型网格 + 包围盒（拾取 mesh_bounds 读这里）
+  │     ├── last_signature                   上一帧输入指纹（静态帧整段跳过的依据）
+  │     └── texture_id                       离屏纹理（本帧 render 后即为本帧画面）
   │
   └── game_runtime: Option<GameRuntime>      物理运行时 (仅 Playing)
         ├── physics: PhysicsWorld             rapier3d 世界
@@ -1052,8 +1052,7 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
 | `editor/state.rs` | 1438 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
-| `editor/scene_renderer.rs` | 804 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（收实体+世界矩阵切片，返回新加载模型的包围盒） |
-| `editor/render_thread.rs` | 280 | `RenderHandle::spawn()`、`poll()`、`should_send()` / `submit()`（latest-wins）、`is_awaiting_frame()`；渲染线程主循环只画最新任务 |
+| `editor/scene_renderer.rs` | 804 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（收 `&Scene`，指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`mesh_bounds()`（拾取用） |
 | `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |

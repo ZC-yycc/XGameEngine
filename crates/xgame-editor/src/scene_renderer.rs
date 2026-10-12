@@ -17,7 +17,7 @@ use glam::{Mat4, Vec3};
 
 use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
-use xgame_core::{Entity, EntityId};
+use xgame_core::{Entity, EntityId, Scene};
 
 /// 连续缩放窗口时，重建离屏渲染目标的最小间隔。
 ///
@@ -276,6 +276,13 @@ impl SceneRenderer {
         self.texture_id
     }
 
+    /// 某个模型标识的本地包围盒（渲染加载过才有），给 UI 侧拾取用。
+    ///
+    /// 拿不到网格数据时调用方退回单位立方体 —— 内置图元本来就是单位尺寸。
+    pub fn mesh_bounds(&self, model: &str) -> Option<Bounds> {
+        self.model_cache.get(model).map(|m| m.bounds)
+    }
+
     // -- Change detection --
 
     /// 算一帧离屏渲染的**输入指纹**。
@@ -380,12 +387,11 @@ impl SceneRenderer {
     /// 输入指纹与上一帧逐位相同时整段渲染被跳过，返回空 Vec —— 上一帧的纹理
     /// 仍然有效，调用方照常拿 [`texture_id`](Self::texture_id) 用就行。
     ///
-    /// 世界矩阵由调用方（UI 线程组装 `RenderJob` 时）算好传入：渲染线程不接触
-    /// `Scene`，指纹里已含的「局部变换 + 父引用」与这份矩阵天然一致。
+    /// 世界矩阵在指纹比对**之后**才算：静态帧连 `world_matrices()` 这次 O(n) 解算
+    /// 都省掉，真正"什么都不做"。指纹里已含的「局部变换 + 父引用」与这份矩阵天然一致。
     pub fn render(
         &mut self,
-        entities: &[Entity],
-        world_matrices: &[Mat4],
+        scene: &Scene,
         view_proj: &Mat4,
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
@@ -401,18 +407,21 @@ impl SceneRenderer {
             return Vec::new();
         }
 
-        // 双保险：调用方（RenderHandle）已经按指纹拦过一次，这里再拦一层 ——
-        // 指纹比对是零分配线性扫描，而漏拦一次就是一整帧 GPU 白画。
+        // 指纹门控的兜底：调用方（`render_scene`）本帧输入处理完才调到这里，指纹
+        // 由这里自己算并比对。指纹比对是零分配线性扫描，漏拦一次就是一整帧 GPU 白画。
         let signature = Self::scene_signature(
             self.viewport_size,
             view_proj,
             camera_pos,
             &lighting,
-            entities,
+            &scene.entities,
         );
         if self.last_signature == Some(signature) {
             return Vec::new();
         }
+
+        // 真的要画这一帧了，才解算世界矩阵（O(n) 矩阵乘，静态帧到不了这里）。
+        let world_matrices = scene.world_matrices();
 
         // Phase 1: ensure all models are loaded (mutable borrow on model_cache)
         //
@@ -420,7 +429,7 @@ impl SceneRenderer {
         // 改过路径的实体一定会走到这里，不会漏加载；而指纹没变的帧连一次表查找都
         // 不做，更不会去反复读一个坏路径的磁盘文件 —— 那正是"静态界面也卡"的经典成因。
         let mut loaded = Vec::new();
-        for entity in entities {
+        for entity in &scene.entities {
             if !entity.model.is_empty() && !self.model_cache.contains_key(&entity.model) {
                 // entity.model 是项目相对路径（或内置图元标识）；缓存键保持原样不变，
                 // 解析与分派都交给 GltfMesh::load。
@@ -460,8 +469,8 @@ impl SceneRenderer {
             color_view,
             self.msaa_color_view.as_ref(),
             depth_view,
-            entities,
-            world_matrices,
+            &scene.entities,
+            &world_matrices,
             &self.model_cache,
             view_proj,
             camera_pos,

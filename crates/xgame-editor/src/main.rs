@@ -46,7 +46,6 @@ mod input_bridge;
 mod hub;
 mod panels;
 mod recents;
-mod render_thread;
 mod scene_renderer;
 mod state;
 
@@ -169,8 +168,8 @@ impl EditorApp {
                 &gpu.adapter,
                 gpu.target_format,
             );
-            log::info!("视口渲染：MSAA x{sample_count}（独立渲染线程）");
-            state.render_thread = Some(render_thread::RenderHandle::spawn(
+            log::info!("视口渲染：MSAA x{sample_count}");
+            state.scene_renderer = Some(scene_renderer::SceneRenderer::new(
                 &gpu.device,
                 &gpu.queue,
                 gpu.egui_renderer.clone(),

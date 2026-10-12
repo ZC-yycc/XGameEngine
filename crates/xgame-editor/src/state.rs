@@ -369,12 +369,14 @@ pub struct EditorState {
     /// 大于 0 时，scene_view 在视口上显示 "Speed: X.X"。
     pub zoom_indicator: f32,
 
-    // -- Render thread (initialised by main.rs after state creation) --
-    /// 3D 视口的渲染线程句柄——wgpu 后端不可用时为 `None`。
+    // -- Scene renderer (initialised by main.rs after state creation) --
+    /// 可选的 3D 场景渲染器——wgpu 后端不可用时为 `None`。
     ///
-    /// 渲染在独立线程上进行（见 `render_thread` 模块）：UI 线程只发任务、
-    /// 收最新纹理，永远不被 GPU 阻塞。
-    pub render_thread: Option<crate::render_thread::RenderHandle>,
+    /// 渲染在 **UI 线程上同步进行**（见 `scene_renderer` 模块与 `scene_view::render_scene`）：
+    /// 输入处理完 → 重画离屏 3D → 同帧上屏。编辑器视口必须让"输入到像素"零管线延迟
+    /// （拖 gizmo / 转视角要钉在光标下），而指纹门控让静态帧整帧跳过、稳态渲染实测
+    /// 单帧 CPU 仅 ~0.4ms —— 同步渲染又快又没有异步线程与窗口模态循环抢资源。
+    pub scene_renderer: Option<crate::scene_renderer::SceneRenderer>,
     /// 本帧离屏渲染**实际用到**的视图投影矩阵（仅供测试）。
     ///
     /// 帧序是这个视口手感的核心不变量：**渲染必须发生在本帧输入之后**。反过来的话
@@ -501,7 +503,7 @@ impl EditorState {
             fly_state: false,
             zoom_indicator: 0.0,
 
-            render_thread: None,
+            scene_renderer: None,
             #[cfg(test)]
             last_render_view_proj: None,
             game_runtime: None,
