@@ -12,6 +12,7 @@
 //! | `scene` | 场景图：`Scene`, `Entity` |
 //! | `prefab` | 预制体：`Prefab`, `PrefabInstanceRef`（可复用的实体子树模板）|
 //! | `id` | 稳定实体标识符 `EntityId` |
+//! | `animation` | 动画播放配置 `Animator`（声明式，落盘进场景文件） |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
 //! | `asset` | `AssetId` 轻量资产句柄 |
@@ -37,6 +38,7 @@ pub mod prefab;
 pub mod project;
 
 // 新增模块
+mod animation;
 mod asset;
 mod check;
 mod component;
@@ -59,6 +61,7 @@ pub use project::{
 };
 
 // -- 导出：新增基础设施
+pub use animation::Animator;
 pub use asset::AssetId;
 pub use component::{Component, ComponentMap, ModelPath, Name};
 pub use id::{EntityId, EntityMap, EntitySet};

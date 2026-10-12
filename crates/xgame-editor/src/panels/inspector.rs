@@ -184,6 +184,120 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             });
         });
 
+        // ── 动画 ──
+        //
+        // 没有模型就没东西可播；但**已经有**动画组件时即使模型被清空也要显示，
+        // 否则组件会被藏到永远摘不掉。剪辑列表来自渲染器的资产缓存 —— 模型还没
+        // 加载时是空的，弱提示占位，下一帧预加载完成后自然有选项。
+        if !entity.model.is_empty() || entity.animator.is_some() {
+            ui.separator();
+            ui.heading("Animation");
+            ui.indent("animation", |ui| {
+                let clips = state
+                    .scene_renderer
+                    .as_ref()
+                    .map(|r| r.animation_clip_names(&entity.model))
+                    .unwrap_or_default();
+                let model_empty = entity.model.is_empty();
+
+                if entity.animator.is_none() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("+ Add Animator")
+                            .on_hover_text(
+                                "挂一个动画播放器：默认自动播放、原速、循环，\n剪辑默认取该模型的第一段。",
+                            )
+                            .clicked()
+                        {
+                            let animator = xgame_core::Animator {
+                                clip: clips.first().cloned().unwrap_or_default(),
+                                ..xgame_core::Animator::default()
+                            };
+                            entity.animator = Some(animator);
+                            touched = true;
+                        }
+                        if clips.is_empty() {
+                            ui.weak(if model_empty {
+                                "没有模型"
+                            } else {
+                                "模型未加载或没有动画剪辑"
+                            });
+                        }
+                    });
+                } else {
+                    let mut remove = false;
+                    if let Some(animator) = entity.animator.as_mut() {
+                        // 剪辑下拉：菜单一打开就把当前项勾出来，选中新项才算改动。
+                        ui.horizontal(|ui| {
+                            ui.label("Clip:");
+                            let current = animator.clip.clone();
+                            let label = if current.is_empty() {
+                                egui::RichText::new("（未选剪辑）").weak()
+                            } else {
+                                egui::RichText::new(current.clone()).monospace()
+                            };
+                            ui.menu_button(label, |ui| {
+                                if clips.is_empty() {
+                                    ui.weak(if model_empty {
+                                        "没有模型"
+                                    } else {
+                                        "模型未加载或没有动画剪辑"
+                                    });
+                                }
+                                for clip in clips.iter() {
+                                    if ui
+                                        .selectable_label(clip == &current, clip.as_str())
+                                        .clicked()
+                                    {
+                                        animator.clip = clip.clone();
+                                        touched = true;
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                            if ui
+                                .small_button("✕")
+                                .on_hover_text("摘掉动画组件（模型与剪辑都不动）")
+                                .clicked()
+                            {
+                                remove = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Speed:")
+                                .on_hover_text("播放速度倍率；0 = 冻结在当前帧");
+                            let mut speed = animator.speed;
+                            let resp = ui.add(
+                                egui::DragValue::new(&mut speed).speed(0.05).suffix("x"),
+                            );
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                            if resp.changed() {
+                                animator.speed = speed.clamp(0.0, 10.0);
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut animator.looping, "Loop").changed() {
+                                touched = true;
+                            }
+                            if ui
+                                .checkbox(&mut animator.autoplay, "Autoplay")
+                                .on_hover_text("关掉后停在剪辑第 0 帧（摆好第一帧再播）")
+                                .changed()
+                            {
+                                touched = true;
+                            }
+                        });
+                    }
+                    if remove {
+                        entity.animator = None;
+                        touched = true;
+                    }
+                }
+            });
+        }
+
         ui.separator();
 
         // ── 脚本 ──

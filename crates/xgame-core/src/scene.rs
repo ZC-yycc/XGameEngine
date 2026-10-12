@@ -61,6 +61,13 @@ pub struct Entity {
     /// "老场景里的物体都是静态装饰"，与当时的行为一致，不会突然被重力拽走。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physics: Option<crate::physics::PhysicsBody>,
+    /// 动画播放器。`None` = 不播动画（绑定姿态 / 静态网格）。
+    ///
+    /// 与 `physics` 同样的兼容策略：旧场景文件没有这个字段 → `None`，
+    /// 老场景照旧渲染；`skip_serializing_if` 让没配动画的实体在场景文件里
+    /// 不出现这一行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animator: Option<crate::animation::Animator>,
     /// 运行时组件集合（反序列化时默认为空）。
     #[serde(skip)]
     pub components: ComponentMap,
@@ -78,6 +85,7 @@ impl Entity {
             prefab: None,
             scripts: Vec::new(),
             physics: None,
+            animator: None,
             components: ComponentMap::new(),
         }
     }
@@ -108,6 +116,12 @@ impl Entity {
     /// 设置物理属性。
     pub fn with_physics(mut self, physics: crate::physics::PhysicsBody) -> Self {
         self.physics = Some(physics);
+        self
+    }
+
+    /// 挂一个动画播放器。
+    pub fn with_animator(mut self, animator: crate::animation::Animator) -> Self {
+        self.animator = Some(animator);
         self
     }
 
@@ -157,6 +171,7 @@ impl PartialEq for Entity {
             && self.prefab == other.prefab
             && self.scripts == other.scripts
             && self.physics == other.physics
+            && self.animator == other.animator
     }
 }
 
@@ -882,6 +897,52 @@ mod tests {
         assert_eq!(scene.entities.len(), 2);
         assert!(scene.entities.iter().all(|e| e.parent.is_none()));
         assert_eq!(scene.roots().len(), 2);
+        // 旧文件没有 animator 字段 → 全部是 None（= 不动画，与当时行为一致）
+        assert!(scene.entities.iter().all(|e| e.animator.is_none()));
+    }
+
+    // -- 动画组件 -----------------------------------------------------------
+
+    /// 动画配置必须能落盘往返——它和 transform 一样是"作品的一部分"。
+    #[test]
+    fn animator_survives_ron_roundtrip() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(
+            Entity::new("Fox")
+                .with_model("Resources/Fox.gltf")
+                .with_animator(crate::animation::Animator::new("Walk")),
+        );
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(text.contains("animator"), "动画组件必须落盘");
+        let restored: Scene = ron::from_str(&text).unwrap();
+        let a = restored.entities[0]
+            .animator
+            .as_ref()
+            .expect("往返后动画组件仍在");
+        assert_eq!(a.clip, "Walk");
+        assert!(a.looping && a.autoplay);
+        assert!((a.speed - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// 没配动画的实体不该写出 `animator: None`——与 `prefab` 同一条理由：
+    /// 场景文件不该被无意义的行灌满。
+    #[test]
+    fn plain_entity_omits_animator_field() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(Entity::new("Plain"));
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("animator"), "普通实体不该写出 animator 字段");
+    }
+
+    /// 脏检查语义 = 落盘内容是否相同：改动画配置必须让实体"不相等"，
+    /// 否则在 Inspector 里换剪辑不会被记成改动（不脏、不提示保存）。
+    #[test]
+    fn animator_participates_in_entity_equality() {
+        let a = Entity::new("Fox").with_animator(crate::animation::Animator::new("Walk"));
+        let mut b = a.clone();
+        assert_eq!(a, b, "同一配置应当相等");
+        b.animator.as_mut().unwrap().clip = "Run".into();
+        assert_ne!(a, b, "换剪辑必须改变相等性（脏检查依赖它）");
     }
 
     #[test]

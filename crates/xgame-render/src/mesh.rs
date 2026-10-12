@@ -143,6 +143,10 @@ fn vertex(position: [f32; 3], normal: [f32; 3], tex_coord: [f32; 2]) -> GltfVert
         normal,
         color: [1.0, 1.0, 1.0],
         tex_coord,
+        // 内置图元永远不蒙皮：关节占位全 0、权重全给 0 号 —— 着色器按
+        // `params.x == 0` 走原始顶点分支，这两个通道根本不会被读。
+        joints: [0.0; 4],
+        weights: [1.0, 0.0, 0.0, 0.0],
     }
 }
 

@@ -9,15 +9,20 @@
 //! 实体的 `model` 字段是**项目相对路径**，加载前会拼上项目根目录
 //! （`project_root`），因此编辑器的工作目录是无关的。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 
+use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
 use xgame_core::{Entity, EntityId, Scene};
+
+/// 视口"还活着"的判定窗口：距上次 `render` 进入本函数超过这个时间就认为
+/// 场景视图已经不出图了（面板被关掉），不再为动画请求帧。
+const VIEWPORT_LIVENESS: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// 连续缩放窗口时，重建离屏渲染目标的最小间隔。
 ///
@@ -108,6 +113,17 @@ pub struct SceneRenderer {
 
     // Model cache (path -> GPU mesh)
     model_cache: HashMap<String, GltfMesh>,
+    /// 模型加载失败记录（路径）。防止坏资产每帧重试读盘，也给
+    /// [`SceneRenderer::viewport_animating`] 一个"这动画永远起不来"的判据。
+    load_failed: HashSet<String>,
+
+    /// 动画播放时钟（每实体一份，见 [`AnimationDriver`]）。
+    /// 编辑器编辑模式没有自己的帧时钟，由 [`SceneRenderer::render`] 用墙钟推进。
+    anim_driver: AnimationDriver,
+    /// 上一次真正进入 [`SceneRenderer::render`] 的时刻。
+    /// 视口面板关掉后这个时间会自然过期 → `viewport_animating` 停止请求帧，
+    /// 免得"视口藏着一只在播动画的狐狸"把编辑器拖成满速空转。
+    viewport_seen: Option<std::time::Instant>,
 }
 
 impl SceneRenderer {
@@ -142,6 +158,9 @@ impl SceneRenderer {
             texture_id: None,
             last_signature: None,
             model_cache: HashMap::new(),
+            load_failed: HashSet::new(),
+            anim_driver: AnimationDriver::new(),
+            viewport_seen: None,
         }
     }
 
@@ -283,6 +302,69 @@ impl SceneRenderer {
         self.model_cache.get(model).map(|m| m.bounds)
     }
 
+    /// 某模型的动画剪辑名列表（Inspector 的剪辑下拉框用）。
+    ///
+    /// 模型还没加载时返回空 —— 面板先显示"未加载"，下一帧 `viewport_animating`
+    /// 的预加载把资产就位后自然出现选项。
+    pub fn animation_clip_names(&self, model: &str) -> Vec<String> {
+        self.model_cache
+            .get(model)
+            .map(|m| m.animations.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// 视口里是否有动画正在**连续播放**（帧策略的输入之一，见 `FrameInputs::animating`）。
+    ///
+    /// 三个条件缺一不可：
+    ///
+    /// 1. 实体配了 `animator` 且 [`is_active`](xgame_core::Animator::is_active)
+    ///    （开自动播放、速度 > 0）；
+    /// 2. 模型能加载、**该剪辑存在** —— 加载失败或剪辑名写错时返回假，
+    ///    否则一个坏资产就能让编辑器永远满速空转（这是本函数存在的首要理由）；
+    /// 3. 视口最近真的在出图（[`Self::render`] 打过卡）—— 面板关着时不请求帧。
+    ///
+    /// 顺带把动画实体的模型**提前加载**：动画请求帧的判定在渲染之前，
+    /// "剪辑存在吗"必须先有资产才能答上来。
+    pub fn viewport_animating(&mut self, scene: &Scene) -> bool {
+        let mut active = false;
+        for entity in &scene.entities {
+            let Some(animator) = &entity.animator else {
+                continue;
+            };
+            if !animator.is_active() || entity.model.is_empty() {
+                continue;
+            }
+            if !self.model_cache.contains_key(&entity.model)
+                && !self.load_failed.contains(&entity.model)
+            {
+                match GltfMesh::load(
+                    &self.device,
+                    &self.queue,
+                    &self.project_root,
+                    &entity.model,
+                ) {
+                    Ok(m) => {
+                        log::info!("Loaded model '{}' for animation", entity.model);
+                        self.model_cache.insert(entity.model.clone(), m);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to load model '{}' for animation: {:#}", entity.model, e);
+                        self.load_failed.insert(entity.model.clone());
+                    }
+                }
+            }
+            if let Some(mesh) = self.model_cache.get(&entity.model) {
+                if mesh.has_animation() && mesh.clip(&animator.clip).is_some() {
+                    active = true;
+                }
+            }
+        }
+        active
+            && self
+                .viewport_seen
+                .is_some_and(|t| t.elapsed() < VIEWPORT_LIVENESS)
+    }
+
     // -- Change detection --
 
     /// 算一帧离屏渲染的**输入指纹**。
@@ -328,11 +410,15 @@ impl SceneRenderer {
         camera_pos: &Vec3,
         lighting: &SceneLighting<'_>,
         entities: &[Entity],
+        anim: u64,
     ) -> u64 {
         let mut hash = 0;
 
         hash = mix_bits(hash, viewport.0 as u64);
         hash = mix_bits(hash, viewport.1 as u64);
+        // 动画时钟指纹：有剪辑在播时它**每帧都变**，于是"时间在走"必然绕过
+        // 指纹门控、逐帧重画；时钟为空/冻结时是稳定值，静态帧照旧整段跳过。
+        hash = mix_bits(hash, anim);
         hash = mix_f32s(hash, &view_proj.to_cols_array());
         hash = mix_f32s(hash, &[camera_pos.x, camera_pos.y, camera_pos.z]);
         hash = mix_f32s(hash, &lighting.ambient);
@@ -374,6 +460,16 @@ impl SceneRenderer {
             hash = mix_f32s(hash, &entity.transform.position.to_array());
             hash = mix_f32s(hash, &entity.transform.rotation.to_array());
             hash = mix_f32s(hash, &entity.transform.scale.to_array());
+            // 动画配置：换剪辑/改速度/开关循环与改变换同权 —— 暂停状态下在
+            // Inspector 里换剪辑也必须触发一次重绘，否则画面停在旧姿势。
+            if let Some(animator) = &entity.animator {
+                for byte in animator.clip.as_bytes() {
+                    hash = mix_bits(hash, *byte as u64);
+                }
+                hash = mix_bits(hash, animator.speed.to_bits() as u64);
+                hash = mix_bits(hash, animator.looping as u64);
+                hash = mix_bits(hash, animator.autoplay as u64);
+            }
         }
 
         hash
@@ -400,12 +496,22 @@ impl SceneRenderer {
         if w == 0 || h == 0 {
             return Vec::new();
         }
+        // 只要带着有效视口进来一次就算"活着"——即使本帧被指纹门控跳过。
+        // `viewport_animating` 靠这个时间戳判断视口面板是否还在出图。
+        self.viewport_seen = Some(std::time::Instant::now());
 
         // 缩放窗口进行中：跳过整段 3D 渲染。调用方会拿上一帧那张纹理拉伸到新矩形 ——
         // 观感与 Unity 一致，代价是这一帧几乎为零（见 `set_viewport_size`）。
         if self.pending_size.is_some() {
             return Vec::new();
         }
+
+        // 动画时钟**先于指纹**推进：有剪辑在播时时间每帧都变，指纹跟着变，
+        // 于是门控放行、下一帧继续来；没动画/已暂停时时间冻结，指纹稳定，
+        // 静态场景照旧"没动就不画"。时钟只在真的走到这一步时才 tick ——
+        // 面板关掉（render 不再被调）时间自然停走，重开接着播。
+        self.anim_driver.tick_wall(&scene.entities);
+        let anim_hash = self.anim_driver.signature();
 
         // 指纹门控的兜底：调用方（`render_scene`）本帧输入处理完才调到这里，指纹
         // 由这里自己算并比对。指纹比对是零分配线性扫描，漏拦一次就是一整帧 GPU 白画。
@@ -415,6 +521,7 @@ impl SceneRenderer {
             camera_pos,
             &lighting,
             &scene.entities,
+            anim_hash,
         );
         if self.last_signature == Some(signature) {
             return Vec::new();
@@ -443,7 +550,10 @@ impl SceneRenderer {
                         loaded.push((entity.model.clone(), m.bounds));
                         self.model_cache.insert(entity.model.clone(), m);
                     }
-                    Err(e) => log::warn!("Failed to load model '{}': {:#}", entity.model, e),
+                    Err(e) => {
+                        log::warn!("Failed to load model '{}': {:#}", entity.model, e);
+                        self.load_failed.insert(entity.model.clone());
+                    }
                 }
             }
         }
@@ -472,6 +582,7 @@ impl SceneRenderer {
             &scene.entities,
             &world_matrices,
             &self.model_cache,
+            &self.anim_driver,
             view_proj,
             camera_pos,
             lighting,
@@ -527,6 +638,7 @@ mod tests {
             &Vec3::new(5.0, 5.0, 5.0),
             &SceneLighting::new(ambient, lights),
             entities,
+            0,
         )
     }
 
@@ -661,6 +773,7 @@ mod tests {
             &Vec3::new(5.0, 5.0, 5.0),
             &SceneLighting::new(ambient, &lights),
             &base,
+            0,
         );
         assert_ne!(reference, moved_camera, "相机矩阵没进指纹");
 
@@ -671,8 +784,40 @@ mod tests {
             &Vec3::new(5.0, 5.0, 5.0),
             &SceneLighting::new(ambient, &lights),
             &base,
+            0,
         );
         assert_ne!(reference, resized, "视口尺寸没进指纹");
+
+        // 8. 动画时钟（有剪辑在播时它每帧都变 → 必须绕过门控逐帧重画）
+        let ticking = SceneRenderer::scene_signature(
+            (800, 600),
+            &Mat4::IDENTITY,
+            &Vec3::new(5.0, 5.0, 5.0),
+            &SceneLighting::new(ambient, &lights),
+            &base,
+            0xDEAD_BEEF,
+        );
+        assert_ne!(reference, ticking, "动画时钟没进指纹");
+    }
+
+    /// 暂停状态下改动画配置（换剪辑）也必须触发重绘 —— 否则 Inspector 里
+    /// 换完剪辑画面纹丝不动，用户只能靠挪相机"刷新"。
+    #[test]
+    fn signature_tracks_animator_config() {
+        let lights = [Light::default()];
+        let ambient = [0.06, 0.06, 0.08];
+
+        let mut fox = entity("Fox", "Resources/Fox.gltf", Vec3::ZERO);
+        fox.animator = Some(xgame_core::Animator::new("Walk"));
+        let walking = signature(std::slice::from_ref(&fox), &lights, ambient);
+
+        fox.animator.as_mut().unwrap().clip = "Run".into();
+        let running = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(walking, running, "换剪辑没进指纹");
+
+        fox.animator.as_mut().unwrap().autoplay = false;
+        let paused = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(running, paused, "开关自动播放没进指纹");
     }
 
     /// 没有模型的实体根本不会被画出来，所以它的变化**不该**让指纹变 ——

@@ -225,6 +225,16 @@ impl eframe::App for EditorApp {
                 .is_some_and(|s| s.state.play_mode == PlayMode::Playing),
             interacting: ctx.input(|i| i.pointer.any_down()),
             had_input,
+            // 视口动画：`viewport_animating` 会顺手把动画实体的模型预加载到位
+            // （"剪辑存在吗"要先有资产才能答），拿不到就是没在播 —— 坏资产
+            // 不会把编辑器拖进满速空转。
+            animating: self.session.as_mut().is_some_and(|s| {
+                let state = &mut s.state;
+                match (&mut state.scene_renderer, &state.scene) {
+                    (Some(renderer), scene) => renderer.viewport_animating(scene),
+                    (None, _) => false,
+                }
+            }),
         };
         let live = self.clock.plan(self.policy, inputs, now) == FramePlan::Now;
         if live {

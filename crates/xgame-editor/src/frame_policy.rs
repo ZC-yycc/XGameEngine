@@ -73,6 +73,13 @@ pub struct FrameInputs {
     pub interacting: bool,
     /// 本帧收到了输入事件。
     pub had_input: bool,
+    /// 3D 视口里有剪辑正在连续播放（`SceneRenderer::viewport_animating`）。
+    ///
+    /// 动画是**时间驱动**的：没输入它也在变。少了这一项，指纹门控 + 事件驱动
+    /// 会联手把动画冻住 —— 时间推进要靠出帧、出帧又在等一个"输入"，死锁。
+    /// 与 `playing` 同权进 `hot`，但它的成立条件更苛刻（剪辑必须真的存在、
+    /// 视口必须真的在出图），见 `viewport_animating` 的三条判据。
+    pub animating: bool,
 }
 
 impl FrameInputs {
@@ -86,6 +93,7 @@ impl FrameInputs {
             playing: false,
             interacting: false,
             had_input: false,
+            animating: false,
         }
     }
 }
@@ -129,6 +137,7 @@ pub fn plan(policy: FramePolicy, inputs: FrameInputs, since_last_input: Duration
     let hot = inputs.playing
         || inputs.interacting
         || inputs.had_input
+        || inputs.animating
         || since_last_input < ACTIVE_GRACE;
 
     match policy {
@@ -195,7 +204,40 @@ mod tests {
             playing,
             interacting,
             had_input,
+            animating: false,
         }
+    }
+
+    /// 动画是时间驱动的：宽限期早已过期、也没有任何输入，只要有剪辑在播，
+    /// Hybrid 就必须继续出帧 —— 否则"没输入"会把动画冻死（时间推进要靠出帧，
+    /// 出帧又在等输入，绕成死锁）。
+    #[test]
+    fn hybrid_keeps_running_while_animating() {
+        let animating = FrameInputs {
+            animating: true,
+            ..inputs(false, false, false)
+        };
+        assert_eq!(
+            plan(FramePolicy::Hybrid, animating, NONE),
+            FramePlan::Now,
+            "动画在播时绝不能停帧"
+        );
+        assert_eq!(
+            plan(FramePolicy::Reactive, animating, NONE),
+            FramePlan::Idle,
+            "Reactive 是纯事件驱动的 A/B 基准，不该被动画改变行为"
+        );
+    }
+
+    /// 动画"停了"（暂停/剪辑不存在/视口关掉）不能赖在满速上 ——
+    /// 判定收在 `viewport_animating`，这里保证 plan 层不放大它。
+    #[test]
+    fn animating_false_does_not_keep_frames_flowing() {
+        assert_eq!(
+            plan(FramePolicy::Hybrid, inputs(false, false, false), NONE),
+            FramePlan::Idle,
+            "没有热输入且过期 → 必须回到空闲"
+        );
     }
 
     // -- Reactive：改动前的行为，作为 A/B 的基准 --

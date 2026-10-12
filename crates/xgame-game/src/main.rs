@@ -35,6 +35,7 @@ use xgame_core::ProjectHandle;
 use xgame_input::{key_from_winit, InputMap, MouseButton};
 use xgame_math::glam::Vec3;
 use xgame_math::projection;
+use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::GltfMesh;
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline};
 use xgame_runtime::{LogLevel, World, WorldConfig};
@@ -109,6 +110,9 @@ struct GameApp {
     /// 交换链的视图本身**不能**是多采样的，所以必须多这一张。
     msaa_color: Option<(wgpu::Texture, wgpu::TextureView)>,
     model_cache: HashMap<String, GltfMesh>,
+    /// 每实体的动画播放时钟。用**帧 dt** 推进（游戏循环本来就有），与编辑器
+    /// 墙钟推进的 `SceneRenderer` 是同一份逻辑的两个宿主。
+    anim_driver: AnimationDriver,
 }
 
 impl GameApp {
@@ -229,6 +233,7 @@ impl GameApp {
             sample_count,
             msaa_color,
             model_cache: HashMap::new(),
+            anim_driver: AnimationDriver::new(),
         }
     }
 
@@ -369,6 +374,10 @@ impl GameApp {
 
     fn update(&mut self, dt: f32) {
         self.world.update(dt);
+        // 动画时钟跟着**帧时间**走：物理/脚本推进的同一拍，保证动画与游戏逻辑
+        // 用的是同一个 dt（掉帧时两边一起慢，不会各走各的）。
+        self.anim_driver
+            .tick(dt, &self.world.scene().entities);
         for log in self.world.take_logs() {
             emit_script_log(&log);
         }
@@ -434,6 +443,7 @@ impl GameApp {
             &scene.entities,
             &world_matrices,
             &self.model_cache,
+            &self.anim_driver,
             &view_proj,
             &eye,
             SceneLighting::new(scene.ambient, &scene.lights),

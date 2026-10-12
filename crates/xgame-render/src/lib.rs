@@ -2,6 +2,7 @@
 //!
 //! 提供窗口创建、交换链管理、相机、网格和最小渲染管线。
 
+pub mod animation;
 pub mod camera;
 pub mod gltf_loader;
 pub mod mesh;

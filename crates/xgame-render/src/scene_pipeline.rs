@@ -53,6 +53,7 @@ use wgpu::util::DeviceExt;
 use xgame_math::glam::{Mat4, Vec3};
 
 use xgame_core::{Entity, Light, LightKind};
+use crate::animation::AnimationDriver;
 use crate::gltf_loader::{Bounds, GltfMesh, GltfPrimitive, GltfVertex, MaterialParams};
 
 /// 每帧最多渲染的实体数量。
@@ -61,6 +62,16 @@ use crate::gltf_loader::{Bounds, GltfMesh, GltfPrimitive, GltfVertex, MaterialPa
 /// 常驻可忽略）。超出部分仍然静默不画 —— 真到这个规模，该上的是实例化/分批，
 /// 而不是继续放大这张表。
 const MAX_RENDER_ENTITIES: usize = 4096;
+
+/// 每个蒙皮槽位预留的骨骼数（矩阵）。**必须与 WGSL 的 `BONES_PER_SLOT` 一致。**
+///
+/// 槽位是定长的：一条存储缓冲里所有动画实体的骨骼首尾相接，着色器靠
+/// `slot * BONES_PER_SLOT + joint` 直接定位，CPU 侧也就不需要为每个实体
+/// 记录偏移表。256 覆盖绝大多数人形/动物骨架；超过的在解析时告警并截断。
+pub const BONES_PER_SLOT: usize = 256;
+
+/// 骨骼缓冲的初始槽位数（约 128 KB）。不够时翻倍重建。
+const MIN_BONE_SLOTS: u32 = 8;
 
 /// 默认阴影贴图分辨率（正方形边长）。
 ///
@@ -176,6 +187,12 @@ struct ShadowUniform {
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct ModelUniform {
     model: [[f32; 4]; 4],
+    /// `.x` = 蒙皮槽位 + 1（0 = 不蒙皮）。其余 3 个分量预留。
+    ///
+    /// 放在 model uniform 里而不是单独绑一个"每实体蒙皮索引"缓冲：这个结构
+    /// 已经按动态偏移按实体排布，多 16 字节不增加任何绑定或命令，画哪个实体
+    /// 用哪根骨头天然跟着同一次 `set_bind_group` 走。
+    params: [u32; 4],
 }
 
 #[repr(C)]
@@ -328,16 +345,24 @@ pub fn fit_directional_shadow(direction: Vec3, scene: Bounds) -> Option<Mat4> {
 
 const SCENE_VERT_SRC: &str = r#"
 struct CameraUniform { view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
-struct ModelUniform  { model: mat4x4<f32> }
+// params.x = 蒙皮槽位 + 1（0 = 不蒙皮，走原始顶点）。
+struct ModelUniform  { model: mat4x4<f32>, params: vec4<u32> }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(2) var<uniform> model: ModelUniform;
+// 所有动画实体的骨骼矩阵排在同一条存储缓冲里，按槽位分段（见 BONES_PER_SLOT）。
+@group(0) @binding(6) var<storage, read> bones: array<mat4x4<f32>>;
+
+// 每个蒙皮槽位预留的骨骼数。必须与 CPU 侧的 `BONES_PER_SLOT` 一致。
+const BONES_PER_SLOT: u32 = 256u;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) tex_coord: vec2<f32>,
+    @location(4) joints: vec4<f32>,
+    @location(5) weights: vec4<f32>,
 }
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
@@ -364,13 +389,35 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
-    let world_pos = model.model * vec4<f32>(input.position, 1.0);
+    var pos = input.position;
+    var nrm = input.normal;
+
+    // 蒙皮：skinned = Σ wₖ · boneₖ · position（权重归一化后）。
+    // 骨骼矩阵是**模型空间**里的变换（关节全局 × 逆绑定矩阵），所以这里不碰
+    // model.model —— 世界变换照旧在下面统一做，与非蒙皮路径完全共用。
+    // params.x == 0 时整段跳过：绑定姿态 = 原始顶点，画面与不开动画逐位一致。
+    let skin_slot = model.params.x;
+    if (skin_slot > 0u) {
+        let wsum = input.weights.x + input.weights.y + input.weights.z + input.weights.w;
+        if (wsum > 0.0) {
+            let base = (skin_slot - 1u) * BONES_PER_SLOT;
+            let inv = 1.0 / wsum;
+            let skin = (input.weights.x * bones[base + u32(input.joints.x)]
+                      + input.weights.y * bones[base + u32(input.joints.y)]
+                      + input.weights.z * bones[base + u32(input.joints.z)]
+                      + input.weights.w * bones[base + u32(input.joints.w)]) * inv;
+            pos = (skin * vec4<f32>(input.position, 1.0)).xyz;
+            nrm = (skin * vec4<f32>(input.normal, 0.0)).xyz;
+        }
+    }
+
+    let world_pos = model.model * vec4<f32>(pos, 1.0);
     let m = model.model;
     let m33 = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
     let normal_mat = transpose(mat3_inverse(m33));
     var out: VertexOutput;
     out.clip_pos = camera.view_proj * world_pos;
-    out.world_normal = normal_mat * input.normal;
+    out.world_normal = normal_mat * nrm;
     out.world_pos = world_pos.xyz;
     out.color = input.color;
     out.tex_coord = input.tex_coord;
@@ -486,14 +533,37 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 /// 深度图只关心深度，管线里 `fragment: None`。
 const SHADOW_VERT_SRC: &str = r#"
 struct ShadowUniform { light_view_proj: mat4x4<f32>, params: vec4<f32> }
-struct ModelUniform  { model: mat4x4<f32> }
+struct ModelUniform  { model: mat4x4<f32>, params: vec4<u32> }
 
 @group(0) @binding(0) var<uniform> shadow: ShadowUniform;
 @group(0) @binding(1) var<uniform> model: ModelUniform;
+@group(0) @binding(2) var<storage, read> bones: array<mat4x4<f32>>;
+
+const BONES_PER_SLOT: u32 = 256u;
 
 @vertex
-fn vs_shadow(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    let world_pos = model.model * vec4<f32>(position, 1.0);
+fn vs_shadow(
+    @location(0) position: vec3<f32>,
+    @location(4) joints: vec4<f32>,
+    @location(5) weights: vec4<f32>,
+) -> @builtin(position) vec4<f32> {
+    // 阴影也走蒙皮：不然跑动的角色会投出一具绑定姿态的静止影子。
+    // 与主 pass 同一套分支（params.x == 0 → 原始顶点），两边永远一致。
+    var pos = position;
+    let skin_slot = model.params.x;
+    if (skin_slot > 0u) {
+        let wsum = weights.x + weights.y + weights.z + weights.w;
+        if (wsum > 0.0) {
+            let base = (skin_slot - 1u) * BONES_PER_SLOT;
+            let inv = 1.0 / wsum;
+            let skin = (weights.x * bones[base + u32(joints.x)]
+                      + weights.y * bones[base + u32(joints.y)]
+                      + weights.z * bones[base + u32(joints.z)]
+                      + weights.w * bones[base + u32(joints.w)]) * inv;
+            pos = (skin * vec4<f32>(position, 1.0)).xyz;
+        }
+    }
+    let world_pos = model.model * vec4<f32>(pos, 1.0);
     return shadow.light_view_proj * world_pos;
 }
 "#;
@@ -521,9 +591,9 @@ pub struct ScenePipeline {
     /// 把它后面的东西提前挡掉）。
     blend_pipeline: wgpu::RenderPipeline,
 
-    /// 全局绑定组布局。构造完 `global_bind_group` 后就不再被直接使用，
-    /// 但显式持有它，免得依赖"wgpu 内部 Arc 一定活着"这种隐含前提。
-    _global_bgl: wgpu::BindGroupLayout,
+    /// 全局绑定组布局。构造完 `global_bind_group` 之外，重建绑定组时也要用
+    /// （阴影分辨率变化、骨骼缓冲扩容），所以去掉下划线成为实打实的字段。
+    global_bgl: wgpu::BindGroupLayout,
     material_bgl: wgpu::BindGroupLayout,
 
     camera_buffer: wgpu::Buffer,
@@ -531,16 +601,23 @@ pub struct ScenePipeline {
     model_buffer: wgpu::Buffer,
     global_bind_group: wgpu::BindGroup,
 
+    // -- 蒙皮 --
+    /// 所有动画实体的骨骼矩阵（存储缓冲，按 [`BONES_PER_SLOT`] 定长分槽）。
+    /// 扩容时重建，两个绑定组跟着换（见 [`ScenePipeline::ensure_bones_capacity`]）。
+    bones_buffer: wgpu::Buffer,
+    /// `bones_buffer` 当前能装下的槽位数。
+    bone_slots: u32,
+    /// 骨骼矩阵复用暂存（与 `model_staging` 同理：一次 write 搞定整段）。
+    bone_staging: Vec<[f32; 16]>,
+
     // -- 阴影 --
-    /// 阴影 pass 的布局：binding 0 = 阴影 uniform，binding 1 = 模型矩阵（动态偏移）。
+    /// 阴影 pass 的布局：binding 0 = 阴影 uniform，binding 1 = 模型矩阵（动态偏移），
+    /// binding 2 = 蒙皮骨骼。
     ///
     /// 刻意与 `global_bgl` **分开**：阴影 pass 一边把深度画进 `shadow_view`、
     /// 一边又要在 group(0) 里绑这张图 —— wgpu 会把"同一资源既当渲染目标又当
     /// 绑定资源"判成冲突。用一个不含深度贴图的小布局绕开它。
-    ///
-    /// 建完管线与绑定组之后就不再被直接使用，冠以 `_` 只是为了表明"留着是为了
-    /// 语义清晰，不是被谁读"（与 `_global_bgl` 同理）。
-    _shadow_bgl: wgpu::BindGroupLayout,
+    shadow_bgl: wgpu::BindGroupLayout,
     shadow_pipeline: wgpu::RenderPipeline,
     /// 阴影 uniform（光源视图投影 + 偏置）。主 pass 与阴影 pass 都读它。
     shadow_buffer: wgpu::Buffer,
@@ -650,6 +727,17 @@ impl ScenePipeline {
                     },
                     count: None,
                 },
+                // 6: 蒙皮骨骼矩阵（顶点阶段只读存储）
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -705,6 +793,17 @@ impl ScenePipeline {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // 2: 蒙皮骨骼矩阵（与主 pass 同一条缓冲，阴影顶点也做蒙皮）
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
                         min_binding_size: None,
                     },
                     count: None,
@@ -766,6 +865,14 @@ impl ScenePipeline {
         let shadow_resolution = DEFAULT_SHADOW_RESOLUTION;
         let (shadow_texture, shadow_view) = Self::create_shadow_target(device, shadow_resolution);
 
+        // 蒙皮骨骼缓冲：先给一小段（8 槽 × 256 骨 ≈ 128 KB），实体多了再翻倍。
+        let bones_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_bones_sb"),
+            size: MIN_BONE_SLOTS as u64 * BONES_PER_SLOT as u64 * 64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let global_bind_group = Self::create_global_bind_group(
             device,
             &global_bgl,
@@ -775,6 +882,7 @@ impl ScenePipeline {
             &shadow_view,
             &shadow_sampler,
             &shadow_buffer,
+            &bones_buffer,
         );
 
         let shadow_pass_bind_group = Self::create_shadow_pass_bind_group(
@@ -782,6 +890,7 @@ impl ScenePipeline {
             &shadow_bgl,
             &shadow_buffer,
             &model_buffer,
+            &bones_buffer,
         );
 
         let pipeline = Self::build_pipeline(device, &global_bgl, &material_bgl, format, sample_count, false);
@@ -791,13 +900,16 @@ impl ScenePipeline {
         Self {
             pipeline,
             blend_pipeline,
-            _global_bgl: global_bgl,
+            global_bgl,
             material_bgl,
             camera_buffer,
             lights_buffer,
             model_buffer,
             global_bind_group,
-            _shadow_bgl: shadow_bgl,
+            bones_buffer,
+            bone_slots: MIN_BONE_SLOTS,
+            bone_staging: Vec::new(),
+            shadow_bgl,
             shadow_pipeline,
             shadow_buffer,
             shadow_pass_bind_group,
@@ -856,6 +968,7 @@ impl ScenePipeline {
         shadow_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
         shadow_buffer: &wgpu::Buffer,
+        bones_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_global_bg"),
@@ -873,6 +986,7 @@ impl ScenePipeline {
                     resource: wgpu::BindingResource::Sampler(shadow_sampler),
                 },
                 wgpu::BindGroupEntry { binding: 5, resource: shadow_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: bones_buffer.as_entire_binding() },
             ],
         })
     }
@@ -882,6 +996,7 @@ impl ScenePipeline {
         layout: &wgpu::BindGroupLayout,
         shadow_buffer: &wgpu::Buffer,
         model_buffer: &wgpu::Buffer,
+        bones_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_shadow_pass_bg"),
@@ -889,6 +1004,7 @@ impl ScenePipeline {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: Self::model_binding(model_buffer) },
+                wgpu::BindGroupEntry { binding: 2, resource: bones_buffer.as_entire_binding() },
             ],
         })
     }
@@ -909,13 +1025,58 @@ impl ScenePipeline {
         self.shadow_resolution = resolution;
         self.global_bind_group = Self::create_global_bind_group(
             device,
-            &self._global_bgl,
+            &self.global_bgl,
             &self.camera_buffer,
             &self.lights_buffer,
             &self.model_buffer,
             &self.shadow_view,
             &self.shadow_sampler,
             &self.shadow_buffer,
+            &self.bones_buffer,
+        );
+    }
+
+    /// 骨骼缓冲至少要装下 `slots` 个槽位；不够就翻倍重建。
+    ///
+    /// 重建必须同时换 `global_bind_group` 和 `shadow_pass_bind_group` ——
+    /// 它们内部持有旧 buffer 的引用。因此只能在**开 pass 之前**调用（本帧
+    /// 就是收集完绘制项之后、`begin_render_pass` 之前），在 pass 中途换绑定
+    /// 会被 wgpu 直接判非法。
+    ///
+    /// 稳态零开销：`slots <= bone_slots` 时就是一次整数比较。
+    fn ensure_bones_capacity(&mut self, device: &wgpu::Device, slots: u32) {
+        if slots <= self.bone_slots {
+            return;
+        }
+        let mut capacity = self.bone_slots.max(MIN_BONE_SLOTS);
+        while capacity < slots {
+            capacity *= 2;
+        }
+        let bytes = capacity as u64 * BONES_PER_SLOT as u64 * 64; // mat4x4 = 64 字节
+        self.bones_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_bones_sb"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.bone_slots = capacity;
+        self.global_bind_group = Self::create_global_bind_group(
+            device,
+            &self.global_bgl,
+            &self.camera_buffer,
+            &self.lights_buffer,
+            &self.model_buffer,
+            &self.shadow_view,
+            &self.shadow_sampler,
+            &self.shadow_buffer,
+            &self.bones_buffer,
+        );
+        self.shadow_pass_bind_group = Self::create_shadow_pass_bind_group(
+            device,
+            &self.shadow_bgl,
+            &self.shadow_buffer,
+            &self.model_buffer,
+            &self.bones_buffer,
         );
     }
 
@@ -1160,6 +1321,7 @@ impl ScenePipeline {
         entities: &[Entity],
         world_matrices: &[Mat4],
         model_cache: &HashMap<String, GltfMesh>,
+        anim: &AnimationDriver,
         view_proj: &Mat4,
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
@@ -1232,6 +1394,9 @@ impl ScenePipeline {
         // 要用的那段显式清零 —— 于是"没被任何实体用到的槽位"也是确定性的 0，
         // 而不是上一帧的旧矩阵（虽然那些槽位不会被绘制，但确定性更好排查问题）。
         self.model_staging.clear();
+        // 骨骼暂存同理：本帧每个动画实体占一个新槽，槽位随实体序单调递增。
+        self.bone_staging.clear();
+        let mut bone_slots_used = 0u32;
 
         for (i, entity) in entities.iter().enumerate() {
             if i >= MAX_RENDER_ENTITIES {
@@ -1251,10 +1416,43 @@ impl ScenePipeline {
                 .copied()
                 .unwrap_or_else(|| entity.transform.local_matrix());
 
+            // -- 蒙皮槽位 --
+            //
+            // 三个条件齐了才算：有时钟（实体带 animator 且被 tick 过）、模型里有
+            // 这个剪辑、模型有蒙皮。任何一条不满足 → params.x = 0，着色器走原始
+            // 顶点，与动画功能上线前逐位一致（绑定姿态）。
+            let mut params = [0u32; 4];
+            if let (Some(time), Some(animator)) =
+                (anim.time(entity.id), entity.animator.as_ref())
+            {
+                let skin_idx = mesh.primitives.iter().find_map(|p| p.skin);
+                if let (Some(clip), Some(skin_idx)) = (mesh.clip(&animator.clip), skin_idx) {
+                    if let Some(skin) = mesh.skins.get(skin_idx) {
+                        let t = crate::animation::clip_time(
+                            time,
+                            clip.duration,
+                            animator.looping,
+                        );
+                        let mut bones =
+                            crate::animation::compute_bones(&mesh.nodes, clip, skin, t);
+                        // 超过槽位容量的骨架（>256 骨）解析时已告警；这里截断
+                        // 保证 staging 的槽距不被撑歪——宁可末梢骨不对，不能整帧错位。
+                        bones.truncate(BONES_PER_SLOT);
+                        let slot = bone_slots_used;
+                        self.bone_staging
+                            .extend(bones.iter().map(|m| m.to_cols_array()));
+                        bone_slots_used += 1;
+                        // 存槽位 + 1：0 是"不蒙皮"的哨兵，着色器里直接 `> 0u` 判分支。
+                        params[0] = slot + 1;
+                    }
+                }
+            }
+
             // 攒进 staging（而不是立刻 write_buffer）：偏移是 `i * alignment`，
             // 实体按 i 递增遍历，所以只需要往后长。最后一次性上传。
             let uniform = ModelUniform {
                 model: world.to_cols_array_2d(),
+                params,
             };
             let bytes = bytemuck::bytes_of(&uniform);
             let offset = i * self.uniform_alignment as usize;
@@ -1280,6 +1478,17 @@ impl ScenePipeline {
         // 空场景（一个可绘制实体都没有）时什么都不用写。
         if !self.model_staging.is_empty() {
             queue.write_buffer(&self.model_buffer, 0, &self.model_staging);
+        }
+
+        // 骨骼：容量不够先翻倍重建（连带换两个绑定组，必须在开 pass 之前），
+        // 再一次性把本帧所有动画实体的骨骼写进去。
+        if bone_slots_used > 0 {
+            self.ensure_bones_capacity(device, bone_slots_used);
+            queue.write_buffer(
+                &self.bones_buffer,
+                0,
+                bytemuck::cast_slice(&self.bone_staging),
+            );
         }
 
         // 远 → 近。`partial_cmp` 对 NaN 返回 None，退化成"保持原序"即可，
