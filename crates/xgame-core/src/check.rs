@@ -1,30 +1,21 @@
-//! 无头项目检查：`xgame-editor --check [项目路径]`。
+//! 无头项目检查（`check_project`）。
 //!
-//! # 为什么要有它
+//! # 为什么它是独立的库函数而不是某个二进制里的私货
 //!
-//! 打开编辑器验证一次项目太重（窗口 + GPU + 秒级启动），而且"看起来能打开"
-//! 没法进 CI。`--check` 秒级返回，**退出码是给 CI / AI 智能体的契约**：
+//! 验证项目"能不能被完整加载"是**编辑器（`--check` CLI）、CI 与 AI 智能体
+//! （MCP `project_check` 工具）三方共用**的能力，放哪一家里都要被另外两家抄一遍
+//! —— 抄三份的验证逻辑早晚各自漂移。收在 core 里，谁都能调，语义只有一份。
 //!
-//! - `0` = 干净：清单、场景、引用全通过；
-//! - `1` = 加载失败：清单 / 入口场景解析不了；
-//! - `2` = 能加载，但有悬空的模型 / 脚本引用。
+//! # 契约
 //!
-//! 验证内容：
-//!
-//! - 项目清单能解析；
-//! - 入口场景能加载；
-//! - 场景引用的模型 / 脚本文件在盘上真的存在。
-//!
-//! # 与「Agent-Native」的关系
-//!
-//! 这是**给 AI 智能体用的路线的第一块砖**：智能体改完场景 / 清单，
-//! 必须有一个不用点 UI、结果可机读的验证入口才能闭环（改 → 查 → 自证）。
-//! 后续的 MCP 工具接口、无头运行都会挂在这套"程序化入口"的骨架上。
+//! - 任何**加载失败**（清单坏、入口场景坏）返回 `Err`；
+//! - 加载成功但引用悬空记在 [`CheckReport`] 里（`has_issues()`）——
+//!   缺资产不阻断运行时加载（有兜底），但检查方必须知道。
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-use xgame_core::project::ProjectHandle;
+use crate::project::ProjectHandle;
 
 /// 检查结果：能加载到什么程度、有哪些可疑引用。
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -50,12 +41,20 @@ impl CheckReport {
     /// 人和机器都能读的摘要（标准输出用；纯 ASCII，避开控制台编码坑）。
     pub fn render(&self) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "check: entities={} lights={} script_refs={}", self.entities, self.lights, self.script_refs);
+        let _ = writeln!(
+            out,
+            "check: entities={} lights={} script_refs={}",
+            self.entities, self.lights, self.script_refs
+        );
         if self.missing_models.is_empty() && self.missing_scripts.is_empty() {
             let _ = writeln!(out, "check: OK (all referenced assets exist)");
             return out;
         }
-        let _ = writeln!(out, "check: WARN {} missing asset(s)", self.missing_models.len() + self.missing_scripts.len());
+        let _ = writeln!(
+            out,
+            "check: WARN {} missing asset(s)",
+            self.missing_models.len() + self.missing_scripts.len()
+        );
         for m in &self.missing_models {
             let _ = writeln!(out, "  missing model:  {m}");
         }
@@ -66,8 +65,7 @@ impl CheckReport {
     }
 }
 
-/// 无头检查一个项目。任何**加载失败**（清单坏、场景坏）返回 `Err`，
-/// 加载成功但引用悬空则记在 [`CheckReport`] 里（`has_issues()`）。
+/// 无头检查一个项目：清单能解析、入口场景能加载、引用的模型 / 脚本真实存在。
 pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     let project = ProjectHandle::open(root).map_err(|e| e.to_string())?;
     let scene = project
@@ -82,7 +80,7 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
 
     for entity in &scene.entities {
         // `builtin://cube` 这类是**生成的几何**（渲染器直接造，盘上没有文件），
-        // 当成缺失资产报出来就是狼来了 —— CI 只要真的断了引用才该红。
+        // 当成缺失资产报出来就是狼来了 —— 调用方只要真的断了引用才该知道。
         if entity.has_model()
             && !entity.model.starts_with("builtin://")
             && !project.path(&entity.model).is_file()
@@ -132,25 +130,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.root());
     }
 
-    /// 悬空的模型 / 脚本引用必须被点名 —— 这是 `--check` 对 CI 和
-    /// AI 智能体的核心价值：改完资产引用，一条命令就知道改没改坏。
+    /// 悬空的模型 / 脚本引用必须被点名 —— 这是检查对 CI 和 AI 智能体的
+    /// 核心价值：改完资产引用，一条命令就知道改没改坏。
     #[test]
     fn dangling_references_are_reported() {
         let project = temp_project("dangling");
         let mut scene = project.load_entry_scene().expect("加载默认场景");
         scene.entities.push(
-            xgame_core::Entity::new("Ghost")
+            crate::Entity::new("Ghost")
                 .with_model("Resources/NotThere.glb")
                 .with_script("Scripts/NotThere.rhai"),
         );
         // 内置几何不是文件引用，绝不能被报成"缺失"。
         scene
             .entities
-            .push(xgame_core::Entity::new("Cube").with_model("builtin://cube"));
+            .push(crate::Entity::new("Cube").with_model("builtin://cube"));
         let entry = project.manifest().entry_scene.clone();
-        project
-            .write_scene(&entry, &scene)
-            .expect("写场景");
+        project.write_scene(&entry, &scene).expect("写场景");
 
         let report = check_project(project.root()).expect("检查应成功");
         assert!(report.has_issues());
@@ -165,7 +161,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.root());
     }
 
-    /// 坏清单（不是合法 RON）→ `Err`，退出码 1 的依据。
+    /// 坏清单（不是合法 RON）→ `Err`（CLI 退出码 1 的依据）。
     #[test]
     fn broken_manifest_is_an_error() {
         let project = temp_project("broken");

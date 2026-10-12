@@ -38,7 +38,6 @@
 //! ```
 
 mod builder;
-mod check;
 mod dialogs;
 mod frame_policy;
 mod frame_probe;
@@ -532,7 +531,7 @@ fn main() -> Result<(), eframe::Error> {
     //   0 = 干净（清单、场景、引用全通过）
     //   1 = 加载失败（清单 / 场景解析不了）
     //   2 = 能加载，但有悬空的模型 / 脚本引用
-    // 详见 `check` 模块头。
+    // 详见 xgame-core `check` 模块头（验证逻辑在那，编辑器只管退出码）。
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
         if args.first().map(String::as_str) == Some("--check") {
@@ -540,7 +539,7 @@ fn main() -> Result<(), eframe::Error> {
                 .get(1)
                 .map(String::as_str)
                 .unwrap_or("projects/SampleScene");
-            match check::check_project(Path::new(path)) {
+            match xgame_core::check_project(Path::new(path)) {
                 Ok(report) => {
                     print!("{}", report.render());
                     std::process::exit(if report.has_issues() { 2 } else { 0 });

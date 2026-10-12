@@ -38,6 +38,7 @@ pub mod project;
 
 // 新增模块
 mod asset;
+mod check;
 mod component;
 mod id;
 mod light;
@@ -46,6 +47,7 @@ pub mod ray;
 mod time;
 
 // -- 导出：旧有类型（保持向后兼容）
+pub use check::{check_project, CheckReport};
 pub use color::Color;
 pub use config::{ContentConfig, EngineConfig, RuntimeConfig, WindowConfig};
 pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
