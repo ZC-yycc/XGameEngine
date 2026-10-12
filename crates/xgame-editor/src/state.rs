@@ -33,6 +33,18 @@ pub enum PlayMode {
     Paused,
 }
 
+/// 「未保存更改」确认框要执行的退出动作。
+///
+/// 退出有两条路——关窗口和返回项目枢纽——但**要确认的逻辑只有一份**，
+/// 所以把"去哪"带在动作里，弹窗与放行流程对两条路一视同仁。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitTarget {
+    /// 返回项目枢纽（同一窗口内换页，会丢弃当前会话）。
+    Hub,
+    /// 关闭编辑器窗口。
+    Quit,
+}
+
 /// Gizmo 交互操作柄标识（与 ToolMode 组合使用）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GizmoPart {
@@ -398,6 +410,34 @@ pub struct EditorState {
     /// 实体"。快照在进入 Play 时拍一次，代价可以接受。
     pub play_snapshot: Option<Scene>,
 
+    // -- Save / exit --
+    /// 上次**落盘（或打开）时**的场景快照 —— 与它逐字段比较即知有没有未保存改动。
+    ///
+    /// 用快照比较而不是给每处改场景的代码塞 `mark_dirty()`：改场景的入口太多
+    /// （Inspector 就有几十处 `.changed()`、gizmo 逐帧写变换），漏一处就是
+    /// "改了却不提示保存"。比较是 O(实体数)，只在真正询问时做（关闭 / 回枢纽 /
+    /// 工具栏按钮），并按帧 memo —— 见 [`scene_dirty_memo`](Self::scene_dirty_memo)。
+    saved_snapshot: Scene,
+    /// [`scene_dirty_memo`](Self::scene_dirty_memo) 的按帧缓存 `(pass_nr, 结果)`。
+    dirty_memo: Option<(u64, bool)>,
+    /// 「场景另存为」对话框是否显示。
+    pub save_as_open: bool,
+    /// 「场景另存为」的名称输入。
+    pub save_as_name: String,
+    /// 「项目设置」窗口是否显示。
+    pub settings_open: bool,
+    /// 设置窗口的编辑草稿：打开时克隆清单，按 Apply 才写回。
+    ///
+    /// 半成品设置不该边敲键盘边生效 —— 与 Undo 同理，确认才落地。
+    pub settings_draft: Option<xgame_core::project::Project>,
+    /// 待确认的退出动作；`Some` 时弹「未保存更改」确认框。
+    pub exit_dialog: Option<ExitTarget>,
+    /// 用户已在确认框里放行（保存成功 / 选了不保存），主循环消费后直接执行。
+    ///
+    /// 存在的意义：「不保存」之后场景依旧是脏的（内存 ≠ 磁盘），只看脏标记会
+    /// 把确认框再弹一遍死循环 —— 放行是一次性凭证。
+    pub exit_confirmed: Option<ExitTarget>,
+
     // -- Clipboard --
     /// 复制/粘贴用的实体剪贴板（整棵子树，根在前）。
     ///
@@ -509,6 +549,15 @@ impl EditorState {
             game_runtime: None,
             play_snapshot: None,
 
+            saved_snapshot: Scene::new(""),
+            dirty_memo: None,
+            save_as_open: false,
+            save_as_name: String::new(),
+            settings_open: false,
+            settings_draft: None,
+            exit_dialog: None,
+            exit_confirmed: None,
+
             clipboard: None,
             collapsed_entities: HashSet::new(),
             hierarchy_drag: None,
@@ -536,6 +585,8 @@ impl EditorState {
         // 打开项目时先把资产清单扫出来，面板第一帧就有内容。
         state.refresh_prefabs();
         state.refresh_scripts();
+        // 脏检查的基准：刚打开的场景 = 刚落盘的内容 = 干净。
+        state.saved_snapshot = state.scene.clone();
         state
     }
 
@@ -1221,6 +1272,7 @@ impl EditorState {
         let runtime = crate::game_runtime::GameRuntime::start(
             self.scene.clone(),
             self.project.root(),
+            &self.project.manifest().runtime,
         );
         self.game_runtime = Some(runtime);
         self.refresh_scripts();
@@ -1321,17 +1373,165 @@ impl EditorState {
     }
 
     /// 把当前场景保存回项目的入口场景文件。
+    ///
+    /// 成功后刷新脏检查基准（[`saved_snapshot`](Self::saved_snapshot)），
+    /// 否则刚保存完工具栏还挂着 "未保存" 的星号。
     pub fn save_scene(&mut self) -> Result<(), String> {
         let entry = self.project.manifest().entry_scene.clone();
         let relative = self.project.path(&entry);
-        self.project
-            .write_scene(&entry, &self.scene)
-            .map(|()| self.log_success(format!("已保存场景 → {}", relative.display())))
-            .map_err(|e| {
+        let result = self.project.write_scene(&entry, &self.scene);
+        match result {
+            Ok(()) => {
+                self.mark_saved();
+                self.log_success(format!("已保存场景 → {}", relative.display()));
+                Ok(())
+            }
+            Err(e) => {
                 let message = e.to_string();
                 self.log_error(format!("保存失败: {message}"));
-                message
-            })
+                Err(message)
+            }
+        }
+    }
+
+    /// 落盘成功后的收尾：脏检查基准对齐 + 按帧 memo 失效。
+    fn mark_saved(&mut self) {
+        self.saved_snapshot = self.scene.clone();
+        self.dirty_memo = None;
+    }
+
+    /// 场景有没有未保存改动（与上次落盘的快照逐字段比较）。
+    ///
+    /// O(实体数)。每帧都要问的调用方（工具栏 / 标题栏 / 状态栏）请走
+    /// [`scene_dirty_memo`](Self::scene_dirty_memo)。
+    pub fn scene_dirty(&self) -> bool {
+        self.scene != self.saved_snapshot
+    }
+
+    /// 按帧 memo 版的脏检查：同一 egui pass 内多次询问只比较一次。
+    ///
+    /// 比较在交互期可能每帧发生（编辑器 idle 时不出帧，交互期出帧率可到
+    /// 上千），不 memo 的话一个大场景能把好几毫秒花在"只是想知道一下"上。
+    /// `pass_nr` 来自 `ctx.cumulative_pass_nr()`。
+    pub fn scene_dirty_memo(&mut self, pass_nr: u64) -> bool {
+        if let Some((frame, dirty)) = self.dirty_memo {
+            if frame == pass_nr {
+                return dirty;
+            }
+        }
+        let dirty = self.scene_dirty();
+        self.dirty_memo = Some((pass_nr, dirty));
+        dirty
+    }
+
+    /// 场景**另存为**一个新文件，并把入口场景切过去（语义对齐 Unity 的 Save As）。
+    ///
+    /// - 旧场景文件保持原样 —— 改坏了随时能从旧文件重来；
+    /// - `entry_scene` 跟着切到新文件并落盘清单，下次打开项目直接进新场景；
+    /// - 场景名同步成新文件名（场景名就是给它当展示名用的）。
+    ///
+    /// 名字只作**文件名**：路径分隔符、`..` 与 Windows 非法字符会被拒绝，
+    /// 防手滑把场景写到项目外面去（清单是手改/机器写的文本，同样不能信）。
+    pub fn save_scene_as(&mut self, raw_name: &str) -> Result<(), String> {
+        let name = raw_name.trim();
+        if name.is_empty() {
+            self.log_error("另存为失败: 场景名不能为空");
+            return Err("场景名不能为空".into());
+        }
+        if name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) || name.contains("..") {
+            let message = format!("场景名含非法字符: {name}");
+            self.log_error(format!("另存为失败: {message}"));
+            return Err(message);
+        }
+
+        let scenes_dir = self
+            .project
+            .manifest()
+            .content
+            .scenes_dir
+            .trim()
+            .trim_matches(['/', '\\'])
+            .to_string();
+        let relative = if scenes_dir.is_empty() {
+            format!("{name}.ron")
+        } else {
+            format!("{scenes_dir}/{name}.ron")
+        };
+
+        self.scene.name = name.to_string();
+        if let Err(e) = self.project.write_scene(&relative, &self.scene) {
+            let message = e.to_string();
+            self.log_error(format!("另存为失败: {message}"));
+            return Err(message);
+        }
+
+        // 入口场景跟着切到新文件。清单写失败不回滚场景文件（已经落盘了，
+        // 回滚反而可能把用户的成果删掉），但要明确警告：否则下次打开还是旧场景。
+        self.project.manifest_mut().entry_scene = relative.clone();
+        if let Err(e) = self.project.save() {
+            self.log_warning(format!(
+                "场景已另存，但项目清单更新失败（请手动改 entry_scene）: {e}"
+            ));
+        }
+
+        self.mark_saved();
+        self.log_success(format!(
+            "已另存为 → {}（入口场景已切换）",
+            self.project.path(&relative).display()
+        ));
+        Ok(())
+    }
+
+    /// 把设置草稿写回内存清单并落盘（校验集中在这里，面板只管画）。
+    ///
+    /// 校验不过时草稿**原样留着**——用户敲错一个数字不该被弹窗清空重来。
+    pub fn apply_settings_draft(&mut self) -> Result<(), String> {
+        let Some(mut draft) = self.settings_draft.take() else {
+            return Ok(());
+        };
+
+        let mut invalid = |msg: String, draft: xgame_core::project::Project| -> Result<(), String> {
+            self.log_error(format!("设置未应用: {msg}"));
+            self.settings_draft = Some(draft);
+            Err(msg)
+        };
+
+        draft.name = draft.name.trim().to_string();
+        if draft.name.is_empty() {
+            return invalid("项目名不能为空".into(), draft);
+        }
+        draft.entry_scene = draft.entry_scene.trim().replace('\\', "/");
+        if draft.entry_scene.is_empty() {
+            return invalid("入口场景路径不能为空".into(), draft);
+        }
+
+        // 清单是手改的文本，垃圾值统一在这里夹回安全范围（同 sanitized 语义）。
+        draft.window.width = draft.window.width.clamp(320, 16_384);
+        draft.window.height = draft.window.height.clamp(240, 16_384);
+        let sane_runtime = draft.runtime.sanitized();
+        if sane_runtime != draft.runtime {
+            self.log_warning(format!(
+                "运行时参数超出安全范围已自动纠正（重力 {:?} → {:?}，步长 {}s → {}s）",
+                draft.runtime.gravity,
+                sane_runtime.gravity,
+                draft.runtime.fixed_dt,
+                sane_runtime.fixed_dt
+            ));
+            draft.runtime = sane_runtime;
+        }
+
+        *self.project.manifest_mut() = draft;
+        match self.project.save() {
+            Ok(()) => {
+                self.log_success("项目设置已写入 project.ron");
+                Ok(())
+            }
+            Err(e) => {
+                let message = e.to_string();
+                self.log_error(format!("项目设置写盘失败: {message}"));
+                Err(message)
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1440,6 +1640,116 @@ mod tests {
         state.selected_entity = Some(0);
         state.clamp_selection();
         assert_eq!(state.selected_entity, Some(0));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 脏标记的完整生命周期：打开时干净 → 改动变脏 → 保存后干净。
+    ///
+    /// 旧实现没有脏标记这回事（`scene_dirty` 不存在，编译都过不去 ——
+    /// 这就是"红"）。按帧 memo 还要验证：同一 pass 只比较一次、
+    /// 改动后的下一 pass 能看到新结果（不然标题栏星号会卡死）。
+    #[test]
+    fn dirty_tracks_edits_and_clears_on_save() {
+        let (mut state, base) = temp_state("dirty");
+
+        assert!(!state.scene_dirty(), "刚打开的场景应当是干净的");
+        assert!(!state.scene_dirty_memo(1), "按帧 memo 的结果应一致");
+
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+        assert!(state.scene_dirty(), "改了场景应当变脏");
+        // memo 按 pass 缓存：pass 1 的旧值照常命中（这正是它省开销的方式，
+        // 同一 pass 内改了场景的边角情况下一 pass 自然修正），新 pass 才重算。
+        assert!(!state.scene_dirty_memo(1), "同一 pass 的缓存命中旧值");
+        assert!(state.scene_dirty_memo(2), "新 pass 应当重算并看到脏");
+
+        state.save_scene().expect("保存应成功");
+        assert!(!state.scene_dirty(), "保存后应当干净");
+        assert!(!state.scene_dirty_memo(3), "memo 失效后重算应为干净");
+
+        // Play 往返不应弄脏：进入前是干净的，退出时快照原样恢复。
+        state.enter_play_mode();
+        state.exit_play_mode();
+        assert!(!state.scene_dirty(), "Play 往返不改变落盘内容");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 「另存为」：写新文件、入口场景跟着切、旧文件原样保留、脏状态清零。
+    #[test]
+    fn save_as_switches_entry_scene_and_keeps_old_file() {
+        let (mut state, base) = temp_state("save_as");
+        let old_entry = state.project.manifest().entry_scene.clone();
+        let old_path = state.project.path(&old_entry);
+
+        state.scene.add_entity(xgame_core::Entity::new("new stuff"));
+        state.save_scene_as("Level2").expect("另存为应成功");
+
+        assert_eq!(state.project.manifest().entry_scene, "Scenes/Level2.ron");
+        assert!(state.project.path("Scenes/Level2.ron").is_file(), "新文件应落盘");
+        assert!(old_path.is_file(), "旧场景文件必须原样保留");
+        assert!(!state.scene_dirty(), "另存为后应当干净");
+        assert_eq!(state.scene.name, "Level2", "场景名应同步成新名");
+
+        // 旧文件没被这次另存改动（里面没有 new stuff 实体）。
+        let old_scene = state.project.load_scene(&old_entry).expect("旧场景可读回");
+        assert!(
+            !old_scene.entities.iter().any(|e| e.name == "new stuff"),
+            "另存为不该动旧文件"
+        );
+
+        // 非法名一律拒绝：空名、路径穿越、分隔符。
+        assert!(state.save_scene_as("").is_err());
+        assert!(state.save_scene_as("   ").is_err());
+        assert!(state.save_scene_as("../evil").is_err());
+        assert!(state.save_scene_as("a/b").is_err());
+        assert!(state.save_scene_as("a\\b").is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 项目设置的落地链路：草稿 → 校验 → 清单 → 落盘 → 读回一致。
+    #[test]
+    fn settings_draft_applies_and_persists() {
+        let (mut state, base) = temp_state("settings");
+
+        // 没有草稿时 apply 是 no-op（防呆：面板没开就点 Apply 不该 panic）。
+        assert!(state.apply_settings_draft().is_ok());
+
+        let mut draft = state.project.manifest().clone();
+        draft.runtime.gravity = [0.0, -30.0, 0.0];
+        draft.runtime.fixed_dt = 1.0 / 90.0;
+        draft.window.width = 1920;
+        state.settings_draft = Some(draft);
+        state.apply_settings_draft().expect("合法设置应能应用");
+
+        assert_eq!(state.project.manifest().runtime.gravity, [0.0, -30.0, 0.0]);
+        assert_eq!(state.project.manifest().runtime.fixed_dt, 1.0 / 90.0);
+
+        // 读回：从盘上重新打开项目，设置还在（写盘是真的发生了）。
+        let reopened = xgame_core::ProjectHandle::open(state.project.root()).expect("重开项目");
+        assert_eq!(reopened.manifest().runtime.fixed_dt, 1.0 / 90.0);
+        assert_eq!(reopened.manifest().window.width, 1920);
+
+        // 非法草稿：留着草稿等用户改，不写清单。
+        let mut bad = state.project.manifest().clone();
+        bad.name = "   ".into();
+        state.settings_draft = Some(bad);
+        assert!(state.apply_settings_draft().is_err());
+        assert!(state.settings_draft.is_some(), "校验失败必须保留草稿");
+
+        // 垃圾运行时参数进清单前要被夹安全（fixed_dt=0 = 时间静止）。
+        let mut toxic = state.project.manifest().clone();
+        toxic.runtime.fixed_dt = 0.0;
+        toxic.runtime.gravity = [f32::NAN, -9.81, 0.0];
+        state.settings_draft = Some(toxic);
+        state.apply_settings_draft().expect("夹取后应当合法");
+        assert_eq!(
+            state.project.manifest().runtime.fixed_dt,
+            1.0 / 60.0,
+            "fixed_dt=0 必须退回默认"
+        );
+        assert!(state.project.manifest().runtime.gravity.iter().all(|x| x.is_finite()));
 
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -35,10 +35,17 @@ impl GameRuntime {
     ///
     /// 收**快照**而不是借用编辑器的场景：Play 跑起来之后编辑器手里那份必须
     /// 保持"进入 Play 之前的样子"，退出时才能原样恢复。
-    pub fn start(scene: Scene, project_root: &Path) -> Self {
+    pub fn start(
+        scene: Scene,
+        project_root: &Path,
+        runtime: &xgame_core::RuntimeConfig,
+    ) -> Self {
         let input_map = load_input_map(project_root);
-        let world = World::new(scene, project_root, WorldConfig::default())
-            .with_input_map(input_map);
+        // 重力 / 固定步长来自 project.ron 的 `runtime` 节（⚙ 项目设置面板可改），
+        // 不再用 WorldConfig::default() —— 否则清单里改了重力 Play 却纹丝不动。
+        let world =
+            World::new(scene, project_root, WorldConfig::from_project_runtime(runtime))
+                .with_input_map(input_map);
         Self {
             world,
             report: FrameReport::default(),

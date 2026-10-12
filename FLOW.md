@@ -102,14 +102,28 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
 新建表单、打开表单）。**打开项目之后**，走下面几步：
 
 ```
- 1  ViewportCommand::Title        窗口标题带上项目名（仅项目名变化时发送）
- 2  toolbar::show() + 模式切换     项目 / 播放暂停停止 / 变换工具
- 3  Ctrl+S                        保存当前场景回项目入口场景
+ 0  关窗拦截（update，editor_ui 之前）
+                        close_requested 且场景脏 → CancelClose + 弹「未保存」确认框
+ 1  ViewportCommand::Title        窗口标题：项目名 + 未保存 `*`（仅变化时发送）
+ 2  toolbar::show() + 模式切换     项目 / 💾 Save · Save As / 播放暂停停止 / 变换工具 / ⚙ 设置
+ 3  Ctrl+S / Ctrl+Shift+S         保存场景 / 另存为新场景文件
  3b Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤销 / 重做（Play 模式下不生效）
  4  physics_step() (仅 Playing)    固定步长物理模拟
- 5  CentralPanel (egui_tiles)      4 面板 Dock 布局
+ 5  CentralPanel (egui_tiles)      面板 Dock 布局
  6  StatusBar                      底部状态栏（含项目名）
+ 7  应用级弹窗（画在最上层）        ⚙ 项目设置窗口 / 场景另存为 / 未保存确认框
 ```
+
+> **阶段 0：关窗拦截（为什么必须在 `editor_ui` 之前）** —— egui 的语义是
+> `close_requested()` 为真的**那一帧**不发 `ViewportCommand::CancelClose`，帧末应用
+> 直接退出。所以确认框必须在帧首拦下；用户放行后（保存成功 / 选了不保存）才发
+> `ViewportCommand::Close` 真正关窗。两条退出路径（关窗口 `Quit`、返回枢纽 `Hub`）
+> 共用一套确认：脏检查 → `exit_dialog` 弹框 → `exit_confirmed` 是**一次性放行凭证**
+> （「不保存」之后场景在内存里依然是脏的，只看脏标记会把确认框复弹到死）。
+> 脏检查 = 场景与落盘快照逐字段比较（`ComponentMap` 因类型擦除不参与 —— 它本来也不
+> 落盘），按 `pass_nr` 帧内 memo，避免大场景每帧 O(n)。Hub 路径的确认框在
+> `editor_ui` 之后才置位，必须显式 `request_repaint()`，否则帧调度已停、弹窗要等下次
+> 输入才出现。
 
 > **这几件事的频率各不相同，别搞混** —— 每帧、只启动一次、仅变化时，三种：
 >
@@ -117,7 +131,7 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
 > |---|---|---|
 > | `theme::install(ctx)` | **只启动时一次** | `ThemePreference::Dark` 固定后 egui 不再按系统主题覆盖 style（过去每帧重设就是在对抗那个覆盖）|
 > | `theme::install_fonts(ctx)` | **只启动时一次** | `set_fonts` 会重建整张字形图集，很贵 |
-> | `ViewportCommand::Title` | **仅项目名变化时** | 一路走到 winit 的 `SetWindowText`，是真实的系统调用 |
+> | `ViewportCommand::Title` | **仅项目名或脏状态变化时** | 一路走到 winit 的 `SetWindowText`，是真实的系统调用 |
 > | 「最近项目」磁盘校验 | **仅列表变化时** | `is_file()` 是磁盘 IO，遇到失效的网络路径会阻塞 UI 线程 |
 > | 离屏 3D 渲染 | **仅输入指纹变化时** | 指纹没变整段渲染跳过，连世界矩阵都不解算，见「阶段 4b」 |
 > | Hierarchy 行模型 | **仅结构指纹变化时** | 行缓存按 (指纹, 折叠版本, 过滤器) 复用，不变零 String 分配 |
@@ -140,14 +154,23 @@ Ubuntu-Light / Hack **不含任何 CJK 字形**，少了这一步中文就是一
 （TrueType `0x00010000` / `true`、OpenType `OTTO`、字体集合 `ttcf`），把坏文件
 挡在 `set_fonts` 之外 —— 否则编辑器会带着 panic 启动失败，用户侧只看到「双击没反应」。
 
-#### 阶段 1：窗口标题
+#### 阶段 1：窗口标题（项目名 + 未保存星号）
 
 ```rust
-let project_name = session.state.project_name();
-if session.window_title != project_name {          // 只在变化时发
-    session.window_title = project_name.to_owned();
+// 标题是唯一"永远在视野里"的位置 —— 未保存的 `*` 挂这里，工具栏也挂一份，
+// 两处共用同一份按帧 memo 的脏检查（`scene_dirty_memo`），不重复比较场景。
+let title_name = {
+    let project_name = session.state.project_name().to_owned();
+    if session.state.scene_dirty_memo(ctx.cumulative_pass_nr()) {
+        format!("{project_name} *")
+    } else {
+        project_name
+    }
+};
+if session.window_title != title_name {          // 只在变化时发
+    session.window_title = title_name.clone();
     ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-        "XGameEngine Editor — {project_name}"
+        "XGameEngine Editor — {title_name}"
     )));
 }
 ```
@@ -1071,19 +1094,21 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 
 | 文件 | 行数 | 核心函数 |
 |---|---|---|
-| `editor/main.rs` | 516 | `EditorApp::new()`、`update()`（开头过 `drop_redundant_pointer_moves`）、`open_project()`、`editor_ui()` |
+| `editor/main.rs` | 618 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `--check` 分派）、`open_project()`、`editor_ui()`（末尾画设置 / 另存为 / 未保存弹窗） |
 | `editor/hub.rs` | 352 | `ProjectHub::ui()`、`open_project_at()`、`create_project_at()` |
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
-| `editor/state.rs` | 1438 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
+| `editor/check.rs` | 149 | `check_project()`（无头验证清单 / 场景 / 引用，退出码 0/1/2）、`CheckReport` |
+| `editor/dialogs.rs` | 141 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_save_as_dialog()` |
+| `editor/state.rs` | 1756 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()` / `save_scene_as()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
 | `editor/scene_renderer.rs` | 804 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（收 `&Scene`，指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`mesh_bounds()`（拾取用） |
 | `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
-| `editor/game_runtime.rs` | 93 | `start()`、`fixed_update()` |
-| `core/project.rs` | 685 | `ProjectHandle::open()`、`create()`、`path()`、`list_prefabs()`、`load_prefab()`、`write_prefab()` |
+| `editor/game_runtime.rs` | 121 | `start()`（`WorldConfig::from_project_runtime` 接项目清单）、`fixed_update()` |
+| `core/project.rs` | 773 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`；清单含 `runtime` 节（重力 / 固定步长） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
-| `core/scene.rs` | 947 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()` |
+| `core/scene.rs` | 965 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`） |
 | `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
 | `render/scene_pipeline.rs` | 1575 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
 | `render/gltf_loader.rs` | 546 | `GltfMesh::from_file()` / `load()`、`read_material()`、`Bounds`（网格本地包围盒） |
@@ -1092,7 +1117,8 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 | `editor/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|
 | `editor/inspector.rs` | 314 | `show_content()`（含撤销集成、父节点下拉、预制体区块）|
 | `editor/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|
-| `editor/toolbar.rs` | 144 | `show()`（含 ⌂ Projects / 🔨 Build） |
+| `editor/toolbar.rs` | 191 | `show()`（含 ⌂ Projects / 💾 Save · Save As / 🔨 Build / ⚙ 设置） |
+| `editor/settings.rs` | 198 | `show()`（项目设置窗口：草稿编辑 → Apply 校验写回 `project.ron`） |
 | `editor/console.rs` | 46 | `show_content()` |
 | `editor/dock.rs` | 117 | `create_tile_tree()`、`EditorBehavior` |
 | `editor/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |

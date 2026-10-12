@@ -142,8 +142,26 @@ impl Entity {
     }
 }
 
+impl PartialEq for Entity {
+    /// 逐字段比较，**唯独不比 `components`**：
+    ///
+    /// - `components` 是 `#[serde(skip)]` 的运行时数据，不落盘 —— 场景相等
+    ///   问的本来就是"落盘内容一样吗"（脏检查的语义），运行时组件与此无关；
+    /// - 它装的是 `Box<dyn Any>`，类型擦除后根本没法比，硬比只能比个寂寞。
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.transform == other.transform
+            && self.model == other.model
+            && self.id == other.id
+            && self.parent == other.parent
+            && self.prefab == other.prefab
+            && self.scripts == other.scripts
+            && self.physics == other.physics
+    }
+}
+
 /// 包含实体列表的场景。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
     /// 场景名称。
     pub name: String,

@@ -38,6 +38,8 @@
 //! ```
 
 mod builder;
+mod check;
+mod dialogs;
 mod frame_policy;
 mod frame_probe;
 mod game_runtime;
@@ -56,7 +58,7 @@ use std::time::Instant;
 use frame_policy::{FrameClock, FrameInputs, FramePlan, FramePolicy};
 use hub::{HubAction, ProjectHub};
 use panels::dock::PanelTab;
-use state::{EditorState, PlayMode};
+use state::{EditorState, ExitTarget, PlayMode};
 
 // ---------------------------------------------------------------------------
 // 应用状态
@@ -230,13 +232,47 @@ impl eframe::App for EditorApp {
             ctx.request_repaint();
         }
 
+        // ── 关窗拦截：有未保存改动先确认 ──
+        //
+        // egui 的语义：`close_requested()` 为真的**这一帧**不发 CancelClose，
+        // 帧末应用就直接退出。所以必须在 editor_ui 之前拦下 —— 用户点 X 的
+        //那一帧取消关闭、改弹确认框；用户放行后再由 `editor_ui` 里的弹窗
+        // 发 `ViewportCommand::Close` 真正关窗。枢纽界面上没有可丢的东西，不拦。
+        let pass_nr = ctx.cumulative_pass_nr();
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if let Some(session) = self.session.as_mut() {
+                if session.state.exit_dialog.is_none()
+                    && session.state.scene_dirty_memo(pass_nr)
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    session.state.exit_dialog = Some(ExitTarget::Quit);
+                }
+            }
+        }
+
         // ── 编辑器界面 ──
         let mut close_requested = false;
         if let Some(session) = self.session.as_mut() {
             editor_ui(session, ctx, live);
-            if session.state.return_to_hub {
+
+            // 确认框的放行凭证（保存成功 / 用户明确选了"不保存"）。
+            // 存在的意义见 `EditorState::exit_confirmed`："不保存"之后场景
+            // 依然是脏的，只看脏标记会把确认框复弹到死。
+            if let Some(target) = session.state.exit_confirmed.take() {
+                match target {
+                    ExitTarget::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                    ExitTarget::Hub => close_requested = true,
+                }
+            } else if session.state.return_to_hub {
                 session.state.return_to_hub = false;
-                close_requested = true;
+                if session.state.scene_dirty_memo(pass_nr) {
+                    session.state.exit_dialog = Some(ExitTarget::Hub);
+                    // 本帧的编辑器 UI 已经画完，不补一帧的话确认框要等下次
+                    // 输入才出现（帧调度 idle 时不会自己出帧，等于"点了没反应"）。
+                    ctx.request_repaint();
+                } else {
+                    close_requested = true;
+                }
             }
         }
 
@@ -256,7 +292,6 @@ impl eframe::App for EditorApp {
         // 分组用：rt=0 表示这是同一次 ctx.run 的丢弃重跑（第二遍），不是新帧。
         let raw_time = ctx.input(|i| i.raw.time.is_some());
         let will_discard = ctx.will_discard();
-        let pass_nr = ctx.cumulative_pass_nr();
         self.probe.tick(
             t_in,
             Instant::now(),
@@ -327,12 +362,21 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     // 是 O(1) 的，把这类崩溃一次性堵死（详见 `EditorState::clamp_selection`）。
     session.state.clamp_selection();
 
-    // ── 1. 窗口标题带上项目名（仅变化时发，见 EditorSession::window_title）──
-    let project_name = session.state.project_name();
-    if session.window_title != project_name {
-        session.window_title = project_name.to_owned();
+    // ── 1. 窗口标题：项目名 + 未保存星号（仅变化时发，见 EditorSession::window_title）──
+    // "*" 是**标题栏级**的未保存提示：标题是唯一永远在视野里的位置，工具栏
+    // 按钮会被弹窗挡住。与工具栏共用同一份按帧 memo 的脏检查（不重复比较）。
+    let title_name = {
+        let project_name = session.state.project_name().to_owned();
+        if session.state.scene_dirty_memo(ctx.cumulative_pass_nr()) {
+            format!("{project_name} *")
+        } else {
+            project_name
+        }
+    };
+    if session.window_title != title_name {
+        session.window_title = title_name.clone();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "XGameEngine Editor — {project_name}"
+            "XGameEngine Editor — {title_name}"
         )));
     }
 
@@ -351,9 +395,18 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
         _ => {}
     }
 
-    // ── 3. Ctrl+S 保存场景 ──
-    if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
+    // ── 3. Ctrl+S 保存 / Ctrl+Shift+S 另存为 ──
+    // 一次读完再分派：省得在同一个 input 闭包里重复查询键盘状态。
+    let (want_save, want_save_as) = ctx.input(|i| {
+        let ctrl_s = i.modifiers.ctrl && i.key_pressed(egui::Key::S);
+        (ctrl_s && !i.modifiers.shift, ctrl_s && i.modifiers.shift)
+    });
+    if want_save {
         let _ = session.state.save_scene();
+    }
+    if want_save_as {
+        session.state.save_as_open = true;
+        session.state.save_as_name = session.state.scene.name.clone();
     }
 
     // ── 3b. Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤销重做 ──
@@ -401,6 +454,16 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
 
     // ── 6. Status bar (bottom) ──
     status_bar(ctx, &session.state, live);
+
+    // ── 7. 应用级弹窗 ──
+    // 画在最后：确认框 / 另存为要盖在设置窗口之上（同层后画的在上）。
+    panels::settings::show(&mut session.state, ctx);
+    dialogs::show_save_as_dialog(&mut session.state, ctx);
+    if let Some(target) =
+        dialogs::show_exit_dialog(&mut session.state, ctx, ctx.cumulative_pass_nr())
+    {
+        session.state.exit_confirmed = Some(target);
+    }
 }
 
 /// 底部状态栏。
@@ -462,6 +525,33 @@ fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
 
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
+
+    // ── 无头项目检查：`xgame-editor --check [项目路径]` ──
+    //
+    // 不开窗口、不建 GPU，秒级返回。退出码是给 CI / **AI 智能体**的契约：
+    //   0 = 干净（清单、场景、引用全通过）
+    //   1 = 加载失败（清单 / 场景解析不了）
+    //   2 = 能加载，但有悬空的模型 / 脚本引用
+    // 详见 `check` 模块头。
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("--check") {
+            let path = args
+                .get(1)
+                .map(String::as_str)
+                .unwrap_or("projects/SampleScene");
+            match check::check_project(Path::new(path)) {
+                Ok(report) => {
+                    print!("{}", report.render());
+                    std::process::exit(if report.has_issues() { 2 } else { 0 });
+                }
+                Err(e) => {
+                    eprintln!("check FAILED: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 
     // 上屏参数 A/B 开关（诊断用）：
     //   XGAME_PRESENT_MODE   fifo|fifo_relaxed|immediate|mailbox|auto_no_vsync|auto_vsync

@@ -116,6 +116,56 @@ impl Default for ContentConfig {
 }
 
 // ---------------------------------------------------------------------------
+// 运行时参数
+// ---------------------------------------------------------------------------
+
+/// 玩法层可调参数（重力 / 固定步长），持久化在 `project.ron` 的 `runtime` 节。
+///
+/// 这两个值此前硬编码在 `xgame-runtime::WorldConfig` 的默认值里 —— 想调重力
+/// 只能改引擎源码重编译。现在进清单、由编辑器「⚙ Project Settings」面板编辑；
+/// `Project` 上的 `#[serde(default)]` 保证旧清单照常加载。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeConfig {
+    /// 世界重力（m/s²，Y 向上、向下为负）。
+    pub gravity: [f32; 3],
+    /// 物理 / 固定步脚本的步长（秒）。
+    pub fixed_dt: f32,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            gravity: [0.0, -9.81, 0.0],
+            fixed_dt: 1.0 / 60.0,
+        }
+    }
+}
+
+impl RuntimeConfig {
+    /// 容错读取：清单是**手改的文本**，非法值不能直接交给物理引擎。
+    ///
+    /// - 重力含 NaN / 无穷 / 超大值（>1e6，一帧能把物体弹出银河系）→ 退回默认；
+    /// - `fixed_dt <= 0` 会让固定步长累加器永远凑不满一步（时间静止），非有限
+    ///   同理 → 退回默认；
+    /// - 合法但离谱的步长夹进 [1/240s, 1/10s]：比 240Hz 更快没有意义，
+    ///   比 10Hz 更慢肉眼可见地卡。
+    pub fn sanitized(self) -> Self {
+        let sane = |v: [f32; 3]| v.iter().all(|x| x.is_finite() && x.abs() <= 1e6);
+        let gravity = if sane(self.gravity) {
+            self.gravity
+        } else {
+            Self::default().gravity
+        };
+        let fixed_dt = if self.fixed_dt.is_finite() && self.fixed_dt > 0.0 {
+            self.fixed_dt.clamp(1.0 / 240.0, 1.0 / 10.0)
+        } else {
+            Self::default().fixed_dt
+        };
+        Self { gravity, fixed_dt }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
 
@@ -137,5 +187,31 @@ mod tests {
         let restored: EngineConfig = ron::from_str(&ron_str).expect("deserialize");
         assert_eq!(restored.target_fps, 0);
         assert_eq!(restored.window.width, 1280);
+    }
+
+    #[test]
+    fn runtime_config_defaults_match_legacy_hardcoded_values() {
+        // 这两个值就是当年 WorldConfig::default() 里硬编码的那一对 ——
+        // 改默认值会让所有旧项目的物理行为悄悄变样。
+        let rt = RuntimeConfig::default();
+        assert_eq!(rt.gravity, [0.0, -9.81, 0.0]);
+        assert_eq!(rt.fixed_dt, 1.0 / 60.0);
+    }
+
+    #[test]
+    fn runtime_config_sanitized_rejects_garbage() {
+        // 固定步长 0 = 累加器永远凑不满一步 = 时间静止，必须退回默认。
+        let zero = RuntimeConfig { fixed_dt: 0.0, ..Default::default() }.sanitized();
+        assert_eq!(zero.fixed_dt, 1.0 / 60.0);
+
+        let nan = RuntimeConfig { fixed_dt: f32::NAN, ..Default::default() }.sanitized();
+        assert_eq!(nan.fixed_dt, 1.0 / 60.0);
+
+        let wild = RuntimeConfig { gravity: [f32::NAN, -1e30, 0.0], ..Default::default() }.sanitized();
+        assert_eq!(wild.gravity, RuntimeConfig::default().gravity);
+
+        // 合法但过慢的步长要夹住（10Hz 物理肉眼可见地卡）。
+        let slow = RuntimeConfig { fixed_dt: 0.5, ..Default::default() }.sanitized();
+        assert_eq!(slow.fixed_dt, 1.0 / 10.0);
     }
 }

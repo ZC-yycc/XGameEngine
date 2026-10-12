@@ -26,7 +26,7 @@ pub enum LightKind {
 }
 
 /// 一盏场景光源。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Light {
     /// 显示名称，编辑器里用来区分多盏灯。
     pub name: String,

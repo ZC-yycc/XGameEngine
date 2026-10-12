@@ -14,6 +14,10 @@ cargo run -p xgame-editor -- projects/SampleScene
 # 独立游戏 —— 运行一个项目
 cargo run -p xgame-game -- projects/SampleScene
 
+# 无头项目检查 —— 不开窗口，验证清单 / 场景 / 资产引用
+# （退出码 0=干净 · 1=加载失败 · 2=悬空引用；给 CI / AI 智能体用）
+cargo run -p xgame-editor -- --check projects/SampleScene
+
 # 一键构建可分发软件包（等价于双击根目录的「一键构建.cmd」）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
@@ -109,7 +113,15 @@ core ← math ← {render, physics} ← editor / game
   （地板、平台）用包围球会严重高估，连相机都落进球里，导致"点哪儿都选中它、取消不掉"
 - 撤销 / 重做：`Ctrl+Z` · `Ctrl+Shift+Z` · `Ctrl+Y`
 - 复制 / 粘贴：`Ctrl+C` · `Ctrl+V`；复制实体 / 删除：`Ctrl+D` · `Delete`
-- `Ctrl+S` 保存场景；🔨 Build 把项目打包成独立游戏
+- **项目设置（工具栏 ⚙）**：窗口 / 重力 / 固定步长 / 内容目录可视化编辑，草稿式
+  Apply 写回 `project.ron`；重力与步长不再是引擎源码里的硬编码，编辑器 Play 与
+  打包游戏读的是**同一份**配置（`WorldConfig::from_project_runtime`）
+- **未保存保护**：场景有改动时标题栏与工具栏显示 `*`（按帧 memo 的落盘快照比较），
+  关窗 / 返回枢纽前弹确认（保存 / 不保存 / 取消）；`Ctrl+S` 保存、`Ctrl+Shift+S`
+  **另存为**新场景文件并切过去（旧文件原样保留）
+- **无头检查**：`xgame-editor --check <项目>` 秒级验证项目完整性（见快速开始），
+  退出码可判 —— 一条命令跑通"改 → 查 → 自证"闭环
+- 🔨 Build 把项目打包成独立游戏
 - **帧序**：每帧"先处理输入（飞行相机 / 拖拽 / 拾取）→ 再按最新状态发渲染任务 → 最后画叠加层"，
   拖物体与转视角都不会多慢一帧
 - **渲染线程**：3D 视口在独立线程上渲染（2026-10-10 重构）。UI 线程只按输入指纹组装

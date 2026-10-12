@@ -207,8 +207,14 @@ impl GameApp {
         };
 
         // -- 运行时 --
-        let world = World::new(scene, project.root(), WorldConfig::default())
-            .with_input_map(input_map);
+        // 重力 / 固定步长来自 project.ron 的 `runtime` 节，与编辑器 Play 同一
+        // 入口（`WorldConfig::from_project_runtime`）—— 两端行为永远一致。
+        let world = World::new(
+            scene,
+            project.root(),
+            WorldConfig::from_project_runtime(&project.manifest().runtime),
+        )
+        .with_input_map(input_map);
 
         Self {
             project,

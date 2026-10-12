@@ -22,6 +22,32 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
 
                 ui.separator();
 
+                // ── 保存 ──
+                // 脏时给个 "*"，与窗口标题栏一致 —— 在工具栏还是标题栏看到的
+                // 都是同一份按帧 memo 的脏检查（不重复比较场景）。
+                let dirty = state.scene_dirty_memo(ctx.cumulative_pass_nr());
+                let save_label = if dirty { "💾  Save *" } else { "💾  Save" };
+                if ui
+                    .button(save_label)
+                    .on_hover_text("保存入口场景（Ctrl+S）")
+                    .clicked()
+                {
+                    let _ = state.save_scene();
+                }
+                if ui
+                    .button("Save As…")
+                    .on_hover_text(
+                        "把当前场景另存成新文件并切过去（Ctrl+Shift+S）\n\
+                         旧文件保持原样，改坏了随时能重来",
+                    )
+                    .clicked()
+                {
+                    state.save_as_open = true;
+                    state.save_as_name = state.scene.name.clone();
+                }
+
+                ui.separator();
+
                 // ── 播放控制 ──
                 let play_btn = egui::Button::new(if state.play_mode == PlayMode::Playing {
                     "⏸  Playing"
@@ -128,11 +154,22 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         }
                     }
 
+                    // ── 项目设置 ──
+                    if ui
+                        .button("⚙")
+                        .on_hover_text("项目设置\n窗口 / 重力 / 固定步长 / 内容目录")
+                        .clicked()
+                    {
+                        state.settings_open = true;
+                    }
+
                     ui.separator();
                     ui.label(format!("Project: {}", state.project_name()));
                     ui.separator();
+                    // 场景名旁的星号与标题栏一致：脏状态来自同一份按帧 memo。
+                    let star = if dirty { " *" } else { "" };
                     ui.label(format!(
-                        "{} | {} entities",
+                        "{}{star} | {} entities",
                         state.scene.name,
                         state.scene.entities.len()
                     ));

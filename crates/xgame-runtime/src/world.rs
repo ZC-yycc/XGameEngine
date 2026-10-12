@@ -60,6 +60,23 @@ impl Default for WorldConfig {
     }
 }
 
+impl WorldConfig {
+    /// 从项目清单的 `runtime` 节构造（重力 / 固定步长，先过容错夹取）。
+    ///
+    /// 编辑器 Play 与独立游戏二进制**共用这一个入口**——两处各写一遍
+    /// `gravity: Vec3::from_array(...)` 就是"同一份配置两种行为"的经典起点。
+    /// `sanitized()` 在这里做而不是要求调用方先做：清单是手改的文本，
+    /// 非法值（`fixed_dt <= 0` = 时间静止）不能流进物理引擎。
+    pub fn from_project_runtime(rt: &xgame_core::RuntimeConfig) -> Self {
+        let rt = rt.sanitized();
+        Self {
+            gravity: Vec3::from_array(rt.gravity),
+            fixed_dt: rt.fixed_dt,
+            ..Self::default()
+        }
+    }
+}
+
 /// 一帧的统计信息（状态栏 / 性能面板用）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameReport {
@@ -521,6 +538,31 @@ mod tests {
             .transform
             .position
             .y
+    }
+
+    /// 清单里的重力 / 步长必须真的流进 `WorldConfig` —— 这是项目设置面板
+    /// （project.ron → 两端运行时）的落地验证。旧实现这里是 `WorldConfig::default()`，
+    /// 清单改了重力也纹丝不动，所以断言自定义值会红。
+    #[test]
+    fn project_runtime_flows_into_world_config() {
+        let rt = xgame_core::RuntimeConfig {
+            gravity: [0.0, -20.0, 0.0],
+            fixed_dt: 1.0 / 120.0,
+        };
+        let cfg = WorldConfig::from_project_runtime(&rt);
+        assert_eq!(cfg.gravity, Vec3::new(0.0, -20.0, 0.0));
+        assert_eq!(cfg.fixed_dt, 1.0 / 120.0);
+        // substeps 不在清单里，保持默认。
+        assert_eq!(cfg.physics_sub_steps, WorldConfig::default().physics_sub_steps);
+
+        // 手改出的垃圾值不能流进物理：fixed_dt=0 是"时间静止"。
+        let bad = xgame_core::RuntimeConfig {
+            gravity: [0.0, f32::NAN, 0.0],
+            fixed_dt: 0.0,
+        };
+        let cfg = WorldConfig::from_project_runtime(&bad);
+        assert_eq!(cfg.fixed_dt, 1.0 / 60.0);
+        assert!(cfg.gravity.is_finite());
     }
 
     /// 用静态地面 + 动态方块跑一段模拟，验证"动态体由物理驱动"这条链路。

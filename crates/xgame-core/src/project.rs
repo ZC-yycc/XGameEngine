@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ContentConfig, WindowConfig};
+use crate::config::{ContentConfig, RuntimeConfig, WindowConfig};
 use crate::prefab::{Prefab, PREFAB_EXTENSION};
 use crate::scene::Scene;
 use crate::transform::Transform;
@@ -66,6 +66,12 @@ pub struct Project {
     /// 内容目录布局。
     #[serde(default)]
     pub content: ContentConfig,
+    /// 玩法运行时参数（重力 / 固定步长）。
+    ///
+    /// 后加的字段：旧清单没有它，`#[serde(default)]` 补默认值 —— 与当年加
+    /// `prefabs_dir` / `scripts_dir` 同一套路，不强制升级项目文件。
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
 }
 
 fn default_format_version() -> u32 {
@@ -94,6 +100,7 @@ impl Default for Project {
             entry_scene: DEFAULT_ENTRY_SCENE.into(),
             window: WindowConfig::default(),
             content: ContentConfig::default(),
+            runtime: RuntimeConfig::default(),
         }
     }
 }
@@ -736,5 +743,31 @@ mod tests {
         )"#;
         let project: Project = ron::from_str(ron).expect("老清单应当能反序列化");
         assert_eq!(project.content.prefabs_dir, "Prefabs");
+    }
+
+    /// 老项目的 `project.ron` 里没有 `runtime` 节（重力 / 固定步长是后加的），
+    /// 反序列化时必须补上与当年硬编码值一致的默认值，物理行为不能因为升级
+    /// 引擎而悄悄变样。
+    #[test]
+    fn old_manifest_without_runtime_defaults() {
+        let ron = r#"(format_version: 1, name: "Old")"#;
+        let project: Project = ron::from_str(ron).expect("老清单应当能反序列化");
+        assert_eq!(project.runtime, crate::config::RuntimeConfig::default());
+        // 默认值 = 旧 WorldConfig::default() 里硬编码的那一对。
+        assert_eq!(project.runtime.gravity, [0.0, -9.81, 0.0]);
+        assert_eq!(project.runtime.fixed_dt, 1.0 / 60.0);
+    }
+
+    /// 新字段写盘 → 读回一致，且老代码能忽略未知字段（前向兼容反向验证：
+    /// 清单里多了 `runtime` 节时 `manifest_roundtrip` 也覆盖到了）。
+    #[test]
+    fn runtime_survives_manifest_roundtrip() {
+        let mut project = Project::new("RT");
+        project.runtime.gravity = [0.0, -1.0, 0.0];
+        project.runtime.fixed_dt = 1.0 / 120.0;
+        let text = ron::to_string(&project).expect("序列化");
+        assert!(text.contains("runtime"), "runtime 节必须落盘");
+        let back: Project = ron::from_str(&text).expect("反序列化");
+        assert_eq!(back.runtime, project.runtime);
     }
 }
