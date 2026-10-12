@@ -190,6 +190,9 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 本帧闭包的起点：探针用它算 `w_us`（工作）与 dt 的差值（上屏/唤醒段）。
+        let t_in = Instant::now();
+
         // ── 丢掉「位置没变」的指针移动事件 ──
         //
         // egui 在帧末只要看到「本帧有输入事件」就会请求**立即**重绘；而 Windows 在指针
@@ -249,7 +252,20 @@ impl eframe::App for EditorApp {
             }
         }
 
-        self.probe.tick(now, live);
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        // 分组用：rt=0 表示这是同一次 ctx.run 的丢弃重跑（第二遍），不是新帧。
+        let raw_time = ctx.input(|i| i.raw.time.is_some());
+        let will_discard = ctx.will_discard();
+        let pass_nr = ctx.cumulative_pass_nr();
+        self.probe.tick(
+            t_in,
+            Instant::now(),
+            live,
+            pointer.map(|p| (p.x, p.y)),
+            raw_time,
+            will_discard,
+            pass_nr,
+        );
     }
 }
 
@@ -447,18 +463,47 @@ fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
 
+    // 上屏参数 A/B 开关（诊断用）：
+    //   XGAME_PRESENT_MODE   fifo|fifo_relaxed|immediate|mailbox|auto_no_vsync|auto_vsync
+    //   XGAME_FRAME_LATENCY  1|2|3
+    // 不设 = 默认 AutoNoVsync（不等垂直同步，交给 DWM 按屏幕刷新率合成）。
+    let present_mode = match std::env::var("XGAME_PRESENT_MODE").as_deref() {
+        Ok("fifo") => wgpu::PresentMode::Fifo,
+        Ok("fifo_relaxed") => wgpu::PresentMode::FifoRelaxed,
+        Ok("immediate") => wgpu::PresentMode::Immediate,
+        Ok("mailbox") => wgpu::PresentMode::Mailbox,
+        Ok("auto_no_vsync") => wgpu::PresentMode::AutoNoVsync,
+        Ok("auto_vsync") => wgpu::PresentMode::AutoVsync,
+        _ => wgpu::PresentMode::AutoNoVsync,
+    };
+    let frame_latency: Option<u32> = std::env::var("XGAME_FRAME_LATENCY")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
             .with_title("XGameEngine"),
-        // 交换链只留 1 帧在飞。
+        // 不限帧上屏（AutoNoVsync → Immediate，不支持时逐级回退到 Fifo）。
         //
-        // 默认值（`None` → wgpu 用 2）会让 present 最多排 3 帧：连续输入时表现为
-        // "几帧挤在一起、然后一口气停 3 个 vsync"，鼠标悬停与拖窗口的手感就是
-        // 一顿一顿的（实测帧间隔是 1.6ms / 54ms 的双峰，而不是均匀的 16.7ms）。
-        // 收到 1 之后 present 最多等一个 vsync，输入到画面的延迟明显变小。
+        // 这是"界面拖动卡顿/迟钝"的根因修复，实测依据（PresentMon 2.6 + 帧探针，
+        // RTX 2080 1440x900，hybrid 策略拖拽 5s）：
+        //
+        // - vsync（Fifo / FifoRelaxed，latency=1）：交换链 acquire 与 present 的
+        //   等待会叠加，update() 节奏变成 33/1/16ms 的三连拍 —— 每 ~50ms 就有一段
+        //   33ms 盲区，期间**输入完全不被处理**、界面内容按三连拍刷新（一顿一顿）；
+        //   提交→上屏 32.8ms，输入→光子 p90 ≈ 50ms。
+        // - vsync + latency=2：帧挤成串、再整段停 33-50ms，比 latency=1 更糟。
+        // - 不限帧：update 间隔 p50=0.5ms / p99=1.9ms，无盲区；提交→上屏 17.5ms
+        //   （p99 18.9）；屏上节奏由 DWM 保证（动画误差≈0）。交互期代价约 1 核
+        //   CPU + ~11% GPU，闲置时 frame_policy 照常停帧（0 占用）。
+        //
+        // 想回 vsync 对比：XGAME_PRESENT_MODE=fifo（或 fifo_relaxed）。
+        // desired_maximum_frame_latency 保持 1：仅对 vsync 模式有意义（A/B 中
+        // lat=1 优于 lat=2），对不限帧模式无影响。
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
-            desired_maximum_frame_latency: Some(1),
+            present_mode,
+            desired_maximum_frame_latency: frame_latency.or(Some(1)),
             ..Default::default()
         },
         ..Default::default()
