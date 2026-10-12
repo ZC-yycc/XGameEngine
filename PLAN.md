@@ -665,6 +665,8 @@ WM_MOUSEMOVE(同一坐标) → PointerMoved → egui 认为"要再画一帧"
 
 ### 五、遗留
 
-- p90≈33ms 的双峰（vsync 相位）三档一致，属 eframe/vsync 层，策略管不到。
+- ~~p90≈33ms 的双峰（vsync 相位）三档一致，属 eframe/vsync 层，策略管不到。~~
+  已在 10-12 第三轮定位为交换链 acquire+present 双重等待（33ms 输入盲区），
+  以 `present_mode = AutoNoVsync` 治本，见 FLOW「上屏节奏」节。
 - eframe 层"事件到达即请求重绘"无法从应用侧拦截（噪声事件仍会各触发一帧，
   但不再连锁续命）。

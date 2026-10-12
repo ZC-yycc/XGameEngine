@@ -435,16 +435,40 @@ Windows 指针静止时仍会反复投递同一坐标的 WM_MOUSEMOVE
 > ~60fps、p99 ≈ 35ms；Reactive（旧）拖拽中存在 30% 死时间 —— 这就是"操作发涩"的
 > 量化。Hybrid 空闲帧数只有 Always 的 ~1/3，且完全无输入时整段归零
 > （实测有 6.27s 的连续零帧空档）。
+> （这组绝对值是 vsync 时代的 —— 上屏已改 AutoNoVsync，改后的量级见「上屏节奏」节。）
 > 回归测试在 `frame_policy.rs`：`reactive_only_fires_on_actual_input` /
 > `hybrid_keeps_running_while_interacting` / `hybrid_never_stops_during_play` /
 > `hybrid_keeps_running_within_the_grace_window` / `hybrid_idles_once_the_grace_window_expires`。
 
 > **量帧间隔用 `frame_probe.rs`**（环境变量 `XGAME_FRAME_LOG=<文件>`，每帧一行
-> `t_us/dt_us/live`）。两个坑都踩过：探针**不能**用 `BufWriter`（驱动脚本用
+> `t_us/dt_us/w_us/px/py/rt/d/p/live` —— 关键是 `w_us`（闭包内工作量）：**w 小而
+> dt 巨 = 时间花在上屏/唤醒段而不是计算**，第三轮就是靠它把矛头从 UI/渲染转向
+> present 的）。两个坑都踩过：探针**不能**用 `BufWriter`（驱动脚本用
 > `taskkill /F` 收尾，进程没机会 flush，丢的恰好是被测的尾段）；统计要**只取阶段
 > 窗口**并排除窗口内第一帧的 dt（它是跨窗口边界算来的，会把"死时间"算出 >100%）。
 > 另外注意测量机环境里可能有**真实指针活动**（位置漂移、偶发按键），idle 档的数据
 > 会被它污染 —— 判定"空闲是否真停"以"有无连续零帧空档"为准，别看平均 fps。
+
+### 上屏节奏：`AutoNoVsync`（2026-10-12 第三轮定案）
+
+"操作迟钝、拖动一顿一顿"的最后一块拼图不在 UI 也不在渲染，而在**交换链的等待结构**：
+
+- vsync（Fifo / FifoRelaxed）+ `desired_maximum_frame_latency=1` 时，wgpu 的 acquire
+  （取后缓冲）与 present 各等一个 vsync，两处等待叠成 **33ms 输入盲区**：`update()`
+  节奏变成 33/1/16ms 的三连拍 —— 每 ~50ms 有一段 33ms **期间输入完全不被处理**、
+  界面内容按三连拍刷新；提交→上屏 32.8ms、输入→光子 p90 ≈ 50ms。
+  （PLAN 十四遗留的"p90≈33ms 双峰三档一致、策略管不到"就是它 —— 它跟帧策略无关，
+  是 present 层的。）
+- 修法：`main.rs` 默认 `present_mode = AutoNoVsync`（Immediate → Mailbox → Fifo 逐级
+  回退），上屏等屏交给 DWM 按刷新率合成；窗口化应用由 DWM 合成、不撕裂。
+  诊断开关保留：`XGAME_PRESENT_MODE` / `XGAME_FRAME_LATENCY`（A/B 后别改回 vsync 默认）。
+- 实测（PresentMon 2.6 与帧探针对齐）：改后 `update()` 间隔 p50 0.5ms / p99 1.9ms
+  无盲区，提交→上屏 17.5ms（p99 18.9，减半）；交互期代价 ~1 核 CPU + ~11% GPU
+  （**不是 GPU 瓶颈**，GPUBusy 仅 3.6ms）；闲置仍由 frame_policy 停帧（0.21s 内归零）。
+  状态栏 FPS 交互期显示 ~2000 是**不限帧的真实值**，不是 bug。
+- 已排除、勿重测：`latency=2`（帧挤成串后整段停 33-50ms，更糟）、Vulkan 后端（同样
+  三连拍）、DX11 后端（wgpu 没编译，surface 创建失败）、egui 多遍（探针 `rt=1` 全程、
+  `d=0`）。
 
 ### 视口缩放：节流重建离屏目标
 
