@@ -116,7 +116,7 @@
 
 ---
 
-## Agent-Native：AI 智能体深度操控引擎（战略方向 ⬜ 启动）
+## Agent-Native：AI 智能体深度操控引擎（战略方向 🟨 ① MCP 已落地）
 
 **目标**：用户的 AI 智能体能**深度、精确、可验证地**操作本引擎做游戏开发 —— 读写项目、
 运行检查、拿到可机读结果，而不是"截图点按钮"。**架构判决式：后续每个架构决策都要过一问 ——
@@ -128,10 +128,12 @@
 - **程序化验证** —— `xgame-editor --check <项目>`（退出码 0/1/2，秒级，可进 CI）；
 - **程序化配置** —— 重力 / 步长进 `project.ron`，改一行文本即调参；
 - **单一运行时** —— 无头验证的行为与玩家实跑的完全一致（编辑器 Play == 游戏二进制）；
-- **安全网** —— 176 个回归测试、每条先证红，智能体改引擎也有兜底。
+- **安全网** —— 196 个回归测试、每条先证红，智能体改引擎也有兜底。
 
-近期计划（按序）：**① MCP server 最小工具集**（project_info / scene_read / scene_write /
-entity_upsert / project_check / project_build）→ **② 无头运行**（`--headless --frames N`
+进度与计划：**① MCP server 最小工具集 ✅ 本轮落地** —— 新 crate `xgame-mcp`
+（`dist\xgame-mcp.exe`，stdio 按行 JSON-RPC），6 个工具 project_info / scene_read /
+scene_write / entity_upsert / entity_remove / project_check，配 20 条回归测试与工具
+参考 [`Docs/MCP.md`](Docs/MCP.md) → **② 无头运行**（`--headless --frames N`
 输出统计 JSON）→ **③ 场景 schema 导出**（`--export-schema`，机器可读的字段与类型）。
 详细依据与完整矩阵：[`Docs/差距分析.md`](Docs/差距分析.md) 文末战略章。
 
@@ -239,7 +241,8 @@ XGameEngine/                       # 引擎源码仓库
 │   │       ├── id.rs              # EntityId
 │   │       ├── time.rs            # GameClock
 │   │       ├── asset.rs           # AssetId
-│   │       └── project.rs         # Project / ProjectHandle（新）
+│   │       ├── project.rs         # Project / ProjectHandle（新）
+│   │       └── check.rs           # check_project：无头验证（--check 与 MCP 共用，新）
 │   ├── xgame-math/                # 数学库
 │   │   └── src/
 │   │       ├── projection.rs
@@ -267,7 +270,6 @@ XGameEngine/                       # 引擎源码仓库
 │   │       ├── hub.rs             # 项目枢纽：新建 / 打开 / 最近（新）
 │   │       ├── recents.rs         # 最近项目持久化（新）
 │   │       ├── builder.rs         # 项目构建：打包成独立游戏（新）
-│   │       ├── check.rs           # 无头项目检查 --check（新）
 │   │       ├── dialogs.rs         # 应用级弹窗：未保存确认 / 另存为（新）
 │   │       ├── state.rs           # 中央状态（持有 ProjectHandle）
 │   │       ├── scene_renderer.rs  # 离屏渲染（按项目根解析模型）
@@ -285,6 +287,11 @@ XGameEngine/                       # 引擎源码仓库
 │   │           ├── scene_view.rs  # 3D 视口
 │   │           ├── console.rs     # 控制台
 │   │           └── theme.rs       # 暗色主题
+│   ├── xgame-mcp/                 # MCP server：AI 智能体工具面（新）
+│   │   └── src/
+│   │       ├── main.rs            # stdin/stdout 管道（唯一碰 I/O 的一层）
+│   │       ├── lib.rs             # 协议层：handle_line() 按行 JSON-RPC + 两层错误
+│   │       └── tools.rs           # 6 工具：project_info / 场景读写 / 实体增删 / 检查
 │   └── xgame-game/                # 独立游戏
 │       └── src/
 │           └── main.rs            # 游戏入口（参数 > exe 同目录项目 > 示例项目）
@@ -302,6 +309,9 @@ cargo run -p xgame-editor -- projects/SampleScene
 
 # 无头项目检查（不开窗口；退出码 0=干净 / 1=加载失败 / 2=悬空引用）
 cargo run -p xgame-editor -- --check projects/SampleScene
+
+# MCP server —— AI 智能体接口（stdio 按行 JSON-RPC；工具参考 Docs/MCP.md）
+cargo run -p xgame-mcp
 
 # 独立游戏 —— 运行指定项目（省略参数时默认 projects/SampleScene）
 cargo run -p xgame-game -- projects/SampleScene

@@ -18,6 +18,10 @@ cargo run -p xgame-game -- projects/SampleScene
 # （退出码 0=干净 · 1=加载失败 · 2=悬空引用；给 CI / AI 智能体用）
 cargo run -p xgame-editor -- --check projects/SampleScene
 
+# MCP server —— AI 智能体接口：stdio 起服务，客户端可读写场景、动实体、跑检查
+# （工具参考 Docs/MCP.md）
+cargo run -p xgame-mcp
+
 # 一键构建可分发软件包（等价于双击根目录的「一键构建.cmd」）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
@@ -408,8 +412,31 @@ Build/<项目名>/
 这个布局是刻意的：`xgame-game` 在没有命令行参数时，会优先去找**自己可执行文件旁边**的
 `project.ron`。所以构建出来的游戏**双击 exe 就能跑**，不需要参数，也不需要启动脚本。
 
+## MCP（AI 智能体接口）
+
+`xgame-mcp` 是本引擎的 **MCP server** —— Agent-Native 路线的第一块：把"读项目、改场景、
+动实体、跑检查"暴露成标准 MCP 工具，Cursor / Claude 等任何 MCP 客户端接上就能**不用鼠标
+直接操纵引擎**做游戏开发。无窗口、无 GPU，stdio 起服务（按行 JSON-RPC）。
+
+```json
+{ "mcpServers": { "xgame": { "command": "D:\\...\\dist\\xgame-mcp.exe" } } }
+```
+
+| 工具 | 干什么 |
+|---|---|
+| `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
+| `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
+| `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |
+| `entity_upsert` | 按名字创建/部分更新实体（变换、模型、脚本、父子） |
+| `entity_remove` | 按名字删除实体（重名歧义拒绝；子节点提升不连坐） |
+| `project_check` | 无头验证（与 `--check` 同一份逻辑），返回 JSON 报告 |
+
+改完就 `project_check` 自证没改坏 —— 这是智能体的「改 → 查 → 验」闭环。
+完整协议面、参数语义与已知边界（编辑器并发写、清单只读）见 [`Docs/MCP.md`](Docs/MCP.md)。
+
 ## 依赖方向
 
 ```
 core ← math ← {render, physics} ← editor / game
+core ← mcp                      （MCP server 只依赖 core：无窗口、无 GPU）
 ```

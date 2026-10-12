@@ -8,6 +8,9 @@
         dist\xgame-game.exe            the player. The editor COPIES this file when
                                        you press "Build", so it must stay next to
                                        xgame-editor.exe.
+        dist\xgame-mcp.exe             MCP server: lets AI agents (Cursor, Claude,
+                                       ...) read/write scenes and check projects
+                                       over stdio. No window, no GPU.
         dist\projects\SampleScene\     the bundled sample project
         dist\README.txt                short usage note
 
@@ -273,8 +276,9 @@ Write-Step 'Collecting artifacts'
 
 $editorExe = Join-Path $RepoRoot 'target\release\xgame-editor.exe'
 $gameExe   = Join-Path $RepoRoot 'target\release\xgame-game.exe'
+$mcpExe    = Join-Path $RepoRoot 'target\release\xgame-mcp.exe'
 
-foreach ($exe in @($editorExe, $gameExe)) {
+foreach ($exe in @($editorExe, $gameExe, $mcpExe)) {
     if (-not (Test-Path $exe)) { throw "Expected build output is missing: $exe" }
 }
 
@@ -288,8 +292,10 @@ if ([System.IO.Directory]::Exists($DistDir)) {
 
 Copy-Item $editorExe $DistDir -Force
 Copy-Item $gameExe   $DistDir -Force
+Copy-Item $mcpExe    $DistDir -Force
 Write-Ok 'xgame-editor.exe'
 Write-Ok 'xgame-game.exe'
+Write-Ok 'xgame-mcp.exe'
 
 if (-not $SkipSample) {
     $sample = Join-Path $RepoRoot 'projects\SampleScene'
@@ -327,6 +333,21 @@ What xgame-game.exe is for
 --------------------------
 It is the player runtime. The editor copies it every time you press "Build",
 so keep it next to xgame-editor.exe.
+
+What xgame-mcp.exe is for
+-------------------------
+It is the MCP server for AI agents: it exposes project/scene tools (read a
+scene, write a scene, create/update/remove entities, check the project) over
+stdin/stdout as newline-delimited JSON-RPC. It needs no window and no GPU.
+Point your MCP client at it, e.g. in Cursor settings:
+
+    {
+      "mcpServers": {
+        "xgame": { "command": "C:\\...\\dist\\xgame-mcp.exe" }
+      }
+    }
+
+See Docs/MCP.md in the repository for the tool reference.
 '@
 
 Set-Content -Path (Join-Path $DistDir 'README.txt') -Value $usage -Encoding UTF8

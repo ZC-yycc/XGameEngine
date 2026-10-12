@@ -4975,6 +4975,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xgame-mcp"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "ron",
+ "serde_json",
+ "xgame-core",
+]
+
+[[package]]
 name = "xgame-physics"
 version = "0.1.0"
 dependencies = [

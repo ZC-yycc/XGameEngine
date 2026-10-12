@@ -882,6 +882,7 @@ GameApp::render()
        └── 收集产物
              ├── target/release/xgame-editor.exe → dist/
              ├── target/release/xgame-game.exe   → dist/   （编辑器 Build 时要复制它）
+             ├── target/release/xgame-mcp.exe    → dist/   （AI 智能体的 MCP server）
              ├── projects/SampleScene/           → dist/projects/
              └── 写 dist/README.txt
 ```
@@ -1086,6 +1087,8 @@ xgame-physics  rapier3d 刚体、碰撞体、物理世界、调试绘制
     ↑
 xgame-editor   egui 面板、SceneRenderer（ScenePipeline wrapper）、GameRuntime
 xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWorld）
+xgame-mcp      MCP server（stdio 按行 JSON-RPC，智能体读写场景 / 跑检查；只依赖 core，
+               无窗口无 GPU —— 手段：喂行进、断言行出的纯函数 handle_line()）
 ```
 
 ---
@@ -1094,11 +1097,11 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 
 | 文件 | 行数 | 核心函数 |
 |---|---|---|
-| `editor/main.rs` | 618 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `--check` 分派）、`open_project()`、`editor_ui()`（末尾画设置 / 另存为 / 未保存弹窗） |
+| `editor/main.rs` | 617 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `--check` 分派）、`open_project()`、`editor_ui()`（末尾画设置 / 另存为 / 未保存弹窗） |
 | `editor/hub.rs` | 352 | `ProjectHub::ui()`、`open_project_at()`、`create_project_at()` |
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
-| `editor/check.rs` | 149 | `check_project()`（无头验证清单 / 场景 / 引用，退出码 0/1/2）、`CheckReport` |
+| `core/check.rs` | 150 | `check_project()`（无头验证清单 / 场景 / 引用，退出码 0/1/2 契约的依据；**编辑器 `--check` 与 MCP `project_check` 共用同一份**）、`CheckReport` |
 | `editor/dialogs.rs` | 141 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_save_as_dialog()` |
 | `editor/state.rs` | 1756 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()` / `save_scene_as()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
 | `editor/scene_renderer.rs` | 804 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（收 `&Scene`，指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`mesh_bounds()`（拾取用） |
@@ -1123,4 +1126,7 @@ xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWor
 | `editor/dock.rs` | 117 | `create_tile_tree()`、`EditorBehavior` |
 | `editor/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |
 | `game/main.rs` | 517 | `GameRunner`（`ApplicationHandler`：`resumed` / `window_event` / `about_to_wait`）、`GameApp::new()`、`update()`、`render()`、`resolve_project()` |
-| `tools/build-release.ps1` | 349 | `Resolve-Cargo`、`Enable-MsvcEnv`、`Invoke-CargoBuild` |
+| `mcp/lib.rs` | 224 | `handle_line()`（协议入口，喂行进断言行出的纯函数）、`initialize_result()`（版本协商）、两层错误（协议 `error` vs 工具 `isError`） |
+| `mcp/tools.rs` | 693 | `schemas()`（6 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、upsert（先挂父再改变换）/ remove / check 实现 |
+| `mcp/main.rs` | 24 | stdin/stdout 管道（唯一碰 I/O 的一层） |
+| `tools/build-release.ps1` | 370 | `Resolve-Cargo`、`Enable-MsvcEnv`、`Invoke-CargoBuild` |
