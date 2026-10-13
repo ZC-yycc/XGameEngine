@@ -183,12 +183,19 @@ lights: [
 (
     name: "Fox",
     model: "Resources/Fox.gltf",
-    animator: (
+    transform: (
+        position: (0.0, 0.0, 0.0),
+        rotation: (0.0, 0.0, 0.0, 1.0),
+        // Khronos Fox 样例按厘米建模（骨骼跨度 ~100 单位，且 glTF 里没有归一化
+        // 根节点），scale 0.01 才是真实狐狸体型（约 1 米），否则有百倍立方体大。
+        scale: (0.01, 0.01, 0.01),
+    ),
+    animator: Some((
         clip: "Walk",      // glTF 里的动画剪辑名
         speed: 1.0,        // 播放倍率；0 = 冻结，1 = 原速
         looping: true,     // true 取模循环；false 播完停在最后一帧
         autoplay: true,    // 载入即自动播放；false = 停在第 0 帧摆姿势
-    ),
+    )),
 ),
 ```
 
