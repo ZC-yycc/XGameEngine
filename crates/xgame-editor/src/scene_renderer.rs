@@ -313,6 +313,23 @@ impl SceneRenderer {
             .unwrap_or_default()
     }
 
+    /// 某模型的骨骼（节点）名列表 —— 去重、跳过匿名 —— Inspector 层栈遮罩下拉用。
+    ///
+    /// 模型还没加载时返回空（同 [`Self::animation_clip_names`] 的约定：面板先显示
+    /// "未加载"，预加载完成后自然出现选项）。
+    pub fn bone_names(&self, model: &str) -> Vec<String> {
+        let Some(mesh) = self.model_cache.get(model) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = Vec::new();
+        for node in &mesh.nodes {
+            if !node.name.is_empty() && !names.iter().any(|n| n == &node.name) {
+                names.push(node.name.clone());
+            }
+        }
+        names
+    }
+
     /// 某实体状态机的**当前状态名**（Inspector 显示"现在站在哪"用）。
     ///
     /// 单剪辑模式 / 还没 tick 过 → `None`（面板只在机器模式下显示这一行）。
@@ -377,7 +394,12 @@ impl SceneRenderer {
                     .additive
                     .as_ref()
                     .is_some_and(|a| a.weight > 0.0 && mesh.clip(&a.clip).is_some());
-                if clip_ok || additive_ok {
+                // 层栈：任一层权重 > 0 且剪辑在模型里 → 同理要出帧。
+                let layers_ok = animator
+                    .layers
+                    .iter()
+                    .any(|l| l.weight > 0.0 && mesh.clip(&l.clip).is_some());
+                if clip_ok || additive_ok || layers_ok {
                     active = true;
                 }
             }
@@ -550,6 +572,28 @@ impl SceneRenderer {
                     hash = mix_bits(hash, add.weight.to_bits() as u64);
                     hash = mix_bits(hash, add.speed.to_bits() as u64);
                     hash = mix_bits(hash, add.looping as u64);
+                }
+                // 层栈：每层的 名字/模式/剪辑/权重/速度/循环/遮罩 全进指纹 ——
+                // 脚本按名推权重、Inspector 加层/改遮罩都要触发重绘。分隔字节
+                // 防不同切分的相邻字符串撞出同一串哈希（["ab","c"] vs ["a","bc"]）。
+                for l in &animator.layers {
+                    for byte in l.name.as_bytes() {
+                        hash = mix_bits(hash, *byte as u64);
+                    }
+                    hash = mix_bits(hash, l.mode as u64);
+                    for byte in l.clip.as_bytes() {
+                        hash = mix_bits(hash, *byte as u64);
+                    }
+                    hash = mix_bits(hash, l.weight.to_bits() as u64);
+                    hash = mix_bits(hash, l.speed.to_bits() as u64);
+                    hash = mix_bits(hash, l.looping as u64);
+                    for m in &l.mask {
+                        for byte in m.as_bytes() {
+                            hash = mix_bits(hash, *byte as u64);
+                        }
+                        hash = mix_bits(hash, 0xFF);
+                    }
+                    hash = mix_bits(hash, 0xFE);
                 }
             }
         }
@@ -1011,6 +1055,56 @@ mod tests {
             plain,
             signature(std::slice::from_ref(&fox), &lights, ambient),
             "摘掉叠加层应还原指纹"
+        );
+    }
+
+    /// 层栈的每层配置（名字 / 模式 / 剪辑 / 权重 / 遮罩）都进指纹 ——
+    /// 加层、脚本按名推权重、改遮罩切分都要触发重绘。
+    #[test]
+    fn signature_tracks_layer_config() {
+        use xgame_core::{AnimLayer, AnimLayerMode};
+
+        let lights = [Light::default()];
+        let ambient = [0.06, 0.06, 0.08];
+
+        let mut fox = entity("Fox", "Resources/Fox.gltf", Vec3::ZERO);
+        fox.animator = Some(xgame_core::Animator::new("Walk"));
+        let plain = signature(std::slice::from_ref(&fox), &lights, ambient);
+
+        fox.animator.as_mut().unwrap().layers = vec![AnimLayer {
+            name: "upper".into(),
+            mode: AnimLayerMode::Override,
+            clip: "Survey".into(),
+            weight: 0.6,
+            mask: vec!["Spine1".into()],
+            ..Default::default()
+        }];
+        let layered = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(plain, layered, "加层没进指纹");
+
+        // 权重（脚本按名推的量）变了要变。
+        fox.animator.as_mut().unwrap().layers[0].weight = 0.2;
+        let lighter = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(layered, lighter, "层权重没进指纹");
+
+        // 遮罩切分变了要变：["Spine1"] 与 ["Spine","1"] 的字节流相同，
+        // 靠分隔字节才区分得开 —— 这条测试钉住分隔。
+        fox.animator.as_mut().unwrap().layers[0].mask =
+            vec!["Spine".to_string(), "1".to_string()];
+        let masked = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(lighter, masked, "遮罩（含切分）没进指纹");
+
+        // 模式变了要变。
+        fox.animator.as_mut().unwrap().layers[0].mode = AnimLayerMode::Additive;
+        let remoded = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(masked, remoded, "求值模式没进指纹");
+
+        // 清空栈回到纯基础。
+        fox.animator.as_mut().unwrap().layers.clear();
+        assert_eq!(
+            plain,
+            signature(std::slice::from_ref(&fox), &lights, ambient),
+            "清空层栈应还原指纹"
         );
     }
 

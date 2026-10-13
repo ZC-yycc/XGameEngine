@@ -565,6 +565,8 @@ pub fn parse_animation_data(
             crate::animation::AnimNode {
                 // u32::MAX 是"没父"的哨兵（children 反填时的初值）。
                 parent: (parents[node.index()] != u32::MAX).then_some(parents[node.index()]),
+                // glTF 节点名（可能没有）—— 骨骼遮罩的选择面。
+                name: node.name().unwrap_or_default().to_owned(),
                 translation: Vec3::from_array(translation),
                 rotation: Quat::from_array(rotation),
                 scale: Vec3::from_array(scale),

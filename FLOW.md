@@ -366,15 +366,18 @@ scene_view::show_content(state, ui)
   │   │     │   （换状态 = 换剪辑，复用同一条交叉淡入）
   │   │     ├── 叠加层同步解析（剪辑/权重/速度；换叠加剪辑只归零它自己的时钟），
   │   │     │   时钟与基础层共用同一个播放闸门
+  │   │     ├── 层栈同步：逐层**按层名**对齐旧时钟（Inspector 重排不丢进度、
+  │   │     │   删层即 prune、换本层剪辑只归零那一层；权重钳 [0,1]、mode/遮罩跟配置）
   │   │     └── 有剪辑在播时时间每帧都变 → 下面的指纹跟着变 → 持续出帧；
   │   │         暂停 / 无动画 → 时间冻结 → 静态帧照旧整段跳过
   │   │
   │   ├── 【输入指纹】相机 / 视口尺寸 / 环境光 + 有效光源（含阴影开关）+
   │   │     每个实体的 model + **局部变换** + **父引用** + **Animator 配置**
   │   │     （剪辑 / 速度 / 循环 / 自动播放 / 淡入时长 / **状态机 entry+参数+状态表+转移表**
-  │   │      / **叠加层剪辑+权重+速度+循环**）
-  │   │     + **动画时钟签名**（基础与叠加**两个**时钟都进：基础层冻结而叠加层在走时
-  │   │       也要出帧），收成一个 u64（逐位比较）
+  │   │      / **叠加层剪辑+权重+速度+循环** / **层栈每层名字+模式+剪辑+权重+速度+循环+遮罩**，
+  │   │       遮罩项之间带分隔字节防不同切分撞哈希）
+  │   │     + **动画时钟签名**（基础、叠加、层栈**所有**时钟都进：基础层冻结而叠加层 /
+  │   │       层栈在走时也要出帧），收成一个 u64（逐位比较）
   │   │     └── 与上次**完全相同** → 整段跳过 ★
   │   │         ★ 指纹**排在解算世界矩阵之前**：静态帧连 `world_matrices()` 都省掉
   │   │
@@ -385,11 +388,13 @@ scene_view::show_content(state, ui)
   │   │     │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
   │   │     │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
   │   │     │     │   └── 攒完一次 `write_buffer` 写完整段（旧的逐实体写 = 每帧 N 次分配 + N 条命令）
-  │   │     │     ├── [动画实体] 按驱动解析的 (剪辑, 时间, 循环) 采样（状态机模式下
-  │   │     │     │               剪辑来自状态表；正在换剪辑/换状态 → 旧剪辑连同时钟
-  │   │     │     │               一起淡出，两份局部姿态按权重混合）；配了叠加层再把
-  │   │     │     │               **增量**（叠加剪辑当前帧 − 其第 0 帧）按 weight 加到
-  │   │     │     │               姿态上（淡入中也照叠）→ 关节矩阵进
+  │   │     │     ├── [动画实体] `compute_bones_composed` **一条路**：基础姿态
+  │   │     │     │               （单剪辑；换剪辑/换状态淡入中 → 旧剪辑连同时钟一起
+  │   │     │     │               淡出、两份局部姿态按权重混合）→ 逐层合入
+  │   │     │     │               （additive 快捷层先，layers 按数组顺序盖上去、后层盖前层；
+  │   │     │     │               Additive = 加增量（减第 0 帧参考），Override = 向该层
+  │   │     │     │               姿态 lerp；每层只作用于**遮罩命中**的骨骼；零权重/
+  │   │     │     │               剪辑缺失的层跳过）→ 关节矩阵进
   │   │     │     │               **骨骼槽位**（每实体 256 骨定长）
   │   │     │     │     └── 容量不够先翻倍重建骨骼缓冲（连带换两个绑定组，必须在开 pass 之前）
   │   │     │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
@@ -558,9 +563,11 @@ _"moving a window doesn't warrant a repaint"_，后来被并进大组里丢了�
 `SceneRenderer::render` 因此先算一个**输入指纹**：相机矩阵与位置、视口尺寸、环境光、
 参与光照的光源（含 `casts_shadow` / `shadow_resolution`）、每个实体的模型标识、**局部变换**
 与**父引用**、实体的 **Animator 配置**（剪辑 / 速度 / 循环 / 自动播放 / 淡入时长、
-**状态机的 entry / 参数值 / 状态表 / 转移表**、**叠加层的剪辑 / 权重 / 速度 / 循环**），
-外加**动画时钟签名**（`AnimationDriver::signature`，按实体 ID 排序的确定性混合，
-基础与叠加**两个**时钟都参与）。这些正是着色器会读到的东西；
+**状态机的 entry / 参数值 / 状态表 / 转移表**、**叠加层的剪辑 / 权重 / 速度 / 循环**、
+**层栈每层的名字 / 模式 / 剪辑 / 权重 / 速度 / 循环 / 遮罩**——遮罩项之间带分隔字节，
+防止不同切分的相邻字符串撞出同一串哈希），外加**动画时钟签名**
+（`AnimationDriver::signature`，按实体 ID 排序的确定性混合，基础、叠加、层栈
+**所有**时钟都参与）。这些正是着色器会读到的东西；
 选中态、gizmo、网格开关、物理调试线都不在其中（它们画在 egui 叠加层上，与离屏纹理无关）。
 指纹与上一帧逐位相同 → 整段渲染跳过，`painter.image` 照旧贴上一帧那张纹理。
 动画时钟是**唯一每帧都变的指纹输入** —— 这正是"有剪辑在播就逐帧画、播完自动回到
@@ -1137,7 +1144,7 @@ xgame-mcp      MCP server（stdio 按行 JSON-RPC，智能体读写场景 / 跑�
 | `core/check.rs` | 150 | `check_project()`（无头验证清单 / 场景 / 引用，退出码 0/1/2 契约的依据；**编辑器 `--check` 与 MCP `project_check` 共用同一份**）、`CheckReport` |
 | `editor/dialogs.rs` | 141 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_save_as_dialog()` |
 | `editor/state.rs` | 1756 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()` / `save_scene_as()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
-| `editor/scene_renderer.rs` | 949 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + Animator 配置（含淡入时长、**状态机 entry/参数/状态表/转移表**、**叠加层剪辑/权重/速度/循环**）+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判、叠加层按"权重>0 且剪辑存在"判，顺手预加载）、`animation_clip_names()`、`animation_state()`（状态机当前状态，Inspector 用）、`mesh_bounds()`（拾取用） |
+| `editor/scene_renderer.rs` | 1045 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + Animator 配置（含淡入时长、**状态机 entry/参数/状态表/转移表**、**叠加层剪辑/权重/速度/循环**、**层栈每层名字/模式/剪辑/权重/速度/循环/遮罩**（分隔字节防撞））+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判、叠加层与层栈按"权重>0 且剪辑存在"判，顺手预加载）、`animation_clip_names()`、`bone_names()`（骨骼名去重跳过匿名，Inspector 遮罩下拉用）、`animation_state()`（状态机当前状态，Inspector 用）、`mesh_bounds()`（拾取用） |
 | `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
@@ -1146,15 +1153,15 @@ xgame-mcp      MCP server（stdio 按行 JSON-RPC，智能体读写场景 / 跑�
 | `core/project.rs` | 773 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`；清单含 `runtime` 节（重力 / 固定步长） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 1026 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`）；`Entity::animator`（`#[serde(default)]`，旧场景读作 None） |
-| `core/animation.rs` | 142 | `Animator`（clip / speed / looping / autoplay / fade_time / machine / additive）、`is_active()`（机器感知：模式下 = autoplay 且存在 speed > 0 的状态）、`AnimMachine`（entry / parameters / states / transitions，`state()` / `transition_for()` 首条命中 / `is_usable()` 坏机器退回单剪辑）、`AnimState`（每状态自己的 clip/speed/looping，覆盖 Animator 字段）、`AnimCondition`（AtLeast ≥ / Below 严格 <，同阈值互补；缺参数永不匹配）、`AnimAdditive`（叠加层 clip/weight/speed/looping，与机器正交，默认 weight 1.0/speed 1.0/循环） |
-| `render/animation.rs` | 944 | `AnimClip` / `Track` / `Skin`、`sample_clip_into()`（二分钳位、坏轨道跳过）、`global_matrices()`（成环护栏）、`compute_bones()` / `compute_bones_blended()`（交叉淡入）/ `apply_additive_into()`（叠加增量：平移/缩放线性差、旋转按权重 slerp 局部增量，参考 = 叠加剪辑第 0 帧）/ `compute_bones_additive()` / `compute_bones_blended_additive()`（淡入 × 叠加组合）、`clip_time()`、`AnimationDriver`（tick：每帧求值一步状态转移 → 解析 (状态, 剪辑, 速度, 循环)，换状态/换剪辑同一条淡入路径；叠加层独立时钟与权重解析，换叠加剪辑只归零它自己；`playback()` / `state()` / `fade_from()`（含旧剪辑自己的循环方式）/ `additive()`、signature（基础+叠加两个时钟都进），换剪辑归零 + 淡入状态） |
+| `core/animation.rs` | 588 | `Animator`（clip / speed / looping / autoplay / fade_time / machine / additive / layers）、`is_active()`（机器感知：模式下 = autoplay 且存在 speed > 0 的状态）、`AnimMachine`（entry / parameters / states / transitions，`state()` / `transition_for()` 首条命中 / `is_usable()` 坏机器退回单剪辑）、`AnimState`（每状态自己的 clip/speed/looping，覆盖 Animator 字段）、`AnimCondition`（AtLeast ≥ / Below 严格 <，同阈值互补；缺参数永不匹配）、`AnimAdditive`（单层快捷方式：clip/weight/speed/looping，与机器正交，默认 weight 1.0/speed 1.0/循环）、`AnimLayer` / `AnimLayerMode`（层栈每层：name + mode(Additive/Override) + clip + weight + speed + looping + mask（骨骼子树根名单，空 = 整副骨架），与 additive 并存、内部排在它之后求值） |
+| `render/animation.rs` | 1883 | `AnimClip` / `Track` / `Skin` / `AnimNode`（含 `name`，遮罩按名选子树）、`sample_clip_into()`（二分钳位、坏轨道跳过）、`global_matrices()`（成环护栏）、`compute_bones_composed()`（**唯一的全量路径**：基础 + 可选淡入 → 逐层合入（LayerInput：Additive 加增量（参考 = 本层第 0 帧）/ Override 向该层 lerp，`mask_covers()` 按子树根名单逐骨裁剪，环护栏），旧 `compute_bones()` / `compute_bones_blended()` / `compute_bones_additive()` / `compute_bones_blended_additive()` 全是薄封装 + `apply_additive_into()`（单节点核心 `blend_additive`），`clip_time()`、`AnimationDriver`（tick：每帧求值一步状态转移 → 解析 (状态, 剪辑, 速度, 循环)，换状态/换剪辑同一条淡入路径；叠加层独立时钟与权重解析，换叠加剪辑只归零它自己；**层栈时钟按层名对齐同步**（重排不丢进度、换本层剪辑归零、删层 prune、权重钳位、mode/遮罩跟配置），全部时钟共用 `is_active` 闸门；`playback()` / `state()` / `fade_from()`（含旧剪辑自己的循环方式）/ `additive()` / `layers()`，signature（基础+叠加+层栈**所有**时钟都进），换剪辑归零 + 淡入状态） |
 | `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
-| `render/scene_pipeline.rs` | 1813 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体采样骨骼进槽位（剪辑名/时间/循环问驱动 `playback()`，换剪辑/换状态淡入中 → 两份姿势按权重混合，旧剪辑按自己的循环方式采样；配了叠加层 → 增量加到基础或混合后姿势上，四种组合各走一条 compute_bones*）+ `ensure_bones_capacity()` 扩容重建）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
-| `render/gltf_loader.rs` | 944 | `GltfMesh::from_file()` / `load()`、`read_material()`、`parse_animation_data()`（节点层级 / 皮肤 / 通道 → AnimClip+Skin，CUBICSPLINE 降采样）、`clip()` / `has_animation()`、`Bounds`（网格本地包围盒） |
+| `render/scene_pipeline.rs` | 1842 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体采样骨骼进槽位（剪辑名/时间/循环问驱动 `playback()`，换剪辑/换状态淡入中 → 旧剪辑按自己的循环方式采样后按权重混合；把 additive 快捷层 + 驱动 `layers()` 解析成 `LayerInput` 栈（剪辑缺失的层不进栈），统一交 `compute_bones_composed` 一条路出矩阵）+ `ensure_bones_capacity()` 扩容重建）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
+| `render/gltf_loader.rs` | 946 | `GltfMesh::from_file()` / `load()`、`read_material()`、`parse_animation_data()`（节点层级 / 皮肤 / 通道 → AnimClip+Skin，CUBICSPLINE 降采样；`AnimNode` 记 glTF 节点名 —— 遮罩按名选子树的来源）、`clip()` / `has_animation()`、`Bounds`（网格本地包围盒） |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |
 | `physics/world.rs` | 900 | `step(dt)`（按传入 dt 积分、子步均分 dt）、`add_body()`（维护 `body_handles` 反查表）、`add_collider()`（未知 body 只警告不 panic）、`debug_lines()` |
 | `editor/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|
-| `editor/panels/inspector.rs` | 703 | `show_content()`（含撤销集成、父节点下拉、预制体区块、**Animation 区块**：剪辑下拉 / 速度 / Fade / Loop / Autoplay / 状态机 UI / 「+ Additive」叠加层（剪辑下拉 + 权重 DragValue + 摘除））|
+| `editor/panels/inspector.rs` | 1033 | `show_content()`（含撤销集成、父节点下拉、预制体区块、**Animation 区块**：剪辑下拉 / 速度 / Fade / Loop / Autoplay / 状态机 UI / 「+ Additive」叠加层（剪辑下拉 + 权重 DragValue + 摘除）/ **「+ Add Layer」层栈**（每层一行：摘除 ✕ + 名字 TextEdit + 模式 menu_button + 剪辑下拉 + 权重 DragValue；第二行遮罩 chips（点 chip 移出）+ 「+ 骨骼」下拉（来源 `bone_names()`）；增删在闭包外收集后统一应用））|
 | `editor/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|
 | `editor/toolbar.rs` | 191 | `show()`（含 ⌂ Projects / 💾 Save · Save As / 🔨 Build / ⚙ 设置） |
 | `editor/settings.rs` | 198 | `show()`（项目设置窗口：草稿编辑 → Apply 校验写回 `project.ron`） |

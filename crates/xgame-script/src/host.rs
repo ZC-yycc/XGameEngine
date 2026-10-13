@@ -785,6 +785,76 @@ mod tests {
         );
     }
 
+    /// `set_anim_layer_weight` 按层名写权重并钳位；重名取第一个命中；
+    /// 未知名字 / 没挂 animator → 静默 no-op。
+    #[test]
+    fn set_anim_layer_weight_matches_by_name_and_clamps() {
+        use xgame_core::AnimLayer;
+
+        let project = TempProject::new("layer_weight");
+        let path = project.write_script(
+            "upper",
+            r#"
+            fn update(ctx) {
+                set_anim_layer_weight(ctx, "upper", 3.0);
+                set_anim_layer_weight(ctx, "ghost", 0.5);   // 不存在的层：静默
+            }
+            "#,
+        );
+
+        let mut with = Entity::new("with_layers");
+        with.scripts.push(path.clone());
+        let mut a = xgame_core::Animator::new("Walk");
+        a.layers = vec![
+            AnimLayer {
+                name: "legs".into(),
+                weight: 0.4,
+                ..Default::default()
+            },
+            AnimLayer {
+                name: "upper".into(),
+                weight: 0.1,
+                ..Default::default()
+            },
+            AnimLayer {
+                name: "upper".into(), // 重名：不该被改到
+                weight: 0.9,
+                ..Default::default()
+            },
+        ];
+        with.animator = Some(a);
+        let mut scene = Scene::new("layer_weight");
+        scene.add_entity(with);
+        let mut without = Entity::new("without_layers");
+        without.scripts.push(path.clone());
+        scene.add_entity(without);
+
+        let mut host = ScriptHost::new();
+        host.preload(&project.dir, &scene);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0));
+        assert!(host.logs.is_empty(), "不该有错误日志: {:?}", host.logs);
+
+        let layers = scene.entities[0].animator.as_ref().unwrap().layers.as_slice();
+        assert_eq!(layers[0].name, "legs", "别的层不该被误写");
+        assert!((layers[0].weight - 0.4).abs() < 1e-6, "别的层权重保持");
+        assert!(
+            (layers[1].weight - 1.0).abs() < 1e-6,
+            "同名第一命中应钳在 1.0，实得 {}",
+            layers[1].weight
+        );
+        assert!(
+            (layers[2].weight - 0.9).abs() < 1e-6,
+            "重名的第二个不该被写"
+        );
+        assert!(
+            scene.entities[1]
+                .animator
+                .as_ref()
+                .is_none_or(|a2| a2.layers.is_empty()),
+            "没配层栈的实体静默 no-op"
+        );
+    }
+
     #[test]
     fn script_errors_are_reported_without_killing_the_frame() {
         let project = TempProject::new("runtime_error");

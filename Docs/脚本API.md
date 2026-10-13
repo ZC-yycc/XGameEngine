@@ -226,6 +226,32 @@ fn update(ctx) {
 
 示例见 `projects/SampleScene/Scripts/FoxLocomotion.rhai`。
 
+### 4.10 混合层栈
+
+| 函数 | 说明 |
+|---|---|
+| `set_anim_layer_weight(ctx, name, value)` | 写**自己实体**层栈中按层名匹配的层的权重（自动钳在 0~1） |
+
+层栈（`Animator.layers`）里每层可以是 Additive（加增量）或 Override（整段覆盖），
+配**骨骼遮罩**后就是"只管某个部位"的层（如只盖上半身、腿照走）。脚本按层的
+**名字**查找：重名按栈内顺序取第一个命中，层名不存在 / 没挂动画组件时**静默无操作**
+（同 `set_anim_param`，通用脚本不需要先探测组件）。
+
+```rhai
+// 走路段把 "upper" 层（Override + 遮罩 = 上半身）开到 0.6，其他段归 0 ——
+// 走路上半身张望、跑动时恢复自然摆臂（层配置见场景 RON 的 animator.layers）
+fn update(ctx) {
+    if time(ctx) % 7.5 >= 2.5 && time(ctx) % 7.5 < 5.0 {
+        set_anim_layer_weight(ctx, "upper", 0.6);
+    } else {
+        set_anim_layer_weight(ctx, "upper", 0.0);
+    }
+}
+```
+
+示例见 `projects/SampleScene/Scripts/FoxLocomotion.rhai`（按时间分段推
+`"upper"` 层权重）。
+
 Rhai 自带完整的 `if` / `while` / `for` / 数组 / Map / 字符串，
 以及 `sin` / `cos` / `sqrt` / `abs` / `min` / `max` 等数学函数。
 

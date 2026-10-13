@@ -198,6 +198,12 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     .as_ref()
                     .map(|r| r.animation_clip_names(&entity.model))
                     .unwrap_or_default();
+                // 骨骼名：层栈遮罩的下拉来源（去重、跳过匿名；模型未加载 → 空）。
+                let bone_names = state
+                    .scene_renderer
+                    .as_ref()
+                    .map(|r| r.bone_names(&entity.model))
+                    .unwrap_or_default();
                 let model_empty = entity.model.is_empty();
 
                 if entity.animator.is_none() {
@@ -437,6 +443,164 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                                     animator.additive = None;
                                     touched = true;
                                 }
+                            }
+                        });
+
+                        // 混合层栈：与 additive 快捷字段正交 —— additive 先求值，
+                        // 这里按数组顺序依次叠上（后层盖前层）。增删在闭包外收集、
+                        // 循环后统一应用（闭包里正借着 animator 的可变引用）。
+                        let mut remove_layer: Option<usize> = None;
+                        if !animator.layers.is_empty() {
+                            ui.label("Layers:")
+                                .on_hover_text(
+                                    "混合层栈：按顺序叠到基础姿势上（后层盖前层）；\n\
+                                     Additive = 加增量，Override = 整段覆盖；\n\
+                                     遮罩 = 骨骼子树根名单（留空 = 整副骨架）",
+                                );
+                        }
+                        for idx in 0..animator.layers.len() {
+                            // ── 第一行：摘除 / 名字 / 模式 / 剪辑 / 权重 ──
+                            ui.horizontal(|ui| {
+                                let layer = &mut animator.layers[idx];
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text("摘掉这一层")
+                                    .clicked()
+                                {
+                                    remove_layer = Some(idx);
+                                }
+                                // 层名：脚本 set_anim_layer_weight 按它查找。
+                                let mut name = layer.name.clone();
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut name)
+                                        .desired_width(64.0)
+                                        .hint_text("name"),
+                                );
+                                if resp.changed() {
+                                    layer.name = name;
+                                    touched = true;
+                                }
+                                // 模式下拉（与剪辑同一套 menu_button 惯例）。
+                                let mode_label =
+                                    egui::RichText::new(format!("{:?}", layer.mode)).monospace();
+                                ui.menu_button(mode_label, |ui| {
+                                    let variants = [
+                                        (
+                                            xgame_core::AnimLayerMode::Additive,
+                                            "Additive（加增量）",
+                                        ),
+                                        (xgame_core::AnimLayerMode::Override, "Override（覆盖）"),
+                                    ];
+                                    for (mode, label) in variants {
+                                        if ui
+                                            .selectable_label(layer.mode == mode, label)
+                                            .clicked()
+                                        {
+                                            layer.mode = mode;
+                                            touched = true;
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+                                // 剪辑下拉：与基础剪辑同一来源。
+                                let current = layer.clip.clone();
+                                let label = if current.is_empty() {
+                                    egui::RichText::new("（选剪辑）").weak()
+                                } else {
+                                    egui::RichText::new(current.clone()).monospace()
+                                };
+                                ui.menu_button(label, |ui| {
+                                    if clips.is_empty() {
+                                        ui.weak(if model_empty {
+                                            "没有模型"
+                                        } else {
+                                            "模型未加载或没有动画剪辑"
+                                        });
+                                    }
+                                    for clip in clips.iter() {
+                                        if ui
+                                            .selectable_label(clip == &current, clip.as_str())
+                                            .clicked()
+                                        {
+                                            layer.clip = clip.clone();
+                                            touched = true;
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+                                // 权重：与脚本 set_anim_layer_weight 同源（都写这个字段）。
+                                let resp = ui.add(
+                                    egui::DragValue::new(&mut layer.weight)
+                                        .speed(0.01)
+                                        .range(0.0..=1.0),
+                                );
+                                collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                            });
+                            // ── 第二行：骨骼遮罩 chips + 加骨骼 ──
+                            ui.horizontal(|ui| {
+                                let layer = &mut animator.layers[idx];
+                                ui.label("Mask:")
+                                    .on_hover_text(
+                                        "子树根名单：名单里的骨及其全部子孙被这层作用；\n\
+                                         留空 = 整副骨架。glTF 匿名节点匹配不到，\n\
+                                         只能靠有名字的祖先进名单。",
+                                    );
+                                if layer.mask.is_empty() {
+                                    ui.weak("整副骨架");
+                                }
+                                let mut drop_mask: Option<usize> = None;
+                                for (mi, m) in layer.mask.iter().enumerate() {
+                                    if ui
+                                        .small_button(format!("{m} ✕"))
+                                        .on_hover_text("点一下把这根骨头移出遮罩")
+                                        .clicked()
+                                    {
+                                        drop_mask = Some(mi);
+                                    }
+                                }
+                                if let Some(mi) = drop_mask {
+                                    layer.mask.remove(mi);
+                                    touched = true;
+                                }
+                                ui.menu_button("+ 骨骼", |ui| {
+                                    if bone_names.is_empty() {
+                                        ui.weak(if model_empty {
+                                            "没有模型"
+                                        } else {
+                                            "模型未加载"
+                                        });
+                                    }
+                                    for b in bone_names.iter() {
+                                        if layer.mask.contains(b) {
+                                            continue;
+                                        }
+                                        if ui.small_button(b.as_str()).clicked() {
+                                            layer.mask.push(b.clone());
+                                            touched = true;
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                        if let Some(idx) = remove_layer {
+                            animator.layers.remove(idx);
+                            touched = true;
+                        }
+                        ui.horizontal(|ui| {
+                            if ui
+                                .small_button("+ Add Layer")
+                                .on_hover_text(
+                                    "往栈里加一层（默认：Additive、整副骨架、权重 1）",
+                                )
+                                .clicked()
+                            {
+                                let name = format!("layer{}", animator.layers.len());
+                                animator.layers.push(xgame_core::AnimLayer {
+                                    name,
+                                    ..Default::default()
+                                });
+                                touched = true;
                             }
                         });
 

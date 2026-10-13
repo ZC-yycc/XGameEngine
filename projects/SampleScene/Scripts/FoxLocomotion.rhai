@@ -1,8 +1,11 @@
-// Fox 状态机 + 叠加层演示：
+// Fox 状态机 + 叠加层 + 层栈演示：
 // 1) 按时间分段推 `speed` 参数，引擎侧的状态机（见 scene.ron 里 Fox 的
 //    animator.machine）自己在 Idle/Walk/Run 间切换；
 // 2) 振荡叠加层权重 —— Run 剪辑的**增量**（相对它第 0 帧的奔跑弹跳）按
-//    sin 波叠在当前基础姿势上，"呼吸/弹跳幅度"看得见地起伏。
+//    sin 波叠在当前基础姿势上，"呼吸/弹跳幅度"看得见地起伏；
+// 3) 按段推层栈权重 —— 走路段（2.5~5.0s）把 "upper" 层（Override +
+//    遮罩 b_Spine01_02 子树 = 上半身）开到 0.6，其他段归 0：
+//    **走路上半身张望、跑动时恢复自然摆臂**，一眼看出"这层在管上半身"。
 //
 // 状态机阈值（含滞回）：
 //   Idle(Survey) → Walk 需 speed ≥ 0.5；退回 Idle 需 < 0.3
@@ -30,4 +33,13 @@ fn update(ctx) {
     // sin ∈ [-1,1] → 0.3 + 0.3·sin ∈ [0, 0.6]：增量从无到明显来回起伏。
     // 没配叠加层的实体这里静默 no-op，脚本不用探测组件。
     set_anim_additive_weight(ctx, 0.3 + 0.3 * sin(time(ctx) * 4.0));
+
+    // ── 层栈权重（按名查找）──
+    // 只在走路段开上半身覆盖：走 = 上半身张望 + 腿照走；站/跑 = 0（这层无贡献）。
+    // 层名 "upper" 见 scene.ron 的 animator.layers；名字写错/没配层 → 静默 no-op。
+    if t >= 2.5 && t < 5.0 {
+        set_anim_layer_weight(ctx, "upper", 0.6);
+    } else {
+        set_anim_layer_weight(ctx, "upper", 0.0);
+    }
 }

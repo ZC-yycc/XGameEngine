@@ -1436,82 +1436,59 @@ impl ScenePipeline {
                         // 换剪辑/换状态交叉淡入中：旧剪辑按它自己的时钟与循环方式
                         // 采样，两份局部姿势按 alpha 混合。旧剪辑已经不在模型里
                         // （资产改名等）就退回硬切 —— 宁可跳一下，不能画错。
-                        let faded = anim.fade_from(entity.id).and_then(|f| {
-                            mesh.clip(f.clip).map(|c| (c, f.t, f.looping, f.alpha))
+                        let fade = anim.fade_from(entity.id).and_then(|f| {
+                            mesh.clip(f.clip).map(|c| {
+                                let prev_t = crate::animation::clip_time(
+                                    f.t,
+                                    c.duration,
+                                    f.looping,
+                                );
+                                (c, prev_t, f.alpha)
+                            })
                         });
-                        // 叠加层与基础层正交：增量 = 叠加剪辑当前帧 − 其第 0 帧，
-                        // 按 weight 加到基础（或淡入混合后）的局部姿态上。叠加剪辑
-                        // 不在模型里 → 不叠加（基础姿势原样，不画错）。
-                        let add = anim
-                            .additive(entity.id)
-                            .and_then(|a| mesh.clip(a.clip).map(|c| (c, a.t, a.looping, a.weight)));
-                        let mut bones = match (faded, add) {
-                            (
-                                Some((prev_clip, prev_time, prev_looping, alpha)),
-                                Some((add_clip, add_time, add_looping, weight)),
-                            ) => {
-                                let prev_t = crate::animation::clip_time(
-                                    prev_time,
-                                    prev_clip.duration,
-                                    prev_looping,
-                                );
+                        // 层栈 = 单层 additive 快捷方式（先求值）++ 配置的 layers。
+                        // 剪辑不在模型里的层直接不进栈 —— 这层不生效，基础姿势不受
+                        // 影响（与"旧淡出剪辑缺失退硬切"同一取舍：宁缺勿错）。
+                        let mut stack: Vec<crate::animation::LayerInput> = Vec::new();
+                        if let Some(a) = anim.additive(entity.id) {
+                            if let Some(c) = mesh.clip(a.clip) {
                                 let add_t = crate::animation::clip_time(
-                                    add_time,
-                                    add_clip.duration,
-                                    add_looping,
+                                    a.t,
+                                    c.duration,
+                                    a.looping,
                                 );
-                                crate::animation::compute_bones_blended_additive(
-                                    &mesh.nodes,
-                                    prev_clip,
-                                    prev_t,
-                                    clip,
-                                    t,
-                                    alpha,
-                                    skin,
-                                    add_clip,
-                                    add_t,
-                                    weight,
-                                )
+                                stack.push(crate::animation::LayerInput {
+                                    clip: c,
+                                    t: add_t,
+                                    weight: a.weight,
+                                    mode: xgame_core::AnimLayerMode::Additive,
+                                    mask: &[],
+                                });
                             }
-                            (
-                                Some((prev_clip, prev_time, prev_looping, alpha)),
-                                None,
-                            ) => {
-                                let prev_t = crate::animation::clip_time(
-                                    prev_time,
-                                    prev_clip.duration,
-                                    prev_looping,
-                                );
-                                crate::animation::compute_bones_blended(
-                                    &mesh.nodes,
-                                    prev_clip,
-                                    prev_t,
-                                    clip,
-                                    t,
-                                    alpha,
-                                    skin,
-                                )
+                        }
+                        for l in anim.layers(entity.id) {
+                            if l.clip.is_empty() {
+                                continue;
                             }
-                            (None, Some((add_clip, add_time, add_looping, weight))) => {
-                                let add_t = crate::animation::clip_time(
-                                    add_time,
-                                    add_clip.duration,
-                                    add_looping,
-                                );
-                                crate::animation::compute_bones_additive(
-                                    &mesh.nodes,
-                                    clip,
-                                    t,
-                                    skin,
-                                    add_clip,
-                                    add_t,
-                                    weight,
-                                )
-                            }
-                            (None, None) => {
-                                crate::animation::compute_bones(&mesh.nodes, clip, skin, t)
-                            }
-                        };
+                            let Some(c) = mesh.clip(&l.clip) else {
+                                continue;
+                            };
+                            let l_t = crate::animation::clip_time(l.t, c.duration, l.looping);
+                            stack.push(crate::animation::LayerInput {
+                                clip: c,
+                                t: l_t,
+                                weight: l.weight,
+                                mode: l.mode,
+                                mask: &l.mask,
+                            });
+                        }
+                        let mut bones = crate::animation::compute_bones_composed(
+                            &mesh.nodes,
+                            skin,
+                            (clip, t),
+                            fade,
+                            &stack,
+                        );
                         // 超过槽位容量的骨架（>256 骨）解析时已告警；这里截断
                         // 保证 staging 的槽距不被撑歪——宁可末梢骨不对，不能整帧错位。
                         bones.truncate(BONES_PER_SLOT);

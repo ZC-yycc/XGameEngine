@@ -302,6 +302,21 @@
                     speed: 1.5,
                     looping: true,
                 )),
+                // 层栈（混合层 v1）：走路段给上半身盖一层 Survey ——
+                // Override 模式 + 骨骼遮罩 ["b_Spine01_02"]（该骨及其全部子孙 =
+                // 脊柱/颈/头/双臂，尾巴和腿不被盖），腿照走、上半身张望。
+                // 权重由脚本按段推（走时 0.6、其他段 0），见 FoxLocomotion.rhai。
+                layers: [
+                    (
+                        name: "upper",
+                        mode: Override,
+                        clip: "Survey",
+                        weight: 0.0,
+                        speed: 1.0,
+                        looping: true,
+                        mask: ["b_Spine01_02"],
+                    ),
+                ],
             )),
             scripts: [
                 "Scripts/FoxLocomotion.rhai",

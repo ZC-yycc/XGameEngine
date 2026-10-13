@@ -747,6 +747,30 @@ fn register_animation(engine: &mut Engine) {
             }
         }
     });
+
+    // 写本实体层栈中**按名匹配的层**的权重 ∈ [0,1]（引擎侧钳位）。
+    //
+    // 重名按栈内顺序取第一个命中；层名不存在 / 没挂 animator → 静默 no-op
+    // （同 set_anim_param：通用脚本挂到任意实体上不需要先探测组件）。
+    // 经典用法：走路上半身盖一层（Override + 遮罩），跑动时把 weight 拉 0 恢复。
+    engine.register_fn(
+        "set_anim_layer_weight",
+        |ctx: &mut ScriptCtx, layer: &str, value: f32| {
+            if let Some(i) = ctx.entity_index() {
+                if let Some(layers) = ctx
+                    .scene_mut()
+                    .entities
+                    .get_mut(i)
+                    .and_then(|e| e.animator.as_mut())
+                    .map(|a| &mut a.layers)
+                {
+                    if let Some(l) = layers.iter_mut().find(|l| l.name == layer) {
+                        l.weight = value.clamp(0.0, 1.0);
+                    }
+                }
+            }
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------

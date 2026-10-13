@@ -1,8 +1,9 @@
 //! 实体动画组件（声明式播放配置）。
 //!
 //! 这里只放**要落盘的配置**：播哪个剪辑、速度、是否循环、是否自动播放、换剪辑
-//! 淡入时长、可选的**动画状态机**（参数表 / 状态表 / 转移表）与可选的**叠加层**
-//! （additive：在基础姿势上加增量）。采样时钟与蒙皮矩阵计算属于渲染层
+//! 淡入时长、可选的**动画状态机**（参数表 / 状态表 / 转移表）、可选的**叠加层**
+//! （additive：在基础姿势上加增量）与**混合层栈**（多层 Additive/Override +
+//! 骨骼遮罩）。采样时钟与蒙皮矩阵计算属于渲染层
 //! （见 `xgame_render::animation`）——
 //! 动画数据（glTF 里的骨骼与关键帧）本身就是渲染资产，把它拆到 core 之外
 //! 可以让 core 继续对 GPU / glTF 一无所知。
@@ -175,6 +176,63 @@ impl Default for AnimAdditive {
     }
 }
 
+/// 混合层的模式。
+///
+/// - [`Additive`](Self::Additive)：加**增量**（当前帧 − 第 0 帧参考姿势），不替换
+///   基础姿势 —— 与单层快捷方式 [`AnimAdditive`] 同语义，适合呼吸 / 弹跳 / 晃动。
+/// - [`Override`](Self::Override)：向该层的姿势**整段 lerp**（覆盖）—— 配上遮罩就是
+///   "上半身播放另一条剪辑、下半身继续走路"这类分区域重定向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AnimLayerMode {
+    #[default]
+    Additive,
+    Override,
+}
+
+/// 混合层栈里的一层：模式 + 剪辑 + 权重 + 独立时钟 + 骨骼遮罩。
+///
+/// 与 [`AnimAdditive`]（单层快捷方式）的关系：`Animator.additive` 等价于排在
+/// `layers` **之前**求值的一个 Additive 层；栈内各层按数组顺序依次合到
+/// "当前已合成的姿势"上（后层盖前层）。
+///
+/// v1 边界：二值遮罩（权重整体缩放，不羽化边界）；换本层剪辑是硬切（想平滑就
+/// 脚本把 weight 拉 0 再拉回）；时钟与基础层共用同一个 `is_active` 闸门。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnimLayer {
+    /// 层名：脚本 `set_anim_layer_weight(ctx, name, w)` 按名推权重，Inspector 也显示。
+    /// 空名 / 重名时按栈内顺序取第一个命中。
+    pub name: String,
+    /// 求值模式（默认加增量，见 [`AnimLayerMode`]）。
+    pub mode: AnimLayerMode,
+    /// 这层播哪个剪辑。空串 / 模型里没有 → 这层不生效（不报错）。
+    pub clip: String,
+    /// 权重 ∈ [0,1]（引擎侧钳位）：`0` = 这层不参与，`1` = 全额。
+    pub weight: f32,
+    /// 这层自己的播放速度。
+    pub speed: f32,
+    /// 这层是否循环。
+    pub looping: bool,
+    /// 骨骼遮罩 = **子树根名单**：节点名等于名单里任一名字、或其某个祖先等于，
+    /// 则这层作用于它（`mask: ["Spine1"]` = 上半身；`["LeftUpLeg","RightUpLeg"]`
+    /// = 双腿）。空名单 = 整副骨架。glTF 匿名节点匹配不到（只能靠有名字的祖先入列）。
+    pub mask: Vec<String>,
+}
+
+impl Default for AnimLayer {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            mode: AnimLayerMode::Additive,
+            clip: String::new(),
+            weight: 1.0,
+            speed: 1.0,
+            looping: true,
+            mask: Vec::new(),
+        }
+    }
+}
+
 /// 挂在实体上的动画播放器配置。
 ///
 /// 默认值 = 「播第一个剪辑、原速、循环、自动播放、换剪辑 0.25s 淡入」——给一个
@@ -204,8 +262,13 @@ pub struct Animator {
     pub machine: Option<AnimMachine>,
     /// 叠加（additive）层。`Some` 时在基础姿势（单剪辑或状态机当前状态）之上
     /// **加一层增量**（见 [`AnimAdditive`]）—— 与机器模式正交：状态机换状态照常
-    /// 换基础层，叠加层按自己的时钟独立播放。
+    /// 换基础层，叠加层按自己的时钟独立播放。这是**单层快捷方式**：等价于排在
+    /// [`Animator::layers`] 之前求值的一个 Additive 层，两者可以并存。
     pub additive: Option<AnimAdditive>,
+    /// 混合层栈（见 [`AnimLayer`]）：每层可选 Additive / Override 模式、独立时钟与
+    /// 骨骼遮罩，按数组顺序依次合到当前姿势上。求值次序：基础 → `additive` →
+    /// `layers[0..]`（后层盖前层）。
+    pub layers: Vec<AnimLayer>,
 }
 
 impl Default for Animator {
@@ -218,6 +281,7 @@ impl Default for Animator {
             fade_time: 0.25,
             machine: None,
             additive: None,
+            layers: Vec::new(),
         }
     }
 }
@@ -457,6 +521,57 @@ mod tests {
         let s = ron::to_string(&a.animator).expect("应能序列化");
         let back: Animator = ron::from_str(&s).expect("应能反序列化");
         assert_eq!(back.additive, a.animator.additive, "additive 应活过 RON 往返");
+    }
+
+    /// 层栈默认语义：Additive 模式、全额权重、空遮罩（= 整副骨架）、Animator 默认空栈。
+    #[test]
+    fn layer_defaults_are_additive_full_weight_full_skeleton() {
+        let d = AnimLayer::default();
+        assert_eq!(d.mode, AnimLayerMode::Additive, "默认加增量而不是覆盖");
+        assert!((d.weight - 1.0).abs() < f32::EPSILON, "默认全额");
+        assert!((d.speed - 1.0).abs() < f32::EPSILON, "默认原速");
+        assert!(d.looping, "默认循环");
+        assert!(d.mask.is_empty(), "默认整副骨架");
+        assert!(Animator::default().layers.is_empty(), "默认空栈");
+    }
+
+    /// 半截 RON：层栈只写必需字段，其余补默认；Override 模式与遮罩按名解析；
+    /// 与机器、单层 additive 三者**正交共存**；往返保留。
+    #[test]
+    fn layers_ron_parses_mode_and_mask_alongside_machine_and_additive() {
+        #[derive(Deserialize)]
+        struct Wrap {
+            #[serde(default)]
+            animator: Animator,
+        }
+        let ron = r#"(animator: (
+            machine: Some((entry: "Idle", states: [(name: "Idle", clip: "Survey")])),
+            additive: Some((clip: "Run", weight: 0.3)),
+            layers: [
+                (name: "upper", mode: Override, clip: "Survey", weight: 0.6,
+                 mask: ["Spine1", "Neck"]),
+                (name: "bounce"),   // 半截配置：Additive、全额、整副骨架
+            ],
+        ))"#;
+        let a: Wrap = ron::from_str(ron).unwrap();
+        assert!(a.animator.active_machine().is_some(), "机器照常可用");
+        assert!(a.animator.additive.is_some(), "单层快捷方式照常可用");
+        assert_eq!(a.animator.layers.len(), 2);
+
+        let upper = &a.animator.layers[0];
+        assert_eq!(upper.name, "upper");
+        assert_eq!(upper.mode, AnimLayerMode::Override, "RON 裸标识符解析成枚举变体");
+        assert!((upper.weight - 0.6).abs() < f32::EPSILON);
+        assert_eq!(upper.mask, vec!["Spine1".to_string(), "Neck".to_string()]);
+
+        let bounce = &a.animator.layers[1];
+        assert_eq!(bounce.mode, AnimLayerMode::Additive, "缺失 mode 补默认");
+        assert!((bounce.weight - 1.0).abs() < f32::EPSILON, "缺失 weight 补默认 1.0");
+        assert!(bounce.mask.is_empty(), "缺失 mask 补空名单（整副骨架）");
+
+        let s = ron::to_string(&a.animator).expect("应能序列化");
+        let back: Animator = ron::from_str(&s).expect("应能反序列化");
+        assert_eq!(back.layers, a.animator.layers, "层栈应活过 RON 往返");
     }
 
     /// 阈值配对：升速跨 0.5 进 Walk、跨 2.0 进 Run；降速低于 0.3 退回 Idle、

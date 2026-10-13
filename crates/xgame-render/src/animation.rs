@@ -16,13 +16,14 @@
 //!
 //! 单剪辑播放 + 换剪辑时的**交叉淡入** + 声明式**动画状态机**（参数阈值驱动的
 //! 剪辑切换，见 `xgame_core::AnimMachine`）+ **叠加（additive）混合**（增量 =
-//! 叠加剪辑当前帧 − 其第 0 帧参考姿势，见 `compute_bones_additive`），LINEAR/STEP
+//! 叠加剪辑当前帧 − 其第 0 帧参考姿势，见 `compute_bones_additive`）+ **混合层栈**
+//! （多层 Additive/Override × 骨骼遮罩，见 [`compute_bones_composed`]），LINEAR/STEP
 //! 插值（CUBICSPLINE 读入时降采样成线性）。旋转用 slerp，循环用取模、非循环钳在末帧。
 
 use std::collections::HashMap;
 use std::time::Instant;
 
-use xgame_core::{Entity, EntityId};
+use xgame_core::{AnimLayerMode, Entity, EntityId};
 use xgame_math::glam::{Mat4, Quat, Vec3};
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,9 @@ use xgame_math::glam::{Mat4, Quat, Vec3};
 pub struct AnimNode {
     /// 父节点下标。`None` = 根。
     pub parent: Option<u32>,
+    /// 节点名（glTF `name`，可能为空串）。骨骼遮罩（`AnimLayer::mask`）按名字
+    /// 匹配子树根 —— 匿名节点只能靠有名字的祖先进名单。
+    pub name: String,
     pub translation: Vec3,
     pub rotation: Quat,
     pub scale: Vec3,
@@ -253,15 +257,133 @@ fn blend_into(pose_a: &mut [LocalPose], pose_b: &[LocalPose], alpha: f32) {
     }
 }
 
+/// 参与 [`compute_bones_composed`] 的一层 —— 名字已在调用方解析成剪辑引用的
+/// 运行时输入（管线拿 `mesh.clip()` 的结果填进来）。
+pub struct LayerInput<'a> {
+    /// 这层播的剪辑（不在模型里的层调用方直接不放进栈）。
+    pub clip: &'a AnimClip,
+    /// 这层的当前时间（已按循环 / 钳位归一）。
+    pub t: f32,
+    /// 权重 ∈ [0,1]（越界引擎侧钳位）。
+    pub weight: f32,
+    /// 模式：`Additive` = 加增量（减第 0 帧参考），`Override` = 向这层姿势 lerp。
+    pub mode: AnimLayerMode,
+    /// 骨骼遮罩子树根名单；空 = 整副骨架。
+    pub mask: &'a [String],
+}
+
+/// 节点 `i` 是否在遮罩范围内：自身或**任一祖先**的名字命中名单。
+///
+/// 空名单 = 全覆盖（没配遮罩不设卡）。glTF 匿名节点（空名）不参与匹配 —— 只能靠
+/// 有名字的祖先进名单。环护栏与 `global_matrices` 同款：畸形成环的资产最多沿父链
+/// 走一遍节点数就停，不死循环。
+fn mask_covers(nodes: &[AnimNode], i: usize, mask: &[String]) -> bool {
+    if mask.is_empty() {
+        return true;
+    }
+    let mut cur = i;
+    for _ in 0..=nodes.len() {
+        if cur >= nodes.len() {
+            break;
+        }
+        let node = &nodes[cur];
+        if !node.name.is_empty() && mask.iter().any(|m| m == &node.name) {
+            return true;
+        }
+        match node.parent {
+            Some(p) => cur = p as usize,
+            None => break,
+        }
+    }
+    false
+}
+
+/// 单节点 Additive：`b += w × (a − r)`；旋转增量在**该节点局部空间**按权重向单位
+/// 四元数 slerp 收 —— w=0 恒为原姿势、w=1 全额、中间值走最短路径（对四元数分量
+/// 直接 lerp 会走反向长弧）。
+fn blend_additive(b: &mut LocalPose, a: &LocalPose, r: &LocalPose, w: f32) {
+    b.translation += (a.translation - r.translation) * w;
+    b.scale += (a.scale - r.scale) * w;
+    let delta = r.rotation.inverse() * a.rotation;
+    b.rotation = b.rotation.slerp(b.rotation * delta, w);
+}
+
+/// 单节点 Override：向该层姿势 lerp / slerp —— w=1 完全接管、w=0 纹丝不动。
+fn blend_override(b: &mut LocalPose, layer: &LocalPose, w: f32) {
+    b.translation = b.translation.lerp(layer.translation, w);
+    b.rotation = b.rotation.slerp(layer.rotation, w);
+    b.scale = b.scale.lerp(layer.scale, w);
+}
+
+/// 一步到位：基础层（可带交叉淡入）+ 层栈（Additive/Override × 骨骼遮罩）→ 蒙皮矩阵。
+///
+/// 求值次序：基础姿态（单剪辑；淡入中 = 旧剪辑按 `alpha` 混向新剪辑）→ 按数组
+/// 顺序逐层合到"当前已合成的姿势"上（后层盖前层），每层只作用于**遮罩命中**的
+/// 节点。本族其余 `compute_bones*` 全是它的薄封装 —— 管线只走这一条路，老测试
+/// 原样当回归网。
+///
+/// 零权重 / 空剪辑的层直接跳过：没配层的实体与没这功能时**逐位一致**，不付采样代价。
+pub fn compute_bones_composed(
+    nodes: &[AnimNode],
+    skin: &Skin,
+    base: (&AnimClip, f32),
+    fade: Option<(&AnimClip, f32, f32)>,
+    layers: &[LayerInput<'_>],
+) -> Vec<Mat4> {
+    let (base_clip, base_t) = base;
+    let mut pose = default_pose(nodes);
+    match fade {
+        // 淡入先采旧剪辑、再按 alpha 混向新剪辑 —— 与历史 `compute_bones_blended`
+        // 同一拍的采样/混合顺序，逐位一致（顺序换了会引入不同的浮点舍入）。
+        Some((old_clip, old_t, alpha)) => {
+            let alpha = alpha.clamp(0.0, 1.0);
+            sample_clip_into(old_clip, old_t, &mut pose);
+            let mut new_pose = default_pose(nodes);
+            sample_clip_into(base_clip, base_t, &mut new_pose);
+            blend_into(&mut pose, &new_pose, alpha);
+        }
+        None => sample_clip_into(base_clip, base_t, &mut pose),
+    }
+    for layer in layers {
+        let w = layer.weight.clamp(0.0, 1.0);
+        if w <= 0.0 || layer.clip.duration <= 0.0 {
+            continue;
+        }
+        match layer.mode {
+            AnimLayerMode::Additive => {
+                let mut add_pose = default_pose(nodes);
+                sample_clip_into(layer.clip, layer.t, &mut add_pose);
+                // 参考姿势 = 本层剪辑第 0 帧：没轨道的节点两份都停在绑定姿态 →
+                // 增量恒 0，叠加层"没动的骨头"不干扰基础层。
+                let mut ref_pose = default_pose(nodes);
+                sample_clip_into(layer.clip, 0.0, &mut ref_pose);
+                for i in 0..nodes.len() {
+                    if mask_covers(nodes, i, layer.mask) {
+                        blend_additive(&mut pose[i], &add_pose[i], &ref_pose[i], w);
+                    }
+                }
+            }
+            AnimLayerMode::Override => {
+                let mut layer_pose = default_pose(nodes);
+                sample_clip_into(layer.clip, layer.t, &mut layer_pose);
+                for i in 0..nodes.len() {
+                    if mask_covers(nodes, i, layer.mask) {
+                        blend_override(&mut pose[i], &layer_pose[i], w);
+                    }
+                }
+            }
+        }
+    }
+    bones_from_pose(nodes, &pose, skin)
+}
+
 /// 采样一个剪辑并算出某张蒙皮的**蒙皮矩阵**（`globals[joint] × inverse_bind`）。
 ///
 /// 顶点着色器拿它做 4 影响混合：`skinned = Σ wₖ · boneₖ · position`。
 /// 骨架根节点的祖先（glTF 场景根）也走同一套连乘 —— 模型文件自带的世界原点
 /// 偏移因此被正确吃进矩阵，而不是在运行时"看起来歪了"再打补丁。
 pub fn compute_bones(nodes: &[AnimNode], clip: &AnimClip, skin: &Skin, t: f32) -> Vec<Mat4> {
-    let mut pose = default_pose(nodes);
-    sample_clip_into(clip, t, &mut pose);
-    bones_from_pose(nodes, &pose, skin)
+    compute_bones_composed(nodes, skin, (clip, t), None, &[])
 }
 
 /// 两份剪辑在各自时刻采样后按 `alpha` 混合，再算蒙皮矩阵（交叉淡入用）。
@@ -278,13 +400,13 @@ pub fn compute_bones_blended(
     alpha: f32,
     skin: &Skin,
 ) -> Vec<Mat4> {
-    let alpha = alpha.clamp(0.0, 1.0);
-    let mut pose = default_pose(nodes);
-    sample_clip_into(clip_a, t_a, &mut pose);
-    let mut pose_b = default_pose(nodes);
-    sample_clip_into(clip_b, t_b, &mut pose_b);
-    blend_into(&mut pose, &pose_b, alpha);
-    bones_from_pose(nodes, &pose, skin)
+    compute_bones_composed(
+        nodes,
+        skin,
+        (clip_b, t_b),
+        Some((clip_a, t_a, alpha)),
+        &[],
+    )
 }
 
 /// 把叠加层增量按 `weight` 加进基础**局部姿态**（additive blending 的核心一步）。
@@ -306,38 +428,12 @@ pub fn apply_additive_into(
 ) {
     let w = weight.clamp(0.0, 1.0);
     for (b, (a, r)) in base.iter_mut().zip(add_pose.iter().zip(ref_pose)) {
-        b.translation += (a.translation - r.translation) * w;
-        b.scale += (a.scale - r.scale) * w;
-        // 增量在**该节点的局部空间**：先减掉参考旋转得到"转了多少"，再右乘到
-        // 基础旋转上（与平移加在局部空间保持一致）。
-        let delta = r.rotation.inverse() * a.rotation;
-        b.rotation = b.rotation.slerp(b.rotation * delta, w);
+        blend_additive(b, a, r, w);
     }
 }
 
-/// 按权重把 `add_clip` 的增量加进基础姿态的采样结果（`compute_bones_*_additive`
-/// 共用；`weight <= 0` 或叠加层时长 0 时是 no-op —— 零权重不付采样代价，
-/// 画面也与没配叠加层逐位一致）。
-fn add_additive_layer(
-    nodes: &[AnimNode],
-    pose: &mut [LocalPose],
-    add_clip: &AnimClip,
-    add_t: f32,
-    weight: f32,
-) {
-    if weight <= 0.0 || add_clip.duration <= 0.0 {
-        return;
-    }
-    let mut add_pose = default_pose(nodes);
-    sample_clip_into(add_clip, add_t, &mut add_pose);
-    // 参考姿势 = 叠加剪辑**第 0 帧**（0 在循环取模/非循环钳位下都恒映射 0）。
-    // 没有轨道的节点保持绑定姿态 → 增量恒为 0，叠加层"没动的骨头"不干扰基础层。
-    let mut ref_pose = default_pose(nodes);
-    sample_clip_into(add_clip, 0.0, &mut ref_pose);
-    apply_additive_into(pose, &add_pose, &ref_pose, weight);
-}
-
-/// 基础剪辑 + 叠加层 → 蒙皮矩阵（叠加混合的一步到位封装）。
+/// 基础剪辑 + 叠加层 → 蒙皮矩阵（叠加混合的一步到位封装 = [`compute_bones_composed`]
+/// 的"单层 Additive、无遮罩"退化；零权重与纯 `compute_bones` 逐位一致）。
 pub fn compute_bones_additive(
     nodes: &[AnimNode],
     clip: &AnimClip,
@@ -347,17 +443,26 @@ pub fn compute_bones_additive(
     add_t: f32,
     weight: f32,
 ) -> Vec<Mat4> {
-    let mut pose = default_pose(nodes);
-    sample_clip_into(clip, t, &mut pose);
-    add_additive_layer(nodes, &mut pose, add_clip, add_t, weight);
-    bones_from_pose(nodes, &pose, skin)
+    compute_bones_composed(
+        nodes,
+        skin,
+        (clip, t),
+        None,
+        &[LayerInput {
+            clip: add_clip,
+            t: add_t,
+            weight,
+            mode: AnimLayerMode::Additive,
+            mask: &[],
+        }],
+    )
 }
 
 /// 交叉淡入中 + 叠加层：先按 `alpha` 混合基础层，再把叠加增量加到**混合后**的
 /// 姿态上（叠加层与基础层的切换正交 —— 基础层淡入淡出时它照叠不误）。
 ///
-/// 参数多但每个都直呼其名（管线的四种组合位之一，拆结构体反而绕）——
-/// 与 `ScenePipeline::render` 同样的取舍。
+/// 参数多但每个都直呼其名（历史签名；管线已改走 [`compute_bones_composed`]，
+/// 这里保留给直调方与回归测试）—— 与 `ScenePipeline::render` 同样的取舍。
 #[allow(clippy::too_many_arguments)]
 pub fn compute_bones_blended_additive(
     nodes: &[AnimNode],
@@ -371,14 +476,19 @@ pub fn compute_bones_blended_additive(
     add_t: f32,
     weight: f32,
 ) -> Vec<Mat4> {
-    let alpha = alpha.clamp(0.0, 1.0);
-    let mut pose = default_pose(nodes);
-    sample_clip_into(clip_a, t_a, &mut pose);
-    let mut pose_b = default_pose(nodes);
-    sample_clip_into(clip_b, t_b, &mut pose_b);
-    blend_into(&mut pose, &pose_b, alpha);
-    add_additive_layer(nodes, &mut pose, add_clip, add_t, weight);
-    bones_from_pose(nodes, &pose, skin)
+    compute_bones_composed(
+        nodes,
+        skin,
+        (clip_b, t_b),
+        Some((clip_a, t_a, alpha)),
+        &[LayerInput {
+            clip: add_clip,
+            t: add_t,
+            weight,
+            mode: AnimLayerMode::Additive,
+            mask: &[],
+        }],
+    )
 }
 
 /// 播放时间归一：循环取模、非循环钳在末帧。
@@ -414,6 +524,31 @@ pub struct Additive<'a> {
     pub looping: bool,
     /// 权重 ∈ [0,1]（tick 里已钳位）。
     pub weight: f32,
+}
+
+/// 层栈某一层的解析时钟（[`AnimationDriver::layers`] 按**配置顺序**返回切片）。
+///
+/// 与配置**按 name 对齐**同步：Inspector 重排层各保各的进度、删层即 prune、
+/// 换本层剪辑只归零它自己的时钟（硬切，与叠加层同语义）。`mode` / `mask` /
+/// `weight` 都由 tick 跟配置对齐（越界权重钳位），渲染侧只问驱动、不回头读组件。
+#[derive(Clone, Debug)]
+pub struct LayerClock {
+    /// 层名（脚本 `set_anim_layer_weight` 按名查找的就是它）。
+    pub name: String,
+    /// 本层剪辑名（空 = 未解析，渲染侧跳过这层）。
+    pub clip: String,
+    /// 本层当前时间。
+    pub t: f32,
+    /// 本层播放速度。
+    pub speed: f32,
+    /// 本层循环方式。
+    pub looping: bool,
+    /// 权重 ∈ [0,1]（tick 里已钳位）。
+    pub weight: f32,
+    /// 求值模式（Additive / Override）。
+    pub mode: AnimLayerMode,
+    /// 骨骼遮罩子树根名单（空 = 整副骨架）。
+    pub mask: Vec<String>,
 }
 
 /// 进行中的交叉淡入，给渲染侧采样用（[`AnimationDriver::fade_from`]）。
@@ -464,6 +599,8 @@ struct Entry {
     additive_speed: f32,
     additive_looping: bool,
     additive_weight: f32,
+    /// 层栈（`Animator.layers`）逐层时钟，保持配置顺序；tick 按 name 对齐同步。
+    layer_clocks: Vec<LayerClock>,
 }
 
 /// 每个实体的动画播放时钟（clip + 已累计时间）。
@@ -551,6 +688,7 @@ impl AnimationDriver {
                     additive_speed: 1.0,
                     additive_looping: true,
                     additive_weight: 0.0,
+                    layer_clocks: Vec::new(),
                 });
             // -- 3. 换剪辑 → 交叉淡入 --
             if entry.clip != clip {
@@ -596,6 +734,43 @@ impl AnimationDriver {
                     entry.additive_t = 0.0;
                 }
             }
+            // -- 4.6 层栈同步：按 name 对齐旧时钟（重排 / 删层各保各的进度）--
+            //
+            // 换本层剪辑只归零这一层自己的时钟（硬切，与叠加层同语义）；权重钳
+            // [0,1]；mode / mask 跟配置走。没配层的实体这里只是把 vec 清空。
+            let old = std::mem::take(&mut entry.layer_clocks);
+            entry.layer_clocks = animator
+                .layers
+                .iter()
+                .map(|cfg| {
+                    let mut clock = old
+                        .iter()
+                        .find(|c| c.name == cfg.name)
+                        .cloned()
+                        .unwrap_or_else(|| LayerClock {
+                            name: cfg.name.clone(),
+                            clip: String::new(),
+                            t: 0.0,
+                            speed: cfg.speed,
+                            looping: cfg.looping,
+                            weight: 0.0,
+                            mode: cfg.mode,
+                            mask: Vec::new(),
+                        });
+                    if clock.clip != cfg.clip {
+                        clock.clip = cfg.clip.clone();
+                        clock.t = 0.0;
+                    }
+                    clock.speed = cfg.speed;
+                    clock.looping = cfg.looping;
+                    clock.weight = cfg.weight.clamp(0.0, 1.0);
+                    clock.mode = cfg.mode;
+                    if clock.mask != cfg.mask {
+                        clock.mask = cfg.mask.clone();
+                    }
+                    clock
+                })
+                .collect();
             // -- 5. 推进时钟 --
             if animator.is_active() {
                 // 负速在 v1 是"静止"而不是倒放（与单剪辑语义一致）：状态表里
@@ -604,6 +779,12 @@ impl AnimationDriver {
                 // 叠加层时钟与基础层共用同一个闸门（v1 边界，AnimAdditive 文档）。
                 if !entry.additive_clip.is_empty() {
                     entry.additive_t += dt * entry.additive_speed.max(0.0);
+                }
+                // 层栈同闸门；空剪辑的层不推进（时间停 0，解析时被跳过）。
+                for clock in &mut entry.layer_clocks {
+                    if !clock.clip.is_empty() {
+                        clock.t += dt * clock.speed.max(0.0);
+                    }
                 }
                 let mut fade_done = false;
                 if let Some(prev) = entry.prev.as_mut() {
@@ -687,6 +868,18 @@ impl AnimationDriver {
         })
     }
 
+    /// 某实体**层栈**的解析时钟（[`LayerClock`] 列表，配置顺序；没配层 / 没条目
+    /// → 空切片）。
+    ///
+    /// 渲染侧逐层取 `clip` → `mesh.clip()` 解析，喂 [`compute_bones_composed`]；
+    /// 剪辑不在模型里的层直接跳过（这层不生效，不画错）。
+    pub fn layers(&self, id: EntityId) -> &[LayerClock] {
+        self.entries
+            .get(&id)
+            .map(|e| e.layer_clocks.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// 某实体正在进行的交叉淡入（结构体 [`FadeFrom`]）。
     ///
     /// `alpha = 0` 还是纯旧剪辑，`1` 淡入完成（此时条目已被清掉，返回 `None`）。
@@ -708,18 +901,21 @@ impl AnimationDriver {
     /// 没有时钟 → 恒为 0，静态场景照旧"没动就不画"。按 ID 排序后混合，
     /// 与 `HashMap` 的遍历顺序无关 —— 同样的内容必须给同样的指纹。
     ///
-    /// **两个时钟都进**：机器模式下基础层可以冻结在某个速度 0 的状态里而
-    /// 叠加层照常推进（is_active 看的是"还有没有活状态"）—— 只哈希基础时钟
-    /// 会让叠加层在冻结基础层上"演给瞎子看"（画面不刷新）。
+    /// **三个时钟都进**：机器模式下基础层可以冻结在某个速度 0 的状态里而
+    /// 叠加层 / 层栈照常推进（is_active 看的是"还有没有活状态"）—— 只哈希基础
+    /// 时钟会让它们在冻结基础层上"演给瞎子看"（画面不刷新）。
     pub fn signature(&self) -> u64 {
         let mut pairs: Vec<(u64, u64)> = self
             .entries
             .iter()
             .map(|(id, e)| {
-                (
-                    id.raw(),
-                    ((e.t.to_bits() as u64) << 32) | e.additive_t.to_bits() as u64,
-                )
+                let mut packed =
+                    ((e.t.to_bits() as u64) << 32) | e.additive_t.to_bits() as u64;
+                // 层栈时钟按配置顺序折进来（splitmix64 是双射，任一层在走都会变）。
+                for l in &e.layer_clocks {
+                    packed = mix(packed, l.t.to_bits() as u64);
+                }
+                (id.raw(), packed)
             })
             .collect();
         pairs.sort_unstable();
@@ -797,6 +993,7 @@ mod tests {
     fn root_node() -> AnimNode {
         AnimNode {
             parent: None,
+            name: String::new(),
             translation: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
@@ -886,6 +1083,7 @@ mod tests {
         let clip = move_x_clip();
         let nodes = vec![AnimNode {
             parent: None,
+            name: String::new(),
             translation: Vec3::new(9.0, 9.0, 9.0),
             rotation: Quat::from_rotation_z(0.3),
             scale: Vec3::splat(2.0),
@@ -924,12 +1122,14 @@ mod tests {
         let nodes = vec![
             AnimNode {
                 parent: None,
+                name: String::new(),
                 translation: Vec3::new(1.0, 0.0, 0.0),
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,
             },
             AnimNode {
                 parent: Some(0),
+                name: String::new(),
                 translation: Vec3::new(0.0, 2.0, 0.0),
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,
@@ -950,12 +1150,14 @@ mod tests {
         let nodes = vec![
             AnimNode {
                 parent: Some(1), // 子在前、父在后
+                name: String::new(),
                 translation: Vec3::new(0.0, 5.0, 0.0),
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,
             },
             AnimNode {
                 parent: None,
+                name: String::new(),
                 translation: Vec3::new(3.0, 0.0, 0.0),
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,
@@ -971,8 +1173,8 @@ mod tests {
     #[test]
     fn cyclic_parents_degrade_instead_of_overflowing() {
         let nodes = vec![
-            AnimNode { parent: Some(1), translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE },
-            AnimNode { parent: Some(0), translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            AnimNode { parent: Some(1), name: String::new(), translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            AnimNode { parent: Some(0), name: String::new(), translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE },
         ];
         let pose = default_pose(&nodes);
         let g = global_matrices(&nodes, &pose);
@@ -988,12 +1190,14 @@ mod tests {
         let nodes = vec![
             AnimNode {
                 parent: None,
+                name: String::new(),
                 translation: Vec3::new(5.0, 1.0, 0.0),
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,
             },
             AnimNode {
                 parent: Some(0),
+                name: String::new(),
                 translation: Vec3::new(0.0, 2.0, 0.0),
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,
@@ -1226,7 +1430,10 @@ mod tests {
 
     // -- 状态机 --
 
-    use xgame_core::{AnimAdditive, AnimCondition, AnimMachine, AnimState, AnimTransition};
+    use xgame_core::{
+        AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState,
+        AnimTransition,
+    };
 
     /// Idle(Survey, 速度 1) ⇄ Walk(速度 1) ⇄ Run(速度 2)：
     /// Idle→Walk 需 ≥0.5、回 Idle 需 <0.3（滞回），Walk→Run 需 ≥2.0、回 <1.8。
@@ -1579,5 +1786,340 @@ mod tests {
         let sig1 = d.signature();
         d.tick(0.1, std::slice::from_ref(&e));
         assert_ne!(sig1, d.signature(), "叠加层在走 → 指纹必须变，否则画面冻结");
+    }
+
+    // -- 层栈与骨骼遮罩 --
+
+    /// 两节骨架：Root("Root") → Child("Child")，都停在绑定姿态。
+    fn root_child_nodes() -> Vec<AnimNode> {
+        vec![
+            AnimNode {
+                parent: None,
+                name: "Root".into(),
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            AnimNode {
+                parent: Some(0),
+                name: "Child".into(),
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        ]
+    }
+
+    /// 单轨剪辑：`node` 的平移 0→1 秒从原点走到 `end`。
+    fn translate_clip(name: &str, node: u32, end: Vec3) -> AnimClip {
+        AnimClip {
+            name: name.into(),
+            duration: 1.0,
+            tracks: vec![Track {
+                node,
+                path: TrackPath::Translation,
+                interpolation: Interpolation::Linear,
+                times: vec![0.0, 1.0],
+                values: vec![0.0, 0.0, 0.0, end.x, end.y, end.z],
+            }],
+        }
+    }
+
+    /// 每个关节都是单位逆绑定（关节矩阵 = 全局矩阵）的小蒙皮。
+    fn flat_skin(joints: u32) -> Skin {
+        Skin {
+            joints: (0..joints).collect(),
+            inverse_bind: vec![Mat4::IDENTITY; joints as usize],
+        }
+    }
+
+    /// 遮罩 = 子树根名单：命中自身或祖先；空名单全覆盖；匿名节点不与空串互认；
+    /// 畸形成环不死循环。
+    #[test]
+    fn mask_covers_subtree_roots_and_their_descendants() {
+        let nodes = root_child_nodes();
+        assert!(mask_covers(&nodes, 0, &[]), "空名单 = 整副骨架");
+        assert!(mask_covers(&nodes, 1, &["Child".into()]), "命中自身");
+        assert!(!mask_covers(&nodes, 0, &["Child".into()]), "只列子 → 父不被覆盖");
+        assert!(mask_covers(&nodes, 1, &["Root".into()]), "祖先命中 → 子孙一并覆盖");
+        assert!(!mask_covers(&nodes, 1, &["Nope".into()]), "没命中不覆盖");
+
+        // 匿名节点（名字空串）不能靠空名单项互认进来。
+        let anon = vec![root_node()];
+        assert!(!mask_covers(&anon, 0, &["".into()]), "匿名节点不与空串名单项互认");
+
+        // 畸形：A→B→A 成环 —— 沿父链能命中就返回，没命中也要收尾而不是挂起。
+        let cycle = vec![
+            AnimNode {
+                parent: Some(1),
+                name: "A".into(),
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            AnimNode {
+                parent: Some(0),
+                name: "B".into(),
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        ];
+        assert!(mask_covers(&cycle, 0, &["B".into()]), "环里沿父链也要能命中");
+        assert!(
+            !mask_covers(&cycle, 0, &["Nope".into()]),
+            "成环没命中也要返回（不死循环）"
+        );
+    }
+
+    /// Override × 遮罩端到端：只有名单内的骨被接管 —— w=1 完全等于该层姿势、
+    /// w=0.5 折半、遮罩没命中则整层不生效；名单外的骨保持基础姿势。
+    #[test]
+    fn override_layer_takes_over_only_masked_bones() {
+        let nodes = root_child_nodes();
+        let base = move_x_clip(); // 根 0→2（t=1 → x=2）
+        let upper = translate_clip("upper", 1, Vec3::new(0.0, 4.0, 0.0));
+        let skin = flat_skin(2);
+        let mask_child: Vec<String> = vec!["Child".into()];
+        let mask_no: Vec<String> = vec!["Nope".into()];
+
+        let composed = |weight: f32, mask: &[String]| {
+            compute_bones_composed(
+                &nodes,
+                &skin,
+                (&base, 1.0),
+                None,
+                &[LayerInput {
+                    clip: &upper,
+                    t: 1.0,
+                    weight,
+                    mode: AnimLayerMode::Override,
+                    mask,
+                }],
+            )
+        };
+
+        let full = composed(1.0, &mask_child);
+        assert!(
+            (full[0].w_axis.truncate() - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-6,
+            "名单外的根保持基础姿势"
+        );
+        assert!(
+            (full[1].w_axis.truncate() - Vec3::new(2.0, 4.0, 0.0)).length() < 1e-6,
+            "w=1 时子 = 根位移 + 该层姿势"
+        );
+
+        let half = composed(0.5, &mask_child);
+        assert!(
+            (half[1].w_axis.truncate() - Vec3::new(2.0, 2.0, 0.0)).length() < 1e-6,
+            "w=0.5 应折半"
+        );
+
+        let miss = composed(1.0, &mask_no);
+        assert!(
+            (miss[1].w_axis.truncate() - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-6,
+            "遮罩没命中 → 层不生效"
+        );
+    }
+
+    /// Additive 层同样走遮罩：增量（当前帧 − 第 0 帧）只加在名单内的骨上。
+    #[test]
+    fn additive_layer_in_stack_respects_mask() {
+        let nodes = root_child_nodes();
+        let base = move_x_clip(); // t=0 → 根在原点
+        let inc = translate_clip("inc", 1, Vec3::new(0.0, 4.0, 0.0));
+        let skin = flat_skin(2);
+        let mask_child: Vec<String> = vec!["Child".into()];
+        let mask_no: Vec<String> = vec!["Nope".into()];
+
+        let on = compute_bones_composed(
+            &nodes,
+            &skin,
+            (&base, 0.0),
+            None,
+            &[LayerInput {
+                clip: &inc,
+                t: 1.0,
+                weight: 1.0,
+                mode: AnimLayerMode::Additive,
+                mask: &mask_child,
+            }],
+        );
+        assert!(
+            (on[1].w_axis.truncate() - Vec3::new(0.0, 4.0, 0.0)).length() < 1e-6,
+            "名单内的骨吃到增量"
+        );
+        assert!(
+            on[0].w_axis.truncate().length() < 1e-6,
+            "名单外的骨不动"
+        );
+
+        let off = compute_bones_composed(
+            &nodes,
+            &skin,
+            (&base, 0.0),
+            None,
+            &[LayerInput {
+                clip: &inc,
+                t: 1.0,
+                weight: 1.0,
+                mode: AnimLayerMode::Additive,
+                mask: &mask_no,
+            }],
+        );
+        assert!(
+            off.iter().all(|b| b.w_axis.truncate().length() < 1e-6),
+            "遮罩没命中 → 整副骨架不动"
+        );
+    }
+
+    /// 栈按数组顺序合到"当前已合成的姿势"上：后层盖前层。
+    #[test]
+    fn later_layers_compose_on_top() {
+        let nodes = root_child_nodes();
+        let base = move_x_clip();
+        let first = translate_clip("first", 1, Vec3::new(0.0, 4.0, 0.0));
+        let second = translate_clip("second", 1, Vec3::new(0.0, 1.0, 0.0));
+        let skin = flat_skin(2);
+        let mask: Vec<String> = vec!["Child".into()];
+
+        let bones = compute_bones_composed(
+            &nodes,
+            &skin,
+            (&base, 0.0),
+            None,
+            &[
+                LayerInput {
+                    clip: &first,
+                    t: 1.0,
+                    weight: 1.0,
+                    mode: AnimLayerMode::Override,
+                    mask: &mask,
+                },
+                LayerInput {
+                    clip: &second,
+                    t: 1.0,
+                    weight: 1.0,
+                    mode: AnimLayerMode::Override,
+                    mask: &mask,
+                },
+            ],
+        );
+        assert!(
+            (bones[1].w_axis.truncate() - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-6,
+            "后层 w=1 应完全盖掉前层"
+        );
+    }
+
+    fn entity_with_layers() -> Entity {
+        let mut a = Animator::new("Walk");
+        a.layers = vec![
+            AnimLayer {
+                name: "upper".into(),
+                clip: "Survey".into(),
+                weight: 0.6,
+                ..Default::default()
+            },
+            AnimLayer {
+                name: "legs".into(),
+                clip: "Run".into(),
+                speed: 2.0,
+                ..Default::default()
+            },
+        ];
+        Entity::new("Fox").with_animator(a)
+    }
+
+    /// 层时钟按 name 对齐同步：重排不丢进度、新层从 0 起播、删层即 prune、
+    /// 换本层剪辑只归零那一层、权重越界钳位。
+    #[test]
+    fn driver_layer_clocks_sync_by_name() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_layers();
+        d.tick(0.5, std::slice::from_ref(&e));
+        {
+            let layers = d.layers(e.id);
+            assert_eq!(layers.len(), 2, "配置两层就该有两个时钟");
+            assert_eq!(layers[0].name, "upper");
+            assert!((layers[0].t - 0.5).abs() < 1e-6, "upper 按速度 1 推进");
+            assert!((layers[0].weight - 0.6).abs() < 1e-6);
+            assert_eq!(layers[1].clip, "Run");
+            assert!((layers[1].t - 1.0).abs() < 1e-6, "legs 按速度 2 推进，实得 {}", layers[1].t);
+        }
+
+        // 重排 + 插入新层：各层按名字对齐，进度延续（不按位置错位）。
+        let anim = e.animator.as_mut().unwrap();
+        let upper = anim.layers[0].clone();
+        let legs = anim.layers[1].clone();
+        anim.layers = vec![
+            AnimLayer {
+                name: "new".into(),
+                clip: "Walk".into(),
+                ..Default::default()
+            },
+            legs,
+            upper,
+        ];
+        d.tick(0.1, std::slice::from_ref(&e));
+        {
+            let layers = d.layers(e.id);
+            assert_eq!(layers[0].name, "new");
+            assert!((layers[0].t - 0.1).abs() < 1e-6, "新层从 0 起播");
+            assert_eq!(layers[1].name, "legs");
+            assert!(
+                (layers[1].t - 1.2).abs() < 1e-6,
+                "重排后 legs 进度延续（1.0 + 0.1×2），实得 {}",
+                layers[1].t
+            );
+            assert_eq!(layers[2].name, "upper");
+            assert!((layers[2].t - 0.6).abs() < 1e-6, "重排后 upper 进度延续");
+        }
+
+        // 换本层剪辑：只有它归零重播，别的层照走。
+        e.animator.as_mut().unwrap().layers[2].clip = "Run".into();
+        d.tick(0.1, std::slice::from_ref(&e));
+        assert!(
+            (d.layers(e.id)[2].t - 0.1).abs() < 1e-6,
+            "换剪辑归零重播"
+        );
+        assert!(
+            (d.layers(e.id)[1].t - 1.4).abs() < 1e-6,
+            "别的层不受影响"
+        );
+
+        // 删层 → prune；权重越界 → 钳 [0,1]（dt=0 只同步不推进）。
+        e.animator.as_mut().unwrap().layers.remove(0);
+        e.animator.as_mut().unwrap().layers[1].weight = 9.0;
+        d.tick(0.0, std::slice::from_ref(&e));
+        assert_eq!(d.layers(e.id).len(), 2, "删掉的层不再出现，剩 legs + upper");
+        assert_eq!(d.layers(e.id)[1].name, "upper");
+        assert!((d.layers(e.id)[1].weight - 1.0).abs() < 1e-6, "权重钳在 1.0");
+    }
+
+    /// 冻结基础层（当前状态速度 0、别的状态还活）+ 活层栈：层时钟照走且指纹
+    /// 跟着变 —— 不然层栈在冻结基础层上"演给瞎子看"（画面不刷新）。
+    #[test]
+    fn driver_layer_stack_advances_under_frozen_base_and_moves_signature() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_machine();
+        e.animator.as_mut().unwrap().machine.as_mut().unwrap().states[0].speed = 0.0;
+        e.animator.as_mut().unwrap().layers = vec![AnimLayer {
+            name: "upper".into(),
+            clip: "Survey".into(),
+            ..Default::default()
+        }];
+
+        d.tick(0.4, std::slice::from_ref(&e));
+        assert!(
+            d.playback(e.id).unwrap().1.abs() < 1e-6,
+            "冻结状态的基础时钟不该走"
+        );
+        assert!(
+            (d.layers(e.id)[0].t - 0.4).abs() < 1e-6,
+            "层时钟要继续走"
+        );
+        let sig1 = d.signature();
+        d.tick(0.1, std::slice::from_ref(&e));
+        assert_ne!(sig1, d.signature(), "层时钟在走 → 指纹必须变，否则画面冻结");
     }
 }
