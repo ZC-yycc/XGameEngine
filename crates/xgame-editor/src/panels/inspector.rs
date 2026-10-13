@@ -373,6 +373,73 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                             }
                         }
 
+                        // 叠加层：与基础层正交 —— 机器 / 单剪辑模式都显示这一行。
+                        ui.horizontal(|ui| {
+                            if animator.additive.is_none() {
+                                if ui
+                                    .small_button("+ Additive")
+                                    .on_hover_text(
+                                        "加一层叠加动画：在基础姿势上加增量（走路呼吸、\n\
+                                         受击晃动都靠它），增量 = 叠加剪辑当前帧 − 第 0 帧。",
+                                    )
+                                    .clicked()
+                                {
+                                    animator.additive = Some(xgame_core::AnimAdditive::default());
+                                    touched = true;
+                                }
+                            } else {
+                                let mut remove_additive = false;
+                                ui.label("Additive:")
+                                    .on_hover_text("叠加层：基础姿势之上加一层增量（参考帧 = 叠加剪辑第 0 帧）");
+                                if let Some(add) = animator.additive.as_mut() {
+                                    // 剪辑下拉：与基础剪辑同一来源（模型的剪辑列表）。
+                                    let current = add.clip.clone();
+                                    let label = if current.is_empty() {
+                                        egui::RichText::new("（选剪辑）").weak()
+                                    } else {
+                                        egui::RichText::new(current.clone()).monospace()
+                                    };
+                                    ui.menu_button(label, |ui| {
+                                        if clips.is_empty() {
+                                            ui.weak(if model_empty {
+                                                "没有模型"
+                                            } else {
+                                                "模型未加载或没有动画剪辑"
+                                            });
+                                        }
+                                        for clip in clips.iter() {
+                                            if ui
+                                                .selectable_label(clip == &current, clip.as_str())
+                                                .clicked()
+                                            {
+                                                add.clip = clip.clone();
+                                                touched = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                    // 权重：与脚本 set_anim_additive_weight 同源（都写这个字段）。
+                                    let resp = ui.add(
+                                        egui::DragValue::new(&mut add.weight)
+                                            .speed(0.01)
+                                            .range(0.0..=1.0),
+                                    );
+                                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                                }
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text("摘掉叠加层（基础层不动）")
+                                    .clicked()
+                                {
+                                    remove_additive = true;
+                                }
+                                if remove_additive {
+                                    animator.additive = None;
+                                    touched = true;
+                                }
+                            }
+                        });
+
                         ui.horizontal(|ui| {
                             ui.label("Fade:")
                                 .on_hover_text("换剪辑/换状态的交叉淡入时长；0 = 硬切");

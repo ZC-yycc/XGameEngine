@@ -1,8 +1,9 @@
 //! 实体动画组件（声明式播放配置）。
 //!
 //! 这里只放**要落盘的配置**：播哪个剪辑、速度、是否循环、是否自动播放、换剪辑
-//! 淡入时长、以及可选的**动画状态机**（参数表 / 状态表 / 转移表）。采样时钟与
-//! 蒙皮矩阵计算属于渲染层（见 `xgame_render::animation`）——
+//! 淡入时长、可选的**动画状态机**（参数表 / 状态表 / 转移表）与可选的**叠加层**
+//! （additive：在基础姿势上加增量）。采样时钟与蒙皮矩阵计算属于渲染层
+//! （见 `xgame_render::animation`）——
 //! 动画数据（glTF 里的骨骼与关键帧）本身就是渲染资产，把它拆到 core 之外
 //! 可以让 core 继续对 GPU / glTF 一无所知。
 //!
@@ -136,6 +137,44 @@ impl AnimMachine {
     }
 }
 
+/// 叠加（additive）层：在基础姿势之上**加一层增量**，而不是替换它。
+///
+/// 数学上：`最终局部姿势 = 基础姿势 + weight × (叠加剪辑当前帧 − 叠加剪辑第 0 帧)`。
+/// 第 0 帧就是这层的**参考姿势**（"零增量"帧）—— 制作叠加剪辑时把起始姿势摆成
+/// 想要的静止参考，引擎减掉它，剩下的就是纯增量，叠到谁身上都是"加了个动作"。
+///
+/// 用途：走路时呼吸起伏、边跑边扭头、受击晃动 —— 同一份增量叠在任意基础姿势上，
+/// 不必烘进每条移动剪辑（O(M+N) 取代 O(M×N) 的剪辑数量）。交叉淡入只解决
+/// "换"剪辑；"叠"必须有它。
+///
+/// v1 边界：**全骨架、单层**（骨骼遮罩 / 多层栈留后续）；换叠加剪辑是硬切
+/// （想平滑就把 weight 脚本拉到 0、换好剪辑再拉回）；叠加层时钟与基础层共用
+/// 同一个 `is_active` 闸门（基础层冻住，叠加层也冻）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnimAdditive {
+    /// 叠加层剪辑名。空串 / 模型里没有 → 叠加层不生效（基础姿势原样，不报错）。
+    pub clip: String,
+    /// 权重 ∈ [0,1]（引擎侧钳位）：`0` = 完全不叠加，`1` = 全额增量。
+    /// 脚本 `set_anim_additive_weight` 与 Inspector 都可推；随场景落盘。
+    pub weight: f32,
+    /// 叠加层自己的播放速度（呼吸循环可以比步频快或慢）。
+    pub speed: f32,
+    /// 叠加层是否循环。
+    pub looping: bool,
+}
+
+impl Default for AnimAdditive {
+    fn default() -> Self {
+        Self {
+            clip: String::new(),
+            weight: 1.0,
+            speed: 1.0,
+            looping: true,
+        }
+    }
+}
+
 /// 挂在实体上的动画播放器配置。
 ///
 /// 默认值 = 「播第一个剪辑、原速、循环、自动播放、换剪辑 0.25s 淡入」——给一个
@@ -163,6 +202,10 @@ pub struct Animator {
     /// `clip` / `speed` / `looping` 被状态表覆盖（`autoplay` / `fade_time` 仍生效），
     /// 每帧按参数表求值转移、自动换剪辑。
     pub machine: Option<AnimMachine>,
+    /// 叠加（additive）层。`Some` 时在基础姿势（单剪辑或状态机当前状态）之上
+    /// **加一层增量**（见 [`AnimAdditive`]）—— 与机器模式正交：状态机换状态照常
+    /// 换基础层，叠加层按自己的时钟独立播放。
+    pub additive: Option<AnimAdditive>,
 }
 
 impl Default for Animator {
@@ -174,6 +217,7 @@ impl Default for Animator {
             autoplay: true,
             fade_time: 0.25,
             machine: None,
+            additive: None,
         }
     }
 }
@@ -374,6 +418,45 @@ mod tests {
         assert!((walk.speed - 1.0).abs() < f32::EPSILON);
         assert!(m.transitions.is_empty());
         assert!(m.is_usable());
+    }
+
+    /// 叠加层默认语义：挂上即全额（weight 1.0）、原速、循环；Animator 默认不叠。
+    #[test]
+    fn additive_defaults_are_full_weight_and_off_by_default() {
+        let d = AnimAdditive::default();
+        assert!((d.weight - 1.0).abs() < f32::EPSILON, "默认全额叠加");
+        assert!((d.speed - 1.0).abs() < f32::EPSILON, "默认原速");
+        assert!(d.looping, "默认循环");
+        assert!(Animator::default().additive.is_none(), "默认不叠任何东西");
+    }
+
+    /// 半截 RON：叠加层只写 clip/weight，其余补默认；与状态机**正交共存**；往返保留。
+    #[test]
+    fn additive_ron_fills_defaults_and_coexists_with_machine() {
+        #[derive(Deserialize)]
+        struct Wrap {
+            #[serde(default)]
+            animator: Animator,
+        }
+        let ron = r#"(animator: (
+            clip: "Walk",
+            machine: Some((entry: "Idle", states: [(name: "Idle", clip: "Survey")])),
+            additive: Some((clip: "Run", weight: 0.4)),
+        ))"#;
+        let a: Wrap = ron::from_str(ron).unwrap();
+        let add = a.animator.additive.as_ref().expect("additive 应解析出来");
+        assert_eq!(add.clip, "Run");
+        assert!((add.weight - 0.4).abs() < f32::EPSILON);
+        assert!((add.speed - 1.0).abs() < f32::EPSILON, "缺失 speed 补默认 1.0");
+        assert!(add.looping, "缺失 looping 补默认 true");
+        assert!(
+            a.animator.active_machine().is_some(),
+            "additive 与机器模式正交：机器照样可用"
+        );
+
+        let s = ron::to_string(&a.animator).expect("应能序列化");
+        let back: Animator = ron::from_str(&s).expect("应能反序列化");
+        assert_eq!(back.additive, a.animator.additive, "additive 应活过 RON 往返");
     }
 
     /// 阈值配对：升速跨 0.5 进 Walk、跨 2.0 进 Run；降速低于 0.3 退回 Idle、

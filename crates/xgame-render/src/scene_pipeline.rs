@@ -1439,8 +1439,44 @@ impl ScenePipeline {
                         let faded = anim.fade_from(entity.id).and_then(|f| {
                             mesh.clip(f.clip).map(|c| (c, f.t, f.looping, f.alpha))
                         });
-                        let mut bones = match faded {
-                            Some((prev_clip, prev_time, prev_looping, alpha)) => {
+                        // 叠加层与基础层正交：增量 = 叠加剪辑当前帧 − 其第 0 帧，
+                        // 按 weight 加到基础（或淡入混合后）的局部姿态上。叠加剪辑
+                        // 不在模型里 → 不叠加（基础姿势原样，不画错）。
+                        let add = anim
+                            .additive(entity.id)
+                            .and_then(|a| mesh.clip(a.clip).map(|c| (c, a.t, a.looping, a.weight)));
+                        let mut bones = match (faded, add) {
+                            (
+                                Some((prev_clip, prev_time, prev_looping, alpha)),
+                                Some((add_clip, add_time, add_looping, weight)),
+                            ) => {
+                                let prev_t = crate::animation::clip_time(
+                                    prev_time,
+                                    prev_clip.duration,
+                                    prev_looping,
+                                );
+                                let add_t = crate::animation::clip_time(
+                                    add_time,
+                                    add_clip.duration,
+                                    add_looping,
+                                );
+                                crate::animation::compute_bones_blended_additive(
+                                    &mesh.nodes,
+                                    prev_clip,
+                                    prev_t,
+                                    clip,
+                                    t,
+                                    alpha,
+                                    skin,
+                                    add_clip,
+                                    add_t,
+                                    weight,
+                                )
+                            }
+                            (
+                                Some((prev_clip, prev_time, prev_looping, alpha)),
+                                None,
+                            ) => {
                                 let prev_t = crate::animation::clip_time(
                                     prev_time,
                                     prev_clip.duration,
@@ -1456,7 +1492,25 @@ impl ScenePipeline {
                                     skin,
                                 )
                             }
-                            None => crate::animation::compute_bones(&mesh.nodes, clip, skin, t),
+                            (None, Some((add_clip, add_time, add_looping, weight))) => {
+                                let add_t = crate::animation::clip_time(
+                                    add_time,
+                                    add_clip.duration,
+                                    add_looping,
+                                );
+                                crate::animation::compute_bones_additive(
+                                    &mesh.nodes,
+                                    clip,
+                                    t,
+                                    skin,
+                                    add_clip,
+                                    add_t,
+                                    weight,
+                                )
+                            }
+                            (None, None) => {
+                                crate::animation::compute_bones(&mesh.nodes, clip, skin, t)
+                            }
                         };
                         // 超过槽位容量的骨架（>256 骨）解析时已告警；这里截断
                         // 保证 staging 的槽距不被撑歪——宁可末梢骨不对，不能整帧错位。

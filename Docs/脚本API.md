@@ -199,20 +199,28 @@ fn update(ctx) {
 | `clamp(v, lo, hi)` / `lerpf(a, b, t)` | 数值工具 |
 | `deg_to_rad(d)` / `rad_to_deg(r)` | 角度换算 |
 
-### 4.9 动画状态机
+### 4.9 动画状态机与叠加层
 
 | 函数 | 说明 |
 |---|---|
 | `set_anim_param(ctx, name, value)` | 写**自己实体**的动画状态机参数（键不存在就创建） |
+| `set_anim_additive_weight(ctx, value)` | 写**自己实体**叠加层的权重（自动钳在 0~1） |
 
 状态机（`Animator.machine`）的转移求值在引擎侧每帧自动跑；脚本只负责把
 "现在多快 / 要不要攻击"这类**信号**推进参数表。没挂动画组件或没配机器时
 `set_anim_param` **静默无操作** —— 通用移动脚本可以挂在任意实体上，不用先探测组件。
 
+叠加层（`Animator.additive`）是叠在基础姿势上的一层**增量**（增量 = 叠加剪辑
+当前帧 − 它的第 0 帧），`weight` 决定幅度：`set_anim_additive_weight` 同样在
+没配叠加层时**静默无操作**。经典用法是"受击晃动淡入再淡出"：平时 0，挨打瞬间
+拉到 1 再随时间衰减回去。
+
 ```rhai
-// 速度驱动 Idle/Walk/Run（阈值见场景 RON 里的 transitions）
+// 速度驱动 Idle/Walk/Run（阈值见场景 RON 里的 transitions），
+// 叠加层权重按 sin 波起伏（走动时的"呼吸/弹跳幅度"看得见地变化）
 fn update(ctx) {
     set_anim_param(ctx, "speed", velocity(ctx, self_id(ctx)).length());
+    set_anim_additive_weight(ctx, 0.3 + 0.3 * sin(time(ctx) * 4.0));
 }
 ```
 

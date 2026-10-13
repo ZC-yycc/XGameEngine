@@ -293,6 +293,15 @@
                         (from: "Run", to: "Walk", when: Below(param: "speed", value: 1.8)),
                     ],
                 )),
+                // 叠加层：把 Run 的**增量**（相对它第 0 帧的奔跑弹跳）叠在任意
+                // 基础状态上 —— 权重由 FoxLocomotion.rhai 每帧振荡，跑动时的
+                // "呼吸/弹跳幅度"看得见地起伏（weight 0 = 无增量）。
+                additive: Some((
+                    clip: "Run",
+                    weight: 0.3,
+                    speed: 1.5,
+                    looping: true,
+                )),
             )),
             scripts: [
                 "Scripts/FoxLocomotion.rhai",

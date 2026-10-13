@@ -371,7 +371,13 @@ impl SceneRenderer {
                     Some(m) => m.states.iter().any(|s| mesh.clip(&s.clip).is_some()),
                     None => mesh.clip(&animator.clip).is_some(),
                 };
-                if clip_ok {
+                // 叠加层：权重 > 0 且剪辑在模型里 → 也要出帧（哪怕基础层冻结，
+                // 增量还在动）。权重 0 的叠加层贡献零画面，不为它烧帧。
+                let additive_ok = animator
+                    .additive
+                    .as_ref()
+                    .is_some_and(|a| a.weight > 0.0 && mesh.clip(&a.clip).is_some());
+                if clip_ok || additive_ok {
                     active = true;
                 }
             }
@@ -490,8 +496,7 @@ impl SceneRenderer {
                 // 状态机配置同样进指纹：**参数值**变了（脚本每帧推、Inspector
                 // DragValue 拖）要触发重绘，否则转移换的状态不显示；states/
                 // transitions/entry 改了同理（编辑期改 RON 后重载场景才画对）。
-                if let Some(m) = animator.active_machine() {
-                    for byte in m.entry.as_bytes() {
+                if let Some(m) = animator.active_machine() {                    for byte in m.entry.as_bytes() {
                         hash = mix_bits(hash, *byte as u64);
                     }
                     // BTreeMap 天然有序 → 参数表哈希稳定，与插入顺序无关。
@@ -535,6 +540,16 @@ impl SceneRenderer {
                             }
                         }
                     }
+                }
+                // 叠加层：clip/weight/speed/looping 进指纹 —— 脚本每帧推权重、
+                // Inspector 拖权重都要触发重绘，否则增量效果改了画面不动。
+                if let Some(add) = &animator.additive {
+                    for byte in add.clip.as_bytes() {
+                        hash = mix_bits(hash, *byte as u64);
+                    }
+                    hash = mix_bits(hash, add.weight.to_bits() as u64);
+                    hash = mix_bits(hash, add.speed.to_bits() as u64);
+                    hash = mix_bits(hash, add.looping as u64);
                 }
             }
         }
@@ -958,6 +973,44 @@ mod tests {
             base,
             signature(std::slice::from_ref(&fox), &lights, ambient),
             "相同机器配置必须给相同指纹"
+        );
+    }
+
+    /// 叠加层的**权重**（脚本每帧推）与配置都进指纹 —— 否则增量效果改了画面不动。
+    #[test]
+    fn signature_tracks_additive_config() {
+        use xgame_core::AnimAdditive;
+
+        let lights = [Light::default()];
+        let ambient = [0.06, 0.06, 0.08];
+
+        let mut fox = entity("Fox", "Resources/Fox.gltf", Vec3::ZERO);
+        fox.animator = Some(xgame_core::Animator::new("Walk"));
+        let plain = signature(std::slice::from_ref(&fox), &lights, ambient);
+
+        fox.animator.as_mut().unwrap().additive = Some(AnimAdditive {
+            clip: "Run".into(),
+            ..Default::default()
+        });
+        let layered = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(plain, layered, "挂上叠加层没进指纹");
+
+        // 权重是脚本每帧推的量 —— 只改权重也必须变。
+        fox.animator.as_mut().unwrap().additive.as_mut().unwrap().weight = 0.3;
+        let lighter = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(layered, lighter, "权重没进指纹（脚本推权重不重绘）");
+
+        // 换叠加剪辑也要变。
+        fox.animator.as_mut().unwrap().additive.as_mut().unwrap().clip = "Survey".into();
+        let retargeted = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(lighter, retargeted, "叠加剪辑没进指纹");
+
+        // 摘掉叠加层回到纯基础。
+        fox.animator.as_mut().unwrap().additive = None;
+        assert_eq!(
+            plain,
+            signature(std::slice::from_ref(&fox), &lights, ambient),
+            "摘掉叠加层应还原指纹"
         );
     }
 

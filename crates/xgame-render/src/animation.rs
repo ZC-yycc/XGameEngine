@@ -15,8 +15,9 @@
 //! # v1 范围
 //!
 //! 单剪辑播放 + 换剪辑时的**交叉淡入** + 声明式**动画状态机**（参数阈值驱动的
-//! 剪辑切换，见 `xgame_core::AnimMachine`），LINEAR/STEP 插值（CUBICSPLINE
-//! 读入时降采样成线性）。旋转用 slerp，循环用取模、非循环钳在末帧。
+//! 剪辑切换，见 `xgame_core::AnimMachine`）+ **叠加（additive）混合**（增量 =
+//! 叠加剪辑当前帧 − 其第 0 帧参考姿势，见 `compute_bones_additive`），LINEAR/STEP
+//! 插值（CUBICSPLINE 读入时降采样成线性）。旋转用 slerp，循环用取模、非循环钳在末帧。
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -233,6 +234,25 @@ pub fn global_matrices(nodes: &[AnimNode], pose: &[LocalPose]) -> Vec<Mat4> {
         .collect()
 }
 
+/// 局部姿态 → 蒙皮矩阵（`globals[joint] × inverse_bind`），四条 compute_bones 共用的尾巴。
+fn bones_from_pose(nodes: &[AnimNode], pose: &[LocalPose], skin: &Skin) -> Vec<Mat4> {
+    let globals = global_matrices(nodes, pose);
+    skin.joints
+        .iter()
+        .zip(skin.inverse_bind.iter())
+        .map(|(&j, &ibm)| globals.get(j as usize).copied().unwrap_or(Mat4::IDENTITY) * ibm)
+        .collect()
+}
+
+/// 把 `pose_b` 按 `alpha` 混进 `pose_a`（就地，交叉淡入共用）。
+fn blend_into(pose_a: &mut [LocalPose], pose_b: &[LocalPose], alpha: f32) {
+    for (a, b) in pose_a.iter_mut().zip(pose_b) {
+        a.translation = a.translation.lerp(b.translation, alpha);
+        a.rotation = a.rotation.slerp(b.rotation, alpha);
+        a.scale = a.scale.lerp(b.scale, alpha);
+    }
+}
+
 /// 采样一个剪辑并算出某张蒙皮的**蒙皮矩阵**（`globals[joint] × inverse_bind`）。
 ///
 /// 顶点着色器拿它做 4 影响混合：`skinned = Σ wₖ · boneₖ · position`。
@@ -241,12 +261,7 @@ pub fn global_matrices(nodes: &[AnimNode], pose: &[LocalPose]) -> Vec<Mat4> {
 pub fn compute_bones(nodes: &[AnimNode], clip: &AnimClip, skin: &Skin, t: f32) -> Vec<Mat4> {
     let mut pose = default_pose(nodes);
     sample_clip_into(clip, t, &mut pose);
-    let globals = global_matrices(nodes, &pose);
-    skin.joints
-        .iter()
-        .zip(skin.inverse_bind.iter())
-        .map(|(&j, &ibm)| globals.get(j as usize).copied().unwrap_or(Mat4::IDENTITY) * ibm)
-        .collect()
+    bones_from_pose(nodes, &pose, skin)
 }
 
 /// 两份剪辑在各自时刻采样后按 `alpha` 混合，再算蒙皮矩阵（交叉淡入用）。
@@ -264,25 +279,106 @@ pub fn compute_bones_blended(
     skin: &Skin,
 ) -> Vec<Mat4> {
     let alpha = alpha.clamp(0.0, 1.0);
-    let mut pose_a = default_pose(nodes);
-    sample_clip_into(clip_a, t_a, &mut pose_a);
+    let mut pose = default_pose(nodes);
+    sample_clip_into(clip_a, t_a, &mut pose);
     let mut pose_b = default_pose(nodes);
     sample_clip_into(clip_b, t_b, &mut pose_b);
-    let pose: Vec<LocalPose> = pose_a
-        .iter()
-        .zip(&pose_b)
-        .map(|(a, b)| LocalPose {
-            translation: a.translation.lerp(b.translation, alpha),
-            rotation: a.rotation.slerp(b.rotation, alpha),
-            scale: a.scale.lerp(b.scale, alpha),
-        })
-        .collect();
-    let globals = global_matrices(nodes, &pose);
-    skin.joints
-        .iter()
-        .zip(skin.inverse_bind.iter())
-        .map(|(&j, &ibm)| globals.get(j as usize).copied().unwrap_or(Mat4::IDENTITY) * ibm)
-        .collect()
+    blend_into(&mut pose, &pose_b, alpha);
+    bones_from_pose(nodes, &pose, skin)
+}
+
+/// 把叠加层增量按 `weight` 加进基础**局部姿态**（additive blending 的核心一步）。
+///
+/// 增量 = `add_pose − ref_pose`（ref 是这层的参考姿势/"零增量"帧 —— 约定为
+/// 叠加剪辑自己的**第 0 帧**，由调用方采样后传进来）：
+///
+/// - 平移 / 缩放：线性差 —— `base + w × (add − ref)`；
+/// - 旋转：局部空间增量 `ref⁻¹ · add`，按权重向单位四元数 slerp 收 ——
+///   `base · slerp(I, ref⁻¹·add, w)`。w=0 恒为原姿势、w=1 全额增量，
+///   中间值是一条**最短路径**的插值（直接对四元数分量做 lerp 会走反向长弧）。
+///
+/// 纯函数，不猜时间/循环语义 —— 两份叠加姿态由调用方采样好。
+pub fn apply_additive_into(
+    base: &mut [LocalPose],
+    add_pose: &[LocalPose],
+    ref_pose: &[LocalPose],
+    weight: f32,
+) {
+    let w = weight.clamp(0.0, 1.0);
+    for (b, (a, r)) in base.iter_mut().zip(add_pose.iter().zip(ref_pose)) {
+        b.translation += (a.translation - r.translation) * w;
+        b.scale += (a.scale - r.scale) * w;
+        // 增量在**该节点的局部空间**：先减掉参考旋转得到"转了多少"，再右乘到
+        // 基础旋转上（与平移加在局部空间保持一致）。
+        let delta = r.rotation.inverse() * a.rotation;
+        b.rotation = b.rotation.slerp(b.rotation * delta, w);
+    }
+}
+
+/// 按权重把 `add_clip` 的增量加进基础姿态的采样结果（`compute_bones_*_additive`
+/// 共用；`weight <= 0` 或叠加层时长 0 时是 no-op —— 零权重不付采样代价，
+/// 画面也与没配叠加层逐位一致）。
+fn add_additive_layer(
+    nodes: &[AnimNode],
+    pose: &mut [LocalPose],
+    add_clip: &AnimClip,
+    add_t: f32,
+    weight: f32,
+) {
+    if weight <= 0.0 || add_clip.duration <= 0.0 {
+        return;
+    }
+    let mut add_pose = default_pose(nodes);
+    sample_clip_into(add_clip, add_t, &mut add_pose);
+    // 参考姿势 = 叠加剪辑**第 0 帧**（0 在循环取模/非循环钳位下都恒映射 0）。
+    // 没有轨道的节点保持绑定姿态 → 增量恒为 0，叠加层"没动的骨头"不干扰基础层。
+    let mut ref_pose = default_pose(nodes);
+    sample_clip_into(add_clip, 0.0, &mut ref_pose);
+    apply_additive_into(pose, &add_pose, &ref_pose, weight);
+}
+
+/// 基础剪辑 + 叠加层 → 蒙皮矩阵（叠加混合的一步到位封装）。
+pub fn compute_bones_additive(
+    nodes: &[AnimNode],
+    clip: &AnimClip,
+    t: f32,
+    skin: &Skin,
+    add_clip: &AnimClip,
+    add_t: f32,
+    weight: f32,
+) -> Vec<Mat4> {
+    let mut pose = default_pose(nodes);
+    sample_clip_into(clip, t, &mut pose);
+    add_additive_layer(nodes, &mut pose, add_clip, add_t, weight);
+    bones_from_pose(nodes, &pose, skin)
+}
+
+/// 交叉淡入中 + 叠加层：先按 `alpha` 混合基础层，再把叠加增量加到**混合后**的
+/// 姿态上（叠加层与基础层的切换正交 —— 基础层淡入淡出时它照叠不误）。
+///
+/// 参数多但每个都直呼其名（管线的四种组合位之一，拆结构体反而绕）——
+/// 与 `ScenePipeline::render` 同样的取舍。
+#[allow(clippy::too_many_arguments)]
+pub fn compute_bones_blended_additive(
+    nodes: &[AnimNode],
+    clip_a: &AnimClip,
+    t_a: f32,
+    clip_b: &AnimClip,
+    t_b: f32,
+    alpha: f32,
+    skin: &Skin,
+    add_clip: &AnimClip,
+    add_t: f32,
+    weight: f32,
+) -> Vec<Mat4> {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mut pose = default_pose(nodes);
+    sample_clip_into(clip_a, t_a, &mut pose);
+    let mut pose_b = default_pose(nodes);
+    sample_clip_into(clip_b, t_b, &mut pose_b);
+    blend_into(&mut pose, &pose_b, alpha);
+    add_additive_layer(nodes, &mut pose, add_clip, add_t, weight);
+    bones_from_pose(nodes, &pose, skin)
 }
 
 /// 播放时间归一：循环取模、非循环钳在末帧。
@@ -304,6 +400,21 @@ pub fn clip_time(t: f32, duration: f32, looping: bool) -> f32 {
 // ---------------------------------------------------------------------------
 // 播放时钟
 // ---------------------------------------------------------------------------
+
+/// 叠加层的解析结果，给渲染侧采样用（[`AnimationDriver::additive`]）。
+///
+/// 渲染侧拿 `clip` 找到剪辑、按 `t` / `looping` 采样，减去它**第 0 帧**（参考
+/// 姿势）得到增量，再按 `weight` 加到基础局部姿态上（见 [`compute_bones_additive`]）。
+pub struct Additive<'a> {
+    /// 叠加层剪辑名（渲染侧拿去 `mesh.clip()`）。
+    pub clip: &'a str,
+    /// 叠加层的当前时间。
+    pub t: f32,
+    /// 叠加层的循环方式。
+    pub looping: bool,
+    /// 权重 ∈ [0,1]（tick 里已钳位）。
+    pub weight: f32,
+}
 
 /// 进行中的交叉淡入，给渲染侧采样用（[`AnimationDriver::fade_from`]）。
 ///
@@ -346,6 +457,13 @@ struct Entry {
     looping: bool,
     /// `None` = 没有淡入（未切换 / 已完成 / 硬切）。
     prev: Option<Prev>,
+    /// 叠加层的解析结果：独立剪辑名 + 独立时钟 + 权重（配置摘掉时清成空剪辑）。
+    /// 与基础层正交 —— 状态机换状态不影响它，它换剪辑也不触发基础层淡入。
+    additive_clip: String,
+    additive_t: f32,
+    additive_speed: f32,
+    additive_looping: bool,
+    additive_weight: f32,
 }
 
 /// 每个实体的动画播放时钟（clip + 已累计时间）。
@@ -428,6 +546,11 @@ impl AnimationDriver {
                     speed,
                     looping,
                     prev: None,
+                    additive_clip: String::new(),
+                    additive_t: 0.0,
+                    additive_speed: 1.0,
+                    additive_looping: true,
+                    additive_weight: 0.0,
                 });
             // -- 3. 换剪辑 → 交叉淡入 --
             if entry.clip != clip {
@@ -452,11 +575,36 @@ impl AnimationDriver {
             entry.state = state;
             entry.speed = speed;
             entry.looping = looping;
+            // -- 4.5 叠加层刷新：独立剪辑名 → 独立时钟 --
+            //
+            // 与基础层正交：这里换叠加剪辑只归零**它自己**的时钟（硬切 —— 想平滑
+            // 就脚本把 weight 拉 0 再拉回），不动基础层的淡入状态。
+            match &animator.additive {
+                Some(add) if !add.clip.is_empty() => {
+                    if entry.additive_clip != add.clip {
+                        entry.additive_clip = add.clip.clone();
+                        entry.additive_t = 0.0;
+                    }
+                    entry.additive_speed = add.speed;
+                    entry.additive_looping = add.looping;
+                    // 权重钳在 [0,1]：RON 里写 3.0 不该让狐狸抖成筛子。
+                    entry.additive_weight = add.weight.clamp(0.0, 1.0);
+                }
+                _ => {
+                    // 摘掉叠加层（或 clip 写空）→ 清干净，时钟归零。
+                    entry.additive_clip.clear();
+                    entry.additive_t = 0.0;
+                }
+            }
             // -- 5. 推进时钟 --
             if animator.is_active() {
                 // 负速在 v1 是"静止"而不是倒放（与单剪辑语义一致）：状态表里
                 // 写了负速度 → 该状态定格，但转移照常求值，机器不会卡死。
                 entry.t += dt * entry.speed.max(0.0);
+                // 叠加层时钟与基础层共用同一个闸门（v1 边界，AnimAdditive 文档）。
+                if !entry.additive_clip.is_empty() {
+                    entry.additive_t += dt * entry.additive_speed.max(0.0);
+                }
                 let mut fade_done = false;
                 if let Some(prev) = entry.prev.as_mut() {
                     // 旧剪辑的时钟也继续走 —— 淡出的那半边若定格，混合出来的
@@ -522,6 +670,23 @@ impl AnimationDriver {
             .filter(|s| !s.is_empty())
     }
 
+    /// 某实体的**叠加层**解析结果（结构体 [`Additive`]）；没配 / clip 写空 → `None`。
+    ///
+    /// 渲染侧拿它调 [`compute_bones_additive`]：增量 = 叠加剪辑当前帧 − 其第 0 帧
+    /// （参考姿势），按 weight 加到基础姿势上。
+    pub fn additive(&self, id: EntityId) -> Option<Additive<'_>> {
+        let e = self.entries.get(&id)?;
+        if e.additive_clip.is_empty() {
+            return None;
+        }
+        Some(Additive {
+            clip: e.additive_clip.as_str(),
+            t: e.additive_t,
+            looping: e.additive_looping,
+            weight: e.additive_weight,
+        })
+    }
+
     /// 某实体正在进行的交叉淡入（结构体 [`FadeFrom`]）。
     ///
     /// `alpha = 0` 还是纯旧剪辑，`1` 淡入完成（此时条目已被清掉，返回 `None`）。
@@ -542,17 +707,26 @@ impl AnimationDriver {
     /// 有动画在播 → 每帧指纹变 → 每帧真渲染（否则指纹门控会把动画冻结）；
     /// 没有时钟 → 恒为 0，静态场景照旧"没动就不画"。按 ID 排序后混合，
     /// 与 `HashMap` 的遍历顺序无关 —— 同样的内容必须给同样的指纹。
+    ///
+    /// **两个时钟都进**：机器模式下基础层可以冻结在某个速度 0 的状态里而
+    /// 叠加层照常推进（is_active 看的是"还有没有活状态"）—— 只哈希基础时钟
+    /// 会让叠加层在冻结基础层上"演给瞎子看"（画面不刷新）。
     pub fn signature(&self) -> u64 {
-        let mut pairs: Vec<(u64, u32)> = self
+        let mut pairs: Vec<(u64, u64)> = self
             .entries
             .iter()
-            .map(|(id, e)| (id.raw(), e.t.to_bits()))
+            .map(|(id, e)| {
+                (
+                    id.raw(),
+                    ((e.t.to_bits() as u64) << 32) | e.additive_t.to_bits() as u64,
+                )
+            })
             .collect();
         pairs.sort_unstable();
         let mut h = 0u64;
         for (id, bits) in pairs {
             h = mix(h, id);
-            h = mix(h, bits as u64);
+            h = mix(h, bits);
         }
         h
     }
@@ -1052,7 +1226,7 @@ mod tests {
 
     // -- 状态机 --
 
-    use xgame_core::{AnimCondition, AnimMachine, AnimState, AnimTransition};
+    use xgame_core::{AnimAdditive, AnimCondition, AnimMachine, AnimState, AnimTransition};
 
     /// Idle(Survey, 速度 1) ⇄ Walk(速度 1) ⇄ Run(速度 2)：
     /// Idle→Walk 需 ≥0.5、回 Idle 需 <0.3（滞回），Walk→Run 需 ≥2.0、回 <1.8。
@@ -1234,5 +1408,176 @@ mod tests {
         assert_eq!(clip, "Walk", "坏机器应退回单剪辑的 clip");
         assert!((t - 0.2).abs() < 1e-6, "单剪辑时钟照走");
         assert_eq!(d.state(e.id), None, "坏机器不算状态机，没有状态名");
+    }
+
+    // -- 叠加混合 --
+
+    /// 叠加增量 = 相对**第 0 帧**的差，按权重线性加入基础平移。
+    /// move_x_clip：0s=(0,0,0) → 1s=(2,0,0)，所以 t=0.5 的增量是 (1,0,0)。
+    #[test]
+    fn additive_applies_frame_zero_relative_translation_delta() {
+        let nodes = vec![root_node()];
+        let clip = move_x_clip();
+        let mut add = default_pose(&nodes);
+        sample_clip_into(&clip, 0.5, &mut add); // (1,0,0)
+        let mut r = default_pose(&nodes);
+        sample_clip_into(&clip, 0.0, &mut r); // 参考 = 第 0 帧 (0,0,0)
+
+        let base_t = Vec3::new(0.0, 5.0, 0.0);
+        let at = |w: f32| {
+            let mut p = default_pose(&nodes);
+            p[0].translation = base_t;
+            apply_additive_into(&mut p, &add, &r, w);
+            p[0].translation
+        };
+        assert!((at(1.0) - Vec3::new(1.0, 5.0, 0.0)).length() < 1e-6, "全额增量");
+        assert!((at(0.5) - Vec3::new(0.5, 5.0, 0.0)).length() < 1e-6, "半权");
+        assert!((at(0.0) - base_t).length() < 1e-6, "零权重纹丝不动");
+    }
+
+    /// 停在参考帧上的叠加层增量恒为 0 —— "没动的骨头"不干扰基础姿势。
+    #[test]
+    fn additive_at_reference_frame_is_a_no_op() {
+        let nodes = vec![root_node()];
+        let clip = move_x_clip();
+        let mut add = default_pose(&nodes);
+        sample_clip_into(&clip, 0.0, &mut add);
+        let mut base = default_pose(&nodes);
+        base[0].translation = Vec3::new(9.0, 9.0, 9.0);
+        let before = base[0];
+        let r = add.clone();
+        apply_additive_into(&mut base, &add, &r, 1.0);
+        assert!(
+            (base[0].translation - before.translation).length() < 1e-6,
+            "参考帧上的叠加必须是零增量"
+        );
+        assert!(
+            base[0].rotation.angle_between(before.rotation) < 1e-5,
+            "旋转同理"
+        );
+    }
+
+    /// 旋转增量走最短路径、按权重缩放：90° 叠加层全额 = 90°、半权 = 45°。
+    #[test]
+    fn additive_rotation_composes_delta_by_weight() {
+        let nodes = vec![root_node()];
+        let mut add = default_pose(&nodes);
+        add[0].rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let r = default_pose(&nodes); // 参考 = 单位旋转
+
+        for (w, want) in [
+            (1.0f32, std::f32::consts::FRAC_PI_2),
+            (0.5, std::f32::consts::FRAC_PI_4),
+        ] {
+            let mut base = default_pose(&nodes);
+            apply_additive_into(&mut base, &add, &r, w);
+            let angle = base[0].rotation.angle_between(Quat::IDENTITY);
+            assert!((angle - want).abs() < 1e-3, "w={w} 应转 {want} rad，实得 {angle}");
+        }
+    }
+
+    /// 零权重的 `compute_bones_additive` 与纯 `compute_bones` **逐位一致** ——
+    /// 没配叠加层的实体不该为它付任何代价（也不引入浮点噪声）。
+    #[test]
+    fn zero_weight_additive_is_bit_identical_to_plain() {
+        let nodes = vec![root_node()];
+        let clip = move_x_clip();
+        let add = move_y_clip();
+        let skin = Skin {
+            joints: vec![0],
+            inverse_bind: vec![Mat4::IDENTITY],
+        };
+        let plain = compute_bones(&nodes, &clip, &skin, 0.5);
+        let zero = compute_bones_additive(&nodes, &clip, 0.5, &skin, &add, 0.5, 0.0);
+        assert_eq!(plain, zero, "零权重必须逐位一致");
+    }
+
+    /// 淡入 × 叠加组合：alpha=0（纯旧基础）+ 叠加 == 对旧基础直接叠加。
+    #[test]
+    fn blended_additive_reduces_to_additive_on_pure_base() {
+        let nodes = vec![root_node()];
+        let old = move_x_clip(); // 旧基础
+        let new = move_y_clip();
+        let add = move_x_clip();
+        let skin = Skin {
+            joints: vec![0],
+            inverse_bind: vec![Mat4::IDENTITY],
+        };
+        let expected = compute_bones_additive(&nodes, &old, 0.5, &skin, &add, 0.5, 1.0);
+        let combined =
+            compute_bones_blended_additive(&nodes, &old, 0.5, &new, 0.5, 0.0, &skin, &add, 0.5, 1.0);
+        assert_eq!(expected, combined, "alpha=0 应退化成'纯旧基础 + 叠加'");
+    }
+
+    fn entity_with_additive() -> Entity {
+        let mut a = Animator::new("Walk");
+        a.additive = Some(AnimAdditive {
+            clip: "Run".into(),
+            weight: 0.6,
+            speed: 2.0,
+            looping: true,
+        });
+        Entity::new("Fox").with_animator(a)
+    }
+
+    /// 叠加层有自己的时钟与速度；权重钳位在 [0,1]；摘掉配置 → None；基础层不受影响。
+    #[test]
+    fn driver_advances_additive_clock_with_own_speed() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_additive();
+        d.tick(0.5, std::slice::from_ref(&e));
+        let a = d.additive(e.id).expect("配了叠加层就该有解析结果");
+        assert_eq!(a.clip, "Run");
+        assert!((a.t - 1.0).abs() < 1e-6, "按叠加层自己的速度 2.0 推进，实得 {}", a.t);
+        assert!((a.weight - 0.6).abs() < 1e-6);
+        let (clip, t, _) = d.playback(e.id).unwrap();
+        assert_eq!(clip, "Walk", "基础层不受叠加层影响");
+        assert!((t - 0.5).abs() < 1e-6);
+
+        e.animator.as_mut().unwrap().additive.as_mut().unwrap().weight = 7.0;
+        d.tick(0.0, std::slice::from_ref(&e));
+        assert!((d.additive(e.id).unwrap().weight - 1.0).abs() < 1e-6, "权重应钳在 1.0");
+
+        e.animator.as_mut().unwrap().additive = None;
+        d.tick(0.1, std::slice::from_ref(&e));
+        assert!(d.additive(e.id).is_none(), "摘掉叠加层后应无解析结果");
+    }
+
+    /// 换叠加剪辑：只归零**它自己**的时钟（硬切），基础层照走、不触发淡入。
+    #[test]
+    fn driver_additive_clip_switch_resets_only_its_own_clock() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_additive();
+        d.tick(0.4, std::slice::from_ref(&e));
+        e.animator.as_mut().unwrap().additive.as_mut().unwrap().clip = "Survey".into();
+        d.tick(0.1, std::slice::from_ref(&e));
+
+        let a = d.additive(e.id).unwrap();
+        assert_eq!(a.clip, "Survey");
+        assert!((a.t - 0.2).abs() < 1e-6, "换叠加剪辑应从 0 重播（0.1×2.0），实得 {}", a.t);
+        assert!(d.fade_from(e.id).is_none(), "叠加层切换不该触发基础层淡入");
+        let (_, t, _) = d.playback(e.id).unwrap();
+        assert!((t - 0.5).abs() < 1e-6, "基础层时钟照走");
+    }
+
+    /// 冻结基础层（机器的当前状态速度 0、别的状态还活着）+ 活叠加层：
+    /// 叠加时钟继续推进且指纹跟着变 —— 否则叠加层"演给瞎子看"（画面不刷新）。
+    #[test]
+    fn driver_frozen_base_still_advances_additive_and_signature() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_machine();
+        e.animator.as_mut().unwrap().machine.as_mut().unwrap().states[0].speed = 0.0;
+        e.animator.as_mut().unwrap().additive = Some(AnimAdditive {
+            clip: "Run".into(),
+            ..Default::default()
+        });
+
+        d.tick(0.5, std::slice::from_ref(&e));
+        let (_, base_t, _) = d.playback(e.id).unwrap();
+        assert!(base_t.abs() < 1e-6, "冻结状态基础时钟不该走");
+        assert!((d.additive(e.id).unwrap().t - 0.5).abs() < 1e-6, "叠加层时钟要继续走");
+        let sig1 = d.signature();
+        d.tick(0.1, std::slice::from_ref(&e));
+        assert_ne!(sig1, d.signature(), "叠加层在走 → 指纹必须变，否则画面冻结");
     }
 }

@@ -708,9 +708,9 @@ fn register_state(engine: &mut Engine) {
 
 /// 动画状态机的脚本接口。
 ///
-/// v1 只给一个**写参数**：状态机的转移求值在引擎侧（驱动每 tick 跑），
-/// 脚本只负责把"现在多快 / 要不要攻击"这类信号推进参数表。没有读取、没有
-/// id 变体 —— 真实需求出现再加（YAGNI）。
+/// v1 只给**写**：状态机的转移求值与叠加层的增量合成都在引擎侧（驱动每 tick
+/// 跑），脚本只负责把"现在多快 / 要不要攻击"这类**信号**推进参数表、把
+/// "晃动多重"推进叠加层权重。没有读取、没有 id 变体 —— 真实需求出现再加（YAGNI）。
 fn register_animation(engine: &mut Engine) {
     // 写本实体的状态机参数（键不存在就创建）。
     //
@@ -729,6 +729,24 @@ fn register_animation(engine: &mut Engine) {
             }
         },
     );
+
+    // 写本实体叠加层的权重 ∈ [0,1]（引擎侧钳位）。
+    //
+    // 脚本的经典用法：受击晃动"淡入再淡出"——平时 weight=0（零成本 no-op），
+    // 挨打瞬间拉到 1 再随时间衰减回去。没配叠加层 → 静默 no-op，同 set_anim_param。
+    engine.register_fn("set_anim_additive_weight", |ctx: &mut ScriptCtx, value: f32| {
+        if let Some(i) = ctx.entity_index() {
+            if let Some(add) = ctx
+                .scene_mut()
+                .entities
+                .get_mut(i)
+                .and_then(|e| e.animator.as_mut())
+                .and_then(|a| a.additive.as_mut())
+            {
+                add.weight = value.clamp(0.0, 1.0);
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

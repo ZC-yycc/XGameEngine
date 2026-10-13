@@ -732,6 +732,59 @@ mod tests {
             .is_none_or(|a| a.machine.is_none()));
     }
 
+    /// `set_anim_additive_weight` 写叠加层权重并钳位；没配叠加层 → 静默 no-op。
+    #[test]
+    fn set_anim_additive_weight_writes_and_clamps() {
+        use xgame_core::AnimAdditive;
+
+        let project = TempProject::new("additive_weight");
+        let path = project.write_script(
+            "hitshake",
+            r#"
+            fn update(ctx) { set_anim_additive_weight(ctx, 3.0); }
+            "#,
+        );
+
+        let mut scene = Scene::new("additive_weight");
+        let mut with = Entity::new("with_layer");
+        with.scripts.push(path.clone());
+        let mut a = xgame_core::Animator::new("Walk");
+        a.additive = Some(AnimAdditive {
+            clip: "Run".into(),
+            ..Default::default()
+        });
+        with.animator = Some(a);
+        scene.add_entity(with);
+        let mut without = Entity::new("without_layer");
+        without.scripts.push(path.clone());
+        scene.add_entity(without);
+
+        let mut host = ScriptHost::new();
+        host.preload(&project.dir, &scene);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0));
+        assert!(host.logs.is_empty(), "不该有错误日志: {:?}", host.logs);
+
+        let add = scene.entities[0]
+            .animator
+            .as_ref()
+            .unwrap()
+            .additive
+            .as_ref()
+            .unwrap();
+        assert!(
+            (add.weight - 1.0).abs() < 1e-6,
+            "权重应钳在 1.0，实得 {}",
+            add.weight
+        );
+        assert!(
+            scene.entities[1]
+                .animator
+                .as_ref()
+                .is_none_or(|a2| a2.additive.is_none()),
+            "没配叠加层的实体静默 no-op"
+        );
+    }
+
     #[test]
     fn script_errors_are_reported_without_killing_the_frame() {
         let project = TempProject::new("runtime_error");
