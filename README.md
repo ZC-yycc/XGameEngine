@@ -191,12 +191,30 @@ lights: [
         scale: (0.01, 0.01, 0.01),
     ),
     animator: Some((
-        clip: "Walk",      // glTF 里的动画剪辑名
+        clip: "Walk",      // 单剪辑模式：glTF 里的动画剪辑名
         speed: 1.0,        // 播放倍率；0 = 冻结，1 = 原速
         looping: true,     // true 取模循环；false 播完停在最后一帧
         autoplay: true,    // 载入即自动播放；false = 停在第 0 帧摆姿势
-        fade_time: 0.25,   // 换剪辑交叉淡入时长（秒）；0 = 硬切
+        fade_time: 0.25,   // 换剪辑/换状态交叉淡入时长（秒）；0 = 硬切
+        // 可选：动画状态机 —— 配了它，clip/speed/looping 由状态表决定
+        machine: Some((
+            entry: "Idle",
+            parameters: { "speed": 0.0 },   // 初值；脚本 set_anim_param / Inspector 可改
+            states: [
+                (name: "Idle", clip: "Survey", speed: 1.0, looping: true),
+                (name: "Walk", clip: "Walk"),
+                (name: "Run",  clip: "Run"),
+            ],
+            transitions: [
+                // AtLeast 是 ≥、Below 是严格 <；进出阈值各配各的（滞回），0.3~0.5 之间不动
+                (from: "Idle", to: "Walk", when: AtLeast(param: "speed", value: 0.5)),
+                (from: "Walk", to: "Idle", when: Below(param: "speed", value: 0.3)),
+                (from: "Walk", to: "Run",  when: AtLeast(param: "speed", value: 2.0)),
+                (from: "Run",  to: "Walk", when: Below(param: "speed", value: 1.8)),
+            ],
+        )),
     )),
+    scripts: ["Scripts/FoxLocomotion.rhai"],  // 每帧推 speed 参数（见 Docs/脚本API.md 4.9）
 ),
 ```
 
@@ -209,17 +227,24 @@ lights: [
   持续出帧），独立游戏跟帧 dt 走 —— 与物理 / 脚本同一拍。**换剪辑自动交叉淡入**
   （`fade_time`，默认 0.25s）：旧剪辑连同它自己的时钟一起淡出，两份局部姿态按权重
   混合（平移 lerp、旋转 slerp）；暂停中切换或 `fade_time = 0` 则硬切。
+- **状态机**：配了 `machine` 就进入机器模式 —— 每帧从当前状态求值**一步**转移
+  （参数 ≥ / < 阈值，按书写顺序取第一条命中；打错名的参数永不匹配、坏转移被跳过、
+  entry 指不到状态则整台退回单剪辑模式），换状态 = 换剪辑、复用同一条交叉淡入。
+  状态的 `speed` / `looping` 覆盖 `Animator` 的同名字段。参数表随场景落盘：
+  脚本 `set_anim_param` 推、Inspector 里也能拖，Play 模式跑在场景快照上不污染文件。
 - **蒙皮**：每帧把当前姿势的关节矩阵（关节全局 × 逆绑定矩阵）上传到骨骼存储缓冲，
   顶点着色器按顶点的 `joints / weights` 加权合成模型空间坐标。**阴影 pass 一样蒙皮**，
   否则跑动的角色会投出一具绑定姿态的静止影子。每个动画实体占一个定长槽位
   （256 骨），多个角色同时播互不干扰。
 - **编辑器**：Inspector 的 **Animation 区块**直接选剪辑、调速度、勾 Loop / Autoplay，
-  暂停状态下换剪辑也立刻看到新姿势（动画配置进了渲染指纹）；视口有剪辑在播时帧
-  策略自动保持连续出帧，停播后回到"没动就不画"的静态门控。
+  或「转为状态机」/ 调机器参数、看当前状态；暂停状态下改配置也立刻看到新姿势
+  （动画配置 + 机器参数进了渲染指纹）；视口有剪辑在播时帧策略自动保持连续出帧，
+  停播后回到"没动就不画"的静态门控。
 
-v1 的边界（ROADMAP 阶段七有完整清单）：**单剪辑直读 + 换剪辑淡入** —— 没有状态机、
-没有叠加（additive）混合、没有 morph target；负速度不做倒放（停在第 0 帧）。每个模型
-取第一张蒙皮，超过 256 骨的骨架会在加载时告警并截断。
+v1 的边界（ROADMAP 阶段七有完整清单）：**单剪辑 + 换剪辑淡入 + 阈值状态机** ——
+没有分层（additive）叠加混合、没有逐条转移时长（统一 `fade_time`）、没有 morph
+target；负速度不做倒放（停在第 0 帧）。每个模型取第一张蒙皮，超过 256 骨的骨架会
+在加载时告警并截断。
 
 ## 场景层级
 

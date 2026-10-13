@@ -362,12 +362,15 @@ scene_view::show_content(state, ui)
   ├── ⑥ render_scene(用本帧最新的相机与场景)   ← **现在才画 3D（UI 线程同步）**
   │   │
   │   ├── 【动画时钟】anim_driver.tick_wall(每个配了 animator 的实体)
+  │   │     ├── 状态机模式：从当前状态求值一步转移 → 解析 (状态, 剪辑, 速度, 循环)
+  │   │     │   （换状态 = 换剪辑，复用同一条交叉淡入）
   │   │     └── 有剪辑在播时时间每帧都变 → 下面的指纹跟着变 → 持续出帧；
   │   │         暂停 / 无动画 → 时间冻结 → 静态帧照旧整段跳过
   │   │
   │   ├── 【输入指纹】相机 / 视口尺寸 / 环境光 + 有效光源（含阴影开关）+
   │   │     每个实体的 model + **局部变换** + **父引用** + **Animator 配置**
-  │   │     （剪辑 / 速度 / 循环 / 自动播放 / 淡入时长）+ **动画时钟签名**，收成一个 u64（逐位比较）
+  │   │     （剪辑 / 速度 / 循环 / 自动播放 / 淡入时长 / **状态机 entry+参数+状态表+转移表**）
+  │   │     + **动画时钟签名**，收成一个 u64（逐位比较）
   │   │     └── 与上次**完全相同** → 整段跳过 ★
   │   │         ★ 指纹**排在解算世界矩阵之前**：静态帧连 `world_matrices()` 都省掉
   │   │
@@ -378,9 +381,10 @@ scene_view::show_content(state, ui)
   │   │     │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
   │   │     │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
   │   │     │     │   └── 攒完一次 `write_buffer` 写完整段（旧的逐实体写 = 每帧 N 次分配 + N 条命令）
-  │   │     │     ├── [动画实体] 按当前时间采样剪辑（正在换剪辑 → 旧剪辑连同时钟一起
-  │   │     │     │               淡出，两份局部姿态按权重混合）→ 关节矩阵进**骨骼槽位**
-  │   │     │     │               （每实体 256 骨定长）
+  │   │     │     ├── [动画实体] 按驱动解析的 (剪辑, 时间, 循环) 采样（状态机模式下
+  │   │     │     │               剪辑来自状态表；正在换剪辑/换状态 → 旧剪辑连同时钟
+  │   │     │     │               一起淡出，两份局部姿态按权重混合）→ 关节矩阵进
+  │   │     │     │               **骨骼槽位**（每实体 256 骨定长）
   │   │     │     │     └── 容量不够先翻倍重建骨骼缓冲（连带换两个绑定组，必须在开 pass 之前）
   │   │     │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
   │   │     │     ├── 主 RenderPass (背景 #1E1E24)：
@@ -547,7 +551,8 @@ _"moving a window doesn't warrant a repaint"_，后来被并进大组里丢了�
 
 `SceneRenderer::render` 因此先算一个**输入指纹**：相机矩阵与位置、视口尺寸、环境光、
 参与光照的光源（含 `casts_shadow` / `shadow_resolution`）、每个实体的模型标识、**局部变换**
-与**父引用**、实体的 **Animator 配置**（剪辑 / 速度 / 循环 / 自动播放），外加**动画时钟签名**
+与**父引用**、实体的 **Animator 配置**（剪辑 / 速度 / 循环 / 自动播放 / 淡入时长、
+**状态机的 entry / 参数值 / 状态表 / 转移表**），外加**动画时钟签名**
 （`AnimationDriver::signature`，按实体 ID 排序的确定性混合）。这些正是着色器会读到的东西；
 选中态、gizmo、网格开关、物理调试线都不在其中（它们画在 egui 叠加层上，与离屏纹理无关）。
 指纹与上一帧逐位相同 → 整段渲染跳过，`painter.image` 照旧贴上一帧那张纹理。
@@ -1125,7 +1130,7 @@ xgame-mcp      MCP server（stdio 按行 JSON-RPC，智能体读写场景 / 跑�
 | `core/check.rs` | 150 | `check_project()`（无头验证清单 / 场景 / 引用，退出码 0/1/2 契约的依据；**编辑器 `--check` 与 MCP `project_check` 共用同一份**）、`CheckReport` |
 | `editor/dialogs.rs` | 141 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_save_as_dialog()` |
 | `editor/state.rs` | 1756 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()` / `save_scene_as()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
-| `editor/scene_renderer.rs` | 949 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + Animator 配置（含淡入时长）+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`viewport_animating()`（帧策略的动画输入，顺手预加载）、`animation_clip_names()`、`mesh_bounds()`（拾取用） |
+| `editor/scene_renderer.rs` | 949 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + Animator 配置（含淡入时长、**状态机 entry/参数/状态表/转移表**）+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判，顺手预加载）、`animation_clip_names()`、`animation_state()`（状态机当前状态，Inspector 用）、`mesh_bounds()`（拾取用） |
 | `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
@@ -1134,10 +1139,10 @@ xgame-mcp      MCP server（stdio 按行 JSON-RPC，智能体读写场景 / 跑�
 | `core/project.rs` | 773 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`；清单含 `runtime` 节（重力 / 固定步长） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 1026 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`）；`Entity::animator`（`#[serde(default)]`，旧场景读作 None） |
-| `core/animation.rs` | 142 | `Animator`（clip / speed / looping / autoplay / fade_time）、`is_active()`（autoplay 且 speed > 0） |
-| `render/animation.rs` | 944 | `AnimClip` / `Track` / `Skin`、`sample_clip_into()`（二分钳位、坏轨道跳过）、`global_matrices()`（成环护栏）、`compute_bones()` / `compute_bones_blended()`（交叉淡入：局部姿态按 alpha 混合后再算骨矩阵）、`clip_time()`、`AnimationDriver`（tick / signature / `fade_from()`，换剪辑归零 + 淡入状态） |
+| `core/animation.rs` | 142 | `Animator`（clip / speed / looping / autoplay / fade_time / machine）、`is_active()`（机器感知：模式下 = autoplay 且存在 speed > 0 的状态）、`AnimMachine`（entry / parameters / states / transitions，`state()` / `transition_for()` 首条命中 / `is_usable()` 坏机器退回单剪辑）、`AnimState`（每状态自己的 clip/speed/looping，覆盖 Animator 字段）、`AnimCondition`（AtLeast ≥ / Below 严格 <，同阈值互补；缺参数永不匹配） |
+| `render/animation.rs` | 944 | `AnimClip` / `Track` / `Skin`、`sample_clip_into()`（二分钳位、坏轨道跳过）、`global_matrices()`（成环护栏）、`compute_bones()` / `compute_bones_blended()`（交叉淡入：局部姿态按 alpha 混合后再算骨矩阵）、`clip_time()`、`AnimationDriver`（tick：每帧求值一步状态转移 → 解析 (状态, 剪辑, 速度, 循环)，换状态/换剪辑同一条淡入路径；`playback()` / `state()` / `fade_from()`（含旧剪辑自己的循环方式）、signature，换剪辑归零 + 淡入状态） |
 | `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
-| `render/scene_pipeline.rs` | 1813 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体采样骨骼进槽位（换剪辑淡入中 → 两份姿势按权重混合）+ `ensure_bones_capacity()` 扩容重建）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
+| `render/scene_pipeline.rs` | 1813 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体采样骨骼进槽位（剪辑名/时间/循环问驱动 `playback()`，换剪辑/换状态淡入中 → 两份姿势按权重混合，旧剪辑按自己的循环方式采样）+ `ensure_bones_capacity()` 扩容重建）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
 | `render/gltf_loader.rs` | 944 | `GltfMesh::from_file()` / `load()`、`read_material()`、`parse_animation_data()`（节点层级 / 皮肤 / 通道 → AnimClip+Skin，CUBICSPLINE 降采样）、`clip()` / `has_animation()`、`Bounds`（网格本地包围盒） |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |
 | `physics/world.rs` | 900 | `step(dt)`（按传入 dt 积分、子步均分 dt）、`add_body()`（维护 `body_handles` 反查表）、`add_collider()`（未知 body 只警告不 panic）、`debug_lines()` |

@@ -14,7 +14,8 @@
 //!
 //! # v1 范围
 //!
-//! 单剪辑播放 + 换剪辑时的**交叉淡入**（无状态机）、LINEAR/STEP 插值（CUBICSPLINE
+//! 单剪辑播放 + 换剪辑时的**交叉淡入** + 声明式**动画状态机**（参数阈值驱动的
+//! 剪辑切换，见 `xgame_core::AnimMachine`），LINEAR/STEP 插值（CUBICSPLINE
 //! 读入时降采样成线性）。旋转用 slerp，循环用取模、非循环钳在末帧。
 
 use std::collections::HashMap;
@@ -304,10 +305,30 @@ pub fn clip_time(t: f32, duration: f32, looping: bool) -> f32 {
 // 播放时钟
 // ---------------------------------------------------------------------------
 
+/// 进行中的交叉淡入，给渲染侧采样用（[`AnimationDriver::fade_from`]）。
+///
+/// 旧剪辑按**它自己**的时钟与循环方式采样 —— Walk→Run 淡出的那半边仍是 Walk
+/// 的步态，不会被 Run 的循环方式带偏。
+pub struct FadeFrom<'a> {
+    /// 旧剪辑名（渲染侧拿去 `mesh.clip()`）。
+    pub clip: &'a str,
+    /// 旧剪辑的当前时间。
+    pub t: f32,
+    /// 旧剪辑的循环方式（切换时刻定格）。
+    pub looping: bool,
+    /// 混合权重 ∈ [0,1]：0 = 纯旧剪辑，1 = 淡入完成。
+    pub alpha: f32,
+}
+
 /// 交叉淡入的**来源**剪辑（换剪辑时把旧剪辑连同它的时钟一起记下来）。
 struct Prev {
     clip: String,
     t: f32,
+    /// 切换那一刻旧剪辑的播放速度与循环方式 —— 淡出的那半边按**旧状态自己**的
+    /// 速度/循环走。单剪辑模式下与主剪辑同值（切换时刻定格，不跟随事后调速）；
+    /// 机器模式下 Walk→Run 时旧 Walk 仍按 Walk 的速度淡出，不会突然被 Run 带快。
+    speed: f32,
+    looping: bool,
     /// 已淡入的秒数。
     fade_t: f32,
     /// 当前混合权重 ∈ [0,1]：0 = 纯旧剪辑，1 = 淡入完成。tick 里算好存下，
@@ -316,8 +337,13 @@ struct Prev {
 }
 
 struct Entry {
+    /// 状态机当前状态名（单剪辑模式恒为空串）。换状态 = 换剪辑，走同一条淡入路径。
+    state: String,
     clip: String,
     t: f32,
+    /// 本帧解析后的播放速度 / 循环方式（机器模式下由状态表覆盖 Animator 字段）。
+    speed: f32,
+    looping: bool,
     /// `None` = 没有淡入（未切换 / 已完成 / 硬切）。
     prev: Option<Prev>,
 }
@@ -345,9 +371,14 @@ impl AnimationDriver {
     /// - 只为**带 [`Animator`][xgame_core::Animator] 的实体**建条目；
     ///   `autoplay = false` 也建（时间停在 0），于是首帧能画出剪辑第 0 帧的姿势，
     ///   而不是退回绑定姿态 —— "摆好第一帧再播"是正常的制作流程。
+    /// - 有状态机时先**求值一步转移**（校验当前状态还在表内 → 查一条命中的转移），
+    ///   得到本帧的 (状态, 剪辑, 速度, 循环)；没有状态机就取 Animator 的
+    ///   clip/speed/looping。求值每 tick 都做，暂停中改参数也立刻换姿势
+    ///   （与单剪辑模式"暂停中改 clip 硬切"同一语义）。
     /// - 剪辑名变了 → 时间归零（换剪辑从头播）。淡入时长 > 0 且当时正在播放 →
-    ///   记下旧剪辑（连同它的时钟）做交叉淡入，见 [`fade_from`](Self::fade_from)；
-    ///   暂停中切换 / `fade_time = 0` → 硬切。
+    ///   记下旧剪辑（连同它的时钟、速度、循环方式）做交叉淡入，见
+    ///   [`fade_from`](Self::fade_from)；暂停中切换 / `fade_time = 0` → 硬切。
+    ///   换状态与换剪辑走同一条路径 —— 状态机的转移就是一次换剪辑。
     /// - 实体被删 / 动画组件被摘掉 → 条目清理，防泄漏。
     ///
     /// 淡入中途再次换剪辑：旧的淡入被丢弃，从**当前主剪辑**重新淡入新剪辑
@@ -359,35 +390,78 @@ impl AnimationDriver {
             let Some(animator) = &entity.animator else {
                 continue;
             };
+            // -- 1. 解析本帧目标播放 --
+            //
+            // 机器模式：当前状态必须还在表里（配置被 RON 改坏 → 退回 entry），
+            // 然后求值一步转移（每 tick 最多走一条边，不链跳）。
+            let (state, clip, speed, looping) = match animator.active_machine() {
+                None => (
+                    String::new(),
+                    animator.clip.clone(),
+                    animator.speed,
+                    animator.looping,
+                ),
+                Some(m) => {
+                    let current = self
+                        .entries
+                        .get(&entity.id)
+                        .map(|e| e.state.as_str())
+                        .filter(|s| m.state(s).is_some())
+                        .unwrap_or(m.entry.as_str());
+                    let next = m.transition_for(current, &m.parameters).unwrap_or(current);
+                    // next 只能是 current（已校验在表内）或转移表里校验过的目标
+                    // （transition_for 跳过缺失状态）—— 必查得到。
+                    let Some(s) = m.state(next) else {
+                        continue;
+                    };
+                    (next.to_owned(), s.clip.clone(), s.speed, s.looping)
+                }
+            };
+            // -- 2. 条目（首建直接落解析值，不触发假淡入）--
             let entry = self
                 .entries
                 .entry(entity.id)
                 .or_insert_with(|| Entry {
-                    clip: animator.clip.clone(),
+                    state: state.clone(),
+                    clip: clip.clone(),
                     t: 0.0,
+                    speed,
+                    looping,
                     prev: None,
                 });
-            if entry.clip != animator.clip {
+            // -- 3. 换剪辑 → 交叉淡入 --
+            if entry.clip != clip {
                 entry.prev = if animator.fade_time > 0.0 && animator.is_active() {
                     Some(Prev {
                         clip: entry.clip.clone(),
                         t: entry.t,
+                        // 旧剪辑的速度/循环在**切换时刻**定格：淡出的那半边按它
+                        // 自己的参数走，不被新状态带偏。
+                        speed: entry.speed,
+                        looping: entry.looping,
                         fade_t: 0.0,
                         alpha: 0.0,
                     })
                 } else {
                     None
                 };
-                entry.clip = animator.clip.clone();
+                entry.clip = clip;
                 entry.t = 0.0;
             }
+            // -- 4. 速度/循环/状态刷新（必须在换剪辑比较之后：Prev 记的是旧值）--
+            entry.state = state;
+            entry.speed = speed;
+            entry.looping = looping;
+            // -- 5. 推进时钟 --
             if animator.is_active() {
-                entry.t += dt * animator.speed;
+                // 负速在 v1 是"静止"而不是倒放（与单剪辑语义一致）：状态表里
+                // 写了负速度 → 该状态定格，但转移照常求值，机器不会卡死。
+                entry.t += dt * entry.speed.max(0.0);
                 let mut fade_done = false;
                 if let Some(prev) = entry.prev.as_mut() {
                     // 旧剪辑的时钟也继续走 —— 淡出的那半边若定格，混合出来的
                     // 姿势会在过渡中"粘住"一下，看起来像卡帧。
-                    prev.t += dt * animator.speed;
+                    prev.t += dt * prev.speed;
                     prev.fade_t += dt;
                     prev.alpha = if animator.fade_time > 0.0 {
                         (prev.fade_t / animator.fade_time).min(1.0)
@@ -428,17 +502,39 @@ impl AnimationDriver {
         self.entries.get(&id).map(|e| e.t)
     }
 
-    /// 某实体正在进行的交叉淡入：`(旧剪辑名, 旧剪辑时间, 混合权重 alpha)`。
+    /// 某实体本帧的**解析结果**：`(剪辑名, 时间, 循环方式)`。
+    ///
+    /// 机器模式下剪辑/速度/循环来自状态表（不是 `Animator` 的字段）—— 渲染侧
+    /// 一律问驱动要，别再回头读组件配置，否则换状态不出效。
+    pub fn playback(&self, id: EntityId) -> Option<(&str, f32, bool)> {
+        self.entries
+            .get(&id)
+            .map(|e| (e.clip.as_str(), e.t, e.looping))
+    }
+
+    /// 某实体状态机的**当前状态名**（单剪辑模式恒 `None`）。
+    ///
+    /// 编辑器 Inspector 显示"现在站在哪个状态"用。
+    pub fn state(&self, id: EntityId) -> Option<&str> {
+        self.entries
+            .get(&id)
+            .map(|e| e.state.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// 某实体正在进行的交叉淡入（结构体 [`FadeFrom`]）。
     ///
     /// `alpha = 0` 还是纯旧剪辑，`1` 淡入完成（此时条目已被清掉，返回 `None`）。
-    /// 渲染侧拿它调 [`compute_bones_blended`]：旧剪辑在旧时钟、新剪辑用
-    /// [`time`](Self::time) 的时钟。
-    pub fn fade_from(&self, id: EntityId) -> Option<(&str, f32, f32)> {
-        self.entries
-            .get(&id)?
-            .prev
-            .as_ref()
-            .map(|p| (p.clip.as_str(), p.t, p.alpha))
+    /// 渲染侧拿它调 [`compute_bones_blended`]：旧剪辑在旧时钟、按旧剪辑自己的
+    /// 速度与循环方式采样；新剪辑用 [`playback`](Self::playback) 的时钟。
+    pub fn fade_from(&self, id: EntityId) -> Option<FadeFrom<'_>> {
+        let p = self.entries.get(&id)?.prev.as_ref()?;
+        Some(FadeFrom {
+            clip: p.clip.as_str(),
+            t: p.t,
+            looping: p.looping,
+            alpha: p.alpha,
+        })
     }
 
     /// 当前所有时钟的**内容指纹**：进编辑器的场景指纹用。
@@ -843,13 +939,14 @@ mod tests {
 
         e.animator.as_mut().unwrap().clip = "Run".into(); // 默认 fade_time = 0.25s
         d.tick(0.1, std::slice::from_ref(&e));
-        let (clip, prev_t, alpha) = d.fade_from(id).expect("换剪辑后应处于淡入中");
-        assert_eq!(clip, "Walk", "应从旧剪辑淡出");
+        let f = d.fade_from(id).expect("换剪辑后应处于淡入中");
+        assert_eq!(f.clip, "Walk", "应从旧剪辑淡出");
         assert!(
-            (prev_t - 0.5).abs() < 1e-6,
-            "旧剪辑时钟应继续走（0.4+0.1），实得 {prev_t}"
+            (f.t - 0.5).abs() < 1e-6,
+            "旧剪辑时钟应继续走（0.4+0.1），实得 {}",
+            f.t
         );
-        assert!((alpha - 0.4).abs() < 1e-6, "alpha 应是 0.1/0.25，实得 {alpha}");
+        assert!((f.alpha - 0.4).abs() < 1e-6, "alpha 应是 0.1/0.25，实得 {}", f.alpha);
         assert!((d.time(id).unwrap() - 0.1).abs() < 1e-6, "新剪辑从 0 起播");
 
         d.tick(0.2, std::slice::from_ref(&e)); // 累计 0.3 ≥ 0.25
@@ -892,13 +989,20 @@ mod tests {
         d.tick(0.4, std::slice::from_ref(&e));
         e.animator.as_mut().unwrap().clip = "Run".into();
         d.tick(0.1, std::slice::from_ref(&e));
-        let (_, prev_t, alpha) = d.fade_from(e.id).unwrap();
+        // 先把数值抄出来 —— FadeFrom 借用着驱动，挡不住下一次 tick 的可变借用。
+        let (prev_t1, alpha1) = {
+            let f = d.fade_from(e.id).unwrap();
+            (f.t, f.alpha)
+        };
 
         e.animator.as_mut().unwrap().autoplay = false;
         d.tick(5.0, std::slice::from_ref(&e));
-        let (_, prev_t2, alpha2) = d.fade_from(e.id).expect("暂停不该把淡入清掉");
-        assert!((prev_t2 - prev_t).abs() < 1e-6, "暂停中旧剪辑时钟该冻结");
-        assert!((alpha2 - alpha).abs() < 1e-6, "暂停中淡入进度该冻结");
+        let (prev_t2, alpha2) = {
+            let f = d.fade_from(e.id).expect("暂停不该把淡入清掉");
+            (f.t, f.alpha)
+        };
+        assert!((prev_t2 - prev_t1).abs() < 1e-6, "暂停中旧剪辑时钟该冻结");
+        assert!((alpha2 - alpha1).abs() < 1e-6, "暂停中淡入进度该冻结");
         assert!((d.time(e.id).unwrap() - 0.1).abs() < 1e-6, "暂停中主时钟也该冻结");
     }
 
@@ -914,9 +1018,13 @@ mod tests {
 
         e.animator.as_mut().unwrap().clip = "Survey".into();
         d.tick(0.05, std::slice::from_ref(&e));
-        let (clip, _, alpha) = d.fade_from(e.id).expect("双切后仍应处于淡入中");
-        assert_eq!(clip, "Run", "第二次切换应从当前主剪辑（Run）淡出");
-        assert!((alpha - 0.2).abs() < 1e-6, "淡入进度应重新起算（0.05/0.25），实得 {alpha}");
+        let f = d.fade_from(e.id).expect("双切后仍应处于淡入中");
+        assert_eq!(f.clip, "Run", "第二次切换应从当前主剪辑（Run）淡出");
+        assert!(
+            (f.alpha - 0.2).abs() < 1e-6,
+            "淡入进度应重新起算（0.05/0.25），实得 {}",
+            f.alpha
+        );
     }
 
     #[test]
@@ -940,5 +1048,191 @@ mod tests {
         let a = d2.signature();
         d2.tick(0.1, std::slice::from_ref(&paused));
         assert_eq!(a, d2.signature(), "暂停中的时钟不该让指纹抖动");
+    }
+
+    // -- 状态机 --
+
+    use xgame_core::{AnimCondition, AnimMachine, AnimState, AnimTransition};
+
+    /// Idle(Survey, 速度 1) ⇄ Walk(速度 1) ⇄ Run(速度 2)：
+    /// Idle→Walk 需 ≥0.5、回 Idle 需 <0.3（滞回），Walk→Run 需 ≥2.0、回 <1.8。
+    /// Walk 的剪辑故意取**半速**，用来验证速度覆盖。
+    fn locomotion_machine() -> AnimMachine {
+        AnimMachine {
+            entry: "Idle".into(),
+            parameters: std::collections::BTreeMap::from([("speed".to_string(), 0.0)]),
+            states: vec![
+                AnimState {
+                    name: "Idle".into(),
+                    clip: "Survey".into(),
+                    speed: 1.0,
+                    looping: true,
+                },
+                AnimState {
+                    name: "Walk".into(),
+                    clip: "Walk".into(),
+                    speed: 0.5,
+                    looping: false,
+                },
+                AnimState {
+                    name: "Run".into(),
+                    clip: "Run".into(),
+                    speed: 2.0,
+                    looping: true,
+                },
+            ],
+            transitions: vec![
+                AnimTransition {
+                    from: "Idle".into(),
+                    to: "Walk".into(),
+                    when: AnimCondition::AtLeast {
+                        param: "speed".into(),
+                        value: 0.5,
+                    },
+                },
+                AnimTransition {
+                    from: "Walk".into(),
+                    to: "Idle".into(),
+                    when: AnimCondition::Below {
+                        param: "speed".into(),
+                        value: 0.3,
+                    },
+                },
+                AnimTransition {
+                    from: "Walk".into(),
+                    to: "Run".into(),
+                    when: AnimCondition::AtLeast {
+                        param: "speed".into(),
+                        value: 2.0,
+                    },
+                },
+                AnimTransition {
+                    from: "Run".into(),
+                    to: "Walk".into(),
+                    when: AnimCondition::Below {
+                        param: "speed".into(),
+                        value: 1.8,
+                    },
+                },
+            ],
+        }
+    }
+
+    fn entity_with_machine() -> Entity {
+        let mut a = Animator::new("ignored");
+        a.machine = Some(locomotion_machine());
+        Entity::new("Fox").with_animator(a)
+    }
+
+    /// 首帧：entry 状态起步、播 entry 状态的剪辑（不是 Animator.clip ——
+    /// 机器模式下它已被状态表覆盖）；状态名可查。
+    #[test]
+    fn driver_starts_at_entry_state_and_plays_its_clip() {
+        let mut d = AnimationDriver::new();
+        let e = entity_with_machine();
+        d.tick(0.1, std::slice::from_ref(&e));
+
+        assert_eq!(d.state(e.id), Some("Idle"), "应停在 entry 状态");
+        let (clip, t, looping) = d.playback(e.id).expect("有 animator 就该有解析结果");
+        assert_eq!(clip, "Survey", "entry 状态的剪辑才是入口（Animator.clip 被覆盖）");
+        assert!((t - 0.1).abs() < 1e-6, "按状态速度推进");
+        assert!(looping, "循环方式也来自状态表");
+    }
+
+    /// 参数跨阈值 → 求值一步转移 → 当帧换剪辑并交叉淡入（复用第二片的淡入机制）。
+    #[test]
+    fn driver_transitions_on_param_and_fades_to_new_state() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_machine();
+        d.tick(0.3, std::slice::from_ref(&e));
+
+        e.animator.as_mut().unwrap().machine.as_mut().unwrap()
+            .parameters
+            .insert("speed".into(), 0.6);
+        d.tick(0.1, std::slice::from_ref(&e));
+
+        assert_eq!(d.state(e.id), Some("Walk"), "speed ≥ 0.5 应转 Walk");
+        let (clip, t, looping) = d.playback(e.id).unwrap();
+        assert_eq!(clip, "Walk", "换状态 = 换剪辑");
+        // 转移与新剪辑推进在同一 tick：0.1 × Walk 速度 0.5 = 0.05。
+        assert!((t - 0.05).abs() < 1e-6, "新剪辑应从 0 起播并当帧推进，实得 {t}");
+        assert!(!looping, "新状态是非循环，循环方式也跟着换");
+        let f = d.fade_from(e.id).expect("换状态应交叉淡入（复用换剪辑机制）");
+        assert_eq!(f.clip, "Survey", "应从旧状态的剪辑淡出");
+        assert!(f.looping, "旧剪辑按**它自己**的循环方式淡出");
+    }
+
+    /// 状态表的 speed 覆盖 Animator.speed：Walk 状态半速 → 时钟按 dt×0.5 走。
+    #[test]
+    fn driver_uses_state_speed_and_looping_over_animator_fields() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_machine();
+        // 直接从 Walk 起步（半速、非循环）；参数停在滞回区间 0.3~0.5 内，
+        // 保证首帧不会被转移带走。
+        e.animator.as_mut().unwrap().machine.as_mut().unwrap().entry = "Walk".into();
+        e.animator.as_mut().unwrap().machine.as_mut().unwrap()
+            .parameters
+            .insert("speed".into(), 0.4);
+        e.animator.as_mut().unwrap().speed = 7.0; // 单剪辑速度，必须被无视
+
+        d.tick(0.4, std::slice::from_ref(&e));
+        let (_, t, looping) = d.playback(e.id).unwrap();
+        assert!((t - 0.2).abs() < 1e-6, "应按状态速度 0.5×0.4=0.2 走，实得 {t}");
+        assert!(!looping, "非循环状态应报非循环");
+    }
+
+    /// entry 状态冻住（速度 0）但转移仍要被求值 —— 否则冻结状态永远出不来。
+    #[test]
+    fn driver_evaluates_transitions_even_from_frozen_state() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_machine();
+        // 把 Idle 冻住（speed 0），但机器还有活状态 → is_active 仍为真。
+        e.animator.as_mut().unwrap().machine.as_mut().unwrap().states[0].speed = 0.0;
+        d.tick(0.5, std::slice::from_ref(&e));
+        let (_, t, _) = d.playback(e.id).unwrap();
+        assert!(t.abs() < 1e-6, "冻结状态时钟不该走");
+
+        e.animator.as_mut().unwrap().machine.as_mut().unwrap()
+            .parameters
+            .insert("speed".into(), 0.6);
+        d.tick(0.1, std::slice::from_ref(&e));
+        assert_eq!(d.state(e.id), Some("Walk"), "冻结状态里的转移求值必须活着");
+    }
+
+    /// 单剪辑模式行为逐位不变：playback 就是 Animator 字段，state 恒 None。
+    #[test]
+    fn driver_single_clip_playback_mirrors_animator_fields() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_animator("Walk");
+        e.animator.as_mut().unwrap().looping = false;
+        d.tick(0.2, std::slice::from_ref(&e));
+
+        let (clip, t, looping) = d.playback(e.id).unwrap();
+        assert_eq!(clip, "Walk");
+        assert!((t - 0.2).abs() < 1e-6);
+        assert!(!looping, "单剪辑的 looping 原样透出");
+        assert_eq!(d.state(e.id), None, "单剪辑模式没有状态名");
+    }
+
+    /// 坏机器（entry 指不到状态）→ 退回单剪辑解析：Animator.clip 照旧生效。
+    #[test]
+    fn driver_unusable_machine_falls_back_to_animator_clip() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_animator("Walk");
+        e.animator.as_mut().unwrap().machine = Some(AnimMachine {
+            entry: "Ghost".into(),
+            states: vec![AnimState {
+                name: "Idle".into(),
+                clip: "Survey".into(),
+                speed: 1.0,
+                looping: true,
+            }],
+            ..Default::default()
+        });
+        d.tick(0.2, std::slice::from_ref(&e));
+        let (clip, t, _) = d.playback(e.id).unwrap();
+        assert_eq!(clip, "Walk", "坏机器应退回单剪辑的 clip");
+        assert!((t - 0.2).abs() < 1e-6, "单剪辑时钟照走");
+        assert_eq!(d.state(e.id), None, "坏机器不算状态机，没有状态名");
     }
 }

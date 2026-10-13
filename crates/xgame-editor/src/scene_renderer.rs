@@ -313,14 +313,24 @@ impl SceneRenderer {
             .unwrap_or_default()
     }
 
+    /// 某实体状态机的**当前状态名**（Inspector 显示"现在站在哪"用）。
+    ///
+    /// 单剪辑模式 / 还没 tick 过 → `None`（面板只在机器模式下显示这一行）。
+    pub fn animation_state(&self, id: EntityId) -> Option<&str> {
+        self.anim_driver.state(id)
+    }
+
     /// 视口里是否有动画正在**连续播放**（帧策略的输入之一，见 `FrameInputs::animating`）。
     ///
     /// 三个条件缺一不可：
     ///
     /// 1. 实体配了 `animator` 且 [`is_active`](xgame_core::Animator::is_active)
-    ///    （开自动播放、速度 > 0）；
-    /// 2. 模型能加载、**该剪辑存在** —— 加载失败或剪辑名写错时返回假，
-    ///    否则一个坏资产就能让编辑器永远满速空转（这是本函数存在的首要理由）；
+    ///    （开自动播放；机器模式下是"还有速度为正的状态"，见其文档）；
+    /// 2. 模型能加载、**剪辑存在** —— 加载失败或剪辑名写错时返回假，否则一个
+    ///    坏资产就能让编辑器永远满速空转（这是本函数存在的首要理由）。
+    ///    机器模式下要的是「**任一状态**的剪辑在模型里」：entry 剪辑缺失但
+    ///    别的状态有效时必须继续出帧，否则转移永远不被求值，机器卡死；
+    ///    反过来整台机器的剪辑全都指错 → 假，守住空转底线；
     /// 3. 视口最近真的在出图（[`Self::render`] 打过卡）—— 面板关着时不请求帧。
     ///
     /// 顺带把动画实体的模型**提前加载**：动画请求帧的判定在渲染之前，
@@ -354,7 +364,14 @@ impl SceneRenderer {
                 }
             }
             if let Some(mesh) = self.model_cache.get(&entity.model) {
-                if mesh.has_animation() && mesh.clip(&animator.clip).is_some() {
+                if !mesh.has_animation() {
+                    continue;
+                }
+                let clip_ok = match animator.active_machine() {
+                    Some(m) => m.states.iter().any(|s| mesh.clip(&s.clip).is_some()),
+                    None => mesh.clip(&animator.clip).is_some(),
+                };
+                if clip_ok {
                     active = true;
                 }
             }
@@ -470,6 +487,55 @@ impl SceneRenderer {
                 hash = mix_bits(hash, animator.looping as u64);
                 hash = mix_bits(hash, animator.autoplay as u64);
                 hash = mix_bits(hash, animator.fade_time.to_bits() as u64);
+                // 状态机配置同样进指纹：**参数值**变了（脚本每帧推、Inspector
+                // DragValue 拖）要触发重绘，否则转移换的状态不显示；states/
+                // transitions/entry 改了同理（编辑期改 RON 后重载场景才画对）。
+                if let Some(m) = animator.active_machine() {
+                    for byte in m.entry.as_bytes() {
+                        hash = mix_bits(hash, *byte as u64);
+                    }
+                    // BTreeMap 天然有序 → 参数表哈希稳定，与插入顺序无关。
+                    for (name, value) in &m.parameters {
+                        for byte in name.as_bytes() {
+                            hash = mix_bits(hash, *byte as u64);
+                        }
+                        hash = mix_bits(hash, value.to_bits() as u64);
+                    }
+                    for s in &m.states {
+                        for byte in s.name.as_bytes() {
+                            hash = mix_bits(hash, *byte as u64);
+                        }
+                        for byte in s.clip.as_bytes() {
+                            hash = mix_bits(hash, *byte as u64);
+                        }
+                        hash = mix_bits(hash, s.speed.to_bits() as u64);
+                        hash = mix_bits(hash, s.looping as u64);
+                    }
+                    for t in &m.transitions {
+                        for byte in t.from.as_bytes() {
+                            hash = mix_bits(hash, *byte as u64);
+                        }
+                        for byte in t.to.as_bytes() {
+                            hash = mix_bits(hash, *byte as u64);
+                        }
+                        match &t.when {
+                            xgame_core::AnimCondition::AtLeast { param, value } => {
+                                hash = mix_bits(hash, 0);
+                                for byte in param.as_bytes() {
+                                    hash = mix_bits(hash, *byte as u64);
+                                }
+                                hash = mix_bits(hash, value.to_bits() as u64);
+                            }
+                            xgame_core::AnimCondition::Below { param, value } => {
+                                hash = mix_bits(hash, 1);
+                                for byte in param.as_bytes() {
+                                    hash = mix_bits(hash, *byte as u64);
+                                }
+                                hash = mix_bits(hash, value.to_bits() as u64);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -823,6 +889,76 @@ mod tests {
         fox.animator.as_mut().unwrap().fade_time = 0.0;
         let hard = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(paused, hard, "改淡入时长没进指纹");
+    }
+
+    /// 状态机的**参数值**进了指纹 —— 脚本每帧推参数、Inspector DragValue 拖动
+    /// 都靠它触发重绘，否则转移换了状态画面却不刷新。
+    #[test]
+    fn signature_tracks_machine_parameters_and_config() {
+        use std::collections::BTreeMap;
+        use xgame_core::{AnimCondition, AnimMachine, AnimState, AnimTransition};
+
+        let lights = [Light::default()];
+        let ambient = [0.06, 0.06, 0.08];
+
+        let machine = || AnimMachine {
+            entry: "Idle".into(),
+            parameters: BTreeMap::from([("speed".to_string(), 0.0)]),
+            states: vec![AnimState {
+                name: "Idle".into(),
+                clip: "Survey".into(),
+                speed: 1.0,
+                looping: true,
+            }],
+            transitions: vec![AnimTransition {
+                from: "Idle".into(),
+                to: "Walk".into(),
+                when: AnimCondition::AtLeast {
+                    param: "speed".into(),
+                    value: 0.5,
+                },
+            }],
+        };
+
+        let mut fox = entity("Fox", "Resources/Fox.gltf", Vec3::ZERO);
+        fox.animator = Some(xgame_core::Animator::new("ignored"));
+        fox.animator.as_mut().unwrap().machine = Some(machine());
+        let base = signature(std::slice::from_ref(&fox), &lights, ambient);
+
+        // 只改参数值 —— 结构一个字节没动，指纹也必须变。
+        fox.animator.as_mut().unwrap().machine.as_mut().unwrap()
+            .parameters
+            .insert("speed".to_string(), 0.6);
+        let bumped = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(base, bumped, "参数值没进指纹（脚本推参数就不重绘）");
+
+        // 改转移阈值也要变。
+        fox.animator.as_mut().unwrap().machine.as_mut().unwrap().transitions[0]
+            .when = AnimCondition::AtLeast {
+            param: "speed".into(),
+            value: 0.9,
+        };
+        let retuned = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(bumped, retuned, "转移阈值没进指纹");
+
+        // 状态表（clip/speed/looping）也要变。
+        fox.animator.as_mut().unwrap().machine.as_mut().unwrap().states[0]
+            .clip = "Walk".into();
+        let restated = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(retuned, restated, "状态表没进指纹");
+
+        // 去掉机器（退回单剪辑）同样要变。
+        fox.animator.as_mut().unwrap().machine = None;
+        let stripped = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(restated, stripped, "移除状态机没进指纹");
+
+        // 同样的机器再装回去 → 指纹必须回到 base（哈希稳定，与路径无关）。
+        fox.animator.as_mut().unwrap().machine = Some(machine());
+        assert_eq!(
+            base,
+            signature(std::slice::from_ref(&fox), &lights, ambient),
+            "相同机器配置必须给相同指纹"
+        );
     }
 
     /// 没有模型的实体根本不会被画出来，所以它的变化**不该**让指纹变 ——

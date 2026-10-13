@@ -277,7 +277,26 @@
                 speed: 1.0,
                 looping: true,
                 autoplay: true,
+                fade_time: 0.25,
+                machine: Some((
+                    entry: "Idle",
+                    parameters: { "speed": 0.0 },
+                    states: [
+                        (name: "Idle", clip: "Survey", speed: 1.0, looping: true),
+                        (name: "Walk", clip: "Walk", speed: 1.0, looping: true),
+                        (name: "Run", clip: "Run", speed: 1.0, looping: true),
+                    ],
+                    transitions: [
+                        (from: "Idle", to: "Walk", when: AtLeast(param: "speed", value: 0.5)),
+                        (from: "Walk", to: "Idle", when: Below(param: "speed", value: 0.3)),
+                        (from: "Walk", to: "Run", when: AtLeast(param: "speed", value: 2.0)),
+                        (from: "Run", to: "Walk", when: Below(param: "speed", value: 1.8)),
+                    ],
+                )),
             )),
+            scripts: [
+                "Scripts/FoxLocomotion.rhai",
+            ],
         ),
     ],
     lights: [

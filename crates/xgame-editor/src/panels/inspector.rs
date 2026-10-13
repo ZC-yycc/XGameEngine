@@ -226,60 +226,156 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     });
                 } else {
                     let mut remove = false;
+                    let mut remove_machine = false;
                     if let Some(animator) = entity.animator.as_mut() {
-                        // 剪辑下拉：菜单一打开就把当前项勾出来，选中新项才算改动。
-                        ui.horizontal(|ui| {
-                            ui.label("Clip:");
-                            let current = animator.clip.clone();
-                            let label = if current.is_empty() {
-                                egui::RichText::new("（未选剪辑）").weak()
-                            } else {
-                                egui::RichText::new(current.clone()).monospace()
-                            };
-                            ui.menu_button(label, |ui| {
-                                if clips.is_empty() {
-                                    ui.weak(if model_empty {
-                                        "没有模型"
-                                    } else {
-                                        "模型未加载或没有动画剪辑"
-                                    });
+                        // 机器模式：clip/speed/looping 由状态表决定，这三行换成
+                        // 机器信息 + 参数调节；Fade/Autoplay 两行仍生效、照常显示。
+                        //
+                        // 坏机器（entry 指不到状态）不算机器模式 —— 走单剪辑 UI，
+                        // 用户还能改 clip / 转状态机自救，不会被一张死表锁死。
+                        let machine_usable =
+                            animator.machine.as_ref().is_some_and(|m| m.is_usable());
+                        if machine_usable {
+                            let current = state
+                                .scene_renderer
+                                .as_ref()
+                                .and_then(|r| r.animation_state(entity.id));
+                            let entry_name = animator
+                                .machine
+                                .as_ref()
+                                .map(|m| m.entry.clone())
+                                .unwrap_or_default();
+                            ui.horizontal(|ui| {
+                                ui.label("Machine:")
+                                    .on_hover_text("动画状态机：播哪个剪辑由状态表+参数决定\n（states / transitions 在场景 RON 里编辑）");
+                                ui.monospace(entry_name.as_str());
+                                if let Some(cur) = current {
+                                    ui.label(egui::RichText::new("→").weak());
+                                    ui.label(egui::RichText::new(cur).monospace().weak());
                                 }
-                                for clip in clips.iter() {
-                                    if ui
-                                        .selectable_label(clip == &current, clip.as_str())
-                                        .clicked()
-                                    {
-                                        animator.clip = clip.clone();
-                                        touched = true;
-                                        ui.close_menu();
-                                    }
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text("移除状态机，回到单剪辑模式（clip 字段还在）")
+                                    .clicked()
+                                {
+                                    remove_machine = true;
                                 }
                             });
+                            // 参数行：脚本/这里都能改，值随场景落盘。
+                            if let Some(machine) = animator.machine.as_mut() {
+                                if machine.parameters.is_empty() {
+                                    ui.weak("没有参数（转移条件永远不满足，停在 entry）");
+                                }
+                                for (name, value) in machine.parameters.iter_mut() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(name.as_str())
+                                            .on_hover_text("状态机参数：转移条件拿它和阈值比");
+                                        let resp = ui.add(
+                                            egui::DragValue::new(value)
+                                                .speed(0.05)
+                                                .range(-100.0..=100.0),
+                                        );
+                                        collect(
+                                            &resp,
+                                            &mut touched,
+                                            &mut drag_began,
+                                            &mut drag_ended,
+                                        );
+                                    });
+                                }
+                            }
+                            ui.weak("states / transitions 在场景 RON 里编辑");
+                        } else {
+                            // 剪辑下拉：菜单一打开就把当前项勾出来，选中新项才算改动。
+                            ui.horizontal(|ui| {
+                                ui.label("Clip:");
+                                let current = animator.clip.clone();
+                                let label = if current.is_empty() {
+                                    egui::RichText::new("（未选剪辑）").weak()
+                                } else {
+                                    egui::RichText::new(current.clone()).monospace()
+                                };
+                                ui.menu_button(label, |ui| {
+                                    if clips.is_empty() {
+                                        ui.weak(if model_empty {
+                                            "没有模型"
+                                        } else {
+                                            "模型未加载或没有动画剪辑"
+                                        });
+                                    }
+                                    for clip in clips.iter() {
+                                        if ui
+                                            .selectable_label(clip == &current, clip.as_str())
+                                            .clicked()
+                                        {
+                                            animator.clip = clip.clone();
+                                            touched = true;
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text("摘掉动画组件（模型与剪辑都不动）")
+                                    .clicked()
+                                {
+                                    remove = true;
+                                }
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Speed:")
+                                    .on_hover_text("播放速度倍率；0 = 冻结在当前帧");
+                                let mut speed = animator.speed;
+                                let resp = ui.add(
+                                    egui::DragValue::new(&mut speed).speed(0.05).suffix("x"),
+                                );
+                                collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                                if resp.changed() {
+                                    animator.speed = speed.clamp(0.0, 10.0);
+                                }
+                            });
+
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut animator.looping, "Loop").changed() {
+                                    touched = true;
+                                }
+                            });
+
+                            // 转为状态机：用当前 clip/speed/looping 建一个单状态机器，
+                            // entry 就是它 —— 之后在 RON 里加状态和转移即可。
                             if ui
-                                .small_button("✕")
-                                .on_hover_text("摘掉动画组件（模型与剪辑都不动）")
+                                .small_button("转为状态机（单状态）")
+                                .on_hover_text(
+                                    "把当前配置包成一台只有 entry 状态的机器：\n\
+                                     之后在场景 RON 的 states/transitions 里加新状态与转移，\n\
+                                     脚本用 set_anim_param 推参数驱动切换。",
+                                )
                                 .clicked()
                             {
-                                remove = true;
+                                let name = if animator.clip.is_empty() {
+                                    "State".to_string()
+                                } else {
+                                    animator.clip.clone()
+                                };
+                                animator.machine = Some(xgame_core::AnimMachine {
+                                    entry: name.clone(),
+                                    parameters: Default::default(),
+                                    states: vec![xgame_core::AnimState {
+                                        name,
+                                        clip: animator.clip.clone(),
+                                        speed: animator.speed,
+                                        looping: animator.looping,
+                                    }],
+                                    transitions: vec![],
+                                });
+                                touched = true;
                             }
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Speed:")
-                                .on_hover_text("播放速度倍率；0 = 冻结在当前帧");
-                            let mut speed = animator.speed;
-                            let resp = ui.add(
-                                egui::DragValue::new(&mut speed).speed(0.05).suffix("x"),
-                            );
-                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                            if resp.changed() {
-                                animator.speed = speed.clamp(0.0, 10.0);
-                            }
-                        });
+                        }
 
                         ui.horizontal(|ui| {
                             ui.label("Fade:")
-                                .on_hover_text("换剪辑时的交叉淡入时长；0 = 硬切");
+                                .on_hover_text("换剪辑/换状态的交叉淡入时长；0 = 硬切");
                             let mut fade = animator.fade_time;
                             let resp = ui.add(
                                 egui::DragValue::new(&mut fade)
@@ -294,9 +390,6 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                         });
 
                         ui.horizontal(|ui| {
-                            if ui.checkbox(&mut animator.looping, "Loop").changed() {
-                                touched = true;
-                            }
                             if ui
                                 .checkbox(&mut animator.autoplay, "Autoplay")
                                 .on_hover_text("关掉后停在剪辑第 0 帧（摆好第一帧再播）")
@@ -305,6 +398,12 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                                 touched = true;
                             }
                         });
+                    }
+                    if remove_machine {
+                        if let Some(animator) = entity.animator.as_mut() {
+                            animator.machine = None;
+                        }
+                        touched = true;
                     }
                     if remove {
                         entity.animator = None;

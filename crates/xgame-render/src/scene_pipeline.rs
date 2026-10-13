@@ -1418,35 +1418,33 @@ impl ScenePipeline {
 
             // -- 蒙皮槽位 --
             //
-            // 三个条件齐了才算：有时钟（实体带 animator 且被 tick 过）、模型里有
-            // 这个剪辑、模型有蒙皮。任何一条不满足 → params.x = 0，着色器走原始
-            // 顶点，与动画功能上线前逐位一致（绑定姿态）。
+            // 四个条件齐了才算：有时钟（实体带 animator 且被 tick 过）、组件还在
+            // （防条目残留：万一某个宿主没 tick 就渲染，摘掉 animator 的实体不该
+            // 继续蒙皮）、驱动解析出的剪辑在模型里、模型有蒙皮。任何一条不满足
+            // → params.x = 0，着色器走原始顶点，与动画功能上线前逐位一致。
+            //
+            // 剪辑名一律问驱动（状态机模式下由状态表解析，Animator.clip 只是
+            // 单剪辑模式的配置），别回头读组件。
             let mut params = [0u32; 4];
-            if let (Some(time), Some(animator)) =
-                (anim.time(entity.id), entity.animator.as_ref())
+            if let (Some((clip_name, time, looping)), true) =
+                (anim.playback(entity.id), entity.animator.is_some())
             {
                 let skin_idx = mesh.primitives.iter().find_map(|p| p.skin);
-                if let (Some(clip), Some(skin_idx)) = (mesh.clip(&animator.clip), skin_idx) {
+                if let (Some(clip), Some(skin_idx)) = (mesh.clip(clip_name), skin_idx) {
                     if let Some(skin) = mesh.skins.get(skin_idx) {
-                        let t = crate::animation::clip_time(
-                            time,
-                            clip.duration,
-                            animator.looping,
-                        );
-                        // 换剪辑交叉淡入中：旧剪辑按它自己的时钟采样，两份局部
-                        // 姿势按 alpha 混合。旧剪辑已经不在模型里（资产改名等）
-                        // 就退回硬切 —— 宁可跳一下，不能画错。
-                        let faded = anim
-                            .fade_from(entity.id)
-                            .and_then(|(name, prev_t, alpha)| {
-                                mesh.clip(name).map(|c| (c, prev_t, alpha))
-                            });
+                        let t = crate::animation::clip_time(time, clip.duration, looping);
+                        // 换剪辑/换状态交叉淡入中：旧剪辑按它自己的时钟与循环方式
+                        // 采样，两份局部姿势按 alpha 混合。旧剪辑已经不在模型里
+                        // （资产改名等）就退回硬切 —— 宁可跳一下，不能画错。
+                        let faded = anim.fade_from(entity.id).and_then(|f| {
+                            mesh.clip(f.clip).map(|c| (c, f.t, f.looping, f.alpha))
+                        });
                         let mut bones = match faded {
-                            Some((prev_clip, prev_time, alpha)) => {
+                            Some((prev_clip, prev_time, prev_looping, alpha)) => {
                                 let prev_t = crate::animation::clip_time(
                                     prev_time,
                                     prev_clip.duration,
-                                    animator.looping,
+                                    prev_looping,
                                 );
                                 crate::animation::compute_bones_blended(
                                     &mesh.nodes,

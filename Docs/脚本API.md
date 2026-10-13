@@ -199,6 +199,25 @@ fn update(ctx) {
 | `clamp(v, lo, hi)` / `lerpf(a, b, t)` | 数值工具 |
 | `deg_to_rad(d)` / `rad_to_deg(r)` | 角度换算 |
 
+### 4.9 动画状态机
+
+| 函数 | 说明 |
+|---|---|
+| `set_anim_param(ctx, name, value)` | 写**自己实体**的动画状态机参数（键不存在就创建） |
+
+状态机（`Animator.machine`）的转移求值在引擎侧每帧自动跑；脚本只负责把
+"现在多快 / 要不要攻击"这类**信号**推进参数表。没挂动画组件或没配机器时
+`set_anim_param` **静默无操作** —— 通用移动脚本可以挂在任意实体上，不用先探测组件。
+
+```rhai
+// 速度驱动 Idle/Walk/Run（阈值见场景 RON 里的 transitions）
+fn update(ctx) {
+    set_anim_param(ctx, "speed", velocity(ctx, self_id(ctx)).length());
+}
+```
+
+示例见 `projects/SampleScene/Scripts/FoxLocomotion.rhai`。
+
 Rhai 自带完整的 `if` / `while` / `for` / 数组 / Map / 字符串，
 以及 `sin` / `cos` / `sqrt` / `abs` / `min` / `max` 等数学函数。
 

@@ -674,6 +674,64 @@ mod tests {
         assert_eq!(scene.entities[1].transform.position.x, 3.0, "实体 b");
     }
 
+    /// `set_anim_param` 把值写进**自己实体**的机器参数表。
+    #[test]
+    fn set_anim_param_writes_the_owning_entities_machine() {
+        use xgame_core::{AnimMachine, AnimState};
+
+        let project = TempProject::new("anim_param");
+        let path = project.write_script(
+            "locomotion",
+            r#"
+            fn update(ctx) { set_anim_param(ctx, "speed", 2.5); }
+            "#,
+        );
+
+        let mut machine = AnimMachine {
+            entry: "Idle".into(),
+            ..Default::default()
+        };
+        machine.states.push(AnimState {
+            name: "Idle".into(),
+            ..Default::default()
+        });
+
+        let mut scene = Scene::new("anim_param");
+        for name in ["with_machine", "without_machine"] {
+            let mut entity = Entity::new(name);
+            entity.scripts.push(path.clone());
+            if name == "with_machine" {
+                let mut a = xgame_core::Animator::new("Walk");
+                a.machine = Some(machine.clone());
+                entity.animator = Some(a);
+            }
+            scene.add_entity(entity);
+        }
+
+        let mut host = ScriptHost::new();
+        host.preload(&project.dir, &scene);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0));
+        assert!(host.logs.is_empty(), "不该有错误日志: {:?}", host.logs);
+
+        let m = scene.entities[0]
+            .animator
+            .as_ref()
+            .unwrap()
+            .machine
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            m.parameters.get("speed").copied(),
+            Some(2.5),
+            "带机器的实体应写入参数"
+        );
+        // 没挂机器的实体静默 no-op —— 脚本照常跑，不报错。
+        assert!(scene.entities[1]
+            .animator
+            .as_ref()
+            .is_none_or(|a| a.machine.is_none()));
+    }
+
     #[test]
     fn script_errors_are_reported_without_killing_the_frame() {
         let project = TempProject::new("runtime_error");

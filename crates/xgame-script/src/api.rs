@@ -43,6 +43,7 @@ pub(crate) fn register(engine: &mut Engine) {
     register_physics(engine);
     register_input(engine);
     register_time_and_log(engine);
+    register_animation(engine);
 }
 
 // ---------------------------------------------------------------------------
@@ -699,6 +700,35 @@ fn register_state(engine: &mut Engine) {
             map.clear();
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// 动画状态机
+// ---------------------------------------------------------------------------
+
+/// 动画状态机的脚本接口。
+///
+/// v1 只给一个**写参数**：状态机的转移求值在引擎侧（驱动每 tick 跑），
+/// 脚本只负责把"现在多快 / 要不要攻击"这类信号推进参数表。没有读取、没有
+/// id 变体 —— 真实需求出现再加（YAGNI）。
+fn register_animation(engine: &mut Engine) {
+    // 写本实体的状态机参数（键不存在就创建）。
+    //
+    // 没挂 animator / 没配机器 → **静默 no-op**：脚本照常跑，只是机器不动。
+    // 这让"通用移动脚本挂到任意实体上"成为可能，不需要脚本自己先探测组件。
+    engine.register_fn(
+        "set_anim_param",
+        |ctx: &mut ScriptCtx, name: &str, value: f32| {
+            if let Some(i) = ctx.entity_index() {
+                if let Some(animator) = ctx.scene_mut().entities.get_mut(i).and_then(|e| e.animator.as_mut())
+                {
+                    if let Some(machine) = animator.machine.as_mut() {
+                        machine.parameters.insert(name.to_owned(), value);
+                    }
+                }
+            }
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
