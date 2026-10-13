@@ -278,6 +278,22 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                         });
 
                         ui.horizontal(|ui| {
+                            ui.label("Fade:")
+                                .on_hover_text("换剪辑时的交叉淡入时长；0 = 硬切");
+                            let mut fade = animator.fade_time;
+                            let resp = ui.add(
+                                egui::DragValue::new(&mut fade)
+                                    .speed(0.01)
+                                    .range(0.0..=2.0)
+                                    .suffix("s"),
+                            );
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                            if resp.changed() {
+                                animator.fade_time = fade.clamp(0.0, 2.0);
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
                             if ui.checkbox(&mut animator.looping, "Loop").changed() {
                                 touched = true;
                             }

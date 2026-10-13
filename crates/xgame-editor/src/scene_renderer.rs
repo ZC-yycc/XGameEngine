@@ -469,6 +469,7 @@ impl SceneRenderer {
                 hash = mix_bits(hash, animator.speed.to_bits() as u64);
                 hash = mix_bits(hash, animator.looping as u64);
                 hash = mix_bits(hash, animator.autoplay as u64);
+                hash = mix_bits(hash, animator.fade_time.to_bits() as u64);
             }
         }
 
@@ -818,6 +819,10 @@ mod tests {
         fox.animator.as_mut().unwrap().autoplay = false;
         let paused = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(running, paused, "开关自动播放没进指纹");
+
+        fox.animator.as_mut().unwrap().fade_time = 0.0;
+        let hard = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(paused, hard, "改淡入时长没进指纹");
     }
 
     /// 没有模型的实体根本不会被画出来，所以它的变化**不该**让指纹变 ——

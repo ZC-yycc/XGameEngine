@@ -1,7 +1,7 @@
 //! 实体动画组件（声明式播放配置）。
 //!
-//! 这里只放**要落盘的配置**：播哪个剪辑、速度、是否循环、是否自动播放。
-//! 采样时钟与蒙皮矩阵计算属于渲染层（见 `xgame_render::animation`）——
+//! 这里只放**要落盘的配置**：播哪个剪辑、速度、是否循环、是否自动播放、换剪辑
+//! 淡入时长。采样时钟与蒙皮矩阵计算属于渲染层（见 `xgame_render::animation`）——
 //! 动画数据（glTF 里的骨骼与关键帧）本身就是渲染资产，把它拆到 core 之外
 //! 可以让 core 继续对 GPU / glTF 一无所知。
 //!
@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 /// 挂在实体上的动画播放器配置。
 ///
-/// 默认值 = 「播第一个剪辑、原速、循环、自动播放」——给一个带动画的模型
-/// 挂上组件后不改任何字段就应当能看到它动起来。
+/// 默认值 = 「播第一个剪辑、原速、循环、自动播放、换剪辑 0.25s 淡入」——给一个
+/// 带动画的模型挂上组件后不改任何字段就应当能看到它动起来、切剪辑平滑过渡。
 ///
 /// `#[serde(default)]` 在**结构体**级别：反序列化时缺哪个字段就从
 /// [`Default`] 补哪个字段。于是旧场景文件（没有 `animator`）反序列化成
@@ -33,6 +33,9 @@ pub struct Animator {
     pub looping: bool,
     /// 是否自动开始播放。`false` = 静止在剪辑第 0 帧（用于「先摆好再播」的制作流程）。
     pub autoplay: bool,
+    /// 换剪辑时的交叉淡入时长（秒）。`> 0` 时切剪辑不硬跳，而是从旧剪辑的当前
+    /// 姿势在这么多秒内混到新剪辑；`0` = 硬切。只对**播放中**的切换生效。
+    pub fade_time: f32,
 }
 
 impl Default for Animator {
@@ -42,6 +45,7 @@ impl Default for Animator {
             speed: 1.0,
             looping: true,
             autoplay: true,
+            fade_time: 0.25,
         }
     }
 }
@@ -69,13 +73,17 @@ impl Animator {
 mod tests {
     use super::*;
 
-    /// 默认值的语义承诺：挂上就播、原速、循环。
+    /// 默认值的语义承诺：挂上就播、原速、循环、切剪辑淡入。
     #[test]
     fn default_plays_the_first_clip_in_a_loop() {
         let a = Animator::default();
         assert!(a.autoplay, "默认应当自动播放");
         assert!(a.looping, "默认应当循环");
         assert!((a.speed - 1.0).abs() < f32::EPSILON, "默认应当原速");
+        assert!(
+            (a.fade_time - 0.25).abs() < f32::EPSILON,
+            "默认换剪辑应有 0.25s 淡入"
+        );
         assert!(a.is_active());
     }
 
@@ -95,6 +103,14 @@ mod tests {
             (partial.animator.speed - 1.0).abs() < f32::EPSILON,
             "缺失的 speed 应补成 1.0"
         );
+        assert!(
+            (partial.animator.fade_time - 0.25).abs() < f32::EPSILON,
+            "缺失的 fade_time 应补成默认 0.25s"
+        );
+
+        // 显式 0 必须原样保留 —— 它是「我要硬切」的表达，不能被默认值顶掉。
+        let hard: Wrap = ron::from_str("(animator: (clip: \"Run\", fade_time: 0.0))").unwrap();
+        assert_eq!(hard.animator.fade_time, 0.0, "显式 fade_time: 0 是硬切语义");
 
         // 整个字段都缺失 → 用整套默认（clip 空 = 不动画）。
         let none: Wrap = ron::from_str("()").unwrap();

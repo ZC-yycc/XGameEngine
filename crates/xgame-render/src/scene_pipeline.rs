@@ -1433,8 +1433,33 @@ impl ScenePipeline {
                             clip.duration,
                             animator.looping,
                         );
-                        let mut bones =
-                            crate::animation::compute_bones(&mesh.nodes, clip, skin, t);
+                        // 换剪辑交叉淡入中：旧剪辑按它自己的时钟采样，两份局部
+                        // 姿势按 alpha 混合。旧剪辑已经不在模型里（资产改名等）
+                        // 就退回硬切 —— 宁可跳一下，不能画错。
+                        let faded = anim
+                            .fade_from(entity.id)
+                            .and_then(|(name, prev_t, alpha)| {
+                                mesh.clip(name).map(|c| (c, prev_t, alpha))
+                            });
+                        let mut bones = match faded {
+                            Some((prev_clip, prev_time, alpha)) => {
+                                let prev_t = crate::animation::clip_time(
+                                    prev_time,
+                                    prev_clip.duration,
+                                    animator.looping,
+                                );
+                                crate::animation::compute_bones_blended(
+                                    &mesh.nodes,
+                                    prev_clip,
+                                    prev_t,
+                                    clip,
+                                    t,
+                                    alpha,
+                                    skin,
+                                )
+                            }
+                            None => crate::animation::compute_bones(&mesh.nodes, clip, skin, t),
+                        };
                         // 超过槽位容量的骨架（>256 骨）解析时已告警；这里截断
                         // 保证 staging 的槽距不被撑歪——宁可末梢骨不对，不能整帧错位。
                         bones.truncate(BONES_PER_SLOT);

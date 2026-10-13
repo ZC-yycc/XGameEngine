@@ -14,8 +14,8 @@
 //!
 //! # v1 范围
 //!
-//! 单剪辑播放（无状态机、无交叉淡入）、LINEAR/STEP 插值（CUBICSPLINE 读入时
-//! 降采样成线性）。旋转用 slerp，循环用取模、非循环钳在末帧。
+//! 单剪辑播放 + 换剪辑时的**交叉淡入**（无状态机）、LINEAR/STEP 插值（CUBICSPLINE
+//! 读入时降采样成线性）。旋转用 slerp，循环用取模、非循环钳在末帧。
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -248,6 +248,42 @@ pub fn compute_bones(nodes: &[AnimNode], clip: &AnimClip, skin: &Skin, t: f32) -
         .collect()
 }
 
+/// 两份剪辑在各自时刻采样后按 `alpha` 混合，再算蒙皮矩阵（交叉淡入用）。
+///
+/// 混合发生在**局部姿态**（平移 lerp、旋转 slerp、缩放 lerp）而不是全局矩阵上
+/// —— 矩阵逐分量插值会把旋转混成剪切，模型在过渡中会"缩一下"。
+/// `alpha = 0` 纯 `clip_a`，`alpha = 1` 纯 `clip_b`。
+pub fn compute_bones_blended(
+    nodes: &[AnimNode],
+    clip_a: &AnimClip,
+    t_a: f32,
+    clip_b: &AnimClip,
+    t_b: f32,
+    alpha: f32,
+    skin: &Skin,
+) -> Vec<Mat4> {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mut pose_a = default_pose(nodes);
+    sample_clip_into(clip_a, t_a, &mut pose_a);
+    let mut pose_b = default_pose(nodes);
+    sample_clip_into(clip_b, t_b, &mut pose_b);
+    let pose: Vec<LocalPose> = pose_a
+        .iter()
+        .zip(&pose_b)
+        .map(|(a, b)| LocalPose {
+            translation: a.translation.lerp(b.translation, alpha),
+            rotation: a.rotation.slerp(b.rotation, alpha),
+            scale: a.scale.lerp(b.scale, alpha),
+        })
+        .collect();
+    let globals = global_matrices(nodes, &pose);
+    skin.joints
+        .iter()
+        .zip(skin.inverse_bind.iter())
+        .map(|(&j, &ibm)| globals.get(j as usize).copied().unwrap_or(Mat4::IDENTITY) * ibm)
+        .collect()
+}
+
 /// 播放时间归一：循环取模、非循环钳在末帧。
 ///
 /// 非循环停在 `duration`（= 末关键帧）而不是 `duration - ε`：钳位后采样命中
@@ -268,9 +304,22 @@ pub fn clip_time(t: f32, duration: f32, looping: bool) -> f32 {
 // 播放时钟
 // ---------------------------------------------------------------------------
 
+/// 交叉淡入的**来源**剪辑（换剪辑时把旧剪辑连同它的时钟一起记下来）。
+struct Prev {
+    clip: String,
+    t: f32,
+    /// 已淡入的秒数。
+    fade_t: f32,
+    /// 当前混合权重 ∈ [0,1]：0 = 纯旧剪辑，1 = 淡入完成。tick 里算好存下，
+    /// 渲染侧查询时不再需要 Animator 配置。
+    alpha: f32,
+}
+
 struct Entry {
     clip: String,
     t: f32,
+    /// `None` = 没有淡入（未切换 / 已完成 / 硬切）。
+    prev: Option<Prev>,
 }
 
 /// 每个实体的动画播放时钟（clip + 已累计时间）。
@@ -296,8 +345,14 @@ impl AnimationDriver {
     /// - 只为**带 [`Animator`][xgame_core::Animator] 的实体**建条目；
     ///   `autoplay = false` 也建（时间停在 0），于是首帧能画出剪辑第 0 帧的姿势，
     ///   而不是退回绑定姿态 —— "摆好第一帧再播"是正常的制作流程。
-    /// - 剪辑名变了 → 时间归零（换剪辑从头播）。
+    /// - 剪辑名变了 → 时间归零（换剪辑从头播）。淡入时长 > 0 且当时正在播放 →
+    ///   记下旧剪辑（连同它的时钟）做交叉淡入，见 [`fade_from`](Self::fade_from)；
+    ///   暂停中切换 / `fade_time = 0` → 硬切。
     /// - 实体被删 / 动画组件被摘掉 → 条目清理，防泄漏。
+    ///
+    /// 淡入中途再次换剪辑：旧的淡入被丢弃，从**当前主剪辑**重新淡入新剪辑
+    /// （v1 取舍：0.25 秒内连切两刀本来就是编辑期误操作居多，不值得为此
+    /// 维护多层混合栈；代价是双切瞬间有一帧小跳变）。
     pub fn tick(&mut self, dt: f32, entities: &[Entity]) {
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         for entity in entities {
@@ -310,13 +365,40 @@ impl AnimationDriver {
                 .or_insert_with(|| Entry {
                     clip: animator.clip.clone(),
                     t: 0.0,
+                    prev: None,
                 });
             if entry.clip != animator.clip {
+                entry.prev = if animator.fade_time > 0.0 && animator.is_active() {
+                    Some(Prev {
+                        clip: entry.clip.clone(),
+                        t: entry.t,
+                        fade_t: 0.0,
+                        alpha: 0.0,
+                    })
+                } else {
+                    None
+                };
                 entry.clip = animator.clip.clone();
                 entry.t = 0.0;
             }
             if animator.is_active() {
                 entry.t += dt * animator.speed;
+                let mut fade_done = false;
+                if let Some(prev) = entry.prev.as_mut() {
+                    // 旧剪辑的时钟也继续走 —— 淡出的那半边若定格，混合出来的
+                    // 姿势会在过渡中"粘住"一下，看起来像卡帧。
+                    prev.t += dt * animator.speed;
+                    prev.fade_t += dt;
+                    prev.alpha = if animator.fade_time > 0.0 {
+                        (prev.fade_t / animator.fade_time).min(1.0)
+                    } else {
+                        1.0
+                    };
+                    fade_done = animator.fade_time <= 0.0 || prev.fade_t >= animator.fade_time;
+                }
+                if fade_done {
+                    entry.prev = None;
+                }
             }
         }
         let live: std::collections::HashSet<EntityId> = entities
@@ -344,6 +426,19 @@ impl AnimationDriver {
     /// 某实体当前的播放时间（未被 tick 过的实体没有条目）。
     pub fn time(&self, id: EntityId) -> Option<f32> {
         self.entries.get(&id).map(|e| e.t)
+    }
+
+    /// 某实体正在进行的交叉淡入：`(旧剪辑名, 旧剪辑时间, 混合权重 alpha)`。
+    ///
+    /// `alpha = 0` 还是纯旧剪辑，`1` 淡入完成（此时条目已被清掉，返回 `None`）。
+    /// 渲染侧拿它调 [`compute_bones_blended`]：旧剪辑在旧时钟、新剪辑用
+    /// [`time`](Self::time) 的时钟。
+    pub fn fade_from(&self, id: EntityId) -> Option<(&str, f32, f32)> {
+        self.entries
+            .get(&id)?
+            .prev
+            .as_ref()
+            .map(|p| (p.clip.as_str(), p.t, p.alpha))
     }
 
     /// 当前所有时钟的**内容指纹**：进编辑器的场景指纹用。
@@ -409,6 +504,22 @@ mod tests {
                 interpolation: Interpolation::Linear,
                 times: vec![0.0, 1.0],
                 values: vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+            }],
+        }
+    }
+
+    /// 0→1 秒从 (0,0,0) 走到 (0,4,0)，挂在节点 0 —— 与 [`move_x_clip`] 不同轴，
+    /// 混合结果的两个分量能分别断言。
+    fn move_y_clip() -> AnimClip {
+        AnimClip {
+            name: "Run".into(),
+            duration: 1.0,
+            tracks: vec![Track {
+                node: 0,
+                path: TrackPath::Translation,
+                interpolation: Interpolation::Linear,
+                times: vec![0.0, 1.0],
+                values: vec![0.0, 0.0, 0.0, 0.0, 4.0, 0.0],
             }],
         }
     }
@@ -631,6 +742,34 @@ mod tests {
         assert!(dev < 1e-5, "绑定姿态的骨矩阵应当是单位阵，偏差 {dev}");
     }
 
+    /// 交叉淡入的混合在**局部姿态**上做：两段位移的中点必须是逐分量的中点，
+    /// 且 alpha 端点要退回纯剪辑（钳位保护坏数据）。
+    #[test]
+    fn blended_bones_mix_poses_and_clamp_alpha() {
+        let nodes = vec![root_node()];
+        let skin = Skin {
+            joints: vec![0],
+            inverse_bind: vec![Mat4::IDENTITY],
+        };
+        let a = move_x_clip(); // t=1 → (2,0,0)
+        let b = move_y_clip(); // t=1 → (0,4,0)
+        let at = |alpha: f32| compute_bones_blended(&nodes, &a, 1.0, &b, 1.0, alpha, &skin)[0]
+            .w_axis
+            .truncate();
+
+        let mid = at(0.5);
+        assert!(
+            (mid - Vec3::new(1.0, 2.0, 0.0)).length() < 1e-5,
+            "alpha=0.5 应是两姿势的中点，实得 {mid:?}"
+        );
+        let only_a = at(0.0);
+        assert!((only_a - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5, "alpha=0 应是纯旧剪辑");
+        let only_b = at(1.0);
+        assert!((only_b - Vec3::new(0.0, 4.0, 0.0)).length() < 1e-5, "alpha=1 应是纯新剪辑");
+        let clamped = at(9.0);
+        assert!((clamped - only_b).length() < 1e-5, "alpha 越界应钳在纯新剪辑");
+    }
+
     // -- 时间归一 --
 
     #[test]
@@ -690,6 +829,94 @@ mod tests {
         assert!(!d.is_empty());
         d.tick(0.1, &[]); // 实体没了
         assert!(d.is_empty(), "摘掉动画组件/删除实体后条目必须清理");
+    }
+
+    // -- 交叉淡入 --
+
+    #[test]
+    fn driver_fades_from_old_clip_on_switch_and_completes() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_animator("Walk");
+        let id = e.id;
+        d.tick(0.4, std::slice::from_ref(&e));
+        assert!(d.fade_from(id).is_none(), "没切换过就不该有淡入");
+
+        e.animator.as_mut().unwrap().clip = "Run".into(); // 默认 fade_time = 0.25s
+        d.tick(0.1, std::slice::from_ref(&e));
+        let (clip, prev_t, alpha) = d.fade_from(id).expect("换剪辑后应处于淡入中");
+        assert_eq!(clip, "Walk", "应从旧剪辑淡出");
+        assert!(
+            (prev_t - 0.5).abs() < 1e-6,
+            "旧剪辑时钟应继续走（0.4+0.1），实得 {prev_t}"
+        );
+        assert!((alpha - 0.4).abs() < 1e-6, "alpha 应是 0.1/0.25，实得 {alpha}");
+        assert!((d.time(id).unwrap() - 0.1).abs() < 1e-6, "新剪辑从 0 起播");
+
+        d.tick(0.2, std::slice::from_ref(&e)); // 累计 0.3 ≥ 0.25
+        assert!(d.fade_from(id).is_none(), "淡入完成后应清掉旧剪辑");
+        assert!((d.time(id).unwrap() - 0.3).abs() < 1e-6, "主时钟不受淡入影响");
+    }
+
+    #[test]
+    fn driver_hard_switches_when_fade_time_is_zero() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_animator("Walk");
+        e.animator.as_mut().unwrap().fade_time = 0.0;
+        d.tick(0.4, std::slice::from_ref(&e));
+        e.animator.as_mut().unwrap().clip = "Run".into();
+        d.tick(0.1, std::slice::from_ref(&e));
+        assert!(d.fade_from(e.id).is_none(), "fade_time = 0 应硬切");
+        assert!((d.time(e.id).unwrap() - 0.1).abs() < 1e-6, "硬切后新剪辑从 0 起播");
+    }
+
+    #[test]
+    fn driver_does_not_fade_when_switching_while_paused() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_animator("Walk");
+        d.tick(0.4, std::slice::from_ref(&e));
+
+        e.animator.as_mut().unwrap().autoplay = false;
+        e.animator.as_mut().unwrap().clip = "Run".into();
+        d.tick(0.1, std::slice::from_ref(&e));
+        assert!(
+            d.fade_from(e.id).is_none(),
+            "暂停中切换不该淡入（没有'正在播的姿势'可淡出）"
+        );
+        assert!((d.time(e.id).unwrap()).abs() < 1e-6, "切换照旧把新剪辑时钟归零");
+    }
+
+    #[test]
+    fn driver_freezes_the_fade_while_paused() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_animator("Walk");
+        d.tick(0.4, std::slice::from_ref(&e));
+        e.animator.as_mut().unwrap().clip = "Run".into();
+        d.tick(0.1, std::slice::from_ref(&e));
+        let (_, prev_t, alpha) = d.fade_from(e.id).unwrap();
+
+        e.animator.as_mut().unwrap().autoplay = false;
+        d.tick(5.0, std::slice::from_ref(&e));
+        let (_, prev_t2, alpha2) = d.fade_from(e.id).expect("暂停不该把淡入清掉");
+        assert!((prev_t2 - prev_t).abs() < 1e-6, "暂停中旧剪辑时钟该冻结");
+        assert!((alpha2 - alpha).abs() < 1e-6, "暂停中淡入进度该冻结");
+        assert!((d.time(e.id).unwrap() - 0.1).abs() < 1e-6, "暂停中主时钟也该冻结");
+    }
+
+    /// 淡入中途连切两刀（0.25s 内 Walk→Run→Survey）：丢弃旧淡入，从当前主剪辑
+    /// 重新开始 —— 不维护多层混合栈，见 `tick` 的文档。
+    #[test]
+    fn driver_double_switch_restarts_fade_from_current_clip() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_animator("Walk");
+        d.tick(0.4, std::slice::from_ref(&e));
+        e.animator.as_mut().unwrap().clip = "Run".into();
+        d.tick(0.1, std::slice::from_ref(&e));
+
+        e.animator.as_mut().unwrap().clip = "Survey".into();
+        d.tick(0.05, std::slice::from_ref(&e));
+        let (clip, _, alpha) = d.fade_from(e.id).expect("双切后仍应处于淡入中");
+        assert_eq!(clip, "Run", "第二次切换应从当前主剪辑（Run）淡出");
+        assert!((alpha - 0.2).abs() < 1e-6, "淡入进度应重新起算（0.05/0.25），实得 {alpha}");
     }
 
     #[test]
