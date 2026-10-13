@@ -670,3 +670,87 @@ WM_MOUSEMOVE(同一坐标) → PointerMoved → egui 认为"要再画一帧"
   以 `present_mode = AutoNoVsync` 治本，见 FLOW「上屏节奏」节。
 - eframe 层"事件到达即请求重绘"无法从应用侧拦截（噪声事件仍会各触发一帧，
   但不再连锁续命）。
+
+---
+
+## 十五、双轨语言架构 P0：门面 + 方法层 + Rust 组件 + 插件边界（本轮）
+
+按 `Docs/双轨语言架构计划.md` §五 的六件事执行，**方法层先行**（其余五项都依赖
+它的形状，现有 Rhai 测试当平移回归网）。六件事全部完成，验收七条全过。
+
+### 一、六个产物
+
+1. **`GameCtx` 方法层**（`xgame-script/src/ctx.rs`）：api.rs 约 750 行的函数体
+   平移为 `impl GameCtx` 方法（含 辅助函数 + RayHit）；`api.rs` 每个函数退化为
+   ≤3 行转发壳；`ScriptCtx` 瘦身为 { GameCtx 地址束, rhai state }；
+   `host.rs::run_hook` 构造 GameCtx。15 条 Rhai 测试语义零改动，全绿。
+2. **`xgame` 门面 crate**：`ENGINE_VERSION`（版本握手基准）+ prelude 拍平深路径；
+   `xgame-game/main.rs` 的 7 行 `xgame_render::`/`xgame_script::` 直引清零。
+3. **`Lifecycle` trait**（`xgame-runtime/src/lifecycle.rs`）：四钩子默认空实现，
+   与 Rhai `Hook` 同名同语义；`Ctx` 是 `GameCtx` 的类型别名。
+4. **组件分发**（`world.rs`）：`run_dispatch` 平行加组件路径，沿用字段级拆借；
+   `on_destroy` 接线在命令消费时（实体已离场，与脚本轨同款时机）。
+5. **注册表 + `Entity.behaviors`**：`register::<T>("Name")`；behaviors 与 scripts
+   完全同款的 serde 兼容模式，旧场景文件加载测试通过。
+6. **插件边界**（`xgame/src/plugin.rs` + `examples/spinner-plugin`）：
+   `export_plugin!` 宏生成 `unsafe extern "C" fn xgame_plugin_entry`；
+   `#[repr(C)] PluginHost { EngineApi{version, log}, registry 句柄 }`；
+   版本码 = `0x58` 魔数 + 三段 8 位（永不为 0，不与错误码撞）；`load_plugin`
+   双侧握手（插件拒载 + 日志报自身版本，宿主翻译成可读报错）。
+
+### 二、刻意的取舍（三处对计划文档的偏离，已回写其 D6）
+
+1. **`GameCtx` 落在 `xgame-script` 而非计划文档 C1 写的 `xgame-runtime`**：
+   api.rs 转发壳要调 GameCtx，放 runtime 会形成 script → runtime 反向依赖；
+   script 现有依赖恰好覆盖 GameCtx 所需，零新增。
+2. **`EngineApi` 只带 `version` + `log`**，不带 C4 列的 pos/set_rot 等 ~10 函数：
+   C1 落地后那些**全是 `Ctx` 的方法**，钩子本来就拿到 `&mut Ctx` —— 再铺裸函数表
+   等于同一套能力两份真相源。只留钩子之外（入口期）用得到的东西。
+3. **组件热路径零哈希**：钩子函数指针在装配期拷进 `BehaviorInstance`，`start`
+   标记从 `HashSet<EntityId>` 下沉到组件自身。理由与数据见下节。
+
+### 三、先量后改：组件分发微基准（验收第 7 条）
+
+新增 `crates/xgame-runtime/tests/behavior_dispatch_throughput.rs`（`#[ignore]`，
+1000 实体纯视觉三档：无轨道基线 / no-op 组件 / no-op Rhai）：
+
+| 档 | µs/帧 |
+|---|---|
+| 无轨道基线 | 4.36 |
+| 组件轨分发（扣基线） | 68.95 → **37.61**（验收线 50 µs） |
+| 脚本轨分发（扣基线） | 493.89（= 组件的 **13.1×**） |
+
+首跑 68.95 µs 超线（验收线先红），归因：每帧 3 阶段 × 1000 实体 × 两次
+`HashMap<String>` 字符串哈希（装配期解析好的钩子每帧重新查表）+ Start 阶段
+`HashSet<EntityId>` 哈希。改法即取舍 3，两处哈希归零；脚本轨不受影响。
+
+### 四、先证红：组件测试首跑全红揪出装配 bug
+
+三条组件测试（驱动实体 / on_destroy / 未注册跳过）首跑全红 —— 钩子一个没跑。
+根因：`World::new` 在空注册表下装配，在实例表里插入"未注册"空占坑；
+`instantiate_behaviors` 的 `contains_key` 短路让注入注册表后的重装永不发生。
+修法：`World::new` 不再装配（注释写明理由）；`with_behavior_registry` 先清实例
+再重装配；分发早退判据改 `declared == 0`。
+
+### 五、验证
+
+- workspace **280 项测试全绿**；clippy 0 警告（顺手修掉 editor 一条既有的
+  `collapsible_match`）。
+- 端到端：`examples/spinner-plugin`（cdylib）经 libloading 加载 → 版本握手 →
+  注册 Spinner/Reaper → `World` 驱动四钩子（调用计数经 `#[no_mangle]` 导出符号
+  回读：start 恰好 2、on_destroy 恰好 1）→ Reaper 销毁 target 全链路走通。
+- dll 缺失回退：单独 `cargo test -p xgame` 时集成测试现场触发嵌套
+  `cargo build -p spinner-plugin`（工作线程 + 超时，防与外层 cargo 抢锁死锁），
+  实测可用。
+- 版本不匹配拒载：`run_entry` 单测（拒载 + 经日志报自身版本 + 注册表不被写入）
+  + `handshake` 报错文案含两端版本，可读性断言在案。
+
+### 六、遗留
+
+- 脚本轨 `dispatch_destroy` 仍无调用方（历史遗留，勿提前接线）：组件轨的
+  `on_destroy` 在命令消费时派发；脚本轨接线需要命令携带脚本路径，留待后续
+  （避免"命令在帧内何时带路径"的语义漂移），已写进 lifecycle.rs 文档。
+- 插件 panic 隔离（D5 的 `catch_unwind` 纪律）本轮未做：P0 边界是同版本工程内
+  自用（示例插件 + 集成测试），隔离留到插件生态开放时（P0.5 PIE 之后）。
+- 编辑器只编辑数据：Behaviors 字段 Inspector 暂不显示（C5 范围声明）；
+  编辑器内 Play 跑 Rust 插件（PIE）是 P0.5。

@@ -10,14 +10,22 @@
 //! 所以 [`ScriptCtx`] 不持有引用，只持有**地址**（`usize`）。安全性由调用方保证：
 //!
 //! - `ScriptCtx` 只在 [`crate::ScriptHost`] 的 `run_hook` 一次调用期间存在；
-//! - 创建它的那一刻，被指向的对象（`Scene` / `PhysicsWorld` / `Input` / 日志缓冲）
-//!   都由调用栈上的 `&mut` / `&` 独占持有，期间不会有第二个别名；
+//! - 创建它的那一刻，被指向的对象（[`GameCtx`]，内含 `Scene` / `PhysicsWorld` /
+//!   `Input` / 日志与命令缓冲）都由调用栈上的 `&mut` / `&` 独占持有，
+//!   期间不会有第二个别名；
 //! - 传给 Rhai 时按**值**传递（`ScriptCtx: Copy`）。解释器拿到的是地址的副本，
 //!   所有写入仍然落到同一份真实数据上 —— 这正是我们要的。
 //!
 //! 用地址而不是 `*mut T` 还有一个实际好处：裸指针在 Rust 里是 `!Send + !Sync`，
 //! 而 Rhai（开启 `sync` feature）要求注册的类型 `Send + Sync`。
 //! `usize` + `PhantomData<fn() -> T>` 天然满足，不需要 `unsafe impl`。
+//!
+//! # P0 之后的形状
+//!
+//! 双轨计划 P0 把全部宿主 API 的函数体平移到了 [`GameCtx`]（`ctx.rs`），
+//! 本模块的 [`ScriptCtx`] 随之瘦成两样东西：**一个 GameCtx 地址束** +
+//! **一张 Rhai 专属的持久状态表**（`state_get` / `state_set` 背后的表，
+//! `Dynamic` 类型只属于 Rhai，不进引擎无关的 `GameCtx`）。
 
 // 上面这一段解释了这个模块**为什么**要从 `&self` 里交出 `&mut`：`ScriptCtx` 是
 // 一个 Copy 的"地址束"，解释器按值拷来拷去，但每个副本指向的都是同一份活数据，
@@ -31,6 +39,8 @@ use xgame_core::{EntityId, PhysicsBody, Scene};
 use xgame_input::Input;
 use xgame_math::glam::Vec3;
 use xgame_physics::PhysicsWorld;
+
+use crate::ctx::GameCtx;
 
 // ---------------------------------------------------------------------------
 // 生命周期擦除的容器
@@ -57,6 +67,15 @@ impl<T> ErasedMut<T> {
         }
     }
 
+    /// 从裸地址构造（用于把带生命周期参数的类型擦成 `'static` 形状，
+    /// 见 `ScriptCtx::new` 的 GameCtx 地址束）。
+    fn from_addr(addr: usize) -> Self {
+        Self {
+            addr,
+            _p: PhantomData,
+        }
+    }
+
     /// # Safety
     ///
     /// 调用者必须保证：地址仍然有效，且此刻没有其它别名借用。
@@ -67,42 +86,6 @@ impl<T> ErasedMut<T> {
     /// 实际的存活期由调用方自己保证（见模块文档）。
     unsafe fn get_mut(self) -> &'static mut T {
         unsafe { &mut *(self.addr as *mut T) }
-    }
-
-    /// # Safety
-    ///
-    /// 调用者必须保证地址仍然有效。返回类型放宽到 `'static` 的理由同上。
-    unsafe fn get(self) -> &'static T {
-        unsafe { &*(self.addr as *const T) }
-    }
-}
-
-/// 擦除了生命周期的不可变别名。
-struct ErasedRef<T> {
-    addr: usize,
-    _p: PhantomData<fn() -> T>,
-}
-
-impl<T> Clone for ErasedRef<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<T> Copy for ErasedRef<T> {}
-
-impl<T> ErasedRef<T> {
-    fn new(value: &T) -> Self {
-        Self {
-            addr: value as *const T as usize,
-            _p: PhantomData,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// 调用者必须保证地址仍然有效。返回类型放宽到 `'static` 的理由同 [`ErasedMut`]。
-    unsafe fn get(self) -> &'static T {
-        unsafe { &*(self.addr as *const T) }
     }
 }
 
@@ -122,7 +105,7 @@ pub enum LogLevel {
 #[derive(Debug, Clone)]
 pub struct ScriptLog {
     pub level: LogLevel,
-    /// 产生这条日志的脚本（项目相对路径）。
+    /// 产生这条日志的来源（脚本轨是项目相对路径，组件轨是行为名）。
     pub script: String,
     /// 产生这条日志的实体。
     pub entity: Option<EntityId>,
@@ -195,7 +178,8 @@ impl SpawnRequest {
 /// 一次脚本派发所需的外部状态。
 ///
 /// 这是**安全**的一层：调用方用 `&mut` / `&` 明确交出所有权，证明这些对象
-/// 在本次派发期间不会被别人碰。`ScriptHost` 拿到之后才把它们擦除成地址。
+/// 在本次派发期间不会被别人碰。`ScriptHost` 拿到之后把它连同日志 / 命令缓冲
+/// 一起捆进 [`GameCtx`]，再把 `GameCtx` 擦除成地址交给解释器。
 pub struct FrameCtx<'a> {
     pub scene: &'a mut Scene,
     /// 输入状态。没有输入系统时（例如无头测试）为 `None`。
@@ -238,42 +222,25 @@ impl<'a> FrameCtx<'a> {
 ///
 /// 它是一个 `Copy` 的地址束：脚本可以随便传给别的函数、存进局部变量，
 /// 不会因为"把它移走了"而报错，也不会阻止 Rust 侧的借用检查。
+/// 本体只有一个 [`GameCtx`] 地址 —— 全部宿主 API 都是它的方法
+/// （见 `api.rs`：每个 Rhai 函数都是一行转发）。
 #[derive(Clone, Copy)]
 pub struct ScriptCtx {
-    scene: ErasedMut<Scene>,
-    input: Option<ErasedRef<Input>>,
-    physics: Option<ErasedMut<PhysicsWorld>>,
-    logs: ErasedMut<Vec<ScriptLog>>,
-    commands: ErasedMut<Vec<ScriptCommand>>,
+    game: ErasedMut<GameCtx<'static>>,
     /// 这个 (实体, 脚本) 对的持久状态。见 [`ScriptCtx::state`]。
     state: Option<ErasedMut<rhai::Map>>,
-    delta: f32,
-    time: f32,
-    /// 触发这次调用的实体（[`EntityId::raw`]）。`0` 表示没有实体上下文。
-    entity: u64,
-    script: ErasedRef<String>,
 }
 
 impl ScriptCtx {
-    pub(crate) fn new(
-        frame: &mut FrameCtx<'_>,
-        entity: EntityId,
-        script_name: &String,
-        logs: &mut Vec<ScriptLog>,
-        commands: &mut Vec<ScriptCommand>,
-        state: Option<&mut rhai::Map>,
-    ) -> Self {
+    pub(crate) fn new(game: &mut GameCtx<'_>, state: Option<&mut rhai::Map>) -> Self {
         Self {
-            scene: ErasedMut::new(frame.scene),
-            input: frame.input.map(ErasedRef::new),
-            physics: frame.physics.as_deref_mut().map(ErasedMut::new),
-            logs: ErasedMut::new(logs),
-            commands: ErasedMut::new(commands),
+            // 生命周期提升（`GameCtx<'a>` → `GameCtx<'static>`）只是地址束的
+            // 类型层谎报，实际存活期由 `run_hook` 的调用窗口保证 —— 与
+            // `ErasedMut::get_mut` 放宽返回生命周期是同一套论证（见模块文档）。
+            // 地址转换是唯一不与借用检查器打架的写法：`&mut` 再 deref 无法
+            // 提升类型里内嵌的生命周期参数。
+            game: ErasedMut::from_addr(game as *mut GameCtx<'_> as usize),
             state: state.map(ErasedMut::new),
-            delta: frame.delta,
-            time: frame.time,
-            entity: entity.raw(),
-            script: ErasedRef::new(script_name),
         }
     }
 
@@ -284,89 +251,27 @@ impl ScriptCtx {
     /// Rhai 的函数**不能写外层作用域**（顶层 `let` 只能读、不能改），所以
     /// "给自己记一个计时器 / 冷却 / 血量"在脚本里没有别的写法。这张表由引擎侧
     /// 持有、按 `(实体, 脚本)` 分开，脚本通过 `state_get` / `state_set` 访问。
+    ///
+    /// 它不进 `GameCtx`：表的值是 `rhai::Dynamic`，纯 Rhai 概念，
+    /// 引擎无关的方法层不该认识它。
     pub(crate) fn state(&self) -> Option<&mut rhai::Map> {
         // SAFETY: 状态表由 ScriptHost 独占持有，直到派发结束。
         self.state.map(|s| unsafe { s.get_mut() })
     }
 
-    // -- 访问器 -------------------------------------------------------------
-
-    pub(crate) fn scene(&self) -> &Scene {
+    /// 本次调用的完整游戏上下文（全部宿主 API 都在它上面）。
+    pub(crate) fn game(&self) -> &mut GameCtx<'static> {
         // SAFETY: 见模块头。ctx 的生命周期被 run_hook 的调用窗口包住。
-        unsafe { self.scene.get() }
-    }
-
-    pub(crate) fn scene_mut(&self) -> &mut Scene {
-        // SAFETY: 同上；run_hook 期间 scene 由 FrameCtx 独占。
-        unsafe { self.scene.get_mut() }
-    }
-
-    pub(crate) fn physics(&self) -> Option<&PhysicsWorld> {
-        // SAFETY: 同上。
-        self.physics.map(|p| unsafe { p.get() })
-    }
-
-    pub(crate) fn physics_mut(&self) -> Option<&mut PhysicsWorld> {
-        // SAFETY: 同上。
-        self.physics.map(|p| unsafe { p.get_mut() })
-    }
-
-    pub(crate) fn input(&self) -> Option<&Input> {
-        // SAFETY: 同上。
-        self.input.map(|i| unsafe { i.get() })
-    }
-
-    pub(crate) fn push_log(&self, level: LogLevel, message: String) {
-        let entry = ScriptLog {
-            level,
-            script: self.script_name().to_owned(),
-            entity: self.entity_id(),
-            message,
-        };
-        // SAFETY: 日志缓冲由 ScriptHost 独占持有，直到派发结束。
-        unsafe { self.logs.get_mut() }.push(entry);
-    }
-
-    pub(crate) fn push_command(&self, command: ScriptCommand) {
-        // SAFETY: 同上。
-        unsafe { self.commands.get_mut() }.push(command);
-    }
-
-    pub(crate) fn script_name(&self) -> &str {
-        // SAFETY: 脚本路径字符串在 `ScriptHost.scripts` 里，活得比 ctx 久。
-        unsafe { self.script.get() }.as_str()
-    }
-
-    /// 触发这次调用的实体 ID；`0`（即 `None`）表示没有实体上下文。
-    pub(crate) fn entity_id(&self) -> Option<EntityId> {
-        if self.entity == 0 {
-            None
-        } else {
-            Some(EntityId::from_raw(self.entity))
-        }
-    }
-
-    /// 当前实体在场景里的索引。
-    pub(crate) fn entity_index(&self) -> Option<usize> {
-        let id = self.entity_id()?;
-        self.scene().find_entity(id)
-    }
-
-    pub(crate) fn delta(&self) -> f32 {
-        self.delta
-    }
-
-    pub(crate) fn time(&self) -> f32 {
-        self.time
+        unsafe { self.game.get_mut() }
     }
 }
 
 impl std::fmt::Debug for ScriptCtx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScriptCtx")
-            .field("entity", &self.entity)
-            .field("delta", &self.delta)
-            .field("time", &self.time)
+            .field("entity", &self.game().entity)
+            .field("delta", &self.game().delta)
+            .field("time", &self.game().time)
             .finish_non_exhaustive()
     }
 }

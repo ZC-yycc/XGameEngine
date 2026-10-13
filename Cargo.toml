@@ -9,9 +9,12 @@ members = [
     "crates/xgame-runtime",
     "crates/xgame-render",
     "crates/xgame-physics",
+    "crates/xgame",
     "crates/xgame-editor",
     "crates/xgame-game",
     "crates/xgame-mcp",
+    # 示例插件（cdylib）：双轨架构 P0 的 Rust 轨道演示，集成测试会 dlopen 它。
+    "examples/spinner-plugin",
 ]
 
 # 日常 `cargo run -p xgame-editor` 走的是 dev profile，默认 **零优化**。

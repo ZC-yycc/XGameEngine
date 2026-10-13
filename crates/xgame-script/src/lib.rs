@@ -29,7 +29,8 @@
 //! | `fn fixed_update(ctx)` | 每个物理固定步长 |
 //! | `fn on_destroy(ctx)` | 实体被销毁前 |
 //!
-//! 完整 API 见 [`api`] 模块文档（也可看仓库 `Docs/脚本 API.md`）。
+//! 完整 API 见 [`GameCtx`] 的方法表（`ctx.rs` —— 真相源；`api.rs` 只是
+//! 每个函数一行的 Rhai 转发壳，也可看仓库 `Docs/脚本 API.md`）。
 //!
 //! # 三条设计约定
 //!
@@ -43,9 +44,11 @@
 
 mod api;
 mod context;
+mod ctx;
 mod host;
 
 pub use context::{
     FrameCtx, LogLevel, ScriptCommand, ScriptCtx, ScriptLog, SpawnRequest,
 };
+pub use ctx::{GameCtx, RayHit};
 pub use host::{CommandReport, Hook, PreloadReport, ScriptHost};

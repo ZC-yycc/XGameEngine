@@ -1,0 +1,19 @@
+[package]
+name = "xgame"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine facade: the single entry crate for game code and plugins"
+
+[dependencies]
+xgame-core = { path = "../xgame-core" }
+xgame-math = { path = "../xgame-math" }
+xgame-physics = { path = "../xgame-physics" }
+# `winit` feature 把窗口库的按键翻译成引擎 KeyCode —— 门面的 prelude 要导出
+# `key_from_winit` 给宿主二进制用，所以这一层就得开着。
+xgame-input = { path = "../xgame-input", features = ["winit"] }
+xgame-render = { path = "../xgame-render" }
+xgame-script = { path = "../xgame-script" }
+xgame-runtime = { path = "../xgame-runtime" }
+# 插件边界（P0）：宿主加载器经 libloading dlsym 用户 cdylib；log 是插件日志的去处。
+libloading = "0.8"
+log = "0.4"

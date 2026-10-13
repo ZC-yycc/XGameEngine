@@ -37,7 +37,9 @@ use xgame_core::{EntityId, GameClock, PhysicsHandle, Scene, Transform};
 use xgame_input::{Input, InputMap};
 use xgame_math::glam::{Mat4, Vec3};
 use xgame_physics::{body_from_scene, DebugLine, PhysicsConfig, PhysicsWorld};
-use xgame_script::{FrameCtx, ScriptHost, ScriptLog};
+use xgame_script::{FrameCtx, GameCtx, ScriptHost, ScriptLog};
+
+use crate::registry::{BehaviorInstance, BehaviorRegistry};
 
 /// 运行时的可调参数。
 #[derive(Debug, Clone)]
@@ -118,7 +120,18 @@ pub struct World {
     has_kinematic: bool,
     /// 场景里是否存在**动态**刚体。同上，供 `pull_dynamic_bodies` 早退用。
     has_dynamic: bool,
+    /// 行为组件注册表（双轨架构的 Rust 轨道）。
+    behaviors: BehaviorRegistry,
+    /// 实体 → 已实例化的行为组件。
+    ///
+    /// 注册名存的是注册表里的 `'static` 字符串：每次分发构造 `GameCtx`
+    /// 时零分配，日志归属也统一成注册名。钩子函数指针在装配期就拷进了
+    /// 实例（`BehaviorInstance`），分发热路径零哈希。
+    behavior_instances: HashMap<EntityId, BehaviorInstanceSet>,
 }
+
+/// 单个实体已实例化的组件集合。
+type BehaviorInstanceSet = Vec<BehaviorInstance>;
 
 impl World {
     /// 用一份场景快照建立运行时。
@@ -149,10 +162,29 @@ impl World {
             scratch_physics_indices: Vec::new(),
             has_kinematic: false,
             has_dynamic: false,
+            behaviors: BehaviorRegistry::default(),
+            behavior_instances: HashMap::new(),
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
         world.sync_bodies();
+        // 组件实例化刻意不在这里做：此刻注册表还是空表，装配只会在实例表里
+        // 留下"未注册"的空占坑。真正的装配发生在 `with_behavior_registry`。
         world
+    }
+
+    /// 注入行为组件注册表（Rust 轨道）。
+    ///
+    /// 未注入时是空表 —— 声明了 `behaviors` 的实体记日志跳过（容错哲学与
+    /// 未注册脚本一致）。
+    ///
+    /// 重复注入 = 按新表**重新装配**（先清实例，组件的 start 标记随实例
+    /// 一起作废）：插件热重载之后组件逻辑已变，旧实例留着会跑到旧代码上；
+    /// 空表时期可能留下的"未注册"占坑也在这一步一并清掉。
+    pub fn with_behavior_registry(mut self, registry: BehaviorRegistry) -> Self {
+        self.behaviors = registry;
+        self.behavior_instances.clear();
+        self.instantiate_behaviors();
+        self
     }
 
     /// 用指定的输入映射建立运行时（游戏项目可以在 `input.ron` 里自定义按键）。
@@ -236,7 +268,7 @@ impl World {
         let mut fixed_steps = 0u32;
         while self.clock.consume_fixed_update() {
             self.run_dispatch(Phase::FixedUpdate, fixed_dt, time);
-            self.consume_script_commands();
+            self.consume_script_commands(fixed_dt, time);
             self.sync_bodies();
             self.push_kinematic_bodies();
             self.physics.step(fixed_dt);
@@ -248,7 +280,7 @@ impl World {
 
         // -- 3. update：每渲染帧一次 --
         self.run_dispatch(Phase::Update, frame_dt, time);
-        self.consume_script_commands();
+        self.consume_script_commands(frame_dt, time);
         self.sync_bodies();
 
         // -- 4. 输入帧末清理 --
@@ -264,12 +296,17 @@ impl World {
         self.last_report
     }
 
-    /// 按阶段派发脚本。
+    /// 按阶段派发（组件轨 + 脚本轨）。
     ///
-    /// 先 `let World { .. } = self` 把四个字段拆开再构造 `FrameCtx`，是为了把
+    /// 先 `let World { .. } = self` 把字段拆开再构造上下文，是为了把
     /// **字段级拆借**写清楚：`scene`（可变）/ `physics`（可变）/ `input`（只读）/
-    /// `scripts`（可变）互不重叠，编译器放行，不需要 `RefCell` 或运行期检查。
+    /// `scripts`（可变）/ 组件侧的注册表与实例表（可变）互不重叠，编译器放行，
+    /// 不需要 `RefCell` 或运行期检查。
     fn run_dispatch(&mut self, phase: Phase, delta: f32, time: f32) {
+        // 组件轨（Rust）先行、脚本轨随后：两轨共用同一束状态，顺序固定成
+        // "快的先跑"——组件钩子里改的状态，脚本当帧可见（反之不保证）。
+        self.dispatch_behaviors(phase, delta, time);
+
         let World {
             scene,
             physics,
@@ -286,6 +323,147 @@ impl World {
             Phase::Start => scripts.dispatch_start(frame),
             Phase::FixedUpdate => scripts.dispatch_fixed_update(frame, delta),
             Phase::Update => scripts.dispatch_update(frame),
+        }
+    }
+
+    /// 组件轨分发：按 `Entity::behaviors` 逐个调用已实例化组件的钩子。
+    ///
+    /// # 安全论证（与脚本轨同款）
+    ///
+    /// 循环体不跨钩子调用持有场景借用：每轮按索引现取 `(id, behaviors 非空)`，
+    /// 借用立即结束；钩子里增删实体时，下一轮重新索引 —— 删除会让后面实体
+    /// 左移（最多让一个实体本轮少跑），追加的实体还没有实例（`get_mut` 落空，
+    /// 自然跳过）。组件实例表在钩子期间不会变（清理只发生在命令消费时），
+    /// 所以 `instances` 的借用是稳定的。
+    fn dispatch_behaviors(&mut self, phase: Phase, delta: f32, time: f32) {
+        // 增量装配：为新实体补实例。判据（与 `sync_bodies` 同款论证）：
+        // "声明了 behaviors 的实体数 == 已实例化的实体数" 时没有新面孔 ——
+        // 新实体让声明数 +1；删实体在 `destroy_behaviors` 里同步清了实例；
+        // 所以不存在"变了但判据看不见"的情形。稳态成本是一次 O(n) 顺序扫描。
+        let declared = self
+            .scene
+            .entities
+            .iter()
+            .filter(|e| !e.behaviors.is_empty())
+            .count();
+        // 没有任何组件声明（当前绝大多数项目）：整段早退，稳态只付这次扫描。
+        if declared == 0 {
+            return;
+        }
+        if declared != self.behavior_instances.len() {
+            self.instantiate_behaviors();
+        }
+
+        let World {
+            scene,
+            physics,
+            input,
+            scripts,
+            behavior_instances,
+            ..
+        } = self;
+        let (logs, commands) = scripts.buffers_mut();
+
+        let mut index = 0usize;
+        while index < scene.entities.len() {
+            let entity = &scene.entities[index];
+            let id = entity.id;
+            let has_behaviors = !entity.behaviors.is_empty();
+            index += 1;
+            if !has_behaviors {
+                continue;
+            }
+            let Some(instances) = behavior_instances.get_mut(&id) else {
+                continue;
+            };
+            for instance in instances.iter_mut() {
+                // start-before-update：Start 阶段只对还没 start 过的组件跑，
+                // 标记先记后跑，与脚本轨同款语义 —— 钩子里生成的实体等下
+                // 一轮才跑 start。标记挂在组件上而不是实体集合上：热路径
+                // 由此零哈希（见 registry.rs 模块文档）。
+                if phase == Phase::Start {
+                    if instance.started {
+                        continue;
+                    }
+                    instance.started = true;
+                }
+                let mut game = GameCtx {
+                    scene: &mut *scene,
+                    physics: Some(&mut *physics),
+                    input: Some(input),
+                    logs: &mut *logs,
+                    commands: &mut *commands,
+                    source: instance.name,
+                    entity: id,
+                    delta,
+                    time,
+                };
+                match phase {
+                    Phase::Start => {
+                        (instance.hooks.start)(&mut instance.component, &mut game, 0.0)
+                    }
+                    Phase::Update => {
+                        (instance.hooks.update)(&mut instance.component, &mut game, delta)
+                    }
+                    Phase::FixedUpdate => {
+                        (instance.hooks.fixed_update)(&mut instance.component, &mut game, delta)
+                    }
+                }
+            }
+        }
+    }
+
+    /// 为声明了 behaviors 却还没有实例的实体构造组件。
+    ///
+    /// 未注册的名字记一条警告并跳过（不进实例表）——与"脚本崩溃不拖垮引擎"
+    /// 同一容错哲学；同一实体只装配一次，警告不会每帧刷屏。
+    fn instantiate_behaviors(&mut self) {
+        for entity in &self.scene.entities {
+            if entity.behaviors.is_empty() || self.behavior_instances.contains_key(&entity.id) {
+                continue;
+            }
+            let mut instances = Vec::with_capacity(entity.behaviors.len());
+            for name in &entity.behaviors {
+                match self.behaviors.construct_instance(name) {
+                    Some(instance) => instances.push(instance),
+                    None => {
+                        log::warn!("实体 '{}' 的行为 '{}' 未注册，已跳过", entity.name, name);
+                    }
+                }
+            }
+            self.behavior_instances.insert(entity.id, instances);
+        }
+    }
+
+    /// 实体被删除：先派发各组件的 `on_destroy`，再清掉实例。
+    ///
+    /// 调用时机是命令消费时 —— 实体**已经离开场景**（脚本轨 on_destroy 的
+    /// 接线沿用同一时机），钩子里读不到自身变换，适合做"通知外部清理"。
+    fn destroy_behaviors(&mut self, id: EntityId, delta: f32, time: f32) {
+        let Some(instances) = self.behavior_instances.remove(&id) else {
+            return;
+        };
+        let World {
+            scene,
+            physics,
+            input,
+            scripts,
+            ..
+        } = self;
+        let (logs, commands) = scripts.buffers_mut();
+        for mut instance in instances {
+            let mut game = GameCtx {
+                scene: &mut *scene,
+                physics: Some(&mut *physics),
+                input: Some(input),
+                logs: &mut *logs,
+                commands: &mut *commands,
+                source: instance.name,
+                entity: id,
+                delta,
+                time,
+            };
+            (instance.hooks.on_destroy)(&mut instance.component, &mut game, 0.0);
         }
     }
 
@@ -310,14 +488,16 @@ impl World {
     // 内部：物理体生命周期
     // -----------------------------------------------------------------------
 
-    /// 把脚本产生的结构性改动落到物理侧。
-    fn consume_script_commands(&mut self) {
+    /// 把脚本 / 组件产生的结构性改动落到物理侧。
+    fn consume_script_commands(&mut self, delta: f32, time: f32) {
         let report = self.scripts.take_commands();
         if report.is_empty() {
             return;
         }
 
         for id in report.removed {
+            // 先通知组件（on_destroy），再清刚体。
+            self.destroy_behaviors(id, delta, time);
             if let Some(body) = self.body_of_entity.remove(&id) {
                 self.physics.remove_body(body);
             }
@@ -749,6 +929,142 @@ mod tests {
         let report = world.last_report();
         assert_eq!(report.bodies, 1, "30 帧之后也应当只有 1 个刚体");
         assert_eq!(report.colliders, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // 组件轨（Rust Lifecycle）—— 双轨计划 P0
+    // -----------------------------------------------------------------------
+
+    use crate::{BehaviorRegistry, Ctx, Lifecycle};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// 一个走起来像脚本的组件：start 抬高、update 每帧沿 x 漂移。
+    #[derive(Default)]
+    struct Drifter;
+
+    impl Lifecycle for Drifter {
+        fn start(&mut self, ctx: &mut Ctx) {
+            let p = ctx.pos();
+            ctx.set_pos(Vec3::new(p.x, 5.0, p.z));
+        }
+        fn update(&mut self, ctx: &mut Ctx, dt: f32) {
+            let p = ctx.pos();
+            ctx.set_pos(Vec3::new(p.x + dt, p.y, p.z));
+        }
+    }
+
+    /// 组件真的能驱动实体（Rust 轨道的最小闭环）。
+    ///
+    /// 旧实现（没有组件路径）下 `actor` 纹丝不动，断言必红。
+    #[test]
+    fn behavior_hooks_drive_entities_like_scripts() {
+        let mut scene = Scene::new("behavior");
+        let mut actor = Entity::new("actor");
+        actor.behaviors.push("Drifter".to_owned());
+        scene.add_entity(actor);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Drifter>("Drifter");
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+
+        for _ in 0..10 {
+            world.update(1.0 / 60.0);
+        }
+        let actor = world.scene().find_by_name("actor").expect("实体应当还在");
+        // start 把 y 抬到 5 且只跑一次（之后 10 帧 update 不动 y）。
+        assert!((actor.transform.position.y - 5.0).abs() < 1e-6, "start 应当生效且只生效一次");
+        // update 每帧 +dt：10 帧 ≈ 0.167。
+        assert!(
+            actor.transform.position.x > 0.1,
+            "update 应当把实体沿 x 推走，实际 x = {}",
+            actor.transform.position.x
+        );
+    }
+
+    static DESTROYED: AtomicU32 = AtomicU32::new(0);
+
+    #[derive(Default)]
+    struct Marker;
+
+    impl Lifecycle for Marker {
+        fn on_destroy(&mut self, _ctx: &mut Ctx) {
+            DESTROYED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 一个会销毁别人的组件（顺带验证"组件钩子里的结构改动走命令消费路径"）。
+    #[derive(Default)]
+    struct Bomber {
+        victim: Option<xgame_core::EntityId>,
+    }
+
+    impl Lifecycle for Bomber {
+        fn start(&mut self, ctx: &mut Ctx) {
+            self.victim = ctx.find_entity_id("victim");
+        }
+        fn update(&mut self, ctx: &mut Ctx, _dt: f32) {
+            if let Some(id) = self.victim.take() {
+                ctx.destroy(id);
+            }
+        }
+    }
+
+    /// 实体被销毁时其组件收到 `on_destroy`。
+    ///
+    /// 旧实现（钩子没接线）下计数停在 0，断言必红。
+    #[test]
+    fn destroying_an_entity_runs_on_destroy() {
+        DESTROYED.store(0, Ordering::Relaxed);
+
+        let mut scene = Scene::new("destroy");
+        let mut bomber = Entity::new("bomber");
+        bomber.behaviors.push("Bomber".to_owned());
+        scene.add_entity(bomber);
+        let mut victim = Entity::new("victim");
+        victim.behaviors.push("Marker".to_owned());
+        scene.add_entity(victim);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Bomber>("Bomber");
+        registry.register::<Marker>("Marker");
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+
+        // bomber 在第一帧的 update 里 destroy(victim)；命令在同帧被消费。
+        world.update(1.0 / 60.0);
+
+        assert_eq!(DESTROYED.load(Ordering::Relaxed), 1, "victim 的 on_destroy 应当跑一次");
+        assert!(world.scene().find_by_name("victim").is_none(), "victim 应当已离开场景");
+        // 第二帧不该再收到任何回调（实例已清）。
+        world.update(1.0 / 60.0);
+        assert_eq!(DESTROYED.load(Ordering::Relaxed), 1, "on_destroy 不该重复派发");
+    }
+
+    /// 未注册的行为名：记日志跳过，不 panic、不影响其它实体。
+    #[test]
+    fn unregistered_behaviors_are_skipped_not_fatal() {
+        let mut scene = Scene::new("unregistered");
+        let mut actor = Entity::new("actor");
+        actor.behaviors.push("Ghost".to_owned());
+        scene.add_entity(actor);
+        let mut drifter = Entity::new("drifter");
+        drifter.behaviors.push("Drifter".to_owned());
+        scene.add_entity(drifter);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Drifter>("Drifter"); // 故意不注册 Ghost
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+
+        for _ in 0..5 {
+            world.update(1.0 / 60.0);
+        }
+        // 已注册的照常工作。
+        let drifter = world.scene().find_by_name("drifter").unwrap();
+        assert!(drifter.transform.position.x > 0.0);
+        // 未注册的实体只是没有组件，场景安然无恙。
+        assert!(world.scene().find_by_name("actor").is_some());
     }
 }
 

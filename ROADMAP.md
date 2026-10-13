@@ -17,6 +17,7 @@
 | **六·五** | ✅ 完成 | **玩法层：输入系统 + 脚本系统（Rhai）+ 统一运行时** |
 | **六·六** | ✅ 完成 | **稳定性 / 流畅度 / 性能硬化**（无新功能：运行时热路径、渲染批上传、崩溃面与无界增长治理，附分档微基准） |
 | **六·七** | ✅ 完成 | **编辑器产品化第一波**：项目设置（重力 / 步长进 project.ron + ⚙ 设置窗口）、未保存保护（脏标记 + 关窗确认 + Save As + 标题星号）、无头检查 `xgame-editor --check`（Agent-Native 第一块砖）+ 差距分析入库 `Docs/差距分析.md` |
+| **双轨架构 P0** | ✅ 完成 | 双轨语言架构（Rust + Lua）第一期：`xgame` 门面 crate + `GameCtx` 方法层 + Rust 组件（`Lifecycle` / 注册表 / `Entity::behaviors`）+ cdylib 插件边界（`export_plugin!` + 版本握手 + 示例插件全链路）—— 计划与决策见 [`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)，实施记录见 PLAN.md 十五 |
 | **七** | 🟨 进行中 | 动画系统（第一片 ✅：骨骼蒙皮 + 单剪辑播放；第二片 ✅：换剪辑交叉淡入；第三片 ✅：阈值状态机；第四片 ✅：叠加混合；第五片 ✅：多层混合栈 + 骨骼遮罩；morph/Phase B 待做） |
 | **八** | ⬜ 待开始 | 音频系统 |
 | **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影已落地；CSM / Bloom / ACES / 天空盒待做） |
@@ -128,7 +129,7 @@
 - **程序化验证** —— `xgame-editor --check <项目>`（退出码 0/1/2，秒级，可进 CI）；
 - **程序化配置** —— 重力 / 步长进 `project.ron`，改一行文本即调参；
 - **单一运行时** —— 无头验证的行为与玩家实跑的完全一致（编辑器 Play == 游戏二进制）；
-- **安全网** —— 196 个回归测试、每条先证红，智能体改引擎也有兜底。
+- **安全网** —— 280 个回归测试、每条先证红，智能体改引擎也有兜底。
 
 进度与计划：**① MCP server 最小工具集 ✅ 本轮落地** —— 新 crate `xgame-mcp`
 （`dist\xgame-mcp.exe`，stdio 按行 JSON-RPC），6 个工具 project_info / scene_read /
@@ -173,6 +174,24 @@ scene_write / entity_upsert / entity_remove / project_check，配 20 条回归�
 > `EventLoop::create_window` 都已废弃，现在是 `run_app` + `ApplicationHandler`，
 > 窗口与 `GameApp` 都推迟到 `resumed` 里创建（`ActiveEventLoop::create_window`
 > 只在回调内可见）。`about_to_wait` 主动 `request_redraw()` 的连续帧机制不变。
+
+## 双轨语言架构（进行中）：P0 ✅
+
+Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决策记录：
+[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；P0 实施记录：PLAN.md 十五。
+
+| P0 交付 | 状态 | 说明 |
+|---|---|---|
+| `xgame` 门面 crate | ✅ | 游戏 / 插件代码的唯一入口：prelude 拍平深路径 + `ENGINE_VERSION`（版本握手基准） |
+| `GameCtx` 方法层 | ✅ | api.rs 约 750 行函数体平移为 `impl GameCtx` 方法；脚本 API 与组件 API 是同一套方法的两个投影 |
+| Rust 组件 | ✅ | `Lifecycle` 四钩子（与 Rhai 同名同语义）+ `BehaviorRegistry` + `Entity::behaviors`（serde 兼容旧场景文件） |
+| 组件分发 | ✅ | `World` 帧管线的平行路径（字段级拆借不动）；钩子函数装配期拷进实例，热路径零哈希 |
+| 插件边界 | ✅ | cdylib + `export_plugin!` 宏 + 版本握手（不匹配拒载、报错可读）；示例 `examples/spinner-plugin` 端到端跑通四钩子 |
+| 微基准 | ✅ | 1000 no-op 组件实体分发 **37.6 µs/帧**（验收线 50）；对照 Rhai 脚本轨 493.9 µs = **13.1×** |
+
+后续分期：**P0.5** 编辑器 PIE（探测插件项目 → 后台 cargo build → 加载进 Play 会话）
+→ **P1** `#[derive(Inspect)]` → **P2** Lua 宿主（mlua）→ **P2.5** 基准闸门（Rhai vs Lua）
+→ **P3** 按闸门结论处置 Rhai。
 
 ## 第七阶段：动画系统 🟨
 
@@ -278,6 +297,10 @@ XGameEngine/                       # 引擎源码仓库
 │   │   └── src/
 │   │       ├── projection.rs
 │   │       └── transform.rs
+│   ├── xgame-derive/              # proc-macro（编辑器 Panel 派生）
+│   ├── xgame-script/              # Rhai 脚本宿主（GameCtx 方法层在此，api.rs 为转发壳）
+│   ├── xgame-runtime/             # 统一运行时 World（帧管线 + Rust 组件分发 + 注册表）
+│   ├── xgame/                     # 门面 crate（prelude + ENGINE_VERSION + 插件边界）
 │   ├── xgame-render/              # 渲染器
 │   │   └── src/
 │   │       ├── lib.rs             # RenderContext
@@ -326,6 +349,8 @@ XGameEngine/                       # 引擎源码仓库
 │   └── xgame-game/                # 独立游戏
 │       └── src/
 │           └── main.rs            # 游戏入口（参数 > exe 同目录项目 > 示例项目）
+├── examples/
+│   └── spinner-plugin/            # 示例 cdylib 插件（与 Spinner.rhai 同款的 Rust 组件）
 └── README.md
 ```
 

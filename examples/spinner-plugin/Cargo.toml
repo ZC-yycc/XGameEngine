@@ -1,0 +1,15 @@
+[package]
+name = "spinner-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "示例 cdylib 插件：与 Spinner.rhai 同款行为的 Rust 组件（双轨架构 P0 演示）"
+publish = false
+
+# cdylib 是给宿主 dlopen 的产物；rlib 让它也能被当依赖编译（cargo test 的测试
+# 挂载需要，两种 crate-type 一次 rustc 调用全出）。
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 与引擎同版本的门面 crate —— 版本握手的前提。
+xgame = { path = "../../crates/xgame" }

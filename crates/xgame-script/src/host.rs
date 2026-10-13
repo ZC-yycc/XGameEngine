@@ -9,6 +9,7 @@ use xgame_core::{EntityId, Scene};
 
 use crate::api;
 use crate::context::{FrameCtx, LogLevel, ScriptCommand, ScriptCtx, ScriptLog};
+use crate::ctx::GameCtx;
 
 /// 脚本可以实现的生命周期钩子。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,12 +304,14 @@ impl ScriptHost {
             return;
         }
 
-        // 字段级拆借：scripts（可写）/ engine（只读）/ logs、commands（可写）
-        // 是四个互不重叠的字段，这里必须一次借清，否则 `&mut self` 的辅助方法
-        // 会把整份 self 借走。
+        // 字段级拆借：scripts（可写）/ engine（可写）/ logs、commands、states
+        // （可写）是互不重叠的字段，这里必须一次借清，否则 `&mut self` 的辅助
+        // 方法会把整份 self 借走。
         //
-        // `ScriptCtx` 拿的是**地址**（见 context.rs 的说明），所以这一步不会
-        // 延长任何借用 —— 下面调 `self.engine` 依然是安全的共享借用。
+        // `GameCtx` 持有 logs / commands 的**真实借用**（活到下面 `call_fn`
+        // 返回、`game` 析构为止）；`self.engine` 是另一个字段，同时取它的
+        // `&mut` 不冲突。交给解释器的 `ScriptCtx` 则只是 `game` 的地址
+        // （见 context.rs 的说明），不会额外延长任何借用。
         //
         // scope 先 take 出来、跑完再放回去：借 `script.scope` 的同时还要借
         // `script.ast`，两个可变/不可变借用叠在一起过不了借用检查。
@@ -320,14 +323,21 @@ impl ScriptHost {
         let state_key = (entity, script.path.clone());
         let state = self.states.entry(state_key).or_default();
 
-        let ctx = ScriptCtx::new(
-            frame,
+        // 把本次钩子所需的全部状态捆成 GameCtx（API 真相源，见 ctx.rs），
+        // 再擦除成地址交给解释器。字段级拆借：frame 的 scene / physics 与
+        // self 的 logs / commands / states / scripts 互不重叠，编译器放行。
+        let mut game = GameCtx {
+            scene: &mut *frame.scene,
+            physics: frame.physics.as_deref_mut(),
+            input: frame.input,
+            logs: &mut self.logs,
+            commands: &mut self.commands,
+            source: &script.path,
             entity,
-            &script.path,
-            &mut self.logs,
-            &mut self.commands,
-            Some(state),
-        );
+            delta: frame.delta,
+            time: frame.time,
+        };
+        let ctx = ScriptCtx::new(&mut game, Some(state));
         let fn_name = hook.fn_name();
         let result = self
             .engine
@@ -348,6 +358,12 @@ impl ScriptHost {
     // -----------------------------------------------------------------------
     // 命令与日志
     // -----------------------------------------------------------------------
+
+    /// 日志与命令缓冲的直接访问 —— 组件轨（Rust `Lifecycle`）的分发与脚本轨
+    /// 共用这两条缓冲：日志进同一个控制台、结构改动走同一条消费路径。
+    pub fn buffers_mut(&mut self) -> (&mut Vec<ScriptLog>, &mut Vec<ScriptCommand>) {
+        (&mut self.logs, &mut self.commands)
+    }
 
     /// 取走脚本产生的结构性改动通知（场景已经改完了，这里只处理物理侧）。
     ///

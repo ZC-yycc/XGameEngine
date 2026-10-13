@@ -55,6 +55,17 @@ pub struct Entity {
     /// 一个可控点：玩家脚本依赖另一个脚本先算出的状态时，能靠顺序表达。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scripts: Vec<String>,
+    /// 挂在这个实体上的 Rust 行为组件名（注册表里的名字，见
+    /// `xgame-runtime::BehaviorRegistry`）。
+    ///
+    /// 双轨语言架构的 Rust 轨道（UE 模式）：名字在运行时查注册表实例化成
+    /// `Lifecycle` 组件。与 `scripts` 完全同款的兼容模式 —— 旧场景文件没有
+    /// 这个字段 → 空列表（纯数据、零行为），`skip_serializing_if` 让没挂
+    /// 行为的实体不写这一行。
+    ///
+    /// 顺序即执行顺序（同实体内多个行为按列表顺序跑），理由同 `scripts`。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub behaviors: Vec<String>,
     /// 物理属性。`None` = 不参与物理（纯视觉实体）。
     ///
     /// 旧场景文件没有这个字段，反序列化成 `None` —— 语义上正好等于
@@ -84,6 +95,7 @@ impl Entity {
             parent: None,
             prefab: None,
             scripts: Vec::new(),
+            behaviors: Vec::new(),
             physics: None,
             animator: None,
             components: ComponentMap::new(),
@@ -170,6 +182,7 @@ impl PartialEq for Entity {
             && self.parent == other.parent
             && self.prefab == other.prefab
             && self.scripts == other.scripts
+            && self.behaviors == other.behaviors
             && self.physics == other.physics
             && self.animator == other.animator
     }
@@ -899,6 +912,38 @@ mod tests {
         assert_eq!(scene.roots().len(), 2);
         // 旧文件没有 animator 字段 → 全部是 None（= 不动画，与当时行为一致）
         assert!(scene.entities.iter().all(|e| e.animator.is_none()));
+    }
+
+    /// 旧场景文件（没有 behaviors 字段）必须照常加载：空行为列表 = 纯数据实体。
+    ///
+    /// 双轨计划 P0 的字段兼容回归网 —— serde 属性写错（漏 `default`）
+    /// 会让所有既有场景文件当场加载失败。
+    #[test]
+    fn old_scene_without_behaviors_field_loads() {
+        let ron = r#"Scene(
+            name: "Old",
+            entities: [
+                (name: "A", transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: ""),
+            ],
+        )"#;
+        let scene: Scene = ron::from_str(ron).expect("旧场景应当能反序列化");
+        assert!(scene.entities[0].behaviors.is_empty());
+
+        // 挂了行为的实体：字段落盘、顺序保持（顺序即执行顺序）。
+        let mut scene = Scene::new("New");
+        let mut entity = Entity::new("A");
+        entity.behaviors = vec!["Spinner".to_owned(), "Drift".to_owned()];
+        scene.add_entity(entity);
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(text.contains("behaviors"), "挂了行为的实体必须落盘");
+        let restored: Scene = ron::from_str(&text).unwrap();
+        assert_eq!(restored.entities[0].behaviors, vec!["Spinner", "Drift"]);
+
+        // 没挂行为的实体不写 behaviors 行（`skip_serializing_if` 的承诺）。
+        let mut plain = Scene::new("Plain");
+        plain.add_entity(Entity::new("A"));
+        let text = ron::ser::to_string_pretty(&plain, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("behaviors"), "空列表不该污染场景文件");
     }
 
     // -- 动画组件 -----------------------------------------------------------

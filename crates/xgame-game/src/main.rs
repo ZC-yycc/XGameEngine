@@ -30,16 +30,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use xgame_core::project::PROJECT_FILE_NAME;
-use xgame_core::ProjectHandle;
-use xgame_input::{key_from_winit, InputMap, MouseButton};
-use xgame_math::glam::Vec3;
-use xgame_math::projection;
-use xgame_render::animation::AnimationDriver;
-use xgame_render::gltf_loader::GltfMesh;
-use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline};
-use xgame_runtime::{LogLevel, World, WorldConfig};
-use xgame_script::ScriptLog;
+use xgame::prelude::*;
 
 /// 既没传命令行参数、可执行文件旁边也没有项目时，退回的示例项目
 /// （相对进程工作目录，只在仓库内 `cargo run` 时有意义）。
@@ -172,7 +163,7 @@ impl GameApp {
 
         // 采样数由设备能力决定：不支持的格式上硬开 4× 会让管线创建失败。
         let sample_count =
-            xgame_render::scene_pipeline::supported_sample_count(&adapter, config.format);
+            supported_sample_count(&adapter, config.format);
         log::info!("渲染：MSAA x{sample_count}");
 
         let (depth_texture, depth_view) =
@@ -192,7 +183,7 @@ impl GameApp {
             Ok(scene) => scene,
             Err(e) => {
                 log::error!("{e}");
-                xgame_core::Scene::new("Untitled")
+                Scene::new("Untitled")
             }
         };
 
@@ -350,16 +341,16 @@ impl GameApp {
                 state.handle_mouse_button(MouseButton::from(*button), *btn_state == ElementState::Pressed);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                state.handle_cursor_moved(xgame_math::glam::Vec2::new(
+                state.handle_cursor_moved(glam::Vec2::new(
                     position.x as f32,
                     position.y as f32,
                 ));
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => xgame_math::glam::Vec2::new(*x, *y),
+                    MouseScrollDelta::LineDelta(x, y) => glam::Vec2::new(*x, *y),
                     MouseScrollDelta::PixelDelta(pos) => {
-                        xgame_math::glam::Vec2::new(pos.x as f32, pos.y as f32)
+                        glam::Vec2::new(pos.x as f32, pos.y as f32)
                     }
                 };
                 state.handle_scroll(scroll);

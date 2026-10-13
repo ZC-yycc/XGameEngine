@@ -393,10 +393,10 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     let prev_mode = session.state.play_mode;
     panels::toolbar::show(&mut session.state, ctx);
     match (prev_mode, session.state.play_mode) {
-        (PlayMode::Edit, PlayMode::Playing) | (PlayMode::Paused, PlayMode::Playing) => {
-            if session.state.game_runtime.is_none() {
-                session.state.enter_play_mode();
-            }
+        (PlayMode::Edit, PlayMode::Playing) | (PlayMode::Paused, PlayMode::Playing)
+            if session.state.game_runtime.is_none() =>
+        {
+            session.state.enter_play_mode();
         }
         (PlayMode::Playing, PlayMode::Edit) | (PlayMode::Paused, PlayMode::Edit) => {
             session.state.exit_play_mode();

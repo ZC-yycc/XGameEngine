@@ -37,8 +37,12 @@
 //! // world.scene() 现在就是这一帧的状态，拿去渲染。
 //! ```
 
+mod lifecycle;
+mod registry;
 mod world;
 
+pub use lifecycle::{Ctx, Lifecycle};
+pub use registry::BehaviorRegistry;
 pub use world::{FrameReport, World, WorldConfig};
 
 // 常用类型顺手重导出，免得宿主到处写 `xgame_script::...`。
