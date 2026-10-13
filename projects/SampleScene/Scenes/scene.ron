@@ -1,16 +1,6 @@
-// SampleScene —— 引擎能力的演示场景。
-//
-// 想看出每个实体在演示什么，看 `name` 上的注释（RON 支持 `//` 行注释）。
-//
-// 几个刻意的设计：
-//   · **物理要显式声明**。`physics: None`（不写这个字段）= 纯视觉实体，不会被
-//     重力拽走。地面 / 平台 / 可推的箱子各自是什么，由场景作者说了算。
-//   · **脚本只存路径**。多个实体挂同一个 `.rhai`，改一次逻辑全部生效。
-//   · 动态体由物理驱动、运动学体由脚本驱动（见 `xgame-runtime` 的帧序说明）。
 (
     name: "Test Scene",
     entities: [
-        // -- 地面：静态盒子。没有它，下面所有动态物体都会无限下坠 --
         (
             name: "Ground",
             transform: (
@@ -23,14 +13,16 @@
             parent: None,
             physics: Some((
                 kind: Static,
-                // 注意：RON 里**定长数组/元组**写成 `(...)`，`[...]` 是变长序列。
-                // `half_extents` 是 `[f32; 3]`，所以用圆括号。
-                shape: Cuboid(half_extents: (12.0, 0.5, 12.0)),
+                shape: Cuboid(
+                    half_extents: (12.0, 0.5, 12.0),
+                ),
+                mass: 0.0,
                 friction: 0.7,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
             )),
         ),
-
-        // -- 静态台阶：纯装饰 + 静态碰撞，演示"父节点带子节点一起立住" --
         (
             name: "Platform",
             transform: (
@@ -41,7 +33,15 @@
             model: "builtin://cube",
             id: (2),
             parent: None,
-            physics: Some((kind: Static, shape: Auto)),
+            physics: Some((
+                kind: Static,
+                shape: Auto,
+                mass: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
         ),
         (
             name: "Platform.Mid",
@@ -53,7 +53,15 @@
             model: "builtin://cube",
             id: (3),
             parent: Some((2)),
-            physics: Some((kind: Static, shape: Auto)),
+            physics: Some((
+                kind: Static,
+                shape: Auto,
+                mass: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
         ),
         (
             name: "Platform.Top",
@@ -65,11 +73,16 @@
             model: "builtin://cube",
             id: (4),
             parent: Some((3)),
-            physics: Some((kind: Static, shape: Auto)),
+            physics: Some((
+                kind: Static,
+                shape: Auto,
+                mass: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
         ),
-
-        // -- 脚本演示 ①：运动学立方体，由 Spinner.rhai 每帧改旋转 --
-        //    运动学体的位置 / 朝向由脚本负责，物理只负责把它推给别人。
         (
             name: "Spinner",
             transform: (
@@ -80,33 +93,44 @@
             model: "builtin://cube",
             id: (5),
             parent: None,
-            scripts: ["Scripts/Spinner.rhai"],
-            physics: Some((kind: Kinematic, shape: Auto)),
+            scripts: [
+                "Scripts/Spinner.rhai",
+            ],
+            physics: Some((
+                kind: Kinematic,
+                shape: Auto,
+                mass: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
         ),
-
-        // -- 脚本演示 ②：动态球，由 Jumper.rhai 响应「Jump」把它弹起来 --
-        //    动态体由物理驱动，脚本只通过 `set_velocity` 施加影响 ——
-        //    这条分工让"脚本改位置"和"重力算位置"不会互相覆盖。
         (
             name: "Bouncer",
             transform: (
-                position: (4.0, 1.0, 0.0),
+                position: (1.5652337, 0.99999976, -3.108657),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             model: "builtin://sphere",
             id: (6),
             parent: None,
-            scripts: ["Scripts/Jumper.rhai"],
+            scripts: [
+                "Scripts/Jumper.rhai",
+            ],
             physics: Some((
                 kind: Dynamic,
-                shape: Ball(radius: 0.5),
-                restitution: 0.55,
+                shape: Ball(
+                    radius: 0.5,
+                ),
+                mass: 0.0,
                 friction: 0.4,
+                restitution: 0.55,
+                gravity_scale: 1.0,
+                is_sensor: false,
             )),
         ),
-
-        // -- 自由落体：几个动态箱子，用于确认刚体与静止的接触解算 --
         (
             name: "Crate.A",
             transform: (
@@ -117,7 +141,15 @@
             model: "builtin://cube",
             id: (7),
             parent: None,
-            physics: Some((kind: Dynamic, shape: Auto, friction: 0.6)),
+            physics: Some((
+                kind: Dynamic,
+                shape: Auto,
+                mass: 0.0,
+                friction: 0.6,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
         ),
         (
             name: "Crate.B",
@@ -129,7 +161,15 @@
             model: "builtin://cube",
             id: (8),
             parent: None,
-            physics: Some((kind: Dynamic, shape: Auto, friction: 0.6)),
+            physics: Some((
+                kind: Dynamic,
+                shape: Auto,
+                mass: 0.0,
+                friction: 0.6,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
         ),
         (
             name: "Crate.C",
@@ -141,10 +181,16 @@
             model: "builtin://cube",
             id: (9),
             parent: None,
-            physics: Some((kind: Dynamic, shape: Auto, restitution: 0.3)),
+            physics: Some((
+                kind: Dynamic,
+                shape: Auto,
+                mass: 0.0,
+                friction: 0.5,
+                restitution: 0.3,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
         ),
-
-        // -- 圆柱：内置图元之一 --
         (
             name: "Pillar",
             transform: (
@@ -157,13 +203,17 @@
             parent: None,
             physics: Some((
                 kind: Static,
-                shape: Cylinder(half_height: 1.5, radius: 0.5),
+                shape: Cylinder(
+                    half_height: 1.5,
+                    radius: 0.5,
+                ),
+                mass: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
             )),
         ),
-
-        // -- 预制体实例：一棵"小场景"（柱基 + 中段 + 顶饰）--
-        //    这里刻意**不给物理**：实例是纯视觉装饰，演示 `physics: None`
-        //    的语义 —— 没有声明就不参与模拟，不会被重力拽走。
         (
             name: "Pillar",
             transform: (
@@ -212,6 +262,23 @@
                 is_root: false,
             )),
         ),
+        (
+            name: "Fox",
+            transform: (
+                position: (0.0, 0.0, 1.8),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.01, 0.01, 0.01),
+            ),
+            model: "Resources/Fox.gltf",
+            id: (14),
+            parent: None,
+            animator: Some((
+                clip: "Walk",
+                speed: 1.0,
+                looping: true,
+                autoplay: true,
+            )),
+        ),
     ],
     lights: [
         (
@@ -223,7 +290,8 @@
             intensity: 3.2,
             range: 10.0,
             casts_shadow: true,
+            shadow_resolution: 0,
         ),
     ],
-    ambient: (0.09, 0.10, 0.13),
+    ambient: (0.09, 0.1, 0.13),
 )
