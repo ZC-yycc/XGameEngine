@@ -18,6 +18,7 @@
 | **六·六** | ✅ 完成 | **稳定性 / 流畅度 / 性能硬化**（无新功能：运行时热路径、渲染批上传、崩溃面与无界增长治理，附分档微基准） |
 | **六·七** | ✅ 完成 | **编辑器产品化第一波**：项目设置（重力 / 步长进 project.ron + ⚙ 设置窗口）、未保存保护（脏标记 + 关窗确认 + Save As + 标题星号）、无头检查 `xgame-editor --check`（Agent-Native 第一块砖）+ 差距分析入库 `Docs/差距分析.md` |
 | **双轨架构 P0** | ✅ 完成 | 双轨语言架构（Rust + Lua）第一期：`xgame` 门面 crate + `GameCtx` 方法层 + Rust 组件（`Lifecycle` / 注册表 / `Entity::behaviors`）+ cdylib 插件边界（`export_plugin!` + 版本握手 + 示例插件全链路）—— 计划与决策见 [`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)，实施记录见 PLAN.md 十五 |
+| **双轨架构 P0.5** | ✅ 完成 | **编辑器 PIE**：项目根有 `Cargo.toml` ⇒ 按 ▶ Play 自动后台 `cargo build`（UI 不阻塞）→ 产物同步进 `<项目>/Plugins/` → 临时副本加载进 Play 会话；Inspector 的 Behaviors 区、工具栏编译指示器、打包器带 `Plugins/`、玩家加载插件；演示项目 [`projects/BehaviorsDemo`](projects/BehaviorsDemo) 是 Rust 组件与 Rhai 脚本同场景共存 —— 决策见计划文档 **D7**，实施记录见 PLAN.md 十六 |
 | **七** | 🟨 进行中 | 动画系统（第一片 ✅：骨骼蒙皮 + 单剪辑播放；第二片 ✅：换剪辑交叉淡入；第三片 ✅：阈值状态机；第四片 ✅：叠加混合；第五片 ✅：多层混合栈 + 骨骼遮罩；morph/Phase B 待做） |
 | **八** | ⬜ 待开始 | 音频系统 |
 | **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影已落地；CSM / Bloom / ACES / 天空盒待做） |
@@ -175,10 +176,10 @@ scene_write / entity_upsert / entity_remove / project_check，配 20 条回归�
 > 窗口与 `GameApp` 都推迟到 `resumed` 里创建（`ActiveEventLoop::create_window`
 > 只在回调内可见）。`about_to_wait` 主动 `request_redraw()` 的连续帧机制不变。
 
-## 双轨语言架构（进行中）：P0 ✅
+## 双轨语言架构（进行中）：P0 ✅ P0.5 ✅
 
 Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决策记录：
-[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；P0 实施记录：PLAN.md 十五。
+[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；实施记录：PLAN.md 十五 / 十六。
 
 | P0 交付 | 状态 | 说明 |
 |---|---|---|
@@ -189,9 +190,21 @@ Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决�
 | 插件边界 | ✅ | cdylib + `export_plugin!` 宏 + 版本握手（不匹配拒载、报错可读）；示例 `examples/spinner-plugin` 端到端跑通四钩子 |
 | 微基准 | ✅ | 1000 no-op 组件实体分发 **37.6 µs/帧**（验收线 50）；对照 Rhai 脚本轨 493.9 µs = **13.1×** |
 
-后续分期：**P0.5** 编辑器 PIE（探测插件项目 → 后台 cargo build → 加载进 Play 会话）
-→ **P1** `#[derive(Inspect)]` → **P2** Lua 宿主（mlua）→ **P2.5** 基准闸门（Rhai vs Lua）
-→ **P3** 按闸门结论处置 Rhai。
+| P0.5 交付 | 状态 | 说明 |
+|---|---|---|
+| 插件项目探测 + 新鲜度 | ✅ | 项目根有 `Cargo.toml` 即插件项目；纯时间戳比较的纯函数，新鲜就**连 cargo 都不启动** |
+| 后台构建 | ✅ | `cargo build --message-format=json-render-diagnostics` 跑在工作线程，mpsc 回传；产物路径从 JSON 解析，诊断直接进 Console；profile 跟随编辑器 |
+| 产物同步 + 加载 | ✅ | 同步进规范目录 `<项目>/Plugins/`（玩家与打包器只认这里）；加载走**临时副本**绕开 Windows 文件锁；旧句柄永不卸载 |
+| Play 状态机 | ✅ | 按 ▶ 过期 ⇒ 转后台编译 + 自动进 Play；失败留在编辑态、不阻塞 Play；工具栏转圈 + 秒数 + 手动 Build |
+| 编辑器 UI | ✅ | Inspector 的 **Behaviors** 区（与 Scripts 同构，未注册名标红 ⚠）、工具栏编译指示器 |
+| 玩家 / 打包器 | ✅ | `xgame-game` 加载 `Plugins/`；打包器复制 `Plugins/` 并在"有 Cargo.toml 却没 DLL"时把警告塞进构建报告 |
+| 演示项目 | ✅ | [`projects/BehaviorsDemo`](projects/BehaviorsDemo) —— **项目本身就是 cdylib crate**，场景里 Rust 组件与 Rhai 脚本同款行为共存 |
+
+后续分期：**P1** `#[derive(Inspect)]` → **P2** Lua 宿主（mlua）→ **P2.5** 基准闸门
+（Rhai vs Lua）→ **P3** 按闸门结论处置 Rhai。
+
+P0.5 遗留（有意延后）：Play 中途热换插件、组件徽章、release profile 插件出货（P3）、
+cargo 构建超时。
 
 ## 第七阶段：动画系统 🟨
 

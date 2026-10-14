@@ -40,7 +40,8 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 ## 项目布局
 
 - `crates/` — 引擎与工具（11 个 crate，名字见 workspace Cargo.toml）
-- `projects/` — 游戏项目（`project.ron` + `Scenes/` + `Resources/` + `Scripts/` + `Prefabs/` + `input.ron`）
+- `projects/` — 游戏项目（`project.ron` + `Scenes/` + `Resources/` + `Scripts/` + `Prefabs/` + `input.ron`）；
+  `BehaviorsDemo` 例外——它本身是 workspace 成员（cdylib），用来演示 Rust 插件项目形态
 - `Docs/` — 脚本 API、差距分析、双轨语言架构计划
 - `dist/` — 发布产物（构建输出，不入库改动）
 - `tools/` — 构建脚本（build-release.ps1 等）
@@ -49,5 +50,8 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 
 - 双轨语言架构已决策收敛为 **Rust + Lua**（C#/Verse/多语言中立层已否决，理由见计划文档决策记录 D1）。
 - **P0 已完成**（2026-10-14，实施记录见 PLAN.md 十五）：`xgame` 门面 crate + `GameCtx` 方法层（api.rs 平移为转发壳）+ `Lifecycle` trait + 组件分发 + 注册表 + 插件边界（`export_plugin!` + 版本握手）+ 示例插件 `examples/spinner-plugin` 全链路。落地偏离已回写计划文档 D6。
-- 下一步是 **P0.5 编辑器 PIE**（探测 Rust 插件项目 → 后台 cargo build → 加载进 Play 会话），随后 P1 `#[derive(Inspect)]` / P2 Lua 宿主，见计划文档 §四。
+- **P0.5 已完成**（2026-10-14，实施记录见 PLAN.md 十六，决策见计划文档 D7）：编辑器 PIE —— 项目根有 `Cargo.toml` 即插件项目，按 ▶ Play 自动后台 `cargo build`（UI 不阻塞）、产物同步进 `<项目>/Plugins/`、经**临时副本**加载进 Play 会话；Inspector 有 Behaviors 区；玩家与打包器都认 `Plugins/`；演示项目 `projects/BehaviorsDemo`（Rust 组件 + Rhai 脚本同场景共存）。
+  - **三条不能推翻的约束**（D7）：`Plugins/` 是唯一规范目录；加载永远走临时副本（Windows 文件锁）；旧 DLL 句柄永不卸载（悬垂 vtable 是 UB）。持有句柄的字段必须声明在 `game_runtime` / `world` **之后**。
+- 下一步是 **P1 `#[derive(Inspect)]`**，随后 P2 Lua 宿主（mlua），见计划文档 §四。
 - Rhai 暂保留，P2.5 基准闸门数据决定去留——不要提前删。当前对照数据：1000 no-op 实体组件轨分发 37.6 µs/帧 vs Rhai 493.9 µs（13.1×），微基准 `behavior_dispatch_throughput`。
+- **工具链注意**：本仓库的源文件是 UTF-8 **无 BOM** 且含大量中文注释。用 PowerShell 做文本替换时必须显式 `-Encoding UTF8` 读写，否则 PS 5.1 会按 GBK 解码把中文**有损**毁掉（已发生过一次，PLAN.md 十六第七节）。改中文源文件优先用编辑器工具，shell 只做只读操作。

@@ -51,6 +51,12 @@ pub struct BuildReport {
     pub asset_count: usize,
     /// 实际打包的目录（相对项目根），用于让用户看清「都带了什么」。
     pub packed_dirs: Vec<String>,
+    /// 构建过程中的警告（不致命，但**必须让人看见**）。
+    ///
+    /// 走报告而不是 `log::warn!`：那条路只到 stderr（终端），而打包按钮是在
+    /// 图形界面里点的 —— 最典型的警告"有 Cargo.toml 却没编译过插件"正是要在
+    /// Console 里喊的那一声。
+    pub warnings: Vec<String>,
 }
 
 impl BuildReport {
@@ -174,11 +180,20 @@ pub fn build(project: &ProjectHandle) -> Result<BuildReport, BuildError> {
         packed_dirs.push(relative);
     }
 
+    // 4) Rust 插件（P0.5）——固定目录，不由清单声明。
+    let plugins = pack_plugins(project.root(), &output_dir)?;
+    asset_count += plugins.asset_count;
+    if let Some(dir) = plugins.dir {
+        packed_dirs.push(dir);
+    }
+    let warnings = plugins.warnings;
+
     Ok(BuildReport {
         output_dir,
         executable,
         asset_count,
         packed_dirs,
+        warnings,
     })
 }
 
@@ -312,6 +327,52 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<usize, BuildError> {
     Ok(count)
 }
 
+/// [`pack_plugins`] 的结果。拆成独立类型只为一件事：让"插件打包"这条逻辑能
+/// 脱离播放器可执行文件单独测 —— 完整的 `build()` 要求磁盘上真有 xgame-game，
+/// 测试环境里没有。
+struct PackedPlugins {
+    asset_count: usize,
+    /// 实际打包了 `Plugins/` 时是它的名字；没有插件时为 `None`（不进 packed_dirs）。
+    dir: Option<String>,
+    warnings: Vec<String>,
+}
+
+/// 把 `<项目>/Plugins/` 复制进产物目录。
+///
+/// 播放器启动时只认 `<项目>/Plugins/`，漏了它 = 打包出去的游戏里 Rust 组件全部
+/// **静默**失效（场景里挂着 Behaviors 却纹丝不动，没有任何报错）。所以除了打包，
+/// 还要在"项目是插件项目却一个 DLL 都没有"时大声警告：那几乎一定是忘了按 ▶ Play
+/// 编译，或者编译失败了 —— 一个打包出来的"缺胳膊少腿"的成品，比一次明确的失败
+/// 更糟糕（失败你会当场知道，缺件要等玩家反馈）。
+///
+/// 警告走 [`BuildReport::warnings`] 而不是 `log::warn!`：后者只到 stderr，
+/// 而这个警告恰恰是点图形界面按钮的人需要看见的。
+fn pack_plugins(project_root: &Path, output_dir: &Path) -> Result<PackedPlugins, BuildError> {
+    let plugins_dir = crate::plugin_build::PLUGINS_DIR;
+    let src = project_root.join(plugins_dir);
+    if src.is_dir() {
+        let dst = output_dir.join(plugins_dir);
+        return Ok(PackedPlugins {
+            asset_count: copy_dir(&src, &dst)?,
+            dir: Some(plugins_dir.to_owned()),
+            warnings: Vec::new(),
+        });
+    }
+    Ok(PackedPlugins {
+        asset_count: 0,
+        dir: None,
+        warnings: if crate::plugin_build::is_plugin_project(project_root) {
+            vec![
+                "项目有 Cargo.toml（Rust 插件项目）但 Plugins/ 里没有 DLL —— \
+                 打包出去的游戏不会有任何 Rust 组件。回编辑器按 ▶ Play 编译一次再构建。"
+                    .to_owned(),
+            ]
+        } else {
+            Vec::new()
+        },
+    })
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -362,6 +423,50 @@ mod tests {
             dirs.iter().filter(|d| d.as_str() == "Resources").count(),
             1,
             "重复的内容目录应被去重"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 三个分支各自成立：有插件就打包、纯数据项目安静跳过、插件项目缺产物要警告。
+    ///
+    /// 第三条是这条测试的重点 —— "打包出来的成品少了 Rust 组件"这件事本身不会
+    /// 报任何错（播放器照常启动、场景照常渲染、组件静默不生效），所以唯一的
+    /// 机会就是在这里喊一声。旧实现根本没有这一步，打包出来的游戏会少整个目录。
+    #[test]
+    fn pack_plugins_copies_dir_and_warns_when_missing() {
+        let base = std::env::temp_dir().join(format!("xgame_plugins_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("project");
+        let out = base.join("out");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+
+        // 1) 纯数据项目：没有 Cargo.toml、也没有 Plugins/ ⇒ 静默跳过。
+        let got = pack_plugins(&project, &out).unwrap();
+        assert_eq!(got.asset_count, 0);
+        assert!(got.dir.is_none(), "纯数据项目不该出现 Plugins/ 条目");
+        assert!(got.warnings.is_empty(), "没有 Cargo.toml 就不该有警告");
+
+        // 2) 插件项目但还没编译：必须给出警告（这是最容易漏的那一步）。
+        std::fs::write(project.join("Cargo.toml"), b"[package]\nname=\"x\"\n").unwrap();
+        let got = pack_plugins(&project, &out).unwrap();
+        assert_eq!(got.warnings.len(), 1, "有 Cargo.toml 却没 DLL 必须警告");
+        assert!(got.warnings[0].contains("Plugins/"), "{}", got.warnings[0]);
+
+        // 3) 编译过之后：DLL 被复制进产物目录，警告消失。
+        let plugins = project.join(crate::plugin_build::PLUGINS_DIR);
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("demo.dll"), b"bin").unwrap();
+        let got = pack_plugins(&project, &out).unwrap();
+        assert_eq!(got.asset_count, 1, "应当复制一个 DLL");
+        assert_eq!(got.dir.as_deref(), Some(crate::plugin_build::PLUGINS_DIR));
+        assert!(got.warnings.is_empty(), "有产物就不该再警告");
+        assert!(
+            out.join(crate::plugin_build::PLUGINS_DIR)
+                .join("demo.dll")
+                .is_file(),
+            "DLL 必须真的落到产物目录里"
         );
 
         let _ = std::fs::remove_dir_all(&base);

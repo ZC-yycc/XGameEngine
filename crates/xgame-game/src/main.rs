@@ -88,6 +88,16 @@ struct GameApp {
     project: ProjectHandle,
     /// 运行时世界：场景 + 物理 + 输入 + 脚本。
     world: World,
+    /// 已加载的 Rust 插件句柄（`Plugins/*.dll`，P0.5）。
+    ///
+    /// **必须声明在 `world` 之后**：struct 字段按声明顺序 drop，`world` 里的
+    /// 组件实例与注册表全是**指向这些 DLL 的函数指针**，它们得先销毁，否则
+    /// drop 胶水会跳进已 FreeLibrary 的代码区。
+    ///
+    /// 本字段**从不被读**是刻意的：它的全部意义就是"占住句柄直到进程结束"
+    /// （Drop 实现也不卸载 —— 详见 `xgame::plugin` 模块文档）。
+    #[allow(dead_code)]
+    plugins: Vec<xgame::plugin::LoadedPlugin>,
     pipeline: ScenePipeline,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -201,6 +211,20 @@ impl GameApp {
             }
         };
 
+        // -- Rust 插件（P0.5）--
+        // 与编辑器「▶ Play」同一来源：加载项目里的 `Plugins/*.dll`，组件注册进
+        // 一份新表交给 World。没有插件目录（纯数据项目）时这一步是空扫描 ——
+        // 不该因为"这个项目没写 Rust"就走另一条代码路径。
+        //
+        // 玩家**直接**从 `Plugins/` 加载（不像编辑器那样要临时副本）：玩家是
+        // 独立进程、只读一次、不参与编译，那个文件没有被覆盖的需求。
+        let mut behaviors = BehaviorRegistry::new();
+        let plugins =
+            xgame::plugin::load_plugins_dir(project.root().join("Plugins"), &mut behaviors);
+        if !plugins.is_empty() {
+            log::info!("已加载 {} 个 Rust 插件", plugins.len());
+        }
+
         // -- 运行时 --
         // 重力 / 固定步长来自 project.ron 的 `runtime` 节，与编辑器 Play 同一
         // 入口（`WorldConfig::from_project_runtime`）—— 两端行为永远一致。
@@ -209,11 +233,13 @@ impl GameApp {
             project.root(),
             WorldConfig::from_project_runtime(&project.manifest().runtime),
         )
-        .with_input_map(input_map);
+        .with_input_map(input_map)
+        .with_behavior_registry(behaviors);
 
         Self {
             project,
             world,
+            plugins,
             pipeline,
             device,
             queue,

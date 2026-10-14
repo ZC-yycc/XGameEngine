@@ -47,7 +47,7 @@
 use std::ffi::{c_char, c_void};
 use std::fmt;
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use libloading::Library;
 
@@ -184,6 +184,51 @@ pub unsafe fn run_entry(
 #[derive(Debug)]
 pub struct LoadedPlugin {
     _lib: Library,
+    /// 加载来源路径。`register_into` 报错时要告诉用户"是哪个 DLL 出了问题"。
+    path: PathBuf,
+}
+
+impl LoadedPlugin {
+    /// 这个句柄是从哪个文件加载的（编辑器控制台 / 报错定位用）。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 在**已加载**的动态库上重新调一次入口，把组件注册进一份**新的**注册表。
+    ///
+    /// P0.5 编辑器 PIE 的关键原语：DLL 句柄跨多次 Play 复用（Windows 上
+    /// 文件被锁、反复 dlopen 代价高），但每次 Play 的组件实例必须是新的 ——
+    /// 注册表要从零重建，否则上次 Play 的实例状态会泄漏进来。因此每次 Play
+    /// 不重新 `dlopen`，而是在现有句柄上重新 dlsym 入口、重新握手、重新注册。
+    ///
+    /// 握手在这里重跑一遍是刻意的：同一份 DLL 理论上不会中途变卦，但重跑
+    /// 握手的代价只有一次函数调用，换来"注册表里的函数指针一定指向一个版本
+    /// 握手通过的库"这条不变式永远成立。
+    ///
+    /// 与 [`load_plugin`] 的区别：那个从零打开文件，这个复用已打开的句柄。
+    pub fn register_into(&self, registry: &mut BehaviorRegistry) -> Result<(), String> {
+        let ret = {
+            let entry: libloading::Symbol<'_, PluginEntryFn> =
+                // SAFETY: 库句柄由 self 持有且存活，符号名是导出契约的一部分。
+                unsafe { self._lib.get(b"xgame_plugin_entry") }.map_err(|_| {
+                    format!(
+                        "插件 {} 缺少入口符号 xgame_plugin_entry（没有用 xgame::export_plugin! 导出？）",
+                        self.path.display()
+                    )
+                })?;
+            let host = PluginHost {
+                api: EngineApi {
+                    version: ENGINE_VERSION_CODE,
+                    log_fn: engine_log_sink,
+                },
+                registry: registry as *mut BehaviorRegistry as *mut c_void,
+            };
+            // SAFETY: `entry` 来自 libloading 对 `xgame_plugin_entry` 的按名查找；
+            // `host` 是刚构造的栈上块，调用期间存活 —— 即 run_entry 的契约。
+            unsafe { (*entry)(&host) }
+        };
+        handshake(ret)
+    }
 }
 
 impl Deref for LoadedPlugin {
@@ -204,33 +249,57 @@ pub fn load_plugin(
     // SAFETY: 库句柄随返回值交给调用方持有（LoadedPlugin 记载了存活期约定）。
     let lib = unsafe { Library::new(path) }
         .map_err(|e| format!("无法打开插件 {}: {e}", path.display()))?;
-    let ret = {
-        let entry: libloading::Symbol<'_, PluginEntryFn> = unsafe { lib.get(b"xgame_plugin_entry") }
-            .map_err(|_| {
-                format!(
-                    "插件 {} 缺少入口符号 xgame_plugin_entry（没有用 xgame::export_plugin! 导出？）",
-                    path.display()
-                )
-            })?;
-        let host = PluginHost {
-            api: EngineApi {
-                version: ENGINE_VERSION_CODE,
-                log_fn: engine_log_sink,
-            },
-            registry: registry as *mut BehaviorRegistry as *mut c_void,
-        };
-        // SAFETY: `entry` 来自 libloading 对 `xgame_plugin_entry` 的按名查找；
-        // `host` 是刚构造的栈上块，调用期间存活 —— 即 run_entry 的契约。
-        unsafe { (*entry)(&host) }
+    let plugin = LoadedPlugin {
+        _lib: lib,
+        path: path.to_owned(),
     };
-    handshake(ret)?;
+    plugin.register_into(registry)?;
     log::info!(
         "已加载插件 {}（xgame v{}，版本码 0x{:08X}）",
-        path.display(),
+        plugin.path.display(),
         crate::ENGINE_VERSION,
         ENGINE_VERSION_CODE
     );
-    Ok(LoadedPlugin { _lib: lib })
+    Ok(plugin)
+}
+
+/// 扫描目录，加载其中每一个插件动态库（独立游戏 / 打包产物启动时用）。
+///
+/// 按文件名排序扫描，保证注册顺序稳定（同名组件后注册者覆盖，顺序影响
+/// 覆盖结果，必须可复现）。加载失败的插件**记日志跳过**而不是让整个游戏
+/// 起不来 —— 与脚本层"一个文件编译失败不拖垮整个场景"同一条容错原则。
+///
+/// 返回的句柄调用方必须持有到所有注册表销毁为止（同 [`load_plugin`]）。
+/// 没有插件目录（或读不开）时返回空表，不是错误：纯数据项目本就没有插件。
+pub fn load_plugins_dir(
+    dir: impl AsRef<Path>,
+    registry: &mut BehaviorRegistry,
+) -> Vec<LoadedPlugin> {
+    let dir = dir.as_ref();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dlls: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| {
+                        e.eq_ignore_ascii_case(std::env::consts::DLL_SUFFIX.trim_start_matches('.'))
+                    })
+        })
+        .collect();
+    dlls.sort();
+    let mut plugins = Vec::new();
+    for dll in dlls {
+        match load_plugin(&dll, registry) {
+            Ok(p) => plugins.push(p),
+            Err(e) => log::error!("插件加载失败，已跳过：{e}"),
+        }
+    }
+    plugins
 }
 
 /// 把入口返回码翻译成宿主侧的加载结果（版本不匹配 ⇒ 可读报错）。

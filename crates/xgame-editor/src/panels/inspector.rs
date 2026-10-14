@@ -716,6 +716,81 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
         ui.separator();
 
+        // ── Behaviors（Rust 组件，双轨架构 P0.5）──
+        //
+        // 与上面的 Scripts 同构：存的是**组件名**而不是代码，顺序即执行顺序。
+        // 区别在于这些名字来自插件 DLL 的注册表 —— 没构建过插件时是空的，
+        // 场景里已挂的名字就会显示成红色 ⚠（名字写错 / 插件没编译，都该看见）。
+        ui.heading("Behaviors");
+        ui.indent("behaviors", |ui| {
+            let names: Vec<String> = state.behavior_names().to_vec();
+            let mut remove: Option<usize> = None;
+            for (slot, name) in entity.behaviors.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label("🧩");
+                    let registered = names.iter().any(|n| n == name);
+                    let text = egui::RichText::new(name.clone()).monospace().size(11.0);
+                    if registered {
+                        ui.label(text).on_hover_text("已注册的 Rust 组件；顺序即执行顺序");
+                    } else {
+                        // 未注册不是错误（用户可能先在场景里写好、再按 Play 编译），
+                        // 但它**必须可见** —— 否则就是"挂了个组件却纹丝不动"。
+                        ui.label(egui::RichText::new("⚠").color(egui::Color32::YELLOW))
+                            .on_hover_text("未注册：插件还没编译，或名字写错了");
+                        ui.label(text.color(egui::Color32::LIGHT_RED))
+                            .on_hover_text("插件没编译过 / 组件名不在注册表里");
+                    }
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("把这个组件从实体上摘掉")
+                        .clicked()
+                    {
+                        remove = Some(slot);
+                    }
+                });
+            }
+            if let Some(slot) = remove {
+                entity.behaviors.remove(slot);
+                touched = true;
+            }
+
+            ui.horizontal(|ui| {
+                ui.menu_button("+ Add Behavior", |ui| {
+                    if names.is_empty() {
+                        ui.weak("还没有已注册的 Rust 组件");
+                        ui.label(
+                            egui::RichText::new(
+                                "项目根放 Cargo.toml 后按 ▶ Play 会自动编译插件",
+                            )
+                            .weak()
+                            .size(11.0),
+                        );
+                    } else {
+                        for name in names.iter() {
+                            if entity.behaviors.contains(name) {
+                                continue;
+                            }
+                            if ui.button(name.clone()).clicked() {
+                                entity.behaviors.push(name.clone());
+                                touched = true;
+                                ui.close_menu();
+                            }
+                        }
+                    }
+                });
+            });
+
+            if entity.behaviors.is_empty() {
+                ui.label(
+                    egui::RichText::new("还没有挂组件 —— Rust 轨道的性能优势就体现在这里")
+                        .weak()
+                        .size(11.0),
+                );
+            }
+        });
+
+        ui.separator();
+
         // ── 物理 ──
         //
         // 取消勾选 = 这个实体不参与物理（纯视觉）。旧场景文件没有 `physics` 字段，

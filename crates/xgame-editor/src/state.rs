@@ -410,6 +410,23 @@ pub struct EditorState {
     /// 实体"。快照在进入 Play 时拍一次，代价可以接受。
     pub play_snapshot: Option<Scene>,
 
+    // -- Rust 插件（P0.5 / UE 模式）--
+    /// 插件会话：已加载 DLL 句柄 + 当前代组件名。
+    ///
+    /// **声明位置是硬约束**：struct 字段按声明顺序 drop，`game_runtime`
+    /// （其 `World` 的组件实例与注册表里全是**指向插件 DLL 的函数指针**）必须
+    /// 先于本字段销毁，否则 drop 胶水会跳进已 FreeLibrary 的代码区。详见
+    /// [`crate::plugin_session`] 模块文档。
+    pub plugins: crate::plugin_session::PluginSession,
+    /// 正在飞行的后台 `cargo build`；`None` = 空闲。
+    pub plugin_build: Option<crate::plugin_build::BuildTask>,
+    /// 用户按了 ▶ Play 但插件还没编译完：构建成功后自动进 Play。
+    ///
+    /// 按下 Play 的那次调用会先退回到 Edit（此时没有可跑的运行时），编译
+    /// 完成再由 [`poll_plugin_build`](Self::poll_plugin_build) 真正进入 ——
+    /// 用户视角是"按了 Play，转了两秒，自己跑起来了"，UE 同款。
+    pub pending_play: bool,
+
     // -- Save / exit --
     /// 上次**落盘（或打开）时**的场景快照 —— 与它逐字段比较即知有没有未保存改动。
     ///
@@ -548,6 +565,10 @@ impl EditorState {
             last_render_view_proj: None,
             game_runtime: None,
             play_snapshot: None,
+
+            plugins: crate::plugin_session::PluginSession::new(),
+            plugin_build: None,
+            pending_play: false,
 
             saved_snapshot: Scene::new(""),
             dirty_memo: None,
@@ -1264,19 +1285,168 @@ impl EditorState {
     // Game runtime (play mode)
     // -----------------------------------------------------------------------
 
-    /// 进入播放模式：拍下场景快照，启动游戏运行时。
+    /// 进入播放模式：必要时先编译 Rust 插件，再拍快照、启动游戏运行时。
+    ///
+    /// # 插件项目会走两条路
+    ///
+    /// 项目根有 `Cargo.toml` 且产物过期时，这里**不进 Play**，而是起一个后台
+    /// `cargo build`、置 [`pending_play`](Self::pending_play)、把 `play_mode`
+    /// 退回 Edit —— UI 上看不出停顿（工具栏显示编译中），编译完成后由
+    /// [`poll_plugin_build`](Self::poll_plugin_build) 自动进 Play。
+    /// 旧实现那种"按 Play 就卡在主线程等 cargo"的做法会让编辑器假死几十秒，
+    /// 与 UE 的后台编译体验相去甚远。
+    ///
+    /// 没有插件项目、或产物已新鲜时走老路，`needs_build` 只做几次 `stat`。
     pub fn enter_play_mode(&mut self) {
+        // cargo 起不来（没装 / 环境变量坏掉）时 `start_plugin_build` 返回 false：
+        // 那就不阻塞 Play —— 项目里可能还有上次编译的旧产物，能玩就先玩，报错
+        // 已经在控制台里了。一条本可以阻止游戏启动的工具链问题，不该反过来让
+        // 游戏启动不了。
+        let deferred = crate::plugin_build::is_plugin_project(self.project.root())
+            && crate::plugin_build::needs_build(self.project.root())
+            && self.start_plugin_build();
+        if deferred {
+            return;
+        }
+
+        // 加载插件（幂等：内容没变不重载）。非插件项目这一步是空扫描。
+        let (names, reloaded) = self.plugins.ensure_loaded(self.project.root());
+        if reloaded {
+            if names.is_empty() {
+                self.log_warning("Plugins/ 里没有任何可用的插件 DLL（编译失败？）");
+            } else {
+                self.log_info(format!("Rust 插件已加载，注册组件：{}", names.join(", ")));
+            }
+        }
+
         // 快照 + 启动都要在改 `play_mode` 之前完成：运行时的 `start` 可能失败
         // （脚本编译错误），那时状态应该还是"干净的编辑态"。
         self.play_snapshot = Some(self.scene.clone());
+        let registry = self.plugins.build_registry();
         let runtime = crate::game_runtime::GameRuntime::start(
             self.scene.clone(),
             self.project.root(),
             &self.project.manifest().runtime,
+            registry,
         );
         self.game_runtime = Some(runtime);
         self.refresh_scripts();
-        self.log_info("▶ Play — 已启动运行时（物理 / 输入 / 脚本）");
+        self.pending_play = false;
+        let plugins_note = if self.plugins.is_empty() {
+            String::new()
+        } else {
+            format!("，Rust 插件 {} 个", self.plugins.names().len())
+        };
+        self.log_info(format!(
+            "▶ Play — 已启动运行时（物理 / 输入 / 脚本{plugins_note}）"
+        ));
+    }
+
+    /// 起一次后台插件编译。返回 `true` = 本次 Play 被推迟（编译完成后再进）。
+    fn start_plugin_build(&mut self) -> bool {
+        if self.plugin_build.is_some() {
+            // 已有构建在飞：排队等它，完成时一起进 Play。
+            self.defer_play_for_build("插件正在后台编译，完成后自动进入 Play…");
+            return true;
+        }
+        match crate::plugin_build::spawn_build(self.project.root()) {
+            Ok(task) => {
+                self.plugin_build = Some(task);
+                self.defer_play_for_build("插件源码有改动，正在后台编译，完成后自动进入 Play…");
+                true
+            }
+            Err(e) => {
+                self.log_error(format!("无法启动插件编译：{e}"));
+                false // 起不来就别挡住 Play（降级成用现有产物）
+            }
+        }
+    }
+
+    /// 本次 Play 被推迟：退回 Edit 并记下"编译完成后要进 Play"。
+    fn defer_play_for_build(&mut self, msg: &str) {
+        self.pending_play = true;
+        self.play_mode = PlayMode::Edit;
+        self.log_info(msg);
+    }
+
+    /// 轮询后台插件编译；完成后同步产物，若用户按过 Play 则自动进入播放模式。
+    ///
+    /// 放在每帧入口调用（`editor_ui` 的第 0 步之后）：编译可能在任意一帧完成，
+    /// 而"进入 Play"的状态跃迁检测在同一帧的工具栏之后 —— 先把状态摆好，
+    /// 同帧就能完成"编译完成 → 进 Play"，用户感觉不到中间那一帧。
+    pub fn poll_plugin_build(&mut self) {
+        let outcome = self.plugin_build.as_ref().and_then(|t| t.poll());
+        let Some(outcome) = outcome else {
+            return;
+        };
+        self.plugin_build = None;
+
+        match outcome {
+            crate::plugin_build::BuildOutcome::Success(dlls) => {
+                let synced = crate::plugin_build::sync_plugins_dir(self.project.root(), &dlls);
+                if synced.is_empty() {
+                    self.log_error(
+                        "插件编译成功，但产物一个都没能拷进 Plugins/（见上方错误）",
+                    );
+                    self.pending_play = false;
+                    return;
+                }
+                let (names, _) = self.plugins.ensure_loaded(self.project.root());
+                if names.is_empty() {
+                    self.log_error(
+                        "插件产物已就位，但没有任何组件注册成功 —— 版本握手失败？（见 stderr）",
+                    );
+                    self.pending_play = false;
+                    return;
+                }
+                self.log_info(format!("✅ 插件编译完成，注册组件：{}", names.join(", ")));
+                if std::mem::take(&mut self.pending_play) {
+                    self.play_mode = PlayMode::Playing;
+                    self.enter_play_mode();
+                }
+            }
+            crate::plugin_build::BuildOutcome::Failed(msg) => {
+                // 编译失败留在编辑态（可改代码再按 Play），错误原样进控制台。
+                self.log_error(format!("插件编译失败：\n{msg}"));
+                self.pending_play = false;
+            }
+        }
+    }
+
+    /// 后台是否正在编译插件（工具栏指示器读）。
+    pub fn plugin_building(&self) -> bool {
+        self.plugin_build.is_some()
+    }
+
+    /// 后台编译已进行的秒数；没有编译在跑时 `None`（工具栏"已编译 Xs"用）。
+    pub fn plugin_build_elapsed(&self) -> Option<u64> {
+        self.plugin_build
+            .as_ref()
+            .map(|t| t.started.elapsed().as_secs())
+    }
+
+    /// 项目根是否是 Rust 插件项目（工具栏「Build」按钮据此显隐）。
+    pub fn is_plugin_project(&self) -> bool {
+        crate::plugin_build::is_plugin_project(self.project.root())
+    }
+
+    /// 手动编译一次插件（**不**进 Play）——只想让产物跟上、不想跑起来时用。
+    pub fn build_plugins(&mut self) {
+        if !self.is_plugin_project() || self.plugin_build.is_some() {
+            return;
+        }
+        match crate::plugin_build::spawn_build(self.project.root()) {
+            Ok(task) => {
+                self.plugin_build = Some(task);
+                self.log_info("🔨 正在编译 Rust 插件…");
+            }
+            Err(e) => self.log_error(format!("无法启动插件编译：{e}")),
+        }
+    }
+
+    /// 当前已注册的 Rust 组件名（Inspector 的 Behaviors 下拉菜单读）。
+    pub fn behavior_names(&self) -> &[String] {
+        self.plugins.names()
     }
 
     /// 退出播放模式：丢弃运行时，把场景恢复成进入 Play 之前的样子。
@@ -1549,6 +1719,9 @@ impl EditorState {
 
         match crate::builder::build(&self.project) {
             Ok(report) => {
+                for w in &report.warnings {
+                    self.log_warning(w.clone());
+                }
                 self.log_success(report.summary());
                 self.log_info(format!("双击即可运行: {}", report.executable.display()));
                 self.last_build_dir = Some(report.output_dir);

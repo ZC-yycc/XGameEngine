@@ -511,6 +511,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
+name = "behaviors-demo"
+version = "0.1.0"
+dependencies = [
+ "xgame",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4941,10 +4948,12 @@ dependencies = [
  "rfd",
  "ron",
  "serde",
+ "serde_json",
  "strum",
  "uuid",
  "wgpu",
  "winit",
+ "xgame",
  "xgame-core",
  "xgame-derive",
  "xgame-input",

@@ -754,3 +754,99 @@ WM_MOUSEMOVE(同一坐标) → PointerMoved → egui 认为"要再画一帧"
   自用（示例插件 + 集成测试），隔离留到插件生态开放时（P0.5 PIE 之后）。
 - 编辑器只编辑数据：Behaviors 字段 Inspector 暂不显示（C5 范围声明）；
   编辑器内 Play 跑 Rust 插件（PIE）是 P0.5。
+
+---
+
+## 十六、双轨语言架构 P0.5：编辑器 PIE（后台编译 + 插件会话）
+
+接 §十五。目标是把 UE 模式那条"改代码 → 按 Play → 自己就跑起来了"的链路打通，
+验收七条全部完成。四个产物：
+
+### 一、四个产物
+
+1. **`plugin_build.rs`（编辑器）**——探测 / 新鲜度 / 后台构建 / 产物同步。
+   探测只看"项目根有没有 `Cargo.toml`"（一次 `stat`）；新鲜度是纯时间戳比较的
+   纯函数 `is_fresh`（三个输入：`Plugins/` 里每个 DLL 的 mtime、项目源 mtime、
+   编辑器 exe mtime），新鲜就**连 cargo 进程都不起**；过期才 `spawn_build` 起
+   后台线程跑 `cargo build --message-format=json-render-diagnostics`，产物路径
+   从 stdout 的 JSON 行解析（比扫 `target/` 可靠），诊断走 stderr 直接进 Console。
+2. **`plugin_session.rs`（编辑器）**——DLL 句柄保活 + 每次 Play 重建注册表。
+   句柄只增不减：旧代挪进 `_retired`，`Drop` 里 `mem::forget`，**永不 FreeLibrary**
+   （UE Hot Reload 同款策略，理由见 D7）。每次 Play 调 `build_registry()` 在已
+   加载的 DLL 上重跑一遍入口（`LoadedPlugin::register_into`，微秒级）拿到全新
+   `BehaviorRegistry`，保证"停止再播放"回到干净状态。
+3. **编辑器状态机**——`enter_play_mode` 改成"先看要不要编译"：过期就转后台
+   构建 + `pending_play = true` + 退回 Edit，编译完成后由每帧入口的
+   `poll_plugin_build` 同步产物并自动进 Play。UI 全程不阻塞，工具栏显示
+   转圈 + 已用秒数，并提供手动「🔨 Build」按钮。编译失败留在编辑态、错误进
+   Console，**不阻塞 Play**（项目里可能还有上次的产物）。
+4. **玩家与打包器**——`xgame-game` 启动时 `load_plugins_dir("Plugins")`；打包器
+   把 `Plugins/` 复制进 `Build/<项目名>/Plugins/`，并在"有 Cargo.toml 却没 DLL"
+   时把警告塞进 `BuildReport.warnings`（走报告而不是 `log::warn!`，因为那条只到
+   stderr，而这个警告恰恰是点图形界面按钮的人需要看见的）。
+
+另外补了一块 UI：Inspector 在 Scripts 之后加 **Behaviors** 区（组件名列表 + ✕ +
+`+ Add Behavior` 菜单，未注册的名字标红 ⚠）—— 与 Scripts 完全同构。
+
+### 二、两个真 bug：都由测试先证红抓出
+
+1. **`needs_build` 写反**（返回了 `is_fresh` 而不是 `!is_fresh`）。语义完全颠倒，
+   而两种写法的返回类型都是 `bool`，编译器一声不吭。`freshness_against_real_files`
+   首跑红，改对后绿。这条同时说明了那个函数存在的理由：调用方只该问"要不要编"，
+   不该各自再翻转一次。
+2. **cargo 参数拼错**：`json-render-diagnostic`（单数）—— cargo 的可选值是
+   `json-render-diagnostics`（复数）。这个错**单测抓不到**（`run_cargo_build`
+   不在单测覆盖里），只有真按 Play 才会炸。手工端到端验证时抓出并修正，
+   同时把 `parse_cdylib_artifacts` 的固定 JSON 换成实测形状（`crate-type =
+   ["cdylib","rlib"]` 的目标一次给五个文件名，`.dll.lib` / `.pdb` / `.rlib`
+   都要靠 `Path::extension` 正确排除，不能用 `contains("dll")`）。
+
+### 三、一个差点上线的死循环
+
+新鲜度里"编辑器 exe 比 DLL 新 ⇒ 要重建"这条，与"cargo 源码没变就不重写产物"
+会打架：引擎改了 → 编辑器重编 → 按 Play → 检查说 DLL 旧 → 起 cargo → cargo 说
+没改动、什么都不做 → DLL 还是旧的 → 再按 Play 又来一遍，**每次 Play 都白跑一轮
+cargo**。
+
+解药是 `sync_plugins_dir` 同步完盖一个"现在"时间戳（`touch`）。回归测试
+`sync_makes_plugins_fresh_even_when_cargo_did_nothing` 把待同步产物的时间戳
+**倒退回一小时前**来模拟"cargo 说没改动"的情形 —— 注释掉 `touch` 该测试立刻变红
+（已实测验证红）。
+
+### 四、演示项目 `projects/BehaviorsDemo`
+
+**它本身就是一个 cdylib crate**（workspace 成员），是"用户项目形态"的插件 ——
+与 `examples/spinner-plugin`（引擎自带示例）互补。场景里同时挂：
+
+- `RustSpinner`（Rust 组件，75°/s）+ `RustBobber`（Rust 组件，上下浮动，
+  组件自己持有跨帧状态）；
+- `RhaiSpinner`（Rhai 脚本，同款 75°/s）—— **两条轨道共用一个运行时**的证明。
+
+三条单元测试在 crate 内直接跑组件逻辑；另有两条集成测试在 `xgame` 里经
+**真实 dlopen** 加载 `behaviors_demo.dll`，验证"跨边界注册的表"与"单测里那张表"
+完全一致（否则会出现"单测绿、场景里挂组件却纹丝不动"）。
+
+### 五、验证
+
+- workspace **296 项测试全绿**；clippy 0 警告。
+- 端到端手工验证：在 `projects/BehaviorsDemo` 里跑真实
+  `cargo build --message-format=json-render-diagnostics`，确认产物 JSON 形状、
+  只挑出 `behaviors_demo.dll`。
+- 无头检查：`xgame-editor --check projects/BehaviorsDemo` →
+  `entities=4 lights=1 script_refs=1`，`OK`。
+
+### 六、遗留
+
+- **Play 中途热换插件**未做（现在是"停止 → 编译 → 再播放"），Inspector 的
+  组件徽章、release profile 的插件出货（P3）同属遗留。
+- cargo 构建**没有超时**：首次拉依赖可能几分钟，用户只能干等（工具栏有秒数）。
+  加超时需要决定"杀不杀 cargo 子进程"，留到有真实诉求时。
+- 新鲜度把"编译期间恰好又存了文件"这个窄窗口交给下一次存盘（cargo 的指纹
+  本来也有同款窗口），已在 `sync_plugins_dir` 的文档里写明。
+
+### 七、一条工程教训
+
+本轮用 PowerShell 的 `Get-Content`/`Set-Content` 做了一次文本替换，**把
+`plugin_build.rs` 的中文注释全毁了**（PS 5.1 默认按 GBK 读、按 UTF-8 写，
+且部分字符是有损的）。教训：改本仓库的中文源文件一律走编辑器工具，
+shell 只做只读操作。

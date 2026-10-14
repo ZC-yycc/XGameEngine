@@ -1,0 +1,22 @@
+(
+    format_version: 1,
+    name: "BehaviorsDemo",
+    entry_scene: "Scenes/main.ron",
+    window: (
+        title: "BehaviorsDemo",
+        width: 1280,
+        height: 720,
+        resizable: true,
+        vsync: true,
+    ),
+    content: (
+        scenes_dir: "Scenes",
+        models_dir: "Resources",
+        textures_dir: "Resources",
+        audio_dir: "Resources",
+        shaders_dir: "Shaders",
+        prefabs_dir: "Prefabs",
+        scripts_dir: "Scripts",
+        search_paths: [],
+    ),
+)

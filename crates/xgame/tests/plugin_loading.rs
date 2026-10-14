@@ -13,10 +13,18 @@
 //!
 //! # dll 在哪
 //!
-//! `spinner-plugin` 是 workspace 成员，`cargo test --workspace` 会顺带产出
-//! cdylib；单独跑 `cargo test -p xgame` 时未必。所以先探 `target/*`，
-//! 找不到就触发一次嵌套 `cargo build -p spinner-plugin`（带超时，防止与
-//! 外层 cargo 抢目标目录锁时无限挂起）。
+//! 两个插件都是 workspace 成员，`cargo test --workspace` 会顺带产出 cdylib；
+//! 单独跑 `cargo test -p xgame` 时未必。所以先探 `target/*`，找不到就触发一次
+//! 嵌套 `cargo build -p <package>`（带超时，防止与外层 cargo 抢目标目录锁时
+//! 无限挂起）。
+//!
+//! # 为什么同时测两个插件
+//!
+//! `spinner-plugin`（`examples/`）是引擎仓库自带的最小示例，四钩子 + 计数器；
+//! `behaviors-demo`（`projects/`）是**用户项目形态**的插件 —— 它就在游戏项目
+//! 里面，正是编辑器 P0.5 会探测并自动编译的那一种。两条路径的 dlopen 逻辑
+//! 相同，但"用户项目"这一侧还需要确认：workspace 成员产出的产物名、
+//! `crate-type = ["cdylib", "rlib"]` 时的文件名，都与示例不同。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -27,15 +35,30 @@ use xgame::prelude::*;
 
 /// 探测示例插件的 cdylib 路径；找不到就现场构建一次。
 fn example_plugin_dll() -> PathBuf {
-    let lib_name = format!(
-        "{}spinner_plugin{}",
+    workspace_plugin_dll("spinner_plugin", "spinner-plugin")
+}
+
+/// 探测演示项目 `projects/BehaviorsDemo` 的 cdylib 路径；找不到就现场构建一次。
+fn behaviors_demo_dll() -> PathBuf {
+    workspace_plugin_dll("behaviors_demo", "behaviors-demo")
+}
+
+/// 按 cdylib 名字（下划线形式）与 cargo 包名（连字符形式）定位 workspace 成员的
+/// 动态库，找不到就嵌套构建一次。
+///
+/// 两个名字分开传是因为"包名 → 产物文件名"的换算规则是 cargo 的地盘
+/// （`-` → `_`，再按平台加 `lib` 前缀 / `.dll` 后缀）—— 在测试里照抄一遍
+/// 规则比猜可靠，而一旦猜错，报错会是"找不到文件"这种毫无信息量的话。
+fn workspace_plugin_dll(lib_name: &str, package: &str) -> PathBuf {
+    let file = format!(
+        "{}{lib_name}{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     );
     let mut candidates: Vec<PathBuf> = Vec::new();
     // 1) 当前测试二进制的 target 子目录（CARGO_TARGET_TMPDIR = target/<profile>/tmp）。
     if let Ok(tmp) = std::env::var("CARGO_TARGET_TMPDIR") {
-        candidates.push(PathBuf::from(tmp).parent().unwrap().join(&lib_name));
+        candidates.push(PathBuf::from(tmp).parent().unwrap().join(&file));
     }
     // 2) 仓库根的 target/{当前 profile, 另一 profile}（`env!` 保证路径与本测试同源）。
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -45,31 +68,31 @@ fn example_plugin_dll() -> PathBuf {
     } else {
         ("release", "debug")
     };
-    candidates.push(repo_root.join("target").join(first).join(&lib_name));
-    candidates.push(repo_root.join("target").join(second).join(&lib_name));
+    candidates.push(repo_root.join("target").join(first).join(&file));
+    candidates.push(repo_root.join("target").join(second).join(&file));
 
     if let Some(found) = candidates.iter().find(|p| p.exists()) {
         return found.clone();
     }
 
-    build_example_plugin(&repo_root);
+    build_plugin_package(&repo_root, package);
     candidates
         .into_iter()
         .find(|p| p.exists())
         .unwrap_or_else(|| {
             panic!(
-                "构建后仍未找到示例插件动态库；请手动运行 `cargo build -p spinner-plugin` \
+                "构建后仍未找到插件动态库 {file}；请手动运行 `cargo build -p {package}` \
                  并检查 target 目录布局"
             )
         })
 }
 
-/// 嵌套跑一次 `cargo build -p spinner-plugin`（在工作线程里等结果，
+/// 嵌套跑一次 `cargo build -p <package>`（在工作线程里等结果，
 /// 超时即判"与外层 cargo 死锁"而不是无限挂起测试）。
-fn build_example_plugin(repo_root: &std::path::Path) {
+fn build_plugin_package(repo_root: &std::path::Path, package: &str) {
     let cargo = cargo_exe();
     let mut cmd = std::process::Command::new(&cargo);
-    cmd.args(["build", "-p", "spinner-plugin"])
+    cmd.args(["build", "-p", package])
         .current_dir(repo_root)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -78,14 +101,14 @@ fn build_example_plugin(repo_root: &std::path::Path) {
     }
     let mut child = cmd
         .spawn()
-        .unwrap_or_else(|e| panic!("无法启动 {cargo:?} 构建示例插件：{e}"));
+        .unwrap_or_else(|e| panic!("无法启动 {cargo:?} 构建插件包 {package}：{e}"));
 
     let deadline = Instant::now() + Duration::from_secs(240);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
-                    panic!("`cargo build -p spinner-plugin` 失败（{status}），示例插件无法构建");
+                    panic!("`cargo build -p {package}` 失败（{status}），插件无法构建");
                 }
                 return;
             }
@@ -93,13 +116,13 @@ fn build_example_plugin(repo_root: &std::path::Path) {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     panic!(
-                        "嵌套 `cargo build -p spinner-plugin` 超时 —— 多半是与外层 cargo \
+                        "嵌套 `cargo build -p {package}` 超时 —— 多半是与外层 cargo \
                          抢目标目录锁；请手动构建后再跑本测试"
                     );
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
-            Err(e) => panic!("等待示例插件构建失败：{e}"),
+            Err(e) => panic!("等待插件构建失败：{e}"),
         }
     }
 }
@@ -192,4 +215,84 @@ fn unreadable_plugin_fails_with_readable_error() {
     assert!(err.contains("无法打开插件"), "{err}");
     assert!(err.contains("definitely_missing_xgame_plugin.dll"), "{err}");
     // 握手失败的报错文案（版本不匹配 / 空指针）由 xgame::plugin 的单元测试覆盖。
+}
+
+// ---------------------------------------------------------------------------
+// 演示项目（projects/BehaviorsDemo）—— P0.5 的"用户项目"这一侧
+// ---------------------------------------------------------------------------
+
+/// 演示插件跨边界加载后，组件名与它自己单元测试里断言的**完全一致**。
+///
+/// 这条测试守着一件很容易漂移的事：`behaviors-demo` 的单测是在**同进程**里
+/// 直接调 `register_all` 验证的，而编辑器走的是 dlopen + 握手。两边必须是
+/// 同一张表 —— 否则会出现"单测绿、场景里挂组件却纹丝不动"。
+#[test]
+fn behaviors_demo_plugin_registers_across_the_boundary() {
+    let dll = behaviors_demo_dll();
+    let mut registry = BehaviorRegistry::new();
+    let plugin = load_plugin(&dll, &mut registry).unwrap_or_else(|e| panic!("{e}"));
+
+    assert!(registry.contains("Spinner"), "Spinner 应当已注册");
+    assert!(registry.contains("Bobber"), "Bobber 应当已注册");
+    assert_eq!(
+        registry.names().len(),
+        2,
+        "注册表里应当正好是这两个组件，实际 {:?}",
+        registry.names()
+    );
+
+    // 保活到测试结束：句柄 drop 不卸载，但断言期间必须活着。
+    let _keep = plugin.path();
+}
+
+/// 演示插件的组件真的能驱动实体（**经真实 dlopen** 的整条链路）。
+///
+/// 与 `behaviors-demo` 自己的单测互补：那条测的是组件逻辑，这条测的是
+/// "组件逻辑经跨边界函数指针 + `World` 分发后仍然成立"。
+#[test]
+fn behaviors_demo_plugin_drives_entities() {
+    let dll = behaviors_demo_dll();
+    let mut registry = BehaviorRegistry::new();
+    let _plugin = load_plugin(&dll, &mut registry).unwrap_or_else(|e| panic!("{e}"));
+
+    let mut scene = Scene::new("e2e");
+    let mut spinner = Entity::new("spinner");
+    spinner.behaviors.push("Spinner".to_owned());
+    scene.add_entity(spinner);
+    let mut bobber = Entity::new("bobber");
+    bobber.behaviors.push("Bobber".to_owned());
+    bobber.transform.position = Vec3::new(0.0, 3.0, 0.0);
+    scene.add_entity(bobber);
+
+    let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+        .with_behavior_registry(registry);
+
+    // 一边跑一边记录 Bobber 的最低点：跑满整周期（BOB_HZ=0.5 ⇒ 周期 2s）会正好
+    // 回到起点，只看终点会得到"没动"的假象 —— 第一版就是这么写的。
+    let mut bob_min = f32::MAX;
+    for _ in 0..120 {
+        world.update(1.0 / 60.0);
+        let y = world
+            .scene()
+            .find_by_name("bobber")
+            .expect("实体应当还在")
+            .transform
+            .position
+            .y;
+        bob_min = bob_min.min(y);
+    }
+
+    let scene = world.scene();
+    let s = scene.find_by_name("spinner").expect("实体应当还在");
+    let (yaw, _, _) = s.transform.rotation.to_euler(glam::EulerRot::YXZ);
+    assert!(
+        (yaw.to_degrees() - 150.0).abs() < 1.0,
+        "Spinner 应当在 2 秒里转过约 150°，实际 {:.2}°",
+        yaw.to_degrees()
+    );
+    // 起点 3.0、幅度 0.6 ⇒ 最低点应当接近 2.4。
+    assert!(
+        (bob_min - 2.4).abs() < 0.05,
+        "Bobber 应当浮到 2.4 附近，最低只到 {bob_min:.3}"
+    );
 }

@@ -30,6 +30,13 @@ ron = "0.8"
 glam = "0.29"
 # 原生文件对话框（项目枢纽里「打开项目 / 选择位置」用）。
 rfd = "0.17"
+# 解析 `cargo build --message-format=json` 的 compiler-artifact 行（P0.5）：
+# 与其自己扫 target/ 目录猜产物路径，不如让 cargo 自己报出文件名。
+serde_json = "1"
+
+# 门面 crate（P0.5）：编辑器要经它加载插件动态库 —— `load_plugin` /
+# `LoadedPlugin::register_into` 是唯一过境点，不绕开版本握手直接用 libloading。
+xgame = { path = "../xgame" }
 
 xgame-core = { path = "../xgame-core" }
 xgame-derive = { path = "../xgame-derive" }

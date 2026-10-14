@@ -22,4 +22,9 @@ build-release.log
 
 # 编辑器里按「Build」打出来的游戏（见 crates/xgame-editor/src/builder.rs）
 projects/*/Build/
+
+# Rust 插件的编译产物（P0.5）：编辑器把 target/ 里的 DLL 同步到项目内的
+# `Plugins/` 作为规范目录，玩家与打包器都只认这里。它是构建产物、随编随变 ——
+# 不入库（否则每次按 Play 都是一次无意义的二进制 diff）。
+projects/*/Plugins/
 /.workbuddy

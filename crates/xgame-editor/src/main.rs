@@ -46,6 +46,8 @@ mod gizmo;
 mod input_bridge;
 mod hub;
 mod panels;
+mod plugin_build;
+mod plugin_session;
 mod recents;
 mod scene_renderer;
 mod state;
@@ -371,6 +373,17 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     // 是 O(1) 的，把这类崩溃一次性堵死（详见 `EditorState::clamp_selection`）。
     session.state.clamp_selection();
 
+    // ── 0b. Rust 插件后台编译轮询（P0.5）──
+    // 编译在独立线程里跑，这里只收结果。放在这一步（工具栏之前）是刻意的：
+    // 编译完成时可能要**立刻进 Play**，而进 Play 的状态跃迁检测在工具栏之后 ——
+    // 先把状态摆好，同一帧内就能完成"编译完成 → 进 Play"。
+    session.state.poll_plugin_build();
+    if session.state.plugin_building() {
+        // 空闲时编辑器会停止出帧（省电），编译中必须持续唤醒 —— 否则结果
+        // 永远没人来收，编译其实早完成了、界面还停在"编译中"。
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
     // ── 1. 窗口标题：项目名 + 未保存星号（仅变化时发，见 EditorSession::window_title）──
     // "*" 是**标题栏级**的未保存提示：标题是唯一永远在视野里的位置，工具栏
     // 按钮会被弹窗挡住。与工具栏共用同一份按帧 memo 的脏检查（不重复比较）。
@@ -561,6 +574,12 @@ fn main() -> Result<(), eframe::Error> {
             }
         }
     }
+
+    // ── 插件临时副本清扫（P0.5）──
+    // Windows 上被 dlopen 的 DLL 文件会锁到进程结束，所以加载走的是
+    // `%TEMP%/xgame-plugin-cache/` 里的唯一副本；上一个编辑器进程退出后那些
+    // 文件就成了垃圾。放在 --check 之后：无头检查根本不碰插件，没必要扫盘。
+    crate::plugin_build::sweep_temp_copies();
 
     // 上屏参数 A/B 开关（诊断用）：
     //   XGAME_PRESENT_MODE   fifo|fifo_relaxed|immediate|mailbox|auto_no_vsync|auto_vsync

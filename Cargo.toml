@@ -15,6 +15,11 @@ members = [
     "crates/xgame-mcp",
     # 示例插件（cdylib）：双轨架构 P0 的 Rust 轨道演示，集成测试会 dlopen 它。
     "examples/spinner-plugin",
+    # P0.5 演示项目：本身就是 cdylib crate 的**游戏项目**（编辑器按下 ▶ Play
+    # 会后台 cargo build 它）。作为 workspace 成员共享 target 目录与 profile
+    # 设置 —— 成员目录里跑 `cargo build` 只编本 crate 及其依赖（引擎那部分
+    # 早已编好），不会与编辑器抢锁（实验证明 cargo 在程序运行期不持锁）。
+    "projects/BehaviorsDemo",
 ]
 
 # 日常 `cargo run -p xgame-editor` 走的是 dev profile，默认 **零优化**。

@@ -76,6 +76,26 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     state.play_mode = PlayMode::Edit;
                 }
 
+                // ── Rust 插件编译（P0.5）──
+                //
+                // 只在插件项目里出现。编译跑在后台线程，但**必须看得见**：
+                // 按了 Play 却"什么都没发生"会被当成卡死，而这里恰恰是 UE 模式
+                // 的体验核心 —— 后台编译 + 自动进 Play。
+                if state.is_plugin_project() {
+                    if state.plugin_building() {
+                        let secs = state.plugin_build_elapsed().unwrap_or_default();
+                        ui.add(egui::Spinner::new());
+                        ui.label(format!("编译插件… {secs}s"))
+                            .on_hover_text("后台 cargo build；完成后自动进入 Play");
+                    } else if ui
+                        .button("🔨  Build")
+                        .on_hover_text("编译 Rust 插件（不进入 Play）\n产物同步进 Plugins/")
+                        .clicked()
+                    {
+                        state.build_plugins();
+                    }
+                }
+
                 ui.separator();
 
                 // ── 脚本热重载 ──

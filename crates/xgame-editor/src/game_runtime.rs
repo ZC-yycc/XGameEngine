@@ -35,17 +35,27 @@ impl GameRuntime {
     ///
     /// 收**快照**而不是借用编辑器的场景：Play 跑起来之后编辑器手里那份必须
     /// 保持"进入 Play 之前的样子"，退出时才能原样恢复。
+    ///
+    /// `behaviors` 是本次 Play 的组件注册表（P0.5）：即使项目里一个插件都没有
+    /// 也要传**空表**进来 —— 让"传不传"没有分支，两条轨走同一条链路
+    /// （`with_input_map(..).with_behavior_registry(..)`）。空表的行为就是
+    /// "所有 `behaviors` 名字都构造不出来、记一条警告"，与没插件时一致。
+    ///
+    /// 每次 Play 都传**新**表是刻意的：组件实例可能持有上次 Play 的状态，
+    /// 复用旧表会让"停止再播放"回不到初始状态（详见 `plugin_session` 模块文档）。
     pub fn start(
         scene: Scene,
         project_root: &Path,
         runtime: &xgame_core::RuntimeConfig,
+        behaviors: xgame_runtime::BehaviorRegistry,
     ) -> Self {
         let input_map = load_input_map(project_root);
         // 重力 / 固定步长来自 project.ron 的 `runtime` 节（⚙ 项目设置面板可改），
         // 不再用 WorldConfig::default() —— 否则清单里改了重力 Play 却纹丝不动。
         let world =
             World::new(scene, project_root, WorldConfig::from_project_runtime(runtime))
-                .with_input_map(input_map);
+                .with_input_map(input_map)
+                .with_behavior_registry(behaviors);
         Self {
             world,
             report: FrameReport::default(),

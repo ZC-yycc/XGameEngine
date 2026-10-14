@@ -1,0 +1,17 @@
+[package]
+name = "behaviors-demo"
+version = "0.1.0"
+edition = "2021"
+description = "双轨架构 P0.5 演示项目：Rust 插件组件 + Rhai 脚本同场景共存"
+publish = false
+
+# cdylib 是给编辑器 / 播放器 dlopen 的产物；rlib 让单元测试能直接以 crate 身份
+# 跑组件逻辑（不用先编出 DLL 再加载）。
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 与引擎同版本的门面 crate —— 版本握手的前提（P0）。
+# 路径依赖意味着这是**引擎仓库里的 workspace 成员**：共享 target 目录、
+# 继承根 profile 设置，增量编译只需要重编本 crate 本身。
+xgame = { path = "../../crates/xgame" }
