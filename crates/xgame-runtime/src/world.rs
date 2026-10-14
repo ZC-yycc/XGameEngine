@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use xgame_core::{EntityId, GameClock, PhysicsHandle, Scene, Transform};
+use xgame_core::{EntityId, GameClock, Inspect, PhysicsHandle, Scene, Transform};
 use xgame_input::{Input, InputMap};
 use xgame_math::glam::{Mat4, Vec3};
 use xgame_physics::{body_from_scene, DebugLine, PhysicsConfig, PhysicsWorld};
@@ -219,6 +219,40 @@ impl World {
 
     pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
         &mut self.physics
+    }
+
+    /// 编辑器专用：某实体身上**已装配**的组件数。
+    ///
+    /// 会先跑一次惰性装配（[`Self::instantiate_behaviors`]）—— Inspector 在
+    /// Play 的第一帧就要画组件，而装配原本发生在 `update` 里。装配幂等、
+    /// O(声明数)，重复调用无副作用。
+    ///
+    /// 取 `&mut self` 不是笔误：惰性装配要写 `behavior_instances`。
+    pub fn behavior_count(&mut self, entity: EntityId) -> usize {
+        self.instantiate_behaviors();
+        self.behavior_instances
+            .get(&entity)
+            .map_or(0, |set| set.len())
+    }
+
+    /// 编辑器专用：按下标取一个组件的 `(注册名, 可检视对象)`。
+    ///
+    /// **下标制而不是"一次借出全部"**：一次 `&mut self` 只能借出一个可变引用，
+    /// 而 Inspector 要逐个画字段 —— 每画一个借一次、借完即还，借用检查器天然
+    /// 满意，不需要 `split_at_mut` 那类算错索引就是 UB 的把戏。
+    ///
+    /// 返回 `&mut dyn Inspect`（而不是 `&mut dyn Behavior`）是刻意的：
+    /// 编辑器只该碰字段表，碰不到四钩子 —— 在 Play 中途改一个正在跑的组件
+    /// 的生命周期方法，是没设计过的语义。
+    pub fn behavior_at_mut(
+        &mut self,
+        entity: EntityId,
+        index: usize,
+    ) -> Option<(&'static str, &mut dyn Inspect)> {
+        self.instantiate_behaviors();
+        let set = self.behavior_instances.get_mut(&entity)?;
+        let instance = set.get_mut(index)?;
+        Some((instance.name, &mut *instance.component))
     }
 
     pub fn clock(&self) -> &GameClock {
@@ -937,6 +971,7 @@ mod tests {
 
     use crate::{BehaviorRegistry, Ctx, Lifecycle};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use xgame_core::{FieldDesc, FieldKind, FieldValue, Inspect};
 
     /// 一个走起来像脚本的组件：start 抬高、update 每帧沿 x 漂移。
     #[derive(Default)]
@@ -952,6 +987,7 @@ mod tests {
             ctx.set_pos(Vec3::new(p.x + dt, p.y, p.z));
         }
     }
+    xgame_core::impl_no_inspect!(Drifter);
 
     /// 组件真的能驱动实体（Rust 轨道的最小闭环）。
     ///
@@ -992,6 +1028,7 @@ mod tests {
             DESTROYED.fetch_add(1, Ordering::Relaxed);
         }
     }
+    xgame_core::impl_no_inspect!(Marker);
 
     /// 一个会销毁别人的组件（顺带验证"组件钩子里的结构改动走命令消费路径"）。
     #[derive(Default)]
@@ -1008,6 +1045,111 @@ mod tests {
                 ctx.destroy(id);
             }
         }
+    }
+    xgame_core::impl_no_inspect!(Bomber);
+
+    /// 一个带可检视字段的组件。
+    ///
+    /// `Inspect` 是**手写**的 —— `#[derive(Inspect)]` 生成的代码引用
+    /// `::xgame`，本 crate 解析不到（见 xgame-derive 的"路径假设"）。
+    /// derive 生成的正是下面这三段，它的正确性由
+    /// `crates/xgame/tests/inspect_derive.rs` 单独覆盖。
+    #[derive(Default)]
+    struct Tunable {
+        speed: f32,
+        label: String,
+    }
+
+    impl Lifecycle for Tunable {}
+
+    impl Inspect for Tunable {
+        fn inspect_fields(&self) -> &'static [FieldDesc] {
+            static FIELDS: &[FieldDesc] = &[
+                FieldDesc {
+                    name: "speed",
+                    kind: FieldKind::F32,
+                    label: None,
+                    min: Some(0.0),
+                    max: Some(100.0),
+                    speed: None,
+                    step: None,
+                    unit: "m/s",
+                    tooltip: "移动速度",
+                },
+                FieldDesc::new("label", FieldKind::String),
+            ];
+            FIELDS
+        }
+        fn inspect_get(&self, index: usize) -> FieldValue {
+            match index {
+                0 => FieldValue::F32(self.speed),
+                1 => FieldValue::String(self.label.clone()),
+                _ => FieldKind::F32.default_value(),
+            }
+        }
+        fn inspect_set(&mut self, index: usize, value: FieldValue) {
+            match (index, value) {
+                (0, FieldValue::F32(v)) => self.speed = v,
+                (1, FieldValue::String(v)) => self.label = v,
+                _ => {}
+            }
+        }
+    }
+
+    /// 编辑器在 Play 中读写组件字段的整条通路（P1）。
+    ///
+    /// 守三件事：装配后能按下标取到组件、写进去的值真的落到组件本体
+    /// （不是编辑器侧的影子值）、越界与未装配实体安静返回而不是 panic。
+    #[test]
+    fn editor_can_read_and_write_component_fields() {
+        let mut scene = Scene::new("inspect");
+        let mut a = Entity::new("a");
+        a.behaviors.push("Tunable".to_owned());
+        scene.add_entity(a);
+        let bare = Entity::new("bare");
+        scene.add_entity(bare);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Tunable>("Tunable");
+
+        // 字段表在注册期就缓存好了 —— 编辑器 Edit 模式（还没有实例）零分配画字段的依据。
+        let table = registry.field_table("Tunable").expect("字段表应当已缓存");
+        assert_eq!(table.len(), 2);
+        assert_eq!(table[0].name, "speed");
+        assert_eq!(table[0].unit, "m/s");
+        assert!(table[0].has_range(), "min + max 齐全 ⇒ 编辑器画滑块");
+        assert_eq!(table[1].name, "label");
+        assert!(registry.field_table("Nope").is_none());
+
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+
+        let id = world.scene().find_by_name("a").expect("a 应当在").id;
+        let bare_id = world.scene().find_by_name("bare").expect("bare 应当在").id;
+        assert_eq!(world.behavior_count(id), 1, "应当装配出一个组件");
+        assert_eq!(
+            world.behavior_count(bare_id),
+            0,
+            "没声明 behaviors 的实体不该有组件"
+        );
+
+        // 读默认值 → 改 → 写回
+        let (name, comp) = world.behavior_at_mut(id, 0).expect("第 0 个组件存在");
+        assert_eq!(name, "Tunable");
+        assert_eq!(comp.inspect_get(0), FieldValue::F32(0.0), "默认构造 ⇒ speed = 0");
+        comp.inspect_set(0, FieldValue::F32(42.0));
+        comp.inspect_set(1, FieldValue::String("hello".into()));
+        // 类型不匹配的写入必须被忽略（Lua 侧传错类型的常见后果）。
+        comp.inspect_set(0, FieldValue::Bool(true));
+
+        // 再读一次，确认值真的进了组件本体。
+        let (_, comp) = world.behavior_at_mut(id, 0).expect("同一实体再取一次");
+        assert_eq!(comp.inspect_get(0), FieldValue::F32(42.0));
+        assert_eq!(comp.inspect_get(1), FieldValue::String("hello".into()));
+
+        // 越界：安静返回 None —— Inspector 不该因为一次下标错误崩掉。
+        assert!(world.behavior_at_mut(id, 7).is_none());
+        assert!(world.behavior_at_mut(bare_id, 0).is_none());
     }
 
     /// 实体被销毁时其组件收到 `on_destroy`。

@@ -11,6 +11,10 @@
 //! - `Bobber`（Rust）—— 上下浮动，展示组件自己持有跨帧状态；
 //! - `Spinner`（Rhai，另一实体）—— 证明两条轨道**共用一个运行时、互不干扰**。
 //!
+//! 两个组件都派生了 [`Inspect`]（P1）：编辑器 Inspector 里会出现
+//! `speed`、`amplitude`、`hz` 三个可拖的滑块 —— 状态字段（`base_y` 等）用
+//! `#[inspect(skip)]` 挡在外面。
+//!
 //! # 注册表只有一份真相源
 //!
 //! [`register_all`] 同时被 `export_plugin!`（发布路径）与单元测试（验证路径）
@@ -18,19 +22,43 @@
 
 use xgame::prelude::*;
 
-/// 与 `Scripts/Spinner.rhai` 同值：绕 Y 轴每秒转 75 度。
+/// 与 `Scripts/Spinner.rhai` 同值：绕 Y 轴每秒转 75 度（组件的默认参数）。
 const SPIN_SPEED: f32 = 75.0;
 
 /// 与 Rhai 版同款：绕 Y 轴匀速旋转。
 ///
 /// 帧率无关靠 `delta()`：乘以 dt 才是"每秒 75 度"，否则机器越快转得越快。
-#[derive(Default)]
-pub struct Spinner;
+///
+/// `speed` 是**可检视字段**（P1）：编辑器 Inspector 里会画成一个
+/// `-720 ~ 720 °/s` 的滑块，拖一下下一次 update 就生效 —— 这正是
+/// `#[derive(Inspect)]` 要买到的东西。
+///
+/// `Default` 手写而不是派生：`#[derive(Default)]` 会把 `f32` 归零，组件就
+/// 不转了。组件的默认参数本来就该由作者给，派生只是在没有合理默认值时省事。
+#[derive(Inspect)]
+pub struct Spinner {
+    #[inspect(
+        min = -720.0,
+        max = 720.0,
+        speed = 5.0,
+        unit = "°/s",
+        tooltip = "绕 Y 轴的角速度，负值反向"
+    )]
+    pub speed: f32,
+}
+
+impl Default for Spinner {
+    fn default() -> Self {
+        Self {
+            speed: SPIN_SPEED,
+        }
+    }
+}
 
 impl Lifecycle for Spinner {
     fn update(&mut self, ctx: &mut Ctx, dt: f32) {
         let r = ctx.rot();
-        ctx.set_rot(Vec3::new(r.x, r.y + SPIN_SPEED * dt, r.z));
+        ctx.set_rot(Vec3::new(r.x, r.y + self.speed * dt, r.z));
     }
 }
 
@@ -38,18 +66,46 @@ impl Lifecycle for Spinner {
 ///
 /// 这是与脚本的一个刻意对照：Rhai 脚本没有实例字段可用（状态得靠全局表或
 /// 实体身上挂东西），而 Rust 组件天生就是一个结构体，状态归属清清楚楚。
-#[derive(Default)]
+///
+/// 字段分两类，`#[inspect(...)]` 把这件事写在了字段上：
+/// - `amplitude` / `hz` 是**调参**（进编辑器，能在 Play 中拖）；
+/// - `base_y` / `elapsed` / `configured` 是**状态**（`#[inspect(skip)]`）——
+///   它们由 `start` 决定，让用户在 Inspector 里改只会得到一个被下一次
+///   `update` 覆盖的假象。
+#[derive(Inspect)]
 pub struct Bobber {
+    /// 浮动幅度（米）。
+    #[inspect(min = 0.0, max = 5.0, speed = 0.05, unit = "m", tooltip = "浮动幅度")]
+    amplitude: f32,
+    /// 浮动频率（Hz）。
+    #[inspect(min = 0.0, max = 5.0, speed = 0.05, unit = "Hz", tooltip = "浮动频率")]
+    hz: f32,
+
     /// `start` 时记下的起始高度（浮动围绕它对称）。
+    #[inspect(skip)]
     base_y: f32,
     /// 累计时间。用 `delta()` 自己攒而不是 `time()`，是为了让"组件何时被
     /// 创建"这件事只影响 `start`，行为完全可预测。
+    #[inspect(skip)]
     elapsed: f32,
     /// 本组件自己的参数（与别的 Bobber 实例互不影响）。
+    #[inspect(skip)]
     configured: bool,
 }
 
-/// 浮动幅度（米）与频率（Hz）。
+impl Default for Bobber {
+    fn default() -> Self {
+        Self {
+            amplitude: BOB_AMPLITUDE,
+            hz: BOB_HZ,
+            base_y: 0.0,
+            elapsed: 0.0,
+            configured: false,
+        }
+    }
+}
+
+/// 浮动幅度（米）与频率（Hz）—— 组件的默认参数。
 const BOB_AMPLITUDE: f32 = 0.6;
 const BOB_HZ: f32 = 0.5;
 
@@ -65,7 +121,7 @@ impl Lifecycle for Bobber {
         debug_assert!(self.configured, "update 跑在 start 之前");
         self.elapsed += dt;
         let mut p = ctx.pos();
-        p.y = self.base_y + (self.elapsed * BOB_HZ * std::f32::consts::TAU).sin() * BOB_AMPLITUDE;
+        p.y = self.base_y + (self.elapsed * self.hz * std::f32::consts::TAU).sin() * self.amplitude;
         ctx.set_pos(p);
     }
 
@@ -173,6 +229,81 @@ mod tests {
         assert!(
             (min_y - 2.4).abs() < 0.05 && (max_y - 3.6).abs() < 0.05,
             "浮动必须围绕 start 高度 3.0 对称，实际 [{min_y:.3}, {max_y:.3}]"
+        );
+    }
+
+    /// `#[derive(Inspect)]` 生成的字段表，以及"调参真的改变行为"这条闭环（P1）。
+    ///
+    /// 守三件事：
+    /// - 表的元数据正确（名字、类型、单位、边界）—— 编辑器画控件全靠它；
+    /// - **状态字段被 `skip` 掉** —— 漏一个就会让用户在 Inspector 里改到一个
+    ///   下一帧就被覆盖的假值，比不给改更糟；
+    /// - 经 `inspect_set` 写进去的值真的改变了运行结果（不是只改了显示）。
+    #[test]
+    fn field_table_matches_and_tuning_changes_behavior() {
+        let mut registry = BehaviorRegistry::new();
+        register_all(&mut registry);
+
+        // -- Spinner：表 + 调参 ------------------------------------------------
+        let table = registry.field_table("Spinner").expect("Spinner 应当有字段表");
+        assert_eq!(table.len(), 1);
+        assert_eq!(table[0].name, "speed");
+        assert_eq!(table[0].kind, FieldKind::F32);
+        assert_eq!(table[0].unit, "°/s");
+        assert_eq!(table[0].min, Some(-720.0));
+        assert_eq!(table[0].max, Some(720.0));
+        assert!(table[0].has_range(), "有边界 ⇒ 编辑器画滑块而不是裸拖拽");
+
+        // -- Bobber：2 个调参字段，3 个状态字段被 skip ------------------------
+        let table = registry.field_table("Bobber").expect("Bobber 应当有字段表");
+        let names: Vec<&str> = table.iter().map(|f| f.name).collect();
+        assert_eq!(
+            names,
+            ["amplitude", "hz"],
+            "base_y / elapsed / configured 是状态，必须被 skip"
+        );
+        assert_eq!(table[0].unit, "m");
+        assert_eq!(table[1].unit, "Hz");
+
+        // -- 调参 → 行为真的变了 ----------------------------------------------
+        let mut scene = Scene::new("tune");
+        let mut actor = Entity::new("spinner");
+        actor.behaviors.push("Spinner".to_owned());
+        scene.add_entity(actor);
+
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+
+        let id = world
+            .scene()
+            .find_by_name("spinner")
+            .expect("实体应当在")
+            .id;
+        {
+            let (_, comp) = world.behavior_at_mut(id, 0).expect("Spinner 已装配");
+            assert_eq!(
+                comp.inspect_get(0),
+                FieldValue::F32(75.0),
+                "默认值来自手写的 Default（派生 Default 会把 f32 归零）"
+            );
+            comp.inspect_set(0, FieldValue::F32(150.0));
+            // 写错类型必须被忽略 —— Lua 侧传错类型的常见后果。
+            comp.inspect_set(0, FieldValue::String("fast".into()));
+        }
+
+        // 1 秒 × 150°/s = 150°。刻意不跑 2 秒：`to_euler` 把 yaw 归一化到
+        // (-180, 180]，300° 会变成 -60°，断言就得自己处理绕圈 ——
+        // 第一版就是这么写的，看到"实际 -60.00°"才想起来。
+        for _ in 0..60 {
+            world.update(1.0 / 60.0);
+        }
+        let actor = world.scene().find_by_name("spinner").expect("实体应当还在");
+        let (yaw, _, _) = actor.transform.rotation.to_euler(glam::EulerRot::YXZ);
+        let degrees = yaw.to_degrees();
+        assert!(
+            (degrees - 150.0).abs() < 2.0,
+            "调到 150°/s 后 1 秒应当转过约 150 度，实际 {degrees:.2}° —— \
+             说明 inspect_set 的值没有真正进入组件"
         );
     }
 }

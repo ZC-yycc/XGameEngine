@@ -52,6 +52,9 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 - **P0 已完成**（2026-10-14，实施记录见 PLAN.md 十五）：`xgame` 门面 crate + `GameCtx` 方法层（api.rs 平移为转发壳）+ `Lifecycle` trait + 组件分发 + 注册表 + 插件边界（`export_plugin!` + 版本握手）+ 示例插件 `examples/spinner-plugin` 全链路。落地偏离已回写计划文档 D6。
 - **P0.5 已完成**（2026-10-14，实施记录见 PLAN.md 十六，决策见计划文档 D7）：编辑器 PIE —— 项目根有 `Cargo.toml` 即插件项目，按 ▶ Play 自动后台 `cargo build`（UI 不阻塞）、产物同步进 `<项目>/Plugins/`、经**临时副本**加载进 Play 会话；Inspector 有 Behaviors 区；玩家与打包器都认 `Plugins/`；演示项目 `projects/BehaviorsDemo`（Rust 组件 + Rhai 脚本同场景共存）。
   - **三条不能推翻的约束**（D7）：`Plugins/` 是唯一规范目录；加载永远走临时副本（Windows 文件锁）；旧 DLL 句柄永不卸载（悬垂 vtable 是 UB）。持有句柄的字段必须声明在 `game_runtime` / `world` **之后**。
-- 下一步是 **P1 `#[derive(Inspect)]`**，随后 P2 Lua 宿主（mlua），见计划文档 §四。
-- Rhai 暂保留，P2.5 基准闸门数据决定去留——不要提前删。当前对照数据：1000 no-op 实体组件轨分发 37.6 µs/帧 vs Rhai 493.9 µs（13.1×），微基准 `behavior_dispatch_throughput`。
+- **P1 已完成**（2026-10-14，实施记录见 PLAN.md 十七，决策见计划文档 D8）：`#[derive(Inspect)]` + Inspector 按字段表自动渲染 + 编辑器调参（Edit 改惰性构造的副本、Play 改 World 里的活实例）。
+  - **四条不能推翻的约束**（D8）：① 组件契约是 `Behavior: Lifecycle + Inspect`（**不是** `Lifecycle`）——编辑器不链接用户代码，拿 `&mut dyn Inspect` 只能靠实例自带的字段表，存 `Box<dyn Lifecycle>` 时这条降级做不到（需 downcast，跨 DLL 无共享类型信息）；② `Inspect` 是"表 + 下标"，别改成闭包（跨边界闭包要处理 panic 隔离与函数指针生命周期）；③ 寻址名永远是 Rust 字段名，`label` 只改显示名（重命名显示名不能破坏脚本）；④ 组件字段改动**不进**场景撤销栈（组件参数不在场景文件里，动它会凭空多出一条场景撤销）。
+  - **两条实现事实**：`PluginSession` 留的常驻注册表是每帧路径（查字段表 / 构造编辑态副本）的唯一通道，别改回 `build_registry()` —— 后者每次重跑插件入口且失败时 `log::error!`，错位时会变成**每帧一条错误日志**；**插件注册表是跨编译单元的内存布局**，给 `BehaviorEntry` 加字段 = 改 ABI，会让过期的 `target/*.dll` 变成 `0xc0000005`（进程暴毙无 panic）。而 **`cargo test` 不产出 cdylib**，那些 DLL 极易过期 —— `plugin_loading` 现在取 DLL 前先嵌套构建一次。
+- 下一步是 **P1.5（组件字段进场景文件）/ P2 Lua 宿主（mlua）**，见计划文档 §四。
+- Rhai 暂保留，P2.5 基准闸门数据决定去留——不要提前删。当前对照数据：1000 no-op 实体组件轨分发 37.6 µs/帧 vs Rhai 493.9 µs（13.1×），微基准 `behavior_dispatch_throughput`。⚠ 该数字是 **P0 当时机器状态**下的；**跨版本比较必须同机背靠背**（2026-10-14 同机回测：P0.5 = 68.4 µs、P1 = 65.2 µs，无回归；记录表在该基准的模块文档里）。
 - **工具链注意**：本仓库的源文件是 UTF-8 **无 BOM** 且含大量中文注释。用 PowerShell 做文本替换时必须显式 `-Encoding UTF8` 读写，否则 PS 5.1 会按 GBK 解码把中文**有损**毁掉（已发生过一次，PLAN.md 十六第七节）。改中文源文件优先用编辑器工具，shell 只做只读操作。

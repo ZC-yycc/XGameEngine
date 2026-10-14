@@ -40,6 +40,20 @@ pub struct PluginSession {
     /// 当前代注册过的组件名。缓存下来是因为 Inspector 在**编辑态**就要渲染
     /// 下拉菜单，而那时没有注册表在手。
     names: Vec<String>,
+    /// 与 [`names`](Self::names) 同一批装配出来的注册表（`load_from_dir` 里
+    /// 本来就在手，原先读完名字就丢掉了）。
+    ///
+    /// # 与 [`Self::build_registry`] 的分工
+    ///
+    /// - **本字段**：常驻缓存，给**每帧都要走**的路径（Inspector 查字段表、
+    ///   惰性构造编辑态组件副本）—— 一次 `HashMap` 查询，不重跑插件入口。
+    /// - **`build_registry()`**：每次 Play 现造一份，语义不变（见模块文档：
+    ///   入口函数可能带副作用，"停止再播放"必须从干净状态开始）。
+    ///
+    /// 为什么不能让每帧的读也走 `build_registry()`：入口重跑失败会
+    /// `log::error!`，而"组件名在 `names` 里、重跑却没注册上"的错位会让
+    /// 构造每次失败 → 每帧重试 → **每帧一条错误日志**（日志洪水）。
+    registry: BehaviorRegistry,
     /// 旧代句柄：永不卸载（见模块文档）。
     _retired: Vec<LoadedPlugin>,
     /// 临时副本计数器：保证 `temp_copy` 的目标文件名进程内唯一。
@@ -53,6 +67,7 @@ impl PluginSession {
         Self {
             current: Vec::new(),
             names: Vec::new(),
+            registry: BehaviorRegistry::new(),
             _retired: Vec::new(),
             copy_counter: 0,
             sources: Vec::new(),
@@ -126,7 +141,23 @@ impl PluginSession {
         let names: Vec<String> = registry.names().into_iter().map(str::to_owned).collect();
         self.current = loaded;
         self.names = names.clone();
+        // 名字和注册表必须**同批**：分两处装配早晚会出现"名字在、表里没有"。
+        self.registry = registry;
         names
+    }
+
+    /// 按注册名取字段表；未注册返回 `None`。
+    ///
+    /// 走常驻缓存，可以每帧调（见 [`Self::registry`] 的说明）。
+    pub fn field_table(&self, name: &str) -> Option<&'static [xgame::FieldDesc]> {
+        self.registry.field_table(name)
+    }
+
+    /// 按注册名构造一个组件实例（编辑态调参用）；未注册返回 `None`。
+    ///
+    /// 同样走常驻缓存 —— 不重跑插件入口，避免入口失败时**每帧**一条错误日志。
+    pub fn construct(&self, name: &str) -> Option<Box<dyn xgame::Behavior>> {
+        self.registry.construct(name)
     }
 
     /// 用当前代插件装配一份**全新的**行为注册表（每次 Play 调用）。

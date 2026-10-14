@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use xgame_math::glam::{Quat, Vec3};
 use xgame_core::prefab::{prefab_display_name, Prefab, PrefabInstanceRef};
 use xgame_core::project::ProjectHandle;
-use xgame_core::{Entity, EntityId, Scene, Transform};
+use xgame_core::{Entity, EntityId, FieldDesc, Inspect, Scene, Transform};
 use xgame_physics::DebugLine;
 use strum::Display;
 
@@ -43,6 +43,18 @@ pub enum ExitTarget {
     Hub,
     /// 关闭编辑器窗口。
     Quit,
+}
+
+/// Edit 模式下一份「可调参数的组件副本」（纯数据，不挂 World、不跑钩子）。
+///
+/// 为什么需要它：组件实例只在 Play 时由注册表构造，Edit 模式下没有实例可改；
+/// 而"先调好参数再 Play"恰恰是调参的常态。存两样东西是为了**对齐校验** ——
+/// 用户把 `behaviors[0]` 从 A 换成 B 之后，旧副本的参数必须作废重建，
+/// 否则会把 A 的参数写进 B 的字段里（两边都是 `f32` 的话，编译器管不着）。
+struct EditComponent {
+    /// 构造时的注册名，与场景里 `behaviors[下标]` 比对。
+    name: String,
+    component: Box<dyn xgame_runtime::Behavior>,
 }
 
 /// Gizmo 交互操作柄标识（与 ToolMode 组合使用）。
@@ -410,6 +422,24 @@ pub struct EditorState {
     /// 实体"。快照在进入 Play 时拍一次，代价可以接受。
     pub play_snapshot: Option<Scene>,
 
+    /// Edit 模式下用户调好参数的组件副本（key = `(实体 id, behaviors 下标)`）。
+    ///
+    /// # 为什么 Edit 模式也要有"实例"
+    ///
+    /// 组件实例只在 Play 时由注册表构造（`Default` 起步），Edit 模式下根本
+    /// 没有东西可改 —— 但"先拖滑块再按 Play 看效果"是 Unity 工作流的常态。
+    /// 所以编辑态也持有一份**纯数据**的组件（没有 World、不跑任何钩子），
+    /// Inspector 直接改它，按下 Play 时 [`Self::seed_play_from_edit_components`]
+    /// 把值灌进真正跑起来的那份。
+    ///
+    /// 惰性构造：只有 Inspector 真要画某个组件时才造一次。组件的 `Default`
+    /// 可能不便宜（比如要解析配置），不该"打开项目就构造全场景所有组件"。
+    ///
+    /// **声明位置是硬约束**：值里装着指向插件 DLL 的函数指针，必须**先于
+    /// `plugins`（DLL 句柄）销毁**，否则 drop 胶水会跳进已 FreeLibrary 的代码区。
+    /// 同理它得排在 `game_runtime` 之后 —— 那份 `World` 里的组件实例同理。
+    edit_components: HashMap<(EntityId, usize), EditComponent>,
+
     // -- Rust 插件（P0.5 / UE 模式）--
     /// 插件会话：已加载 DLL 句柄 + 当前代组件名。
     ///
@@ -565,6 +595,7 @@ impl EditorState {
             last_render_view_proj: None,
             game_runtime: None,
             play_snapshot: None,
+            edit_components: HashMap::new(),
 
             plugins: crate::plugin_session::PluginSession::new(),
             plugin_build: None,
@@ -1330,6 +1361,9 @@ impl EditorState {
             registry,
         );
         self.game_runtime = Some(runtime);
+        // 把 Edit 模式调好的组件参数灌进去 —— 必须在第一帧 update 之前，
+        // 否则组件的 `start` 会先按 `Default` 跑掉一遍。
+        self.seed_play_from_edit_components();
         self.refresh_scripts();
         self.pending_play = false;
         let plugins_note = if self.plugins.is_empty() {
@@ -1447,6 +1481,89 @@ impl EditorState {
     /// 当前已注册的 Rust 组件名（Inspector 的 Behaviors 下拉菜单读）。
     pub fn behavior_names(&self) -> &[String] {
         self.plugins.names()
+    }
+
+    /// 取一个「可检视的组件」，供 Inspector 读写。
+    ///
+    /// - **Play / Paused**：返回 World 里**真正跑着的那份**实例 —— 拖一下滑块
+    ///   下一次 `update` 就生效，这是 Unity 式的热调参。
+    /// - **Edit**：返回本状态里惰性构造的编辑副本，值由
+    ///   [`Self::seed_play_from_edit_components`] 带进下一次 Play。
+    ///
+    /// `name` 是场景里写的注册名（编辑态要靠它构造实例；Play 侧只按下标定位，
+    /// 但会用它核对下标处是不是同一个组件 —— 返回 `None` 等于说"对不上，别画"）。
+    ///
+    /// 返回的名字生命周期绑 `&mut self`（不是 `'static`）：Edit 侧的名字来自
+    /// 存的 `String`，而 `World` 那侧给的是 `'static` —— 短的那个说了算。
+    pub fn inspect_component(
+        &mut self,
+        entity_id: EntityId,
+        slot: usize,
+        name: &str,
+    ) -> Option<(&str, &mut dyn Inspect)> {
+        if self.game_runtime.is_some() {
+            let (live_name, comp) = self.game_runtime.as_mut()?.behavior_at_mut(entity_id, slot)?;
+            // 下标对上了但类型换了（Play 期间改场景改不到这里，但 Edit 侧
+            // 快照恢复后索引会平移）—— 让调用方知道这份数据不适用。
+            return (live_name == name).then_some((live_name, comp));
+        }
+
+        // 缺失或名字对不上都重建：把参数写到错误的组件类型上是静默的错误，
+        // 编译器管不着（两边都有 `f32` 字段），只能在这里挡住。
+        let stale = self
+            .edit_components
+            .get(&(entity_id, slot))
+            .is_none_or(|e| e.name != name);
+        if stale {
+            let component = self.plugins.construct(name)?;
+            self.edit_components.insert(
+                (entity_id, slot),
+                EditComponent {
+                    name: name.to_owned(),
+                    component,
+                },
+            );
+        }
+        self.edit_components
+            .get_mut(&(entity_id, slot))
+            .map(|e| (e.name.as_str(), &mut *e.component as &mut dyn Inspect))
+    }
+
+    /// 只读地取一个组件的字段表（**不构造实例**）。
+    ///
+    /// 注册表里缓存了每种组件的静态表，所以"还没调过参的组件"也能画出字段
+    /// 预览 —— 零分配，也不必先把组件造出来。走常驻缓存，可每帧调。
+    pub fn behavior_field_table(&self, name: &str) -> Option<&'static [FieldDesc]> {
+        self.plugins.field_table(name)
+    }
+
+    /// 把 Edit 模式调好的参数灌进刚启动的运行时。
+    ///
+    /// 时机：`GameRuntime::start` 之后、第一帧 `update` 之前 —— 组件的 `start`
+    /// 还没跑，参数能被 `start` 读到（比如"起始高度 = 某个可调值"）。
+    ///
+    /// **逐字段复制而不是换实例**：World 那份已经装配完毕，换掉等于作废装配
+    /// 状态；而且只有可检视字段该被外部影响 —— 状态字段（`#[inspect(skip)]`）
+    /// 本来就属于实例自己。
+    ///
+    /// Play 期间的改动**不回写**这里：停止 Play 时丢弃，与 Unity 默认一致
+    /// （Play 中改的是"试试看"，不是"就这么定了"）。
+    fn seed_play_from_edit_components(&mut self) {
+        let Some(runtime) = self.game_runtime.as_mut() else {
+            return;
+        };
+        for ((entity_id, slot), edit) in &self.edit_components {
+            let Some((live_name, comp)) = runtime.behavior_at_mut(*entity_id, *slot) else {
+                continue;
+            };
+            // 场景里这个下标已经换成别的组件了 —— 这份副本作废。
+            if live_name != edit.name {
+                continue;
+            }
+            for i in 0..edit.component.inspect_fields().len() {
+                comp.inspect_set(i, edit.component.inspect_get(i));
+            }
+        }
     }
 
     /// 退出播放模式：丢弃运行时，把场景恢复成进入 Play 之前的样子。

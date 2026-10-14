@@ -4901,6 +4901,7 @@ dependencies = [
  "libloading",
  "log",
  "xgame-core",
+ "xgame-derive",
  "xgame-input",
  "xgame-math",
  "xgame-physics",

@@ -27,7 +27,11 @@ pub static SPINNER_DESTROYS: AtomicU32 = AtomicU32::new(0);
 const SPIN_SPEED: f32 = 75.0;
 
 /// 与 Spinner.rhai 同款：绕 Y 轴匀速旋转。
-#[derive(Default)]
+///
+/// 没有可调字段（`SPIN_SPEED` 是常量）—— `#[derive(Inspect)]` 生成一张空表，
+/// 编辑器里就会显示成"没有参数"。可调字段的完整示范见
+/// `projects/BehaviorsDemo`。
+#[derive(Default, Inspect)]
 pub struct Spinner;
 
 impl Lifecycle for Spinner {
@@ -48,8 +52,12 @@ impl Lifecycle for Spinner {
 }
 
 /// 第一帧 update 里销毁 `target` 实体（用来触发受害者的 `on_destroy`）。
-#[derive(Default)]
+///
+/// `victim` 是 `start` 期解析出来的内部状态，不进编辑器 —— `#[inspect(skip)]`
+/// 就是为这种字段准备的（不 skip 的话它类型不支持，derive 会**编译期报错**）。
+#[derive(Default, Inspect)]
 pub struct Reaper {
+    #[inspect(skip)]
     victim: Option<EntityId>,
 }
 

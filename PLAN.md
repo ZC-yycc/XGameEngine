@@ -850,3 +850,133 @@ cargo**。
 `plugin_build.rs` 的中文注释全毁了**（PS 5.1 默认按 GBK 读、按 UTF-8 写，
 且部分字符是有损的）。教训：改本仓库的中文源文件一律走编辑器工具，
 shell 只做只读操作。
+
+## 十七、双轨语言架构 P1：`#[derive(Inspect)]` + 编辑器调参（本轮）
+
+### 一、"可检视"为什么是组件契约的一部分
+
+编辑器**不链接用户代码**（插件是用户自己编的 DLL）。要在 Inspector 里画出一个
+组件的字段，编辑器只有两条路：要么拿到类型信息（跨 DLL 边界做不到），要么让
+**实例自己带着字段表**。所以：
+
+```rust
+pub trait Behavior: Lifecycle + Inspect {}   // 空 body + blanket impl
+```
+
+关键在 `Box<dyn Behavior>` 能直接 `as_mut()` 成 `&mut dyn Inspect`。若存的是
+`Box<dyn Lifecycle>`，编辑器想要 `&mut dyn Inspect` 就必须 downcast ——
+而 downcast 需要两边共享类型信息，跨 DLL 边界正是这条不通。**"可检视"因此不是
+锦上添花，是让编辑器这条边能成立的前提**，注册约束相应从 `Lifecycle` 提到
+`Behavior`（`impl_no_inspect!` 是"我不开放字段"的一行逃生舱）。
+
+### 二、`Inspect` 的形状：表 + 下标，不是回调
+
+`crates/xgame-core/src/inspect.rs`：`FieldDesc`（`'static` 描述）/
+`FieldKind`（10 种）/ `FieldValue`（拥有值）/ trait `Inspect`。
+
+- **为什么不是"每个字段一对闭包"**：检视对象活在插件 DLL 里，跨边界传闭包要
+  处理 panic 隔离与函数指针生命周期；而"读第 i 个 / 写第 i 个"是两个对象安全的
+  方法，下标与表一一对应，热路径零哈希。
+- **`inspect_field` 返回 `&'static FieldDesc`**：调用方（编辑器）可以跨组件变更
+  持有描述符而不借用实例。表是编译期常量，`'static` 是白给的。
+- **`FieldValue` 是拥有的**：字段里可能有 `String`，借用版需要 `FieldValueRef`
+  与 `Cow`，把 API 复杂度推给每一个消费者。要优化将来加
+  `inspect_get_into(&self, i, &mut FieldValue)` 即可，表结构不动。
+- **检视是旁路**：`inspect_set` 遇到类型不符的变体**静默忽略**（Lua 传错类型是
+  日常），越界 `inspect_get` 返回该类型的零值 —— 一个下标算错不该拖垮宿主进程。
+
+### 三、derive：三处下标必须同源
+
+`crates/xgame-derive` 生成 `impl Inspect for T`。**表、get、set 全部由同一个
+`index` 变量生成** —— 这就是"不要手写这个 trait"的理由：手写最常犯的错是三处
+下标错位，表现是"改 A 字段动了 B 字段"，两边都是 `f32` 时编译器一声不吭。
+
+- **硬编码 `::xgame::` 路径**（serde 惯例）：派生出来的代码要能在任何 crate 里
+  编译。引擎内部测试组件解析不到 `::xgame`，用 `xgame_core::impl_no_inspect!`。
+- **`#[inspect(skip / label= / min= / max= / speed= / step= / unit= / tooltip=)]`**。
+  `label` 只改**显示名**，寻址名永远是 Rust 字段名 —— 重命名显示名不能破坏已有脚本。
+- 回归测试 `crates/xgame/tests/inspect_derive.rs`：核心是"把每个字段写成一个
+  **可辨认**的值，再逐个读回来"（数值刻意不取 0，否则错位了也读到 0 测不出来）。
+
+### 四、踩到的四个坑（共同点：报错指向用户代码，而不是宏本身）
+
+1. **`INSPECTABLE` 两列都写了小写类型名** → 生成 `FieldKind::f32` →
+   报"no variant named `f32`"，而错误位置指向**用户的结构体**。
+2. **`descs` 里字面量之间漏了一个尾逗号** → `expected one of ',' ... found '::`。
+   只有两个以上字段才复现，所以第一个字段的用例全绿。
+3. **`split_for_impl` 摆错位**（`for #name #impl_g`）—— `DeriveInput` 上没有
+   `split_for_impl`，要先 `let (impl_g, ty_g, where_g) = input.generics.split_for_impl()`。
+4. **`String` 字段在 `inspect_get` 里是 `&self` 上的移动** → E0507。
+   数值 / bool / glam 向量都是 `Copy`，只有 `String` 要 `.clone()`。
+
+**诊断方法**（下次照做）：proc macro 里 `eprintln!("{ts}")`，用环境变量门控，
+再 `cargo check -p <pkg>` 读 stderr。`cargo expand` 本仓库没装，别指望它。
+
+### 五、编辑器：Edit 模式也要有"实例"
+
+组件实例只在 Play 时由注册表构造，Edit 模式下没有东西可改 —— 但"先拖滑块再按
+Play 看效果"是 Unity 工作流的常态。于是 `EditorState.edit_components`（惰性构造，
+声明位置在 `game_runtime` 之后、`plugins` **之前** —— 值里有插件函数指针）。
+
+- **名字对齐校验**：用户把 `behaviors[0]` 从 A 换成 B 后，旧副本必须作废重建。
+  否则会把 A 的参数写进 B 的字段里 —— 两边都是 `f32`，编译器管不着。
+- **`seed_play_from_edit_components` 逐字段复制，不换实例**：World 那份已经装配
+  完毕，换掉等于作废装配状态；而且只有可检视字段该被外部影响，
+  `#[inspect(skip)]` 的状态字段本来就属于实例自己。
+- **Play 中的改动不回写**：停止 Play 即丢弃（Unity 默认语义）。
+- **组件字段改动刻意不碰 `touched`**：那个标志意味着"改了 `working`，要写回场景
+  +推一条撤销"。组件参数不在场景文件里，动它会凭空多出一条场景撤销记录，
+  按 Ctrl+Z 会撤掉一个并不存在的改动。
+
+**顺带修掉的隐患**：`PluginSession` 现在把加载时已经装配好的注册表**留了下来**
+（原先读完名字就丢）。Inspector 每帧要查字段表、要构造编辑态副本，若走
+`build_registry()`（每次现跑插件入口），一旦出现"名字在 `names` 里、重跑却没
+注册上"的错位，构造会**每帧失败**，而入口重跑失败会 `log::error!` —— 日志洪水。
+常驻缓存把它变成一次 `HashMap` 查询。
+
+### 六、一个会崩进程的测试陷阱（P0.5 埋的，P1 才暴露）
+
+`plugin_loading` 集成测试直接 dlopen `target/*.dll`。而 **`cargo test` 根本不
+产出 cdylib**（它只要 rlib 来链接测试），所以那些 DLL 停在上次 `cargo build`
+的那一刻。P1 给 `BehaviorEntry` 加了 `fields` 字段 —— **插件注册表是跨编译单元
+的内存布局**：DLL 那侧写、宿主这侧读。旧 DLL 按三段写、新宿主按四段解，
+`HashMap` 的桶直接读歪，下一次经构造函数指针跳过去就是
+**`STATUS_ACCESS_VIOLATION`（0xc0000005，进程暴毙，连 panic 都没有）**。
+
+修法：取 DLL 前先**嵌套构建一次**（`build_package_once`，每包每进程一次，
+持锁跨整次构建以串行化并行测试），把"新鲜"交给 cargo 的完整指纹去判断。
+
+**教训**：P0.5 当时没踩到纯属运气 —— 那会儿 DLL 刚由验证流程里的 `cargo build`
+产出、恰好新鲜。**产物与源码是否一致不能靠运气**，尤其当它变成内存布局的时候。
+
+### 七、性能：先量后改（这次差点白改一版架构）
+
+换 `Box<dyn Lifecycle>` → `Box<dyn Behavior>` 时担心：supertrait 方法调用要多一层
+vtable 间接（`dyn Behavior` 的 v表里存着 `Lifecycle` 的 v表指针）。量之前先回测：
+
+| 轨 | P0.5 `3d77f12` 同机 | P1 同机背靠背 |
+|---|---|---|
+| Rust 组件轨分发 | 68.4 µs | **65.2 µs** |
+| Rhai 脚本轨分发 | 728.8 µs | 729.3 µs |
+
+**P1 无回归**（甚至略低，在噪声内）—— 所以没有为这个猜想动架构。
+
+注意 50 µs 的验收线在本机是**红**的（P0.5 也红，同机测得 68.4 µs），而 P0 当时
+记录的是 37.6 µs：三条轨同步变慢而基线不动，判定为当时机器状态不同，不是某次
+提交把分发搞慢了。**没有为迁就机器而上调验收线**；数字连同"必须带同机对照"
+的说明一起写进了 `behavior_dispatch_throughput.rs` 的模块文档。
+
+### 八、验证
+
+- `cargo check --workspace --all-targets` / `cargo clippy`：0 错误 0 警告。
+- `cargo test --workspace --all-targets`：**307 项全绿**（P0.5 是 296）。
+- 无头检查：`xgame-editor --check projects/BehaviorsDemo` → `OK`。
+
+### 九、遗留
+
+- `FieldKind` v1 只有 10 种：`Quat` / `Color` 未进（等有真实组件需要再说）。
+- **组件字段不进场景文件**（P1.5）：现在 Edit 态调的参数活在编辑器内存里，
+  存盘不带走。序列化格式与 Lua 侧的绑定都等 P1.5 / P2。
+- 字段级编辑**没有撤销**（场景级有）—— 接上场景撤销时再一起做。
+- 没有 `trybuild`：「类型不支持又没标 `skip` ⇒ 编译期报错」这条无法断言，
+  只能靠报错文案本身足够指向性。

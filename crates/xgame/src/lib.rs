@@ -33,6 +33,22 @@ pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 插件边界（UE 模式）：宿主加载器 + 版本握手 + `export_plugin!` 宏。
 pub mod plugin;
 
+// ---------------------------------------------------------------------------
+// 检视（P1）：组件字段表 —— 编辑器 Inspector 与（P2）Lua 参数的同一份真相源
+// ---------------------------------------------------------------------------
+
+// 模块本身要能被 `::xgame::inspect::FieldDesc` 这样的**完全限定路径**引用 ——
+// `#[derive(Inspect)]` 生成的代码走的就是这条路（与 serde 生成 `::serde::...`
+// 同一约定），所以不能只在 prelude 里散着导出。
+pub use xgame_core::inspect;
+
+// trait 与派生宏同名但不同命名空间（type ns vs macro ns）——
+// 与 `serde::Serialize`（trait）+ `#[derive(Serialize)]` 是同一套玩法。
+pub use xgame_core::{FieldDesc, FieldKind, FieldValue, Inspect};
+pub use xgame_derive::Inspect;
+/// 组件的完整契约：四个钩子（[`Lifecycle`]）+ 字段检视（[`Inspect`]）。
+pub use xgame_runtime::Behavior;
+
 /// 一行拿齐写游戏 / 写插件所需的全部引擎类型。
 ///
 /// 拍平的是**深路径**（`xgame_render::scene_pipeline::ScenePipeline` 这类），
@@ -44,6 +60,9 @@ pub mod prelude {
         BodyKind, Entity, EntityId, GameClock, PhysicsBody, PhysicsHandle, Scene,
         Transform,
     };
+
+    // -- 检视（P1）：字段表 + 派生宏 --------------------------------------
+    pub use crate::{inspect, FieldDesc, FieldKind, FieldValue, Inspect};
 
     // -- 输入 -------------------------------------------------------------
     pub use xgame_input::{key_from_winit, Input, InputMap, KeyCode, MouseButton};
@@ -61,7 +80,9 @@ pub mod prelude {
     };
 
     // -- 运行时 -----------------------------------------------------------
-    pub use xgame_runtime::{BehaviorRegistry, Ctx, FrameReport, Lifecycle, World, WorldConfig};
+    pub use xgame_runtime::{
+        Behavior, BehaviorRegistry, Ctx, FrameReport, Lifecycle, World, WorldConfig,
+    };
 
     // -- 游戏侧 API（脚本 / 组件两轨的真相源）--------------------------
     pub use xgame_script::{GameCtx, LogLevel, RayHit, ScriptLog};

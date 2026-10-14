@@ -374,6 +374,9 @@ mod tests {
     #[derive(Default)]
     struct Noop;
     impl Lifecycle for Noop {}
+    // 握手测试不关心字段表；`#[derive(Inspect)]` 在本 crate 里解析不到
+    // `::xgame`（见 xgame-derive 的"路径假设"），走空实现。
+    xgame_core::impl_no_inspect!(Noop);
 
     /// 插件日志的捕获槽（`extern "C"` 函数不能带状态，只能经静态收集）。
     static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());

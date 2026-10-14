@@ -14,6 +14,7 @@
 //! | `id` | 稳定实体标识符 `EntityId` |
 //! | `animation` | 动画播放配置 `Animator` + 状态机 `AnimMachine` + 叠加层 `AnimAdditive` + 混合层栈 `AnimLayer`（声明式，落盘进场景文件） |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
+//! | `inspect` | 组件字段检视契约 `Inspect` + `FieldDesc`/`FieldValue`（Inspector 与 Lua 参数的同一份真相源）|
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
 //! | `asset` | `AssetId` 轻量资产句柄 |
 //! | `project` | 项目清单 `Project` + 项目句柄 `ProjectHandle` |
@@ -42,6 +43,7 @@ mod animation;
 mod asset;
 mod check;
 mod component;
+pub mod inspect;
 mod id;
 mod light;
 pub mod physics;
@@ -67,6 +69,7 @@ pub use animation::{
 };
 pub use asset::AssetId;
 pub use component::{Component, ComponentMap, ModelPath, Name};
+pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};
 pub use id::{EntityId, EntityMap, EntitySet};
 pub use light::{Light, LightKind};
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};

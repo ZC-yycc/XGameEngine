@@ -20,6 +20,8 @@
 //! 数量级；真正需要整场景快照的时刻仍然是整场景克隆，但那时是"确实编辑了一次"。
 
 use crate::state::EditorState;
+use xgame_core::{EntityId, FieldDesc, FieldKind, FieldValue, Inspect};
+use xgame_math::glam::{Vec2, Vec3, Vec4};
 
 /// 从一个控件的响应里收集「有改动 / 拖拽开始 / 拖拽结束」三个信号。
 fn collect(
@@ -31,6 +33,196 @@ fn collect(
     *touched |= resp.changed();
     *drag_began |= resp.drag_started();
     *drag_ended |= resp.drag_stopped();
+}
+
+// ---------------------------------------------------------------------------
+// 组件字段（双轨架构 P1）
+// ---------------------------------------------------------------------------
+
+/// 数值标量的通用步长 / 灵敏度兜底。
+///
+/// 单独拎出来是因为 `#[inspect]` 不写 `speed` 时五个数值类型各要一个合理默认：
+/// `f32` 拖一下想动 0.1，而 `u32` 拖一下动 0.1 只会让它**一格不动**
+/// （向下取整）。分两个值省掉"为什么这个数框拖不动"的排查。
+fn drag_speed(kind: FieldKind) -> f64 {
+    match kind {
+        FieldKind::I32 | FieldKind::I64 | FieldKind::U32 => 1.0,
+        _ => 0.1,
+    }
+}
+
+/// 把编辑器里拖出来的 `f32` 按字段类型写回成对应的 [`FieldValue`]。
+///
+/// 只在 `desc.kind` 是数值类型时调用（上面的 match 分支保证了这一点），
+/// 其余类型走不到 —— 所以不是 `Option`：走到了就是编程错误，让
+/// `U32` 那一臂兜底也比静默返回 `None` 让写入被吞掉好。
+fn numeric_value(kind: FieldKind, v: f32) -> FieldValue {
+    match kind {
+        FieldKind::F32 => FieldValue::F32(v),
+        FieldKind::F64 => FieldValue::F64(v as f64),
+        FieldKind::I32 => FieldValue::I32(v as i32),
+        FieldKind::I64 => FieldValue::I64(v as i64),
+        FieldKind::U32 => FieldValue::U32(v.max(0.0) as u32),
+        _ => FieldValue::F32(v),
+    }
+}
+
+/// 画一个组件的可检视字段，并把改动**写回组件本体**。
+///
+/// # 改的是哪一份
+///
+/// 由 [`EditorState::inspect_component`] 决定：Play 中是 World 里**跑着的**
+/// 那份（拖一下，下一次 `update` 就生效），Edit 中是编辑态副本（按 ▶ Play 时
+/// 灌进运行时）。两种模式下控件长得完全一样 —— 这是"一份元数据，两个消费者"
+/// 在编辑器这一侧的体现：控件布局只由 `FieldDesc` 决定，跟实例活在哪无关。
+///
+/// # 刻意不碰 `show_content` 的 `touched`
+///
+/// `touched` 在那边意味着"改了 `working`，要写回场景 + 推一条撤销记录"。
+/// 组件参数**不在场景文件里**（P1.5 才落地），改它不该凭空多出一条场景撤销 ——
+/// 否则按 Ctrl+Z 会撤销一个并不存在的场景改动，然后发现"参数还在，场景没变"。
+///
+/// # 取不到实例时
+///
+/// 直接返回、什么都不画。Behaviors 列表那一行已经用 ⚠ 标红了未注册的组件名，
+/// 再画一行"无法检视"是同一条信息说第二遍。
+fn show_behavior_fields(
+    state: &mut EditorState,
+    ui: &mut egui::Ui,
+    entity_id: EntityId,
+    slot: usize,
+    name: &str,
+) {
+    let Some((_, comp)) = state.inspect_component(entity_id, slot, name) else {
+        return;
+    };
+
+    let count = comp.inspect_fields().len();
+    if count == 0 {
+        ui.label(
+            egui::RichText::new("这个组件没有可调参数")
+                .weak()
+                .size(11.0),
+        );
+        return;
+    }
+
+    // 标签列宽固定，字段名长短不同也不会让右边的控件参差不齐。
+    let label_w = 120.0;
+    for i in 0..count {
+        // `desc` 是 `'static`（表是编译期常量），拿在手里**不占用** `comp` ——
+        // 下一行还能接着 &mut 它，不需要先放开借用。
+        let Some((desc, value)) = comp.inspect_field(i) else {
+            continue;
+        };
+
+        ui.horizontal(|ui| {
+            let label = egui::RichText::new(desc.display_label()).size(11.0);
+            let text = ui.add_sized([label_w, ui.spacing().interact_size.y], egui::Label::new(label));
+            if !desc.tooltip.is_empty() {
+                text.on_hover_text(desc.tooltip);
+            }
+            show_field_widget(ui, comp, i, desc, value);
+        });
+    }
+}
+
+/// 一个字段的控件。改动直接 `inspect_set` 回组件。
+///
+/// 每种 `FieldKind` 一个分支 —— 控件形状就是类型本身的一部分：
+/// 有边界的数值给滑块（拖到哪算哪，不会拖出界），没有的给裸拖拽值
+/// （`min/max` 缺省是常态，不强加一个作者没声明过的范围）。
+fn show_field_widget(
+    ui: &mut egui::Ui,
+    comp: &mut dyn Inspect,
+    index: usize,
+    desc: &FieldDesc,
+    value: FieldValue,
+) {
+    let unit = desc.unit;
+    match desc.kind {
+        FieldKind::F32 | FieldKind::F64 | FieldKind::I32 | FieldKind::I64 | FieldKind::U32 => {
+            let mut v = value.as_f32().unwrap_or(0.0);
+            let speed = desc.speed.map_or(drag_speed(desc.kind), |s| s as f64);
+            let resp = if desc.has_range() {
+                let lo = desc.min.unwrap_or(0.0);
+                let hi = desc.max.unwrap_or(1.0).max(lo);
+                // 滑块不做 `step_by`：边拖边吸附会让细调变成"一格一格跳"，
+                // 而 `step` 的语义是"落点对齐"，松手后量化一次更符合直觉。
+                ui.add(egui::Slider::new(&mut v, lo..=hi).suffix(unit))
+            } else {
+                ui.add(egui::DragValue::new(&mut v).speed(speed).suffix(unit))
+            };
+            if resp.changed() {
+                // 离散步长：量化在**写回前**做，两种控件共用这一处。
+                if let Some(step) = desc.step {
+                    if step > 0.0 {
+                        v = (v / step).round() * step;
+                    }
+                }
+                comp.inspect_set(index, numeric_value(desc.kind, v));
+            }
+        }
+
+        FieldKind::Bool => {
+            let mut b = matches!(value, FieldValue::Bool(true));
+            if ui.checkbox(&mut b, "").changed() {
+                comp.inspect_set(index, FieldValue::Bool(b));
+            }
+        }
+
+        FieldKind::String => {
+            let mut s = match value {
+                FieldValue::String(s) => s,
+                _ => String::new(),
+            };
+            let hint = if desc.tooltip.is_empty() {
+                desc.display_label().to_owned()
+            } else {
+                desc.tooltip.to_owned()
+            };
+            let resp = ui
+                .add(egui::TextEdit::singleline(&mut s).hint_text(hint).desired_width(140.0));
+            if resp.changed() {
+                comp.inspect_set(index, FieldValue::String(s));
+            }
+        }
+
+        FieldKind::Vec2 | FieldKind::Vec3 | FieldKind::Vec4 => {
+            // 拆成一个定长数组来编辑：三个类型共用同一套控件逻辑，
+            // 只在"读出来 / 拼回去"两处分叉 —— 比给每个向量类型抄一遍短得多。
+            let (mut arr, dims) = match value {
+                FieldValue::Vec2(v) => ([v.x, v.y, 0.0, 0.0], 2usize),
+                FieldValue::Vec3(v) => ([v.x, v.y, v.z, 0.0], 3),
+                FieldValue::Vec4(v) => ([v.x, v.y, v.z, v.w], 4),
+                // 与 `desc.kind` 对不上：不该发生（表与值同源），按 vec3 兜底。
+                _ => ([0.0; 4], 3),
+            };
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                for (axis, f) in ["X", "Y", "Z", "W"]
+                    .iter()
+                    .zip(arr.iter_mut().take(dims))
+                {
+                    ui.label(
+                        egui::RichText::new(*axis)
+                            .weak()
+                            .size(10.0),
+                    );
+                    let speed = desc.speed.map_or(0.1, |s| s as f64);
+                    changed |= ui.add(egui::DragValue::new(f).speed(speed)).changed();
+                }
+            });
+            if changed {
+                let out = match desc.kind {
+                    FieldKind::Vec2 => FieldValue::Vec2(Vec2::new(arr[0], arr[1])),
+                    FieldKind::Vec3 => FieldValue::Vec3(Vec3::new(arr[0], arr[1], arr[2])),
+                    _ => FieldValue::Vec4(Vec4::new(arr[0], arr[1], arr[2], arr[3])),
+                };
+                comp.inspect_set(index, out);
+            }
+        }
+    }
 }
 
 /// 在 `Ui` 内渲染检视面板内容。
@@ -725,13 +917,38 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         ui.indent("behaviors", |ui| {
             let names: Vec<String> = state.behavior_names().to_vec();
             let mut remove: Option<usize> = None;
+            let entity_id = entity.id;
             for (slot, name) in entity.behaviors.iter().enumerate() {
+                let registered = names.iter().any(|n| n == name);
                 ui.horizontal(|ui| {
                     ui.label("🧩");
-                    let registered = names.iter().any(|n| n == name);
                     let text = egui::RichText::new(name.clone()).monospace().size(11.0);
                     if registered {
-                        ui.label(text).on_hover_text("已注册的 Rust 组件；顺序即执行顺序");
+                        // 悬停先把"有哪些参数"说清楚 —— 展开之前就知道值不值得
+                        // 展开，也省得对着一个没参数的组件找为什么是空的。
+                        // 查的是常驻缓存的字段表，不构造实例、不重跑插件入口。
+                        // `is_empty` 的判断放进分支体而不是 match guard：
+                        // `Some(t) if t.is_empty()` 这种写法 clippy 会报
+                        // redundant_guard（空切片本可以直接写成 `Some([])`）。
+                        let tip = match state.behavior_field_table(name) {
+                            None => "已注册的 Rust 组件；顺序即执行顺序".to_owned(),
+                            Some(table) => {
+                                let params: Vec<&str> =
+                                    table.iter().map(|f| f.display_label()).collect();
+                                if params.is_empty() {
+                                    "已注册的 Rust 组件；顺序即执行顺序；没有可调参数"
+                                        .to_owned()
+                                } else {
+                                    format!(
+                                        "已注册的 Rust 组件；顺序即执行顺序\n\
+                                         可调参数（{} 个）：{}",
+                                        params.len(),
+                                        params.join("、")
+                                    )
+                                }
+                            }
+                        };
+                        ui.label(text).on_hover_text(tip);
                     } else {
                         // 未注册不是错误（用户可能先在场景里写好、再按 Play 编译），
                         // 但它**必须可见** —— 否则就是"挂了个组件却纹丝不动"。
@@ -748,10 +965,32 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                         remove = Some(slot);
                     }
                 });
+
+                // ── 可调参数（P1）──
+                //
+                // 缩进一级挂在组件名下面：字段属于它上面那行的组件，不是实体的。
+                // 未注册的不画 —— 注册表里没有它就取不到字段表，而"为什么是空的"
+                // 上面那行 ⚠ 已经说清楚了。
+                if registered {
+                    ui.indent(("behavior_fields", slot), |ui| {
+                        show_behavior_fields(state, ui, entity_id, slot, name);
+                    });
+                }
             }
             if let Some(slot) = remove {
                 entity.behaviors.remove(slot);
                 touched = true;
+            }
+
+            // 调参什么时候生效 —— 两种模式的差别就这一句话，说在最前面免得
+            // 用户在 Edit 里拖了半天问"为什么没动"。
+            if !entity.behaviors.is_empty() {
+                let hint = if state.is_editing() {
+                    "参数在按 ▶ Play 后生效（改动会留到下次 Play）"
+                } else {
+                    "热调参中 —— 改动立即生效，停止 Play 时丢弃"
+                };
+                ui.label(egui::RichText::new(hint).weak().size(10.5));
             }
 
             ui.horizontal(|ui| {

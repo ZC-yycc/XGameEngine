@@ -13,10 +13,16 @@
 //!
 //! # dll 在哪
 //!
-//! 两个插件都是 workspace 成员，`cargo test --workspace` 会顺带产出 cdylib；
-//! 单独跑 `cargo test -p xgame` 时未必。所以先探 `target/*`，找不到就触发一次
-//! 嵌套 `cargo build -p <package>`（带超时，防止与外层 cargo 抢目标目录锁时
-//! 无限挂起）。
+//! 两个插件都是 workspace 成员，产出在 `target/*/<插件名>.dll`。**注意
+//! `cargo test` 并不会产出 cdylib** —— 它只要 rlib 来链接测试，所以
+//! `target/*.dll` 停在上次 `cargo build` 的那一刻。
+//!
+//! 而"过期的插件 DLL"在本测试里不是"跑得旧"而是**直接崩进程**：插件注册表
+//! 是跨编译单元的内存布局，DLL 侧写、宿主侧读，结构一变（P1 给
+//! `BehaviorEntry` 加过一个字段）就会读歪 `HashMap`，再经构造函数指针跳过去
+//! = `STATUS_ACCESS_VIOLATION`。所以每次取 DLL 都先嵌套构建一次
+//! （见 [`build_package_once`]），把"新鲜"交给 cargo 的完整指纹去判断。
+//! 带超时，防止与外层 cargo 抢目标目录锁时无限挂起。
 //!
 //! # 为什么同时测两个插件
 //!
@@ -28,6 +34,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use xgame::plugin::{load_plugin, LoadedPlugin};
@@ -71,11 +78,10 @@ fn workspace_plugin_dll(lib_name: &str, package: &str) -> PathBuf {
     candidates.push(repo_root.join("target").join(first).join(&file));
     candidates.push(repo_root.join("target").join(second).join(&file));
 
-    if let Some(found) = candidates.iter().find(|p| p.exists()) {
-        return found.clone();
-    }
+    // **先保证产物与源码一致，再找产物** —— 顺序反了就会捡到一个"存在但过期"
+    // 的 DLL，而过期的插件会把测试进程打崩（见 `build_package_once`）。
+    build_package_once(&repo_root, package);
 
-    build_plugin_package(&repo_root, package);
     candidates
         .into_iter()
         .find(|p| p.exists())
@@ -85,6 +91,44 @@ fn workspace_plugin_dll(lib_name: &str, package: &str) -> PathBuf {
                  并检查 target 目录布局"
             )
         })
+}
+
+/// 嵌套构建一个插件包，**每个包每进程至多一次**（并发的其余测试等它建完）。
+///
+/// # 为什么必须真的构建，而不是"探到就用"
+///
+/// `cargo test` **不会重新产出 cdylib** —— 它只要 rlib 来链接测试二进制，
+/// 于是 `target/*.dll` 停在上次 `cargo build` 的那一刻。而插件注册表是
+/// **跨编译单元的内存布局**：DLL 那侧写 `BehaviorEntry`，宿主这侧读它。
+/// P1 给 `BehaviorEntry` 加了 `fields: &'static [FieldDesc]` —— 旧 DLL 按三段写、
+/// 新宿主按四段解，`HashMap` 的桶直接读歪，下一次经构造函数指针跳过去就是
+/// `STATUS_ACCESS_VIOLATION`：**进程暴毙，连 panic 都没有**，测试输出里只能看到
+/// 一个 0xc0000005。
+///
+/// P0.5 没踩到纯属运气 —— 那会儿 DLL 刚由验证流程里的 `cargo build` 产出、
+/// 恰好新鲜。产物与源码是否一致不该靠运气，所以这里无条件交给 cargo
+/// （它有完整指纹：新鲜时零点几秒、**且不会重写产物文件**）。
+///
+/// # 为什么每包只构建一次
+///
+/// 本文件的四个测试并行跑，各自起一次嵌套 cargo 除了白排队，还有 Windows
+/// 文件锁竞态：`load_plugin` 直接 dlopen `target/*.dll`（本测试**刻意**不走
+/// 编辑器的临时副本路径 —— 那是 P0.5 给"编辑器反复重载"设计的，走它就测不到
+/// 原始加载了），而已被加载的文件 cargo 重写不了，会以 "Access denied" 失败。
+/// 把构建串成进程内一次，后面几个测试读到的必定是同一批已建好的产物。
+///
+/// 持锁跨整次构建是有意的：第二个测试要的正是"第一个建完了"。
+fn build_package_once(repo_root: &std::path::Path, package: &str) {
+    static DONE: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    let done = DONE.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = done
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.iter().any(|p| p == package) {
+        return;
+    }
+    build_plugin_package(repo_root, package);
+    guard.push(package.to_owned());
 }
 
 /// 嵌套跑一次 `cargo build -p <package>`（在工作线程里等结果，

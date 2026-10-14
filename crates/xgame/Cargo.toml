@@ -14,6 +14,8 @@ xgame-input = { path = "../xgame-input", features = ["winit"] }
 xgame-render = { path = "../xgame-render" }
 xgame-script = { path = "../xgame-script" }
 xgame-runtime = { path = "../xgame-runtime" }
+# `#[derive(Inspect)]`（P1）：生成组件字段表，同时服务编辑器 Inspector 与 Lua 参数。
+xgame-derive = { path = "../xgame-derive" }
 # 插件边界（P0）：宿主加载器经 libloading dlsym 用户 cdylib；log 是插件日志的去处。
 libloading = "0.8"
 log = "0.4"

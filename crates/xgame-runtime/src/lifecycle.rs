@@ -23,6 +23,8 @@
 
 use std::any::Any;
 
+use xgame_core::Inspect;
+
 /// 组件钩子的上下文 —— [`GameCtx`] 的别名（见模块文档末尾的取舍说明）。
 ///
 /// [`GameCtx`]: xgame_script::GameCtx
@@ -56,3 +58,26 @@ pub trait Lifecycle: Any + Send + Sync {
         let _ = ctx;
     }
 }
+
+// ---------------------------------------------------------------------------
+// 组件契约：生命周期 + 可检视
+// ---------------------------------------------------------------------------
+
+/// **组件的完整契约** —— 四个钩子（[`Lifecycle`]）+ 字段检视（[`Inspect`]）。
+///
+/// # 为什么"可检视"是必选项而不是可选能力
+///
+/// 运行时把组件存成 `Box<dyn Behavior>`。要让编辑器在不链接用户代码的前提下
+/// 拿到 `&mut dyn Inspect`，存储的 trait 对象本身就必须能转过去 ——
+/// 而 `Box<dyn Lifecycle>` **不能**安全地降级成 `&mut dyn Inspect`
+/// （跨 DLL 边界 `Any::downcast` 靠 `TypeId`，而 `TypeId` 在两个编译单元之间
+/// 不保证相同；同名不同类型会静默错配）。
+///
+/// 所以两条能力合并成一个 trait：注册时同时拿到钩子函数与字段表，一次擦除、
+/// 终身可用。代价是"不想在编辑器里调参"的组件也要给个空表 ——
+/// `xgame_core::impl_no_inspect!` 或 `#[inspect(skip)]` 把成本压到一行。
+///
+/// 这个绑定也是 P2 的伏笔：Lua 宿主要把组件字段暴露成脚本参数，用的正是
+/// 同一张表（`Docs/双轨语言架构计划.md`：一份元数据，两个消费者）。
+pub trait Behavior: Lifecycle + Inspect {}
+impl<T: Lifecycle + Inspect + ?Sized> Behavior for T {}

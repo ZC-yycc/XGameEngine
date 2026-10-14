@@ -19,6 +19,7 @@
 | **六·七** | ✅ 完成 | **编辑器产品化第一波**：项目设置（重力 / 步长进 project.ron + ⚙ 设置窗口）、未保存保护（脏标记 + 关窗确认 + Save As + 标题星号）、无头检查 `xgame-editor --check`（Agent-Native 第一块砖）+ 差距分析入库 `Docs/差距分析.md` |
 | **双轨架构 P0** | ✅ 完成 | 双轨语言架构（Rust + Lua）第一期：`xgame` 门面 crate + `GameCtx` 方法层 + Rust 组件（`Lifecycle` / 注册表 / `Entity::behaviors`）+ cdylib 插件边界（`export_plugin!` + 版本握手 + 示例插件全链路）—— 计划与决策见 [`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)，实施记录见 PLAN.md 十五 |
 | **双轨架构 P0.5** | ✅ 完成 | **编辑器 PIE**：项目根有 `Cargo.toml` ⇒ 按 ▶ Play 自动后台 `cargo build`（UI 不阻塞）→ 产物同步进 `<项目>/Plugins/` → 临时副本加载进 Play 会话；Inspector 的 Behaviors 区、工具栏编译指示器、打包器带 `Plugins/`、玩家加载插件；演示项目 [`projects/BehaviorsDemo`](projects/BehaviorsDemo) 是 Rust 组件与 Rhai 脚本同场景共存 —— 决策见计划文档 **D7**，实施记录见 PLAN.md 十六 |
+| **双轨架构 P1** | ✅ 完成 | **`#[derive(Inspect)]` + 编辑器调参**：组件自带静态字段表（`Inspect` trait / `FieldDesc` / 10 种 `FieldKind`），Inspector 按表自动渲染控件（有边界给滑块、无边界给拖拽值、勾选框 / 文本 / 向量行），Play 中改**活实例**（热调参）、Edit 中改副本（按 ▶ 时灌进运行时）—— 决策见计划文档 **D8**，实施记录见 PLAN.md 十七 |
 | **七** | 🟨 进行中 | 动画系统（第一片 ✅：骨骼蒙皮 + 单剪辑播放；第二片 ✅：换剪辑交叉淡入；第三片 ✅：阈值状态机；第四片 ✅：叠加混合；第五片 ✅：多层混合栈 + 骨骼遮罩；morph/Phase B 待做） |
 | **八** | ⬜ 待开始 | 音频系统 |
 | **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影已落地；CSM / Bloom / ACES / 天空盒待做） |
@@ -176,10 +177,10 @@ scene_write / entity_upsert / entity_remove / project_check，配 20 条回归�
 > 窗口与 `GameApp` 都推迟到 `resumed` 里创建（`ActiveEventLoop::create_window`
 > 只在回调内可见）。`about_to_wait` 主动 `request_redraw()` 的连续帧机制不变。
 
-## 双轨语言架构（进行中）：P0 ✅ P0.5 ✅
+## 双轨语言架构（进行中）：P0 ✅ P0.5 ✅ P1 ✅
 
 Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决策记录：
-[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；实施记录：PLAN.md 十五 / 十六。
+[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；实施记录：PLAN.md 十五 / 十六 / 十七。
 
 | P0 交付 | 状态 | 说明 |
 |---|---|---|
@@ -188,7 +189,7 @@ Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决�
 | Rust 组件 | ✅ | `Lifecycle` 四钩子（与 Rhai 同名同语义）+ `BehaviorRegistry` + `Entity::behaviors`（serde 兼容旧场景文件） |
 | 组件分发 | ✅ | `World` 帧管线的平行路径（字段级拆借不动）；钩子函数装配期拷进实例，热路径零哈希 |
 | 插件边界 | ✅ | cdylib + `export_plugin!` 宏 + 版本握手（不匹配拒载、报错可读）；示例 `examples/spinner-plugin` 端到端跑通四钩子 |
-| 微基准 | ✅ | 1000 no-op 组件实体分发 **37.6 µs/帧**（验收线 50）；对照 Rhai 脚本轨 493.9 µs = **13.1×** |
+| 微基准 | ✅ | 1000 no-op 组件实体分发 **37.6 µs/帧**（验收线 50）；对照 Rhai 脚本轨 493.9 µs = **13.1×**。⚠ 这是 **P0 当时机器状态**下的数字：绝对值随睿频 / 后台负载浮动 1.5× 以上，跨版本比较必须用**同机背靠背对照**（记录表见 `crates/xgame-runtime/tests/behavior_dispatch_throughput.rs` 模块文档） |
 
 | P0.5 交付 | 状态 | 说明 |
 |---|---|---|
@@ -200,11 +201,25 @@ Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决�
 | 玩家 / 打包器 | ✅ | `xgame-game` 加载 `Plugins/`；打包器复制 `Plugins/` 并在"有 Cargo.toml 却没 DLL"时把警告塞进构建报告 |
 | 演示项目 | ✅ | [`projects/BehaviorsDemo`](projects/BehaviorsDemo) —— **项目本身就是 cdylib crate**，场景里 Rust 组件与 Rhai 脚本同款行为共存 |
 
-后续分期：**P1** `#[derive(Inspect)]` → **P2** Lua 宿主（mlua）→ **P2.5** 基准闸门
-（Rhai vs Lua）→ **P3** 按闸门结论处置 Rhai。
+| P1 交付 | 状态 | 说明 |
+|---|---|---|
+| `Inspect` 契约 | ✅ | `xgame-core::inspect`：`FieldDesc`（`'static` 描述）/ `FieldKind`（10 种）/ `FieldValue`（拥有值）/ trait `Inspect`（表 + 下标，两个对象安全方法，热路径零哈希）；类型不符的写入静默忽略、越界读返回类型零值 —— 检视是旁路，一个下标算错不该拖垮宿主 |
+| `#[derive(Inspect)]` | ✅ | `xgame-derive`；表 / get / set 三处下标**由同一个变量生成**，结构上不可能错位（手写最常犯的错就是三处错位，表现是"改 A 字段动了 B 字段"且编译器不响）；字段属性 `skip / label= / min= / max= / speed= / step= / unit= / tooltip=`；`label` 只改显示名，寻址名永远是 Rust 字段名 |
+| 组件契约升级 | ✅ | `pub trait Behavior: Lifecycle + Inspect {}`（blanket impl）。编辑器不链接用户代码，拿 `&mut dyn Inspect` 只能靠实例自带的字段表 —— 存 `Box<dyn Lifecycle>` 时这个降级做不到（需 downcast，跨 DLL 无共享类型信息）；`impl_no_inspect!` 是"不开放字段"的一行逃生舱 |
+| Inspector 自动渲染 | ✅ | Behaviors 区按字段表画控件：有 `min+max` 给**滑块**（不强加作者没声明的范围），否则给裸拖拽值；`Bool` 勾选框、`String` 单行文本、`Vec2/3/4` 分量拖拽行；悬停先列出该组件有哪些参数 |
+| Edit 模式调参 | ✅ | `EditorState.edit_components` 惰性构造的**纯数据副本**：拖滑块 → 按 ▶ → 逐字段灌进刚启动的运行时（不换实例，装配状态不作废）；换组件类型即作废重建（避免把 A 的参数写进 B 的字段）；停止 Play 丢弃 Play 中的改动（Unity 默认语义） |
+| Play 热调参 | ✅ | Play 中改的是 World 里**跑着的那份** —— 拖一下下一次 `update` 就生效；`GameRuntime::behavior_at_mut` 是面板拿到活实例的唯一通道（不暴露整个 `World`） |
+
+后续分期：**P1.5**（组件字段进场景文件）→ **P2** Lua 宿主（mlua）→ **P2.5**
+基准闸门（Rhai vs Lua）→ **P3** 按闸门结论处置 Rhai。
 
 P0.5 遗留（有意延后）：Play 中途热换插件、组件徽章、release profile 插件出货（P3）、
 cargo 构建超时。
+
+P1 遗留（有意延后）：**组件字段不进场景文件**（Edit 态调的参数活在编辑器内存里，
+存盘不带走，序列化格式与 Lua 绑定一起等 P1.5 / P2）、`Quat` / `Color` 未进
+`FieldKind`、字段级编辑无撤销（场景级有）、无 `trybuild`（"类型不支持又没标
+`skip` 就报错"这条无法断言）。
 
 ## 第七阶段：动画系统 🟨
 

@@ -96,6 +96,20 @@ impl GameRuntime {
         self.world.take_logs()
     }
 
+    /// 按下标取一个组件的 `(注册名, 可检视对象)` —— Inspector 在 Play 中改
+    /// **活实例**用（拖一下下一次 `update` 就生效，Unity 式热调参）。
+    ///
+    /// 转发而不是让面板直接拿 `World`：多这一层，面板就只能碰到字段表，
+    /// 碰不到变换 / 物理 / 销毁 —— 那些是 `state.scene` 的事，有它自己的路径。
+    /// 少一条边，少一类"面板在 Play 中偷偷改了运行时状态"的 bug。
+    pub fn behavior_at_mut(
+        &mut self,
+        entity_id: xgame_core::EntityId,
+        index: usize,
+    ) -> Option<(&'static str, &mut dyn xgame_core::Inspect)> {
+        self.world.behavior_at_mut(entity_id, index)
+    }
+
     /// 重新编译所有脚本（脚本热重载）。
     pub fn reload_scripts(&mut self) {
         self.world.reload_scripts();

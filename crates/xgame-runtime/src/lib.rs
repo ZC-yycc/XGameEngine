@@ -41,7 +41,7 @@ mod lifecycle;
 mod registry;
 mod world;
 
-pub use lifecycle::{Ctx, Lifecycle};
+pub use lifecycle::{Behavior, Ctx, Lifecycle};
 pub use registry::BehaviorRegistry;
 pub use world::{FrameReport, World, WorldConfig};
 
