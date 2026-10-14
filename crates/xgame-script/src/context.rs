@@ -224,15 +224,34 @@ impl<'a> FrameCtx<'a> {
 /// 不会因为"把它移走了"而报错，也不会阻止 Rust 侧的借用检查。
 /// 本体只有一个 [`GameCtx`] 地址 —— 全部宿主 API 都是它的方法
 /// （见 `api.rs`：每个 Rhai 函数都是一行转发）。
-#[derive(Clone, Copy)]
-pub struct ScriptCtx {
+///
+/// # 为什么状态表是泛型参数 `S`
+///
+/// 持久状态表的值类型是**宿主专属**的：Rhai 存 `rhai::Dynamic`，Lua 存
+/// `mlua::Value`（双轨计划 D1 明确"Lua 值直接用 mlua 原生转换"，不引入中立
+/// `ScriptValue`）。地址束本身与状态类型无关，所以把它抽成泛型参数，默认
+/// `S = rhai::Map` —— Rhai 侧全部代码零改动，Lua 宿主用 `ScriptCtx<mlua::Table>`。
+pub struct ScriptCtx<S = rhai::Map> {
     game: ErasedMut<GameCtx<'static>>,
     /// 这个 (实体, 脚本) 对的持久状态。见 [`ScriptCtx::state`]。
-    state: Option<ErasedMut<rhai::Map>>,
+    state: Option<ErasedMut<S>>,
 }
 
-impl ScriptCtx {
-    pub(crate) fn new(game: &mut GameCtx<'_>, state: Option<&mut rhai::Map>) -> Self {
+// 手写而不是 `#[derive(Clone, Copy)]`：derive 会给 `S` 加 `S: Clone` / `S: Copy`
+// 约束，而 `rhai::Map` / `mlua::Table` 都不是 `Copy`。地址束的两个字段
+// （`usize` + `PhantomData`）对任意 `S` 都是 `Copy`，约束纯属 derive 多加的。
+impl<S> Clone for ScriptCtx<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S> Copy for ScriptCtx<S> {}
+
+// `S: 'static` 是 [`ErasedMut::get_mut`] 放宽返回生命周期的硬要求（返回
+// `&'static mut S`）。两个宿主的状态类型（`rhai::Map` / `mlua::Table`）都是 `'static`，
+// 这个约束不影响任何实际用途。
+impl<S: 'static> ScriptCtx<S> {
+    pub(crate) fn new(game: &mut GameCtx<'_>, state: Option<&mut S>) -> Self {
         Self {
             // 生命周期提升（`GameCtx<'a>` → `GameCtx<'static>`）只是地址束的
             // 类型层谎报，实际存活期由 `run_hook` 的调用窗口保证 —— 与
@@ -252,10 +271,10 @@ impl ScriptCtx {
     /// "给自己记一个计时器 / 冷却 / 血量"在脚本里没有别的写法。这张表由引擎侧
     /// 持有、按 `(实体, 脚本)` 分开，脚本通过 `state_get` / `state_set` 访问。
     ///
-    /// 它不进 `GameCtx`：表的值是 `rhai::Dynamic`，纯 Rhai 概念，
+    /// 它不进 [`GameCtx`]：表的值类型是宿主专属的（`rhai::Dynamic` / `mlua::Value`），
     /// 引擎无关的方法层不该认识它。
-    pub(crate) fn state(&self) -> Option<&mut rhai::Map> {
-        // SAFETY: 状态表由 ScriptHost 独占持有，直到派发结束。
+    pub(crate) fn state(&self) -> Option<&mut S> {
+        // SAFETY: 状态表由宿主（ScriptHost / LuaHost）独占持有，直到派发结束。
         self.state.map(|s| unsafe { s.get_mut() })
     }
 
@@ -266,7 +285,7 @@ impl ScriptCtx {
     }
 }
 
-impl std::fmt::Debug for ScriptCtx {
+impl<S: 'static> std::fmt::Debug for ScriptCtx<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScriptCtx")
             .field("entity", &self.game().entity)

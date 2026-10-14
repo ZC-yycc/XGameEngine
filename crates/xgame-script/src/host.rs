@@ -10,6 +10,7 @@ use xgame_core::{EntityId, Scene};
 use crate::api;
 use crate::context::{FrameCtx, LogLevel, ScriptCommand, ScriptCtx, ScriptLog};
 use crate::ctx::GameCtx;
+use crate::intern::PathIntern;
 
 /// 脚本可以实现的生命周期钩子。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,9 +58,10 @@ impl Hooks {
 }
 
 /// 一份编译好的脚本。
+///
+/// 不存路径了：名字走驻留表（`intern.resolve`），状态表键走驻留 id ——
+/// 结构上不再需要第二份 `String` 副本。
 struct CompiledScript {
-    /// 项目相对路径，同时用作日志里的"脚本名"。
-    path: String,
     ast: AST,
     hooks: Hooks,
     /// 脚本**顶层语句**跑完之后的作用域。
@@ -123,7 +125,14 @@ pub struct ScriptHost {
     /// 已经跑过 `start` 的实体。
     started: HashSet<EntityId>,
     /// 每个 (实体, 脚本) 对的持久状态（`state_get` / `state_set` 背后的表）。
-    states: HashMap<(EntityId, String), Map>,
+    /// 键里的脚本是**驻留 id**（`u32`）：`String` 键意味着每钩子克隆一次路径，
+    /// 1000 实体实测 ≈77.8 µs/帧，见 [`PathIntern`] 模块文档。
+    states: HashMap<(EntityId, u32), Map>,
+    /// 脚本路径驻留表（热路径零 `String` 分配）。
+    ///
+    /// **永不清空**：状态表按 id 找状态，`invalidate` / `invalidate_all`
+    /// 只清编译缓存 —— 驻留表一清，热重载后每实体的状态就静默错位了。
+    intern: PathIntern,
     /// 待回收的日志与命令。
     logs: Vec<ScriptLog>,
     commands: Vec<ScriptCommand>,
@@ -162,6 +171,7 @@ impl ScriptHost {
             failed: HashSet::new(),
             started: HashSet::new(),
             states: HashMap::new(),
+            intern: PathIntern::new(),
             logs: Vec::new(),
             commands: Vec::new(),
             root: None,
@@ -186,12 +196,16 @@ impl ScriptHost {
     /// 丢弃所有编译结果，下次派发时重新读取。
     ///
     /// 热重载的入口：编辑器（或独立游戏的开发模式）在检测到脚本文件变化后调用。
+    ///
+    /// **不碰驻留表**（[`PathIntern`]）：状态表按驻留 id 找状态，id 一变
+    /// 每实体的计时器 / 冷却就静默错位了。回归测试：
+    /// `state_survives_hot_reload_even_when_intern_order_changes`。
     pub fn invalidate_all(&mut self) {
         self.scripts.clear();
         self.failed.clear();
     }
 
-    /// 让某个脚本失效。
+    /// 让某个脚本失效（同样不清驻留表，理由见 [`ScriptHost::invalidate_all`]）。
     pub fn invalidate(&mut self, path: &str) {
         self.scripts.remove(path);
         self.failed.remove(path);
@@ -208,7 +222,7 @@ impl ScriptHost {
         self.commands.clear();
     }
 
-    /// 编译场景里用到的全部脚本。
+    /// 编译场景里用到的全部 Rhai 脚本（`.lua` 归 Lua 宿主，这里跳过）。
     pub fn preload(&mut self, root: &Path, scene: &Scene) -> PreloadReport {
         self.root = Some(root.to_path_buf());
         let mut report = PreloadReport::default();
@@ -217,7 +231,7 @@ impl ScriptHost {
         let mut paths: Vec<String> = Vec::new();
         for entity in &scene.entities {
             for path in &entity.scripts {
-                if seen.insert(path.as_str()) {
+                if is_rhai(path) && seen.insert(path.as_str()) {
                     paths.push(path.clone());
                 }
             }
@@ -237,15 +251,20 @@ impl ScriptHost {
     // 生命周期派发
     // -----------------------------------------------------------------------
 
-    /// 对尚未跑过 `start` 的实体派发一次 `start`。
+    /// 对尚未跑过 `start` 的实体派发一次 `start`（`.lua` 归 Lua 宿主）。
     pub fn dispatch_start(&mut self, mut frame: FrameCtx<'_>) {
-        let mut queue: Vec<(EntityId, String)> = Vec::new();
+        // 队列存驻留 id（`u32`）而不是 `String`：实体一旦跑过 start，这个队列
+        // 就不会再建，所以这里省的主要是"首次进入场景那一帧"的分配 ——
+        // 但与 `collect_script_queue` 保持同一种载体，免得两处各记一套账。
+        let mut queue: Vec<(EntityId, u32)> = Vec::new();
         for entity in &frame.scene.entities {
             if entity.scripts.is_empty() || self.started.contains(&entity.id) {
                 continue;
             }
             for path in &entity.scripts {
-                queue.push((entity.id, path.clone()));
+                if is_rhai(path) {
+                    queue.push((entity.id, self.intern.intern(path)));
+                }
             }
         }
         // 先把 `started` 全记上再执行：脚本 A 的 `start` 里如果生成了实体，
@@ -253,25 +272,25 @@ impl ScriptHost {
         for (id, _) in &queue {
             self.started.insert(*id);
         }
-        for (id, path) in queue {
-            self.run_hook(&mut frame, id, &path, Hook::Start);
+        for (id, path_id) in queue {
+            self.run_hook(&mut frame, id, path_id, Hook::Start);
         }
     }
 
     /// 派发一帧 `update`。
     pub fn dispatch_update(&mut self, mut frame: FrameCtx<'_>) {
-        let queue = collect_script_queue(frame.scene);
-        for (id, path) in queue {
-            self.run_hook(&mut frame, id, &path, Hook::Update);
+        let queue = collect_script_queue(frame.scene, &mut self.intern);
+        for (id, path_id) in queue {
+            self.run_hook(&mut frame, id, path_id, Hook::Update);
         }
     }
 
     /// 派发一次 `fixed_update`（与物理固定步长同频）。
     pub fn dispatch_fixed_update(&mut self, mut frame: FrameCtx<'_>, fixed_dt: f32) {
         frame.delta = fixed_dt;
-        let queue = collect_script_queue(frame.scene);
-        for (id, path) in queue {
-            self.run_hook(&mut frame, id, &path, Hook::FixedUpdate);
+        let queue = collect_script_queue(frame.scene, &mut self.intern);
+        for (id, path_id) in queue {
+            self.run_hook(&mut frame, id, path_id, Hook::FixedUpdate);
         }
     }
 
@@ -280,7 +299,10 @@ impl ScriptHost {
     /// `scripts` 由调用方传进来：实体一旦从场景里摘掉，它的脚本列表也就没了。
     pub fn dispatch_destroy(&mut self, frame: &mut FrameCtx<'_>, entity: EntityId, scripts: &[String]) {
         for path in scripts {
-            self.run_hook(frame, entity, path, Hook::Destroy);
+            if is_rhai(path) {
+                let path_id = self.intern.intern(path);
+                self.run_hook(frame, entity, path_id, Hook::Destroy);
+            }
         }
         self.started.remove(&entity);
     }
@@ -293,10 +315,20 @@ impl ScriptHost {
         self.states.retain(|(id, _), _| *id != entity);
     }
 
-    fn run_hook(&mut self, frame: &mut FrameCtx<'_>, entity: EntityId, path: &str, hook: Hook) {
-        if !self.ensure_loaded(path) {
+    /// 派发一个钩子。`path_id` 是 [`PathIntern`] 给的稳定 id（队列里只带它，
+    /// 热路径零 `String` 克隆；要 `&str` 的地方用 `intern.resolve` 换回来）。
+    fn run_hook(&mut self, frame: &mut FrameCtx<'_>, entity: EntityId, path_id: u32, hook: Hook) {
+        // 不能先 `let path = self.intern.resolve(...)` 再传进 `&mut self` 的
+        // 方法：那条 `&str` 借的是 self 的一个字段，借用检查器看不出"它就是
+        // self 身上的一块"，只会认为整个 self 被借走。所以加载这一步在
+        // 方法**内部**自己解析 id；钩子体再单独 resolve 一次（O(1) 下标）。
+        if !self.ensure_loaded_id(path_id) {
             return;
         }
+        // 字段级拆借：`path` 借 `self.intern`（共享），`script` 借 `self.scripts`
+        // （可写），下面还要动 `states` / `logs` / `commands` / `engine` ——
+        // 全是互不重叠的字段，编译器放行，所以这条 `&str` 能一路活到钩子跑完。
+        let path = self.intern.resolve(path_id);
         let Some(script) = self.scripts.get_mut(path) else {
             return;
         };
@@ -317,22 +349,22 @@ impl ScriptHost {
         // `script.ast`，两个可变/不可变借用叠在一起过不了借用检查。
         let mut scope = std::mem::replace(&mut script.scope, Scope::new());
 
-        // 每 (实体, 脚本) 一份的状态表。这里每次都会构造一个 key 字符串，
-        // 换来的是"脚本终于能给自己记计时器"这件事成立 —— 脚本实体通常只有
-        // 几十个，这点分配不值得为它做更绕的设计。
-        let state_key = (entity, script.path.clone());
+        // 每个 (实体, 脚本) 一份的状态表。键里的脚本是驻留 id（`u32`）——
+        // 以前这里每次克隆一个路径 `String`（1000 实体实测 ≈77.8 µs/帧），
+        // 换成 id 后语义不变（id 与路径一一对应、热重载也不变，见 `intern.rs`）。
+        let state_key = (entity, path_id);
         let state = self.states.entry(state_key).or_default();
 
         // 把本次钩子所需的全部状态捆成 GameCtx（API 真相源，见 ctx.rs），
         // 再擦除成地址交给解释器。字段级拆借：frame 的 scene / physics 与
-        // self 的 logs / commands / states / scripts 互不重叠，编译器放行。
+        // self 的 logs / commands / states / scripts / intern 互不重叠，编译器放行。
         let mut game = GameCtx {
             scene: &mut *frame.scene,
             physics: frame.physics.as_deref_mut(),
             input: frame.input,
             logs: &mut self.logs,
             commands: &mut self.commands,
-            source: &script.path,
+            source: path,
             entity,
             delta: frame.delta,
             time: frame.time,
@@ -388,6 +420,18 @@ impl ScriptHost {
 
     /// 用编译好的脚本预加载一个已知路径（编辑器"重新加载脚本"用）。
     pub fn ensure_loaded(&mut self, path: &str) -> bool {
+        // 先驻留拿到 id、再转 id 版：`ensure_loaded_id` 要在方法**体内**借
+        // `self.intern` 解析路径，从外面把那条 `&str` 递进去会与 `&mut self`
+        // 打架（借用检查器看不出"它就是 self 身上的一块"）。
+        let path_id = self.intern.intern(path);
+        self.ensure_loaded_id(path_id)
+    }
+
+    /// [`ensure_loaded`] 的驻留 id 形参版（派发热路径用：队列里只有 id）。
+    fn ensure_loaded_id(&mut self, path_id: u32) -> bool {
+        // 借 `self.intern`（共享）；下面动的全是别的字段（scripts / failed /
+        // logs / engine / root），字段级拆借放行。
+        let path = self.intern.resolve(path_id);
         if self.scripts.contains_key(path) {
             return true;
         }
@@ -445,7 +489,6 @@ impl ScriptHost {
                 self.scripts.insert(
                     path.to_owned(),
                     CompiledScript {
-                        path: path.to_owned(),
                         ast,
                         hooks,
                         scope,
@@ -467,15 +510,28 @@ impl ScriptHost {
     }
 }
 
-/// 收集场景里所有 (实体, 脚本) 对，顺序即执行顺序。
-fn collect_script_queue(scene: &Scene) -> Vec<(EntityId, String)> {
+/// 收集场景里所有 (实体, Rhai 脚本) 对，顺序即执行顺序。
+///
+/// `.lua` 归 Lua 宿主（见 [`crate::lua_host::is_lua`]）—— 不在这里过滤的话，
+/// 混挂场景里每个 `.lua` 都会被 Rhai 当成语法错误，每帧刷一条"脚本编译失败"。
+///
+/// 路径当场驻留成 `u32` 再进队列：`String` 版每帧每实体克隆一次路径，
+/// 1000 实体实测比驻留贵 ≈32.6 µs/帧（见 [`PathIntern`] 模块文档）。
+fn collect_script_queue(scene: &Scene, intern: &mut PathIntern) -> Vec<(EntityId, u32)> {
     let mut queue = Vec::new();
     for entity in &scene.entities {
         for path in &entity.scripts {
-            queue.push((entity.id, path.clone()));
+            if is_rhai(path) {
+                queue.push((entity.id, intern.intern(path)));
+            }
         }
     }
     queue
+}
+
+/// 这条脚本路径归 Rhai 宿主管（`.lua` 的否定）—— 两轨合起来恰好覆盖全部脚本。
+fn is_rhai(path: &str) -> bool {
+    !crate::lua_host::is_lua(path)
 }
 
 /// 从编译结果里找出定义了哪些钩子。
@@ -544,6 +600,53 @@ mod tests {
         entity.scripts.push(relative.to_owned());
         scene.add_entity(entity);
         scene
+    }
+
+    /// 按扩展名分流：Rhai 宿主**不碰** `.lua`。
+    ///
+    /// 双轨计划要求"两轨按扩展名分流，同一个 `Entity::scripts` 可以混挂"。
+    /// 反向（Lua 宿主跳过 `.rhai`）已有 `is_lua` 保证；这边若不过滤，混挂场景里
+    /// 每个 `.lua` 都会被 Rhai 当成语法错误 → 每帧一条"脚本编译失败"日志，
+    /// 且 preload 把它们记进 `failed`（正常的 Lua 脚本被打成"坏脚本"）。
+    #[test]
+    fn rhai_host_skips_lua_scripts() {
+        let project = TempProject::new("rhai_skip_lua");
+        // 真写一个 `.lua` 文件（内容按 Rhai 语法就是错的，正好验"不该被它编译"）。
+        let lua = "Scripts/other.lua";
+        std::fs::write(
+            project.dir.join(lua),
+            "function update(ctx) end",
+        )
+        .unwrap();
+
+        let mut scene = scene_with_script(&project.write_script("ok", "fn update(ctx) {}"));
+        scene.entities[0].scripts.push(lua.to_owned());
+
+        let mut host = ScriptHost::new();
+        let report = host.preload(&project.dir, &scene);
+
+        assert!(
+            report.failed.is_empty(),
+            "`.lua` 不该被 Rhai 宿主当成编译失败: {:?}",
+            report.failed
+        );
+        assert!(
+            !report.loaded.iter().any(|p| p.ends_with(".lua")),
+            "`.lua` 不该进 Rhai 的 loaded: {:?}",
+            report.loaded
+        );
+
+        // 派发也不该产生任何错误日志（否则混挂场景每帧刷屏）。
+        let mut scene = scene_with_script(&project.write_script("ok2", "fn update(ctx) {}"));
+        scene.entities[0].scripts.push(lua.to_owned());
+        let mut host = ScriptHost::new();
+        host.preload(&project.dir, &scene);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0));
+        assert!(
+            host.logs.is_empty(),
+            "Rhai 派发不该碰 `.lua`，日志应为空: {:?}",
+            host.logs
+        );
     }
 
     #[test]
@@ -688,6 +791,72 @@ mod tests {
         assert!(host.logs.is_empty(), "不该有错误日志: {:?}", host.logs);
         assert_eq!(scene.entities[0].transform.position.x, 3.0, "实体 a");
         assert_eq!(scene.entities[1].transform.position.x, 3.0, "实体 b");
+    }
+
+    /// 热重载后每实体的状态不能错位（驻留 id 是状态表的键）。
+    ///
+    /// 场景里 a 挂 `counter_a.rhai`（计数 +1）、b 挂 `counter_b.rhai`（计数 +100）。
+    /// 跑一帧后 `invalidate_all` 并**把实体顺序倒过来** —— 下一轮的驻留顺序
+    /// 随之改变（b 的脚本先被驻留）。状态必须还跟着"实体 + 自己的脚本"走：
+    /// a 应当是 2、b 应当是 200。
+    ///
+    /// 红对照是**热重载时顺手清空驻留表**这个看似合理的实现：清掉之后 b 先
+    /// 被驻留成 id 0，两条状态全部落空、各自从 0 重计（a=1、b=100），这条
+    /// 断言就红。状态错位是**静默**的（键的类型两版一样，错了无从发现），
+    /// 所以必须靠测试兜底；它是 `PathIntern` "表永不清空"约定的执行者。
+    #[test]
+    fn state_survives_hot_reload_even_when_intern_order_changes() {
+        let project = TempProject::new("reload_state");
+        let path_a = project.write_script(
+            "counter_a",
+            r#"
+            fn update(ctx) {
+                let n = state_get_or(ctx, "n", 0.0);
+                let n2 = n + 1.0;
+                state_set(ctx, "n", n2);
+                set_pos(ctx, n2, 0.0, 0.0);
+            }
+            "#,
+        );
+        let path_b = project.write_script(
+            "counter_b",
+            r#"
+            fn update(ctx) {
+                let n = state_get_or(ctx, "n", 0.0);
+                let n2 = n + 100.0;
+                state_set(ctx, "n", n2);
+                set_pos(ctx, n2, 0.0, 0.0);
+            }
+            "#,
+        );
+
+        let mut scene = Scene::new("reload_state");
+        for (name, path) in [("a", &path_a), ("b", &path_b)] {
+            let mut entity = Entity::new(name);
+            entity.scripts.push(path.clone());
+            scene.add_entity(entity);
+        }
+
+        let mut host = ScriptHost::new();
+        host.preload(&project.dir, &scene);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0));
+        assert_eq!(scene.entities[0].transform.position.x, 1.0, "帧 1：a");
+        assert_eq!(scene.entities[1].transform.position.x, 100.0, "帧 1：b");
+
+        // 热重载 + 倒序：下一轮驻留顺序 b 先于 a（id 若被重发就会错位）。
+        host.invalidate_all();
+        scene.entities.reverse();
+
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0));
+        assert!(host.logs.is_empty(), "重编译不该报错: {:?}", host.logs);
+        assert_eq!(
+            scene.entities[0].transform.position.x, 200.0,
+            "热重载后 b（现在排第一）的状态应延续"
+        );
+        assert_eq!(
+            scene.entities[1].transform.position.x, 2.0,
+            "热重载后 a 的状态应延续"
+        );
     }
 
     /// `set_anim_param` 把值写进**自己实体**的机器参数表。
