@@ -434,6 +434,9 @@ pub struct EditorState {
     ///
     /// 惰性构造：只有 Inspector 真要画某个组件时才造一次。组件的 `Default`
     /// 可能不便宜（比如要解析配置），不该"打开项目就构造全场景所有组件"。
+    /// 构造时立刻套上场景里存的字段值（P1.5 的 `behavior_params`，见
+    /// [`Self::inspect_component`]）—— Edit 看到的、Play 跑的、打包玩家拿到的
+    /// 必须是同一份数。
     ///
     /// **声明位置是硬约束**：值里装着指向插件 DLL 的函数指针，必须**先于
     /// `plugins`（DLL 句柄）销毁**，否则 drop 胶水会跳进已 FreeLibrary 的代码区。
@@ -1515,7 +1518,15 @@ impl EditorState {
             .get(&(entity_id, slot))
             .is_none_or(|e| e.name != name);
         if stale {
-            let component = self.plugins.construct(name)?;
+            let mut component = self.plugins.construct(name)?;
+            // P1.5：新构造的副本从 `Default` 起步，立刻套上场景里存的字段值 ——
+            // 与 `World` 装配走同一对 capture/apply 函数，Edit 看到的、Play 跑的、
+            // 打包玩家拿到的必须是同一份数。
+            if let Some(index) = self.scene.find_entity(entity_id) {
+                if let Some(values) = self.scene.entities[index].behavior_params.get(name) {
+                    xgame_core::inspect::apply_field_values(&mut *component, values);
+                }
+            }
             self.edit_components.insert(
                 (entity_id, slot),
                 EditComponent {
@@ -1994,6 +2005,62 @@ mod tests {
         assert!(state.save_scene_as("../evil").is_err());
         assert!(state.save_scene_as("a/b").is_err());
         assert!(state.save_scene_as("a\\b").is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// P1.5：Edit 模式的组件副本必须**从场景里存的字段值起步**。
+    ///
+    /// 参数此前只活在编辑器内存里（存盘不带走）；这条断言守的是"打开场景 →
+    /// 选中实体 → Inspector 里看到的必须是上次存盘的值"这条最基本的等式。
+    /// 旧实现（构造只给 `Default`）下读到 0.0，断言必红。
+    #[test]
+    fn edit_component_is_seeded_from_scene_params() {
+        use xgame::Inspect; // trait 与 derive 同名不同命名空间（serde 同款玩法）
+        use xgame_core::inspect::{FieldValue, FieldValues};
+
+        #[derive(Default, Inspect)]
+        struct Tuned {
+            #[inspect(min = 0.0, max = 100.0)]
+            speed: f32,
+            label: String,
+        }
+        impl xgame::prelude::Lifecycle for Tuned {}
+
+        let (mut state, base) = temp_state("param_seed");
+        state.plugins.register_for_test::<Tuned>("Tuned");
+
+        // 实体 A：存了参数；实体 B：同组件、没存参数（应当拿到构造默认值）。
+        let mut a = xgame_core::Entity::new("a");
+        a.behaviors.push("Tuned".to_owned());
+        let mut fields = FieldValues::new();
+        fields.insert("speed".to_owned(), FieldValue::F32(66.0));
+        fields.insert("label".to_owned(), FieldValue::String("存盘值".into()));
+        a.behavior_params.insert("Tuned".to_owned(), fields);
+        state.scene.add_entity(a);
+        state.scene.add_entity(xgame_core::Entity::new("b"));
+        state.scene.entities.last_mut().expect("b 在末尾").behaviors.push("Tuned".to_owned());
+        // 按**名**取 id：新建项目自带一个默认实体，`entities[0]` 不一定是 "a"。
+        let id_a = state.scene.find_by_name("a").expect("a 应当在").id;
+        let id_b = state.scene.find_by_name("b").expect("b 应当在").id;
+
+        let (_, comp) = state.inspect_component(id_a, 0, "Tuned").expect("应当能构造");
+        assert_eq!(
+            comp.inspect_get(0),
+            FieldValue::F32(66.0),
+            "编辑副本必须吃到存盘的 speed"
+        );
+        assert_eq!(comp.inspect_get(1), FieldValue::String("存盘值".into()));
+
+        // 没存参数 ⇒ 保留构造默认值（缺字段不动）。
+        let (_, comp) = state.inspect_component(id_b, 0, "Tuned").expect("应当能构造");
+        assert_eq!(comp.inspect_get(0), FieldValue::F32(0.0));
+        assert_eq!(comp.inspect_get(1), FieldValue::String(String::new()));
+
+        // 存盘的等式另一头：从实例 capture 出来的值 = 场景里那份。
+        let (_, comp) = state.inspect_component(id_a, 0, "Tuned").expect("再取一次");
+        let captured = xgame_core::inspect::capture_field_values(comp);
+        assert_eq!(captured.get("speed"), Some(&FieldValue::F32(66.0)));
 
         let _ = std::fs::remove_dir_all(&base);
     }

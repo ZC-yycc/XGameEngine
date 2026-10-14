@@ -3,6 +3,8 @@
 //! 场景是游戏世界的顶层容器，包含实体列表。实体现在拥有稳定 ID
 //! 和可选的运行时组件集合，向后兼容旧版 RON 场景文件。
 
+use std::collections::BTreeMap;
+
 use glam::Mat4;
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +68,20 @@ pub struct Entity {
     /// 顺序即执行顺序（同实体内多个行为按列表顺序跑），理由同 `scripts`。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub behaviors: Vec<String>,
+    /// 这些组件的**字段存盘值**（P1.5「组件字段进场景文件」）：
+    /// 注册名 →（字段寻址名 → 值）。
+    ///
+    /// 为什么要挂在实体上而不是别的地方：参数是**这份场景的设定**，属于资产；
+    /// 此前它只活在编辑器内存里（P1 的 `edit_components`），存盘不带走 ——
+    /// 打包出去的玩家拿不到编辑器调好的手感。装配期（`World` 实例化组件、
+    /// 编辑器构造 Edit 副本）按名套用，键用注册名而非列表下标：增删 / 重排
+    /// `behaviors` 不会让参数错位到别的组件上（下标错位 = 把 A 的参数写进
+    /// B 的字段，两边都是 `f32`，编译器管不着）。
+    ///
+    /// 兼容模式与 `behaviors` 同款：旧场景文件没有这个字段 → 空表，
+    /// `skip_serializing_if` 让没调过参的实体不写这一行。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub behavior_params: BTreeMap<String, crate::inspect::FieldValues>,
     /// 物理属性。`None` = 不参与物理（纯视觉实体）。
     ///
     /// 旧场景文件没有这个字段，反序列化成 `None` —— 语义上正好等于
@@ -96,6 +112,7 @@ impl Entity {
             prefab: None,
             scripts: Vec::new(),
             behaviors: Vec::new(),
+            behavior_params: BTreeMap::new(),
             physics: None,
             animator: None,
             components: ComponentMap::new(),
@@ -183,6 +200,9 @@ impl PartialEq for Entity {
             && self.prefab == other.prefab
             && self.scripts == other.scripts
             && self.behaviors == other.behaviors
+            // 组件参数也是落盘内容（P1.5）——脏检查必须比它，否则调完参按
+            // 保存没反应 / 关窗不提示未保存。
+            && self.behavior_params == other.behavior_params
             && self.physics == other.physics
             && self.animator == other.animator
     }
@@ -944,6 +964,63 @@ mod tests {
         plain.add_entity(Entity::new("A"));
         let text = ron::ser::to_string_pretty(&plain, ron::ser::PrettyConfig::default()).unwrap();
         assert!(!text.contains("behaviors"), "空列表不该污染场景文件");
+    }
+
+    /// P1.5：组件字段值必须落盘往返，且**旧场景文件**（没有 behavior_params
+    /// 字段）照常加载。
+    ///
+    /// 双重回归：serde 属性漏 `default` ⇒ 旧文件加载失败（当场红）；
+    /// 键用下标而不是注册名 ⇒ 这里的改名场景会读出错位的参数（更阴）。
+    #[test]
+    fn behavior_params_survive_ron_roundtrip_and_old_scenes_load() {
+        // ① 旧文件没有 behavior_params 字段 → 空表
+        let ron = r#"Scene(
+            name: "Old",
+            entities: [
+                (name: "A", transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: "", behaviors: ["Spinner"]),
+            ],
+        )"#;
+        let scene: Scene = ron::from_str(ron).expect("旧场景应当能反序列化");
+        assert!(scene.entities[0].behavior_params.is_empty());
+
+        // ② 挂了参数的实体：逐值往返
+        use crate::inspect::FieldValue;
+        let mut scene = Scene::new("New");
+        let mut entity = Entity::new("A");
+        entity.behaviors = vec!["Spinner".to_owned()];
+        let mut fields = crate::inspect::FieldValues::new();
+        fields.insert("speed".to_owned(), FieldValue::F32(75.0));
+        fields.insert("enabled".to_owned(), FieldValue::Bool(true));
+        fields.insert("label".to_owned(), FieldValue::String("玩家".into()));
+        entity.behavior_params.insert("Spinner".to_owned(), fields.clone());
+        scene.add_entity(entity);
+
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(text.contains("behavior_params"), "调过参的实体必须落盘");
+        assert!(text.contains("speed"), "字段寻址名落盘");
+        let restored: Scene = ron::from_str(&text).unwrap();
+        assert_eq!(
+            restored.entities[0].behavior_params.get("Spinner"),
+            Some(&fields),
+            "往返后逐值相等"
+        );
+
+        // ③ 没调过参的实体不写这一行（skip_serializing_if 的承诺）
+        let mut plain = Scene::new("Plain");
+        plain.add_entity(Entity::new("A"));
+        let text = ron::ser::to_string_pretty(&plain, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("behavior_params"), "空表不该污染场景文件");
+
+        // ④ 参数变化必须被 PartialEq 看见（编辑器脏检查靠它）
+        let mut a = Entity::new("A");
+        let mut b = a.clone();
+        assert_eq!(a, b);
+        let mut fields = crate::inspect::FieldValues::new();
+        fields.insert("speed".to_owned(), FieldValue::F32(1.0));
+        b.behavior_params.insert("Spinner".to_owned(), fields);
+        assert_ne!(a, b, "只改参数也算改动，否则关窗不提示未保存");
+        a.behavior_params = b.behavior_params.clone();
+        assert_eq!(a, b);
     }
 
     // -- 动画组件 -----------------------------------------------------------

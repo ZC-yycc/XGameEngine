@@ -160,6 +160,22 @@ impl PluginSession {
         self.registry.construct(name)
     }
 
+    /// 测试注入：绕过 DLL 直接往常驻注册表里塞一个组件。
+    ///
+    /// 生产路径的注册只来自插件 DLL（编辑器不链接用户代码），而单测没有 DLL
+    /// 可加载 —— 这条是给 `state.rs` 测试里"编辑副本要吃到存盘参数"这类断言
+    /// 用的后门，`#[cfg(test)]` 保证它进不了发行版。
+    #[cfg(test)]
+    pub(crate) fn register_for_test<T>(&mut self, name: &'static str)
+    where
+        T: xgame::Behavior + Default + 'static,
+    {
+        self.registry.register::<T>(name);
+        let mut names: Vec<String> = self.registry.names().into_iter().map(str::to_owned).collect();
+        names.sort();
+        self.names = names;
+    }
+
     /// 用当前代插件装配一份**全新的**行为注册表（每次 Play 调用）。
     ///
     /// 重跑入口只是一次 dlsym + 握手 + 注册闭包调用，微秒级 —— 换来的是

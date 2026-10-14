@@ -22,13 +22,26 @@
 //! 真到了要优化的那天，加一个 `inspect_get_into(&self, i, &mut FieldValue)` 即可，
 //! 表结构不动。
 
+use std::collections::BTreeMap;
+
 use glam::{Vec2, Vec3, Vec4};
+use serde::{Deserialize, Serialize};
+
+/// 一组「字段寻址名 → 值」——组件字段**存盘**时的载体（P1.5）。
+///
+/// 用 `BTreeMap` 而不是 `HashMap`：场景是纯文本、要能 diff，有序才能让
+/// 同一份参数每次序列化出**逐字节相同**的内容（否则保存一次就"变了"，
+/// 脏检查与版本库都会被无意义的行序抖动烦死）。
+pub type FieldValues = BTreeMap<String, FieldValue>;
 
 /// 字段的类型分类。
 ///
 /// 它同时决定两件事：编辑器画什么控件、Lua 侧把这个字段当什么类型绑定。
 /// 所以它是**契约**而不是提示 —— `FieldValue` 的变体必须与之一一对应。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 可序列化（P1.5）：[`FieldValue`] 进场景文件，变体名就是 RON 里的标签，
+/// 改名 = 破坏已有场景文件（与改 `FieldKind` 一样属于结构性变更）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FieldKind {
     F32,
     F64,
@@ -126,7 +139,10 @@ impl FieldDesc {
 /// 字段的运行期值 —— get/set 的载体，也是 Lua 侧的参数值类型。
 ///
 /// 与 [`FieldKind`] 一一对应；[`kind`](Self::kind) 可以反查。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// 可序列化（P1.5「组件字段进场景文件」）：RON 里写作 `F32(75.0)` 这样的
+/// 带标签形式，变体名是**磁盘格式的一部分** —— 重命名会破坏已有场景文件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FieldValue {
     F32(f32),
     F64(f64),
@@ -245,6 +261,43 @@ pub trait Inspect {
     fn inspect_get_by_name(&self, name: &str) -> Option<FieldValue> {
         let index = self.inspect_fields().iter().position(|f| f.name == name)?;
         Some(self.inspect_get(index))
+    }
+}
+
+/// 读出一个组件实例的**全部**可检视字段（P1.5 的「存」这一半）。
+///
+/// 存的是**每一个**可检视字段的当前值，而不是"只存与零值不同的"：
+/// 组件的 `Default` 可能把 `speed` 定成 75，而 `FieldKind` 的零值是 0 ——
+/// 按"与零值不同才存"的规则，75 会被原样存下、0 却被丢掉，两份同样合法的
+/// 默认值走出两条不对称的路径，这类半截规则日后一定出鬼。全存的代价只是
+/// 场景文件多几行，换来"存下来的就是读出来的"这条一眼可验的等式。
+///
+/// `#[inspect(skip)]` 的字段不在表里，自然不会落盘 —— 状态字段属于实例自己。
+pub fn capture_field_values(source: &dyn Inspect) -> FieldValues {
+    let table = source.inspect_fields();
+    // `BTreeMap` 没有 `with_capacity`（容量是树的形状问题）：字段数通常个位数，
+    // 逐条 insert 的成本可以忽略。
+    let mut out = FieldValues::new();
+    for (i, desc) in table.iter().enumerate() {
+        out.insert(desc.name.to_owned(), source.inspect_get(i));
+    }
+    out
+}
+
+/// 把存盘的字段值套到一个组件实例上（P1.5 的「取」这一半）。
+///
+/// 按**寻址名**（Rust 字段名，不是 `label` 显示名）逐条
+/// [`inspect_set_by_name`](Inspect::inspect_set_by_name)：
+///
+/// - 名字在组件里不存在（字段被删了 / 场景是手改的）→ 跳过；
+/// - 类型对不上（组件把 `speed` 从 `f32` 改成了 `bool`）→ 跳过；
+/// - 存盘里缺某个字段（旧版本存的 / 那次保存时插件没编译）→ 保留构造默认值。
+///
+/// 三条都是**静默**的：这是"尽力恢复"的路径，一条陈旧参数不该让整个场景
+/// 加载失败（与 `Inspect::inspect_set` 的"类型不符静默忽略"同一哲学）。
+pub fn apply_field_values(target: &mut dyn Inspect, values: &FieldValues) {
+    for (name, value) in values {
+        target.inspect_set_by_name(name, value.clone());
     }
 }
 
@@ -403,5 +456,65 @@ mod tests {
         assert_eq!(FieldValue::F32(1.0).as_f32(), Some(1.0));
         assert_eq!(FieldValue::F64(2.0).as_f32(), Some(2.0));
         assert_eq!(FieldValue::Bool(true).as_f32(), None, "布尔转不了数字");
+    }
+
+    /// P1.5 的「存/取」一对函数：**存下来的就是读出来的**（roundtrip 等式），
+    /// 且陈旧 / 错型的条目被静默吸收而不是把实例搞坏。
+    #[test]
+    fn capture_then_apply_roundtrips_and_tolerates_stale_entries() {
+        let mut src = Handwritten { speed: 75.0, enabled: true };
+        let values = capture_field_values(&src);
+        assert_eq!(values.len(), 2, "表里两个字段都要存下来");
+        assert_eq!(values.get("speed"), Some(&FieldValue::F32(75.0)));
+        assert_eq!(values.get("enabled"), Some(&FieldValue::Bool(true)));
+
+        // 全零字段也照样存（"只存非零"的半截规则会丢掉合法的 0 默认值）
+        src.speed = 0.0;
+        assert_eq!(
+            capture_field_values(&src).get("speed"),
+            Some(&FieldValue::F32(0.0))
+        );
+
+        let mut dst = Handwritten { speed: 1.0, enabled: false };
+        apply_field_values(&mut dst, &values);
+        assert_eq!(dst.speed, 75.0);
+        assert!(dst.enabled);
+
+        // 陈旧条目：名字不存在、类型不符 —— 都静默跳过，其余字段照常套用
+        let mut stale = FieldValues::new();
+        stale.insert("deleted_field".to_owned(), FieldValue::F32(9.0));
+        stale.insert("enabled".to_owned(), FieldValue::F32(9.0)); // 类型不符
+        stale.insert("speed".to_owned(), FieldValue::F32(3.5));
+        apply_field_values(&mut dst, &stale);
+        assert_eq!(dst.speed, 3.5);
+        assert!(dst.enabled, "错型写入不许把原值冲掉");
+
+        // 空表 = 什么都不动（缺字段保留构造默认值）
+        let mut untouched = Handwritten { speed: 2.0, enabled: true };
+        apply_field_values(&mut untouched, &FieldValues::new());
+        assert_eq!(untouched.speed, 2.0);
+        assert!(untouched.enabled);
+    }
+
+    /// `FieldValue` 的序列化是**磁盘格式**：变体标签写进场景文件。
+    /// 这条测试钉住 RON 里的形状 —— 改标签等于破坏所有已有场景文件。
+    #[test]
+    fn field_value_ron_roundtrip_keeps_variant_labels() {
+        let values: FieldValues = [
+            ("speed".to_owned(), FieldValue::F32(75.0)),
+            ("enabled".to_owned(), FieldValue::Bool(true)),
+            ("label".to_owned(), FieldValue::String("玩家".into())),
+            ("offset".to_owned(), FieldValue::Vec3(Vec3::new(1.0, 2.0, 3.0))),
+            ("count".to_owned(), FieldValue::I64(-7)),
+        ]
+        .into_iter()
+        .collect();
+
+        let text = ron::to_string(&values).expect("应当能序列化");
+        assert!(text.contains("F32(75.0)"), "变体标签必须落盘，实际：{text}");
+        assert!(text.contains("Bool(true)"), "实际：{text}");
+
+        let back: FieldValues = ron::from_str(&text).expect("应当能反序列化");
+        assert_eq!(back, values, "RON 往返必须逐值相等");
     }
 }

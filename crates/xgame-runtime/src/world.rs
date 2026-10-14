@@ -451,6 +451,11 @@ impl World {
     ///
     /// 未注册的名字记一条警告并跳过（不进实例表）——与"脚本崩溃不拖垮引擎"
     /// 同一容错哲学；同一实体只装配一次，警告不会每帧刷屏。
+    ///
+    /// 构造后立刻套用实体上存的字段值（P1.5「组件字段进场景文件」）：
+    /// 必须在 `start` 之前 —— 组件的 `start` 常常要读参数（"起始高度 =
+    /// 某个可调值"）。条目按**注册名**查，名字对不上（组件已改名 / 手改
+    /// 场景文件）由 `apply_field_values` 静默吸收，不影响其它字段。
     fn instantiate_behaviors(&mut self) {
         for entity in &self.scene.entities {
             if entity.behaviors.is_empty() || self.behavior_instances.contains_key(&entity.id) {
@@ -459,7 +464,18 @@ impl World {
             let mut instances = Vec::with_capacity(entity.behaviors.len());
             for name in &entity.behaviors {
                 match self.behaviors.construct_instance(name) {
-                    Some(instance) => instances.push(instance),
+                    Some(mut instance) => {
+                        // 借用拆借：`entity` 是 `&self.scene` 的借用，而
+                        // `instance.component` 是独立的所有权对象 —— 套参数
+                        // 不碰 World 的任何字段，直接在循环里做即可。
+                        if let Some(values) = entity.behavior_params.get(name.as_str()) {
+                            xgame_core::inspect::apply_field_values(
+                                &mut *instance.component,
+                                values,
+                            );
+                        }
+                        instances.push(instance);
+                    }
                     None => {
                         log::warn!("实体 '{}' 的行为 '{}' 未注册，已跳过", entity.name, name);
                     }
@@ -1150,6 +1166,60 @@ mod tests {
         // 越界：安静返回 None —— Inspector 不该因为一次下标错误崩掉。
         assert!(world.behavior_at_mut(id, 7).is_none());
         assert!(world.behavior_at_mut(bare_id, 0).is_none());
+    }
+
+    /// P1.5：场景里存的组件字段值必须在**装配期**套到实例上。
+    ///
+    /// 这是打包玩家拿到手感参数的唯一通路（玩家没有 `edit_components`，
+    /// 没有 `seed_play_from_edit_components` —— 只有 `World` 自己装配这一条）。
+    /// 旧实现（装配只构造 `Default` 实例）下 speed 读回 0，断言必红。
+    #[test]
+    fn behavior_params_from_scene_are_applied_at_assembly() {
+        use xgame_core::inspect::{apply_field_values, FieldValue};
+
+        let mut scene = Scene::new("params");
+        let mut tuned = Entity::new("tuned");
+        tuned.behaviors.push("Tunable".to_owned());
+        let mut fields = xgame_core::inspect::FieldValues::new();
+        fields.insert("speed".to_owned(), FieldValue::F32(42.0));
+        fields.insert("label".to_owned(), FieldValue::String("存盘值".into()));
+        tuned.behavior_params.insert("Tunable".to_owned(), fields);
+        scene.add_entity(tuned);
+        // 没存参数的实体：构造默认值原样保留（缺字段 = 不动）。
+        scene.add_entity(Entity::new("plain_with_behavior_b"));
+        scene.entities[1].behaviors.push("Tunable".to_owned());
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Tunable>("Tunable");
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+
+        let id = world.scene().find_by_name("tuned").expect("tuned 应当在").id;
+        let (_, comp) = world.behavior_at_mut(id, 0).expect("组件已装配");
+        assert_eq!(
+            comp.inspect_get(0),
+            FieldValue::F32(42.0),
+            "存盘的 speed 必须在装配时套上"
+        );
+        assert_eq!(
+            comp.inspect_get(1),
+            FieldValue::String("存盘值".into()),
+            "存盘的 label 必须在装配时套上"
+        );
+
+        let plain_id = world.scene().find_by_name("plain_with_behavior_b").expect("在").id;
+        let (_, comp) = world.behavior_at_mut(plain_id, 0).expect("组件已装配");
+        assert_eq!(comp.inspect_get(0), FieldValue::F32(0.0), "没存参数 ⇒ 保留默认");
+        assert_eq!(comp.inspect_get(1), FieldValue::String(String::new()));
+
+        // 错位防线：存盘里出现组件没有的字段 / 类型不符 —— 静默吸收，
+        // 不 panic、不把别的字段带歪（与 `Inspect::inspect_set` 的哲学一致）。
+        let mut stale = xgame_core::inspect::FieldValues::new();
+        stale.insert("deleted".to_owned(), FieldValue::F32(1.0));
+        stale.insert("speed".to_owned(), FieldValue::Bool(true));
+        let mut c = Tunable::default();
+        apply_field_values(&mut c, &stale);
+        assert_eq!(c.speed, 0.0);
     }
 
     /// 实体被销毁时其组件收到 `on_destroy`。

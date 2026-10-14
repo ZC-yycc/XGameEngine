@@ -67,6 +67,43 @@ fn numeric_value(kind: FieldKind, v: f32) -> FieldValue {
     }
 }
 
+/// 一个字段控件产生的编辑信号（与 [`collect`] 同语义，聚合成结构体往下传）。
+///
+/// 单独成型是因为 P1.5 之后组件字段改动**进撤销栈、进场景文件**：需要在
+/// "改动发生"与"写回场景"之间拿到 `changed` / 拖拽起点 / 拖拽终点三个时机，
+/// 而一个字段一个 `bool` 传三遍的写法在有五种字段类型的地方很快失控。
+#[derive(Default, Clone, Copy)]
+struct FieldSignals {
+    /// 本帧有字段被改动（对应 `Response::changed`）。
+    changed: bool,
+    /// 本帧有控件开始拖拽（改前快照的拍摄时机）。
+    drag_began: bool,
+    /// 本帧有控件结束拖拽（入撤销栈的时机）。
+    drag_ended: bool,
+}
+
+impl FieldSignals {
+    fn collect(&mut self, resp: &egui::Response) {
+        self.changed |= resp.changed();
+        self.drag_began |= resp.drag_started();
+        self.drag_ended |= resp.drag_stopped();
+    }
+}
+
+/// 组件字段一帧的编辑结果（P1.5）——信号交给面板级撤销逻辑，值交给 `working`。
+#[derive(Default)]
+struct BehaviorEdit {
+    /// 三个撤销信号（与 [`FieldSignals`] 同语义）。
+    sig: FieldSignals,
+    /// `Some(新参数表)` = 本帧有字段被改动，调用方写进 `working.behavior_params`；
+    /// `None` = 没动过 —— `working` 克隆自场景，那份本来就是对的，不必回写。
+    ///
+    /// **不直接写 `state.scene`**：组件参数从此与 Name / Transform 走**同一条**
+    /// 通道（`working` → 撤销 → 写回场景），撤销与脏检查的时序不用为它单开
+    /// 一条支路 —— 支路就是将来"调完参改个名字，参数被旧克隆盖掉"的出处。
+    values: Option<xgame_core::inspect::FieldValues>,
+}
+
 /// 画一个组件的可检视字段，并把改动**写回组件本体**。
 ///
 /// # 改的是哪一份
@@ -76,15 +113,22 @@ fn numeric_value(kind: FieldKind, v: f32) -> FieldValue {
 /// 灌进运行时）。两种模式下控件长得完全一样 —— 这是"一份元数据，两个消费者"
 /// 在编辑器这一侧的体现：控件布局只由 `FieldDesc` 决定，跟实例活在哪无关。
 ///
-/// # 刻意不碰 `show_content` 的 `touched`
+/// # 参数怎么进场景文件（P1.5）
 ///
-/// `touched` 在那边意味着"改了 `working`，要写回场景 + 推一条撤销记录"。
-/// 组件参数**不在场景文件里**（P1.5 才落地），改它不该凭空多出一条场景撤销 ——
-/// 否则按 Ctrl+Z 会撤销一个并不存在的场景改动，然后发现"参数还在，场景没变"。
+/// 返回的 [`BehaviorEdit`] 里带捕获好的参数表，调用方（Behaviors 区）把它写进
+/// `working.behavior_params` 并置 `touched` —— 于是存盘、脏检查、撤销、打包玩家
+/// 的手感参数全部走 `show_content` 既有的那套逻辑，没有第二条写回路径：
+///
+/// - **拖拽**类控件：`drag_began` 挂改前快照、`drag_ended` 入栈（拖 200 帧
+///   不记 200 步），与 Transform 的滑杆完全同款；
+/// - **离散**编辑（勾选框 / 文本）：由面板级逻辑按 `touched` 当场入栈，
+///   那一刻 `state.scene` 里还是旧参数；
+/// - **Play 中的热调参不写回**：那是"试试看"，停止 Play 靠场景快照整体还原
+///   （与 Unity 默认一致），写回反而会让"Play 里试的值"泄漏进存盘文件。
 ///
 /// # 取不到实例时
 ///
-/// 直接返回、什么都不画。Behaviors 列表那一行已经用 ⚠ 标红了未注册的组件名，
+/// 直接返回什么都不画。Behaviors 列表那一行已经用 ⚠ 标红了未注册的组件名，
 /// 再画一行"无法检视"是同一条信息说第二遍。
 fn show_behavior_fields(
     state: &mut EditorState,
@@ -92,9 +136,11 @@ fn show_behavior_fields(
     entity_id: EntityId,
     slot: usize,
     name: &str,
-) {
+) -> BehaviorEdit {
+    // 先取模式（下面 `comp` 借着 `&mut state`，届时再读就是 E0502）。
+    let editing = state.is_editing();
     let Some((_, comp)) = state.inspect_component(entity_id, slot, name) else {
-        return;
+        return BehaviorEdit::default();
     };
 
     let count = comp.inspect_fields().len();
@@ -104,11 +150,12 @@ fn show_behavior_fields(
                 .weak()
                 .size(11.0),
         );
-        return;
+        return BehaviorEdit::default();
     }
 
     // 标签列宽固定，字段名长短不同也不会让右边的控件参差不齐。
     let label_w = 120.0;
+    let mut sig = FieldSignals::default();
     for i in 0..count {
         // `desc` 是 `'static`（表是编译期常量），拿在手里**不占用** `comp` ——
         // 下一行还能接着 &mut 它，不需要先放开借用。
@@ -122,9 +169,18 @@ fn show_behavior_fields(
             if !desc.tooltip.is_empty() {
                 text.on_hover_text(desc.tooltip);
             }
-            show_field_widget(ui, comp, i, desc, value);
+            show_field_widget(ui, comp, i, desc, value, &mut sig);
         });
     }
+
+    // 只在 Edit 模式捕获（见文档"Play 中的热调参不写回"）。`comp` 的借用到此
+    // 结束 —— `BehaviorEdit` 必须是拥有的值。
+    let values = if editing && sig.changed {
+        Some(xgame_core::inspect::capture_field_values(comp))
+    } else {
+        None
+    };
+    BehaviorEdit { sig, values }
 }
 
 /// 一个字段的控件。改动直接 `inspect_set` 回组件。
@@ -132,12 +188,16 @@ fn show_behavior_fields(
 /// 每种 `FieldKind` 一个分支 —— 控件形状就是类型本身的一部分：
 /// 有边界的数值给滑块（拖到哪算哪，不会拖出界），没有的给裸拖拽值
 /// （`min/max` 缺省是常态，不强加一个作者没声明过的范围）。
+///
+/// 三个编辑信号经 `sig` 外传（见 [`FieldSignals`]）—— 控件的 `Response`
+/// 是借用，出了这个函数就没了。
 fn show_field_widget(
     ui: &mut egui::Ui,
     comp: &mut dyn Inspect,
     index: usize,
     desc: &FieldDesc,
     value: FieldValue,
+    sig: &mut FieldSignals,
 ) {
     let unit = desc.unit;
     match desc.kind {
@@ -153,6 +213,7 @@ fn show_field_widget(
             } else {
                 ui.add(egui::DragValue::new(&mut v).speed(speed).suffix(unit))
             };
+            sig.collect(&resp);
             if resp.changed() {
                 // 离散步长：量化在**写回前**做，两种控件共用这一处。
                 if let Some(step) = desc.step {
@@ -166,7 +227,9 @@ fn show_field_widget(
 
         FieldKind::Bool => {
             let mut b = matches!(value, FieldValue::Bool(true));
-            if ui.checkbox(&mut b, "").changed() {
+            let resp = ui.checkbox(&mut b, "");
+            sig.collect(&resp);
+            if resp.changed() {
                 comp.inspect_set(index, FieldValue::Bool(b));
             }
         }
@@ -183,6 +246,7 @@ fn show_field_widget(
             };
             let resp = ui
                 .add(egui::TextEdit::singleline(&mut s).hint_text(hint).desired_width(140.0));
+            sig.collect(&resp);
             if resp.changed() {
                 comp.inspect_set(index, FieldValue::String(s));
             }
@@ -198,7 +262,9 @@ fn show_field_widget(
                 // 与 `desc.kind` 对不上：不该发生（表与值同源），按 vec3 兜底。
                 _ => ([0.0; 4], 3),
             };
-            let mut changed = false;
+            // 本字段自己的改动标记：不能直接用聚合后的 `sig.changed` 判定写回 ——
+            // 那会让同一帧里**别的**字段的改动把这里一个没动过的值也写回去。
+            let mut local = false;
             ui.horizontal(|ui| {
                 for (axis, f) in ["X", "Y", "Z", "W"]
                     .iter()
@@ -210,10 +276,12 @@ fn show_field_widget(
                             .size(10.0),
                     );
                     let speed = desc.speed.map_or(0.1, |s| s as f64);
-                    changed |= ui.add(egui::DragValue::new(f).speed(speed)).changed();
+                    let resp = ui.add(egui::DragValue::new(f).speed(speed));
+                    sig.collect(&resp);
+                    local |= resp.changed();
                 }
             });
-            if changed {
+            if local {
                 let out = match desc.kind {
                     FieldKind::Vec2 => FieldValue::Vec2(Vec2::new(arr[0], arr[1])),
                     FieldKind::Vec3 => FieldValue::Vec3(Vec3::new(arr[0], arr[1], arr[2])),
@@ -917,6 +985,11 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         ui.indent("behaviors", |ui| {
             let names: Vec<String> = state.behavior_names().to_vec();
             let mut remove: Option<usize> = None;
+            // 本帧被改动的组件参数（P1.5）：先攒着，出了 `entity.behaviors` 的
+            // 迭代再写 —— 循环还借着 `entity` 的不可变借用，循环里直接写
+            // `entity.behavior_params` 会撞可变借用。按**名**记而不是按下标：
+            // 同一帧点 ✕ 删除会让下标错位，名字不会。
+            let mut pending_params: Option<(String, xgame_core::inspect::FieldValues)> = None;
             let entity_id = entity.id;
             for (slot, name) in entity.behaviors.iter().enumerate() {
                 let registered = names.iter().any(|n| n == name);
@@ -973,9 +1046,27 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 // 上面那行 ⚠ 已经说清楚了。
                 if registered {
                     ui.indent(("behavior_fields", slot), |ui| {
-                        show_behavior_fields(state, ui, entity_id, slot, name);
+                        let edit = show_behavior_fields(state, ui, entity_id, slot, name);
+                        // 撤销信号接到面板级两段式（外层变量，靠闭包捕获）：
+                        // 拖拽起点挂快照、松手入栈，离散改动按 touched 入栈。
+                        drag_began |= edit.sig.drag_began;
+                        drag_ended |= edit.sig.drag_ended;
+                        if let Some(values) = edit.values {
+                            pending_params = Some((name.clone(), values));
+                        }
                     });
                 }
+            }
+            // 参数改动写进 `working`（P1.5）：与 Name / Transform 同一条通道，
+            // 写回场景、脏检查、撤销都由 show_content 的既有逻辑统一处理。
+            if let Some((name, values)) = pending_params.take() {
+                if values.is_empty() {
+                    // 没有可检视字段的组件不值得在场景里留一张空表（纯噪音）。
+                    entity.behavior_params.remove(&name);
+                } else {
+                    entity.behavior_params.insert(name, values);
+                }
+                touched = true;
             }
             if let Some(slot) = remove {
                 entity.behaviors.remove(slot);
@@ -986,7 +1077,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             // 用户在 Edit 里拖了半天问"为什么没动"。
             if !entity.behaviors.is_empty() {
                 let hint = if state.is_editing() {
-                    "参数在按 ▶ Play 后生效（改动会留到下次 Play）"
+                    "参数随场景存盘（Ctrl+Z 可撤销）；按 ▶ Play 后生效"
                 } else {
                     "热调参中 —— 改动立即生效，停止 Play 时丢弃"
                 };
@@ -1248,7 +1339,14 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 拖滑块的过程中 3D 视图不会跟着动。
     if touched {
         if let Some(slot) = state.scene.entities.get_mut(index) {
+            // 组件参数（P1.5）与其它字段一样活在 `working` 里、随这次写回一起
+            // 落盘 —— 没有第二条写回路径，也就没有"旧克隆盖掉刚调的参数"的问题。
             *slot = working;
+            // 摘掉组件时顺手清掉它的孤儿参数（键是注册名，删列表项不会自动清）。
+            // 留着不出错（装配按 behaviors 查表，孤儿根本读不到），但会污染场景
+            // 文件，还会在"删了又加回来"时让旧参数神秘复活。
+            let behaviors = &slot.behaviors;
+            slot.behavior_params.retain(|name, _| behaviors.contains(name));
         }
     }
 
