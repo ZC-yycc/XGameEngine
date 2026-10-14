@@ -210,16 +210,26 @@ Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决�
 | Edit 模式调参 | ✅ | `EditorState.edit_components` 惰性构造的**纯数据副本**：拖滑块 → 按 ▶ → 逐字段灌进刚启动的运行时（不换实例，装配状态不作废）；换组件类型即作废重建（避免把 A 的参数写进 B 的字段）；停止 Play 丢弃 Play 中的改动（Unity 默认语义） |
 | Play 热调参 | ✅ | Play 中改的是 World 里**跑着的那份** —— 拖一下下一次 `update` 就生效；`GameRuntime::behavior_at_mut` 是面板拿到活实例的唯一通道（不暴露整个 `World`） |
 
-后续分期：**P1.5**（组件字段进场景文件）→ **P2** Lua 宿主（mlua）→ **P2.5**
-基准闸门（Rhai vs Lua）→ **P3** 按闸门结论处置 Rhai。
+| P1.5 交付 | 状态 | 说明 |
+|---|---|---|
+| 参数落盘数据模型 | ✅ | `Entity::behavior_params: BTreeMap<String, FieldValues>`（**注册名** → 字段寻址名 → 值）。键用注册名而非数组下标 —— 下标会错位，而参数是持久化数据，错位写参表现为"改 A 组件的参数写进了 B 组件"且两边都是 `f32` 时无从发现；`BTreeMap` 有序保证场景 diff 不抖 |
+| serde 格式 | ✅ | `FieldKind` / `FieldValue` 补 `Serialize + Deserialize`，**变体标签即磁盘格式**（`field_value_ron_variant_labels_are_stable` 钉死）；改标签名等于作废所有旧场景 |
+| 装配期套用 | ✅ | `World::instantiate_behaviors` 按注册名查参数表并套用，注册不到的名字**静默跳过**（与"参数表只是数据"取舍一致）；行为字段级拆借未动 |
+| 编辑副本种子 | ✅ | `inspect_component` 构造编辑态副本时种子场景参数 —— Edit 模式打开 Inspector 看到的就是场景真实值而非组件默认值 |
+| 撤销语义推翻 | ✅ | 组件字段编辑接上场景撤销栈（拖拽挂 `undo_pending`、松手入栈、离散编辑当场 push），与 Name/Transform 同通道 —— 推翻 P1"不进撤销栈"（参数已成场景数据，不进栈会凭空丢一条场景编辑） |
+
+后续分期：**P2** Lua 宿主（mlua）→ **P2.5** 基准闸门（Rhai vs Lua）→ **P3**
+按闸门结论处置 Rhai。
 
 P0.5 遗留（有意延后）：Play 中途热换插件、组件徽章、release profile 插件出货（P3）、
 cargo 构建超时。
 
-P1 遗留（有意延后）：**组件字段不进场景文件**（Edit 态调的参数活在编辑器内存里，
-存盘不带走，序列化格式与 Lua 绑定一起等 P1.5 / P2）、`Quat` / `Color` 未进
-`FieldKind`、字段级编辑无撤销（场景级有）、无 `trybuild`（"类型不支持又没标
-`skip` 就报错"这条无法断言）。
+P1 遗留（有意延后）：`Quat` / `Color` 未进 `FieldKind`（序列化变体随之受限）、
+无 `trybuild`（"类型不支持又没标 `skip` 就报错"这条无法断言）。
+
+P1.5 遗留（有意延后）：**prefab 的组件字段**（prefab 目前只覆盖 Transform 等基础
+数据，待 prefab 扩展到组件层时一起）、Play 中热调参不写回（既有语义，"Play 中调参
+也持久化"需另开决策）。
 
 ## 第七阶段：动画系统 🟨
 

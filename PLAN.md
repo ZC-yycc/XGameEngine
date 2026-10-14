@@ -980,3 +980,71 @@ vtable 间接（`dyn Behavior` 的 v表里存着 `Lifecycle` 的 v表指针）�
 - 字段级编辑**没有撤销**（场景级有）—— 接上场景撤销时再一起做。
 - 没有 `trybuild`：「类型不支持又没标 `skip` ⇒ 编译期报错」这条无法断言，
   只能靠报错文案本身足够指向性。
+
+---
+
+## 十八、双轨语言架构 P1.5：组件参数落盘进场景文件（本轮）
+
+接 §十七。P1 打通了「可检视 + 可调参」，但参数只活在编辑器内存里 —— 关掉即丢、
+不能进版本库、prefab 没有字段位。本轮把组件参数变成**场景数据**，验收四条全部完成。
+
+### 一、数据模型：注册名做键，不是下标
+
+`Entity::behavior_params: BTreeMap<String, FieldValues>`（注册名 → 字段寻址名 → 值）。
+
+- **为什么是注册名而不是 `behaviors` 数组下标**：下标会错位（用户在中间插一个组件，
+  所有后续下标全变），而参数表是**持久化数据** —— 错位写参的表现是"改 A 组件的参数
+  写进了 B 组件"，两边字段都是 `f32` 时编译器和运行时都发现不了。注册名天然稳定。
+- **`FieldValues = BTreeMap<String, FieldValues>` 的有序性**：`BTreeMap` 保证 key 有序，
+  序列化顺序稳定 → 场景文件 diff 不会因为哈希随机序而抖动。
+- **`FieldKind` / `FieldValue` 补 serde**：变体标签即磁盘格式，钉死变体名测试
+  （`field_value_ron_variant_labels_are_stable`）—— 改标签名等于作废所有旧场景。
+
+### 二、capture 存全部，apply 吸收陈旧
+
+- **capture 存全部可检视字段**（不做"非零才存"的半截规则）：半截规则会让"用户显式
+  调回默认值"与"从没碰过"无法区分，且 diff 不可读。
+- **apply 静默吸收陈旧/错型条目**（`apply_field_values`）：组件字段表改了之后，
+  旧场景里的陈旧参数不该让加载崩溃。这与世界层 `apply_field_values` 既有取舍一致
+  （检视是旁路，一个下标算错不该拖垮宿主）。
+
+### 三、装配期套用 + 编辑副本种子
+
+- **`World::instantiate_behaviors`**：装配时按注册名查 `behavior_params` 并套用。
+  注册不到的名字**静默跳过**（与"参数表只是数据"的既有取舍一致，不 panic）。
+  行为字段级拆借未动（Lua 侧仍走 `FieldValue`）。
+- **`EditorState::inspect_component`**：构造编辑态副本时种子场景参数（找不到字段表
+  时不种）。这样 Edit 模式下打开 Inspector 看到的就是场景里的真实值，而不是组件默认值。
+
+### 四、撤销语义的推翻（P1 遗留的"不进撤销栈"）
+
+P1 刻意让组件字段改动**不进**场景撤销栈（理由：参数不在场景文件里，动它会凭空多出
+一条撤销记录）。参数进场景后这条取舍**失效** —— 它已成为场景数据，不进栈会凭空丢
+一条场景编辑。改法：组件字段编辑接上既有撤销两段式（拖拽挂 `undo_pending`、松手入栈；
+离散编辑当场 push），与 Name/Transform 同一通道，不单开支路。
+
+**Play 中的改动仍不写回**：停止 Play 靠场景快照还原（既有语义，与本轮无关）。
+
+### 五、一个测试后门
+
+`PluginSession` 加 `#[cfg(test)] register_for_test<T>`：编辑器测试要构造带字段表的
+组件实例，但生产路径只有 `build_registry()`（重跑插件入口）。后门只在测试编译期存在，
+保住"注册表只构建一次"的每帧性能取舍。
+
+### 六、验证
+
+- 先证红（仓库惯例）：`behavior_params_from_scene_are_applied_at_assembly`
+  （旧实现场景参数被丢弃 → 红）、`edit_component_is_seeded_from_scene_params`
+  （无种子路径 → 红）。改后全绿。
+- 新增回归：capture roundtrip、陈旧条目容错、RON 变体标签钉死、场景 roundtrip/
+  旧文件兼容、装配套用、编辑副本种子 —— 共 6 条。
+- `cargo test --workspace --all-targets`：**312 项全绿**（P1 是 307）。
+  clippy 0 警告；`cargo check` 0 错误。
+- 无头检查：`xgame-editor --check` 对 BehaviorsDemo 与 SampleScene 均 `OK`。
+
+### 七、遗留
+
+- **prefab 的组件字段**未做（prefab 目前只覆盖 Transform 等基础数据）——
+  待 prefab 系统扩展到组件层时一起。
+- `FieldKind` 仍只有 10 种（`Quat` / `Color` 未进），序列化变体随之受限。
+- Play 中热调参**不写回**是既有语义；若将来要"Play 中调参也持久化"需另开决策。
