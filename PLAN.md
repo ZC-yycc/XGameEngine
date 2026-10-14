@@ -1048,3 +1048,114 @@ P1 刻意让组件字段改动**不进**场景撤销栈（理由：参数不在�
   待 prefab 系统扩展到组件层时一起。
 - `FieldKind` 仍只有 10 种（`Quat` / `Color` 未进），序列化变体随之受限。
 - Play 中热调参**不写回**是既有语义；若将来要"Play 中调参也持久化"需另开决策。
+
+## 十九、双轨语言架构 P2：Lua 宿主 + 路径驻留表（本轮）
+
+接 §十八。完成计划文档 §四的 **P2** 两件事（Lua 宿主、修每帧 String 克隆）
+与双轨的编辑器接入。验收：`cargo test --workspace --all-targets` **332 项
+0 失败**（2 个手动基准 ignore）、clippy **0 警告**、`xgame-editor --check`
+OK。决策注记已回写计划文档 D10。
+
+### 一、Lua 宿主（`lua_host.rs` + `lua_api.rs`，两文件共约 1600 行）
+
+- **mlua 0.10**（`lua54` + `vendored` + `send`）：没有 `'lua` 生命周期，
+  `Value` / `Table` / `Function` 全是 `'static` —— 与 Rhai 一样能把句柄放进
+  跨帧结构。`ScriptCtx` 泛型化 `ScriptCtx<S: 'static>`（Rhai 侧
+  `ScriptCtx<rhai::Map>` **零改动**，Lua 用 `ScriptCtx<mlua::Table>`）。
+- **每脚本一张环境表（沙箱）**，钩子从 env 里查。关键：`__index` 必须挂
+  **真元表**（`meta.set("__index", lua.globals())` 后 `env.set_metatable(...)`）
+  —— 往 env 塞名叫 `__index` 的普通字段对读取完全无效（本轮最贵的坑：
+  脚本里所有宿主 API 变成 nil，9 条测试因此红，查元表语义才定位到）。
+- **指令计数沙箱**：`set_hook(every_nth_instruction(1024))`，预算 200_000，
+  扣到 0 返回 `Error::RuntimeError` 中断本次调用 —— 死循环脚本只毁掉自己
+  这一帧，不卡死进程。与 Rhai 的 `set_max_operations(200_000)` 同量级。
+- **StdLib 裁剪**：只开 `TABLE | STRING | MATH | UTF8 | COROUTINE`；
+  io / os / package / debug / ffi 不给 —— 脚本是用户内容（可能是下载的 mod）。
+  四个钩子与 Rhai 同名同语义；顶层 `local` 脚本级共享，每实体状态走
+  `state_get_or` / `state_set`。
+- mlua API 细节坑（留档）：`load(chunk)` 只收 1 个参数（chunk 名用
+  `.set_name(...)`）、`AsChunk` 只对 `&[u8]` 实现、`set_metatable` 返回 `()`、
+  `Table::set` 无 turbofish。测试 15 条（沙箱/死循环/状态隔离/钩子，与
+  Rhai 侧对称）。
+
+### 二、两轨按扩展名分流（`world.rs` 合并）
+
+- `.lua` → `LuaHost`，其余 → `ScriptHost`（`is_rhai = !is_lua`）。两轨
+  **合起来必须恰好覆盖全部脚本**：漏了是"两边都不管、脚本静默不执行"，
+  重了是"两边都编译、假报编译错"。证红测试 `rhai_host_skips_lua_scripts`
+  （旧实现把 `.lua` 丢给 Rhai → 每帧一条"脚本编译失败"日志 → 红）。
+- `World` 帧管线依次派发两轨；日志/命令缓冲**合并但不共享指针**
+  （各持各的 `Vec`，每帧取走追加到 world 侧）。
+- `dispatch_destroy` / `forget_entity` 两宿主都**未接线** —— 与 Rhai 对称的
+  既有遗留（运行时本来就没调用它们），不借 P2 之名单方面接线。
+
+### 三、热路径 String 克隆 → 路径驻留表（先量后改）
+
+**量**（临时探针 `clone_cost_probe`，量完即删，数据在此留档）：1000 实体
+场景、每帧 2 次派发 × 300 帧，同机会话：
+
+| 热路径点 | String 版 | 驻留 u32 版 | 克隆贵出 |
+|---|---|---|---|
+| 建派发队列（`collect_*_queue` / `dispatch_start`） | 53.52 µs/帧 | 20.91 µs/帧 | **32.61 µs/帧** |
+| 状态表 entry（`state_key`） | 93.84 µs/帧 | 16.00 µs/帧 | **77.84 µs/帧** |
+
+合计上限 ≈ **110 µs/帧** —— 占当时 Rhai 轨分发（819.6 µs）的 13%。
+三处克隆：两宿主各自的 `collect_*_queue`、`dispatch_start` 内联队列、
+`run_hook` 的 `state_key`（Lua 侧与 Rhai 侧一一对称）。
+
+**改**（`xgame-script/src/intern.rs`，两宿主各持一份 `PathIntern`）：
+
+- 路径 → 稳定 `u32`；队列存 `(EntityId, u32)`，状态键 `(EntityId, u32)`；
+  `resolve(id)` 用 `Vec` 下标换回 `&str`（日志 / `GameCtx::source`），零分配。
+  每帧每路径只多一次哈希查表（探针已计入），换掉一次 String 分配+复制。
+- **id 永不回收、驻留表永不清空**：状态表按 id 找状态，`invalidate` /
+  `invalidate_all` 只清编译缓存。表一清，热重载后每实体状态会**静默错位**
+  （A 脚本读到 B 的计时器，两边都是 `f32` 时无从发现）。回归测试
+  `state_survives_hot_reload_even_when_intern_order_changes`（两宿主各一条）：
+  跑帧 → `invalidate_all` + **把实体顺序倒过来**（逼驻留顺序改变）→
+  断言状态延续（a=2、b=200）。**证红**：把"清空驻留表"这个看似合理的实现
+  写进 `invalidate_all`，两条测试都红（b=100，即状态从 0 重计）——
+  这是新不变量的红对照（旧实现没有驻留表，性能改动本身在行为测试下恒绿，
+  正因此需要这条不变量网）。
+- **借用检查的形状**（实现要点）：借 `self.intern` 得到的 `&str` 没法跨
+  `&mut self` 方法调用传（借用检查器看不出"它就是 self 身上的一块"）。
+  解法：`ensure_loaded(path)` 拆成"先 intern 再转"的外壳 + `ensure_loaded_id`
+  内核（在方法体内自己 resolve）；`run_hook` 改收 `path_id`，体内 resolve
+  （O(1) 下标）。`CompiledScript.path` 字段随之删除（两个用途都被驻留表
+  取代，留着是死字段）。
+
+**验**（端到端，`behavior_dispatch_throughput` 4 轮背靠背）：Rhai 轨分发
+819.6 → **713 µs/帧**（-106 µs，-13%），与探针预测 ≈110 µs 吻合 ——
+微基准与端到端交叉验证，该对照已写进基准模块文档（P2 列）。
+
+### 四、编辑器 / 工具链接入
+
+- `Project::list_scripts` 扫 `rhai` **和** `lua`（证红测试
+  `list_scripts_includes_both_tracks`：旧实现只列出 `["Scripts/a.rhai"]` → 红）。
+  Inspector 的 Add Script 菜单、MCP 项目信息、热重载扫描都走它，一处改完全通。
+- 三处文案（state 扫描说明、工具栏 ⟳ Scripts 提示、Inspector 空态）改为
+  "双轨"；热重载链（state → game_runtime → world）本就两个宿主各
+  `invalidate_all`，无需改。
+- `xgame-editor --check`：SampleScene OK（entities=14、script_refs=3）。
+
+### 五、验证汇总
+
+- 全量：**332 项 0 失败**、clippy 0 警告、`--check` OK。
+- 新增回归 5 条：intern 稳定性 2、双宿主状态延续 2、list_scripts 双轨 1
+  （其中 3 条按惯例先证红再改绿，状态延续 2 条的红对照见上文）。
+- 基准 P2 列：基线 7.43 / 组件分发 64.7 / Rhai 分发 713 µs。基线与组件轨
+  相对上一轮的漂移（10.39 → 7.43、57.1 → 64.7）是机器状态 —— 那两档的
+  执行路径不经过驻留表（脚本列表为空，扫描循环逐字未变）；判回归只看
+  Rhai 轨的 -106 µs 是否消失。
+
+### 六、遗留
+
+- **下一步 = P2.5 基准闸门**：扩 `behavior_dispatch_throughput` 加 Lua 轨、
+  三负载对比出报告（规则见计划文档 §六）。Rhai 去留在闸门结论前不动。
+- `dispatch_destroy` / `forget_entity` 双轨都未接线（既有遗留，等运行时
+  真正需要"销毁钩子"时两轨一起）。
+- 编辑器没有"新建脚本"功能（两轨一致）：`.lua` 文件放进 `Scripts/` 即被
+  扫描、挂载、执行。
+- Lua 轨的**每帧性能还没有实测**（本轮基准只加了驻留表对照）——P2.5 会出
+  第一个数；若 Lua 轨明显慢于预期，优先怀疑方向是每钩子的 `LuaCtx` 构造
+  与 env 查表，不是驻留表（已修的部分有交叉验证）。

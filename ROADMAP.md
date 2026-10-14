@@ -20,6 +20,8 @@
 | **双轨架构 P0** | ✅ 完成 | 双轨语言架构（Rust + Lua）第一期：`xgame` 门面 crate + `GameCtx` 方法层 + Rust 组件（`Lifecycle` / 注册表 / `Entity::behaviors`）+ cdylib 插件边界（`export_plugin!` + 版本握手 + 示例插件全链路）—— 计划与决策见 [`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)，实施记录见 PLAN.md 十五 |
 | **双轨架构 P0.5** | ✅ 完成 | **编辑器 PIE**：项目根有 `Cargo.toml` ⇒ 按 ▶ Play 自动后台 `cargo build`（UI 不阻塞）→ 产物同步进 `<项目>/Plugins/` → 临时副本加载进 Play 会话；Inspector 的 Behaviors 区、工具栏编译指示器、打包器带 `Plugins/`、玩家加载插件；演示项目 [`projects/BehaviorsDemo`](projects/BehaviorsDemo) 是 Rust 组件与 Rhai 脚本同场景共存 —— 决策见计划文档 **D7**，实施记录见 PLAN.md 十六 |
 | **双轨架构 P1** | ✅ 完成 | **`#[derive(Inspect)]` + 编辑器调参**：组件自带静态字段表（`Inspect` trait / `FieldDesc` / 10 种 `FieldKind`），Inspector 按表自动渲染控件（有边界给滑块、无边界给拖拽值、勾选框 / 文本 / 向量行），Play 中改**活实例**（热调参）、Edit 中改副本（按 ▶ 时灌进运行时）—— 决策见计划文档 **D8**，实施记录见 PLAN.md 十七 |
+| **双轨架构 P1.5** | ✅ 完成 | **组件参数落盘进场景文件**：`Entity::behavior_params`（**注册名** → 字段寻址名 → 值）、装配期套用 + 编辑副本种子、`FieldKind`/`FieldValue` serde 变体标签钉死、组件字段编辑接入场景撤销栈 —— 决策见计划文档 **D9**，实施记录见 PLAN.md 十八 |
+| **双轨架构 P2** | ✅ 完成 | **Lua 宿主 + 路径驻留表**：mlua 0.10 双轨宿主（每脚本环境表沙箱 + 指令计数沙箱 + StdLib 裁剪），按扩展名分流（`.lua` → LuaHost、其余 → Rhai）；修两宿主每帧 3 处路径 `String` 克隆 → 驻留 `u32`（Rhai 轨分发 **819.6 → 713 µs/帧**，同机背靠背 -13%）；编辑器双轨接入 —— 决策见计划文档 **D10**，实施记录见 PLAN.md 十九 |
 | **七** | 🟨 进行中 | 动画系统（第一片 ✅：骨骼蒙皮 + 单剪辑播放；第二片 ✅：换剪辑交叉淡入；第三片 ✅：阈值状态机；第四片 ✅：叠加混合；第五片 ✅：多层混合栈 + 骨骼遮罩；morph/Phase B 待做） |
 | **八** | ⬜ 待开始 | 音频系统 |
 | **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影已落地；CSM / Bloom / ACES / 天空盒待做） |
@@ -177,10 +179,10 @@ scene_write / entity_upsert / entity_remove / project_check，配 20 条回归�
 > 窗口与 `GameApp` 都推迟到 `resumed` 里创建（`ActiveEventLoop::create_window`
 > 只在回调内可见）。`about_to_wait` 主动 `request_redraw()` 的连续帧机制不变。
 
-## 双轨语言架构（进行中）：P0 ✅ P0.5 ✅ P1 ✅
+## 双轨语言架构（进行中）：P0 ✅ P0.5 ✅ P1 ✅ P1.5 ✅ P2 ✅
 
 Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决策记录：
-[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；实施记录：PLAN.md 十五 / 十六 / 十七。
+[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；实施记录：PLAN.md 十五 / 十六 / 十七 / 十八 / 十九。
 
 | P0 交付 | 状态 | 说明 |
 |---|---|---|
@@ -218,7 +220,14 @@ Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决�
 | 编辑副本种子 | ✅ | `inspect_component` 构造编辑态副本时种子场景参数 —— Edit 模式打开 Inspector 看到的就是场景真实值而非组件默认值 |
 | 撤销语义推翻 | ✅ | 组件字段编辑接上场景撤销栈（拖拽挂 `undo_pending`、松手入栈、离散编辑当场 push），与 Name/Transform 同通道 —— 推翻 P1"不进撤销栈"（参数已成场景数据，不进栈会凭空丢一条场景编辑） |
 
-后续分期：**P2** Lua 宿主（mlua）→ **P2.5** 基准闸门（Rhai vs Lua）→ **P3**
+| P2 交付 | 状态 | 说明 |
+|---|---|---|
+| Lua 宿主 | ✅ | `lua_host.rs` + `lua_api.rs`（mlua 0.10：`lua54` + `vendored` + `send`）：每脚本环境表沙箱（`__index` 必须挂**真元表**，普通字段无效）、指令计数沙箱（每 1024 条指令查预算、200_000 中断本次调用）、StdLib 裁剪（无 io/os/package/debug）、四钩子与 Rhai 同名同语义、顶层 `local` 脚本级共享；`ScriptCtx<S>` 泛型化，Rhai 侧零改动 |
+| 两轨分流 | ✅ | `.lua` → LuaHost、其余 → Rhai（`is_rhai = !is_lua`，两轨恰好全覆盖）；`World` 帧管线依次派发两轨，日志/命令缓冲合并不共享指针；证红测试 `rhai_host_skips_lua_scripts` |
+| 路径驻留表 | ✅ | 修两宿主每帧 3 处路径 `String` 克隆 → `(EntityId, u32)`（`xgame-script/src/intern.rs`）：探针量得上限 ≈110 µs/帧，端到端 Rhai 轨分发 **819.6 → 713 µs/帧（同机背靠背 -13%）**；驻留 id 永不回收、`invalidate*` 只清编译缓存（双宿主 `state_survives_hot_reload_*` 钉死，红对照 = "热重载清空驻留表"实测红） |
+| 编辑器接入 | ✅ | `list_scripts` 双轨扫描（证红）+ 工具栏/Inspector/状态层三处文案 + 热重载链双 `invalidate_all`；MCP 项目信息同源生效；`xgame-editor --check` OK |
+
+后续分期：**P2.5** 基准闸门（Rhai vs Lua，决策规则见计划文档 §六）→ **P3**
 按闸门结论处置 Rhai。
 
 P0.5 遗留（有意延后）：Play 中途热换插件、组件徽章、release profile 插件出货（P3）、
@@ -230,6 +239,10 @@ P1 遗留（有意延后）：`Quat` / `Color` 未进 `FieldKind`（序列化变
 P1.5 遗留（有意延后）：**prefab 的组件字段**（prefab 目前只覆盖 Transform 等基础
 数据，待 prefab 扩展到组件层时一起）、Play 中热调参不写回（既有语义，"Play 中调参
 也持久化"需另开决策）。
+
+P2 遗留（有意延后）：`dispatch_destroy` / `forget_entity` 两宿主都未接线（与 Rhai
+对称的既有遗留，等运行时真需要销毁钩子时一起）；编辑器无"新建脚本"功能（两轨一致，
+放文件进 `Scripts/` 即被扫描）；**Lua 轨每帧性能未实测** —— P2.5 闸门出第一个数。
 
 ## 第七阶段：动画系统 🟨
 
