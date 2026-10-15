@@ -8,13 +8,14 @@
 //!
 //! # 量的是什么
 //!
-//! 1000 个**纯视觉**实体（无刚体，`sync_bodies` / 物理完全不参与），分三档：
+//! 1000 个**纯视觉**实体（无刚体，`sync_bodies` / 物理完全不参与），分四档：
 //!
 //! | 档 | 量的是什么 |
 //! |---|---|
 //! | 无轨道（基线） | 引擎每帧的公共开销（start 扫描、固定步循环、空脚本轨扫描） |
 //! | Rust 组件轨 | 基线 + 1000 个 no-op 组件的分发 |
-//! | Rhai 脚本轨 | 基线 + 1000 个 no-op 脚本的分发 |
+//! | Rhai 脚本轨 | 基线 + 1000 个 no-op Rhai 脚本的分发 |
+//! | Lua 脚本轨 | 基线 + 1000 个 no-op Lua 脚本的分发（P2.5 闸门引入，与 Rhai 同机背靠背） |
 //!
 //! "轨的分发成本" = 各档减基线 —— 差额里只有分发路径不同（验收线
 //! "组件分发一轮 < 50 µs"按这个口径判）。写成 `tests/` 下的集成测试
@@ -27,11 +28,12 @@
 //! 所以记录时要记全三元组（提交 + 机器状态 + 同机对照组），否则下一个人会拿一个
 //! 跨机器的数字当绝对真理，去"修"一个并不存在的回归。已知记录：
 //!
-//! | 轨 | P0 `9b3cd1c`（当时记录） | P0.5 `3d77f12`（2026-10-14 同机回测） | P1（同一次会话、同机背靠背） | P2（2026-10-14 同日同机复测） |
-//! |---|---|---|---|---|
-//! | 无轨道基线 | — | 6.32 µs | 6.39 µs | 7.43 µs |
-//! | Rust 组件轨分发 | 37.6 µs | **68.4 µs** | **65.2 µs** | **64.7 µs** |
-//! | Rhai 脚本轨分发 | 493.9 µs | 728.8 µs | 729.3 µs | **713 µs** |
+//! | 轨 | P0 `9b3cd1c`（当时记录） | P0.5 `3d77f12`（2026-10-14 同机回测） | P1（同一次会话、同机背靠背） | P2（2026-10-14 同日同机复测） | P2.5（2026-10-15 同机背靠背） |
+//! |---|---|---|---|---|---|
+//! | 无轨道基线 | — | 6.32 µs | 6.39 µs | 7.43 µs | 7.54 µs |
+//! | Rust 组件轨分发 | 37.6 µs | **68.4 µs** | **65.2 µs** | **64.7 µs** | **71.7 µs** |
+//! | Rhai 脚本轨分发 | 493.9 µs | 728.8 µs | 729.3 µs | **713 µs** | 735.6 µs |
+//! | Lua 脚本轨分发 | — | — | — | （未实测） | **562.1 µs** |
 //!
 //! P2 列是**驻留表修复后**的数字（每帧 3 处路径 `String` 克隆换成驻留 `u32`，
 //! 见 `xgame-script` 的 `intern.rs`），4 轮背靠背取中位：基线 7.40-7.44、
@@ -46,6 +48,13 @@
 //!    循环前后逐字相同），漂移来自机器状态 —— 正是本文开头声明的"绝对值随
 //!    机器状态浮动"。判回归只看 Rhai 轨的 -106 µs 是不是消失。
 //! 3. 组件轨 64.7 与 P0.5 / P1（68.4 / 65.2）同量级，P1 之后无回归。
+//!
+//! **P2.5 列**（闸门会话）：Lua 轨首测 **1615 µs/帧**（比 Rhai 慢 2.3×），
+//! 定位到两处实现开销并修掉后 **562 µs（-65%）** —— 每钩子 `env.get` 查表
+//! （~194 ns/次，钩子函数句柄改为编译期缓存）+ 每次调用现造 userdata
+//! （~284 ns/次，改为宿主常驻槽 + 轻量指针传参）。量证与方案对比在
+//! PLAN.md 二十。Rhai 轨 735.6 与历史 713 在机器噪声内（同机对照基线
+//! 7.43 → 7.54 也漂了 ~2%）；组件轨 71.7 同理（本机验收线持续红，见文首）。
 //!
 //! 两个结论，都由这张表得出：
 //!
@@ -75,13 +84,14 @@ impl Lifecycle for Noop {}
 xgame_core::impl_no_inspect!(Noop);
 
 /// 造一个 N 实体的纯视觉场景。`mode`：none = 无轨道基线；scripts = no-op
-/// Rhai 脚本；components = no-op 组件。
+/// Rhai 脚本；scripts_lua = no-op Lua 脚本；components = no-op 组件。
 fn build_scene(mode: &str) -> Scene {
     let mut scene = Scene::new("bench");
     for i in 0..N {
         let mut e = Entity::new(format!("e{i}"));
         match mode {
             "scripts" => e.scripts.push("Scripts/noop.rhai".to_owned()),
+            "scripts_lua" => e.scripts.push("Scripts/noop.lua".to_owned()),
             "components" => e.behaviors.push("Noop".to_owned()),
             _ => {}
         }
@@ -97,13 +107,25 @@ fn measure(mode: &str, label: &str) -> f64 {
         std::process::id(),
         mode
     ));
-    if mode == "scripts" {
-        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
-        std::fs::write(
-            dir.join("Scripts/noop.rhai"),
-            "fn start(ctx) {}\nfn update(ctx) {}\nfn fixed_update(ctx) {}\n",
-        )
-        .unwrap();
+    match mode {
+        "scripts" => {
+            std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+            std::fs::write(
+                dir.join("Scripts/noop.rhai"),
+                "fn start(ctx) {}\nfn update(ctx) {}\nfn fixed_update(ctx) {}\n",
+            )
+            .unwrap();
+        }
+        "scripts_lua" => {
+            std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+            // 与 Rhai 档同三个钩子、全空 —— 两档唯一的差别只能是宿主本身。
+            std::fs::write(
+                dir.join("Scripts/noop.lua"),
+                "function start(ctx) end\nfunction update(ctx) end\nfunction fixed_update(ctx) end\n",
+            )
+            .unwrap();
+        }
+        _ => {}
     }
 
     let registry = {
@@ -141,13 +163,18 @@ fn behavior_dispatch_throughput() {
     let baseline_us = measure("none", "无轨道基线");
     let component_us = measure("components", "Rust 组件轨");
     let script_us = measure("scripts", "Rhai 脚本轨");
+    // P2.5 闸门引入 Lua 档：固定排在 Rhai 之后，同进程同机背靠背 ——
+    // 两档实体数、钩子集、脚本内容逐字同型，差额只能来自宿主本身。
+    let lua_us = measure("scripts_lua", "Lua 脚本轨");
 
     let component_dispatch = component_us - baseline_us;
     let script_dispatch = script_us - baseline_us;
+    let lua_dispatch = lua_us - baseline_us;
     println!(
-        "对照：组件轨分发 {component_dispatch:.2} us/帧，脚本轨分发 {script_dispatch:.2} us/帧 \
-         （脚本是组件的 {:.1}×，含每钩子的 ScriptCtx 构造、rhai 调用与日志缓冲写入）",
-        script_dispatch / component_dispatch
+        "对照：组件轨分发 {component_dispatch:.2} us/帧，Rhai 轨分发 {script_dispatch:.2} us/帧，\
+         Lua 轨分发 {lua_dispatch:.2} us/帧（Rhai/Lua = {:.2}×，>1 = Lua 更快；\
+         含各钩子的 Ctx 构造、解释器调用与日志缓冲写入）",
+        script_dispatch / lua_dispatch
     );
 
     // P0 验收：1000 个 no-op 组件实体，组件分发一轮 < 50 µs（扣除公共基线后的分发成本）。

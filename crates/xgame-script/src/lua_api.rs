@@ -27,13 +27,28 @@ use crate::ctx::RayHit;
 
 /// Lua 侧的脚本上下文句柄。
 ///
-/// 它是 [`ScriptCtx`]（`Copy` 地址束）的一层 userdata 壳。传给 Lua 时按值拷进
-/// userdata；从 Lua 取回时 [`FromLua`] 借出再拷一份 —— 安全论证与 Rhai 完全相同：
-/// 句柄只在宿主一次钩子调用的窗口内被解释器持有，期间被指向的对象由调用栈上的
-/// `&mut` 独占（见 `context.rs` 模块文档）。
+/// 它是 [`ScriptCtx`]（`Copy` 地址束）的一层壳。**传给脚本时不再现造
+/// userdata**（每次调用 `lua_newuserdata` + 元表挂接实测 ~284 ns/次，
+/// 1000 实体 ×2 钩子 ≈568 µs/帧，比脚本本体还贵），改为传宿主常驻槽的
+/// **轻量指针**（`LightUserData`，~3 ns）：[`LuaHost`] 持有一个
+/// `Box<MaybeUninit<LuaCtx>>`，每次钩子调用前写入本次地址束，脚本侧
+/// [`FromLua`] 把指针解回一份 `Copy`。
 ///
-/// 用 userdata 而不是裸地址：mlua 的类型检查能在脚本传错第一参数时给出清晰报错
-/// （"expected ScriptCtx"），而不是把一个随机 `usize` 当地址解引用。
+/// # 为什么这样仍然安全
+///
+/// - 指针**永远**指向宿主持有的槽：槽在 [`LuaHost`] 的堆上，任何脚本可见的
+///   读取都发生在某次钩子调用内（脚本代码只在钩子调用窗口里跑，没有别的
+///   宿主入口），而槽在每次调用入口就被写成本次 ctx —— 所以读到的一定是
+///   **当前正在执行的这次调用**的地址束，被指向的对象（`GameCtx`）此刻由
+///   调用栈上的 `&mut` 独占（调用窗口约定见 `context.rs` 模块文档）。
+/// - 脚本把句柄存起来下帧再用（违约）时，读到的也是**下帧那次调用**的
+///   有效 ctx —— 语义是"当前运行中的上下文"，不是悬垂地址。这比旧方案
+///   （userdata 里存一份过期拷贝、下帧用 = 解引用已死栈帧）更不容易踩坑。
+/// - 脚本没法**伪造**这种值：Lua 语言层没有构造 lightuserdata 的操作，
+///   VM 里出现的 lightuserdata 只可能是我们放进去的槽指针。
+///
+/// 用指针而不是裸 `usize`：`Value::LightUserData` 仍带 tag，脚本传错第一参
+/// （数字 / 表 / nil）时 [`FromLua`] 给出清晰报错，而不是把随机数当地址解引用。
 #[derive(Clone, Copy)]
 pub(crate) struct LuaCtx(ScriptCtx<Table>);
 
@@ -41,6 +56,14 @@ impl LuaCtx {
     /// 从脚本上下文地址束构造（宿主侧唯一入口）。
     pub(crate) fn from_script_ctx(ctx: ScriptCtx<Table>) -> Self {
         Self(ctx)
+    }
+
+    /// 把自己摊成传给脚本的轻量指针（指向宿主常驻槽，见类型文档）。
+    ///
+    /// 入参就是槽里那个 `LuaCtx` 的地址 —— 传引用而不是裸指针，让"指针必须
+    /// 指向有效槽"这条责任留在安全 Rust 侧（槽地址由宿主的 `&mut` 保证）。
+    pub(crate) fn as_light(ctx: &LuaCtx) -> mlua::LightUserData {
+        mlua::LightUserData(ctx as *const LuaCtx as *mut _)
     }
 
     #[inline]
@@ -54,20 +77,22 @@ impl LuaCtx {
     }
 }
 
-// 空实现：ctx 上没有脚本能直接调的方法，全部宿主能力都是取 ctx 作第一参的全局函数。
-impl mlua::UserData for LuaCtx {}
-
 // mlua 只为 `T: UserData` 提供 `IntoLua`，没有对应的 `FromLua`（见 conversion.rs）。
-// 这里手写：从 userdata 借出再拷贝（`ScriptCtx: Copy`）。
+// 这里手写：lightuserdata → 槽地址 → 解出一份 `Copy`（`ScriptCtx: Copy`）。
+// 参数校验仍由类型层做：不是 lightuserdata（脚本传了数字 / 表 / nil）直接报错，
+// 不会把随机值当地址解引用 —— 伪造 lightuserdata 需要 Lua 语言层没有的操作。
 impl FromLua for LuaCtx {
     fn from_lua(value: Value, _lua: &Lua) -> mlua::Result<Self> {
-        let ud = value.as_userdata().ok_or_else(|| Error::FromLuaConversionError {
-            from: value.type_name(),
-            to: "ScriptCtx".to_owned(),
-            message: Some("期望脚本上下文句柄（第一个参数）".to_owned()),
+        let mlua::LightUserData(ptr) = value.as_light_userdata().ok_or_else(|| {
+            Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "ScriptCtx".to_owned(),
+                message: Some("期望脚本上下文句柄（第一个参数）".to_owned()),
+            }
         })?;
-        let guard = ud.borrow::<LuaCtx>()?;
-        Ok(*guard)
+        // SAFETY: 槽由 LuaHost 独占持有，任何脚本可见的执行都发生在钩子调用
+        // 窗口内（见 `LuaCtx` 类型文档的安全论证），窗口内槽已写入本次 ctx。
+        Ok(unsafe { *(ptr as *const LuaCtx) })
     }
 }
 

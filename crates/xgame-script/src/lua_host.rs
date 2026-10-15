@@ -37,22 +37,27 @@ const INSTRUCTION_BUDGET: u64 = 200_000;
 /// 才中断。1024 是"正常脚本几乎无感、死循环在微秒级被掐断"的折中。
 const HOOK_INTERVAL: u32 = 1024;
 
-/// 一个脚本定义了哪些钩子（编译期算一次，之后每帧只查这几个 bool）。
-#[derive(Debug, Clone, Copy, Default)]
-struct Hooks {
-    start: bool,
-    update: bool,
-    fixed_update: bool,
-    destroy: bool,
+/// 四个生命周期钩子的函数句柄（编译期从环境表取一次）。
+///
+/// 以前这里是一组 bool（`Hooks`），钩子函数每帧每实体现从 env 表查
+/// （`env.get` 实测 ~194 ns/次，1000 实体 ≈192 µs/帧，占 no-op 派发 17%）。
+/// 而 `detect_funcs` 本来就要把函数 `raw_get` 出来验存在性 —— 句柄直接留下，
+/// 热路径零查表。`Function` 是 mlua 的 GC 句柄，跨帧持有安全（脚本失效时
+/// 随 [`CompiledScript`] 一起丢弃）。
+struct HookFuncs {
+    start: Option<Function>,
+    update: Option<Function>,
+    fixed_update: Option<Function>,
+    destroy: Option<Function>,
 }
 
-impl Hooks {
-    fn has(&self, hook: Hook) -> bool {
+impl HookFuncs {
+    fn get(&self, hook: Hook) -> Option<&Function> {
         match hook {
-            Hook::Start => self.start,
-            Hook::Update => self.update,
-            Hook::FixedUpdate => self.fixed_update,
-            Hook::Destroy => self.destroy,
+            Hook::Start => self.start.as_ref(),
+            Hook::Update => self.update.as_ref(),
+            Hook::FixedUpdate => self.fixed_update.as_ref(),
+            Hook::Destroy => self.destroy.as_ref(),
         }
     }
 }
@@ -61,10 +66,11 @@ impl Hooks {
 ///
 /// 不存路径了：名字走驻留表（`intern.resolve`），状态表键走驻留 id ——
 /// 结构上不再需要第二份 `String` 副本（与 Rhai 宿主同款取舍）。
+///
+/// 也不存环境表：钩子函数自身的 `_ENV` upvalue 持有它（Lua 的沙箱机制），
+/// 宿主侧丢掉 `Table` 句柄不影响脚本内的全局查找回落。
 struct CompiledScript {
-    /// 这个脚本的环境表（沙箱）。钩子函数就在这张表里。
-    env: Table,
-    hooks: Hooks,
+    funcs: HookFuncs,
 }
 
 /// [`LuaHost::preload`] 的结果别名（与 Rhai 宿主共用 [`PreloadReport`]）。
@@ -89,6 +95,13 @@ pub struct LuaHost {
     /// 理由与 Rhai 宿主一致：`String` 键 = 每钩子克隆一次路径
     /// （1000 实体实测 ≈77.8 µs/帧，见 [`PathIntern`] 模块文档）。
     states: HashMap<(EntityId, u32), Table>,
+    /// ctx 传参的常驻槽（见 [`LuaCtx`] 类型文档）。
+    ///
+    /// 为什么是 `Box`：槽的地址必须**跨调用稳定** —— 脚本拿到的是它的指针，
+    /// 每钩子现址分配会给出不同地址（而且现造 userdata 实测 ~284 ns/次，
+    /// 1000 实体 ×2 钩子 ≈568 µs/帧）。`MaybeUninit` 是因为首次写入前
+    /// 没有合法初值（`LuaCtx` 需要一个活的 `GameCtx` 才能构造）。
+    ctx_slot: Box<std::mem::MaybeUninit<LuaCtx>>,
     /// 脚本路径驻留表（热路径零 `String` 分配）。**永不清空** ——
     /// 状态表按 id 找状态，热重载（`invalidate*`）只清编译缓存；
     /// 理由与回归测试见 [`crate::intern`] 与 Rhai 宿主的对应说明。
@@ -156,6 +169,7 @@ impl LuaHost {
             failed: HashSet::new(),
             started: HashSet::new(),
             states: HashMap::new(),
+            ctx_slot: Box::new(std::mem::MaybeUninit::uninit()),
             intern: PathIntern::new(),
             logs: Vec::new(),
             commands: Vec::new(),
@@ -302,21 +316,15 @@ impl LuaHost {
             return;
         }
         // 字段级拆借：`path` 借 `self.intern`（共享），下面要动的
-        // scripts / states / logs / commands / budget / lua 全是别的字段。
+        // scripts / states / logs / commands / budget / ctx_slot / lua 全是别的字段。
         let path = self.intern.resolve(path_id);
-        let Some(script) = self.scripts.get_mut(path) else {
+        let Some(script) = self.scripts.get(path) else {
             return;
         };
-        if !script.hooks.has(hook) {
+        // 钩子函数句柄是编译期缓存的（`detect_funcs` 留下的），热路径不再
+        // 查 env 表 —— 每钩子 ~194 ns ×1000 实体 ≈192 µs/帧，量证见 PLAN.md 二十。
+        let Some(func) = script.funcs.get(hook) else {
             return;
-        }
-
-        // 从环境表里取出这次的钩子函数。编译期已确认它存在（`hooks.has`），
-        // 这里再取一次是因为 mlua 的 `Function` 借用环境表；直接存 `Function`
-        // 也行，但取函数是 O(1) 哈希，省一份跨帧持有的句柄更干净。
-        let func: Function = match script.env.get::<Value>(hook.fn_name()) {
-            Ok(Value::Function(f)) => f,
-            _ => return,
         };
 
         // 重置本次调用的指令预算（沙箱）。
@@ -345,10 +353,12 @@ impl LuaHost {
             time: frame.time,
         };
         let ctx = ScriptCtx::new(&mut game, Some(state));
-        let lua_ctx = LuaCtx::from_script_ctx(ctx);
+        // 写进常驻槽、传槽的轻量指针（见 `LuaCtx` 类型文档）——现造 userdata
+        // 实测 ~284 ns/次，1000 实体 ×2 钩子 ≈568 µs/帧，方案对比见 PLAN.md 二十。
+        let light = LuaCtx::as_light(self.ctx_slot.write(LuaCtx::from_script_ctx(ctx)));
 
         // 调用钩子。错误（含沙箱超限）记成日志，不 panic、不中断这一帧。
-        if let Err(err) = func.call::<()>(lua_ctx) {
+        if let Err(err) = func.call::<()>(light) {
             let message = format!("{err}");
             self.logs.push(ScriptLog {
                 level: LogLevel::Error,
@@ -498,14 +508,8 @@ impl LuaHost {
             return false;
         }
 
-        let hooks = detect_hooks(&env);
-        self.scripts.insert(
-            path.to_owned(),
-            CompiledScript {
-                env,
-                hooks,
-            },
-        );
+        let funcs = detect_funcs(&env);
+        self.scripts.insert(path.to_owned(), CompiledScript { funcs });
         true
     }
 }
@@ -537,25 +541,23 @@ fn collect_lua_queue(scene: &Scene, intern: &mut PathIntern) -> Vec<(EntityId, u
     queue
 }
 
-/// 从环境表里找出定义了哪些钩子。
+/// 从环境表里取出四个钩子的函数句柄（不存在的为 `None`）。
 ///
 /// 用"这个名字在 env 里是不是函数"而不是"调用失败再看错误"：后者会把
 /// "钩子不存在"和"钩子内部报错"混成一类。四个钩子名与 Rhai 完全一致。
-fn detect_hooks(env: &Table) -> Hooks {
-    let mut hooks = Hooks::default();
-    for (name, flag) in [
-        ("start", &mut hooks.start),
-        ("update", &mut hooks.update),
-        ("fixed_update", &mut hooks.fixed_update),
-        ("on_destroy", &mut hooks.destroy),
-    ] {
+fn detect_funcs(env: &Table) -> HookFuncs {
+    let grab = |name: &str| match env.raw_get::<Value>(name) {
         // `raw_get` 绕过 `__index`：我们要看的是**这个脚本自己**有没有定义钩子，
         // 而不是"全局有没有一个同名函数"（宿主 API 里没有同名的，但保险起见）。
-        if let Ok(Value::Function(_)) = env.raw_get::<Value>(name) {
-            *flag = true;
-        }
+        Ok(Value::Function(f)) => Some(f),
+        _ => None,
+    };
+    HookFuncs {
+        start: grab("start"),
+        update: grab("update"),
+        fixed_update: grab("fixed_update"),
+        destroy: grab("on_destroy"),
     }
-    hooks
 }
 
 #[cfg(test)]
@@ -614,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn hooks_are_detected_from_env() {
+    fn funcs_are_detected_from_env() {
         let host = LuaHost::new();
         let env = host.lua.create_table().unwrap();
         // 只定义两个钩子 + 一个普通函数。
@@ -624,10 +626,11 @@ mod tests {
             .set_environment(env.clone())
             .exec()
             .unwrap();
-        let hooks = detect_hooks(&env);
-        assert!(hooks.start, "没识别出 start");
-        assert!(hooks.update, "没识别出 update");
-        assert!(!hooks.destroy, "没定义 on_destroy 不该被识别");
+        let funcs = detect_funcs(&env);
+        assert!(funcs.start.is_some(), "没识别出 start");
+        assert!(funcs.update.is_some(), "没识别出 update");
+        assert!(funcs.fixed_update.is_none(), "没定义 fixed_update 不该被识别");
+        assert!(funcs.destroy.is_none(), "没定义 on_destroy 不该被识别");
     }
 
     #[test]
