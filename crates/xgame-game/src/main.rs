@@ -228,13 +228,18 @@ impl GameApp {
         // -- 运行时 --
         // 重力 / 固定步长来自 project.ron 的 `runtime` 节，与编辑器 Play 同一
         // 入口（`WorldConfig::from_project_runtime`）—— 两端行为永远一致。
+        //
+        // 音频：这里尝试打开真设备（`World::new` 里是 silent，无卡自动降级）。
+        // 监听者不用每帧推：本宿主的相机是固定机位 (5,5,5)→原点，
+        // 与 `ListenerPose::default()` 完全一致（引擎开设备时就是这个姿态）。
         let world = World::new(
             scene,
             project.root(),
             WorldConfig::from_project_runtime(&project.manifest().runtime),
         )
         .with_input_map(input_map)
-        .with_behavior_registry(behaviors);
+        .with_behavior_registry(behaviors)
+        .with_audio_engine(AudioEngine::open(project.root()));
 
         Self {
             project,

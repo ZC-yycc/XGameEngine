@@ -52,10 +52,14 @@ impl GameRuntime {
         let input_map = load_input_map(project_root);
         // 重力 / 固定步长来自 project.ron 的 `runtime` 节（⚙ 项目设置面板可改），
         // 不再用 WorldConfig::default() —— 否则清单里改了重力 Play 却纹丝不动。
-        let world =
-            World::new(scene, project_root, WorldConfig::from_project_runtime(runtime))
-                .with_input_map(input_map)
-                .with_behavior_registry(behaviors);
+        //
+        // 音频引擎在这里**尝试打开真设备**（`World::new` 里是 silent）：
+        // 编辑器是宿主，只有宿主知道"现在要不要出声"。打不开自动降级无声，
+        // 不阻断 Play（无卡的 CI / 远程桌面都应当能进 Play 调逻辑）。
+        let world = World::new(scene, project_root, WorldConfig::from_project_runtime(runtime))
+            .with_input_map(input_map)
+            .with_behavior_registry(behaviors)
+            .with_audio_engine(xgame_runtime::AudioEngine::open(project_root));
         Self {
             world,
             report: FrameReport::default(),
@@ -94,6 +98,16 @@ impl GameRuntime {
     /// 取走本帧脚本产生的日志。
     pub fn take_logs(&mut self) -> Vec<ScriptLog> {
         self.world.take_logs()
+    }
+
+    /// 设置 3D 监听者（编辑器 Play 用当前编辑器相机当"玩家的耳朵"）。
+    pub fn set_listener(&mut self, position: [f32; 3], forward: [f32; 3]) {
+        self.world.set_listener(position, forward);
+    }
+
+    /// 音频子系统状态（状态栏 / 诊断用）。
+    pub fn audio_stats(&self) -> xgame_core::AudioStats {
+        self.world.audio_stats()
     }
 
     /// 按下标取一个组件的 `(注册名, 可检视对象)` —— Inspector 在 Play 中改

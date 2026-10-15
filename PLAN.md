@@ -1372,3 +1372,157 @@ AST 解释 vs 字节码 VM 的**语言级代差**，任何宿主侧派发优化�
 - 遗留不变：`dispatch_destroy` / `forget_entity` 仍未接线（单轨后只剩
   Lua 宿主一份，语义同 P2）；组件轨 <50 µs 验收线本机持续红（P0.5 起已知）。
 - **双轨语言架构计划 P0–P3 全部分期完成**。
+
+## 二十二、第八阶段：音频系统（本轮）
+
+引擎第一次有声音。选型 **kira 0.12.5**（纯 Rust、CPAL 后端、自带空间化轨道
+与 symphonia 解码；对比 rodio —— rodio 无内置 3D 定位，空间化得自己拿
+`SpatialSink` 手搓距离衰减，等于把本阶段最核心的一块自己写一遍）。
+
+全量验证绿：`cargo check --workspace --all-targets` 绿、clippy **0 警告**、
+`cargo test --workspace --all-targets` 全绿（新增 20 条音频测试，全部先证红）。
+
+### 一、分层与数据流
+
+```
+xgame-core::audio   纯数据（无 kira 依赖）
+  AudioSource（组件） / ListenerPose / PlaySound / AudioCommand / AudioPort / AudioStats
+        ↑ 只依赖 core
+xgame-audio         AudioEngine：kira 封装（设备 / 空间轨道 / 解码缓存 / GC）
+        ↑
+xgame-runtime       World 持 port + engine，帧末 drain 结算
+        ↑
+xgame-script        GameCtx.audio: Option<&mut AudioPort>（脚本 6 个 API 只进 port）
+```
+
+**脚本层不引 kira** —— 脚本 API 的实现是"往 `AudioPort` 里塞命令"，与
+物理射线 / 生成实体同一模式：脚本产生**意图**，`World` 帧末统一结算。
+这样设备失败 / 沙箱 / 热重载全都与音频实现解耦。
+
+### 二、核心设计决策
+
+1. **监听者与主音量是状态，不进命令束**。`AudioPort` 持
+   `listener: ListenerPose` + `master_volume: f32` + 私有 `commands`。
+   每帧被反复覆盖（编辑器每帧推相机姿态），命令束语义是"发生过的事"，
+   姿态是"现在是什么"—— 混在一起会让"第 3 帧听者在 A、第 5 帧在 B"
+   变成一串需要回放的状态更新。
+
+2. **`PlaySound.follow` 是实体绑定，不是空间化开关**。`spatial` 只看
+   `position.is_some()`；`follow` 只决定 `StopEntity` / `EmitterPosition`
+   按哪个实体匹配。**非空间化的声音也绑实体** —— UI 音挂实体时照样要能
+   "实体删了音就停"。实现期踩过：初版只给空间声源绑实体，导致
+   "非空间化 autoplay + 删实体"音频还在响（`removed_entity_or_component_stops_its_sound`
+   红后修复，`play.follow` 恒设挂载实体）。
+
+3. **无声降级而不是报错**。`AudioEngine::open` 失败（无设备 / 无头 CI /
+   容器里没有音频服务）进入 `Playback::Silent`：照常受理命令、解码、计数、
+   GC（墙钟），只是不出声。**所有音频回归测试跑在 silent 引擎上** ——
+   不用 MockBackend（那会把 kira 内部结构钉死在测试里），用**真 WAV 文件**
+   走完整解码路径，测试因此同时验证了"解码 + 缓存 + 停止 + GC"整条链。
+
+4. **`sync_audio` 每渲染帧一次，不跟物理固定步同频**。人耳对 16 ms 的
+   声源位置更新完全不敏感，固定步一帧可能跑好几个 —— 音频不值得同频。
+
+5. **帧末结算**：`sync_audio()`（发命令）→ …物理 / 脚本… → `flush_audio()`
+   （drain → `engine.apply`）。放在 `World::update` 内部，编辑器 Play 与
+   独立游戏天然一致（仓库铁律）。
+
+### 三、组件与落盘
+
+`Entity::audio: Option<AudioSource>`（一等字段，`#[serde(default, skip_serializing_if)]`，
+与 `physics` / `animator` 完全同款的旧文件兼容策略）。字段：
+`clip / volume(1.0) / pitch(1.0) / looping(false) / autoplay(true) / spatial(false) /
+min_distance(1.0) / max_distance(50.0)`，结构体级 `#[serde(default)]`。
+
+`autoplay` 默认 `true` 是刻意的：给实体挂音频源的作者意图几乎总是"进场景就响"；
+要"等脚本触发"就关掉 autoplay、脚本里 `play_sound`。首播去重靠
+`World.audio_autoplayed: HashSet<EntityId>`（标记进集合后不再触发，组件摘除 /
+实体删除 → `StopEntity` + 清标记 → **重挂再响**，`removed_entity_or_component_stops_its_sound`
+的后半段钉死这个来回）。
+
+### 四、空间化与监听者
+
+- kira spatial sub-track：`add_spatial_sub_track(listener.id(), pos,
+  SpatialTrackBuilder{distances{min,max}})`，Drop 即从混音树移除；
+  `set_position` 每帧推发射位置（组件 spatial 声源每帧从世界矩阵取位置）。
+- 监听者姿态：`ListenerPose::new(position, forward)` —— **只收位置与朝前向量**，
+  up 恒 +Y、`right = forward × up`（相机帧约定）；`forward` 存归一化值，
+  竖直朝向（与 up 平行）退化取 +X 而不是 NaN（`vertical_forward_does_not_produce_nan`）。
+- 编辑器 Play 每帧 `set_listener(编辑器相机 eye/forward)`；`xgame-game`
+  固定机位与 `ListenerPose::default()` 一致，不需每帧推。
+- kira 类型（glam 0.33）不出 `xgame-audio` 墙 —— 跨界只传 `[f32;3]` / `[f32;4]` 数组
+  （引擎 glam 是 0.29，两个版本不能混类型）。
+
+### 五、脚本 API（6 个，`Docs/脚本API.md` §4.11）
+
+`play_sound(ctx, clip, volume, pitch)` / `play_sound_at(ctx, clip, x, y, z, volume)` /
+`stop_sound(ctx, clip)` / `stop_all_sounds(ctx)` / `set_listener(ctx, x, y, z, fx, fy, fz)` /
+`set_master_volume(ctx, v)`。全部是 `GameCtx` 方法（`ctx.rs` 真相源，
+`lua_api.rs` 每函数一行转发）；`FrameCtx.audio` / `GameCtx.audio` 为 `None` 时
+静默 no-op（编辑态、测试构造不需音频也能跑）。
+
+### 六、编辑器接入
+
+- Inspector 新增 **Audio** 区块：clip 路径 / volume / pitch / loop / autoplay /
+  spatial / min-max distance，离散编辑走场景撤销栈（与 Name/Transform 同通道）；
+- `GameRuntime` 注入 `AudioEngine::open(root)`，每帧 `set_listener(编辑器相机)`；
+- 状态栏加 **Audio** 行（`AudioStats`：设备可用 / 活跃声数 / 缓存 clip 数）；
+- `xgame-core::check` 加 `audio_refs` / `missing_audio`（clip 断链进悬空引用报告，
+  `--check` 与 MCP `project_check` 同源）；
+- `ProjectHandle::list_audio()` 扫 wav/ogg/mp3（`content.audio_dir` 子树）。
+
+### 七、示例与资产
+
+SampleScene：`Resources/Audio/Beep.wav`（44.1 kHz / 16 bit / mono 880 Hz
+衰减正弦，`tools/gen-beep-wav.ps1` 生成，88 KB 入库）。Spinner 实体挂
+空间化循环蜂鸣（走近响、走远轻），Jumper 起跳播一次性音效
+（`play_sound` pitch 1.5）。`bundled_sample_project_loads` 补了音频引用
+存在性断言（clip 断链在编辑器里不显形 —— 解码失败只记日志然后无声，
+必须在加载前断言才能被 CI 抓住）。
+
+### 八、回归测试清单（20 条新增，全部先证红）
+
+| 层 | 测试 | 钉死什么 |
+|---|---|---|
+| core | `audio_source_ron_round_trips` / `_defaults_when_fields_omitted` / `audio_source_survives_ron_roundtrip` / `plain_entity_omits_audio_field` / `audio_participates_in_entity_equality` | 落盘格式 + 旧文件兼容 |
+| core | `audio_port_collects_commands_in_order` | 命令束顺序 |
+| core | `listener_orientation_matches_camera_convention` / `vertical_forward_does_not_produce_nan` | 姿态数学（竖直朝向不 NaN） |
+| core | `source_maps_to_play_sound` | 组件 → 播放请求映射（spatial 只看 position） |
+| audio | `plays_and_stops_a_real_wav_in_silent_mode` | 真 WAV 解码 + 停止 + GC（墙钟） |
+| audio | `missing_clip_is_counted_but_not_retried` | 解码失败进 failed 表、不重试 |
+| audio | `entity_scoped_stops_and_emitter_updates` | StopEntity / EmitterPosition 按实体匹配 |
+| audio | `linear_volume_maps_to_decibels_safely` | 音量→分贝换算 + clamp（0 音量不炸） |
+| script | `audio_api_buffers_commands_or_noops` | GameCtx 音频方法缓冲 / None 静默 |
+| script | `script_audio_calls_reach_the_port` | Lua 6 个函数 → port 端到端 |
+| runtime | `autoplay_sound_requests_play_exactly_once` | 首播一次（标记表去重） |
+| runtime | `real_wav_autoplay_becomes_active` | 真 WAV 进 ActiveSound |
+| runtime | `spatial_source_pushes_emitter_positions_each_frame` | 空间声源每帧推位置 |
+| runtime | `removed_entity_or_component_stops_its_sound` | 删实体 / 摘组件停音 + 重挂再响 |
+| runtime | `script_play_sound_reaches_the_engine` | 脚本 → World → 引擎全链路 |
+
+### 九、刻意的取舍
+
+1. **不用 MockBackend**：无声模式走真实 `AudioEngine` 代码路径（只是不碰设备），
+   测试用真 WAV。Mock 会把 kira 内部 trait 结构钉进测试，升级即碎。
+2. **不做混音总线分组**（BGM / SFX 各自音量）：主音量 + 每声源音量已够 v1；
+   总线要动 kira 的 track 层级设计，等有真实需求（游戏要"音乐音量滑块"）再开。
+3. **不做流式长音频**：`StaticSoundData` 全量解码进内存（Beep.wav 88 KB 无感）；
+   一小时 BGM 会吃几十 MB —— 流式播放（`StreamingSoundData`）留给需要时。
+4. **`play_sound` 固定参数不接表**：Lua 侧签名 `(ctx, clip, volume, pitch)` 是
+   位置参数，不支持 `play_sound(ctx, {clip=..., volume=...})` 的表式可选参数 ——
+   与 `raycast` / `spawn_ball` 等既有 API 的固定参数风格一致，转发壳每函数一行
+   的模式也不被破坏。
+5. **`AudioEngine` 藏在 `xgame-audio`，`World` 持有但不暴露**：外部只能
+   `with_audio_engine` 注入、`audio_stats` 读数 —— 防止有人绕过 port 直接
+   摆弄 kira 句柄（那会绕开命令束的时序保证）。
+
+### 十、实现期踩的坑（防好心人翻案）
+
+- **非空间化 autoplay 没绑实体** → 删实体音还在响。修复：`play.follow`
+  恒设挂载实体（见二.2）。
+- **测试 WAV 太短被 GC 干扰**：初版测试用 50 ms WAV + `Instant` 墙钟 GC，
+  断言"active == 1"时声音已自然结束 → 红。改用 1~5 s WAV 后绿。
+  教训：**GC 语义（墙钟 vs 句柄状态）要在测试里显式选择**。
+- **`AudioManager` 六百多字节内联进 `Playback` 枚举** → clippy
+  `large_enum_variant`。`manager` 装箱（热路径只按引用解引用，零成本）。
+- **`map_or(true, …)`** → clippy `unnecessary_map_or`，改 `is_none_or`。

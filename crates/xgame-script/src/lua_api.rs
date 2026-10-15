@@ -112,6 +112,7 @@ pub(crate) fn register(lua: &Lua) -> mlua::Result<()> {
     register_time_and_log(lua, &globals)?;
     register_state(lua, &globals)?;
     register_animation(lua, &globals)?;
+    register_audio(lua, &globals)?;
     Ok(())
 }
 
@@ -797,6 +798,62 @@ fn register_animation(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         "set_anim_layer_weight",
         lua.create_function(|_, (ctx, layer, value): (LuaCtx, String, f32)| {
             ctx.game().set_anim_layer_weight(&layer, value);
+            Ok(())
+        })?,
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 音频
+// ---------------------------------------------------------------------------
+
+/// 音频 API：全部固定参数（不用 Variadic）——参数个数固定换来的是
+/// 脚本里写错参数个数时**当场报错**，而不是静默吞掉一个音效。
+fn register_audio(lua: &Lua, globals: &Table) -> mlua::Result<()> {
+    globals.set(
+        "play_sound",
+        lua.create_function(|_, (ctx, clip, volume, pitch): (LuaCtx, String, f32, f32)| {
+            ctx.game().play_sound(&clip, volume, pitch);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "play_sound_at",
+        lua.create_function(
+            |_, (ctx, clip, x, y, z, volume): (LuaCtx, String, f32, f32, f32, f32)| {
+                ctx.game().play_sound_at(&clip, x, y, z, volume);
+                Ok(())
+            },
+        )?,
+    )?;
+    globals.set(
+        "stop_sound",
+        lua.create_function(|_, (ctx, clip): (LuaCtx, String)| {
+            ctx.game().stop_sound(&clip);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "stop_all_sounds",
+        lua.create_function(|_, ctx: LuaCtx| {
+            ctx.game().stop_all_sounds();
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "set_listener",
+        lua.create_function(
+            |_, (ctx, x, y, z, fx, fy, fz): (LuaCtx, f32, f32, f32, f32, f32, f32)| {
+                ctx.game().set_listener(x, y, z, fx, fy, fz);
+                Ok(())
+            },
+        )?,
+    )?;
+    globals.set(
+        "set_master_volume",
+        lua.create_function(|_, (ctx, volume): (LuaCtx, f32)| {
+            ctx.game().set_master_volume(volume);
             Ok(())
         })?,
     )?;

@@ -26,16 +26,22 @@ pub struct CheckReport {
     pub lights: usize,
     /// 实体上挂的脚本引用总数。
     pub script_refs: usize,
+    /// 实体上挂的音频引用总数。
+    pub audio_refs: usize,
     /// 引用了但盘上不存在的模型（"名字 → 路径"）。
     pub missing_models: Vec<String>,
     /// 引用了但盘上不存在的脚本（"名字 → 路径"）。
     pub missing_scripts: Vec<String>,
+    /// 引用了但盘上不存在的音频（"名字 → 路径"）。
+    pub missing_audio: Vec<String>,
 }
 
 impl CheckReport {
     /// 有没有问题（缺引用算问题；只缺资产不阻断加载，但 CI 应当知道）。
     pub fn has_issues(&self) -> bool {
-        !self.missing_models.is_empty() || !self.missing_scripts.is_empty()
+        !self.missing_models.is_empty()
+            || !self.missing_scripts.is_empty()
+            || !self.missing_audio.is_empty()
     }
 
     /// 人和机器都能读的摘要（标准输出用；纯 ASCII，避开控制台编码坑）。
@@ -43,23 +49,29 @@ impl CheckReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "check: entities={} lights={} script_refs={}",
-            self.entities, self.lights, self.script_refs
+            "check: entities={} lights={} script_refs={} audio_refs={}",
+            self.entities, self.lights, self.script_refs, self.audio_refs
         );
-        if self.missing_models.is_empty() && self.missing_scripts.is_empty() {
+        if self.missing_models.is_empty()
+            && self.missing_scripts.is_empty()
+            && self.missing_audio.is_empty()
+        {
             let _ = writeln!(out, "check: OK (all referenced assets exist)");
             return out;
         }
         let _ = writeln!(
             out,
             "check: WARN {} missing asset(s)",
-            self.missing_models.len() + self.missing_scripts.len()
+            self.missing_models.len() + self.missing_scripts.len() + self.missing_audio.len()
         );
         for m in &self.missing_models {
             let _ = writeln!(out, "  missing model:  {m}");
         }
         for s in &self.missing_scripts {
             let _ = writeln!(out, "  missing script: {s}");
+        }
+        for a in &self.missing_audio {
+            let _ = writeln!(out, "  missing audio:  {a}");
         }
         out
     }
@@ -97,6 +109,16 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
                     .push(format!("{} -> {}", entity.name, script));
             }
         }
+        if let Some(audio) = &entity.audio {
+            if !audio.clip.is_empty() {
+                report.audio_refs += 1;
+                if !project.path(&audio.clip).is_file() {
+                    report
+                        .missing_audio
+                        .push(format!("{} -> {}", entity.name, audio.clip));
+                }
+            }
+        }
     }
 
     Ok(report)
@@ -130,8 +152,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.root());
     }
 
-    /// 悬空的模型 / 脚本引用必须被点名 —— 这是检查对 CI 和 AI 智能体的
-    /// 核心价值：改完资产引用，一条命令就知道改没改坏。
+    /// 悬空的模型 / 脚本 / 音频引用必须被点名 —— 这是检查对 CI 和 AI 智能体
+    /// 的核心价值：改完资产引用，一条命令就知道改没改坏。
     #[test]
     fn dangling_references_are_reported() {
         let project = temp_project("dangling");
@@ -139,7 +161,8 @@ mod tests {
         scene.entities.push(
             crate::Entity::new("Ghost")
                 .with_model("Resources/NotThere.glb")
-                .with_script("Scripts/NotThere.lua"),
+                .with_script("Scripts/NotThere.lua")
+                .with_audio(crate::AudioSource::new("Resources/NotThere.wav")),
         );
         // 内置几何不是文件引用，绝不能被报成"缺失"。
         scene
@@ -152,11 +175,14 @@ mod tests {
         assert!(report.has_issues());
         assert_eq!(report.missing_models.len(), 1, "{}", report.render());
         assert_eq!(report.missing_scripts.len(), 1, "{}", report.render());
+        assert_eq!(report.missing_audio.len(), 1, "{}", report.render());
         assert_eq!(report.script_refs, 1);
+        assert_eq!(report.audio_refs, 1);
 
         let text = report.render();
         assert!(text.contains("missing model"), "{text}");
         assert!(text.contains("missing script"), "{text}");
+        assert!(text.contains("missing audio"), "{text}");
 
         let _ = std::fs::remove_dir_all(project.root());
     }

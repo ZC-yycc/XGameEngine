@@ -428,8 +428,10 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         "entities": report.entities,
         "lights": report.lights,
         "script_refs": report.script_refs,
+        "audio_refs": report.audio_refs,
         "missing_models": report.missing_models,
         "missing_scripts": report.missing_scripts,
+        "missing_audio": report.missing_audio,
         "has_issues": report.has_issues(),
         "render": report.render(),
     })))

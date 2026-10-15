@@ -24,7 +24,7 @@
 | **双轨架构 P2** | ✅ 完成 | **Lua 宿主 + 路径驻留表**：mlua 0.10 双轨宿主（每脚本环境表沙箱 + 指令计数沙箱 + StdLib 裁剪），按扩展名分流（`.lua` → LuaHost、其余 → Rhai）；修两宿主每帧 3 处路径 `String` 克隆 → 驻留 `u32`（Rhai 轨分发 **819.6 → 713 µs/帧**，同机背靠背 -13%）；编辑器双轨接入 —— 决策见计划文档 **D10**，实施记录见 PLAN.md 十九 |
 | **双轨架构 P2.5** | ✅ 完成 | **基准闸门 Rhai vs Lua**：三负载同进程背靠背（dispatch / api / compute），**Lua 三负载全占优（1.31× / 1.26× / 9.16×）→ 判定 P3 删 Rhai**；闸门暴露负载 1 Lua 慢 2.25×，探针量证并修掉两处宿主热路径实现开销（钩子句柄编译期缓存 + ctx 常驻槽轻量指针传参，Lua 轨分发 **1670 → 576 µs/帧，-65%**）—— 规则见计划文档 §六，实施记录见 PLAN.md 二十 |
 | **七** | 🟨 进行中 | 动画系统（第一片 ✅：骨骼蒙皮 + 单剪辑播放；第二片 ✅：换剪辑交叉淡入；第三片 ✅：阈值状态机；第四片 ✅：叠加混合；第五片 ✅：多层混合栈 + 骨骼遮罩；morph/Phase B 待做） |
-| **八** | ⬜ 待开始 | 音频系统 |
+| **八** | ✅ 完成 | 音频系统（kira：`AudioSource` 组件 + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，实施记录见 PLAN.md 二十二） |
 | **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影已落地；CSM / Bloom / ACES / 天空盒待做） |
 | ~~**十**~~ | ✅ 完成 | 脚本系统 + 热重载（已并入六·五） |
 
@@ -134,7 +134,7 @@
 - **程序化验证** —— `xgame-editor --check <项目>`（退出码 0/1/2，秒级，可进 CI）；
 - **程序化配置** —— 重力 / 步长进 `project.ron`，改一行文本即调参；
 - **单一运行时** —— 无头验证的行为与玩家实跑的完全一致（编辑器 Play == 游戏二进制）；
-- **安全网** —— 280 个回归测试、每条先证红，智能体改引擎也有兜底。
+- **安全网** —— 330+ 回归测试、每条先证红，智能体改引擎也有兜底。
 
 进度与计划：**① MCP server 最小工具集 ✅ 本轮落地** —— 新 crate `xgame-mcp`
 （`dist\xgame-mcp.exe`，stdio 按行 JSON-RPC），6 个工具 project_info / scene_read /
@@ -158,7 +158,7 @@ scene_write / entity_upsert / entity_remove / project_check，配 20 条回归�
 | 声明式物理 | ✅ 完成 | `Entity::physics: Option<PhysicsBody>`（kind / shape / mass / friction / restitution / gravity_scale / sensor）。取代了"凡带模型即动态盒子"的旧行为；不声明 = 纯视觉实体。`PhysicsBody` → rapier 刚体的翻译收在 `xgame-physics::scene_body` |
 | 物理射线 | ✅ 完成 | `PhysicsWorld::raycast` / `raycast_with_filter`（`RaycastFilter`：忽略传感器 / 只打动态体 / 排除自身）。脚本里是 `raycast(ctx, ...)` |
 | 编辑器接入 | ✅ 完成 | Inspector 新增 **Scripts**（增删 / 从项目脚本列表选 / 重扫）与 **Physics**（类型 / 形状 / 形状参数 / 摩擦 / 弹性 / 质量 / 重力缩放 / 传感器）两个区块；Hierarchy 行加 `📜`（带数量）/`⚙` 徽标；工具栏加 `⟳ Scripts` 热重载；Console 直接收脚本日志；Play 时通过 `input_bridge` 把 egui 键鼠灌进运行时 |
-| 音频系统 | ⬜ 待做 | 尚未开始（`ContentConfig::audio_dir` 字段已在） |
+| 音频系统 | ✅ 完成 | 移到**第八阶段**独立落地（2026-10）：`xgame-audio`（kira）+ `AudioSource` 组件 + 3D 空间音频 + 脚本 API，见下方「第八阶段」 |
 | 角色控制器 | 🟨 部分 | 射线有了；基于射线的胶囊体移动 / 台阶 / 坡度尚未实现 |
 | 后处理 / 阴影 | ⬜ 待做 | `Light::casts_shadow` / `shadow_resolution` 字段已进场景，渲染侧还没接 |
 
@@ -302,12 +302,22 @@ P2 遗留（有意延后）：`dispatch_destroy` / `forget_entity` 未接线（�
 > v1 明确不含：多层混合栈、骨骼遮罩、真倒放（负速 = 停在第 0 帧）、逐条转移时长（统一 fade_time）。
 > 每个模型 v1 取第一个带蒙皮的图元、每实体一张皮肤，超过 256 骨的骨架解析时告警截断。
 
-## 第八阶段：音频系统 ⬜
+## 第八阶段：音频系统 ✅
 
-- [ ] kira / rodio 集成
-- [ ] AudioSource 组件
-- [ ] 3D 空间音频
-- [ ] 混音器
+- [x] kira 集成（`xgame-audio` crate：`AudioManager` 默认后端 + 解码缓存；
+      设备打开失败**无声降级** —— 照常受理命令 / 计数 / GC，只是不出声）
+- [x] AudioSource 组件（`Entity::audio` 一等字段：clip / volume / pitch /
+      looping / autoplay / spatial / min-max distance，Inspector 可视化编辑，
+      参数随场景 RON 落盘）
+- [x] 3D 空间音频（kira spatial sub-track：距离衰减 + 每帧推发射位置；
+      实体绑定 `follow`，组件摘除 / 实体删除自动停音）
+- [x] 听者跟随（编辑器 Play 每帧 `set_listener(编辑器相机)`；脚本可
+      `set_listener` 覆盖；主音量可调）
+- [x] 脚本 API（`play_sound` / `play_sound_at` / `stop_sound` /
+      `stop_all_sounds` / `set_listener` / `set_master_volume`）
+- [ ] 混音总线分组（BGM / SFX 独立音量）、流式长音频、音频遮挡 / 低通 —— 有意延后
+
+> 架构与取舍记录见 PLAN.md 二十二。
 
 ## 第九阶段：后处理 + 阴影 🟨
 
@@ -369,6 +379,7 @@ XGameEngine/                       # 引擎源码仓库
 │   │       └── transform.rs
 │   ├── xgame-derive/              # proc-macro（编辑器 Panel 派生）
 │   ├── xgame-script/              # Lua 脚本宿主（GameCtx 方法层在此，lua_api.rs 为转发壳）
+│   ├── xgame-audio/               # 音频引擎（kira 封装：设备 / 空间轨道 / 解码缓存 / 无声降级）
 │   ├── xgame-runtime/             # 统一运行时 World（帧管线 + Rust 组件分发 + 注册表）
 │   ├── xgame/                     # 门面 crate（prelude + ENGINE_VERSION + 插件边界）
 │   ├── xgame-render/              # 渲染器

@@ -1,55 +1,82 @@
-//! 类 Unity 暗色编辑器主题。
+//! 类 UE（Unreal Engine）暗色编辑器主题。
 //!
-//! 在启动时调用 `install(ctx)` 以应用深色背景、蓝色强调色和锐利边角，
-//! 仿照 Unity 编辑器的配色方案；`install_fonts(ctx)` 负责挂上系统中文字体。
+//! 在启动时调用 `install(ctx)` 以应用 Slate 暗色风格的配色：整体灰阶比 Unity
+//! 亮一档且更平（面板 #242424 / 页签 #2B2B2B），输入框反而**更暗**（#181818），
+//! 按钮带轻微蓝灰调，强调色是 UE 标志性的选中蓝，边框和文字都压到 1px 细线；
+//! `install_fonts(ctx)` 负责挂上系统中文字体。
+//!
+//! 所有会出现在界面上的颜色只在 [`colors`] 里定义一次 —— 面板代码一律引用
+//! 这些常量（或 `ui.visuals()`），不要就地 `Color32::from_rgb`，否则下次
+//! 调风格又得全局翻一遍。
 
 use std::path::PathBuf;
 
 use egui::Color32;
 
-/// Unity 暗色主题颜色常量。
+/// UE 暗色主题颜色常量（数值参考 UE4/UE5 编辑器 Slate 暗色主题）。
 pub mod colors {
     use egui::Color32;
 
-    pub const WINDOW_BG: Color32 = Color32::from_rgb(26, 26, 26);
-    pub const PANEL_BG: Color32 = Color32::from_rgb(34, 34, 34);
-    pub const PANEL_HEADER_BG: Color32 = Color32::from_rgb(40, 40, 40);
-    pub const INPUT_BG: Color32 = Color32::from_rgb(48, 48, 48);
-    pub const BUTTON_BG: Color32 = Color32::from_rgb(55, 55, 55);
-    pub const BUTTON_HOVER: Color32 = Color32::from_rgb(70, 70, 70);
-    pub const BUTTON_ACTIVE: Color32 = Color32::from_rgb(85, 85, 85);
+    /// 浮动窗口 / 最外层底色（UE 编辑器背景最深的一档）。
+    pub const WINDOW_BG: Color32 = Color32::from_rgb(30, 30, 30);
+    /// 停靠面板主体（Details / Outliner 面板的 #242424）。
+    pub const PANEL_BG: Color32 = Color32::from_rgb(36, 36, 36);
+    /// 页签条 / 分组标题栏（比面板亮一档，UE 的 Tab 背景 #2B2B2B）。
+    pub const PANEL_HEADER_BG: Color32 = Color32::from_rgb(43, 43, 43);
+    /// 输入框 —— UE 的 TextBox 刻意比周围面板**暗**，让可编辑区域一眼可辨。
+    pub const INPUT_BG: Color32 = Color32::from_rgb(24, 24, 24);
+    /// 按钮常态（UE 按钮带一点蓝灰，不是纯中性灰）。
+    pub const BUTTON_BG: Color32 = Color32::from_rgb(48, 48, 54);
+    pub const BUTTON_HOVER: Color32 = Color32::from_rgb(62, 62, 70);
+    pub const BUTTON_ACTIVE: Color32 = Color32::from_rgb(76, 76, 86);
 
-    pub const ACCENT_BLUE: Color32 = Color32::from_rgb(0, 122, 204);
-    pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(64, 150, 220);
-    pub const SELECTION_BG: Color32 = Color32::from_rgb(30, 80, 120);
+    /// UE 标志性选中蓝（链接、按下态、hover 描边共用）。
+    pub const ACCENT_BLUE: Color32 = Color32::from_rgb(23, 108, 196);
+    pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(71, 149, 217);
+    /// 列表选中行（UE Outliner 选中行是偏灰的深蓝，不是饱和蓝）。
+    pub const SELECTION_BG: Color32 = Color32::from_rgb(35, 84, 128);
 
-    pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(200, 200, 200);
-    pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(140, 140, 140);
-    pub const TEXT_ACCENT: Color32 = Color32::from_rgb(77, 156, 230);
+    /// UE 前景色 #B9B9B9 —— 不用纯白，长时间盯界面不刺眼。
+    pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(191, 191, 191);
+    pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(128, 128, 128);
+    pub const TEXT_ACCENT: Color32 = Color32::from_rgb(66, 149, 226);
 
-    pub const SEPARATOR: Color32 = Color32::from_rgb(50, 50, 50);
+    /// 边框 / 分隔线（UE 的边框很弱，只求"分开了"，不求"看得清"）。
+    pub const SEPARATOR: Color32 = Color32::from_rgb(56, 56, 56);
+
+    /// 视口里没有渲染纹理时的占位底色（UE 视口无内容时接近纯黑）。
+    pub const VIEWPORT_BG: Color32 = Color32::from_rgb(22, 22, 22);
+
+    /// 警告黄 / 错误红（UE 日志的 F5C211 / E53543，比纯黄纯红柔和）。
+    pub const WARN: Color32 = Color32::from_rgb(242, 194, 61);
+    pub const ERROR: Color32 = Color32::from_rgb(229, 67, 73);
 }
 
-/// 构建 Unity 暗色 egui `Visuals`。
-pub fn unity_dark_visuals() -> egui::Visuals {
+/// 构建 UE 暗色 egui `Visuals`。
+///
+/// 与 Unity 暗色主题的两个刻意差异：
+/// 1. `weak_bg_fill`（输入框 / 下拉等"可写"区域）比 `bg_fill` **暗**，Unity 是反过来的；
+/// 2. `fg_stroke` 全部 1px —— UE 的文字不加粗描边，状态变化靠**底色**表达。
+pub fn ue_dark_visuals() -> egui::Visuals {
     use colors::*;
 
     egui::Visuals {
         dark_mode: true,
 
+        // UE 的面板和窗口都是方角，只有下拉/按钮有 2px 微圆角。
         window_rounding: egui::Rounding::ZERO,
         window_fill: WINDOW_BG,
         window_stroke: egui::Stroke::new(1.0_f32, SEPARATOR),
 
         panel_fill: PANEL_BG,
         faint_bg_color: PANEL_HEADER_BG,
-        extreme_bg_color: Color32::from_rgb(20, 20, 20),
-        code_bg_color: Color32::from_rgb(30, 30, 35),
+        extreme_bg_color: Color32::from_rgb(22, 22, 22),
+        code_bg_color: Color32::from_rgb(30, 30, 34),
 
         override_text_color: Some(TEXT_PRIMARY),
         hyperlink_color: TEXT_ACCENT,
-        warn_fg_color: Color32::YELLOW,
-        error_fg_color: Color32::RED,
+        warn_fg_color: WARN,
+        error_fg_color: ERROR,
 
         selection: egui::style::Selection {
             bg_fill: SELECTION_BG,
@@ -69,32 +96,34 @@ pub fn unity_dark_visuals() -> egui::Visuals {
                 bg_fill: BUTTON_BG,
                 weak_bg_fill: INPUT_BG,
                 bg_stroke: egui::Stroke::new(1.0_f32, SEPARATOR),
-                fg_stroke: egui::Stroke::new(1.5_f32, TEXT_PRIMARY),
-                rounding: egui::Rounding::ZERO,
+                fg_stroke: egui::Stroke::new(1.0_f32, TEXT_PRIMARY),
+                rounding: egui::Rounding::same(2.0_f32),
                 expansion: 0.0,
             },
             hovered: egui::style::WidgetVisuals {
                 bg_fill: BUTTON_HOVER,
-                weak_bg_fill: Color32::from_rgb(50, 50, 60),
+                weak_bg_fill: Color32::from_rgb(44, 44, 52),
                 bg_stroke: egui::Stroke::new(1.0_f32, ACCENT_BLUE),
-                fg_stroke: egui::Stroke::new(2.0_f32, TEXT_PRIMARY),
-                rounding: egui::Rounding::ZERO,
-                expansion: 1.0,
+                fg_stroke: egui::Stroke::new(1.0_f32, TEXT_PRIMARY),
+                rounding: egui::Rounding::same(2.0_f32),
+                expansion: 0.0,
             },
             active: egui::style::WidgetVisuals {
                 bg_fill: ACCENT_BLUE,
                 weak_bg_fill: SELECTION_BG,
                 bg_stroke: egui::Stroke::new(1.0_f32, ACCENT_LIGHT),
-                fg_stroke: egui::Stroke::new(2.0_f32, Color32::WHITE),
-                rounding: egui::Rounding::ZERO,
-                expansion: 1.0,
+                fg_stroke: egui::Stroke::new(1.0_f32, Color32::WHITE),
+                rounding: egui::Rounding::same(2.0_f32),
+                expansion: 0.0,
             },
+            // egui 里 `open` 状态对应"展开中的树节点 / 打开的下拉"，
+            // UE 用比常态亮一档的蓝灰底表达"这里正在展开"。
             open: egui::style::WidgetVisuals {
                 bg_fill: BUTTON_ACTIVE,
                 weak_bg_fill: INPUT_BG,
                 bg_stroke: egui::Stroke::new(1.0_f32, ACCENT_BLUE),
-                fg_stroke: egui::Stroke::new(2.0_f32, TEXT_PRIMARY),
-                rounding: egui::Rounding::ZERO,
+                fg_stroke: egui::Stroke::new(1.0_f32, TEXT_PRIMARY),
+                rounding: egui::Rounding::same(2.0_f32),
                 expansion: 0.0,
             },
         },
@@ -103,18 +132,21 @@ pub fn unity_dark_visuals() -> egui::Visuals {
     }
 }
 
-/// 将 Unity 暗色主题应用到 egui 上下文。
+/// 将 UE 暗色主题应用到 egui 上下文。
 ///
-/// **必须每帧调用**：eframe 每帧会按**系统主题**（这台机器是浅色）重设 egui 的
-/// style，只在启动时设一次会被它顶掉 —— 界面会退回浅色。`set_style` 只是赋一个
-/// `Arc`，开销可以忽略；真正昂贵的是 [`install_fonts`] 里的 `set_fonts`
-/// （重建整张字形图集），那个只在启动时装一次。
+/// **启动时调用一次即可**（调用点在 `main.rs::EditorApp::new`）：历史上这里
+/// 曾需要每帧重设，因为 eframe 每帧会按**系统主题**（这台机器是浅色）重设
+/// egui 的 style，只在启动时设一次会被它顶掉。现在调用点先用
+/// `ThemePreference::Dark` 关掉了跟随系统主题，覆盖不再发生，每帧重建整个
+/// `egui::Style` 纯属浪费。真正昂贵的是 [`install_fonts`] 里的 `set_fonts`
+/// （重建整张字形图集），那个同样只在启动时装一次。
 pub fn install(ctx: &egui::Context) {
     let style = egui::Style {
+        // UE 编辑器信息密度高，间距压得比 egui 默认更紧一点。
         spacing: egui::style::Spacing {
-            item_spacing: egui::Vec2::new(4.0, 2.0),
+            item_spacing: egui::Vec2::new(5.0, 3.0),
             button_padding: egui::Vec2::new(6.0, 2.0),
-            indent: 12.0,
+            indent: 14.0,
             ..Default::default()
         },
         interaction: egui::style::Interaction {
@@ -122,7 +154,7 @@ pub fn install(ctx: &egui::Context) {
             resize_grab_radius_corner: 6.0,
             ..Default::default()
         },
-        visuals: unity_dark_visuals(),
+        visuals: ue_dark_visuals(),
         ..Default::default()
     };
 

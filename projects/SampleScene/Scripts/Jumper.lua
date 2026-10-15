@@ -8,6 +8,7 @@
 -- 换按键不用改这个脚本：改 `input.ron` 里 "Jump" 的绑定即可。
 
 local JUMP_SPEED = 6.5
+local JUMP_SOUND = "Resources/Audio/Beep.wav"
 
 function update(ctx)
     if not action_pressed(ctx, "Jump") then
@@ -18,4 +19,7 @@ function update(ctx)
     local v = velocity(ctx, me)
     -- 保留水平速度，只把垂直速度设成跳跃速度 —— 跳起来还能继续横向跑。
     set_velocity(ctx, me, v.x, JUMP_SPEED, v.z)
+    -- 起跳给个一次性音效（pitch 拉高听起来更"弹"）；音频设备不可用时
+    -- 这些调用照样安全，只是不出声（引擎在设备失败时无声降级）。
+    play_sound(ctx, JUMP_SOUND, 0.6, 1.5)
 end

@@ -171,7 +171,9 @@ fn draw_render_texture(painter: &egui::Painter, rect: egui::Rect, tex_id: Option
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         painter.image(tex_id, rect, uv, egui::Color32::WHITE);
     } else {
-        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 36));
+        // 无渲染纹理时的占位底色：走主题常量，和 UE 一样接近纯黑，
+        // 让视口和周围面板在视觉上拉开层次。
+        painter.rect_filled(rect, 0.0, crate::panels::theme::colors::VIEWPORT_BG);
     }
 }
 

@@ -1310,6 +1310,109 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
         ui.separator();
 
+        // ── 音频 ──
+        //
+        // 取消勾选 = 静默实体。旧场景文件没有 `audio` 字段，加载出来就是
+        // 未勾选 —— 与当时"没有任何声音"的行为一致。
+        ui.heading("Audio");
+        ui.indent("audio", |ui| {
+            let mut enabled = entity.audio.is_some();
+            if ui
+                .checkbox(&mut enabled, "Has audio source")
+                .on_hover_text("挂一个音频源：autoplay 进场景就响；\n非 autoplay 的剪辑由脚本 play_sound 触发")
+                .changed()
+            {
+                entity.audio = if enabled {
+                    Some(xgame_core::AudioSource::default())
+                } else {
+                    None
+                };
+                touched = true;
+            }
+
+            if let Some(audio) = entity.audio.as_mut() {
+                ui.horizontal(|ui| {
+                    ui.label("Clip:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut audio.clip)
+                            .hint_text("Resources/Audio/Beep.wav"),
+                    );
+                    if resp.changed() {
+                        touched = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Volume:");
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut audio.volume)
+                            .speed(0.01)
+                            .range(0.0..=1.0),
+                    );
+                    if resp.changed() {
+                        touched = true;
+                    }
+                    ui.label("Pitch:");
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut audio.pitch)
+                            .speed(0.01)
+                            .range(0.05..=4.0),
+                    );
+                    if resp.changed() {
+                        touched = true;
+                    }
+                });
+
+                if ui
+                    .checkbox(&mut audio.looping, "Loop")
+                    .on_hover_text("循环声只能被 stop_* 命令停掉")
+                    .changed()
+                {
+                    touched = true;
+                }
+                if ui
+                    .checkbox(&mut audio.autoplay, "Autoplay")
+                    .on_hover_text("进场景自动播一次（每实体只播一次，不会每帧重播）")
+                    .changed()
+                {
+                    touched = true;
+                }
+                if ui
+                    .checkbox(&mut audio.spatial, "Spatial (3D)")
+                    .on_hover_text("随实体移动更新发声位置；监听者 = 当前相机")
+                    .changed()
+                {
+                    touched = true;
+                }
+                if audio.spatial {
+                    ui.horizontal(|ui| {
+                        ui.label("Dist:");
+                        let resp = ui.add(
+                            egui::DragValue::new(&mut audio.min_distance)
+                                .speed(0.05)
+                                .prefix("min ")
+                                .range(0.001..=f32::MAX),
+                        );
+                        let resp2 = ui.add(
+                            egui::DragValue::new(&mut audio.max_distance)
+                                .speed(0.1)
+                                .prefix("max ")
+                                .range(0.002..=f32::MAX),
+                        );
+                        if resp.changed() || resp2.changed() {
+                            // 引擎侧要求 max > min，编辑器先把住门。
+                            if audio.max_distance <= audio.min_distance {
+                                audio.max_distance = audio.min_distance + 0.001;
+                            }
+                            touched = true;
+                        }
+                    });
+                }
+            }
+        });
+
+        ui.separator();
+
         // ── 添加组件（占位）──
         ui.add_enabled(false, egui::Button::new("+  Add Component"))
             .on_disabled_hover_text("自由组件系统尚未开放序列化；脚本 / 物理已可直接编辑");

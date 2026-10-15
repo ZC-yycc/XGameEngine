@@ -1600,6 +1600,11 @@ impl EditorState {
             let Some(runtime) = self.game_runtime.as_mut() else {
                 return;
             };
+            // 编辑器相机就是"玩家的耳朵"：Play 期间监听者每帧跟随它
+            //（在 update 之前写入，本帧的音频结算用的就是最新姿态）。
+            let eye = self.editor_camera.eye();
+            let fwd = self.editor_camera.forward();
+            runtime.set_listener(eye.to_array(), fwd.to_array());
             runtime.update_with_scene(dt, &mut self.scene);
             runtime.take_logs()
         };
@@ -1650,6 +1655,14 @@ impl EditorState {
     /// 获取物理统计（刚体数, 碰撞体数）。
     pub fn physics_stats(&self) -> (usize, usize) {
         self.game_runtime.as_ref().map_or((0, 0), |rt| rt.stats())
+    }
+
+    /// 获取音频统计（无运行时返回默认值 —— available=false，状态栏显示
+    /// 不出来声卡状态也合理）。
+    pub fn audio_stats(&self) -> xgame_core::AudioStats {
+        self.game_runtime
+            .as_ref()
+            .map_or(xgame_core::AudioStats::default(), |rt| rt.audio_stats())
     }
 
     // -----------------------------------------------------------------------

@@ -44,6 +44,9 @@ mod world;
 pub use lifecycle::{Behavior, Ctx, Lifecycle};
 pub use registry::BehaviorRegistry;
 pub use world::{FrameReport, World, WorldConfig};
+// 音频引擎从这里再导出：宿主（编辑器 / 独立游戏）只需要 runtime 一个入口，
+// 不必自己再依赖 xgame-audio。
+pub use xgame_audio::AudioEngine;
 
 // 常用类型顺手重导出，免得宿主到处写 `xgame_script::...`。
 pub use xgame_input::InputMap;

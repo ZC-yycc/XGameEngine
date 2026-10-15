@@ -24,16 +24,29 @@
 //!        └─ pull_dynamic_bodies     动态体：把物理算出的位置写回实体
 //!   ├─ dispatch_update           脚本的 update（每渲染帧一次）
 //!   ├─ 消费脚本命令 / sync_bodies
+//!   ├─ sync_audio                音频：autoplay 首播、空间声源推位置、失联停音
+//!   ├─ flush_audio               音频：drain 命令束交给引擎（帧末一次结算）
 //!   └─ input.end_frame()         清掉"仅本帧有效"的输入边沿
 //! ```
 //!
 //! **动态体由物理驱动，运动学体由脚本驱动** —— 这条规则决定了上面两个方向的
 //! 数据流。二者不会互相打架，因为一个刚体只属于其中一类。
+//!
+//! # 音频
+//!
+//! 组件与脚本不直接碰 kira：它们往 [`AudioPort`]（core 的纯数据命令束）里
+//! 塞命令，`flush_audio` 在**帧末**一次性结算给 `xgame-audio` 的
+//! [`AudioEngine`]。好处见 `xgame-core::audio` 模块文档 —— 这里只需记住：
+//! `World::new` 一律建 **silent 引擎**（测试反复构造 World，抢设备会让行为
+//! 不确定），宿主用 [`World::with_audio_engine`] 注入真设备引擎。
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use xgame_core::{EntityId, GameClock, Inspect, PhysicsHandle, Scene, Transform};
+use xgame_audio::AudioEngine;
+use xgame_core::{
+    AudioPort, AudioStats, EntityId, GameClock, Inspect, PhysicsHandle, PlaySound, Scene, Transform,
+};
 use xgame_input::{Input, InputMap};
 use xgame_math::glam::{Mat4, Vec3};
 use xgame_physics::{body_from_scene, DebugLine, PhysicsConfig, PhysicsWorld};
@@ -130,6 +143,13 @@ pub struct World {
     /// 时零分配，日志归属也统一成注册名。钩子函数指针在装配期就拷进了
     /// 实例（`BehaviorInstance`），分发热路径零哈希。
     behavior_instances: HashMap<EntityId, BehaviorInstanceSet>,
+    /// 音频命令束：组件 / 脚本产生命令，`flush_audio` 帧末结算。
+    audio_port: AudioPort,
+    /// 音频引擎（kira 封装）。`World::new` 一律 silent，宿主注入真引擎。
+    audio: AudioEngine,
+    /// 已经 autoplay 过的实体 —— 没有它，"进场景就响"会变成每帧重播。
+    /// 组件被摘除 / 实体被删时清掉对应条目（重新挂上会再响一次）。
+    audio_autoplayed: HashSet<EntityId>,
 }
 
 /// 单个实体已实例化的组件集合。
@@ -152,6 +172,11 @@ impl World {
         scripts.set_root(root.clone());
         scripts.preload(&root, &scene);
 
+        // 音频引擎刻意 **silent**：`World::new` 在测试里被反复构造，抢声卡
+        // 会让"同一段测试有时连着设备、有时没有"——行为不确定的测试等于没有。
+        // 真设备引擎由宿主经 `with_audio_engine` 注入（编辑器 Play / 独立游戏）。
+        let audio = AudioEngine::silent(root.clone());
+
         let mut world = Self {
             scene,
             physics,
@@ -166,6 +191,9 @@ impl World {
             has_dynamic: false,
             behaviors: BehaviorRegistry::default(),
             behavior_instances: HashMap::new(),
+            audio_port: AudioPort::new(),
+            audio,
+            audio_autoplayed: HashSet::new(),
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
         world.sync_bodies();
@@ -193,6 +221,30 @@ impl World {
     pub fn with_input_map(mut self, map: InputMap) -> Self {
         self.input.set_map(map);
         self
+    }
+
+    /// 注入真设备音频引擎（编辑器 Play / 独立游戏宿主调用）。
+    ///
+    /// `World::new` 里是 silent 引擎（见那里的理由）；换引擎不影响已收集
+    /// 的命令 —— 下一次 `flush_audio` 就按新引擎结算。
+    pub fn with_audio_engine(mut self, engine: AudioEngine) -> Self {
+        self.audio = engine;
+        self
+    }
+
+    /// 设置 3D 监听者（宿主每帧调用：编辑器 / 游戏相机就是玩家的耳朵）。
+    pub fn set_listener(&mut self, position: [f32; 3], forward: [f32; 3]) {
+        self.audio_port.set_listener(position, forward);
+    }
+
+    /// 设置主音量（线性 `0.0..=1.0`）。
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.audio_port.set_master_volume(volume);
+    }
+
+    /// 音频子系统的可观测状态（状态栏 / 测试断言）。
+    pub fn audio_stats(&self) -> AudioStats {
+        self.audio.stats()
     }
 
     // -----------------------------------------------------------------------
@@ -319,7 +371,11 @@ impl World {
         self.consume_script_commands(frame_dt, time);
         self.sync_bodies();
 
-        // -- 4. 输入帧末清理 --
+        // -- 4. 音频（帧末：本帧的实体增删与物理回写都已落定） --
+        self.sync_audio();
+        self.flush_audio();
+
+        // -- 5. 输入帧末清理 --
         self.input.end_frame();
 
         let (bodies, colliders) = self.physics.stats();
@@ -348,12 +404,14 @@ impl World {
             physics,
             input,
             scripts,
+            audio_port,
             ..
         } = self;
 
         let frame = FrameCtx::new(scene, delta, time)
             .with_input(input)
-            .with_physics(physics);
+            .with_physics(physics)
+            .with_audio(audio_port);
 
         // 组件轨与脚本轨：共用 `scripts` 那一对日志 / 命令缓冲。
         match phase {
@@ -396,6 +454,7 @@ impl World {
             physics,
             input,
             scripts,
+            audio_port,
             behavior_instances,
             ..
         } = self;
@@ -428,6 +487,7 @@ impl World {
                     scene: &mut *scene,
                     physics: Some(&mut *physics),
                     input: Some(input),
+                    audio: Some(&mut *audio_port),
                     logs: &mut *logs,
                     commands: &mut *commands,
                     source: instance.name,
@@ -501,6 +561,7 @@ impl World {
             physics,
             input,
             scripts,
+            audio_port,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
@@ -509,6 +570,7 @@ impl World {
                 scene: &mut *scene,
                 physics: Some(&mut *physics),
                 input: Some(input),
+                audio: Some(&mut *audio_port),
                 logs: &mut *logs,
                 commands: &mut *commands,
                 source: instance.name,
@@ -535,6 +597,78 @@ impl World {
     /// 物理调试线条。
     pub fn debug_lines(&self) -> Vec<DebugLine> {
         self.physics.debug_lines()
+    }
+
+    // -----------------------------------------------------------------------
+    // 内部：音频生命周期
+    // -----------------------------------------------------------------------
+
+    /// 音频同步：autoplay 首播、空间声源推位置、失联实体停音。
+    ///
+    /// 每渲染帧一次（不是每个固定步）：人耳对 16 ms 的声源位置更新完全
+    /// 不敏感，而固定步可能一帧跑好几个 —— 音频不值得跟物理同频。
+    fn sync_audio(&mut self) {
+        // 先扫（只读场景）再发命令（写 port）：把"读场景"与"写命令束"
+        // 分成两段，循环体里不需要为拆借发愁。
+        let mut spawned: Vec<(EntityId, PlaySound)> = Vec::new();
+        let mut moved: Vec<(EntityId, [f32; 3])> = Vec::new();
+
+        for (index, entity) in self.scene.entities.iter().enumerate() {
+            let Some(source) = entity.audio.as_ref() else {
+                continue;
+            };
+            let id = entity.id;
+            let world_pos = self.scene.world_matrix(index).w_axis.truncate().to_array();
+            let first_time = !self.audio_autoplayed.contains(&id);
+            if source.autoplay && first_time {
+                let mut play = source.to_play_sound(source.spatial.then_some(world_pos));
+                // 绑定挂载实体：让 `StopEntity`（组件摘除 / 实体删除）找得到
+                // 这条声音。空间声源还顺便靠它逐帧跟随实体移动。
+                play.follow = Some(id);
+                spawned.push((id, play));
+            } else if source.spatial {
+                // 已在响（或 autoplay 关着）的空间声源：逐帧推位置。
+                // 脚本用 `follow` 播的声源也靠这条拿到实体的最新坐标 ——
+                // 所以 follow 目标实体需要挂一个 spatial 的 `AudioSource`
+                // （哪怕 `autoplay: false`），这是"实体是发声体"的声明。
+                moved.push((id, world_pos));
+            }
+        }
+
+        // 失联判定：autoplay 标记还在、但实体没了 / 组件被摘了 → 停音。
+        // 按标记表逐个查（`find_entity` 是 O(n)，标记数 = 历史发声实体数，
+        // 通常是个位数）——比"每帧建一个在场实体集合"便宜得多。
+        let gone: Vec<EntityId> = self
+            .audio_autoplayed
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.scene
+                    .find_entity(*id)
+                    .is_none_or(|index| self.scene.entities[index].audio.is_none())
+            })
+            .collect();
+
+        let port = &mut self.audio_port;
+        for (id, play) in spawned {
+            self.audio_autoplayed.insert(id);
+            port.play(play);
+        }
+        for (id, position) in moved {
+            port.emitter_position(id, position);
+        }
+        for id in gone {
+            self.audio_autoplayed.remove(&id);
+            port.stop_entity(id);
+        }
+    }
+
+    /// 帧末结算：drain 命令束，连同当前监听者姿态与主音量交给音频引擎。
+    fn flush_audio(&mut self) {
+        let commands = self.audio_port.drain();
+        let listener = self.audio_port.listener;
+        let master_volume = self.audio_port.master_volume;
+        self.audio.apply(&commands, &listener, master_volume);
     }
 
     // -----------------------------------------------------------------------
@@ -760,7 +894,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use xgame_core::project::ProjectHandle;
-    use xgame_core::{Entity, PhysicsBody};
+    use xgame_core::{AudioSource, Entity, PhysicsBody};
 
     fn entity_y(world: &World, name: &str) -> f32 {
         world
@@ -1282,6 +1416,188 @@ mod tests {
         assert!(drifter.transform.position.x > 0.0);
         // 未注册的实体只是没有组件，场景安然无恙。
         assert!(world.scene().find_by_name("actor").is_some());
+    }
+
+    // -- 音频 ---------------------------------------------------------------
+
+    /// 生成一个 16-bit mono PCM WAV（440 Hz，5 秒）。
+    ///
+    /// 时长刻意取 5 秒而不是几十毫秒：无声引擎按**墙钟**做 GC，太短的
+    /// WAV 会在测试跑到一半时被当成"播完了"，断言 active/stopped 就会飘。
+    fn write_test_wav(dir: &std::path::Path, name: &str) {
+        const SAMPLE_RATE: u32 = 44100;
+        let samples: u32 = SAMPLE_RATE * 5;
+        let data_len = samples * 2;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        bytes.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..samples {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            let sample = (0.5 * (2.0 * std::f32::consts::PI * 440.0 * t).sin() * i16::MAX as f32) as i16;
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    /// autoplay 只播一次：三次 update 之后 `requests` 仍是 1。
+    ///
+    /// 证红点：没有 `audio_autoplayed` 标记表的实现会每帧重播（requests=3）。
+    #[test]
+    fn autoplay_sound_requests_play_exactly_once() {
+        let mut scene = Scene::new("autoplay");
+        scene.add_entity(Entity::new("beep").with_audio(AudioSource::new("Beep.wav")));
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+
+        for _ in 0..3 {
+            world.update(1.0 / 60.0);
+        }
+        let stats = world.audio_stats();
+        assert_eq!(stats.requests, 1, "autoplay 只该在首帧请求一次");
+        assert_eq!(stats.stopped, 0);
+    }
+
+    /// 真 WAV 走完整链：场景组件 → 命令束 → 解码缓存 → 活动声音。
+    #[test]
+    fn real_wav_autoplay_becomes_active() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_audio_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_test_wav(&dir, "Beep.wav");
+
+        let mut scene = Scene::new("wav");
+        scene.add_entity(
+            Entity::new("beep")
+                .with_audio(AudioSource::new("Beep.wav").with_looping(true)),
+        );
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+        world.update(1.0 / 60.0);
+
+        let stats = world.audio_stats();
+        assert_eq!(stats.requests, 1);
+        assert_eq!(stats.cached_clips, 1, "clip 应被解码并缓存");
+        assert_eq!(stats.active, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空间声源：首帧 Play（带位置）、之后每帧 EmitterPosition（跟随实体）。
+    #[test]
+    fn spatial_source_pushes_emitter_positions_each_frame() {
+        let mut scene = Scene::new("spatial");
+        scene.add_entity(
+            Entity::new("engine")
+                .with_audio(AudioSource::new("Engine.wav").with_spatial(true)),
+        );
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+
+        world.update(1.0 / 60.0);
+        assert_eq!(world.audio_stats().requests, 1, "首帧应发 Play");
+
+        // 第二帧没有新请求，但空间声源要推位置 → last_batch 应为 1
+        //（一条 EmitterPosition）。
+        world.update(1.0 / 60.0);
+        let stats = world.audio_stats();
+        assert_eq!(stats.requests, 1, "不该重播");
+        assert_eq!(stats.last_batch, 1, "每帧应推一次发射位置");
+    }
+
+    /// 实体被删除 / 组件被摘除：停音 + 清 autoplay 标记（重挂会再响）。
+    #[test]
+    fn removed_entity_or_component_stops_its_sound() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_audio_cleanup_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_test_wav(&dir, "Beep.wav");
+        write_test_wav(&dir, "Hum.wav");
+
+        let mut scene = Scene::new("cleanup");
+        scene.add_entity(Entity::new("beep").with_audio(AudioSource::new("Beep.wav")));
+        scene.add_entity(Entity::new("hum").with_audio(AudioSource::new("Hum.wav")));
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+        world.update(1.0 / 60.0);
+        assert_eq!(world.audio_stats().active, 2);
+
+        // 摘组件（保留实体）→ 只停它那一条。
+        world.scene_mut().entities[1].audio = None;
+        world.update(1.0 / 60.0);
+        let stats = world.audio_stats();
+        assert_eq!(stats.active, 1, "摘掉组件应停对应声音");
+        assert_eq!(stats.stopped, 1);
+
+        // 删实体 → 停剩下那条。
+        world.scene_mut().entities.clear();
+        world.update(1.0 / 60.0);
+        let stats = world.audio_stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.stopped, 2);
+
+        // 重新挂上 → 再响一次（标记已清）。
+        world
+            .scene_mut()
+            .entities
+            .push(Entity::new("beep2").with_audio(AudioSource::new("Beep.wav")));
+        world.update(1.0 / 60.0);
+        assert_eq!(world.audio_stats().requests, 3, "重挂应重新 autoplay");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 脚本 → World → 音频引擎的端到端：Lua 的 `play_sound` 要变成
+    /// 引擎的 requests。
+    #[test]
+    fn script_play_sound_reaches_the_engine() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_audio_script_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/sfx.lua"),
+            r#"
+            function update(ctx)
+                play_sound(ctx, "Beep.wav", 0.8, 1.0)
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("scripted_audio");
+        let mut actor = Entity::new("actor");
+        actor.scripts.push("Scripts/sfx.lua".to_owned());
+        scene.add_entity(actor);
+
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+        world.update(1.0 / 60.0);
+        assert_eq!(world.audio_stats().requests, 1, "脚本的 play_sound 应到达引擎");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -258,6 +258,34 @@ end
 示例见 `projects/SampleScene/Scripts/FoxLocomotion.lua`（按时间分段推
 `"upper"` 层权重）。
 
+### 4.11 音频
+
+| 函数 | 说明 |
+|---|---|
+| `play_sound(ctx, clip, volume, pitch)` | 播一次**非空间化**音效（UI 音、提示音） |
+| `play_sound_at(ctx, clip, x, y, z, volume)` | 播一次**空间化**音效（3D 定位，随距离衰减） |
+| `stop_sound(ctx, clip)` | 停止某个 clip 的**全部**在播实例 |
+| `stop_all_sounds(ctx)` | 停止所有声音（脚本播的 + 组件 autoplay 的） |
+| `set_listener(ctx, x, y, z, fx, fy, fz)` | 设置听者位置与朝向（`fx/fy/fz` 是朝前向量） |
+| `set_master_volume(ctx, v)` | 主音量（`0.0` 静音，`1.0` 原音量） |
+
+`clip` 是**项目相对路径**（如 `"Resources/Audio/Beep.wav"`）。`volume` / `pitch`
+都是 `1.0` 为基准（pitch 同时改速度与音高）。
+
+```lua
+-- 起跳给个一次性音效（pitch 拉高听起来更"弹"）
+function update(ctx)
+    if action_pressed(ctx, "Jump") then
+        play_sound(ctx, "Resources/Audio/Beep.wav", 0.6, 1.5)
+    end
+end
+```
+
+> 没有音频设备时这些调用照样安全（引擎无声降级、照常受理），脚本不必探测。
+> 听者默认跟随编辑器相机；纯脚本驱动的听者一般用在顶视角 / 固定机位玩法。
+> 环境音 / 机关音更推荐挂 `AudioSource` 组件（Inspector 的 Audio 区块可视化配置），
+> `play_sound` 系列适合"事件驱动"的一次性音效。
+
 ---
 
 ## 五、输入映射（`input.ron`）

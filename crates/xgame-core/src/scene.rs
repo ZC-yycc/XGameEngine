@@ -95,6 +95,13 @@ pub struct Entity {
     /// 不出现这一行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animator: Option<crate::animation::Animator>,
+    /// 音频源。`None` = 静默实体。
+    ///
+    /// 兼容策略与 `animator` 同款（旧文件 → `None`；没配音频不写这一行）。
+    /// 引擎侧封装在 `xgame-audio`（kira），这里只是纯数据声明 ——
+    /// 场景文件从不引用 kira 类型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<crate::audio::AudioSource>,
     /// 运行时组件集合（反序列化时默认为空）。
     #[serde(skip)]
     pub components: ComponentMap,
@@ -115,6 +122,7 @@ impl Entity {
             behavior_params: BTreeMap::new(),
             physics: None,
             animator: None,
+            audio: None,
             components: ComponentMap::new(),
         }
     }
@@ -151,6 +159,12 @@ impl Entity {
     /// 挂一个动画播放器。
     pub fn with_animator(mut self, animator: crate::animation::Animator) -> Self {
         self.animator = Some(animator);
+        self
+    }
+
+    /// 挂一个音频源。
+    pub fn with_audio(mut self, audio: crate::audio::AudioSource) -> Self {
+        self.audio = Some(audio);
         self
     }
 
@@ -205,6 +219,7 @@ impl PartialEq for Entity {
             && self.behavior_params == other.behavior_params
             && self.physics == other.physics
             && self.animator == other.animator
+            && self.audio == other.audio
     }
 }
 
@@ -1064,6 +1079,51 @@ mod tests {
         let mut b = a.clone();
         assert_eq!(a, b, "同一配置应当相等");
         b.animator.as_mut().unwrap().clip = "Run".into();
+        assert_ne!(a, b, "换剪辑必须改变相等性（脏检查依赖它）");
+    }
+
+    // -- 音频组件 -----------------------------------------------------------
+
+    /// 音频源必须能落盘往返——它是"作品的一部分"（何时响、响多大声）。
+    #[test]
+    fn audio_source_survives_ron_roundtrip() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(
+            Entity::new("Beep").with_audio(
+                crate::audio::AudioSource::new("Resources/Audio/Beep.wav")
+                    .with_looping(true)
+                    .with_spatial(true),
+            ),
+        );
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(text.contains("audio"), "音频组件必须落盘");
+        let restored: Scene = ron::from_str(&text).unwrap();
+        let a = restored.entities[0]
+            .audio
+            .as_ref()
+            .expect("往返后音频组件仍在");
+        assert_eq!(a.clip, "Resources/Audio/Beep.wav");
+        assert!(a.looping && a.spatial);
+        assert!(a.autoplay, "autoplay 默认 true");
+    }
+
+    /// 没配音频的实体不该写出 `audio: None`（与 `animator` 同一条理由）。
+    #[test]
+    fn plain_entity_omits_audio_field() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(Entity::new("Plain"));
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("audio"), "普通实体不该写出 audio 字段");
+    }
+
+    /// 脏检查语义：改音频配置必须让实体"不相等"，否则 Inspector 里换
+    /// 剪辑不会被记成改动。
+    #[test]
+    fn audio_participates_in_entity_equality() {
+        let a = Entity::new("Beep").with_audio(crate::audio::AudioSource::new("a.wav"));
+        let mut b = a.clone();
+        assert_eq!(a, b, "同一配置应当相等");
+        b.audio.as_mut().unwrap().clip = "b.wav".into();
         assert_ne!(a, b, "换剪辑必须改变相等性（脏检查依赖它）");
     }
 

@@ -345,6 +345,7 @@ impl LuaHost {
             scene: &mut *frame.scene,
             physics: frame.physics.as_deref_mut(),
             input: frame.input,
+            audio: frame.audio.as_deref_mut(),
             logs: &mut self.logs,
             commands: &mut self.commands,
             source: path,
@@ -661,6 +662,45 @@ mod tests {
             "start 里的 log 应当被收上来: {logs:?}"
         );
         assert!(host.take_logs().is_empty());
+    }
+
+    /// 脚本调音频 API：命令必须经 port 收上来 —— 这是"脚本层不碰 kira、
+    /// 只产生纯数据命令"这条分层承诺的端到端证红（函数未注册时 Lua 报
+    /// "attempt to call a nil value"，port 会是空的）。
+    #[test]
+    fn script_audio_calls_reach_the_port() {
+        let project = TempProject::new("audio");
+        let path = project.write_script(
+            "sfx",
+            r#"
+            function update(ctx)
+                play_sound(ctx, "Resources/Audio/Beep.wav", 0.5, 1.0)
+                play_sound_at(ctx, "Resources/Audio/Boom.wav", 1.0, 2.0, 3.0, 0.8)
+                stop_sound(ctx, "Resources/Audio/Beep.wav")
+                set_listener(ctx, 5.0, 5.0, 5.0, 0.0, 0.0, -1.0)
+                set_master_volume(ctx, 0.3)
+            end
+            "#,
+        );
+        let mut scene = scene_with_script(&path);
+        let mut host = LuaHost::new();
+        let report = host.preload(&project.dir, &scene);
+        assert!(report.failed.is_empty(), "编译失败: {:?}", report.failed);
+
+        let mut port = xgame_core::AudioPort::new();
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0).with_audio(&mut port));
+
+        let errors: Vec<String> = host
+            .take_logs()
+            .iter()
+            .filter(|l| matches!(l.level, crate::context::LogLevel::Error))
+            .map(|l| l.message.clone())
+            .collect();
+        assert!(errors.is_empty(), "脚本调音频 API 不应报错: {errors:?}");
+
+        assert!((port.master_volume - 0.3).abs() < 1e-6, "主音量应落到 port 上");
+        let batch = port.drain();
+        assert_eq!(batch.len(), 3, "play×2 + stop 应产生三条命令: {batch:?}");
     }
 
     #[test]

@@ -521,6 +521,15 @@ fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
                 let (bodies, colliders) = state.physics_stats();
                 ui.label(format!("Bodies: {} | Colliders: {}", bodies, colliders));
                 ui.separator();
+
+                // Audio stats（只显示"在响的"和设备状态；silent = 无声降级）
+                let audio = state.audio_stats();
+                ui.label(format!(
+                    "Audio: {} | {} active",
+                    if audio.available { "device" } else { "silent" },
+                    audio.active,
+                ));
+                ui.separator();
             }
 
             // FPS

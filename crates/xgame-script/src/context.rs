@@ -186,6 +186,8 @@ pub struct FrameCtx<'a> {
     pub input: Option<&'a Input>,
     /// 物理世界。没有物理时为 `None`。
     pub physics: Option<&'a mut PhysicsWorld>,
+    /// 音频命令束。宿主没接音频子系统时为 `None`（脚本的音频调用静默 no-op）。
+    pub audio: Option<&'a mut xgame_core::AudioPort>,
     /// 本帧真实帧间隔（秒）。
     pub delta: f32,
     /// 游戏已运行的总时长（秒）。
@@ -198,6 +200,7 @@ impl<'a> FrameCtx<'a> {
             scene,
             input: None,
             physics: None,
+            audio: None,
             delta,
             time,
         }
@@ -210,6 +213,11 @@ impl<'a> FrameCtx<'a> {
 
     pub fn with_physics(mut self, physics: &'a mut PhysicsWorld) -> Self {
         self.physics = Some(physics);
+        self
+    }
+
+    pub fn with_audio(mut self, audio: &'a mut xgame_core::AudioPort) -> Self {
+        self.audio = Some(audio);
         self
     }
 }

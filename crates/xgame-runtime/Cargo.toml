@@ -10,4 +10,5 @@ xgame-math = { path = "../xgame-math" }
 xgame-input = { path = "../xgame-input" }
 xgame-physics = { path = "../xgame-physics" }
 xgame-script = { path = "../xgame-script" }
+xgame-audio = { path = "../xgame-audio" }
 log = "0.4"

@@ -96,6 +96,16 @@
             scripts: [
                 "Scripts/Spinner.lua",
             ],
+            // 空间化循环蜂鸣：自转的立方体就是场景里的"发声地标"，
+            // 走近了响、走远了轻 —— 演示 AudioSource 的 autoplay + spatial。
+            audio: Some((
+                clip: "Resources/Audio/Beep.wav",
+                volume: 0.35,
+                looping: true,
+                spatial: true,
+                min_distance: 2.0,
+                max_distance: 24.0,
+            )),
             physics: Some((
                 kind: Kinematic,
                 shape: Auto,

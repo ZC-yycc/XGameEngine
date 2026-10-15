@@ -81,7 +81,7 @@ pub mod prelude {
 
     // -- 运行时 -----------------------------------------------------------
     pub use xgame_runtime::{
-        Behavior, BehaviorRegistry, Ctx, FrameReport, Lifecycle, World, WorldConfig,
+        AudioEngine, Behavior, BehaviorRegistry, Ctx, FrameReport, Lifecycle, World, WorldConfig,
     };
 
     // -- 游戏侧 API（脚本 / 组件两轨的真相源）--------------------------

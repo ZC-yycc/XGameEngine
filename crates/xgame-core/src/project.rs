@@ -322,6 +322,21 @@ impl ProjectHandle {
         out
     }
 
+    /// 列出项目里所有音频文件（**项目相对路径**，按字典序）——
+    /// 认 `.wav` / `.ogg` / `.mp3`（kira + symphonia 的主力解码格式）。
+    ///
+    /// 扫的是 `content.audio_dir` 子树（默认 `Resources`，与模型 / 贴图
+    /// 同一套目录约定）。目录不存在时返回空列表 —— 还没做声音的项目完全合法。
+    pub fn list_audio(&self) -> Vec<String> {
+        let scan = self.path(&self.manifest.content.audio_dir);
+        let mut out = Vec::new();
+        for ext in ["wav", "ogg", "mp3"] {
+            collect_by_extension(&scan, &self.root, ext, &mut out);
+        }
+        out.sort();
+        out
+    }
+
     /// 由预制体名推出它在项目里的**相对路径**（`Prefabs/<安全名>.prefab.ron`）。
     ///
     /// 名字里的路径分隔符与 Windows 非法字符会被剔除；全被过滤光时退回 `Prefab`。
@@ -681,6 +696,23 @@ mod tests {
                 "实体 '{}' 引用的预制体不存在: {}",
                 entity.name,
                 link.source
+            );
+        }
+
+        // 音频引用同理：clip 断链不会在编辑器里显形（引擎解码失败只记日志
+        // 然后无声），只有加载前就断言才能在 CI 里抓住"文件改名忘改场景"。
+        for entity in &scene.entities {
+            let Some(audio) = &entity.audio else {
+                continue;
+            };
+            if audio.clip.is_empty() {
+                continue;
+            }
+            assert!(
+                handle.path(&audio.clip).is_file(),
+                "实体 '{}' 引用的音频不存在: {}",
+                entity.name,
+                audio.clip
             );
         }
     }

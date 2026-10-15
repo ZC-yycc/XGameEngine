@@ -38,7 +38,7 @@
 //! 在栈上构造，活到钩子调用返回为止。交给 Lua 的 [`crate::ScriptCtx`] 只是
 //! 它的**地址束**（见 `context.rs` 的安全论证），不延长任何借用。
 
-use xgame_core::{Entity, EntityId, PhysicsBody, PhysicsHandle, Scene};
+use xgame_core::{Entity, EntityId, PhysicsBody, PhysicsHandle, PlaySound, Scene};
 use xgame_input::{Input, KeyCode, MouseButton};
 use xgame_math::glam::{EulerRot, Quat, Vec2, Vec3};
 use xgame_physics::{PhysicsRayHit, PhysicsWorld, RaycastFilter};
@@ -61,6 +61,9 @@ pub struct GameCtx<'a> {
     pub physics: Option<&'a mut PhysicsWorld>,
     /// 输入状态。没有输入系统时为 `None`。
     pub input: Option<&'a Input>,
+    /// 音频命令束。宿主没接音频子系统时为 `None` —— 脚本的音频调用
+    /// 静默 no-op（与"没接物理时 raycast 返回 miss"同款容错哲学）。
+    pub audio: Option<&'a mut xgame_core::AudioPort>,
     /// 日志缓冲（派发方持有，帧末统一回收）。
     pub logs: &'a mut Vec<ScriptLog>,
     /// 结构性改动通知缓冲：场景是上下文改的，刚体是运行时建的，
@@ -178,6 +181,55 @@ impl GameCtx<'_> {
 
     fn push_command(&mut self, command: ScriptCommand) {
         self.commands.push(command);
+    }
+
+    // -----------------------------------------------------------------------
+    // 音频
+    // -----------------------------------------------------------------------
+
+    /// 播放一次音效（非空间化）。
+    ///
+    /// `volume` 是线性音量（`0.0..=1.0`），`pitch` 是播放速率（`1.0` = 原速）。
+    /// 命令进 `AudioPort`，World 帧末结算 —— 脚本层不碰 kira（见 `context.rs`）。
+    pub fn play_sound(&mut self, clip: &str, volume: f32, pitch: f32) {
+        if let Some(audio) = &mut self.audio {
+            audio.play(PlaySound::new(clip).with_volume(volume).with_pitch(pitch));
+        }
+    }
+
+    /// 在世界坐标播放一次空间化音效（固定位置，不跟随实体）。
+    pub fn play_sound_at(&mut self, clip: &str, x: f32, y: f32, z: f32, volume: f32) {
+        if let Some(audio) = &mut self.audio {
+            audio.play(PlaySound::new(clip).at([x, y, z]).with_volume(volume));
+        }
+    }
+
+    /// 停止某 clip 的全部实例。
+    pub fn stop_sound(&mut self, clip: &str) {
+        if let Some(audio) = &mut self.audio {
+            audio.stop_clip(clip);
+        }
+    }
+
+    /// 停止一切声音。
+    pub fn stop_all_sounds(&mut self) {
+        if let Some(audio) = &mut self.audio {
+            audio.stop_all();
+        }
+    }
+
+    /// 设置 3D 监听者（玩家的耳朵）：位置 + 朝向，up 恒为世界 +Y。
+    pub fn set_listener(&mut self, x: f32, y: f32, z: f32, fx: f32, fy: f32, fz: f32) {
+        if let Some(audio) = &mut self.audio {
+            audio.set_listener([x, y, z], [fx, fy, fz]);
+        }
+    }
+
+    /// 设置主音量（线性 `0.0..=1.0`，超界被 clamp）。
+    pub fn set_master_volume(&mut self, volume: f32) {
+        if let Some(audio) = &mut self.audio {
+            audio.set_master_volume(volume);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -821,6 +873,7 @@ mod tests {
             scene: &mut scene,
             physics: None,
             input: None,
+            audio: None,
             logs: &mut logs,
             commands: &mut commands,
             source: "Spinner",
@@ -839,5 +892,81 @@ mod tests {
         assert_eq!(commands.len(), 1, "生成应当上报一条命令");
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].script, "Spinner", "日志归属应当是 source");
+    }
+
+    /// 音频方法层：有 port 时命令按语义进束；没接音频（`None`）时静默 no-op。
+    ///
+    /// 这条测试钉住的是分层承诺 —— 脚本 API 不需要音频设备就能被完整验证。
+    #[test]
+    fn audio_api_buffers_commands_or_noops() {
+        let mut scene = Scene::new("audio");
+        scene.add_entity(Entity::new("speaker"));
+        let id = scene.entities[0].id;
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        let mut port = xgame_core::AudioPort::new();
+
+        {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: Some(&mut port),
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "Sfx",
+                entity: id,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            ctx.play_sound("Resources/Audio/Beep.wav", 0.5, 1.5);
+            ctx.play_sound_at("Resources/Audio/Boom.wav", 1.0, 2.0, 3.0, 0.8);
+            ctx.stop_sound("Resources/Audio/Beep.wav");
+            ctx.set_listener(5.0, 5.0, 5.0, 0.0, 0.0, -1.0);
+            ctx.set_master_volume(2.0); // 超界 → port 内 clamp 到 1.0
+            ctx.stop_all_sounds();
+        }
+
+        assert_eq!(port.master_volume, 1.0, "主音量应被 clamp");
+        let batch = port.drain();
+        // 注意：set_listener / set_master_volume 直接改 port 字段、不进命令束
+        // —— 监听者与主音量是"当前状态"，不是"一次性事件"。
+        assert_eq!(batch.len(), 4);
+        match &batch[0] {
+            xgame_core::AudioCommand::Play(p) => {
+                assert_eq!(p.clip, "Resources/Audio/Beep.wav");
+                assert_eq!(p.volume, 0.5);
+                assert_eq!(p.pitch, 1.5);
+                assert_eq!(p.position, None, "play_sound 不做空间化");
+            }
+            other => panic!("第 1 条应是 Play，得到 {other:?}"),
+        }
+        match &batch[1] {
+            xgame_core::AudioCommand::Play(p) => {
+                assert_eq!(p.position, Some([1.0, 2.0, 3.0]));
+                assert_eq!(p.volume, 0.8);
+            }
+            other => panic!("第 2 条应是 Play，得到 {other:?}"),
+        }
+        assert!(matches!(&batch[2], xgame_core::AudioCommand::StopClip(c) if c == "Resources/Audio/Beep.wav"));
+        assert!(matches!(&batch[3], xgame_core::AudioCommand::StopAll));
+
+        // 没接音频：一条命令都不该产生，也不该 panic。
+        let port2 = xgame_core::AudioPort::new();
+        let mut ctx = GameCtx {
+            scene: &mut scene,
+            physics: None,
+            input: None,
+            audio: None,
+            logs: &mut logs,
+            commands: &mut commands,
+            source: "Sfx",
+            entity: id,
+            delta: 1.0 / 60.0,
+            time: 0.0,
+        };
+        ctx.play_sound("x.wav", 1.0, 1.0);
+        ctx.stop_all_sounds();
+        assert!(port2.is_empty(), "没接音频时应静默 no-op");
     }
 }

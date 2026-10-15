@@ -1,0 +1,13 @@
+[package]
+name = "xgame-audio"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine audio: kira-backed mixer, spatial tracks and clip caching"
+
+[dependencies]
+log = "0.4"
+# 只用 kira 做**解码 + 混音 + 空间化**，不碰它的类型出这个 crate —— 上层拿到的
+# 全是本 crate 自己的 id / 纯数据（见 `lib.rs`）。这样 kira 升级、glam 版本漂移
+# （kira 0.12 用 glam 0.33，引擎用 0.29）都关在这道墙里，跨界只传数组。
+kira = "0.12.5"
+xgame-core = { path = "../xgame-core" }

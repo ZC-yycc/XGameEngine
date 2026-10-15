@@ -182,6 +182,7 @@ mod tests {
             scene: &mut scene,
             physics: None,
             input: None,
+            audio: None,
             logs: &mut logs,
             commands: &mut commands,
             source: "test",
