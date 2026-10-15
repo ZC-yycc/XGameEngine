@@ -1,24 +1,24 @@
 # 脚本 API 参考
 
-> 语言是 [Rhai](https://rhai.rs/)（类 Rust 语法的嵌入式脚本）。
-> 脚本放在项目的 `Scripts/` 目录，实体用**项目相对路径**引用它。
+> 语言是 [Lua 5.4](https://www.lua.org/manual/5.4/)（经 mlua 嵌入，`vendored` 随引擎编译）。
+> 脚本放在项目的 `Scripts/` 目录（`.lua`），实体用**项目相对路径**引用它。
 
 ---
 
 ## 一、最小示例
 
-```rhai
-// Scripts/Spinner.rhai
-const SPIN_SPEED = 75.0;   // 度 / 秒
+```lua
+-- Scripts/Spinner.lua
+local SPIN_SPEED = 75.0   -- 度 / 秒
 
-fn update(ctx) {
-    let r = rot(ctx);
-    set_rot(ctx, r.x, r.y + SPIN_SPEED * delta(ctx), r.z);
-}
+function update(ctx)
+    local r = rot(ctx)
+    set_rot(ctx, r.x, r.y + SPIN_SPEED * delta(ctx), r.z)
+end
 ```
 
 挂到实体上：编辑器里选中实体 → Inspector 的 **Scripts** 区 → `+ Add Script`
-（或直接改场景文件里的 `scripts: ["Scripts/Spinner.rhai"]`）。
+（或直接改场景文件里的 `scripts: ["Scripts/Spinner.lua"]`）。
 
 ---
 
@@ -28,10 +28,10 @@ fn update(ctx) {
 
 | 钩子 | 时机 | 典型用途 |
 |---|---|---|
-| `fn start(ctx)` | 实体进入运行时后**一次** | 初始化状态、找别的实体 |
-| `fn update(ctx)` | **每个渲染帧**一次 | 视觉、UI、非物理逻辑 |
-| `fn fixed_update(ctx)` | **每个物理固定步长**一次（60 Hz） | 与物理交互的逻辑 |
-| `fn on_destroy(ctx)` | 实体被销毁**之前**一次 | 清理、生成特效 |
+| `function start(ctx)` | 实体进入运行时后**一次** | 初始化状态、找别的实体 |
+| `function update(ctx)` | **每个渲染帧**一次 | 视觉、UI、非物理逻辑 |
+| `function fixed_update(ctx)` | **每个物理固定步长**一次（60 Hz） | 与物理交互的逻辑 |
+| `function on_destroy(ctx)` | 实体被销毁**之前**一次 | 清理、生成特效 |
 
 > `update` 的 `delta(ctx)` 是**真实帧间隔**，`fixed_update` 的 `delta(ctx)` 是
 > **固定步长**。做匀速运动请在 `update` 里乘 `delta`；做物理相关的请在
@@ -39,34 +39,33 @@ fn update(ctx) {
 
 ---
 
-## 三、两个必须知道的语法坑
+## 三、两个必须知道的语义
 
-### 1. 全局 `let` 在函数里看不见 —— 用 `const`
+### 1. 顶层 `local` 是**脚本级共享**的
 
-```rhai
-let speed = 5.0;            // ✗ 函数里引用会报 "Variable not found"
-const SPEED = 5.0;          // ✓
+```lua
+local speed = 5.0          -- 同一份脚本的所有实体看到同一个值（模块级静态）
 ```
 
-Rhai 的函数没有闭包，读不到顶层 `let`。引擎会把脚本**顶层语句先执行一遍**
-（这样 `const` 才进得了作用域），但**顶层 `let` 依然不能被函数体写入** ——
-这是 Rhai 的语义，不是本引擎的限制。
+顶层 `local` 在函数体里天然可见（upvalue），也可以被函数改写 —— 但它是
+**这份脚本共享**的，不是每实体一份。想给"每个实体独立"的可变状态，
+用下一节的 `state_*`。
 
-### 2. 想存"每实体的状态"用 `state_*`，别用全局变量
+### 2. 想存"每实体的状态"用 `state_*`，别用顶层变量
 
-因为上面那条，计时器 / 冷却 / 血量这类可变状态没有别的落地方式：
+计时器 / 冷却 / 血量这类**每实体**可变状态必须走这组 API：
 
-```rhai
-fn update(ctx) {
-    // 冷却：每 0.5 秒才能开一枪
-    let cd = state_get_or(ctx, "cooldown", 0.0) - delta(ctx);
-    state_set(ctx, "cooldown", cd);
+```lua
+function update(ctx)
+    -- 冷却：每 0.5 秒才能开一枪
+    local cd = state_get_or(ctx, "cooldown", 0.0) - delta(ctx)
+    state_set(ctx, "cooldown", cd)
 
-    if cd <= 0.0 && action_pressed(ctx, "Fire") {
-        log(ctx, "bang!");
-        state_set(ctx, "cooldown", 0.5);
-    }
-}
+    if cd <= 0.0 and action_pressed(ctx, "Fire") then
+        log(ctx, "bang!")
+        state_set(ctx, "cooldown", 0.5)
+    end
+end
 ```
 
 `state_*` 存的东西按 **`(实体, 脚本)` 分开** —— 同一个脚本挂在 10 个实体上，
@@ -76,18 +75,17 @@ fn update(ctx) {
 
 ## 四、API 一览
 
-所有函数都把 `ctx` 作为**第一个参数**；Rhai 允许方法式调用，所以
-`set_pos(ctx, x, y, z)` 和 `ctx.set_pos(x, y, z)` 都合法。
+所有函数都把 `ctx` 作为**第一个参数**。
 
 ### 4.1 自身变换
 
 | 函数 | 说明 |
 |---|---|
-| `pos(ctx)` | 自身**世界**坐标 → `Vec3` |
+| `pos(ctx)` | 自身**世界**坐标 → `{x, y, z}` 表 |
 | `set_pos(ctx, x, y, z)` | 设置**世界**坐标（有父节点时自动换算回局部） |
 | `local_pos(ctx)` / `set_local_pos(ctx, x, y, z)` | **局部**坐标 |
 | `translate(ctx, dx, dy, dz)` | 世界空间平移增量 |
-| `rot(ctx)` | 自身**局部**欧拉角（度），顺序 Y-X-Z → `Vec3` |
+| `rot(ctx)` | 自身**局部**欧拉角（度），顺序 Y-X-Z → `{x, y, z}` 表 |
 | `set_rot(ctx, x, y, z)` | 设置局部欧拉角（度） |
 | `rotate(ctx, dx, dy, dz)` | 叠加旋转增量（度） |
 | `scale(ctx)` / `set_scale(ctx, x, y, z)` | 局部缩放 |
@@ -122,36 +120,37 @@ fn update(ctx) {
 | `spawn_ball(ctx, name, radius, x, y, z)` | 生成一个动态球（带刚体与球碰撞体） |
 | `spawn_static_box(ctx, name, hx, hy, hz, x, y, z)` | 生成一个静态盒子 |
 
-> 返回的 ID **立刻可用** —— `let id = spawn_entity(...)` 之后马上
+> 返回的 ID **立刻可用** —— `local id = spawn_entity(...)` 之后马上
 > `set_entity_pos(ctx, id, ...)` 是生效的。
 
-> 函数名不叫 `spawn` 是因为 Rhai 把 `spawn` 保留成了关键字。
+> 函数名带 `_entity` 后缀是历史命名（早期脚本语言把 `spawn` 保留成了关键字），
+> 现在保持不变以免破坏既有脚本。
 
 ### 4.4 物理
 
 | 函数 | 说明 |
 |---|---|
 | `has_physics(ctx, id)` | 这个实体有没有刚体 |
-| `raycast(ctx, ox, oy, oz, dx, dy, dz, max_dist)` | 射线检测，返回一个 Map |
+| `raycast(ctx, ox, oy, oz, dx, dy, dz, max_dist)` | 射线检测，返回一个表 |
 | `apply_force(ctx, id, x, y, z)` | 施力（持续，下一帧清零） |
 | `apply_impulse(ctx, id, x, y, z)` | 施冲量（瞬间改速度） |
 | `add_torque(ctx, id, x, y, z)` | 施加力矩 |
 | `velocity(ctx, id)` / `set_velocity(ctx, id, x, y, z)` | 线速度 |
 | `gravity(ctx)` / `set_gravity(ctx, x, y, z)` | 全局重力 |
 
-`raycast` 返回的 Map 字段：`hit`(bool)、`point`(Vec3)、`normal`(Vec3)、
-`distance`(float)、`entity`(i64，0 表示没打中实体)、`is_sensor`(bool)。
-**永远有全部字段**（没打中时 `hit: false`、其余为零值），所以脚本不必先判空。
+`raycast` 返回的表字段：`hit`(bool)、`point`(`{x,y,z}`)、`normal`(`{x,y,z}`)、
+`distance`(float)、`entity`(整数，0 表示没打中实体)、`is_sensor`(bool)。
+**永远有全部字段**（没打中时 `hit = false`、其余为零值），所以脚本不必先判空。
 
-```rhai
-fn update(ctx) {
-    // 脚下 0.6 米内有没有地？
-    let p = pos(ctx);
-    let r = raycast(ctx, p.x, p.y, p.z, 0.0, -1.0, 0.0, 0.6);
-    if !r.hit {
-        log(ctx, "踩空了");
-    }
-}
+```lua
+function update(ctx)
+    -- 脚下 0.6 米内有没有地？
+    local p = pos(ctx)
+    local r = raycast(ctx, p.x, p.y, p.z, 0.0, -1.0, 0.0, 0.6)
+    if not r.hit then
+        log(ctx, "踩空了")
+    end
+end
 ```
 
 > `raycast` 会自动忽略**传感器**，并排除自身刚体（避免从自己内部出发打到自己）。
@@ -166,7 +165,7 @@ fn update(ctx) {
 | `axis(ctx, "MoveX")` | 轴的值（-1 … 1） |
 | `key_down(ctx, "W")` / `key_pressed(ctx, "W")` | 直接按物理键位查询 |
 | `mouse_down(ctx, "Left")` / `mouse_pressed(ctx, "Left")` | 鼠标按键 |
-| `mouse_pos(ctx)` / `mouse_delta(ctx)` / `scroll(ctx)` | 指针状态 → `Vec2` |
+| `mouse_pos(ctx)` / `mouse_delta(ctx)` / `scroll(ctx)` | 指针状态 → `{x, y}` 表 |
 
 动作名来自项目根目录的 **`input.ron`**（见下一节）。改按键不用改脚本。
 
@@ -182,7 +181,7 @@ fn update(ctx) {
 
 | 函数 | 说明 |
 |---|---|
-| `state_get(ctx, key)` | 取值；没设过返回 `()` |
+| `state_get(ctx, key)` | 取值；没设过返回 `nil`（用 `== nil` 判空） |
 | `state_get_or(ctx, key, default)` | 取值，缺省时返回 `default` |
 | `state_set(ctx, key, value)` | 写入 |
 | `state_has(ctx, key)` / `state_remove(ctx, key)` / `state_clear(ctx)` | 其它操作 |
@@ -191,13 +190,19 @@ fn update(ctx) {
 
 | 函数 | 说明 |
 |---|---|
-| `vec3(x, y, z)` / `vec2(x, y)` | 构造向量 |
-| `a + b`、`a - b`、`a * 2.0`、`-a` | 向量运算 |
-| `v.length()` / `v.length_squared()` / `v.normalized()` | 向量属性 |
-| `a.dot(b)` / `a.cross(b)` / `a.distance_to(b)` / `a.lerp(b, t)` | 向量运算 |
+| `vec3(x, y, z)` / `vec2(x, y)` | 构造向量（Lua 表 `{x=, y=, z=}`） |
+| `vlength(v)` / `vlength_squared(v)` / `vnormalized(v)` | 向量长度 / 归一化 |
+| `vdot(a, b)` / `vcross(a, b)` / `vdistance_to(a, b)` | 向量运算 |
+| `vadd(a, b)` / `vsub(a, b)` / `vmul(v, s)` | 加减 / 标量乘 |
+| `vlerp(a, b, t)` | 插值 |
+| `vtostring(v)` | 格式化成字符串（调试用） |
 | `v.x` / `v.y` / `v.z` | 分量（可读写） |
 | `clamp(v, lo, hi)` / `lerpf(a, b, t)` | 数值工具 |
 | `deg_to_rad(d)` / `rad_to_deg(r)` | 角度换算 |
+
+> 向量是普通 Lua 表，**没有 `a + b` 运算符重载** —— 算术走上面的 `v*` 具名函数，
+> 或取分量做标量运算（`p.x + 1.0`）。Lua 标准库的 `math.sin` / `math.cos` /
+> `math.sqrt` / `math.abs` / `math.min` / `math.max` 也可直接用。
 
 ### 4.9 动画状态机与叠加层
 
@@ -215,16 +220,16 @@ fn update(ctx) {
 没配叠加层时**静默无操作**。经典用法是"受击晃动淡入再淡出"：平时 0，挨打瞬间
 拉到 1 再随时间衰减回去。
 
-```rhai
-// 速度驱动 Idle/Walk/Run（阈值见场景 RON 里的 transitions），
-// 叠加层权重按 sin 波起伏（走动时的"呼吸/弹跳幅度"看得见地变化）
-fn update(ctx) {
-    set_anim_param(ctx, "speed", velocity(ctx, self_id(ctx)).length());
-    set_anim_additive_weight(ctx, 0.3 + 0.3 * sin(time(ctx) * 4.0));
-}
+```lua
+-- 速度驱动 Idle/Walk/Run（阈值见场景 RON 里的 transitions），
+-- 叠加层权重按 sin 波起伏（走动时的"呼吸/弹跳幅度"看得见地变化）
+function update(ctx)
+    set_anim_param(ctx, "speed", vlength(velocity(ctx, self_id(ctx))))
+    set_anim_additive_weight(ctx, 0.3 + 0.3 * math.sin(time(ctx) * 4.0))
+end
 ```
 
-示例见 `projects/SampleScene/Scripts/FoxLocomotion.rhai`。
+示例见 `projects/SampleScene/Scripts/FoxLocomotion.lua`。
 
 ### 4.10 混合层栈
 
@@ -237,23 +242,21 @@ fn update(ctx) {
 **名字**查找：重名按栈内顺序取第一个命中，层名不存在 / 没挂动画组件时**静默无操作**
 （同 `set_anim_param`，通用脚本不需要先探测组件）。
 
-```rhai
-// 走路段把 "upper" 层（Override + 遮罩 = 上半身）开到 0.6，其他段归 0 ——
-// 走路上半身张望、跑动时恢复自然摆臂（层配置见场景 RON 的 animator.layers）
-fn update(ctx) {
-    if time(ctx) % 7.5 >= 2.5 && time(ctx) % 7.5 < 5.0 {
-        set_anim_layer_weight(ctx, "upper", 0.6);
-    } else {
-        set_anim_layer_weight(ctx, "upper", 0.0);
-    }
-}
+```lua
+-- 走路段把 "upper" 层（Override + 遮罩 = 上半身）开到 0.6，其他段归 0 ——
+-- 走路上半身张望、跑动时恢复自然摆臂（层配置见场景 RON 的 animator.layers）
+function update(ctx)
+    local t = time(ctx) % 7.5
+    if t >= 2.5 and t < 5.0 then
+        set_anim_layer_weight(ctx, "upper", 0.6)
+    else
+        set_anim_layer_weight(ctx, "upper", 0.0)
+    end
+end
 ```
 
-示例见 `projects/SampleScene/Scripts/FoxLocomotion.rhai`（按时间分段推
+示例见 `projects/SampleScene/Scripts/FoxLocomotion.lua`（按时间分段推
 `"upper"` 层权重）。
-
-Rhai 自带完整的 `if` / `while` / `for` / 数组 / Map / 字符串，
-以及 `sin` / `cos` / `sqrt` / `abs` / `min` / `max` 等数学函数。
 
 ---
 
@@ -290,9 +293,8 @@ InputMap(
 |---|---|
 | 语法错误 | 编译失败，Console 报错；该脚本整个不生效，游戏继续 |
 | 顶层语句抛错 | 同上 |
-| 运行时错误（如除零、变量不存在） | **这一帧**这个钩子不生效，Console 报错，游戏继续 |
-| 死循环 / 运算爆炸 | 超过 20 万次操作被强制中断（记一条错误），游戏继续 |
-| 递归过深 | 超过 32 层调用被中断 |
+| 运行时错误（如除零、索引 nil） | **这一帧**这个钩子不生效，Console 报错，游戏继续 |
+| 死循环 / 运算爆炸 | 单次钩子调用的**指令预算**（20 万条）耗尽后被强制中断（记一条错误），游戏继续 |
 
 **热重载**：Play 模式下点工具栏的 `⟳ Scripts`，全部脚本重新编译，不用重启。
 

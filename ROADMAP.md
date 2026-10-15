@@ -180,11 +180,13 @@ scene_write / entity_upsert / entity_remove / project_check，配 20 条回归�
 > 窗口与 `GameApp` 都推迟到 `resumed` 里创建（`ActiveEventLoop::create_window`
 > 只在回调内可见）。`about_to_wait` 主动 `request_redraw()` 的连续帧机制不变。
 
-## 双轨语言架构（进行中）：P0 ✅ P0.5 ✅ P1 ✅ P1.5 ✅ P2 ✅ P2.5 ✅
+## 双轨语言架构：P0 ✅ P0.5 ✅ P1 ✅ P1.5 ✅ P2 ✅ P2.5 ✅ P3 ✅
 
-Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决策记录：
-[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；实施记录：PLAN.md 十五 / 十六 / 十七 / 十八 / 十九 / 二十。
-**P2.5 闸门判定：Lua 三负载全占优 → P3 删 Rhai**（数据见 PLAN.md 二十）。
+Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨；**P3 起脚本层收敛为单一
+Lua 轨**（Rhai 已删）。计划与决策记录：
+[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；实施记录：PLAN.md 十五 / 十六 / 十七 / 十八 / 十九 / 二十 / 二十一。
+**P2.5 闸门判定：Lua 三负载全占优 → P3 删 Rhai**（数据见 PLAN.md 二十），
+**P3 已执行完毕**（落地注记见计划文档 D11，实施记录见 PLAN.md 二十一）。
 
 | P0 交付 | 状态 | 说明 |
 |---|---|---|
@@ -229,14 +231,22 @@ Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨。计划与决�
 | 路径驻留表 | ✅ | 修两宿主每帧 3 处路径 `String` 克隆 → `(EntityId, u32)`（`xgame-script/src/intern.rs`）：探针量得上限 ≈110 µs/帧，端到端 Rhai 轨分发 **819.6 → 713 µs/帧（同机背靠背 -13%）**；驻留 id 永不回收、`invalidate*` 只清编译缓存（双宿主 `state_survives_hot_reload_*` 钉死，红对照 = "热重载清空驻留表"实测红） |
 | 编辑器接入 | ✅ | `list_scripts` 双轨扫描（证红）+ 工具栏/Inspector/状态层三处文案 + 热重载链双 `invalidate_all`；MCP 项目信息同源生效；`xgame-editor --check` OK |
 
-后续分期：**P2.5** 基准闸门 ✅（判定：Lua 三负载全占优 → P3 删 Rhai）→ **P3**
-按闸门结论处置 Rhai（样例/文档切 Lua + 删 Rhai 宿主）。
+分期已全部完成：**P2.5** 基准闸门 ✅（判定：Lua 三负载全占优 → P3 删 Rhai）→
+**P3** 按闸门结论删除 Rhai 宿主、样例 / 文档切 Lua ✅。
 
 | P2.5 交付 | 状态 | 说明 |
 |---|---|---|
 | 闸门工具 | ✅ | `language_gate.rs`：三负载同进程背靠背（dispatch 1000 实体 / api 500 实体 ×20 组 / compute 200 实体 ×1000 循环），脚本两轨同源同循环数（`format!` 从同一组常量拼）；`measure()` 错误日志守卫 —— 脚本没真跑时直接 panic，不许假数据端到端通过 |
 | 判定 | ✅ | **Lua 三负载全占优：dispatch 1.31×、api 1.26×、compute 9.16× → 按 §六 规则 P3 删 Rhai**。首跑曾出假数据（Rhai 无 `mut` 关键字 → 脚本编译失败 → 空调度被当"快"），守卫堵住后重跑（复盘见 PLAN.md 二十） |
 | Lua 热路径修复 | ✅ | 闸门暴露负载 1 Lua 慢 2.25×，探针量证两处实现开销并修掉：钩子函数句柄**编译期缓存**（`detect_funcs` 留下 `Option<Function>`，省每钩子 `env.get` ~194 ns）+ ctx 改**宿主常驻槽轻量指针传参**（省每钩子现造 userdata ~284 ns）→ 负载 1 Lua **1670 → 576 µs/帧（-65%）**，行为回归 34 条全绿 |
+
+| P3 交付 | 状态 | 说明 |
+|---|---|---|
+| 删 Rhai 宿主 | ✅ | `host.rs` 瘦身为宿主公共类型模块（`Hook` / `PreloadReport` / `CommandReport`，Lua 宿主一直共用）；`api.rs`（Rhai 转发壳）删除；workspace `rhai` 依赖移除；`ScriptCtx<S>` 泛型收成非泛型（状态表直接持 `mlua::Table`，地址束模式与 unsafe 窗口约定原样保留） |
+| 单轨化 | ✅ | `World` 只持一个 `scripts: LuaHost`（原双字段合一），日志 / 命令缓冲 / 热重载 / 预载走这一份，两轨缓冲合并代码删除；`list_scripts` 只扫 `.lua`（证红测试更新为"残留 `.rhai` 不进下拉"）；编辑器三处双轨文案收敛 |
+| 闸门退役 | ✅ | `language_gate.rs` 删除（一次性使命完成，判定数据已入档计划文档 §六 / PLAN.md 二十）；`behavior_dispatch_throughput` 去 Rhai 档（基线 / 组件 / Lua 三档，表中 Rhai 列留作历史） |
+| 样例迁移 | ✅ | 4 个 `.rhai` 示例移植 `.lua`（Spinner / Jumper / FoxLocomotion / BehaviorsDemo Spinner），场景 ron 引用同步改；`math.sin` 走沙箱 MATH 库，`sample_project_runs` 覆盖验证 |
+| 文档迁移 | ✅ | `Docs/脚本API.md` 整篇改写为 Lua 版（"两个语法坑"收敛为"顶层 `local` 脚本级共享 + 每实体状态走 `state_*`"的语义说明）；README / 差距分析 / 架构图同步；API 名（含 `spawn_entity` 后缀）一字不改 |
 
 P0.5 遗留（有意延后）：Play 中途热换插件、组件徽章、release profile 插件出货（P3）、
 cargo 构建超时。
@@ -248,9 +258,9 @@ P1.5 遗留（有意延后）：**prefab 的组件字段**（prefab 目前只覆
 数据，待 prefab 扩展到组件层时一起）、Play 中热调参不写回（既有语义，"Play 中调参
 也持久化"需另开决策）。
 
-P2 遗留（有意延后）：`dispatch_destroy` / `forget_entity` 两宿主都未接线（与 Rhai
-对称的既有遗留，等运行时真需要销毁钩子时一起）；编辑器无"新建脚本"功能（两轨一致，
-放文件进 `Scripts/` 即被扫描）。~~Lua 轨每帧性能未实测~~ → P2.5 闸门已出数
+P2 遗留（有意延后）：`dispatch_destroy` / `forget_entity` 未接线（双轨时期的
+对称遗留，P3 删 Rhai 后只剩 Lua 宿主这一份，等运行时真需要销毁钩子时一起）；
+编辑器无"新建脚本"功能（放文件进 `Scripts/` 即被扫描）。~~Lua 轨每帧性能未实测~~ → P2.5 闸门已出数
 （dispatch 562 µs/帧，见基准文档 P2.5 列）。
 
 ## 第七阶段：动画系统 🟨
@@ -273,7 +283,7 @@ P2 遗留（有意延后）：`dispatch_destroy` / `forget_entity` 两宿主都�
 - [x] 动画状态机（`Animator.machine`：浮点参数表 + 阈值转移表（AtLeast ≥ / Below <，
       进出阈值配对留滞回）+ 状态表（每状态自己的 clip/speed/looping）；每帧一步转移、
       换状态复用换剪辑交叉淡入；坏配置全部安全退回单剪辑；参数随场景落盘，
-      脚本 `set_anim_param` / Inspector 均可推；示例 FoxLocomotion.rhai）
+      脚本 `set_anim_param` / Inspector 均可推；示例 FoxLocomotion.lua）
 - [x] 叠加（additive）混合 v1（`Animator.additive`：增量 = 叠加剪辑当前帧 − 其第 0 帧
       参考姿势，按 weight 加权；平移/缩放线性差、旋转按权重 slerp 局部增量；叠加层
       独立时钟/循环，与状态机正交；淡入中照叠；权重 0 与未配置逐位一致；脚本
@@ -358,7 +368,7 @@ XGameEngine/                       # 引擎源码仓库
 │   │       ├── projection.rs
 │   │       └── transform.rs
 │   ├── xgame-derive/              # proc-macro（编辑器 Panel 派生）
-│   ├── xgame-script/              # Rhai 脚本宿主（GameCtx 方法层在此，api.rs 为转发壳）
+│   ├── xgame-script/              # Lua 脚本宿主（GameCtx 方法层在此，lua_api.rs 为转发壳）
 │   ├── xgame-runtime/             # 统一运行时 World（帧管线 + Rust 组件分发 + 注册表）
 │   ├── xgame/                     # 门面 crate（prelude + ENGINE_VERSION + 插件边界）
 │   ├── xgame-render/              # 渲染器
@@ -410,7 +420,7 @@ XGameEngine/                       # 引擎源码仓库
 │       └── src/
 │           └── main.rs            # 游戏入口（参数 > exe 同目录项目 > 示例项目）
 ├── examples/
-│   └── spinner-plugin/            # 示例 cdylib 插件（与 Spinner.rhai 同款的 Rust 组件）
+│   └── spinner-plugin/            # 示例 cdylib 插件（与 Spinner.lua 同款的 Rust 组件）
 └── README.md
 ```
 

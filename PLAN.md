@@ -1278,3 +1278,97 @@ AST 解释 vs 字节码 VM 的**语言级代差**，任何宿主侧派发优化�
 - **下一步 = P3**：按判定删 Rhai 宿主、样例/文档切 Lua（范围见计划文档
   §四 P3 与 ROADMAP）。`language_gate.rs` 在 P3 删 Rhai 后自然退役
   （判定已出，它的一次性使命完成）。
+
+## 二十一、双轨语言架构 P3：删 Rhai、脚本层收敛单一 Lua 轨（本轮）
+
+接 §二十。按闸门判定（§二十 四、计划文档 §六 / D11）执行删除：Rhai 宿主整体
+下线，脚本层从"双轨按扩展名分流"收敛为**单一 Lua 轨**。全量验证绿
+（clippy 0 警告、`cargo test --workspace --all-targets` 全绿、`--check` OK）。
+
+### 一、删了什么
+
+| 删除物 | 位置 | 说明 |
+|---|---|---|
+| Rhai 宿主本体 | `xgame-script/src/host.rs` | `ScriptHost` / `CompiledScript` / bool 版 `Hooks` 及其派发、编译缓存、测试全删 |
+| Rhai 转发壳 | `xgame-script/src/api.rs` | 整文件（P0 起就是"每函数一行转发"，函数体早在 ctx.rs） |
+| `rhai` 依赖 | `xgame-script/Cargo.toml` | 连带 `f32_float` 注释（那是 Rhai 的 f64 问题，Lua 侧无此事） |
+| 闸门工具 | `tests/language_gate.rs` | 一次性使命完成，判定数据已入档（§二十 + 计划文档 §六） |
+| 基准 Rhai 档 | `tests/behavior_dispatch_throughput.rs` | 保留基线 / 组件 / Lua 三档；模块文档的 Rhai 列**留作历史记录表** |
+| `LuaPreloadReport` 别名 | `lua_host.rs` | 双轨对称期的纯别名，单轨后无人使用（连 `PreloadReport` 都在同模块导出） |
+
+**保留物**：`host.rs` 瘦身为**宿主公共类型**模块（`Hook` / `PreloadReport` /
+`CommandReport`）—— `lua_host.rs` 一直 `use crate::host::{...}` 共用这三个类型，
+模块路径与 `lib.rs` 再导出不变，纯删代码不制造无关 diff。
+
+### 二、单轨化改动
+
+1. **`World` 单字段**：`scripts: ScriptHost` + `lua: LuaHost` → 一个
+   `scripts: LuaHost`。`take_logs` / `reload_scripts` / `consume_script_commands`
+   的"两轨缓冲合并"代码全删（合并语义本来就是"消费方不关心来源"，单轨后
+   天然成立）；组件轨的日志 / 命令缓冲仍走 `scripts.buffers_mut()`，通道未变。
+2. **`ScriptCtx<S>` 收成非泛型**：状态表直接持 `mlua::Table`。泛型是双轨期
+   "Rhai `Map` / Lua `Table` 各一个实例化"的产物，单轨后无意义。**地址束模式、
+   `ErasedMut`、unsafe 调用窗口约定原样保留** —— 不在删语言的同一轮里动
+   unsafe 核心（churn 风险 > 收益）。
+3. **`list_scripts` 只扫 `.lua`**：残留 `.rhai` 不进编辑器下拉。证红测试
+   `list_scripts_includes_both_tracks`（P2 引入）使命完成，更新为
+   `list_scripts_scans_lua_only` —— 断言方向**反转**（写一个 `.rhai` 进去，
+   必须不出现在列表里；旧实现在这条断言下会红）。
+4. **编辑器三处双轨文案**收敛（state.rs / inspector.rs / toolbar.rs）；
+   `xgame-core` 的注释示例（`Scripts/Player.rhai` → `.lua` 等）同步。
+
+### 三、样例与文档迁移
+
+- **4 个 `.rhai` 移植 `.lua`**（`git mv` 语义：删旧建新）：SampleScene 的
+  Spinner / Jumper / FoxLocomotion + BehaviorsDemo 的 Spinner。语法点：
+  `let` → `local`、`fn` → `function ... end`、`!` → `not`、方法式调用本就
+  没有（Rhai 函数式写法同形，迁移零摩擦）、`sin` → **`math.sin`**（沙箱
+  MATH 库已开 —— `sample_project_runs` 跑 FoxLocomotion.lua 180 帧无错误日志，
+  链路验证在案）。场景 ron 引用（scene.ron ×3 + 注释 ×2、main.ron ×1）同步改。
+- **`Docs/脚本API.md` 整篇重写为 Lua 版**：原"两个语法坑"一节收敛 ——
+  "全局 `let` 在函数里看不见"随 Rhai 消失（Lua 顶层 `local` 是 upvalue，
+  函数体天然可见），换成"顶层 `local` 是**脚本级共享**、每实体状态走
+  `state_*`"的语义说明；数学节改 `v*` 具名函数 + `math.*`；容错表去掉
+  Rhai 专属的"递归 32 层"数字，按 Lua 指令预算语义写；`raycast` / 向量的
+  返回形状按 `lua_api.rs` 真实实现核对过（表、全字段恒填）。
+- README（脚本章节 + 目录树 + Fox 示例）、差距分析两处、ROADMAP 架构图同步。
+  `Docs/双轨语言架构计划.md` 补 **D11 落地注记**、路线图表 P2.5/P3 打勾、
+  一页结论与 §六 收尾更新。
+
+### 四、刻意的取舍
+
+1. **API 名一字不改**：`spawn_entity` 的 `_entity` 后缀是 Rhai 保留字时期
+   的历史产物，`state_*` / `set_anim_*` 等全部保持原名 —— 迁移成本
+   （既有脚本 + 文档 + 测试）远大于后缀的违和感。注释里写明历史原因。
+2. **`host.rs` 不改名不搬家**：有人会想把它并进 `context.rs` 或改名
+   `types.rs` —— 但 `lua_host.rs` 的 `use crate::host::` 与 `lib.rs`
+   再导出路径全都不用动，纯删代码的 diff 最小、最好审。
+3. **`ScriptCtx` 泛型收掉，但 unsafe 半步不迈**：见上文二.2。地址束 +
+   `ErasedMut<'static>` 是 P2 安全论证的原物，本轮只把 `S = rhai::Map`
+   这个默认参数摘了。
+4. **`language_gate.rs` 直接删**而不是留作"将来接第三门语言再用"：
+   一次性工具，脚本两轨同源的写法与 Rhai 侧强耦合（`api_rhai()` /
+   `compute_rhai()`），留着就是死代码 + 误导（仓库有"不留死代码"惯例）。
+   判定数据已完整入档，未来要做语言对比按 §二十 的方法重写即可。
+5. **`check.rs` 不加扩展名校验**：悬空引用检查仍只查"文件在不在"，
+   不查"是不是 `.lua` / 能不能编译"—— 旧项目场景里残留的 `.rhai` 引用
+   （文件还在）会继续通过存在性检查，不被误报；真正的"这脚本不会跑了"
+   会在 Play 时以"没定义钩子"的静默形态出现（与"空脚本"同语义）。
+   迁移期不制造惊吓，是刻意选择。
+
+### 五、验证汇总与遗留
+
+- 全量：`cargo check --workspace --all-targets` 绿、clippy **0 警告**、
+  `cargo test --workspace --all-targets` 全绿（xgame-script 16 项 Lua 测试
+  = 原 11 项 Rhai 测试的等价覆盖：沙箱 / 死循环预算 / 状态隔离 / 驻留表
+  热重载不变量 / 分流判定 / 顶层 local 可见性）；
+  `xgame-editor --check` OK（`script_refs=3`，三个 Lua 脚本全解析）。
+- 基准复跑（同机）：Lua 轨分发与 P2.5 的 562 µs/帧在噪声内，组件轨 /
+  基线同机器状态口径不变 —— 删 Rhai 没有触碰 Lua 轨热路径。
+- 行为验证：`sample_project_runs`（Spinner.lua 转动 + Jumper.lua +
+  FoxLocomotion.lua 的 `math.sin` / `set_anim_*` 全链路）、
+  `sample_project_assets_all_load`（三脚本编译 0 失败）、BehaviorsDemo
+  场景加载。
+- 遗留不变：`dispatch_destroy` / `forget_entity` 仍未接线（单轨后只剩
+  Lua 宿主一份，语义同 P2）；组件轨 <50 µs 验收线本机持续红（P0.5 起已知）。
+- **双轨语言架构计划 P0–P3 全部分期完成**。

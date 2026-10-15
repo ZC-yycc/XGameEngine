@@ -39,7 +39,7 @@ XGameEngine/                  # 引擎源码仓库
 │   ├── xgame-render/         # 渲染管线：wgpu 上下文、glTF 加载、ScenePipeline
 │   ├── xgame-physics/        # 物理引擎：rapier3d 刚体、碰撞体、射线、调试绘制
 │   ├── xgame-input/          # 输入层：设备状态 + 动作映射（与窗口库解耦）
-│   ├── xgame-script/         # 脚本层：嵌入式 Rhai + 生命周期钩子 + 宿主 API
+│   ├── xgame-script/         # 脚本层：嵌入式 Lua + 生命周期钩子 + 宿主 API
 │   ├── xgame-runtime/        # 运行时：把场景/物理/输入/脚本编排成一条帧管线
 │   ├── xgame-derive/         # 过程宏：#[derive(Panel)]
 │   ├── xgame-editor/         # 编辑器程序：项目枢纽 + egui 面板
@@ -49,7 +49,7 @@ XGameEngine/                  # 引擎源码仓库
         ├── project.ron       # 项目清单
         ├── input.ron         # 输入映射（动作 / 轴）
         ├── Scenes/
-        ├── Scripts/          # 实体脚本（.rhai）
+        ├── Scripts/          # 实体脚本（.lua）
         └── Resources/
 ```
 
@@ -229,7 +229,7 @@ lights: [
                 name: "upper",       // 脚本 set_anim_layer_weight(ctx, "upper", w) 按名查找
                 mode: Override,      // Override = 向这层姿势整段 lerp（Additive = 加增量）
                 clip: "Survey",
-                weight: 0.0,         // 0 = 这层不参与；走路段脚本推到 0.6（见 FoxLocomotion.rhai）
+                weight: 0.0,         // 0 = 这层不参与；走路段脚本推到 0.6（见 FoxLocomotion.lua）
                 speed: 1.0,
                 looping: true,
                 mask: ["b_Spine01_02"],  // 骨骼遮罩 = 子树根名单：该骨及其全部子孙
@@ -237,7 +237,7 @@ lights: [
             ),
         ],
     )),
-    scripts: ["Scripts/FoxLocomotion.rhai"],  // 推 speed/层栈权重（见 Docs/脚本API.md 4.9/4.10）
+    scripts: ["Scripts/FoxLocomotion.lua"],  // 推 speed/层栈权重（见 Docs/脚本API.md 4.9/4.10）
 ),
 ```
 
@@ -369,20 +369,20 @@ Entity(
   `prefab: None` 灌满；旧文件缺这个字段也能照常加载。
 - 构建（🔨 Build）会把 `Prefabs/` 一并打进产物。
 
-## 脚本（Rhai）
+## 脚本（Lua）
 
-实体可以挂 `.rhai` 脚本，引擎在固定步长 / 每帧 / 销毁时回调：
+实体可以挂 `.lua` 脚本，引擎在固定步长 / 每帧 / 销毁时回调：
 
-```rhai
-// Scripts/Jumper.rhai
-const JUMP_SPEED = 6.5;
+```lua
+-- Scripts/Jumper.lua
+local JUMP_SPEED = 6.5
 
-fn update(ctx) {
-    if !action_pressed(ctx, "Jump") { return; }
-    let me = self_id(ctx);
-    let v = velocity(ctx, me);
-    set_velocity(ctx, me, v.x, JUMP_SPEED, v.z);   // 保留水平速度，只跳
-}
+function update(ctx)
+    if not action_pressed(ctx, "Jump") then return end
+    local me = self_id(ctx)
+    local v = velocity(ctx, me)
+    set_velocity(ctx, me, v.x, JUMP_SPEED, v.z)   -- 保留水平速度，只跳
+end
 ```
 
 - 脚本按**项目相对路径**挂在实体上（`Entity::scripts`），所以一份脚本能挂到
@@ -391,8 +391,8 @@ fn update(ctx) {
 - Play 模式下点工具栏 **⟳ Scripts** 即可热重载，不必退出重进
 - 脚本出错**不会**拖垮引擎：编译错误、运行时错误、死循环超限都只记一条日志，
   这一帧该钩子不生效，游戏继续跑
-- 完整的函数清单、坐标约定、以及两个 Rhai 语法坑
-  （全局 `let` 在函数里看不见、每实体状态要用 `state_*`）见
+- 完整的函数清单、坐标约定、以及两条语义说明
+  （顶层 `local` 是脚本级共享、每实体状态要用 `state_*`）见
   **[Docs/脚本API.md](Docs/脚本API.md)**
 
 ## 输入映射

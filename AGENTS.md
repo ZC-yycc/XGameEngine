@@ -1,13 +1,13 @@
 # XGameEngine — Agent 指南
 
-Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物理 + 脚本双轨 Rhai/Lua）。
+Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物理 + 脚本 Lua + Rust 组件插件）。
 
 ## 必读文档（按顺序）
 
 1. `ROADMAP.md` — 阶段状态总表（先看「整体路线图」）
 2. `PLAN.md` — 历史各轮的实施记录（含每个决策的理由与取舍，改代码前先查这里有没有已定结论）
 3. `Docs/差距分析.md` — 与 Unity/UE/Godot 的能力差距及优先级
-4. `Docs/双轨语言架构计划.md` — **当前进行中的大方向**：Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨，P0–P3 分期。开工前通读其「决策记录」一节
+4. `Docs/双轨语言架构计划.md` — 双轨语言架构计划（**P0–P3 已全部完成**）：Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨，Rhai 已于 P3 删除。其「决策记录」一节（D1–D11）是脚本层全部取舍的真相源，改脚本层代码前必读
 
 ## 常用命令
 
@@ -26,7 +26,7 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 
 - **crate 依赖方向**（不许反向依赖）：`core ← math ← {render, physics}`；`input`/`script` 在中层；`runtime`（World 编排）在上；`editor`/`game` 是两个宿主。
 - **编辑器 Play 与独立游戏跑同一段 `World::update`**（`xgame-runtime`）——改运行时行为两端自动一致；不要在 editor/game 里复制运行时逻辑。
-- 脚本层（`xgame-script`）：`ScriptHost`（Rhai）与 `LuaHost`（Lua）各管编译缓存/生命周期派发，按扩展名分流（`.lua` → Lua、其余 → Rhai，两轨必须恰好全覆盖）；API 真相源是 `GameCtx` 方法层（`ctx.rs`；`api.rs` 自 P0 起只是 Rhai 转发壳）；`ScriptCtx<S>` 是地址束（unsafe 有严格调用窗口约定，见 `context.rs` 模块文档，别破坏该约定）；路径驻留表 `intern.rs` 的 id **永不清**（热重载只清编译缓存，见 D10）。
+- 脚本层（`xgame-script`）：`LuaHost`（`lua_host.rs`）管编译缓存/生命周期派发，**单轨只认 `.lua`**（Rhai 已随双轨 P3 删除，见计划文档 D11）；API 真相源是 `GameCtx` 方法层（`ctx.rs`；`lua_api.rs` 只是每函数一行的转发壳）；`host.rs` 是宿主公共类型模块（`Hook` / `PreloadReport` / `CommandReport`）；`ScriptCtx` 是地址束（unsafe 有严格调用窗口约定，见 `context.rs` 模块文档，别破坏该约定）；路径驻留表 `intern.rs` 的 id **永不清**（热重载只清编译缓存，见 D10）；每脚本环境表的 `__index` 必须挂**真元表**（D10 ①）。
 - 场景格式 RON，纯文本、可 diff；新字段一律 `#[serde(default, skip_serializing_if = ...)]` 保证旧文件兼容。
 
 ## 代码风格约定
@@ -62,7 +62,9 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
   - **四条不能推翻的约束**（D10）：① 每脚本环境表的 `__index` 必须挂**真元表**（往 env 塞同名普通字段对读取无效，表现是"脚本里宿主 API 全变 nil"，踩过：首跑 9 条红）；② 两轨分流必须恰好全覆盖（`is_rhai = !is_lua`，漏 = 脚本静默不执行，重 = 每帧假报编译错）；③ **驻留表 id 永不清**（`invalidate*` 只清编译缓存 —— 清表 = 热重载后每实体状态静默错位，双宿主 `state_survives_hot_reload_even_when_intern_order_changes` 钉死，红对照已实测）；④ 沙箱预算两轨同量级（Rhai `set_max_operations(200_000)` 与 Lua 指令钩子预算 200_000），改预算两轨一起改。
   - **一条实现事实**：借 `self.intern` 的 `&str` 跨不过 `&mut self` 方法调用（借用检查器看不出它就是 self 的一个字段）—— `ensure_loaded` 因此拆成 path 外壳 + `ensure_loaded_id` 内核、`run_hook` 收 `path_id`，路径解析都在方法**体内**做（字段级拆借）。
 - **P2.5 已完成**（2026-10-15，实施记录见 PLAN.md 二十，规则见计划文档 §六）：三负载闸门 `language_gate.rs`（同进程背靠背，`measure()` 有错误日志守卫 —— 脚本编译失败时"空调度"会被当成假快，首跑就栽在这：Rhai 无 `mut` 关键字）。**判定：Lua 三负载全占优（dispatch 1.31×、api 1.26×、compute 9.16×）→ P3 删 Rhai**。
-  - **两条不能推翻的教训**：① 基准工具必须断言"脚本真跑了"（宿主对编译失败只记日志是产品正确语义，但基准要自己 panic，`language_gate::measure` 的守卫在案）；② Rhai 语言**没有 `mut` 关键字**（变量天然可变），写 `let mut x` = 编译错 + 脚本静默不跑。
-- **下一步是 P3：删 Rhai、样例/文档切 Lua**（闸门判定已出，Rhai 去留不再是悬案）。P2.5 顺带修了 Lua 宿主热路径两处实现开销（先量后改，探针数据在 PLAN.md 二十）：① 钩子函数句柄**编译期缓存**（`detect_funcs` 留下 `Option<Function>`，省每钩子 `env.get` ~194 ns）；② ctx 改**宿主常驻槽 + 轻量指针传参**（`LuaHost.ctx_slot: Box<MaybeUninit<LuaCtx>>`，脚本侧 `FromLua` 解引用槽地址，省每钩子现造 userdata ~284 ns；安全论证在 `LuaCtx` 类型文档 —— 指针永远指向宿主持有的槽，窗口内槽 = 本次 ctx，脚本无法伪造 lightuserdata）。Lua 轨分发 **1670 → 576 µs/帧（-65%）**。
-- 对照数据（微基准 `behavior_dispatch_throughput`，1000 no-op 实体 × 300 帧，P2.5 会话）：Lua 轨分发 **562 µs/帧**、Rhai 轨 735.6 µs、Rust 组件轨 71.7 µs、无轨基线 7.54 µs（Rhai/Lua = 1.31×）。历史：P0 = 493.9 µs（当时机器）、P0.5 = 68.4 µs、P1 = 65.2 µs、P2 = 713 µs（组件/基线口径的历次漂移见基准模块文档的完整记录表）。⚠ 绝对值随机器状态浮动 1.5× 以上，**跨版本比较必须同机背靠背**。**组件轨 < 50 µs 的验收线在本机持续红**（P0.5 起已知，验收线未为迁就机器上调 —— 红了先对同机数字再判回归）。
+  - **两条不能推翻的教训**：① 基准工具必须断言"脚本真跑了"（宿主对编译失败只记日志是产品正确语义，但基准要自己 panic，`language_gate::measure` 的守卫在案）；② Rhai 语言**没有 `mut` 关键字**（变量天然可变），写 `let mut x` = 编译错 + 脚本静默不跑（Rhai 已删，但教训对任何"宿主只记日志"的基准工具都成立）。
+  - P2.5 顺带修了 Lua 宿主热路径两处实现开销（先量后改，探针数据在 PLAN.md 二十）：① 钩子函数句柄**编译期缓存**（`detect_funcs` 留下 `Option<Function>`，省每钩子 `env.get` ~194 ns）；② ctx 改**宿主常驻槽 + 轻量指针传参**（`LuaHost.ctx_slot: Box<MaybeUninit<LuaCtx>>`，脚本侧 `FromLua` 解引用槽地址，省每钩子现造 userdata ~284 ns；安全论证在 `LuaCtx` 类型文档 —— 指针永远指向宿主持有的槽，窗口内槽 = 本次 ctx，脚本无法伪造 lightuserdata）。Lua 轨分发 **1670 → 576 µs/帧（-65%）**。
+- **P3 已完成**（2026-10-15，实施记录见 PLAN.md 二十一，落地注记见计划文档 D11）：按闸门判定删 Rhai，脚本层收敛单一 Lua 轨 —— `host.rs` 瘦身为宿主公共类型模块（`Hook` / `PreloadReport` / `CommandReport`，Lua 宿主一直共用，路径不变）、`api.rs`（Rhai 转发壳）删除、`rhai` 依赖移除、`ScriptCtx<S>` 泛型收成非泛型（状态表直接持 `mlua::Table`，地址束与 unsafe 窗口约定原样未动）；`World` 只持一个 `scripts: LuaHost`（两轨缓冲合并代码全删）；`list_scripts` 只扫 `.lua`（`list_scripts_scans_lua_only` 证红：残留 `.rhai` 不进下拉）；4 个示例 `.rhai` 移植 `.lua`（`math.sin` 走沙箱 MATH 库，`sample_project_runs` 覆盖）；`Docs/脚本API.md` 整篇重写为 Lua 版。闸门工具 `language_gate.rs` 退役删除、`behavior_dispatch_throughput` 去 Rhai 档（历史数据留模块文档表）。
+  - **三条 P3 取舍**（防好心人翻案）：① API 名一字不改（`spawn_entity` 后缀是 Rhai 保留字时期的历史产物，迁移成本 > 违和感）；② `host.rs` 不改名不搬家（`lua_host.rs` 的 `use crate::host::` 与再导出路径全不动，纯删代码 diff 最小）；③ `check.rs` 悬空引用检查仍只查文件存在、不查扩展名 —— 旧项目残留 `.rhai` 引用不被误报。
+- 对照数据（微基准 `behavior_dispatch_throughput`，1000 no-op 实体 × 300 帧，P2.5 会话）：Lua 轨分发 **562 µs/帧**、Rust 组件轨 71.7 µs、无轨基线 7.54 µs。（历史 Rhai 轨 735.6 µs，P3 起已从基准移除。）历史：P0 = 493.9 µs（当时机器）、P0.5 = 68.4 µs、P1 = 65.2 µs、P2 = 713 µs（组件/基线口径的历次漂移见基准模块文档的完整记录表）。⚠ 绝对值随机器状态浮动 1.5× 以上，**跨版本比较必须同机背靠背**。**组件轨 < 50 µs 的验收线在本机持续红**（P0.5 起已知，验收线未为迁就机器上调 —— 红了先对同机数字再判回归）。
 - **工具链注意**：本仓库的源文件是 UTF-8 **无 BOM** 且含大量中文注释。用 PowerShell 做文本替换时必须显式 `-Encoding UTF8` 读写，否则 PS 5.1 会按 GBK 解码把中文**有损**毁掉（已发生过一次，PLAN.md 十六第七节）。改中文源文件优先用编辑器工具，shell 只做只读操作。
