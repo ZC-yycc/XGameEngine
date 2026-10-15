@@ -47,7 +47,7 @@ pub struct Entity {
     /// 保证旧文件（没这个字段）照常加载成 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefab: Option<crate::prefab::PrefabInstanceRef>,
-    /// 挂在这个实体上的脚本（项目相对路径，例如 `Scripts/Player.rhai`）。
+    /// 挂在这个实体上的脚本（项目相对路径，例如 `Scripts/Player.lua`）。
     ///
     /// 存的是**路径**而不是脚本内容：脚本是资产，要能一改全生效、
     /// 要在多个实体间共享、要能进版本库。把内容内联进场景文件，

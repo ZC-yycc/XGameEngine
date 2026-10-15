@@ -77,7 +77,7 @@ pub struct ContentConfig {
     /// 反序列化时补默认值即可，不必强制升级清单文件。
     #[serde(default = "default_prefabs_dir")]
     pub prefabs_dir: String,
-    /// 脚本目录（`.rhai` 文件）。
+    /// 脚本目录（`.lua` 文件）。
     ///
     /// 同样带 serde 默认值：脚本是后加的能力，老清单里没有这一项。
     /// 运行时也**只**用默认值兜底，不会因为目录不存在就报错 ——

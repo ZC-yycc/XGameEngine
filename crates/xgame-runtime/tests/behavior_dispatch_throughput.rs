@@ -8,14 +8,13 @@
 //!
 //! # 量的是什么
 //!
-//! 1000 个**纯视觉**实体（无刚体，`sync_bodies` / 物理完全不参与），分四档：
+//! 1000 个**纯视觉**实体（无刚体，`sync_bodies` / 物理完全不参与），分三档：
 //!
 //! | 档 | 量的是什么 |
 //! |---|---|
 //! | 无轨道（基线） | 引擎每帧的公共开销（start 扫描、固定步循环、空脚本轨扫描） |
 //! | Rust 组件轨 | 基线 + 1000 个 no-op 组件的分发 |
-//! | Rhai 脚本轨 | 基线 + 1000 个 no-op Rhai 脚本的分发 |
-//! | Lua 脚本轨 | 基线 + 1000 个 no-op Lua 脚本的分发（P2.5 闸门引入，与 Rhai 同机背靠背） |
+//! | Lua 脚本轨 | 基线 + 1000 个 no-op Lua 脚本的分发 |
 //!
 //! "轨的分发成本" = 各档减基线 —— 差额里只有分发路径不同（验收线
 //! "组件分发一轮 < 50 µs"按这个口径判）。写成 `tests/` 下的集成测试
@@ -56,6 +55,10 @@
 //! PLAN.md 二十。Rhai 轨 735.6 与历史 713 在机器噪声内（同机对照基线
 //! 7.43 → 7.54 也漂了 ~2%）；组件轨 71.7 同理（本机验收线持续红，见文首）。
 //!
+//! **P3 起 Rhai 轨从基准移除**（闸门判定 Lua 三负载全占优 → 删 Rhai，
+//! 见计划文档 §六）—— 表中 Rhai 列保留作历史记录，代码只跑基线 /
+//! 组件 / Lua 三档。
+//!
 //! 两个结论，都由这张表得出：
 //!
 //! 1. **P1 相对 P0.5 没有回归**（65.2 vs 68.4 µs，甚至略低，在噪声内）。
@@ -83,14 +86,13 @@ impl Lifecycle for Noop {}
 // 见 xgame-derive 的"路径假设"）。
 xgame_core::impl_no_inspect!(Noop);
 
-/// 造一个 N 实体的纯视觉场景。`mode`：none = 无轨道基线；scripts = no-op
-/// Rhai 脚本；scripts_lua = no-op Lua 脚本；components = no-op 组件。
+/// 造一个 N 实体的纯视觉场景。`mode`：none = 无轨基线；
+/// scripts_lua = no-op Lua 脚本；components = no-op 组件。
 fn build_scene(mode: &str) -> Scene {
     let mut scene = Scene::new("bench");
     for i in 0..N {
         let mut e = Entity::new(format!("e{i}"));
         match mode {
-            "scripts" => e.scripts.push("Scripts/noop.rhai".to_owned()),
             "scripts_lua" => e.scripts.push("Scripts/noop.lua".to_owned()),
             "components" => e.behaviors.push("Noop".to_owned()),
             _ => {}
@@ -107,25 +109,13 @@ fn measure(mode: &str, label: &str) -> f64 {
         std::process::id(),
         mode
     ));
-    match mode {
-        "scripts" => {
-            std::fs::create_dir_all(dir.join("Scripts")).unwrap();
-            std::fs::write(
-                dir.join("Scripts/noop.rhai"),
-                "fn start(ctx) {}\nfn update(ctx) {}\nfn fixed_update(ctx) {}\n",
-            )
-            .unwrap();
-        }
-        "scripts_lua" => {
-            std::fs::create_dir_all(dir.join("Scripts")).unwrap();
-            // 与 Rhai 档同三个钩子、全空 —— 两档唯一的差别只能是宿主本身。
-            std::fs::write(
-                dir.join("Scripts/noop.lua"),
-                "function start(ctx) end\nfunction update(ctx) end\nfunction fixed_update(ctx) end\n",
-            )
-            .unwrap();
-        }
-        _ => {}
+    if mode == "scripts_lua" {
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/noop.lua"),
+            "function start(ctx) end\nfunction update(ctx) end\nfunction fixed_update(ctx) end\n",
+        )
+        .unwrap();
     }
 
     let registry = {
@@ -162,19 +152,13 @@ fn measure(mode: &str, label: &str) -> f64 {
 fn behavior_dispatch_throughput() {
     let baseline_us = measure("none", "无轨道基线");
     let component_us = measure("components", "Rust 组件轨");
-    let script_us = measure("scripts", "Rhai 脚本轨");
-    // P2.5 闸门引入 Lua 档：固定排在 Rhai 之后，同进程同机背靠背 ——
-    // 两档实体数、钩子集、脚本内容逐字同型，差额只能来自宿主本身。
     let lua_us = measure("scripts_lua", "Lua 脚本轨");
 
     let component_dispatch = component_us - baseline_us;
-    let script_dispatch = script_us - baseline_us;
     let lua_dispatch = lua_us - baseline_us;
     println!(
-        "对照：组件轨分发 {component_dispatch:.2} us/帧，Rhai 轨分发 {script_dispatch:.2} us/帧，\
-         Lua 轨分发 {lua_dispatch:.2} us/帧（Rhai/Lua = {:.2}×，>1 = Lua 更快；\
-         含各钩子的 Ctx 构造、解释器调用与日志缓冲写入）",
-        script_dispatch / lua_dispatch
+        "对照：组件轨分发 {component_dispatch:.2} us/帧，Lua 轨分发 {lua_dispatch:.2} us/帧\
+         （含各钩子的 Ctx 构造、解释器调用与日志缓冲写入）"
     );
 
     // P0 验收：1000 个 no-op 组件实体，组件分发一轮 < 50 µs（扣除公共基线后的分发成本）。

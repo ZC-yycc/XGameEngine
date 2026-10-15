@@ -37,7 +37,7 @@ use xgame_core::{EntityId, GameClock, Inspect, PhysicsHandle, Scene, Transform};
 use xgame_input::{Input, InputMap};
 use xgame_math::glam::{Mat4, Vec3};
 use xgame_physics::{body_from_scene, DebugLine, PhysicsConfig, PhysicsWorld};
-use xgame_script::{FrameCtx, GameCtx, LuaHost, ScriptHost, ScriptLog};
+use xgame_script::{FrameCtx, GameCtx, LuaHost, ScriptLog};
 
 use crate::registry::{BehaviorInstance, BehaviorRegistry};
 
@@ -97,11 +97,9 @@ pub struct World {
     scene: Scene,
     physics: PhysicsWorld,
     input: Input,
-    scripts: ScriptHost,
-    /// Lua 宿主（双轨的第二条脚本轨）。与 `scripts`（Rhai）按扩展名分流：
-    /// `.rhai` → Rhai，`.lua` → Lua。日志与命令缓冲仍共用 `scripts` 那两条
-    /// （`LuaHost::buffers_mut` 拿到的是同一对 `Vec`），消费路径完全一致。
-    lua: LuaHost,
+    /// Lua 脚本宿主（唯一脚本轨；Rhai 已随双轨 P3 删除，见计划文档 §六）。
+    /// 日志与命令缓冲也由它持有（`LuaHost::buffers_mut`），组件轨与脚本轨共用。
+    scripts: LuaHost,
     clock: GameClock,
     /// 实体 → 刚体。用 `EntityId` 而不是索引做键：脚本可以增删实体，
     /// 索引随时会变。
@@ -150,20 +148,15 @@ impl World {
             timestep: config.fixed_dt,
         });
 
-        let mut scripts = ScriptHost::new();
+        let mut scripts = LuaHost::new();
         scripts.set_root(root.clone());
         scripts.preload(&root, &scene);
-
-        let mut lua = LuaHost::new();
-        lua.set_root(root.clone());
-        lua.preload(&root, &scene);
 
         let mut world = Self {
             scene,
             physics,
             input: Input::with_default_map(),
             scripts,
-            lua,
             clock: GameClock::new().with_fixed_dt(config.fixed_dt),
             body_of_entity: HashMap::new(),
             root,
@@ -268,7 +261,7 @@ impl World {
         &self.clock
     }
 
-    pub fn scripts(&self) -> &ScriptHost {
+    pub fn scripts(&self) -> &LuaHost {
         &self.scripts
     }
 
@@ -355,7 +348,6 @@ impl World {
             physics,
             input,
             scripts,
-            lua,
             ..
         } = self;
 
@@ -363,22 +355,11 @@ impl World {
             .with_input(input)
             .with_physics(physics);
 
-        // 组件轨与 Rhai 轨：共用 `scripts` 那一对日志 / 命令缓冲。
+        // 组件轨与脚本轨：共用 `scripts` 那一对日志 / 命令缓冲。
         match phase {
             Phase::Start => scripts.dispatch_start(frame),
             Phase::FixedUpdate => scripts.dispatch_fixed_update(frame, delta),
             Phase::Update => scripts.dispatch_update(frame),
-        }
-
-        // Lua 轨：借用束已释放，重建一份指向同一束状态的 frame 派发。
-        // Lua 宿主用自己的缓冲（见 `take_lua_logs` / `consume_lua_commands`）。
-        let frame = FrameCtx::new(scene, delta, time)
-            .with_input(input)
-            .with_physics(physics);
-        match phase {
-            Phase::Start => lua.dispatch_start(frame),
-            Phase::FixedUpdate => lua.dispatch_fixed_update(frame, delta),
-            Phase::Update => lua.dispatch_update(frame),
         }
     }
 
@@ -540,22 +521,15 @@ impl World {
     }
 
     /// 脚本日志（编辑器控制台 / 游戏日志）。
-    ///
-    /// 合并两条脚本轨（Rhai + Lua）的日志：它们各有一对缓冲，但消费方
-    /// （编辑器控制台）只认"这一帧所有脚本说了什么"，不关心来自哪个宿主。
     pub fn take_logs(&mut self) -> Vec<ScriptLog> {
-        let mut logs = self.scripts.take_logs();
-        logs.append(&mut self.lua.take_logs());
-        logs
+        self.scripts.take_logs()
     }
 
     /// 重新编译所有脚本（热重载）。
     pub fn reload_scripts(&mut self) {
         self.scripts.invalidate_all();
-        self.lua.invalidate_all();
         let root = self.root.clone();
         self.scripts.preload(&root, &self.scene);
-        self.lua.preload(&root, &self.scene);
     }
 
     /// 物理调试线条。
@@ -568,16 +542,8 @@ impl World {
     // -----------------------------------------------------------------------
 
     /// 把脚本 / 组件产生的结构性改动落到物理侧。
-    ///
-    /// 两条脚本轨（Rhai + Lua）各攒各的命令，这里并成一份再消费 ——
-    /// 物理侧只关心"这一帧哪些实体该补体 / 清体 / 挪刚体"，不区分来源。
     fn consume_script_commands(&mut self, delta: f32, time: f32) {
-        let mut report = self.scripts.take_commands();
-        // Lua 轨的结构性改动并进来，走完全相同的物理侧消费。
-        let lua_report = self.lua.take_commands();
-        report.spawned.extend(lua_report.spawned);
-        report.removed.extend(lua_report.removed);
-        report.reparented.extend(lua_report.reparented);
+        let report = self.scripts.take_commands();
         if report.is_empty() {
             return;
         }
@@ -795,7 +761,6 @@ mod tests {
     use std::path::PathBuf;
     use xgame_core::project::ProjectHandle;
     use xgame_core::{Entity, PhysicsBody};
-    use xgame_script::ScriptHost;
 
     fn entity_y(world: &World, name: &str) -> f32 {
         world
@@ -896,17 +861,20 @@ mod tests {
         ));
         std::fs::create_dir_all(dir.join("Scripts")).unwrap();
         std::fs::write(
-            dir.join("Scripts/drive.rhai"),
+            dir.join("Scripts/drive.lua"),
             r#"
-            fn start(ctx) { set_pos(ctx, 1.0, 0.0, 0.0); }
-            fn update(ctx) { let p = pos(ctx); set_pos(ctx, p.x + 0.1, p.y, p.z); }
+            function start(ctx) set_pos(ctx, 1.0, 0.0, 0.0) end
+            function update(ctx)
+                local p = pos(ctx)
+                set_pos(ctx, p.x + 0.1, p.y, p.z)
+            end
             "#,
         )
         .unwrap();
 
         let mut scene = Scene::new("scripted");
         let mut actor = Entity::new("actor");
-        actor.scripts.push("Scripts/drive.rhai".to_owned());
+        actor.scripts.push("Scripts/drive.lua".to_owned());
         scene.add_entity(actor);
 
         let mut world = World::new(scene, &dir, WorldConfig::default());
@@ -939,7 +907,7 @@ mod tests {
         assert!(map.actions.contains_key("Jump"), "示例映射应当有 Jump 动作");
         assert!(map.axes.contains_key("MoveX"));
 
-        let mut host = ScriptHost::new();
+        let mut host = LuaHost::new();
         let report = host.preload(&root, &scene);
         assert!(
             report.failed.is_empty(),
@@ -980,7 +948,7 @@ mod tests {
             );
         }
 
-        // Spinner 挂了 Spinner.rhai，3 秒之后它的 Y 轴欧拉角应当明显转过。
+        // Spinner 挂了 Spinner.lua，3 秒之后它的 Y 轴欧拉角应当明显转过。
         let spinner = world
             .scene()
             .find_by_name("Spinner")

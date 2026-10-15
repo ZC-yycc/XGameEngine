@@ -139,7 +139,7 @@ mod tests {
         scene.entities.push(
             crate::Entity::new("Ghost")
                 .with_model("Resources/NotThere.glb")
-                .with_script("Scripts/NotThere.rhai"),
+                .with_script("Scripts/NotThere.lua"),
         );
         // 内置几何不是文件引用，绝不能被报成"缺失"。
         scene

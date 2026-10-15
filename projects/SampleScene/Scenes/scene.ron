@@ -94,7 +94,7 @@
             id: (5),
             parent: None,
             scripts: [
-                "Scripts/Spinner.rhai",
+                "Scripts/Spinner.lua",
             ],
             physics: Some((
                 kind: Kinematic,
@@ -117,7 +117,7 @@
             id: (6),
             parent: None,
             scripts: [
-                "Scripts/Jumper.rhai",
+                "Scripts/Jumper.lua",
             ],
             physics: Some((
                 kind: Dynamic,
@@ -294,7 +294,7 @@
                     ],
                 )),
                 // 叠加层：把 Run 的**增量**（相对它第 0 帧的奔跑弹跳）叠在任意
-                // 基础状态上 —— 权重由 FoxLocomotion.rhai 每帧振荡，跑动时的
+                // 基础状态上 —— 权重由 FoxLocomotion.lua 每帧振荡，跑动时的
                 // "呼吸/弹跳幅度"看得见地起伏（weight 0 = 无增量）。
                 additive: Some((
                     clip: "Run",
@@ -305,7 +305,7 @@
                 // 层栈（混合层 v1）：走路段给上半身盖一层 Survey ——
                 // Override 模式 + 骨骼遮罩 ["b_Spine01_02"]（该骨及其全部子孙 =
                 // 脊柱/颈/头/双臂，尾巴和腿不被盖），腿照走、上半身张望。
-                // 权重由脚本按段推（走时 0.6、其他段 0），见 FoxLocomotion.rhai。
+                // 权重由脚本按段推（走时 0.6、其他段 0），见 FoxLocomotion.lua。
                 layers: [
                     (
                         name: "upper",
@@ -319,7 +319,7 @@
                 ],
             )),
             scripts: [
-                "Scripts/FoxLocomotion.rhai",
+                "Scripts/FoxLocomotion.lua",
             ],
         ),
     ],

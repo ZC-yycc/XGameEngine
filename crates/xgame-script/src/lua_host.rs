@@ -1,12 +1,12 @@
 //! Lua 脚本宿主：编译缓存、生命周期派发、命令回收。
 //!
-//! 与 Rhai 宿主（`host.rs`）一一对应，两轨共用同一套 [`crate::GameCtx`] 方法层
-//! （真相源在 `ctx.rs`）。差异全部来自 Lua 的语言习惯：
+//! 宿主 API 的真相源是 [`crate::GameCtx`] 方法层（`ctx.rs`），本模块只管
+//! 编译缓存与生命周期派发。差异全部来自 Lua 的语言习惯：
 //!
 //! - **钩子是环境表里的全局函数**。每个脚本在**自己的环境表**里执行（沙箱），
 //!   `start` / `update` / `fixed_update` / `on_destroy` 从那张表里查。
-//! - **顶层 `local` 是脚本级共享的**（同一脚本的所有实体看到同一个值），
-//!   与 Rhai 顶层作用域同语义。每实体的状态走 `state_get` / `state_set`
+//! - **顶层 `local` 是脚本级共享的**（同一脚本的所有实体看到同一个值，
+//!   像别的语言里的模块级静态）。每实体的状态走 `state_get` / `state_set`
 //!   （由 `LuaCtx` 携带的每 (实体, 脚本) 一张表）。
 //! - **指令计数沙箱**：每帧每钩子一次调用的步数上限，超了就中断这次调用
 //!   （效果类似"这个脚本这帧没跑"），而不是卡死进程。
@@ -28,7 +28,8 @@ use crate::lua_api::{self, LuaCtx};
 /// 每帧每钩子一次调用的指令上限。
 ///
 /// 常见脚本一帧只有几千条指令，留足余量；真跑到这个数说明它必然写错了（死循环）。
-/// 与 Rhai 侧 `set_max_operations(200_000)` 同量级。
+/// 20 万条指令对一帧的胶水逻辑绰绰有余（历史值：双轨时期与 Rhai 侧
+/// `set_max_operations(200_000)` 对齐，删 Rhai 后保留原数量级）。
 const INSTRUCTION_BUDGET: u64 = 200_000;
 
 /// 指令计数钩子的触发间隔（每 N 条指令检查一次预算）。
@@ -65,16 +66,13 @@ impl HookFuncs {
 /// 一份编译好的 Lua 脚本。
 ///
 /// 不存路径了：名字走驻留表（`intern.resolve`），状态表键走驻留 id ——
-/// 结构上不再需要第二份 `String` 副本（与 Rhai 宿主同款取舍）。
+/// 结构上不再需要第二份 `String` 副本。
 ///
 /// 也不存环境表：钩子函数自身的 `_ENV` upvalue 持有它（Lua 的沙箱机制），
 /// 宿主侧丢掉 `Table` 句柄不影响脚本内的全局查找回落。
 struct CompiledScript {
     funcs: HookFuncs,
 }
-
-/// [`LuaHost::preload`] 的结果别名（与 Rhai 宿主共用 [`PreloadReport`]）。
-pub type LuaPreloadReport = PreloadReport;
 
 /// Lua 脚本宿主。
 ///
@@ -91,9 +89,9 @@ pub struct LuaHost {
     failed: HashSet<String>,
     /// 已经跑过 `start` 的实体。
     started: HashSet<EntityId>,
-    /// 每个 (实体, 脚本) 对的持久状态表。键里的脚本是**驻留 id**（`u32`），
-    /// 理由与 Rhai 宿主一致：`String` 键 = 每钩子克隆一次路径
-    /// （1000 实体实测 ≈77.8 µs/帧，见 [`PathIntern`] 模块文档）。
+    /// 每个 (实体, 脚本) 对的持久状态表。键里的脚本是**驻留 id**（`u32`）——
+    /// `String` 键 = 每钩子克隆一次路径（1000 实体实测 ≈77.8 µs/帧，
+    /// 见 [`PathIntern`] 模块文档）。
     states: HashMap<(EntityId, u32), Table>,
     /// ctx 传参的常驻槽（见 [`LuaCtx`] 类型文档）。
     ///
@@ -104,7 +102,8 @@ pub struct LuaHost {
     ctx_slot: Box<std::mem::MaybeUninit<LuaCtx>>,
     /// 脚本路径驻留表（热路径零 `String` 分配）。**永不清空** ——
     /// 状态表按 id 找状态，热重载（`invalidate*`）只清编译缓存；
-    /// 理由与回归测试见 [`crate::intern`] 与 Rhai 宿主的对应说明。
+    /// 理由与回归测试见 [`crate::intern`] 与
+    /// `LuaHost::invalidate_all` 的说明（`state_survives_hot_reload_*`）。
     intern: PathIntern,
     /// 待回收的日志与命令。
     logs: Vec<ScriptLog>,
@@ -195,8 +194,8 @@ impl LuaHost {
     /// 丢弃所有编译结果，下次派发时重新读取（热重载入口）。
     ///
     /// **不碰驻留表**（[`PathIntern`]）：状态表按驻留 id 找状态，id 一变
-    /// 每实体的状态就静默错位了。回归测试见 Rhai 宿主的
-    /// `state_survives_hot_reload_even_when_intern_order_changes`（两宿主同款）。
+    /// 每实体的状态就静默错位了。回归测试见本文件的
+    /// `state_survives_hot_reload_even_when_intern_order_changes`。
     pub fn invalidate_all(&mut self) {
         self.scripts.clear();
         self.failed.clear();
@@ -218,8 +217,8 @@ impl LuaHost {
 
     /// 编译场景里用到的全部 `.lua` 脚本。
     ///
-    /// 只处理 `.lua`：`.rhai` 归 Rhai 宿主（`host.rs`）。两轨按扩展名分流，
-    /// 同一个 `Entity::scripts` 列表可以混挂两种脚本。
+    /// 只认 `.lua`（扩展名判定见 [`is_lua`]）—— 非 `.lua` 的路径直接跳过
+    /// （历史上 Rhai 轨的遗留，删 Rhai 后不再有第二个宿主接管）。
     pub fn preload(&mut self, root: &Path, scene: &Scene) -> PreloadReport {
         self.root = Some(root.to_path_buf());
         let mut report = PreloadReport::default();
@@ -250,7 +249,8 @@ impl LuaHost {
 
     /// 对尚未跑过 `start` 的实体派发一次 `start`。
     pub fn dispatch_start(&mut self, mut frame: FrameCtx<'_>) {
-        // 队列存驻留 id 而不是 `String`（与 Rhai 宿主同款取舍）。
+        // 队列存驻留 id 而不是 `String`（热路径零路径 `String` 克隆，
+        // 见 [`PathIntern`]）。
         let mut queue: Vec<(EntityId, u32)> = Vec::new();
         for entity in &frame.scene.entities {
             if self.started.contains(&entity.id) {
@@ -309,9 +309,9 @@ impl LuaHost {
     /// 派发一个钩子。`path_id` 是驻留 id（队列里只带它，热路径零 `String`
     /// 克隆；要 `&str` 的地方用 `intern.resolve` 换回来）。
     fn run_hook(&mut self, frame: &mut FrameCtx<'_>, entity: EntityId, path_id: u32, hook: Hook) {
-        // 与 Rhai 侧同因：借 `self.intern` 得到的 `&str` 传不进 `&mut self`
-        // 的方法（借用检查器看不出"它就是 self 身上的一块"），所以加载这一步
-        // 在方法内部自己解析 id；钩子体再单独 resolve 一次（O(1) 下标）。
+        // 借 `self.intern` 得到的 `&str` 传不进 `&mut self` 的方法（借用检查器
+        // 看不出"它就是 self 身上的一块"），所以加载这一步在方法内部自己解析 id；
+        // 钩子体再单独 resolve 一次（O(1) 下标）。
         if !self.ensure_loaded_id(path_id) {
             return;
         }
@@ -373,7 +373,7 @@ impl LuaHost {
     // 命令与日志
     // -----------------------------------------------------------------------
 
-    /// 日志与命令缓冲的直接访问 —— 与组件轨、Rhai 轨共用这两条缓冲。
+    /// 日志与命令缓冲的直接访问 —— 组件轨与脚本轨共用这两条缓冲。
     pub fn buffers_mut(&mut self) -> (&mut Vec<ScriptLog>, &mut Vec<ScriptCommand>) {
         (&mut self.logs, &mut self.commands)
     }
@@ -399,8 +399,8 @@ impl LuaHost {
 
     /// 用编译好的脚本预加载一个已知路径（编辑器"重新加载脚本"用）。
     pub fn ensure_loaded(&mut self, path: &str) -> bool {
-        // 先驻留拿到 id、再转 id 版（原因与 Rhai 侧相同：`&str` 借的是
-        // self 的一个字段，没法跨 `&mut self` 方法调用传进去）。
+        // 先驻留拿到 id、再转 id 版（`&str` 借的是 self 的一个字段，
+        // 没法跨 `&mut self` 方法调用传进去）。
         let path_id = self.intern.intern(path);
         self.ensure_loaded_id(path_id)
     }
@@ -514,12 +514,9 @@ impl LuaHost {
     }
 }
 
-/// 这条脚本路径是不是 Lua（按扩展名分流；`scripts` 列表里可能混挂 Rhai）。
-///
-/// `pub(crate)`：Rhai 宿主（`host.rs`）要用它的**否定**做反向分流 ——
-/// 两轨合起来必须恰好覆盖全部脚本（Lua 管 `.lua`，其余归 Rhai），
-/// 否则会出现"两边都不管 → 脚本静默不执行"或"两边都管 → 报假编译错"。
-pub(crate) fn is_lua(path: &str) -> bool {
+/// 这条脚本路径是不是 Lua（按扩展名判定；非 `.lua` 的路径在
+/// [`LuaHost::preload`] / 派发队列里直接跳过）。
+fn is_lua(path: &str) -> bool {
     Path::new(path)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("lua"))
@@ -527,8 +524,8 @@ pub(crate) fn is_lua(path: &str) -> bool {
 
 /// 收集场景里所有 (实体, Lua 脚本) 对，顺序即执行顺序。
 ///
-/// 路径当场驻留成 `u32` 再进队列（理由与 Rhai 的 `collect_script_queue`
-/// 一致：`String` 版每帧每实体克隆一次，1000 实体 ≈32.6 µs/帧的纯克隆）。
+/// 路径当场驻留成 `u32` 再进队列（`String` 版每帧每实体克隆一次，
+/// 1000 实体 ≈32.6 µs/帧的纯克隆，见 [`PathIntern`] 模块文档）。
 fn collect_lua_queue(scene: &Scene, intern: &mut PathIntern) -> Vec<(EntityId, u32)> {
     let mut queue = Vec::new();
     for entity in &scene.entities {
@@ -544,7 +541,7 @@ fn collect_lua_queue(scene: &Scene, intern: &mut PathIntern) -> Vec<(EntityId, u
 /// 从环境表里取出四个钩子的函数句柄（不存在的为 `None`）。
 ///
 /// 用"这个名字在 env 里是不是函数"而不是"调用失败再看错误"：后者会把
-/// "钩子不存在"和"钩子内部报错"混成一类。四个钩子名与 Rhai 完全一致。
+/// "钩子不存在"和"钩子内部报错"混成一类。四个钩子名见 [`crate::Hook::fn_name`]。
 fn detect_funcs(env: &Table) -> HookFuncs {
     let grab = |name: &str| match env.raw_get::<Value>(name) {
         // `raw_get` 绕过 `__index`：我们要看的是**这个脚本自己**有没有定义钩子，
@@ -566,7 +563,7 @@ mod tests {
     use crate::context::SpawnRequest;
     use xgame_core::Entity;
 
-    /// 建一个用完就删的临时项目目录（与 Rhai 宿主测试同款）。
+    /// 建一个用完就删的临时项目目录。
     struct TempProject {
         dir: PathBuf,
     }
@@ -610,7 +607,7 @@ mod tests {
     fn is_lua_splits_by_extension() {
         assert!(is_lua("Scripts/a.lua"));
         assert!(is_lua("Scripts/a.LUA"), "扩展名大小写不敏感");
-        assert!(!is_lua("Scripts/a.rhai"), "Rhai 归 Rhai 宿主");
+        assert!(!is_lua("Scripts/a.rhai"), "非 .lua 扩展名不是 Lua");
         assert!(!is_lua("Scripts/noext"), "无扩展名不是 Lua");
         assert!(!is_lua("Scripts/lua"), "纯名字不是扩展名");
     }
@@ -689,7 +686,7 @@ mod tests {
     /// 顶层 `local` 常量必须在函数体里可见。
     ///
     /// Lua 的 chunk 以 env 为 `_ENV`，顶层 `local SPEED` 是 update 的 upvalue，
-    /// 函数体里天然可见 —— 与 Rhai 那条"先 eval 顶层再 call_fn"是同一语义。
+    /// 函数体里天然可见。
     #[test]
     fn global_constants_are_visible_inside_functions() {
         let project = TempProject::new("globals");
@@ -754,10 +751,10 @@ mod tests {
         assert_eq!(scene.entities[1].transform.position.x, 3.0, "实体 b");
     }
 
-    /// 热重载后每实体的状态不能错位（驻留 id 是状态表的键）—— 与 Rhai 宿主
-    /// 同款回归网，防的是"热重载时顺手清空驻留表"这个看似合理的错误实现：
-    /// 清掉之后下一轮按新顺序重发 id，两条状态全部落空、从 0 重计，
-    /// 下面"状态应延续"的断言就红。详见 [`crate::intern`] 模块文档。
+    /// 热重载后每实体的状态不能错位（驻留 id 是状态表的键）—— 防的是
+    /// "热重载时顺手清空驻留表"这个看似合理的错误实现：清掉之后下一轮按
+    /// 新顺序重发 id，两条状态全部落空、从 0 重计，下面"状态应延续"的断言
+    /// 就红。详见 [`crate::intern`] 模块文档。
     #[test]
     fn state_survives_hot_reload_even_when_intern_order_changes() {
         let project = TempProject::new("reload_state");

@@ -309,15 +309,14 @@ impl ProjectHandle {
         Some(relative.to_string_lossy().replace('\\', "/"))
     }
 
-    /// 列出项目里所有脚本（**项目相对路径**，按字典序）—— 双轨：`.rhai` 与
-    /// `.lua` 都算（两轨按扩展名分流，见双轨计划 P2）。
+    /// 列出项目里所有脚本（**项目相对路径**，按字典序）—— 只认 `.lua`
+    /// （唯一脚本轨；`.rhai` 已随双轨 P3 删除，见计划文档 §六）。
     ///
     /// 与 [`list_prefabs`](Self::list_prefabs) 一样允许子目录归类，
     /// 目录不存在时返回空列表 —— 一个还没写脚本的项目完全合法。
     pub fn list_scripts(&self) -> Vec<String> {
         let scan = self.scripts_dir();
         let mut out = Vec::new();
-        collect_by_extension(&scan, &self.root, "rhai", &mut out);
         collect_by_extension(&scan, &self.root, "lua", &mut out);
         out.sort();
         out
@@ -590,33 +589,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// `list_scripts` 必须**同时**列出两轨（`.rhai` 与 `.lua`）—— 双轨计划 P2。
-    ///
-    /// 旧实现只扫 `rhai`：`.lua` 不进列表 → 编辑器的脚本下拉看不到 Lua 脚本、
-    /// 热重载扫描也漏掉它（表现是"写了 .lua 但编辑器当它不存在"）。
-    /// 非脚本文件不许混进来。
+    /// `list_scripts` 列出全部 `.lua`（子目录递归、按字典序、非脚本不混入），
+    /// 且**不**列 `.rhai`（已删的语言，残留文件不进编辑器下拉）。
     #[test]
-    fn list_scripts_includes_both_tracks() {
+    fn list_scripts_scans_lua_only() {
         let base =
             std::env::temp_dir().join(format!("xgame_scripts_list_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let handle = ProjectHandle::create(&base, "Dual").expect("create");
+        let handle = ProjectHandle::create(&base, "LuaOnly").expect("create");
 
         let scripts = handle.scripts_dir();
         std::fs::create_dir_all(scripts.join("sub")).unwrap();
-        std::fs::write(scripts.join("a.rhai"), "fn update(ctx) {}").unwrap();
-        std::fs::write(scripts.join("b.lua"), "function update(ctx) end").unwrap();
-        std::fs::write(scripts.join("sub/c.lua"), "function update(ctx) end").unwrap();
+        std::fs::write(scripts.join("a.lua"), "function update(ctx) end").unwrap();
+        std::fs::write(scripts.join("old.rhai"), "fn update(ctx) {}").unwrap();
+        std::fs::write(scripts.join("sub/b.lua"), "function update(ctx) end").unwrap();
         std::fs::write(scripts.join("notes.txt"), "不是脚本").unwrap();
 
         assert_eq!(
             handle.list_scripts(),
             vec![
-                "Scripts/a.rhai".to_owned(),
-                "Scripts/b.lua".to_owned(),
-                "Scripts/sub/c.lua".to_owned(),
+                "Scripts/a.lua".to_owned(),
+                "Scripts/sub/b.lua".to_owned(),
             ],
-            "两轨都要列出、按字典序、子目录递归、非脚本文件不混入"
+            "只列 .lua、按字典序、子目录递归、非脚本与已删语言的残留不混入"
         );
 
         let _ = std::fs::remove_dir_all(&base);

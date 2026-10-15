@@ -1,21 +1,21 @@
-//! 游戏上下文方法层：双轨共享的 API 真相源。
+//! 游戏上下文方法层：脚本 API 的真相源。
 //!
 //! [`GameCtx`] 把"一次派发所需的全部状态"捆成一束：场景、物理、输入、
-//! 日志与命令缓冲、触发本次调用的实体、时间。原先散在 `api.rs` 里 100+ 个
-//! Rhai 闭包的**函数体**全部平移为这里的 `impl GameCtx` 方法；`api.rs` 退化成
-//! 一行一个的转发壳。这条分界是刻意的：
+//! 日志与命令缓冲、触发本次调用的实体、时间。原先散在 `api.rs`（Rhai 转发壳，
+//! 已随 Rhai 删除）里的 100+ 个闭包**函数体**全部平移为这里的 `impl GameCtx`
+//! 方法；`lua_api.rs` 退化成一行一个的转发壳。这条分界是刻意的：
 //!
-//! - **脚本层是公共 API 的第一个用户**。Rust 组件（`Lifecycle`）与未来的 Lua
-//!   绑定调的是同一批 `GameCtx` 方法，两个轨道的能力边界与行为天然一致；
+//! - **脚本层是公共 API 的第一个用户**。Rust 组件（`Lifecycle`）与 Lua 绑定
+//!   调的是同一批 `GameCtx` 方法，两个轨道的能力边界与行为天然一致；
 //! - 引擎侧调试 / 测试可以直接 `GameCtx { .. }` 构造一束状态调方法，
-//!   不需要经过 Rhai 解释器。
+//!   不需要经过 Lua 解释器。
 //!
 //! # 为什么这个类型住在 `xgame-script` 而不是 `xgame-runtime`
 //!
 //! 双轨计划文档最初把 `ctx.rs` 定位在 `xgame-runtime`，但那会撞上 crate 依赖
-//! 方向的硬约束：`xgame-script/api.rs` 的转发壳要调用 `GameCtx` 方法，若
+//! 方向的硬约束：`xgame-script` 的转发壳要调用 `GameCtx` 方法，若
 //! `GameCtx` 在 runtime 里，就变成 script → runtime，而 runtime 本来就依赖
-//! script（`World` 持有 `ScriptHost`）—— 循环依赖编译不过。既定方向
+//! script（`World` 持有 `LuaHost`）—— 循环依赖编译不过。既定方向
 //! `core ← math ← {render, physics}`、`script` 中层、`runtime` 在上不许反向，
 //! 所以方法层必须放在 script（或更低层）这一侧；它需要的全部类型
 //! （`PhysicsWorld` / `Input` / glam）script 本来就依赖着，零新增依赖。
@@ -34,8 +34,8 @@
 //!
 //! # 生命周期约定
 //!
-//! `GameCtx` 内全是借用：由派发方（`ScriptHost::run_hook`，或未来的组件分发）
-//! 在栈上构造，活到钩子调用返回为止。交给 Rhai 的 [`crate::ScriptCtx`] 只是
+//! `GameCtx` 内全是借用：由派发方（`LuaHost::run_hook`，或组件分发）
+//! 在栈上构造，活到钩子调用返回为止。交给 Lua 的 [`crate::ScriptCtx`] 只是
 //! 它的**地址束**（见 `context.rs` 的安全论证），不延长任何借用。
 
 use xgame_core::{Entity, EntityId, PhysicsBody, PhysicsHandle, Scene};
@@ -807,7 +807,7 @@ mod tests {
         assert!((world - Vec3::new(12.0, 5.0, 0.0)).length() < 1e-4);
     }
 
-    /// GameCtx 作为一束状态可以直接构造并调方法 —— 不经过 Rhai。
+    /// GameCtx 作为一束状态可以直接构造并调方法 —— 不经过脚本解释器。
     /// 这是"脚本层只是 API 的第一个用户"这条架构原则的最小验证。
     #[test]
     fn game_ctx_drives_an_entity_without_a_script_engine() {

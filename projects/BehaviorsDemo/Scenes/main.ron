@@ -54,12 +54,12 @@
                 "Bobber",
             ],
         ),
-        // ── Rhai 轨道（共存证明）────────────────────────────────────
+        // ── Lua 脚本轨道（共存证明）──────────────────────────────────
         // 同一个运行时、同一份 `World::update`，两条轨道各跑各的、互不干扰。
         // 这个实体在**没编译过插件**时也照样转 —— 那正是降级语义：
         // Rust 组件缺席只是"少了两个会动的东西"，场景不会崩。
         (
-            name: "RhaiSpinner",
+            name: "LuaSpinner",
             transform: (
                 position: (3.0, 1.5, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -69,7 +69,7 @@
             id: (4),
             parent: None,
             scripts: [
-                "Scripts/Spinner.rhai",
+                "Scripts/Spinner.lua",
             ],
         ),
     ],

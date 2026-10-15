@@ -1,6 +1,6 @@
 //! Rust 组件的生命周期 trait —— 双轨架构里 Rust 轨道的用户接口。
 //!
-//! 与 Rhai / Lua 的四个钩子**同名同语义**（见 `xgame-script::Hook`）：
+//! 与 Lua 脚本的四个钩子**同名同语义**（见 `xgame-script::Hook`）：
 //! 脚本作者与 Rust 作者共享心智模型，也共享调度时机（start-before-update、
 //! 每帧 update 一次、fixed_update 与物理同频）。
 //!

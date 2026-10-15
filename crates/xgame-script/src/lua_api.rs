@@ -1,18 +1,18 @@
 //! 暴露给脚本的宿主 API —— Lua 转发壳。
 //!
-//! 与 `api.rs`（Rhai 壳）一一对应：每个函数体调 [`crate::GameCtx`] 的同名方法，
-//! **API 的真相在 `ctx.rs`**。本模块只负责 Lua 专属的两件事：把脚本的松散参数
-//! （`x, y, z`、整数 ID）收拢成引擎类型，以及把结果摊回 Lua 值（表 / 数字）。
+//! 每个函数体调 [`crate::GameCtx`] 的同名方法，**API 的真相在 `ctx.rs`**。
+//! 本模块只负责 Lua 专属的翻译：把脚本的松散参数（`x, y, z`、整数 ID）
+//! 收拢成引擎类型，以及把结果摊回 Lua 值（表 / 数字）。
 //!
-//! 与 Rhai 壳的差异（都是 Lua 的语言习惯，不是能力差异）：
+//! 两处 Lua 专属的形状（都是 Lua 的语言习惯，不是能力差异）：
 //!
-//! - **`ctx` 是 userdata**。Lua 没有 Rhai 那种"首参类型匹配即方法"的机制，
-//!   所以 `ctx` 统一作为每个全局函数的第一参数传入（与 Rhai 函数式写法同形）。
+//! - **`ctx` 是 userdata**。`ctx` 统一作为每个全局函数的第一参数传入。
 //! - **`Vec3` / `Vec2` 是 Lua 表**（`{x=, y=, z=}`），不是 userdata。这样
 //!   `pos(ctx).x` 直接成立、零注册开销，也是 Lua 生态最普遍的表示。代价是
 //!   没有 `a + b` 向量运算符 —— 常见写法是取分量做标量算术
-//!   （`set_pos(ctx, p.x + 1.0, p.y, p.z)`），与既有 Rhai 示例脚本同形。
-//! - **整数 ID 就是 Lua 整数**（`0` = 无效），与 Rhai 的 `i64` 约定一致。
+//!   （`set_pos(ctx, p.x + 1.0, p.y, p.z)`）；向量运算走 `vadd` / `vsub` /
+//!   `vmul` 等具名函数。
+//! - **整数 ID 就是 Lua 整数**（`0` = 无效）。
 //!
 //! # 坐标约定
 //!
@@ -50,11 +50,11 @@ use crate::ctx::RayHit;
 /// 用指针而不是裸 `usize`：`Value::LightUserData` 仍带 tag，脚本传错第一参
 /// （数字 / 表 / nil）时 [`FromLua`] 给出清晰报错，而不是把随机数当地址解引用。
 #[derive(Clone, Copy)]
-pub(crate) struct LuaCtx(ScriptCtx<Table>);
+pub(crate) struct LuaCtx(ScriptCtx);
 
 impl LuaCtx {
     /// 从脚本上下文地址束构造（宿主侧唯一入口）。
-    pub(crate) fn from_script_ctx(ctx: ScriptCtx<Table>) -> Self {
+    pub(crate) fn from_script_ctx(ctx: ScriptCtx) -> Self {
         Self(ctx)
     }
 
@@ -156,7 +156,7 @@ fn vec2_to_lua(lua: &Lua, v: Vec2) -> mlua::Result<Table> {
 
 /// 把射线命中结果摊进 Lua 表。
 ///
-/// 与 Rhai 版同款取舍：用表而不是自定义类型，且**所有字段都填上**（含 `hit=false`
+/// 用表而不是自定义类型，且**所有字段都填上**（含 `hit=false`
 /// 的分支），脚本里 `hit.point` 永远拿得到东西。`point` / `normal` 是嵌套的向量表。
 fn ray_hit_table(lua: &Lua, hit: RayHit) -> mlua::Result<Table> {
     let t = lua.create_table()?;
@@ -452,8 +452,8 @@ fn register_entity(lua: &Lua, globals: &Table) -> mlua::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn register_spawn(lua: &Lua, globals: &Table) -> mlua::Result<()> {
-    // Lua 里 `spawn` 不是保留字，但为与 Rhai API 同名（脚本可在两轨间迁移），
-    // 这里保留 `_entity` 后缀。
+    // 函数名沿用历史命名 `spawn_entity`（早期 Rhai 轨把 `spawn` 当保留字，
+    // 后缀是那时留下的；删 Rhai 后保持不变以免破坏既有脚本与文档）。
     globals.set(
         "spawn_entity",
         lua.create_function(|_, (ctx, name, model): (LuaCtx, String, String)| {
@@ -693,10 +693,9 @@ fn register_time_and_log(lua: &Lua, globals: &Table) -> mlua::Result<()> {
 
 /// Lua 的状态表就是 [`ScriptCtx`] 携带的那张 `mlua::Table`。
 ///
-/// Lua 的函数**能**写外层 upvalue（与 Rhai 不同），所以脚本本可以自己记计时器；
-/// 但这组 API 仍然保留，理由有二：① 与 Rhai API 同名，脚本可在两轨间迁移；
-/// ② upvalue 是**脚本级共享**的（同一脚本的所有实体看到同一个变量），
-/// 而 `state_*` 按 `(实体, 脚本)` 分开 —— "每个实体一份血量"这类需求仍然要它。
+/// Lua 的函数**能**写外层 upvalue，但 upvalue 是**脚本级共享**的
+/// （同一脚本的所有实体看到同一个变量），而 `state_*` 按 `(实体, 脚本)`
+/// 分开 —— "每个实体一份血量"这类需求只能走这组 API。
 fn register_state(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     globals.set(
         "state_get",

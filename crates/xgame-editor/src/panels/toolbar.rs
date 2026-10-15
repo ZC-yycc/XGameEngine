@@ -104,7 +104,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     if ui
                         .button("⟳  Scripts")
                         .on_hover_text(
-                            "重新编译项目里的全部脚本（.rhai / .lua 双轨）\n\
+                            "重新编译项目里的全部脚本（.lua）\n\
                              改完脚本不用退出 Play，编译一次即刻生效",
                         )
                         .clicked()

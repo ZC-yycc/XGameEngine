@@ -935,7 +935,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.menu_button("+ Add Script", |ui| {
                     if state.script_list.is_empty() {
-                        ui.weak("项目里还没有脚本（.rhai / .lua）");
+                        ui.weak("项目里还没有脚本（.lua）");
                         if ui.button("⟳ 重新扫描").clicked() {
                             state.refresh_scripts();
                             ui.close_menu();

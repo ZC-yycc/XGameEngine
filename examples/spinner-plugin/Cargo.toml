@@ -2,7 +2,7 @@
 name = "spinner-plugin"
 version = "0.1.0"
 edition = "2021"
-description = "示例 cdylib 插件：与 Spinner.rhai 同款行为的 Rust 组件（双轨架构 P0 演示）"
+description = "示例 cdylib 插件：与 Spinner.lua 同款行为的 Rust 组件（双轨架构 P0 演示）"
 publish = false
 
 # cdylib 是给宿主 dlopen 的产物；rlib 让它也能被当依赖编译（cargo test 的测试

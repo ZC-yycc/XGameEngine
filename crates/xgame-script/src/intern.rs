@@ -20,13 +20,10 @@
 //!
 //! 代价只有"改名后的旧路径各占一条记录"（永不清），按项目规模（几十条脚本）
 //! 可以忽略；换来的是热路径上不需要任何"这个 id 还有效吗"的判断。
-//!
-//! 两个宿主（Rhai / Lua）各持一份，互不共享 —— 两轨按扩展名分流，路径集合
-//! 天然不相交，共享一份反而要多解释一层"为什么这张表里有别的轨的路径"。
 
 use std::collections::HashMap;
 
-/// 脚本路径驻留表（见模块文档；两宿主各持一份）。
+/// 脚本路径驻留表（见模块文档）。
 #[derive(Debug, Default)]
 pub(crate) struct PathIntern {
     /// 路径 → id。热路径上只有"命中"分支（一次哈希查找，零分配）。
@@ -70,16 +67,16 @@ mod tests {
     #[test]
     fn intern_roundtrips_and_is_stable() {
         let mut intern = PathIntern::new();
-        let a = intern.intern("Scripts/a.rhai");
-        let b = intern.intern("Scripts/b.rhai");
+        let a = intern.intern("Scripts/a.lua");
+        let b = intern.intern("Scripts/b.lua");
         assert_ne!(a, b, "不同路径必须拿到不同 id");
         assert_eq!(
-            intern.intern("Scripts/a.rhai"),
+            intern.intern("Scripts/a.lua"),
             a,
             "重复驻留必须拿回同一个 id（状态表键的稳定性依赖这条）"
         );
-        assert_eq!(intern.resolve(a), "Scripts/a.rhai");
-        assert_eq!(intern.resolve(b), "Scripts/b.rhai");
+        assert_eq!(intern.resolve(a), "Scripts/a.lua");
+        assert_eq!(intern.resolve(b), "Scripts/b.lua");
     }
 
     #[test]

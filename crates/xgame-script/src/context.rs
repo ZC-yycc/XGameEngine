@@ -2,30 +2,30 @@
 //!
 //! # 为什么这里全是"擦除过的指针"
 //!
-//! Rhai 的自定义类型要求 `'static`（它把参数包进 `Dynamic` 交给解释器，
-//! 而 `Dynamic` 不能带生命周期参数）。可脚本必须能直接读写**活的**场景、物理世界
-//! 和输入状态 —— 拷一份快照进去、跑完再拷回来，脚本之间就看不到彼此刚做的改动，
-//! "一个脚本移动平台、另一个脚本把角色放上去"这种最基本的协作会直接失效。
+//! 脚本必须能直接读写**活的**场景、物理世界和输入状态 —— 拷一份快照进去、
+//! 跑完再拷回来，脚本之间就看不到彼此刚做的改动，"一个脚本移动平台、另一个
+//! 脚本把角色放上去"这种最基本的协作会直接失效。
 //!
 //! 所以 [`ScriptCtx`] 不持有引用，只持有**地址**（`usize`）。安全性由调用方保证：
 //!
-//! - `ScriptCtx` 只在 [`crate::ScriptHost`] 的 `run_hook` 一次调用期间存在；
+//! - `ScriptCtx` 只在 [`crate::LuaHost`] 的 `run_hook` 一次调用期间存在；
 //! - 创建它的那一刻，被指向的对象（[`GameCtx`]，内含 `Scene` / `PhysicsWorld` /
 //!   `Input` / 日志与命令缓冲）都由调用栈上的 `&mut` / `&` 独占持有，
 //!   期间不会有第二个别名；
-//! - 传给 Rhai 时按**值**传递（`ScriptCtx: Copy`）。解释器拿到的是地址的副本，
-//!   所有写入仍然落到同一份真实数据上 —— 这正是我们要的。
+//! - 交给脚本的是**地址的副本**（Lua 侧把槽地址装进宿主常驻槽、按
+//!   `LightUserData` 轻量指针传参，见 `lua_api.rs` 的 `LuaCtx`）。
+//!   解释器拿到的指向同一份真实数据 —— 所有写入都落到活数据上。
 //!
 //! 用地址而不是 `*mut T` 还有一个实际好处：裸指针在 Rust 里是 `!Send + !Sync`，
-//! 而 Rhai（开启 `sync` feature）要求注册的类型 `Send + Sync`。
+//! 而 mlua（开启 `send`）要求注册的类型 `Send`。
 //! `usize` + `PhantomData<fn() -> T>` 天然满足，不需要 `unsafe impl`。
 //!
-//! # P0 之后的形状
+//! # 形状
 //!
-//! 双轨计划 P0 把全部宿主 API 的函数体平移到了 [`GameCtx`]（`ctx.rs`），
-//! 本模块的 [`ScriptCtx`] 随之瘦成两样东西：**一个 GameCtx 地址束** +
-//! **一张 Rhai 专属的持久状态表**（`state_get` / `state_set` 背后的表，
-//! `Dynamic` 类型只属于 Rhai，不进引擎无关的 `GameCtx`）。
+//! 双轨计划 P0 把全部宿主 API 的函数体平移进了 [`GameCtx`]（`ctx.rs`），
+//! 本模块的 [`ScriptCtx`] 因此瘦成两样东西：**一个 GameCtx 地址束** +
+//! **一张宿主专属的持久状态表**（`state_get` / `state_set` 背后的表，
+//! `mlua::Table` 类型不进引擎无关的 `GameCtx`）。
 
 // 上面这一段解释了这个模块**为什么**要从 `&self` 里交出 `&mut`：`ScriptCtx` 是
 // 一个 Copy 的"地址束"，解释器按值拷来拷去，但每个副本指向的都是同一份活数据，
@@ -120,9 +120,9 @@ pub struct ScriptLog {
 /// 跑完再统一建实体。听起来稳妥（避免在遍历中改容器），但立刻暴露了一个
 /// 致命的易用性问题：
 ///
-/// ```rhai
-/// let id = spawn_entity(ctx, "ball", "builtin://sphere");
-/// set_entity_pos(ctx, id, 1.0, 2.0, 3.0);   // 实体还不存在，这句静默失效
+/// ```lua
+/// local id = spawn_entity(ctx, "ball", "builtin://sphere")
+/// set_entity_pos(ctx, id, 1.0, 2.0, 3.0)   -- 实体还不存在，这句静默失效
 /// ```
 ///
 /// "先生成、再摆位置"是最自然的写法，延迟执行会让它默默不生效，作者根本猜不到原因。
@@ -178,7 +178,7 @@ impl SpawnRequest {
 /// 一次脚本派发所需的外部状态。
 ///
 /// 这是**安全**的一层：调用方用 `&mut` / `&` 明确交出所有权，证明这些对象
-/// 在本次派发期间不会被别人碰。`ScriptHost` 拿到之后把它连同日志 / 命令缓冲
+/// 在本次派发期间不会被别人碰。[`crate::LuaHost`] 拿到之后把它连同日志 / 命令缓冲
 /// 一起捆进 [`GameCtx`]，再把 `GameCtx` 擦除成地址交给解释器。
 pub struct FrameCtx<'a> {
     pub scene: &'a mut Scene,
@@ -223,35 +223,29 @@ impl<'a> FrameCtx<'a> {
 /// 它是一个 `Copy` 的地址束：脚本可以随便传给别的函数、存进局部变量，
 /// 不会因为"把它移走了"而报错，也不会阻止 Rust 侧的借用检查。
 /// 本体只有一个 [`GameCtx`] 地址 —— 全部宿主 API 都是它的方法
-/// （见 `api.rs`：每个 Rhai 函数都是一行转发）。
+/// （见 `lua_api.rs`：每个 Lua 函数都是一行转发）。
 ///
-/// # 为什么状态表是泛型参数 `S`
-///
-/// 持久状态表的值类型是**宿主专属**的：Rhai 存 `rhai::Dynamic`，Lua 存
-/// `mlua::Value`（双轨计划 D1 明确"Lua 值直接用 mlua 原生转换"，不引入中立
-/// `ScriptValue`）。地址束本身与状态类型无关，所以把它抽成泛型参数，默认
-/// `S = rhai::Map` —— Rhai 侧全部代码零改动，Lua 宿主用 `ScriptCtx<mlua::Table>`。
-pub struct ScriptCtx<S = rhai::Map> {
+/// 状态表直接持 `mlua::Table`（双轨计划 D1"Lua 值直接用 mlua 原生转换"）。
+/// 双轨时期的泛型参数 `S` 已随 Rhai 删除（P3）收掉 —— 只剩一个宿主，
+/// 泛型不再有意义。
+pub struct ScriptCtx {
     game: ErasedMut<GameCtx<'static>>,
     /// 这个 (实体, 脚本) 对的持久状态。见 [`ScriptCtx::state`]。
-    state: Option<ErasedMut<S>>,
+    state: Option<ErasedMut<mlua::Table>>,
 }
 
 // 手写而不是 `#[derive(Clone, Copy)]`：derive 会给 `S` 加 `S: Clone` / `S: Copy`
-// 约束，而 `rhai::Map` / `mlua::Table` 都不是 `Copy`。地址束的两个字段
-// （`usize` + `PhantomData`）对任意 `S` 都是 `Copy`，约束纯属 derive 多加的。
-impl<S> Clone for ScriptCtx<S> {
+// 约束，而 `mlua::Table` 不是 `Copy`。地址束的两个字段（`usize` + `PhantomData`）
+// 对任意 `S` 都是 `Copy`，约束纯属 derive 多加的。
+impl Clone for ScriptCtx {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<S> Copy for ScriptCtx<S> {}
+impl Copy for ScriptCtx {}
 
-// `S: 'static` 是 [`ErasedMut::get_mut`] 放宽返回生命周期的硬要求（返回
-// `&'static mut S`）。两个宿主的状态类型（`rhai::Map` / `mlua::Table`）都是 `'static`，
-// 这个约束不影响任何实际用途。
-impl<S: 'static> ScriptCtx<S> {
-    pub(crate) fn new(game: &mut GameCtx<'_>, state: Option<&mut S>) -> Self {
+impl ScriptCtx {
+    pub(crate) fn new(game: &mut GameCtx<'_>, state: Option<&mut mlua::Table>) -> Self {
         Self {
             // 生命周期提升（`GameCtx<'a>` → `GameCtx<'static>`）只是地址束的
             // 类型层谎报，实际存活期由 `run_hook` 的调用窗口保证 —— 与
@@ -267,14 +261,15 @@ impl<S: 'static> ScriptCtx<S> {
     ///
     /// # 为什么需要它
     ///
-    /// Rhai 的函数**不能写外层作用域**（顶层 `let` 只能读、不能改），所以
-    /// "给自己记一个计时器 / 冷却 / 血量"在脚本里没有别的写法。这张表由引擎侧
+    /// 顶层 `local` 是**脚本级**共享的（同一脚本的所有实体看到同一个变量，
+    /// 像别的语言里的模块级静态），所以"给自己记一个计时器 / 冷却 / 血量"
+    /// 这类**每实体**可变状态在脚本里没有别的落地方式。这张表由引擎侧
     /// 持有、按 `(实体, 脚本)` 分开，脚本通过 `state_get` / `state_set` 访问。
     ///
-    /// 它不进 [`GameCtx`]：表的值类型是宿主专属的（`rhai::Dynamic` / `mlua::Value`），
+    /// 它不进 [`GameCtx`]：值类型是 `mlua::Value`（宿主专属），
     /// 引擎无关的方法层不该认识它。
-    pub(crate) fn state(&self) -> Option<&mut S> {
-        // SAFETY: 状态表由宿主（ScriptHost / LuaHost）独占持有，直到派发结束。
+    pub(crate) fn state(&self) -> Option<&mut mlua::Table> {
+        // SAFETY: 状态表由宿主（LuaHost）独占持有，直到派发结束。
         self.state.map(|s| unsafe { s.get_mut() })
     }
 
@@ -285,7 +280,7 @@ impl<S: 'static> ScriptCtx<S> {
     }
 }
 
-impl<S: 'static> std::fmt::Debug for ScriptCtx<S> {
+impl std::fmt::Debug for ScriptCtx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScriptCtx")
             .field("entity", &self.game().entity)
