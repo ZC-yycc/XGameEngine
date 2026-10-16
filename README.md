@@ -40,6 +40,7 @@ XGameEngine/                  # 引擎源码仓库
 │   ├── xgame-physics/        # 物理引擎：rapier3d 刚体、碰撞体、射线、调试绘制
 │   ├── xgame-input/          # 输入层：设备状态 + 动作映射（与窗口库解耦）
 │   ├── xgame-script/         # 脚本层：嵌入式 Lua + 生命周期钩子 + 宿主 API
+│   ├── xgame-audio/          # 音频引擎：kira 封装（设备 / 3D 空间轨道 / 解码缓存 / 无声降级）
 │   ├── xgame-runtime/        # 运行时：把场景/物理/输入/脚本编排成一条帧管线
 │   ├── xgame-derive/         # 过程宏：#[derive(Panel)]
 │   ├── xgame-editor/         # 编辑器程序：项目枢纽 + egui 面板
@@ -287,6 +288,48 @@ v1 的边界（ROADMAP 阶段七有完整清单）：**单剪辑 + 换剪辑淡�
 负速度不做倒放（停在第 0 帧）。每个模型取第一张蒙皮，超过 256 骨的骨架会在加载时
 告警并截断；glTF 匿名节点进不了遮罩名单（只能靠有名字的祖先进）。
 
+## 音频
+
+给实体挂上 `audio`，引擎（`xgame-audio`，基于 [kira](https://github.com/tesselode/kira)）
+就会解码并播放它；勾上 `spatial` 就是带距离衰减的 3D 声：
+
+```ron
+(
+    name: "Spinner",
+    // ……
+    audio: Some((
+        clip: "Resources/Audio/Beep.wav",  // 项目相对路径（wav / ogg / mp3）
+        volume: 0.35,       // 线性音量：1.0 = 原音量
+        pitch: 1.0,         // 播放速率（同时改变音高）
+        looping: true,      // 循环（环境音）；false = 播一次
+        autoplay: true,     // 进场景即播；false = 等脚本 play_sound 触发
+        spatial: true,      // 3D 定位：随实体移动 + 距离衰减
+        min_distance: 2.0,  // 满音量的最近距离
+        max_distance: 24.0, // 衰减到听不见的最远距离
+    )),
+)
+```
+
+**怎么工作**：
+
+- **脚本只产生意图**：`play_sound` 系列往命令束里塞一条命令，`World` 帧末统一
+  结算给引擎 —— 脚本层（`xgame-script`）不依赖 kira，编辑态 / 无头测试不接
+  音频设备也能跑全部逻辑。
+- **监听者跟随相机**：编辑器 Play 每帧把相机位置与朝向推给听者（up 恒 +Y、
+  right = forward × up）；脚本可用 `set_listener` 覆盖（顶视角 / 固定机位玩法）。
+- **`autoplay` 首播一次**：靠实体标记表去重；组件被摘除或实体被删除 →
+  对应的声音自动停掉（重挂组件会重新响）。
+- **无声降级**：设备打不开（无音频服务 / CI 容器）时引擎进入无声模式 ——
+  照常受理播放、计数、回收，只是不出声。**所有音频回归测试都跑在这条路径上**，
+  用真 WAV 走完整解码链，不用 mock。
+- **帧末同步**：音频每**渲染帧**同步一次（不跟物理固定步同频 —— 人耳对 16ms 的
+  声源位置更新完全不敏感），插在 `update` 派发之后、输入帧末清理之前。
+
+脚本侧 API（`play_sound` / `play_sound_at` / `stop_sound` / `stop_all_sounds` /
+`set_listener` / `set_master_volume`）见 [Docs/脚本API.md](Docs/脚本API.md) 4.11；
+混音总线分组与流式长音频有意延后（见 PLAN.md 二十二 的取舍清单）。
+示例：SampleScene 的 Spinner 是空间化循环蜂鸣，Jumper 起跳播一次性音效。
+
 ## 场景层级
 
 实体之间可以有父子关系，与 Unity / Godot 的场景树一致：
@@ -442,6 +485,7 @@ clock.tick(dt)
   └─ 固定步长循环（与渲染帧率解耦）
        ├─ dispatch_fixed_update → 补/清刚体 → 推运动学体 → physics.step → 回写动态体
   ├─ dispatch_update                每渲染帧一次
+  ├─ sync_audio → flush_audio       帧末音频结算（空间声推位置 / 命令交给引擎）
   └─ input.end_frame()              清掉"仅本帧有效"的输入边沿
 ```
 

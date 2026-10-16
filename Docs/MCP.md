@@ -115,8 +115,9 @@
 无头验证项目（与编辑器 `xgame-editor --check` 是**同一份** `xgame-core::check_project`）。
 
 - **入参**：`project`
-- **返回**（JSON）：`entities` / `lights` / `script_refs` / `missing_models` /
-  `missing_scripts` / `has_issues` / `render`（人读摘要）
+- **返回**（JSON）：`entities` / `lights` / `script_refs` / `audio_refs` /
+  `missing_models` / `missing_scripts` / `missing_audio` / `has_issues` /
+  `render`（人读摘要）
 - **闭环用法**：改（2/3/4/5）→ `project_check` → `has_issues` 必须为 `false`。
 
 ---

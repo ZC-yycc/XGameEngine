@@ -358,7 +358,8 @@ XGameEngine/                       # 引擎源码仓库
 │           ├── Box.glb
 │           ├── Fox.gltf
 │           ├── Fox.bin
-│           └── Texture.png
+│           ├── Texture.png
+│           └── Audio/Beep.wav    # 示例音频（Spinner 空间化循环蜂鸣 / Jumper 起跳音）
 ├── crates/
 │   ├── xgame-core/                # 核心类型
 │   │   └── src/
