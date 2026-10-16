@@ -9,8 +9,8 @@
                                        you press "Build", so it must stay next to
                                        xgame-editor.exe.
         dist\xgame-mcp.exe             MCP server: lets AI agents (Cursor, Claude,
-                                       ...) read/write scenes and check projects
-                                       over stdio. No window, no GPU.
+                                       ...) read/write scenes, check projects and run
+                                       them headless over stdio. No window, no GPU.
         dist\projects\SampleScene\     the bundled sample project
         dist\README.txt                short usage note
 
@@ -337,9 +337,10 @@ so keep it next to xgame-editor.exe.
 What xgame-mcp.exe is for
 -------------------------
 It is the MCP server for AI agents: it exposes project/scene tools (read a
-scene, write a scene, create/update/remove entities, check the project) over
-stdin/stdout as newline-delimited JSON-RPC. It needs no window and no GPU.
-Point your MCP client at it, e.g. in Cursor settings:
+scene, write a scene, create/update/remove entities, check the project, run
+the project headless for N frames) over stdin/stdout as newline-delimited
+JSON-RPC. It needs no window and no GPU. Point your MCP client at it, e.g. in
+Cursor settings:
 
     {
       "mcpServers": {
@@ -348,6 +349,18 @@ Point your MCP client at it, e.g. in Cursor settings:
     }
 
 See Docs/MCP.md in the repository for the tool reference.
+
+Headless tools (for CI and AI agents)
+-------------------------------------
+xgame-editor.exe also runs without a window:
+
+    xgame-editor.exe --check <project>                    validate manifest/scene/refs
+    xgame-editor.exe --headless --frames 300 <project>    run N frames, print JSON stats
+
+Exit codes: 0 = clean, 1 = failed to load / bad arguments, 2 = ran but found
+issues (script errors, non-finite transforms for --headless; dangling refs for
+--check). See Docs/MCP.md and the headless-run doc under Docs/ in the
+repository for details.
 '@
 
 Set-Content -Path (Join-Path $DistDir 'README.txt') -Value $usage -Encoding UTF8

@@ -146,7 +146,10 @@ impl GameRuntime {
 /// 读项目根目录的 `input.ron`；没有就退回默认映射，坏了就报警再退回默认。
 ///
 /// 「文件不存在」和「文件写坏了」是两件不同的事，前者正常、后者要提示作者。
-fn load_input_map(project_root: &Path) -> InputMap {
+///
+/// `pub(crate)`：无头运行（`headless.rs`）复用同一条读法 —— 两个宿主与无头
+/// 三条路径必须拿到同一份输入映射，输入行为才不会分叉。
+pub(crate) fn load_input_map(project_root: &Path) -> InputMap {
     let path = project_root.join(INPUT_MAP_FILE);
     match InputMap::load(&path) {
         Ok(Some(map)) => map,

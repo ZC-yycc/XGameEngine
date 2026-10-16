@@ -18,7 +18,11 @@ cargo run -p xgame-game -- projects/SampleScene
 # （退出码 0=干净 · 1=加载失败 · 2=悬空引用；给 CI / AI 智能体用）
 cargo run -p xgame-editor -- --check projects/SampleScene
 
-# MCP server —— AI 智能体接口：stdio 起服务，客户端可读写场景、动实体、跑检查
+# 无头运行 —— 不开窗口跑 N 帧，stdout 出 JSON 统计（帧耗时 / 实体 / 脚本日志）
+# （退出码 0=干净 · 1=加载失败 · 2=跑完有问题；见 Docs/无头运行.md）
+cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
+
+# MCP server —— AI 智能体接口：stdio 起服务，客户端可读写场景、动实体、跑检查、无头实跑
 # （工具参考 Docs/MCP.md）
 cargo run -p xgame-mcp
 
@@ -44,7 +48,8 @@ XGameEngine/                  # 引擎源码仓库
 │   ├── xgame-runtime/        # 运行时：把场景/物理/输入/脚本编排成一条帧管线
 │   ├── xgame-derive/         # 过程宏：#[derive(Panel)]
 │   ├── xgame-editor/         # 编辑器程序：项目枢纽 + egui 面板
-│   └── xgame-game/           # 独立游戏二进制
+│   ├── xgame-game/           # 独立游戏二进制
+│   └── xgame-mcp/            # MCP server：AI 智能体工具面（stdio JSON-RPC）
 └── projects/                 # 默认的项目存放位置（可放在任意目录）
     └── SampleScene/          # 示例项目
         ├── project.ron       # 项目清单
@@ -128,6 +133,9 @@ core ← math ← {render, physics} ← editor / game
   **另存为**新场景文件并切过去（旧文件原样保留）
 - **无头检查**：`xgame-editor --check <项目>` 秒级验证项目完整性（见快速开始），
   退出码可判 —— 一条命令跑通"改 → 查 → 自证"闭环
+- **无头运行**：`xgame-editor --headless --frames N <项目>` 不开窗口跑 N 帧，
+  stdout 出 JSON 统计（帧耗时分布 / 实体与刚体 / 脚本日志含 error 样本 /
+  非有限变换），固定 dt 两次运行逐位一致；`--dump-scene` 落盘"跑完后的世界"
 - 🔨 Build 把项目打包成独立游戏
 - **帧序**：每帧"先处理输入（飞行相机 / 拖拽 / 拾取）→ 再按最新状态发渲染任务 → 最后画叠加层"，
   拖物体与转视角都不会多慢一帧
@@ -573,9 +581,9 @@ Build/<项目名>/
 
 ## MCP（AI 智能体接口）
 
-`xgame-mcp` 是本引擎的 **MCP server** —— Agent-Native 路线的第一块：把"读项目、改场景、
-动实体、跑检查"暴露成标准 MCP 工具，Cursor / Claude 等任何 MCP 客户端接上就能**不用鼠标
-直接操纵引擎**做游戏开发。无窗口、无 GPU，stdio 起服务（按行 JSON-RPC）。
+`xgame-mcp` 是本引擎的 **MCP server** —— Agent-Native 路线的前两块：把"读项目、改场景、
+动实体、跑检查、无头实跑"暴露成标准 MCP 工具，Cursor / Claude 等任何 MCP 客户端接上就能
+**不用鼠标直接操纵引擎**做游戏开发。无窗口、无 GPU，stdio 起服务（按行 JSON-RPC）。
 
 ```json
 { "mcpServers": { "xgame": { "command": "D:\\...\\dist\\xgame-mcp.exe" } } }
@@ -589,9 +597,11 @@ Build/<项目名>/
 | `entity_upsert` | 按名字创建/部分更新实体（变换、模型、脚本、父子） |
 | `entity_remove` | 按名字删除实体（重名歧义拒绝；子节点提升不连坐） |
 | `project_check` | 无头验证（与 `--check` 同一份逻辑），返回 JSON 报告 |
+| `run_headless` | 无头跑 N 帧（与 `--headless` 同一实现），返回统计报告 + 可选场景快照 |
 
-改完就 `project_check` 自证没改坏 —— 这是智能体的「改 → 查 → 验」闭环。
-完整协议面、参数语义与已知边界（编辑器并发写、清单只读）见 [`Docs/MCP.md`](Docs/MCP.md)。
+改完先 `project_check` 自证没改坏、再 `run_headless` 看真的跑得动 —— 这是智能体的
+「改 → 查 → 验」闭环。完整协议面、参数语义与已知边界（编辑器并发写、清单只读）见
+[`Docs/MCP.md`](Docs/MCP.md)，无头运行的报告字段见 [`Docs/无头运行.md`](Docs/无头运行.md)。
 
 ## 依赖方向
 

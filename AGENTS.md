@@ -16,6 +16,8 @@ cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
 cargo test --workspace --all-targets         # 测试（要求全绿）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
+cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
+cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
 cargo run -p xgame-game -- projects/SampleScene  # 独立游戏
 cargo test -p xgame-runtime --release --test update_throughput -- --ignored --nocapture  # 分档性能基准（默认 ignore）
 ```
@@ -39,7 +41,7 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 
 ## 项目布局
 
-- `crates/` — 引擎与工具（11 个 crate，名字见 workspace Cargo.toml）
+- `crates/` — 引擎与工具（13 个 crate，名字见 workspace Cargo.toml）
 - `projects/` — 游戏项目（`project.ron` + `Scenes/` + `Resources/` + `Scripts/` + `Prefabs/` + `input.ron`）；
   `BehaviorsDemo` 例外——它本身是 workspace 成员（cdylib），用来演示 Rust 插件项目形态
 - `Docs/` — 脚本 API、差距分析、双轨语言架构计划
@@ -70,5 +72,9 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
   - **四条不能推翻的约束**（防好心人翻案）：① **脚本层不引 kira** —— 脚本音频 API 只往 `AudioPort` 塞命令，`World` 帧末统一结算（`GameCtx.audio: Option<&mut AudioPort>`，None 静默 no-op）；设备失败走 **silent 降级**（照常受理/计数/GC，只是不出声），别改成"没设备就报错"；② **监听者与主音量是 port 上的状态字段，不进命令束**（姿态每帧被覆盖，混进"发生过的事"会变成回放一串状态更新的荒诞语义）；③ **`PlaySound.follow` 是实体绑定、不是空间化开关** —— 空间化只看 `position.is_some()`，非空间化声音**也要绑实体**（否则"删实体音还在响"，`removed_entity_or_component_stops_its_sound` 钉死该来回）；④ **音频每渲染帧同步一次、不跟物理固定步同频**（人耳对 16 ms 的位置更新不敏感，固定步一帧可能跑多个）。
   - **两条实现事实**：`AudioEngine` 的 silent 模式用**墙钟** GC、设备模式看 `handle.state()==Stopped`；测试要断言"声音在响"必须用 ≥1 秒的 WAV（50 ms 的会被 GC 先真掉，曾造成假红）；kira glam 0.33 与引擎 glam 0.29 **类型不出 `xgame-audio` 墙**——跨界只传 `[f32;3]`/`[f32;4]` 数组。
   - **热路径快速路径（先量后改，数据在 PLAN.md 二十二·九）**：`sync_audio` 的实体表扫描在无音频场景下实测 +5.7 µs/帧（2000 实体纯视觉），故加 `audio_sources_seen` / `audio_scan_count` 守卫 —— 没挂过音频源、无 autoplay 标记、实体数不变 ⇒ 整段跳过；实体数变化（spawn/destroy）重新武装扫描（`audio_rescan_picks_up_new_entities` 钉死）。**刻意取舍**：给已有实体运行中直接贴 `audio` 组件（不动实体数）不触发重扫 —— 动态发声正路是脚本 `play_sound`（不经扫描）。
+- **Agent-Native ①② 已完成**（2026-10-16，实施记录见 PLAN.md 二十三）:MCP 工具面收尾 + 无头运行 —— `xgame-editor --headless [--frames N] [--dt 秒] [--report 路径] [--dump-scene 路径] <项目>`（实现 `crates/xgame-editor/src/headless.rs`：跑**同一段** `World::update`，每帧固定 dt、无输入、无墙钟 ⇒ 两次运行**模拟结果**逐位一致；退出码 **0=干净 / 1=加载失败或参数错 / 2=跑完有问题**；报告 = 帧耗时最近秩分布 / 实体刚体计数 / 脚本日志含 error 样本 / 非有限变换 / 音频 silent 计数）；MCP 第 7 个工具 `run_headless`（**spawn 同目录编辑器 exe 透传**，信封 `{exit_code, report, scene_ron?}`，校验归属编辑器唯一）；文档 `Docs/无头运行.md` + `Docs/MCP.md`（6→7 工具）。
+  - **三条不能推翻的约束**：① 无头运行的实现住在编辑器二进制（`--check` 的邻居），**不做第二份帧循环**（单一运行时铁律；MCP 只透传）；② 退出码 `2`（跑完有问题）**不是工具失败** —— 报告照常产出、`isError` 只留给"打不开项目"；③ 报告 JSON 字段名是稳定契约（`json_contract_has_stable_keys` 钉死，消费方 = CI + MCP）。
+  - **两条实现事实**：MCP 测试 spawn 编辑器**前必须嵌套 `cargo build -p xgame-editor`**（`cargo test` 不产出常规 exe，过期编辑器不认 `--headless` 会弹窗挂死测试；纪律同 `xgame/tests/plugin_loading.rs`）；`find_editor_exe` 找同目录 + **上一级**（`cargo test` 时 server 在 `deps/` 下跑）。
+  - **实测（PLAN.md 二十三·三）**：SampleScene 300 帧墙钟 ~80 ms（帧循环 8.6 ms、帧均值 28.5 µs）；BehaviorsDemo（插件 + Lua）~70 ms（帧循环 1.3 ms）；进程启动固定成本 ~60 ms（与 `--check` 同量级）。
 - 对照数据（微基准 `behavior_dispatch_throughput`，1000 no-op 实体 × 300 帧，P2.5 会话）：Lua 轨分发 **562 µs/帧**、Rust 组件轨 71.7 µs、无轨基线 7.54 µs。（历史 Rhai 轨 735.6 µs，P3 起已从基准移除。）历史：P0 = 493.9 µs（当时机器）、P0.5 = 68.4 µs、P1 = 65.2 µs、P2 = 713 µs（组件/基线口径的历次漂移见基准模块文档的完整记录表）。⚠ 绝对值随机器状态浮动 1.5× 以上，**跨版本比较必须同机背靠背**。**组件轨 < 50 µs 的验收线在本机持续红**（P0.5 起已知，验收线未为迁就机器上调 —— 红了先对同机数字再判回归）。
 - **工具链注意**：本仓库的源文件是 UTF-8 **无 BOM** 且含大量中文注释。用 PowerShell 做文本替换时必须显式 `-Encoding UTF8` 读写，否则 PS 5.1 会按 GBK 解码把中文**有损**毁掉（已发生过一次，PLAN.md 十六第七节）。改中文源文件优先用编辑器工具，shell 只做只读操作。

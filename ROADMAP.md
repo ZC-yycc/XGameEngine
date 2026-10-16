@@ -25,6 +25,7 @@
 | **双轨架构 P2.5** | ✅ 完成 | **基准闸门 Rhai vs Lua**：三负载同进程背靠背（dispatch / api / compute），**Lua 三负载全占优（1.31× / 1.26× / 9.16×）→ 判定 P3 删 Rhai**；闸门暴露负载 1 Lua 慢 2.25×，探针量证并修掉两处宿主热路径实现开销（钩子句柄编译期缓存 + ctx 常驻槽轻量指针传参，Lua 轨分发 **1670 → 576 µs/帧，-65%**）—— 规则见计划文档 §六，实施记录见 PLAN.md 二十 |
 | **七** | 🟨 进行中 | 动画系统（第一片 ✅：骨骼蒙皮 + 单剪辑播放；第二片 ✅：换剪辑交叉淡入；第三片 ✅：阈值状态机；第四片 ✅：叠加混合；第五片 ✅：多层混合栈 + 骨骼遮罩；morph/Phase B 待做） |
 | **八** | ✅ 完成 | 音频系统（kira：`AudioSource` 组件 + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，实施记录见 PLAN.md 二十二） |
+| **Agent-Native ①②** | ✅ 完成 | **MCP 工具面 + 无头运行**：`xgame-mcp` server（7 个工具：项目 / 场景 / 实体读写、`project_check`、`run_headless`）；`xgame-editor --headless` 无头跑 N 帧出 JSON 统计（固定 dt 两次运行逐位一致，退出码 0=干净 / 1=加载失败 / 2=跑完有问题），MCP 工具 spawn 透传 —— 文档 [`Docs/MCP.md`](Docs/MCP.md) / [`Docs/无头运行.md`](Docs/无头运行.md)，实施记录见 PLAN.md 二十三 |
 | **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影已落地；CSM / Bloom / ACES / 天空盒待做） |
 | ~~**十**~~ | ✅ 完成 | 脚本系统 + 热重载（已并入六·五） |
 
@@ -113,6 +114,7 @@
 | 项目设置（Project Settings） | ✅ 完成 | `⚙ Project Settings` 窗口（项目 / 窗口 / 运行时 / 内容目录，草稿 + Apply 校验）；重力与固定步长进 `project.ron` 的 `runtime` 节，编辑器与游戏共用 `WorldConfig::from_project_runtime`（非法值自动夹安全），旧清单靠 serde 默认兼容 |
 | 未保存保护 / Save As | ✅ 完成 | 脏标记（落盘快照比较 + 按帧 memo）、关窗 / 返回枢纽双路径确认框（保存 / 不保存 / 取消）、Save As 写新文件并切换入口场景、工具栏 Save 按钮、标题栏与工具栏 `*` 星号、Ctrl+S / Ctrl+Shift+S |
 | 无头检查 `--check` | ✅ 完成 | `xgame-editor --check <项目>`：不开窗口验证清单 / 场景 / 资产引用，退出码契约 **0=干净 / 1=加载失败 / 2=悬空引用** —— CI 与 AI 智能体的可机读验证入口（见文末 Agent-Native） |
+| 无头运行 `--headless` | ✅ 完成 | `xgame-editor --headless [--frames N] [--dt 秒] [--report 路径] [--dump-scene 路径] <项目>`：不开窗口跑 N 帧输出 JSON 统计（帧耗时分布 / 实体与刚体计数 / 脚本日志含 error 样本 / 非有限变换 / 音频状态），固定 dt 两次运行**逐位一致**；退出码 **0=干净跑完 / 1=加载失败或参数错误 / 2=跑完但观察到问题**。MCP `run_headless` 的底座，角色见 [`Docs/无头运行.md`](Docs/无头运行.md) |
 | 阴影 / 天空盒 / 后处理 | 🟨 部分 | **方向光阴影贴图**（单盏、正交视锥按场景包围盒拟合、3×3 PCF、深度偏置 + 硬件斜率偏置）与 **MSAA 4×**（颜色多采样 → resolve，采样数按适配器能力选）已落地；天空盒、CSM、Bloom、ACES、FXAA/TAA 仍待做 |
 | Gizmo 吸附 / Rect 工具 | ⬜ 待做 | `gizmo_snap` 字段已在但未接线；Rect 工具无实现 |
 | 编辑器交互稳定性 | ✅ 完成 | 拾取改「射线 × 世界 AABB」（旧的"包围球"被拉伸物体会连相机一起吞进去）；轴拖拽的参考线锚定在拖拽起点（修掉 `Δ_k = A_k − Δ_{k-1}` 的正反馈 —— "拖拽抽搐"的根因）；每帧收敛选中索引，堵住越界 panic |
@@ -122,7 +124,7 @@
 
 ---
 
-## Agent-Native：AI 智能体深度操控引擎（战略方向 🟨 ① MCP 已落地）
+## Agent-Native：AI 智能体深度操控引擎（战略方向 🟨 ①② 已落地）
 
 **目标**：用户的 AI 智能体能**深度、精确、可验证地**操作本引擎做游戏开发 —— 读写项目、
 运行检查、拿到可机读结果，而不是"截图点按钮"。**架构判决式：后续每个架构决策都要过一问 ——
@@ -132,15 +134,18 @@
 
 - **数据即文本** —— 场景 / 预制体 / 清单 / 输入映射全是 RON 纯文本，可直接读写与 diff；
 - **程序化验证** —— `xgame-editor --check <项目>`（退出码 0/1/2，秒级，可进 CI）；
+- **程序化实跑** —— `xgame-editor --headless`（跑 N 帧出 JSON 统计，固定 dt 逐位可复现）；
 - **程序化配置** —— 重力 / 步长进 `project.ron`，改一行文本即调参；
 - **单一运行时** —— 无头验证的行为与玩家实跑的完全一致（编辑器 Play == 游戏二进制）；
-- **安全网** —— 330+ 回归测试、每条先证红，智能体改引擎也有兜底。
+- **安全网** —— 359 条回归测试、每条先证红，智能体改引擎也有兜底。
 
-进度与计划：**① MCP server 最小工具集 ✅ 本轮落地** —— 新 crate `xgame-mcp`
-（`dist\xgame-mcp.exe`，stdio 按行 JSON-RPC），6 个工具 project_info / scene_read /
-scene_write / entity_upsert / entity_remove / project_check，配 20 条回归测试与工具
-参考 [`Docs/MCP.md`](Docs/MCP.md) → **② 无头运行**（`--headless --frames N`
-输出统计 JSON）→ **③ 场景 schema 导出**（`--export-schema`，机器可读的字段与类型）。
+进度与计划：**① MCP server 最小工具集 ✅ 已落地** —— 新 crate `xgame-mcp`
+（`dist\xgame-mcp.exe`，stdio 按行 JSON-RPC）→ **② 无头运行 ✅ 已落地** ——
+`--headless --frames N` 输出统计 JSON（帧耗时 / 实体 / 刚体 / 脚本日志 / 非有限
+变换），MCP 侧 `run_headless` 透传壳；现共 7 个工具（project_info / scene_read /
+scene_write / entity_upsert / entity_remove / project_check / run_headless），配
+25 条回归测试与工具参考 [`Docs/MCP.md`](Docs/MCP.md)、[`Docs/无头运行.md`](Docs/无头运行.md)
+→ **③ 场景 schema 导出**（`--export-schema`，机器可读的字段与类型）。
 详细依据与完整矩阵：[`Docs/差距分析.md`](Docs/差距分析.md) 文末战略章。
 
 ---
@@ -447,6 +452,9 @@ cargo run -p xgame-editor -- projects/SampleScene
 
 # 无头项目检查（不开窗口；退出码 0=干净 / 1=加载失败 / 2=悬空引用）
 cargo run -p xgame-editor -- --check projects/SampleScene
+
+# 无头运行（不开窗口跑 N 帧，stdout 出 JSON 统计；退出码 0=干净 / 1=加载失败 / 2=跑完有问题）
+cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
 
 # MCP server —— AI 智能体接口（stdio 按行 JSON-RPC；工具参考 Docs/MCP.md）
 cargo run -p xgame-mcp

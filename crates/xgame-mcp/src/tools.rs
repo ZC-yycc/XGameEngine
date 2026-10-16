@@ -1,8 +1,10 @@
-//! # 六个工具 —— 智能体操纵引擎的最小完备集
+//! # 七个工具 —— 智能体操纵引擎的最小完备集
 //!
 //! 刻意小：**读清单 → 读场景 → 改（整体或单实体）→ 验证** 四步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
-//! 智能体拿得到、改得动、写得回，不需要我们发明私有格式。
+//! 智能体拿得到、改得动、写得回，不需要我们发明私有格式。验证有两条腿：
+//! `project_check` 管静态引用（模型 / 脚本在不在盘上），`run_headless` 管
+//! 动态实跑（真的跑 N 帧、脚本真的没报错）。
 //!
 //! # 并发写警告（所有写工具共有）
 //!
@@ -34,7 +36,7 @@ fn fail(message: impl Into<String>) -> CallError {
     CallError::Failed(message.into())
 }
 
-/// 6 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 7 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -122,6 +124,20 @@ pub fn schemas() -> Vec<Value> {
                 "required": ["project"],
             },
         }),
+        json!({
+            "name": "run_headless",
+            "description": "无头跑项目：不开窗口把项目模拟 N 帧（默认 300），逐帧固定 dt，返回 JSON 报告 —— 帧耗时分布、实体/刚体计数、脚本与组件日志（含 error 样本）、非有限变换检测、音频状态。project_check 的自证搭档：它管静态引用，这个管「真的跑得动」。report.ok=false（退出码 2）表示跑完但观察到问题（脚本 error 日志等），报告照常返回；项目打不开才是工具失败。include_scene=true 时另带回跑完后的场景 RON（观察模拟结果：物理落点、脚本改过的变换）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": project_prop,
+                    "frames": { "type": "integer", "minimum": 1, "maximum": 100000, "description": "跑多少帧（默认 300；60Hz 下 300 帧 = 5 秒模拟）" },
+                    "dt": { "type": "number", "description": "每帧推进的秒数（默认 = 项目固定步长；非必要不传 —— 默认值才保证确定性）" },
+                    "include_scene": { "type": "boolean", "description": "true 时在返回信封里附上跑完后的场景 RON（默认 false，响应更小）" },
+                },
+                "required": ["project"],
+            },
+        }),
     ]
 }
 
@@ -134,6 +150,7 @@ pub fn call(name: &str, args: &Value) -> Result<String, CallError> {
         "entity_upsert" => entity_upsert(args),
         "entity_remove" => entity_remove(args),
         "project_check" => project_check(args),
+        "run_headless" => run_headless(args),
         other => Err(CallError::UnknownTool(other.to_string())),
     }
 }
@@ -238,7 +255,7 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 六个工具
+// 七个工具
 // ---------------------------------------------------------------------------
 
 /// `project_info` —— 清单 + 各目录清单，全走 [`ProjectHandle`] 的现成 API。
@@ -435,6 +452,132 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         "has_issues": report.has_issues(),
         "render": report.render(),
     })))
+}
+
+/// `run_headless` —— 把"无头跑项目"透传给编辑器二进制（`--headless`）。
+///
+/// # 为什么是 spawn
+///
+/// 无头运行的实现住在编辑器二进制里（`--check` 的邻居）：跑的是
+/// `World::update`，与编辑器 ▶ Play、独立游戏同一段代码。MCP 侧只做透传 ——
+/// 两处共用一条进化路径，不做第二份帧循环。server 装在哪编辑器就在哪
+/// （`target/debug/` 与 `dist/` 都是同目录布局，见 [`find_editor_exe`]）。
+///
+/// # 校验的归属
+///
+/// `frames` / `dt` 的合法性由编辑器侧（`headless::parse_args`）**唯一**负责，
+/// 这里只做 JSON 类型检查 —— 两处都做校验必然漂移，报错文案也会不同步。
+fn run_headless(args: &Value) -> Result<String, CallError> {
+    let root = require_str(args, "project")?;
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| fail(format!("拿不到 server 可执行文件路径: {e}")))?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| fail("server 可执行文件没有上级目录（不该发生）"))?;
+    let exe = find_editor_exe(&exe_dir).ok_or_else(|| {
+        fail(format!(
+            "找不到 xgame-editor 可执行文件（找过 {} 及其上一级）—— 它应与 xgame-mcp 装在同一目录（target/debug 或 dist/）",
+            exe_dir.display()
+        ))
+    })?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--headless");
+    // MCP server 常被 GUI 客户端（无控制台）拉起：不给子进程 CREATE_NO_WINDOW，
+    // 每次工具调用都会闪出一个控制台窗口（stdout/stderr 管道不受影响）。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    if let Some(v) = args.get("frames").filter(|v| !v.is_null()) {
+        let n = v.as_u64().ok_or_else(|| fail("`frames` 必须是正整数"))?;
+        cmd.arg("--frames").arg(n.to_string());
+    }
+    if let Some(v) = args.get("dt").filter(|v| !v.is_null()) {
+        let dt = v.as_f64().ok_or_else(|| fail("`dt` 必须是数字（秒）"))?;
+        cmd.arg("--dt").arg(dt.to_string());
+    }
+    let include_scene = args
+        .get("include_scene")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let dump_path = include_scene.then(|| temp_report_path("headless-scene"));
+    if let Some(path) = &dump_path {
+        cmd.arg("--dump-scene").arg(path);
+    }
+    cmd.arg(root);
+
+    let output = cmd
+        .output()
+        .map_err(|e| fail(format!("启动 {} 失败: {e}", exe.display())))?;
+    let stderr = tail_chars(&String::from_utf8_lossy(&output.stderr), 2000);
+    let exit = output.status.code();
+    match exit {
+        Some(0 | 2) => {}
+        Some(1) => return Err(fail(format!("无头运行失败（退出码 1）: {stderr}"))),
+        other => {
+            return Err(fail(format!(
+                "无头运行异常退出（退出码 {other:?}）: {stderr}"
+            )))
+        }
+    }
+
+    let report: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| fail(format!("无头运行输出不是 JSON: {e}")))?;
+    let mut envelope = json!({ "exit_code": exit, "report": report });
+    if let Some(path) = &dump_path {
+        // `include_scene` 是给智能体的承诺：读不到就整体失败，别给半个信封。
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| fail(format!("读场景落盘 {} 失败: {e}", path.display())))?;
+        let _ = std::fs::remove_file(path);
+        envelope["scene_ron"] = json!(text);
+    }
+    Ok(pretty(&envelope))
+}
+
+/// 在 `dir` 及其上一级找 `xgame-editor` 可执行文件。
+///
+/// 上一级是给 `cargo test` 兜底：测试二进制在 `target/<profile>/deps/` 下跑，
+/// 编辑器 exe 在它的上一级（`cargo build` 的常规产物布局）。
+fn find_editor_exe(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = format!("xgame-editor{}", std::env::consts::EXE_SUFFIX);
+    for base in [dir.to_path_buf(), dir.join("..")] {
+        let candidate = base.join(&name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// 进程内唯一的临时文件路径（pid + 纳秒）；调用方读完即删。
+fn temp_report_path(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "xgame-mcp-{tag}-{}-{}.ron",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ))
+}
+
+/// 取文本尾巴（≤ `max` 个字符，按字符切不按字节切）。
+///
+/// 孩子的失败原因在 stderr 的最后几行；如果调用环境的 `RUST_LOG` 开着，
+/// 头部会混进成片日志 —— 原样转发等于拿噪声灌智能体的上下文。
+fn tail_chars(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    let count = trimmed.chars().count();
+    if count <= max {
+        return trimmed.to_string();
+    }
+    let skipped = count - max;
+    format!(
+        "…（前 {skipped} 字符略）{}",
+        trimmed.chars().skip(skipped).collect::<String>()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -740,5 +883,182 @@ mod tests {
             .expect_err("未知工具必须报错");
         assert_eq!(err, CallError::UnknownTool("definitely_not_a_tool".into()));
         cleanup(&project);
+    }
+
+    // -- run_headless（spawn 编辑器二进制）---------------------------------
+
+    /// 嵌套构建"当前"编辑器二进制并返回其路径。
+    ///
+    /// 与 `xgame/tests/plugin_loading.rs` 同一套纪律：`cargo test` 不会把 bin
+    /// 目标装成 exe，`target/*/xgame-editor.exe` 可能停在上次 `cargo build` 的
+    /// 那一刻 —— 而过期的编辑器**不认 `--headless`**：旧入口会把它当未知参数
+    /// 继续走 eframe，弹出一个窗口把测试进程挂死。所以先无条件嵌套跑一次
+    /// `cargo build -p xgame-editor`（指纹新鲜时零点几秒），再拼路径。
+    fn editor_exe_for_tests() -> std::path::PathBuf {
+        static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        BUILT.get_or_init(|| {
+            let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|p| p.parent())
+                .expect("crates/xgame-mcp 的上两级 = 仓库根");
+            let cargo = match std::env::var_os("CARGO") {
+                Some(c) => std::path::PathBuf::from(c),
+                None => std::path::PathBuf::from("cargo"),
+            };
+            let mut cmd = std::process::Command::new(&cargo);
+            cmd.args(["build", "-p", "xgame-editor"])
+                .current_dir(repo_root)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if !cfg!(debug_assertions) {
+                cmd.arg("--release");
+            }
+            let mut child = cmd
+                .spawn()
+                .unwrap_or_else(|e| panic!("无法启动 {cargo:?} 构建编辑器：{e}"));
+            // 超时防"与外层 cargo 抢目标目录锁"无限挂起（同 plugin_loading）。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) if status.success() => break,
+                    Ok(Some(status)) => panic!("`cargo build -p xgame-editor` 失败（{status}）"),
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    Ok(None) => {
+                        let _ = child.kill();
+                        panic!(
+                            "嵌套 `cargo build -p xgame-editor` 超时 —— 多半是与外层 cargo \
+                             抢目标目录锁；请手动构建后再跑本测试"
+                        );
+                    }
+                    Err(e) => panic!("等待编辑器构建失败：{e}"),
+                }
+            }
+        });
+
+        // 测试二进制在 target/<profile>/deps/ 下，编辑器 exe 在其上一级。
+        let exe = std::env::current_exe()
+            .expect("拿测试可执行文件路径")
+            .parent()
+            .expect("测试二进制有上级目录")
+            .join("..")
+            .join(format!("xgame-editor{}", std::env::consts::EXE_SUFFIX));
+        assert!(exe.is_file(), "构建后仍未找到编辑器：{}", exe.display());
+        exe
+    }
+
+    /// run_headless 干净跑：信封 = 退出码 0 + 报告 ok + 帧数透传；默认不带场景快照。
+    #[test]
+    fn run_headless_runs_a_clean_project() {
+        editor_exe_for_tests(); // 先保证产物新鲜（过期编辑器不认 --headless）
+        let project = temp_project("headless");
+        let out = run(&project, "run_headless", json!({ "frames": 30 })).expect("应成功");
+        let envelope: Value = serde_json::from_str(&out).expect("信封必须是 JSON");
+        assert_eq!(envelope["exit_code"], 0);
+        assert_eq!(envelope["report"]["frames"], 30);
+        assert_eq!(envelope["report"]["ok"], true, "{}", envelope["report"]);
+        assert!(
+            envelope.get("scene_ron").is_none(),
+            "include_scene 默认关闭，不该带场景快照"
+        );
+        cleanup(&project);
+    }
+
+    /// 脚本 error：跑完但脏 —— 退出码 2、report.ok=false、error 计数透传。
+    /// **退出码 2 不是工具失败**，问题表达在报告里（智能体读报告定位）。
+    #[test]
+    fn run_headless_reports_script_errors_in_envelope() {
+        editor_exe_for_tests();
+        let project = temp_project("headless_dirty");
+        let scripts = project.scripts_dir();
+        std::fs::create_dir_all(&scripts).expect("建 Scripts 目录");
+        std::fs::write(
+            scripts.join("boom.lua"),
+            "function update(ctx)\n    error(ctx, 'boom')\nend\n",
+        )
+        .expect("写脚本");
+        let mut scene = entry_scene(&project);
+        scene
+            .entities
+            .push(Entity::new("Boomer").with_script("Scripts/boom.lua"));
+        let rel = project.manifest().entry_scene.clone();
+        project.write_scene(&rel, &scene).expect("写场景");
+
+        let out = run(&project, "run_headless", json!({ "frames": 5 })).expect("跑完即成功");
+        let envelope: Value = serde_json::from_str(&out).expect("JSON");
+        assert_eq!(envelope["exit_code"], 2);
+        assert_eq!(envelope["report"]["ok"], false);
+        assert_eq!(envelope["report"]["logs"]["error"], 5);
+        assert!(
+            !envelope["report"]["error_samples"]
+                .as_array()
+                .expect("error_samples 数组")
+                .is_empty()
+        );
+        cleanup(&project);
+    }
+
+    /// include_scene=true：信封带回跑完后的场景 RON，且能读回、实体在。
+    #[test]
+    fn run_headless_can_include_scene_snapshot() {
+        editor_exe_for_tests();
+        let project = temp_project("headless_scene");
+        let out = run(
+            &project,
+            "run_headless",
+            json!({ "frames": 3, "include_scene": true }),
+        )
+        .expect("应成功");
+        let envelope: Value = serde_json::from_str(&out).expect("JSON");
+        let ron_text = envelope["scene_ron"]
+            .as_str()
+            .expect("include_scene=true 必须带 scene_ron");
+        let scene: Scene = ron::from_str(ron_text).expect("scene_ron 必须能读回");
+        assert!(scene.find_by_name("Main Camera").is_some());
+        cleanup(&project);
+    }
+
+    /// 项目打不开：孩子退出码 1 → 工具失败（isError 层），消息里带孩子的 stderr。
+    #[test]
+    fn run_headless_fails_on_unloadable_project() {
+        editor_exe_for_tests();
+        let err = call(
+            "run_headless",
+            &json!({ "project": "Z:/definitely/not/a/project", "frames": 1 }),
+        )
+        .expect_err("打不开的项目必须失败");
+        assert!(
+            matches!(&err, CallError::Failed(m) if m.contains("退出码 1")),
+            "{err:?}"
+        );
+    }
+
+    /// 可执行文件搜索：空目录树找不到；同目录命中；`deps/` 下跑时上一级命中。
+    #[test]
+    fn editor_exe_search_covers_same_and_parent_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_mcp_exe_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let deps = dir.join("deps");
+        std::fs::create_dir_all(&deps).expect("建目录");
+        assert_eq!(find_editor_exe(&deps), None, "空目录树必须找不到");
+
+        let fake = dir.join(format!("xgame-editor{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&fake, b"stub").expect("放桩文件");
+        assert_eq!(find_editor_exe(&dir), Some(fake.clone()), "同目录应命中");
+        // 上一级命中的路径拼写带 `..`（`deps/../xgame-editor.exe`）——按解析后
+        // 的同一文件断言，别锁死字节拼写（那是 `join` 的实现细节）。
+        let found = find_editor_exe(&deps).expect("上一级应命中");
+        assert_eq!(
+            found.canonicalize().expect("解析命中路径"),
+            fake.canonicalize().expect("解析桩路径"),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

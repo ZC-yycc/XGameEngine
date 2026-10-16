@@ -1,12 +1,11 @@
 # MCP 接口（AI 智能体工具面）
 
 > `xgame-mcp` 是本引擎的 **MCP server**（Model Context Protocol）：把"读项目、改场景、
-> 动实体、跑检查"暴露成标准工具，Cursor / Claude 等任何 MCP 客户端接上就能直接操纵
-> 引擎做游戏开发 —— 这是 Agent-Native 路线（见 [`差距分析.md`](差距分析.md) 文末战略章）
-> 的第 ① 块。
+> 动实体、跑检查、无头实跑"暴露成标准工具，Cursor / Claude 等任何 MCP 客户端接上就能
+> 直接操纵引擎做游戏开发 —— 这是 Agent-Native 路线（见 [`差距分析.md`](差距分析.md)
+> 文末战略章）的第 ① 块 + 第 ② 块（无头运行经 `run_headless` 一并接上）。
 >
-> **判据**：智能体没有鼠标时，这条路走得通吗？—— 本接口就是答案的前半段（改与查），
-> 无头运行（看效果）在后面补。
+> **判据**：智能体没有鼠标时，这条路走得通吗？—— 读 / 改 / 查 / 看效果，四步齐了。
 
 ---
 
@@ -54,12 +53,12 @@
 
 ---
 
-## 工具参考（6 个）
+## 工具参考（7 个）
 
-最小完备集，覆盖「读 → 改 → 查」闭环。全部工具必填 `project`（含 `project.ron`
-的项目根目录，绝对或相对 server 工作目录）；除 `project_info` / `project_check`
-外都可带 `scene`（项目内相对场景路径，如 `Scenes/scene.ron`，缺省 = 清单入口场景；
-**绝对路径与 `..` 一律拒绝**）。
+最小完备集，覆盖「读 → 改 → 查 → 看效果」闭环。全部工具必填 `project`（含
+`project.ron` 的项目根目录，绝对或相对 server 工作目录）；除 `project_info` /
+`project_check` / `run_headless` 外都可带 `scene`（项目内相对场景路径，如
+`Scenes/scene.ron`，缺省 = 清单入口场景；**绝对路径与 `..` 一律拒绝**）。
 
 ### 1. `project_info`
 
@@ -120,6 +119,24 @@
   `render`（人读摘要）
 - **闭环用法**：改（2/3/4/5）→ `project_check` → `has_issues` 必须为 `false`。
 
+### 7. `run_headless`
+
+无头跑项目 N 帧（**透传**编辑器 `xgame-editor --headless`：spawn 同目录的编辑器
+可执行文件，报告从它的 stdout 原样返回）。
+
+- **入参**：`project`，可选 `frames`（默认 300，上限 100000）/ `dt`（默认 = 项目
+  固定步长）/ `include_scene`（默认 `false`）
+- **返回**（JSON 信封）：`exit_code`（0 干净 / 2 跑完但有脚本 error 日志或非有限
+  变换）+ `report`（帧耗时分布 `frame_us`、实体/刚体计数、脚本日志计数与
+  `error_samples`、音频状态……字段契约见 [`无头运行.md`](无头运行.md)）；
+  `include_scene: true` 时另带 `scene_ron`（**跑完后**的场景 RON，可读回、可 diff
+  —— 观察物理落点 / 脚本改过的变换的出口）。
+- **语义**：每帧固定 dt、无输入、无墙钟依赖 —— 同一项目两次运行逐位一致
+  （确定性回归的底座）。`report.ok` 为 `false` **不是工具失败**：问题表达在报告里
+  （智能体读 `error_samples` 定位）；只有项目打不开（退出码 1）才是 `isError`。
+- **闭环用法**：改（2/3/4/5）→ `project_check`（静态引用）→ `run_headless`
+  （动态实跑）→ 看 `report.ok` 与 `error_samples`。
+
 ---
 
 ## 已知边界（写给正在用它的智能体）
@@ -128,8 +145,8 @@
   的编辑器；编辑器之后保存也会覆盖 MCP 的修改。**同一时刻只让一边写**。
 - **能读不能写的清单**：`project.ron` 的修改（改入口场景、窗口尺寸……）目前请走
   直接编辑文件；MCP 写工具只覆盖场景与实体。
-- **构建 / 无头运行**：在计划里（`project_build`、`--headless --frames N` 统计
-  JSON），还没上。
+- **构建**：`project_build`（打包 / 编译插件）在计划里，还没上；无头运行已就绪
+  （工具 `run_headless` / CLI `xgame-editor --headless`）。
 - **破坏半径**：`scene` 参数拒绝 `..` / 绝对路径，写入止于项目目录内；重名歧义
   一律拒绝而不是"猜一个"。
 
@@ -140,8 +157,11 @@
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 6 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 7 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/check.rs` | `check_project()`（编辑器 `--check` 与 `project_check` 共用） |
+| `crates/xgame-editor/src/headless.rs` | 无头运行的实现（CLI `--headless`；`run_headless` 工具 spawn 它） |
 
-回归测试：`cargo test -p xgame-mcp`（协议 8 条 + 工具行为 12 条）。
+回归测试：`cargo test -p xgame-mcp`（协议 9 条 + 工具行为 16 条 = 25 条；其中
+`run_headless` 的 4 条会嵌套 `cargo build -p xgame-editor` 保证被测 exe 新鲜，
+再经真实进程 spawn 跑通）。

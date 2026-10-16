@@ -1550,3 +1550,100 @@ SampleScene：`Resources/Audio/Beep.wav`（44.1 kHz / 16 bit / mono 880 Hz
 - **`AudioManager` 六百多字节内联进 `Playback` 枚举** → clippy
   `large_enum_variant`。`manager` 装箱（热路径只按引用解引用，零成本）。
 - **`map_or(true, …)`** → clippy `unnecessary_map_or`，改 `is_none_or`。
+
+## 二十三、Agent-Native：MCP 工具面 + 无头运行（本轮）
+
+差距分析「近期计划」第 ② 条落地：**无头运行**。判据还是那一条 ——「智能体没有
+鼠标时，这条路走得通吗？」。`--check` 已回答"项目能不能加载"，本轮回答后半句：
+**"跑起来会怎样"**。MCP 侧同时收获第 7 个工具 `run_headless`（透传壳），
+至此工具面覆盖「读 → 改 → 查 → 看效果」完整闭环。
+
+全量验证绿：`cargo check --workspace --all-targets` 绿、clippy **0 警告**、
+`cargo test --workspace --all-targets` 全绿（**359 条**，较上轮 +20：headless
+模块 15 条自带测试 + MCP 工具 5 条；其中 MCP 侧 4 条 spawn 行为测试在接线前
+**先证红** —— 红的是 `UnknownTool("run_headless")` 与工具数 6≠7，随后实现转绿）。
+
+### 一、形态与契约
+
+```sh
+xgame-editor --headless [--frames N] [--dt 秒] [--report 路径] [--dump-scene 路径] <项目>
+```
+
+- **实现位置在编辑器二进制**（`headless.rs`，`--check` 的邻居）：跑的是
+  `World::update` —— 与编辑器 ▶ Play、独立游戏**同一段**代码，无头跑出的行为
+  与玩家实跑一致。MCP 只做 spawn 透传，不做第二份帧循环。
+- **退出码契约**（与 `--check` 对齐，给 CI / 智能体）：
+  **0 = 干净跑完 / 1 = 加载失败或参数错误（报告不产出）/ 2 = 跑完但观察到问题
+  （脚本 error 日志、非有限变换；报告照常输出）**。`2` 与 `1` 的分野是刻意的：
+  "发现问题"的报告是完整可用的，智能体读 `error_samples` 就能定位。
+- **报告字段即契约**：`frame_us`（最近秩百分位 —— 报告里每个数都是真实出现过
+  的一帧，不是插值）、`logs`（含装载期脚本编译失败这种"帧 0"日志）、
+  `error_samples`（前 10 条）、`non_finite_transforms`、`audio`（silent 引擎的
+  真实解码 / 缓存计数）、`fixed_steps`。`json_contract_has_stable_keys` 钉死。
+- **`--dump-scene`**：跑完后的场景落盘为 RON（与 `write_scene` 同一序列化配置）
+  —— 观察物理落点 / 脚本改过的变换的出口，也可直接喂 MCP `scene_write`。
+
+### 二、确定性（刻意的）
+
+每帧固定 `dt`（默认 = 项目固定步长）、无输入、无墙钟依赖 —— 同一项目两次运行
+**逐位一致**（测试里两次运行落盘场景 SHA256 相等钉死；是"改前改后对 diff"的
+底座）。`--dt` 允许偏离固定步长（时钟补多个固定步），但**要确定性就沿用默认**。
+
+### 三、实测（先量后改的"量"；本机样本，看数量级）
+
+| 场景 | 300 帧墙钟 | 帧循环 | 帧均值 | p50 / p99 |
+|---|---|---|---|---|
+| `projects/SampleScene`（14 实体 / 10 刚体 / 3 脚本 / 1 音源） | 78~120 ms | 8.6 ms | 28.5 µs | 26 / 37~61 µs |
+| `projects/BehaviorsDemo`（Rust 插件 + Lua 共存） | 62~82 ms | 1.3 ms | 4.4 µs | 3.7 / ~10 µs |
+| 基线：`--frames 1` / `--check`（进程启动 + 装载） | 62~72 ms | — | — | — |
+
+读法：**一次无头调用的固定成本 ≈ 进程启动 60 ms**（Windows 加载链接的 DLL），
+帧循环本身个位数毫秒 —— "跑一下看看"在智能体循环里是廉价操作。
+
+### 四、MCP `run_headless`（第 7 个工具，spawn 透传）
+
+- **信封**：`{ "exit_code": 0|2, "report": {…}, "scene_ron": "…（include_scene
+  才带）" }`。`report.ok=false`（退出码 2）**不是工具失败** —— 问题表达在报告里；
+  只有打不开项目（退出码 1）才走 `isError`。
+- **为什么走 spawn**：无头实现住在编辑器二进制里（同一段 `World::update`）；
+  server 装在哪编辑器就在哪（`dist/`、`target/debug/` 都是同目录布局）——
+  `find_editor_exe` 同时找同目录与**上一级**（`cargo test` 时 server 在
+  `target/*/deps/` 下跑，编辑器 exe 在它上一级）。
+- **校验归属编辑器唯一**：`frames` / `dt` 的合法性不做双侧校验（必然漂移），
+  MCP 只做 JSON 类型检查、其余透传。
+- **Windows 细节**：spawn 带 `CREATE_NO_WINDOW`（MCP server 常被 GUI 客户端
+  无控制台拉起，不设会闪控制台窗）；孩子 stderr 进错误消息前**截尾 2000 字符**
+  （`RUST_LOG` 开着时头部是成片日志噪声，不拿它灌智能体上下文）。
+
+### 五、实现期踩的坑（防好心人翻案）
+
+- **过期的编辑器 exe 会把测试挂死**：旧版编辑器不认 `--headless`，会把它当
+  项目路径继续 `eframe::run_native` 弹窗 → 测试进程挂住。而 `cargo test` 不产出
+  常规 bin 产物，`target/*/xgame-editor.exe` 可能停在上次 `cargo build`。
+  处理：MCP 测试沿用 `xgame/tests/plugin_loading.rs` 的纪律 —— 取 exe 前先
+  **嵌套 `cargo build -p xgame-editor` 一次**（OnceLock，每进程一次，带 240s
+  超时防与外层 cargo 抢目标目录锁）。
+- **PowerShell 管道会把子进程 stdout 的 UTF-8 按 GBK 解码弄坏**（中文变 `?`，
+  JSON 直接解析失败）—— 手工冒烟要 `cmd /c "exe > file"` 做字节级重定向，
+  或在管道前先 `[Console]::OutputEncoding = UTF8`。这是本仓库的老坑（PS 5.1），
+  与 AGENTS.md 的工具链注意同源。
+- **`find_editor_exe` 的上一级命中路径拼写带 `..`**（`deps/../xgame-editor.exe`）：
+  测试若按字节比较路径会假红（功能是对的）。断言应比较**解析后的同一文件**
+  （`canonicalize` 后比较），或者干脆只断 `is_some` + 文件名 —— 别把 `join` 的
+  拼写行为写死进契约。
+
+### 六、刻意的取舍
+
+1. **`include_scene` 默认关**：默认响应只带报告（智能体大多只要"跑通没有"）；
+   场景 RON 可能很大，要观察模拟结果再显式打开 —— 不拿大响应占上下文。
+2. **`--headless` 不重编 Rust 插件**：`Plugins/*.dll` 按现状加载（与打包游戏
+   同路径）；改了插件源码要先在编辑器 Play 一次或走 PIE 构建。
+3. **不做输入模拟、不推进动画时钟**：无头没有输入源；动画采样在渲染宿主侧
+   （`AnimationDriver`），脚本写的 `set_anim_param` 照常进场景、只是没人消费。
+   两条都写进了 `Docs/无头运行.md` 的边界一节，不给"它应该能"的误解留空间。
+4. **`--frames` 上限 100000**：防"手滑写个大数挂住一个智能体"；100k 帧 @60Hz
+   已是 ~28 分钟模拟时长，真实验证远用不到。
+5. **Worktree 工作区状态**：验证 BehaviorsDemo 时把 `target/debug/behaviors_demo.dll`
+   同步进了 `projects/BehaviorsDemo/Plugins/`（该 DLL 是构建产物、未入 git；
+   编辑器 PIE 平时也这么干）—— 过期 DLL 跨 ABI 加载是 0xc0000005 的已知雷
+   （P1 记录在案），验证前刷新是纪律不是可选项。

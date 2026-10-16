@@ -35,6 +35,10 @@
 //!
 //! # 直接打开指定项目
 //! cargo run -p xgame-editor -- projects/SampleScene
+//!
+//! # 无头工具（不开窗口，给 CI / AI 智能体用）
+//! cargo run -p xgame-editor -- --check projects/SampleScene
+//! cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
 //! ```
 
 mod builder;
@@ -43,6 +47,7 @@ mod frame_policy;
 mod frame_probe;
 mod game_runtime;
 mod gizmo;
+mod headless;
 mod input_bridge;
 mod hub;
 mod panels;
@@ -557,37 +562,52 @@ fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
 
-    // ── 无头项目检查：`xgame-editor --check [项目路径]` ──
+    // ── 无头项目检查 / 无头运行 ──
     //
-    // 不开窗口、不建 GPU，秒级返回。退出码是给 CI / **AI 智能体**的契约：
-    //   0 = 干净（清单、场景、引用全通过）
-    //   1 = 加载失败（清单 / 场景解析不了）
-    //   2 = 能加载，但有悬空的模型 / 脚本引用
-    // 详见 xgame-core `check` 模块头（验证逻辑在那，编辑器只管退出码）。
+    // 两者都不开窗口、不建 GPU，秒级返回。退出码是给 CI / **AI 智能体**的契约：
+    //   --check：0 = 干净 / 1 = 加载失败 / 2 = 能加载但有悬空引用
+    //   --headless：0 = 干净跑完 / 1 = 加载失败或参数错误 / 2 = 跑完但有脚本
+    //               error 日志或非有限变换
+    // 详见 xgame-core `check` 模块头与 `headless` 模块头（验证 / 运行逻辑在
+    // 那里，这里只管分发与退出码）。
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        if args.first().map(String::as_str) == Some("--check") {
-            let path = args
-                .get(1)
-                .map(String::as_str)
-                .unwrap_or("projects/SampleScene");
-            match xgame_core::check_project(Path::new(path)) {
-                Ok(report) => {
-                    print!("{}", report.render());
-                    std::process::exit(if report.has_issues() { 2 } else { 0 });
-                }
-                Err(e) => {
-                    eprintln!("check FAILED: {e}");
-                    std::process::exit(1);
+        match args.first().map(String::as_str) {
+            Some("--check") => {
+                let path = args
+                    .get(1)
+                    .map(String::as_str)
+                    .unwrap_or("projects/SampleScene");
+                match xgame_core::check_project(Path::new(path)) {
+                    Ok(report) => {
+                        print!("{}", report.render());
+                        std::process::exit(if report.has_issues() { 2 } else { 0 });
+                    }
+                    Err(e) => {
+                        eprintln!("check FAILED: {e}");
+                        std::process::exit(1);
+                    }
                 }
             }
+            Some("--headless") => {
+                let rest = &args[1..];
+                // `--help` 在这里截住：`parse_args` 只认真正的选项，帮助文案
+                // 不该混进参数解析（"help 也算一个已解析参数"会误导后续维护）。
+                if rest.iter().any(|a| a == "--help" || a == "-h") {
+                    print!("{}", headless::usage());
+                    std::process::exit(0);
+                }
+                std::process::exit(headless::cli(rest));
+            }
+            _ => {}
         }
     }
 
     // ── 插件临时副本清扫（P0.5）──
     // Windows 上被 dlopen 的 DLL 文件会锁到进程结束，所以加载走的是
     // `%TEMP%/xgame-plugin-cache/` 里的唯一副本；上一个编辑器进程退出后那些
-    // 文件就成了垃圾。放在 --check 之后：无头检查根本不碰插件，没必要扫盘。
+    // 文件就成了垃圾。放在无头分支之后：--check / --headless 都不碰临时副本，
+    // 没必要为它们扫盘。
     crate::plugin_build::sweep_temp_copies();
 
     // 上屏参数 A/B 开关（诊断用）：
