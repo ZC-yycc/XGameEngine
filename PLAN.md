@@ -1380,7 +1380,7 @@ AST 解释 vs 字节码 VM 的**语言级代差**，任何宿主侧派发优化�
 `SpatialSink` 手搓距离衰减，等于把本阶段最核心的一块自己写一遍）。
 
 全量验证绿：`cargo check --workspace --all-targets` 绿、clippy **0 警告**、
-`cargo test --workspace --all-targets` 全绿（新增 20 条音频测试，全部先证红）。
+`cargo test --workspace --all-targets` 全绿（新增 21 条音频测试，全部先证红）。
 
 ### 一、分层与数据流
 
@@ -1480,7 +1480,7 @@ SampleScene：`Resources/Audio/Beep.wav`（44.1 kHz / 16 bit / mono 880 Hz
 存在性断言（clip 断链在编辑器里不显形 —— 解码失败只记日志然后无声，
 必须在加载前断言才能被 CI 抓住）。
 
-### 八、回归测试清单（20 条新增，全部先证红）
+### 八、回归测试清单（21 条新增，全部先证红）
 
 | 层 | 测试 | 钉死什么 |
 |---|---|---|
@@ -1499,8 +1499,32 @@ SampleScene：`Resources/Audio/Beep.wav`（44.1 kHz / 16 bit / mono 880 Hz
 | runtime | `spatial_source_pushes_emitter_positions_each_frame` | 空间声源每帧推位置 |
 | runtime | `removed_entity_or_component_stops_its_sound` | 删实体 / 摘组件停音 + 重挂再响 |
 | runtime | `script_play_sound_reaches_the_engine` | 脚本 → World → 引擎全链路 |
+| runtime | `audio_rescan_picks_up_new_entities` | 快速路径的重扫时机（实体数变化必须重新武装扫描） |
 
-### 九、刻意的取舍
+### 九、性能：音频同步"先量后改"（同机背靠背）
+
+`update_throughput`（2000 实体 × 300 帧，同机交替跑 before / after 二进制）：
+
+| 档位 | 音频前（均值） | 音频后·无快速路径 | 音频后·有快速路径 |
+|---|---|---|---|
+| 纯视觉 | **19.3 µs/帧** | 25.0（**+5.7**） | **21.9**（含跨二进制布局漂移 ~2.5，见下） |
+| 全静态体 | 101.0 | 109.7 | 105.5 |
+| 稀疏动态 64 | 737.7 | 747.2 | 742.5 |
+| 密集接触 1000 | 13281.7 | 13256.5 | 13282.5 |
+
+- 起因：`sync_audio` 每帧扫一遍实体表找音频源 —— 2000 实体纯视觉场景下
+  这是一条额外的内存流（实体结构每条几百字节），实测 +5.7 µs/帧。
+- 修复：`audio_sources_seen` / `audio_scan_count` 快速路径 —— 没挂过音频源、
+  没有 autoplay 标记、实体数也没变 ⇒ 整段跳过；实体数变化（脚本 spawn /
+  destroy）重新武装一次扫描（`audio_rescan_picks_up_new_entities` 钉死）。
+  **刻意取舍**：给已有实体在运行中直接贴 `audio` 组件（不增删实体）不会触发
+  重扫 —— 动态发声的正路是脚本 `play_sound`（不经扫描），组件走场景配置。
+- 收尾判定：把 `sync_audio` / `flush_audio` 两个调用整体注释掉再量得
+  21.5~21.9 µs/帧 ≈ 快速路径版同值 —— 残余的 ~2.5 µs 差距来自**跨二进制
+  的代码布局漂移**（同一份源码 batch 重编也会浮动），不是每帧音频工作。
+  按仓库口径：±1.5× 的系统性漂移内，音频对热路径的增量 ≈ 噪声。
+
+### 十、刻意的取舍
 
 1. **不用 MockBackend**：无声模式走真实 `AudioEngine` 代码路径（只是不碰设备），
    测试用真 WAV。Mock 会把 kira 内部 trait 结构钉进测试，升级即碎。
@@ -1516,7 +1540,7 @@ SampleScene：`Resources/Audio/Beep.wav`（44.1 kHz / 16 bit / mono 880 Hz
    `with_audio_engine` 注入、`audio_stats` 读数 —— 防止有人绕过 port 直接
    摆弄 kira 句柄（那会绕开命令束的时序保证）。
 
-### 十、实现期踩的坑（防好心人翻案）
+### 十一、实现期踩的坑（防好心人翻案）
 
 - **非空间化 autoplay 没绑实体** → 删实体音还在响。修复：`play.follow`
   恒设挂载实体（见二.2）。

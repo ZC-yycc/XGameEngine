@@ -300,7 +300,9 @@ impl AudioEngine {
         };
 
         // 播放失败（容量 / 错误）时不跟踪：句柄都没有，GC 无从谈起。
-        if handle.is_none() && spatial_track.is_none() && matches!(self.playback, Playback::Device { .. }) {
+        // 无声模式是唯一"没有句柄却要跟踪"的情况 —— 它靠墙钟 GC，
+        // 不跟踪的话测试就看不到"声音在响"。
+        if matches!(self.playback, Playback::Device { .. }) && handle.is_none() {
             return;
         }
 

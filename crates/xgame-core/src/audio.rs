@@ -14,7 +14,7 @@
 //!
 //! - **脚本层不引 kira**（`xgame-script` 只依赖 core）——脚本 API 生成命令、
 //!   World 帧末消费，两层之间只传纯数据。kira 的链接产物（cpal / symphonia）
-//!   与它的 glam 0.32 版本都关在 `xgame-audio` 一道墙里；
+//!   与它自带的 glam 版本（0.33，引擎是 0.29）都关在 `xgame-audio` 一道墙里；
 //! - **无声降级免费**：没有声卡的环境（CI、无头测试）里 `AudioEngine` 是
 //!   silent 模式，但命令照常受理、计数照常递增 —— 上层（World 胶水、
 //!   脚本 API）的回归测试完全不需要音频设备；

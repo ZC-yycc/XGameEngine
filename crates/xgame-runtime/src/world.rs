@@ -150,6 +150,10 @@ pub struct World {
     /// 已经 autoplay 过的实体 —— 没有它，"进场景就响"会变成每帧重播。
     /// 组件被摘除 / 实体被删时清掉对应条目（重新挂上会再响一次）。
     audio_autoplayed: HashSet<EntityId>,
+    /// 上一次音频扫描时的实体数（见 `sync_audio` 的快速路径）。
+    audio_scan_count: usize,
+    /// 上一次扫描时场景里有没有挂音频源的实体（扫描时刷新）。
+    audio_sources_seen: bool,
 }
 
 /// 单个实体已实例化的组件集合。
@@ -194,6 +198,9 @@ impl World {
             audio_port: AudioPort::new(),
             audio,
             audio_autoplayed: HashSet::new(),
+            // 0 = 强迫第一帧做过一次实扫（场景非空时实体数必然不等）。
+            audio_scan_count: 0,
+            audio_sources_seen: false,
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
         world.sync_bodies();
@@ -608,15 +615,30 @@ impl World {
     /// 每渲染帧一次（不是每个固定步）：人耳对 16 ms 的声源位置更新完全
     /// 不敏感，而固定步可能一帧跑好几个 —— 音频不值得跟物理同频。
     fn sync_audio(&mut self) {
+        // 快速路径（先量后改：2000 实体纯视觉场景，这条扫描实测 +5 µs/帧）。
+        // 没挂过音频源、没有 autoplay 标记、实体数也没变 ⇒ 没有 autoplay /
+        // 空间跟踪要维护，整段跳过。
+        // 实体数变化（脚本 spawn / destroy）会重新武装一次扫描；若某个 Rust
+        // 行为在运行中直接给**已有**实体贴上 `audio` 组件（不增删实体），
+        // 这里扫不到 —— 动态发声的正路是脚本 `play_sound`（不经扫描），
+        // 组件走场景配置，这条取舍写在测试 `audio_rescan_picks_up_new_entities`。
+        let entity_count_changed = self.scene.entities.len() != self.audio_scan_count;
+        if !self.audio_sources_seen && self.audio_autoplayed.is_empty() && !entity_count_changed {
+            return;
+        }
+        self.audio_scan_count = self.scene.entities.len();
+
         // 先扫（只读场景）再发命令（写 port）：把"读场景"与"写命令束"
         // 分成两段，循环体里不需要为拆借发愁。
         let mut spawned: Vec<(EntityId, PlaySound)> = Vec::new();
         let mut moved: Vec<(EntityId, [f32; 3])> = Vec::new();
+        let mut found_sources = false;
 
         for (index, entity) in self.scene.entities.iter().enumerate() {
             let Some(source) = entity.audio.as_ref() else {
                 continue;
             };
+            found_sources = true;
             let id = entity.id;
             let world_pos = self.scene.world_matrix(index).w_axis.truncate().to_array();
             let first_time = !self.audio_autoplayed.contains(&id);
@@ -634,6 +656,9 @@ impl World {
                 moved.push((id, world_pos));
             }
         }
+
+        // 刷新"这个场景还挂着音频源吗"——全摘光之后下一帧起走快速路径。
+        self.audio_sources_seen = found_sources;
 
         // 失联判定：autoplay 标记还在、但实体没了 / 组件被摘了 → 停音。
         // 按标记表逐个查（`find_entity` 是 O(n)，标记数 = 历史发声实体数，
@@ -1516,6 +1541,35 @@ mod tests {
         let stats = world.audio_stats();
         assert_eq!(stats.requests, 1, "不该重播");
         assert_eq!(stats.last_batch, 1, "每帧应推一次发射位置");
+    }
+
+    /// 快速路径的重扫时机：实体数变化必须重新武装扫描。
+    /// 场景先没音频（首扫后进快速路径），运行中新增带音频源的实体
+    /// （模拟脚本 spawn 的结构性变化）→ 下一帧必须被扫到并 autoplay。
+    ///
+    /// 反面刻意**不**覆盖：给已有实体在运行中贴 `audio` 组件而不动实体数
+    /// —— 快速路径不会重扫，autoplay 不触发。动态发声的正路是脚本
+    /// `play_sound`（不经扫描），组件走场景配置。
+    #[test]
+    fn audio_rescan_picks_up_new_entities() {
+        let mut scene = Scene::new("rescan");
+        scene.add_entity(Entity::new("ground"));
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+
+        // 首帧：场景无音频源 → 快速路径。等一帧让首扫落定。
+        world.update(1.0 / 60.0);
+        assert_eq!(world.audio_stats().requests, 0);
+
+        // 运行中新增带音频源的实体（实体数 1 → 2）。
+        world.scene_mut().entities.push(
+            Entity::new("beep").with_audio(AudioSource::new("Beep.wav")),
+        );
+        world.update(1.0 / 60.0);
+        assert_eq!(
+            world.audio_stats().requests,
+            1,
+            "实体数变化必须触发重扫，autoplay 才不会被快速路径吞掉"
+        );
     }
 
     /// 实体被删除 / 组件被摘除：停音 + 清 autoplay 标记（重挂会再响）。
