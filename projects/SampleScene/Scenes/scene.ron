@@ -11,6 +11,11 @@
             model: "builtin://cube",
             id: (1),
             parent: None,
+            // PBR 材质覆盖：混凝土色地面（base_color 是**乘子**，见 MaterialOverride）。
+            material: Some((
+                base_color: Some((0.55, 0.58, 0.62, 1.0)),
+                roughness: Some(0.9),
+            )),
             physics: Some((
                 kind: Static,
                 shape: Cuboid(
@@ -33,6 +38,11 @@
             model: "builtin://cube",
             id: (2),
             parent: None,
+            // 演示平台三级递深的暖沙色（同一主题色的三种深浅）。
+            material: Some((
+                base_color: Some((0.70, 0.60, 0.45, 1.0)),
+                roughness: Some(0.85),
+            )),
             physics: Some((
                 kind: Static,
                 shape: Auto,
@@ -53,6 +63,10 @@
             model: "builtin://cube",
             id: (3),
             parent: Some((2)),
+            material: Some((
+                base_color: Some((0.62, 0.52, 0.38, 1.0)),
+                roughness: Some(0.85),
+            )),
             physics: Some((
                 kind: Static,
                 shape: Auto,
@@ -73,6 +87,10 @@
             model: "builtin://cube",
             id: (4),
             parent: Some((3)),
+            material: Some((
+                base_color: Some((0.55, 0.45, 0.32, 1.0)),
+                roughness: Some(0.85),
+            )),
             physics: Some((
                 kind: Static,
                 shape: Auto,
@@ -93,6 +111,11 @@
             model: "builtin://cube",
             id: (5),
             parent: None,
+            // 亮蓝半光泽 —— 转起来时高光扫过表面，"粗糙度 → 高光形状"的直观演示。
+            material: Some((
+                base_color: Some((0.20, 0.40, 0.80, 1.0)),
+                roughness: Some(0.35),
+            )),
             scripts: [
                 "Scripts/Spinner.lua",
             ],
@@ -126,6 +149,11 @@
             model: "builtin://sphere",
             id: (6),
             parent: None,
+            // 红塑料球：低粗糙度给出紧致的高光点（绝缘体，无金属度）。
+            material: Some((
+                base_color: Some((0.75, 0.18, 0.16, 1.0)),
+                roughness: Some(0.30),
+            )),
             scripts: [
                 "Scripts/Jumper.lua",
             ],
@@ -151,6 +179,11 @@
             model: "builtin://cube",
             id: (7),
             parent: None,
+            // 木箱三兄弟：同色系深浅变化，落地后靠明暗也能分清哪只箱子。
+            material: Some((
+                base_color: Some((0.52, 0.34, 0.20, 1.0)),
+                roughness: Some(0.8),
+            )),
             physics: Some((
                 kind: Dynamic,
                 shape: Auto,
@@ -171,6 +204,10 @@
             model: "builtin://cube",
             id: (8),
             parent: None,
+            material: Some((
+                base_color: Some((0.58, 0.38, 0.22, 1.0)),
+                roughness: Some(0.8),
+            )),
             physics: Some((
                 kind: Dynamic,
                 shape: Auto,
@@ -191,6 +228,10 @@
             model: "builtin://cube",
             id: (9),
             parent: None,
+            material: Some((
+                base_color: Some((0.46, 0.30, 0.18, 1.0)),
+                roughness: Some(0.8),
+            )),
             physics: Some((
                 kind: Dynamic,
                 shape: Auto,
@@ -211,6 +252,13 @@
             model: "builtin://cylinder",
             id: (10),
             parent: None,
+            // 抛光金属柱：metallic=1 没有漫反射，只剩镜面 + 环境反射 ——
+            // PBR 里"金属"与"塑料"的分野（对比 Bouncer 的红塑料球）。
+            material: Some((
+                base_color: Some((0.85, 0.87, 0.90, 1.0)),
+                metallic: Some(1.0),
+                roughness: Some(0.35),
+            )),
             physics: Some((
                 kind: Static,
                 shape: Cylinder(
@@ -340,7 +388,9 @@
             direction: (0.45, -1.0, 0.35),
             position: (0.0, 0.0, 0.0),
             color: (1.0, 0.97, 0.92),
-            intensity: 3.2,
+            // 3.2 是 Blinn-Phong 时代"白模也要亮"的手调值；PBR 落地 + 场景材质
+            // 上色后回调到 1.4 —— 受光面落在"高光但不死白"的区间，阴影对比正常。
+            intensity: 1.4,
             range: 10.0,
             casts_shadow: true,
             shadow_resolution: 0,

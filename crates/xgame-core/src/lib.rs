@@ -14,6 +14,7 @@
 //! | `id` | 稳定实体标识符 `EntityId` |
 //! | `animation` | 动画播放配置 `Animator` + 状态机 `AnimMachine` + 叠加层 `AnimAdditive` + 混合层栈 `AnimLayer`（声明式，落盘进场景文件） |
 //! | `audio` | 音频纯数据层：`AudioSource` 组件 + `AudioPort` 命令束 + `ListenerPose`（引擎封装在 `xgame-audio`） |
+//! | `material` | 逐实体材质覆盖 `MaterialOverride`（PBR 参数，字段级打补丁） |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
 //! | `inspect` | 组件字段检视契约 `Inspect` + `FieldDesc`/`FieldValue`（Inspector 与 Lua 参数的同一份真相源）|
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
@@ -48,6 +49,7 @@ mod component;
 pub mod inspect;
 mod id;
 mod light;
+pub mod material;
 pub mod physics;
 pub mod ray;
 mod time;
@@ -77,6 +79,7 @@ pub use component::{Component, ComponentMap, ModelPath, Name};
 pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};
 pub use id::{EntityId, EntityMap, EntitySet};
 pub use light::{Light, LightKind};
+pub use material::MaterialOverride;
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
 pub use ray::{Ray, RayHit};
 pub use time::{GameClock, Stopwatch, Timer};

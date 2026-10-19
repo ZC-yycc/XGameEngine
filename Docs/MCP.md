@@ -125,17 +125,23 @@
 可执行文件，报告从它的 stdout 原样返回）。
 
 - **入参**：`project`，可选 `frames`（默认 300，上限 100000）/ `dt`（默认 = 项目
-  固定步长）/ `include_scene`（默认 `false`）
+  固定步长）/ `include_scene`（默认 `false`）/ `screenshot`（默认 `false`，
+  需要 GPU）
 - **返回**（JSON 信封）：`exit_code`（0 干净 / 2 跑完但有脚本 error 日志或非有限
   变换）+ `report`（帧耗时分布 `frame_us`、实体/刚体计数、脚本日志计数与
-  `error_samples`、音频状态……字段契约见 [`无头运行.md`](无头运行.md)）；
-  `include_scene: true` 时另带 `scene_ron`（**跑完后**的场景 RON，可读回、可 diff
-  —— 观察物理落点 / 脚本改过的变换的出口）。
+  `error_samples`、音频状态、`screenshot` 机位……字段契约见
+  [`无头运行.md`](无头运行.md)）；`include_scene: true` 时另带 `scene_ron`
+  （**跑完后**的场景 RON，可读回、可 diff —— 观察物理落点 / 脚本改过的变换的
+  出口）；`screenshot: true` 时信封带 `{ "screenshot": { "bytes": n } }`，
+  **PNG 本体以 MCP `image` 内容块（base64）随结果返回** —— 视觉模型直接看到画面。
 - **语义**：每帧固定 dt、无输入、无墙钟依赖 —— 同一项目两次运行逐位一致
   （确定性回归的底座）。`report.ok` 为 `false` **不是工具失败**：问题表达在报告里
   （智能体读 `error_samples` 定位）；只有项目打不开（退出码 1）才是 `isError`。
+- **截图的取景**：自动拟合全场 + 顺光机位（同 CLI 默认），实际机位写在报告的
+  `screenshot` 节（`eye` / `target`，可复现）；只有一张图，不给相机参数开洞。
 - **闭环用法**：改（2/3/4/5）→ `project_check`（静态引用）→ `run_headless`
-  （动态实跑）→ 看 `report.ok` 与 `error_samples`。
+  （动态实跑）→ 看 `report.ok` 与 `error_samples`；调了渲染/材质再看
+  `screenshot` 的图。
 
 ---
 

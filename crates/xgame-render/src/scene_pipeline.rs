@@ -5,10 +5,24 @@
 //!
 //! # 着色模型
 //!
-//! 采用 **Blinn-Phong**（环境光 + 漫反射 + 半程向量高光），单帧最多
-//! [`MAX_LIGHTS`] 盏方向光 / 点光叠加。这不是 PBR——完整 PBR 需要 IBL 与
-//! 能量守恒，属于后续"材质系统"的范畴；这一版先把最要紧的三件事做对：
-//! **纹理真的被采样**、**高光真的存在**、**多盏灯真的能叠加**。
+//! 采用 **PBR（metallic-roughness 工作流）**：Cook-Torrance 的 GGX 分布 +
+//! Smith 几何 + Schlick 菲涅尔。glTF 的 `metallicFactor` / `roughnessFactor`
+//! 一路原样送进着色器，金属是有色反射、绝缘体有 4% 基础反射，粗糙度连续
+//! 控制高光形状 —— 这是"材质身份"的语义层，不再有"高光强度 / 光泽度"
+//! 这类翻译损耗。
+//!
+//! 两个**刻意的取舍**（防好心人翻案）：
+//!
+//! - **环境光是"均匀环境辐射"**：全局 `ambient` 直接当作 IBL 的最低阶近似
+//!   （漫反射按金属度分流、镜面按菲涅尔加权）。金属因此能反射环境色，但
+//!   看不出形状 —— 真环境反射（预过滤贴图 / 天空盒）留给后续轮次，出口
+//!   已经收在 `fs_main` 的环境项里。
+//! - **π 并进 radiance**：物理正确的漫反射带 `1/π`，但历史场景的光强是按
+//!   "Lambert 直乘"手调的（SampleScene 太阳 = 3.2）。照搬会把全场砍掉
+//!   3.14 倍、老场景集体欠曝，所以在光源侧乘 π 把观感还回来（详见
+//!   `fs_main` 里的"π 校准"注释）。
+//!
+//! 单帧最多 [`MAX_LIGHTS`] 盏方向光 / 点光叠加。
 //!
 //! # 绑定组布局
 //!
@@ -16,7 +30,8 @@
 //! group(0)  全局，整帧一份
 //!   binding 0  camera    uniform
 //!   binding 1  lights    uniform（环境光 + 光源数组）
-//!   binding 2  model     uniform（动态偏移：每个实体占一段）
+//!   binding 2  draw      uniform（动态偏移：每个 draw 占一段；模型矩阵 +
+//!                        蒙皮槽位 + 材质）
 //!   binding 3  shadow    texture_depth_2d（方向光阴影深度图）
 //!   binding 4  shadow_smp    comparison sampler
 //!   binding 5  shadow_ub     uniform（光源视图投影矩阵 + 偏置/开关）
@@ -24,11 +39,12 @@
 //! group(1)  材质，每个材质槽一份
 //!   binding 0  base color texture
 //!   binding 1  sampler
-//!   binding 2  material  uniform（反照率因子 + 高光参数）
 //! ```
 //!
 //! 材质绑定组**惰性创建并缓存**（键是 `GltfPrimitive::material_id`），
 //! 所以一次模型加载之后，每帧只是查表 + `set_bind_group`，不会重复建对象。
+//! **颜色 / 金属度 / 粗糙度不在这个绑定组里**——它们是逐 draw 的（实体级
+//! 材质覆盖），随 group(0) binding 2 的动态偏移走。
 //!
 //! # 阴影贴图
 //!
@@ -58,10 +74,18 @@ use crate::gltf_loader::{Bounds, GltfMesh, GltfPrimitive, GltfVertex, MaterialPa
 
 /// 每帧最多渲染的实体数量。
 ///
-/// 模型 uniform 缓冲按这个上限一次性分配（4096 × 对齐后 stride ≈ 1~2 MB 显存，
-/// 常驻可忽略）。超出部分仍然静默不画 —— 真到这个规模，该上的是实例化/分批，
-/// 而不是继续放大这张表。
+/// 绘制数据缓冲按 [`MAX_RENDER_DRAWS`] 一次性分配（≈2 MB 显存，常驻可忽略）。
+/// 超出部分仍然静默不画 —— 真到这个规模，该上的是实例化/分批，而不是继续
+/// 放大这张表。
 const MAX_RENDER_ENTITIES: usize = 4096;
+
+/// 每帧最多提交的**图元绘制**（draw）数量。
+///
+/// 实体与 draw 不是一对一：一个多材质的 glTF 网格（材质不同 → 图元不同）
+/// 单只实体就能出十几个 draw，材质覆盖后每个图元还要各自携带材质参数。
+/// 给实体上限的 2 倍余量；超出静默丢弃（动态偏移越过缓冲会在校验层整帧
+/// 报错，宁缺勿炸）。
+const MAX_RENDER_DRAWS: usize = MAX_RENDER_ENTITIES * 2;
 
 /// 每个蒙皮槽位预留的骨骼数（矩阵）。**必须与 WGSL 的 `BONES_PER_SLOT` 一致。**
 ///
@@ -183,16 +207,26 @@ struct ShadowUniform {
     params: [f32; 4],
 }
 
+/// 一次 draw 的全部逐 draw 数据：模型矩阵 + 蒙皮槽位 + 材质。
+///
+/// 按动态偏移在 `draw_buffer` 里一段一个 draw —— 网格有几个图元就有几个 draw。
+/// 材质之所以放这里而不是"每材质一个绑定组"：**实体级材质覆盖**
+/// （[`xgame_core::MaterialOverride`]）让同一份 glTF 材质在不同实体上可以有
+/// 不同的颜色 / 金属度，材质参数因此是逐 draw 的而不是逐资产的；旧方案
+/// （贴图 + 参数打包进绑定组、按 material_id 缓存）在逐实体覆盖下要么每次
+/// 改色重建绑定组、要么缓存键随数值无限膨胀。
+///
+/// 字节布局与两个 WGSL 着色器里的 `DrawUniform` 一一对应（`material` 在
+/// WGSL 侧展平为 `base_color` / `material` 两个 vec4）。改字段顺序 = 改
+/// 着色器 ABI，两边必须一起改。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct ModelUniform {
+struct DrawUniform {
     model: [[f32; 4]; 4],
     /// `.x` = 蒙皮槽位 + 1（0 = 不蒙皮）。其余 3 个分量预留。
-    ///
-    /// 放在 model uniform 里而不是单独绑一个"每实体蒙皮索引"缓冲：这个结构
-    /// 已经按动态偏移按实体排布，多 16 字节不增加任何绑定或命令，画哪个实体
-    /// 用哪根骨头天然跟着同一次 `set_bind_group` 走。
     params: [u32; 4],
+    /// 本 draw 的有效材质（模型自带参数 ⊕ 实体级覆盖后的结果）。
+    material: MaterialUniform,
 }
 
 #[repr(C)]
@@ -200,26 +234,31 @@ struct ModelUniform {
 struct MaterialUniform {
     /// rgb = 基础色因子，a = 不透明度。
     base_color: [f32; 4],
-    /// x = 高光强度，y = 光泽度（Phong 指数），zw 预留。
+    /// x = 金属度（0 = 绝缘体 / 1 = 金属），y = 粗糙度，zw 预留。
     params: [f32; 4],
 }
 
+/// 粗糙度下限。GGX 的 D 项在 α→0（完美镜面）时发散：除以零 → NaN 传染
+/// 整帧（一个 `roughness: 0.0` 的材质能黑掉整个画面）。0.04 的镜面已经
+/// 光滑到看不出和 0 的区别，但分母永远安全。
+pub const MIN_ROUGHNESS: f32 = 0.04;
+
 impl MaterialUniform {
-    /// 把 glTF 的 metallic-roughness 参数翻译成 Blinn-Phong 的两个经典参数。
+    /// 原样携带 glTF 的 metallic-roughness 参数，PBR BRDF 直接消费。
     ///
-    /// 两处换算都是为了"看起来对"而不是"物理正确"：
-    /// - **高光强度**：绝缘体的菲涅尔反射率约 4%，金属接近全反射，所以在
-    ///   `0.04 ~ 0.6` 之间按金属度插值（上限压在 0.6，否则全金属模型会白到失形）。
-    /// - **光泽度**：`2/r⁴ - 2` 是 Blinn-Phong 指数与 GGX 粗糙度之间的常用近似，
-    ///   再夹到 `[2, 512]`——下界防止 `pow(x, 0)` 出现未定义值，上界防止
-    ///   高光小到看不见还白白吃算力。
+    /// 历史上这里做的是"翻译成 Blinn-Phong 的 specular/shininess"——
+    /// 那次换算为了"看起来对"牺牲了材料身份（金属度成了高光强度、
+    /// 粗糙度成了光泽度），反射行为必然错；换成 Cook-Torrance 之后
+    /// 两个值就是自有语义，只做安全夹取。
     fn from_params(p: &MaterialParams) -> Self {
-        let specular = 0.04 + p.metallic.clamp(0.0, 1.0) * 0.56;
-        let r = p.roughness.clamp(0.02, 1.0);
-        let shininess = (2.0 / (r * r * r * r) - 2.0).clamp(2.0, 512.0);
         Self {
             base_color: p.base_color,
-            params: [specular, shininess, 0.0, 0.0],
+            params: [
+                p.metallic.clamp(0.0, 1.0),
+                p.roughness.clamp(MIN_ROUGHNESS, 1.0),
+                0.0,
+                0.0,
+            ],
         }
     }
 }
@@ -345,11 +384,16 @@ pub fn fit_directional_shadow(direction: Vec3, scene: Bounds) -> Option<Mat4> {
 
 const SCENE_VERT_SRC: &str = r#"
 struct CameraUniform { view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
-// params.x = 蒙皮槽位 + 1（0 = 不蒙皮，走原始顶点）。
-struct ModelUniform  { model: mat4x4<f32>, params: vec4<u32> }
+// 逐 draw 数据：模型矩阵 + 蒙皮槽位（params.x）+ 材质（base_color / material）。
+struct DrawUniform  {
+    model: mat4x4<f32>,
+    params: vec4<u32>,
+    base_color: vec4<f32>,
+    material: vec4<f32>,
+}
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
-@group(0) @binding(2) var<uniform> model: ModelUniform;
+@group(0) @binding(2) var<uniform> draw: DrawUniform;
 // 所有动画实体的骨骼矩阵排在同一条存储缓冲里，按槽位分段（见 BONES_PER_SLOT）。
 @group(0) @binding(6) var<storage, read> bones: array<mat4x4<f32>>;
 
@@ -394,9 +438,9 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
     // 蒙皮：skinned = Σ wₖ · boneₖ · position（权重归一化后）。
     // 骨骼矩阵是**模型空间**里的变换（关节全局 × 逆绑定矩阵），所以这里不碰
-    // model.model —— 世界变换照旧在下面统一做，与非蒙皮路径完全共用。
+    // draw.model —— 世界变换照旧在下面统一做，与非蒙皮路径完全共用。
     // params.x == 0 时整段跳过：绑定姿态 = 原始顶点，画面与不开动画逐位一致。
-    let skin_slot = model.params.x;
+    let skin_slot = draw.params.x;
     if (skin_slot > 0u) {
         let wsum = input.weights.x + input.weights.y + input.weights.z + input.weights.w;
         if (wsum > 0.0) {
@@ -411,8 +455,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
         }
     }
 
-    let world_pos = model.model * vec4<f32>(pos, 1.0);
-    let m = model.model;
+    let world_pos = draw.model * vec4<f32>(pos, 1.0);
+    let m = draw.model;
     let m33 = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
     let normal_mat = transpose(mat3_inverse(m33));
     var out: VertexOutput;
@@ -431,17 +475,23 @@ const MAX_LIGHTS: u32 = 8u;
 struct CameraUniform { view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
 struct GpuLight      { pos_type: vec4<f32>, color_intensity: vec4<f32>, shadow_params: vec4<f32> }
 struct LightsUniform { ambient: vec4<f32>, lights: array<GpuLight, 8> }
-struct MaterialUniform { base_color: vec4<f32>, params: vec4<f32> }
+// 与顶点着色器同一份逐 draw 数据；本阶段只用 base_color / material 两个字段。
+struct DrawUniform  {
+    model: mat4x4<f32>,
+    params: vec4<u32>,
+    base_color: vec4<f32>,
+    material: vec4<f32>,
+}
 struct ShadowUniform { light_view_proj: mat4x4<f32>, params: vec4<f32> }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> lights: LightsUniform;
+@group(0) @binding(2) var<uniform> draw: DrawUniform;
 @group(0) @binding(3) var shadow_tex: texture_depth_2d;
 @group(0) @binding(4) var shadow_smp: sampler_comparison;
 @group(0) @binding(5) var<uniform> shadow: ShadowUniform;
 @group(1) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(1) @binding(1) var base_color_smp: sampler;
-@group(1) @binding(2) var<uniform> material: MaterialUniform;
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
@@ -478,17 +528,54 @@ fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
     return sum / 9.0;
 }
 
+// --- PBR（metallic-roughness 工作流）：GGX 分布 + Smith 几何 + Schlick 菲涅尔 ---
+// 三个函数是 Cook-Torrance 的标准拼装（对照 Filament / learnopengl 的参考实现），
+// 除了 fs_main 里「π 校准」一节注明的那处，没有自定义魔改。
+const PI: f32 = 3.141592653589793;
+
+fn distribution_ggx(n_dot_h: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * d * d, 1e-6);
+}
+
+// Schlick-GGX（直接光的 k = α/2 形式）拆成两条可见性函数相乘。
+fn smith_visibility(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
+    let k = alpha * 0.5;
+    let gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
+    let gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
+    return gv * gl;
+}
+
+fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - clamp(cos_theta, 0.0, 1.0), 5.0);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 反照率 = 贴图 × 材质因子 × 顶点色（三者都是"乘法叠加"的直觉语义）
     let sampled = textureSample(base_color_tex, base_color_smp, input.tex_coord);
-    let albedo = sampled.rgb * material.base_color.rgb * input.color;
-    let alpha = sampled.a * material.base_color.a;
+    let albedo = sampled.rgb * draw.base_color.rgb * input.color;
+    let alpha = sampled.a * draw.base_color.a;
 
-    let N = normalize(input.world_normal);
-    let V = normalize(camera.camera_pos.xyz - input.world_pos);
+    let metallic = draw.material.x;
+    let roughness = draw.material.y;
+    let n = normalize(input.world_normal);
+    let v = normalize(camera.camera_pos.xyz - input.world_pos);
+    let n_dot_v = max(dot(n, v), 1e-4);
 
-    var color = lights.ambient.rgb;
+    // 绝缘体的基础反射率 4%；金属的 F0 = 自身反照率（有色镜面反射）。
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+    let alpha_g = roughness * roughness;
+
+    // 环境项：把全局 ambient 当作**均匀环境辐射**（IBL 的最低阶近似）。
+    // - 漫反射环境按金属度分流：金属没有漫反射；
+    // - 镜面环境按菲涅尔加权：金属靠它保住"反射环境色"这条最重要的感知
+    //   线索（均匀环境看不出形状，但颜色对）。
+    // 真环境反射（预过滤贴图 / 天空盒）等后续轮次，出口已经收在这里。
+    let f_env = fresnel_schlick(n_dot_v, f0);
+    var color = lights.ambient.rgb * (albedo * (1.0 - metallic) + f_env);
+
     let count = min(u32(lights.ambient.a), MAX_LIGHTS);
     let shadows_on = shadow.params.z > 0.5;
 
@@ -496,33 +583,47 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         if (i >= count) { break; }
         let light = lights.lights[i];
 
-        var L: vec3<f32>;
+        var l: vec3<f32>;
         var atten = 1.0;
         if (light.pos_type.w < 0.5) {
             // 方向光：pos_type.xyz 是光线传播方向，入射方向取反
-            L = normalize(-light.pos_type.xyz);
+            l = normalize(-light.pos_type.xyz);
         } else {
             // 点光：按到光源的距离做平滑衰减（1/(1+kd+kd²) 的标准近似）
             let to_light = light.pos_type.xyz - input.world_pos;
             let dist = length(to_light);
-            L = to_light / max(dist, 1e-4);
+            l = to_light / max(dist, 1e-4);
             atten = 1.0 / (1.0 + 0.09 * dist + 0.032 * dist * dist);
         }
 
-        let ndotl = max(dot(N, L), 0.0);
-        let radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
+        let n_dot_l = max(dot(n, l), 0.0);
+        // π 校准（刻意的）：历史场景的 intensity 是按"Lambert 直乘"手调的
+        // （SampleScene 的太阳是 3.2）。物理正确的漫反射带 1/π，照搬会把
+        // 全场砍掉 3.14 倍、老场景集体欠曝。这里把 π 并进 radiance：漫反射
+        // 回到"intensity × 白面 ≈ 1.0"的老观感，镜面项一并受益（高光本来
+        // 就该过曝，由后续 tonemap 收敛）。
+        let radiance = light.color_intensity.rgb * light.color_intensity.a * atten * PI;
 
         // 只有被标记的那盏灯查阴影图；其余灯（含未受光的背光面）跳过采样。
         var shade = 1.0;
-        if (shadows_on && light.shadow_params.x > 0.5 && ndotl > 0.0) {
-            shade = shadow_factor(input.world_pos, ndotl);
+        if (shadows_on && light.shadow_params.x > 0.5 && n_dot_l > 0.0) {
+            shade = shadow_factor(input.world_pos, n_dot_l);
         }
 
-        // Blinn-Phong 高光：用半程向量 H 代替反射向量，比 Phong 更快也更稳
-        let H = normalize(L + V);
-        let spec = pow(max(dot(N, H), 0.0), material.params.y) * material.params.x * ndotl;
+        let h = normalize(l + v);
+        let n_dot_h = max(dot(n, h), 0.0);
+        let v_dot_h = max(dot(v, h), 0.0);
 
-        color = color + (albedo * ndotl + spec) * radiance * shade;
+        let d_term = distribution_ggx(n_dot_h, alpha_g);
+        let g_term = smith_visibility(n_dot_v, n_dot_l, alpha_g);
+        let f_term = fresnel_schlick(v_dot_h, f0);
+        let specular = d_term * g_term * f_term / max(4.0 * n_dot_v * n_dot_l, 1e-4);
+
+        // 漫反射：能量守恒地把分给镜面反射的部分扣掉（1-F），金属没有漫反射。
+        let kd = (vec3<f32>(1.0) - f_term) * (1.0 - metallic);
+        let diffuse = kd * albedo / PI;
+
+        color = color + (diffuse + specular) * radiance * n_dot_l * shade;
     }
 
     return vec4<f32>(color, alpha);
@@ -533,10 +634,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 /// 深度图只关心深度，管线里 `fragment: None`。
 const SHADOW_VERT_SRC: &str = r#"
 struct ShadowUniform { light_view_proj: mat4x4<f32>, params: vec4<f32> }
-struct ModelUniform  { model: mat4x4<f32>, params: vec4<u32> }
+// 与主 pass 同一份逐 draw 数据；阴影只要 model / params 两个字段，
+// 但结构体声明保持与缓冲布局一致（字段齐全，未用的不读取）。
+struct DrawUniform  {
+    model: mat4x4<f32>,
+    params: vec4<u32>,
+    base_color: vec4<f32>,
+    material: vec4<f32>,
+}
 
 @group(0) @binding(0) var<uniform> shadow: ShadowUniform;
-@group(0) @binding(1) var<uniform> model: ModelUniform;
+@group(0) @binding(1) var<uniform> draw: DrawUniform;
 @group(0) @binding(2) var<storage, read> bones: array<mat4x4<f32>>;
 
 const BONES_PER_SLOT: u32 = 256u;
@@ -550,7 +658,7 @@ fn vs_shadow(
     // 阴影也走蒙皮：不然跑动的角色会投出一具绑定姿态的静止影子。
     // 与主 pass 同一套分支（params.x == 0 → 原始顶点），两边永远一致。
     var pos = position;
-    let skin_slot = model.params.x;
+    let skin_slot = draw.params.x;
     if (skin_slot > 0u) {
         let wsum = weights.x + weights.y + weights.z + weights.w;
         if (wsum > 0.0) {
@@ -563,7 +671,7 @@ fn vs_shadow(
             pos = (skin * vec4<f32>(position, 1.0)).xyz;
         }
     }
-    let world_pos = model.model * vec4<f32>(pos, 1.0);
+    let world_pos = draw.model * vec4<f32>(pos, 1.0);
     return shadow.light_view_proj * world_pos;
 }
 "#;
@@ -571,14 +679,6 @@ fn vs_shadow(
 // ---------------------------------------------------------------------------
 // ScenePipeline
 // ---------------------------------------------------------------------------
-
-/// 一个材质槽的 GPU 资源。
-struct MaterialBinding {
-    bind_group: wgpu::BindGroup,
-    /// 材质 uniform 缓冲。`BindGroup` 内部其实已经持有引用，这里显式留着是为了
-    /// 语义清晰——删了这个槽就一起释放。
-    _uniform: wgpu::Buffer,
-}
 
 /// 共享 3D 场景渲染管线。
 ///
@@ -598,7 +698,7 @@ pub struct ScenePipeline {
 
     camera_buffer: wgpu::Buffer,
     lights_buffer: wgpu::Buffer,
-    model_buffer: wgpu::Buffer,
+    draw_buffer: wgpu::Buffer,
     global_bind_group: wgpu::BindGroup,
 
     // -- 蒙皮 --
@@ -607,12 +707,12 @@ pub struct ScenePipeline {
     bones_buffer: wgpu::Buffer,
     /// `bones_buffer` 当前能装下的槽位数。
     bone_slots: u32,
-    /// 骨骼矩阵复用暂存（与 `model_staging` 同理：一次 write 搞定整段）。
+    /// 骨骼矩阵复用暂存（与 `draw_staging` 同理：一次 write 搞定整段）。
     bone_staging: Vec<[f32; 16]>,
 
     // -- 阴影 --
-    /// 阴影 pass 的布局：binding 0 = 阴影 uniform，binding 1 = 模型矩阵（动态偏移），
-    /// binding 2 = 蒙皮骨骼。
+    /// 阴影 pass 的布局：binding 0 = 阴影 uniform，binding 1 = draw 数据
+    /// （动态偏移，阴影只需要其中的模型矩阵），binding 2 = 蒙皮骨骼。
     ///
     /// 刻意与 `global_bgl` **分开**：阴影 pass 一边把深度画进 `shadow_view`、
     /// 一边又要在 group(0) 里绑这张图 —— wgpu 会把"同一资源既当渲染目标又当
@@ -621,7 +721,7 @@ pub struct ScenePipeline {
     shadow_pipeline: wgpu::RenderPipeline,
     /// 阴影 uniform（光源视图投影 + 偏置）。主 pass 与阴影 pass 都读它。
     shadow_buffer: wgpu::Buffer,
-    /// 阴影 pass 用的绑定组（阴影 uniform + 模型段）。模型缓冲固定不变，建一次即可。
+    /// 阴影 pass 用的绑定组（阴影 uniform + draw 段）。draw 缓冲固定不变，建一次即可。
     shadow_pass_bind_group: wgpu::BindGroup,
     /// 深度比较采样器（PCF）。
     shadow_sampler: wgpu::Sampler,
@@ -630,8 +730,11 @@ pub struct ScenePipeline {
     shadow_view: wgpu::TextureView,
     shadow_resolution: u32,
 
-    /// `material_id` → 材质槽 GPU 资源。
-    material_cache: HashMap<u64, MaterialBinding>,
+    /// `material_id` → 材质绑定组（贴图 + 采样器）。
+    ///
+    /// 颜色参数不在这里 —— 它们逐 draw 变化（实体级材质覆盖），随
+    /// `draw_buffer` 每帧上传。这张表因此只随**资产**增长，与实体数无关。
+    material_cache: HashMap<u64, wgpu::BindGroup>,
 
     /// 主 pass 的采样数（1 = 关闭 MSAA）。
     ///
@@ -641,8 +744,8 @@ pub struct ScenePipeline {
 
     uniform_alignment: u64,
 
-    /// 模型矩阵的**复用暂存**：把所有实体的 `ModelUniform` 按 `uniform_alignment`
-    /// 排布在这里，最后一次性写进 `model_buffer`。
+    /// 逐 draw uniform 的**复用暂存**：把所有 `DrawUniform` 按 `uniform_alignment`
+    /// 排布在这里，最后一次性写进 `draw_buffer`。
     ///
     /// 为什么会需要它：`Queue::write_buffer` 每调一次都要从 staging belt 上领一段、
     /// 再记一条拷贝命令。逐实体调用的话，一个 256 实体的场景每帧就是 256 次小分配 +
@@ -650,7 +753,7 @@ pub struct ScenePipeline {
     ///
     /// 复用同一个 `Vec` 是为了稳态零分配：`clear()` + 按需 `resize(n, 0)` 会把要用的
     /// 那段显式清零，容量留着下次接着用。
-    model_staging: Vec<u8>,
+    draw_staging: Vec<u8>,
 }
 
 impl ScenePipeline {
@@ -686,10 +789,12 @@ impl ScenePipeline {
                     },
                     count: None,
                 },
-                // 2: 模型矩阵（动态偏移：一个实体一段，避免每个实体一个绑定组）
+                // 2: 逐 draw 数据（模型矩阵 + 蒙皮槽位 + 材质。动态偏移：一个
+                //    draw 一段，避免每个实体/图元各建一个绑定组）。片元阶段
+                //    读材质（base_color / metallic / roughness）。
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
@@ -760,16 +865,6 @@ impl ScenePipeline {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
             ],
         });
 
@@ -830,11 +925,11 @@ impl ScenePipeline {
         });
 
         let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let model_buffer_size = MAX_RENDER_ENTITIES as u64 * uniform_alignment;
-        let model_buffer_init = vec![0u8; model_buffer_size as usize];
-        let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_model_ub"),
-            contents: &model_buffer_init,
+        let draw_buffer_size = MAX_RENDER_DRAWS as u64 * uniform_alignment;
+        let draw_buffer_init = vec![0u8; draw_buffer_size as usize];
+        let draw_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_draw_ub"),
+            contents: &draw_buffer_init,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -878,7 +973,7 @@ impl ScenePipeline {
             &global_bgl,
             &camera_buffer,
             &lights_buffer,
-            &model_buffer,
+            &draw_buffer,
             &shadow_view,
             &shadow_sampler,
             &shadow_buffer,
@@ -889,7 +984,7 @@ impl ScenePipeline {
             device,
             &shadow_bgl,
             &shadow_buffer,
-            &model_buffer,
+            &draw_buffer,
             &bones_buffer,
         );
 
@@ -904,7 +999,7 @@ impl ScenePipeline {
             material_bgl,
             camera_buffer,
             lights_buffer,
-            model_buffer,
+            draw_buffer,
             global_bind_group,
             bones_buffer,
             bone_slots: MIN_BONE_SLOTS,
@@ -920,7 +1015,7 @@ impl ScenePipeline {
             material_cache: HashMap::new(),
             sample_count,
             uniform_alignment,
-            model_staging: Vec::new(),
+            draw_staging: Vec::new(),
         }
     }
 
@@ -950,11 +1045,11 @@ impl ScenePipeline {
         (texture, view)
     }
 
-    fn model_binding(buffer: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
+    fn draw_binding(buffer: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
         wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer,
             offset: 0,
-            size: std::num::NonZeroU64::new(std::mem::size_of::<ModelUniform>() as u64),
+            size: std::num::NonZeroU64::new(std::mem::size_of::<DrawUniform>() as u64),
         })
     }
 
@@ -964,7 +1059,7 @@ impl ScenePipeline {
         layout: &wgpu::BindGroupLayout,
         camera_buffer: &wgpu::Buffer,
         lights_buffer: &wgpu::Buffer,
-        model_buffer: &wgpu::Buffer,
+        draw_buffer: &wgpu::Buffer,
         shadow_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
         shadow_buffer: &wgpu::Buffer,
@@ -976,7 +1071,7 @@ impl ScenePipeline {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: lights_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: Self::model_binding(model_buffer) },
+                wgpu::BindGroupEntry { binding: 2, resource: Self::draw_binding(draw_buffer) },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(shadow_view),
@@ -995,7 +1090,7 @@ impl ScenePipeline {
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         shadow_buffer: &wgpu::Buffer,
-        model_buffer: &wgpu::Buffer,
+        draw_buffer: &wgpu::Buffer,
         bones_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1003,7 +1098,7 @@ impl ScenePipeline {
             layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: Self::model_binding(model_buffer) },
+                wgpu::BindGroupEntry { binding: 1, resource: Self::draw_binding(draw_buffer) },
                 wgpu::BindGroupEntry { binding: 2, resource: bones_buffer.as_entire_binding() },
             ],
         })
@@ -1028,7 +1123,7 @@ impl ScenePipeline {
             &self.global_bgl,
             &self.camera_buffer,
             &self.lights_buffer,
-            &self.model_buffer,
+            &self.draw_buffer,
             &self.shadow_view,
             &self.shadow_sampler,
             &self.shadow_buffer,
@@ -1065,7 +1160,7 @@ impl ScenePipeline {
             &self.global_bgl,
             &self.camera_buffer,
             &self.lights_buffer,
-            &self.model_buffer,
+            &self.draw_buffer,
             &self.shadow_view,
             &self.shadow_sampler,
             &self.shadow_buffer,
@@ -1075,7 +1170,7 @@ impl ScenePipeline {
             device,
             &self.shadow_bgl,
             &self.shadow_buffer,
-            &self.model_buffer,
+            &self.draw_buffer,
             &self.bones_buffer,
         );
     }
@@ -1253,14 +1348,13 @@ impl ScenePipeline {
     /// 惰性创建：第一次遇到某个 `material_id` 时建，之后整帧乃至整局复用。
     /// 这也是为什么材质 ID 要全局唯一——不同模型里即使材质完全一样，
     /// 各自持有自己的槽位，不会因为缓存键相同而串台。
+    ///
+    /// 绑定组里只有**贴图 + 采样器**：颜色 / 金属度 / 粗糙度是逐 draw 的
+    /// （实体级覆盖），走 `draw_buffer` 的动态偏移，不在这里。（曾经这里
+    /// 还打包一个材质 uniform —— 那种"按资产缓存参数"的形态救不了
+    /// 逐实体覆盖：同一份材质的两个实体可以要不同颜色。）
     fn material_binding(&mut self, device: &wgpu::Device, prim: &GltfPrimitive) -> &wgpu::BindGroup {
         if !self.material_cache.contains_key(&prim.material_id) {
-            let uniform = MaterialUniform::from_params(&prim.material);
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("scene_material_ub"),
-                contents: bytemuck::bytes_of(&uniform),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
             // 这里对 `self.material_bgl`（不可变）与 `self.material_cache`（可变）的
             // 借用不重叠——layout 的借用只在 create_bind_group 这一句里活着，
             // 返回的 BindGroup 持有的是自己的资源引用，不挂在 self 上。
@@ -1276,16 +1370,11 @@ impl ScenePipeline {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&prim.texture.sampler),
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: buffer.as_entire_binding(),
-                    },
                 ],
             });
-            self.material_cache
-                .insert(prim.material_id, MaterialBinding { bind_group, _uniform: buffer });
+            self.material_cache.insert(prim.material_id, bind_group);
         }
-        &self.material_cache[&prim.material_id].bind_group
+        &self.material_cache[&prim.material_id]
     }
 
     /// 执行一帧场景渲染。
@@ -1384,22 +1473,27 @@ impl ScenePipeline {
             }),
         );
 
-        // --- 收集绘制项，同时把所有模型矩阵攒进 staging ---
+        // --- 收集绘制项，同时把所有 draw 数据攒进 staging ---
         // 不透明与半透明分开收集：半透明要按到相机的距离从远到近排序，
         // 否则两个半透明物体前后叠在一起时，谁的 alpha 生效取决于绘制顺序。
+        //
+        // 列表里的 usize 是 **draw 槽位**（一个图元一个槽），不是实体下标：
+        // 材质是逐图元的（实体级覆盖让同一模型在不同实体上颜色不同），
+        // 每个图元都要有自己的一段 uniform。
         let mut opaque: Vec<(usize, &GltfPrimitive)> = Vec::new();
         let mut blended: Vec<(f32, usize, &GltfPrimitive)> = Vec::new();
 
         // 上一帧的残留先清掉。`clear()` 只把长度归零，下面按需 `resize(n, 0)` 会把
-        // 要用的那段显式清零 —— 于是"没被任何实体用到的槽位"也是确定性的 0，
+        // 要用的那段显式清零 —— 于是"没被任何 draw 用到的槽位"也是确定性的 0，
         // 而不是上一帧的旧矩阵（虽然那些槽位不会被绘制，但确定性更好排查问题）。
-        self.model_staging.clear();
+        self.draw_staging.clear();
         // 骨骼暂存同理：本帧每个动画实体占一个新槽，槽位随实体序单调递增。
         self.bone_staging.clear();
         let mut bone_slots_used = 0u32;
+        let mut draw_slots_used = 0usize;
 
         for (i, entity) in entities.iter().enumerate() {
-            if i >= MAX_RENDER_ENTITIES {
+            if i >= MAX_RENDER_ENTITIES || draw_slots_used >= MAX_RENDER_DRAWS {
                 break;
             }
             if entity.model.is_empty() {
@@ -1502,36 +1596,49 @@ impl ScenePipeline {
                 }
             }
 
-            // 攒进 staging（而不是立刻 write_buffer）：偏移是 `i * alignment`，
-            // 实体按 i 递增遍历，所以只需要往后长。最后一次性上传。
-            let uniform = ModelUniform {
-                model: world.to_cols_array_2d(),
-                params,
-            };
-            let bytes = bytemuck::bytes_of(&uniform);
-            let offset = i * self.uniform_alignment as usize;
-            if self.model_staging.len() < offset + bytes.len() {
-                self.model_staging.resize(offset + bytes.len(), 0);
-            }
-            self.model_staging[offset..offset + bytes.len()].copy_from_slice(bytes);
-
+            // -- 攒本实体的每个图元 --
+            //
+            // 模型矩阵 / 蒙皮槽位是逐实体的，材质是逐图元的：对每个图元写一段
+            // `DrawUniform`（偏移 = draw 槽位 * alignment，按遍历顺序单调往后长，
+            // 最后一次性上传 —— 与骨头同款）。
+            //
             // 半透明排序用的是**世界坐标**——实体被父节点挪过位置之后，
             // 局部坐标早就不是它在屏幕上的深度了。
             let world_pos = Vec3::new(world.w_axis.x, world.w_axis.y, world.w_axis.z);
             let dist = (world_pos - *camera_pos).length_squared();
             for prim in &mesh.primitives {
-                if prim.material.blend {
-                    blended.push((dist, i, prim));
+                if draw_slots_used >= MAX_RENDER_DRAWS {
+                    break;
+                }
+                let slot = draw_slots_used;
+                draw_slots_used += 1;
+
+                // 有效材质 = 模型自带参数 ⊕ 实体级覆盖（覆盖是字段级的）。
+                let effective = prim.material.merged_with(entity.material.as_ref());
+                let uniform = DrawUniform {
+                    model: world.to_cols_array_2d(),
+                    params,
+                    material: MaterialUniform::from_params(&effective),
+                };
+                let bytes = bytemuck::bytes_of(&uniform);
+                let offset = slot * self.uniform_alignment as usize;
+                if self.draw_staging.len() < offset + bytes.len() {
+                    self.draw_staging.resize(offset + bytes.len(), 0);
+                }
+                self.draw_staging[offset..offset + bytes.len()].copy_from_slice(bytes);
+
+                if effective.blend {
+                    blended.push((dist, slot, prim));
                 } else {
-                    opaque.push((i, prim));
+                    opaque.push((slot, prim));
                 }
             }
         }
 
-        // 一次写完整段模型矩阵（见 `model_staging` 的说明）。
+        // 一次写完整段 draw 数据（见 `draw_staging` 的说明）。
         // 空场景（一个可绘制实体都没有）时什么都不用写。
-        if !self.model_staging.is_empty() {
-            queue.write_buffer(&self.model_buffer, 0, &self.model_staging);
+        if !self.draw_staging.is_empty() {
+            queue.write_buffer(&self.draw_buffer, 0, &self.draw_staging);
         }
 
         // 骨骼：容量不够先翻倍重建（连带换两个绑定组，必须在开 pass 之前），
@@ -1570,8 +1677,8 @@ impl ScenePipeline {
                 ..Default::default()
             });
             spass.set_pipeline(&self.shadow_pipeline);
-            for (i, prim) in &opaque {
-                let offset = *i as u64 * self.uniform_alignment;
+            for (slot, prim) in &opaque {
+                let offset = *slot as u64 * self.uniform_alignment;
                 spass.set_bind_group(0, &self.shadow_pass_bind_group, &[offset as u32]);
                 spass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
                 spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
@@ -1610,8 +1717,8 @@ impl ScenePipeline {
 
         // 不透明：写深度
         rpass.set_pipeline(&self.pipeline);
-        for (i, prim) in &opaque {
-            let offset = *i as u64 * self.uniform_alignment;
+        for (slot, prim) in &opaque {
+            let offset = *slot as u64 * self.uniform_alignment;
             rpass.set_bind_group(0, &self.global_bind_group, &[offset as u32]);
             let material = self.material_binding(device, prim);
             rpass.set_bind_group(1, material, &[]);
@@ -1623,8 +1730,8 @@ impl ScenePipeline {
         // 半透明：不写深度，远→近
         if !blended.is_empty() {
             rpass.set_pipeline(&self.blend_pipeline);
-            for (_, i, prim) in &blended {
-                let offset = *i as u64 * self.uniform_alignment;
+            for (_, slot, prim) in &blended {
+                let offset = *slot as u64 * self.uniform_alignment;
                 rpass.set_bind_group(0, &self.global_bind_group, &[offset as u32]);
                 let material = self.material_binding(device, prim);
                 rpass.set_bind_group(1, material, &[]);
@@ -1643,6 +1750,61 @@ mod tests {
     fn project(m: &Mat4, p: Vec3) -> Vec3 {
         let clip = *m * p.extend(1.0);
         clip.truncate() / clip.w
+    }
+
+    // -- 材质 uniform（metallic-roughness 原样过桥）--
+
+    /// 材质 uniform 必须**原样**携带 metallic / roughness —— PBR BRDF 直接
+    /// 消费这两个值。旧 Blinn-Phong 实现把它们翻译成"高光强度 + 光泽度"
+    /// （metallic=1 → params[0]=0.6），这条测试在那套实现下必然红。
+    #[test]
+    fn material_uniform_carries_metallic_and_roughness_untouched() {
+        let p = MaterialParams {
+            base_color: [0.2, 0.4, 0.6, 1.0],
+            metallic: 1.0,
+            roughness: 0.2,
+            blend: false,
+        };
+        let u = MaterialUniform::from_params(&p);
+        assert_eq!(u.base_color, p.base_color);
+        assert!(
+            (u.params[0] - 1.0).abs() < 1e-6,
+            "metallic 应当原样保留，收到 {:?}",
+            u.params
+        );
+        assert!(
+            (u.params[1] - 0.2).abs() < 1e-6,
+            "roughness 应当原样保留，收到 {:?}",
+            u.params
+        );
+    }
+
+    /// 安全夹取：metallic 夹到 [0,1]；roughness 下限不给 0 —— GGX 的 D 项
+    /// 在 α→0 时发散（除以零 → NaN 传染整帧），粗糙度 0 的材质必须变成
+    /// "很光滑"而不是"算崩"。
+    #[test]
+    fn material_uniform_clamps_metallic_and_keeps_roughness_alive() {
+        let p = MaterialParams {
+            metallic: 2.5,
+            roughness: 0.0,
+            ..Default::default()
+        };
+        let u = MaterialUniform::from_params(&p);
+        assert!((u.params[0] - 1.0).abs() < 1e-6, "metallic 上夹 1.0");
+        assert!(
+            u.params[1] > 0.0,
+            "粗糙度必须有正下限（GGX 除零防护），收到 {:?}",
+            u.params
+        );
+
+        let p = MaterialParams {
+            metallic: -1.0,
+            roughness: 9.0,
+            ..Default::default()
+        };
+        let u = MaterialUniform::from_params(&p);
+        assert!(u.params[0] >= 0.0, "metallic 下夹 0.0");
+        assert!(u.params[1] <= 1.0, "roughness 上夹 1.0");
     }
 
     // -- Bounds --

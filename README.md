@@ -101,8 +101,12 @@ core ← math ← {render, physics} ← editor / game
 
 **渲染**（`xgame-render`，编辑器与独立游戏共用同一条管线）
 
-- glTF 模型加载：顶点 / 法线 / 顶点色 / UV + base color 贴图 + PBR 材质因子
-- Blinn-Phong 光照：环境光 + 漫反射 + 半程向量高光，单帧最多 8 盏方向光 / 点光
+- glTF 模型加载：顶点 / 法线 / 顶点色 / UV + base color 贴图 + metallic / roughness 材质因子
+- **PBR 着色（Cook-Torrance）**：GGX 分布 + Smith 几何 + Schlick 菲涅尔，金属度工作流；
+  单帧最多 8 盏方向光 / 点光。环境项是均匀环境近似（IBL 未做，金属偏暗属已知限制）。
+  灯强度按"radiance = intensity × π"标定，换模型不换亮度
+- **逐实体材质覆盖**（`Entity.material`）：base_color 乘子 / metallic / roughness 字段级
+  覆盖，Inspector 可调、随场景落盘 —— 内置白模也能上色、金属化
 - 光照是**场景级数据**（`Scene::lights` / `Scene::ambient`），随场景一起存盘
 - **方向光阴影贴图**：`Light::casts_shadow` 打开后，那盏方向光会先渲染一遍场景深度，
   主 pass 再用 3×3 PCF 比较出阴影；`shadow_resolution` 可调贴图分辨率（0 = 2048）
@@ -135,7 +139,8 @@ core ← math ← {render, physics} ← editor / game
   退出码可判 —— 一条命令跑通"改 → 查 → 自证"闭环
 - **无头运行**：`xgame-editor --headless --frames N <项目>` 不开窗口跑 N 帧，
   stdout 出 JSON 统计（帧耗时分布 / 实体与刚体 / 脚本日志含 error 样本 /
-  非有限变换），固定 dt 两次运行逐位一致；`--dump-scene` 落盘"跑完后的世界"
+  非有限变换），固定 dt 两次运行逐位一致；`--dump-scene` 落盘"跑完后的世界"，
+  `--screenshot out.png` 再离屏渲染一帧（默认顺光取景，同机逐字节可复现）
 - 🔨 Build 把项目打包成独立游戏
 - **帧序**：每帧"先处理输入（飞行相机 / 拖拽 / 拾取）→ 再按最新状态发渲染任务 → 最后画叠加层"，
   拖物体与转视角都不会多慢一帧
@@ -597,7 +602,7 @@ Build/<项目名>/
 | `entity_upsert` | 按名字创建/部分更新实体（变换、模型、脚本、父子） |
 | `entity_remove` | 按名字删除实体（重名歧义拒绝；子节点提升不连坐） |
 | `project_check` | 无头验证（与 `--check` 同一份逻辑），返回 JSON 报告 |
-| `run_headless` | 无头跑 N 帧（与 `--headless` 同一实现），返回统计报告 + 可选场景快照 |
+| `run_headless` | 无头跑 N 帧（与 `--headless` 同一实现），返回统计报告 + 可选场景快照 + 可选截图（MCP 图片块） |
 
 改完先 `project_check` 自证没改坏、再 `run_headless` 看真的跑得动 —— 这是智能体的
 「改 → 查 → 验」闭环。完整协议面、参数语义与已知边界（编辑器并发写、清单只读）见

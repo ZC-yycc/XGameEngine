@@ -1413,6 +1413,85 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
         ui.separator();
 
+        // ── 材质覆盖 ──
+        //
+        // 内置图元（builtin://cube 等）只有白模、glTF 材质改不了 —— 这一区是
+        // 场景层面调材质的唯一入口。语义见 `MaterialOverride`：Tint 是**乘子**，
+        // Metallic / Roughness 是**替换**；没勾的字段保持模型自带值。
+        ui.heading("Material");
+        ui.indent("material", |ui| {
+            let mut enabled = entity.material.is_some();
+            if ui
+                .checkbox(&mut enabled, "Override material params")
+                .on_hover_text("在内置白模 / glTF 材质之上逐字段覆盖 PBR 参数；\n只影响勾选的字段")
+                .changed()
+            {
+                entity.material = if enabled {
+                    Some(xgame_core::MaterialOverride::default())
+                } else {
+                    None
+                };
+                touched = true;
+            }
+
+            if let Some(m) = entity.material.as_mut() {
+                // 基础色乘子（线性 RGBA；a 一并相乘 = "整体透明一点"）
+                ui.horizontal(|ui| {
+                    let mut has = m.base_color.is_some();
+                    if ui
+                        .checkbox(&mut has, "Tint")
+                        .on_hover_text("与模型自带基础色**相乘**：白模直接上色，\n贴图模型调整体色调；a 控制整体透明度")
+                        .changed()
+                    {
+                        m.base_color = if has { Some([1.0; 4]) } else { None };
+                        touched = true;
+                    }
+                    if let Some(c) = m.base_color.as_mut() {
+                        let resp = ui.color_edit_button_rgba_unmultiplied(c);
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    let mut has = m.metallic.is_some();
+                    if ui
+                        .checkbox(&mut has, "Metallic")
+                        .on_hover_text("0 = 绝缘体，1 = 金属。金属没有漫反射，\n反射环境色（写覆盖值，不做相乘）")
+                        .changed()
+                    {
+                        m.metallic = if has { Some(0.0) } else { None };
+                        touched = true;
+                    }
+                    if let Some(v) = m.metallic.as_mut() {
+                        let resp = ui.add(
+                            egui::DragValue::new(v).speed(0.01).range(0.0..=1.0),
+                        );
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    let mut has = m.roughness.is_some();
+                    if ui
+                        .checkbox(&mut has, "Roughness")
+                        .on_hover_text("0 = 镜面，1 = 完全漫反射（写覆盖值，不做相乘）")
+                        .changed()
+                    {
+                        m.roughness = if has { Some(0.5) } else { None };
+                        touched = true;
+                    }
+                    if let Some(v) = m.roughness.as_mut() {
+                        let resp = ui.add(
+                            egui::DragValue::new(v).speed(0.01).range(0.0..=1.0),
+                        );
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    }
+                });
+            }
+        });
+
+        ui.separator();
+
         // ── 添加组件（占位）──
         ui.add_enabled(false, egui::Button::new("+  Add Component"))
             .on_disabled_hover_text("自由组件系统尚未开放序列化；脚本 / 物理已可直接编辑");

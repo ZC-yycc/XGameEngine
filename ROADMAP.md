@@ -26,7 +26,8 @@
 | **七** | 🟨 进行中 | 动画系统（第一片 ✅：骨骼蒙皮 + 单剪辑播放；第二片 ✅：换剪辑交叉淡入；第三片 ✅：阈值状态机；第四片 ✅：叠加混合；第五片 ✅：多层混合栈 + 骨骼遮罩；morph/Phase B 待做） |
 | **八** | ✅ 完成 | 音频系统（kira：`AudioSource` 组件 + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，实施记录见 PLAN.md 二十二） |
 | **Agent-Native ①②** | ✅ 完成 | **MCP 工具面 + 无头运行**：`xgame-mcp` server（7 个工具：项目 / 场景 / 实体读写、`project_check`、`run_headless`）；`xgame-editor --headless` 无头跑 N 帧出 JSON 统计（固定 dt 两次运行逐位一致，退出码 0=干净 / 1=加载失败 / 2=跑完有问题），MCP 工具 spawn 透传 —— 文档 [`Docs/MCP.md`](Docs/MCP.md) / [`Docs/无头运行.md`](Docs/无头运行.md)，实施记录见 PLAN.md 二十三 |
-| **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影已落地；CSM / Bloom / ACES / 天空盒待做） |
+| **渲染 PBR 片** | ✅ 完成 | **PBR（Cook-Torrance）+ 逐实体材质覆盖 + 无头截图**：GGX/Smith/Schlick 替换 Blinn-Phong（metallic/roughness 原样进 GPU，π 亮度标定保持旧场景亮度）；`Entity.material: Option<MaterialOverride>`（字段级覆盖 + Inspector + 场景落盘 + `scene_signature` 刷新）；`--screenshot` 离屏截图（默认顺光取景、同机逐字节确定）+ MCP `run_headless` 图片块 —— 实施记录见 PLAN.md 二十四 |
+| **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影已落地；PBR 已落地；CSM / Bloom / **ACES 色调映射**（高光裁剪是当前最扎眼的一项）/ 天空盒与 IBL 待做） |
 | ~~**十**~~ | ✅ 完成 | 脚本系统 + 热重载（已并入六·五） |
 
 ---
@@ -135,16 +136,19 @@
 - **数据即文本** —— 场景 / 预制体 / 清单 / 输入映射全是 RON 纯文本，可直接读写与 diff；
 - **程序化验证** —— `xgame-editor --check <项目>`（退出码 0/1/2，秒级，可进 CI）；
 - **程序化实跑** —— `xgame-editor --headless`（跑 N 帧出 JSON 统计，固定 dt 逐位可复现）；
+- **程序化观察** —— `--headless --screenshot` 离屏渲染 PNG（默认顺光取景、同机逐字节可复现），
+  MCP `run_headless(screenshot: true)` 以图片块回传画面 —— 智能体**看到**自己造的场景；
 - **程序化配置** —— 重力 / 步长进 `project.ron`，改一行文本即调参；
 - **单一运行时** —— 无头验证的行为与玩家实跑的完全一致（编辑器 Play == 游戏二进制）；
-- **安全网** —— 359 条回归测试、每条先证红，智能体改引擎也有兜底。
+- **安全网** —— 391 条回归测试、每条先证红，智能体改引擎也有兜底。
 
 进度与计划：**① MCP server 最小工具集 ✅ 已落地** —— 新 crate `xgame-mcp`
 （`dist\xgame-mcp.exe`，stdio 按行 JSON-RPC）→ **② 无头运行 ✅ 已落地** ——
 `--headless --frames N` 输出统计 JSON（帧耗时 / 实体 / 刚体 / 脚本日志 / 非有限
-变换），MCP 侧 `run_headless` 透传壳；现共 7 个工具（project_info / scene_read /
+变换）；`--screenshot` 额外出图，MCP 侧 `run_headless` 透传（`screenshot: true`
+以 MCP 图片块回传）；现共 7 个工具（project_info / scene_read /
 scene_write / entity_upsert / entity_remove / project_check / run_headless），配
-25 条回归测试与工具参考 [`Docs/MCP.md`](Docs/MCP.md)、[`Docs/无头运行.md`](Docs/无头运行.md)
+28 条回归测试与工具参考 [`Docs/MCP.md`](Docs/MCP.md)、[`Docs/无头运行.md`](Docs/无头运行.md)
 → **③ 场景 schema 导出**（`--export-schema`，机器可读的字段与类型）。
 详细依据与完整矩阵：[`Docs/差距分析.md`](Docs/差距分析.md) 文末战略章。
 

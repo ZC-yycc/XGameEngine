@@ -146,6 +146,38 @@ impl Default for MaterialParams {
     }
 }
 
+impl MaterialParams {
+    /// 套用逐实体材质覆盖，得到该 draw 的**有效材质**。
+    ///
+    /// 字段级语义（见 [`xgame_core::MaterialOverride`]）：
+    /// - `base_color` **相乘**（tint 乘子）：内置图元原色是白，乘即上色；
+    ///   带贴图的 glTF 只被调"整体色调"，贴图细节照常参与。
+    ///   透明度（a 分量）一并相乘——"半透明一点"就这么来表达。
+    /// - `metallic` / `roughness` **替换**：它们是材料的身份参数，
+    ///   "乘以 0.5 的金属度"没有直觉含义。
+    /// - `blend` 不参与：透明与否决定走哪条管线（混合开关是管线级的），
+    ///   改它等于换材质**行为**，不是调参数——留作后续的独立功能。
+    pub fn merged_with(&self, over: Option<&xgame_core::MaterialOverride>) -> Self {
+        let Some(o) = over else {
+            return *self;
+        };
+        Self {
+            base_color: match o.base_color {
+                Some(c) => [
+                    self.base_color[0] * c[0],
+                    self.base_color[1] * c[1],
+                    self.base_color[2] * c[2],
+                    self.base_color[3] * c[3],
+                ],
+                None => self.base_color,
+            },
+            metallic: o.metallic.unwrap_or(self.metallic),
+            roughness: o.roughness.unwrap_or(self.roughness),
+            blend: self.blend,
+        }
+    }
+}
+
 /// 一次 glTF 网格图元的绘制调用。
 pub struct GltfPrimitive {
     pub vertex_buffer: wgpu::Buffer,
@@ -839,6 +871,73 @@ fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]
 mod tests {
     use super::*;
     use crate::animation::{clip_time, compute_bones, TrackPath};
+
+    // -- 材质覆盖合并 -------------------------------------------------------
+
+    /// 基础色是**乘子**：与模型自带色逐通道相乘（含透明度）。
+    #[test]
+    fn base_color_override_multiplies() {
+        let base = MaterialParams {
+            base_color: [0.5, 0.5, 0.5, 0.8],
+            ..Default::default()
+        };
+        let over = xgame_core::MaterialOverride {
+            base_color: Some([0.4, 1.0, 2.0, 0.5]),
+            ..Default::default()
+        };
+        let merged = base.merged_with(Some(&over));
+        assert_eq!(merged.base_color, [0.2, 0.5, 1.0, 0.4]);
+        assert_eq!(merged.metallic, base.metallic, "没写的字段保持不变");
+        assert_eq!(merged.roughness, base.roughness);
+    }
+
+    /// 金属度 / 粗糙度是**替换**：写了就覆盖，没写就保留。
+    #[test]
+    fn metallic_roughness_override_replaces() {
+        let base = MaterialParams {
+            metallic: 0.1,
+            roughness: 0.9,
+            ..Default::default()
+        };
+        let merged = base.merged_with(Some(&xgame_core::MaterialOverride {
+            roughness: Some(0.2),
+            ..Default::default()
+        }));
+        assert_eq!(merged.metallic, 0.1, "没写 metallic 保持原值");
+        assert_eq!(merged.roughness, 0.2, "写了 roughness 用覆盖值");
+
+        let merged = base.merged_with(Some(&xgame_core::MaterialOverride {
+            metallic: Some(1.0),
+            ..Default::default()
+        }));
+        assert_eq!(merged.metallic, 1.0);
+        assert_eq!(merged.roughness, 0.9);
+    }
+
+    /// `None` 覆盖 = 原样返回（无覆盖实体的行为与覆盖功能上线前逐位一致）；
+    /// `blend` 永远不参与覆盖（管线级属性）。
+    #[test]
+    fn no_override_is_identity_and_blend_never_merges() {
+        let base = MaterialParams {
+            base_color: [0.1, 0.2, 0.3, 1.0],
+            metallic: 0.5,
+            roughness: 0.5,
+            blend: true,
+        };
+        let same = base.merged_with(None);
+        assert_eq!(same.base_color, base.base_color);
+        assert_eq!(same.metallic, base.metallic);
+        assert_eq!(same.roughness, base.roughness);
+        assert!(same.blend, "blend 不受覆盖影响");
+
+        // 即使覆盖写满，blend 也不动。
+        let over = xgame_core::MaterialOverride {
+            base_color: Some([2.0; 4]),
+            metallic: Some(0.0),
+            roughness: Some(1.0),
+        };
+        assert!(base.merged_with(Some(&over)).blend);
+    }
 
     /// 仓库自带的示例狐狸（3 段剪辑 + 24 骨蒙皮）——解析测试的固定夹具。
     ///

@@ -102,6 +102,12 @@ pub struct Entity {
     /// 场景文件从不引用 kira 类型。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<crate::audio::AudioSource>,
+    /// 逐实体材质覆盖（PBR 参数乘子 / 替换）。`None` = 纯用模型自带材质。
+    ///
+    /// 兼容策略与 `audio` 同款（旧文件 → `None`；没配覆盖不写这一行）。
+    /// 语义与理由见 [`crate::material::MaterialOverride`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<crate::material::MaterialOverride>,
     /// 运行时组件集合（反序列化时默认为空）。
     #[serde(skip)]
     pub components: ComponentMap,
@@ -123,6 +129,7 @@ impl Entity {
             physics: None,
             animator: None,
             audio: None,
+            material: None,
             components: ComponentMap::new(),
         }
     }
@@ -165,6 +172,12 @@ impl Entity {
     /// 挂一个音频源。
     pub fn with_audio(mut self, audio: crate::audio::AudioSource) -> Self {
         self.audio = Some(audio);
+        self
+    }
+
+    /// 设置逐实体材质覆盖。
+    pub fn with_material(mut self, material: crate::material::MaterialOverride) -> Self {
+        self.material = Some(material);
         self
     }
 
@@ -220,6 +233,8 @@ impl PartialEq for Entity {
             && self.physics == other.physics
             && self.animator == other.animator
             && self.audio == other.audio
+            // 材质覆盖同样是落盘内容：调完颜色按保存得有反应。
+            && self.material == other.material
     }
 }
 
@@ -1125,6 +1140,61 @@ mod tests {
         assert_eq!(a, b, "同一配置应当相等");
         b.audio.as_mut().unwrap().clip = "b.wav".into();
         assert_ne!(a, b, "换剪辑必须改变相等性（脏检查依赖它）");
+    }
+
+    // -- 材质覆盖 -----------------------------------------------------------
+
+    /// 材质覆盖必须能落盘往返 —— 它是"作品的一部分"（什么颜色、多亮、多金属）。
+    #[test]
+    fn material_override_survives_ron_roundtrip() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(Entity::new("Crate").with_material(crate::MaterialOverride {
+            base_color: Some([0.8, 0.25, 0.2, 1.0]),
+            metallic: Some(0.0),
+            roughness: Some(0.65),
+        }));
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(text.contains("material"), "材质覆盖必须落盘");
+        let restored: Scene = ron::from_str(&text).unwrap();
+        let m = restored.entities[0]
+            .material
+            .expect("往返后材质覆盖仍在");
+        assert_eq!(m.base_color, Some([0.8, 0.25, 0.2, 1.0]));
+        assert_eq!(m.metallic, Some(0.0));
+        assert_eq!(m.roughness, Some(0.65));
+    }
+
+    /// 没配材质的实体不该写出 `material: None`（与 `audio` 同一条理由）；
+    /// 旧场景文件（没有这个字段）解析成 `None` = 行为逐位不变。
+    #[test]
+    fn plain_entity_omits_material_field() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(Entity::new("Plain"));
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("material"), "普通实体不该写出 material 字段");
+
+        // 旧文件路径：手工构造一条不含 material 的实体 RON，必须解析成 None。
+        let old = r#"Scene(
+            name: "Old",
+            entities: [
+                (name: "A", transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: ""),
+            ],
+        )"#;
+        let parsed: Scene = ron::from_str(old).expect("旧文件必须能解析");
+        assert!(parsed.entities[0].material.is_none());
+    }
+
+    /// 脏检查语义：改材质必须让实体"不相等"（Inspector 拖颜色滑块依赖它）。
+    #[test]
+    fn material_participates_in_entity_equality() {
+        let a = Entity::new("Crate").with_material(crate::MaterialOverride {
+            base_color: Some([1.0, 1.0, 1.0, 1.0]),
+            ..Default::default()
+        });
+        let mut b = a.clone();
+        assert_eq!(a, b, "同一配置应当相等");
+        b.material.as_mut().unwrap().roughness = Some(0.9);
+        assert_ne!(a, b, "改材质必须改变相等性（脏检查依赖它）");
     }
 
     #[test]

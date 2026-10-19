@@ -1,0 +1,913 @@
+//! 离屏截图：不开窗口渲染一帧场景、读回像素、落盘 PNG。
+//!
+//! # 为什么（两块用途，一个实现）
+//!
+//! 1. **Agent-Native「程序化采集」**：`xgame-editor --headless --screenshot`。
+//!    智能体改完场景 / 材质没有鼠标 —— 截图就是它的眼睛，从"改完看
+//!    退出码"进化到"改完看画面"。
+//! 2. **渲染改动的自动化验证**：测试直接读回像素做断言。光照换 BRDF、
+//!    阴影、材质这类改动，"像素级红线测试"是唯一说得清的验证手段 ——
+//!    本模块的测试里有实例（金属面与绝缘面在同一盏灯下谁亮）。
+//!
+//! # 与编辑器视口的关系（刻意不共用的一层）
+//!
+//! **渲染管线共用**（[`ScenePipeline`]：同一套着色器、同一套绘制顺序，
+//! 截图就是玩家看到的东西）；**宿主层不共用**（编辑器的 `SceneRenderer`
+//! 带着视口节流、动画墙钟、指纹门控这些"面板"逻辑，截图只要确定性的
+//! 一帧）。这是"单一运行时"纪律的延伸：可以少一层壳，不能多一套画法。
+//!
+//! # 确定性
+//!
+//! 同一台机器、同一份场景与动画时钟，渲染结果**逐字节一致**（两次运行
+//! 的 PNG 二进制相等，测试钉死）。跨机器不承诺 —— 不同 GPU 的光栅化
+//! 细节本来就没有逐位约定。
+//!
+//! # GPU 依赖与测试纪律
+//!
+//! 截图必须要有图形设备（与无头运行的其余部分不同）。拿不到适配器时
+//! [`ScreenshotRenderer::new`] 返回可读错误；测试统一走"拿不到就跳过"，
+//! 让无显卡的 CI 仍然全绿，而本机（有显卡）老老实实跑像素断言。
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{anyhow, Context, Result};
+use xgame_core::{LightKind, Scene};
+use xgame_math::glam::{Mat4, Vec3};
+
+use crate::animation::AnimationDriver;
+use crate::gltf_loader::{Bounds, GltfMesh};
+use crate::scene_pipeline::{
+    scene_bounds, supported_sample_count, SceneLighting, ScenePipeline,
+};
+
+/// 截图默认垂直视场角（45°）。比编辑器视口（60°）略窄一点 —— 截图
+/// 主要用来"看清单个场景"，透视变形小些更接近正投影的审视感。
+pub const DEFAULT_FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
+
+/// 空场景（没有任何可绘制实体）自动取景时的兜底半径。
+/// 给个不为零的值，保证相机矩阵不退化。
+const EMPTY_SCENE_FALLBACK_RADIUS: f32 = 5.0;
+
+/// 自动取景相机的固定后备视轴（场景里没有可用方向光时使用）。
+///
+/// 取"右上前方"四分之三视角：水平面 45° 给立体感，俯角约 24° 让地面
+/// 与立面都露出来 —— 与大多数引擎资源预览的默认机位同款。
+pub fn default_shot_direction() -> Vec3 {
+    Vec3::new(1.0, 0.62, 1.25).normalize()
+}
+
+/// 由场景的主方向光推一个**顺光**的默认视轴。
+///
+/// 相机放在主光方位再偏 35°、仰角约 26°：拍出来以受光面为主，还能看到
+/// 明暗交界 —— 材质（尤其是金属 / 粗糙度）只有在受光面上才看得出来。
+/// 把相机扔在光源对侧（很多"固定默认机位"的实际效果）会让所有物体只剩
+/// 环境光的死灰，是自动截图最该避免的事。
+///
+/// 光的数据来自场景本身 ⇒ 结果仍然是确定性的。没有可用的方向光时退回
+/// [`default_shot_direction`]。
+pub fn default_shot_direction_for(scene: &Scene) -> Vec3 {
+    let light = scene
+        .lights
+        .iter()
+        .find(|l| l.kind == LightKind::Directional && l.is_active());
+    let Some(light) = light else {
+        return default_shot_direction();
+    };
+    // 光传播方向取反 = 表面指向光源的方向；取其 XZ 方位角再偏 35°。
+    let [dx, dy, dz] = light.normalized_direction();
+    let to_light = Vec3::new(-dx, -dy, -dz);
+    let azimuth = to_light.x.atan2(to_light.z) + 0.61; // +35°
+    let elevation = 0.45_f32; // ≈ 26°
+    Vec3::new(
+        azimuth.sin() * elevation.cos(),
+        elevation.sin(),
+        azimuth.cos() * elevation.cos(),
+    )
+}
+
+/// 一台截图相机的姿态。`eye`/`target` 是**世界空间**坐标。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotCamera {
+    pub eye: Vec3,
+    pub target: Vec3,
+    /// 垂直视场角（弧度）。
+    pub fov_y: f32,
+    /// 上方向。接近垂直俯视 / 仰视时必须换轴，否则 `look_at` 在
+    /// forward ∥ up 时算出 NaN —— 与阴影视锥拟合同款防退化处理。
+    pub up: Vec3,
+}
+
+impl ShotCamera {
+    /// 由视点 / 目标 / 视场角构造，`up` 自动选择：视线接近垂直
+    /// （|dir.y| > 0.99）时用 Z 轴，否则 Y 轴。
+    pub fn looking_at(eye: Vec3, target: Vec3, fov_y: f32) -> Self {
+        let view_dir = (target - eye).try_normalize().unwrap_or(-Vec3::Z);
+        let up = if view_dir.y.abs() > 0.99 {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        };
+        Self {
+            eye,
+            target,
+            fov_y,
+            up,
+        }
+    }
+}
+
+/// 由场景包围盒拟合一台"看得全"的相机。
+///
+/// `bounds` 为 `None`（空场景）时退化成"原点为中心、半径
+/// [`EMPTY_SCENE_FALLBACK_RADIUS`] 的球"——仍然给出一台合法相机，
+/// 而不是报错：截一张空场景的图（背景色）本身就是合法需求。
+///
+/// 距离取 `半径 / sin(min(半垂直 FOV, 半水平 FOV))`，再留 6% 余量：
+/// 保证包围球**在两条轴上**都完整入画（宽高比 < 1 的竖图以水平视场
+/// 为准，宽图以垂直视场为准）。
+pub fn frame_bounds(
+    bounds: Option<&Bounds>,
+    aspect: f32,
+    fov_y: f32,
+    direction: Vec3,
+) -> ShotCamera {
+    let (center, radius) = match bounds {
+        Some(b) if !b.is_empty() => (b.center(), b.radius().max(0.5)),
+        _ => (Vec3::ZERO, EMPTY_SCENE_FALLBACK_RADIUS),
+    };
+    let fov_y = fov_y.clamp(5.0_f32.to_radians(), 120.0_f32.to_radians());
+    let aspect = aspect.max(1e-3);
+    let half_v = fov_y * 0.5;
+    // 水平半视场角：tan(h) = tan(v) · aspect。宽图时它比 v 大，取小的那条。
+    let half_h = (half_v.tan() * aspect).atan();
+    let half_min = half_v.min(half_h);
+    let dist = radius / half_min.sin().max(1e-3) * 1.06;
+    let dir = direction.try_normalize().unwrap_or_else(default_shot_direction);
+    ShotCamera::looking_at(center + dir * dist, center, fov_y)
+}
+
+/// 由相机与场景半径推近 / 远裁剪面。
+///
+/// 相机在包围球外（正常取景）时：near 在"到球面"之前留 1.5 倍半径的
+/// 富余（球是松包围，真实几何总在球内），far 罩住整球再留一倍余量。
+/// 相机被放进球内（手动给的机位）时退化为"尽量小但为正"的面 ——
+/// 别处不炸比精确重要。
+pub fn clip_planes(camera: &ShotCamera, scene_radius: f32) -> (f32, f32) {
+    let dist = (camera.eye - camera.target).length().max(1e-3);
+    let radius = scene_radius.max(1e-3);
+    let near = (dist - radius * 1.5).max(dist * 0.02).max(0.02);
+    let far = dist + radius * 4.0 + 20.0;
+    (near, far)
+}
+
+/// 离屏渲染器：一台设备 + 一套场景管线 + 一组颜色 / 深度附件。
+///
+/// 生命周期由调用方决定：一次性截图（CLI）就建一次用一次；将来若要
+/// "每帧截图"再谈复用。
+pub struct ScreenshotRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: ScenePipeline,
+    size: (u32, u32),
+    /// 最终颜色纹理（MSAA 时是 resolve 目标）。
+    _color: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    /// MSAA 多采样颜色附件（`sample_count > 1` 时存在）。
+    _msaa: Option<wgpu::Texture>,
+    msaa_view: Option<wgpu::TextureView>,
+    _depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+    /// 模型标识 → 已上传的网格（与编辑器 / 游戏同一条加载入口）。
+    model_cache: HashMap<String, GltfMesh>,
+    /// 磁盘模型的解析基准（`builtin://` 用不到）。
+    project_root: PathBuf,
+}
+
+impl ScreenshotRenderer {
+    /// 建 GPU 设备与离屏附件。`Rgba8UnormSrgb` 颜色 + `Depth32Float` 深度，
+    /// MSAA 采样数按适配器能力选（与编辑器视口同一规则）。
+    pub fn new(project_root: &Path, width: u32, height: u32) -> Result<Self> {
+        let width = width.max(1);
+        let height = height.max(1);
+
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::empty(),
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .ok_or_else(|| {
+            anyhow!("找不到可用的 GPU 适配器 —— 截图需要图形设备（CI 无显卡时别传 --screenshot）")
+        })?;
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("screenshot device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            },
+            None,
+        ))
+        .context("创建 GPU 设备失败")?;
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let sample_count = supported_sample_count(&adapter, format);
+        log::info!(
+            "截图渲染：{}（MSAA x{sample_count}）{width}x{height}",
+            adapter.get_info().name
+        );
+
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("screenshot color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let msaa = (sample_count > 1).then(|| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("screenshot msaa"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        });
+        let msaa_view = msaa
+            .as_ref()
+            .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
+
+        // 深度附件的采样数必须与颜色附件一致（MSAA 时是 4x32-bit 深度）。
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("screenshot depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: sample_count.max(1),
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let pipeline = ScenePipeline::new(&device, format, sample_count);
+
+        Ok(Self {
+            device,
+            queue,
+            pipeline,
+            size: (width, height),
+            _color: color,
+            color_view,
+            _msaa: msaa,
+            msaa_view,
+            _depth: depth,
+            depth_view,
+            model_cache: HashMap::new(),
+            project_root: project_root.to_path_buf(),
+        })
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    pub fn aspect(&self) -> f32 {
+        self.size.0 as f32 / self.size.1.max(1) as f32
+    }
+
+    /// 把指定模型直接塞进缓存（键即 `Entity::model` 的值）。
+    ///
+    /// 测试用：内置图元的材质是写死的常量，像素红线测试需要"同一几何、
+    /// 两种材质"的受控输入。给成 public 也是为将来"材质资源覆盖"留的
+    /// 正门 —— 但当前只有测试在用。
+    pub fn inject_model(&mut self, key: impl Into<String>, mesh: GltfMesh) {
+        self.model_cache.insert(key.into(), mesh);
+    }
+
+    /// 自动取景相机：框住当前 `model_cache` 能解析出的全部几何。
+    ///
+    /// 与 [`render_scene`](Self::render_scene) 的懒加载保持一致 ——
+    /// 调用前先 `render_scene` 一次（或自行确保模型已加载），否则包围盒
+    /// 会偏小。实际上 CLI 走 `render_scene(None)` 这条自动取景路径，
+    /// 不需要单独调用本函数；它是给"先问机位、后截图"的调用方留的。
+    pub fn default_camera(&self, scene: &Scene) -> ShotCamera {
+        let world_matrices = scene.world_matrices();
+        let bounds = scene_bounds(&scene.entities, &world_matrices, &self.model_cache);
+        frame_bounds(
+            bounds.as_ref(),
+            self.aspect(),
+            DEFAULT_FOV_Y,
+            default_shot_direction_for(scene),
+        )
+    }
+
+    /// 渲染一帧到离屏颜色纹理。
+    ///
+    /// `camera` 为 `None` 时自动取景（框住整个场景）；返回**实际使用**的
+    /// 相机 —— 调用方要把它写进报告（"这张图是从哪拍的"必须可复现）。
+    ///
+    /// `anim` 是动画播放时钟：静态截图传空驱动即可；想让骨骼姿态与无头
+    /// 运行的模拟时长一致，就按同一串 dt tick 出来。
+    pub fn render_scene(
+        &mut self,
+        scene: &Scene,
+        anim: &AnimationDriver,
+        camera: Option<ShotCamera>,
+        lighting: SceneLighting<'_>,
+    ) -> Result<ShotCamera> {
+        // 模型懒加载：与编辑器 SceneRenderer 同一条入口，失败只警告
+        // （画不出来的实体留空，整张图照常出）。
+        for entity in &scene.entities {
+            if entity.model.is_empty() || self.model_cache.contains_key(&entity.model) {
+                continue;
+            }
+            match GltfMesh::load(&self.device, &self.queue, &self.project_root, &entity.model) {
+                Ok(m) => {
+                    self.model_cache.insert(entity.model.clone(), m);
+                }
+                Err(e) => log::warn!("截图：加载模型 '{}' 失败: {:#}", entity.model, e),
+            }
+        }
+
+        let world_matrices = scene.world_matrices();
+        let bounds = scene_bounds(&scene.entities, &world_matrices, &self.model_cache);
+        let camera = camera.unwrap_or_else(|| {
+            frame_bounds(
+                bounds.as_ref(),
+                self.aspect(),
+                DEFAULT_FOV_Y,
+                default_shot_direction_for(scene),
+            )
+        });
+        let radius = bounds.map(|b| b.radius()).unwrap_or(EMPTY_SCENE_FALLBACK_RADIUS);
+        let (near, far) = clip_planes(&camera, radius);
+
+        let view = Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let proj = Mat4::perspective_rh(camera.fov_y, self.aspect(), near, far);
+        let view_proj = proj * view;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("screenshot encoder"),
+            });
+        self.pipeline.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &self.color_view,
+            self.msaa_view.as_ref(),
+            &self.depth_view,
+            &scene.entities,
+            &world_matrices,
+            &self.model_cache,
+            anim,
+            &view_proj,
+            &camera.eye,
+            lighting,
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+        Ok(camera)
+    }
+
+    /// 把颜色纹理读回 CPU（RGBA8、行紧排）。
+    ///
+    /// 拷贝的行距按 WebGPU 的 256 字节对齐要求补齐，读回后再把补丁裁掉。
+    pub fn read_rgba(&self) -> Result<Vec<u8>> {
+        let (width, height) = self.size;
+        let unpadded_row = width as usize * 4;
+        let padded_row = unpadded_row.div_ceil(256) * 256;
+
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot readback"),
+            size: (padded_row * height as usize) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("screenshot readback encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &self._color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row as u32),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .map_err(|_| anyhow!("读回通道断开（渲染设备丢失？）"))?
+            .map_err(|e| anyhow!("映射读回缓冲失败: {e}"))?;
+
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity(unpadded_row * height as usize);
+        for row in data.chunks_exact(padded_row) {
+            out.extend_from_slice(&row[..unpadded_row]);
+        }
+        drop(data);
+        buffer.unmap();
+        Ok(out)
+    }
+
+    /// 读回像素并落盘 PNG（目录不存在会自动创建）。返回图像尺寸。
+    pub fn save_png(&self, path: &Path) -> Result<(u32, u32)> {
+        let (width, height) = self.size;
+        let rgba = self.read_rgba()?;
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("创建截图目录失败 ({})", parent.display()))?;
+            }
+        }
+        image::save_buffer_with_format(
+            path,
+            &rgba,
+            width,
+            height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )
+        .with_context(|| format!("写 PNG 失败 ({})", path.display()))?;
+        Ok((width, height))
+    }
+}
+
+/// 读一张 PNG 回 RGBA8（测试 / 验证工具用：免得到处再引一遍 image 依赖）。
+pub fn load_png_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
+    let img = image::open(path)
+        .with_context(|| format!("打开 PNG 失败 ({})", path.display()))?
+        .to_rgba8();
+    let (w, h) = img.dimensions();
+    Ok((w, h, img.into_raw()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use xgame_core::{Entity, Light, MaterialOverride};
+
+    /// 纯函数测试用的盒（边长 2，中心在 (1, 2, 3) 附近，测试取景的平移。
+    fn test_bounds() -> Bounds {
+        Bounds {
+            min: Vec3::new(0.0, 0.0, 0.0),
+            max: Vec3::new(2.0, 4.0, 6.0),
+        }
+    }
+
+    /// 把包围盒八个角点投到裁剪空间：每个角都必须在 NDC 立方内
+    /// （|x|,|y| ≤ 1，z ∈ [0,1]）——这才叫"看得全"。
+    fn corners_inside_at(aspect: f32, dir: Vec3) {
+        let bounds = test_bounds();
+        let cam = frame_bounds(Some(&bounds), aspect, DEFAULT_FOV_Y, dir);
+        let (near, far) = clip_planes(&cam, bounds.radius());
+        let view = Mat4::look_at_rh(cam.eye, cam.target, cam.up);
+        let proj = Mat4::perspective_rh(cam.fov_y, aspect, near, far);
+        let view_proj = proj * view;
+        for corner in bounds.corners() {
+            let clip = view_proj * corner.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            assert!(
+                ndc.x.abs() <= 1.0 + 1e-3 && ndc.y.abs() <= 1.0 + 1e-3,
+                "aspect={aspect} 方向 {dir:?} 下角点 {corner:?} 出画: ndc={ndc:?}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&ndc.z),
+                "角点 {corner:?} 被深度裁剪: z={}",
+                ndc.z
+            );
+        }
+    }
+
+    #[test]
+    fn frame_bounds_fits_every_corner_across_aspects() {
+        for aspect in [0.5, 4.0 / 3.0, 1.0, 2.5] {
+            corners_inside_at(aspect, default_shot_direction());
+        }
+    }
+
+    #[test]
+    fn frame_bounds_fits_every_corner_for_off_axis_directions() {
+        for dir in [
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, 0.1, -1.0),
+            Vec3::new(1.0, -0.2, 0.3),
+        ] {
+            corners_inside_at(16.0 / 9.0, dir);
+        }
+    }
+
+    #[test]
+    fn frame_bounds_keeps_direction_and_target() {
+        let bounds = test_bounds();
+        let dir = Vec3::new(1.0, 1.0, -1.0).normalize();
+        let cam = frame_bounds(Some(&bounds), 16.0 / 9.0, DEFAULT_FOV_Y, dir);
+        assert!((cam.eye - cam.target).normalize().abs_diff_eq(dir, 1e-5));
+        assert!(cam.target.abs_diff_eq(bounds.center(), 1e-5));
+    }
+
+    #[test]
+    fn frame_bounds_empty_scene_still_produces_a_sane_camera() {
+        let cam = frame_bounds(None, 16.0 / 9.0, DEFAULT_FOV_Y, default_shot_direction());
+        assert_eq!(cam.target, Vec3::ZERO);
+        assert!(cam.eye.is_finite());
+        assert!((cam.eye - cam.target).length() > EMPTY_SCENE_FALLBACK_RADIUS);
+    }
+
+    /// 默认取景必须"顺光"：相机视轴与"表面指向光源"的方向同侧。
+    /// 背光机位拍出来物体只剩环境光死灰，材质全看不出来。
+    #[test]
+    fn default_direction_faces_the_sun() {
+        let mut scene = Scene::new("sun");
+        scene.lights = vec![Light::directional("sun", [0.45, -1.0, 0.35], [1.0; 3], 3.2)];
+        let dir = default_shot_direction_for(&scene);
+        let to_light = Vec3::new(-0.45, 1.0, -0.35).normalize();
+        let alignment = dir.dot(to_light);
+        assert!(
+            alignment > 0.5,
+            "默认视轴应当明显偏向光源侧（点积 = {alignment:.2}）"
+        );
+
+        // 换一个光源方位：结果跟着转，仍然顺光。
+        scene.lights[0].direction = [-1.0, -0.6, 0.0];
+        let dir2 = default_shot_direction_for(&scene);
+        let to_light2 = Vec3::new(1.0, 0.6, 0.0).normalize();
+        assert!(dir2.dot(to_light2) > 0.5);
+        assert!(
+            dir2.distance(dir) > 0.5,
+            "光源方位换了，默认机位不应该原地不动"
+        );
+    }
+
+    /// 没有可用方向光（只有点光 / 强度为 0）时退回固定方向，结果仍然确定。
+    #[test]
+    fn default_direction_falls_back_without_directional_light() {
+        let mut scene = Scene::new("no-sun");
+        scene.lights.clear();
+        assert_eq!(default_shot_direction_for(&scene), default_shot_direction());
+
+        scene.lights = vec![Light::point("lamp", [0.0, 3.0, 0.0], [1.0; 3], 2.0, 10.0)];
+        assert_eq!(default_shot_direction_for(&scene), default_shot_direction());
+
+        scene.lights = vec![Light::directional("dead", [0.0, -1.0, 0.0], [1.0; 3], 0.0)];
+        assert_eq!(default_shot_direction_for(&scene), default_shot_direction());
+    }
+
+    #[test]
+    fn clip_planes_bracket_the_scene_sphere() {
+        let cam = frame_bounds(
+            Some(&test_bounds()),
+            16.0 / 9.0,
+            DEFAULT_FOV_Y,
+            default_shot_direction(),
+        );
+        let radius = test_bounds().radius();
+        let (near, far) = clip_planes(&cam, radius);
+        let dist = (cam.eye - cam.target).length();
+        assert!(near > 0.0 && near < dist + radius, "near={near} dist={dist}");
+        assert!(far > dist + radius, "far={far} 必须罩住整个包围球");
+    }
+
+    #[test]
+    fn clip_planes_stay_positive_inside_the_sphere() {
+        let cam = ShotCamera::looking_at(Vec3::new(0.1, 0.1, 0.1), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (near, far) = clip_planes(&cam, 50.0);
+        assert!(near > 0.0 && near.is_finite(), "near={near}");
+        assert!(far > near);
+    }
+
+    /// 接近垂直的视线必须换 up 轴 —— 否则 `look_at` 的 forward ∥ up 会
+    /// 算出 NaN，整张图静默变黑（NaN 通过投影矩阵传染到所有顶点）。
+    #[test]
+    fn top_down_camera_switches_up_axis_and_stays_finite() {
+        let bounds = test_bounds();
+        let straight_down = Vec3::new(0.0, 1.0, 0.0);
+        let cam = frame_bounds(Some(&bounds), 16.0 / 9.0, DEFAULT_FOV_Y, straight_down);
+        assert_eq!(cam.up, Vec3::Z, "垂直俯视时 up 必须换 Z 轴");
+        let view = Mat4::look_at_rh(cam.eye, cam.target, cam.up);
+        assert!(
+            view.to_cols_array().iter().all(|v| v.is_finite()),
+            "退化视角不能算出 NaN 矩阵: {view:?}"
+        );
+        // 取景照样完整（角点全在画面内）。
+        corners_inside_at(16.0 / 9.0, straight_down);
+    }
+
+    // -----------------------------------------------------------------
+    // GPU 测试（拿不到适配器就跳过，见模块头"GPU 依赖与测试纪律"）
+    // -----------------------------------------------------------------
+
+    /// 建一个截图渲染器；无 GPU 环境跳过（返回 None）。
+    fn gpu_or_skip(name: &str) -> Option<ScreenshotRenderer> {
+        match ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("跳过 {name}：{e}");
+                None
+            }
+        }
+    }
+
+    /// 单个内置立方体、一盏开着的方向光（无阴影，简化像素预测）。
+    fn one_cube_scene() -> Scene {
+        let mut scene = Scene::new("shot");
+        scene.ambient = [0.0, 0.0, 0.0];
+        scene.lights = vec![Light::directional("sun", [0.0, -1.0, 0.0], [1.0; 3], 1.0)];
+        scene.lights[0].casts_shadow = false;
+        let mut e = Entity::new("Cube");
+        e.model = "builtin://cube".to_owned();
+        scene.add_entity(e);
+        scene
+    }
+
+    fn pixel_at(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
+        let i = ((y * width + x) * 4) as usize;
+        [rgba[i], rgba[i + 1], rgba[i + 2]]
+    }
+
+    /// 3x3 均值（抗 MSAA 边缘的单像素抖动）。
+    fn pixel_avg(rgba: &[u8], width: u32, x: u32, y: u32) -> [f32; 3] {
+        let mut sum = [0.0f32; 3];
+        let mut n = 0.0;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let px = (x as i32 + dx).max(0) as u32;
+                let py = (y as i32 + dy).max(0) as u32;
+                let p = pixel_at(rgba, width, px, py);
+                sum[0] += p[0] as f32;
+                sum[1] += p[1] as f32;
+                sum[2] += p[2] as f32;
+                n += 1.0;
+            }
+        }
+        [sum[0] / n, sum[1] / n, sum[2] / n]
+    }
+
+    /// 渲染 → 读回：画面必须真的画出了东西（不是纯背景色）。
+    #[test]
+    fn render_produces_non_uniform_pixels() {
+        let Some(mut shot) = gpu_or_skip("render_produces_non_uniform_pixels") else {
+            return;
+        };
+        let scene = one_cube_scene();
+        let anim = AnimationDriver::new();
+        shot.render_scene(
+            &scene,
+            &anim,
+            None,
+            SceneLighting::new(scene.ambient, &scene.lights),
+        )
+        .expect("渲染失败");
+
+        let rgba = shot.read_rgba().expect("读回失败");
+        assert_eq!(rgba.len(), 320 * 240 * 4);
+        let (pixels, _) = rgba.as_chunks::<4>();
+        let first = &pixels[0];
+        let any_different = pixels.iter().any(|p| p != first);
+        assert!(any_different, "整张图一个颜色 = 几何没画出来");
+    }
+
+    /// 同一场景渲染两遍（连渲染器都重建）：PNG 二进制逐字节一致。
+    /// 这是 `--screenshot` 确定性契约在模块层的钉子。
+    #[test]
+    fn two_runs_produce_identical_png_bytes() {
+        let Some(mut first) = gpu_or_skip("two_runs_produce_identical_png_bytes") else {
+            return;
+        };
+        let scene = one_cube_scene();
+        let anim = AnimationDriver::new();
+
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_shot_det_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_a = dir.join("a.png");
+        let path_b = dir.join("b.png");
+
+        first
+            .render_scene(
+                &scene,
+                &anim,
+                None,
+                SceneLighting::new(scene.ambient, &scene.lights),
+            )
+            .expect("第一次渲染失败");
+        let (w, h) = first.save_png(&path_a).expect("第一次落盘失败");
+
+        // 重建整个渲染器（新设备、新管线、新附件），模拟"两次进程运行"。
+        let mut second = ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240)
+            .expect("第二次创建渲染器失败");
+        second
+            .render_scene(
+                &scene,
+                &anim,
+                None,
+                SceneLighting::new(scene.ambient, &scene.lights),
+            )
+            .expect("第二次渲染失败");
+        second.save_png(&path_b).expect("第二次落盘失败");
+
+        let bytes_a = std::fs::read(&path_a).unwrap();
+        let bytes_b = std::fs::read(&path_b).unwrap();
+        assert_eq!(bytes_a, bytes_b, "两次截图的 PNG 必须逐字节一致");
+
+        // 顺带验证 PNG 读写闭环：尺寸正确、像素与显存读回一致（无损）。
+        let (pw, ph, pixels) = load_png_rgba(&path_a).expect("PNG 应能读回");
+        assert_eq!((pw, ph), (w, h));
+        assert_eq!(pixels.len(), 320 * 240 * 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **PBR 红线测试**：同一盏灯、同一几何，金属面（metallic=1）的中心像素
+    /// 必须比绝缘面（metallic=0）**暗** —— 金属没有漫反射，能量全在镜面项，
+    /// 高粗糙度下几乎不反光。旧 Blinn-Phong 实现恰好相反（把金属度翻译成
+    /// "更大的高光强度"，金属更亮），所以这条测试在换 BRDF 前必然是红的。
+    #[test]
+    fn metallic_surface_is_darker_than_dielectric_under_same_light() {
+        let Some(mut shot) = gpu_or_skip("metallic_surface_is_darker_than_dielectric") else {
+            return;
+        };
+
+        let builtin = crate::mesh::BuiltinMesh::Cube;
+        // 闭包借用 shot 的设备 / 队列；先造好两块网格，闭包退出（借用结束）
+        // 再注入缓存 —— 绕过"不可变借用与可变借用并存"。
+        let meshes: Vec<(&str, GltfMesh)> = {
+            let make = |metallic: f32, roughness: f32| {
+                let mut mesh = GltfMesh::from_mesh_data(
+                    &shot.device,
+                    &shot.queue,
+                    &builtin.build(),
+                    builtin.label(),
+                );
+                for prim in &mut mesh.primitives {
+                    prim.material.metallic = metallic;
+                    prim.material.roughness = roughness;
+                }
+                mesh
+            };
+            vec![
+                ("test://dielectric", make(0.0, 0.9)),
+                ("test://metal", make(1.0, 0.9)),
+            ]
+        };
+        for (key, mesh) in meshes {
+            shot.inject_model(key, mesh);
+        }
+
+        let mut scene = Scene::new("pbr");
+        scene.ambient = [0.0, 0.0, 0.0];
+        scene.lights = vec![Light::directional("sun", [0.0, 0.0, -1.0], [1.0; 3], 0.3)];
+        scene.lights[0].casts_shadow = false;
+        let mut left = Entity::new("Dielectric");
+        left.model = "test://dielectric".to_owned();
+        left.transform.position = Vec3::new(-0.7, 0.0, 0.0);
+        scene.add_entity(left);
+        let mut right = Entity::new("Metal");
+        right.model = "test://metal".to_owned();
+        right.transform.position = Vec3::new(0.7, 0.0, 0.0);
+        scene.add_entity(right);
+
+        // 正视两台立方体正面（+z 面朝相机），方向光的传播方向 -z 打亮该面。
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+        )
+        .expect("渲染失败");
+
+        let rgba = shot.read_rgba().expect("读回失败");
+        // 立方体半边长 0.5、心距 0.7、相机 z=4：投影后两中心在图像中心 ±58px 附近，
+        // 取中心行的两侧采样点，各做 3x3 均值。
+        let (cx, cy) = (320 / 2, 240 / 2);
+        let dielectric = pixel_avg(&rgba, 320, cx - 58, cy);
+        let metal = pixel_avg(&rgba, 320, cx + 58, cy);
+        let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        let (dl, ml) = (luma(dielectric), luma(metal));
+        assert!(
+            dl > 60.0,
+            "绝缘面应当被明显照亮（采样点是不是打到背景上了？）: {dielectric:?}"
+        );
+        // 定量预期（按 GGX 手算过）：绝缘 ≈ 0.29 线性（漫反射 0.288 + 微弱高光），
+        // 金属 ≈ 0.12 线性（只剩粗糙镜面项）—— 像素亮度比 ≈ 0.65。阈值放宽到
+        // 0.8 留出 GPU 光栅化与 sRGB 编码的余量，但"金属必须明显更暗"这条
+        // 方向性断言是硬的（旧 Blinn-Phong 下金属 184 > 绝缘 152，方向相反）。
+        assert!(
+            ml < dl * 0.8,
+            "金属面必须比绝缘面暗（无漫反射）: 金属 luma={ml:.1} vs 绝缘 {dl:.1}"
+        );
+        assert!(ml > 10.0, "金属仍应反射一点光（粗糙镜面项）: {metal:?}");
+    }
+
+    /// **逐实体材质覆盖**：给内置白模写 `material.base_color` 之后，渲染出的
+    /// 中心像素必须真的带上这个色调 —— 覆盖从场景数据一路到 GPU 的钉子。
+    /// 在这条测试之前，内置图元没有任何泛化手段上色（白模就是白模）。
+    #[test]
+    fn entity_material_override_tints_builtin_mesh() {
+        let Some(mut shot) = gpu_or_skip("entity_material_override_tints_builtin_mesh") else {
+            return;
+        };
+
+        let mut scene = Scene::new("tint");
+        scene.ambient = [0.0, 0.0, 0.0];
+        // 光斜着来：中心像素落在"漫反射为主、镜面无瓣"的位置。光要是与相机
+        // 同轴（0,0,-1），N·H 恰为 1，粗糙度 0.45 的 GGX 副瓣会给采样点叠上
+        // 约 0.24 线性白（实测），把乘子的效果糊掉一半。
+        scene.lights = vec![Light::directional("sun", [0.6, -1.0, -0.75], [1.0; 3], 1.0)];
+        scene.lights[0].casts_shadow = false;
+        let mut e = Entity::new("Cube");
+        e.model = "builtin://cube".to_owned();
+        scene.add_entity(e);
+
+        // 正视 +z 面；方向光的传播方向含 -z 分量，该面受光（N·L ≈ 0.56）。
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (cx, cy) = (320 / 2, 240 / 2);
+
+        // ① 基线（无覆盖）：白模正面受光 → 亮灰。
+        let render = |scene: &Scene, shot: &mut ScreenshotRenderer| {
+            shot.render_scene(
+                scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+            )
+            .expect("渲染失败");
+            pixel_avg(&shot.read_rgba().expect("读回失败"), 320, cx, cy)
+        };
+        let baseline = render(&scene, &mut shot);
+        assert!(
+            baseline[0] > 150.0,
+            "基线白模应当受光明显（采样点打到背景上？）: {baseline:?}"
+        );
+
+        // ② 蓝色乘子覆盖：蓝通道必须压过红通道，红通道被乘子显著压低。
+        // 定量预期：受光面线性亮度 ≈ 0.54；红 = 0.2×0.54 ≈ 0.11（sRGB≈94），
+        // 蓝 = 0.9×0.54 ≈ 0.49（sRGB≈187）。阈值留编码与光栅化的余量。
+        scene.entities[0].material = Some(MaterialOverride {
+            base_color: Some([0.2, 0.4, 0.9, 1.0]),
+            ..Default::default()
+        });
+        let tinted = render(&scene, &mut shot);
+        assert!(
+            tinted[2] > tinted[0] + 60.0,
+            "蓝色乘子必须让蓝通道显著压过红通道: {tinted:?}"
+        );
+        assert!(
+            tinted[0] < baseline[0] * 0.65,
+            "红通道应当被乘子显著压低: {tinted:?} vs 基线 {baseline:?}"
+        );
+
+        // ③ 再清掉覆盖：像素必须回到基线（覆盖不是一次性烘培）。
+        scene.entities[0].material = None;
+        let restored = render(&scene, &mut shot);
+        assert_eq!(restored, baseline, "清掉覆盖后画面必须与基线逐位一致");
+    }
+}

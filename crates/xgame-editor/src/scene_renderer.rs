@@ -596,6 +596,37 @@ impl SceneRenderer {
                     hash = mix_bits(hash, 0xFE);
                 }
             }
+            // 材质覆盖：颜色 / 金属度 / 粗糙度决定像素颜色，必须进指纹 ——
+            // 漏掉的话"在 Inspector 里调颜色"会看到视口纹丝不动（只在切镜头
+            // 或下一帧动画时钟变化时才补画一次）。
+            if let Some(m) = &entity.material {
+                // 每字段先混一个"是否存在"标记：Some(1.0) 与 None 必须区分，
+                // 且 [1.0,1.0,1.0,1.0] 这种"看起来没改"的值也要区分（它意味着
+                // 字段被显式覆盖了，将来语义若变不受影响）。
+                match m.base_color {
+                    Some(c) => {
+                        hash = mix_bits(hash, 1);
+                        hash = mix_f32s(hash, &c);
+                    }
+                    None => hash = mix_bits(hash, 2),
+                }
+                match m.metallic {
+                    Some(v) => {
+                        hash = mix_bits(hash, 3);
+                        hash = mix_bits(hash, v.to_bits() as u64);
+                    }
+                    None => hash = mix_bits(hash, 4),
+                }
+                match m.roughness {
+                    Some(v) => {
+                        hash = mix_bits(hash, 5);
+                        hash = mix_bits(hash, v.to_bits() as u64);
+                    }
+                    None => hash = mix_bits(hash, 6),
+                }
+            } else {
+                hash = mix_bits(hash, 7);
+            }
         }
 
         hash
@@ -948,6 +979,41 @@ mod tests {
         fox.animator.as_mut().unwrap().fade_time = 0.0;
         let hard = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(paused, hard, "改淡入时长没进指纹");
+    }
+
+    /// 暂停状态下改材质也必须触发重绘 —— 与动画配置同一条理由：视口读的是
+    /// 指纹门控后的缓存帧，材质没进指纹就"调色没反应"。
+    #[test]
+    fn signature_tracks_material_override() {
+        let lights = [Light::default()];
+        let ambient = [0.06, 0.06, 0.08];
+
+        let mut cube = entity("Crate", "builtin://cube", Vec3::ZERO);
+        let plain = signature(std::slice::from_ref(&cube), &lights, ambient);
+
+        cube.material = Some(xgame_core::MaterialOverride::default());
+        let overridden = signature(std::slice::from_ref(&cube), &lights, ambient);
+        assert_ne!(plain, overridden, "打上材质覆盖没进指纹");
+
+        cube.material.as_mut().unwrap().base_color = Some([0.8, 0.2, 0.1, 1.0]);
+        let tinted = signature(std::slice::from_ref(&cube), &lights, ambient);
+        assert_ne!(overridden, tinted, "改颜色没进指纹");
+
+        cube.material.as_mut().unwrap().metallic = Some(1.0);
+        let metal = signature(std::slice::from_ref(&cube), &lights, ambient);
+        assert_ne!(tinted, metal, "改金属度没进指纹");
+
+        cube.material.as_mut().unwrap().roughness = Some(0.1);
+        let glossy = signature(std::slice::from_ref(&cube), &lights, ambient);
+        assert_ne!(metal, glossy, "改粗糙度没进指纹");
+
+        // 清掉覆盖 → 指纹必须回到"从来没有覆盖"的原值（同一场景内容）。
+        cube.material = None;
+        assert_eq!(
+            plain,
+            signature(std::slice::from_ref(&cube), &lights, ambient),
+            "清掉覆盖后指纹应回到原值"
+        );
     }
 
     /// 状态机的**参数值**进了指纹 —— 脚本每帧推参数、Inspector DragValue 拖动

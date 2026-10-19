@@ -114,7 +114,7 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
         return Err((-32602, "params.arguments must be an object".to_string()));
     }
     match tools::call(name, &args) {
-        Ok(text) => Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false })),
+        Ok(output) => Ok(tool_result_content(output)),
         Err(tools::CallError::UnknownTool(name)) => {
             Err((-32602, format!("unknown tool: {name}")))
         }
@@ -122,6 +122,23 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
             Ok(json!({ "content": [{ "type": "text", "text": message }], "isError": true }))
         }
     }
+}
+
+/// 工具输出 → `tools/call` 的 result：文本块打头，之后每个随附图片一个 MCP
+/// `image` 块（视觉模型直接看画面；纯文本客户端至少能读到信封里的元数据）。
+///
+/// 单独抽出来是为了能不加 GPU 直接测协议形状：`mimeType` 是协议拼写，
+/// 写错客户端会把图片当未知块静默丢掉。
+fn tool_result_content(output: tools::ToolOutput) -> Value {
+    let mut content = vec![json!({ "type": "text", "text": output.text })];
+    for image in &output.images {
+        content.push(json!({
+            "type": "image",
+            "data": image.base64,
+            "mimeType": image.mime,
+        }));
+    }
+    json!({ "content": content, "isError": false })
 }
 
 fn result_line(id: &Value, result: Value) -> String {
@@ -247,6 +264,27 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"project_info","arguments":"nope"}}"#,
         );
         assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    /// 带图的工具输出 → 文本块 + `image` 块（字段拼写是协议契约：`mimeType`、
+    /// `data` 里是裸 base64，不带 data URL 前缀）。
+    #[test]
+    fn tool_output_with_images_maps_to_content_blocks() {
+        let result = tool_result_content(tools::ToolOutput {
+            text: "{\"ok\":true}".into(),
+            images: vec![tools::ToolImage {
+                mime: "image/png",
+                base64: "iVBORw0KGgo=".into(),
+            }],
+        });
+        assert_eq!(result["isError"], false);
+        let content = result["content"].as_array().expect("content 数组");
+        assert_eq!(content.len(), 2, "一个文本块 + 一个图片块");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "{\"ok\":true}");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["mimeType"], "image/png");
+        assert_eq!(content[1]["data"], "iVBORw0KGgo=");
     }
 
     /// ping 是保活，回空 result。

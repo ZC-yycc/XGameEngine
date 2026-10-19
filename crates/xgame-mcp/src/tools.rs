@@ -36,6 +36,37 @@ fn fail(message: impl Into<String>) -> CallError {
     CallError::Failed(message.into())
 }
 
+/// 一次工具调用的输出：一段文本 +（可选的）随附图片。
+///
+/// 七工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
+/// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
+/// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
+#[derive(Debug)]
+pub struct ToolOutput {
+    pub text: String,
+    pub images: Vec<ToolImage>,
+}
+
+/// 一张随附图片（MCP `image` 内容块的内容）。
+#[derive(Debug)]
+pub struct ToolImage {
+    /// MIME 类型，如 `image/png`。
+    pub mime: &'static str,
+    /// 标准 base64（不带 data URL 前缀）。
+    pub base64: String,
+}
+
+impl ToolOutput {
+    /// 只有文本（绝大多数工具）。
+    fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+}
+
 /// 7 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
@@ -126,7 +157,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "run_headless",
-            "description": "无头跑项目：不开窗口把项目模拟 N 帧（默认 300），逐帧固定 dt，返回 JSON 报告 —— 帧耗时分布、实体/刚体计数、脚本与组件日志（含 error 样本）、非有限变换检测、音频状态。project_check 的自证搭档：它管静态引用，这个管「真的跑得动」。report.ok=false（退出码 2）表示跑完但观察到问题（脚本 error 日志等），报告照常返回；项目打不开才是工具失败。include_scene=true 时另带回跑完后的场景 RON（观察模拟结果：物理落点、脚本改过的变换）。",
+            "description": "无头跑项目：不开窗口把项目模拟 N 帧（默认 300），逐帧固定 dt，返回 JSON 报告 —— 帧耗时分布、实体/刚体计数、脚本与组件日志（含 error 样本）、非有限变换检测、音频状态。project_check 的自证搭档：它管静态引用，这个管「真的跑得动」。report.ok=false（退出码 2）表示跑完但观察到问题（脚本 error 日志等），报告照常返回；项目打不开才是工具失败。include_scene=true 时另带回跑完后的场景 RON（观察模拟结果：物理落点、脚本改过的变换）。screenshot=true 时离屏渲染一帧（默认取景 + 顺光机位，1280x720）并以图片块返回 —— 接得上模型的视觉通道就能直接看画面。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -134,6 +165,7 @@ pub fn schemas() -> Vec<Value> {
                     "frames": { "type": "integer", "minimum": 1, "maximum": 100000, "description": "跑多少帧（默认 300；60Hz 下 300 帧 = 5 秒模拟）" },
                     "dt": { "type": "number", "description": "每帧推进的秒数（默认 = 项目固定步长；非必要不传 —— 默认值才保证确定性）" },
                     "include_scene": { "type": "boolean", "description": "true 时在返回信封里附上跑完后的场景 RON（默认 false，响应更小）" },
+                    "screenshot": { "type": "boolean", "description": "true 时跑完额外离屏渲染一帧，PNG 以图片内容块随结果返回（需要 GPU；默认 false）" },
                 },
                 "required": ["project"],
             },
@@ -141,15 +173,15 @@ pub fn schemas() -> Vec<Value> {
     ]
 }
 
-/// 分发一次工具调用：`Ok(text)` = 成功文本；`Err` 见 [`CallError`]。
-pub fn call(name: &str, args: &Value) -> Result<String, CallError> {
+/// 分发一次工具调用：`Ok` 是工具输出（文本，可能带图）；`Err` 见 [`CallError`]。
+pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
     match name {
-        "project_info" => project_info(args),
-        "scene_read" => scene_read(args),
-        "scene_write" => scene_write(args),
-        "entity_upsert" => entity_upsert(args),
-        "entity_remove" => entity_remove(args),
-        "project_check" => project_check(args),
+        "project_info" => project_info(args).map(ToolOutput::text),
+        "scene_read" => scene_read(args).map(ToolOutput::text),
+        "scene_write" => scene_write(args).map(ToolOutput::text),
+        "entity_upsert" => entity_upsert(args).map(ToolOutput::text),
+        "entity_remove" => entity_remove(args).map(ToolOutput::text),
+        "project_check" => project_check(args).map(ToolOutput::text),
         "run_headless" => run_headless(args),
         other => Err(CallError::UnknownTool(other.to_string())),
     }
@@ -467,7 +499,7 @@ fn project_check(args: &Value) -> Result<String, CallError> {
 ///
 /// `frames` / `dt` 的合法性由编辑器侧（`headless::parse_args`）**唯一**负责，
 /// 这里只做 JSON 类型检查 —— 两处都做校验必然漂移，报错文案也会不同步。
-fn run_headless(args: &Value) -> Result<String, CallError> {
+fn run_headless(args: &Value) -> Result<ToolOutput, CallError> {
     let root = require_str(args, "project")?;
     let exe_dir = std::env::current_exe()
         .map_err(|e| fail(format!("拿不到 server 可执行文件路径: {e}")))?
@@ -502,9 +534,18 @@ fn run_headless(args: &Value) -> Result<String, CallError> {
         .get("include_scene")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let dump_path = include_scene.then(|| temp_report_path("headless-scene"));
+    let dump_path = include_scene.then(|| temp_report_path("headless-scene", "ron"));
     if let Some(path) = &dump_path {
         cmd.arg("--dump-scene").arg(path);
+    }
+    let want_shot = args
+        .get("screenshot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // 截图落在临时 PNG，读完即删 —— 图会以内联图片块进信封，不需要留盘。
+    let shot_path = want_shot.then(|| temp_report_path("headless-shot", "png"));
+    if let Some(path) = &shot_path {
+        cmd.arg("--screenshot").arg(path);
     }
     cmd.arg(root);
 
@@ -533,7 +574,24 @@ fn run_headless(args: &Value) -> Result<String, CallError> {
         let _ = std::fs::remove_file(path);
         envelope["scene_ron"] = json!(text);
     }
-    Ok(pretty(&envelope))
+    let mut images = Vec::new();
+    if let Some(path) = &shot_path {
+        // 读不到截图 = 编辑器宣称画了却没落盘：整体失败，别给半个信封。
+        let bytes = std::fs::read(path)
+            .map_err(|e| fail(format!("读截图 {} 失败: {e}", path.display())))?;
+        let _ = std::fs::remove_file(path);
+        // 报告的 `screenshot` 节带实际机位与尺寸（ShotInfo）；信封这里只留
+        // "图片块里有几个字节"这个元数据，图本身在 content 块里。
+        envelope["screenshot"] = json!({ "bytes": bytes.len() });
+        images.push(ToolImage {
+            mime: "image/png",
+            base64: base64_encode(&bytes),
+        });
+    }
+    Ok(ToolOutput {
+        text: pretty(&envelope),
+        images,
+    })
 }
 
 /// 在 `dir` 及其上一级找 `xgame-editor` 可执行文件。
@@ -552,15 +610,41 @@ fn find_editor_exe(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 /// 进程内唯一的临时文件路径（pid + 纳秒）；调用方读完即删。
-fn temp_report_path(tag: &str) -> std::path::PathBuf {
+fn temp_report_path(tag: &str, ext: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "xgame-mcp-{tag}-{}-{}.ron",
+        "xgame-mcp-{tag}-{}-{}.{ext}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ))
+}
+
+/// 标准 base64（RFC 4648，带 `=` 填充）—— 只为内联截图存在。
+///
+/// 没引 `base64` crate：全仓库只此一处编码、且是单向（解码从不需要），
+/// 30 行查表法配一组已知向量测试足够钉住。
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let third = *chunk.get(2).unwrap_or(&0);
+        let n = ((chunk[0] as u32) << 16) | ((*chunk.get(1).unwrap_or(&0) as u32) << 8) | third as u32;
+        out.push(TABLE[(n >> 18 & 63) as usize] as char);
+        out.push(TABLE[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// 取文本尾巴（≤ `max` 个字符，按字符切不按字节切）。
@@ -607,7 +691,17 @@ mod tests {
     }
 
     /// 调工具：自动注入 `project` 参数（测试里没人想手写五遍绝对路径）。
-    fn run(project: &ProjectHandle, name: &str, mut args: Value) -> Result<String, CallError> {
+    /// 只返回文本部分；要断言随附图片用 [`run_full`]。
+    fn run(project: &ProjectHandle, name: &str, args: Value) -> Result<String, CallError> {
+        run_full(project, name, args).map(|out| out.text)
+    }
+
+    /// 调工具并返回完整输出（文本 + 随附图片块）。
+    fn run_full(
+        project: &ProjectHandle,
+        name: &str,
+        mut args: Value,
+    ) -> Result<ToolOutput, CallError> {
         let obj = args.as_object_mut().expect("测试参数必须是对象");
         obj.insert("project".into(), json!(project.root().display().to_string()));
         call(name, &args)
@@ -1016,6 +1110,64 @@ mod tests {
             .expect("include_scene=true 必须带 scene_ron");
         let scene: Scene = ron::from_str(ron_text).expect("scene_ron 必须能读回");
         assert!(scene.find_by_name("Main Camera").is_some());
+        cleanup(&project);
+    }
+
+    /// base64：RFC 4648 的已知向量（含填充的三种长度）。编码错了图片块就
+    /// 是坏数据 —— 客户端解不开只会看到"图打不开"，极难联想到是编码 bug。
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // 每 3 字节 → 4 字符（含填充）的定长关系，随机长度扫一遍。
+        for len in 0..64usize {
+            let bytes: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            assert_eq!(base64_encode(&bytes).len(), len.div_ceil(3) * 4, "len={len}");
+        }
+    }
+
+    /// screenshot=true：信封带字节数、随附块是一张真 PNG（签名开头的 base64）。
+    #[test]
+    fn run_headless_screenshot_returns_inline_image() {
+        editor_exe_for_tests();
+        let project = temp_project("headless_shot");
+        let out = match run_full(&project, "run_headless", json!({ "frames": 3, "screenshot": true }))
+        {
+            Ok(out) => out,
+            // 无 GPU 环境跳过（与渲染层测试同一套约定）：截图拿下适配器失败
+            // 走退出码 1，错误文本里带"GPU 适配器"。
+            Err(CallError::Failed(m)) if m.contains("GPU") || m.contains("适配器") => {
+                eprintln!("跳过 run_headless_screenshot_returns_inline_image：{m}");
+                cleanup(&project);
+                return;
+            }
+            Err(e) => panic!("截图运行不该失败：{e:?}"),
+        };
+        let envelope: Value = serde_json::from_str(&out.text).expect("信封必须是 JSON");
+        assert_eq!(envelope["exit_code"], 0);
+        let bytes = envelope["screenshot"]["bytes"].as_u64().expect("截图字节数");
+        assert!(bytes > 1000, "PNG 太小（{bytes} 字节），多半没画出东西");
+        // 报告的 screenshot 节带实际机位（自动取景的结果必须是可复现的具体值）。
+        let report_shot = &envelope["report"]["screenshot"];
+        assert_eq!(report_shot["width"], 1280);
+        assert_eq!(report_shot["height"], 720);
+
+        assert_eq!(out.images.len(), 1, "必须恰好一张图");
+        let image = &out.images[0];
+        assert_eq!(image.mime, "image/png");
+        // `iVBORw0KGgo` = PNG 魔数（89 50 4E 47 0D 0A 1A 0A）的 base64 前缀：
+        // 不解码也能确认块里装的是 PNG 而不是随便什么字节。
+        assert!(
+            image.base64.starts_with("iVBORw0KGgo"),
+            "图片块不是 PNG：{}…",
+            &image.base64[..image.base64.len().min(24)]
+        );
+        assert_eq!(image.base64.len(), (bytes as usize).div_ceil(3) * 4);
         cleanup(&project);
     }
 

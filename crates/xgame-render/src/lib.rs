@@ -9,6 +9,7 @@ pub mod mesh;
 pub mod model;
 pub mod scene;
 pub mod scene_pipeline;
+pub mod screenshot;
 pub mod texture;
 
 pub struct RenderContext {

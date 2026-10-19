@@ -1647,3 +1647,133 @@ xgame-editor --headless [--frames N] [--dt 秒] [--report 路径] [--dump-scene 
    同步进了 `projects/BehaviorsDemo/Plugins/`（该 DLL 是构建产物、未入 git；
    编辑器 PIE 平时也这么干）—— 过期 DLL 跨 ABI 加载是 0xc0000005 的已知雷
    （P1 记录在案），验证前刷新是纪律不是可选项。
+
+## 二十四、渲染层 PBR + 逐实体材质覆盖 + 无头截图（本轮）
+
+差距分析里"观感落后一代"的 P0 主因：光照模型停在 Blinn-Phong，材质参数
+**读进来就丢掉**。本轮三件事一次闭环：① Cook-Torrance 替换 Blinn-Phong；
+② 逐实体材质覆盖（`MaterialOverride`，"材质系统"的入口）；③ `--screenshot`
+无头截图（渲染改动的唯一可靠验证手段）——截图接上 MCP 后，智能体能**看到**
+自己造的画面。全量验证绿：`cargo check --workspace --all-targets` 绿、
+clippy **0 警告**、`cargo test --workspace --all-targets` **391 条全绿**
+（2 条基准默认 ignore；较上轮 +32：截图 CLI 18 种边角、材质 7 条、
+合并语义 3 条、逐实体 tint 1 条、指纹 1 条、MCP 3 条）。
+
+### 一、PBR：Cook-Torrance 替换 Blinn-Phong
+
+- 材质参数（metallic / roughness）**原样进 GPU**，片元着色器实现完整
+  Cook-Torrance：GGX 分布 + Smith 几何 + Schlick 菲涅尔；`F0 = mix(0.04,
+  albedo, metallic)`、漫反射项 `kd = (1 - F)(1 - metallic)`。金属没有漫反射、
+  绝缘体有 4% 基础反射 —— 从"每盏灯两个经验项"变成有物理意义的模型。
+- **环境项 = `ambient × (albedo×(1-metallic) + F(N·V))`**：均匀环境近似。
+  真 IBL（环境贴图 / 预过滤）留给 RenderGraph 轮 —— 但结构上先给金属留了
+  环境反射的挂点，到时候只换这一项。
+- **radiance × π 的亮度标定**：历史场景的灯强度是按 Lambert 手调的
+  （`diffuse = albedo × intensity × ndotl`）。PBR 的漫反射是
+  `albedo/π × radiance`：着色器里取 `radiance = intensity × π`，与旧公式
+  **数值等价** —— 换模型不换亮度，材质调参才有可比较的基线（否则全场先暗
+  3.14 倍，所有场景内容都得重调）。
+- **`MIN_ROUGHNESS = 0.04`**：GGX 在 roughness = 0 时分母为 0（除零 → NaN
+  随第一个像素扩散到整帧），夹到 0.04 的镜面感与真镜面肉眼无差。
+- **色调映射（ACES）刻意暂缓**：HDR 目标要动 Presenter / 游戏 / 编辑器三个
+  宿主的渲染目标，超出本轮；当前高光仍会裁剪，属已知限制（差距分析同步
+  改了措辞）。
+
+### 二、逐实体材质覆盖（`MaterialOverride`）
+
+- **场景格式**：`Entity.material: Option<MaterialOverride>`，三个字段全
+  `Option`（base_color / metallic / roughness），serde
+  `default + skip_serializing_if` —— 旧场景逐位兼容；RON 里 `Option` 显式写
+  `Some(...)`（与 `physics` / `audio` 同款，见 `material.rs` 文档的示例）。
+- **字段语义**：base_color **相乘**（tint 乘子：内置白模 = 直接上色，
+  glTF 带贴图的模型 = 调整体色调，a 乘透明度）；metallic / roughness
+  **替换**（"乘 0.5 的金属度"没有直觉含义）；**blend 不参与**（透明与否是
+  管线级行为，不是颜色参数）。
+- **渲染侧结构改动（防好心人翻案）**：材质参数从"每材质一个绑定组"改为
+  **逐 draw uniform** —— `DrawUniform { model, params, base_color, material }`
+  （112 字节），staging 按**图元**分段、动态偏移取段；group(1) 只剩
+  贴图 + 采样器。为什么必须换：逐实体覆盖让"同一 material_id 的两个实体
+  材质不同"，按资产缓存参数要么改色时重建绑定组、要么缓存键随数值无限膨胀；
+  逐 draw 段天然正确。上限 `MAX_RENDER_DRAWS = MAX_RENDER_ENTITIES × 2`
+  （多材质网格一只实体出十几个 draw，不是一对一），超出静默丢弃 ——
+  动态偏移越过缓冲 = 整帧校验失败，宁缺勿炸。
+- **编辑器**：Inspector 新增 Material 区（Override 勾选 → Tint 色盘 +
+  metallic / roughness 勾选式 DragValue）；`scene_signature` 纳入材质哈希
+  （漏掉的话"在 Inspector 里调颜色"视口纹丝不动 —— 指纹门控的缓存帧）；
+  组件字段编辑走既有撤销通道（P1.5 结论不变：参数是场景数据，编辑进撤销栈）。
+
+### 三、无头截图 `--screenshot`
+
+```sh
+xgame-editor --headless --frames 150 --screenshot out.png \
+    [--shot-size 1600x900] [--camera-pos x,y,z --camera-target x,y,z] <项目>
+```
+
+- 尺寸默认 1280×720、上限 4096²；`--camera-pos` / `--camera-target` **必须
+  成对**（单给一侧 = 参数错误）；`--shot-size` 等只在配合 `--screenshot` 时
+  才合法（给了没截图 = 报错，不给"静默忽略"留歧义）。
+- **默认取景 = 拟合全场 + 顺光机位**：先 `frame_bounds` 框住全部可绘制实体
+  （含背景模型），再算**相机方位 = 主方向光的 XZ 方位角 + 35°、仰角 26°**。
+  为什么是顺光：太阳在 -x/-z 时把相机放在 +x/+z，画面全是背光面 + 一丝环境
+  光，白模看起来像"渲染坏了"——实测第一版截图如此，不是 PBR 的问题而是机位
+  问题。无可用方向光时退回固定方向（纯函数 + 两条测试钉死）。
+- **无 GPU：退出码 1、不降级**。音频可以 silent 降级（照常计数只是不出声），
+  截图没有"静默降级"的余地 —— 拿不到适配器就是拿不到图。
+- 报告新增 `screenshot { path, width, height, eye, target }`：`eye/target` 是
+  **实际使用**的相机（自动取景时是拟合结果）——"这张图从哪拍的"必须可复现。
+- **确定性**：同机两次进程运行 PNG **逐字节一致**（本轮实测 SHA256 相等）；
+  跨机器不承诺（GPU 光栅化差异），文档按此口径。
+- **`--screenshot` 是推进动画时钟的唯一例外**：静态截图里角色停在绑定姿态
+  没有信息量，截图路径每帧 tick `AnimationDriver`；其余无头路径维持"不推进
+  时钟"的边界（脚本 `set_anim_param` 照常进场景、没人消费）。
+
+### 四、MCP：`run_headless` 加 `screenshot`
+
+- `screenshot: true` → spawn 编辑器带 `--screenshot <临时 PNG>`；读完即删，
+  PNG 以 **MCP `image` 内容块**（base64）随结果返回 —— 视觉模型直接看到
+  画面本身，而不是"渲染没报错"的口头保证。信封加
+  `{"screenshot": {"bytes": n}}`，实际机位在报告的 `screenshot` 节里。
+- **只有一张图、默认取景，不给相机参数开洞**：智能体很难凭一组 xyz 取景，
+  自动取景 + 可复现机位报告已经够用；要精细取景走 CLI。
+- base64 自写 30 行（不引新依赖），RFC 4648 已知向量 + 长度关系测试钉死；
+  「ToolOutput → content 块」抽成纯函数 `tool_result_content` 单独测 ——
+  `mimeType` 是协议拼写，写错客户端会把图片块静默丢掉。
+
+### 五、示例内容（SampleScene 上色）
+
+- 内置白模第一次有颜色：地面混凝土（0.55/0.58/0.62，rough 0.9）、平台三级
+  暖沙、木箱三兄弟深浅、蓝半光泽 Spinner（rough 0.35）、红塑料球
+  （rough 0.30）、抛光金属柱（metallic 1.0 / rough 0.35，与红球对照
+  "金属 vs 塑料"）。
+- **太阳强度 3.2 → 1.4**：3.2 是 Blinn-Phong 时代"白模也要亮"的手调值 ——
+  白 albedo 地面在 ndotl 0.87 × 强度 3.2 下辐射度 ≈ 2.7，早已是裁剪纯白。
+  PBR 的 π 标定保持了这个亮度（不是回归），所以过曝是**内容**问题：上色 +
+  回调强度后，受光面落在"高光但不死白"的区间。
+- 实拍：`target/shots/after3_sample.png`（自动取景，顺光）、`hero1.png`
+  （近景：高光、软影、材质差异全部可见）。
+
+### 六、测试与先证红
+
+- 先证红（仓库纪律）：材质 uniform 两条测试在旧实现下红（旧代码把
+  metallic=1 写成 params[0]=0.6）；金属/绝缘像素测试在旧 Blinn-Phong 下
+  **方向相反**（184 vs 152 luma；PBR 后 95 vs 147）——换实现后转绿即证。
+- 新增：core 7 条（material.rs 4：字段级解析 / 空表 / None 不落盘 / 往返；
+  scene.rs 3：落盘往返 / 普通实体不写字段 + 旧文件解析 / 脏检查）、
+  gltf_loader 合并 3 条、render 逐实体 tint GPU 测试 1 条（覆盖 → 像素变蓝、
+  清掉覆盖 → 与基线**逐位一致**）、editor 指纹 1 条、MCP 3 条
+  （base64 向量 / 截图像素块 / content 块协议形状）。
+- **像素测试的一个实测账**：tint 测试最初把光与相机放同轴，GGX 副瓣在中心
+  像素叠了 ~0.24 线性白（roughness 0.45 时 D≈7.8），看去像"乘子没生效"
+  （实测 176 vs 基线 255，比值 0.69 > 阈值 0.5 假红）。把光源错开轴线后
+  中心像素是纯漫反射，断言才有判别力 —— **写像素测试必须算一遍镜面项**。
+
+### 七、刻意的取舍
+
+1. **不做 IBL**：金属在均匀环境近似下偏暗（只有 ambient×F 兜底），这是
+   物理上诚实的"没有环境可反射"；真 IBL 属 RenderGraph/后处理轮。
+2. **不做 ACES 色调映射**：见第一节；现在的高光裁剪是已知限制。
+3. **材质不接脚本 API**：本轮入口 = Inspector / 场景 RON / MCP
+   `scene_write`；脚本 `set_material` 留给下一轮（连带动画/材质曲线一起做）。
+4. **blend 不可覆盖**：见第二节；要"开关透明"得换材质而不是改参数。
+5. **材质随 prefab 自动走**：实例化走 `entity.clone()`，新字段零改动自动
+   进预制体实例（这是"Entity 字段一律 Clone + PartialEq"惯例的红利）。

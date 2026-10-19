@@ -18,6 +18,7 @@ cargo test --workspace --all-targets         # 测试（要求全绿）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
+cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
 cargo run -p xgame-game -- projects/SampleScene  # 独立游戏
 cargo test -p xgame-runtime --release --test update_throughput -- --ignored --nocapture  # 分档性能基准（默认 ignore）
 ```
@@ -76,5 +77,9 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
   - **三条不能推翻的约束**：① 无头运行的实现住在编辑器二进制（`--check` 的邻居），**不做第二份帧循环**（单一运行时铁律；MCP 只透传）；② 退出码 `2`（跑完有问题）**不是工具失败** —— 报告照常产出、`isError` 只留给"打不开项目"；③ 报告 JSON 字段名是稳定契约（`json_contract_has_stable_keys` 钉死，消费方 = CI + MCP）。
   - **两条实现事实**：MCP 测试 spawn 编辑器**前必须嵌套 `cargo build -p xgame-editor`**（`cargo test` 不产出常规 exe，过期编辑器不认 `--headless` 会弹窗挂死测试；纪律同 `xgame/tests/plugin_loading.rs`）；`find_editor_exe` 找同目录 + **上一级**（`cargo test` 时 server 在 `deps/` 下跑）。
   - **实测（PLAN.md 二十三·三）**：SampleScene 300 帧墙钟 ~80 ms（帧循环 8.6 ms、帧均值 28.5 µs）；BehaviorsDemo（插件 + Lua）~70 ms（帧循环 1.3 ms）；进程启动固定成本 ~60 ms（与 `--check` 同量级）。
+- **渲染 PBR 片已完成**（2026-10-19，实施记录见 PLAN.md 二十四）：Cook-Torrance（GGX + Smith + Schlick）替换 Blinn-Phong + **逐实体材质覆盖**（`Entity.material: Option<MaterialOverride>`，base_color 乘子 / metallic / roughness 替换）+ `--screenshot` 无头截图（默认顺光取景、同机逐字节确定）+ MCP `run_headless` 的 `screenshot: true`（PNG 走 MCP `image` 内容块）。
+  - **四条不能推翻的约束**：① 灯亮度按 `radiance = intensity × π` 标定 —— 别"顺手修正"成物理严格的 intensity，全部旧场景会暗 3.14 倍；② 材质参数是**逐 draw** 的（`DrawUniform` 112 B + 动态偏移），别改回"每材质一个绑定组"（逐实体覆盖下按资产缓存要么重建绑定组、要么缓存键随数值膨胀）；③ `scene_signature` 必须哈希 material（漏了 = 暂停时调色视口不刷新）；④ 默认截图机位必须**顺光**（相机方位 = 主方向光 XZ 方位角 + 35°、仰角 26°；背光机位会把 PBR 画面拍成"渲染坏了"）。
+  - **三条实现事实**：`MIN_ROUGHNESS = 0.04`（GGX 在 roughness=0 时除零 → NaN 扩散整帧）；`--screenshot` 是**唯一**推进动画时钟的无头路径（静态截图里角色不能停在绑定姿态）；像素断言必须算一遍镜面项（光与相机同轴时 GGX 副瓣会在中心像素叠 ~0.24 线性白，把 tint 的效果糊掉一半 —— 实测踩过）。
+  - **已知限制（写进差距分析）**：无 IBL（金属只有 ambient×F 兜底、偏暗）、无 ACES（高光直接裁剪）；脚本侧没有 `set_material`（入口 = Inspector / 场景 RON / MCP `scene_write`）。
 - 对照数据（微基准 `behavior_dispatch_throughput`，1000 no-op 实体 × 300 帧，P2.5 会话）：Lua 轨分发 **562 µs/帧**、Rust 组件轨 71.7 µs、无轨基线 7.54 µs。（历史 Rhai 轨 735.6 µs，P3 起已从基准移除。）历史：P0 = 493.9 µs（当时机器）、P0.5 = 68.4 µs、P1 = 65.2 µs、P2 = 713 µs（组件/基线口径的历次漂移见基准模块文档的完整记录表）。⚠ 绝对值随机器状态浮动 1.5× 以上，**跨版本比较必须同机背靠背**。**组件轨 < 50 µs 的验收线在本机持续红**（P0.5 起已知，验收线未为迁就机器上调 —— 红了先对同机数字再判回归）。
 - **工具链注意**：本仓库的源文件是 UTF-8 **无 BOM** 且含大量中文注释。用 PowerShell 做文本替换时必须显式 `-Encoding UTF8` 读写，否则 PS 5.1 会按 GBK 解码把中文**有损**毁掉（已发生过一次，PLAN.md 十六第七节）。改中文源文件优先用编辑器工具，shell 只做只读操作。
