@@ -72,6 +72,15 @@ pub mod colors {
     pub const AXIS_Y: Color32 = Color32::from_rgb(122, 186, 112);
     pub const AXIS_Z: Color32 = Color32::from_rgb(96, 146, 214);
 
+    /// 3D 操作柄的轴色。
+    ///
+    /// 与 [`AXIS_X`] 那组**不是同一套**：面板里的轴标是 9px 小字，饱和度高会刺眼；
+    /// 而操作柄压在视口上（近白的天空 + 各种材质），不饱和就压不住。这里取的
+    /// 是"比面板色艳、比纯 (255,48,48) 稳"的中点 —— 纯色在亮背景上会发光。
+    pub const GIZMO_X: Color32 = Color32::from_rgb(232, 64, 64);
+    pub const GIZMO_Y: Color32 = Color32::from_rgb(74, 208, 74);
+    pub const GIZMO_Z: Color32 = Color32::from_rgb(56, 140, 246);
+
     /// 徽标色：脚本（青）/ 物理（橙）/ 预制体（紫）。
     pub const BADGE_SCRIPT: Color32 = Color32::from_rgb(92, 184, 178);
     pub const BADGE_PHYSICS: Color32 = Color32::from_rgb(214, 158, 88);

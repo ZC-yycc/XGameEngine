@@ -83,10 +83,14 @@ pub(crate) const CUBE_SIZE: f32 = 0.08;
 pub(crate) const AXIS_DIRS: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
 
 /// 轴颜色：X=红, Y=绿, Z=蓝。
+///
+/// 色值统一收在 `theme::colors::GIZMO_*`（那里解释了为什么操作柄与面板轴标
+/// 用两套饱和度）。原先这里是三组硬编码纯色 `(255,48,48)` 之类，在白天空上
+/// 会发光，也和 Inspector 的轴标完全是两个色系。
 pub(crate) const AXIS_COLORS: [egui::Color32; 3] = [
-    egui::Color32::from_rgb(255, 48, 48),
-    egui::Color32::from_rgb(48, 255, 48),
-    egui::Color32::from_rgb(48, 128, 255),
+    crate::panels::theme::colors::GIZMO_X,
+    crate::panels::theme::colors::GIZMO_Y,
+    crate::panels::theme::colors::GIZMO_Z,
 ];
 
 /// 悬停高亮颜色（亮黄）。
