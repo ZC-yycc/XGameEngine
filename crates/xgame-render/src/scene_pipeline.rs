@@ -168,6 +168,28 @@ const MAX_SHADOW_RADIUS: f32 = 120.0;
 /// `MAX_LIGHTS`。改的时候别漏。
 pub const MAX_LIGHTS: usize = 8;
 
+/// 一帧的绘制统计（合批效果的读数口）。
+///
+/// 存在的理由：实例化把"绘制项"与"draw call"解耦之后，画面正确性可以靠像素
+/// 测试守，但"合批到底有没有生效"只有计数看得见 —— 基准与测试都需要一个
+/// 能断言 `opaque_batches == 1` 的地方，而不是从帧耗时反推。
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FrameStats {
+    /// 不透明批次（一批 = 一次实例化 `draw_indexed`）。
+    pub opaque_batches: usize,
+    /// 不透明实例数（= 不透明绘制项数；批次数 ≤ 实例数）。
+    pub opaque_instances: usize,
+    /// 半透明绘制项数。半透明要按距离排序，逐项一次 draw call，不参与合批。
+    pub blended_draws: usize,
+}
+
+impl FrameStats {
+    /// 本帧主 pass 真正发出的 draw call 数（阴影 pass 复用不透明批次，不重复计）。
+    pub fn draw_calls(&self) -> usize {
+        self.opaque_batches + self.blended_draws
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GPU uniform 类型（必须与 WGSL 布局逐字节对齐）
 // ---------------------------------------------------------------------------
@@ -806,6 +828,9 @@ pub struct ScenePipeline {
     /// 复用同一个 `Vec` 是为了稳态零分配：`clear()` + 按需 `resize(n, 0)` 会把要用的
     /// 那段显式清零，容量留着下次接着用。
     draw_staging: Vec<u8>,
+
+    /// 上一帧的绘制统计（见 [`FrameStats`]）。合批是否生效的读数口。
+    stats: FrameStats,
 }
 
 impl ScenePipeline {
@@ -1079,12 +1104,18 @@ impl ScenePipeline {
             sample_count,
             uniform_alignment,
             draw_staging: Vec::new(),
+            stats: FrameStats::default(),
         }
     }
 
     /// 主 pass 使用的采样数（1 = 未开 MSAA）。
     pub fn sample_count(&self) -> u32 {
         self.sample_count
+    }
+
+    /// 上一帧的绘制统计（见 [`FrameStats`]）。
+    pub fn frame_stats(&self) -> FrameStats {
+        self.stats
     }
 
     /// 创建一张阴影深度图（深度仅用作渲染目标 + 采样源）。
@@ -1760,6 +1791,13 @@ impl ScenePipeline {
         // 远 → 近。`partial_cmp` 对 NaN 返回 None，退化成"保持原序"即可，
         // 不值得为一个坏变换把整帧干掉。
         blended.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 统计口径 = 主 pass 真正发出的 draw call（阴影复用不透明批次，另计）。
+        self.stats = FrameStats {
+            opaque_batches: opaque.len(),
+            opaque_instances: opaque.len(),
+            blended_draws: blended.len(),
+        };
 
         // --- 阴影 pass：先把深度画进阴影图（必须在主 pass 之前）---
         //
