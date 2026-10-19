@@ -575,10 +575,16 @@ fn hud_text(
 ) {
     let galley = painter.layout_no_wrap(text.to_string(), font, color);
     let rect = align.anchor_size(pos, galley.size());
-    painter.rect_filled(
-        rect.expand2(egui::vec2(6.0, 3.0)),
+    let bg = rect.expand2(egui::vec2(6.0, 3.0));
+    // 药丸底的不透明度要压得住**明亮天空**：0.38 的黑叠在 200 级灰的天空上
+    // 还剩 124 级 —— 白字压上去对比度只有 2:1，看着像糊了一层雾；0.5 也不够
+    // （背景最亮时接近纯白，叠完是 128 级中灰）。0.69 才能保证任何背景下
+    // 底色都落在 80 级以下，白字对比度 5:1 以上。
+    painter.rect_filled(bg, 3.0, egui::Color32::from_black_alpha(176));
+    painter.rect_stroke(
+        bg,
         3.0,
-        egui::Color32::from_black_alpha(96),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(72)),
     );
     painter.galley(rect.min, galley, color);
 }
@@ -599,11 +605,12 @@ fn draw_zoom_indicator(state: &EditorState, painter: &egui::Painter, rect: egui:
     );
 }
 
-/// 视口 HUD：四个角各放一条信息，全部**无衬底**小字。
+/// 视口 HUD：四个角各放一条信息，全部**药丸底小字**。
 ///
 /// 与面板里的标题不同，这里的文字直接压在半透明/3D 画面上，所以：
-/// 字号统一 11（比面板正文小半号，避免和 3D 抢注意力）、都带 1px 黑影、
-/// 颜色只用「亮 / 暗」两档。旧实现有一条独立的顶部栏，白白吃掉 22px 视口高度，
+/// 字号统一 11（比面板正文小半号，避免和 3D 抢注意力）、一律带
+/// `from_black_alpha(128)` 的药丸底 + 1px 暗边、颜色只用「亮 / 暗」两档。
+/// 旧实现有一条独立的顶部栏，白白吃掉 22px 视口高度，
 /// 而它显示的两条信息（场景名、相机位置）用叠加层表达更省地方也更像 UE。
 fn draw_viewport_hud(state: &EditorState, painter: &egui::Painter, rect: egui::Rect, ui: &egui::Ui) {
     use crate::panels::theme::colors;
