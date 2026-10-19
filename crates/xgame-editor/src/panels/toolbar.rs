@@ -123,7 +123,10 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     } else if icons::icon_text_button(
                         ui,
                         Icon::Build,
-                        "Build",
+                        // 不能也叫 "Build"：右边还有一个「构建游戏」的 Build，
+                        // 同一条工具栏上两个一模一样的图标 + 文字，用户没法区分
+                        // 哪个是编插件、哪个是打包。
+                        "Build Plugins",
                         "编译 Rust 插件（不进入 Play）\n产物同步进 Plugins/",
                     )
                     .clicked()
