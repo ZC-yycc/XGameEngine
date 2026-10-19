@@ -142,6 +142,11 @@ struct UiShot {
     stable: u32,
     /// 尺寸对不上时的重抓次数（见 [`EditorApp::service_ui_shot`]）。
     retries: u32,
+    /// 抓图前把「项目设置」窗口打开。
+    ///
+    /// 这个窗口是模态的，只能靠点 ⚙ 打开 —— 没有这个开关就**永远截不到**
+    /// 它，界面改版时它是唯一一块只能靠肉眼读代码猜排版的地方。
+    open_settings: bool,
 }
 
 impl EditorApp {
@@ -193,6 +198,18 @@ impl EditorApp {
             let action = app.hub.try_open(Path::new(&arg));
             if let HubAction::Open(project) = action {
                 app.open_project(*project);
+            }
+        }
+
+        // `--ui-settings`：把模态的项目设置窗口一并拉开（否则截不到）。
+        if app
+            .ui_shot
+            .as_ref()
+            .map(|s| s.open_settings)
+            .unwrap_or(false)
+        {
+            if let Some(session) = app.session.as_mut() {
+                session.state.settings_open = true;
             }
         }
 
@@ -387,7 +404,8 @@ struct LaunchArgs {
 
 /// 解析窗口模式的启动参数。
 ///
-/// 只认 `--ui-shot <png>` / `--ui-frames <n>` / `--ui-select <实体名>` 三个开关，
+/// 只认 `--ui-shot <png>` / `--ui-frames <n>` / `--ui-select <实体名>` /
+/// `--ui-settings` 四个开关，
 /// 其余非开关参数按顺序取**第一个**当项目路径。`--check` / `--headless` 在
 /// `main` 更早的分支就分流了，不会走到这里。
 fn parse_launch_args(raw: &[String]) -> LaunchArgs {
@@ -395,6 +413,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut shot_path: Option<std::path::PathBuf> = None;
     let mut after_frames = 12u32;
     let mut select: Option<String> = None;
+    let mut open_settings = false;
 
     let mut i = 0;
     while i < raw.len() {
@@ -423,6 +442,9 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
                     log::error!("--ui-select 需要一个实体名");
                 }
             }
+            "--ui-settings" => {
+                open_settings = true;
+            }
             other if !other.starts_with("--") => {
                 if out.project.is_none() {
                     out.project = Some(other.to_owned());
@@ -442,6 +464,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         last_size: None,
         stable: 0,
         retries: 0,
+        open_settings,
     });
     out
 }

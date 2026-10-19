@@ -18,6 +18,19 @@
 use crate::panels::theme;
 use crate::state::EditorState;
 
+/// 设置窗口里的单行文本字段：**撑满网格剩下的宽度**。
+///
+/// 不这么做的话每个字段只有 egui 的默认宽度（~220px），右边缘离窗口边框
+/// 还差一大截：一列输入框右边缘不齐，窗口右边又空出一块。网格单元格的
+/// `available_width()` 就是"本行到网格右边界"的剩余量，拿它定宽即可。
+fn text_field(ui: &mut egui::Ui, value: &mut String) {
+    let width = ui.available_width().max(160.0);
+    ui.add_sized(
+        egui::vec2(width, theme::FIELD_HEIGHT + 2.0),
+        egui::TextEdit::singleline(value),
+    );
+}
+
 pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     if !state.settings_open {
         return;
@@ -33,10 +46,16 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     let mut reset = false;
     let mut cancel = false;
 
+    // 内容比一屏高：**必须给滚动区一个上限**，否则窗口会按内容高度长到屏幕外，
+    // 顶部的标题栏和底部的 Apply / Cancel 一起被裁掉（用户连确认都点不到）。
+    // 上限按窗口高度算，留出标题栏与页脚的位置。
+    let body_max = (ctx.screen_rect().height() - 190.0).max(240.0);
+
     egui::Window::new("Project Settings")
         .open(&mut open)
         .collapsible(false)
-        .resizable(true)
+        // 固定高度上限之后，拉大窗口只会把滚动区撑在同一高度上，不如不给拖。
+        .resizable(false)
         .default_width(470.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
@@ -44,7 +63,10 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 return;
             };
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(body_max)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
                 // ── 项目 ──
                 theme::section_bar(ui, "项目");
                 egui::Grid::new("set_proj")
@@ -53,12 +75,12 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     .min_col_width(88.0)
                     .show(ui, |ui| {
                         ui.label("项目名");
-                        ui.text_edit_singleline(&mut draft.name);
+                        text_field(ui, &mut draft.name);
                         ui.end_row();
 
                         ui.label("入口场景")
                             .on_hover_text("打开项目时加载的场景（项目相对路径）");
-                        ui.text_edit_singleline(&mut draft.entry_scene);
+                        text_field(ui, &mut draft.entry_scene);
                         ui.end_row();
                     });
 
@@ -72,7 +94,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     .min_col_width(88.0)
                     .show(ui, |ui| {
                         ui.label("标题");
-                        ui.text_edit_singleline(&mut draft.window.title);
+                        text_field(ui, &mut draft.window.title);
                         ui.end_row();
 
                         ui.label("尺寸");
@@ -299,25 +321,25 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     .show(ui, |ui| {
                         let c = &mut draft.content;
                         ui.label("场景");
-                        ui.text_edit_singleline(&mut c.scenes_dir);
+                        text_field(ui, &mut c.scenes_dir);
                         ui.end_row();
                         ui.label("模型");
-                        ui.text_edit_singleline(&mut c.models_dir);
+                        text_field(ui, &mut c.models_dir);
                         ui.end_row();
                         ui.label("贴图");
-                        ui.text_edit_singleline(&mut c.textures_dir);
+                        text_field(ui, &mut c.textures_dir);
                         ui.end_row();
                         ui.label("音频");
-                        ui.text_edit_singleline(&mut c.audio_dir);
+                        text_field(ui, &mut c.audio_dir);
                         ui.end_row();
                         ui.label("着色器");
-                        ui.text_edit_singleline(&mut c.shaders_dir);
+                        text_field(ui, &mut c.shaders_dir);
                         ui.end_row();
                         ui.label("预制体");
-                        ui.text_edit_singleline(&mut c.prefabs_dir);
+                        text_field(ui, &mut c.prefabs_dir);
                         ui.end_row();
                         ui.label("脚本");
-                        ui.text_edit_singleline(&mut c.scripts_dir);
+                        text_field(ui, &mut c.scripts_dir);
                         ui.end_row();
                     });
             });
