@@ -9,6 +9,7 @@ use egui_tiles::{
 };
 use strum::Display;
 use xgame_derive::Panel;
+use crate::panels::theme;
 use crate::state::EditorState;
 
 
@@ -21,6 +22,22 @@ pub enum PanelTab {
     SceneView,
     Inspector,
     Console,
+}
+
+impl PanelTab {
+    /// 页签上显示的名字。
+    ///
+    /// 与枚举名分开：枚举名是代码里的稳定标识（`SceneView`），页签名是**给人看的**
+    /// （UE 的视口叫 Viewport、日志面板叫 Output Log）。改名字不该牵动代码引用。
+    pub fn title(&self) -> &'static str {
+        match self {
+            PanelTab::Hierarchy => "Hierarchy",
+            PanelTab::Prefabs => "Prefabs",
+            PanelTab::SceneView => "Viewport",
+            PanelTab::Inspector => "Inspector",
+            PanelTab::Console => "Output Log",
+        }
+    }
 }
 
 pub fn create_tile_tree() -> Tree<PanelTab> {
@@ -89,9 +106,9 @@ pub struct EditorBehavior<'a> {
 
 impl Behavior<PanelTab> for EditorBehavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut PanelTab) -> UiResponse {
-        // 8px inner margin so panel elements don't sit flush against the tile edges.
+        // 面板内边距统一走主题常量：所有面板的内容起点因此对齐。
         egui::Frame::default()
-            .inner_margin(egui::Margin::same(8.0))
+            .inner_margin(egui::Margin::same(theme::PANEL_MARGIN))
             .show(ui, |ui| {
                 pane.show(self.state, ui);
             });
@@ -99,7 +116,7 @@ impl Behavior<PanelTab> for EditorBehavior<'_> {
     }
 
     fn tab_title_for_pane(&mut self, pane: &PanelTab) -> egui::WidgetText {
-        format!("{}", pane).into()
+        pane.title().to_owned().into()
     }
 
     fn is_tab_closable(&self, _tiles: &Tiles<PanelTab>, _tile_id: TileId) -> bool {
@@ -113,5 +130,101 @@ impl Behavior<PanelTab> for EditorBehavior<'_> {
             all_panes_must_have_tabs: true,
             ..SimplificationOptions::default()
         }
+    }
+
+    fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
+        theme::TAB_BAR_HEIGHT
+    }
+
+    fn tab_bar_color(&self, _visuals: &egui::Visuals) -> egui::Color32 {
+        theme::colors::TAB_BAR_BG
+    }
+
+    fn tab_title_spacing(&self, _visuals: &egui::Visuals) -> f32 {
+        10.0
+    }
+
+    fn tab_bar_hline_stroke(&self, _visuals: &egui::Visuals) -> egui::Stroke {
+        egui::Stroke::new(1.0_f32, theme::colors::SEPARATOR_SOFT)
+    }
+
+    /// 自绘页签（覆盖 egui_tiles 的默认实现）。
+    ///
+    /// 默认实现的"选中 = 一个 1px 蓝框"太弱，看起来像没画完的控件。UE 的做法是：
+    /// **选中页签用面板底色与内容连成一片**、顶部一条 2px 强调线，
+    /// 未选中的页签融进更暗的页签条里、只有悬停才浮起来。
+    ///
+    /// 点击 / 拖拽的**语义**仍由 egui_tiles 处理（`Tabs` 读返回的 `Response`），
+    /// 这里只负责画。
+    fn tab_ui(
+        &mut self,
+        _tiles: &mut Tiles<PanelTab>,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        tile_id: TileId,
+        state: &egui_tiles::TabState,
+    ) -> egui::Response {
+        use theme::colors;
+
+        // 标题仍然走 `tab_title_for_pane`（拿一份 pane 副本喂它，避免与
+        // `&mut self` 的可变借用打架）。
+        let pane = match _tiles.get(tile_id) {
+            Some(egui_tiles::Tile::Pane(pane)) => pane.clone(),
+            _ => unreachable!("页签对应的 pane 必须存在"),
+        };
+        let text = self.tab_title_for_pane(&pane);
+
+        let font = if state.active {
+            egui::FontId::new(12.5, theme::bold_family())
+        } else {
+            egui::FontId::proportional(12.5)
+        };
+        let galley = text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font);
+
+        let x_margin = self.tab_title_spacing(ui.visuals());
+        let width = galley.size().x + 2.0 * x_margin;
+        let (_, tab_rect) = ui.allocate_space(egui::vec2(width, ui.available_height()));
+
+        let response = ui
+            .interact(tab_rect, id, egui::Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::Grab);
+
+        if !state.is_being_dragged {
+            let painter = ui.painter();
+            if state.active {
+                painter.rect_filled(tab_rect, 0.0, colors::PANEL_BG);
+                // 顶部 2px 强调线：UE 选中页签的标志。
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        tab_rect.left_top(),
+                        egui::pos2(tab_rect.right(), tab_rect.top() + 2.0),
+                    ),
+                    0.0,
+                    colors::ACCENT_LIGHT,
+                );
+                // 与内容区连成一片：擦掉页签条与内容之间的那条分隔线。
+                painter.hline(
+                    tab_rect.x_range(),
+                    tab_rect.bottom(),
+                    egui::Stroke::new(1.0_f32, colors::PANEL_BG),
+                );
+            } else if response.hovered() {
+                painter.rect_filled(tab_rect, 0.0, colors::TAB_HOVER_BG);
+            }
+
+            let text_color = if state.active {
+                colors::TEXT_BRIGHT
+            } else if response.hovered() {
+                colors::TEXT_PRIMARY
+            } else {
+                colors::TEXT_SECONDARY
+            };
+            let text_pos = egui::Align2::LEFT_CENTER
+                .align_size_within_rect(galley.size(), tab_rect.shrink2(egui::vec2(x_margin, 0.0)))
+                .min;
+            painter.galley(text_pos, galley, text_color);
+        }
+
+        response
     }
 }

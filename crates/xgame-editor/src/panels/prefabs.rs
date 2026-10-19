@@ -13,25 +13,97 @@
 //! 资产清单存在 [`EditorState::prefab_list`] 里，由 [`EditorState::refresh_prefabs`]
 //! 在打开项目、创建/删除资产时刷新。**不是**每帧去扫目录——目录扫描是一串系统
 //! 调用，逐帧做就是"界面没动却在耗 CPU"的典型来源（这个项目已经在这类问题上
-//! 栽过几次）。列表因此可能滞后于手工在资源管理器里新建的文件，那个 ⟳ 按钮
+//! 栽过几次）。列表因此可能滞后于手工在资源管理器里新建的文件，那个刷新按钮
 //! 就是给这种情况准备的。
 
 use xgame_core::prefab::prefab_display_name;
 
+use crate::panels::{icons, theme};
 use crate::state::EditorState;
+
+/// 资产所在子目录（用于列表行右侧的暗色归类提示）；直接在 `Prefabs/` 下时返回空。
+///
+/// 例：`Prefabs/Props/Crate.prefab.ron` → `Some("Props")`。
+fn subdir_label(path: &str) -> Option<&str> {
+    let (dir, _) = path.rsplit_once('/')?;
+    let last = dir.rsplit('/').next()?;
+    // 目录名恰好是预制体根目录（`Prefabs`）时不算子目录。
+    if last.eq_ignore_ascii_case("prefabs") || last.is_empty() {
+        None
+    } else {
+        Some(last)
+    }
+}
+
+/// 一行预制体资产：22px 高、整宽可点，悬停浮出浅底。
+///
+/// 不用 `egui::Button` 的原因和 Hierarchy 一样：按钮自带的边框/圆角/内边距
+/// 让行高在 20~26px 之间飘，列表看起来就是"一行高一行矮"。
+fn prefab_row(ui: &mut egui::Ui, path: &str, name: &str) -> egui::Response {
+    use egui::{Align2, FontId, Pos2, Vec2};
+
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, theme::ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, 0.0, theme::colors::ROW_HOVER_BG);
+    }
+    let icon_rect = egui::Rect::from_center_size(
+        Pos2::new(rect.left() + 12.0, rect.center().y),
+        Vec2::splat(11.0),
+    );
+    icons::paint(
+        painter,
+        icon_rect,
+        icons::Icon::Diamond,
+        theme::colors::BADGE_PREFAB,
+    );
+    painter.text(
+        Pos2::new(icon_rect.right() + 6.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        name,
+        FontId::proportional(12.0),
+        theme::colors::TEXT_PRIMARY,
+    );
+    if let Some(dir) = subdir_label(path) {
+        painter.text(
+            Pos2::new(rect.right() - 6.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            dir,
+            FontId::proportional(10.5),
+            theme::colors::TEXT_DIM,
+        );
+    }
+    response.on_hover_text(format!("{path}\n\n点击 = 实例化到场景"))
+}
 
 /// 在 `Ui` 内渲染预制体面板内容。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     let is_editing = state.is_editing();
 
     // ── 标题行 + 刷新 ──
+    //
+    // 与 Hierarchy / Console 同一套：左标题 + 右侧数字/图标，标题走粗体族
+    // （`ui.strong` 只改颜色不换字重，在暗色面板里几乎看不出层级）。
     ui.horizontal(|ui| {
-        ui.strong("Prefabs");
+        ui.label(
+            egui::RichText::new("Prefabs")
+                .family(theme::bold_family())
+                .color(theme::colors::TEXT_PRIMARY),
+        );
+        ui.label(theme::dim_note(format!("{} 项", state.prefab_list.len())));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .button("⟳")
-                .on_hover_text("重新扫描项目里的预制体资产\n（在资源管理器里手工增删过文件时用）")
-                .clicked()
+            if icons::icon_button(
+                ui,
+                icons::Icon::Refresh,
+                18.0,
+                "重新扫描项目里的预制体资产\n（在资源管理器里手工增删过文件时用）",
+                false,
+            )
+            .clicked()
             {
                 state.refresh_prefabs();
             }
@@ -39,13 +111,10 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     });
 
     // ── 搜索 ──
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut state.prefab_filter)
-                .hint_text("Search prefabs...")
-                .desired_width(f32::INFINITY),
-        );
-    });
+    ui.add_sized(
+        egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
+        egui::TextEdit::singleline(&mut state.prefab_filter).hint_text("Search prefabs…"),
+    );
 
     // ── 从选中创建 ──
     let has_selection = state.selected_entity.is_some();
@@ -57,24 +126,27 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     } else {
         "把选中实体（含整棵子树）存成可复用的预制体资产"
     };
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(create_enabled, egui::Button::new("📦  Create from Selection"))
-            .on_hover_text(create_hint)
-            .clicked()
-        {
-            state.begin_create_prefab();
-        }
-    });
+    let create = ui
+        .add_enabled_ui(create_enabled, |ui| {
+            icons::icon_text_button(
+                ui,
+                icons::Icon::Diamond,
+                "Create from Selection",
+                "把选中实体（含整棵子树）存成可复用的预制体资产",
+            )
+        })
+        .inner;
+    if create.on_hover_text(create_hint).clicked() {
+        state.begin_create_prefab();
+    }
     if is_editing && has_selection {
-        let name = state.prefab_default_name();
-        ui.label(
-            egui::RichText::new(format!("Selection: {name}"))
-                .weak()
-                .size(11.0),
-        );
+        ui.label(theme::dim_note(format!(
+            "新建自 {}",
+            state.prefab_default_name()
+        )));
     }
 
+    ui.add_space(4.0);
     ui.separator();
 
     // ── 资产列表 ──
@@ -94,26 +166,27 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         if total == 0 {
-            ui.weak("还没有预制体。选中一个实体后点上方 “Create from Selection”。");
+            ui.label(theme::dim_note(
+                "还没有预制体 —— 选中一个实体后点上面 “Create from Selection”",
+            ));
             return;
         }
         if entries.is_empty() {
-            ui.weak("没有匹配的预制体。");
+            ui.label(theme::dim_note("没有匹配的预制体"));
             return;
         }
 
         for path in &entries {
             let name = prefab_display_name(path);
-            let width = ui.available_width();
-            let resp = ui
-                .add_enabled(
-                    is_editing,
-                    egui::Button::new(format!("📦  {name}")).min_size(egui::vec2(width, 20.0)),
-                )
-                .on_hover_text(format!("{path}\n\n点击 = 实例化到场景"));
-            if resp.clicked() {
+            let resp = prefab_row(ui, path, &name);
+            if resp.clicked() && is_editing {
                 instantiate = Some(path.clone());
             }
+            let resp = if is_editing {
+                resp
+            } else {
+                resp.on_hover_text("播放模式下不能修改场景")
+            };
 
             let path_for_menu = path.clone();
             resp.context_menu(|ui| {

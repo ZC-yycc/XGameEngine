@@ -18,6 +18,8 @@ use std::collections::HashSet;
 
 use xgame_core::{EntityId, Scene};
 
+use crate::panels::icons::{self, Icon};
+use crate::panels::theme::{self, colors};
 use crate::scene_renderer::mix_bits;
 use crate::state::{EditorState, PlayMode};
 
@@ -178,21 +180,12 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     let is_editing = state.is_editing();
 
     // ── 搜索过滤器 ──
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut state.hierarchy_filter)
-                .hint_text("Search...")
-                .desired_width(f32::INFINITY),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let resp = ui
-                .add_enabled(is_editing, egui::Button::new("+"))
-                .on_disabled_hover_text("Cannot modify scene while playing");
-            if resp.clicked() {
-                state.create_entity();
-            }
-        });
-    });
+    // 只留一个整宽搜索框；"+" 与底部「Create Empty」重复，去掉可以让搜索框
+    // 独占一行（此前加号把输入宽挤掉 24px，占位文字都快放不下）。
+    ui.add_sized(
+        egui::vec2(ui.available_width(), theme::FIELD_HEIGHT),
+        egui::TextEdit::singleline(&mut state.hierarchy_filter).hint_text("Search…"),
+    );
 
     if !is_editing {
         let play_label = match state.play_mode {
@@ -202,12 +195,12 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         };
         ui.label(
             egui::RichText::new(format!("{play_label} — Scene locked"))
-                .color(egui::Color32::YELLOW)
+                .color(colors::WARN)
                 .size(11.0),
         );
     }
 
-    ui.separator();
+    ui.add_space(2.0);
 
     // ── 收集本帧要显示的行 ──
     // 走行模型缓存：结构指纹没变就复用上一帧的（零 String 分配），见 `RowCache`。
@@ -239,7 +232,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             return;
         }
 
-        let row_height = 20.0;
+        let row_height = theme::ROW_HEIGHT;
         let full_width = ui.available_width();
 
         for row in &rows {
@@ -254,39 +247,40 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 && state.hierarchy_drag != Some(row.id)
                 && pointer.is_some_and(|p| rect.contains(p));
 
-            // 背景
+            // 背景：选中是实心蓝，悬停是浅一档的灰，拖拽目标是强调蓝。
             let painter = ui.painter();
             if is_drop_target {
-                // 拖拽悬停目标：高亮描边，提示"松手就挂到这里"
-                painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(60, 90, 130));
+                painter.rect_filled(rect, 2.0, colors::ACCENT_BLUE.gamma_multiply(0.75));
             } else if selected {
-                painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+                painter.rect_filled(rect, 0.0, colors::SELECTION_BG);
             } else if resp.hovered() {
-                painter.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+                painter.rect_filled(rect, 0.0, colors::ROW_HOVER_BG);
             }
 
-            let mut x = rect.left() + 4.0 + row.depth as f32 * 14.0;
+            let mut x = rect.left() + 4.0 + row.depth as f32 * 12.0;
             let center_y = rect.center().y;
 
-            // 折叠箭头（只有含子节点时才画，并且只有它可点）
+            // 折叠箭头：固定 14px 列宽，画矢量三角（字形的 ▼ 基线不稳）。
             if row.has_children {
-                let arrow = if state.collapsed_entities.contains(&row.id) {
-                    "▶"
-                } else {
-                    "▼"
-                };
-                let arrow_rect = egui::Rect::from_min_size(
+                let arrow_hit = egui::Rect::from_min_size(
                     egui::pos2(x, rect.top()),
                     egui::vec2(14.0, row_height),
                 );
                 let arrow_resp =
-                    ui.interact(arrow_rect, ui.id().with(("fold", row.idx)), egui::Sense::click());
-                painter.text(
-                    arrow_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    arrow,
-                    egui::FontId::proportional(10.0),
-                    egui::Color32::from_gray(180),
+                    ui.interact(arrow_hit, ui.id().with(("fold", row.idx)), egui::Sense::click());
+                icons::paint(
+                    painter,
+                    egui::Rect::from_center_size(arrow_hit.center(), egui::Vec2::splat(9.0)),
+                    if state.collapsed_entities.contains(&row.id) {
+                        Icon::ChevronRight
+                    } else {
+                        Icon::ChevronDown
+                    },
+                    if arrow_resp.hovered() {
+                        colors::TEXT_BRIGHT
+                    } else {
+                        colors::TEXT_SECONDARY
+                    },
                 );
                 if arrow_resp.clicked() {
                     toggle_fold = Some(row.id);
@@ -294,40 +288,51 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             }
             x += 16.0;
 
-            // 图标 + 名称
-            // 预制体实例用菱形：根是实心的 🔷，内部节点是空心的 🔹 —— 一眼就能
-            // 看出"这一坨是一份资产实例"，而不是一堆普通对象。
-            //
-            // 后面追加两个徽标：📜 = 挂了脚本（多于一份时带数量），⚙ = 参与物理。
-            // 这两样决定了实体"运行时会不会动"，比有没有模型更值得一眼看到。
-            let mut icon = String::from(match row.prefab_root {
-                Some(true) => "🔷",
-                Some(false) => "🔹",
-                None if row.has_model => "📦",
-                None => "•",
-            });
-            if row.script_count > 0 {
-                if row.script_count > 1 {
-                    icon.push_str(&format!("📜{}", row.script_count));
-                } else {
-                    icon.push('📜');
-                }
-            }
-            if row.has_physics {
-                icon.push('⚙');
-            }
+            // 图标：预制体 = 菱形（紫）、有模型 = 小方块、空实体 = 圆点。
+            // 单图标 + 右侧徽标，避免"一行两个图标"的拥挤感。
+            let (icon, icon_color) = match row.prefab_root {
+                Some(true) => (Icon::Diamond, colors::BADGE_PREFAB),
+                Some(false) => (Icon::Diamond, colors::BADGE_PREFAB.gamma_multiply(0.6)),
+                None if row.has_model => (Icon::Cube, colors::TEXT_SECONDARY),
+                None => (Icon::Dot, colors::TEXT_DIM),
+            };
+            icons::paint(
+                painter,
+                egui::Rect::from_center_size(
+                    egui::pos2(x + 6.0, center_y),
+                    egui::Vec2::splat(12.0),
+                ),
+                icon,
+                icon_color,
+            );
+            x += 18.0;
+
             let text_color = if selected {
-                ui.visuals().strong_text_color()
+                colors::TEXT_BRIGHT
             } else {
-                ui.visuals().text_color()
+                colors::TEXT_PRIMARY
             };
             painter.text(
                 egui::pos2(x, center_y),
                 egui::Align2::LEFT_CENTER,
-                format!("{icon} {}", row.name),
-                egui::FontId::proportional(13.0),
+                &row.name,
+                egui::FontId::proportional(12.5),
                 text_color,
             );
+
+            // 右侧徽标（从右往左排）：物理 P / 脚本 S（多份带数量）。
+            let mut badge_x = rect.right() - 6.0;
+            if row.has_physics {
+                badge_x -= badge(painter, badge_x, center_y, "P", colors::BADGE_PHYSICS, selected);
+            }
+            if row.script_count > 0 {
+                let label = if row.script_count > 1 {
+                    format!("S{}", row.script_count)
+                } else {
+                    "S".to_owned()
+                };
+                badge(painter, badge_x, center_y, &label, colors::BADGE_SCRIPT, selected);
+            }
 
             // 交互
             if resp.clicked() && toggle_fold.is_none() {
@@ -479,26 +484,44 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         }
     }
 
-    // ── 底部创建按钮 ──
+    // ── 底部「＋ Add」──
+    //
+    // UE 的 Content Browser / Outliner 都是一个整宽的 Add 按钮 + 下拉类型列表；
+    // 比并排两个小按钮更整齐（并排时两个按钮宽度由文字决定，右边永远空一块）。
+    ui.add_space(2.0);
     ui.separator();
-    ui.horizontal(|ui| {
-        let create_resp = ui
-            .add_enabled(is_editing, egui::Button::new("Create Empty"))
-            .on_disabled_hover_text("Cannot modify scene while playing");
-        if create_resp.clicked() {
-            state.create_entity();
+    {
+        let add_id = ui.id().with("hierarchy_add_menu");
+        let response = ui
+            .add_enabled_ui(is_editing, |ui| {
+                icons::add_row(ui, "Add", "新建实体 / 内置图元")
+            })
+            .inner
+            .on_disabled_hover_text("播放模式下不能修改场景");
+
+        if response.clicked() {
+            ui.memory_mut(|memory| memory.toggle_popup(add_id));
         }
-        ui.add_enabled_ui(is_editing, |ui| {
-            ui.menu_button("Create Primitive", |ui| {
+
+        egui::popup_below_widget(
+            ui,
+            add_id,
+            &response,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(180.0);
+                if ui.button("Empty Entity").clicked() {
+                    state.create_entity();
+                }
+                ui.separator();
                 for kind in xgame_render::mesh::BuiltinMesh::ALL {
                     if ui.button(kind.label()).clicked() {
                         state.create_primitive(kind);
-                        ui.close_menu();
                     }
                 }
-            });
-        });
-    });
+            },
+        );
+    }
 
     // ── 键盘快捷键 ──
     if is_editing {
@@ -518,4 +541,56 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
     // 行模型还回缓存：指纹没变的下一帧直接复用，零 String 分配。
     state.hierarchy_cache.give_back(rows);
+}
+
+/// 画一个右对齐的小徽标（S = 有脚本 / P = 参与物理），返回占用宽度（含间距）。
+///
+/// 用「描边 + 淡底 + 字母」而不是字形图标：字形图标的字宽不稳定，
+/// 一多就会挤在一起；字母徽标在 13px 高度里永远排得下。
+/// 行尾徽标（P = 物理 / S = 脚本）。
+///
+/// `selected` 只影响底色：选中行是蓝底，徽标那层 12% 的同色底会直接糊进
+/// 蓝色里（"S" 几乎看不见）。选中时改用半透明黑底 + 提亮一档的字色，
+/// 徽标的色相仍然保留 —— 用户靠颜色认"这是脚本还是物理"。
+fn badge(
+    painter: &egui::Painter,
+    right: f32,
+    center_y: f32,
+    text: &str,
+    color: egui::Color32,
+    selected: bool,
+) -> f32 {
+    let text_color = if selected {
+        color.gamma_multiply(1.25)
+    } else {
+        color
+    };
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(9.0),
+        text_color,
+    );
+    let width = (galley.size().x + 7.0).max(13.0);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(right - width, center_y - 6.5),
+        egui::vec2(width, 13.0),
+    );
+    painter.rect_filled(
+        rect,
+        2.0,
+        if selected {
+            egui::Color32::from_black_alpha(110)
+        } else {
+            color.gamma_multiply(0.12)
+        },
+    );
+    painter.galley(
+        egui::pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        text_color,
+    );
+    width + 3.0
 }

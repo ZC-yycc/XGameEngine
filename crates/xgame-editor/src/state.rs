@@ -131,21 +131,15 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    pub fn log_level_color(&self) -> egui::Color32 {
+    /// 日志等级对应的文字颜色（走主题常量，别就地写 `Color32::YELLOW`——
+    /// 纯黄纯红在暗色面板上过于刺眼，UE 的日志用的是压暗一档的暖黄/砖红）。
+    pub fn color(&self) -> egui::Color32 {
+        use crate::panels::theme::colors;
         match self {
-            LogLevel::Info => egui::Color32::WHITE,
-            LogLevel::Warning => egui::Color32::YELLOW,
-            LogLevel::Error => egui::Color32::RED,
-            LogLevel::Success => egui::Color32::GREEN,
-        }
-    }
-
-    pub fn log_level_icon(&self) -> &'static str {
-        match self {
-            LogLevel::Info => "ℹ",
-            LogLevel::Warning => "⚠",
-            LogLevel::Error => "✖",
-            LogLevel::Success => "✔",
+            LogLevel::Info => colors::TEXT_PRIMARY,
+            LogLevel::Warning => colors::WARN,
+            LogLevel::Error => colors::ERROR,
+            LogLevel::Success => colors::PLAY_GREEN,
         }
     }
 }

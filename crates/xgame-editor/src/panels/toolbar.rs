@@ -1,63 +1,92 @@
-//! 类 Unity 工具栏——播放/暂停/停止控制和变换工具选择。
+//! 类 UE 工具栏——文件、播放控制、变换工具、视图开关与构建。
+//!
+//! # 视觉纪律
+//!
+//! UE 的工具栏是一条**扁平的分组条**：按钮常态没有边框和底色，悬停才浮出浅灰；
+//! 组与组之间用一条 18px 的竖线分开；所有按钮同高（[`theme::FIELD_HEIGHT`] + 2）。
+//! 图标全部走 [`icons`] 的自绘几何图形 —— 字形图标（💾 / ⚙ / 🔨）的字宽和基线与
+//! 文字不一致，混排时整条工具栏会歪。
+//!
+//! # 保留的行为
+//!
+//! 按钮只是换了画法，**语义与快捷键一个都没改**：项目枢纽返回、保存 / 另存为、
+//! Play/Pause/Stop 与状态跃迁、插件编译、脚本热重载、四种变换工具、网格 / 物理
+//! 调试开关、构建项目、打开产物目录、项目设置。
 
+use crate::panels::icons::{self, Icon};
+use crate::panels::theme::{self, colors};
 use crate::state::{EditorState, PlayMode, ToolMode};
 
 /// 工具栏高度（逻辑像素）。
-pub const TOOLBAR_HEIGHT: f32 = 32.0;
+pub const TOOLBAR_HEIGHT: f32 = theme::TOOLBAR_HEIGHT;
 
 /// 渲染顶部工具栏。
 pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     egui::TopBottomPanel::top("toolbar")
-        .min_height(TOOLBAR_HEIGHT)
+        .exact_height(TOOLBAR_HEIGHT)
+        .frame(
+            egui::Frame::default()
+                .fill(colors::PANEL_HEADER_BG)
+                .inner_margin(egui::Margin::symmetric(8.0, 0.0)),
+        )
         .show(ctx, |ui| {
+            // 底边 1px：把工具栏和下面的面板分割开（UE 的工具栏下沿就这一条线）。
+            let full = ui.max_rect();
+            ui.painter().hline(
+                full.x_range(),
+                full.bottom() - 0.5,
+                egui::Stroke::new(1.0_f32, colors::SEPARATOR),
+            );
+
             ui.horizontal_centered(|ui| {
-                // ── 项目 ──
-                if ui
-                    .button("⌂  Projects")
-                    .on_hover_text("关闭当前项目，返回项目枢纽")
-                    .clicked()
+                ui.spacing_mut().item_spacing.x = 3.0;
+
+                // ── 文件 ──
+                if icons::icon_text_button(
+                    ui,
+                    Icon::Folder,
+                    "Projects",
+                    "关闭当前项目，返回项目枢纽",
+                )
+                .clicked()
                 {
                     state.return_to_hub = true;
                 }
 
-                ui.separator();
+                icons::v_separator(ui);
 
-                // ── 保存 ──
-                // 脏时给个 "*"，与窗口标题栏一致 —— 在工具栏还是标题栏看到的
-                // 都是同一份按帧 memo 的脏检查（不重复比较场景）。
+                // 脏时标签带 "*"，与窗口标题栏一致（同一份按帧 memo 的脏检查）。
                 let dirty = state.scene_dirty_memo(ctx.cumulative_pass_nr());
-                let save_label = if dirty { "💾  Save *" } else { "💾  Save" };
-                if ui
-                    .button(save_label)
-                    .on_hover_text("保存入口场景（Ctrl+S）")
+                let save_label = if dirty { "Save *" } else { "Save" };
+                if icons::icon_text_button(ui, Icon::Save, save_label, "保存入口场景（Ctrl+S）")
                     .clicked()
                 {
                     let _ = state.save_scene();
                 }
-                if ui
-                    .button("Save As…")
-                    .on_hover_text(
-                        "把当前场景另存成新文件并切过去（Ctrl+Shift+S）\n\
-                         旧文件保持原样，改坏了随时能重来",
-                    )
-                    .clicked()
-                {
+                if icons::text_button(ui, "Save As…", "另存为…（Ctrl+Shift+S）").clicked() {
                     state.save_as_open = true;
                     state.save_as_name = state.scene.name.clone();
                 }
 
-                ui.separator();
+                icons::v_separator(ui);
 
                 // ── 播放控制 ──
-                let play_btn = egui::Button::new(if state.play_mode == PlayMode::Playing {
-                    "⏸  Playing"
+                let playing = state.play_mode == PlayMode::Playing;
+                let play_color = if playing {
+                    colors::PLAY_GREEN
                 } else {
-                    "▶  Play"
-                });
-                // 这里只切 `play_mode`；运行时的启停由主循环检测状态跃迁后执行
-                // （`enter_play_mode` / `exit_play_mode`）。日志也在那边记，
-                // 免得同一个动作在 Console 里出现两条。
-                if ui.add(play_btn).clicked() {
+                    colors::PLAY_GREEN.gamma_multiply(0.85)
+                };
+                let play_label = if playing { "Playing" } else { "Play" };
+                if icons::icon_text_button_colored(
+                    ui,
+                    Icon::Play,
+                    play_label,
+                    "进入 / 退出播放模式（Play 中再点一次回到编辑态）",
+                    Some(play_color),
+                )
+                .clicked()
+                {
                     state.play_mode = match state.play_mode {
                         PlayMode::Edit => PlayMode::Playing,
                         PlayMode::Playing => PlayMode::Edit,
@@ -65,134 +94,145 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     };
                 }
 
-                let pause_btn = egui::Button::new("⏸  Pause");
-                if ui.add(pause_btn).clicked() && state.play_mode == PlayMode::Playing {
+                let paused = state.play_mode == PlayMode::Paused;
+                if icons::icon_button(ui, Icon::Pause, 24.0, "暂停（物理与脚本停步）", paused)
+                    .clicked()
+                    && state.play_mode == PlayMode::Playing
+                {
                     state.play_mode = PlayMode::Paused;
                     state.log_info("⏸ Pause — 物理与脚本暂停，场景保持当前状态");
                 }
 
-                let stop_btn = egui::Button::new("⏹  Stop");
-                if ui.add(stop_btn).clicked() && state.play_mode != PlayMode::Edit {
+                if icons::icon_button(ui, Icon::Stop, 24.0, "停止并回到编辑态", false).clicked()
+                    && state.play_mode != PlayMode::Edit
+                {
                     state.play_mode = PlayMode::Edit;
                 }
 
                 // ── Rust 插件编译（P0.5）──
-                //
-                // 只在插件项目里出现。编译跑在后台线程，但**必须看得见**：
-                // 按了 Play 却"什么都没发生"会被当成卡死，而这里恰恰是 UE 模式
-                // 的体验核心 —— 后台编译 + 自动进 Play。
                 if state.is_plugin_project() {
                     if state.plugin_building() {
                         let secs = state.plugin_build_elapsed().unwrap_or_default();
-                        ui.add(egui::Spinner::new());
-                        ui.label(format!("编译插件… {secs}s"))
-                            .on_hover_text("后台 cargo build；完成后自动进入 Play");
-                    } else if ui
-                        .button("🔨  Build")
-                        .on_hover_text("编译 Rust 插件（不进入 Play）\n产物同步进 Plugins/")
-                        .clicked()
+                        ui.add(egui::Spinner::new().size(14.0));
+                        ui.label(
+                            egui::RichText::new(format!("编译插件… {secs}s"))
+                                .size(11.0)
+                                .color(colors::TEXT_SECONDARY),
+                        )
+                        .on_hover_text("后台 cargo build；完成后自动进入 Play");
+                    } else if icons::icon_text_button(
+                        ui,
+                        Icon::Build,
+                        "Build",
+                        "编译 Rust 插件（不进入 Play）\n产物同步进 Plugins/",
+                    )
+                    .clicked()
                     {
                         state.build_plugins();
                     }
                 }
 
-                ui.separator();
-
-                // ── 脚本热重载 ──
-                // 只在运行中有意义：编辑态没有运行时，脚本本来就没在跑。
-                if state.play_mode != PlayMode::Edit {
-                    if ui
-                        .button("⟳  Scripts")
-                        .on_hover_text(
-                            "重新编译项目里的全部脚本（.lua）\n\
-                             改完脚本不用退出 Play，编译一次即刻生效",
-                        )
-                        .clicked()
-                    {
-                        state.reload_scripts();
-                    }
-                    ui.separator();
+                // ── 脚本热重载：只在运行中有意义 ──
+                if state.play_mode != PlayMode::Edit
+                    && icons::icon_button(
+                        ui,
+                        Icon::Refresh,
+                        24.0,
+                        "重新编译项目里的全部脚本（.lua）\n改完脚本不用退出 Play，编译一次即刻生效",
+                        false,
+                    )
+                    .clicked()
+                {
+                    state.reload_scripts();
                 }
+
+                icons::v_separator(ui);
 
                 // ── 变换工具 ──
                 let tools = [
-                    (ToolMode::Translate, "↔"),
-                    (ToolMode::Rotate, "↻"),
-                    (ToolMode::Scale, "⇔"),
-                    (ToolMode::Rect, "▭"),
+                    (ToolMode::Translate, Icon::Translate, "移动（W）"),
+                    (ToolMode::Rotate, Icon::Rotate, "旋转（E）"),
+                    (ToolMode::Scale, Icon::Scale, "缩放（R）"),
+                    (ToolMode::Rect, Icon::Rect, "矩形工具"),
                 ];
-                for (mode, icon) in &tools {
-                    let is_active = state.tool_mode == *mode;
-                    let btn = egui::SelectableLabel::new(is_active, *icon);
-                    let size = egui::Vec2::new(28.0, 22.0);
-                    if ui.add_sized(size, btn).clicked() {
-                        state.tool_mode = *mode;
+                for (mode, icon, tip) in tools {
+                    if icons::icon_button(ui, icon, 26.0, tip, state.tool_mode == mode).clicked() {
+                        state.tool_mode = mode;
                     }
                 }
 
-                ui.separator();
+                icons::v_separator(ui);
 
                 // ── 视图开关 ──
-                let mut grid = state.show_grid;
-                if ui
-                    .add(egui::Checkbox::new(&mut grid, "Grid"))
-                    .changed()
+                if icons::icon_button(ui, Icon::Grid, 24.0, "显示网格", state.show_grid).clicked() {
+                    state.show_grid = !state.show_grid;
+                }
+                if icons::icon_button(
+                    ui,
+                    Icon::Cube,
+                    24.0,
+                    "显示物理调试线框（碰撞体 / 接触点）",
+                    state.show_physics_debug,
+                )
+                .clicked()
                 {
-                    state.show_grid = grid;
+                    state.show_physics_debug = !state.show_physics_debug;
                 }
 
-                let mut physics = state.show_physics_debug;
-                if ui
-                    .add(egui::Checkbox::new(&mut physics, "Physics"))
-                    .changed()
-                {
-                    state.show_physics_debug = physics;
-                }
-
+                // ── 右侧：场景信息 / 设置 / 构建 ──
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // ── 构建 ──
-                    // right_to_left 布局：先加的在最右边，所以先画构建按钮。
-                    if ui
-                        .button("🔨  Build")
-                        .on_hover_text(
-                            "把当前项目打包成可独立运行的游戏\n\
-                             输出到 <项目目录>/Build/<项目名>/，产物里的 exe 双击即玩",
-                        )
-                        .clicked()
+                    if icons::icon_text_button(
+                        ui,
+                        Icon::Build,
+                        "Build",
+                        "把当前项目打包成可独立运行的游戏\n\
+                         输出到 <项目目录>/Build/<项目名>/，产物里的 exe 双击即玩",
+                    )
+                    .clicked()
                     {
                         state.build_project();
                     }
 
-                    // 构建过之后才出现：直接打开产物目录
                     if let Some(dir) = state.last_build_dir.clone() {
-                        if ui
-                            .button("📂")
-                            .on_hover_text(format!("打开输出目录\n{}", dir.display()))
-                            .clicked()
+                        if icons::icon_button(
+                            ui,
+                            Icon::Folder,
+                            24.0,
+                            &format!("打开输出目录\n{}", dir.display()),
+                            false,
+                        )
+                        .clicked()
                         {
                             open_in_file_manager(&dir);
                         }
                     }
 
-                    // ── 项目设置 ──
-                    if ui
-                        .button("⚙")
-                        .on_hover_text("项目设置\n窗口 / 重力 / 固定步长 / 内容目录")
-                        .clicked()
+                    if icons::icon_button(
+                        ui,
+                        Icon::Gear,
+                        24.0,
+                        "项目设置\n窗口 / 重力 / 固定步长 / 内容目录",
+                        false,
+                    )
+                    .clicked()
                     {
                         state.settings_open = true;
                     }
 
-                    ui.separator();
-                    ui.label(format!("Project: {}", state.project_name()));
-                    ui.separator();
-                    // 场景名旁的星号与标题栏一致：脏状态来自同一份按帧 memo。
+                    icons::v_separator(ui);
+
+                    // 场景名 + 实体数：小字、次要色，不跟左边的操作抢注意力。
                     let star = if dirty { " *" } else { "" };
-                    ui.label(format!(
-                        "{}{star} | {} entities",
-                        state.scene.name,
-                        state.scene.entities.len()
-                    ));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}{star}   ·   {} entities",
+                            state.scene.name,
+                            state.scene.entities.len()
+                        ))
+                        .size(11.5)
+                        .color(colors::TEXT_SECONDARY),
+                    )
+                    .on_hover_text(format!("项目：{}", state.project_name()));
                 });
             });
         });

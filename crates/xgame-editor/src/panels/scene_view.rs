@@ -34,26 +34,6 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, screen_size: egui::Vec2, scr
 }
 
 // ============================================================================
-// 顶部栏相关
-// ============================================================================
-
-/// 绘制场景视图的顶部栏（场景名称和相机位置）
-fn draw_top_bar(state: &EditorState, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.label(&state.scene.name);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let cam = &state.editor_camera;
-            ui.monospace(format!(
-                "{:.1}, {:.1}, {:.1}",
-                cam.eye().x,
-                cam.eye().y,
-                cam.eye().z,
-            ));
-        });
-    });
-}
-
-// ============================================================================
 // 视口与渲染相关
 // ============================================================================
 
@@ -580,39 +560,94 @@ fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Re
 // UI 叠加层相关
 // ============================================================================
 
+/// 视口里的 HUD 文字：画一块半透明暗底再写字。
+///
+/// 早先只描 1px 黑影，结果在亮天空上白字几乎看不见（示例场景的天顶接近纯白）。
+/// 折中方案是"暗色药丸底 + 亮字"：无论背后是天空、地形还是暗色模型都读得清，
+/// 观感也接近 UE 视口的 stats 叠加层。
+fn hud_text(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    text: impl ToString,
+    font: egui::FontId,
+    color: egui::Color32,
+) {
+    let galley = painter.layout_no_wrap(text.to_string(), font, color);
+    let rect = align.anchor_size(pos, galley.size());
+    painter.rect_filled(
+        rect.expand2(egui::vec2(6.0, 3.0)),
+        3.0,
+        egui::Color32::from_black_alpha(96),
+    );
+    painter.galley(rect.min, galley, color);
+}
+
 /// 绘制缩放速度指示器
 fn draw_zoom_indicator(state: &EditorState, painter: &egui::Painter, rect: egui::Rect) {
     if state.zoom_indicator <= 0.0 {
         return;
     }
-    
-    painter.text(
-        egui::pos2(rect.right() - 8.0, rect.bottom() - 28.0),
+
+    hud_text(
+        painter,
+        egui::pos2(rect.right() - 10.0, rect.bottom() - 26.0),
         egui::Align2::RIGHT_BOTTOM,
-        format!("Speed: {:.1}", state.editor_camera.pan_speed),
-        egui::FontId::monospace(12.0),
+        format!("Speed {:.1}", state.editor_camera.pan_speed),
+        egui::FontId::monospace(10.5),
         egui::Color32::from_rgb(180, 220, 255),
     );
 }
 
-/// 绘制底部状态栏（FPS 和当前工具）
-fn draw_bottom_status_bar(state: &EditorState, painter: &egui::Painter, rect: egui::Rect, ui: &egui::Ui) {
+/// 视口 HUD：四个角各放一条信息，全部**无衬底**小字。
+///
+/// 与面板里的标题不同，这里的文字直接压在半透明/3D 画面上，所以：
+/// 字号统一 11（比面板正文小半号，避免和 3D 抢注意力）、都带 1px 黑影、
+/// 颜色只用「亮 / 暗」两档。旧实现有一条独立的顶部栏，白白吃掉 22px 视口高度，
+/// 而它显示的两条信息（场景名、相机位置）用叠加层表达更省地方也更像 UE。
+fn draw_viewport_hud(state: &EditorState, painter: &egui::Painter, rect: egui::Rect, ui: &egui::Ui) {
+    use crate::panels::theme::colors;
+
+    // 左上：场景名
+    //
+    // 这里**不用粗体族**：视口 HUD 可能在没有 `install_fonts` 的裸 egui 上下文里
+    // 被画出来（scene_view 的交互测试就是这样），而 `FontFamily::Name` 指向未注册
+    // 的族会让 epaint 直接 panic。药丸底 + 亮色已经够醒目，不需要再加字重。
+    hud_text(
+        painter,
+        rect.left_top() + egui::vec2(10.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        &state.scene.name,
+        egui::FontId::new(11.5, egui::FontFamily::Proportional),
+        colors::TEXT_BRIGHT,
+    );
+
+    // 右上：相机位置（等宽数字，读数不抖）
+    let eye = state.editor_camera.eye();
+    hud_text(
+        painter,
+        rect.right_top() + egui::vec2(-10.0, 8.0),
+        egui::Align2::RIGHT_TOP,
+        format!("{:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z),
+        egui::FontId::monospace(10.5),
+        colors::TEXT_SECONDARY,
+    );
+
+    // 左下：当前工具 + 帧率
     let tool_label = match state.tool_mode {
         ToolMode::Translate => "Translate",
         ToolMode::Rotate => "Rotate",
         ToolMode::Scale => "Scale",
         ToolMode::Rect => "Rect",
     };
-    
-    // 提前计算 FPS，避免在 painter.text 中借用 ui
     let fps = ui.input(|i| i.stable_dt).recip().round();
-    
-    painter.text(
-        egui::pos2(rect.left() + 8.0, rect.bottom() - 8.0),
+    hud_text(
+        painter,
+        egui::pos2(rect.left() + 10.0, rect.bottom() - 7.0),
         egui::Align2::LEFT_BOTTOM,
-        format!("{:.0} FPS | Tool: {}", fps, tool_label),
-        egui::FontId::monospace(11.0),
-        egui::Color32::from_gray(140),
+        format!("{tool_label}   {fps:.0} fps"),
+        egui::FontId::new(10.5, egui::FontFamily::Proportional),
+        colors::TEXT_SECONDARY,
     );
 }
 
@@ -622,10 +657,7 @@ fn draw_bottom_status_bar(state: &EditorState, painter: &egui::Painter, rect: eg
 
 /// 在 `Ui` 内渲染场景视图内容。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
-    // 顶部栏
-    draw_top_bar(state, ui);
-
-    // 视口区域
+    // 视口区域（HUD 是叠加层，不占布局高度）
     let viewport = setup_viewport(ui, state);
     // painter 内部只是一堆 Arc，克隆很便宜；后面要跨越对 `ui` 的多次借用。
     let painter = ui.painter().clone();
@@ -684,7 +716,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     }
     draw_physics_debug_lines(state, &painter, &view_proj, viewport.rect);
     draw_zoom_indicator(state, &painter, viewport.rect);
-    draw_bottom_status_bar(state, &painter, viewport.rect, ui);
+    draw_viewport_hud(state, &painter, viewport.rect, ui);
 }
 
 // ============================================================================

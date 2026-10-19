@@ -2501,3 +2501,119 @@ Vulkan / 1280×720 / MSAA ×4 / 2000 实体 ×（共享网格、各自网格）�
 - **半透明逐项 draw call**：数量大时是新的 CPU 税源（本轮场景未触及）。
 - 无 GPU-driven / indirect draw、无材质排序（同材质跨网格不合批）——
   当前瓶颈数字（见 ROADMAP"每帧开销"行）不需要它们。
+
+## 二十九、编辑器 UI：UE 风格重做（本轮）
+
+### 一、要解决的是什么
+
+用户的原话是「调整画面风格，有些元素大小不合适，有些地方排版不好看，有些地方
+不整齐」。三条抱怨里只有第一条是审美，后两条是**几何问题**：行高在 20–26px 之间
+飘、标签列宽随文字长短变化、值列左右各错开一档、emoji 字形宽度不一致导致图标
+永远对不齐。所以这一轮的主线不是"换个配色"，而是**把尺寸与对齐收进一套常量**。
+
+判据（可截图验证，不靠感觉）：
+1. 同一面板里所有输入框的左边缘落在同一条竖线上；
+2. 所有行高、控件高度、面板内边距只来自 `theme` 常量；
+3. 界面上不再出现 emoji / 字形图标（矢量绘制，尺寸与基线可控）；
+4. 改完不引入任何帧调度与渲染路径上的变化（纯 UI 层）。
+
+### 二、尺寸体系（`panels/theme.rs`）
+
+| 常量 | 值 | 用在哪 |
+|---|---|---|
+| `TOOLBAR_HEIGHT` | 34 | 顶部工具栏 |
+| `TAB_BAR_HEIGHT` | 26 | 面板页签条 |
+| `CATEGORY_HEIGHT` | 22 | Inspector 分类条 |
+| `SECTION_GAP` | 6 | 分类条与上一组内容之间 |
+| `ROW_HEIGHT` | 22 | Hierarchy / Prefabs / Console 行 |
+| `FIELD_HEIGHT` | 20 | DragValue / TextEdit / ComboBox |
+| `STATUS_BAR_HEIGHT` | 24 | 底部状态栏 |
+| `PANEL_MARGIN` | 6 | 每个停靠面板的内边距 |
+| `LABEL_WIDTH` | 58 | Inspector 标签列 |
+| `AXIS_TAG_WIDTH` | 9 | X/Y/Z 轴标占位 |
+| `FIELD_WIDTH` | 54 | 数值框标准宽度 |
+
+行高统一之后"紧凑但不挤"是自然结果 —— UE 的信息密度来自**间距的规律性**，
+不是把字号压小。
+
+### 三、可复用件
+
+- `theme::section_bar`：22px 分类条 + 左 2px 强调条 + 下沿 1px 线 + 6px 上留白。
+  分组靠留白切开，不靠更粗的线。
+- `theme::field_row(ui, label, f)`：定宽标签列 + 值区，**返回闭包的返回值**
+  （向量行要拿 `changed`）。标签 `truncate()`，长参数名不会顶出控件列。
+- `theme::note(ui, text)`：分类内容里的说明文字，**自己排一次版**再交给 Label。
+- `theme::drag_field` / `axis_label` / `axis_color`：数值框与轴色。
+- `theme::card_frame` / `card_title` / `bold` / `bold_family`：枢纽卡片与粗体族。
+- `icons::*`：`paint(painter, rect, Icon, color)` 全几何绘制（18 个图标）、
+  `icon_button` / `icon_text_button` / `text_button` / `add_row` / `chip` /
+  `close_button` / `small_icon` / `v_separator`。
+
+### 四、对齐的四个陷阱（这轮踩到的，全是"看不出原因"的那种）
+
+1. **`allocate_ui_with_layout` 只按子 ui 的 `min_rect` 占位**，不按你给的
+   `desired_size`。于是"58px 标签列"实际只有标签文字那么宽：`Type` 行与
+   `Radius` 行的输入框差出 12px，一列控件左边缘参差。修法是在子 ui 里
+   `ui.set_min_width(w)` 把占位拉回目标宽度。`field_row` 与枢纽的
+   "名字列 / 主列"都吃这一条。
+2. **`ComboBox::width(w)` 是内宽，控件实宽 ≥ w**（自带箭头与内边距）。所以
+   拿"请求宽度"去排一张列头，偏移会逐列累积：`Weight` 表头最终偏出 10px。
+   结论：**不排这张表头**，改成每个控件一条悬停说明。
+3. **`FontFamily::Name` 指向未注册的族 = epaint 直接 panic**。`install_fonts`
+   里粗体族改成**无条件注册**（找不到粗体文件就用 proportional 链兜底）；
+   裸 `egui::Context`（测试）里画的东西只能用 `Proportional`。
+4. **`allocate_ui_with_layout(vec2(w, 0.0), ...)`** 会把子 ui 的 `max_rect`
+   高度设成 0，内部的 `ScrollArea` 按"可用高度 0"夹视口 —— 表现是列表只画出
+   前三行。要给真实可用高度。
+
+### 五、逐面板
+
+- **工具栏**：34px 扁平分组（项目 / 保存 / 播放 / 插件 / 变换工具 / 显示 / 右
+  侧 Build + 设置 + 场景名），分隔线用 1px 竖线，激活工具是蓝底。
+- **页签**：自绘 `tab_ui`（选中 = 面板底色 + 顶部 2px 强调线 + 粗体），
+  页签名与枚举名解耦（`SceneView → Viewport`、`Console → Output Log`）。
+- **Hierarchy**：22px 行、缩进 12、选中行直角填充、矢量箭头、行尾 P/S 徽标
+  （**选中行改半透明黑底 + 提亮字色**，否则徽标糊进蓝底）。
+- **Inspector**：整条滚动；分类内容**零缩进**（`spacing.indent = 0`，代码里
+  的 `ui.indent` 只做分块）；标量行补 `AXIS_TAG_WIDTH` 占位，与 Transform 的
+  三个轴框共用同一条值列；Physics / Animation / Audio 全部 `field_row` +
+  ComboBox；层栈去掉列头改悬停说明。
+- **Prefabs**：标题 + 计数 + 刷新图标；搜索框整宽；`Create from Selection` 是
+  扁平行；资产行 22px + 紫色菱形 + 右侧子目录暗字。
+- **Output Log**：矢量等级图标（Info 圆点 / Warning 三角 / Error 叉 / Success
+  对勾）+ 截断 + 右对齐计数。
+- **状态栏**：24px 深条 + 分组 + 右侧 fps/版本；**编辑态用小圆点而不是暂停
+  图标**（暂停符号在"没在跑"的语境里会被读成"运行中已暂停"）。
+- **视口 HUD**：药丸底（`from_black_alpha(96)`）+ 左上场景名 / 右上相机 /
+  左下工具 + fps。
+- **枢纽**：三张卡片（新建 / 打开 / 最近），固定标签列、蓝底主按钮、最近项目
+  名字列定宽 112px。
+
+### 六、自检工具链（这轮新加的）
+
+```
+xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体名>]
+```
+- 首帧 `ViewportCommand::InnerSize(1440, 900)` 固定窗口尺寸；
+- **连续两帧逻辑尺寸相同**才发 `ViewportCommand::Screenshot`；
+- 像素尺寸 ≠ 逻辑尺寸 × ppp 时最多重抓 3 次（pidpi 缩放下的经典陷阱）；
+- 落盘走 `xgame_render::screenshot::save_rgba_png`（与场景截图同一份实现）。
+
+配套：`.workbuddy/tools/crop.py`（局部放大）与 `rowscan.py`（按行扫描颜色分段，
+用来**量**像素位置而不是靠眼睛判断"对齐了没有"）。
+
+### 七、刻意的取舍
+
+1. **不引第三方图标库**：18 个图标全用 `Painter` 画。字形图标的宽度/基线/粗细
+   不受控，正是"不整齐"的来源；矢量图标永远落在给定方框里。
+2. **不恢复列头**：见陷阱 2。表头对不齐比没有表头更显乱。
+3. **Inspector 分类内容零缩进**：UE 的 Details 就是平的；缩进会让值列分层。
+4. **粗体族无条件注册**：宁可"没有粗体效果"也不能"找不到族就 panic"。
+5. **UI 层不动帧调度**：截图与量帧数据表明这一轮没有引入新的重绘源。
+
+### 八、已知限制
+
+- 项目设置窗口（⚙）是模态窗口，`--ui-shot` 抓不到（需要交互打开），
+  这轮只做了 `section_bar` 的间距统一。
+- 视口 gizmo 与选中高亮的配色未重做（属于 3D 叠加层，不在这轮范围）。
+- 窗口尺寸小于 1440×900 时的排版只做了 1280 宽的一次抽查，未逐档验证。

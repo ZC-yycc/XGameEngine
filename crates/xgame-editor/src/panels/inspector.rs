@@ -19,6 +19,7 @@
 //! `Scene`。这里改成只克隆选中实体：每帧两个小字符串的拷贝，和整场景拷贝差了三个
 //! 数量级；真正需要整场景快照的时刻仍然是整场景克隆，但那时是"确实编辑了一次"。
 
+use crate::panels::{icons, theme};
 use crate::state::EditorState;
 use xgame_core::{EntityId, FieldDesc, FieldKind, FieldValue, Inspect};
 use xgame_math::glam::{Vec2, Vec3, Vec4};
@@ -33,6 +34,18 @@ fn collect(
     *touched |= resp.changed();
     *drag_began |= resp.drag_started();
     *drag_ended |= resp.drag_stopped();
+}
+
+/// 检查器里的**标量行**：定宽标签列 + 轴标占位 + 控件。
+///
+/// Transform 的三行是 `[标签][X][框]`，输入框从"轴标宽 + 间距"之后开始；
+/// 别的行没有轴标，不补这一截的话两类行的输入框左边缘就差一个轴标的宽度
+/// （15px），一列控件看着参差不齐。所有**非向量**行都走这个包装。
+fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    theme::field_row(ui, label, |ui| {
+        ui.add_space(theme::AXIS_TAG_WIDTH + ui.spacing().item_spacing.x);
+        add(ui)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -294,13 +307,35 @@ fn show_field_widget(
 }
 
 /// 在 `Ui` 内渲染检视面板内容。
+/// Inspector 面板入口：内容一律包在一条竖向滚动区里。
+///
+/// 为什么必须有：一个挂满组件的实体（模型 + 动画 + 脚本 + 组件 + 物理 + 音频 +
+/// 材质 + 父级 + 预制体）在 660px 高的面板里放不下，没有滚动区时**下面几段点不到**，
+/// 而且看不出来是被截断还是根本没有 —— UE 的 Details 面板同样是整条滚动的。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
-    ui.separator();
+    ui.scope(|ui| {
+        // **分组内容不额外缩进**。面板里的 `ui.indent(...)` 只用来给代码分块，
+        // 视觉上必须是零缩进：UE 的 Details 里分类条下的行与 Name 行共用同一条
+        // 左边界，否则（indent = 10px）Name 的值在 x=64、Transform 的值在 x=74，
+        // 整块看下来所有控件左右各错开一档 —— 这是"排版不整齐"最主要的一条。
+        ui.spacing_mut().indent = 0.0;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| show_body(state, ui));
+    });
+}
 
+fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
     // 控件全部作用在 `working`（选中实体的副本）上，`state.scene` 在下面整段 UI 里
     // 都不会被碰到 —— 这正是"改前快照"还能拿到的原因。
     let Some(index) = state.selected_entity else {
-        ui.weak("Select an entity from the Hierarchy to inspect its properties.");
+        ui.add_space(8.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("Select an entity in the Hierarchy")
+                    .color(theme::colors::TEXT_SECONDARY),
+            );
+        });
         return;
     };
     let Some(mut working) = state.scene.entities.get(index).cloned() else {
@@ -319,36 +354,31 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         let entity = &mut working;
 
         // ── 实体名称 ──
-        ui.horizontal(|ui| {
-            ui.label("Name:");
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut entity.name)
-                    .desired_width(f32::INFINITY),
+        row(ui, "Name", |ui| {
+            let resp = ui.add_sized(
+                egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
+                egui::TextEdit::singleline(&mut entity.name),
             );
             touched |= resp.changed();
         });
 
-        ui.separator();
-
         // ── 变换组件 ──
-        ui.heading("Transform");
+        theme::section_bar(ui, "Transform");
         ui.indent("transform", |ui| {
             // 位置
-            ui.label("Position");
-            ui.horizontal(|ui| {
+            theme::field_row(ui, "Position", |ui| {
                 for (axis, value) in [
                     ("X", &mut entity.transform.position.x),
                     ("Y", &mut entity.transform.position.y),
                     ("Z", &mut entity.transform.position.z),
                 ] {
-                    ui.label(axis);
-                    let resp = ui.add(egui::DragValue::new(value).speed(0.1).prefix("  "));
+                    theme::axis_label(ui, axis);
+                    let resp = theme::drag_field(ui, value, 0.1, "");
                     collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 }
             });
 
             // 旋转（欧拉角显示，内部仍是四元数）
-            ui.label("Rotation");
             let euler = entity
                 .transform
                 .rotation
@@ -358,21 +388,22 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 euler.1.to_degrees(),
                 euler.2.to_degrees(),
             ];
-            let rotation_changed = ui
-                .horizontal(|ui| {
-                    let mut any = false;
-                    // 用 zip(iter_mut) 而不是数组字面量：`[&mut rot[0], &mut rot[1], ...]`
-                    // 会被借用检查器判成"同一数组的多次可变借用"——数组索引不是字段，
-                    // 拿不到字段级借用拆分。
-                    for (axis, value) in ["X", "Y", "Z"].into_iter().zip(rot.iter_mut()) {
-                        ui.label(axis);
-                        let resp = ui.add(egui::DragValue::new(value).speed(0.5).suffix("°"));
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                        any |= resp.changed();
-                    }
-                    any
-                })
-                .inner;
+            // 走 `field_row`（而不是手搓 horizontal）：标签列宽必须与 Position /
+            // Scale 完全一致，否则 "Rotation" 比 "Position" 窄一点，下面 Scale 的
+            // 三个输入框就跟着往左挪一档。
+            let rotation_changed = theme::field_row(ui, "Rotation", |ui| {
+                let mut any = false;
+                // 用 zip(iter_mut) 而不是数组字面量：`[&mut rot[0], &mut rot[1], ...]`
+                // 会被借用检查器判成"同一数组的多次可变借用"——数组索引不是字段，
+                // 拿不到字段级借用拆分。
+                for (axis, value) in ["X", "Y", "Z"].into_iter().zip(rot.iter_mut()) {
+                    theme::axis_label(ui, axis);
+                    let resp = theme::drag_field(ui, value, 0.5, "°");
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    any |= resp.changed();
+                }
+                any
+            });
             if rotation_changed {
                 entity.transform.rotation = xgame_math::glam::Quat::from_euler(
                     xgame_math::glam::EulerRot::XYZ,
@@ -383,15 +414,15 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             }
 
             // 缩放（不允许 0 或负数——那会让法线矩阵退化，整个物体变黑）
-            ui.label("Scale");
-            ui.horizontal(|ui| {
+            theme::field_row(ui, "Scale", |ui| {
                 for (axis, value) in [
                     ("X", &mut entity.transform.scale.x),
                     ("Y", &mut entity.transform.scale.y),
                     ("Z", &mut entity.transform.scale.z),
                 ] {
-                    ui.label(axis);
-                    let resp = ui.add(
+                    theme::axis_label(ui, axis);
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                         egui::DragValue::new(value)
                             .speed(0.05)
                             .range(0.01..=f32::MAX),
@@ -400,30 +431,31 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 }
             });
 
-            ui.label(
-                egui::RichText::new(format!(
-                    "World: {:.2}, {:.2}, {:.2}",
-                    world_position.x, world_position.y, world_position.z
-                ))
-                .monospace()
-                .weak(),
-            );
+            // 世界坐标用小一号的等宽字：它是只读参考，不该和可编辑控件抢注意力。
+            // 用空标签的 `field_row` 占位，值才能落在与上面三行同一条竖线上。
+            row(ui, "", |ui| {
+                ui.add_space(1.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "World  {:.2},  {:.2},  {:.2}",
+                        world_position.x, world_position.y, world_position.z
+                    ))
+                    .monospace()
+                    .size(10.5)
+                    .color(theme::colors::TEXT_DIM),
+                );
+            });
         });
 
-        ui.separator();
-
         // ── 网格 ──
-        ui.heading("Mesh");
+        theme::section_bar(ui, "Mesh");
         ui.indent("mesh", |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Model:").on_hover_text(
-                    "项目相对路径（如 Resources/Box.glb），或内置图元（builtin://cube）",
-                );
+            row(ui, "Model", |ui| {
                 let mut path = entity.model.clone();
-                let resp = ui.add(
+                let resp = ui.add_sized(
+                    egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
                     egui::TextEdit::singleline(&mut path)
-                        .hint_text("Resources/… 或 builtin://cube")
-                        .desired_width(f32::INFINITY),
+                        .hint_text("Resources/… 或 builtin://cube"),
                 );
                 if resp.changed() && path != entity.model {
                     entity.model = path;
@@ -431,16 +463,29 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 }
             });
 
-            // 内置图元快捷切换——比手敲 builtin:// 路径友好得多
-            ui.horizontal(|ui| {
-                ui.label("Primitive:");
-                for kind in xgame_render::mesh::BuiltinMesh::ALL {
-                    let active = entity.model == kind.uri();
-                    if ui.selectable_label(active, kind.label()).clicked() {
-                        entity.model = kind.uri();
-                        touched = true;
-                    }
-                }
+            // 内置图元：下拉选择（此前是四个并排 chip，"Cylinder" 会被面板边缘裁掉）
+            row(ui, "Primitive", |ui| {
+                let current = xgame_render::mesh::BuiltinMesh::ALL
+                    .iter()
+                    .find(|kind| entity.model == kind.uri())
+                    .copied();
+                let text = current
+                    .map(|kind| kind.label().to_owned())
+                    .unwrap_or_else(|| "Custom".to_owned());
+                egui::ComboBox::from_id_salt("inspector_primitive")
+                    .selected_text(text)
+                    // 与上面 Model 那行同宽（而不是固定 140）：两行右边缘对齐，
+                    // 否则 140 的框在满宽输入框下面缩进去一截，像没画完。
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for kind in xgame_render::mesh::BuiltinMesh::ALL {
+                            let active = entity.model == kind.uri();
+                            if ui.selectable_label(active, kind.label()).clicked() {
+                                entity.model = kind.uri();
+                                touched = true;
+                            }
+                        }
+                    });
             });
         });
 
@@ -450,8 +495,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         // 否则组件会被藏到永远摘不掉。剪辑列表来自渲染器的资产缓存 —— 模型还没
         // 加载时是空的，弱提示占位，下一帧预加载完成后自然有选项。
         if !entity.model.is_empty() || entity.animator.is_some() {
-            ui.separator();
-            ui.heading("Animation");
+            theme::section_bar(ui, "Animation");
             ui.indent("animation", |ui| {
                 let clips = state
                     .scene_renderer
@@ -467,29 +511,29 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 let model_empty = entity.model.is_empty();
 
                 if entity.animator.is_none() {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .small_button("+ Add Animator")
-                            .on_hover_text(
-                                "挂一个动画播放器：默认自动播放、原速、循环，\n剪辑默认取该模型的第一段。",
-                            )
-                            .clicked()
-                        {
-                            let animator = xgame_core::Animator {
-                                clip: clips.first().cloned().unwrap_or_default(),
-                                ..xgame_core::Animator::default()
-                            };
-                            entity.animator = Some(animator);
-                            touched = true;
-                        }
-                        if clips.is_empty() {
-                            ui.weak(if model_empty {
-                                "没有模型"
-                            } else {
-                                "模型未加载或没有动画剪辑"
-                            });
-                        }
-                    });
+                    if icons::add_row(
+                        ui,
+                        "Add Animator",
+                        "挂一个动画播放器：默认自动播放、原速、循环，\n剪辑默认取该模型的第一段。",
+                    )
+                    .clicked()
+                    {
+                        let animator = xgame_core::Animator {
+                            clip: clips.first().cloned().unwrap_or_default(),
+                            ..xgame_core::Animator::default()
+                        };
+                        entity.animator = Some(animator);
+                        touched = true;
+                    }
+                    // 提示必须**另起一行**：同一行里 `ui.label` 不会换行，
+                    // 中文一旦比剩余宽度长就会顶出面板右边缘被裁掉。
+                    if clips.is_empty() {
+                        ui.label(theme::dim_note(if model_empty {
+                            "没有模型"
+                        } else {
+                            "模型未加载或没有动画剪辑"
+                        }));
+                    }
                 } else {
                     let mut remove = false;
                     let mut remove_machine = false;
@@ -511,32 +555,58 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                                 .as_ref()
                                 .map(|m| m.entry.clone())
                                 .unwrap_or_default();
-                            ui.horizontal(|ui| {
-                                ui.label("Machine:")
-                                    .on_hover_text("动画状态机：播哪个剪辑由状态表+参数决定\n（states / transitions 在场景 RON 里编辑）");
-                                ui.monospace(entry_name.as_str());
+                            row(ui, "Machine", |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(entry_name.as_str())
+                                            .monospace()
+                                            .size(11.0),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(
+                                    "动画状态机：播哪个剪辑由状态表+参数决定\n\
+                                     （states / transitions 在场景 RON 里编辑）",
+                                );
                                 if let Some(cur) = current {
-                                    ui.label(egui::RichText::new("→").weak());
-                                    ui.label(egui::RichText::new(cur).monospace().weak());
+                                    ui.label(
+                                        egui::RichText::new("→")
+                                            .size(11.0)
+                                            .color(theme::colors::TEXT_DIM),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(cur)
+                                                .monospace()
+                                                .size(11.0)
+                                                .color(theme::colors::TEXT_SECONDARY),
+                                        )
+                                        .truncate(),
+                                    );
                                 }
-                                if ui
-                                    .small_button("✕")
-                                    .on_hover_text("移除状态机，回到单剪辑模式（clip 字段还在）")
-                                    .clicked()
-                                {
-                                    remove_machine = true;
-                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if icons::close_button(
+                                            ui,
+                                            "移除状态机，回到单剪辑模式（clip 字段还在）",
+                                        ) {
+                                            remove_machine = true;
+                                        }
+                                    },
+                                );
                             });
                             // 参数行：脚本/这里都能改，值随场景落盘。
                             if let Some(machine) = animator.machine.as_mut() {
                                 if machine.parameters.is_empty() {
-                                    ui.weak("没有参数（转移条件永远不满足，停在 entry）");
+                                    ui.label(theme::dim_note(
+                                        "没有参数（转移条件永远不满足，停在 entry）",
+                                    ));
                                 }
                                 for (name, value) in machine.parameters.iter_mut() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(name.as_str())
-                                            .on_hover_text("状态机参数：转移条件拿它和阈值比");
-                                        let resp = ui.add(
+                                    row(ui, name.as_str(), |ui| {
+                                        let resp = ui.add_sized(
+                                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                                             egui::DragValue::new(value)
                                                 .speed(0.05)
                                                 .range(-100.0..=100.0),
@@ -550,74 +620,73 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                                     });
                                 }
                             }
-                            ui.weak("states / transitions 在场景 RON 里编辑");
+                            ui.label(theme::dim_note("states / transitions 在场景 RON 里编辑"));
                         } else {
                             // 剪辑下拉：菜单一打开就把当前项勾出来，选中新项才算改动。
-                            ui.horizontal(|ui| {
-                                ui.label("Clip:");
+                            row(ui, "Clip", |ui| {
                                 let current = animator.clip.clone();
                                 let label = if current.is_empty() {
-                                    egui::RichText::new("（未选剪辑）").weak()
+                                    "（未选剪辑）".to_string()
                                 } else {
-                                    egui::RichText::new(current.clone()).monospace()
+                                    current.clone()
                                 };
-                                ui.menu_button(label, |ui| {
-                                    if clips.is_empty() {
-                                        ui.weak(if model_empty {
-                                            "没有模型"
-                                        } else {
-                                            "模型未加载或没有动画剪辑"
-                                        });
-                                    }
-                                    for clip in clips.iter() {
-                                        if ui
-                                            .selectable_label(clip == &current, clip.as_str())
-                                            .clicked()
-                                        {
-                                            animator.clip = clip.clone();
-                                            touched = true;
-                                            ui.close_menu();
+                                egui::ComboBox::from_id_salt("anim_clip")
+                                    .width(ui.available_width() - 20.0)
+                                    .selected_text(egui::RichText::new(label).monospace().size(11.0))
+                                    .show_ui(ui, |ui| {
+                                        if clips.is_empty() {
+                                            ui.label(theme::dim_note(if model_empty {
+                                                "没有模型"
+                                            } else {
+                                                "模型未加载或没有动画剪辑"
+                                            }));
                                         }
-                                    }
-                                });
-                                if ui
-                                    .small_button("✕")
-                                    .on_hover_text("摘掉动画组件（模型与剪辑都不动）")
-                                    .clicked()
-                                {
+                                        for clip in clips.iter() {
+                                            if ui
+                                                .selectable_label(
+                                                    clip == &current,
+                                                    clip.as_str(),
+                                                )
+                                                .clicked()
+                                            {
+                                                animator.clip = clip.clone();
+                                                touched = true;
+                                            }
+                                        }
+                                    });
+                                if icons::close_button(ui, "摘掉动画组件（模型与剪辑都不动）") {
                                     remove = true;
                                 }
                             });
 
-                            ui.horizontal(|ui| {
-                                ui.label("Speed:")
-                                    .on_hover_text("播放速度倍率；0 = 冻结在当前帧");
+                            row(ui, "Speed", |ui| {
                                 let mut speed = animator.speed;
-                                let resp = ui.add(
-                                    egui::DragValue::new(&mut speed).speed(0.05).suffix("x"),
-                                );
+                                let resp = ui
+                                    .add_sized(
+                                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                        egui::DragValue::new(&mut speed).speed(0.05).suffix("x"),
+                                    )
+                                    .on_hover_text("播放速度倍率；0 = 冻结在当前帧");
                                 collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                                 if resp.changed() {
                                     animator.speed = speed.clamp(0.0, 10.0);
                                 }
                             });
 
-                            ui.horizontal(|ui| {
-                                if ui.checkbox(&mut animator.looping, "Loop").changed() {
-                                    touched = true;
-                                }
-                            });
+                            if ui.checkbox(&mut animator.looping, "Loop").changed() {
+                                touched = true;
+                            }
 
                             // 转为状态机：用当前 clip/speed/looping 建一个单状态机器，
                             // entry 就是它 —— 之后在 RON 里加状态和转移即可。
-                            if ui
-                                .small_button("转为状态机（单状态）")
-                                .on_hover_text(
-                                    "把当前配置包成一台只有 entry 状态的机器：\n\
-                                     之后在场景 RON 的 states/transitions 里加新状态与转移，\n\
-                                     脚本用 set_anim_param 推参数驱动切换。",
-                                )
-                                .clicked()
+                            if icons::text_button(
+                                ui,
+                                "转为状态机（单状态）",
+                                "把当前配置包成一台只有 entry 状态的机器：\n\
+                                 之后在场景 RON 的 states/transitions 里加新状态与转移，\n\
+                                 脚本用 set_anim_param 推参数驱动切换。",
+                            )
+                            .clicked()
                             {
                                 let name = if animator.clip.is_empty() {
                                     "State".to_string()
@@ -640,181 +709,221 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                         }
 
                         // 叠加层：与基础层正交 —— 机器 / 单剪辑模式都显示这一行。
-                        ui.horizontal(|ui| {
-                            if animator.additive.is_none() {
-                                if ui
-                                    .small_button("+ Additive")
-                                    .on_hover_text(
-                                        "加一层叠加动画：在基础姿势上加增量（走路呼吸、\n\
-                                         受击晃动都靠它），增量 = 叠加剪辑当前帧 − 第 0 帧。",
-                                    )
-                                    .clicked()
-                                {
-                                    animator.additive = Some(xgame_core::AnimAdditive::default());
-                                    touched = true;
-                                }
-                            } else {
-                                let mut remove_additive = false;
-                                ui.label("Additive:")
-                                    .on_hover_text("叠加层：基础姿势之上加一层增量（参考帧 = 叠加剪辑第 0 帧）");
+                        if animator.additive.is_none() {
+                            if icons::add_row(
+                                ui,
+                                "Additive Layer",
+                                "加一层叠加动画：在基础姿势上加增量（走路呼吸、\n\
+                                 受击晃动都靠它），增量 = 叠加剪辑当前帧 − 第 0 帧。",
+                            )
+                            .clicked()
+                            {
+                                animator.additive = Some(xgame_core::AnimAdditive::default());
+                                touched = true;
+                            }
+                        } else {
+                            let mut remove_additive = false;
+                            row(ui, "Additive", |ui| {
                                 if let Some(add) = animator.additive.as_mut() {
                                     // 剪辑下拉：与基础剪辑同一来源（模型的剪辑列表）。
                                     let current = add.clip.clone();
-                                    let label = if current.is_empty() {
-                                        egui::RichText::new("（选剪辑）").weak()
-                                    } else {
-                                        egui::RichText::new(current.clone()).monospace()
-                                    };
-                                    ui.menu_button(label, |ui| {
+                                    egui::ComboBox::from_id_salt("anim_additive_clip")
+                                        .width(84.0)
+                                        .selected_text(
+                                            egui::RichText::new(if current.is_empty() {
+                                                "（选剪辑）"
+                                            } else {
+                                                current.as_str()
+                                            })
+                                            .monospace()
+                                            .size(11.0),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            if clips.is_empty() {
+                                                ui.label(theme::dim_note(if model_empty {
+                                                    "没有模型"
+                                                } else {
+                                                    "模型未加载或没有动画剪辑"
+                                                }));
+                                            }
+                                            for clip in clips.iter() {
+                                                if ui
+                                                    .selectable_label(
+                                                        clip == &current,
+                                                        clip.as_str(),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    add.clip = clip.clone();
+                                                    touched = true;
+                                                }
+                                            }
+                                        });
+                                    // 权重：与脚本 set_anim_additive_weight 同源（都写这个字段）。
+                                    let resp = ui
+                                        .add_sized(
+                                            egui::vec2(48.0, theme::FIELD_HEIGHT),
+                                            egui::DragValue::new(&mut add.weight)
+                                                .speed(0.01)
+                                                .range(0.0..=1.0),
+                                        )
+                                        .on_hover_text(
+                                            "叠加层权重：0 = 完全不影响基础姿势，1 = 全量叠加",
+                                        );
+                                    collect(
+                                        &resp,
+                                        &mut touched,
+                                        &mut drag_began,
+                                        &mut drag_ended,
+                                    );
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if icons::close_button(ui, "摘掉叠加层（基础层不动）") {
+                                            remove_additive = true;
+                                        }
+                                    },
+                                );
+                            });
+                            if remove_additive {
+                                animator.additive = None;
+                                touched = true;
+                            }
+                        }
+
+                        // 混合层栈：与 additive 快捷字段正交 —— additive 先求值，
+                        // 这里按数组顺序依次叠上（后层盖前层）。增删在闭包外收集、
+                        // 循环后统一应用（闭包里正借着 animator 的可变引用）。
+                        let mut remove_layer: Option<usize> = None;
+                        // 层栈不做列头：一行五个控件里 ComboBox 自带内边距
+                        // （请求 54 实得 59），列头若按请求值排布会逐列累积偏移，
+                        // 到 "Weight" 已经错开一个字母 —— 一列对不齐的表头比没有
+                        // 表头更显乱。改成每个控件一条悬停说明，信息一样给全。
+                        for idx in 0..animator.layers.len() {
+                            // ── 第一行：摘除 / 名字 / 模式 / 剪辑 / 权重 ──
+                            //
+                            // 一行要塞五个控件，宽度是硬约束（面板 ~284px）：
+                            // ✕16 + 名字 52 + 模式 54 + 剪辑 66 + 权重 44 + 4×5 间距
+                            // = 252 —— 再宽就会把权重挤出面板。
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let layer = &mut animator.layers[idx];
+                                if icons::close_button(ui, "摘掉这一层") {
+                                    remove_layer = Some(idx);
+                                }
+                                // 层名：脚本 set_anim_layer_weight 按它查找。
+                                let mut name = layer.name.clone();
+                                let resp = ui
+                                    .add_sized(
+                                        egui::vec2(52.0, theme::FIELD_HEIGHT),
+                                        egui::TextEdit::singleline(&mut name)
+                                            .hint_text("name")
+                                            .font(egui::TextStyle::Monospace),
+                                    )
+                                    .on_hover_text(
+                                        "层名：脚本 set_anim_layer_weight(ctx, 名字, 权重) 按它找这一层",
+                                    );
+                                if resp.changed() {
+                                    layer.name = name;
+                                    touched = true;
+                                }
+                                // 模式下拉
+                                egui::ComboBox::from_id_salt(("layer_mode", idx))
+                                    .width(54.0)
+                                    .selected_text(match layer.mode {
+                                        xgame_core::AnimLayerMode::Additive => "Add",
+                                        xgame_core::AnimLayerMode::Override => "Over",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        let variants = [
+                                            (
+                                                xgame_core::AnimLayerMode::Additive,
+                                                "Additive（加增量）",
+                                            ),
+                                            (
+                                                xgame_core::AnimLayerMode::Override,
+                                                "Override（覆盖）",
+                                            ),
+                                        ];
+                                        for (mode, label) in variants {
+                                            if ui
+                                                .selectable_label(layer.mode == mode, label)
+                                                .clicked()
+                                            {
+                                                layer.mode = mode;
+                                                touched = true;
+                                            }
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Additive = 把这一层的增量加上去；\nOverride = 用这一层的姿势覆盖（可配骨骼遮罩）",
+                                    );
+                                // 剪辑下拉：与基础剪辑同一来源。
+                                let current = layer.clip.clone();
+                                egui::ComboBox::from_id_salt(("layer_clip", idx))
+                                    .width(66.0)
+                                    .selected_text(
+                                        egui::RichText::new(if current.is_empty() {
+                                            "—"
+                                        } else {
+                                            current.as_str()
+                                        })
+                                        .monospace()
+                                        .size(10.5),
+                                    )
+                                    .show_ui(ui, |ui| {
                                         if clips.is_empty() {
-                                            ui.weak(if model_empty {
+                                            ui.label(theme::dim_note(if model_empty {
                                                 "没有模型"
                                             } else {
                                                 "模型未加载或没有动画剪辑"
-                                            });
+                                            }));
                                         }
                                         for clip in clips.iter() {
                                             if ui
                                                 .selectable_label(clip == &current, clip.as_str())
                                                 .clicked()
                                             {
-                                                add.clip = clip.clone();
+                                                layer.clip = clip.clone();
                                                 touched = true;
-                                                ui.close_menu();
                                             }
                                         }
-                                    });
-                                    // 权重：与脚本 set_anim_additive_weight 同源（都写这个字段）。
-                                    let resp = ui.add(
-                                        egui::DragValue::new(&mut add.weight)
+                                    })
+                                    .response
+                                    .on_hover_text("这一层播的剪辑（与基础层同一来源）");
+                                // 权重：与脚本 set_anim_layer_weight 同源（都写这个字段）。
+                                let resp = ui
+                                    .add_sized(
+                                        egui::vec2(44.0, theme::FIELD_HEIGHT),
+                                        egui::DragValue::new(&mut layer.weight)
                                             .speed(0.01)
                                             .range(0.0..=1.0),
-                                    );
-                                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                                }
-                                if ui
-                                    .small_button("✕")
-                                    .on_hover_text("摘掉叠加层（基础层不动）")
-                                    .clicked()
-                                {
-                                    remove_additive = true;
-                                }
-                                if remove_additive {
-                                    animator.additive = None;
-                                    touched = true;
-                                }
-                            }
-                        });
-
-                        // 混合层栈：与 additive 快捷字段正交 —— additive 先求值，
-                        // 这里按数组顺序依次叠上（后层盖前层）。增删在闭包外收集、
-                        // 循环后统一应用（闭包里正借着 animator 的可变引用）。
-                        let mut remove_layer: Option<usize> = None;
-                        if !animator.layers.is_empty() {
-                            ui.label("Layers:")
-                                .on_hover_text(
-                                    "混合层栈：按顺序叠到基础姿势上（后层盖前层）；\n\
-                                     Additive = 加增量，Override = 整段覆盖；\n\
-                                     遮罩 = 骨骼子树根名单（留空 = 整副骨架）",
-                                );
-                        }
-                        for idx in 0..animator.layers.len() {
-                            // ── 第一行：摘除 / 名字 / 模式 / 剪辑 / 权重 ──
-                            ui.horizontal(|ui| {
-                                let layer = &mut animator.layers[idx];
-                                if ui
-                                    .small_button("✕")
-                                    .on_hover_text("摘掉这一层")
-                                    .clicked()
-                                {
-                                    remove_layer = Some(idx);
-                                }
-                                // 层名：脚本 set_anim_layer_weight 按它查找。
-                                let mut name = layer.name.clone();
-                                let resp = ui.add(
-                                    egui::TextEdit::singleline(&mut name)
-                                        .desired_width(64.0)
-                                        .hint_text("name"),
-                                );
-                                if resp.changed() {
-                                    layer.name = name;
-                                    touched = true;
-                                }
-                                // 模式下拉（与剪辑同一套 menu_button 惯例）。
-                                let mode_label =
-                                    egui::RichText::new(format!("{:?}", layer.mode)).monospace();
-                                ui.menu_button(mode_label, |ui| {
-                                    let variants = [
-                                        (
-                                            xgame_core::AnimLayerMode::Additive,
-                                            "Additive（加增量）",
-                                        ),
-                                        (xgame_core::AnimLayerMode::Override, "Override（覆盖）"),
-                                    ];
-                                    for (mode, label) in variants {
-                                        if ui
-                                            .selectable_label(layer.mode == mode, label)
-                                            .clicked()
-                                        {
-                                            layer.mode = mode;
-                                            touched = true;
-                                            ui.close_menu();
-                                        }
-                                    }
-                                });
-                                // 剪辑下拉：与基础剪辑同一来源。
-                                let current = layer.clip.clone();
-                                let label = if current.is_empty() {
-                                    egui::RichText::new("（选剪辑）").weak()
-                                } else {
-                                    egui::RichText::new(current.clone()).monospace()
-                                };
-                                ui.menu_button(label, |ui| {
-                                    if clips.is_empty() {
-                                        ui.weak(if model_empty {
-                                            "没有模型"
-                                        } else {
-                                            "模型未加载或没有动画剪辑"
-                                        });
-                                    }
-                                    for clip in clips.iter() {
-                                        if ui
-                                            .selectable_label(clip == &current, clip.as_str())
-                                            .clicked()
-                                        {
-                                            layer.clip = clip.clone();
-                                            touched = true;
-                                            ui.close_menu();
-                                        }
-                                    }
-                                });
-                                // 权重：与脚本 set_anim_layer_weight 同源（都写这个字段）。
-                                let resp = ui.add(
-                                    egui::DragValue::new(&mut layer.weight)
-                                        .speed(0.01)
-                                        .range(0.0..=1.0),
-                                );
+                                    )
+                                    .on_hover_text("层权重：0 = 不生效，1 = 全量");
                                 collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                             });
                             // ── 第二行：骨骼遮罩 chips + 加骨骼 ──
                             ui.horizontal(|ui| {
                                 let layer = &mut animator.layers[idx];
-                                ui.label("Mask:")
-                                    .on_hover_text(
-                                        "子树根名单：名单里的骨及其全部子孙被这层作用；\n\
-                                         留空 = 整副骨架。glTF 匿名节点匹配不到，\n\
-                                         只能靠有名字的祖先进名单。",
-                                    );
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(
+                                    egui::RichText::new("Mask")
+                                        .size(10.5)
+                                        .color(theme::colors::TEXT_DIM),
+                                )
+                                .on_hover_text(
+                                    "子树根名单：名单里的骨及其全部子孙被这层作用；\n\
+                                     留空 = 整副骨架。glTF 匿名节点匹配不到，\n\
+                                     只能靠有名字的祖先进名单。",
+                                );
                                 if layer.mask.is_empty() {
-                                    ui.weak("整副骨架");
+                                    ui.label(theme::dim_note("整副骨架"));
                                 }
                                 let mut drop_mask: Option<usize> = None;
                                 for (mi, m) in layer.mask.iter().enumerate() {
-                                    if ui
-                                        .small_button(format!("{m} ✕"))
-                                        .on_hover_text("点一下把这根骨头移出遮罩")
-                                        .clicked()
-                                    {
+                                    if icons::chip(ui, m, "点一下把这根骨头移出遮罩") {
                                         drop_mask = Some(mi);
                                     }
                                 }
@@ -822,73 +931,87 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                                     layer.mask.remove(mi);
                                     touched = true;
                                 }
-                                ui.menu_button("+ 骨骼", |ui| {
-                                    if bone_names.is_empty() {
-                                        ui.weak(if model_empty {
-                                            "没有模型"
-                                        } else {
-                                            "模型未加载"
-                                        });
-                                    }
-                                    for b in bone_names.iter() {
-                                        if layer.mask.contains(b) {
-                                            continue;
+                                let bone_id = egui::Id::new(("layer_bone_menu", idx));
+                                let add_bone =
+                                    icons::text_button(ui, "＋", "往遮罩里加一根骨骼");
+                                if add_bone.clicked() {
+                                    ui.memory_mut(|m| m.toggle_popup(bone_id));
+                                }
+                                egui::popup_below_widget(
+                                    ui,
+                                    bone_id,
+                                    &add_bone,
+                                    egui::PopupCloseBehavior::CloseOnClick,
+                                    |ui| {
+                                        ui.set_min_width(170.0);
+                                        ui.set_max_height(260.0);
+                                        if bone_names.is_empty() {
+                                            ui.label(theme::dim_note(if model_empty {
+                                                "没有模型"
+                                            } else {
+                                                "模型未加载"
+                                            }));
                                         }
-                                        if ui.small_button(b.as_str()).clicked() {
-                                            layer.mask.push(b.clone());
-                                            touched = true;
-                                            ui.close_menu();
-                                        }
-                                    }
-                                });
+                                        egui::ScrollArea::vertical()
+                                            .max_height(240.0)
+                                            .show(ui, |ui| {
+                                                for b in bone_names.iter() {
+                                                    if layer.mask.contains(b) {
+                                                        continue;
+                                                    }
+                                                    if ui.button(b.as_str()).clicked() {
+                                                        layer.mask.push(b.clone());
+                                                        touched = true;
+                                                    }
+                                                }
+                                            });
+                                    },
+                                );
                             });
                         }
                         if let Some(idx) = remove_layer {
                             animator.layers.remove(idx);
                             touched = true;
                         }
-                        ui.horizontal(|ui| {
-                            if ui
-                                .small_button("+ Add Layer")
-                                .on_hover_text(
-                                    "往栈里加一层（默认：Additive、整副骨架、权重 1）",
-                                )
-                                .clicked()
-                            {
-                                let name = format!("layer{}", animator.layers.len());
-                                animator.layers.push(xgame_core::AnimLayer {
-                                    name,
-                                    ..Default::default()
-                                });
-                                touched = true;
-                            }
-                        });
+                        if icons::add_row(
+                            ui,
+                            "Add Layer",
+                            "往栈里加一层（默认：Additive、整副骨架、权重 1）",
+                        )
+                        .clicked()
+                        {
+                            let name = format!("layer{}", animator.layers.len());
+                            animator.layers.push(xgame_core::AnimLayer {
+                                name,
+                                ..Default::default()
+                            });
+                            touched = true;
+                        }
 
-                        ui.horizontal(|ui| {
-                            ui.label("Fade:")
-                                .on_hover_text("换剪辑/换状态的交叉淡入时长；0 = 硬切");
+                        row(ui, "Fade", |ui| {
                             let mut fade = animator.fade_time;
-                            let resp = ui.add(
-                                egui::DragValue::new(&mut fade)
-                                    .speed(0.01)
-                                    .range(0.0..=2.0)
-                                    .suffix("s"),
-                            );
+                            let resp = ui
+                                .add_sized(
+                                    egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                    egui::DragValue::new(&mut fade)
+                                        .speed(0.01)
+                                        .range(0.0..=2.0)
+                                        .suffix("s"),
+                                )
+                                .on_hover_text("换剪辑/换状态的交叉淡入时长；0 = 硬切");
                             collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                             if resp.changed() {
                                 animator.fade_time = fade.clamp(0.0, 2.0);
                             }
                         });
 
-                        ui.horizontal(|ui| {
-                            if ui
-                                .checkbox(&mut animator.autoplay, "Autoplay")
-                                .on_hover_text("关掉后停在剪辑第 0 帧（摆好第一帧再播）")
-                                .changed()
-                            {
-                                touched = true;
-                            }
-                        });
+                        if ui
+                            .checkbox(&mut animator.autoplay, "Autoplay")
+                            .on_hover_text("关掉后停在剪辑第 0 帧（摆好第一帧再播）")
+                            .changed()
+                        {
+                            touched = true;
+                        }
                     }
                     if remove_machine {
                         if let Some(animator) = entity.animator.as_mut() {
@@ -904,27 +1027,30 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             });
         }
 
-        ui.separator();
 
         // ── 脚本 ──
         //
         // 这里存的是**项目相对路径**，不是脚本内容：同一份脚本可以挂在多个实体上，
         // 改一次逻辑全都生效。列表顺序就是执行顺序。
-        ui.heading("Scripts");
+        theme::section_bar(ui, "Scripts");
         ui.indent("scripts", |ui| {
             let mut remove: Option<usize> = None;
             for (slot, path) in entity.scripts.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label("📜");
-                    ui.label(egui::RichText::new(path).monospace().size(11.0))
-                        .on_hover_text("项目相对路径；顺序即执行顺序");
-                    if ui
-                        .small_button("✕")
-                        .on_hover_text("把这个脚本从实体上摘掉（脚本文件本身不动）")
-                        .clicked()
-                    {
-                        remove = Some(slot);
-                    }
+                    icons::small_icon(ui, icons::Icon::Script, 12.0, theme::colors::BADGE_SCRIPT);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(path).monospace().size(11.0))
+                            .truncate(),
+                    )
+                    .on_hover_text("项目相对路径；顺序即执行顺序");
+                    // 行尾右对齐：`with_layout` 把剩余宽度全吃掉，✕ 贴右边对齐，
+                    // 多个脚本行之间因此不会因为路径长短而左右乱跳。
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icons::close_button(ui, "把这个脚本从实体上摘掉（脚本文件本身不动）")
+                        {
+                            remove = Some(slot);
+                        }
+                    });
                 });
             }
             if let Some(slot) = remove {
@@ -932,14 +1058,22 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 touched = true;
             }
 
-            ui.horizontal(|ui| {
-                ui.menu_button("+ Add Script", |ui| {
+            let add_id = egui::Id::new("inspector_add_script");
+            let add = icons::add_row(ui, "Add Script", "从项目 Scripts/ 目录里挑一个 .lua 挂上");
+            if add.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(add_id));
+            }
+            // 用 `popup_below_widget` 而不是 `menu_button`：后者自带边框和菜单
+            // 分隔线的观感，跟这边的扁平行不搭，也没法做到 "整宽点击区"。
+            egui::popup_below_widget(
+                ui,
+                add_id,
+                &add,
+                egui::PopupCloseBehavior::CloseOnClick,
+                |ui| {
+                    ui.set_min_width(220.0);
                     if state.script_list.is_empty() {
-                        ui.weak("项目里还没有脚本（.lua）");
-                        if ui.button("⟳ 重新扫描").clicked() {
-                            state.refresh_scripts();
-                            ui.close_menu();
-                        }
+                        ui.label(theme::dim_note("项目里还没有脚本（.lua）"));
                     } else {
                         for path in state.script_list.clone() {
                             if entity.scripts.contains(&path) {
@@ -948,40 +1082,26 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                             if ui.button(path.clone()).clicked() {
                                 entity.scripts.push(path);
                                 touched = true;
-                                ui.close_menu();
                             }
                         }
                         ui.separator();
-                        if ui.button("⟳ 重新扫描").clicked() {
-                            state.refresh_scripts();
-                            ui.close_menu();
-                        }
                     }
-                });
-                if ui
-                    .small_button("⟳")
-                    .on_hover_text("重新扫描项目里的 Scripts/ 目录")
-                    .clicked()
-                {
-                    state.refresh_scripts();
-                }
-            });
-
-            ui.label(
-                egui::RichText::new("钩子: start / update / fixed_update / on_destroy")
-                    .weak()
-                    .size(11.0),
+                    if ui.button("重新扫描 Scripts/").clicked() {
+                        state.refresh_scripts();
+                    }
+                },
             );
+
+            theme::note(ui, "钩子: start / update / fixed_update / on_destroy");
         });
 
-        ui.separator();
 
         // ── Behaviors（Rust 组件，双轨架构 P0.5）──
         //
         // 与上面的 Scripts 同构：存的是**组件名**而不是代码，顺序即执行顺序。
         // 区别在于这些名字来自插件 DLL 的注册表 —— 没构建过插件时是空的，
         // 场景里已挂的名字就会显示成红色 ⚠（名字写错 / 插件没编译，都该看见）。
-        ui.heading("Behaviors");
+        theme::section_bar(ui, "Behaviors");
         ui.indent("behaviors", |ui| {
             let names: Vec<String> = state.behavior_names().to_vec();
             let mut remove: Option<usize> = None;
@@ -994,7 +1114,16 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             for (slot, name) in entity.behaviors.iter().enumerate() {
                 let registered = names.iter().any(|n| n == name);
                 ui.horizontal(|ui| {
-                    ui.label("🧩");
+                    icons::small_icon(
+                        ui,
+                        icons::Icon::Component,
+                        12.0,
+                        if registered {
+                            theme::colors::BADGE_PREFAB
+                        } else {
+                            theme::colors::WARN
+                        },
+                    );
                     let text = egui::RichText::new(name.clone()).monospace().size(11.0);
                     if registered {
                         // 悬停先把"有哪些参数"说清楚 —— 展开之前就知道值不值得
@@ -1025,18 +1154,16 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     } else {
                         // 未注册不是错误（用户可能先在场景里写好、再按 Play 编译），
                         // 但它**必须可见** —— 否则就是"挂了个组件却纹丝不动"。
-                        ui.label(egui::RichText::new("⚠").color(egui::Color32::YELLOW))
+                        icons::small_icon(ui, icons::Icon::Warning, 12.0, theme::colors::WARN)
                             .on_hover_text("未注册：插件还没编译，或名字写错了");
-                        ui.label(text.color(egui::Color32::LIGHT_RED))
+                        ui.label(text.color(theme::colors::ERROR))
                             .on_hover_text("插件没编译过 / 组件名不在注册表里");
                     }
-                    if ui
-                        .small_button("✕")
-                        .on_hover_text("把这个组件从实体上摘掉")
-                        .clicked()
-                    {
-                        remove = Some(slot);
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icons::close_button(ui, "把这个组件从实体上摘掉") {
+                            remove = Some(slot);
+                        }
+                    });
                 });
 
                 // ── 可调参数（P1）──
@@ -1081,20 +1208,24 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 } else {
                     "热调参中 —— 改动立即生效，停止 Play 时丢弃"
                 };
-                ui.label(egui::RichText::new(hint).weak().size(10.5));
+                theme::note(ui, hint);
             }
 
-            ui.horizontal(|ui| {
-                ui.menu_button("+ Add Behavior", |ui| {
+            let add_id = egui::Id::new("inspector_add_behavior");
+            let add = icons::add_row(ui, "Add Behavior", "从插件注册表里挑一个 Rust 组件挂上");
+            if add.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(add_id));
+            }
+            egui::popup_below_widget(
+                ui,
+                add_id,
+                &add,
+                egui::PopupCloseBehavior::CloseOnClick,
+                |ui| {
+                    ui.set_min_width(220.0);
                     if names.is_empty() {
-                        ui.weak("还没有已注册的 Rust 组件");
-                        ui.label(
-                            egui::RichText::new(
-                                "项目根放 Cargo.toml 后按 ▶ Play 会自动编译插件",
-                            )
-                            .weak()
-                            .size(11.0),
-                        );
+                        ui.label(theme::dim_note("还没有已注册的 Rust 组件"));
+                        theme::note(ui, "项目根放 Cargo.toml 后按 ▶ Play 会自动编译插件");
                     } else {
                         for name in names.iter() {
                             if entity.behaviors.contains(name) {
@@ -1103,29 +1234,23 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                             if ui.button(name.clone()).clicked() {
                                 entity.behaviors.push(name.clone());
                                 touched = true;
-                                ui.close_menu();
                             }
                         }
                     }
-                });
-            });
+                },
+            );
 
             if entity.behaviors.is_empty() {
-                ui.label(
-                    egui::RichText::new("还没有挂组件 —— Rust 轨道的性能优势就体现在这里")
-                        .weak()
-                        .size(11.0),
-                );
+                theme::note(ui, "还没有挂组件 —— Rust 轨道的性能优势就体现在这里");
             }
         });
 
-        ui.separator();
 
         // ── 物理 ──
         //
         // 取消勾选 = 这个实体不参与物理（纯视觉）。旧场景文件没有 `physics` 字段，
         // 加载出来就是未勾选 —— 与当时"没有任何东西会掉下去"的行为一致。
-        ui.heading("Physics");
+        theme::section_bar(ui, "Physics");
         ui.indent("physics", |ui| {
             let mut enabled = entity.physics.is_some();
             if ui
@@ -1144,32 +1269,45 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             if let Some(body) = entity.physics.as_mut() {
                 use xgame_core::physics::{BodyKind, CollisionShape};
 
-                ui.horizontal(|ui| {
-                    ui.label("Type:");
-                    for (kind, label) in [
-                        (BodyKind::Static, "Static"),
-                        (BodyKind::Dynamic, "Dynamic"),
-                        (BodyKind::Kinematic, "Kinematic"),
-                    ] {
-                        if ui.selectable_label(body.kind == kind, label).clicked() {
-                            body.kind = kind;
-                            touched = true;
-                        }
-                    }
+                // 枚举属性一律用**下拉**，不用并排 chip。
+                //
+                // 两个理由：① UE 的 Details 面板对 enum 就是 ComboBox；② 三个
+                // `selectable_label` 加前缀标签在 300px 宽的面板里必然挤成一片，
+                // 五个形状 chip 更是把 "Cylinder" 直接裁掉 —— 溢出不是"有点丑"，
+                // 是**信息丢失**。
+                row(ui, "Type", |ui| {
+                    let current = match body.kind {
+                        BodyKind::Static => "Static",
+                        BodyKind::Dynamic => "Dynamic",
+                        BodyKind::Kinematic => "Kinematic",
+                    };
+                    egui::ComboBox::from_id_salt("physics_kind")
+                        .width(ui.available_width())
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for (kind, label) in [
+                                (BodyKind::Static, "Static"),
+                                (BodyKind::Dynamic, "Dynamic"),
+                                (BodyKind::Kinematic, "Kinematic"),
+                            ] {
+                                if ui.selectable_label(body.kind == kind, label).clicked()
+                                    && body.kind != kind
+                                {
+                                    body.kind = kind;
+                                    touched = true;
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(match body.kind {
+                            BodyKind::Static => "静态：地面 / 墙，不受力",
+                            BodyKind::Dynamic => "动态：受重力与碰撞（物理驱动）",
+                            BodyKind::Kinematic => "运动学：由脚本驱动位置（脚本驱动）",
+                        });
                 });
-                ui.label(
-                    egui::RichText::new(match body.kind {
-                        BodyKind::Static => "静态：地面 / 墙，不受力",
-                        BodyKind::Dynamic => "动态：受重力与碰撞（物理驱动）",
-                        BodyKind::Kinematic => "运动学：由脚本驱动位置（脚本驱动）",
-                    })
-                    .weak()
-                    .size(11.0),
-                );
 
                 // -- 形状 --
-                ui.horizontal(|ui| {
-                    ui.label("Shape:");
+                row(ui, "Shape", |ui| {
                     let shape_names = ["Auto", "Box", "Ball", "Capsule", "Cylinder"];
                     let current = match body.shape {
                         CollisionShape::Auto => 0,
@@ -1178,30 +1316,37 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                         CollisionShape::Capsule { .. } => 3,
                         CollisionShape::Cylinder { .. } => 4,
                     };
-                    for (i, name) in shape_names.iter().enumerate() {
-                        if ui.selectable_label(current == i, *name).clicked() && current != i {
-                            body.shape = match i {
-                                0 => CollisionShape::Auto,
-                                1 => CollisionShape::Cuboid {
-                                    // 从 Auto 切到 Box 时，用当前缩放推一个合理初值，
-                                    // 免得用户一上来就看到一个 0.5 的小方块。
-                                    half_extents: CollisionShape::auto_half_extents(
-                                        entity.transform.scale.to_array(),
-                                    ),
-                                },
-                                2 => CollisionShape::Ball { radius: 0.5 },
-                                3 => CollisionShape::Capsule {
-                                    half_height: 0.5,
-                                    radius: 0.3,
-                                },
-                                _ => CollisionShape::Cylinder {
-                                    half_height: 0.5,
-                                    radius: 0.5,
-                                },
-                            };
-                            touched = true;
-                        }
-                    }
+                    egui::ComboBox::from_id_salt("physics_shape")
+                        .width(ui.available_width())
+                        .selected_text(shape_names[current])
+                        .show_ui(ui, |ui| {
+                            for (i, name) in shape_names.iter().enumerate() {
+                                if ui.selectable_label(current == i, *name).clicked()
+                                    && current != i
+                                {
+                                    body.shape = match i {
+                                        0 => CollisionShape::Auto,
+                                        1 => CollisionShape::Cuboid {
+                                            // 从 Auto 切到 Box 时，用当前缩放推一个
+                                            // 合理初值，免得一上来就是个 0.5 的小方块。
+                                            half_extents: CollisionShape::auto_half_extents(
+                                                entity.transform.scale.to_array(),
+                                            ),
+                                        },
+                                        2 => CollisionShape::Ball { radius: 0.5 },
+                                        3 => CollisionShape::Capsule {
+                                            half_height: 0.5,
+                                            radius: 0.3,
+                                        },
+                                        _ => CollisionShape::Cylinder {
+                                            half_height: 0.5,
+                                            radius: 0.5,
+                                        },
+                                    };
+                                    touched = true;
+                                }
+                            }
+                        });
                 });
 
                 // -- 形状参数 --
@@ -1211,19 +1356,16 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 // `ref mut` 绑在副本上，用户拖动参数时改动会被静默丢弃。
                 match &mut body.shape {
                     CollisionShape::Auto => {
-                        ui.label(
-                            egui::RichText::new("Auto：按实体缩放的绝对值生成盒子")
-                                .weak()
-                                .size(11.0),
-                        );
+                        ui.label(theme::dim_note("按实体缩放的绝对值生成盒子"));
                     }
                     CollisionShape::Cuboid { half_extents } => {
-                        ui.horizontal(|ui| {
-                            ui.label("Half:");
-                            for (axis, value) in ["x", "y", "z"].into_iter().zip(half_extents.iter_mut())
+                        row(ui, "Extents", |ui| {
+                            for (axis, value) in
+                                ["X", "Y", "Z"].into_iter().zip(half_extents.iter_mut())
                             {
-                                ui.label(axis);
-                                let resp = ui.add(
+                                theme::axis_label(ui, axis);
+                                let resp = ui.add_sized(
+                                    egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                                     egui::DragValue::new(value)
                                         .speed(0.02)
                                         .range(0.001..=f32::MAX),
@@ -1233,88 +1375,91 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                         });
                     }
                     CollisionShape::Ball { radius } => {
-                        let resp = ui.add(
-                            egui::DragValue::new(radius)
-                                .speed(0.02)
-                                .prefix("radius ")
-                                .range(0.001..=f32::MAX),
-                        );
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        row(ui, "Radius", |ui| {
+                            let resp = ui.add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                egui::DragValue::new(radius)
+                                    .speed(0.02)
+                                    .range(0.001..=f32::MAX),
+                            );
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        });
                     }
                     CollisionShape::Capsule { half_height, radius }
                     | CollisionShape::Cylinder { half_height, radius } => {
-                        ui.horizontal(|ui| {
-                            let a = ui.add(
+                        row(ui, "Height", |ui| {
+                            let resp = ui.add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                                 egui::DragValue::new(half_height)
                                     .speed(0.02)
-                                    .prefix("half-h ")
                                     .range(0.0..=f32::MAX),
                             );
-                            collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
-                            let b = ui.add(
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        });
+                        row(ui, "Radius", |ui| {
+                            let resp = ui.add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                                 egui::DragValue::new(radius)
                                     .speed(0.02)
-                                    .prefix("radius ")
                                     .range(0.001..=f32::MAX),
                             );
-                            collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                         });
                     }
                 }
 
-                ui.horizontal(|ui| {
-                    let f = ui.add(
+                row(ui, "Friction", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                         egui::DragValue::new(&mut body.friction)
                             .speed(0.01)
-                            .prefix("friction ")
                             .range(0.0..=2.0),
                     );
-                    collect(&f, &mut touched, &mut drag_began, &mut drag_ended);
-                    let r = ui.add(
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+                row(ui, "Bounce", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                         egui::DragValue::new(&mut body.restitution)
                             .speed(0.01)
-                            .prefix("bounce ")
                             .range(0.0..=1.0),
                     );
-                    collect(&r, &mut touched, &mut drag_began, &mut drag_ended);
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 });
-                ui.horizontal(|ui| {
-                    let m = ui.add(
+                row(ui, "Mass", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                         egui::DragValue::new(&mut body.mass)
                             .speed(0.1)
-                            .prefix("mass ")
                             .range(0.0..=10_000.0),
-                    );
-                    collect(&m, &mut touched, &mut drag_began, &mut drag_ended);
-                    let g = ui.add(
+                    )
+                    .on_hover_text("0 = 按碰撞体密度自动推算");
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+                row(ui, "Gravity", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                         egui::DragValue::new(&mut body.gravity_scale)
                             .speed(0.01)
-                            .prefix("gravity ")
                             .range(-5.0..=5.0),
-                    );
-                    collect(&g, &mut touched, &mut drag_began, &mut drag_ended);
+                    )
+                    .on_hover_text("重力倍率：1 = 正常，0 = 悬浮，负数 = 反重力");
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 });
                 let sensor = ui
                     .checkbox(&mut body.is_sensor, "Sensor (trigger)")
                     .on_hover_text("只检测重叠、不产生碰撞力；射线默认会忽略它")
                     .changed();
                 touched |= sensor;
-
-                ui.label(
-                    egui::RichText::new("mass 0 = 按碰撞体密度自动推算")
-                        .weak()
-                        .size(11.0),
-                );
             }
         });
 
-        ui.separator();
 
         // ── 音频 ──
         //
         // 取消勾选 = 静默实体。旧场景文件没有 `audio` 字段，加载出来就是
         // 未勾选 —— 与当时"没有任何声音"的行为一致。
-        ui.heading("Audio");
+        theme::section_bar(ui, "Audio");
         ui.indent("audio", |ui| {
             let mut enabled = entity.audio.is_some();
             if ui
@@ -1331,9 +1476,9 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             }
 
             if let Some(audio) = entity.audio.as_mut() {
-                ui.horizontal(|ui| {
-                    ui.label("Clip:");
-                    let resp = ui.add(
+                row(ui, "Clip", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
                         egui::TextEdit::singleline(&mut audio.clip)
                             .hint_text("Resources/Audio/Beep.wav"),
                     );
@@ -1342,9 +1487,9 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     }
                 });
 
-                ui.horizontal(|ui| {
-                    ui.label("Volume:");
-                    let resp = ui.add(
+                row(ui, "Volume", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                         egui::DragValue::new(&mut audio.volume)
                             .speed(0.01)
                             .range(0.0..=1.0),
@@ -1352,8 +1497,10 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     if resp.changed() {
                         touched = true;
                     }
-                    ui.label("Pitch:");
-                    let resp = ui.add(
+                });
+                row(ui, "Pitch", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                         egui::DragValue::new(&mut audio.pitch)
                             .speed(0.01)
                             .range(0.05..=4.0),
@@ -1361,6 +1508,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     if resp.changed() {
                         touched = true;
                     }
+                    ui.label(theme::dim_note("1.0 = 原速"));
                 });
 
                 if ui
@@ -1385,21 +1533,21 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     touched = true;
                 }
                 if audio.spatial {
-                    ui.horizontal(|ui| {
-                        ui.label("Dist:");
-                        let resp = ui.add(
+                    row(ui, "Distance", |ui| {
+                        let min = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                             egui::DragValue::new(&mut audio.min_distance)
                                 .speed(0.05)
-                                .prefix("min ")
                                 .range(0.001..=f32::MAX),
                         );
-                        let resp2 = ui.add(
+                        ui.label(theme::dim_note("→"));
+                        let max = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                             egui::DragValue::new(&mut audio.max_distance)
                                 .speed(0.1)
-                                .prefix("max ")
                                 .range(0.002..=f32::MAX),
                         );
-                        if resp.changed() || resp2.changed() {
+                        if min.changed() || max.changed() {
                             // 引擎侧要求 max > min，编辑器先把住门。
                             if audio.max_distance <= audio.min_distance {
                                 audio.max_distance = audio.min_distance + 0.001;
@@ -1407,18 +1555,20 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                             touched = true;
                         }
                     });
+                    // 只加一次：这一行同时标出两列的语义（min / max），
+                    // 挤在控件后面会把工具栏式的紧凑感打散。
+                    theme::note(ui, "min → max：衰减区间（米）");
                 }
             }
         });
 
-        ui.separator();
 
         // ── 材质覆盖 ──
         //
         // 内置图元（builtin://cube 等）只有白模、glTF 材质改不了 —— 这一区是
         // 场景层面调材质的唯一入口。语义见 `MaterialOverride`：Tint 是**乘子**，
         // Metallic / Roughness 是**替换**；没勾的字段保持模型自带值。
-        ui.heading("Material");
+        theme::section_bar(ui, "Material");
         ui.indent("material", |ui| {
             let mut enabled = entity.material.is_some();
             if ui
@@ -1436,10 +1586,14 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
 
             if let Some(m) = entity.material.as_mut() {
                 // 基础色乘子（线性 RGBA；a 一并相乘 = "整体透明一点"）
-                ui.horizontal(|ui| {
+                //
+                // 每组都是「标签列 + 勾选框 + 编辑控件」：勾选框贴控件列起始，
+                // 颜色块/数值紧随其后。这样三行的勾选框在同一竖线上，扫一眼
+                // 就知道哪些字段被覆盖了。
+                row(ui, "Tint", |ui| {
                     let mut has = m.base_color.is_some();
                     if ui
-                        .checkbox(&mut has, "Tint")
+                        .checkbox(&mut has, "")
                         .on_hover_text("与模型自带基础色**相乘**：白模直接上色，\n贴图模型调整体色调；a 控制整体透明度")
                         .changed()
                     {
@@ -1452,10 +1606,10 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     }
                 });
 
-                ui.horizontal(|ui| {
+                row(ui, "Metallic", |ui| {
                     let mut has = m.metallic.is_some();
                     if ui
-                        .checkbox(&mut has, "Metallic")
+                        .checkbox(&mut has, "")
                         .on_hover_text("0 = 绝缘体，1 = 金属。金属没有漫反射，\n反射环境色（写覆盖值，不做相乘）")
                         .changed()
                     {
@@ -1463,17 +1617,18 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                         touched = true;
                     }
                     if let Some(v) = m.metallic.as_mut() {
-                        let resp = ui.add(
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                             egui::DragValue::new(v).speed(0.01).range(0.0..=1.0),
                         );
                         collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                     }
                 });
 
-                ui.horizontal(|ui| {
+                row(ui, "Roughness", |ui| {
                     let mut has = m.roughness.is_some();
                     if ui
-                        .checkbox(&mut has, "Roughness")
+                        .checkbox(&mut has, "")
                         .on_hover_text("0 = 镜面，1 = 完全漫反射（写覆盖值，不做相乘）")
                         .changed()
                     {
@@ -1481,7 +1636,8 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                         touched = true;
                     }
                     if let Some(v) = m.roughness.as_mut() {
-                        let resp = ui.add(
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
                             egui::DragValue::new(v).speed(0.01).range(0.0..=1.0),
                         );
                         collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
@@ -1490,11 +1646,15 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             }
         });
 
-        ui.separator();
-
         // ── 添加组件（占位）──
-        ui.add_enabled(false, egui::Button::new("+  Add Component"))
-            .on_disabled_hover_text("自由组件系统尚未开放序列化；脚本 / 物理已可直接编辑");
+        ui.add_space(4.0);
+        ui.add_enabled_ui(false, |ui| {
+            icons::add_row(
+                ui,
+                "Add Component",
+                "自由组件系统尚未开放序列化；脚本 / 物理已可直接编辑",
+            );
+        });
     }
 
     // ── 记录撤销点 ──
@@ -1535,40 +1695,44 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // ── 父节点（层级）──
     // 刻意放在写回**之后**：`reparent_entity` 按"保留世界变换"会改写实体自己的
     // `transform`，若先 reparent 再被 `working` 写回，那次换算就被覆盖掉了。
-    ui.separator();
-    ui.heading("Parent");
-    let current_parent = state.scene.parent_index(index);
-    let parent_label = match current_parent {
-        Some(p) => state.scene.entities[p].name.clone(),
-        None => "(none — scene root)".to_string(),
-    };
-    let mut chosen: Option<Option<usize>> = None;
-    ui.add_enabled_ui(state.is_editing(), |ui| {
-        egui::ComboBox::from_label("")
-            .selected_text(parent_label)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(current_parent.is_none(), "(none — scene root)")
-                    .clicked()
-                {
-                    chosen = Some(None);
-                }
-                for i in 0..state.scene.entities.len() {
-                    // 自己、以及自己的子孙都不能当父节点（会成环）
-                    if i == index || state.scene.is_ancestor(index, i) {
-                        continue;
-                    }
-                    let selected = current_parent == Some(i);
-                    let name = state.scene.entities[i].name.clone();
-                    if ui.selectable_label(selected, name).clicked() {
-                        chosen = Some(Some(i));
-                    }
-                }
+    theme::section_bar(ui, "Parent");
+    ui.indent("parent", |ui| {
+        let current_parent = state.scene.parent_index(index);
+        let parent_label = match current_parent {
+            Some(p) => state.scene.entities[p].name.clone(),
+            None => "(none — scene root)".to_string(),
+        };
+        let mut chosen: Option<Option<usize>> = None;
+        ui.add_enabled_ui(state.is_editing(), |ui| {
+            row(ui, "Parent", |ui| {
+                egui::ComboBox::from_id_salt("inspector_parent")
+                    .width(ui.available_width())
+                    .selected_text(parent_label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(current_parent.is_none(), "(none — scene root)")
+                            .clicked()
+                        {
+                            chosen = Some(None);
+                        }
+                        for i in 0..state.scene.entities.len() {
+                            // 自己、以及自己的子孙都不能当父节点（会成环）
+                            if i == index || state.scene.is_ancestor(index, i) {
+                                continue;
+                            }
+                            let selected = current_parent == Some(i);
+                            let name = state.scene.entities[i].name.clone();
+                            if ui.selectable_label(selected, name).clicked() {
+                                chosen = Some(Some(i));
+                            }
+                        }
+                    });
             });
+        });
+        if let Some(parent) = chosen {
+            state.reparent_entity(index, parent);
+        }
     });
-    if let Some(parent) = chosen {
-        state.reparent_entity(index, parent);
-    }
 
     // ── 预制体（实例来源 / Apply / Revert）──
     // 放在最后：这几个按钮会直接改场景（Revert 会重建整棵子树、让索引位移），
@@ -1579,49 +1743,50 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         .get(index)
         .and_then(|e| e.prefab.clone());
     if let Some(link) = prefab_link {
-        ui.separator();
-        ui.heading("Prefab");
-        ui.label(
-            egui::RichText::new(format!("Source: {}", link.source))
-                .monospace()
-                .weak()
-                .size(11.0),
-        );
+        theme::section_bar(ui, "Prefab");
+        ui.indent("prefab", |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&link.source)
+                        .monospace()
+                        .size(10.5)
+                        .color(theme::colors::TEXT_DIM),
+                )
+                .truncate(),
+            )
+            .on_hover_text(format!("预制体资产：{}", link.source));
 
-        if state.is_prefab_root(index) {
-            let editing = state.is_editing();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(editing, egui::Button::new("Apply"))
-                    .on_hover_text("把当前实例的改动写回预制体资产文件")
-                    .clicked()
-                {
-                    state.apply_prefab(index);
-                }
-                if ui
-                    .add_enabled(editing, egui::Button::new("Revert"))
-                    .on_hover_text("用资产覆盖回这个实例（保留它当前的位置）")
-                    .clicked()
-                {
-                    state.revert_prefab(index);
-                }
-            });
-        } else {
-            let root = state.prefab_instance_root(index);
-            let root_name = root.map(|r| state.scene.entities[r].name.clone());
-            ui.label(
-                egui::RichText::new(match &root_name {
+            if state.is_prefab_root(index) {
+                let editing = state.is_editing();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(editing, egui::Button::new("Apply"))
+                        .on_hover_text("把当前实例的改动写回预制体资产文件")
+                        .clicked()
+                    {
+                        state.apply_prefab(index);
+                    }
+                    if ui
+                        .add_enabled(editing, egui::Button::new("Revert"))
+                        .on_hover_text("用资产覆盖回这个实例（保留它当前的位置）")
+                        .clicked()
+                    {
+                        state.revert_prefab(index);
+                    }
+                });
+            } else {
+                let root = state.prefab_instance_root(index);
+                let root_name = root.map(|r| state.scene.entities[r].name.clone());
+                ui.label(theme::dim_note(match &root_name {
                     Some(n) => format!("实例内部节点（根: {n}）"),
                     None => "实例内部节点".to_string(),
-                })
-                .weak()
-                .size(11.0),
-            );
-            if let Some(r) = root {
-                if ui.button("Select Instance Root").clicked() {
-                    state.selected_entity = Some(r);
+                }));
+                if let Some(r) = root {
+                    if ui.button("Select Instance Root").clicked() {
+                        state.selected_entity = Some(r);
+                    }
                 }
             }
-        }
+        });
     }
 }

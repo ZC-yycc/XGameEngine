@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use egui::RichText;
 use xgame_core::{ProjectError, ProjectHandle};
 
+use crate::panels::{icons, theme};
 use crate::recents::RecentProjects;
 
 /// 项目枢纽每帧返回的动作。
@@ -87,149 +88,245 @@ impl ProjectHub {
         let mut open_recent: Option<PathBuf> = None;
         let mut forget_recent: Option<PathBuf> = None;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(70.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(theme::colors::WINDOW_BG))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(48.0);
 
-                ui.label(RichText::new("XGameEngine").size(34.0).strong());
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("选择、创建或打开一个游戏项目")
-                        .size(13.0)
-                        .color(egui::Color32::from_gray(150)),
-                );
+                    ui.label(theme::bold("XGameEngine").size(26.0));
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("选择、创建或打开一个游戏项目")
+                            .size(12.0)
+                            .color(theme::colors::TEXT_SECONDARY),
+                    );
+                    ui.add_space(20.0);
 
-                ui.add_space(28.0);
+                    // 高度必须给成**真实可用高度**：`vec2(640, 0)` 会把子 ui 的
+                    // `max_rect` 高度设成 0，里面的 `ScrollArea` 于是按"可用高度 0"
+                    // 夹自己的视口 —— 表现是最近项目列表只画出前三行。
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(640.0, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            // 同 field_row 的坑：`allocate_ui_with_layout` 只按子 ui
+                            // 的 min_rect 占位，不撑宽的话这一列会缩到最宽那张卡片
+                            // 的宽度，卡片之间的左右边距全看内容。
+                            ui.set_min_width(640.0);
+                            // ── 新建项目 ──
+                            theme::card_frame().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                theme::card_title(ui, "新建项目");
 
-                ui.allocate_ui_with_layout(
-                    egui::vec2(620.0, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        // ── 新建项目 ──
-                        ui.group(|ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(RichText::new("新建项目").strong());
-                            ui.add_space(4.0);
-
-                            egui::Grid::new("new_project_grid")
-                                .num_columns(3)
-                                .spacing([8.0, 6.0])
-                                .show(ui, |ui| {
-                                    ui.label("名称");
-                                    ui.add(
+                                theme::field_row(ui, "名称", |ui| {
+                                    ui.add_sized(
+                                        egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
                                         egui::TextEdit::singleline(&mut new_name)
-                                            .hint_text("MyGame")
-                                            .desired_width(f32::INFINITY),
+                                            .hint_text("MyGame"),
                                     );
-                                    ui.label("");
-                                    ui.end_row();
-
-                                    ui.label("位置");
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut new_location)
-                                            .desired_width(f32::INFINITY),
+                                });
+                                theme::field_row(ui, "位置", |ui| {
+                                    let browse_w = 62.0;
+                                    let field_w =
+                                        (ui.available_width() - browse_w - 5.0).max(120.0);
+                                    ui.add_sized(
+                                        egui::vec2(field_w, theme::FIELD_HEIGHT + 2.0),
+                                        egui::TextEdit::singleline(&mut new_location),
                                     );
-                                    if ui.button("浏览…").clicked() {
+                                    if ui
+                                        .add_sized(
+                                            egui::vec2(browse_w, theme::FIELD_HEIGHT + 2.0),
+                                            egui::Button::new("浏览…"),
+                                        )
+                                        .clicked()
+                                    {
                                         browse_new_location = true;
                                     }
-                                    ui.end_row();
                                 });
+                                ui.label(theme::dim_note("项目将创建在「位置/名称」目录下"));
 
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new("项目将创建在「位置/名称」目录下")
-                                    .size(11.0)
-                                    .color(egui::Color32::from_gray(140)),
-                            );
-
-                            ui.add_space(6.0);
-                            if ui.button("＋ 创建项目").clicked() {
-                                do_create = true;
-                            }
-                        });
-
-                        ui.add_space(14.0);
-
-                        // ── 打开已有项目 ──
-                        ui.group(|ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(RichText::new("打开项目").strong());
-                            ui.add_space(4.0);
-
-                            ui.horizontal(|ui| {
-                                ui.label("路径");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut open_path)
-                                        .hint_text("项目根目录（含 project.ron）")
-                                        .desired_width(f32::INFINITY),
-                                );
-                                if ui.button("浏览…").clicked() {
-                                    browse_open_path = true;
+                                ui.add_space(8.0);
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("创建项目").color(egui::Color32::WHITE),
+                                        )
+                                        .fill(theme::colors::ACCENT_BLUE)
+                                        .min_size(egui::vec2(96.0, theme::FIELD_HEIGHT + 6.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    do_create = true;
                                 }
                             });
 
-                            ui.add_space(6.0);
-                            if ui.button("📂 打开项目").clicked() {
-                                do_open = true;
-                            }
-                        });
+                            ui.add_space(12.0);
 
-                        ui.add_space(14.0);
+                            // ── 打开已有项目 ──
+                            theme::card_frame().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                theme::card_title(ui, "打开项目");
 
-                        // ── 最近项目 ──
-                        ui.group(|ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(RichText::new("最近项目").strong());
-                            ui.add_space(4.0);
-
-                            if self.recent_paths.is_empty() {
-                                ui.label(
-                                    RichText::new("（还没有打开过项目）")
-                                        .size(12.0)
-                                        .color(egui::Color32::from_gray(140)),
-                                );
-                            }
-
-                            egui::ScrollArea::vertical()
-                                .max_height(220.0)
-                                .show(ui, |ui| {
-                                    for path in &self.recent_paths {
-                                        ui.horizontal(|ui| {
-                                            let title = display_name(path);
-                                            if ui.selectable_label(false, title).clicked() {
-                                                open_recent = Some(path.clone());
-                                            }
-                                            ui.label(
-                                                RichText::new(path.display().to_string())
-                                                    .size(11.0)
-                                                    .color(egui::Color32::from_gray(140)),
-                                            );
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if ui
-                                                        .small_button("✕")
-                                                        .on_hover_text("从最近列表中移除")
-                                                        .clicked()
-                                                    {
-                                                        forget_recent = Some(path.clone());
-                                                    }
-                                                },
-                                            );
-                                        });
+                                theme::field_row(ui, "路径", |ui| {
+                                    let browse_w = 62.0;
+                                    let field_w =
+                                        (ui.available_width() - browse_w - 5.0).max(120.0);
+                                    ui.add_sized(
+                                        egui::vec2(field_w, theme::FIELD_HEIGHT + 2.0),
+                                        egui::TextEdit::singleline(&mut open_path)
+                                            .hint_text("项目根目录（含 project.ron）"),
+                                    );
+                                    if ui
+                                        .add_sized(
+                                            egui::vec2(browse_w, theme::FIELD_HEIGHT + 2.0),
+                                            egui::Button::new("浏览…"),
+                                        )
+                                        .clicked()
+                                    {
+                                        browse_open_path = true;
                                     }
                                 });
-                        });
 
-                        // ── 提示 / 错误 ──
-                        if let Some(message) = &self.message {
-                            ui.add_space(10.0);
-                            ui.colored_label(egui::Color32::from_rgb(230, 120, 120), message);
-                        }
-                    },
-                );
+                                ui.add_space(8.0);
+                                if ui
+                                    .add(
+                                        egui::Button::new("打开项目").min_size(egui::vec2(
+                                            96.0,
+                                            theme::FIELD_HEIGHT + 6.0,
+                                        )),
+                                    )
+                                    .clicked()
+                                {
+                                    do_open = true;
+                                }
+                            });
+
+                            ui.add_space(12.0);
+
+                            // ── 最近项目 ──
+                            theme::card_frame().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("最近项目")
+                                            .family(theme::bold_family())
+                                            .size(13.0)
+                                            .color(theme::colors::TEXT_BRIGHT),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(theme::dim_note(format!(
+                                                "{} 个",
+                                                self.recent_paths.len()
+                                            )));
+                                        },
+                                    );
+                                });
+                                ui.add_space(2.0);
+                                {
+                                    let width = ui.available_width();
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(width, 1.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().hline(
+                                        rect.x_range(),
+                                        rect.center().y,
+                                        egui::Stroke::new(
+                                            1.0_f32,
+                                            theme::colors::SEPARATOR_SOFT,
+                                        ),
+                                    );
+                                }
+                                ui.add_space(4.0);
+
+                                if self.recent_paths.is_empty() {
+                                    ui.label(theme::dim_note("还没有打开过项目"));
+                                }
+
+                                egui::ScrollArea::vertical()
+                                    .max_height(200.0)
+                                    .auto_shrink([false, true])
+                                    .show(ui, |ui| {
+                                        ui.spacing_mut().item_spacing.y = 2.0;
+                                        for path in &self.recent_paths {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 8.0;
+                                                // 名字列定宽：路径因此**对齐成一列**，
+                                                // 不会因为项目名长短而在每行左右跳。
+                                                let name = display_name(path);
+                                                let clicked = ui
+                                                    .allocate_ui_with_layout(
+                                                        egui::vec2(112.0, 20.0),
+                                                        egui::Layout::left_to_right(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            // 同上：不撑宽度的话名字列只有
+                                                            // 文字那么宽，"BehaviorsDemo" 会把
+                                                            // 路径顶到右边，整列对不齐。
+                                                            ui.set_min_width(112.0);
+                                                            let response = ui.add(
+                                                                egui::Label::new(
+                                                                    RichText::new(name)
+                                                                        .size(12.0),
+                                                                )
+                                                                .truncate()
+                                                                .sense(egui::Sense::click()),
+                                                            );
+                                                            if response.hovered() {
+                                                                ui.ctx().set_cursor_icon(
+                                                                    egui::CursorIcon::PointingHand,
+                                                                );
+                                                            }
+                                                            response.clicked()
+                                                        },
+                                                    )
+                                                    .inner;
+                                                if clicked {
+                                                    open_recent = Some(path.clone());
+                                                }
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(path.display().to_string())
+                                                            .size(10.5)
+                                                            .color(theme::colors::TEXT_DIM),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        if icons::close_button(
+                                                            ui,
+                                                            "从最近列表中移除",
+                                                        ) {
+                                                            forget_recent = Some(path.clone());
+                                                        }
+                                                    },
+                                                );
+                                            });
+                                        }
+                                    });
+                            });
+
+                            // ── 提示 / 错误 ──
+                            if let Some(message) = &self.message {
+                                ui.add_space(10.0);
+                                ui.label(
+                                    RichText::new(message)
+                                        .size(11.5)
+                                        .color(theme::colors::ERROR),
+                                );
+                            }
+                        },
+                    );
+                });
             });
-        });
 
         // -- 回写可变状态 --
         self.new_name = new_name;

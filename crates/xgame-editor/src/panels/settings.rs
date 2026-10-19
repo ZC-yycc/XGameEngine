@@ -15,6 +15,7 @@
 //! 数据化的另一层意义是给 **AI 智能体**用：能被程序读写校验的配置，
 //! 才能被智能体批量调参与自动验证，而不是"打开 GUI 拖滑块"。
 
+use crate::panels::theme;
 use crate::state::EditorState;
 
 pub fn show(state: &mut EditorState, ctx: &egui::Context) {
@@ -32,11 +33,11 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     let mut reset = false;
     let mut cancel = false;
 
-    egui::Window::new("⚙  Project Settings")
+    egui::Window::new("Project Settings")
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_width(420.0)
+        .default_width(470.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             let Some(draft) = state.settings_draft.as_mut() else {
@@ -45,10 +46,11 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // ── 项目 ──
-                ui.label(egui::RichText::new("项目").strong());
+                theme::section_bar(ui, "项目");
                 egui::Grid::new("set_proj")
                     .num_columns(2)
-                    .spacing([12.0, 6.0])
+                    .spacing([10.0, 5.0])
+                    .min_col_width(88.0)
                     .show(ui, |ui| {
                         ui.label("项目名");
                         ui.text_edit_singleline(&mut draft.name);
@@ -60,14 +62,14 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         ui.end_row();
                     });
 
-                ui.add_space(8.0);
-                ui.separator();
+                ui.add_space(10.0);
 
                 // ── 窗口 ──
-                ui.label(egui::RichText::new("窗口").strong());
+                theme::section_bar(ui, "窗口");
                 egui::Grid::new("set_win")
                     .num_columns(2)
-                    .spacing([12.0, 6.0])
+                    .spacing([10.0, 5.0])
+                    .min_col_width(88.0)
                     .show(ui, |ui| {
                         ui.label("标题");
                         ui.text_edit_singleline(&mut draft.window.title);
@@ -99,14 +101,14 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         ui.end_row();
                     });
 
-                ui.add_space(8.0);
-                ui.separator();
+                ui.add_space(10.0);
 
                 // ── 运行时 ──
-                ui.label(egui::RichText::new("运行时（物理 / 时间）").strong());
+                theme::section_bar(ui, "运行时（物理 / 时间）");
                 egui::Grid::new("set_rt")
                     .num_columns(2)
-                    .spacing([12.0, 6.0])
+                    .spacing([10.0, 5.0])
+                    .min_col_width(88.0)
                     .show(ui, |ui| {
                         ui.label("重力")
                             .on_hover_text("世界重力加速度（m/s²），Y 轴向下为负");
@@ -137,14 +139,14 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         ui.end_row();
                     });
 
-                ui.add_space(8.0);
-                ui.separator();
+                ui.add_space(10.0);
 
                 // ── 画面 ──
-                ui.label(egui::RichText::new("画面（曝光 / 色调映射 / 泛光）").strong());
+                theme::section_bar(ui, "画面（曝光 / 色调映射 / 泛光）");
                 egui::Grid::new("set_render")
                     .num_columns(2)
-                    .spacing([12.0, 6.0])
+                    .spacing([10.0, 5.0])
+                    .min_col_width(88.0)
                     .show(ui, |ui| {
                         ui.label("色调映射").on_hover_text(
                             "ACES：高光滚降、过曝仍保留层次（默认）；\
@@ -218,11 +220,12 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         ui.end_row();
                     });
 
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("天空（程序化天空盒 + 环境光照 IBL）").strong());
+                ui.add_space(10.0);
+                theme::section_bar(ui, "天空（程序化天空盒 + 环境光照 IBL）");
                 egui::Grid::new("set_sky")
                     .num_columns(2)
-                    .spacing([12.0, 6.0])
+                    .spacing([10.0, 5.0])
+                    .min_col_width(88.0)
                     .show(ui, |ui| {
                         ui.label("启用").on_hover_text(
                             "开着时：背景是程序化天空，环境光 = ambient + IBL（两者相加）。\
@@ -285,14 +288,14 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         ui.end_row();
                     });
 
-                ui.add_space(8.0);
-                ui.separator();
+                ui.add_space(10.0);
 
                 // ── 内容目录 ──
-                ui.label(egui::RichText::new("内容目录（项目相对路径）").strong());
+                theme::section_bar(ui, "内容目录（项目相对路径）");
                 egui::Grid::new("set_dirs")
                     .num_columns(2)
-                    .spacing([12.0, 6.0])
+                    .spacing([10.0, 5.0])
+                    .min_col_width(88.0)
                     .show(ui, |ui| {
                         let c = &mut draft.content;
                         ui.label("场景");
@@ -322,22 +325,39 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui
-                    .button("Apply")
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("Apply").color(egui::Color32::WHITE),
+                        )
+                        .fill(theme::colors::ACCENT_BLUE)
+                        .min_size(egui::vec2(80.0, theme::FIELD_HEIGHT + 6.0)),
+                    )
                     .on_hover_text("校验并写入 project.ron")
                     .clicked()
                 {
                     apply = true;
                 }
                 if ui
-                    .button("Reset")
+                    .add(
+                        egui::Button::new("Reset")
+                            .min_size(egui::vec2(80.0, theme::FIELD_HEIGHT + 6.0)),
+                    )
                     .on_hover_text("丢弃本次修改，恢复清单里的原值")
                     .clicked()
                 {
                     reset = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new("Cancel")
+                                .min_size(egui::vec2(80.0, theme::FIELD_HEIGHT + 6.0)),
+                        )
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
             });
         });
 

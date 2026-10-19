@@ -459,23 +459,33 @@ impl ScreenshotRenderer {
     pub fn save_png(&self, path: &Path) -> Result<(u32, u32)> {
         let (width, height) = self.size;
         let rgba = self.read_rgba()?;
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("创建截图目录失败 ({})", parent.display()))?;
-            }
-        }
-        image::save_buffer_with_format(
-            path,
-            &rgba,
-            width,
-            height,
-            image::ColorType::Rgba8,
-            image::ImageFormat::Png,
-        )
-        .with_context(|| format!("写 PNG 失败 ({})", path.display()))?;
+        save_rgba_png(path, &rgba, width, height)?;
         Ok((width, height))
     }
+}
+
+/// 把一段 RGBA8 像素写成 PNG（目录不存在会自动创建）。
+///
+/// 与 [`ScreenshotRenderer::save_png`] 共用同一段落盘逻辑 —— 编辑器的
+/// 「界面截图」（`--ui-shot`）抓的是 egui 的上屏像素，不是场景渲染器，
+/// 但落盘格式必须一致，否则两套工具读图要写两个分支。
+pub fn save_rgba_png(path: &Path, rgba: &[u8], width: u32, height: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建截图目录失败 ({})", parent.display()))?;
+        }
+    }
+    image::save_buffer_with_format(
+        path,
+        rgba,
+        width,
+        height,
+        image::ColorType::Rgba8,
+        image::ImageFormat::Png,
+    )
+    .with_context(|| format!("写 PNG 失败 ({})", path.display()))?;
+    Ok(())
 }
 
 /// 读一张 PNG 回 RGBA8（测试 / 验证工具用：免得到处再引一遍 image 依赖）。

@@ -39,6 +39,10 @@
 //! # 无头工具（不开窗口，给 CI / AI 智能体用）
 //! cargo run -p xgame-editor -- --check projects/SampleScene
 //! cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
+//!
+//! # 界面截图（开窗口跑几帧，把上屏像素存成 PNG 后退出；调界面用）
+//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot shot.png
+//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot shot.png --ui-select Fox
 //! ```
 
 mod builder;
@@ -111,6 +115,33 @@ struct EditorApp {
     clock: FrameClock,
     /// 帧间隔探针（`XGAME_FRAME_LOG` 开关，默认关闭）。
     probe: frame_probe::FrameProbe,
+    /// 界面截图请求（`--ui-shot`，开发/智能体工具）。
+    ui_shot: Option<UiShot>,
+}
+
+/// 「跑几帧 → 抓上屏像素 → 落盘 → 退出」的界面截图请求。
+///
+/// 为什么不用 `PrintWindow` / 系统截图：编辑器窗口常常不在前台（`SetForegroundWindow`
+/// 在无交互环境里会静默失败），而 UI 回归需要**同机逐字节可复现**的像素。
+/// eframe/wgpu 的 `ViewportCommand::Screenshot` 拿到的就是这一帧真正提交上屏的内容，
+/// 不受遮挡、缩放和 DWM 合成时机影响。
+struct UiShot {
+    path: std::path::PathBuf,
+    /// 打开项目之后至少跑这么多帧再抓（等字体图集、布局和首帧视口渲染稳定）。
+    after_frames: u32,
+    /// 打开项目后按名字选中一个实体（截图里就能带上 Inspector 的真实内容）。
+    select: Option<String>,
+    frames_seen: u32,
+    requested: bool,
+    /// 上一帧的**逻辑**屏幕尺寸。连续两帧相同才认为布局稳定。
+    ///
+    /// 踩过的坑：窗口创建尺寸与 DPI 缩放的落定不在同一帧，抢在第一帧抓，
+    /// 抓到的是一张"界面只画了左上角"的图（外框 1440×900，内容 936×579）。
+    last_size: Option<egui::Vec2>,
+    /// 连续稳定的帧数。
+    stable: u32,
+    /// 尺寸对不上时的重抓次数（见 [`EditorApp::service_ui_shot`]）。
+    retries: u32,
 }
 
 impl EditorApp {
@@ -149,16 +180,31 @@ impl EditorApp {
             policy,
             clock: FrameClock::new(now),
             probe,
+            ui_shot: None,
         };
 
-        // 命令行参数：`xgame-editor <项目路径>` 直接进编辑器，跳过枢纽。
+        // ── 命令行参数 ──
+        // `xgame-editor <项目路径>` 直接进编辑器，跳过枢纽。
         // 路径无效时不退出——错误显示在枢纽界面上，用户还能另选一个。
-        if let Some(arg) = std::env::args().nth(1) {
-            // 先取出返回值，让 `&mut app.hub` 的借用在这里结束，
-            // 否则下面 `app.open_project` 会与它冲突。
+        // `--ui-shot` 等开关与路径混排时按「第一个非开关参数是路径」解析。
+        let launch = parse_launch_args(&std::env::args().skip(1).collect::<Vec<_>>());
+        app.ui_shot = launch.ui_shot;
+        if let Some(arg) = launch.project {
             let action = app.hub.try_open(Path::new(&arg));
             if let HubAction::Open(project) = action {
                 app.open_project(*project);
+            }
+        }
+
+        // `--ui-select <名字>`：截图前先选中实体（Inspector 才有内容可看）。
+        if let Some(name) = app.ui_shot.as_ref().and_then(|s| s.select.clone()) {
+            if let Some(session) = app.session.as_mut() {
+                session.state.selected_entity = session
+                    .state
+                    .scene
+                    .entities
+                    .iter()
+                    .position(|e| e.name == name);
             }
         }
 
@@ -319,8 +365,179 @@ impl eframe::App for EditorApp {
             will_discard,
             pass_nr,
         );
+
+        // 界面截图（`--ui-shot`）：放在最后一帧的所有 UI 之后 —— 抓到的就是
+        // 用户真正看到的那一帧（含状态栏与弹窗层）。
+        self.service_ui_shot(ctx);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 启动参数（窗口模式）
+// ---------------------------------------------------------------------------
+
+/// 窗口模式的启动参数。
+#[derive(Default)]
+struct LaunchArgs {
+    /// 直接打开的项目路径（第一个非开关参数）。
+    project: Option<String>,
+    /// 界面截图请求。
+    ui_shot: Option<UiShot>,
+}
+
+/// 解析窗口模式的启动参数。
+///
+/// 只认 `--ui-shot <png>` / `--ui-frames <n>` / `--ui-select <实体名>` 三个开关，
+/// 其余非开关参数按顺序取**第一个**当项目路径。`--check` / `--headless` 在
+/// `main` 更早的分支就分流了，不会走到这里。
+fn parse_launch_args(raw: &[String]) -> LaunchArgs {
+    let mut out = LaunchArgs::default();
+    let mut shot_path: Option<std::path::PathBuf> = None;
+    let mut after_frames = 12u32;
+    let mut select: Option<String> = None;
+
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i].as_str() {
+            "--ui-shot" => {
+                if let Some(path) = raw.get(i + 1) {
+                    shot_path = Some(std::path::PathBuf::from(path));
+                    i += 1;
+                } else {
+                    log::error!("--ui-shot 需要一个 PNG 路径");
+                }
+            }
+            "--ui-frames" => {
+                if let Some(n) = raw.get(i + 1).and_then(|s| s.parse().ok()) {
+                    after_frames = n;
+                    i += 1;
+                } else {
+                    log::error!("--ui-frames 需要一个正整数");
+                }
+            }
+            "--ui-select" => {
+                if let Some(name) = raw.get(i + 1) {
+                    select = Some(name.clone());
+                    i += 1;
+                } else {
+                    log::error!("--ui-select 需要一个实体名");
+                }
+            }
+            other if !other.starts_with("--") => {
+                if out.project.is_none() {
+                    out.project = Some(other.to_owned());
+                }
+            }
+            other => log::warn!("忽略未知参数: {other}"),
+        }
+        i += 1;
+    }
+
+    out.ui_shot = shot_path.map(|path| UiShot {
+        path,
+        after_frames,
+        select,
+        frames_seen: 0,
+        requested: false,
+        last_size: None,
+        stable: 0,
+        retries: 0,
+    });
+    out
+}
+
+impl EditorApp {
+    /// 推进 `--ui-shot` 状态机：等布局稳定 → 请求截图 → 收到像素落盘 → 关窗。
+    ///
+    /// 等待期间必须自己 `request_repaint`：帧调度在静态界面上会停帧，
+    /// 停帧之后截图命令可能永远等不到下一帧去处理。
+    fn service_ui_shot(&mut self, ctx: &egui::Context) {
+        let Some(shot) = self.ui_shot.as_mut() else {
+            return;
+        };
+
+        // 第一帧就把窗口要成固定尺寸：截图要逐字节可比，不能受"上次窗口大小 /
+        // 落在哪台显示器"影响（不同显示器的 DPI 缩放会让同一份界面差一个像素）。
+        if shot.frames_seen == 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                SHOT_WIDTH, SHOT_HEIGHT,
+            )));
+        }
+        shot.frames_seen += 1;
+
+        // 尺寸稳定判定：连着一帧没变才算布局落定。
+        let size = ctx.screen_rect().size();
+        if shot.last_size == Some(size) {
+            shot.stable += 1;
+        } else {
+            shot.last_size = Some(size);
+            shot.stable = 0;
+        }
+
+        if !shot.requested {
+            if shot.frames_seen >= shot.after_frames && shot.stable >= 2 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                shot.requested = true;
+            }
+            ctx.request_repaint();
+            return;
+        }
+
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+
+        let Some(image) = image else {
+            // 截图命令已经发出，但像素还没回来：别停帧。
+            ctx.request_repaint();
+            return;
+        };
+
+        // 上屏纹理的尺寸必须等于「逻辑尺寸 × 缩放系数」。对不上说明这一帧
+        // 涂的是一张还没跟上的旧目标（缩放刚变 / 窗口刚 resize），丢掉重抓。
+        let ppp = ctx.pixels_per_point();
+        let expected = [
+            (size.x * ppp).round().max(1.0) as usize,
+            (size.y * ppp).round().max(1.0) as usize,
+        ];
+        if image.size != expected && shot.retries < 3 {
+            shot.retries += 1;
+            log::warn!(
+                "界面截图尺寸不符（拿到 {:?}，期望 {expected:?}，ppp={ppp:.3}），重抓一次",
+                image.size
+            );
+            shot.requested = false;
+            shot.stable = 0;
+            ctx.request_repaint();
+            return;
+        }
+
+        let (width, height) = (image.size[0], image.size[1]);
+        let mut rgba = Vec::with_capacity(width * height * 4);
+        for pixel in &image.pixels {
+            rgba.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
+        }
+
+        match xgame_render::screenshot::save_rgba_png(
+            &shot.path,
+            &rgba,
+            width as u32,
+            height as u32,
+        ) {
+            Ok(()) => log::info!("界面截图已保存: {} ({width}x{height})", shot.path.display()),
+            Err(error) => log::error!("界面截图落盘失败: {error:#}"),
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
+/// `--ui-shot` 抓图时的窗口逻辑尺寸（16:10，够放下四列面板 + 视口）。
+const SHOT_WIDTH: f32 = 1440.0;
+const SHOT_HEIGHT: f32 = 900.0;
 
 // ---------------------------------------------------------------------------
 // 输入事件过滤
@@ -496,65 +713,126 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
 }
 
 /// 底部状态栏。
+///
+/// UE 的状态栏是一条**比面板深**的窄条（24px），文字一律 11px、标签暗、数值亮，
+/// 段与段之间用 1px 竖线分开；右侧固定放"不常看但必须能看到"的读数（FPS / 版本）。
+/// 这里刻意不用 `ui.separator()`：它是横线，塞进水平布局里会把行高撑到 30px 以上。
 fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
-    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Editor Framework v0.1.0");
-            ui.separator();
+    use crate::panels::{icons, theme};
 
-            // Project
-            ui.label(format!("Project: {}", state.project_name()));
-            ui.separator();
+    let frame = egui::Frame::default()
+        .fill(theme::colors::PANEL_HEADER_BG)
+        .inner_margin(egui::Margin::symmetric(8.0, 0.0));
 
-            // Play mode indicator
-            let btn_text = match state.play_mode {
-                PlayMode::Edit => "Edit Mode",
-                PlayMode::Playing => "▶ Playing",
-                PlayMode::Paused => "⏸ Paused",
-            };
-            ui.label(btn_text);
-            ui.separator();
+    egui::TopBottomPanel::bottom("status_bar")
+        .exact_height(theme::STATUS_BAR_HEIGHT)
+        .frame(frame)
+        .show(ctx, |ui| {
+            // 顶沿 1px 分隔线（panel 的 frame 没有边框可设，直接画一条）。
+            ui.painter().hline(
+                ui.max_rect().x_range(),
+                ui.max_rect().top() + 0.5,
+                egui::Stroke::new(1.0_f32, theme::colors::SEPARATOR),
+            );
 
-            // Scene info
-            ui.label(format!(
-                "Scene: {} | {} entities",
-                state.scene.name,
-                state.scene.entities.len(),
-            ));
-            ui.separator();
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 7.0;
 
-            // Physics stats (only when playing)
-            if state.play_mode != PlayMode::Edit {
-                let (bodies, colliders) = state.physics_stats();
-                ui.label(format!("Bodies: {} | Colliders: {}", bodies, colliders));
-                ui.separator();
+                // ── 播放态 ──
+                // 编辑态用**小圆点**而不是暂停符号：暂停图标在"没在跑"的
+                // 语境里读起来像"运行中的暂停"，是状态栏最容易误读的一处。
+                let (icon, text, color) = match state.play_mode {
+                    PlayMode::Edit => (
+                        icons::Icon::Dot,
+                        "Edit Mode",
+                        theme::colors::TEXT_SECONDARY,
+                    ),
+                    PlayMode::Playing => (icons::Icon::Play, "Playing", theme::colors::PLAY_GREEN),
+                    PlayMode::Paused => (icons::Icon::Pause, "Paused", theme::colors::WARN),
+                };
+                icons::small_icon(ui, icon, 9.0, color);
+                ui.label(egui::RichText::new(text).size(11.0).color(color));
+                icons::v_separator(ui);
 
-                // Audio stats（只显示"在响的"和设备状态；silent = 无声降级）
-                let audio = state.audio_stats();
-                ui.label(format!(
-                    "Audio: {} | {} active",
-                    if audio.available { "device" } else { "silent" },
-                    audio.active,
-                ));
-                ui.separator();
-            }
+                // ── 项目 / 场景 ──
+                ui.label(
+                    egui::RichText::new(state.project_name())
+                        .size(11.0)
+                        .color(theme::colors::TEXT_PRIMARY),
+                );
+                ui.label(
+                    egui::RichText::new("·")
+                        .size(11.0)
+                        .color(theme::colors::TEXT_DIM),
+                );
+                ui.label(
+                    egui::RichText::new(&state.scene.name)
+                        .size(11.0)
+                        .color(theme::colors::TEXT_PRIMARY),
+                );
+                ui.label(
+                    egui::RichText::new(format!("{} entities", state.scene.entities.len()))
+                        .size(11.0)
+                        .color(theme::colors::TEXT_DIM),
+                );
 
-            // FPS
-            // 读真实帧间隔（`stable_dt`），别用 `predicted_dt` —— 后者是预测值，
-            // 帧率真的掉下去时它可能仍然报 60，等于把卡顿藏起来。
-            //
-            // 空闲（帧调度已停）时不能继续显示上一次的读数 —— 那看起来像界面卡死了。
-            // 显式标成 `idle`，用户一眼就知道"不是卡、是它真的闲下来了"。
-            if live {
-                ui.label(format!(
-                    "FPS: {:.0}",
-                    ctx.input(|i| i.stable_dt).recip().round(),
-                ));
-            } else {
-                ui.label("FPS: idle");
-            }
+                // ── 物理 / 音频（只在运行时有意义）──
+                if state.play_mode != PlayMode::Edit {
+                    icons::v_separator(ui);
+                    let (bodies, colliders) = state.physics_stats();
+                    ui.label(
+                        egui::RichText::new(format!("{bodies} bodies / {colliders} colliders"))
+                            .size(11.0)
+                            .color(theme::colors::TEXT_SECONDARY),
+                    );
+                    // 音频只显示"在响的"和设备状态（silent = 无声降级，用警告色）。
+                    let audio = state.audio_stats();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "audio {} · {} active",
+                            if audio.available { "device" } else { "silent" },
+                            audio.active,
+                        ))
+                        .size(11.0)
+                        .color(if audio.available {
+                            theme::colors::TEXT_SECONDARY
+                        } else {
+                            theme::colors::WARN
+                        }),
+                    );
+                }
+
+                // ── 右侧：FPS + 版本 ──
+                //
+                // 读真实帧间隔（`stable_dt`），别用 `predicted_dt` —— 后者是预测值，
+                // 帧率真的掉下去时它可能仍然报 60，等于把卡顿藏起来。
+                // 空闲（帧调度已停）时不能继续显示上一次的读数 —— 那看起来像界面卡死，
+                // 显式标成 `idle`，一眼就知道"不是卡、是它真的闲下来了"。
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new("v0.1.0")
+                            .size(10.5)
+                            .color(theme::colors::TEXT_DIM),
+                    );
+                    icons::v_separator(ui);
+                    let fps = if live {
+                        format!("{:.0} fps", ctx.input(|i| i.stable_dt).recip().round())
+                    } else {
+                        "idle".to_owned()
+                    };
+                    ui.label(
+                        egui::RichText::new(fps)
+                            .monospace()
+                            .size(11.0)
+                            .color(if live {
+                                theme::colors::TEXT_PRIMARY
+                            } else {
+                                theme::colors::TEXT_DIM
+                            }),
+                    );
+                });
+            });
         });
-    });
 }
 
 // ---------------------------------------------------------------------------
