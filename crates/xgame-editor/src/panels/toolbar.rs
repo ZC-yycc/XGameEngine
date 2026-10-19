@@ -56,14 +56,33 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 icons::v_separator(ui);
 
                 // 脏时标签带 "*"，与窗口标题栏一致（同一份按帧 memo 的脏检查）。
+                // Play 态下 `scene_dirty_memo` 恒为 false（运行时副本不算改动）。
                 let dirty = state.scene_dirty_memo(ctx.cumulative_pass_nr());
                 let save_label = if dirty { "Save *" } else { "Save" };
-                if icons::icon_text_button(ui, Icon::Save, save_label, "保存入口场景（Ctrl+S）")
-                    .clicked()
-                {
+                // 播放中保存会写入运行时状态（树倒了、箱子飞了），
+                // 所以按钮跟着禁用 —— `save_scene` 里也有一道同语义的硬保护。
+                let can_save = state.is_editing();
+                let save_hint = if can_save {
+                    "保存入口场景（Ctrl+S）"
+                } else {
+                    "播放中不能保存 —— 先 ⏹ Stop 回到编辑态"
+                };
+                let save_clicked = ui
+                    .add_enabled_ui(can_save, |ui| {
+                        icons::icon_text_button(ui, Icon::Save, save_label, save_hint)
+                    })
+                    .inner
+                    .clicked();
+                if save_clicked {
                     let _ = state.save_scene();
                 }
-                if icons::text_button(ui, "Save As…", "另存为…（Ctrl+Shift+S）").clicked() {
+                let save_as_clicked = ui
+                    .add_enabled_ui(can_save, |ui| {
+                        icons::text_button(ui, "Save As…", "另存为…（Ctrl+Shift+S）")
+                    })
+                    .inner
+                    .clicked();
+                if save_as_clicked {
                     state.save_as_open = true;
                     state.save_as_name = state.scene.name.clone();
                 }
@@ -94,18 +113,31 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     };
                 }
 
+                // Pause / Stop 只在有东西可停的时候才是亮的。
+                //
+                // 之前无论什么模式都用同一个颜色：编辑态下两个按钮看着"能用"，
+                // 点了却什么都不发生（代码里有 `&& play_mode == Playing` 兜着）。
+                // `add_enabled_ui` 把禁用态画成半透明，一眼就能看出"现在没在跑"。
                 let paused = state.play_mode == PlayMode::Paused;
-                if icons::icon_button(ui, Icon::Pause, 24.0, "暂停（物理与脚本停步）", paused)
-                    .clicked()
-                    && state.play_mode == PlayMode::Playing
-                {
+                let running = state.play_mode != PlayMode::Edit;
+                let pause_clicked = ui
+                    .add_enabled_ui(state.play_mode == PlayMode::Playing, |ui| {
+                        icons::icon_button(ui, Icon::Pause, 24.0, "暂停（物理与脚本停步）", paused)
+                    })
+                    .inner
+                    .clicked();
+                if pause_clicked && state.play_mode == PlayMode::Playing {
                     state.play_mode = PlayMode::Paused;
                     state.log_info("⏸ Pause — 物理与脚本暂停，场景保持当前状态");
                 }
 
-                if icons::icon_button(ui, Icon::Stop, 24.0, "停止并回到编辑态", false).clicked()
-                    && state.play_mode != PlayMode::Edit
-                {
+                let stop_clicked = ui
+                    .add_enabled_ui(running, |ui| {
+                        icons::icon_button(ui, Icon::Stop, 24.0, "停止并回到编辑态", false)
+                    })
+                    .inner
+                    .clicked();
+                if stop_clicked && state.play_mode != PlayMode::Edit {
                     state.play_mode = PlayMode::Edit;
                 }
 

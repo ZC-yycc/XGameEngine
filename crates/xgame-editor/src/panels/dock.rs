@@ -60,11 +60,16 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
             .with_share(prefs, 0.40),
     );
 
-    // Top row: Scene View (75%) | Inspector (25%)
+    // Top row: Scene View (72%) | Inspector (28%)
+    //
+    // Inspector 从 25% 提到 28%：Transform 的三轴并排需要「标签列 58 + 3×(轴标 +
+    // 输入框) + 6 个间距」。25% 时 1280 窗口只分到 250px，输入框被压到 37px
+    // （数值勉强能看，但拖拽手感很差）；28% 能到 43px，1440 窗口正好稳住
+    // 标准的 54px —— 与旧布局在 1440 下逐像素一致，窄窗口才真正受益。
     let top_row = tiles.insert_container(
         Linear::new(LinearDir::Horizontal, vec![scene, insp])
-            .with_share(scene, 0.75)
-            .with_share(insp, 0.25),
+            .with_share(scene, 0.72)
+            .with_share(insp, 0.28),
     );
 
     // Right column: top_row (75%) | Console (25%)

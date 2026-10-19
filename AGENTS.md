@@ -51,8 +51,18 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
   `theme::note`（自己排 galley），别用裸 `ui.label` 画长句。
 - **`allocate_ui_with_layout` 只按子 ui 的 `min_rect` 占位**：要定宽就必须在子 ui 里
   `ui.set_min_width(w)`，否则列宽 = 内容宽，值列会左右乱跳。
-- 改 UI 必须截图自检：`xgame-editor <项目> --ui-shot <png> [--ui-select 实体] [--ui-settings]`，
-  配 `.workbuddy/tools/crop.py`（局部放大）与 `rowscan.py`（按行扫颜色分段量像素）。
+- **三轴并排的宽度必须算，不能写死**：用 `theme::axis_field_width(ui)`，且必须在放
+  第一个控件**之前**取一次、三行共用同一个值（放完一个再算会越算越窄，列就错开）。
+  写死 `FIELD_WIDTH` 的话 1280 窗口下 Z 框会顶出面板右边缘。
+- **`add_sized` 只保证"至少这么大"**：控件自己的 `min_size` 更大时会溢出。数值框走
+  `theme::drag_field_w`，别绕过它。
+- **运行态（Play/Pause）的界面语义**：`scene_dirty_memo` 恒为 false（运行时副本不算
+  改动）、`save_scene` / `save_scene_as` 硬拒绝、Pause/Stop 用 `add_enabled_ui` 禁用。
+  任何"只在编辑态有意义"的新按钮都要照这三条办。
+- **`--ui-shot` 的四个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
+  `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
+  `rowscan.py`（按行扫颜色分段量像素）。**用 `--ui-size` 至少扫 1280 / 1440 / 1920
+  三档** —— 窄窗口的溢出只有跑过才看得见。
 
 ## 项目布局
 

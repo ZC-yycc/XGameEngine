@@ -1682,6 +1682,16 @@ impl EditorState {
     /// 成功后刷新脏检查基准（[`saved_snapshot`](Self::saved_snapshot)），
     /// 否则刚保存完工具栏还挂着 "未保存" 的星号。
     pub fn save_scene(&mut self) -> Result<(), String> {
+        // 播放中**不许存盘**：`self.scene` 此刻是运行时的副本，物理和脚本每帧都在
+        // 改它 —— 存下去等于把"跑了三秒之后的现场"写进场景文件（树倒了、箱子飞了、
+        // Fox 站在半空），而用户以为自己只是按了一下 Ctrl+S。
+        //
+        // 退出 Play 会拿 `play_snapshot` 覆盖回来，所以这里挡住不会丢任何编辑。
+        if self.play_mode != PlayMode::Edit {
+            let message = "播放中不能保存场景 —— 先按 ⏹ Stop 回到编辑态".to_owned();
+            self.log_warning(message.clone());
+            return Err(message);
+        }
         let entry = self.project.manifest().entry_scene.clone();
         let relative = self.project.path(&entry);
         let result = self.project.write_scene(&entry, &self.scene);
@@ -1719,6 +1729,13 @@ impl EditorState {
     /// 上千），不 memo 的话一个大场景能把好几毫秒花在"只是想知道一下"上。
     /// `pass_nr` 来自 `ctx.cumulative_pass_nr()`。
     pub fn scene_dirty_memo(&mut self, pass_nr: u64) -> bool {
+        // Play / Pause 态下场景是**运行时的副本**：物理每帧都在改它，退出 Play 时
+        // 会被 `play_snapshot` 整个覆盖 —— 那不是"用户的改动"，标题里打星号、
+        // 关窗时问"要不要保存"都是误导（用户一个字都没改，物理却已经跑了几百帧）。
+        // 热调参同理，按丢弃处理。
+        if self.play_mode != PlayMode::Edit {
+            return false;
+        }
         if let Some((frame, dirty)) = self.dirty_memo {
             if frame == pass_nr {
                 return dirty;
@@ -1738,6 +1755,12 @@ impl EditorState {
     /// 名字只作**文件名**：路径分隔符、`..` 与 Windows 非法字符会被拒绝，
     /// 防手滑把场景写到项目外面去（清单是手改/机器写的文本，同样不能信）。
     pub fn save_scene_as(&mut self, raw_name: &str) -> Result<(), String> {
+        // 同 `save_scene`：播放中不许写盘（`self.scene` 是运行时副本）。
+        if self.play_mode != PlayMode::Edit {
+            let message = "播放中不能另存场景 —— 先按 ⏹ Stop 回到编辑态".to_owned();
+            self.log_warning(message.clone());
+            return Err(message);
+        }
         let name = raw_name.trim();
         if name.is_empty() {
             self.log_error("另存为失败: 场景名不能为空");

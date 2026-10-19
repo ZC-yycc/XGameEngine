@@ -2592,14 +2592,20 @@ Vulkan / 1280×720 / MSAA ×4 / 2000 实体 ×（共享网格、各自网格）�
 ### 六、自检工具链（这轮新加的）
 
 ```
-xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体名>] [--ui-settings]
+xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体名>]
+                            [--ui-settings] [--ui-play] [--ui-size 1280x800]
 ```
-- 首帧 `ViewportCommand::InnerSize(1440, 900)` 固定窗口尺寸；
+- 首帧 `ViewportCommand::InnerSize(<--ui-size 或 1440x900>)` 固定窗口尺寸；
 - **连续两帧逻辑尺寸相同**才发 `ViewportCommand::Screenshot`；
 - 像素尺寸 ≠ 逻辑尺寸 × ppp 时最多重抓 3 次（pidpi 缩放下的经典陷阱）；
 - 落盘走 `xgame_render::screenshot::save_rgba_png`（与场景截图同一份实现）；
 - `--ui-settings` 在抓图前把模态的项目设置窗口拉开 —— 没有它，那个窗口
   **永远截不到**（只能靠点 ⚙）。
+- `--ui-play` 抓图前先进 Play。**必须自己把 `play_mode` 推上去**：平时这条
+  跃迁由 `editor_ui` 监听到工具栏改了枚举之后补上，截图路径不经过工具栏，
+  只调 `enter_play_mode()` 会得到"运行时在跑、界面写着 Edit Mode"的僵尸态。
+- `--ui-size` 逐档扫窗口宽度做排版回归（1280 / 1440 / 1920 各跑一遍）。
+  解析失败要**报错**不能静默退化，否则那一档截图其实还是 1440×900（有测试钉住）。
 
 顺带修掉设置窗口的两个硬伤：滚动区没有高度上限（窗口按内容长到屏幕外，
 标题栏和 Apply/Cancel 一起被裁掉）、文本字段只有 egui 默认宽度（右边缘空出
@@ -2608,7 +2614,31 @@ xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体�
 配套：`.workbuddy/tools/crop.py`（局部放大）与 `rowscan.py`（按行扫描颜色分段，
 用来**量**像素位置而不是靠眼睛判断"对齐了没有"）。
 
-### 七、刻意的取舍
+### 七、第二轮：窄窗口与运行态（同日续做）
+
+第一轮只在 1440×900 / 扫描过 1280 一次，第二轮把三档都跑了一遍，修掉三类问题：
+
+1. **Transform 三轴在 1280 下顶出面板**（Z 输入框只剩半个）。根因是
+   `FIELD_WIDTH=54` 写死：标签列 58 + 3×(轴标 9 + 框 54) + 6 个间距 ≈ 276px，
+   而 1280 时 Inspector 内容宽只有 ~244px。改为 `theme::axis_field_width(ui)`
+   按剩余宽度均分（`clamp(MIN_AXIS_FIELD=30, FIELD_WIDTH)`），三行共用**同一个**
+   算出的宽度（放完第一个控件再算会越算越窄，列就不齐了）。同时把
+   Inspector 的 share 从 25% 提到 28% —— 1440 下正好稳住 54px（与旧布局逐像素
+   一致），1280 下从 37px 提到 43px。留 4px 余量给滚动条与取整。
+2. **Play 态的三个语义错误**（`--ui-play` 做出来才看见）：
+   - Play 中标题/工具栏一直显示 `*`（未保存）—— 运行时的物理每帧都在改
+     `self.scene`，但那不是用户的改动。`scene_dirty_memo` 在非 Edit 态直接
+     返回 `false`。
+   - Play 中 Save 按钮可用，按下去会把"跑了三秒之后的现场"写进场景文件。
+     `save_scene` / `save_scene_as` 现在硬拒绝，工具栏按钮跟着禁用。
+   - Pause / Stop 在编辑态也是亮的，点了什么都不发生。改用 `add_enabled_ui`
+     按 `play_mode` 禁用。
+3. **三个图标在 14px 下读不出来**：`Translate` 的箭头只有 2.1×1.6px（整个图标
+   是个加号）、`Save` 画了三个框糊成"回"字、`Folder` 的页签 4×1.7px（看着是
+   空心方块）。分别改成：箭头放大到臂长的 1/4、软盘只留"外框 + 上半实心"、
+   页签占宽度一半且单独提亮 + 接缝压暗。
+
+### 八、刻意的取舍
 
 1. **不引第三方图标库**：18 个图标全用 `Painter` 画。字形图标的宽度/基线/粗细
    不受控，正是"不整齐"的来源；矢量图标永远落在给定方框里。
@@ -2616,10 +2646,15 @@ xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体�
 3. **Inspector 分类内容零缩进**：UE 的 Details 就是平的；缩进会让值列分层。
 4. **粗体族无条件注册**：宁可"没有粗体效果"也不能"找不到族就 panic"。
 5. **UI 层不动帧调度**：截图与量帧数据表明这一轮没有引入新的重绘源。
+6. **Inspector 不设最小宽度**：egui_tiles 的 `Behavior::min_size` 是**全局一个
+   值**（0.11 的签名就是 `fn min_size(&self) -> f32`），没法按面板给；所以窄窗口
+   靠"三轴自适应 + 调 share"扛，而不是靠 dock 保证宽度。
 
-### 八、已知限制
+### 九、已知限制
 
-- 项目设置窗口（⚙）是模态窗口，`--ui-shot` 抓不到（需要交互打开），
-  这轮只做了 `section_bar` 的间距统一。
 - 视口 gizmo 与选中高亮的配色未重做（属于 3D 叠加层，不在这轮范围）。
-- 窗口尺寸小于 1440×900 时的排版只做了 1280 宽的一次抽查，未逐档验证。
+- 窗口小于 1280×800 的排版未验证（Dock 四列到这个尺寸已经很难看，UE 同尺寸
+  也一样）。
+- Console 的错误/警告等级图标只在高亮时验证过；空列表没有专门的空状态插画。
+- 动画层栈在 1280 下四个控件（名字 / 模式 / 剪辑 / 权重）仍然偏挤，
+  但都完整可见（列头已按陷阱 2 删除）。

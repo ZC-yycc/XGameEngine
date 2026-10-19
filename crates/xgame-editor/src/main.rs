@@ -43,6 +43,8 @@
 //! # 界面截图（开窗口跑几帧，把上屏像素存成 PNG 后退出；调界面用）
 //! cargo run -p xgame-editor -- projects/SampleScene --ui-shot shot.png
 //! cargo run -p xgame-editor -- projects/SampleScene --ui-shot shot.png --ui-select Fox
+//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot play.png --ui-play
+//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot s.png --ui-size 1280x800
 //! ```
 
 mod builder;
@@ -147,6 +149,14 @@ struct UiShot {
     /// 这个窗口是模态的，只能靠点 ⚙ 打开 —— 没有这个开关就**永远截不到**
     /// 它，界面改版时它是唯一一块只能靠肉眼读代码猜排版的地方。
     open_settings: bool,
+    /// 抓图前先进 Play。
+    ///
+    /// Play 态有一整套只在运行时出现的界面：工具栏的暂停/停止组、视口 HUD、
+    /// 状态栏的物理/音频段、Inspector 顶部的"热调参中"横幅。此前它们只能靠
+    /// 人工按键后肉眼检查，改版时最容易漏。
+    play: bool,
+    /// 抓图用的窗口逻辑尺寸（`--ui-size`，缺省 1440×900）。
+    size: egui::Vec2,
 }
 
 impl EditorApp {
@@ -222,6 +232,25 @@ impl EditorApp {
                     .entities
                     .iter()
                     .position(|e| e.name == name);
+            }
+        }
+
+        // `--ui-play`：进 Play 再截图（运行态专属的界面元素都在这里）。
+        //
+        // 放在选中之后：进入 Play 会克隆一份场景，实体顺序不变，选中索引仍然有效。
+        //
+        // **必须自己把 `play_mode` 推上去**：平时这条跃迁由 `editor_ui` 监听到
+        // 工具栏改了枚举之后补上（见那里的 match），截图路径不经过工具栏，
+        // 只调 `enter_play_mode()` 会得到一个"运行时在跑、界面写着 Edit Mode"
+        // 的僵尸态 —— 状态栏 / Inspector 全按编辑态画，Play 态截图就白拍了。
+        if app.ui_shot.as_ref().map(|s| s.play).unwrap_or(false) {
+            if let Some(session) = app.session.as_mut() {
+                session.state.enter_play_mode();
+                // 插件工程会被推迟到编译完成（`game_runtime` 还是 None），
+                // 那种情况下保持 Edit —— 与工具栏路径的语义一致。
+                if session.state.game_runtime.is_some() {
+                    session.state.play_mode = PlayMode::Playing;
+                }
             }
         }
 
@@ -405,7 +434,7 @@ struct LaunchArgs {
 /// 解析窗口模式的启动参数。
 ///
 /// 只认 `--ui-shot <png>` / `--ui-frames <n>` / `--ui-select <实体名>` /
-/// `--ui-settings` 四个开关，
+/// `--ui-settings` / `--ui-play` / `--ui-size <WxH>` 六个开关，
 /// 其余非开关参数按顺序取**第一个**当项目路径。`--check` / `--headless` 在
 /// `main` 更早的分支就分流了，不会走到这里。
 fn parse_launch_args(raw: &[String]) -> LaunchArgs {
@@ -414,6 +443,8 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut after_frames = 12u32;
     let mut select: Option<String> = None;
     let mut open_settings = false;
+    let mut play = false;
+    let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
 
     let mut i = 0;
     while i < raw.len() {
@@ -445,6 +476,20 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
             "--ui-settings" => {
                 open_settings = true;
             }
+            "--ui-play" => {
+                play = true;
+            }
+            "--ui-size" => {
+                // `1440x900` / `1280X800` 都收；解析失败就保持缺省。
+                match raw.get(i + 1).map(|s| parse_size(s)) {
+                    Some(Some(parsed)) => {
+                        size = parsed;
+                        i += 1;
+                    }
+                    Some(None) => log::error!("--ui-size 需要 <宽>x<高>，例如 1280x800"),
+                    None => log::error!("--ui-size 需要 <宽>x<高>，例如 1280x800"),
+                }
+            }
             other if !other.starts_with("--") => {
                 if out.project.is_none() {
                     out.project = Some(other.to_owned());
@@ -465,8 +510,23 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         stable: 0,
         retries: 0,
         open_settings,
+        play,
+        size,
     });
     out
+}
+
+/// 解析 `1280x800` 形式的尺寸（`x` / `X` / `*` 都收，前后空格忽略）。
+///
+/// 单独抽出来是为了能测：`--ui-size` 是排版回归的入口，参数写错了会
+/// **静默**退化成缺省尺寸 —— 那几轮回归就白跑一遍还不知道。
+fn parse_size(text: &str) -> Option<egui::Vec2> {
+    let lower = text.trim().to_ascii_lowercase();
+    let (w, h) = lower.split_once(['x', '*'])?;
+    let w: f32 = w.trim().parse().ok()?;
+    let h: f32 = h.trim().parse().ok()?;
+    // 比 480×360 还小的窗口画不下四列面板（Dock 会挤成负宽度），当参数错误处理。
+    (w >= 480.0 && h >= 360.0 && w.is_finite() && h.is_finite()).then(|| egui::vec2(w, h))
 }
 
 impl EditorApp {
@@ -482,9 +542,7 @@ impl EditorApp {
         // 第一帧就把窗口要成固定尺寸：截图要逐字节可比，不能受"上次窗口大小 /
         // 落在哪台显示器"影响（不同显示器的 DPI 缩放会让同一份界面差一个像素）。
         if shot.frames_seen == 0 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                SHOT_WIDTH, SHOT_HEIGHT,
-            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(shot.size));
         }
         shot.frames_seen += 1;
 
@@ -1107,5 +1165,46 @@ mod tests {
             1,
             "只有绝对位置事件该留下"
         );
+    }
+
+    /// `--ui-size` 的解析：写错了要**报错**，不能静默退化成缺省尺寸。
+    ///
+    /// 排版回归靠这个参数逐档扫窗口宽度，参数被吃掉而没人发现的话，
+    /// 那一档截图其实还是 1440×900 —— 看过一遍什么都没验证到。
+    #[test]
+    fn ui_size_parses_and_rejects_garbage() {
+        assert_eq!(parse_size("1280x800"), Some(egui::vec2(1280.0, 800.0)));
+        assert_eq!(parse_size(" 1920X1080 "), Some(egui::vec2(1920.0, 1080.0)));
+        assert_eq!(parse_size("1600*1000"), Some(egui::vec2(1600.0, 1000.0)));
+        // 太小画不下四列面板 —— 当参数错误，让调用方报出来。
+        assert_eq!(parse_size("320x240"), None);
+        assert_eq!(parse_size("1280"), None);
+        assert_eq!(parse_size("1280xabc"), None);
+        assert_eq!(parse_size(""), None);
+    }
+
+    /// 四个截图开关互不干扰，且项目路径仍然取「第一个非开关参数」。
+    #[test]
+    fn ui_shot_flags_compose() {
+        let raw: Vec<String> = [
+            "--ui-shot",
+            "a.png",
+            "--ui-play",
+            "--ui-size",
+            "1280x800",
+            "--ui-select",
+            "Fox",
+            "projects/SampleScene",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let args = parse_launch_args(&raw);
+        assert_eq!(args.project.as_deref(), Some("projects/SampleScene"));
+        let shot = args.ui_shot.expect("应当解析出截图请求");
+        assert!(shot.play, "--ui-play 应当置位");
+        assert_eq!(shot.size, egui::vec2(1280.0, 800.0));
+        assert_eq!(shot.select.as_deref(), Some("Fox"));
+        assert!(!shot.open_settings);
     }
 }

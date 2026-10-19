@@ -365,71 +365,75 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // ── 变换组件 ──
         theme::section_bar(ui, "Transform");
         ui.indent("transform", |ui| {
-            // 位置
-            theme::field_row(ui, "Position", |ui| {
-                for (axis, value) in [
-                    ("X", &mut entity.transform.position.x),
-                    ("Y", &mut entity.transform.position.y),
-                    ("Z", &mut entity.transform.position.z),
-                ] {
-                    theme::axis_label(ui, axis);
-                    let resp = theme::drag_field(ui, value, 0.1, "");
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                }
-            });
+                // 三轴输入框的宽度按面板剩余空间算：面板够宽时等于 `FIELD_WIDTH`
+                // （与旧画面逐像素一致），窗口收到 1280 时自动压窄 —— 否则最后的
+                // Z 列会被面板右边缘裁掉，数值看不见也拖不到。
+                // 必须在放第一个控件之前算：放完一个 `available_width()` 就少一截。
+                let axis_w = theme::axis_field_width(ui);
+                theme::field_row(ui, "Position", |ui| {
+                    for (axis, value) in [
+                        ("X", &mut entity.transform.position.x),
+                        ("Y", &mut entity.transform.position.y),
+                        ("Z", &mut entity.transform.position.z),
+                    ] {
+                        theme::axis_label(ui, axis);
+                        let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    }
+                });
 
-            // 旋转（欧拉角显示，内部仍是四元数）
-            let euler = entity
-                .transform
-                .rotation
-                .to_euler(xgame_math::glam::EulerRot::XYZ);
-            let mut rot = [
-                euler.0.to_degrees(),
-                euler.1.to_degrees(),
-                euler.2.to_degrees(),
-            ];
-            // 走 `field_row`（而不是手搓 horizontal）：标签列宽必须与 Position /
-            // Scale 完全一致，否则 "Rotation" 比 "Position" 窄一点，下面 Scale 的
-            // 三个输入框就跟着往左挪一档。
-            let rotation_changed = theme::field_row(ui, "Rotation", |ui| {
-                let mut any = false;
-                // 用 zip(iter_mut) 而不是数组字面量：`[&mut rot[0], &mut rot[1], ...]`
-                // 会被借用检查器判成"同一数组的多次可变借用"——数组索引不是字段，
-                // 拿不到字段级借用拆分。
-                for (axis, value) in ["X", "Y", "Z"].into_iter().zip(rot.iter_mut()) {
-                    theme::axis_label(ui, axis);
-                    let resp = theme::drag_field(ui, value, 0.5, "°");
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    any |= resp.changed();
-                }
-                any
-            });
-            if rotation_changed {
-                entity.transform.rotation = xgame_math::glam::Quat::from_euler(
-                    xgame_math::glam::EulerRot::XYZ,
-                    rot[0].to_radians(),
-                    rot[1].to_radians(),
-                    rot[2].to_radians(),
-                );
-            }
-
-            // 缩放（不允许 0 或负数——那会让法线矩阵退化，整个物体变黑）
-            theme::field_row(ui, "Scale", |ui| {
-                for (axis, value) in [
-                    ("X", &mut entity.transform.scale.x),
-                    ("Y", &mut entity.transform.scale.y),
-                    ("Z", &mut entity.transform.scale.z),
-                ] {
-                    theme::axis_label(ui, axis);
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(value)
-                            .speed(0.05)
-                            .range(0.01..=f32::MAX),
+                // 旋转（欧拉角显示，内部仍是四元数）
+                let euler = entity
+                    .transform
+                    .rotation
+                    .to_euler(xgame_math::glam::EulerRot::XYZ);
+                let mut rot = [
+                    euler.0.to_degrees(),
+                    euler.1.to_degrees(),
+                    euler.2.to_degrees(),
+                ];
+                // 走 `field_row`（而不是手搓 horizontal）：标签列宽必须与 Position /
+                // Scale 完全一致，否则 "Rotation" 比 "Position" 窄一点，下面 Scale 的
+                // 三个输入框就跟着往左挪一档。
+                let rotation_changed = theme::field_row(ui, "Rotation", |ui| {
+                    let mut any = false;
+                    // 用 zip(iter_mut) 而不是数组字面量：`[&mut rot[0], &mut rot[1], ...]`
+                    // 会被借用检查器判成"同一数组的多次可变借用"——数组索引不是字段，
+                    // 拿不到字段级借用拆分。
+                    for (axis, value) in ["X", "Y", "Z"].into_iter().zip(rot.iter_mut()) {
+                        theme::axis_label(ui, axis);
+                        let resp = theme::drag_field_w(ui, axis_w, value, 0.5, "°");
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        any |= resp.changed();
+                    }
+                    any
+                });
+                if rotation_changed {
+                    entity.transform.rotation = xgame_math::glam::Quat::from_euler(
+                        xgame_math::glam::EulerRot::XYZ,
+                        rot[0].to_radians(),
+                        rot[1].to_radians(),
+                        rot[2].to_radians(),
                     );
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 }
-            });
+
+                // 缩放（不允许 0 或负数——那会让法线矩阵退化，整个物体变黑）
+                theme::field_row(ui, "Scale", |ui| {
+                    for (axis, value) in [
+                        ("X", &mut entity.transform.scale.x),
+                        ("Y", &mut entity.transform.scale.y),
+                        ("Z", &mut entity.transform.scale.z),
+                    ] {
+                        theme::axis_label(ui, axis);
+                        let resp = ui.add_sized(
+                            egui::vec2(axis_w, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(value)
+                                .speed(0.05)
+                                .range(0.01..=f32::MAX),
+                        );
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    }
+                });
 
             // 世界坐标用小一号的等宽字：它是只读参考，不该和可编辑控件抢注意力。
             // 用空标签的 `field_row` 占位，值才能落在与上面三行同一条竖线上。
@@ -1212,7 +1216,11 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             }
 
             let add_id = egui::Id::new("inspector_add_behavior");
-            let add = icons::add_row(ui, "Add Behavior", "从插件注册表里挑一个 Rust 组件挂上");
+            let add = icons::add_row(
+                ui,
+                "Add Behavior",
+                "从插件注册表里挑一个 Rust 组件挂上 —— 直接编译进宿主，没有解释器开销",
+            );
             if add.clicked() {
                 ui.memory_mut(|m| m.toggle_popup(add_id));
             }
@@ -1241,7 +1249,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             );
 
             if entity.behaviors.is_empty() {
-                theme::note(ui, "还没有挂组件 —— Rust 轨道的性能优势就体现在这里");
+                theme::note(ui, "还没有挂组件");
             }
         });
 

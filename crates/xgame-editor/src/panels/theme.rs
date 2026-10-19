@@ -124,6 +124,9 @@ pub fn bold(text: impl Into<String>) -> egui::RichText {
 /// 数值输入框的标准宽度（Inspector 里三个轴向并排还能放下）。
 pub const FIELD_WIDTH: f32 = 54.0;
 
+/// 三轴输入框被面板宽度压窄时的下限（再窄就装不下 3 位有效数字 + 负号）。
+pub const MIN_AXIS_FIELD: f32 = 30.0;
+
 /// 轴标（X/Y/Z 彩色字母）的占位宽度。向量行的控件从"轴标 + 间距"之后开始，
 /// 标量行也要留出同样一截，两类行的输入框才会落在同一条竖线上。
 pub const AXIS_TAG_WIDTH: f32 = 9.0;
@@ -231,17 +234,38 @@ pub fn field_row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::
     .inner
 }
 
-/// 固定尺寸的数值输入框（高度与 [`FIELD_HEIGHT`] 一致）。
-pub fn drag_field(
+/// 指定宽度的数值输入框（高度与 [`FIELD_HEIGHT`] 一致；三轴并排时宽度由
+/// [`axis_field_width`] 算出来）。
+pub fn drag_field_w(
     ui: &mut egui::Ui,
+    width: f32,
     value: &mut f32,
     speed: f64,
     suffix: &str,
 ) -> egui::Response {
     ui.add_sized(
-        egui::vec2(FIELD_WIDTH, FIELD_HEIGHT),
+        egui::vec2(width, FIELD_HEIGHT),
         egui::DragValue::new(value).speed(speed).suffix(suffix),
     )
+}
+
+/// 三轴并排时每个输入框该有多宽（够宽就是 [`FIELD_WIDTH`]，窄了按剩余宽度均分）。
+///
+/// 固定 54px 在窄窗口下会**顶出 Inspector 右边缘**：标签列 58 + 3×(轴标 9 +
+/// 输入框 54) + 6 个间距 ≈ 276px，而 1280 窗口时 Inspector 内容宽只有 ~244px ——
+/// 最后一列的 Z 输入框被面板边界裁掉，数值看不见也拖不到。
+///
+/// UE 的 Details 遇到窄面板是**把输入框压窄**（三列始终都在），所以这里按
+/// 剩余宽度均分，只在真的挤不下时才收到 [`MIN_AXIS_FIELD`]。
+///
+/// 必须在放置第一个控件**之前**调用：放完一个 `available_width()` 就少一截，
+/// 三行会算出三个不同的宽度，列就对不齐了。
+pub fn axis_field_width(ui: &egui::Ui) -> f32 {
+    // 6 个控件（3 轴标 + 3 输入框）之间有 6 个间隙（含与标签列之间那一个）。
+    // 再留 4px 余量：面板的滚动条宽度、分隔线与 `max_rect` 的取整会各吃掉一点，
+    // 算满之后最后一列会贴到边界上（实测截图里 Z 框右沿正好压在窗口边缘）。
+    let fixed = AXIS_TAG_WIDTH * 3.0 + ui.spacing().item_spacing.x * 6.0 + 4.0;
+    ((ui.available_width() - fixed) / 3.0).clamp(MIN_AXIS_FIELD, FIELD_WIDTH)
 }
 
 /// 轴的字母颜色（X 红 / Y 绿 / Z 蓝，与 UE 一致）。
@@ -284,8 +308,13 @@ pub fn note(ui: &mut egui::Ui, text: impl Into<String>) {
     // 自己排一次版（而不是交给 `Label::wrap()`）：`Label` 用的换行宽度是
     // 本 ui 的 `available_width()`，但它自己又从光标处起笔，两者在缩进过
     // 一次的子 ui 里会差出几像素 —— 中文长句于是正好差最后半个字，尾部
-    // 被面板裁掉。先按"可用宽度 − 2px"排出 galley，再交给 Label 原样画。
-    let wrap = (ui.available_width() - 2.0).max(48.0);
+    // 被面板裁掉。先按"可用宽度 − RIGHT_BREATH"排出 galley，再交给 Label 原样画。
+    //
+    // 留的是 6px 而不是 2px：刚好一行塞满的提示文本（实测"还没有挂组件 ——
+    // Rust 轨道的性能优势就体现在这里"占 270px / 可用 272px）会**紧贴**右侧
+    // 分隔线，字面没溢出但读起来像被挤出去。留白换来的多一行比贴边好看。
+    const RIGHT_BREATH: f32 = 6.0;
+    let wrap = (ui.available_width() - RIGHT_BREATH).max(48.0);
     let galley = ui.painter().layout(
         text.into(),
         egui::FontId::proportional(11.0),

@@ -80,14 +80,17 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Translate => {
             // 四向箭头：一条横线 + 一条竖线，四个箭头尖。
+            //
+            // 箭头必须**够大**（占臂长约 1/4）：原先的 2.1×1.6px 小三角在 16px
+            // 下几乎不可见，整个图标读起来就是一个"加号"，和"添加实体"撞语义。
             let arm = s * 0.42;
             painter.line_segment([c - Vec2::X * arm, c + Vec2::X * arm], stroke);
             painter.line_segment([c - Vec2::Y * arm, c + Vec2::Y * arm], stroke);
-            let head = s * 0.13;
+            let head = s * 0.17;
             for dir in [Vec2::X, -Vec2::X, Vec2::Y, -Vec2::Y] {
                 let tip = c + dir * arm;
-                let base = tip - dir * (head * 1.8);
-                let side = Vec2::new(-dir.y, dir.x) * head * 0.75;
+                let base = tip - dir * head;
+                let side = Vec2::new(-dir.y, dir.x) * head * 0.66;
                 painter.add(Shape::convex_polygon(
                     vec![tip, base + side, base - side],
                     color,
@@ -229,24 +232,20 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(Shape::line(pts, Stroke::new(t * 1.2, color)));
         }
         Icon::Save => {
-            // 软盘：外框 + 上方写入口 + 下方标签。
-            let r = Rect::from_center_size(c, Vec2::new(s * 0.62, s * 0.62));
+            // 软盘：外框 + 上半的写入口（实心）。
+            //
+            // 原先还画了下方标签，16px 下三个框叠在一起糊成"回"字 —— 关掉缩放的
+            // 显示器上根本看不出是软盘。上半实心 + 下半留空是最小可辨识的形状。
+            let r = Rect::from_center_size(c, Vec2::new(s * 0.60, s * 0.62));
             painter.rect_stroke(r, 1.0, stroke);
+            let w = r.width();
             painter.rect_filled(
                 Rect::from_min_size(
-                    Pos2::new(r.left() + s * 0.14, r.top()),
-                    Vec2::new(s * 0.24, s * 0.18),
+                    Pos2::new(r.left() + w * 0.22, r.top()),
+                    Vec2::new(w * 0.42, r.height() * 0.42),
                 ),
                 0.0,
                 color,
-            );
-            painter.rect_stroke(
-                Rect::from_min_size(
-                    Pos2::new(r.left() + s * 0.10, r.bottom() - s * 0.24),
-                    Vec2::new(s * 0.42, s * 0.20),
-                ),
-                0.0,
-                stroke,
             );
         }
         Icon::Gear => {
@@ -260,14 +259,28 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             }
         }
         Icon::Folder => {
-            let r = Rect::from_center_size(c, Vec2::new(s * 0.66, s * 0.46));
+            // 文件夹：主体 + 左上的小页签。
+            //
+            // 页签必须**占宽度的近一半、高 2px 以上**：原先页签只有 0.30s 宽、
+            // 0.12s 高，14px 图标里就是 4×1.7px 的一条，肉眼完全看不见 ——
+            // 整个图标读作"空心方块"。主体的填充也压到 0.22 倍，让它退到描边之后，
+            // 页签（全亮实心）才是第一个被看到的东西。
+            let r = Rect::from_center_size(c, Vec2::new(s * 0.68, s * 0.44));
             let tab = Rect::from_min_size(
-                Pos2::new(r.left(), r.top() - s * 0.10),
-                Vec2::new(s * 0.26, s * 0.12),
+                Pos2::new(r.left(), r.top() - s * 0.16),
+                Vec2::new(r.width() * 0.50, s * 0.17),
             );
-            painter.rect_filled(tab, 1.0, color.gamma_multiply(0.7));
-            painter.rect_filled(r, 1.0, color.gamma_multiply(0.5));
-            painter.rect_stroke(r, 1.0, Stroke::new(t * 0.8, color));
+            painter.rect_filled(r, 1.0, color.gamma_multiply(0.22));
+            painter.rect_stroke(r, 1.0, Stroke::new(t * 0.9, color));
+            painter.rect_filled(tab, egui::Rounding::same(0.5), color);
+            // 页签与主体的接缝：一条底色线，否则两块实心糊成一块高方块。
+            painter.line_segment(
+                [
+                    Pos2::new(tab.left(), r.top()),
+                    Pos2::new(tab.right(), r.top()),
+                ],
+                Stroke::new(1.0_f32, color.gamma_multiply(0.22)),
+            );
         }
         Icon::Build => {
             // 包裹箱：外框 + 横向封条 + 竖向提手带。
