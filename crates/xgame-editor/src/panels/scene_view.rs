@@ -630,14 +630,21 @@ fn draw_viewport_hud(state: &EditorState, painter: &egui::Painter, rect: egui::R
     );
 
     // 右上：相机位置（等宽数字，读数不抖）
+    //
+    // **必须带前缀**：三个裸数字（"5.0 5.0 5.0"）在画面上没有任何含义，
+    // 用户只能猜它是坐标、网格间距还是缩放。`Cam` 三个字母就够定语义，
+    // 又不至于像 "Camera Position" 那样把药丸拉得比场景名还长。
     let eye = state.editor_camera.eye();
     hud_text(
         painter,
         rect.right_top() + egui::vec2(-10.0, 8.0),
         egui::Align2::RIGHT_TOP,
-        format!("{:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z),
+        format!("Cam  {:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z),
         egui::FontId::monospace(10.5),
-        colors::TEXT_SECONDARY,
+        // 药丸底已经压到 72 级：`TEXT_SECONDARY`（128）压上去只有 2.3:1，
+        // 缩到 100% 缩放看不清。HUD 的"次要"只是相对场景名而言，绝对对比度
+        // 得过关 —— 用 `TEXT_PRIMARY`（191）刚好 4.9:1。
+        colors::TEXT_PRIMARY,
     );
 
     // 左下：当前工具 + 帧率
@@ -654,7 +661,7 @@ fn draw_viewport_hud(state: &EditorState, painter: &egui::Painter, rect: egui::R
         egui::Align2::LEFT_BOTTOM,
         format!("{tool_label}   {fps:.0} fps"),
         egui::FontId::new(10.5, egui::FontFamily::Proportional),
-        colors::TEXT_SECONDARY,
+        colors::TEXT_PRIMARY,
     );
 }
 

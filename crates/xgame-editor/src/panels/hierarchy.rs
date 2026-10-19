@@ -179,6 +179,42 @@ fn flatten(
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     let is_editing = state.is_editing();
 
+    // ── 运行态提示条 ──
+    //
+    // 放在搜索框**之前**：这是面板级的模式提示，UE 的 World Outliner 也把它压在
+    // 最上面。跟在搜索框后面会被读成"过滤结果的一部分"，而它其实和搜索无关。
+    //
+    // 底色 + 图标 + 分色文字（运行 = 绿、暂停 = 黄）：原先是一整行 `WARN` 黄字，
+    // 和工具栏绿色的 "Playing" 对不上，用户会以为是"出错了"。
+    if !is_editing {
+        let (icon, label, tint) = match state.play_mode {
+            PlayMode::Playing => (Icon::Play, "Playing", colors::PLAY_GREEN),
+            PlayMode::Paused => (Icon::Pause, "Paused", colors::WARN),
+            PlayMode::Edit => (Icon::Dot, "Edit", colors::TEXT_SECONDARY),
+        };
+        egui::Frame::default()
+            .fill(tint.gamma_multiply(0.16))
+            .stroke(egui::Stroke::new(1.0_f32, tint.gamma_multiply(0.45)))
+            .rounding(egui::Rounding::same(2.0))
+            .inner_margin(egui::Margin::symmetric(5.0, 2.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    icons::small_icon(ui, icon, 9.0, tint);
+                    ui.label(egui::RichText::new(label).size(11.0).color(tint));
+                    ui.label(
+                        egui::RichText::new("— Scene locked")
+                            .size(11.0)
+                            .color(colors::TEXT_DIM),
+                    );
+                    // 撑满整行：`Frame` 只围住内容的 `min_rect`，不加这一句横幅
+                    // 就缩成一个药丸（UE 的模式提示条是通栏的）。
+                    ui.add_space(ui.available_width().max(0.0));
+                });
+            });
+        ui.add_space(3.0);
+    }
+
     // ── 搜索过滤器 ──
     // 只留一个整宽搜索框；"+" 与底部「Create Empty」重复，去掉可以让搜索框
     // 独占一行（此前加号把输入宽挤掉 24px，占位文字都快放不下）。
@@ -186,19 +222,6 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         egui::vec2(ui.available_width(), theme::FIELD_HEIGHT),
         egui::TextEdit::singleline(&mut state.hierarchy_filter).hint_text("Search…"),
     );
-
-    if !is_editing {
-        let play_label = match state.play_mode {
-            PlayMode::Playing => "▶ Playing",
-            PlayMode::Paused => "⏸ Paused",
-            PlayMode::Edit => "",
-        };
-        ui.label(
-            egui::RichText::new(format!("{play_label} — Scene locked"))
-                .color(colors::WARN)
-                .size(11.0),
-        );
-    }
 
     ui.add_space(2.0);
 
