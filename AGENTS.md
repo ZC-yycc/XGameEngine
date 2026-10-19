@@ -40,6 +40,20 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 - clippy 0 警告是硬要求。
 - `一键构建.cmd` 保持 ASCII-only（cmd.exe GBK 解码问题）。
 
+### 编辑器 UI 约定（2026-10-19 起）
+
+- **尺寸与颜色只从 `crates/xgame-editor/src/panels/theme.rs` 取**：行高 22 / 控件 20 /
+  分类条 22 / 工具栏 34 / 页签 26 / 状态栏 24 / 内边距 6 / 标签列 58 / 轴标 9 /
+  数值框 54。面板里不写魔法数、不就地 `Color32::from_rgb`（否则下次调风格要全局翻）。
+- **图标一律矢量绘制**（`panels/icons.rs`），禁 emoji / 字形图标 —— 字形宽度与基线
+  不一致，是"图标对不齐"的根源。
+- 行用 `theme::field_row`（Inspector 用本地 `row`，它会补轴标占位）；长中文说明用
+  `theme::note`（自己排 galley），别用裸 `ui.label` 画长句。
+- **`allocate_ui_with_layout` 只按子 ui 的 `min_rect` 占位**：要定宽就必须在子 ui 里
+  `ui.set_min_width(w)`，否则列宽 = 内容宽，值列会左右乱跳。
+- 改 UI 必须截图自检：`xgame-editor <项目> --ui-shot <png> [--ui-select 实体] [--ui-settings]`，
+  配 `.workbuddy/tools/crop.py`（局部放大）与 `rowscan.py`（按行扫颜色分段量像素）。
+
 ## 项目布局
 
 - `crates/` — 引擎与工具（13 个 crate，名字见 workspace Cargo.toml）

@@ -2592,12 +2592,18 @@ Vulkan / 1280×720 / MSAA ×4 / 2000 实体 ×（共享网格、各自网格）�
 ### 六、自检工具链（这轮新加的）
 
 ```
-xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体名>]
+xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体名>] [--ui-settings]
 ```
 - 首帧 `ViewportCommand::InnerSize(1440, 900)` 固定窗口尺寸；
 - **连续两帧逻辑尺寸相同**才发 `ViewportCommand::Screenshot`；
 - 像素尺寸 ≠ 逻辑尺寸 × ppp 时最多重抓 3 次（pidpi 缩放下的经典陷阱）；
-- 落盘走 `xgame_render::screenshot::save_rgba_png`（与场景截图同一份实现）。
+- 落盘走 `xgame_render::screenshot::save_rgba_png`（与场景截图同一份实现）；
+- `--ui-settings` 在抓图前把模态的项目设置窗口拉开 —— 没有它，那个窗口
+  **永远截不到**（只能靠点 ⚙）。
+
+顺带修掉设置窗口的两个硬伤：滚动区没有高度上限（窗口按内容长到屏幕外，
+标题栏和 Apply/Cancel 一起被裁掉）、文本字段只有 egui 默认宽度（右边缘空出
+一大截）。现在滚动区上限 = 窗口高 − 190，字段宽度 = 网格剩余宽度。
 
 配套：`.workbuddy/tools/crop.py`（局部放大）与 `rowscan.py`（按行扫描颜色分段，
 用来**量**像素位置而不是靠眼睛判断"对齐了没有"）。

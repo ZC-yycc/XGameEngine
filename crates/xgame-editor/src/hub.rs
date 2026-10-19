@@ -317,10 +317,48 @@ impl ProjectHub {
                             // ── 提示 / 错误 ──
                             if let Some(message) = &self.message {
                                 ui.add_space(10.0);
-                                ui.label(
-                                    RichText::new(message)
-                                        .size(11.5)
-                                        .color(theme::colors::ERROR),
+                                // 错误不要只甩一行红字：给一条**带底的横幅**
+                                // （警告图标 + 11% 红底 + 1px 红边），否则在
+                                // 长路径里那行字很容易被当成说明文字读过去。
+                                let width = ui.available_width();
+                                // 先排版再占位：错误信息里带路径，窄窗口下会换行，
+                                // 固定 26px 高会把第二行裁掉。
+                                let galley = ui.painter().layout(
+                                    message.clone(),
+                                    egui::FontId::proportional(11.5),
+                                    theme::colors::ERROR,
+                                    (width - 34.0).max(40.0),
+                                );
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(width, (galley.size().y + 12.0).max(26.0)),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect(
+                                    rect,
+                                    3.0,
+                                    theme::colors::ERROR.gamma_multiply(0.12),
+                                    egui::Stroke::new(
+                                        1.0_f32,
+                                        theme::colors::ERROR.gamma_multiply(0.45),
+                                    ),
+                                );
+                                let icon_rect = egui::Rect::from_min_size(
+                                    egui::pos2(rect.left() + 8.0, rect.center().y - 6.0),
+                                    egui::vec2(12.0, 12.0),
+                                );
+                                icons::paint(
+                                    ui.painter(),
+                                    icon_rect,
+                                    icons::Icon::Warning,
+                                    theme::colors::ERROR,
+                                );
+                                ui.painter().galley(
+                                    egui::pos2(
+                                        rect.left() + 26.0,
+                                        rect.center().y - galley.size().y * 0.5,
+                                    ),
+                                    galley,
+                                    theme::colors::ERROR,
                                 );
                             }
                         },
