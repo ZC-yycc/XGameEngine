@@ -57,8 +57,8 @@ pub mod prelude {
     // -- 核心数据 ---------------------------------------------------------
     pub use xgame_core::project::{ProjectHandle, PROJECT_FILE_NAME};
     pub use xgame_core::{
-        BodyKind, Entity, EntityId, GameClock, PhysicsBody, PhysicsHandle, Scene,
-        Transform,
+        BloomConfig, BodyKind, Entity, EntityId, GameClock, PhysicsBody, PhysicsHandle, RenderConfig,
+        Scene, ToneMapMode, Transform,
     };
 
     // -- 检视（P1）：字段表 + 派生宏 --------------------------------------
@@ -75,6 +75,8 @@ pub mod prelude {
     // -- 渲染 -------------------------------------------------------------
     pub use xgame_render::animation::AnimationDriver;
     pub use xgame_render::gltf_loader::GltfMesh;
+    // 后处理链（HDR 中间标 + 曝光 / 色调映射）：宿主画场景时几乎必然要用。
+    pub use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
     pub use xgame_render::scene_pipeline::{
         supported_sample_count, SceneLighting, ScenePipeline,
     };

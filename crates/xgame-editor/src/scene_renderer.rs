@@ -17,8 +17,9 @@ use glam::{Mat4, Vec3};
 
 use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::{Bounds, GltfMesh};
+use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
-use xgame_core::{Entity, EntityId, Scene};
+use xgame_core::{Entity, EntityId, RenderConfig, Scene};
 
 /// 视口"还活着"的判定窗口：距上次 `render` 进入本函数超过这个时间就认为
 /// 场景视图已经不出图了（面板被关掉），不再为动画请求帧。
@@ -89,12 +90,22 @@ pub struct SceneRenderer {
 
     // Render target (recreated when viewport size changes)
     viewport_size: (u32, u32),
-    /// 最终交给 egui 的**单采样**颜色纹理。
+    /// 最终交给 egui 的**单采样**颜色纹理（后处理 pass 的输出，LDR）。
+    ///
+    /// 3D 场景**不**直接画它 —— 画它的是 `postfx`（色调映射之后）。理由见
+    /// `xgame_render::postfx` 模块文档：8 位目标的写入是钳制的，高光必须在
+    /// 浮点中间标里先被看见。
     render_view: Option<wgpu::TextureView>,
-    /// 开了 MSAA 时的多采样颜色目标；渲染写它，再 resolve 到 `render_view`。
-    msaa_color_view: Option<wgpu::TextureView>,
-    /// 深度附件。采样数必须与颜色附件一致（MSAA 时也是多采样）。
-    depth_view: Option<wgpu::TextureView>,
+    /// 当前 LDR 显示纹理（`render_view` 是它的视图）。
+    /// 重建时整块换掉：旧的那张移进 `_stale_textures` 多留一代。
+    _ldr_texture: Option<wgpu::Texture>,
+    /// 场景 pass 的 HDR 附件（颜色 / MSAA / 深度），随视口尺寸重建。
+    hdr: Option<HdrTargets>,
+    /// 全屏后处理 pass（曝光 + 色调映射），源视图按 [`Self::target_gen`] 缓存绑定组。
+    postfx: PostFx,
+    /// 渲染目标的**代数**：每次 `recreate_targets` 自增，作为 `postfx` 的
+    /// 绑定组缓存键（纹理视图没有稳定身份，不能按指针判等，见 `PostFx::render`）。
+    target_gen: u64,
     /// 上一帧请求过、但被推迟的视口尺寸（见 [`SceneRenderer::set_viewport_size`]）。
     ///
     /// `Some(尺寸)` 表示"尺寸还在变，这一帧先不重建"。`render` 在它为 `Some` 时
@@ -138,7 +149,11 @@ impl SceneRenderer {
         let device = Arc::clone(device);
         let queue = Arc::clone(queue);
 
-        let pipeline = ScenePipeline::new(&device, surface_format, sample_count);
+        // 场景管线画进 HDR 中间标（Rgba16Float）；显示目标（surface_format）
+        // 由后处理 pass 写。**管线格式与显示格式就此分家** —— 这正是高光
+        // 不再在写入时被裁掉的原因（见 `xgame_render::postfx` 模块文档）。
+        let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        let postfx = PostFx::new(&device, surface_format);
 
         Self {
             device,
@@ -149,8 +164,10 @@ impl SceneRenderer {
             project_root,
             viewport_size: (0, 0),
             render_view: None,
-            msaa_color_view: None,
-            depth_view: None,
+            _ldr_texture: None,
+            hdr: None,
+            postfx,
+            target_gen: 0,
             pending_size: None,
             last_target_rebuild: None,
             sample_count: sample_count.max(1),
@@ -168,11 +185,12 @@ impl SceneRenderer {
 
     /// 视口尺寸变化时**不立刻**重建渲染目标，而是节流重建。
     ///
-    /// 拖窗口边缘时这个函数每帧都会被调一次，而重建意味着新建 3 张纹理
-    /// （单采样颜色 / MSAA 颜色 / 深度 —— MSAA 那张是 4 倍采样，最贵）+ 注册一张
-    /// 新的 egui 原生纹理 + 释放旧的；而且尺寸一变**输入指纹必然变** → 每帧还要全量
-    /// 重绘一次 3D。实测拖一次边框（约 1.7 秒）会重建 **43 次**目标、重绘 43 帧 ——
-    /// 主线程被这些分配占满，Windows 的模态缩放循环抢不到消息线程，表现就是缩放发"黏"。
+    /// 拖窗口边缘时这个函数每帧都会被调一次，而重建意味着新建 4 张纹理
+    /// （LDR 显示 / HDR 中间标 / MSAA HDR 颜色 / 深度 —— 后两张按采样数放大，
+    /// 最贵），再加上注册一张新的 egui 原生纹理、释放旧的；而且尺寸一变
+    /// **输入指纹必然变** → 每帧还要全量重绘一次 3D。实测拖一次边框（约 1.7 秒）
+    /// 会重建 **43 次**目标、重绘 43 帧 —— 主线程被这些分配占满，Windows 的模态
+    /// 缩放循环抢不到消息线程，表现就是缩放发"黏"。
     ///
     /// 现在的策略：
     /// - **尺寸还没稳定** → 先不重建，本帧跳过 3D（`render` 会直接返回）；
@@ -207,8 +225,6 @@ impl SceneRenderer {
     }
 
     fn recreate_targets(&mut self) {
-        let (w, h) = self.viewport_size;
-
         // 旧纹理必须先从这里摘掉：下面会注册一张新的原生纹理，并把新 id 存回来。
         //
         // 顺带把旧的 egui 纹理 id 显式释放 —— `egui_wgpu::Renderer` 会为每个注册过的
@@ -220,72 +236,57 @@ impl SceneRenderer {
             self.egui_renderer.write().free_texture(&old_id);
         }
         self.render_view = None;
-        self.msaa_color_view = None;
-        self.depth_view = None;
+        // 上一代的附件进 stale 列表多留一会儿 —— 别在飞行中的提交还没完成时
+        // 就被释放（egui 那边也可能还引用着上一帧的 texture id）。
+        if let Some(old) = self._ldr_texture.take() {
+            self._stale_textures.push(old);
+        }
+        if let Some(old) = self.hdr.take() {
+            self._stale_textures.push(old.color);
+            self._stale_textures.extend(old.msaa);
+            self._stale_textures.push(old.depth);
+        }
         // 尺寸变了，之前那张纹理的内容已经作废，下一帧无论如何都要重画。
         self.last_signature = None;
+        // 目标换代：`postfx` 的绑定组按这个计数失效重建（源视图换了）。
+        self.target_gen = self.target_gen.wrapping_add(1);
 
-        let size = wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        };
+        let (w, h) = self.viewport_size;
 
-        let color = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("editor_scene_color"),
-            size,
+        // 显示目标：后处理 pass 的输出、egui 注册的那张（surface_format，
+        // 与交换链一致，egui 采样它当普通纹理用）。
+        let ldr = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("editor_scene_ldr"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let ldr_view = ldr.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 开了 MSAA 就再要一张多采样颜色目标：渲染写它、resolve 到上面的单采样图。
-        // 另外把旧纹理塞进 `_stale_textures` 只是为了让它们别在飞行中的提交还没
-        // 完成时就被销毁（egui 那边还引用着上一帧的 texture id）。
-        let msaa_color = (self.sample_count > 1).then(|| {
-            let t = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("editor_scene_color_msaa"),
-                size,
-                mip_level_count: 1,
-                sample_count: self.sample_count,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.surface_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            t.create_view(&wgpu::TextureViewDescriptor::default())
-        });
-
-        // 深度附件的采样数**必须**与颜色附件一致，否则渲染通道校验失败。
-        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("editor_scene_depth"),
-            size,
-            mip_level_count: 1,
-            sample_count: self.sample_count,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        // HDR 附件（颜色 / MSAA / 深度）由公共模块建 —— 与截图 / 独立游戏
+        // 走同一套纹理描述（采样数不匹配的渲染通道会在提交时直接校验失败，
+        // 三份手写描述是漂移的温床）。
+        let hdr = HdrTargets::new(&self.device, "editor", w, h, self.sample_count);
 
         // Register with egui-wgpu（注册的必须是**单采样**那张 —— egui 只认它）
         let tid = self
             .egui_renderer
             .write()
-            .register_native_texture(&self.device, &color_view, wgpu::FilterMode::Linear);
+            .register_native_texture(&self.device, &ldr_view, wgpu::FilterMode::Linear);
 
-        self.render_view = Some(color_view);
-        self.msaa_color_view = msaa_color;
-        self.depth_view = Some(depth_view);
+        self.render_view = Some(ldr_view);
+        self.hdr = Some(hdr);
+        self._ldr_texture = Some(ldr);
         self.texture_id = Some(tid);
-        self._stale_textures.push(color);
-        self._stale_textures.push(depth);
+
         if self._stale_textures.len() > 24 {
             self._stale_textures.drain(..12);
         }
@@ -429,8 +430,9 @@ impl SceneRenderer {
     /// # 覆盖范围
     ///
     /// 只收**着色器真正读到的东西**：相机矩阵与位置、视口尺寸、环境光、参与光照的
-    /// 光源，以及每个实体的模型标识、**局部变换**与**父引用**。选中态、gizmo、
-    /// 网格开关、物理调试线都不进来 —— 它们画在 egui 叠加层上，与这张离屏纹理无关。
+    /// 光源、画面设置（曝光 / 色调映射），以及每个实体的模型标识、**局部变换**与
+    /// **父引用**。选中态、gizmo、网格开关、物理调试线都不进来 —— 它们画在 egui
+    /// 叠加层上，与这张离屏纹理无关。
     ///
     /// # 为什么收「局部变换 + 父引用」，而不是直接收世界矩阵
     ///
@@ -456,6 +458,7 @@ impl SceneRenderer {
         lighting: &SceneLighting<'_>,
         entities: &[Entity],
         anim: u64,
+        render: RenderConfig,
     ) -> u64 {
         let mut hash = 0;
 
@@ -467,6 +470,14 @@ impl SceneRenderer {
         hash = mix_f32s(hash, &view_proj.to_cols_array());
         hash = mix_f32s(hash, &[camera_pos.x, camera_pos.y, camera_pos.z]);
         hash = mix_f32s(hash, &lighting.ambient);
+        // 画面设置（曝光 / 色调映射 / 泛光）进指纹：它们是后处理 pass 的输入，
+        // 决定每个像素的最终颜色 —— 漏掉的话"在 Project Settings 里把曝光
+        // 翻倍"会看不到视口有任何反应（材质字段曾踩过同一类坑，见本函数文档）。
+        hash = mix_bits(hash, render.exposure.to_bits() as u64);
+        hash = mix_bits(hash, render.tone_map as u64);
+        hash = mix_bits(hash, render.bloom.intensity.to_bits() as u64);
+        hash = mix_bits(hash, render.bloom.threshold.to_bits() as u64);
+        hash = mix_bits(hash, render.bloom.knee.to_bits() as u64);
 
         // 光源按渲染管线同样的规则取（只算 active、最多 MAX_LIGHTS 盏），
         // 免得一个超出上限的光源改了参数却白触发一次重绘。
@@ -642,12 +653,16 @@ impl SceneRenderer {
     ///
     /// 世界矩阵在指纹比对**之后**才算：静态帧连 `world_matrices()` 这次 O(n) 解算
     /// 都省掉，真正"什么都不做"。指纹里已含的「局部变换 + 父引用」与这份矩阵天然一致。
+    ///
+    /// `settings` 是清单里的画面设置（曝光 / 色调映射）—— 与独立游戏、无头
+    /// 截图同源，视口不存在自己的"调试用"渲染参数。
     pub fn render(
         &mut self,
         scene: &Scene,
         view_proj: &Mat4,
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
+        settings: RenderConfig,
     ) -> Vec<(String, Bounds)> {
         let (w, h) = self.viewport_size;
         if w == 0 || h == 0 {
@@ -679,6 +694,7 @@ impl SceneRenderer {
             &lighting,
             &scene.entities,
             anim_hash,
+            settings,
         );
         if self.last_signature == Some(signature) {
             return Vec::new();
@@ -716,10 +732,10 @@ impl SceneRenderer {
         }
 
         // Phase 2: render via shared pipeline
-        let Some(ref color_view) = self.render_view else {
+        let Some(hdr) = self.hdr.as_ref() else {
             return Vec::new();
         };
-        let Some(ref depth_view) = self.depth_view else {
+        let Some(ldr_view) = self.render_view.as_ref() else {
             return Vec::new();
         };
 
@@ -733,9 +749,9 @@ impl SceneRenderer {
             &self.device,
             &self.queue,
             &mut encoder,
-            color_view,
-            self.msaa_color_view.as_ref(),
-            depth_view,
+            &hdr.color_view,
+            hdr.msaa_view.as_ref(),
+            &hdr.depth_view,
             &scene.entities,
             &world_matrices,
             &self.model_cache,
@@ -743,6 +759,21 @@ impl SceneRenderer {
             view_proj,
             camera_pos,
             lighting,
+        );
+
+        // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → egui 注册的 LDR 显示
+        // 目标。绑定组按目标代数缓存 —— 静态帧整段被指纹拦掉，走到这里的每帧
+        // 都要复用同一批 GPU 资源，不能每帧新建绑定组。Bloom 链的尺寸判据用
+        // `hdr.size`（附件实际尺寸）而不是请求尺寸：源视图就是它。
+        self.postfx.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &hdr.color_view,
+            self.target_gen,
+            hdr.size,
+            ldr_view,
+            settings,
         );
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -796,6 +827,7 @@ mod tests {
             &SceneLighting::new(ambient, lights),
             entities,
             0,
+            RenderConfig::default(),
         )
     }
 
@@ -931,6 +963,7 @@ mod tests {
             &SceneLighting::new(ambient, &lights),
             &base,
             0,
+            RenderConfig::default(),
         );
         assert_ne!(reference, moved_camera, "相机矩阵没进指纹");
 
@@ -942,6 +975,7 @@ mod tests {
             &SceneLighting::new(ambient, &lights),
             &base,
             0,
+            RenderConfig::default(),
         );
         assert_ne!(reference, resized, "视口尺寸没进指纹");
 
@@ -953,6 +987,7 @@ mod tests {
             &SceneLighting::new(ambient, &lights),
             &base,
             0xDEAD_BEEF,
+            RenderConfig::default(),
         );
         assert_ne!(reference, ticking, "动画时钟没进指纹");
     }
@@ -1014,6 +1049,76 @@ mod tests {
             signature(std::slice::from_ref(&cube), &lights, ambient),
             "清掉覆盖后指纹应回到原值"
         );
+    }
+
+    /// 画面设置（曝光 / 色调映射 / 泛光）进指纹 —— 它们是后处理 pass 的输入。
+    /// 漏掉的话"在 Project Settings 里把曝光从 1.0 拖到 2.0"视口纹丝不动
+    /// （静态帧被指纹门控拦下，只有下次相机/场景变化时才补画一次）。
+    #[test]
+    fn signature_tracks_render_settings() {
+        use xgame_core::ToneMapMode;
+
+        let entities = [entity("Crate", "builtin://cube", Vec3::ZERO)];
+        let lights = [Light::default()];
+        let ambient = [0.06, 0.06, 0.08];
+
+        let hashed = |render: RenderConfig| {
+            SceneRenderer::scene_signature(
+                (800, 600),
+                &Mat4::IDENTITY,
+                &Vec3::new(5.0, 5.0, 5.0),
+                &SceneLighting::new(ambient, &lights),
+                &entities,
+                0,
+                render,
+            )
+        };
+
+        let base = hashed(RenderConfig::default());
+        assert_ne!(
+            base,
+            hashed(RenderConfig {
+                exposure: 2.0,
+                ..Default::default()
+            }),
+            "改曝光没进指纹（调曝光视口不动）"
+        );
+        assert_ne!(
+            base,
+            hashed(RenderConfig {
+                tone_map: ToneMapMode::Off,
+                ..Default::default()
+            }),
+            "切换色调映射没进指纹"
+        );
+        // Bloom 三件套也全是后处理输入：漏掉任何一项 = 调它视口纹丝不动。
+        for render in [
+            RenderConfig {
+                bloom: xgame_core::BloomConfig {
+                    intensity: 0.6,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            RenderConfig {
+                bloom: xgame_core::BloomConfig {
+                    threshold: 2.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            RenderConfig {
+                bloom: xgame_core::BloomConfig {
+                    knee: 1.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ] {
+            assert_ne!(base, hashed(render), "Bloom 参数没进指纹：{render:?}");
+        }
+        // 同一份设置必须给出同一个指纹（哈希稳定，不会每帧白重画）。
+        assert_eq!(base, hashed(RenderConfig::default()));
     }
 
     /// 状态机的**参数值**进了指纹 —— 脚本每帧推参数、Inspector DragValue 拖动

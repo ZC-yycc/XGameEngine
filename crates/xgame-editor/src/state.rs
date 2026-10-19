@@ -1831,6 +1831,16 @@ impl EditorState {
             draft.runtime = sane_runtime;
         }
 
+        // 画面参数同理（曝光 0 / 负数 / NaN 会让视口全黑或出 NaN 像素）。
+        let sane_render = draft.render.sanitized();
+        if sane_render != draft.render {
+            self.log_warning(format!(
+                "渲染参数超出安全范围已自动纠正（曝光 {} → {}）",
+                draft.render.exposure, sane_render.exposure
+            ));
+            draft.render = sane_render;
+        }
+
         *self.project.manifest_mut() = draft;
         match self.project.save() {
             Ok(()) => {

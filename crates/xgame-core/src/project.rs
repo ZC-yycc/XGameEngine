@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ContentConfig, RuntimeConfig, WindowConfig};
+use crate::config::{ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
 use crate::prefab::{Prefab, PREFAB_EXTENSION};
 use crate::scene::Scene;
 use crate::transform::Transform;
@@ -72,6 +72,13 @@ pub struct Project {
     /// `prefabs_dir` / `scripts_dir` 同一套路，不强制升级项目文件。
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    /// 画面渲染参数（色调映射 / 曝光）。
+    ///
+    /// 同样是后加字段、同样靠 `#[serde(default)]` 兼容旧清单。放在清单而不是
+    /// 场景里：画面风格是项目的属性（编辑器视口 / 独立游戏 / 无头截图三端一致），
+    /// 不是"这张地图"的属性。
+    #[serde(default)]
+    pub render: RenderConfig,
 }
 
 fn default_format_version() -> u32 {
@@ -101,6 +108,7 @@ impl Default for Project {
             window: WindowConfig::default(),
             content: ContentConfig::default(),
             runtime: RuntimeConfig::default(),
+            render: RenderConfig::default(),
         }
     }
 }
@@ -830,5 +838,48 @@ mod tests {
         assert!(text.contains("runtime"), "runtime 节必须落盘");
         let back: Project = ron::from_str(&text).expect("反序列化");
         assert_eq!(back.runtime, project.runtime);
+    }
+
+    /// 老清单没有 `render` 节（色调映射 / 曝光是后加的）→ 补默认值。
+    /// 与 `old_manifest_without_runtime_defaults` 同一纪律：升级引擎不能
+    /// 让旧项目直接打不开。
+    #[test]
+    fn old_manifest_without_render_defaults() {
+        let ron = r#"(format_version: 1, name: "Old")"#;
+        let project: Project = ron::from_str(ron).expect("老清单应当能反序列化");
+        assert_eq!(project.render, RenderConfig::default());
+    }
+
+    /// 渲染参数写盘 → 读回一致（磁盘格式是消费契约，编辑器 / 游戏 / 截图
+    /// 三端都要读它）。Bloom 一起过：它是后加字段，走 `serde(default)` 且
+    /// 未调过时不落盘（见 `bloom_defaults_to_off`）。
+    #[test]
+    fn render_survives_manifest_roundtrip() {
+        let mut project = Project::new("Render");
+        project.render.exposure = 2.25;
+        project.render.tone_map = crate::config::ToneMapMode::Off;
+        project.render.bloom = crate::config::BloomConfig {
+            intensity: 0.75,
+            threshold: 1.5,
+            knee: 0.4,
+        };
+        let text = ron::to_string(&project).expect("序列化");
+        assert!(text.contains("render"), "render 节必须落盘");
+        assert!(text.contains("bloom"), "调过的 Bloom 必须落盘");
+        let back: Project = ron::from_str(&text).expect("反序列化");
+        assert_eq!(back.render, project.render);
+    }
+
+    /// `tone_map` 的**变体标签即磁盘格式**：RON 里是 `Aces` / `Off` 两个字面量。
+    /// 改标签名等于让所有写了 `tone_map` 的旧清单解析失败 —— 与
+    /// `field_value_ron_variant_labels_are_stable`（P1.5）同一纪律。
+    #[test]
+    fn tone_map_ron_labels_are_stable() {
+        let aces: crate::config::ToneMapMode = ron::from_str("Aces").expect("Aces");
+        assert_eq!(aces, crate::config::ToneMapMode::Aces);
+        let off: crate::config::ToneMapMode = ron::from_str("Off").expect("Off");
+        assert_eq!(off, crate::config::ToneMapMode::Off);
+        assert_eq!(ron::to_string(&aces).unwrap(), "Aces");
+        assert_eq!(ron::to_string(&off).unwrap(), "Off");
     }
 }

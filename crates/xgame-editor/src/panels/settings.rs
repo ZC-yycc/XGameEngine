@@ -140,6 +140,87 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 ui.add_space(8.0);
                 ui.separator();
 
+                // ── 画面 ──
+                ui.label(egui::RichText::new("画面（曝光 / 色调映射 / 泛光）").strong());
+                egui::Grid::new("set_render")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("色调映射").on_hover_text(
+                            "ACES：高光滚降、过曝仍保留层次（默认）；\
+                             Off：只曝光 + 钳制（旧管线语义，高光裁成纯白）",
+                        );
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut draft.render.tone_map,
+                                xgame_core::ToneMapMode::Aces,
+                                "ACES",
+                            );
+                            ui.selectable_value(
+                                &mut draft.render.tone_map,
+                                xgame_core::ToneMapMode::Off,
+                                "Off",
+                            );
+                        });
+                        ui.end_row();
+
+                        ui.label("曝光")
+                            .on_hover_text("线性光乘子：1.0 不增不减；保存时夹进 [0.05, 20]");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.render.exposure)
+                                .range(
+                                    xgame_core::RenderConfig::MIN_EXPOSURE
+                                        ..=xgame_core::RenderConfig::MAX_EXPOSURE,
+                                )
+                                .speed(0.02)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+
+                        ui.label("泛光强度").on_hover_text(
+                            "Bloom 光晕的叠加比例：0 = 关闭（渲染器整段跳过，零成本）；\
+                             常用 0.4~0.8。保存时夹进 [0, 10]",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut draft.render.bloom.intensity)
+                                .range(
+                                    0.0..=xgame_core::BloomConfig::MAX_INTENSITY,
+                                )
+                                .speed(0.02)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+
+                        ui.label("泛光阈值").on_hover_text(
+                            "多亮算亮（曝光后的线性亮度，1.0 ≈ 显示白点）。\
+                             保存时夹进 [0, 100]",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut draft.render.bloom.threshold)
+                                .range(
+                                    0.0..=xgame_core::BloomConfig::MAX_THRESHOLD,
+                                )
+                                .speed(0.05)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+
+                        ui.label("泛光软膝").on_hover_text(
+                            "阈值附近多宽的一段『淡入』（单位同阈值）：0 = 硬阈值，\
+                             亮斑边缘会有硬边。保存时夹进 [0, 4]",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut draft.render.bloom.knee)
+                                .range(0.0..=xgame_core::BloomConfig::MAX_KNEE)
+                                .speed(0.02)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+
                 // ── 内容目录 ──
                 ui.label(egui::RichText::new("内容目录（项目相对路径）").strong());
                 egui::Grid::new("set_dirs")

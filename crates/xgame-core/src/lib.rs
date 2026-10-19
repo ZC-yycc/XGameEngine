@@ -57,7 +57,10 @@ mod time;
 // -- 导出：旧有类型（保持向后兼容）
 pub use check::{check_project, CheckReport};
 pub use color::Color;
-pub use config::{ContentConfig, EngineConfig, RuntimeConfig, WindowConfig};
+pub use config::{
+    BloomConfig, ContentConfig, EngineConfig, RenderConfig, RuntimeConfig, ToneMapMode,
+    WindowConfig,
+};
 pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
 pub use scene::{Entity, Scene};
 pub use transform::Transform;

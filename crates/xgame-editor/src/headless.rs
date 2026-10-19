@@ -56,7 +56,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use serde_json::json;
-use xgame_core::{ProjectHandle, Scene};
+use xgame_core::{ProjectHandle, RenderConfig, Scene};
 use xgame_math::glam::Vec3;
 use xgame_render::animation::AnimationDriver;
 use xgame_render::screenshot::{ScreenshotRenderer, ShotCamera};
@@ -429,6 +429,9 @@ pub struct HeadlessReport {
     pub audio_active: usize,
     pub audio_cached_clips: usize,
     pub audio_failed_clips: usize,
+    /// 画面设置（`project.ron` 的 `render` 节）：`--screenshot` 出的图就是按
+    /// 这一份设置渲染的（曝光 / 色调映射）—— 智能体看报告就知道图是怎么调的。
+    pub render: RenderConfig,
     /// `--dump-scene` 写出的路径（没给就是 `None`）。
     pub scene_dump: Option<String>,
     /// `--screenshot` 的落盘信息（没给就是 `None`）。
@@ -473,6 +476,15 @@ impl HeadlessReport {
                 "active": self.audio_active,
                 "cached_clips": self.audio_cached_clips,
                 "failed_clips": self.audio_failed_clips,
+            },
+            "render": {
+                "exposure": self.render.exposure,
+                "tone_map": self.render.tone_map,
+                "bloom": {
+                    "intensity": self.render.bloom.intensity,
+                    "threshold": self.render.bloom.threshold,
+                    "knee": self.render.bloom.knee,
+                },
             },
             "scene_dump": self.scene_dump,
             "screenshot": match &self.screenshot {
@@ -621,6 +633,9 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
                     anim,
                     camera,
                     SceneLighting::new(scene.ambient, &scene.lights),
+                    // 画面设置与编辑器视口 / 独立游戏同源：截图不是"特调画面"，
+                    // 它就是玩家会看到的那张图（见 screenshot 模块文档）。
+                    project.manifest().render,
                 )
                 .map_err(|e| format!("截图渲染失败: {e:#}"))?;
             renderer
@@ -663,6 +678,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         audio_active: audio.active,
         audio_cached_clips: audio.cached_clips,
         audio_failed_clips: audio.failed_clips,
+        render: project.manifest().render,
         scene_dump,
         screenshot,
     };
@@ -1290,6 +1306,7 @@ mod tests {
             "logs",
             "error_samples",
             "audio",
+            "render",
             "scene_dump",
             "screenshot",
         ];
@@ -1308,6 +1325,21 @@ mod tests {
         for key in ["available", "active", "cached_clips", "failed_clips"] {
             assert!(value["audio"].get(key).is_some(), "audio 缺字段 {key}");
         }
+        for key in ["exposure", "tone_map", "bloom"] {
+            assert!(value["render"].get(key).is_some(), "render 缺字段 {key}");
+        }
+        assert_eq!(
+            value["render"]["tone_map"], "Aces",
+            "清单默认就是 ACES（新项目的画面基线）"
+        );
+        assert_eq!(value["render"]["exposure"], 1.0);
+        // 泛光默认关（intensity 0），三件套照常出现在报告里 —— 报告是完整
+        // 快照，不跟着 `project.ron` 的 skip_serializing_if 省略字段。
+        assert_eq!(value["render"]["bloom"]["intensity"], 0.0);
+        assert_eq!(value["render"]["bloom"]["threshold"], 1.0);
+        // `knee` 是 f32：`json!` 把它**精确加宽**成 f64（0.6000000238…），
+        // 与十进制字面量 `0.6`（另一个 f64）不相等 —— 按 f32 的真值比。
+        assert_eq!(value["render"]["bloom"]["knee"], f64::from(0.6f32));
         assert!(value["scene_dump"].is_null(), "没给 --dump-scene 时是 null");
         assert!(value["screenshot"].is_null(), "没给 --screenshot 时是 null");
         cleanup(&project);

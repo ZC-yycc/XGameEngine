@@ -65,9 +65,12 @@
 读项目概要。
 
 - **入参**：`project`
-- **返回**（JSON 文本）：`name` / `root` / `entry_scene` / `window`（标题与尺寸）/
-  `runtime`（重力、固定步长，已过容错夹取 —— JSON 里不会出现 NaN）/
-  `scenes` / `scripts` / `prefabs` 清单。
+- **返回**（JSON 文本）：`name` / `root` / `format_version` / `entry_scene` /
+  `window`（标题与尺寸）/ `runtime`（重力、固定步长，已过容错夹取 —— JSON
+  里不会出现 NaN）/ `render`（`exposure` / `tone_map` / `bloom`
+  {`intensity` / `threshold` / `knee`} —— 画面设置真相源，
+  `run_headless` 截的图按它渲染；泛光数值按 f32 存储，JSON 里是精确加宽的
+  f64，比较时按 f32 精度留容差）/ `scenes` / `scripts` / `prefabs` 清单。
 
 ### 2. `scene_read`
 

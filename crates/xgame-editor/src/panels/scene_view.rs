@@ -151,6 +151,10 @@ fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4)
         return None;
     }
 
+    // 画面设置从清单读 —— 编辑器视口 / 独立游戏 / 无头截图吃的是**同一份**
+    // `render` 节（视口不搞自己的"调试参数"，否则截图与玩家画面会分叉）。
+    // 先取出来再借 `scene_renderer`，免得两个 `state` 借用打架。
+    let settings = state.project.manifest().render;
     let renderer = state.scene_renderer.as_mut()?;
     renderer.set_viewport_size(vp_w, vp_h);
     renderer.render(
@@ -161,6 +165,7 @@ fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4)
             state.scene.ambient,
             &state.scene.lights,
         ),
+        settings,
     );
     renderer.texture_id()
 }

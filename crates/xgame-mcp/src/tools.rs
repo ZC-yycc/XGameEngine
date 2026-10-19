@@ -296,6 +296,7 @@ fn project_info(args: &Value) -> Result<String, CallError> {
     let manifest = project.manifest();
     // NaN/超限在入口夹成安全值（sanitized 契约）—— JSON 本身也不许出现 NaN。
     let runtime = manifest.runtime.sanitized();
+    let render = manifest.render.sanitized();
     let info = json!({
         "name": manifest.name,
         "root": project.root().display().to_string(),
@@ -311,6 +312,17 @@ fn project_info(args: &Value) -> Result<String, CallError> {
         "runtime": {
             "gravity": runtime.gravity,
             "fixed_dt": runtime.fixed_dt,
+        },
+        // 画面设置（色调映射 / 曝光 / 泛光）：智能体改画面就是改这几项，
+        // 读报告时也知道 `run_headless` 截的图是按什么出的。
+        "render": {
+            "exposure": render.exposure,
+            "tone_map": render.tone_map,
+            "bloom": {
+                "intensity": render.bloom.intensity,
+                "threshold": render.bloom.threshold,
+                "knee": render.bloom.knee,
+            },
         },
         "scenes": list_scenes(&project),
         "scripts": project.list_scripts(),
@@ -731,6 +743,13 @@ mod tests {
             "默认场景应在列表里: {scenes:?}"
         );
         assert!(info["runtime"]["fixed_dt"].as_f64().unwrap() > 0.0);
+        // 画面设置节：默认 ACES + 曝光 1.0 + 泛光关（智能体改画面读的三项）。
+        assert_eq!(info["render"]["tone_map"], "Aces");
+        assert_eq!(info["render"]["exposure"], 1.0);
+        assert_eq!(info["render"]["bloom"]["intensity"], 0.0);
+        assert_eq!(info["render"]["bloom"]["threshold"], 1.0);
+        // f32 → f64 是精确加宽（0.6000000238…），别拿十进制字面量比。
+        assert_eq!(info["render"]["bloom"]["knee"], f64::from(0.6f32));
         cleanup(&project);
     }
 

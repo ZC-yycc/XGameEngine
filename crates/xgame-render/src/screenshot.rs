@@ -32,11 +32,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use xgame_core::{LightKind, Scene};
+use xgame_core::{LightKind, RenderConfig, Scene};
 use xgame_math::glam::{Mat4, Vec3};
 
 use crate::animation::AnimationDriver;
 use crate::gltf_loader::{Bounds, GltfMesh};
+use crate::postfx::{HdrTargets, PostFx, HDR_FORMAT};
 use crate::scene_pipeline::{
     scene_bounds, supported_sample_count, SceneLighting, ScenePipeline,
 };
@@ -170,14 +171,16 @@ pub struct ScreenshotRenderer {
     queue: wgpu::Queue,
     pipeline: ScenePipeline,
     size: (u32, u32),
-    /// 最终颜色纹理（MSAA 时是 resolve 目标）。
-    _color: wgpu::Texture,
-    color_view: wgpu::TextureView,
-    /// MSAA 多采样颜色附件（`sample_count > 1` 时存在）。
-    _msaa: Option<wgpu::Texture>,
-    msaa_view: Option<wgpu::TextureView>,
-    _depth: wgpu::Texture,
-    depth_view: wgpu::TextureView,
+    /// 最终显示纹理（sRGB 编码、可拷回 CPU 的那张）。
+    ///
+    /// 场景 pass **不**直接写它 —— 写它的是后处理 pass（色调映射之后）。
+    /// 直接写它的话高光在写入时就被硬件裁掉了，色调映射根本看不到真实亮度。
+    _ldr: wgpu::Texture,
+    ldr_view: wgpu::TextureView,
+    /// 场景 pass 的 HDR 附件（颜色 / MSAA / 深度）。
+    hdr: HdrTargets,
+    /// 全屏后处理 pass（曝光 + 色调映射）。
+    postfx: PostFx,
     /// 模型标识 → 已上传的网格（与编辑器 / 游戏同一条加载入口）。
     model_cache: HashMap<String, GltfMesh>,
     /// 磁盘模型的解析基准（`builtin://` 用不到）。
@@ -185,8 +188,10 @@ pub struct ScreenshotRenderer {
 }
 
 impl ScreenshotRenderer {
-    /// 建 GPU 设备与离屏附件。`Rgba8UnormSrgb` 颜色 + `Depth32Float` 深度，
-    /// MSAA 采样数按适配器能力选（与编辑器视口同一规则）。
+    /// 建 GPU 设备与离屏附件。场景 pass 渲进 `Rgba16Float`（HDR），后处理
+    /// pass 做色调映射写进 `Rgba8UnormSrgb`（可读回的那张）；MSAA 采样数
+    /// 按 **HDR 格式**的能力选（与编辑器视口同一规则 —— 采样数是格式相关的，
+    /// 拿显示格式问出来的答案在 HDR 附件上不一定成立）。
     pub fn new(project_root: &Path, width: u32, height: u32) -> Result<Self> {
         let width = width.max(1);
         let height = height.max(1);
@@ -216,7 +221,7 @@ impl ScreenshotRenderer {
         .context("创建 GPU 设备失败")?;
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let sample_count = supported_sample_count(&adapter, format);
+        let sample_count = supported_sample_count(&adapter, HDR_FORMAT);
         log::info!(
             "截图渲染：{}（MSAA x{sample_count}）{width}x{height}",
             adapter.get_info().name
@@ -227,60 +232,32 @@ impl ScreenshotRenderer {
             height,
             depth_or_array_layers: 1,
         };
-        let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("screenshot color"),
+        let ldr = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("screenshot ldr color"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
+            // RENDER_ATTACHMENT：后处理 pass 的输出；COPY_SRC：读回。
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let ldr_view = ldr.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let msaa = (sample_count > 1).then(|| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("screenshot msaa"),
-                size: extent,
-                mip_level_count: 1,
-                sample_count,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            })
-        });
-        let msaa_view = msaa
-            .as_ref()
-            .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
-
-        // 深度附件的采样数必须与颜色附件一致（MSAA 时是 4x32-bit 深度）。
-        let depth = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("screenshot depth"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: sample_count.max(1),
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let pipeline = ScenePipeline::new(&device, format, sample_count);
+        let hdr = HdrTargets::new(&device, "screenshot", width, height, sample_count);
+        let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        let postfx = PostFx::new(&device, format);
 
         Ok(Self {
             device,
             queue,
             pipeline,
             size: (width, height),
-            _color: color,
-            color_view,
-            _msaa: msaa,
-            msaa_view,
-            _depth: depth,
-            depth_view,
+            _ldr: ldr,
+            ldr_view,
+            hdr,
+            postfx,
             model_cache: HashMap::new(),
             project_root: project_root.to_path_buf(),
         })
@@ -327,12 +304,16 @@ impl ScreenshotRenderer {
     ///
     /// `anim` 是动画播放时钟：静态截图传空驱动即可；想让骨骼姿态与无头
     /// 运行的模拟时长一致，就按同一串 dt tick 出来。
+    ///
+    /// `settings` 是画面设置（曝光 / 色调映射）。**与独立游戏同源** ——
+    /// 智能体截的图就是玩家会看到的画面，不存在"截图特调"。
     pub fn render_scene(
         &mut self,
         scene: &Scene,
         anim: &AnimationDriver,
         camera: Option<ShotCamera>,
         lighting: SceneLighting<'_>,
+        settings: RenderConfig,
     ) -> Result<ShotCamera> {
         // 模型懒加载：与编辑器 SceneRenderer 同一条入口，失败只警告
         // （画不出来的实体留空，整张图照常出）。
@@ -374,9 +355,9 @@ impl ScreenshotRenderer {
             &self.device,
             &self.queue,
             &mut encoder,
-            &self.color_view,
-            self.msaa_view.as_ref(),
-            &self.depth_view,
+            &self.hdr.color_view,
+            self.hdr.msaa_view.as_ref(),
+            &self.hdr.depth_view,
             &scene.entities,
             &world_matrices,
             &self.model_cache,
@@ -384,6 +365,19 @@ impl ScreenshotRenderer {
             &view_proj,
             &camera.eye,
             lighting,
+        );
+        // HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → LDR 显示目标。截图器建一次
+        // 用一次、目标从不重建 ⇒ 目标代数恒为 0（绑定组缓存只填一次）；
+        // Bloom 链按尺寸惰性建，`source_size` 就是渲染尺寸。
+        self.postfx.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &self.hdr.color_view,
+            0,
+            self.size,
+            &self.ldr_view,
+            settings,
         );
         self.queue.submit(std::iter::once(encoder.finish()));
         Ok(camera)
@@ -410,7 +404,7 @@ impl ScreenshotRenderer {
             });
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: &self._color,
+                texture: &self._ldr,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -487,7 +481,7 @@ pub fn load_png_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
 mod tests {
     use super::*;
 
-    use xgame_core::{Entity, Light, MaterialOverride};
+    use xgame_core::{BloomConfig, Entity, Light, MaterialOverride, ToneMapMode};
 
     /// 纯函数测试用的盒（边长 2，中心在 (1, 2, 3) 附近，测试取景的平移。
     fn test_bounds() -> Bounds {
@@ -698,6 +692,7 @@ mod tests {
             &anim,
             None,
             SceneLighting::new(scene.ambient, &scene.lights),
+            RenderConfig::default(),
         )
         .expect("渲染失败");
 
@@ -711,6 +706,9 @@ mod tests {
 
     /// 同一场景渲染两遍（连渲染器都重建）：PNG 二进制逐字节一致。
     /// 这是 `--screenshot` 确定性契约在模块层的钉子。
+    ///
+    /// 特意开满 Bloom：链的惰性建（首帧重建纹理与绑定组）与 9 趟 pass 的
+    /// 记录顺序都必须确定 —— 关着测只覆盖合成 pass 一条路径。
     #[test]
     fn two_runs_produce_identical_png_bytes() {
         let Some(mut first) = gpu_or_skip("two_runs_produce_identical_png_bytes") else {
@@ -736,6 +734,7 @@ mod tests {
                 &anim,
                 None,
                 SceneLighting::new(scene.ambient, &scene.lights),
+                bloom_settings(0.7),
             )
             .expect("第一次渲染失败");
         let (w, h) = first.save_png(&path_a).expect("第一次落盘失败");
@@ -749,6 +748,7 @@ mod tests {
                 &anim,
                 None,
                 SceneLighting::new(scene.ambient, &scene.lights),
+                bloom_settings(0.7),
             )
             .expect("第二次渲染失败");
         second.save_png(&path_b).expect("第二次落盘失败");
@@ -821,6 +821,7 @@ mod tests {
             &AnimationDriver::new(),
             Some(camera),
             SceneLighting::new(scene.ambient, &scene.lights),
+            RenderConfig::default(),
         )
         .expect("渲染失败");
 
@@ -836,10 +837,11 @@ mod tests {
             dl > 60.0,
             "绝缘面应当被明显照亮（采样点是不是打到背景上了？）: {dielectric:?}"
         );
-        // 定量预期（按 GGX 手算过）：绝缘 ≈ 0.29 线性（漫反射 0.288 + 微弱高光），
-        // 金属 ≈ 0.12 线性（只剩粗糙镜面项）—— 像素亮度比 ≈ 0.65。阈值放宽到
-        // 0.8 留出 GPU 光栅化与 sRGB 编码的余量，但"金属必须明显更暗"这条
-        // 方向性断言是硬的（旧 Blinn-Phong 下金属 184 > 绝缘 152，方向相反）。
+        // 定量预期（按 GGX 手算过）：绝缘 ≈ 0.30 线性（漫反射 + 微弱高光），
+        // 金属 ≈ 0.12 线性（只剩粗糙镜面项）—— 线性比 ≈ 0.4；经 ACES 曲线
+        // 压缩后显示亮度比 ≈ 0.58。阈值放宽到 0.8 留出 GPU 光栅化与 sRGB
+        // 编码的余量，但"金属必须明显更暗"这条方向性断言是硬的
+        // （旧 Blinn-Phong 下金属 184 > 绝缘 152，方向相反）。
         assert!(
             ml < dl * 0.8,
             "金属面必须比绝缘面暗（无漫反射）: 金属 luma={ml:.1} vs 绝缘 {dl:.1}"
@@ -878,6 +880,7 @@ mod tests {
                 &AnimationDriver::new(),
                 Some(camera),
                 SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
             )
             .expect("渲染失败");
             pixel_avg(&shot.read_rgba().expect("读回失败"), 320, cx, cy)
@@ -889,8 +892,9 @@ mod tests {
         );
 
         // ② 蓝色乘子覆盖：蓝通道必须压过红通道，红通道被乘子显著压低。
-        // 定量预期：受光面线性亮度 ≈ 0.54；红 = 0.2×0.54 ≈ 0.11（sRGB≈94），
-        // 蓝 = 0.9×0.54 ≈ 0.49（sRGB≈187）。阈值留编码与光栅化的余量。
+        // 定量预期：受光面线性亮度 ≈ 0.54，经 ACES 显示 ≈ 201；红 =
+        // 0.2×0.54 ≈ 0.11（显示 ≈ 92），蓝 = 0.9×0.54 ≈ 0.49（显示 ≈ 195）。
+        // 阈值留编码与光栅化的余量。
         scene.entities[0].material = Some(MaterialOverride {
             base_color: Some([0.2, 0.4, 0.9, 1.0]),
             ..Default::default()
@@ -909,5 +913,255 @@ mod tests {
         scene.entities[0].material = None;
         let restored = render(&scene, &mut shot);
         assert_eq!(restored, baseline, "清掉覆盖后画面必须与基线逐位一致");
+    }
+
+    // -----------------------------------------------------------------
+    // HDR / 色调映射（后处理链）：GPU 侧的"先证红"测试组
+    // -----------------------------------------------------------------
+
+    /// 白模立方体 + 一盏斜射、可调强度的方向光。正对相机的 +z 面受光，
+    /// 采样点上的 N·L = |光传播方向归一化后的 z|。
+    ///
+    /// 斜光的意义：光与相机**不同轴** ⇒ 采样点落到 GGX 副瓣之外，"线性亮度
+    /// = intensity × N·L"（π 校准确认，见 `scene_pipeline` 的 π 一节）的预测
+    /// 才成立 —— HDR 与曝光测试的受控输入。
+    fn tilted_lit_white_cube(intensity: f32) -> Scene {
+        let mut scene = Scene::new("hdr");
+        scene.ambient = [0.0, 0.0, 0.0];
+        scene.lights = vec![Light::directional("sun", [0.6, -1.0, -0.75], [1.0; 3], intensity)];
+        scene.lights[0].casts_shadow = false;
+        let mut e = Entity::new("Cube");
+        e.model = "builtin://cube".to_owned();
+        scene.add_entity(e);
+        scene
+    }
+
+    /// 受光面（+z 法线）上的漫反射线性亮度：`intensity × N·L`，白模 albedo = 1。
+    fn front_face_linear(intensity: f32) -> f32 {
+        let to_light = Vec3::new(-0.6, 1.0, 0.75).normalize();
+        to_light.z * intensity
+    }
+
+    /// 与 CPU 镜像对表的容差（8 位台阶）：Rgba16Float 量化、MSAA resolve 与
+    /// 硬件 sRGB 编码的合成误差远小于 2 个台阶，±4 是留了余量仍然有分辨力的界。
+    const MIRROR_TOLERANCE: f32 = 4.0;
+
+    /// **HDR 红线测试**：同一个高光（intensity 4），`Off` 模式裁成纯白（旧
+    /// 管线语义），ACES 保留层次且像素值与 CPU 镜像对表。
+    ///
+    /// 这条测试在 HDR 路径缺席时必然红：场景直接画进 sRGB 目标的话，写入的
+    /// 那一刻就钳到 1.0，"ACES 与 Off 的差异"根本无从谈起 —— 两个开关会
+    /// 输出同一张 255 的图。
+    #[test]
+    fn aces_keeps_highlight_detail_that_off_clips() {
+        let Some(mut shot) = gpu_or_skip("aces_keeps_highlight_detail_that_off_clips") else {
+            return;
+        };
+        let scene = tilted_lit_white_cube(4.0);
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (cx, cy) = (320 / 2, 240 / 2);
+        let render = |shot: &mut ScreenshotRenderer, settings: RenderConfig| {
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings,
+            )
+            .expect("渲染失败");
+            pixel_avg(&shot.read_rgba().expect("读回失败"), 320, cx, cy)
+        };
+
+        let aces = render(&mut shot, RenderConfig::default());
+        let off = render(
+            &mut shot,
+            RenderConfig {
+                tone_map: ToneMapMode::Off,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            off,
+            [255.0, 255.0, 255.0],
+            "Off 模式应当把 intensity 4 的高光裁成纯白（旧管线语义）"
+        );
+        assert!(
+            aces[0] < 250.0,
+            "ACES 下同样的高光必须明显离开顶点（滚降可见）: {aces:?}"
+        );
+
+        let expected = crate::postfx::cpu::to_srgb_u8(crate::postfx::cpu::tone_map(
+            [front_face_linear(4.0); 3],
+            RenderConfig::default(),
+        ));
+        for (got, want) in aces.iter().zip(expected) {
+            assert!(
+                (got - want as f32).abs() <= MIRROR_TOLERANCE,
+                "ACES 像素应与 CPU 镜像对表: 实测 {aces:?} vs 预期 {expected:?}"
+            );
+        }
+    }
+
+    /// 曝光是**曲线之前**的亮度乘子，GPU 侧同样成立：0.25×/1×/4× 三档的
+    /// 显示值严格递增（若哪天有人把曝光挪到曲线之后，高光端会被钳平，
+    /// 这条测试立刻变红）。
+    #[test]
+    fn exposure_scales_highlights_before_the_curve_on_gpu() {
+        let Some(mut shot) = gpu_or_skip("exposure_scales_highlights_before_the_curve_on_gpu") else {
+            return;
+        };
+        let scene = tilted_lit_white_cube(4.0);
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (cx, cy) = (320 / 2, 240 / 2);
+        let sample = |shot: &mut ScreenshotRenderer, exposure: f32| {
+            let settings = RenderConfig {
+                exposure,
+                ..Default::default()
+            };
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings,
+            )
+            .expect("渲染失败");
+            pixel_avg(&shot.read_rgba().expect("读回失败"), 320, cx, cy)[0]
+        };
+
+        let dark = sample(&mut shot, 0.25);
+        let normal = sample(&mut shot, 1.0);
+        let bright = sample(&mut shot, 4.0);
+        assert!(
+            dark < normal && normal < bright,
+            "曝光 0.25×/1×/4× 的显示亮度必须严格递增: {dark} / {normal} / {bright}"
+        );
+
+        // 对表一档（曝光 0.25）：受光面线性 4.0×0.54 ≈ 2.16，曝光后 ≈ 0.54，
+        // ACES 把它映到 ~200 的显示值（注意镜像函数自己会乘曝光 —— 传**未
+        // 曝光**的线性值，别再预先乘一遍）。
+        let expected = crate::postfx::cpu::to_srgb_u8(crate::postfx::cpu::tone_map(
+            [front_face_linear(4.0); 3],
+            RenderConfig {
+                exposure: 0.25,
+                ..Default::default()
+            },
+        ))[0];
+        assert!(
+            (dark - expected as f32).abs() <= MIRROR_TOLERANCE,
+            "曝光 0.25× 的像素应与 CPU 镜像对表: 实测 {dark} vs 预期 {expected}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Bloom（后处理链第二片）：GPU 侧的"先证红"测试组
+    // -----------------------------------------------------------------
+
+    /// Bloom 开着的画面设置：只有 intensity 不同（阈值 / 软膝取默认）。
+    fn bloom_settings(intensity: f32) -> RenderConfig {
+        RenderConfig {
+            bloom: BloomConfig {
+                intensity,
+                ..Default::default()
+            },
+            ..RenderConfig::default()
+        }
+    }
+
+    /// **Bloom 红线测试**：高光块轮廓**之外**的像素在 Bloom 开启后必须被
+    /// 显著提亮（光晕漏出），而远处角落不受影响（光晕围着亮源，不照亮全场）。
+    ///
+    /// 自证红的口径：第一条断言测的是"开与关的像素差" —— Bloom 链被整段
+    /// 跳过（或提取/模糊里任一趟没跑）时同一点两档逐位相同，必红。
+    #[test]
+    fn bloom_glows_around_a_bright_spot() {
+        let Some(mut shot) = gpu_or_skip("bloom_glows_around_a_bright_spot") else {
+            return;
+        };
+        // 光强 8：正面线性亮度 ≈ 8×0.54 ≈ 4.3，远超阈值 1.0（提取量 ≈ 3.3）。
+        let scene = tilted_lit_white_cube(8.0);
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (cx, cy) = (320 / 2, 240 / 2);
+        // 正面在图上约 ±41px（0.5 世界单位在 3.5 深度上，45° 视场）。
+        // near = 轮廓外 ~5px（光晕第一、二级的覆盖区）；far = 左上角落（>100px）。
+        let near = (cx + 46, cy);
+        let far = (10, 10);
+        let render = |shot: &mut ScreenshotRenderer, settings: RenderConfig| {
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings,
+            )
+            .expect("渲染失败");
+            let rgba = shot.read_rgba().expect("读回失败");
+            (
+                pixel_avg(&rgba, 320, near.0, near.1),
+                pixel_avg(&rgba, 320, far.0, far.1),
+            )
+        };
+
+        let (off_near, off_far) = render(&mut shot, RenderConfig::default());
+        // 两个采样点都落在背景上（背景是均匀清屏色）——不一致说明采样点
+        // 打到立方体表面上了，后面的"变亮"就不是光晕的功劳。
+        for ch in 0..3 {
+            assert!(
+                (off_near[ch] - off_far[ch]).abs() < 3.0,
+                "背景不是匀色？near={off_near:?} far={off_far:?}（采样点打到物体上了？）"
+            );
+        }
+
+        let (on_near, on_far) = render(&mut shot, bloom_settings(0.6));
+        assert!(
+            on_near[0] > off_near[0] + 25.0,
+            "高光轮廓外的像素必须被光晕显著提亮：开 {on_near:?} vs 关 {off_near:?}"
+        );
+        assert!(
+            (on_far[0] - off_far[0]).abs() < 4.0,
+            "远处角落不该被光晕照亮：开 {on_far:?} vs 关 {off_far:?}"
+        );
+
+        // 强度单调：2.0 必须比 0.6 更亮（光晕加在曲线之前，ACES 单调）。
+        let (strong_near, _) = render(&mut shot, bloom_settings(2.0));
+        assert!(
+            strong_near[0] > on_near[0] + 5.0,
+            "强度 2.0 必须比 0.6 亮：{strong_near:?} vs {on_near:?}"
+        );
+    }
+
+    /// **Bloom 的阈值红线**：低于软膝下限（threshold - knee = 0.4）的"微光"
+    /// 一个光子都不提取。光强 0.35 的立方体正面线性 ≈ 0.19：开满 Bloom 也
+    /// 不该在轮廓外留下光晕（若提取公式丢了阈值，这条会红）。
+    #[test]
+    fn bloom_leaves_sub_threshold_content_dark() {
+        let Some(mut shot) = gpu_or_skip("bloom_leaves_sub_threshold_content_dark") else {
+            return;
+        };
+        let scene = tilted_lit_white_cube(0.35);
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (cx, cy) = (320 / 2, 240 / 2);
+        let near = (cx + 46, cy);
+        let render = |shot: &mut ScreenshotRenderer, settings: RenderConfig| {
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings,
+            )
+            .expect("渲染失败");
+            pixel_avg(&shot.read_rgba().expect("读回失败"), 320, near.0, near.1)
+        };
+
+        let off = render(&mut shot, RenderConfig::default());
+        let on = render(&mut shot, bloom_settings(0.6));
+        for ch in 0..3 {
+            assert!(
+                (on[ch] - off[ch]).abs() < 3.0,
+                "阈值以下的微光不该发光：开 {on:?} vs 关 {off:?}"
+            );
+        }
     }
 }

@@ -172,9 +172,11 @@ impl EditorApp {
         if let Some(gpu) = &self.gpu {
             let project_root = state.project.root().to_path_buf();
             // MSAA 的采样数由设备能力决定：不支持的格式上硬开 4× 会让管线创建失败。
+            // **按 HDR 格式问** —— 场景 pass 画进 `Rgba16Float`（见 `xgame_render::postfx`），
+            // 采样数是格式相关的量，拿交换链格式问出来的答案在 HDR 附件上不一定成立。
             let sample_count = xgame_render::scene_pipeline::supported_sample_count(
                 &gpu.adapter,
-                gpu.target_format,
+                xgame_render::postfx::HDR_FORMAT,
             );
             log::info!("视口渲染：MSAA x{sample_count}");
             state.scene_renderer = Some(scene_renderer::SceneRenderer::new(
