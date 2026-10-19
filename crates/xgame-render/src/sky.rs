@@ -921,8 +921,8 @@ impl SkyResources {
     /// 在场景 pass 里画天空盒（不透明之后、半透明之前调用）。
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, global_bind_group: &wgpu::BindGroup) {
         pass.set_pipeline(&self.sky_pipeline);
-        // 全局组带一个动态偏移槽位（逐 draw 数据）——天空不读它，给 0 即可。
-        pass.set_bind_group(0, global_bind_group, &[0]);
+        // 全局组整帧一份，无动态偏移（实例数据走 storage，天空不读它）。
+        pass.set_bind_group(0, global_bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 }

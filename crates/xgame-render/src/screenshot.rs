@@ -39,7 +39,7 @@ use crate::animation::AnimationDriver;
 use crate::gltf_loader::{Bounds, GltfMesh};
 use crate::postfx::{HdrTargets, PostFx, HDR_FORMAT};
 use crate::scene_pipeline::{
-    scene_bounds, supported_sample_count, SceneLighting, ScenePipeline,
+    scene_bounds, supported_sample_count, FrameStats, SceneLighting, ScenePipeline,
 };
 
 /// 截图默认垂直视场角（45°）。比编辑器视口（60°）略窄一点 —— 截图
@@ -265,6 +265,15 @@ impl ScreenshotRenderer {
 
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// 上一次 [`render_scene`](Self::render_scene) 的绘制统计（口径见
+    /// [`ScenePipeline::frame_stats`]）。
+    ///
+    /// 实例化是否真的合批了只有这个读数看得见：像素测试能守"画得对"，
+    /// 守不了"是不是一批画完的"。
+    pub fn frame_stats(&self) -> FrameStats {
+        self.pipeline.frame_stats()
     }
 
     pub fn aspect(&self) -> f32 {
@@ -1551,5 +1560,365 @@ mod tests {
                 "阈值以下的微光不该发光：开 {on:?} vs 关 {off:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // 实例化（draw batching）：GPU 侧的"先证红"测试组
+    // -----------------------------------------------------------------
+    //
+    // 合批的三条合同：① 同图元合并成一批（CPU 读数看得见，画面看不出来）；
+    // ② 合批不许改变画面（与逐 draw 渲染逐像素等价）；③ 逐实例数据（模型
+    // 矩阵、材质）必须真的逐实例 —— 材质一旦被"提到批次级"，同批实体就会
+    // 共用一份颜色，这是合批最典型的错法。阴影 pass 复用批次表，另有钉子。
+
+    /// **合批计数**：64 个共用 `builtin://cube` 的实体 + 一块地面，必须压成
+    /// 2 批。像素测试守得住"画得对"，守不住"是不是一批画完的"——旧实现
+    /// （逐 drawcall）下这里必然是 65 批。
+    #[test]
+    fn instancing_batches_shared_mesh_entities() {
+        let Some(mut shot) = gpu_or_skip("instancing_batches_shared_mesh_entities") else {
+            return;
+        };
+
+        let mut scene = Scene::new("instancing-count");
+        scene.ambient = [0.05; 3];
+        scene.lights = vec![Light::directional("sun", [0.4, -1.0, -0.3], [1.0; 3], 1.5)];
+        scene.lights[0].casts_shadow = false;
+
+        let mut ground = Entity::new("Ground");
+        ground.model = "builtin://plane".to_owned();
+        ground.transform.scale = Vec3::new(9.0, 1.0, 9.0);
+        scene.add_entity(ground);
+
+        for i in 0..64 {
+            let mut e = Entity::new(format!("c{i}"));
+            e.model = "builtin://cube".to_owned();
+            let (gx, gz) = ((i % 8) as f32, (i / 8) as f32);
+            e.transform.position = Vec3::new((gx - 3.5) * 1.8, 0.5, (gz - 3.5) * 1.8);
+            scene.add_entity(e);
+        }
+
+        // 斜上方俯视：别让实体互相遮挡导致采样点不好对（本测试不查像素，
+        // 但画面照常渲染 —— 统计口径与真实帧一致）。
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 9.0, 10.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            RenderConfig::default(),
+        )
+        .expect("渲染失败");
+
+        let stats = shot.frame_stats();
+        assert_eq!(stats.opaque_instances, 65, "65 个不透明绘制项");
+        assert_eq!(
+            stats.opaque_batches, 2,
+            "地面 1 批 + 64 个立方体 1 批（旧实现 65 批）"
+        );
+        assert_eq!(stats.blended_draws, 0);
+        assert_eq!(stats.draw_calls(), 2, "主 pass 的 draw call 数");
+    }
+
+    /// **逐 draw 画面等价**：几何完全相同，一边共用 `builtin://cube`（合批成
+    /// 少批），一边 4 份各自注入的同几何网格（不合批），两图必须逐字节一致
+    /// —— 合批只许省 draw call，不许改画面。开着阴影跑，把阴影 pass 的批次
+    /// 复用也一起覆盖。
+    #[test]
+    fn instancing_matches_per_draw_rendering() {
+        let Some(mut shot) = gpu_or_skip("instancing_matches_per_draw_rendering") else {
+            return;
+        };
+
+        // 4 份独立网格：`from_mesh_data` 每次生成新的材质 id（各自的绑定组），
+        // 同几何同参数 —— 正是"素材侧每个物体一份网格"的形态。
+        let meshes: Vec<(String, GltfMesh)> = (0..4)
+            .map(|i| {
+                let builtin = crate::mesh::BuiltinMesh::Cube;
+                let mesh = GltfMesh::from_mesh_data(
+                    &shot.device,
+                    &shot.queue,
+                    &builtin.build(),
+                    builtin.label(),
+                );
+                (format!("test://cube{i}"), mesh)
+            })
+            .collect();
+        for (key, mesh) in meshes {
+            shot.inject_model(key, mesh);
+        }
+
+        let make = |per_draw: bool| {
+            let mut scene = Scene::new(if per_draw { "per-draw" } else { "shared" });
+            scene.ambient = [0.05, 0.05, 0.08];
+            scene.lights = vec![Light::directional("sun", [0.5, -1.0, -0.4], [1.0; 3], 2.0)];
+            let mut ground = Entity::new("Ground");
+            ground.model = "builtin://plane".to_owned();
+            ground.transform.scale = Vec3::new(10.0, 1.0, 10.0);
+            scene.add_entity(ground);
+            for (i, p) in [(-1.5, 0.5, -0.5), (1.5, 0.5, -0.5), (-1.5, 0.5, 1.0), (1.5, 0.5, 1.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let mut e = Entity::new(format!("c{i}"));
+                e.model = if per_draw {
+                    format!("test://cube{i}")
+                } else {
+                    "builtin://cube".to_owned()
+                };
+                e.transform.position = Vec3::new(p.0, p.1, p.2);
+                scene.add_entity(e);
+            }
+            scene
+        };
+
+        let camera =
+            ShotCamera::looking_at(Vec3::new(0.0, 4.0, 6.0), Vec3::new(0.0, 0.0, 0.2), DEFAULT_FOV_Y);
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene| {
+            shot.render_scene(
+                scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.read_rgba().expect("读回失败")
+        };
+
+        let shared_scene = make(false);
+        let shared = render(&mut shot, &shared_scene);
+        let shared_stats = shot.frame_stats();
+        let per_draw_scene = make(true);
+        let per_draw = render(&mut shot, &per_draw_scene);
+        let per_draw_stats = shot.frame_stats();
+
+        assert!(
+            shared_stats.opaque_batches < per_draw_stats.opaque_batches,
+            "共用网格必须真的合批：共享 {} 批 vs 各自 {} 批",
+            shared_stats.opaque_batches,
+            per_draw_stats.opaque_batches
+        );
+        assert_eq!(
+            shared_stats.opaque_instances, per_draw_stats.opaque_instances,
+            "两种形态的绘制项数必须相同"
+        );
+        assert_eq!(shared.len(), per_draw.len());
+        if shared != per_draw {
+            let idx = shared
+                .iter()
+                .zip(&per_draw)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            panic!(
+                "合批与逐 draw 的画面必须逐字节一致；首个差异在第 {idx} 字节（像素 {}）: {} vs {}",
+                idx / 4,
+                shared[idx],
+                per_draw[idx]
+            );
+        }
+    }
+
+    /// **同批实体各调各的色**：两个共用网格的立方体各带红 / 绿实体级覆盖，
+    /// 必须落在同一批（`opaque_batches == 1`），且两个采样点颜色各异 ——
+    /// 钉死"材质随实例走"。材质若被提到批次级，同批实体只能共用一份颜色，
+    /// 这条测试就是它的红。
+    #[test]
+    fn batching_keeps_per_instance_material_overrides() {
+        let Some(mut shot) = gpu_or_skip("batching_keeps_per_instance_material_overrides") else {
+            return;
+        };
+
+        let mut scene = Scene::new("per-instance-material");
+        scene.ambient = [0.0; 3];
+        // 斜射光 + 粗糙度 0.45：中心像素落在漫反射为主的位置（光与相机同轴
+        // 时 GGX 副瓣会叠上约 0.24 线性白，把色调糊掉一半，见上一条测试）。
+        scene.lights = vec![Light::directional("sun", [0.6, -1.0, -0.75], [1.0; 3], 1.0)];
+        scene.lights[0].casts_shadow = false;
+
+        let mut left = Entity::new("Left");
+        left.model = "builtin://cube".to_owned();
+        left.transform.position = Vec3::new(-0.7, 0.0, 0.0);
+        left.material = Some(MaterialOverride {
+            base_color: Some([0.9, 0.1, 0.1, 1.0]),
+            ..Default::default()
+        });
+        scene.add_entity(left);
+        let mut right = Entity::new("Right");
+        right.model = "builtin://cube".to_owned();
+        right.transform.position = Vec3::new(0.7, 0.0, 0.0);
+        right.material = Some(MaterialOverride {
+            base_color: Some([0.1, 0.9, 0.1, 1.0]),
+            ..Default::default()
+        });
+        scene.add_entity(right);
+
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            RenderConfig::default(),
+        )
+        .expect("渲染失败");
+
+        let stats = shot.frame_stats();
+        assert_eq!(stats.opaque_batches, 1, "两个同网格实体应当合批");
+        assert_eq!(stats.opaque_instances, 2);
+
+        let rgba = shot.read_rgba().expect("读回失败");
+        // 与 metallic/dielectric 测试同款采样几何：两个立方体中心投影在
+        // 图像中心 ±58px。
+        let (cx, cy) = (320 / 2, 240 / 2);
+        let l = pixel_avg(&rgba, 320, cx - 58, cy);
+        let r = pixel_avg(&rgba, 320, cx + 58, cy);
+        assert!(l[0] > l[1] + 60.0, "左立方体应当偏红: {l:?}");
+        assert!(r[1] > r[0] + 60.0, "右立方体应当偏绿: {r:?}");
+    }
+
+    /// **合批的阴影 pass 复用**：实例化批次表在阴影 pass 里原样复用（统计
+    /// 口径不重复计 draw call），影子必须照常投出来。开 / 关阴影两图比对：
+    /// 有一片像素变暗（影子）、没有任何像素反而变亮。
+    #[test]
+    fn instanced_draws_still_cast_shadows() {
+        let Some(mut shot) = gpu_or_skip("instanced_draws_still_cast_shadows") else {
+            return;
+        };
+
+        let mut scene = Scene::new("instanced-shadow");
+        scene.ambient = [0.22, 0.22, 0.28];
+        // 竖直向下的方向光：悬空立方体的影子正好落在正下方，位置可预测。
+        scene.lights = vec![Light::directional("sun", [0.0, -1.0, 0.0], [1.0; 3], 1.6)];
+        assert!(scene.lights[0].casts_shadow, "默认应当开阴影");
+        let mut ground = Entity::new("Ground");
+        ground.model = "builtin://plane".to_owned();
+        ground.transform.scale = Vec3::new(12.0, 1.0, 12.0);
+        scene.add_entity(ground);
+        let mut cube = Entity::new("Cube");
+        cube.model = "builtin://cube".to_owned();
+        cube.transform.position = Vec3::new(0.0, 1.5, 0.0);
+        scene.add_entity(cube);
+
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 4.5, 7.0),
+            Vec3::new(0.0, 0.3, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene| {
+            shot.render_scene(
+                scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.read_rgba().expect("读回失败")
+        };
+
+        let with_shadow = render(&mut shot, &scene);
+        let stats = shot.frame_stats();
+        scene.lights[0].casts_shadow = false;
+        let without = render(&mut shot, &scene);
+
+        let luma = |p: &[u8]| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
+        let (mut darker, mut brighter) = (0usize, 0usize);
+        let (pixels_a, _) = with_shadow.as_chunks::<4>();
+        let (pixels_b, _) = without.as_chunks::<4>();
+        for (a, b) in pixels_a.iter().zip(pixels_b) {
+            let (la, lb) = (luma(a), luma(b));
+            if la + 8.0 < lb {
+                darker += 1;
+            }
+            if la > lb + 2.0 {
+                brighter += 1;
+            }
+        }
+        assert!(
+            darker >= 100,
+            "开阴影必须在地面上投出可见影子（变暗像素只有 {darker}）"
+        );
+        assert!(
+            brighter <= 4,
+            "开阴影不该让任何像素变亮（{brighter} 个变亮，可能是偏置漏光）"
+        );
+        // 阴影 pass 复用不透明批次：统计口径 = 主 pass 的 draw call 数。
+        assert_eq!(stats.opaque_batches, 2, "地面 1 批 + 立方体 1 批");
+        assert_eq!(stats.draw_calls(), 2);
+    }
+
+    /// **半透明不合批、远→近**：两个半透明立方体同轴（近蓝远红），中心像素
+    /// 必须 b > r —— 蓝叠在红之上。绘制顺序若反了（近的先画），红的贡献压
+    /// 在蓝之上，断言正好倒过来。
+    #[test]
+    fn blended_draws_render_far_to_near() {
+        let Some(mut shot) = gpu_or_skip("blended_draws_render_far_to_near") else {
+            return;
+        };
+
+        // 两块半透明网格：同几何、不同颜色（alpha 0.5），注入缓存（内置图元
+        // 材质写死为不透明，需要受控输入）。粗糙度调高、金属度归零，压掉
+        // 镜面白斑对色调的稀释。
+        let meshes: Vec<(&str, GltfMesh)> = {
+            let make = |color: [f32; 4]| {
+                let builtin = crate::mesh::BuiltinMesh::Cube;
+                let mut mesh = GltfMesh::from_mesh_data(
+                    &shot.device,
+                    &shot.queue,
+                    &builtin.build(),
+                    builtin.label(),
+                );
+                for prim in &mut mesh.primitives {
+                    prim.material.base_color = color;
+                    prim.material.blend = true;
+                    prim.material.metallic = 0.0;
+                    prim.material.roughness = 0.9;
+                }
+                mesh
+            };
+            vec![
+                ("test://red", make([0.9, 0.05, 0.05, 0.5])),
+                ("test://blue", make([0.05, 0.05, 0.9, 0.5])),
+            ]
+        };
+        for (key, mesh) in meshes {
+            shot.inject_model(key, mesh);
+        }
+
+        let mut scene = Scene::new("blend-order");
+        scene.ambient = [0.0; 3];
+        scene.lights = vec![Light::directional("sun", [0.6, -1.0, -0.75], [1.0; 3], 1.2)];
+        scene.lights[0].casts_shadow = false;
+        let mut far = Entity::new("FarRed");
+        far.model = "test://red".to_owned();
+        far.transform.position = Vec3::new(0.0, 0.0, -1.0);
+        scene.add_entity(far);
+        let mut near = Entity::new("NearBlue");
+        near.model = "test://blue".to_owned();
+        near.transform.position = Vec3::new(0.0, 0.0, 1.0);
+        scene.add_entity(near);
+
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            RenderConfig::default(),
+        )
+        .expect("渲染失败");
+
+        let stats = shot.frame_stats();
+        assert_eq!(stats.opaque_batches, 0, "半透明不参与合批");
+        assert_eq!(stats.blended_draws, 2, "半透明逐项一次 draw call");
+        assert_eq!(stats.draw_calls(), 2);
+
+        let rgba = shot.read_rgba().expect("读回失败");
+        let center = pixel_avg(&rgba, 320, 160, 120);
+        assert!(
+            center[2] > center[0] + 30.0,
+            "近处蓝色必须叠在远处红色之上（画反了会 r > b）: {center:?}"
+        );
     }
 }

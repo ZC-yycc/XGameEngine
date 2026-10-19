@@ -30,8 +30,9 @@
 //! group(0)  全局，整帧一份
 //!   binding 0  camera    uniform（view_proj + inv_view_proj + 相机位置）
 //!   binding 1  lights    uniform（环境光 + 光源数组）
-//!   binding 2  draw      uniform（动态偏移：每个 draw 占一段；模型矩阵 +
-//!                        蒙皮槽位 + 材质）
+//!   binding 2  draws     storage（逐实例：模型矩阵 + 蒙皮槽位 + 材质；
+//!                        一个实例一段、紧密排布，实例下标 =
+//!                        `@builtin(instance_index)`，见"实例化"一节）
 //!   binding 3  shadow    texture_depth_2d（方向光阴影深度图）
 //!   binding 4  shadow_smp    comparison sampler
 //!   binding 5  shadow_ub     uniform（光源视图投影矩阵 + 偏置/开关）
@@ -46,6 +47,32 @@
 //!   binding 0  base color texture
 //!   binding 1  sampler
 //! ```
+//!
+//! # 实例化（draw batching）
+//!
+//! 成百上千个实体共用同一张网格时，"一个实体一次 draw call"的固定成本
+//! （命令校验、绑定组、顶点/索引缓冲切换）会直接压垮 CPU 侧 —— 实测
+//! 2000 实体 ≈ 2.2 ms/帧，而 GPU 只花 0.3 ms。本管线把**同图元**的绘制项
+//! 合成一批：
+//!
+//! - 逐实例数据（模型矩阵 / 蒙皮槽位 / 材质）走 `draw_buffer` 这块 **storage
+//!   缓冲**，一个实例一段、按 112 B 紧密排布（不需要 uniform 动态偏移的
+//!   256 B 对齐填充）；顶点着色器用 `@builtin(instance_index)` 直接索引
+//!   `draws[...]`；
+//! - 一批 = 一次 `draw_indexed(indices, 0, first..first+count)`：`first` 是
+//!   这一批在缓冲里的**起始槽位**。实例下标从 `first` 起单调递增，与实例
+//!   数据在缓冲里的紧密排布正好对上（这是"批次占连续槽位"的落脚点）；
+//! - 材质参数（base_color / metallic / roughness）是**逐实例**的（实体级
+//!   覆盖），随实例数据走 —— 同一网格的两个实体仍然各调各的颜色；只有
+//!   材质绑定组（贴图 + 采样器）按批切换，一批一次 `set_bind_group`；
+//! - 半透明**不参与合批**：混合结果与绘制顺序相关（远→近），每项独立一次
+//!   draw call。阴影 pass 复用同一批批次（同一份实例数据），无需另行准备。
+//!
+//! **分组键是图元地址、批次顺序是"首次遇到"**（刻意的）：图元地址只用于
+//! 相等判定（同一网格在不同实体间共享同一份 `GltfPrimitive`，地址相等 ⇔
+//! 顶点/索引缓冲与材质槽全同），排序一律按实体遍历顺序 —— 指针值每次运行
+//! 都不同，拿它排序会让槽位布局随机漂移，"同机逐字节确定"的截图契约
+//! （[`crate::screenshot`]）就没了。
 //!
 //! # 天空盒与环境光照（IBL）
 //!
@@ -253,27 +280,31 @@ struct ShadowUniform {
     params: [f32; 4],
 }
 
-/// 一次 draw 的全部逐 draw 数据：模型矩阵 + 蒙皮槽位 + 材质。
+/// 一次绘制项（= 一个实例）的全部数据：模型矩阵 + 蒙皮槽位 + 材质。
 ///
-/// 按动态偏移在 `draw_buffer` 里一段一个 draw —— 网格有几个图元就有几个 draw。
-/// 材质之所以放这里而不是"每材质一个绑定组"：**实体级材质覆盖**
-/// （[`xgame_core::MaterialOverride`]）让同一份 glTF 材质在不同实体上可以有
-/// 不同的颜色 / 金属度，材质参数因此是逐 draw 的而不是逐资产的；旧方案
-/// （贴图 + 参数打包进绑定组、按 material_id 缓存）在逐实体覆盖下要么每次
-/// 改色重建绑定组、要么缓存键随数值无限膨胀。
+/// 按**槽位**紧密排布在 `draw_buffer`（storage）里：一个图元一个实例，槽位
+/// 由批次分组决定（见模块头"实例化"一节）。材质之所以放这里而不是"每材质
+/// 一个绑定组"：**实体级材质覆盖**（[`xgame_core::MaterialOverride`]）让同一
+/// 份 glTF 材质在不同实体上可以有不同颜色 / 金属度，材质参数因此是逐实例的
+/// 而不是逐资产的；旧方案（贴图 + 参数打包进绑定组、按 material_id 缓存）
+/// 在逐实体覆盖下要么每次改色重建绑定组、要么缓存键随数值无限膨胀。
 ///
-/// 字节布局与两个 WGSL 着色器里的 `DrawUniform` 一一对应（`material` 在
-/// WGSL 侧展平为 `base_color` / `material` 两个 vec4）。改字段顺序 = 改
-/// 着色器 ABI，两边必须一起改。
+/// 字节布局与三个 WGSL 着色器里的 `DrawUniform` 一一对应（`material` 在 WGSL
+/// 侧展平为 `base_color` / `material` 两个 vec4）。改字段顺序 = 改着色器 ABI，
+/// 两边必须一起改；大小还必须等于 WGSL 数组步长（`size_of` 已由测试钉死）。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct DrawUniform {
     model: [[f32; 4]; 4],
     /// `.x` = 蒙皮槽位 + 1（0 = 不蒙皮）。其余 3 个分量预留。
     params: [u32; 4],
-    /// 本 draw 的有效材质（模型自带参数 ⊕ 实体级覆盖后的结果）。
+    /// 本实例的有效材质（模型自带参数 ⊕ 实体级覆盖后的结果）。
     material: MaterialUniform,
 }
+
+/// `DrawUniform` 的 GPU 步长（字节）。WGSL 里 `array<DrawUniform>` 的元素步长
+/// 由结构体布局决定 —— 必须与这里的值一致，运行期断言在单测里。
+const DRAW_STRIDE: usize = std::mem::size_of::<DrawUniform>();
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -288,6 +319,57 @@ struct MaterialUniform {
 /// 整帧（一个 `roughness: 0.0` 的材质能黑掉整个画面）。0.04 的镜面已经
 /// 光滑到看不出和 0 的区别，但分母永远安全。
 pub const MIN_ROUGHNESS: f32 = 0.04;
+
+// ---------------------------------------------------------------------------
+// 实例化：批次（一批 = 一次实例化 draw call）
+// ---------------------------------------------------------------------------
+
+/// 一批同图元的实例。
+#[derive(Copy, Clone, Debug, Default)]
+struct DrawBatch {
+    /// 本批第一个实例在 `draw_buffer` 里的槽位（= `draw_indexed` 的 first_instance）。
+    first: u32,
+    /// 实例数。
+    count: u32,
+    /// 解析图元用：实体下标 + 图元下标（见下）。
+    ///
+    /// 批次表是**跨帧复用的字段**，不能驻留 `&GltfPrimitive` —— 那会把
+    /// `render` 入参的生命周期绑进 `ScenePipeline` 自己（自引用）。绘制时经
+    /// [`batch_prim`] 解析，每个批次一次（批次少的时候几乎零成本，批次多
+    /// 的时候本来就省不下什么）。
+    entity: u32,
+    prim: u32,
+}
+
+/// 待写的实例数据。
+///
+/// 为什么不能边收集边写槽位：槽位要在批次**计数**之后才能定（前缀和），
+/// 而实例数据在收集时就已经算好了（材质合并、世界矩阵都在那个循环里）。
+/// 攒进这里比"再遍历一遍实体重算"便宜（重算要再做一遍网格查找与材质合并）。
+struct PendingDraw {
+    /// 所属不透明批次。
+    batch: u32,
+    uniform: DrawUniform,
+}
+
+/// 半透明绘制项：距离是排序键（远→近），每项独立一次 draw call。
+struct BlendedDraw {
+    /// 到相机的距离平方（只比较大小，省一次开方）。
+    dist: f32,
+    batch: DrawBatch,
+    uniform: DrawUniform,
+}
+
+/// 从批次记录解析出图元（见 [`DrawBatch::entity`] 的说明）。
+fn batch_prim<'a>(
+    entities: &[Entity],
+    model_cache: &'a HashMap<String, GltfMesh>,
+    batch: &DrawBatch,
+) -> Option<&'a GltfPrimitive> {
+    let entity = entities.get(batch.entity as usize)?;
+    let mesh = model_cache.get(entity.model.as_str())?;
+    mesh.primitives.get(batch.prim as usize)
+}
 
 impl MaterialUniform {
     /// 原样携带 glTF 的 metallic-roughness 参数，PBR BRDF 直接消费。
@@ -430,7 +512,9 @@ pub fn fit_directional_shadow(direction: Vec3, scene: Bounds) -> Option<Mat4> {
 
 const SCENE_VERT_SRC: &str = r#"
 struct CameraUniform { view_proj: mat4x4<f32>, inv_view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
-// 逐 draw 数据：模型矩阵 + 蒙皮槽位（params.x）+ 材质（base_color / material）。
+// 逐实例数据：模型矩阵 + 蒙皮槽位（params.x）+ 材质（base_color / material）。
+// 一个实例一段、紧密排布；下标就是 @builtin(instance_index)（= 本批起始槽位
+// + 批内序号，见 CPU 侧 `draw_indexed` 的 first_instance）。
 struct DrawUniform  {
     model: mat4x4<f32>,
     params: vec4<u32>,
@@ -439,7 +523,7 @@ struct DrawUniform  {
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
-@group(0) @binding(2) var<uniform> draw: DrawUniform;
+@group(0) @binding(2) var<storage, read> draws: array<DrawUniform>;
 // 所有动画实体的骨骼矩阵排在同一条存储缓冲里，按槽位分段（见 BONES_PER_SLOT）。
 @group(0) @binding(6) var<storage, read> bones: array<mat4x4<f32>>;
 
@@ -460,6 +544,10 @@ struct VertexOutput {
     @location(1) world_pos: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) tex_coord: vec2<f32>,
+    // 材质随实例数据来，但片元阶段拿不到 instance_index —— 用 flat 插值带过去
+    // （同一实例的所有顶点取同一个值，provoking vertex 取谁都一样）。
+    @location(4) @interpolate(flat) base_color: vec4<f32>,
+    @location(5) @interpolate(flat) material: vec4<f32>,
 }
 
 // 手写 3x3 求逆：non-uniform scale 下法线必须用逆转置矩阵变换，
@@ -478,7 +566,8 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
 }
 
 @vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
+fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+    let draw = draws[instance_index];
     var pos = input.position;
     var nrm = input.normal;
 
@@ -511,6 +600,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.world_pos = world_pos.xyz;
     out.color = input.color;
     out.tex_coord = input.tex_coord;
+    out.base_color = draw.base_color;
+    out.material = draw.material;
     return out;
 }
 "#;
@@ -521,18 +612,10 @@ const MAX_LIGHTS: u32 = 8u;
 struct CameraUniform { view_proj: mat4x4<f32>, inv_view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
 struct GpuLight      { pos_type: vec4<f32>, color_intensity: vec4<f32>, shadow_params: vec4<f32> }
 struct LightsUniform { ambient: vec4<f32>, lights: array<GpuLight, 8> }
-// 与顶点着色器同一份逐 draw 数据；本阶段只用 base_color / material 两个字段。
-struct DrawUniform  {
-    model: mat4x4<f32>,
-    params: vec4<u32>,
-    base_color: vec4<f32>,
-    material: vec4<f32>,
-}
 struct ShadowUniform { light_view_proj: mat4x4<f32>, params: vec4<f32> }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> lights: LightsUniform;
-@group(0) @binding(2) var<uniform> draw: DrawUniform;
 @group(0) @binding(3) var shadow_tex: texture_depth_2d;
 @group(0) @binding(4) var shadow_smp: sampler_comparison;
 @group(0) @binding(5) var<uniform> shadow: ShadowUniform;
@@ -552,6 +635,9 @@ struct VertexOutput {
     @location(1) world_pos: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) tex_coord: vec2<f32>,
+    // 逐实例材质（顶点阶段从 draws[] 取出后 flat 传下来，见顶点着色器）。
+    @location(4) @interpolate(flat) base_color: vec4<f32>,
+    @location(5) @interpolate(flat) material: vec4<f32>,
 }
 
 // 3x3 PCF：把 9 个比较结果平均一下，边缘不那么硬。
@@ -608,11 +694,11 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 反照率 = 贴图 × 材质因子 × 顶点色（三者都是"乘法叠加"的直觉语义）
     let sampled = textureSample(base_color_tex, base_color_smp, input.tex_coord);
-    let albedo = sampled.rgb * draw.base_color.rgb * input.color;
-    let alpha = sampled.a * draw.base_color.a;
+    let albedo = sampled.rgb * input.base_color.rgb * input.color;
+    let alpha = sampled.a * input.base_color.a;
 
-    let metallic = draw.material.x;
-    let roughness = draw.material.y;
+    let metallic = input.material.x;
+    let roughness = input.material.y;
     let n = normalize(input.world_normal);
     let v = normalize(camera.camera_pos.xyz - input.world_pos);
     let n_dot_v = max(dot(n, v), 1e-4);
@@ -703,7 +789,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 /// 深度图只关心深度，管线里 `fragment: None`。
 const SHADOW_VERT_SRC: &str = r#"
 struct ShadowUniform { light_view_proj: mat4x4<f32>, params: vec4<f32> }
-// 与主 pass 同一份逐 draw 数据；阴影只要 model / params 两个字段，
+// 与主 pass 同一份逐实例数据；阴影只要 model / params 两个字段，
 // 但结构体声明保持与缓冲布局一致（字段齐全，未用的不读取）。
 struct DrawUniform  {
     model: mat4x4<f32>,
@@ -713,7 +799,7 @@ struct DrawUniform  {
 }
 
 @group(0) @binding(0) var<uniform> shadow: ShadowUniform;
-@group(0) @binding(1) var<uniform> draw: DrawUniform;
+@group(0) @binding(1) var<storage, read> draws: array<DrawUniform>;
 @group(0) @binding(2) var<storage, read> bones: array<mat4x4<f32>>;
 
 const BONES_PER_SLOT: u32 = 256u;
@@ -723,7 +809,9 @@ fn vs_shadow(
     @location(0) position: vec3<f32>,
     @location(4) joints: vec4<f32>,
     @location(5) weights: vec4<f32>,
+    @builtin(instance_index) instance_index: u32,
 ) -> @builtin(position) vec4<f32> {
+    let draw = draws[instance_index];
     // 阴影也走蒙皮：不然跑动的角色会投出一具绑定姿态的静止影子。
     // 与主 pass 同一套分支（params.x == 0 → 原始顶点），两边永远一致。
     var pos = position;
@@ -767,6 +855,8 @@ pub struct ScenePipeline {
 
     camera_buffer: wgpu::Buffer,
     lights_buffer: wgpu::Buffer,
+    /// 逐实例数据（storage）。槽位紧密排布：一个绘制项一段 [`DRAW_STRIDE`] 字节，
+    /// 实例下标由 `draw_indexed` 的 first_instance 与实例数据位置共同决定。
     draw_buffer: wgpu::Buffer,
     global_bind_group: wgpu::BindGroup,
 
@@ -780,8 +870,8 @@ pub struct ScenePipeline {
     bone_staging: Vec<[f32; 16]>,
 
     // -- 阴影 --
-    /// 阴影 pass 的布局：binding 0 = 阴影 uniform，binding 1 = draw 数据
-    /// （动态偏移，阴影只需要其中的模型矩阵），binding 2 = 蒙皮骨骼。
+    /// 阴影 pass 的布局：binding 0 = 阴影 uniform，binding 1 = 逐实例数据
+    /// （storage 数组，阴影只用其中的模型矩阵与蒙皮槽位），binding 2 = 蒙皮骨骼。
     ///
     /// 刻意与 `global_bgl` **分开**：阴影 pass 一边把深度画进 `shadow_view`、
     /// 一边又要在 group(0) 里绑这张图 —— wgpu 会把"同一资源既当渲染目标又当
@@ -816,18 +906,26 @@ pub struct ScenePipeline {
     /// 所以它永远是 1。这个值只作用于两条主管线。
     sample_count: u32,
 
-    uniform_alignment: u64,
-
-    /// 逐 draw uniform 的**复用暂存**：把所有 `DrawUniform` 按 `uniform_alignment`
-    /// 排布在这里，最后一次性写进 `draw_buffer`。
+    /// 逐实例数据的**复用暂存**：按槽位顺序排好的 `DrawUniform` 字节。
     ///
     /// 为什么会需要它：`Queue::write_buffer` 每调一次都要从 staging belt 上领一段、
-    /// 再记一条拷贝命令。逐实体调用的话，一个 256 实体的场景每帧就是 256 次小分配 +
-    /// 256 条命令。攒成一次写，开销与实体数解耦。
+    /// 再记一条拷贝命令。逐实例调用的话，一个 2000 实体的场景每帧就是 2000 次小分配 +
+    /// 2000 条命令。攒成一次写，开销与实例数解耦。
     ///
-    /// 复用同一个 `Vec` 是为了稳态零分配：`clear()` + 按需 `resize(n, 0)` 会把要用的
+    /// 复用同一个 `Vec` 是为了稳态零分配：`clear()` + `resize(n, 0)` 会把要用的
     /// 那段显式清零，容量留着下次接着用。
     draw_staging: Vec<u8>,
+
+    /// 本帧待写的实例数据（见 [`PendingDraw`]）。
+    pending_draws: Vec<PendingDraw>,
+    /// 本帧不透明批次。**顺序 = 首次遇到的实体顺序**（布局确定性的来源）。
+    opaque_batches: Vec<DrawBatch>,
+    /// 本帧半透明绘制项（每项一批，按距离远→近）。
+    blended_draws: Vec<BlendedDraw>,
+    /// 图元地址 → 不透明批次下标（本帧复用，`clear()` 保留容量）。
+    batch_index: HashMap<usize, u32>,
+    /// 写实例数据时的每批游标（长度 = `opaque_batches.len()`）。
+    batch_cursor: Vec<u32>,
 
     /// 上一帧的绘制统计（见 [`FrameStats`]）。合批是否生效的读数口。
     stats: FrameStats,
@@ -865,15 +963,16 @@ impl ScenePipeline {
                     },
                     count: None,
                 },
-                // 2: 逐 draw 数据（模型矩阵 + 蒙皮槽位 + 材质。动态偏移：一个
-                //    draw 一段，避免每个实体/图元各建一个绑定组）。片元阶段
-                //    读材质（base_color / metallic / roughness）。
+                // 2: 逐实例数据（模型矩阵 + 蒙皮槽位 + 材质）。storage 数组：
+                //    一个实例一段，顶点着色器靠 `@builtin(instance_index)`
+                //    直接索引（批量绘制时它从 first_instance 起递增）。
+                //    逐实例而不是逐 draw/逐实体的理由见 `DrawUniform` 的说明。
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
                         min_binding_size: None,
                     },
                     count: None,
@@ -967,8 +1066,8 @@ impl ScenePipeline {
                     binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
                         min_binding_size: None,
                     },
                     count: None,
@@ -1006,13 +1105,12 @@ impl ScenePipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let draw_buffer_size = MAX_RENDER_DRAWS as u64 * uniform_alignment;
+        let draw_buffer_size = MAX_RENDER_DRAWS as u64 * DRAW_STRIDE as u64;
         let draw_buffer_init = vec![0u8; draw_buffer_size as usize];
         let draw_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_draw_ub"),
+            label: Some("scene_draw_sb"),
             contents: &draw_buffer_init,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // -- 阴影资源 --
@@ -1102,8 +1200,12 @@ impl ScenePipeline {
             sky,
             material_cache: HashMap::new(),
             sample_count,
-            uniform_alignment,
             draw_staging: Vec::new(),
+            pending_draws: Vec::new(),
+            opaque_batches: Vec::new(),
+            blended_draws: Vec::new(),
+            batch_index: HashMap::new(),
+            batch_cursor: Vec::new(),
             stats: FrameStats::default(),
         }
     }
@@ -1139,14 +1241,6 @@ impl ScenePipeline {
         (texture, view)
     }
 
-    fn draw_binding(buffer: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
-        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-            buffer,
-            offset: 0,
-            size: std::num::NonZeroU64::new(std::mem::size_of::<DrawUniform>() as u64),
-        })
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn create_global_bind_group(
         device: &wgpu::Device,
@@ -1166,7 +1260,7 @@ impl ScenePipeline {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: lights_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: Self::draw_binding(draw_buffer) },
+                wgpu::BindGroupEntry { binding: 2, resource: draw_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(shadow_view),
@@ -1215,7 +1309,7 @@ impl ScenePipeline {
             layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: Self::draw_binding(draw_buffer) },
+                wgpu::BindGroupEntry { binding: 1, resource: draw_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: bones_buffer.as_entire_binding() },
             ],
         })
@@ -1472,10 +1566,13 @@ impl ScenePipeline {
     /// 这也是为什么材质 ID 要全局唯一——不同模型里即使材质完全一样，
     /// 各自持有自己的槽位，不会因为缓存键相同而串台。
     ///
-    /// 绑定组里只有**贴图 + 采样器**：颜色 / 金属度 / 粗糙度是逐 draw 的
-    /// （实体级覆盖），走 `draw_buffer` 的动态偏移，不在这里。（曾经这里
+    /// 绑定组里只有**贴图 + 采样器**：颜色 / 金属度 / 粗糙度是逐实例的
+    /// （实体级覆盖），走 `draw_buffer` 的实例槽位，不在这里。（曾经这里
     /// 还打包一个材质 uniform —— 那种"按资产缓存参数"的形态救不了
     /// 逐实体覆盖：同一份材质的两个实体可以要不同颜色。）
+    ///
+    /// 调用点是**收集阶段**（实例化之后 pass 里只读 `self`，见 render 的
+    /// 说明）：绘图循环用 `material_cache.get` 直取，不再经过这里。
     fn material_binding(&mut self, device: &wgpu::Device, prim: &GltfPrimitive) -> &wgpu::BindGroup {
         if !self.material_cache.contains_key(&prim.material_id) {
             // 这里对 `self.material_bgl`（不可变）与 `self.material_cache`（可变）的
@@ -1609,23 +1706,23 @@ impl ScenePipeline {
             SkyUniform::build(&sky, sky::sun_from_lights(&packed)),
         );
 
-        // --- 收集绘制项，同时把所有 draw 数据攒进 staging ---
+        // --- 收集绘制项：分组（不透明）+ 排序键（半透明），实例数据攒进 staging ---
         // 不透明与半透明分开收集：半透明要按到相机的距离从远到近排序，
-        // 否则两个半透明物体前后叠在一起时，谁的 alpha 生效取决于绘制顺序。
+        // 否则两个半透明物体前后叠在一起时，谁的 alpha 生效取决于绘制顺序；
+        // 不透明按图元分组实例化（见模块头"实例化"一节）。
         //
-        // 列表里的 usize 是 **draw 槽位**（一个图元一个槽），不是实体下标：
-        // 材质是逐图元的（实体级覆盖让同一模型在不同实体上颜色不同），
-        // 每个图元都要有自己的一段 uniform。
-        let mut opaque: Vec<(usize, &GltfPrimitive)> = Vec::new();
-        let mut blended: Vec<(f32, usize, &GltfPrimitive)> = Vec::new();
-
-        // 上一帧的残留先清掉。`clear()` 只把长度归零，下面按需 `resize(n, 0)` 会把
-        // 要用的那段显式清零 —— 于是"没被任何 draw 用到的槽位"也是确定性的 0，
-        // 而不是上一帧的旧矩阵（虽然那些槽位不会被绘制，但确定性更好排查问题）。
+        // 上一帧的残留先清掉。所有收集缓冲都是复用字段（稳态零分配）：
+        // `clear()` 只把长度归零，容量留着下次接着用。
         self.draw_staging.clear();
+        self.pending_draws.clear();
+        self.opaque_batches.clear();
+        self.blended_draws.clear();
+        self.batch_index.clear();
         // 骨骼暂存同理：本帧每个动画实体占一个新槽，槽位随实体序单调递增。
         self.bone_staging.clear();
         let mut bone_slots_used = 0u32;
+        // 本帧用掉的**实例槽位**数（不透明实例 + 半透明绘制项），上限
+        // [`MAX_RENDER_DRAWS`]：超出静默丢弃（见该常量的说明）。
         let mut draw_slots_used = 0usize;
 
         for (i, entity) in entities.iter().enumerate() {
@@ -1734,19 +1831,17 @@ impl ScenePipeline {
 
             // -- 攒本实体的每个图元 --
             //
-            // 模型矩阵 / 蒙皮槽位是逐实体的，材质是逐图元的：对每个图元写一段
-            // `DrawUniform`（偏移 = draw 槽位 * alignment，按遍历顺序单调往后长，
-            // 最后一次性上传 —— 与骨头同款）。
+            // 模型矩阵 / 蒙皮槽位是逐实体的，材质是逐图元的：每个图元一个
+            // 实例槽位（`DrawUniform`），槽位在批次分组之后统一分配（见下）。
             //
             // 半透明排序用的是**世界坐标**——实体被父节点挪过位置之后，
             // 局部坐标早就不是它在屏幕上的深度了。
             let world_pos = Vec3::new(world.w_axis.x, world.w_axis.y, world.w_axis.z);
             let dist = (world_pos - *camera_pos).length_squared();
-            for prim in &mesh.primitives {
+            for (pi, prim) in mesh.primitives.iter().enumerate() {
                 if draw_slots_used >= MAX_RENDER_DRAWS {
                     break;
                 }
-                let slot = draw_slots_used;
                 draw_slots_used += 1;
 
                 // 有效材质 = 模型自带参数 ⊕ 实体级覆盖（覆盖是字段级的）。
@@ -1756,24 +1851,89 @@ impl ScenePipeline {
                     params,
                     material: MaterialUniform::from_params(&effective),
                 };
-                let bytes = bytemuck::bytes_of(&uniform);
-                let offset = slot * self.uniform_alignment as usize;
-                if self.draw_staging.len() < offset + bytes.len() {
-                    self.draw_staging.resize(offset + bytes.len(), 0);
-                }
-                self.draw_staging[offset..offset + bytes.len()].copy_from_slice(bytes);
 
                 if effective.blend {
-                    blended.push((dist, slot, prim));
+                    // 半透明：一项一个批次（不做合批，见模块头），距离排序键留好。
+                    self.material_binding(device, prim);
+                    self.blended_draws.push(BlendedDraw {
+                        dist,
+                        batch: DrawBatch {
+                            first: 0, // 槽位在排序之后统一分配
+                            count: 1,
+                            entity: i as u32,
+                            prim: pi as u32,
+                        },
+                        uniform,
+                    });
                 } else {
-                    opaque.push((slot, prim));
+                    // 不透明：按图元地址找批次，找不到就新开一批（顺序 = 首次遇到）。
+                    let key = prim as *const GltfPrimitive as usize;
+                    let batch = match self.batch_index.get(&key) {
+                        Some(b) => *b,
+                        None => {
+                            let b = self.opaque_batches.len() as u32;
+                            // 材质绑定组惰性创建要 `&mut self`，而 pass 里的绘制
+                            // 循环只能读 `self` —— 在这里就把要用到的备好。
+                            self.material_binding(device, prim);
+                            self.opaque_batches.push(DrawBatch {
+                                first: 0,
+                                count: 0,
+                                entity: i as u32,
+                                prim: pi as u32,
+                            });
+                            self.batch_index.insert(key, b);
+                            b
+                        }
+                    };
+                    let batch_ref = &mut self.opaque_batches[batch as usize];
+                    batch_ref.count += 1;
+                    self.pending_draws.push(PendingDraw { batch, uniform });
                 }
             }
         }
 
-        // 一次写完整段 draw 数据（见 `draw_staging` 的说明）。
-        // 空场景（一个可绘制实体都没有）时什么都不用写。
-        if !self.draw_staging.is_empty() {
+        // --- 槽位分配 + 实例数据落 staging ---
+        //
+        // 不透明批次占 [0, n)：一批一段**连续**槽位（`first` = 前缀和），
+        // 实例下标 = first + 批内序号 —— 与 `draw_indexed` 的 first_instance
+        // 正好对上。半透明接在后面（顺序 = 排序后的绘制顺序，互不重叠即可）。
+        //
+        // 远 → 近。`partial_cmp` 对 NaN 返回 None，退化成"保持原序"即可，
+        // 不值得为一个坏变换把整帧干掉。
+        self.blended_draws
+            .sort_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(std::cmp::Ordering::Equal));
+        let mut next_slot = 0u32;
+        for batch in &mut self.opaque_batches {
+            batch.first = next_slot;
+            next_slot += batch.count;
+        }
+        for draw in &mut self.blended_draws {
+            draw.batch.first = next_slot;
+            next_slot += 1;
+        }
+
+        let stride = DRAW_STRIDE;
+        self.draw_staging.clear();
+        self.draw_staging.resize(next_slot as usize * stride, 0);
+        if next_slot > 0 {
+            // 不透明：每批一个游标，实例按收集顺序填进本批的连续槽位。
+            self.batch_cursor.clear();
+            self.batch_cursor
+                .extend(self.opaque_batches.iter().map(|b| b.first));
+            for draw in &self.pending_draws {
+                let cursor = &mut self.batch_cursor[draw.batch as usize];
+                let offset = *cursor as usize * stride;
+                *cursor += 1;
+                self.draw_staging[offset..offset + stride]
+                    .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+            }
+            // 半透明：排序后一路往后排。
+            for draw in &self.blended_draws {
+                let offset = draw.batch.first as usize * stride;
+                self.draw_staging[offset..offset + stride]
+                    .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+            }
+            // 一次写完整段实例数据（见 `draw_staging` 的说明）。
             queue.write_buffer(&self.draw_buffer, 0, &self.draw_staging);
         }
 
@@ -1788,21 +1948,18 @@ impl ScenePipeline {
             );
         }
 
-        // 远 → 近。`partial_cmp` 对 NaN 返回 None，退化成"保持原序"即可，
-        // 不值得为一个坏变换把整帧干掉。
-        blended.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        // 统计口径 = 主 pass 真正发出的 draw call（阴影复用不透明批次，另计）。
+        // 统计口径 = 主 pass 真正发出的 draw call（阴影复用不透明批次，不重复计）。
         self.stats = FrameStats {
-            opaque_batches: opaque.len(),
-            opaque_instances: opaque.len(),
-            blended_draws: blended.len(),
+            opaque_batches: self.opaque_batches.len(),
+            opaque_instances: self.pending_draws.len(),
+            blended_draws: self.blended_draws.len(),
         };
 
         // --- 阴影 pass：先把深度画进阴影图（必须在主 pass 之前）---
         //
         // 只画**不透明**图元。半透明物体（玻璃之类）本来也不该投出实心影子，
         // 而且它们不写主深度缓冲，混到阴影图里只会投出一块错误的黑斑。
+        // 实例数据与主 pass 是同一份，批次也一模一样 —— 零额外准备。
         if shadow_enabled {
             let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow_pass"),
@@ -1820,12 +1977,18 @@ impl ScenePipeline {
                 ..Default::default()
             });
             spass.set_pipeline(&self.shadow_pipeline);
-            for (slot, prim) in &opaque {
-                let offset = *slot as u64 * self.uniform_alignment;
-                spass.set_bind_group(0, &self.shadow_pass_bind_group, &[offset as u32]);
+            spass.set_bind_group(0, &self.shadow_pass_bind_group, &[]);
+            for batch in &self.opaque_batches {
+                let Some(prim) = batch_prim(entities, model_cache, batch) else {
+                    continue;
+                };
                 spass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
                 spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
-                spass.draw_indexed(0..prim.num_indices, 0, 0..1);
+                spass.draw_indexed(
+                    0..prim.num_indices,
+                    0,
+                    batch.first..batch.first + batch.count,
+                );
             }
         }
 
@@ -1858,16 +2021,25 @@ impl ScenePipeline {
             ..Default::default()
         });
 
-        // 不透明：写深度
+        // 不透明：写深度。全局绑定组（含实例数据的 storage）整段绑一次，
+        // 逐批只换材质绑定组与顶点/索引缓冲，然后一次实例化 draw。
         rpass.set_pipeline(&self.pipeline);
-        for (slot, prim) in &opaque {
-            let offset = *slot as u64 * self.uniform_alignment;
-            rpass.set_bind_group(0, &self.global_bind_group, &[offset as u32]);
-            let material = self.material_binding(device, prim);
+        rpass.set_bind_group(0, &self.global_bind_group, &[]);
+        for batch in &self.opaque_batches {
+            let Some(prim) = batch_prim(entities, model_cache, batch) else {
+                continue;
+            };
+            // 绑定组在收集阶段就备好了（见那里的说明）；真缺了说明是逻辑错误，
+            // 宁可当场炸也不能拿着上一批的材质去画（画面会静默错色）。
+            let material = self.material_cache.get(&prim.material_id).expect("材质绑定组缺失");
             rpass.set_bind_group(1, material, &[]);
             rpass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
             rpass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
-            rpass.draw_indexed(0..prim.num_indices, 0, 0..1);
+            rpass.draw_indexed(
+                0..prim.num_indices,
+                0,
+                batch.first..batch.first + batch.count,
+            );
         }
 
         // 天空盒：不透明之后、半透明之前（见模块头的理由）。管线是 z = 1.0
@@ -1877,17 +2049,23 @@ impl ScenePipeline {
             self.sky.draw(&mut rpass, &self.global_bind_group);
         }
 
-        // 半透明：不写深度，远→近
-        if !blended.is_empty() {
+        // 半透明：不写深度，远→近。逐项一次 draw call（项数与批次无关）。
+        if !self.blended_draws.is_empty() {
             rpass.set_pipeline(&self.blend_pipeline);
-            for (_, slot, prim) in &blended {
-                let offset = *slot as u64 * self.uniform_alignment;
-                rpass.set_bind_group(0, &self.global_bind_group, &[offset as u32]);
-                let material = self.material_binding(device, prim);
+            rpass.set_bind_group(0, &self.global_bind_group, &[]);
+            for draw in &self.blended_draws {
+                let Some(prim) = batch_prim(entities, model_cache, &draw.batch) else {
+                    continue;
+                };
+                let material = self.material_cache.get(&prim.material_id).expect("材质绑定组缺失");
                 rpass.set_bind_group(1, material, &[]);
                 rpass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
                 rpass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
-                rpass.draw_indexed(0..prim.num_indices, 0, 0..1);
+                rpass.draw_indexed(
+                    0..prim.num_indices,
+                    0,
+                    draw.batch.first..draw.batch.first + 1,
+                );
             }
         }
     }

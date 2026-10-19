@@ -17,8 +17,8 @@
 //!
 //! | 场景 | 组成 | 批次 |
 //! |---|---|---|
-//! | 共享网格 | 2000 个实体全用 `builtin://cube` | 1 批（实例化真正生效） |
-//! | 各自网格 | 2000 个实体各自一份 `GltfMesh`（同几何、不同材质槽） | 2000 批（退化为逐 draw） |
+//! | 共享网格 | 2000 个实体全用 `builtin://cube` | 2 批（地面 1 + 方块 1，实例化真正生效） |
+//! | 各自网格 | 2000 个实体各自一份 `GltfMesh`（同几何、不同材质槽） | 2001 批（退化为逐 draw） |
 //!
 //! 后者不是"假想的最坏情况"——它同时是回归护栏：合批逻辑一旦把不同网格
 //! 错并成一批（顶点缓冲不同却当成同批），画面上会直接错乱，这里也是唯一
@@ -368,9 +368,8 @@ fn instancing_cost() {
     let mut shared = BenchPath::new(&device, &adapter);
     let mut unique = BenchPath::new(&device, &adapter);
     println!(
-        "  MSAA x{}；共享网格场景 {ACTORS} 实体 / {} 批；各自网格场景 {ACTORS} 实体 / {ACTORS} 批",
+        "  MSAA x{}；两场景各 {ACTORS} 实体（批次结构见末尾统计）",
         shared.pipeline.sample_count(),
-        ACTORS, // 打印用（真实批次数见统计断言）
     );
 
     // 预热（时间戳写进一次性查询集，不 resolve）。
@@ -468,9 +467,39 @@ fn instancing_cost() {
         u_stats.blended_draws,
     );
 
-    // P2.5 的教训：基准必须断言"活真干了"。
+    // P2.5 的教训：基准必须断言"活真干了"（宿主静默失败的场景在这里是
+    // 假快 —— 数字好看但调度根本没发生）。
     assert!(
         s_scene > 0.0 && u_scene > 0.0,
         "时间戳读数为 0：适配器是不是没真正写入查询？读数不可信"
+    );
+    // 实例化生效的硬读数：共享网格场景必须压成"远小于绘制项数"的批次数。
+    // 阈值刻意松（1%），不钉具体数字 —— 将来批次结构变多（按渲染状态分组
+    // 之类）也不该把它弄红；退化成逐 draw 则必然红。
+    assert!(
+        s_stats.opaque_batches * 100 <= s_stats.opaque_instances,
+        "共享网格场景没有合批：{} 批 / {} 实例",
+        s_stats.opaque_batches,
+        s_stats.opaque_instances
+    );
+    // 反向护栏：各自一份网格的场景一条都不许合并（并错 = 画面错乱）。
+    assert!(
+        u_stats.opaque_batches >= ACTORS,
+        "各自网格场景的批次不应减少（合错了）：{} 批 < {ACTORS}",
+        u_stats.opaque_batches
+    );
+    assert_eq!(
+        s_stats.opaque_instances, u_stats.opaque_instances,
+        "两种形态的绘制项数必须相同（几何完全相同）"
+    );
+    assert_eq!(
+        s_stats.blended_draws, u_stats.blended_draws,
+        "半透明绘制项数两场景应当相同"
+    );
+    // CPU 档位：合批必须真的省下"编码 + 提交"开销。给足余量（同机实测
+    // 6 倍以上），不做精确比值 —— 绝对值随机器状态浮动 1.5× 是常态。
+    assert!(
+        s_cpu * 2.0 < u_cpu,
+        "合批未能显著省下 CPU：共享 {s_cpu:.1} vs 各自 {u_cpu:.1} µs/帧"
     );
 }
