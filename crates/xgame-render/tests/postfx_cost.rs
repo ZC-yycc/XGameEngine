@@ -41,13 +41,18 @@
 //!
 //! 适配器不支持时间戳查询时跳过（与截图测试的"拿不到就跳过"同款纪律）。
 //!
+//! 本文件还有第二条入口 **`sky_ibl_cost`**：同一套读数口径（GPU 时间戳、
+//! 交替换轮、轮间中位数）用到天空盒 + 环境光照（IBL）上，三档对比
+//! （关 / 稳态开 / 每帧重建），细节见该测试的模块文档。两条基准分开成独立
+//! 入口，是为了各自的结论（后处理的账 / 天空的账）能被独立引用与重跑。
+//!
 //! ⚠ 绝对值随机器状态浮动（与 `update_throughput` 同款警告），**跨版本
 //! 比较必须同机背靠背**。
 
 use std::collections::HashMap;
 use std::time::Instant;
 
-use xgame_core::{BloomConfig, Entity, Light, RenderConfig, Scene};
+use xgame_core::{BloomConfig, Entity, Light, RenderConfig, Scene, SkyConfig};
 use xgame_math::glam::{Mat4, Vec3};
 use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::GltfMesh;
@@ -147,6 +152,20 @@ fn model_cache(device: &wgpu::Device, queue: &wgpu::Queue) -> HashMap<String, Gl
         cache.insert(builtin.uri(), mesh);
     }
     cache
+}
+
+/// 基准相机：俯视 3/4 角，把地面与立方体阵框满画面。两条基准共用，
+/// 保证不同入口之间的读数差异只来自被测路径本身。
+fn bench_camera() -> (Vec3, Mat4) {
+    let eye = Vec3::new(11.0, 8.5, 11.0);
+    let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+    let proj = Mat4::perspective_rh(
+        50.0_f32.to_radians(),
+        WIDTH as f32 / HEIGHT as f32,
+        0.1,
+        200.0,
+    );
+    (eye, proj * view)
 }
 
 fn depth_target(device: &wgpu::Device, sample_count: u32) -> (wgpu::Texture, wgpu::TextureView) {
@@ -259,6 +278,7 @@ impl LdrPath {
             view_proj,
             eye,
             SceneLighting::new(scene.ambient, &scene.lights),
+            SkyConfig::default(),
         );
         encoder.write_timestamp(stamps, base + 1);
         // 旧路径没有第二段；连着打两个点，让"后处理段"恒为 0（读数表结构统一）。
@@ -340,6 +360,7 @@ impl HdrPath {
             view_proj,
             eye,
             SceneLighting::new(scene.ambient, &scene.lights),
+            settings.sky,
         );
         encoder.write_timestamp(stamps, base + 1);
         self.postfx.render(
@@ -439,6 +460,13 @@ struct RoundTriple {
     bloom: Round,
 }
 
+/// `sky_ibl_cost` 的一轮读数（复用 `Round`，但字段名按天空三档来）。
+struct SkyTriple {
+    off: Round,
+    steady: Round,
+    churn: Round,
+}
+
 #[test]
 #[ignore = "手动运行的 GPU 微基准，不进 CI 门禁"]
 fn postfx_cost() {
@@ -457,15 +485,7 @@ fn postfx_cost() {
     let matrices = scene.world_matrices();
 
     // 俯视 3/4 角，把地面与立方体阵框满画面。
-    let eye = Vec3::new(11.0, 8.5, 11.0);
-    let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
-    let proj = Mat4::perspective_rh(
-        50.0_f32.to_radians(),
-        WIDTH as f32 / HEIGHT as f32,
-        0.1,
-        200.0,
-    );
-    let view_proj = proj * view;
+    let (eye, view_proj) = bench_camera();
 
     let mut ldr = LdrPath::new(&device, &adapter);
     let mut hdr = HdrPath::new(&device, &adapter);
@@ -637,5 +657,303 @@ fn postfx_cost() {
         "postfx_cost[差额]: Bloom 相对 ACES {bloom_delta:+.1} µs/帧（{:+.1}%）—— \
          亮部提取 + 降采样 + 6 趟可分离模糊全在半分辨率以下",
         bloom_delta / (hdr_scene + hdr_post) * 100.0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 天空 + IBL 的每帧成本
+// ---------------------------------------------------------------------------
+
+/// 只跑一帧的单帧读数（口径与 `run_round` 相同，噪声未做中位数平滑）。
+///
+/// 用途只有一个："打开天空开关的那一帧"（BRDF LUT 生成 + 首次预过滤 +
+/// 球谐投影）——那是一次性成本，不能混进稳态轮次里取中位数。
+/// `cpu_us` 不测（写 0）；调用方自己知道这一帧的语义。
+fn run_single_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame: impl FnOnce(&wgpu::QuerySet, u32),
+) -> Round {
+    let stamps = device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("bench_single_stamps"),
+        ty: wgpu::QueryType::Timestamp,
+        count: STAMPS_PER_FRAME as u32,
+    });
+    frame(&stamps, 0);
+
+    // 单帧只有 24 字节：不需要整轮口径那种 256 对齐（那是 resolve 目标偏移的
+    // 要求，这里是偏移 0 + 普通 copy）。
+    let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bench_single_resolve"),
+        size: 256,
+        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bench_single_readback"),
+        size: 256,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("bench_single_resolve_encoder"),
+    });
+    encoder.resolve_query_set(&stamps, 0..STAMPS_PER_FRAME as u32, &resolve, 0);
+    encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, (STAMPS_PER_FRAME * 8) as u64);
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv().expect("读回通道断开").expect("映射时间戳缓冲失败");
+    let ticks: Vec<u64> = {
+        let view = slice.get_mapped_range();
+        view.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect()
+    };
+    readback.unmap();
+
+    let period = queue.get_timestamp_period() as f64;
+    Round {
+        scene_us: (ticks[1] - ticks[0]) as f64 * period / 1000.0,
+        post_us: (ticks[2] - ticks[1]) as f64 * period / 1000.0,
+        cpu_us: 0.0,
+    }
+}
+
+/// 重建档的每帧设置：`sun_size` 在两个相邻值之间来回切 ⇒ uniform key 每帧都变。
+///
+/// 为什么不用"每帧转向光源"来模拟昼夜循环：重建路径只认"key 变了"，重建
+/// 内容与哪个字段变**无关**（同样 30 趟 pass）；挑一个不牵连场景其他环节
+/// （灯光打包、阴影）的字段，读数里就只有天空自己的账。代价与昼夜循环同量级。
+fn churn_settings(frame: u32) -> RenderConfig {
+    let mut sky = SkyConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    sky.sun_size = 4.0 + (frame % 2) as f32 * 0.001;
+    RenderConfig {
+        sky,
+        ..RenderConfig::default()
+    }
+}
+
+/// 天空 + IBL 微基准：三档（关 / 稳态开 / 每帧重建）。
+///
+/// # 三档比什么
+///
+/// | 档 | 组成 | 读数回答的问题 |
+/// |---|---|---|
+/// | 关 | HDR + ACES，天空默认关（uniform 照写、开关位 0、不建内容） | 基线 |
+/// | 稳态 | 天空开、参数恒定（key 不变） | 每帧**增量**：天空盒全屏 pass + 场景片元的 IBL 采样（环境立方体 + BRDF LUT） |
+/// | 重建 | 天空开、每帧微调 `sun_size`（key 每帧都变） | **最坏情况**：球谐重投影（CPU 1024 点）+ 30 趟预过滤 pass |
+///
+/// 稳态档在预热后单独测**首帧**（BRDF LUT 生成 + 首次预过滤 + 球谐）——
+/// 那是"打开天空开关的那一帧"的一次性账；后续每帧只剩 80 字节 uniform 写入，
+/// 这是"固定分配、按 key 重建"设计的直接读数。
+///
+/// # 断言（P2.5 纪律：基准必须证明"活真干了"）
+///
+/// - 稳态场景段 > 关 + 1 µs（天空盒与 IBL 采样真在跑）；
+/// - 重建场景段 > 稳态 + 10 µs（30 趟预过滤真在重跑）；
+/// - 重建 CPU > 稳态 + 5 µs（球谐投影与 30 趟 pass 的编码真在跑）。
+///
+/// key 因实现回归不再变化时，后两条必红（这正是它们要守的东西）。
+#[test]
+#[ignore = "手动运行的 GPU 微基准，不进 CI 门禁"]
+fn sky_ibl_cost() {
+    /// 只热身管线与 GPU 频率（让"首帧天空"的读数少受冷启动污染）。
+    const PIPELINE_WARMUP: std::time::Duration = std::time::Duration::from_millis(500);
+
+    let Some((device, queue, adapter)) = gpu() else {
+        return;
+    };
+    let info = adapter.get_info();
+    println!(
+        "sky_ibl_cost: {} ({:?}, {:?}) {}x{}",
+        info.name, info.device_type, info.backend, WIDTH, HEIGHT
+    );
+
+    let scene = bench_scene();
+    let cache = model_cache(&device, &queue);
+    let anim = AnimationDriver::new();
+    let matrices = scene.world_matrices();
+    let (eye, view_proj) = bench_camera();
+
+    let off = RenderConfig::default();
+    let sky_on = RenderConfig {
+        sky: SkyConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        ..RenderConfig::default()
+    };
+
+    // [0] 关 / [1] 稳态 / [2] 重建 —— 与 Bloom 档同款纪律：重建档的设置每帧
+    // 都变，单独一份实例（那份实例的 SkyResources 一直在重建，别搅进稳态档）。
+    let mut paths = [
+        HdrPath::new(&device, &adapter),
+        HdrPath::new(&device, &adapter),
+        HdrPath::new(&device, &adapter),
+    ];
+    println!(
+        "  MSAA: x{}（HDR 附件）；天空：稳态档预过滤 128²/5 mip、BRDF LUT 128²",
+        paths[0].pipeline.sample_count()
+    );
+
+    // -- 阶段 A：管线与频率热身。稳态档此刻还用着"关"，为的是让"首帧天空"
+    // 的语义 = "已经渲过若干帧、然后打开天空开关的那一帧"（管线已热）。
+    let warmup = device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("sky_bench_warmup_stamps"),
+        ty: wgpu::QueryType::Timestamp,
+        count: (FRAMES * STAMPS_PER_FRAME) as u32,
+    });
+    let warmup_start = Instant::now();
+    while warmup_start.elapsed() < PIPELINE_WARMUP {
+        paths[0].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off);
+        paths[1].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off);
+        paths[2].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, churn_settings(0));
+    }
+    device.poll(wgpu::Maintain::Wait);
+
+    // -- 阶段 B："打开天空开关的那一帧"（BRDF LUT + 首次预过滤 + 球谐）。
+    let first = run_single_frame(&device, &queue, |stamps, base| {
+        paths[1].frame(
+            &device, &queue, stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+            sky_on,
+        );
+    });
+    println!(
+        "sky_ibl_cost[首帧]: 场景 {:.1} + 后处理 {:.1} µs —— 打开天空开关的那一帧\
+         （BRDF LUT 生成 + 首次预过滤 30 趟 + 球谐投影；单帧读数，含冷态开销）",
+        first.scene_us, first.post_us
+    );
+
+    // -- 阶段 C：稳态热身（三档各就各位）。
+    let warmup_start = Instant::now();
+    while warmup_start.elapsed() < WARMUP_TIME {
+        paths[0].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off);
+        paths[1].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, sky_on);
+        paths[2].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, churn_settings(0));
+    }
+    device.poll(wgpu::Maintain::Wait);
+
+    let byte_len = (FRAMES * STAMPS_PER_FRAME * 8) as u64;
+    let make_buffers = || {
+        (
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sky_bench_stamps_resolve"),
+                size: byte_len,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sky_bench_stamps_readback"),
+                size: byte_len,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        )
+    };
+
+    let mut triples = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let stamps = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("sky_bench_stamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: (FRAMES * STAMPS_PER_FRAME) as u32,
+        });
+        let (resolve, readback) = make_buffers();
+        let o = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
+            paths[0].frame(&device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye, off);
+        });
+        let s = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
+            paths[1].frame(&device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye, sky_on);
+        });
+        let c = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
+            let frame = base / STAMPS_PER_FRAME as u32;
+            paths[2].frame(&device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye, churn_settings(frame));
+        });
+        println!(
+            "  第 {} 轮: 关 场景{:.1}/CPU{:.1} | 稳态 场景{:.1}/CPU{:.1} | 重建 场景{:.1}/CPU{:.1}（µs/帧）",
+            triples.len() + 1,
+            o.scene_us,
+            o.cpu_us,
+            s.scene_us,
+            s.cpu_us,
+            c.scene_us,
+            c.cpu_us,
+        );
+        triples.push(SkyTriple {
+            off: o,
+            steady: s,
+            churn: c,
+        });
+    }
+
+    let pick = |f: fn(&Round) -> f64, path: fn(&SkyTriple) -> &Round| {
+        let mut v: Vec<f64> = triples.iter().map(|p| f(path(p))).collect();
+        median(&mut v)
+    };
+    let off_scene = pick(|r| r.scene_us, |p| &p.off);
+    let off_post = pick(|r| r.post_us, |p| &p.off);
+    let off_cpu = pick(|r| r.cpu_us, |p| &p.off);
+    let steady_scene = pick(|r| r.scene_us, |p| &p.steady);
+    let steady_post = pick(|r| r.post_us, |p| &p.steady);
+    let steady_cpu = pick(|r| r.cpu_us, |p| &p.steady);
+    let churn_scene = pick(|r| r.scene_us, |p| &p.churn);
+    let churn_post = pick(|r| r.post_us, |p| &p.churn);
+    let churn_cpu = pick(|r| r.cpu_us, |p| &p.churn);
+
+    assert!(
+        off_scene > 0.0 && steady_scene > 0.0,
+        "时间戳读数为 0：适配器是不是没真正写入查询？读数不可信"
+    );
+    assert!(
+        steady_scene > off_scene + 1.0,
+        "稳态档的场景段与关天空无差别（{steady_scene:.1} vs {off_scene:.1} µs）：\
+         天空盒 / IBL 采样是不是没跑？"
+    );
+    assert!(
+        churn_scene > steady_scene + 10.0,
+        "重建档的场景段与稳态无差别（{churn_scene:.1} vs {steady_scene:.1} µs）：\
+         预过滤是不是没在 key 变化时重跑？"
+    );
+    assert!(
+        churn_cpu > steady_cpu + 5.0,
+        "重建档的 CPU 编码与稳态无差别（{churn_cpu:.1} vs {steady_cpu:.1} µs）：\
+         球谐投影 / 30 趟 pass 的编码是不是没跑？"
+    );
+
+    println!(
+        "sky_ibl_cost[中位数]: 关 场景 {off_scene:.1} + 后处理 {off_post:.1} = {:.1} µs/帧（CPU {off_cpu:.1}）",
+        off_scene + off_post
+    );
+    println!(
+        "sky_ibl_cost[中位数]: 稳态开 场景 {steady_scene:.1} + 后处理 {steady_post:.1} = {:.1} µs/帧（CPU {steady_cpu:.1}）",
+        steady_scene + steady_post
+    );
+    println!(
+        "sky_ibl_cost[中位数]: 每帧重建 场景 {churn_scene:.1} + 后处理 {churn_post:.1} = {:.1} µs/帧（CPU {churn_cpu:.1}）",
+        churn_scene + churn_post
+    );
+    let steady_delta = steady_scene - off_scene;
+    println!(
+        "sky_ibl_cost[差额]: 稳态开相对关 {steady_delta:+.1} µs/帧（场景段，{:+.1}%）= 天空盒 pass + IBL 采样\
+         （后处理段 {:.1} vs {:.1} µs，应几乎相等）",
+        steady_delta / off_scene * 100.0,
+        steady_post,
+        off_post
+    );
+    let churn_delta = churn_scene - steady_scene;
+    println!(
+        "sky_ibl_cost[差额]: 每帧重建相对稳态 {churn_delta:+.1} µs/帧（{:+.1}%）—— 球谐投影（CPU 1024 点）+ 30 趟预过滤 pass；\
+         首帧额外 {:.1} µs（BRDF LUT + 冷态）",
+        churn_delta / steady_scene * 100.0,
+        first.scene_us - churn_scene
     );
 }

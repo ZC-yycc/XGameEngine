@@ -19,4 +19,19 @@
         scripts_dir: "Scripts",
         search_paths: [],
     ),
+    // 画面：色调映射走默认 ACES；天空作为**演示**在此开启（引擎默认关，
+    // 见 SkyConfig 的说明）。环境光 = ambient + 天空 IBL 两者相加。
+    render: (
+        exposure: 1.0,
+        tone_map: Aces,
+        sky: (
+            enabled: true,
+            intensity: 1.0,
+            zenith: (0.09, 0.26, 0.60),
+            horizon: (0.62, 0.72, 0.88),
+            ground: (0.15, 0.14, 0.13),
+            sun_size: 2.0,
+            sun_intensity: 1.0,
+        ),
+    ),
 )

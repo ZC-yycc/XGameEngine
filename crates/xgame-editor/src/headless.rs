@@ -485,6 +485,15 @@ impl HeadlessReport {
                     "threshold": self.render.bloom.threshold,
                     "knee": self.render.bloom.knee,
                 },
+                "sky": {
+                    "enabled": self.render.sky.enabled,
+                    "intensity": self.render.sky.intensity,
+                    "zenith": self.render.sky.zenith,
+                    "horizon": self.render.sky.horizon,
+                    "ground": self.render.sky.ground,
+                    "sun_size": self.render.sky.sun_size,
+                    "sun_intensity": self.render.sky.sun_intensity,
+                },
             },
             "scene_dump": self.scene_dump,
             "screenshot": match &self.screenshot {
@@ -1325,7 +1334,7 @@ mod tests {
         for key in ["available", "active", "cached_clips", "failed_clips"] {
             assert!(value["audio"].get(key).is_some(), "audio 缺字段 {key}");
         }
-        for key in ["exposure", "tone_map", "bloom"] {
+        for key in ["exposure", "tone_map", "bloom", "sky"] {
             assert!(value["render"].get(key).is_some(), "render 缺字段 {key}");
         }
         assert_eq!(
@@ -1340,6 +1349,16 @@ mod tests {
         // `knee` 是 f32：`json!` 把它**精确加宽**成 f64（0.6000000238…），
         // 与十进制字面量 `0.6`（另一个 f64）不相等 —— 按 f32 的真值比。
         assert_eq!(value["render"]["bloom"]["knee"], f64::from(0.6f32));
+        // 天空同样默认关，但字段是完整快照（智能体靠它判断"这张图有没有天空"）。
+        assert_eq!(value["render"]["sky"]["enabled"], false);
+        assert_eq!(value["render"]["sky"]["intensity"], 1.0);
+        assert_eq!(value["render"]["sky"]["sun_size"], f64::from(1.5f32));
+        for key in ["zenith", "horizon", "ground"] {
+            assert!(
+                value["render"]["sky"][key].as_array().is_some_and(|a| a.len() == 3),
+                "sky.{key} 应当是三通道数组"
+            );
+        }
         assert!(value["scene_dump"].is_null(), "没给 --dump-scene 时是 null");
         assert!(value["screenshot"].is_null(), "没给 --screenshot 时是 null");
         cleanup(&project);

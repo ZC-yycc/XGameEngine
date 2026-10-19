@@ -478,6 +478,16 @@ impl SceneRenderer {
         hash = mix_bits(hash, render.bloom.intensity.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.threshold.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.knee.to_bits() as u64);
+        // 天空 / IBL 全字段进指纹：开着天空时它决定背景与所有物体的环境光，
+        // 漏一个字段就是"在 ⚙ 里调了天空颜色，视口纹丝不动"（材质/画面设置
+        // 都踩过同一类坑）。太阳方向不在这里 —— 它来自灯光，上方灯光段已哈希。
+        hash = mix_bits(hash, render.sky.enabled as u64);
+        hash = mix_bits(hash, render.sky.intensity.to_bits() as u64);
+        hash = mix_f32s(hash, &render.sky.zenith);
+        hash = mix_f32s(hash, &render.sky.horizon);
+        hash = mix_f32s(hash, &render.sky.ground);
+        hash = mix_bits(hash, render.sky.sun_size.to_bits() as u64);
+        hash = mix_bits(hash, render.sky.sun_intensity.to_bits() as u64);
 
         // 光源按渲染管线同样的规则取（只算 active、最多 MAX_LIGHTS 盏），
         // 免得一个超出上限的光源改了参数却白触发一次重绘。
@@ -759,6 +769,7 @@ impl SceneRenderer {
             view_proj,
             camera_pos,
             lighting,
+            settings.sky,
         );
 
         // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → egui 注册的 LDR 显示

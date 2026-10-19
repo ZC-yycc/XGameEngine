@@ -259,7 +259,118 @@ impl BloomConfig {
     }
 }
 
-/// 画面渲染参数（色调映射 / 曝光 / 泛光），持久化在 `project.ron` 的 `render` 节。
+/// 程序化天空盒与环境光照（IBL）参数。
+///
+/// 天空是一个**解析函数**：天顶 / 地平线 / 地面三段颜色渐变 + 太阳盘 + 太阳
+/// 光晕，直接对着方向求值。不做 Preetham/Hosek 那类物理大气散射 —— 前者是
+/// "长什么样"的参数化，后者是"为什么长这样"的模型；先把前者做扎实（同样的
+/// 出口结构以后能原样换成物理模型）。
+///
+/// 天空同时是**两件事的输入**，这是它比"一张背景图"重要的地方：
+/// ① 背景像素画什么；② 环境照明（IBL）—— 漫反射用球谐（L2，CPU 侧投影）、
+/// 镜面用 GGX 重要性采样的预过滤立方体贴图（GPU 侧一次生成）。两者从同一
+/// 个解析函数现取 ⇒ "背景是蓝天、物体却按另一套环境光照明"这种分叉从根上
+/// 不存在。
+///
+/// **默认关（`enabled = false`）**：与 [`BloomConfig`] 同一条纪律 —— 天空是
+/// 风格参数，默认改变画面不可接受。关着时渲染器**整段跳过**（不建环境贴图、
+/// 不采样三张环境纹理），画面与天空上线前逐位一致；`ambient` 照旧是环境光
+/// 的入口。开着时环境光 = `ambient` + IBL 两者**相加**：想只要 IBL 就把
+/// `ambient` 清零，想保留旧观感就留着它。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SkyConfig {
+    /// 是否启用天空盒与环境照明。
+    pub enabled: bool,
+    /// 整体强度乘子（0 = 天空全黑 —— 那时 IBL 也全黑，等价于只有 ambient）。
+    pub intensity: f32,
+    /// 天顶色（线性 RGB）。
+    pub zenith: [f32; 3],
+    /// 地平线色。天空段与地面段在视线水平处**都**取它 —— 渐变因此在
+    /// `dir.y == 0` 处连续，不需要额外处理"缝合线"。
+    pub horizon: [f32; 3],
+    /// 地面色（镜头朝下看时的颜色：体感上是"脚下的大地"）。
+    pub ground: [f32; 3],
+    /// 太阳盘半径（度）。真实太阳约 0.53°，默认调到能看清的量级。
+    pub sun_size: f32,
+    /// 太阳盘与光晕的强度乘子。太阳的位置与颜色来自场景里**第一盏
+    /// active 的方向光**（颜色取光色）；场景没有方向光时太阳整段不画
+    /// （这个乘子也不生效——没有灯就没有太阳）。
+    pub sun_intensity: f32,
+}
+
+impl Default for SkyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 1.0,
+            zenith: [0.12, 0.28, 0.58],
+            horizon: [0.58, 0.68, 0.82],
+            ground: [0.16, 0.15, 0.14],
+            sun_size: 1.5,
+            sun_intensity: 1.0,
+        }
+    }
+}
+
+impl SkyConfig {
+    /// 整体强度上限：再亮整幅背景糊成纯白，没有可用画面。
+    pub const MAX_INTENSITY: f32 = 10.0;
+    /// 太阳强度上限（同上）。
+    pub const MAX_SUN_INTENSITY: f32 = 10.0;
+    /// 太阳盘半径范围（度）：下限保证看得见，上限避免"半个天空都是太阳"。
+    pub const MIN_SUN_SIZE: f32 = 0.1;
+    pub const MAX_SUN_SIZE: f32 = 20.0;
+    /// 颜色分量上限：线性值允许超过 1（HDR 天空），但不能失控到 NaN 邻域
+    /// 的不可用亮度。
+    pub const MAX_COLOR: f32 = 50.0;
+
+    /// 与默认值完全一致时不落盘（`skip_serializing_if` 用）：没开过天空的
+    /// 项目 diff 里不出现这一节。判据是**整体相等**而不是 `!enabled` ——
+    /// 关着但调过颜色的配置照样落盘（用户调过的参数不悄悄丢）。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// 容错读取（与 [`RenderConfig::sanitized`] 同一契约）：
+    /// NaN / 无穷进不了渲染器，合法但离谱的量级夹进安全范围。
+    pub fn sanitized(self) -> Self {
+        let color = |c: [f32; 3], fallback: [f32; 3]| -> [f32; 3] {
+            if c.iter().all(|x| x.is_finite()) {
+                c.map(|x| x.clamp(0.0, Self::MAX_COLOR))
+            } else {
+                fallback
+            }
+        };
+        let d = Self::default();
+        let intensity = if self.intensity.is_finite() {
+            self.intensity.clamp(0.0, Self::MAX_INTENSITY)
+        } else {
+            d.intensity
+        };
+        let sun_size = if self.sun_size.is_finite() {
+            self.sun_size.clamp(Self::MIN_SUN_SIZE, Self::MAX_SUN_SIZE)
+        } else {
+            d.sun_size
+        };
+        let sun_intensity = if self.sun_intensity.is_finite() {
+            self.sun_intensity.clamp(0.0, Self::MAX_SUN_INTENSITY)
+        } else {
+            d.sun_intensity
+        };
+        Self {
+            enabled: self.enabled,
+            intensity,
+            zenith: color(self.zenith, d.zenith),
+            horizon: color(self.horizon, d.horizon),
+            ground: color(self.ground, d.ground),
+            sun_size,
+            sun_intensity,
+        }
+    }
+}
+
+/// 画面渲染参数（色调映射 / 曝光 / 泛光 / 天空），持久化在 `project.ron` 的
+/// `render` 节。
 ///
 /// 与 [`RuntimeConfig`] 同一套路：此前曝光是硬编码常量、色调映射根本不存在；
 /// 现在它们是**数据** —— 编辑器 ⚙ Project Settings 可调、智能体改一行文本即可、
@@ -276,6 +387,9 @@ pub struct RenderConfig {
     /// （老项目 diff 不出新节的噪声）。
     #[serde(default, skip_serializing_if = "BloomConfig::is_default")]
     pub bloom: BloomConfig,
+    /// 天空盒 / 环境照明参数，见 [`SkyConfig`]。同样后加 + 默认关。
+    #[serde(default, skip_serializing_if = "SkyConfig::is_default")]
+    pub sky: SkyConfig,
 }
 
 impl Default for RenderConfig {
@@ -284,6 +398,7 @@ impl Default for RenderConfig {
             exposure: 1.0,
             tone_map: ToneMapMode::Aces,
             bloom: BloomConfig::default(),
+            sky: SkyConfig::default(),
         }
     }
 }
@@ -300,7 +415,8 @@ impl RenderConfig {
     ///
     /// - 曝光 NaN / 无穷 / 非正 → 退回默认 1.0；
     /// - 合法但离谱的量级夹进 [`Self::MIN_EXPOSURE`] / [`Self::MAX_EXPOSURE`]；
-    /// - Bloom 三件套走 [`BloomConfig::sanitized`]。
+    /// - Bloom 三件套走 [`BloomConfig::sanitized`]；
+    /// - 天空走 [`SkyConfig::sanitized`]。
     pub fn sanitized(self) -> Self {
         let exposure = if self.exposure.is_finite() && self.exposure > 0.0 {
             self.exposure.clamp(Self::MIN_EXPOSURE, Self::MAX_EXPOSURE)
@@ -311,6 +427,7 @@ impl RenderConfig {
             exposure,
             tone_map: self.tone_map,
             bloom: self.bloom.sanitized(),
+            sky: self.sky.sanitized(),
         }
     }
 }
@@ -472,5 +589,109 @@ mod tests {
         assert_eq!(ok.intensity, 0.6);
         assert_eq!(ok.threshold, 1.2);
         assert_eq!(ok.knee, 0.5);
+    }
+
+    /// 天空默认必须是**关**：它是风格参数，默认改变旧项目画面不可接受
+    /// （与 Bloom 同一条纪律）。默认配置序列化后不出现 sky 节。
+    #[test]
+    fn sky_defaults_to_off() {
+        let s = SkyConfig::default();
+        assert!(!s.enabled, "天空默认必须关闭");
+        assert!(s.is_default());
+
+        let text = ron::to_string(&RenderConfig::default()).expect("serialize");
+        assert!(!text.contains("sky"), "未调过的天空不该落盘: {text}");
+
+        // 关着但调过颜色 → 照样落盘（用户调过的参数不悄悄丢），且往返一致。
+        let tuned = RenderConfig {
+            sky: SkyConfig {
+                zenith: [0.1, 0.2, 0.9],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = ron::to_string(&tuned).expect("serialize");
+        assert!(text.contains("sky"), "调过的参数必须落盘: {text}");
+        let back: RenderConfig = ron::from_str(&text).expect("deserialize");
+        assert_eq!(back, tuned);
+    }
+
+    /// 天空容错：NaN / 负强度 / 离谱太阳尺寸与颜色全部落到安全值。
+    #[test]
+    fn sky_config_sanitized_rejects_garbage() {
+        let nan = SkyConfig {
+            intensity: f32::NAN,
+            sun_size: f32::NAN,
+            sun_intensity: f32::INFINITY,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(nan.intensity, SkyConfig::default().intensity);
+        assert_eq!(nan.sun_size, SkyConfig::default().sun_size);
+        assert_eq!(
+            nan.sun_intensity,
+            SkyConfig::default().sun_intensity,
+            "无穷太阳强度必须落回默认"
+        );
+
+        let negative = SkyConfig {
+            intensity: -3.0,
+            sun_intensity: -1.0,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(negative.intensity, 0.0, "负强度 = 关，不是反向天空");
+        assert_eq!(negative.sun_intensity, 0.0);
+
+        // 太阳尺寸过小 / 过大都夹住；颜色分量为负或超限都夹住。
+        let wild = SkyConfig {
+            sun_size: 0.001,
+            zenith: [-1.0, 200.0, f32::NAN],
+            ground: [f32::INFINITY, 0.5, 0.5],
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(wild.sun_size, SkyConfig::MIN_SUN_SIZE);
+        assert_eq!(
+            wild.zenith,
+            SkyConfig::default().zenith,
+            "含 NaN 的颜色整组退回默认"
+        );
+        assert_eq!(
+            wild.ground,
+            SkyConfig::default().ground,
+            "含无穷的颜色整组退回默认"
+        );
+
+        // 有限但越界的颜色**只夹取、不整组退回**：一个分量写坏不该把同行的
+        // 另外两个也丢回默认（用户调过的参数不悄悄丢）。
+        let clamped = SkyConfig {
+            zenith: [-1.0, 200.0, 0.5],
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(clamped.zenith, [0.0, SkyConfig::MAX_COLOR, 0.5]);
+
+        // 合法输入逐字段原样保留（HDR 颜色允许超过 1）。
+        let ok = SkyConfig {
+            enabled: true,
+            intensity: 1.4,
+            zenith: [2.0, 1.0, 0.5],
+            horizon: [0.7, 0.8, 0.9],
+            ground: [0.2, 0.2, 0.2],
+            sun_size: 2.5,
+            sun_intensity: 3.0,
+        }
+        .sanitized();
+        let expected = SkyConfig {
+            enabled: true,
+            intensity: 1.4,
+            zenith: [2.0, 1.0, 0.5],
+            horizon: [0.7, 0.8, 0.9],
+            ground: [0.2, 0.2, 0.2],
+            sun_size: 2.5,
+            sun_intensity: 3.0,
+        };
+        assert_eq!(ok, expected, "合法输入必须逐字段原样保留");
     }
 }

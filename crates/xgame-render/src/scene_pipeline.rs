@@ -28,18 +28,36 @@
 //!
 //! ```text
 //! group(0)  全局，整帧一份
-//!   binding 0  camera    uniform
+//!   binding 0  camera    uniform（view_proj + inv_view_proj + 相机位置）
 //!   binding 1  lights    uniform（环境光 + 光源数组）
 //!   binding 2  draw      uniform（动态偏移：每个 draw 占一段；模型矩阵 +
 //!                        蒙皮槽位 + 材质）
 //!   binding 3  shadow    texture_depth_2d（方向光阴影深度图）
 //!   binding 4  shadow_smp    comparison sampler
 //!   binding 5  shadow_ub     uniform（光源视图投影矩阵 + 偏置/开关）
+//!   binding 6  bones     storage（蒙皮骨骼矩阵，见下）
+//!   binding 7  sky       uniform（天空参数；太阳转向/强度都在这）
+//!   binding 8  sky_sh    uniform（漫反射环境的 L2 球谐，E/π 口径）
+//!   binding 9  env_cube  texture_cube（预过滤镜面环境，5 级 mip）
+//!   binding 10 env_smp   sampler（立方体与 BRDF LUT 共用）
+//!   binding 11 brdf_lut  texture_2d（split-sum 的 BRDF 积分表）
 //!
 //! group(1)  材质，每个材质槽一份
 //!   binding 0  base color texture
 //!   binding 1  sampler
 //! ```
+//!
+//! # 天空盒与环境光照（IBL）
+//!
+//! 天空（[`crate::sky`]）一开，环境照明从"均匀 ambient"升级为"解析天空的
+//! 积分"：漫反射走 CPU 投影的 L2 球谐，镜面走 GPU 预过滤立方体 + BRDF LUT。
+//! 天空盒本身是场景 pass 里的一个全屏三角形，画在**不透明之后、半透明之前**
+//! （z = 1.0 + `LessEqual` + 不写深度）：被几何盖住的像素失败、空像素作画，
+//! 半透明仍混在天空之上。它画进 MSAA 附件 ⇒ 物体轮廓与天空的交界有正确
+//! 的多采样覆盖，而不是"先铺一张背景图再让 MSAA 只作用于物体"。
+//!
+//! 关着时整段跳过（无 pass、无采样），与天空上线前的画面逐位一致 —— 亮度
+//! 基线纪律与 π 标定同款（见 `fs_main` 的"π 校准"一节）。
 //!
 //! 材质绑定组**惰性创建并缓存**（键是 `GltfPrimitive::material_id`），
 //! 所以一次模型加载之后，每帧只是查表 + `set_bind_group`，不会重复建对象。
@@ -68,9 +86,10 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use xgame_math::glam::{Mat4, Vec3};
 
-use xgame_core::{Entity, Light, LightKind};
+use xgame_core::{Entity, Light, LightKind, SkyConfig};
 use crate::animation::AnimationDriver;
 use crate::gltf_loader::{Bounds, GltfMesh, GltfPrimitive, GltfVertex, MaterialParams};
+use crate::sky::{self, SkyResources, SkyUniform};
 
 /// 每帧最多渲染的实体数量。
 ///
@@ -157,6 +176,11 @@ pub const MAX_LIGHTS: usize = 8;
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    /// 视图投影矩阵的逆：天空盒片元由 NDC 反推视线方向（见 sky.rs）。
+    ///
+    /// 逆矩阵每帧在 **CPU** 侧解算，而不是在着色器里逐像素求逆 —— 后者
+    /// 每像素一次 4×4 求逆是纯浪费（全屏像素都算同一个矩阵）。
+    inv_view_proj: [[f32; 4]; 4],
     camera_pos: [f32; 4],
 }
 
@@ -383,7 +407,7 @@ pub fn fit_directional_shadow(direction: Vec3, scene: Bounds) -> Option<Mat4> {
 // ---------------------------------------------------------------------------
 
 const SCENE_VERT_SRC: &str = r#"
-struct CameraUniform { view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
+struct CameraUniform { view_proj: mat4x4<f32>, inv_view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
 // 逐 draw 数据：模型矩阵 + 蒙皮槽位（params.x）+ 材质（base_color / material）。
 struct DrawUniform  {
     model: mat4x4<f32>,
@@ -472,7 +496,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 const SCENE_FRAG_SRC: &str = r#"
 const MAX_LIGHTS: u32 = 8u;
 
-struct CameraUniform { view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
+struct CameraUniform { view_proj: mat4x4<f32>, inv_view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
 struct GpuLight      { pos_type: vec4<f32>, color_intensity: vec4<f32>, shadow_params: vec4<f32> }
 struct LightsUniform { ambient: vec4<f32>, lights: array<GpuLight, 8> }
 // 与顶点着色器同一份逐 draw 数据；本阶段只用 base_color / material 两个字段。
@@ -490,6 +514,13 @@ struct ShadowUniform { light_view_proj: mat4x4<f32>, params: vec4<f32> }
 @group(0) @binding(3) var shadow_tex: texture_depth_2d;
 @group(0) @binding(4) var shadow_smp: sampler_comparison;
 @group(0) @binding(5) var<uniform> shadow: ShadowUniform;
+// 7..11：天空（类型与函数在 sky.rs 的公共片段里，这里只声明绑定）。
+// 关着天空时这几张表照常绑着（布局固定），片元按开关位整段跳过采样。
+@group(0) @binding(7) var<uniform> sky: SkyUniform;
+@group(0) @binding(8) var<uniform> skysh: SkySH;
+@group(0) @binding(9) var env_cube: texture_cube<f32>;
+@group(0) @binding(10) var env_smp: sampler;
+@group(0) @binding(11) var brdf_lut: texture_2d<f32>;
 @group(1) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(1) @binding(1) var base_color_smp: sampler;
 
@@ -568,13 +599,29 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
     let alpha_g = roughness * roughness;
 
-    // 环境项：把全局 ambient 当作**均匀环境辐射**（IBL 的最低阶近似）。
+    // 环境项①：全局 ambient 当作**均匀环境辐射**（IBL 的最低阶近似）。
     // - 漫反射环境按金属度分流：金属没有漫反射；
     // - 镜面环境按菲涅尔加权：金属靠它保住"反射环境色"这条最重要的感知
     //   线索（均匀环境看不出形状，但颜色对）。
-    // 真环境反射（预过滤贴图 / 天空盒）等后续轮次，出口已经收在这里。
     let f_env = fresnel_schlick(n_dot_v, f0);
     var color = lights.ambient.rgb * (albedo * (1.0 - metallic) + f_env);
+
+    // 环境项②：天空 IBL（开着天空时与①**相加**）。split-sum 的标准两半：
+    // - 漫反射 = L2 球谐（E/π，系数里已折好余弦卷积）× albedo × kD；
+    // - 镜面 = 预过滤立方体（GGX 重要性采样，mip 由 roughness 选）× (F0·A + B)，
+    //   A / B 来自 BRDF LUT。
+    // 关着时整段跳过：不采样三张环境纹理，画面与天空上线前逐位一致（开关位
+    // 是 uniform 里的常量，控制流一致，采样合法且便宜）。
+    if (sky.sun_dir.w > 0.5) {
+        let r = reflect(-v, n);
+        let spec_env = textureSampleLevel(env_cube, env_smp, r, roughness * ENV_MAX_LOD).rgb;
+        let brdf = textureSampleLevel(brdf_lut, env_smp, vec2<f32>(n_dot_v, roughness), 0.0).rg;
+        let f_rough = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * pow(1.0 - n_dot_v, 5.0);
+        let kd_env = (vec3<f32>(1.0) - f_rough) * (1.0 - metallic);
+        color = color
+            + sky_sh_eval(skysh, n) * albedo * kd_env
+            + spec_env * (f0 * brdf.x + brdf.y);
+    }
 
     let count = min(u32(lights.ambient.a), MAX_LIGHTS);
     let shadows_on = shadow.params.z > 0.5;
@@ -730,6 +777,11 @@ pub struct ScenePipeline {
     shadow_view: wgpu::TextureView,
     shadow_resolution: u32,
 
+    /// 天空盒 + 环境光照（IBL）资源。纹理常驻、内容按 key 重建（见
+    /// [`crate::sky`] 的模块文档）；`global_bind_group` 持有它的三张表与
+    /// 采样器，创建顺序上必须排在全局绑定组之前。
+    sky: SkyResources,
+
     /// `material_id` → 材质绑定组（贴图 + 采样器）。
     ///
     /// 颜色参数不在这里 —— 它们逐 draw 变化（实体级材质覆盖），随
@@ -764,9 +816,8 @@ impl ScenePipeline {
     /// 传 1 就是关闭 MSAA。**调用方必须按同一个值准备颜色/深度附件**：
     /// 采样数不匹配的话渲染通道直接校验失败。
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, sample_count: u32) -> Self {
-        let global_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("scene_global_bgl"),
-            entries: &[
+        let mut global_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::with_capacity(12);
+        global_entries.extend([
                 // 0: 相机（顶点阶段要 view_proj，片元阶段要相机位置算半程向量）
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -843,7 +894,12 @@ impl ScenePipeline {
                     },
                     count: None,
                 },
-            ],
+            ]);
+        // 7..11：天空（绑定号契约集中在 sky.rs，见那里的说明）。
+        global_entries.extend(sky::global_layout_entries());
+        let global_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene_global_bgl"),
+            entries: &global_entries,
         });
 
         let material_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -910,6 +966,7 @@ impl ScenePipeline {
             label: Some("scene_camera_ub"),
             contents: bytemuck::cast_slice(&[CameraUniform {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 camera_pos: [0.0; 4],
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -968,6 +1025,10 @@ impl ScenePipeline {
             mapped_at_creation: false,
         });
 
+        // 天空资源：必须在全局绑定组之前建 —— 组里持有它的 uniform 缓冲、
+        // 立方体与 LUT 的视图（换内容不换对象，见 sky.rs 的生命周期说明）。
+        let sky = SkyResources::new(device, &global_bgl, format, sample_count);
+
         let global_bind_group = Self::create_global_bind_group(
             device,
             &global_bgl,
@@ -978,6 +1039,7 @@ impl ScenePipeline {
             &shadow_sampler,
             &shadow_buffer,
             &bones_buffer,
+            &sky,
         );
 
         let shadow_pass_bind_group = Self::create_shadow_pass_bind_group(
@@ -1012,6 +1074,7 @@ impl ScenePipeline {
             shadow_texture,
             shadow_view,
             shadow_resolution,
+            sky,
             material_cache: HashMap::new(),
             sample_count,
             uniform_alignment,
@@ -1064,6 +1127,7 @@ impl ScenePipeline {
         shadow_sampler: &wgpu::Sampler,
         shadow_buffer: &wgpu::Buffer,
         bones_buffer: &wgpu::Buffer,
+        sky: &SkyResources,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_global_bg"),
@@ -1082,6 +1146,28 @@ impl ScenePipeline {
                 },
                 wgpu::BindGroupEntry { binding: 5, resource: shadow_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: bones_buffer.as_entire_binding() },
+                // 7..11：天空。对象的身份不变（内容变），所以这里没有"重建
+                // 绑定组"的需求 —— 这正是纹理固定分配换来的。
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: sky.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: sky.sh_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&sky.env_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::Sampler(&sky.env_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&sky.brdf_view),
+                },
             ],
         })
     }
@@ -1128,6 +1214,7 @@ impl ScenePipeline {
             &self.shadow_sampler,
             &self.shadow_buffer,
             &self.bones_buffer,
+            &self.sky,
         );
     }
 
@@ -1165,6 +1252,7 @@ impl ScenePipeline {
             &self.shadow_sampler,
             &self.shadow_buffer,
             &self.bones_buffer,
+            &self.sky,
         );
         self.shadow_pass_bind_group = Self::create_shadow_pass_bind_group(
             device,
@@ -1189,7 +1277,11 @@ impl ScenePipeline {
         });
         let fs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene_fs"),
-            source: wgpu::ShaderSource::Wgsl(SCENE_FRAG_SRC.into()),
+            // 天空公式（sky_radiance / sky_sh_eval）只有一份实现：公共片段在
+            // 这里是**前缀**，绑定号由场景 FS 自己声明（见 sky.rs 的说明）。
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}{}", sky::SKY_COMMON_WGSL, SCENE_FRAG_SRC).into(),
+            ),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene_pl"),
@@ -1414,6 +1506,7 @@ impl ScenePipeline {
         view_proj: &Mat4,
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
+        sky: SkyConfig,
     ) {
         // --- 光源打包 + 阴影准备（都在 CPU 侧，先算完再开 pass）---
         let packed: Vec<&Light> = lighting
@@ -1449,6 +1542,7 @@ impl ScenePipeline {
             0,
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: view_proj.to_cols_array_2d(),
+                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
                 camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 1.0],
             }]),
         );
@@ -1471,6 +1565,17 @@ impl ScenePipeline {
                     0.0,
                 ],
             }),
+        );
+
+        // --- 天空 / 环境（内容 key 变了才重建）---
+        //
+        // 必须在 `begin_render_pass` 之前：预过滤立方体与 BRDF LUT 各自要开
+        // 自己的 pass，一帧的 encoder 里 pass 不能嵌套。关着天空时只写 80
+        // 字节 uniform，不碰任何资源（旧画面逐位一致的落脚点）。
+        self.sky.prepare(
+            queue,
+            encoder,
+            SkyUniform::build(&sky, sky::sun_from_lights(&packed)),
         );
 
         // --- 收集绘制项，同时把所有 draw 数据攒进 staging ---
@@ -1725,6 +1830,13 @@ impl ScenePipeline {
             rpass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
             rpass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
             rpass.draw_indexed(0..prim.num_indices, 0, 0..1);
+        }
+
+        // 天空盒：不透明之后、半透明之前（见模块头的理由）。管线是 z = 1.0
+        // + `LessEqual` + 不写深度 —— 被几何盖住的像素在这里失败、空像素作画；
+        // 半透明随后仍混在天空之上。
+        if sky.enabled {
+            self.sky.draw(&mut rpass, &self.global_bind_group);
         }
 
         // 半透明：不写深度，远→近

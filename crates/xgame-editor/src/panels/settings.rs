@@ -218,6 +218,73 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         ui.end_row();
                     });
 
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("天空（程序化天空盒 + 环境光照 IBL）").strong());
+                egui::Grid::new("set_sky")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("启用").on_hover_text(
+                            "开着时：背景是程序化天空，环境光 = ambient + IBL（两者相加）。\
+                             关着时整段跳过，画面与天空上线前逐位一致。\
+                             太阳的位置/颜色取场景里第一盏 active 的方向光",
+                        );
+                        ui.checkbox(&mut draft.render.sky.enabled, "");
+                        ui.end_row();
+
+                        ui.label("强度")
+                            .on_hover_text("天空辐射的整体乘子；保存时夹进 [0, 10]");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.render.sky.intensity)
+                                .range(0.0..=xgame_core::SkyConfig::MAX_INTENSITY)
+                                .speed(0.02)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+
+                        ui.label("天顶色");
+                        ui.horizontal(|ui| {
+                            ui.color_edit_button_rgb(&mut draft.render.sky.zenith);
+                        });
+                        ui.end_row();
+
+                        ui.label("地平线色");
+                        ui.horizontal(|ui| {
+                            ui.color_edit_button_rgb(&mut draft.render.sky.horizon);
+                        });
+                        ui.end_row();
+
+                        ui.label("地面色");
+                        ui.horizontal(|ui| {
+                            ui.color_edit_button_rgb(&mut draft.render.sky.ground);
+                        });
+                        ui.end_row();
+
+                        ui.label("太阳盘大小")
+                            .on_hover_text("半径（度）。默认 1.5°；保存时夹进 [0.1, 20]");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.render.sky.sun_size)
+                                .range(
+                                    xgame_core::SkyConfig::MIN_SUN_SIZE
+                                        ..=xgame_core::SkyConfig::MAX_SUN_SIZE,
+                                )
+                                .speed(0.05)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+
+                        ui.label("太阳强度").on_hover_text(
+                            "太阳盘与光晕的乘子；没有方向光时整段不出现。保存时夹进 [0, 10]",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut draft.render.sky.sun_intensity)
+                                .range(0.0..=xgame_core::SkyConfig::MAX_SUN_INTENSITY)
+                                .speed(0.02)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+                    });
+
                 ui.add_space(8.0);
                 ui.separator();
 

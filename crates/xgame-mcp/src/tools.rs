@@ -323,6 +323,15 @@ fn project_info(args: &Value) -> Result<String, CallError> {
                 "threshold": render.bloom.threshold,
                 "knee": render.bloom.knee,
             },
+            "sky": {
+                "enabled": render.sky.enabled,
+                "intensity": render.sky.intensity,
+                "zenith": render.sky.zenith,
+                "horizon": render.sky.horizon,
+                "ground": render.sky.ground,
+                "sun_size": render.sky.sun_size,
+                "sun_intensity": render.sky.sun_intensity,
+            },
         },
         "scenes": list_scenes(&project),
         "scripts": project.list_scripts(),
@@ -750,6 +759,17 @@ mod tests {
         assert_eq!(info["render"]["bloom"]["threshold"], 1.0);
         // f32 → f64 是精确加宽（0.6000000238…），别拿十进制字面量比。
         assert_eq!(info["render"]["bloom"]["knee"], f64::from(0.6f32));
+        // 天空默认关；字段完整，智能体据此判断截图的背景来自天空还是清屏色。
+        assert_eq!(info["render"]["sky"]["enabled"], false);
+        assert_eq!(info["render"]["sky"]["intensity"], 1.0);
+        assert_eq!(info["render"]["sky"]["sun_size"], f64::from(1.5f32));
+        assert_eq!(
+            info["render"]["sky"]["zenith"]
+                .as_array()
+                .expect("zenith 数组")
+                .len(),
+            3
+        );
         cleanup(&project);
     }
 

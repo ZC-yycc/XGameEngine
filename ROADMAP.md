@@ -27,7 +27,7 @@
 | **八** | ✅ 完成 | 音频系统（kira：`AudioSource` 组件 + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，实施记录见 PLAN.md 二十二） |
 | **Agent-Native ①②** | ✅ 完成 | **MCP 工具面 + 无头运行**：`xgame-mcp` server（7 个工具：项目 / 场景 / 实体读写、`project_check`、`run_headless`）；`xgame-editor --headless` 无头跑 N 帧出 JSON 统计（固定 dt 两次运行逐位一致，退出码 0=干净 / 1=加载失败 / 2=跑完有问题），MCP 工具 spawn 透传 —— 文档 [`Docs/MCP.md`](Docs/MCP.md) / [`Docs/无头运行.md`](Docs/无头运行.md)，实施记录见 PLAN.md 二十三 |
 | **渲染 PBR 片** | ✅ 完成 | **PBR（Cook-Torrance）+ 逐实体材质覆盖 + 无头截图**：GGX/Smith/Schlick 替换 Blinn-Phong（metallic/roughness 原样进 GPU，π 亮度标定保持旧场景亮度）；`Entity.material: Option<MaterialOverride>`（字段级覆盖 + Inspector + 场景落盘 + `scene_signature` 刷新）；`--screenshot` 离屏截图（默认顺光取景、同机逐字节确定）+ MCP `run_headless` 图片块 —— 实施记录见 PLAN.md 二十四 |
-| **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影、PBR、**HDR 渲染路径 + ACES 色调映射 + 曝光**、**Bloom 泛光**已落地；CSM / 天空盒与 IBL 待做） |
+| **九** | 🟨 进行中 | 后处理 + 阴影（方向光阴影、PBR、**HDR 渲染路径 + ACES 色调映射 + 曝光**、**Bloom 泛光**、**程序化天空盒 + IBL** 已落地；CSM / FXAA / TAA 待做） |
 | ~~**十**~~ | ✅ 完成 | 脚本系统 + 热重载（已并入六·五） |
 
 ---
@@ -116,7 +116,7 @@
 | 未保存保护 / Save As | ✅ 完成 | 脏标记（落盘快照比较 + 按帧 memo）、关窗 / 返回枢纽双路径确认框（保存 / 不保存 / 取消）、Save As 写新文件并切换入口场景、工具栏 Save 按钮、标题栏与工具栏 `*` 星号、Ctrl+S / Ctrl+Shift+S |
 | 无头检查 `--check` | ✅ 完成 | `xgame-editor --check <项目>`：不开窗口验证清单 / 场景 / 资产引用，退出码契约 **0=干净 / 1=加载失败 / 2=悬空引用** —— CI 与 AI 智能体的可机读验证入口（见文末 Agent-Native） |
 | 无头运行 `--headless` | ✅ 完成 | `xgame-editor --headless [--frames N] [--dt 秒] [--report 路径] [--dump-scene 路径] <项目>`：不开窗口跑 N 帧输出 JSON 统计（帧耗时分布 / 实体与刚体计数 / 脚本日志含 error 样本 / 非有限变换 / 音频状态），固定 dt 两次运行**逐位一致**；退出码 **0=干净跑完 / 1=加载失败或参数错误 / 2=跑完但观察到问题**。MCP `run_headless` 的底座，角色见 [`Docs/无头运行.md`](Docs/无头运行.md) |
-| 阴影 / 天空盒 / 后处理 | 🟨 部分 | **方向光阴影贴图**（单盏、正交视锥按场景包围盒拟合、3×3 PCF、深度偏置 + 硬件斜率偏置）与 **MSAA 4×**（颜色多采样 → resolve，采样数按适配器能力选）已落地；**HDR 渲染路径 + ACES 色调映射 + 曝光**与 **Bloom 泛光**已落地（2026-10-19，见 PLAN.md 二十五 / 二十六）；天空盒、CSM、FXAA/TAA 仍待做 |
+| 阴影 / 天空盒 / 后处理 | 🟨 部分 | **方向光阴影贴图**（单盏、正交视锥按场景包围盒拟合、3×3 PCF、深度偏置 + 硬件斜率偏置）与 **MSAA 4×**（颜色多采样 → resolve，采样数按适配器能力选）已落地；**HDR 渲染路径 + ACES 色调映射 + 曝光**、**Bloom 泛光** 与 **程序化天空盒 + 环境光照（IBL）** 已落地（2026-10-19，见 PLAN.md 二十五 / 二十六 / 二十七）；CSM、FXAA/TAA 仍待做 |
 | Gizmo 吸附 / Rect 工具 | ⬜ 待做 | `gizmo_snap` 字段已在但未接线；Rect 工具无实现 |
 | 编辑器交互稳定性 | ✅ 完成 | 拾取改「射线 × 世界 AABB」（旧的"包围球"被拉伸物体会连相机一起吞进去）；轴拖拽的参考线锚定在拖拽起点（修掉 `Δ_k = A_k − Δ_{k-1}` 的正反馈 —— "拖拽抽搐"的根因）；每帧收敛选中索引，堵住越界 panic |
 | 每帧开销 / 可扩展性 | ✅ 完成 | 运行时热路径稳态零分配（`sync_bodies` 快路径、运动学/动态体早退、层级一次解算、`world_matrices` 链缓冲复用）；渲染模型矩阵批上传；编辑器指纹不再先解算世界矩阵。2000 实体下引擎自身开销 226 → 13 µs/帧（纯视觉）、1026 → 89 µs/帧（全静态）。**剩余瓶颈是 rapier 自身**（1000 个互挤动态体 ≈13 ms/帧），要再往前得动作业系统 / 减少接触岛 |
@@ -140,7 +140,7 @@
   MCP `run_headless(screenshot: true)` 以图片块回传画面 —— 智能体**看到**自己造的场景；
 - **程序化配置** —— 重力 / 步长进 `project.ron`，改一行文本即调参；
 - **单一运行时** —— 无头验证的行为与玩家实跑的完全一致（编辑器 Play == 游戏二进制）；
-- **安全网** —— 419 条回归测试、每条先证红，智能体改引擎也有兜底。
+- **安全网** —— 434 条回归测试、每条先证红，智能体改引擎也有兜底。
 
 进度与计划：**① MCP server 最小工具集 ✅ 已落地** —— 新 crate `xgame-mcp`
 （`dist\xgame-mcp.exe`，stdio 按行 JSON-RPC）→ **② 无头运行 ✅ 已落地** ——
@@ -340,9 +340,12 @@ P2 遗留（有意延后）：`dispatch_destroy` / `forget_entity` 未接线（�
       合成权重 [0.5,0.3,0.2]；阈值在曝光后判、按最大通道；**默认关**
       （intensity 0，整段跳过），开启才惰性建链；`project.ron` 的
       `render.bloom` 三参数，2026-10-19，见 PLAN.md 二十六）
+- [x] 程序化天空盒 + 环境光照（IBL）（天顶/地平线/地面三段渐变 + 太阳盘/光晕，
+      解析函数一个真相源喂三个消费者：背景 / 漫反射 L2 球谐 / 镜面 GGX 预过滤
+      立方体 + BRDF LUT；**默认关**（enabled false，画面与旧版逐位一致），
+      `project.ron` 的 `render.sky` 七参数，2026-10-19，见 PLAN.md 二十七）
 - [ ] RenderGraph 构建（等出现带依赖分叉的 pass 再抽，见 PLAN.md 二十五·二）
 - [ ] FXAA / TAA
-- [ ] 天空盒
 
 ## 第十阶段：脚本 + 热重载 ⬜
 

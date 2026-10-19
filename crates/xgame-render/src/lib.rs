@@ -11,6 +11,7 @@ pub mod postfx;
 pub mod scene;
 pub mod scene_pipeline;
 pub mod screenshot;
+pub mod sky;
 pub mod texture;
 
 pub struct RenderContext {

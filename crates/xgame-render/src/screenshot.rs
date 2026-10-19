@@ -365,6 +365,7 @@ impl ScreenshotRenderer {
             &view_proj,
             &camera.eye,
             lighting,
+            settings.sky,
         );
         // HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → LDR 显示目标。截图器建一次
         // 用一次、目标从不重建 ⇒ 目标代数恒为 0（绑定组缓存只填一次）；
@@ -481,7 +482,9 @@ pub fn load_png_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
 mod tests {
     use super::*;
 
-    use xgame_core::{BloomConfig, Entity, Light, MaterialOverride, ToneMapMode};
+    use xgame_core::{BloomConfig, Entity, Light, MaterialOverride, SkyConfig, ToneMapMode};
+
+    use crate::sky::SkyUniform;
 
     /// 纯函数测试用的盒（边长 2，中心在 (1, 2, 3) 附近，测试取景的平移。
     fn test_bounds() -> Bounds {
@@ -762,6 +765,391 @@ mod tests {
         assert_eq!((pw, ph), (w, h));
         assert_eq!(pixels.len(), 320 * 240 * 4);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // 天空盒 + 环境光照（IBL）：GPU 侧像素测试组
+    // -----------------------------------------------------------------
+
+    /// 天空测试的共用画面设置：**ToneMap Off + 曝光 1 + 无 Bloom**。
+    /// GPU 输出于是就是 `sky_radiance` 钳制后的 sRGB —— 与 CPU 镜像逐值可比，
+    /// 不给色调映射曲线留"差一点也算对"的模糊空间。
+    fn sky_settings(enabled: bool) -> RenderConfig {
+        RenderConfig {
+            tone_map: ToneMapMode::Off,
+            exposure: 1.0,
+            bloom: BloomConfig {
+                intensity: 0.0,
+                ..Default::default()
+            },
+            sky: SkyConfig {
+                enabled,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// 与 `fs_sky` 逐式对应的"像素中心 → 世界方向"（CPU 对表用）。
+    ///
+    /// 用的是渲染器自己那条 `inv_view_proj · (ndc, 1, 1) − eye` 路径 —— 对表
+    /// 测试最怕两边各用一套相机数学，"差半个像素"会被误判成公式不一致。
+    fn sky_dir_for_pixel(
+        camera: &ShotCamera,
+        aspect: f32,
+        radius: f32,
+        (w, h): (u32, u32),
+        (x, y): (u32, u32),
+    ) -> Vec3 {
+        let (near, far) = clip_planes(camera, radius);
+        let view_proj = Mat4::perspective_rh(camera.fov_y, aspect, near, far)
+            * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let inv = view_proj.inverse();
+        let ndc_x = (x as f32 + 0.5) / w as f32 * 2.0 - 1.0;
+        let ndc_y = 1.0 - (y as f32 + 0.5) / h as f32 * 2.0;
+        let far_p = inv * xgame_math::glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+        (far_p.truncate() / far_p.w - camera.eye).normalize()
+    }
+
+    /// 天空盒的公式只有一份：GPU 背景必须等于 CPU `sky_radiance` 的镜像。
+    ///
+    /// 取天顶、地平线、地面与左右两侧五个点。没有方向光（没有太阳盘），
+    /// 剩下的是平滑渐变 —— 抗锯齿与盘面边界不会污染读数。
+    #[test]
+    fn sky_background_matches_cpu_mirror() {
+        let Some(mut shot) = gpu_or_skip("sky_background_matches_cpu_mirror") else {
+            return;
+        };
+        let scene = Scene::new("sky");
+        let camera = ShotCamera::looking_at(
+            Vec3::new(1.5, 2.0, 3.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let settings = sky_settings(true);
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            settings,
+        )
+        .expect("渲染失败");
+        let rgba = shot.read_rgba().expect("读回失败");
+        let (w, h) = shot.size();
+        let uniform = SkyUniform::build(&settings.sky, None);
+
+        for (x, y) in [
+            (w / 2, 12),
+            (w / 2, h / 2),
+            (w / 2, h - 12),
+            (12, h / 2),
+            (w - 12, h / 2),
+        ] {
+            let dir = sky_dir_for_pixel(
+                &camera,
+                shot.aspect(),
+                EMPTY_SCENE_FALLBACK_RADIUS,
+                (w, h),
+                (x, y),
+            );
+            let cpu = crate::postfx::cpu::to_srgb_u8(crate::postfx::cpu::tone_map(
+                crate::sky::cpu::sky_radiance(&uniform, dir),
+                settings,
+            ));
+            let gpu = pixel_at(&rgba, w, x, y);
+            for ch in 0..3 {
+                let delta = gpu[ch] as i32 - cpu[ch] as i32;
+                assert!(
+                    delta.abs() <= 2,
+                    "像素 ({x},{y}) 通道 {ch}: GPU {} vs CPU {}（方向 {dir:?}）",
+                    gpu[ch],
+                    cpu[ch]
+                );
+            }
+        }
+    }
+
+    /// 关着天空时背景必须还是旧的清屏色 —— "默认关不改变旧项目画面"的钉子。
+    ///
+    /// 天空盒一旦漏掉开关位（或画出第一帧后就不再清屏），这条会立刻红。
+    #[test]
+    fn sky_off_keeps_the_old_background_clear_color() {
+        let Some(mut shot) = gpu_or_skip("sky_off_keeps_the_old_background_clear_color") else {
+            return;
+        };
+        let scene = Scene::new("old");
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            None,
+            SceneLighting::new(scene.ambient, &scene.lights),
+            sky_settings(false),
+        )
+        .expect("渲染失败");
+        let rgba = shot.read_rgba().expect("读回失败");
+        let gpu = pixel_at(&rgba, shot.size().0, 5, 5);
+        let expected = crate::postfx::cpu::to_srgb_u8([0.12, 0.12, 0.14]);
+        for ch in 0..3 {
+            assert!(
+                (gpu[ch] as i32 - expected[ch] as i32).abs() <= 1,
+                "关着天空时背景必须是旧清屏色: GPU {gpu:?} vs {expected:?}"
+            );
+        }
+    }
+
+    /// **IBL 照亮无光绝缘体**：没有直接光、ambient 也清零时，开天空前立方体
+    /// 必须全黑；开天空后必须被球谐环境光照亮。
+    ///
+    /// 这同时钉住"SH 系数真的写进了 binding 8"和"场景 FS 的 IBL 分支真的
+    /// 走得到"—— 只建管线不写数据时，两边都是黑，方向性断言会红。
+    #[test]
+    fn sky_ibl_lights_an_unlit_insulator() {
+        let Some(mut shot) = gpu_or_skip("sky_ibl_lights_an_unlit_insulator") else {
+            return;
+        };
+        let mut scene = one_cube_scene();
+        scene.lights.clear();
+        scene.ambient = [0.0; 3];
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let anim = AnimationDriver::new();
+        let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+
+        shot.render_scene(
+            &scene,
+            &anim,
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            sky_settings(false),
+        )
+        .expect("关天空渲染失败");
+        let off = pixel_avg(&shot.read_rgba().expect("读回失败"), 320, 160, 120);
+
+        shot.render_scene(
+            &scene,
+            &anim,
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            sky_settings(true),
+        )
+        .expect("开天空渲染失败");
+        let on = pixel_avg(&shot.read_rgba().expect("读回失败"), 320, 160, 120);
+
+        assert!(
+            luma(off) < 2.0,
+            "无直接光 + 无环境光时立方体应当是黑的: {off:?}"
+        );
+        assert!(
+            luma(on) > 20.0,
+            "天空 IBL 应当照亮无光绝缘体: {on:?}（关天空时 {off:?}）"
+        );
+        assert!(
+            luma(on) > luma(off) + 20.0,
+            "开天空必须带来可见的环境照明: on={on:?} off={off:?}"
+        );
+    }
+
+    /// **立方体面约定 + 预过滤链的端到端钉子**：光滑金属平面上的太阳反光
+    /// 必须出现在"几何镜像"算出的屏幕位置。
+    ///
+    /// 场景里那盏方向光强度是 1e-30（只为给天空提供太阳方向与颜色，直接光
+    /// 可忽略），亮点只能来自 `env_cube`。六面基向量任何一处转错 / 镜像，
+    /// 太阳就会出现在别处甚至不出现 —— `cube_face_basis` 的历史错误
+    /// （+Y 面上下颠倒）正是会在这里被抓住。
+    #[test]
+    fn metal_reflects_the_sky_sun_at_the_mirrored_screen_position() {
+        let Some(mut shot) =
+            gpu_or_skip("metal_reflects_the_sky_sun_at_the_mirrored_screen_position")
+        else {
+            return;
+        };
+
+        let builtin = crate::mesh::BuiltinMesh::Plane;
+        let mesh = {
+            let mut mesh = GltfMesh::from_mesh_data(
+                &shot.device,
+                &shot.queue,
+                &builtin.build(),
+                builtin.label(),
+            );
+            for prim in &mut mesh.primitives {
+                prim.material.metallic = 1.0;
+                prim.material.roughness = 0.05;
+                // 金属的漫反射为零，基色只剩很弱的 F0 底色；把反射对比拉开。
+                prim.material.base_color = [0.02, 0.02, 0.02, 1.0];
+            }
+            mesh
+        };
+        shot.inject_model("test://mirror", mesh);
+
+        // 指向太阳（方向光的传播方向取反）。
+        let sun_dir = Vec3::new(0.35, 0.55, -0.75).normalize();
+        let mut scene = Scene::new("mirror");
+        scene.ambient = [0.0; 3];
+        scene.lights = vec![Light::directional(
+            "sun",
+            (-sun_dir).to_array(),
+            [1.0; 3],
+            1e-30,
+        )];
+        scene.lights[0].casts_shadow = false;
+        let mut plane = Entity::new("Mirror");
+        plane.model = "test://mirror".to_owned();
+        plane.transform.scale = Vec3::new(40.0, 1.0, 40.0);
+        scene.add_entity(plane);
+
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 5.0, 10.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let settings = RenderConfig {
+            sky: SkyConfig {
+                enabled: true,
+                zenith: [0.0; 3],
+                horizon: [0.0; 3],
+                ground: [0.0; 3],
+                sun_size: 8.0,
+                sun_intensity: 1.0,
+                intensity: 1.0,
+            },
+            ..sky_settings(true)
+        };
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            settings,
+        )
+        .expect("渲染失败");
+        let rgba = shot.read_rgba().expect("读回失败");
+        let (w, h) = shot.size();
+
+        // 渲染器取用的 near/far 由场景包围盒半径决定 —— 对表必须用同一组。
+        let world = scene.world_matrices();
+        let bounds = scene_bounds(&scene.entities, &world, &shot.model_cache);
+        let radius = bounds.map(|b| b.radius()).unwrap_or(EMPTY_SCENE_FALLBACK_RADIUS);
+        let (near, far) = clip_planes(&camera, radius);
+        let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
+            * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let inv = view_proj.inverse();
+
+        // 平面镜里的太阳 = 把太阳方向按平面法线镜像后，从眼睛看过去的交点。
+        let mirrored = Vec3::new(sun_dir.x, -sun_dir.y, sun_dir.z);
+        let t = -camera.eye.y / mirrored.y;
+        let expected_point = camera.eye + mirrored * t;
+        assert!(
+            expected_point.x.abs() < 20.0 && expected_point.z.abs() < 20.0,
+            "测试机位没把镜像点放在平面上: {expected_point:?}"
+        );
+        let clip = view_proj * expected_point.extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        let expected = (
+            (ndc.x * 0.5 + 0.5) * w as f32,
+            (1.0 - ndc.y) * 0.5 * h as f32,
+        );
+
+        // 只在真的打到平面上的像素里找太阳盘。盘内辐射亮度经 ToneMap Off
+        // 后全部钳到 255（整块饱和），所以用**饱和像素的质心**对位置 ——
+        // 取"第一个最亮点"会落在盘的上边缘，平白引入一个盘半径的偏差。
+        let mut sum_x = 0f64;
+        let mut sum_y = 0f64;
+        let mut count = 0u32;
+        let mut brightest = 0u8;
+        for y in 0..h {
+            for x in 0..w {
+                let ndc_x = (x as f32 + 0.5) / w as f32 * 2.0 - 1.0;
+                let ndc_y = 1.0 - (y as f32 + 0.5) / h as f32 * 2.0;
+                let far_p = inv * xgame_math::glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+                let dir = (far_p.truncate() / far_p.w - camera.eye).normalize();
+                if dir.y >= -1e-6 {
+                    continue;
+                }
+                let hit = camera.eye + dir * (-camera.eye.y / dir.y);
+                if hit.x.abs() > 19.0 || hit.z.abs() > 19.0 {
+                    continue;
+                }
+                let px = pixel_at(&rgba, w, x, y);
+                let lum = px[0].max(px[1]).max(px[2]);
+                brightest = brightest.max(lum);
+                if lum >= 200 {
+                    sum_x += x as f64;
+                    sum_y += y as f64;
+                    count += 1;
+                }
+            }
+        }
+
+        assert!(
+            brightest > 200 && count > 0,
+            "镜面平面应当反射出天空里的太阳（找不到亮点）"
+        );
+        let (cx, cy) = (sum_x / count as f64, sum_y / count as f64);
+        let dist = ((cx - expected.0 as f64).powi(2) + (cy - expected.1 as f64).powi(2)).sqrt();
+        assert!(
+            dist < 15.0,
+            "太阳反光的质心与几何镜像不符：实际 ({cx:.1}, {cy:.1})，期望 ({:.1}, {:.1})，距离 {dist:.1}px",
+            expected.0,
+            expected.1
+        );
+    }
+
+    /// 天空开着时整条链（球谐投影 + 30 趟预过滤 + BRDF LUT + 天空盒 + IBL）
+    /// 也必须逐位确定：重建渲染器再跑一遍，PNG 二进制相等。
+    #[test]
+    fn sky_enabled_two_runs_produce_identical_png_bytes() {
+        let Some(mut first) = gpu_or_skip("sky_enabled_two_runs_produce_identical_png_bytes")
+        else {
+            return;
+        };
+        let scene = one_cube_scene();
+        let anim = AnimationDriver::new();
+        let settings = RenderConfig {
+            bloom: BloomConfig {
+                intensity: 0.5,
+                ..Default::default()
+            },
+            ..sky_settings(true)
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_sky_det_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_a = dir.join("a.png");
+        let path_b = dir.join("b.png");
+
+        first
+            .render_scene(
+                &scene,
+                &anim,
+                None,
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings,
+            )
+            .expect("第一次渲染失败");
+        first.save_png(&path_a).expect("第一次落盘失败");
+
+        let mut second = ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240)
+            .expect("第二次创建渲染器失败");
+        second
+            .render_scene(
+                &scene,
+                &anim,
+                None,
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings,
+            )
+            .expect("第二次渲染失败");
+        second.save_png(&path_b).expect("第二次落盘失败");
+
+        let bytes_a = std::fs::read(&path_a).unwrap();
+        let bytes_b = std::fs::read(&path_b).unwrap();
+        assert_eq!(
+            bytes_a, bytes_b,
+            "天空开着时两次截图的 PNG 必须逐字节一致"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
