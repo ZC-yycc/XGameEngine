@@ -2948,3 +2948,68 @@ xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体�
   这一步处理。
 
 
+
+---
+
+## 三十二、P0 资产管线：GUID + `.meta` + 导入 + 资源浏览器（2026-10-20）
+
+优先级来自 `Docs/差距分析.md`：**唯一的 P0**（资产管线）。不做的代价是
+"场景 / 预制体多起来之后改引用格式 = 重写全部资产文件与所有外部工具"。
+
+### 一、为什么先做这一刀
+
+盘点结论（`差距分析.md` 第四节）：场景里 `model: "Resources/Box.glb"` 是路径，
+资产改名 / 挪目录即断链，只能靠 `--check` 事后发现再手改。而引用格式是**数据格式**，
+越晚改越贵。同时"资源浏览器"这一端完全缺失（只有 Prefabs 面板），
+每加一个资产都要手改 RON —— 对 Agent-Native 路线尤其刺眼。
+
+### 二、做法（完整推理见决策记录 §十四）
+
+1. **磁盘存 GUID、内存存路径**。转换只在 `ProjectHandle` 的 load / write 边界：
+   `xgame_core::asset` 的 `encode_scene_references` / `decode_scene_references`
+   （预制体同构复用）。243 个消费点一行没改。
+2. **`.meta`**（`<资产>.meta`，RON）：`guid` + `kind` + `import`。
+   GUID 首次导入生成，之后永不变；改名 / 移动只搬文件。
+3. **`AssetDatabase`**：一次扫描建 `guid ↔ path` 双向索引 + 诊断
+   （缺 meta / 孤儿 meta / 坏 meta / GUID 冲突）。构建产物目录跳过。
+4. **`--check` 扩展**：`dangling_guids` / `missing_metas` / `orphan_metas` /
+   `invalid_metas` / `guid_conflicts` / `missing_prefabs`。检查仍**严格只读**。
+5. **`--migrate-assets <项目>`**：老项目一次性升级。用**字符串字面量替换**
+   而不是整份重序列化 —— 示例场景是带注释的教程，重写会吃光注释
+   （第一版实现踩了，靠 `git diff` 发现后改成替换）。
+6. **资源浏览器**（Assets 面板，与 Prefabs 共页签）：目录树 + 类型图标 +
+   搜索 + 详情（路径 / GUID / 导入设置）+ 双击放入场景 + **拖到视口按射线落点放置**。
+7. **MCP `asset_list`**：智能体的资产树视野（只读，含诊断）。
+8. **仓库内三个项目已迁移**：8 份 `.meta`，`SampleScene` 场景 14 行引用改写，
+   注释一字未动。
+
+### 三、验证
+
+- 新回归测试 **33 条**（core 22：资产库 15 / 项目端到端 4 / check 诊断 3；
+  编辑器 9：状态 5 / 面板 2 / 落点 2；MCP 2），全量 **491 passed / 6 ignored**
+  （基线 458）。
+- 核心验收测试：`renaming_asset_keeps_scene_reference_alive`
+  （挪资产 + `.meta` → 场景仍解析到新路径）—— 旧实现下必红。
+- 冒烟：`--check projects/SampleScene` → `entities=14 lights=1 assets=8` 全绿；
+  `--headless --frames 60` 正常；`--ui-shot` 三档尺寸截图检查资源浏览器布局。
+
+### 四、刻意的取舍
+
+1. **内存不引入 `AssetRef` 类型**：见决策记录 §十四.1，避免改 243 个消费点与热路径。
+2. **场景文件不登记资产**：它由 `entry_scene` 按路径引用，没有改名需求；
+   强行要 `.meta` 会让"新建项目"立刻带一条待处理诊断。
+3. **导入设置只落盘不消费**：`model_scale` 的正确实现要连骨骼 / 逆绑定矩阵 /
+   动画轨道一起缩放，半吊子接线会与物理不一致 —— 留到下一刀（文档已标注）。
+4. **视口落点用 y=0 地面平面**，不做任意表面吸附：项目约定地面在 y=0；
+   射线朝上时退回相机前方 5 米。表面吸附等做角色控制器时一起补射线查询。
+5. **拖拽不用 egui `DragAndDrop` payload**：视口是自绘离屏纹理，命中与落点本来
+   就要自己算；`Option<String>` 更直白，也更好测（收尾放在 `main.rs` 帧末，
+   面板被拖成非活动页签时不会漏）。
+
+### 五、已知限制
+
+- 资产被删后，场景里留 `guid://…`（这是刻意的，`--check` 会点名）。
+- `Fox.gltf` 的外部 buffer `Fox.bin` 不是独立资产：移动 gltf 时必须连它一起搬
+  （`.meta` 目前不记依赖）。
+- 重命名资产要在编辑器外做（还没有 in-editor 的 rename / move API）。
+- 编辑器保存是全量序列化，会吃掉场景注释（既有行为，见决策记录 §十四.7）。

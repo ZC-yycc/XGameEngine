@@ -16,9 +16,10 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；458 条 + 6 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；491 条 + 6 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
+cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
 cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
 cargo run -p xgame-game -- projects/SampleScene  # 独立游戏
@@ -34,6 +35,10 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - **编辑器 Play 与独立游戏跑同一段 `World::update`**（`xgame-runtime`）——改运行时行为两端自动一致；不要在 editor/game 里复制运行时逻辑。
 - 脚本层（`xgame-script`）：`LuaHost`（`lua_host.rs`）管编译缓存/生命周期派发，**单轨只认 `.lua`**（Rhai 已随双轨 P3 删除，见 D11）；API 真相源是 `GameCtx` 方法层（`ctx.rs`；`lua_api.rs` 只是每函数一行的转发壳）；`host.rs` 是宿主公共类型模块（`Hook` / `PreloadReport` / `CommandReport`）；`ScriptCtx` 是地址束（unsafe 有严格调用窗口约定，见 `context.rs` 模块文档，别破坏该约定）；路径驻留表 `intern.rs` 的 id **永不清**（热重载只清编译缓存，见 D10）；每脚本环境表的 `__index` 必须挂**真元表**（D10 ①）。
 - 场景格式 RON，纯文本、可 diff；新字段一律 `#[serde(default, skip_serializing_if = ...)]` 保证旧文件兼容。
+- **资产引用（P0 资产管线）**：磁盘上存 `guid://…`，**内存里存项目相对路径**。转换只在
+  `ProjectHandle::load_scene` / `write_scene` / `load_prefab` / `write_prefab`（`core::asset`
+  的 `encode_*` / `decode_*`）。别把 GUID 往热路径或 243 个消费点上引；也别让 `.meta` 生成
+  混进 `--check`（检查必须只读）。规则见 `Docs/决策记录.md` §十四。
 
 ## 代码风格约定
 
@@ -100,4 +105,5 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 实例化 | 分组键 = 图元地址；顺序 = 首次遇到；半透明不合批；材质组收集阶段预热 | §十 |
 | 剔除 | 保守性硬合同（开/关逐位一致）；相机外投影物保留；蒙皮 50% 余量 | §十一 |
 | FXAA | 默认关；显示空间 luma；`textureSampleLevel(..., 0.0)`；平坦区回原值 | §十二 |
+| 资产管线 | 磁盘 GUID / 内存路径；GUID 永不变；`--check` 只读；迁移只替换字面量（不吃注释） | §十四 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |

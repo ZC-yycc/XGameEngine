@@ -3,6 +3,7 @@
 //! 每个面板都是一个函数，接收 `(&mut EditorState, &egui::Context)` 并渲染其内容。
 //! 主布局在 `main.rs` 中组装。
 
+pub mod assets;
 pub mod console;
 pub mod dock;
 pub mod hierarchy;

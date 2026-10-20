@@ -43,6 +43,10 @@ pub enum Icon {
     Plus,
     /// 对勾（日志成功 / 校验通过）。
     Check,
+    /// 图片（纹理资产）：带山与太阳的相框。
+    Image,
+    /// 声波（音频资产）：三条高低不一的竖线。
+    Wave,
 }
 
 /// 在 `rect` 内画一个图标。
@@ -436,6 +440,37 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             let r = s * 0.26;
             painter.line_segment([c - Vec2::X * r, c + Vec2::X * r], Stroke::new(t * 1.1, color));
             painter.line_segment([c - Vec2::Y * r, c + Vec2::Y * r], Stroke::new(t * 1.1, color));
+        }
+        Icon::Image => {
+            // 相框 + 内部一座山 + 一颗太阳：小尺寸下仍能读出"这是图片"。
+            let r = Rect::from_center_size(c, Vec2::new(s * 0.62, s * 0.50));
+            painter.rect_stroke(r, 1.0, Stroke::new(t * 0.9, color));
+            painter.add(Shape::closed_line(
+                vec![
+                    Pos2::new(r.left() + s * 0.08, r.bottom() - s * 0.06),
+                    Pos2::new(r.center().x - s * 0.04, r.center().y - s * 0.06),
+                    Pos2::new(r.right() - s * 0.06, r.bottom() - s * 0.06),
+                ],
+                Stroke::new(t * 0.8, color.gamma_multiply(0.85)),
+            ));
+            painter.circle_filled(
+                Pos2::new(r.right() - s * 0.14, r.top() + s * 0.14),
+                s * 0.05,
+                color.gamma_multiply(0.75),
+            );
+        }
+        Icon::Wave => {
+            // 三条竖线（中间最高）—— 音频的通用符号，比音符在 11px 下更清楚。
+            for (i, h) in [0.20_f32, 0.34, 0.24].iter().enumerate() {
+                let x = c.x + (i as f32 - 1.0) * s * 0.18;
+                painter.line_segment(
+                    [
+                        Pos2::new(x, c.y - s * h * 0.5),
+                        Pos2::new(x, c.y + s * h * 0.5),
+                    ],
+                    Stroke::new(t * 1.0, color),
+                );
+            }
         }
         Icon::Check => {
             let pts = vec![

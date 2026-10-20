@@ -18,6 +18,8 @@ use crate::state::EditorState;
 #[derive(Debug, Clone, Display, PartialEq, Panel)]
 pub enum PanelTab {
     Hierarchy,
+    /// 资源浏览器（P0 资产管线）：浏览 Resources/ 全部资产并拖进场景。
+    Assets,
     Prefabs,
     SceneView,
     Inspector,
@@ -32,6 +34,7 @@ impl PanelTab {
     pub fn title(&self) -> &'static str {
         match self {
             PanelTab::Hierarchy => "Hierarchy",
+            PanelTab::Assets => "Assets",
             PanelTab::Prefabs => "Prefabs",
             PanelTab::SceneView => "Viewport",
             PanelTab::Inspector => "Inspector",
@@ -45,19 +48,24 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
 
     // Insert pane tiles
     let hier = tiles.insert_pane(PanelTab::Hierarchy);
+    let assets = tiles.insert_pane(PanelTab::Assets);
     let prefs = tiles.insert_pane(PanelTab::Prefabs);
     let scene = tiles.insert_pane(PanelTab::SceneView);
     let insp = tiles.insert_pane(PanelTab::Inspector);
     let cons = tiles.insert_pane(PanelTab::Console);
 
+    // Assets 与 Prefabs 共用左列下半格的两个页签：
+    // 它们是同一类东西（"项目里有什么"），单独再切一格会把 Hierarchy 挤没。
+    let asset_tabs = tiles.insert_tab_tile(vec![assets, prefs]);
+
     // ── Build containers with custom shares ──
 
-    // Left column: Hierarchy (60%) | Prefabs (40%)
-    // 与 Unity 一致：层级树在上，资源浏览器（预制体）在下。
+    // Left column: Hierarchy (58%) | Assets+Prefabs (42%)
+    // 与 Unity 一致：层级树在上，资源浏览器在下。
     let left_column = tiles.insert_container(
-        Linear::new(LinearDir::Vertical, vec![hier, prefs])
-            .with_share(hier, 0.60)
-            .with_share(prefs, 0.40),
+        Linear::new(LinearDir::Vertical, vec![hier, asset_tabs])
+            .with_share(hier, 0.58)
+            .with_share(asset_tabs, 0.42),
     );
 
     // Top row: Scene View (72%) | Inspector (28%)

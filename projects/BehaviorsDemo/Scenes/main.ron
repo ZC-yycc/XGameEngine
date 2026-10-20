@@ -69,7 +69,7 @@
             id: (4),
             parent: None,
             scripts: [
-                "Scripts/Spinner.lua",
+                "guid://e1ea0ec292aab394364a94e4e17cc625",
             ],
         ),
     ],

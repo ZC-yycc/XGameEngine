@@ -53,11 +53,11 @@
 
 ---
 
-## 工具参考（7 个）
+## 工具参考（8 个）
 
 最小完备集，覆盖「读 → 改 → 查 → 看效果」闭环。全部工具必填 `project`（含
 `project.ron` 的项目根目录，绝对或相对 server 工作目录）；除 `project_info` /
-`project_check` / `run_headless` 外都可带 `scene`（项目内相对场景路径，如
+`project_check` / `asset_list` / `run_headless` 外都可带 `scene`（项目内相对场景路径，如
 `Scenes/scene.ron`，缺省 = 清单入口场景；**绝对路径与 `..` 一律拒绝**）。
 
 ### 1. `project_info`
@@ -120,12 +120,27 @@
 无头验证项目（与编辑器 `xgame-editor --check` 是**同一份** `xgame-core::check_project`）。
 
 - **入参**：`project`
-- **返回**（JSON）：`entities` / `lights` / `script_refs` / `audio_refs` /
-  `missing_models` / `missing_scripts` / `missing_audio` / `has_issues` /
-  `render`（人读摘要）
+- **返回**（JSON）：`entities` / `lights` / `script_refs` / `audio_refs` / `assets` /
+  `missing_models` / `missing_scripts` / `missing_audio` / `missing_prefabs` /
+  `dangling_guids`（场景里 `guid://…` 查无此资产）/ `missing_metas` / `orphan_metas` /
+  `invalid_metas` / `guid_conflicts` / `has_issues` / `issue_count` / `render`（人读摘要）
+- **只读契约**：它**不会**给缺 `.meta` 的资产生成身份证（那会让"检查一遍"改变项目）。
 - **闭环用法**：改（2/3/4/5）→ `project_check` → `has_issues` 必须为 `false`。
 
-### 7. `run_headless`
+### 7. `asset_list`
+
+智能体的"资产树视野"：看清项目里有什么资产，再去写 `entity_upsert` 的 `model` /
+`scripts` —— 不需要猜。
+
+- **入参**：`project`，可选 `kind`（`Model` / `Texture` / `Audio` / `Script` /
+  `Prefab` / `Shader`，大小写不敏感）
+- **返回**（JSON）：`count` / `assets`（每项 `path` / `kind` / `guid` / `import`）/
+  `diagnostics`（`missing_meta` / `orphan_meta` / `invalid_meta` / `guid_conflicts` /
+  `has_issues`）
+- **只读**：与 `project_check` 同一条纪律，不写任何文件。
+- **闭环用法**：`asset_list` 找模型路径 → `entity_upsert` 引用它 → `project_check` 验证。
+
+### 8. `run_headless`
 
 无头跑项目 N 帧（**透传**编辑器 `xgame-editor --headless`：spawn 同目录的编辑器
 可执行文件，报告从它的 stdout 原样返回）。
@@ -173,11 +188,12 @@
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 7 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 8 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/check.rs` | `check_project()`（编辑器 `--check` 与 `project_check` 共用） |
+| `crates/xgame-core/src/asset.rs` | `AssetGuid` / `AssetMeta` / `AssetDatabase`（`asset_list` 与 `--check` 的资产诊断都读它） |
 | `crates/xgame-editor/src/headless.rs` | 无头运行的实现（CLI `--headless`；`run_headless` 工具 spawn 它） |
 
-回归测试：`cargo test -p xgame-mcp`（28 条：协议 9 条 + 7 个工具的行为与信封；
+回归测试：`cargo test -p xgame-mcp`（30 条：协议 9 条 + 8 个工具的行为与信封；
 其中 `run_headless` 的几条会嵌套 `cargo build -p xgame-editor` 保证被测 exe 新鲜，
 再经真实进程 spawn 跑通）。

@@ -11,10 +11,23 @@ use std::path::PathBuf;
 use xgame_math::glam::{Quat, Vec3};
 use xgame_core::prefab::{prefab_display_name, Prefab, PrefabInstanceRef};
 use xgame_core::project::ProjectHandle;
-use xgame_core::{Entity, EntityId, FieldDesc, Inspect, Scene, Transform};
+use xgame_core::{AssetKind, Entity, EntityId, FieldDesc, ImportSettings, Inspect, Scene, Transform};
 use xgame_physics::DebugLine;
 use strum::Display;
 
+
+/// 资产文件名去掉扩展名（`Resources/Box.glb` → `Box`；`A.prefab.ron` → `A`）。
+///
+/// 只取第一个 `.` 之前的部分：预制体是双后缀，用 `file_stem` 会得到 `A.prefab`。
+fn asset_stem(relative: &str) -> String {
+    let file = relative.rsplit('/').next().unwrap_or(relative);
+    let stem = file.split('.').next().unwrap_or(file);
+    if stem.is_empty() {
+        "Asset".to_string()
+    } else {
+        stem.to_string()
+    }
+}
 
 /// 场景视图中当前激活的变换工具。
 #[derive(Debug, Clone, Copy, Display, PartialEq, Eq)]
@@ -528,6 +541,24 @@ pub struct EditorState {
     /// 只在这几处刷新 —— 打开项目、Play 前重新扫描、点 ⟳。
     pub script_list: Vec<String>,
 
+    // -- Assets（资源浏览器）--
+    /// 已登记的资产（项目相对路径 + 类型，按路径排序）。
+    ///
+    /// 来源是 `ProjectHandle` 的资产库（有 `.meta` 的才在里面），不是逐帧扫盘。
+    /// 与 `prefab_list` 的关系：预制体既在这里（浏览器要显示），也在
+    /// `prefab_list`（预制体面板/Create from Selection 工作流用）。
+    pub asset_browser: Vec<(String, xgame_core::AssetKind)>,
+    /// 资源浏览器的搜索过滤词（跨帧保持）。
+    pub asset_filter: String,
+    /// 资源浏览器里选中的资产（项目相对路径）。
+    pub asset_selected: Option<String>,
+    /// 正在从资源浏览器拖进视口的资产（`Some` 时鼠标处于"拖资产"状态）。
+    ///
+    /// 刻意不用 egui 的 `DragAndDrop` payload：视口是一块自绘的离屏纹理，
+    /// 拖拽的命中与落点都由我们自己算（见 `panels::scene_view`），
+    /// 一条 `Option<String>` 比跨控件传 payload 更直白，也更好测。
+    pub asset_drag: Option<String>,
+
     // -- Undo / redo --
     /// 快照式撤销栈（场景级）。
     undo_stack: UndoStack,
@@ -620,6 +651,11 @@ impl EditorState {
 
             script_list: Vec::new(),
 
+            asset_browser: Vec::new(),
+            asset_filter: String::new(),
+            asset_selected: None,
+            asset_drag: None,
+
             undo_stack: UndoStack::new(),
             undo_pending: None,
 
@@ -634,6 +670,7 @@ impl EditorState {
         // 打开项目时先把资产清单扫出来，面板第一帧就有内容。
         state.refresh_prefabs();
         state.refresh_scripts();
+        state.refresh_assets();
         // 脏检查的基准：刚打开的场景 = 刚落盘的内容 = 干净。
         state.saved_snapshot = state.scene.clone();
         state
@@ -645,6 +682,97 @@ impl EditorState {
     /// 逐帧做就是"界面没动却在耗 CPU"。
     pub fn refresh_scripts(&mut self) {
         self.script_list = self.project.list_scripts();
+    }
+
+    // -----------------------------------------------------------------------
+    // 资源浏览器（Assets）
+    // -----------------------------------------------------------------------
+
+    /// 重新扫描资产库，并刷新三个依赖它的列表（资产 / 预制体 / 脚本）。
+    ///
+    /// 会顺手给缺 `.meta` 的资产生成身份证 —— 这是"打开项目 / 导入资产"该做的
+    /// 事。`--check` 那条路不写盘（检查必须只读），两者刻意分开。
+    pub fn refresh_assets(&mut self) {
+        // `ensure_asset_metas` 内部会先重新扫盘，所以这里不必再单独 refresh。
+        if let Err(e) = self.project.ensure_asset_metas() {
+            // 只读目录 / 权限问题：仍然把已扫到的列出来，别让面板空着。
+            self.log_warning(format!("生成资产 .meta 失败: {e}"));
+        }
+        self.asset_browser = self.project.list_assets();
+        // 资产变了，预制体清单与脚本清单可能跟着变（同一份磁盘状态）。
+        self.prefab_list = self.project.list_prefabs();
+        self.script_list = self.project.list_scripts();
+    }
+
+    /// 某个资产的导入设置（UI 显示用）。
+    pub fn asset_import(&self, relative: &str) -> ImportSettings {
+        self.project.asset_import(relative)
+    }
+
+    /// 改写某个资产的导入设置（写回 `.meta`）。
+    pub fn set_asset_import(&mut self, relative: &str, import: ImportSettings) {
+        match self.project.set_asset_import(relative, import) {
+            Ok(()) => {
+                // 导入参数变了，渲染侧的模型缩放会在下一次加载时生效；
+                // 索引也要跟着刷新（`record.import` 是缓存）。
+                self.asset_browser = self.project.list_assets();
+            }
+            Err(e) => self.log_error(format!("保存导入设置失败: {e}")),
+        }
+    }
+
+    /// 把资产放进场景（模型 = 新建实体；预制体 = 实例化），返回新实体索引。
+    ///
+    /// `position` 是**世界坐标**（视口里拖放时的落点由调用方算好；双击则是
+    /// 相机前方）。整次放置只压一次撤销栈。
+    pub fn spawn_asset_at(&mut self, relative: &str, position: Vec3) -> Option<usize> {
+        if !self.is_editing() {
+            self.log_warning("Cannot place assets while playing");
+            return None;
+        }
+        let kind = AssetKind::from_path(relative)?;
+        match kind {
+            AssetKind::Model => {
+                self.push_undo();
+                let id = self.next_entity_id;
+                self.next_entity_id += 1;
+                let idx = self.scene.entities.len();
+                let mut entity = Entity::new(format!("{} ({id})", asset_stem(relative)));
+                entity.model = relative.to_string();
+                entity.transform.position = position;
+                self.scene.entities.push(entity);
+                self.selected_entity = Some(idx);
+                self.log_success(format!("Placed model '{relative}'"));
+                Some(idx)
+            }
+            AssetKind::Prefab => {
+                // `instantiate_prefab_by_path` 自己压撤销栈并落在根层 ——
+                // 根层意味着局部坐标就是世界坐标，直接改 position 即可。
+                let idx = self.instantiate_prefab_by_path(relative)?;
+                if let Some(entity) = self.scene.entities.get_mut(idx) {
+                    entity.transform.position = position;
+                }
+                Some(idx)
+            }
+            other => {
+                self.log_warning(format!(
+                    "{} 资产不能直接放进场景（只有模型与预制体可以）",
+                    other.label()
+                ));
+                None
+            }
+        }
+    }
+
+    /// 双击放置的默认落点：相机正前方 5 米，且不低于地面。
+    ///
+    /// 不放在相机脚下（会挡住视线），也不放在原点（相机可能正看着别处）。
+    /// 夹到 `y >= 0` 是因为项目约定地面在 y=0 附近：放到地下会让人以为
+    /// "拖进来但没渲染"。
+    pub fn placement_point_in_front(&self) -> Vec3 {
+        let mut point = self.editor_camera.eye() + self.editor_camera.forward() * 5.0;
+        point.y = point.y.max(0.0);
+        point
     }
 
 
@@ -1925,6 +2053,130 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let handle = xgame_core::ProjectHandle::create(&base, "StateTest").expect("创建临时项目");
         (EditorState::new(handle), base)
+    }
+
+    // -- 资源浏览器（P0 资产管线）------------------------------------------
+
+    /// 把模型资产放进场景：新实体带路径、落在给定世界坐标、选中、可撤销。
+    #[test]
+    fn spawn_model_asset_creates_entity_at_position() {
+        let (mut state, base) = temp_state("spawn_model");
+        std::fs::create_dir_all(state.project.path("Resources")).unwrap();
+        std::fs::write(state.project.path("Resources/Box.glb"), b"glb").unwrap();
+        state.refresh_assets();
+        assert_eq!(
+            state.asset_browser.len(),
+            1,
+            "刷新后应看见刚放进来的资产: {:?}",
+            state.asset_browser
+        );
+
+        let before = state.scene.entities.len();
+        let idx = state
+            .spawn_asset_at("Resources/Box.glb", Vec3::new(1.0, 0.0, -2.0))
+            .expect("模型应能放进场景");
+        assert_eq!(state.scene.entities.len(), before + 1);
+        let entity = &state.scene.entities[idx];
+        assert_eq!(entity.model, "Resources/Box.glb", "实体引用必须是路径（内存态）");
+        assert_eq!(entity.transform.position, Vec3::new(1.0, 0.0, -2.0));
+        assert!(
+            entity.name.starts_with("Box"),
+            "名字应取自文件名，实际 {}",
+            entity.name
+        );
+        assert_eq!(state.selected_entity, Some(idx), "放置后应选中新实体");
+        assert!(state.can_undo(), "放置必须进撤销栈");
+
+        state.undo();
+        assert_eq!(
+            state.scene.entities.len(),
+            before,
+            "撤销应撤掉这次放置"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 预制体资产走实例化路径，并且整体搬到落点（根层 = 局部坐标即世界坐标）。
+    #[test]
+    fn spawn_prefab_asset_instantiates_at_position() {
+        let (mut state, base) = temp_state("spawn_prefab");
+        std::fs::create_dir_all(state.project.path("Resources")).unwrap();
+        std::fs::write(state.project.path("Resources/Box.glb"), b"glb").unwrap();
+        let mut prefab = Prefab::new("Tower");
+        prefab.entities.push(Entity::new("Body").with_model("Resources/Box.glb"));
+        let relative = state.project.prefab_path_for("Tower");
+        state.project.write_prefab(&relative, &prefab).unwrap();
+        state.refresh_assets();
+
+        let before = state.scene.entities.len();
+        let idx = state
+            .spawn_asset_at(&relative, Vec3::new(3.0, 0.0, 4.0))
+            .expect("预制体应能实例化");
+        assert_eq!(state.scene.entities.len(), before + 1);
+        assert_eq!(state.scene.entities[idx].transform.position, Vec3::new(3.0, 0.0, 4.0));
+        assert!(
+            state.scene.entities[idx].prefab.is_some(),
+            "实例化出来的实体必须带来源标记"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 脚本 / 音频 / 纹理不能"放进场景"——必须明确拒绝并给提示，
+    /// 而不是静默生成一个空实体（那会让用户以为资产导入失败）。
+    #[test]
+    fn spawn_rejects_non_scene_assets() {
+        let (mut state, base) = temp_state("spawn_reject");
+        std::fs::create_dir_all(state.project.path("Scripts")).unwrap();
+        std::fs::write(state.project.path("Scripts/A.lua"), b"-- lua").unwrap();
+        state.refresh_assets();
+
+        let before = state.scene.entities.len();
+        assert!(state.spawn_asset_at("Scripts/A.lua", Vec3::ZERO).is_none());
+        assert_eq!(state.scene.entities.len(), before, "不该生成任何实体");
+        assert!(
+            state
+                .console_messages
+                .last()
+                .map(|m| m.text.contains("不能直接放进场景"))
+                .unwrap_or(false),
+            "应给出可读提示"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 导入设置写进 `.meta`，重开项目后仍在（落盘契约）。
+    #[test]
+    fn import_settings_survive_reopen() {
+        let (mut state, base) = temp_state("import_roundtrip");
+        std::fs::create_dir_all(state.project.path("Resources")).unwrap();
+        std::fs::write(state.project.path("Resources/Box.glb"), b"glb").unwrap();
+        state.refresh_assets();
+
+        let mut import = state.asset_import("Resources/Box.glb");
+        import.model_scale = 2.5;
+        state.set_asset_import("Resources/Box.glb", import);
+
+        // 重开项目（模拟编辑器重启）后仍读得到。
+        // 注意项目根是 `base/StateTest`（`create` 会在父目录下建同名子目录）。
+        let root = state.project.root().to_path_buf();
+        let reopened = xgame_core::ProjectHandle::open(&root).expect("重新打开项目");
+        assert_eq!(reopened.asset_import("Resources/Box.glb").model_scale, 2.5);
+        assert!(reopened.path("Resources/Box.glb.meta").is_file());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `asset_stem` 必须是"第一个点之前"：预制体是双后缀，
+    /// 用 `file_stem` 会得到 `Pillar.prefab` 这种半截名字。
+    #[test]
+    fn asset_stem_takes_first_segment() {
+        assert_eq!(asset_stem("Resources/Box.glb"), "Box");
+        assert_eq!(asset_stem("Prefabs/Pillar.prefab.ron"), "Pillar");
+        assert_eq!(asset_stem("Box.glb"), "Box");
+        assert_eq!(asset_stem(""), "Asset");
     }
 
     /// 控制台消息表必须有上限。

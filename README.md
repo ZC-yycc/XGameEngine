@@ -19,9 +19,13 @@ cargo run -p xgame-editor -- projects/SampleScene
 # 独立游戏 —— 运行一个项目
 cargo run -p xgame-game -- projects/SampleScene
 
-# 无头项目检查 —— 不开窗口，验证清单 / 场景 / 资产引用
-# （退出码 0=干净 · 1=加载失败 · 2=悬空引用；给 CI / AI 智能体用）
+# 无头项目检查 —— 不开窗口，验证清单 / 场景 / 资产引用 / 资产身份证
+# （退出码 0=干净 · 1=加载失败 · 2=有问题；给 CI / AI 智能体用）
 cargo run -p xgame-editor -- --check projects/SampleScene
+
+# 老项目迁移 —— 给资产生成 .meta、把场景 / 预制体里的路径引用改写成 GUID
+# （幂等；只替换引用字面量，不动注释与排版）
+cargo run -p xgame-editor -- --migrate-assets projects/MyOldGame
 
 # 无头运行 —— 不开窗口跑 N 帧，stdout 出 JSON 统计（帧耗时 / 实体 / 脚本日志）
 # （退出码 0=干净 · 1=加载失败 · 2=跑完有问题；见 Docs/无头运行.md）
@@ -435,6 +439,43 @@ Entity(
 - **普通实体不写 `prefab` 字段**（`skip_serializing_if`），场景文件不会被一堆
   `prefab: None` 灌满；旧文件缺这个字段也能照常加载。
 - 构建（🔨 Build）会把 `Prefabs/` 一并打进产物。
+
+## 资产与导入（GUID + `.meta`）
+
+**问题**：场景里如果存的是 `model: "Resources/Box.glb"`，资产一改名 / 一挪目录就断链，
+只能等 `--check` 事后发现再手改。引用格式是数据格式，越晚改越贵 —— 所以资产的引用
+一律用**稳定身份**。
+
+**做法**（细节见 `Docs/决策记录.md` §十四）：
+
+- 每个资产旁边一份 `<文件名>.meta`（RON 纯文本）：
+
+  ```ron
+  (guid: "43b41a2008432f77ca7fbca93854f890", kind: Model, import: (model_scale: 2.0))
+  ```
+
+- 场景 / 预制体里存 `guid://43b4…`，**内存里仍然是路径** —— 渲染 / 物理 / 音频 / 脚本
+  完全不知道 GUID 的存在。转换只发生在 `ProjectHandle` 的加载 / 保存边界。
+- 改名、挪目录：把资产**连同 `.meta`** 一起搬即可，引用自动跟随。
+  （`Fox.gltf` 这类带外部 `.bin` 的模型，`.bin` 要一起搬 —— 它不算独立资产。）
+- 老项目升级：`--migrate-assets <项目>`。它只替换引用字面量，**不动注释与排版**；
+  也可以直接打开 + 保存一次（保存时会自动编码成 GUID）。
+
+**资源浏览器（Assets 面板，与 Prefabs 共页签）**：
+
+- 目录树浏览 `Resources/` / `Scripts/` / `Prefabs/`，按类型着色图标、可搜索；
+- 选中看详情：路径、GUID、导入设置；
+- **双击**放入场景（落在相机前方）、**拖到视口**放在鼠标射线打到的地方（射线 × y=0 地面）；
+- 右上角 ⟳ = 重新扫描（给新拷进来的资产补 `.meta`）。
+
+**`--check` 现在会报**：悬空 GUID、缺 `.meta`、孤儿 `.meta`、坏 `.meta`、GUID 冲突、
+缺失的模型 / 脚本 / 音频 / 预制体。它**严格只读** —— 不会顺手生成 `.meta`
+（生成是编辑器打开项目 / 保存场景时的事）。
+
+**导入设置**目前是**数据面就位、消费面待接**：`.meta` 里的 `model_scale` /
+`texture_srgb` / `texture_nearest` / `audio_streaming` 都能改、能存、重开还在，
+但渲染侧还没读它们（材质还没有纹理槽位；模型缩放要连带骨骼 / 逆绑定 / 动画轨道
+一起缩放，属于独立一刀）。在 `Docs/差距分析.md` 里记为 P1「接线」。
 
 ## 脚本（Lua）
 

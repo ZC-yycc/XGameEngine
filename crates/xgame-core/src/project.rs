@@ -19,16 +19,26 @@
 //! └── Resources/           # 模型 / 纹理 / 音频等资产
 //! ```
 //!
-//! # 为什么清单里存的是相对路径
+//! # 为什么清单里存的是相对路径，而场景里存的是 GUID
 //!
-//! 场景文件里的 `model: "Resources/Box.glb"` 是**项目相对路径**。这样整个项目
-//! 目录可以随便移动、拷贝、进版本库，不会因为绝对路径而失效。解析工作统一由
-//! [`ProjectHandle`] 承担。
+//! 清单里的 `entry_scene` / `content.*` 是**项目相对路径** —— 它们描述的是
+//! "项目自己的布局"，跟着项目走，没有重命名的需求。
+//!
+//! 场景与预制体里对**资产**的引用（模型 / 音频 / 脚本 / 预制体）则存 **GUID**
+//! （`guid://…`，见 [`crate::asset`]）：资产会被改名、会被挪目录，只有稳定身份
+//! 才能不断链。两个格式之间的转换收在本模块的加载 / 保存边界上 ——
+//! **内存里永远是路径**（于是渲染 / 物理 / 音频等所有消费点都不用知道 GUID），
+//! 磁盘上永远是 GUID。
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
+use crate::asset::{
+    decode_prefab_references, decode_scene_references, encode_prefab_references,
+    encode_scene_references, AssetDatabase, AssetGuid, AssetKind, ImportSettings,
+};
 use crate::config::{ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
 use crate::prefab::{Prefab, PREFAB_EXTENSION};
 use crate::scene::Scene;
@@ -162,19 +172,70 @@ pub enum ProjectError {
 }
 
 // ---------------------------------------------------------------------------
+// 资产引用迁移
+// ---------------------------------------------------------------------------
+
+/// 资产引用迁移的结果（编辑器 `--migrate-assets` 与 MCP 共用）。
+///
+/// 迁移是"老项目一次性升级"：给资产发身份证、把场景 / 预制体里的路径引用
+/// 改写成 GUID。它不改变任何运行语义 —— 迁完之后内存里读出来的路径一模一样。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetMigrationReport {
+    /// 本次新生成的 `.meta` 数量。
+    pub created_metas: usize,
+    /// 重写过的场景文件数。
+    pub rewritten_scenes: usize,
+    /// 重写过的预制体文件数。
+    pub rewritten_prefabs: usize,
+    /// 单个文件失败的原因（不阻断其余文件）。
+    pub errors: Vec<String>,
+}
+
+impl AssetMigrationReport {
+    /// 有没有失败项。
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    /// 人和机器都能读的摘要（纯 ASCII）。
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            out,
+            "migrate: metas={} scenes={} prefabs={} errors={}",
+            self.created_metas,
+            self.rewritten_scenes,
+            self.rewritten_prefabs,
+            self.errors.len()
+        );
+        for e in &self.errors {
+            let _ = writeln!(out, "  error: {e}");
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 项目句柄
 // ---------------------------------------------------------------------------
 
-/// 已打开的项目：项目清单 + 根目录。
+/// 已打开的项目：项目清单 + 根目录 + 资产库。
 ///
 /// 这是编辑器与游戏二进制访问项目资产的**唯一入口**——所有相对路径都经过
 /// [`ProjectHandle::path`] 解析，避免散落各处的 `Path::join`。
+///
+/// 资产库放在 `Arc<Mutex<…>>` 里：`ProjectHandle` 到处被 clone（编辑器把句柄
+/// 放进各个状态结构），复制一个句柄不该重新扫一遍盘；同时"刷新资产"必须对
+/// 所有持有者同时生效 —— 共享一份索引是唯一不会漂移的做法。
 #[derive(Debug, Clone)]
 pub struct ProjectHandle {
     /// 项目根目录（绝对路径）。
     root: PathBuf,
     /// 项目清单。
     manifest: Project,
+    /// 资产索引 + `.meta` 导入设置（惰性刷新，见 [`ProjectHandle::assets`]）。
+    assets: Arc<Mutex<AssetDatabase>>,
 }
 
 impl ProjectHandle {
@@ -205,7 +266,14 @@ impl ProjectHandle {
             }
         })?;
 
-        Ok(Self { root, manifest })
+        // 扫描一次资产库。项目级文件数通常是几百，毫秒级；放在打开项目时做，
+        // 换来"每次加载场景都不必扫盘"。
+        let assets = Arc::new(Mutex::new(AssetDatabase::scan(&root)));
+        Ok(Self {
+            root,
+            manifest,
+            assets,
+        })
     }
 
     /// 在 `parent/<name>` 下创建一个新项目：建目录、写清单、写默认场景。
@@ -225,9 +293,13 @@ impl ProjectHandle {
 
         // 先建句柄，再按清单里声明的目录建结构——目录名以清单为准，
         // 免得以后改了默认布局要在这里跟着改一份。
+        // 目录此时还不存在（`root.exists()` 已被排除），扫出来就是一个空库；
+        // 但仍然要给句柄一个真实 root，否则后续 `refresh` 无从下手。
+        let assets = Arc::new(Mutex::new(AssetDatabase::scan(&root)));
         let handle = Self {
             root,
             manifest: Project::new(name),
+            assets,
         };
 
         // 基础目录结构：场景 + 预制体 + 资产
@@ -246,6 +318,9 @@ impl ProjectHandle {
         // 清单 + 默认场景
         handle.save()?;
         handle.write_scene(DEFAULT_ENTRY_SCENE, &default_scene())?;
+        if let Ok(mut db) = handle.assets.lock() {
+            db.refresh();
+        }
 
         Ok(handle)
     }
@@ -307,6 +382,72 @@ impl ProjectHandle {
         self.path(&self.manifest.content.scripts_dir)
     }
 
+    // -- 资产库 ------------------------------------------------------------
+
+    /// 借用资产库（GUID ↔ 路径 / 导入设置 / 扫描诊断）。
+    ///
+    /// 返回的 guard 持有锁：**不要**在持有它的同时调用本句柄的
+    /// `load_scene` / `write_scene` / `load_prefab` / `write_prefab`
+    /// （它们内部也要拿这把锁，会自锁）。需要跨调用时先取出值再放锁。
+    pub fn assets(&self) -> MutexGuard<'_, AssetDatabase> {
+        // 中毒的锁也照样用：一次 panic 不该让整个项目的资产索引永久不可用。
+        self.assets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 重新扫描资产目录（编辑器"刷新资产"、脚本热重载后、外部改动文件后）。
+    pub fn refresh_assets(&self) {
+        self.assets().refresh();
+    }
+
+    /// 为缺 `.meta` 的资产生成身份证（写盘）。
+    ///
+    /// 编辑器打开项目、保存场景前、资源浏览器导入资产时调用。
+    /// `--check` **不**调用它 —— 检查必须只读，否则"检查一遍"会改项目。
+    ///
+    /// 内部先重新扫盘：调用方通常是"刚把资产拷进项目"，此时索引还是打开项目
+    /// 那会儿的，不刷新就会漏掉新文件（那样"补 meta"会静默什么都不做）。
+    pub fn ensure_asset_metas(&self) -> Result<usize, String> {
+        let mut assets = self.assets();
+        assets.refresh();
+        assets.ensure_metas()
+    }
+
+    /// 取某个资产的导入设置（没有记录时给默认值）。
+    pub fn asset_import(&self, relative: &str) -> ImportSettings {
+        let assets = self.assets();
+        assets
+            .record_of_path(relative)
+            .map(|r| r.import)
+            .unwrap_or_default()
+    }
+
+    /// 取某个资产的 GUID（供 UI 显示"身份"用）。
+    pub fn asset_guid(&self, relative: &str) -> Option<AssetGuid> {
+        self.assets().guid_of(relative).cloned()
+    }
+
+    /// 改写某个资产的导入设置（写回 `.meta` 并刷新索引）。
+    pub fn set_asset_import(
+        &self,
+        relative: &str,
+        import: ImportSettings,
+    ) -> Result<(), String> {
+        self.assets().set_import(relative, import)
+    }
+
+    /// 列出项目里所有已登记的资产（项目相对路径 + 类型，按路径字典序）。
+    ///
+    /// 资源浏览器 / MCP `asset_list` 共用 —— 不扫盘、直接读索引。
+    pub fn list_assets(&self) -> Vec<(String, AssetKind)> {
+        self.assets()
+            .sorted_entries()
+            .into_iter()
+            .map(|(_, record)| (record.path.clone(), record.kind))
+            .collect()
+    }
+
     /// 把一个绝对路径转成**项目相对路径**（统一用正斜杠）。
     ///
     /// 不在项目内（或不是 `root` 的后代）时返回 `None`。
@@ -364,15 +505,42 @@ impl ProjectHandle {
     }
 
     /// 从项目内的相对路径加载预制体。
+    ///
+    /// 磁盘上的资产引用是 GUID，这里解码成项目相对路径再交给上层 ——
+    /// 调用方永远只看见能直接打开的路径。
     pub fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {
         let path = self.path(relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
-        Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{}': {e}", path.display()))
+        let mut prefab = Prefab::from_ron(&text)
+            .map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+        {
+            let assets = self.assets();
+            decode_prefab_references(&mut prefab, &assets);
+        }
+        Ok(prefab)
     }
 
     /// 把预制体写回项目内的相对路径。
+    ///
+    /// 写盘前把资产引用编码成 GUID（并补齐缺 `.meta` 的资产身份证）。
+    /// 这样"改了资产名再保存"就把新身份固化进文件，而不是继续存路径。
     pub fn write_prefab(&self, relative: &str, prefab: &Prefab) -> Result<(), ProjectError> {
+        let encoded = {
+            let mut assets = self.assets();
+            // 与 `write_scene` 同理：编码前保证索引是最新的。
+            assets.refresh();
+            let _ = assets.ensure_metas();
+            if assets.is_empty() {
+                None
+            } else {
+                let mut copy = prefab.clone();
+                encode_prefab_references(&mut copy, &assets);
+                Some(copy)
+            }
+        };
+        let prefab = encoded.as_ref().unwrap_or(prefab);
+
         let path = self.path(relative);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
@@ -400,12 +568,137 @@ impl ProjectHandle {
         out
     }
 
+    /// 列出项目里所有场景文件（**项目相对路径**，按字典序）。
+    ///
+    /// 只认 `.ron` 且排除 `.prefab.ron` —— 与 [`AssetKind::from_path`] 的
+    /// 判定顺序保持一致，避免预制体被当成场景重写一遍。
+    pub fn list_scenes(&self) -> Vec<String> {
+        let scan = self.scenes_dir();
+        let mut out = Vec::new();
+        collect_by_extension(&scan, &self.root, "ron", &mut out);
+        out.retain(|p| !p.ends_with(&format!(".{PREFAB_EXTENSION}")));
+        out.sort();
+        out
+    }
+
+    /// 把整个项目的资产引用迁移成 GUID（老项目一次性升级）。
+    ///
+    /// 做三件事：
+    /// 1. 补齐所有资产的 `.meta`（GUID 在这里生成，之后永不变）；
+    /// 2. 把场景 / 预制体里的路径字面量改写成 `guid://…`；
+    /// 3. 汇总错误（单个文件坏掉不阻断其余文件 —— 迁移是批处理，能救多少救多少）。
+    ///
+    /// # 为什么是"字符串字面量替换"而不是"读出来再整体序列化"
+    ///
+    /// 场景文件在本仓库里不只是数据，还是**文档**：示例场景大量用注释解释
+    /// "这块地面为什么是这个颜色"。整份重新序列化会把注释全部吃掉，
+    /// 一次迁移就把教程变成裸数据。所以这里只在原文里替换
+    /// `"Resources/Box.glb"` → `"guid://…"`，其余一个字节都不动。
+    ///
+    /// 幂等：已经迁移过的引用是 `guid://…`，不再匹配路径，也不会重复改写。
+    pub fn migrate_asset_references(&self) -> AssetMigrationReport {
+        let mut report = AssetMigrationReport::default();
+
+        // 先扫盘 + 生成身份证，后面的引用编码才查得到 GUID。
+        {
+            let mut assets = self.assets();
+            assets.refresh();
+            match assets.ensure_metas() {
+                Ok(n) => report.created_metas = n,
+                Err(e) => report.errors.push(e),
+            }
+        }
+
+        for relative in self.list_scenes() {
+            match self.rewrite_references_in_place(&relative, false) {
+                Ok(true) => report.rewritten_scenes += 1,
+                Ok(false) => {}
+                Err(e) => report.errors.push(format!("{relative}: {e}")),
+            }
+        }
+
+        for relative in self.list_prefabs() {
+            match self.rewrite_references_in_place(&relative, true) {
+                Ok(true) => report.rewritten_prefabs += 1,
+                Ok(false) => {}
+                Err(e) => report.errors.push(format!("{relative}: {e}")),
+            }
+        }
+
+        report
+    }
+
+    /// 就地把一个场景 / 预制体文件里的资产引用路径改写成 GUID。
+    ///
+    /// 返回"是否真的改了"。只替换**完整的带引号字面量** —— `"Resources/Box.glb"`
+    /// 不会误伤 `"Resources/Box.glb.bak"`（后者不包含前者的收尾引号）。
+    fn rewrite_references_in_place(&self, relative: &str, is_prefab: bool) -> Result<bool, String> {
+        let path = self.path(relative);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("无法读取 '{}': {e}", path.display()))?;
+
+        // 先按正常路径解析一遍：既拿到"内存里的路径清单"，也顺手验证文件本身
+        // 是可解析的（坏文件直接进 errors，而不是被文本替换掩盖过去）。
+        let mut references: Vec<String> = Vec::new();
+        if is_prefab {
+            let prefab = Prefab::from_ron(&text)
+                .map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+            collect_entity_references(&prefab.entities, &mut references);
+        } else {
+            let scene: Scene = ron::from_str(&text)
+                .map_err(|e| format!("无法解析 '{}': {e:#}", path.display()))?;
+            collect_entity_references(&scene.entities, &mut references);
+        }
+
+        let mut replaced = text;
+        let mut changed = false;
+        {
+            let assets = self.assets();
+            references.sort();
+            references.dedup();
+            for reference in references {
+                if reference.is_empty()
+                    || reference.contains("://")
+                    || Path::new(&reference).is_absolute()
+                {
+                    continue;
+                }
+                let Some(guid) = assets.guid_of(&reference) else {
+                    continue; // 悬空路径：没有身份证，保持原样让 check 报出来
+                };
+                let literal = format!("\"{reference}\"");
+                if replaced.contains(&literal) {
+                    let with_guid = format!("\"{}\"", guid.to_reference());
+                    replaced = replaced.replace(&literal, &with_guid);
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(false);
+        }
+        std::fs::write(&path, replaced)
+            .map_err(|source| ProjectError::Write { path, source })
+            .map(|_| true)
+            .map_err(|e| e.to_string())
+    }
+
     /// 从项目内的相对路径加载场景。
+    ///
+    /// 磁盘上的资产引用是 GUID，这里解码成项目相对路径。悬空 GUID（资产被删）
+    /// 会原样保留 `guid://…` 字符串，好让 `--check` 与 Inspector 都能指出断链。
     pub fn load_scene(&self, relative: &str) -> Result<Scene, String> {
         let path = self.path(relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
-        ron::from_str(&text).map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))
+        let mut scene = ron::from_str(&text)
+            .map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))?;
+        {
+            let assets = self.assets();
+            decode_scene_references(&mut scene, &assets);
+        }
+        Ok(scene)
     }
 
     /// 加载清单里指定的入口场景。
@@ -414,7 +707,28 @@ impl ProjectHandle {
     }
 
     /// 把场景写回项目内的相对路径。
+    ///
+    /// 写盘前把资产引用编码成 GUID（并补齐缺 `.meta` 的资产身份证）——
+    /// 于是"打开旧项目 + 保存一次"就完成了从路径引用到 GUID 引用的迁移，
+    /// 不需要额外的迁移命令。
     pub fn write_scene(&self, relative: &str, scene: &Scene) -> Result<(), ProjectError> {
+        let encoded = {
+            let mut assets = self.assets();
+            // 保存前重新扫一遍：用户可能在编辑器打开后往 `Resources/` 里拷了
+            // 新资产（或从外部改了文件名），索引过期就会漏掉新资产、把引用
+            // 继续写成路径。保存是低频操作，一次全扫（几百文件）也就毫秒级。
+            assets.refresh();
+            let _ = assets.ensure_metas();
+            if assets.is_empty() {
+                None
+            } else {
+                let mut copy = scene.clone();
+                encode_scene_references(&mut copy, &assets);
+                Some(copy)
+            }
+        };
+        let scene = encoded.as_ref().unwrap_or(scene);
+
         let path = self.path(relative);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
@@ -551,8 +865,7 @@ fn collect_prefabs(scan_dir: &Path, project_root: &Path, out: &mut Vec<String>) 
 ///
 /// 与 `collect_prefabs` 同构，只是把"后缀"参数化了 —— 预制体、脚本、
 /// 以后还有音频，各自的目录不同但收集逻辑一模一样。
-fn collect_by_extension(scan_dir: &Path, project_root: &Path, extension: &str, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(scan_dir) else {
+fn collect_by_extension(scan_dir: &Path, project_root: &Path, extension: &str, out: &mut Vec<String>) {    let Ok(entries) = std::fs::read_dir(scan_dir) else {
         return; // 目录还不存在 = 一个都没有，不是错误
     };
     for entry in entries.flatten() {
@@ -570,6 +883,27 @@ fn collect_by_extension(scan_dir: &Path, project_root: &Path, extension: &str, o
     }
 }
 
+/// 收集一组实体上出现的所有资产引用（内存态：项目相对路径或悬空 `guid://`）。
+///
+/// 与 `xgame_core::asset` 里的编码 / 解码 walk 是同一组字段 —— 加新的资产
+/// 引用字段时**两处都要改**（这里漏一个，迁移就会漏掉它，断链留在原地）。
+fn collect_entity_references(entities: &[crate::Entity], out: &mut Vec<String>) {
+    for entity in entities {
+        if !entity.model.is_empty() {
+            out.push(entity.model.clone());
+        }
+        out.extend(entity.scripts.iter().cloned());
+        if let Some(audio) = &entity.audio {
+            if !audio.clip.is_empty() {
+                out.push(audio.clip.clone());
+            }
+        }
+        if let Some(link) = &entity.prefab {
+            out.push(link.source.clone());
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -577,6 +911,7 @@ fn collect_by_extension(scan_dir: &Path, project_root: &Path, extension: &str, o
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::Entity;
 
     #[test]
     fn manifest_roundtrip() {
@@ -647,11 +982,171 @@ mod tests {
         assert_eq!(sanitize_dir_name("..."), "");
     }
 
+    // -- 资产 GUID 的端到端（P0 验收）--------------------------------------
+
+    /// 一个临时的、带内容的项目。
+    fn temp_project(tag: &str) -> (PathBuf, ProjectHandle) {
+        let base = std::env::temp_dir().join(format!(
+            "xgame_guid_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let handle = ProjectHandle::create(&base, "GuidDemo").expect("创建项目");
+        (base, handle)
+    }
+
+    /// 保存场景必须把资产引用写成 GUID —— 这是"磁盘存 GUID"的第一条判据。
+    ///
+    /// 旧实现（路径引用）下这条必然红：文件里会是 `Resources/Box.glb`。
+    #[test]
+    fn saving_scene_writes_guid_references() {
+        let (base, handle) = temp_project("write");
+        std::fs::create_dir_all(handle.path("Resources")).unwrap();
+        std::fs::write(handle.path("Resources/Box.glb"), b"glb").unwrap();
+
+        let mut scene = handle.load_entry_scene().expect("默认场景");
+        scene
+            .entities
+            .push(Entity::new("Box").with_model("Resources/Box.glb"));
+        let entry = handle.manifest().entry_scene.clone();
+        handle.write_scene(&entry, &scene).expect("写场景");
+
+        let text = std::fs::read_to_string(handle.path(&entry)).unwrap();
+        assert!(
+            text.contains("guid://"),
+            "资产引用必须以 GUID 落盘，实际：\n{text}"
+        );
+        assert!(
+            !text.contains("Resources/Box.glb"),
+            "路径不该再出现在场景文件里（.meta 才有路径）:\n{text}"
+        );
+        // `.meta` 要同时被生成 —— 没有身份证就没法编码。
+        assert!(handle.path("Resources/Box.glb.meta").is_file());
+
+        // 读回来必须是**路径**（内存态），不是 guid:// 字符串。
+        let reloaded = handle.load_entry_scene().unwrap();
+        assert_eq!(reloaded.entities.last().unwrap().model, "Resources/Box.glb");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **P0 核心验收**：资产改名 / 挪目录后，场景依然指向它。
+    ///
+    /// 旧实现下这条红得最直接：场景里存的是 `Resources/Box.glb`，
+    /// 文件挪走后模型路径就断了。
+    #[test]
+    fn renaming_asset_keeps_scene_reference_alive() {
+        let (base, handle) = temp_project("rename");
+        std::fs::create_dir_all(handle.path("Resources")).unwrap();
+        std::fs::write(handle.path("Resources/Box.glb"), b"glb").unwrap();
+
+        let mut scene = handle.load_entry_scene().unwrap();
+        scene
+            .entities
+            .push(Entity::new("Box").with_model("Resources/Box.glb"));
+        let entry = handle.manifest().entry_scene.clone();
+        handle.write_scene(&entry, &scene).unwrap();
+
+        // 用户用文件管理器把资产（连同 .meta）挪进子目录。
+        std::fs::create_dir_all(handle.path("Resources/Models")).unwrap();
+        std::fs::rename(
+            handle.path("Resources/Box.glb"),
+            handle.path("Resources/Models/Box.glb"),
+        )
+        .unwrap();
+        std::fs::rename(
+            handle.path("Resources/Box.glb.meta"),
+            handle.path("Resources/Models/Box.glb.meta"),
+        )
+        .unwrap();
+
+        handle.refresh_assets();
+        let reloaded = handle.load_entry_scene().unwrap();
+        let model = &reloaded.entities.last().unwrap().model;
+        assert_eq!(model, "Resources/Models/Box.glb", "GUID 应解析到新路径");
+        assert!(handle.path(model).is_file(), "解析出的路径必须真的存在");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 旧场景（存路径）打开后不改任何东西，保存一次就迁移成 GUID；
+    /// 再读回来路径一模一样 —— 迁移不能改变任何语义。
+    #[test]
+    fn legacy_path_references_migrate_on_save() {
+        let (base, handle) = temp_project("migrate");
+        std::fs::create_dir_all(handle.path("Resources")).unwrap();
+        std::fs::write(handle.path("Resources/Box.glb"), b"glb").unwrap();
+
+        // 手写一份"老格式"场景（引用是路径）。
+        let legacy = r#"(
+            name: "Legacy",
+            entities: [
+                (
+                    name: "Box",
+                    transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+                    model: "Resources/Box.glb",
+                ),
+            ],
+        )"#;
+        std::fs::write(handle.path("Scenes/legacy.ron"), legacy).unwrap();
+
+        let before = handle.load_scene("Scenes/legacy.ron").expect("老场景可读");
+        assert_eq!(before.entities[0].model, "Resources/Box.glb");
+
+        handle.write_scene("Scenes/legacy.ron", &before).unwrap();
+        let text = std::fs::read_to_string(handle.path("Scenes/legacy.ron")).unwrap();
+        assert!(text.contains("guid://"), "保存后必须迁移成 GUID:\n{text}");
+
+        let after = handle.load_scene("Scenes/legacy.ron").unwrap();
+        assert_eq!(after.entities[0].model, "Resources/Box.glb");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 预制体资产的引用同样走 GUID：改名后预制体内部的模型引用不断。
+    #[test]
+    fn prefab_references_use_guid() {
+        let (base, handle) = temp_project("prefab_guid");
+        std::fs::create_dir_all(handle.path("Resources")).unwrap();
+        std::fs::write(handle.path("Resources/Box.glb"), b"glb").unwrap();
+
+        let mut prefab = Prefab::new("Enemy");
+        prefab
+            .entities
+            .push(Entity::new("Body").with_model("Resources/Box.glb"));
+        let relative = handle.prefab_path_for("Enemy");
+        handle.write_prefab(&relative, &prefab).unwrap();
+
+        let text = std::fs::read_to_string(handle.path(&relative)).unwrap();
+        assert!(text.contains("guid://"), "预制体引用也要 GUID:\n{text}");
+
+        // 挪走模型 + meta，预制体仍能解析。
+        std::fs::create_dir_all(handle.path("Resources/Models")).unwrap();
+        std::fs::rename(handle.path("Resources/Box.glb"), handle.path("Resources/Models/Box.glb")).unwrap();
+        std::fs::rename(
+            handle.path("Resources/Box.glb.meta"),
+            handle.path("Resources/Models/Box.glb.meta"),
+        )
+        .unwrap();
+        handle.refresh_assets();
+
+        let loaded = handle.load_prefab(&relative).unwrap();
+        assert_eq!(loaded.entities[0].model, "Resources/Models/Box.glb");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn path_resolves_relative_to_root() {
         let handle = ProjectHandle {
             root: PathBuf::from("/tmp/demo"),
             manifest: Project::new("demo"),
+            assets: Arc::new(Mutex::new(AssetDatabase::default())),
         };
         assert_eq!(
             handle.path("Resources/Box.glb"),
@@ -759,6 +1254,7 @@ mod tests {
         let handle = ProjectHandle {
             root: PathBuf::from("/tmp/demo"),
             manifest: Project::new("demo"),
+            assets: Arc::new(Mutex::new(AssetDatabase::default())),
         };
         assert_eq!(handle.prefab_path_for("Enemy"), "Prefabs/Enemy.prefab.ron");
         assert_eq!(handle.prefab_path_for("a/b:c"), "Prefabs/abc.prefab.ron");

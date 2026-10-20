@@ -797,7 +797,28 @@ console::show_content(state, ui)
   └── 最多保留 500 条
 ```
 
-##### 4e. Prefabs 面板（预制体资源浏览器）
+##### 4e. Assets 面板（资源浏览器，与 Prefabs 同页签组）
+
+```
+assets::show_content(state, ui)
+  ├── 标题 "Assets" + 资产数 + [⟳] 刷新（refresh_assets：扫盘 + 补 .meta + 三份清单）
+  ├── 搜索框 (词存 state.asset_filter)
+  ├── 目录树 (ScrollArea，max_height 让位给详情区)
+  │     ├── 目录行：箭头 + 文件夹图标 + 名字（展开状态存 egui temp data）
+  │     └── 资产行：类型图标 + 文件名
+  │           ├── 单击 = 选中（state.asset_selected）→ 底部详情
+  │           ├── 双击 = 放入场景（相机前方 5 米，state.placement_point_in_front）
+  │           ├── 拖动 = state.asset_drag = Some(path) → 视口接管（射线落点）
+  │           └── 右键: 放入场景 / 复制路径 / 复制 GUID
+  └── 详情区: 类型 + 路径 + GUID 前 8 位 + 导入设置（模型缩放 / 纹理 sRGB·nearest / 音频流式）
+```
+
+**拖放的两段职责**：面板只负责"开始拖"（`asset_drag = Some(path)`）；
+落点、提示十字与放置都在 `scene_view::compute_asset_drop` 里（`interact_pos` →
+`gizmo::screen_to_ray` → 与 y=0 平面求交，朝上则退回相机前方）；
+**清空 `asset_drag` 在 `main.rs` 帧末**（面板被拖成非活动页签不绘制时也不会漏）。
+
+##### 4f. Prefabs 面板（预制体工作流）
 
 ```
 prefabs::show_content(state, ui)
@@ -973,8 +994,13 @@ GameApp::render()
 ```
 EditorState（中央状态，所有面板共享可变引用）
   │
-  ├── project: ProjectHandle            已打开的项目（根目录 + 清单）
-  │     └── path(rel) → 绝对路径         所有资产路径的唯一解析入口
+  ├── project: ProjectHandle            已打开的项目（根目录 + 清单 + 资产库）
+  │     ├── path(rel) → 绝对路径         所有资产路径的唯一解析入口
+  │     └── assets() → AssetDatabase     GUID ↔ 路径 / 导入设置 / 诊断（扫描一次，显式刷新）
+  │
+  │   资产引用的**磁盘 ⇄ 内存**转换只在 project 的 load_*/write_* 里：
+  │     读：RON 里 `guid://…` ──decode──▶ 内存里的项目相对路径（渲染/物理/音频/脚本只认路径）
+  │     写：内存路径 ──encode──▶ `guid://…`（顺带 ensure .meta）
   │
   ├── scene: Scene
   │     ├── name: String
@@ -1150,6 +1176,7 @@ Scene(
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
 | `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |
 | `core/project.rs` | 773 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`；清单含 `runtime` 节（重力 / 固定步长） |
+| `core/asset.rs` | 1200+ | `AssetGuid`（32 位十六进制，生成器 = 进程随机 + 纳秒 + 原子序号）、`AssetMeta`（`.meta` 的 RON：guid/kind/import）、`AssetDatabase`（扫描建 guid↔path、诊断缺/孤儿/坏/冲突、`ensure_metas`、`set_import`、`resolve_reference`/`encode_reference`）、`encode_*`/`decode_*`（场景/预制体的磁盘⇄内存引用转换） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 1026 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`）；`Entity::animator`（`#[serde(default)]`，旧场景读作 None） |
 | `core/animation.rs` | 588 | `Animator`（clip / speed / looping / autoplay / fade_time / machine / additive / layers）、`is_active()`（机器感知：模式下 = autoplay 且存在 speed > 0 的状态）、`AnimMachine`（entry / parameters / states / transitions，`state()` / `transition_for()` 首条命中 / `is_usable()` 坏机器退回单剪辑）、`AnimState`（每状态自己的 clip/speed/looping，覆盖 Animator 字段）、`AnimCondition`（AtLeast ≥ / Below 严格 <，同阈值互补；缺参数永不匹配）、`AnimAdditive`（单层快捷方式：clip/weight/speed/looping，与机器正交，默认 weight 1.0/speed 1.0/循环）、`AnimLayer` / `AnimLayerMode`（层栈每层：name + mode(Additive/Override) + clip + weight + speed + looping + mask（骨骼子树根名单，空 = 整副骨架），与 additive 并存、内部排在它之后求值） |
@@ -1165,6 +1192,7 @@ Scene(
 | `physics/world.rs` | 900 | `step(dt)`（按传入 dt 积分、子步均分 dt）、`add_body()`（维护 `body_handles` 反查表）、`add_collider()`（未知 body 只警告不 panic）、`debug_lines()` |
 | `editor/panels/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|
 | `editor/panels/inspector.rs` | 1033 | `show_content()`（含撤销集成、父节点下拉、预制体区块、**Animation 区块**：剪辑下拉 / 速度 / Fade / Loop / Autoplay / 状态机 UI / 「+ Additive」叠加层（剪辑下拉 + 权重 DragValue + 摘除）/ **「+ Add Layer」层栈**（每层一行：摘除 ✕ + 名字 TextEdit + 模式 menu_button + 剪辑下拉 + 权重 DragValue；第二行遮罩 chips（点 chip 移出）+ 「+ 骨骼」下拉（来源 `bone_names()`）；增删在闭包外收集后统一应用））|
+| `editor/panels/assets.rs` | 500 | `show_content()`（目录树 + 类型图标 + 详情 + 导入设置 + 双击/拖拽放入场景；`join_path`/`join_dir` 保证同名文件不串）|
 | `editor/panels/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|
 | `editor/panels/toolbar.rs` | 191 | `show()`（含 ⌂ Projects / 💾 Save · Save As / 🔨 Build / ⚙ 设置） |
 | `editor/panels/settings.rs` | 198 | `show()`（项目设置窗口：草稿编辑 → Apply 校验写回 `project.ron`） |
@@ -1173,6 +1201,6 @@ Scene(
 | `editor/panels/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |
 | `game/main.rs` | 517 | `GameRunner`（`ApplicationHandler`：`resumed` / `window_event` / `about_to_wait`）、`GameApp::new()`、`update()`、`render()`、`resolve_project()` |
 | `mcp/lib.rs` | 224 | `handle_line()`（协议入口，喂行进断言行出的纯函数）、`initialize_result()`（版本协商）、两层错误（协议 `error` vs 工具 `isError`） |
-| `mcp/tools.rs` | 693 | `schemas()`（7 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、upsert（先挂父再改变换）/ remove / check / run_headless 实现 |
+| `mcp/tools.rs` | 1500+ | `schemas()`（8 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、upsert（先挂父再改变换）/ remove / check / run_headless 实现 |
 | `mcp/main.rs` | 24 | stdin/stdout 管道（唯一碰 I/O 的一层） |
 | `tools/build-release.ps1` | 370 | `Resolve-Cargo`、`Enable-MsvcEnv`、`Invoke-CargoBuild` |

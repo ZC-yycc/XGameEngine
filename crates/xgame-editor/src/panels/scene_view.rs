@@ -10,6 +10,7 @@
 //! 在 Play 模式下，如果 `show_physics_debug` 启用，会叠加绘制碰撞体线框。
 
 use xgame_math::glam::{Mat4, Vec3};
+use crate::panels::theme;
 use crate::state::{EditorState, GizmoPart, ToolMode};
 use crate::gizmo;
 
@@ -699,7 +700,6 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     let viewport = setup_viewport(ui, state);
     // painter 内部只是一堆 Arc，克隆很便宜；后面要跨越对 `ui` 的多次借用。
     let painter = ui.painter().clone();
-
     // ── 帧序：这里是整个视口手感的命门 ──
     //
     // 顺序必须是 **先处理本帧输入 → 再按最新状态重画离屏 3D → 最后画叠加层**。
@@ -755,6 +755,119 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     draw_physics_debug_lines(state, &painter, &view_proj, viewport.rect);
     draw_zoom_indicator(state, &painter, viewport.rect);
     draw_viewport_hud(state, &painter, viewport.rect, ui);
+
+    // 6) 资源拖放（Assets 面板 → 视口）。
+    //
+    // 落点用"鼠标射线 × y=0 地面平面"：这一版不做表面吸附（命中实体 AABB 再取
+    // 上表面），因为项目约定地面就在 y=0 附近，先保证"拖进来就落在看得见的地方"；
+    // 射线朝上 / 平行于地面时退回相机前方 5 米（`placement_point_in_front`）。
+    let asset_drop = compute_asset_drop(state, ui, &viewport, &view_proj);
+    if let Some(drop) = &asset_drop {
+        draw_asset_drop_hint(&painter, &viewport, &view_proj, state, drop);
+    }
+    // 松手当帧放置。`asset_drag` 本身由 `main.rs` 帧末统一清空 ——
+    // 面板可能被拖成非活动页签而不绘制，清理放在这里会漏。
+    if ui.input(|i| i.pointer.any_released()) {
+        if let Some(drop) = asset_drop {
+            state.spawn_asset_at(&drop.path, drop.point);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 资源拖放
+// ---------------------------------------------------------------------------
+
+/// 一次"拖资产进视口"的落点（只在指针位于视口内时存在）。
+struct AssetDrop {
+    path: String,
+    point: Vec3,
+    /// 指针的屏幕位置（画提示用）。
+    cursor: egui::Pos2,
+}
+
+/// 射线与 y=0 平面求交。射线朝上或无交点时返回 `None`。
+fn ray_ground_point(origin: Vec3, dir: Vec3) -> Option<Vec3> {
+    if dir.y.abs() < 1e-5 {
+        return None;
+    }
+    let t = -origin.y / dir.y;
+    (t > 0.0).then(|| origin + dir * t)
+}
+
+fn compute_asset_drop(
+    state: &EditorState,
+    ui: &egui::Ui,
+    viewport: &ViewportInfo,
+    view_proj: &Mat4,
+) -> Option<AssetDrop> {
+    let path = state.asset_drag.clone()?;
+    // `interact_pos` 在拖拽期间比 `hover_pos` 可靠：指针离开控件后
+    // hover 会变成 None，而拖拽还在继续。
+    let cursor = ui.input(|i| i.pointer.interact_pos())?;
+    if !viewport.rect.contains(cursor) {
+        return None;
+    }
+    let screen_offset = viewport.rect.min.to_vec2();
+    let (origin, dir) =
+        gizmo::screen_to_ray(cursor, view_proj, state.viewport_logical_size, screen_offset);
+    let point = ray_ground_point(origin, dir).unwrap_or_else(|| state.placement_point_in_front());
+    Some(AssetDrop {
+        path,
+        point,
+        cursor,
+    })
+}
+
+/// 拖拽中的落点提示：世界坐标处画一个十字与脚环，指针旁浮出资产名。
+fn draw_asset_drop_hint(
+    painter: &egui::Painter,
+    viewport: &ViewportInfo,
+    view_proj: &Mat4,
+    state: &EditorState,
+    drop: &AssetDrop,
+) {
+    use egui::{Align2, FontId, Pos2};
+
+    let screen = project_to_screen(
+        drop.point,
+        view_proj,
+        state.viewport_logical_size,
+        viewport.rect.min.to_vec2(),
+    );
+    if !viewport.rect.contains(screen) {
+        return;
+    }
+    let arm = 9.0;
+    let stroke = egui::Stroke::new(1.5_f32, theme::colors::ACCENT_LIGHT);
+    painter.line_segment(
+        [
+            Pos2::new(screen.x - arm, screen.y),
+            Pos2::new(screen.x + arm, screen.y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(screen.x, screen.y - arm),
+            Pos2::new(screen.x, screen.y + arm),
+        ],
+        stroke,
+    );
+    painter.circle_stroke(screen, 5.0_f32, stroke);
+    painter.text(
+        drop.cursor + egui::vec2(14.0, 10.0),
+        Align2::LEFT_TOP,
+        asset_display_name(&drop.path),
+        FontId::proportional(12.0),
+        theme::colors::TEXT_BRIGHT,
+    );
+}
+
+/// 路径 → 显示名（`Resources/Models/Box.glb` → `Box`）。
+fn asset_display_name(path: &str) -> String {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    file.split('.').next().unwrap_or(file).to_string()
 }
 
 // ============================================================================
@@ -1339,5 +1452,40 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+/// 资源拖放的落点计算（纯函数，独立成模块便于单测）。
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    /// 向下的射线打中 y=0 平面；朝上 / 平行都不算命中（退回相机前方）。
+    #[test]
+    fn ray_ground_point_rules() {
+        let hit = ray_ground_point(Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.0, -1.0, 0.0))
+            .expect("垂直向下应命中");
+        assert!((hit - Vec3::ZERO).length() < 1e-6);
+
+        let slant = ray_ground_point(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.5, -1.0, 0.0).normalize())
+            .expect("斜向下应命中");
+        assert!((slant.y).abs() < 1e-6, "命中点必须在地面上");
+        assert!(slant.x > 0.0, "应落在射线方向一侧");
+
+        assert!(
+            ray_ground_point(Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.0, 1.0, 0.0)).is_none(),
+            "朝上不该命中"
+        );
+        assert!(
+            ray_ground_point(Vec3::new(0.0, 2.0, 0.0), Vec3::new(1.0, 0.0, 0.0)).is_none(),
+            "平行于地面不该命中"
+        );
+    }
+
+    /// 显示名取第一个点之前（`Box.glb` → `Box`，`A.prefab.ron` → `A`）。
+    #[test]
+    fn asset_display_name_strips_suffixes() {
+        assert_eq!(asset_display_name("Resources/Box.glb"), "Box");
+        assert_eq!(asset_display_name("Prefabs/A.prefab.ron"), "A");
+        assert_eq!(asset_display_name("Box.glb"), "Box");
     }
 }

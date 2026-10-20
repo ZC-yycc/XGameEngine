@@ -1,4 +1,4 @@
-//! # 七个工具 —— 智能体操纵引擎的最小完备集
+//! # 八个工具 —— 智能体操纵引擎的最小完备集
 //!
 //! 刻意小：**读清单 → 读场景 → 改（整体或单实体）→ 验证** 四步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
@@ -38,7 +38,7 @@ fn fail(message: impl Into<String>) -> CallError {
 
 /// 一次工具调用的输出：一段文本 +（可选的）随附图片。
 ///
-/// 七工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 八个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
 /// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
 /// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
 /// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
@@ -67,7 +67,7 @@ impl ToolOutput {
     }
 }
 
-/// 7 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 8 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -147,8 +147,20 @@ pub fn schemas() -> Vec<Value> {
             },
         }),
         json!({
+            "name": "asset_list",
+            "description": "列出项目里已登记的资产（有 .meta 的模型 / 纹理 / 音频 / 脚本 / 预制体），返回 JSON：每项的路径、类型、GUID 与导入设置，外加资产库诊断（缺 .meta / 孤儿 .meta / 坏 .meta / GUID 冲突）。智能体先用它「看见」资产树，再用路径去写 entity_upsert 的 model / scripts 参数 —— 不需要猜项目里有什么。只读，不生成任何文件。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": project_prop,
+                    "kind": { "type": "string", "description": "只看某一类：Model / Texture / Audio / Script / Prefab / Shader（不传 = 全部）" },
+                },
+                "required": ["project"],
+            },
+        }),
+        json!({
             "name": "project_check",
-            "description": "无头验证项目：清单可解析、入口场景可加载、实体引用的模型/脚本在盘上真实存在。返回 JSON 报告（missing_* 列出悬空引用，has_issues 汇总）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
+            "description": "无头验证项目：清单可解析、入口场景可加载、实体引用的模型/脚本在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（missing_* / dangling_guids / missing_metas 列出问题，has_issues 汇总）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop },
@@ -182,6 +194,7 @@ pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
         "entity_upsert" => entity_upsert(args).map(ToolOutput::text),
         "entity_remove" => entity_remove(args).map(ToolOutput::text),
         "project_check" => project_check(args).map(ToolOutput::text),
+        "asset_list" => asset_list(args).map(ToolOutput::text),
         "run_headless" => run_headless(args),
         other => Err(CallError::UnknownTool(other.to_string())),
     }
@@ -287,7 +300,7 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 七个工具
+// 八个工具
 // ---------------------------------------------------------------------------
 
 /// `project_info` —— 清单 + 各目录清单，全走 [`ProjectHandle`] 的现成 API。
@@ -502,11 +515,78 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         "lights": report.lights,
         "script_refs": report.script_refs,
         "audio_refs": report.audio_refs,
+        "assets": report.assets,
         "missing_models": report.missing_models,
         "missing_scripts": report.missing_scripts,
         "missing_audio": report.missing_audio,
+        "missing_prefabs": report.missing_prefabs,
+        "dangling_guids": report.dangling_guids,
+        "missing_metas": report.missing_metas,
+        "orphan_metas": report.orphan_metas,
+        "invalid_metas": report.invalid_metas,
+        "guid_conflicts": report.guid_conflicts,
         "has_issues": report.has_issues(),
+        "issue_count": report.issue_count(),
         "render": report.render(),
+    })))
+}
+
+/// `asset_list` —— 智能体的"资产树视野"（P0 资产管线的读侧）。
+///
+/// 只读：打开项目会扫一次资产库（不写 `.meta`，那是编辑器的活），
+/// 因此 `missing_meta` 会如实列出来 —— 智能体据此决定是报告问题还是
+/// 让用户跑一次 `--migrate-assets`。
+fn asset_list(args: &Value) -> Result<String, CallError> {
+    let project = open_project(args)?;
+    let kind_filter = str_arg(args, "kind")
+        .map(|k| k.trim().to_lowercase())
+        .filter(|k| !k.is_empty());
+
+    let assets = project.assets();
+    let mut items = Vec::new();
+    for (guid, record) in assets.sorted_entries() {
+        let kind_label = format!("{:?}", record.kind).to_lowercase();
+        if let Some(filter) = &kind_filter {
+            if &kind_label != filter {
+                continue;
+            }
+        }
+        items.push(json!({
+            "path": record.path,
+            "kind": record.kind,
+            "guid": guid.to_string(),
+            "import": record.import,
+        }));
+    }
+
+    let diagnostics = assets.diagnostics();
+    let missing_meta = diagnostics.missing_meta.clone();
+    let orphan_meta = diagnostics.orphan_meta.clone();
+    let invalid_meta: Vec<Value> = diagnostics
+        .invalid_meta
+        .iter()
+        .map(|bad| json!({ "path": bad.path, "reason": bad.reason }))
+        .collect();
+    let conflicts: Vec<Value> = diagnostics
+        .conflicts
+        .iter()
+        .map(|c| json!({ "guid": c.guid.to_string(), "paths": c.paths }))
+        .collect();
+    drop(assets);
+
+    Ok(pretty(&json!({
+        "count": items.len(),
+        "assets": items,
+        "diagnostics": {
+            "missing_meta": missing_meta,
+            "orphan_meta": orphan_meta,
+            "invalid_meta": invalid_meta,
+            "guid_conflicts": conflicts,
+            "has_issues": !(missing_meta.is_empty()
+                && orphan_meta.is_empty()
+                && invalid_meta.is_empty()
+                && conflicts.is_empty()),
+        },
     })))
 }
 
@@ -1228,6 +1308,86 @@ mod tests {
             matches!(&err, CallError::Failed(m) if m.contains("退出码 1")),
             "{err:?}"
         );
+    }
+
+    /// `asset_list`：智能体的"资产树视野"—— 列路径 / 类型 / GUID / 导入设置，
+    /// 并把"还没导入（缺 .meta）"如实报出来；**全程只读**。
+    #[test]
+    fn asset_list_reports_assets_and_diagnostics() {
+        let project = temp_project("assets");
+        std::fs::create_dir_all(project.path("Resources")).unwrap();
+        std::fs::create_dir_all(project.path("Scripts")).unwrap();
+        std::fs::write(project.path("Resources/Box.glb"), b"glb").unwrap();
+        std::fs::write(project.path("Scripts/A.lua"), b"-- lua").unwrap();
+
+        // 还没有 .meta：0 个资产，但诊断指出两个待导入文件，且不写盘。
+        let text = run(&project, "asset_list", json!({})).expect("asset_list 应成功");
+        let out: Value = serde_json::from_str(&text).expect("返回必须是 JSON");
+        assert_eq!(out["count"], 0);
+        assert_eq!(out["diagnostics"]["missing_meta"].as_array().unwrap().len(), 2);
+        assert_eq!(out["diagnostics"]["has_issues"], true);
+        assert!(
+            !project.path("Resources/Box.glb.meta").exists(),
+            "asset_list 必须只读：它不该顺手生成 .meta"
+        );
+
+        // 走了导入（生成 .meta）之后：两项都在，GUID 是 32 位十六进制。
+        project.ensure_asset_metas().expect("生成 meta");
+        let text = run(&project, "asset_list", json!({})).expect("asset_list 应成功");
+        let out: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(out["count"], 2);
+        let kinds: Vec<&str> = out["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["kind"].as_str().unwrap())
+            .collect();
+        assert!(kinds.contains(&"Model"), "{kinds:?}");
+        assert!(kinds.contains(&"Script"), "{kinds:?}");
+        for asset in out["assets"].as_array().unwrap() {
+            assert_eq!(asset["guid"].as_str().unwrap().len(), 32);
+            assert!(asset["import"]["model_scale"].as_f64().is_some());
+        }
+
+        // kind 过滤（大小写不敏感）。
+        let text = run(&project, "asset_list", json!({ "kind": "model" })).unwrap();
+        let out: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(out["count"], 1);
+        assert_eq!(out["assets"][0]["path"], "Resources/Box.glb");
+
+        cleanup(&project);
+    }
+
+    /// 场景里悬空的 GUID 要在 `project_check` 的 JSON 里单独出现 ——
+    /// 智能体据此知道"引用断了"，而不是只看到 `missing_models` 里一串 guid。
+    #[test]
+    fn project_check_reports_dangling_guids() {
+        let project = temp_project("dangling_guid");
+        std::fs::create_dir_all(project.path("Resources")).unwrap();
+        std::fs::write(project.path("Resources/Box.glb"), b"glb").unwrap();
+
+        run(
+            &project,
+            "entity_upsert",
+            json!({ "name": "Box", "model": "Resources/Box.glb" }),
+        )
+        .expect("建实体");
+
+        // 删掉资产与 .meta：场景里留着 guid://，库里查不到。
+        std::fs::remove_file(project.path("Resources/Box.glb")).unwrap();
+        std::fs::remove_file(project.path("Resources/Box.glb.meta")).unwrap();
+
+        let text = run(&project, "project_check", json!({})).expect("检查应成功");
+        let out: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(out["has_issues"], true);
+        assert_eq!(out["dangling_guids"].as_array().unwrap().len(), 1, "{out}");
+        assert!(
+            out["dangling_guids"][0].as_str().unwrap().contains("guid://"),
+            "{out}"
+        );
+        assert!(out["missing_models"].as_array().unwrap().is_empty());
+
+        cleanup(&project);
     }
 
     /// 可执行文件搜索：空目录树找不到；同目录命中；`deps/` 下跑时上一级命中。

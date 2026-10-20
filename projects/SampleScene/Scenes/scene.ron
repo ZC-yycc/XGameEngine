@@ -117,12 +117,12 @@
                 roughness: Some(0.35),
             )),
             scripts: [
-                "Scripts/Spinner.lua",
+                "guid://3f3d4e9022e87bbfb39cb545d47fafa5",
             ],
             // 空间化循环蜂鸣：自转的立方体就是场景里的"发声地标"，
             // 走近了响、走远了轻 —— 演示 AudioSource 的 autoplay + spatial。
             audio: Some((
-                clip: "Resources/Audio/Beep.wav",
+                clip: "guid://9b1f53440712e1c691708b1f952e9208",
                 volume: 0.35,
                 looping: true,
                 spatial: true,
@@ -155,7 +155,7 @@
                 roughness: Some(0.30),
             )),
             scripts: [
-                "Scripts/Jumper.lua",
+                "guid://036592f00d77acad5ddd43913b3c90d8",
             ],
             physics: Some((
                 kind: Dynamic,
@@ -279,11 +279,11 @@
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
-            model: "Resources/Box.glb",
+            model: "guid://43b41a2008432f77ca7fbca93854f890",
             id: (11),
             parent: None,
             prefab: Some((
-                source: "Prefabs/Pillar.prefab.ron",
+                source: "guid://3444c856a89c3140a1b95ceed99f4989",
                 source_id: (1),
                 is_root: true,
             )),
@@ -295,11 +295,11 @@
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
-            model: "Resources/Box.glb",
+            model: "guid://43b41a2008432f77ca7fbca93854f890",
             id: (12),
             parent: Some((11)),
             prefab: Some((
-                source: "Prefabs/Pillar.prefab.ron",
+                source: "guid://3444c856a89c3140a1b95ceed99f4989",
                 source_id: (2),
                 is_root: false,
             )),
@@ -311,11 +311,11 @@
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.6, 0.6, 0.6),
             ),
-            model: "Resources/Box.glb",
+            model: "guid://43b41a2008432f77ca7fbca93854f890",
             id: (13),
             parent: Some((12)),
             prefab: Some((
-                source: "Prefabs/Pillar.prefab.ron",
+                source: "guid://3444c856a89c3140a1b95ceed99f4989",
                 source_id: (3),
                 is_root: false,
             )),
@@ -327,7 +327,7 @@
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.01, 0.01, 0.01),
             ),
-            model: "Resources/Fox.gltf",
+            model: "guid://247e6655b676415d6c77cb91ceb3281b",
             id: (14),
             parent: None,
             animator: Some((
@@ -377,7 +377,7 @@
                 ],
             )),
             scripts: [
-                "Scripts/FoxLocomotion.lua",
+                "guid://58a14f446aa341711d5d7b75806b8ecc",
             ],
         ),
     ],

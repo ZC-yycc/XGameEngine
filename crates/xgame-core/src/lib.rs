@@ -18,7 +18,7 @@
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
 //! | `inspect` | 组件字段检视契约 `Inspect` + `FieldDesc`/`FieldValue`（Inspector 与 Lua 参数的同一份真相源）|
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
-//! | `asset` | `AssetId` 轻量资产句柄 |
+//! | `asset` | 资产身份 `AssetGuid` + `.meta` + `AssetDatabase`（GUID 引用、导入设置、诊断） |
 //! | `project` | 项目清单 `Project` + 项目句柄 `ProjectHandle` |
 //!
 //! # 依赖方向
@@ -65,8 +65,8 @@ pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
 pub use scene::{Entity, Scene};
 pub use transform::Transform;
 pub use project::{
-    Project, ProjectError, ProjectHandle, DEFAULT_ENTRY_SCENE, PROJECT_FILE_NAME,
-    PROJECT_FORMAT_VERSION,
+    AssetMigrationReport, Project, ProjectError, ProjectHandle, DEFAULT_ENTRY_SCENE,
+    PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION,
 };
 
 // -- 导出：新增基础设施
@@ -74,7 +74,12 @@ pub use animation::{
     AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState,
     AnimTransition, Animator,
 };
-pub use asset::AssetId;
+pub use asset::{
+    decode_prefab_references, decode_scene_references, encode_prefab_references,
+    encode_scene_references, is_dangling_reference, is_guid_reference, render_asset_list,
+    AssetDatabase, AssetDiagnostics, AssetGuid, AssetId, AssetKind, AssetMeta, AssetRecord,
+    GuidConflict, ImportSettings, InvalidMeta, GUID_SCHEME, META_EXTENSION,
+};
 pub use audio::{
     AudioCommand, AudioPort, AudioStats, AudioSource, ListenerPose, PlaySound,
 };

@@ -149,6 +149,11 @@ struct UiShot {
     /// 这个窗口是模态的，只能靠点 ⚙ 打开 —— 没有这个开关就**永远截不到**
     /// 它，界面改版时它是唯一一块只能靠肉眼读代码猜排版的地方。
     open_settings: bool,
+    /// 抓图前在资源浏览器里选中一个资产（详情区与导入设置才在画面里）。
+    ///
+    /// 没有选中时详情区整块不渲染 —— 这个开关是"资产详情 / 导入设置排版"
+    /// 唯一可重复的验收手段（靠肉眼点选没法进自检回路）。
+    asset: Option<String>,
     /// 抓图前先进 Play。
     ///
     /// Play 态有一整套只在运行时出现的界面：工具栏的暂停/停止组、视口 HUD、
@@ -232,6 +237,14 @@ impl EditorApp {
                     .entities
                     .iter()
                     .position(|e| e.name == name);
+            }
+        }
+
+        // `--ui-asset <路径>`：截图前在资源浏览器里选中一个资产。
+        // 详情区（路径 / GUID / 导入设置）只在有选中时出现，不设它就永远截不到。
+        if let Some(asset) = app.ui_shot.as_ref().and_then(|s| s.asset.clone()) {
+            if let Some(session) = app.session.as_mut() {
+                session.state.asset_selected = Some(asset);
             }
         }
 
@@ -434,7 +447,7 @@ struct LaunchArgs {
 /// 解析窗口模式的启动参数。
 ///
 /// 只认 `--ui-shot <png>` / `--ui-frames <n>` / `--ui-select <实体名>` /
-/// `--ui-settings` / `--ui-play` / `--ui-size <WxH>` 六个开关，
+/// `--ui-asset <资产路径>` / `--ui-settings` / `--ui-play` / `--ui-size <WxH>` 七个开关，
 /// 其余非开关参数按顺序取**第一个**当项目路径。`--check` / `--headless` 在
 /// `main` 更早的分支就分流了，不会走到这里。
 fn parse_launch_args(raw: &[String]) -> LaunchArgs {
@@ -442,6 +455,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut shot_path: Option<std::path::PathBuf> = None;
     let mut after_frames = 12u32;
     let mut select: Option<String> = None;
+    let mut asset: Option<String> = None;
     let mut open_settings = false;
     let mut play = false;
     let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
@@ -471,6 +485,14 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
                     i += 1;
                 } else {
                     log::error!("--ui-select 需要一个实体名");
+                }
+            }
+            "--ui-asset" => {
+                if let Some(path) = raw.get(i + 1) {
+                    asset = Some(path.clone());
+                    i += 1;
+                } else {
+                    log::error!("--ui-asset 需要一个资产路径（项目相对）");
                 }
             }
             "--ui-settings" => {
@@ -504,6 +526,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         path,
         after_frames,
         select,
+        asset,
         frames_seen: 0,
         requested: false,
         last_size: None,
@@ -782,6 +805,15 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     // ── 6. Status bar (bottom) ──
     status_bar(ctx, &session.state, live);
 
+    // ── 6.5. 资源拖拽收尾 ──
+    //
+    // 放置动作在视口里做（它知道射线落点），这里只负责"松手即清空"。
+    // 放在面板绘制之后：视口同帧已经拿到 payload；而面板被拖成非活动页签、
+    // 整帧没绘制时，这一行仍然会执行，不会留下跟着鼠标的幽灵。
+    if session.state.asset_drag.is_some() && ctx.input(|i| i.pointer.any_released()) {
+        session.state.asset_drag = None;
+    }
+
     // ── 7. 应用级弹窗 ──
     // 画在最后：确认框 / 另存为要盖在设置窗口之上（同层后画的在上）。
     panels::settings::show(&mut session.state, ctx);
@@ -946,6 +978,24 @@ fn main() -> Result<(), eframe::Error> {
                     }
                     Err(e) => {
                         eprintln!("check FAILED: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some("--migrate-assets") => {
+                let path = args
+                    .get(1)
+                    .map(String::as_str)
+                    .unwrap_or("projects/SampleScene");
+                match xgame_core::ProjectHandle::open(Path::new(path)) {
+                    Ok(project) => {
+                        let report = project.migrate_asset_references();
+                        print!("{}", report.render());
+                        // 迁移是"尽力而为"的批处理：有文件失败才返回 1。
+                        std::process::exit(if report.has_errors() { 1 } else { 0 });
+                    }
+                    Err(e) => {
+                        eprintln!("migrate FAILED: {e}");
                         std::process::exit(1);
                     }
                 }
