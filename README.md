@@ -2,6 +2,11 @@
 
 > Rust 实现的类 Unity 游戏引擎，基于 wgpu + egui + rapier3d。
 
+**文档导航**：想跑起来看本文「快速开始」；想查某个功能怎么用，看本文对应小节；
+想知道**还差什么、先做哪个**看 [`Docs/差距分析.md`](Docs/差距分析.md)；阶段状态看
+[`ROADMAP.md`](ROADMAP.md)；改引擎代码前先查 [`Docs/决策记录.md`](Docs/决策记录.md)
+的约束表；历史决策与实测数据在 `PLAN.md` 与 `FLOW.md`。
+
 ## 快速开始
 
 ```powershell
@@ -45,29 +50,25 @@ XGameEngine/                  # 引擎源码仓库
 │   ├── xgame-input/          # 输入层：设备状态 + 动作映射（与窗口库解耦）
 │   ├── xgame-script/         # 脚本层：嵌入式 Lua + 生命周期钩子 + 宿主 API
 │   ├── xgame-audio/          # 音频引擎：kira 封装（设备 / 3D 空间轨道 / 解码缓存 / 无声降级）
-│   ├── xgame-runtime/        # 运行时：把场景/物理/输入/脚本编排成一条帧管线
-│   ├── xgame-derive/         # 过程宏：#[derive(Panel)]
+│   ├── xgame-runtime/        # 运行时：把场景/物理/输入/脚本/音频编排成一条帧管线
+│   ├── xgame/                # 门面 crate：prelude + Lifecycle / Inspect + 插件边界
+│   ├── xgame-derive/         # 过程宏：#[derive(Panel)] / #[derive(Inspect)]
 │   ├── xgame-editor/         # 编辑器程序：项目枢纽 + egui 面板
 │   ├── xgame-game/           # 独立游戏二进制
 │   └── xgame-mcp/            # MCP server：AI 智能体工具面（stdio JSON-RPC）
-└── projects/                 # 默认的项目存放位置（可放在任意目录）
-    └── SampleScene/          # 示例项目
-        ├── project.ron       # 项目清单
-        ├── input.ron         # 输入映射（动作 / 轴）
-        ├── Scenes/
-        ├── Scripts/          # 实体脚本（.lua）
-        └── Resources/
+├── examples/spinner-plugin/  # 示例 Rust 组件插件（cdylib）
+├── projects/                 # 默认的项目存放位置（可放在任意目录）
+│   ├── SampleScene/          # 示例项目
+│   │   ├── project.ron       # 项目清单
+│   │   ├── input.ron         # 输入映射（动作 / 轴）
+│   │   ├── Scenes/
+│   │   ├── Scripts/          # 实体脚本（.lua）
+│   │   └── Resources/
+│   └── BehaviorsDemo/        # Rust 组件插件演示项目（本身是 workspace 成员）
 ```
 
-依赖方向是单向的，新增的四个 crate 都在中间层：
-
-```text
-core ← math ← {render, physics} ← editor / game
-  ↑        ↑         ↑
-  └── input / script ┘
-             ↑
-         runtime（编排上面全部）
-```
+上面各 crate 的依赖方向是单向的（不许反向依赖）；逐层关系见本文末
+[「依赖方向」](#依赖方向)，避免同一张图在文件里出现两次。
 
 一个**游戏项目**是自包含的目录：
 
@@ -103,15 +104,21 @@ core ← math ← {render, physics} ← editor / game
 
 - glTF 模型加载：顶点 / 法线 / 顶点色 / UV + base color 贴图 + metallic / roughness 材质因子
 - **PBR 着色（Cook-Torrance）**：GGX 分布 + Smith 几何 + Schlick 菲涅尔，金属度工作流；
-  单帧最多 8 盏方向光 / 点光。环境项是均匀环境近似（IBL 未做，金属偏暗属已知限制）。
-  灯强度按"radiance = intensity × π"标定，换模型不换亮度
+  单帧最多 8 盏方向光 / 点光。灯强度按"radiance = intensity × π"标定，换模型不换亮度
 - **逐实体材质覆盖**（`Entity.material`）：base_color 乘子 / metallic / roughness 字段级
   覆盖，Inspector 可调、随场景落盘 —— 内置白模也能上色、金属化
 - 光照是**场景级数据**（`Scene::lights` / `Scene::ambient`），随场景一起存盘
 - **方向光阴影贴图**：`Light::casts_shadow` 打开后，那盏方向光会先渲染一遍场景深度，
   主 pass 再用 3×3 PCF 比较出阴影；`shadow_resolution` 可调贴图分辨率（0 = 2048）
-- **MSAA 4×**：颜色附件走多采样、resolve 回单采样纹理，物体轮廓不再是硬台阶。
-  采样数由适配器能力决定（不支持的格式自动退回 1×）
+- **HDR 渲染路径 + ACES 色调映射 + 曝光**：场景 pass 渲进 `Rgba16Float` 中间标，
+  曝光与曲线后写 LDR；`project.ron` 的 `render` 节（三宿主同源，`ToneMapMode::Off`
+  是旧管线出口）
+- **Bloom 泛光**（可选，默认关）：亮部软膝提取 + 三级 mip + 可分离高斯，与色调映射
+  同一趟合成；`render.bloom` 三参数，`intensity = 0` 即关闭（整段跳过）
+- **程序化天空盒 + 环境光照（IBL）**（可选，默认关）：天顶 / 地平线 / 地面渐变 +
+  太阳盘 / 光晕；同一个解析函数喂背景、漫反射球谐与镜面预过滤环境，`render.sky` 七参数
+- **MSAA**：颜色附件走多采样、resolve 回单采样纹理，物体轮廓不再是硬台阶。采样数取
+  适配器支持的最高档（常见 4×；不支持的格式自动退回 1×）
 - **FXAA 抗锯齿**（可选，默认关）：合成后的画面再走一趟 FXAA 3.11 质量路径，
   补 MSAA 管不到的高频细节；`project.ron` 的 `render.fxaa.enabled` 开关，
   关着时整段跳过（不建 scratch、不记录 pass）
@@ -132,9 +139,10 @@ core ← math ← {render, physics} ← editor / game
   （地板、平台）用包围球会严重高估，连相机都落进球里，导致"点哪儿都选中它、取消不掉"
 - 撤销 / 重做：`Ctrl+Z` · `Ctrl+Shift+Z` · `Ctrl+Y`
 - 复制 / 粘贴：`Ctrl+C` · `Ctrl+V`；复制实体 / 删除：`Ctrl+D` · `Delete`
-- **项目设置（工具栏 ⚙）**：窗口 / 重力 / 固定步长 / 内容目录可视化编辑，草稿式
-  Apply 写回 `project.ron`；重力与步长不再是引擎源码里的硬编码，编辑器 Play 与
-  打包游戏读的是**同一份**配置（`WorldConfig::from_project_runtime`）
+- **项目设置（工具栏 ⚙）**：项目名 / 入口场景 / 窗口 / 重力 / 固定步长 / 画面（曝光、
+  ACES、Bloom、FXAA）可视化编辑，草稿式 Apply 写回 `project.ron`；内容目录目前只在
+  `project.ron` 里手改（设置窗口未暴露）。重力与步长不再是引擎源码里的硬编码，编辑器
+  Play 与打包游戏读的是**同一份**配置（`WorldConfig::from_project_runtime`）
 - **未保存保护**：场景有改动时标题栏与工具栏显示 `*`（按帧 memo 的落盘快照比较），
   关窗 / 返回枢纽前弹确认（保存 / 不保存 / 取消）；`Ctrl+S` 保存、`Ctrl+Shift+S`
   **另存为**新场景文件并切过去（旧文件原样保留）
@@ -524,6 +532,11 @@ clock.tick(dt)
 | 编辑器空闲 | **空闲时完全不重绘**（实测 CPU 0.00%）。Windows 在指针静止时会反复投递同一坐标的 `WM_MOUSEMOVE`，而 egui 把"本帧有输入"当作"要立刻再画一帧"，于是编辑器会一直 60fps 空转、拖窗口时跟模态循环抢消息线程。现在位置未变的 `PointerMoved` 直接丢掉（语义 no-op）；**原始位移 `Event::MouseMoved` 整类丢弃**（光电鼠标传感器噪声以 ±1~2px 灌进来会续命帧调度宽限期，编辑器无人消费原始 delta） |
 | 编辑器帧调度 | `frame_policy.rs` 集中决策「要不要连续出帧」：**Hybrid**（默认，`XGAME_FRAME_POLICY` 可切 `always`/`reactive`）—— 交互中 / 刚输入过 220ms 内满速出帧，其余停帧。拖拽阶段与永远满速同手感（~60fps、p99≈35ms），纯事件驱动的旧实现拖拽中有 30% 死时间（操作发涩的根源）。全工程只此一处主动 `request_repaint` |
 | 编辑器缩放 | 拖边框时**节流重建**离屏目标（≤10Hz），尺寸一稳定立刻按最终尺寸重建。实测一次拖拽重建次数 43 → 1 |
+| 渲染实例化 | 同图元（网格指针相同）合并成一次实例化 draw，逐实例数据走 storage buffer；2000 实体同网格场景 **2001 批 → 2 批**、CPU 2225 → 344 µs/帧（-84%） |
+| 视锥剔除 | 实体级世界 AABB × 六个归一化视锥平面；相机外但影子会进画面的投影物只跑阴影 pass；2000 实体窄视场未合批场景 **2000 → 868 批**、CPU 3295 → 1146 µs/帧（-65%） |
+
+> 渲染侧的两条纪律：剔除**开 / 关画面逐字节一致**（宁可白画不能黑屏），合批的批次
+> 顺序 = 首次遇到顺序（同机截图逐字节确定的前提）。细节见 `PLAN.md` 二十八 / 三十。
 
 可复现的微基准（2000 实体）：
 
@@ -613,7 +626,27 @@ Build/<项目名>/
 
 ## 依赖方向
 
+不许反向依赖（看见 `render` 依赖 `runtime` 就是设计错了）：
+
 ```
-core ← math ← {render, physics} ← editor / game
-core ← mcp                      （MCP server 只依赖 core：无窗口、无 GPU）
+xgame-core     核心类型：Color / Config / Transform / Scene / Entity / GameClock / AssetId
+    ↑
+xgame-math     glam 重导出 + projection 辅助
+    ↑
+xgame-render   wgpu 管线、glTF、PostFx（HDR / ACES / Bloom / FXAA）、天空 IBL、实例化与剔除
+xgame-physics  rapier3d 刚体、碰撞体、物理世界、射线、调试绘制
+    ↑
+xgame-input    键鼠状态 + 动作映射（与 winit 解耦）
+xgame-script   Lua 宿主 + GameCtx 方法层（不依赖渲染 / 编辑器）
+xgame-audio    kira 封装（设备 / 空间轨道 / 解码缓存 / silent 降级）
+    ↑
+xgame-runtime  World：场景 / 物理 / 输入 / 脚本 / 音频编排成一条帧管线
+    ↑
+xgame          门面 crate：prelude + Lifecycle / Inspect + 插件边界（export_plugin!）
+    ↑
+xgame-editor   egui 面板、SceneRenderer（ScenePipeline wrapper）、GameRuntime（Play 宿主）
+xgame-game     独立游戏二进制（与编辑器跑同一段 World::update）
+xgame-mcp      MCP server（stdio 按行 JSON-RPC；只依赖 core，无窗口无 GPU）
 ```
+
+三个宿主（编辑器 / 独立游戏 / MCP）都只是入口，运行时逻辑只在 `xgame-runtime` 一处。

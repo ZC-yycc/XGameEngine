@@ -178,6 +178,6 @@
 | `crates/xgame-core/src/check.rs` | `check_project()`（编辑器 `--check` 与 `project_check` 共用） |
 | `crates/xgame-editor/src/headless.rs` | 无头运行的实现（CLI `--headless`；`run_headless` 工具 spawn 它） |
 
-回归测试：`cargo test -p xgame-mcp`（协议 9 条 + 工具行为 16 条 = 25 条；其中
-`run_headless` 的 4 条会嵌套 `cargo build -p xgame-editor` 保证被测 exe 新鲜，
+回归测试：`cargo test -p xgame-mcp`（28 条：协议 9 条 + 7 个工具的行为与信封；
+其中 `run_headless` 的几条会嵌套 `cargo build -p xgame-editor` 保证被测 exe 新鲜，
 再经真实进程 spawn 跑通）。

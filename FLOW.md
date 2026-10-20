@@ -254,8 +254,10 @@ clock.tick(dt)
        ├─ push_kinematic_bodies    运动学体：把脚本摆的世界变换推给物理（无运动学体则直接返回）
        ├─ physics.step(fixed_dt)   顺带维护查询流水线（所以稳态下不必再 sync_queries）
        └─ pull_dynamic_bodies      动态体：物理世界变换 → 局部（无动态体则直接返回）
-  ├─ dispatch_update               脚本的 update（每渲染帧一次）
+  ├─ dispatch_update               脚本的 update（每渲染帧一次；Lua 与 Rust 组件同相位）
   ├─ 消费脚本通知 / sync_bodies
+  ├─ sync_audio                    autoplay 首播、空间声源推位置、失联停音
+  ├─ flush_audio                   drain 命令束交给音频引擎（帧末一次结算）
   └─ input.end_frame()             清掉"仅本帧有效"的输入边沿
 ```
 
@@ -1103,7 +1105,8 @@ Scene(
 | 过程宏 | syn / quote / proc-macro2 | 2/1/1 | `#[derive(Panel)]` |
 | 数学 | glam | 0.29 | Vec3/Mat4/Quat |
 | 物理 | rapier3d | 0.22 | 刚体动力学、碰撞检测、射线 |
-| 脚本 | rhai | 1.26 | 嵌入式脚本（开了 `f32_float`，见下） |
+| 脚本 | mlua | 0.10 | 嵌入式 Lua 5.4（`lua54` + `vendored` + `send`；沙箱 + 指令预算） |
+| 音频 | kira | 0.12.5 | 设备 / 空间化轨道 / 解码缓存（设备失败 silent 降级） |
 | 3D 模型 | gltf (Rust) | 1 | glTF/glb 解析 |
 | 纹理 | image | 0.24 | PNG/JPEG 解码 |
 | 序列化 | ron + serde | 0.8 / 1 | 场景文件持久化 |
@@ -1117,23 +1120,15 @@ Scene(
 > 这也是它在 0.20 时的写法），要么整体升级 egui 系（锁在 0.30，升到 0.3x 是一整套
 > API 迁移，得单独当一件事做）。
 
-```
-xgame-core     核心类型：Color,Config,Transform,Scene,Entity,Component,GameClock,AssetId
-    ↑
-xgame-math     glam 重导出 + projection 辅助
-    ↑
-xgame-render   wgpu 管线、glTF 加载、ScenePipeline（共享渲染管线）
-xgame-physics  rapier3d 刚体、碰撞体、物理世界、调试绘制
-    ↑
-xgame-editor   egui 面板、SceneRenderer（ScenePipeline wrapper）、GameRuntime
-xgame-game     独立游戏二进制（winit + wgpu + ScenePipeline + PhysicsWorld）
-xgame-mcp      MCP server（stdio 按行 JSON-RPC，智能体读写场景 / 跑检查；只依赖 core，
-               无窗口无 GPU —— 手段：喂行进、断言行出的纯函数 handle_line()）
-```
+> crate 职责与依赖方向见 [`README.md`](README.md) 的「依赖方向」一节 —— 单一真相源，
+> 这里不再复制一份（依赖方向是架构约束，复制两份迟早漂移）。
 
 ---
 
 ## 六、关键文件速查
+
+> **行数只是数量级参考**（部分取自历史记录、部分是本轮实测），随提交漂移 ——
+> 只用它判断"这个文件大概多大"，别当契约。文件名与职责是稳定的。
 
 | 文件 | 行数 | 核心函数 |
 |---|---|---|
@@ -1145,11 +1140,15 @@ xgame-mcp      MCP server（stdio 按行 JSON-RPC，智能体读写场景 / 跑�
 | `editor/dialogs.rs` | 141 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_save_as_dialog()` |
 | `editor/state.rs` | 1756 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()` / `save_scene_as()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作 |
 | `editor/scene_renderer.rs` | 1045 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + Animator 配置（含淡入时长、**状态机 entry/参数/状态表/转移表**、**叠加层剪辑/权重/速度/循环**、**层栈每层名字/模式/剪辑/权重/速度/循环/遮罩**（分隔字节防撞））+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判、叠加层与层栈按"权重>0 且剪辑存在"判，顺手预加载）、`animation_clip_names()`、`bone_names()`（骨骼名去重跳过匿名，Inspector 遮罩下拉用）、`animation_state()`（状态机当前状态，Inspector 用）、`mesh_bounds()`（拾取用） |
-| `editor/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
+| `editor/panels/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
 | `editor/game_runtime.rs` | 121 | `start()`（`WorldConfig::from_project_runtime` 接项目清单）、`fixed_update()` |
 | `editor/frame_policy.rs` | 277 | `plan()`（纯函数，五输入：playing / interacting / had_input / animating / since_last_input）、`FrameClock` |
+| `editor/headless.rs` | 1334 | `run()`（CLI `--headless`：固定 dt 帧循环 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
+| `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
+| `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
+| `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |
 | `core/project.rs` | 773 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`；清单含 `runtime` 节（重力 / 固定步长） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 1026 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`）；`Entity::animator`（`#[serde(default)]`，旧场景读作 None） |
@@ -1159,17 +1158,21 @@ xgame-mcp      MCP server（stdio 按行 JSON-RPC，智能体读写场景 / 跑�
 | `render/scene_pipeline.rs` | 1842 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体采样骨骼进槽位（剪辑名/时间/循环问驱动 `playback()`，换剪辑/换状态淡入中 → 旧剪辑按自己的循环方式采样后按权重混合；把 additive 快捷层 + 驱动 `layers()` 解析成 `LayerInput` 栈（剪辑缺失的层不进栈），统一交 `compute_bones_composed` 一条路出矩阵）+ `ensure_bones_capacity()` 扩容重建）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
 | `render/gltf_loader.rs` | 946 | `GltfMesh::from_file()` / `load()`、`read_material()`、`parse_animation_data()`（节点层级 / 皮肤 / 通道 → AnimClip+Skin，CUBICSPLINE 降采样；`AnimNode` 记 glTF 节点名 —— 遮罩按名选子树的来源）、`clip()` / `has_animation()`、`Bounds`（网格本地包围盒） |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |
+| `render/postfx.rs` | 1569 | `PostFx::render()`（HDR → 曝光 / Bloom / ACES → LDR，可选 FXAA 第二趟）；`FxaaPipelines` / `FxaaScratch`；`HDR_FORMAT` |
+| `render/sky.rs` | 1390 | 程序化天空（天顶 / 地平线 / 地面 + 太阳盘）+ 球谐漫反射 + GGX 预过滤 + BRDF LUT（`render.sky`，默认关） |
+| `render/frustum.rs` | 235 | `Frustum::from_view_proj()`（Gribb–Hartmann，六归一化平面）、`Bounds` 相交测试（矩阵退化返回 `None` = 不剔除） |
+| `render/screenshot.rs` | 2179 | 离屏截图（默认顺光机位）、确定性测试、FXAA / 天空 / 后处理的 GPU 断言 |
 | `physics/world.rs` | 900 | `step(dt)`（按传入 dt 积分、子步均分 dt）、`add_body()`（维护 `body_handles` 反查表）、`add_collider()`（未知 body 只警告不 panic）、`debug_lines()` |
-| `editor/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|
+| `editor/panels/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|
 | `editor/panels/inspector.rs` | 1033 | `show_content()`（含撤销集成、父节点下拉、预制体区块、**Animation 区块**：剪辑下拉 / 速度 / Fade / Loop / Autoplay / 状态机 UI / 「+ Additive」叠加层（剪辑下拉 + 权重 DragValue + 摘除）/ **「+ Add Layer」层栈**（每层一行：摘除 ✕ + 名字 TextEdit + 模式 menu_button + 剪辑下拉 + 权重 DragValue；第二行遮罩 chips（点 chip 移出）+ 「+ 骨骼」下拉（来源 `bone_names()`）；增删在闭包外收集后统一应用））|
-| `editor/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|
-| `editor/toolbar.rs` | 191 | `show()`（含 ⌂ Projects / 💾 Save · Save As / 🔨 Build / ⚙ 设置） |
-| `editor/settings.rs` | 198 | `show()`（项目设置窗口：草稿编辑 → Apply 校验写回 `project.ron`） |
-| `editor/console.rs` | 46 | `show_content()` |
-| `editor/dock.rs` | 117 | `create_tile_tree()`、`EditorBehavior` |
-| `editor/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |
+| `editor/panels/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|
+| `editor/panels/toolbar.rs` | 191 | `show()`（含 ⌂ Projects / 💾 Save · Save As / 🔨 Build / ⚙ 设置） |
+| `editor/panels/settings.rs` | 198 | `show()`（项目设置窗口：草稿编辑 → Apply 校验写回 `project.ron`） |
+| `editor/panels/console.rs` | 46 | `show_content()` |
+| `editor/panels/dock.rs` | 117 | `create_tile_tree()`、`EditorBehavior` |
+| `editor/panels/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |
 | `game/main.rs` | 517 | `GameRunner`（`ApplicationHandler`：`resumed` / `window_event` / `about_to_wait`）、`GameApp::new()`、`update()`、`render()`、`resolve_project()` |
 | `mcp/lib.rs` | 224 | `handle_line()`（协议入口，喂行进断言行出的纯函数）、`initialize_result()`（版本协商）、两层错误（协议 `error` vs 工具 `isError`） |
-| `mcp/tools.rs` | 693 | `schemas()`（6 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、upsert（先挂父再改变换）/ remove / check 实现 |
+| `mcp/tools.rs` | 693 | `schemas()`（7 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、upsert（先挂父再改变换）/ remove / check / run_headless 实现 |
 | `mcp/main.rs` | 24 | stdin/stdout 管道（唯一碰 I/O 的一层） |
 | `tools/build-release.ps1` | 370 | `Resolve-Cargo`、`Enable-MsvcEnv`、`Invoke-CargoBuild` |
