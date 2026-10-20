@@ -68,6 +68,26 @@
 //! - 半透明**不参与合批**：混合结果与绘制顺序相关（远→近），每项独立一次
 //!   draw call。阴影 pass 复用同一批批次（同一份实例数据），无需另行准备。
 //!
+//! # 视锥剔除
+//!
+//! 每帧收集绘制项之前，先按实体**网格级世界包围盒**与相机视锥求交；
+//! 完全在视锥外的实体整段跳过（不算蒙皮骨骼、不合并材质、不写实例数据）。
+//! 判据是 [`crate::frustum::Frustum`] 的六个归一化平面 —— 纯几何、可单测。
+//!
+//! 两个必须守住的正确性细节（否则"优化"会变成画面 bug）：
+//!
+//! - **阴影补投**：相机看不见、但仍会把影子投进画面的物体不能一起剔掉。
+//!   这类实体进 `shadow_batches`，只参与阴影 pass（不占主 pass 的实例槽位，
+//!   也不需要材质绑定组）。相机视锥 / 阴影视锥都命不中的才真的跳过。
+//! - **蒙皮余量**：蒙皮网格的包围盒是**绑定姿态**的（顶点在 VS 里才被骨骼
+//!   拉走），动画能把肢体甩出盒外。给这类实体留 50% 半径余量，宁可少剔
+//!   几个角色，也不能让"走路时手臂在屏幕边缘忽然消失"。
+//!
+//! 剔除是**保守**的（包围盒相交即保留）：画面必须与不剔除逐位一致，这点由
+//! `screenshot.rs` 的 GPU 等价测试钉死。相机矩阵退化时整段不剔除（宁可白画，
+//! 不能黑屏）。合批的分组键 / 批次顺序不受影响 —— 剔除只让某些批次少几个
+//! 实例，或整批不出现，不重排剩余项。
+//!
 //! **分组键是图元地址、批次顺序是"首次遇到"**（刻意的）：图元地址只用于
 //! 相等判定（同一网格在不同实体间共享同一份 `GltfPrimitive`，地址相等 ⇔
 //! 顶点/索引缓冲与材质槽全同），排序一律按实体遍历顺序 —— 指针值每次运行
@@ -115,6 +135,7 @@ use xgame_math::glam::{Mat4, Vec3};
 
 use xgame_core::{Entity, Light, LightKind, SkyConfig};
 use crate::animation::AnimationDriver;
+use crate::frustum::Frustum;
 use crate::gltf_loader::{Bounds, GltfMesh, GltfPrimitive, GltfVertex, MaterialParams};
 use crate::sky::{self, SkyResources, SkyUniform};
 
@@ -195,7 +216,7 @@ const MAX_SHADOW_RADIUS: f32 = 120.0;
 /// `MAX_LIGHTS`。改的时候别漏。
 pub const MAX_LIGHTS: usize = 8;
 
-/// 一帧的绘制统计（合批效果的读数口）。
+/// 一帧的绘制统计（合批效果与剔除效果的读数口）。
 ///
 /// 存在的理由：实例化把"绘制项"与"draw call"解耦之后，画面正确性可以靠像素
 /// 测试守，但"合批到底有没有生效"只有计数看得见 —— 基准与测试都需要一个
@@ -204,16 +225,40 @@ pub const MAX_LIGHTS: usize = 8;
 pub struct FrameStats {
     /// 不透明批次（一批 = 一次实例化 `draw_indexed`）。
     pub opaque_batches: usize,
-    /// 不透明实例数（= 不透明绘制项数；批次数 ≤ 实例数）。
+    /// 不透明实例数（= 主 pass 的不透明绘制项数；批次数 ≤ 实例数）。
     pub opaque_instances: usize,
     /// 半透明绘制项数。半透明要按距离排序，逐项一次 draw call，不参与合批。
     pub blended_draws: usize,
+    /// 因整个实体落在相机视锥外（且不投影）而跳过的实体数。
+    pub culled_entities: usize,
+    /// 被剔除的绘制项数（按图元计，≈ 省下的实例槽位）。
+    pub culled_instances: usize,
+    /// 只在阴影 pass 出现的不透明批次：相机看不见、但影子会进画面。
+    pub shadow_only_batches: usize,
+    /// 只在阴影 pass 出现的不透明实例数。
+    pub shadow_only_instances: usize,
 }
 
 impl FrameStats {
-    /// 本帧主 pass 真正发出的 draw call 数（阴影 pass 复用不透明批次，不重复计）。
+    /// 本帧**主 pass** 真正发出的 draw call 数（阴影 pass 复用不透明批次，
+    /// 不重复计；阴影专用批次单独记在 [`Self::shadow_only_batches`]）。
     pub fn draw_calls(&self) -> usize {
         self.opaque_batches + self.blended_draws
+    }
+
+    /// 被剔除的绘制项占"收集到的全部绘制项"的比例（0..=1）。
+    ///
+    /// 剔除是否真的在干活，看这一个数就够：相机一转，它就跟着动。
+    pub fn cull_ratio(&self) -> f32 {
+        let total = self.opaque_instances
+            + self.culled_instances
+            + self.shadow_only_instances
+            + self.blended_draws;
+        if total == 0 {
+            0.0
+        } else {
+            self.culled_instances as f32 / total as f32
+        }
     }
 }
 
@@ -417,7 +462,9 @@ impl<'a> SceneLighting<'a> {
 /// 经世界矩阵变换后并起来。
 ///
 /// 变换包围盒只能"变换 8 个角点再重新求盒"——旋转之后对角线方向会变，
-/// 不能直接用对角线推。这正是 [`Bounds::transformed`] 做的事。
+/// 不能直接用对角线推。这正是 [`Bounds::transformed`] 做的事；
+/// 这里用它的解析式版本（[`Bounds::transformed_affine`]，对仿射矩阵逐值等价），
+/// 每帧要跑一遍全实体，省下的 7 次点变换不是常数级冗余而是真实开销。
 ///
 /// 场景里没有任何能画出来的东西时返回 `None`（调用方据此关闭阴影）。
 pub fn scene_bounds(
@@ -437,12 +484,37 @@ pub fn scene_bounds(
             .get(i)
             .copied()
             .unwrap_or_else(|| entity.transform.local_matrix());
-        bounds = bounds.union(&mesh.bounds.transformed(&world));
+        bounds = bounds.union(&mesh.bounds.transformed_affine(&world));
     }
     if bounds.is_empty() {
         None
     } else {
         Some(bounds)
+    }
+}
+
+/// 蒙皮网格的剔除余量（半长倍率）。
+///
+/// 蒙皮在 GPU 顶点着色器里发生，CPU 侧的 `GltfMesh::bounds` 只是**绑定姿态**
+/// 的外壳。走路、挥拳、翻滚都会把肢体甩到盒外；50% 余量（3× 体积）能覆盖
+/// 常见骨骼动画的摆幅，又不会让角色永远"不可剔除"。精确做法是逐帧用当前
+/// 骨骼重新求蒙皮包围盒 —— 那要在 CPU 上再算一遍蒙皮，收益抵不上成本。
+const SKINNED_BOUNDS_PADDING: f32 = 1.5;
+
+/// 剔除用的世界包围盒（网格级）。
+///
+/// `animated` 只在**蒙皮网格**上生效：给绑定姿态包围盒加余量（见
+/// [`SKINNED_BOUNDS_PADDING`]）。静态网格（含内置图元）走精确解析式。
+fn cull_bounds(mesh: &GltfMesh, world: &Mat4, animated: bool) -> Bounds {
+    let bounds = mesh.bounds.transformed_affine(world);
+    if !animated || mesh.skins.is_empty() || bounds.is_empty() {
+        return bounds;
+    }
+    let center = bounds.center();
+    let extent = bounds.half_extent() * SKINNED_BOUNDS_PADDING;
+    Bounds {
+        min: center - extent,
+        max: center + extent,
     }
 }
 
@@ -924,10 +996,24 @@ pub struct ScenePipeline {
     blended_draws: Vec<BlendedDraw>,
     /// 图元地址 → 不透明批次下标（本帧复用，`clear()` 保留容量）。
     batch_index: HashMap<usize, u32>,
-    /// 写实例数据时的每批游标（长度 = `opaque_batches.len()`）。
+    /// 写实例数据时的每批游标（长度 = 当前正在填的批次表长度）。
     batch_cursor: Vec<u32>,
 
-    /// 上一帧的绘制统计（见 [`FrameStats`]）。合批是否生效的读数口。
+    /// 本帧**阴影专用**批次：相机视锥外、但阴影会进画面的不透明实例。
+    ///
+    /// 与 `opaque_batches` 分开是必须的 —— 主 pass 不能画它们（在相机外，
+    /// 白费片元），阴影 pass 必须画它们。两张批次表在 `draw_buffer` 里各占
+    /// 一段连续槽位，阴影 pass 依次遍历两表即可。
+    shadow_batches: Vec<DrawBatch>,
+    /// 与 `shadow_batches` 对应的待写实例数据。
+    shadow_pending: Vec<PendingDraw>,
+    /// 图元地址 → 阴影专用批次下标。
+    shadow_batch_index: HashMap<usize, u32>,
+
+    /// 视锥剔除开关（默认开）。见 [`ScenePipeline::set_frustum_culling`]。
+    frustum_culling: bool,
+
+    /// 上一帧的绘制统计（见 [`FrameStats`]）。合批与剔除是否生效的读数口。
     stats: FrameStats,
 }
 
@@ -1206,6 +1292,10 @@ impl ScenePipeline {
             blended_draws: Vec::new(),
             batch_index: HashMap::new(),
             batch_cursor: Vec::new(),
+            shadow_batches: Vec::new(),
+            shadow_pending: Vec::new(),
+            shadow_batch_index: HashMap::new(),
+            frustum_culling: true,
             stats: FrameStats::default(),
         }
     }
@@ -1218,6 +1308,20 @@ impl ScenePipeline {
     /// 上一帧的绘制统计（见 [`FrameStats`]）。
     pub fn frame_stats(&self) -> FrameStats {
         self.stats
+    }
+
+    /// 开关视锥剔除（默认开；关掉只用于 A/B 基准与像素等价测试）。
+    ///
+    /// 剔除是**保守**的：开与关的画面必须逐位一致。生产路径没有理由关它；
+    /// 这个开关的存在是为了让"剔除到底省了多少"能被同机背靠背量出来，而不是
+    /// 靠版本对比猜。
+    pub fn set_frustum_culling(&mut self, enabled: bool) {
+        self.frustum_culling = enabled;
+    }
+
+    /// 当前是否开了视锥剔除。
+    pub fn frustum_culling(&self) -> bool {
+        self.frustum_culling
     }
 
     /// 创建一张阴影深度图（深度仅用作渲染目标 + 采样源）。
@@ -1706,6 +1810,21 @@ impl ScenePipeline {
             SkyUniform::build(&sky, sky::sun_from_lights(&packed)),
         );
 
+        // --- 视锥剔除：先把两个视锥提出来 ---
+        //
+        // 相机视锥在 `view_proj` 退化时拿不到（`None`）—— 此时整段不剔除，
+        // 宁可多画也不能因为一个坏矩阵把整场景判成不可见。
+        // 阴影视锥只在真的开了阴影时才有意义；矩阵退化时保守地认为所有
+        // 物体都投影（`map_or(true, ...)`）。
+        let camera_frustum = if self.frustum_culling {
+            Frustum::from_view_proj(view_proj)
+        } else {
+            None
+        };
+        let shadow_frustum = shadow_matrix
+            .as_ref()
+            .and_then(Frustum::from_view_proj);
+
         // --- 收集绘制项：分组（不透明）+ 排序键（半透明），实例数据攒进 staging ---
         // 不透明与半透明分开收集：半透明要按到相机的距离从远到近排序，
         // 否则两个半透明物体前后叠在一起时，谁的 alpha 生效取决于绘制顺序；
@@ -1718,12 +1837,18 @@ impl ScenePipeline {
         self.opaque_batches.clear();
         self.blended_draws.clear();
         self.batch_index.clear();
+        self.shadow_batches.clear();
+        self.shadow_pending.clear();
+        self.shadow_batch_index.clear();
         // 骨骼暂存同理：本帧每个动画实体占一个新槽，槽位随实体序单调递增。
         self.bone_staging.clear();
         let mut bone_slots_used = 0u32;
-        // 本帧用掉的**实例槽位**数（不透明实例 + 半透明绘制项），上限
-        // [`MAX_RENDER_DRAWS`]：超出静默丢弃（见该常量的说明）。
+        // 本帧用掉的**实例槽位**数（不透明实例 + 半透明绘制项 + 阴影专用实例），
+        // 上限 [`MAX_RENDER_DRAWS`]：超出静默丢弃（见该常量的说明）。
         let mut draw_slots_used = 0usize;
+        // 剔除读数：被整实体跳过的数量 / 绘制项数（按图元计）。
+        let mut culled_entities = 0usize;
+        let mut culled_instances = 0usize;
 
         for (i, entity) in entities.iter().enumerate() {
             if i >= MAX_RENDER_ENTITIES || draw_slots_used >= MAX_RENDER_DRAWS {
@@ -1742,6 +1867,32 @@ impl ScenePipeline {
                 .get(i)
                 .copied()
                 .unwrap_or_else(|| entity.transform.local_matrix());
+
+            // -- 视锥剔除（实体级，先于蒙皮 / 材质 / 实例数据）--
+            //
+            // 用**网格级**世界包围盒：网格内部各图元共享一个物体，逐图元求交
+            // 省下的那点实例写不值得再乘一次矩阵。蒙皮网格给余量（见
+            // [`cull_bounds`]），否则动画会把肢体甩到绑定盒外。
+            //
+            // 三种去向：
+            //   相机内               → 主 pass（阴影 pass 复用同一批）
+            //   相机外、影子里       → `shadow_batches`（只投影，不进主 pass）
+            //   两边都外             → 整实体跳过
+            let mut draw_in_main = true;
+            if let Some(camera_frustum) = camera_frustum {
+                let bounds = cull_bounds(mesh, &world, entity.animator.is_some());
+                let in_camera = camera_frustum.intersects_bounds(&bounds);
+                let in_shadow = shadow_enabled
+                    && shadow_frustum
+                        .as_ref()
+                        .is_none_or(|f| f.intersects_bounds(&bounds));
+                if !in_camera && !in_shadow {
+                    culled_entities += 1;
+                    culled_instances += mesh.primitives.len();
+                    continue;
+                }
+                draw_in_main = in_camera;
+            }
 
             // -- 蒙皮槽位 --
             //
@@ -1852,7 +2003,32 @@ impl ScenePipeline {
                     material: MaterialUniform::from_params(&effective),
                 };
 
-                if effective.blend {
+                if !draw_in_main {
+                    // 阴影专用：相机看不见，但影子会进画面。半透明不投影
+                    //（它不写主深度，混进阴影图会投出一块错误的黑斑）。
+                    if effective.blend {
+                        continue;
+                    }
+                    // 不透明：按图元地址分组（与主 pass 同一套规则），但只写
+                    // 阴影批次；不需要材质绑定组（深度 pass 不采样材质）。
+                    let key = prim as *const GltfPrimitive as usize;
+                    let batch = match self.shadow_batch_index.get(&key) {
+                        Some(b) => *b,
+                        None => {
+                            let b = self.shadow_batches.len() as u32;
+                            self.shadow_batches.push(DrawBatch {
+                                first: 0,
+                                count: 0,
+                                entity: i as u32,
+                                prim: pi as u32,
+                            });
+                            self.shadow_batch_index.insert(key, b);
+                            b
+                        }
+                    };
+                    self.shadow_batches[batch as usize].count += 1;
+                    self.shadow_pending.push(PendingDraw { batch, uniform });
+                } else if effective.blend {
                     // 半透明：一项一个批次（不做合批，见模块头），距离排序键留好。
                     self.material_binding(device, prim);
                     self.blended_draws.push(BlendedDraw {
@@ -1896,7 +2072,8 @@ impl ScenePipeline {
         //
         // 不透明批次占 [0, n)：一批一段**连续**槽位（`first` = 前缀和），
         // 实例下标 = first + 批内序号 —— 与 `draw_indexed` 的 first_instance
-        // 正好对上。半透明接在后面（顺序 = 排序后的绘制顺序，互不重叠即可）。
+        // 正好对上。半透明接在后面（顺序 = 排序后的绘制顺序，互不重叠即可）；
+        // 阴影专用批次再接到最后（只有阴影 pass 读得到，主 pass 不碰）。
         //
         // 远 → 近。`partial_cmp` 对 NaN 返回 None，退化成"保持原序"即可，
         // 不值得为一个坏变换把整帧干掉。
@@ -1910,6 +2087,10 @@ impl ScenePipeline {
         for draw in &mut self.blended_draws {
             draw.batch.first = next_slot;
             next_slot += 1;
+        }
+        for batch in &mut self.shadow_batches {
+            batch.first = next_slot;
+            next_slot += batch.count;
         }
 
         let stride = DRAW_STRIDE;
@@ -1933,6 +2114,17 @@ impl ScenePipeline {
                 self.draw_staging[offset..offset + stride]
                     .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
             }
+            // 阴影专用：与主 pass 同一套游标填法，接在最后一段槽位。
+            self.batch_cursor.clear();
+            self.batch_cursor
+                .extend(self.shadow_batches.iter().map(|b| b.first));
+            for draw in &self.shadow_pending {
+                let cursor = &mut self.batch_cursor[draw.batch as usize];
+                let offset = *cursor as usize * stride;
+                *cursor += 1;
+                self.draw_staging[offset..offset + stride]
+                    .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+            }
             // 一次写完整段实例数据（见 `draw_staging` 的说明）。
             queue.write_buffer(&self.draw_buffer, 0, &self.draw_staging);
         }
@@ -1948,18 +2140,24 @@ impl ScenePipeline {
             );
         }
 
-        // 统计口径 = 主 pass 真正发出的 draw call（阴影复用不透明批次，不重复计）。
+        // 统计口径 = 主 pass 真正发出的 draw call（阴影复用不透明批次，不重复计；
+        // 阴影专用批次单独计数）。剔除读数给基准与编辑器 HUD 用。
         self.stats = FrameStats {
             opaque_batches: self.opaque_batches.len(),
             opaque_instances: self.pending_draws.len(),
             blended_draws: self.blended_draws.len(),
+            culled_entities,
+            culled_instances,
+            shadow_only_batches: self.shadow_batches.len(),
+            shadow_only_instances: self.shadow_pending.len(),
         };
 
         // --- 阴影 pass：先把深度画进阴影图（必须在主 pass 之前）---
         //
         // 只画**不透明**图元。半透明物体（玻璃之类）本来也不该投出实心影子，
         // 而且它们不写主深度缓冲，混到阴影图里只会投出一块错误的黑斑。
-        // 实例数据与主 pass 是同一份，批次也一模一样 —— 零额外准备。
+        // 相机可见的不透明批次与"相机外、影子在画面里"的专用批次都在这画；
+        // 实例数据全在同一个 storage 缓冲里，只是槽位分段不同。
         if shadow_enabled {
             let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow_pass"),
@@ -1978,7 +2176,7 @@ impl ScenePipeline {
             });
             spass.set_pipeline(&self.shadow_pipeline);
             spass.set_bind_group(0, &self.shadow_pass_bind_group, &[]);
-            for batch in &self.opaque_batches {
+            for batch in self.opaque_batches.iter().chain(self.shadow_batches.iter()) {
                 let Some(prim) = batch_prim(entities, model_cache, batch) else {
                     continue;
                 };
@@ -2328,5 +2526,65 @@ mod tests {
         let u_none = ScenePipeline::build_lights([0.0; 3], &packed, None);
         assert_eq!(u_none.lights[0].shadow_params[0], 0.0);
         assert_eq!(u_none.lights[1].shadow_params[0], 0.0);
+    }
+
+    // -- 视锥剔除 --
+
+    /// 蒙皮网格必须拿到 50% 余量，静态网格必须**一点不多**。
+    ///
+    /// 这条测试守的是"动画肢体甩出绑定盒"的修复：如果哪天有人把
+    /// `mesh.skins.is_empty()` 判反、或把余量乘到错误的分支上，这里立刻红。
+    #[test]
+    fn cull_bounds_pads_skinned_meshes_only() {
+        let bounds = Bounds {
+            min: Vec3::new(-1.0, -1.0, -1.0),
+            max: Vec3::new(1.0, 1.0, 1.0),
+        };
+        let mesh = GltfMesh {
+            primitives: Vec::new(),
+            vertex_size: 0,
+            bounds,
+            nodes: Vec::new(),
+            skins: vec![crate::animation::Skin {
+                joints: vec![0],
+                inverse_bind: vec![Mat4::IDENTITY],
+            }],
+            animations: Vec::new(),
+        };
+        let world = Mat4::IDENTITY;
+
+        let padded = cull_bounds(&mesh, &world, true);
+        assert_eq!(
+            padded.half_extent(),
+            Vec3::splat(1.5),
+            "蒙皮余量是 50%（1.5× 半长），不是'把常数抄进断言'"
+        );
+        assert_eq!(padded.center(), Vec3::ZERO);
+
+        // 没有动画器（或动画器还没 tick）时不该平白多画 3× 体积。
+        assert_eq!(cull_bounds(&mesh, &world, false), bounds);
+    }
+
+    /// 非蒙皮网格即便有动画器（节点动画 / 内置图元的平移旋转）也不加余量：
+    /// 静态几何的世界包围盒本来就是精确的。
+    #[test]
+    fn cull_bounds_leaves_static_meshes_exact() {
+        let bounds = Bounds {
+            min: Vec3::new(-2.0, 0.0, -0.5),
+            max: Vec3::new(2.0, 1.0, 0.5),
+        };
+        let mesh = GltfMesh {
+            primitives: Vec::new(),
+            vertex_size: 0,
+            bounds,
+            nodes: Vec::new(),
+            skins: Vec::new(),
+            animations: Vec::new(),
+        };
+        let world = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
+        assert_eq!(
+            cull_bounds(&mesh, &world, true),
+            bounds.transformed_affine(&world)
+        );
     }
 }

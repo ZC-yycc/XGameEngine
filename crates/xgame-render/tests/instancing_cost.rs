@@ -205,7 +205,10 @@ impl BenchPath {
             view_formats: &[],
         });
         let ldr_view = ldr.create_view(&wgpu::TextureViewDescriptor::default());
-        let pipeline = ScenePipeline::new(device, HDR_FORMAT, sample_count);
+        let mut pipeline = ScenePipeline::new(device, HDR_FORMAT, sample_count);
+        // 这条基准测的是**合批**：关掉剔除，让 2000 个演员全部进实例表，
+        // 两档的绘制项数才严格相等（剔除另有 `culling_cost` 基准）。
+        pipeline.set_frustum_culling(false);
         let hdr = HdrTargets::new(device, "bench_inst", WIDTH, HEIGHT, sample_count);
         let postfx = PostFx::new(device, format);
         Self {

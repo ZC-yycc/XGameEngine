@@ -276,6 +276,14 @@ impl ScreenshotRenderer {
         self.pipeline.frame_stats()
     }
 
+    /// 开关视锥剔除（默认开）—— 只给 A/B 测试与基准用。
+    ///
+    /// 生产路径不该关它：剔除是保守的，开与关的像素必须逐位一致
+    /// （`frustum_culling_matches_unculled_pixels` 钉死）。
+    pub fn set_frustum_culling(&mut self, enabled: bool) {
+        self.pipeline.set_frustum_culling(enabled);
+    }
+
     pub fn aspect(&self) -> f32 {
         self.size.0 as f32 / self.size.1.max(1) as f32
     }
@@ -655,10 +663,81 @@ mod tests {
     // GPU 测试（拿不到适配器就跳过，见模块头"GPU 依赖与测试纪律"）
     // -----------------------------------------------------------------
 
+    /// GPU 测试并发上限。
+    ///
+    /// 本机（16 逻辑核，默认 16 个测试线程）在同时创建十几个 wgpu 设备时会
+    /// **挂死**：进程不前进、没有报错、也没有 GPU 占用。8 线程跑同一组测试
+    /// 3 秒即绿，所以问题在驱动侧的并发设备创建，而不是某条测试本身。
+    ///
+    /// 这不是产品代码的问题，但会让 `cargo test` 变成"永远跑不完"，测试
+    /// 安全网就此失效。用一个计数信号量把**同时存活的截图渲染器**限制住；
+    /// 4 个足够让 CPU 侧并行，又离驱动的临界点有安全距离。
+    const MAX_CONCURRENT_GPU_TESTS: usize = 4;
+
+    struct GpuGate {
+        active: std::sync::Mutex<usize>,
+        cv: std::sync::Condvar,
+    }
+
+    static GPU_GATE: std::sync::OnceLock<GpuGate> = std::sync::OnceLock::new();
+
+    struct GpuTestPermit {
+        gate: &'static GpuGate,
+    }
+
+    impl Drop for GpuTestPermit {
+        fn drop(&mut self) {
+            let mut active = self
+                .gate
+                .active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *active -= 1;
+            self.gate.cv.notify_one();
+        }
+    }
+
+    fn acquire_gpu_test_permit() -> GpuTestPermit {
+        let gate = GPU_GATE.get_or_init(|| GpuGate {
+            active: std::sync::Mutex::new(0),
+            cv: std::sync::Condvar::new(),
+        });
+        let mut active = gate.active.lock().unwrap_or_else(|e| e.into_inner());
+        while *active >= MAX_CONCURRENT_GPU_TESTS {
+            active = gate.cv.wait(active).unwrap_or_else(|e| e.into_inner());
+        }
+        *active += 1;
+        GpuTestPermit { gate }
+    }
+
+    /// 带并发许可的截图渲染器：`Deref` 到 [`ScreenshotRenderer`]，测试代码
+    /// 照常 `shot.render_scene(...)` / `shot.device`，许可在测试结束时归还。
+    struct GpuFixture {
+        renderer: ScreenshotRenderer,
+        _permit: GpuTestPermit,
+    }
+
+    impl std::ops::Deref for GpuFixture {
+        type Target = ScreenshotRenderer;
+        fn deref(&self) -> &Self::Target {
+            &self.renderer
+        }
+    }
+
+    impl std::ops::DerefMut for GpuFixture {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.renderer
+        }
+    }
+
     /// 建一个截图渲染器；无 GPU 环境跳过（返回 None）。
-    fn gpu_or_skip(name: &str) -> Option<ScreenshotRenderer> {
+    fn gpu_or_skip(name: &str) -> Option<GpuFixture> {
+        let permit = acquire_gpu_test_permit();
         match ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240) {
-            Ok(s) => Some(s),
+            Ok(renderer) => Some(GpuFixture {
+                renderer,
+                _permit: permit,
+            }),
             Err(e) => {
                 eprintln!("跳过 {name}：{e}");
                 None
@@ -1589,6 +1668,10 @@ mod tests {
         let Some(mut shot) = gpu_or_skip("instancing_batches_shared_mesh_entities") else {
             return;
         };
+        // 这条测的是**合批结构**（65 个绘制项压成 2 批），不是剔除；关掉剔除
+        // 才能让"实例数 = 实体数"的口径保持纯粹。剔除的计数与画面等价由
+        // `frustum_culling_*` 三条测试单独钉死。
+        shot.set_frustum_culling(false);
 
         let mut scene = Scene::new("instancing-count");
         scene.ambient = [0.05; 3];
@@ -1929,6 +2012,226 @@ mod tests {
         assert!(
             center[2] > center[0] + 30.0,
             "近处蓝色必须叠在远处红色之上（画反了会 r > b）: {center:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 视锥剔除：GPU 侧的"先证红"测试组
+    // -----------------------------------------------------------------
+    //
+    // 剔除的三条合同：① 视锥外的实体不产生实例（CPU 读数看得见，画面
+    // 看不出来）；② 开 / 关剔除的画面**逐字节一致**（保守性）；③ 相机
+    // 看不见、但影子落在画面里的物体必须继续参与阴影 pass（最容易漏的
+    // 一条 —— 只按相机视锥剔，影子会跟着物体一起消失）。
+
+    /// 16 个可见立方体（交错排布）+ 16 个相机背后的立方体。
+    ///
+    /// 交错是刻意的：剔除若只是"截断尾部"，实例槽位不会重排，像素等价
+    /// 测试就测不出"逐实例数据是否跟着实例走"。这里可见项在开 / 关剔除
+    /// 时的槽位号完全不同。
+    fn interleaved_visible_and_hidden_cubes() -> Scene {
+        let mut scene = Scene::new("culling");
+        scene.ambient = [0.08; 3];
+        scene.lights = vec![Light::directional("sun", [0.4, -1.0, -0.3], [1.0; 3], 1.2)];
+        scene.lights[0].casts_shadow = false;
+
+        for i in 0..32 {
+            let mut e = Entity::new(format!("c{i}"));
+            e.model = "builtin://cube".to_owned();
+            if i % 2 == 0 {
+                let g = (i / 2) as f32;
+                e.transform.position = Vec3::new(
+                    (g % 4.0 - 1.5) * 0.7,
+                    (g / 4.0 - 1.5) * 0.7,
+                    -4.0,
+                );
+            } else {
+                // 相机背后：z 为正，任何朝向 -Z 的相机都看不见。
+                let g = (i / 2) as f32;
+                e.transform.position = Vec3::new(g % 4.0, g / 4.0, 3.0 + g * 0.05);
+            }
+            scene.add_entity(e);
+        }
+        scene
+    }
+
+    /// **剔除计数**：相机背后的 16 个实例必须没有进主 pass 的批次；关掉
+    /// 剔除时它们全部进（32 个）。旧实现（无剔除）里 `culled_entities` 恒为
+    /// 0、`opaque_instances` 恒为 32 —— 这条测试就是它的红。
+    #[test]
+    fn frustum_culling_skips_offscreen_instances() {
+        let Some(mut shot) = gpu_or_skip("frustum_culling_skips_offscreen_instances") else {
+            return;
+        };
+        let scene = interleaved_visible_and_hidden_cubes();
+        let camera =
+            ShotCamera::looking_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), DEFAULT_FOV_Y);
+        let render = |shot: &mut ScreenshotRenderer| {
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.frame_stats()
+        };
+
+        shot.set_frustum_culling(false);
+        let unculled = render(&mut shot);
+        assert_eq!(unculled.opaque_instances, 32, "关掉剔除：16 可见 + 16 隐藏");
+        assert_eq!(unculled.culled_entities, 0);
+        assert_eq!(unculled.culled_instances, 0);
+
+        shot.set_frustum_culling(true);
+        let culled = render(&mut shot);
+        assert_eq!(culled.opaque_instances, 16, "只剩可见的 16 个实例");
+        assert_eq!(culled.culled_entities, 16, "16 个整实体被跳过");
+        assert_eq!(culled.culled_instances, 16);
+        assert!(
+            (culled.cull_ratio() - 0.5).abs() < 1e-6,
+            "剔除比例应为五成：{}",
+            culled.cull_ratio()
+        );
+        // 合批结构不受剔除影响：同图元仍是一批（只是少了实例）。
+        assert_eq!(culled.opaque_batches, unculled.opaque_batches);
+    }
+
+    /// **像素等价**：开 / 关剔除的图像必须逐字节一致。剔除把"屏幕外的东西"
+    /// 丢掉，屏幕上的像素没有任何理由变化；这条挂了说明剔除判据写错了
+    /// （包围盒 / 视锥平面 / 槽位分配其中之一）。
+    #[test]
+    fn frustum_culling_matches_unculled_pixels() {
+        let Some(mut shot) = gpu_or_skip("frustum_culling_matches_unculled_pixels") else {
+            return;
+        };
+        let scene = interleaved_visible_and_hidden_cubes();
+        let camera =
+            ShotCamera::looking_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), DEFAULT_FOV_Y);
+        let render = |shot: &mut ScreenshotRenderer| {
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.read_rgba().expect("读回失败")
+        };
+
+        shot.set_frustum_culling(false);
+        let unculled = render(&mut shot);
+        shot.set_frustum_culling(true);
+        let culled = render(&mut shot);
+
+        assert_eq!(unculled.len(), culled.len());
+        if unculled != culled {
+            let idx = unculled
+                .iter()
+                .zip(&culled)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            panic!(
+                "剔除不许改画面；首个差异在第 {idx} 字节（像素 {}）: {} vs {}",
+                idx / 4,
+                unculled[idx],
+                culled[idx]
+            );
+        }
+    }
+
+    /// **阴影补投**：相机视锥外、但影子落在画面里的投影物必须继续参与
+    /// 阴影 pass。
+    ///
+    /// 机位 (0, 14, 18) 俯视原点，立方体在 (-12, 5, 0) —— 水平角 33.7°
+    /// 超出 4:3 / 45° 视场的 28.9° 半角，肯定不在主 pass。光 (1,-1,0)
+    /// 把它的影子推到 (-7, 0, 0)，正落在可见地面上。旧实现里这个实体
+    /// 在收集阶段就被整段跳过，阴影会凭空消失 —— 这条测试就是它的红。
+    #[test]
+    fn offscreen_casters_still_cast_shadows() {
+        let Some(mut shot) = gpu_or_skip("offscreen_casters_still_cast_shadows") else {
+            return;
+        };
+
+        let mut scene = Scene::new("shadow-only-caster");
+        scene.ambient = [0.05; 3];
+        scene.lights = vec![Light::directional("sun", [1.0, -1.0, 0.0], [1.0; 3], 2.0)];
+        assert!(scene.lights[0].casts_shadow);
+        let mut ground = Entity::new("Ground");
+        ground.model = "builtin://plane".to_owned();
+        ground.transform.scale = Vec3::new(30.0, 1.0, 30.0);
+        scene.add_entity(ground);
+        let mut caster = Entity::new("Caster");
+        caster.model = "builtin://cube".to_owned();
+        caster.transform.position = Vec3::new(-12.0, 5.0, 0.0);
+        scene.add_entity(caster);
+
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 14.0, 18.0),
+            Vec3::ZERO,
+            DEFAULT_FOV_Y,
+        );
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene| {
+            shot.render_scene(
+                scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.read_rgba().expect("读回失败")
+        };
+
+        // 先把模型装进缓存，才能用同一套取景参数算出投影坐标。
+        let _ = render(&mut shot, &scene);
+        let world = scene.world_matrices();
+        let bounds = scene_bounds(&scene.entities, &world, &shot.model_cache)
+            .expect("场景有几何");
+        let (near, far) = clip_planes(&camera, bounds.radius());
+        let view_proj = Mat4::perspective_rh(
+            camera.fov_y,
+            shot.aspect(),
+            near,
+            far,
+        ) * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let project = |p: Vec3| {
+            let clip = view_proj * p.extend(1.0);
+            clip.truncate() / clip.w
+        };
+
+        let caster_ndc = project(Vec3::new(-12.0, 5.0, 0.0));
+        assert!(
+            caster_ndc.x.abs() > 1.0,
+            "前提：投影物必须在相机视锥外（ndc.x = {}）",
+            caster_ndc.x
+        );
+
+        let shadow_ndc = project(Vec3::new(-7.0, 0.0, 0.0));
+        let sx = ((shadow_ndc.x * 0.5 + 0.5) * 320.0).round() as u32;
+        let sy = ((1.0 - (shadow_ndc.y * 0.5 + 0.5)) * 240.0).round() as u32;
+        assert!(sx < 320 && sy < 240, "影子落点必须在画面内: ({sx}, {sy})");
+
+        let with_shadow = render(&mut shot, &scene);
+        let stats = shot.frame_stats();
+        assert_eq!(stats.opaque_instances, 1, "主 pass 只剩地面");
+        assert_eq!(
+            stats.shadow_only_instances, 1,
+            "相机外的投影物必须进阴影专用批次"
+        );
+        assert_eq!(stats.culled_entities, 0, "投影物不能算被剔除");
+
+        scene.lights[0].casts_shadow = false;
+        let without_shadow = render(&mut shot, &scene);
+
+        let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        let lit = luma(pixel_avg(&with_shadow, 320, sx, sy));
+        let unlit = luma(pixel_avg(&without_shadow, 320, sx, sy));
+        assert!(
+            lit + 20.0 < unlit,
+            "屏幕外投影物的影子必须落在地面上：有阴影 {lit:.1} vs 无阴影 {unlit:.1}"
         );
     }
 }

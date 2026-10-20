@@ -4,6 +4,7 @@
 
 pub mod animation;
 pub mod camera;
+pub mod frustum;
 pub mod gltf_loader;
 pub mod mesh;
 pub mod model;

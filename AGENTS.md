@@ -21,6 +21,7 @@ cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无
 cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
 cargo run -p xgame-game -- projects/SampleScene  # 独立游戏
 cargo test -p xgame-runtime --release --test update_throughput -- --ignored --nocapture  # 分档性能基准（默认 ignore）
+cargo test -p xgame-render --release --test culling_cost -- --ignored --nocapture  # 视锥剔除开/关 A/B 基准（默认 ignore）
 ```
 
 发布打包：双击 `一键构建.cmd`（产物在 `dist/`）。
@@ -115,5 +116,9 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 - **渲染 GPU 实例化（draw batching）已完成**（2026-10-19，实施记录见 PLAN.md 二十八）：同图元（网格指针相同）合并成一次实例化 `draw_indexed`；逐实例 `DrawUniform`（112 B：模型矩阵 + 蒙皮槽位 + 材质）走 **storage buffer** 紧密排布、**无动态偏移**，顶点着色器用 `@builtin(instance_index)` 直接索引（`first_instance` = 批起始槽位）；材质随实例数据走、VS→FS 用 **flat 插值**传递（片元阶段不读 storage）；半透明不合批（**远→近逐项一次 draw call**）；阴影 pass 复用同一批批次表（统计口径不重复计）。
   - **四条不能推翻的约束**：① 批次分组键 = **图元地址**（只做相等判定）、批次顺序 = **首次遇到顺序** —— 无头截图 / 基准"同机逐字节确定"契约依赖槽位布局确定，别改成哈希序 / 按材质排序；② 逐实例数据一律走 `draw_buffer`（storage 整缓冲一次绑定），别退回"逐 draw 动态偏移 uniform"—— 那是 2000 实体场景 ~1.9 ms/帧 的 CPU 税（本轮实测）；③ 半透明**不参与合批**（排序语义优先）；④ 材质绑定组在**收集阶段**预热（绘制循环只有 `&self`、不能惰性建组）—— 绘制循环里的 `material_cache.get(..).expect()` 是故意的硬失败（静默用错材质 = 画错色）。
   - **实测（同机交替 3 轮取中位数，RTX 2060 / 1280×720 / MSAA×4 / 2000 实体，`instancing_cost`）**：共享网格场景 2001 批 → **2 批**、CPU **2225 → 344 µs/帧（-84%）**、场景段 287 → 241 µs；各自网格对照档（防"错并批"护栏）4139 → 3287 µs/帧（-21%，省掉每 draw 的动态偏移设置与逐项 uniform 上传）。端到端钉子一例：同一 SampleScene 无头截图（150 帧 + `--screenshot`）在两版之间**逐字节一致**（含阴影 / 天空 / ACES）。
+- **渲染视锥剔除 + 阴影补投已完成**（2026-10-20，实施记录见 PLAN.md 三十）：实体级世界 AABB × 六个**归一化**视锥平面（`frustum.rs`，Gribb–Hartmann，wgpu NDC 深度 `[0,1]`）；相机外但影子会进画面的不透明投影物进 `shadow_batches`，**只跑阴影 pass**（不占主 pass 实例槽、不建材质组）；半透明不投影的旧语义不变；蒙皮网格包围盒给 **50% 余量**（绑定姿态）；开/关剔除画面**逐字节一致**；视口 HUD 右下 `Draws / Inst / Cull`，无头截图报告带 `screenshot.render_stats`。
+  - **四条不能推翻的约束**：① **保守性是硬合同** —— 开/关剔除逐位一致（`frustum_culling_matches_unculled_pixels` 钉死），矩阵退化（含 NaN / 零法线）必须返回 `None` 并**当作不剔除**，宁可白画不能黑屏；② 相机外投影物**必须保留**在阴影视锥里（`offscreen_casters_still_cast_shadows` 钉死）—— 只按相机视锥剔会让影子凭空消失；③ 蒙皮包围盒是绑定姿态，**50% 余量不能删**（`cull_bounds_pads_skinned_meshes_only` 钉死）；静态网格不得加余量；④ 剔除不改变分组键 / 批次顺序，只少实例或整批不出现 —— 槽位布局确定性的前提（同机逐字节截图契约）。
+  - **三条实现事实**：收集顺序是**主 pass 不透明 → 半透明 → 仅阴影**三段连续槽位，仍只做一次 `queue.write_buffer`；`FrameStats.opaque_instances` **只算主 pass**，仅阴影实例单独记 `shadow_only_instances`，`cull_ratio()` 的分母两者都算（投影物不是"被剔除"）；`Bounds::transformed_affine` 是 8 角点法的解析等价式，每帧省 7 次点变换，交叉单测钉住一致性。
+  - **实测（RTX 2060 / 1280×720 / MSAA×4 / 2000 实体 / 30° 窄视场 / 56.6% 剔除，`culling_cost`）**：未合批场景 **2000 → 868 批、CPU 3295 → 1146 µs/帧（-65%）、场景段 158.0 → 108.5 µs（-31%）**；共享网格场景（1 批）CPU 187.6 → 181.7 µs/帧（-3%）、场景段 76.8 → 71.7 µs（-7%）。阴影刻意关（相机外投影物按设计保留，混进来测的是组合而不是剔除本身）。
 - 对照数据（微基准 `behavior_dispatch_throughput`，1000 no-op 实体 × 300 帧，P2.5 会话）：Lua 轨分发 **562 µs/帧**、Rust 组件轨 71.7 µs、无轨基线 7.54 µs。（历史 Rhai 轨 735.6 µs，P3 起已从基准移除。）历史：P0 = 493.9 µs（当时机器）、P0.5 = 68.4 µs、P1 = 65.2 µs、P2 = 713 µs（组件/基线口径的历次漂移见基准模块文档的完整记录表）。⚠ 绝对值随机器状态浮动 1.5× 以上，**跨版本比较必须同机背靠背**。**组件轨 < 50 µs 的验收线在本机持续红**（P0.5 起已知，验收线未为迁就机器上调 —— 红了先对同机数字再判回归）。
 - **工具链注意**：本仓库的源文件是 UTF-8 **无 BOM** 且含大量中文注释。用 PowerShell 做文本替换时必须显式 `-Encoding UTF8` 读写，否则 PS 5.1 会按 GBK 解码把中文**有损**毁掉（已发生过一次，PLAN.md 十六第七节）。改中文源文件优先用编辑器工具，shell 只做只读操作。

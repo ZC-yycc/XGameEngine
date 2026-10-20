@@ -89,6 +89,10 @@ impl Bounds {
     }
 
     /// 用一个仿射矩阵（通常是世界矩阵）变换本盒，返回新的轴对齐盒。
+    ///
+    /// 实现是"变换 8 个角点再重新求盒"——旋转之后盒子会变成平行六面体，
+    /// 不能用对角线直接推。这也是 [`transformed_affine`](Self::transformed_affine)
+    /// 的**参考实现**：后者用「绝对值矩阵」走解析式，二者对仿射矩阵必须逐值一致。
     pub fn transformed(&self, m: &Mat4) -> Bounds {
         if self.is_empty() {
             return *self;
@@ -98,6 +102,38 @@ impl Bounds {
                 .into_iter()
                 .map(|c| (*m * c.extend(1.0)).truncate().to_array()),
         )
+    }
+
+    /// 仿射矩阵下的轴对齐盒——解析式，比 [`transformed`](Self::transformed)
+    /// 少 7 次点变换。
+    ///
+    /// 原理：平行六面体在第 i 轴上的半长 = Σ_j |M_ij| · e_j（局部半长 e）。
+    /// 每帧要对**所有实体**做一次（阴影拟合 + 视锥剔除），8 角点版本在
+    /// 2000 实体下是几十微秒的固定税；解析式把向量乘法从 24 次降到 9 次。
+    ///
+    /// 只对仿射矩阵成立（平移 / 旋转 / 缩放 / 错切都行，投影矩阵不行）——
+    /// 世界矩阵按定义就是仿射的。空盒原样返回（保持"空"的哨兵语义）。
+    pub fn transformed_affine(&self, m: &Mat4) -> Bounds {
+        if self.is_empty() {
+            return *self;
+        }
+        let center = self.center();
+        let extent = self.half_extent();
+        let world_center = m.transform_point3(center);
+        // `Mat4` 的 3×3 部分：用各列的绝对值对 extent 做线性组合。
+        // （等价于 |M| · e，行/列写法在这里只影响变量命名。）
+        let x = m.x_axis;
+        let y = m.y_axis;
+        let z = m.z_axis;
+        let world_extent = Vec3::new(
+            x.x.abs() * extent.x + y.x.abs() * extent.y + z.x.abs() * extent.z,
+            x.y.abs() * extent.x + y.y.abs() * extent.y + z.y.abs() * extent.z,
+            x.z.abs() * extent.x + y.z.abs() * extent.y + z.z.abs() * extent.z,
+        );
+        Bounds {
+            min: world_center - world_extent,
+            max: world_center + world_extent,
+        }
     }
 }
 

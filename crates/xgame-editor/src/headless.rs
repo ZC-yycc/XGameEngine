@@ -361,6 +361,44 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[rank.clamp(1, n) - 1]
 }
 
+/// 截图那一帧的绘制读数（与 `xgame_render::scene_pipeline::FrameStats` 同口径）。
+///
+/// 为什么截图报告要带它：截图可能用显式机位（`--camera-pos/--camera-target`），
+/// 此时"相机外的东西被剔掉了"是**画面的解释**而不是 bug。把 draw call 与剔除数
+/// 一起写进报告，智能体不必靠猜就能区分"这张图没画那个物体"的两种原因：
+/// 场景里本来没有 / 相机没框到。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotRenderStats {
+    /// 主 pass 发出的 draw call 数（不透明批次 + 半透明逐项）。
+    pub draw_calls: usize,
+    pub opaque_batches: usize,
+    pub opaque_instances: usize,
+    pub blended_draws: usize,
+    /// 因整个实体落在相机视锥外而跳过的实体数。
+    pub culled_entities: usize,
+    /// 被剔除的绘制项数。
+    pub culled_instances: usize,
+    /// 只在阴影 pass 出现的实例数（相机外、影子在画面里的投影物）。
+    pub shadow_only_instances: usize,
+    /// 被剔除的绘制项占全部绘制项的比例（0..=1）。
+    pub cull_ratio: f32,
+}
+
+impl From<xgame_render::scene_pipeline::FrameStats> for ShotRenderStats {
+    fn from(s: xgame_render::scene_pipeline::FrameStats) -> Self {
+        Self {
+            draw_calls: s.draw_calls(),
+            opaque_batches: s.opaque_batches,
+            opaque_instances: s.opaque_instances,
+            blended_draws: s.blended_draws,
+            culled_entities: s.culled_entities,
+            culled_instances: s.culled_instances,
+            shadow_only_instances: s.shadow_only_instances,
+            cull_ratio: s.cull_ratio(),
+        }
+    }
+}
+
 /// 截图的落盘信息（`--screenshot` 未给时为 `None`）。
 ///
 /// `eye` / `target` 是**实际使用**的相机（自动取景时是拟合结果）——
@@ -372,6 +410,8 @@ pub struct ShotInfo {
     pub height: u32,
     pub eye: [f32; 3],
     pub target: [f32; 3],
+    /// 这一帧的绘制读数（见 [`ShotRenderStats`]）。
+    pub render_stats: ShotRenderStats,
 }
 
 /// 无头运行的统计报告。
@@ -504,6 +544,16 @@ impl HeadlessReport {
                     "camera": {
                         "eye": s.eye,
                         "target": s.target,
+                    },
+                    "render_stats": {
+                        "draw_calls": s.render_stats.draw_calls,
+                        "opaque_batches": s.render_stats.opaque_batches,
+                        "opaque_instances": s.render_stats.opaque_instances,
+                        "blended_draws": s.render_stats.blended_draws,
+                        "culled_entities": s.render_stats.culled_entities,
+                        "culled_instances": s.render_stats.culled_instances,
+                        "shadow_only_instances": s.render_stats.shadow_only_instances,
+                        "cull_ratio": s.render_stats.cull_ratio,
                     },
                 }),
                 None => serde_json::Value::Null,
@@ -656,6 +706,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
                 height,
                 eye: used.eye.to_array(),
                 target: used.target.to_array(),
+                render_stats: ShotRenderStats::from(renderer.frame_stats()),
             })
         }
         None => None,
@@ -1224,6 +1275,31 @@ mod tests {
         let shot = report.screenshot.as_ref().expect("报告必须带 screenshot 节");
         assert_eq!((shot.width, shot.height), (320, 240));
         assert!(shot.eye.iter().all(|v| v.is_finite()));
+        // 自动取景把整个场景框进视锥 ⇒ 剔除读数必须是 0（不是"碰巧没剔"，
+        // 而是"没有可剔的东西"）。这也钉死了截图走的是生产剔除路径。
+        assert!(shot.render_stats.draw_calls >= 1, "立方体至少占一个 draw call");
+        assert_eq!(
+            shot.render_stats.culled_instances, 0,
+            "自动取景框住全场，不该有实例被剔除"
+        );
+        assert_eq!(shot.render_stats.cull_ratio, 0.0);
+        // render_stats 的字段名是报告契约的一部分（消费方：CI / MCP）。
+        let value = report.to_json();
+        for key in [
+            "draw_calls",
+            "opaque_batches",
+            "opaque_instances",
+            "blended_draws",
+            "culled_entities",
+            "culled_instances",
+            "shadow_only_instances",
+            "cull_ratio",
+        ] {
+            assert!(
+                value["screenshot"]["render_stats"].get(key).is_some(),
+                "screenshot.render_stats 缺字段 {key}"
+            );
+        }
         let path_a = std::path::PathBuf::from(&shot.path);
         assert!(path_a.is_file(), "截图文件应当落盘");
 

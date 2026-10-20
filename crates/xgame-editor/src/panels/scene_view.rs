@@ -663,6 +663,30 @@ fn draw_viewport_hud(state: &EditorState, painter: &egui::Painter, rect: egui::R
         egui::FontId::new(10.5, egui::FontFamily::Proportional),
         colors::TEXT_PRIMARY,
     );
+
+    // 右下：本帧绘制读数（draw call / 实例 / 被剔除的实例）。
+    //
+    // 剔除是**保守**的、画面与不剔除逐位一致，所以"它到底有没有在干活"
+    // 只能靠计数看。把读数放在视口里而不是只给日志：相机一转这个数就变，
+    // 用户（和接手的开发者）立刻知道剔除生效了，不用去翻基准。
+    //
+    // 与缩放提示共用右下角：它在 `bottom - 26`，这里在 `bottom - 7`，
+    // 同时出现时上下叠放，不会互相压字。
+    if let Some(stats) = state.scene_renderer.as_ref().map(|r| r.frame_stats()) {
+        hud_text(
+            painter,
+            egui::pos2(rect.right() - 10.0, rect.bottom() - 7.0),
+            egui::Align2::RIGHT_BOTTOM,
+            format!(
+                "Draws {}   Inst {}   Cull {}",
+                stats.draw_calls(),
+                stats.opaque_instances + stats.blended_draws,
+                stats.culled_instances
+            ),
+            egui::FontId::monospace(10.5),
+            colors::TEXT_PRIMARY,
+        );
+    }
 }
 
 // ============================================================================

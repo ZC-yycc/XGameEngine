@@ -296,6 +296,15 @@ impl SceneRenderer {
         self.texture_id
     }
 
+    /// 最近一帧的绘制统计（合批 / 剔除读数，见 `FrameStats`）。
+    ///
+    /// 读的是**上一次真正渲染**的结果：静态场景的指纹门控会整帧跳过，
+    /// 此时视口里的画面就是上一帧那张，统计也应当停在上一帧 —— 与画面一致
+    /// 比"每帧更新一个没人看的数"更重要。
+    pub fn frame_stats(&self) -> xgame_render::scene_pipeline::FrameStats {
+        self.pipeline.frame_stats()
+    }
+
     /// 某个模型标识的本地包围盒（渲染加载过才有），给 UI 侧拾取用。
     ///
     /// 拿不到网格数据时调用方退回单位立方体 —— 内置图元本来就是单位尺寸。
