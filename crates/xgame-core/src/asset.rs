@@ -706,6 +706,12 @@ pub fn encode_entity_references(entity: &mut Entity, db: &AssetDatabase) {
     if let Some(link) = &mut entity.prefab {
         encode_slot(&mut link.source, db);
     }
+    // UI 图片与模型 / 音频同款：磁盘上存 GUID，改名不断链。
+    // （P0 资产管线的规则见 `Docs/决策记录.md` §十四.1：转换只发生在
+    //  ProjectHandle 的读写边界，这里正是那个边界。）
+    if let Some(image) = entity.ui.as_mut().and_then(|ui| ui.image.as_mut()) {
+        encode_slot(&mut image.path, db);
+    }
 }
 
 /// 把实体上所有资产引用从**磁盘 GUID** 解码成**内存路径**。
@@ -722,6 +728,9 @@ pub fn decode_entity_references(entity: &mut Entity, db: &AssetDatabase) {
     }
     if let Some(link) = &mut entity.prefab {
         decode_slot(&mut link.source, db);
+    }
+    if let Some(image) = entity.ui.as_mut().and_then(|ui| ui.image.as_mut()) {
+        decode_slot(&mut image.path, db);
     }
 }
 

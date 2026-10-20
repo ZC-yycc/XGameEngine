@@ -21,6 +21,7 @@
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
 //! | `asset` | 资产身份 `AssetGuid` + `.meta` + `AssetDatabase`（GUID 引用、导入设置、诊断） |
 //! | `project` | 项目清单 `Project` + 项目句柄 `ProjectHandle` |
+//! | `ui` | 屏幕空间 UI 组件 `UiElement`（锚点布局的纯数据层，布局与绘制在 `xgame-ui`）|
 //!
 //! # 依赖方向
 //!
@@ -55,6 +56,7 @@ pub mod material;
 pub mod physics;
 pub mod ray;
 mod time;
+pub mod ui;
 
 // -- 导出：旧有类型（保持向后兼容）
 pub use check::{check_project, CheckReport};
@@ -96,3 +98,4 @@ pub use material::MaterialOverride;
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
 pub use ray::{Ray, RayHit};
 pub use time::{GameClock, Stopwatch, Timer};
+pub use ui::{UiAlign, UiElement, UiImageStyle, UiKind, UiState, UiStyle, UiTextStyle, UiVAlign};

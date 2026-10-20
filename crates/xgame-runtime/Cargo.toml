@@ -9,6 +9,7 @@ xgame-core = { path = "../xgame-core" }
 xgame-math = { path = "../xgame-math" }
 xgame-input = { path = "../xgame-input" }
 xgame-physics = { path = "../xgame-physics" }
+xgame-ui = { path = "../xgame-ui" }
 xgame-script = { path = "../xgame-script" }
 xgame-audio = { path = "../xgame-audio" }
 log = "0.4"

@@ -382,6 +382,11 @@ pub struct ShotRenderStats {
     pub shadow_only_instances: usize,
     /// 被剔除的绘制项占全部绘制项的比例（0..=1）。
     pub cull_ratio: f32,
+    /// 屏幕空间 UI 的绘制读数（没有 UI 元素时全为 0）。
+    ///
+    /// 单独一段而不是并进 `draw_calls`：3D 的 draw 与 UI 的 draw 是两条
+    /// pass、两个数量级，混在一起既看不清也断言不了"UI 只画了 1 次"。
+    pub ui: xgame_render::ui_renderer::UiStats,
 }
 
 impl From<xgame_render::scene_pipeline::FrameStats> for ShotRenderStats {
@@ -395,6 +400,7 @@ impl From<xgame_render::scene_pipeline::FrameStats> for ShotRenderStats {
             culled_instances: s.culled_instances,
             shadow_only_instances: s.shadow_only_instances,
             cull_ratio: s.cull_ratio(),
+            ui: xgame_render::ui_renderer::UiStats::default(),
         }
     }
 }
@@ -486,6 +492,37 @@ impl HeadlessReport {
 
     /// 报告 → JSON（字段名即契约，见类型文档）。
     pub fn to_json(&self) -> serde_json::Value {
+        // 截图这一段单独构造：整个报告是一个巨大的 `json!`，再往里嵌两层
+        // 就会顶到宏的递归上限（实测 `recursion limit reached`）。
+        let screenshot = match &self.screenshot {
+            Some(s) => json!({
+                "path": s.path,
+                "width": s.width,
+                "height": s.height,
+                "camera": {
+                    "eye": s.eye,
+                    "target": s.target,
+                },
+                "render_stats": {
+                    "draw_calls": s.render_stats.draw_calls,
+                    "opaque_batches": s.render_stats.opaque_batches,
+                    "opaque_instances": s.render_stats.opaque_instances,
+                    "blended_draws": s.render_stats.blended_draws,
+                    "culled_entities": s.render_stats.culled_entities,
+                    "culled_instances": s.render_stats.culled_instances,
+                    "shadow_only_instances": s.render_stats.shadow_only_instances,
+                    "cull_ratio": s.render_stats.cull_ratio,
+                    "ui": {
+                        "draws": s.render_stats.ui.draws,
+                        "quads": s.render_stats.ui.quads,
+                        "sprites": s.render_stats.ui.sprites,
+                        "elements": s.render_stats.ui.elements,
+                    },
+                },
+            }),
+            None => serde_json::Value::Null,
+        };
+
         json!({
             "ok": !self.has_issues(),
             "engine_version": self.engine_version,
@@ -539,28 +576,7 @@ impl HeadlessReport {
                 },
             },
             "scene_dump": self.scene_dump,
-            "screenshot": match &self.screenshot {
-                Some(s) => json!({
-                    "path": s.path,
-                    "width": s.width,
-                    "height": s.height,
-                    "camera": {
-                        "eye": s.eye,
-                        "target": s.target,
-                    },
-                    "render_stats": {
-                        "draw_calls": s.render_stats.draw_calls,
-                        "opaque_batches": s.render_stats.opaque_batches,
-                        "opaque_instances": s.render_stats.opaque_instances,
-                        "blended_draws": s.render_stats.blended_draws,
-                        "culled_entities": s.render_stats.culled_entities,
-                        "culled_instances": s.render_stats.culled_instances,
-                        "shadow_only_instances": s.render_stats.shadow_only_instances,
-                        "cull_ratio": s.render_stats.cull_ratio,
-                    },
-                }),
-                None => serde_json::Value::Null,
-            },
+            "screenshot": screenshot,
         })
     }
 
@@ -709,7 +725,11 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
                 height,
                 eye: used.eye.to_array(),
                 target: used.target.to_array(),
-                render_stats: ShotRenderStats::from(renderer.frame_stats()),
+                render_stats: {
+                    let mut stats = ShotRenderStats::from(renderer.frame_stats());
+                    stats.ui = renderer.ui_stats();
+                    stats
+                },
             })
         }
         None => None,

@@ -329,6 +329,66 @@ end
 > 环境音 / 机关音更推荐挂 `AudioSource` 组件（Inspector 的 Audio 区块可视化配置），
 > `play_sound` 系列适合"事件驱动"的一次性音效。
 
+### 4.12 游戏 UI
+
+UI 元素也是实体（`Entity::ui`），id 与其它实体通用。颜色参数是 **sRGB 0..1**
+（引擎内部转线性）；坐标是**视口物理像素**，锚点是父矩形的归一化坐标（0..1）。
+
+| 函数 | 说明 |
+|---|---|
+| `ui_set_text(ctx, id, text)` | 改文本 |
+| `ui_text(ctx, id)` | 读文本（不存在返回空串） |
+| `ui_set_text_size(ctx, id, size)` | 字号（像素） |
+| `ui_set_text_color(ctx, id, r, g, b, a)` | 文字颜色 |
+| `ui_set_text_align(ctx, id, "left"\|"center"\|"right")` | 水平对齐 |
+| `ui_set_bg_color(ctx, id, r, g, b, a)` | 背景色 |
+| `ui_set_radius(ctx, id, radius)` | 圆角半径 |
+| `ui_set_visible(ctx, id, visible)` / `ui_visible(ctx, id)` | 显隐（连带整棵子树） |
+| `ui_set_enabled(ctx, id, enabled)` / `ui_enabled(ctx, id)` | 是否接受点击（按钮禁用态半透明） |
+| `ui_has(ctx, id)` | 这个实体是不是 UI 元素 |
+| `ui_clicked(ctx, id)` | **本帧**完成了一次"在元素上按下并在元素上松开" |
+| `ui_hovered(ctx, id)` | 本帧指针停在元素上 |
+| `ui_set_rect(ctx, id, ax0, ay0, ax1, ay1, ox0, oy0, ox1, oy1)` | 一次设定锚点 + 偏移 |
+| `ui_set_anchor(ctx, id, ax0, ay0, ax1, ay1)` | 只改锚点 |
+| `ui_set_offset(ctx, id, ox0, oy0, ox1, oy1)` | 只改偏移 |
+| `ui_set_size(ctx, id, w, h)` | 改尺寸（左上角不动） |
+| `ui_set_pos(ctx, id, x, y)` | 改位置（相对父矩形左上角） |
+| `ui_set_image(ctx, id, path)` | 换图片 |
+| `ui_set_image_tint(ctx, id, r, g, b, a)` | 图片着色 |
+| `ui_set_fill(ctx, id, t)` | 填充比例 `0..1`（血条：从左往右裁剪） |
+| `ui_spawn_label(ctx, text, x, y, size)` | 生成文本，返回 id（父 = 屏幕根） |
+| `ui_spawn_button(ctx, text, x, y, w, h)` | 生成按钮，返回 id |
+| `ui_spawn_panel(ctx, x, y, w, h)` | 生成面板，返回 id |
+| `ui_spawn_image(ctx, path, x, y, w, h)` | 生成图片元素，返回 id |
+
+```lua
+-- HUD：按钮点击计数 + 血条呼吸
+local fill, count = 0, 0
+
+function start(ctx)
+    fill = entity_id(ctx, "Bar.Fill")
+    count = entity_id(ctx, "Click.Count")
+end
+
+function update(ctx)
+    if ui_clicked(ctx, self_id(ctx)) then
+        ui_set_text(ctx, count, "点击: " .. tostring(os.time()))
+    end
+    local pulse = math.sin(time(ctx) * 2.2) * 0.5 + 0.5
+    ui_set_size(ctx, fill, 4.0 + 300.0 * pulse, 14.0)
+    ui_set_bg_color(ctx, fill, 0.95 - pulse * 0.6, 0.25 + pulse * 0.5, 0.28, 1.0)
+end
+```
+
+> **点击语义**：按下之后指针被"捕获"——拖出元素再拖回来松开仍然算点击，
+> 拖到别处松开才算取消（桌面按钮的惯例）。
+>
+> **本帧状态**：`ui_clicked` / `ui_hovered` 只在**当帧**为真，必须在 `update`
+> 里读；`fixed_update` 里读会漏（固定步长一帧可能跑 0 次或多次）。
+>
+> **没有 UI 时**这一切都是空操作：`ui_set_*` 找不到实体就静默返回，
+> 不报错（与其它"容错优先"的 API 一致）。
+
 ---
 
 ## 五、输入映射（`input.ron`）

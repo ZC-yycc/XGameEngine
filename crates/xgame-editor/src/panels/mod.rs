@@ -9,6 +9,7 @@ pub mod dock;
 pub mod hierarchy;
 pub mod icons;
 pub mod inspector;
+pub mod inspector_ui;
 pub mod prefabs;
 pub mod scene_view;
 pub mod settings;

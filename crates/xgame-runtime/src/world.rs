@@ -47,8 +47,9 @@ use xgame_audio::AudioEngine;
 use xgame_core::{
     AudioPort, AudioStats, EntityId, GameClock, Inspect, PhysicsHandle, PlaySound, Scene, Transform,
 };
-use xgame_input::{Input, InputMap};
-use xgame_math::glam::{Mat4, Vec3};
+use xgame_input::{Input, InputMap, MouseButton};
+use xgame_math::glam::{Mat4, Vec2, Vec3};
+use xgame_ui::{layout, update_interaction, UiEvent, UiInteraction, UiPointer, UiTree};
 use xgame_physics::{
     body_from_scene, Collider, CollisionEvent, DebugLine, PhysicsConfig, PhysicsWorld, RigidBody,
 };
@@ -107,6 +108,15 @@ pub struct FrameReport {
     pub colliders: usize,
 }
 
+/// UI 运行态：布局缓冲 + 交互状态（容量跨帧复用）。
+#[derive(Default)]
+struct UiRuntime {
+    tree: UiTree,
+    items: Vec<xgame_ui::LayoutItem>,
+    interaction: UiInteraction,
+    events: Vec<UiEvent>,
+}
+
 /// 游戏运行时世界。
 pub struct World {
     scene: Scene,
@@ -156,6 +166,15 @@ pub struct World {
     audio_scan_count: usize,
     /// 上一次扫描时场景里有没有挂音频源的实体（扫描时刷新）。
     audio_sources_seen: bool,
+    /// UI 视口尺寸（物理像素）。宿主每帧设置；`(0, 0)` = 不跑 UI（无头 / 未上屏）。
+    ui_viewport: (u32, u32),
+    /// UI 指针（视口左上角原点，物理像素）。`None` = 指针不在视口内。
+    ///
+    /// 刻意**不**直接读 `input.mouse_pos()`：窗口坐标 → 视口坐标的映射只有
+    /// 宿主知道（编辑器视口在面板里的位置 / DPI 缩放），运行时不该猜。
+    ui_pointer: Option<Vec2>,
+    /// UI 布局与交互状态（跨帧保持按下捕获）。
+    ui: UiRuntime,
     /// 角色上一帧的接触面（实体 → 刚体集合），用于 enter / exit 差分。
     ///
     /// 角色的运动学胶囊永远停在 skin 距离外 —— 物理引擎不会给它发接触事件，
@@ -208,6 +227,9 @@ impl World {
             // 0 = 强迫第一帧做过一次实扫（场景非空时实体数必然不等）。
             audio_scan_count: 0,
             audio_sources_seen: false,
+            ui_viewport: (0, 0),
+            ui_pointer: None,
+            ui: UiRuntime::default(),
             character_contacts: HashMap::new(),
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
@@ -347,6 +369,63 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
+    // UI
+    // -----------------------------------------------------------------------
+
+    /// 设置 UI 视口（物理像素）。宿主每帧调用；`(0, 0)` = 本帧不跑 UI。
+    pub fn set_ui_viewport(&mut self, viewport: (u32, u32)) {
+        self.ui_viewport = viewport;
+    }
+
+    /// 设置 UI 指针（视口左上角原点、物理像素）。`None` = 指针不在视口内。
+    pub fn set_ui_pointer(&mut self, pointer: Option<Vec2>) {
+        self.ui_pointer = pointer;
+    }
+
+    /// 当前悬停的 UI 实体。
+    pub fn ui_hovered(&self) -> Option<EntityId> {
+        self.ui.interaction.hovered()
+    }
+
+    /// 本帧的 UI 事件（调试 / 测试用；玩法侧读 `UiElement::state`）。
+    pub fn ui_events(&self) -> &[UiEvent] {
+        &self.ui.events
+    }
+
+    /// 布局 + 命中测试，把悬停 / 按下 / 点击写回 `Entity::ui.state`。
+    ///
+    /// 没有 UI 实体时整段跳过（场景里 2000 个实体也只是一次 `any` 扫描）。
+    fn update_ui(&mut self) {
+        let (w, h) = self.ui_viewport;
+        if w == 0 || h == 0 {
+            self.ui.interaction.reset();
+            return;
+        }
+        let pointer = self.ui_pointer.map(|pos| UiPointer {
+            pos,
+            down: self.input.mouse_down(MouseButton::Left),
+            pressed: self.input.mouse_pressed(MouseButton::Left),
+            released: self.input.state().mouse_released(MouseButton::Left),
+        });
+        let viewport = Vec2::new(w as f32, h as f32);
+        self.ui.tree.build(&self.scene);
+        if self.ui.tree.roots().is_empty() {
+            // 没有 UI：清掉上一帧的悬停残影（实体可能刚被删掉）。
+            self.ui.items.clear();
+            self.ui.interaction.reset();
+            return;
+        }
+        layout::visit(&self.scene, &self.ui.tree, viewport, &mut self.ui.items);
+        update_interaction(
+            &mut self.scene,
+            &self.ui.items,
+            pointer,
+            &mut self.ui.interaction,
+            &mut self.ui.events,
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // 帧推进
     // -----------------------------------------------------------------------
 
@@ -359,6 +438,13 @@ impl World {
         let time = self.clock.total_time();
         let frame_dt = self.clock.delta_time();
         let fixed_dt = self.clock.fixed_dt();
+
+        // -- 0. UI：布局 + 命中测试 --
+        //
+        // 必须排在脚本之前：`ui_clicked(ctx, id)` 是**本帧**状态，脚本在
+        // `update` 里读它时点击标志必须已经写好。代价是"脚本本帧生成的 UI
+        // 元素下一帧才能被点到"—— 与 Unity 的 EventSystem 同一取舍。
+        self.update_ui();
 
         // -- 1. start：给尚未启动过的实体（含上一轮脚本生成的）调用一次 --
         //
@@ -1346,6 +1432,21 @@ mod tests {
     static HIT_EXITS: AtomicUsize = AtomicUsize::new(0);
     static HIT_OTHER: AtomicU64 = AtomicU64::new(0);
 
+    /// 串行锁：上面三个是**进程级**静态变量，两条测试并行跑会互相清计数 /
+    /// 读到对方的实体 id（`cargo test` 默认 4 线程，实测 100% 必现）。
+    ///
+    /// 谁再写"用全局静态记录回调"的测试，也请拿这把锁 —— 或者干脆改成
+    /// 组件实例自带的计数器（那才是根治，但会动被测组件的形状）。
+    static COLLISION_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial_collision_test() -> std::sync::MutexGuard<'static, ()> {
+        // 前一条测试 panic 时锁会中毒；这里直接取回内部值，让后续测试照常跑
+        // （否则一次失败会连锁成一片"poisoned"失败，掩盖真正的原因）。
+        COLLISION_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// 记录碰撞事件的组件（测试用）。
     #[derive(Default)]
     struct CollisionProbe;
@@ -1369,6 +1470,7 @@ mod tests {
     /// 升级后不再生成，这里会先红。
     #[test]
     fn character_collision_events_reach_components() {
+        let _guard = serial_collision_test();
         HITS.store(0, Ordering::Relaxed);
         HIT_EXITS.store(0, Ordering::Relaxed);
         HIT_OTHER.store(0, Ordering::Relaxed);
@@ -1429,6 +1531,7 @@ mod tests {
     /// 触发区靠 `move_character` 里那次额外的重叠查询补上。
     #[test]
     fn character_enters_a_trigger_volume() {
+        let _guard = serial_collision_test();
         HITS.store(0, Ordering::Relaxed);
         HIT_OTHER.store(0, Ordering::Relaxed);
 

@@ -74,7 +74,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 
 ## 项目布局
 
-- `crates/` — 引擎与工具（13 个 crate，名字见 workspace Cargo.toml）
+- `crates/` — 引擎与工具（14 个 crate，名字见 workspace Cargo.toml）
 - `projects/` — 游戏项目（`project.ron` + `Scenes/` + `Resources/` + `Scripts/` + `Prefabs/` + `input.ron`）；
   `BehaviorsDemo` 例外——它本身是 workspace 成员（cdylib），用来演示 Rust 插件项目形态
 - `Docs/` — 脚本 API、无头运行、MCP、差距分析、决策记录、双轨语言架构计划

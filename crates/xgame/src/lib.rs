@@ -80,6 +80,8 @@ pub mod prelude {
     pub use xgame_render::scene_pipeline::{
         supported_sample_count, SceneLighting, ScenePipeline,
     };
+    // 屏幕空间 UI：与场景管线一样是"宿主画一帧"的组成部分。
+    pub use xgame_render::ui_renderer::UiRenderer;
 
     // -- 运行时 -----------------------------------------------------------
     pub use xgame_runtime::{

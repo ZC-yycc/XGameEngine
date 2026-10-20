@@ -8,6 +8,7 @@ members = [
     "crates/xgame-script",
     "crates/xgame-runtime",
     "crates/xgame-render",
+    "crates/xgame-ui",
     "crates/xgame-physics",
     "crates/xgame-audio",
     "crates/xgame",

@@ -26,8 +26,17 @@ pub struct Entity {
     /// 实体的显示名称。
     pub name: String,
     /// **局部空间**变换（相对父节点；没有父节点时即世界变换）。
+    ///
+    /// 缺省 = 单位变换。旧场景文件全部写满三个分量，行为不变；新文件里
+    /// **纯 UI 实体可以整段省掉** —— UI 的位置由锚点决定，`transform` 对它
+    /// 没有任何意义，强制写一段单位变换只是噪音。
+    #[serde(default)]
     pub transform: Transform,
     /// glTF 模型路径（相对于工作区）。空字符串表示没有模型。
+    ///
+    /// 缺省 = 空串：纯 UI / 纯逻辑实体（触发器、生成点、HUD）本来就没有网格，
+    /// 强制写一行 `model: ""` 只是噪音。
+    #[serde(default)]
     pub model: String,
     /// 稳定唯一标识符。旧版文件反序列化时自动分配新 ID。
     #[serde(default)]
@@ -120,6 +129,19 @@ pub struct Entity {
     /// 老场景照常加载；没配角色的实体不写这一行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller: Option<crate::character::CharacterController>,
+    /// 屏幕空间 UI 元素。`None` = 这个实体不参与 UI。
+    ///
+    /// 与 `physics`（碰撞体）/ `controller`（角色）**三者正交**：一个实体
+    /// 可以是纯 UI（挂 UI + 不挂模型 / 物理），也可以既是 3D 物体又是 UI
+    /// （少见，但语义上并不冲突）。
+    ///
+    /// 位置由**锚点**决定，`transform` 不参与 UI 布局 —— 理由见
+    /// [`crate::ui`] 的模块文档。
+    ///
+    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → `None`，
+    /// 老场景照常加载；没配 UI 的实体不写这一行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<crate::ui::UiElement>,
     /// 运行时组件集合（反序列化时默认为空）。
     #[serde(skip)]
     pub components: ComponentMap,
@@ -143,6 +165,7 @@ impl Entity {
             audio: None,
             material: None,
             controller: None,
+            ui: None,
             components: ComponentMap::new(),
         }
     }
@@ -256,6 +279,13 @@ impl PartialEq for Entity {
             && self.material == other.material
             // 角色参数同样是落盘内容：Inspector 里调完半径按保存得有反应。
             && self.controller == other.controller
+            // UI 元素同理，但**只比落盘字段**：`UiState`（悬停 / 按下 / 点击）
+            // 每帧都在变，算进相等就永远是"未保存"。见 `UiElement::data_eq`。
+            && match (&self.ui, &other.ui) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.data_eq(b),
+                _ => false,
+            }
     }
 }
 

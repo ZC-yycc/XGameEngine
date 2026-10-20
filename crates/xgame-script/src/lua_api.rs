@@ -67,7 +67,7 @@ impl LuaCtx {
     }
 
     #[inline]
-    fn game(&self) -> &mut crate::GameCtx<'static> {
+    pub(crate) fn game(&self) -> &mut crate::GameCtx<'static> {
         self.0.game()
     }
 
@@ -113,6 +113,7 @@ pub(crate) fn register(lua: &Lua) -> mlua::Result<()> {
     register_state(lua, &globals)?;
     register_animation(lua, &globals)?;
     register_audio(lua, &globals)?;
+    crate::ui_api::register_ui(lua, &globals)?;
     Ok(())
 }
 
@@ -122,7 +123,7 @@ pub(crate) fn register(lua: &Lua) -> mlua::Result<()> {
 
 /// 脚本的整数 ID（`0` = 无效）→ 引擎 [`EntityId`]。
 #[inline]
-fn id_of(raw: i64) -> EntityId {
+pub(crate) fn id_of(raw: i64) -> EntityId {
     EntityId::from_raw(raw as u64)
 }
 

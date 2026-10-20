@@ -135,9 +135,53 @@ pub fn sync(ctx: &egui::Context, input: &mut xgame_input::Input) {
     });
 }
 
+/// 把 egui 的逻辑坐标换算成**视口物理像素**（UI 指针用）。
+///
+/// 三个坐标系在这一处对齐：
+///
+/// | 坐标 | 空间 | 谁在用 |
+/// |---|---|---|
+/// | egui 逻辑点 | 窗口，已乘 DPI 缩放 | 面板布局、鼠标事件 |
+/// | 视口逻辑矩形 | 窗口，视口的 `rect` | `response.hover_pos()` |
+/// | 视口物理像素 | 离屏纹理像素 | UI 布局、命中测试 |
+///
+/// 指针不在视口内（或视口还没布局）返回 `None` —— 编辑器里鼠标移到
+/// Hierarchy 上时，游戏 UI 不该保持"悬停"。
+pub fn viewport_pointer(
+    viewport: egui::Rect,
+    pixels_per_point: f32,
+    cursor: Option<egui::Pos2>,
+) -> Option<xgame_math::glam::Vec2> {
+    let cursor = cursor?;
+    if viewport.width() <= 0.0 || viewport.height() <= 0.0 || !viewport.contains(cursor) {
+        return None;
+    }
+    Some(Vec2::new(
+        (cursor.x - viewport.min.x) * pixels_per_point,
+        (cursor.y - viewport.min.y) * pixels_per_point,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewport_pointer_maps_into_texture_pixels() {
+        // 视口在窗口里位于 (200, 100)，尺寸 400x300 逻辑点，2 倍 DPI。
+        let rect = egui::Rect::from_min_size(egui::pos2(200.0, 100.0), egui::vec2(400.0, 300.0));
+        let p = viewport_pointer(rect, 2.0, Some(egui::pos2(250.0, 160.0))).expect("在视口内");
+        assert_eq!(p, Vec2::new(100.0, 120.0), "偏移要减掉视口原点，再乘 DPI");
+    }
+
+    #[test]
+    fn viewport_pointer_rejects_outside_and_degenerate() {
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(100.0, 100.0));
+        assert!(viewport_pointer(rect, 1.0, Some(egui::pos2(5.0, 5.0))).is_none());
+        assert!(viewport_pointer(rect, 1.0, None).is_none());
+        // 面板还没布局（egui 的 NOTHING 矩形）
+        assert!(viewport_pointer(egui::Rect::NOTHING, 1.0, Some(egui::pos2(1.0, 1.0))).is_none());
+    }
 
     #[test]
     fn letter_and_digit_keys_map() {

@@ -451,6 +451,13 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             });
         });
 
+        // ── UI 元素（屏幕空间）──
+        //
+        // 紧挨着 Transform：UI 元素的"矩形"就是锚点 + 偏移，语义上正是
+        // 这个实体的变换；放在面板末尾（Material 之后）时，属性多的实体
+        // 要滚很久才能看到它 —— 实测截图里它整块在折叠线以下。
+        crate::panels::inspector_ui::show(ui, entity, &mut touched);
+
         // ── 网格 ──
         theme::section_bar(ui, "Mesh");
         ui.indent("mesh", |ui| {

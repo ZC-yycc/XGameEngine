@@ -138,6 +138,16 @@ impl GameRuntime {
     }
 
     /// 运行时输入（Play 模式下由 `input_bridge` 从 egui 灌进来）。
+    /// UI 视口（物理像素）。Play 时每帧由主循环设置。
+    pub fn set_ui_viewport(&mut self, viewport: (u32, u32)) {
+        self.world.set_ui_viewport(viewport);
+    }
+
+    /// UI 指针（视口物理像素）。`None` = 指针不在视口内。
+    pub fn set_ui_pointer(&mut self, pointer: Option<xgame_math::glam::Vec2>) {
+        self.world.set_ui_pointer(pointer);
+    }
+
     pub fn input_mut(&mut self) -> &mut xgame_input::Input {
         self.world.input_mut()
     }

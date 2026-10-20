@@ -19,6 +19,7 @@ use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
+use xgame_render::ui_renderer::UiRenderer;
 use xgame_core::{Entity, EntityId, RenderConfig, Scene};
 
 /// 视口"还活着"的判定窗口：距上次 `render` 进入本函数超过这个时间就认为
@@ -103,6 +104,11 @@ pub struct SceneRenderer {
     hdr: Option<HdrTargets>,
     /// 全屏后处理 pass（曝光 + 色调映射），源视图按 [`Self::target_gen`] 缓存绑定组。
     postfx: PostFx,
+    /// 屏幕空间 UI（在 `postfx` **之后**画到同一张 LDR 目标上）。
+    ///
+    /// 排在色调映射之后是硬约束：UI 颜色不该随场景曝光变化，见
+    /// `xgame_render::ui_renderer` 的模块文档。
+    ui: UiRenderer,
     /// 渲染目标的**代数**：每次 `recreate_targets` 自增，作为 `postfx` 的
     /// 绑定组缓存键（纹理视图没有稳定身份，不能按指针判等，见 `PostFx::render`）。
     target_gen: u64,
@@ -154,6 +160,7 @@ impl SceneRenderer {
         // 不再在写入时被裁掉的原因（见 `xgame_render::postfx` 模块文档）。
         let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
         let postfx = PostFx::new(&device, surface_format);
+        let ui = UiRenderer::new(&device, surface_format);
 
         Self {
             device,
@@ -167,6 +174,7 @@ impl SceneRenderer {
             _ldr_texture: None,
             hdr: None,
             postfx,
+            ui,
             target_gen: 0,
             pending_size: None,
             last_target_rebuild: None,
@@ -718,6 +726,16 @@ impl SceneRenderer {
             anim_hash,
             settings,
         );
+        // UI 的内容签名必须进指纹：否则"场景没动、只有 UI 在变"（按钮悬停
+        // 变色、血量数字跳动）会被整帧跳过，看起来像 UI 卡住了。
+        let ui_signature = self.ui.prepare(
+            &self.device,
+            &self.queue,
+            scene,
+            self.viewport_size,
+            &self.project_root,
+        );
+        let signature = mix_bits(signature, ui_signature);
         if self.last_signature == Some(signature) {
             return Vec::new();
         }
@@ -798,6 +816,11 @@ impl SceneRenderer {
             ldr_view,
             settings,
         );
+
+        // UI：后处理之后、同一条 encoder。没有 UI 时 `render` 直接返回 false，
+        // 一个 pass 都不记（空场景零开销）。
+        self.ui
+            .render(&self.device, &self.queue, &mut encoder, ldr_view, hdr.size);
 
         self.queue.submit(std::iter::once(encoder.finish()));
 

@@ -780,8 +780,22 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     if session.state.play_mode == PlayMode::Playing {
         // 先把 egui 的键鼠状态灌进运行时 —— 必须发生在 physics_step **之前**，
         // 否则脚本这一帧读到的是上一帧的按键。
+        // UI 指针：egui 的逻辑点 → 视口物理像素。
+        //
+        // 用**上一帧**的视口矩形：这一步在面板绘制之前，本帧的布局还没跑。
+        // 面板停靠变化的那一帧可能差几像素，之后的帧都是准的 —— 与 egui
+        // 自己处理输入的方式一致。
+        let ui_pointer = input_bridge::viewport_pointer(
+            session.state.viewport_rect,
+            ctx.pixels_per_point(),
+            ctx.input(|i| i.pointer.latest_pos()),
+        );
+        let ui_viewport = session.state.viewport_pixel_size;
+
         if let Some(runtime) = session.state.game_runtime.as_mut() {
             input_bridge::sync(ctx, runtime.input_mut());
+            runtime.set_ui_viewport(ui_viewport);
+            runtime.set_ui_pointer(ui_pointer);
         }
 
         // 用**平滑过的真实帧间隔**推进物理，而不是 `predicted_dt`（那是"下一帧

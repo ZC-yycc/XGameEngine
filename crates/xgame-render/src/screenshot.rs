@@ -181,6 +181,8 @@ pub struct ScreenshotRenderer {
     hdr: HdrTargets,
     /// 全屏后处理 pass（曝光 + 色调映射）。
     postfx: PostFx,
+    /// 屏幕空间 UI（后处理之后画到同一张 LDR 上；无头截图也要有 UI）。
+    ui: crate::ui_renderer::UiRenderer,
     /// 模型标识 → 已上传的网格（与编辑器 / 游戏同一条加载入口）。
     model_cache: HashMap<String, GltfMesh>,
     /// 磁盘模型的解析基准（`builtin://` 用不到）。
@@ -274,6 +276,7 @@ impl ScreenshotRenderer {
         let hdr = HdrTargets::new(&device, "screenshot", width, height, sample_count);
         let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
         let postfx = PostFx::new(&device, format);
+        let ui = crate::ui_renderer::UiRenderer::new(&device, format);
 
         Ok(Self {
             device,
@@ -284,6 +287,7 @@ impl ScreenshotRenderer {
             ldr_view,
             hdr,
             postfx,
+            ui,
             model_cache: HashMap::new(),
             project_root: project_root.to_path_buf(),
         })
@@ -291,6 +295,11 @@ impl ScreenshotRenderer {
 
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// 上一次 `render_scene` 的 UI 绘制读数（批数 / 图元数）。
+    pub fn ui_stats(&self) -> crate::ui_renderer::UiStats {
+        self.ui.stats()
     }
 
     /// 上一次 [`render_scene`](Self::render_scene) 的绘制统计（口径见
@@ -422,6 +431,16 @@ impl ScreenshotRenderer {
             self.size,
             &self.ldr_view,
             settings,
+        );
+        // UI：截图与玩家看到的必须是同一张画面 —— 只画 3D 的截图会漏掉 HUD。
+        self.ui
+            .prepare(&self.device, &self.queue, scene, self.size, &self.project_root);
+        self.ui.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &self.ldr_view,
+            self.size,
         );
         self.queue.submit(std::iter::once(encoder.finish()));
         Ok(camera)

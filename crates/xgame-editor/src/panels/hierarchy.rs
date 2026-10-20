@@ -389,6 +389,14 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                             }
                         }
                     });
+                    ui.menu_button("Create UI", |ui| {
+                        for kind in xgame_core::UiKind::ALL {
+                            if ui.button(kind.label()).clicked() {
+                                state.create_ui(kind);
+                                ui.close_menu();
+                            }
+                        }
+                    });
                 });
 
                 ui.separator();
@@ -540,6 +548,14 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 for kind in xgame_render::mesh::BuiltinMesh::ALL {
                     if ui.button(kind.label()).clicked() {
                         state.create_primitive(kind);
+                    }
+                }
+                ui.separator();
+                // UI 与 3D 图元分开放：它们的摆放方式完全不同（锚点 vs 变换），
+                // 混在一个列表里会误导"选了就能拖进场景"。
+                for kind in xgame_core::UiKind::ALL {
+                    if ui.button(format!("UI {}", kind.label())).clicked() {
+                        state.create_ui(kind);
                     }
                 }
             },

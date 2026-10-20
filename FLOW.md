@@ -682,6 +682,22 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, screen_size: Vec2) -> Pos2 {
 颜色附件与深度附件的采样数也必须与管线一致，否则渲染通道校验失败。阴影 pass 单独
 一条管线、永远是 1× —— 它只存深度，不需要抗锯齿。
 
+**UI pass**（在 `postfx` 之后、同一条 encoder）：
+
+```text
+ScenePipeline::render   → HDR 中间标
+PostFx::render          → 曝光 / Bloom / ACES / FXAA → LDR 显示目标
+UiRenderer::render      → 同一张 LDR 上叠 UI（LoadOp::Load）
+```
+
+- **顺序是硬约束**：UI 不参与曝光与色调映射（否则调场景亮度会把 HUD 也调亮）；
+- 一条实例化管线画完矩形（圆角 SDF）/ 图片 / 字形，矩形与字形共用同一张
+  图集绑定组 → 相邻图元天然同批（示例 HUD 整屏 1 次 draw）；
+- 数据侧：`World::update` 的开头做布局 + 命中测试（写回 `UiElement::state`），
+  渲染器在 `prepare()` 里重新排版（文本只在渲染侧需要字体）；
+- 编辑器视口的**指纹门控必须混入 UI 内容签名**（`UiRenderer::prepare` 的返回值），
+  否则"场景没动、只有 UI 在变"会被整帧跳过。
+
 ###### 飞行相机的两条手感规则
 
 - **转视角不能每帧都要求"指针压在视口上"。** 飞行态是在"右键按下且指针在视口里"
@@ -1179,17 +1195,26 @@ Scene(
 | `core/asset.rs` | 1200+ | `AssetGuid`（32 位十六进制，生成器 = 进程随机 + 纳秒 + 原子序号）、`AssetMeta`（`.meta` 的 RON：guid/kind/import）、`AssetDatabase`（扫描建 guid↔path、诊断缺/孤儿/坏/冲突、`ensure_metas`、`set_import`、`resolve_reference`/`encode_reference`）、`encode_*`/`decode_*`（场景/预制体的磁盘⇄内存引用转换） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 1026 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`）；`Entity::animator`（`#[serde(default)]`，旧场景读作 None） |
+| `core/ui.rs` | 673 | `UiElement`（kind / 锚点 / 偏移 / `UiStyle` / `UiTextStyle` / `UiImageStyle` / 运行时 `UiState`）、`data_eq()`（脏检查忽略运行时状态）、`sanitized()`；`*UiKind::ALL` / `UiAlign` / `UiVAlign` |
 | `core/animation.rs` | 588 | `Animator`（clip / speed / looping / autoplay / fade_time / machine / additive / layers）、`is_active()`（机器感知：模式下 = autoplay 且存在 speed > 0 的状态）、`AnimMachine`（entry / parameters / states / transitions，`state()` / `transition_for()` 首条命中 / `is_usable()` 坏机器退回单剪辑）、`AnimState`（每状态自己的 clip/speed/looping，覆盖 Animator 字段）、`AnimCondition`（AtLeast ≥ / Below 严格 <，同阈值互补；缺参数永不匹配）、`AnimAdditive`（单层快捷方式：clip/weight/speed/looping，与机器正交，默认 weight 1.0/speed 1.0/循环）、`AnimLayer` / `AnimLayerMode`（层栈每层：name + mode(Additive/Override) + clip + weight + speed + looping + mask（骨骼子树根名单，空 = 整副骨架），与 additive 并存、内部排在它之后求值） |
 | `render/animation.rs` | 1883 | `AnimClip` / `Track` / `Skin` / `AnimNode`（含 `name`，遮罩按名选子树）、`sample_clip_into()`（二分钳位、坏轨道跳过）、`global_matrices()`（成环护栏）、`compute_bones_composed()`（**唯一的全量路径**：基础 + 可选淡入 → 逐层合入（LayerInput：Additive 加增量（参考 = 本层第 0 帧）/ Override 向该层 lerp，`mask_covers()` 按子树根名单逐骨裁剪，环护栏），旧 `compute_bones()` / `compute_bones_blended()` / `compute_bones_additive()` / `compute_bones_blended_additive()` 全是薄封装 + `apply_additive_into()`（单节点核心 `blend_additive`），`clip_time()`、`AnimationDriver`（tick：每帧求值一步状态转移 → 解析 (状态, 剪辑, 速度, 循环)，换状态/换剪辑同一条淡入路径；叠加层独立时钟与权重解析，换叠加剪辑只归零它自己；**层栈时钟按层名对齐同步**（重排不丢进度、换本层剪辑归零、删层 prune、权重钳位、mode/遮罩跟配置），全部时钟共用 `is_active` 闸门；`playback()` / `state()` / `fade_from()`（含旧剪辑自己的循环方式）/ `additive()` / `layers()`，signature（基础+叠加+层栈**所有**时钟都进），换剪辑归零 + 淡入状态） |
 | `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
 | `render/scene_pipeline.rs` | 1842 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体采样骨骼进槽位（剪辑名/时间/循环问驱动 `playback()`，换剪辑/换状态淡入中 → 旧剪辑按自己的循环方式采样后按权重混合；把 additive 快捷层 + 驱动 `layers()` 解析成 `LayerInput` 栈（剪辑缺失的层不进栈），统一交 `compute_bones_composed` 一条路出矩阵）+ `ensure_bones_capacity()` 扩容重建）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()` |
 | `render/gltf_loader.rs` | 946 | `GltfMesh::from_file()` / `load()`、`read_material()`、`parse_animation_data()`（节点层级 / 皮肤 / 通道 → AnimClip+Skin，CUBICSPLINE 降采样；`AnimNode` 记 glTF 节点名 —— 遮罩按名选子树的来源）、`clip()` / `has_animation()`、`Bounds`（网格本地包围盒） |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |
+| `render/ui_renderer.rs` | 1050 | `UiRenderer::new()` / `prepare()`（排版 + 内容签名）/ `render()`（一条实例化管线：圆角 SDF + 纹理；矩形与字形共用图集 → 相邻同批）、`UiStats`、字形图集上传、图片纹理缓存（sRGB / 行对齐补齐） |
 | `render/postfx.rs` | 1569 | `PostFx::render()`（HDR → 曝光 / Bloom / ACES → LDR，可选 FXAA 第二趟）；`FxaaPipelines` / `FxaaScratch`；`HDR_FORMAT` |
 | `render/sky.rs` | 1390 | 程序化天空（天顶 / 地平线 / 地面 + 太阳盘）+ 球谐漫反射 + GGX 预过滤 + BRDF LUT（`render.sky`，默认关） |
 | `render/frustum.rs` | 235 | `Frustum::from_view_proj()`（Gribb–Hartmann，六归一化平面）、`Bounds` 相交测试（矩阵退化返回 `None` = 不剔除） |
 | `render/screenshot.rs` | 2179 | 离屏截图（默认顺光机位）、确定性测试、FXAA / 天空 / 后处理的 GPU 断言 |
 | `physics/world.rs` | 900 | `step(dt)`（按传入 dt 积分、子步均分 dt）、`add_body()`（维护 `body_handles` 反查表）、`add_collider()`（未知 body 只警告不 panic）、`debug_lines()` |
+| `ui/layout.rs` | 411 | `UiRect`、`UiTree::build()`（父子索引 + 无 UI 快路径）、`visit()`（DFS 先序 = 绘制顺序）、`resolve()`（锚点公式唯一实现）、`hit_test()`（反向扫描） |
+| `ui/input.rs` | 362 | `UiPointer`、`UiInteraction`（按下捕获）、`update_interaction()`（写回 `UiState` + 事件表）、`UiEvent` / `UiEventKind` |
+| `ui/text.rs` | 774 | `TextEngine`（系统字体、`ab_glyph` 度量 + 轮廓光栅化）、`GlyphAtlas`（R8、shelf 打包、翻倍保 UV）、换行（空格 / CJK 断点、硬断）、对齐、整像素落位 |
+| `ui/draw.rs` | 541 | `UiQuad` / `UiSprite` / `UiCommand` / `UiDrawData`、`Painter::build()`（背景 → 图片 → 文本，合批） |
+| `script/ui_ctx.rs` | 292 | `GameCtx` 的 `ui_*` 方法层（23 个：内容 / 显隐 / 颜色 / 布局 / 图片 / 点击 / 运行时生成） |
+| `script/ui_api.rs` | 245 | `ui_*` 的 Lua 转发壳（固定参数个数，写错当场报错） |
+| `editor/panels/inspector_ui.rs` | 383 | Inspector 的 UI 区块（类型 / 显隐 / 锚点预设 / 锚点与偏移 / 样式 / 文本 / 图片 / 运行态） |
 | `editor/panels/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|
 | `editor/panels/inspector.rs` | 1033 | `show_content()`（含撤销集成、父节点下拉、预制体区块、**Animation 区块**：剪辑下拉 / 速度 / Fade / Loop / Autoplay / 状态机 UI / 「+ Additive」叠加层（剪辑下拉 + 权重 DragValue + 摘除）/ **「+ Add Layer」层栈**（每层一行：摘除 ✕ + 名字 TextEdit + 模式 menu_button + 剪辑下拉 + 权重 DragValue；第二行遮罩 chips（点 chip 移出）+ 「+ 骨骼」下拉（来源 `bone_names()`）；增删在闭包外收集后统一应用））|
 | `editor/panels/assets.rs` | 500 | `show_content()`（目录树 + 类型图标 + 详情 + 导入设置 + 双击/拖拽放入场景；`join_path`/`join_dir` 保证同名文件不串）|

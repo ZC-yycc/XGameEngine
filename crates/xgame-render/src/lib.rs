@@ -14,6 +14,7 @@ pub mod scene_pipeline;
 pub mod screenshot;
 pub mod sky;
 pub mod texture;
+pub mod ui_renderer;
 
 pub struct RenderContext {
     pub surface: wgpu::Surface<'static>,

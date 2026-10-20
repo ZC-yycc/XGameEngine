@@ -44,6 +44,8 @@ pub struct CheckReport {
     pub missing_scripts: Vec<String>,
     /// 引用了但盘上不存在的音频（"名字 → 路径"）。
     pub missing_audio: Vec<String>,
+    /// UI 元素引用了但盘上不存在的图片（"名字 → 路径"）。
+    pub missing_ui_images: Vec<String>,
     /// 引用了但盘上不存在的预制体（只报实例根，避免整棵实例刷屏）。
     pub missing_prefabs: Vec<String>,
     /// 场景 / 预制体里写了 `guid://…` 但资产库里找不到的（悬空 GUID）。
@@ -67,6 +69,7 @@ impl CheckReport {
         !self.missing_models.is_empty()
             || !self.missing_scripts.is_empty()
             || !self.missing_audio.is_empty()
+            || !self.missing_ui_images.is_empty()
             || !self.missing_prefabs.is_empty()
             || !self.dangling_guids.is_empty()
             || !self.missing_metas.is_empty()
@@ -80,6 +83,7 @@ impl CheckReport {
         self.missing_models.len()
             + self.missing_scripts.len()
             + self.missing_audio.len()
+            + self.missing_ui_images.len()
             + self.missing_prefabs.len()
             + self.dangling_guids.len()
             + self.missing_metas.len()
@@ -109,6 +113,9 @@ impl CheckReport {
         }
         for a in &self.missing_audio {
             let _ = writeln!(out, "  missing audio:  {a}");
+        }
+        for i in &self.missing_ui_images {
+            let _ = writeln!(out, "  missing ui image: {i}");
         }
         for p in &self.missing_prefabs {
             let _ = writeln!(out, "  missing prefab: {p}");
@@ -210,6 +217,20 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
                     report
                         .missing_audio
                         .push(format!("{} -> {}", entity.name, audio.clip));
+                }
+            }
+        }
+        // UI 图片：与模型同款规则（GUID 悬空 vs 路径不存在分开报）。
+        if let Some(image) = entity.ui.as_ref().and_then(|ui| ui.image.as_ref()) {
+            if !image.path.is_empty() {
+                if is_guid_reference(&image.path) {
+                    report
+                        .dangling_guids
+                        .push(format!("{} -> {}", entity.name, image.path));
+                } else if !project.path(&image.path).is_file() {
+                    report
+                        .missing_ui_images
+                        .push(format!("{} -> {}", entity.name, image.path));
                 }
             }
         }

@@ -108,6 +108,8 @@ struct GameApp {
     hdr: HdrTargets,
     /// 全屏后处理 pass（曝光 + 色调映射），写交换链。
     postfx: PostFx,
+    /// 屏幕空间 UI（后处理之后画到交换链上）。
+    ui: UiRenderer,
     /// `hdr` 的**代数**：resize 重建时 +1，作为 `postfx` 绑定组的缓存键
     /// （纹理视图没有稳定身份，不能按指针判等）。
     target_gen: u64,
@@ -184,6 +186,7 @@ impl GameApp {
         let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
         // 显示目标 = 交换链格式：非 sRGB 的交换链由着色器手动编码（见 postfx）。
         let postfx = PostFx::new(&device, config.format);
+        let ui = UiRenderer::new(&device, config.format);
 
         // -- 场景（路径都按项目根解析）--
         let scene = match project.load_entry_scene() {
@@ -249,6 +252,7 @@ impl GameApp {
             config,
             hdr,
             postfx,
+            ui,
             target_gen: 0,
             sample_count,
             model_cache: HashMap::new(),
@@ -311,6 +315,10 @@ impl GameApp {
                     position.y as f32,
                 ));
             }
+            WindowEvent::CursorLeft { .. } => {
+                // 指针出了窗口：UI 悬停要清掉（否则按钮会一直亮着）。
+                state.handle_cursor_left();
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(x, y) => glam::Vec2::new(*x, *y),
@@ -329,6 +337,15 @@ impl GameApp {
     }
 
     fn update(&mut self, dt: f32) {
+        // UI 的视口与指针：窗口坐标即物理像素（winit 给的 CursorMoved 就是），
+        // 所以这里不需要缩放。编辑器那边则要把 egui 的逻辑点换算成视口像素。
+        self.world
+            .set_ui_viewport((self.config.width, self.config.height));
+        // 指针还没进过窗口时传 `None`：`mouse_pos` 的初值 (0,0) 是个合法位置，
+        // 直接传会让左上角的元素一开窗就处于"悬停"。
+        let input = self.world.input();
+        let pointer = input.state().has_cursor().then(|| input.mouse_pos());
+        self.world.set_ui_pointer(pointer);
         self.world.update(dt);
         // 动画时钟跟着**帧时间**走：物理/脚本推进的同一拍，保证动画与游戏逻辑
         // 用的是同一个 dt（掉帧时两边一起慢，不会各走各的）。
@@ -389,6 +406,15 @@ impl GameApp {
         // 世界矩阵解算一次，渲染与物理同步共用同一份。
         let world_matrices = scene.world_matrices();
 
+        // UI 布局 + 合批（在 3D 之前算好：`prepare` 只碰 CPU）。
+        self.ui.prepare(
+            &self.device,
+            &self.queue,
+            scene,
+            (self.config.width, self.config.height),
+            self.project.root(),
+        );
+
         self.pipeline.render(
             &self.device,
             &self.queue,
@@ -418,6 +444,15 @@ impl GameApp {
             self.hdr.size,
             &frame_view,
             self.project.manifest().render,
+        );
+
+        // UI：后处理之后、同一条 encoder —— UI 不参与曝光 / 色调映射。
+        self.ui.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &frame_view,
+            (self.config.width, self.config.height),
         );
 
         self.queue.submit(std::iter::once(encoder.finish()));

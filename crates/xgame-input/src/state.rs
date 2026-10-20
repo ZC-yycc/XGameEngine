@@ -42,6 +42,12 @@ pub struct InputState {
     buttons_released: HashSet<MouseButton>,
 
     mouse_pos: Vec2,
+    /// 指针是否在窗口内：收到过 `CursorMoved`、且没有 `CursorLeft`。
+    ///
+    /// 为什么需要这个标志：`mouse_pos` 的初值是 `(0,0)`，而 `(0,0)` 是
+    /// 一个合法位置 —— 分不清"指针在左上角"与"还没有指针事件"。UI 命中
+    /// 测试拿它当"指针在不在"，会在窗口刚打开时把左上角的元素点亮。
+    cursor_seen: bool,
     /// 本帧鼠标的位移。
     ///
     /// 有两个来源，都往里累加：
@@ -102,8 +108,19 @@ impl InputState {
 
     /// 光标移动到一个**绝对**位置。
     pub fn handle_cursor_moved(&mut self, pos: Vec2) {
+        // 位移的语义保持原样（与 `mouse_pos` 的初值有关，既有测试锁着）：
+        // 这里只额外记录"指针真的出现过"，供 UI 判断悬停。
         self.mouse_delta += pos - self.mouse_pos;
         self.mouse_pos = pos;
+        self.cursor_seen = true;
+    }
+
+    /// 光标离开窗口（winit 的 `CursorLeft`）。
+    ///
+    /// 位置保留在最后一点：窗口重新获得指针时 `handle_cursor_moved` 会用
+    /// 新位置覆盖它。`has_cursor` 转 false，UI 悬停随之清空。
+    pub fn handle_cursor_left(&mut self) {
+        self.cursor_seen = false;
     }
 
     /// 原始相对位移（鼠标被捕获 / 锁定时使用）。
@@ -192,6 +209,11 @@ impl InputState {
     /// 当前按住的键（顺序未定义，用于调试面板）。
     pub fn keys_down(&self) -> impl Iterator<Item = KeyCode> + '_ {
         self.keys_down.iter().copied()
+    }
+
+    /// 指针是否在窗口内（见 `cursor_seen` 的说明）。
+    pub fn has_cursor(&self) -> bool {
+        self.cursor_seen
     }
 
     pub fn mouse_pos(&self) -> Vec2 {

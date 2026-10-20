@@ -5528,6 +5528,7 @@ dependencies = [
  "xgame-core",
  "xgame-math",
  "xgame-physics",
+ "xgame-ui",
 ]
 
 [[package]]
@@ -5541,6 +5542,7 @@ dependencies = [
  "xgame-math",
  "xgame-physics",
  "xgame-script",
+ "xgame-ui",
 ]
 
 [[package]]
@@ -5554,6 +5556,16 @@ dependencies = [
  "xgame-input",
  "xgame-math",
  "xgame-physics",
+]
+
+[[package]]
+name = "xgame-ui"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "log",
+ "xgame-core",
+ "xgame-math",
 ]
 
 [[package]]

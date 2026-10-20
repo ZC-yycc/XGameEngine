@@ -54,6 +54,8 @@ mod host;
 mod intern;
 mod lua_api;
 mod lua_host;
+mod ui_api;
+mod ui_ctx;
 
 pub use context::{
     FrameCtx, LogLevel, ScriptCommand, ScriptCtx, ScriptLog, SpawnRequest,

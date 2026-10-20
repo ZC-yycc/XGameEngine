@@ -389,6 +389,10 @@ pub struct EditorState {
     pub viewport_logical_size: egui::Vec2,
     /// 视口大小（物理像素 = 逻辑像素 x pixels_per_point）。
     pub viewport_pixel_size: (u32, u32),
+    /// 视口在窗口里的矩形（egui 逻辑点）。UI 指针映射用：
+    /// 主循环在面板绘制**之前**推进 Play，只能用上一帧的矩形 —— egui 自己
+    /// 处理输入也是这个模式（布局与输入天然差一帧）。
+    pub viewport_rect: egui::Rect,
 
     // -- Fly mode state --
     /// 用户在视口上按住右键时为 `true`。
@@ -613,6 +617,7 @@ impl EditorState {
             next_entity_id: 1,
 
             viewport_logical_size: egui::Vec2::ZERO,
+            viewport_rect: egui::Rect::NOTHING,
             viewport_pixel_size: (0, 0),
 
             fly_state: false,
@@ -1024,6 +1029,37 @@ impl EditorState {
         );
         self.selected_entity = Some(idx);
         self.log_info(format!("Created new GameObject ({})", id));
+        idx
+    }
+
+    /// 创建一个屏幕空间 UI 元素（对应商业引擎的 `Create > UI > ...`）。
+    ///
+    /// 默认摆在左上角内缩 40px 的位置：全部叠在 (0,0) 的话，新建第二个元素
+    /// 就完全看不见（正好盖住第一个），作者会以为"创建没生效"。
+    pub fn create_ui(&mut self, kind: xgame_core::UiKind) -> usize {
+        if !self.is_editing() {
+            self.log_warning("Cannot create UI while playing");
+            return usize::MAX;
+        }
+        self.push_undo();
+        let id = self.next_entity_id;
+        self.next_entity_id += 1;
+        let idx = self.scene.entities.len();
+
+        let (label, element) = match kind {
+            xgame_core::UiKind::Panel => ("UI Panel", xgame_core::UiElement::panel(320.0, 180.0)),
+            xgame_core::UiKind::Text => ("UI Label", xgame_core::UiElement::text("Text")),
+            xgame_core::UiKind::Image => ("UI Image", xgame_core::UiElement::image("")),
+            xgame_core::UiKind::Button => ("UI Button", xgame_core::UiElement::button("Button")),
+        };
+        let size = element.size();
+        let element = element.at([0.0, 0.0], 40.0, 40.0, size[0], size[1]);
+
+        let mut entity = Entity::new(format!("{label} ({id})"));
+        entity.ui = Some(element);
+        self.scene.entities.push(entity);
+        self.selected_entity = Some(idx);
+        self.log_info(format!("Created {label} ({id})"));
         idx
     }
 

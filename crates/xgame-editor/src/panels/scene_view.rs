@@ -92,6 +92,7 @@ fn setup_viewport(ui: &mut egui::Ui, state: &mut EditorState) -> ViewportInfo {
     state.viewport_pixel_size = (vp_w, vp_h);
 
     let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+    state.viewport_rect = rect;
     
     ViewportInfo {
         pixel_size: (vp_w, vp_h),
