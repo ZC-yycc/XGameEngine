@@ -518,6 +518,11 @@ impl ProjectHandle {
             let assets = self.assets();
             decode_prefab_references(&mut prefab, &assets);
         }
+        // 坏数据（NaN / 越界）在**加载边界**夹一次：手写 RON 里的一个 `nan`
+        // 不该让整棵 UI 的矩形变成 NaN 再传进 GPU。运行时 / 渲染侧还有一道
+        // 非有限几何的兜底（见 `xgame_ui::layout::visit`），两处职责不同：
+        // 这里"修正"，那里"拦截"。
+        sanitize_ui(&mut prefab.entities);
         Ok(prefab)
     }
 
@@ -698,6 +703,8 @@ impl ProjectHandle {
             let assets = self.assets();
             decode_scene_references(&mut scene, &assets);
         }
+        // 同 `load_prefab`：UI 数值在加载时夹取一次。
+        sanitize_ui(&mut scene.entities);
         Ok(scene)
     }
 
@@ -908,8 +915,37 @@ fn collect_entity_references(entities: &[crate::Entity], out: &mut Vec<String>) 
 // 测试
 // ---------------------------------------------------------------------------
 
+/// 把场景里所有 UI 元素的数值夹到合法范围（NaN / inf 换成默认值）。
+///
+/// 只在**加载边界**调用：写盘时不动（用户没改的东西不该被悄悄改写），
+/// 运行时也不每帧夹（那是热路径）。
+fn sanitize_ui(entities: &mut [crate::Entity]) {
+    for entity in entities {
+        if let Some(ui) = entity.ui.as_mut() {
+            *ui = ui.sanitized();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// 加载边界会把 NaN 换成默认值：一个手写的 `nan` 不该让 UI 整棵树消失。
+    #[test]
+    fn ui_values_are_clamped_at_load_boundary() {
+        use crate::{Entity, UiElement};
+        let mut entities = vec![Entity::new("hud")];
+        let mut ui = UiElement::panel(10.0, 10.0);
+        ui.anchor_min = [f32::NAN, f32::INFINITY];
+        ui.style.corner_radius = f32::NAN;
+        ui.text.size = -5.0;
+        entities[0].ui = Some(ui);
+        super::sanitize_ui(&mut entities);
+        let ui = entities[0].ui.as_ref().unwrap();
+        assert_eq!(ui.anchor_min, [0.0, 0.0]);
+        assert_eq!(ui.style.corner_radius, 0.0);
+        assert!(ui.text.size >= 1.0);
+    }
+
     use super::*;
     use crate::scene::Entity;
 

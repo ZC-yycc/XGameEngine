@@ -250,6 +250,15 @@ fn walk(
     }
 
     let rect = resolve(parent, ui);
+    // 非有限几何（NaN / inf）在这里挡掉：进了绘制数据就是整批图元的顶点
+    // 变 NaN，GPU 上表现为"什么都没画"，而 CPU 侧看不出任何异常。
+    if !rect.min.is_finite() || !rect.max.is_finite() {
+        if !*warned {
+            *warned = true;
+            log::warn!("UI 元素的矩形非有限（锚点 / 偏移里有 NaN 或 inf），已跳过该子树");
+        }
+        return;
+    }
     out.push(LayoutItem {
         index,
         id: entity.id,
@@ -384,6 +393,29 @@ mod tests {
         assert_eq!(items[1].depth, 1);
         // 子元素相对父矩形：父在 (10,10) 起 400×300，子锚点 (0,0) 偏移 (0,0)。
         assert_eq!(items[1].rect.min, Vec2::new(10.0, 10.0));
+    }
+
+    /// NaN 锚点：整个子树被跳过，而不是把 NaN 顶点塞进绘制数据。
+    #[test]
+    fn non_finite_rect_is_skipped() {
+        let mut scene = Scene::new("nan");
+        let mut bad = Entity::new("Bad");
+        let mut ui = UiElement::panel(10.0, 10.0);
+        ui.anchor_min = [f32::NAN, 0.0];
+        bad.ui = Some(ui);
+        let bad_id = bad.id;
+        scene.entities.push(bad);
+
+        let mut child = Entity::new("Child");
+        child.parent = Some(bad_id);
+        child.ui = Some(UiElement::panel(5.0, 5.0));
+        scene.entities.push(child);
+
+        let mut tree = UiTree::new();
+        tree.build(&scene);
+        let mut items = Vec::new();
+        visit(&scene, &tree, Vec2::new(800.0, 600.0), &mut items);
+        assert!(items.is_empty(), "NaN 矩形及其子树都不该进布局");
     }
 
     /// 命中测试：后画的优先；不可交互的元素让点击穿透。

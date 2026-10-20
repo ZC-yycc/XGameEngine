@@ -18,6 +18,18 @@ use xgame_core::{Entity, UiAlign, UiElement, UiKind, UiVAlign};
 
 use crate::panels::theme;
 
+/// 带范围与步长的数值框（`theme::drag_field_w` 没有 range 参数）。
+///
+/// Inspector 里凡是"物理上不可能为负"的量（半径 / 边框 / 内边距 / 字号）
+/// 都要给范围：拖成负数不会崩，但会得到"圆角内凹""字号 0"这类诡异画面。
+fn drag(ui: &mut egui::Ui, width: f32, value: &mut f32, speed: f64, range: std::ops::RangeInclusive<f32>) -> bool {
+    ui.add_sized(
+        egui::vec2(width, theme::FIELD_HEIGHT),
+        egui::DragValue::new(value).speed(speed).range(range),
+    )
+    .changed()
+}
+
 /// 与 Inspector 其余非向量行对齐（补掉轴标那一截）。
 fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     theme::field_row(ui, label, |ui| {
@@ -138,16 +150,16 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
             changed |= color_edit(ui, &mut element.style.background);
         });
         row(ui, "Radius", |ui| {
-            changed |= theme::drag_field_w(ui, theme::FIELD_WIDTH, &mut element.style.corner_radius, 0.5, "").changed();
+            changed |= drag(ui, theme::FIELD_WIDTH, &mut element.style.corner_radius, 0.5, 0.0..=512.0);
         });
         row(ui, "Width", |ui| {
-            changed |= theme::drag_field_w(ui, theme::FIELD_WIDTH, &mut element.style.border_width, 0.1, "").changed();
+            changed |= drag(ui, theme::FIELD_WIDTH, &mut element.style.border_width, 0.1, 0.0..=64.0);
         });
         row(ui, "Border", |ui| {
             changed |= color_edit(ui, &mut element.style.border_color);
         });
         row(ui, "Padding", |ui| {
-            changed |= theme::drag_field_w(ui, theme::FIELD_WIDTH, &mut element.style.padding, 0.5, "").changed();
+            changed |= drag(ui, theme::FIELD_WIDTH, &mut element.style.padding, 0.5, 0.0..=256.0);
         });
 
         ui.add_space(theme::PANEL_MARGIN);
@@ -162,7 +174,7 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
             changed |= resp.changed();
         });
         row(ui, "Size", |ui| {
-            changed |= theme::drag_field_w(ui, theme::FIELD_WIDTH, &mut element.text.size, 0.5, "px").changed();
+            changed |= drag(ui, theme::FIELD_WIDTH, &mut element.text.size, 0.5, 1.0..=512.0);
         });
         row(ui, "Color", |ui| {
             changed |= color_edit(ui, &mut element.text.color);
