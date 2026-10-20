@@ -1,6 +1,6 @@
 //! Rust 组件的生命周期 trait —— 双轨架构里 Rust 轨道的用户接口。
 //!
-//! 与 Lua 脚本的四个钩子**同名同语义**（见 `xgame-script::Hook`）：
+//! 与 Lua 脚本的钩子**同名同语义**（见 `xgame-script::Hook`）：
 //! 脚本作者与 Rust 作者共享心智模型，也共享调度时机（start-before-update、
 //! 每帧 update 一次、fixed_update 与物理同频）。
 //!
@@ -48,6 +48,20 @@ pub trait Lifecycle: Any + Send + Sync {
     /// 每个固定步长调用一次（与物理步进同频）。
     fn fixed_update(&mut self, ctx: &mut Ctx, dt: f32) {
         let _ = (ctx, dt);
+    }
+    /// 与另一个碰撞体**开始**接触时调用一次。
+    ///
+    /// `other` 是对方的实体 id。物理层只报刚体句柄，实体映射由运行时做；
+    /// 对不上实体的刚体（脚本直接建的临时刚体）不会走到这里。
+    ///
+    /// 与 Unity 的 `OnCollisionEnter` 同款语义：**双方各自**都会收到一次，
+    /// 每次接触只报一次（持续接触不会每帧刷）。
+    fn on_collision_enter(&mut self, ctx: &mut Ctx, other: xgame_core::EntityId) {
+        let _ = (ctx, other);
+    }
+    /// 与另一个碰撞体**结束**接触时调用一次（`other` 是对方实体 id）。
+    fn on_collision_exit(&mut self, ctx: &mut Ctx, other: xgame_core::EntityId) {
+        let _ = (ctx, other);
     }
     /// 实体被销毁时调用一次。
     ///

@@ -49,7 +49,9 @@ use xgame_core::{
 };
 use xgame_input::{Input, InputMap};
 use xgame_math::glam::{Mat4, Vec3};
-use xgame_physics::{body_from_scene, DebugLine, PhysicsConfig, PhysicsWorld};
+use xgame_physics::{
+    body_from_scene, Collider, CollisionEvent, DebugLine, PhysicsConfig, PhysicsWorld, RigidBody,
+};
 use xgame_script::{FrameCtx, GameCtx, LuaHost, ScriptLog};
 
 use crate::registry::{BehaviorInstance, BehaviorRegistry};
@@ -154,6 +156,11 @@ pub struct World {
     audio_scan_count: usize,
     /// 上一次扫描时场景里有没有挂音频源的实体（扫描时刷新）。
     audio_sources_seen: bool,
+    /// 角色上一帧的接触面（实体 → 刚体集合），用于 enter / exit 差分。
+    ///
+    /// 角色的运动学胶囊永远停在 skin 距离外 —— 物理引擎不会给它发接触事件，
+    /// 所以角色的 enter/exit 只能靠"这一帧碰到了谁 vs 上一帧碰到了谁"算出来。
+    character_contacts: HashMap<EntityId, xgame_core::CharacterContacts>,
 }
 
 /// 单个实体已实例化的组件集合。
@@ -201,6 +208,7 @@ impl World {
             // 0 = 强迫第一帧做过一次实扫（场景非空时实体数必然不等）。
             audio_scan_count: 0,
             audio_sources_seen: false,
+            character_contacts: HashMap::new(),
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
         world.sync_bodies();
@@ -368,6 +376,8 @@ impl World {
             self.push_kinematic_bodies();
             self.physics.step(fixed_dt);
             self.pull_dynamic_bodies();
+            self.dispatch_collisions(fixed_dt, time);
+            self.dispatch_character_collisions(fixed_dt, time);
             fixed_steps += 1;
         }
         // 步数上限是"每帧"的预算，必须在整轮固定步长跑完之后再重置。
@@ -713,6 +723,8 @@ impl World {
             if let Some(body) = self.body_of_entity.remove(&id) {
                 self.physics.remove_body(body);
             }
+            // 角色的接触面备忘随实体一起清掉。
+            self.character_contacts.remove(&id);
         }
 
         // 生成的实体：`sync_bodies` 会统一补建（它按"有 physics 但没有刚体"来扫）。
@@ -758,6 +770,17 @@ impl World {
         let mut has_kinematic = false;
         let mut has_dynamic = false;
         for (index, entity) in self.scene.entities.iter().enumerate() {
+            // 角色实体：刚体与碰撞体由**运行时托管**（运动学位置 + 胶囊），
+            // 不走 `PhysicsBody` —— 后者默认映射成速度驱动的运动学体，而
+            // rapier 的角色控制器要求位置驱动。即便作者同时配了 physics，
+            // 这里也以 controller 为准（见 core::character 的模块文档）。
+            if entity.controller.is_some() {
+                physics_count += 1;
+                if !self.body_of_entity.contains_key(&entity.id) {
+                    to_create.push(index);
+                }
+                continue;
+            }
             if let Some(def) = &entity.physics {
                 physics_count += 1;
                 // 顺带记下"有没有运动学 / 动态体"，省掉 push / pull 各自再扫一遍。
@@ -782,12 +805,27 @@ impl World {
 
         // -- 补建 --
         for index in to_create.drain(..) {
-            let Some(def) = self.scene.entities[index].physics else {
-                continue;
-            };
-            let id = self.scene.entities[index].id;
+            let entity = &self.scene.entities[index];
+            let id = entity.id;
             let world = self.scene.world_transform(index);
-            let (body, collider) = body_from_scene(&def, world);
+            let (body, collider) = if let Some(controller) = entity.controller {
+                // 参数先过容错钳制：场景文件是手写的，负半径 / NaN 会让 rapier
+                // 建出 NaN 胶囊，整个模拟再也回不来。
+                let c = controller.sanitized();
+                (
+                    // 初始位置抬到"脚底正好踩在世界变换的原点"上：角色原点在
+                    // 胶囊中心，直接按实体变换放会让半个身子陷进地面。
+                    RigidBody::kinematic_position_at(Transform {
+                        position: world.position + Vec3::Y * c.center_height(),
+                        rotation: world.rotation,
+                        ..Transform::IDENTITY
+                    }),
+                    Collider::capsule(c.half_height(), c.radius),
+                )
+            } else {
+                let Some(def) = entity.physics else { continue };
+                body_from_scene(&def, world)
+            };
             let body_id = self.physics.add_body(body);
             // `body_id` 是上一行刚建出来的，必然存在；`add_collider` 这里返回 `None`
             // 只可能是引擎内部状态不一致（那里已经记了警告）。退化成"没有碰撞体"，
@@ -808,7 +846,7 @@ impl World {
             .scene
             .entities
             .iter()
-            .filter(|e| e.physics.is_some())
+            .filter(|e| e.physics.is_some() || e.controller.is_some())
             .map(|e| e.id)
             .collect();
         let dead: Vec<EntityId> = self
@@ -842,6 +880,10 @@ impl World {
         let world_matrices = self.scene.world_matrices();
         for (index, entity) in self.scene.entities.iter().enumerate() {
             let Some(def) = &entity.physics else { continue };
+            // 角色实体的位姿是角色控制器写的，运动学推送会把刚移动的结果覆盖掉。
+            if entity.controller.is_some() {
+                continue;
+            }
             if def.kind != xgame_core::BodyKind::Kinematic {
                 continue;
             }
@@ -855,6 +897,161 @@ impl World {
             self.physics.teleport(body, position);
             self.physics.set_rotation(body, rotation);
         }
+    }
+
+    /// 把这一步的碰撞事件派发给组件轨与脚本轨。
+    ///
+    /// # 为什么事件在这里派发而不是在 `step` 里
+    ///
+    /// 物理层只知道刚体句柄，`GameCtx` 只知道实体 —— 映射表在运行时手里。
+    /// 派发放在固定步长的末尾：此时 `pull_dynamic_bodies` 已经把本步的位置
+    /// 写回实体，钩子里读 `pos()` 拿到的是**碰撞发生后**的位置（与 Unity 的
+    /// `OnCollisionEnter` 时序一致）。
+    ///
+    /// 事件整批取走再派发：`drain_events` 借的是 `physics`，而派发要 `&mut self`。
+    fn dispatch_collisions(&mut self, delta: f32, time: f32) {
+        let events: Vec<CollisionEvent> = self.physics.drain_events().collect();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            let (Some(a), Some(b)) = (
+                self.entity_of_body(event.body_a),
+                self.entity_of_body(event.body_b),
+            ) else {
+                // 对不上实体的刚体（脚本直接建的临时刚体）没有收件人。
+                continue
+            };
+            if a == b {
+                continue;
+            }
+            // 双向派发：Unity 的 OnCollisionEnter 也是两边各收一次。
+            self.dispatch_collision_to(a, b, event.started, delta, time);
+            self.dispatch_collision_to(b, a, event.started, delta, time);
+        }
+    }
+
+    /// 给一个实体派发"和 `other` 碰撞"（组件轨 + 脚本轨）。
+    fn dispatch_collision_to(
+        &mut self,
+        entity: EntityId,
+        other: EntityId,
+        started: bool,
+        delta: f32,
+        time: f32,
+    ) {
+        if self.behavior_instances.contains_key(&entity) {
+            let World {
+                scene,
+                physics,
+                input,
+                scripts,
+                audio_port,
+                behavior_instances,
+                ..
+            } = self;
+            let (logs, commands) = scripts.buffers_mut();
+            if let Some(instances) = behavior_instances.get_mut(&entity) {
+                for instance in instances.iter_mut() {
+                    let mut game = GameCtx {
+                        scene: &mut *scene,
+                        physics: Some(&mut *physics),
+                        input: Some(input),
+                        audio: Some(&mut *audio_port),
+                        logs: &mut *logs,
+                        commands: &mut *commands,
+                        source: instance.name,
+                        entity,
+                        delta,
+                        time,
+                    };
+                    if started {
+                        (instance.hooks.collision_enter)(&mut instance.component, &mut game, other);
+                    } else {
+                        (instance.hooks.collision_exit)(&mut instance.component, &mut game, other);
+                    }
+                }
+            }
+        }
+
+        let World {
+            scene,
+            physics,
+            input,
+            scripts,
+            audio_port,
+            ..
+        } = self;
+        let frame = FrameCtx::new(scene, delta, time)
+            .with_input(input)
+            .with_physics(physics)
+            .with_audio(audio_port);
+        scripts.dispatch_collision(frame, entity, other, started);
+    }
+
+    /// 把角色的接触面变化派发成 `on_collision_enter` / `on_collision_exit`。
+    ///
+    /// 与 [`dispatch_collisions`](Self::dispatch_collisions) 的分工：那边处理
+    /// **动态刚体**（rapier 会发真实接触事件），这边处理**角色**（运动学胶囊
+    /// 永远停在 skin 距离外，物理层根本不会有接触）。两条路都汇到同一个
+    /// `dispatch_collision_to`，所以脚本 / 组件看到的语义完全一致。
+    fn dispatch_character_collisions(&mut self, delta: f32, time: f32) {
+        // 先把差分算完再派发：派发要 `&mut self`，不能一边借场景一边改场景。
+        let mut events: Vec<(EntityId, EntityId, bool)> = Vec::new();
+        for index in 0..self.scene.entities.len() {
+            let entity = &self.scene.entities[index];
+            if entity.controller.is_none() {
+                continue;
+            }
+            let id = entity.id;
+            let now = entity
+                .component::<xgame_core::CharacterState>()
+                .map(|s| s.contacts)
+                .unwrap_or_default();
+            let before = self
+                .character_contacts
+                .get(&id)
+                .copied()
+                .unwrap_or_default();
+            if now == before {
+                continue;
+            }
+            for body in now.iter() {
+                if !before.contains(body) {
+                    if let Some(other) = self.entity_of_body(body) {
+                        if other != id {
+                            push_collision_pair(&mut events, id, other, true);
+                        }
+                    }
+                }
+            }
+            for body in before.iter() {
+                if !now.contains(body) {
+                    if let Some(other) = self.entity_of_body(body) {
+                        if other != id {
+                            push_collision_pair(&mut events, id, other, false);
+                        }
+                    }
+                }
+            }
+            self.character_contacts.insert(id, now);
+        }
+        // 已销毁角色的条目在 `consume_script_commands` 里随实体一起删 ——
+        // 每帧 retain 一遍是 O(角色数²)，不值得。
+        // 双向派发（Unity 同款）：两个角色互相撞上时，两边各自的接触集都会
+        // 记到对方，`push_collision_pair` 已经把这一对合并成一条事件。
+        for (a, b, started) in events {
+            self.dispatch_collision_to(a, b, started, delta, time);
+            self.dispatch_collision_to(b, a, started, delta, time);
+        }
+    }
+
+    /// 刚体 id → 实体 id（线性扫：碰撞事件远比实体少，不值得为它维护反查表）。
+    fn entity_of_body(&self, body: u64) -> Option<EntityId> {
+        self.body_of_entity
+            .iter()
+            .find(|(_, b)| **b == body)
+            .map(|(id, _)| *id)
     }
 
     /// 动态体：把物理算出的世界变换写回实体的**局部**变换。
@@ -874,6 +1071,10 @@ impl World {
             let Some(def) = &self.scene.entities[index].physics else {
                 continue;
             };
+            // 角色实体即使误配了动态刚体也不回收 —— 它的位姿归角色控制器管。
+            if self.scene.entities[index].controller.is_some() {
+                continue;
+            }
             if def.kind != xgame_core::BodyKind::Dynamic {
                 continue;
             }
@@ -906,6 +1107,27 @@ impl World {
     }
 }
 
+/// 把一对碰撞实体规范化（小 id 在前）后去重压入事件表。
+///
+/// 两个角色互相撞上时，两边各自的接触集都会记到对方 —— 不做规范化就会
+/// 收到两条方向相反的同一次碰撞。进出方向由 `started` 区分，所以去重键是
+/// `(小 id, 大 id, started)` 三元组。
+fn push_collision_pair(
+    events: &mut Vec<(EntityId, EntityId, bool)>,
+    a: EntityId,
+    b: EntityId,
+    started: bool,
+) {
+    let (lo, hi) = if a.raw() <= b.raw() { (a, b) } else { (b, a) };
+    if events
+        .iter()
+        .any(|(x, y, s)| *x == lo && *y == hi && *s == started)
+    {
+        return;
+    }
+    events.push((lo, hi, started));
+}
+
 /// 派发阶段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -919,7 +1141,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use xgame_core::project::ProjectHandle;
-    use xgame_core::{AudioSource, Entity, PhysicsBody};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use xgame_core::{AudioSource, Entity, EntityId, PhysicsBody};
 
     fn entity_y(world: &World, name: &str) -> f32 {
         world
@@ -991,6 +1215,263 @@ mod tests {
         assert_eq!(entity_y(&world, "ground"), -0.5);
     }
 
+    /// 一个只会往前走的角色组件（测试用）。
+    #[derive(Default)]
+    struct Walker;
+
+    xgame_core::impl_no_inspect!(Walker);
+
+    impl Lifecycle for Walker {
+        fn fixed_update(&mut self, ctx: &mut Ctx, _dt: f32) {
+            ctx.character_simple_move(Vec3::new(2.0, 0.0, 0.0));
+            assert!(ctx.character_is_grounded(), "走上地面后应报告着地");
+        }
+    }
+
+    /// 角色实体：运行时自己建运动学胶囊刚体，脚本 / 组件通过 `character_*`
+    /// 驱动，实体变换跟着走。
+    ///
+    /// 这条测试覆盖"实体 → 刚体 → 移动 → 写回变换"整条链路，也钉住脚底
+    /// 坐标约定：激活位置 (0,0,0) 的角色应当站在 y=0 的地面上，而不是半截
+    /// 身子埋进去。
+    #[test]
+    fn character_entity_walks_on_the_ground() {
+        let mut scene = Scene::new("character");
+        let mut ground = Entity::new("ground");
+        ground.physics = Some(PhysicsBody::static_box([20.0, 0.5, 20.0]));
+        ground.transform.position = Vec3::new(0.0, -0.5, 0.0);
+        scene.add_entity(ground);
+
+        let mut player = Entity::new("player");
+        player.controller = Some(xgame_core::CharacterController::default());
+        player.behaviors.push("Walker".to_owned());
+        // 脚底就在 y=0：角色原点按"脚底"解释（见 center_height 的文档）。
+        player.transform.position = Vec3::ZERO;
+        scene.add_entity(player);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Walker>("Walker");
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+
+        for _ in 0..60 {
+            world.update(1.0 / 60.0);
+        }
+
+        let player = world.scene().find_by_name("player").expect("角色还在");
+        let p = player.transform.position;
+        assert!(
+            (p.x - 2.0).abs() < 0.2,
+            "1 秒 × 2 m/s 应走到 x≈2，实际 x={}",
+            p.x
+        );
+        assert!(
+            p.y.abs() < 0.05,
+            "应贴着地面走（脚底 y≈0），实际 y={}",
+            p.y
+        );
+        let state = player
+            .component::<xgame_core::CharacterState>()
+            .copied()
+            .expect("移动过就应有状态组件");
+        assert!(state.grounded, "地面上应一直着地");
+        assert!(state.ground_normal.y > 0.99, "平地法线应朝上");
+    }
+
+    static APEX_BITS: AtomicU32 = AtomicU32::new(0);
+    static JUMPED: AtomicUsize = AtomicUsize::new(0);
+
+    /// 着地后起跳一次的组件（测试用）。
+    #[derive(Default)]
+    struct Jumper;
+
+    xgame_core::impl_no_inspect!(Jumper);
+
+    impl Lifecycle for Jumper {
+        fn fixed_update(&mut self, ctx: &mut Ctx, _dt: f32) {
+            if ctx.character_is_grounded() && JUMPED.load(Ordering::Relaxed) == 0 {
+                assert!(ctx.character_jump(5.0), "着地时起跳应当成功");
+                JUMPED.store(1, Ordering::Relaxed);
+            }
+            ctx.character_simple_move(Vec3::ZERO);
+            // 正数的 f32 位模式与大小同序，所以可以直接按位取 max。
+            APEX_BITS.fetch_max(ctx.pos().y.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// 跳跃：5 m/s 起跳 → 最高点约 v²/2g ≈ 1.27m → 落回地面并恢复着地。
+    ///
+    /// 这条钉住运行时层的竖直速度时序：起跳当帧 `character_simple_move`
+    /// 不能被"落地钳制"吃掉初速，落地当帧也不能把速度清零到穿地。
+    #[test]
+    fn character_jump_leaves_and_returns_to_the_ground() {
+        APEX_BITS.store(0, Ordering::Relaxed);
+        JUMPED.store(0, Ordering::Relaxed);
+
+        let mut scene = Scene::new("jump");
+        let mut ground = Entity::new("ground");
+        ground.physics = Some(PhysicsBody::static_box([20.0, 0.5, 20.0]));
+        ground.transform.position = Vec3::new(0.0, -0.5, 0.0);
+        scene.add_entity(ground);
+
+        let mut player = Entity::new("player");
+        player.controller = Some(xgame_core::CharacterController::default());
+        player.behaviors.push("Jumper".to_owned());
+        scene.add_entity(player);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Jumper>("Jumper");
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+        for _ in 0..150 {
+            world.update(1.0 / 60.0);
+        }
+
+        let apex = f32::from_bits(APEX_BITS.load(Ordering::Relaxed));
+        assert!(apex > 0.8, "应跳到 ~1.27m 高，实际最高 {apex}");
+        let player = world.scene().find_by_name("player").expect("角色还在");
+        assert!(
+            player.transform.position.y.abs() < 0.05,
+            "应落回地面（脚底 y≈0），实际 y={}",
+            player.transform.position.y
+        );
+        let state = player
+            .component::<xgame_core::CharacterState>()
+            .copied()
+            .expect("应有状态");
+        assert!(state.grounded, "落回后应恢复着地");
+    }
+
+    static HITS: AtomicUsize = AtomicUsize::new(0);
+    static HIT_EXITS: AtomicUsize = AtomicUsize::new(0);
+    static HIT_OTHER: AtomicU64 = AtomicU64::new(0);
+
+    /// 记录碰撞事件的组件（测试用）。
+    #[derive(Default)]
+    struct CollisionProbe;
+
+    xgame_core::impl_no_inspect!(CollisionProbe);
+
+    impl Lifecycle for CollisionProbe {
+        fn on_collision_enter(&mut self, _ctx: &mut Ctx, other: EntityId) {
+            HITS.fetch_add(1, Ordering::Relaxed);
+            HIT_OTHER.store(other.raw(), Ordering::Relaxed);
+        }
+        fn on_collision_exit(&mut self, _ctx: &mut Ctx, _other: EntityId) {
+            HIT_EXITS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 角色撞墙 → 组件收到 `on_collision_enter`，参数是角色的实体 id。
+    ///
+    /// 这条同时钉住一个上游细节：rapier 会为**运动学 vs 静态**的碰撞体对
+    /// 生成碰撞事件（角色的胶囊是运动学位置刚体，墙是静态体）。如果哪天
+    /// 升级后不再生成，这里会先红。
+    #[test]
+    fn character_collision_events_reach_components() {
+        HITS.store(0, Ordering::Relaxed);
+        HIT_EXITS.store(0, Ordering::Relaxed);
+        HIT_OTHER.store(0, Ordering::Relaxed);
+
+        let mut scene = Scene::new("collide");
+        let mut ground = Entity::new("ground");
+        ground.physics = Some(PhysicsBody::static_box([20.0, 0.5, 20.0]));
+        ground.transform.position = Vec3::new(0.0, -0.5, 0.0);
+        scene.add_entity(ground);
+
+        // 墙：占 x ∈ [2.0, 3.0]，高 3 米（足够挡住 1 秒的行走）。
+        let mut wall = Entity::new("wall");
+        wall.physics = Some(PhysicsBody::static_box([0.5, 1.5, 3.0]));
+        wall.transform.position = Vec3::new(2.5, 1.5, 0.0);
+        wall.behaviors.push("Probe".to_owned());
+        scene.add_entity(wall);
+
+        let mut player = Entity::new("player");
+        player.controller = Some(xgame_core::CharacterController::default());
+        player.behaviors.push("Walker".to_owned());
+        scene.add_entity(player);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Walker>("Walker");
+        registry.register::<CollisionProbe>("Probe");
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+
+        for _ in 0..90 {
+            world.update(1.0 / 60.0);
+        }
+
+        assert!(
+            HITS.load(Ordering::Relaxed) >= 1,
+            "角色撞墙应触发 on_collision_enter（运动学 vs 静态）"
+        );
+        let player_entity = world.scene().find_by_name("player").expect("角色还在");
+        assert_eq!(
+            HIT_OTHER.load(Ordering::Relaxed),
+            player_entity.id.raw(),
+            "事件的对方参数应当是角色的实体 id"
+        );
+        // 速度是**实际**位移反推的：撞墙后水平速度必须归零（动画混合依赖它）。
+        let state = player_entity
+            .component::<xgame_core::CharacterState>()
+            .copied()
+            .expect("应有状态");
+        assert!(
+            state.velocity.x.abs() < 0.1,
+            "撞墙后水平速度应≈0，实际 vx={}",
+            state.velocity.x
+        );
+    }
+
+    /// 走进传感器（trigger）：不挡路，但要能触发 `on_collision_enter`。
+    ///
+    /// 角色的接触面来自 `move_shape`，而扫掠按 Unity 语义排除传感器 ——
+    /// 触发区靠 `move_character` 里那次额外的重叠查询补上。
+    #[test]
+    fn character_enters_a_trigger_volume() {
+        HITS.store(0, Ordering::Relaxed);
+        HIT_OTHER.store(0, Ordering::Relaxed);
+
+        let mut scene = Scene::new("trigger");
+        let mut ground = Entity::new("ground");
+        ground.physics = Some(PhysicsBody::static_box([20.0, 0.5, 20.0]));
+        ground.transform.position = Vec3::new(0.0, -0.5, 0.0);
+        scene.add_entity(ground);
+
+        let mut zone = Entity::new("zone");
+        let mut body = PhysicsBody::static_box([0.5, 1.0, 1.0]);
+        body.is_sensor = true;
+        zone.physics = Some(body);
+        zone.transform.position = Vec3::new(1.0, 1.0, 0.0);
+        zone.behaviors.push("Probe".to_owned());
+        scene.add_entity(zone);
+
+        let mut player = Entity::new("player");
+        player.controller = Some(xgame_core::CharacterController::default());
+        player.behaviors.push("Walker".to_owned());
+        scene.add_entity(player);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<Walker>("Walker");
+        registry.register::<CollisionProbe>("Probe");
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_behavior_registry(registry);
+        for _ in 0..60 {
+            world.update(1.0 / 60.0);
+        }
+
+        assert!(
+            HITS.load(Ordering::Relaxed) >= 1,
+            "走进触发区应触发 on_collision_enter"
+        );
+        let player_id = world.scene().find_by_name("player").expect("角色还在").id;
+        assert_eq!(HIT_OTHER.load(Ordering::Relaxed), player_id.raw());
+        assert!(
+            world.scene().find_by_name("player").unwrap().transform.position.x > 1.5,
+            "传感器不该挡住角色"
+        );
+    }
+
     /// 静态体不吃重力、动态体吃 —— 用数值确认 `PhysicsBody::kind` 真的接进了物理。
     #[test]
     fn static_bodies_never_fall() {
@@ -1044,6 +1525,82 @@ mod tests {
         let x = world.scene().find_by_name("actor").unwrap().transform.position.x;
         // start 摆到 1.0，之后每帧 +0.1。
         assert!((x - 2.0).abs() < 1e-3, "脚本应当把 x 推到约 2.0，实际 {x}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Lua 脚本驱动角色 + 收到碰撞事件：整条链路的端到端验证。
+    ///
+    /// 覆盖四段：脚本调用 `character_simple_move` → 物理层移动运动学胶囊 →
+    /// 运行时把接触面差分派发回去 → 脚本的 `on_collision_enter` 收到对方实体 id。
+    #[test]
+    fn lua_scripts_drive_characters_and_receive_collisions() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_character_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/walk.lua"),
+            r#"
+            function fixed_update(ctx)
+                character_simple_move(ctx, 2.0, 0.0, 0.0)
+            end
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Scripts/bump.lua"),
+            r#"
+            function on_collision_enter(ctx, other)
+                log(ctx, "bumped " .. tostring(other) .. " grounded=" .. tostring(character_is_grounded(ctx)))
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("lua_character");
+        let mut ground = Entity::new("ground");
+        ground.physics = Some(PhysicsBody::static_box([20.0, 0.5, 20.0]));
+        ground.transform.position = Vec3::new(0.0, -0.5, 0.0);
+        scene.add_entity(ground);
+
+        let mut wall = Entity::new("wall");
+        wall.physics = Some(PhysicsBody::static_box([0.5, 1.5, 3.0]));
+        wall.transform.position = Vec3::new(2.5, 1.5, 0.0);
+        wall.scripts.push("Scripts/bump.lua".to_owned());
+        scene.add_entity(wall);
+
+        let mut player = Entity::new("player");
+        player.controller = Some(xgame_core::CharacterController::default());
+        player.scripts.push("Scripts/walk.lua".to_owned());
+        scene.add_entity(player);
+
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+        for _ in 0..90 {
+            world.update(1.0 / 60.0);
+        }
+
+        let logs = world.take_logs();
+        assert!(
+            logs.iter().any(|l| l.message.starts_with("bumped ")),
+            "墙上的脚本应收到 on_collision_enter，日志：{logs:?}"
+        );
+        let p = world
+            .scene()
+            .find_by_name("player")
+            .expect("角色还在")
+            .transform
+            .position;
+        assert!(
+            (p.x - 1.68).abs() < 0.05,
+            "角色应被墙挡在 x≈1.68，实际 x={}",
+            p.x
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1150,7 +1707,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use crate::{BehaviorRegistry, Ctx, Lifecycle};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
     use xgame_core::{FieldDesc, FieldKind, FieldValue, Inspect};
 
     /// 一个走起来像脚本的组件：start 抬高、update 每帧沿 x 漂移。

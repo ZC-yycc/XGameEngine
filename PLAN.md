@@ -3013,3 +3013,44 @@ xgame-editor.exe <project> --ui-shot <png> [--ui-frames N] [--ui-select <实体�
   （`.meta` 目前不记依赖）。
 - 重命名资产要在编辑器外做（还没有 in-editor 的 rename / move API）。
 - 编辑器保存是全量序列化，会吃掉场景注释（既有行为，见决策记录 §十四.7）。
+
+## 三十三、角色控制器 + 碰撞事件进脚本（2026-10-20）
+
+优先级来自 `Docs/差距分析.md` P1 第 3 项：3D 游戏的主角移动与"踩到触发器"是玩法
+闭环的第一块。路线是**封装 rapier 的 `KinematicCharacterController`**，不手写扫掠。
+
+### 一、四个上游缺陷（这一节是本轮的主要成本）
+
+rapier 0.22 + parry 0.17.6 的这条链路对**胶囊角色**有四处硬缺陷，全部先用诊断
+测试跑出真实数据、再决定绕过方式（完整推理见决策记录 §十五与
+`xgame-physics/src/character.rs` 的模块文档）：
+
+1. `(Capsule, Cuboid)` 的 contact manifold 在 parry 里被注释掉 → `grounded`
+   恒为 false，连带 `snap_to_ground` 整体失效。
+2. `check_and_fix_penetrations()` 是空函数 → 一旦陷地，扫掠返回 `None`、整段
+   位移放行，实测 60 帧沉到 y=-41 并穿墙。**根因链**：静止间隙恰好等于 `offset`
+   时本来就会退化 → 所以静止间隙取 `skin_width × 1.1`，着地窗口再宽 20%。
+3. 60° 薄板上胶囊扫掠返回 `None`（0°/30° 正常）→ 陡坡滑落自实现（投影到坡面）。
+4. `autostep` 的 `handle_stairs` 只在"第一次扫掠撞墙"时触发，且 `min_width`
+   不足以把胶囊底面推上台阶 → 关掉，自实现"抬升 → 前进一个半径 → 贴回"。
+
+### 二、分层
+
+| 层 | 内容 |
+|---|---|
+| `xgame-core` | `CharacterController`（可序列化 + `sanitized()` + `center_height()`/`rest_gap` 约定）、`CharacterState` / `CharacterContacts`（运行时组件，零分配） |
+| `xgame-physics` | `move_character`（grounded / snap / 皮肤层硬约束 / 陡坡滑落 / 台阶）、`probe_ground`（胶囊中心出发、法向间隙） |
+| `xgame-script` | `character_*` 8 个方法（Lua 与 Rust 组件共用真相源）、`Hook::{CollisionEnter, CollisionExit}` + 带参数派发 |
+| `xgame-runtime` | controller 实体的刚体托管、接触面差分 → enter/exit 双向派发、`Lifecycle::{on_collision_enter, on_collision_exit}` |
+| `xgame-editor` | Inspector 的 Character 区块 |
+
+### 三、验证
+
+- 物理新增 **21 条**行为测试：站立 / 吸附 / 悬空 / 撞墙 / 沿墙滑 / 上台阶 /
+  高台阶挡停 / 爬坡 / 陡坡滑落 / 坡面法线 / 跳跃 / 传感器 / 高速下冲 / 高速横冲 /
+  陷地自救 / 零位移 / 零台阶高度 / 缺失刚体。
+- 运行时新增 **3 条**：角色行走（实体变换跟随 + 状态组件）、跳跃（最高点 + 落回）、
+  角色碰撞事件（运动学 vs 静态）；脚本层 **1 条** Lua 端到端（脚本驱动 + 收事件）。
+- 全量：`cargo test --workspace --lib` **412 passed / 0 failed**；集成测试
+  （runtime / script / xgame / render）另 16 条全绿，6 条 GPU / 截图用例 skip。
+  编辑器测试二进制在本机被安全策略拦下，未纳入本次统计。

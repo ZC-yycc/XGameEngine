@@ -22,12 +22,18 @@ use crate::lifecycle::{Behavior, Ctx};
 /// 统一签名是为了让四个指针装进一个 `Copy` 结构体，随实例一起拷贝。
 pub(crate) type HookFn = fn(&mut Box<dyn Behavior>, &mut Ctx, f32);
 
+/// 碰撞钩子的函数指针形状（多一个"对方实体"参数）。
+pub(crate) type CollisionHookFn =
+    fn(&mut Box<dyn Behavior>, &mut Ctx, xgame_core::EntityId);
+
 /// 四个钩子（装配期从注册项拷出，见模块文档"为什么拷进实例"）。
 #[derive(Clone, Copy)]
 pub(crate) struct Hooks {
     pub(crate) start: HookFn,
     pub(crate) update: HookFn,
     pub(crate) fixed_update: HookFn,
+    pub(crate) collision_enter: CollisionHookFn,
+    pub(crate) collision_exit: CollisionHookFn,
     pub(crate) on_destroy: HookFn,
 }
 
@@ -90,6 +96,12 @@ impl BehaviorRegistry {
                     start: |component, ctx, _| component.start(ctx),
                     update: |component, ctx, dt| component.update(ctx, dt),
                     fixed_update: |component, ctx, dt| component.fixed_update(ctx, dt),
+                    collision_enter: |component, ctx, other| {
+                        component.on_collision_enter(ctx, other)
+                    },
+                    collision_exit: |component, ctx, other| {
+                        component.on_collision_exit(ctx, other)
+                    },
                     on_destroy: |component, ctx, _| component.on_destroy(ctx),
                 },
                 // 表是 `'static` 的，所以能从一个临时实例上取下来存住 ——

@@ -1,0 +1,10 @@
+// CharacterDemo 的输入映射：WASD 移动、空格跳。
+InputMap(
+    actions: {
+        "Jump": [Key(Space)],
+    },
+    axes: {
+        "MoveX": (positive: [Key(KeyD)], negative: [Key(KeyA)]),
+        "MoveY": (positive: [Key(KeyW)], negative: [Key(KeyS)]),
+    },
+)

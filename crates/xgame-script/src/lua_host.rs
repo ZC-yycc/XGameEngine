@@ -49,6 +49,8 @@ struct HookFuncs {
     start: Option<Function>,
     update: Option<Function>,
     fixed_update: Option<Function>,
+    collision_enter: Option<Function>,
+    collision_exit: Option<Function>,
     destroy: Option<Function>,
 }
 
@@ -58,6 +60,8 @@ impl HookFuncs {
             Hook::Start => self.start.as_ref(),
             Hook::Update => self.update.as_ref(),
             Hook::FixedUpdate => self.fixed_update.as_ref(),
+            Hook::CollisionEnter => self.collision_enter.as_ref(),
+            Hook::CollisionExit => self.collision_exit.as_ref(),
             Hook::Destroy => self.destroy.as_ref(),
         }
     }
@@ -268,7 +272,7 @@ impl LuaHost {
             self.started.insert(*id);
         }
         for (id, path_id) in queue {
-            self.run_hook(&mut frame, id, path_id, Hook::Start);
+            self.run_hook(&mut frame, id, path_id, Hook::Start, None);
         }
     }
 
@@ -276,7 +280,7 @@ impl LuaHost {
     pub fn dispatch_update(&mut self, mut frame: FrameCtx<'_>) {
         let queue = collect_lua_queue(frame.scene, &mut self.intern);
         for (id, path_id) in queue {
-            self.run_hook(&mut frame, id, path_id, Hook::Update);
+            self.run_hook(&mut frame, id, path_id, Hook::Update, None);
         }
     }
 
@@ -285,7 +289,7 @@ impl LuaHost {
         frame.delta = fixed_dt;
         let queue = collect_lua_queue(frame.scene, &mut self.intern);
         for (id, path_id) in queue {
-            self.run_hook(&mut frame, id, path_id, Hook::FixedUpdate);
+            self.run_hook(&mut frame, id, path_id, Hook::FixedUpdate, None);
         }
     }
 
@@ -294,10 +298,40 @@ impl LuaHost {
         for path in scripts {
             if is_lua(path) {
                 let path_id = self.intern.intern(path);
-                self.run_hook(frame, entity, path_id, Hook::Destroy);
+                self.run_hook(frame, entity, path_id, Hook::Destroy, None);
             }
         }
         self.started.remove(&entity);
+    }
+
+    /// 派发一次碰撞事件（`started` = 进入接触）。
+    ///
+    /// 只派发给**事件涉及的那个实体**：对方实体作为参数传进去，不是收件人 ——
+    /// 否则一次碰撞会把全场脚本都叫一遍。
+    pub fn dispatch_collision(
+        &mut self,
+        mut frame: FrameCtx<'_>,
+        entity: EntityId,
+        other: EntityId,
+        started: bool,
+    ) {
+        let hook = if started {
+            Hook::CollisionEnter
+        } else {
+            Hook::CollisionExit
+        };
+        // 队列里存驻留 id（与其它派发同款：热路径不克隆路径字符串）。
+        let mut queue: Vec<(EntityId, u32)> = Vec::new();
+        if let Some(e) = frame.scene.entities.iter().find(|e| e.id == entity) {
+            for path in &e.scripts {
+                if is_lua(path) {
+                    queue.push((entity, self.intern.intern(path)));
+                }
+            }
+        }
+        for (id, path_id) in queue {
+            self.run_hook(&mut frame, id, path_id, hook, Some(other));
+        }
     }
 
     /// 实体离开场景时清掉它的运行时痕迹（`started` 标记与状态表）。
@@ -308,7 +342,14 @@ impl LuaHost {
 
     /// 派发一个钩子。`path_id` 是驻留 id（队列里只带它，热路径零 `String`
     /// 克隆；要 `&str` 的地方用 `intern.resolve` 换回来）。
-    fn run_hook(&mut self, frame: &mut FrameCtx<'_>, entity: EntityId, path_id: u32, hook: Hook) {
+    fn run_hook(
+        &mut self,
+        frame: &mut FrameCtx<'_>,
+        entity: EntityId,
+        path_id: u32,
+        hook: Hook,
+        arg: Option<EntityId>,
+    ) {
         // 借 `self.intern` 得到的 `&str` 传不进 `&mut self` 的方法（借用检查器
         // 看不出"它就是 self 身上的一块"），所以加载这一步在方法内部自己解析 id；
         // 钩子体再单独 resolve 一次（O(1) 下标）。
@@ -359,7 +400,13 @@ impl LuaHost {
         let light = LuaCtx::as_light(self.ctx_slot.write(LuaCtx::from_script_ctx(ctx)));
 
         // 调用钩子。错误（含沙箱超限）记成日志，不 panic、不中断这一帧。
-        if let Err(err) = func.call::<()>(light) {
+        // 带参数的钩子（碰撞）多传一个"对方实体 id"：Lua 里是普通整数，
+        // 与脚本侧 `self_id()` / `find_entity()` 的口径一致。
+        let result = match arg {
+            Some(other) => func.call::<()>((light, other.raw() as i64)),
+            None => func.call::<()>(light),
+        };
+        if let Err(err) = result {
             let message = format!("{err}");
             self.logs.push(ScriptLog {
                 level: LogLevel::Error,
@@ -554,6 +601,8 @@ fn detect_funcs(env: &Table) -> HookFuncs {
         start: grab("start"),
         update: grab("update"),
         fixed_update: grab("fixed_update"),
+        collision_enter: grab("on_collision_enter"),
+        collision_exit: grab("on_collision_exit"),
         destroy: grab("on_destroy"),
     }
 }

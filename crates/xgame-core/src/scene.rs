@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::component::ComponentMap;
@@ -108,6 +108,18 @@ pub struct Entity {
     /// 语义与理由见 [`crate::material::MaterialOverride`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<crate::material::MaterialOverride>,
+    /// 角色控制器参数。`None` = 这个实体不做角色移动（普通动态 /
+    /// 运动学物体，或纯视觉）。
+    ///
+    /// 与 `physics` **正交**：`physics` 描述碰撞体本身，`controller` 描述
+    /// 怎么移动它（台阶 / 坡度 / 贴地吸附）。挂了 `controller` 的实体会被
+    /// 运行时接管成位置驱动的运动学胶囊，`PhysicsBody` 里声明的运动学
+    /// 类型此时不再作数（理由见 [`crate::character::CharacterController`]）。
+    ///
+    /// 兼容策略与 `material` 同款：旧场景文件没有这个字段 → `None`，
+    /// 老场景照常加载；没配角色的实体不写这一行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<crate::character::CharacterController>,
     /// 运行时组件集合（反序列化时默认为空）。
     #[serde(skip)]
     pub components: ComponentMap,
@@ -130,6 +142,7 @@ impl Entity {
             animator: None,
             audio: None,
             material: None,
+            controller: None,
             components: ComponentMap::new(),
         }
     }
@@ -178,6 +191,12 @@ impl Entity {
     /// 设置逐实体材质覆盖。
     pub fn with_material(mut self, material: crate::material::MaterialOverride) -> Self {
         self.material = Some(material);
+        self
+    }
+
+    /// 挂一个角色控制器（与 `physics` 正交，见 [`Entity::controller`]）。
+    pub fn with_controller(mut self, controller: crate::character::CharacterController) -> Self {
+        self.controller = Some(controller);
         self
     }
 
@@ -235,6 +254,8 @@ impl PartialEq for Entity {
             && self.audio == other.audio
             // 材质覆盖同样是落盘内容：调完颜色按保存得有反应。
             && self.material == other.material
+            // 角色参数同样是落盘内容：Inspector 里调完半径按保存得有反应。
+            && self.controller == other.controller
     }
 }
 
@@ -540,6 +561,35 @@ impl Scene {
     /// 实体的世界变换（位置 / 旋转 / 缩放）。
     pub fn world_transform(&self, index: usize) -> Transform {
         Transform::from_matrix(self.world_matrix(index))
+    }
+
+    /// 直接设置实体的**世界**位置（内部换算成局部）。
+    ///
+    /// 物理（角色控制器 / 动态刚体）始终在世界空间工作，而实体存的是局部
+    /// 变换。根节点占绝大多数，走零矩阵运算的快路径；有父节点时才解一次
+    /// 父世界矩阵的逆 —— 角色通常不挂父节点，这条慢路径只在真需要时付钱。
+    ///
+    /// 父世界矩阵不可逆（父节点缩放含 0）时退化成"把世界坐标当局部写"：
+    /// 宁可位置偏一点，也不要把 NaN 写进变换。
+    pub fn set_world_position(&mut self, index: usize, position: Vec3) {
+        if index >= self.entities.len() {
+            return;
+        }
+        let parent = self.entities[index]
+            .parent
+            .and_then(|id| self.index_of(id));
+        let local = match parent {
+            None => position,
+            Some(p) => {
+                let parent_world = self.world_matrix(p);
+                if parent_world.determinant().abs() > 1e-12 {
+                    parent_world.inverse().transform_point3(position)
+                } else {
+                    position
+                }
+            }
+        };
+        self.entities[index].transform.position = local;
     }
 
     /// 重新挂载父节点，**保留世界变换**（Unity 的 "keep world transform" 语义）。
@@ -1195,6 +1245,64 @@ mod tests {
         assert_eq!(a, b, "同一配置应当相等");
         b.material.as_mut().unwrap().roughness = Some(0.9);
         assert_ne!(a, b, "改材质必须改变相等性（脏检查依赖它）");
+    }
+
+    // -- 角色控制器 --------------------------------------------------------
+
+    /// 角色参数必须能落盘往返 —— 手感是「作品的一部分」（能上多高的台阶、
+    /// 能爬多陡的坡），打包出去的玩家拿的必须是作者调好的值。
+    #[test]
+    fn controller_survives_ron_roundtrip() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(Entity::new("Player").with_controller(crate::CharacterController {
+            radius: 0.4,
+            height: 2.0,
+            step_offset: 0.5,
+            slope_limit: 60.0,
+            skin_width: 0.01,
+            snap_to_ground: 0.4,
+        }));
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(text.contains("controller"), "角色组件必须落盘");
+        let restored: Scene = ron::from_str(&text).unwrap();
+        let c = restored.entities[0]
+            .controller
+            .expect("往返后角色组件仍在");
+        assert_eq!(c.radius, 0.4);
+        assert_eq!(c.height, 2.0);
+        assert_eq!(c.step_offset, 0.5);
+        assert_eq!(c.slope_limit, 60.0);
+    }
+
+    /// 没配角色的实体不该写出 `controller: None`；旧场景文件（没有这个
+    /// 字段）也必须照常加载成 `None`（= 非角色实体，行为逐位不变）。
+    #[test]
+    fn plain_entity_omits_controller_field() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(Entity::new("Plain"));
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("controller"), "普通实体不该写出 controller 字段");
+
+        // 旧文件路径：手工构造一条不含 controller 的实体 RON。
+        let old = r#"Scene(
+            name: "Old",
+            entities: [
+                (name: "A", transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: ""),
+            ],
+        )"#;
+        let parsed: Scene = ron::from_str(old).expect("旧文件必须能解析");
+        assert!(parsed.entities[0].controller.is_none());
+    }
+
+    /// 脏检查语义：改角色参数必须让实体"不相等"（Inspector 调台阶高度
+    /// 依赖它，否则关窗不提示未保存）。
+    #[test]
+    fn controller_participates_in_entity_equality() {
+        let a = Entity::new("Player").with_controller(crate::CharacterController::default());
+        let mut b = a.clone();
+        assert_eq!(a, b, "同一配置应当相等");
+        b.controller.as_mut().unwrap().step_offset = 0.5;
+        assert_ne!(a, b, "改台阶高度必须改变相等性（脏检查依赖它）");
     }
 
     #[test]

@@ -163,7 +163,7 @@
 | 声明式物理 | ✅ | `Entity::physics`（kind / shape / mass / friction / restitution / gravity_scale / sensor）；不声明 = 纯视觉实体 |
 | 物理射线 | ✅ | `raycast` / `raycast_with_filter`（忽略传感器 / 只打动态体 / 排除自身） |
 | 编辑器接入 | ✅ | Inspector 的 Scripts / Physics 区块；工具栏热重载；Console 收脚本日志；Play 时 `input_bridge` 灌键鼠 |
-| 角色控制器 | 🟨 | 射线有了；胶囊移动 / 台阶 / 坡度未做（差距分析 P1） |
+| 角色控制器 | ✅ | 胶囊控制器 + 碰撞事件进脚本，见下方「阶段六·六」 |
 
 > **已知欠账**：`crates/xgame-editor/src/editor_input.rs` 是一套"输入绑定表 → 动作"的
 > 抽象，**从未接入**（`EditorState::input_manager` 只构造、没人读），整体
@@ -172,6 +172,23 @@
 >
 > **独立播放器**已迁到 winit 0.30 的 `run_app` + `ApplicationHandler`：窗口与 `GameApp`
 > 推迟到 `resumed` 里创建；`about_to_wait` 主动 `request_redraw()` 的连续帧机制不变。
+
+## 阶段六·六：角色控制器 + 碰撞事件 ✅
+
+玩法闭环的第一块：角色能走、能跳、能上台阶、能踩触发器。
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| 胶囊角色控制器 | ✅ | `Entity::controller`（`xgame_core::CharacterController`）：半径 / 总高 / 台阶 / 坡度 / 皮肤 / 吸附，可 RON 序列化，`sanitized()` 钳制坏数据 |
+| 移动解析 | ✅ | `PhysicsWorld::move_character`：rapier `KinematicCharacterController` + **四处上游缺陷的绕过**（见决策记录 §十五）：自实现 grounded / snap / 陡坡滑落 / 自动上台阶 |
+| 角色刚体托管 | ✅ | `World::sync_bodies` 为 controller 实体建运动学位置胶囊；`push_kinematic_bodies` / `pull_dynamic_bodies` 跳过它（位姿归控制器） |
+| 脚本 API | ✅ | `character_simple_move` / `character_move` / `character_jump` / `character_velocity` / `character_set_velocity` / `character_is_grounded` / `character_ground_normal` / `character_is_sliding`；Lua 与 Rust 组件共用 |
+| 碰撞 / 触发事件 | ✅ | `on_collision_enter` / `on_collision_exit`（第二参 = 对方实体 id）：动态体走 rapier 事件，角色走"接触面差分"（运动学胶囊永远停在 skin 距离外，物理层没有真实接触）；双向派发、双方各收一次 |
+| 编辑器 | ✅ | Inspector 的 Character 区块（勾选式，与 Physics 正交） |
+| 测试 | ✅ | 物理 21 条行为测试 + 运行时 3 条（行走 / 跳跃 / 碰撞）+ Lua 端到端 1 条 |
+
+> **已知缺失**：移动平台不带动角色（上游该特性走同一条坏掉的 contact manifold）；
+> 无蹲伏 / 根运动 / 多人同步（属网络层）。
 
 ## 双轨语言架构：P0 ✅ P0.5 ✅ P1 ✅ P1.5 ✅ P2 ✅ P2.5 ✅ P3 ✅
 

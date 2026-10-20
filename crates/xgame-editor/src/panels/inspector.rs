@@ -1463,6 +1463,99 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         });
 
 
+        // ── 角色控制器 ──
+        //
+        // 与 Physics 正交：勾上之后这个实体的刚体由**运行时托管**
+        // （运动学位置 + 胶囊），`physics` 里的类型/形状会被忽略 ——
+        // 见 `xgame_core::character` 的模块文档。
+        theme::section_bar(ui, "Character");
+        ui.indent("character", |ui| {
+            let mut enabled = entity.controller.is_some();
+            if ui
+                .checkbox(&mut enabled, "Character controller")
+                .on_hover_text("由角色控制器驱动：撞墙、自动上台阶、贴地、陡坡滑落")
+                .changed()
+            {
+                entity.controller = if enabled {
+                    Some(xgame_core::CharacterController::default())
+                } else {
+                    None
+                };
+                touched = true;
+            }
+
+            if let Some(c) = entity.controller.as_mut() {
+                let mut field = |ui: &mut egui::Ui,
+                                 label: &str,
+                                 value: &mut f32,
+                                 speed: f64,
+                                 range: std::ops::RangeInclusive<f32>,
+                                 hint: &str| {
+                    row(ui, label, |ui| {
+                        let resp = ui
+                            .add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                egui::DragValue::new(value).speed(speed).range(range),
+                            )
+                            .on_hover_text(hint);
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+                };
+                field(
+                    ui,
+                    "Height",
+                    &mut c.height,
+                    0.02,
+                    0.5..=5.0,
+                    "总高（含两端半球）。脚底 = 实体原点",
+                );
+                field(
+                    ui,
+                    "Radius",
+                    &mut c.radius,
+                    0.01,
+                    0.05..=2.0,
+                    "胶囊半径。总高必须大于直径，否则会被钳成球",
+                );
+                field(
+                    ui,
+                    "Step",
+                    &mut c.step_offset,
+                    0.01,
+                    0.0..=1.0,
+                    "自动上台阶的最大高度；0 = 不许上台阶",
+                );
+                field(
+                    ui,
+                    "Slope",
+                    &mut c.slope_limit,
+                    0.5,
+                    0.0..=89.0,
+                    "可站立的最大坡度（度）；超过就滑下去",
+                );
+                field(
+                    ui,
+                    "Skin",
+                    &mut c.skin_width,
+                    0.005,
+                    0.001..=0.5,
+                    "与障碍物保持的微小间隙（米），太小会抖、太大会看起来悬空",
+                );
+                field(
+                    ui,
+                    "Snap",
+                    &mut c.snap_to_ground,
+                    0.01,
+                    0.0..=2.0,
+                    "贴地吸附距离：走下矮台阶时被吸住的最大落差",
+                );
+                theme::note(
+                    ui,
+                    format!("胶囊中心 = 脚底 + {:.2} m", c.center_height()),
+                );
+            }
+        });
+
         // ── 音频 ──
         //
         // 取消勾选 = 静默实体。旧场景文件没有 `audio` 字段，加载出来就是

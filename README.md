@@ -539,6 +539,28 @@ physics: Some((kind: Dynamic, shape: Ball(radius: 0.5), restitution: 0.55)),
 **动态体由物理驱动、运动学体由脚本驱动** —— 这条分工决定了数据往哪个方向流，
 两者不会互相覆盖。
 
+### 角色控制器
+
+给实体加一行 `controller` 就是 Unity 式的角色（**实体原点是脚底**）：
+
+```ron
+controller: Some((radius: 0.3, height: 1.8, step_offset: 0.35, slope_limit: 45.0)),
+```
+
+```lua
+function fixed_update(ctx)
+    character_simple_move(ctx, axis(ctx, "MoveX") * 5.0, 0.0, axis(ctx, "MoveZ") * 5.0)
+    if action_pressed(ctx, "Jump") then character_jump(ctx, 5.0) end
+end
+```
+
+- 撞墙滑行、**自动上台阶**（0.35m）、45° 坡度限制、**陡坡滑落**、贴地吸附、
+  跳跃与落地钳制；`character_is_grounded` / `character_ground_normal` 可查状态
+- 碰撞事件进两轨脚本：`on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)`，
+  **双方各收一次**，持续接触不刷屏（角色的接触面由控制器自己上报 —— 胶囊停在
+  skin 距离外，物理引擎不会发事件）
+- 编辑器 Inspector 有 **Character** 区块；与 `physics` 正交（角色实体的刚体由运行时托管）
+
 ## 运行时（编辑器和游戏共用的那一段）
 
 `xgame-runtime::World` 是唯一编排者，编辑器按下 ▶ Play 与打包出去的游戏跑的是

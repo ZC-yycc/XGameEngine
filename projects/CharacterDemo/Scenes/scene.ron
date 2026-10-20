@@ -1,0 +1,157 @@
+// 角色控制器演示场景。
+//
+// 布局：地面 → 0.2m 台阶（演示自动上台阶）→ 1m 高墙（演示挡停与沿墙滑）
+//       中间放一个传感器触发区（演示 on_collision_enter / exit）。
+//
+// 注意 Player 的 transform.position.y = 0：**实体原点是脚底**，
+// 所以 0 就是"站在地平面上"。视觉模型是它的子节点，抬高了 0.9m
+// （胶囊中心）—— 层级让"脚底驱动、模型居中"两件事可以同时成立。
+(
+    name: "Character Demo",
+    entities: [
+        (
+            name: "Ground",
+            transform: (
+                position: (0.0, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (24.0, 1.0, 24.0),
+            ),
+            model: "builtin://cube",
+            id: (1),
+            parent: None,
+            material: Some((
+                base_color: Some((0.52, 0.55, 0.60, 1.0)),
+                roughness: Some(0.92),
+            )),
+            physics: Some((
+                kind: Static,
+                shape: Cuboid(half_extents: (12.0, 0.5, 12.0)),
+                mass: 0.0,
+                friction: 0.8,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
+        ),
+        (
+            name: "Step",
+            transform: (
+                position: (4.0, 0.1, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.0, 0.2, 6.0),
+            ),
+            model: "builtin://cube",
+            id: (2),
+            parent: None,
+            material: Some((
+                base_color: Some((0.72, 0.62, 0.42, 1.0)),
+                roughness: Some(0.85),
+            )),
+            physics: Some((
+                kind: Static,
+                shape: Cuboid(half_extents: (1.0, 0.1, 3.0)),
+                mass: 0.0,
+                friction: 0.8,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
+        ),
+        (
+            name: "Wall",
+            transform: (
+                position: (9.0, 1.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 3.0, 8.0),
+            ),
+            model: "builtin://cube",
+            id: (3),
+            parent: None,
+            material: Some((
+                base_color: Some((0.42, 0.46, 0.52, 1.0)),
+                roughness: Some(0.8),
+            )),
+            physics: Some((
+                kind: Static,
+                shape: Cuboid(half_extents: (0.5, 1.5, 4.0)),
+                mass: 0.0,
+                friction: 0.5,
+                restitution: 0.0,
+                gravity_scale: 1.0,
+                is_sensor: false,
+            )),
+        ),
+        (
+            name: "Trigger Zone",
+            transform: (
+                position: (1.6, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 2.0, 4.0),
+            ),
+            model: "builtin://cube",
+            id: (4),
+            parent: None,
+            material: Some((
+                base_color: Some((0.20, 0.65, 0.45, 0.35)),
+                roughness: Some(0.4),
+            )),
+            physics: Some((
+                kind: Static,
+                shape: Cuboid(half_extents: (0.5, 1.0, 2.0)),
+                mass: 0.0,
+                friction: 0.0,
+                restitution: 0.0,
+                gravity_scale: 0.0,
+                is_sensor: true,
+            )),
+            scripts: ["guid://2786b65dcb2ab8b3119c6f1424596635"],
+        ),
+        (
+            name: "Player",
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            model: "",
+            id: (5),
+            parent: None,
+            controller: Some((
+                radius: 0.3,
+                height: 1.8,
+                step_offset: 0.35,
+                slope_limit: 45.0,
+                skin_width: 0.02,
+                snap_to_ground: 0.3,
+            )),
+            scripts: ["guid://d26d40ff68c4cd53b20c309e3b9db92d"],
+        ),
+        (
+            name: "Player.Visual",
+            transform: (
+                position: (0.0, 0.9, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 1.7, 0.6),
+            ),
+            model: "builtin://cylinder",
+            id: (6),
+            parent: Some((5)),
+            material: Some((
+                base_color: Some((0.85, 0.35, 0.30, 1.0)),
+                roughness: Some(0.55),
+            )),
+        ),
+    ],
+    lights: [
+        (
+            name: "Sun",
+            kind: Directional,
+            direction: (0.4, -1.0, 0.35),
+            position: (0.0, 6.0, 0.0),
+            color: (1.0, 0.97, 0.92),
+            intensity: 3.2,
+            range: 20.0,
+        ),
+    ],
+    ambient: (0.06, 0.07, 0.09),
+)

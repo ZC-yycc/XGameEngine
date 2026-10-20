@@ -24,14 +24,21 @@ end
 
 ## 二、生命周期钩子
 
-四个钩子，**全部可选**（没定义就不调用，不需要写空函数）。
+六个钩子，**全部可选**（没定义就不调用，不需要写空函数）。
 
 | 钩子 | 时机 | 典型用途 |
 |---|---|---|
 | `function start(ctx)` | 实体进入运行时后**一次** | 初始化状态、找别的实体 |
 | `function update(ctx)` | **每个渲染帧**一次 | 视觉、UI、非物理逻辑 |
 | `function fixed_update(ctx)` | **每个物理固定步长**一次（60 Hz） | 与物理交互的逻辑 |
+| `function on_collision_enter(ctx, other)` | 与另一个实体**开始**接触时一次 | 拾取、伤害、触发器 |
+| `function on_collision_exit(ctx, other)` | **结束**接触时一次 | 离开触发区、停止持续伤害 |
 | `function on_destroy(ctx)` | 实体被销毁**之前**一次 | 清理、生成特效 |
+
+`other` 是**对方的实体 id**（整数，与 `self_id()` / `find_entity()` 同一种值）。
+碰撞事件**双方各收一次**（Unity 的 `OnCollisionEnter` 同款语义），持续接触
+不会每帧刷。对瞬时的"穿过就触发"，在 `on_collision_enter` 里判断
+`entity_name(ctx, other)` 即可。
 
 > `update` 的 `delta(ctx)` 是**真实帧间隔**，`fixed_update` 的 `delta(ctx)` 是
 > **固定步长**。做匀速运动请在 `update` 里乘 `delta`；做物理相关的请在
@@ -154,6 +161,42 @@ end
 ```
 
 > `raycast` 会自动忽略**传感器**，并排除自身刚体（避免从自己内部出发打到自己）。
+
+### 4.4.1 角色控制器
+
+给实体挂上 `CharacterController`（场景里 `controller` 字段，或在编辑器
+Inspector 的 **Character** 区块勾选）之后，用这组 API 驱动它：
+
+| 函数 | 说明 |
+|---|---|
+| `character_simple_move(ctx, vx, vy, vz)` | **最常用**：给水平速度（米/秒），重力、坡面跟随、陡坡滑落由引擎负责 |
+| `character_move(ctx, dx, dy, dz)` | 按**位移**移动（米），不施加重力；竖直速度自己管 |
+| `character_jump(ctx, speed)` | 着地时起跳（米/秒），返回是否成功；空中调用返回 `false`（无二段跳） |
+| `character_velocity(ctx)` | 角色当前速度 → `{x, y, z}`（**实际**速度：撞墙后水平分量归零） |
+| `character_set_velocity(ctx, x, y, z)` | 直接改速度（击退 / 传送带） |
+| `character_is_grounded(ctx)` | 是否着地 |
+| `character_ground_normal(ctx)` | 脚下法线 → `{x, y, z}`（腾空时是 `{0,1,0}`） |
+| `character_is_sliding(ctx)` | 是否正在陡坡上自动下滑 |
+
+最小用法：
+
+```lua
+function fixed_update(ctx)
+    local x = axis(ctx, "MoveX")
+    local z = axis(ctx, "MoveZ")
+    character_simple_move(ctx, x * 5.0, 0.0, z * 5.0)
+
+    if action_pressed(ctx, "Jump") then
+        character_jump(ctx, 5.0)
+    end
+end
+```
+
+> **坐标约定**：实体原点是角色的**脚底**（不是胶囊中心）。所以把一个角色
+> 拖到 y = 0，它就正好站在地平面上。
+>
+> **想从上方俯视/第三人称跟随**：读 `pos(ctx)` 拿到的是脚底位置，
+> 相机目标要自己加约 1.6m（身高）。
 
 ### 4.5 输入
 

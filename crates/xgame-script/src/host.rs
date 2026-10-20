@@ -15,6 +15,10 @@ pub enum Hook {
     Update,
     /// 每个固定步长调用一次（物理步进同频）。
     FixedUpdate,
+    /// 与另一个碰撞体**开始**接触时调用一次（参数：对方实体 id）。
+    CollisionEnter,
+    /// 与另一个碰撞体**结束**接触时调用一次（参数：对方实体 id）。
+    CollisionExit,
     /// 实体被销毁前调用一次。
     Destroy,
 }
@@ -26,6 +30,8 @@ impl Hook {
             Hook::Start => "start",
             Hook::Update => "update",
             Hook::FixedUpdate => "fixed_update",
+            Hook::CollisionEnter => "on_collision_enter",
+            Hook::CollisionExit => "on_collision_exit",
             Hook::Destroy => "on_destroy",
         }
     }

@@ -14,6 +14,7 @@
 //! | `id` | 稳定实体标识符 `EntityId` |
 //! | `animation` | 动画播放配置 `Animator` + 状态机 `AnimMachine` + 叠加层 `AnimAdditive` + 混合层栈 `AnimLayer`（声明式，落盘进场景文件） |
 //! | `audio` | 音频纯数据层：`AudioSource` 组件 + `AudioPort` 命令束 + `ListenerPose`（引擎封装在 `xgame-audio`） |
+//! | `character` | 角色控制器参数 `CharacterController`（可序列化）+ 运行时状态 `CharacterState` |
 //! | `material` | 逐实体材质覆盖 `MaterialOverride`（PBR 参数，字段级打补丁） |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
 //! | `inspect` | 组件字段检视契约 `Inspect` + `FieldDesc`/`FieldValue`（Inspector 与 Lua 参数的同一份真相源）|
@@ -44,6 +45,7 @@ pub mod project;
 mod animation;
 mod asset;
 mod audio;
+mod character;
 mod check;
 mod component;
 pub mod inspect;
@@ -82,6 +84,9 @@ pub use asset::{
 };
 pub use audio::{
     AudioCommand, AudioPort, AudioStats, AudioSource, ListenerPose, PlaySound,
+};
+pub use character::{
+    CharacterContacts, CharacterController, CharacterState, MAX_CHARACTER_CONTACTS,
 };
 pub use component::{Component, ComponentMap, ModelPath, Name};
 pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};

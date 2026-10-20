@@ -85,4 +85,25 @@ impl RigidBody {
             ..Default::default()
         }
     }
+
+    /// 便捷方法：创建**位置驱动**的运动学刚体（角色控制器专用）。
+    ///
+    /// 与 `KinematicVelocity` 的区别在 rapier 侧的接触求解语义：position-based
+    /// 是"硬挡"（无限质量，动态物体被锋利的投影推开，接近 Unity 的
+    /// CharacterController）；velocity-based 则会把速度交换给动态物体
+    /// （为移动平台设计）。角色要的是前者。
+    ///
+    /// `gravity_enabled: false` + `can_sleep: false`：重力由角色控制器自己算
+    /// （脚本层的 `character_simple_move`），不走 rapier 的重力积分；休眠对
+    /// 一个每帧都要 `move_shape` 的刚体没有意义，还可能在唤醒边界上抖一帧。
+    pub fn kinematic_position_at(transform: Transform) -> Self {
+        Self {
+            body_type: RigidBodyType::KinematicPosition,
+            transform,
+            mass: 0.0,
+            gravity_enabled: false,
+            can_sleep: false,
+            ..Default::default()
+        }
+    }
 }

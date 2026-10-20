@@ -627,6 +627,223 @@ impl GameCtx<'_> {
     }
 
     // -----------------------------------------------------------------------
+    // 角色控制器
+    // -----------------------------------------------------------------------
+
+    /// 角色着地时的"贴地速度"（米/秒，向下）。
+    ///
+    /// **必须是 0**，这不是省事而是必需：`move_shape` 的第一次扫掠如果带着
+    /// 向下的分量，会先撞到**地面**，而 rapier 的自动上台阶只在"撞到墙"时
+    /// 才尝试 —— 剩下的位移被地面吃掉，0.2m 的台阶会把角色焊死在原地
+    /// （实测锯齿抖动但永远上不去）。贴地交给 `snap_to_ground`（走下矮台阶）
+    /// 与坡面切向投影（走坡）就够了，不需要额外向下推。
+    pub const GROUND_STICK_SPEED: f32 = 0.0;
+
+    /// 目标实体的角色控制器参数；不是角色返回 `None`。
+    pub fn character_config(&mut self, id: EntityId) -> Option<xgame_core::CharacterController> {
+        let index = self.scene.find_entity(id)?;
+        self.scene.entities.get(index)?.controller
+    }
+
+    /// 当前实体的角色运行时状态（没配控制器 / 还没移动过 → 默认值）。
+    ///
+    /// 返回**拷贝**：状态表在 `ComponentMap` 里，交出去引用会卡住后续的
+    /// `character_*` 调用（它们都要 `&mut self`）。
+    pub fn character_state(&mut self) -> xgame_core::CharacterState {
+        let Some(index) = self.entity_index() else {
+            return xgame_core::CharacterState::default();
+        };
+        self.scene.entities[index]
+            .component::<xgame_core::CharacterState>()
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Unity `CharacterController.Move`：按**位移**（米）移动角色，不施加重力。
+    ///
+    /// 竖直速度完全由调用方负责（想做跳跃就自己积分重力再一起传进来）。
+    /// 物理层会解析碰撞、坡面、台阶与贴地吸附，返回的实际位移反推成
+    /// [`character_velocity`](Self::character_velocity)。
+    ///
+    /// 返回 `false` 表示这个实体没配控制器、没有物理刚体，或没有物理世界
+    /// —— 与其它 API 同款的静默容错。
+    pub fn character_move(&mut self, displacement: Vec3) -> bool {
+        self.move_character_internal(displacement, true).is_some()
+    }
+
+    /// Unity `CharacterController.SimpleMove`：给**水平速度**（米/秒），
+    /// 重力与坡面跟随由引擎负责。
+    ///
+    /// `planar_velocity` 的 y 分量会被忽略 —— 竖直方向由引擎算（这是
+    /// "Simple" 的全部含义）。着地时角色被贴地速度轻轻压住，腾空时按
+    /// 物理世界的重力积分；落在坡上时竖直速度按坡面跟随率反推，且
+    /// **只取向下分量**（上坡的爬升由物理层沿坡切向完成，这里再叠加一次
+    /// 就是双倍爬升）。
+    pub fn character_simple_move(&mut self, planar_velocity: Vec3) -> bool {
+        let Some(index) = self.entity_index() else {
+            return false;
+        };
+        let Some(def) = self.scene.entities.get(index).and_then(|e| e.controller) else {
+            return false;
+        };
+        let c = def.sanitized();
+        let dt = self.delta.max(1e-5);
+        let gravity = self
+            .physics
+            .as_deref()
+            .map(|p| p.gravity())
+            .unwrap_or(Vec3::ZERO);
+
+        let mut state = self.scene.entities[index]
+            .component::<xgame_core::CharacterState>()
+            .copied()
+            .unwrap_or_default();
+
+        // 竖直速度：着地时给贴地速度，腾空时积分重力。
+        if state.grounded {
+            state.velocity.y = Self::GROUND_STICK_SPEED;
+        } else {
+            state.velocity.y += gravity.y * dt;
+        }
+
+        // 陡坡禁行（Unity 语义）：站在超过 slope_limit 的坡上时不给水平期望，
+        // 只留竖直分量让物理层把角色沿坡面分解成下滑。用**上一帧**的法线判断
+        // —— 这一帧的地面还没测出来，而"已经站在陡坡上"本来就该由上一帧得知。
+        let n = state.ground_normal;
+        let too_steep = state.grounded && n.dot(Vec3::Y) < c.slope_limit_cos();
+        let planar = if too_steep {
+            Vec3::ZERO
+        } else {
+            Vec3::new(planar_velocity.x, 0.0, planar_velocity.z)
+        };
+
+        let desired = Vec3::new(planar.x, state.velocity.y, planar.z) * dt;
+        let Some(r) = self.move_character_internal(desired, false) else {
+            return false;
+        };
+
+        // 速度从**实际**位移反推：撞墙后水平分量归零、上坡被压短，动画混合
+        // 才不会对着墙还在跑步。
+        state.velocity.x = r.effective_translation.x / dt;
+        state.velocity.z = r.effective_translation.z / dt;
+        if r.grounded {
+            let gn = r.ground_normal;
+            // 坡面跟随率：水平速度在坡面上的竖直分量。只取 ≤0，
+            // 上坡交给物理层的切向投影。
+            let follow = -(gn.x * state.velocity.x + gn.z * state.velocity.z) / gn.y.max(1e-4);
+            state.velocity.y = follow.min(0.0);
+        } else {
+            state.velocity.y = r.effective_translation.y / dt;
+        }
+
+        // 起跳当帧不被吃速度，落地当帧也不该把手里的跳跃初速清零 ——
+        // `follow.min(0.0)` 与这里的 `effective/dt` 共同保证这一点。
+        let s = self.scene.entities[index]
+            .components
+            .get_or_insert_with(xgame_core::CharacterState::default);
+        s.velocity = state.velocity;
+        s.grounded = r.grounded;
+        s.ground_normal = r.ground_normal;
+        s.sliding_down_slope = r.sliding_down_slope;
+        s.contacts = r.contacts;
+        true
+    }
+
+    /// 起跳：着地时把竖直速度设为 `speed`（米/秒，向上）。
+    ///
+    /// 返回 `false` 表示没配控制器，或此刻不在地面上（不能二段跳）。
+    /// 起跳只是**设速度**，真正离地发生在下一次 `character_simple_move`：
+    /// 位移由物理层解析，所以"起跳瞬间撞到天花板"依然会被正确处理。
+    pub fn character_jump(&mut self, speed: f32) -> bool {
+        let Some(index) = self.entity_index() else {
+            return false;
+        };
+        if self.scene.entities[index].controller.is_none() {
+            return false;
+        }
+        let state = self.scene.entities[index]
+            .components
+            .get_or_insert_with(xgame_core::CharacterState::default);
+        if !state.grounded {
+            return false;
+        }
+        state.velocity.y = speed.max(0.0);
+        state.grounded = false;
+        true
+    }
+
+    /// 角色当前速度（米/秒）。不是角色返回零向量。
+    pub fn character_velocity(&mut self) -> Vec3 {
+        self.character_state().velocity
+    }
+
+    /// 直接改角色速度（被击退、被传送带推动等外部控制用）。
+    pub fn character_set_velocity(&mut self, velocity: Vec3) {
+        let Some(index) = self.entity_index() else { return };
+        let state = self.scene.entities[index]
+            .components
+            .get_or_insert_with(xgame_core::CharacterState::default);
+        state.velocity = velocity;
+    }
+
+    /// 角色是否着地（最近一次移动结束后）。
+    pub fn character_is_grounded(&mut self) -> bool {
+        self.character_state().grounded
+    }
+
+    /// 角色脚下的地面法线（腾空时为 `Vec3::Y`）。
+    pub fn character_ground_normal(&mut self) -> Vec3 {
+        self.character_state().ground_normal
+    }
+
+    /// 角色是否正在陡坡上自动下滑。
+    pub fn character_is_sliding(&mut self) -> bool {
+        self.character_state().sliding_down_slope
+    }
+
+    /// `character_move` / `character_simple_move` 的共同主体。
+    ///
+    /// `update_velocity` 为 `true` 时把实际位移反推成速度；`simple_move`
+    /// 传 `false`（它要在落地/坡面语义上再修一次竖直分量）。
+    fn move_character_internal(
+        &mut self,
+        desired: Vec3,
+        update_velocity: bool,
+    ) -> Option<xgame_physics::CharacterMoveResult> {
+        let index = self.entity_index()?;
+        let entity = self.scene.entities.get(index)?;
+        let def = entity.controller?;
+        let body = entity.component::<PhysicsHandle>()?.0;
+        let dt = self.delta.max(1e-5);
+
+        // 字段级拆借：`physics` 与 `scene` 是 GameCtx 的两个不同字段。
+        let physics = self.physics.as_deref_mut()?;
+        let r = physics.move_character(body, &def, desired, dt)?;
+        // 刚体原点是**胶囊中心**，实体原点是**脚底**：写回时要减掉中心高度。
+        let center = physics.body_transform(body)?.position;
+        let feet = center - Vec3::Y * def.sanitized().center_height();
+
+        // 物理在世界空间工作，实体存局部变换：由 Scene 负责换算（根节点零成本）。
+        self.scene.set_world_position(index, feet);
+
+        let state = self.scene.entities[index]
+            .components
+            .get_or_insert_with(xgame_core::CharacterState::default);
+        if update_velocity {
+            state.velocity = Vec3::new(
+                r.effective_translation.x / dt,
+                r.effective_translation.y / dt,
+                r.effective_translation.z / dt,
+            );
+        }
+        state.grounded = r.grounded;
+        state.ground_normal = r.ground_normal;
+        state.sliding_down_slope = r.sliding_down_slope;
+        state.contacts = r.contacts;
+        Some(r)
+    }
+
+    // -----------------------------------------------------------------------
     // 输入
     // -----------------------------------------------------------------------
 

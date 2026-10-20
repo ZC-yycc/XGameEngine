@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use glam::{Quat, Vec3};
-use xgame_core::{Color, Transform};
+use xgame_core::{CharacterController, Color, Transform};
 use xgame_math::glam;
 
 use rapier3d::dynamics::{
@@ -15,9 +15,16 @@ use rapier3d::geometry::{
     BroadPhaseMultiSap as DefaultBroadPhase, ColliderBuilder, ColliderHandle,
     ColliderSet, NarrowPhase,
 };
+use rapier3d::control::{EffectiveCharacterMovement, KinematicCharacterController};
+use rapier3d::math::Isometry;
+use rapier3d::parry::shape::Capsule;
 use rapier3d::prelude::{ActiveEvents, Ray};
 use rapier3d::pipeline::{PhysicsPipeline, QueryFilter, QueryFilterFlags, QueryPipeline};
 
+use crate::character::{
+    build_rapier_controller, character_capsule, ground_prediction, CharacterMoveResult,
+    GROUND_NORMAL_MIN_DOT,
+};
 use crate::collider::{Collider, ColliderShape};
 use crate::debug_draw::DebugLine;
 use crate::rigid_body::{RigidBody, RigidBodyType};
@@ -416,6 +423,418 @@ impl PhysicsWorld {
                 });
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Character controller
+    // -----------------------------------------------------------------------
+
+    /// 用 rapier 的角色控制器移动一个刚体，返回实际位移与着地信息。
+    ///
+    /// # 前置条件
+    ///
+    /// - `body_id` 必须存在，且它上面挂的碰撞体与 [`character_capsule`] 同款
+    ///   （运行时 `sync_bodies` 保证这一点）；
+    /// - **调用前应已 `sync_queries()`**：角色移动发生在 `step()` 之前，用的是
+    ///   上一帧留下的 `query_pipeline`。若刚体位置在别处被改过（编辑器拖动物体、
+    ///   上一帧的 `sync_bodies`），broad-phase 会滞后于实际位置，`move_shape`
+    ///   可能漏掉本该挡路的碰撞体。批量移动多个角色时，循环外刷新一次即可。
+    ///
+    /// # 为什么传感器被排除
+    ///
+    /// Unity 的 `CharacterController.Move` 不会被 trigger 阻挡（trigger 只发
+    /// 事件）。这里保持同样语义：否则角色一走进对话触发区就走不动了。
+    /// 代价是「拿传感器当隐形平台」不再可行 —— 那请用 `is_sensor: false` 的
+    /// 运动学刚体。
+    pub fn move_character(
+        &mut self,
+        body_id: u64,
+        def: &CharacterController,
+        desired_translation: Vec3,
+        dt: f32,
+    ) -> Option<CharacterMoveResult> {
+        let handle = self.bodies.get(&body_id)?.rapier_handle;
+        let rb = self.rigid_body_set.get(handle)?;
+        let char_pos: Isometry<f32> = *rb.position();
+        let c = def.sanitized();
+
+        let controller = build_rapier_controller(def);
+        let shape = character_capsule(def);
+        let filter = QueryFilter {
+            flags: QueryFilterFlags::EXCLUDE_SENSORS,
+            groups: None,
+            exclude_collider: None,
+            exclude_rigid_body: Some(handle),
+            predicate: None,
+        };
+
+        // ---- 脚下探测（自实现，绕开上游 parry 缺陷，见 character.rs 模块文档）----
+        // 一次探测同时服务三件事：起始着地判定、陷地自救、snap 的落点测量。
+        // 探测距离取 snap + predict：既要覆盖"贴地但略微悬空"，也要覆盖
+        // "脚下掉了个小台阶"（snap 窗口）。
+        let prediction = ground_prediction(&c);
+        let lookahead = c.snap_to_ground + prediction;
+        let below = self
+            .probe_ground(handle, &c, &char_pos, lookahead)
+            .filter(|(normal, _)| normal.dot(Vec3::Y) >= GROUND_NORMAL_MIN_DOT);
+        let gap_before = below.map(|(_, gap)| gap);
+        let grounded_at_start = gap_before.is_some_and(|gap| gap <= prediction + 1e-5);
+
+        // ---- 陡坡不承重：自己生成下滑切向 ----
+        // rapier 0.22 的 `is_sliding_down_slope` 只在扫掠**命中**时才由
+        // `handle_slopes` 置位。实测胶囊在 60° 薄板上做竖直扫掠时，parry 的
+        // shape cast 直接返回 None（0°/30° 都正常，60° 退化），于是角色要么
+        // 被陷地自救顶住原地抖、要么沉进坡里，永远不会滑。
+        //
+        // 这里在移动前把"向下的期望"投影到坡面：法向分量清零，剩下的切向
+        // 天然带一个水平分量，角色就会顺着坡往下滑，且间隙保持不变（不会再
+        // 触发上面那个退化扫掠）。
+        let is_steep = below.is_some_and(|(n, _)| n.dot(Vec3::Y) < c.slope_limit_cos());
+        let steep_slide = grounded_at_start && is_steep && desired_translation.y < 0.0;
+        let mut desired = desired_translation;
+        if steep_slide {
+            if let Some((normal, _)) = below {
+                let into_plane = desired.dot(normal);
+                desired -= normal * into_plane;
+            }
+        }
+
+        // ---- 皮肤层硬约束（陷地自救）----
+        // rapier 0.22 的 `check_and_fix_penetrations()` 整段被注释成了空函数，
+        // 而 `move_shape` 的扫掠是 `target_distance = offset` +
+        // `stop_at_penetration: false`：**只要起始时间隙 ≤ 皮肤宽度，扫掠就
+        // 直接返回 None，整段期望位移被放行**。于是"停在 skin 上"这个静止
+        // 状态本身就是个陷阱 —— 下一帧往下一压就沉进去，再被顶回来，角色
+        // 变成锯齿状抖动（实测每帧沉 1.4cm）。
+        //
+        // 所以约束定在**移动前**：间隙不足皮肤宽度时，向下的期望一律抬到
+        // "刚好补回皮肤层"（gap < 0 时 desired.y 由负变正，把角色顶出来）。
+        // 陡坡滑落例外：那时 desired 已经投影成坡面切向、法向分量为零，
+        // 再钳一次会把下滑分量清零，角色就挂在陡坡上了。
+        if !steep_slide {
+            if let Some(gap) = gap_before {
+                // 迟滞带：间隙落在 [skin, rest] 之间时**不干预** —— 那段是
+                // rapier 自己收敛出来的正常工作区间，硬抬会把扫掠的接触几何
+                // 每帧改动 2mm，自动上台阶直接失效（先证红过）。只有真正
+                // 掉进 offset 以内（那之后所有扫掠都会返回 None）才补回来。
+                if gap < c.skin_width {
+                    let dy_min = crate::character::rest_gap(&c) - gap;
+                    if desired.y < dy_min {
+                        desired.y = dy_min;
+                    }
+                }
+            }
+        }
+
+        // 撞到的碰撞体句柄先攒在栈上（固定容量，热路径零分配），
+        // `move_shape` 借走了 `&self`，回调里没法查反查表。
+        let mut hit_handles = [None; xgame_core::MAX_CHARACTER_CONTACTS];
+        let mut collisions = 0usize;
+        let movement = controller.move_shape(
+            dt,
+            &self.rigid_body_set,
+            &self.collider_set,
+            &self.query_pipeline,
+            &shape,
+            &char_pos,
+            glam_to_na_vec3(desired),
+            filter,
+            |hit| {
+                collisions += 1;
+                if collisions <= xgame_core::MAX_CHARACTER_CONTACTS {
+                    hit_handles[collisions - 1] = Some(hit.handle);
+                }
+            },
+        );
+
+        // 句柄 → 刚体 id（去重）。角色停在 skin 距离外、物理层不会给它发
+        // 接触事件，这份集合就是运行时判定"撞上谁 / 离开谁"的唯一依据。
+        let mut contacts = xgame_core::CharacterContacts::new();
+        for handle in hit_handles.into_iter().flatten() {
+            if let Some(body) = self.resolve_collider_body(handle) {
+                contacts.push(body);
+            }
+        }
+
+        let mut new_pos = char_pos;
+        new_pos.translation.vector += movement.translation;
+
+        // ---- 自动上台阶（自实现，rapier 的 autostep 对胶囊不可用）----
+        // 只在"想走却几乎走不动"时试探：抬到台阶高度 → 水平前进 → 贴回地面。
+        // 三次试探全部复用 `move_shape`，所以皮肤间隙、坡面、碰撞过滤与常规
+        // 移动完全同一套语义。
+        if grounded_at_start && c.step_offset > 1e-4 && desired.y <= 1.0e-5 {
+            let flat = Vec3::new(desired.x, 0.0, desired.z);
+            let want_h = flat.length();
+            // 用**沿期望方向**的投影而不是位移长度：贴墙时 `handle_slopes`
+            // 的推离分量是反方向的一小段，按长度算会误判成"已经走了"，
+            // 自动上台阶永远等不到机会（实测在原地来回抖 1.5cm）。
+            let dir = if want_h > 1e-4 { flat / want_h } else { Vec3::ZERO };
+            let got_h = Vec3::new(movement.translation.x, 0.0, movement.translation.z)
+                .dot(dir)
+                .max(0.0);
+            if want_h > 1e-4 && got_h < want_h * 0.5 {
+                if let Some(stepped) = self.try_step_up(
+                    &controller,
+                    &shape,
+                    &char_pos,
+                    desired,
+                    c.step_offset + crate::character::rest_gap(&c),
+                    c.radius,
+                    crate::character::rest_gap(&c),
+                    filter,
+                    dt,
+                ) {
+                    let step_h = Vec3::new(
+                        stepped.translation.vector.x - char_pos.translation.vector.x,
+                        0.0,
+                        stepped.translation.vector.z - char_pos.translation.vector.z,
+                    )
+                    .dot(dir);
+                    // 只有真的比原来走得更远才采纳：否则"抬起来又落回原地"
+                    // 会变成一次白嫖的高度抖动。
+                    if step_h > got_h + 1e-4 {
+                        new_pos = stepped;
+                    }
+                }
+            }
+        }
+
+        // ---- 自实现 snap_to_ground ----
+        // 上游的 snap 挂在 `grounded_at_starting_pos` 上，而它对胶囊整体失效
+        // （见 character.rs 模块文档）。这里按同款条件重写：
+        //   起始着地 + 本帧净位移向下 + 落点在 snap 距离内 → 贴合下去。
+        // 逐条对齐 rapier：`result.translation.dot(up) < -1e-5` 才 snap，
+        // 所以起跳/上升帧绝不被吸附（否则跳跃会被 snap 吃掉）。
+        //
+        // 贴合目标是**皮肤的静悬距**，不是零间隙。这条是实测换来的：贴到 0 会
+        // 正好踩进上面那个空函数的坑，下一帧扫掠返回 None，三帧内沉进地面。
+        // 门槛从 rapier 的"净位移向下"放宽成"不是在向上动"：皮肤层约束会把
+        // 平地/台阶边缘的竖直期望压到 0，若还要求"净位移向下"，走下矮台阶时
+        // 就永远不会被吸附（角色会先腾空一帧）。跳跃（desired.y > 0）仍然排除。
+        if grounded_at_start && c.snap_to_ground > 1e-4 && desired.y <= 1.0e-5 {
+            if let Some((_, gap)) = self
+                .probe_ground(handle, &c, &new_pos, lookahead + c.skin_width)
+                .filter(|(normal, _)| normal.dot(Vec3::Y) >= GROUND_NORMAL_MIN_DOT)
+            {
+                let rest = crate::character::rest_gap(&c);
+                if gap > rest + 1e-4 && gap <= c.snap_to_ground {
+                    new_pos.translation.vector -= rapier3d::math::Vector::y() * (gap - rest);
+                }
+            }
+        }
+
+        // ---- 传感器（trigger）重叠 ----
+        // 传感器不挡路（Unity 语义），但"走进触发区"必须能发事件。角色与传感器
+        // 永远不会产生物理接触（扫掠排除了它们，它们本来也不挡），所以这里单独
+        // 用一次重叠查询把传感器并进接触集合 —— 运行时那边不需要知道区别，
+        // 差分出来的 enter/exit 与实体碰撞完全同款。
+        let sensor_filter = QueryFilter {
+            flags: QueryFilterFlags::EXCLUDE_SOLIDS,
+            ..filter
+        };
+        self.query_pipeline.intersections_with_shape(
+            &self.rigid_body_set,
+            &self.collider_set,
+            &new_pos,
+            &shape,
+            sensor_filter,
+            |handle| {
+                if let Some(body) = self.resolve_collider_body(handle) {
+                    contacts.push(body);
+                }
+                true
+            },
+        );
+
+        // 位置写回。只动平移、保留朝向：角色朝向是渲染/脚本层的事，
+        // 物理层不该因为它撞了个墙角就悄悄转个向。
+        let rb = self.rigid_body_set.get_mut(handle)?;
+        rb.set_position(new_pos, true);
+
+        // 实际位移从最终位置反算：snap 与陷地自救的修正都要如实报给调用方，
+        // 否则运行时的速度积分会和真实位置悄悄脱节。
+        let effective = Vec3::new(
+            new_pos.translation.vector.x - char_pos.translation.vector.x,
+            new_pos.translation.vector.y - char_pos.translation.vector.y,
+            new_pos.translation.vector.z - char_pos.translation.vector.z,
+        );
+
+        // ---- 最终着地判定与地面法线 ----
+        // 法线探测距离宽容到 snap 距离（下滑时也能拿到坡面法线）；
+        // grounded 判定则严格用 predict_ground 的间隙窗口。
+        let (ground_normal, grounded) = match self
+            .probe_ground(handle, &c, &new_pos, lookahead)
+        {
+            Some((normal, gap)) => (
+                normal,
+                normal.dot(Vec3::Y) >= GROUND_NORMAL_MIN_DOT && gap <= prediction + 1e-5,
+            ),
+            None => (Vec3::Y, false),
+        };
+
+        Some(CharacterMoveResult {
+            effective_translation: effective,
+            grounded,
+            sliding_down_slope: movement.is_sliding_down_slope || steep_slide,
+            ground_normal,
+            collisions,
+            contacts,
+        })
+    }
+
+    /// 直接跑一次 `move_shape` 试探（不写回任何状态）。
+    fn probe_move(
+        &self,
+        controller: &KinematicCharacterController,
+        shape: &Capsule,
+        pos: &Isometry<f32>,
+        translation: Vec3,
+        filter: QueryFilter,
+        dt: f32,
+    ) -> EffectiveCharacterMovement {
+        controller.move_shape(
+            dt,
+            &self.rigid_body_set,
+            &self.collider_set,
+            &self.query_pipeline,
+            shape,
+            pos,
+            glam_to_na_vec3(translation),
+            filter,
+            |_| {},
+        )
+    }
+
+    /// 自动上台阶：抬到台阶高度 → 水平前进 → 贴回地面，返回落点。
+    ///
+    /// # 为什么自己写而不是用 rapier 的 `autostep`
+    ///
+    /// 上游实现对胶囊角色不可用（两条实测结论见
+    /// [`build_rapier_controller`](crate::character::build_rapier_controller)
+    /// 里关掉 autostep 的注释）。这里只用 `move_shape` 做三次试探，台阶高度
+    /// 判定、皮肤间隙、坡面投影全部与常规移动共用同一套代码 —— 没有第二套
+    /// 穿透规则，也就没有第二类"只在台阶上才出现"的 bug。
+    ///
+    /// # 为什么要往前多推一个半径
+    ///
+    /// 胶囊的最低接触点在**底面中心**。只前进原来那点距离的话，中心还在台
+    /// 阶边缘之外，向下探测打到的是下一层地面，角色会被"抬起来又放回原地"，
+    /// 却已经横向挤进了台阶侧面（实测：直接穿过去）。所以这里把前进距离
+    /// 补到"中心至少跨过一个半径"，落地才算真的踩上了台阶。
+    // 参数多是因为它是一段纯几何试探：控制器、形状、起点、期望、高度、半径、
+    // 间隙、过滤器、dt 全都是输入。打包成结构体只会把这层直白的调用藏起来。
+    #[allow(clippy::too_many_arguments)]
+    fn try_step_up(
+        &self,
+        controller: &KinematicCharacterController,
+        shape: &Capsule,
+        char_pos: &Isometry<f32>,
+        desired: Vec3,
+        step_height: f32,
+        radius: f32,
+        rest: f32,
+        filter: QueryFilter,
+        dt: f32,
+    ) -> Option<Isometry<f32>> {
+        let horiz = Vec3::new(desired.x, 0.0, desired.z);
+        let horiz_len = horiz.length();
+        if horiz_len < 1e-4 {
+            return None;
+        }
+        let dir = horiz / horiz_len;
+        // 中心必须越过台阶边缘，否则向下探测踩不到台面。
+        let advance = dir * (horiz_len + radius + 0.02);
+
+        // 1. 头顶得先有空间，否则就是"钻进天花板"。
+        let lift = self.probe_move(controller, shape, char_pos, Vec3::Y * step_height, filter, dt);
+        if lift.translation.y < step_height - 1e-3 {
+            return None;
+        }
+        let mut raised = *char_pos;
+        raised.translation.vector += lift.translation;
+
+        // 2. 抬起来之后能不能真的走过去。走不过去说明前面是一堵比自己高的
+        //    墙，不是台阶 —— 这一条把"贴墙起跳"挡在门外。
+        let forward = self.probe_move(controller, shape, &raised, advance, filter, dt);
+        let advanced_h = Vec3::new(forward.translation.x, 0.0, forward.translation.z).dot(dir);
+        if advanced_h < advance.length() - 1e-3 {
+            return None;
+        }
+        let mut advanced = raised;
+        advanced.translation.vector += forward.translation;
+
+        // 3. 贴回地面，且必须落在**高于原地**的表面上。
+        //    落了整整一个 `step_height`（只剩皮肤的余量）就说明前面是平地，
+        //    不是台阶 —— 那叫"抬起来又放回原地"，采纳它只会把角色塞进墙里。
+        let down_dist = step_height + 0.05;
+        let down = self.probe_move(controller, shape, &advanced, -Vec3::Y * down_dist, filter, dt);
+        if down.translation.y <= -(step_height - rest - 1e-3) {
+            return None;
+        }
+        advanced.translation.vector += down.translation;
+        Some(advanced)
+    }
+
+    /// 从胶囊中心竖直向下探测脚下表面，返回 `(法线, 法向间隙)`。
+    ///
+    /// 间隙 = `竖直落距 × n.y − (half_height + radius)`，也就是**沿地面法线**量的
+    /// 脚底高度差；平地上退化成"脚底离地多少米"。
+    ///
+    /// 三个设计点都是踩过坑才定下来的：
+    ///
+    /// 1. **原点取胶囊中心，不取脚底球心**。角色一旦陷进地面，脚底球心已经在
+    ///    地表以下，向下射线只会打到地板的**底面**（法线朝下被过滤），于是
+    ///    "陷得越深越探不到地面"，自救逻辑彻底失效。
+    /// 2. **乘 `n.y` 换算成法向距离**。斜坡上竖直落距会长于真实间隙（45° 时
+    ///    长 41%），直接拿来比 `predict_ground` 会把"稳站坡上"误判成悬空。
+    /// 3. `solid = true`，但 `toi == 0`（中心已在碰撞体内部）视为探不到：那时
+    ///    法线不可信，宁可报"没有地面"也不要把角色往某个随机方向弹。
+    ///
+    /// `extra` 是"间隙之外还允许多探多远"：着地判定传 `predict_ground`（严），
+    /// 法线与 snap 传 `snap_to_ground`（宽）。射线长度按 2 倍预留，覆盖到 60°
+    /// 的坡（竖直落距 = 法向距离 / n.y）。
+    ///
+    /// 传感器被排除：trigger 不该承重（Unity 语义，与 `move_shape` 一致）。
+    fn probe_ground(
+        &self,
+        body_handle: RigidBodyHandle,
+        def: &CharacterController,
+        pos: &Isometry<f32>,
+        extra: f32,
+    ) -> Option<(Vec3, f32)> {
+        let c = def.sanitized();
+        let core = c.half_height() + c.radius;
+        let max_dist = ((core + extra).max(1e-3)) * 2.0;
+        let origin = pos.translation.vector;
+        let filter = QueryFilter {
+            flags: QueryFilterFlags::EXCLUDE_SENSORS,
+            groups: None,
+            exclude_collider: None,
+            exclude_rigid_body: Some(body_handle),
+            predicate: None,
+        };
+        let ray = Ray::new(
+            rapier3d::na::Point3::new(origin.x, origin.y, origin.z),
+            -rapier3d::math::Vector::y(),
+        );
+        self.query_pipeline
+            .cast_ray_and_get_normal(
+                &self.rigid_body_set,
+                &self.collider_set,
+                &ray,
+                max_dist,
+                true,
+                filter,
+            )
+            .and_then(|(_, inter)| {
+                if inter.time_of_impact <= 0.0 {
+                    return None;
+                }
+                let n = inter.normal;
+                let normal = Vec3::new(n.x, n.y, n.z);
+                Some((normal, inter.time_of_impact * n.y - core))
+            })
     }
 
     // -----------------------------------------------------------------------

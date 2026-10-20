@@ -566,6 +566,53 @@ fn register_physics(lua: &Lua, globals: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+
+    // -- 角色控制器 --------------------------------------------------------
+    globals.set(
+        "character_move",
+        lua.create_function(|_, (ctx, x, y, z): (LuaCtx, f32, f32, f32)| {
+            ctx.game().character_move(Vec3::new(x, y, z));
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "character_simple_move",
+        lua.create_function(|_, (ctx, x, y, z): (LuaCtx, f32, f32, f32)| {
+            ctx.game().character_simple_move(Vec3::new(x, y, z));
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "character_jump",
+        lua.create_function(|_, (ctx, speed): (LuaCtx, f32)| {
+            Ok(ctx.game().character_jump(speed))
+        })?,
+    )?;
+    globals.set(
+        "character_velocity",
+        lua.create_function(|lua, ctx: LuaCtx| vec3_to_lua(lua, ctx.game().character_velocity()))?,
+    )?;
+    globals.set(
+        "character_set_velocity",
+        lua.create_function(|_, (ctx, x, y, z): (LuaCtx, f32, f32, f32)| {
+            ctx.game().character_set_velocity(Vec3::new(x, y, z));
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "character_is_grounded",
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().character_is_grounded()))?,
+    )?;
+    globals.set(
+        "character_ground_normal",
+        lua.create_function(|lua, ctx: LuaCtx| {
+            vec3_to_lua(lua, ctx.game().character_ground_normal())
+        })?,
+    )?;
+    globals.set(
+        "character_is_sliding",
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().character_is_sliding()))?,
+    )?;
     Ok(())
 }
 

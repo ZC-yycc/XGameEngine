@@ -84,6 +84,23 @@ impl ComponentMap {
             .and_then(|b| b.downcast_mut::<T>())
     }
 
+    /// 获取组件的可变引用；不存在时用 `make` 造一个插进去。
+    ///
+    /// 给"每帧都要读改写一份运行时状态"的场景用（角色控制器的速度 /
+    /// 着地状态就是典型）：先 `get` 再 `insert` 的写法每次都要重新装箱，
+    /// 1000 个角色 60Hz 就是每秒 6 万次分配；这里命中时零分配。
+    pub fn get_or_insert_with<T: Component>(&mut self, make: impl FnOnce() -> T) -> &mut T {
+        let entry = self
+            .inner
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Box::new(make()));
+        // 键就是 `TypeId::of::<T>()`，装进去的也一定是 `T` —— 不匹配只可能是
+        // `ComponentMap` 自己被改坏了。
+        entry
+            .downcast_mut::<T>()
+            .expect("ComponentMap 内部类型与 TypeId 不一致")
+    }
+
     /// 检查是否包含某类型的组件。
     pub fn has<T: Component>(&self) -> bool {
         self.inner.contains_key(&TypeId::of::<T>())
