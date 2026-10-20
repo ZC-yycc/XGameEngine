@@ -69,7 +69,8 @@
   `window`（标题与尺寸）/ `runtime`（重力、固定步长，已过容错夹取 —— JSON
   里不会出现 NaN）/ `render`（`exposure` / `tone_map` / `bloom`
   {`intensity` / `threshold` / `knee`} / `sky` {`enabled` / `intensity` /
-  `zenith` / `horizon` / `ground` / `sun_size` / `sun_intensity`} —— 画面设置
+  `zenith` / `horizon` / `ground` / `sun_size` / `sun_intensity`} /
+  `fxaa` {`enabled`} —— 画面设置
   真相源，
   `run_headless` 截的图按它渲染；泛光与天空数值按 f32 存储，JSON 里是精确加宽的
   f64，比较时按 f32 精度留容差）/ `scenes` / `scripts` / `prefabs` 清单。

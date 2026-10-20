@@ -484,6 +484,9 @@ impl SceneRenderer {
         // 翻倍"会看不到视口有任何反应（材质字段曾踩过同一类坑，见本函数文档）。
         hash = mix_bits(hash, render.exposure.to_bits() as u64);
         hash = mix_bits(hash, render.tone_map as u64);
+        // FXAA 是后处理链的最后一趟：开关决定目标像素是不是"再过一遍边缘
+        // 平滑"，漏进指纹的话在 ⚙ 里勾选它视口会纹丝不动。
+        hash = mix_bits(hash, render.fxaa.enabled as u64);
         hash = mix_bits(hash, render.bloom.intensity.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.threshold.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.knee.to_bits() as u64);
@@ -1110,6 +1113,14 @@ mod tests {
                 ..Default::default()
             }),
             "切换色调映射没进指纹"
+        );
+        assert_ne!(
+            base,
+            hashed(RenderConfig {
+                fxaa: xgame_core::FxaaConfig { enabled: true },
+                ..Default::default()
+            }),
+            "切换 FXAA 没进指纹（勾了它视口不动）"
         );
         // Bloom 三件套也全是后处理输入：漏掉任何一项 = 调它视口纹丝不动。
         for render in [

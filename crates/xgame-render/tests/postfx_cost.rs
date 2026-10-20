@@ -52,7 +52,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use xgame_core::{BloomConfig, Entity, Light, RenderConfig, Scene, SkyConfig};
+use xgame_core::{BloomConfig, Entity, FxaaConfig, Light, RenderConfig, Scene, SkyConfig};
 use xgame_math::glam::{Mat4, Vec3};
 use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::GltfMesh;
@@ -453,11 +453,12 @@ fn run_round(
     }
 }
 
-/// 一轮的完整读数（三条路径交替测，见 `postfx_cost` 主流程）。
+/// 一轮的完整读数（四条路径交替测，见 `postfx_cost` 主流程）。
 struct RoundTriple {
     ldr: Round,
     hdr: Round,
     bloom: Round,
+    fxaa: Round,
 }
 
 /// `sky_ibl_cost` 的一轮读数（复用 `Round`，但字段名按天空三档来）。
@@ -500,6 +501,13 @@ fn postfx_cost() {
         },
         ..RenderConfig::default()
     };
+    // 第四档：只有 FXAA（无 Bloom）。两份独立实例的理由同上 —— scratch
+    // 纹理与绑定组在预热期建好，之后恒定复用。
+    let mut fxaa = HdrPath::new(&device, &adapter);
+    let fxaa_settings = RenderConfig {
+        fxaa: FxaaConfig { enabled: true },
+        ..RenderConfig::default()
+    };
     println!(
         "  MSAA: 旧路径 x{}（sRGB 目标）/ 新路径 x{}（HDR 附件）",
         ldr.pipeline.sample_count(),
@@ -523,6 +531,10 @@ fn postfx_cost() {
         bloom.frame(
             &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye,
             bloom_settings,
+        );
+        fxaa.frame(
+            &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+            fxaa_settings,
         );
     }
     device.poll(wgpu::Maintain::Wait);
@@ -575,8 +587,14 @@ fn postfx_cost() {
                 bloom_settings,
             );
         });
+        let f = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
+            fxaa.frame(
+                &device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+                fxaa_settings,
+            );
+        });
         println!(
-            "  第 {} 轮: 旧 场景{:.1}/后处理{:.1}/CPU{:.1} | ACES 场景{:.1}/后处理{:.1}/CPU{:.1} | Bloom 场景{:.1}/后处理{:.1}/CPU{:.1}（µs/帧）",
+            "  第 {} 轮: 旧 场景{:.1}/后处理{:.1}/CPU{:.1} | ACES 场景{:.1}/后处理{:.1}/CPU{:.1} | Bloom 场景{:.1}/后处理{:.1}/CPU{:.1} | FXAA 场景{:.1}/后处理{:.1}/CPU{:.1}（µs/帧）",
             triples.len() + 1,
             l.scene_us,
             l.post_us,
@@ -587,11 +605,15 @@ fn postfx_cost() {
             b.scene_us,
             b.post_us,
             b.cpu_us,
+            f.scene_us,
+            f.post_us,
+            f.cpu_us,
         );
         triples.push(RoundTriple {
             ldr: l,
             hdr: h,
             bloom: b,
+            fxaa: f,
         });
     }
 
@@ -609,6 +631,9 @@ fn postfx_cost() {
     let bloom_scene = pick(|r| r.scene_us, |p| &p.bloom);
     let bloom_post = pick(|r| r.post_us, |p| &p.bloom);
     let bloom_cpu = pick(|r| r.cpu_us, |p| &p.bloom);
+    let fxaa_scene = pick(|r| r.scene_us, |p| &p.fxaa);
+    let fxaa_post = pick(|r| r.post_us, |p| &p.fxaa);
+    let fxaa_cpu = pick(|r| r.cpu_us, |p| &p.fxaa);
 
     // P2.5 的教训：基准必须断言"活真干了" —— 如果时间戳全 0（某后端没实现
     // 写入），这里的数字就成了"空调度"的假快，必须自己把它打红。
@@ -632,6 +657,17 @@ fn postfx_cost() {
         "Bloom 路径的场景段应当与纯 ACES 几乎一致（都是同一段场景渲染）：\
          {bloom_scene:.1} vs {hdr_scene:.1} µs"
     );
+    // FXAA 是第二趟全屏 pass + 一张 LDR scratch，后处理段必须比纯 ACES 贵；
+    // 若 scratch 没建、pass 没记录，差额就是 0。
+    assert!(
+        fxaa_post > hdr_post + 0.5,
+        "FXAA 路径的后处理段与纯 ACES 无明显差别（{fxaa_post:.1} vs {hdr_post:.1} µs）：\
+         pass 是不是没跑？"
+    );
+    assert!(
+        (fxaa_scene - hdr_scene).abs() < 5.0,
+        "FXAA 路径的场景段应当与纯 ACES 几乎一致：{fxaa_scene:.1} vs {hdr_scene:.1} µs"
+    );
 
     println!(
         "postfx_cost[中位数]: 旧 LDR 直渲 场景 {ldr_scene:.1} + 后处理 {ldr_post:.1} = {:.1} µs/帧（CPU {ldr_cpu:.1}）",
@@ -645,6 +681,10 @@ fn postfx_cost() {
         "postfx_cost[中位数]: HDR + ACES + Bloom 场景 {bloom_scene:.1} + 后处理 {bloom_post:.1} = {:.1} µs/帧（CPU {bloom_cpu:.1}）",
         bloom_scene + bloom_post
     );
+    println!(
+        "postfx_cost[中位数]: HDR + ACES + FXAA 场景 {fxaa_scene:.1} + 后处理 {fxaa_post:.1} = {:.1} µs/帧（CPU {fxaa_cpu:.1}）",
+        fxaa_scene + fxaa_post
+    );
     let delta = (hdr_scene + hdr_post) - (ldr_scene + ldr_post);
     println!(
         "postfx_cost[差额]: ACES 相对旧路径 {delta:+.1} µs/帧（{:+.1}%），其中后处理 pass {hdr_post:.1} µs、\
@@ -657,6 +697,12 @@ fn postfx_cost() {
         "postfx_cost[差额]: Bloom 相对 ACES {bloom_delta:+.1} µs/帧（{:+.1}%）—— \
          亮部提取 + 降采样 + 6 趟可分离模糊全在半分辨率以下",
         bloom_delta / (hdr_scene + hdr_post) * 100.0
+    );
+    let fxaa_delta = (fxaa_scene + fxaa_post) - (hdr_scene + hdr_post);
+    println!(
+        "postfx_cost[差额]: FXAA 相对 ACES {fxaa_delta:+.1} µs/帧（{:+.1}%）—— \
+         一张全尺寸 LDR scratch + 一趟 9 次采样（5 抽头 + 亚像素）的全屏 pass",
+        fxaa_delta / (hdr_scene + hdr_post) * 100.0
     );
 }
 

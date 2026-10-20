@@ -534,6 +534,9 @@ impl HeadlessReport {
                     "sun_size": self.render.sky.sun_size,
                     "sun_intensity": self.render.sky.sun_intensity,
                 },
+                "fxaa": {
+                    "enabled": self.render.fxaa.enabled,
+                },
             },
             "scene_dump": self.scene_dump,
             "screenshot": match &self.screenshot {
@@ -1410,7 +1413,7 @@ mod tests {
         for key in ["available", "active", "cached_clips", "failed_clips"] {
             assert!(value["audio"].get(key).is_some(), "audio 缺字段 {key}");
         }
-        for key in ["exposure", "tone_map", "bloom", "sky"] {
+        for key in ["exposure", "tone_map", "bloom", "sky", "fxaa"] {
             assert!(value["render"].get(key).is_some(), "render 缺字段 {key}");
         }
         assert_eq!(
@@ -1435,6 +1438,9 @@ mod tests {
                 "sky.{key} 应当是三通道数组"
             );
         }
+        // FXAA 同样默认关；报告里保留完整开关，截图是否走过第二趟 pass
+        // 不用靠猜（低采样 / 细长几何时这决定了边缘像素的差异）。
+        assert_eq!(value["render"]["fxaa"]["enabled"], false);
         assert!(value["scene_dump"].is_null(), "没给 --dump-scene 时是 null");
         assert!(value["screenshot"].is_null(), "没给 --screenshot 时是 null");
         cleanup(&project);

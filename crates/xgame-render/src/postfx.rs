@@ -48,6 +48,23 @@
 //!   跑，叠出由近及远的柔和光晕；合成权重 `[0.5, 0.3, 0.2]`（和为 1，
 //!   与强度相乘后是"光晕总能量"的线性度量）。
 //!
+//! # FXAA：在**显示空间**里抹平边缘
+//!
+//! ```text
+//!  HDR ──合成(曝光/Bloom/色调映射)──▶ LDR scratch ──FXAA──▶ LDR 显示目标
+//! ```
+//!
+//! - **默认关闭**：FXAA 会改变画面（哪怕只在边缘），与 Bloom 同属风格参数。
+//!   关着时整段跳过 —— 不建 scratch 纹理、不记录 pass，画面与上线前逐位一致。
+//! - **在显示空间做 luma 与混合**：边缘检测的阈值是按"人眼看到的对比度"
+//!   定的（0.0833 / 0.166），在线性光里做会让暗部边缘被过度平滑、亮部欠平滑。
+//!   输出格式是 sRGB 时采样值由硬件解码成线性，着色器先编码回显示空间再算，
+//!   最后解码回线性交给硬件第二次编码；非 sRGB 目标本身存的就是显示值，
+//!   不再来回转换（`manual_srgb` 的同一套约定，见 `needs_manual_srgb`）。
+//! - **必须用 `textureSampleLevel`**：边缘检测的分支建立在采样值上（非一致
+//!   控制流），WGSL 只允许显式 LOD 的采样出现在这种位置。后处理是 1:1，
+//!   LOD 恒为 0，没有画质代价。
+//!
 //! # 色调映射曲线的选择（ACES）
 //!
 //! 用的是 Stephen Hill 的 ACES 拟合（RRT + ODT 的有理函数拟合），三.js / Unity
@@ -220,6 +237,17 @@ struct BloomParams {
     direction: [f32; 2],
 }
 
+/// FXAA 的 uniform（必须与 WGSL 逐字节对齐）。
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct FxaaParams {
+    /// 源纹理的 texel 尺寸（边缘搜索步长的基数）。
+    texel: [f32; 2],
+    /// 1 = 源 / 目标是 sRGB 格式：采样值是线性的，需先编码到显示空间。
+    srgb: u32,
+    _pad: u32,
+}
+
 /// Bloom 的 mip 级数（½、¼、⅛ 三级）。
 const BLOOM_LEVELS: usize = 3;
 /// 三级 mip 在合成时的权重（和为 1）：小 mip 更模糊、覆盖更广，权重更低。
@@ -265,6 +293,13 @@ pub struct PostFx {
     /// 不记录 pass —— 真零成本）；一旦关闭就把已建的链丢掉（不养这份显存，
     /// 开关是 Inspector 里的手动操作，重建一次的代价无感）。
     bloom: Option<BloomChain>,
+    /// FXAA 的管线（只有 `FxaaConfig::enabled` 才会被记录）。
+    fxaa_pipelines: FxaaPipelines,
+    /// FXAA 的 LDR scratch：合成 pass 先写这里，再由 FXAA 写进真正的目标。
+    /// **惰性建**：关着时保持 `None`（与 Bloom 链同一条纪律：关闭 = 真零成本）。
+    fxaa_scratch: Option<FxaaScratch>,
+    /// 目标的格式（FXAA 的 sRGB 显示空间换算按它分支）。
+    output_format: wgpu::TextureFormat,
     /// 目标是否为 sRGB 格式（决定写 uniform 里的手动编码标志）。
     manual_srgb: bool,
 }
@@ -394,16 +429,20 @@ impl PostFx {
             bind_cache: None,
             bloom_pipelines: BloomPipelines::new(device),
             bloom: None,
+            fxaa_pipelines: FxaaPipelines::new(device, output_format),
+            fxaa_scratch: None,
+            output_format,
             manual_srgb: needs_manual_srgb(output_format),
         }
     }
 
-    /// 记录一趟：源 HDR 视图 → 曝光 →（Bloom 光晕）→ 色调映射 → 目标视图。
+    /// 记录后处理：源 HDR 视图 → 曝光 →（Bloom 光晕）→ 色调映射 →
+    /// （FXAA 开启时先写 LDR scratch，再平滑到目标）。
     ///
     /// `source_gen` 是宿主对"当前源视图是第几代目标"的计数：目标重建时 +1。
-    /// `source_size` 是源的像素尺寸：Bloom 链按它定各级分辨率，尺寸变了就重建
-    /// （截图器这类恒定 0 代的宿主只有尺寸这一个重建判据）。绑定组按二者与
-    /// Bloom 开关缓存（见 `bind_cache` 的说明）。
+    /// `source_size` 是源的像素尺寸：Bloom 链与 FXAA scratch 都按它定尺寸，
+    /// 尺寸变了就重建（截图器这类恒定 0 代的宿主只有尺寸这一个重建判据）。
+    /// 合成绑定组按源代、尺寸与 Bloom 开关缓存（见 `bind_cache` 的说明）。
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -508,7 +547,44 @@ impl PostFx {
         }
         let bind_group = &self.bind_cache.as_ref().expect("刚写入过缓存").1;
 
-        record_fullscreen_pass(encoder, &self.pipeline, bind_group, dest, "postfx_pass");
+        // FXAA 关着时合成 pass 直接写显示目标、scratch 丢掉（不养显存）；
+        // 开着时先写 scratch，再由第二趟把平滑后的画面写进 `dest`。
+        let fxaa_on = settings.fxaa.enabled;
+        if !fxaa_on {
+            self.fxaa_scratch = None;
+        }
+        if fxaa_on
+            && self.fxaa_scratch.as_ref().map(|scratch| scratch.size) != Some(source_size)
+        {
+            self.fxaa_scratch = Some(FxaaScratch::new(
+                device,
+                source_size,
+                self.output_format,
+                &self.fxaa_pipelines,
+                &self.sampler,
+            ));
+        }
+        let composite_target = match self.fxaa_scratch.as_ref() {
+            Some(scratch) => &scratch.view,
+            None => dest,
+        };
+        record_fullscreen_pass(
+            encoder,
+            &self.pipeline,
+            bind_group,
+            composite_target,
+            "postfx_pass",
+        );
+
+        if let Some(scratch) = self.fxaa_scratch.as_ref() {
+            record_fullscreen_pass(
+                encoder,
+                &self.fxaa_pipelines.pipeline,
+                &scratch.bind_group,
+                dest,
+                "fxaa_pass",
+            );
+        }
     }
 }
 
@@ -888,6 +964,301 @@ impl BloomChain {
         }
     }
 }
+
+/// FXAA 的管线（全屏三角形；一条布局 = 纹理 + 采样器 + uniform）。
+///
+/// 与 Bloom 的管线分开是因为目标格式不同：Bloom 全程 `HDR_FORMAT`，
+/// FXAA 读写的都是**显示目标格式**（sRGB 或非 sRGB），必须与 scratch 一致。
+struct FxaaPipelines {
+    bgl: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl FxaaPipelines {
+    fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat) -> Self {
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fxaa_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fxaa_layout"),
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fxaa_shader"),
+            source: wgpu::ShaderSource::Wgsl(FXAA_WGSL.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("fxaa_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: output_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        Self { bgl, pipeline }
+    }
+}
+
+/// FXAA 的 LDR scratch：合成 pass 的落点、FXAA pass 的源。
+///
+/// 尺寸跟源（= 显示目标）走；尺寸变化时整块重建（绑定组引用视图，
+/// 视图对象换了就必须重建）。纹理本体在视图建好后放手：视图持有 `Arc`。
+struct FxaaScratch {
+    size: (u32, u32),
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+}
+
+impl FxaaScratch {
+    fn new(
+        device: &wgpu::Device,
+        size: (u32, u32),
+        format: wgpu::TextureFormat,
+        pipelines: &FxaaPipelines,
+        sampler: &wgpu::Sampler,
+    ) -> Self {
+        let (width, height) = (size.0.max(1), size.1.max(1));
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("fxaa_scratch"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fxaa_params"),
+            contents: bytemuck::bytes_of(&FxaaParams {
+                texel: [1.0 / width as f32, 1.0 / height as f32],
+                srgb: u32::from(format.is_srgb()),
+                _pad: 0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fxaa_bg"),
+            layout: &pipelines.bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+            ],
+        });
+        Self {
+            size: (width, height),
+            view,
+            bind_group,
+        }
+    }
+}
+
+/// FXAA 3.11 的"质量"路径（5 抽头，`FXAA_QUALITY__PRESET 12` 一族）。
+///
+/// 亚像素混合 0.75、方向收缩 1/8（下界 1/128）、跨度上限 8 texel 都是 FXAA 3.11
+/// 的公开口径。**唯一的偏离是边缘阈值**：stock 是 1/24 与 1/8，这里取 1/12 与
+/// 1/6（更严一档）—— 本引擎默认已经开着 MSAA，stock 阈值叠上去会明显整幅柔化，
+/// 而 FXAA 在这里的职责只是收拾"MSAA 覆盖不到的走样"。
+///
+/// 这些数字是 Lottes 按"人眼在 8 位显示值上能看出台阶"标定的，改一个就要
+/// 重新评估"平坦区域是否被无辜柔化"（测试里的硬台阶 / 中间调 / 平坦角点三项
+/// 就是为此设的护栏）。
+///
+/// 与 Bloom 一样是"全屏三角形 + 单纹理"；差异只在采样方式：边缘检测的
+/// 分支建立在采样值上，WGSL 的一致性控制流规则不允许隐式 LOD 采样，所以
+/// 全部走 `textureSampleLevel(..., 0.0)`（后处理 1:1，LOD 本就是 0）。
+const FXAA_WGSL: &str = r#"
+struct FxaaParams {
+    texel: vec2<f32>,   // 源纹理 texel 尺寸
+    srgb: u32,          // 1 = 源 / 目标是 sRGB 格式（采样值是线性的）
+    _pad: u32,
+}
+
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_smp: sampler;
+@group(0) @binding(2) var<uniform> params: FxaaParams;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
+    var xy = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    let p = xy[index];
+    var out: VsOut;
+    out.clip = vec4<f32>(p, 0.0, 1.0);
+    out.uv = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    return out;
+}
+
+fn luma(c: vec3<f32>) -> f32 {
+    // Rec.601 权重：FXAA 原实现的 luma 口径，与阈值常量配套，别换成 Rec.709。
+    return dot(c, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(lo, hi, c > vec3<f32>(0.0031308));
+}
+
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(lo, hi, c > vec3<f32>(0.04045));
+}
+
+// sRGB 目标的采样值是硬件解码后的线性光；luma 阈值是显示空间的量，
+// 先编码再比较。非 sRGB 目标存的本来就是显示值（合成 pass 已手动编码）。
+fn to_display(c: vec3<f32>) -> vec3<f32> {
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (params.srgb == 1u) {
+        return srgb_encode(x);
+    }
+    return x;
+}
+
+// 混合结果（显示空间）→ 目标着色器输出空间。sRGB 目标要解码回线性，
+// 由硬件在写入时再编码一次；非 sRGB 目标原样写。
+fn from_display(c: vec3<f32>) -> vec3<f32> {
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (params.srgb == 1u) {
+        return srgb_decode(x);
+    }
+    return x;
+}
+
+@fragment
+fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
+    let t = params.texel;
+    let uv = input.uv;
+    let raw_m = textureSampleLevel(src_tex, src_smp, uv, 0.0).rgb;
+    let c_m = to_display(raw_m);
+    let c_nw = to_display(textureSampleLevel(src_tex, src_smp, uv + vec2<f32>(-1.0, -1.0) * t, 0.0).rgb);
+    let c_ne = to_display(textureSampleLevel(src_tex, src_smp, uv + vec2<f32>( 1.0, -1.0) * t, 0.0).rgb);
+    let c_sw = to_display(textureSampleLevel(src_tex, src_smp, uv + vec2<f32>(-1.0,  1.0) * t, 0.0).rgb);
+    let c_se = to_display(textureSampleLevel(src_tex, src_smp, uv + vec2<f32>( 1.0,  1.0) * t, 0.0).rgb);
+
+    let l_m = luma(c_m);
+    let l_nw = luma(c_nw);
+    let l_ne = luma(c_ne);
+    let l_sw = luma(c_sw);
+    let l_se = luma(c_se);
+    let l_min = min(l_m, min(min(l_nw, l_ne), min(l_sw, l_se)));
+    let l_max = max(l_m, max(max(l_nw, l_ne), max(l_sw, l_se)));
+    let contrast = l_max - l_min;
+
+    // 亚像素项：中心与四邻均值的差占局部对比度的比例，平滑后按 0.75 混入。
+    // 平坦区域这一项为 0 —— 这是"不做整幅柔焦"的第一道闸门。
+    let average = (c_nw + c_ne + c_sw + c_se) * 0.25;
+    let ratio = clamp(abs(luma(average) - l_m) / max(contrast, 0.0001), 0.0, 1.0);
+    let subpix = smoothstep(0.0, 1.0, ratio) * 0.75;
+
+    // 五抽头范围低于阈值 ⇒ 无边缘。原样返回中心像素（不走 encode/decode
+    // 往返，保证平坦区逐字节不变）；亚像素项非零时才用混合结果。
+    if (contrast < max(1.0 / 12.0, l_max * (1.0 / 6.0))) {
+        if (subpix <= 0.0) {
+            return vec4<f32>(raw_m, 1.0);
+        }
+        return vec4<f32>(from_display(mix(c_m, average, subpix)), 1.0);
+    }
+
+    // 边缘方向：对角亮度差之和的梯度方向。dirReduce 防止平坦方向上的
+    // 除零 / 爆炸；再按 8 texel 上限收缩（步子太大会把远处内容拖进来）。
+    var dir = vec2<f32>(
+        -((l_nw + l_ne) - (l_sw + l_se)),
+        ((l_nw + l_sw) - (l_ne + l_se)),
+    );
+    let dir_reduce = max((l_nw + l_ne + l_sw + l_se) * 0.25 * 0.125, 1.0 / 128.0);
+    let rcp_dir_min = 1.0 / (min(abs(dir.x), abs(dir.y)) + dir_reduce);
+    dir = clamp(dir * rcp_dir_min, vec2<f32>(-8.0), vec2<f32>(8.0)) * t;
+
+    // 沿边缘方向取 4 个点（1/3、2/3 处的两点先平均成 A；±½ 处两点与 A
+    // 再平均成 B）。B 超出局部亮度范围说明混进了别的结构，退回 A。
+    let c_a = 0.5 * (
+        to_display(textureSampleLevel(src_tex, src_smp, uv + dir * (1.0 / 3.0 - 0.5), 0.0).rgb)
+        + to_display(textureSampleLevel(src_tex, src_smp, uv + dir * (2.0 / 3.0 - 0.5), 0.0).rgb)
+    );
+    let c_b = c_a * 0.5 + 0.25 * (
+        to_display(textureSampleLevel(src_tex, src_smp, uv - dir * 0.5, 0.0).rgb)
+        + to_display(textureSampleLevel(src_tex, src_smp, uv + dir * 0.5, 0.0).rgb)
+    );
+    let l_b = luma(c_b);
+    let c_out = select(c_b, c_a, l_b < l_min || l_b > l_max);
+    return vec4<f32>(from_display(c_out), 1.0);
+}
+"#;
 
 /// 后处理着色器。
 ///

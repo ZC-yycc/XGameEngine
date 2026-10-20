@@ -193,6 +193,30 @@ impl ScreenshotRenderer {
     /// 按 **HDR 格式**的能力选（与编辑器视口同一规则 —— 采样数是格式相关的，
     /// 拿显示格式问出来的答案在 HDR 附件上不一定成立）。
     pub fn new(project_root: &Path, width: u32, height: u32) -> Result<Self> {
+        Self::build(project_root, width, height, None)
+    }
+
+    /// 测试专用：强制 MSAA 采样数。
+    ///
+    /// FXAA 的价值在**低采样档位**最明显（4× MSAA 已经把几何边缘磨平了）。
+    /// 要证明 FXAA 真的在干活，测试得把 MSAA 关到 1×，否则断言只能看到
+    /// 很小的像素差，容易变成"阈值调到刚好能过"的假测试。
+    #[cfg(test)]
+    fn new_with_sample_count(
+        project_root: &Path,
+        width: u32,
+        height: u32,
+        sample_count: u32,
+    ) -> Result<Self> {
+        Self::build(project_root, width, height, Some(sample_count))
+    }
+
+    fn build(
+        project_root: &Path,
+        width: u32,
+        height: u32,
+        forced_sample_count: Option<u32>,
+    ) -> Result<Self> {
         let width = width.max(1);
         let height = height.max(1);
 
@@ -221,7 +245,9 @@ impl ScreenshotRenderer {
         .context("创建 GPU 设备失败")?;
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let sample_count = supported_sample_count(&adapter, HDR_FORMAT);
+        let sample_count = forced_sample_count
+            .unwrap_or_else(|| supported_sample_count(&adapter, HDR_FORMAT))
+            .max(1);
         log::info!(
             "截图渲染：{}（MSAA x{sample_count}）{width}x{height}",
             adapter.get_info().name
@@ -509,7 +535,10 @@ pub fn load_png_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
 mod tests {
     use super::*;
 
-    use xgame_core::{BloomConfig, Entity, Light, MaterialOverride, SkyConfig, ToneMapMode};
+    use xgame_core::{
+        BloomConfig, Entity, FxaaConfig, Light, MaterialOverride, SkyConfig, ToneMapMode,
+    };
+    use xgame_math::glam::Quat;
 
     use crate::sky::SkyUniform;
 
@@ -745,6 +774,84 @@ mod tests {
         }
     }
 
+    /// FXAA 的价值在高对比度、**低采样**的斜边上最明显：用 1× MSAA 渲染
+    /// 一个绕 Z 轴旋转的薄盒，斜边必然是一格一格的硬台阶。
+    fn gpu_or_skip_msaa1(name: &str) -> Option<GpuFixture> {
+        let permit = acquire_gpu_test_permit();
+        match ScreenshotRenderer::new_with_sample_count(&std::env::temp_dir(), 320, 240, 1) {
+            Ok(renderer) => Some(GpuFixture {
+                renderer,
+                _permit: permit,
+            }),
+            Err(e) => {
+                eprintln!("跳过 {name}：{e}");
+                None
+            }
+        }
+    }
+
+    fn fxaa_probe_scene() -> Scene {
+        let mut scene = Scene::new("fxaa-edge");
+        scene.ambient = [0.01, 0.01, 0.01];
+        scene.lights = vec![Light::directional(
+            "key",
+            [0.25, -0.6, -1.0],
+            [1.0; 3],
+            2.5,
+        )];
+        scene.lights[0].casts_shadow = false;
+        let mut blade = Entity::new("Blade");
+        blade.model = "builtin://cube".to_owned();
+        blade.transform.rotation = Quat::from_rotation_z(0.35);
+        blade.transform.scale = Vec3::new(4.0, 2.6, 1.4);
+        scene.add_entity(blade);
+        scene
+    }
+
+    fn luma_of(p: [u8; 3]) -> f32 {
+        (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0
+    }
+
+    /// 相邻像素的亮度跳变超过 `threshold` 的次数（横 + 纵两向）。
+    ///
+    /// 硬台阶在 FXAA 之后会多出一两个中间值，于是"大幅跳变"变少；
+    /// 平坦区域即使有轻微噪声也不会被计入。
+    fn hard_luma_steps(rgba: &[u8], width: u32, height: u32, threshold: f32) -> usize {
+        let luma = |x: u32, y: u32| luma_of(pixel_at(rgba, width, x, y));
+        let mut count = 0;
+        for y in 0..height {
+            for x in 0..width - 1 {
+                if (luma(x + 1, y) - luma(x, y)).abs() > threshold {
+                    count += 1;
+                }
+            }
+        }
+        for y in 0..height - 1 {
+            for x in 0..width {
+                if (luma(x, y + 1) - luma(x, y)).abs() > threshold {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// 介于前景 / 背景之间的中间调像素数：抗锯齿的"灰边"就是这些像素。
+    fn midtone_pixels(rgba: &[u8], width: u32, height: u32, bg: f32, fg: f32) -> usize {
+        let lo = f32::min(bg, fg) + 0.06;
+        let hi = f32::max(bg, fg) - 0.06;
+        let mut count = 0;
+        for y in 0..height {
+            for x in 0..width {
+                let l = luma_of(pixel_at(rgba, width, x, y));
+                if l > lo && l < hi {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     /// 单个内置立方体、一盏开着的方向光（无阴影，简化像素预测）。
     fn one_cube_scene() -> Scene {
         let mut scene = Scene::new("shot");
@@ -808,8 +915,9 @@ mod tests {
     /// 同一场景渲染两遍（连渲染器都重建）：PNG 二进制逐字节一致。
     /// 这是 `--screenshot` 确定性契约在模块层的钉子。
     ///
-    /// 特意开满 Bloom：链的惰性建（首帧重建纹理与绑定组）与 9 趟 pass 的
-    /// 记录顺序都必须确定 —— 关着测只覆盖合成 pass 一条路径。
+    /// 特意开满 Bloom + FXAA：Bloom 链的惰性建（首帧重建纹理与绑定组）、
+    /// 9 趟 pass 的记录顺序、FXAA 的 scratch 惰性建与二段合成都必须确定 ——
+    /// 关着测只覆盖合成 pass 一条路径。
     #[test]
     fn two_runs_produce_identical_png_bytes() {
         let Some(mut first) = gpu_or_skip("two_runs_produce_identical_png_bytes") else {
@@ -828,6 +936,10 @@ mod tests {
         ));
         let path_a = dir.join("a.png");
         let path_b = dir.join("b.png");
+        let settings = RenderConfig {
+            fxaa: FxaaConfig { enabled: true },
+            ..bloom_settings(0.7)
+        };
 
         first
             .render_scene(
@@ -835,7 +947,7 @@ mod tests {
                 &anim,
                 None,
                 SceneLighting::new(scene.ambient, &scene.lights),
-                bloom_settings(0.7),
+                settings,
             )
             .expect("第一次渲染失败");
         let (w, h) = first.save_png(&path_a).expect("第一次落盘失败");
@@ -849,7 +961,7 @@ mod tests {
                 &anim,
                 None,
                 SceneLighting::new(scene.ambient, &scene.lights),
-                bloom_settings(0.7),
+                settings,
             )
             .expect("第二次渲染失败");
         second.save_png(&path_b).expect("第二次落盘失败");
@@ -885,6 +997,7 @@ mod tests {
                 enabled,
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 
@@ -2012,6 +2125,78 @@ mod tests {
         assert!(
             center[2] > center[0] + 30.0,
             "近处蓝色必须叠在远处红色之上（画反了会 r > b）: {center:?}"
+        );
+    }
+
+    /// **FXAA**：1× MSAA 下斜边的硬台阶必须被磨出中间调；平坦区域不许被
+    /// 无差别模糊（早期退出），否则"抗锯齿"就退化成"整幅柔焦"。
+    ///
+    /// 旧实现（没有 FXAA 这一趟）里开关只是个未接线的配置字段：开 / 关
+    /// 两张图**逐字节相同**，第一条断言就红。这正是本测试的先证红。
+    #[test]
+    fn fxaa_smooths_edges_without_touching_flat_areas() {
+        let Some(mut shot) = gpu_or_skip_msaa1("fxaa_smooths_edges_without_touching_flat_areas")
+        else {
+            return;
+        };
+        let scene = fxaa_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera =
+            ShotCamera::looking_at(Vec3::new(0.0, 0.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        let mut render = |enabled: bool| {
+            let settings = RenderConfig {
+                fxaa: FxaaConfig { enabled },
+                ..Default::default()
+            };
+            shot.render_scene(
+                &scene,
+                &anim,
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings,
+            )
+            .expect("渲染失败");
+            shot.read_rgba().expect("读回失败")
+        };
+
+        let off = render(false);
+        let on = render(true);
+        assert_ne!(off, on, "FXAA 开关没接进后处理链：两张图逐字节相同");
+
+        // 背景取左上角、前景取画面中心（薄盒正好压在视轴上）。
+        let bg = luma_of(pixel_at(&off, 320, 4, 4));
+        let fg = luma_of(pixel_at(&off, 320, 160, 120));
+        assert!(
+            (fg - bg).abs() > 0.15,
+            "测试前提：前景 / 背景必须有足够对比度（bg={bg:.3} fg={fg:.3}）"
+        );
+
+        let steps_off = hard_luma_steps(&off, 320, 240, 0.25);
+        let steps_on = hard_luma_steps(&on, 320, 240, 0.25);
+        assert!(steps_off > 200, "测试前提：1× MSAA 的斜边必须有大量硬台阶（{steps_off}）");
+        assert!(
+            steps_on < steps_off,
+            "FXAA 应当把硬台阶磨成中间调：{steps_off} → {steps_on}"
+        );
+        assert!(
+            steps_on * 10 <= steps_off * 9,
+            "平滑幅度太小（{steps_off} → {steps_on}，不足 10%）—— 检查边缘检测阈值"
+        );
+
+        let mid_off = midtone_pixels(&off, 320, 240, bg, fg);
+        let mid_on = midtone_pixels(&on, 320, 240, bg, fg);
+        assert!(
+            mid_on > mid_off,
+            "FXAA 必须增加斜边上的中间调像素：{mid_off} → {mid_on}"
+        );
+
+        // 纯背景区域（远离轮廓）必须原样保留：5 抽头范围低于阈值 ⇒ 直接
+        // 返回中心像素。整幅图都变 = 早期退出写错了。
+        assert_eq!(
+            pixel_at(&on, 320, 4, 4),
+            pixel_at(&off, 320, 4, 4),
+            "平坦背景不该被 FXAA 改动"
         );
     }
 

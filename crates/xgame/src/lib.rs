@@ -57,8 +57,8 @@ pub mod prelude {
     // -- 核心数据 ---------------------------------------------------------
     pub use xgame_core::project::{ProjectHandle, PROJECT_FILE_NAME};
     pub use xgame_core::{
-        BloomConfig, BodyKind, Entity, EntityId, GameClock, PhysicsBody, PhysicsHandle, RenderConfig,
-        Scene, ToneMapMode, Transform,
+        BloomConfig, BodyKind, Entity, EntityId, FxaaConfig, GameClock, PhysicsBody, PhysicsHandle,
+        RenderConfig, Scene, ToneMapMode, Transform,
     };
 
     // -- 检视（P1）：字段表 + 派生宏 --------------------------------------

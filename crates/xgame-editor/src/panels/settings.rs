@@ -164,7 +164,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 ui.add_space(10.0);
 
                 // ── 画面 ──
-                theme::section_bar(ui, "画面（曝光 / 色调映射 / 泛光）");
+                theme::section_bar(ui, "画面（曝光 / 色调映射 / 泛光 / FXAA）");
                 egui::Grid::new("set_render")
                     .num_columns(2)
                     .spacing([10.0, 5.0])
@@ -199,6 +199,15 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                                 .speed(0.02)
                                 .fixed_decimals(2),
                         );
+                        ui.end_row();
+
+                        ui.label("FXAA").on_hover_text(
+                            "后处理抗锯齿：平滑 MSAA 覆盖不到的几何 / 着色器走样。\
+                             默认关（MSAA 已经处理几何边缘，开着会改变旧画面）；\
+                             低采样档位或细长几何多的场景收益最明显。\
+                             需要场景先渲进 HDR 中间标，属于后处理链的最后一趟",
+                        );
+                        ui.checkbox(&mut draft.render.fxaa.enabled, "");
                         ui.end_row();
 
                         ui.label("泛光强度").on_hover_text(

@@ -58,8 +58,8 @@ mod time;
 pub use check::{check_project, CheckReport};
 pub use color::Color;
 pub use config::{
-    BloomConfig, ContentConfig, EngineConfig, RenderConfig, RuntimeConfig, SkyConfig, ToneMapMode,
-    WindowConfig,
+    BloomConfig, ContentConfig, EngineConfig, FxaaConfig, RenderConfig, RuntimeConfig, SkyConfig,
+    ToneMapMode, WindowConfig,
 };
 pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
 pub use scene::{Entity, Scene};

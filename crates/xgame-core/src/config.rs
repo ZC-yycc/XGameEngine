@@ -259,6 +259,30 @@ impl BloomConfig {
     }
 }
 
+/// FXAA 抗锯齿参数（后处理级别的边缘平滑）。
+///
+/// **默认关**：引擎的场景 pass 已经走 MSAA（默认取适配器支持的最高档，常见
+/// 4×），几何边缘本身就有硬件抗锯齿；FXAA 是给"MSAA 覆盖不到的走样"（细长
+/// 几何、着色器高频细节、低采样档位）补的一层。默认开着会改变所有旧场景的
+/// 画面，与 Bloom / 天空同一条纪律：风格 / 画质增强默认不动画面。
+///
+/// 目前只有开关，没有暴露阈值与强度：FXAA 3.11 的内部参数（subpix 0.75、
+/// edge threshold 0.166 / 0.0833）是经过大量内容验证过的一组值，先不把
+/// 调参负担转给用户。确需可调时再加字段，默认值保持不变。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FxaaConfig {
+    /// 是否启用 FXAA。
+    pub enabled: bool,
+}
+
+impl FxaaConfig {
+    /// 与默认值完全一致时不落盘（`skip_serializing_if` 用）：没开过的项目
+    /// `project.ron` 里不出现这一节。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// 程序化天空盒与环境光照（IBL）参数。
 ///
 /// 天空是一个**解析函数**：天顶 / 地平线 / 地面三段颜色渐变 + 太阳盘 + 太阳
@@ -390,6 +414,9 @@ pub struct RenderConfig {
     /// 天空盒 / 环境照明参数，见 [`SkyConfig`]。同样后加 + 默认关。
     #[serde(default, skip_serializing_if = "SkyConfig::is_default")]
     pub sky: SkyConfig,
+    /// FXAA 抗锯齿参数，见 [`FxaaConfig`]。同样后加 + 默认关。
+    #[serde(default, skip_serializing_if = "FxaaConfig::is_default")]
+    pub fxaa: FxaaConfig,
 }
 
 impl Default for RenderConfig {
@@ -399,6 +426,7 @@ impl Default for RenderConfig {
             tone_map: ToneMapMode::Aces,
             bloom: BloomConfig::default(),
             sky: SkyConfig::default(),
+            fxaa: FxaaConfig::default(),
         }
     }
 }
@@ -428,6 +456,9 @@ impl RenderConfig {
             tone_map: self.tone_map,
             bloom: self.bloom.sanitized(),
             sky: self.sky.sanitized(),
+            // 布尔开关没有"非法值"可夹；保留字段是为了让 sanitized 的返回
+            // 结构完整（漏写会编译失败，这是刻意的）。
+            fxaa: self.fxaa,
         }
     }
 }
@@ -551,6 +582,29 @@ mod tests {
         assert!(text.contains("bloom"), "调过的参数必须落盘: {text}");
         let back: RenderConfig = ron::from_str(&text).expect("deserialize");
         assert_eq!(back, tuned);
+    }
+
+    /// FXAA 默认必须**关**：MSAA 已经处理了几何边缘，默认再叠一层后处理
+    /// 会改变所有旧场景的画面（与 Bloom / 天空同一条纪律）。
+    #[test]
+    fn fxaa_defaults_to_off_and_roundtrips() {
+        assert!(!FxaaConfig::default().enabled, "FXAA 默认必须关闭");
+        assert!(FxaaConfig::default().is_default());
+
+        // 默认配置序列化后不出现 fxaa 节（没开过的项目 diff 干净）。
+        let text = ron::to_string(&RenderConfig::default()).expect("serialize");
+        assert!(!text.contains("fxaa"), "未开过的 FXAA 不该落盘: {text}");
+
+        // 显式打开 → 落盘 → 读回，开关不能在半路丢。
+        let on = RenderConfig {
+            fxaa: FxaaConfig { enabled: true },
+            ..Default::default()
+        };
+        let text = ron::to_string(&on).expect("serialize");
+        assert!(text.contains("fxaa"), "开着的 FXAA 必须落盘: {text}");
+        let back: RenderConfig = ron::from_str(&text).expect("deserialize");
+        assert_eq!(back, on);
+        assert!(back.fxaa.enabled);
     }
 
     /// Bloom 容错：NaN / 负数 / 超限。intensity 负数 = 关（不是"反向光晕"）。

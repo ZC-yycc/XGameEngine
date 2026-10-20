@@ -332,6 +332,9 @@ fn project_info(args: &Value) -> Result<String, CallError> {
                 "sun_size": render.sky.sun_size,
                 "sun_intensity": render.sky.sun_intensity,
             },
+            "fxaa": {
+                "enabled": render.fxaa.enabled,
+            },
         },
         "scenes": list_scenes(&project),
         "scripts": project.list_scripts(),
@@ -770,6 +773,8 @@ mod tests {
                 .len(),
             3
         );
+        // FXAA 默认关；字段完整，智能体据此解释截图的边缘像素差异。
+        assert_eq!(info["render"]["fxaa"]["enabled"], false);
         cleanup(&project);
     }
 

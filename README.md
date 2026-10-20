@@ -112,6 +112,9 @@ core ← math ← {render, physics} ← editor / game
   主 pass 再用 3×3 PCF 比较出阴影；`shadow_resolution` 可调贴图分辨率（0 = 2048）
 - **MSAA 4×**：颜色附件走多采样、resolve 回单采样纹理，物体轮廓不再是硬台阶。
   采样数由适配器能力决定（不支持的格式自动退回 1×）
+- **FXAA 抗锯齿**（可选，默认关）：合成后的画面再走一趟 FXAA 3.11 质量路径，
+  补 MSAA 管不到的高频细节；`project.ron` 的 `render.fxaa.enabled` 开关，
+  关着时整段跳过（不建 scratch、不记录 pass）
 - 半透明（glTF `alphaMode`）与不透明分两条管线，半透明按到相机距离远 → 近排序
 - 内置基础图元（Cube / Sphere / Plane / Cylinder）不依赖外部资产文件
 - **骨骼蒙皮动画**（GPU skinning，详见「动画」）：关节矩阵在顶点着色器里按权重合成，
