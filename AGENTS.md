@@ -16,7 +16,7 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；599 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；640 条 + 7 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
@@ -67,8 +67,8 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - **运行态（Play/Pause）的界面语义**：`scene_dirty_memo` 恒为 false（运行时副本不算
   改动）、`save_scene` / `save_scene_as` 硬拒绝、Pause/Stop 用 `add_enabled_ui` 禁用。
   任何"只在编辑态有意义"的新按钮都要照这三条办。
-- **`--ui-shot` 的四个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
-  `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
+- **`--ui-shot` 的五个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
+  `--ui-profiler` / `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
   `rowscan.py`（按行扫颜色分段量像素）。**用 `--ui-size` 至少扫 1280 / 1440 / 1920
   三档** —— 窄窗口的溢出只有跑过才看得见。
 

@@ -59,6 +59,7 @@ mod hub;
 mod panels;
 mod plugin_build;
 mod plugin_session;
+mod profiler;
 mod recents;
 mod scene_renderer;
 mod state;
@@ -160,6 +161,11 @@ struct UiShot {
     /// 状态栏的物理/音频段、Inspector 顶部的"热调参中"横幅。此前它们只能靠
     /// 人工按键后肉眼检查，改版时最容易漏。
     play: bool,
+    /// 抓图前切到 Profiler 页签。
+    ///
+    /// 它与 Output Log 同一组，默认激活的是后者 —— 没有这个开关，Profiler
+    /// 永远不出现在截图里（改版时等于没法自检）。
+    profiler: bool,
     /// 抓图用的窗口逻辑尺寸（`--ui-size`，缺省 1440×900）。
     size: egui::Vec2,
 }
@@ -269,6 +275,18 @@ impl EditorApp {
                 if session.state.game_runtime.is_some() {
                     session.state.play_mode = PlayMode::Playing;
                 }
+            }
+        }
+
+        // `--ui-profiler`：切到 Profiler 页签。
+        //
+        // 它在 Output Log 同一个页签组里，默认激活的是后者 —— 不切过去截到的
+        // 还是日志，改版自检就等于什么都没看。放在 Play 之后：进 Play 会重建
+        // 运行时，但布局树不动，谁先谁后都不影响选中页签，这里只是让"状态先
+        // 摆好、再摆视图"的顺序保持统一。
+        if app.ui_shot.as_ref().map(|s| s.profiler).unwrap_or(false) {
+            if let Some(session) = app.session.as_mut() {
+                panels::dock::activate(&mut session.tree, PanelTab::Profiler);
             }
         }
 
@@ -459,9 +477,9 @@ struct LaunchArgs {
 /// 解析窗口模式的启动参数。
 ///
 /// 只认 `--ui-shot <png>` / `--ui-frames <n>` / `--ui-select <实体名>` /
-/// `--ui-asset <资产路径>` / `--ui-settings` / `--ui-play` / `--ui-size <WxH>` 七个开关，
-/// 其余非开关参数按顺序取**第一个**当项目路径。`--check` / `--headless` 在
-/// `main` 更早的分支就分流了，不会走到这里。
+/// `--ui-asset <资产路径>` / `--ui-settings` / `--ui-play` / `--ui-profiler` /
+/// `--ui-size <WxH>` 八个开关，其余非开关参数按顺序取**第一个**当项目路径。
+/// `--check` / `--headless` 在 `main` 更早的分支就分流了，不会走到这里。
 fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut out = LaunchArgs::default();
     let mut shot_path: Option<std::path::PathBuf> = None;
@@ -470,6 +488,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut asset: Option<String> = None;
     let mut open_settings = false;
     let mut play = false;
+    let mut profiler = false;
     let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
 
     let mut i = 0;
@@ -513,6 +532,9 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
             "--ui-play" => {
                 play = true;
             }
+            "--ui-profiler" => {
+                profiler = true;
+            }
             "--ui-size" => {
                 // `1440x900` / `1280X800` 都收；解析失败就保持缺省。
                 match raw.get(i + 1).map(|s| parse_size(s)) {
@@ -546,6 +568,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         retries: 0,
         open_settings,
         play,
+        profiler,
         size,
     });
     out
@@ -707,6 +730,10 @@ fn drop_redundant_pointer_moves(ctx: &egui::Context, last_pos: &mut Option<egui:
 /// 「此刻在出帧」还是「已空闲」—— 免得空闲时把上一帧的最后一次读数一直挂在那儿，
 /// 看起来像卡死了。
 fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
+    // Profiler 的"主循环工作"起点：从这一帧进编辑器界面算到退出。不含
+    // `update()` 前半段（指针去重 + 帧调度决策），那两段是常数级、且与界面无关。
+    let t_frame_start = Instant::now();
+
     // ── 0. 选中索引收敛 ──
     // `selected_entity` 是按位置记的索引，而改实体数量/顺序的操作有十几处。任何一处
     // 漏同步，下一帧的 `entities[idx]` 就会 panic 掉整个编辑器。在每帧入口夹一次
@@ -789,6 +816,10 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     }
 
     // ── 4. Physics step (only when actively playing) ──
+    //
+    // 这一段单独计时进 Profiler 面板（"运行时推进"）：脚本、物理、音频都在
+    // `World::update` 里，Play 态下它是唯一会随场景规模增长的耗时块。
+    let mut runtime_us = std::time::Duration::ZERO;
     if session.state.play_mode == PlayMode::Playing {
         // 先把 egui 的键鼠状态灌进运行时 —— 必须发生在 physics_step **之前**，
         // 否则脚本这一帧读到的是上一帧的按键。
@@ -814,22 +845,34 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
         // 大概要多久"的预测）：固定步长累加器吃的就是这个 dt，预测偏了模拟的
         // 快慢就跟着偏。
         let dt = ctx.input(|i| i.stable_dt);
+        let t_runtime = Instant::now();
         session.state.physics_step(dt);
+        runtime_us = t_runtime.elapsed();
         // 这里**不再**手动 `request_repaint()`：Play 模式下 `frame_policy` 会持续
         // 排帧（见 `FrameInputs::playing`）。把"什么时候出帧"集中到一处决策，
         // 免得散落在各处的 `request_repaint` 互相打架。
     }
 
-    // ── 5. Central dock area (tile tree with all panels) ──
+    // ── 5. Status bar (bottom) ──
+    //
+    // **必须在停靠区之前画**：`CentralPanel` 会把"当时剩下的整块矩形"全吃掉，
+    // 之后再加的 `TopBottomPanel` 只会叠在它上面、不会让它缩短。以前顺序反了，
+    // 结果停靠区底部有 24px 永远压在状态栏底下 —— 面板里靠底排的内容（Profiler
+    // 的绘制读数）就整行画进不可见区。egui 的文档也写着：`CentralPanel` 必须最后加。
+    status_bar(ctx, &session.state, live);
+
+    // ── 6. Central dock area (tile tree with all panels) ──
+    //
+    // 停靠区这一段也进 Profiler：各面板的排版 + **视口渲染提交**都在这里，
+    // 编辑态的绝大部分耗时就在这一点上（Play 态才是运行时推进）。
+    let t_ui = Instant::now();
     egui::CentralPanel::default().show(ctx, |ui| {
         let mut behavior = panels::dock::EditorBehavior {
             state: &mut session.state,
         };
         session.tree.ui(&mut behavior, ui);
     });
-
-    // ── 6. Status bar (bottom) ──
-    status_bar(ctx, &session.state, live);
+    let ui_us = t_ui.elapsed();
 
     // ── 6.5. 资源拖拽收尾 ──
     //
@@ -850,6 +893,22 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     {
         session.state.exit_confirmed = Some(target);
     }
+
+    // ── 8. 帧采样（Profiler 面板的数据面）──
+    //
+    // 放在最末：本帧每一段耗时都已测完，样本是完整的一份。采样本身只写一个
+    // 预分配槽位（零分配），面板没打开时照样采 —— 换来"切过去就能看到刚才那段"，
+    // 而不是从打开那一刻才开始有数据。`live` 原样记下：空闲停帧那一帧的 `dt`
+    // 是唤醒间隔，统计时必须与连续帧分开（见 `profiler` 模块文档）。
+    let work_us = t_frame_start.elapsed();
+    let dt_us = (ctx.input(|i| i.stable_dt).max(0.0) * 1_000_000.0) as u128;
+    session.state.profiler.record(profiler::FrameSample::from_micros(
+        dt_us,
+        work_us.as_micros(),
+        runtime_us.as_micros(),
+        ui_us.as_micros(),
+        live,
+    ));
 }
 
 /// 底部状态栏。
@@ -1282,13 +1341,14 @@ mod tests {
         assert_eq!(parse_size(""), None);
     }
 
-    /// 四个截图开关互不干扰，且项目路径仍然取「第一个非开关参数」。
+    /// 截图开关互不干扰，且项目路径仍然取「第一个非开关参数」。
     #[test]
     fn ui_shot_flags_compose() {
         let raw: Vec<String> = [
             "--ui-shot",
             "a.png",
             "--ui-play",
+            "--ui-profiler",
             "--ui-size",
             "1280x800",
             "--ui-select",
@@ -1302,6 +1362,7 @@ mod tests {
         assert_eq!(args.project.as_deref(), Some("projects/SampleScene"));
         let shot = args.ui_shot.expect("应当解析出截图请求");
         assert!(shot.play, "--ui-play 应当置位");
+        assert!(shot.profiler, "--ui-profiler 应当置位");
         assert_eq!(shot.size, egui::vec2(1280.0, 800.0));
         assert_eq!(shot.select.as_deref(), Some("Fox"));
         assert!(!shot.open_settings);

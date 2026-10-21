@@ -11,6 +11,7 @@ pub mod icons;
 pub mod inspector;
 pub mod inspector_ui;
 pub mod prefabs;
+pub mod profiler;
 pub mod scene_view;
 pub mod settings;
 pub mod theme;

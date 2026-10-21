@@ -24,6 +24,8 @@ pub enum PanelTab {
     SceneView,
     Inspector,
     Console,
+    /// 帧分析（Profiler）：帧间隔 / 主循环耗时的滚动窗口 + 绘制读数。
+    Profiler,
 }
 
 impl PanelTab {
@@ -39,6 +41,7 @@ impl PanelTab {
             PanelTab::SceneView => "Viewport",
             PanelTab::Inspector => "Inspector",
             PanelTab::Console => "Output Log",
+            PanelTab::Profiler => "Profiler",
         }
     }
 }
@@ -53,6 +56,7 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
     let scene = tiles.insert_pane(PanelTab::SceneView);
     let insp = tiles.insert_pane(PanelTab::Inspector);
     let cons = tiles.insert_pane(PanelTab::Console);
+    let prof = tiles.insert_pane(PanelTab::Profiler);
 
     // Assets 与 Prefabs 共用左列下半格的两个页签：
     // 它们是同一类东西（"项目里有什么"），单独再切一格会把 Hierarchy 挤没。
@@ -80,11 +84,16 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
             .with_share(insp, 0.28),
     );
 
-    // Right column: top_row (75%) | Console (25%)
+    // Right column: top_row (75%) | Console+Profiler (25%)
+    //
+    // Profiler 与 Output Log 同一组：两者都是"底部横条"型的诊断面板，同时看
+    // 日志和帧时间才是排查问题的常态。默认激活第一个（Output Log），
+    // 老的截图与手感因此逐像素不变；要看帧分析就点页签（`--ui-profiler`）。
+    let bottom_tabs = tiles.insert_tab_tile(vec![cons, prof]);
     let right_column = tiles.insert_container(
-        Linear::new(LinearDir::Vertical, vec![top_row, cons])
+        Linear::new(LinearDir::Vertical, vec![top_row, bottom_tabs])
             .with_share(top_row, 0.75)
-            .with_share(cons, 0.25),
+            .with_share(bottom_tabs, 0.25),
     );
 
     // Root: left_column (22%) | right_column (78%)
@@ -95,6 +104,22 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
     );
 
     Tree::new("editor_tree", root, tiles)
+}
+
+/// 把某个面板页签切到前台。
+///
+/// 给 `--ui-profiler` 这类截图开关用：面板在布局里存在，但默认不是激活页签时，
+/// 截出来的就是邻居的内容 —— "改了界面却截不到"最容易发生在同一组的第二个页签上。
+///
+/// `make_active` 只按谓词命中 pane，祖先容器的激活链由 egui_tiles 自己补，
+/// 所以这里不需要知道这棵树是怎么分组的（布局再改也不会失配）。
+pub fn activate(tree: &mut Tree<PanelTab>, pane: PanelTab) {
+    let hit = tree.make_active(|_, tile| {
+        matches!(tile, egui_tiles::Tile::Pane(p) if *p == pane)
+    });
+    if !hit {
+        log::warn!("面板 {:?} 不在当前布局里，无法激活", pane);
+    }
 }
 
 // ── Helper: set share on a linear container builder ──
@@ -239,5 +264,77 @@ impl Behavior<PanelTab> for EditorBehavior<'_> {
         }
 
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个 `PanelTab` 变体在布局里都必须有一个 pane —— 漏掉一个变体的表现是
+    /// "能编译、能跑，但那个面板永远打不开"，`Panel` 派生也不会报错。
+    #[test]
+    fn every_tab_is_in_the_tree() {
+        let tree = create_tile_tree();
+        let all = [
+            PanelTab::Hierarchy,
+            PanelTab::Assets,
+            PanelTab::Prefabs,
+            PanelTab::SceneView,
+            PanelTab::Inspector,
+            PanelTab::Console,
+            PanelTab::Profiler,
+        ];
+        for tab in all {
+            assert!(
+                tree.tiles.find_pane(&tab).is_some(),
+                "{tab:?} 在布局里没有对应的 pane"
+            );
+        }
+    }
+
+    /// Profiler 与 Output Log 同组：默认激活的必须是 Output Log（老截图逐像素不变），
+    /// 而 `activate` 能把它切上来（`--ui-profiler` 的唯一依赖）。
+    #[test]
+    fn profiler_shares_tabs_with_console_and_can_be_activated() {
+        let mut tree = create_tile_tree();
+        let console = tree.tiles.find_pane(&PanelTab::Console).unwrap();
+        let profiler = tree.tiles.find_pane(&PanelTab::Profiler).unwrap();
+
+        let tab_tile = |id: TileId| match tree.tiles.get(id) {
+            Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) => {
+                Some(tabs.children.clone())
+            }
+            _ => None,
+        };
+        // 两者挂在同一个 tab 容器下（页签组），而不是各自独占一格。
+        let shared = tree
+            .tiles
+            .iter()
+            .find_map(|(_, tile)| match tile {
+                egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs)) => {
+                    (tabs.children.contains(&console) && tabs.children.contains(&profiler))
+                        .then(|| tabs.children.clone())
+                }
+                _ => None,
+            })
+            .expect("Console 与 Profiler 应当在同一个页签组里");
+        assert_eq!(shared.first().copied(), Some(console), "默认激活的应当是 Output Log");
+        assert!(tab_tile(profiler).is_none(), "pane 本身不是 tab 容器");
+
+        assert!(tree.make_active(|_, tile| matches!(tile, egui_tiles::Tile::Pane(p) if *p == PanelTab::Profiler)));
+        // 激活之后，那个 tab 容器的 active 应当换成 Profiler。
+        let active = tree
+            .tiles
+            .iter()
+            .find_map(|(_, tile)| match tile {
+                egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs)) => tabs
+                    .children
+                    .contains(&profiler)
+                    .then_some(tabs.active),
+                _ => None,
+            })
+            .flatten();
+        assert_eq!(active, Some(profiler));
     }
 }

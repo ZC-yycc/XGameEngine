@@ -31,27 +31,26 @@
 use serde::{Deserialize, Serialize};
 
 /// 粒子混合方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 默认 [`ParticleBlend::Alpha`]：直通 alpha 是"通用"的那一档，加色模式挂错
+/// 会把整个画面点成过曝（见 [`ParticleEmitter::blend`] 的说明）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParticleBlend {
     /// 直通 alpha 混合（`src*a + dst*(1-a)`）：烟雾、尘土、落叶。
+    #[default]
     Alpha,
     /// 加色混合（`src*a + dst`）：火焰、火花、能量 —— 亮部叠起来自然过曝。
     Additive,
-}
-
-impl Default for ParticleBlend {
-    fn default() -> Self {
-        Self::Alpha
-    }
 }
 
 /// 发射体积。决定**出生位置**在实体局部空间里的分布。
 ///
 /// 方向不由形状决定，见 [`ParticleEmitter::direction`] 与
 /// [`ParticleEmitter::spread`] —— 两者正交，形状只管"从哪儿冒出来"。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub enum EmissionShape {
-    /// 一个点（实体原点）。
+    /// 一个点（实体原点）。默认值：不额外采样，最便宜的形态。
+    #[default]
     Point,
     /// 实心球内均匀分布（半径 = `radius`）。
     Sphere {
@@ -63,12 +62,6 @@ pub enum EmissionShape {
         /// 三个半边长。
         half_extents: [f32; 3],
     },
-}
-
-impl Default for EmissionShape {
-    fn default() -> Self {
-        Self::Point
-    }
 }
 
 impl EmissionShape {

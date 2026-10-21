@@ -1838,7 +1838,7 @@ mod tests {
                 &AnimationDriver::new(),
                 Some(camera),
                 SceneLighting::new(scene.ambient, &scene.lights),
-                settings.clone(),
+                settings,
                 quads,
             )
             .expect("渲染失败");
@@ -1919,7 +1919,7 @@ mod tests {
                 &AnimationDriver::new(),
                 Some(camera),
                 SceneLighting::new(scene.ambient, &scene.lights),
-                settings.clone(),
+                settings,
                 quads,
             )
             .expect("渲染失败");

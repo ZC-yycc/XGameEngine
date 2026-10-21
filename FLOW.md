@@ -108,11 +108,17 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
  2  toolbar::show() + 模式切换     项目 / 💾 Save · Save As / 播放暂停停止 / 变换工具 / ⚙ 设置
  3  Ctrl+S / Ctrl+Shift+S         保存场景 / 另存为新场景文件
  3b Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤销 / 重做（Play 模式下不生效）
- 4  physics_step() (仅 Playing)    固定步长物理模拟
- 5  CentralPanel (egui_tiles)      面板 Dock 布局
- 6  StatusBar                      底部状态栏（含项目名）
+ 4  physics_step() (仅 Playing)    固定步长物理模拟（整段耗时 → Profiler 的 runtime）
+ 5  StatusBar                      底部状态栏（含项目名）—— **必须在 CentralPanel 之前**
+ 6  CentralPanel (egui_tiles)      面板 Dock 布局（整段耗时 → Profiler 的 viewport）
  7  应用级弹窗（画在最上层）        ⚙ 项目设置窗口 / 场景另存为 / 未保存确认框
+ 8  帧采样 → state.profiler        帧末写一条样本（环形缓冲，零分配；不驱动重绘）
 ```
+
+> **阶段 5 为什么在阶段 6 之前**：`CentralPanel` 会把"当时剩下的整块矩形"全吃掉，
+> 之后再加的 `TopBottomPanel` 不会让它缩短、只会**叠在它上面**。顺序反了的话，
+> 停靠区底部有 24px 永远压在状态栏底下（Profiler 的绘制读数整行就是那样消失的）。
+> 这也是 egui 文档写明的规则：`CentralPanel` 必须最后加。详情见决策记录 §十九.3。
 
 > **阶段 0：关窗拦截（为什么必须在 `editor_ui` 之前）** —— egui 的语义是
 > `close_requested()` 为真的**那一帧**不发 `ViewportCommand::CancelClose`，帧末应用
@@ -870,6 +876,31 @@ StatusBar
   Playing 时额外显示:
   "▶ Playing | ... | Bodies: 3 | Colliders: 3 | FPS: 60"
 ```
+
+#### 阶段 8：帧采样 → Profiler 面板
+
+```
+每帧（editor_ui 末尾）
+  dt_us      ← ctx.input().stable_dt      （与状态栏 FPS 同源）
+  work_us    ← editor_ui 全程
+  runtime_us ← physics_step() 那一段      （仅 Play 态非零）
+  ui_us      ← CentralPanel 那一段        （各面板排版 + 视口渲染提交）
+  live       ← 帧调度的 FramePlan::Now
+        │
+        ▼
+  state.profiler.record()      600 帧定长环，写一个槽位（零分配；Pause 时直接丢）
+        │
+        ▼
+  panels/profiler.rs           每帧现算 Summary（p50 定纵轴、p99 作 1% low）
+    ├── KPI 行：fps / frame / 1% low / work / runtime / viewport
+    ├── 帧时间图：每帧一根竖条，底部深色段 = 主循环工作，预算线 16.7 / 33.3ms
+    └── 读数行：draw calls / 不透明批次·实例 / 半透明 / 剔除比例 / 粒子
+```
+
+两条口径（决策记录 §十九.1）：**FPS 只统计 `live` 帧**（停帧唤醒那一帧的 `dt`
+是空闲时长，算进去会让 FPS 假性塌到个位数）；**纵轴按中位帧 ×3 定标**（不用
+最大值 / p99，否则一次长帧会把其余 599 帧压成一条线）。面板**不** `request_repaint`
+—— 出不出帧由 `frame_policy` 决定。
 
 ---
 

@@ -669,6 +669,13 @@ pub struct EditorState {
     pub collapsed_version: u64,
     /// 层级面板的行模型缓存（指纹没变就整段复用，见 `panels::hierarchy::RowCache`）。
     pub hierarchy_cache: crate::panels::hierarchy::RowCache,
+
+    // -- Profiler panel --
+    /// 帧采样环形缓冲（数据面见 [`crate::profiler`]）。
+    ///
+    /// 主循环在帧末往这里写一条，面板随时读 —— 采集与绘制完全解耦：面板没被打开
+    /// 时照样在采（切过去就能看到刚才那段），关掉面板也不影响采样成本（一次写入）。
+    pub profiler: crate::profiler::Profiler,
 }
 
 impl EditorState {
@@ -758,6 +765,8 @@ impl EditorState {
 
             collapsed_version: 0,
             hierarchy_cache: crate::panels::hierarchy::RowCache::default(),
+
+            profiler: crate::profiler::Profiler::new(),
         };
 
         // 打开项目时先把资产清单扫出来，面板第一帧就有内容。
@@ -2077,6 +2086,16 @@ impl EditorState {
         self.game_runtime
             .as_ref()
             .map_or(xgame_particle::ParticleStats::default(), |rt| rt.particle_stats())
+    }
+
+    /// 最近一帧的绘制读数（合批 / 剔除 / 半透明）。
+    ///
+    /// 没有渲染器（无头 / 测试 / wgpu 不可用）时返回全零 —— 调用方据此画
+    /// "只有帧时间"，比显示一排 0 更不容易误读。
+    pub fn render_stats(&self) -> xgame_render::scene_pipeline::FrameStats {
+        self.scene_renderer
+            .as_ref()
+            .map_or_else(Default::default, |r| r.frame_stats())
     }
 
     // -----------------------------------------------------------------------

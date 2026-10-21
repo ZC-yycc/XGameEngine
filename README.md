@@ -136,7 +136,10 @@ XGameEngine/                  # 引擎源码仓库
 
 **编辑器**
 
-- Hierarchy / Prefabs / Scene View / Inspector / Console 五面板 Dock 布局
+- Hierarchy / Prefabs / Scene View / Inspector / Output Log / Profiler 六面板 Dock 布局
+- **Profiler 面板**（与 Output Log 同页签组）：帧间隔 / 1% low / 主循环分段耗时
+  （运行时 · 界面+视口）+ draw / 剔除 / 粒子读数，600 帧滚动窗口、Pause / Clear。
+  只在编辑器里看，不落盘；长时段趋势仍用 `XGAME_FRAME_LOG` 探针
 - **场景层级（父子关系）**：层级面板是一棵可折叠的树，拖拽节点即重挂父节点
   （保留世界变换），拖到空白处移回根层；Inspector 有父节点下拉框
 - **预制体（Prefab）**：把一棵子树存成可复用资产并反复实例化，支持 Apply / Revert
