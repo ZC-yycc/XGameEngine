@@ -357,7 +357,35 @@ end
 > 共享资产负责"这是什么材质"，覆盖负责"这个实例怎么微调"；调
 > `set_material` 不会清掉 `set_material_asset` 设过的资产。
 
-### 4.13 游戏 UI
+### 4.13 粒子
+
+粒子是**声明 + 运行态请求**两层：发射器参数（`rate` / `lifetime` / `gravity` / ...）
+在场景文件里，脚本只管"现在喷不喷、炸多少颗"。
+
+| 函数 | 说明 |
+|---|---|
+| `particle_emitting(ctx, id)` | 读开关（没挂发射器 → false） |
+| `set_particle_emitting(ctx, id, bool)` | 开 / 关持续发射 |
+| `particle_burst(ctx, id, n)` | 立刻炸出 n 颗（可累积：连按两帧 = 两次相加） |
+| `set_particle_rate(ctx, id, r)` | 改发射速率（颗/秒；非有限值钳 0） |
+
+```lua
+function start(ctx)
+    local me = self_id(ctx)
+    -- 默认持续喷；命中后改成一次性爆发
+    set_particle_emitting(ctx, me, false)
+end
+
+function on_collision_enter(ctx, other)
+    particle_burst(ctx, self_id(ctx), 30)  -- 撞一下炸一团火花
+end
+```
+
+> 没挂发射器时全部静默 no-op（不会凭空创建组件）。`burst` 是**一次性**请求位：
+> 模拟层当帧消费后清零，所以"按下开火键 → 这一帧看见火花"。参数在场景里调，
+> 运行期改请改字段本身（`Entity::particle`）。
+
+### 4.14 游戏 UI
 
 UI 元素也是实体（`Entity::ui`），id 与其它实体通用。颜色参数是 **sRGB 0..1**
 （引擎内部转线性）；坐标是**视口物理像素**，锚点是父矩形的归一化坐标（0..1）。

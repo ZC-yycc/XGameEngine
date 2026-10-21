@@ -5447,6 +5447,7 @@ dependencies = [
  "xgame-derive",
  "xgame-input",
  "xgame-math",
+ "xgame-particle",
  "xgame-physics",
  "xgame-render",
  "xgame-runtime",
@@ -5499,6 +5500,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xgame-particle"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "xgame-core",
+ "xgame-math",
+]
+
+[[package]]
 name = "xgame-physics"
 version = "0.1.0"
 dependencies = [
@@ -5527,6 +5537,7 @@ dependencies = [
  "winit",
  "xgame-core",
  "xgame-math",
+ "xgame-particle",
  "xgame-physics",
  "xgame-ui",
 ]
@@ -5540,6 +5551,7 @@ dependencies = [
  "xgame-core",
  "xgame-input",
  "xgame-math",
+ "xgame-particle",
  "xgame-physics",
  "xgame-script",
  "xgame-ui",

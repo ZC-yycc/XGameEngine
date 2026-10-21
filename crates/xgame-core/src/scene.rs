@@ -154,6 +154,18 @@ pub struct Entity {
     /// 老场景照常加载；没配 UI 的实体不写这一行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<crate::ui::UiElement>,
+    /// 粒子发射器。`None` = 这个实体不发射粒子（零成本）。
+    ///
+    /// **纯视觉、纯声明**：模拟在 `xgame-particle`（按实体 id 分桶存单个粒子），
+    /// 绘制在 `xgame-render`。这里的字段决定"长什么样"，不决定"现在有几颗"。
+    ///
+    /// 与 `model` 正交：可以挂在有模型的物体上当火焰附着点，也可以挂空实体
+    /// （只有发射器、没有网格 —— 篝火、烟雾口都是这样）。
+    ///
+    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → `None` 且当帧
+    /// 零开销；没配粒子的实体不写这一行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub particle: Option<crate::particle::ParticleEmitter>,
     /// 运行时组件集合（反序列化时默认为空）。
     #[serde(skip)]
     pub components: ComponentMap,
@@ -179,6 +191,7 @@ impl Entity {
             material: None,
             controller: None,
             ui: None,
+            particle: None,
             components: ComponentMap::new(),
         }
     }
@@ -239,6 +252,12 @@ impl Entity {
     /// 挂一个角色控制器（与 `physics` 正交，见 [`Entity::controller`]）。
     pub fn with_controller(mut self, controller: crate::character::CharacterController) -> Self {
         self.controller = Some(controller);
+        self
+    }
+
+    /// 挂一个粒子发射器（纯视觉，见 [`Entity::particle`]）。
+    pub fn with_particle(mut self, particle: crate::particle::ParticleEmitter) -> Self {
+        self.particle = Some(particle);
         self
     }
 
@@ -303,6 +322,12 @@ impl PartialEq for Entity {
             // UI 元素同理，但**只比落盘字段**：`UiState`（悬停 / 按下 / 点击）
             // 每帧都在变，算进相等就永远是"未保存"。见 `UiElement::data_eq`。
             && match (&self.ui, &other.ui) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.data_eq(b),
+                _ => false,
+            }
+            // 粒子同理：`burst` 是脚本写进去的运行态，不算改动。
+            && match (&self.particle, &other.particle) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a.data_eq(b),
                 _ => false,
@@ -821,6 +846,43 @@ mod tests {
         let a = EntityId::new();
         let b = EntityId::new();
         assert_ne!(a, b);
+    }
+
+    // -- 粒子发射器（组件落盘与相等语义）----------------------------------
+
+    #[test]
+    fn particle_component_roundtrips_through_ron() {
+        let mut emitter = crate::particle::ParticleEmitter::sparks();
+        emitter.seed = 7;
+        let entity = Entity::new("Spark").with_particle(emitter.clone());
+        let text = ron::to_string(&entity).unwrap();
+        assert!(text.contains("particle"), "挂了发射器就得写出来: {text}");
+        let back: Entity = ron::from_str(&text).unwrap();
+        assert_eq!(back.particle.unwrap(), emitter);
+    }
+
+    #[test]
+    fn entity_without_particle_writes_no_line() {
+        let text = ron::to_string(&Entity::new("Plain")).unwrap();
+        assert!(
+            !text.contains("particle"),
+            "没配粒子的实体不该被一行 `particle: None` 灌满: {text}"
+        );
+    }
+
+    #[test]
+    fn particle_equality_ignores_burst_but_not_config() {
+        let a = Entity::new("E").with_particle(crate::particle::ParticleEmitter::default());
+        let mut b = a.clone();
+        // 脚本写 burst = 运行态，不该让编辑器显示"未保存"。
+        if let Some(p) = b.particle.as_mut() {
+            p.burst = 12;
+        }
+        assert_eq!(a, b, "burst 不进相等判定");
+        if let Some(p) = b.particle.as_mut() {
+            p.rate = 1.0;
+        }
+        assert_ne!(a, b, "配置改了必须算改动");
     }
 
     // -- 层级 -------------------------------------------------------------

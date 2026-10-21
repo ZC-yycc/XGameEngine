@@ -630,6 +630,7 @@ impl ProjectHandle {
         // 非有限几何的兜底（见 `xgame_ui::layout::visit`），两处职责不同：
         // 这里"修正"，那里"拦截"。
         sanitize_ui(&mut prefab.entities);
+        sanitize_particles(&mut prefab.entities);
         Ok(prefab)
     }
 
@@ -851,6 +852,7 @@ impl ProjectHandle {
         }
         // 同 `load_prefab`：UI 数值在加载时夹取一次。
         sanitize_ui(&mut scene.entities);
+        sanitize_particles(&mut scene.entities);
         Ok(scene)
     }
 
@@ -1082,6 +1084,16 @@ fn sanitize_ui(entities: &mut [crate::Entity]) {
     for entity in entities {
         if let Some(ui) = entity.ui.as_mut() {
             *ui = ui.sanitized();
+        }
+    }
+}
+
+/// 同上，但给粒子发射器：NaN 的半径 / 颜色会让 GPU 拿到垃圾实例，
+/// 表现是"粒子整块消失或糊满屏"，所以加载边界必须挡一道。
+fn sanitize_particles(entities: &mut [crate::Entity]) {
+    for entity in entities {
+        if let Some(p) = entity.particle.as_mut() {
+            p.sanitized();
         }
     }
 }

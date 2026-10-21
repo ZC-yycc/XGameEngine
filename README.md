@@ -54,6 +54,7 @@ XGameEngine/                  # 引擎源码仓库
 │   ├── xgame-input/          # 输入层：设备状态 + 动作映射（与窗口库解耦）
 │   ├── xgame-script/         # 脚本层：嵌入式 Lua + 生命周期钩子 + 宿主 API
 │   ├── xgame-audio/          # 音频引擎：kira 封装（设备 / 3D 空间轨道 / 解码缓存 / 无声降级）
+│   ├── xgame-particle/       # 粒子：确定性 CPU 模拟（按实体分桶 / 上限 / burst），输出 billboard 四边形
 │   ├── xgame-runtime/        # 运行时：把场景/物理/输入/脚本/音频编排成一条帧管线
 │   ├── xgame/                # 门面 crate：prelude + Lifecycle / Inspect + 插件边界
 │   ├── xgame-derive/         # 过程宏：#[derive(Panel)] / #[derive(Inspect)]
@@ -610,6 +611,44 @@ end
   skin 距离外，物理引擎不会发事件）
 - 编辑器 Inspector 有 **Character** 区块；与 `physics` 正交（角色实体的刚体由运行时托管）
 
+### 粒子
+
+给实体加一行 `particle` 就是一组发射器（**CPU 模拟 + billboard 渲染**）：
+
+```ron
+particle: Some((
+    rate: 60.0,                     // 颗/秒
+    max_particles: 512,             // 硬顶（满了丢欠账）
+    lifetime: (0.6, 1.2),           // 寿命区间（秒）
+    speed: (1.0, 2.2),
+    direction: (0.0, 1.0, 0.0),     // 锥轴
+    spread: 18.0,                   // 锥半角（度）
+    shape: Sphere(radius: 0.15),    // Point / Sphere / Box
+    gravity: (0.0, -1.2, 0.0),      // 粒子自己的重力，与物理世界无关
+    start_color: (1.0, 0.55, 0.12, 0.9),
+    end_color: (0.35, 0.05, 0.0, 0.0),
+    blend: Additive,                // Alpha / Additive
+    seed: 7,                        // 同种子 = 逐位可复现
+)),
+```
+
+- **进 Play 才喷**：编辑态不模拟（Play 就是那条编辑器内模拟回路），场景存盘
+  只存参数、不存粒子状态
+- 确定性模拟：同种子 + 同 dt 序列 ⇒ 逐位相同的粒子流 —— 无头截图与回归测试
+  的地基；每发射器一把独立 RNG，两个 `seed: 0` 的实体也喷得不一样
+- 出生点在实体世界变换下、出生后活在**世界空间**（实体移动不拖着粒子走）；
+  实体删除 ⇒ 粒子立即消失
+- Inspector 有 **Particle** 区块（Fire / Smoke / Sparks 预设）；脚本侧
+  `particle_burst` / `set_particle_emitting` / `set_particle_rate` 控制运行期行为
+- 两种混合都走实例化 billboard（一次 draw 画完同混合的全部粒子）：深度测试开、
+  深度写关 —— 粒子被几何遮住、彼此不互相遮挡
+
+```lua
+function on_collision_enter(ctx, other)
+    particle_burst(ctx, self_id(ctx), 30)  -- 撞一下炸一团火花
+end
+```
+
 ## 运行时（编辑器和游戏共用的那一段）
 
 `xgame-runtime::World` 是唯一编排者，编辑器按下 ▶ Play 与打包出去的游戏跑的是
@@ -621,6 +660,7 @@ clock.tick(dt)
   └─ 固定步长循环（与渲染帧率解耦）
        ├─ dispatch_fixed_update → 补/清刚体 → 推运动学体 → physics.step → 回写动态体
   ├─ dispatch_update                每渲染帧一次
+  ├─ particles.step(dt)             CPU 粒子推进（脚本本帧写的 burst 当帧炸出）
   ├─ sync_audio → flush_audio       帧末音频结算（空间声推位置 / 命令交给引擎）
   └─ input.end_frame()              清掉"仅本帧有效"的输入边沿
 ```

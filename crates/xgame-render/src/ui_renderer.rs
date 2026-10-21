@@ -847,7 +847,7 @@ fn create_image_texture(
 }
 
 /// 上传实例数据；容量不够时**新建**缓冲区并返回它（`None` = 沿用旧的）。
-fn upload_instances<T: bytemuck::Pod>(
+pub(crate) fn upload_instances<T: bytemuck::Pod>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,

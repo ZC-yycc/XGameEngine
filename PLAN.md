@@ -3308,3 +3308,118 @@ color button 会把 f32 无条件量化写回，导致一打开就显示"未保�
 - 没有材质缩略图与文件监听，刷新靠 ⟳，保存靠显式失效；
 - 脚本不能逐字段清除覆盖（要么 `clear_material`，要么改用资产）；
 - `audio_streaming` 仍是数据面：流式播放未落地。
+
+## 三十六、粒子系统：CPU 模拟 + billboard 渲染 + 编辑器 / 脚本（2026-10-21）
+
+### 一、为什么是粒子、为什么这样做
+
+P2 清单里"粒子系统"一直挂着。选它的理由：它是**第一个"每帧全变的大量运行态"
+**—— 音频是命令束、动画是时钟、UI 是静态树，都不同时具备"量大 + 每帧全变 + 要进
+渲染"三个性质。这一轮把这条路走通，后面真要上 GPU 粒子 / 特效编辑器时，分层已经
+在那儿了。
+
+三个关键取舍（都有被否决的备选）：
+
+1. **模拟住在新 crate `xgame-particle`（CPU），不住 runtime 也不住 render**。
+   粒子位置 / 速度是运行态，量大且每帧全变，塞进 `Entity` 会让场景 diff、撤销
+   快照、脏检查全部失真（UI 的 `state` 字段上一轮已经示范过这个坑）。但也不能
+   塞进 render —— 无头运行（`--headless`）没有渲染器，却要在报告里报粒子数。
+   runtime 持有 `ParticleSystem`（与 `AudioEngine` / `PhysicsWorld` 同级的"子系统
+   字段"），渲染只是消费者。
+2. **确定性优先**：每个发射器一把 xorshift RNG（种子 = 组件 `seed`），所有随机数
+   只从这一把流里取。同种子 + 同 dt 序列 ⇒ 逐位相同的四边形序列。这是无头截图与
+   回归测试的地基，所以**刻意不引入** `rand::thread_rng()` / `SystemTime` /
+   `HashMap` 迭代序。代价是"换个机器结果也一致"这句只对同平台成立（f32 运算
+   顺序由代码固定，跨编译器理论上仍可能差）—— 对截图回归够用。
+3. **billboard 朝向从 `view_proj` 逆矩阵现算**，而不是让三个宿主各自传相机
+   right / up。渲染入口只多一个 `quads` 参数；传相机基的话有三个会写错的地方。
+
+### 二、core：`ParticleEmitter` 组件（纯数据层）
+
+- `crates/xgame-core/src/particle.rs`：`ParticleEmitter`（emitting / rate /
+  max_particles / duration / looping / lifetime / speed / direction / spread /
+  shape / gravity / drag / start_size / end_size / start_color / end_color /
+  blend / seed）+ `EmissionShape`（Point / Sphere / Box）+ `ParticleBlend`
+  （Alpha / Additive）。`Entity::particle` 字段 + `with_particle()`。
+- 预设：`fire()`（默认值，刻意是一份"挂上就看得见"的配置）/ `smoke()` /
+  `sparks()` / `burst_of(count)`。
+- `sanitized()`：NaN / inf / 逆序区间在**加载边界**钳制（`ProjectHandle::
+  load_scene` / `load_prefab` 各一道，与 `sanitize_ui` 同款）。非有限值退回
+  默认值而不是钳到上界 —— `inf` 几乎总是手改坏了，猜"作者想要极快"不如回到
+  一份确定可用的配置。
+- `burst` 是 `#[serde(skip)]` 的运行态字段（脚本"炸一下"的请求位，模拟层消费
+  后清零）。`data_eq()` 忽略它，所以脚本写 burst **不会**让编辑器显示未保存。
+- 默认重力**不取自物理世界**：火焰要往上飘、烟要慢慢散，与场景全局重力无关；
+  粒子是纯视觉，不该被物理世界的参数牵着走。
+
+### 三、`xgame-particle`：确定性 CPU 模拟
+
+- xorshift RNG、发射累加（`rate*dt` 攒够 1 才生一颗，单帧封顶 256 颗防手滑）、
+  寿命 / 重力 / 阻尼积分、体积采样（球 / 盒内均匀）、方向锥采样（`spread` 半角，
+  180° = 全向）、burst、`max_particles` 硬顶（满了丢欠账不攒）、按实体分桶、
+  实体删除即丢桶。
+- 出生点在实体世界变换下（体积与方向随实体朝向转）；出生后活在世界空间，实体
+  再动不拖着粒子走（与 Unity `Simulation Space = World` 一致）；实体缩放不参与
+  尺寸（尺寸是绝对世界单位）。
+- 稳态零分配：桶里 `Vec` 与输出四边形缓冲都跨帧复用；粒子死光后每帧只剩一次
+  O(n) 扫表（与音频快路径同思路）。
+- 输出 `ParticleQuad`（世界中心 / 世界半边长 / 线性 RGBA / blend）+ `ParticleStats`
+  （alive / emitters / capacity —— capacity 是各发射器上限之和，"粒子数撞顶"
+  是这个系统最主要的性能故障模式，状态栏要能看见）。
+- `signature()`（内容指纹：静止时恒定、在动时每帧都变）与 `animating()`（还要
+  不要继续出帧）分开：前者给渲染门控做静帧跳过，后者给帧调度防"视角不动、
+  粒子在飞时被当成空闲停下来"。
+
+### 四、render：实例化 billboard pass
+
+- `crates/xgame-render/src/particles.rs`：一次实例化 draw 画完同一种混合方式的
+  所有粒子；软圆片 SDF 片元；Alpha（`One / OneMinusSrcAlpha`，片元输出**预乘**，
+  用 `SrcAlpha` 会把 alpha 乘两遍、烟雾薄一半）/ Additive（`One / One`）两条管线；
+  Alpha 远→近排序、Additive 不排（加法可交换）。
+- **画在场景 pass 内部**（不透明与天空之后）：粒子是场景里的东西 —— 要被几何
+  遮住（深度测试开、深度写关，粒子之间不互相遮挡）、要参与曝光 / 色调映射 /
+  Bloom。UI 相反，见 `ui_renderer` 模块头。
+- 批次数进 `FrameStats`（`particle_draws` / `particle_instances`）。
+
+### 五、runtime + 三宿主
+
+- `World::particles: ParticleSystem`，在 `update` 之后、音频之前推进（脚本这帧写
+  的 burst 当帧就能炸出来）；用**渲染帧 dt**（与动画时钟同一取舍，无头 dt 固定
+  所以仍逐位可复现）。
+- 编辑器：`GameRuntime` 转发 + `SceneRenderer::render` 多收 `particles` 与
+  `particle_signature`（指纹进渲染门控，否则"只有粒子在动"会被静帧跳过冻住）；
+  帧调度的 `animating` 并入 `particles_animating()`；状态栏 Play 态显示
+  `particles 活着/上限 (发射器数)`，撞上限转警告色。
+- 独立游戏 / 无头截图同一条 pass；`render_scene_with_particles` 单开（既有调用点
+  与全部静态取景测试传 `&[]`，没有噪音）。
+- Inspector：`Particle` 区块（勾选才有 + Fire/Smoke/Sparks 预设 + 全字段），
+  与 Audio 同款写法；没有"预览播放"按钮 —— Play 就是那条编辑器内模拟回路。
+- 脚本：`particle_emitting` / `set_particle_emitting` / `particle_burst` /
+  `set_particle_rate`。burst 可累积（连按两帧 = 两次爆发相加），非有限 rate 钳 0。
+- `SampleScene`：柱顶 Torch（火焰）+ 地面 Campfire.Smoke（炊烟），两种混合方式
+  并排演示；固定种子保证截图逐位可复现。
+
+### 六、验证
+
+- `xgame-core`（新增 7 条）：默认值是一份能看见的配置、RON 往返 / burst 不落盘 /
+  缺字段回落、`sanitized` 钳 NaN 与逆序区间且幂等、零方向退回 +Y、burst 预设。
+- `xgame-particle`（14 条）：同种子逐位一致、各语义（寿命到头一颗不剩、上限硬顶、
+  阻尼衰减、burst、duration/looping、实体删除丢桶、形状/锥采样方向正确）。
+- `xgame-render`（新增 2 条 GPU 像素钉子）：`particle_quads_light_up_the_frame`
+  （HDR 白粒子点亮中心、纯红粒子红通道压过绿蓝、取走粒子逐位回基线）、
+  `particle_quads_respect_depth`（被立方体挡住的粒子逐位等于无粒子、前面的
+  加色提亮冒出来）。
+- `xgame-script`（新增 2 条）：GameCtx 直驱（开关/rate/burst 累积/没挂发射器时
+  静默 no-op 不凭空创建组件）+ Lua 可达性（四个函数都落在组件上）。
+- 全工作区测试与 clippy：见收尾 commit 信息（本节写于跑批前，数字以 commit 为准）。
+- 样例项目 `--check`：`entities=23`（+2 发射器）且 `OK`。
+
+### 七、已知限制（有意为之）
+
+- CPU 模拟：万级以上粒子会吃满一个核；真要上万，该上 GPU 变换反馈 / compute
+  （分层已经留好：模拟与渲染只靠 `ParticleQuad` 数组通信）。
+- 只有"软圆片"一种片元形状：没有图集帧动画 / 网格粒子 / 拖尾。
+- 没有编辑器内的发射器预览（编辑态不模拟，Play 才喷）—— 见第五条的理由。
+- 没有粒子与场景的碰撞（出生即世界空间，飞出去就飞出世界）。
+- `Sprite`/纹理粒子没有：颜色是纯色插值，要贴图粒子得先有 UI 图集之外的
+  第二张粒子图集（UI 图集是字体 + 矢量图元，塞不进火焰序列帧）。

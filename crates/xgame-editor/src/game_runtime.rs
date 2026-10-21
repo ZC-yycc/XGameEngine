@@ -133,6 +133,27 @@ impl GameRuntime {
         self.world.debug_lines()
     }
 
+    // -- 粒子（渲染 + 帧调度都要用，见 `scene_renderer` 的指纹门控）--
+
+    /// 本帧的粒子四边形。编辑态没有运行时 ⇒ 调用方拿空切片（见 `scene_view`）。
+    pub fn particle_quads(&self) -> &[xgame_particle::ParticleQuad] {
+        self.world.particle_quads()
+    }
+
+    /// 粒子内容指纹（混进渲染指纹，否则"只有粒子在动"会被整帧跳过）。
+    pub fn particle_signature(&self) -> u64 {
+        self.world.particle_signature()
+    }
+
+    /// 粒子是否还在动（帧调度：视角不动但粒子在飞时必须继续出帧）。
+    pub fn particles_animating(&self) -> bool {
+        self.world.particles_animating()
+    }
+
+    pub fn particle_stats(&self) -> xgame_particle::ParticleStats {
+        self.world.particle_stats()
+    }
+
     pub fn stats(&self) -> (usize, usize) {
         (self.report.bodies, self.report.colliders)
     }

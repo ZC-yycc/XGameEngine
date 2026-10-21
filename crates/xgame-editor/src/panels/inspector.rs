@@ -1670,6 +1670,319 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             }
         });
 
+        // ── 粒子发射器 ──
+        //
+        // 与 Audio 同一套"勾选才有"的写法。组件是纯声明（`core::ParticleEmitter`），
+        // 模拟住在运行时的 `ParticleSystem` 里：**编辑态看不见粒子，Play 才喷** ——
+        // 所以这里没有任何"预览播放"按钮，那需要另造一条编辑器内模拟回路，
+        // 而 Play 就是那条回路。
+        theme::section_bar(ui, "Particle");
+        ui.indent("particle", |ui| {
+            let mut enabled = entity.particle.is_some();
+            if ui
+                .checkbox(&mut enabled, "Has particle emitter")
+                .on_hover_text("CPU 粒子（billboard）。进 Play 开始喷，\n场景存盘只存参数、不存粒子状态")
+                .changed()
+            {
+                entity.particle = if enabled {
+                    Some(xgame_core::ParticleEmitter::default())
+                } else {
+                    None
+                };
+                touched = true;
+            }
+
+            if let Some(p) = entity.particle.as_mut() {
+                // 预设：只是"把一组字段填成某个值"，之后照常可改。
+                // 不放 Burst（一次性爆发）—— burst 是运行态动作（脚本 / 按键
+                // 触发），编辑态按了也没有模拟层去消费它。
+                ui.horizontal(|ui| {
+                    ui.label(theme::dim_note("Preset:"));
+                    if icons::chip(ui, "Fire", "火焰：快、短命、加色、往上飘") {
+                        *p = xgame_core::ParticleEmitter::fire();
+                        touched = true;
+                    }
+                    if icons::chip(ui, "Smoke", "烟尘：慢、长大、Alpha、继续上浮") {
+                        *p = xgame_core::ParticleEmitter::smoke();
+                        touched = true;
+                    }
+                    if icons::chip(ui, "Sparks", "火花：小、快、强重力、加色") {
+                        *p = xgame_core::ParticleEmitter::sparks();
+                        touched = true;
+                    }
+                });
+
+                if ui
+                    .checkbox(&mut p.emitting, "Emitting")
+                    .on_hover_text("关掉后已出生的粒子走完寿命再消失（不是清屏）")
+                    .changed()
+                {
+                    touched = true;
+                }
+
+                row(ui, "Rate", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.rate)
+                            .speed(1.0)
+                            .range(0.0..=1.0e5)
+                            .fixed_decimals(0),
+                    );
+                    ui.label(theme::dim_note("/s"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                row(ui, "Max", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.max_particles)
+                            .speed(1.0)
+                            .range(0..=xgame_core::particle::MAX_PARTICLES_LIMIT),
+                    );
+                    ui.label(theme::dim_note("同时存在上限"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                row(ui, "Duration", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.duration)
+                            .speed(0.1)
+                            .range(0.0..=1.0e5)
+                            .fixed_decimals(1),
+                    );
+                    ui.label(theme::dim_note("s（0 = 一直喷）"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    // Loop 是离散勾选（不是拖拽），changed 直接进 touched。
+                    if ui
+                        .checkbox(&mut p.looping, "Loop")
+                        .on_hover_text("到时重来（只在 Duration > 0 时有意义）")
+                        .changed()
+                    {
+                        touched = true;
+                    }
+                });
+                row(ui, "Lifetime", |ui| {
+                    let a = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.lifetime[0])
+                            .speed(0.05)
+                            .range(0.001..=1.0e4),
+                    );
+                    ui.label(theme::dim_note("→"));
+                    let b = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.lifetime[1])
+                            .speed(0.05)
+                            .range(0.001..=1.0e4),
+                    );
+                    ui.label(theme::dim_note("s"));
+                    collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
+                    collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                row(ui, "Speed", |ui| {
+                    let a = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.speed[0])
+                            .speed(0.1)
+                            .range(0.0..=1.0e4),
+                    );
+                    ui.label(theme::dim_note("→"));
+                    let b = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.speed[1])
+                            .speed(0.1)
+                            .range(0.0..=1.0e4),
+                    );
+                    ui.label(theme::dim_note("m/s"));
+                    collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
+                    collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                row(ui, "Spread", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.spread)
+                            .speed(1.0)
+                            .range(0.0..=180.0)
+                            .fixed_decimals(0),
+                    );
+                    ui.label(theme::dim_note("°（0 = 直线，180 = 全向）"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                // 方向是实体局部向量：三轴宽度与 Transform 同行算法一致。
+                let axis_w = theme::axis_field_width(ui);
+                theme::field_row(ui, "Direction", |ui| {
+                    // zip(iter_mut) 而不是 `[&mut a[0], ...]` 数组字面量：数组索引
+                    // 拿不到字段级借用拆分，会被判成同一数组的多次可变借用。
+                    for (axis, value) in ["X", "Y", "Z"].into_iter().zip(p.direction.iter_mut()) {
+                        theme::axis_label(ui, axis);
+                        let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    }
+                });
+
+                row(ui, "Shape", |ui| {
+                    let mut shape = p.shape;
+                    egui::ComboBox::from_id_salt("inspector_particle_shape")
+                        .width(ui.available_width())
+                        .selected_text(match shape {
+                            xgame_core::particle::EmissionShape::Point => "Point",
+                            xgame_core::particle::EmissionShape::Sphere { .. } => "Sphere",
+                            xgame_core::particle::EmissionShape::Box { .. } => "Box",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut shape,
+                                xgame_core::particle::EmissionShape::Point,
+                                "Point",
+                            );
+                            ui.selectable_value(
+                                &mut shape,
+                                xgame_core::particle::EmissionShape::Sphere { radius: 0.15 },
+                                "Sphere",
+                            );
+                            ui.selectable_value(
+                                &mut shape,
+                                xgame_core::particle::EmissionShape::Box {
+                                    half_extents: [0.15, 0.15, 0.15],
+                                },
+                                "Box",
+                            );
+                        });
+                    if shape != p.shape {
+                        p.shape = shape;
+                        touched = true;
+                    }
+                });
+                match p.shape {
+                    xgame_core::particle::EmissionShape::Sphere { radius } => {
+                        row(ui, "Radius", |ui| {
+                            let mut r = radius;
+                            let resp = ui.add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                egui::DragValue::new(&mut r)
+                                    .speed(0.05)
+                                    .range(0.0..=1.0e4),
+                            );
+                            ui.label(theme::dim_note("m"));
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                            if r != radius {
+                                p.shape = xgame_core::particle::EmissionShape::Sphere { radius: r };
+                            }
+                        });
+                    }
+                    xgame_core::particle::EmissionShape::Box { mut half_extents } => {
+                        theme::field_row(ui, "Half", |ui| {
+                            for (axis, value) in
+                                ["X", "Y", "Z"].into_iter().zip(half_extents.iter_mut())
+                            {
+                                theme::axis_label(ui, axis);
+                                let resp = theme::drag_field_w(ui, axis_w, value, 0.05, "");
+                                collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                            }
+                        });
+                        p.shape = xgame_core::particle::EmissionShape::Box { half_extents };
+                    }
+                    xgame_core::particle::EmissionShape::Point => {}
+                }
+
+                theme::field_row(ui, "Gravity", |ui| {
+                    for (axis, value) in ["X", "Y", "Z"].into_iter().zip(p.gravity.iter_mut()) {
+                        theme::axis_label(ui, axis);
+                        let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    }
+                });
+
+                row(ui, "Drag", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.drag)
+                            .speed(0.05)
+                            .range(0.0..=1.0e3),
+                    );
+                    ui.label(theme::dim_note("每秒衰减比例"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                row(ui, "Size", |ui| {
+                    let a = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.start_size)
+                            .speed(0.01)
+                            .range(0.0..=1.0e4),
+                    );
+                    ui.label(theme::dim_note("→"));
+                    let b = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.end_size)
+                            .speed(0.01)
+                            .range(0.0..=1.0e4),
+                    );
+                    ui.label(theme::dim_note("出生 → 死亡"));
+                    collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
+                    collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                row(ui, "Color", |ui| {
+                    // 与材质 Tint 同一套写法：先写临时变量，只有真的交互过才回写
+                    // （取色器会把 0.38 量化成 0.38039216，白开一次面板就"未保存"）。
+                    let mut start = p.start_color;
+                    let ra = ui.color_edit_button_rgba_unmultiplied(&mut start);
+                    if ra.changed() {
+                        p.start_color = start;
+                    }
+                    ui.label(theme::dim_note("→"));
+                    let mut end = p.end_color;
+                    let rb = ui.color_edit_button_rgba_unmultiplied(&mut end);
+                    if rb.changed() {
+                        p.end_color = end;
+                    }
+                    ui.label(theme::dim_note("出生 → 死亡"));
+                    collect(&ra, &mut touched, &mut drag_began, &mut drag_ended);
+                    collect(&rb, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                row(ui, "Blend", |ui| {
+                    let mut blend = p.blend;
+                    egui::ComboBox::from_id_salt("inspector_particle_blend")
+                        .width(ui.available_width())
+                        .selected_text(match blend {
+                            xgame_core::particle::ParticleBlend::Alpha => "Alpha",
+                            xgame_core::particle::ParticleBlend::Additive => "Additive",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut blend,
+                                xgame_core::particle::ParticleBlend::Alpha,
+                                "Alpha（烟雾 / 尘土）",
+                            );
+                            ui.selectable_value(
+                                &mut blend,
+                                xgame_core::particle::ParticleBlend::Additive,
+                                "Additive（火焰 / 火花）",
+                            );
+                        });
+                    if blend != p.blend {
+                        p.blend = blend;
+                        touched = true;
+                    }
+                });
+
+                row(ui, "Seed", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut p.seed).speed(1.0),
+                    );
+                    ui.label(theme::dim_note("同种子 ⇒ 逐位可复现"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+            }
+        });
+
 
         // ── 材质资产 + 覆盖 ──
         //

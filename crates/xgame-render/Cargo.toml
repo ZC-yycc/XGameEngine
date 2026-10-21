@@ -20,6 +20,7 @@ image = "0.24"
 xgame-core = { path = "../xgame-core" }
 xgame-math = { path = "../xgame-math" }
 xgame-ui = { path = "../xgame-ui" }
+xgame-particle = { path = "../xgame-particle" }
 
 [dev-dependencies]
 xgame-physics = { path = "../xgame-physics" }

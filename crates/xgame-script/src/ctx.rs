@@ -446,6 +446,65 @@ impl GameCtx<'_> {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // 粒子（运行态动作；配置本身在场景文件 / Inspector 里）
+    // -----------------------------------------------------------------------
+
+    /// 实体是否挂着粒子发射器且在发射（没挂 = `false`）。
+    pub fn entity_particle_emitting(&mut self, id: EntityId) -> bool {
+        self.scene
+            .find_entity(id)
+            .and_then(|i| self.scene.entities.get(i))
+            .and_then(|e| e.particle.as_ref())
+            .is_some_and(|p| p.emitting)
+    }
+
+    /// 开 / 关持续发射。关掉后**已出生的粒子照常走完寿命**（不是清屏）——
+    /// 想立刻消失得另加"清空"语义，而那个语义应该由 Kill 计时器之类的
+    /// 游戏逻辑自己做，引擎不替作者猜。
+    pub fn set_entity_particle_emitting(&mut self, id: EntityId, emitting: bool) {
+        if let Some(i) = self.scene.find_entity(id) {
+            if let Some(e) = self.scene.entities.get_mut(i) {
+                if let Some(p) = e.particle.as_mut() {
+                    p.emitting = emitting;
+                }
+            }
+        }
+    }
+
+    /// 一次爆发：同一帧多出 `count` 颗粒子（超出上限的部分被丢弃）。
+    ///
+    /// 走组件上的 `burst` 请求位（`#[serde(skip)]` 的运行态字段）：模拟层
+    /// 消费后清零，所以它是"一次性"的 —— 连按两帧就是两次爆发，不需要
+    /// 脚本侧自己记状态。没挂发射器时静默 no-op。
+    pub fn entity_particle_burst(&mut self, id: EntityId, count: u32) {
+        if let Some(i) = self.scene.find_entity(id) {
+            if let Some(e) = self.scene.entities.get_mut(i) {
+                if let Some(p) = e.particle.as_mut() {
+                    p.burst = p.burst.saturating_add(count);
+                }
+            }
+        }
+    }
+
+    /// 改发射速率（颗/秒）。`0` = 只靠 burst 出粒子。
+    ///
+    ///  clamp 到 `[0, 1e5]`：脚本算错（比如把帧数当速率传进来）时不该把
+    /// 模拟层打到卡死，钳一下还有救。
+    pub fn set_entity_particle_rate(&mut self, id: EntityId, rate: f32) {
+        if let Some(i) = self.scene.find_entity(id) {
+            if let Some(e) = self.scene.entities.get_mut(i) {
+                if let Some(p) = e.particle.as_mut() {
+                    p.rate = if rate.is_finite() {
+                        rate.clamp(0.0, 1.0e5)
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        }
+    }
+
     /// 实体的**世界**位置。
     pub fn entity_pos(&mut self, id: EntityId) -> Vec3 {
         self.scene
@@ -1206,6 +1265,80 @@ mod tests {
         }
         assert!(scene.entities[0].material.is_none());
         assert!(scene.entities[0].material_asset.is_none(), "空串 = 清空引用");
+    }
+
+    /// 粒子运行态 API：开关发射 / burst / rate，全部落在组件的运行态字段上。
+    ///
+    /// burst 是重点：它必须**可累积**（连按两帧 = 两次爆发相加），且被模拟层
+    /// 消费后清零 —— 这两条决定了"按下开火键"的手感。
+    #[test]
+    fn particle_runtime_api_sits_on_the_component() {
+        use xgame_core::ParticleEmitter;
+
+        let mut scene = Scene::new("particles");
+        let mut actor = Entity::new("torch");
+        actor.particle = Some(ParticleEmitter::fire());
+        scene.add_entity(actor);
+        let id = scene.entities[0].id;
+
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "TorchScript",
+                entity: id,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+
+            assert!(ctx.entity_particle_emitting(id), "默认火焰在发射");
+            ctx.set_entity_particle_emitting(id, false);
+            assert!(!ctx.entity_particle_emitting(id));
+
+            // 关掉发射不该动 rate —— 两个开关是正交的。
+            ctx.set_entity_particle_rate(id, 12.0);
+            assert_eq!(ctx.scene.entities[0].particle.as_ref().unwrap().rate, 12.0);
+
+            // burst 累积：两帧各 10 颗 = 20 颗待处理。
+            ctx.entity_particle_burst(id, 10);
+            ctx.entity_particle_burst(id, 10);
+            assert_eq!(ctx.scene.entities[0].particle.as_ref().unwrap().burst, 20);
+
+            // 非有限值钳成 0 而不是把 NaN 放进模拟层。
+            ctx.set_entity_particle_rate(id, f32::INFINITY);
+            assert_eq!(ctx.scene.entities[0].particle.as_ref().unwrap().rate, 0.0);
+        }
+
+        // 没挂发射器的实体：所有调用静默 no-op（不 panic、不插入组件）。
+        let bare = Entity::new("bare");
+        scene.add_entity(bare);
+        let bare_id = scene.entities[1].id;
+        let mut ctx = GameCtx {
+            scene: &mut scene,
+            physics: None,
+            input: None,
+            audio: None,
+            logs: &mut logs,
+            commands: &mut commands,
+            source: "TorchScript",
+            entity: bare_id,
+            delta: 1.0 / 60.0,
+            time: 0.0,
+        };
+        assert!(!ctx.entity_particle_emitting(bare_id));
+        ctx.entity_particle_burst(bare_id, 5);
+        ctx.set_entity_particle_rate(bare_id, 100.0);
+        ctx.set_entity_particle_emitting(bare_id, true);
+        assert!(
+            scene.entities[1].particle.is_none(),
+            "没挂发射器时不该被 API 凭空创建出来"
+        );
     }
 
     /// GameCtx 作为一束状态可以直接构造并调方法 —— 不经过脚本解释器。

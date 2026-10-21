@@ -175,6 +175,11 @@ pub struct World {
     ui_pointer: Option<Vec2>,
     /// UI 布局与交互状态（跨帧保持按下捕获）。
     ui: UiRuntime,
+    /// 粒子系统（CPU 模拟，按实体 id 分桶；见 `xgame-particle`）。
+    ///
+    /// 住在这里而不是渲染层：粒子的位置 / 速度是**运行时状态**，无头运行
+    /// 也要推进它（`--headless` 报告里能看见粒子数），渲染只是消费者。
+    particles: xgame_particle::ParticleSystem,
     /// 角色上一帧的接触面（实体 → 刚体集合），用于 enter / exit 差分。
     ///
     /// 角色的运动学胶囊永远停在 skin 距离外 —— 物理引擎不会给它发接触事件，
@@ -230,6 +235,7 @@ impl World {
             ui_viewport: (0, 0),
             ui_pointer: None,
             ui: UiRuntime::default(),
+            particles: xgame_particle::ParticleSystem::new(),
             character_contacts: HashMap::new(),
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
@@ -474,6 +480,14 @@ impl World {
         self.consume_script_commands(frame_dt, time);
         self.sync_bodies();
 
+        // -- 3.5 粒子：本帧的实体增删与脚本 burst 都已落定 --
+        //
+        // 放在 `update` 之后：脚本这一帧写的 `particle.burst` 当帧就能炸出来
+        // （"按下开火键 → 这一帧看见火花"，而不是下一帧）。
+        // 用**渲染帧 dt** 而不是固定步长：粒子是纯视觉，跟着画面走比跟着物理
+        // 走更合理（与动画时钟同一取舍）；无头运行里 dt 固定，所以仍逐位可复现。
+        self.particles.update(frame_dt, &mut self.scene);
+
         // -- 4. 音频（帧末：本帧的实体增删与物理回写都已落定） --
         self.sync_audio();
         self.flush_audio();
@@ -700,6 +714,33 @@ impl World {
     /// 物理调试线条。
     pub fn debug_lines(&self) -> Vec<DebugLine> {
         self.physics.debug_lines()
+    }
+
+    // -----------------------------------------------------------------------
+    // 粒子
+    // -----------------------------------------------------------------------
+
+    /// 本帧的粒子四边形（渲染入口；空切片 = 这一帧没有粒子）。
+    pub fn particle_quads(&self) -> &[xgame_particle::ParticleQuad] {
+        self.particles.quads()
+    }
+
+    /// 粒子统计（状态栏 / 无头报告 / 测试）。
+    pub fn particle_stats(&self) -> xgame_particle::ParticleStats {
+        self.particles.stats()
+    }
+
+    /// 粒子内容的指纹：宿主用它判断"这一帧要不要重画"。
+    ///
+    /// 静止时恒定、在动时每帧都变 —— 判据全在
+    /// [`xgame_particle::ParticleSystem::signature`] 里，宿主别自己另算一份。
+    pub fn particle_signature(&self) -> u64 {
+        self.particles.signature()
+    }
+
+    /// 粒子是否还在动（帧调度的输入之一，见 `FrameInputs::animating`）。
+    pub fn particles_animating(&self) -> bool {
+        self.particles.animating()
     }
 
     // -----------------------------------------------------------------------

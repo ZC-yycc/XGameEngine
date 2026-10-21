@@ -726,6 +726,10 @@ impl SceneRenderer {
     ///
     /// `settings` 是清单里的画面设置（曝光 / 色调映射）—— 与独立游戏、无头
     /// 截图同源，视口不存在自己的"调试用"渲染参数。
+    /// `particles` / `particle_signature` 是运行时这一帧的粒子四边形与它的
+    /// 内容指纹（编辑态传空 + 0）。指纹进渲染门控是**必须**的：粒子在飞而
+    /// 场景 / 相机 / UI 全都没变时，缺了它整帧会被跳过，粒子看起来是冻住的。
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         scene: &Scene,
@@ -733,6 +737,8 @@ impl SceneRenderer {
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
         settings: RenderConfig,
+        particles: &[xgame_particle::ParticleQuad],
+        particle_signature: u64,
     ) -> Vec<(String, Bounds)> {
         let (w, h) = self.viewport_size;
         if w == 0 || h == 0 {
@@ -779,6 +785,9 @@ impl SceneRenderer {
             &self.project_root,
         );
         let signature = mix_bits(signature, ui_signature);
+        // 粒子同理：静止时 `particle_signature` 恒定（静态帧照旧跳过），
+        // 有粒子在飞时每帧都变（粒子不会被静帧门控冻住）。
+        let signature = mix_bits(signature, particle_signature);
         if self.last_signature == Some(signature) {
             return Vec::new();
         }
@@ -843,6 +852,7 @@ impl SceneRenderer {
             camera_pos,
             lighting,
             settings.sky,
+            particles,
         );
 
         // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → egui 注册的 LDR 显示

@@ -353,10 +353,13 @@ impl eframe::App for EditorApp {
             // 不会把编辑器拖进满速空转。
             animating: self.session.as_mut().is_some_and(|s| {
                 let state = &mut s.state;
-                match (&mut state.scene_renderer, &state.scene) {
+                let anim = match (&mut state.scene_renderer, &state.scene) {
                     (Some(renderer), scene) => renderer.viewport_animating(scene),
                     (None, _) => false,
-                }
+                };
+                // 粒子也算"在动"：视角不动、只有粒子在飞时，缺这一条就会被
+                // 当成空闲停下来 —— 火焰会一格一格地跳。
+                anim || state.particles_animating()
             }),
         };
         let live = self.clock.plan(self.policy, inputs, now) == FramePlan::Now;
@@ -937,6 +940,28 @@ fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
                             theme::colors::WARN
                         }),
                     );
+                    // 粒子同理：活着多少 / 上限多少。上限数字要能看到 ——
+                    // "粒子数撞顶"是这个系统最主要的性能故障模式，而它在画面上
+                    // 的表现只是"莫名变少 / 不喷了"。
+                    let particles = state.particle_stats();
+                    if particles.emitters > 0 {
+                        icons::v_separator(ui);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "particles {} / {} ({} emitters)",
+                                particles.alive, particles.capacity, particles.emitters
+                            ))
+                            .size(11.0)
+                            .color(if particles.alive >= particles.capacity {
+                                theme::colors::WARN
+                            } else {
+                                theme::colors::TEXT_SECONDARY
+                            }),
+                        )
+                        .on_hover_text(
+                            "活着 / 上限（所有发射器之和）。\n撞上限时新粒子不再出生 —— 调大 Max 或调小 Rate",
+                        );
+                    }
                 }
 
                 // ── 右侧：FPS + 版本 ──

@@ -433,6 +433,8 @@ impl GameApp {
             &eye,
             SceneLighting::new(scene.ambient, &scene.lights),
             self.project.manifest().render.sky,
+            // 粒子：与编辑器视口同一条 pass（见 `ScenePipeline::render`）。
+            self.world.particle_quads(),
         );
 
         // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → 交换链。画面设置的

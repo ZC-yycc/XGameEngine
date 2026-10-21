@@ -473,6 +473,12 @@ pub struct HeadlessReport {
     /// 但解码 / 缓存 / 计数照常 —— 见模块头"明确不做的事"）。
     pub audio_available: bool,
     pub audio_active: usize,
+    /// 跑完时的粒子统计（CPU 模拟在无头运行里照常推进，只是没人看画面）。
+    pub particles_alive: usize,
+    /// 参与模拟的发射器数。
+    pub particles_emitters: usize,
+    /// 各发射器 `max_particles` 之和（`alive == capacity` = 撞顶）。
+    pub particles_capacity: usize,
     pub audio_cached_clips: usize,
     pub audio_failed_clips: usize,
     /// 画面设置（`project.ron` 的 `render` 节）：`--screenshot` 出的图就是按
@@ -553,6 +559,11 @@ impl HeadlessReport {
                 "active": self.audio_active,
                 "cached_clips": self.audio_cached_clips,
                 "failed_clips": self.audio_failed_clips,
+            },
+            "particles": {
+                "alive": self.particles_alive,
+                "emitters": self.particles_emitters,
+                "capacity": self.particles_capacity,
             },
             "render": {
                 "exposure": self.render.exposure,
@@ -673,6 +684,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     let last = world.last_report();
     let non_finite_transforms = count_non_finite(world.scene());
     let audio = world.audio_stats();
+    let particles = world.particle_stats();
     let total_time = world.clock().total_time();
 
     // 场景落盘放在报告之前：agent 的首要观察对象是"跑完的世界长什么样"，
@@ -705,8 +717,11 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
                 _ => None,
             };
             let scene = world.scene();
+            // 粒子必须进截图：无头运行的帧循环已经推进过模拟，玩家看到的
+            // 那一团火不能被截图漏掉（否则"智能体看图验收"完全失效）。
+            let particles = world.particle_quads();
             let used = renderer
-                .render_scene(
+                .render_scene_with_particles(
                     scene,
                     anim,
                     camera,
@@ -714,6 +729,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
                     // 画面设置与编辑器视口 / 独立游戏同源：截图不是"特调画面"，
                     // 它就是玩家会看到的那张图（见 screenshot 模块文档）。
                     project.manifest().render,
+                    particles,
                 )
                 .map_err(|e| format!("截图渲染失败: {e:#}"))?;
             renderer
@@ -761,6 +777,9 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         audio_active: audio.active,
         audio_cached_clips: audio.cached_clips,
         audio_failed_clips: audio.failed_clips,
+        particles_alive: particles.alive,
+        particles_emitters: particles.emitters,
+        particles_capacity: particles.capacity,
         render: project.manifest().render,
         scene_dump,
         screenshot,
@@ -1414,6 +1433,7 @@ mod tests {
             "logs",
             "error_samples",
             "audio",
+            "particles",
             "render",
             "scene_dump",
             "screenshot",
@@ -1432,6 +1452,9 @@ mod tests {
         }
         for key in ["available", "active", "cached_clips", "failed_clips"] {
             assert!(value["audio"].get(key).is_some(), "audio 缺字段 {key}");
+        }
+        for key in ["alive", "emitters", "capacity"] {
+            assert!(value["particles"].get(key).is_some(), "particles 缺字段 {key}");
         }
         for key in ["exposure", "tone_map", "bloom", "sky", "fxaa"] {
             assert!(value["render"].get(key).is_some(), "render 缺字段 {key}");

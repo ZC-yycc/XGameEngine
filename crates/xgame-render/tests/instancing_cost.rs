@@ -254,6 +254,7 @@ impl BenchPath {
             eye,
             SceneLighting::new(scene.ambient, &scene.lights),
             RenderConfig::default().sky,
+            &[], // 无粒子：这条 bench 量的是场景 / 后处理成本
         );
         encoder.write_timestamp(stamps, base + 1);
         self.postfx.render(

@@ -1,0 +1,11 @@
+[package]
+name = "xgame-particle"
+version = "0.1.0"
+edition = "2021"
+description = "XGameEngine 粒子模拟：确定性 CPU 粒子系统（纯 CPU，不含 GPU）"
+
+[dependencies]
+log = "0.4"
+
+xgame-core = { path = "../xgame-core" }
+xgame-math = { path = "../xgame-math" }

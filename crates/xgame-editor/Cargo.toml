@@ -46,3 +46,4 @@ xgame-physics = { path = "../xgame-physics" }
 xgame-input = { path = "../xgame-input" }
 xgame-script = { path = "../xgame-script" }
 xgame-runtime = { path = "../xgame-runtime" }
+xgame-particle = { path = "../xgame-particle" }

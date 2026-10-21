@@ -373,6 +373,24 @@ impl ScreenshotRenderer {
         lighting: SceneLighting<'_>,
         settings: RenderConfig,
     ) -> Result<ShotCamera> {
+        self.render_scene_with_particles(scene, anim, camera, lighting, settings, &[])
+    }
+
+    /// 带粒子的截图。
+    ///
+    /// 单开一个方法而不是给 `render_scene` 加参数：**绝大多数调用点（含全部
+    /// 既有测试）没有粒子**，多一个 `&[]` 只是噪音；而"截图里有没有粒子"
+    /// 本身是个明确的语义差别（无头运行必须有，静态取景测试通常没有）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_scene_with_particles(
+        &mut self,
+        scene: &Scene,
+        anim: &AnimationDriver,
+        camera: Option<ShotCamera>,
+        lighting: SceneLighting<'_>,
+        settings: RenderConfig,
+        particles: &[xgame_particle::ParticleQuad],
+    ) -> Result<ShotCamera> {
         // 模型懒加载：与编辑器 SceneRenderer 同一条入口，失败只警告
         // （画不出来的实体留空，整张图照常出）。
         for entity in &scene.entities {
@@ -424,6 +442,7 @@ impl ScreenshotRenderer {
             &camera.eye,
             lighting,
             settings.sky,
+            particles,
         );
         // HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → LDR 显示目标。截图器建一次
         // 用一次、目标从不重建 ⇒ 目标代数恒为 0（绑定组缓存只填一次）；
@@ -1790,6 +1809,146 @@ mod tests {
         assert_eq!(
             merged.opaque_batches, 1,
             "同一图元 + 同一材质应合批: {merged:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 粒子：CPU 模拟的输出必须真的画进画面，且遵守深度 / 混合语义
+    // -----------------------------------------------------------------
+
+    /// 一颗加色粒子放在相机正前方：中心像素必须被点亮，且**颜色就是粒子的
+    /// 颜色**（不是被雾 / 后处理糊掉）；取走粒子后画面必须逐位回到基线
+    /// （空切片 = 一次 draw 都不发，不是"画了个透明的"）。
+    #[test]
+    fn particle_quads_light_up_the_frame() {
+        let Some(mut shot) = gpu_or_skip("particle_quads_light_up_the_frame") else {
+            return;
+        };
+
+        // 空场景 + 关天空：背景全黑，粒子的贡献没有第二解释。
+        let mut scene = Scene::new("particles");
+        scene.ambient = [0.0, 0.0, 0.0];
+        let settings = sky_settings(false);
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (cx, cy) = (320 / 2, 240 / 2);
+
+        let render = |quads: &[xgame_particle::ParticleQuad], shot: &mut ScreenshotRenderer| {
+            shot.render_scene_with_particles(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings.clone(),
+                quads,
+            )
+            .expect("渲染失败");
+            pixel_avg(&shot.read_rgba().expect("读回失败"), 320, cx, cy)
+        };
+
+        // 背景 = HDR 目标的 clear 色（关天空后是一块深灰蓝，实测显示值 ≈ 97）：
+        // 断言写成"与基线的差"，不写绝对值 —— 绝对阈值会在谁调 clear 色时碎掉。
+        let baseline = render(&[], &mut shot);
+        assert!(
+            (60.0..140.0).contains(&baseline[0]) && (baseline[0] - baseline[2]).abs() < 20.0,
+            "关天空 + 无实体的背景应当是均匀的深灰蓝: {baseline:?}"
+        );
+
+        // ① HDR 白粒子（size 1.0 世界单位盖住中心）：加色 + 曝光后应当饱和。
+        let white = [xgame_particle::ParticleQuad {
+            position: [0.0, 0.0, 0.0],
+            size: 1.0,
+            color: [4.0, 4.0, 4.0, 1.0],
+            blend: xgame_core::ParticleBlend::Additive,
+        }];
+        let lit = render(&white, &mut shot);
+        assert!(
+            lit[0] > baseline[0] + 80.0 && lit[1] > baseline[1] + 80.0,
+            "HDR 加色白粒子必须把中心显著提亮: {lit:?} vs 基线 {baseline:?}"
+        );
+
+        // ② 纯红粒子：红通道必须显著高于绿 / 蓝（颜色一路无损传到片元）。
+        let red = [xgame_particle::ParticleQuad {
+            position: [0.0, 0.0, 0.0],
+            size: 1.0,
+            color: [4.0, 0.0, 0.0, 1.0],
+            blend: xgame_core::ParticleBlend::Additive,
+        }];
+        let tinted = render(&red, &mut shot);
+        assert!(
+            tinted[0] > tinted[1] + 60.0 && tinted[0] > tinted[2] + 60.0,
+            "红色粒子的红通道必须压过绿 / 蓝: {tinted:?}"
+        );
+        assert!(
+            tinted[0] > baseline[0] + 80.0,
+            "红色粒子也必须把中心显著提亮: {tinted:?} vs {baseline:?}"
+        );
+
+        // ③ 取走粒子：逐位回到基线。
+        let restored = render(&[], &mut shot);
+        assert_eq!(restored, baseline, "没有粒子时必须与空场景逐位一致");
+    }
+
+    /// 深度语义：粒子**测试深度但不写深度**。
+    ///
+    /// 立方体挡在中间时，它背后的粒子必须被完全遮掉（画面与不放粒子逐位一致）；
+    /// 挪到立方体前面则必须冒出来（加色让受光面变更亮）。这条钉子锁的是
+    /// "粒子是场景里的东西"这条定位 —— 少了深度测试，火焰会从墙里透出来。
+    #[test]
+    fn particle_quads_respect_depth() {
+        let Some(mut shot) = gpu_or_skip("particle_quads_respect_depth") else {
+            return;
+        };
+
+        let mut scene = Scene::new("particle_depth");
+        scene.ambient = [0.0, 0.0, 0.0];
+        // 斜射光（含 -z 分量）：正对相机的 +z 面才受光。光要是垂直向下
+        // （0,-1,0），照的是顶面，正面全黑，"粒子冒出来"就无从比起。
+        scene.lights = vec![Light::directional("sun", [0.6, -1.0, -0.75], [1.0; 3], 1.0)];
+        scene.lights[0].casts_shadow = false;
+        let mut cube = Entity::new("Cube");
+        cube.model = "builtin://cube".to_owned();
+        scene.add_entity(cube);
+
+        let settings = sky_settings(false);
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (cx, cy) = (320 / 2, 240 / 2);
+
+        let render = |quads: &[xgame_particle::ParticleQuad], shot: &mut ScreenshotRenderer| {
+            shot.render_scene_with_particles(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings.clone(),
+                quads,
+            )
+            .expect("渲染失败");
+            pixel_avg(&shot.read_rgba().expect("读回失败"), 320, cx, cy)
+        };
+
+        // 立方体正面在 z = 0.5：z = 0 的粒子在它背后，z = 1 的在它前面。
+        let behind = [xgame_particle::ParticleQuad {
+            position: [0.0, 0.0, 0.0],
+            size: 1.0,
+            color: [4.0, 4.0, 4.0, 1.0],
+            blend: xgame_core::ParticleBlend::Additive,
+        }];
+        let mut front = behind;
+        front[0].position = [0.0, 0.0, 1.0];
+
+        let plain = render(&[], &mut shot);
+        assert!(plain[0] > 100.0, "受光立方体正面必须亮: {plain:?}");
+
+        let occluded = render(&behind, &mut shot);
+        assert_eq!(
+            occluded, plain,
+            "被立方体挡住的粒子必须完全看不见（逐位等于无粒子）"
+        );
+
+        let in_front = render(&front, &mut shot);
+        assert!(
+            in_front[0] > plain[0] + 20.0,
+            "立方体前面的粒子必须冒出来（加色提亮）: {in_front:?} vs {plain:?}"
         );
     }
 

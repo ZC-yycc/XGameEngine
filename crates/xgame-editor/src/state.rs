@@ -2065,6 +2065,20 @@ impl EditorState {
             .map_or(xgame_core::AudioStats::default(), |rt| rt.audio_stats())
     }
 
+    /// 粒子是否还在动（帧调度用；编辑态恒 false —— 粒子只在 Play 里模拟）。
+    pub fn particles_animating(&self) -> bool {
+        self.game_runtime
+            .as_ref()
+            .is_some_and(|rt| rt.particles_animating())
+    }
+
+    /// 粒子统计（状态栏 / 诊断；编辑态为全 0）。
+    pub fn particle_stats(&self) -> xgame_particle::ParticleStats {
+        self.game_runtime
+            .as_ref()
+            .map_or(xgame_particle::ParticleStats::default(), |rt| rt.particle_stats())
+    }
+
     // -----------------------------------------------------------------------
     // 项目
     // -----------------------------------------------------------------------

@@ -719,6 +719,48 @@ mod tests {
         );
     }
 
+    /// Lua 侧的粒子 API：开关 / burst / rate 必须都落在组件上。
+    /// burst 特别验一次"可累积"—— 这是脚本手感的来源。
+    #[test]
+    fn particle_api_is_reachable_from_lua() {
+        use xgame_core::ParticleEmitter;
+
+        let project = TempProject::new("particle_api");
+        let path = project.write_script(
+            "torch",
+            r#"
+            function start(ctx)
+                local id = self_id(ctx)
+                log(ctx, tostring(particle_emitting(ctx, id)))
+                set_particle_emitting(ctx, id, false)
+                set_particle_rate(ctx, id, 30.0)
+                particle_burst(ctx, id, 8)
+                particle_burst(ctx, id, 8)
+            end
+            "#,
+        );
+        let mut scene = scene_with_script(&path);
+        scene.entities[0].particle = Some(ParticleEmitter::fire());
+        let mut host = LuaHost::new();
+        let report = host.preload(&project.dir, &scene);
+        assert!(report.failed.is_empty(), "编译失败: {:?}", report.failed);
+        host.dispatch_start(FrameCtx::new(&mut scene, 0.016, 0.0));
+
+        let emitter = scene.entities[0]
+            .particle
+            .as_ref()
+            .expect("发射器应还在");
+        assert!(!emitter.emitting, "Lua 关掉了发射");
+        assert_eq!(emitter.rate, 30.0);
+        assert_eq!(emitter.burst, 16, "两次 burst 必须累积");
+
+        let logs = host.take_logs();
+        assert!(
+            logs.iter().any(|l| l.message == "true"),
+            "particle_emitting 应读回 true: {logs:?}"
+        );
+    }
+
     #[test]
     fn script_hooks_run_and_mutate_the_scene() {
         let project = TempProject::new("hooks");

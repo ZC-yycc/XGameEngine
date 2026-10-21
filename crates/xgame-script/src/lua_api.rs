@@ -428,6 +428,34 @@ fn register_entity(lua: &Lua, globals: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // ── 粒子（运行态动作；参数配置在场景 / Inspector）──
+    globals.set(
+        "particle_emitting",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
+            Ok(ctx.game().entity_particle_emitting(id_of(id)))
+        })?,
+    )?;
+    globals.set(
+        "set_particle_emitting",
+        lua.create_function(|_, (ctx, id, on): (LuaCtx, i64, bool)| {
+            ctx.game().set_entity_particle_emitting(id_of(id), on);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "particle_burst",
+        lua.create_function(|_, (ctx, id, count): (LuaCtx, i64, u32)| {
+            ctx.game().entity_particle_burst(id_of(id), count);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "set_particle_rate",
+        lua.create_function(|_, (ctx, id, rate): (LuaCtx, i64, f32)| {
+            ctx.game().set_entity_particle_rate(id_of(id), rate);
+            Ok(())
+        })?,
+    )?;
     globals.set(
         "entity_pos",
         lua.create_function(|lua, (ctx, id): (LuaCtx, i64)| {

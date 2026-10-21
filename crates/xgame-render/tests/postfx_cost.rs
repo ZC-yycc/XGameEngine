@@ -279,6 +279,7 @@ impl LdrPath {
             eye,
             SceneLighting::new(scene.ambient, &scene.lights),
             SkyConfig::default(),
+            &[], // 无粒子：这条 bench 量的是场景 / 后处理成本
         );
         encoder.write_timestamp(stamps, base + 1);
         // 旧路径没有第二段；连着打两个点，让"后处理段"恒为 0（读数表结构统一）。
@@ -361,6 +362,7 @@ impl HdrPath {
             eye,
             SceneLighting::new(scene.ambient, &scene.lights),
             settings.sky,
+            &[], // 无粒子：这条 bench 量的是场景 / 后处理成本
         );
         encoder.write_timestamp(stamps, base + 1);
         self.postfx.render(

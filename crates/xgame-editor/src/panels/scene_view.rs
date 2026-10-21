@@ -137,6 +137,12 @@ fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4)
     // `render` 节（视口不搞自己的"调试参数"，否则截图与玩家画面会分叉）。
     // 先取出来再借 `scene_renderer`，免得两个 `state` 借用打架。
     let settings = state.project.manifest().render;
+    // 粒子只在 Play 态存在（模拟住在运行时里）。编辑态传空切片 + 签名 0，
+    // 指纹因此完全不受这一路影响 —— 与"没有粒子"的时代逐位一致。
+    let particle_signature = state
+        .game_runtime
+        .as_ref()
+        .map_or(0, |rt| rt.particle_signature());
     let renderer = state.scene_renderer.as_mut()?;
     renderer.set_viewport_size(vp_w, vp_h);
     renderer.render(
@@ -148,6 +154,11 @@ fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4)
             &state.scene.lights,
         ),
         settings,
+        state
+            .game_runtime
+            .as_ref()
+            .map_or(&[], |rt| rt.particle_quads()),
+        particle_signature,
     );
     renderer.texture_id()
 }

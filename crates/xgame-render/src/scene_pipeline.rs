@@ -1022,6 +1022,13 @@ pub struct ScenePipeline {
 
     /// 上一帧的绘制统计（见 [`FrameStats`]）。合批与剔除是否生效的读数口。
     stats: FrameStats,
+
+    /// 粒子 billboard 管线（见 [`crate::particles`]）。
+    ///
+    /// 粒子在本管线的**场景 pass 内部**画（不透明与半透明之后）：它是场景里的
+    /// 东西 —— 要被几何遮住、要参与曝光 / 色调映射 / Bloom。UI 则相反，见
+    /// `ui_renderer` 的模块头。
+    particles: crate::particles::ParticleRenderer,
 }
 
 impl ScenePipeline {
@@ -1303,6 +1310,7 @@ impl ScenePipeline {
             shadow_batch_index: HashMap::new(),
             frustum_culling: true,
             stats: FrameStats::default(),
+            particles: crate::particles::ParticleRenderer::new(device, format, sample_count),
         }
     }
 
@@ -1728,6 +1736,7 @@ impl ScenePipeline {
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
         sky: SkyConfig,
+        particle_quads: &[xgame_particle::ParticleQuad],
     ) {
         // --- 光源打包 + 阴影准备（都在 CPU 侧，先算完再开 pass）---
         let packed: Vec<&Light> = lighting
@@ -2207,6 +2216,11 @@ impl ScenePipeline {
             }
         }
 
+        // 粒子：实例数据与相机基在开 pass 之前就备好（`prepare` 里做了 alpha
+        // 排序，那一步不该发生在 pass 里）。没有粒子时整段跳过。
+        self.particles
+            .prepare(device, queue, view_proj, camera_pos, particle_quads);
+
         // --- 渲染通道 ---
         // 开了 MSAA 就把渲染目标换成多采样那张，并把最终视图设为 resolve target。
         let (pass_view, resolve_target) = match msaa_color_view {
@@ -2289,6 +2303,15 @@ impl ScenePipeline {
                 );
             }
         }
+
+        // 粒子：最后画。深度测试让它们被前面的几何遮住，深度写关掉，
+        // 于是粒子之间不互相遮挡（也不污染后续 pass 的深度）。
+        self.particles.draw(&mut rpass);
+    }
+
+    /// 上一帧的粒子绘制统计（无粒子时为全 0）。
+    pub fn particle_stats(&self) -> crate::particles::ParticleDrawStats {
+        self.particles.stats()
     }
 }
 
