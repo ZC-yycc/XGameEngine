@@ -3621,6 +3621,8 @@ let eye = Vec3::new(5.0, 5.0, 5.0);
   脚本到底跑没跑）：把场景里 Main Camera 的 `position` 临时改成 `(0,0,0)` 再截一次，
   报告 `eye` 仍然是 `(4.2, 2.8, 5.4)` = 狐狸世界坐标 `(0,0,1.8)` + 脚本偏移
   `(4.2,2.8,3.6)`，`target` 落在 `eye + forward` 上。改完立刻还原（`md5sum` 对过）。
+  两张截图**逐字节相同**（md5 `27fe26a8…`）—— 静态 `position` 对最终画面零影响，
+  正是"脚本每帧覆写"的直接结果。
   这一步同时验证了 `guid://` 形式的脚本引用能被解析（场景里手写实体走的是 GUID）。
 - 发布包复检：`dist\xgame-editor.exe --check dist\projects\SampleScene` 通过；
   `dist` 版 `--headless --screenshot` 同样报 `mode == "scene"`。
