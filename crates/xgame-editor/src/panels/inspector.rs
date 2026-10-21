@@ -383,15 +383,29 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 });
 
                 // 旋转（欧拉角显示，内部仍是四元数）
+                //
+                // 顺序用 **YXZ**（不是 XYZ）：脚本 API 的 `rot` / `set_rot` 就是 YXZ，
+                // 面板必须与它一致，否则"面板上读到 153°、脚本里读到 −130°"，
+                // 作者会以为其中一处坏了。
+                // 对相机这类物体，YXZ 还给出人类可读的 yaw / pitch（俯角 18°），
+                // XYZ 分解在同样位姿下会折成 (−46°, 153°, 160°) 这种读不出来的三元组。
                 let euler = entity
                     .transform
                     .rotation
-                    .to_euler(xgame_math::glam::EulerRot::XYZ);
+                    .to_euler(xgame_math::glam::EulerRot::YXZ);
+                // `to_euler` 按 (y, x, z) 序返回；面板按 X / Y / Z 排列显示。
                 let mut rot = [
-                    euler.0.to_degrees(),
                     euler.1.to_degrees(),
+                    euler.0.to_degrees(),
                     euler.2.to_degrees(),
                 ];
+                // 把 −0.000 抹成 0：四元数分解常在零附近给出负零，
+                // 面板上显示 "−0.000°" 像是算错了（实际是同一角度）。
+                for value in &mut rot {
+                    if value.abs() < 1e-3 {
+                        *value = 0.0;
+                    }
+                }
                 // 走 `field_row`（而不是手搓 horizontal）：标签列宽必须与 Position /
                 // Scale 完全一致，否则 "Rotation" 比 "Position" 窄一点，下面 Scale 的
                 // 三个输入框就跟着往左挪一档。
@@ -410,9 +424,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 });
                 if rotation_changed {
                     entity.transform.rotation = xgame_math::glam::Quat::from_euler(
-                        xgame_math::glam::EulerRot::XYZ,
-                        rot[0].to_radians(),
+                        xgame_math::glam::EulerRot::YXZ,
                         rot[1].to_radians(),
+                        rot[0].to_radians(),
                         rot[2].to_radians(),
                     );
                 }
@@ -1666,6 +1680,93 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     // 只加一次：这一行同时标出两列的语义（min / max），
                     // 挤在控件后面会把工具栏式的紧凑感打散。
                     theme::note(ui, "min → max：衰减区间（米）");
+                }
+            }
+        });
+
+        // ── 相机 ──
+        //
+        // 与 Audio / Particle 同一套"勾选才有"的写法。相机是**普通实体组件**
+        // （不是场景级数据），所以它在这里，而光源在项目设置里。
+        //
+        // 没有"预览画面"按钮：Play 态视口直接用这台相机的机位
+        // （见 `scene_view::build_view_projection`），那本身就是预览。
+        theme::section_bar(ui, "Camera");
+        ui.indent("camera", |ui| {
+            let mut enabled = entity.camera.is_some();
+            if ui
+                .checkbox(&mut enabled, "Has camera")
+                .on_hover_text(
+                    "勾上之后这个实体就是一台相机：\n\
+                     Play 态视口 / 独立游戏 / 无头截图都从它取机位",
+                )
+                .changed()
+            {
+                entity.camera = if enabled {
+                    Some(xgame_core::Camera::default())
+                } else {
+                    None
+                };
+                touched = true;
+            }
+
+            if let Some(cam) = entity.camera.as_mut() {
+                // `sanitized()` 的边界在这里**手写两遍**是刻意的：Inspector 要能在
+                // 拖拽过程中就拦住坏值，而不是等 `CameraView` 解析时再钳 ——
+                // 否则用户会看到"我拖到 0 了但画面没变化"，比直接拖不动更费解。
+                row(ui, "FOV", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut cam.fov)
+                            .speed(0.5)
+                            .range(1.0..=179.0)
+                            .fixed_decimals(1),
+                    );
+                    ui.label(theme::dim_note("度（垂直）"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                });
+
+                row(ui, "Near", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut cam.near)
+                            .speed(0.01)
+                            .range(0.001..=1.0e4)
+                            .fixed_decimals(3),
+                    );
+                    ui.label(theme::dim_note("米"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    // far 必须 > near：改完 near 顺手把 far 顶上去，
+                    // 免得留下一个"深度范围为空"的相机（整屏没有东西）。
+                    if cam.far <= cam.near {
+                        cam.far = cam.near + 0.001;
+                    }
+                });
+
+                row(ui, "Far", |ui| {
+                    let resp = ui.add_sized(
+                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(&mut cam.far)
+                            .speed(1.0)
+                            .range(0.002..=1.0e5)
+                            .fixed_decimals(1),
+                    );
+                    ui.label(theme::dim_note("米"));
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    if cam.far <= cam.near {
+                        cam.far = cam.near + 0.001;
+                    }
+                });
+
+                if ui
+                    .checkbox(&mut cam.active, "Active")
+                    .on_hover_text(
+                        "多机位时用哪一台：解析规则是「第一个 active 的相机」，\n\
+                         全部取消勾选时退回场景里第一台（画面不会突然没有相机）",
+                    )
+                    .changed()
+                {
+                    touched = true;
                 }
             }
         });

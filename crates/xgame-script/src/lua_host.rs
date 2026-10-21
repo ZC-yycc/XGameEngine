@@ -719,6 +719,81 @@ mod tests {
         );
     }
 
+    /// Lua 侧的相机 API：`look_at` 必须真的把 **+Z** 转向目标，
+    /// `set_active_camera` 必须是"独占式"切换（否则第二台相机永远轮不到）。
+    #[test]
+    fn camera_api_is_reachable_from_lua() {
+        use xgame_core::Camera;
+        use xgame_math::glam::Vec3;
+
+        let project = TempProject::new("camera_api");
+        let path = project.write_script(
+            "follow_cam",
+            r#"
+            function start(ctx)
+                local me = self_id(ctx)
+                -- 先看"哪台是主相机"：应当是第一台（active 默认 true）。
+                log(ctx, tostring(active_camera(ctx)))
+                -- 独占式切换到自己。
+                set_active_camera(ctx, me)
+                -- 看向另一个实体（世界坐标）。
+                look_at_entity(ctx, entity_id(ctx, "Target"))
+                set_camera_fov(ctx, me, 40.0)
+                log(ctx, tostring(camera_fov(ctx, me)))
+            end
+            "#,
+        );
+
+        let mut scene = Scene::new("cam_api");
+        // 第一台相机：抢在脚本实体之前，用来验证"切换"是真的生效。
+        let other = scene.add_entity(Entity::new("Other Cam").with_camera(Camera::default()));
+        let mut cam = Entity::new("Follow Cam").with_camera(Camera::default());
+        cam.scripts.push(path.clone());
+        let me = scene.add_entity(cam);
+        // 目标放在世界 +X 方向，相机在原点 → 看向它之后 forward 应变成 +X。
+        scene.add_entity(
+            Entity::new("Target")
+                .with_transform(xgame_core::Transform::from_translation(Vec3::new(10.0, 0.0, 0.0))),
+        );
+
+        let mut host = LuaHost::new();
+        let report = host.preload(&project.dir, &scene);
+        assert!(report.failed.is_empty(), "编译失败: {:?}", report.failed);
+        host.dispatch_start(FrameCtx::new(&mut scene, 0.016, 0.0));
+
+        let me_index = scene.index_of(me).unwrap();
+        let other_index = scene.index_of(other).unwrap();
+        assert!(
+            scene.entities[me_index].camera.as_ref().unwrap().active,
+            "set_active_camera 没把目标相机打开"
+        );
+        assert!(
+            !scene.entities[other_index].camera.as_ref().unwrap().active,
+            "set_active_camera 必须是独占的：其它相机要关掉"
+        );
+
+        let forward = scene.entities[me_index].transform.rotation * Vec3::Z;
+        assert!(
+            (forward - Vec3::X).length() < 1e-4,
+            "look_at_entity 没把 +Z 转向目标，实际 forward = {forward:?}"
+        );
+        assert_eq!(
+            scene.entities[me_index].camera.as_ref().unwrap().fov,
+            40.0,
+            "set_camera_fov 没落盘"
+        );
+
+        let logs: Vec<String> = host.take_logs().into_iter().map(|l| l.message).collect();
+        assert!(
+            logs.iter().any(|m| m == &other.raw().to_string()),
+            "active_camera 应报告第一台相机（切换之前）: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|m| m == "40.0"),
+            "camera_fov 应能读回（Lua 5.4 的 tostring(40.0) = \"40.0\"）: {logs:?}"
+        );
+    }
+
     /// Lua 侧的粒子 API：开关 / burst / rate 必须都落在组件上。
     /// burst 特别验一次"可累积"—— 这是脚本手感的来源。
     #[test]

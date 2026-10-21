@@ -166,6 +166,20 @@ pub struct Entity {
     /// 零开销；没配粒子的实体不写这一行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub particle: Option<crate::particle::ParticleEmitter>,
+    /// 相机（透视投影参数 + 主相机标记）。`None` = 这个实体不是相机。
+    ///
+    /// 做成**实体组件**而不是 `Scene` 级数据（像 `Light` 那样），是因为相机
+    /// 需要被 Transform 层级带着走：挂在角色下当肩视角、被脚本每帧推着跟随，
+    /// 这些都是"相机是一个物体"的直接后果。理由详见 [`crate::camera`]。
+    ///
+    /// 选谁当主相机不在这里决定 —— 唯一规则是
+    /// [`Scene::active_camera_index`]，宿主（独立游戏 / 编辑器 Play /
+    /// 无头截图）都读那一个，别各自写一套。
+    ///
+    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → `None`，
+    /// 老场景照常加载（宿主退回各自的旧机位）；没配相机的实体不写这一行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<crate::camera::Camera>,
     /// 运行时组件集合（反序列化时默认为空）。
     #[serde(skip)]
     pub components: ComponentMap,
@@ -192,6 +206,7 @@ impl Entity {
             controller: None,
             ui: None,
             particle: None,
+            camera: None,
             components: ComponentMap::new(),
         }
     }
@@ -258,6 +273,12 @@ impl Entity {
     /// 挂一个粒子发射器（纯视觉，见 [`Entity::particle`]）。
     pub fn with_particle(mut self, particle: crate::particle::ParticleEmitter) -> Self {
         self.particle = Some(particle);
+        self
+    }
+
+    /// 挂一台相机（见 [`Entity::camera`]）。
+    pub fn with_camera(mut self, camera: crate::camera::Camera) -> Self {
+        self.camera = Some(camera);
         self
     }
 
@@ -332,6 +353,9 @@ impl PartialEq for Entity {
                 (Some(a), Some(b)) => a.data_eq(b),
                 _ => false,
             }
+            // 相机参数是落盘内容：改了 FOV 按保存必须有反应。相机没有运行态
+            // 字段（不像 UI / 粒子），所以直接比结构。
+            && self.camera == other.camera
     }
 }
 
@@ -380,6 +404,40 @@ impl Scene {
     /// 按 EntityId 查找实体索引（线性搜索）。
     pub fn find_entity(&self, id: EntityId) -> Option<usize> {
         self.entities.iter().position(|e| e.id == id)
+    }
+
+    /// 解析**主相机**：返回它在 `entities` 中的索引。
+    ///
+    /// 唯一的相机选择规则，三宿主（独立游戏 / 编辑器 Play / 无头截图）与
+    /// 脚本 API 全读这一处 —— 各写一套的话，"编辑器里看到的是 A 机位、
+    /// 打包出来是 B 机位"这类 bug 会一直复发（项目设置早已吃过这个亏，
+    /// 所以走 `from_project_runtime` 单入口）。
+    ///
+    /// 规则（按优先级）：
+    /// 1. 第一个 `active == true` 的相机；
+    /// 2. 没有 active 的相机时，退回第一个相机（把唯一的相机误点成 inactive
+    ///    不该让画面变成"没有相机"）；
+    /// 3. 一台相机都没有 → `None`（宿主退回旧机位，老场景零影响）。
+    ///
+    /// 用**场景顺序**而不是"谁先被创建"：场景文件的顺序就是作者眼里的层级顺序，
+    /// 重排场景会改变结果，这是可预期、可 diff 的。
+    pub fn active_camera_index(&self) -> Option<usize> {
+        let mut first_any = None;
+        for (index, entity) in self.entities.iter().enumerate() {
+            let Some(camera) = entity.camera.as_ref() else {
+                continue;
+            };
+            if camera.active {
+                return Some(index);
+            }
+            first_any.get_or_insert(index);
+        }
+        first_any
+    }
+
+    /// 主相机实体（见 [`active_camera_index`](Self::active_camera_index)）。
+    pub fn active_camera(&self) -> Option<&Entity> {
+        self.active_camera_index().map(|i| &self.entities[i])
     }
 
     /// 按名称查找实体。
@@ -883,6 +941,90 @@ mod tests {
             p.rate = 1.0;
         }
         assert_ne!(a, b, "配置改了必须算改动");
+    }
+
+    // -- 相机（组件落盘 / 主相机解析）--------------------------------------
+
+    #[test]
+    fn camera_component_roundtrips_through_ron() {
+        let camera = crate::camera::Camera {
+            fov: 75.0,
+            near: 0.05,
+            far: 200.0,
+            active: false,
+        };
+        let entity = Entity::new("Main Camera")
+            .with_transform(Transform::from_translation(Vec3::new(0.0, 2.0, -4.0)))
+            .with_camera(camera.clone());
+        let text = ron::to_string(&entity).unwrap();
+        assert!(text.contains("camera"), "挂了相机就得写出来: {text}");
+        let back: Entity = ron::from_str(&text).unwrap();
+        assert_eq!(back.camera.unwrap(), camera);
+        // 位置也得跟着落盘 —— 机位就是"相机在哪"。
+        assert_eq!(back.transform.position, Vec3::new(0.0, 2.0, -4.0));
+    }
+
+    #[test]
+    fn entity_without_camera_writes_no_line() {
+        let text = ron::to_string(&Entity::new("Plain")).unwrap();
+        assert!(
+            !text.contains("camera"),
+            "没配相机的实体不该被 `camera: None` 灌满: {text}"
+        );
+    }
+
+    #[test]
+    fn old_scene_without_camera_field_loads_as_none() {
+        // 这条盯的是**向后兼容**：相机字段出现之前的所有场景文件，
+        // 都必须照常加载成"没有相机"，而不是解析失败。
+        let mut scene = Scene::new("Old");
+        scene.add_entity(Entity::new("Box").with_model("builtin://cube"));
+        let text = ron::to_string(&scene).unwrap();
+        let back: Scene = ron::from_str(&text).unwrap();
+        assert!(back.entities.iter().all(|e| e.camera.is_none()));
+    }
+
+    #[test]
+    fn camera_equality_tracks_projection_params() {
+        // 改了 FOV 必须算"未保存"（脏检查靠 PartialEq）。
+        let a = Entity::new("Cam").with_camera(crate::camera::Camera::default());
+        let mut b = a.clone();
+        if let Some(c) = b.camera.as_mut() {
+            c.fov = 90.0;
+        }
+        assert_ne!(a, b);
+        // active 也是落盘内容：多机位切换要能存盘。
+        let mut c = a.clone();
+        if let Some(cam) = c.camera.as_mut() {
+            cam.active = false;
+        }
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn active_camera_prefers_active_then_falls_back() {
+        let mut scene = Scene::new("Cams");
+        scene.add_entity(Entity::new("NoCam"));
+        // 第一个相机是 inactive -> 不该被选中（除非没有 active 的）。
+        let idle = crate::camera::Camera {
+            active: false,
+            ..Default::default()
+        };
+        scene.add_entity(Entity::new("Idle Cam").with_camera(idle.clone()));
+        let main = scene.add_entity(Entity::new("Main Cam").with_camera(Default::default()));
+
+        assert_eq!(scene.active_camera_index(), Some(scene.index_of(main).unwrap()));
+        assert_eq!(scene.active_camera().map(|e| e.name.as_str()), Some("Main Cam"));
+
+        // 唯一 / 全部 inactive：退回第一个相机，而不是"没有相机"。
+        let mut only_idle = Scene::new("OnlyIdle");
+        only_idle.add_entity(Entity::new("Idle Cam").with_camera(idle));
+        assert_eq!(only_idle.active_camera_index(), Some(0));
+
+        // 一台都没有 -> None（宿主退回旧机位）。
+        let mut none = Scene::new("None");
+        none.add_entity(Entity::new("Box"));
+        assert_eq!(none.active_camera_index(), None);
     }
 
     // -- 层级 -------------------------------------------------------------

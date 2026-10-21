@@ -154,6 +154,13 @@ impl GameRuntime {
         self.world.particle_stats()
     }
 
+    // -- 相机（视口在 Play 态用游戏相机，见 `scene_view::build_view_projection`）--
+
+    /// 运行时里的主相机（`None` = 场景没有相机实体，视口退回编辑器自由相机）。
+    pub fn camera_view(&self) -> Option<xgame_runtime::CameraView> {
+        self.world.camera_view()
+    }
+
     pub fn stats(&self) -> (usize, usize) {
         (self.report.bodies, self.report.colliders)
     }

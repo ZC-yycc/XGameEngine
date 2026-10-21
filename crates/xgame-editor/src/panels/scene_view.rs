@@ -102,8 +102,16 @@ fn setup_viewport(ui: &mut egui::Ui, state: &mut EditorState) -> ViewportInfo {
 }
 
 /// 构建视图投影矩阵
+///
+/// **Play 态优先用游戏相机**（场景里的相机实体）：Unity 的 Game 视图语义 ——
+/// 点 Play 之后视口就是"玩家看到的画面"，否则作者调完相机参数还得打一次包去确认。
+/// 没有相机实体时（老项目 / 没配相机）照旧用编辑器的自由飞行相机，
+/// 所以这个改动对既有场景零影响。
 fn build_view_projection(state: &EditorState, vp_w: u32, vp_h: u32) -> Mat4 {
     let aspect = if vp_h > 0 { vp_w as f32 / vp_h as f32 } else { 1.0 };
+    if let Some(camera) = play_camera(state) {
+        return camera.view_projection(aspect);
+    }
     let proj = xgame_math::projection::perspective(60f32.to_radians(), aspect, 0.1, 100.0);
     let cam = &state.editor_camera;
     let view = xgame_math::projection::look_at(
@@ -112,6 +120,18 @@ fn build_view_projection(state: &EditorState, vp_w: u32, vp_h: u32) -> Mat4 {
         glam::Vec3::Y,
     );
     proj * view
+}
+
+/// Play 态正在生效的游戏相机（编辑态恒为 `None`）。
+///
+/// 抽成函数是因为"当前机位归谁"要在两处保持同一个答案：矩阵解算
+/// （[`build_view_projection`]）与飞行相机是否让位（[`handle_fly_camera`]）。
+/// 两处各判一次就会出现"用着游戏相机、鼠标却还在转自由相机"的错位。
+fn play_camera(state: &EditorState) -> Option<xgame_runtime::CameraView> {
+    state
+        .game_runtime
+        .as_ref()
+        .and_then(|rt| rt.camera_view())
 }
 
 /// 渲染 3D 场景并返回纹理 ID。
@@ -143,12 +163,16 @@ fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4)
         .game_runtime
         .as_ref()
         .map_or(0, |rt| rt.particle_signature());
+    // 相机位置统一分量（金属反射的环境近似 / IBL 都用它）：Play 态必须给
+    // **游戏相机**的位置，否则画面是从 A 机位看、高光却按 B 机位算。
+    // 先算再借 renderer：`play_camera` 读 `state`，与 `scene_renderer` 的可变借用打架。
+    let eye = play_camera(state).map_or_else(|| state.editor_camera.eye(), |c| c.position);
     let renderer = state.scene_renderer.as_mut()?;
     renderer.set_viewport_size(vp_w, vp_h);
     renderer.render(
         &state.scene,
         view_proj,
-        &state.editor_camera.eye(),
+        &eye,
         xgame_render::scene_pipeline::SceneLighting::new(
             state.scene.ambient,
             &state.scene.lights,
@@ -514,6 +538,14 @@ fn handle_gizmo_interaction(
 ///    `predicted_dt` 是"下一帧大概要多久"的预测，预测不准时同一段按键时长会走出
 ///    不同的距离，速度跟着一冲一顿 —— 平移和旋转同时进行时最容易看出来。
 fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Response) {
+    // Play 态且场景有相机实体时，机位归**游戏**：自由相机的键鼠不能让位一半 ——
+    // 否则右键一拖，画面纹丝不动而相机参数已经在变，松手后视角会突然跳一下。
+    // 想用自由相机看场景，按 Pause / Stop 回去，或者先把相机实体的 active 关掉。
+    if play_camera(state).is_some() {
+        state.fly_state = false;
+        return;
+    }
+
     let right_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
     
     if response.hovered() && right_down {
@@ -647,12 +679,18 @@ fn draw_viewport_hud(state: &EditorState, painter: &egui::Painter, rect: egui::R
     // **必须带前缀**：三个裸数字（"5.0 5.0 5.0"）在画面上没有任何含义，
     // 用户只能猜它是坐标、网格间距还是缩放。`Cam` 三个字母就够定语义，
     // 又不至于像 "Camera Position" 那样把药丸拉得比场景名还长。
-    let eye = state.editor_camera.eye();
+    //
+    // Play 态显示的是**游戏相机**的位姿（前缀换成 `GameCam`）—— 此时视口里
+    // 真正生效的机位是它，继续报自由相机的位置就是在撒谎。
+    let (eye, prefix) = match play_camera(state) {
+        Some(cam) => (cam.position, "GameCam"),
+        None => (state.editor_camera.eye(), "Cam"),
+    };
     hud_text(
         painter,
         rect.right_top() + egui::vec2(-10.0, 8.0),
         egui::Align2::RIGHT_TOP,
-        format!("Cam  {:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z),
+        format!("{prefix}  {:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z),
         egui::FontId::monospace(10.5),
         // 药丸底已经压到 72 级：`TEXT_SECONDARY`（128）压上去只有 2.3:1，
         // 缩到 100% 缩放看不清。HUD 的"次要"只是相对场景名而言，绝对对比度

@@ -14,6 +14,7 @@
 //! | `id` | 稳定实体标识符 `EntityId` |
 //! | `animation` | 动画播放配置 `Animator` + 状态机 `AnimMachine` + 叠加层 `AnimAdditive` + 混合层栈 `AnimLayer`（声明式，落盘进场景文件） |
 //! | `audio` | 音频纯数据层：`AudioSource` 组件 + `AudioPort` 命令束 + `ListenerPose`（引擎封装在 `xgame-audio`） |
+//! | `camera` | 相机组件 `Camera`（投影参数 + 主相机标记）+ 朝向反解 `look_rotation` |
 //! | `character` | 角色控制器参数 `CharacterController`（可序列化）+ 运行时状态 `CharacterState` |
 //! | `material` | 材质：共享资产 `MaterialAsset`（`.mat`）+ 逐实体覆盖 `MaterialOverride` |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
@@ -47,6 +48,7 @@ pub mod project;
 mod animation;
 mod asset;
 mod audio;
+pub mod camera;
 mod character;
 mod check;
 mod component;
@@ -89,6 +91,7 @@ pub use asset::{
 pub use audio::{
     AudioCommand, AudioPort, AudioStats, AudioSource, ListenerPose, PlaySound,
 };
+pub use camera::{look_rotation, Camera};
 pub use character::{
     CharacterContacts, CharacterController, CharacterState, MAX_CHARACTER_CONTACTS,
 };

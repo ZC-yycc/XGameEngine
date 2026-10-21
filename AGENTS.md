@@ -16,7 +16,7 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；640 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；664 条 + 7 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）

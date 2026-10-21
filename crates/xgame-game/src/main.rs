@@ -362,12 +362,22 @@ impl GameApp {
     fn render(&mut self) {
         // -- Camera --
         //
-        // 还没有"相机实体"这个概念，先用固定的轨道相机看向原点。
+        // 机位来自场景里的**相机实体**（`Entity::camera`）：脚本每帧推它就能做
+        // 跟随 / 摇镜 / 切机位，作者的编辑器 Play 与这里读的是同一个解析入口
+        // （`World::camera_view`），不存在"编辑器里对、打出去不对"。
+        //
+        // 场景里一台相机都没有时退回固定的俯瞰机位 —— 老项目（以及没配相机的
+        // 演示场景）不该因为引入相机概念就变成黑屏。
         let aspect = self.config.width as f32 / self.config.height as f32;
-        let eye = Vec3::new(5.0, 5.0, 5.0);
-        let view = projection::look_at(eye, Vec3::ZERO, Vec3::Y);
-        let proj = projection::perspective(60f32.to_radians(), aspect, 0.1, 100.0);
-        let view_proj = proj * view;
+        let (view_proj, eye) = match self.world.camera_view() {
+            Some(cam) => (cam.view_projection(aspect), cam.position),
+            None => {
+                let default_eye = Vec3::new(5.0, 5.0, 5.0);
+                let view = projection::look_at(default_eye, Vec3::ZERO, Vec3::Y);
+                let proj = projection::perspective(60f32.to_radians(), aspect, 0.1, 100.0);
+                (proj * view, default_eye)
+            }
+        };
 
         let scene = self.world.scene();
 

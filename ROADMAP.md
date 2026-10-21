@@ -35,6 +35,7 @@
 | ~~**十**~~ | ✅ 完成 | 脚本系统 + 热重载（已并入六·五与双轨 P0–P3） |
 | **粒子系统** | ✅ 完成（CPU 版） | `ParticleEmitter` 组件 + `xgame-particle` 确定性 CPU 模拟 + billboard 实例化 pass（Alpha / Additive）+ Inspector 区块 + 4 个脚本 API；万级以上需上 GPU 模拟（分层已留好）；见 PLAN.md 三十六 |
 | **编辑器 Profiler** | ✅ 完成 | 帧时间滚动窗口（600 帧 / 60fps 下 10 秒）+ 主循环分段耗时 + 绘制 / 剔除 / 粒子读数；与 Output Log 同页签组；见 PLAN.md 三十七 |
+| **相机实体** | ✅ 完成 | `Entity::camera`（FOV / near / far / active）+ 单机位解析单入口 + 独立游戏 / 编辑器 Play / 无头截图三宿主同源 + 6 个脚本 API（`look_at` 等）；见 PLAN.md 三十八、决策记录 §二十 |
 
 ---
 
@@ -120,6 +121,8 @@
 | 导入设置消费 | ✅ 完成 | `model_scale` 烘焙进顶点 / 节点 / 动画 / 逆绑定，`texture_srgb` / `texture_nearest` 进纹理采样；`audio_streaming` 仍待流式播放 |
 | 多场景管理 | ⬜ 待做 | 单场景；Save As 可存新文件并切过去 |
 | 角色控制器 | ✅ 完成 | 胶囊控制器 + 自动上台阶 + 坡面 / 陡坡 + 碰撞事件进脚本（见阶段六·六） |
+| 相机实体 | ✅ 完成（最小集） | `Entity::camera` + 单机位解析（active 优先）+ 三宿主同源（独立游戏 / 编辑器 Play / 无头截图）+ 6 个脚本 API；缺正交投影 / 多机位分屏 |
+| 多相机 / 分屏 | ⬜ 待做 | 单帧只渲染一台主相机（不做 Unity 那种多相机叠画 / split screen） |
 | 游戏 UI | ✅ 完成（最小集） | Canvas 等价物 = 实体 + 锚点；文本 / 图片 / 按钮 / 面板；`ui_*` 23 API；缺裁剪、九宫格、输入框、手柄导航 |
 | 输入系统 | ✅ 完成 | `InputMap`（`input.ron`）+ 编辑器 / 游戏共用；无手柄 / 触摸 |
 | 项目设置 | ✅ 完成 | 项目名 / 入口场景 / 窗口 / 重力 / 步长 / 画面（曝光 / ACES / Bloom / FXAA），草稿 + Apply；单入口 `from_project_runtime`。内容目录只在 RON 里手改 |
@@ -152,7 +155,7 @@
 - **程序化配置** —— 重力 / 步长 / 渲染参数都在 `project.ron`；
 - **单一运行时** —— 无头验证与玩家实跑完全一致；
 - **MCP 工具面** —— 8 个工具（读 / 改 / 查 / 看效果 / 看资产）；
-- **安全网** —— 640 条回归测试、每条先证红。
+- **安全网** —— 664 条回归测试、每条先证红。
 
 进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出（`--export-schema`）
 ⬜ → ④ 资产 GUID 落地 ✅，`asset_list` ✅（`asset_import` 仍待，导入参数目前只能在编辑器里改）。

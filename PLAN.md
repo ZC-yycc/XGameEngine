@@ -3507,3 +3507,132 @@ P2 清单里"粒子系统"一直挂着。选它的理由：它是**第一个"每
 - **启动头几帧会拉高 1% low**（实测 release 版首帧 83ms：管线创建 + 字体图集 +
   窗口落定）。这是真实的初始化成本，不做"预热丢样本"来掩盖 —— 窗口滚过去就消失；
   要看稳态数字，等两三秒或按 Clear。
+
+## 三十八、相机实体：`Entity::camera` + 三宿主同源（2026-10-21）
+
+### 一、为什么是它
+
+`crates/xgame-game/src/main.rs` 里那句注释挂了很久：
+
+```rust
+// 还没有"相机实体"这个概念，先用固定的轨道相机看向原点。
+let eye = Vec3::new(5.0, 5.0, 5.0);
+```
+
+后果比"机位不好看"严重得多：**任何玩法都做不出自己的镜头**。第三人称跟随、
+第一人称、过肩、切机位、过场摇镜 —— 全都要求"镜头是一个能被脚本推动的物体"。
+内容层四件套（角色 / UI / 材质 / 粒子）已经齐了，缺的正是这一块把"能动的东西"
+和"能看见它"连起来的地基，所以它是本轮最高优先级。
+
+一次只做一件：**相机实体 + 三宿主接线 + 最小脚本面**。正交投影、多机位叠画、
+相机后处理绑定都不做（见"刻意的取舍"）。
+
+### 二、数据层：`xgame-core/src/camera.rs`
+
+- `Camera { fov, near, far, active }`，随场景落盘（`Entity::camera`）。
+  `fov` 是**垂直**视场角（度），水平视角由宽高比推出来 —— 宽高比属于视口，
+  不属于场景：同一个相机在编辑器视口 / 游戏窗口 / 截图里尺寸各不相同。
+- `Camera::sanitized()`：fov 钳 1..179（0°/180° 会让投影矩阵退化）、
+  near ≥ 0.001（0 会让 1/near 变 inf）、far ≥ near + 0.001。
+  为什么在 core 钳而不是渲染层：这些值是场景数据（人手改 RON / 脚本写 / MCP 写），
+  坏值会直接变成"整屏黑"，而**在那之前没有任何地方会报错**。
+- `look_rotation(forward, up_hint)`：由"看向哪"反解四元数。退化情形全部返回
+  有限值（零向量 / NaN / 与前方向平行的 up 提示），绝不把 NaN 送进 `look_at`。
+- **主相机解析只有一处**：`Scene::active_camera_index()` —— 第一个 `active` 的
+  相机；全都不 active 就退回场景里第一台；一台都没有 → `None`。
+  退回这一步是刻意的：把唯一的相机误点成 inactive 不该让画面变成"没有相机"。
+
+### 三、运行时：`xgame-runtime/src/camera_view.rs`
+
+`CameraView { entity, position, forward, up, fov_deg, near, far }` +
+`view_matrix()` / `projection_matrix(aspect)` / `view_projection(aspect)`。
+
+- 位姿取实体的**世界变换**（`Scene::world_transform`）：相机能被父节点带着走 ——
+  肩视角挂在角色下面、摇臂挂在上层节点、脚本每帧推着跟随，都是这一条的直接结果。
+- 视图矩阵走 `projection::look_at(eye, eye + forward, up)`，**不自己拼**：
+  右手系视图空间的镜头朝向是 −Z，而引擎实体本地朝向是 +Z，这一层换算由
+  `look_at` 天然给出，`up` 还带着实体滚转（相机歪着看也正确）。
+- 每帧一次线性扫描、**不缓存**：脚本可以在任意一帧改相机的 `active` / 变换，
+  缓存只会引入"切了机位但画面还是上一台"的时序 bug。
+
+### 四、三宿主接线（同源是本轮的核心纪律）
+
+| 宿主 | 改动 |
+|---|---|
+| 独立游戏 `xgame-game` | 机位从 `world.camera_view()` 取；场景没有相机才退回旧的 (5,5,5) 兜底 |
+| 编辑器 Play `scene_view` | **Play 态视口用游戏相机**（Unity 的 Game 视图语义）；自由相机让位（右键拖拽早退），HUD 角标 `Cam` → `GameCam`，渲染的相机位置统一分量也换成游戏相机 |
+| 无头 `--screenshot` | 优先级 **显式 `--camera-pos` → 场景相机 → 自动取景**；报告新增 `screenshot.camera.mode`（`explicit` / `scene` / `auto`） |
+
+无头那一路的动机是"截图能当验收证据"：场景里已经有相机，截图却拿自动取景顶替它，
+人和智能体都看不出玩家实际看到什么。
+
+### 五、脚本面（6 个）
+
+`look_at` / `look_at_entity`（朝向，任何实体都能用 —— 炮塔转向、NPC 盯人）、
+`active_camera` / `set_active_camera`（切机位）、`camera_fov` / `set_camera_fov`（变焦）。
+外加 `entity_forward(ctx, id)`：跟随相机"绕到背后"要拿别人的朝向。
+
+两个语义决定：
+
+1. **`look_at` 只改旋转、不改位置**。跟随相机是"先摆位置、再看向目标"两步；
+   合成一个方法会让相机每帧被拽到目标旁边。
+2. **`set_active_camera` 是独占式的**（其它相机全关）。解析规则是"第一个 active"，
+   只置 true 的话第二台永远轮不到 —— 作者会以为切换 API 坏了。
+
+### 六、刻意的取舍
+
+- **不做正交投影**：等真出现塔防 / 等距玩法再加 `projection` 枚举。现在加只会让
+  Inspector 多一个永远默认的字段、视图矩阵多一个分支。
+- **不做多机位叠画 / 分屏**：单帧只渲染一台主相机。Unity 那种"多相机按 depth 叠画"
+  要改 ScenePipeline 的渲染循环与清屏策略，量级是另一刀。
+- **相机不进 `Scene::lights` 那种场景级数据**：光属于环境，相机是物体。
+  做成场景级就丢了 Transform 层级（`Light` 已经付过这个代价：点光位置只能手填）。
+- **样例相机不做"绕到背后"**：实测从正后方看，场景正中的箱塔正好挡住狐狸
+  （截图为证）。样例改用固定世界偏移，并在脚本注释里给出两行改法 ——
+  把"为什么不用更漂亮的写法"写在内容里，比让人自己猜好。
+- **近 / 远裁剪面在截图路径不生效**：截图按场景包围盒推裁剪面，避免机位参数把
+  整场裁掉；fov 与朝向照用。
+
+### 七、顺手修的两处（都是做这一刀时暴露的）
+
+1. **Inspector 的旋转用 XYZ 分解，脚本用 YXZ**。同一台相机面板读 153°/−46°/160°，
+   `rot(ctx)` 读 −130.6°/18° —— 两边都是"对的"，但没人能对上。统一到 **YXZ**
+   （与 `rot` / `set_rot` 一致），相机这类物体因此显示人类可读的 yaw / pitch。
+   顺带把 −0.000 抹成 0（四元数分解的负零，看着像算错）。
+2. **新建项目的 `Main Camera` 只是个名字，没有 `camera` 组件**。于是新项目一按
+   Play 就退回兜底机位，用户会以为"相机没生效"。`default_scene()` 现在带上组件。
+
+### 八、验证
+
+- 新增 **24 条回归测试**（总数 640 → **664 passed / 7 ignored**，全绿）：
+  - core 13 条：`Camera` 默认值 / `sanitized` 钳制（含 NaN / inf）/ `look_rotation`
+    四方向 + 垂直俯视退化 + 零向量与 NaN；场景层 RON 往返、无相机不写行、
+    旧场景无此字段照常加载、`camera` 参与相等判定；主相机解析（active 优先 /
+    全 inactive 退回 / 一台都没有）。
+  - runtime 9 条：沿本地 +Z 看（含"面朝 +Z 时世界 +X 落在画面左侧"这条方向约定）、
+    绕 Y 转 90° 后朝向、**父节点带动的肩视角**、inactive 跳过、fov 变宽点向中心靠、
+    坏参数不产出 NaN 矩阵、正下方俯视矩阵有限、aspect 0 / NaN 兜底。
+  - script 1 条：Lua 侧 `look_at_entity` 真的把 +Z 转向目标、
+    `set_active_camera` 独占、`camera_fov` 读回。
+  - editor 1 条：截图机位优先级（场景相机 vs `--camera-pos`）与 `camera.mode` 回写。
+- 端到端截图：`--headless --frames 60 --screenshot` 的报告 `camera.mode == "scene"`、
+  `eye == (4.2, 2.8, 5.4)`、画面就是编辑器 Play 里看到的那一帧。
+- **"脚本真的在驱动相机"的独立证明**（`eye` 与静态变换刚好重合时，上面那条看不出
+  脚本到底跑没跑）：把场景里 Main Camera 的 `position` 临时改成 `(0,0,0)` 再截一次，
+  报告 `eye` 仍然是 `(4.2, 2.8, 5.4)` = 狐狸世界坐标 `(0,0,1.8)` + 脚本偏移
+  `(4.2,2.8,3.6)`，`target` 落在 `eye + forward` 上。改完立刻还原（`md5sum` 对过）。
+  这一步同时验证了 `guid://` 形式的脚本引用能被解析（场景里手写实体走的是 GUID）。
+- 发布包复检：`dist\xgame-editor.exe --check dist\projects\SampleScene` 通过；
+  `dist` 版 `--headless --screenshot` 同样报 `mode == "scene"`。
+- clippy `-D warnings` 零告警。
+- UI 自检：`--ui-select "Main Camera" --ui-size 1920x1240` 读到 Camera 区块
+  （FOV 60 / Near 0.100 / Far 1000 / Active）与 Rotation 18.025°/−130.602°/0°；
+  `--ui-play --ui-size 1280x800` 读到 HUD `GameCam 4.2 2.8 5.4` + "Scene locked" 横幅。
+- clippy `-D warnings` 零告警。
+
+### 九、遗留（明确不做，不是遗漏）
+
+- 正交投影、多机位分屏 / 叠画、相机抖动 / 后处理体积绑定、`Camera` 的层遮罩（culling mask）。
+- 编辑器里画相机视锥体 gizmo（选中相机时看得见范围）—— 便宜的体验改进，但与机位无关，
+  留给编辑器产品化那几刀。
+- 无头截图忽略场景相机的 `near/far`（见上）。

@@ -113,6 +113,7 @@ end
 | `set_entity_model(ctx, id, path)` | 换模型（`"builtin://cube"` 或项目相对路径） |
 | `entity_pos(ctx, id)` / `set_entity_pos(ctx, id, x, y, z)` | 世界坐标 |
 | `entity_rot(ctx, id)` / `set_entity_rot(ctx, id, x, y, z)` | 局部欧拉角（度） |
+| `entity_forward(ctx, id)` | 该实体世界朝向的 +Z（绕到背后 / 判断"它背没背对我"） |
 | `entity_scale(ctx, id)` / `set_entity_scale(ctx, id, x, y, z)` | 局部缩放 |
 | `distance_to(ctx, id)` | 与目标的距离 |
 | `set_parent(ctx, child, parent)` | 重挂父节点（`parent = 0` 表示回到根） |
@@ -444,6 +445,54 @@ end
 >
 > **没有 UI 时**这一切都是空操作：`ui_set_*` 找不到实体就静默返回，
 > 不报错（与其它"容错优先"的 API 一致）。
+
+### 4.15 相机与朝向
+
+相机是**普通实体组件**（`Entity::camera`），不是引擎特例：位置走 `set_pos` /
+`set_entity_pos`，朝向走 `look_at`。宿主（独立游戏 / 编辑器 Play / 无头截图）
+从同一处解析主相机，所以"你在这里看到的就是玩家看到的"。
+
+| 函数 | 说明 |
+|---|---|
+| `look_at(ctx, x, y, z)` | 让**自己**的 +Z 指向世界坐标点（只改朝向、不改位置） |
+| `look_at_entity(ctx, id)` | 让**自己**看向另一个实体（目标不存在则不动） |
+| `active_camera(ctx)` | 当前主相机的实体 id（`0` = 场景里没有相机实体） |
+| `set_active_camera(ctx, id)` | 把 `id` 设为**唯一**主相机（其它相机全部关掉） |
+| `camera_fov(ctx, id)` | 垂直视场角（度）；不是相机 → `nil` |
+| `set_camera_fov(ctx, id, deg)` | 改视场角（钳在 1..179），变焦自己按 `delta` 插值 |
+
+语义要点：
+
+- **`look_at` 只改朝向**。跟随相机是"先摆位置、再看向目标"两步；合成一个 API
+  的话，相机每帧都会被拽到目标旁边。
+- **相机本地的 +Z 是镜头朝向**（glTF 的模型正面也是 +Z，与 `forward(ctx)` 一致）。
+  单位旋转的相机看向世界 +Z。
+- **`set_active_camera` 是独占式的**：解析规则是"第一个 `active` 的相机"，
+  只置 true 的话第二台永远轮不到。
+- 相机**能被父节点带着走**：挂在角色下面就是肩视角 —— 位置自动跟随父层级，
+  `look_at` 会把父节点的旋转一起抵消掉。
+
+跟随相机的最小写法：
+
+```lua
+local OFFSET = { x = 4.2, y = 2.8, z = 3.6 }
+
+function update(ctx)
+    local target = entity_id(ctx, "Fox")
+    if target == 0 then return end
+    local p = entity_pos(ctx, target)
+    set_pos(ctx, p.x + OFFSET.x, p.y + OFFSET.y, p.z + OFFSET.z)
+    look_at(ctx, p.x, p.y + 1.0, p.z)   -- 看向胸口
+end
+```
+
+完整样例见 `projects/SampleScene/Scripts/CameraFollow.lua`（场景里的 "Main Camera"
+实体就是它驱动的，Play 态视口显示的正是这台相机）。
+
+> **想让相机绕到角色背后**（真正的第三人称）：把偏移换成"朝向的反方向"——
+> `local f = entity_forward(ctx, target)` 之后
+> `set_pos(ctx, p.x - f.x * 5.0, p.y + 2.6, p.z - f.z * 5.0)`。
+> 样例场景没用这个写法，因为正中有座箱塔会挡住视线（实测截图确认过）。
 
 ---
 

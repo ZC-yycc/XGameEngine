@@ -416,6 +416,9 @@ pub struct ShotInfo {
     pub height: u32,
     pub eye: [f32; 3],
     pub target: [f32; 3],
+    /// 机位是怎么定的：`"explicit"`（命令行给）/ `"scene"`（场景相机实体）/
+    /// `"auto"`（自动取景）。智能体据此判断"这张图是不是玩家视角"。
+    pub camera_mode: String,
     /// 这一帧的绘制读数（见 [`ShotRenderStats`]）。
     pub render_stats: ShotRenderStats,
 }
@@ -506,6 +509,7 @@ impl HeadlessReport {
                 "width": s.width,
                 "height": s.height,
                 "camera": {
+                    "mode": s.camera_mode,
                     "eye": s.eye,
                     "target": s.target,
                 },
@@ -707,14 +711,35 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
             let (width, height) = args.shot_size;
             let mut renderer = ScreenshotRenderer::new(project.root(), width, height)
                 .map_err(|e| format!("截图初始化失败: {e:#}"))?;
-            // 相机：显式给了用给的（解析时已保证成对），否则自动取景。
-            let camera = match (args.camera_pos, args.camera_target) {
-                (Some(pos), Some(target)) => Some(ShotCamera::looking_at(
-                    Vec3::from(pos),
-                    Vec3::from(target),
-                    xgame_render::screenshot::DEFAULT_FOV_Y,
-                )),
-                _ => None,
+            // 相机优先级（写进报告的 `screenshot.camera.mode`，别靠猜）：
+            //   1. 显式 `--camera-pos/--camera-target` —— 智能体指定机位；
+            //   2. 场景里的**相机实体** —— "玩家实际看到的画面"；
+            //   3. 自动取景（顺光、包住整个场景）—— 老场景 / 没配相机的场景。
+            //
+            // 第 2 条是这一轮的要点：截图的用途是"验收玩家会看到什么"，
+            // 场景里已经有了相机就不能再拿自动取景顶替它，否则截图会骗人。
+            let (camera, camera_mode) = match (args.camera_pos, args.camera_target) {
+                (Some(pos), Some(target)) => (
+                    Some(ShotCamera::looking_at(
+                        Vec3::from(pos),
+                        Vec3::from(target),
+                        xgame_render::screenshot::DEFAULT_FOV_Y,
+                    )),
+                    "explicit",
+                ),
+                _ => match world.camera_view() {
+                    Some(view) => (
+                        Some(ShotCamera {
+                            eye: view.position,
+                            target: view.position + view.forward,
+                            fov_y: view.fov_deg.to_radians(),
+                            // 用实体自己的上方向：带滚转的机位也照原样截出来。
+                            up: view.up,
+                        }),
+                        "scene",
+                    ),
+                    None => (None, "auto"),
+                },
             };
             let scene = world.scene();
             // 粒子必须进截图：无头运行的帧循环已经推进过模拟，玩家看到的
@@ -741,6 +766,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
                 height,
                 eye: used.eye.to_array(),
                 target: used.target.to_array(),
+                camera_mode: camera_mode.to_owned(),
                 render_stats: {
                     let mut stats = ShotRenderStats::from(renderer.frame_stats());
                     stats.ui = renderer.ui_stats();
@@ -1294,6 +1320,11 @@ mod tests {
     fn screenshot_is_written_with_deterministic_bytes() {
         let project = temp_project("shot");
         patch_scene(&project, |scene| {
+            // 去掉默认场景里那台相机（`default_scene` 自带 `camera` 组件），
+            // 这条测试要盯的是**自动取景**这一路。
+            for entity in &mut scene.entities {
+                entity.camera = None;
+            }
             let mut cube = Entity::new("Cube");
             cube.model = "builtin://cube".to_owned();
             scene.entities.push(cube);
@@ -1316,6 +1347,10 @@ mod tests {
 
         let shot = report.screenshot.as_ref().expect("报告必须带 screenshot 节");
         assert_eq!((shot.width, shot.height), (320, 240));
+        assert_eq!(
+            shot.camera_mode, "auto",
+            "场景里没有相机实体 → 自动取景，报告必须说清楚是哪种机位"
+        );
         assert!(shot.eye.iter().all(|v| v.is_finite()));
         // 自动取景把整个场景框进视锥 ⇒ 剔除读数必须是 0（不是"碰巧没剔"，
         // 而是"没有可剔的东西"）。这也钉死了截图走的是生产剔除路径。
@@ -1395,6 +1430,54 @@ mod tests {
         let shot = report.screenshot.as_ref().expect("报告必须带 screenshot 节");
         assert_eq!(shot.eye, [0.0, 0.0, 4.0]);
         assert_eq!(shot.target, [0.0, 0.0, 0.0]);
+        assert_eq!(shot.camera_mode, "explicit", "命令行机位优先级最高");
+        cleanup(&project);
+    }
+
+    /// 场景相机：截图必须用**玩家视角**，且显式机位优先于它。
+    ///
+    /// 这条守的是"截图能当验收证据"：场景里已经有了相机，截图却拿自动取景
+    /// 顶替它，那智能体和人都看不出玩家实际看到什么。
+    #[test]
+    fn screenshot_prefers_scene_camera_over_auto_framing() {
+        let project = temp_project("shotscene");
+        patch_scene(&project, |scene| {
+            // 默认场景自带一台 (0,1,-5) 的相机，这里把它挪到好认的位置。
+            let cam = scene
+                .entities
+                .iter_mut()
+                .find(|e| e.camera.is_some())
+                .expect("默认场景应当自带相机组件");
+            cam.transform.position = Vec3::new(7.0, 3.0, -2.0);
+        });
+
+        let dir = project.root().join("shots");
+        let mut args = opts(&project, 3);
+        args.screenshot = Some(dir.join("scene.png"));
+        args.shot_size = (160, 120);
+        let report = match run(&args) {
+            Ok(r) => r,
+            Err(e) if e.contains("GPU 适配器") => {
+                eprintln!("跳过截图测试：{e}");
+                cleanup(&project);
+                return;
+            }
+            Err(e) => panic!("截图运行失败: {e}"),
+        };
+        let shot = report.screenshot.as_ref().expect("报告必须带 screenshot 节");
+        assert_eq!(shot.camera_mode, "scene");
+        assert_eq!(shot.eye, [7.0, 3.0, -2.0], "机位必须来自场景相机实体");
+
+        // 同一场景 + 显式机位 → 显式赢（否则智能体无法覆盖作者机位）。
+        let mut explicit = opts(&project, 3);
+        explicit.screenshot = Some(dir.join("explicit.png"));
+        explicit.shot_size = (160, 120);
+        explicit.camera_pos = Some([1.0, 2.0, 3.0]);
+        explicit.camera_target = Some([0.0, 0.0, 0.0]);
+        let report = run(&explicit).expect("显式机位截图运行");
+        let shot = report.screenshot.as_ref().unwrap();
+        assert_eq!(shot.camera_mode, "explicit");
+        assert_eq!(shot.eye, [1.0, 2.0, 3.0]);
         cleanup(&project);
     }
 

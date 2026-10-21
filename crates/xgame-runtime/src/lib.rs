@@ -37,10 +37,12 @@
 //! // world.scene() 现在就是这一帧的状态，拿去渲染。
 //! ```
 
+mod camera_view;
 mod lifecycle;
 mod registry;
 mod world;
 
+pub use camera_view::CameraView;
 pub use lifecycle::{Behavior, Ctx, Lifecycle};
 pub use registry::BehaviorRegistry;
 pub use world::{FrameReport, World, WorldConfig};

@@ -55,6 +55,7 @@ use xgame_physics::{
 };
 use xgame_script::{FrameCtx, GameCtx, LuaHost, ScriptLog};
 
+use crate::camera_view::CameraView;
 use crate::registry::{BehaviorInstance, BehaviorRegistry};
 
 /// 运行时的可调参数。
@@ -741,6 +742,19 @@ impl World {
     /// 粒子是否还在动（帧调度的输入之一，见 `FrameInputs::animating`）。
     pub fn particles_animating(&self) -> bool {
         self.particles.animating()
+    }
+
+    // -----------------------------------------------------------------------
+    // 相机
+    // -----------------------------------------------------------------------
+
+    /// 解析当前**主相机**（`None` = 场景里没有相机实体）。
+    ///
+    /// 三宿主（独立游戏 / 编辑器 Play / 无头截图）都从这里拿机位，规则本身
+    /// 只有一处实现（[`CameraView::from_scene`] → `Scene::active_camera_index`）。
+    /// 每调一次做一次线性扫描，所以**每帧调一次**、别在循环里反复调。
+    pub fn camera_view(&self) -> Option<CameraView> {
+        CameraView::from_scene(&self.scene)
     }
 
     // -----------------------------------------------------------------------

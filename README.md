@@ -652,6 +652,36 @@ function on_collision_enter(ctx, other)
 end
 ```
 
+### 相机
+
+给实体加一行 `camera` 就是一台相机（**相机是普通实体**，能被父节点带着走）：
+
+```ron
+camera: Some((fov: 60.0, near: 0.1, far: 1000.0, active: true)),
+```
+
+- **本地方向 +Z 是镜头朝向**（与 glTF 的模型正面、`forward()` 一致）。宽高比
+  不在组件里 —— 它属于视口（编辑器视口 / 游戏窗口 / 截图尺寸各不相同）
+- **主相机只有一个入口**：`active` 优先，全都没勾就退回场景里第一台，
+  一台都没有则宿主退回各自的兜底机位（老场景零影响）
+- 三个宿主读同一份解析：独立游戏、编辑器 **Play 态视口**（Unity 的 Game 视图语义，
+  此时自由相机让位、HUD 角标变成 `GameCam`）、无头 `--screenshot`（报告里
+  `screenshot.camera.mode` 说明是 `explicit` / `scene` / `auto` 哪一种）
+- Inspector 有 **Camera** 区块（FOV / Near / Far / Active）；脚本侧
+  `look_at` / `look_at_entity` / `active_camera` / `set_active_camera` /
+  `camera_fov` / `set_camera_fov`
+- 样例：`projects/SampleScene` 的 "Main Camera" 由 `Scripts/CameraFollow.lua`
+  每帧摆到狐狸前侧上方并看向它 —— 不做"绕到背后"是因为场景正中有箱塔会挡视线
+
+```lua
+function update(ctx)
+    local t = entity_id(ctx, "Fox")
+    local p = entity_pos(ctx, t)
+    set_pos(ctx, p.x + 4.2, p.y + 2.8, p.z + 3.6)
+    look_at(ctx, p.x, p.y + 1.0, p.z)   -- 只改朝向，不改位置
+end
+```
+
 ## 运行时（编辑器和游戏共用的那一段）
 
 `xgame-runtime::World` 是唯一编排者，编辑器按下 ▶ Play 与打包出去的游戏跑的是

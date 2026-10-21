@@ -105,6 +105,7 @@ pub(crate) fn register(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
     register_math(lua, &globals)?;
     register_transform(lua, &globals)?;
+    register_camera(lua, &globals)?;
     register_entity(lua, &globals)?;
     register_spawn(lua, &globals)?;
     register_physics(lua, &globals)?;
@@ -341,6 +342,65 @@ fn register_transform(lua: &Lua, globals: &Table) -> mlua::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// 相机
+// ---------------------------------------------------------------------------
+
+fn register_camera(lua: &Lua, globals: &Table) -> mlua::Result<()> {
+    // `look_at` / `look_at_entity` 是"朝向"而不是"相机专属"：任何物体都能用
+    // （炮塔转向玩家、NPC 盯人）。放在相机这一节只是因为它们最常见的用途是
+    // 推跟随相机 —— 名字不带 `camera_` 前缀，免得让人以为只能给相机用。
+    globals.set(
+        "look_at",
+        lua.create_function(|_, (ctx, x, y, z): (LuaCtx, f32, f32, f32)| {
+            ctx.game().look_at(Vec3::new(x, y, z));
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "look_at_entity",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
+            if let Some(id) = opt_id(id) {
+                ctx.game().look_at_entity(id);
+            }
+            Ok(())
+        })?,
+    )?;
+    // `active_camera` 返回 0 表示"场景里没有相机实体"（与 `entity_id` 找不到
+    // 返回 0 同一个哨兵值，脚本不必处理 nil）。
+    globals.set(
+        "active_camera",
+        lua.create_function(|_, ctx: LuaCtx| {
+            Ok(ctx.game().active_camera().map_or(0, raw_i64))
+        })?,
+    )?;
+    globals.set(
+        "set_active_camera",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
+            if let Some(id) = opt_id(id) {
+                ctx.game().set_active_camera(id);
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "camera_fov",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
+            Ok(opt_id(id).and_then(|id| ctx.game().camera_fov(id)))
+        })?,
+    )?;
+    globals.set(
+        "set_camera_fov",
+        lua.create_function(|_, (ctx, id, degrees): (LuaCtx, i64, f32)| {
+            if let Some(id) = opt_id(id) {
+                ctx.game().set_camera_fov(id, degrees);
+            }
+            Ok(())
+        })?,
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // 实体查询与操作
 // ---------------------------------------------------------------------------
 
@@ -493,6 +553,12 @@ fn register_entity(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         lua.create_function(|_, (ctx, id, x, y, z): (LuaCtx, i64, f32, f32, f32)| {
             ctx.game().set_entity_rot(id_of(id), Vec3::new(x, y, z));
             Ok(())
+        })?,
+    )?;
+    globals.set(
+        "entity_forward",
+        lua.create_function(|lua, (ctx, id): (LuaCtx, i64)| {
+            vec3_to_lua(lua, ctx.game().entity_forward(id_of(id)))
         })?,
     )?;
     globals.set(

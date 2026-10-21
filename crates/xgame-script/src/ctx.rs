@@ -338,6 +338,105 @@ impl GameCtx<'_> {
     }
 
     // -----------------------------------------------------------------------
+    // 相机
+    // -----------------------------------------------------------------------
+
+    /// 让自身的本地方向 **+Z** 指向世界坐标 `target`（"看向哪"）。
+    ///
+    /// 只改旋转、不动位置：跟随相机是"先摆位置、再看向目标"两步，合成一个
+    /// 方法会让每帧都被拽到目标旁边。
+    ///
+    /// 世界朝向 → 局部旋转的换算带着父节点（肩视角相机通常挂在角色下面，
+    /// 父节点自己转了，子节点的局部旋转要抵消掉那部分）。
+    ///
+    /// 退化情形一律安全：`target` 与自身重合、坐标含 NaN、实体不存在 ——
+    /// 都是"什么都不做"，不会写出 NaN 四元数（写进去之后每帧渲染都会坏）。
+    pub fn look_at(&mut self, target: Vec3) {
+        let Some(i) = self.entity_index() else {
+            return;
+        };
+        if !target.is_finite() {
+            return;
+        }
+        let eye = world_position(self.scene, i);
+        let desired = xgame_core::look_rotation(target - eye, Vec3::Y);
+        if !desired.is_finite() {
+            return;
+        }
+        let local = match self.scene.entities[i]
+            .parent
+            .and_then(|p| self.scene.index_of(p))
+        {
+            Some(pi) => world_rotation(self.scene, pi).inverse() * desired,
+            None => desired,
+        };
+        if let Some(e) = self.scene.entities.get_mut(i) {
+            e.transform.rotation = local.normalize();
+        }
+    }
+
+    /// 让自身看向另一个实体（世界坐标）。
+    ///
+    /// 目标不存在时静默 no-op —— 与其它"容错优先"的 API 一致（脚本里
+    /// `look_at_entity(ctx, entity_id(ctx, "Player"))` 找不到人时不该报错）。
+    pub fn look_at_entity(&mut self, target: EntityId) {
+        let Some(ti) = self.scene.find_entity(target) else {
+            return;
+        };
+        let position = world_position(self.scene, ti);
+        self.look_at(position);
+    }
+
+    /// 当前**主相机**的实体 id（没有相机实体 → `None`）。
+    ///
+    /// 选择规则与宿主完全一致（`Scene::active_camera_index`），所以脚本里
+    /// "主相机是谁"和画面上"谁在拍"永远是同一个答案。
+    pub fn active_camera(&mut self) -> Option<EntityId> {
+        self.scene.active_camera().map(|e| e.id)
+    }
+
+    /// 把 `id` 设为**唯一**主相机（其它相机全部置为 inactive）。
+    ///
+    /// 为什么是"独占式"而不是单纯置 `active = true`：解析规则是"第一个
+    /// active 的相机"，只置 true 的话第二台永远轮不到 —— 作者会以为
+    /// 切换 API 坏了。想同时留多台候选机位，就在切回来时再调一次。
+    pub fn set_active_camera(&mut self, id: EntityId) {
+        // 先确认目标真的是相机：把 id 写错成普通实体时不该把全场相机都关掉。
+        let Some(target) = self.scene.find_entity(id) else {
+            return;
+        };
+        if self.scene.entities[target].camera.is_none() {
+            return;
+        }
+        for entity in &mut self.scene.entities {
+            if let Some(camera) = entity.camera.as_mut() {
+                camera.active = entity.id == id;
+            }
+        }
+    }
+
+    /// 相机的垂直视场角（度）。不是相机 / 实体不存在 → `None`。
+    pub fn camera_fov(&mut self, id: EntityId) -> Option<f32> {
+        let i = self.scene.find_entity(id)?;
+        self.scene.entities[i].camera.as_ref().map(|c| c.fov)
+    }
+
+    /// 改相机的垂直视场角（度）。不是相机时静默 no-op。
+    ///
+    /// 只钳到 1..179（写入时的坏值会让投影矩阵退化），不做"变焦动画"——
+    /// 那是脚本自己的事（按 `delta` 插值）。
+    pub fn set_camera_fov(&mut self, id: EntityId, degrees: f32) {
+        if !degrees.is_finite() {
+            return;
+        }
+        if let Some(i) = self.scene.find_entity(id) {
+            if let Some(camera) = self.scene.entities[i].camera.as_mut() {
+                camera.fov = degrees.clamp(1.0, 179.0);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // 实体查询与操作
     // -----------------------------------------------------------------------
 
@@ -543,6 +642,17 @@ impl GameCtx<'_> {
             .find_entity(id)
             .and_then(|i| self.scene.entities.get(i).map(|e| euler_degrees(e.transform.rotation)))
             .unwrap_or(Vec3::ZERO)
+    }
+
+    /// 另一个实体的世界朝向 **+Z**（目标不存在 → `Vec3::Z`）。
+    ///
+    /// 与自身版 `forward` 同款，只是换成别的实体：跟随相机要"绕到角色背后"、
+    /// AI 要判断"它是不是背对我"，都得先拿到别人的朝向。
+    pub fn entity_forward(&mut self, id: EntityId) -> Vec3 {
+        self.scene
+            .find_entity(id)
+            .map(|i| world_rotation(self.scene, i).mul_vec3(Vec3::Z))
+            .unwrap_or(Vec3::Z)
     }
 
     /// 设置实体的局部欧拉角（度）。

@@ -596,6 +596,30 @@
                 scale: (1.0, 1.0, 1.0),
             ),
         ),
+        (
+            // 主相机：跟随狐狸。机位由 `Scripts/CameraFollow.lua` 每帧摆到
+            // "目标 + 固定偏移"并 `look_at` 目标 —— **相机是普通实体**，
+            // 不是引擎特例：位置走 `set_pos`、朝向走 `look_at`。
+            //
+            // 这里的静态变换与脚本算出来的位姿一致，所以"没进 Play 的编辑器
+            // 视图 / 关掉脚本的场景"看上去是同一个机位。
+            // rotation 对应 offset (4.2, 2.8, 3.6) 看向 (0, 1.0, 1.8)：
+            // yaw −130.6°、俯角 18.0°。
+            name: "Main Camera",
+            id: (30),
+            camera: Some((
+                fov: 60.0,
+                near: 0.1,
+                far: 1000.0,
+                active: true,
+            )),
+            scripts: ["guid://b7c1d4e28f3a49c6a1e5d0f7b2c84a19"],
+            transform: (
+                position: (4.2, 2.8, 5.4),
+                rotation: (0.06546, -0.8973, 0.14232, 0.41270),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
     ],
     lights: [
         (

@@ -919,10 +919,15 @@ impl ProjectHandle {
 /// 新建项目时写入的默认场景：一台主相机 + 一盏方向光。
 ///
 /// 放在 core 而不是编辑器里，是为了让「新建项目」这件事不依赖 UI 层。
+///
+/// 相机实体**带 `camera` 组件**（不只是名字叫 Main Camera）：引擎的单机位解析
+/// 只认组件（`Scene::active_camera_index`），没组件的话新项目一按 Play 就会
+/// 退回宿主的兜底机位 —— 用户会以为"相机没生效"。
 pub fn default_scene() -> Scene {
     let mut scene = Scene::new("New Scene");
     scene.entities = vec![crate::scene::Entity::new("Main Camera")
-        .with_transform(Transform::from_translation(glam::Vec3::new(0.0, 1.0, -5.0)))];
+        .with_transform(Transform::from_translation(glam::Vec3::new(0.0, 1.0, -5.0)))
+        .with_camera(crate::camera::Camera::default())];
     // 光源不再是一个名叫 "Directional Light" 的空实体——空实体既没有模型也不
     // 参与光照，摆在那里只会让人以为改它就能改光。现在光走 `Scene::lights`，
     // 由 `Scene::new` 自动带上一盏默认方向光。
