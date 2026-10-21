@@ -133,10 +133,11 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use xgame_math::glam::{Mat4, Vec3};
 
-use xgame_core::{Entity, Light, LightKind, SkyConfig};
+use xgame_core::{Entity, Light, LightKind, ProjectHandle, SkyConfig};
 use crate::animation::AnimationDriver;
 use crate::frustum::Frustum;
 use crate::gltf_loader::{Bounds, GltfMesh, GltfPrimitive, GltfVertex, MaterialParams};
+use crate::material_library::{MaterialKey, MaterialLibrary};
 use crate::sky::{self, SkyResources, SkyUniform};
 
 /// 每帧最多渲染的实体数量。
@@ -384,6 +385,11 @@ struct DrawBatch {
     /// 的时候本来就省不下什么）。
     entity: u32,
     prim: u32,
+    /// 这批用哪套材质绑定组。
+    ///
+    /// **批次键必须包含它**：同一个图元被两个实体分别指定不同 `.mat` 时，
+    /// 颜色 / 贴图不同，合成一批会让后一个材质覆盖前一个。
+    material: MaterialKey,
 }
 
 /// 待写的实例数据。
@@ -923,7 +929,6 @@ pub struct ScenePipeline {
     /// 全局绑定组布局。构造完 `global_bind_group` 之外，重建绑定组时也要用
     /// （阴影分辨率变化、骨骼缓冲扩容），所以去掉下划线成为实打实的字段。
     global_bgl: wgpu::BindGroupLayout,
-    material_bgl: wgpu::BindGroupLayout,
 
     camera_buffer: wgpu::Buffer,
     lights_buffer: wgpu::Buffer,
@@ -966,11 +971,11 @@ pub struct ScenePipeline {
     /// 采样器，创建顺序上必须排在全局绑定组之前。
     sky: SkyResources,
 
-    /// `material_id` → 材质绑定组（贴图 + 采样器）。
+    /// 材质绑定组 + 共享材质资产库（贴图 / 参数 / 失效代数）。
     ///
-    /// 颜色参数不在这里 —— 它们逐 draw 变化（实体级材质覆盖），随
-    /// `draw_buffer` 每帧上传。这张表因此只随**资产**增长，与实体数无关。
-    material_cache: HashMap<u64, wgpu::BindGroup>,
+    /// 颜色参数不在这里 —— 它们逐 draw 变化（资产 + 实体级覆盖），随
+    /// `draw_buffer` 每帧上传。这里只随**资产**增长，与实体数无关。
+    materials: MaterialLibrary,
 
     /// 主 pass 的采样数（1 = 关闭 MSAA）。
     ///
@@ -994,8 +999,10 @@ pub struct ScenePipeline {
     opaque_batches: Vec<DrawBatch>,
     /// 本帧半透明绘制项（每项一批，按距离远→近）。
     blended_draws: Vec<BlendedDraw>,
-    /// 图元地址 → 不透明批次下标（本帧复用，`clear()` 保留容量）。
-    batch_index: HashMap<usize, u32>,
+    /// （图元地址 + 材质 key）→ 不透明批次下标（本帧复用，`clear()` 保留容量）。
+    ///
+    /// 只按图元地址分组会让"同一个图元、不同 `.mat`"的两个实体被错误合批。
+    batch_index: HashMap<(usize, MaterialKey), u32>,
     /// 写实例数据时的每批游标（长度 = 当前正在填的批次表长度）。
     batch_cursor: Vec<u32>,
 
@@ -1267,7 +1274,7 @@ impl ScenePipeline {
             pipeline,
             blend_pipeline,
             global_bgl,
-            material_bgl,
+            materials: MaterialLibrary::new(material_bgl),
             camera_buffer,
             lights_buffer,
             draw_buffer,
@@ -1284,7 +1291,6 @@ impl ScenePipeline {
             shadow_view,
             shadow_resolution,
             sky,
-            material_cache: HashMap::new(),
             sample_count,
             draw_staging: Vec::new(),
             pending_draws: Vec::new(),
@@ -1664,41 +1670,24 @@ impl ScenePipeline {
         uniform
     }
 
-    /// 为一个材质槽创建（或复用）绑定组。
+    /// 绑定项目（共享材质资产从这里读 `.mat` / 贴图 / 导入设置）。
     ///
-    /// 惰性创建：第一次遇到某个 `material_id` 时建，之后整帧乃至整局复用。
-    /// 这也是为什么材质 ID 要全局唯一——不同模型里即使材质完全一样，
-    /// 各自持有自己的槽位，不会因为缓存键相同而串台。
+    /// 三个宿主（编辑器 / 独立游戏 / 无头截图）必须在开始渲染前调用一次；
+    /// 不绑定也能渲染，只是实体上的 `material_asset` 会被忽略（退回模型材质）。
+    pub fn set_project(&mut self, project: Option<ProjectHandle>) {
+        self.materials.set_project(project);
+    }
+
+    /// 让所有已缓存的资产材质 / 贴图失效，下一帧重新读盘。
     ///
-    /// 绑定组里只有**贴图 + 采样器**：颜色 / 金属度 / 粗糙度是逐实例的
-    /// （实体级覆盖），走 `draw_buffer` 的实例槽位，不在这里。（曾经这里
-    /// 还打包一个材质 uniform —— 那种"按资产缓存参数"的形态救不了
-    /// 逐实体覆盖：同一份材质的两个实体可以要不同颜色。）
-    ///
-    /// 调用点是**收集阶段**（实例化之后 pass 里只读 `self`，见 render 的
-    /// 说明）：绘图循环用 `material_cache.get` 直取，不再经过这里。
-    fn material_binding(&mut self, device: &wgpu::Device, prim: &GltfPrimitive) -> &wgpu::BindGroup {
-        if !self.material_cache.contains_key(&prim.material_id) {
-            // 这里对 `self.material_bgl`（不可变）与 `self.material_cache`（可变）的
-            // 借用不重叠——layout 的借用只在 create_bind_group 这一句里活着，
-            // 返回的 BindGroup 持有的是自己的资源引用，不挂在 self 上。
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("scene_material_bg"),
-                layout: &self.material_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&prim.texture.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&prim.texture.sampler),
-                    },
-                ],
-            });
-            self.material_cache.insert(prim.material_id, bind_group);
-        }
-        &self.material_cache[&prim.material_id]
+    /// 编辑器保存 `.mat`、改贴图导入设置、或资产刷新后调用。
+    pub fn invalidate_materials(&mut self) {
+        self.materials.invalidate();
+    }
+
+    /// 材质库失效代数（编辑器渲染指纹用它判断"要不要重画"）。
+    pub fn material_revision(&self) -> u64 {
+        self.materials.revision()
     }
 
     /// 执行一帧场景渲染。
@@ -1989,14 +1978,40 @@ impl ScenePipeline {
             // 局部坐标早就不是它在屏幕上的深度了。
             let world_pos = Vec3::new(world.w_axis.x, world.w_axis.y, world.w_axis.z);
             let dist = (world_pos - *camera_pos).length_squared();
+
+            // -- 共享材质资产（逐实体解析一次，逐图元复用 key）--
+            //
+            // `bind_asset` 在**收集阶段**读盘 / 建绑定组（pass 里只能读 self）；
+            // 失败返回 None，这个实体安静地退回模型自带材质。
+            let asset_key = entity
+                .material_asset
+                .as_deref()
+                .and_then(|reference| self.materials.bind_asset(device, queue, reference));
+
+            // 模型材质的绑定组同样在收集阶段预热；有资产时贴图被资产替换，
+            // 这批模型绑定组至少整个模型仍可能被别的实体用到，建了不亏。
+            for prim in &mesh.primitives {
+                self.materials
+                    .bind_model(device, prim.material_id, &prim.texture);
+            }
+            // 借出的 Arc 在本实体收集期间保持有效；`Arc` 是为了不与上面
+            // 对 `self.materials` 的可变借用打架（库自己还持有同一份）。
+            let asset = asset_key
+                .and_then(|key| self.materials.asset(key))
+                .cloned();
+
             for (pi, prim) in mesh.primitives.iter().enumerate() {
                 if draw_slots_used >= MAX_RENDER_DRAWS {
                     break;
                 }
                 draw_slots_used += 1;
 
-                // 有效材质 = 模型自带参数 ⊕ 实体级覆盖（覆盖是字段级的）。
-                let effective = prim.material.merged_with(entity.material.as_ref());
+                // 有效材质 = 模型 → 材质资产 → 实体级覆盖（后者逐字段打补丁）。
+                let effective = prim
+                    .material
+                    .with_asset(asset.as_deref())
+                    .merged_with(entity.material.as_ref());
+                let material_key = asset_key.unwrap_or(MaterialKey::Model(prim.material_id));
                 let uniform = DrawUniform {
                     model: world.to_cols_array_2d(),
                     params,
@@ -2021,6 +2036,8 @@ impl ScenePipeline {
                                 count: 0,
                                 entity: i as u32,
                                 prim: pi as u32,
+                                // 深度 pass 不采样材质；填模型 key 只是让字段有值。
+                                material: MaterialKey::Model(prim.material_id),
                             });
                             self.shadow_batch_index.insert(key, b);
                             b
@@ -2030,7 +2047,6 @@ impl ScenePipeline {
                     self.shadow_pending.push(PendingDraw { batch, uniform });
                 } else if effective.blend {
                     // 半透明：一项一个批次（不做合批，见模块头），距离排序键留好。
-                    self.material_binding(device, prim);
                     self.blended_draws.push(BlendedDraw {
                         dist,
                         batch: DrawBatch {
@@ -2038,24 +2054,25 @@ impl ScenePipeline {
                             count: 1,
                             entity: i as u32,
                             prim: pi as u32,
+                            material: material_key,
                         },
                         uniform,
                     });
                 } else {
-                    // 不透明：按图元地址找批次，找不到就新开一批（顺序 = 首次遇到）。
-                    let key = prim as *const GltfPrimitive as usize;
+                    // 不透明：按（图元地址 + 材质 key）找批次，找不到就新开一批
+                    // （顺序 = 首次遇到）。材质 key 是必需的：同一个图元挂不同
+                    // `.mat` 的实体不能合成一批（会互相覆盖材质）。
+                    let key = (prim as *const GltfPrimitive as usize, material_key);
                     let batch = match self.batch_index.get(&key) {
                         Some(b) => *b,
                         None => {
                             let b = self.opaque_batches.len() as u32;
-                            // 材质绑定组惰性创建要 `&mut self`，而 pass 里的绘制
-                            // 循环只能读 `self` —— 在这里就把要用到的备好。
-                            self.material_binding(device, prim);
                             self.opaque_batches.push(DrawBatch {
                                 first: 0,
                                 count: 0,
                                 entity: i as u32,
                                 prim: pi as u32,
+                                material: material_key,
                             });
                             self.batch_index.insert(key, b);
                             b
@@ -2229,7 +2246,10 @@ impl ScenePipeline {
             };
             // 绑定组在收集阶段就备好了（见那里的说明）；真缺了说明是逻辑错误，
             // 宁可当场炸也不能拿着上一批的材质去画（画面会静默错色）。
-            let material = self.material_cache.get(&prim.material_id).expect("材质绑定组缺失");
+            let material = self
+                .materials
+                .bind_group(batch.material)
+                .expect("材质绑定组缺失");
             rpass.set_bind_group(1, material, &[]);
             rpass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
             rpass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
@@ -2255,7 +2275,10 @@ impl ScenePipeline {
                 let Some(prim) = batch_prim(entities, model_cache, &draw.batch) else {
                     continue;
                 };
-                let material = self.material_cache.get(&prim.material_id).expect("材质绑定组缺失");
+                let material = self
+                    .materials
+                    .bind_group(draw.batch.material)
+                    .expect("材质绑定组缺失");
                 rpass.set_bind_group(1, material, &[]);
                 rpass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
                 rpass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);

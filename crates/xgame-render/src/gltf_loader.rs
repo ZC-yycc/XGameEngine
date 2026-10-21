@@ -7,7 +7,8 @@ use wgpu::util::DeviceExt;
 use xgame_math::glam::{Mat4, Quat, Vec3};
 
 use crate::animation::{Interpolation, TrackPath};
-use crate::texture::Texture;
+use crate::texture::{Texture, TextureOptions};
+use xgame_core::{read_import_settings, ImportSettings, MaterialAsset};
 
 // ---------------------------------------------------------------------------
 // 轴对齐包围盒
@@ -183,6 +184,33 @@ impl Default for MaterialParams {
 }
 
 impl MaterialParams {
+    /// 套用共享材质资产（`MaterialAsset`），得到"模型材质 + 资产"的结果。
+    ///
+    /// 语义见 [`xgame_core::MaterialAsset`]：
+    /// - `base_color` **相乘**（tint 乘子，与覆盖同款）；
+    /// - `metallic` / `roughness` **替换**（资产就是一份完整材质）；
+    /// - `albedo` 不在这里处理 —— 贴图是 GPU 资源，由材质库负责换成
+    ///   [`GltfPrimitive::texture`]（见 `ScenePipeline` 的绘制循环）；
+    /// - `blend` 不动（透明与否是管线级属性，与覆盖同一取舍）。
+    ///
+    /// `None` 原样返回：没引用材质的实体与材质资产功能上线前逐位一致。
+    pub fn with_asset(&self, asset: Option<&MaterialAsset>) -> Self {
+        let Some(asset) = asset else {
+            return *self;
+        };
+        Self {
+            base_color: [
+                self.base_color[0] * asset.base_color[0],
+                self.base_color[1] * asset.base_color[1],
+                self.base_color[2] * asset.base_color[2],
+                self.base_color[3] * asset.base_color[3],
+            ],
+            metallic: asset.metallic,
+            roughness: asset.roughness,
+            blend: self.blend,
+        }
+    }
+
     /// 套用逐实体材质覆盖，得到该 draw 的**有效材质**。
     ///
     /// 字段级语义（见 [`xgame_core::MaterialOverride`]）：
@@ -310,19 +338,37 @@ impl GltfVertex {
 // ---------------------------------------------------------------------------
 
 impl GltfMesh {
-    /// 加载 `.gltf` 或 `.glb` 文件并将所有网格图元上传到 GPU。
-    ///
-    /// 缺失的顶点属性用合理默认值填充。
+    /// 加载 `.gltf` / `.glb`，使用默认导入设置（等价于 `.meta` 全是默认值）。
     pub fn from_file(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         path: impl AsRef<Path>,
     ) -> Result<Self> {
+        Self::from_file_with(device, queue, path, ImportSettings::default())
+    }
+
+    /// 加载 `.gltf` / `.glb`，按资产的导入设置处理缩放与内嵌贴图。
+    ///
+    /// 缺失的顶点属性用合理默认值填充。
+    pub fn from_file_with(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: impl AsRef<Path>,
+        settings: ImportSettings,
+    ) -> Result<Self> {
         let (document, buffers, images) =
             gltf::import(path.as_ref()).context("Failed to parse glTF file")?;
 
+        // `model_scale` 是**烘焙进几何与骨架**的，而不是乘在实体变换上：
+        // 后者会与用户在 Inspector 里设的 Transform 缩放打架（改导入缩放
+        // 把摆放位置也一起改了）。烘焙的完整规则见 `parse_animation_data_scaled`。
+        let scale = sanitize_model_scale(settings.model_scale);
         // 骨骼层级 / 蒙皮 / 动画剪辑：纯 CPU 解析（可单测，不碰 GPU）。
-        let anim = parse_animation_data(&document, &buffers);
+        let anim = parse_animation_data_scaled(&document, &buffers, scale);
+        let texture_options = TextureOptions {
+            srgb: settings.texture_srgb,
+            nearest: settings.texture_nearest,
+        };
 
         let mut primitives = Vec::new();
         // 整个网格的本地包围盒：各图元的顶点位置并起来。阴影拟合只关心这个。
@@ -335,9 +381,12 @@ impl GltfMesh {
                 let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
 
                 // --- 位置（必需）---
+                // 导入缩放直接乘进顶点：动画的节点位移 / IBM 平移也同步缩放
+                // （见 `parse_animation_data_scaled`），三者不一起变会撕裂蒙皮。
                 let positions: Vec<[f32; 3]> = reader
                     .read_positions()
                     .context("Missing POSITION attribute")?
+                    .map(|p| [p[0] * scale, p[1] * scale, p[2] * scale])
                     .collect();
                 let vertex_count = positions.len();
                 bounds = bounds.union(&Bounds::from_points(positions.iter().copied()));
@@ -400,7 +449,8 @@ impl GltfMesh {
                 }
 
                 // --- 纹理 ---
-                let texture = load_primitive_texture(device, queue, &primitive, &images);
+                let texture =
+                    load_primitive_texture(device, queue, &primitive, &images, texture_options);
 
                 // --- 材质因子 ---
                 let material = read_material(&primitive);
@@ -575,7 +625,10 @@ impl GltfMesh {
         if let Some(builtin) = crate::mesh::BuiltinMesh::from_model_path(model) {
             return Ok(Self::from_mesh_data(device, queue, &builtin.build(), builtin.label()));
         }
-        Self::from_file(device, queue, project_root.join(model))
+        // 读 `.meta`（只读）。没有 `.meta` 或解析失败 → 默认设置，
+        // 与资产管线"坏 meta 不阻断出图"的约定一致。
+        let settings = read_import_settings(project_root, model);
+        Self::from_file_with(device, queue, project_root.join(model), settings)
     }
 }
 
@@ -616,6 +669,38 @@ pub fn parse_animation_data(
     document: &gltf::Document,
     buffers: &[gltf::buffer::Data],
 ) -> AnimData {
+    parse_animation_data_scaled(document, buffers, 1.0)
+}
+
+/// `model_scale` 的合法化：非有限 / 非正数一律回 1.0。
+///
+/// 负缩放会让三角形绕序翻转（背面剔除把模型剔没），0 会让包围盒塌成
+/// 一个点（阴影拟合除零）；这两种"用户手滑"不该变成黑屏。
+fn sanitize_model_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// 同 [`parse_animation_data`]，但把所有**平移量**乘以 `scale`。
+///
+/// 这是 `model_scale` 烘焙规则的另一半（几何顶点在 `from_file_with` 里乘）：
+///
+/// - 节点默认位移 × scale；
+/// - 动画 Translation 轨道的每个关键帧值 × scale；
+/// - 蒙皮逆绑定矩阵的平移分量 × scale（`S·IBM·S⁻¹` 对均匀缩放的化简，
+///   线性部分不变）。
+///
+/// 旋转 / 缩放通道**不动**：均匀全局缩放不改变朝向与相对比例。
+/// `scale == 1.0` 时跳过全部乘法，保证默认路径逐位不变。
+pub fn parse_animation_data_scaled(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    scale: f32,
+) -> AnimData {
+    let scale = sanitize_model_scale(scale);
     // -- 节点层级 --
     let node_count = document.nodes().count();
     let mut parents = vec![u32::MAX; node_count];
@@ -629,15 +714,19 @@ pub fn parse_animation_data(
         .map(|node| {
             // `decomposed()` 对 Matrix 形态做分解、TRS 形态原样取出 ——
             // 骨架资产几乎都是 TRS，这条统一入口省掉一个手写 match。
-            let (translation, rotation, scale) = node.transform().decomposed();
+            let (translation, rotation, node_scale) = node.transform().decomposed();
+            let mut translation = Vec3::from_array(translation);
+            if scale != 1.0 {
+                translation *= scale;
+            }
             crate::animation::AnimNode {
                 // u32::MAX 是"没父"的哨兵（children 反填时的初值）。
                 parent: (parents[node.index()] != u32::MAX).then_some(parents[node.index()]),
                 // glTF 节点名（可能没有）—— 骨骼遮罩的选择面。
                 name: node.name().unwrap_or_default().to_owned(),
-                translation: Vec3::from_array(translation),
+                translation,
                 rotation: Quat::from_array(rotation),
-                scale: Vec3::from_array(scale),
+                scale: Vec3::from_array(node_scale),
             }
         })
         .collect();
@@ -657,10 +746,19 @@ pub fn parse_animation_data(
         let reader = skin.reader(|buf| Some(&buffers[buf.index()]));
         // 缺 IBM accessor 的蒙皮按"单位阵"处理（= 不做绑定空间校正），
         // 顶多姿态不准，不会黑屏或 panic。
-        let inverse_bind: Vec<Mat4> = reader
+        let mut inverse_bind: Vec<Mat4> = reader
             .read_inverse_bind_matrices()
             .map(|iter| iter.map(|m| Mat4::from_cols_array_2d(&m)).collect())
             .unwrap_or_else(|| vec![Mat4::IDENTITY; joints.len()]);
+        if scale != 1.0 {
+            // 均匀缩放 s 下 IBM' = S·IBM·S⁻¹：线性部分不变，平移乘 s。
+            // （推导见 `parse_animation_data_scaled` 的文档。）
+            for m in &mut inverse_bind {
+                m.w_axis.x *= scale;
+                m.w_axis.y *= scale;
+                m.w_axis.z *= scale;
+            }
+        }
         skins.push(crate::animation::Skin {
             joints,
             inverse_bind,
@@ -719,7 +817,7 @@ pub fn parse_animation_data(
                 _ => Interpolation::Linear,
             };
 
-            let values = match reader.read_outputs() {
+            let mut values = match reader.read_outputs() {
                 Some(ReadOutputs::Translations(iter)) => take_spline_values(
                     iter.map(|v| v.to_vec()).collect(),
                     cubic,
@@ -734,6 +832,13 @@ pub fn parse_animation_data(
                 ),
                 _ => continue,
             };
+            if path == TrackPath::Translation && scale != 1.0 {
+                for value in values.as_chunks_mut::<3>().0 {
+                    value[0] *= scale;
+                    value[1] *= scale;
+                    value[2] *= scale;
+                }
+            }
 
             tracks.push(crate::animation::Track {
                 node: channel.target().node().index() as u32,
@@ -809,6 +914,7 @@ fn load_primitive_texture(
     queue: &wgpu::Queue,
     primitive: &gltf::Primitive<'_>,
     images: &[gltf::image::Data],
+    options: TextureOptions,
 ) -> Texture {
     // Try to get the base colour texture from the PBR material
     let base_color_texture = primitive
@@ -823,10 +929,14 @@ fn load_primitive_texture(
 
         if let Some(data) = images.get(idx) {
             if let Some(rgba) = decode_image_data(data) {
-                return Texture::from_rgba8(
-                    device, queue,
-                    data.width, data.height,
-                    &rgba, "glTF diffuse",
+                return Texture::from_rgba8_with(
+                    device,
+                    queue,
+                    data.width,
+                    data.height,
+                    &rgba,
+                    "glTF diffuse",
+                    options,
                 );
             }
         }
@@ -973,6 +1083,86 @@ mod tests {
             roughness: Some(1.0),
         };
         assert!(base.merged_with(Some(&over)).blend);
+    }
+
+    // -- 材质资产合并 -------------------------------------------------------
+
+    /// 共享材质：颜色相乘、金属度 / 粗糙度替换、`blend` 不动。
+    #[test]
+    fn material_asset_multiplies_color_and_replaces_pbr() {
+        let base = MaterialParams {
+            base_color: [0.5, 0.5, 0.5, 0.8],
+            metallic: 0.1,
+            roughness: 0.9,
+            blend: true,
+        };
+        let asset = xgame_core::MaterialAsset {
+            base_color: [0.4, 1.0, 2.0, 0.5],
+            metallic: 0.25,
+            roughness: 0.7,
+            albedo: String::new(),
+        };
+        let merged = base.with_asset(Some(&asset));
+        assert_eq!(merged.base_color, [0.2, 0.5, 1.0, 0.4]);
+        assert_eq!(merged.metallic, 0.25, "资产替换模型金属度");
+        assert_eq!(merged.roughness, 0.7, "资产替换模型粗糙度");
+        assert!(merged.blend, "透明与否是管线属性，资产不该改");
+
+        let same = base.with_asset(None);
+        assert_eq!(same.base_color, base.base_color);
+        assert_eq!(same.metallic, base.metallic);
+        assert_eq!(same.roughness, base.roughness);
+    }
+
+    /// `model_scale` 必须同时烘焙进节点位移、动画位移轨道与 IBM 平移：
+    /// 只改几何的话，骨骼动画会把模型"拉回"原尺寸 / 错位。
+    #[test]
+    fn model_scale_bakes_into_nodes_tracks_and_bind_matrices() {
+        let (doc, buffers) = fox();
+        let base = parse_animation_data(&doc, &buffers);
+        let scaled = parse_animation_data_scaled(&doc, &buffers, 2.0);
+
+        assert_eq!(scaled.nodes.len(), base.nodes.len());
+        for (a, b) in base.nodes.iter().zip(&scaled.nodes) {
+            assert_eq!(b.translation, a.translation * 2.0, "节点位移必须缩放");
+            assert_eq!(b.rotation, a.rotation, "旋转不受均匀缩放影响");
+            assert_eq!(b.scale, a.scale, "节点自身缩放不受影响");
+        }
+
+        assert_eq!(scaled.skins.len(), base.skins.len());
+        for (a, b) in base.skins.iter().zip(&scaled.skins) {
+            for (m0, m1) in a.inverse_bind.iter().zip(&b.inverse_bind) {
+                assert_eq!(
+                    [m1.w_axis.x, m1.w_axis.y, m1.w_axis.z],
+                    [m0.w_axis.x * 2.0, m0.w_axis.y * 2.0, m0.w_axis.z * 2.0],
+                    "IBM 平移必须缩放"
+                );
+                assert_eq!(m1.x_axis, m0.x_axis, "IBM 线性部分不变");
+                assert_eq!(m1.y_axis, m0.y_axis);
+                assert_eq!(m1.z_axis, m0.z_axis);
+            }
+        }
+
+        // 动画的 Translation 轨道：每个关键帧的三个分量都乘 2。
+        let base_walk = base.animations.iter().find(|c| c.name == "Walk").unwrap();
+        let scaled_walk = scaled.animations.iter().find(|c| c.name == "Walk").unwrap();
+        let base_track = base_walk
+            .tracks
+            .iter()
+            .find(|t| t.path == TrackPath::Translation)
+            .expect("Walk 应含位移轨道");
+        let scaled_track = scaled_walk
+            .tracks
+            .iter()
+            .find(|t| t.path == TrackPath::Translation)
+            .unwrap();
+        assert_eq!(scaled_track.values, base_track.values.iter().map(|v| v * 2.0).collect::<Vec<_>>());
+
+        // 非法缩放（NaN / 0 / 负）退回 1.0，不能把模型弄没。
+        let fallback = parse_animation_data_scaled(&doc, &buffers, f32::NAN);
+        for (a, b) in base.nodes.iter().zip(&fallback.nodes) {
+            assert_eq!(b.translation, a.translation);
+        }
     }
 
     /// 仓库自带的示例狐狸（3 段剪辑 + 24 骨蒙皮）——解析测试的固定夹具。

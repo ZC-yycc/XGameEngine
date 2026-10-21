@@ -1671,13 +1671,53 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         });
 
 
-        // ── 材质覆盖 ──
+        // ── 材质资产 + 覆盖 ──
         //
-        // 内置图元（builtin://cube 等）只有白模、glTF 材质改不了 —— 这一区是
-        // 场景层面调材质的唯一入口。语义见 `MaterialOverride`：Tint 是**乘子**，
-        // Metallic / Roughness 是**替换**；没勾的字段保持模型自带值。
+        // 资产负责"这是什么材质"（跨实体共享，`.mat` 可复用）；下面的 Override
+        // 负责"这个实例想怎么微调"。两层正交：资产定金属度 / 粗糙度，覆盖在
+        // 其结果之上逐字段打补丁。内置图元（builtin://cube 等）没有模型材质，
+        // 要么挂资产、要么用覆盖，否则永远是白模。
         theme::section_bar(ui, "Material");
         ui.indent("material", |ui| {
+            let materials = state.material_list();
+            row(ui, "Asset", |ui| {
+                let current = entity.material_asset.clone().unwrap_or_default();
+                let text = if current.is_empty() {
+                    "None（模型自带）".to_string()
+                } else {
+                    current
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&current)
+                        .trim_end_matches(".mat")
+                        .to_string()
+                };
+                egui::ComboBox::from_id_salt("inspector_material_asset")
+                    .selected_text(text)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(current.is_empty(), "None（模型自带）")
+                            .clicked()
+                            && !current.is_empty()
+                        {
+                            entity.material_asset = None;
+                            touched = true;
+                        }
+                        for path in &materials {
+                            if ui.selectable_label(&current == path, path).clicked() {
+                                entity.material_asset = Some(path.clone());
+                                touched = true;
+                            }
+                        }
+                    });
+            });
+            if entity.material_asset.is_none() {
+                theme::note(ui, "共享材质资产 · 在 Assets 面板新建 .mat 后可在此指派");
+            } else {
+                theme::note(ui, entity.material_asset.as_deref().unwrap_or_default());
+            }
+
             let mut enabled = entity.material.is_some();
             if ui
                 .checkbox(&mut enabled, "Override material params")
@@ -1733,11 +1773,11 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     }
                 });
 
-                row(ui, "Roughness", |ui| {
+                row(ui, "Rough", |ui| {
                     let mut has = m.roughness.is_some();
                     if ui
                         .checkbox(&mut has, "")
-                        .on_hover_text("0 = 镜面，1 = 完全漫反射（写覆盖值，不做相乘）")
+                        .on_hover_text("粗糙度：0 = 镜面，1 = 完全漫反射。\n（写覆盖值，不做相乘）")
                         .changed()
                     {
                         m.roughness = if has { Some(0.5) } else { None };

@@ -3184,3 +3184,127 @@ draw call** —— 因为"背景 / 文字"交替出现，而**绘制顺序就是
 - 没有文字输入框、没有手柄 / 键盘导航；
 - UI 不吃指针时游戏输入照常（"点 UI 时不要开枪"需要脚本自己用 `ui_hovered` 判断）；
 - 无 Canvas Scaler（设计分辨率缩放）。
+
+## 三十五、材质资产（`.mat`）+ 导入参数接线（2026-10-21）
+
+优先级来自 `Docs/差距分析.md` P1 第 5 项。原文的判断是：材质资产是内容复用的
+最小单位，而 P0 资产管线已经把所有前置条件（GUID、`.meta`、资源浏览器）铺好了。
+这一轮顺手把 §十四.6 遗留的消费面一起接掉 —— 材质是纹理导入设置的第一个真实
+消费者，分开做会为了同一个绑定组改两遍。
+
+### 一、分层
+
+| 层 | 内容 |
+|---|---|
+| `xgame-core::material` | `MaterialAsset`（`base_color` / `metallic` / `roughness` / `albedo`）、默认值、RON、`sanitized()` |
+| `xgame-core::scene` | `Entity::material_asset: Option<String>`（内存路径；磁盘 GUID） |
+| `xgame-core::asset` | `AssetKind::Material`、`.mat` 扩展名、实体材质引用编解码、`read_import_settings()` |
+| `xgame-core::project` | `list_materials()` / `material_path_for()` / `load_material()` / `write_material()`（albedo 的 GUID⇄路径边界） |
+| `xgame-render::material_library` | `.mat` 解析、albedo 上传、绑定组缓存、负缓存、`MaterialKey::{Model, Asset}`、修订号 |
+| `xgame-render::scene_pipeline` | 逐实体材料解析（模型 → 资产 → 覆盖）、批次键加材质、项目绑定与失效 |
+| `xgame-render::gltf_loader` | 读 `.meta` 的 `model_scale` / `texture_srgb` / `texture_nearest`；资产材质与模型材质合并 |
+| `xgame-editor` | Assets 面板新建 / 编辑 / Apply·Revert / 指派；Inspector 资产选择器；拖放语义 |
+| `xgame-script` | `material_asset` / `set_material_asset` / `set_material` / `clear_material` |
+| `xgame-mcp` | `project_check` 暴露四项材质诊断字段 |
+
+### 二、六个关键决定
+
+**1. `.mat` 是完整材质，不是覆盖层（最重要的一条）。**
+
+- 资产的颜色 / albedo 与模型颜色**相乘**；
+- 资产的 metallic / roughness **替换**模型值；
+- albedo 为空 = 1×1 白，**不回退模型贴图**。
+
+如果空 albedo 保留模型贴图，"换材质"就会变成"有时换、有时不换"的玄学。
+优先级只有一条链：**模型 → 资产 → 实体覆盖**；覆盖在资产结果上逐字段打补丁，
+`set_material` 不会清掉 `material_asset`。两者正交，才能同时表达"这是木头"
+和"这个箱子偏红"。
+
+**2. GUID 只出现在磁盘边界。**
+
+`Entity::material_asset` 与 `.mat` 的 albedo 在磁盘上都是 `guid://…`，内存里
+都是项目相对路径；转换只在 `ProjectHandle` 的 `load_*` / `write_*` 里。渲染热
+路径（每帧查表）只认路径，`MaterialLibrary` 的键也是路径 —— 把 GUID 解析塞进
+热路径既慢又会让同一资产出现两份缓存。
+
+**3. 材质库住在 `ScenePipeline`，失效必须显式。**
+
+`MaterialLibrary` 按路径缓存 `.mat`、纹理与绑定组，失败也缓存（负缓存），避免
+一个坏文件每帧刷日志 + 读盘。编辑器保存材质 / 改导入设置后调
+`SceneRenderer::invalidate_materials` / `invalidate_assets`；渲染指纹混入材质
+修订号，否则会出现"文件改了、视口纹丝不动"的假象。独立游戏只在启动时
+`set_project` 一次，不做文件监听。
+
+**4. 批次键从「图元地址」扩成「图元地址 + 材质 key」。**
+
+这是本轮的硬红线。同一个 `builtin://cube`（或同一份 glTF 网格）的两个实体挂
+不同 `.mat` 时，按图元合批会在一次 `set_bind_group` 里把整批盖成最后一份材质，
+表现为"两颗箱子同色"。半透明 draw 本来就按距离排序、不合批，但也携带材质 key；
+阴影批只比较深度，保持图元地址。回归测试
+`material_assets_split_opaque_batches` 钉死：不同资产 = 2 批，改成同一资产 = 1 批。
+批次顺序仍是首次遇到顺序，不改哈希序 / 不按材质排序 —— 无头截图的逐字节确定性
+依赖它。
+
+**5. `model_scale` 在加载边界烘焙，不乘世界矩阵。**
+
+缩放因子乘四处：顶点位置、节点平移、动画 translation 轨道、逆绑定矩阵平移
+（`w_axis.xyz *= s`）。只在世界矩阵外乘一层会让画面缩放、但物理碰撞 / 包围盒 /
+射线拾取仍按原尺寸 —— 三者错位比不缩放更难查。非有限 / ≤0 的缩放退回 `1.0`。
+纹理的 `texture_srgb` / `texture_nearest` 由 `TextureOptions` 消费，模型贴图与
+材质 albedo 走同一条上传路径。
+
+**6. 编辑器材质编辑用浮窗 + 草稿 + 显式 Apply。**
+
+材质编辑器改的是 `MaterialDraft`，点 Apply 才写盘，Revert 丢弃。理由：写盘有
+IO + GPU 纹理重传，逐帧写会把一次拖动变成几十次落盘；撤销栈是**场景快照**，
+不该混入资产文件历史，所以材质编辑本身不可撤销（Revert 是替代品），播放态整体
+禁用。编辑器放在**应用级浮窗**里，而不是 Assets 详情区：1280×800 下底部面板
+只有 ~150px 高，四个字段 + 三个按钮必被裁掉；浮窗必须在 dock 之后画，否则后画
+的 Output Log 会盖住它。Tint 只在 `response.changed()` 时回写（egui 的
+color button 会把 f32 无条件量化写回，导致一打开就显示"未保存"）。
+指派材质相反 —— 它是场景改动，会压撤销栈。三个入口共用
+`EditorState::assign_material`：Inspector 下拉、Assets 双击（给选中实体）、
+拖到视口（优先鼠标下实体，其次选中实体；都没有就提示，**不生成新实体**）。
+
+### 三、检查、迁移与样例
+
+- `--check` 新增 `material_refs` / `missing_materials` / `missing_material_textures` /
+  `invalid_materials`；同一路径被 N 个实体引用只检查一次；检查仍严格只读。
+- `--migrate-assets` 除场景 / 预制体外，也改写 `.mat` 的 albedo 字面量并给
+  `.mat` 补 `.meta`。
+- `SampleScene` 新增 5 份材质（Concrete / Wood / PolishedMetal / RedPlastic /
+  BlueGloss），给地面、旋转体、弹跳球、三个箱子、柱子指派；箱子仍保留各自的
+  颜色覆盖，用来演示"资产 + 覆盖"两层同时生效。
+- 空 albedo 走 1×1 白纹理；渲染侧统一夹取 metallic / roughness，存盘保留用户
+  原值（与 `MaterialOverride` 同款策略）。
+
+### 四、验证
+
+- `xgame-core`（167 条）：`.mat` 默认值 / RON 往返 / `sanitized`、实体材质引用
+  往返与旧文件兼容、材质路径推导、GUID 编解码与迁移、检查的四类诊断。
+- `xgame-render`（136 条，有 GPU 时）：材质库缓存与失效、模型 → 资产 → 覆盖的
+  合并（颜色乘、PBR 替换、空 albedo 回退白）、`model_scale` 对顶点 / 节点 /
+  动画 / 逆绑定的缩放、纹理导入选项、三条像素钉子：
+  `material_asset_tints_builtin_mesh`（资产真的上屏、清引用后逐位回基线）、
+  `material_asset_albedo_texture_applies`（GUID 贴图经 sRGB 解码后只剩红通道）、
+  `material_assets_split_opaque_batches`（批次键必须带材质）。
+- `xgame-editor`（115 条）：新建材质不覆盖同名（自动加后缀）、`.meta` 自动补齐、
+  草稿 Apply 前不写盘 / Apply 后落盘 / Revert 丢弃、指派写实体字段 + 可撤销、
+  无选中实体时双击材质不凭空生成。
+- `xgame-script`（24 条）：4 个 API 的 Lua 可达性；`set_material` 自动夹取
+  metallic / roughness，`clear_material` 只清覆盖不动资产。
+- `xgame-mcp`（31 条）：`project_check` 同时报缺材质、缺 albedo、坏 RON，且
+  `material_refs` 只数实体引用。
+- 全工作区：**599 条通过 / 7 条基准 ignore**；clippy `-D warnings` 零告警。
+- 样例项目：`--check` 输出 `material_refs=7 assets=14` 且 `OK`；`--headless`
+  跑 300 帧；`--screenshot` 出图；编辑器 `--ui-shot` 在 1280 / 1440 / 1920
+  三档自检材质浮窗、详情区与 Inspector 选择器（另扫 1280×720 最小高度）。
+
+### 五、已知限制（有意为之）
+
+- 只有 albedo 一个贴图槽：无法接入法线 / 金属-粗糙 / 自发光贴图，法线贴图需要
+  先给顶点着色器补切线（glTF 的 `TANGENT` 目前没读）；
+- 没有材质变体 / 继承 / 实例参数；
+- 没有材质缩略图与文件监听，刷新靠 ⟳，保存靠显式失效；
+- 脚本不能逐字段清除覆盖（要么 `clear_material`，要么改用资产）；
+- `audio_streaming` 仍是数据面：流式播放未落地。

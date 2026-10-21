@@ -388,6 +388,64 @@ impl GameCtx<'_> {
         }
     }
 
+    /// 实体引用的共享材质资产路径（没引用 → 空串）。
+    pub fn entity_material_asset(&mut self, id: EntityId) -> String {
+        self.scene
+            .find_entity(id)
+            .and_then(|i| self.scene.entities.get(i))
+            .and_then(|e| e.material_asset.clone())
+            .unwrap_or_default()
+    }
+
+    /// 指向 / 清空实体的共享材质资产（`""` = 恢复模型自带材质）。
+    ///
+    /// 只接受项目相对路径或 `guid://`；路径不存在不在这里报错 ——
+    /// 渲染侧会退回模型材质，`--check` 会点名悬空引用。
+    pub fn set_entity_material_asset(&mut self, id: EntityId, material: &str) {
+        if let Some(i) = self.scene.find_entity(id) {
+            if let Some(e) = self.scene.entities.get_mut(i) {
+                e.material_asset = (!material.is_empty()).then(|| material.to_owned());
+            }
+        }
+    }
+
+    /// 一次性设置实体的内联材质覆盖（颜色 + 金属度 + 粗糙度）。
+    ///
+    /// 这是给脚本的**便捷入口**：`set_material(id, r,g,b,a, metallic, roughness)`。
+    /// 三个字段都会被写上（不像 Inspector 那样逐字段勾选）；要把控制权还给
+    /// 模型自带材质，用 `clear_material` 或改用 `set_material_asset`。
+    /// 与共享资产同时存在时，覆盖在资产结果之上继续生效（本函数不改资产）。
+    pub fn set_entity_material(
+        &mut self,
+        id: EntityId,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+    ) {
+        let Some(i) = self.scene.find_entity(id) else {
+            return;
+        };
+        let Some(e) = self.scene.entities.get_mut(i) else {
+            return;
+        };
+        let finite = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+        let color = base_color.map(|v| finite(v, 1.0));
+        e.material = Some(xgame_core::MaterialOverride {
+            base_color: Some(color),
+            metallic: Some(finite(metallic, 0.0).clamp(0.0, 1.0)),
+            roughness: Some(finite(roughness, 0.5).clamp(0.0, 1.0)),
+        });
+    }
+
+    /// 清掉内联材质覆盖（共享材质资产与模型材质不受影响）。
+    pub fn clear_entity_material(&mut self, id: EntityId) {
+        if let Some(i) = self.scene.find_entity(id) {
+            if let Some(e) = self.scene.entities.get_mut(i) {
+                e.material = None;
+            }
+        }
+    }
+
     /// 实体的**世界**位置。
     pub fn entity_pos(&mut self, id: EntityId) -> Vec3 {
         self.scene
@@ -1074,6 +1132,80 @@ mod tests {
         assert_eq!(scene.entities[child].transform.position, Vec3::new(2.0, 5.0, 0.0));
         let world = scene.world_matrix(child).w_axis.truncate();
         assert!((world - Vec3::new(12.0, 5.0, 0.0)).length() < 1e-4);
+    }
+
+    /// 材质 API：资产引用与内联覆盖是两层，互不取消；坏数值被钳到合法区间。
+    #[test]
+    fn material_api_assigns_asset_and_clamps_override() {
+        let mut scene = Scene::new("materials");
+        scene.add_entity(Entity::new("crate"));
+        let id = scene.entities[0].id;
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+
+        {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "MaterialProbe",
+                entity: id,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            assert_eq!(ctx.entity_material_asset(id), "");
+            ctx.set_entity_material_asset(id, "Resources/Materials/Wood.mat");
+            assert_eq!(
+                ctx.entity_material_asset(id),
+                "Resources/Materials/Wood.mat"
+            );
+
+            ctx.set_entity_material(
+                id,
+                [0.8, f32::NAN, f32::INFINITY, 1.0],
+                5.0,
+                -2.0,
+            );
+        }
+
+        let entity = &scene.entities[0];
+        assert_eq!(
+            entity.material_asset.as_deref(),
+            Some("Resources/Materials/Wood.mat"),
+            "设置覆盖不该清掉资产引用"
+        );
+        let material = entity.material.as_ref().expect("覆盖应写入");
+        assert_eq!(
+            material.base_color,
+            Some([0.8, 1.0, 1.0, 1.0]),
+            "非有限颜色分量退回 1.0"
+        );
+        assert_eq!(material.metallic, Some(1.0), "超界金属度必须钳到 1");
+        assert_eq!(material.roughness, Some(0.0), "负粗糙度必须钳到 0");
+
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "MaterialProbe",
+                entity: id,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            ctx.clear_entity_material(id);
+            ctx.set_entity_material_asset(id, "");
+        }
+        assert!(scene.entities[0].material.is_none());
+        assert!(scene.entities[0].material_asset.is_none(), "空串 = 清空引用");
     }
 
     /// GameCtx 作为一束状态可以直接构造并调方法 —— 不经过脚本解释器。

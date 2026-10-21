@@ -191,6 +191,34 @@ impl SceneRenderer {
 
     // -- Viewport management --
 
+    /// 绑定项目句柄：共享材质资产（`.mat`）与贴图导入设置都从这里读。
+    ///
+    /// 编辑器在打开项目后调用一次；之后 `ProjectHandle` 内部的资产库会随
+    /// 保存 / 刷新更新，不需要重新绑定。
+    pub fn set_project(&mut self, project: Option<xgame_core::ProjectHandle>) {
+        self.pipeline.set_project(project);
+        self.last_signature = None;
+    }
+
+    /// 材质 / 贴图内容变了：丢缓存并强制下一帧重画。
+    ///
+    /// 只影响资产材质，模型网格不动 —— 编辑器保存 `.mat` 或改贴图导入设置时用。
+    pub fn invalidate_materials(&mut self) {
+        self.pipeline.invalidate_materials();
+        self.last_signature = None;
+    }
+
+    /// 模型 / 贴图导入设置变了：连模型缓存一起丢。
+    ///
+    /// `model_scale` / 贴图 sRGB / 最近邻都烘焙在 `GltfMesh` 与 GPU 纹理里，
+    /// 只清材质库不够。下一帧会按新设置重新加载（坏路径仍进负缓存）。
+    pub fn invalidate_assets(&mut self) {
+        self.model_cache.clear();
+        self.load_failed.clear();
+        self.pipeline.invalidate_materials();
+        self.last_signature = None;
+    }
+
     /// 视口尺寸变化时**不立刻**重建渲染目标，而是节流重建。
     ///
     /// 拖窗口边缘时这个函数每帧都会被调一次，而重建意味着新建 4 张纹理
@@ -637,6 +665,18 @@ impl SceneRenderer {
                     hash = mix_bits(hash, 0xFE);
                 }
             }
+            // 材质资产引用：换 `.mat` 必须重画。资产**内容**的变化不在这里，
+            // 由 `render` 把 `pipeline.material_revision()` 混进指纹（编辑器保存
+            // 材质后自增），否则改文件内容不会触发重绘。
+            match &entity.material_asset {
+                Some(path) => {
+                    hash = mix_bits(hash, 8);
+                    for byte in path.as_bytes() {
+                        hash = mix_bits(hash, *byte as u64);
+                    }
+                }
+                None => hash = mix_bits(hash, 9),
+            }
             // 材质覆盖：颜色 / 金属度 / 粗糙度决定像素颜色，必须进指纹 ——
             // 漏掉的话"在 Inspector 里调颜色"会看到视口纹丝不动（只在切镜头
             // 或下一帧动画时钟变化时才补画一次）。
@@ -726,6 +766,9 @@ impl SceneRenderer {
             anim_hash,
             settings,
         );
+        // 材质库失效代数进指纹：编辑器保存 `.mat` / 改导入设置后 `invalidate_*`
+        // 自增，即使实体字段一个都没变也必须重画（贴图与参数都换了）。
+        let signature = mix_bits(signature, self.pipeline.material_revision());
         // UI 的内容签名必须进指纹：否则"场景没动、只有 UI 在变"（按钮悬停
         // 变色、血量数字跳动）会被整帧跳过，看起来像 UI 卡住了。
         let ui_signature = self.ui.prepare(

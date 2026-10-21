@@ -62,15 +62,35 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 结果底部的"路径 / GUID / 导入设置"永远被挤到视野之外（第一版就是这样，
     // 截图才发现）。高度随"有没有选中"变化 —— 没选中时只需要一行提示，
     // 把空间让给列表（否则 8 个资产只能看见 7 个）。
+    //
+    // 材质不再把整块编辑器塞进这里（1280×800 下这个面板只有 ~150px 高，
+    // 四个字段必然被裁）。详情只留路径 / GUID / 两个按钮，完整编辑在浮动窗口。
+    // 上限按 available 夹住：曾经固定 240–360 的下限，面板不够高时列表 + 详情
+    // 直接溢出到面板外，截图里连 Metallic 都看不到。
+    let available = ui.available_height();
+    let selected_material = state
+        .asset_selected
+        .as_deref()
+        .and_then(AssetKind::from_path)
+        == Some(AssetKind::Material);
     let reserve = if state.asset_selected.is_some() {
-        (ui.available_height() * 0.46).clamp(120.0, 150.0)
+        if selected_material {
+            // 只剩「类型 / 路径 / GUID / 两个按钮」，但面板底部会被状态栏
+            // 盖住 ~24px（egui_tiles 的 pane 高度算到了状态栏下面），
+            // 96px 时按钮正好被裁掉半行；120px 留出这段安全区。
+            120.0
+        } else {
+            (available * 0.57).clamp(96.0, 160.0)
+        }
     } else {
         34.0
     };
-    let list_height = (ui.available_height() - reserve).max(60.0);
+    let reserve = reserve.min((available - 48.0).max(40.0));
+    let list_height = (available - reserve).max(48.0);
 
     let mut actions: Vec<Action> = Vec::new();
     egui::ScrollArea::vertical()
+        .id_salt("assets_list")
         .max_height(list_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -92,7 +112,13 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 只在这里判"松手"会漏。放置动作在 `scene_view` 里做（它知道落点）。
 
     ui.separator();
-    details(state, ui, &mut actions);
+    egui::ScrollArea::vertical()
+        .id_salt("asset_details")
+        .max_height(ui.available_height())
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            details(state, ui, &mut actions);
+        });
 
     for action in actions {
         match action {
@@ -107,6 +133,16 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             }
         }
     }
+}
+
+/// 资源面板的浮动窗口（材质编辑器 / 新建材质）。
+///
+/// **必须在 dock 之后、由应用层调用**：如果在 `show_content` 里画，窗口会
+/// 进入当前 pane 的图层，后面的 Output Log 面板能把窗口下半截盖掉（1280×720
+/// 截图实锤）。与 Project Settings 一样放到所有面板之后画，才是真正的浮层。
+pub fn show_overlays(state: &mut EditorState, ctx: &egui::Context) {
+    material_editor_window(state, ctx);
+    create_material_dialog(state, ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +168,22 @@ fn header(state: &mut EditorState, ui: &mut egui::Ui) {
             .clicked()
             {
                 state.refresh_assets();
+                // 外部可能改了模型 / 贴图 / 导入设置：渲染缓存必须一起丢。
+                if let Some(renderer) = state.scene_renderer.as_mut() {
+                    renderer.invalidate_assets();
+                }
+            }
+            if icons::icon_button(
+                ui,
+                icons::Icon::Plus,
+                18.0,
+                "新建材质资产（.mat）",
+                false,
+            )
+            .clicked()
+            {
+                state.material_create_dialog = true;
+                state.material_create_name = "New Material".to_string();
             }
         });
     });
@@ -325,8 +377,18 @@ fn asset_row(
         actions.push(Action::Place(full_path.to_string()));
     }
 
+    let drop_hint = if kind == AssetKind::Material {
+        "拖到视口里的实体上指派材质"
+    } else {
+        "拖到视口放到鼠标位置"
+    };
+    let double_hint = if kind == AssetKind::Material {
+        "双击指派给选中实体"
+    } else {
+        "双击放入场景"
+    };
     let hover = format!(
-        "{full_path}\n\n{} · 双击放入场景 · 拖到视口放到鼠标位置",
+        "{full_path}\n\n{} · {double_hint} · {drop_hint}",
         kind.label()
     );
     let _ = filter;
@@ -334,7 +396,11 @@ fn asset_row(
         if ui
             .add_enabled(
                 kind.is_draggable_into_scene() && state.is_editing(),
-                egui::Button::new("放入场景"),
+                egui::Button::new(if kind == AssetKind::Material {
+                    "指派给选中实体"
+                } else {
+                    "放入场景"
+                }),
             )
             .clicked()
         {
@@ -397,44 +463,65 @@ fn details(state: &mut EditorState, ui: &mut egui::Ui, actions: &mut Vec<Action>
         .on_hover_text(full);
     }
 
-    // 导入设置：只对该类型有意义的字段才显示（模型没有"纹理过滤"，
-    // 把不适用的开关画出来只会让人以为它有效）。
-    let mut import = state.asset_import(&relative);
-    let before = import;
-    ui.add_space(4.0);
-    ui.add_enabled_ui(state.is_editing(), |ui| match kind {
-        AssetKind::Model => {
-            ui.horizontal(|ui| {
-                ui.label(theme::dim_note("缩放"));
-                ui.add(
-                    egui::DragValue::new(&mut import.model_scale)
-                        .speed(0.01)
-                        .range(0.001..=1000.0)
-                        .fixed_decimals(2),
-                );
-            });
-        }
-        AssetKind::Texture => {
-            ui.checkbox(&mut import.texture_srgb, "sRGB（颜色贴图）");
-            ui.checkbox(&mut import.texture_nearest, "最近邻过滤（像素风）");
-        }
-        AssetKind::Audio => {
-            ui.checkbox(&mut import.audio_streaming, "流式播放（长音频）");
-        }
-        _ => {
-            ui.label(theme::dim_note("该类型没有可调导入参数"));
-        }
-    });
-    if import != before {
-        state.set_asset_import(&relative, import);
+    if kind == AssetKind::Material {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui.button("编辑材质…").clicked() {
+                state.material_editor_open = Some(relative.clone());
+            }
+            let assign = ui.add_enabled(
+                state.is_editing() && state.selected_entity.is_some(),
+                egui::Button::new("指派给选中实体"),
+            );
+            if assign.clicked() {
+                actions.push(Action::Place(relative.clone()));
+            }
+            if state.selected_entity.is_none() {
+                assign.on_disabled_hover_text("先在 Hierarchy 里选中一个实体");
+            }
+        });
     }
 
-    if kind.is_draggable_into_scene() {
+    // 导入设置：只对该类型有意义的字段才显示（模型没有"纹理过滤"，
+    // 把不适用的开关画出来只会让人以为它有效）。材质没有导入参数，
+    // 内容本身就在 `.mat` 里，由浮动编辑器改 —— 整段跳过，别留空行。
+    if kind != AssetKind::Material {
+        let mut import = state.asset_import(&relative);
+        let before = import;
         ui.add_space(4.0);
-        let label = if kind == AssetKind::Prefab {
-            "实例化到场景"
-        } else {
-            "放入场景"
+        ui.add_enabled_ui(state.is_editing(), |ui| match kind {
+            AssetKind::Model => {
+                ui.horizontal(|ui| {
+                    ui.label(theme::dim_note("缩放"));
+                    ui.add(
+                        egui::DragValue::new(&mut import.model_scale)
+                            .speed(0.01)
+                            .range(0.001..=1000.0)
+                            .fixed_decimals(2),
+                    );
+                });
+            }
+            AssetKind::Texture => {
+                ui.checkbox(&mut import.texture_srgb, "sRGB（颜色贴图）");
+                ui.checkbox(&mut import.texture_nearest, "最近邻过滤（像素风）");
+            }
+            AssetKind::Audio => {
+                ui.checkbox(&mut import.audio_streaming, "流式播放（长音频）");
+            }
+            _ => {
+                ui.label(theme::dim_note("该类型没有可调导入参数"));
+            }
+        });
+        if import != before {
+            state.set_asset_import(&relative, import);
+        }
+    }
+
+    if kind.is_draggable_into_scene() && kind != AssetKind::Material {
+        ui.add_space(4.0);
+        let label = match kind {
+            AssetKind::Prefab => "实例化到场景",
+            _ => "放入场景",
         };
         if ui
             .add_enabled(
@@ -445,6 +532,274 @@ fn details(state: &mut EditorState, ui: &mut egui::Ui, actions: &mut Vec<Action>
         {
             actions.push(Action::Place(relative));
         }
+    }
+}
+
+/// 浮动材质编辑器。
+///
+/// 资源浏览器底部只有 ~150px，塞不下四个字段 + Apply/Revert/Assign；这里把
+/// 内容放进可拖动、可滚动的窗口。窗口跟着资产走（同一时间只开一个），
+/// 面板里的按钮负责打开，关闭走标题栏的 ×。
+fn material_editor_window(state: &mut EditorState, ctx: &egui::Context) {
+    let Some(relative) = state.material_editor_open.clone() else {
+        return;
+    };
+    if AssetKind::from_path(&relative) != Some(AssetKind::Material) {
+        state.material_editor_open = None;
+        return;
+    }
+
+    let file_name = relative.rsplit('/').next().unwrap_or(&relative);
+    let mut open = true;
+    egui::Window::new(format!("材质 · {file_name}"))
+        .id(egui::Id::new(("material_editor", relative.as_str())))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(360.0)
+        // 首帧 `Resize` 用 default_size，内容尺寸到下一帧才参与自动扩张；
+        // 首次打开 / 截图会裁掉底部按钮。240 略大于内容，230 做下限兜底，
+        // 之后仍可拖动调整。
+        .default_height(240.0)
+        .min_height(230.0)
+        .default_pos(ctx.screen_rect().center() - egui::vec2(180.0, 130.0))
+        .show(ctx, |ui| {
+            // 不再套 `ScrollArea`：内容只有 ~210px，而 ScrollArea 的期望
+            // 高度会在 720px 高的窗口里与 Window 的自动尺寸打架 —— 实测
+            // 最后一行「未保存」被窗口底边裁掉。
+            material_editor(state, ui, &relative);
+        });
+    if !open {
+        state.material_editor_open = None;
+    }
+}
+
+/// 材质窗口的「标签 + 控件」行。
+///
+/// 不复用 [`theme::field_row`]：它的标签列固定 58px，"Roughness" 会被截成
+/// "Roughn…"。浮窗比 Inspector 宽裕，给 72px 让三个 PBR 术语完整显示。
+fn material_field_row<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    const LABEL: f32 = 72.0;
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(LABEL, theme::FIELD_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(LABEL);
+                ui.add(egui::Label::new(
+                    egui::RichText::new(label).color(theme::colors::TEXT_SECONDARY),
+                ));
+            },
+        );
+        add(ui)
+    })
+    .inner
+}
+
+/// 材质资产的编辑器内容（由 [`material_editor_window`] 的浮动窗口承载）。
+///
+/// 控件只改草稿；Apply 才写盘。播放态整体禁用 —— 与"运行时副本不算改动"
+/// 的全局约定一致。
+fn material_editor(state: &mut EditorState, ui: &mut egui::Ui, relative: &str) {
+    ui.add_space(4.0);
+    ui.separator();
+    if let Some(message) = state.material_draft_error(relative) {
+        ui.label(
+            egui::RichText::new(format!("材质读取失败: {message}"))
+                .size(11.0)
+                .color(theme::colors::WARN),
+        );
+        return;
+    }
+
+    // 贴图候选先拷出来：下面要可变借用 `state.material_draft`。
+    let textures: Vec<String> = state
+        .asset_browser
+        .iter()
+        .filter(|(_, kind)| *kind == AssetKind::Texture)
+        .map(|(path, _)| path.clone())
+        .collect();
+    let selected_entity = state.selected_entity;
+    let editing = state.is_editing();
+
+    let mut apply = false;
+    let mut revert = false;
+    let mut assign = false;
+    ui.add_enabled_ui(editing, |ui| {
+        let Some(draft) = state.material_draft_mut(relative) else {
+            return;
+        };
+
+        material_field_row(ui, "Tint", |ui| {
+            // 先写到临时变量，只有真正发生交互才回写草稿：
+            // `color_edit_button_rgba_unmultiplied` 会先把 f32 转成 `Color32`
+            // 再写回数组，即使没人点也会把 0.38 量化成 0.38039216 —— 于是
+            // 打开 Wood.mat 就显示「未保存」，Apply 还会悄悄改磁盘值。
+            let mut color = draft.asset.base_color;
+            let resp = ui.color_edit_button_rgba_unmultiplied(&mut color);
+            if resp.changed() {
+                draft.asset.base_color = color;
+            }
+            resp.on_hover_text("线性 RGBA，与模型自带基础色相乘");
+        });
+        material_field_row(ui, "Metallic", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut draft.asset.metallic)
+                    .speed(0.01)
+                    .range(0.0..=1.0)
+                    .fixed_decimals(2),
+            )
+            .on_hover_text("0 = 绝缘体，1 = 金属（替换模型值）");
+        });
+        material_field_row(ui, "Roughness", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut draft.asset.roughness)
+                    .speed(0.01)
+                    .range(0.0..=1.0)
+                    .fixed_decimals(2),
+            )
+            .on_hover_text("0 = 镜面，1 = 完全漫反射（替换模型值）");
+        });
+
+        material_field_row(ui, "Albedo", |ui| {
+            let name = if draft.asset.albedo.is_empty() {
+                "None（纯色）".to_string()
+            } else {
+                draft
+                    .asset
+                    .albedo
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&draft.asset.albedo)
+                    .to_string()
+            };
+            egui::ComboBox::from_id_salt("material_albedo")
+                .selected_text(name)
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(draft.asset.albedo.is_empty(), "None（纯色）")
+                        .clicked()
+                    {
+                        draft.asset.albedo.clear();
+                    }
+                    for path in &textures {
+                        if ui
+                            .selectable_label(&draft.asset.albedo == path, path)
+                            .clicked()
+                        {
+                            draft.asset.albedo = path.clone();
+                        }
+                    }
+                });
+        });
+        if !draft.asset.albedo.is_empty() {
+            theme::note(ui, &draft.asset.albedo);
+        }
+        theme::note(ui, "资产替换 Metallic / Roughness，Tint 与模型基础色相乘。");
+        theme::note(ui, "逐实体 Override 在资产之上继续生效。");
+
+        // 8px：note 的字形下沿会压到下一行按钮上（11px 字号的行高很小），
+        // 4px 在 2× 截图里已经贴住了。
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let dirty = draft.dirty();
+            apply = ui
+                .add_enabled(dirty, egui::Button::new("Apply"))
+                .on_hover_text("写回 .mat 并让视口下一帧重新加载")
+                .clicked();
+            revert = ui
+                .add_enabled(dirty, egui::Button::new("Revert"))
+                .on_hover_text("丢弃未保存改动")
+                .clicked();
+            assign = ui
+                .add_enabled(
+                    selected_entity.is_some(),
+                    egui::Button::new("Assign"),
+                )
+                .on_hover_text("指派给当前选中的实体（替换它原来的材质资产）")
+                .clicked();
+        });
+        if draft.dirty() {
+            ui.label(
+                egui::RichText::new("● 未保存")
+                    .size(10.5)
+                    .color(theme::colors::WARN),
+            );
+        }
+    });
+
+    if revert {
+        if let Some(draft) = state.material_draft.as_mut() {
+            draft.revert();
+        }
+    }
+    if apply {
+        state.save_material_draft();
+    }
+    if assign {
+        if let Some(index) = selected_entity {
+            state.assign_material(index, relative);
+        }
+    }
+}
+
+/// 「新建材质」命名弹窗（与 Create Prefab 同一套交互）。
+fn create_material_dialog(state: &mut EditorState, ctx: &egui::Context) {
+    if !state.material_create_dialog {
+        return;
+    }
+    // 预览在窗口闭包外算：闭包里同时可变借用名字、不可变借用 project 会打架。
+    let preview = state.project.material_path_for(state.material_create_name.trim());
+    let mut confirm = false;
+    let mut cancel = false;
+
+    egui::Window::new("Create Material")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label("新建一份共享材质资产（.mat）。");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Name:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.material_create_name)
+                        .desired_width(220.0),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    confirm = true;
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!("→ {preview}（重名自动加后缀）"))
+                    .monospace()
+                    .weak()
+                    .size(11.0),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Create").clicked() {
+                    confirm = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if cancel {
+        state.material_create_dialog = false;
+    }
+    if confirm {
+        state.material_create_dialog = false;
+        let name = state.material_create_name.clone();
+        state.create_material(&name);
     }
 }
 
@@ -459,6 +814,7 @@ fn kind_icon(kind: AssetKind) -> icons::Icon {
         AssetKind::Audio => icons::Icon::Wave,
         AssetKind::Script => icons::Icon::Script,
         AssetKind::Prefab => icons::Icon::Diamond,
+        AssetKind::Material => icons::Icon::Material,
         AssetKind::Shader => icons::Icon::Component,
         AssetKind::Scene | AssetKind::Other => icons::Icon::Folder,
     }
@@ -472,6 +828,7 @@ fn kind_color(kind: AssetKind) -> egui::Color32 {
         AssetKind::Audio => theme::colors::BADGE_SCRIPT,
         AssetKind::Script => theme::colors::BADGE_SCRIPT,
         AssetKind::Prefab => theme::colors::BADGE_PREFAB,
+        AssetKind::Material => theme::colors::BADGE_PREFAB,
         AssetKind::Shader => theme::colors::TEXT_ACCENT,
         AssetKind::Scene | AssetKind::Other => theme::colors::TEXT_DIM,
     }

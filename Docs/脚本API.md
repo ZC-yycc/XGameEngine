@@ -329,7 +329,35 @@ end
 > 环境音 / 机关音更推荐挂 `AudioSource` 组件（Inspector 的 Audio 区块可视化配置），
 > `play_sound` 系列适合"事件驱动"的一次性音效。
 
-### 4.12 游戏 UI
+### 4.12 材质
+
+材质分两层，互相正交：
+
+- **共享资产**（`.mat`）：颜色 / 金属度 / 粗糙度 / albedo，跨实体复用；
+- **实体覆盖**（`Entity.material`）：只对这个实例逐字段打补丁，在资产结果之上生效。
+
+| 函数 | 说明 |
+|---|---|
+| `material_asset(ctx, id)` | 读实体引用的材质资产路径（没有 → 空串） |
+| `set_material_asset(ctx, id, path)` | 指向一份 `.mat`（项目相对路径）；传 `""` 恢复模型自带材质 |
+| `set_material(ctx, id, r, g, b, a, metallic, roughness)` | **一次性**写内联覆盖（颜色是线性 RGBA；金属度 / 粗糙度自动钳到 0..1） |
+| `clear_material(ctx, id)` | 清掉内联覆盖（不影响共享资产） |
+
+```lua
+function start(ctx)
+    local me = self_id(ctx)
+    -- 复用项目里的材质资产（路径带 GUID 也行；建议写项目相对路径）
+    set_material_asset(ctx, me, "Resources/Materials/Wood.mat")
+    -- 只给这个实例压一点红 + 更粗糙
+    set_material(ctx, me, 0.9, 0.35, 0.25, 1.0, 0.0, 0.8)
+end
+```
+
+> 资产不存在不会报错：渲染侧退回模型材质，`--check` 会把悬空引用点名。
+> 共享资产负责"这是什么材质"，覆盖负责"这个实例怎么微调"；调
+> `set_material` 不会清掉 `set_material_asset` 设过的资产。
+
+### 4.13 游戏 UI
 
 UI 元素也是实体（`Entity::ui`），id 与其它实体通用。颜色参数是 **sRGB 0..1**
 （引擎内部转线性）；坐标是**视口物理像素**，锚点是父矩形的归一化坐标（0..1）。

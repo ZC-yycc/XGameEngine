@@ -19,6 +19,7 @@
 //! diff 里会冒出意料之外的文件。所以这里只读索引、只报告；生成 `.meta`
 //! 是编辑器打开项目与保存场景时的动作（[`ProjectHandle::ensure_asset_metas`]）。
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -36,10 +37,18 @@ pub struct CheckReport {
     pub script_refs: usize,
     /// 实体上挂的音频引用总数。
     pub audio_refs: usize,
+    /// 实体上引用的材质资产总数。
+    pub material_refs: usize,
     /// 已登记的资产数（有 `.meta` 的）。
     pub assets: usize,
     /// 引用了但盘上不存在的模型（"名字 → 路径"）。
     pub missing_models: Vec<String>,
+    /// 引用了但盘上不存在的材质（"实体 → 路径"）。
+    pub missing_materials: Vec<String>,
+    /// 材质里引用了但盘上不存在的贴图（"材质 → 贴图路径"）。
+    pub missing_material_textures: Vec<String>,
+    /// 解析失败 / 读不出来的材质文件（"路径 (原因)"）。
+    pub invalid_materials: Vec<String>,
     /// 引用了但盘上不存在的脚本（"名字 → 路径"）。
     pub missing_scripts: Vec<String>,
     /// 引用了但盘上不存在的音频（"名字 → 路径"）。
@@ -67,6 +76,9 @@ impl CheckReport {
     /// 有没有问题（缺引用算问题；只缺资产不阻断加载，但 CI 应当知道）。
     pub fn has_issues(&self) -> bool {
         !self.missing_models.is_empty()
+            || !self.missing_materials.is_empty()
+            || !self.missing_material_textures.is_empty()
+            || !self.invalid_materials.is_empty()
             || !self.missing_scripts.is_empty()
             || !self.missing_audio.is_empty()
             || !self.missing_ui_images.is_empty()
@@ -81,6 +93,9 @@ impl CheckReport {
     /// 问题总数。
     pub fn issue_count(&self) -> usize {
         self.missing_models.len()
+            + self.missing_materials.len()
+            + self.missing_material_textures.len()
+            + self.invalid_materials.len()
             + self.missing_scripts.len()
             + self.missing_audio.len()
             + self.missing_ui_images.len()
@@ -97,8 +112,13 @@ impl CheckReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "check: entities={} lights={} script_refs={} audio_refs={} assets={}",
-            self.entities, self.lights, self.script_refs, self.audio_refs, self.assets
+            "check: entities={} lights={} script_refs={} audio_refs={} material_refs={} assets={}",
+            self.entities,
+            self.lights,
+            self.script_refs,
+            self.audio_refs,
+            self.material_refs,
+            self.assets
         );
         if !self.has_issues() {
             let _ = writeln!(out, "check: OK (all referenced assets exist)");
@@ -107,6 +127,15 @@ impl CheckReport {
         let _ = writeln!(out, "check: WARN {} issue(s)", self.issue_count());
         for m in &self.missing_models {
             let _ = writeln!(out, "  missing model:  {m}");
+        }
+        for m in &self.missing_materials {
+            let _ = writeln!(out, "  missing material: {m}");
+        }
+        for m in &self.missing_material_textures {
+            let _ = writeln!(out, "  material texture: {m}");
+        }
+        for m in &self.invalid_materials {
+            let _ = writeln!(out, "  invalid material: {m}");
         }
         for s in &self.missing_scripts {
             let _ = writeln!(out, "  missing script: {s}");
@@ -177,6 +206,8 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     }
 
     // -- 场景引用 ---------------------------------------------------------
+    // 材质按路径去重：同一个材质挂在一百个实体上时，坏文件只该报一次。
+    let mut materials: BTreeMap<String, String> = BTreeMap::new();
     for entity in &scene.entities {
         // `builtin://cube` 这类是**生成的几何**（渲染器直接造，盘上没有文件），
         // 当成缺失资产报出来就是狼来了 —— 调用方只要真的断了引用才该知道。
@@ -192,6 +223,20 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
                 report
                     .missing_models
                     .push(format!("{} -> {}", entity.name, entity.model));
+            }
+        }
+        if let Some(material) = &entity.material_asset {
+            if !material.is_empty() {
+                report.material_refs += 1;
+                materials
+                    .entry(material.clone())
+                    .or_insert_with(|| entity.name.clone());
+                if is_guid_reference(material) {
+                    // 加载期解码失败的悬空 GUID 会原样留在内存里。
+                    report
+                        .dangling_guids
+                        .push(format!("{} -> {}", entity.name, material));
+                }
             }
         }
         for script in &entity.scripts {
@@ -246,6 +291,37 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
                     report
                         .missing_prefabs
                         .push(format!("{} -> {}", entity.name, link.source));
+                }
+            }
+        }
+    }
+
+    // -- 材质内容（引用的材质能不能读、里面的贴图在不在）------------------
+    for (material, entity) in materials {
+        if is_guid_reference(&material) {
+            continue; // 上面已按悬空 GUID 报过，不再重复
+        }
+        if !project.path(&material).is_file() {
+            report
+                .missing_materials
+                .push(format!("{entity} -> {material}"));
+            continue;
+        }
+        match project.load_material(&material) {
+            Err(e) => report.invalid_materials.push(format!("{material} ({e})")),
+            Ok(asset) => {
+                if asset.albedo.is_empty() {
+                    continue;
+                }
+                if is_guid_reference(&asset.albedo) {
+                    report.dangling_guids.push(format!(
+                        "{entity} -> {material} albedo -> {}",
+                        asset.albedo
+                    ));
+                } else if !project.path(&asset.albedo).is_file() {
+                    report
+                        .missing_material_textures
+                        .push(format!("{material} -> {}", asset.albedo));
                 }
             }
         }
@@ -313,6 +389,65 @@ mod tests {
         assert!(text.contains("missing model"), "{text}");
         assert!(text.contains("missing script"), "{text}");
         assert!(text.contains("missing audio"), "{text}");
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 材质引用：缺文件 / 坏文件 / 缺贴图都要点名，且同一材质只报一次。
+    #[test]
+    fn material_references_are_checked() {
+        let project = temp_project("materials");
+        std::fs::create_dir_all(project.path("Resources/Textures")).unwrap();
+        std::fs::create_dir_all(project.path("Resources/Materials")).unwrap();
+        std::fs::write(project.path("Resources/Textures/OK.png"), b"png").unwrap();
+        std::fs::write(
+            project.path("Resources/Materials/Good.mat"),
+            "()",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path("Resources/Materials/NoTex.mat"),
+            "(albedo: \"Resources/Textures/Gone.png\")",
+        )
+        .unwrap();
+        std::fs::write(project.path("Resources/Materials/Bad.mat"), "not ron ((").unwrap();
+
+        let mut scene = project.load_entry_scene().unwrap();
+        scene
+            .entities
+            .push(crate::Entity::new("Good").with_material_asset("Resources/Materials/Good.mat"));
+        // 同一份坏材质挂两次：只该报一行。
+        scene.entities.push(
+            crate::Entity::new("NoTexA").with_material_asset("Resources/Materials/NoTex.mat"),
+        );
+        scene.entities.push(
+            crate::Entity::new("NoTexB").with_material_asset("Resources/Materials/NoTex.mat"),
+        );
+        scene
+            .entities
+            .push(crate::Entity::new("Bad").with_material_asset("Resources/Materials/Bad.mat"));
+        scene.entities.push(
+            crate::Entity::new("Missing").with_material_asset("Resources/Materials/Gone.mat"),
+        );
+        let entry = project.manifest().entry_scene.clone();
+        project.write_scene(&entry, &scene).unwrap();
+
+        let report = check_project(project.root()).unwrap();
+        assert_eq!(report.material_refs, 5, "{}", report.render());
+        assert_eq!(report.missing_materials.len(), 1, "{}", report.render());
+        assert!(report.missing_materials[0].contains("Gone.mat"));
+        assert_eq!(report.invalid_materials.len(), 1, "{}", report.render());
+        assert!(report.invalid_materials[0].contains("Bad.mat"));
+        assert_eq!(
+            report.missing_material_textures.len(),
+            1,
+            "同一材质挂两次只能报一次: {}",
+            report.render()
+        );
+        assert!(report.missing_material_textures[0].contains("NoTex.mat"));
+        assert!(report.has_issues());
+        assert!(report.render().contains("missing material"));
+        assert!(report.render().contains("invalid material"));
 
         let _ = std::fs::remove_dir_all(project.root());
     }

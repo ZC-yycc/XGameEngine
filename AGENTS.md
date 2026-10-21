@@ -16,7 +16,7 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；491 条 + 6 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；599 条 + 7 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
@@ -100,9 +100,10 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 音频 | 脚本层不引 kira；监听者/主音量不进命令束；`follow` 是实体绑定；每渲染帧同步 | §五 |
 | 无头 / MCP | 不做第二份帧循环；退出码 2 不是工具失败；JSON 字段名是契约 | §六 |
 | PBR / 材质 | `intensity × π` 亮度标定；材质逐 draw；截图顺光；`MIN_ROUGHNESS = 0.04` | §七 |
+| 材质资产（`.mat`） | 资产是完整材质（替换 PBR，albedo 空 = 纯白）；优先级 模型 → 资产 → 覆盖；批次键必须带材质 | §十七 |
 | HDR / Bloom | 亮度基线不动；Bloom 阈值在曝光后；光晕在曲线前；默认关且整段跳过 | §八 |
 | 天空 / IBL | 默认关；资源固定分配按 key 重建；太阳 = 第一盏方向光；IBL 与 ambient 相加 | §九 |
-| 实例化 | 分组键 = 图元地址；顺序 = 首次遇到；半透明不合批；材质组收集阶段预热 | §十 |
+| 实例化 | 分组键 = 「图元 + 材质 key」；顺序 = 首次遇到；半透明不合批；材质组收集阶段预热 | §十 |
 | 剔除 | 保守性硬合同（开/关逐位一致）；相机外投影物保留；蒙皮 50% 余量 | §十一 |
 | FXAA | 默认关；显示空间 luma；`textureSampleLevel(..., 0.0)`；平坦区回原值 | §十二 |
 | 资产管线 | 磁盘 GUID / 内存路径；GUID 永不变；`--check` 只读；迁移只替换字面量（不吃注释） | §十四 |

@@ -242,8 +242,13 @@ impl EditorApp {
 
         // `--ui-asset <路径>`：截图前在资源浏览器里选中一个资产。
         // 详情区（路径 / GUID / 导入设置）只在有选中时出现，不设它就永远截不到。
+        // 材质额外把浮动编辑器打开 —— 截图要检查的正是四个字段与三个按钮。
         if let Some(asset) = app.ui_shot.as_ref().and_then(|s| s.asset.clone()) {
             if let Some(session) = app.session.as_mut() {
+                if xgame_core::AssetKind::from_path(&asset) == Some(xgame_core::AssetKind::Material)
+                {
+                    session.state.material_editor_open = Some(asset.clone());
+                }
                 session.state.asset_selected = Some(asset);
             }
         }
@@ -292,6 +297,10 @@ impl EditorApp {
                 project_root,
                 sample_count,
             ));
+            // 渲染共享材质资产要项目句柄（`.mat` / 贴图 / 导入设置）。
+            if let Some(renderer) = state.scene_renderer.as_mut() {
+                renderer.set_project(Some(state.project.clone()));
+            }
         }
 
         self.session = Some(EditorSession {
@@ -830,6 +839,7 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
 
     // ── 7. 应用级弹窗 ──
     // 画在最后：确认框 / 另存为要盖在设置窗口之上（同层后画的在上）。
+    panels::assets::show_overlays(&mut session.state, ctx);
     panels::settings::show(&mut session.state, ctx);
     dialogs::show_save_as_dialog(&mut session.state, ctx);
     if let Some(target) =

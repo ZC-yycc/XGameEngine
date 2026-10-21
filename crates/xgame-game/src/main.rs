@@ -183,7 +183,10 @@ impl GameApp {
 
         let (width, height) = (config.width.max(1), config.height.max(1));
         let hdr = HdrTargets::new(&device, "game", width, height, sample_count);
-        let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        let mut pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        // 共享材质资产（`.mat`）需要项目句柄才能把项目相对路径解析成绝对路径。
+        // 独立游戏只在启动时绑定一次；资产热重载是编辑器的能力。
+        pipeline.set_project(Some(project.clone()));
         // 显示目标 = 交换链格式：非 sRGB 的交换链由着色器手动编码（见 postfx）。
         let postfx = PostFx::new(&device, config.format);
         let ui = UiRenderer::new(&device, config.format);

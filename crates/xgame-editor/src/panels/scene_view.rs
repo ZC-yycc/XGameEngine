@@ -770,7 +770,27 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 面板可能被拖成非活动页签而不绘制，清理放在这里会漏。
     if ui.input(|i| i.pointer.any_released()) {
         if let Some(drop) = asset_drop {
-            state.spawn_asset_at(&drop.path, drop.point);
+            if xgame_core::AssetKind::from_path(&drop.path)
+                == Some(xgame_core::AssetKind::Material)
+            {
+                // 材质不是"生成实体"的资产：它要贴到已有实体上。优先用鼠标
+                // 下面的实体，其次退回当前选中 —— 拖到空白处时仍有一个明确目标。
+                let target = pick_entity(
+                    state,
+                    drop.cursor,
+                    &view_proj,
+                    viewport.rect.min.to_vec2(),
+                )
+                .or(state.selected_entity);
+                match target {
+                    Some(index) => {
+                        state.assign_material(index, &drop.path);
+                    }
+                    None => state.log_warning("把材质拖到实体上，或先选中一个实体"),
+                }
+            } else {
+                state.spawn_asset_at(&drop.path, drop.point);
+            }
         }
     }
 }
@@ -856,10 +876,18 @@ fn draw_asset_drop_hint(
         stroke,
     );
     painter.circle_stroke(screen, 5.0_f32, stroke);
+    let name = asset_display_name(&drop.path);
+    let label = if xgame_core::AssetKind::from_path(&drop.path)
+        == Some(xgame_core::AssetKind::Material)
+    {
+        format!("指派材质 {name}")
+    } else {
+        name
+    };
     painter.text(
         drop.cursor + egui::vec2(14.0, 10.0),
         Align2::LEFT_TOP,
-        asset_display_name(&drop.path),
+        label,
         FontId::proportional(12.0),
         theme::colors::TEXT_BRIGHT,
     );

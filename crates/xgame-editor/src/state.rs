@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use xgame_math::glam::{Quat, Vec3};
 use xgame_core::prefab::{prefab_display_name, Prefab, PrefabInstanceRef};
 use xgame_core::project::ProjectHandle;
-use xgame_core::{AssetKind, Entity, EntityId, FieldDesc, ImportSettings, Inspect, Scene, Transform};
+use xgame_core::{
+    AssetKind, Entity, EntityId, FieldDesc, ImportSettings, Inspect, MaterialAsset, Scene, Transform,
+};
 use xgame_physics::DebugLine;
 use strum::Display;
 
@@ -27,6 +29,25 @@ fn asset_stem(relative: &str) -> String {
     } else {
         stem.to_string()
     }
+}
+
+/// 给新材质找一个不撞车的路径（`Wood.mat` → `Wood 2.mat` → …）。
+///
+/// 只查磁盘存在性，不依赖资产库索引：刚打开项目 / 索引还没刷新时也要正确。
+fn unique_material_path(project: &ProjectHandle, base: &str) -> String {
+    if !project.path(base).exists() {
+        return base.to_string();
+    }
+    let stem = base
+        .strip_suffix(&format!(".{}", xgame_core::MATERIAL_EXTENSION))
+        .unwrap_or(base);
+    for n in 2..10_000 {
+        let candidate = format!("{stem} {n}.{}", xgame_core::MATERIAL_EXTENSION);
+        if !project.path(&candidate).exists() {
+            return candidate;
+        }
+    }
+    base.to_string()
 }
 
 /// 场景视图中当前激活的变换工具。
@@ -347,6 +368,51 @@ impl Default for UndoStack {
 // Editor state
 // ---------------------------------------------------------------------------
 
+/// 材质编辑器里正在编辑的一份材质资产。
+///
+/// # 为什么需要草稿而不是直接改文件
+///
+/// 材质有 4 个字段 + 一个贴图引用，每拖一下数值框就写盘的话：
+/// 1. 撤销 / 重做没有粒度（拖一次产生几十个中间状态）；
+/// 2. 渲染侧要每帧失效重载（磁盘 + GPU 纹理）；
+/// 3. 用户拖到一半反悔没有"取消"。
+///
+/// 所以控件只改草稿，显式点 Apply 才落盘；[`baseline`](Self::baseline) 保留
+/// 打开时 / 上次保存后的内容，用来显示"未保存"并支持 Revert。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterialDraft {
+    /// 目标文件（项目相对路径）。
+    pub relative: String,
+    /// 正在编辑的内容。
+    pub asset: MaterialAsset,
+    /// 上次加载 / 保存时的内容（脏检查与 Revert 的基准）。
+    baseline: MaterialAsset,
+}
+
+impl MaterialDraft {
+    fn new(relative: String, asset: MaterialAsset) -> Self {
+        Self {
+            relative,
+            baseline: asset.clone(),
+            asset,
+        }
+    }
+
+    /// 是否有未保存的改动。
+    pub fn dirty(&self) -> bool {
+        self.asset != self.baseline
+    }
+
+    /// 丢弃未保存改动，回到上次加载 / 保存的内容。
+    pub fn revert(&mut self) {
+        self.asset = self.baseline.clone();
+    }
+
+    fn mark_saved(&mut self) {
+        self.baseline = self.asset.clone();
+    }
+}
+
 /// 所有面板共享的顶层编辑器状态。
 pub struct EditorState {
     // -- Project --
@@ -563,6 +629,22 @@ pub struct EditorState {
     /// 一条 `Option<String>` 比跨控件传 payload 更直白，也更好测。
     pub asset_drag: Option<String>,
 
+    // -- Materials --
+    /// 当前在资源面板里编辑的材质草稿（`None` = 没选中材质）。
+    pub material_draft: Option<MaterialDraft>,
+    /// 材质草稿加载失败的 `(路径, 原因)` —— 负缓存，避免每帧重复读坏文件 + 刷日志。
+    pub material_draft_error: Option<(String, String)>,
+    /// 「新建材质」命名对话框是否显示。
+    pub material_create_dialog: bool,
+    /// 对话框里的材质名。
+    pub material_create_name: String,
+    /// 当前打开的浮动材质编辑器（项目相对路径，`None` = 窗口关闭）。
+    ///
+    /// 材质编辑器不内嵌在 Assets 面板里：底部资源面板在 1280×800 下只有
+    /// ~150px 高，四个字段 + 三个按钮必然被裁掉。改成浮动窗口后，面板里只留
+    /// 路径 / GUID / 「编辑材质… / 指派」两行，窗口按内容自动定高。
+    pub material_editor_open: Option<String>,
+
     // -- Undo / redo --
     /// 快照式撤销栈（场景级）。
     undo_stack: UndoStack,
@@ -661,6 +743,12 @@ impl EditorState {
             asset_selected: None,
             asset_drag: None,
 
+            material_draft: None,
+            material_draft_error: None,
+            material_create_dialog: false,
+            material_create_name: String::new(),
+            material_editor_open: None,
+
             undo_stack: UndoStack::new(),
             undo_pending: None,
 
@@ -721,13 +809,159 @@ impl EditorState {
                 // 导入参数变了，渲染侧的模型缩放会在下一次加载时生效；
                 // 索引也要跟着刷新（`record.import` 是缓存）。
                 self.asset_browser = self.project.list_assets();
+                // `model_scale` / sRGB / 最近邻都烘焙在已加载的网格与 GPU 纹理里：
+                // 不丢缓存的话"改了导入参数但视口纹丝不动"。
+                if let Some(renderer) = self.scene_renderer.as_mut() {
+                    renderer.invalidate_assets();
+                }
             }
             Err(e) => self.log_error(format!("保存导入设置失败: {e}")),
         }
     }
 
-    /// 把资产放进场景（模型 = 新建实体；预制体 = 实例化），返回新实体索引。
+    // -----------------------------------------------------------------------
+    // 材质资产
+    // -----------------------------------------------------------------------
+
+    /// 项目里所有材质（项目相对路径，按字典序）。
     ///
+    /// 从已缓存的资产清单过滤，不扫盘 —— Inspector 的下拉框每帧都可能重建。
+    pub fn material_list(&self) -> Vec<String> {
+        self.asset_browser
+            .iter()
+            .filter(|(_, kind)| *kind == AssetKind::Material)
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
+    /// 取得（必要时加载）某个材质的编辑草稿。
+    ///
+    /// 坏文件只读一次：失败原因存进 [`material_draft_error`](Self::material_draft_error)，
+    /// 同一路径再次请求直接返回 `None`，不会每帧刷日志。修好文件后点 ⟳ 或重新选中
+    /// 另一个资产再回来即可重试。
+    pub fn material_draft_mut(&mut self, relative: &str) -> Option<&mut MaterialDraft> {
+        if let Some((failed, _)) = &self.material_draft_error {
+            if failed == relative {
+                return None;
+            }
+        }
+        let current = self
+            .material_draft
+            .as_ref()
+            .is_some_and(|d| d.relative == relative);
+        if !current {
+            match self.project.load_material(relative) {
+                Ok(asset) => {
+                    self.material_draft = Some(MaterialDraft::new(relative.to_string(), asset));
+                    self.material_draft_error = None;
+                }
+                Err(e) => {
+                    self.material_draft = None;
+                    self.material_draft_error = Some((relative.to_string(), e.clone()));
+                    self.log_error(format!("材质 '{relative}' 加载失败: {e}"));
+                    return None;
+                }
+            }
+        }
+        self.material_draft.as_mut()
+    }
+
+    /// 材质草稿当前的加载错误（资源面板显示用）。
+    pub fn material_draft_error(&self, relative: &str) -> Option<&str> {
+        self.material_draft_error
+            .as_ref()
+            .filter(|(path, _)| path == relative)
+            .map(|(_, message)| message.as_str())
+    }
+
+    /// 把草稿写回 `.mat`，并让渲染侧下一帧重新加载。
+    ///
+    /// 成功时刷新资产清单（新文件的 `.meta` 在这一步补上）并把草稿基准推进
+    /// 到刚保存的内容。播放态硬拒绝：场景里跑的是运行时副本，改资产不该在
+    /// 这一帧偷偷影响正在跑的游戏。
+    pub fn save_material_draft(&mut self) {
+        if !self.is_editing() {
+            self.log_warning("Cannot edit materials while playing");
+            return;
+        }
+        let Some(draft) = self.material_draft.as_ref() else {
+            return;
+        };
+        let relative = draft.relative.clone();
+        let asset = draft.asset.clone();
+        match self.project.write_material(&relative, &asset) {
+            Ok(()) => {
+                self.refresh_assets();
+                if let Some(draft) = self.material_draft.as_mut() {
+                    draft.mark_saved();
+                }
+                self.asset_selected = Some(relative.clone());
+                self.material_draft_error = None;
+                if let Some(renderer) = self.scene_renderer.as_mut() {
+                    renderer.invalidate_materials();
+                }
+                self.log_success(format!("Saved material '{relative}'"));
+            }
+            Err(e) => self.log_error(format!("保存材质 '{relative}' 失败: {e}")),
+        }
+    }
+
+    /// 新建一份材质（默认参数 + 白底），返回项目相对路径。
+    ///
+    /// 重名自动加 ` 2` / ` 3` 后缀，不覆盖已有文件 —— 资产文件覆盖是
+    /// 不可撤销的破坏性操作，不该由一次"新建"顺手完成。
+    pub fn create_material(&mut self, name: &str) -> Option<String> {
+        if !self.is_editing() {
+            self.log_warning("Cannot create materials while playing");
+            return None;
+        }
+        let relative = unique_material_path(&self.project, &self.project.material_path_for(name));
+        let asset = MaterialAsset::default();
+        if let Err(e) = self.project.write_material(&relative, &asset) {
+            self.log_error(format!("创建材质 '{relative}' 失败: {e}"));
+            return None;
+        }
+        self.refresh_assets();
+        self.asset_selected = Some(relative.clone());
+        self.material_draft = Some(MaterialDraft::new(relative.clone(), asset));
+        self.material_draft_error = None;
+        if let Some(renderer) = self.scene_renderer.as_mut() {
+            renderer.invalidate_materials();
+        }
+        self.log_success(format!("Created material '{relative}'"));
+        Some(relative)
+    }
+
+    /// 把一份材质资产指派给实体（拖放 / 双击 / 资源面板按钮共用）。
+    ///
+    /// 只改 `entity.material_asset`，不动逐实体覆盖 —— 两层正交，用户可以
+    /// "资产定基调 + 覆盖微调这个实例"。
+    pub fn assign_material(&mut self, entity_index: usize, relative: &str) -> bool {
+        if !self.is_editing() {
+            self.log_warning("Cannot assign materials while playing");
+            return false;
+        }
+        if AssetKind::from_path(relative) != Some(AssetKind::Material) {
+            self.log_warning(format!("'{relative}' 不是材质资产"));
+            return false;
+        }
+        if entity_index >= self.scene.entities.len() {
+            return false;
+        }
+        self.push_undo();
+        self.scene.entities[entity_index].material_asset = Some(relative.to_string());
+        self.selected_entity = Some(entity_index);
+        self.log_success(format!(
+            "Assigned material '{relative}' to '{}'",
+            self.scene.entities[entity_index].name
+        ));
+        true
+    }
+
+    /// 把资产放进场景，返回新实体索引。
+    ///
+    /// 模型 = 新建实体；预制体 = 实例化；材质 = 指派给当前选中实体（没有选中
+    /// 时给一句提示 —— 材质是"贴在物体上"的，没有目标就没有意义）。
     /// `position` 是**世界坐标**（视口里拖放时的落点由调用方算好；双击则是
     /// 相机前方）。整次放置只压一次撤销栈。
     pub fn spawn_asset_at(&mut self, relative: &str, position: Vec3) -> Option<usize> {
@@ -737,6 +971,14 @@ impl EditorState {
         }
         let kind = AssetKind::from_path(relative)?;
         match kind {
+            AssetKind::Material => {
+                let Some(index) = self.selected_entity else {
+                    self.log_warning("先选中一个实体，再把材质拖到它身上");
+                    return None;
+                };
+                self.assign_material(index, relative);
+                Some(index)
+            }
             AssetKind::Model => {
                 self.push_undo();
                 let id = self.next_entity_id;
@@ -2201,6 +2443,101 @@ mod tests {
         let reopened = xgame_core::ProjectHandle::open(&root).expect("重新打开项目");
         assert_eq!(reopened.asset_import("Resources/Box.glb").model_scale, 2.5);
         assert!(reopened.path("Resources/Box.glb.meta").is_file());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 新建材质：落盘 + 补 `.meta` + 选中 + 草稿就绪；重名自动加后缀不覆盖。
+    #[test]
+    fn create_material_writes_unique_asset_and_loads_draft() {
+        let (mut state, base) = temp_state("create_material");
+        let first = state.create_material("Wood").expect("应能创建材质");
+        assert_eq!(first, "Resources/Materials/Wood.mat");
+        assert!(state.project.path(&first).is_file(), "材质文件应落盘");
+        assert!(
+            state.project.path(format!("{first}.meta")).is_file(),
+            "刷新资产时应补上 .meta"
+        );
+        assert_eq!(state.asset_selected.as_deref(), Some(first.as_str()));
+        assert_eq!(
+            state.material_draft.as_ref().map(|d| d.relative.as_str()),
+            Some(first.as_str()),
+            "新建后应直接进入编辑草稿"
+        );
+
+        let second = state.create_material("Wood").expect("重名也应能创建");
+        assert_eq!(second, "Resources/Materials/Wood 2.mat");
+        assert!(
+            state.project.path(&first).is_file(),
+            "新建不得覆盖已有材质"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 材质草稿：Apply 才写盘，Revert 恢复上次保存的内容。
+    #[test]
+    fn material_draft_apply_and_revert_control_disk() {
+        let (mut state, base) = temp_state("material_draft");
+        let relative = state.create_material("Metal").expect("创建材质");
+        {
+            let draft = state.material_draft_mut(&relative).expect("草稿应加载");
+            draft.asset.base_color = [0.1, 0.2, 0.3, 1.0];
+            draft.asset.metallic = 1.0;
+            assert!(draft.dirty(), "改过字段就应标脏");
+        }
+        // 未 Apply 前，磁盘还是默认值。
+        let on_disk = state.project.load_material(&relative).unwrap();
+        assert_eq!(on_disk.base_color, [1.0; 4], "未 Apply 不该偷偷写盘");
+
+        state.save_material_draft();
+        let saved = state.project.load_material(&relative).unwrap();
+        assert_eq!(saved.base_color, [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(saved.metallic, 1.0);
+        assert!(
+            !state.material_draft.as_ref().unwrap().dirty(),
+            "Apply 后应回到干净状态"
+        );
+
+        {
+            let draft = state.material_draft.as_mut().unwrap();
+            draft.asset.roughness = 0.01;
+            draft.revert();
+            assert!(!draft.dirty(), "Revert 应丢弃未保存改动");
+            assert_eq!(draft.asset.roughness, saved.roughness);
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 指派材质是场景改动：写实体字段、选中目标、可撤销；
+    /// 双击材质资产（走 `spawn_asset_at`）在没有选中实体时拒绝。
+    #[test]
+    fn assign_material_targets_entity_and_is_undoable() {
+        let (mut state, base) = temp_state("assign_material");
+        let relative = state.create_material("Wood").expect("创建材质");
+        let idx = state.scene.entities.len();
+        state.scene.add_entity(Entity::new("Crate"));
+        state.selected_entity = None;
+        assert!(state.spawn_asset_at(&relative, Vec3::ZERO).is_none());
+        assert_eq!(
+            state.scene.entities[idx].material_asset, None,
+            "没有目标实体时不能凭空指派"
+        );
+
+        assert!(state.assign_material(idx, &relative));
+        assert_eq!(
+            state.scene.entities[idx].material_asset.as_deref(),
+            Some(relative.as_str())
+        );
+        assert_eq!(state.selected_entity, Some(idx));
+        assert!(state.can_undo());
+
+        state.undo();
+        assert_eq!(
+            state.scene.entities[idx].material_asset, None,
+            "撤销应撤掉这次指派"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

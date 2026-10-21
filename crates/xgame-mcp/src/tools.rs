@@ -160,7 +160,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "project_check",
-            "description": "无头验证项目：清单可解析、入口场景可加载、实体引用的模型/脚本在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（missing_* / dangling_guids / missing_metas 列出问题，has_issues 汇总）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
+            "description": "无头验证项目：清单可解析、入口场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（missing_* / dangling_guids / missing_metas 列出问题，has_issues 汇总）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop },
@@ -515,11 +515,15 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         "lights": report.lights,
         "script_refs": report.script_refs,
         "audio_refs": report.audio_refs,
+        "material_refs": report.material_refs,
         "assets": report.assets,
         "missing_models": report.missing_models,
         "missing_scripts": report.missing_scripts,
         "missing_audio": report.missing_audio,
         "missing_prefabs": report.missing_prefabs,
+        "missing_materials": report.missing_materials,
+        "missing_material_textures": report.missing_material_textures,
+        "invalid_materials": report.invalid_materials,
         "dangling_guids": report.dangling_guids,
         "missing_metas": report.missing_metas,
         "orphan_metas": report.orphan_metas,
@@ -1090,6 +1094,60 @@ mod tests {
         let report: Value = serde_json::from_str(&out).expect("JSON");
         assert_eq!(report["has_issues"], true);
         assert_eq!(report["missing_models"].as_array().unwrap().len(), 1);
+        cleanup(&project);
+    }
+
+    /// `project_check` 的材质契约：缺文件、贴图缺失、坏 RON 三类问题分开报，
+    /// 且 `material_refs` 只数实体上的引用（不是项目里有多少 `.mat`）。
+    #[test]
+    fn project_check_reports_material_issues() {
+        let project = temp_project("materials_check");
+        let mut scene = entry_scene(&project);
+        scene.entities.push(
+            Entity::new("MissingAsset").with_material_asset("Resources/Materials/Missing.mat"),
+        );
+        project
+            .write_material(
+                "Resources/Materials/BrokenTexture.mat",
+                &xgame_core::MaterialAsset {
+                    albedo: "Resources/Textures/nope.png".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("写材质");
+        std::fs::write(
+            project.path("Resources/Materials/Bad.mat"),
+            "this is not ron",
+        )
+        .expect("写坏材质");
+        scene
+            .entities
+            .push(Entity::new("BrokenTexture").with_material_asset("Resources/Materials/BrokenTexture.mat"));
+        scene
+            .entities
+            .push(Entity::new("BadAsset").with_material_asset("Resources/Materials/Bad.mat"));
+        let rel = project.manifest().entry_scene.clone();
+        project.write_scene(&rel, &scene).expect("写入材质引用");
+
+        let out = run(&project, "project_check", json!({})).expect("检查应成功");
+        let report: Value = serde_json::from_str(&out).expect("JSON");
+        assert_eq!(report["material_refs"], 3, "{report}");
+        assert_eq!(
+            report["missing_materials"].as_array().unwrap().len(),
+            1,
+            "{report}"
+        );
+        assert_eq!(
+            report["missing_material_textures"].as_array().unwrap().len(),
+            1,
+            "{report}"
+        );
+        assert_eq!(
+            report["invalid_materials"].as_array().unwrap().len(),
+            1,
+            "{report}"
+        );
+        assert_eq!(report["has_issues"], true);
         cleanup(&project);
     }
 

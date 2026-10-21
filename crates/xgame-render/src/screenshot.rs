@@ -274,7 +274,13 @@ impl ScreenshotRenderer {
         let ldr_view = ldr.create_view(&wgpu::TextureViewDescriptor::default());
 
         let hdr = HdrTargets::new(&device, "screenshot", width, height, sample_count);
-        let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        let mut pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        // 有 `project.ron` 才绑定项目：截图也走共享材质资产这条正门。
+        // 临时目录 / 单测里的裸资源没有项目清单，绑定失败就退回"只有模型材质"，
+        // 不影响任何既有测试。
+        if let Ok(project) = xgame_core::ProjectHandle::open(project_root) {
+            pipeline.set_project(Some(project));
+        }
         let postfx = PostFx::new(&device, format);
         let ui = crate::ui_renderer::UiRenderer::new(&device, format);
 
@@ -555,7 +561,8 @@ mod tests {
     use super::*;
 
     use xgame_core::{
-        BloomConfig, Entity, FxaaConfig, Light, MaterialOverride, SkyConfig, ToneMapMode,
+        BloomConfig, Entity, FxaaConfig, Light, MaterialAsset, MaterialOverride, SkyConfig,
+        ToneMapMode,
     };
     use xgame_math::glam::Quat;
 
@@ -807,6 +814,102 @@ mod tests {
                 None
             }
         }
+    }
+
+    /// 临时项目目录（测试结束删掉整棵子树）。
+    struct TestProjectDir(PathBuf);
+
+    impl Drop for TestProjectDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 建一个带材质资产的临时项目，并让截图渲染器绑定它。
+    ///
+    /// 顺序是刻意的：先写贴图，再写 `.mat` —— `write_material` 会把
+    /// `albedo` 编码成 GUID，贴图必须先被资产库扫到，否则落盘的是字面量路径。
+    fn material_gpu_fixture(
+        name: &str,
+        textures: &[(&str, [u8; 4])],
+        materials: &[(&str, MaterialAsset)],
+    ) -> Option<(GpuFixture, TestProjectDir)> {
+        let permit = acquire_gpu_test_permit();
+        let parent = std::env::temp_dir().join(format!(
+            "xgame_material_shot_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&parent).expect("建临时项目目录失败");
+        let guard = TestProjectDir(parent.clone());
+
+        let project = match xgame_core::ProjectHandle::create(&parent, "MaterialProject") {
+            Ok(project) => project,
+            Err(e) => {
+                eprintln!("跳过 {name}：创建临时项目失败: {e}");
+                return None;
+            }
+        };
+
+        for (relative, rgba) in textures {
+            let path = project.path(relative);
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).expect("建贴图目录失败");
+            }
+            let mut pixels = Vec::with_capacity(8 * 8 * 4);
+            for _ in 0..8 * 8 {
+                pixels.extend_from_slice(rgba);
+            }
+            image::save_buffer_with_format(
+                &path,
+                &pixels,
+                8,
+                8,
+                image::ColorType::Rgba8,
+                image::ImageFormat::Png,
+            )
+            .expect("写测试贴图失败");
+        }
+
+        for (relative, material) in materials {
+            project
+                .write_material(relative, material)
+                .expect("写测试材质失败");
+        }
+
+        match ScreenshotRenderer::new(project.root(), 320, 240) {
+            Ok(renderer) => Some((
+                GpuFixture {
+                    renderer,
+                    _permit: permit,
+                },
+                guard,
+            )),
+            Err(e) => {
+                eprintln!("跳过 {name}：{e}");
+                None
+            }
+        }
+    }
+
+    /// 斜射光下的一颗白模立方体 —— 材质像素测试的受控画面。
+    fn material_probe_scene() -> Scene {
+        let mut scene = Scene::new("material");
+        scene.ambient = [0.0, 0.0, 0.0];
+        scene.lights = vec![Light::directional(
+            "sun",
+            [0.6, -1.0, -0.75],
+            [1.0; 3],
+            1.0,
+        )];
+        scene.lights[0].casts_shadow = false;
+        let mut e = Entity::new("Cube");
+        e.model = "builtin://cube".to_owned();
+        scene.add_entity(e);
+        scene
     }
 
     fn fxaa_probe_scene() -> Scene {
@@ -1531,6 +1634,163 @@ mod tests {
         scene.entities[0].material = None;
         let restored = render(&scene, &mut shot);
         assert_eq!(restored, baseline, "清掉覆盖后画面必须与基线逐位一致");
+    }
+
+    /// **共享材质资产**：`.mat` 从项目加载后必须真正作用到内置白模上，
+    /// 且清掉引用后逐位回到基线（不是一次性烘焙）。
+    ///
+    /// 这条测试覆盖「项目句柄 → `.mat` 解析 → GPU 绑定组 → 批次键」整条链；
+    /// 只做 CPU 侧解析测试的话，"文件对了但画面没变"这类断裂查不出来。
+    #[test]
+    fn material_asset_tints_builtin_mesh() {
+        let material = MaterialAsset {
+            base_color: [0.2, 0.4, 0.9, 1.0],
+            ..Default::default()
+        };
+        let Some((mut shot, _project)) = material_gpu_fixture(
+            "material_asset_tints_builtin_mesh",
+            &[],
+            &[("Resources/Materials/Blue.mat", material)],
+        ) else {
+            return;
+        };
+
+        let mut scene = material_probe_scene();
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let (cx, cy) = (320 / 2, 240 / 2);
+        let render = |scene: &Scene, shot: &mut ScreenshotRenderer| {
+            shot.render_scene(
+                scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            pixel_avg(&shot.read_rgba().expect("读回失败"), 320, cx, cy)
+        };
+
+        let baseline = render(&scene, &mut shot);
+        assert!(
+            baseline[0] > 150.0,
+            "基线白模应当受光明显（采样点打到背景上？）: {baseline:?}"
+        );
+
+        scene.entities[0].material_asset = Some("Resources/Materials/Blue.mat".to_string());
+        let tinted = render(&scene, &mut shot);
+        assert!(
+            tinted[2] > tinted[0] + 60.0,
+            "材质资产的蓝色乘子必须让蓝通道压过红通道: {tinted:?}"
+        );
+        assert!(
+            tinted[0] < baseline[0] * 0.65,
+            "红通道应当被材质乘子显著压低: {tinted:?} vs 基线 {baseline:?}"
+        );
+
+        scene.entities[0].material_asset = None;
+        let restored = render(&scene, &mut shot);
+        assert_eq!(restored, baseline, "清掉材质引用后画面必须与基线逐位一致");
+    }
+
+    /// **材质 albedo**：`.mat` 里的贴图（磁盘上以 GUID 存）必须替换模型贴图，
+    /// 并经过 `texture_srgb` 的默认 sRGB 解码 —— 成品红贴图应当只留红通道。
+    #[test]
+    fn material_asset_albedo_texture_applies() {
+        let material = MaterialAsset {
+            albedo: "Resources/Textures/red.png".to_string(),
+            ..Default::default()
+        };
+        let Some((mut shot, _project)) = material_gpu_fixture(
+            "material_asset_albedo_texture_applies",
+            &[("Resources/Textures/red.png", [255, 0, 0, 255])],
+            &[("Resources/Materials/Red.mat", material)],
+        ) else {
+            return;
+        };
+
+        let mut scene = material_probe_scene();
+        scene.entities[0].material_asset = Some("Resources/Materials/Red.mat".to_string());
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(camera),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            RenderConfig::default(),
+        )
+        .expect("渲染失败");
+
+        let rgba = shot.read_rgba().expect("读回失败");
+        let center = pixel_avg(&rgba, 320, 320 / 2, 240 / 2);
+        assert!(
+            center[0] > 100.0,
+            "红贴图必须让红通道保持明显亮度: {center:?}"
+        );
+        assert!(
+            center[0] > center[1] + 60.0,
+            "贴图应按 sRGB 解码后只保留红通道（绿/蓝是镜面项残余）: {center:?}"
+        );
+    }
+
+    /// **批次键必须含材质**：两颗同一图元、不同 `.mat` 的立方体不能合批；
+    /// 改成同一份资产后才允许合并。旧键（图元地址）下这条会读到 1 批，
+    /// 表现为后一颗把前一颗的材质盖掉。
+    #[test]
+    fn material_assets_split_opaque_batches() {
+        let red = MaterialAsset {
+            base_color: [0.9, 0.1, 0.1, 1.0],
+            ..Default::default()
+        };
+        let blue = MaterialAsset {
+            base_color: [0.1, 0.1, 0.9, 1.0],
+            ..Default::default()
+        };
+        let Some((mut shot, _project)) = material_gpu_fixture(
+            "material_assets_split_opaque_batches",
+            &[],
+            &[
+                ("Resources/Materials/Red.mat", red),
+                ("Resources/Materials/Blue.mat", blue),
+            ],
+        ) else {
+            return;
+        };
+
+        let mut scene = material_probe_scene();
+        let mut second = Entity::new("Cube2");
+        second.model = "builtin://cube".to_owned();
+        second.transform.position.x = 1.4;
+        scene.entities[0].transform.position.x = -1.4;
+        scene.entities[0].material_asset = Some("Resources/Materials/Red.mat".to_string());
+        scene.add_entity(second);
+        scene.entities[1].material_asset = Some("Resources/Materials/Blue.mat".to_string());
+
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let render = |scene: &Scene, shot: &mut ScreenshotRenderer| {
+            shot.render_scene(
+                scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.frame_stats()
+        };
+
+        let split = render(&scene, &mut shot);
+        assert_eq!(
+            split.opaque_batches, 2,
+            "不同材质资产必须拆成两批（否则一颗的颜色会盖掉另一颗）: {split:?}"
+        );
+
+        // 指向同一份资产：批次键相同，必须重新合回一批。
+        scene.entities[1].material_asset = Some("Resources/Materials/Red.mat".to_string());
+        let merged = render(&scene, &mut shot);
+        assert_eq!(
+            merged.opaque_batches, 1,
+            "同一图元 + 同一材质应合批: {merged:?}"
+        );
     }
 
     // -----------------------------------------------------------------

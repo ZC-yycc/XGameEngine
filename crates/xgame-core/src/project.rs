@@ -40,6 +40,7 @@ use crate::asset::{
     encode_scene_references, AssetDatabase, AssetGuid, AssetKind, ImportSettings,
 };
 use crate::config::{ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
+use crate::material::{MaterialAsset, MATERIAL_EXTENSION};
 use crate::prefab::{Prefab, PREFAB_EXTENSION};
 use crate::scene::Scene;
 use crate::transform::Transform;
@@ -187,6 +188,8 @@ pub struct AssetMigrationReport {
     pub rewritten_scenes: usize,
     /// 重写过的预制体文件数。
     pub rewritten_prefabs: usize,
+    /// 重写过的材质文件数（只改了 `albedo` 贴图引用）。
+    pub rewritten_materials: usize,
     /// 单个文件失败的原因（不阻断其余文件）。
     pub errors: Vec<String>,
 }
@@ -203,10 +206,11 @@ impl AssetMigrationReport {
         use std::fmt::Write as _;
         let _ = writeln!(
             out,
-            "migrate: metas={} scenes={} prefabs={} errors={}",
+            "migrate: metas={} scenes={} prefabs={} materials={} errors={}",
             self.created_metas,
             self.rewritten_scenes,
             self.rewritten_prefabs,
+            self.rewritten_materials,
             self.errors.len()
         );
         for e in &self.errors {
@@ -486,6 +490,109 @@ impl ProjectHandle {
         out
     }
 
+    /// 列出项目里的共享材质（`.mat`，项目相对路径，按字典序）。
+    ///
+    /// 扫 `content.models_dir` 子树（默认 `Resources/Materials`），允许用户
+    /// 按子目录归类。目录不存在时返回空列表 —— 还没做材质的项目完全合法。
+    pub fn list_materials(&self) -> Vec<String> {
+        let scan = self.assets_dir();
+        let mut out = Vec::new();
+        collect_by_extension(&scan, &self.root, MATERIAL_EXTENSION, &mut out);
+        out.sort();
+        out
+    }
+
+    /// 由材质名推出它在项目里的**相对路径**（`Resources/Materials/<安全名>.mat`）。
+    ///
+    /// 材质与模型 / 纹理同住 `Resources`（`models_dir` 是资源根，不是"只放
+    /// 模型"的意思 —— 名字是历史遗留）。全被过滤光时退回 `Material`，
+    /// 而不是 `Prefab`：文件名要能一眼看出这是什么。
+    pub fn material_path_for(&self, name: &str) -> String {
+        let dir = self
+            .manifest
+            .content
+            .models_dir
+            .trim()
+            .trim_matches(['/', '\\']);
+        let file = format!(
+            "{}.{}",
+            sanitize_asset_name_or(name, "Material"),
+            MATERIAL_EXTENSION
+        );
+        if dir.is_empty() {
+            format!("Materials/{file}")
+        } else {
+            format!("{dir}/Materials/{file}")
+        }
+    }
+
+    /// 从项目内的相对路径（或 `guid://…` 引用）加载一份材质资产。
+    ///
+    /// 这是材质引用从磁盘 GUID 回到内存路径的**唯一转换点**（与
+    /// `load_scene` / `load_prefab` 同一条规则）：`albedo` 也在这里从
+    /// GUID 解码成可直接打开的路径。坏数据在返回前 [`MaterialAsset::sanitized`]。
+    pub fn load_material(&self, reference: &str) -> Result<MaterialAsset, String> {
+        let relative = {
+            let assets = self.assets();
+            assets
+                .resolve_reference(reference)
+                .unwrap_or_else(|| reference.to_string())
+        };
+        let path = self.path(&relative);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
+        let mut material = MaterialAsset::from_ron(&text)
+            .map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+        if !material.albedo.is_empty() {
+            let assets = self.assets();
+            if let Some(resolved) = assets.resolve_reference(&material.albedo) {
+                material.albedo = resolved;
+            }
+            // 解不开（悬空 GUID）就保留原字面量：渲染会报"贴图打不开"，
+            // `--check` 也会把这条引用点名，而不是静默变成白色。
+        }
+        Ok(material.sanitized())
+    }
+
+    /// 把材质资产写回项目内的相对路径（`albedo` 编码成 GUID）。
+    ///
+    /// 与场景 / 预制体同款的写前刷新：用户可能刚把贴图拷进项目，
+    /// 不刷新就会把路径写成字面量而不是稳定身份。
+    pub fn write_material(
+        &self,
+        relative: &str,
+        material: &MaterialAsset,
+    ) -> Result<(), ProjectError> {
+        let encoded = {
+            let mut assets = self.assets();
+            assets.refresh();
+            let _ = assets.ensure_metas();
+            if assets.is_empty() {
+                None
+            } else {
+                let mut copy = material.clone();
+                if !copy.albedo.is_empty() {
+                    copy.albedo = assets.encode_reference(&copy.albedo);
+                }
+                Some(copy)
+            }
+        };
+        let material = encoded.as_ref().unwrap_or(material);
+
+        let path = self.path(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let text = material.to_ron().map_err(|e| ProjectError::Write {
+            path: path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        })?;
+        std::fs::write(&path, text).map_err(|source| ProjectError::Write { path, source })
+    }
+
     /// 由预制体名推出它在项目里的**相对路径**（`Prefabs/<安全名>.prefab.ron`）。
     ///
     /// 名字里的路径分隔符与 Windows 非法字符会被剔除；全被过滤光时退回 `Prefab`。
@@ -630,6 +737,15 @@ impl ProjectHandle {
             }
         }
 
+        // 材质里的 albedo 也是资产引用：不迁的话，以后贴图改名材质就断链。
+        for relative in self.list_materials() {
+            match self.rewrite_material_references_in_place(&relative) {
+                Ok(true) => report.rewritten_materials += 1,
+                Ok(false) => {}
+                Err(e) => report.errors.push(format!("{relative}: {e}")),
+            }
+        }
+
         report
     }
 
@@ -655,6 +771,36 @@ impl ProjectHandle {
             collect_entity_references(&scene.entities, &mut references);
         }
 
+        self.rewrite_literals(relative, text, references)
+    }
+
+    /// 就地改写一份材质文件里的 `albedo` 路径（同样只替换完整字面量）。
+    fn rewrite_material_references_in_place(&self, relative: &str) -> Result<bool, String> {
+        let path = self.path(relative);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("无法读取 '{}': {e}", path.display()))?;
+        // 先解析一遍：坏材质进 errors，而不是被文本替换掩盖过去。
+        let material = MaterialAsset::from_ron(&text)
+            .map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+        let references = if material.albedo.is_empty() {
+            Vec::new()
+        } else {
+            vec![material.albedo]
+        };
+        self.rewrite_literals(relative, text, references)
+    }
+
+    /// 把一组"内存路径引用"在原文里改写成 GUID 字面量；返回是否真的改了。
+    ///
+    /// 场景 / 预制体 / 材质三个阶段共用 —— 三个文件的引用形态不同
+    /// （实体字段 vs `albedo`），但"替换完整引号字面量"这条规则只有一份。
+    fn rewrite_literals(
+        &self,
+        relative: &str,
+        text: String,
+        mut references: Vec<String>,
+    ) -> Result<bool, String> {
+        let path = self.path(relative);
         let mut replaced = text;
         let mut changed = false;
         {
@@ -831,9 +977,17 @@ fn sanitize_dir_name(name: &str) -> String {
 /// `format!("{}.prefab.ron", "")` 会得到 `.prefab.ron`（一个隐藏文件），
 /// 既看不见也选不中，所以全被过滤光时退回 `Prefab`。
 pub fn sanitize_asset_name(name: &str) -> String {
+    sanitize_asset_name_or(name, "Prefab")
+}
+
+/// 同 [`sanitize_asset_name`]，但空名退回调用方指定的名字。
+///
+/// 不同资产类型要有各自的兜底：`...` 当材质名应该叫 `Material.mat`，
+/// 而不是莫名其妙变成 `Prefab.mat`。
+fn sanitize_asset_name_or(name: &str, fallback: &str) -> String {
     let cleaned = sanitize_dir_name(name);
     if cleaned.is_empty() {
-        "Prefab".to_string()
+        fallback.to_string()
     } else {
         cleaned
     }
@@ -898,6 +1052,11 @@ fn collect_entity_references(entities: &[crate::Entity], out: &mut Vec<String>) 
     for entity in entities {
         if !entity.model.is_empty() {
             out.push(entity.model.clone());
+        }
+        if let Some(material) = &entity.material_asset {
+            if !material.is_empty() {
+                out.push(material.clone());
+            }
         }
         out.extend(entity.scripts.iter().cloned());
         if let Some(audio) = &entity.audio {
@@ -1173,6 +1332,91 @@ mod tests {
 
         let loaded = handle.load_prefab(&relative).unwrap();
         assert_eq!(loaded.entities[0].model, "Resources/Models/Box.glb");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 材质资产走同一套 GUID 边界：`albedo` 落盘是 GUID，读回是路径。
+    #[test]
+    fn material_albedo_uses_guid_and_roundtrips() {
+        let (base, handle) = temp_project("material_guid");
+        std::fs::write(handle.path("Resources/Texture.png"), b"png").unwrap();
+        let material = MaterialAsset {
+            base_color: [0.8, 0.2, 0.1, 1.0],
+            metallic: 0.0,
+            roughness: 0.6,
+            albedo: "Resources/Texture.png".into(),
+        };
+        let relative = handle.material_path_for("Wood");
+        assert_eq!(relative, "Resources/Materials/Wood.mat");
+        handle.write_material(&relative, &material).unwrap();
+
+        let text = std::fs::read_to_string(handle.path(&relative)).unwrap();
+        assert!(text.contains("guid://"), "albedo 必须以 GUID 落盘:\n{text}");
+        assert!(
+            !text.contains("Resources/Texture.png"),
+            "磁盘上不该留贴图路径:\n{text}"
+        );
+
+        let loaded = handle.load_material(&relative).unwrap();
+        assert_eq!(loaded, material, "读回的内存态必须是原路径");
+        assert_eq!(
+            handle.material_path_for("..."),
+            "Resources/Materials/Material.mat",
+            "空名兜底不能变成 Prefab"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `--migrate-assets` 必须把材质里的 albedo 与实体上的 material_asset
+    /// 一起迁成 GUID，并且迁移后语义不变（读回来还是路径）。
+    #[test]
+    fn migration_rewrites_material_and_entity_references() {
+        let (base, handle) = temp_project("material_migrate");
+        std::fs::write(handle.path("Resources/Texture.png"), b"png").unwrap();
+        std::fs::create_dir_all(handle.path("Resources/Materials")).unwrap();
+        std::fs::write(
+            handle.path("Resources/Materials/Legacy.mat"),
+            "(base_color: (1.0, 1.0, 1.0, 1.0), albedo: \"Resources/Texture.png\")\n",
+        )
+        .unwrap();
+        let legacy_scene = r#"(
+            name: "Legacy",
+            entities: [
+                (
+                    name: "Box",
+                    transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+                    material_asset: Some("Resources/Materials/Legacy.mat"),
+                ),
+            ],
+        )"#;
+        std::fs::write(handle.path("Scenes/legacy.ron"), legacy_scene).unwrap();
+
+        let report = handle.migrate_asset_references();
+        assert!(!report.has_errors(), "{:?}", report.errors);
+        assert_eq!(report.rewritten_materials, 1);
+        assert_eq!(report.rewritten_scenes, 1);
+
+        let material_text = std::fs::read_to_string(handle.path("Resources/Materials/Legacy.mat")).unwrap();
+        assert!(material_text.contains("guid://"), "{material_text}");
+        let scene_text = std::fs::read_to_string(handle.path("Scenes/legacy.ron")).unwrap();
+        assert!(scene_text.contains("guid://"), "{scene_text}");
+
+        let loaded = handle.load_scene("Scenes/legacy.ron").unwrap();
+        assert_eq!(
+            loaded.entities[0].material_asset.as_deref(),
+            Some("Resources/Materials/Legacy.mat")
+        );
+        let material = handle
+            .load_material(loaded.entities[0].material_asset.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(material.albedo, "Resources/Texture.png");
+
+        // 幂等：第二次迁移不该再改写。
+        let again = handle.migrate_asset_references();
+        assert_eq!(again.rewritten_materials, 0);
+        assert_eq!(again.rewritten_scenes, 0);
 
         let _ = std::fs::remove_dir_all(&base);
     }

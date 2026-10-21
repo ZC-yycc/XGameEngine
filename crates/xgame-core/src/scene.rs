@@ -38,6 +38,18 @@ pub struct Entity {
     /// 强制写一行 `model: ""` 只是噪音。
     #[serde(default)]
     pub model: String,
+    /// 共享材质资产路径（项目相对路径，例如 `Resources/Materials/Wood.mat`）。
+    ///
+    /// `None` = 用模型自带材质。引用了材质资产后，资产里的金属度 / 粗糙度
+    /// **替换**模型参数、`base_color` 乘在模型基础色上、`albedo` 替换模型贴图
+    /// （完整优先级见 [`crate::material::MaterialAsset`]）。
+    ///
+    /// 与 [`Entity::material`]（逐实体临时覆盖）**正交**：资产负责"这是什么
+    /// 材质"，覆盖负责"这个实例想怎么微调"，两层可以同时存在。
+    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → `None`，
+    /// 没引用材质的实体不写这一行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_asset: Option<String>,
     /// 稳定唯一标识符。旧版文件反序列化时自动分配新 ID。
     #[serde(default)]
     pub id: EntityId,
@@ -154,6 +166,7 @@ impl Entity {
             name: name.into(),
             transform: Transform::IDENTITY,
             model: String::new(),
+            material_asset: None,
             id: EntityId::new(),
             parent: None,
             prefab: None,
@@ -178,6 +191,12 @@ impl Entity {
     /// 给实体附加模型路径。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// 给实体指定共享材质资产（`Resources/Materials/Wood.mat`）。
+    pub fn with_material_asset(mut self, material: impl Into<String>) -> Self {
+        self.material_asset = Some(material.into());
         self
     }
 
@@ -264,6 +283,8 @@ impl PartialEq for Entity {
         self.name == other.name
             && self.transform == other.transform
             && self.model == other.model
+            // 材质资产引用是落盘内容：换了材质按保存必须有反应。
+            && self.material_asset == other.material_asset
             && self.id == other.id
             && self.parent == other.parent
             && self.prefab == other.prefab
@@ -1275,6 +1296,51 @@ mod tests {
         assert_eq!(a, b, "同一配置应当相等");
         b.material.as_mut().unwrap().roughness = Some(0.9);
         assert_ne!(a, b, "改材质必须改变相等性（脏检查依赖它）");
+    }
+
+    // -- 材质资产引用 -------------------------------------------------------
+
+    /// 材质资产引用必须落盘往返；没引用时整行不写。
+    #[test]
+    fn material_asset_reference_survives_roundtrip() {
+        let mut scene = Scene::new("A");
+        scene.add_entity(Entity::new("Crate").with_material_asset("Resources/Materials/Wood.mat"));
+        scene.add_entity(Entity::new("Plain"));
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert_eq!(
+            text.matches("material_asset").count(),
+            1,
+            "只有引用了材质的实体才写这一行: {text}"
+        );
+
+        let restored: Scene = ron::from_str(&text).unwrap();
+        assert_eq!(
+            restored.entities[0].material_asset.as_deref(),
+            Some("Resources/Materials/Wood.mat")
+        );
+        assert!(restored.entities[1].material_asset.is_none());
+
+        // 旧文件（没有这个字段）→ None，渲染行为不变。
+        let old = r#"Scene(
+            name: "Old",
+            entities: [
+                (name: "A", transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: ""),
+            ],
+        )"#;
+        let parsed: Scene = ron::from_str(old).expect("旧文件必须能解析");
+        assert!(parsed.entities[0].material_asset.is_none());
+    }
+
+    /// 换材质必须让实体"不相等"（编辑器脏检查依赖它）。
+    #[test]
+    fn material_asset_participates_in_entity_equality() {
+        let a = Entity::new("Crate").with_material_asset("Resources/Materials/A.mat");
+        let mut b = a.clone();
+        assert_eq!(a, b, "同一引用应当相等");
+        b.material_asset = Some("Resources/Materials/B.mat".into());
+        assert_ne!(a, b, "换材质必须改变相等性");
+        b.material_asset = None;
+        assert_ne!(a, b, "清空材质也必须改变相等性");
     }
 
     // -- 角色控制器 --------------------------------------------------------

@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::material::MATERIAL_EXTENSION;
 use crate::prefab::PREFAB_EXTENSION;
 use crate::scene::{Entity, Scene};
 
@@ -201,6 +202,8 @@ pub enum AssetKind {
     Script,
     /// 预制体（`.prefab.ron`）。
     Prefab,
+    /// 可复用材质（`.mat`）。
+    Material,
     /// 场景（`.ron`，但排除 `project.ron`）。
     Scene,
     /// WGSL 着色器（`.wgsl`）。
@@ -234,6 +237,7 @@ impl AssetKind {
             }
             "wav" | "ogg" | "mp3" | "flac" => Self::Audio,
             "lua" => Self::Script,
+            MATERIAL_EXTENSION => Self::Material,
             "ron" => Self::Scene,
             "wgsl" => Self::Shader,
             _ => return None,
@@ -248,15 +252,19 @@ impl AssetKind {
             Self::Audio => "音频",
             Self::Script => "脚本",
             Self::Prefab => "预制体",
+            Self::Material => "材质",
             Self::Scene => "场景",
             Self::Shader => "着色器",
             Self::Other => "其它",
         }
     }
 
-    /// 是否属于"可拖进场景生成实体"的资产。
+    /// 是否属于"可拖进场景"的资产。
+    ///
+    /// 模型 / 预制体拖进去会生成实体；材质拖到实体上会**指派**给它
+    /// （拖到空白处没有目标，编辑器会给提示）。
     pub fn is_draggable_into_scene(self) -> bool {
-        matches!(self, Self::Model | Self::Prefab)
+        matches!(self, Self::Model | Self::Prefab | Self::Material)
     }
 }
 
@@ -351,6 +359,26 @@ impl AssetMeta {
         text.push('\n');
         Ok(text)
     }
+}
+
+/// 直接读一个资产的导入设置（只读；没有 `.meta` / 解析失败 → 默认值）。
+///
+/// 给渲染侧用：模型 / 纹理加载时只需要"这个资产怎么导入"，不值得为此重建
+/// 整个 [`AssetDatabase`]（那是一次全项目扫盘）。`--check` 也用同一份逻辑，
+/// 保证"检查看到的"和"运行时用的"不会漂移。
+///
+/// 坏 `.meta` 在这里静默走默认值：资产库扫描会在 `--check` / 资产面板里
+/// 把它点名，渲染热路径不该因为一个用户手改坏的文本而拒绝出图。
+pub fn read_import_settings(root: &Path, relative: &str) -> ImportSettings {
+    if relative.is_empty() {
+        return ImportSettings::default();
+    }
+    let meta_path = root.join(format!("{relative}.{META_EXTENSION}"));
+    std::fs::read_to_string(meta_path)
+        .ok()
+        .and_then(|text| AssetMeta::from_ron(&text).ok())
+        .map(|meta| meta.import)
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -697,6 +725,9 @@ impl AssetDatabase {
 /// 把实体上所有资产引用从**内存路径**编码成**磁盘 GUID**。
 pub fn encode_entity_references(entity: &mut Entity, db: &AssetDatabase) {
     encode_slot(&mut entity.model, db);
+    if let Some(material) = &mut entity.material_asset {
+        encode_slot(material, db);
+    }
     for script in &mut entity.scripts {
         encode_slot(script, db);
     }
@@ -720,6 +751,9 @@ pub fn encode_entity_references(entity: &mut Entity, db: &AssetDatabase) {
 /// 能把它当成"悬空 GUID"点名，UI 也能显示出来让人知道这里断链了。
 pub fn decode_entity_references(entity: &mut Entity, db: &AssetDatabase) {
     decode_slot(&mut entity.model, db);
+    if let Some(material) = &mut entity.material_asset {
+        decode_slot(material, db);
+    }
     for script in &mut entity.scripts {
         decode_slot(script, db);
     }
@@ -1019,9 +1053,56 @@ mod tests {
     fn asset_kind_labels_are_stable() {
         assert_eq!(ron::to_string(&AssetKind::Model).unwrap(), "Model");
         assert_eq!(ron::to_string(&AssetKind::Prefab).unwrap(), "Prefab");
+        assert_eq!(ron::to_string(&AssetKind::Material).unwrap(), "Material");
         assert_eq!(ron::to_string(&AssetKind::Scene).unwrap(), "Scene");
         let kind: AssetKind = ron::from_str("Texture").unwrap();
         assert_eq!(kind, AssetKind::Texture);
+    }
+
+    /// 渲染热路径读导入设置：只读 `.meta`、坏文件走默认值、绝不写盘。
+    #[test]
+    fn read_import_settings_is_read_only_and_defaults_on_bad_meta() {
+        let root = temp_root("import_read");
+        put(&root, "Resources/Box.glb", b"glb");
+        let meta = AssetMeta {
+            guid: AssetGuid::generate(),
+            kind: AssetKind::Model,
+            import: ImportSettings {
+                model_scale: 2.0,
+                texture_srgb: false,
+                texture_nearest: true,
+                audio_streaming: false,
+            },
+        };
+        put(
+            &root,
+            "Resources/Box.glb.meta",
+            meta.to_ron().unwrap().as_bytes(),
+        );
+
+        let got = read_import_settings(&root, "Resources/Box.glb");
+        assert_eq!(got.model_scale, 2.0);
+        assert!(!got.texture_srgb);
+        assert!(got.texture_nearest);
+
+        // 没有 meta / 坏 meta / 空路径 → 默认值，不报错也不写盘。
+        assert_eq!(
+            read_import_settings(&root, "Resources/Gone.png"),
+            ImportSettings::default()
+        );
+        put(&root, "Resources/Bad.png", b"png");
+        put(&root, "Resources/Bad.png.meta", b"not ron");
+        assert_eq!(
+            read_import_settings(&root, "Resources/Bad.png"),
+            ImportSettings::default()
+        );
+        assert_eq!(
+            read_import_settings(&root, ""),
+            ImportSettings::default()
+        );
+        assert!(!root.join("Resources/Gone.png.meta").exists(), "读取不得补 meta");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `.prefab.ron` 必须先于 `.ron` 判定；`project.ron` 不是资产。
@@ -1031,6 +1112,10 @@ mod tests {
         assert_eq!(AssetKind::from_path("Scenes/A.ron"), Some(AssetKind::Scene));
         assert_eq!(AssetKind::from_path("project.ron"), None);
         assert_eq!(AssetKind::from_path("Resources/Box.glb"), Some(AssetKind::Model));
+        assert_eq!(
+            AssetKind::from_path("Resources/Materials/Wood.mat"),
+            Some(AssetKind::Material)
+        );
         assert_eq!(AssetKind::from_path("Scripts/a.lua"), Some(AssetKind::Script));
         assert_eq!(AssetKind::from_path("src/main.rs"), None);
         assert_eq!(AssetKind::from_path("Cargo.toml"), None);
@@ -1186,11 +1271,13 @@ mod tests {
         put(&root, "Scripts/Player.lua", b"-- lua");
         put(&root, "Resources/Audio/Beep.wav", b"wav");
         put(&root, "Prefabs/Enemy.prefab.ron", b"(name:\"E\",entities:[])");
+        put(&root, "Resources/Materials/Wood.mat", b"(metallic: 0.0)");
         let mut db = AssetDatabase::scan(&root);
         db.ensure_metas().unwrap();
 
         let mut entity = Entity::new("Box")
             .with_model("Resources/Box.glb")
+            .with_material_asset("Resources/Materials/Wood.mat")
             .with_script("Scripts/Player.lua")
             .with_audio(crate::AudioSource::new("Resources/Audio/Beep.wav"));
         entity.prefab = Some(crate::prefab::PrefabInstanceRef {
@@ -1206,6 +1293,11 @@ mod tests {
         let original = scene.entities[0].clone();
         encode_scene_references(&mut scene, &db);
         assert!(scene.entities[0].model.starts_with(GUID_SCHEME));
+        assert!(scene.entities[0]
+            .material_asset
+            .as_deref()
+            .unwrap()
+            .starts_with(GUID_SCHEME));
         assert!(scene.entities[0].scripts[0].starts_with(GUID_SCHEME));
         assert!(scene.entities[0].audio.as_ref().unwrap().clip.starts_with(GUID_SCHEME));
         assert!(scene.entities[0].prefab.as_ref().unwrap().source.starts_with(GUID_SCHEME));
@@ -1213,6 +1305,7 @@ mod tests {
         decode_scene_references(&mut scene, &db);
         let back = &scene.entities[0];
         assert_eq!(back.model, original.model);
+        assert_eq!(back.material_asset, original.material_asset);
         assert_eq!(back.scripts, original.scripts);
         assert_eq!(back.audio.as_ref().unwrap().clip, original.audio.as_ref().unwrap().clip);
         assert_eq!(

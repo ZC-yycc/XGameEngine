@@ -390,6 +390,45 @@ fn register_entity(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         })?,
     )?;
     globals.set(
+        "material_asset",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
+            Ok(ctx.game().entity_material_asset(id_of(id)))
+        })?,
+    )?;
+    globals.set(
+        "set_material_asset",
+        lua.create_function(|_, (ctx, id, path): (LuaCtx, i64, String)| {
+            ctx.game().set_entity_material_asset(id_of(id), &path);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "set_material",
+        lua.create_function(
+            |_, (ctx, id, r, g, b, a, metallic, roughness): (
+                LuaCtx,
+                i64,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+            )| {
+                ctx.game()
+                    .set_entity_material(id_of(id), [r, g, b, a], metallic, roughness);
+                Ok(())
+            },
+        )?,
+    )?;
+    globals.set(
+        "clear_material",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
+            ctx.game().clear_entity_material(id_of(id));
+            Ok(())
+        })?,
+    )?;
+    globals.set(
         "entity_pos",
         lua.create_function(|lua, (ctx, id): (LuaCtx, i64)| {
             vec3_to_lua(lua, ctx.game().entity_pos(id_of(id)))

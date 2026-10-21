@@ -680,6 +680,45 @@ mod tests {
         assert!(funcs.destroy.is_none(), "没定义 on_destroy 不该被识别");
     }
 
+    /// Lua 侧的材质 API 必须真的接在同名方法上（防止"注册了但没接"）。
+    #[test]
+    fn material_api_is_reachable_from_lua() {
+        let project = TempProject::new("material_api");
+        let path = project.write_script(
+            "material",
+            r#"
+            function start(ctx)
+                local id = self_id(ctx)
+                set_material_asset(ctx, id, "Resources/Materials/Wood.mat")
+                set_material(ctx, id, 0.5, 0.6, 0.7, 1.0, 0.25, 0.75)
+                log(ctx, material_asset(ctx, id))
+            end
+            "#,
+        );
+        let mut scene = scene_with_script(&path);
+        let mut host = LuaHost::new();
+        let report = host.preload(&project.dir, &scene);
+        assert!(report.failed.is_empty(), "编译失败: {:?}", report.failed);
+        host.dispatch_start(FrameCtx::new(&mut scene, 0.016, 0.0));
+
+        let entity = &scene.entities[0];
+        assert_eq!(
+            entity.material_asset.as_deref(),
+            Some("Resources/Materials/Wood.mat")
+        );
+        let material = entity.material.as_ref().expect("Lua set_material 应写入覆盖");
+        assert_eq!(material.base_color, Some([0.5, 0.6, 0.7, 1.0]));
+        assert_eq!(material.metallic, Some(0.25));
+        assert_eq!(material.roughness, Some(0.75));
+
+        let logs = host.take_logs();
+        assert!(
+            logs.iter()
+                .any(|l| l.message.contains("Resources/Materials/Wood.mat")),
+            "material_asset 应能读回 Lua: {logs:?}"
+        );
+    }
+
     #[test]
     fn script_hooks_run_and_mutate_the_scene() {
         let project = TempProject::new("hooks");

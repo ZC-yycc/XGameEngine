@@ -9,6 +9,8 @@
                 scale: (24.0, 1.0, 24.0),
             ),
             model: "builtin://cube",
+            // 共享材质资产：地面与其它物体可复用同一份 .mat。
+            material_asset: Some("guid://235b50780baf2866df65bddf31c31470"),
             id: (1),
             parent: None,
             // PBR 材质覆盖：混凝土色地面（base_color 是**乘子**，见 MaterialOverride）。
@@ -109,6 +111,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             model: "builtin://cube",
+            material_asset: Some("guid://17e23593a51c476c2f1047b0ca0c4389"),
             id: (5),
             parent: None,
             // 亮蓝半光泽 —— 转起来时高光扫过表面，"粗糙度 → 高光形状"的直观演示。
@@ -147,6 +150,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             model: "builtin://sphere",
+            material_asset: Some("guid://6f023d7dbe52e6c4676e1f1646452a10"),
             id: (6),
             parent: None,
             // 红塑料球：低粗糙度给出紧致的高光点（绝缘体，无金属度）。
@@ -177,6 +181,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             model: "builtin://cube",
+            material_asset: Some("guid://830acb9cfc4afd2082a44c6b99ddf80c"),
             id: (7),
             parent: None,
             // 木箱三兄弟：同色系深浅变化，落地后靠明暗也能分清哪只箱子。
@@ -202,6 +207,7 @@
                 scale: (1.2, 1.2, 1.2),
             ),
             model: "builtin://cube",
+            material_asset: Some("guid://830acb9cfc4afd2082a44c6b99ddf80c"),
             id: (8),
             parent: None,
             material: Some((
@@ -226,6 +232,7 @@
                 scale: (0.8, 0.8, 0.8),
             ),
             model: "builtin://cube",
+            material_asset: Some("guid://830acb9cfc4afd2082a44c6b99ddf80c"),
             id: (9),
             parent: None,
             material: Some((
@@ -250,6 +257,7 @@
                 scale: (1.0, 3.0, 1.0),
             ),
             model: "builtin://cylinder",
+            material_asset: Some("guid://315e350a8efe0e18c063dd611eba0c95"),
             id: (10),
             parent: None,
             // 抛光金属柱：metallic=1 没有漫反射，只剩镜面 + 环境反射 ——

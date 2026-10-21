@@ -47,6 +47,8 @@ pub enum Icon {
     Image,
     /// 声波（音频资产）：三条高低不一的竖线。
     Wave,
+    /// 材质（`.mat` 资产）：一滴颜料 / 液滴。
+    Material,
 }
 
 /// 在 `rect` 内画一个图标。
@@ -204,6 +206,28 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Dot => {
             painter.circle_filled(c, s * 0.16, color);
+        }
+        Icon::Material => {
+            // 水滴：上方尖角 + 下方圆。用两段凸多边形拼，12px 下仍能读出
+            // "不是方块、不是圆点"的材质语义（材质 = 一层漆 / 颜料）。
+            let r = s * 0.24;
+            let tip = Pos2::new(c.x, c.y - s * 0.38);
+            painter.add(Shape::convex_polygon(
+                vec![
+                    tip,
+                    Pos2::new(c.x + r * 0.92, c.y - s * 0.02),
+                    Pos2::new(c.x - r * 0.92, c.y - s * 0.02),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+            painter.circle_filled(Pos2::new(c.x, c.y + s * 0.10), r, color);
+            // 高光：同色系更亮的一小块（不引入新主题色）。
+            painter.circle_filled(
+                Pos2::new(c.x - r * 0.34, c.y + s * 0.03),
+                r * 0.26,
+                color.gamma_multiply(1.6),
+            );
         }
         Icon::Diamond => {
             let r = s * 0.30;
