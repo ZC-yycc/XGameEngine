@@ -71,6 +71,8 @@ pub struct GameCtx<'a> {
     pub commands: &'a mut Vec<ScriptCommand>,
     /// 日志归属名：脚本轨传脚本的项目相对路径，组件轨传行为名。
     pub source: &'a str,
+    /// 当前场景的项目相对路径（`""` = 宿主没告诉运行时）。
+    pub scene_name: &'a str,
     /// 触发本次调用的实体（"self"）。[`EntityId::raw`] 为 `0` 表示没有实体上下文。
     pub entity: EntityId,
     /// 本帧真实帧间隔（秒）。
@@ -152,6 +154,31 @@ impl GameCtx<'_> {
     /// 游戏已运行总时长（秒）。
     pub fn time(&self) -> f32 {
         self.time
+    }
+
+    // -----------------------------------------------------------------------
+    // 场景
+    // -----------------------------------------------------------------------
+
+    /// 当前场景的项目相对路径（`""` = 宿主没告诉运行时）。
+    pub fn current_scene(&self) -> &str {
+        self.scene_name
+    }
+
+    /// 请求切换到项目内的另一份场景（如 `"Scenes/Level2.ron"`）。
+    ///
+    /// **不在调用处生效**：本帧剩余的逻辑跑的还是旧场景，切换发生在
+    /// `World::update` 的末尾（见 [`ScriptCommand::LoadScene`]）。所以
+    /// "请求切换后别再往下写同一个钩子"是脚本作者的责任 —— 新场景的
+    /// `start` 在下一帧才跑。
+    ///
+    /// 路径按**项目相对路径**解释（与场景文件里存资产的写法一致）：
+    /// 只写 `"Level2"` 会找不到文件并记一条错误日志 —— 不做"猜扩展名 /
+    /// 猜目录"的模糊匹配，那是给智能体和 CI 埋不确定性。
+    pub fn load_scene(&mut self, path: &str) {
+        self.push_command(ScriptCommand::LoadScene {
+            path: path.to_owned(),
+        });
     }
 
     /// 记一条 Info 日志（编辑器控制台 / 游戏日志）。
@@ -1321,6 +1348,7 @@ mod tests {
                 logs: &mut logs,
                 commands: &mut commands,
                 source: "MaterialProbe",
+                scene_name: "",
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1366,6 +1394,7 @@ mod tests {
                 logs: &mut logs,
                 commands: &mut commands,
                 source: "MaterialProbe",
+                scene_name: "",
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1402,6 +1431,7 @@ mod tests {
                 logs: &mut logs,
                 commands: &mut commands,
                 source: "TorchScript",
+                scene_name: "",
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1437,6 +1467,7 @@ mod tests {
             logs: &mut logs,
             commands: &mut commands,
             source: "TorchScript",
+            scene_name: "",
             entity: bare_id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1469,6 +1500,7 @@ mod tests {
             logs: &mut logs,
             commands: &mut commands,
             source: "Spinner",
+            scene_name: "",
             entity: id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1507,6 +1539,7 @@ mod tests {
                 logs: &mut logs,
                 commands: &mut commands,
                 source: "Sfx",
+                scene_name: "",
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1553,6 +1586,7 @@ mod tests {
             logs: &mut logs,
             commands: &mut commands,
             source: "Sfx",
+            scene_name: "",
             entity: id,
             delta: 1.0 / 60.0,
             time: 0.0,

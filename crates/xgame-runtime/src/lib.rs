@@ -40,11 +40,13 @@
 mod camera_view;
 mod lifecycle;
 mod registry;
+mod scene_loader;
 mod world;
 
 pub use camera_view::CameraView;
 pub use lifecycle::{Behavior, Ctx, Lifecycle};
 pub use registry::BehaviorRegistry;
+pub use scene_loader::SceneLoader;
 pub use world::{FrameReport, World, WorldConfig};
 // 音频引擎从这里再导出：宿主（编辑器 / 独立游戏）只需要 runtime 一个入口，
 // 不必自己再依赖 xgame-audio。

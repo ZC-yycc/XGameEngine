@@ -219,6 +219,20 @@ impl LuaHost {
         self.commands.clear();
     }
 
+    /// 场景切换：只清与**实体**绑定的运行时状态（`start` 标记 + 每实体状态表）。
+    ///
+    /// 与 [`LuaHost::reset_runtime_state`] 的差别是**不碰日志与命令缓冲** ——
+    /// 换场景发生在帧末，此时本帧的日志还没被人取走（编辑器控制台 / 无头报告
+    /// 都在帧后读），连它们一起清掉就会把"这一帧到底报了什么错"抹掉。
+    /// 命令缓冲同理：其中可能有本帧最后一条 `spawn` 通知还没被消费。
+    ///
+    /// **不清编译缓存与驻留表**：脚本模块级全局变量跨场景保留（Unity 不重载
+    /// domain 的语义），驻留 id 永不清是 `intern.rs` 的硬约束。
+    pub fn reset_scene_state(&mut self) {
+        self.started.clear();
+        self.states.clear();
+    }
+
     /// 编译场景里用到的全部 `.lua` 脚本。
     ///
     /// 只认 `.lua`（扩展名判定见 [`is_lua`]）—— 非 `.lua` 的路径直接跳过
@@ -390,6 +404,7 @@ impl LuaHost {
             logs: &mut self.logs,
             commands: &mut self.commands,
             source: path,
+            scene_name: frame.scene_name,
             entity,
             delta: frame.delta,
             time: frame.time,
@@ -435,6 +450,9 @@ impl LuaHost {
                 ScriptCommand::EntitySpawned { id, .. } => report.spawned.push(id),
                 ScriptCommand::EntitiesRemoved { ids } => report.removed.extend(ids),
                 ScriptCommand::Reparented { child } => report.reparented.push(child),
+                // 一帧多次切换请求只认最后一个：中间那些场景永远不会被装载，
+                // 也就不该产生"装载了又立刻丢弃"的副作用。
+                ScriptCommand::LoadScene { path } => report.scene_load = Some(path),
             }
         }
         report

@@ -45,10 +45,11 @@ impl GameRuntime {
     /// 复用旧表会让"停止再播放"回不到初始状态（详见 `plugin_session` 模块文档）。
     pub fn start(
         scene: Scene,
-        project_root: &Path,
+        project: &xgame_core::ProjectHandle,
         runtime: &xgame_core::RuntimeConfig,
         behaviors: xgame_runtime::BehaviorRegistry,
     ) -> Self {
+        let project_root = project.root();
         let input_map = load_input_map(project_root);
         // 重力 / 固定步长来自 project.ron 的 `runtime` 节（⚙ 项目设置面板可改），
         // 不再用 WorldConfig::default() —— 否则清单里改了重力 Play 却纹丝不动。
@@ -56,10 +57,15 @@ impl GameRuntime {
         // 音频引擎在这里**尝试打开真设备**（`World::new` 里是 silent）：
         // 编辑器是宿主，只有宿主知道"现在要不要出声"。打不开自动降级无声，
         // 不阻断 Play（无卡的 CI / 远程桌面都应当能进 Play 调逻辑）。
+        //
+        // 场景装载器 = 项目句柄：Play 期间脚本 `load_scene()` 也照常生效
+        // （与独立游戏同一条路径）。切过去的场景在 Play 结束时被
+        // `play_snapshot` 整个丢弃 —— 运行期切换不写回项目文件。
         let world = World::new(scene, project_root, WorldConfig::from_project_runtime(runtime))
             .with_input_map(input_map)
             .with_behavior_registry(behaviors)
-            .with_audio_engine(xgame_runtime::AudioEngine::open(project_root));
+            .with_audio_engine(xgame_runtime::AudioEngine::open(project_root))
+            .with_scene_loader(project.clone());
         Self {
             world,
             report: FrameReport::default(),
@@ -108,6 +114,19 @@ impl GameRuntime {
     /// 音频子系统状态（状态栏 / 诊断用）。
     pub fn audio_stats(&self) -> xgame_core::AudioStats {
         self.world.audio_stats()
+    }
+
+    /// 告诉运行时本次 Play 从哪份场景开始（脚本 `current_scene()` 读它）。
+    ///
+    /// 必须传**当前编辑的场景**而不是清单里的启动场景：多场景编辑下两者经常
+    /// 不同，而 Play 跑的是编辑中的那一份。
+    pub fn set_current_scene(&mut self, relative: &str) {
+        self.world.set_current_scene(relative);
+    }
+
+    /// 运行时当前所在的场景（Play 期间脚本 `load_scene()` 会改它）。
+    pub fn current_scene(&self) -> Option<&str> {
+        self.world.current_scene()
     }
 
     /// 按下标取一个组件的 `(注册名, 可检视对象)` —— Inspector 在 Play 中改

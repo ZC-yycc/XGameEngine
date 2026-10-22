@@ -198,6 +198,7 @@ mod tests {
             logs: &mut logs,
             commands: &mut commands,
             source: "test",
+            scene_name: "",
             entity: EntityId::from_raw(0),
             delta: 0.016,
             time: 0.0,

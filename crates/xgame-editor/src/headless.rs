@@ -440,6 +440,13 @@ pub struct HeadlessReport {
     pub scene: String,
     /// 入口场景的 `Scene.name`。
     pub scene_name: String,
+    /// 跑完时所在场景的项目相对路径。
+    ///
+    /// 运行期 `load_scene()` 切换过场景时，这里会与 `scene`（入口场景）不同 ——
+    /// 有了它，"这一跑最后停在哪一关"才是可验证的（否则只能靠日志猜）。
+    pub scene_current: String,
+    /// 本次运行成功切换场景的次数（0 = 没换过）。
+    pub scene_loads: u32,
     /// 引擎版本（报告的"是谁吐的"戳）。
     pub engine_version: String,
     /// 跑了多少帧（= 请求的帧数）。
@@ -540,6 +547,8 @@ impl HeadlessReport {
             "root": self.root,
             "scene": self.scene,
             "scene_name": self.scene_name,
+            "scene_current": self.scene_current,
+            "scene_loads": self.scene_loads,
             "frames": self.frames,
             "dt": self.dt,
             "fixed_dt": self.fixed_dt,
@@ -640,9 +649,16 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     // 音频刻意保持 `World::new` 的 silent 引擎：无头运行不抢声卡（CI / 远程
     // 会话里也必须能跑），但解码 / 缓存 / 计数照常 —— 报告里的 audio 节
     // 不是零值。
+    //
+    // 场景装载器 = 项目句柄：脚本 `load_scene()` 在无头运行里也**照常生效**
+    // （否则"多场景流程"就没法被 CI 与智能体验证）。入口场景路径同时交给运行时，
+    // 脚本 `current_scene()` 才有值。
+    let entry_scene = project.manifest().entry_scene.clone();
     let mut world = World::new(scene, project.root(), config)
         .with_input_map(input_map)
-        .with_behavior_registry(behaviors);
+        .with_behavior_registry(behaviors)
+        .with_scene_loader(project.clone())
+        .with_current_scene(entry_scene);
 
     let setup_ms = millis(setup_start.elapsed());
 
@@ -782,6 +798,8 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         root: project.root().display().to_string(),
         scene: project.manifest().entry_scene.clone(),
         scene_name,
+        scene_current: world.current_scene().unwrap_or_default().to_owned(),
+        scene_loads: world.scene_loads(),
         engine_version: xgame::ENGINE_VERSION.to_owned(),
         frames: args.frames,
         dt,
@@ -1501,6 +1519,8 @@ mod tests {
             "root",
             "scene",
             "scene_name",
+            "scene_current",
+            "scene_loads",
             "frames",
             "dt",
             "fixed_dt",

@@ -192,6 +192,7 @@ impl GameApp {
         let ui = UiRenderer::new(&device, config.format);
 
         // -- 场景（路径都按项目根解析）--
+        let entry_scene = project.manifest().entry_scene.clone();
         let scene = match project.load_entry_scene() {
             Ok(scene) => scene,
             Err(e) => {
@@ -235,6 +236,10 @@ impl GameApp {
         // 音频：这里尝试打开真设备（`World::new` 里是 silent，无卡自动降级）。
         // 监听者不用每帧推：本宿主的相机是固定机位 (5,5,5)→原点，
         // 与 `ListenerPose::default()` 完全一致（引擎开设备时就是这个姿态）。
+        //
+        // 场景装载器 = 项目句柄本身（`ProjectHandle` 是共享资产索引的轻句柄，
+        // clone 不重新扫盘）：脚本 `load_scene()` 靠它把 GUID 引用解码成路径。
+        // 没有这一步，运行期切场景会记一条"宿主没接入场景装载器"的错误。
         let world = World::new(
             scene,
             project.root(),
@@ -242,7 +247,9 @@ impl GameApp {
         )
         .with_input_map(input_map)
         .with_behavior_registry(behaviors)
-        .with_audio_engine(AudioEngine::open(project.root()));
+        .with_audio_engine(AudioEngine::open(project.root()))
+        .with_scene_loader(project.clone())
+        .with_current_scene(entry_scene);
 
         Self {
             project,

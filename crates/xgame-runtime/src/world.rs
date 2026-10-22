@@ -23,7 +23,9 @@
 //!        ├─ physics.step(fixed_dt)
 //!        └─ pull_dynamic_bodies     动态体：把物理算出的位置写回实体
 //!   ├─ dispatch_update           脚本的 update（每渲染帧一次）
-//!   ├─ 消费脚本命令 / sync_bodies
+//!   ├─ 消费脚本命令
+//!   ├─ 应用场景切换请求           `load_scene()` 在这里才真的换场景（帧末、借用已还）
+//!   ├─ sync_bodies
 //!   ├─ sync_audio                音频：autoplay 首播、空间声源推位置、失联停音
 //!   ├─ flush_audio               音频：drain 命令束交给引擎（帧末一次结算）
 //!   └─ input.end_frame()         清掉"仅本帧有效"的输入边沿
@@ -31,6 +33,13 @@
 //!
 //! **动态体由物理驱动，运动学体由脚本驱动** —— 这条规则决定了上面两个方向的
 //! 数据流。二者不会互相打架，因为一个刚体只属于其中一类。
+//!
+//! # 场景切换
+//!
+//! `load_scene` 只在**一处**被应用（`apply_pending_scene_load`，见帧顺序图），
+//! 且只换**一份**场景对象。编辑器 Play 每帧把自己的场景与运行时那份
+//! `mem::swap`，所以换场景之后两边会在下一帧自动收敛到新内容 ——
+//! `game_runtime` 那边有一行日志说明这件事（见 `GameRuntime::update_with_scene`）。
 //!
 //! # 音频
 //!
@@ -53,10 +62,11 @@ use xgame_ui::{layout, update_interaction, UiEvent, UiInteraction, UiPointer, Ui
 use xgame_physics::{
     body_from_scene, Collider, CollisionEvent, DebugLine, PhysicsConfig, PhysicsWorld, RigidBody,
 };
-use xgame_script::{FrameCtx, GameCtx, LuaHost, ScriptLog};
+use xgame_script::{FrameCtx, GameCtx, LogLevel, LuaHost, ScriptLog};
 
 use crate::camera_view::CameraView;
 use crate::registry::{BehaviorInstance, BehaviorRegistry};
+use crate::scene_loader::SceneLoader;
 
 /// 运行时的可调参数。
 #[derive(Debug, Clone)]
@@ -186,6 +196,17 @@ pub struct World {
     /// 角色的运动学胶囊永远停在 skin 距离外 —— 物理引擎不会给它发接触事件，
     /// 所以角色的 enter/exit 只能靠"这一帧碰到了谁 vs 上一帧碰到了谁"算出来。
     character_contacts: HashMap<EntityId, xgame_core::CharacterContacts>,
+    /// 场景装载来源（宿主注入；`None` = 这份运行时不能换场景）。
+    scene_loader: Option<Box<dyn SceneLoader>>,
+    /// 当前场景的项目相对路径（`None` = 宿主没告诉，脚本 `current_scene()` 返回空串）。
+    ///
+    /// 存**路径**而不是 `Scene::name`：路径是项目的稳定标识（`Scenes/Level2.ron`），
+    /// `name` 是作者可随意改的显示名，用它做"切到哪一份"的键会一改就断。
+    current_scene: Option<String>,
+    /// 本帧脚本请求的切换（帧末统一应用，见 [`World::apply_pending_scene_load`]）。
+    pending_scene_load: Option<String>,
+    /// 累计成功切换次数（无头报告 / 诊断读数）。
+    scene_loads: u32,
 }
 
 /// 单个实体已实例化的组件集合。
@@ -238,6 +259,10 @@ impl World {
             ui: UiRuntime::default(),
             particles: xgame_particle::ParticleSystem::new(),
             character_contacts: HashMap::new(),
+            scene_loader: None,
+            current_scene: None,
+            pending_scene_load: None,
+            scene_loads: 0,
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
         world.sync_bodies();
@@ -274,6 +299,33 @@ impl World {
     pub fn with_audio_engine(mut self, engine: AudioEngine) -> Self {
         self.audio = engine;
         self
+    }
+
+    /// 注入场景装载来源（宿主调用；不注入 = 这份运行时不能换场景）。
+    ///
+    /// 编辑器 Play / 独立游戏 / 无头运行都传 `project.clone()` ——
+    /// `ProjectHandle` 是共享资产索引的轻句柄，clone 不会重新扫盘。
+    ///
+    /// 不注入时 [`World::load_scene`] 返回错误而不是"静默成功"：一个不能换场景的
+    /// 运行时遇上 `load_scene()` 调用，最可能的成因是宿主忘了接线，
+    /// 静默吞掉会让作者以为"脚本没写对"。
+    pub fn with_scene_loader(mut self, loader: impl SceneLoader + 'static) -> Self {
+        self.scene_loader = Some(Box::new(loader));
+        self
+    }
+
+    /// 告诉运行时"起始跑的是哪份场景文件"（宿主从清单的 `entry_scene` 取）。
+    ///
+    /// 只影响脚本 `current_scene()` 与诊断日志 —— 场景内容本来就已经交给
+    /// [`World::new`] 了。装配时漏掉这一步不会有功能故障，只是脚本读不到名字。
+    pub fn with_current_scene(mut self, relative: impl Into<String>) -> Self {
+        self.set_current_scene(relative);
+        self
+    }
+
+    /// 同上，但**运行中**可改（编辑器 Play 在装配完之后才知道当前场景路径）。
+    pub fn set_current_scene(&mut self, relative: impl Into<String>) {
+        self.current_scene = Some(relative.into());
     }
 
     /// 设置 3D 监听者（宿主每帧调用：编辑器 / 游戏相机就是玩家的耳朵）。
@@ -373,6 +425,146 @@ impl World {
     /// 取出场景，结束运行时。
     pub fn into_scene(self) -> Scene {
         self.scene
+    }
+
+    // -----------------------------------------------------------------------
+    // 场景切换
+    // -----------------------------------------------------------------------
+
+    /// 当前场景的项目相对路径（`None` = 宿主没告诉运行时）。
+    pub fn current_scene(&self) -> Option<&str> {
+        self.current_scene.as_deref()
+    }
+
+    /// 累计成功切换场景的次数（无头报告 / 诊断读数）。
+    pub fn scene_loads(&self) -> u32 {
+        self.scene_loads
+    }
+
+    /// 立刻装载并切换到另一份场景（宿主 / 测试入口）。
+    ///
+    /// 骨架逻辑全在 [`World::swap_scene`]；这里只负责"先装载、成功了再换"——
+    /// 装载失败时旧场景**原封不动**（半换过去的场景比重启还糟）。
+    ///
+    /// 脚本侧不直接调这个：钩子执行期间场景正被可变借用，只能登记请求，
+    /// 由 [`World::apply_pending_scene_load`] 在帧末统一应用。
+    pub fn load_scene(&mut self, relative: &str) -> Result<(), String> {
+        let Some(loader) = self.scene_loader.as_ref() else {
+            return Err(format!(
+                "宿主没有接入场景装载器，无法加载 '{relative}'（游戏 / 编辑器 Play / 无头运行都需要 with_scene_loader）"
+            ));
+        };
+        let scene = loader.load_scene(relative)?;
+        self.swap_scene(scene, relative);
+        Ok(())
+    }
+
+    /// 登记一次场景切换请求（脚本 `load_scene()` 走这里；宿主也可以用）。
+    ///
+    /// 一帧内多次请求只认最后一个 —— 中间那些场景永远不会被装载，
+    /// 也就不该产生"装载了又立刻丢弃"的物理重建与脚本重编译。
+    pub fn request_scene_load(&mut self, relative: impl Into<String>) {
+        self.pending_scene_load = Some(relative.into());
+    }
+
+    /// 应用本帧脚本登记的切换请求（在 `update` 里"消费脚本命令"之后调用）。
+    ///
+    /// 失败只记一条错误日志、继续跑旧场景：游戏不该因为一次路径写错就整个停摆。
+    fn apply_pending_scene_load(&mut self) {
+        let Some(path) = self.pending_scene_load.take() else {
+            return;
+        };
+        if let Err(err) = self.load_scene(&path) {
+            self.push_runtime_log(LogLevel::Error, format!("切换场景 '{path}' 失败：{err}"));
+        }
+    }
+
+    /// 换场景的**唯一**实现：把"旧场景的一切运行时痕迹"清干净再装新的。
+    ///
+    /// 这一步漏掉任何一项，症状都是"跨场景串味"而不是报错，所以逐项写清理由：
+    ///
+    /// | 状态 | 不清会怎样 |
+    /// |---|---|
+    /// | `body_of_entity` / 物理体 | 旧刚体没人引用，却仍参与模拟与射线查询 |
+    /// | `character_contacts` | 角色接触差分拿旧帧的接触面做基线，进新场景就误报 exit |
+    /// | 脚本 `started` / `states` | 按实体 id 存：新场景的实体永远不会跑 `start`（旧 id 占着标记），每实体状态也全错位 |
+    /// | 粒子 | 旧发射器的粒子留在新场景里飞（而且找不到自己的发射器） |
+    /// | 音频 autoplay 集合 | 新场景同一个"名字"不会再响 |
+    /// | UI 布局/交互 | 悬停与按下捕获指向已不存在的实体 |
+    /// | 组件实例 | 组件持有旧场景的状态，且绑在旧实体 id 上 |
+    ///
+    /// **不清的**：脚本编译缓存与路径驻留表（`LuaHost::reset_scene_state` 只清
+    /// `started` / `states`，连日志缓冲都不碰）。于是脚本的模块级全局变量跨场景
+    /// 保留 —— 与 Unity 不重载 domain 的语义一致，作者该用 `state_*` 存
+    /// "随实体走"的数据。
+    fn swap_scene(&mut self, scene: Scene, relative: &str) {
+        let previous = self.scene.entities.len();
+
+        // -- 1. 物理：旧刚体全丢 --
+        //
+        // 实体 id 是进程内单调分配的（`id.rs`），新场景的 id 一定不与旧的重合，
+        // 所以"留着等 sync_bodies 清理"虽然也会清对，但那要多跑一遍全场景扫描，
+        // 而且中间态里 `body_of_entity` 是一张跨场景的垃圾表。
+        let stale: Vec<u64> = self.body_of_entity.drain().map(|(_, body)| body).collect();
+        for body in stale {
+            self.physics.remove_body(body);
+        }
+        self.character_contacts.clear();
+        self.has_kinematic = false;
+        self.has_dynamic = false;
+
+        // -- 2. 脚本运行时状态（编译缓存与驻留表不动，理由见上）--
+        //
+        // 用 `reset_scene_state` 而不是 `reset_runtime_state`：后者会连日志
+        // 缓冲一起清，而本帧的日志此刻还没人取走 —— 那会把"这一帧报了什么"
+        // 抹掉，正好抹掉最该留下的诊断。
+        self.scripts.reset_scene_state();
+
+        // -- 3. 粒子 / UI / 音频 --
+        self.particles.clear();
+        self.ui = UiRuntime::default();
+        self.audio_autoplayed.clear();
+        // 0 = 强迫下一帧重新实扫一遍（与 `World::new` 同一手法）。
+        self.audio_scan_count = 0;
+        self.audio_sources_seen = false;
+        self.audio_port.stop_all();
+
+        // -- 4. 换本体 --
+        self.scene = scene;
+        self.current_scene = Some(relative.to_owned());
+        self.scene_loads += 1;
+
+        // -- 5. 为新场景建物理体 / 装配组件 / 编译新脚本 --
+        self.behavior_instances.clear();
+        self.sync_bodies();
+        self.instantiate_behaviors();
+        let root = self.root.clone();
+        let preload = self.scripts.preload(&root, &self.scene);
+
+        self.push_runtime_log(
+            LogLevel::Info,
+            format!(
+                "场景已切换 → {relative}（实体 {previous} → {}）",
+                self.scene.entities.len()
+            ),
+        );
+        if !preload.failed.is_empty() {
+            self.push_runtime_log(
+                LogLevel::Error,
+                format!("场景 '{relative}' 有脚本编译失败：{}", preload.failed.join(", ")),
+            );
+        }
+    }
+
+    /// 推一条**运行时自己**产生的日志（进控制台 / 无头报告的同一本账）。
+    fn push_runtime_log(&mut self, level: LogLevel, message: String) {
+        let (logs, _) = self.scripts.buffers_mut();
+        logs.push(ScriptLog {
+            level,
+            script: "运行时".to_owned(),
+            entity: None,
+            message,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -479,6 +671,17 @@ impl World {
         // -- 3. update：每渲染帧一次 --
         self.run_dispatch(Phase::Update, frame_dt, time);
         self.consume_script_commands(frame_dt, time);
+
+        // -- 3.1 场景切换：**唯一**合法的换场景时机 --
+        //
+        // 必须排在这里，三个理由缺一不可：
+        // 1. 脚本钩子都跑完了 —— 钩子执行期间 `scene` 正被可变借用，
+        //    中途换掉等于把脚下那份抽走；
+        // 2. 固定步长循环已经结束 —— 在物理步进中途换场景会让这一步的
+        //    `pull_dynamic_bodies` 把旧刚体位姿写进新场景的实体；
+        // 3. 还赶得上本帧的粒子 / 音频 / UI 收拾 —— 新场景的发射器与
+        //    autoplay 音源当帧就开始推进，而不用空等一帧。
+        self.apply_pending_scene_load();
         self.sync_bodies();
 
         // -- 3.5 粒子：本帧的实体增删与脚本 burst 都已落定 --
@@ -523,13 +726,15 @@ impl World {
             input,
             scripts,
             audio_port,
+            current_scene,
             ..
         } = self;
 
         let frame = FrameCtx::new(scene, delta, time)
             .with_input(input)
             .with_physics(physics)
-            .with_audio(audio_port);
+            .with_audio(audio_port)
+            .with_scene_name(current_scene.as_deref().unwrap_or(""));
 
         // 组件轨与脚本轨：共用 `scripts` 那一对日志 / 命令缓冲。
         match phase {
@@ -574,6 +779,7 @@ impl World {
             scripts,
             audio_port,
             behavior_instances,
+            current_scene,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
@@ -609,6 +815,7 @@ impl World {
                     logs: &mut *logs,
                     commands: &mut *commands,
                     source: instance.name,
+                    scene_name: current_scene.as_deref().unwrap_or(""),
                     entity: id,
                     delta,
                     time,
@@ -680,6 +887,7 @@ impl World {
             input,
             scripts,
             audio_port,
+            current_scene,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
@@ -692,6 +900,7 @@ impl World {
                 logs: &mut *logs,
                 commands: &mut *commands,
                 source: instance.name,
+                scene_name: current_scene.as_deref().unwrap_or(""),
                 entity: id,
                 delta,
                 time,
@@ -883,6 +1092,13 @@ impl World {
             let world = self.scene.world_transform(index);
             self.physics.teleport(body, world.position);
             self.physics.set_rotation(body, world.rotation);
+        }
+
+        // 场景切换请求：这里只登记，真正的交换在 `apply_pending_scene_load`。
+        // 固定步长循环里也会调到这里，所以**不能**就地换场景 ——
+        // 那样本步的 `pull_dynamic_bodies` 会把旧刚体位姿写进新场景。
+        if let Some(path) = report.scene_load {
+            self.request_scene_load(path);
         }
     }
 
@@ -1089,6 +1305,7 @@ impl World {
                 scripts,
                 audio_port,
                 behavior_instances,
+                current_scene,
                 ..
             } = self;
             let (logs, commands) = scripts.buffers_mut();
@@ -1102,6 +1319,7 @@ impl World {
                         logs: &mut *logs,
                         commands: &mut *commands,
                         source: instance.name,
+                        scene_name: current_scene.as_deref().unwrap_or(""),
                         entity,
                         delta,
                         time,
@@ -2367,6 +2585,232 @@ mod tests {
         assert_eq!(world.audio_stats().requests, 1, "脚本的 play_sound 应到达引擎");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // 场景切换
+    // -----------------------------------------------------------------------
+
+    /// 造一个临时项目：`Scenes/A.ron`（2 实体 / 1 刚体，挂 `Scripts/switch.lua`）
+    /// + `Scenes/B.ron`（3 实体 / 2 刚体，挂 `Scripts/level2.lua`）。
+    ///
+    /// 两份场景的实体数、刚体数、脚本**刻意都不一样** —— 切换是否真的发生，
+    /// 靠数字就能判定，不必去比内存地址。
+    /// `auto_switch` = `Scripts/switch.lua` 是否每帧请求切到 B。
+    /// 需要"自己控制切换时机"的测试传 `false`（只保留 start 日志）。
+    fn temp_scene_project(tag: &str, auto_switch: bool) -> ProjectHandle {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_scene_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = ProjectHandle::create(&dir, "SwitchDemo").expect("建临时项目");
+        std::fs::create_dir_all(project.root().join("Scripts")).unwrap();
+
+        // A：地面 + 一个纯视觉塔；脚本在 start 里报场景名。
+        // `auto_switch` 时额外加一个"每帧请求切到 B"的 update。
+        let switch_body = if auto_switch {
+            r#"
+            function start(ctx)
+                log(ctx, "start:" .. current_scene(ctx))
+            end
+            function update(ctx)
+                load_scene(ctx, "Scenes/B.ron")
+            end
+            "#
+        } else {
+            r#"
+            function start(ctx)
+                log(ctx, "start:" .. current_scene(ctx))
+            end
+            "#
+        };
+        std::fs::write(project.root().join("Scripts/switch.lua"), switch_body).unwrap();
+        // B：地面 + 下落球 + 一个视觉标记；start 里打一条带场景名的日志。
+        std::fs::write(
+            project.root().join("Scripts/level2.lua"),
+            r#"
+            function start(ctx)
+                log(ctx, "level2-start:" .. current_scene(ctx))
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut a = Scene::new("A");
+        let mut ground = Entity::new("ground");
+        ground.physics = Some(PhysicsBody::static_box([10.0, 0.5, 10.0]));
+        a.add_entity(ground);
+        let mut tower = Entity::new("tower");
+        tower.transform.position = Vec3::new(3.0, 2.0, 0.0);
+        a.add_entity(tower);
+        let mut switcher = Entity::new("switcher");
+        switcher.scripts.push("Scripts/switch.lua".to_owned());
+        a.add_entity(switcher);
+        project.write_scene("Scenes/A.ron", &a).expect("写 A");
+
+        let mut b = Scene::new("B");
+        let mut ground2 = Entity::new("ground2");
+        ground2.physics = Some(PhysicsBody::static_box([10.0, 0.5, 10.0]));
+        b.add_entity(ground2);
+        let mut ball = Entity::new("ball");
+        ball.physics = Some(PhysicsBody::dynamic_box([0.5, 0.5, 0.5]));
+        ball.transform.position = Vec3::new(0.0, 4.0, 0.0);
+        b.add_entity(ball);
+        let mut marker = Entity::new("marker");
+        marker.scripts.push("Scripts/level2.lua".to_owned());
+        b.add_entity(marker);
+        project.write_scene("Scenes/B.ron", &b).expect("写 B");
+
+        project
+    }
+
+    /// 切换场景：实体换成新的、旧刚体全部销毁、新场景的刚体建好。
+    #[test]
+    fn load_scene_swaps_entities_and_rebuilds_physics() {
+        let project = temp_scene_project("swap", true);
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron");
+
+        assert_eq!(world.scene().entities.len(), 3, "A 有 3 个实体");
+        assert_eq!(world.physics().stats().0, 1, "A 只有地面带刚体");
+        assert_eq!(world.current_scene(), Some("Scenes/A.ron"));
+
+        world.load_scene("Scenes/B.ron").expect("应当能加载 B");
+
+        assert_eq!(world.scene().entities.len(), 3, "B 有 3 个实体");
+        assert!(world.scene().find_by_name("tower").is_none(), "旧场景实体必须消失");
+        assert!(world.scene().find_by_name("ball").is_some(), "新场景实体应当就位");
+        assert_eq!(
+            world.physics().stats().0,
+            2,
+            "旧刚体必须销毁：B 只有地面 + 球两个"
+        );
+        assert_eq!(world.current_scene(), Some("Scenes/B.ron"));
+        assert_eq!(world.scene_loads(), 1);
+    }
+
+    /// 装不上的场景：旧场景原封不动，错误可读（不是"半换过去"）。
+    #[test]
+    fn failed_scene_load_keeps_the_current_scene() {
+        let project = temp_scene_project("missing", true);
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron");
+
+        let err = world.load_scene("Scenes/Nope.ron").expect_err("不存在的场景应当报错");
+        assert!(err.contains("Nope.ron"), "错误里要带路径，实际：{err}");
+
+        assert_eq!(world.scene().entities.len(), 3, "旧场景必须原封不动");
+        assert!(world.scene().find_by_name("tower").is_some());
+        assert_eq!(world.current_scene(), Some("Scenes/A.ron"));
+        assert_eq!(world.scene_loads(), 0, "失败的装载不算切换");
+    }
+
+    /// 没接装载器的运行时：脚本的 `load_scene` 必须留下一条**可诊断**的错误，
+    /// 而不是静默无事发生（否则作者会以为脚本没写对）。
+    #[test]
+    fn scene_load_without_loader_is_reported() {
+        let mut scene = Scene::new("no_loader");
+        scene.add_entity(Entity::new("only"));
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_current_scene("Scenes/A.ron");
+
+        world.request_scene_load("Scenes/B.ron");
+        world.update(1.0 / 60.0);
+
+        let logs = world.take_logs();
+        let hit = logs
+            .iter()
+            .find(|log| log.level == crate::LogLevel::Error)
+            .expect("应当有一条错误日志");
+        assert!(
+            hit.message.contains("场景装载器"),
+            "错误文案要指出缺哪一环，实际：{}",
+            hit.message
+        );
+        assert_eq!(world.scene().entities.len(), 1, "旧场景照常跑");
+        assert_eq!(world.scene_loads(), 0);
+    }
+
+    /// 脚本 `load_scene` 的端到端：帧末生效、新场景的 `start` 跑一次、
+    /// `current_scene()` 报的是**新**路径。
+    #[test]
+    fn script_can_switch_scene_and_new_scene_starts_fresh() {
+        let project = temp_scene_project("scripted", true);
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron");
+
+        let mut logs = Vec::new();
+        // 第一帧：A 的 start + update 里登记切换请求；切换在**帧末**生效。
+        world.update(1.0 / 60.0);
+        logs.extend(world.take_logs());
+        assert_eq!(world.scene_loads(), 1, "请求应当在帧末被应用");
+        assert_eq!(world.current_scene(), Some("Scenes/B.ron"));
+
+        // 第二帧：B 的 start 才跑（start 在下一帧派发，与生成的实体同一时机）。
+        world.update(1.0 / 60.0);
+        logs.extend(world.take_logs());
+
+        let messages: Vec<&str> = logs.iter().map(|log| log.message.as_str()).collect();
+        assert!(
+            messages.contains(&"start:Scenes/A.ron"),
+            "A 的 start 应当看到 A 的路径，实际 {messages:?}"
+        );
+        assert!(
+            messages.contains(&"level2-start:Scenes/B.ron"),
+            "B 的 start 应当看到 B 的路径，实际 {messages:?}"
+        );
+        // 切换只发生一次：`switch.lua` 只挂在 A 上，B 里没有它。
+        assert_eq!(world.scene_loads(), 1, "不该反复重载");
+    }
+
+    /// 来回切换时，运行时的"旧痕迹"必须清干净：
+    /// 粒子清空、`start` 重新跑（`started` 标记与每实体状态都按实体 id 存）。
+    #[test]
+    fn scene_switch_clears_particles_and_script_state() {
+        let project = temp_scene_project("reset", false);
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron");
+
+        // 给 A 加一个发射器（走场景 API 而不是改文件：测试只关心运行时行为）。
+        let mut emitter = Entity::new("flame");
+        emitter.particle = Some(xgame_core::ParticleEmitter::default());
+        world.scene_mut().add_entity(emitter);
+        for _ in 0..5 {
+            world.update(1.0 / 60.0);
+        }
+        assert!(
+            world.particle_stats().alive > 0,
+            "5 帧之后发射器应当已经出粒子"
+        );
+        // 这一帧的日志里有 A 的 start；之后切走再切回来，start 要**再来一次**。
+        let first: Vec<String> = world.take_logs().into_iter().map(|l| l.message).collect();
+        assert!(first.iter().any(|m| m == "start:Scenes/A.ron"));
+
+        world.load_scene("Scenes/B.ron").expect("切到 B");
+        assert_eq!(world.particle_stats().alive, 0, "旧场景的粒子必须清空");
+
+        world.load_scene("Scenes/A.ron").expect("切回 A");
+        world.update(1.0 / 60.0);
+        let second: Vec<String> = world.take_logs().into_iter().map(|l| l.message).collect();
+        assert!(
+            second.iter().any(|m| m == "start:Scenes/A.ron"),
+            "切回后 start 必须重新跑（started 标记按实体 id 存，不清就会永远静默），实际 {second:?}"
+        );
+        assert_eq!(world.scene_loads(), 2);
     }
 }
 

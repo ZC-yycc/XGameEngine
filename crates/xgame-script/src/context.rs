@@ -145,6 +145,12 @@ pub enum ScriptCommand {
     EntitiesRemoved { ids: Vec<EntityId> },
     /// 实体换了父节点，运行时需要把它的刚体移到新的世界位置。
     Reparented { child: EntityId },
+    /// 脚本请求切换场景（项目相对路径）。
+    ///
+    /// **不能在钩子里直接换**：此刻 `scene` 正被 `&mut` 借给 `GameCtx`，
+    /// 换掉它意味着在派发中途把脚下那份场景抽走。所以只登记请求，
+    /// 由运行时在**本帧末尾**统一应用（见 `World::apply_pending_scene_load`）。
+    LoadScene { path: String },
 }
 
 /// 脚本请求生成的实体。
@@ -188,6 +194,11 @@ pub struct FrameCtx<'a> {
     pub physics: Option<&'a mut PhysicsWorld>,
     /// 音频命令束。宿主没接音频子系统时为 `None`（脚本的音频调用静默 no-op）。
     pub audio: Option<&'a mut xgame_core::AudioPort>,
+    /// 当前场景的项目相对路径（`""` = 宿主没告诉运行时，`current_scene()` 返回空串）。
+    ///
+    /// 由运行时填：只有它知道这一帧跑的是哪份场景文件（场景可以在运行中被
+    /// 脚本换掉）。脚本侧读它是为了做"已经在 A 场景里就别再加载 A"这类判断。
+    pub scene_name: &'a str,
     /// 本帧真实帧间隔（秒）。
     pub delta: f32,
     /// 游戏已运行的总时长（秒）。
@@ -201,9 +212,16 @@ impl<'a> FrameCtx<'a> {
             input: None,
             physics: None,
             audio: None,
+            scene_name: "",
             delta,
             time,
         }
+    }
+
+    /// 告诉上下文"这一帧跑的是哪份场景"（运行时填，见 [`FrameCtx::scene_name`]）。
+    pub fn with_scene_name(mut self, name: &'a str) -> Self {
+        self.scene_name = name;
+        self
     }
 
     pub fn with_input(mut self, input: &'a Input) -> Self {

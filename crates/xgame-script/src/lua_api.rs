@@ -107,6 +107,7 @@ pub(crate) fn register(lua: &Lua) -> mlua::Result<()> {
     register_transform(lua, &globals)?;
     register_camera(lua, &globals)?;
     register_entity(lua, &globals)?;
+    register_scene(lua, &globals)?;
     register_spawn(lua, &globals)?;
     register_physics(lua, &globals)?;
     register_input(lua, &globals)?;
@@ -619,6 +620,28 @@ fn register_spawn(lua: &Lua, globals: &Table) -> mlua::Result<()> {
                 ))
             },
         )?,
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 场景
+// ---------------------------------------------------------------------------
+
+fn register_scene(lua: &Lua, globals: &Table) -> mlua::Result<()> {
+    globals.set(
+        "current_scene",
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().current_scene().to_owned()))?,
+    )?;
+
+    // 只登记请求，真正装载在 `World::update` 末尾 —— 钩子执行期间场景正被
+    // 可变借用，中途换掉它等于把脚下那份抽走（见 `ScriptCommand::LoadScene`）。
+    globals.set(
+        "load_scene",
+        lua.create_function(|_, (ctx, path): (LuaCtx, String)| {
+            ctx.game().load_scene(&path);
+            Ok(())
+        })?,
     )?;
     Ok(())
 }

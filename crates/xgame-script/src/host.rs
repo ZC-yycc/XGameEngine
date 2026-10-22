@@ -56,11 +56,17 @@ pub struct CommandReport {
     pub removed: Vec<EntityId>,
     /// 换了父节点的实体（运行时应把刚体移到新的世界位置）。
     pub reparented: Vec<EntityId>,
+    /// 脚本请求加载的场景（项目相对路径）。同一帧多次请求时**最后一个生效** ——
+    /// 一帧只换一次场景，不允许"切三次最后停在第二次"这种中间态。
+    pub scene_load: Option<String>,
 }
 
 impl CommandReport {
     /// 这份报告里有没有事情需要运行时处理。
     pub fn is_empty(&self) -> bool {
-        self.spawned.is_empty() && self.removed.is_empty() && self.reparented.is_empty()
+        self.spawned.is_empty()
+            && self.removed.is_empty()
+            && self.reparented.is_empty()
+            && self.scene_load.is_none()
     }
 }

@@ -1898,12 +1898,15 @@ impl EditorState {
         // （脚本编译错误），那时状态应该还是"干净的编辑态"。
         self.play_snapshot = Some(self.scene.clone());
         let registry = self.plugins.build_registry();
-        let runtime = crate::game_runtime::GameRuntime::start(
+        let mut runtime = crate::game_runtime::GameRuntime::start(
             self.scene.clone(),
-            self.project.root(),
+            &self.project,
             &self.project.manifest().runtime,
             registry,
         );
+        // Play 跑的是**当前编辑的场景**（多场景编辑下未必是清单里的启动场景）：
+        // 脚本 `current_scene()` 与"切到 B 再切回来"都靠这个起点。
+        runtime.set_current_scene(&self.current_scene);
         self.game_runtime = Some(runtime);
         // 把 Edit 模式调好的组件参数灌进去 —— 必须在第一帧 update 之前，
         // 否则组件的 `start` 会先按 `Default` 跑掉一遍。
@@ -2123,6 +2126,21 @@ impl EditorState {
     /// 恢复的是**整份场景快照**：脚本可能 `spawn_entity` / `destroy` 过实体，
     /// 只恢复变换会留下"凭空多出来的实体"。
     pub fn exit_play_mode(&mut self) {
+        // 运行时在 Play 里换过场景（脚本 `load_scene`）时先提一句：
+        // 场景会被 `play_snapshot` 整个换回去，不说清楚的话用户会以为
+        // "切过去的那一关怎么没了"。
+        let played = self
+            .game_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.current_scene().map(str::to_owned));
+        if let Some(played) = played {
+            if played != self.current_scene {
+                self.log_info(format!(
+                    "Play 期间场景切到了 '{played}'；Stop 后回到编辑中的 '{}'",
+                    self.current_scene
+                ));
+            }
+        }
         if let Some(snapshot) = self.play_snapshot.take() {
             self.scene = snapshot;
         }

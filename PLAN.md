@@ -4038,3 +4038,103 @@ Preferences / 布局持久化 / 多场景编辑都已落地）。它不是能力
   打开时再问）。
 - 单一副本，不做时间线 / 多版本。
 - 不做"自动保存后自动清空撤销栈"之类的联动。
+
+## 四十三、运行期场景切换：`load_scene` + `current_scene` + 三宿主接线（2026-10-22）
+
+差距分析 P1 #9 的剩余项（"无运行时 `load_scene`"）与 #13 的一个脚本 API 缺口。
+挑它而不是 TAA 的理由很直接：**渲染只差一刀观感，而缺了它，游戏连"菜单 → 关卡"
+都写不出来** —— 一张图跑到底不是引擎能力的边界问题，是"能不能做出一款游戏"的问题。
+成本也可控：`ProjectHandle::load_scene`（含 GUID 解码）早就存在，缺的是"什么时候换"
+与"换的时候清什么"。
+
+### 一、装载来源：注入，而不是让 `World` 认识项目
+
+`World` 的既有契约是"一份场景 + 一个根目录"，测试 / 无头 / 独立游戏都按这个契约
+构造它。让 runtime 直接持有 `ProjectHandle` 会把"项目布局"焊进运行时；而让
+`World` 自己读 RON 又会漏掉 GUID 解码（磁盘存 `guid://`、内存存路径，边界在
+`ProjectHandle`）。所以是一条 trait：
+
+```rust
+pub trait SceneLoader { fn load_scene(&self, relative: &str) -> Result<Scene, String>; }
+impl SceneLoader for ProjectHandle { .. }        // 真实路径
+impl<T: SceneLoader + ?Sized> SceneLoader for Arc<T> { .. }
+```
+
+宿主 `with_scene_loader(project.clone())` —— 句柄共享资产索引，clone 不重扫盘。
+**没接装载器时返回错误而不是静默 no-op**：静默会让作者以为脚本写错了。
+
+### 二、切换时机：只有一处，且在帧末
+
+脚本 `load_scene()` → `ScriptCommand::LoadScene` → `LuaHost::take_commands` 聚合
+（一帧多次只留最后一个）→ `World::pending_scene_load` → `apply_pending_scene_load`
+在 `update` 里"消费脚本通知"之后、`sync_bodies` 之前应用。
+
+三条理由写进了代码注释与决策记录 §二十五：钩子期间场景被可变借用；固定步长循环
+中途换场景会让 `pull_dynamic_bodies` 把旧刚体位姿写进新场景；再往后挪就赶不上本帧
+的粒子 / 音频结算。固定步长循环里也会调到 `consume_script_commands`，所以那里
+**只登记不应用**。
+
+### 三、清什么：按"是否与实体绑定"划线
+
+清：物理刚体与 `body_of_entity`、`character_contacts`、脚本 `started` / `states`、
+粒子、`audio_autoplayed` 与扫描计数、UI 布局与交互、组件实例。
+不清：脚本编译缓存、路径驻留表、**日志与命令缓冲**、脚本模块级全局变量。
+
+第三条踩了一次：第一版直接调 `LuaHost::reset_runtime_state()`，它连日志缓冲一起清 ——
+切换那一帧的日志（含 A 场景的 `start:Scenes/A.ron`）全没了，而那恰好是最该留下的
+诊断。测试 `script_can_switch_scene_and_new_scene_starts_fresh` 就是被这条绊倒的，
+于是新增 `LuaHost::reset_scene_state()`（只清 `started` + `states`）。
+**保留全局变量是刻意的**：Unity 也不在场景加载时重载 domain。
+
+### 四、编辑器 Play：切换不写回项目
+
+`GameRuntime::start` 改为收 `&ProjectHandle`，并 `set_current_scene(当前编辑的场景)`。
+Play 里切场景只动运行时那份，Stop 时 `play_snapshot` 整个覆盖回来；Console 会在
+Stop 时补一句"Play 期间场景切到了 X"，否则用户会以为切过去的那关丢了。
+编辑器与运行时每帧 `mem::swap` 场景，所以换过之后两边**下一帧自动收敛**到新内容 ——
+不用额外同步代码，但这条必须在 `game_runtime` 的文档里写清（谁改动帧序时要留意）。
+
+### 五、验证
+
+- **新增 5 条运行时回归测试**（`crates/xgame-runtime/src/world.rs`）：
+  实体与刚体确实换掉（3 实体 / 1 刚体 → 3 实体 / 2 刚体）、失败时旧场景原封不动、
+  没装载器时留下可诊断错误、脚本 `load_scene` 端到端（帧末生效 + 新场景 `start`
+  看到新路径）、来回切换时粒子清空且 `start` 重跑。
+- **全量**：`cargo test --workspace --all-targets -j 2 -- --test-threads=4`
+  → **722 passed / 0 failed / 7 ignored**（上一轮 717，净增 5）；
+  `cargo clippy --workspace --all-targets` → **0 警告**。
+- **CLI 实跑**（临时双场景项目，`target/e2e_switch`，从 SampleScene 复制并加一张
+  `Level2.ron` 与切换脚本）：
+  - `--check` → `scenes=2 entities=48 ... check: OK`，退出码 0（副本场景不会被
+    误当资产 / 不污染清单）；
+  - `--headless --frames 20` → `scene_loads: 1`、`scene_current: "Scenes/Level2.ron"`、
+    `logs: {info: 3, warn: 0, error: 0}`、`ok: true`、退出码 0 ——
+    三条 info 分别是 `switch-start:` / `switch-request:` / `场景已切换 →`；
+  - `cargo run -p xgame-game -- target/e2e_switch`（独立游戏宿主，窗口化实跑）：
+    stderr 依次出现 `switch-start:Scenes/scene.ron` → `switch-request:Scenes/scene.ron`
+    → `运行时: 场景已切换 → Scenes/Level2.ron（实体 24 → 24）`，之后继续正常渲染
+    （手动结束进程，未观察到崩溃或串味）。**编辑器 Play 的同一路径没有窗口化验收**
+    （它跑的是同一个 `World::update` 与同一个装载器注入，差异只在场景所有权交换，
+    而那个机制本来每帧都在跑）。
+  - 把脚本改成加载不存在的场景 → `ok: false`、退出码 **2**、
+    `error_samples` 里是 `切换场景 'Scenes/Missing.ron' 失败：无法读取 '...'（os error 2）`，
+    且实体数仍是 24（旧场景照常跑）。
+- **契约**：无头报告新增 `scene_current` / `scene_loads`，`json_contract_has_stable_keys`
+  同步（新增字段允许，改名 / 删除不行）。
+
+### 六、刻意的限制
+
+- **不做 `load_scene` 的"带参数"版本**（如把数据传给下一关）：状态传递该走全局
+  单例脚本 / 存档，那是另一个设计。
+- **不做异步 / 流式加载**：一次同步读盘，大场景会掉一帧 —— 与场景流式加载
+  （P3 #37）一起做才有意义。
+- **不做场景栈 / 回到上一关**：`load_scene` 是"换掉"，不是"压栈"。
+- **构建仍按 `entry_scene` 启动**：场景清单 / 排序属"构建设置"那一刀（P1 #9 剩余）。
+  好在 `build` 本来就随 `content_dirs()` 打包整个 `Scenes/`，所以运行期切到任意
+  场景在打包后的游戏里同样成立。**独立游戏宿主已实跑验证**（`cargo run -p xgame-game
+  -- target/e2e_switch`，日志里 `switch-start:` → `switch-request:` → `场景已切换 →
+  Scenes/Level2.ron（实体 24 → 24）`，进程继续正常渲染直到手动结束）；
+  **`dist/` 里的 release 产物没跑双场景**（本轮只重新打包，没有窗口化验收）。
+- **没给样例项目加第二关**：`projects/SampleScene` 被大量测试与截图钉着，
+  往入口场景塞实体 / 加场景会牵动它们的基线。想做演示的话，建议单独加一对
+  `Menu.ron` + `Level1.ron`，再配一个"按 E 切场景"的脚本 —— 下一轮的事。
