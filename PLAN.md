@@ -4103,19 +4103,23 @@ Stop 时补一句"Play 期间场景切到了 X"，否则用户会以为切过去
 - **全量**：`cargo test --workspace --all-targets -j 2 -- --test-threads=4`
   → **722 passed / 0 failed / 7 ignored**（上一轮 717，净增 5）；
   `cargo clippy --workspace --all-targets` → **0 警告**。
-- **CLI 实跑**（临时双场景项目，`target/e2e_switch`，从 SampleScene 复制并加一张
-  `Level2.ron` 与切换脚本）：
+- **CLI 实跑**（临时双场景项目：从 `projects/SampleScene` 复制，加一张
+  `Scenes/Level2.ron` 与一个"第 5 帧切过去"的脚本；验证完即删，不进仓库）：
   - `--check` → `scenes=2 entities=48 ... check: OK`，退出码 0（副本场景不会被
     误当资产 / 不污染清单）；
   - `--headless --frames 20` → `scene_loads: 1`、`scene_current: "Scenes/Level2.ron"`、
     `logs: {info: 3, warn: 0, error: 0}`、`ok: true`、退出码 0 ——
     三条 info 分别是 `switch-start:` / `switch-request:` / `场景已切换 →`；
-  - `cargo run -p xgame-game -- target/e2e_switch`（独立游戏宿主，窗口化实跑）：
+  - `cargo run -p xgame-game -- <项目>`（独立游戏宿主，窗口化实跑）：
     stderr 依次出现 `switch-start:Scenes/scene.ron` → `switch-request:Scenes/scene.ron`
     → `运行时: 场景已切换 → Scenes/Level2.ron（实体 24 → 24）`，之后继续正常渲染
-    （手动结束进程，未观察到崩溃或串味）。**编辑器 Play 的同一路径没有窗口化验收**
-    （它跑的是同一个 `World::update` 与同一个装载器注入，差异只在场景所有权交换，
-    而那个机制本来每帧都在跑）。
+    （手动结束进程，未观察到崩溃或串味）。
+  - **编辑器 Play 也验过**（`dist\xgame-editor.exe --ui-play --ui-frames 30 --ui-shot`）：
+    截图里工具栏右侧显示 `Level 2 · 24 entities`、Console 有
+    `[运行时] 场景已切换 → Scenes/Level2.ron（实体 24 → 24）`，视口正常出图；
+    把脚本的触发帧改成永不触发再截一张，两张图 **md5 不同**（729 266 B vs 708 262 B）——
+    说明视口渲染的确实是**切换后**的场景，不是"只改了状态栏"。
+    （Level2 特意把地面抬高了 3 米，否则两份拷贝的截图看不出差别。）
   - 把脚本改成加载不存在的场景 → `ok: false`、退出码 **2**、
     `error_samples` 里是 `切换场景 'Scenes/Missing.ron' 失败：无法读取 '...'（os error 2）`，
     且实体数仍是 24（旧场景照常跑）。
