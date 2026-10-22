@@ -120,11 +120,15 @@
 无头验证项目（与编辑器 `xgame-editor --check` 是**同一份** `xgame-core::check_project`）。
 
 - **入参**：`project`
-- **返回**（JSON）：`entities` / `lights` / `script_refs` / `audio_refs` / `material_refs` /
+- **返回**（JSON）：`scenes` / `entities` / `lights` / `script_refs` / `audio_refs` / `material_refs` /
   `assets` / `missing_models` / `missing_scripts` / `missing_audio` / `missing_prefabs` /
   `missing_materials` / `missing_material_textures` / `invalid_materials` /
-  `dangling_guids`（场景里 `guid://…` 查无此资产）/ `missing_metas` / `orphan_metas` /
-  `invalid_metas` / `guid_conflicts` / `has_issues` / `issue_count` / `render`（人读摘要）
+  `dangling_guids`（场景里 `guid://…` 查无此资产）/ `invalid_scenes`（非入口场景加载失败）/
+  `missing_metas` / `orphan_metas` / `invalid_metas` / `guid_conflicts` / `has_issues` /
+  `issue_count` / `render`（人读摘要）
+- **场景范围**：入口场景 + `Scenes/` 下全部 `.ron`；`entities` / `lights` 是全部场景合计。
+  入口场景坏掉 → 工具失败（对应 `--check` 退出码 1）；非入口场景坏掉 → `invalid_scenes`
+  （退出码 2），其余场景照常检查。
 - **只读契约**：它**不会**给缺 `.meta` 的资产生成身份证（那会让"检查一遍"改变项目）。
 - **闭环用法**：改（2/3/4/5）→ `project_check` → `has_issues` 必须为 `false`。
 

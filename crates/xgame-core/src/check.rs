@@ -8,7 +8,9 @@
 //!
 //! # 契约
 //!
-//! - 任何**加载失败**（清单坏、入口场景坏）返回 `Err`；
+//! - 清单坏 / **入口场景**加载失败返回 `Err`（启动契约断了，退出码 1）；
+//! - 其余场景加载失败记进 [`CheckReport::invalid_scenes`]，检查继续跑完 ——
+//!   一张关卡坏掉不该掩盖其他关卡的问题（退出码 2）；
 //! - 加载成功但引用悬空 / 资产缺身份证记在 [`CheckReport`] 里（`has_issues()`）——
 //!   缺资产不阻断运行时加载（有兜底），但检查方必须知道。
 //!
@@ -29,9 +31,11 @@ use crate::project::ProjectHandle;
 /// 检查结果：能加载到什么程度、有哪些可疑引用。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CheckReport {
-    /// 入口场景的实体数。
+    /// 成功加载的场景数（入口 + `Scenes/*.ron`）。
+    pub scenes: usize,
+    /// 全部场景合计的实体数。
     pub entities: usize,
-    /// 光源数。
+    /// 全部场景合计的光源数。
     pub lights: usize,
     /// 实体上挂的脚本引用总数。
     pub script_refs: usize,
@@ -64,6 +68,11 @@ pub struct CheckReport {
     pub dangling_guids: Vec<String>,
     /// 有资产文件但没有 `.meta` 的（项目相对路径）。
     pub missing_metas: Vec<String>,
+    /// 非入口场景加载失败的（"路径 (原因)"）。
+    ///
+    /// 入口场景坏掉是 `Err`（启动契约断了）；其余关卡坏掉只算问题：多场景
+    /// 项目里一张关卡写坏，不该让整条检查命令失去"其他关卡怎么样"的视野。
+    pub invalid_scenes: Vec<String>,
     /// `.meta` 还在但资产文件没了的（孤儿）。
     pub orphan_metas: Vec<String>,
     /// 解析失败的 `.meta`。
@@ -84,6 +93,7 @@ impl CheckReport {
             || !self.missing_ui_images.is_empty()
             || !self.missing_prefabs.is_empty()
             || !self.dangling_guids.is_empty()
+            || !self.invalid_scenes.is_empty()
             || !self.missing_metas.is_empty()
             || !self.orphan_metas.is_empty()
             || !self.invalid_metas.is_empty()
@@ -101,6 +111,7 @@ impl CheckReport {
             + self.missing_ui_images.len()
             + self.missing_prefabs.len()
             + self.dangling_guids.len()
+            + self.invalid_scenes.len()
             + self.missing_metas.len()
             + self.orphan_metas.len()
             + self.invalid_metas.len()
@@ -112,7 +123,8 @@ impl CheckReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "check: entities={} lights={} script_refs={} audio_refs={} material_refs={} assets={}",
+            "check: scenes={} entities={} lights={} script_refs={} audio_refs={} material_refs={} assets={}",
+            self.scenes,
             self.entities,
             self.lights,
             self.script_refs,
@@ -152,6 +164,9 @@ impl CheckReport {
         for g in &self.dangling_guids {
             let _ = writeln!(out, "  dangling guid:  {g}");
         }
+        for s in &self.invalid_scenes {
+            let _ = writeln!(out, "  invalid scene:  {s}");
+        }
         for m in &self.missing_metas {
             let _ = writeln!(out, "  missing .meta:  {m}");
         }
@@ -168,19 +183,31 @@ impl CheckReport {
     }
 }
 
-/// 无头检查一个项目：清单能解析、入口场景能加载、引用的资产真实存在、
-/// 资产身份证（`.meta`）齐全且不冲突。
+/// 无头检查一个项目：清单能解析、入口场景能加载、**所有场景**引用的资产
+/// 真实存在、资产身份证（`.meta`）齐全且不冲突。
 pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     let project = ProjectHandle::open(root).map_err(|e| e.to_string())?;
-    let scene = project
+
+    // 入口场景先单独加载：它是启动契约的一部分，坏掉必须让 `--check` 硬失败
+    // （退出码 1），而不是混进"有问题的场景"里只算警告。
+    let entry_scene = project
         .load_entry_scene()
         .map_err(|e| format!("加载入口场景失败: {e}"))?;
+    let entry = project.manifest().entry_scene.clone();
+    let entry_key = entry.replace('\\', "/");
 
-    let mut report = CheckReport {
-        entities: scene.entities.len(),
-        lights: scene.lights.len(),
-        ..CheckReport::default()
-    };
+    let mut report = CheckReport::default();
+    let mut scenes = vec![(entry.clone(), entry_scene)];
+    for relative in project.list_scenes() {
+        if relative == entry || relative == entry_key {
+            continue;
+        }
+        match project.load_scene(&relative) {
+            Ok(scene) => scenes.push((relative, scene)),
+            // 单张关卡坏掉不阻断检查：报告里点名，其他场景照常查完。
+            Err(e) => report.invalid_scenes.push(format!("{relative} ({e})")),
+        }
+    }
 
     // -- 资产库诊断（只读，不生成任何文件）--------------------------------
     {
@@ -206,94 +233,13 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     }
 
     // -- 场景引用 ---------------------------------------------------------
-    // 材质按路径去重：同一个材质挂在一百个实体上时，坏文件只该报一次。
+    // 材质按路径**跨场景**去重：同一个材质挂在一百个实体上时，坏文件只该报一次。
     let mut materials: BTreeMap<String, String> = BTreeMap::new();
-    for entity in &scene.entities {
-        // `builtin://cube` 这类是**生成的几何**（渲染器直接造，盘上没有文件），
-        // 当成缺失资产报出来就是狼来了 —— 调用方只要真的断了引用才该知道。
-        if entity.has_model() {
-            if is_guid_reference(&entity.model) {
-                // 加载期解码失败的悬空 GUID 会原样留在内存里。
-                report
-                    .dangling_guids
-                    .push(format!("{} -> {}", entity.name, entity.model));
-            } else if !entity.model.starts_with("builtin://")
-                && !project.path(&entity.model).is_file()
-            {
-                report
-                    .missing_models
-                    .push(format!("{} -> {}", entity.name, entity.model));
-            }
-        }
-        if let Some(material) = &entity.material_asset {
-            if !material.is_empty() {
-                report.material_refs += 1;
-                materials
-                    .entry(material.clone())
-                    .or_insert_with(|| entity.name.clone());
-                if is_guid_reference(material) {
-                    // 加载期解码失败的悬空 GUID 会原样留在内存里。
-                    report
-                        .dangling_guids
-                        .push(format!("{} -> {}", entity.name, material));
-                }
-            }
-        }
-        for script in &entity.scripts {
-            report.script_refs += 1;
-            if is_guid_reference(script) {
-                report
-                    .dangling_guids
-                    .push(format!("{} -> {}", entity.name, script));
-            } else if !project.path(script).is_file() {
-                report
-                    .missing_scripts
-                    .push(format!("{} -> {}", entity.name, script));
-            }
-        }
-        if let Some(audio) = &entity.audio {
-            if !audio.clip.is_empty() {
-                report.audio_refs += 1;
-                if is_guid_reference(&audio.clip) {
-                    report
-                        .dangling_guids
-                        .push(format!("{} -> {}", entity.name, audio.clip));
-                } else if !project.path(&audio.clip).is_file() {
-                    report
-                        .missing_audio
-                        .push(format!("{} -> {}", entity.name, audio.clip));
-                }
-            }
-        }
-        // UI 图片：与模型同款规则（GUID 悬空 vs 路径不存在分开报）。
-        if let Some(image) = entity.ui.as_ref().and_then(|ui| ui.image.as_ref()) {
-            if !image.path.is_empty() {
-                if is_guid_reference(&image.path) {
-                    report
-                        .dangling_guids
-                        .push(format!("{} -> {}", entity.name, image.path));
-                } else if !project.path(&image.path).is_file() {
-                    report
-                        .missing_ui_images
-                        .push(format!("{} -> {}", entity.name, image.path));
-                }
-            }
-        }
-        // 预制体引用：整棵实例的每个实体都带同一份 `source`，只报根一次，
-        // 否则一个 20 节点的实例会刷 20 行一模一样的问题。
-        if let Some(link) = &entity.prefab {
-            if link.is_root {
-                if is_guid_reference(&link.source) {
-                    report
-                        .dangling_guids
-                        .push(format!("{} -> {}", entity.name, link.source));
-                } else if !project.path(&link.source).is_file() {
-                    report
-                        .missing_prefabs
-                        .push(format!("{} -> {}", entity.name, link.source));
-                }
-            }
-        }
+    for (relative, scene) in &scenes {
+        report.scenes += 1;
+        report.entities += scene.entities.len();
+        report.lights += scene.lights.len();
+        check_scene_references(&project, relative, scene, &mut report, &mut materials);
     }
 
     // -- 材质内容（引用的材质能不能读、里面的贴图在不在）------------------
@@ -330,6 +276,109 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     Ok(report)
 }
 
+/// 检查单张场景里的实体引用。
+///
+/// `relative` 会拼在每条问题前面（`Scenes/Level2.ron: Ghost -> ...`）：多场景
+/// 项目里只说实体名根本定位不到是哪张关卡。材质收集到 `materials` 里跨场景
+/// 去重，值记"首次引用它的场景 + 实体"，让缺失材质也有落点。
+fn check_scene_references(
+    project: &ProjectHandle,
+    relative: &str,
+    scene: &crate::Scene,
+    report: &mut CheckReport,
+    materials: &mut BTreeMap<String, String>,
+) {
+    let at = |name: &str| format!("{relative}: {name}");
+
+    for entity in &scene.entities {
+        // `builtin://cube` 这类是**生成的几何**（渲染器直接造，盘上没有文件），
+        // 当成缺失资产报出来就是狼来了 —— 调用方只要真的断了引用才该知道。
+        if entity.has_model() {
+            if is_guid_reference(&entity.model) {
+                // 加载期解码失败的悬空 GUID 会原样留在内存里。
+                report
+                    .dangling_guids
+                    .push(format!("{} -> {}", at(&entity.name), entity.model));
+            } else if !entity.model.starts_with("builtin://")
+                && !project.path(&entity.model).is_file()
+            {
+                report
+                    .missing_models
+                    .push(format!("{} -> {}", at(&entity.name), entity.model));
+            }
+        }
+        if let Some(material) = &entity.material_asset {
+            if !material.is_empty() {
+                report.material_refs += 1;
+                materials
+                    .entry(material.clone())
+                    .or_insert_with(|| at(&entity.name));
+                if is_guid_reference(material) {
+                    // 加载期解码失败的悬空 GUID 会原样留在内存里。
+                    report
+                        .dangling_guids
+                        .push(format!("{} -> {}", at(&entity.name), material));
+                }
+            }
+        }
+        for script in &entity.scripts {
+            report.script_refs += 1;
+            if is_guid_reference(script) {
+                report
+                    .dangling_guids
+                    .push(format!("{} -> {}", at(&entity.name), script));
+            } else if !project.path(script).is_file() {
+                report
+                    .missing_scripts
+                    .push(format!("{} -> {}", at(&entity.name), script));
+            }
+        }
+        if let Some(audio) = &entity.audio {
+            if !audio.clip.is_empty() {
+                report.audio_refs += 1;
+                if is_guid_reference(&audio.clip) {
+                    report
+                        .dangling_guids
+                        .push(format!("{} -> {}", at(&entity.name), audio.clip));
+                } else if !project.path(&audio.clip).is_file() {
+                    report
+                        .missing_audio
+                        .push(format!("{} -> {}", at(&entity.name), audio.clip));
+                }
+            }
+        }
+        // UI 图片：与模型同款规则（GUID 悬空 vs 路径不存在分开报）。
+        if let Some(image) = entity.ui.as_ref().and_then(|ui| ui.image.as_ref()) {
+            if !image.path.is_empty() {
+                if is_guid_reference(&image.path) {
+                    report
+                        .dangling_guids
+                        .push(format!("{} -> {}", at(&entity.name), image.path));
+                } else if !project.path(&image.path).is_file() {
+                    report
+                        .missing_ui_images
+                        .push(format!("{} -> {}", at(&entity.name), image.path));
+                }
+            }
+        }
+        // 预制体引用：整棵实例的每个实体都带同一份 `source`，只报根一次，
+        // 否则一个 20 节点的实例会刷 20 行一模一样的问题。
+        if let Some(link) = &entity.prefab {
+            if link.is_root {
+                if is_guid_reference(&link.source) {
+                    report
+                        .dangling_guids
+                        .push(format!("{} -> {}", at(&entity.name), link.source));
+                } else if !project.path(&link.source).is_file() {
+                    report
+                        .missing_prefabs
+                        .push(format!("{} -> {}", at(&entity.name), link.source));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +403,7 @@ mod tests {
         let project = temp_project("clean");
         let report = check_project(project.root()).expect("干净项目应能检查");
         assert!(!report.has_issues(), "{}", report.render());
+        assert_eq!(report.scenes, 1, "默认项目只有入口场景");
         assert!(report.entities >= 1, "默认场景至少有一个实体");
         let _ = std::fs::remove_dir_all(project.root());
     }
@@ -389,6 +439,63 @@ mod tests {
         assert!(text.contains("missing model"), "{text}");
         assert!(text.contains("missing script"), "{text}");
         assert!(text.contains("missing audio"), "{text}");
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 非入口场景也要检查：只查入口场景时，第二关的断引用会一路漏到运行时。
+    ///
+    /// 旧实现只 `load_entry_scene()`，这条断言必红（`missing_models` 为空）。
+    #[test]
+    fn non_entry_scenes_are_checked() {
+        let project = temp_project("all_scenes");
+        let mut level2 = crate::project::default_scene();
+        level2.name = "Level2".to_owned();
+        level2.entities.push(
+            crate::Entity::new("Ghost")
+                .with_model("Resources/NotThere.glb")
+                .with_script("Scripts/NotThere.lua"),
+        );
+        project.write_scene("Scenes/Level2.ron", &level2).unwrap();
+
+        let report = check_project(project.root()).expect("坏的是非入口场景，检查不该失败");
+        assert_eq!(report.scenes, 2, "{}", report.render());
+        assert!(report.has_issues());
+        assert_eq!(report.missing_models.len(), 1, "{}", report.render());
+        assert!(
+            report.missing_models[0].starts_with("Scenes/Level2.ron:"),
+            "问题必须带场景路径，否则定位不到是哪一关: {}",
+            report.missing_models[0]
+        );
+        assert_eq!(report.missing_scripts.len(), 1, "{}", report.render());
+        assert!(report.render().contains("Scenes/Level2.ron"));
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 非入口场景文件本身写坏：记 `invalid_scenes` + 退出码 2，不返回 `Err`；
+    /// 入口场景写坏才是 `Err`（退出码 1，启动契约断了）。
+    #[test]
+    fn broken_non_entry_scene_is_an_issue_not_fatal() {
+        let project = temp_project("broken_scene");
+        std::fs::write(project.path("Scenes/Level2.ron"), "this is not ron ((").unwrap();
+
+        let report = check_project(project.root()).expect("单张关卡坏掉不该让整条命令失败");
+        assert_eq!(report.invalid_scenes.len(), 1, "{}", report.render());
+        assert!(
+            report.invalid_scenes[0].starts_with("Scenes/Level2.ron"),
+            "{}",
+            report.invalid_scenes[0]
+        );
+        assert!(report.has_issues());
+        assert!(report.render().contains("invalid scene"));
+
+        let entry = project.manifest().entry_scene.clone();
+        std::fs::write(project.path(&entry), "this is not ron ((").unwrap();
+        assert!(
+            check_project(project.root()).is_err(),
+            "入口场景坏掉必须硬失败（退出码 1）"
+        );
 
         let _ = std::fs::remove_dir_all(project.root());
     }

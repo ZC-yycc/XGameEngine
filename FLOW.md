@@ -119,14 +119,14 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
  0  关窗拦截（update，editor_ui 之前）
                         close_requested 且场景脏 → CancelClose + 弹「未保存」确认框
  1  ViewportCommand::Title        窗口标题：项目名 + 未保存 `*`（仅变化时发送）
- 2  toolbar::show() + 模式切换     项目 / 💾 Save · Save As / 播放暂停停止 / 变换工具 / ⚙ 设置 / 偏好
- 3  Ctrl+S / Ctrl+Shift+S         保存场景 / 另存为新场景文件
+ 2  toolbar::show() + 模式切换     项目 / 💾 Save · Save As · Scenes / 播放暂停停止 / 变换工具 / ⚙ 设置 / 偏好
+ 3  Ctrl+S / Ctrl+Shift+S         保存当前场景 / 另存为新场景文件（启动场景不变）
  3b Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤销 / 重做（Play 模式下不生效）
  4  physics_step() (仅 Playing)    固定步长物理模拟（整段耗时 → Profiler 的 runtime）
  5  StatusBar                      底部状态栏（含项目名）—— **必须在 CentralPanel 之前**
  6  CentralPanel (egui_tiles)      面板 Dock 布局（整段耗时 → Profiler 的 viewport）
  6b 松手后同步布局                 树变了才写 editor.ron（拖拽中逐帧写盘没有意义）
- 7  应用级弹窗（画在最上层）        Preferences / ⚙ 项目设置窗口 / 场景另存为 / 未保存确认框
+ 7  应用级弹窗（画在最上层）        Preferences / ⚙ 项目设置窗口 / 场景另存为 / 新建场景 / 场景切换确认 / 未保存确认框
  8  帧采样 → state.profiler        帧末写一条样本（环形缓冲，零分配；不驱动重绘）
 ```
 
@@ -233,8 +233,11 @@ if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
 }
 ```
 
-`save_scene()` 把当前 `Scene` 写回**项目清单里的入口场景**（`project.entry_scene`），
-路径由 `ProjectHandle::path` 解析，与编辑器的工作目录无关。
+`save_scene()` 把当前 `Scene` 写回**编辑器正在编辑的场景**（`current_scene`），
+路径由 `ProjectHandle::path` 解析，与编辑器的工作目录无关。**它不再写
+`project.entry_scene`**：启动场景只由 Scenes 菜单的 `Set Current as Startup`
+（`set_startup_scene`）或项目设置显式修改。`save_scene_as` / `new_scene` 也只切
+`current_scene`，不碰启动场景。
 
 #### 阶段 3b：撤销 / 重做
 
@@ -1232,14 +1235,14 @@ Scene(
 
 | 文件 | 行数 | 核心函数 |
 |---|---|---|
-| `editor/main.rs` | 625 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `FrameInputs` 四输入含 `animating` + `--check` 分派）、`open_project()`、`editor_ui()`（末尾画设置 / 另存为 / 未保存弹窗） |
+| `editor/main.rs` | 1263 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `FrameInputs` 四输入含 `animating` + `--check` 分派）、`open_project()`、`editor_ui()`（末尾画设置 / 另存为 / 新建场景 / 场景切换 / 未保存弹窗） |
 | `editor/hub.rs` | 352 | `ProjectHub::ui()`、`open_project_at()`、`create_project_at()` |
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
 | `core/material.rs` | 195 | `MaterialAsset`（base_color / metallic / roughness / albedo）、默认值 / RON 往返 / `sanitized()`、`MATERIAL_EXTENSION` |
-| `core/check.rs` | 446 | `check_project()`（无头验证清单 / 场景 / 引用，退出码 0/1/2 契约的依据；**编辑器 `--check` 与 MCP `project_check` 共用同一份**）、`CheckReport`（含材质 / 材质贴图诊断） |
-| `editor/dialogs.rs` | 141 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_save_as_dialog()` |
-| `editor/state.rs` | 1969 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()` / `save_scene_as()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作、材质草稿 / 新建 / 保存 / 指派（`material_draft` / `create_material` / `save_material_draft` / `assign_material`） |
+| `core/check.rs` | 573 | `check_project()`（无头验证清单 / **全部场景** / 引用，退出码 0/1/2 契约的依据；**编辑器 `--check` 与 MCP `project_check` 共用同一份**）、`CheckReport`（含材质 / 材质贴图 / 非入口坏场景诊断）、`check_scene_references()`（单场景引用检查，问题带场景路径前缀） |
+| `editor/dialogs.rs` | 285 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_scene_change_dialog()`（切换 / 新建前的同一套三选一）、`show_new_scene_dialog()`、`show_save_as_dialog()` |
+| `editor/state.rs` | 2809 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()`（写 `current_scene`）/ `save_scene_as()` / `new_scene()` / `open_scene()` / `set_startup_scene()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作、材质草稿 / 新建 / 保存 / 指派（`material_draft` / `create_material` / `save_material_draft` / `assign_material`） |
 | `editor/scene_renderer.rs` | 1045 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + **材质资产引用** + Animator 配置（含淡入时长、**状态机 entry/参数/状态表/转移表**、**叠加层剪辑/权重/速度/循环**、**层栈每层名字/模式/剪辑/权重/速度/循环/遮罩**（分隔字节防撞））+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`invalidate_assets()` / `invalidate_materials()`（改导入设置 / 存材质后丢缓存）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判、叠加层与层栈按"权重>0 且剪辑存在"判，顺手预加载）、`animation_clip_names()`、`bone_names()`（骨骼名去重跳过匿名，Inspector 遮罩下拉用）、`animation_state()`（状态机当前状态，Inspector 用）、`mesh_bounds()`（拾取用） |
 | `editor/panels/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
@@ -1250,7 +1253,7 @@ Scene(
 | `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
 | `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |
-| `core/project.rs` | 1269 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`、`list_materials()` / `load_material()` / `write_material()`（材质 albedo 的 GUID⇄路径边界）；清单含 `runtime` 节（重力 / 固定步长） |
+| `core/project.rs` | 1269 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_scenes()`（`Scenes/*.ron`，排除 `.prefab.ron`；场景菜单与 `--check` 的真相源）、`load_scene()` / `write_scene()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`、`list_materials()` / `load_material()` / `write_material()`（材质 albedo 的 GUID⇄路径边界）；清单含 `runtime` 节（重力 / 固定步长） |
 | `core/asset.rs` | 1068 | `AssetGuid`（32 位十六进制，生成器 = 进程随机 + 纳秒 + 原子序号）、`AssetMeta`（`.meta` 的 RON：guid/kind/import）、`AssetDatabase`（扫描建 guid↔path、诊断缺/孤儿/坏/冲突、`ensure_metas`、`set_import`、`resolve_reference`/`encode_reference`）、`encode_*`/`decode_*`（场景 / 预制体 / 材质的磁盘⇄内存引用转换） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 1026 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`）；`Entity::animator`（`#[serde(default)]`，旧场景读作 None） |
@@ -1279,7 +1282,7 @@ Scene(
 | `editor/panels/inspector.rs` | 1695 | `show_content()`（含撤销集成、父节点下拉、预制体区块、**材质资产选择器 + 覆盖**、**Animation 区块**：剪辑下拉 / 速度 / Fade / Loop / Autoplay / 状态机 UI / 「+ Additive」叠加层（剪辑下拉 + 权重 DragValue + 摘除）/ **「+ Add Layer」层栈**（每层一行：摘除 ✕ + 名字 TextEdit + 模式 menu_button + 剪辑下拉 + 权重 DragValue；第二行遮罩 chips（点 chip 移出）+ 「+ 骨骼」下拉（来源 `bone_names()`）；增删在闭包外收集后统一应用））|
 | `editor/panels/assets.rs` | 678 | `show_content()`（目录树 + 类型图标 + 详情 + 导入设置 + 材质新建 / 草稿编辑 / Apply·Revert / 指派 + 双击/拖拽放入场景；`join_path`/`join_dir` 保证同名文件不串）|
 | `editor/panels/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|
-| `editor/panels/toolbar.rs` | 191 | `show()`（含 ⌂ Projects / 💾 Save · Save As / 🔨 Build / ⚙ 设置） |
+| `editor/panels/toolbar.rs` | 364 | `show()`（含 ⌂ Projects / 💾 Save · Save As · Scenes / 🔨 Build / ⚙ 设置；Scenes 菜单列出磁盘场景、新建、设启动场景，播放中禁用） |
 | `editor/panels/settings.rs` | 198 | `show()`（项目设置窗口：草稿编辑 → Apply 校验写回 `project.ron`） |
 | `editor/panels/console.rs` | 46 | `show_content()` |
 | `editor/panels/dock.rs` | 117 | `create_tile_tree()`、`EditorBehavior` |

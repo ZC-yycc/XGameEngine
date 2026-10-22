@@ -1030,6 +1030,12 @@ fn editor_ui(
 
     panels::settings::show(&mut session.state, ctx);
     dialogs::show_save_as_dialog(&mut session.state, ctx);
+    dialogs::show_new_scene_dialog(&mut session.state, ctx);
+    dialogs::show_scene_change_dialog(
+        &mut session.state,
+        ctx,
+        ctx.cumulative_pass_nr(),
+    );
     if let Some(target) =
         dialogs::show_exit_dialog(&mut session.state, ctx, ctx.cumulative_pass_nr())
     {

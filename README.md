@@ -19,7 +19,7 @@ cargo run -p xgame-editor -- projects/SampleScene
 # 独立游戏 —— 运行一个项目
 cargo run -p xgame-game -- projects/SampleScene
 
-# 无头项目检查 —— 不开窗口，验证清单 / 场景 / 资产引用 / 资产身份证
+# 无头项目检查 —— 不开窗口，验证清单 / 全部场景 / 资产引用 / 资产身份证
 # （退出码 0=干净 · 1=加载失败 · 2=有问题；给 CI / AI 智能体用）
 cargo run -p xgame-editor -- --check projects/SampleScene
 
@@ -158,13 +158,17 @@ XGameEngine/                  # 引擎源码仓库
   （地板、平台）用包围球会严重高估，连相机都落进球里，导致"点哪儿都选中它、取消不掉"
 - 撤销 / 重做：`Ctrl+Z` · `Ctrl+Shift+Z` · `Ctrl+Y`
 - 复制 / 粘贴：`Ctrl+C` · `Ctrl+V`；复制实体 / 删除：`Ctrl+D` · `Delete`
-- **项目设置（工具栏 ⚙）**：项目名 / 入口场景 / 窗口 / 重力 / 固定步长 / 画面（曝光、
+- **项目设置（工具栏 ⚙）**：项目名 / 启动场景（`entry_scene`）/ 窗口 / 重力 / 固定步长 / 画面（曝光、
   ACES、Bloom、FXAA）可视化编辑，草稿式 Apply 写回 `project.ron`；内容目录目前只在
   `project.ron` 里手改（设置窗口未暴露）。重力与步长不再是引擎源码里的硬编码，编辑器
   Play 与打包游戏读的是**同一份**配置（`WorldConfig::from_project_runtime`）
+- **多场景编辑（工具栏 Scenes）**：菜单列出 `Scenes/*.ron`，点击切换；`New Scene…`
+  新建空场景（主相机 + 方向光）；`Set Current as Startup` 显式改启动场景。
+  **Save 永远写当前场景，Save As / 新建都不改启动场景** —— 要改必须显式设，
+  不会在备份关卡时悄悄改掉游戏入口
 - **未保存保护**：场景有改动时标题栏与工具栏显示 `*`（按帧 memo 的落盘快照比较），
-  关窗 / 返回枢纽前弹确认（保存 / 不保存 / 取消）；`Ctrl+S` 保存、`Ctrl+Shift+S`
-  **另存为**新场景文件并切过去（旧文件原样保留）
+  关窗 / 返回枢纽 / 切换场景前弹确认（保存 / 不保存 / 取消）；`Ctrl+S` 保存**当前场景**、
+  `Ctrl+Shift+S` **另存为**新场景文件并切过去（旧文件原样保留、启动场景不变）
 - **无头检查**：`xgame-editor --check <项目>` 秒级验证项目完整性（见快速开始），
   退出码可判 —— 一条命令跑通"改 → 查 → 自证"闭环
 - **无头运行**：`xgame-editor --headless --frames N <项目>` 不开窗口跑 N 帧，

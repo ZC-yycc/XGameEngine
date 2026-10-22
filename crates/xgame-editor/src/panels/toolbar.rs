@@ -63,7 +63,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 // 所以按钮跟着禁用 —— `save_scene` 里也有一道同语义的硬保护。
                 let can_save = state.is_editing();
                 let save_hint = if can_save {
-                    "保存入口场景（Ctrl+S）"
+                    "保存当前场景（Ctrl+S）"
                 } else {
                     "播放中不能保存 —— 先 ⏹ Stop 回到编辑态"
                 };
@@ -86,6 +86,72 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     state.save_as_open = true;
                     state.save_as_name = state.scene.name.clone();
                 }
+
+                // ── 场景 ──
+                //
+                // 列表以磁盘 `Scenes/*.ron` 为真相源（`scene_list` 现扫），不维
+                // 护第二份清单：用户在资源管理器里加关卡，这里立刻能看到。
+                // 播放中禁用一切场景操作 —— 切换会丢掉 `play_snapshot` 的退路。
+                let editing = state.is_editing();
+                ui.add_enabled_ui(editing, |ui| {
+                    ui.menu_button("Scenes", |ui| {
+                        let current = state.current_scene.clone();
+                        let startup = state.project.manifest().entry_scene.clone();
+                        let scenes = state.scene_list();
+                        if scenes.is_empty() {
+                            ui.label(
+                                egui::RichText::new("(没有场景文件)")
+                                    .size(11.0)
+                                    .color(colors::TEXT_SECONDARY),
+                            );
+                        }
+                        for path in scenes {
+                            let mut suffix = String::new();
+                            if path == current {
+                                suffix.push_str("  · current");
+                            }
+                            if path == startup {
+                                suffix.push_str("  · startup");
+                            }
+                            let label = format!("{}{suffix}", crate::state::scene_label(&path));
+                            // 当前场景点自己没有意义（还会白清撤销栈），直接禁用。
+                            let enabled = path != current;
+                            if ui
+                                .add_enabled(enabled, egui::Button::new(label))
+                                .on_hover_text(format!("{path}\n点击后切换编辑场景"))
+                                .clicked()
+                            {
+                                state.request_scene_open(path);
+                                ui.close_menu();
+                            }
+                        }
+
+                        ui.separator();
+
+                        if ui.button("New Scene…").clicked() {
+                            state.request_new_scene();
+                            ui.close_menu();
+                        }
+                        // 已经是启动场景时禁用：避免用户以为点了会有什么变化。
+                        let can_set_startup =
+                            !current.is_empty() && current != startup;
+                        if ui
+                            .add_enabled(
+                                can_set_startup,
+                                egui::Button::new("Set Current as Startup"),
+                            )
+                            .on_hover_text(
+                                "把当前场景设为项目启动场景（写入 project.ron，\
+                                 下次打开 / 构建 / 独立游戏生效）",
+                            )
+                            .clicked()
+                        {
+                            let current = current.clone();
+                            let _ = state.set_startup_scene(&current);
+                            ui.close_menu();
+                        }
+                    });
+                });
 
                 icons::v_separator(ui);
 

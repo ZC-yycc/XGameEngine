@@ -5,8 +5,8 @@
 //! 状态**绑定在一个已打开的项目上**（[`ProjectHandle`]）：场景与资产一律按项目
 //! 根目录解析，编辑器不再依赖进程当前工作目录。
 
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
 use xgame_math::glam::{Quat, Vec3};
 use xgame_core::prefab::{prefab_display_name, Prefab, PrefabInstanceRef};
@@ -29,6 +29,46 @@ fn asset_stem(relative: &str) -> String {
     } else {
         stem.to_string()
     }
+}
+
+/// 场景文件在界面上的显示名（`Scenes/Level2.ron` → `Level2`）。
+///
+/// 菜单里不该出现整条项目相对路径：一排 `Scenes/...` 前缀只会把真正不同的
+/// 部分挤出可视区。完整路径放在悬停提示里。
+pub(crate) fn scene_label(relative: &str) -> String {
+    let file = relative.rsplit('/').next().unwrap_or(relative);
+    file.strip_suffix(".ron").unwrap_or(file).to_string()
+}
+
+/// 校验并规范化一个**项目相对**场景路径。
+///
+/// 场景列表来自磁盘，但设置窗口、对话框和以后的脚本也可能把路径递进来。
+/// 统一在这里挡掉绝对路径、`..`、非 `.ron` 与预制体（`.prefab.ron`）：
+/// 保存路径越界会把文件写到项目外，读路径越界则等于允许编辑器读任意文件。
+fn normalize_scene_relative(raw: &str) -> Result<String, String> {
+    let rel = raw.trim().replace('\\', "/");
+    if rel.is_empty() {
+        return Err("场景路径不能为空".into());
+    }
+    // Windows 盘符（`C:`）与 UNC 前缀在非 Windows 上不一定被 `Path` 认成绝对路径，
+    // 这里显式再挡一次；编辑器的主要平台是 Windows，不能靠平台差异放行。
+    if rel.starts_with('/') || rel.as_bytes().get(1) == Some(&b':') {
+        return Err(format!("场景路径必须是项目相对路径: {raw}"));
+    }
+
+    let path = Path::new(&rel);
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            _ => return Err(format!("场景路径不能包含 `..` 或绝对路径: {raw}")),
+        }
+    }
+    let normalized = parts.join("/");
+    if !normalized.ends_with(".ron") || normalized.ends_with(".prefab.ron") {
+        return Err(format!("场景文件必须以 .ron 结尾: {raw}"));
+    }
+    Ok(normalized)
 }
 
 /// 给新材质找一个不撞车的路径（`Wood.mat` → `Wood 2.mat` → …）。
@@ -77,6 +117,18 @@ pub enum ExitTarget {
     Hub,
     /// 关闭编辑器窗口。
     Quit,
+}
+
+/// 有未保存改动时，用户请求的**场景切换**动作。
+///
+/// 和 [`ExitTarget`] 分开：退出是 Copy 的小枚举，切场景要带一条项目相对路径。
+/// 两者共用「保存 / 不保存 / 取消」三选一的交互，但落点不同。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneChange {
+    /// 打开另一个场景文件。
+    Open(String),
+    /// 新建场景（先走命名对话框）。
+    New,
 }
 
 /// Edit 模式下一份「可调参数的组件副本」（纯数据，不挂 World、不跑钩子）。
@@ -444,6 +496,12 @@ pub struct EditorState {
     // -- Scene --
     /// 当前加载的场景（实体 + 元数据）。
     pub scene: Scene,
+    /// 当前编辑场景的**项目相对路径**（保存目标）。
+    ///
+    /// 它和 `scene.name` 是两件事：`scene.name` 是文件里的展示名，可以随便起；
+    /// 本字段决定 `save_scene` 写哪个文件。切场景时必须一起换，否则在 Level2
+    /// 里按 Ctrl+S 会把入口场景覆盖掉。
+    pub current_scene: String,
     /// 当前选中实体在 `scene.entities` 中的索引；`None` = 未选中。
     pub selected_entity: Option<usize>,
 
@@ -565,6 +623,12 @@ pub struct EditorState {
     pub save_as_open: bool,
     /// 「场景另存为」的名称输入。
     pub save_as_name: String,
+    /// 「新建场景」对话框是否显示。
+    pub new_scene_open: bool,
+    /// 「新建场景」的名称输入。
+    pub new_scene_name: String,
+    /// 有未保存改动时暂存的场景切换请求；`Some` 时弹确认框。
+    pub pending_scene_change: Option<SceneChange>,
     /// 「项目设置」窗口是否显示。
     pub settings_open: bool,
     /// 请求打开「编辑器偏好」窗口。
@@ -700,7 +764,10 @@ pub struct EditorState {
 impl EditorState {
     /// 打开一个项目：加载其入口场景并初始化编辑器状态。
     pub fn new(project: ProjectHandle) -> Self {
-        let scene = match project.load_entry_scene() {
+        // 入口场景 = 本次会话的起始「当前场景」。之后切换场景只改
+        // `current_scene`，不会再碰清单里的启动场景（那是显式操作）。
+        let current_scene = project.manifest().entry_scene.clone();
+        let scene = match project.load_scene(&current_scene) {
             Ok(scene) => scene,
             Err(e) => {
                 eprintln!("[EditorState] {e}");
@@ -713,6 +780,7 @@ impl EditorState {
             last_build_dir: None,
 
             scene,
+            current_scene,
             selected_entity: None,
 
             editor_camera: EditorCamera::default(),
@@ -746,6 +814,9 @@ impl EditorState {
             dirty_memo: None,
             save_as_open: false,
             save_as_name: String::new(),
+            new_scene_open: false,
+            new_scene_name: String::new(),
+            pending_scene_change: None,
             settings_open: false,
             open_preferences: false,
             settings_draft: None,
@@ -2136,7 +2207,12 @@ impl EditorState {
         self.project.path(relative)
     }
 
-    /// 把当前场景保存回项目的入口场景文件。
+    /// 把当前场景保存回它自己的文件（[`current_scene`](Self::current_scene)）。
+    ///
+    /// 早先这里写死 `entry_scene`：只有一张地图时等价，一旦切到别的关卡，
+    /// 在 Level2 里按 Ctrl+S 会把入口场景覆盖成 Level2 的内容。现在保存目标
+    /// 与启动场景彻底分开，入口场景只能由 [`set_startup_scene`](Self::set_startup_scene)
+    /// 或项目设置显式修改。
     ///
     /// 成功后刷新脏检查基准（[`saved_snapshot`](Self::saved_snapshot)），
     /// 否则刚保存完工具栏还挂着 "未保存" 的星号。
@@ -2151,13 +2227,18 @@ impl EditorState {
             self.log_warning(message.clone());
             return Err(message);
         }
-        let entry = self.project.manifest().entry_scene.clone();
-        let relative = self.project.path(&entry);
-        let result = self.project.write_scene(&entry, &self.scene);
-        match result {
+        let relative = if self.current_scene.trim().is_empty() {
+            // 理论不可达（`new` 一定填入口场景）；留一条兜底，免得空路径把
+            // `project.path("")` 变成项目根目录然后写盘失败得莫名其妙。
+            self.project.manifest().entry_scene.clone()
+        } else {
+            self.current_scene.clone()
+        };
+        let path = self.project.path(&relative);
+        match self.project.write_scene(&relative, &self.scene) {
             Ok(()) => {
                 self.mark_saved();
-                self.log_success(format!("已保存场景 → {}", relative.display()));
+                self.log_success(format!("已保存场景 → {}", path.display()));
                 Ok(())
             }
             Err(e) => {
@@ -2205,32 +2286,37 @@ impl EditorState {
         dirty
     }
 
-    /// 场景**另存为**一个新文件，并把入口场景切过去（语义对齐 Unity 的 Save As）。
+    /// 场景文件列表（**项目相对路径**，已排序）。
     ///
-    /// - 旧场景文件保持原样 —— 改坏了随时能从旧文件重来；
-    /// - `entry_scene` 跟着切到新文件并落盘清单，下次打开项目直接进新场景；
-    /// - 场景名同步成新文件名（场景名就是给它当展示名用的）。
-    ///
-    /// 名字只作**文件名**：路径分隔符、`..` 与 Windows 非法字符会被拒绝，
-    /// 防手滑把场景写到项目外面去（清单是手改/机器写的文本，同样不能信）。
-    pub fn save_scene_as(&mut self, raw_name: &str) -> Result<(), String> {
-        // 同 `save_scene`：播放中不许写盘（`self.scene` 是运行时副本）。
-        if self.play_mode != PlayMode::Edit {
-            let message = "播放中不能另存场景 —— 先按 ⏹ Stop 回到编辑态".to_owned();
-            self.log_warning(message.clone());
-            return Err(message);
+    /// 磁盘扫描是真相源：用户在资源管理器里新建 / 删除场景后，下次打开菜单
+    /// 就能看到，不需要维护第二份清单。入口场景与当前场景即使不在 `Scenes/`
+    /// 里也会补进来（老项目可能把场景放在自定义目录）。
+    pub fn scene_list(&self) -> Vec<String> {
+        let mut scenes: BTreeSet<String> = self.project.list_scenes().into_iter().collect();
+        for raw in [
+            self.current_scene.as_str(),
+            self.project.manifest().entry_scene.as_str(),
+        ] {
+            if let Ok(path) = normalize_scene_relative(raw) {
+                scenes.insert(path);
+            }
         }
+        scenes.into_iter().collect()
+    }
+
+    /// 把一个用户输入的**场景名**变成项目相对路径（不加扩展名时补 `.ron`）。
+    ///
+    /// 名字只作文件名：路径分隔符、`..` 与 Windows 非法字符会被拒绝，
+    /// 防手滑把场景写到项目外面去。
+    pub fn scene_path_for_name(&self, raw_name: &str) -> Result<String, String> {
         let name = raw_name.trim();
+        let name = name.strip_suffix(".ron").unwrap_or(name).trim_end();
         if name.is_empty() {
-            self.log_error("另存为失败: 场景名不能为空");
             return Err("场景名不能为空".into());
         }
         if name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) || name.contains("..") {
-            let message = format!("场景名含非法字符: {name}");
-            self.log_error(format!("另存为失败: {message}"));
-            return Err(message);
+            return Err(format!("场景名含非法字符: {name}"));
         }
-
         let scenes_dir = self
             .project
             .manifest()
@@ -2244,27 +2330,227 @@ impl EditorState {
         } else {
             format!("{scenes_dir}/{name}.ron")
         };
+        normalize_scene_relative(&relative)
+    }
 
-        self.scene.name = name.to_string();
-        if let Err(e) = self.project.write_scene(&relative, &self.scene) {
+    /// 打开另一个场景并把它设为当前编辑场景。
+    ///
+    /// **不在这里问"要不要保存"**：确认框需要 egui，而状态层要能在测试里
+    /// 直接调用。交互入口走 [`request_scene_open`](Self::request_scene_open)。
+    pub fn open_scene(&mut self, relative: &str) -> Result<(), String> {
+        if self.play_mode != PlayMode::Edit {
+            let message = "播放中不能切换场景 —— 先按 ⏹ Stop 回到编辑态".to_owned();
+            self.log_warning(message.clone());
+            return Err(message);
+        }
+        let relative = normalize_scene_relative(relative)?;
+        let scene = match self.project.load_scene(&relative) {
+            Ok(scene) => scene,
+            Err(e) => {
+                let message = format!("打开场景失败: {e}");
+                self.log_error(message.clone());
+                return Err(message);
+            }
+        };
+        let path = self.project.path(&relative);
+        self.adopt_scene(scene, relative);
+        self.log_success(format!("已打开场景 → {}", path.display()));
+        Ok(())
+    }
+
+    /// 交互入口：有未保存改动就先挂起，交给确认框；干净时直接切换。
+    pub fn request_scene_open(&mut self, relative: String) {
+        if self.play_mode != PlayMode::Edit {
+            self.log_warning("播放中不能切换场景 —— 先按 ⏹ Stop 回到编辑态");
+            return;
+        }
+        let Ok(relative) = normalize_scene_relative(&relative) else {
+            self.log_error(format!("场景路径无效: {relative}"));
+            return;
+        };
+        if relative == self.current_scene {
+            return;
+        }
+        if self.scene_dirty() {
+            self.pending_scene_change = Some(SceneChange::Open(relative));
+        } else {
+            // `open_scene` 自己会把失败写进 Console，这里不再重复记一条。
+            let _ = self.open_scene(&relative);
+        }
+    }
+
+    /// 交互入口：新建场景；有未保存改动时先挂起确认。
+    pub fn request_new_scene(&mut self) {
+        if self.play_mode != PlayMode::Edit {
+            self.log_warning("播放中不能新建场景 —— 先按 ⏹ Stop 回到编辑态");
+            return;
+        }
+        if self.scene_dirty() {
+            self.pending_scene_change = Some(SceneChange::New);
+        } else {
+            self.begin_new_scene();
+        }
+    }
+
+    /// 打开「新建场景」命名对话框。
+    pub fn begin_new_scene(&mut self) {
+        self.new_scene_open = true;
+        self.new_scene_name = "NewScene".to_string();
+    }
+
+    /// 确认框放行后执行暂存的场景动作。
+    pub fn finish_scene_change(&mut self, change: SceneChange) {
+        match change {
+            SceneChange::Open(path) => {
+                let _ = self.open_scene(&path);
+            }
+            SceneChange::New => self.begin_new_scene(),
+        }
+    }
+
+    /// 在场景目录里创建一个空场景（主相机 + 方向光）并切过去。
+    ///
+    /// **不改启动场景**：新建关卡不等于"游戏从这里开始"，要改启动场景请用
+    /// [`set_startup_scene`](Self::set_startup_scene)。同名文件已存在时拒绝，
+    /// 避免一次手滑覆盖掉已有内容。
+    pub fn new_scene(&mut self, raw_name: &str) -> Result<(), String> {
+        if self.play_mode != PlayMode::Edit {
+            let message = "播放中不能新建场景 —— 先按 ⏹ Stop 回到编辑态".to_owned();
+            self.log_warning(message.clone());
+            return Err(message);
+        }
+        let relative = match self.scene_path_for_name(raw_name) {
+            Ok(path) => path,
+            Err(e) => {
+                self.log_error(format!("新建场景失败: {e}"));
+                return Err(e);
+            }
+        };
+        if self.project.path(&relative).exists() {
+            let message = format!("场景已存在: {relative}");
+            self.log_error(format!("新建场景失败: {message}"));
+            return Err(message);
+        }
+
+        let mut scene = xgame_core::project::default_scene();
+        scene.name = scene_label(&relative);
+        if let Err(e) = self.project.write_scene(&relative, &scene) {
+            let message = e.to_string();
+            self.log_error(format!("新建场景失败: {message}"));
+            return Err(message);
+        }
+        let path = self.project.path(&relative);
+        self.adopt_scene(scene, relative);
+        self.log_success(format!(
+            "已新建场景 → {}（启动场景仍是 {}）",
+            path.display(),
+            self.project.manifest().entry_scene
+        ));
+        Ok(())
+    }
+
+    /// 场景切换 / 新建后的统一收尾。
+    ///
+    /// 撤销栈、选中、折叠状态、Edit 组件副本全部属于**上一张场景**：不清掉的话
+    /// 撤销会把旧场景整个贴回来，组件副本还会按 (EntityId, slot) 撞到新场景的
+    /// 实体上。这些状态没有跨场景意义，重置是唯一正确的语义。
+    fn adopt_scene(&mut self, scene: Scene, relative: String) {
+        self.scene = scene;
+        self.current_scene = relative;
+        self.selected_entity = None;
+        self.undo_stack = UndoStack::new();
+        self.undo_pending = None;
+        self.edit_components.clear();
+        self.collapsed_entities.clear();
+        self.collapsed_version = self.collapsed_version.wrapping_add(1);
+        self.hierarchy_cache = crate::panels::hierarchy::RowCache::default();
+        self.gizmo_hovered = None;
+        self.gizmo_active = None;
+        self.asset_drag = None;
+        self.play_snapshot = None;
+        self.saved_snapshot = self.scene.clone();
+        self.dirty_memo = None;
+    }
+
+    /// 把指定场景设为项目启动场景（写 `project.ron` 的 `entry_scene`）。
+    ///
+    /// 下一次打开项目 / 构建 / 独立游戏启动生效；当前编辑场景不变。
+    pub fn set_startup_scene(&mut self, relative: &str) -> Result<(), String> {
+        let relative = normalize_scene_relative(relative)?;
+        if !self.project.path(&relative).is_file() {
+            let message = format!("启动场景不存在: {relative}");
+            self.log_error(message.clone());
+            return Err(message);
+        }
+        let previous = self.project.manifest().entry_scene.clone();
+        if previous == relative {
+            return Ok(());
+        }
+        self.project.manifest_mut().entry_scene = relative.clone();
+        if let Err(e) = self.project.save() {
+            // 清单写失败就回滚内存值，别让界面显示一个磁盘上不存在的启动场景。
+            self.project.manifest_mut().entry_scene = previous;
+            let message = e.to_string();
+            self.log_error(format!("设置启动场景失败: {message}"));
+            return Err(message);
+        }
+        self.log_success(format!(
+            "启动场景已设为 {relative}（下次打开 / 构建生效）"
+        ));
+        Ok(())
+    }
+
+    /// 场景**另存为**一个新文件，并把编辑器切过去。
+    ///
+    /// - 旧场景文件保持原样 —— 改坏了随时能从旧文件重来；
+    /// - **启动场景不变**：另存为是"给当前关卡做一个副本"，不是"让游戏从这里开始"；
+    ///   要改启动场景用 [`set_startup_scene`](Self::set_startup_scene)；
+    /// - 场景名同步成新文件名（场景名就是给它当展示名用的）。
+    ///
+    /// 名字只作**文件名**：路径分隔符、`..` 与 Windows 非法字符会被拒绝，
+    /// 防手滑把场景写到项目外面去（清单是手改/机器写的文本，同样不能信）。
+    pub fn save_scene_as(&mut self, raw_name: &str) -> Result<(), String> {
+        // 同 `save_scene`：播放中不许写盘（`self.scene` 是运行时副本）。
+        if self.play_mode != PlayMode::Edit {
+            let message = "播放中不能另存场景 —— 先按 ⏹ Stop 回到编辑态".to_owned();
+            self.log_warning(message.clone());
+            return Err(message);
+        }
+        let relative = match self.scene_path_for_name(raw_name) {
+            Ok(path) => path,
+            Err(e) => {
+                self.log_error(format!("另存为失败: {e}"));
+                return Err(e);
+            }
+        };
+        if relative == self.current_scene {
+            let message = "目标就是当前场景；用 Save 直接保存".to_string();
+            self.log_warning(message.clone());
+            return Err(message);
+        }
+        if self.project.path(&relative).exists() {
+            let message = format!("场景已存在: {relative}");
+            self.log_error(format!("另存为失败: {message}"));
+            return Err(message);
+        }
+
+        // 写盘成功后才改内存里的场景名：写失败时界面仍应显示旧场景，
+        // 不能让一次失败的「另存为」顺手把当前场景弄脏。
+        let mut scene = self.scene.clone();
+        scene.name = scene_label(&relative);
+        if let Err(e) = self.project.write_scene(&relative, &scene) {
             let message = e.to_string();
             self.log_error(format!("另存为失败: {message}"));
             return Err(message);
         }
 
-        // 入口场景跟着切到新文件。清单写失败不回滚场景文件（已经落盘了，
-        // 回滚反而可能把用户的成果删掉），但要明确警告：否则下次打开还是旧场景。
-        self.project.manifest_mut().entry_scene = relative.clone();
-        if let Err(e) = self.project.save() {
-            self.log_warning(format!(
-                "场景已另存，但项目清单更新失败（请手动改 entry_scene）: {e}"
-            ));
-        }
-
+        self.scene = scene;
+        self.current_scene = relative.clone();
         self.mark_saved();
         self.log_success(format!(
-            "已另存为 → {}（入口场景已切换）",
-            self.project.path(&relative).display()
+            "已另存为 → {}（启动场景仍是 {}）",
+            self.project.path(&relative).display(),
+            self.project.manifest().entry_scene
         ));
         Ok(())
     }
@@ -2291,6 +2577,13 @@ impl EditorState {
         if draft.entry_scene.is_empty() {
             return invalid("入口场景路径不能为空".into(), draft);
         }
+        // 入口场景也会被构建器 / 独立游戏直接拼接成磁盘路径：与场景菜单用同一套
+        // 校验，挡掉绝对路径、`..` 和预制体文件，别让手改的 project.ron 把启动
+        // 路径指到项目外。
+        draft.entry_scene = match normalize_scene_relative(&draft.entry_scene) {
+            Ok(path) => path,
+            Err(e) => return invalid(e, draft),
+        };
 
         // 清单是手改的文本，垃圾值统一在这里夹回安全范围（同 sanitized 语义）。
         draft.window.width = draft.window.width.clamp(320, 16_384);
@@ -2694,9 +2987,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 「另存为」：写新文件、入口场景跟着切、旧文件原样保留、脏状态清零。
+    /// 场景路径是**保存目标**：切到 Level2 后按 Save 只写 Level2，
+    /// 入口场景文件与 `project.ron` 都不该被碰。
+    ///
+    /// 旧实现里 `save_scene` 写死 `entry_scene`，这条断言必红（会把入口场景
+    /// 覆盖成 Level2 的内容）。
     #[test]
-    fn save_as_switches_entry_scene_and_keeps_old_file() {
+    fn open_scene_repoints_save_without_touching_entry() {
+        let (mut state, base) = temp_state("open_scene");
+        let entry = state.project.manifest().entry_scene.clone();
+
+        let mut level2 = xgame_core::project::default_scene();
+        level2.name = "Level2".to_owned();
+        state
+            .project
+            .write_scene("Scenes/Level2.ron", &level2)
+            .expect("先放一个第二场景");
+
+        state.scene.add_entity(xgame_core::Entity::new("entry stuff"));
+        state.save_scene().expect("保存入口场景");
+        let entry_before = state.project.load_scene(&entry).expect("读回入口场景");
+
+        state.open_scene("Scenes/Level2.ron").expect("切换应成功");
+        assert_eq!(state.current_scene, "Scenes/Level2.ron");
+        assert_eq!(state.scene.name, "Level2");
+        assert_eq!(
+            state.project.manifest().entry_scene,
+            entry,
+            "切场景不该改启动场景"
+        );
+
+        state.scene.add_entity(xgame_core::Entity::new("level2 stuff"));
+        state.save_scene().expect("保存当前场景");
+
+        let level2_after = state
+            .project
+            .load_scene("Scenes/Level2.ron")
+            .expect("读回 Level2");
+        assert!(
+            level2_after.entities.iter().any(|e| e.name == "level2 stuff"),
+            "Save 必须写当前场景"
+        );
+        let entry_after = state.project.load_scene(&entry).expect("再读入口场景");
+        assert_eq!(
+            entry_before.entities.len(),
+            entry_after.entities.len(),
+            "入口场景文件必须一个字节都没变"
+        );
+        assert!(
+            !entry_after.entities.iter().any(|e| e.name == "level2 stuff"),
+            "当前场景的内容不许漏进入口场景"
+        );
+        assert!(!state.scene_dirty(), "保存后应当干净");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 「另存为」：写新文件、切当前场景、**启动场景不变**、旧文件原样保留、
+    /// 目标已存在时拒绝（不许一次手滑覆盖别的关卡）。
+    #[test]
+    fn save_as_keeps_startup_and_old_file() {
         let (mut state, base) = temp_state("save_as");
         let old_entry = state.project.manifest().entry_scene.clone();
         let old_path = state.project.path(&old_entry);
@@ -2704,18 +3054,32 @@ mod tests {
         state.scene.add_entity(xgame_core::Entity::new("new stuff"));
         state.save_scene_as("Level2").expect("另存为应成功");
 
-        assert_eq!(state.project.manifest().entry_scene, "Scenes/Level2.ron");
+        assert_eq!(
+            state.project.manifest().entry_scene, old_entry,
+            "另存为只是做副本，不能偷偷改启动场景"
+        );
+        assert_eq!(state.current_scene, "Scenes/Level2.ron");
         assert!(state.project.path("Scenes/Level2.ron").is_file(), "新文件应落盘");
         assert!(old_path.is_file(), "旧场景文件必须原样保留");
         assert!(!state.scene_dirty(), "另存为后应当干净");
         assert_eq!(state.scene.name, "Level2", "场景名应同步成新名");
 
-        // 旧文件没被这次另存改动（里面没有 new stuff 实体）。
         let old_scene = state.project.load_scene(&old_entry).expect("旧场景可读回");
         assert!(
             !old_scene.entities.iter().any(|e| e.name == "new stuff"),
             "另存为不该动旧文件"
         );
+
+        // 目标已存在：拒绝，且当前场景不切走、文件内容不变。
+        state
+            .project
+            .write_scene("Scenes/Taken.ron", &xgame_core::project::default_scene())
+            .expect("先占一个文件名");
+        assert!(
+            state.save_scene_as("Taken").is_err(),
+            "同名文件已存在时必须拒绝，而不是覆盖"
+        );
+        assert_eq!(state.current_scene, "Scenes/Level2.ron");
 
         // 非法名一律拒绝：空名、路径穿越、分隔符。
         assert!(state.save_scene_as("").is_err());
@@ -2723,6 +3087,142 @@ mod tests {
         assert!(state.save_scene_as("../evil").is_err());
         assert!(state.save_scene_as("a/b").is_err());
         assert!(state.save_scene_as("a\\b").is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 新建场景：落盘、切过去、**不自动设为启动场景**、同名拒绝。
+    #[test]
+    fn new_scene_switches_without_setting_startup() {
+        let (mut state, base) = temp_state("new_scene");
+        let entry = state.project.manifest().entry_scene.clone();
+
+        state.new_scene("Level2").expect("新建应成功");
+        assert_eq!(state.current_scene, "Scenes/Level2.ron");
+        assert_eq!(state.scene.name, "Level2");
+        assert!(
+            state.project.path("Scenes/Level2.ron").is_file(),
+            "新场景必须立刻落盘"
+        );
+        assert!(!state.scene.entities.is_empty(), "空场景也要有相机 + 光");
+        assert_eq!(
+            state.project.manifest().entry_scene,
+            entry,
+            "新建关卡不等于让游戏从这里开始"
+        );
+        assert!(!state.scene_dirty(), "刚创建的场景应当是干净的");
+
+        // 同名再建：拒绝，且不把当前场景切成一个坏状态。
+        assert!(state.new_scene("Level2").is_err());
+        assert_eq!(state.current_scene, "Scenes/Level2.ron");
+
+        // 名字只作文件名：路径穿越 / 分隔符 / 预制体后缀都不行。
+        assert!(state.new_scene("../evil").is_err());
+        assert!(state.new_scene("a/b").is_err());
+        assert!(state.new_scene("x.prefab").is_err());
+        assert!(!state.project.path("Scenes/evil.ron").exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 启动场景是显式动作：写 `project.ron`，重启后仍然生效。
+    #[test]
+    fn set_startup_scene_persists() {
+        let (mut state, base) = temp_state("startup");
+        state
+            .project
+            .write_scene("Scenes/Level2.ron", &xgame_core::project::default_scene())
+            .expect("先放一个第二场景");
+
+        state
+            .set_startup_scene("Scenes/Level2.ron")
+            .expect("设置启动场景应成功");
+        assert_eq!(state.project.manifest().entry_scene, "Scenes/Level2.ron");
+
+        let reopened = xgame_core::ProjectHandle::open(state.project.root()).expect("重开项目");
+        assert_eq!(
+            reopened.manifest().entry_scene,
+            "Scenes/Level2.ron",
+            "启动场景必须落盘，不能只活在内存里"
+        );
+
+        // 不存在的文件不许设成启动场景。
+        assert!(state.set_startup_scene("Scenes/Missing.ron").is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 名字 → 路径的约束：补 `.ron`、拒绝绝对路径 / `..` / 分隔符 / 预制体。
+    #[test]
+    fn scene_path_and_name_validation() {
+        let (state, base) = temp_state("scene_paths");
+
+        assert_eq!(
+            state.scene_path_for_name("Level 2").unwrap(),
+            "Scenes/Level 2.ron"
+        );
+        assert_eq!(
+            state.scene_path_for_name("Level2.ron").unwrap(),
+            "Scenes/Level2.ron"
+        );
+        for bad in ["", "   ", "../evil", "a/b", "a\\b", "x.prefab", "C:evil"] {
+            assert!(
+                state.scene_path_for_name(bad).is_err(),
+                "`{bad}` 不该被当成合法场景名"
+            );
+        }
+
+        assert_eq!(
+            normalize_scene_relative("Scenes\\Win.ron").unwrap(),
+            "Scenes/Win.ron"
+        );
+        for bad in [
+            "",
+            "/abs.ron",
+            "C:/abs.ron",
+            "Scenes/../evil.ron",
+            "x.txt",
+            "Scenes/X.prefab.ron",
+        ] {
+            assert!(
+                normalize_scene_relative(bad).is_err(),
+                "`{bad}` 不该通过路径校验"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 有未保存改动时，切换请求只挂起、不动场景；保存后才真正切。
+    #[test]
+    fn dirty_scene_change_is_deferred() {
+        let (mut state, base) = temp_state("deferred");
+        state
+            .project
+            .write_scene("Scenes/Level2.ron", &xgame_core::project::default_scene())
+            .expect("先放一个第二场景");
+        let entry = state.current_scene.clone();
+
+        state.scene.add_entity(xgame_core::Entity::new("dirty"));
+        state.request_scene_open("Scenes/Level2.ron".to_owned());
+        assert_eq!(state.current_scene, entry, "脏的时候不能直接切");
+        assert_eq!(
+            state.pending_scene_change,
+            Some(SceneChange::Open("Scenes/Level2.ron".to_owned()))
+        );
+
+        // 取消 / 保存后重新请求：干净时直接切。
+        state.pending_scene_change = None;
+        state.save_scene().expect("保存");
+        state.request_scene_open("Scenes/Level2.ron".to_owned());
+        assert_eq!(state.current_scene, "Scenes/Level2.ron");
+        assert!(state.pending_scene_change.is_none());
+
+        // 新建同理：脏时只挂起。
+        state.scene.add_entity(xgame_core::Entity::new("dirty again"));
+        state.request_new_scene();
+        assert!(state.pending_scene_change == Some(SceneChange::New));
+        assert!(!state.new_scene_open, "确认前不该弹命名框");
 
         let _ = std::fs::remove_dir_all(&base);
     }
