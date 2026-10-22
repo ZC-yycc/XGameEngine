@@ -4373,8 +4373,8 @@ Stop 时补一句"Play 期间场景切到了 X"，否则用户会以为切过去
 
 ### 五、验证（全部实跑）
 
-- **全量测试**：`754 passed / 0 failed / 7 ignored`（新增 9 条：core 4 / script 1 /
-  runtime 2 / render 1 / editor 1）；clippy 0 警告。
+- **全量测试**：`755 passed / 0 failed / 7 ignored`（新增 10 条：core 4 / script 1 /
+  runtime 3 / render 1 / editor 1）；clippy 0 警告。
 - **无头实跑**（release exe + 临时项目：40m 高动态方块 + 三段式脚本）：
   - 三段式（第 5 帧 0.25 倍速 / 第 40 帧暂停 / 第 70 帧恢复实时），跑 140 帧 →
     `fixed_steps: 83`、`total_time: 1.3958`、`time_scale: 1.0`；

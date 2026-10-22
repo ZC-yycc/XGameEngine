@@ -3148,13 +3148,15 @@ mod tests {
         assert_eq!(world.current_scene(), Some("Scenes/B.ron"), "失败的切换不动场景");
     }
 
-    /// `set_time_scale(ctx, 0)` = 暂停模拟。三件事一起守，少一件就说明缩放
+    /// `set_time_scale(ctx, 0)` = 暂停模拟。四件事一起守，少一件就说明缩放
     /// 没有真正进入帧管线：
     ///
     /// 1. 动态体停在半空（物理固定步没跑）；
     /// 2. `frame_dt()` 归零（脚本 `delta` / 粒子 / 宿主动画钟同源）；
     /// 3. 暂停期间 `update` 仍**每帧执行**（暂停菜单要靠它响应点击 ——
-    ///    这是与"编辑器 Pause 干脆不推进 World"最关键的区别）。
+    ///    这是与"编辑器 Pause 干脆不推进 World"最关键的区别）；
+    /// 4. `fixed_update` **一次都不派发** —— 累计器不涨就没有固定步，
+    ///    不是"派发了但 delta 为 0"。文档里写的就是这条，用它钉住。
     #[test]
     fn script_pause_freezes_physics_but_keeps_update_running() {
         let dir = std::env::temp_dir().join(format!(
@@ -3170,13 +3172,17 @@ mod tests {
             dir.join("Scripts/pause.lua"),
             r#"
             local frames = 0
+            local fixed = 0
+            function fixed_update(ctx)
+                fixed = fixed + 1
+            end
             function update(ctx)
                 frames = frames + 1
                 if frames == 5 then
                     set_time_scale(ctx, 0)
                 end
-                if time_scale(ctx) == 0 then
-                    log(ctx, "paused " .. tostring(frames))
+                if time_scale(ctx) == 0 and frames % 10 == 0 then
+                    log(ctx, "paused " .. tostring(frames) .. " fixed " .. tostring(fixed))
                 end
             end
             "#,
@@ -3223,8 +3229,69 @@ mod tests {
             .filter(|l| l.message.starts_with("paused "))
             .count();
         assert!(
-            paused_ticks >= 25,
+            paused_ticks >= 3,
             "暂停期间 update 仍应每帧执行（暂停菜单靠它），实际 {paused_ticks} 次"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 暂停期间 `fixed_update` **一次都不派发**（不是"派发了但 delta 为 0"）——
+    /// 脚本 API 文档里写的就是这条，所以单独钉一遍。
+    #[test]
+    fn paused_fixed_update_is_never_dispatched() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_pause_fixed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        // 每帧把 fixed_update 的累计次数打出来：暂停后这个数必须冻住。
+        std::fs::write(
+            dir.join("Scripts/count.lua"),
+            r#"
+            local frames = 0
+            local fixed = 0
+            function fixed_update(ctx)
+                fixed = fixed + 1
+            end
+            function update(ctx)
+                frames = frames + 1
+                if frames == 6 then
+                    set_time_scale(ctx, 0)
+                end
+                log(ctx, "tick " .. tostring(frames) .. "|" .. tostring(fixed))
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("count");
+        let mut probe = Entity::new("probe");
+        probe.scripts.push("Scripts/count.lua".to_owned());
+        scene.add_entity(probe);
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+
+        for _ in 0..20 {
+            world.update(1.0 / 60.0);
+        }
+
+        let logs = world.take_logs();
+        let counts: Vec<i64> = logs
+            .iter()
+            .filter_map(|l| l.message.strip_prefix("tick "))
+            .filter_map(|rest| rest.split('|').nth(1))
+            .filter_map(|n| n.trim().parse().ok())
+            .collect();
+        assert!(counts.len() >= 15, "实际只记录到 {} 帧", counts.len());
+        let at_pause = counts[5]; // 第 6 帧（`frames == 6`）写缩放，本帧固定步已跑完
+        assert!(at_pause > 0, "暂停前应当有过固定步");
+        assert!(
+            counts[6..].iter().all(|&c| c == at_pause),
+            "暂停后 fixed_update 不该再派发，实际：{counts:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
