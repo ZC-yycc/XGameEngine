@@ -244,6 +244,18 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
 
                     if icons::icon_button(
                         ui,
+                        Icon::Sliders,
+                        24.0,
+                        "编辑器偏好\n相机速度 / 鼠标灵敏度 / 网格 / 面板布局",
+                        false,
+                    )
+                    .clicked()
+                    {
+                        state.open_preferences = true;
+                    }
+
+                    if icons::icon_button(
+                        ui,
                         Icon::Gear,
                         24.0,
                         "项目设置\n窗口 / 重力 / 固定步长 / 内容目录",

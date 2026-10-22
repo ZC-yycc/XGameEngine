@@ -103,6 +103,15 @@ XGameEngine/                  # 引擎源码仓库
 
 最近项目列表持久化在 `%APPDATA%\XGameEngine\recent_projects.ron`（Windows）。
 
+编辑器偏好与面板布局保存在同一目录的 `editor.ron`：工具栏的滑块按钮打开
+**Preferences** 窗口，可调相机速度 / 鼠标灵敏度 / 视口网格；拖动页签、调整分隔条后
+自动保存，下次启动恢复，窗口里的「恢复默认布局」立即重建出厂布局。`XGAME_CONFIG_DIR`
+可以把整个配置目录指到别处（便携运行 / 隔离验证）。
+
+做无头截图时，`--ui-shot` 默认**只读**：不读也不写 `editor.ron`，保证截图永远对应
+出厂界面；要验证偏好恢复加 `--ui-restore-prefs`，要在截图里打开偏好窗口加
+`--ui-preferences`（见 `AGENTS.md` 的截图自检约定）。
+
 ## 渲染与编辑能力
 
 **渲染**（`xgame-render`，编辑器与独立游戏共用同一条管线）

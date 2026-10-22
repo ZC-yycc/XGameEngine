@@ -16,7 +16,7 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；664 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；679 条 + 7 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
@@ -67,8 +67,8 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - **运行态（Play/Pause）的界面语义**：`scene_dirty_memo` 恒为 false（运行时副本不算
   改动）、`save_scene` / `save_scene_as` 硬拒绝、Pause/Stop 用 `add_enabled_ui` 禁用。
   任何"只在编辑态有意义"的新按钮都要照这三条办。
-- **`--ui-shot` 的五个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
-  `--ui-profiler` / `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
+- **`--ui-shot` 的七个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
+  `--ui-profiler` / `--ui-preferences` / `--ui-restore-prefs` / `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
   `rowscan.py`（按行扫颜色分段量像素）。**用 `--ui-size` 至少扫 1280 / 1440 / 1920
   三档** —— 窄窗口的溢出只有跑过才看得见。
 
@@ -101,6 +101,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 无头 / MCP | 不做第二份帧循环；退出码 2 不是工具失败；JSON 字段名是契约 | §六 |
 | PBR / 材质 | `intensity × π` 亮度标定；材质逐 draw；截图顺光；`MIN_ROUGHNESS = 0.04` | §七 |
 | 材质资产（`.mat`） | 资产是完整材质（替换 PBR，albedo 空 = 纯白）；优先级 模型 → 资产 → 覆盖；批次键必须带材质 | §十七 |
+| 编辑器偏好 / 布局 | 截图默认只读出厂值；坏布局回退出厂；七个面板缺一不可；写盘只在松手 / 关闭 / 退出 | §二十一 |
 | HDR / Bloom | 亮度基线不动；Bloom 阈值在曝光后；光晕在曲线前；默认关且整段跳过 | §八 |
 | 天空 / IBL | 默认关；资源固定分配按 key 重建；太阳 = 第一盏方向光；IBL 与 ambient 相加 | §九 |
 | 实例化 | 分组键 = 「图元 + 材质 key」；顺序 = 首次遇到；半透明不合批；材质组收集阶段预热 | §十 |

@@ -27,6 +27,8 @@ pub enum Icon {
     ChevronRight,
     Save,
     Gear,
+    /// 三根带滑块的横线（编辑器偏好设置）。
+    Sliders,
     Folder,
     Build,
     Refresh,
@@ -284,6 +286,22 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 let a = (i as f32) * std::f32::consts::TAU / 8.0;
                 let dir = Vec2::new(a.cos(), a.sin());
                 painter.line_segment([c + dir * s * 0.28, c + dir * s * 0.38], stroke);
+            }
+        }
+        Icon::Sliders => {
+            // 三根横线 + 错开的滑块：与 Gear 区分开（齿轮是"项目设置"，
+            // 滑块是"编辑器偏好"），不会在工具栏上出现两个一样的按钮。
+            for (i, x) in [0.30_f32, 0.50, 0.70].iter().enumerate() {
+                let y = c.y + (i as f32 - 1.0) * s * 0.22;
+                painter.line_segment(
+                    [
+                        Pos2::new(c.x - s * 0.30, y),
+                        Pos2::new(c.x + s * 0.30, y),
+                    ],
+                    Stroke::new(t * 0.8, color),
+                );
+                let knob_x = c.x + (x - 0.5) * s * 1.1;
+                painter.circle_filled(Pos2::new(knob_x, y), s * 0.09, color);
             }
         }
         Icon::Folder => {

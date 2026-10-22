@@ -12,9 +12,6 @@ use serde::{Deserialize, Serialize};
 /// 最近项目列表上限。
 const MAX_RECENTS: usize = 12;
 
-/// 配置目录名（位于平台的用户配置根目录下）。
-const CONFIG_DIR_NAME: &str = "XGameEngine";
-
 /// 配置文件名。
 const RECENTS_FILE_NAME: &str = "recent_projects.ron";
 
@@ -95,12 +92,7 @@ impl RecentProjects {
 
 /// 配置文件路径。取不到用户配置目录时返回 `None`（此时最近列表功能静默关闭）。
 fn store_path() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-
-    Some(base.join(CONFIG_DIR_NAME).join(RECENTS_FILE_NAME))
+    crate::config::file(RECENTS_FILE_NAME)
 }
 
 #[cfg(test)]

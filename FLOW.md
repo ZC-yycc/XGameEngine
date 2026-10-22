@@ -26,6 +26,8 @@ main()                           crates/xgame-editor/src/main.rs
 ```
 GpuHandles::from(cc.wgpu_render_state)
   └── 保留 device / queue / egui 渲染器    （打开项目后才用来构造视口渲染器）
+EditorPreferences::load()                %APPDATA%\XGameEngine\editor.ron
+  └── --ui-shot 默认改用出厂值（截图只读，不碰用户配置）
 ProjectHub::new()
   ├── RecentProjects::load()              %APPDATA%\XGameEngine\recent_projects.ron
   └── 默认新建位置 = <cwd>/projects（cwd 不像引擎根目录时退回用户文档目录）
@@ -51,6 +53,18 @@ project.load_entry_scene()        路径 = 项目根 / project.entry_scene
   ├── 成功 → 解析为 Scene { name, entities }
   └── 失败 → xgame_core::project::default_scene()  (Main Camera + Directional Light)
 ```
+
+随后把编辑器偏好应用到新状态，并从偏好恢复停靠布局：
+
+```
+EditorPreferences::apply_to_state(&mut state)   相机速度 / 灵敏度 / 网格开关
+session.tree = preferences.layout_for_startup()  校验通过才恢复；否则回退出厂布局
+```
+
+> 布局的校验在 `dock::is_usable_layout`：七个面板必须**恰好各出现一次**，且没有
+> 悬空 / 重复 / 孤儿 tile。磁盘上的 `editor.ron` 是外部输入，坏树直接喂给
+> `egui_tiles::Tree::ui` 轻则少面板、重则 panic；回退出厂布局后，下一次保存会把
+> 好布局写回去（自愈）。
 
 `EditorApp::open_project` 接着构造**视口渲染器**，并把**项目根目录**交给它：
 
@@ -105,13 +119,14 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
  0  关窗拦截（update，editor_ui 之前）
                         close_requested 且场景脏 → CancelClose + 弹「未保存」确认框
  1  ViewportCommand::Title        窗口标题：项目名 + 未保存 `*`（仅变化时发送）
- 2  toolbar::show() + 模式切换     项目 / 💾 Save · Save As / 播放暂停停止 / 变换工具 / ⚙ 设置
+ 2  toolbar::show() + 模式切换     项目 / 💾 Save · Save As / 播放暂停停止 / 变换工具 / ⚙ 设置 / 偏好
  3  Ctrl+S / Ctrl+Shift+S         保存场景 / 另存为新场景文件
  3b Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤销 / 重做（Play 模式下不生效）
  4  physics_step() (仅 Playing)    固定步长物理模拟（整段耗时 → Profiler 的 runtime）
  5  StatusBar                      底部状态栏（含项目名）—— **必须在 CentralPanel 之前**
  6  CentralPanel (egui_tiles)      面板 Dock 布局（整段耗时 → Profiler 的 viewport）
- 7  应用级弹窗（画在最上层）        ⚙ 项目设置窗口 / 场景另存为 / 未保存确认框
+ 6b 松手后同步布局                 树变了才写 editor.ron（拖拽中逐帧写盘没有意义）
+ 7  应用级弹窗（画在最上层）        Preferences / ⚙ 项目设置窗口 / 场景另存为 / 未保存确认框
  8  帧采样 → state.profiler        帧末写一条样本（环形缓冲，零分配；不驱动重绘）
 ```
 
@@ -139,6 +154,8 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
 > | `theme::install_fonts(ctx)` | **只启动时一次** | `set_fonts` 会重建整张字形图集，很贵 |
 > | `ViewportCommand::Title` | **仅项目名或脏状态变化时** | 一路走到 winit 的 `SetWindowText`，是真实的系统调用 |
 > | 「最近项目」磁盘校验 | **仅列表变化时** | `is_file()` 是磁盘 IO，遇到失效的网络路径会阻塞 UI 线程 |
+> | `editor.ron` 布局保存 | **松手 / Apply / Reset / 关闭 / 退出** | 拖拽过程中树每帧都不同；逐帧写盘只会磨盘，且没有可恢复的中间态 |
+> | 偏好数值生效 | **仅 Apply** | 与项目设置同一条纪律：拖数值框时不改运行时状态、不写盘 |
 > | 离屏 3D 渲染 | **仅输入指纹变化时**（动画在播时每帧必变） | 指纹没变整段渲染跳过，连世界矩阵都不解算，见「阶段 4b」 |
 > | Hierarchy 行模型 | **仅结构指纹变化时** | 行缓存按 (指纹, 折叠版本, 过滤器) 复用，不变零 String 分配 |
 >

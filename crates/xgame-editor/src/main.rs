@@ -48,6 +48,7 @@
 //! ```
 
 mod builder;
+mod config;
 mod dialogs;
 mod frame_policy;
 mod frame_probe;
@@ -59,6 +60,7 @@ mod hub;
 mod panels;
 mod plugin_build;
 mod plugin_session;
+mod prefs;
 mod profiler;
 mod recents;
 mod scene_renderer;
@@ -95,6 +97,11 @@ struct GpuHandles {
 struct EditorSession {
     tree: egui_tiles::Tree<PanelTab>,
     state: EditorState,
+    /// 「Preferences」窗口（打开位 + 草稿）。
+    ///
+    /// 窗口本身放在会话里（它要同时改 `EditorState` 与布局树），但**偏好数据**
+    /// 在 `EditorApp`：那是跨项目、跨会话的，不随关闭项目消失。
+    preferences_window: panels::preferences::PreferencesWindow,
     /// 上一次发给操作系统的窗口标题。
     ///
     /// `ViewportCommand::Title` 最终落到 winit 的 `SetWindowText`，是一条真实的
@@ -120,6 +127,14 @@ struct EditorApp {
     probe: frame_probe::FrameProbe,
     /// 界面截图请求（`--ui-shot`，开发/智能体工具）。
     ui_shot: Option<UiShot>,
+    /// 编辑器级偏好（相机手感 / 网格 / 面板布局），跨项目共享。
+    preferences: prefs::EditorPreferences,
+    /// 本次运行是否允许写 `editor.ron`。
+    ///
+    /// `--ui-shot` 默认是**只读**的：它应该永远截出厂界面，不能被开发机上的
+    /// 个人布局 / 网格开关影响（否则"老截图逐像素不变"这条验收就失效了）。
+    /// 需要验证恢复逻辑时显式加 `--ui-restore-prefs`。
+    save_preferences: bool,
 }
 
 /// 「跑几帧 → 抓上屏像素 → 落盘 → 退出」的界面截图请求。
@@ -166,6 +181,8 @@ struct UiShot {
     /// 它与 Output Log 同一组，默认激活的是后者 —— 没有这个开关，Profiler
     /// 永远不出现在截图里（改版时等于没法自检）。
     profiler: bool,
+    /// 抓图前打开 Preferences 窗口。
+    open_preferences: bool,
     /// 抓图用的窗口逻辑尺寸（`--ui-size`，缺省 1440×900）。
     size: egui::Vec2,
 }
@@ -198,6 +215,22 @@ impl EditorApp {
         let probe = frame_probe::FrameProbe::from_env();
         log::info!("帧调度策略：{policy:?}（探针{}）", if probe.enabled() { "开" } else { "关" });
 
+        // ── 命令行参数 ──
+        // `xgame-editor <项目路径>` 直接进编辑器，跳过枢纽。
+        // 路径无效时不退出——错误显示在枢纽界面上，用户还能另选一个。
+        // `--ui-shot` 等开关与路径混排时按「第一个非开关参数是路径」解析。
+        let launch = parse_launch_args(&std::env::args().skip(1).collect::<Vec<_>>());
+
+        // `--ui-shot` 默认不读也不写 `editor.ron`：截图必须永远对应出厂界面，
+        // 否则开发机换过一次布局，"改 UI 前后逐像素对比"就再也不成立了。
+        // 验证恢复逻辑时加 `--ui-restore-prefs`。
+        let restore_prefs = launch.ui_shot.is_none() || launch.restore_prefs;
+        let preferences = if restore_prefs {
+            prefs::EditorPreferences::load()
+        } else {
+            prefs::EditorPreferences::default()
+        };
+
         let mut app = Self {
             hub: ProjectHub::new(),
             session: None,
@@ -206,15 +239,11 @@ impl EditorApp {
             policy,
             clock: FrameClock::new(now),
             probe,
-            ui_shot: None,
+            ui_shot: launch.ui_shot,
+            preferences,
+            save_preferences: restore_prefs,
         };
 
-        // ── 命令行参数 ──
-        // `xgame-editor <项目路径>` 直接进编辑器，跳过枢纽。
-        // 路径无效时不退出——错误显示在枢纽界面上，用户还能另选一个。
-        // `--ui-shot` 等开关与路径混排时按「第一个非开关参数是路径」解析。
-        let launch = parse_launch_args(&std::env::args().skip(1).collect::<Vec<_>>());
-        app.ui_shot = launch.ui_shot;
         if let Some(arg) = launch.project {
             let action = app.hub.try_open(Path::new(&arg));
             if let HubAction::Open(project) = action {
@@ -290,12 +319,26 @@ impl EditorApp {
             }
         }
 
+        // `--ui-preferences`：把偏好窗口拉开（否则这扇窗只能靠手点，改版时截不到）。
+        if app
+            .ui_shot
+            .as_ref()
+            .map(|s| s.open_preferences)
+            .unwrap_or(false)
+        {
+            if let Some(session) = app.session.as_mut() {
+                session.preferences_window.open(&app.preferences);
+            }
+        }
+
         app
     }
 
     /// 打开项目：构造编辑器状态 + 离屏渲染器，进入编辑器界面。
     fn open_project(&mut self, project: xgame_core::ProjectHandle) {
         let mut state = EditorState::new(project);
+        // 偏好是全局的：每个新会话都从当前值起步（相机速度 / 网格开关）。
+        self.preferences.apply_to_state(&mut state);
 
         if let Some(gpu) = &self.gpu {
             let project_root = state.project.root().to_path_buf();
@@ -322,11 +365,33 @@ impl EditorApp {
         }
 
         self.session = Some(EditorSession {
-            tree: panels::dock::create_tile_tree(),
+            // 存过就恢复，没存过 / 校验不过就回退出厂布局（见 prefs 模块文档）。
+            tree: self.preferences.layout_for_startup(),
             state,
+            preferences_window: panels::preferences::PreferencesWindow::new(),
             // 空串保证进入编辑器后的第一帧一定会把标题刷成项目名。
             window_title: String::new(),
         });
+    }
+
+    /// 把当前会话的布局同步进偏好并写盘。
+    ///
+    /// 返回枢纽 / 关窗 / 退出时调用；没有会话（停在枢纽）时只写数值部分。
+    /// `save_preferences == false`（`--ui-shot` 默认路径）时**什么都不做** ——
+    /// 截图不能顺手改掉用户的 `editor.ron`。
+    fn persist_preferences(&mut self) {
+        if !self.save_preferences {
+            return;
+        }
+        let changed = match self.session.as_ref() {
+            Some(session) => self.preferences.sync_layout(&session.tree),
+            None => false,
+        };
+        // 布局没变就不写盘：同一个会话反复关闭 / 退出不该重复写。
+        // 数值偏好走 Apply 时已经写过；ResetLayout 也当场写过。
+        if changed {
+            self.preferences.save();
+        }
     }
 }
 
@@ -406,7 +471,13 @@ impl eframe::App for EditorApp {
         // ── 编辑器界面 ──
         let mut close_requested = false;
         if let Some(session) = self.session.as_mut() {
-            editor_ui(session, ctx, live);
+            editor_ui(
+                session,
+                &mut self.preferences,
+                self.save_preferences,
+                ctx,
+                live,
+            );
 
             // 确认框的放行凭证（保存成功 / 用户明确选了"不保存"）。
             // 存在的意义见 `EditorState::exit_confirmed`："不保存"之后场景
@@ -430,6 +501,9 @@ impl eframe::App for EditorApp {
         }
 
         if close_requested {
+            // 关闭会话前把当前布局带进偏好并落盘：这是"下次打开还是这套布局"
+            // 的唯一保证。`--ui-shot` 默认 `save_preferences == false`，不会写。
+            self.persist_preferences();
             self.session = None;
         }
 
@@ -459,6 +533,14 @@ impl eframe::App for EditorApp {
         // 用户真正看到的那一帧（含状态栏与弹窗层）。
         self.service_ui_shot(ctx);
     }
+
+    /// eframe 在窗口真正销毁前调用一次。
+    ///
+    /// 关窗路径有两条（直接点 X / 未保存确认后放行），其中"干净时点 X"不经过
+    /// `close_requested` 分支；这里兜住最后一次布局保存。
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_preferences();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,13 +554,19 @@ struct LaunchArgs {
     project: Option<String>,
     /// 界面截图请求。
     ui_shot: Option<UiShot>,
+    /// `--ui-shot` 时也读（写）真实的 `editor.ron`。
+    ///
+    /// 默认截图**不碰**用户偏好：同一份代码在任何开发机上都要截出同一张图。
+    /// 要验证"恢复布局 / 网格关闭"这类偏好效果时才显式打开。
+    restore_prefs: bool,
 }
 
 /// 解析窗口模式的启动参数。
 ///
 /// 只认 `--ui-shot <png>` / `--ui-frames <n>` / `--ui-select <实体名>` /
 /// `--ui-asset <资产路径>` / `--ui-settings` / `--ui-play` / `--ui-profiler` /
-/// `--ui-size <WxH>` 八个开关，其余非开关参数按顺序取**第一个**当项目路径。
+/// `--ui-preferences` / `--ui-restore-prefs` / `--ui-size <WxH>` 十个开关，
+/// 其余非开关参数按顺序取**第一个**当项目路径。
 /// `--check` / `--headless` 在 `main` 更早的分支就分流了，不会走到这里。
 fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut out = LaunchArgs::default();
@@ -489,6 +577,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut open_settings = false;
     let mut play = false;
     let mut profiler = false;
+    let mut open_preferences = false;
     let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
 
     let mut i = 0;
@@ -535,6 +624,12 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
             "--ui-profiler" => {
                 profiler = true;
             }
+            "--ui-preferences" => {
+                open_preferences = true;
+            }
+            "--ui-restore-prefs" => {
+                out.restore_prefs = true;
+            }
             "--ui-size" => {
                 // `1440x900` / `1280X800` 都收；解析失败就保持缺省。
                 match raw.get(i + 1).map(|s| parse_size(s)) {
@@ -569,6 +664,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         open_settings,
         play,
         profiler,
+        open_preferences,
         size,
     });
     out
@@ -729,7 +825,13 @@ fn drop_redundant_pointer_moves(ctx: &egui::Context, last_pos: &mut Option<egui:
 /// `live` 是**本帧的帧调度决策**（要不要连续出帧）。状态栏用它把 FPS 显示成
 /// 「此刻在出帧」还是「已空闲」—— 免得空闲时把上一帧的最后一次读数一直挂在那儿，
 /// 看起来像卡死了。
-fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
+fn editor_ui(
+    session: &mut EditorSession,
+    editor_prefs: &mut prefs::EditorPreferences,
+    save_preferences: bool,
+    ctx: &egui::Context,
+    live: bool,
+) {
     // Profiler 的"主循环工作"起点：从这一帧进编辑器界面算到退出。不含
     // `update()` 前半段（指针去重 + 帧调度决策），那两段是常数级、且与界面无关。
     let t_frame_start = Instant::now();
@@ -782,6 +884,12 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
             session.state.exit_play_mode();
         }
         _ => {}
+    }
+
+    // 工具栏只置请求位，窗口要同时看到布局树，所以在这里消费。
+    if session.state.open_preferences {
+        session.state.open_preferences = false;
+        session.preferences_window.open(editor_prefs);
     }
 
     // ── 3. Ctrl+S 保存 / Ctrl+Shift+S 另存为 ──
@@ -874,6 +982,17 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     });
     let ui_us = t_ui.elapsed();
 
+    // 拖完页签 / 分隔条就保存布局。只在**松手那一帧**比较整棵树：
+    // 拖拽中的每一帧树都不同，逐帧保存会变成高频磁盘写；而每帧比较需要
+    // 深比较 + 克隆，也没必要。没拖过时 `layout` 与树不同（首次运行为 None），
+    // 第一次松手会顺手把默认布局写下来 —— 这正是"从没保存过"该有的结果。
+    if save_preferences
+        && ctx.input(|i| i.pointer.any_released())
+        && editor_prefs.sync_layout(&session.tree)
+    {
+        editor_prefs.save();
+    }
+
     // ── 6.5. 资源拖拽收尾 ──
     //
     // 放置动作在视口里做（它知道射线落点），这里只负责"松手即清空"。
@@ -886,6 +1005,29 @@ fn editor_ui(session: &mut EditorSession, ctx: &egui::Context, live: bool) {
     // ── 7. 应用级弹窗 ──
     // 画在最后：确认框 / 另存为要盖在设置窗口之上（同层后画的在上）。
     panels::assets::show_overlays(&mut session.state, ctx);
+
+    if let Some(action) = session
+        .preferences_window
+        .show(&mut session.state, &mut session.tree, ctx)
+    {
+        match action {
+            panels::preferences::PreferencesAction::Apply(next) => {
+                if save_preferences {
+                    next.save();
+                }
+                *editor_prefs = *next;
+            }
+            panels::preferences::PreferencesAction::ResetLayout => {
+                session.tree = panels::dock::create_tile_tree();
+                editor_prefs.layout = Some(session.tree.clone());
+                if save_preferences {
+                    editor_prefs.save();
+                }
+                session.state.log_info("Restored default panel layout");
+            }
+        }
+    }
+
     panels::settings::show(&mut session.state, ctx);
     dialogs::show_save_as_dialog(&mut session.state, ctx);
     if let Some(target) =
@@ -1349,6 +1491,8 @@ mod tests {
             "a.png",
             "--ui-play",
             "--ui-profiler",
+            "--ui-preferences",
+            "--ui-restore-prefs",
             "--ui-size",
             "1280x800",
             "--ui-select",
@@ -1363,6 +1507,11 @@ mod tests {
         let shot = args.ui_shot.expect("应当解析出截图请求");
         assert!(shot.play, "--ui-play 应当置位");
         assert!(shot.profiler, "--ui-profiler 应当置位");
+        assert!(
+            shot.open_preferences,
+            "--ui-preferences 应当置位（否则 Preferences 窗口永远截不到）"
+        );
+        assert!(args.restore_prefs, "--ui-restore-prefs 应当置位");
         assert_eq!(shot.size, egui::vec2(1280.0, 800.0));
         assert_eq!(shot.select.as_deref(), Some("Fox"));
         assert!(!shot.open_settings);

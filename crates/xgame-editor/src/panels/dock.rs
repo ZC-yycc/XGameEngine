@@ -7,6 +7,7 @@ use egui_tiles::{
     Behavior, SimplificationOptions, Tiles, TileId, UiResponse, Tree,
     Linear, LinearDir,
 };
+use serde::{Deserialize, Serialize};
 use strum::Display;
 use xgame_derive::Panel;
 use crate::panels::theme;
@@ -15,7 +16,11 @@ use crate::state::EditorState;
 
 
 /// 编辑器中所有可停靠的面板类型。
-#[derive(Debug, Clone, Display, PartialEq, Panel)]
+///
+/// `Serialize` / `Deserialize` 是给布局持久化用的（`editor.ron`）：磁盘上的
+/// 页签名就是变体名（`SceneView`），所以**变体名是数据格式的一部分**，
+/// 改名等于让老布局失效（`is_usable_layout` 会回退默认布局，不会崩）。
+#[derive(Debug, Clone, Display, PartialEq, Eq, Hash, Serialize, Deserialize, Panel)]
 pub enum PanelTab {
     Hierarchy,
     /// 资源浏览器（P0 资产管线）：浏览 Resources/ 全部资产并拖进场景。
@@ -29,6 +34,17 @@ pub enum PanelTab {
 }
 
 impl PanelTab {
+    /// 所有面板（顺序 = 校验与测试里"一个都不能少"的清单）。
+    pub const ALL: [PanelTab; 7] = [
+        PanelTab::Hierarchy,
+        PanelTab::Assets,
+        PanelTab::Prefabs,
+        PanelTab::SceneView,
+        PanelTab::Inspector,
+        PanelTab::Console,
+        PanelTab::Profiler,
+    ];
+
     /// 页签上显示的名字。
     ///
     /// 与枚举名分开：枚举名是代码里的稳定标识（`SceneView`），页签名是**给人看的**
@@ -103,6 +119,69 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
             .with_share(right_column, 0.78),
     );
 
+    Tree::new("editor_tree", root, tiles)
+}
+
+/// 校验一个**从磁盘读回来的**布局是否还能用。
+///
+/// 磁盘是外部输入：老版本写的布局可能少了后来新增的面板，手改过的文件可能有
+/// 悬空 tile / 环 / 重复 pane。`egui_tiles` 的 `Tree::ui` 假定这些不变量成立，
+/// 直接喂坏树轻则少几个面板，重则整帧 panic —— 所以恢复布局前必须过这一道。
+///
+/// 判据（全部满足才可用）：
+/// 1. 根节点存在，且从根能走到的每个 tile 都真实存在；
+/// 2. 没有环 / 重复引用（同一个 tile 被走到两次）；
+/// 3. 没有不可达的孤儿 tile（它们会跟着下次保存越积越多）；
+/// 4. 每个 [`PanelTab::ALL`] 变体恰好出现一次 —— 少一个就永远打不开那个面板，
+///    多一个则说明文件被改坏了。
+pub fn is_usable_layout(tree: &Tree<PanelTab>) -> bool {
+    let Some(root) = tree.root() else {
+        return false;
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut panes = std::collections::HashSet::new();
+    let mut stack = vec![root];
+
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            return false;
+        }
+        match tree.tiles.get(id) {
+            Some(egui_tiles::Tile::Pane(pane)) => {
+                if !panes.insert(pane.clone()) {
+                    return false;
+                }
+            }
+            Some(egui_tiles::Tile::Container(container)) => {
+                let mut children = container.children().peekable();
+                // 空容器是没有任何意义的中间层，也说明布局来自坏数据。
+                if children.peek().is_none() {
+                    return false;
+                }
+                stack.extend(children.copied());
+            }
+            None => return false,
+        }
+    }
+
+    if tree.tiles.iter().any(|(id, _)| !seen.contains(id)) {
+        return false;
+    }
+
+    PanelTab::ALL.iter().all(|tab| panes.contains(tab))
+}
+
+/// 把读回来的布局重新挂到编辑器固定的树 id 上。
+///
+/// `Tree` 的 `id` 决定 egui 持久化状态（页签拖拽 / 分隔条）的 key。旧文件里
+/// 可能是别的 id，或干脆被手改过；重建一次只花几个分配，换来"布局状态一定
+/// 挂在当前树 id 下"。
+pub fn normalize_layout(mut tree: Tree<PanelTab>) -> Tree<PanelTab> {
+    let Some(root) = tree.root() else {
+        return tree;
+    };
+    let tiles = std::mem::take(&mut tree.tiles);
     Tree::new("editor_tree", root, tiles)
 }
 
@@ -276,21 +355,86 @@ mod tests {
     #[test]
     fn every_tab_is_in_the_tree() {
         let tree = create_tile_tree();
-        let all = [
-            PanelTab::Hierarchy,
-            PanelTab::Assets,
-            PanelTab::Prefabs,
-            PanelTab::SceneView,
-            PanelTab::Inspector,
-            PanelTab::Console,
-            PanelTab::Profiler,
-        ];
-        for tab in all {
+        for tab in PanelTab::ALL {
             assert!(
                 tree.tiles.find_pane(&tab).is_some(),
                 "{tab:?} 在布局里没有对应的 pane"
             );
         }
+        assert!(is_usable_layout(&tree), "出厂布局必须通过恢复校验");
+    }
+
+    /// 少一个面板的布局不可以用：恢复它会让那个面板永远打不开。
+    #[test]
+    fn layout_missing_a_pane_is_rejected() {
+        let full = create_tile_tree();
+        let profiler = full.tiles.find_pane(&PanelTab::Profiler).unwrap();
+
+        let mut tiles = Tiles::default();
+        let hierarchy = tiles.insert_pane(PanelTab::Hierarchy);
+        let assets = tiles.insert_pane(PanelTab::Assets);
+        let prefabs = tiles.insert_pane(PanelTab::Prefabs);
+        let scene = tiles.insert_pane(PanelTab::SceneView);
+        let inspector = tiles.insert_pane(PanelTab::Inspector);
+        let console = tiles.insert_pane(PanelTab::Console);
+        let left = tiles.insert_tab_tile(vec![hierarchy, assets, prefabs]);
+        let right = tiles.insert_tab_tile(vec![scene, inspector, console]);
+        let root = tiles.insert_tab_tile(vec![left, right]);
+        let broken = Tree::new("editor_tree", root, tiles);
+
+        assert_ne!(
+            broken.tiles.find_pane(&PanelTab::Profiler),
+            Some(profiler),
+            "测试布局本来就不该有 Profiler"
+        );
+        assert!(!is_usable_layout(&broken));
+        assert!(is_usable_layout(&create_tile_tree()));
+    }
+
+    /// 空树 / 根节点悬空的树不能通过校验（`Tree::ui` 会假定根存在）。
+    #[test]
+    fn empty_or_dangling_layout_is_rejected() {
+        let mut empty_tiles = Tiles::default();
+        let empty_root = empty_tiles.insert_tab_tile(Vec::new());
+        let mut empty = Tree::new("editor_tree", empty_root, empty_tiles);
+        empty.root = None; // `Tree::new` 不接受空根，但磁盘上的空树可以长这样。
+        assert!(!is_usable_layout(&empty));
+
+        let mut tiles = Tiles::default();
+        let pane = tiles.insert_pane(PanelTab::Hierarchy);
+        let root = tiles.insert_tab_tile(vec![pane]);
+        let dangling = Tree::new("editor_tree", root, tiles);
+        // 只有一个 pane 也不够：必须七个都在。
+        assert!(!is_usable_layout(&dangling));
+    }
+
+    /// 同一个 pane 被挂两次：布局能构造出来，但 `Tree::ui` 会把它当两张页签，
+    /// 保存后仍是一棵坏树。校验必须把重复引用挡住（`seen` 与 `panes` 两道集合
+    /// 各自覆盖「同一 tile 被走两次」与「同一 pane 内容出现两次」）。
+    #[test]
+    fn duplicated_pane_is_rejected() {
+        let mut tiles = Tiles::default();
+        let ids = PanelTab::ALL
+            .iter()
+            .map(|pane| tiles.insert_pane(pane.clone()))
+            .collect::<Vec<_>>();
+        let mut children = ids.clone();
+        children.push(ids[0]);
+        let root = tiles.insert_tab_tile(children);
+        let tree = Tree::new("editor_tree", root, tiles);
+
+        assert!(
+            !is_usable_layout(&tree),
+            "七个面板都在、但有一个被重复引用，仍然不是合法布局"
+        );
+    }
+
+    /// 不可达的孤儿 tile 也要拒绝：它们不参与显示，却会跟着下次保存继续堆。
+    #[test]
+    fn orphan_tile_is_rejected() {
+        let mut tree = create_tile_tree();
+        let _ = tree.tiles.insert_pane(PanelTab::Hierarchy);
+        assert!(!is_usable_layout(&tree));
     }
 
     /// Profiler 与 Output Log 同组：默认激活的必须是 Output Log（老截图逐像素不变），

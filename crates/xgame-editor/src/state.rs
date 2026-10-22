@@ -221,14 +221,27 @@ pub struct EditorCamera {
     pub pan_speed: f32,
 }
 
+impl EditorCamera {
+    /// 右键转视角的默认灵敏度。
+    pub const DEFAULT_SENSITIVITY: f32 = 0.0025;
+    /// 默认平移速度（世界单位/秒）。
+    pub const DEFAULT_PAN_SPEED: f32 = 5.0;
+    /// 平移速度下限 / 上限（滚轮与偏好窗口共用同一对边界）。
+    pub const MIN_PAN_SPEED: f32 = 0.5;
+    pub const MAX_PAN_SPEED: f32 = 50.0;
+    /// 转视角灵敏度下限 / 上限。
+    pub const MIN_SENSITIVITY: f32 = 0.0005;
+    pub const MAX_SENSITIVITY: f32 = 0.02;
+}
+
 impl Default for EditorCamera {
     fn default() -> Self {
         Self {
             yaw: -2.356,                // ≈ −135° — 从 (+, +, +) 方向看向原点
             pitch: -0.524,              // ≈ −30°  — 略微向下
             position: Vec3::new(5.0, 5.0, 5.0),
-            sensitivity: 0.0025,
-            pan_speed: 5.0,
+            sensitivity: Self::DEFAULT_SENSITIVITY,
+            pan_speed: Self::DEFAULT_PAN_SPEED,
         }
     }
 }
@@ -261,7 +274,8 @@ impl EditorCamera {
 
     /// 用滚轮调整移动速度。
     pub fn zoom(&mut self, delta: f32) {
-        self.pan_speed = (self.pan_speed + delta * 0.05).clamp(0.5, 50.0);
+        self.pan_speed =
+            (self.pan_speed + delta * 0.05).clamp(Self::MIN_PAN_SPEED, Self::MAX_PAN_SPEED);
     }
 
     /// 沿相机右方向平移（A / D）— 移动 position。
@@ -553,6 +567,11 @@ pub struct EditorState {
     pub save_as_name: String,
     /// 「项目设置」窗口是否显示。
     pub settings_open: bool,
+    /// 请求打开「编辑器偏好」窗口。
+    ///
+    /// 工具栏只知道 `EditorState`，而偏好窗口还要操作停靠布局树（在
+    /// `EditorSession` 里），所以这里只是一个一次性请求位，由主循环消费。
+    pub open_preferences: bool,
     /// 设置窗口的编辑草稿：打开时克隆清单，按 Apply 才写回。
     ///
     /// 半成品设置不该边敲键盘边生效 —— 与 Undo 同理，确认才落地。
@@ -728,6 +747,7 @@ impl EditorState {
             save_as_open: false,
             save_as_name: String::new(),
             settings_open: false,
+            open_preferences: false,
             settings_draft: None,
             exit_dialog: None,
             exit_confirmed: None,
