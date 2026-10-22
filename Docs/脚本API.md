@@ -242,9 +242,39 @@ end
 
 | 函数 | 说明 |
 |---|---|
-| `delta(ctx)` | 到上一帧的时间（秒） |
-| `time(ctx)` | 游戏已运行的总时长（秒） |
+| `delta(ctx)` | 到上一帧的时间（秒，**已按时间缩放**；暂停时恒为 0） |
+| `time(ctx)` | 游戏已运行的总时长（秒，同样已缩放；暂停时不增长） |
+| `time_scale(ctx)` | 当前时间缩放系数（默认 `1.0`） |
+| `set_time_scale(ctx, scale)` | 设置时间缩放；`0` = 暂停模拟，`0.3` = 慢动作，`2.0` = 二倍速 |
 | `log(ctx, msg)` / `warn(ctx, msg)` / `error(ctx, msg)` | 写进编辑器 Console |
+
+#### 时间缩放（`set_time_scale`）
+
+一次设置，**物理固定步 / `delta` / `time` / 粒子模拟 / 动画钟**同帧同源变慢，
+和 Unity `Time.timeScale` 一个意思：
+
+```lua
+-- 按 Esc 暂停：模拟停住，但 update 仍然在跑（所以还能按键恢复）
+function update(ctx)
+    if key_pressed(ctx, "Escape") then
+        set_time_scale(ctx, 1.0 - time_scale(ctx))   -- 0 ↔ 1 切换
+    end
+end
+```
+
+四条语义要记清：
+
+1. **`0` 只是停模拟，不是停引擎**：`update` / `fixed_update` 的**调用**照旧每帧发生
+   （`fixed_update` 里 `delta` 为 0），所以暂停菜单的输入、UI、`load_scene` 都还能用。
+   这与编辑器 Play 工具栏的 Pause 不同——那个是干脆不推进 `World`。
+2. **生效在下一帧**：本帧的固定步循环已经跑完，写进去的系数从下一个 `update` 起算。
+3. **不动音频与 UI**：音频走自己的时钟，UI 交互不受影响。想暂停 BGM 请显式调
+   `stop_sound`。
+4. **口径是"游戏时间"**：暂停菜单里要做呼吸动画这类"照常走"的效果，别用 `time(ctx)`，
+   自己累加未缩放的墙钟差值。
+
+非法值处理：负值钳到 `0`，超过 `100` 钳到 `100`，`NaN` / `∞` 直接忽略（保住上一档，
+不会把游戏静默冻住）。
 
 ### 4.7 每实体状态
 

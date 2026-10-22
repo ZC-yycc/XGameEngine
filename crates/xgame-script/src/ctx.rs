@@ -39,7 +39,8 @@
 //! 它的**地址束**（见 `context.rs` 的安全论证），不延长任何借用。
 
 use xgame_core::{
-    same_scene_path, Entity, EntityId, PhysicsBody, PhysicsHandle, PlaySound, Scene, SceneLoader,
+    same_scene_path, Entity, EntityId, GameClock, PhysicsBody, PhysicsHandle, PlaySound, Scene,
+    SceneLoader,
 };
 use xgame_input::{Input, KeyCode, MouseButton};
 use xgame_math::glam::{EulerRot, Quat, Vec2, Vec3};
@@ -80,6 +81,9 @@ pub struct GameCtx<'a> {
     /// 资产装载来源（场景 / 预制体）。`None` = 宿主没接装载器：
     /// `load_scene` / `spawn_prefab` 记一条错误日志并返回失败，不静默。
     pub loader: Option<&'a dyn SceneLoader>,
+    /// 游戏时钟（时间缩放的唯一真相源）。`None` = 宿主没接：
+    /// `set_time_scale` 静默 no-op、`time_scale()` 恒为 1.0。
+    pub clock: Option<&'a mut GameClock>,
     /// 触发本次调用的实体（"self"）。[`EntityId::raw`] 为 `0` 表示没有实体上下文。
     pub entity: EntityId,
     /// 本帧真实帧间隔（秒）。
@@ -152,14 +156,37 @@ impl GameCtx<'_> {
         self.scene.find_entity(self.entity)
     }
 
-    /// 本帧帧间隔（秒）。
+    /// 本帧帧间隔（秒，**已按 `time_scale` 缩放**）。暂停时恒为 0。
     pub fn delta(&self) -> f32 {
         self.delta
     }
 
-    /// 游戏已运行总时长（秒）。
+    /// 游戏已运行总时长（秒，同样按 `time_scale` 缩放）。
+    ///
+    /// 与 Unity `Time.time` 一致：暂停时它不增长。暂停菜单里要"照常走"的动画
+    /// 得自己用 `delta` 之外的计数（脚本侧 `state_time` 之类的局部状态），
+    /// 引擎不另发一份未缩放时钟 —— 那会让"两套时间"在每处调用点都要选一次。
     pub fn time(&self) -> f32 {
         self.time
+    }
+
+    /// 当前时间缩放系数。没接时钟时返回 1.0。
+    pub fn time_scale(&self) -> f32 {
+        self.clock.as_deref().map_or(1.0, GameClock::time_scale)
+    }
+
+    /// 设置时间缩放系数（`0` = 暂停模拟）。
+    ///
+    /// 只有 `GameClock::tick` 一处消费它，所以物理固定步、脚本 `delta` /
+    /// `time`、粒子模拟会**同帧同源**地一起变慢；音频与 UI 不受影响
+    /// （kira 有独立时钟；暂停菜单必须还能点）——这与 Unity `timeScale`
+    /// 的行为一致，见决策记录 §二十八。
+    ///
+    /// 生效时机是**下一帧**：本帧的固定步循环已经跑完，不可能回头重算。
+    pub fn set_time_scale(&mut self, scale: f32) {
+        if let Some(clock) = self.clock.as_deref_mut() {
+            clock.set_time_scale(scale);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1531,6 +1558,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: None,
+                clock: None,
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1579,6 +1607,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: None,
+                clock: None,
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1618,6 +1647,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: None,
+                clock: None,
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1656,6 +1686,7 @@ pub(crate) mod tests {
             scene_name: "",
             scene_order: &[],
             loader: None,
+            clock: None,
             entity: bare_id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1691,6 +1722,7 @@ pub(crate) mod tests {
             scene_name: "",
             scene_order: &[],
             loader: None,
+            clock: None,
             entity: id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1732,6 +1764,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: None,
+                clock: None,
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1781,6 +1814,7 @@ pub(crate) mod tests {
             scene_name: "",
             scene_order: &[],
             loader: None,
+            clock: None,
             entity: id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1848,6 +1882,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: Some(&loader),
+                clock: None,
                 entity: EntityId::from_raw(0),
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1901,6 +1936,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: Some(&loader),
+                clock: None,
                 entity: EntityId::from_raw(0),
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1943,6 +1979,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: None,
+                clock: None,
                 entity: EntityId::from_raw(0),
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1978,6 +2015,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: Some(&loader),
+                clock: None,
                 entity: EntityId::from_raw(0),
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -2011,6 +2049,7 @@ pub(crate) mod tests {
                 scene_name: "",
                 scene_order: &[],
                 loader: Some(&loader),
+                clock: None,
                 entity: EntityId::from_raw(0),
                 delta: 1.0 / 60.0,
                 time: 0.0,

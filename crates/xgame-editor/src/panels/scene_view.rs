@@ -11,7 +11,7 @@
 
 use xgame_math::glam::{Mat4, Vec3};
 use crate::panels::theme;
-use crate::state::{EditorState, GizmoPart, ToolMode};
+use crate::state::{EditorState, GizmoPart, PlayMode, ToolMode};
 use crate::gizmo;
 
 /// 把世界坐标点换算成某父节点下的局部坐标。
@@ -167,8 +167,22 @@ fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4)
     // **游戏相机**的位置，否则画面是从 A 机位看、高光却按 B 机位算。
     // 先算再借 renderer：`play_camera` 读 `state`，与 `scene_renderer` 的可变借用打架。
     let eye = play_camera(state).map_or_else(|| state.editor_camera.eye(), |c| c.position);
+    // 预览动画钟跟**运行态**对齐：Play 吃脚本写的时间缩放，编辑器 Pause 直接归零
+    //（Pause 不推进 `World::update`，动画若继续走就成了"物理冻住、角色还在跑"）。
+    // 编辑态恒 1.0 —— 脚本在编辑态根本不跑，这里只是把语义写明确。
+    let anim_time_scale = match state.play_mode {
+        PlayMode::Playing => {
+            state
+                .game_runtime
+                .as_ref()
+                .map_or(1.0, |rt| rt.time_scale())
+        }
+        PlayMode::Paused => 0.0,
+        PlayMode::Edit => 1.0,
+    };
     let renderer = state.scene_renderer.as_mut()?;
     renderer.set_viewport_size(vp_w, vp_h);
+    renderer.set_anim_time_scale(anim_time_scale);
     renderer.render(
         &state.scene,
         view_proj,

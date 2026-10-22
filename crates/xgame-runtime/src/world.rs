@@ -451,6 +451,33 @@ impl World {
         &self.clock
     }
 
+    /// 当前时间缩放系数（`1.0` = 实时）。
+    pub fn time_scale(&self) -> f32 {
+        self.clock.time_scale()
+    }
+
+    /// 设置时间缩放系数（`0` = 暂停模拟）。钳制与非法值处理见 [`GameClock`]。
+    ///
+    /// 宿主侧入口（编辑器 / 独立游戏 / 测试都走这里）；脚本侧是
+    /// `set_time_scale(ctx, v)`，写的是同一份时钟。生效在**下一帧**：
+    /// 本帧的固定步循环已经跑完。
+    pub fn set_time_scale(&mut self, scale: f32) {
+        self.clock.set_time_scale(scale);
+    }
+
+    /// 上一帧的**帧间隔**（秒，已按 `time_scale` 缩放）。
+    ///
+    /// 宿主的动画钟必须吃这一份而不是原始 dt —— 否则脚本一暂停，
+    /// 物理冻住、角色却还在原地跑步。
+    pub fn frame_dt(&self) -> f32 {
+        self.clock.delta_time()
+    }
+
+    /// 游戏已运行总时长（秒，已按 `time_scale` 缩放）。
+    pub fn game_time(&self) -> f32 {
+        self.clock.total_time()
+    }
+
     pub fn scripts(&self) -> &LuaHost {
         &self.scripts
     }
@@ -768,6 +795,7 @@ impl World {
             input,
             scripts,
             audio_port,
+            clock,
             current_scene,
             scene_order,
             scene_loader,
@@ -778,6 +806,7 @@ impl World {
             .with_input(input)
             .with_physics(physics)
             .with_audio(audio_port)
+            .with_clock(clock)
             .with_scene_name(current_scene.as_deref().unwrap_or(""))
             .with_scene_order(scene_order.as_slice());
         let frame = match scene_loader.as_deref() {
@@ -828,6 +857,7 @@ impl World {
             scripts,
             audio_port,
             behavior_instances,
+            clock,
             current_scene,
             scene_order,
             scene_loader,
@@ -869,6 +899,7 @@ impl World {
                     scene_name: current_scene.as_deref().unwrap_or(""),
                     scene_order: scene_order.as_slice(),
                     loader: scene_loader.as_deref(),
+                    clock: Some(&mut *clock),
                     entity: id,
                     delta,
                     time,
@@ -940,6 +971,7 @@ impl World {
             input,
             scripts,
             audio_port,
+            clock,
             current_scene,
             scene_order,
             scene_loader,
@@ -958,6 +990,7 @@ impl World {
                 scene_name: current_scene.as_deref().unwrap_or(""),
                 scene_order: scene_order.as_slice(),
                 loader: scene_loader.as_deref(),
+                clock: Some(&mut *clock),
                 entity: id,
                 delta,
                 time,
@@ -1362,6 +1395,7 @@ impl World {
                 scripts,
                 audio_port,
                 behavior_instances,
+                clock,
                 current_scene,
                 scene_order,
                 scene_loader,
@@ -1381,6 +1415,7 @@ impl World {
                         scene_name: current_scene.as_deref().unwrap_or(""),
                         scene_order: scene_order.as_slice(),
                         loader: scene_loader.as_deref(),
+                        clock: Some(&mut *clock),
                         entity,
                         delta,
                         time,
@@ -1400,6 +1435,7 @@ impl World {
             input,
             scripts,
             audio_port,
+            clock,
             current_scene,
             scene_order,
             scene_loader,
@@ -1413,6 +1449,7 @@ impl World {
             .with_input(input)
             .with_physics(physics)
             .with_audio(audio_port)
+            .with_clock(clock)
             .with_scene_name(current_scene.as_deref().unwrap_or(""))
             .with_scene_order(scene_order.as_slice());
         let frame = match scene_loader.as_deref() {
@@ -3109,6 +3146,105 @@ mod tests {
         let err = world.load_scene_at(2).expect_err("越界必须报错");
         assert!(err.contains("越界"), "实际：{err}");
         assert_eq!(world.current_scene(), Some("Scenes/B.ron"), "失败的切换不动场景");
+    }
+
+    /// `set_time_scale(ctx, 0)` = 暂停模拟。三件事一起守，少一件就说明缩放
+    /// 没有真正进入帧管线：
+    ///
+    /// 1. 动态体停在半空（物理固定步没跑）；
+    /// 2. `frame_dt()` 归零（脚本 `delta` / 粒子 / 宿主动画钟同源）；
+    /// 3. 暂停期间 `update` 仍**每帧执行**（暂停菜单要靠它响应点击 ——
+    ///    这是与"编辑器 Pause 干脆不推进 World"最关键的区别）。
+    #[test]
+    fn script_pause_freezes_physics_but_keeps_update_running() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_pause_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/pause.lua"),
+            r#"
+            local frames = 0
+            function update(ctx)
+                frames = frames + 1
+                if frames == 5 then
+                    set_time_scale(ctx, 0)
+                end
+                if time_scale(ctx) == 0 then
+                    log(ctx, "paused " .. tostring(frames))
+                end
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("pause");
+        let mut cube = Entity::new("cube");
+        cube.physics = Some(PhysicsBody::dynamic_box([0.5, 0.5, 0.5]));
+        // 摆得足够高：真跑起来一定会明显下落，停住才可分辨。
+        cube.transform.position = Vec3::new(0.0, 50.0, 0.0);
+        cube.scripts.push("Scripts/pause.lua".to_owned());
+        scene.add_entity(cube);
+
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+
+        for _ in 0..5 {
+            world.update(1.0 / 60.0);
+        }
+        assert_eq!(
+            world.time_scale(),
+            0.0,
+            "脚本写的时间缩放必须落在运行时那一份时钟上"
+        );
+
+        // 第 5 帧的固定步在脚本之前就跑完了，所以从**下一帧**起才真正冻住。
+        world.update(1.0 / 60.0);
+        let paused_y = entity_y(&world, "cube");
+        let paused_time = world.game_time();
+        assert_eq!(world.frame_dt(), 0.0, "暂停后帧 dt 必须是 0");
+        assert_eq!(world.last_report().fixed_steps, 0, "暂停后不该再跑固定步");
+
+        for _ in 0..30 {
+            let report = world.update(1.0 / 60.0);
+            assert_eq!(report.fixed_steps, 0, "暂停期间每帧都不该有固定步");
+        }
+
+        assert_eq!(entity_y(&world, "cube"), paused_y, "暂停期间物理体不能动");
+        assert_eq!(world.game_time(), paused_time, "暂停期间 time 不能增长");
+
+        let paused_ticks = world
+            .take_logs()
+            .iter()
+            .filter(|l| l.message.starts_with("paused "))
+            .count();
+        assert!(
+            paused_ticks >= 25,
+            "暂停期间 update 仍应每帧执行（暂停菜单靠它），实际 {paused_ticks} 次"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 缩放 2 倍：同样 `1/60` 的帧 dt 消费**两个**固定步 —— 证明累计器吃的是
+    /// 缩放后的 dt，而不是把 `time_scale` 只挂在 `time()` 这个读数上。
+    #[test]
+    fn time_scale_multiplies_fixed_steps() {
+        let mut scene = Scene::new("speed");
+        scene.add_entity(Entity::new("marker"));
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+
+        world.set_time_scale(2.0);
+        let first = world.update(1.0 / 60.0).fixed_steps;
+        let second = world.update(1.0 / 60.0).fixed_steps;
+        assert_eq!(first + second, 4, "两帧 × 2 倍速 = 4 个固定步");
+
+        world.set_time_scale(1.0);
+        assert_eq!(world.update(1.0 / 60.0).fixed_steps, 1, "回到实时应当是 1 步");
     }
 }
 

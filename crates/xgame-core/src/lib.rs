@@ -108,5 +108,5 @@ pub use particle::{
 };
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
 pub use ray::{Ray, RayHit};
-pub use time::{GameClock, Stopwatch, Timer};
+pub use time::{GameClock, Stopwatch, Timer, MAX_TIME_SCALE};
 pub use ui::{UiAlign, UiElement, UiImageStyle, UiKind, UiState, UiStyle, UiTextStyle, UiVAlign};

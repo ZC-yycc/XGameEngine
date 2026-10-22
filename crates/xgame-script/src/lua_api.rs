@@ -903,6 +903,18 @@ fn register_time_and_log(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         "time",
         lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().time()))?,
     )?;
+    // 时间缩放：`set_time_scale(ctx, 0)` 就是暂停（Unity `Time.timeScale` 语义）。
+    globals.set(
+        "time_scale",
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().time_scale()))?,
+    )?;
+    globals.set(
+        "set_time_scale",
+        lua.create_function(|_, (ctx, scale): (LuaCtx, f32)| {
+            ctx.game().set_time_scale(scale);
+            Ok(())
+        })?,
+    )?;
 
     globals.set(
         "log",

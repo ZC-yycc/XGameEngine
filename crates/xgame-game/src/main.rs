@@ -374,8 +374,11 @@ impl GameApp {
         self.world.update(dt);
         // 动画时钟跟着**帧时间**走：物理/脚本推进的同一拍，保证动画与游戏逻辑
         // 用的是同一个 dt（掉帧时两边一起慢，不会各走各的）。
+        // 吃的是**缩放后**的 dt（`world.frame_dt()`）：脚本 `set_time_scale(0)`
+        // 暂停时，动画必须一起停 —— 否则角色冻在原地却还在跑步。
+        let anim_dt = self.world.frame_dt();
         self.anim_driver
-            .tick(dt, &self.world.scene().entities);
+            .tick(anim_dt, &self.world.scene().entities);
         for log in self.world.take_logs() {
             emit_script_log(&log);
         }

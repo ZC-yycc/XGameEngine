@@ -35,7 +35,7 @@
 
 use std::marker::PhantomData;
 
-use xgame_core::{EntityId, PhysicsBody, Scene, SceneLoader};
+use xgame_core::{EntityId, GameClock, PhysicsBody, Scene, SceneLoader};
 use xgame_input::Input;
 use xgame_math::glam::Vec3;
 use xgame_physics::PhysicsWorld;
@@ -208,9 +208,13 @@ pub struct FrameCtx<'a> {
     /// 资产装载来源（场景 / 预制体，按项目相对路径）。宿主没注入 = `None`：
     /// 脚本侧 `load_scene` / `spawn_prefab` 记一条错误日志而不是静默失败。
     pub loader: Option<&'a dyn SceneLoader>,
-    /// 本帧真实帧间隔（秒）。
+    /// 游戏时钟（读写时间缩放）。宿主没注入 = `None`：`set_time_scale` 静默
+    /// no-op、`time_scale()` 恒返回 1.0 —— 与"没接物理时 `raycast` 返回 miss"
+    /// 同款容错，脚本不必先探测。
+    pub clock: Option<&'a mut GameClock>,
+    /// 本帧帧间隔（秒，**已按 `time_scale` 缩放**）。暂停时恒为 0。
     pub delta: f32,
-    /// 游戏已运行的总时长（秒）。
+    /// 游戏已运行的总时长（秒，同样按 `time_scale` 缩放；暂停时不再增长）。
     pub time: f32,
 }
 
@@ -224,6 +228,7 @@ impl<'a> FrameCtx<'a> {
             scene_name: "",
             scene_order: &[],
             loader: None,
+            clock: None,
             delta,
             time,
         }
@@ -260,6 +265,15 @@ impl<'a> FrameCtx<'a> {
 
     pub fn with_audio(mut self, audio: &'a mut xgame_core::AudioPort) -> Self {
         self.audio = Some(audio);
+        self
+    }
+
+    /// 注入游戏时钟（时间缩放的唯一真相源）。
+    ///
+    /// 时钟**必须**是运行时自己那一份：写的是下一帧 `tick` 要用的系数，
+    /// 另给一份副本会让"暂停了但物理还在走"。
+    pub fn with_clock(mut self, clock: &'a mut GameClock) -> Self {
+        self.clock = Some(clock);
         self
     }
 }

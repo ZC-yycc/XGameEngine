@@ -407,6 +407,7 @@ impl LuaHost {
             scene_name: frame.scene_name,
             scene_order: frame.scene_order,
             loader: frame.loader,
+            clock: frame.clock.as_deref_mut(),
             entity,
             delta: frame.delta,
             time: frame.time,
@@ -1377,5 +1378,49 @@ mod tests {
         let report = host.take_commands();
         assert_eq!(report.removed.len(), 1);
         assert!(scene.find_by_name("victim").is_none());
+    }
+
+    /// `time_scale` / `set_time_scale` 必须读写**同一份时钟**（宿主交进来的那份），
+    /// 且坏值处理与 `GameClock` 一致：NaN 忽略、负值钳 0。
+    ///
+    /// 反例是很容易犯的：在脚本层缓一个 `time_scale` 副本，于是"设了暂停、
+    /// 下一帧又自己变回 1.0"，或者 `0.0/0.0` 把系数悄悄打回默认。
+    #[test]
+    fn lua_time_scale_round_trips_through_the_host_clock() {
+        let project = TempProject::new("time_scale");
+        let path = project.write_script(
+            "speed",
+            r#"
+            function update(ctx)
+                if time_scale(ctx) == 1.0 then log(ctx, "default_ok") end
+                set_time_scale(ctx, 0.25)
+                if time_scale(ctx) == 0.25 then log(ctx, "set_ok") end
+                set_time_scale(ctx, 0.0 / 0.0)   -- NaN：必须忽略，保住 0.25
+                if time_scale(ctx) == 0.25 then log(ctx, "nan_ignored") end
+                set_time_scale(ctx, -5.0)        -- 负值：钳到 0
+                if time_scale(ctx) == 0.0 then log(ctx, "neg_clamped") end
+            end
+            "#,
+        );
+        let mut scene = scene_with_script(&path);
+        let mut host = LuaHost::new();
+        let report = host.preload(&project.dir, &scene);
+        assert!(report.failed.is_empty(), "编译失败: {:?}", report.failed);
+
+        let mut clock = xgame_core::GameClock::new();
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0).with_clock(&mut clock));
+
+        let logs: Vec<String> = host
+            .take_logs()
+            .into_iter()
+            .map(|l| l.message)
+            .collect();
+        for expected in ["default_ok", "set_ok", "nan_ignored", "neg_clamped"] {
+            assert!(
+                logs.iter().any(|m| m == expected),
+                "缺标记 {expected}，实际日志：{logs:?}"
+            );
+        }
+        assert_eq!(clock.time_scale(), 0.0, "最后一次写入应落在宿主时钟上");
     }
 }

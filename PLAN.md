@@ -4314,3 +4314,87 @@ Stop 时补一句"Play 期间场景切到了 X"，否则用户会以为切过去
 - **TAA**（渲染最后一刀，P1 #10）：历史缓冲 + 运动向量 + 重投影。
 - **手柄输入**（P1 #15）：要硬件才能验证手感。
 - **构建设置剩余项**：平台预设 / 图标。
+
+## 四十六、时间缩放：`set_time_scale` 一处生效，四个子系统同源（2026-10-22）
+
+### 一、为什么是这一刀
+
+上一轮结尾把"时间缩放"记成"几十行的小补面"，动工前核对代码发现两个事实：
+
+1. `xgame-core/src/time.rs` 里 `time_scale` 字段、`set_time_scale()`、`tick` 里的
+   乘法**全都在**，但全仓库 `grep time_scale()` **零个读者** —— 能力存在却不可触达，
+   是标准"半截接线"。
+2. 它同时是**帧管线的公共分母**：真能设了，物理固定步、脚本 `delta` / `time`、
+   粒子、动画钟必须一起跟手。当时游戏宿主的 `anim_driver.tick(dt)` 吃的是**原始 dt**，
+   编辑器吃**墙钟** —— 一设缩放就会各走各的。
+
+比起再补一个面板，这类"漏一个子系统就静默走偏"的活更值得先钉死。改动面可控，
+且能用无头固定 dt 逐位验证（这正是本轮验证的基础）。
+
+### 二、事实基础（动手前确认）
+
+- `World::update` 已经把 `clock.delta_time()` 传给脚本 `update` 与
+  `particles.update(...)`，固定步走 `consume_fixed_update()` 读同一个累计器 ——
+  **管线本来就同源**，缺的只是"能设"与"宿主动画钟跟手"。
+- `GameCtx` 已有 `loader` 这个 `Option<&dyn Trait>` 注入先例，`clock` 照抄同一形状即可。
+- 注册名侧：`lua_api.rs` 123 处 + `ui_api.rs` 26 处 = 149（改前 147）。
+
+### 三、做了什么
+
+1. **core**：`set_time_scale` 补钳制（负→0、>100→100、NaN/∞ 忽略）与 `MAX_TIME_SCALE`
+   常量；`tick` 的缩放语义补 4 条测试钉住。
+2. **script**：`GameCtx` 加 `clock: Option<&mut GameClock>` + 构造器 `with_clock`；
+   `delta` / `time` 文档标注"已缩放"；新增 `time_scale()` / `set_time_scale()`；
+   Lua 注册 `time_scale` / `set_time_scale`（注册名 147 → **149**）。
+3. **runtime**：`World` 的**五处** `GameCtx` / `FrameCtx` 构造点全部注入时钟
+   （含 `dispatch_collision_to` —— 上一轮刚在这里吃过"上下文漏字段"的亏）；
+   对外加 `time_scale` / `set_time_scale` / `frame_dt` / `game_time` 四个口。
+4. **三宿主**：游戏侧动画钟改吃 `world.frame_dt()`；编辑器 Play 态每帧把
+   `game_runtime.time_scale()` 同步给 `SceneRenderer::set_anim_time_scale`
+   （编辑器 Pause 写 0、编辑态写 1.0）；`AnimationDriver` 加 `wall_time_scale`
+   （`Default` 手写为 1.0，derive 会让预览动画卡在第一帧）；无头报告加 `time_scale`。
+5. 文档：脚本API §4.6 扩成小节、无头运行加字段说明、差距分析 P2 #33 结项、
+   ROADMAP / README 各一条、决策记录 §二十八。
+
+### 四、关键取舍
+
+- **缩放只在 `GameClock::tick` 一处消费**，不做 `dt * scale` 的二次分发 ——
+  多一个分发点就多一次漏掉的机会。
+- **`0` 停模拟不停引擎**：`update` 派发照跑、`delta` 为 0，暂停菜单靠这个活着；
+  与编辑器 Play 的 Pause（完全不推进 `World`）是两件事。
+- **音频与 UI 不缩放**（kira 自带时钟 / 宿主驱动），与 Unity 一致；暂停时 BGM 继续放，
+  要不要停由作者决定。
+- **不发未缩放时间 API**：多一份读数就多一次选错的机会；代价（暂停菜单的呼吸动画）
+  写进决策记录，真需要时再补两个只读函数。
+- **动画钟三宿主分别处理**：编辑器不让 `SceneRenderer` 看见 `runtime::World`，
+  只同步一个 `f32`；`tick_wall` 先夹 `min(0.1)` 再乘缩放（否则高倍速会把
+  "拖动窗口三秒"放大成长跳）。
+- **生效在下一帧**：`clock.tick` 在 `update` 最开头，脚本写的缩放只能影响下一帧。
+
+### 五、验证（全部实跑）
+
+- **全量测试**：`754 passed / 0 failed / 7 ignored`（新增 9 条：core 4 / script 1 /
+  runtime 2 / render 1 / editor 1）；clippy 0 警告。
+- **无头实跑**（release exe + 临时项目：40m 高动态方块 + 三段式脚本）：
+  - 三段式（第 5 帧 0.25 倍速 / 第 40 帧暂停 / 第 70 帧恢复实时），跑 140 帧 →
+    `fixed_steps: 83`、`total_time: 1.3958`、`time_scale: 1.0`；
+    手算 5 + 8 + 70 步、`5/60 + 35/240 + 70/60 = 1.395833` —— **逐位一致**。
+  - `--dump-scene` 里方块停在 `39.86034`（自由落体 0.1667s 的解析值 39.864），
+    暂停后再跑 110 帧位置不变。
+  - 单段暂停版（第 10 帧停、跑 120 帧）→ `fixed_steps: 10`、`total_time: 0.16666667`。
+  - `--check` 该临时项目 exit 0（先 `--migrate-assets` 补 meta）。
+- **编辑器冒烟**：`--ui-shot --ui-play --ui-size 1280x800` 截图正常
+  （GameCam 角标 / 视口 / 状态栏 24px / Profiler 页签都在），视口渲染路径无回归。
+
+### 六、刻意没做
+
+- `unscaled_delta` / `unscaled_time`（理由见决策记录 §二十八.4）。
+- 单一实体的局部时间缩放（Unity 也没有；要做是"每实体时钟"，属于另一层语义）。
+- 编辑器工具栏的"暂停 / 单步"保持不变 —— 它是调试器语义，不跟 `time_scale` 合并。
+
+### 七、下一步候选
+
+- **TAA**（P1 #10）：历史缓冲 + 运动向量 + 重投影，牵动剔除 / CSM 拟合 / 拾取三处。
+- **手柄输入**（P1 #15）：要硬件才能验证手感。
+- **动画剪辑切换的脚本 API**（P1 #13 剩下的唯一缺口）：`crossfade` 已存在，
+  只差一层暴露。

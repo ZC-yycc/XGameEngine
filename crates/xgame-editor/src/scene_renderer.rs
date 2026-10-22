@@ -383,6 +383,15 @@ impl SceneRenderer {
         self.anim_driver.state(id)
     }
 
+    /// 预览动画钟的时间缩放（`tick_wall` 的乘数）。
+    ///
+    /// 由 `scene_view::render_scene` 每帧写：Play 态来自运行时的 `time_scale`、
+    /// 编辑器 Pause 写 0、编辑态写 1。**必须每帧写**而不是只在进出 Play 时写 ——
+    /// 少写一帧就会让已经暂停的动画继续走一格。
+    pub fn set_anim_time_scale(&mut self, scale: f32) {
+        self.anim_driver.set_wall_time_scale(scale);
+    }
+
     /// 视口里是否有动画正在**连续播放**（帧策略的输入之一，见 `FrameInputs::animating`）。
     ///
     /// 三个条件缺一不可：

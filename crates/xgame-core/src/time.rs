@@ -5,6 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 时间缩放的上界。
+///
+/// 上界的存在理由不是精度，而是**给死亡螺旋留出口**：`max_steps` 每帧只放行
+/// 5 个固定步，100 倍速已经保证"每帧都跑满预算"，再往上只会把累计器堆成
+/// 无穷大 —— 之后调回 1 倍速时要连着几百帧补步，一帧卡死。Unity 同样把
+/// 上界钉在 100。
+pub const MAX_TIME_SCALE: f32 = 100.0;
+
 /// 游戏时钟：跟踪累计时间、帧 Delta，并提供固定步长累计器。
 ///
 /// 每个渲染帧调用 `tick(dt)`，然后循环调用 `consume_fixed_update()`
@@ -107,9 +115,19 @@ impl GameClock {
         self.time_scale
     }
 
-    /// 设置时间缩放系数。
+    /// 设置时间缩放系数（钳在 `0.0..=MAX_TIME_SCALE`）。
+    ///
+    /// `0` = 冻结模拟：`delta_time`、`total_time`、固定步累计器都不再前进，
+    /// 但调用方（`World::update`）**照常每帧被调用** —— 暂停菜单要靠这一点
+    /// 才能响应点击。这与"宿主干脆不推进帧"是两件事（编辑器 Pause 按钮走后者）。
+    ///
+    /// 非有限值（NaN / ±∞）**忽略**，保住上一档而不是悄悄变成 0：缩放值通常来自
+    /// 脚本表达式（`1.0 / 0.0` 这种），静默暂停会让作者以为引擎卡死。
     pub fn set_time_scale(&mut self, scale: f32) {
-        self.time_scale = scale.max(0.0);
+        if !scale.is_finite() {
+            return;
+        }
+        self.time_scale = scale.clamp(0.0, MAX_TIME_SCALE);
     }
 
     /// 获取两个固定步长之间的插值因子（0..1），用于渲染插值。
@@ -267,5 +285,100 @@ impl Stopwatch {
     /// 是否正在运行。
     pub fn is_running(&self) -> bool {
         self.running
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缩放的**唯一**作用点必须是 `tick`：`delta_time` / `total_time` /
+    /// 固定步累计器三者同源，才不会出现"物理慢速、脚本却按实时走"。
+    #[test]
+    fn scale_is_applied_to_every_clock_channel() {
+        let mut clock = GameClock::new().with_fixed_dt(1.0 / 60.0);
+        clock.set_time_scale(0.5);
+
+        clock.tick(1.0 / 30.0);
+
+        assert!((clock.delta_time() - 1.0 / 60.0).abs() < 1e-6);
+        assert!((clock.total_time() - 1.0 / 60.0).abs() < 1e-6);
+        assert!(
+            (clock.accumulator() - 1.0 / 60.0).abs() < 1e-6,
+            "累计器吃的是缩放后的 dt，否则固定步会按实时跑"
+        );
+        assert!(clock.consume_fixed_update(), "半速下仍然积满了一步");
+    }
+
+    /// `time_scale = 0` 时三路都不前进，但 `tick` 本身仍被调用 ——
+    /// 暂停靠的就是"帧照来、时间不走"。
+    ///
+    /// 注意暂停那一刻累计器里可能还压着**不到一步**的零头：它不会被清零，
+    /// 恢复后最多补一步（≤ 1 个 fixed_dt）。这是有意的——把零头抹掉等于
+    /// 让每次暂停都吃掉一点时间，长期会让"暂停/恢复"改变物理轨迹。
+    #[test]
+    fn zero_scale_freezes_time_without_stopping_the_caller() {
+        let mut clock = GameClock::new().with_fixed_dt(1.0 / 60.0);
+        clock.tick(1.0 / 60.0);
+        assert!(clock.consume_fixed_update(), "先把这个整步消费掉");
+        let frozen_at = clock.total_time();
+
+        clock.set_time_scale(0.0);
+        for _ in 0..10 {
+            clock.tick(1.0 / 60.0);
+            assert!(!clock.consume_fixed_update(), "暂停期间不该有固定步");
+        }
+
+        assert_eq!(clock.delta_time(), 0.0);
+        assert_eq!(clock.total_time(), frozen_at);
+        assert!(
+            clock.accumulator() < clock.fixed_dt(),
+            "暂停不清零头，但零头必须小于一步"
+        );
+    }
+
+    /// 负值是作者的笔误（Unity 直接当 0 处理），NaN / ∞ 是表达式算炸了 ——
+    /// 前者钳到 0，后者**忽略**（保住上一档），都不能静默把游戏冻住。
+    #[test]
+    fn bad_scales_are_sanitized_instead_of_freezing_silently() {
+        let mut clock = GameClock::new();
+
+        clock.set_time_scale(-2.0);
+        assert_eq!(clock.time_scale(), 0.0, "负值钳到 0");
+
+        clock.set_time_scale(3.0);
+        clock.set_time_scale(f32::NAN);
+        assert_eq!(clock.time_scale(), 3.0, "NaN 忽略，保留上一档");
+        clock.set_time_scale(f32::INFINITY);
+        assert_eq!(clock.time_scale(), 3.0, "∞ 忽略，保留上一档");
+
+        clock.set_time_scale(1e9);
+        assert_eq!(clock.time_scale(), MAX_TIME_SCALE, "上界钳到 100");
+    }
+
+    /// 加速受"每帧最多 5 个固定步"的预算约束：预算是防死亡螺旋的，
+    /// 不能被时间缩放绕过（否则 100 倍速一帧就能跑出 6000 步）。
+    #[test]
+    fn accelerated_time_still_respects_the_step_budget() {
+        let mut clock = GameClock::new().with_fixed_dt(1.0 / 60.0);
+        clock.set_time_scale(10.0);
+        clock.tick(0.1); // 10 倍速 × 0.1s = 1s 游戏时间 ≈ 60 步
+
+        let mut steps = 0;
+        while clock.consume_fixed_update() {
+            steps += 1;
+        }
+        assert_eq!(steps, 5, "每帧预算仍是 5 步");
+
+        clock.reset_step_counter();
+        let mut steps = 0;
+        while clock.consume_fixed_update() {
+            steps += 1;
+        }
+        assert_eq!(steps, 5, "重置后可以继续消费剩余的累计时间");
     }
 }

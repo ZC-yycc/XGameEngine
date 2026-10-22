@@ -201,6 +201,7 @@ mod tests {
             scene_name: "",
             scene_order: &[],
             loader: None,
+            clock: None,
             entity: EntityId::from_raw(0),
             delta: 0.016,
             time: 0.0,

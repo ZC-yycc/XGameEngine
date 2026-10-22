@@ -130,6 +130,14 @@ impl GameRuntime {
         self.world.current_scene()
     }
 
+    /// 运行时的时间缩放（脚本 `set_time_scale` 写的值）。
+    ///
+    /// 编辑器视口用它同步**预览动画钟**：脚本暂停时，编辑器的动画预览也得停，
+    /// 否则 Play 态里"物理冻住、角色还在跑步"。
+    pub fn time_scale(&self) -> f32 {
+        self.world.time_scale()
+    }
+
     /// 按下标取一个组件的 `(注册名, 可检视对象)` —— Inspector 在 Play 中改
     /// **活实例**用（拖一下下一次 `update` 就生效，Unity 式热调参）。
     ///

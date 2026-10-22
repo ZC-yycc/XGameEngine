@@ -609,11 +609,25 @@ struct Entry {
 /// `ScenePipeline`：管线是纯绘制，`render()` 每帧被调用与否还受指纹门控 ——
 /// 时钟跟着门控走会出现"不出帧 → 时间不走 → 指纹不变 → 更不出帧"的死锁。
 /// 由外层在**每帧 update** 里 tick，时间永远在推进；渲染只读时间。
-#[derive(Default)]
 pub struct AnimationDriver {
     entries: HashMap<EntityId, Entry>,
     /// `tick_wall` 用：上一次推进的时刻。
     last_tick: Option<Instant>,
+    /// `tick_wall` 的时间缩放（编辑器 Play 态 = 运行时 `time_scale`；
+    /// 编辑态恒 1.0）。`tick`（游戏侧）不吃它 —— 那边的 dt 已经缩放过了。
+    wall_time_scale: f32,
+}
+
+impl Default for AnimationDriver {
+    /// 手写而不是 derive：`f32` 的默认值是 **0.0**，derive 出来的驱动会
+    /// 让编辑器的预览动画永远停在第一帧，而且不报任何错。
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            last_tick: None,
+            wall_time_scale: 1.0,
+        }
+    }
 }
 
 impl AnimationDriver {
@@ -823,7 +837,25 @@ impl AnimationDriver {
             .map(|prev| now.saturating_duration_since(prev).as_secs_f32())
             .unwrap_or(0.0);
         self.last_tick = Some(now);
-        self.tick(dt.min(0.1), entities);
+        // 先夹墙钟（窗口被拖动几秒会一次补上整段），再乘缩放 ——
+        // 顺序反过来会让 100 倍速把"拖动窗口"放大成一次长跳。
+        self.tick(dt.min(0.1) * self.wall_time_scale, entities);
+    }
+
+    /// 设置 `tick_wall` 的时间缩放（编辑器 Play 态每帧从运行时同步）。
+    ///
+    /// 非有限值忽略、负数钳到 0：与 `GameClock::set_time_scale` 同一套规矩，
+    /// 免得两个入口对"坏值"给出不同结果。
+    pub fn set_wall_time_scale(&mut self, scale: f32) {
+        if !scale.is_finite() {
+            return;
+        }
+        self.wall_time_scale = scale.clamp(0.0, xgame_core::MAX_TIME_SCALE);
+    }
+
+    /// 当前 `tick_wall` 的时间缩放（测试与诊断用）。
+    pub fn wall_time_scale(&self) -> f32 {
+        self.wall_time_scale
     }
 
     /// 某实体当前的播放时间（未被 tick 过的实体没有条目）。
@@ -2121,5 +2153,38 @@ mod tests {
         let sig1 = d.signature();
         d.tick(0.1, std::slice::from_ref(&e));
         assert_ne!(sig1, d.signature(), "层时钟在走 → 指纹必须变，否则画面冻结");
+    }
+
+    /// `tick_wall` 的时间缩放：编辑器 Play 态从运行时同步，脚本 `set_time_scale(0)`
+    /// 暂停时预览动画必须一起停 —— 否则 Play 里"物理冻住、角色却在原地跑步"。
+    ///
+    /// 顺带钉住 `Default`：`f32` 的默认值是 0.0，若 derive 掉这个字段，编辑器的
+    /// 预览动画会永远停在第一帧，且不报任何错。
+    #[test]
+    fn wall_time_scale_zero_freezes_the_preview_clock() {
+        let driver_default = AnimationDriver::new();
+        assert_eq!(driver_default.wall_time_scale(), 1.0, "默认必须是实时");
+
+        let mut e = Entity::new("actor");
+        e.animator = Some(Animator {
+            clip: "Walk".into(),
+            ..Animator::default()
+        });
+
+        let mut d = AnimationDriver::new();
+        d.set_wall_time_scale(0.0);
+        d.tick_wall(std::slice::from_ref(&e));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        d.tick_wall(std::slice::from_ref(&e));
+        assert_eq!(d.time(e.id), Some(0.0), "缩放 0 时墙钟推不动预览动画");
+
+        // 恢复实时：同样的墙钟间隔必须重新推动时钟（证明上一步不是"没 tick"）。
+        d.set_wall_time_scale(1.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        d.tick_wall(std::slice::from_ref(&e));
+        assert!(
+            d.time(e.id).is_some_and(|t| t > 0.0),
+            "恢复实时后时钟应继续走"
+        );
     }
 }

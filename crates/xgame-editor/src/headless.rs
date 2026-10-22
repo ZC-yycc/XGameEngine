@@ -469,6 +469,11 @@ pub struct HeadlessReport {
     pub colliders: usize,
     /// 全程执行的固定步长总数（每帧可能 0 或多个，取决于 dt 与固定步长之比）。
     pub fixed_steps: u64,
+    /// 跑完时的时间缩放（脚本 `set_time_scale` 写的值；`0` = 暂停）。
+    ///
+    /// 与 `fixed_steps` 配合就能无脑判断"暂停到底生效没"：缩放归零后
+    /// 固定步应当停止增长，`total_time` 也应当停在那一刻。
+    pub time_scale: f32,
     /// 跑完时局部变换含 NaN / Infinity 的实体数（物理炸了、脚本算错都会体现在这里）。
     pub non_finite_transforms: usize,
     /// 逐帧 `World::update` 的耗时分布（微秒）。
@@ -559,6 +564,7 @@ impl HeadlessReport {
             "bodies": self.bodies,
             "colliders": self.colliders,
             "fixed_steps": self.fixed_steps,
+            "time_scale": self.time_scale,
             "non_finite_transforms": self.non_finite_transforms,
             "frame_us": self.frame_us.to_json(),
             "logs": {
@@ -681,7 +687,9 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         let frame_start = Instant::now();
         let frame = world.update(dt);
         if let Some(anim) = shot_anim.as_mut() {
-            anim.tick(dt, &world.scene().entities);
+            // 与独立游戏同一份口径：动画吃缩放后的 dt，脚本暂停时截图里的姿势
+            // 也停在那一刻（否则同一份脚本在游戏里停、在截图里还在跑）。
+            anim.tick(world.frame_dt(), &world.scene().entities);
         }
         frame_samples_us.push(micros(frame_start.elapsed()));
 
@@ -812,6 +820,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         bodies: last.bodies,
         colliders: last.colliders,
         fixed_steps,
+        time_scale: world.time_scale(),
         non_finite_transforms,
         frame_us: FrameStats::from_samples(&frame_samples_us),
         log_info,
@@ -1167,6 +1176,35 @@ mod tests {
         assert_eq!(report.log_error, 0);
         assert!(report.error_samples.is_empty());
         assert!(!report.has_issues(), "只有 info 日志 = 干净");
+        cleanup(&project);
+    }
+
+    /// 脚本暂停：无头报告要能直接看出"暂停到底生效没"，判据是三个读数 ——
+    /// `time_scale` 归零、`fixed_steps` 停止增长、`total_time` 停在那一刻。
+    ///
+    /// 这条是给智能体 / CI 用的：没有它，"暂停"只能靠人肉跑游戏看画面。
+    #[test]
+    fn script_time_scale_pause_is_reported() {
+        let project = temp_project("pause");
+        write_script(
+            &project,
+            "pause.lua",
+            "local n = 0\nfunction update(ctx)\n    n = n + 1\n    if n == 5 then set_time_scale(ctx, 0) end\nend\n",
+        );
+        patch_scene(&project, |scene| {
+            scene.entities.push(Entity::new("Pauser").with_script("Scripts/pause.lua"));
+        });
+
+        let report = run(&opts(&project, 20)).expect("无头运行应成功");
+        assert_eq!(report.time_scale, 0.0, "报告要带上跑完时的缩放");
+        // 1~5 帧各一步（第 5 帧的固定步在脚本之前就跑完了），之后全冻。
+        assert_eq!(report.fixed_steps, 5, "暂停后固定步必须停止增长");
+        assert!(
+            (report.total_time - 5.0 * report.dt).abs() < 1e-4,
+            "time 应停在暂停那一刻，实际 {}",
+            report.total_time
+        );
+        assert!(!report.has_issues());
         cleanup(&project);
     }
 
@@ -1532,6 +1570,7 @@ mod tests {
             "bodies",
             "colliders",
             "fixed_steps",
+            "time_scale",
             "non_finite_transforms",
             "frame_us",
             "logs",
