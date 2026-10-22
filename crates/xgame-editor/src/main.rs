@@ -45,8 +45,10 @@
 //! cargo run -p xgame-editor -- projects/SampleScene --ui-shot shot.png --ui-select Fox
 //! cargo run -p xgame-editor -- projects/SampleScene --ui-shot play.png --ui-play
 //! cargo run -p xgame-editor -- projects/SampleScene --ui-shot s.png --ui-size 1280x800
+//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot r.png --ui-autosave-recover
 //! ```
 
+mod autosave;
 mod builder;
 mod config;
 mod dialogs;
@@ -135,6 +137,12 @@ struct EditorApp {
     /// 个人布局 / 网格开关影响（否则"老截图逐像素不变"这条验收就失效了）。
     /// 需要验证恢复逻辑时显式加 `--ui-restore-prefs`。
     save_preferences: bool,
+    /// 本次运行是否允许写 `.autosave/` 副本。
+    ///
+    /// `--ui-shot` 默认是**只读**的（理由同 [`save_preferences`](Self::save_preferences)）：
+    /// 截图会跑几十帧、还要等布局稳定，不该在用户的真实项目里留下自动保存
+    /// 副本 —— 那会让下一次正常打开项目时多弹一个"发现自动保存"。
+    write_autosave: bool,
 }
 
 /// 「跑几帧 → 抓上屏像素 → 落盘 → 退出」的界面截图请求。
@@ -183,6 +191,12 @@ struct UiShot {
     profiler: bool,
     /// 抓图前打开 Preferences 窗口。
     open_preferences: bool,
+    /// 抓图时**保留**「发现自动保存」恢复框。
+    ///
+    /// 默认**忽略**恢复框：它取决于磁盘上有没有 `.autosave/` 残留 —— 那是开发机
+    /// 的外部状态，会让"同一份代码截出的图逐像素不变"这条验收失效。
+    /// 要检查这扇窗的排版时显式加 `--ui-autosave-recover`（配合先手工放一份副本）。
+    recover_autosave: bool,
     /// 抓图用的窗口逻辑尺寸（`--ui-size`，缺省 1440×900）。
     size: egui::Vec2,
 }
@@ -225,6 +239,8 @@ impl EditorApp {
         // 否则开发机换过一次布局，"改 UI 前后逐像素对比"就再也不成立了。
         // 验证恢复逻辑时加 `--ui-restore-prefs`。
         let restore_prefs = launch.ui_shot.is_none() || launch.restore_prefs;
+        // 截图模式 = 只读：既不读个人偏好，也不写自动保存副本。
+        let launched_for_shot = launch.ui_shot.is_some();
         let preferences = if restore_prefs {
             prefs::EditorPreferences::load()
         } else {
@@ -242,6 +258,8 @@ impl EditorApp {
             ui_shot: launch.ui_shot,
             preferences,
             save_preferences: restore_prefs,
+            // 截图路径不写自动保存：它只读，见字段文档。
+            write_autosave: !launched_for_shot,
         };
 
         if let Some(arg) = launch.project {
@@ -337,6 +355,18 @@ impl EditorApp {
     /// 打开项目：构造编辑器状态 + 离屏渲染器，进入编辑器界面。
     fn open_project(&mut self, project: xgame_core::ProjectHandle) {
         let mut state = EditorState::new(project);
+
+        // 截图模式**忽略**恢复框：它取决于磁盘上有没有 `.autosave/` 残留，
+        // 那是开发机的外部状态。让它进画面，"同一份代码的截图逐像素不变"
+        // 这条验收就不成立了。要专门检查这扇窗时加 `--ui-autosave-recover`。
+        let shot_wants_recovery = self
+            .ui_shot
+            .as_ref()
+            .map(|s| s.recover_autosave)
+            .unwrap_or(false);
+        if !self.write_autosave && !shot_wants_recovery {
+            state.pending_autosave = None;
+        }
         // 偏好是全局的：每个新会话都从当前值起步（相机速度 / 网格开关）。
         self.preferences.apply_to_state(&mut state);
 
@@ -457,6 +487,8 @@ impl eframe::App for EditorApp {
         //那一帧取消关闭、改弹确认框；用户放行后再由 `editor_ui` 里的弹窗
         // 发 `ViewportCommand::Close` 真正关窗。枢纽界面上没有可丢的东西，不拦。
         let pass_nr = ctx.cumulative_pass_nr();
+        // 借用 `session` 期间不能再碰 `self`，先把本帧要用的开关取出来。
+        let write_autosave = self.write_autosave;
         if ctx.input(|i| i.viewport().close_requested()) {
             if let Some(session) = self.session.as_mut() {
                 if session.state.exit_dialog.is_none()
@@ -464,6 +496,10 @@ impl eframe::App for EditorApp {
                 {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     session.state.exit_dialog = Some(ExitTarget::Quit);
+                } else if session.state.exit_dialog.is_none() && write_autosave {
+                    // 无脏、直接放行 = 正常退出。同样要清副本（"改了又撤销回原样"
+                    // 的场景下，盘上可能还留着更早的一份）。
+                    session.state.drop_autosave_of_current();
                 }
             }
         }
@@ -475,6 +511,7 @@ impl eframe::App for EditorApp {
                 session,
                 &mut self.preferences,
                 self.save_preferences,
+                self.write_autosave,
                 ctx,
                 live,
             );
@@ -483,6 +520,13 @@ impl eframe::App for EditorApp {
             // 存在的意义见 `EditorState::exit_confirmed`："不保存"之后场景
             // 依然是脏的，只看脏标记会把确认框复弹到死。
             if let Some(target) = session.state.exit_confirmed.take() {
+                // 会话到此结束：`.autosave/` 副本只服务**崩溃**。用户主动退出
+                // （保存过，或明确选了"不保存"）说明他已经做过决定，下次启动
+                // 不该再被问一遍"要不要恢复上次的工作"。崩溃时走不到这里，
+                // 副本留在盘上 —— 那才是恢复流程的入口。
+                if write_autosave {
+                    session.state.drop_autosave_of_current();
+                }
                 match target {
                     ExitTarget::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                     ExitTarget::Hub => close_requested = true,
@@ -578,6 +622,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut play = false;
     let mut profiler = false;
     let mut open_preferences = false;
+    let mut recover_autosave = false;
     let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
 
     let mut i = 0;
@@ -630,6 +675,9 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
             "--ui-restore-prefs" => {
                 out.restore_prefs = true;
             }
+            "--ui-autosave-recover" => {
+                recover_autosave = true;
+            }
             "--ui-size" => {
                 // `1440x900` / `1280X800` 都收；解析失败就保持缺省。
                 match raw.get(i + 1).map(|s| parse_size(s)) {
@@ -665,6 +713,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         play,
         profiler,
         open_preferences,
+        recover_autosave,
         size,
     });
     out
@@ -829,6 +878,7 @@ fn editor_ui(
     session: &mut EditorSession,
     editor_prefs: &mut prefs::EditorPreferences,
     save_preferences: bool,
+    write_autosave: bool,
     ctx: &egui::Context,
     live: bool,
 ) {
@@ -904,6 +954,24 @@ fn editor_ui(
     if want_save_as {
         session.state.save_as_open = true;
         session.state.save_as_name = session.state.scene.name.clone();
+    }
+
+    // ── 3a. 自动保存（只写 `.autosave/` 副本，不动脏标记）──
+    //
+    // 放在 Ctrl+S 之后：手动保存会顺手删掉副本。顺序反了就是"先写一份、紧接着
+    // 删掉"，白跑一次同步 IO。
+    if write_autosave {
+        let now = Instant::now();
+        session.state.autosave_tick(now);
+        // 空闲停帧时不会有人再来问"到点没"。这里排一次**定时**唤醒
+        // （`request_repaint_after` 不强制立刻重绘），自动保存才能准点发生 ——
+        // 否则它只在"用户一直在拖东西"时触发，恰恰是最不需要它的时候。
+        // 只在 `!live` 排：连续出帧时本来就不缺 frame。
+        if !live {
+            if let Some(wait) = session.state.autosave_wait(now) {
+                ctx.request_repaint_after(wait);
+            }
+        }
     }
 
     // ── 3b. Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤销重做 ──
@@ -1042,6 +1110,10 @@ fn editor_ui(
         session.state.exit_confirmed = Some(target);
     }
 
+    // 崩溃恢复框画在最末：它只在打开项目后的头几帧存在，盖在其他弹窗之上
+    // 才不会被"未保存更改"压住（两个都开着时，恢复框是更紧急的那个）。
+    dialogs::show_autosave_recovery_dialog(&mut session.state, ctx);
+
     // ── 8. 帧采样（Profiler 面板的数据面）──
     //
     // 放在最末：本帧每一段耗时都已测完，样本是完整的一份。采样本身只写一个
@@ -1064,6 +1136,26 @@ fn editor_ui(
 /// UE 的状态栏是一条**比面板深**的窄条（24px），文字一律 11px、标签暗、数值亮，
 /// 段与段之间用 1px 竖线分开；右侧固定放"不常看但必须能看到"的读数（FPS / 版本）。
 /// 这里刻意不用 `ui.separator()`：它是横线，塞进水平布局里会把行高撑到 30px 以上。
+/// 状态栏的自动保存读数；`None` = 不显示。
+///
+/// 三条都不显示：非编辑态（Play 时不写副本）、自动保存被关掉、还没成功写过
+/// 任何一次 —— 空状态下多一个"自动保存 —"只是噪音。
+fn autosave_label(state: &EditorState) -> Option<(String, egui::Color32)> {
+    use crate::panels::theme::colors;
+    let autosave = state.autosave_state();
+    if !state.is_editing() || !autosave.is_enabled() {
+        return None;
+    }
+    if autosave.last_error().is_some() {
+        return Some(("自动保存失败".to_owned(), colors::WARN));
+    }
+    let elapsed = autosave.last_success()?.elapsed();
+    Some((
+        format!("自动保存 {}", crate::autosave::relative_label(elapsed)),
+        colors::TEXT_DIM,
+    ))
+}
+
 fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
     use crate::panels::{icons, theme};
 
@@ -1199,6 +1291,21 @@ fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
                                 theme::colors::TEXT_DIM
                             }),
                     );
+
+                    // ── 自动保存 ──
+                    //
+                    // 显示的是**上一次成功写入**的相对时间 —— 用户唯一关心的
+                    // 就是这个（"我最多会丢多少工作"）。失败优先显示：一条
+                    // "自动保存失败"比"3 分钟前"更急。
+                    if let Some((text, color)) = autosave_label(state) {
+                        icons::v_separator(ui);
+                        let interval = state.autosave_state().interval_secs();
+                        ui.label(egui::RichText::new(text).size(11.0).color(color))
+                            .on_hover_text(format!(
+                                "每 {interval} 秒在 {}/ 下留一份副本。\n副本不改「未保存」状态 —— 要真正落盘仍需 Ctrl+S。",
+                                xgame_core::project::AUTOSAVE_DIR
+                            ));
+                    }
                 });
             });
         });

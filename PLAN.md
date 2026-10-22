@@ -3954,3 +3954,87 @@ panic。校验不过时记 warning、本次用 `dock::create_tile_tree()` 继续
 - 单级拟合 `fit_directional_shadow` 保留：关掉 CSM 的等价退路 + 精度账的基准。
 - 点光阴影 / 软阴影（PCSS、VSM）仍在 P2 #20。
 
+## 四十二、自动保存 + 崩溃恢复：`.autosave/` 副本 + 恢复框（2026-10-22）
+
+差距分析 P1 #14，也是「编辑器产品化」这一条线剩下的最后一处硬缺口（Profiler /
+Preferences / 布局持久化 / 多场景编辑都已落地）。它不是能力差距，而是**风险**：
+崩溃即丢全部未保存工作，`Ctrl+S` 是唯一防线。
+
+### 一、存哪儿：难点不在"写"，在"不污染"
+
+第一反应是在 `Scenes/` 下写 `*.autosave.ron`，但 `ProjectHandle::list_scenes` 是
+**递归扫描**这个目录的。副本一旦落在那里，会同时污染三处：
+
+| 消费点 | 后果 |
+|---|---|
+| Scenes 菜单 | 多出一条"未命名副本"，点一下就打开它 |
+| `--check` | 把副本当场景校验 —— 一次崩溃残留就能让 CI 变红 |
+| `--migrate-assets` | 把副本当场景改写引用 |
+
+所以最终落在 `<项目根>/.autosave/<场景相对路径>`：项目根的点目录，场景 / 预制体 /
+资产三条扫描都碰不到。为此专门写了两条测试钉住（`autosave_stays_out_of_the_scene_list`
+与 core 侧 `autosave_roundtrips_and_stays_out_of_the_scene_list`）——**只看"文件写了"
+是不够的**，还得断言"场景清单没多东西"。
+
+顺带补了新建项目的 `.gitignore`（`Build/` / `Plugins/` / `.autosave/`）。原本
+`ProjectHandle::create` 什么都不写，用户第一次 `git add .` 就会把 DLL 和副本一起提交。
+
+### 二、"自动保存 ≠ 保存"是这一轮最重要的一条
+
+写副本之后 `saved_snapshot` 一个字节都不动：星号还在、关窗照样要确认、
+`save_scene` 语义不变。反过来做（写副本就当已保存）会在两个地方立刻出问题：
+
+1. 用户以为落盘了，实际磁盘上是两小时前的版本；
+2. 关窗时被放行，而那份"已保存"的内容其实还躺在 `.autosave/` 里。
+
+同理，**手动保存成功后要删副本**。这不是省磁盘：留着它，下次启动会问"要不要恢复
+两小时前那一份"，用户点"恢复"就把刚存的东西盖回去了。
+
+### 三、调度：时间注入 + 空闲唤醒
+
+`AutoSave`（`crates/xgame-editor/src/autosave.rs`）只做计时，不碰 IO：
+
+- `new(interval, now)` / `due_at(now)` / `mark_attempt(now)` / `mark_success(now)`；
+- 时间全部**由参数注入**，单测能把时钟拨快三分钟验证间隔语义，不用真等；
+- 干净时到点也 `mark_attempt` 推进计时器（"改一笔之后最多等一个间隔"），
+  `scene_dirty()` 拦在写盘那一步。
+
+真正容易漏的是**空闲停帧**：界面静止后 `frame_policy` 会停帧，`update()` 不再被调用，
+`autosave_tick` 也就没人问。所以 `AutoSave::wait(now)` 把剩余时间交给主循环，在
+`!live` 时 `request_repaint_after(wait)` —— 准点醒一帧再睡。没有这一步，自动保存
+只在"用户一直拖着鼠标"时触发，恰好是最不需要它的时候。
+
+### 四、恢复：探测 ≠ 自动载入
+
+`EditorState::new` 只探测入口场景有没有副本（`pending_autosave`），首帧由
+`dialogs::show_autosave_recovery_dialog` 弹三选一：恢复 / 丢弃 / 稍后。
+自动恢复被刻意排除 —— 在用户没同意的情况下把场景换成一份旧现场，比丢改动更让人困惑。
+
+恢复路径有个细节：`adopt_scene` 会把 `saved_snapshot` 设成刚载入的场景（= 干净），
+所以之后要**单独覆盖回磁盘版本**，否则恢复完的场景会被标成"已保存"，用户直接关窗
+就真丢了。恢复后还 `schedule_now()` —— 恢复出来的内容尚未进任何副本，中间再崩一次
+就白恢复。
+
+### 五、验证
+
+新增 21 条测试（core 3 + editor 18）。**新模块没有"旧实现"可对照**（类型还不存在，
+编译即红），所以这里的"红"是初版断言真的失败过三次，逐条修的是断言而不是代码：
+  - 第一条草稿让"干净时到点"和"脏时到点"共用一个时刻，被"干净也推进计时器"的语义
+    打败 —— 断言写错而不是代码写错，改成按真实时刻序列 `t0+60 / t0+100 / t0+121`；
+  - `enter_play_mode()` **不设** `play_mode`（那是工具栏的活，主循环补调），测试要自己
+    推上去，否则"Play 态不写"这条测的是编辑态；
+  - `ProjectHandle::create(base, name)` 的 root 是 `base/name`，重开项目要用
+    `state.project.root()`，不是 `base`。
+- 实机：造副本后 `--check` 仍 `scenes=1 / exit 0`；`--headless --frames 30` 正常；
+  `--ui-shot` 截图确认恢复框（文案 / 三个按钮 / 相对时间"17 秒前"），截图后副本
+  字节数未变 —— 只读约束成立。
+- 全工作区 `cargo clippy --all-targets` 0 告警；全量测试
+  **717 passed / 0 failed / 7 ignored**（上一轮 696，净增 21），
+  `-j 2 -- --test-threads=4`。
+
+### 六、刻意的限制
+
+- 只探测**入口场景**；切场景不弹框（副本仍在盘上，Console 提一句，等它作为启动场景
+  打开时再问）。
+- 单一副本，不做时间线 / 多版本。
+- 不做"自动保存后自动清空撤销栈"之类的联动。

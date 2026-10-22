@@ -40,6 +40,10 @@ fn default_show_grid() -> bool {
     true
 }
 
+fn default_autosave_interval() -> u64 {
+    crate::autosave::DEFAULT_INTERVAL_SECS
+}
+
 /// 跨项目保存的编辑器偏好。
 ///
 /// 字段全部 `#[serde(default)]`：以后加字段时，老文件照常能读。
@@ -54,6 +58,12 @@ pub struct EditorPreferences {
     /// 视口网格默认是否显示。
     #[serde(default = "default_show_grid")]
     pub show_grid: bool,
+    /// 自动保存间隔（秒）；`0` = 关闭。
+    ///
+    /// 归**编辑器**偏好而不是项目设置：它是"这个人怎么用编辑器"，
+    /// 换项目不该重置（同相机速度）。
+    #[serde(default = "default_autosave_interval")]
+    pub autosave_interval_secs: u64,
     /// 停靠布局；`None` = 从没保存过（使用出厂布局）。
     #[serde(default)]
     pub layout: Option<egui_tiles::Tree<PanelTab>>,
@@ -65,6 +75,7 @@ impl Default for EditorPreferences {
             camera_speed: default_camera_speed(),
             camera_sensitivity: default_camera_sensitivity(),
             show_grid: default_show_grid(),
+            autosave_interval_secs: default_autosave_interval(),
             layout: None,
         }
     }
@@ -88,6 +99,9 @@ impl EditorPreferences {
             EditorCamera::MAX_SENSITIVITY,
             EditorCamera::DEFAULT_SENSITIVITY,
         );
+        // 间隔可能是手改出来的离谱值（1 秒 = 逐帧写盘；十天 = 等于没有）。
+        // `0` 是合法的"关闭"，不能被夹成 10。
+        self.autosave_interval_secs = crate::autosave::sanitize_interval(self.autosave_interval_secs);
         self
     }
 
@@ -114,6 +128,7 @@ impl EditorPreferences {
         state.editor_camera.pan_speed = self.camera_speed;
         state.editor_camera.sensitivity = self.camera_sensitivity;
         state.show_grid = self.show_grid;
+        state.set_autosave_interval(self.autosave_interval_secs);
     }
 
     /// 把当前布局同步进偏好；返回是否真的变了。
@@ -313,6 +328,7 @@ mod tests {
             camera_speed: 12.5,
             camera_sensitivity: 0.004,
             show_grid: false,
+            autosave_interval_secs: 90,
             layout: Some(dock::create_tile_tree()),
         };
         prefs.save_to(&path).unwrap();
@@ -321,6 +337,7 @@ mod tests {
         assert_eq!(back.camera_speed, 12.5);
         assert_eq!(back.camera_sensitivity, 0.004);
         assert!(!back.show_grid);
+        assert_eq!(back.autosave_interval_secs, 90);
         assert_eq!(back.layout, prefs.layout);
         assert!(dock::is_usable_layout(&back.layout_for_startup()));
 

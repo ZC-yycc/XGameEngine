@@ -16,8 +16,14 @@
 //! ├── project.ron          # 项目清单（本模块的 Project）
 //! ├── Scenes/              # 场景文件（.ron）
 //! ├── Prefabs/             # 预制体资产（*.prefab.ron）
-//! └── Resources/           # 模型 / 纹理 / 音频等资产
+//! ├── Resources/           # 模型 / 纹理 / 音频等资产
+//! └── .autosave/           # 自动保存副本（崩溃恢复用，见 AUTOSAVE_DIR）
 //! ```
+//!
+//! `.autosave/` 刻意**不在** `Scenes/` 下：`list_scenes` 递归扫 `Scenes/` 下
+//! 所有 `.ron`，自动保存副本落在那里就会被当成真场景（Scenes 菜单列出它、
+//! `--check` 校验它、`--migrate-assets` 改写它）。放在项目根的点目录里，
+//! 上面三条扫描（场景 / 预制体 / 资产）一条都碰不到。
 //!
 //! # 为什么清单里存的是相对路径，而场景里存的是 GUID
 //!
@@ -55,6 +61,38 @@ pub const PROJECT_FORMAT_VERSION: u32 = 1;
 
 /// 默认入口场景（相对项目根目录）。
 pub const DEFAULT_ENTRY_SCENE: &str = "Scenes/scene.ron";
+
+/// 自动保存目录（项目根下）。
+///
+/// **不能改成 `Scenes/` 下的子目录或文件后缀**：`Scenes/` 是递归扫描的，
+/// 任何 `.ron` 都会进 `list_scenes`（→ `--check` / Scenes 菜单 / 资产迁移）。
+/// 详见模块文档。
+pub const AUTOSAVE_DIR: &str = ".autosave";
+
+/// 自动保存副本的项目相对路径：`.autosave/<场景相对路径>`。
+///
+/// 保留子目录结构（`Scenes/Level2.ron` → `.autosave/Scenes/Level2.ron`），
+/// 出问题时能一眼对上是哪个场景，不需要额外的映射表。
+pub fn autosave_relative(scene_relative: &str) -> String {
+    format!("{AUTOSAVE_DIR}/{scene_relative}")
+}
+
+/// 新建项目时写下的 `.gitignore`。
+///
+/// 三条都是**本引擎产生的东西**：`Build/`（编辑器 Build 按钮）、
+/// `Plugins/`（Rust 插件编译产物）、`.autosave/`（崩溃恢复副本）。
+/// 让用户第一次 `git add .` 就把它们提交进去，之后每次 Play / 自动保存都是
+/// 一次无意义的二进制或整文件 diff —— 这个坑越早堵越好。
+pub const DEFAULT_GITIGNORE: &str = "\
+# 构建产物（编辑器 Build 按钮）
+Build/
+
+# Rust 插件编译产物（编辑器在 Play 时同步到这里）
+Plugins/
+
+# 自动保存副本（编辑器崩溃恢复用，属于本机现场，不入库）
+.autosave/
+";
 
 // ---------------------------------------------------------------------------
 // 项目清单
@@ -322,6 +360,10 @@ impl ProjectHandle {
         // 清单 + 默认场景
         handle.save()?;
         handle.write_scene(DEFAULT_ENTRY_SCENE, &default_scene())?;
+        // 新建项目自带 `.gitignore`：`Build/` 与 `Plugins/` 是构建产物，
+        // `.autosave/` 是"这台机器这一刻的现场"（见 AUTOSAVE_DIR）——
+        // 三者都不该进版本库。写失败不影响项目可用，所以只当尽力而为。
+        let _ = std::fs::write(handle.root.join(".gitignore"), DEFAULT_GITIGNORE);
         if let Ok(mut db) = handle.assets.lock() {
             db.refresh();
         }
@@ -844,16 +886,7 @@ impl ProjectHandle {
         let path = self.path(relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
-        let mut scene = ron::from_str(&text)
-            .map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))?;
-        {
-            let assets = self.assets();
-            decode_scene_references(&mut scene, &assets);
-        }
-        // 同 `load_prefab`：UI 数值在加载时夹取一次。
-        sanitize_ui(&mut scene.entities);
-        sanitize_particles(&mut scene.entities);
-        Ok(scene)
+        self.parse_scene_text(&text, &path)
     }
 
     /// 加载清单里指定的入口场景。
@@ -867,6 +900,23 @@ impl ProjectHandle {
     /// 于是"打开旧项目 + 保存一次"就完成了从路径引用到 GUID 引用的迁移，
     /// 不需要额外的迁移命令。
     pub fn write_scene(&self, relative: &str, scene: &Scene) -> Result<(), ProjectError> {
+        let path = self.path(relative);
+        let text = self.scene_text(scene, &path)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::write(&path, text).map_err(|source| ProjectError::Write { path, source })
+    }
+
+    /// 把场景序列化成落盘文本（资产引用已编码成 GUID）。
+    ///
+    /// `write_scene` 与 `write_autosave` 共用这一份实现 —— 两条路写出来的
+    /// 必须是**同一种格式**，否则"从自动保存恢复"会把 GUID 变成路径，
+    /// 下一次保存再把它们编回去（中间任何一步的 diff 都会显得莫名其妙）。
+    fn scene_text(&self, scene: &Scene, path: &Path) -> Result<String, ProjectError> {
         let encoded = {
             let mut assets = self.assets();
             // 保存前重新扫一遍：用户可能在编辑器打开后往 `Resources/` 里拷了
@@ -883,20 +933,98 @@ impl ProjectHandle {
             }
         };
         let scene = encoded.as_ref().unwrap_or(scene);
+        let pretty = ron::ser::PrettyConfig::default();
+        ron::ser::to_string_pretty(scene, pretty).map_err(|e| ProjectError::Write {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+        })
+    }
 
-        let path = self.path(relative);
+    /// 解析场景文本（`guid://` 解码成路径 + UI / 粒子数值夹取）。
+    fn parse_scene_text(&self, text: &str, path: &Path) -> Result<Scene, String> {
+        let mut scene = ron::from_str(text)
+            .map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))?;
+        {
+            let assets = self.assets();
+            decode_scene_references(&mut scene, &assets);
+        }
+        // 同 `load_prefab`：UI 数值在加载时夹取一次。
+        sanitize_ui(&mut scene.entities);
+        sanitize_particles(&mut scene.entities);
+        Ok(scene)
+    }
+
+    // -- 自动保存 ----------------------------------------------------------
+
+    /// 某个场景的自动保存文件绝对路径。
+    pub fn autosave_path(&self, scene_relative: &str) -> PathBuf {
+        self.path(autosave_relative(scene_relative))
+    }
+
+    /// 写一份自动保存副本，返回落盘路径。
+    ///
+    /// **原子写**（`.tmp` + rename）：自动保存是"用户没在看着"的时候写的，
+    /// 恰好在这一刻断电 / 被杀进程不能留下半截 RON —— 那比没有自动保存更糟，
+    /// 因为恢复流程会拿它去覆盖内存里的场景。
+    pub fn write_autosave(
+        &self,
+        scene_relative: &str,
+        scene: &Scene,
+    ) -> Result<PathBuf, ProjectError> {
+        let path = self.autosave_path(scene_relative);
+        let text = self.scene_text(scene, &path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
                 path: parent.to_path_buf(),
                 source,
             })?;
         }
-        let pretty = ron::ser::PrettyConfig::default();
-        let text = ron::ser::to_string_pretty(scene, pretty).map_err(|e| ProjectError::Write {
-            path: path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-        })?;
-        std::fs::write(&path, text).map_err(|source| ProjectError::Write { path, source })
+        write_atomic(&path, &text)?;
+        Ok(path)
+    }
+
+    /// 读回某个场景的自动保存副本。
+    pub fn read_autosave(&self, scene_relative: &str) -> Result<Scene, String> {
+        let path = self.autosave_path(scene_relative);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("无法读取自动保存 '{}': {}", path.display(), e))?;
+        self.parse_scene_text(&text, &path)
+    }
+
+    /// 某场景是否有自动保存，返回最后一次写入时间。
+    pub fn autosave_modified(&self, scene_relative: &str) -> Option<std::time::SystemTime> {
+        std::fs::metadata(self.autosave_path(scene_relative))
+            .ok()?
+            .modified()
+            .ok()
+    }
+
+    /// 删除某场景的自动保存；返回是否真的删掉了文件。
+    ///
+    /// 文件不存在不算错误（正常路径就是"从没自动保存过"）—— 调用方
+    /// （手动保存成功 / 用户选择丢弃）不该为此收到一条警告。
+    pub fn remove_autosave(&self, scene_relative: &str) -> bool {
+        let path = self.autosave_path(scene_relative);
+        match std::fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                log::warn!("删除自动保存失败 ({}): {e}", path.display());
+                false
+            }
+        }
+    }
+
+    /// 列出所有留有自动保存的场景（项目相对路径，已排序）。
+    ///
+    /// 只用于"打开项目时提示还有哪些场景留有副本"，不是场景清单的一环
+    /// （`list_scenes` 与它彻底无关）。
+    pub fn list_autosaves(&self) -> Vec<String> {
+        let dir = self.root.join(AUTOSAVE_DIR);
+        let mut out = Vec::new();
+        collect_by_extension(&dir, &dir, "ron", &mut out);
+        out.sort();
+        out
     }
 
     /// 把项目清单写回磁盘。
@@ -998,6 +1126,31 @@ fn sanitize_asset_name_or(name: &str, fallback: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// 原子写：先写 `<文件名>.tmp` 再 rename 覆盖目标。
+///
+/// Windows 的 `rename` 会覆盖已存在的目标（MoveFileEx + REPLACE_EXISTING），
+/// 与 Unix 语义一致。rename 失败（文件被占用、跨卷）时退回直接写 ——
+/// "写成功但不原子"好过"什么都没写"，而且这条路径只在异常情况下走。
+fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> {
+    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{ext}.tmp"),
+        None => "tmp".to_owned(),
+    });
+    std::fs::write(&tmp, text).map_err(|source| ProjectError::Write {
+        path: tmp.clone(),
+        source,
+    })?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        log::warn!("临时文件 rename 失败，改为直接写入: {e}");
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::write(path, text).map_err(|source| ProjectError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 /// 递归收集预制体资产，把相对**项目根**的路径（正斜杠形式）写进 `out`。
@@ -1243,6 +1396,112 @@ mod tests {
         // 读回来必须是**路径**（内存态），不是 guid:// 字符串。
         let reloaded = handle.load_entry_scene().unwrap();
         assert_eq!(reloaded.entities.last().unwrap().model, "Resources/Box.glb");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // -- 自动保存（崩溃恢复的数据面）--------------------------------------
+
+    /// 新建项目自带 `.gitignore`，且覆盖引擎自己的三个产物目录。
+    ///
+    /// 旧实现（不写 `.gitignore`）下这条必红。漏掉的后果是用户第一次
+    /// `git add .` 就把 `Plugins/` 的 DLL 和 `.autosave/` 的副本一起提交进去。
+    #[test]
+    fn create_writes_a_gitignore_for_generated_dirs() {
+        let base =
+            std::env::temp_dir().join(format!("xgame_gitignore_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let handle = ProjectHandle::create(&base, "IgnoreMe").expect("create");
+        let text = std::fs::read_to_string(handle.root().join(".gitignore"))
+            .expect("新建项目应当带 .gitignore");
+        for needle in ["Build/", "Plugins/", AUTOSAVE_DIR] {
+            assert!(text.contains(needle), ".gitignore 应当忽略 {needle}，实际：\n{text}");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 副本的路径保留子目录、能读回，且**不进** `list_scenes`。
+    ///
+    /// `list_scenes` 是递归扫描的：副本一旦落在 `Scenes/` 下，`--check` 会拿它
+    /// 当场景校验、Scenes 菜单会列出它、`--migrate-assets` 会改写它。
+    #[test]
+    fn autosave_roundtrips_and_stays_out_of_the_scene_list() {
+        let (base, handle) = temp_project("autosave");
+        let mut scene = handle.load_entry_scene().expect("默认场景");
+        scene.name = "Autosaved".to_owned();
+        scene.entities.push(Entity::new("extra"));
+
+        let path = handle
+            .write_autosave(DEFAULT_ENTRY_SCENE, &scene)
+            .expect("写自动保存");
+        assert_eq!(
+            path,
+            handle.root().join(AUTOSAVE_DIR).join(DEFAULT_ENTRY_SCENE),
+            "副本应落在 .autosave/ 下的同名子路径"
+        );
+        assert!(path.is_file());
+
+        let back = handle.read_autosave(DEFAULT_ENTRY_SCENE).expect("读回副本");
+        assert_eq!(back.name, "Autosaved");
+        assert!(back.entities.iter().any(|e| e.name == "extra"));
+
+        assert_eq!(
+            handle.list_scenes(),
+            vec![DEFAULT_ENTRY_SCENE.to_owned()],
+            "副本不该进场景清单"
+        );
+        assert_eq!(
+            handle.list_autosaves(),
+            vec![DEFAULT_ENTRY_SCENE.to_owned()],
+            "但 list_autosaves 要能看见它"
+        );
+        assert!(handle.autosave_modified(DEFAULT_ENTRY_SCENE).is_some());
+
+        assert!(handle.remove_autosave(DEFAULT_ENTRY_SCENE), "第一次删除应成功");
+        assert!(
+            !handle.remove_autosave(DEFAULT_ENTRY_SCENE),
+            "文件已经不在了，重复删除不该报成功"
+        );
+        assert!(handle.list_autosaves().is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 副本与真保存必须是**同一种格式**（GUID 编码）。
+    ///
+    /// 不一致的后果很隐蔽：从副本恢复会把 GUID 退回路径，下一次保存再编回去，
+    /// 中间每一次 diff 都像"引用被改过"，排查时完全找不到原因。
+    #[test]
+    fn autosave_uses_the_same_encoding_as_a_real_save() {
+        let (base, handle) = temp_project("autosave_guid");
+        std::fs::create_dir_all(handle.path("Resources")).unwrap();
+        std::fs::write(handle.path("Resources/Box.glb"), b"glb").unwrap();
+
+        let mut scene = handle.load_entry_scene().expect("默认场景");
+        scene
+            .entities
+            .push(Entity::new("Box").with_model("Resources/Box.glb"));
+
+        handle
+            .write_autosave(DEFAULT_ENTRY_SCENE, &scene)
+            .expect("写自动保存");
+        let text =
+            std::fs::read_to_string(handle.autosave_path(DEFAULT_ENTRY_SCENE)).unwrap();
+        assert!(text.contains("guid://"), "副本里应当是 GUID 引用：\n{text}");
+        assert!(
+            !text.contains("Resources/Box.glb"),
+            "副本里不该出现资产路径字面量：\n{text}"
+        );
+
+        // 读回来是**路径**（内存态）—— 与 `load_scene` 同一条边界。
+        let back = handle.read_autosave(DEFAULT_ENTRY_SCENE).expect("读回副本");
+        assert!(back
+            .entities
+            .iter()
+            .any(|e| e.model == "Resources/Box.glb"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

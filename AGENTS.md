@@ -16,7 +16,7 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；686 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；717 条 + 7 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
@@ -67,10 +67,12 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - **运行态（Play/Pause）的界面语义**：`scene_dirty_memo` 恒为 false（运行时副本不算
   改动）、`save_scene` / `save_scene_as` 硬拒绝、Pause/Stop 用 `add_enabled_ui` 禁用。
   任何"只在编辑态有意义"的新按钮都要照这三条办。
-- **`--ui-shot` 的七个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
-  `--ui-profiler` / `--ui-preferences` / `--ui-restore-prefs` / `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
+- **`--ui-shot` 的八个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
+  `--ui-profiler` / `--ui-preferences` / `--ui-restore-prefs` / `--ui-autosave-recover` /
+  `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
   `rowscan.py`（按行扫颜色分段量像素）。**用 `--ui-size` 至少扫 1280 / 1440 / 1920
-  三档** —— 窄窗口的溢出只有跑过才看得见。
+  三档** —— 窄窗口的溢出只有跑过才看得见。截图默认**只读**：不写 `editor.ron`、
+  不写 `.autosave/`、不弹恢复框（磁盘残留会让像素不确定）。
 
 ## 项目布局
 
@@ -108,4 +110,5 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 剔除 | 保守性硬合同（开/关逐位一致）；相机外投影物保留；蒙皮 50% 余量 | §十一 |
 | FXAA | 默认关；显示空间 luma；`textureSampleLevel(..., 0.0)`；平坦区回原值 | §十二 |
 | 资产管线 | 磁盘 GUID / 内存路径；GUID 永不变；`--check` 只读；迁移只替换字面量（不吃注释） | §十四 |
+| 自动保存 | 副本只在 `<项目>/.autosave/`（进 `Scenes/` 会被当场景）；**不算保存**（不动 `saved_snapshot`）；手动保存 / 正常退出即清；写盘格式与 `write_scene` 同源 + 原子写；空闲停帧时靠 `request_repaint_after` 唤醒 | §二十四 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |

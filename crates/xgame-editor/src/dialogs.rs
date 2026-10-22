@@ -9,6 +9,89 @@
 use crate::panels::theme::colors;
 use crate::state::{EditorState, ExitTarget, SceneChange};
 
+/// 「发现自动保存」恢复框：上一次会话没走正常退出流程时出现。
+///
+/// 三个选择（都不做"自动恢复"：在用户没同意的情况下把场景换成一份旧现场，
+/// 比丢改动更让人困惑）：
+///
+/// - **恢复**：载入副本。载入后仍是**未保存**状态（脏检查基准还是磁盘上那一份），
+///   要 Ctrl+S 才真正写进场景文件；
+/// - **丢弃**：删掉副本，继续用磁盘上的场景；
+/// - **稍后**：这次不处理，副本留在盘上 —— 下次打开还会问。
+pub fn show_autosave_recovery_dialog(state: &mut EditorState, ctx: &egui::Context) {
+    let Some(notice) = state.pending_autosave.clone() else {
+        return;
+    };
+    // Play / Pause 态下不该弹：进 Play 会换掉场景，恢复出来的内容会被
+    // `play_snapshot` 覆盖掉，等于白恢复。留着副本，等回到编辑态。
+    if !state.is_editing() {
+        return;
+    }
+
+    let label = crate::state::scene_label(&notice.scene);
+    let age = notice
+        .age_label()
+        .map(|a| format!("，写入于{a}"))
+        .unwrap_or_default();
+
+    let mut recover = false;
+    let mut discard = false;
+    let mut later = false;
+
+    egui::Window::new("发现自动保存")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "场景「{label}」有一份自动保存的副本{age}。"
+            ));
+            ui.label("它来自上一次没有正常退出的会话 —— 可能是崩溃或被强制结束。");
+            theme_note(ui, "恢复之后仍然是未保存状态：要按 Ctrl+S 才会写进场景文件。");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button("恢复")
+                    .on_hover_text("载入这份副本（随后仍需 Ctrl+S 落盘）")
+                    .clicked()
+                {
+                    recover = true;
+                }
+                if ui
+                    .button("丢弃")
+                    .on_hover_text("删除副本，继续使用磁盘上的场景文件")
+                    .clicked()
+                {
+                    discard = true;
+                }
+                if ui
+                    .button("稍后")
+                    .on_hover_text("这次不处理，副本留在盘上，下次打开再问")
+                    .clicked()
+                {
+                    later = true;
+                }
+            });
+        });
+
+    if recover {
+        let _ = state.recover_autosave();
+    } else if discard {
+        state.discard_autosave();
+    } else if later {
+        state.pending_autosave = None;
+    }
+}
+
+/// 与面板里同款的说明文字（这条弹窗不进 dock，拿不到 `theme` 的排版上下文）。
+fn theme_note(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(11.0)
+            .color(crate::panels::theme::colors::TEXT_DIM),
+    );
+}
+
 /// 「未保存更改」确认框。
 ///
 /// 返回 `Some(target)` 表示用户已放行（保存成功，或明确选了不保存）——

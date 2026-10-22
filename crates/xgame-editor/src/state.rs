@@ -619,6 +619,16 @@ pub struct EditorState {
     saved_snapshot: Scene,
     /// [`scene_dirty_memo`](Self::scene_dirty_memo) 的按帧缓存 `(pass_nr, 结果)`。
     dirty_memo: Option<(u64, bool)>,
+    /// 自动保存的计时器（间隔 / 上次成功 / 上次错误）。
+    ///
+    /// 它**只影响 `.autosave/` 副本**：`saved_snapshot` 不动、脏标记不动、
+    /// 标题星号不动 —— 自动保存不等于保存。详见 [`crate::autosave`]。
+    autosave: crate::autosave::AutoSave,
+    /// 打开项目时发现的、可以恢复的自动保存；`Some` 时首帧弹恢复框。
+    ///
+    /// 只针对**本次打开的入口场景**：切场景不弹框（多场景的副本仍然留在
+    /// `.autosave/` 里，下次把它设成启动场景时会问）。
+    pub pending_autosave: Option<crate::autosave::AutosaveNotice>,
     /// 「场景另存为」对话框是否显示。
     pub save_as_open: bool,
     /// 「场景另存为」的名称输入。
@@ -774,11 +784,31 @@ impl EditorState {
                 xgame_core::project::default_scene()
             }
         };
+        // ── 崩溃恢复：上一次会话没走正常退出流程，会留下 `.autosave/` 副本 ──
+        //
+        // 这里只**探测**，不自动载入：自动恢复会在用户没同意的情况下把场景换成
+        // 一份"两小时前的现场"，比丢改动更让人困惑。弹框让用户自己选
+        // （见 `dialogs::show_autosave_recovery_dialog`）。
+        //
+        // 只探测入口场景：切场景不弹框。多场景留下的副本仍然在磁盘上，等它
+        // 作为启动场景打开时会再问一次。
+        let pending_autosave = project
+            .autosave_modified(&current_scene)
+            .map(|written| crate::autosave::AutosaveNotice {
+                scene: current_scene.clone(),
+                written: Some(written),
+            });
+        // 其它场景的副本：不弹框，但打开时在 Console 里说一声 ——
+        // 否则它们会安静地堆在 `.autosave/` 里没人知道。
+        let other_autosaves = project
+            .list_autosaves()
+            .len()
+            .saturating_sub(usize::from(pending_autosave.is_some()));
+
         let mut state = Self {
             project,
             return_to_hub: false,
             last_build_dir: None,
-
             scene,
             current_scene,
             selected_entity: None,
@@ -812,6 +842,11 @@ impl EditorState {
 
             saved_snapshot: Scene::new(""),
             dirty_memo: None,
+            autosave: crate::autosave::AutoSave::new(
+                crate::autosave::DEFAULT_INTERVAL_SECS,
+                std::time::Instant::now(),
+            ),
+            pending_autosave,
             save_as_open: false,
             save_as_name: String::new(),
             new_scene_open: false,
@@ -866,6 +901,12 @@ impl EditorState {
         state.refresh_assets();
         // 脏检查的基准：刚打开的场景 = 刚落盘的内容 = 干净。
         state.saved_snapshot = state.scene.clone();
+        if other_autosaves > 0 {
+            state.log_info(format!(
+                "另有 {other_autosaves} 个场景留有自动保存副本（在 {}/ 下）",
+                xgame_core::project::AUTOSAVE_DIR
+            ));
+        }
         state
     }
 
@@ -2227,17 +2268,15 @@ impl EditorState {
             self.log_warning(message.clone());
             return Err(message);
         }
-        let relative = if self.current_scene.trim().is_empty() {
-            // 理论不可达（`new` 一定填入口场景）；留一条兜底，免得空路径把
-            // `project.path("")` 变成项目根目录然后写盘失败得莫名其妙。
-            self.project.manifest().entry_scene.clone()
-        } else {
-            self.current_scene.clone()
-        };
+        let relative = self.save_target();
         let path = self.project.path(&relative);
         match self.project.write_scene(&relative, &self.scene) {
             Ok(()) => {
                 self.mark_saved();
+                // 手动保存之后，自动保存副本就没有存在价值了：磁盘与内存已经
+                // 对齐，下次启动再问"要不要恢复那一份"只会把刚存的内容覆盖回去。
+                // 这是**正确性**，不是省磁盘。
+                self.project.remove_autosave(&relative);
                 self.log_success(format!("已保存场景 → {}", path.display()));
                 Ok(())
             }
@@ -2247,6 +2286,153 @@ impl EditorState {
                 Err(message)
             }
         }
+    }
+
+    /// 当前场景的**保存目标**（项目相对路径）。
+    ///
+    /// `current_scene` 为空是理论不可达（`new` 一定填入口场景），但留一条兜底，
+    /// 免得空路径把 `project.path("")` 变成项目根目录、然后写盘失败得莫名其妙。
+    fn save_target(&self) -> String {
+        if self.current_scene.trim().is_empty() {
+            self.project.manifest().entry_scene.clone()
+        } else {
+            self.current_scene.clone()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 自动保存 / 崩溃恢复
+    // -----------------------------------------------------------------------
+
+    /// 到点就写一份自动保存副本；返回**本帧是否真的写了盘**。
+    ///
+    /// 触发条件（全部满足）：编辑态 + 到点 + 场景脏。这条路径
+    /// **不碰 `saved_snapshot`** —— 自动保存不等于保存（星号照旧、
+    /// 关窗照旧要确认）。
+    ///
+    /// `now` 是注入的，测试可以"把时间拨快三分钟"而不真的等。
+    pub fn autosave_tick(&mut self, now: std::time::Instant) -> bool {
+        // Play / Pause 态不写：`self.scene` 是运行时的副本，物理每帧都在改它，
+        // 与 `save_scene` 同一条理由。区别是这里**不弹警告** —— 用户没要求保存。
+        if !self.is_editing() {
+            return false;
+        }
+        if !self.autosave.due_at(now) {
+            return false;
+        }
+        // 先推进计时器：下面任何一条提前返回都不该让下一帧立刻重试。
+        self.autosave.mark_attempt(now);
+        // 干净就不写：省磁盘，更重要的是别让下次启动为一个和磁盘一模一样的
+        // 副本弹"要不要恢复"。
+        if !self.scene_dirty() {
+            return false;
+        }
+
+        let relative = self.save_target();
+        match self.project.write_autosave(&relative, &self.scene) {
+            Ok(_path) => {
+                self.autosave.mark_success(now);
+                true
+            }
+            Err(e) => {
+                let message = e.to_string();
+                // 同一条错误只记一次：磁盘满的时候每 60 秒刷一条警告就够吵了。
+                if self.autosave.last_error() != Some(message.as_str()) {
+                    self.log_warning(format!("自动保存失败: {message}"));
+                }
+                self.autosave.mark_failure(message);
+                false
+            }
+        }
+    }
+
+    /// 距离下一次自动保存检查还有多久；关闭 / 非编辑态时 `None`。
+    ///
+    /// 主循环拿它去 `request_repaint_after`：界面静止时帧调度会停帧，
+    /// 只靠"每帧判一次到点没"是不够的 —— 用户改完东西手离开鼠标，编辑器
+    /// 就不再出帧，自动保存永远不会发生。
+    ///
+    /// **刻意不看脏不脏**：脏检查是 O(实体数) 而这里每帧都会被问；
+    /// 代价是干净时每个间隔醒一次空跑一帧，比"该醒没醒"（功能形同不存在）
+    /// 便宜得多。
+    pub fn autosave_wait(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        if !self.is_editing() {
+            return None;
+        }
+        self.autosave.wait(now)
+    }
+
+    /// 自动保存计时器（只读，状态栏用）。
+    pub fn autosave_state(&self) -> &crate::autosave::AutoSave {
+        &self.autosave
+    }
+
+    /// 改变自动保存间隔（秒，`0` = 关闭）。
+    ///
+    /// 立刻重排下一次到点时刻 —— 从 600 秒改成 10 秒不该还要等 590 秒才生效。
+    pub fn set_autosave_interval(&mut self, secs: u64) {
+        self.autosave
+            .set_interval_secs(secs, std::time::Instant::now());
+    }
+
+    /// 从自动保存副本恢复当前场景。
+    ///
+    /// **恢复后场景是脏的**：恢复出来的内容没有落进场景文件，脏检查的基准仍然
+    /// 是磁盘上那一份。这一点是刻意的 —— 恢复不等于保存，用户还得自己按
+    /// Ctrl+S（否则关窗时会被"未保存"拦一下，那正是应有的行为）。
+    pub fn recover_autosave(&mut self) -> Result<(), String> {
+        let Some(notice) = self.pending_autosave.take() else {
+            return Err("没有待恢复的自动保存".to_owned());
+        };
+        let recovered = match self.project.read_autosave(&notice.scene) {
+            Ok(scene) => scene,
+            Err(e) => {
+                // 读不出来就把通知放回去：用户还能选"丢弃"，也还能再试一次。
+                self.log_error(format!("恢复自动保存失败: {e}"));
+                self.pending_autosave = Some(notice);
+                return Err(e);
+            }
+        };
+        // 磁盘版本作为脏检查的基准。读不出来（场景文件被删了）就退化成空场景
+        // 基准 —— 结果依然是"脏"，方向是对的。
+        let on_disk = self
+            .project
+            .load_scene(&notice.scene)
+            .unwrap_or_else(|_| xgame_core::project::default_scene());
+
+        self.adopt_scene(recovered, notice.scene.clone());
+        // `adopt_scene` 会把基准设成刚载入的场景（= 干净）；这里覆盖回来。
+        self.saved_snapshot = on_disk;
+        self.dirty_memo = None;
+        // 恢复出来的内容还没进任何副本 —— 中间再崩一次就白恢复了。
+        // 让下一次 tick 立刻补一份。
+        self.autosave.schedule_now(std::time::Instant::now());
+
+        self.log_success(format!(
+            "已从自动保存恢复「{}」—— 改动尚未落盘，Ctrl+S 保存",
+            notice.scene
+        ));
+        Ok(())
+    }
+
+    /// 丢弃当前场景的自动保存副本（用户选了"不要"）。
+    pub fn discard_autosave(&mut self) -> bool {
+        let Some(notice) = self.pending_autosave.take() else {
+            return false;
+        };
+        let removed = self.project.remove_autosave(&notice.scene);
+        self.log_info(format!("已丢弃自动保存「{}」", notice.scene));
+        removed
+    }
+
+    /// 正常退出时删掉当前场景的自动保存副本。
+    ///
+    /// 语义：**自动保存只服务崩溃**。用户主动退出（包括明确选了"不保存"）=
+    /// 他已经做过决定，下次启动不该再被问一遍"要不要恢复上次的工作"。
+    /// 崩溃时没有这句调用，副本留在盘上 —— 这才是恢复流程的入口。
+    pub fn drop_autosave_of_current(&mut self) -> bool {
+        let relative = self.save_target();
+        self.project.remove_autosave(&relative)
     }
 
     /// 落盘成功后的收尾：脏检查基准对齐 + 按帧 memo 失效。
@@ -2983,6 +3169,246 @@ mod tests {
         state.enter_play_mode();
         state.exit_play_mode();
         assert!(!state.scene_dirty(), "Play 往返不改变落盘内容");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // -- 自动保存 / 崩溃恢复 -------------------------------------------------
+
+    /// 「到点」的时刻：比 `EditorState::new` 里的首次到点（60 秒）晚一点。
+    fn due_now() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(61)
+    }
+
+    /// 脏且到点才写；干净、未到点都不写。
+    ///
+    /// 旧实现（没有 `AutoSave`）编译都过不去 —— 这就是"红"。更要紧的是
+    /// **干净时不写**：否则每次打开项目 60 秒后都会留一份和磁盘一模一样的
+    /// 副本，下次启动还要为一个"根本不需要恢复"的副本弹框。
+    #[test]
+    fn autosave_writes_only_when_dirty_and_due() {
+        let (mut state, base) = temp_state("autosave_trigger");
+        let t0 = std::time::Instant::now();
+        let at = |secs: u64| t0 + std::time::Duration::from_secs(secs);
+
+        // 干净 + 到点：不写。**这一次会推进计时器**（设计如此：干净时也走一格），
+        // 所以后面的"到点"要按 t0+120 之后算。
+        assert!(!state.autosave_tick(at(60)), "干净场景不该写自动保存");
+        assert!(state.pending_autosave.is_none(), "干净时不该产生恢复通知");
+
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+        assert!(
+            !state.autosave_tick(at(100)),
+            "未到点不该写（改一个字也不该立刻写盘）"
+        );
+        assert!(state.autosave_tick(at(121)), "脏 + 到点应当写一份副本");
+
+        let path = state.project.autosave_path(&state.current_scene);
+        assert!(path.is_file(), "副本应落在 {}", path.display());
+        let copy = state
+            .project
+            .read_autosave(&state.current_scene)
+            .expect("副本应当可读回");
+        assert!(copy.entities.iter().any(|e| e.name == "edited"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 自动保存**不是**保存：脏标记与按帧 memo 都必须还是"未保存"。
+    #[test]
+    fn autosave_keeps_the_scene_dirty() {
+        let (mut state, base) = temp_state("autosave_dirty");
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+        assert!(state.autosave_tick(due_now()));
+
+        assert!(state.scene_dirty(), "自动保存之后场景依旧是未保存状态");
+        assert!(state.scene_dirty_memo(7), "按帧 memo 也要看到脏");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 手动保存之后副本必须消失。
+    ///
+    /// 不删的后果很具体：下次启动弹"要不要恢复两小时前的版本"，用户点"恢复"
+    /// 就把刚保存的内容盖回去了。这条是正确性，不是省磁盘。
+    #[test]
+    fn manual_save_clears_the_autosave_copy() {
+        let (mut state, base) = temp_state("autosave_clear");
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+        assert!(state.autosave_tick(due_now()));
+        let path = state.project.autosave_path(&state.current_scene);
+        assert!(path.is_file());
+
+        state.save_scene().expect("保存应成功");
+        assert!(!path.exists(), "保存后副本必须被清掉");
+        assert!(!state.scene_dirty());
+        assert!(!state.autosave_tick(due_now()), "干净时不该再写");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 间隔语义：写完一次后，同一个间隔内不再写，下一间隔再写。
+    #[test]
+    fn autosave_respects_the_interval() {
+        let (mut state, base) = temp_state("autosave_interval");
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+
+        let t = due_now();
+        assert!(state.autosave_tick(t));
+        assert!(
+            !state.autosave_tick(t + std::time::Duration::from_secs(1)),
+            "间隔内不该重复写"
+        );
+        assert!(
+            state.autosave_tick(t + std::time::Duration::from_secs(61)),
+            "下一个间隔应当再写"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Play 态不写副本：那时的 `scene` 是运行时副本，物理每帧都在改它。
+    #[test]
+    fn autosave_skips_play_mode() {
+        let (mut state, base) = temp_state("autosave_play");
+        state.enter_play_mode();
+        // `enter_play_mode` 只负责建运行时；`play_mode` 的跃迁平时由工具栏改、
+        // 主循环补调（见 `editor_ui` 的 match）。测试不经过工具栏，自己推上去。
+        state.play_mode = PlayMode::Playing;
+        state.scene.add_entity(xgame_core::Entity::new("runtime"));
+
+        assert!(!state.autosave_tick(due_now()), "Play 态不该写自动保存");
+        assert!(!state.project.autosave_path(&state.current_scene).exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 副本不进场景清单 —— `list_scenes` 是递归扫描的，一旦进去，
+    /// `--check` 会把它当场景校验、Scenes 菜单会列出它、资产迁移会改写它。
+    #[test]
+    fn autosave_stays_out_of_the_scene_list() {
+        let (mut state, base) = temp_state("autosave_list");
+        let before = state.project.list_scenes();
+
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+        assert!(state.autosave_tick(due_now()));
+
+        let after = state.project.list_scenes();
+        assert_eq!(before, after, "自动保存不该出现在场景清单里");
+        assert!(
+            after
+                .iter()
+                .all(|s| !s.starts_with(xgame_core::project::AUTOSAVE_DIR)),
+            "场景清单里出现了自动保存目录: {after:?}"
+        );
+        // 同一个结论从"文件确实存在"这一侧再钉一次：不能因为压根没写就通过。
+        assert!(state.project.autosave_path(&state.current_scene).is_file());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 原子写：rename 之后不该留下半截 `.tmp`。
+    #[test]
+    fn autosave_write_leaves_no_temporary_file() {
+        let (mut state, base) = temp_state("autosave_atomic");
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+        assert!(state.autosave_tick(due_now()));
+
+        let path = state.project.autosave_path(&state.current_scene);
+        let stray = path.with_extension("ron.tmp");
+        assert!(
+            !stray.exists(),
+            "rename 之后不该留下临时文件 {}",
+            stray.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 崩溃恢复的完整路径：留副本 → 进程没了 → 重新打开项目 → 恢复。
+    ///
+    /// 恢复之后必须是**未保存**状态：副本没有落进场景文件，用户还得自己
+    /// Ctrl+S。把它标成干净等于谎报"磁盘上已经是这个内容了"。
+    #[test]
+    fn recover_autosave_restores_the_copy_and_stays_dirty() {
+        let (mut state, base) = temp_state("autosave_recover");
+        state.scene.add_entity(xgame_core::Entity::new("recovered"));
+        assert!(state.autosave_tick(due_now()));
+        let root = state.project.root().to_path_buf();
+
+        // 模拟崩溃：直接丢掉 state，不走 `drop_autosave_of_current`。
+        drop(state);
+
+        let project = xgame_core::ProjectHandle::open(&root).expect("重新打开项目");
+        let mut reopened = EditorState::new(project);
+        assert!(reopened.pending_autosave.is_some(), "重开项目应当发现副本");
+        assert!(
+            !reopened.scene.entities.iter().any(|e| e.name == "recovered"),
+            "恢复前不能自动生效（要不要恢复由用户决定）"
+        );
+
+        reopened.recover_autosave().expect("恢复应成功");
+        assert!(reopened
+            .scene
+            .entities
+            .iter()
+            .any(|e| e.name == "recovered"));
+        assert!(
+            reopened.scene_dirty(),
+            "恢复出来的内容没落盘，必须是未保存状态"
+        );
+        assert!(reopened.pending_autosave.is_none(), "恢复完不该再弹框");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 「丢弃」删副本、清通知。
+    #[test]
+    fn discard_autosave_removes_the_copy() {
+        let (mut state, base) = temp_state("autosave_discard");
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+        assert!(state.autosave_tick(due_now()));
+        let path = state.project.autosave_path(&state.current_scene);
+        assert!(path.is_file());
+
+        // 丢弃只在"打开项目时发现了副本"的语境下有意义，这里手工造一条通知。
+        state.pending_autosave = Some(crate::autosave::AutosaveNotice {
+            scene: state.current_scene.clone(),
+            written: None,
+        });
+        assert!(state.discard_autosave());
+        assert!(!path.exists());
+        assert!(state.pending_autosave.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 正常退出清副本 —— 它只服务崩溃。
+    #[test]
+    fn normal_exit_drops_the_copy() {
+        let (mut state, base) = temp_state("autosave_exit");
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+        assert!(state.autosave_tick(due_now()));
+        assert!(state.drop_autosave_of_current());
+        assert!(!state.project.autosave_path(&state.current_scene).exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 间隔 0 = 关闭：不写，也不给主循环排唤醒。
+    #[test]
+    fn disabling_autosave_writes_nothing() {
+        let (mut state, base) = temp_state("autosave_off");
+        state.set_autosave_interval(0);
+        state.scene.add_entity(xgame_core::Entity::new("edited"));
+
+        assert!(!state.autosave_tick(due_now()));
+        assert!(!state.project.autosave_path(&state.current_scene).exists());
+        assert_eq!(
+            state.autosave_wait(due_now()),
+            None,
+            "关闭后不该再排唤醒（否则每个间隔白醒一次）"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

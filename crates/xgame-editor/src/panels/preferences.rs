@@ -126,6 +126,38 @@ impl PreferencesWindow {
                         ui.end_row();
                     });
 
+                // ── 自动保存 ──
+                theme::section_bar(ui, "自动保存");
+                egui::Grid::new("pref_autosave")
+                    .num_columns(2)
+                    .spacing([10.0, 5.0])
+                    .min_col_width(96.0)
+                    .show(ui, |ui| {
+                        ui.label("间隔").on_hover_text(
+                            "每隔多少秒在项目的 .autosave/ 下留一份副本；0 = 关闭",
+                        );
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut draft.autosave_interval_secs)
+                                    .range(0..=crate::autosave::MAX_INTERVAL_SECS)
+                                    .speed(1.0)
+                                    .suffix(" 秒"),
+                            );
+                            if ui
+                                .small_button("关闭")
+                                .on_hover_text("设为 0，不再自动保存")
+                                .clicked()
+                            {
+                                draft.autosave_interval_secs = crate::autosave::OFF;
+                            }
+                        });
+                        ui.end_row();
+                    });
+                theme::note(
+                    ui,
+                    "副本只用于崩溃恢复，不改变「未保存」状态 —— 要落盘仍然要 Ctrl+S。",
+                );
+
                 // ── 布局 ──
                 theme::section_bar(ui, "面板布局");
                 theme::note(
@@ -194,6 +226,7 @@ mod tests {
             camera_speed: 9.5,
             camera_sensitivity: 0.003,
             show_grid: false,
+            autosave_interval_secs: 30,
             layout: None,
         };
         window.open(&prefs);
