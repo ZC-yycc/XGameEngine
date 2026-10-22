@@ -33,9 +33,9 @@
 //!   binding 2  draws     storage（逐实例：模型矩阵 + 蒙皮槽位 + 材质；
 //!                        一个实例一段、紧密排布，实例下标 =
 //!                        `@builtin(instance_index)`，见"实例化"一节）
-//!   binding 3  shadow    texture_depth_2d（方向光阴影深度图）
+//!   binding 3  shadow    texture_depth_2d_array（方向光级联阴影，一层一个级联）
 //!   binding 4  shadow_smp    comparison sampler
-//!   binding 5  shadow_ub     uniform（光源视图投影矩阵 + 偏置/开关）
+//!   binding 5  shadow_ub     uniform（级联矩阵数组 + 切分表 + 偏置/开关）
 //!   binding 6  bones     storage（蒙皮骨骼矩阵，见下）
 //!   binding 7  sky       uniform（天空参数；太阳转向/强度都在这）
 //!   binding 8  sky_sh    uniform（漫反射环境的 L2 球谐，E/π 口径）
@@ -111,21 +111,30 @@
 //! **颜色 / 金属度 / 粗糙度不在这个绑定组里**——它们是逐 draw 的（实体级
 //! 材质覆盖），随 group(0) binding 2 的动态偏移走。
 //!
-//! # 阴影贴图
+//! # 阴影贴图（级联 CSM）
 //!
 //! 方向光走经典的 **shadow mapping**：先用一盏灯（第一盏开了 `casts_shadow`
-//! 的方向光）的视图投影矩阵把整场景的深度画进一张独立的深度图，主 pass 里
-//! 再把片元变换回光源裁剪空间、与深度图比较（PCF 3×3 软化边缘）。
+//! 的方向光）把场景深度画进深度图，主 pass 里再把片元变换回光源裁剪空间、
+//! 与深度图比较（PCF 3×3 软化边缘）。
+//!
+//! 深度图是 **4 层深度数组**，一层一个级联：相机视线方向按 practical split
+//! （λ = 0.7，见 [`cascade_splits`]）切成 4 段，每段各自拟合一个正交视锥
+//! （[`cascade_shadow_matrices`]）。片元按自己的视线深度选层，于是同样一张
+//! 2048² 的图，近处拿到的纹素密度比"整场景一个视锥"细一个量级。
 //!
 //! 几个刻意的取舍：
 //! - **只做方向光**。点光阴影要 6 面立方体贴图，成本高得多，留到以后。
 //! - **只做一盏**。多盏灯各自的阴影贴图意味着每盏一次全场景重绘 + 一张贴图，
 //!   收益远不如先把一盏做扎实。第一盏生效，后面的 `casts_shadow` 暂时忽略。
-//! - **正交视锥按场景世界包围盒拟合**（[`fit_directional_shadow`]）：阴影贴图是
-//!   固定分辨率的，视锥开得太大精度就被稀释。这个矩阵是**纯函数**，因此能单测。
+//! - **覆盖距离 = min(相机远平面, 场景延伸, 120)**，不是相机远平面：编辑器远
+//!   平面常是 1000，照它切等于把 99% 的纹素花在看不见的地方。
+//! - **每层吸附到纹素网格**：否则相机一动，影子边缘就随纹素相位抖（shimmer）。
+//! - 拟合是**纯函数**，因此能单测（见模块尾部那组 `shadow_cascades_*`）。
 //! - 深度图**常驻一张**（默认 [`DEFAULT_SHADOW_RESOLUTION`]），不随场景变化重建；
 //!   灯里的 `shadow_resolution` 改了才会重建（走 [`ScenePipeline::render`] 里那条
 //!   "分辨率变了就换图"的分支）。
+//! - 单级拟合 [`fit_directional_shadow`] 保留着：它是"关掉 CSM"的等价退路，
+//!   也是 CSM 精度账的基准（测试里拿两者的纹素尺寸直接比）。
 
 use std::collections::HashMap;
 
@@ -198,18 +207,41 @@ pub fn supported_sample_count(adapter: &wgpu::Adapter, format: wgpu::TextureForm
 /// 零点几个世界单位 —— 宁可有一点 peter-panning，也不要满屏条纹。
 const SHADOW_DEPTH_BIAS: f32 = 0.0022;
 
-/// 阴影视锥半径的上限（世界单位）。
+/// 阴影覆盖距离的上限（世界单位，沿**相机视线**方向量）。
 ///
 /// # 为什么必须封顶
 ///
-/// 视锥是按**整场景的世界包围盒**拟合的。只要场景里有一个物体飞远（自由落体掉出
-/// 视野、被脚本扔出去、瞬移……），包围盒就会一路长大，半径跟着涨 —— 而阴影贴图
-/// 的分辨率是固定的，深度范围 `far - near` 一旦被拉长，整场景的深度值就挤进
-/// `[0,1]` 的一小段里，**精度当场崩掉**（表现为影子糊成一团或时隐时现）。
+/// 级联把"相机看得见的这段距离"切成若干段，每段一张独立的深度图。段的总长
+/// （[`ShadowCascades`] 的覆盖距离）直接决定最后一级的纹素尺寸：范围拉得越长，
+/// 远处越糊。相机远平面在编辑器里可能是 1000，照它切就是把 99% 的纹素浪费在
+/// 玩家根本看不清的地方。
 ///
-/// 商业引擎用级联（CSM）或"最大阴影视距"来处理同一件事；这里先做最简单的那个：
-/// 把半径夹住。超出这个范围的物体不投影 —— 比整个场景的阴影一起烂掉要好。
-const MAX_SHADOW_RADIUS: f32 = 120.0;
+/// 所以覆盖距离取 **min(相机远平面, 场景在视线方向的延伸, 这个上限)**：
+/// 小场景自动收紧（纹素密度白拿），大场景不会无限稀释（≤120 单位）。
+/// 超出的物体不投影 —— 比整屏阴影一起烂掉要好。Unity 的 Shadow Distance、
+/// Godot 的 `directional_shadow_max_distance` 是同一个旋钮，将来接到质量设置里。
+const MAX_SHADOW_DISTANCE: f32 = 120.0;
+
+/// 级联层数。
+///
+/// 4 级是"阴影距离 120 / 2048²"这组参数下的常规折中（Unity 默认 4 级、
+/// Godot 默认 4 级）：再多一级要多一次全场景深度重绘，少一级则每级跨度太大、
+/// 近处纹素密度不够。上限见 [`MAX_SHADOW_CASCADES`]（= uniform 数组长度）。
+pub const SHADOW_CASCADES: usize = 4;
+
+/// 级联层的**最大**数量。
+///
+/// 这个值必须在三处一致：本常量、[`ShadowUniform`] 里矩阵数组的长度、
+/// WGSL 的 `array<mat4x4<f32>, 4>`。改的时候别漏（漏了是"着色器读到越界
+/// 内存"，画面表现为随机的阴影跳变）。
+pub const MAX_SHADOW_CASCADES: usize = 4;
+
+/// 级联切分的"对数 / 均匀"混合系数（practical split scheme）。
+///
+/// 纯对数切分（λ=1）让近处的段极窄、远处极宽，符合透视精度分布，但第一级
+/// 常常窄到连脚下的地面都装不下；纯均匀切分（λ=0）又浪费了近处的精度。
+/// 0.7 是 PSSM 论文推荐的折中值，也是各引擎的常用值。
+const SHADOW_SPLIT_LAMBDA: f32 = 0.7;
 
 /// 单帧支持的最大光源数。
 ///
@@ -322,9 +354,27 @@ struct LightsUniform {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct ShadowUniform {
-    light_view_proj: [[f32; 4]; 4],
+    /// 每层的光源视图投影矩阵（世界 → 该层光源裁剪空间）。
+    ///
+    /// 用**定长数组**而不是四个独立字段：着色器按 `cascade` 下标取用，
+    /// 数组正好是"下标寻址"的表达；定长也保证 ABI 不随层数变。
+    light_view_proj: [[[f32; 4]; 4]; MAX_SHADOW_CASCADES],
+    /// 每层的远平面距离（沿相机视线方向的线性深度）：`splits[i]` 之后归下一层。
+    splits: [f32; MAX_SHADOW_CASCADES],
+    /// xyz = 相机前向（单位向量），w 预留。
+    forward: [f32; 4],
+    /// x = 1/分辨率（PCF 偏移），y = 深度偏置，z = 开关（>0.5 表示启用），
+    /// w = 有效层数（0 = 没有阴影图可用）。
     params: [f32; 4],
 }
+
+/// 阴影 pass 的 uniform 步长（字节）。
+///
+/// 阴影 pass 每层只用一个矩阵，四层共用一条缓冲、靠**动态偏移**切换 ——
+/// 比"每层一个绑定组"省三次绑定组创建，比 push constant 少一个设备特性依赖。
+/// 步长必须是 `min_uniform_buffer_offset_alignment`（wgpu 保证 ≥256）的倍数，
+/// 所以取 256 而不是 64。
+const SHADOW_PASS_STRIDE: u64 = 256;
 
 /// 一次绘制项（= 一个实例）的全部数据：模型矩阵 + 蒙皮槽位 + 材质。
 ///
@@ -536,6 +586,244 @@ fn pick_shadow_slot(packed: &[&Light]) -> Option<usize> {
         .position(|l| l.casts_shadow && l.kind == LightKind::Directional)
 }
 
+/// 一帧的级联阴影参数（CPU 拟合的结果）。
+///
+/// 一个索引对应一张阴影深度图的一层；`splits[i]` 是第 i 层的**远平面距离**
+/// （沿相机视线方向量，也是着色器选层的唯一依据）。
+#[derive(Copy, Clone, Debug)]
+pub struct ShadowCascades {
+    /// 实际使用的层数（1..=[`MAX_SHADOW_CASCADES`]）。
+    pub count: usize,
+    /// 每层的光源视图投影矩阵（世界 → 该层的光源裁剪空间）。
+    pub view_proj: [Mat4; MAX_SHADOW_CASCADES],
+    /// 每层的远平面距离（视线方向）：`splits[i]` 之后归下一层。
+    pub splits: [f32; MAX_SHADOW_CASCADES],
+    /// 相机前向（单位向量）。着色器用它把世界坐标换算成"视线方向深度"。
+    pub forward: Vec3,
+    /// 每层一个纹素覆盖的世界尺寸（米）。诊断 / 实测用：它直接决定影子边缘
+    /// 能有多锐，也是"CSM 把精度提了多少倍"的唯一量化口径。
+    pub texel_world: [f32; MAX_SHADOW_CASCADES],
+}
+
+/// 从**逆视图投影矩阵**反推视锥的 8 个角点（近平面 4 个 + 远平面 4 个）。
+///
+/// # 为什么从矩阵反推，而不是让宿主多传一份 near/far
+///
+/// 级联必须切**正在被投影的那个视锥**。让宿主另外传一份相机参数，就有"传的
+/// 和实际用的不是同一组"的可能（编辑器自由相机、游戏相机、无头截图三套调用
+/// 各自组装矩阵），错了的表现是阴影分层错位、或近处一段莫名没有影子 —— 都很
+/// 难查。反推只需要 `view_proj`（渲染的输入之一）与 wgpu 的 `[0,1]` 深度约定。
+///
+/// 顺序固定为 (x,y) = (-1,-1), (1,-1), (1,1), (-1,1)；近平面在前。
+fn frustum_corners(inv_view_proj: &Mat4) -> Option<[[Vec3; 4]; 2]> {
+    let mut quads = [[Vec3::ZERO; 4]; 2];
+    for (q, z) in [0.0f32, 1.0].into_iter().enumerate() {
+        for (i, (x, y)) in [
+            (-1.0f32, -1.0f32),
+            (1.0, -1.0),
+            (1.0, 1.0),
+            (-1.0, 1.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let p = inv_view_proj.project_point3(Vec3::new(x, y, z));
+            if !p.is_finite() {
+                return None;
+            }
+            quads[q][i] = p;
+        }
+    }
+    Some(quads)
+}
+
+/// 级联的远平面距离（practical split scheme，见 [`SHADOW_SPLIT_LAMBDA`]）。
+///
+/// 返回长度 = `count`；最后一项**恰好**等于 `far` —— 覆盖距离是硬边界，
+/// 浮点误差让它少一点点，就会在正好那一圈留下一道"没有影子"的环。
+pub fn cascade_splits(near: f32, far: f32, count: usize) -> Vec<f32> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let near = near.max(1e-3);
+    let far = far.max(near + 1e-3);
+    let span = far - near;
+    // 相邻两层的**最小**间距。用 span 的一个小份数（而不是固定 1e-3）：
+    // near ≈ far（坏相机）时固定值会把三段挤到同一个数上，切分不再单调。
+    let min_gap = span / (count as f32 * 4.0);
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let p = (i + 1) as f32 / count as f32;
+        let log = near * (far / near).powf(p);
+        let uniform = near + span * p;
+        let mut d = SHADOW_SPLIT_LAMBDA * log + (1.0 - SHADOW_SPLIT_LAMBDA) * uniform;
+        // 单调性兜底：近平面很小时 (far/near)^p 与线性插值可能挤到一起，
+        // 而"第 i 层的远平面 ≤ 第 i-1 层的"会让切分出现负跨度。
+        if let Some(prev) = out.last() {
+            d = d.max(*prev + min_gap);
+        }
+        out.push(d.min(far));
+    }
+    if let Some(last) = out.last_mut() {
+        *last = far;
+    }
+    out
+}
+
+/// 拟合方向光的级联阴影（CSM）。
+///
+/// # 做法
+///
+/// 1. 从 `inv_view_proj` 反推相机视锥的 8 个角点；
+/// 2. **覆盖距离** = min(相机远平面, 场景 8 角点在视线方向的最远投影,
+///    [`MAX_SHADOW_DISTANCE`]) —— 小场景自动收紧，不让纹素浪费在空气里；
+/// 3. 按 practical split 把 `[near, 覆盖距离]` 切成 `count` 段，每段取一个
+///    子视锥（沿视锥棱边线性插值，透视 / 正交下都**精确**）；
+/// 4. 每段各拟合一个紧致的正交视锥，并把范围**吸附到纹素网格**上
+///    （否则相机一动，影子边缘就随纹素相位抖 —— 也就是常说的 shimmer）。
+///
+/// 返回 `None` 表示矩阵退化 / 场景为空 / 覆盖距离没有厚度，调用方应关闭阴影。
+pub fn cascade_shadow_matrices(
+    inv_view_proj: &Mat4,
+    camera_pos: Vec3,
+    direction: Vec3,
+    scene: Bounds,
+    resolution: u32,
+    count: usize,
+) -> Option<ShadowCascades> {
+    if count == 0 || count > MAX_SHADOW_CASCADES || scene.is_empty() {
+        return None;
+    }
+    let [near_q, far_q] = frustum_corners(inv_view_proj)?;
+
+    let quad_center = |q: &[Vec3; 4]| (q[0] + q[1] + q[2] + q[3]) / 4.0;
+    let near_center = quad_center(&near_q);
+    let far_center = quad_center(&far_q);
+    let axis = far_center - near_center;
+    if !axis.is_finite() || axis.length_squared() < 1e-9 {
+        return None;
+    }
+    let forward = axis.normalize();
+
+    let near_d = (near_center - camera_pos).dot(forward).max(0.0);
+    let far_plane_d = (far_center - camera_pos).dot(forward);
+    if !far_plane_d.is_finite() || far_plane_d <= near_d + 1e-3 {
+        return None;
+    }
+
+    // 覆盖距离：场景在视线方向上"用到"的最远处。
+    let mut scene_far = f32::NEG_INFINITY;
+    for corner in scene.corners() {
+        scene_far = scene_far.max((corner - camera_pos).dot(forward));
+    }
+    let mut far_d = scene_far.min(MAX_SHADOW_DISTANCE).min(far_plane_d);
+    // 场景整个在相机背后（自由相机看空处）时投影不出有效的覆盖距离：
+    // 退回相机远平面 ---- 宁可多覆盖一段空气，也不要阴影凭空消失。
+    if !far_d.is_finite() || far_d < near_d + 0.5 {
+        far_d = far_plane_d.min(MAX_SHADOW_DISTANCE);
+    }
+    if far_d <= near_d + 1e-3 {
+        return None;
+    }
+
+    let splits = cascade_splits(near_d, far_d, count);
+
+    // 零向量方向（数据坏了）退化成"垂直向下"，与 `Light::normalized_direction` 一致。
+    let dir = if direction.length_squared() > 1e-12 {
+        direction.normalize()
+    } else {
+        Vec3::new(0.0, -1.0, 0.0)
+    };
+    // up 不能与视线平行（look_at 会算出 NaN）。光接近竖直时改用 Z 当上方向。
+    let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+
+    // 视锥棱边上"距离 d"的那一点 = 近角点与远角点的线性插值：透视下
+    // `near + (d-near)/near·v_near` 与插值式恒等，正交下棱边本来就平行。
+    let span = far_plane_d - near_d;
+    let at = |d: f32| ((d - near_d) / span).clamp(0.0, 1.0);
+
+    let res = resolution.max(1) as f32;
+    let mut out = ShadowCascades {
+        count,
+        view_proj: [Mat4::IDENTITY; MAX_SHADOW_CASCADES],
+        splits: [0.0; MAX_SHADOW_CASCADES],
+        forward,
+        texel_world: [0.0; MAX_SHADOW_CASCADES],
+    };
+
+    for c in 0..count {
+        let d0 = if c == 0 { near_d } else { splits[c - 1] };
+        let d1 = splits[c];
+        let (t0, t1) = (at(d0), at(d1));
+
+        let mut corners = [Vec3::ZERO; 8];
+        for k in 0..4 {
+            corners[k] = near_q[k].lerp(far_q[k], t0);
+            corners[k + 4] = near_q[k].lerp(far_q[k], t1);
+        }
+
+        let center = corners.iter().fold(Vec3::ZERO, |a, c| a + *c) / 8.0;
+        let radius = corners
+            .iter()
+            .fold(0.0f32, |m, c| m.max((*c - center).length()))
+            .clamp(0.5, MAX_SHADOW_DISTANCE);
+        let eye = center - dir * (radius * 2.0 + 1.0);
+        let view = Mat4::look_at_rh(eye, center, up);
+
+        // 紧致光束：逐轴求这 8 个角点在光源空间的范围。拿球半径当宽高会把
+        // 纹素浪费在空角上（子视锥是梯形的，包围球比它胖得多）。
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for corner in corners {
+            let p = view.transform_point3(corner);
+            if !p.is_finite() {
+                return None;
+            }
+            min = min.min(p);
+            max = max.max(p);
+        }
+
+        // x / y 用同一个尺寸（正方形范围）：纹素在屏幕上是方的，PCF 的 3×3
+        // 核不会在某个方向上被拉长成条。
+        let half_raw = ((max.x - min.x).max(max.y - min.y) * 0.5).max(0.05);
+        // 向上取整到"整数个纹素"，于是每层的正交宽度恰好是 resolution 个纹素。
+        let texel_raw = 2.0 * half_raw / res;
+        let half = (half_raw / texel_raw).ceil() * texel_raw;
+        let texel = 2.0 * half / res;
+        // 吸附：把盒子中心对齐到纹素边界。相机连续移动时，中心在"纹素格子"
+        // 上跳，采样相位不变 ⇒ 影子边缘不抖（shimmer 的根因就是相位在漂）。
+        let cx = ((min.x + max.x) * 0.5 / texel).floor() * texel;
+        let cy = ((min.y + max.y) * 0.5 / texel).floor() * texel;
+
+        // 深度方向按半径给余量：太紧会把投影物自己的影子裁掉（peter-panning
+        // 反而更明显）。
+        //
+        // 注意符号：`look_at_rh` 的视空间里"前方"是 -z，而 glam 的正交投影要的是
+        // **正的距离**（z_view = -near → 0，z_view = -far → 1）。所以最近 / 最远
+        // 距离分别来自 -max.z / -min.z；直接把 z 值传进去会把整段深度推到
+        // [0,1] 之外（表现是"全屏没有影子"）。
+        let pad = radius * 0.05 + 1.0;
+        let near_z = (-max.z - pad).max(0.01);
+        let far_z = -min.z + pad;
+        if far_z <= near_z + 1e-3 {
+            return None;
+        }
+
+        let proj =
+            Mat4::orthographic_rh(cx - half, cx + half, cy - half, cy + half, near_z, far_z);
+        out.view_proj[c] = proj * view;
+        out.splits[c] = d1;
+        out.texel_world[c] = texel;
+    }
+
+    Some(out)
+}
+
+/// 拟合**单级**阴影视锥：整场景包围盒 → 光源裁剪空间。
+///
+/// 保留它有两个理由：级联层数为 1 时它就是唯一那层（A/B 基准的另一条腿），
+/// 以及"关掉 CSM"的退路需要一条与上线前行为等价的路径。
+///
 /// 拟合一盏方向光的正交阴影视锥矩阵（世界 → 光源裁剪空间）。
 ///
 /// # 做法
@@ -564,8 +852,8 @@ pub fn fit_directional_shadow(direction: Vec3, scene: Bounds) -> Option<Mat4> {
 
     let center = scene.center();
     // 退化场景（只有一个点）时给个下限，否则正交矩阵会塌成一个奇异矩阵；
-    // 上限见 `MAX_SHADOW_RADIUS`（防"有物体飞出视野"把深度精度吃光）。
-    let radius = scene.half_extent().length().clamp(0.5, MAX_SHADOW_RADIUS);
+    // 上限见 `MAX_SHADOW_DISTANCE`（防"有物体飞出视野"把深度精度吃光）。
+    let radius = scene.half_extent().length().clamp(0.5, MAX_SHADOW_DISTANCE);
 
     // up 不能与视线平行（look_at 会算出 NaN）。光接近竖直时改用 Z 当上方向。
     let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
@@ -690,11 +978,21 @@ const MAX_LIGHTS: u32 = 8u;
 struct CameraUniform { view_proj: mat4x4<f32>, inv_view_proj: mat4x4<f32>, camera_pos: vec4<f32> }
 struct GpuLight      { pos_type: vec4<f32>, color_intensity: vec4<f32>, shadow_params: vec4<f32> }
 struct LightsUniform { ambient: vec4<f32>, lights: array<GpuLight, 8> }
-struct ShadowUniform { light_view_proj: mat4x4<f32>, params: vec4<f32> }
+struct ShadowUniform {
+    // 级联矩阵数组：下标 = 层号。长度必须等于 Rust 侧 `MAX_SHADOW_CASCADES`。
+    light_view_proj: array<mat4x4<f32>, 4>,
+    // 每层远平面（相机视线方向的线性深度）。用 vec4 而不是 array<f32, 4>：
+    // uniform 里 array<f32,4> 的元素步长是 16，与 Rust 的 [f32;4] 对不上。
+    splits: vec4<f32>,
+    // xyz = 相机前向（单位向量）
+    forward: vec4<f32>,
+    // x = 1/分辨率, y = 深度偏置, z = 开关, w = 有效层数
+    params: vec4<f32>,
+}
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> lights: LightsUniform;
-@group(0) @binding(3) var shadow_tex: texture_depth_2d;
+@group(0) @binding(3) var shadow_tex: texture_depth_2d_array;
 @group(0) @binding(4) var shadow_smp: sampler_comparison;
 @group(0) @binding(5) var<uniform> shadow: ShadowUniform;
 // 7..11：天空（类型与函数在 sky.rs 的公共片段里，这里只声明绑定）。
@@ -724,7 +1022,22 @@ struct VertexOutput {
 // 导数，而它处在一个"按灯循环里的 if 分支"中（非一致控制流），WGSL 的一致性
 // 分析会因此报错。深度图没有 mip，本来也只需要 level 0，正好。
 fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
-    let light_clip = shadow.light_view_proj * vec4<f32>(world_pos, 1.0);
+    // 选层：级联是按**相机视线方向的线性深度**切的，不是 NDC 深度。
+    // 用线性深度是因为 `splits` 本身就是世界单位，跨相机/跨投影都可比。
+    let count = u32(max(shadow.params.w, 0.0));
+    if (count == 0u) {
+        return 1.0;
+    }
+    let view_depth = dot(world_pos - camera.camera_pos.xyz, shadow.forward.xyz);
+    var cascade = count - 1u;
+    for (var i = 0u; i + 1u < count; i = i + 1u) {
+        if (view_depth <= shadow.splits[i]) {
+            cascade = i;
+            break;
+        }
+    }
+
+    let light_clip = shadow.light_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
     let ndc = light_clip.xyz / light_clip.w;
     // NDC → 纹理 UV。y 要翻：NDC 的 y 朝上，纹理的 v 朝下。
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
@@ -739,7 +1052,13 @@ fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
             let offset = vec2<f32>(f32(dx), f32(dy)) * shadow.params.x;
-            sum = sum + textureSampleCompareLevel(shadow_tex, shadow_smp, uv + offset, depth - bias);
+            sum = sum + textureSampleCompareLevel(
+                shadow_tex,
+                shadow_smp,
+                uv + offset,
+                i32(cascade),
+                depth - bias,
+            );
         }
     }
     return sum / 9.0;
@@ -866,7 +1185,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 /// 阴影 pass 的顶点着色器：只把顶点变换到光源裁剪空间，片元阶段不需要——
 /// 深度图只关心深度，管线里 `fragment: None`。
 const SHADOW_VERT_SRC: &str = r#"
-struct ShadowUniform { light_view_proj: mat4x4<f32>, params: vec4<f32> }
+// 阴影 pass 的 uniform：每层被**动态偏移**切一段，段内只有一个矩阵
+// （见 Rust 侧的 `SHADOW_PASS_STRIDE`）。这里刻意不声明主 pass 的整组级联 ——
+// 段长 256 字节，声明了多余字段只会读到未写入的填充。
+struct ShadowPassUniform { light_view_proj: mat4x4<f32> }
 // 与主 pass 同一份逐实例数据；阴影只要 model / params 两个字段，
 // 但结构体声明保持与缓冲布局一致（字段齐全，未用的不读取）。
 struct DrawUniform  {
@@ -876,7 +1198,7 @@ struct DrawUniform  {
     material: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> shadow: ShadowUniform;
+@group(0) @binding(0) var<uniform> shadow: ShadowPassUniform;
 @group(0) @binding(1) var<storage, read> draws: array<DrawUniform>;
 @group(0) @binding(2) var<storage, read> bones: array<mat4x4<f32>>;
 
@@ -955,15 +1277,27 @@ pub struct ScenePipeline {
     /// 绑定资源"判成冲突。用一个不含深度贴图的小布局绕开它。
     shadow_bgl: wgpu::BindGroupLayout,
     shadow_pipeline: wgpu::RenderPipeline,
-    /// 阴影 uniform（光源视图投影 + 偏置）。主 pass 与阴影 pass 都读它。
+    /// 阴影 uniform（级联矩阵数组 + 切分表 + 偏置）。主 pass 与阴影 pass 都读它。
+    ///
+    /// 主 pass 一次读走**整组**级联（选层在片元里做）；阴影 pass 每层只取一个
+    /// 矩阵，走另一条 `shadow_pass_buffer` 的动态偏移 —— 两个 pass 对"同一份
+    /// 数据"的取法不同，混用一个缓冲会让两边都要迁就对方。
     shadow_buffer: wgpu::Buffer,
+    /// 阴影 pass 的每层矩阵（步长 [`SHADOW_PASS_STRIDE`]，动态偏移选层）。
+    shadow_pass_buffer: wgpu::Buffer,
     /// 阴影 pass 用的绑定组（阴影 uniform + draw 段）。draw 缓冲固定不变，建一次即可。
     shadow_pass_bind_group: wgpu::BindGroup,
     /// 深度比较采样器（PCF）。
     shadow_sampler: wgpu::Sampler,
-    /// 阴影深度图。分辨率变化时重建（连同 `global_bind_group`）。
+    /// 阴影深度图（`MAX_SHADOW_CASCADES` 层深度数组）。分辨率变化时重建
+    /// （连同 `global_bind_group` 与 `shadow_layer_views`）。
     shadow_texture: wgpu::Texture,
+    /// 深度数组的整体视图：主 pass 采样用（dimension = D2Array）。
     shadow_view: wgpu::TextureView,
+    /// 每层单独一张视图（dimension = D2）：阴影 pass 每层各画进一层。
+    ///
+    /// wgpu 不允许把"数组视图"当渲染目标的多层切片直接画 —— 只能给单层视图。
+    shadow_layer_views: Vec<wgpu::TextureView>,
     shadow_resolution: u32,
 
     /// 天空盒 + 环境光照（IBL）资源。纹理常驻、内容按 key 重建（见
@@ -1082,9 +1416,10 @@ impl ScenePipeline {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        // 深度纹理只能用 Depth 采样类型（不是 Float）
+                        // 深度纹理只能用 Depth 采样类型（不是 Float）。
+                        // 维度必须是 D2Array：一层一个级联，着色器按 index 取层。
                         sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -1157,7 +1492,8 @@ impl ScenePipeline {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        // 每层取一个矩阵，靠动态偏移选层（见 `SHADOW_PASS_STRIDE`）。
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -1217,11 +1553,21 @@ impl ScenePipeline {
         let shadow_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_shadow_ub"),
             contents: bytemuck::bytes_of(&ShadowUniform {
-                light_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                light_view_proj: [[[f32::NAN; 4]; 4]; MAX_SHADOW_CASCADES],
+                splits: [0.0; MAX_SHADOW_CASCADES],
+                forward: [0.0; 4],
                 // z = 0：默认阴影关闭。没有标记任何灯时片元着色器不采样这张图。
                 params: [1.0 / DEFAULT_SHADOW_RESOLUTION as f32, SHADOW_DEPTH_BIAS, 0.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // 阴影 pass 的每层矩阵：一条缓冲、`MAX_SHADOW_CASCADES` 段、动态偏移选段。
+        let shadow_pass_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_shadow_pass_ub"),
+            size: SHADOW_PASS_STRIDE * MAX_SHADOW_CASCADES as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1238,7 +1584,8 @@ impl ScenePipeline {
         });
 
         let shadow_resolution = DEFAULT_SHADOW_RESOLUTION;
-        let (shadow_texture, shadow_view) = Self::create_shadow_target(device, shadow_resolution);
+        let (shadow_texture, shadow_view, shadow_layer_views) =
+            Self::create_shadow_target(device, shadow_resolution);
 
         // 蒙皮骨骼缓冲：先给一小段（8 槽 × 256 骨 ≈ 128 KB），实体多了再翻倍。
         let bones_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1268,7 +1615,7 @@ impl ScenePipeline {
         let shadow_pass_bind_group = Self::create_shadow_pass_bind_group(
             device,
             &shadow_bgl,
-            &shadow_buffer,
+            &shadow_pass_buffer,
             &draw_buffer,
             &bones_buffer,
         );
@@ -1292,10 +1639,12 @@ impl ScenePipeline {
             shadow_bgl,
             shadow_pipeline,
             shadow_buffer,
+            shadow_pass_buffer,
             shadow_pass_bind_group,
             shadow_sampler,
             shadow_texture,
             shadow_view,
+            shadow_layer_views,
             shadow_resolution,
             sky,
             sample_count,
@@ -1338,12 +1687,20 @@ impl ScenePipeline {
         self.frustum_culling
     }
 
-    /// 创建一张阴影深度图（深度仅用作渲染目标 + 采样源）。
-    fn create_shadow_target(device: &wgpu::Device, resolution: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    /// 创建阴影深度图层（深度数组，一层一个级联）。
+    ///
+    /// 返回（纹理，整体 D2Array 视图，每层 D2 视图）。两套视图不是冗余：
+    /// 采样必须用数组视图（着色器按 index 取层），渲染必须用单层视图
+    /// （wgpu 不允许把数组视图直接当一层的渲染目标）。
+    #[allow(clippy::type_complexity)]
+    fn create_shadow_target(
+        device: &wgpu::Device,
+        resolution: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView, Vec<wgpu::TextureView>) {
         let size = wgpu::Extent3d {
             width: resolution.max(1),
             height: resolution.max(1),
-            depth_or_array_layers: 1,
+            depth_or_array_layers: MAX_SHADOW_CASCADES as u32,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("scene_shadow_depth"),
@@ -1355,8 +1712,23 @@ impl ScenePipeline {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        (texture, view)
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("scene_shadow_depth_array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let layers = (0..MAX_SHADOW_CASCADES as u32)
+            .map(|i| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("scene_shadow_depth_layer"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: i,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        (texture, view, layers)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1426,7 +1798,17 @@ impl ScenePipeline {
             label: Some("scene_shadow_pass_bg"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() },
+                // 阴影 pass 的 uniform：必须**显式写段长**。
+                // `as_entire_binding()` 会把绑定固定成"整条缓冲"，wgpu 于是只允许
+                // 动态偏移 = 0（偏移后就越界），四层全部画到同一层上。
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: shadow_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(64),
+                    }),
+                },
                 wgpu::BindGroupEntry { binding: 1, resource: draw_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: bones_buffer.as_entire_binding() },
             ],
@@ -1443,9 +1825,10 @@ impl ScenePipeline {
         if resolution == self.shadow_resolution {
             return;
         }
-        let (texture, view) = Self::create_shadow_target(device, resolution);
+        let (texture, view, layers) = Self::create_shadow_target(device, resolution);
         self.shadow_texture = texture;
         self.shadow_view = view;
+        self.shadow_layer_views = layers;
         self.shadow_resolution = resolution;
         self.global_bind_group = Self::create_global_bind_group(
             device,
@@ -1747,24 +2130,36 @@ impl ScenePipeline {
             .collect();
         let shadow_slot = pick_shadow_slot(&packed);
 
-        // 阴影视锥按场景世界包围盒拟合；取不到包围盒（空场景）就没有阴影。
-        let shadow_matrix = match shadow_slot {
+        // 分辨率取自那盏灯（0 = 用默认值）。**必须先定分辨率**：级联拟合要用它
+        // 算每层纹素的世界尺寸（进而决定吸附步长），顺序反了就得重拟合一遍。
+        let shadow_resolution = match shadow_slot {
+            Some(slot) => match packed[slot].shadow_resolution {
+                0 => DEFAULT_SHADOW_RESOLUTION,
+                r => r.max(1),
+            },
+            None => self.shadow_resolution,
+        };
+        if shadow_slot.is_some() {
+            self.ensure_shadow_resolution(device, shadow_resolution);
+        }
+
+        // 级联阴影：按**当前相机的视锥**切段，每段拟合一个光源正交视锥。
+        // 取不到包围盒（空场景）或视锥退化时 `None` —— 整条阴影链路关掉。
+        let cascades = match shadow_slot {
             Some(slot) => scene_bounds(entities, world_matrices, model_cache).and_then(|bounds| {
                 let light = packed[slot];
-                fit_directional_shadow(Vec3::from(light.normalized_direction()), bounds)
+                cascade_shadow_matrices(
+                    &view_proj.inverse(),
+                    *camera_pos,
+                    Vec3::from(light.normalized_direction()),
+                    bounds,
+                    self.shadow_resolution,
+                    SHADOW_CASCADES,
+                )
             }),
             None => None,
         };
-        let shadow_enabled = shadow_matrix.is_some();
-
-        // 分辨率取自那盏灯（0 = 用默认值）。变了才重建深度图。
-        if let Some(slot) = shadow_slot {
-            let res = match packed[slot].shadow_resolution {
-                0 => DEFAULT_SHADOW_RESOLUTION,
-                r => r,
-            };
-            self.ensure_shadow_resolution(device, res);
-        }
+        let shadow_enabled = cascades.is_some();
 
         // --- 每帧全局 uniform ---
         queue.write_buffer(
@@ -1781,20 +2176,38 @@ impl ScenePipeline {
             0,
             bytemuck::bytes_of(&Self::build_lights(lighting.ambient, &packed, shadow_slot)),
         );
+
+        // 主 pass 的级联 uniform：没阴影时矩阵填 0（shader 靠 params.w = 0 整段跳过，
+        // 不会读到它们），有阴影时按层填有效值，其余层留 0。
+        let mut shadow_uniform = ShadowUniform {
+            light_view_proj: [[[0.0; 4]; 4]; MAX_SHADOW_CASCADES],
+            splits: [0.0; MAX_SHADOW_CASCADES],
+            forward: [0.0; 4],
+            params: [
+                1.0 / self.shadow_resolution as f32,
+                SHADOW_DEPTH_BIAS,
+                if shadow_enabled { 1.0 } else { 0.0 },
+                0.0,
+            ],
+        };
+        if let Some(c) = &cascades {
+            shadow_uniform.forward = [c.forward.x, c.forward.y, c.forward.z, 0.0];
+            shadow_uniform.params[3] = c.count as f32;
+            for i in 0..c.count {
+                shadow_uniform.light_view_proj[i] = c.view_proj[i].to_cols_array_2d();
+                shadow_uniform.splits[i] = c.splits[i];
+                // 阴影 pass 每层段只放矩阵：动态偏移选层（见 `SHADOW_PASS_STRIDE`）。
+                queue.write_buffer(
+                    &self.shadow_pass_buffer,
+                    i as u64 * SHADOW_PASS_STRIDE,
+                    bytemuck::cast_slice(&c.view_proj[i].to_cols_array()),
+                );
+            }
+        }
         queue.write_buffer(
             &self.shadow_buffer,
             0,
-            bytemuck::bytes_of(&ShadowUniform {
-                light_view_proj: shadow_matrix
-                    .unwrap_or(Mat4::IDENTITY)
-                    .to_cols_array_2d(),
-                params: [
-                    1.0 / self.shadow_resolution as f32,
-                    SHADOW_DEPTH_BIAS,
-                    if shadow_enabled { 1.0 } else { 0.0 },
-                    0.0,
-                ],
-            }),
+            bytemuck::bytes_of(&shadow_uniform),
         );
 
         // --- 天空 / 环境（内容 key 变了才重建）---
@@ -1812,16 +2225,21 @@ impl ScenePipeline {
         //
         // 相机视锥在 `view_proj` 退化时拿不到（`None`）—— 此时整段不剔除，
         // 宁可多画也不能因为一个坏矩阵把整场景判成不可见。
-        // 阴影视锥只在真的开了阴影时才有意义；矩阵退化时保守地认为所有
-        // 物体都投影（`map_or(true, ...)`）。
         let camera_frustum = if self.frustum_culling {
             Frustum::from_view_proj(view_proj)
         } else {
             None
         };
-        let shadow_frustum = shadow_matrix
-            .as_ref()
-            .and_then(Frustum::from_view_proj);
+        // 阴影视锥只在真的开了阴影时才有意义；矩阵退化时保守地认为所有
+        // 物体都投影（`is_none_or`）。
+        //
+        // 剔除用**最后一级**（覆盖最远、最宽）：它能见 = 至少某一层能见。
+        // 用第 0 层会漏掉"近处看不见、影子却落在远处"的那批物体。
+        let shadow_frustum = cascades.as_ref().and_then(|c| {
+            c.view_proj
+                .get(c.count.saturating_sub(1))
+                .and_then(Frustum::from_view_proj)
+        });
 
         // --- 收集绘制项：分组（不透明）+ 排序键（半透明），实例数据攒进 staging ---
         // 不透明与半透明分开收集：半透明要按到相机的距离从远到近排序，
@@ -2178,41 +2596,56 @@ impl ScenePipeline {
             shadow_only_instances: self.shadow_pending.len(),
         };
 
-        // --- 阴影 pass：先把深度画进阴影图（必须在主 pass 之前）---
+        // --- 阴影 pass：每层画一遍深度（必须在主 pass 之前）---
         //
         // 只画**不透明**图元。半透明物体（玻璃之类）本来也不该投出实心影子，
         // 而且它们不写主深度缓冲，混到阴影图里只会投出一块错误的黑斑。
         // 相机可见的不透明批次与"相机外、影子在画面里"的专用批次都在这画；
         // 实例数据全在同一个 storage 缓冲里，只是槽位分段不同。
-        if shadow_enabled {
-            let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow_pass"),
-                // 深度-only 管线：没有颜色附件。
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations {
-                        // 1.0 = 最远。没被任何东西遮住的区域保持"最远"，比较时永远判为受光。
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            spass.set_pipeline(&self.shadow_pipeline);
-            spass.set_bind_group(0, &self.shadow_pass_bind_group, &[]);
-            for batch in self.opaque_batches.iter().chain(self.shadow_batches.iter()) {
-                let Some(prim) = batch_prim(entities, model_cache, batch) else {
-                    continue;
+        //
+        // 每层一个 pass（而不是一张 4 象限图集）：图集更省一次绑定切换，但
+        // 每层的 UV 映射得各自缩放、PCF 在象限边界上要夹紧，代码复杂度不值
+        // 那点收益。层数 = `cascades.count`，空场景时整段跳过。
+        if let Some(c) = &cascades {
+            for cascade in 0..c.count {
+                let Some(layer_view) = self.shadow_layer_views.get(cascade) else {
+                    break;
                 };
-                spass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
-                spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
-                spass.draw_indexed(
-                    0..prim.num_indices,
+                let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("shadow_pass"),
+                    // 深度-only 管线：没有颜色附件。
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: layer_view,
+                        depth_ops: Some(wgpu::Operations {
+                            // 1.0 = 最远。没被任何东西遮住的区域保持"最远"，
+                            // 比较时永远判为受光。
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                spass.set_pipeline(&self.shadow_pipeline);
+                // 动态偏移选层：一段 = 一个矩阵（见 `SHADOW_PASS_STRIDE`）。
+                spass.set_bind_group(
                     0,
-                    batch.first..batch.first + batch.count,
+                    &self.shadow_pass_bind_group,
+                    &[(cascade as u64 * SHADOW_PASS_STRIDE) as u32],
                 );
+                for batch in self.opaque_batches.iter().chain(self.shadow_batches.iter()) {
+                    let Some(prim) = batch_prim(entities, model_cache, batch) else {
+                        continue;
+                    };
+                    spass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+                    spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
+                    spass.draw_indexed(
+                        0..prim.num_indices,
+                        0,
+                        batch.first..batch.first + batch.count,
+                    );
+                }
             }
         }
 
@@ -2436,9 +2869,256 @@ mod tests {
 
     // -- 阴影拟合 --
 
+    /// 一个够用的小相机：eye 在 +Z 退开，看向原点，标准透视。
+    fn probe_camera(eye: Vec3, target: Vec3) -> Mat4 {
+        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+        let proj = Mat4::perspective_rh(60f32.to_radians(), 16.0 / 9.0, 0.1, 200.0);
+        proj * view
+    }
+
+    fn probe_scene() -> Bounds {
+        Bounds {
+            min: Vec3::new(-10.0, -0.5, -10.0),
+            max: Vec3::new(10.0, 6.0, 10.0),
+        }
+    }
+
+    #[test]
+    fn cascade_splits_are_monotonic_and_end_at_the_coverage() {
+        let splits = cascade_splits(0.1, 60.0, 4);
+        assert_eq!(splits.len(), 4);
+        for w in splits.windows(2) {
+            assert!(w[1] > w[0], "切分必须严格递增：{splits:?}");
+        }
+        assert!(
+            (splits[3] - 60.0).abs() < 1e-4,
+            "最后一级必须精确落在覆盖距离上：{splits:?}"
+        );
+    }
+
+    /// 对数混合的含义：**近处切得细、远处切得粗**。纯均匀切分每段等长，
+    /// 这条测试在那种实现下会红（第一段 15 而不是 3 左右）。
+    #[test]
+    fn cascade_splits_bias_toward_the_camera() {
+        let splits = cascade_splits(0.1, 64.0, 4);
+        let uniform = 64.0 / 4.0;
+        assert!(
+            splits[0] < uniform * 0.6,
+            "近处一级应当明显短于均匀切分（{:.2} vs {uniform:.2}）",
+            splits[0]
+        );
+        // 最后一级明显长于均匀切分 —— 远处的精度按透视本来就该少给。
+        assert!(splits[3] - splits[2] > uniform * 1.2, "{splits:?}");
+    }
+
+    #[test]
+    fn cascade_splits_handle_degenerate_ranges() {
+        // count = 0：没有级联（调用方应当关闭阴影）。
+        assert!(cascade_splits(0.1, 10.0, 0).is_empty());
+        // near >= far（坏相机）：仍然给出单调且有限的切分，不能 panic / NaN。
+        let splits = cascade_splits(5.0, 1.0, 3);
+        assert_eq!(splits.len(), 3);
+        assert!(splits.iter().all(|d| d.is_finite()), "{splits:?}");
+        assert!(splits.windows(2).all(|w| w[1] > w[0]), "{splits:?}");
+    }
+
+    /// **每层的子视锥必须完整落在该层的光源裁剪空间里。** 这是阴影贴图能
+    /// 工作的前提：落在外面的部分没有深度可比较，画面上就是"没有影子"。
+    /// 级联的经典 bug（切分区间与拟合范围对不上）会在这里立刻红。
+    #[test]
+    fn shadow_cascades_cover_their_own_slab() {
+        let view_proj = probe_camera(Vec3::new(0.0, 6.0, 24.0), Vec3::ZERO);
+        let inv = view_proj.inverse();
+        let cascades = cascade_shadow_matrices(
+            &inv,
+            Vec3::new(0.0, 6.0, 24.0),
+            Vec3::new(0.4, -1.0, 0.3),
+            probe_scene(),
+            2048,
+            SHADOW_CASCADES,
+        )
+        .expect("应当拟合出级联");
+
+        assert_eq!(cascades.count, SHADOW_CASCADES);
+        let [near_q, far_q] = frustum_corners(&inv).expect("角点");
+        let near_center = (near_q[0] + near_q[1] + near_q[2] + near_q[3]) / 4.0;
+        let far_center = (far_q[0] + far_q[1] + far_q[2] + far_q[3]) / 4.0;
+        let forward = (far_center - near_center).normalize();
+        let eye = Vec3::new(0.0, 6.0, 24.0);
+        let near_d = (near_center - eye).dot(forward);
+        let span = (far_center - eye).dot(forward) - near_d;
+
+        for c in 0..cascades.count {
+            let d0 = if c == 0 { near_d } else { cascades.splits[c - 1] };
+            let d1 = cascades.splits[c];
+            let (t0, t1) = ((d0 - near_d) / span, (d1 - near_d) / span);
+            for k in 0..4 {
+                for t in [t0, t1] {
+                    let corner = near_q[k].lerp(far_q[k], t);
+                    let ndc = project(&cascades.view_proj[c], corner);
+                    assert!(
+                        ndc.x.abs() <= 1.001 && ndc.y.abs() <= 1.001,
+                        "第 {c} 层的子视锥角点跑去画面外：ndc = {ndc:?}"
+                    );
+                    assert!(
+                        (-0.001..=1.001).contains(&ndc.z),
+                        "第 {c} 层的子视锥角点深度越界：ndc.z = {}",
+                        ndc.z
+                    );
+                }
+            }
+        }
+    }
+
+    /// CSM 的**全部意义**：同一张 2048² 深度图，近处的纹素必须比"整场景一个
+    /// 视锥"细一个量级。这条测试就是那笔账 —— 旧实现（单级拟合）下第一级
+    /// 纹素约 2.9 cm，四级的第 0 层不到 1 cm。
+    #[test]
+    fn shadow_cascades_sharpen_the_near_field() {
+        let eye = Vec3::new(0.0, 6.0, 24.0);
+        let bounds = probe_scene();
+        let view_proj = probe_camera(eye, Vec3::ZERO);
+        let cascades = cascade_shadow_matrices(
+            &view_proj.inverse(),
+            eye,
+            Vec3::new(0.4, -1.0, 0.3),
+            bounds,
+            2048,
+            SHADOW_CASCADES,
+        )
+        .expect("应当拟合出级联");
+
+        // 单级拟合的纹素：直径 / 分辨率（与 `fit_directional_shadow` 的口径一致）。
+        let single_texel = 2.0 * bounds.half_extent().length() * 1.02 / 2048.0;
+        assert!(
+            cascades.texel_world[0] < single_texel * 0.5,
+            "第 0 层纹素 {:.4} m 应当明显细于单级 {:.4} m",
+            cascades.texel_world[0],
+            single_texel
+        );
+        // 远处的层反而更粗（覆盖更宽），但必须仍优于"整场景一个视锥"的量级
+        // 或至少在同一数量级 —— 反了说明切分与拟合接错了。
+        assert!(cascades.texel_world[0] < cascades.texel_world[3]);
+        assert!(cascades.texel_world.iter().all(|t| *t > 0.0));
+    }
+
+    /// 同输入两次拟合必须逐位相同：无头截图"同机逐字节一致"的地基。
+    #[test]
+    fn shadow_cascades_are_deterministic() {
+        let eye = Vec3::new(1.0, 7.0, 20.0);
+        let inv = probe_camera(eye, Vec3::new(0.0, 0.0, 0.0)).inverse();
+        let a = cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4)
+            .expect("a");
+        let b = cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4)
+            .expect("b");
+        assert_eq!(a.view_proj[0].to_cols_array(), b.view_proj[0].to_cols_array());
+        assert_eq!(a.splits, b.splits);
+        assert_eq!(a.texel_world, b.texel_world);
+    }
+
+    /// 退化输入必须给 `None`（调用方据此关阴影），而不是 NaN 矩阵。
+    #[test]
+    fn shadow_cascades_reject_degenerate_input() {
+        // 空场景 / 非法层数。
+        let inv = probe_camera(Vec3::new(0.0, 5.0, 10.0), Vec3::ZERO).inverse();
+        assert!(cascade_shadow_matrices(
+            &inv,
+            Vec3::new(0.0, 5.0, 10.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Bounds::EMPTY,
+            2048,
+            4
+        )
+        .is_none());
+        assert!(cascade_shadow_matrices(
+            &inv,
+            Vec3::new(0.0, 5.0, 10.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            probe_scene(),
+            2048,
+            0
+        )
+        .is_none());
+        // 逆矩阵退化成零：角点全是原点，切不出来。
+        assert!(cascade_shadow_matrices(
+            &Mat4::ZERO,
+            Vec3::ZERO,
+            Vec3::new(0.0, -1.0, 0.0),
+            probe_scene(),
+            2048,
+            4
+        )
+        .is_none());
+    }
+
+    /// 零方向（数据坏了）也要拟合出有限矩阵 —— 与单级拟合同一条容错约定。
+    #[test]
+    fn shadow_cascades_survive_a_zero_direction() {
+        let eye = Vec3::new(0.0, 5.0, 10.0);
+        let cascades = cascade_shadow_matrices(
+            &probe_camera(eye, Vec3::ZERO).inverse(),
+            eye,
+            Vec3::ZERO,
+            probe_scene(),
+            2048,
+            2,
+        )
+        .expect("零方向也要能拟合");
+        assert!(cascades.view_proj[0].to_cols_array().iter().all(|v| v.is_finite()));
+    }
+
+    /// 相机远平面比场景大得多时，覆盖距离必须按**场景**收紧（不是按远平面）：
+    /// 40×40 的地面不该被切到 200 单位的远平面上，否则每层都糊。
+    #[test]
+    fn shadow_coverage_follows_the_scene_not_the_far_plane() {
+        let eye = Vec3::new(0.0, 6.0, 24.0);
+        let bounds = probe_scene();
+        let cascades = cascade_shadow_matrices(
+            &probe_camera(eye, Vec3::ZERO).inverse(),
+            eye,
+            Vec3::new(0.4, -1.0, 0.3),
+            bounds,
+            2048,
+            SHADOW_CASCADES,
+        )
+        .expect("应当拟合出级联");
+        let cover = cascades.splits[SHADOW_CASCADES - 1];
+        // 场景最远角点在视线上的投影 ≈ 30 上下（eye 24 处看向原点，远角 10）。
+        assert!(
+            cover < 60.0,
+            "覆盖距离应当贴着场景（{cover:.2}），而不是相机远平面 200"
+        );
+        // 同时必须罩住整个场景：最远角点不能被切掉。
+        let mut scene_far = f32::NEG_INFINITY;
+        for corner in bounds.corners() {
+            scene_far = scene_far.max((corner - eye).dot(cascades.forward));
+        }
+        assert!(
+            cover + 1e-3 >= scene_far.min(MAX_SHADOW_DISTANCE),
+            "覆盖距离 {cover:.2} 没罩住场景（最远 {scene_far:.2}）"
+        );
+    }
+
     #[test]
     fn shadow_fit_of_empty_scene_is_none() {
         assert!(fit_directional_shadow(Vec3::new(0.0, -1.0, 0.0), Bounds::EMPTY).is_none());
+    }
+
+    /// uniform 的字节布局必须与 WGSL 的 `ShadowUniform` 逐字段对上。
+    ///
+    /// 4×mat4（256）+ 3×vec4（48）= 304。这不是"差不多"的事：偏移错一格，
+    /// 片元就会用另一层（或另一盏灯）的矩阵去投影，表现是"影子在奇怪的位置"
+    /// 而不是报错 —— 只能靠测试钉住。
+    #[test]
+    fn shadow_uniform_matches_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<ShadowUniform>(), 304);
+        // uniform 的结构体尺寸必须是 16 的倍数（WGSL 的地址空间对齐要求）。
+        assert_eq!(std::mem::size_of::<ShadowUniform>() % 16, 0);
+        // 阴影 pass 的动态偏移步长必须能容纳一个矩阵，且是 256 的倍数。
+        assert!((SHADOW_PASS_STRIDE as usize) >= 64);
+        assert_eq!(SHADOW_PASS_STRIDE % 256, 0);
+        // 主 pass 与阴影 pass 读的是同一批矩阵：层数上限必须一致。
+        assert_eq!(SHADOW_CASCADES, MAX_SHADOW_CASCADES);
     }
 
     /// 场景包围盒里的任何一点，投影到光源裁剪空间后都必须落在
@@ -2519,8 +3199,8 @@ mod tests {
         };
         let m = fit_directional_shadow(Vec3::new(0.0, -1.0, 0.0), runaway).unwrap();
 
-        // 视锥被夹到 MAX_SHADOW_RADIUS ⇒ "场景中心 + 3 倍上限"必然落在视锥外。
-        let outside = runaway.center() + Vec3::new(MAX_SHADOW_RADIUS * 3.0, 0.0, 0.0);
+        // 视锥被夹到 MAX_SHADOW_DISTANCE ⇒ "场景中心 + 3 倍上限"必然落在视锥外。
+        let outside = runaway.center() + Vec3::new(MAX_SHADOW_DISTANCE * 3.0, 0.0, 0.0);
         let ndc = project(&m, outside);
         assert!(
             ndc.x.abs() > 1.0 || ndc.y.abs() > 1.0,

@@ -3862,3 +3862,95 @@ panic。校验不过时记 warning、本次用 `dock::create_tile_tree()` 继续
 - 场景重命名 / 删除的专用 UI（当前交给资源管理器）。
 - 多场景同时打开 / additive 编辑。
 - 自动保存 / 崩溃恢复（P1 #14）。
+
+## 四十一、级联阴影（CSM）：4 层深度数组 + 视线深度选层（2026-10-22）
+
+差距分析 P1 #11。上一轮的单级拟合按**整场景包围盒**定视锥，相机一拉远，每个像素
+对到的纹素就少一大截，影子边缘糊成噪点。这一轮把它换成 4 级级联。
+
+### 一、切分：视线方向的线性深度 + practical split
+
+- `splits[i]` = 第 i 层远平面距相机的**线性**距离（沿视线），不是 NDC z ——
+  NDC z 在透视下被非线性压缩，按它切出来的段在世界空间里不成比例。
+  选层口径与 CPU 拟合口径是同一个标量：`dot(world_pos - camera_pos, forward)`。
+- 切分用 practical split（λ = 0.7，对数项与均匀项混合）：纯对数第一层装不下
+  脚下地面，纯均匀浪费近处精度。
+- **覆盖距离 = min(相机远平面, 场景在视线方向的延伸, 120)**。编辑器远平面常是
+  1000，照它切等于把 99% 的纹素花在看不见的地方；120 是硬上限，防"物体飞出
+  视野"把最后一级拉糊。最后一级的远平面恰好等于覆盖距离（少一点点会留一圈
+  "没影子"的环）。
+
+### 二、每层拟合：反推视锥 + 紧致包围 + 纹素吸附
+
+- 从 `inv_view_proj` 反推视锥 8 角点，**不额外传 near/far**：三套宿主（编辑器
+  自由相机 / 游戏相机 / 无头截图）各自组装矩阵，多传一份就有"传的与用的不是
+  同一组"的风险，错了只表现为阴影错位。
+- 子视锥 = 近角点与远角点的线性插值（透视下与解析式恒等，正交下棱边平行）。
+- 逐轴求**紧致包围**（不用外接球：子视锥是梯形，球比它胖）；x/y 取同一尺寸
+  （正方形范围），PCF 的 3×3 核才不会被拉长。
+- 宽度向上取整到整数纹素、中心吸附到纹素网格 —— 否则相机一动影子边缘就抖
+  （shimmer）。
+- 深度范围的符号是这一轮唯一一次"写对了才不黑屏"的坑：`look_at_rh` 视空间前方
+  是 -z，而 glam 的 `orthographic_rh` 要正距离，所以 `near = -max.z - pad`。
+  写反的后果是整段深度落在 `[0,1]` 外 —— 全屏没有影子。这条由
+  `shadow_cascades_cover_their_own_slab`（断言 8 角点 NDC 落在 `[-1,1]×[0,1]`）
+  钉住。
+
+### 三、GPU 侧
+
+- 阴影图从单张 `texture_depth_2d` 改成**4 层深度数组**，一层一级联；
+  主 pass 用 `texture_depth_2d_array` + `textureSampleCompareLevel(..., layer, ...)`。
+- 阴影 pass **每层一个 render pass**：wgpu 不允许把数组视图当单层的渲染目标，
+  必须另建单层 D2 视图（采样用数组视图、渲染用单层视图）。
+- 每层矩阵走**动态偏移**（`SHADOW_PASS_STRIDE = 256`）切段，而不是四个绑定组：
+  省三次绑定组创建，也不依赖 push constant 特性。绑定必须**显式写 size = 64**，
+  `as_entire_binding()` 会把绑定钉成整条缓冲、只允许偏移 0（四层全画进同一层，
+  表现为影子错位，不报错）。
+- 主 pass 的 uniform 结构：`array<mat4x4,4>` + `splits/forward/params` 三个 vec4
+  = 304 B；切分表用 `vec4` 而不是 `array<f32,4>`（uniform 里后者的元素步长是 16）。
+- 阴影视锥剔除改用**最后一级**（覆盖最广），否则会漏掉"近处看不见、影子落在
+  远处"的物体。
+
+### 四、验证
+
+- **xgame-render 全量单测 152 passed / 0 failed**（含 3 条阴影 GPU 回归：
+  `instanced_draws_still_cast_shadows` / `offscreen_casters_still_cast_shadows` /
+  `instancing_matches_per_draw_rendering`）。
+- **全工作区 `cargo test --workspace --all-targets -j 2 -- --test-threads=4`：
+  696 passed / 0 failed / 7 ignored**（上一轮 686，净增 10）。
+  环境备注：本机沙箱不允许往仓库内 `target/` 写代码生成产物（OS Error 5），
+  本轮改用 `CARGO_TARGET_DIR=D:\xgame-target` 构建；`plugin_loading` 那 4 条
+  按设计去 `<repo>/target/{debug,release}` 找 cdylib，把两个插件 DLL 复制过去后
+  全绿 —— 是构建目录约定，不是代码问题。
+- **新增 9 条**（纯 CPU，无需 GPU）：
+  - `cascade_splits`：单调、末项恰好 = far、近处一级明显短于均匀切分、
+    near ≥ far 的坏相机不 panic；
+  - `shadow_cascades_cover_their_own_slab`：每层子视锥的 8 角点必须落在该层的
+    光源裁剪空间内（NDC xy ∈ [-1,1]、z ∈ [0,1]）—— 这是"影子能出现"的前提，
+    也是上面那个符号坑的守门员；
+  - `shadow_cascades_sharpen_the_near_field`：第 0 层纹素必须细于单级拟合的一半，
+    且远端层确实更粗（切分与拟合没接反）；
+  - `shadow_cascades_are_deterministic`：同输入两次拟合逐位相同（无头截图
+    "同机逐字节一致"的地基）；
+  - `shadow_cascades_reject_degenerate_input`：空场景 / 层数 0 / 退化逆矩阵给
+    `None` 而不是 NaN 矩阵；
+  - `shadow_cascades_survive_a_zero_direction`：零方向退化成垂直向下；
+  - `shadow_coverage_follows_the_scene_not_the_far_plane`：40 单位的地面不被切到
+    200 单位的远平面上，同时仍罩住整个场景；
+  - `shadow_uniform_matches_wgsl_layout`：304 B 且 16 对齐、动态偏移步长与层数
+    一致性（ABI 错了只会表现为"影子在奇怪的位置"）。
+- clippy `-p xgame-render --all-targets -- -D warnings`：0 告警。
+- **无头截图对比**（`--headless --frames 150 projects/SampleScene`）：与改动前
+  基线逐区域一致，无接缝、无黑带、无消失的影子；另外跑了 `BehaviorsDemo` /
+  `CharacterDemo` 两个项目，均正常出图、`ok=true`。
+
+### 五、刻意的限制 / 遗留
+
+- 不做级间混合（blend band）：边界是"锐度突变"而非接缝，混合要一次额外采样，
+  留给软阴影那一刀。
+- 不按光源方向扩展剔除视锥去抓"画面外投影物"（盒外物体的影子本来也落不进这张图）。
+- 层数写死 4（常量 + WGSL 数组长度 + uniform 布局三处一致，有测试钉住）；
+  还没接到质量档位（P2 #23）。
+- 单级拟合 `fit_directional_shadow` 保留：关掉 CSM 的等价退路 + 精度账的基准。
+- 点光阴影 / 软阴影（PCSS、VSM）仍在 P2 #20。
+
