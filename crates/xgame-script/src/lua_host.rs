@@ -406,6 +406,7 @@ impl LuaHost {
             source: path,
             scene_name: frame.scene_name,
             scene_order: frame.scene_order,
+            loader: frame.loader,
             entity,
             delta: frame.delta,
             time: frame.time,
@@ -1284,6 +1285,66 @@ mod tests {
         // 顺带覆盖一下 SpawnRequest 的默认值走法。
         let default_request = SpawnRequest::new("x");
         assert_eq!(default_request.model, "");
+    }
+
+    /// 预制体实例化：从 Lua 一路走到场景，并且失败（没装载器）时脚本侧
+    /// 拿到的是 `nil` 而不是一个假 id。
+    ///
+    /// 这里用一个内存假装载器（真路径 `ProjectHandle` 由 runtime 的测试覆盖，
+    /// 见 `world.rs` 的同名场景）。
+    #[test]
+    fn spawn_prefab_is_reachable_from_lua() {
+        let project = TempProject::new("spawn_prefab");
+        let path = project.write_script(
+            "spawner",
+            r#"
+            function start(ctx)
+                id = spawn_prefab(ctx, "Prefabs/Enemy.prefab.ron", 1.0, 2.0, 3.0)
+                if id ~= nil then
+                    set_entity_pos(ctx, id, 4.0, 5.0, 6.0)
+                end
+            end
+            "#,
+        );
+
+        let mut scene = scene_with_script(&path);
+        let mut host = LuaHost::new();
+        let preload = host.preload(&project.dir, &scene);
+        assert!(preload.failed.is_empty(), "编译失败: {:?}", preload.failed);
+
+        // 没注入装载器：失败路径，脚本里 `id ~= nil` 应为假。
+        host.dispatch_start(FrameCtx::new(&mut scene, 0.016, 0.0));
+        let spawned = host.take_commands().spawned;
+        assert!(spawned.is_empty(), "没有装载器时什么都不该生成");
+        assert_eq!(scene.entities.len(), 1, "只有原来那个 actor");
+        assert!(
+            host.take_logs().iter().any(|l| l.level == LogLevel::Error
+                && l.message.contains("装载器")),
+            "失败要留下可诊断的日志"
+        );
+
+        // 注入装载器：整棵子树进场景，脚本里紧接着那句 set_entity_pos 生效。
+        let loader = crate::ctx::tests::FakePrefabLoader {
+            prefab: Some(crate::ctx::tests::sample_prefab()),
+        };
+        let mut scene2 = scene_with_script(&path);
+        let mut host2 = LuaHost::new();
+        assert!(host2.preload(&project.dir, &scene2).failed.is_empty());
+        let frame = FrameCtx::new(&mut scene2, 0.016, 0.0).with_loader(&loader);
+        host2.dispatch_start(frame);
+        let spawned = host2.take_commands().spawned;
+        assert_eq!(spawned.len(), 2, "Root + Child 两条生成命令");
+        assert_eq!(scene2.entities.len(), 3, "actor + 两个新实体");
+        let root = scene2.find_entity(spawned[0]).expect("根实体应存在");
+        assert_eq!(
+            scene2.entities[root].transform.position,
+            xgame_math::glam::Vec3::new(4.0, 5.0, 6.0),
+            "脚本里 spawn 之后的 set_entity_pos 必须当帧生效"
+        );
+        assert!(scene2.entities[root]
+            .prefab
+            .as_ref()
+            .is_some_and(|p| p.is_root));
     }
 
     #[test]

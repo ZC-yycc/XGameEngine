@@ -621,6 +621,31 @@ fn register_spawn(lua: &Lua, globals: &Table) -> mlua::Result<()> {
             },
         )?,
     )?;
+
+    // 预制体实例化：返回实例根的 id，失败返回 **nil**（另一类生成函数永远
+    // 成功，所以直接给 id；预制体要读盘，失败是常态，脚本必须能判）。
+    globals.set(
+        "spawn_prefab",
+        lua.create_function(
+            |_, (ctx, path, x, y, z): (LuaCtx, String, f32, f32, f32)| {
+                Ok(ctx
+                    .game()
+                    .spawn_prefab(&path, Vec3::new(x, y, z))
+                    .map(raw_i64))
+            },
+        )?,
+    )?;
+    globals.set(
+        "spawn_prefab_under",
+        lua.create_function(
+            |_, (ctx, path, parent, x, y, z): (LuaCtx, String, i64, f32, f32, f32)| {
+                Ok(ctx
+                    .game()
+                    .spawn_prefab_under(&path, id_of(parent), Vec3::new(x, y, z))
+                    .map(raw_i64))
+            },
+        )?,
+    )?;
     Ok(())
 }
 

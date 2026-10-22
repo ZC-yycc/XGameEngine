@@ -528,6 +528,27 @@ Entity(
   `prefab: None` 灌满；旧文件缺这个字段也能照常加载。
 - 构建（🔨 Build）会把 `Prefabs/` 一并打进产物。
 
+### 运行时实例化：`spawn_prefab`
+
+预制体不只能由作者在编辑器里摆 —— 脚本可以随时实例化它，这是子弹 / 敌人 /
+掉落物 / 技能特效的唯一入口：
+
+```lua
+-- 世界位置（覆盖预制体根自己写的位置，子节点相对位置原样保留）
+local e = spawn_prefab(ctx, "Prefabs/Enemy.prefab.ron", 0.0, 1.0, 0.0)
+if e ~= nil then set_entity_pos(ctx, e, 4.0, 1.0, 0.0) end
+
+-- 挂在玩家手上的子弹（坐标是局部偏移，之后跟着玩家走）
+spawn_prefab_under(ctx, "Prefabs/Bullet.prefab.ron", self_id(ctx), 0.0, 1.5, 0.0)
+```
+
+- 整棵子树一次进场景：层级 / 变换 / 物理 / 粒子 / 音频 / 相机 / UI 全带上，
+  **每个新实体的刚体由运行时自动补建**，脚本侧不需要额外调用。
+- 返回的 ID **立刻可用**（与 `spawn_entity` 同款语义）；失败返回 `nil` 并留一条
+  日志（宿主没接装载器 / 文件读不到 / 预制体是空，三种分开说）。
+- 用法与参数细节见 [`Docs/脚本API.md`](Docs/脚本API.md) §4.3，取舍见
+  `Docs/决策记录.md` §二十七。
+
 ## 资产与导入（GUID + `.meta`）
 
 **问题**：场景里如果存的是 `model: "Resources/Box.glb"`，资产一改名 / 一挪目录就断链，

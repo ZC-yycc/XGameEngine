@@ -4247,3 +4247,70 @@ Stop 时补一句"Play 期间场景切到了 X"，否则用户会以为切过去
   真需要时再加，别提前给清单加三种状态。
 - **构建产物裁剪**：`content_dirs()` 仍然整目录打包，没按清单只打需要的资产。
 - **MCP 的 build 工具**：见 §四，走 CLI。
+
+---
+
+## 四十五、运行时预制体实例化：`spawn_prefab` / `spawn_prefab_under`（2026-10-22）
+
+### 一、为什么是这一刀
+
+差距分析 P1 #13 的缺口里，"预制体实例化"是唯一一个**卡住玩法闭环**的：
+编辑器里能把预制体摆进场景，但脚本不能实例化它 —— 子弹、敌人、掉落物、
+技能特效一条都写不出来，玩法永远停在"场景里预先摆好的东西"。相比之下
+同列的"手柄"要硬件才能验证、"时间缩放"是几十行的小补面。选它。
+
+### 二、事实基础（动手前确认）
+
+- `Prefab::instantiate()` / `Scene::instantiate_prefab()` 已存在且带测试
+  （分配新 ID、重映射父引用、贴 `PrefabInstanceRef`），`ProjectHandle::load_prefab`
+  也已存在（读盘 + GUID 解码 + UI / 粒子钳制）—— **缺的只是把两者接到脚本轨**。
+- 渲染侧不拦路：编辑器与独立游戏每帧都按 `entity.model` 懒加载网格，
+  新实体当帧就能画出来。
+- 物理 / 粒子 / 音频都按帧扫或按命令补：新实体不需要额外的"注册"步骤。
+- 依赖方向是硬约束：`script ← runtime`，所以脚本要的装载 trait 必须在 core。
+
+### 三、做了什么
+
+1. **`SceneLoader` 从 runtime 搬到 core**（`xgame_core::loader`），新增
+   `load_prefab`（默认实现返回 `Err`）；runtime 改 `pub use` 转出，宿主零改动。
+2. `FrameCtx` / `GameCtx` 加 `loader` 字段 + `with_loader` 构造器；
+   `LuaHost::run_hook` 与 runtime 的四处派发全部注入同一份装载器。
+3. `GameCtx::spawn_prefab` / `spawn_prefab_under`：读盘 → 实例化 → 设位置 /
+   挂父 → **逐实体**推 `ScriptCommand::EntitySpawned`（运行时据此补刚体）。
+4. Lua 注册两个函数，注册名 145 → **147**；失败返回 `nil` + 一条分级日志。
+5. 顺带修掉 `dispatch_collision_to` 脚本轨上下文缺 `scene_name` / `scene_order`
+   的不一致（此前 `on_collision_enter` 里 `current_scene()` 恒为空串）。
+
+### 四、关键取舍
+
+- **位置是"设置"不是"叠加"**：`spawn_prefab` 覆盖根的世界位置、
+  `spawn_prefab_under` 是局部偏移；子节点相对位置原样保留。没有第三种形态。
+- **立即生成**（与 `spawn_entity` 同款理由）：`local e = spawn_prefab(...)`
+  之后马上 `set_entity_pos(e, ...)` 必须生效。
+- **不做缓存**：每次读盘约几十微秒；等"每秒上千发"再加，缓存要处理编辑器
+  改文件的失效问题，提前做是拿正确性换一个未发生的性能问题。
+- **失败不留半个实例**：三种失败（没装载器 / 读不到 / 空预制体）各自一条日志，
+  都返回 `nil`。
+
+### 五、验证（全部实跑）
+
+- **全量测试**：`745 passed / 0 failed / 7 ignored`（新增 10 条：core 2、
+  script 5 + Lua 1、runtime 2）；clippy 0 警告。
+- **dist 版无头实跑**（`--headless --frames N`，SampleScene 临时挂一个生成器脚本）：
+  基础场景 24 实体，每帧两次实例化各 +3（1 帧 → 30、14 帧 → 108），
+  实例根 ID 连续不重复，`error: 0 / warn: 0`；
+  路径改成不存在文件 → Error 日志带绝对路径、脚本拿到 `nil`、实体数不变、不崩。
+- 恢复项目后 `--check` OK（exit 0）、30 帧冒烟 `entities: 24 / error: 0`；
+  `dist/` 已用最终源码重新打包。
+
+### 六、刻意没做
+
+- 预制体缓存（见 §四）。
+- 实例根传旋转 / 改名（Unity `Instantiate` 的第三、第四个参数）。
+- MCP 侧的预制体生成工具（走 CLI / 编辑器）。
+
+### 七、下一步候选
+
+- **TAA**（渲染最后一刀，P1 #10）：历史缓冲 + 运动向量 + 重投影。
+- **手柄输入**（P1 #15）：要硬件才能验证手感。
+- **构建设置剩余项**：平台预设 / 图标。

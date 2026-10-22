@@ -22,6 +22,7 @@
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
 //! | `asset` | 资产身份 `AssetGuid` + `.meta` + `AssetDatabase`（GUID 引用、导入设置、诊断） |
 //! | `project` | 项目清单 `Project` + 项目句柄 `ProjectHandle` |
+//! | `loader` | 资产装载注入点 `SceneLoader`（场景 / 预制体，按项目相对路径装载）|
 //! | `ui` | 屏幕空间 UI 组件 `UiElement`（锚点布局的纯数据层，布局与绘制在 `xgame-ui`）|
 //! | `particle` | 粒子发射器 `ParticleEmitter`（纯声明；模拟在 `xgame-particle`，绘制在 `xgame-render`）|
 //!
@@ -55,6 +56,7 @@ mod component;
 pub mod inspect;
 mod id;
 mod light;
+mod loader;
 pub mod material;
 pub mod particle;
 pub mod physics;
@@ -99,6 +101,7 @@ pub use component::{Component, ComponentMap, ModelPath, Name};
 pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};
 pub use id::{EntityId, EntityMap, EntitySet};
 pub use light::{Light, LightKind};
+pub use loader::SceneLoader;
 pub use material::{MaterialAsset, MaterialOverride, MATERIAL_EXTENSION};
 pub use particle::{
     EmissionShape, ParticleBlend, ParticleEmitter, MAX_PARTICLES_LIMIT,

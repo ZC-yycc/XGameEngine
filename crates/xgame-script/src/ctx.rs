@@ -38,7 +38,9 @@
 //! 在栈上构造，活到钩子调用返回为止。交给 Lua 的 [`crate::ScriptCtx`] 只是
 //! 它的**地址束**（见 `context.rs` 的安全论证），不延长任何借用。
 
-use xgame_core::{same_scene_path, Entity, EntityId, PhysicsBody, PhysicsHandle, PlaySound, Scene};
+use xgame_core::{
+    same_scene_path, Entity, EntityId, PhysicsBody, PhysicsHandle, PlaySound, Scene, SceneLoader,
+};
 use xgame_input::{Input, KeyCode, MouseButton};
 use xgame_math::glam::{EulerRot, Quat, Vec2, Vec3};
 use xgame_physics::{PhysicsRayHit, PhysicsWorld, RaycastFilter};
@@ -75,6 +77,9 @@ pub struct GameCtx<'a> {
     pub scene_name: &'a str,
     /// 发布清单里的关卡顺序（`build.scenes`）。空 = 没配 / 宿主没注入。
     pub scene_order: &'a [String],
+    /// 资产装载来源（场景 / 预制体）。`None` = 宿主没接装载器：
+    /// `load_scene` / `spawn_prefab` 记一条错误日志并返回失败，不静默。
+    pub loader: Option<&'a dyn SceneLoader>,
     /// 触发本次调用的实体（"self"）。[`EntityId::raw`] 为 `0` 表示没有实体上下文。
     pub entity: EntityId,
     /// 本帧真实帧间隔（秒）。
@@ -852,6 +857,127 @@ impl GameCtx<'_> {
         id
     }
 
+    /// 把预制体资产**实例化**进当前场景，返回实例根的实体 ID（失败 = `None`）。
+    ///
+    /// `position` 覆盖根的**世界**位置（Unity `Instantiate(prefab, pos, rot)` 的
+    /// 语义）：预制体里根节点自己写的位置被入参顶掉，**子节点原样保留** ——
+    /// 一棵"炮口在 (0,1,0)、炮身在世界原点"的预制体，实例化到 (10,0,0) 之后
+    /// 炮口就在 (10,1,0)。
+    ///
+    /// 与 `spawn_entity` 的关系：那条生成的是**一个空壳实体**（给个名字 + 模型），
+    /// 这条生成的是**一整棵子树**（预制体资产里有什么就有什么：层级 / 变换 /
+    /// 物理 / 粒子 / 音频 / 相机 / UI 全带上），并且每个新实体都记着
+    /// `PrefabInstanceRef`（编辑器 Play 里的 Prefab 面板仍然认得出它）。
+    ///
+    /// # 为什么是"立即"而不是延后
+    ///
+    /// 与 [`spawn_request`](Self::spawn_request) 同一条理由：
+    /// `local e = spawn_prefab(...); set_entity_pos(e, ...)` 是最自然的写法，
+    /// 延后会让第二句对着一个还不存在的实体静默失效。
+    ///
+    /// # 失败是三种，日志分开说
+    ///
+    /// 1. 宿主没注入装载器（`loader == None`）—— 接线问题，测试 / 自建宿主常见；
+    /// 2. 文件读不出来 / RON 解析失败 —— 路径写错或资产坏了；
+    /// 3. 预制体是空的 —— 不是错误，但脚本通常也不想看到"什么都没发生"。
+    pub fn spawn_prefab(&mut self, path: &str, position: Vec3) -> Option<EntityId> {
+        self.spawn_prefab_request(path, None, position)
+    }
+
+    /// 同 [`spawn_prefab`](Self::spawn_prefab)，但把实例根**挂到** `parent` 底下。
+    ///
+    /// `offset` 是**局部**位置（相对父节点）：挂在玩家手上的子弹写成
+    /// `spawn_prefab_under("Prefabs/Bullet.prefab.ron", player, 0, 1.5, 0)`，
+    /// 之后子弹会跟着玩家走（父节点带动子节点），不需要每帧自己追。
+    ///
+    /// 父节点在当前场景里找不到时**退回世界根**并记一条警告：把一颗子弹的
+    /// 父引用写死成"挂在某个可能已被销毁的实体上"，静默丢弃整次生成更糟。
+    pub fn spawn_prefab_under(
+        &mut self,
+        path: &str,
+        parent: EntityId,
+        offset: Vec3,
+    ) -> Option<EntityId> {
+        let parent_index = self.scene.find_entity(parent);
+        if parent_index.is_none() {
+            self.push_log(
+                LogLevel::Warn,
+                format!(
+                    "spawn_prefab_under('{path}') 的父实体 {} 不在当前场景里，实例挂到场景根",
+                    parent.raw()
+                ),
+            );
+        }
+        self.spawn_prefab_request(path, parent_index, offset)
+    }
+
+    fn spawn_prefab_request(
+        &mut self,
+        path: &str,
+        parent: Option<usize>,
+        position: Vec3,
+    ) -> Option<EntityId> {
+        // 1. 装载器：宿主的接线问题，日志要说清"去哪接"。
+        let Some(loader) = self.loader else {
+            self.push_log(
+                LogLevel::Error,
+                format!(
+                    "spawn_prefab('{path}') 失败：宿主没有接入资产装载器（World 需要 with_scene_loader）"
+                ),
+            );
+            return None;
+        };
+
+        // 2. 读盘：路径写错 / 资产坏了都走这里，错误文案由装载器给出（含绝对路径）。
+        let prefab = match loader.load_prefab(path) {
+            Ok(prefab) => prefab,
+            Err(reason) => {
+                self.push_log(
+                    LogLevel::Error,
+                    format!("spawn_prefab('{path}') 失败：{reason}"),
+                );
+                return None;
+            }
+        };
+
+        // 3. 实例化：`instantiate_prefab` 自己会分配新 ID、重映射内部父引用、
+        //    贴 `PrefabInstanceRef`。空预制体返回 None —— 不是故障，但作者
+        //    通常想被告知，所以记 warn。
+        // 先记下"追加前有多少实体"：新增块就是这一段，收集新实体命令时
+        //    不能反推（实例根在块内的偏移没有保证）。
+        let base = self.scene.entities.len();
+        let Some(root) = self.scene.instantiate_prefab(&prefab, path) else {
+            self.push_log(
+                LogLevel::Warn,
+                format!("spawn_prefab('{path}')：预制体是空的，什么都没生成"),
+            );
+            return None;
+        };
+        let root_id = self.scene.entities[root].id;
+        self.scene.entities[root].transform.position = position;
+        if let Some(parent_index) = parent {
+            // `set_parent` 自己会拒绝成环，返回 false 时不要假装成功
+            // （实例根不可能成环 —— 它是刚加进来的，但别依赖这个巧合）。
+            if !self.scene.set_parent(root, Some(parent_index)) {
+                self.push_log(
+                    LogLevel::Warn,
+                    format!("spawn_prefab_under('{path}')：挂父节点被拒绝（会成环？），实例留在场景根"),
+                );
+            }
+        }
+
+        // 4. 通知运行时补刚体：每个新实体一条，与 `spawn_request` 走同一条命令
+        //    路径。父引用此刻已在场景里，命令被消费时刚体建在世界正确位置。
+        let spawned: Vec<(EntityId, Option<PhysicsBody>)> = self.scene.entities[base..]
+            .iter()
+            .map(|e| (e.id, e.physics))
+            .collect();
+        for (id, physics) in spawned {
+            self.push_command(ScriptCommand::EntitySpawned { id, physics });
+        }
+        Some(root_id)
+    }
+
     // -----------------------------------------------------------------------
     // 物理
     // -----------------------------------------------------------------------
@@ -1349,8 +1475,10 @@ fn entity_of_body(scene: &Scene, body: u64) -> Option<EntityId> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    // `Prefab` / `Transform` 只在测试里用（造预制体模板），不放顶层 import。
+    use xgame_core::{Prefab, Transform};
 
     /// 原 api.rs 的回归测试，随函数体一并平移（YXZ 分解往返稳定）。
     #[test]
@@ -1402,6 +1530,7 @@ mod tests {
                 source: "MaterialProbe",
                 scene_name: "",
                 scene_order: &[],
+                loader: None,
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1449,6 +1578,7 @@ mod tests {
                 source: "MaterialProbe",
                 scene_name: "",
                 scene_order: &[],
+                loader: None,
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1487,6 +1617,7 @@ mod tests {
                 source: "TorchScript",
                 scene_name: "",
                 scene_order: &[],
+                loader: None,
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1524,6 +1655,7 @@ mod tests {
             source: "TorchScript",
             scene_name: "",
             scene_order: &[],
+            loader: None,
             entity: bare_id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1558,6 +1690,7 @@ mod tests {
             source: "Spinner",
             scene_name: "",
             scene_order: &[],
+            loader: None,
             entity: id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1598,6 +1731,7 @@ mod tests {
                 source: "Sfx",
                 scene_name: "",
                 scene_order: &[],
+                loader: None,
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1646,6 +1780,7 @@ mod tests {
             source: "Sfx",
             scene_name: "",
             scene_order: &[],
+            loader: None,
             entity: id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1653,5 +1788,244 @@ mod tests {
         ctx.play_sound("x.wav", 1.0, 1.0);
         ctx.stop_all_sounds();
         assert!(port2.is_empty(), "没接音频时应静默 no-op");
+    }
+
+    // -----------------------------------------------------------------------
+    // 预制体实例化
+    // -----------------------------------------------------------------------
+
+    /// 一个能在内存里返回预制体的假装载器（真装在 `ProjectHandle` 上，
+    /// 这里测的是 spawn_prefab 自己的逻辑：通知 / 位置 / 挂父 / 失败路径）。
+    pub(crate) struct FakePrefabLoader {
+        pub(crate) prefab: Option<Prefab>,
+    }
+
+    impl SceneLoader for FakePrefabLoader {
+        fn load_scene(&self, _relative: &str) -> Result<Scene, String> {
+            Err("测试装载器不提供场景".to_string())
+        }
+        fn load_prefab(&self, _relative: &str) -> Result<Prefab, String> {
+            self.prefab
+                .clone()
+                .ok_or_else(|| "预制体不存在".to_string())
+        }
+    }
+
+    /// 造一个两层深、根带物理的预制体（Root -> Child）。
+    pub(crate) fn sample_prefab() -> Prefab {
+        let mut scene = Scene::new("Template");
+        let root = scene.add_entity(Entity::new("Enemy"));
+        let root_index = scene.index_of(root).unwrap();
+        scene.entities[root_index].physics =
+            Some(PhysicsBody::dynamic_ball(0.5));
+        let child = scene.add_entity(
+            Entity::new("Gun")
+                .with_model("builtin://cube")
+                .with_transform(Transform::from_translation(Vec3::new(0.0, 1.0, 0.0))),
+        );
+        let child_index = scene.index_of(child).unwrap();
+        scene.set_parent(child_index, Some(root_index));
+        Prefab::from_subtree(&scene, root_index)
+    }
+
+    #[test]
+    fn spawn_prefab_instantiates_subtree_at_position() {
+        let mut scene = Scene::new("Runtime");
+        let loader = FakePrefabLoader {
+            prefab: Some(sample_prefab()),
+        };
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        let root_id = {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "Spawner",
+                scene_name: "",
+                scene_order: &[],
+                loader: Some(&loader),
+                entity: EntityId::from_raw(0),
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            ctx.spawn_prefab("Prefabs/Enemy.prefab.ron", Vec3::new(10.0, 0.0, -3.0))
+                .expect("非空预制体应当能实例化")
+        };
+        assert_eq!(scene.entities.len(), 2, "整棵子树都该进场景");
+        assert_eq!(
+            scene.entities[0].transform.position,
+            Vec3::new(10.0, 0.0, -3.0),
+            "根的世界位置被入参覆盖"
+        );
+        // 子节点的**相对**位置原样保留（Unity Instantiate 语义）
+        let child = &scene.entities[1];
+        assert_eq!(child.transform.position, Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(child.parent, Some(root_id), "内部父引用被重映射");
+        // 每个新实体都带着实例来源（编辑器 Play 里的 Prefab 面板仍认得出它）
+        assert!(scene
+            .entities
+            .iter()
+            .all(|e| e.prefab.as_ref().is_some_and(|p| p.source == "Prefabs/Enemy.prefab.ron")));
+        // 每个新实体一条 EntitySpawned（运行时据此补刚体）——含根上那颗球
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(
+            &commands[0],
+            ScriptCommand::EntitySpawned { physics: Some(_), .. }
+        ));
+        assert!(logs.is_empty(), "成功路径不该有日志");
+    }
+
+    #[test]
+    fn spawn_prefab_under_reparents_and_keeps_local_offset() {
+        let mut scene = Scene::new("Runtime");
+        let player = scene.add_entity(Entity::new("Player"));
+        let player_id = scene.entities[scene.index_of(player).unwrap()].id;
+        let loader = FakePrefabLoader {
+            prefab: Some(sample_prefab()),
+        };
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        let root_id = {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "Weapon",
+                scene_name: "",
+                scene_order: &[],
+                loader: Some(&loader),
+                entity: EntityId::from_raw(0),
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            ctx.spawn_prefab_under(
+                "Prefabs/Enemy.prefab.ron",
+                player_id,
+                Vec3::new(0.25, 1.5, 0.0),
+            )
+            .expect("非空预制体应当能实例化")
+        };
+        let root_index = scene.index_of(root_id).expect("根应当存在");
+        assert_eq!(root_id, scene.entities[root_index].id);
+        assert_eq!(
+            scene.entities[root_index].transform.position,
+            Vec3::new(0.25, 1.5, 0.0),
+            "挂到父节点下时入参是**局部**位置"
+        );
+        assert_eq!(scene.parent_index(root_index), Some(scene.index_of(player).unwrap()));
+        // 父节点带着子节点走：根的世界位置 = 父位置 + 局部偏移
+        let world = scene.world_matrix(root_index).w_axis.truncate();
+        assert!((world - Vec3::new(0.25, 1.5, 0.0)).length() < 1e-4);
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn spawn_prefab_without_loader_logs_and_returns_none() {
+        let mut scene = Scene::new("Runtime");
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        let result = {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "Spawner",
+                scene_name: "",
+                scene_order: &[],
+                loader: None,
+                entity: EntityId::from_raw(0),
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            ctx.spawn_prefab("Prefabs/Enemy.prefab.ron", Vec3::ZERO)
+        };
+        assert!(result.is_none());
+        assert_eq!(scene.entities.len(), 0, "失败不该留下半个实例");
+        assert!(commands.is_empty());
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, LogLevel::Error);
+        assert!(
+            logs[0].message.contains("装载器"),
+            "日志要说清是接线问题：{}", logs[0].message
+        );
+    }
+
+    #[test]
+    fn spawn_prefab_reports_unreadable_asset() {
+        let mut scene = Scene::new("Runtime");
+        let loader = FakePrefabLoader { prefab: None };
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        let result = {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "Spawner",
+                scene_name: "",
+                scene_order: &[],
+                loader: Some(&loader),
+                entity: EntityId::from_raw(0),
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            ctx.spawn_prefab("Prefabs/Missing.prefab.ron", Vec3::ZERO)
+        };
+        assert!(result.is_none());
+        assert_eq!(scene.entities.len(), 0);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, LogLevel::Error);
+        assert!(logs[0].message.contains("Prefabs/Missing.prefab.ron"));
+    }
+
+    #[test]
+    fn spawn_prefab_under_missing_parent_falls_back_to_root() {
+        let mut scene = Scene::new("Runtime");
+        let loader = FakePrefabLoader {
+            prefab: Some(sample_prefab()),
+        };
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        let root_id = {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "Weapon",
+                scene_name: "",
+                scene_order: &[],
+                loader: Some(&loader),
+                entity: EntityId::from_raw(0),
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            // 一个场景里不存在的实体 id
+            ctx.spawn_prefab_under(
+                "Prefabs/Enemy.prefab.ron",
+                EntityId::from_raw(9999),
+                Vec3::new(1.0, 0.0, 0.0),
+            )
+            .expect("父节点缺失只是退回场景根，不该整次失败")
+        };
+        let root_index = scene.index_of(root_id).expect("根应当存在");
+        assert_eq!(scene.parent_index(root_index), None, "应当挂在场景根");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, LogLevel::Warn);
     }
 }

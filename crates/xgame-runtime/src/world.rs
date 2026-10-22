@@ -55,7 +55,7 @@ use std::path::PathBuf;
 use xgame_audio::AudioEngine;
 use xgame_core::{
     same_scene_path, AudioPort, AudioStats, EntityId, GameClock, Inspect, PhysicsHandle, PlaySound,
-    Scene, Transform,
+    Scene, SceneLoader, Transform,
 };
 use xgame_input::{Input, InputMap, MouseButton};
 use xgame_math::glam::{Mat4, Vec2, Vec3};
@@ -67,7 +67,6 @@ use xgame_script::{FrameCtx, GameCtx, LogLevel, LuaHost, ScriptLog};
 
 use crate::camera_view::CameraView;
 use crate::registry::{BehaviorInstance, BehaviorRegistry};
-use crate::scene_loader::SceneLoader;
 
 /// 运行时的可调参数。
 #[derive(Debug, Clone)]
@@ -771,6 +770,7 @@ impl World {
             audio_port,
             current_scene,
             scene_order,
+            scene_loader,
             ..
         } = self;
 
@@ -780,6 +780,10 @@ impl World {
             .with_audio(audio_port)
             .with_scene_name(current_scene.as_deref().unwrap_or(""))
             .with_scene_order(scene_order.as_slice());
+        let frame = match scene_loader.as_deref() {
+            Some(loader) => frame.with_loader(loader),
+            None => frame,
+        };
 
         // 组件轨与脚本轨：共用 `scripts` 那一对日志 / 命令缓冲。
         match phase {
@@ -826,6 +830,7 @@ impl World {
             behavior_instances,
             current_scene,
             scene_order,
+            scene_loader,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
@@ -863,6 +868,7 @@ impl World {
                     source: instance.name,
                     scene_name: current_scene.as_deref().unwrap_or(""),
                     scene_order: scene_order.as_slice(),
+                    loader: scene_loader.as_deref(),
                     entity: id,
                     delta,
                     time,
@@ -936,6 +942,7 @@ impl World {
             audio_port,
             current_scene,
             scene_order,
+            scene_loader,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
@@ -950,6 +957,7 @@ impl World {
                 source: instance.name,
                 scene_name: current_scene.as_deref().unwrap_or(""),
                 scene_order: scene_order.as_slice(),
+                loader: scene_loader.as_deref(),
                 entity: id,
                 delta,
                 time,
@@ -1356,6 +1364,7 @@ impl World {
                 behavior_instances,
                 current_scene,
                 scene_order,
+                scene_loader,
                 ..
             } = self;
             let (logs, commands) = scripts.buffers_mut();
@@ -1371,6 +1380,7 @@ impl World {
                         source: instance.name,
                         scene_name: current_scene.as_deref().unwrap_or(""),
                         scene_order: scene_order.as_slice(),
+                        loader: scene_loader.as_deref(),
                         entity,
                         delta,
                         time,
@@ -1390,12 +1400,25 @@ impl World {
             input,
             scripts,
             audio_port,
+            current_scene,
+            scene_order,
+            scene_loader,
             ..
         } = self;
+        // 与其它派发路径**同款注入**：早先这里只给了 input/physics/audio，
+        // 结果 `on_collision_enter` 里读 `current_scene()` 恒为空串、切场景 /
+        // 生成预制体全部静默失败 —— 同一份 API 在不同钩子里行为不一致，
+        // 是最难查的那类 bug。
         let frame = FrameCtx::new(scene, delta, time)
             .with_input(input)
             .with_physics(physics)
-            .with_audio(audio_port);
+            .with_audio(audio_port)
+            .with_scene_name(current_scene.as_deref().unwrap_or(""))
+            .with_scene_order(scene_order.as_slice());
+        let frame = match scene_loader.as_deref() {
+            Some(loader) => frame.with_loader(loader),
+            None => frame,
+        };
         scripts.dispatch_collision(frame, entity, other, started);
     }
 
@@ -1553,7 +1576,7 @@ mod tests {
     use xgame_core::project::ProjectHandle;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    use xgame_core::{AudioSource, Entity, EntityId, PhysicsBody};
+    use xgame_core::{AudioSource, Entity, EntityId, PhysicsBody, Prefab};
 
     fn entity_y(world: &World, name: &str) -> f32 {
         world
@@ -2939,6 +2962,122 @@ mod tests {
         assert!(hit.message.contains("越界"), "实际：{}", hit.message);
         assert_eq!(world.current_scene(), Some("Scenes/A.ron"), "场景必须原地不动");
         assert_eq!(world.scene_loads(), 0);
+    }
+
+    // -- 预制体实例化（spawn_prefab）----------------------------------------
+
+    /// 造一个带预制体的临时项目：`Prefabs/Enemy.prefab.ron` 里是一棵
+    /// Root(动态球) -> Child(视觉方块)，A 场景放一个会生成它的脚本。
+    fn temp_prefab_project(tag: &str) -> ProjectHandle {
+        let project = temp_scene_project(tag, false);
+        // A 里只有一个"每帧生成一个敌人"的脚本实体。
+        std::fs::write(
+            project.root().join("Scripts/switch.lua"),
+            r#"
+            function update(ctx)
+                spawn_prefab(ctx, "Prefabs/Enemy.prefab.ron", 0.0, 2.0, 0.0)
+            end
+            "#,
+        )
+        .unwrap();
+
+        // 预制体资产：自己造一份写盘（与编辑器 Prefab 面板走同一条写入口）。
+        let mut template = Scene::new("EnemyTemplate");
+        let root = template.add_entity(Entity::new("Enemy"));
+        let root_index = template.index_of(root).unwrap();
+        template.entities[root_index].physics = Some(PhysicsBody::dynamic_ball(0.5));
+        let child = template.add_entity(
+            Entity::new("Gun").with_transform(Transform::from_translation(Vec3::new(0.0, 1.0, 0.0))),
+        );
+        let child_index = template.index_of(child).unwrap();
+        template.set_parent(child_index, Some(root_index));
+        project
+            .write_prefab(
+                "Prefabs/Enemy.prefab.ron",
+                &Prefab::from_subtree(&template, root_index),
+            )
+            .expect("写预制体");
+        project
+    }
+
+    /// 端到端：脚本生成预制体 → 整棵子树进场景 → 运行时补上刚体 → 世界位置正确。
+    ///
+    /// 关键在刚体数：`EntitySpawned` 命令是**每个新实体**一条，漏一条就少一
+    /// 个刚体（表现是"生成的敌人不参与碰撞"），所以拿它当判据。
+    #[test]
+    fn spawn_prefab_instantiates_subtree_and_builds_bodies() {
+        let project = temp_prefab_project("spawn_prefab");
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let (base_entities, base_bodies) = {
+            let world = World::new(scene, project.root(), WorldConfig::default())
+                .with_scene_loader(project.clone())
+                .with_current_scene("Scenes/A.ron");
+            (world.scene().entities.len(), world.physics().stats().0)
+        };
+        assert_eq!(base_entities, 3, "A：地面 + 塔 + 脚本实体");
+        assert_eq!(base_bodies, 1, "A 只有地面带刚体");
+
+        let scene = project.load_scene("Scenes/A.ron").expect("再读 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron");
+
+        world.update(1.0 / 60.0);
+
+        assert_eq!(
+            world.scene().entities.len(),
+            base_entities + 2,
+            "Root + Child 都该进场景"
+        );
+        let bodies = world.physics().stats().0;
+        assert_eq!(bodies, base_bodies + 1, "只有根带刚体，但必须真的补上");
+        // 世界位置 = 预制体根位置(0,2,0) + 子节点局部(0,1,0)
+        let root = world
+            .scene()
+            .entities
+            .iter()
+            .find(|e| e.name == "Enemy")
+            .expect("实例根应当在场景里");
+        assert_eq!(root.transform.position, Vec3::new(0.0, 2.0, 0.0));
+        let gun = world
+            .scene()
+            .entities
+            .iter()
+            .find(|e| e.name == "Gun")
+            .expect("子节点应当在场景里");
+        let gun_index = world.scene().index_of(gun.id).unwrap();
+        let world_pos = world.scene().world_matrix(gun_index).w_axis.truncate();
+        assert!(
+            (world_pos - Vec3::new(0.0, 3.0, 0.0)).length() < 1e-4,
+            "子节点跟着根走，实际 {world_pos:?}"
+        );
+        // 生成是当帧的，但**没有报错**（失败路径的错误日志会在这里露出来）。
+        let logs = world.take_logs();
+        assert!(
+            logs.iter().all(|l| l.level != crate::LogLevel::Error),
+            "成功路径不该有错误日志：{logs:?}"
+        );
+    }
+
+    /// 没接装载器时：`spawn_prefab` 记一条 Error 且什么都不生成
+    /// （不静默、不 panic —— 半通不通的宿主最容易在这里卡住）。
+    #[test]
+    fn spawn_prefab_without_loader_reports_and_does_nothing() {
+        let project = temp_prefab_project("spawn_prefab_noloader");
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_current_scene("Scenes/A.ron");
+        let before = world.scene().entities.len();
+
+        world.update(1.0 / 60.0);
+
+        assert_eq!(world.scene().entities.len(), before, "什么都不该生成");
+        let logs = world.take_logs();
+        assert!(
+            logs.iter()
+                .any(|l| l.level == crate::LogLevel::Error && l.message.contains("装载器")),
+            "缺装载器必须报错而不是静默：{logs:?}"
+        );
     }
 
     /// 没配清单（`scene_order` 为空）：`scene_index()` 是 `None`，不是 0。

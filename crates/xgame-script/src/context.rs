@@ -35,7 +35,7 @@
 
 use std::marker::PhantomData;
 
-use xgame_core::{EntityId, PhysicsBody, Scene};
+use xgame_core::{EntityId, PhysicsBody, Scene, SceneLoader};
 use xgame_input::Input;
 use xgame_math::glam::Vec3;
 use xgame_physics::PhysicsWorld;
@@ -205,6 +205,9 @@ pub struct FrameCtx<'a> {
     /// `scene_index()` 返回 `nil` —— 与"清单里没有当前场景"是同一个可观察结果，
     /// 因为两者对作者的意义一样：这次运行没有关卡顺序可用。
     pub scene_order: &'a [String],
+    /// 资产装载来源（场景 / 预制体，按项目相对路径）。宿主没注入 = `None`：
+    /// 脚本侧 `load_scene` / `spawn_prefab` 记一条错误日志而不是静默失败。
+    pub loader: Option<&'a dyn SceneLoader>,
     /// 本帧真实帧间隔（秒）。
     pub delta: f32,
     /// 游戏已运行的总时长（秒）。
@@ -220,6 +223,7 @@ impl<'a> FrameCtx<'a> {
             audio: None,
             scene_name: "",
             scene_order: &[],
+            loader: None,
             delta,
             time,
         }
@@ -234,6 +238,13 @@ impl<'a> FrameCtx<'a> {
     /// 告诉上下文"这次运行的关卡顺序"（运行时从 `build.scenes` 注入）。
     pub fn with_scene_order(mut self, order: &'a [String]) -> Self {
         self.scene_order = order;
+        self
+    }
+
+    /// 注入资产装载来源（场景 / 预制体）。宿主从 `with_scene_loader` 那一个口子
+    /// 拿到同一份装载器，两条脚本能力（切场景 / 生成预制体）因此同进同退。
+    pub fn with_loader(mut self, loader: &'a dyn SceneLoader) -> Self {
+        self.loader = Some(loader);
         self
     }
 

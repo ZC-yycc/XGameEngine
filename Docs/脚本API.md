@@ -127,12 +127,37 @@ end
 | `spawn_entity_at(ctx, name, model, x, y, z)` | 同上，指定位置 |
 | `spawn_ball(ctx, name, radius, x, y, z)` | 生成一个动态球（带刚体与球碰撞体） |
 | `spawn_static_box(ctx, name, hx, hy, hz, x, y, z)` | 生成一个静态盒子 |
+| `spawn_prefab(ctx, path, x, y, z)` | **实例化一个预制体资产**，返回实例根 ID（失败返回 `nil`） |
+| `spawn_prefab_under(ctx, path, parent, x, y, z)` | 同上，但把实例根挂到 `parent` 底下，坐标为**局部** |
 
 > 返回的 ID **立刻可用** —— `local id = spawn_entity(...)` 之后马上
 > `set_entity_pos(ctx, id, ...)` 是生效的。
 
 > 函数名带 `_entity` 后缀是历史命名（早期脚本语言把 `spawn` 保留成了关键字），
 > 现在保持不变以免破坏既有脚本。
+
+```lua
+-- 敌人 / 子弹 / 掉落物：预制体里有什么就生成什么（层级 / 变换 / 物理 /
+-- 粒子 / 音频 / 相机 / UI 全带上），子节点相对位置原样保留。
+local e = spawn_prefab(ctx, "Prefabs/Enemy.prefab.ron", 0.0, 1.0, 0.0)
+if e ~= nil then
+    set_entity_pos(ctx, e, 4.0, 1.0, 0.0)      -- 立刻可用
+else
+    log(ctx, "生成失败：预制体读不到（见 error 日志）")
+end
+
+-- 挂在玩家手上的子弹：跟着玩家走，不用每帧自己追。
+spawn_prefab_under(ctx, "Prefabs/Bullet.prefab.ron", self_id(ctx), 0.0, 1.5, 0.0)
+```
+
+- **位置语义**：`spawn_prefab` 的坐标**覆盖**根的**世界**位置（Unity
+  `Instantiate(prefab, pos, rot)` 同款）；`spawn_prefab_under` 的坐标是**局部**
+  偏移。两者都不会叠加到预制体自己写的位置上。
+- **失败三种，日志分开说**：宿主没接装载器（`World` 没 `with_scene_loader`，
+  只有自建宿主 / 单测会碰到）、文件读不到或 RON 坏、预制体是空的。三种都返回
+  `nil` 并留一条日志 —— 不静默、不生成半个实例。
+- 每个新实体的刚体由运行时自动补建（与 `spawn_ball` 同一条路径），脚本侧
+  不需要任何额外调用。
 
 ### 4.4 物理
 

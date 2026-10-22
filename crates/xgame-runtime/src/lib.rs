@@ -40,13 +40,15 @@
 mod camera_view;
 mod lifecycle;
 mod registry;
-mod scene_loader;
 mod world;
 
 pub use camera_view::CameraView;
 pub use lifecycle::{Behavior, Ctx, Lifecycle};
 pub use registry::BehaviorRegistry;
-pub use scene_loader::SceneLoader;
+// 资产装载注入点住在 core：脚本层（`GameCtx`）要能按路径实例化预制体，而依赖方向
+// 是 `script ← runtime`，脚本层看不到本 crate 的类型。转出一致名，宿主侧的
+// `use xgame_runtime::SceneLoader` 不因此改变；设计取舍见 core 的 `loader` 模块。
+pub use xgame_core::SceneLoader;
 pub use world::{FrameReport, World, WorldConfig};
 // 音频引擎从这里再导出：宿主（编辑器 / 独立游戏）只需要 runtime 一个入口，
 // 不必自己再依赖 xgame-audio。

@@ -200,6 +200,7 @@ mod tests {
             source: "test",
             scene_name: "",
             scene_order: &[],
+            loader: None,
             entity: EntityId::from_raw(0),
             delta: 0.016,
             time: 0.0,

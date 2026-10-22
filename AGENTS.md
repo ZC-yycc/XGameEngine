@@ -16,7 +16,7 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；735 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；745 条 + 7 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
@@ -113,4 +113,5 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 自动保存 | 副本只在 `<项目>/.autosave/`（进 `Scenes/` 会被当场景）；**不算保存**（不动 `saved_snapshot`）；手动保存 / 正常退出即清；写盘格式与 `write_scene` 同源 + 原子写；空闲停帧时靠 `request_repaint_after` 唤醒 | §二十四 |
 | 场景切换 | 只在**帧末**一处应用（`apply_pending_scene_load`）；脚本 `load_scene` 只登记请求（钩子期间场景正被可变借用）；装不上就**不动** + 一条 error 日志；只重置"与实体绑定"的状态（物理 / 粒子 / 音频 autoplay / UI 交互 / `started` / `states`），**日志缓冲与脚本全局变量不能清**；装载来源由宿主注入 `with_scene_loader`，没接是**可诊断的错误** | §二十五 |
 | 关卡顺序 | `build.scenes` 顺序即关卡索引（下标 **0 起**）；**未配置 = 空**（不退回 `[entry_scene]`，脚本 `scene_index()` 返回 nil）；`entry_scene` 仍是唯一启动来源，清单第一项不兼任；`--check` 里"缺场景"算问题（exit 2）、"未列入"只提示（exit 0）；构建前逐关试装，路径规则只有 `normalize_scene_relative`（core） | §二十六 |
+| 预制体实例化 | 装载 trait `SceneLoader` 在 **core**（脚本层要能命名它，runtime 只 `pub use` 转出）；`spawn_prefab` / `spawn_prefab_under` **立即生成**（返回的 ID 当帧可用）；位置是**设置不是叠加**（世界 / 局部两种，子节点相对位置原样保留）；每个新实体逐条推 `ScriptCommand::EntitySpawned`（运行时据此补刚体）；失败三种（没装载器 / 读不到 / 空预制体）各自一条日志 + 返回 `nil`，**不留半个实例** | §二十七 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |
