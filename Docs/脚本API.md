@@ -502,6 +502,9 @@ end
 |---|---|
 | `current_scene(ctx)` | 当前场景的**项目相对路径**（如 `"Scenes/Level2.ron"`；`""` = 宿主没告诉运行时） |
 | `load_scene(ctx, path)` | 请求切换到 `path`（项目相对路径）。**本帧末尾**才生效 |
+| `scene_count(ctx)` | 发布清单里的关卡数（`0` = 没配清单） |
+| `scene_index(ctx)` | 当前场景在清单里的下标（**0 起**；`nil` = 没配清单，或当前场景不在清单里） |
+| `load_scene_at(ctx, i)` | 切到清单里的第 `i` 关（**0 起**）。越界记一条 error，场景不动 |
 
 语义要点（这几条决定了它能不能用来做"菜单 → 关卡"）：
 
@@ -519,6 +522,32 @@ end
   `--headless` 会把这条错误计入 `logs.error` 并用退出码 2 报出来。
 - **运行期切换不写项目文件**：编辑器 Play 里切过去的场景在 Stop 时随
   `play_snapshot` 一起丢弃，磁盘上的场景文件一个字节都不动。
+
+### 关卡顺序：把"下一关"变成数据
+
+`project.ron` 的 `build.scenes` 是一份**有序**清单（`⚙ 项目设置 → 构建` 里上下移
+就能改），顺序即关卡索引。于是"进下一关"不需要在每张关卡的脚本里写死路径：
+
+```lua
+function update(ctx)
+    if reached_goal and key_pressed(ctx, "Confirm") then
+        local i = scene_index(ctx)          -- 当前是第几关（0 起）
+        if i then load_scene_at(ctx, i + 1) end   -- 下一关；越界会记 error
+    end
+end
+```
+
+几条必须知道的语义：
+
+- **下标 0 起**，与 `load_scene_at` 直接配对（`scene_index(ctx) + 1` 就是下一关）。
+  Lua 惯例是 1 起，这里故意不折 —— 折一次就要在每个调用点 `+1 / -1` 往返。
+- **未配置清单时 `scene_count` 是 0、`scene_index` 是 `nil`**，`load_scene_at` 任何
+  下标都算越界。单场景项目不要指望拿到 `0`。
+- **入口场景可以不在清单里**（比如入口是个"启动器"场景），此时它的
+  `scene_index` 也是 `nil`。`--check` 只提示不报错。
+- 顺序**不会自动推进**：它只是数据，"什么时候进下一关"永远由脚本决定。
+- 越界（比如最后一关 `i + 1`）记一条 **error** 日志、场景原地不动 —— 别让它
+  表现成"卡在关底不动"。
 
 菜单 → 关卡的最小写法：
 

@@ -1192,6 +1192,8 @@ projects/SampleScene/
     entry_scene: "Scenes/scene.ron",     // 相对项目根目录
     window: (title: "SampleScene", width: 1280, height: 720, resizable: true, vsync: true),
     content: (scenes_dir: "Scenes", models_dir: "Resources", …),
+    // 构建设置：版本号 + 有序关卡清单（顺序即关卡索引；空 = 未配置）
+    build: (version: "0.1.0", scenes: ["Scenes/scene.ron", "Scenes/Level2.ron"]),
 )
 ```
 

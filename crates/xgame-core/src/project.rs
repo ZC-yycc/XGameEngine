@@ -36,7 +36,7 @@
 //! **内存里永远是路径**（于是渲染 / 物理 / 音频等所有消费点都不用知道 GUID），
 //! 磁盘上永远是 GUID。
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ use crate::asset::{
     decode_prefab_references, decode_scene_references, encode_prefab_references,
     encode_scene_references, AssetDatabase, AssetGuid, AssetKind, ImportSettings,
 };
-use crate::config::{ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
+use crate::config::{BuildConfig, ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
 use crate::material::{MaterialAsset, MATERIAL_EXTENSION};
 use crate::prefab::{Prefab, PREFAB_EXTENSION};
 use crate::scene::Scene;
@@ -75,6 +75,59 @@ pub const AUTOSAVE_DIR: &str = ".autosave";
 /// 出问题时能一眼对上是哪个场景，不需要额外的映射表。
 pub fn autosave_relative(scene_relative: &str) -> String {
     format!("{AUTOSAVE_DIR}/{scene_relative}")
+}
+
+/// 两个场景路径是否指同一份文件（只忽略分隔符与首尾空白）。
+///
+/// **不分配**：`scene_index()` 可能被脚本每帧调用，稳态热路径上不该为了一次
+/// 比较去 `replace` 出一个新 `String`。也不做大小写折叠 —— Windows 上确实
+/// 大小写不敏感，但清单与运行时路径都由本引擎写出，真出现大小写差异属于
+/// 配置错误，应该暴露而不是被悄悄当成同一关。
+///
+/// 收在 core：运行时（`World::scene_index`）与脚本（`ctx.scene_index`）
+/// 必须用同一份规则，否则同一份清单在两边算出不同的关卡下标。
+pub fn same_scene_path(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().as_bytes(), b.trim().as_bytes());
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x == y || (*x == b'\\' && *y == b'/') || (*x == b'/' && *y == b'\\'))
+}
+
+/// 把用户输入的场景路径规范化，并挡掉会跑出项目外的写法。
+///
+/// **收在 core 而不是编辑器里**：这条规则现在有三个消费方 —— 编辑器（改清单 /
+/// 另存为新场景）、`--check`（校验发布清单）、构建器（打包前逐关装载）。
+/// 三处各抄一份的结果必然漂移，而漂移的后果是"检查通过、构建成功、运行时打不开"。
+///
+/// 规则：
+/// - 反斜杠转正斜杠（Windows 手改清单的高频写法）；
+/// - 拒绝绝对路径 / `..`（拼上项目根就能跳到任意位置）；
+/// - 必须 `.ron` 结尾且不是 `.prefab.ron`（预制体不是场景）。
+pub fn normalize_scene_relative(raw: &str) -> Result<String, String> {
+    let rel = raw.trim().replace('\\', "/");
+    if rel.is_empty() {
+        return Err("场景路径不能为空".into());
+    }
+    // Windows 盘符（`C:`）与 UNC 前缀在非 Windows 上不一定被 `Path` 认成绝对路径，
+    // 这里显式再挡一次；编辑器的主要平台是 Windows，不能靠平台差异放行。
+    if rel.starts_with('/') || rel.as_bytes().get(1) == Some(&b':') {
+        return Err(format!("场景路径必须是项目相对路径: {raw}"));
+    }
+
+    let path = Path::new(&rel);
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            _ => return Err(format!("场景路径不能包含 `..` 或绝对路径: {raw}")),
+        }
+    }
+    let normalized = parts.join("/");
+    if !normalized.ends_with(".ron") || normalized.ends_with(".prefab.ron") {
+        return Err(format!("场景文件必须以 .ron 结尾: {raw}"));
+    }
+    Ok(normalized)
 }
 
 /// 新建项目时写下的 `.gitignore`。
@@ -128,6 +181,12 @@ pub struct Project {
     /// 不是"这张地图"的属性。
     #[serde(default)]
     pub render: RenderConfig,
+    /// 构建 / 发布设置（版本号 + 有序关卡清单）。
+    ///
+    /// 同样是后加字段、同样 `#[serde(default)]`：老清单没有这一节，
+    /// 空清单的语义是"没配"，有效顺序退化成只有入口场景，行为与加这功能之前一致。
+    #[serde(default)]
+    pub build: BuildConfig,
 }
 
 fn default_format_version() -> u32 {
@@ -146,6 +205,32 @@ impl Project {
             ..Self::default()
         }
     }
+
+    /// 配置过的**关卡顺序**（项目相对路径，已规范化）。未配置返回空。
+    ///
+    /// 规则只有三条，但每条都有来由：
+    ///
+    /// 1. 逐项 `trim` + 反斜杠转正斜杠 —— 清单是手改的文本，Windows 路径习惯会漏进来；
+    ///    运行时与资产系统都只认正斜杠。
+    /// 2. 空串丢弃、重复项只留第一次出现 —— 重复会让 `scene_index()` 出现两个答案，
+    ///    而且 `load_scene_at` 指到哪一个都算"对"，这种歧义必须在入口处消掉。
+    /// 3. 清完之后为空就是**未配置**，返回空 —— 不退回 `[entry_scene]`。
+    ///
+    /// 第 3 条是刻意的：如果未配置时返回 `[entry]`，脚本的 `scene_index()` 会对
+    /// 单场景项目返回 `0`，作者会以为"这是第 0 关，可以 `load_scene_at(1)`"，
+    /// 然后在运行时撞越界错误。返回空则 `scene_index()` 是 `nil`，
+    /// 语义诚实：**没有关卡顺序，只能按路径切**。
+    pub fn scene_order(&self) -> Vec<String> {
+        let mut order: Vec<String> = Vec::new();
+        for raw in &self.build.scenes {
+            let path = raw.trim().replace('\\', "/");
+            if path.is_empty() || order.iter().any(|p| p == &path) {
+                continue;
+            }
+            order.push(path);
+        }
+        order
+    }
 }
 
 impl Default for Project {
@@ -158,6 +243,7 @@ impl Default for Project {
             content: ContentConfig::default(),
             runtime: RuntimeConfig::default(),
             render: RenderConfig::default(),
+            build: BuildConfig::default(),
         }
     }
 }
@@ -1933,5 +2019,91 @@ mod tests {
         assert_eq!(off, crate::config::ToneMapMode::Off);
         assert_eq!(ron::to_string(&aces).unwrap(), "Aces");
         assert_eq!(ron::to_string(&off).unwrap(), "Off");
+    }
+
+    // -- 发布清单（build 节）------------------------------------------------
+
+    /// 未配置清单 = 空顺序（**不**退回 `[entry_scene]`）。
+    ///
+    /// 这条是"单场景项目"的语义：老 `project.ron` 没有 `build` 节，反序列化后
+    /// `scenes` 为空 ⇒ 脚本 `scene_index()` 是 `nil`。若退回 `[entry]`，
+    /// 单场景项目会拿到 `0`，作者以为能 `load_scene_at(1)`，实际必然越界。
+    #[test]
+    fn scene_order_is_empty_when_unconfigured() {
+        let mut project = Project::new("Demo");
+        project.entry_scene = "Scenes/Main.ron".into();
+        assert!(project.build.scenes.is_empty(), "默认不写清单");
+        assert!(project.scene_order().is_empty());
+        assert!(!project.scene_order().contains(&"Scenes/Main.ron".to_string()));
+
+        // 只有空白项也算"没配"。
+        project.build.scenes = vec!["".into(), "   ".into()];
+        assert!(project.scene_order().is_empty());
+    }
+
+    /// 顺序即索引：规范化不能改变相对次序，重复项只留第一次出现。
+    #[test]
+    fn scene_order_normalizes_and_keeps_first_occurrence() {
+        let mut project = Project::new("Demo");
+        project.build.scenes = vec![
+            " Scenes\\Menu.ron ".into(),
+            "Scenes/Level1.ron".into(),
+            "Scenes/Menu.ron".into(),   // 重复（规范化后与第一项相同）
+            "".into(),                  // 空串
+            "Scenes/Level2.ron".into(),
+        ];
+        assert_eq!(
+            project.scene_order(),
+            vec![
+                "Scenes/Menu.ron".to_string(),
+                "Scenes/Level1.ron".to_string(),
+                "Scenes/Level2.ron".to_string(),
+            ]
+        );
+        assert!(project.scene_order().contains(&"Scenes/Level1.ron".to_string()));
+        assert!(!project.scene_order().contains(&"Scenes/Level9.ron".to_string()));
+    }
+
+    /// 清单是后加字段：旧清单（没有 `build` 节）必须能反序列化，
+    /// 且版本号有默认值（否则构建报告 / 启动日志里会出现空版本）。
+    #[test]
+    fn build_section_defaults_for_legacy_manifest() {
+        let legacy = r#"(
+            format_version: 1,
+            name: "Old",
+            entry_scene: "Scenes/scene.ron",
+        )"#;
+        let project: Project = ron::from_str(legacy).expect("旧清单必须能读");
+        assert_eq!(project.build.version, "0.1.0");
+        assert!(project.build.scenes.is_empty());
+        assert!(project.scene_order().is_empty(), "旧清单 = 没有关卡顺序");
+
+        // 序列化会写出 build 节（新项目 / 保存过的项目都带上默认值）。
+        let text = ron::to_string(&project).expect("序列化");
+        assert!(text.contains("build"), "build 节必须落盘: {text}");
+    }
+
+    /// 路径规则：越界 / 非场景文件一律拒绝（发布清单与编辑器共用同一份）。
+    #[test]
+    fn normalize_scene_relative_rejects_escapes() {
+        assert_eq!(
+            normalize_scene_relative("Scenes\\Level2.ron").unwrap(),
+            "Scenes/Level2.ron"
+        );
+        for bad in [
+            "",
+            "  ",
+            "/etc/passwd.ron",
+            "C:////Scenes////A.ron",
+            "../Outside.ron",
+            "Scenes/../../Escape.ron",
+            "Scenes/A.txt",
+            "Prefabs/Thing.prefab.ron",
+        ] {
+            assert!(
+                normalize_scene_relative(bad).is_err(),
+                "{bad:?} 不该被当成场景路径"
+            );
+        }
     }
 }

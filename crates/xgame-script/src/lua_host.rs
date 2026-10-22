@@ -405,6 +405,7 @@ impl LuaHost {
             commands: &mut self.commands,
             source: path,
             scene_name: frame.scene_name,
+            scene_order: frame.scene_order,
             entity,
             delta: frame.delta,
             time: frame.time,

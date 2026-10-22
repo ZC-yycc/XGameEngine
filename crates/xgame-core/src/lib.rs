@@ -66,15 +66,15 @@ pub mod ui;
 pub use check::{check_project, CheckReport};
 pub use color::Color;
 pub use config::{
-    BloomConfig, ContentConfig, EngineConfig, FxaaConfig, RenderConfig, RuntimeConfig, SkyConfig,
-    ToneMapMode, WindowConfig,
+    BloomConfig, BuildConfig, ContentConfig, EngineConfig, FxaaConfig, RenderConfig, RuntimeConfig,
+    SkyConfig, ToneMapMode, WindowConfig,
 };
 pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
 pub use scene::{Entity, Scene};
 pub use transform::Transform;
 pub use project::{
     AssetMigrationReport, Project, ProjectError, ProjectHandle, DEFAULT_ENTRY_SCENE,
-    PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION,
+    PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION, normalize_scene_relative, same_scene_path,
 };
 
 // -- 导出：新增基础设施

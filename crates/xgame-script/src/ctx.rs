@@ -38,7 +38,7 @@
 //! 在栈上构造，活到钩子调用返回为止。交给 Lua 的 [`crate::ScriptCtx`] 只是
 //! 它的**地址束**（见 `context.rs` 的安全论证），不延长任何借用。
 
-use xgame_core::{Entity, EntityId, PhysicsBody, PhysicsHandle, PlaySound, Scene};
+use xgame_core::{same_scene_path, Entity, EntityId, PhysicsBody, PhysicsHandle, PlaySound, Scene};
 use xgame_input::{Input, KeyCode, MouseButton};
 use xgame_math::glam::{EulerRot, Quat, Vec2, Vec3};
 use xgame_physics::{PhysicsRayHit, PhysicsWorld, RaycastFilter};
@@ -73,6 +73,8 @@ pub struct GameCtx<'a> {
     pub source: &'a str,
     /// 当前场景的项目相对路径（`""` = 宿主没告诉运行时）。
     pub scene_name: &'a str,
+    /// 发布清单里的关卡顺序（`build.scenes`）。空 = 没配 / 宿主没注入。
+    pub scene_order: &'a [String],
     /// 触发本次调用的实体（"self"）。[`EntityId::raw`] 为 `0` 表示没有实体上下文。
     pub entity: EntityId,
     /// 本帧真实帧间隔（秒）。
@@ -130,7 +132,6 @@ impl GameCtx<'_> {
     // -----------------------------------------------------------------------
     // 基础访问
     // -----------------------------------------------------------------------
-
     /// 触发本次调用的实体 ID（`raw() == 0` 表示没有实体上下文）。
     pub fn self_id(&self) -> EntityId {
         self.entity
@@ -179,6 +180,57 @@ impl GameCtx<'_> {
         self.push_command(ScriptCommand::LoadScene {
             path: path.to_owned(),
         });
+    }
+
+    // -- 关卡顺序（`project.ron` 的 `build.scenes`）------------------------
+
+    /// 关卡总数（`0` = 这次运行没有关卡顺序可用）。
+    ///
+    /// "没配清单"与"清单里没有当前场景"在作者眼里是同一件事 —— 都意味着
+    /// 不能靠序号推关卡，只能按路径 `load_scene()`。
+    pub fn scene_count(&self) -> usize {
+        self.scene_order.len()
+    }
+
+    /// 当前场景在关卡顺序里的下标（`None` = 不在清单里）。
+    ///
+    /// 比较时**两边都做路径规范化**：清单里可能写成 `Scenes\\Level1.ron`，
+    /// 而运行时记的是 `Scenes/Level1.ron`。不一致会让"同一关"变成两关，
+    /// 症状是 `scene_index()` 突然返回 nil（而不是报错），最难查。
+    pub fn scene_index(&self) -> Option<usize> {
+        self.scene_order
+            .iter()
+            .position(|path| same_scene_path(path, self.scene_name))
+    }
+
+    /// 第 `index` 关的项目相对路径（越界返回 `None`）。
+    pub fn scene_path_at(&self, index: usize) -> Option<&str> {
+        self.scene_order.get(index).map(String::as_str)
+    }
+
+    /// 切到关卡顺序里的第 `index` 关（0 起）。
+    ///
+    /// 越界记一条 **Error** 而不是静默 no-op：脚本算错索引（比如最后一关
+    /// `index + 1`）是常见 bug，静默会让它表现为"卡在关底不动"，而一行日志
+    /// 直接指出来。与 `load_scene` 一样只登记请求，帧末才真的换。
+    pub fn load_scene_at(&mut self, index: usize) {
+        match self.scene_path_at(index) {
+            Some(path) => {
+                let path = path.to_owned();
+                self.load_scene(&path);
+            }
+            None => {
+                let count = self.scene_count();
+                let msg = if count == 0 {
+                    format!(
+                        "load_scene_at({index}) 失败：这次运行没有关卡顺序（project.ron 的 build.scenes 为空或宿主没注入）"
+                    )
+                } else {
+                    format!("load_scene_at({index}) 越界：清单里只有 {count} 关（下标 0..{count}）")
+                };
+                self.error(msg);
+            }
+        }
     }
 
     /// 记一条 Info 日志（编辑器控制台 / 游戏日志）。
@@ -1349,6 +1401,7 @@ mod tests {
                 commands: &mut commands,
                 source: "MaterialProbe",
                 scene_name: "",
+                scene_order: &[],
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1395,6 +1448,7 @@ mod tests {
                 commands: &mut commands,
                 source: "MaterialProbe",
                 scene_name: "",
+                scene_order: &[],
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1432,6 +1486,7 @@ mod tests {
                 commands: &mut commands,
                 source: "TorchScript",
                 scene_name: "",
+                scene_order: &[],
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1468,6 +1523,7 @@ mod tests {
             commands: &mut commands,
             source: "TorchScript",
             scene_name: "",
+            scene_order: &[],
             entity: bare_id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1501,6 +1557,7 @@ mod tests {
             commands: &mut commands,
             source: "Spinner",
             scene_name: "",
+            scene_order: &[],
             entity: id,
             delta: 1.0 / 60.0,
             time: 0.0,
@@ -1540,6 +1597,7 @@ mod tests {
                 commands: &mut commands,
                 source: "Sfx",
                 scene_name: "",
+                scene_order: &[],
                 entity: id,
                 delta: 1.0 / 60.0,
                 time: 0.0,
@@ -1587,6 +1645,7 @@ mod tests {
             commands: &mut commands,
             source: "Sfx",
             scene_name: "",
+            scene_order: &[],
             entity: id,
             delta: 1.0 / 60.0,
             time: 0.0,

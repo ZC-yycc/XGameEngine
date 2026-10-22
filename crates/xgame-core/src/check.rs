@@ -79,6 +79,20 @@ pub struct CheckReport {
     pub invalid_metas: Vec<String>,
     /// 两个资产共用一个 GUID。
     pub guid_conflicts: Vec<String>,
+    /// 发布清单（`build.scenes`）的有效顺序，已规范化去重。
+    ///
+    /// 空清单不在这里体现：`scene_order()` 会退化成只有入口场景，那是"未配置"
+    /// 而不是"配了一个场景"。想区分"配没配"看清单原文是否为空。
+    pub build_scene_order: Vec<String>,
+    /// 清单里点名了、但盘上没有 / 读不出来的关卡（"路径 (原因)"）。
+    ///
+    /// **算问题**：发布会把这些关卡一起打进去，运行时切过去必然失败。
+    pub build_missing_scenes: Vec<String>,
+    /// `Scenes/` 下有、清单里没列的关卡（只提示，不算问题）。
+    ///
+    /// 未配置清单时不报告 —— 否则每个老项目都会刷一屏"你的关卡都没列入"，
+    /// 而它们本来就没打算配置发布清单。
+    pub build_unlisted_scenes: Vec<String>,
 }
 
 impl CheckReport {
@@ -98,6 +112,7 @@ impl CheckReport {
             || !self.orphan_metas.is_empty()
             || !self.invalid_metas.is_empty()
             || !self.guid_conflicts.is_empty()
+            || !self.build_missing_scenes.is_empty()
     }
 
     /// 问题总数。
@@ -116,6 +131,7 @@ impl CheckReport {
             + self.orphan_metas.len()
             + self.invalid_metas.len()
             + self.guid_conflicts.len()
+            + self.build_missing_scenes.len()
     }
 
     /// 人和机器都能读的摘要（标准输出用；纯 ASCII，避开控制台编码坑）。
@@ -134,9 +150,19 @@ impl CheckReport {
         );
         if !self.has_issues() {
             let _ = writeln!(out, "check: OK (all referenced assets exist)");
-            return out;
+        } else {
+            let _ = writeln!(out, "check: WARN {} issue(s)", self.issue_count());
         }
-        let _ = writeln!(out, "check: WARN {} issue(s)", self.issue_count());
+        // 发布清单：配置过才打这一行。未配置（老项目 / 单场景）时 `build_scene_order`
+        // 为空 —— 那时候打 `order=[Scenes/scene.ron]` 会让人以为项目"配了清单"。
+        if !self.build_scene_order.is_empty() {
+            let _ = writeln!(
+                out,
+                "check: build scenes={} order=[{}]",
+                self.build_scene_order.len(),
+                self.build_scene_order.join(", ")
+            );
+        }
         for m in &self.missing_models {
             let _ = writeln!(out, "  missing model:  {m}");
         }
@@ -179,6 +205,13 @@ impl CheckReport {
         for c in &self.guid_conflicts {
             let _ = writeln!(out, "  guid conflict:  {c}");
         }
+        for s in &self.build_missing_scenes {
+            let _ = writeln!(out, "  build scene missing: {s}");
+        }
+        // 提示（不影响退出码）：写了场景但没列入发布清单。
+        for s in &self.build_unlisted_scenes {
+            let _ = writeln!(out, "  not in build list: {s}");
+        }
         out
     }
 }
@@ -198,12 +231,68 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
 
     let mut report = CheckReport::default();
     let mut scenes = vec![(entry.clone(), entry_scene)];
+    // 已经装载过的场景键（正斜杠）。清单里的关卡未必在 `Scenes/` 下（比如
+    // `Levels/L1.ron`），所以两个来源都要装载，靠这份集合去重 —— 否则同一张
+    // 关卡会被算两遍实体、引用问题也会报两次。
+    let mut loaded: Vec<String> = vec![entry_key.clone()];
+
+    // -- 发布清单（`build.scenes`）----------------------------------------
+    // 清单 = "要发布的关卡"，顺序 = 关卡索引。三件事：
+    // 1) 逐项规范化（越界 / 非 `.ron` 算问题，与编辑器共用同一份规则）；
+    // 2) 把清单里的关卡装载进来（可能在 `Scenes/` 之外，否则永远不被检查）；
+    // 3) 报告"盘上有、清单没列"的场景 —— 只提示，不改退出码。
+    let configured: Vec<String> = project
+        .manifest()
+        .build
+        .scenes
+        .iter()
+        .map(|raw| raw.trim().replace('\\', "/"))
+        .filter(|path| !path.is_empty())
+        .collect();
+    if !configured.is_empty() {
+        let mut order: Vec<String> = Vec::new();
+        for raw in &configured {
+            match crate::project::normalize_scene_relative(raw) {
+                Ok(relative) => {
+                    if !order.contains(&relative) {
+                        order.push(relative);
+                    }
+                }
+                Err(e) => report.build_missing_scenes.push(format!("{raw} ({e})")),
+            }
+        }
+        for relative in &order {
+            if loaded.iter().any(|key| key == relative) {
+                continue;
+            }
+            match project.load_scene(relative) {
+                Ok(scene) => {
+                    loaded.push(relative.clone());
+                    scenes.push((relative.clone(), scene));
+                }
+                Err(e) => report
+                    .build_missing_scenes
+                    .push(format!("{relative} ({e})")),
+            }
+        }
+        for relative in project.list_scenes() {
+            if !order.contains(&relative) {
+                report.build_unlisted_scenes.push(relative);
+            }
+        }
+        report.build_scene_order = order;
+    }
+
     for relative in project.list_scenes() {
-        if relative == entry || relative == entry_key {
+        let key = relative.replace('\\', "/");
+        if loaded.iter().any(|seen| seen == &key) {
             continue;
         }
         match project.load_scene(&relative) {
-            Ok(scene) => scenes.push((relative, scene)),
+            Ok(scene) => {
+                loaded.push(key);
+                scenes.push((relative, scene));
+            }
             // 单张关卡坏掉不阻断检查：报告里点名，其他场景照常查完。
             Err(e) => report.invalid_scenes.push(format!("{relative} ({e})")),
         }
@@ -637,6 +726,137 @@ mod tests {
         let report = check_project(project.root()).unwrap();
         assert_eq!(report.guid_conflicts.len(), 1, "{}", report.render());
         assert!(report.render().contains("guid conflict"));
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    // -- 发布清单（build.scenes）------------------------------------------
+
+    /// 复制入口场景到另一个路径（内容一样，场景名不同）。
+    fn add_level(project: &ProjectHandle, relative: &str) {
+        let mut scene = project.load_entry_scene().expect("入口场景");
+        scene.name = relative.to_string();
+        project.write_scene(relative, &scene).expect("写场景");
+    }
+
+    /// 清单里的关卡要**被装载**：哪怕它不在 `Scenes/` 下（`Levels/` 这种布局），
+    /// 否则它的悬空引用永远查不出来，发布会带着坏引用出门。
+    /// 顺序必须原样保留，重复项只留一次（否则 `scene_index()` 有两个答案）。
+    #[test]
+    fn build_list_is_loaded_and_ordered() {
+        let mut project = temp_project("build_ok");
+        add_level(&project, "Scenes/Level2.ron");
+        add_level(&project, "Levels/L3.ron");
+        let entry = project.manifest().entry_scene.clone();
+        project.manifest_mut().build.scenes = vec![
+            entry.clone(),
+            "Scenes\\Level2.ron".into(), // 反斜杠 + 重复（规范化后与下一项相同）
+            "Scenes/Level2.ron".into(),
+            "Levels/L3.ron".into(),
+        ];
+        project.save().unwrap();
+
+        let report = check_project(project.root()).unwrap();
+        assert!(!report.has_issues(), "{}", report.render());
+        assert_eq!(
+            report.build_scene_order,
+            vec![
+                entry.clone(),
+                "Scenes/Level2.ron".to_string(),
+                "Levels/L3.ron".to_string(),
+            ],
+            "顺序保留、重复去掉、反斜杠规范化"
+        );
+        assert_eq!(report.scenes, 3, "入口 + Level2 + Levels/L3 都要装载并检查");
+        assert!(report.build_unlisted_scenes.is_empty(), "全部列入了");
+        let text = report.render();
+        assert!(text.contains("check: build scenes=3"), "{text}");
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 清单指向不存在的关卡 = **问题**（退出码 2）：发布出去切过去必然失败。
+    /// 路径越界同样算问题，而且原因要写清（"必须是项目相对路径"）。
+    #[test]
+    fn build_list_missing_or_illegal_scene_is_an_issue() {
+        let mut project = temp_project("build_bad");
+        let entry = project.manifest().entry_scene.clone();
+        project.manifest_mut().build.scenes = vec![
+            entry,
+            "Scenes/Ghost.ron".into(),
+            "../Outside.ron".into(),
+        ];
+        project.save().unwrap();
+
+        let report = check_project(project.root()).unwrap();
+        assert!(report.has_issues(), "{}", report.render());
+        assert_eq!(report.build_missing_scenes.len(), 2, "{}", report.render());
+        // 两类错误分开落在同一份清单里：规范化失败的（越界）先入，装载失败的（缺文件）后入。
+        // 断言只认内容不认次序 —— 换句更难听的话：别让测试钉住"谁先被检查"。
+        assert!(
+            report
+                .build_missing_scenes
+                .iter()
+                .any(|m| m.contains("Scenes/Ghost.ron")),
+            "缺文件要报路径: {:?}",
+            report.build_missing_scenes
+        );
+        assert!(
+            report
+                .build_missing_scenes
+                .iter()
+                .any(|m| m.contains("项目相对路径") || m.contains("`..`")),
+            "越界要报原因: {:?}",
+            report.build_missing_scenes
+        );
+        assert!(report.render().contains("build scene missing"));
+        // 顺序 = **语法合法**的清单项：越界项（`../`）进不来，缺文件的进得来。
+        // 缺文件不该被悄悄"从顺序里剔掉" —— 那会让后面的关卡索引整体前移，
+        // 与清单对不上（Author 看到的顺序和运行时拿到的顺序必须是同一份）。
+        assert_eq!(
+            report.build_scene_order,
+            vec![
+                project.manifest().entry_scene.clone(),
+                "Scenes/Ghost.ron".to_string(),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// "盘上有、清单没列"只是**提示**：Unity 的 Build Settings 也不会因为你多写了
+    /// 一张场景就判构建失败。所以它不能把 `has_issues()` 弄成 true —— 否则
+    /// 每个配了清单的项目都会在 CI 里红。
+    #[test]
+    fn unlisted_scene_is_a_note_not_an_issue() {
+        let mut project = temp_project("build_unlisted");
+        add_level(&project, "Scenes/Level2.ron");
+        let entry = project.manifest().entry_scene.clone();
+        project.manifest_mut().build.scenes = vec![entry];
+        project.save().unwrap();
+
+        let report = check_project(project.root()).unwrap();
+        assert!(!report.has_issues(), "{}", report.render());
+        assert_eq!(
+            report.build_unlisted_scenes,
+            vec!["Scenes/Level2.ron".to_string()]
+        );
+        assert!(report.render().contains("not in build list"));
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 未配置清单：不提示、不打 build 行 —— 老项目不该被新功能刷屏。
+    #[test]
+    fn empty_build_list_stays_quiet() {
+        let project = temp_project("build_empty");
+        add_level(&project, "Scenes/Level2.ron");
+        let report = check_project(project.root()).unwrap();
+        assert!(!report.has_issues(), "{}", report.render());
+        assert!(report.build_scene_order.is_empty());
+        assert!(report.build_unlisted_scenes.is_empty());
+        assert!(!report.render().contains("check: build"));
+        assert_eq!(report.scenes, 2, "未配置清单也照常检查所有场景");
 
         let _ = std::fs::remove_dir_all(project.root());
     }

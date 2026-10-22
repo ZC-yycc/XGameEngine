@@ -39,6 +39,7 @@
 //! # 无头工具（不开窗口，给 CI / AI 智能体用）
 //! cargo run -p xgame-editor -- --check projects/SampleScene
 //! cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
+//! cargo run -p xgame-editor -- --build projects/SampleScene
 //!
 //! # 界面截图（开窗口跑几帧，把上屏像素存成 PNG 后退出；调界面用）
 //! cargo run -p xgame-editor -- projects/SampleScene --ui-shot shot.png
@@ -1324,6 +1325,7 @@ fn main() -> Result<(), eframe::Error> {
     //   --check：0 = 干净 / 1 = 加载失败 / 2 = 能加载但有悬空引用
     //   --headless：0 = 干净跑完 / 1 = 加载失败或参数错误 / 2 = 跑完但有脚本
     //               error 日志或非有限变换
+    //   --build：0 = 打包成功 / 1 = 失败（入口缺失 / 发布清单有装不起来的关卡 / 找不到播放器）
     // 详见 xgame-core `check` 模块头与 `headless` 模块头（验证 / 运行逻辑在
     // 那里，这里只管分发与退出码）。
     {
@@ -1372,6 +1374,37 @@ fn main() -> Result<(), eframe::Error> {
                     std::process::exit(0);
                 }
                 std::process::exit(headless::cli(rest));
+            }
+            // 构建：与工具栏 Build 按钮**同一个函数**（`builder::build`），
+            // 只是不起窗口。给 CI / 智能体一条"打完包再说"的路 —— 不然
+            // 构建结果只能靠人点按钮看 Console。
+            Some("--build") => {
+                let path = args
+                    .get(1)
+                    .map(String::as_str)
+                    .unwrap_or("projects/SampleScene");
+                let code = match xgame_core::ProjectHandle::open(Path::new(path)) {
+                    Ok(project) => match crate::builder::build(&project) {
+                        Ok(report) => {
+                            println!("{}", report.summary());
+                            for warning in &report.warnings {
+                                println!("  warn: {warning}");
+                            }
+                            println!("scene_count: {}", report.scene_count);
+                            0
+                        }
+                        Err(e) => {
+                            // 多行错误（发布清单里一次列全失败项）原样打到 stderr。
+                            eprintln!("build FAILED: {e}");
+                            1
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("build FAILED: {e}");
+                        1
+                    }
+                };
+                std::process::exit(code);
             }
             _ => {}
         }

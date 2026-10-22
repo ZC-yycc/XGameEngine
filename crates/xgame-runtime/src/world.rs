@@ -54,7 +54,8 @@ use std::path::PathBuf;
 
 use xgame_audio::AudioEngine;
 use xgame_core::{
-    AudioPort, AudioStats, EntityId, GameClock, Inspect, PhysicsHandle, PlaySound, Scene, Transform,
+    same_scene_path, AudioPort, AudioStats, EntityId, GameClock, Inspect, PhysicsHandle, PlaySound,
+    Scene, Transform,
 };
 use xgame_input::{Input, InputMap, MouseButton};
 use xgame_math::glam::{Mat4, Vec2, Vec3};
@@ -207,6 +208,12 @@ pub struct World {
     pending_scene_load: Option<String>,
     /// 累计成功切换次数（无头报告 / 诊断读数）。
     scene_loads: u32,
+    /// 发布清单里的关卡顺序（`project.ron` → `build.scenes`，宿主注入）。
+    ///
+    /// **顺序即关卡索引**：脚本 `scene_index()` / `load_scene_at(i)` 都读它。
+    /// 空 = 宿主没配清单（单场景项目 / 老项目）—— 那时脚本只能按路径切换，
+    /// `scene_count()` 返回 0，与"清单里没有当前场景"是同一个可观察结果。
+    scene_order: Vec<String>,
 }
 
 /// 单个实体已实例化的组件集合。
@@ -263,6 +270,7 @@ impl World {
             current_scene: None,
             pending_scene_load: None,
             scene_loads: 0,
+            scene_order: Vec::new(),
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
         world.sync_bodies();
@@ -326,6 +334,41 @@ impl World {
     /// 同上，但**运行中**可改（编辑器 Play 在装配完之后才知道当前场景路径）。
     pub fn set_current_scene(&mut self, relative: impl Into<String>) {
         self.current_scene = Some(relative.into());
+    }
+
+    /// 注入**关卡顺序**（宿主从清单的 `build.scenes` 取，`Project::scene_order()`）。
+    ///
+    /// 顺序即关卡索引：脚本 `scene_index()` 查当前是第几关、`load_scene_at(i)`
+    /// 按序号切。不注入时脚本仍能用 `load_scene("Scenes/X.ron")` ——
+    /// 按序号推关卡是"有了清单之后更省事"的那层，不是必需品。
+    pub fn with_scene_order(mut self, order: Vec<String>) -> Self {
+        self.scene_order = order;
+        self
+    }
+
+    /// 关卡顺序（诊断用；脚本侧看到的是同一份）。
+    pub fn scene_order(&self) -> &[String] {
+        &self.scene_order
+    }
+
+    /// 当前场景在关卡顺序里的下标（`None` = 不在清单里 / 没配清单）。
+    pub fn scene_index(&self) -> Option<usize> {
+        let current = self.current_scene.as_deref()?;
+        self.scene_order
+            .iter()
+            .position(|path| same_scene_path(path, current))
+    }
+
+    /// 切到关卡顺序里的第 `index` 关（宿主 / 测试入口；脚本走 `load_scene_at`）。
+    pub fn load_scene_at(&mut self, index: usize) -> Result<(), String> {
+        let Some(path) = self.scene_order.get(index).cloned() else {
+            return Err(format!(
+                "load_scene_at({index}) 越界：清单里只有 {} 关（下标 0..{}）",
+                self.scene_order.len(),
+                self.scene_order.len()
+            ));
+        };
+        self.load_scene(&path)
     }
 
     /// 设置 3D 监听者（宿主每帧调用：编辑器 / 游戏相机就是玩家的耳朵）。
@@ -727,6 +770,7 @@ impl World {
             scripts,
             audio_port,
             current_scene,
+            scene_order,
             ..
         } = self;
 
@@ -734,7 +778,8 @@ impl World {
             .with_input(input)
             .with_physics(physics)
             .with_audio(audio_port)
-            .with_scene_name(current_scene.as_deref().unwrap_or(""));
+            .with_scene_name(current_scene.as_deref().unwrap_or(""))
+            .with_scene_order(scene_order.as_slice());
 
         // 组件轨与脚本轨：共用 `scripts` 那一对日志 / 命令缓冲。
         match phase {
@@ -780,6 +825,7 @@ impl World {
             audio_port,
             behavior_instances,
             current_scene,
+            scene_order,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
@@ -816,6 +862,7 @@ impl World {
                     commands: &mut *commands,
                     source: instance.name,
                     scene_name: current_scene.as_deref().unwrap_or(""),
+                    scene_order: scene_order.as_slice(),
                     entity: id,
                     delta,
                     time,
@@ -888,6 +935,7 @@ impl World {
             scripts,
             audio_port,
             current_scene,
+            scene_order,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
@@ -901,6 +949,7 @@ impl World {
                 commands: &mut *commands,
                 source: instance.name,
                 scene_name: current_scene.as_deref().unwrap_or(""),
+                scene_order: scene_order.as_slice(),
                 entity: id,
                 delta,
                 time,
@@ -1306,6 +1355,7 @@ impl World {
                 audio_port,
                 behavior_instances,
                 current_scene,
+                scene_order,
                 ..
             } = self;
             let (logs, commands) = scripts.buffers_mut();
@@ -1320,6 +1370,7 @@ impl World {
                         commands: &mut *commands,
                         source: instance.name,
                         scene_name: current_scene.as_deref().unwrap_or(""),
+                        scene_order: scene_order.as_slice(),
                         entity,
                         delta,
                         time,
@@ -2811,6 +2862,114 @@ mod tests {
             "切回后 start 必须重新跑（started 标记按实体 id 存，不清就会永远静默），实际 {second:?}"
         );
         assert_eq!(world.scene_loads(), 2);
+    }
+
+    // -- 关卡顺序（build.scenes）--------------------------------------------
+
+    /// 顺序即索引：脚本用 `scene_index()` 取当前关、`load_scene_at(i + 1)` 进下一关 ——
+    /// 这是"关卡编排变成数据"的最小闭环，作者不用把下一关的路径写死在脚本里。
+    #[test]
+    fn script_advances_through_build_scene_order() {
+        let project = temp_scene_project("order", false);
+        // 覆盖 A 的脚本：只在第 0 关往下推一关，到了第 1 关就停。
+        std::fs::write(
+            project.root().join("Scripts/switch.lua"),
+            r#"
+            function update(ctx)
+                log(ctx, "idx:" .. tostring(scene_index(ctx)) .. "/" .. scene_count(ctx))
+                if scene_index(ctx) == 0 then
+                    load_scene_at(ctx, 1)
+                end
+            end
+            "#,
+        )
+        .unwrap();
+
+        let order = vec!["Scenes/A.ron".to_string(), "Scenes/B.ron".to_string()];
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron")
+            .with_scene_order(order);
+
+        assert_eq!(world.scene_index(), Some(0), "起始场景是第 0 关");
+
+        world.update(1.0 / 60.0);
+        let logs: Vec<String> = world.take_logs().into_iter().map(|l| l.message).collect();
+        assert_eq!(world.current_scene(), Some("Scenes/B.ron"), "帧末应当已经切过去");
+        assert_eq!(world.scene_index(), Some(1));
+        assert_eq!(world.scene_loads(), 1);
+        assert!(
+            logs.iter().any(|m| m == "idx:0/2"),
+            "脚本应当看到 0/2，实际 {logs:?}"
+        );
+
+        // 第二帧：B 里没有 switch.lua，不再请求切换 —— 顺序本身不该"自动推进"。
+        world.update(1.0 / 60.0);
+        assert_eq!(world.scene_loads(), 1, "顺序只是数据，推进由脚本决定");
+    }
+
+    /// 越界不静默：字节码没错、但关卡算错是常见 bug，必须留一条 Error。
+    /// 而且要**原地不动** —— 关卡不存在时把玩家丢进空场景比重启还糟。
+    #[test]
+    fn load_scene_at_out_of_range_is_an_error() {
+        let project = temp_scene_project("order_bad", false);
+        std::fs::write(
+            project.root().join("Scripts/switch.lua"),
+            r#"
+            function update(ctx)
+                load_scene_at(ctx, 9)
+            end
+            "#,
+        )
+        .unwrap();
+
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron")
+            .with_scene_order(vec!["Scenes/A.ron".to_string()]);
+
+        world.update(1.0 / 60.0);
+        let logs = world.take_logs();
+        let hit = logs
+            .iter()
+            .find(|log| log.level == crate::LogLevel::Error)
+            .expect("越界应当有一条错误日志");
+        assert!(hit.message.contains("越界"), "实际：{}", hit.message);
+        assert_eq!(world.current_scene(), Some("Scenes/A.ron"), "场景必须原地不动");
+        assert_eq!(world.scene_loads(), 0);
+    }
+
+    /// 没配清单（`scene_order` 为空）：`scene_index()` 是 `None`，不是 0。
+    /// 返回 0 会让"第 0 关"和"没配清单"混成同一个值，脚本无法区分。
+    #[test]
+    fn scene_index_is_none_without_order() {
+        let mut scene = Scene::new("solo");
+        scene.add_entity(Entity::new("only"));
+        let world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_current_scene("Scenes/Only.ron");
+
+        assert_eq!(world.scene_index(), None);
+        assert!(world.scene_order().is_empty());
+    }
+
+    /// 宿主 / 测试入口也能按序号切（不进脚本），且失败时不换场景。
+    #[test]
+    fn world_load_scene_at_uses_order() {
+        let project = temp_scene_project("order_host", false);
+        let scene = project.load_scene("Scenes/A.ron").expect("读取 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron")
+            .with_scene_order(vec!["Scenes/A.ron".to_string(), "Scenes/B.ron".to_string()]);
+
+        world.load_scene_at(1).expect("第 1 关应当能装载");
+        assert_eq!(world.current_scene(), Some("Scenes/B.ron"));
+
+        let err = world.load_scene_at(2).expect_err("越界必须报错");
+        assert!(err.contains("越界"), "实际：{err}");
+        assert_eq!(world.current_scene(), Some("Scenes/B.ron"), "失败的切换不动场景");
     }
 }
 

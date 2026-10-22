@@ -51,6 +51,10 @@ pub struct BuildReport {
     pub asset_count: usize,
     /// 实际打包的目录（相对项目根），用于让用户看清「都带了什么」。
     pub packed_dirs: Vec<String>,
+    /// 发布清单里的关卡数（`build.scenes`；未配置清单 = 0）。
+    ///
+    /// 报告的用途：确认"我配了 3 关，打出来的包里就是 3 关"。
+    pub scene_count: usize,
     /// 构建过程中的警告（不致命，但**必须让人看见**）。
     ///
     /// 走报告而不是 `log::warn!`：那条路只到 stderr（终端），而打包按钮是在
@@ -63,9 +67,14 @@ impl BuildReport {
     /// 供控制台显示的一行摘要。
     pub fn summary(&self) -> String {
         format!(
-            "构建完成 → {}  （{} 个资产文件{}）",
+            "构建完成 → {}  （{} 个资产文件{}{}）",
             self.output_dir.display(),
             self.asset_count,
+            if self.scene_count == 0 {
+                String::new()
+            } else {
+                format!("，{} 关", self.scene_count)
+            },
             if self.packed_dirs.is_empty() {
                 String::new()
             } else {
@@ -84,6 +93,10 @@ pub enum BuildError {
     PlayerNotFound { searched: Vec<PathBuf> },
     /// 项目清单里写的入口场景在磁盘上不存在。
     EntrySceneMissing(PathBuf),
+    /// 发布清单（`build.scenes`）里有装载不起来的关卡。
+    ///
+    /// 收**全部**失败项而不是遇到第一个就退：作者一次改三处路径、只想跑一次构建。
+    SceneUnloadable { scenes: Vec<String> },
     /// 文件操作失败。
     Io {
         path: PathBuf,
@@ -109,6 +122,20 @@ impl fmt::Display for BuildError {
             }
             Self::EntrySceneMissing(path) => {
                 write!(f, "入口场景不存在: {}", path.display())
+            }
+            Self::SceneUnloadable { scenes } => {
+                writeln!(
+                    f,
+                    "发布清单里有 {} 关装载不起来（构建已中止，没有产出半成品）:",
+                    scenes.len()
+                )?;
+                for scene in scenes {
+                    writeln!(f, "  - {scene}")?;
+                }
+                write!(
+                    f,
+                    "改 `project.ron` 的 `build.scenes`，或用 ⚙ 项目设置里的场景顺序修掉"
+                )
             }
             Self::Io { path, source } => {
                 write!(f, "文件操作失败 ({}): {source}", path.display())
@@ -145,6 +172,31 @@ pub fn build(project: &ProjectHandle) -> Result<BuildReport, BuildError> {
     let entry_scene = project.entry_scene_path();
     if !entry_scene.is_file() {
         return Err(BuildError::EntrySceneMissing(entry_scene));
+    }
+
+    // 发布清单：逐关**试装**一遍再动手。
+    //
+    // 为什么值得多读一遍盘：清单指向的关卡少一个文件，构建本身不会报错（它只是
+    // 复制目录），玩家却会在切关卡那一刻撞上黑屏。读一遍 RON 是毫秒级的事，
+    // 换掉"发布之后才发现"的返工。失败项一次全列出来 —— 作者往往一次改几处。
+    let order = project.manifest().scene_order();
+    let mut unloadable: Vec<String> = Vec::new();
+    for raw in &order {
+        // 语法先过一遍：`../Outside.ron` 这种在磁盘上**可能真的存在**，
+        // 直接 `load_scene` 会成功，然后被打包进一个指到项目外的路径。
+        match xgame_core::project::normalize_scene_relative(raw) {
+            Err(e) => unloadable.push(format!("{raw} ({e})")),
+            Ok(relative) => {
+                if let Err(e) = project.load_scene(&relative) {
+                    unloadable.push(format!("{relative} ({e})"));
+                }
+            }
+        }
+    }
+    if !unloadable.is_empty() {
+        return Err(BuildError::SceneUnloadable {
+            scenes: unloadable,
+        });
     }
 
     let player = locate_player()?;
@@ -193,6 +245,7 @@ pub fn build(project: &ProjectHandle) -> Result<BuildReport, BuildError> {
         executable,
         asset_count,
         packed_dirs,
+        scene_count: order.len(),
         warnings,
     })
 }

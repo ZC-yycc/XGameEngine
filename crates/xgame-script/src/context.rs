@@ -199,6 +199,12 @@ pub struct FrameCtx<'a> {
     /// 由运行时填：只有它知道这一帧跑的是哪份场景文件（场景可以在运行中被
     /// 脚本换掉）。脚本侧读它是为了做"已经在 A 场景里就别再加载 A"这类判断。
     pub scene_name: &'a str,
+    /// 发布清单里的**关卡顺序**（`project.ron` 的 `build.scenes`，已规范化）。
+    ///
+    /// 空切片 = 宿主没配清单 / 没告诉运行时。脚本侧表现为 `scene_count()` 返回 0、
+    /// `scene_index()` 返回 `nil` —— 与"清单里没有当前场景"是同一个可观察结果，
+    /// 因为两者对作者的意义一样：这次运行没有关卡顺序可用。
+    pub scene_order: &'a [String],
     /// 本帧真实帧间隔（秒）。
     pub delta: f32,
     /// 游戏已运行的总时长（秒）。
@@ -213,6 +219,7 @@ impl<'a> FrameCtx<'a> {
             physics: None,
             audio: None,
             scene_name: "",
+            scene_order: &[],
             delta,
             time,
         }
@@ -221,6 +228,12 @@ impl<'a> FrameCtx<'a> {
     /// 告诉上下文"这一帧跑的是哪份场景"（运行时填，见 [`FrameCtx::scene_name`]）。
     pub fn with_scene_name(mut self, name: &'a str) -> Self {
         self.scene_name = name;
+        self
+    }
+
+    /// 告诉上下文"这次运行的关卡顺序"（运行时从 `build.scenes` 注入）。
+    pub fn with_scene_order(mut self, order: &'a [String]) -> Self {
+        self.scene_order = order;
         self
     }
 

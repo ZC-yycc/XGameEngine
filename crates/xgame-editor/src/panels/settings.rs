@@ -15,8 +15,16 @@
 //! 数据化的另一层意义是给 **AI 智能体**用：能被程序读写校验的配置，
 //! 才能被智能体批量调参与自动验证，而不是"打开 GUI 拖滑块"。
 
-use crate::panels::theme;
+use crate::panels::{icons, theme};
 use crate::state::EditorState;
+
+/// 关卡顺序列表里的行内动作（收集完再改 Vec，避免边迭代边改）。
+#[derive(Clone, Copy)]
+enum RowAction {
+    Up,
+    Down,
+    Remove,
+}
 
 /// 设置窗口里的单行文本字段：**撑满网格剩下的宽度**。
 ///
@@ -40,6 +48,10 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     if state.settings_draft.is_none() {
         state.settings_draft = Some(state.project.manifest().clone());
     }
+
+    // 发布清单的"可添加项"= 盘上所有场景。只在窗口开着时扫一次目录
+    // （文件数是个位数），换来"刚在 Scenes 菜单里新建的场景立刻可选"。
+    let all_scenes = state.project.list_scenes();
 
     let mut open = state.settings_open;
     let mut apply = false;
@@ -83,6 +95,95 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         text_field(ui, &mut draft.entry_scene);
                         ui.end_row();
                     });
+
+                ui.add_space(10.0);
+
+                // ── 构建 ──
+                //
+                // 顺序即关卡索引：脚本 `scene_index()` / `load_scene_at(i)` 读的就是
+                // 这份清单。用列表而不是一段逗号分隔的文本框，是因为"顺序"本身
+                // 是这份数据的语义 —— 让用户手打顺序等于把 `index + 1` 的 bug
+                // 挪到配置里。
+                theme::section_bar(ui, "构建（版本 / 场景顺序）");
+                egui::Grid::new("set_build")
+                    .num_columns(2)
+                    .spacing([10.0, 5.0])
+                    .min_col_width(88.0)
+                    .show(ui, |ui| {
+                        ui.label("版本号")
+                            .on_hover_text("发布版本，只用于展示（独立游戏启动日志 / 构建报告）");
+                        text_field(ui, &mut draft.build.version);
+                        ui.end_row();
+                    });
+
+                ui.add_space(4.0);
+                ui.label("关卡顺序")
+                    .on_hover_text("顺序即关卡索引：脚本 scene_index() 取当前关、load_scene_at(i) 切关");
+                if draft.build.scenes.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "未配置：运行时不提供关卡顺序，脚本只能按路径 load_scene()。",
+                        )
+                        .color(theme::colors::TEXT_DIM),
+                    );
+                }
+
+                // 先收集动作再改列表：`iter()` 期间不能 `&mut` 同一个 Vec。
+                let mut action: Option<(usize, RowAction)> = None;
+                for (index, path) in draft.build.scenes.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let up = ui
+                            .add_enabled(index > 0, egui::Button::new("上移"))
+                            .on_hover_text("往前一关（索引 -1）");
+                        if up.clicked() {
+                            action = Some((index, RowAction::Up));
+                        }
+                        let down = ui
+                            .add_enabled(
+                                index + 1 < draft.build.scenes.len(),
+                                egui::Button::new("下移"),
+                            )
+                            .on_hover_text("往后一关（索引 +1）");
+                        if down.clicked() {
+                            action = Some((index, RowAction::Down));
+                        }
+                        ui.label(format!("{index}. {path}"));
+                        if icons::close_button(ui, "从发布清单里移除（不删文件）") {
+                            action = Some((index, RowAction::Remove));
+                        }
+                    });
+                }
+                match action {
+                    Some((index, RowAction::Up)) => draft.build.scenes.swap(index, index - 1),
+                    Some((index, RowAction::Down)) => draft.build.scenes.swap(index, index + 1),
+                    Some((index, RowAction::Remove)) => {
+                        draft.build.scenes.remove(index);
+                    }
+                    None => {}
+                }
+
+                // 添加：只列磁盘上还没进清单的场景（重复项在 Apply 时还会再挡一次）。
+                let available: Vec<String> = all_scenes
+                    .iter()
+                    .filter(|scene| !draft.build.scenes.iter().any(|listed| listed == *scene))
+                    .cloned()
+                    .collect();
+                if available.is_empty() {
+                    ui.label(
+                        egui::RichText::new("（所有场景都已列入）")
+                            .color(theme::colors::TEXT_DIM),
+                    );
+                } else {
+                    egui::ComboBox::from_id_salt("set_build_add")
+                        .selected_text("添加场景…")
+                        .show_ui(ui, |ui| {
+                            for scene in &available {
+                                if ui.selectable_label(false, scene).clicked() {
+                                    draft.build.scenes.push(scene.clone());
+                                }
+                            }
+                        });
+                }
 
                 ui.add_space(10.0);
 
@@ -318,6 +419,8 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         );
                         ui.end_row();
                     });
+
+                ui.add_space(10.0);
 
                 ui.add_space(10.0);
 

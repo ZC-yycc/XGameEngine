@@ -658,7 +658,8 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         .with_input_map(input_map)
         .with_behavior_registry(behaviors)
         .with_scene_loader(project.clone())
-        .with_current_scene(entry_scene);
+        .with_current_scene(entry_scene)
+        .with_scene_order(project.manifest().scene_order());
 
     let setup_ms = millis(setup_start.elapsed());
 

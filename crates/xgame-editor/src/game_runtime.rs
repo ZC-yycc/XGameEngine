@@ -65,7 +65,8 @@ impl GameRuntime {
             .with_input_map(input_map)
             .with_behavior_registry(behaviors)
             .with_audio_engine(xgame_runtime::AudioEngine::open(project_root))
-            .with_scene_loader(project.clone());
+            .with_scene_loader(project.clone())
+            .with_scene_order(project.manifest().scene_order());
         Self {
             world,
             report: FrameReport::default(),

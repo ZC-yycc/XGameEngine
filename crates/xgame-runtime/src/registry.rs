@@ -199,6 +199,7 @@ mod tests {
             commands: &mut commands,
             source: "test",
             scene_name: "",
+            scene_order: &[],
             entity: EntityId::from_raw(0),
             delta: 0.016,
             time: 0.0,

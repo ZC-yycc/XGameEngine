@@ -4142,3 +4142,108 @@ Stop 时补一句"Play 期间场景切到了 X"，否则用户会以为切过去
 - **没给样例项目加第二关**：`projects/SampleScene` 被大量测试与截图钉着，
   往入口场景塞实体 / 加场景会牵动它们的基线。想做演示的话，建议单独加一对
   `Menu.ron` + `Level1.ron`，再配一个"按 E 切场景"的脚本 —— 下一轮的事。
+
+## 四十四、构建设置：关卡顺序即索引 + 版本号 + 构建前逐关试装（2026-10-22）
+
+上一刀（四十三）让游戏能换场景，但"下一关"还得在每张关卡的脚本里写死路径。这一刀
+把**关卡编排**变成数据：`project.ron` 多一个 `build` 节（版本号 + 有序场景清单），
+顺序就是关卡索引。差距分析 P1 #9 的"构建设置"到此补掉大半。
+
+挑它而不是 TAA：TAA 是观感最后一刀（一周量级、验证只能靠肉眼/指标），而"发布路径"
+缺这一环时，"加一关要改两处、删一关直接断链"是每天都会遇到的麻烦，且这一刀不引入
+任何新依赖。
+
+### 一、数据形状
+
+```ron
+(
+    build: (
+        version: "1.2.3",
+        scenes: ["Scenes/Menu.ron", "Scenes/Level1.ron"],
+    ),
+    entry_scene: "Scenes/Menu.ron",
+    ...
+)
+```
+
+`#[serde(default)]`：老清单没有这一节也能读，空清单 = **未配置**（有效顺序为空）。
+
+### 二、为什么是"顺序即索引"
+
+因为脚本要能问"我是第几关"。三个 API（`scene_count` / `scene_index` /
+`load_scene_at`）都读这份清单，`load_scene_at(scene_index(ctx) + 1)` 就是"进下一关"。
+下标 **0 起**（与 `load_scene_at` 直接配对，不折 Lua 的 1 起）。
+
+`entry_scene` 仍是唯一启动来源，**没有**让 `build.scenes[0]` 兼任（Unity 那么做是
+因为它在清单之前没有别的地方记启动场景；本引擎早就有 `entry_scene`，再造一个必然
+出现"改了清单第一项、启动图变了但没人知道"）。代价：入口可以不在清单里，此时
+`scene_index()` 返回 `nil`，`--check` 只提示。
+
+### 三、`--check` 分两级
+
+| 情况 | 字段 | 退出码 |
+|---|---|---|
+| 清单指向的关卡不存在 / 路径越界 | `build_missing_scenes` | 2 |
+| 盘上有、清单没列 | `build_unlisted_scenes` | 0（提示） |
+
+第二级刻意不算问题：否则每个配了清单的项目在 CI 里永远红，警报就没人看了。
+清单里的关卡会被**真正装载**（可以在 `Scenes/` 之外，如 `Levels/L1.ron`），
+这样它们的悬空引用也进检查视野；输出多一行
+`check: build scenes=2 order=[Scenes/Menu.ron, Scenes/Level1.ron]`。
+
+### 四、构建器：逐关试装 + `--build` CLI
+
+`build()` 在动手前按清单把每一关读一遍，**一次列全**失败项再中止（不留半成品目录）。
+理由：构建只是复制目录，清单里的关卡少个文件时构建不会报错，玩家却在切关卡时撞黑屏。
+
+新增 `xgame-editor --build <项目>`（同一个 `builder::build`，不起窗口）：
+退出码 0/1，stdout 打 `summary` 与 `scene_count: N`，失败项原样进 stderr。
+没有加 MCP 工具 —— `run_headless` 已能验证运行时，"产文件"的动作交给 CLI 更容易
+看清产物路径。
+
+### 五、编辑器：⚙ 项目设置 → 构建
+
+版本号输入框 + 关卡列表（`上移` / `下移` / `✕` 移除 + `添加场景…` 下拉）。
+用列表而不是逗号分隔的文本框：**顺序本身是语义**，让用户手打顺序等于把 `index + 1`
+的 bug 挪进配置。
+
+- Apply 时逐项 `normalize_scene_relative`（越界 / 非 `.ron` 直接挡下）、去重、丢空行；
+  入口不在清单里只 `log_warning`。
+- 空行不报错：手改清单留空串很常见，报错只会挡住整次 Apply。
+- 校验失败的返回从闭包改成关联函数 `EditorState::reject_settings` —— 闭包捕获
+  `&mut self` 会把借用锁到最后一个使用点，中间任何 `self.log_warning` 都是 E0501。
+
+### 六、路径规则收进 core
+
+`normalize_scene_relative`（从编辑器搬来）与 `same_scene_path`（0 分配、忽略分隔符）
+现在都在 `xgame_core::project`。消费方四个：编辑器改清单、`--check` 校验、构建器试装、
+运行时 / 脚本的 `scene_index`。四份拷贝必然漂移成"检查通过、构建成功、运行时打不开"。
+
+### 七、验证
+
+- **新增 13 条回归测试**：core 8（顺序解析 / 旧清单兼容 / 路径规则 / 清单装载与顺序 /
+  缺场景与越界 / 未列入提示 / 未配置静默）、runtime 4（脚本按索引推进 / 越界报错 /
+  无清单返回 `nil` / 宿主 `load_scene_at`）、editor 1（草稿规范化去重 + 越界在 Apply 挡住）。
+- **全量**：`cargo test --workspace --all-targets -j 2 -- --test-threads=4`
+  → **735 passed / 0 failed / 7 ignored**（上一轮 722，净增 13）；
+  `cargo clippy --workspace --all-targets` → **0 警告**。
+- **CLI 实跑**（临时双关卡项目 `target/e2e_build`，从 SampleScene 复制 + `Level2.ron`，
+  脚本第 5 帧 `load_scene_at(scene_index(ctx) + 1)`）：
+  - `--check` → `check: OK`、`check: build scenes=2 order=[Scenes/scene.ron, Scenes/Level2.ron]`，
+    exit 0；加一张未列入的 `Level3.ron` 后多一行 `not in build list`，退出码仍是 **0**；
+  - `--headless --frames 20` → `scene_loads: 1`、`scene_current: "Scenes/Level2.ron"`、
+    `ok: true`、exit 0（脚本靠**索引**推进，不是路径）；
+  - `--build` → `scene_count: 2`、产物含 `Scenes/`，exit 0；
+  - 清单加 `Scenes/Missing.ron` → `--check` exit **2**（`build scene missing` 带 OS 错误）、
+    `--build` exit **1** 并列出该关，`Build/` 目录**没有**被创建（无半成品）；
+  - `projects/SampleScene`（无 `build` 节）→ 不打印 build 行、`--build` 报 `scene_count: 0`。
+- **设置面板截图**：`--ui-settings --ui-shot` 两张（全部列入 / 有未列入），
+  确认版本号与两行关卡的 ↑↓ 首末项置灰、`添加场景…` 下拉出现。
+
+### 八、刻意没做
+
+- **平台预设**（只有 Windows 一种产物）与**图标**（要图像导入管线，属资产侧）。
+- **"禁用某个场景"开关**（Unity 那种勾选框）：当前语义是"列入 = 发布"，删掉即禁用；
+  真需要时再加，别提前给清单加三种状态。
+- **构建产物裁剪**：`content_dirs()` 仍然整目录打包，没按清单只打需要的资产。
+- **MCP 的 build 工具**：见 §四，走 CLI。

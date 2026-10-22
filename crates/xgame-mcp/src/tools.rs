@@ -160,7 +160,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "project_check",
-            "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas 列出问题，has_issues 汇总）。入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
+            "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas / 发布清单 build_missing_scenes 列出问题，has_issues 汇总；build_scene_order 是关卡顺序，未配置为空）。入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop },
@@ -531,6 +531,11 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         "invalid_metas": report.invalid_metas,
         "guid_conflicts": report.guid_conflicts,
         "invalid_scenes": report.invalid_scenes,
+        // 发布清单（`project.ron` 的 `build.scenes`）：顺序即关卡索引。
+        // 未配置清单时 `build_scene_order` 为空 —— 与"配了一个场景"是两回事。
+        "build_scene_order": report.build_scene_order,
+        "build_missing_scenes": report.build_missing_scenes,
+        "build_unlisted_scenes": report.build_unlisted_scenes,
         "has_issues": report.has_issues(),
         "issue_count": report.issue_count(),
         "render": report.render(),

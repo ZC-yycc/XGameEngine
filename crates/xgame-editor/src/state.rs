@@ -6,11 +6,11 @@
 //! 根目录解析，编辑器不再依赖进程当前工作目录。
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
 use xgame_math::glam::{Quat, Vec3};
 use xgame_core::prefab::{prefab_display_name, Prefab, PrefabInstanceRef};
-use xgame_core::project::ProjectHandle;
+use xgame_core::project::{normalize_scene_relative, ProjectHandle};
 use xgame_core::{
     AssetKind, Entity, EntityId, FieldDesc, ImportSettings, Inspect, MaterialAsset, Scene, Transform,
 };
@@ -38,37 +38,6 @@ fn asset_stem(relative: &str) -> String {
 pub(crate) fn scene_label(relative: &str) -> String {
     let file = relative.rsplit('/').next().unwrap_or(relative);
     file.strip_suffix(".ron").unwrap_or(file).to_string()
-}
-
-/// 校验并规范化一个**项目相对**场景路径。
-///
-/// 场景列表来自磁盘，但设置窗口、对话框和以后的脚本也可能把路径递进来。
-/// 统一在这里挡掉绝对路径、`..`、非 `.ron` 与预制体（`.prefab.ron`）：
-/// 保存路径越界会把文件写到项目外，读路径越界则等于允许编辑器读任意文件。
-fn normalize_scene_relative(raw: &str) -> Result<String, String> {
-    let rel = raw.trim().replace('\\', "/");
-    if rel.is_empty() {
-        return Err("场景路径不能为空".into());
-    }
-    // Windows 盘符（`C:`）与 UNC 前缀在非 Windows 上不一定被 `Path` 认成绝对路径，
-    // 这里显式再挡一次；编辑器的主要平台是 Windows，不能靠平台差异放行。
-    if rel.starts_with('/') || rel.as_bytes().get(1) == Some(&b':') {
-        return Err(format!("场景路径必须是项目相对路径: {raw}"));
-    }
-
-    let path = Path::new(&rel);
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
-            _ => return Err(format!("场景路径不能包含 `..` 或绝对路径: {raw}")),
-        }
-    }
-    let normalized = parts.join("/");
-    if !normalized.ends_with(".ron") || normalized.ends_with(".prefab.ron") {
-        return Err(format!("场景文件必须以 .ron 结尾: {raw}"));
-    }
-    Ok(normalized)
 }
 
 /// 给新材质找一个不撞车的路径（`Wood.mat` → `Wood 2.mat` → …）。
@@ -2758,6 +2727,20 @@ impl EditorState {
         ));
         Ok(())
     }
+/// 设置没通过校验：记一条 error、把草稿放回去（窗口继续显示），返回 `Err`。
+///
+/// 独立成函数而不是闭包：闭包捕获 `&mut self` 会把它锁到最后一个使用点，
+/// 中间任何 `self.log_warning(...)` 都变成借用冲突（补"发布清单"校验时踩到了）。
+fn reject_settings(
+    state: &mut EditorState,
+    message: String,
+    draft: xgame_core::project::Project,
+) -> Result<(), String> {
+    state.log_error(format!("设置未应用: {message}"));
+    state.settings_draft = Some(draft);
+    Err(message)
+}
+
 
     /// 把设置草稿写回内存清单并落盘（校验集中在这里，面板只管画）。
     ///
@@ -2767,26 +2750,21 @@ impl EditorState {
             return Ok(());
         };
 
-        let mut invalid = |msg: String, draft: xgame_core::project::Project| -> Result<(), String> {
-            self.log_error(format!("设置未应用: {msg}"));
-            self.settings_draft = Some(draft);
-            Err(msg)
-        };
 
         draft.name = draft.name.trim().to_string();
         if draft.name.is_empty() {
-            return invalid("项目名不能为空".into(), draft);
+            return Self::reject_settings(self, "项目名不能为空".into(), draft);
         }
         draft.entry_scene = draft.entry_scene.trim().replace('\\', "/");
         if draft.entry_scene.is_empty() {
-            return invalid("入口场景路径不能为空".into(), draft);
+            return Self::reject_settings(self, "入口场景路径不能为空".into(), draft);
         }
         // 入口场景也会被构建器 / 独立游戏直接拼接成磁盘路径：与场景菜单用同一套
         // 校验，挡掉绝对路径、`..` 和预制体文件，别让手改的 project.ron 把启动
         // 路径指到项目外。
         draft.entry_scene = match normalize_scene_relative(&draft.entry_scene) {
             Ok(path) => path,
-            Err(e) => return invalid(e, draft),
+            Err(e) => return Self::reject_settings(self, e, draft),
         };
 
         // 清单是手改的文本，垃圾值统一在这里夹回安全范围（同 sanitized 语义）。
@@ -2812,6 +2790,58 @@ impl EditorState {
                 draft.render.exposure, sane_render.exposure
             ));
             draft.render = sane_render;
+        }
+
+        // -- 发布清单 ------------------------------------------------------
+        // 顺序即关卡索引，所以这里做两件事：逐项规范化（越界 / 非 .ron 直接
+        // 挡下来，别等 `--check` 或构建时才发现），以及**去重**（同一个场景出现
+        // 两次会让 `scene_index()` 有两个答案）。
+        //
+        // 校验与日志分开做：`invalid` 闭包借着 `&mut self`，它的生命周期内
+        // 不能再调 `self.log_*` —— 所以先把要报的攒起来，校验过了再一起打。
+        draft.build.version = draft.build.version.trim().to_string();
+        if draft.build.version.is_empty() {
+            draft.build.version = xgame_core::BuildConfig::default().version;
+        }
+        let mut order: Vec<String> = Vec::with_capacity(draft.build.scenes.len());
+        let mut duplicates: Vec<String> = Vec::new();
+        let mut build_error: Option<String> = None;
+        for raw in draft.build.scenes.clone() {
+            // 空行直接丢：手改清单时留一个空串很常见，它不是一个"需要用户
+            // 修的配置错误"，报错只会挡住整次 Apply。
+            if raw.trim().is_empty() {
+                continue;
+            }
+            match normalize_scene_relative(&raw) {
+                Ok(relative) => {
+                    if order.contains(&relative) {
+                        duplicates.push(relative);
+                    } else {
+                        order.push(relative);
+                    }
+                }
+                Err(e) => {
+                    build_error = Some(format!("发布清单里的场景不可用: {e}"));
+                    break;
+                }
+            }
+        }
+        if let Some(message) = build_error {
+            return Self::reject_settings(self, message, draft);
+        }
+        draft.build.scenes = order;
+        for duplicate in duplicates {
+            self.log_warning(format!(
+                "发布清单里 '{duplicate}' 重复，已只保留第一次出现"
+            ));
+        }
+        // 入口不在清单里只提醒、不拦：入口可以是"启动器"场景（不进关卡轮转），
+        // 那时脚本的 `scene_index()` 会返回 nil —— 语义是对的，不该强迫用户改。
+        if !draft.build.scenes.is_empty() && !draft.build.scenes.contains(&draft.entry_scene) {
+            self.log_warning(format!(
+                "入口场景 '{}' 不在发布清单里 —— 运行到这里时脚本的 scene_index() 为 nil",
+                draft.entry_scene
+            ));
         }
 
         *self.project.manifest_mut() = draft;
@@ -3769,6 +3799,53 @@ mod tests {
             "fixed_dt=0 必须退回默认"
         );
         assert!(state.project.manifest().runtime.gravity.iter().all(|x| x.is_finite()));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 发布清单的落地链路：规范化（反斜杠 / 空白 / 空串）、去重、版本号 trim，
+    /// 以及越界路径**挡在 Apply 这一步**（不要等到 `--check` 或构建才发现）。
+    #[test]
+    fn settings_build_list_is_normalized_and_deduped() {
+        let (mut state, base) = temp_state("settings_build");
+
+        let mut draft = state.project.manifest().clone();
+        draft.build.version = "  v1.2.3  ".into();
+        draft.build.scenes = vec![
+            "Scenes\\A.ron".into(),
+            " Scenes/A.ron ".into(), // 规范化后与上一项重复
+            "".into(),
+            "Scenes/B.ron".into(),
+        ];
+        state.settings_draft = Some(draft);
+        state.apply_settings_draft().expect("合法清单应能应用");
+
+        let manifest = state.project.manifest();
+        assert_eq!(manifest.build.version, "v1.2.3", "版本号要 trim");
+        assert_eq!(
+            manifest.build.scenes,
+            vec!["Scenes/A.ron".to_string(), "Scenes/B.ron".to_string()],
+            "反斜杠规范化 + 去重 + 丢空串，顺序保留"
+        );
+
+        // 读回：清单真的落盘了（构建器 / 独立游戏读的是磁盘那份）。
+        let reopened = xgame_core::ProjectHandle::open(state.project.root()).expect("重开项目");
+        assert_eq!(reopened.manifest().build.scenes.len(), 2);
+
+        // 越界路径：Apply 直接失败，草稿留着等用户改。
+        let mut bad = state.project.manifest().clone();
+        bad.build.scenes = vec!["../Outside.ron".into()];
+        state.settings_draft = Some(bad);
+        assert!(
+            state.apply_settings_draft().is_err(),
+            "越界场景必须在 Apply 就被挡住"
+        );
+        assert!(state.settings_draft.is_some(), "校验失败必须保留草稿");
+        assert_eq!(
+            state.project.manifest().build.scenes.len(),
+            2,
+            "失败不得改动内存清单"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

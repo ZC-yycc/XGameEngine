@@ -643,6 +643,35 @@ fn register_scene(lua: &Lua, globals: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+
+    // -- 关卡顺序（project.ron 的 build.scenes）----------------------------
+    //
+    // 三者下标都是 **0 起**（与 `load_scene_at` 直接配对）。Lua 惯例是 1 起，
+    // 但这里刻意的：`load_scene_at(scene_index(ctx) + 1)` 读起来最顺，
+    // 若折成 1 起，每个调用点都要 `+1 -1` 往返，错一次就是串关。
+    globals.set(
+        "scene_count",
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().scene_count() as i64))?,
+    )?;
+
+    globals.set(
+        "scene_index",
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().scene_index().map(|i| i as i64)))?,
+    )?;
+
+    globals.set(
+        "load_scene_at",
+        lua.create_function(|_, (ctx, index): (LuaCtx, i64)| {
+            // 负数在 Lua 里可能来自 `index - 1` 算错：按越界处理（记 error），
+            // 不当成 usize 溢出后变成天文数字。
+            if index < 0 {
+                ctx.game().error(format!("load_scene_at({index}) 失败：关卡下标不能为负"));
+                return Ok(());
+            }
+            ctx.game().load_scene_at(index as usize);
+            Ok(())
+        })?,
+    )?;
     Ok(())
 }
 

@@ -192,6 +192,18 @@ impl GameApp {
         let ui = UiRenderer::new(&device, config.format);
 
         // -- 场景（路径都按项目根解析）--
+        // 版本号 / 关卡数是**发布信息**：打包出去的 exe 得能自报"我是哪个版本、
+        // 带了几关"，否则拿到一份日志也说不清跑的是哪一版（`--headless` 同理）。
+        {
+            let manifest = project.manifest();
+            log::info!(
+                "{} v{} — 启动场景 {}，发布清单 {} 关",
+                manifest.window.title,
+                manifest.build.version,
+                manifest.entry_scene,
+                manifest.scene_order().len()
+            );
+        }
         let entry_scene = project.manifest().entry_scene.clone();
         let scene = match project.load_entry_scene() {
             Ok(scene) => scene,
@@ -249,7 +261,10 @@ impl GameApp {
         .with_behavior_registry(behaviors)
         .with_audio_engine(AudioEngine::open(project.root()))
         .with_scene_loader(project.clone())
-        .with_current_scene(entry_scene);
+        .with_current_scene(entry_scene)
+        // 关卡顺序来自 `project.ron` 的 `build.scenes`：脚本的 `scene_index()` /
+        // `load_scene_at(i)` 都读它。未配置 = 空，脚本只能按路径切。
+        .with_scene_order(project.manifest().scene_order());
 
         Self {
             project,
