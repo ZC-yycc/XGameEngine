@@ -593,6 +593,12 @@ pub struct EditorState {
     /// 它**只影响 `.autosave/` 副本**：`saved_snapshot` 不动、脏标记不动、
     /// 标题星号不动 —— 自动保存不等于保存。详见 [`crate::autosave`]。
     autosave: crate::autosave::AutoSave,
+    /// 项目内容的外部改动检测（脚本 / 资产 / 预制体自动热重载）。
+    ///
+    /// 只持有"上一轮的文件快照"与下次扫描时刻；扫描与分类见
+    /// [`crate::hot_reload`]。`--ui-shot` 那类只读会话**不**驱动它
+    /// （见 `main.rs` 的调用点），否则开发机上的临时文件会让截图不可复现。
+    hot_reload: crate::hot_reload::ProjectWatcher,
     /// 打开项目时发现的、可以恢复的自动保存；`Some` 时首帧弹恢复框。
     ///
     /// 只针对**本次打开的入口场景**：切场景不弹框（多场景的副本仍然留在
@@ -774,6 +780,11 @@ impl EditorState {
             .len()
             .saturating_sub(usize::from(pending_autosave.is_some()));
 
+        // 热重载基线 = 打开项目时的磁盘状态：已有文件不该在第一次扫描时
+        // 被当成"刚发生变化"（那会在打开项目的 1 秒后白刷一遍资产库）。
+        let hot_reload =
+            crate::hot_reload::ProjectWatcher::new(&project, std::time::Instant::now());
+
         let mut state = Self {
             project,
             return_to_hub: false,
@@ -815,6 +826,7 @@ impl EditorState {
                 crate::autosave::DEFAULT_INTERVAL_SECS,
                 std::time::Instant::now(),
             ),
+            hot_reload,
             pending_autosave,
             save_as_open: false,
             save_as_name: String::new(),
@@ -868,6 +880,11 @@ impl EditorState {
         state.refresh_prefabs();
         state.refresh_scripts();
         state.refresh_assets();
+        // `refresh_assets` 会给缺 `.meta` 的资产补身份证 —— 这些是**打开项目时
+        // 自己写的**，不能算外部改动。基线在此再对齐一次（与动作后的 `rebase`
+        // 同一条规则），否则打开项目的 1 秒后会白刷一遍资产库并弹一条日志。
+        // `opening_a_project_absorbs_its_own_meta_generation` 在去掉这一行时会红。
+        state.hot_reload.rebase(&state.project);
         // 脏检查的基准：刚打开的场景 = 刚落盘的内容 = 干净。
         state.saved_snapshot = state.scene.clone();
         if other_autosaves > 0 {
@@ -2422,6 +2439,108 @@ impl EditorState {
         self.project.remove_autosave(&relative)
     }
 
+    // -----------------------------------------------------------------------
+    // 资产 / 脚本热重载（外部改动检测）
+    // -----------------------------------------------------------------------
+
+    /// 检查项目内容目录有没有外部改动，并按类别应用。
+    ///
+    /// 触发条件：到点（[`crate::hot_reload::SCAN_INTERVAL`]）且确实有文件变化。
+    ///
+    /// 返回 `true` 表示画面依赖的东西变了（资产缓存已失效 / 清单已变），
+    /// 调用方应当重画。**不改场景内容**：场景文件即使被外部改写也只记一条
+    /// debug 日志，绝不覆盖内存里可能还没保存的编辑。
+    pub fn hot_reload_tick(&mut self, now: std::time::Instant) -> bool {
+        let changes = self.hot_reload.poll(&self.project, now);
+        if changes.is_empty() {
+            return false;
+        }
+
+        let mut repaint = false;
+        let mut notes = Vec::new();
+
+        if changes.scripts_changed() {
+            if self.game_runtime.is_some() {
+                // `reload_scripts` 自己会记"已重新编译全部脚本"。
+                self.reload_scripts();
+            } else {
+                // 编辑态没有运行时，重新扫描清单即可；下次 Play 会重新编译。
+                self.refresh_scripts();
+                notes.push(format!(
+                    "检测到 {} 个脚本变更：编辑态已刷新脚本清单（Play 中会自动重编译）",
+                    changes.count(crate::hot_reload::Kind::Script)
+                ));
+            }
+            repaint = true;
+        }
+
+        if changes.assets_changed() {
+            // 重新扫盘 + 给新资产补 `.meta` + 刷新三个依赖资产库的列表。
+            self.refresh_assets();
+            // `model_scale` / sRGB / 最近邻都烘焙在网格与 GPU 纹理里，只清
+            // 材质库不够 —— 与改导入设置走同一条失效路径。
+            if let Some(renderer) = self.scene_renderer.as_mut() {
+                renderer.invalidate_assets();
+            }
+            notes.push(format!(
+                "检测到 {} 个资产变更：已重新加载材质 / 模型 / 贴图",
+                changes.count(crate::hot_reload::Kind::Asset)
+            ));
+            self.reload_open_material(&changes);
+            repaint = true;
+        } else if changes.prefabs_changed() {
+            // 预制体也列在资源浏览器里：走 `refresh_assets` 才能把新文件补上
+            // `.meta` 并出现在资产树里；只有预制体变了就不必碰渲染缓存。
+            self.refresh_assets();
+            repaint = true;
+        }
+
+        if changes.has(crate::hot_reload::Kind::Scene) {
+            // 场景不自动重载（见 `hot_reload` 模块文档）。自己 Ctrl+S 也会走到
+            // 这里，所以只写 debug —— 控制台不该为每次正常保存刷一行。
+            log::debug!("场景文件有外部变化（不自动重载，Scenes 菜单现扫）");
+        }
+
+        // 动作可能刚补写了 `.meta`：把它吞进基线，避免下一秒自激。
+        self.hot_reload.rebase(&self.project);
+
+        for note in notes {
+            self.log_info(note);
+        }
+        repaint
+    }
+
+    /// 距离下一次外部改动扫描还有多久。
+    ///
+    /// 主循环拿它去 `request_repaint_after`：界面静止时帧调度会停帧，
+    /// 没人来调 [`hot_reload_tick`](Self::hot_reload_tick) 就发现不了外部改动。
+    pub fn hot_reload_wait(&self, now: std::time::Instant) -> std::time::Duration {
+        self.hot_reload.wait(now)
+    }
+
+    /// 外部改动命中了当前打开的材质草稿：干净就重新载入，有未保存改动就保留。
+    ///
+    /// 直接丢草稿会让用户在 Inspector 里敲的字段凭空消失；直接覆盖草稿则违背
+    /// "草稿只按 Apply 落盘"的约定。两者都不可接受，所以按脏不脏分开处理。
+    fn reload_open_material(&mut self, changes: &crate::hot_reload::ChangeSet) {
+        let Some(relative) = self.material_draft.as_ref().map(|d| d.relative.clone()) else {
+            return;
+        };
+        if !changes.touched(&relative) {
+            return;
+        }
+        if self.material_draft.as_ref().is_some_and(|d| d.dirty()) {
+            self.log_warning(format!(
+                "材质 '{relative}' 已在外部修改；当前草稿有未保存改动，已保留草稿（Revert 可载入磁盘版本）"
+            ));
+            return;
+        }
+        // 丢掉草稿，下一次访问会从磁盘重新读；渲染侧缓存上面已整体失效。
+        self.material_draft = None;
+        self.material_draft_error = None;
+        self.log_info(format!("材质 '{relative}' 已随外部改动重新载入"));
+    }
+
     /// 落盘成功后的收尾：脏检查基准对齐 + 按帧 memo 失效。
     fn mark_saved(&mut self) {
         self.saved_snapshot = self.scene.clone();
@@ -3439,6 +3558,223 @@ mod tests {
         assert!(state.autosave_tick(due_now()));
         assert!(state.drop_autosave_of_current());
         assert!(!state.project.autosave_path(&state.current_scene).exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // -- 资产 / 脚本热重载 ---------------------------------------------------
+
+    /// 打开项目时自己补的 `.meta` 不能被当成外部改动。
+    ///
+    /// `EditorState::new` 会 `refresh_assets()`，给缺身份证的资产补 `.meta`；如果
+    /// watcher 基线停在补之前，打开项目 1 秒后就会白刷一遍资产库。旧实现（只在
+    /// 构造函数里建基线、不在首次扫描后 rebase）这条必红。
+    #[test]
+    fn opening_a_project_absorbs_its_own_meta_generation() {
+        let base = std::env::temp_dir().join(format!(
+            "xgame_state_hot_open_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let project = xgame_core::ProjectHandle::create(&base, "HotOpen").expect("创建临时项目");
+        std::fs::write(project.path("Resources/Box.glb"), b"glb").unwrap();
+
+        let mut state = EditorState::new(project);
+        assert!(
+            state.project.path("Resources/Box.glb.meta").is_file(),
+            "打开项目应补上缺失的 .meta"
+        );
+        let t0 = std::time::Instant::now();
+        assert!(
+            !state.hot_reload_tick(t0 + std::time::Duration::from_secs(2)),
+            "打开项目后的第一轮不该把自补的 .meta 当外部改动"
+        );
+        assert!(
+            !state
+                .console_messages
+                .iter()
+                .any(|m| m.text.contains("资产变更")),
+            "不该给用户刷一条假的资产变更日志: {:?}",
+            state
+                .console_messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 编辑态改了 `.lua`：刷新脚本清单、置重绘、给出可读提示。
+    ///
+    /// 编辑态没有运行时，**不能**去调 `reload_scripts`（它只会重新扫一遍）；
+    /// 关键是新脚本要立刻出现在 Inspector 的脚本列表里，否则用户得重启编辑器。
+    #[test]
+    fn hot_reload_rescans_scripts_in_edit_mode() {
+        let (mut state, base) = temp_state("hot_scripts_edit");
+        let t0 = std::time::Instant::now();
+        std::fs::create_dir_all(state.project.path("Scripts")).unwrap();
+        std::fs::write(
+            state.project.path("Scripts/Spin.lua"),
+            "function start(ctx) end\n",
+        )
+        .unwrap();
+
+        assert!(
+            state.hot_reload_tick(t0 + std::time::Duration::from_secs(2)),
+            "脚本变了应要求重绘"
+        );
+        assert!(
+            state.script_list.iter().any(|s| s == "Scripts/Spin.lua"),
+            "新脚本应进入脚本清单: {:?}",
+            state.script_list
+        );
+        assert!(
+            state
+                .console_messages
+                .iter()
+                .any(|m| m.text.contains("编辑态已刷新脚本清单")),
+            "编辑态应提示只刷新了清单"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Play 中改了 `.lua`：走运行时重编译，而不是只刷清单。
+    ///
+    /// 旧实现（没有热重载）只能靠用户退出再进 Play；这条测试钉住"运行中自动
+    /// 重编译"这条路径确实被接上。
+    #[test]
+    fn hot_reload_recompiles_scripts_in_play_mode() {
+        let (mut state, base) = temp_state("hot_scripts_play");
+        std::fs::create_dir_all(state.project.path("Scripts")).unwrap();
+        std::fs::write(
+            state.project.path("Scripts/Spin.lua"),
+            "function start(ctx) end\n",
+        )
+        .unwrap();
+        state.enter_play_mode();
+        assert!(state.game_runtime.is_some(), "应已进入 Play");
+
+        let t0 = std::time::Instant::now();
+        // 长度必须变：只靠 mtime 在粗粒度文件系统上可能测不出来。
+        std::fs::write(
+            state.project.path("Scripts/Spin.lua"),
+            "function start(ctx) -- externally edited\nend\n",
+        )
+        .unwrap();
+        assert!(state.hot_reload_tick(t0 + std::time::Duration::from_secs(2)));
+        assert!(
+            state
+                .console_messages
+                .iter()
+                .any(|m| m.text.contains("已重新编译全部脚本")),
+            "Play 中应触发运行时重编译: {:?}",
+            state
+                .console_messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 外部改场景文件**不**覆盖内存 —— 未保存的编辑优先。
+    ///
+    /// 这是刻意的取舍：自动重载磁盘场景会把用户正在编辑的内容直接冲掉。
+    /// Scenes 菜单本来就现扫，新场景不需要热重载也能看见。
+    #[test]
+    fn hot_reload_never_overwrites_the_open_scene() {
+        let (mut state, base) = temp_state("hot_scene");
+        state.scene.add_entity(xgame_core::Entity::new("unsaved edit"));
+        let before_name = state.scene.name.clone();
+
+        let t0 = std::time::Instant::now();
+        std::fs::write(
+            state.project.path(&state.current_scene),
+            "// 外部工具改写的场景（内容无关紧要）",
+        )
+        .unwrap();
+
+        assert!(!state.hot_reload_tick(t0 + std::time::Duration::from_secs(2)));
+        assert_eq!(state.scene.name, before_name, "内存场景不该被磁盘覆盖");
+        assert!(
+            state.scene.entities.iter().any(|e| e.name == "unsaved edit"),
+            "未保存的编辑必须原样保留"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 当前材质草稿是干净的：外部改动后丢弃草稿，下次访问重新读盘。
+    #[test]
+    fn hot_reload_reloads_a_clean_material_draft() {
+        let (mut state, base) = temp_state("hot_material_clean");
+        let relative = state.create_material("Wood").expect("创建材质");
+        // 创建动作本身会写文件、补 `.meta`：先对齐基线，避免把"自己写的"
+        // 当成外部改动（与主循环里的 rebase 同一语义）。
+        state.hot_reload.rebase(&state.project);
+        assert!(state.material_draft.is_some(), "应已打开草稿");
+
+        let t0 = std::time::Instant::now();
+        let mut changed = state.project.load_material(&relative).unwrap();
+        changed.roughness = 0.123_456;
+        state.project.write_material(&relative, &changed).unwrap();
+
+        assert!(state.hot_reload_tick(t0 + std::time::Duration::from_secs(2)));
+        assert!(
+            state.material_draft.is_none(),
+            "干净草稿应被丢弃并等待重新读盘"
+        );
+        let reloaded = state.material_draft_mut(&relative).expect("重新加载草稿");
+        assert_eq!(
+            reloaded.asset.roughness, 0.123_456,
+            "再次打开应读到磁盘上的新内容"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 当前材质草稿有未保存改动：外部改动只提示，草稿原样保留。
+    ///
+    /// 直接覆盖会丢掉用户在 Inspector 里敲的字段；直接丢弃则会让"正在编辑"
+    /// 的界面突然清空。两者都不可接受，所以脏草稿必须留下（Revert 可回到磁盘版）。
+    #[test]
+    fn hot_reload_preserves_a_dirty_material_draft() {
+        let (mut state, base) = temp_state("hot_material_dirty");
+        let relative = state.create_material("Metal").expect("创建材质");
+        state.hot_reload.rebase(&state.project);
+        {
+            let draft = state.material_draft.as_mut().expect("草稿应打开");
+            draft.asset.base_color = [0.25, 0.5, 0.75, 1.0];
+            assert!(draft.dirty());
+        }
+
+        let t0 = std::time::Instant::now();
+        let mut changed = state.project.load_material(&relative).unwrap();
+        changed.roughness = 0.987_654;
+        state.project.write_material(&relative, &changed).unwrap();
+
+        assert!(state.hot_reload_tick(t0 + std::time::Duration::from_secs(2)));
+        let draft = state
+            .material_draft
+            .as_ref()
+            .expect("脏草稿不能被外部改动冲掉");
+        assert!(draft.dirty(), "草稿仍应是未保存状态");
+        assert_eq!(draft.asset.base_color, [0.25, 0.5, 0.75, 1.0]);
+        assert_ne!(draft.asset.roughness, 0.987_654, "不能被磁盘版本覆盖");
+        assert!(
+            state
+                .console_messages
+                .iter()
+                .any(|m| m.text.contains("已保留草稿")),
+            "应明确告知用户草稿被保留"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -1051,6 +1051,48 @@ fn register_state(lua: &Lua, globals: &Table) -> mlua::Result<()> {
 
 fn register_animation(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     globals.set(
+        "set_anim_clip",
+        lua.create_function(|_, (ctx, clip): (LuaCtx, String)| {
+            ctx.game().set_anim_clip(&clip);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "set_anim_speed",
+        lua.create_function(|_, (ctx, speed): (LuaCtx, f32)| {
+            ctx.game().set_anim_speed(speed);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "set_anim_looping",
+        lua.create_function(|_, (ctx, looping): (LuaCtx, bool)| {
+            ctx.game().set_anim_looping(looping);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "set_anim_fade_time",
+        lua.create_function(|_, (ctx, seconds): (LuaCtx, f32)| {
+            ctx.game().set_anim_fade_time(seconds);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "set_anim_additive_clip",
+        lua.create_function(|_, (ctx, clip): (LuaCtx, String)| {
+            ctx.game().set_anim_additive_clip(&clip);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "set_anim_layer_clip",
+        lua.create_function(|_, (ctx, layer, clip): (LuaCtx, String, String)| {
+            ctx.game().set_anim_layer_clip(&layer, &clip);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
         "set_anim_param",
         lua.create_function(|_, (ctx, name, value): (LuaCtx, String, f32)| {
             ctx.game().set_anim_param(&name, value);

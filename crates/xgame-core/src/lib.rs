@@ -25,6 +25,7 @@
 //! | `loader` | 资产装载注入点 `SceneLoader`（场景 / 预制体，按项目相对路径装载）|
 //! | `ui` | 屏幕空间 UI 组件 `UiElement`（锚点布局的纯数据层，布局与绘制在 `xgame-ui`）|
 //! | `particle` | 粒子发射器 `ParticleEmitter`（纯声明；模拟在 `xgame-particle`，绘制在 `xgame-render`）|
+//! | `schema` | 场景格式的机器可读说明书（`--export-schema` / MCP `schema_read` 的真相源）|
 //!
 //! # 依赖方向
 //!
@@ -63,6 +64,9 @@ pub mod physics;
 pub mod ray;
 mod time;
 pub mod ui;
+
+// 场景格式的机器可读说明书（Agent-Native ③）：--export-schema / MCP schema_read 的真相源。
+pub mod schema;
 
 // -- 导出：旧有类型（保持向后兼容）
 pub use check::{check_project, CheckReport};
@@ -108,5 +112,6 @@ pub use particle::{
 };
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
 pub use ray::{Ray, RayHit};
+pub use schema::{scene_schema, SchemaDoc, SCHEMA_FORMAT_VERSION};
 pub use time::{GameClock, Stopwatch, Timer, MAX_TIME_SCALE};
 pub use ui::{UiAlign, UiElement, UiImageStyle, UiKind, UiState, UiStyle, UiTextStyle, UiVAlign};

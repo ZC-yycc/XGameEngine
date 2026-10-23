@@ -1134,6 +1134,68 @@ mod tests {
             .is_none_or(|a| a.machine.is_none()));
     }
 
+    /// 动画剪辑的脚本控制：直接换基础剪辑 / 调速度与淡入 / 换叠加层与层栈剪辑。
+    ///
+    /// 六个函数在旧实现里都不存在 —— 这条测试先红，再补注册与 `GameCtx` 方法。
+    #[test]
+    fn script_controls_base_clip_additive_and_layers() {
+        use xgame_core::{AnimAdditive, AnimLayer};
+
+        let project = TempProject::new("anim_control");
+        let path = project.write_script(
+            "drive",
+            r#"
+            function start(ctx)
+                set_anim_clip(ctx, "Run")
+                set_anim_speed(ctx, 2.0)
+                set_anim_looping(ctx, false)
+                set_anim_fade_time(ctx, 0.05)
+                set_anim_additive_clip(ctx, "Survey")
+                set_anim_layer_clip(ctx, "upper", "Run")
+            end
+            "#,
+        );
+
+        let mut scene = Scene::new("anim_control");
+        let mut entity = Entity::new("fox");
+        entity.scripts.push(path);
+        let mut animator = xgame_core::Animator::new("Walk");
+        animator.additive = Some(AnimAdditive {
+            clip: "Walk".into(),
+            ..Default::default()
+        });
+        animator.layers.push(AnimLayer {
+            name: "upper".into(),
+            clip: "Walk".into(),
+            ..Default::default()
+        });
+        entity.animator = Some(animator);
+        scene.add_entity(entity);
+
+        let mut host = LuaHost::new();
+        host.preload(&project.dir, &scene);
+        host.dispatch_start(FrameCtx::new(&mut scene, 0.016, 0.0));
+        assert!(host.logs.is_empty(), "脚本不该报错: {:?}", host.logs);
+
+        let animator = scene.entities[0].animator.as_ref().expect("animator");
+        assert_eq!(animator.clip, "Run", "基础剪辑应被脚本切换");
+        assert_eq!(animator.speed, 2.0, "速度应写到自己的 animator");
+        assert!(!animator.looping, "循环开关应被脚本改掉");
+        assert!(
+            (animator.fade_time - 0.05).abs() < 1e-6,
+            "淡入时长应被脚本改掉"
+        );
+        assert_eq!(
+            animator.additive.as_ref().unwrap().clip,
+            "Survey",
+            "叠加层剪辑应被脚本切换"
+        );
+        assert_eq!(
+            animator.layers[0].clip, "Run",
+            "层栈剪辑应被脚本按层名切换"
+        );
+    }
+
     #[test]
     fn script_errors_are_reported_without_killing_the_frame() {
         let project = TempProject::new("runtime_error");

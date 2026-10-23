@@ -22,9 +22,9 @@
 | **六·七** | ✅ 完成 | 编辑器产品化第一波：项目设置、未保存保护、无头检查 `--check`、差距分析入库 |
 | **P0 资产管线** | ✅ 完成 | 资产 GUID + `.meta` + 资产库诊断 + `--migrate-assets` + 资源浏览器（浏览 / 拖入场景）+ MCP `asset_list`；导入参数消费见「材质资产」；见 PLAN.md 三十二、决策记录 §十四 |
 | **双轨 P0–P3** | ✅ 完成 | Rust 组件（UE 插件模式）+ Lua 脚本（Unity 模式 + 热更）双轨；P2.5 基准判定后 P3 删 Rhai，脚本层收敛单一 Lua 轨。决策 D1–D11 见[计划文档](Docs/双轨语言架构计划.md)，实施记录见 PLAN.md 十五–二十一 |
-| **七** | 🟨 进行中 | 动画系统（前五片 ✅：骨骼蒙皮 + 单剪辑 + 交叉淡入 + 阈值状态机 + 叠加 + 多层混合栈与骨骼遮罩；morph / Phase B 待做） |
+| **七** | 🟨 进行中 | 动画系统（主要切片 ✅：骨骼蒙皮 + 单剪辑 + 交叉淡入 + 阈值状态机 + 叠加 + 多层混合栈与骨骼遮罩；morph / Phase B 待做） |
 | **八** | ✅ 完成 | 音频系统（kira：`AudioSource` + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，见 PLAN.md 二十二） |
-| **Agent-Native ①②** | ✅ 完成 | MCP 工具面（8 工具，含 `asset_list`）+ 无头运行 `--headless` / `--screenshot`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) |
+| **Agent-Native ①②③** | ✅ 完成 | MCP 工具面（9 工具，含 `asset_list` / `schema_read`）+ 无头运行 `--headless` / `--screenshot` + 场景格式说明书 `--export-schema`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) / PLAN.md 五十 |
 | **渲染 PBR** | ✅ 完成 | Cook-Torrance + 逐实体材质覆盖 + 无头截图（PLAN.md 二十四） |
 | **渲染 HDR** | ✅ 完成 | HDR 中间标 + ACES + 曝光（二十五）、Bloom（二十六） |
 | **渲染天空** | ✅ 完成 | 程序化天空盒 + 球谐漫反射 + 预过滤镜面 + BRDF LUT（二十七） |
@@ -44,6 +44,7 @@
 | **构建设置（关卡顺序）** | ✅ 完成 | `project.ron` 加 `build` 节：版本号 + **有序关卡清单**（顺序即关卡索引）；脚本 `scene_count` / `scene_index` / `load_scene_at` 让"进下一关"不再硬编码路径；`--check` 校验清单、构建器打包前逐关试装、新增 `--build` CLI；见 PLAN.md 四十四、决策记录 §二十六 |
 | **运行时预制体实例化** | ✅ 完成 | 脚本 `spawn_prefab` / `spawn_prefab_under`：整棵子树进场景（层级 / 变换 / 物理 / 粒子 / 音频 / 相机 / UI 全带上）、每个新实体贴实例来源、刚体由运行时补建；位置语义"设置不叠加"（世界位置 / 局部偏移两种）；失败三种各自一条日志并返回 `nil`；见 PLAN.md 四十五、决策记录 §二十七 |
 | **时间缩放 / 暂停** | ✅ 完成 | `set_time_scale` / `time_scale` 两个脚本 API（Unity `Time.timeScale` 语义）：`0` = 暂停模拟、`0.3` = 慢动作、`2.0` = 二倍速。缩放**只在 `GameClock::tick` 一处消费**，所以物理固定步 / 脚本 `delta`+`time` / 粒子 / 动画钟同帧同源；音频与 UI 不受影响（暂停菜单必须还能点）；编辑器 Play 的预览动画同步跟手；无头报告加 `time_scale` 让 CI 能断言"真的暂停了"；见 PLAN.md 四十六、决策记录 §二十八 |
+| **资产 / 脚本热重载** | ✅ 完成 | 1 Hz 轮询内容目录（只看 metadata）：Play 中改 `.lua` 自动重编译、编辑态刷新清单；资产 / `.meta` 变更刷新资产库并丢渲染缓存；预制体刷新清单。**场景不自动覆盖**、脏材质草稿保留、`project.ron` / 已实例化预制体 / 已解码音频不重载；只读会话不启用。见 PLAN.md 四十九、决策记录 §三十一 |
 
 ---
 
@@ -151,11 +152,11 @@
 | 自动保存 / 崩溃恢复 | ✅ 完成 | 间隔可调（默认 60 秒，`0` = 关）的 `.autosave/` 副本 + 原子写；崩溃后重开项目三选一（恢复 / 丢弃 / 稍后）；恢复后仍是未保存状态；见 PLAN.md 四十二、决策记录 §二十四 |
 | 每帧开销 / 可扩展性 | ✅ 完成 | 2000 实体纯视觉 13 µs/帧；渲染 2225 → 344 µs（实例化）、3295 → 1146 µs（剔除）。剩余瓶颈是 rapier 求解器 |
 | 崩溃面 / 无界增长 | ✅ 完成 | 未知 body 只警告；控制台上限 1000 条；撤销栈 100 步；缓存有界 |
-| 窗口 / 交互延迟 | ✅ 完成 | 空闲不重绘（CPU 0.00%）；拖边框节流重建（43 → 1 次） |
+| 窗口 / 交互延迟 | ✅ 完成 | 空闲不重绘；1 Hz 内容扫描只查 metadata（不读文件内容、不触发视口重画）；拖边框节流重建（43 → 1 次） |
 
 ---
 
-## Agent-Native：AI 智能体深度操控引擎（①② 已落地）
+## Agent-Native：AI 智能体深度操控引擎（①②③ 已落地）
 
 **目标**：智能体能**深度、精确、可验证地**操作引擎 —— 读写项目、运行检查、拿到可机读
 结果，而不是"截图点按钮"。**架构判决式：后续每个架构决策都要过一问 ——「智能体没有
@@ -168,12 +169,15 @@
 - **程序化实跑** —— `--headless`（固定 dt 逐位可复现）；
 - **程序化观察** —— `--screenshot` 离屏 PNG（同机逐字节一致），MCP 以图片块回传；
 - **程序化配置** —— 重力 / 步长 / 渲染参数都在 `project.ron`；
+- **程序化契约** —— `--export-schema` / MCP `schema_read`：36 个落盘类型、字段、默认值、
+  示例、资产引用规则，确定性 JSON；
 - **单一运行时** —— 无头验证与玩家实跑完全一致；
-- **MCP 工具面** —— 8 个工具（读 / 改 / 查 / 看效果 / 看资产）；
-- **安全网** —— 717 条回归测试、每条先证红。
+- **MCP 工具面** —— 9 个工具（读说明书 / 读 / 改 / 查 / 看效果 / 看资产）；
+- **安全网** —— 799 条回归测试、每条先证红。
 
-进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出（`--export-schema`）
-⬜ → ④ 资产 GUID 落地 ✅，`asset_list` ✅（`asset_import` 仍待，导入参数目前只能在编辑器里改）。
+进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出 ✅
+（`--export-schema` + MCP `schema_read`）→ ④ 资产 GUID 落地 ✅，`asset_list` ✅
+（`asset_import` 仍待，导入参数目前只能在编辑器里改）。
 
 ---
 
@@ -189,7 +193,7 @@
 | 统一运行时 | ✅ | `xgame-runtime::World`：场景 / 物理 / 输入 / 脚本 / 音频一条帧管线，固定步长与渲染帧解耦 |
 | 声明式物理 | ✅ | `Entity::physics`（kind / shape / mass / friction / restitution / gravity_scale / sensor）；不声明 = 纯视觉实体 |
 | 物理射线 | ✅ | `raycast` / `raycast_with_filter`（忽略传感器 / 只打动态体 / 排除自身） |
-| 编辑器接入 | ✅ | Inspector 的 Scripts / Physics 区块；工具栏热重载；Console 收脚本日志；Play 时 `input_bridge` 灌键鼠 |
+| 编辑器接入 | ✅ | Inspector 的 Scripts / Physics 区块；脚本自动热重载（改盘上 `.lua`，Play 中 1 秒内重编译）/ 工具栏手动 `⟳ Scripts`；Console 收脚本日志；Play 时 `input_bridge` 灌键鼠 |
 | 角色控制器 | ✅ | 胶囊控制器 + 碰撞事件进脚本，见下方「阶段六·六」 |
 
 > **已知欠账**：`crates/xgame-editor/src/editor_input.rs` 是一套"输入绑定表 → 动作"的
@@ -252,6 +256,7 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
 - [x] 阈值状态机（参数表 + 转移表（AtLeast ≥ / Below <）+ 滞回；坏配置安全退回单剪辑；脚本 `set_anim_param`）
 - [x] 叠加（additive）混合 v1（增量 = 叠加剪辑当前帧 − 第 0 帧；独立时钟；权重 0 逐位一致）
 - [x] 多层混合栈与骨骼遮罩 v1（每层 name / mode / clip / weight / speed / looping / mask；按数组顺序合成；遮罩 = 骨骼子树根名单；`compute_bones_composed` 唯一路径）
+- [x] 脚本直接控制：基础剪辑 / 速度 / 循环 / 淡入 + 叠加层与层栈剪辑（6 个 API；状态机优先，见 PLAN.md 四十八）
 - [ ] morph target（表情等）；逐条转移时长、分层状态机、根运动（Phase B）
 
 > 明确不含：真倒放（负速 = 停在第 0 帧）、逐条转移时长（统一 `fade_time`）、遮罩羽化

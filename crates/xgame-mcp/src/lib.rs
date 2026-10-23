@@ -14,7 +14,7 @@
 //!
 //! - `initialize` — 握手，回显双方都支持的协议版本 + `capabilities.tools`；
 //! - `ping` — 保活；
-//! - `tools/list` — 返回 8 个工具的 JSON Schema（见 [`tools`]）；
+//! - `tools/list` — 返回 9 个工具的 JSON Schema（见 [`tools`]）；
 //! - `tools/call` — 分发调用。
 //!
 //! 其余方法回 `-32601`；通知（无 `id`）不回包；坏 JSON 回 `-32700`。
@@ -201,12 +201,12 @@ mod tests {
         assert!(resp["id"].is_null());
     }
 
-    /// `tools/list` 给出 8 个工具，每个都带描述和 `project` 必填的 JSON Schema。
+    /// `tools/list` 给出 9 个工具，每个都带描述；除 `schema_read` 外都要求 `project`。
     #[test]
     fn tools_list_shape() {
         let resp = send(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#);
         let list = resp["result"]["tools"].as_array().expect("tools 数组");
-        assert_eq!(list.len(), 8, "最小工具集 = 8 个");
+        assert_eq!(list.len(), 9, "最小工具集 = 9 个");
         for tool in list {
             assert!(tool["name"].as_str().is_some());
             assert!(
@@ -220,6 +220,11 @@ mod tests {
                 .as_array()
                 .map(|a| a.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
+            if tool["name"] == "schema_read" {
+                // 字段契约是引擎的，不属于某个项目 —— 不要求 project。
+                assert!(required.is_empty(), "schema_read 不该要求 project");
+                continue;
+            }
             assert!(
                 required.contains(&"project"),
                 "{} 必填参数缺 project",

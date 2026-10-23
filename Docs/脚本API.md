@@ -305,12 +305,52 @@ end
 > 或取分量做标量运算（`p.x + 1.0`）。Lua 标准库的 `math.sin` / `math.cos` /
 > `math.sqrt` / `math.abs` / `math.min` / `math.max` 也可直接用。
 
-### 4.9 动画状态机与叠加层
+### 4.9 动画：剪辑切换、状态机与叠加层
 
 | 函数 | 说明 |
 |---|---|
+| `set_anim_clip(ctx, clip)` | 直接切**基础层**剪辑（走与 Inspector / RON 相同的交叉淡入路径） |
+| `set_anim_speed(ctx, speed)` | 基础层倍率（钳在 0~100；0 = 冻结；状态机模式下由状态表覆盖） |
+| `set_anim_looping(ctx, looping)` | 基础层是否循环（状态机模式下由状态表覆盖） |
+| `set_anim_fade_time(ctx, seconds)` | 换剪辑 / 换状态的淡入时长（钳在 0~10；0 = 硬切） |
 | `set_anim_param(ctx, name, value)` | 写**自己实体**的动画状态机参数（键不存在就创建） |
+| `set_anim_additive_clip(ctx, clip)` | 切叠加层剪辑（硬切；没配叠加层 = no-op） |
 | `set_anim_additive_weight(ctx, value)` | 写**自己实体**叠加层的权重（自动钳在 0~1） |
+
+**直接控制 vs 状态机**：配了可用状态机（`Animator.machine` 的 entry 指得到状态）
+时，`clip` / `speed` / `looping` 由状态表决定 —— 前四个 setter 仍会写字段，但
+实际播放不跟着变（与 Inspector 的语义一致）。要让脚本驱动状态机，用
+`set_anim_param` 推转移条件；要直接切剪辑，先把机器配置去掉。
+
+`set_anim_clip` 只改**基础层剪辑**，不碰 `autoplay` / `speed` / `looping`，所以
+`autoplay = false` 的实体会切完仍停在第一帧。淡入时长统一由 `fade_time` 决定
+（`set_anim_fade_time` 写的就是它）：下一帧动画钟看到剪辑名变化，就从旧剪辑交叉
+淡入；`fade_time = 0` 或切换时没在播 → 硬切。这是一条**与编辑器 / RON 完全同源**
+的路径，脚本层不自己算混合。
+
+所有 setter 只作用于**调用者自己**的实体；没挂动画组件 → 静默 no-op（通用移动
+脚本可以挂在任意实体上，不用先探测组件）。`speed` / `fade_time` 的越界值会被钳住，
+非有限值（NaN / inf）直接忽略。
+
+```lua
+-- 没有状态机时直接切：进门播 Attack（不循环、淡入 0.1s），0.8 秒后回 Idle。
+-- 配了状态机时请改用 set_anim_param 驱动转移（直接 setter 会被状态表覆盖）。
+function start(ctx)
+    set_anim_fade_time(ctx, 0.1)
+    set_anim_looping(ctx, false)
+    set_anim_clip(ctx, "Attack")
+end
+
+function update(ctx)
+    local t = state_get_or(ctx, "attack_t", 0.0) + delta(ctx)
+    state_set(ctx, "attack_t", t)
+    if t >= 0.8 then
+        set_anim_looping(ctx, true)
+        set_anim_clip(ctx, "Idle")
+        state_set(ctx, "attack_t", 0.0)
+    end
+end
+```
 
 状态机（`Animator.machine`）的转移求值在引擎侧每帧自动跑；脚本只负责把
 "现在多快 / 要不要攻击"这类**信号**推进参数表。没挂动画组件或没配机器时
@@ -319,7 +359,8 @@ end
 叠加层（`Animator.additive`）是叠在基础姿势上的一层**增量**（增量 = 叠加剪辑
 当前帧 − 它的第 0 帧），`weight` 决定幅度：`set_anim_additive_weight` 同样在
 没配叠加层时**静默无操作**。经典用法是"受击晃动淡入再淡出"：平时 0，挨打瞬间
-拉到 1 再随时间衰减回去。
+拉到 1 再随时间衰减回去。`set_anim_additive_clip` 换叠加剪辑是**硬切**（叠加层
+没有交叉淡入）；想平滑就先拉权重到 0、换好再拉回。
 
 ```lua
 -- 速度驱动 Idle/Walk/Run（阈值见场景 RON 里的 transitions），
@@ -337,11 +378,14 @@ end
 | 函数 | 说明 |
 |---|---|
 | `set_anim_layer_weight(ctx, name, value)` | 写**自己实体**层栈中按层名匹配的层的权重（自动钳在 0~1） |
+| `set_anim_layer_clip(ctx, name, clip)` | 按层名切该层剪辑（硬切；层名不存在 = no-op） |
 
 层栈（`Animator.layers`）里每层可以是 Additive（加增量）或 Override（整段覆盖），
 配**骨骼遮罩**后就是"只管某个部位"的层（如只盖上半身、腿照走）。脚本按层的
 **名字**查找：重名按栈内顺序取第一个命中，层名不存在 / 没挂动画组件时**静默无操作**
-（同 `set_anim_param`，通用脚本不需要先探测组件）。
+（同 `set_anim_param`，通用脚本不需要先探测组件）。`set_anim_layer_clip` 只改
+该层的剪辑、并把**该层**时钟归零，权重 / 速度 / 循环 / 遮罩都不动；与叠加层
+同款，换层剪辑是硬切。
 
 ```lua
 -- 走路段把 "upper" 层（Override + 遮罩 = 上半身）开到 0.6，其他段归 0 ——

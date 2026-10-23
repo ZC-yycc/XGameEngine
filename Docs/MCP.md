@@ -53,14 +53,34 @@
 
 ---
 
-## 工具参考（8 个）
+## 工具参考（9 个）
 
-最小完备集，覆盖「读 → 改 → 查 → 看效果」闭环。全部工具必填 `project`（含
-`project.ron` 的项目根目录，绝对或相对 server 工作目录）；除 `project_info` /
-`project_check` / `asset_list` / `run_headless` 外都可带 `scene`（项目内相对场景路径，如
-`Scenes/scene.ron`，缺省 = 清单入口场景；**绝对路径与 `..` 一律拒绝**）。
+最小完备集，覆盖「读说明书 → 读 → 改 → 查 → 看效果」闭环。除 `schema_read` 外，
+全部工具必填 `project`（含 `project.ron` 的项目根目录，绝对或相对 server 工作目录）；
+除 `schema_read` / `project_info` / `project_check` / `asset_list` / `run_headless` 外
+都可带 `scene`（项目内相对场景路径，如 `Scenes/scene.ron`，缺省 = 清单入口场景；
+**绝对路径与 `..` 一律拒绝**）。
 
-### 1. `project_info`
+### 1. `schema_read`
+
+写第一个实体之前先读它：场景格式的**机器可读说明书**。
+
+- **入参**：无（格式契约属于引擎，不属于某个项目 —— 不需要 `project`）
+- **返回**（JSON 文本）：与 `xgame-editor --export-schema` **完全同源**
+  （`xgame_core::schema::scene_schema`），含 `format_version` / `engine_version` /
+  `roots`（场景 `.ron` 与预制体 `.prefab.ron`）/ `conventions` / `primitives` /
+  `asset_references` / `types`。
+- **内容规模**：36 个落盘类型。每个类型有 `summary` / `kind` / `default_ron` /
+  `example_ron`；字段有 `name` / `ty` / `required` / `default_ron` / `note`；
+  枚举有 `variants`（unit / struct / newtype 三种形态，各带可解析示例）。
+- **确定性**：没有时间戳 / 随机 ID；同一份代码两次调用逐字节相同。
+- **资产引用**：`asset_references` 明确每个字段在磁盘（`guid://<uuid>`）与内存
+  （项目相对路径）里的形态 —— **MCP 读写走的都是内存形态**，GUID 转换只发生在
+  `ProjectHandle` 的读写边界。
+- **闭环用法**：`schema_read` 拿字段契约 → `scene_read` 看现状 → `scene_write` /
+  `entity_upsert` 改 → `project_check` / `run_headless` 验证。
+
+### 2. `project_info`
 
 读项目概要。
 
@@ -75,7 +95,7 @@
   `run_headless` 截的图按它渲染；泛光与天空数值按 f32 存储，JSON 里是精确加宽的
   f64，比较时按 f32 精度留容差）/ `scenes` / `scripts` / `prefabs` 清单。
 
-### 2. `scene_read`
+### 3. `scene_read`
 
 读场景真身。
 
@@ -83,7 +103,7 @@
 - **返回**：场景的**完整 RON 文本**（与文件同构：同一序列化配置），可原样传回
   `scene_write`。没有摘要、没有私有格式 —— 智能体拿到的就是人类在编辑器里存的那份。
 
-### 3. `scene_write`
+### 4. `scene_write`
 
 整体替换一个场景。
 
@@ -92,7 +112,7 @@
 - **契约**：**先解析、后落盘** —— 坏 RON 返回 `isError`，一个字节都不写。
 - **适用**：成批改结构（加实体、改层级、动灯光）；小改用下面的 `entity_upsert`。
 
-### 4. `entity_upsert`
+### 5. `entity_upsert`
 
 按名字创建或更新单个实体（**部分更新**）。
 
@@ -106,7 +126,7 @@
     局部值就是最终值（挂父本身保世界坐标）；
   - 场景内该名字**重名多个 → 拒绝**（按名字寻址，歧义时猜一个迟早出事）。
 
-### 5. `entity_remove`
+### 6. `entity_remove`
 
 按名字删除单个实体。
 
@@ -115,7 +135,7 @@
 - **语义**：不存在 → `isError`；重名多个 → `isError`（歧义）；**子节点不连坐**，
   会提升到被删实体的父节点下（层级不散架）。
 
-### 6. `project_check`
+### 7. `project_check`
 
 无头验证项目（与编辑器 `xgame-editor --check` 是**同一份** `xgame-core::check_project`）。
 
@@ -130,9 +150,9 @@
   入口场景坏掉 → 工具失败（对应 `--check` 退出码 1）；非入口场景坏掉 → `invalid_scenes`
   （退出码 2），其余场景照常检查。
 - **只读契约**：它**不会**给缺 `.meta` 的资产生成身份证（那会让"检查一遍"改变项目）。
-- **闭环用法**：改（2/3/4/5）→ `project_check` → `has_issues` 必须为 `false`。
+- **闭环用法**：改（3/4/5/6）→ `project_check` → `has_issues` 必须为 `false`。
 
-### 7. `asset_list`
+### 8. `asset_list`
 
 智能体的"资产树视野"：看清项目里有什么资产，再去写 `entity_upsert` 的 `model` /
 `scripts` —— 不需要猜。
@@ -145,7 +165,7 @@
 - **只读**：与 `project_check` 同一条纪律，不写任何文件。
 - **闭环用法**：`asset_list` 找模型路径 → `entity_upsert` 引用它 → `project_check` 验证。
 
-### 8. `run_headless`
+### 9. `run_headless`
 
 无头跑项目 N 帧（**透传**编辑器 `xgame-editor --headless`：spawn 同目录的编辑器
 可执行文件，报告从它的 stdout 原样返回）。
@@ -169,7 +189,7 @@
   `screenshot.render_stats`（`draw_calls` / `culled_instances` /
   `shadow_only_instances` 等）—— 自动取景不会剔东西，`culled_*` 非零说明画面
   里确实少画了（或用了自定义机位）。只有一张图，不给相机参数开洞。
-- **闭环用法**：改（2/3/4/5）→ `project_check`（静态引用）→ `run_headless`
+- **闭环用法**：改（3/4/5/6）→ `project_check`（静态引用）→ `run_headless`
   （动态实跑）→ 看 `report.ok` 与 `error_samples`；调了渲染/材质再看
   `screenshot` 的图。
 
@@ -183,6 +203,9 @@
   直接编辑文件；MCP 写工具只覆盖场景与实体。
 - **构建**：`project_build`（打包 / 编译插件）在计划里，还没上；无头运行已就绪
   （工具 `run_headless` / CLI `xgame-editor --headless`）。
+- **schema 的边界**：`schema_read` 只描述**场景 / 预制体落盘格式**；脚本 API 清单
+  还没有 JSON 导出（当前真相源是人读的 [`脚本API.md`](脚本API.md)）。schema 也不是
+  JSON Schema —— 它是引擎自己的领域目录（默认值是可解析的 RON 示例）。
 - **破坏半径**：`scene` 参数拒绝 `..` / 绝对路径，写入止于项目目录内；重名歧义
   一律拒绝而不是"猜一个"。
 
@@ -193,12 +216,15 @@
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 8 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 9 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
+| `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
+| `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |
 | `crates/xgame-core/src/check.rs` | `check_project()`（编辑器 `--check` 与 `project_check` 共用） |
 | `crates/xgame-core/src/asset.rs` | `AssetGuid` / `AssetMeta` / `AssetDatabase`（`asset_list` 与 `--check` 的资产诊断都读它） |
 | `crates/xgame-editor/src/headless.rs` | 无头运行的实现（CLI `--headless`；`run_headless` 工具 spawn 它） |
 
-回归测试：`cargo test -p xgame-mcp`（30 条：协议 9 条 + 8 个工具的行为与信封；
+回归测试：`cargo test -p xgame-mcp`（32 条：协议 9 条 + 9 个工具的行为与信封；
 其中 `run_headless` 的几条会嵌套 `cargo build -p xgame-editor` 保证被测 exe 新鲜，
-再经真实进程 spawn 跑通）。
+再经真实进程 spawn 跑通）。`schema_read` 另有 `xgame-core` 的 10 条目录测试与
+`xgame-editor` 的 5 条 CLI 测试钉住内容与确定性。

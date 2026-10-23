@@ -16,9 +16,10 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；745 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；799 条 + 7 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
+cargo run -p xgame-editor -- --export-schema --out schema.json  # 场景格式说明书（JSON；无 --out 打 stdout）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
 cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
@@ -39,6 +40,15 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
   `ProjectHandle::load_scene` / `write_scene` / `load_prefab` / `write_prefab`（`core::asset`
   的 `encode_*` / `decode_*`）。别把 GUID 往热路径或 243 个消费点上引；也别让 `.meta` 生成
   混进 `--check`（检查必须只读）。规则见 `Docs/决策记录.md` §十四。
+- **场景 schema**：`xgame-core::schema::scene_schema()` 是 `--export-schema` 与 MCP
+  `schema_read` 的**唯一内容源**（别在编辑器 / MCP 里再抄一份）。目录是手写的，靠
+  **穷举解构 + 枚举穷举匹配 + 默认值 / 示例反解 + 类型引用校验 + ProjectHandle 往返**
+  钉住；给落盘类型加字段必须同步 `schema.rs`，否则测试编译不过。输出必须确定性
+  （无时间戳 / 随机 ID；示例里的 `EntityId` 固定）。规则见 `Docs/决策记录.md` §三十二。
+- **编辑器热重载**：`crates/xgame-editor/src/hot_reload.rs` 每秒只扫内容目录的 metadata；
+  改动由 `EditorState::hot_reload_tick` 应用，**动作后必须 `rebase`**（自己补的 `.meta`
+  不能当外部改动，否则每秒自激）。场景文件永不自动覆盖；`--ui-shot` 不启用。
+  规则见 `Docs/决策记录.md` §三十一。
 
 ## 代码风格约定
 
@@ -111,8 +121,11 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | FXAA | 默认关；显示空间 luma；`textureSampleLevel(..., 0.0)`；平坦区回原值 | §十二 |
 | TAA | 默认关；抖动**只**叠相机（阴影拟合 / 剔除用未抖动矩阵）；重投影要补上一帧抖动；历史必须被邻域钳制；首帧 / 越界直通；抖动是纯函数（截图确定性）；开着时 FXAA 让位 | §二十九 |
 | 资产管线 | 磁盘 GUID / 内存路径；GUID 永不变；`--check` 只读；迁移只替换字面量（不吃注释） | §十四 |
+| 场景 schema | 唯一源 `scene_schema()`；CLI / MCP 同源；输出确定性；运行时字段不进目录；加落盘字段必须同步目录 | §三十二 |
 | 自动保存 | 副本只在 `<项目>/.autosave/`（进 `Scenes/` 会被当场景）；**不算保存**（不动 `saved_snapshot`）；手动保存 / 正常退出即清；写盘格式与 `write_scene` 同源 + 原子写；空闲停帧时靠 `request_repaint_after` 唤醒 | §二十四 |
 | 场景切换 | 只在**帧末**一处应用（`apply_pending_scene_load`）；脚本 `load_scene` 只登记请求（钩子期间场景正被可变借用）；装不上就**不动** + 一条 error 日志；只重置"与实体绑定"的状态（物理 / 粒子 / 音频 autoplay / UI 交互 / `started` / `states`），**日志缓冲与脚本全局变量不能清**；装载来源由宿主注入 `with_scene_loader`，没接是**可诊断的错误** | §二十五 |
 | 关卡顺序 | `build.scenes` 顺序即关卡索引（下标 **0 起**）；**未配置 = 空**（不退回 `[entry_scene]`，脚本 `scene_index()` 返回 nil）；`entry_scene` 仍是唯一启动来源，清单第一项不兼任；`--check` 里"缺场景"算问题（exit 2）、"未列入"只提示（exit 0）；构建前逐关试装，路径规则只有 `normalize_scene_relative`（core） | §二十六 |
 | 预制体实例化 | 装载 trait `SceneLoader` 在 **core**（脚本层要能命名它，runtime 只 `pub use` 转出）；`spawn_prefab` / `spawn_prefab_under` **立即生成**（返回的 ID 当帧可用）；位置是**设置不是叠加**（世界 / 局部两种，子节点相对位置原样保留）；每个新实体逐条推 `ScriptCommand::EntitySpawned`（运行时据此补刚体）；失败三种（没装载器 / 读不到 / 空预制体）各自一条日志 + 返回 `nil`，**不留半个实例** | §二十七 |
+| 动画脚本控制 | 状态机优先（配了可用机器时 `clip/speed/looping` 由状态表决定）；`set_anim_clip` 只写 `Animator.clip` 并复用 `AnimationDriver` 的淡入；叠加层 / 层剪辑硬切；越界值钳住、非有限值忽略 | §三十 |
+| 热重载 | 1 Hz 轮询内容目录（只查 metadata）；`poll` 推进基线、**动作后必须 `rebase`**（防自激）；场景永不自动覆盖；脏材质草稿保留；`--ui-shot` 不启用 | §三十一 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |

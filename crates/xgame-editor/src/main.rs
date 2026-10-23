@@ -58,6 +58,7 @@ mod frame_probe;
 mod game_runtime;
 mod gizmo;
 mod headless;
+mod hot_reload;
 mod input_bridge;
 mod hub;
 mod panels;
@@ -67,6 +68,7 @@ mod prefs;
 mod profiler;
 mod recents;
 mod scene_renderer;
+mod schema_cli;
 mod state;
 
 use std::path::Path;
@@ -964,14 +966,20 @@ fn editor_ui(
     if write_autosave {
         let now = Instant::now();
         session.state.autosave_tick(now);
+        // ── 3a-2. 资产 / 脚本热重载 ──
+        //
+        // 与自动保存同一条纪律：只在**交互会话**里跑。`--ui-shot` 默认只读，
+        // 扫描到开发机上的临时文件会让截图内容不可复现。
+        session.state.hot_reload_tick(now);
         // 空闲停帧时不会有人再来问"到点没"。这里排一次**定时**唤醒
-        // （`request_repaint_after` 不强制立刻重绘），自动保存才能准点发生 ——
-        // 否则它只在"用户一直在拖东西"时触发，恰恰是最不需要它的时候。
-        // 只在 `!live` 排：连续出帧时本来就不缺 frame。
+        // （`request_repaint_after` 不强制立刻重绘），自动保存才能准点发生，
+        // 外部改脚本 / 资产也才能在 1 秒内被发现。两条各排一次，
+        // egui 取其中最早的时刻。只在 `!live` 排：连续出帧时本来就不缺 frame。
         if !live {
             if let Some(wait) = session.state.autosave_wait(now) {
                 ctx.request_repaint_after(wait);
             }
+            ctx.request_repaint_after(session.state.hot_reload_wait(now));
         }
     }
 
@@ -1326,11 +1334,15 @@ fn main() -> Result<(), eframe::Error> {
     //   --headless：0 = 干净跑完 / 1 = 加载失败或参数错误 / 2 = 跑完但有脚本
     //               error 日志或非有限变换
     //   --build：0 = 打包成功 / 1 = 失败（入口缺失 / 发布清单有装不起来的关卡 / 找不到播放器）
+    //   --export-schema：0 = 导出成功 / 1 = 参数或序列化错误
     // 详见 xgame-core `check` 模块头与 `headless` 模块头（验证 / 运行逻辑在
     // 那里，这里只管分发与退出码）。
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
         match args.first().map(String::as_str) {
+            Some("--export-schema") => {
+                std::process::exit(crate::schema_cli::cli(&args[1..]));
+            }
             Some("--check") => {
                 let path = args
                     .get(1)

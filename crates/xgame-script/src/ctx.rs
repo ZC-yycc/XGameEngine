@@ -1375,8 +1375,92 @@ impl GameCtx<'_> {
     }
 
     // -----------------------------------------------------------------------
-    // 动画状态机
+    // 动画：基础层直接控制 + 状态机 + 叠加层 + 层栈
     // -----------------------------------------------------------------------
+
+    /// 本实体的 animator（没挂 = `None`）。
+    ///
+    /// 新方法共用这一处借用，避免每个 setter 重复三行 `entity_index` +
+    /// `get_mut` + `as_mut`。老方法保留原样，不为一处小重构扩大改动面。
+    fn animator_mut(&mut self) -> Option<&mut xgame_core::Animator> {
+        let index = self.entity_index()?;
+        self.scene.entities.get_mut(index)?.animator.as_mut()
+    }
+
+    /// 切换**基础层**剪辑（直接控制，不经状态机）。
+    ///
+    /// 与编辑器里改 `Animator.clip` 走同一条路径：渲染侧 `AnimationDriver`
+    /// 下一帧发现剪辑名变了，就从旧剪辑交叉淡入（时长 = `fade_time`）。
+    ///
+    /// **状态机优先**：配了可用机器（`Animator.machine` 的 entry 指得到状态）时，
+    /// 基础剪辑由状态表决定，这里写入的 `clip` 不会生效 —— 与 Inspector 的语义
+    /// 一致。要直接控制，先移除机器配置；状态机驱动的切换用 `set_anim_param`。
+    ///
+    /// 不改变 `autoplay` / `speed` / `looping`：只想换剪辑的调用方不该被悄悄
+    /// 改掉播放参数（`autoplay = false` 时切完仍停在第一帧）。
+    pub fn set_anim_clip(&mut self, clip: &str) {
+        if let Some(animator) = self.animator_mut() {
+            animator.clip = clip.to_owned();
+        }
+    }
+
+    /// 基础层播放速度（`1.0` = 原速，`0` = 冻结）。
+    ///
+    /// 非有限值忽略；钳在 `[0, 100]` —— 脚本算错时不该把时钟推成 `inf`。
+    /// 状态机模式下由状态表覆盖，见 [`Self::set_anim_clip`]。
+    pub fn set_anim_speed(&mut self, speed: f32) {
+        if !speed.is_finite() {
+            return;
+        }
+        if let Some(animator) = self.animator_mut() {
+            animator.speed = speed.clamp(0.0, 100.0);
+        }
+    }
+
+    /// 基础层是否循环（`false` = 播到末尾停在最后一帧）。
+    ///
+    /// 状态机模式下由状态表覆盖，见 [`Self::set_anim_clip`]。
+    pub fn set_anim_looping(&mut self, looping: bool) {
+        if let Some(animator) = self.animator_mut() {
+            animator.looping = looping;
+        }
+    }
+
+    /// 换剪辑的交叉淡入时长（秒，`0` = 硬切）。
+    ///
+    /// 非有限值忽略；钳在 `[0, 10]`。它同时管状态机换状态的过渡（v1 全局一条），
+    /// 与 Inspector / RON 里的 `fade_time` 是同一个字段。
+    pub fn set_anim_fade_time(&mut self, seconds: f32) {
+        if !seconds.is_finite() {
+            return;
+        }
+        if let Some(animator) = self.animator_mut() {
+            animator.fade_time = seconds.clamp(0.0, 10.0);
+        }
+    }
+
+    /// 切换**叠加层**剪辑（增量层）。
+    ///
+    /// 没配叠加层 → 静默 no-op（与 `set_anim_additive_weight` 同款容错）。
+    /// 叠加层换剪辑是**硬切**（没有交叉淡入）；想平滑就先 `set_anim_additive_weight`
+    /// 拉到 0、换好再拉回。权重 / 速度 / 循环不变。
+    pub fn set_anim_additive_clip(&mut self, clip: &str) {
+        if let Some(add) = self.animator_mut().and_then(|a| a.additive.as_mut()) {
+            add.clip = clip.to_owned();
+        }
+    }
+
+    /// 按层名切换**层栈**里的剪辑。
+    ///
+    /// 重名按栈内顺序取第一个命中；层名不存在 / 没挂 animator → 静默 no-op。
+    /// 与叠加层同款：换层剪辑是硬切，权重 / 速度 / 循环 / 遮罩不变。
+    pub fn set_anim_layer_clip(&mut self, layer: &str, clip: &str) {
+        if let Some(layers) = self.animator_mut().map(|a| &mut a.layers) {
+            if let Some(l) = layers.iter_mut().find(|l| l.name == layer) {
+                l.clip = clip.to_owned();
+            }
+        }
+    }
 
     /// 写本实体状态机的参数（键不存在就创建）。
     ///
@@ -1617,6 +1701,110 @@ pub(crate) mod tests {
         }
         assert!(scene.entities[0].material.is_none());
         assert!(scene.entities[0].material_asset.is_none(), "空串 = 清空引用");
+    }
+
+    /// 动画 setter：只写自己的 animator；越界 / 非有限值被钳住或忽略；
+    /// 没挂 animator / 层名不存在时静默 no-op。
+    #[test]
+    fn animation_setters_clamp_and_apply_to_the_owning_entity_only() {
+        use xgame_core::{AnimAdditive, AnimLayer, Animator};
+
+        let mut scene = Scene::new("anim");
+        let mut owner_animator = Animator::new("Walk");
+        owner_animator.additive = Some(AnimAdditive {
+            clip: "Walk".into(),
+            ..Default::default()
+        });
+        owner_animator.layers.push(AnimLayer {
+            name: "upper".into(),
+            clip: "Walk".into(),
+            ..Default::default()
+        });
+        let owner = scene.add_entity(Entity::new("owner").with_animator(owner_animator));
+        scene.add_entity(Entity::new("other").with_animator(Animator::new("Walk")));
+        let plain = scene.add_entity(Entity::new("plain"));
+
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "AnimProbe",
+                scene_name: "",
+                scene_order: &[],
+                loader: None,
+                clock: None,
+                entity: owner,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+
+            ctx.set_anim_clip("Run");
+            ctx.set_anim_speed(f32::NAN); // 非有限值：忽略，保持原值
+            assert_eq!(ctx.scene.entities[0].animator.as_ref().unwrap().speed, 1.0);
+            ctx.set_anim_speed(-2.0);
+            assert_eq!(ctx.scene.entities[0].animator.as_ref().unwrap().speed, 0.0);
+            ctx.set_anim_speed(999.0);
+            assert_eq!(ctx.scene.entities[0].animator.as_ref().unwrap().speed, 100.0);
+            ctx.set_anim_looping(false);
+            ctx.set_anim_fade_time(f32::INFINITY); // 非有限值：忽略
+            assert_eq!(
+                ctx.scene.entities[0].animator.as_ref().unwrap().fade_time,
+                0.25
+            );
+            ctx.set_anim_fade_time(-1.0);
+            ctx.set_anim_additive_clip("Survey");
+            ctx.set_anim_layer_clip("upper", "Run");
+            ctx.set_anim_layer_clip("missing", "Nope"); // 层名不存在：no-op
+        }
+
+        let owner_animator = scene.entities[0].animator.as_ref().unwrap();
+        assert_eq!(owner_animator.clip, "Run");
+        assert_eq!(owner_animator.speed, 100.0);
+        assert!(!owner_animator.looping);
+        assert_eq!(owner_animator.fade_time, 0.0);
+        assert_eq!(owner_animator.additive.as_ref().unwrap().clip, "Survey");
+        assert_eq!(owner_animator.layers[0].clip, "Run");
+
+        let other_animator = scene.entities[1].animator.as_ref().unwrap();
+        assert_eq!(other_animator.clip, "Walk", "不能改到别的实体");
+        assert_eq!(other_animator.speed, 1.0);
+        assert!(other_animator.looping);
+        assert_eq!(other_animator.fade_time, 0.25);
+        assert!(other_animator.additive.is_none());
+        assert!(other_animator.layers.is_empty());
+
+        // 没挂 animator 的实体：全部静默 no-op，不 panic、不写日志。
+        {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "AnimProbe",
+                scene_name: "",
+                scene_order: &[],
+                loader: None,
+                clock: None,
+                entity: plain,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            ctx.set_anim_clip("Run");
+            ctx.set_anim_speed(2.0);
+            ctx.set_anim_looping(false);
+            ctx.set_anim_fade_time(0.1);
+            ctx.set_anim_additive_clip("Survey");
+            ctx.set_anim_layer_clip("upper", "Run");
+        }
+        assert!(logs.is_empty(), "no-op 不该刷日志: {logs:?}");
     }
 
     /// 粒子运行态 API：开关发射 / burst / rate，全部落在组件的运行态字段上。

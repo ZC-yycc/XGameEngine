@@ -4465,7 +4465,312 @@ Stop 时补一句"Play 期间场景切到了 X"，否则用户会以为切过去
 
 - **动画 morph target**（P1 #12）：表情 / 面部，需要带 morph 的样例资产。
 - **手柄输入**（P1 #15）：要硬件才能验证手感。
-- **动画剪辑切换的脚本 API**（P1 #13 最后一条缺口）：`crossfade` 已存在，只差暴露。
+- **动画剪辑切换的脚本 API**（P1 #13 最后一条缺口）：`crossfade` 已存在，只差暴露
+  （已在四十八落地）。
 - **CI**（差距分析说"半小时、零风险"）：`.github/workflows` + `check` / `clippy` /
   `test` / `--check` / `--headless`。**本轮没做**：容器里跑不了 GitHub Actions，
   交付物无法自验（按纪律不写"已验证"）。
+
+---
+
+## 四十八、动画脚本控制：六个 API 补齐最后一块纯软件缺口（2026-10-23）
+
+### 一、为什么是这一刀
+
+`Docs/差距分析.md` 的 P1 #13 只剩两项：
+
+- **手柄 / 触摸**：要硬件才能验证手感，本轮无法闭环；
+- **动画剪辑切换**：`crossfade` 已在编辑器与 RON 里存在，脚本只能推状态机参数
+  （`set_anim_param`）或调层权重，缺"直接换剪辑"的入口。
+
+选后者的唯一理由是**可当场实跑验证**。动工前核对了三件事：
+
+1. `xgame-core` 的 `Animator` 已经有 `clip / speed / looping / autoplay / fade_time /
+   machine / additive / layers`，全是普通字段 —— 不需要新数据结构。
+2. `xgame-render::AnimationDriver::tick` 已经把"剪辑名变化 → 时间归零 → 按
+   `fade_time` 交叉淡入"做成唯一路径；状态机优先的解析也在这一个函数里
+   （`active_machine()` 可用时读状态表，否则读 `Animator` 字段）。
+3. 脚本层已有 `set_anim_param` / `set_anim_additive_weight` / `set_anim_layer_weight`，
+   注册名 149 个；补的只是"剪辑 + 基础播放参数"这几个字段写入。
+
+所以这一刀不新增依赖、不改架构、不新增第二份混合实现。
+
+### 二、做了什么
+
+1. **`xgame-script/src/ctx.rs`**：
+   - 新增私有 `animator_mut()`（`entity_index` + `get_mut` + `as_mut` 收在一处）；
+   - 新增 6 个 `GameCtx` 方法：`set_anim_clip` / `set_anim_speed` /
+     `set_anim_looping` / `set_anim_fade_time` / `set_anim_additive_clip` /
+     `set_anim_layer_clip`；
+   - `speed` 钳 `[0, 100]`、`fade_time` 钳 `[0, 10]`，NaN / inf 忽略；
+   - 没挂 animator / 没配叠加层 / 层名不存在 → 静默 no-op。
+2. **`xgame-script/src/lua_api.rs`**：`register_animation` 注册 6 个 Lua 全局名
+   （注册名 149 → 155；`lua_api` 129 + `ui_api` 26）。
+3. **测试**：`lua_host::tests::script_controls_base_clip_additive_and_layers`
+   （真实 Lua 钩子走完六个 API）+ `ctx::tests::animation_setters_clamp_and_apply_to_the_owning_entity_only`
+   （钳制 / 忽略非有限值 / 只改自己实体 / 缺组件与缺层名 no-op）。
+4. **文档**：`Docs/脚本API.md` 4.9 / 4.10、`README.md` 动画章节、`ROADMAP.md`
+   第七阶段、`Docs/差距分析.md` P1 #13、`Docs/决策记录.md` §三十。
+
+**没有改** `xgame-core` 的 `Animator` 与 `xgame-render` 的 `AnimationDriver` ——
+它们已经是唯一真相源，这一刀只是把脚本接到字段上。
+
+### 三、关键取舍
+
+- **状态机优先，且不自动停用机器**：`tick` 原本就是"有可用机器读状态表、没有才读
+  `Animator` 字段"。脚本直接 setter 在机器模式下只写字段、不改变实际播放 ——
+  与 Inspector 语义一致。静默移除机器会让"为什么我的状态机没了"极难排查；
+  要直接控制就明确删掉机器配置。
+- **`set_anim_clip` 只换基础剪辑**：不碰 `autoplay` / `speed` / `looping`。否则
+  "只想换动作"的调用会把"摆好第一帧再播"的 `autoplay = false` 悄悄改掉。
+- **叠加层 / 层栈是硬切**：驱动器对它们只有独立时钟、没有 `Prev`；换剪辑只把该层
+  时钟归零。想平滑就先拉权重到 0、换好再拉回 —— 不为这一刀扩多层混合栈。
+- **钳制而不是报错**：脚本算错速度 / 淡入时不该把时钟推成 `inf`，也不该刷日志。
+- **不做 getter / 逐调用 fade / 强制状态**：getter 要先定义"配置值还是实际值"；
+  逐调用 fade 要改 `AnimationDriver` 的公开签名；强制状态要绕开"状态机优先"。
+  三者都等真实需求。
+
+### 四、验证（全部实跑）
+
+- **先红后绿**：新增 Lua 测试在旧实现下报
+  `attempt to call a nil value (global 'set_anim_clip')`，再补实现。
+- **全量测试**：`771 passed / 0 failed / 7 ignored`（上一轮 769，净增 2 条）；
+  clippy `-D warnings` 0 告警。
+- **无头端到端**（`target/e2e_anim`，Fox 单剪辑、无状态机）：
+  - `--check target/e2e_anim` 退出码 0；
+  - `--headless --frames 5 --dump-scene target/e2e_anim/after.ron target/e2e_anim`
+    退出码 0，报告 `ok: true`、`entities: 1`、`frames: 5`、`error: 0`、`warn: 0`、
+    `time_scale: 1.0`；
+  - dump 的 animator 六项都落地：`clip: "Run"`、`speed: 1.5`、`looping: false`、
+    `fade_time: 0.05`、叠加层 `clip: "Survey"`、`upper` 层 `clip: "Walk"`
+    （权重 / 速度 / 循环 / 遮罩保持原值）。
+- **未验证**：状态机模式下"直接 setter 不生效"没有新增"真实 Lua + 状态机"组合
+  测试；解析顺序由既有 `driver_uses_state_speed_and_looping_over_animator_fields`
+  与 entry 覆盖测试钉住。逐调用 fade、getter、morph、手柄均未做。
+
+### 五、刻意没做
+
+- 逐调用淡入（每次 `set_anim_clip` 带一个时长参数）：要改 `AnimationDriver` 的输入，
+  且 v1 的全局 `fade_time` 已经够用。
+- 强制切状态 / 绕过状态机：直接 setter 的语义边界已经写清，不额外造一条"忽略机器"
+  的后门。
+- getter（`get_anim_clip` 等）：返回配置值还是驱动器实际值没有定论，先不加。
+- morph target（P1 #12）与手柄（P1 #15）：前者缺带 morph 的样例资产，后者缺硬件。
+
+### 六、下一步候选
+
+- **CI**（差距分析说"半小时、零风险"）：`.github/workflows` + `check` / `clippy` /
+  `test` / `--check` / `--headless`。仍需能跑 GitHub Actions 的环境才能自验。
+- **动画 morph target**（P1 #12）：先找 / 造一个带 morph 的 glTF 样例。
+- **手柄输入**（P1 #15）：要硬件。
+- **动画 getter / `crossfade` 脚本化**：等出现"按当前剪辑做分支"的真实需求再定。
+
+---
+
+## 四十九、资产 / 脚本热重载：1 Hz 轮询 + 动作后 rebase（2026-10-23）
+
+### 一、为什么是这一刀
+
+`Docs/差距分析.md` 的 P1 里，资产热重载是**唯一不依赖外部条件的纯软件缺口**
+（morph 缺带 morph 的样例资产、手柄缺硬件）。它也是编辑器日常使用里最刺眼的一处：
+
+- 改 `.lua` 只能退出 Play、点工具栏 **⟳ Scripts**，或者重启项目；
+- 新拷进来的模型 / 贴图 / 材质要手动点资源面板的 ⟳；
+- 外部工具改完 `.meta` 后，渲染侧缓存不失效，画面纹丝不动；
+- 反过来，如果粗暴地"检测到变化就重载场景"，用户未保存的编辑会被直接冲掉。
+
+这一轮把"什么时候该重载、重载什么、什么绝对不能重载"做成一条可测试的规则。
+
+### 二、做了什么
+
+1. **`crates/xgame-editor/src/hot_reload.rs`（新文件）**
+   - `ProjectWatcher`：持有上一轮文件快照（`项目相对路径 / mtime / 长度`）与下次扫描时刻；
+   - `scan()`：只扫清单声明的目录（脚本 / 场景 / 预制体 / 模型 / 贴图 / 音频 / shader），
+     重叠目录去重；只读 `metadata`，不读文件内容；
+   - `classify()`：`.prefab.ron` → Prefab；Scenes 下的 `.ron` → Scene；Scripts 下的 `.lua`
+     → Script；其余 → Asset。同一文件被多个根扫到时取更具体的类别；
+   - `diff()`：按路径归并比较，产出新增 / 修改 / 删除；
+   - `poll()` 到点才扫、返回差异并**推进基线**；`rebase()` 在动作跑完后重扫，把本轮
+     自己写下的文件（主要是 `ensure_asset_metas` 补的 `.meta`）吞进基线；
+   - `SKIP_DIRS`（`.autosave` / `target` / `Build` / `Plugins` / `.git`）、不跟随符号链接、
+     递归深度上限 32。
+2. **`EditorState` 接线**
+   - `hot_reload` 字段 + 构造时以当前磁盘为基线（打开项目不该把已有文件当"刚变化"）；
+   - `hot_reload_tick(now)`：脚本 → 编辑态刷清单 / Play 中 `reload_scripts()`；资产 →
+     `refresh_assets()` + `renderer.invalidate_assets()`；预制体 → 只 `refresh_assets()`；
+     场景 → 只写 debug 日志；随后 `rebase()`；
+   - `reload_open_material()`：当前材质草稿干净 → 丢弃并等下次读盘；脏 → 保留 + warning；
+   - `hot_reload_wait(now)`：给主循环排定时唤醒。
+3. **主循环（`main.rs`）**
+   - 与自动保存同在 `write_autosave` 分支：`--ui-shot` 等只读会话不驱动；
+   - `!live` 时 `request_repaint_after(hot_reload_wait(now))`，空闲停帧也能在 1 秒内发现
+     外部改动；不强制立即重绘。
+4. **测试（12 条）**
+   - watcher 6 条：增 / 改 / 删、没变化为空、资产与 `.meta`、预制体 / 场景分类、忽略自身
+     产物目录、rebase 防自激；
+   - `EditorState` 6 条：打开项目时自补的 `.meta` 不算外部改动、编辑态刷脚本清单、
+     Play 中重编译、场景不被覆盖、干净材质草稿重载、脏材质草稿保留。
+
+### 三、刻意的取舍
+
+- **轮询而不是 `notify` / `ReadDirectoryChangesW`**：不引平台相关依赖，不需要一套事件去抖；
+  内容目录是几棵小树，1 Hz 的 `metadata` 扫描成本远小于维护事件语义的成本。
+- **判据不含哈希 / 文件内容**：多报一次只是多一次重载（加载器自己有缓存），漏报才是 bug；
+  长度用来补 mtime 粒度粗的情况。
+- **`poll` 推进基线 + 动作后 `rebase`**：少了 rebase，`ensure_asset_metas` 写下的 `.meta`
+  会每秒被当成"外部新增"，形成自激循环。测试专门钉住这条。
+- **场景文件永不自动覆盖**：磁盘变了只记 debug。Scenes 菜单现扫，新场景照样出现；
+  "重载场景"必须是显式动作，自动做就是拿未保存编辑冒险。
+- **预制体只刷清单，不热替换已有实例**：实例是普通实体，热替换要先定义字段保留规则
+  （Unity 也要 Prefab Mode）。没有语义的自动替换比不换更危险。
+- **`project.ron` 不热重载**：项目级配置需要重建运行时；重启编辑器是最可预期的语义。
+- **已解码音频不换**：kira 没有公开的解码缓存失效口。
+- **脏材质草稿不覆盖**：外部改动只提示，Revert 才是载入磁盘版的动作。
+- **只读会话不启用**：`--ui-shot` 的截图不能被开发机上的临时文件影响。
+
+### 四、验证（全部实跑）
+
+- **全量测试**：`783 passed / 0 failed / 7 ignored`（上一轮 771，净增 12 条）；
+  clippy `-D warnings` 0 告警。
+- **无头端到端**：
+  - `--check projects/SampleScene` 退出码 0（`scenes=1 entities=24 ...`，全部引用存在）；
+  - `--headless --frames 30 projects/SampleScene` 退出码 0，`ok: true`、`entities: 24`、
+    `error: 0`、`warn: 0`、`non_finite_transforms: 0`；
+  - `--ui-shot ... --ui-size 1280x800` 两次都退出码 0，画面正常。
+- **截图确定性说明**：两次 `--ui-shot` 的 PNG 哈希不同，差异来自状态栏 FPS 与场景里的
+  动画 UI（血条）—— `--ui-shot` 本来就不承诺逐字节一致；逐字节契约属于无头
+  `--screenshot`，本轮没有改动那条路径。
+- **未验证**：没有用真实鼠标在 GUI 里走"外部保存脚本 → 控制台自动出现重编译日志"一遍
+  （UI 层只在单元测试里驱动 `EditorState`）；资产缓存失效后的**画面变化**没有做像素级
+  A/B（缓存失效 / 列表刷新有测试，渲染正确性由既有截图测试覆盖）。
+
+### 五、刻意没做 / 已知边界
+
+- 没有编辑器内的资产 rename / move / delete（仍属资产管线 P2）；
+- 没有 shader 文件热重载（`.wgsl` 目前是内联字符串，见差距分析 P2 Shader 工具链）；
+- 没有"重载当前场景"按钮（要先解决未保存编辑的确认语义）；
+- 扫描只覆盖清单里声明的目录；用户把资产放到目录外不会被检测（这是清单的契约）；
+- 1 Hz 是固定值，没有暴露成偏好项：先看真实使用里"太快 / 太慢"的反馈再决定是否可调。
+
+### 六、下一步候选
+
+- **CI**：`.github/workflows` + `check` / `clippy` / `test` / `--check` / `--headless`；
+  仍需能跑 GitHub Actions 的环境才能自验。
+- **动画 morph target**（P1 #12）：先找 / 造一个带 morph 的 glTF 样例。
+- **手柄输入**（P1 #15）：要硬件。
+- **资产管线剩余项**：编辑器内 rename / move / delete、音频流式播放。
+- **Shader 工具链**：把内联 WGSL 抽成 `.wgsl` 文件后，热重载才有明确对象。
+
+---
+
+## 五十、场景 schema 导出（Agent-Native ③，2026-10-23）
+
+### 一、为什么做这一轮
+
+Agent-Native 的 ③ 是「机器可读契约」：智能体能读写 RON 不等于知道**该写什么**。
+字段名、可选组件、serde 默认值、枚举变体、资产引用的两种形态散在十几个 Rust 类型里，
+智能体只能靠 `--check` 的报错反推，试错成本高（一次坏 RON 就是一次加载失败）。
+这一轮把「场景格式说明书」做成可导出的 JSON，并同时给 MCP 一个 `schema_read` ——
+智能体在写第一个实体之前就能拿到完整契约。
+
+它也是后续所有 Agent 能力的地基：`scene_write` / `entity_upsert` 的参数语义、资产路径
+规则、默认值，都可以引用同一份目录，不必在工具描述里各写一份。
+
+### 二、做了什么
+
+1. **`crates/xgame-core/src/schema.rs`（唯一内容源）**
+   - `scene_schema()` 返回 `SchemaDoc`：`format_version` / `engine_version` /
+     `roots`（场景 `.ron` + 预制体 `.prefab.ron`）/ `conventions` / `primitives` /
+     `asset_references` / `types`；
+   - 36 个落盘类型：Scene / Entity / Transform / Light / 动画 / 物理 / 音频 / 材质 /
+     角色 / 相机 / UI / 粒子 / 行为参数；每个类型带 `summary` / `kind` /
+     `default_ron` / `example_ron`，字段带 `name` / `ty` / `required` /
+     `default_ron` / `note`，枚举变体带形态与可解析示例；
+   - 示例与默认值都由**真实 Rust 值序列化**得到（不是手写字符串）；实体示例把
+     `EntityId` 固定为 1，避免全局原子计数器让两次导出不同；
+   - 运行时字段（`Entity.components` / `UiElement.state` / `ParticleEmitter.burst`）
+     明确排除：写进 RON 也不会生效。
+2. **`crates/xgame-editor/src/schema_cli.rs`（CLI 出口）**
+   - `--export-schema [--out <path>]`；无 `--out` 打 stdout（末尾一个换行），有则写文件
+     并自动建父目录，stdout 只回一行确认；
+   - `serde_json::to_string_pretty` + 确定性内容；参数错误退出码 1，成功 0，与
+     `--check` 的 0/1/2 语义互不干扰。
+3. **MCP `schema_read`（第 9 个工具）**
+   - 与 CLI 调同一个 `scene_schema()`，只是走 MCP 文本通道；**不需要 `project`**；
+   - 工具描述里直接写「写场景之前先读它」，并把闭环串成
+     `schema_read → scene_read → scene_write / entity_upsert → project_check / run_headless`。
+4. **防漂移测试（核心）**
+   - 穷举解构每个结构体、穷举匹配每个枚举：新增 / 删除字段或变体会让测试**编译不过**；
+   - 每个 `default_ron` 反解回真实类型并与 `Default` 比较；每个 `example_ron` 反解并
+     断言关键字段；
+   - 每个枚举变体示例必须解析成**那个**变体；
+   - 字段 `ty` 里的类型引用必须能在目录或基元表里找到（防悬空文档）；
+   - 新增项目往返测试：示例场景 / 预制体经 `ProjectHandle::write_scene` /
+     `write_prefab` 落盘（资产引用变 `guid://`）再 `load_*` 读回（变回路径），
+     逐字段一致，且同一份场景再写一次文本不变。
+
+### 三、刻意的取舍
+
+- **手写目录，而不是 derive / 反射**：serde 的运行期没有字段元数据；为此引入 proc
+  macro 或新依赖，收益不如「穷举解构测试」直接 —— 漏写一个字段是编译错误，不是
+  运行期才发现的文档漂移。
+- **目录放 core，JSON 放 editor**：core 的落盘格式是 RON，刻意不依赖 `serde_json`；
+  编辑器本来就带它（插件构建的 `cargo --message-format=json` 在用）。MCP 只依赖 core，
+  所以 `schema_read` 直接序列化同一个结构体，不经过编辑器。
+- **输出确定性是硬契约**：没有时间戳 / 随机 ID；示例 ID 固定；`BTreeMap` 保证参数表
+  顺序稳定。这样 schema 可以进版本库做 diff，智能体也能用哈希判断引擎格式有没有变。
+- **示例必须能走真实读写边界**：只测 `ron::from_str` 会漏掉 GUID 编码 / 解码与默认值
+  补齐；项目往返测试专门钉这一层。
+- **资产引用只描述、不转换**：schema 里的 `example_ron` 是**内存形态**（项目相对路径）；
+  `guid://` 转换只发生在 `ProjectHandle` 的读写边界。不要把 GUID 写进 schema 示例，
+  否则智能体会以为磁盘 / 内存是同一套字符串。
+- **`UiElement` 用「省略字段的有效默认值」**：`UiElement::default()` 是面板预设
+  （`interactable: false`），而省略字段反序列化得到透明样式 + `interactable: true`。
+  目录描述的是后者（智能体写 RON 时的真实语义），并用测试把两者都钉住。
+- **不做 JSON Schema**：这是引擎自己的领域目录（默认值是可解析的 RON 示例、枚举带
+  变体形态），不是通用 JSON Schema；硬套会让「默认值 / 示例」失去可解析性。
+- **CLI 退出码独立**：`--export-schema` 只有 0/1（成功 / 参数或序列化错误），不复用
+  `--check` 的 2 —— 智能体不会把「schema 导出失败」误判成「项目有问题」。
+
+### 四、验证（全部实跑）
+
+- **全量测试**：`799 passed / 0 failed / 7 ignored`（上一轮 783，净增 16 条：
+  core schema 10（含项目往返 1）+ CLI 5 + MCP 1）；clippy `-D warnings` 0 告警；
+  `cargo check --workspace --all-targets` 通过。
+- **schema 导出（二进制级）**：
+  - `--export-schema --out a.json` 与 `--out b.json` 两次都退出码 0，文件 76,685 字节；
+  - 直接跑 `xgame-editor.exe --export-schema` 重定向到 stdout，stderr 为空，退出码 0；
+  - 三份内容 SHA256 全部为
+    `4DC0B0A990436630D564F9DCDF530C6D80A277BAD55F82811F9A47C89B419207`；
+  - 用 Python 按 UTF-8 解析通过：`format_version = 1`、`types = 36`、根文件为
+    Scene / Prefab。
+- **无头端到端**：
+  - `--check projects/SampleScene` 退出码 0：
+    `scenes=1 entities=24 lights=1 script_refs=5 audio_refs=1 material_refs=7 assets=15`，
+    `OK (all referenced assets exist)`；
+  - `--headless --frames 30 projects/SampleScene` 退出码 0：`ok: true`、`entities: 24`、
+    `error: 0`、`warn: 0`、`non_finite_transforms: 0`、`total_time ≈ 0.5`。
+- **测试覆盖**：`cargo test -p xgame-mcp` 32 条全绿；`xgame-core` 的 schema 测试
+  10 条全绿；`xgame-editor` 的 `schema_cli` 5 条全绿。
+- **MCP 进程级**：用 Python 起真实 `xgame-mcp.exe`，走
+  `initialize → tools/list → tools/call schema_read`：工具数 9、首个是 `schema_read`，
+  返回 JSON 可解析（`format_version = 1`、`types = 36`），进程正常退出。
+
+### 五、刻意没做 / 已知边界
+
+- **脚本 API 清单导出**还没做：支柱 8 的另一半，当前真相源仍是 `Docs/脚本API.md`；
+- **没有 schema 版本迁移器**：`SCHEMA_FORMAT_VERSION` 只在改语义 / 删字段 / 改默认值时
+  递增，旧版本的 JSON 不提供自动升级；
+- **目录是手写的**：加落盘字段时测试会编译不过，但 `summary` / `note` 的文案仍要人写；
+- **不覆盖运行时字段**：`components` / `state` / `burst` 刻意不在目录里，智能体写进去
+  也不会生效（工具描述已说明）；
+- **没有在真实 MCP 客户端里走一遍**：`schema_read` 由协议层单元测试与共享目录测试覆盖，
+  未接 Cursor / Claude 做端到端交互。
+
+### 六、下一步候选
+
+- **脚本 API 清单导出**：把 `GameCtx` 的注册名 / 参数 / 返回值导出成 JSON，补完支柱 8；
+- **`asset_import`**：让智能体经 MCP 改 `.meta` 导入设置（当前只能编辑器里改）；
+- **CI**：`.github/workflows` + `check` / `clippy` / `test` / `--check` / `--headless`；
+- **schema 快照测试**：把导出的 JSON 存一份进仓库，格式变化时 diff 直接可见
+  （当前用「两次导出相同 + 内容断言」防漂移，快照是更直观的补充）。

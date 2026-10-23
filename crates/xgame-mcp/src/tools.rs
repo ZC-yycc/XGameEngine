@@ -1,10 +1,11 @@
-//! # 八个工具 —— 智能体操纵引擎的最小完备集
+//! # 九个工具 —— 智能体操纵引擎的最小完备集
 //!
-//! 刻意小：**读清单 → 读场景 → 改（整体或单实体）→ 验证** 四步闭环，
+//! 刻意小：**读说明 → 读清单 → 读场景 → 改（整体或单实体）→ 验证** 五步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
 //! 智能体拿得到、改得动、写得回，不需要我们发明私有格式。验证有两条腿：
 //! `project_check` 管静态引用（模型 / 脚本在不在盘上），`run_headless` 管
-//! 动态实跑（真的跑 N 帧、脚本真的没报错）。
+//! 动态实跑（真的跑 N 帧、脚本真的没报错）。`schema_read` 是写之前的说明书：
+//! 字段名 / 默认值 / 枚举变体 / 资产引用规则，不用靠试错反推。
 //!
 //! # 并发写警告（所有写工具共有）
 //!
@@ -38,7 +39,7 @@ fn fail(message: impl Into<String>) -> CallError {
 
 /// 一次工具调用的输出：一段文本 +（可选的）随附图片。
 ///
-/// 八个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 九个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
 /// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
 /// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
 /// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
@@ -67,7 +68,7 @@ impl ToolOutput {
     }
 }
 
-/// 8 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 9 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -83,6 +84,14 @@ pub fn schemas() -> Vec<Value> {
     let write_caveat = "注意：编辑器不监视文件，写入不会热加载到已打开的编辑器；编辑器之后的保存也会覆盖本工具的修改。同一时刻只应有一边在写。";
 
     vec![
+        json!({
+            "name": "schema_read",
+            "description": "读出场景格式的机器可读说明书（JSON）：根文件结构、全部类型 / 字段 / 是否必填 / 省略默认值 / 可解析示例、枚举变体、资产引用的磁盘与内存形态。不需要 project 参数。写场景之前先读它 —— 比猜字段名、靠 project_check 报错反推快得多。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        }),
         json!({
             "name": "project_info",
             "description": "读取项目概要：名字、根路径、入口场景、窗口与运行时配置（重力/固定步长）、场景/脚本/预制体清单。探索项目的第一步。",
@@ -188,6 +197,7 @@ pub fn schemas() -> Vec<Value> {
 /// 分发一次工具调用：`Ok` 是工具输出（文本，可能带图）；`Err` 见 [`CallError`]。
 pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
     match name {
+        "schema_read" => schema_read(args).map(ToolOutput::text),
         "project_info" => project_info(args).map(ToolOutput::text),
         "scene_read" => scene_read(args).map(ToolOutput::text),
         "scene_write" => scene_write(args).map(ToolOutput::text),
@@ -300,8 +310,18 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 八个工具
+// 九个工具
 // ---------------------------------------------------------------------------
+
+/// `schema_read` —— 场景格式的机器可读说明书（项目无关）。
+///
+/// 内容与 `xgame-editor --export-schema` 完全同源（[`xgame_core::schema::scene_schema`]），
+/// 只是走 MCP 的文本通道。不需要打开项目：字段契约是引擎的，不是某个项目的。
+fn schema_read(_args: &Value) -> Result<String, CallError> {
+    let doc = xgame_core::schema::scene_schema();
+    serde_json::to_string_pretty(&doc)
+        .map_err(|error| fail(format!("序列化场景 schema 失败: {error}")))
+}
 
 /// `project_info` —— 清单 + 各目录清单，全走 [`ProjectHandle`] 的现成 API。
 fn project_info(args: &Value) -> Result<String, CallError> {
@@ -825,6 +845,29 @@ mod tests {
     /// 拿入口场景（测试断言用）。
     fn entry_scene(project: &ProjectHandle) -> Scene {
         project.load_entry_scene().expect("入口场景应可加载")
+    }
+
+    /// `schema_read` 不需要项目，返回与 `--export-schema` 同一份目录。
+    #[test]
+    fn schema_read_returns_the_shared_catalog() {
+        let out = call("schema_read", &json!({})).expect("schema_read 不该要求 project");
+        assert!(out.images.is_empty());
+        let value: Value = serde_json::from_str(&out.text).expect("必须是 JSON");
+        assert_eq!(
+            value["format_version"],
+            xgame_core::schema::SCHEMA_FORMAT_VERSION
+        );
+        let types = value["types"].as_array().expect("types 数组");
+        assert!(
+            types.iter().any(|ty| ty["name"] == "Entity"),
+            "缺 Entity 类型"
+        );
+        assert!(
+            types
+                .iter()
+                .any(|ty| ty["name"] == "Entity" && ty["fields"].as_array().is_some()),
+            "Entity 字段表必须是数组"
+        );
     }
 
     /// project_info：清单字段与场景文件列表都到位，路径统一正斜杠。

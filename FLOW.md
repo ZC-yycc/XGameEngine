@@ -123,6 +123,8 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
  3  Ctrl+S / Ctrl+Shift+S         保存当前场景 / 另存为新场景文件（启动场景不变）
  3a autosave_tick()               到点（默认 60s）且场景脏 → 写 <项目>/.autosave/ 副本；
                                   不动 saved_snapshot；!live 时 request_repaint_after 排唤醒
+ 3a-2 hot_reload_tick()           到点（1s）且内容目录有变化 → 脚本重编译 / 资产缓存失效 /
+                                  清单刷新；动作后 rebase（防自激）；!live 时同样排定时唤醒
  3b Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤销 / 重做（Play 模式下不生效）
  4  physics_step() (仅 Playing)    固定步长物理模拟（整段耗时 → Profiler 的 runtime）
  5  StatusBar                      底部状态栏（含项目名 / 自动保存时刻）—— **必须在 CentralPanel 之前**
@@ -159,6 +161,7 @@ eframe 每帧调用 `EditorApp::update(ctx)`。
 > | 「最近项目」磁盘校验 | **仅列表变化时** | `is_file()` 是磁盘 IO，遇到失效的网络路径会阻塞 UI 线程 |
 > | `editor.ron` 布局保存 | **松手 / Apply / Reset / 关闭 / 退出** | 拖拽过程中树每帧都不同；逐帧写盘只会磨盘，且没有可恢复的中间态 |
 > | `.autosave/` 副本 | **到点（默认 60s）且脏** | 逐帧写盘等于把磁盘当帧缓冲用；`request_repaint_after` 保证空闲停帧时也能准点醒一次（决策记录 §二十四.4） |
+> | 内容目录热检测 | **到点（1s）** | 只查 metadata 不读内容；动作后 `rebase` 防"自己补的 `.meta`"自激；只读会话（`--ui-shot`）不启用（决策记录 §三十一） |
 > | 偏好数值生效 | **仅 Apply** | 与项目设置同一条纪律：拖数值框时不改运行时状态、不写盘 |
 > | 离屏 3D 渲染 | **仅输入指纹变化时**（动画在播时每帧必变） | 指纹没变整段渲染跳过，连世界矩阵都不解算，见「阶段 4b」 |
 > | Hierarchy 行模型 | **仅结构指纹变化时** | 行缓存按 (指纹, 折叠版本, 过滤器) 复用，不变零 String 分配 |
@@ -484,7 +487,8 @@ Windows 指针静止时仍会反复投递同一坐标的 WM_MOUSEMOVE
 编辑器没有任何代码消费原始 delta（相机旋转用的是 `pointer.delta()`，由 `PointerMoved`
 产生），egui 内部也只把它累计进 `input.raw.motion`，丢弃是安全的。
 
-> 判据只看"有没有真的动"。实测：空闲 0.00% CPU、鼠标移动时 ~8.7%（每帧重绘）。
+> 判据只看"有没有真的动"。实测：空闲时不做任何渲染重绘、鼠标移动时 ~8.7%（每帧重绘）。
+> 之后加入的 1 Hz 内容扫描只查 metadata，不请求重绘（决策记录 §三十一）。
 > 回归测试 `identical_pointer_moves_are_dropped_but_real_moves_pass` /
 > `pointer_returning_to_the_same_spot_passes_after_leaving` /
 > `raw_mouse_motion_noise_is_dropped`。
@@ -1125,7 +1129,7 @@ EditorState（中央状态，所有面板共享可变引用）
   ├── clipboard: Option<Vec<Entity>>     复制/粘贴用的**子树**快照（根在前）
   │
   ├── prefab_list: Vec<String>           预制体资产清单缓存（项目相对路径，已排序）
-  │     └── 打开项目 / 增删资产 / 点 ⟳ 时刷新，**不每帧扫盘**
+  │     └── 打开项目 / 增删资产 / 点 ⟳ / 热检测到变化时刷新，**不每帧扫盘**（1 Hz）
   ├── prefab_filter / prefab_save_dialog / prefab_save_name / prefab_delete_pending
   │
   ├── show_grid: bool
@@ -1258,22 +1262,25 @@ Scene(
 
 | 文件 | 行数 | 核心函数 |
 |---|---|---|
-| `editor/main.rs` | 1608 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `FrameInputs` 四输入含 `animating` + `--check` 分派）、`open_project()`、`editor_ui()`（3a 自动保存 tick + 末尾画设置 / 另存为 / 新建场景 / 场景切换 / 未保存 / 自动保存恢复弹窗）、`autosave_label()`（状态栏读数） |
-| `editor/autosave.rs` | 274 | `AutoSave`（间隔 / 到点 / `wait` 排唤醒 / 上次成功 / 上次错误）、`AutosaveNotice`（打开项目时探测到的副本）、`sanitize_interval()`（`0` = 关闭） |
+| `editor/main.rs` | 1677 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `FrameInputs` 四输入含 `animating` + `--check` / `--export-schema` 分派）、`open_project()`、`editor_ui()`（3a 自动保存 / 3a-2 热重载 tick + 末尾画设置 / 另存为 / 新建场景 / 场景切换 / 未保存 / 自动保存恢复弹窗）、`autosave_label()`（状态栏读数） |
+| `editor/autosave.rs` | 275 | `AutoSave`（间隔 / 到点 / `wait` 排唤醒 / 上次成功 / 上次错误）、`AutosaveNotice`（打开项目时探测到的副本）、`sanitize_interval()`（`0` = 关闭） |
+| `editor/hot_reload.rs` | 555 | `ProjectWatcher`（1 Hz 内容目录快照 / 到点 / `poll` / `rebase` / `wait`）、`scan()` / `walk()`（只查 metadata、跳过自身产物、不跟符号链接）、`classify()`（Script / Scene / Prefab / Asset）、`diff()`（增 / 改 / 删） |
 | `editor/hub.rs` | 352 | `ProjectHub::ui()`、`open_project_at()`、`create_project_at()` |
 | `editor/recents.rs` | 119 | `RecentProjects::load()`、`add()` |
 | `editor/builder.rs` | 368 | `build()`、`locate_player()`、`content_dirs()` |
 | `core/material.rs` | 195 | `MaterialAsset`（base_color / metallic / roughness / albedo）、默认值 / RON 往返 / `sanitized()`、`MATERIAL_EXTENSION` |
 | `core/check.rs` | 573 | `check_project()`（无头验证清单 / **全部场景** / 引用，退出码 0/1/2 契约的依据；**编辑器 `--check` 与 MCP `project_check` 共用同一份**）、`CheckReport`（含材质 / 材质贴图 / 非入口坏场景诊断）、`check_scene_references()`（单场景引用检查，问题带场景路径前缀） |
 | `editor/dialogs.rs` | 395 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_scene_change_dialog()`（切换 / 新建前的同一套三选一）、`show_new_scene_dialog()`、`show_save_as_dialog()`、`show_autosave_recovery_dialog()`（恢复 / 丢弃 / 稍后） |
-| `editor/state.rs` | 3757 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()`（写 `current_scene`，成功后清副本）/ `save_scene_as()` / `new_scene()` / `open_scene()` / `set_startup_scene()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`autosave_tick()` / `autosave_wait()` / `recover_autosave()` / `discard_autosave()` / `drop_autosave_of_current()`、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作、材质草稿 / 新建 / 保存 / 指派（`material_draft` / `create_material` / `save_material_draft` / `assign_material`） |
-| `editor/scene_renderer.rs` | 1045 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + **材质资产引用** + Animator 配置（含淡入时长、**状态机 entry/参数/状态表/转移表**、**叠加层剪辑/权重/速度/循环**、**层栈每层名字/模式/剪辑/权重/速度/循环/遮罩**（分隔字节防撞））+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`invalidate_assets()` / `invalidate_materials()`（改导入设置 / 存材质后丢缓存）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判、叠加层与层栈按"权重>0 且剪辑存在"判，顺手预加载）、`animation_clip_names()`、`bone_names()`（骨骼名去重跳过匿名，Inspector 遮罩下拉用）、`animation_state()`（状态机当前状态，Inspector 用）、`mesh_bounds()`（拾取用） |
+| `editor/state.rs` | 4189 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()`（写 `current_scene`，成功后清副本）/ `save_scene_as()` / `new_scene()` / `open_scene()` / `set_startup_scene()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`autosave_tick()` / `autosave_wait()` / `recover_autosave()` / `discard_autosave()` / `drop_autosave_of_current()`、`hot_reload_tick()` / `hot_reload_wait()` / `reload_open_material()`（外部改动应用 + 草稿策略）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作、材质草稿 / 新建 / 保存 / 指派（`material_draft` / `create_material` / `save_material_draft` / `assign_material`） |
+| `editor/scene_renderer.rs` | 1045 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + **材质资产引用** + Animator 配置（含淡入时长、**状态机 entry/参数/状态表/转移表**、**叠加层剪辑/权重/速度/循环**、**层栈每层名字/模式/剪辑/权重/速度/循环/遮罩**（分隔字节防撞））+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`invalidate_assets()` / `invalidate_materials()`（改导入设置 / 存材质 / 热重载检测到资产变化后丢缓存）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判、叠加层与层栈按"权重>0 且剪辑存在"判，顺手预加载）、`animation_clip_names()`、`bone_names()`（骨骼名去重跳过匿名，Inspector 遮罩下拉用）、`animation_state()`（状态机当前状态，Inspector 用）、`mesh_bounds()`（拾取用） |
 | `editor/panels/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
 | `editor/game_runtime.rs` | 121 | `start()`（`WorldConfig::from_project_runtime` 接项目清单）、`fixed_update()` |
 | `editor/frame_policy.rs` | 277 | `plan()`（纯函数，五输入：playing / interacting / had_input / animating / since_last_input）、`FrameClock` |
 | `editor/headless.rs` | 1334 | `run()`（CLI `--headless`：固定 dt 帧循环 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
+| `editor/schema_cli.rs` | 213 | `--export-schema` 参数解析（stdout / `--out` / `--help`）、`render_json()`（`serde_json` 美化 + 末尾换行）、`cli()`（退出码 0/1） |
+| `core/schema.rs` | 2967 | `scene_schema()`（36 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
 | `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
 | `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |
@@ -1314,6 +1321,6 @@ Scene(
 | `editor/panels/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |
 | `game/main.rs` | 517 | `GameRunner`（`ApplicationHandler`：`resumed` / `window_event` / `about_to_wait`）、`GameApp::new()`、`update()`、`render()`、`resolve_project()` |
 | `mcp/lib.rs` | 224 | `handle_line()`（协议入口，喂行进断言行出的纯函数）、`initialize_result()`（版本协商）、两层错误（协议 `error` vs 工具 `isError`） |
-| `mcp/tools.rs` | 1500+ | `schemas()`（8 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、upsert（先挂父再改变换）/ remove / check / run_headless 实现 |
+| `mcp/tools.rs` | 1528 | `schemas()`（9 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、`schema_read()`（与 `--export-schema` 同源）/ upsert（先挂父再改变换）/ remove / check / run_headless 实现 |
 | `mcp/main.rs` | 24 | stdin/stdout 管道（唯一碰 I/O 的一层） |
 | `tools/build-release.ps1` | 370 | `Resolve-Cargo`、`Enable-MsvcEnv`、`Invoke-CargoBuild` |
