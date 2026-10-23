@@ -82,6 +82,9 @@ pub mod prelude {
     };
     // 屏幕空间 UI：与场景管线一样是"宿主画一帧"的组成部分。
     pub use xgame_render::ui_renderer::UiRenderer;
+    // TAA：历史缓冲 + resolve，以及宿主算抖动要用的两个换算函数。
+    // 宿主只碰这三样，`taa` 模块的其余内容（uniform 布局 / WGSL）不对外。
+    pub use xgame_render::taa::{jitter_to_ndc, jitter_to_uv, TaaResolver};
 
     // -- 运行时 -----------------------------------------------------------
     pub use xgame_runtime::{

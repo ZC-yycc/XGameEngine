@@ -181,6 +181,9 @@ pub struct ScreenshotRenderer {
     hdr: HdrTargets,
     /// 全屏后处理 pass（曝光 + 色调映射）。
     postfx: PostFx,
+    /// TAA 的历史缓冲与 resolve（`render.taa.enabled` 关着时全程不用，
+    /// 历史纹理也不会被创建）。采样数在构造时交给它（深度纹理类型按它选）。
+    taa: crate::taa::TaaResolver,
     /// 屏幕空间 UI（后处理之后画到同一张 LDR 上；无头截图也要有 UI）。
     ui: crate::ui_renderer::UiRenderer,
     /// 模型标识 → 已上传的网格（与编辑器 / 游戏同一条加载入口）。
@@ -282,6 +285,7 @@ impl ScreenshotRenderer {
             pipeline.set_project(Some(project));
         }
         let postfx = PostFx::new(&device, format);
+        let taa = crate::taa::TaaResolver::new(&device, sample_count);
         let ui = crate::ui_renderer::UiRenderer::new(&device, format);
 
         Ok(Self {
@@ -293,6 +297,7 @@ impl ScreenshotRenderer {
             ldr_view,
             hdr,
             postfx,
+            taa,
             ui,
             model_cache: HashMap::new(),
             project_root: project_root.to_path_buf(),
@@ -422,6 +427,19 @@ impl ScreenshotRenderer {
         let proj = Mat4::perspective_rh(camera.fov_y, self.aspect(), near, far);
         let view_proj = proj * view;
 
+        // TAA：本帧的亚像素抖动（关着时一次都不推进，投影逐位不变）。
+        // 抖动序列按帧号取模 —— 同机同帧数两次运行完全一致，`--screenshot`
+        // 的"逐字节确定"契约在 TAA 开着时也成立。
+        let settings = settings.sanitized();
+        let taa_on = settings.taa.enabled;
+        let jitter = if taa_on {
+            self.taa.begin_frame(self.size)
+        } else {
+            self.taa.reset();
+            [0.0, 0.0]
+        };
+        let jitter_ndc = crate::taa::jitter_to_ndc(jitter, self.size);
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -439,11 +457,29 @@ impl ScreenshotRenderer {
             &self.model_cache,
             anim,
             &view_proj,
+            jitter_ndc,
             &camera.eye,
             lighting,
             settings.sky,
             particles,
         );
+        // TAA resolve（开着时）—— 必须在后处理**之前**：曝光 / 色调映射要作用在
+        // 收敛后的画面上，反过来（先 tonemap 再混历史）会把曲线套两遍。
+        let (source_view, source_gen) = if taa_on {
+            self.taa.resolve(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &self.hdr.color_view,
+                &self.hdr.depth_view,
+                self.size,
+                &view_proj,
+                &camera.eye,
+                settings.taa,
+            )
+        } else {
+            (&self.hdr.color_view, 0u64)
+        };
         // HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → LDR 显示目标。截图器建一次
         // 用一次、目标从不重建 ⇒ 目标代数恒为 0（绑定组缓存只填一次）；
         // Bloom 链按尺寸惰性建，`source_size` 就是渲染尺寸。
@@ -451,8 +487,8 @@ impl ScreenshotRenderer {
             &self.device,
             &self.queue,
             &mut encoder,
-            &self.hdr.color_view,
-            0,
+            source_view,
+            source_gen,
             self.size,
             &self.ldr_view,
             settings,
@@ -469,6 +505,14 @@ impl ScreenshotRenderer {
         );
         self.queue.submit(std::iter::once(encoder.finish()));
         Ok(camera)
+    }
+
+    /// 场景 pass 的采样数（1 = 未开 MSAA）。
+    ///
+    /// 给测试用：`taa_runs_on_the_multisampled_path` 要先确认本机适配器真的
+    /// 开了 MSAA，否则它测的是另一条分支却"通过"了 —— 那比不测更糟。
+    pub fn sample_count(&self) -> u32 {
+        self.pipeline.sample_count()
     }
 
     /// 把颜色纹理读回 CPU（RGBA8、行紧排）。
@@ -581,7 +625,7 @@ mod tests {
 
     use xgame_core::{
         BloomConfig, Entity, FxaaConfig, Light, MaterialAsset, MaterialOverride, SkyConfig,
-        ToneMapMode,
+        TaaConfig, ToneMapMode,
     };
     use xgame_math::glam::Quat;
 
@@ -975,6 +1019,203 @@ mod tests {
             }
         }
         count
+    }
+
+    // -----------------------------------------------------------------
+    // TAA（时域抗锯齿）：GPU 侧像素测试组
+    // -----------------------------------------------------------------
+
+    /// 在同一个渲染器上连跑 `frames` 帧（TAA 需要历史累积），返回最后一帧。
+    fn render_frames(
+        shot: &mut ScreenshotRenderer,
+        scene: &Scene,
+        anim: &AnimationDriver,
+        camera: ShotCamera,
+        settings: RenderConfig,
+        frames: usize,
+    ) -> Vec<u8> {
+        let mut last = Vec::new();
+        for _ in 0..frames.max(1) {
+            shot.render_scene(
+                scene,
+                anim,
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                settings,
+            )
+            .expect("渲染失败");
+            last = shot.read_rgba().expect("读回失败");
+        }
+        last
+    }
+
+    fn taa_on() -> RenderConfig {
+        RenderConfig {
+            taa: TaaConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// TAA 真的在干活：1× MSAA 的斜边硬台阶必须明显变少、中间调变多。
+    ///
+    /// 用 12 帧（一个抖动周期 8 帧 + 收敛余量）取"相机静止、画面收敛后"的样子
+    /// —— 这正是 TAA 最有价值的场景（静态画面的边缘质量）。判据沿用 FXAA
+    /// 那套 `hard_luma_steps` / `midtone_pixels`，两种抗锯齿因此可以直接对表。
+    #[test]
+    fn taa_smooths_edges_after_a_few_frames() {
+        let Some(mut shot) = gpu_or_skip_msaa1("taa_smooths_edges_after_a_few_frames") else {
+            return;
+        };
+        let scene = fxaa_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        let off = render_frames(
+            &mut shot,
+            &scene,
+            &anim,
+            camera,
+            RenderConfig::default(),
+            1,
+        );
+        let on = render_frames(&mut shot, &scene, &anim, camera, taa_on(), 12);
+
+        assert_ne!(off, on, "TAA 开关没接进渲染链：两张图逐字节相同");
+
+        // 背景取左上角、前景取画面中心（薄盒正好压在视轴上）。
+        let bg = luma_of(pixel_at(&off, 320, 4, 4));
+        let fg = luma_of(pixel_at(&off, 320, 160, 120));
+        assert!(
+            (fg - bg).abs() > 0.15,
+            "测试前提：前景 / 背景必须有足够对比度（bg={bg:.3} fg={fg:.3}）"
+        );
+
+        let steps_off = hard_luma_steps(&off, 320, 240, 0.25);
+        let steps_on = hard_luma_steps(&on, 320, 240, 0.25);
+        assert!(
+            steps_off > 200,
+            "测试前提：1× MSAA 的斜边必须有大量硬台阶（{steps_off}）"
+        );
+        assert!(
+            steps_on < steps_off,
+            "TAA 应当把硬台阶磨成中间调：{steps_off} → {steps_on}"
+        );
+
+        let mid_off = midtone_pixels(&off, 320, 240, bg, fg);
+        let mid_on = midtone_pixels(&on, 320, 240, bg, fg);
+        assert!(
+            mid_on > mid_off,
+            "TAA 必须增加斜边上的中间调像素：{mid_off} → {mid_on}"
+        );
+        // 读数留在输出里（`--nocapture` 可见）：这是"TAA 到底有多有效"的量化证据，
+        // 也是将来调 `history_weight` / 抖动周期时的基准。
+        eprintln!(
+            "TAA 12 帧：硬台阶 {steps_off} → {steps_on}（-{:.0}%），中间调 {mid_off} → {mid_on}",
+            (1.0 - steps_on as f32 / steps_off as f32) * 100.0
+        );
+    }
+
+    /// TAA 开着时截图仍然**逐字节确定**：两个全新渲染器各跑 5 帧，PNG 相同。
+    ///
+    /// 抖动序列是纯函数（Halton 按帧号取模）、历史缓冲从零开始，所以"第 5 帧"
+    /// 在两次运行里必须是同一张图 —— 这是 `--screenshot` 确定性的契约在 TAA
+    /// 下的延续（序列一旦引入随机数或墙钟，这条立刻失效）。
+    #[test]
+    fn taa_keeps_two_runs_byte_identical() {
+        let Some(mut first) = gpu_or_skip("taa_keeps_two_runs_byte_identical") else {
+            return;
+        };
+        let scene = fxaa_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_taa_det_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录失败");
+        let path_a = dir.join("a.png");
+        let path_b = dir.join("b.png");
+
+        render_frames(&mut first, &scene, &anim, camera, taa_on(), 5);
+        first.save_png(&path_a).expect("落盘失败");
+
+        // 全新渲染器 = 新设备 / 新历史缓冲，等价于"另一个进程跑一遍"。
+        let mut second = ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240)
+            .expect("第二次创建渲染器失败");
+        render_frames(&mut second, &scene, &anim, camera, taa_on(), 5);
+        second.save_png(&path_b).expect("落盘失败");
+
+        let bytes_a = std::fs::read(&path_a).unwrap();
+        let bytes_b = std::fs::read(&path_b).unwrap();
+        assert_eq!(bytes_a, bytes_b, "TAA 开着时两次运行的 PNG 必须逐字节一致");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **首帧**必须是一张正常画面：平均亮度与不抖动的同一帧几乎相同。
+    ///
+    /// 这条守的是被真实抓到过一次的 bug：`resolve` 首帧若把"刚读的那张历史"
+    /// 当输出返回，后处理读到的是一张**从未写过**的纹理 —— 整屏全黑。
+    /// 12 帧的收敛测试发现不了它（落后的那张上一帧已经写过，只是慢一帧），
+    /// 只有"只看第一帧"能抓住。
+    #[test]
+    fn taa_first_frame_is_not_black() {
+        let Some(mut shot) = gpu_or_skip_msaa1("taa_first_frame_is_not_black") else {
+            return;
+        };
+        let scene = fxaa_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        let mean = |rgba: &[u8]| -> f32 {
+            let (pixels, _) = rgba.as_chunks::<4>();
+            let sum: f32 = pixels.iter().map(|p| luma_of([p[0], p[1], p[2]])).sum();
+            sum / pixels.len() as f32
+        };
+
+        let off = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        let first = render_frames(&mut shot, &scene, &anim, camera, taa_on(), 1);
+
+        let (m_off, m_on) = (mean(&off), mean(&first));
+        assert!(m_on > 0.05, "TAA 首帧整屏发黑（平均亮度 {m_on:.3}）—— 检查 resolve 输出的视图");
+        assert!(
+            (m_on - m_off).abs() < 0.05,
+            "TAA 首帧应当≈不抖动的同一帧（{m_off:.3} vs {m_on:.3}）：首帧不该直接混历史"
+        );
+    }
+
+    /// 默认采样数（本机常见 4×）下 TAA 也必须能跑。
+    ///
+    /// 这条守的是**多采样深度**那条分支：深度附件是多采样时，WGSL 里的类型必须
+    /// 换成 `texture_depth_multisampled_2d`，否则绑定组校验直接失败 —— 而那正是
+    /// 编辑器视口与独立游戏（都按适配器档位开 MSAA）走的路径。1× 的用例覆盖不到。
+    #[test]
+    fn taa_runs_on_the_multisampled_path() {
+        let Some(mut shot) = gpu_or_skip("taa_runs_on_the_multisampled_path") else {
+            return;
+        };
+        if shot.renderer.sample_count() <= 1 {
+            // 适配器只有 1× 档位：这条分支在本机不存在，别假装测了。
+            eprintln!("跳过 taa_runs_on_the_multisampled_path：适配器不支持 MSAA");
+            return;
+        }
+        let scene = fxaa_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        let off = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        // 两帧就够：第一帧直通（历史为空），第二帧才真正读历史 —— 乒乓与
+        // 重投影两条路径都走到。跑完不 panic / 不出设备错误 = 这条分支通了。
+        let on = render_frames(&mut shot, &scene, &anim, camera, taa_on(), 2);
+        assert_ne!(off, on, "TAA 在 MSAA 路径下没有生效");
     }
 
     /// 介于前景 / 背景之间的中间调像素数：抗锯齿的"灰边"就是这些像素。

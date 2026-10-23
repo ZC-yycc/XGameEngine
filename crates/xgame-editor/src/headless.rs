@@ -604,6 +604,12 @@ impl HeadlessReport {
                 "fxaa": {
                     "enabled": self.render.fxaa.enabled,
                 },
+                // TAA：`enabled` 决定这张截图是不是"多帧抖动 + 重投影"的结果
+                // —— 静态场景下它比单帧干净，但也不是同一个像素值。
+                "taa": {
+                    "enabled": self.render.taa.enabled,
+                    "history_weight": self.render.taa.history_weight,
+                },
             },
             "scene_dump": self.scene_dump,
             "screenshot": screenshot,
@@ -1599,7 +1605,7 @@ mod tests {
         for key in ["alive", "emitters", "capacity"] {
             assert!(value["particles"].get(key).is_some(), "particles 缺字段 {key}");
         }
-        for key in ["exposure", "tone_map", "bloom", "sky", "fxaa"] {
+        for key in ["exposure", "tone_map", "bloom", "sky", "fxaa", "taa"] {
             assert!(value["render"].get(key).is_some(), "render 缺字段 {key}");
         }
         assert_eq!(
@@ -1627,6 +1633,13 @@ mod tests {
         // FXAA 同样默认关；报告里保留完整开关，截图是否走过第二趟 pass
         // 不用靠猜（低采样 / 细长几何时这决定了边缘像素的差异）。
         assert_eq!(value["render"]["fxaa"]["enabled"], false);
+        // TAA 默认关，权重是 0.9（报告里是完整快照，智能体据此判断截图口径）。
+        assert_eq!(value["render"]["taa"]["enabled"], false);
+        assert_eq!(
+            value["render"]["taa"]["history_weight"],
+            f64::from(0.9f32),
+            "0.9 是 f32 真值（0.89999997…），别按十进制字面量比"
+        );
         assert!(value["scene_dump"].is_null(), "没给 --dump-scene 时是 null");
         assert!(value["screenshot"].is_null(), "没给 --screenshot 时是 null");
         cleanup(&project);

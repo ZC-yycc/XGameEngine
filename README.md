@@ -145,6 +145,11 @@ XGameEngine/                  # 引擎源码仓库
 - **FXAA 抗锯齿**（可选，默认关）：合成后的画面再走一趟 FXAA 3.11 质量路径，
   补 MSAA 管不到的高频细节；`project.ron` 的 `render.fxaa.enabled` 开关，
   关着时整段跳过（不建 scratch、不记录 pass）
+- **TAA 时域抗锯齿**（可选，默认关）：每帧给相机矩阵叠一个 Halton(2,3) 亚像素抖动
+  （8 帧一循环），用上一帧的历史与重投影结果混合，把 MSAA + FXAA 都消不掉的边缘
+  台阶压成中间调；`render.taa` 两个参数（`enabled` / `history_weight`，默认 0.9）。
+  抖动**只进相机**，剔除与阴影级联仍用未抖动矩阵（否则纹素吸附会抖）；3×3 邻域
+  钳制防鬼影；关着时整段跳过、逐位一致。开着时 FXAA 自动让位
 - 半透明（glTF `alphaMode`）与不透明分两条管线，半透明按到相机距离远 → 近排序
 - 内置基础图元（Cube / Sphere / Plane / Cylinder）不依赖外部资产文件
 - **骨骼蒙皮动画**（GPU skinning，详见「动画」）：关节矩阵在顶点着色器里按权重合成，
@@ -166,7 +171,7 @@ XGameEngine/                  # 引擎源码仓库
 - 撤销 / 重做：`Ctrl+Z` · `Ctrl+Shift+Z` · `Ctrl+Y`
 - 复制 / 粘贴：`Ctrl+C` · `Ctrl+V`；复制实体 / 删除：`Ctrl+D` · `Delete`
 - **项目设置（工具栏 ⚙）**：项目名 / 启动场景（`entry_scene`）/ 窗口 / 重力 / 固定步长 / 画面（曝光、
-  ACES、Bloom、FXAA）可视化编辑，草稿式 Apply 写回 `project.ron`；内容目录目前只在
+  ACES、Bloom、FXAA、TAA）可视化编辑，草稿式 Apply 写回 `project.ron`；内容目录目前只在
   `project.ron` 里手改（设置窗口未暴露）。重力与步长不再是引擎源码里的硬编码，编辑器
   Play 与打包游戏读的是**同一份**配置（`WorldConfig::from_project_runtime`）
 - **多场景编辑（工具栏 Scenes）**：菜单列出 `Scenes/*.ron`，点击切换；`New Scene…`
@@ -881,7 +886,7 @@ xgame-core     核心类型：Color / Config / Transform / Scene / Entity / Game
     ↑
 xgame-math     glam 重导出 + projection 辅助
     ↑
-xgame-render   wgpu 管线、glTF、PostFx（HDR / ACES / Bloom / FXAA）、天空 IBL、实例化与剔除
+xgame-render   wgpu 管线、glTF、PostFx（HDR / ACES / Bloom / FXAA / TAA）、天空 IBL、实例化与剔除
 xgame-physics  rapier3d 刚体、碰撞体、物理世界、射线、调试绘制
     ↑
 xgame-input    键鼠状态 + 动作映射（与 winit 解耦）

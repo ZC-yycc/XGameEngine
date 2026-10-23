@@ -69,7 +69,7 @@ pub use check::{check_project, CheckReport};
 pub use color::Color;
 pub use config::{
     BloomConfig, BuildConfig, ContentConfig, EngineConfig, FxaaConfig, RenderConfig, RuntimeConfig,
-    SkyConfig, ToneMapMode, WindowConfig,
+    SkyConfig, TaaConfig, ToneMapMode, WindowConfig,
 };
 pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
 pub use scene::{Entity, Scene};

@@ -108,6 +108,8 @@ struct GameApp {
     hdr: HdrTargets,
     /// 全屏后处理 pass（曝光 + 色调映射），写交换链。
     postfx: PostFx,
+    /// TAA 的历史缓冲与 resolve（`render.taa.enabled` 关着时不用，也不建历史纹理）。
+    taa: TaaResolver,
     /// 屏幕空间 UI（后处理之后画到交换链上）。
     ui: UiRenderer,
     /// `hdr` 的**代数**：resize 重建时 +1，作为 `postfx` 绑定组的缓存键
@@ -189,6 +191,7 @@ impl GameApp {
         pipeline.set_project(Some(project.clone()));
         // 显示目标 = 交换链格式：非 sRGB 的交换链由着色器手动编码（见 postfx）。
         let postfx = PostFx::new(&device, config.format);
+        let taa = TaaResolver::new(&device, sample_count);
         let ui = UiRenderer::new(&device, config.format);
 
         // -- 场景（路径都按项目根解析）--
@@ -277,6 +280,7 @@ impl GameApp {
             config,
             hdr,
             postfx,
+            taa,
             ui,
             target_gen: 0,
             sample_count,
@@ -297,6 +301,9 @@ impl GameApp {
         // 后处理 pass：绑定组按代数失效重建（源视图换了）。
         self.hdr = HdrTargets::new(&self.device, "game", width, height, self.sample_count);
         self.target_gen = self.target_gen.wrapping_add(1);
+        // TAA 的历史跟着目标走：尺寸变了，重投影全部对不上，绑定组里钉着的
+        // 颜色 / 深度视图也已经作废。
+        self.taa.reset();
     }
 
     /// 把窗口事件翻译成引擎输入。
@@ -453,6 +460,20 @@ impl GameApp {
             self.project.root(),
         );
 
+        // 画面设置的真相源是 project.ron 的 `render` 节 —— 与编辑器视口 /
+        // 无头截图吃同一份配置（TAA 的开关与历史权重也在里面）。
+        let settings = self.project.manifest().render.sanitized();
+
+        // TAA：本帧的亚像素抖动（关着时投影逐位不变，也不推进序列）。
+        let taa_on = settings.taa.enabled;
+        let jitter = if taa_on {
+            self.taa.begin_frame(self.hdr.size)
+        } else {
+            self.taa.reset();
+            [0.0, 0.0]
+        };
+        let jitter_ndc = jitter_to_ndc(jitter, self.hdr.size);
+
         self.pipeline.render(
             &self.device,
             &self.queue,
@@ -465,25 +486,42 @@ impl GameApp {
             &self.model_cache,
             &self.anim_driver,
             &view_proj,
+            jitter_ndc,
             &eye,
             SceneLighting::new(scene.ambient, &scene.lights),
-            self.project.manifest().render.sky,
+            settings.sky,
             // 粒子：与编辑器视口同一条 pass（见 `ScenePipeline::render`）。
             self.world.particle_quads(),
         );
 
-        // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → 交换链。画面设置的
-        // 真相源是 project.ron 的 `render` 节 —— 与编辑器视口 / 无头截图吃同一份
-        // 配置。Bloom 链跟 `hdr.size` 走（resize 时附件重建、`target_gen` 自增）。
+        // TAA resolve（开着时）—— 在后处理之前，曝光 / 色调映射作用在收敛后的画面。
+        let (source_view, source_gen) = if taa_on {
+            self.taa.resolve(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &self.hdr.color_view,
+                &self.hdr.depth_view,
+                self.hdr.size,
+                &view_proj,
+                &eye,
+                settings.taa,
+            )
+        } else {
+            (&self.hdr.color_view, self.target_gen)
+        };
+
+        // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → 交换链。Bloom 链跟
+        // `hdr.size` 走（resize 时附件重建、`target_gen` 自增）。
         self.postfx.render(
             &self.device,
             &self.queue,
             &mut encoder,
-            &self.hdr.color_view,
-            self.target_gen,
+            source_view,
+            source_gen,
             self.hdr.size,
             &frame_view,
-            self.project.manifest().render,
+            settings,
         );
 
         // UI：后处理之后、同一条 encoder —— UI 不参与曝光 / 色调映射。

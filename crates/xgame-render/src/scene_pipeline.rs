@@ -2102,6 +2102,13 @@ impl ScenePipeline {
     /// 只有一份实现（`Scene::world_matrices`），渲染器只消费结果。
     /// 调用方传入的 `world_matrices` 必须与 `entities` 同序同长；长度不足的
     /// 位置退回该实体的局部矩阵，不会 panic。
+    ///
+    /// # 关于 `jitter_ndc`（TAA 的亚像素抖动）
+    ///
+    /// 非零时把相机投影按它平移（`[(0,0)]` = 不抖动，逐位与旧画面一致）。
+    /// **只动相机 uniform**：剔除视锥与级联阴影拟合仍然用未抖动的 `view_proj`
+    /// —— 阴影的"整数纹素宽度 + 中心吸附"经不起每帧半个像素的来回拉扯，
+    /// 抖进去就是影子边缘持续抖动（比锯齿难看得多）。
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -2116,6 +2123,7 @@ impl ScenePipeline {
         model_cache: &HashMap<String, GltfMesh>,
         anim: &AnimationDriver,
         view_proj: &Mat4,
+        jitter_ndc: [f32; 2],
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
         sky: SkyConfig,
@@ -2162,12 +2170,16 @@ impl ScenePipeline {
         let shadow_enabled = cascades.is_some();
 
         // --- 每帧全局 uniform ---
+        //
+        // TAA 的抖动只叠在相机矩阵上：阴影拟合（上面的 `cascades`）与剔除视锥
+        // 用的是**未抖动**的 `view_proj`，理由见函数文档。
+        let render_view_proj = crate::taa::jitter_projection(*view_proj, jitter_ndc);
         queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[CameraUniform {
-                view_proj: view_proj.to_cols_array_2d(),
-                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+                view_proj: render_view_proj.to_cols_array_2d(),
+                inv_view_proj: render_view_proj.inverse().to_cols_array_2d(),
                 camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 1.0],
             }]),
         );

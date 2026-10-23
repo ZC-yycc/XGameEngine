@@ -15,6 +15,7 @@ pub mod scene;
 pub mod scene_pipeline;
 pub mod screenshot;
 pub mod sky;
+pub mod taa;
 pub mod texture;
 pub mod ui_renderer;
 

@@ -104,6 +104,11 @@ pub struct SceneRenderer {
     hdr: Option<HdrTargets>,
     /// 全屏后处理 pass（曝光 + 色调映射），源视图按 [`Self::target_gen`] 缓存绑定组。
     postfx: PostFx,
+    /// TAA 的历史缓冲与 resolve（关着时不用，也不建历史纹理）。
+    ///
+    /// 历史缓冲是**每张显示目标**的：切视口尺寸 / 切换项目就把历史作废
+    /// （`recreate_targets` 里 `reset`），否则重投影会去读一张完全不同尺寸的画面。
+    taa: xgame_render::taa::TaaResolver,
     /// 屏幕空间 UI（在 `postfx` **之后**画到同一张 LDR 目标上）。
     ///
     /// 排在色调映射之后是硬约束：UI 颜色不该随场景曝光变化，见
@@ -160,6 +165,7 @@ impl SceneRenderer {
         // 不再在写入时被裁掉的原因（见 `xgame_render::postfx` 模块文档）。
         let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
         let postfx = PostFx::new(&device, surface_format);
+        let taa = xgame_render::taa::TaaResolver::new(&device, sample_count);
         let ui = UiRenderer::new(&device, surface_format);
 
         Self {
@@ -174,6 +180,7 @@ impl SceneRenderer {
             _ldr_texture: None,
             hdr: None,
             postfx,
+            taa,
             ui,
             target_gen: 0,
             pending_size: None,
@@ -284,6 +291,9 @@ impl SceneRenderer {
         }
         // 尺寸变了，之前那张纹理的内容已经作废，下一帧无论如何都要重画。
         self.last_signature = None;
+        // TAA 的历史也是"这张目标的内容"：尺寸一变，重投影全部对不上，
+        // 而且绑定组里钉着旧的颜色 / 深度视图 —— 必须作废。
+        self.taa.reset();
         // 目标换代：`postfx` 的绑定组按这个计数失效重建（源视图换了）。
         self.target_gen = self.target_gen.wrapping_add(1);
 
@@ -532,6 +542,10 @@ impl SceneRenderer {
         // FXAA 是后处理链的最后一趟：开关决定目标像素是不是"再过一遍边缘
         // 平滑"，漏进指纹的话在 ⚙ 里勾选它视口会纹丝不动。
         hash = mix_bits(hash, render.fxaa.enabled as u64);
+        // TAA 同理（而且它的历史权重也直接改变每个像素）。抖动本身**不进**
+        // 指纹 —— 那个值每帧都变，掺进来等于把静态帧门控彻底废掉。
+        hash = mix_bits(hash, render.taa.enabled as u64);
+        hash = mix_bits(hash, render.taa.history_weight.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.intensity.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.threshold.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.knee.to_bits() as u64);
@@ -846,6 +860,18 @@ impl SceneRenderer {
                 label: Some("editor_scene_encoder"),
             });
 
+        // TAA：本帧的亚像素抖动。**必须在指纹之后**算 —— 抖动每帧都变，
+        // 掺进指纹就等于"永远不停帧"（空闲 CPU 从 0% 变成满速重绘）。
+        // 指纹用的是未抖动的 `view_proj`，抖动只影响相机矩阵。
+        let taa_on = settings.taa.enabled;
+        let jitter = if taa_on {
+            self.taa.begin_frame(hdr.size)
+        } else {
+            self.taa.reset();
+            [0.0, 0.0]
+        };
+        let jitter_ndc = xgame_render::taa::jitter_to_ndc(jitter, hdr.size);
+
         self.pipeline.render(
             &self.device,
             &self.queue,
@@ -858,11 +884,30 @@ impl SceneRenderer {
             &self.model_cache,
             &self.anim_driver,
             view_proj,
+            jitter_ndc,
             camera_pos,
             lighting,
             settings.sky,
             particles,
         );
+
+        // TAA resolve（开着时）—— 在后处理**之前**：曝光 / 色调映射要作用在
+        // 收敛后的画面上（先 tonemap 再混历史 = 曲线套两遍，中间调会偏）。
+        let (source_view, source_gen) = if taa_on {
+            self.taa.resolve(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &hdr.color_view,
+                &hdr.depth_view,
+                hdr.size,
+                view_proj,
+                camera_pos,
+                settings.taa,
+            )
+        } else {
+            (&hdr.color_view, self.target_gen)
+        };
 
         // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → egui 注册的 LDR 显示
         // 目标。绑定组按目标代数缓存 —— 静态帧整段被指纹拦掉，走到这里的每帧
@@ -872,8 +917,8 @@ impl SceneRenderer {
             &self.device,
             &self.queue,
             &mut encoder,
-            &hdr.color_view,
-            self.target_gen,
+            source_view,
+            source_gen,
             hdr.size,
             ldr_view,
             settings,

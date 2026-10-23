@@ -179,7 +179,11 @@ impl HdrTargets {
             sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // RENDER_ATTACHMENT：场景 pass 的深度附件。
+            // TEXTURE_BINDING：TAA 的 resolve 要 `textureLoad` 它反投影出世界
+            // 坐标（见 `taa` 模块）。少这一位时 TAA 开着才会在建绑定组时校验
+            // 失败 —— 而关着 TAA 的路径完全正常，是很容易漏的一处。
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
@@ -269,6 +273,9 @@ pub(crate) fn needs_manual_srgb(format: wgpu::TextureFormat) -> bool {
 /// 读代码的人也难一眼分清谁是谁。
 type CompositeKey = (u64, (u32, u32), bool);
 
+/// 合成绑定组缓存的容量上限（见 `bind_cache` 的说明）。
+const BIND_CACHE_CAPACITY: usize = 8;
+
 /// 全屏后处理管线：源（HDR）→ 曝光 →（合成 Bloom 光晕）→ 色调映射 → 目标（LDR）。
 ///
 /// 生命周期与宿主的渲染目标绑定：目标重建（尺寸变化）时绑定组要跟着换，
@@ -286,7 +293,12 @@ pub struct PostFx {
     /// 变了的陈旧视图，表现是画面停留在旧尺寸的最后一帧上）。
     /// 尺寸必须进键：绑定组引用 Bloom 各级的纹理视图，链按尺寸重建时源代可能
     /// 纹丝不动（截图器恒定 0 代），漏了尺寸 = 永远复用旧链的视图。
-    bind_cache: Option<(CompositeKey, wgpu::BindGroup)>,
+    ///
+    /// **不是单个槽**：开着 TAA 时源在两帧历史纹理之间乒乓，源代每帧都换 ——
+    /// 只有一个槽就等于每帧重建绑定组（TAA 的收益被这层分配吃掉一半）。
+    /// 缓存容量取 8（乒乓 2 + 目标换代几次），超了就整体丢弃重来（有界，
+    /// 不会随运行时长无限增长）。
+    bind_cache: Vec<(CompositeKey, wgpu::BindGroup)>,
     /// Bloom 三个 pass 的管线（亮部提取 / 降采样 / 可分离模糊）。
     bloom_pipelines: BloomPipelines,
     /// Bloom 的 mip 链。**惰性建**：`intensity == 0` 时保持 `None`（不建纹理、
@@ -426,7 +438,7 @@ impl PostFx {
             bgl,
             sampler,
             uniform,
-            bind_cache: None,
+            bind_cache: Vec::new(),
             bloom_pipelines: BloomPipelines::new(device),
             bloom: None,
             fxaa_pipelines: FxaaPipelines::new(device, output_format),
@@ -505,10 +517,11 @@ impl PostFx {
         }
 
         let key = (source_gen, source_size, bloom_on);
-        if self.bind_cache.as_ref().map(|(k, _)| *k) != Some(key) {
-            // Bloom 关着时 mip 槽位用源视图占位：布局里有的槽位必须填
-            // （绑定组要求逐项给资源），着色器按 `bloom_intensity` 分支
-            // 不去采样它们。
+        let mut slot = self.bind_cache.iter().position(|(k, _)| *k == key);
+        // Bloom 关着时 mip 槽位用源视图占位：布局里有的槽位必须填
+        // （绑定组要求逐项给资源），着色器按 `bloom_intensity` 分支
+        // 不去采样它们。
+        if slot.is_none() {
             let mips: [&wgpu::TextureView; BLOOM_LEVELS] = match self.bloom.as_ref() {
                 Some(chain) => [&chain.a_views[0], &chain.a_views[1], &chain.a_views[2]],
                 None => [source, source, source],
@@ -543,13 +556,24 @@ impl PostFx {
                     },
                 ],
             });
-            self.bind_cache = Some((key, bind_group));
+            if self.bind_cache.len() >= BIND_CACHE_CAPACITY {
+                // 有界：满了整体丢掉（乒乓 2 条 + 目标换代的少量几条，正常远到不了）。
+                // 清空之后本帧的键一定重建一次，代价是一次绑定组创建 ——
+                // 比"随运行时长无限增长"好得多。
+                self.bind_cache.clear();
+            }
+            self.bind_cache.push((key, bind_group));
+            slot = Some(self.bind_cache.len() - 1);
         }
-        let bind_group = &self.bind_cache.as_ref().expect("刚写入过缓存").1;
+        let bind_group = &self.bind_cache[slot.expect("缓存里一定有这条")].1;
 
         // FXAA 关着时合成 pass 直接写显示目标、scratch 丢掉（不养显存）；
         // 开着时先写 scratch，再由第二趟把平滑后的画面写进 `dest`。
-        let fxaa_on = settings.fxaa.enabled;
+        //
+        // "开没开"看的是 `effective_fxaa()`：TAA 开着时 FXAA 必须让位
+        // （两者都在抹边缘，叠起来只是糊两遍）。这条规则在 core 里只有一份，
+        // 三宿主不需要各自判断。
+        let fxaa_on = settings.effective_fxaa().enabled;
         if !fxaa_on {
             self.fxaa_scratch = None;
         }

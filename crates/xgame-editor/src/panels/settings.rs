@@ -265,7 +265,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 ui.add_space(10.0);
 
                 // ── 画面 ──
-                theme::section_bar(ui, "画面（曝光 / 色调映射 / 泛光 / FXAA）");
+                theme::section_bar(ui, "画面（曝光 / 色调映射 / 泛光 / FXAA / TAA）");
                 egui::Grid::new("set_render")
                     .num_columns(2)
                     .spacing([10.0, 5.0])
@@ -306,9 +306,33 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                             "后处理抗锯齿：平滑 MSAA 覆盖不到的几何 / 着色器走样。\
                              默认关（MSAA 已经处理几何边缘，开着会改变旧画面）；\
                              低采样档位或细长几何多的场景收益最明显。\
-                             需要场景先渲进 HDR 中间标，属于后处理链的最后一趟",
+                             需要场景先渲进 HDR 中间标，属于后处理链的最后一趟。\
+                             注意：TAA 开着时 FXAA 自动让位（叠起来只是糊两遍）",
                         );
                         ui.checkbox(&mut draft.render.fxaa.enabled, "");
+                        ui.end_row();
+
+                        ui.label("TAA").on_hover_text(
+                            "时域抗锯齿：每帧把相机投影抖动一个亚像素，再把重投影后的\
+                             历史帧混进来 —— 静态画面收敛到「每像素采了 8 个子像素」。\
+                             默认关；对细金属丝 / 远处栏杆 / 高频纹理这类 MSAA 管不到的\
+                             走样有效，代价是运动物体会轻微拖影（v1 没有逐物体运动向量），\
+                             且与 FXAA 互斥（开着 TAA 时 FXAA 自动关）",
+                        );
+                        ui.checkbox(&mut draft.render.taa.enabled, "");
+                        ui.end_row();
+
+                        ui.label("TAA 历史权重").on_hover_text(
+                            "历史帧占比：越大越稳、残影越久；0.9 是常用折中\
+                             （静止约 10 帧收敛）。保存时夹进 [0, 0.98]",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut draft.render.taa.history_weight)
+                                .range(0.0..=xgame_core::TaaConfig::MAX_HISTORY_WEIGHT)
+                                .speed(0.01)
+                                .fixed_decimals(2),
+                        )
+                        .on_hover_text("TAA 关着时这一项不生效");
                         ui.end_row();
 
                         ui.label("泛光强度").on_hover_text(

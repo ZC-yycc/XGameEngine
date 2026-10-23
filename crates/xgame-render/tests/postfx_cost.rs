@@ -276,6 +276,8 @@ impl LdrPath {
             cache,
             anim,
             view_proj,
+            // TAA 的亚像素抖动：基准里恒定不抖（关掉 TAA 的等价路径）。
+            [0.0, 0.0],
             eye,
             SceneLighting::new(scene.ambient, &scene.lights),
             SkyConfig::default(),
@@ -359,6 +361,8 @@ impl HdrPath {
             cache,
             anim,
             view_proj,
+            // TAA 的亚像素抖动：基准里恒定不抖（关掉 TAA 的等价路径）。
+            [0.0, 0.0],
             eye,
             SceneLighting::new(scene.ambient, &scene.lights),
             settings.sky,

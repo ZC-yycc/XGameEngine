@@ -327,6 +327,71 @@ impl FxaaConfig {
     }
 }
 
+/// TAA（时域抗锯齿）参数。
+///
+/// **默认关**：与 Bloom / 天空 / FXAA 同一条纪律 —— 画质增强默认不动画面。
+/// 关着时渲染器**整段跳过**（不建历史纹理、不记 pass、相机投影不加抖动），
+/// 画面与 TAA 上线前逐位一致。
+///
+/// 开启后每帧把相机投影按亚像素（Halton(2,3) 序列）抖动，再把当前帧与
+/// **重投影后的历史帧**混合 —— 静态画面因此收敛到"每个像素平均采样了 N 个子
+/// 像素位置"的效果，边缘比任何单帧算法都更干净，且不需要更高的分辨率。
+///
+/// 代价写清楚（这些不是实现缺陷，是时域方法本身的取舍）：
+/// - **运动物体会轻微拖影**：v1 没有逐物体的运动向量，重投影只跟相机走，
+///   靠 3×3 邻域钳制把"这一帧附近根本没有的颜色"挡在外面（钳制越紧越不拖影、
+///   但越容易把有用的历史也丢掉）。
+/// - **快速甩镜头会有一段模糊**：历史对不上时不累计，画面在几帧内由单帧接管。
+/// - **与 FXAA 互斥**：两者叠加只是把边缘糊两遍，开着 TAA 时 FXAA 自动让位
+///   （见 `xgame_render::postfx` 的 `fxaa_on`）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TaaConfig {
+    /// 是否启用 TAA。
+    pub enabled: bool,
+    /// 历史帧权重（0 = 完全不用历史，1 = 永不接受新像素 —— 画面会冻住）。
+    ///
+    /// 越大越稳、越干净，残影也越久；0.9 是"静止时 10 帧收敛、移动时几帧内
+    /// 丢掉陈旧历史"的常用折中。
+    pub history_weight: f32,
+}
+
+impl Default for TaaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            history_weight: 0.9,
+        }
+    }
+}
+
+impl TaaConfig {
+    /// 历史权重的安全上限。
+    ///
+    /// 不给到 1.0：权重 1 = 新颜色一个都不进画面，等于把画面冻在第一帧，
+    /// 而且**没有任何下游能报错**（表现为"引擎卡住了"，实际是配置写错）。
+    pub const MAX_HISTORY_WEIGHT: f32 = 0.98;
+
+    /// 与默认值完全一致时不落盘（`skip_serializing_if` 用）：没开过的项目
+    /// `project.ron` 里不出现这一节。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// 容错读取：历史权重非法（NaN / 无穷 / 越界）退回默认值。
+    pub fn sanitized(self) -> Self {
+        let weight = if self.history_weight.is_finite() {
+            self.history_weight
+                .clamp(0.0, Self::MAX_HISTORY_WEIGHT)
+        } else {
+            Self::default().history_weight
+        };
+        Self {
+            enabled: self.enabled,
+            history_weight: weight,
+        }
+    }
+}
+
 /// 程序化天空盒与环境光照（IBL）参数。
 ///
 /// 天空是一个**解析函数**：天顶 / 地平线 / 地面三段颜色渐变 + 太阳盘 + 太阳
@@ -461,6 +526,9 @@ pub struct RenderConfig {
     /// FXAA 抗锯齿参数，见 [`FxaaConfig`]。同样后加 + 默认关。
     #[serde(default, skip_serializing_if = "FxaaConfig::is_default")]
     pub fxaa: FxaaConfig,
+    /// TAA（时域抗锯齿）参数，见 [`TaaConfig`]。同样后加 + 默认关。
+    #[serde(default, skip_serializing_if = "TaaConfig::is_default")]
+    pub taa: TaaConfig,
 }
 
 impl Default for RenderConfig {
@@ -471,6 +539,7 @@ impl Default for RenderConfig {
             bloom: BloomConfig::default(),
             sky: SkyConfig::default(),
             fxaa: FxaaConfig::default(),
+            taa: TaaConfig::default(),
         }
     }
 }
@@ -503,6 +572,18 @@ impl RenderConfig {
             // 布尔开关没有"非法值"可夹；保留字段是为了让 sanitized 的返回
             // 结构完整（漏写会编译失败，这是刻意的）。
             fxaa: self.fxaa,
+            taa: self.taa.sanitized(),
+        }
+    }
+
+    /// 本帧**实际**生效的 FXAA 配置。
+    ///
+    /// TAA 开着时 FXAA 让位：两者都在抹边缘，叠起来只是把画面糊两遍，还会
+    /// 把 TAA 收敛出来的细节重新抹掉。这条规则只有一份实现（这里是唯一的
+    /// 判定点），三宿主不必各自判断，也不会出现"编辑器糊、游戏不糊"。
+    pub fn effective_fxaa(&self) -> FxaaConfig {
+        FxaaConfig {
+            enabled: self.fxaa.enabled && !self.taa.enabled,
         }
     }
 }
@@ -651,10 +732,94 @@ mod tests {
         assert!(back.fxaa.enabled);
     }
 
+    /// TAA 默认必须**关**，且默认配置不落盘。
+    #[test]
+    fn taa_defaults_to_off_and_roundtrips() {
+        assert!(!TaaConfig::default().enabled, "TAA 默认必须关闭");
+        assert!(TaaConfig::default().is_default());
+
+        let text = ron::to_string(&RenderConfig::default()).expect("serialize");
+        assert!(!text.contains("taa"), "未开过的 TAA 不该落盘: {text}");
+
+        let on = RenderConfig {
+            taa: TaaConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = ron::to_string(&on).expect("serialize");
+        assert!(text.contains("taa"), "开着的 TAA 必须落盘: {text}");
+        let back: RenderConfig = ron::from_str(&text).expect("deserialize");
+        assert_eq!(back, on);
+        assert!(back.taa.enabled);
+        assert_eq!(back.taa.history_weight, TaaConfig::default().history_weight);
+    }
+
+    /// 历史权重：NaN / 无穷落回默认；1.0 夹到上限（权重 1 = 画面冻在第一帧）。
+    #[test]
+    fn taa_history_weight_is_clamped() {
+        let nan = TaaConfig {
+            history_weight: f32::NAN,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(nan.history_weight, TaaConfig::default().history_weight);
+
+        let inf = TaaConfig {
+            history_weight: f32::INFINITY,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(inf.history_weight, TaaConfig::default().history_weight);
+
+        let frozen = TaaConfig {
+            enabled: true,
+            history_weight: 1.0,
+        }
+        .sanitized();
+        assert_eq!(
+            frozen.history_weight,
+            TaaConfig::MAX_HISTORY_WEIGHT,
+            "权重 1 会把画面冻住，必须夹住"
+        );
+        assert!(frozen.enabled, "夹权重不该顺手改开关");
+
+        let negative = TaaConfig {
+            history_weight: -0.5,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(negative.history_weight, 0.0, "负权重 = 只用当前帧");
+    }
+
+    /// TAA 开着时 FXAA 必须自动让位（两者叠加只是糊两遍）。
+    #[test]
+    fn taa_supersedes_fxaa() {
+        let both = RenderConfig {
+            fxaa: FxaaConfig { enabled: true },
+            taa: TaaConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .sanitized();
+        assert!(both.fxaa.enabled, "用户填的开关原样保留（不偷偷改写配置）");
+        assert!(!both.effective_fxaa().enabled, "但实际生效的 FXAA 必须关掉");
+
+        // TAA 关着时 FXAA 照旧按用户填的来。
+        let fxaa_only = RenderConfig {
+            fxaa: FxaaConfig { enabled: true },
+            ..Default::default()
+        }
+        .sanitized();
+        assert!(fxaa_only.effective_fxaa().enabled);
+    }
+
     /// Bloom 容错：NaN / 负数 / 超限。intensity 负数 = 关（不是"反向光晕"）。
     #[test]
-    fn bloom_config_sanitized_rejects_garbage() {
-        let nan = BloomConfig {
+    fn bloom_config_sanitized_rejects_garbage() {        let nan = BloomConfig {
             intensity: f32::NAN,
             ..Default::default()
         }
