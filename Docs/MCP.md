@@ -1,11 +1,14 @@
 # MCP 接口（AI 智能体工具面）
 
-> `xgame-mcp` 是本引擎的 **MCP server**（Model Context Protocol）：把"读项目、改场景、
-> 动实体、跑检查、无头实跑"暴露成标准工具，Cursor / Claude 等任何 MCP 客户端接上就能
-> 直接操纵引擎做游戏开发 —— 这是 Agent-Native 路线（见 [`差距分析.md`](差距分析.md)
-> 文末战略章）的第 ① 块 + 第 ② 块（无头运行经 `run_headless` 一并接上）。
+> `xgame-mcp` 是本引擎的 **MCP server**（Model Context Protocol）：把"读说明书、读脚本
+> 契约、读项目、改场景、动实体、跑检查、无头实跑"暴露成标准工具，Cursor / Claude 等
+> 任何 MCP 客户端接上就能直接操纵引擎做游戏开发 —— 这是 Agent-Native 路线（见
+> [`差距分析.md`](差距分析.md) 文末战略章）的第 ① 块 + 第 ② 块（无头运行经
+> `run_headless` 一并接上），并承载第 ③ 块的机器可读契约（`schema_read` /
+> `script_api_read`）。
 >
-> **判据**：智能体没有鼠标时，这条路走得通吗？—— 读 / 改 / 查 / 看效果，四步齐了。
+> **判据**：智能体没有鼠标时，这条路走得通吗？—— 读说明书 / 脚本契约、改、查、看效果，
+> 四步齐了。
 
 ---
 
@@ -48,18 +51,20 @@
     未知工具名（`-32602`）、缺 `params.name`；
   - **工具结果错误**（`result.isError: true` + 文本）：工具跑了但没干成 ——
     项目打不开、RON 解析失败、实体不存在/重名歧义。文本就是给人和模型看的失败原因。
-- **无会话状态**：每个工具都带 `project`（项目根路径）参数，server 不维护"当前
-  项目"—— 可并发调用、可开多个实例、测试喂行进喂行出。
+- **无会话状态**：除 `schema_read` / `script_api_read` 外，每个工具都带 `project`
+  （项目根路径）参数，server 不维护"当前项目"—— 可并发调用、可开多个实例、测试
+  喂行进喂行出。
 
 ---
 
-## 工具参考（9 个）
+## 工具参考（10 个）
 
-最小完备集，覆盖「读说明书 → 读 → 改 → 查 → 看效果」闭环。除 `schema_read` 外，
-全部工具必填 `project`（含 `project.ron` 的项目根目录，绝对或相对 server 工作目录）；
-除 `schema_read` / `project_info` / `project_check` / `asset_list` / `run_headless` 外
-都可带 `scene`（项目内相对场景路径，如 `Scenes/scene.ron`，缺省 = 清单入口场景；
-**绝对路径与 `..` 一律拒绝**）。
+最小完备集，覆盖「读说明书 / 读脚本契约 → 读 → 改 → 查 → 看效果」闭环。除
+`schema_read` / `script_api_read` 外，全部工具必填 `project`（含 `project.ron` 的
+项目根目录，绝对或相对 server 工作目录）；除 `schema_read` / `script_api_read` /
+`project_info` / `project_check` / `asset_list` / `run_headless` 外都可带 `scene`
+（项目内相对场景路径，如 `Scenes/scene.ron`，缺省 = 清单入口场景；**绝对路径与
+`..` 一律拒绝**）。
 
 ### 1. `schema_read`
 
@@ -193,6 +198,25 @@
   （动态实跑）→ 看 `report.ok` 与 `error_samples`；调了渲染/材质再看
   `screenshot` 的图。
 
+### 10. `script_api_read`
+
+写第一个 `.lua` 之前先读它：脚本 API 的**机器可读清单**。
+
+- **入参**：无（脚本契约属于引擎，不属于某个项目 —— 不需要 `project`）
+- **返回**（JSON 文本）：与 `xgame-editor --export-script-api` **完全同源**
+  （`xgame_core::script_api::script_api`），含 `format_version` /
+  `engine_version` / `conventions` / `hooks` / `value_types` / `categories`。
+- **内容规模**：155 个全局函数、17 个类别、6 个生命周期钩子、7 个值类型。
+  每个函数有 `name` / `signature` / `params` / `returns` / `summary`；每个类别有
+  稳定的 ASCII `id`（如 `transform` / `physics` / `ui`）与中文名。
+- **确定性**：没有时间戳 / 随机 ID；函数与类别按 [`脚本API.md`](脚本API.md) 的
+  顺序排列，同一份代码两次调用逐字节相同。
+- **防漂移**：`xgame-script` 从 `lua_api.rs` / `ui_api.rs` 的 `globals.set("…")`
+  提取注册名并逐名比对；`xgame-editor` 从 `Docs/脚本API.md` 的 API 表提取函数名
+  再比对；运行时还确认每个名字都是 Lua 函数。改注册不同步清单，测试立刻红。
+- **闭环用法**：`script_api_read` 拿函数签名 / 返回值 → 写 `Scripts/*.lua` →
+  `project_check`（脚本引用）→ `run_headless`（脚本真的跑得动、看 Console 日志）。
+
 ---
 
 ## 已知边界（写给正在用它的智能体）
@@ -203,9 +227,10 @@
   直接编辑文件；MCP 写工具只覆盖场景与实体。
 - **构建**：`project_build`（打包 / 编译插件）在计划里，还没上；无头运行已就绪
   （工具 `run_headless` / CLI `xgame-editor --headless`）。
-- **schema 的边界**：`schema_read` 只描述**场景 / 预制体落盘格式**；脚本 API 清单
-  还没有 JSON 导出（当前真相源是人读的 [`脚本API.md`](脚本API.md)）。schema 也不是
-  JSON Schema —— 它是引擎自己的领域目录（默认值是可解析的 RON 示例）。
+- **schema 的边界**：`schema_read` 只描述**场景 / 预制体落盘格式**；脚本 API 用
+  `script_api_read`（参数 / 返回值 / 约定以清单为准，叙述与示例见
+  [`脚本API.md`](脚本API.md)）。schema 也不是 JSON Schema —— 它是引擎自己的领域
+  目录（默认值是可解析的 RON 示例）。
 - **破坏半径**：`scene` 参数拒绝 `..` / 绝对路径，写入止于项目目录内；重名歧义
   一律拒绝而不是"猜一个"。
 
@@ -216,15 +241,19 @@
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 9 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 10 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |
+| `crates/xgame-core/src/script_api.rs` | 脚本 API 清单（155 函数 / 17 类 / 6 钩子 / 值类型 / 约定）+ 确定性数据 + 防漂移测试（`--export-script-api` 与 `script_api_read` 共用的唯一内容源） |
+| `crates/xgame-editor/src/script_api_cli.rs` | `--export-script-api` 的参数解析、JSON 序列化、stdout / `--out` 出口；文档函数名比对 |
 | `crates/xgame-core/src/check.rs` | `check_project()`（编辑器 `--check` 与 `project_check` 共用） |
 | `crates/xgame-core/src/asset.rs` | `AssetGuid` / `AssetMeta` / `AssetDatabase`（`asset_list` 与 `--check` 的资产诊断都读它） |
 | `crates/xgame-editor/src/headless.rs` | 无头运行的实现（CLI `--headless`；`run_headless` 工具 spawn 它） |
 
-回归测试：`cargo test -p xgame-mcp`（32 条：协议 9 条 + 9 个工具的行为与信封；
+回归测试：`cargo test -p xgame-mcp`（33 条：协议 9 条 + 10 个工具的行为与信封；
 其中 `run_headless` 的几条会嵌套 `cargo build -p xgame-editor` 保证被测 exe 新鲜，
 再经真实进程 spawn 跑通）。`schema_read` 另有 `xgame-core` 的 10 条目录测试与
-`xgame-editor` 的 5 条 CLI 测试钉住内容与确定性。
+`xgame-editor` 的 5 条 CLI 测试钉住内容与确定性；`script_api_read` 另有
+`xgame-core` 的 6 条清单测试、`xgame-editor` 的 6 条 CLI / 文档比对测试，以及
+`xgame-script` 的 1 条“注册名逐名一致 + 运行时都是函数”测试。

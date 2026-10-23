@@ -1,4 +1,4 @@
-//! # 九个工具 —— 智能体操纵引擎的最小完备集
+//! # 十个工具 —— 智能体操纵引擎的最小完备集
 //!
 //! 刻意小：**读说明 → 读清单 → 读场景 → 改（整体或单实体）→ 验证** 五步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
@@ -39,7 +39,7 @@ fn fail(message: impl Into<String>) -> CallError {
 
 /// 一次工具调用的输出：一段文本 +（可选的）随附图片。
 ///
-/// 九个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 十个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
 /// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
 /// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
 /// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
@@ -68,7 +68,7 @@ impl ToolOutput {
     }
 }
 
-/// 9 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 10 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -191,6 +191,14 @@ pub fn schemas() -> Vec<Value> {
                 "required": ["project"],
             },
         }),
+        json!({
+            "name": "script_api_read",
+            "description": "返回脚本 API 的机器可读清单（JSON）：155 个全局函数（签名 / 参数 / 返回值 / 语义）、6 个生命周期钩子、17 个类别、值类型与全局约定。写 .lua 之前先读；与 `xgame-editor --export-script-api` 同源，不需要 project。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        }),
     ]
 }
 
@@ -206,6 +214,7 @@ pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
         "project_check" => project_check(args).map(ToolOutput::text),
         "asset_list" => asset_list(args).map(ToolOutput::text),
         "run_headless" => run_headless(args),
+        "script_api_read" => script_api_read(args).map(ToolOutput::text),
         other => Err(CallError::UnknownTool(other.to_string())),
     }
 }
@@ -310,7 +319,7 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 九个工具
+// 十个工具
 // ---------------------------------------------------------------------------
 
 /// `schema_read` —— 场景格式的机器可读说明书（项目无关）。
@@ -321,6 +330,16 @@ fn schema_read(_args: &Value) -> Result<String, CallError> {
     let doc = xgame_core::schema::scene_schema();
     serde_json::to_string_pretty(&doc)
         .map_err(|error| fail(format!("序列化场景 schema 失败: {error}")))
+}
+
+/// `script_api_read` —— 脚本 API 的机器可读清单（项目无关）。
+///
+/// 与 `xgame-editor --export-script-api` 同源（[`xgame_core::script_api::script_api`]）。
+/// 不需要打开项目：脚本契约是引擎的，不是某个项目的。
+fn script_api_read(_args: &Value) -> Result<String, CallError> {
+    let doc = xgame_core::script_api::script_api();
+    serde_json::to_string_pretty(&doc)
+        .map_err(|error| fail(format!("序列化脚本 API 清单失败: {error}")))
 }
 
 /// `project_info` —— 清单 + 各目录清单，全走 [`ProjectHandle`] 的现成 API。
@@ -867,6 +886,37 @@ mod tests {
                 .iter()
                 .any(|ty| ty["name"] == "Entity" && ty["fields"].as_array().is_some()),
             "Entity 字段表必须是数组"
+        );
+    }
+
+    /// `script_api_read` 不需要项目，返回与 `--export-script-api` 同一份清单。
+    #[test]
+    fn script_api_read_returns_the_shared_catalog() {
+        let out = call("script_api_read", &json!({})).expect("script_api_read 不该要求 project");
+        assert!(out.images.is_empty());
+        let value: Value = serde_json::from_str(&out.text).expect("必须是 JSON");
+        assert_eq!(
+            value["format_version"],
+            xgame_core::script_api::SCRIPT_API_FORMAT_VERSION
+        );
+        let categories = value["categories"].as_array().expect("categories 数组");
+        assert_eq!(categories.len(), 17, "类别数");
+        assert_eq!(value["hooks"].as_array().expect("hooks 数组").len(), 6);
+        let functions: Vec<&Value> = categories
+            .iter()
+            .flat_map(|category| category["functions"].as_array().expect("functions 数组"))
+            .collect();
+        assert_eq!(functions.len(), 155, "函数总数");
+        assert!(
+            functions.iter().any(|function| function["name"] == "spawn_prefab"),
+            "缺 spawn_prefab"
+        );
+        assert!(
+            functions
+                .iter()
+                .any(|function| function["name"] == "set_pos"
+                    && function["signature"] == "set_pos(ctx, x, y, z)"),
+            "set_pos 签名不对"
         );
     }
 

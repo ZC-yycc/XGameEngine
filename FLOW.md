@@ -83,6 +83,23 @@ scene_renderer::SceneRenderer::new(device, queue, egui_renderer, format, project
 > 写 `project.ron` 与默认场景「打开」走 `ProjectHandle::open`（读 `project.ron`）。
 > 原生目录选择器来自 `rfd`。
 
+### 无头 / 导出入口（不创建窗口）
+
+`main()` 在 eframe 之前按首个参数分流；除带 `--screenshot` 的 `--headless` 需要 GPU
+外，这些入口都不建窗口：
+
+```
+--check              → xgame_core::check_project        退出码 0 / 1 / 2
+--export-schema      → editor::schema_cli               退出码 0 / 1
+--export-script-api  → editor::script_api_cli           退出码 0 / 1
+--migrate-assets     → ProjectHandle::migrate_asset_references
+--headless           → editor::headless                 退出码 0 / 1 / 2
+--build              → editor::builder::build           退出码 0 / 1
+```
+
+导出入口只把 `xgame-core` 的目录 / 清单序列化成 JSON：`--out` 写文件，缺省打 stdout；
+同一份代码两次导出逐字节相同。
+
 ### 独立游戏 (`xgame-game`)
 
 ```
@@ -1262,7 +1279,7 @@ Scene(
 
 | 文件 | 行数 | 核心函数 |
 |---|---|---|
-| `editor/main.rs` | 1677 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `FrameInputs` 四输入含 `animating` + `--check` / `--export-schema` 分派）、`open_project()`、`editor_ui()`（3a 自动保存 / 3a-2 热重载 tick + 末尾画设置 / 另存为 / 新建场景 / 场景切换 / 未保存 / 自动保存恢复弹窗）、`autosave_label()`（状态栏读数） |
+| `editor/main.rs` | 1682 | `EditorApp::new()`、`update()`（关窗拦截 + `drop_redundant_pointer_moves` + `FrameInputs` 四输入含 `animating` + `--check` / `--export-schema` / `--export-script-api` 分派）、`open_project()`、`editor_ui()`（3a 自动保存 / 3a-2 热重载 tick + 末尾画设置 / 另存为 / 新建场景 / 场景切换 / 未保存 / 自动保存恢复弹窗）、`autosave_label()`（状态栏读数） |
 | `editor/autosave.rs` | 275 | `AutoSave`（间隔 / 到点 / `wait` 排唤醒 / 上次成功 / 上次错误）、`AutosaveNotice`（打开项目时探测到的副本）、`sanitize_interval()`（`0` = 关闭） |
 | `editor/hot_reload.rs` | 555 | `ProjectWatcher`（1 Hz 内容目录快照 / 到点 / `poll` / `rebase` / `wait`）、`scan()` / `walk()`（只查 metadata、跳过自身产物、不跟符号链接）、`classify()`（Script / Scene / Prefab / Asset）、`diff()`（增 / 改 / 删） |
 | `editor/hub.rs` | 352 | `ProjectHub::ui()`、`open_project_at()`、`create_project_at()` |
@@ -1280,7 +1297,9 @@ Scene(
 | `editor/frame_policy.rs` | 277 | `plan()`（纯函数，五输入：playing / interacting / had_input / animating / since_last_input）、`FrameClock` |
 | `editor/headless.rs` | 1334 | `run()`（CLI `--headless`：固定 dt 帧循环 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
 | `editor/schema_cli.rs` | 213 | `--export-schema` 参数解析（stdout / `--out` / `--help`）、`render_json()`（`serde_json` 美化 + 末尾换行）、`cli()`（退出码 0/1） |
+| `editor/script_api_cli.rs` | 331 | `--export-script-api` 的参数解析 / `render_json()` / `cli()`；测试含“文档 API 表函数名 == 清单”防漂移 |
 | `core/schema.rs` | 2967 | `scene_schema()`（36 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
+| `core/script_api.rs` | 701 | `script_api()`（155 个函数 / 17 类 / 6 钩子 / 值类型 / 全局约定）；手写数据 + 6 条结构测试；注册名与文档名分别由 `xgame-script` / `xgame-editor` 测试钉住 |
 | `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
 | `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |
@@ -1320,7 +1339,7 @@ Scene(
 | `editor/panels/dock.rs` | 117 | `create_tile_tree()`、`EditorBehavior` |
 | `editor/panels/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |
 | `game/main.rs` | 517 | `GameRunner`（`ApplicationHandler`：`resumed` / `window_event` / `about_to_wait`）、`GameApp::new()`、`update()`、`render()`、`resolve_project()` |
-| `mcp/lib.rs` | 224 | `handle_line()`（协议入口，喂行进断言行出的纯函数）、`initialize_result()`（版本协商）、两层错误（协议 `error` vs 工具 `isError`） |
-| `mcp/tools.rs` | 1528 | `schemas()`（9 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、`schema_read()`（与 `--export-schema` 同源）/ upsert（先挂父再改变换）/ remove / check / run_headless 实现 |
+| `mcp/lib.rs` | 306 | `handle_line()`（协议入口，喂行进断言行出的纯函数）、`initialize_result()`（版本协商）、两层错误（协议 `error` vs 工具 `isError`） |
+| `mcp/tools.rs` | 1578 | `schemas()`（10 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、`schema_read()`（与 `--export-schema` 同源）/ `script_api_read()`（与 `--export-script-api` 同源）/ upsert（先挂父再改变换）/ remove / check / run_headless 实现 |
 | `mcp/main.rs` | 24 | stdin/stdout 管道（唯一碰 I/O 的一层） |
 | `tools/build-release.ps1` | 370 | `Resolve-Cargo`、`Enable-MsvcEnv`、`Invoke-CargoBuild` |

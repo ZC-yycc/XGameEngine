@@ -27,6 +27,10 @@ cargo run -p xgame-editor -- --check projects/SampleScene
 # （无 --out 打 stdout；同一份代码两次导出逐字节相同）
 cargo run -p xgame-editor -- --export-schema --out schema.json
 
+# 脚本 API 清单 —— 导出 155 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
+# （与 MCP `script_api_read` 同源；无 --out 打 stdout）
+cargo run -p xgame-editor -- --export-script-api --out script_api.json
+
 # 老项目迁移 —— 给资产生成 .meta、把场景 / 预制体里的路径引用改写成 GUID
 # （幂等；只替换引用字面量，不动注释与排版）
 cargo run -p xgame-editor -- --migrate-assets projects/MyOldGame
@@ -875,9 +879,10 @@ Build/<项目名>/
 
 ## MCP（AI 智能体接口）
 
-`xgame-mcp` 是本引擎的 **MCP server** —— 把"读说明书、读项目、改场景、动实体、跑检查、
-无头实跑"暴露成 9 个标准 MCP 工具，Cursor / Claude 等任何 MCP 客户端接上就能
-**不用鼠标直接操纵引擎**做游戏开发。无窗口、无 GPU，stdio 起服务（按行 JSON-RPC）。
+`xgame-mcp` 是本引擎的 **MCP server** —— 把"读说明书、读脚本契约、读项目、改场景、
+动实体、跑检查、无头实跑"暴露成 10 个标准 MCP 工具，Cursor / Claude 等任何 MCP
+客户端接上就能**不用鼠标直接操纵引擎**做游戏开发。无窗口、无 GPU，stdio 起服务
+（按行 JSON-RPC）。
 
 ```json
 { "mcpServers": { "xgame": { "command": "D:\\...\\dist\\xgame-mcp.exe" } } }
@@ -886,12 +891,14 @@ Build/<项目名>/
 | 工具 | 干什么 |
 |---|---|
 | `schema_read` | 读场景格式的机器可读说明书（36 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
+| `script_api_read` | 读脚本 API 的机器可读清单（155 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
 | `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |
 | `entity_upsert` | 按名字创建/部分更新实体（变换、模型、脚本、父子） |
 | `entity_remove` | 按名字删除实体（重名歧义拒绝；子节点提升不连坐） |
 | `project_check` | 无头验证（与 `--check` 同一份逻辑），返回 JSON 报告 |
+| `asset_list` | 读项目资产树（路径 / 类型 / GUID / 导入参数 / 资产库诊断） |
 | `run_headless` | 无头跑 N 帧（与 `--headless` 同一实现），返回统计报告 + 可选场景快照 + 可选截图（MCP 图片块） |
 
 改完先 `project_check` 自证没改坏、再 `run_headless` 看真的跑得动 —— 这是智能体的

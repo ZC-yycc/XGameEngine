@@ -16,10 +16,11 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；799 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；813 条 + 7 条基准 ignore）
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --export-schema --out schema.json  # 场景格式说明书（JSON；无 --out 打 stdout）
+cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（155 函数 / 6 钩子；无 --out 打 stdout）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
 cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
@@ -45,6 +46,11 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
   **穷举解构 + 枚举穷举匹配 + 默认值 / 示例反解 + 类型引用校验 + ProjectHandle 往返**
   钉住；给落盘类型加字段必须同步 `schema.rs`，否则测试编译不过。输出必须确定性
   （无时间戳 / 随机 ID；示例里的 `EntityId` 固定）。规则见 `Docs/决策记录.md` §三十二。
+- **脚本 API 清单**：`xgame-core::script_api::script_api()` 是 `--export-script-api` 与
+  MCP `script_api_read` 的**唯一内容源**。清单是手写的（Lua C 函数没有参数名反射），
+  但 `xgame-script` 从 `lua_api.rs` / `ui_api.rs` 的 `globals.set("…")` 提取注册名
+  逐名比对，`xgame-editor` 从 `Docs/脚本API.md` 的 API 表提取函数名比对；改注册 /
+  文档必须同步清单。规则见 `Docs/决策记录.md` §三十三。
 - **编辑器热重载**：`crates/xgame-editor/src/hot_reload.rs` 每秒只扫内容目录的 metadata；
   改动由 `EditorState::hot_reload_tick` 应用，**动作后必须 `rebase`**（自己补的 `.meta`
   不能当外部改动，否则每秒自激）。场景文件永不自动覆盖；`--ui-shot` 不启用。

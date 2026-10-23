@@ -24,7 +24,7 @@
 | **双轨 P0–P3** | ✅ 完成 | Rust 组件（UE 插件模式）+ Lua 脚本（Unity 模式 + 热更）双轨；P2.5 基准判定后 P3 删 Rhai，脚本层收敛单一 Lua 轨。决策 D1–D11 见[计划文档](Docs/双轨语言架构计划.md)，实施记录见 PLAN.md 十五–二十一 |
 | **七** | 🟨 进行中 | 动画系统（主要切片 ✅：骨骼蒙皮 + 单剪辑 + 交叉淡入 + 阈值状态机 + 叠加 + 多层混合栈与骨骼遮罩；morph / Phase B 待做） |
 | **八** | ✅ 完成 | 音频系统（kira：`AudioSource` + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，见 PLAN.md 二十二） |
-| **Agent-Native ①②③** | ✅ 完成 | MCP 工具面（9 工具，含 `asset_list` / `schema_read`）+ 无头运行 `--headless` / `--screenshot` + 场景格式说明书 `--export-schema`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) / PLAN.md 五十 |
+| **Agent-Native ①②③** | ✅ 完成 | MCP 工具面（10 工具，含 `asset_list` / `schema_read` / `script_api_read`）+ 无头运行 `--headless` / `--screenshot` + 场景格式说明书 `--export-schema` + 脚本 API 清单 `--export-script-api`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) / PLAN.md 五十、五十一 |
 | **渲染 PBR** | ✅ 完成 | Cook-Torrance + 逐实体材质覆盖 + 无头截图（PLAN.md 二十四） |
 | **渲染 HDR** | ✅ 完成 | HDR 中间标 + ACES + 曝光（二十五）、Bloom（二十六） |
 | **渲染天空** | ✅ 完成 | 程序化天空盒 + 球谐漫反射 + 预过滤镜面 + BRDF LUT（二十七） |
@@ -170,13 +170,15 @@
 - **程序化观察** —— `--screenshot` 离屏 PNG（同机逐字节一致），MCP 以图片块回传；
 - **程序化配置** —— 重力 / 步长 / 渲染参数都在 `project.ron`；
 - **程序化契约** —— `--export-schema` / MCP `schema_read`：36 个落盘类型、字段、默认值、
-  示例、资产引用规则，确定性 JSON；
+  示例、资产引用规则，确定性 JSON；`--export-script-api` / MCP `script_api_read`：
+  155 个脚本函数、签名、参数、返回值、6 个生命周期钩子与全局约定；
 - **单一运行时** —— 无头验证与玩家实跑完全一致；
-- **MCP 工具面** —— 9 个工具（读说明书 / 读 / 改 / 查 / 看效果 / 看资产）；
-- **安全网** —— 799 条回归测试、每条先证红。
+- **MCP 工具面** —— 10 个工具（读说明书 / 读脚本契约 / 读 / 改 / 查 / 看效果 / 看资产）；
+- **安全网** —— 813 条回归测试、每条先证红。
 
-进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出 ✅
-（`--export-schema` + MCP `schema_read`）→ ④ 资产 GUID 落地 ✅，`asset_list` ✅
+进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出 + 脚本 API
+清单导出 ✅（`--export-schema` + `schema_read` / `--export-script-api` +
+`script_api_read`）→ ④ 资产 GUID 落地 ✅，`asset_list` ✅
 （`asset_import` 仍待，导入参数目前只能在编辑器里改）。
 
 ---

@@ -69,6 +69,7 @@ mod profiler;
 mod recents;
 mod scene_renderer;
 mod schema_cli;
+mod script_api_cli;
 mod state;
 
 use std::path::Path;
@@ -1335,6 +1336,7 @@ fn main() -> Result<(), eframe::Error> {
     //               error 日志或非有限变换
     //   --build：0 = 打包成功 / 1 = 失败（入口缺失 / 发布清单有装不起来的关卡 / 找不到播放器）
     //   --export-schema：0 = 导出成功 / 1 = 参数或序列化错误
+    //   --export-script-api：0 = 导出成功 / 1 = 参数或序列化错误
     // 详见 xgame-core `check` 模块头与 `headless` 模块头（验证 / 运行逻辑在
     // 那里，这里只管分发与退出码）。
     {
@@ -1342,6 +1344,9 @@ fn main() -> Result<(), eframe::Error> {
         match args.first().map(String::as_str) {
             Some("--export-schema") => {
                 std::process::exit(crate::schema_cli::cli(&args[1..]));
+            }
+            Some("--export-script-api") => {
+                std::process::exit(crate::script_api_cli::cli(&args[1..]));
             }
             Some("--check") => {
                 let path = args

@@ -2,6 +2,10 @@
 
 > 语言是 [Lua 5.4](https://www.lua.org/manual/5.4/)（经 mlua 嵌入，`vendored` 随引擎编译）。
 > 脚本放在项目的 `Scripts/` 目录（`.lua`），实体用**项目相对路径**引用它。
+>
+> **机器可读清单**：`xgame-editor --export-script-api [--out api.json]`，或 MCP
+> `script_api_read`。本文件的 155 个函数名与清单由测试钉住；参数 / 返回值 /
+> 全局约定以清单为准，本文件继续承担叙述、示例与易错点说明。
 
 ---
 

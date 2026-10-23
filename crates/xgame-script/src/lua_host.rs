@@ -1485,4 +1485,68 @@ mod tests {
         }
         assert_eq!(clock.time_scale(), 0.0, "最后一次写入应落在宿主时钟上");
     }
+
+    /// 从注册源码里提取 `globals.set("name", ...)` 的名字。
+    ///
+    /// 不靠运行期枚举全局表：Lua 基础库也有 `error` 等函数，而引擎恰好覆盖了
+    /// 同名全局；用集合差分会把被覆盖的名字漏掉。直接读注册源码能精确拿到
+    /// 引擎自己注册的 155 个名字。
+    fn registered_global_names(source: &str) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut rest = source;
+        while let Some(position) = rest.find("globals.set(") {
+            rest = &rest[position + "globals.set(".len()..];
+            let after = rest.trim_start();
+            let after = after
+                .strip_prefix('"')
+                .unwrap_or_else(|| panic!("globals.set 必须使用字符串字面量名: {after:.80}"));
+            let end = after
+                .find('"')
+                .unwrap_or_else(|| panic!("globals.set 名字缺右引号: {after:.80}"));
+            let name = &after[..end];
+            assert!(!name.is_empty(), "globals.set 名字不能为空");
+            assert!(
+                names.insert(name.to_string()),
+                "重复注册全局函数: {name}"
+            );
+            rest = &after[end + 1..];
+        }
+        names
+    }
+
+    /// 机器可读清单必须与 `lua_api.rs` / `ui_api.rs` 的注册名**逐名一致**。
+    ///
+    /// 这是清单的防漂移主钉子：新增 / 改名 / 删除脚本 API 时，如果只改注册而
+    /// 不改 `xgame-core::script_api`，这里立刻红。运行期再确认每个名字真的
+    /// 是 Lua 函数，防止“源码里有、注册失败”的静默漏注册。
+    #[test]
+    fn script_api_manifest_matches_registered_globals() {
+        let source = format!(
+            "{}\n{}",
+            include_str!("lua_api.rs"),
+            include_str!("ui_api.rs")
+        );
+        let actual = registered_global_names(&source);
+        let doc = xgame_core::script_api::script_api();
+        let expected: std::collections::BTreeSet<String> =
+            doc.function_names().map(str::to_string).collect();
+
+        assert_eq!(
+            actual, expected,
+            "脚本 API 清单与 lua_api/ui_api 的注册名不一致"
+        );
+        assert_eq!(actual.len(), 155, "注册名数量应为 155");
+
+        let host = LuaHost::new();
+        let globals = host.lua.globals();
+        for name in &actual {
+            let value: Value = globals
+                .get(name.as_str())
+                .unwrap_or_else(|error| panic!("读全局 {name} 失败: {error}"));
+            assert!(
+                matches!(value, Value::Function(_)),
+                "{name} 在 Lua 里不是函数"
+            );
+        }
+    }
 }

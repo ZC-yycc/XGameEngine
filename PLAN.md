@@ -4758,7 +4758,8 @@ Agent-Native 的 ③ 是「机器可读契约」：智能体能读写 RON 不等
 
 ### 五、刻意没做 / 已知边界
 
-- **脚本 API 清单导出**还没做：支柱 8 的另一半，当前真相源仍是 `Docs/脚本API.md`；
+- **脚本 API 清单导出**还没做（本轮五十一已补）：支柱 8 的另一半，当时真相源仍是
+  `Docs/脚本API.md`；
 - **没有 schema 版本迁移器**：`SCHEMA_FORMAT_VERSION` 只在改语义 / 删字段 / 改默认值时
   递增，旧版本的 JSON 不提供自动升级；
 - **目录是手写的**：加落盘字段时测试会编译不过，但 `summary` / `note` 的文案仍要人写；
@@ -4774,3 +4775,101 @@ Agent-Native 的 ③ 是「机器可读契约」：智能体能读写 RON 不等
 - **CI**：`.github/workflows` + `check` / `clippy` / `test` / `--check` / `--headless`；
 - **schema 快照测试**：把导出的 JSON 存一份进仓库，格式变化时 diff 直接可见
   （当前用「两次导出相同 + 内容断言」防漂移，快照是更直观的补充）。
+
+---
+
+## 五十一、脚本 API 清单导出（Agent-Native ③ 收口，2026-10-23）
+
+上一轮把「场景怎么写」变成了机器可读 JSON；这一轮补上另一半 ——「脚本怎么调」。
+目标不是再写一份人读文档，而是让智能体在写第一个 `.lua` 之前拿到**可解析的契约**：
+155 个注册名、签名、参数、返回值、6 个生命周期钩子、值类型与全局约定。
+
+### 一、做了什么
+
+1. **`xgame-core::script_api`（新模块）**
+   - `ScriptApiDoc { format_version, engine_version, conventions, hooks,
+     value_types, categories }`；
+   - 17 个类别（`transform` / `entity` / `spawn` / `physics` / `character` /
+     `input` / `time` / `state` / `math` / `animation` / `animation_layers` /
+     `audio` / `material` / `particle` / `ui` / `camera` / `scene`）；
+   - 155 个 `ScriptFunction { name, signature, params, returns, summary }`；
+   - 6 个钩子、7 个值类型（`ctx` / `Vec3` / `Vec2` / `RayHit` / `EntityId` /
+     `AssetPath` / `LuaValue`）、9 条全局约定；
+   - 参数不单独存，构造时从签名解析 —— 避免「签名改了、params 没改」的两处漂移。
+2. **CLI `xgame-editor --export-script-api [--out <path>]`**
+   - 无 `--out` 打 stdout（末尾一个换行）；有则写文件、stdout 只回一行确认；
+   - 退出码 0 成功 / 1 参数或序列化失败，不复用 `--check` 的 2；
+   - JSON 确定性：没有时间戳 / 随机 ID，函数与类别按文档顺序。
+3. **MCP `script_api_read`（第 10 个工具）**
+   - 与 CLI 同源（`xgame_core::script_api::script_api`），不需要 `project`；
+   - 追加为第 10 个工具，避免重排已有 9 个工具的文档编号。
+4. **三层防漂移**
+   - `xgame-script`：从 `lua_api.rs` / `ui_api.rs` 的 `globals.set("…")` 提取
+     全部注册名，与清单逐名比对；再在真实 Lua VM 里确认每个名字都是函数；
+   - `xgame-editor`：从 `Docs/脚本API.md` 的 API 表提取函数名，与清单逐名比对；
+   - `xgame-core`：结构测试（类别引用、签名与函数名一致、名字唯一、数量）。
+5. **文档**：`Docs/脚本API.md` 顶部加机器清单入口；`README` / `ROADMAP` /
+   `Docs/差距分析.md` / `Docs/MCP.md` / `FLOW.md` / `AGENTS.md` 同步；决策记录
+   新增 §三十三。
+
+### 二、刻意的取舍
+
+- **清单放 core，不放 `xgame-script`**：MCP 只依赖 `xgame-core`；如果把清单放进
+  脚本 crate，`xgame-mcp` 会被迫依赖 mlua / vendored Lua。清单是纯数据，放 core
+  让 CLI、MCP、测试共享同一份内容源。
+- **手写元数据，不做运行时反射**：Lua C 函数没有可用的参数名 / 返回类型反射；
+  强行从 Rust 闭包类型推导会把 `LuaCtx`、`f32`、`Option<T>` 等实现细节漏给脚本
+  作者。手写签名 + 注册名测试比“自动但不准确”更有价值。
+- **参数类型只放在签名字符串里**：`set_pos(ctx, x, y, z)` 对智能体已经足够；
+  没有把每个参数拆成 `{name, ty}`。这是第一版的刻意收敛 —— 等出现“必须按类型
+  过滤”的真实需求再升级，避免 155 × N 个字段的手写负担。
+- **返回值是字符串，不是 JSON Schema**：`EntityId | nil` / `RayHit` 这类写法
+  直接对应 Lua 语义；硬套 JSON Schema 会把 `nil`、Lua 表、userdata 表达得很别扭。
+- **文档只钉函数名，不钉文案**：`Docs/脚本API.md` 继续承担叙述与示例，清单的
+  `summary` 可以更精炼；名字集合必须完全一致（否则智能体会照着文档写出不存在的
+  函数），文案允许各自演进。
+- **MCP 工具追加为第 10 个**：`schema_read` 仍是首个；`script_api_read` 不需要
+  `project`，`tools_list_shape` 对它单独放行。这样不用重排已有 9 个工具的章节。
+- **格式版本从 1 开始**：加字段不涨；改语义 / 删字段 / 改返回值才涨。与 schema
+  的版本纪律一致。
+
+### 三、验证（全部实跑）
+
+- **全量测试**：`813 passed / 0 failed / 7 ignored`（上一轮 799，净增 14：
+  core 6 + editor 6 + script 1 + MCP 1）；`cargo check --workspace --all-targets`
+  通过；`cargo clippy --workspace --all-targets -- -D warnings` 0 告警。
+- **二进制级导出**：
+  - `--export-script-api` 两次 stdout 逐字节相同，50,695 字节，SHA256
+    `DBF83431BE494BB675734F8C18BA69EC57DF293AD1F432DAB0F5C6FEE7486CDC`；
+  - 两次 `--out` 与 stdout 完全相同；stderr 为空、退出码 0；
+  - Python 按 UTF-8 解析通过：`format_version=1`、17 类、155 函数、6 钩子、
+    7 值类型、9 条约定；`set_pos(ctx, x, y, z)` 与
+    `spawn_prefab -> EntityId | nil` 等抽样断言通过。
+- **MCP 进程级**：Python 起真实 `xgame-mcp.exe`，`initialize → tools/list`
+  返回 10 个工具（含 `script_api_read`，无必填 `project`）→
+  `tools/call script_api_read` 返回同一份清单（155 函数 / 17 类），退出码 0；
+  stderr 只有启动横幅。
+- **文档防漂移**：`xgame-editor` 的 Markdown 解析测试从 `Docs/脚本API.md` 的
+  API 表提取出 155 个函数名，与清单完全一致。
+
+### 四、还没做 / 已知边界
+
+- **没有真实 MCP 客户端端到端**：只验证了协议层与真实 server 进程；
+  Cursor / Claude 的实际工具选择与上下文注入未测。
+- **参数 / 返回值的结构粒度有限**：参数类型在签名字符串里；返回值是字符串。
+  如果未来智能体需要按类型生成强类型桩代码，再升级为结构化参数。
+- **文档 summary 不参与漂移检查**：函数名集合由测试钉住，但文档文案与清单
+  `summary` 可以各自演进；改语义时仍要人工同步两处。
+- **清单不含“自哪个版本加入”**：当前只有整体 `format_version` / `engine_version`；
+  没有逐函数 `since`。等 API 开始做兼容性分层时再加。
+- **UI / 音频等固定参数个数**：清单只描述签名，不描述“参数个数写错会当场报错”
+  这类实现约束；这些仍在 `Docs/脚本API.md` 的叙述里。
+
+### 五、下一步候选
+
+- **CI**：`.github/workflows` + `check` / `clippy` / `test` / `--check` / `--headless`；
+- **`asset_import`**：让智能体经 MCP 改 `.meta` 导入设置；
+- **脚本 API 结构化参数**：如果出现强类型桩代码需求，再把签名升级成
+  `{ name, ty, optional }`；
+- **两份 JSON 的快照测试**：schema + script_api 各存一份进仓库，格式变化时
+  diff 直接可见。
