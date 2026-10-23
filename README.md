@@ -909,6 +909,8 @@ Build/<项目名>/
 | `entity_remove` | 按名字删除实体（重名歧义拒绝；子节点提升不连坐） |
 | `project_check` | 无头验证（与 `--check` 同一份逻辑），返回 JSON 报告 |
 | `asset_list` | 读项目资产树（路径 / 类型 / GUID / 导入参数 / 资产库诊断） |
+| `asset_import` | 给单个资产建 `.meta` 并（可选）写导入参数；部分更新、越界钳制、幂等 |
+| `asset_move` | 移动 / 改名资产，`.meta` 跟着走、**GUID 不变**（`guid://` 引用天然不断链） |
 | `run_headless` | 无头跑 N 帧（与 `--headless` 同一实现），返回统计报告 + 可选场景快照 + 可选截图（MCP 图片块） |
 
 改完先 `project_check` 自证没改坏、再 `run_headless` 看真的跑得动 —— 这是智能体的

@@ -4949,3 +4949,99 @@ Agent-Native 的 ③ 是「机器可读契约」：智能体能读写 RON 不等
 - **自托管 GPU runner**：把 `--screenshot` 的逐字节确定性也纳入 CI；
 - **性能基准 runner**：给 7 条 ignored 基准建立稳定基线后再进 CI；
 - **跨平台矩阵**：Linux 先补系统依赖与实测，再加进 workflow。
+
+## 五十三、MCP 资产侧闭环：`asset_import` / `asset_move`（2026-10-23）
+
+上一轮的"下一步候选"第一条就是 `asset_import`。这一轮把它和它的孪生兄弟
+`asset_move` 一起做完，让 Agent-Native 的资产侧也齐成闭环：
+**看见（`asset_list`）→ 导入（`asset_import`）→ 整理（`asset_move`）→ 自证
+（`project_check`）**。此前智能体能"看见"资产树，却改不动导入设置、也搬不动文件。
+
+### 一、做了什么
+
+1. **core（`xgame-core::asset`）** —— 三个新原语，编辑器与 MCP 共用同一条路径：
+   - `normalize_asset_relative()`：把外部给的路径收敛成项目内相对路径。拒绝绝对
+     路径 / 盘符 / `..` / 未知扩展名 / 构建缓存目录（`target` / `dist` / `.git` 等），
+     也拒绝 Windows 会**静默吃掉**的结尾空格与点、`file:stream` 里的冒号、非法字符
+     —— 否则"我写下的 `.meta`"和"扫描看到的资产"会对不上。
+   - `ImportSettings::sanitized()`：`model_scale` 非有限值退回 1.0、有限值钳到
+     `[0.001, 1000]`。**读盘（`AssetMeta::from_ron`）与写盘（`set_import`）两个边界
+     都过一遍** —— 坏值既进不来也存不下去，不会出现"列表里是 1e30、画面里是 1000"。
+   - `AssetDatabase::ensure_meta()`：**只给点名的那个资产**写 `.meta`。与
+     `ensure_metas()`（编辑器打开项目时的批量补全）分工明确：一次点名就该是一次
+     范围明确的写操作。已有合法 `.meta` 原样返回（幂等、不换 GUID），已有坏
+     `.meta` 拒绝覆盖（那可能是用户手改到一半的内容）。
+   - `AssetDatabase::move_asset()`：资产 + `.meta` 一起搬，**GUID 不变**。所有拒绝
+     判定都在动盘之前（源未登记 / 目标已存在 / 改变资产类型 / 目标是场景 / 路径
+     穿越）；`.meta` 搬失败时回滚资产文件；成功后 `refresh()` 全量重扫，换"索引
+     绝不会半新半旧"。
+2. **MCP（`xgame-mcp`）** —— 两个新工具，工具面从 10 个变成 12 个：
+   - `asset_import`：不给参数 = 只补 `.meta`（幂等）；给参数 = **部分更新**
+     （只覆盖传了的字段 —— 只调缩放不能顺手把用户改过的 `texture_srgb` 冲回默认）。
+     返回 `created` / `changed` / 落盘后的 `import`；`model_scale` 被钳过时另带
+     `model_scale_requested` + `model_scale_clamped`，让"我设的"和"生效的"两个事实
+     都可见。非有限值**直接拒绝**而不是静默修正。
+   - `asset_move`：搬移 + 返回 `references_preserved`；**刻意不"顺手改写引用"** ——
+     磁盘上存的是 `guid://`，GUID 不变就天然不断链，那才是这条工具的价值。
+3. **文档**：`Docs/MCP.md` 补 11 / 12 两节 + 修正"编辑器不监视文件"这句已经过时的
+   说法（热重载上一轮已落地）；`ROADMAP.md` / `Docs/差距分析.md` / `README.md` /
+   `FLOW.md` / `AGENTS.md` 同步工具数与测试数；决策记录新增 §三十五。
+
+### 二、刻意的取舍
+
+- **单资产而不是整目录**：`asset_import` 只碰点名的那个文件。智能体点名一个资产却
+  顺手给整个资源目录 GUID 化，会把一次小操作变成一次范围外写入。
+- **部分更新而不是整体替换**：`entity_upsert` 那套语义沿用到导入设置。整体替换会
+  让"只调一个字段"变成"其余字段回默认"，用户手改的设置会在第二次调用时消失。
+- **越界钳制 + 两个值都报**：钳制是对的（`1e30` 会把包围盒 / 剔除算爆），但静默
+  钳制会让智能体以为设置生效了。返回值里同时给请求值与实际值。
+- **非有限值拒绝而不是退回默认**：`NaN` 没有"钳到边界"的合理含义，core 退回 1.0
+  是给"手写 `.meta` 的用户"留的兜底；MCP 是**智能体的入口**，那里应该报错。
+- **场景不归资产库**：导入 / 移动都明确拒绝 `.ron`。场景被 `project.ron` 按**路径**
+  引用（入口场景、发布清单），搬它要同步改清单，不是资产库能单方面决定的事。
+- **移动后全量重扫**：移动同时改了 `by_path` / `by_guid` / 诊断三处，手工同步容易
+  漏；这是低频交互操作（毫秒级扫盘），用一次全扫换"索引绝不会半新半旧"。
+- **不碰编辑器 UI**：资源浏览器里的重命名 / 拖拽移动仍是空缺（本轮只做智能体通道）。
+  UI 侧要处理选中项、Undo、已打开场景的引用刷新，是另一件事。
+
+### 三、验证（本地实跑）
+
+- **MCP 行为测试 3 条**（`cargo test -p xgame-mcp`）：
+  - `asset_import_creates_meta_and_merges_settings`：只补 `.meta` → 幂等（反斜杠
+    路径归一、GUID 不变、`changed=false`）→ 写 `model_scale=2.5` 并落盘 → 部分更新
+    （改 `texture_srgb` 后 `model_scale` 仍是 2.5）→ `1e9` 钳到 1000 且
+    `model_scale_clamped=true` → `1e39`（f64 有限、转 f32 溢出）被拒绝 → 场景 /
+    不存在的资产 / `..` 全部拒绝。
+  - `asset_move_keeps_guid_references_alive`：先断言盘上场景**确实存的是 `guid://`**
+    （否则这条测试什么都没证明）→ 移动 → 资产与 `.meta` 都在新路径、源目录清空 →
+    `project_check` 的 `has_issues=false`、`dangling_guids` 为空 → 场景读回来的
+    `model` 直接是新路径。
+  - `asset_move_rejects_unsafe_targets_without_touching_files`：目标已存在 / 改类型 /
+    目标是场景 / 路径穿越 / 同路径 / 源缺 `.meta` 六种拒绝，之后源文件、`.meta`
+    原文与索引全部原样。
+- **core 测试 5 条**：路径归一（16 个拒绝样例）、导入设置读写两边界净化、
+  单资产 `ensure_meta` 不碰别人 + 幂等 + 坏 `.meta` 不覆盖、移动保 GUID 且旧引用
+  解析到新路径、六种拒绝不动盘。
+- **全量**：`cargo check --workspace --all-targets` 通过；`cargo clippy --workspace
+  --all-targets` 0 告警；`cargo test --workspace --all-targets` **821 passed /
+  0 failed / 7 ignored**（上轮 813，本轮 +5 core +3 MCP）。
+
+### 四、还没做 / 已知边界
+
+- **编辑器 UI 的 rename / move**：资源浏览器仍不能重命名或拖拽移动资产（MCP 通了，
+  UI 没通）。
+- **`audio_streaming` 仍未被消费**：参数能写、能落盘，音频层还是全量解码（流式播放
+  是 P2）。
+- **移动不检查"谁在引用"**：不做引用方提示（Unity 会警告"移动会影响 N 个场景"）。
+  引用不会断，但"这个资产被谁用着"仍是盲区。
+- **大小写改名在 Windows 上被拒绝**：`Box.glb` → `box.glb` 会命中"目标已存在"。
+  没去猜"用户是不是只想改大小写" —— 猜错的代价比多一条报错大。
+- **编辑器里已打开的场景不跟随资产移动**：热重载只刷索引，内存中的场景仍是旧路径，
+  重新打开再保存才对齐（已写进 MCP 文档的已知边界）。
+
+### 五、下一步候选
+
+- **资源浏览器的 rename / move UI**：接上 core 的 `move_asset`，处理选中项与 Undo；
+- **`asset_delete`**：与 move 同族（要处理孤儿 `.meta` 与引用方提示）；
+- **`project_write`**：改 `project.ron`（入口场景 / 渲染参数）目前只能直接编辑文件；
+- **自托管 GPU runner**：把 `--screenshot` 的逐字节确定性纳入 CI。

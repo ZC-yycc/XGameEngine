@@ -57,12 +57,13 @@
 
 ---
 
-## 工具参考（10 个）
+## 工具参考（12 个）
 
-最小完备集，覆盖「读说明书 / 读脚本契约 → 读 → 改 → 查 → 看效果」闭环。除
-`schema_read` / `script_api_read` 外，全部工具必填 `project`（含 `project.ron` 的
-项目根目录，绝对或相对 server 工作目录）；除 `schema_read` / `script_api_read` /
-`project_info` / `project_check` / `asset_list` / `run_headless` 外都可带 `scene`
+最小完备集，覆盖「读说明书 / 读脚本契约 → 读 → 改 → 查 → 看效果」闭环，外加资产侧
+的「看见 → 导入 → 整理」。除 `schema_read` / `script_api_read` 外，全部工具必填
+`project`（含 `project.ron` 的项目根目录，绝对或相对 server 工作目录）；除
+`schema_read` / `script_api_read` / `project_info` / `project_check` / `asset_list` /
+`asset_import` / `asset_move` / `run_headless` 外都可带 `scene`
 （项目内相对场景路径，如 `Scenes/scene.ron`，缺省 = 清单入口场景；**绝对路径与
 `..` 一律拒绝**）。
 
@@ -217,12 +218,54 @@
 - **闭环用法**：`script_api_read` 拿函数签名 / 返回值 → 写 `Scripts/*.lua` →
   `project_check`（脚本引用）→ `run_headless`（脚本真的跑得动、看 Console 日志）。
 
+### 11. `asset_import`
+
+给**单个**资产生成身份证（`.meta` + 新 GUID），并可选地写入导入设置。
+
+- **入参**：`project`、`path`（项目内相对路径；反斜杠会归一成 `/`），可选
+  `model_scale` / `texture_srgb` / `texture_nearest` / `audio_streaming`
+- **返回**（JSON）：`path` / `kind` / `guid` / `created`（这次是否新建了 `.meta`）/
+  `changed`（设置是否真的变了）/ `import`（**落盘后的实际值**）；`model_scale`
+  被钳过时另带 `model_scale_requested` + `model_scale_clamped`
+- **语义**：
+  - **不给导入参数 = 只补 `.meta`**，幂等 —— 已有合法 `.meta` 就原样返回，不换 GUID，
+    `changed` 为 `false`；
+  - **给了参数 = 部分更新**：只覆盖传了的字段，其余保持原值（只调缩放不会冲掉
+    用户改过的 `texture_srgb`）；
+  - **只碰点名的那个资产**：不像编辑器打开项目时那样给整个资源目录补 `.meta` ——
+    一次点名就该是一次范围明确的写操作；
+  - `model_scale` 非有限值直接**拒绝**（静默退回 1.0 会让智能体以为设置生效了）；
+    有限但越界（`[0.001, 1000]`）交给 core 钳制，两个值都在返回值里；
+  - 场景（`.ron`）不归资产库管，拒绝。
+- **闭环用法**：`asset_list` 看见资产 → `asset_import` 调导入参数 →
+  `project_check` 自证引用完整。
+
+### 12. `asset_move`
+
+移动 / 改名一个资产，**资产与 `.meta` 一起走，GUID 保持不变**。
+
+- **入参**：`project`、`from`、`to`（都是项目内相对路径）
+- **返回**（JSON）：`from` / `to` / `guid` / `kind` / `references_preserved`
+- **为什么不需要改引用**：磁盘上的场景 / 预制体存的是 `guid://…`，GUID 没变就
+  天然不断链 —— 这条工具只搬两个文件，**不碰任何引用文件**。
+- **拒绝**（全部在动盘之前判定）：源没登记（缺 `.meta`，先 `asset_import`）/
+  目标已存在（绝不覆盖）/ 改变资产类型（`.glb` → `.png`）/ 目标是场景（场景按
+  路径被 `project.ron` 引用，搬它会断入口与发布清单）/ 绝对路径 / `..` / 构建
+  缓存目录。目标目录会自动创建；`.meta` 搬失败时资产文件会回滚。
+- **闭环用法**：`asset_move` 整理目录 → `project_check` 的 `dangling_guids` 必须
+  为空。注意编辑器里**已打开**的场景内存中仍是旧路径，重新打开该场景再保存。
+
 ---
 
 ## 已知边界（写给正在用它的智能体）
 
-- **并发写**：编辑器不监视文件（差距清单在案），MCP 写入**不会热加载**到已打开
-  的编辑器；编辑器之后保存也会覆盖 MCP 的修改。**同一时刻只让一边写**。
+- **并发写**：编辑器每秒轮询内容目录，资产 / 脚本 / `.meta` 的外部改动会**自动热
+  重载**；但**场景文件不会自动重载**（防冲掉未保存的编辑），编辑器之后保存也会覆盖
+  MCP 的修改。**同一时刻只让一边写同一个场景**。资产被移动后，编辑器里已打开的
+  场景内存中仍是旧路径 —— 重新打开该场景再保存。
+- **MCP 写入对其他 handle 不可见**：server 每次调用新开一个 `ProjectHandle`（独立
+  内存索引）。同进程内的另一个 handle 要 `refresh_assets()` / 重新打开才看得见工具
+  写到盘上的 `.meta`（编辑器侧由 1 Hz 扫描负责）。
 - **能读不能写的清单**：`project.ron` 的修改（改入口场景、窗口尺寸……）目前请走
   直接编辑文件；MCP 写工具只覆盖场景与实体。
 - **构建**：`project_build`（打包 / 编译插件）在计划里，还没上；无头运行已就绪
@@ -241,17 +284,17 @@
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 10 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 12 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |
 | `crates/xgame-core/src/script_api.rs` | 脚本 API 清单（155 函数 / 17 类 / 6 钩子 / 值类型 / 约定）+ 确定性数据 + 防漂移测试（`--export-script-api` 与 `script_api_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/script_api_cli.rs` | `--export-script-api` 的参数解析、JSON 序列化、stdout / `--out` 出口；文档函数名比对 |
 | `crates/xgame-core/src/check.rs` | `check_project()`（编辑器 `--check` 与 `project_check` 共用） |
-| `crates/xgame-core/src/asset.rs` | `AssetGuid` / `AssetMeta` / `AssetDatabase`（`asset_list` 与 `--check` 的资产诊断都读它） |
+| `crates/xgame-core/src/asset.rs` | `AssetGuid` / `AssetMeta` / `AssetDatabase`（`asset_list` / `asset_import` / `asset_move` 与 `--check` 的资产诊断都读它） |
 | `crates/xgame-editor/src/headless.rs` | 无头运行的实现（CLI `--headless`；`run_headless` 工具 spawn 它） |
 
-回归测试：`cargo test -p xgame-mcp`（33 条：协议 9 条 + 10 个工具的行为与信封；
+回归测试：`cargo test -p xgame-mcp`（36 条：协议 9 条 + 12 个工具的行为与信封；
 其中 `run_headless` 的几条会嵌套 `cargo build -p xgame-editor` 保证被测 exe 新鲜，
 再经真实进程 spawn 跑通）。`schema_read` 另有 `xgame-core` 的 10 条目录测试与
 `xgame-editor` 的 5 条 CLI 测试钉住内容与确定性；`script_api_read` 另有

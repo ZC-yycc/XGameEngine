@@ -16,7 +16,7 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；813 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；821 条 + 7 条基准 ignore）
 # CI 在 GitHub Actions（windows-latest）跑 check / clippy / test + 示例项目冒烟，
 # 命令带 --locked；workflow 见 .github/workflows/ci.yml，取舍见决策记录 §三十四。
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）

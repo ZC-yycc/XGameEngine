@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::asset::{
     decode_prefab_references, decode_scene_references, encode_prefab_references,
-    encode_scene_references, AssetDatabase, AssetGuid, AssetKind, ImportSettings,
+    encode_scene_references, AssetDatabase, AssetGuid, AssetKind, AssetMoveReport, ImportSettings,
 };
 use crate::config::{BuildConfig, ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
 use crate::material::{MaterialAsset, MATERIAL_EXTENSION};
@@ -567,6 +567,20 @@ impl ProjectHandle {
         import: ImportSettings,
     ) -> Result<(), String> {
         self.assets().set_import(relative, import)
+    }
+
+    /// 只给一个资产生成 `.meta`（写盘），返回它的 GUID。
+    ///
+    /// 与 [`ensure_asset_metas`](Self::ensure_asset_metas) 的区别是**范围**：
+    /// 这个只碰点名的那个资产。MCP `asset_import` 用它，避免"导入一个资产"
+    /// 顺手给全项目所有未导入文件写身份证。
+    pub fn ensure_asset_meta(&self, relative: &str) -> Result<AssetGuid, String> {
+        self.assets().ensure_meta(relative)
+    }
+
+    /// 移动资产并保留 GUID（磁盘场景 / 预制体里的 `guid://` 引用无需改写）。
+    pub fn move_asset(&self, from: &str, to: &str) -> Result<AssetMoveReport, String> {
+        self.assets().move_asset(from, to)
     }
 
     /// 列出项目里所有已登记的资产（项目相对路径 + 类型，按路径字典序）。

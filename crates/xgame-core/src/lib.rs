@@ -94,9 +94,10 @@ pub use animation::{
 };
 pub use asset::{
     decode_prefab_references, decode_scene_references, encode_prefab_references,
-    encode_scene_references, is_dangling_reference, is_guid_reference, read_import_settings,
-    render_asset_list, AssetDatabase, AssetDiagnostics, AssetGuid, AssetId, AssetKind, AssetMeta,
-    AssetRecord, GuidConflict, ImportSettings, InvalidMeta, GUID_SCHEME, META_EXTENSION,
+    encode_scene_references, is_dangling_reference, is_guid_reference, normalize_asset_relative,
+    read_import_settings, render_asset_list, AssetDatabase, AssetDiagnostics, AssetGuid, AssetId,
+    AssetKind, AssetMeta, AssetMoveReport, AssetRecord, GuidConflict, ImportSettings, InvalidMeta,
+    GUID_SCHEME, META_EXTENSION,
 };
 pub use audio::{
     AudioCommand, AudioPort, AudioStats, AudioSource, ListenerPose, PlaySound,

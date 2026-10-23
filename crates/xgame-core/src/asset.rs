@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -60,6 +60,73 @@ pub const GUID_SCHEME: &str = "guid://";
 
 /// `.meta` 文件的后缀（挂在资产文件后面：`Box.glb.meta`）。
 pub const META_EXTENSION: &str = "meta";
+
+/// 把外部给的资产路径收敛成**项目内相对路径**（统一正斜杠）。
+///
+/// 这是 `asset_import` / `asset_move` 的边界：智能体可能给反斜杠、绝对路径、
+/// `..` 穿越或盘符。拒绝而不是"尽量修" —— 资产写操作一旦越出项目根目录，
+/// 破坏半径就不再受控。
+///
+/// 只接受 [`AssetKind::from_path`] 认得的扩展名（场景也算资产类型，但
+/// [`AssetDatabase::move_asset`] 会单独拒绝场景：搬场景会让 `project.ron`
+/// 的入口 / 发布清单断链，那不是资产库能单方面决定的事）。
+pub fn normalize_asset_relative(raw: &str) -> Result<String, String> {
+    let rel = raw.trim().replace('\\', "/");
+    if rel.is_empty() {
+        return Err("资产路径不能为空".into());
+    }
+    // Windows 盘符与 UNC 前缀：跨平台都先用字面量挡一次，别依赖 Path 的
+    // 平台差异（与 `normalize_scene_relative` 同一条纪律）。
+    if rel.starts_with('/') || rel.as_bytes().get(1) == Some(&b':') {
+        return Err(format!("资产路径必须是项目内相对路径: {raw}"));
+    }
+
+    let path = Path::new(&rel);
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part.to_string_lossy();
+                // Windows 的 `file:stream` 写法会把写入引到别的数据流；
+                // 资产名里不需要冒号，直接拒绝。
+                if part.contains(':') {
+                    return Err(format!("资产路径不能包含冒号: {raw}"));
+                }
+                // Windows 会**静默**吃掉结尾的空格 / 点：写 `Box.glb ` 实际生成
+                // `Box.glb`，于是"我写下的 .meta"和"扫描看到的资产"对不上。
+                // 控制字符与 Windows 非法字符同理 —— 跨平台先挡，项目才可移植。
+                if part.ends_with([' ', '.'])
+                    || part
+                        .chars()
+                        .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+                {
+                    return Err(format!("资产路径含非法字符: {raw}"));
+                }
+                parts.push(part.into_owned());
+            }
+            _ => return Err(format!("资产路径不能包含 `..` / 根组件: {raw}")),
+        }
+    }
+    if parts.is_empty() {
+        return Err(format!("资产路径不能为空: {raw}"));
+    }
+    let normalized = parts.join("/");
+    if AssetKind::from_path(&normalized).is_none() {
+        return Err(format!("不是可登记的资产类型: {raw}"));
+    }
+    // 目录树里任何一级命中跳过名单，扫描器都永远看不到这个文件（`collect`
+    // 是逐级剪枝的）；允许写进去等于制造"写成功但永不存在"的资产。
+    if let Some(skipped) = parts.iter().find(|part| {
+        SKIPPED_DIRS
+            .iter()
+            .any(|skip| part.eq_ignore_ascii_case(skip))
+    }) {
+        return Err(format!(
+            "资产不能放进构建 / 缓存目录 `{skipped}`: {raw}"
+        ));
+    }
+    Ok(normalized)
+}
 
 /// 扫描项目时跳过的目录名（构建产物 / 版本库元数据 / 编辑器缓存）。
 ///
@@ -312,9 +379,36 @@ impl Default for ImportSettings {
 }
 
 impl ImportSettings {
+    /// 模型缩放的可接受区间（与编辑器资产面板的 `DragValue` 范围一致）。
+    ///
+    /// 下限不是 0：0 会把模型缩成一个点，看起来像"资产加载失败"；
+    /// 上限 1000 是防止手写 `.meta` 里的 `1e30` 把包围盒 / 剔除算爆。
+    pub const MIN_MODEL_SCALE: f32 = 0.001;
+    /// 见 [`Self::MIN_MODEL_SCALE`]。
+    pub const MAX_MODEL_SCALE: f32 = 1000.0;
+
     /// 全默认时不落盘（`.meta` 保持干净，diff 里只出现真正调过的参数）。
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// 把外部写入的值收敛到可渲染范围。
+    ///
+    /// 为什么是"收敛"而不是"报错"：`.meta` 是纯文本，用户与智能体都会手改；
+    /// 渲染热路径不能因为一个 `NaN` / 越界缩放就拒绝出图。非有限值退回
+    /// 默认 1.0（NaN 没有"钳到边界"的合理含义），有限值按区间钳住。
+    ///
+    /// 调用点在读盘边界（[`AssetMeta::from_ron`]，扫描与渲染共用）与写盘
+    /// 边界（[`AssetDatabase::set_import`]）—— 两处都过一遍，坏值既进不来
+    /// 也存不下去。
+    pub fn sanitized(mut self) -> Self {
+        self.model_scale = if self.model_scale.is_finite() {
+            self.model_scale
+                .clamp(Self::MIN_MODEL_SCALE, Self::MAX_MODEL_SCALE)
+        } else {
+            1.0
+        };
+        self
     }
 }
 
@@ -346,8 +440,13 @@ impl AssetMeta {
     }
 
     /// 解析 `.meta` 文本。
+    ///
+    /// 导入设置在这里就收敛（见 [`ImportSettings::sanitized`]）：扫描、资产面板、
+    /// 渲染热路径读的都是同一份已净化的值，不会出现"列表里是 1e30、画面里是 1000"。
     pub fn from_ron(text: &str) -> Result<Self, String> {
-        ron::from_str(text).map_err(|e| format!("{e}"))
+        let mut meta: Self = ron::from_str(text).map_err(|e| format!("{e}"))?;
+        meta.import = meta.import.sanitized();
+        Ok(meta)
     }
 
     /// 序列化为 `.meta` 文本（带换行，方便 diff 与手改）。
@@ -450,6 +549,21 @@ pub struct AssetRecord {
     pub kind: AssetKind,
     /// 导入设置（来自 `.meta`）。
     pub import: ImportSettings,
+}
+
+/// 一次成功的资产移动（[`AssetDatabase::move_asset`] 的返回值）。
+///
+/// `guid` 与移动前相同 —— MCP / 脚本用它自证"引用没有断"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetMoveReport {
+    /// 移动前的项目相对路径（正斜杠）。
+    pub from: String,
+    /// 移动后的项目相对路径（正斜杠）。
+    pub to: String,
+    /// 保持不变的稳定身份。
+    pub guid: AssetGuid,
+    /// 资产类型（移动不允许改变）。
+    pub kind: AssetKind,
 }
 
 /// 资产数据库：GUID ↔ 路径 的双向索引 + 扫描期诊断。
@@ -618,6 +732,86 @@ impl AssetDatabase {
         }
     }
 
+    /// 只给一个资产生成 `.meta`（写盘），不碰其它缺 meta 的文件。
+    ///
+    /// 与 [`ensure_metas`](Self::ensure_metas) 的分工：批量版用于"打开项目 /
+    /// 导入整个目录"，单个版用于 `asset_import` —— 智能体点名一个资产时，
+    /// 不该顺手给全项目所有未导入文件写身份证（那会把一次小操作变成一次
+    /// 范围外写入）。
+    ///
+    /// 已有合法 `.meta` 时**原样返回**（幂等，不重写文件，也不动 GUID）；
+    /// 已有坏 `.meta` 时拒绝而不是覆盖 —— 那可能是用户手改到一半的内容。
+    /// 场景不是资产库管理的对象（`collect` 不收录），这里也明确拒绝。
+    pub fn ensure_meta(&mut self, relative: &str) -> Result<AssetGuid, String> {
+        let relative = normalize_asset_relative(relative)?;
+        let kind = AssetKind::from_path(&relative)
+            .ok_or_else(|| format!("不是可登记的资产类型: {relative}"))?;
+        if kind == AssetKind::Scene {
+            return Err(format!(
+                "场景不是资产库管理的资产，不能导入 / 生成 .meta: {relative}"
+            ));
+        }
+        let asset_path = self.root.join(&relative);
+        if !asset_path.is_file() {
+            return Err(format!("资产文件不存在: {relative}"));
+        }
+        if let Some(guid) = self.guid_of(&relative) {
+            return Ok(guid.clone());
+        }
+
+        let meta_rel = format!("{relative}.{META_EXTENSION}");
+        let meta_path = self.root.join(&meta_rel);
+        // 盘上有 `.meta` 但索引里没有：要么索引过期，要么文件是坏的。
+        // 合法就补进索引（不重写），坏就拒绝 —— 绝不覆盖用户内容。
+        if meta_path.symlink_metadata().is_ok() {
+            let text = std::fs::read_to_string(&meta_path)
+                .map_err(|e| format!("读 {} 失败: {e}", meta_path.display()))?;
+            let meta = AssetMeta::from_ron(&text).map_err(|e| {
+                format!(
+                    "已有坏 .meta，拒绝覆盖（请先修复 {}）: {e}",
+                    meta_path.display()
+                )
+            })?;
+            if let Some(existing) = self.by_guid.get(&meta.guid) {
+                if existing.path != relative {
+                    return Err(format!(
+                        "GUID 冲突：{} 与 {} 共用 {}",
+                        existing.path, relative, meta.guid
+                    ));
+                }
+            }
+            self.insert_record(&relative, kind, &meta);
+            self.diagnostics.invalid_meta.retain(|bad| bad.path != meta_rel);
+            self.diagnostics
+                .orphan_meta
+                .retain(|path| path != &meta_rel);
+            return Ok(meta.guid);
+        }
+
+        let meta = AssetMeta::fresh(kind);
+        std::fs::write(&meta_path, meta.to_ron()?)
+            .map_err(|e| format!("写入 {} 失败: {e}", meta_path.display()))?;
+        self.insert_record(&relative, kind, &meta);
+        Ok(meta.guid)
+    }
+
+    /// 把一份 `.meta` 登记进内存索引（[`ensure_meta`](Self::ensure_meta) 用）。
+    fn insert_record(&mut self, relative: &str, kind: AssetKind, meta: &AssetMeta) {
+        self.by_path
+            .insert(relative.to_string(), meta.guid.clone());
+        self.by_guid.insert(
+            meta.guid.clone(),
+            AssetRecord {
+                path: relative.to_string(),
+                kind,
+                import: meta.import,
+            },
+        );
+        self.diagnostics
+            .missing_meta
+            .retain(|path| path != relative);
+    }
+
     /// 为所有"有资产但没 `.meta`"的文件生成 `.meta`（写盘）并补进索引。
     ///
     /// 返回生成的数量。写失败（只读目录 / 权限）时返回 `Err`，但**已成功的
@@ -681,13 +875,19 @@ impl AssetDatabase {
 
     /// 改写某个资产的导入设置（写回它的 `.meta`）。
     ///
-    /// 资产还没有身份证时先补一张（`ensure_metas`），而不是报错 ——
-    /// 用户点开一个刚拷进来的资产就要调缩放，是再正常不过的路径。
+    /// 资产还没有身份证时先补**这一张**（[`ensure_meta`](Self::ensure_meta)），
+    /// 而不是报错 —— 用户点开一个刚拷进来的资产就要调缩放，是再正常不过的
+    /// 路径；也不能借机给全项目补 meta（写操作的范围要可预期）。
+    ///
+    /// `import` 先过 [`ImportSettings::sanitized`]：手写 / 智能体传来的
+    /// `NaN`、`1e30` 不能落进 `.meta`，否则下次读盘还要再净化一次。
     pub fn set_import(&mut self, relative: &str, import: ImportSettings) -> Result<(), String> {
-        if self.guid_of(relative).is_none() {
-            self.ensure_metas()?;
+        let relative = normalize_asset_relative(relative)?;
+        let import = import.sanitized();
+        if self.guid_of(&relative).is_none() {
+            self.ensure_meta(&relative)?;
         }
-        let Some(guid) = self.guid_of(relative).cloned() else {
+        let Some(guid) = self.guid_of(&relative).cloned() else {
             return Err(format!("资产没有身份证: {relative}"));
         };
         let kind = self
@@ -715,6 +915,117 @@ impl AssetDatabase {
         self.record_of_path(relative)
             .map(|r| r.import)
             .unwrap_or_default()
+    }
+
+    /// 移动（或改名）一个资产，**连同它的 `.meta`，GUID 保持不变**。
+    ///
+    /// 这是资产管线的写侧闭环：磁盘上的场景 / 预制体 / 材质引用都是 GUID，
+    /// 所以移动资产**不需要改写任何引用文件** —— 这正是 GUID 引用相对路径
+    /// 引用的价值。函数只动两个文件：资产本身与它的 `.meta`。
+    ///
+    /// 拒绝的情况（全部在动盘之前判定）：
+    /// - 源 / 目标是绝对路径、`..`、未知扩展名、构建 / 缓存目录（见
+    ///   [`normalize_asset_relative`]）；
+    /// - 源没有登记（缺 `.meta`）—— 先 `ensure_meta` / `asset_import`；
+    /// - 目标是场景：场景由 `project.ron` 按路径引用，搬它需要同步入口 /
+    ///   发布清单，不属于资产库的单方面决定；
+    /// - 改变资产类型（`.glb` → `.png`）：`kind` 是 `.meta` 的契约；
+    /// - 目标已存在（资产或 `.meta`）—— 绝不覆盖。
+    ///
+    /// 失败时保证**要么两边都没动，要么资产文件已回滚**；唯一无法自动回滚的
+    /// 是"资产已移动、`.meta` 移动失败且回滚也失败"，错误文本会给出两个路径
+    /// 让人手工收拾。
+    pub fn move_asset(&mut self, from: &str, to: &str) -> Result<AssetMoveReport, String> {
+        let from = normalize_asset_relative(from)?;
+        let to = normalize_asset_relative(to)?;
+        if from == to {
+            return Err(format!("源与目标相同: {from}"));
+        }
+        let from_kind = AssetKind::from_path(&from).expect("normalize 已校验扩展名");
+        let to_kind = AssetKind::from_path(&to).expect("normalize 已校验扩展名");
+        if from_kind == AssetKind::Scene || to_kind == AssetKind::Scene {
+            return Err(format!(
+                "场景不是资产库管理的资产，不能移动（会断 project.ron 的入口 / 发布清单）: {from} → {to}"
+            ));
+        }
+        if from_kind != to_kind {
+            return Err(format!(
+                "不能改变资产类型：{from}（{}）→ {to}（{}）",
+                from_kind.label(),
+                to_kind.label()
+            ));
+        }
+
+        let Some(guid) = self.guid_of(&from).cloned() else {
+            return Err(format!(
+                "资产没有登记（缺 .meta）：{from} —— 先 asset_import 生成身份证"
+            ));
+        };
+        let from_path = self.root.join(&from);
+        let to_path = self.root.join(&to);
+        let from_meta = self.root.join(format!("{from}.{META_EXTENSION}"));
+        let to_meta = self.root.join(format!("{to}.{META_EXTENSION}"));
+
+        if !from_path.is_file() {
+            return Err(format!("源资产不在盘上（索引过期？先刷新资产库）: {from}"));
+        }
+        // 用 `symlink_metadata` 而不是 `exists`：悬空链接也算"目标被占用"，
+        // 别让 rename 把它覆盖掉。大小写改名在 Windows 上同样会命中这里 ——
+        // 拒绝而不是猜"用户是不是只想改大小写"。
+        if to_path.symlink_metadata().is_ok() {
+            return Err(format!("目标资产已存在，拒绝覆盖: {to}"));
+        }
+        if to_meta.symlink_metadata().is_ok() {
+            return Err(format!("目标 .meta 已存在，拒绝覆盖: {to}.{META_EXTENSION}"));
+        }
+
+        let meta_text = std::fs::read_to_string(&from_meta).map_err(|e| {
+            format!(
+                "读 {} 失败（资产缺少 .meta？先 asset_import）: {e}",
+                from_meta.display()
+            )
+        })?;
+        let meta = AssetMeta::from_ron(&meta_text)
+            .map_err(|e| format!("{} 解析失败: {e}", from_meta.display()))?;
+        if meta.guid != guid {
+            return Err(format!(
+                "资产库与 .meta 的 GUID 不一致（{} vs {}），先刷新资产库再移动: {from}",
+                guid, meta.guid
+            ));
+        }
+
+        if let Some(parent) = to_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("创建目标目录 {} 失败: {e}", parent.display())
+            })?;
+        }
+
+        std::fs::rename(&from_path, &to_path)
+            .map_err(|e| format!("移动资产 {from} → {to} 失败: {e}"))?;
+        if let Err(e) = std::fs::rename(&from_meta, &to_meta) {
+            return Err(match std::fs::rename(&to_path, &from_path) {
+                Ok(()) => format!("移动 .meta 失败，已回滚资产文件（{to} → {from}）: {e}"),
+                Err(rollback) => format!(
+                    "移动 .meta 失败（{e}），且资产回滚也失败（{rollback}）—— \
+                     请手工把 {to} 移回 {from}"
+                ),
+            });
+        }
+
+        // 全量重扫：移动同时改了 by_path / by_guid / 诊断三处，手工同步容易漏。
+        // 这是低频交互操作（毫秒级扫盘），换"索引绝不会半新半旧"。
+        self.refresh();
+        match self.guid_of(&to) {
+            Some(found) if *found == guid => Ok(AssetMoveReport {
+                from,
+                to,
+                guid,
+                kind: from_kind,
+            }),
+            _ => Err(format!(
+                "文件已移动，但刷新后的资产索引找不到 {to}（GUID {guid}）—— 请再刷新一次资产库"
+            )),
+        }
     }
 }
 
@@ -1395,6 +1706,265 @@ mod tests {
             .map(|(g, r)| format!("{g}|{}", r.path))
             .collect();
         assert_eq!(first, second);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 智能体给的反斜杠 / 空白要能收敛；绝对路径、穿越、未知类型、构建目录
+    /// 必须在**动盘之前**拒绝。
+    #[test]
+    fn normalize_asset_relative_accepts_only_in_project_assets() {
+        assert_eq!(
+            normalize_asset_relative(r"Resources\Box.glb").unwrap(),
+            "Resources/Box.glb"
+        );
+        assert_eq!(
+            normalize_asset_relative("  Resources/Models/Box.glb  ").unwrap(),
+            "Resources/Models/Box.glb"
+        );
+        // 场景本身是合法资产类型；是否允许导入 / 移动由 ensure_meta / move_asset 决定。
+        assert_eq!(
+            normalize_asset_relative("Scenes/A.ron").unwrap(),
+            "Scenes/A.ron"
+        );
+
+        for bad in [
+            "",
+            "   ",
+            "../Box.glb",
+            "Resources/../Box.glb",
+            "/abs/Box.glb",
+            "C:/abs/Box.glb",
+            "C:Box.glb",
+            "Resources/Box.txt",
+            "project.ron",
+            "Scenes/A.ron.meta",
+            "target/Box.glb",
+            "Resources/target/Box.glb",
+            "Resources/Box /A.glb",
+            "Resources/Box./A.glb",
+            "Resources/a?b.glb",
+            "Resources/a:b.glb",
+        ] {
+            assert!(
+                normalize_asset_relative(bad).is_err(),
+                "必须拒绝 {bad:?}"
+            );
+        }
+    }
+
+    /// `model_scale` 在**读盘与写盘两个边界**都要收敛：坏值既进不来也存不下去。
+    #[test]
+    fn import_settings_are_sanitized_on_read_and_write() {
+        let base = ImportSettings::default();
+        assert_eq!(base.sanitized(), base, "默认值不该被改动");
+        assert_eq!(
+            ImportSettings {
+                model_scale: 2.5,
+                ..base
+            }
+            .sanitized()
+            .model_scale,
+            2.5,
+            "区间内的值原样保留"
+        );
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                ImportSettings {
+                    model_scale: bad,
+                    ..base
+                }
+                .sanitized()
+                .model_scale,
+                1.0,
+                "非有限值退回默认: {bad}"
+            );
+        }
+        for (given, want) in [
+            (0.0, ImportSettings::MIN_MODEL_SCALE),
+            (-3.0, ImportSettings::MIN_MODEL_SCALE),
+            (1.0e9, ImportSettings::MAX_MODEL_SCALE),
+        ] {
+            assert_eq!(
+                ImportSettings {
+                    model_scale: given,
+                    ..base
+                }
+                .sanitized()
+                .model_scale,
+                want,
+                "{given} 应钳到 {want}"
+            );
+        }
+
+        let root = temp_root("sanitize");
+        put(&root, "Resources/Box.glb", b"glb");
+        let meta = AssetMeta {
+            guid: AssetGuid::generate(),
+            kind: AssetKind::Model,
+            import: ImportSettings {
+                model_scale: 1.0e9,
+                ..base
+            },
+        };
+        let text = meta.to_ron().unwrap();
+        put(&root, "Resources/Box.glb.meta", text.as_bytes());
+        // 两个消费点（渲染热路径 / 资产库解析）必须给出同一个净化值。
+        assert_eq!(
+            read_import_settings(&root, "Resources/Box.glb").model_scale,
+            ImportSettings::MAX_MODEL_SCALE
+        );
+        assert_eq!(
+            AssetMeta::from_ron(&text).unwrap().import.model_scale,
+            ImportSettings::MAX_MODEL_SCALE
+        );
+        assert_eq!(
+            AssetDatabase::scan(&root)
+                .import_of("Resources/Box.glb")
+                .model_scale,
+            ImportSettings::MAX_MODEL_SCALE
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 单资产导入只碰点名的那一个：不顺手给全项目补 `.meta`，幂等，
+    /// 且拒绝覆盖坏 `.meta`（那可能是用户手改到一半的内容）。
+    #[test]
+    fn ensure_meta_touches_only_the_named_asset() {
+        let root = temp_root("ensure_one");
+        put(&root, "Resources/A.glb", b"a");
+        put(&root, "Resources/B.glb", b"b");
+        let mut db = AssetDatabase::scan(&root);
+        assert_eq!(db.diagnostics().missing_meta.len(), 2);
+
+        let guid = db.ensure_meta(r"Resources\A.glb").unwrap();
+        assert!(root.join("Resources/A.glb.meta").is_file());
+        assert!(
+            !root.join("Resources/B.glb.meta").exists(),
+            "只给点名的资产生成 .meta"
+        );
+        assert_eq!(db.guid_of("Resources/A.glb"), Some(&guid));
+        assert_eq!(db.diagnostics().missing_meta, vec!["Resources/B.glb"]);
+
+        // 幂等：再调一次不换 GUID、不改写内容。
+        let before = std::fs::read_to_string(root.join("Resources/A.glb.meta")).unwrap();
+        assert_eq!(db.ensure_meta("Resources/A.glb").unwrap(), guid);
+        assert_eq!(
+            std::fs::read_to_string(root.join("Resources/A.glb.meta")).unwrap(),
+            before
+        );
+
+        // 不存在的资产 / 场景：拒绝，且不留下孤儿 meta。
+        assert!(db.ensure_meta("Resources/Gone.glb").is_err());
+        assert!(!root.join("Resources/Gone.glb.meta").exists());
+        put(&root, "Scenes/A.ron", b"(entities:[])");
+        assert!(db.ensure_meta("Scenes/A.ron").is_err());
+        assert!(!root.join("Scenes/A.ron.meta").exists());
+
+        // 坏 .meta：拒绝覆盖，原文一个字节不动。
+        put(&root, "Resources/Bad.glb", b"x");
+        put(&root, "Resources/Bad.glb.meta", b"not ron");
+        let err = db
+            .ensure_meta("Resources/Bad.glb")
+            .expect_err("坏 meta 必须拒绝");
+        assert!(err.contains("坏 .meta"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("Resources/Bad.glb.meta")).unwrap(),
+            "not ron"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 资产移动的核心承诺：资产 + `.meta` 一起走，**GUID 不变**，
+    /// 于是原来写下的 `guid://…` 引用自动指向新路径；目标目录自动创建。
+    #[test]
+    fn move_asset_moves_meta_and_preserves_guid() {
+        let root = temp_root("move_op");
+        put(&root, "Resources/Box.glb", b"glb");
+        let mut db = AssetDatabase::scan(&root);
+        let guid = db.ensure_meta("Resources/Box.glb").unwrap();
+        let reference = guid.to_reference();
+
+        let report = db
+            .move_asset("Resources/Box.glb", "Resources/Models/Box.glb")
+            .expect("移动应成功");
+        assert_eq!(report.from, "Resources/Box.glb");
+        assert_eq!(report.to, "Resources/Models/Box.glb");
+        assert_eq!(report.guid, guid);
+        assert_eq!(report.kind, AssetKind::Model);
+
+        assert!(!root.join("Resources/Box.glb").exists());
+        assert!(!root.join("Resources/Box.glb.meta").exists());
+        assert_eq!(
+            std::fs::read(root.join("Resources/Models/Box.glb")).unwrap(),
+            b"glb"
+        );
+        assert!(root.join("Resources/Models/Box.glb.meta").is_file());
+        assert_eq!(db.guid_of("Resources/Models/Box.glb"), Some(&guid));
+        assert_eq!(
+            db.resolve_reference(&reference).as_deref(),
+            Some("Resources/Models/Box.glb"),
+            "旧 GUID 引用必须解析到新路径"
+        );
+        assert!(!db.diagnostics().has_issues(), "{:?}", db.diagnostics());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 所有拒绝路径都要在动盘**之前**生效：源文件与 `.meta` 必须原样。
+    #[test]
+    fn move_asset_rejects_unsafe_operations_without_touching_files() {
+        let root = temp_root("move_reject");
+        put(&root, "Resources/Box.glb", b"box");
+        put(&root, "Resources/Other.glb", b"other");
+        let mut db = AssetDatabase::scan(&root);
+        let guid = db.ensure_meta("Resources/Box.glb").unwrap();
+        let meta_before = std::fs::read_to_string(root.join("Resources/Box.glb.meta")).unwrap();
+
+        // 目标已存在（不覆盖）。
+        assert!(db
+            .move_asset("Resources/Box.glb", "Resources/Other.glb")
+            .is_err());
+        // 改变资产类型。
+        assert!(db
+            .move_asset("Resources/Box.glb", "Resources/Box.png")
+            .is_err());
+        // 场景不归资产库搬。
+        put(&root, "Scenes/A.ron", b"x");
+        assert!(db
+            .move_asset("Resources/Box.glb", "Scenes/A.ron")
+            .is_err());
+        // 路径穿越。
+        assert!(db.move_asset("Resources/Box.glb", "../Box.glb").is_err());
+        // 同路径。
+        assert!(db
+            .move_asset("Resources/Box.glb", "Resources/Box.glb")
+            .is_err());
+        // 源缺 `.meta`（未登记）—— 提示先 asset_import。
+        let err = db
+            .move_asset("Resources/Other.glb", "Resources/Moved.glb")
+            .expect_err("缺 .meta 必须拒绝");
+        assert!(err.contains("asset_import"), "{err}");
+        assert!(!root.join("Resources/Moved.glb").exists());
+        // 目标 `.meta` 已存在（资产文件不存在）也要拒绝。
+        put(
+            &root,
+            "Resources/Moved.glb.meta",
+            b"(guid:\"0123456789abcdef0123456789abcdef\")",
+        );
+        assert!(db
+            .move_asset("Resources/Box.glb", "Resources/Moved.glb")
+            .is_err());
+
+        // 反复失败后源资产 / meta 原样，索引也没被改坏。
+        assert_eq!(std::fs::read(root.join("Resources/Box.glb")).unwrap(), b"box");
+        assert_eq!(
+            std::fs::read_to_string(root.join("Resources/Box.glb.meta")).unwrap(),
+            meta_before
+        );
+        assert_eq!(db.guid_of("Resources/Box.glb"), Some(&guid));
 
         let _ = std::fs::remove_dir_all(&root);
     }

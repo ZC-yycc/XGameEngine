@@ -1,4 +1,4 @@
-//! # 十个工具 —— 智能体操纵引擎的最小完备集
+//! # 十二个工具 —— 智能体操纵引擎的最小完备集
 //!
 //! 刻意小：**读说明 → 读清单 → 读场景 → 改（整体或单实体）→ 验证** 五步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
@@ -7,16 +7,23 @@
 //! 动态实跑（真的跑 N 帧、脚本真的没报错）。`schema_read` 是写之前的说明书：
 //! 字段名 / 默认值 / 枚举变体 / 资产引用规则，不用靠试错反推。
 //!
+//! 资产侧也是闭环：`asset_list` 看见资产 → `asset_import` 调导入设置 →
+//! `asset_move` 整理目录（GUID 不变，引用不断）→ `project_check` 自证。
+//!
 //! # 并发写警告（所有写工具共有）
 //!
-//! 编辑器**不监视文件**（已知差距），外部写入不会热加载；反过来，编辑器里
-//! 未保存的改动也不感知外部写入 —— 谁后保存谁覆盖。约定：**同一时刻只让
-//! 一边写**（要么纯 MCP 改，要么纯编辑器改），该警告也写进了工具描述里。
+//! 编辑器每秒轮询内容目录：脚本 / 资产 / `.meta` 的外部改动会自动热重载，
+//! 但**场景文件不会自动重载**（否则会冲掉未保存的编辑）。反过来，编辑器里
+//! 未保存的场景改动也不感知外部写入 —— 谁后保存谁覆盖。约定：**同一时刻只让
+//! 一边写同一个场景**（要么纯 MCP 改，要么纯编辑器改），该警告也写进了工具
+//! 描述里。资产移动后，编辑器里已打开的场景内存中仍是旧路径，需要重新打开
+//! 该场景再保存。
 //!
 //! # 路径安全
 //!
-//! `scene` 参数必须是**项目内相对路径**：拒绝 `..`、绝对路径、盘符 ——
-//! 这是"智能体能把引擎玩坏到什么程度"的边界之一，宁可拒绝也别写出项目外。
+//! `scene` / `path` / `from` / `to` 参数必须是**项目内相对路径**：拒绝 `..`、
+//! 绝对路径、盘符 —— 这是"智能体能把引擎玩坏到什么程度"的边界之一，
+//! 宁可拒绝也别写出项目外。
 
 use glam::{EulerRot, Quat, Vec3};
 use serde_json::{json, Value};
@@ -39,7 +46,7 @@ fn fail(message: impl Into<String>) -> CallError {
 
 /// 一次工具调用的输出：一段文本 +（可选的）随附图片。
 ///
-/// 十个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 十二个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
 /// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
 /// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
 /// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
@@ -68,7 +75,7 @@ impl ToolOutput {
     }
 }
 
-/// 10 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 12 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -81,7 +88,7 @@ pub fn schemas() -> Vec<Value> {
         "type": "string",
         "description": "项目内相对场景路径（如 Scenes/scene.ron；缺 .ron 会自动补全）；缺省 = 清单里的入口场景。绝对路径与 `..` 会被拒绝",
     });
-    let write_caveat = "注意：编辑器不监视文件，写入不会热加载到已打开的编辑器；编辑器之后的保存也会覆盖本工具的修改。同一时刻只应有一边在写。";
+    let write_caveat = "注意：编辑器每秒轮询内容目录，资产 / 脚本 / `.meta` 的外部改动会自动热重载，但**场景文件不会自动重载**（防冲掉未保存的编辑）。同一时刻只应有一边在写同一个场景：编辑器里未保存的改动之后会覆盖本工具的写入。";
 
     vec![
         json!({
@@ -168,6 +175,35 @@ pub fn schemas() -> Vec<Value> {
             },
         }),
         json!({
+            "name": "asset_import",
+            "description": "给一个资产**生成身份证**（`.meta`，含新 GUID）并可选地写入导入设置。不给导入参数时只补 `.meta`（幂等：已有合法 `.meta` 就原样返回，不换 GUID）；给了参数就合并到现有设置上再落盘。只碰点名的这一个资产 —— 不像编辑器「导入全部」那样给整个项目补 `.meta`。返回 JSON：path / kind / guid / created（这次是否新建了 `.meta`）/ changed（设置是否真的变了）/ import（落盘后的实际值）。`model_scale` 非有限值直接拒绝，越界值会被钳到 [0.001, 1000] 并在返回值里看得出来。场景（`.ron`）不归资产库管，会被拒绝。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": project_prop,
+                    "path": { "type": "string", "description": "项目内相对资产路径（如 Resources/Models/Box.glb；反斜杠会归一成 `/`；绝对路径与 `..` 会被拒绝）" },
+                    "model_scale": { "type": "number", "description": "模型缩放（仅模型有效，1.0 = 原样；区间 [0.001, 1000]）" },
+                    "texture_srgb": { "type": "boolean", "description": "纹理是否按 sRGB 采样（颜色贴图 true，法线 / 粗糙度贴图 false）" },
+                    "texture_nearest": { "type": "boolean", "description": "纹理是否用最近邻过滤（像素风资源开）" },
+                    "audio_streaming": { "type": "boolean", "description": "音频是否流式播放（长 BGM 用；音频层尚未消费该参数）" },
+                },
+                "required": ["project", "path"],
+            },
+        }),
+        json!({
+            "name": "asset_move",
+            "description": "移动 / 改名一个资产，**连同它的 `.meta` 一起搬，GUID 保持不变** —— 于是场景与预制体里已经写下的 `guid://…` 引用自动指向新路径，不需要改写任何文件。目标目录会自动创建。拒绝的情况（全部在动盘之前判定）：源没登记（缺 `.meta`，先 asset_import）、目标已存在（绝不覆盖）、改变资产类型（`.glb` → `.png`）、目标是场景（场景按路径被 project.ron 引用，搬它会断入口 / 发布清单）、绝对路径 / `..` / 构建缓存目录。返回 JSON：from / to / guid / kind；跑 project_check 可自证引用没断。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": project_prop,
+                    "from": { "type": "string", "description": "源资产的项目内相对路径（反斜杠会归一成 `/`）" },
+                    "to": { "type": "string", "description": "目标相对路径（可换目录 / 改名；扩展名必须同类；目标不能已存在）" },
+                },
+                "required": ["project", "from", "to"],
+            },
+        }),
+        json!({
             "name": "project_check",
             "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas / 发布清单 build_missing_scenes 列出问题，has_issues 汇总；build_scene_order 是关卡顺序，未配置为空）。入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
             "inputSchema": {
@@ -213,6 +249,8 @@ pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
         "entity_remove" => entity_remove(args).map(ToolOutput::text),
         "project_check" => project_check(args).map(ToolOutput::text),
         "asset_list" => asset_list(args).map(ToolOutput::text),
+        "asset_import" => asset_import(args).map(ToolOutput::text),
+        "asset_move" => asset_move(args).map(ToolOutput::text),
         "run_headless" => run_headless(args),
         "script_api_read" => script_api_read(args).map(ToolOutput::text),
         other => Err(CallError::UnknownTool(other.to_string())),
@@ -232,6 +270,39 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, CallError> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| fail(format!("`{key}` 是必填字符串参数")))
+}
+
+/// 取数值参数；缺省 / null = 不改该字段。非有限值直接拒绝（见 `asset_import`）。
+fn f32_arg(args: &Value, key: &str) -> Result<Option<f32>, CallError> {
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let number = value
+        .as_f64()
+        .ok_or_else(|| fail(format!("`{key}` 必须是数字")))? as f32;
+    if !number.is_finite() {
+        return Err(fail(format!(
+            "`{key}` 必须是有限数字（NaN / Infinity / 超出 f32 范围都没有意义）"
+        )));
+    }
+    Ok(Some(number))
+}
+
+/// 取布尔参数；缺省 / null = 不改该字段。
+fn bool_arg(args: &Value, key: &str) -> Result<Option<bool>, CallError> {
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| fail(format!("`{key}` 必须是 true / false")))
 }
 
 fn open_project(args: &Value) -> Result<ProjectHandle, CallError> {
@@ -319,7 +390,7 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 十个工具
+// 十二个工具
 // ---------------------------------------------------------------------------
 
 /// `schema_read` —— 场景格式的机器可读说明书（项目无关）。
@@ -637,6 +708,122 @@ fn asset_list(args: &Value) -> Result<String, CallError> {
                 && invalid_meta.is_empty()
                 && conflicts.is_empty()),
         },
+    })))
+}
+
+/// `asset_import` —— 给单个资产生成 `.meta` 并（可选）写入导入设置。
+///
+/// # 为什么不是"导入整个目录"
+///
+/// 编辑器打开项目时会把所有缺 `.meta` 的文件一次补齐（`ensure_asset_metas`），
+/// 那是"打开项目"的语义。智能体点名一个资产是**一次范围明确的写操作** ——
+/// 顺手给全项目未导入的文件写身份证，会让一次小改动变成一次范围外写入
+/// （也可能在用户还没准备好时把整个资源目录 GUID 化）。所以这里走
+/// [`AssetDatabase::ensure_meta`] 的单资产版本。
+///
+/// # 为什么坏值在这里就挡
+///
+/// `model_scale` 的 NaN / Infinity 没有"钳到边界"的合理含义（core 会退回 1.0），
+/// 静默修正会让智能体以为"我设置的生效了"。非有限值直接报错；有限但越界的值
+/// 交给 core 钳制，并在返回里给出 `model_scale_clamped` + 实际落盘值 ——
+/// 让"我设的"和"生效的"两个事实都可见。
+fn asset_import(args: &Value) -> Result<String, CallError> {
+    let project = open_project(args)?;
+    let raw_path = require_str(args, "path")?;
+    let model_scale = f32_arg(args, "model_scale")?;
+    let texture_srgb = bool_arg(args, "texture_srgb")?;
+    let texture_nearest = bool_arg(args, "texture_nearest")?;
+    let audio_streaming = bool_arg(args, "audio_streaming")?;
+
+    // 路径归一与安全校验都在 core（`asset_import` 与编辑器共用同一条规则），
+    // 这里只用来做"导入前是否已登记"的判断，报错原样透传。
+    let path = xgame_core::normalize_asset_relative(raw_path).map_err(fail)?;
+    let kind = xgame_core::AssetKind::from_path(&path)
+        .ok_or_else(|| fail(format!("不是可登记的资产类型: {raw_path}")))?;
+    if kind == xgame_core::AssetKind::Scene {
+        return Err(fail(format!(
+            "场景不归资产库管，不需要 .meta（也不该生成）: {path}"
+        )));
+    }
+
+    let mut assets = project.assets();
+    let before = assets.record_of_path(&path).map(|record| record.import);
+    let created = before.is_none();
+
+    if model_scale.is_some()
+        || texture_srgb.is_some()
+        || texture_nearest.is_some()
+        || audio_streaming.is_some()
+    {
+        // 合并到现有设置上（部分更新语义：没传的字段保持原值，而不是退回默认 ——
+        // 否则"只调缩放"会顺手把用户改过的 texture_srgb 冲掉）。
+        let mut settings = before.unwrap_or_default();
+        if let Some(value) = model_scale {
+            settings.model_scale = value;
+        }
+        if let Some(value) = texture_srgb {
+            settings.texture_srgb = value;
+        }
+        if let Some(value) = texture_nearest {
+            settings.texture_nearest = value;
+        }
+        if let Some(value) = audio_streaming {
+            settings.audio_streaming = value;
+        }
+        assets.set_import(&path, settings).map_err(fail)?;
+    } else {
+        assets.ensure_meta(&path).map_err(fail)?;
+    }
+
+    let guid = assets
+        .guid_of(&path)
+        .cloned()
+        .ok_or_else(|| fail(format!("导入后仍查不到资产（索引异常）: {path}")))?;
+    let record = assets
+        .record_of_path(&path)
+        .ok_or_else(|| fail(format!("导入后仍查不到资产（索引异常）: {path}")))?;
+    let import = record.import;
+    let kind = record.kind;
+    drop(assets);
+
+    let mut payload = json!({
+        "path": path,
+        "kind": kind,
+        "guid": guid.to_string(),
+        "created": created,
+        // 新建 .meta 一定算"变了"；已有则比较落盘前后的实际值。
+        "changed": before.map(|old| old != import).unwrap_or(true),
+        "import": import,
+    });
+    if let Some(requested) = model_scale {
+        // 落盘值是净化后的实际值：两者不等就说明被钳过（不要自己去 clamp 再比 ——
+        // 那样两边都是钳后值，永远相等，永远报不出钳制）。
+        if (requested - import.model_scale).abs() > f32::EPSILON {
+            payload["model_scale_requested"] = json!(requested);
+            payload["model_scale_clamped"] = json!(true);
+        }
+    }
+    Ok(pretty(&payload))
+}
+
+/// `asset_move` —— 移动 / 改名资产，GUID 不变。
+///
+/// 所有拒绝判定都在 core（`AssetDatabase::move_asset`），这里只负责把结果
+/// 编成智能体能读的信封。**故意不在这里"顺手修引用"**：磁盘上的场景 / 预制体
+/// 存的是 `guid://`，GUID 不变就天然不断链 —— 那才是这条工具有价值的原因。
+fn asset_move(args: &Value) -> Result<String, CallError> {
+    let project = open_project(args)?;
+    let from = require_str(args, "from")?;
+    let to = require_str(args, "to")?;
+
+    let report = project.move_asset(from, to).map_err(fail)?;
+    Ok(pretty(&json!({
+        "from": report.from,
+        "to": report.to,
+        "guid": report.guid.to_string(),
+        "kind": report.kind,
+        "references_preserved": true,
+        "hint": "场景 / 预制体里存的是 guid://，GUID 没变所以引用不需要改写；跑 project_check 可自证。编辑器里已打开的场景内存中仍是旧路径，重新打开后再保存。",
     })))
 }
 
@@ -1574,5 +1761,286 @@ mod tests {
             fake.canonicalize().expect("解析桩路径"),
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `asset_import` 的四条语义：只补 `.meta`（幂等）、参数是**部分更新**（不冲掉
+    /// 已有设置）、越界缩放被钳住且"我设的 / 生效的"两个值都可见、坏输入在动盘前拒绝。
+    #[test]
+    fn asset_import_creates_meta_and_merges_settings() {
+        let project = temp_project("import");
+        std::fs::create_dir_all(project.path("Resources")).unwrap();
+        std::fs::write(project.path("Resources/Box.glb"), b"glb").unwrap();
+
+        // 只给 path：补一张身份证，不碰其它文件（对照编辑器「导入全部」的语义）。
+        let out: Value = serde_json::from_str(
+            &run(&project, "asset_import", json!({ "path": "Resources/Box.glb" }))
+                .expect("导入应成功"),
+        )
+        .unwrap();
+        assert_eq!(out["created"], true, "{out}");
+        assert_eq!(out["changed"], true, "{out}");
+        assert_eq!(out["kind"], "Model", "{out}");
+        assert_eq!(out["import"]["model_scale"], 1.0, "{out}");
+        let guid = out["guid"].as_str().expect("guid").to_string();
+        assert_eq!(guid.len(), 32, "GUID 是 32 位十六进制");
+        assert!(project.path("Resources/Box.glb.meta").is_file());
+
+        // 幂等：反斜杠路径归一后命中同一条记录，不换 GUID、不算改动。
+        let out: Value = serde_json::from_str(
+            &run(
+                &project,
+                "asset_import",
+                json!({ "path": r"Resources\Box.glb" }),
+            )
+            .expect("反斜杠路径应归一"),
+        )
+        .unwrap();
+        assert_eq!(out["created"], false, "{out}");
+        assert_eq!(out["changed"], false, "{out}");
+        assert_eq!(out["guid"], guid.as_str(), "{out}");
+
+        // 给参数：写入并落盘（.meta 文本里能读到 2.5）。
+        let out: Value = serde_json::from_str(
+            &run(
+                &project,
+                "asset_import",
+                json!({ "path": "Resources/Box.glb", "model_scale": 2.5 }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out["changed"], true, "{out}");
+        assert_eq!(out["import"]["model_scale"], 2.5, "{out}");
+        // MCP 每次调用都新开一个 `ProjectHandle`（独立的内存索引），所以测试里
+        // 这个 handle 必须显式刷新才能看见工具写到盘上的 `.meta`。
+        project.refresh_assets();
+        assert_eq!(project.asset_import("Resources/Box.glb").model_scale, 2.5);
+        let meta = std::fs::read_to_string(project.path("Resources/Box.glb.meta")).unwrap();
+        assert!(meta.contains("2.5"), "设置要落进 .meta: {meta}");
+
+        // 部分更新：只改 texture_srgb，刚才设的 model_scale 必须保持 ——
+        // 否则"调一个字段"会顺手把用户的其它改动冲回默认。
+        let out: Value = serde_json::from_str(
+            &run(
+                &project,
+                "asset_import",
+                json!({ "path": "Resources/Box.glb", "texture_srgb": false }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out["import"]["model_scale"], 2.5, "{out}");
+        assert_eq!(out["import"]["texture_srgb"], false, "{out}");
+
+        // 越界：钳到上限，且把请求值一并报出来。
+        let out: Value = serde_json::from_str(
+            &run(
+                &project,
+                "asset_import",
+                json!({ "path": "Resources/Box.glb", "model_scale": 1.0e9 }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            out["import"]["model_scale"].as_f64().unwrap(),
+            f64::from(xgame_core::ImportSettings::MAX_MODEL_SCALE),
+            "{out}"
+        );
+        assert_eq!(out["model_scale_clamped"], true, "{out}");
+        assert_eq!(out["model_scale_requested"], 1.0e9, "{out}");
+
+        // 1e39 在 f64 里有限、转成 f32 就溢出成 inf —— 这类值必须拒绝，
+        // 而不是被 core 的 sanitize 静默退回 1.0（那会让智能体以为设置生效了）。
+        let err = run(
+            &project,
+            "asset_import",
+            json!({ "path": "Resources/Box.glb", "model_scale": 1.0e39 }),
+        )
+        .expect_err("超出 f32 范围必须拒绝");
+        assert!(
+            matches!(&err, CallError::Failed(msg) if msg.contains("有限数字")),
+            "{err:?}"
+        );
+
+        // 场景不归资产库管：生成 `.meta` 会让场景被当成资产，直接拒绝。
+        let scene_rel = project.manifest().entry_scene.clone();
+        let err = run(&project, "asset_import", json!({ "path": scene_rel }))
+            .expect_err("场景必须拒绝");
+        assert!(matches!(err, CallError::Failed(_)));
+        assert!(!project.path(format!("{scene_rel}.meta")).exists());
+
+        // 不在盘上 / 路径穿越：都拒绝。
+        assert!(run(
+            &project,
+            "asset_import",
+            json!({ "path": "Resources/Gone.glb" })
+        )
+        .is_err());
+        assert!(run(&project, "asset_import", json!({ "path": "../Box.glb" })).is_err());
+
+        cleanup(&project);
+    }
+
+    /// `asset_move` 的核心承诺：磁盘上写的是 `guid://`，所以资产搬走后引用**不需要
+    /// 改写**——场景读回来直接指向新路径，`project_check` 也干净。
+    #[test]
+    fn asset_move_keeps_guid_references_alive() {
+        let project = temp_project("move");
+        std::fs::create_dir_all(project.path("Resources")).unwrap();
+        std::fs::write(project.path("Resources/Box.glb"), b"glb").unwrap();
+        run(
+            &project,
+            "asset_import",
+            json!({ "path": "Resources/Box.glb" }),
+        )
+        .unwrap();
+        run(
+            &project,
+            "entity_upsert",
+            json!({ "name": "Box", "model": "Resources/Box.glb" }),
+        )
+        .unwrap();
+
+        // 前提：盘上存的确实是 GUID，而不是路径（否则这条测试什么都没证明）。
+        let scene_rel = project.manifest().entry_scene.clone();
+        let disk = std::fs::read_to_string(project.path(&scene_rel)).unwrap();
+        assert!(disk.contains("guid://"), "场景必须存 GUID: {disk}");
+        assert!(
+            !disk.contains("Resources/Box.glb"),
+            "场景不该留路径: {disk}"
+        );
+
+        let out: Value = serde_json::from_str(
+            &run(
+                &project,
+                "asset_move",
+                json!({ "from": r"Resources\Box.glb", "to": "Resources/Models/Box.glb" }),
+            )
+            .expect("移动应成功"),
+        )
+        .unwrap();
+        assert_eq!(out["from"], "Resources/Box.glb", "{out}");
+        assert_eq!(out["to"], "Resources/Models/Box.glb", "{out}");
+        assert_eq!(out["references_preserved"], true, "{out}");
+        assert_eq!(out["kind"], "Model", "{out}");
+
+        // 两个文件一起走，源目录清空。
+        assert!(project.path("Resources/Models/Box.glb").is_file());
+        assert!(project.path("Resources/Models/Box.glb.meta").is_file());
+        assert!(!project.path("Resources/Box.glb").exists());
+        assert!(!project.path("Resources/Box.glb.meta").exists());
+
+        // 引用没断：静态检查干净，场景读回来解析到新路径。
+        let check: Value = serde_json::from_str(&run(&project, "project_check", json!({})).unwrap())
+            .unwrap();
+        assert_eq!(check["has_issues"], false, "{check}");
+        assert!(
+            check["dangling_guids"].as_array().unwrap().is_empty(),
+            "{check}"
+        );
+        // 同上：`entry_scene` 走的是测试 handle 的索引，先刷新才能解析新路径。
+        project.refresh_assets();
+        let scene = entry_scene(&project);
+        let entity = scene
+            .entities
+            .iter()
+            .find(|e| e.name == "Box")
+            .expect("Box 实体");
+        assert_eq!(entity.model, "Resources/Models/Box.glb");
+
+        cleanup(&project);
+    }
+
+    /// 拒绝路径全部在动盘**之前**生效：源文件、`.meta` 与索引都必须原样。
+    #[test]
+    fn asset_move_rejects_unsafe_targets_without_touching_files() {
+        let project = temp_project("move_reject");
+        std::fs::create_dir_all(project.path("Resources")).unwrap();
+        std::fs::write(project.path("Resources/Box.glb"), b"box").unwrap();
+        std::fs::write(project.path("Resources/Other.glb"), b"other").unwrap();
+        run(
+            &project,
+            "asset_import",
+            json!({ "path": "Resources/Box.glb" }),
+        )
+        .unwrap();
+        // MCP 的写入落在盘上；测试 handle 的索引要刷新一次才看得见。
+        project.refresh_assets();
+        let guid = project
+            .assets()
+            .guid_of("Resources/Box.glb")
+            .cloned()
+            .expect("已登记");
+        let meta_before = std::fs::read_to_string(project.path("Resources/Box.glb.meta")).unwrap();
+
+        // 目标已存在：绝不覆盖。
+        let err = run(
+            &project,
+            "asset_move",
+            json!({ "from": "Resources/Box.glb", "to": "Resources/Other.glb" }),
+        )
+        .expect_err("目标存在必须拒绝");
+        assert!(
+            matches!(&err, CallError::Failed(m) if m.contains("拒绝覆盖")),
+            "{err:?}"
+        );
+
+        // 改变资产类型：`.meta` 里的 kind 是契约。
+        assert!(run(
+            &project,
+            "asset_move",
+            json!({ "from": "Resources/Box.glb", "to": "Resources/Box.png" })
+        )
+        .is_err());
+
+        // 目标是场景：场景按路径被 project.ron 引用，搬它会断入口 / 发布清单。
+        let scene_rel = project.manifest().entry_scene.clone();
+        assert!(run(
+            &project,
+            "asset_move",
+            json!({ "from": "Resources/Box.glb", "to": scene_rel })
+        )
+        .is_err());
+
+        // 路径穿越 / 同路径。
+        assert!(run(
+            &project,
+            "asset_move",
+            json!({ "from": "Resources/Box.glb", "to": "../Box.glb" })
+        )
+        .is_err());
+        assert!(run(
+            &project,
+            "asset_move",
+            json!({ "from": "Resources/Box.glb", "to": "Resources/Box.glb" })
+        )
+        .is_err());
+
+        // 源缺 `.meta`（未登记）：提示先 asset_import，且不留下半个目标文件。
+        let err = run(
+            &project,
+            "asset_move",
+            json!({ "from": "Resources/Other.glb", "to": "Resources/Moved.glb" }),
+        )
+        .expect_err("缺 .meta 必须拒绝");
+        assert!(
+            matches!(&err, CallError::Failed(m) if m.contains("asset_import")),
+            "{err:?}"
+        );
+        assert!(!project.path("Resources/Moved.glb").exists());
+
+        // 一串失败之后：源文件、`.meta`、索引全都原样。
+        assert_eq!(
+            std::fs::read(project.path("Resources/Box.glb")).unwrap(),
+            b"box"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path("Resources/Box.glb.meta")).unwrap(),
+            meta_before
+        );
+        assert_eq!(project.assets().guid_of("Resources/Box.glb"), Some(&guid));
+
+        cleanup(&project);
     }
 }

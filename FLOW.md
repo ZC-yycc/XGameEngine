@@ -1345,6 +1345,6 @@ Scene(
 | `editor/panels/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |
 | `game/main.rs` | 517 | `GameRunner`（`ApplicationHandler`：`resumed` / `window_event` / `about_to_wait`）、`GameApp::new()`、`update()`、`render()`、`resolve_project()` |
 | `mcp/lib.rs` | 306 | `handle_line()`（协议入口，喂行进断言行出的纯函数）、`initialize_result()`（版本协商）、两层错误（协议 `error` vs 工具 `isError`） |
-| `mcp/tools.rs` | 1578 | `schemas()`（10 工具 JSON Schema）、`call()` 分发、`scene_rel()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、`schema_read()`（与 `--export-schema` 同源）/ `script_api_read()`（与 `--export-script-api` 同源）/ upsert（先挂父再改变换）/ remove / check / run_headless 实现 |
+| `mcp/tools.rs` | 2046 | `schemas()`（12 工具 JSON Schema）、`call()` 分发、`scene_rel()` / `normalize_asset_relative()`（路径安全：拒 `..` / 绝对路径）、`count_named()`（重名歧义拒绝）、`schema_read()`（与 `--export-schema` 同源）/ `script_api_read()`（与 `--export-script-api` 同源）/ upsert（先挂父再改变换）/ remove / check / asset_list / asset_import（单个资产建 `.meta` + 部分更新导入参数）/ asset_move（`.meta` 跟着走、GUID 不变）/ run_headless 实现 |
 | `mcp/main.rs` | 24 | stdin/stdout 管道（唯一碰 I/O 的一层） |
 | `tools/build-release.ps1` | 370 | `Resolve-Cargo`、`Enable-MsvcEnv`、`Invoke-CargoBuild` |
