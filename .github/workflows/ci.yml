@@ -1,0 +1,63 @@
+name: CI
+
+# 只跑 Windows：引擎目前只在 Windows 实测，MSVC 是唯一验证过的构建面。
+# GPU 截图测试留给带显卡的自托管 runner；无适配器时渲染测试会自行 skip。
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # CI 的 target 缓存只服务一次构建，关掉增量可显著缩小缓存体积。
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    name: Windows / stable
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # --locked：Cargo.lock 是提交物，CI 不允许静默升级依赖。
+      - name: Check
+        run: cargo check --locked --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace --all-targets
+
+      # 下面四步是二进制级冒烟：单元测试之外，确认真实 CLI 入口和示例项目仍可用。
+      - name: Project check
+        run: cargo run --locked -p xgame-editor -- --check projects/SampleScene
+
+      - name: Headless smoke
+        run: cargo run --locked -p xgame-editor -- --headless --frames 30 projects/SampleScene
+
+      - name: Export schema
+        run: cargo run --locked -p xgame-editor -- --export-schema --out "$env:RUNNER_TEMP\xgame-schema.json"
+
+      - name: Export script API
+        run: cargo run --locked -p xgame-editor -- --export-script-api --out "$env:RUNNER_TEMP\xgame-script-api.json"

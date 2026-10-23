@@ -47,6 +47,15 @@ cargo run -p xgame-mcp
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
 
+## CI
+
+推送到 `master`、开 PR 或手动 dispatch 时，GitHub Actions（`.github/workflows/ci.yml`）会在
+`windows-latest` 上跑 `cargo check` / `clippy -D warnings` / `cargo test`，再跑
+示例项目的 `--check` / `--headless` 与 `--export-schema` / `--export-script-api`
+二进制冒烟。所有 cargo 命令带 `--locked`；没有 GPU 的 runner 上渲染测试会自动
+skip，`--screenshot` 留给带显卡的自托管 runner。完整取舍见 `PLAN.md` 五十二与
+`Docs/决策记录.md` §三十四。
+
 ## 引擎与游戏项目是分开的
 
 **引擎**（本仓库的 `crates/`）与**游戏项目**（磁盘上任意目录）彻底分家。
@@ -54,6 +63,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 
 ```
 XGameEngine/                  # 引擎源码仓库
+├── .github/                  # GitHub Actions（CI workflow）
 ├── crates/
 │   ├── xgame-core/           # 核心类型 + Project（项目清单、路径解析）
 │   ├── xgame-math/           # 数学库：glam 重导出 + projection 辅助

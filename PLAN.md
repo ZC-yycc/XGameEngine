@@ -4867,9 +4867,85 @@ Agent-Native 的 ③ 是「机器可读契约」：智能体能读写 RON 不等
 
 ### 五、下一步候选
 
-- **CI**：`.github/workflows` + `check` / `clippy` / `test` / `--check` / `--headless`；
+- ~~**CI**~~ ✅ **已完成（PLAN 五十二）**：`.github/workflows` + `check` / `clippy` /
+  `test` / `--check` / `--headless`；
 - **`asset_import`**：让智能体经 MCP 改 `.meta` 导入设置；
 - **脚本 API 结构化参数**：如果出现强类型桩代码需求，再把签名升级成
   `{ name, ty, optional }`；
 - **两份 JSON 的快照测试**：schema + script_api 各存一份进仓库，格式变化时
   diff 直接可见。
+
+## 五十二、CI（GitHub Actions，2026-10-23）
+
+上一轮把脚本契约变成机器可读；这一轮让 813 条测试与两个无头入口（`--check` /
+`--headless`）不再只靠手动跑。目标很小：push / PR 时自动跑与本地同一套命令，
+先抓编译、lint、回归和示例项目损坏。
+
+### 一、做了什么
+
+1. **`.github/workflows/ci.yml`**
+   - `windows-latest` + stable Rust + clippy + `Swatinem/rust-cache@v2`；
+   - 触发：push `master` / pull request / manual dispatch；同 ref 并发取消旧任务；
+   - 60 分钟超时，`--locked` 固定 `Cargo.lock`，`CARGO_INCREMENTAL=0` 缩小缓存。
+2. **CI 步骤**
+   - `cargo check --locked --workspace --all-targets`
+   - `cargo clippy --locked --workspace --all-targets -- -D warnings`
+   - `cargo test --locked --workspace --all-targets`
+   - `cargo run --locked -p xgame-editor -- --check projects/SampleScene`
+   - `cargo run --locked -p xgame-editor -- --headless --frames 30 projects/SampleScene`
+   - `--export-schema` / `--export-script-api` 写到 `RUNNER_TEMP`，做二进制级冒烟。
+3. **文档**：`Docs/差距分析.md` 把 CI 从"立即做"改成完成；`ROADMAP.md` 加状态；
+   `README.md` / `FLOW.md` / `AGENTS.md` 同步入口与边界；决策记录新增 §三十四。
+
+### 二、刻意的取舍
+
+- **只跑 Windows**：引擎目前只有 Windows 实测；Linux 还要补 ALSA 等系统依赖，
+  在没验证前加矩阵只会制造"红得没意义"的 CI。等跨平台真正开始做再扩。
+- **不跑 `--screenshot`**：hosted runner 没有 GPU；`gpu_or_skip` 已让渲染断言在
+  无适配器时跳过，截图要的是真实像素，不能拿 skip 冒充验证。留给带 GPU 的自托管
+  runner。
+- **不跑 7 条 ignored 基准**：性能基准受机器噪声影响，CI 里只保留 `#[ignore]` 的
+  手动入口；要防回归得先有稳定的自托管 runner 与基线。
+- **不加 `cargo fmt --check`**：当前工具链未安装 rustfmt，仓库也没有格式化门禁；
+  先保证 check / clippy / test，等格式化一次性收口后再加。
+- **单 job 顺序跑**：check → clippy → test → 冒烟共用同一份 target 缓存；
+  拆成并行 job 会让每个 job 各自冷编译，反而更慢。
+- **不跑 release build**：发布打包仍由 `一键构建.cmd` / `tools/build-release.ps1`
+  负责；CI 先守住 debug 编译与测试，避免首版 CI 时间过长。
+- **`--locked`**：`Cargo.lock` 是提交物；CI 不允许静默升级依赖。
+
+### 三、验证（本地实跑）
+
+- **YAML**：PyYAML 解析通过；`actionlint 1.7.12` 0 问题；10 个 step、`windows`
+  job 结构正确。**未在 GitHub 托管 runner 上执行** —— 本地仓库尚未推送这版
+  workflow，首次 push / PR 才是真正的 runner 验证；本地能证明的是命令与 YAML
+  语法。
+- **命令**（全部带 `--locked`）：
+  - `--check projects/SampleScene` 退出码 0；
+  - `--headless --frames 30` 退出码 0，报告 `frames=30`、`entities=24`、
+    `logs.error=0`；
+  - `--export-schema --out` 76,685 字节，`format_version=1`；
+  - `--export-script-api --out` 50,695 字节，`format_version=1`、17 类、155 函数。
+- **全量**：`cargo check --workspace --all-targets` 通过；`cargo clippy --workspace
+  --all-targets -- -D warnings` 0 告警；`cargo test --workspace --all-targets`
+  813 passed / 0 failed / 7 ignored（CI 只改 YAML 与文档，测试数不变）。
+- **已知噪声**：`xgame-derive` 的 MSVC 链接器警告仍在（非致命）；CI 日志会出现，
+  但不影响退出码。
+
+### 四、还没做 / 已知边界
+
+- **没有 GitHub 托管运行记录**：本地只验证 YAML 与命令；runner 上的 MSVC / WARP /
+  缓存命中情况要等首次 push。
+- **没有截图 / 基准 / release 构建**：见上面的取舍；`--screenshot` 需要带 GPU 的
+  自托管 runner，性能基准需要稳定机器。
+- **没有 Linux / macOS 矩阵**：跨平台仍是 P2；先别让未验证的平台拖慢主流程。
+- **没有格式门禁**：`rustfmt` 未安装，代码格式还没一次性收口。
+- **CI 不检查工作区是否干净**：导出写到 `RUNNER_TEMP`，但测试会生成临时文件；
+  目前没有把"工作区必须 clean"作为门禁，避免测试自身产物误报。
+
+### 五、下一步候选
+
+- **`asset_import`**：让智能体经 MCP 改 `.meta` 导入设置；
+- **自托管 GPU runner**：把 `--screenshot` 的逐字节确定性也纳入 CI；
+- **性能基准 runner**：给 7 条 ignored 基准建立稳定基线后再进 CI；
+- **跨平台矩阵**：Linux 先补系统依赖与实测，再加进 workflow。

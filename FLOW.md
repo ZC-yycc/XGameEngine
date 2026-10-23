@@ -100,6 +100,11 @@ scene_renderer::SceneRenderer::new(device, queue, egui_renderer, format, project
 导出入口只把 `xgame-core` 的目录 / 清单序列化成 JSON：`--out` 写文件，缺省打 stdout；
 同一份代码两次导出逐字节相同。
 
+> 其中 `--check` / `--headless` 与两份 JSON 导出是 CI 的二进制冒烟项：
+> `.github/workflows/ci.yml` 在 Windows runner 上跑它们。CI 不跑 `--screenshot`
+> （hosted runner 没有 GPU），渲染测试在无适配器时自动 skip。见 PLAN 五十二 /
+> 决策记录 §三十四。
+
 ### 独立游戏 (`xgame-game`)
 
 ```

@@ -17,6 +17,8 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
 cargo test --workspace --all-targets         # 测试（要求全绿；813 条 + 7 条基准 ignore）
+# CI 在 GitHub Actions（windows-latest）跑 check / clippy / test + 示例项目冒烟，
+# 命令带 --locked；workflow 见 .github/workflows/ci.yml，取舍见决策记录 §三十四。
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --export-schema --out schema.json  # 场景格式说明书（JSON；无 --out 打 stdout）
@@ -96,6 +98,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - `projects/` — 游戏项目（`project.ron` + `Scenes/` + `Resources/` + `Scripts/` + `Prefabs/` + `input.ron`）；
   `BehaviorsDemo` 例外——它本身是 workspace 成员（cdylib），用来演示 Rust 插件项目形态
 - `Docs/` — 脚本 API、无头运行、MCP、差距分析、决策记录、双轨语言架构计划
+- `.github/` — GitHub Actions（CI workflow）
 - `dist/` — 发布产物（构建输出，不入库改动）
 - `tools/` — 构建脚本（build-release.ps1 等）
 
@@ -135,3 +138,4 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 动画脚本控制 | 状态机优先（配了可用机器时 `clip/speed/looping` 由状态表决定）；`set_anim_clip` 只写 `Animator.clip` 并复用 `AnimationDriver` 的淡入；叠加层 / 层剪辑硬切；越界值钳住、非有限值忽略 | §三十 |
 | 热重载 | 1 Hz 轮询内容目录（只查 metadata）；`poll` 推进基线、**动作后必须 `rebase`**（防自激）；场景永不自动覆盖；脏材质草稿保留；`--ui-shot` 不启用 | §三十一 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |
+| CI | Windows + stable + `--locked`；单 job 顺序跑；不跑 `--screenshot` / 基准 / fmt | §三十四 |

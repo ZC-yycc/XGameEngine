@@ -25,6 +25,7 @@
 | **七** | 🟨 进行中 | 动画系统（主要切片 ✅：骨骼蒙皮 + 单剪辑 + 交叉淡入 + 阈值状态机 + 叠加 + 多层混合栈与骨骼遮罩；morph / Phase B 待做） |
 | **八** | ✅ 完成 | 音频系统（kira：`AudioSource` + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，见 PLAN.md 二十二） |
 | **Agent-Native ①②③** | ✅ 完成 | MCP 工具面（10 工具，含 `asset_list` / `schema_read` / `script_api_read`）+ 无头运行 `--headless` / `--screenshot` + 场景格式说明书 `--export-schema` + 脚本 API 清单 `--export-script-api`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) / PLAN.md 五十、五十一 |
+| **CI / 自动化** | ✅ 完成 | GitHub Actions（Windows + stable + clippy + rust-cache）：`check` / `clippy` / `test` + 示例项目 `--check` / `--headless` + 两份 JSON 导出；无 GPU 的 runner 上渲染测试自动 skip；见 PLAN.md 五十二、决策记录 §三十四 |
 | **渲染 PBR** | ✅ 完成 | Cook-Torrance + 逐实体材质覆盖 + 无头截图（PLAN.md 二十四） |
 | **渲染 HDR** | ✅ 完成 | HDR 中间标 + ACES + 曝光（二十五）、Bloom（二十六） |
 | **渲染天空** | ✅ 完成 | 程序化天空盒 + 球谐漫反射 + 预过滤镜面 + BRDF LUT（二十七） |
@@ -141,7 +142,7 @@
 | 输入系统 | ✅ 完成 | `InputMap`（`input.ron`）+ 编辑器 / 游戏共用；无手柄 / 触摸 |
 | 项目设置 | ✅ 完成 | 项目名 / 入口场景 / 窗口 / 重力 / 步长 / 画面（曝光 / ACES / Bloom / FXAA / TAA），草稿 + Apply；单入口 `from_project_runtime`。内容目录只在 RON 里手改 |
 | 未保存保护 / Save As | ✅ 完成 | 脏标记 + 双路径确认 + 标题星号 + 快捷键 |
-| 无头检查 `--check` | ✅ 完成 | 退出码 0/1/2，CI 与智能体的可机读入口 |
+| 无头检查 `--check` | ✅ 完成 | 退出码 0/1/2，CI 与智能体的可机读入口；已接入 GitHub Actions（PLAN 五十二） |
 | 无头运行 `--headless` | ✅ 完成 | 固定 dt 逐位可复现；`--screenshot` 离屏出图 |
 | 阴影 / 天空 / 后处理 | 🟨 部分 | 4 级 CSM + MSAA + HDR/ACES + Bloom + 天空 IBL + FXAA + **TAA** 已落地；SSAO / 点光阴影待做 |
 | 实例化 / 剔除 | 🟨 部分 | GPU 实例化 + 视锥剔除 + 阴影补投已落地；LOD / 遮挡剔除待做 |
@@ -174,7 +175,7 @@
   155 个脚本函数、签名、参数、返回值、6 个生命周期钩子与全局约定；
 - **单一运行时** —— 无头验证与玩家实跑完全一致；
 - **MCP 工具面** —— 10 个工具（读说明书 / 读脚本契约 / 读 / 改 / 查 / 看效果 / 看资产）；
-- **安全网** —— 813 条回归测试、每条先证红。
+- **安全网** —— 813 条回归测试、每条先证红，GitHub Actions 在 push / PR 自动跑。
 
 进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出 + 脚本 API
 清单导出 ✅（`--export-schema` + `schema_read` / `--export-script-api` +
