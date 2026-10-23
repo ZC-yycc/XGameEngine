@@ -13,7 +13,7 @@ use rapier3d::dynamics::{
 };
 use rapier3d::geometry::{
     BroadPhaseMultiSap as DefaultBroadPhase, ColliderBuilder, ColliderHandle,
-    ColliderSet, NarrowPhase,
+    ColliderSet, Group, InteractionGroups, NarrowPhase,
 };
 use rapier3d::control::{EffectiveCharacterMovement, KinematicCharacterController};
 use rapier3d::math::Isometry;
@@ -92,6 +92,12 @@ pub struct RaycastFilter {
     pub only_dynamic: bool,
     /// 排除某个 body（通常是自己，避免射线从自身内部出发时打到自己）。
     pub exclude_body: Option<u64>,
+    /// 只命中这些层（第 N 位 = 第 N 层）；`None` = 不限层。
+    ///
+    /// **只看成员位，不看碰撞矩阵**（Unity `Physics.Raycast(layerMask)` 同语义）：
+    /// "摄像机射线只打几何体层"不该因为几何体层和摄像机层被设成不碰撞就失效 ——
+    /// 矩阵管的是**接触**，查询掩码管的是**我想看什么**，两件事。
+    pub layer_mask: Option<u32>,
 }
 
 /// 一次射线检测的命中结果。
@@ -192,6 +198,12 @@ pub struct PhysicsWorld {
 
     bodies: HashMap<u64, BodyRecord>,
     colliders: HashMap<u64, ColliderRecord>,
+    /// `body_id → 它名下的 collider_id`。
+    ///
+    /// 换层（`set_body_groups`）与角色扫掠（`body_groups`）都要"由刚体找到
+    /// 碰撞体"。线性扫 `colliders` 也能做，但角色每帧都要查一次，刚体一多
+    /// 就变成 O(角色数 × 碰撞体数)。与 `bodies` / `colliders` 同增同减。
+    body_colliders: HashMap<u64, Vec<u64>>,
     /// `rapier 刚体句柄 → 我们的 body_id` 反查表。
     ///
     /// 碰撞事件只给 collider 句柄：要先查 collider 的 parent 刚体句柄，再换成
@@ -228,6 +240,7 @@ impl PhysicsWorld {
             config,
             bodies: HashMap::new(),
             colliders: HashMap::new(),
+            body_colliders: HashMap::new(),
             body_handles: HashMap::new(),
             collider_handles: HashMap::new(),
             next_id: 1,
@@ -285,6 +298,7 @@ impl PhysicsWorld {
             // 反查表要同步清掉，否则 rapier 复用该句柄后会把碰撞事件记到这个
             // 已经删掉的 body 上。
             self.body_handles.remove(&record.rapier_handle);
+            self.body_colliders.remove(&body_id);
             // 先收集要删的句柄，再统一清 —— 直接在 `retain` 闭包里借 `self.collider_handles`
             // 会和 `self.colliders` 的可变借用打架。
             let doomed: Vec<ColliderHandle> = self
@@ -342,6 +356,7 @@ impl PhysicsWorld {
             .sensor(collider.is_sensor)
             .density(collider.density)
             .active_events(ActiveEvents::COLLISION_EVENTS)
+            .collision_groups(interaction_groups(collider.memberships, collider.filter))
             .translation(glam_to_na_vec3(collider.offset));
 
         let rapier_handle = self.collider_set.insert_with_parent(
@@ -350,12 +365,61 @@ impl PhysicsWorld {
 
         self.colliders.insert(cid, ColliderRecord { rapier_handle, body_id });
         self.collider_handles.insert(rapier_handle, cid);
+        self.body_colliders.entry(body_id).or_default().push(cid);
         Some(cid)
+    }
+
+    /// 改某个刚体（它名下所有碰撞体）的碰撞组。
+    ///
+    /// 用于"实体换层"这种**运行中**的改动：`sync_bodies` 只在结构性变化时补建，
+    /// 层变了不需要重建刚体，但必须让 rapier 立刻看到新掩码 —— 否则要等到
+    /// 下一次有实体增减才会生效，表现为"脚本里 set_layer 之后要等几秒才不碰"。
+    ///
+    /// 返回是否真的改了（刚体不存在 / 没有碰撞体时为 `false`）。
+    pub fn set_body_groups(&mut self, body_id: u64, memberships: u32, filter: u32) -> bool {
+        let groups = interaction_groups(memberships, filter);
+        let Some(collider_ids) = self.body_colliders.get(&body_id).cloned() else {
+            return false;
+        };
+        let mut changed = false;
+        for cid in collider_ids {
+            let Some(record) = self.colliders.get(&cid) else { continue };
+            if let Some(collider) = self.collider_set.get_mut(record.rapier_handle) {
+                collider.set_collision_groups(groups);
+                changed = true;
+            }
+        }
+        if changed {
+            // **刻意不重建 query pipeline**：碰撞组存在 collider 的 flags 里，
+            // rapier 的 `QueryFilter::test` 是查询时现读的（不是烘进 QBVH 的）。
+            // 每帧 set_layer 的脚本不该为此付一次全量 AABB 重建。
+        }
+        changed
+    }
+
+    /// 某个刚体的碰撞组（多个碰撞体时取第一个；引擎目前一刚体一碰撞体）。
+    ///
+    /// 只在移动角色时用：角色的扫掠必须遵守它自己那一层的矩阵，
+    /// 否则"关掉的两层"对角色移动不起作用（角色照样被不该碰的东西挡住）。
+    fn body_groups(&self, body_id: u64) -> InteractionGroups {
+        self.body_colliders
+            .get(&body_id)
+            .and_then(|ids| ids.first())
+            .and_then(|cid| self.colliders.get(cid))
+            .and_then(|record| self.collider_set.get(record.rapier_handle))
+            .map(|collider| collider.collision_groups())
+            .unwrap_or_else(InteractionGroups::all)
     }
 
     pub fn remove_collider(&mut self, collider_id: u64) {
         if let Some(record) = self.colliders.remove(&collider_id) {
             self.collider_handles.remove(&record.rapier_handle);
+            if let Some(ids) = self.body_colliders.get_mut(&record.body_id) {
+                ids.retain(|id| *id != collider_id);
+                if ids.is_empty() {
+                    self.body_colliders.remove(&record.body_id);
+                }
+            }
             self.collider_set.remove(
                 record.rapier_handle,
                 &mut self.island_manager,
@@ -462,7 +526,10 @@ impl PhysicsWorld {
         let shape = character_capsule(def);
         let filter = QueryFilter {
             flags: QueryFilterFlags::EXCLUDE_SENSORS,
-            groups: None,
+            // 角色移动必须遵守**它自己那一层**的碰撞矩阵：否则"关掉的两层"
+            // 对角色不起作用，敌人从玩家身上径直穿过 —— 而同一对刚体之间的
+            // 接触却被物理挡下了，两边行为不一致。
+            groups: Some(self.body_groups(body_id)),
             exclude_collider: None,
             exclude_rigid_body: Some(handle),
             predicate: None,
@@ -972,7 +1039,21 @@ impl PhysicsWorld {
         let dir = direction.normalize();
         let ray = Ray::new(glam_to_na_point(origin), glam_to_na_vec3(dir));
 
-        let query_filter = self.build_query_filter(filter);
+        // 层过滤走 `predicate` 而不是 `QueryFilter::groups`：后者用的是
+        // `InteractionGroups::test`，要求**双侧相与**（对方掩码也得同意），
+        // 于是"射线想看第 5 层"会被第 5 层自己的碰撞矩阵挡掉 —— 与 Unity
+        // 的 layerMask 语义不符。这里只查成员位。
+        let mask = filter.layer_mask;
+        let layer_predicate = |_handle: ColliderHandle, collider: &rapier3d::geometry::Collider| {
+            match mask {
+                Some(mask) => (collider.collision_groups().memberships.bits() & mask) != 0,
+                None => true,
+            }
+        };
+        let mut query_filter = self.build_query_filter(filter);
+        if mask.is_some() {
+            query_filter.predicate = Some(&layer_predicate);
+        }
         let (handle, inter) = self.query_pipeline.cast_ray_and_get_normal(
             &self.rigid_body_set,
             &self.collider_set,
@@ -1120,6 +1201,17 @@ fn glam_quat_to_na_rotation(q: glam::Quat) -> rapier3d::na::UnitQuaternion<f32> 
     rapier3d::na::UnitQuaternion::from_quaternion(rapier3d::na::Quaternion::new(
         q.w, q.x, q.y, q.z,
     ))
+}
+
+/// 裸位掩码 → rapier 的碰撞组。
+///
+/// 位掩码（两个 `u32`）是本 crate 对外的表示：`xgame-core` 的层配置、
+/// 场景文件、脚本 API 全是位掩码，rapier 的 `Group` 只在物理层内部出现。
+fn interaction_groups(memberships: u32, filter: u32) -> InteractionGroups {
+    InteractionGroups::new(
+        Group::from_bits_truncate(memberships),
+        Group::from_bits_truncate(filter),
+    )
 }
 
 fn collider_to_shared_shape(shape: &ColliderShape) -> rapier3d::geometry::SharedShape {
@@ -1315,5 +1407,153 @@ mod tests {
 
         let events: Vec<_> = world.drain_events().collect();
         assert!(!events.is_empty(), "collision events should be non-empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // 层 / 碰撞矩阵
+    // -----------------------------------------------------------------------
+
+    /// 造一个"地板 + 落球"的场景，两侧各给一对碰撞组。
+    fn drop_onto_floor(floor_groups: (u32, u32), ball_groups: (u32, u32)) -> f32 {
+        let mut world = PhysicsWorld::new(PhysicsConfig::default());
+        let floor = world.add_body(RigidBody::static_at(Transform {
+            position: Vec3::new(0.0, -1.0, 0.0),
+            ..Transform::IDENTITY
+        }));
+        let _ = world.add_collider(
+            floor,
+            Collider {
+                memberships: floor_groups.0,
+                filter: floor_groups.1,
+                ..Collider::cuboid(Vec3::new(10.0, 0.5, 10.0))
+            },
+        );
+
+        let ball = world.add_body(RigidBody::dynamic_at(Transform {
+            position: Vec3::new(0.0, 3.0, 0.0),
+            ..Transform::IDENTITY
+        }));
+        let _ = world.add_collider(
+            ball,
+            Collider {
+                memberships: ball_groups.0,
+                filter: ball_groups.1,
+                ..Collider::ball(0.5)
+            },
+        );
+
+        for _ in 0..120 {
+            world.step(1.0 / 60.0);
+        }
+        world.body_transform(ball).unwrap().position.y
+    }
+
+    /// 矩阵里关掉的一对**根本不产生接触**：球直接穿过地板。
+    ///
+    /// 这是层功能的核心断言 —— 如果它只是"事件被过滤掉"，球仍会停在地板上。
+    #[test]
+    fn non_colliding_layers_pass_through_each_other() {
+        let (layer1, layer2) = (1u32 << 1, 1u32 << 2);
+        // 两侧都同意"互不碰撞"（rapier 的判定是双侧相与）。
+        let floor = (layer1, !layer2);
+        let ball = (layer2, !layer1);
+
+        let y_blocked = drop_onto_floor((layer1, u32::MAX), (layer2, u32::MAX));
+        assert!(
+            y_blocked > -0.5,
+            "默认全通时球应当停在地板上（y≈0），实际 y={y_blocked}"
+        );
+
+        let y_through = drop_onto_floor(floor, ball);
+        assert!(
+            y_through < -5.0,
+            "关掉 1×2 之后球必须穿过去（实际 y={y_through}）"
+        );
+    }
+
+    /// 换层立刻生效：不用等下一次 `sync_bodies` / 重建刚体。
+    #[test]
+    fn set_body_groups_takes_effect_immediately() {
+        let mut world = PhysicsWorld::new(PhysicsConfig::default());
+        let floor = world.add_body(RigidBody::static_at(Transform {
+            position: Vec3::new(0.0, -0.5, 0.0),
+            ..Transform::IDENTITY
+        }));
+        let _ = world.add_collider(floor, Collider::cuboid(Vec3::new(10.0, 0.5, 10.0)));
+
+        let ball = world.add_body(RigidBody::dynamic_at(Transform {
+            position: Vec3::new(0.0, 1.0, 0.0),
+            ..Transform::IDENTITY
+        }));
+        let ball_collider = world
+            .add_collider(ball, Collider::ball(0.4))
+            .expect("碰撞体挂载失败");
+
+        // 让球不再搭理地板（0 层）：两侧都要同意，所以地板那一侧也得改。
+        assert!(world.set_body_groups(floor, 1 << 0, !(1 << 2)));
+        assert!(world.set_body_groups(ball, 1 << 2, !(1 << 0)));
+
+        for _ in 0..120 {
+            world.step(1.0 / 60.0);
+        }
+        let y = world.body_transform(ball).unwrap().position.y;
+        assert!(y < -5.0, "换层后球应当穿地板落下，实际 y={y}");
+
+        // 未知刚体不该 panic，只返回 false。
+        assert!(!world.set_body_groups(9999, 1, u32::MAX));
+        assert!(world.colliders.contains_key(&ball_collider));
+    }
+
+    /// 射线层掩码：只看成员位，**不看碰撞矩阵**。
+    #[test]
+    fn raycast_layer_mask_ignores_collision_matrix() {
+        let mut world = PhysicsWorld::new(PhysicsConfig::default());
+
+        // 目标在 3 层，但它的掩码是 0（与任何东西都不碰）。
+        let target = world.add_body(RigidBody::static_at(Transform {
+            position: Vec3::new(0.0, 0.0, -5.0),
+            ..Transform::IDENTITY
+        }));
+        let _ = world.add_collider(
+            target,
+            Collider {
+                memberships: 1 << 3,
+                filter: 0,
+                ..Collider::cuboid(Vec3::splat(1.0))
+            },
+        );
+
+        // 查询结构只在 `step()` / `sync_queries()` 里刷新 —— 建完刚体要显式同步一次。
+        world.sync_queries();
+
+        // 3 层掩码：打得到。
+        let hit = world.raycast_with_filter(
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, -1.0),
+            100.0,
+            true,
+            RaycastFilter {
+                layer_mask: Some(1 << 3),
+                ..RaycastFilter::default()
+            },
+        );
+        assert!(hit.is_some(), "掩码包含目标层时必须命中（矩阵不参与查询过滤）");
+        assert_eq!(hit.unwrap().body_id, Some(target));
+
+        // 别的层掩码：打不到。
+        let miss = world.raycast_with_filter(
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, -1.0),
+            100.0,
+            true,
+            RaycastFilter {
+                layer_mask: Some(1 << 4),
+                ..RaycastFilter::default()
+            },
+        );
+        assert!(miss.is_none(), "掩码不含目标层时必须打不到");
+
+        // 不给掩码 = 和以前一样，全都算。
+        assert!(world.raycast(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 100.0).is_some());
     }
 }

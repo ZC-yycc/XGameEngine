@@ -12,6 +12,7 @@
 //! | `scene` | 场景图：`Scene`, `Entity` |
 //! | `prefab` | 预制体：`Prefab`, `PrefabInstanceRef`（可复用的实体子树模板）|
 //! | `id` | 稳定实体标识符 `EntityId` |
+//! | `layers` | 层与碰撞矩阵（物理过滤的唯一真相源，落盘在 `project.ron` 的 `layers` 节） |
 //! | `animation` | 动画播放配置 `Animator` + 状态机 `AnimMachine` + 叠加层 `AnimAdditive` + 混合层栈 `AnimLayer`（声明式，落盘进场景文件） |
 //! | `audio` | 音频纯数据层：`AudioSource` 组件 + `AudioPort` 命令束 + `ListenerPose`（引擎封装在 `xgame-audio`） |
 //! | `camera` | 相机组件 `Camera`（投影参数 + 主相机标记）+ 朝向反解 `look_rotation` |
@@ -57,6 +58,7 @@ mod check;
 mod component;
 pub mod inspect;
 mod id;
+pub mod layers;
 mod light;
 mod loader;
 pub mod material;
@@ -109,6 +111,7 @@ pub use character::{
 pub use component::{Component, ComponentMap, ModelPath, Name};
 pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};
 pub use id::{EntityId, EntityMap, EntitySet};
+pub use layers::{sanitize_layer, Layers, DEFAULT_LAYER, LAYER_COUNT};
 pub use light::{Light, LightKind};
 pub use loader::SceneLoader;
 pub use material::{MaterialAsset, MaterialOverride, MATERIAL_EXTENSION};

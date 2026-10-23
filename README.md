@@ -27,7 +27,7 @@ cargo run -p xgame-editor -- --check projects/SampleScene
 # （无 --out 打 stdout；同一份代码两次导出逐字节相同）
 cargo run -p xgame-editor -- --export-schema --out schema.json
 
-# 脚本 API 清单 —— 导出 155 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
+# 脚本 API 清单 —— 导出 158 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
 # （与 MCP `script_api_read` 同源；无 --out 打 stdout）
 cargo run -p xgame-editor -- --export-script-api --out script_api.json
 
@@ -199,7 +199,7 @@ XGameEngine/                  # 引擎源码仓库
 - **项目设置（工具栏 ⚙）**：项目名 / 启动场景（`entry_scene`）/ 窗口 / 重力 / 固定步长 / 画面（曝光、
   ACES、Bloom、FXAA、TAA）可视化编辑，草稿式 Apply 写回 `project.ron`；内容目录目前只在
   `project.ron` 里手改（设置窗口未暴露）。重力与步长不再是引擎源码里的硬编码，编辑器
-  Play 与打包游戏读的是**同一份**配置（`WorldConfig::from_project_runtime`）
+  Play 与打包游戏读的是**同一份**配置（`WorldConfig::from_project`）
 - **多场景编辑（工具栏 Scenes）**：菜单列出 `Scenes/*.ron`，点击切换；`New Scene…`
   新建空场景（主相机 + 方向光）；`Set Current as Startup` 显式改启动场景。
   **Save 永远写当前场景，Save As / 新建都不改启动场景** —— 要改必须显式设，
@@ -220,6 +220,14 @@ XGameEngine/                  # 引擎源码仓库
   脚本 `delta` / `time`、粒子、动画钟同帧同源（不会出现"物理冻住、角色还在原地跑步"）；
   音频与 UI 不受影响，暂停菜单照样能点。Play 态视口的预览动画也跟手
   （详见 [`Docs/脚本API.md`](Docs/脚本API.md) §4.6）
+- **层与碰撞矩阵**：每个实体有一个 `layer`（Inspector 顶部下拉，32 个），
+  `⚙ 项目设置 → 层与碰撞矩阵` 里给层起名、点格子决定「这两层碰不碰」——
+  **对称写、两侧相与**（和 rapier 一致），矩阵只保存"改过的部分"，
+  默认全通 ⇒ 老工程读进来逐位一致。脚本侧 `layer(ctx, id)` / `set_layer(ctx, id, n)`
+  读写、`raycast_masked(...)` 按层掩码查（只看成员位、**不看矩阵** —— Unity
+  `layerMask` 语义，所以"不与任何层碰撞、只给射线用"的幽灵层是可表达的）。
+  越界层号取模到 0..31，并由 `--check` / MCP `project_check` 的 `invalid_layers` 报出来
+  （详见 [`Docs/脚本API.md`](Docs/脚本API.md) §4.4）
 - **未保存保护**：场景有改动时标题栏与工具栏显示 `*`（按帧 memo 的落盘快照比较），
   关窗 / 返回枢纽 / 切换场景前弹确认（保存 / 不保存 / 取消）；`Ctrl+S` 保存**当前场景**、
   `Ctrl+Shift+S` **另存为**新场景文件并切过去（旧文件原样保留、启动场景不变）
@@ -901,7 +909,7 @@ Build/<项目名>/
 | 工具 | 干什么 |
 |---|---|
 | `schema_read` | 读场景格式的机器可读说明书（36 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
-| `script_api_read` | 读脚本 API 的机器可读清单（155 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
+| `script_api_read` | 读脚本 API 的机器可读清单（158 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
 | `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |

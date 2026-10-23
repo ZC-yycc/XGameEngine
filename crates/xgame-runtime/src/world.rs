@@ -77,6 +77,11 @@ pub struct WorldConfig {
     pub fixed_dt: f32,
     /// 物理子步数（`>1` 提升碰撞稳定性，代价是 CPU）。
     pub physics_sub_steps: u32,
+    /// 层与碰撞矩阵（项目级配置，见 `xgame_core::layers`）。
+    ///
+    /// 进运行时是因为**建刚体的那一刻**就要用它算碰撞组：
+    /// 实体层 → (`memberships`, `filter`) 的翻译只做一次，物理层只认位掩码。
+    pub layers: xgame_core::Layers,
 }
 
 impl Default for WorldConfig {
@@ -85,23 +90,29 @@ impl Default for WorldConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             fixed_dt: 1.0 / 60.0,
             physics_sub_steps: 1,
+            layers: xgame_core::Layers::default(),
         }
     }
 }
 
 impl WorldConfig {
-    /// 从项目清单的 `runtime` 节构造（重力 / 固定步长，先过容错夹取）。
+    /// 从项目清单构造（重力 / 固定步长 / 层矩阵，先过容错夹取）。
     ///
     /// 编辑器 Play 与独立游戏二进制**共用这一个入口**——两处各写一遍
     /// `gravity: Vec3::from_array(...)` 就是"同一份配置两种行为"的经典起点。
     /// `sanitized()` 在这里做而不是要求调用方先做：清单是手改的文本，
     /// 非法值（`fixed_dt <= 0` = 时间静止）不能流进物理引擎。
-    pub fn from_project_runtime(rt: &xgame_core::RuntimeConfig) -> Self {
-        let rt = rt.sanitized();
+    ///
+    /// 吃**整份清单**而不是只吃 `runtime` 节：层矩阵在 `project.ron` 的
+    /// `layers` 节（项目级约定，与 `render` 同级），只传 `RuntimeConfig`
+    /// 会让调用方各自再读一次清单 —— 那正是"两处各写一遍"的开端。
+    pub fn from_project(project: &xgame_core::Project) -> Self {
+        let rt = project.runtime.sanitized();
         Self {
             gravity: Vec3::from_array(rt.gravity),
             fixed_dt: rt.fixed_dt,
-            ..Self::default()
+            physics_sub_steps: 1,
+            layers: project.layers.clone().sanitized(),
         }
     }
 }
@@ -132,6 +143,8 @@ struct UiRuntime {
 pub struct World {
     scene: Scene,
     physics: PhysicsWorld,
+    /// 层与碰撞矩阵（建刚体时算碰撞组用；运行中改层也走它）。
+    layers: xgame_core::Layers,
     input: Input,
     /// Lua 脚本宿主（唯一脚本轨；Rhai 已随双轨 P3 删除，见计划文档 §六）。
     /// 日志与命令缓冲也由它持有（`LuaHost::buffers_mut`），组件轨与脚本轨共用。
@@ -243,6 +256,7 @@ impl World {
         let mut world = Self {
             scene,
             physics,
+            layers: config.layers.clone(),
             input: Input::with_default_map(),
             scripts,
             clock: GameClock::new().with_fixed_dt(config.fixed_dt),
@@ -411,6 +425,40 @@ impl World {
 
     pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
         &mut self.physics
+    }
+
+    /// 层与碰撞矩阵（只读；改它要重新开 World —— 那是项目级设置）。
+    pub fn layers(&self) -> &xgame_core::Layers {
+        &self.layers
+    }
+
+    /// 实体当前所在层。
+    pub fn entity_layer(&self, id: EntityId) -> Option<u8> {
+        let index = self.scene.index_of(id)?;
+        Some(xgame_core::sanitize_layer(self.scene.entities[index].layer))
+    }
+
+    /// 改实体所在层（**当场**同步物理碰撞组）。
+    ///
+    /// 为什么不能只写 `scene.entities[i].layer`：`sync_bodies` 的稳态判据是
+    /// "刚体集合有没有结构性变化"，换层不会增减刚体，所以那次早退会让新层
+    /// 永远等不到生效 —— 表现为"脚本里 set_layer 之后要等某个实体出生才不碰"。
+    /// 这里直接改碰撞体上的组，物理与查询立刻按新矩阵工作。
+    ///
+    /// 越界值按 `sanitize_layer` 取模；实体不存在返回 `false`。
+    pub fn set_entity_layer(&mut self, id: EntityId, layer: u8) -> bool {
+        let layer = xgame_core::sanitize_layer(layer);
+        let Some(index) = self.scene.index_of(id) else {
+            return false;
+        };
+        self.scene.entities[index].layer = layer;
+        if let Some(&body) = self.body_of_entity.get(&id) {
+            let (memberships, filter) = self.layers.groups(layer);
+            // 没有碰撞体（纯逻辑实体）时返回 false 是正常的：层记在实体上，
+            // 等它以后真拿到碰撞体时由 `sync_bodies` 按同一个函数算。
+            self.physics.set_body_groups(body, memberships, filter);
+        }
+        true
     }
 
     /// 编辑器专用：某实体身上**已装配**的组件数。
@@ -1171,6 +1219,12 @@ impl World {
         // 这里只需要让新实体下帧能跑 `start` —— `dispatch_start` 每帧都扫，
         // 天然覆盖。
 
+        // 换过层：场景字段脚本已经写了，这里把物理碰撞组补上（同一个入口，
+        // 免得脚本轨与编辑器 Inspect 两条路各写一遍翻译）。
+        for (id, layer) in report.relayered {
+            self.set_entity_layer(id, layer);
+        }
+
         // 换过父节点的实体：世界位置变了，把刚体挪过去。
         for id in report.reparented {
             let Some(body) = self.body_of_entity.get(&id).copied() else {
@@ -1273,6 +1327,13 @@ impl World {
                 let Some(def) = entity.physics else { continue };
                 body_from_scene(&def, world)
             };
+            // 层 → 碰撞组：这里是把"实体属性"翻译成"物理位掩码"的**唯一**一处。
+            // 放在建体之后、`add_collider` 之前，所以碰撞体一落地就带对了组，
+            // 不存在"先全通一帧再纠正"的窗口。
+            let mut collider = collider;
+            let (memberships, filter) = self.layers.groups(entity.layer);
+            collider.memberships = memberships;
+            collider.filter = filter;
             let body_id = self.physics.add_body(body);
             // `body_id` 是上一行刚建出来的，必然存在；`add_collider` 这里返回 `None`
             // 只可能是引擎内部状态不一致（那里已经记了警告）。退化成"没有碰撞体"，
@@ -1630,22 +1691,31 @@ mod tests {
     /// 清单改了重力也纹丝不动，所以断言自定义值会红。
     #[test]
     fn project_runtime_flows_into_world_config() {
-        let rt = xgame_core::RuntimeConfig {
+        let mut project = xgame_core::Project::new("cfg");
+        project.runtime = xgame_core::RuntimeConfig {
             gravity: [0.0, -20.0, 0.0],
             fixed_dt: 1.0 / 120.0,
         };
-        let cfg = WorldConfig::from_project_runtime(&rt);
+        project.layers.set_name(1, "Player");
+        project.layers.set_collides(1, 2, false);
+
+        let cfg = WorldConfig::from_project(&project);
         assert_eq!(cfg.gravity, Vec3::new(0.0, -20.0, 0.0));
         assert_eq!(cfg.fixed_dt, 1.0 / 120.0);
         // substeps 不在清单里，保持默认。
         assert_eq!(cfg.physics_sub_steps, WorldConfig::default().physics_sub_steps);
+        // 层矩阵也跟着清单走，且两侧都被写过（运行时拿的是同一份）。
+        assert_eq!(cfg.layers.name(1), "Player");
+        assert!(!cfg.layers.collides(1, 2));
+        assert!(cfg.layers.collides(1, 1));
 
         // 手改出的垃圾值不能流进物理：fixed_dt=0 是"时间静止"。
-        let bad = xgame_core::RuntimeConfig {
+        let mut bad = xgame_core::Project::new("bad");
+        bad.runtime = xgame_core::RuntimeConfig {
             gravity: [0.0, f32::NAN, 0.0],
             fixed_dt: 0.0,
         };
-        let cfg = WorldConfig::from_project_runtime(&bad);
+        let cfg = WorldConfig::from_project(&bad);
         assert_eq!(cfg.fixed_dt, 1.0 / 60.0);
         assert!(cfg.gravity.is_finite());
     }
@@ -1683,6 +1753,98 @@ mod tests {
 
         // 地面是静态体，不该被重力拖着走。
         assert_eq!(entity_y(&world, "ground"), -0.5);
+    }
+
+    /// 层与碰撞矩阵在运行时这条链路上真的生效：**建刚体时**就带对了碰撞组。
+    ///
+    /// 造两个场景做 A/B：矩阵全通时方块停在地面上；关掉 0×2 之后同一份场景
+    /// 里的方块直接穿过去。只有"建体时就算组"才能让第二条断言成立 ——
+    /// 事后补救（下一帧再改组）也能过这一条，所以下面还有一条换层的测试。
+    #[test]
+    fn entity_layers_filter_bodies_at_creation() {
+        fn drop_y(disable_pair: bool) -> f32 {
+            let mut scene = Scene::new("layers");
+            let mut ground = Entity::new("ground");
+            ground.physics = Some(PhysicsBody::static_box([10.0, 0.5, 10.0]));
+            ground.transform.position = Vec3::new(0.0, -0.5, 0.0);
+            scene.add_entity(ground);
+
+            let mut cube = Entity::new("cube").with_layer(2);
+            cube.physics = Some(PhysicsBody::dynamic_box([0.5, 0.5, 0.5]));
+            cube.transform.position = Vec3::new(0.0, 5.0, 0.0);
+            scene.add_entity(cube);
+
+            let mut config = WorldConfig::default();
+            if disable_pair {
+                config.layers.set_collides(0, 2, false);
+            }
+            let mut world = World::new(scene, std::env::temp_dir(), config);
+            for _ in 0..180 {
+                world.update(1.0 / 60.0);
+            }
+            entity_y(&world, "cube")
+        }
+
+        let resting = drop_y(false);
+        assert!(
+            (0.3..1.2).contains(&resting),
+            "矩阵全通时方块应停在地面上，实际 y={resting}"
+        );
+
+        let through = drop_y(true);
+        assert!(
+            through < -5.0,
+            "关掉 0×2 之后方块必须穿过地面，实际 y={through}"
+        );
+    }
+
+    /// 运行中换层**当场**生效：不用等某个实体出生触发 `sync_bodies` 重建。
+    ///
+    /// 这条专门盯住 `sync_bodies` 的稳态早退：只改 `entity.layer` 而不动刚体集合，
+    /// 那个早退会让新层永远等不到生效（`set_entity_layer` 才是唯一正确入口）。
+    #[test]
+    fn set_entity_layer_applies_without_waiting_for_resync() {
+        let mut scene = Scene::new("relayer");
+        let mut ground = Entity::new("ground");
+        ground.physics = Some(PhysicsBody::static_box([10.0, 0.5, 10.0]));
+        ground.transform.position = Vec3::new(0.0, -0.5, 0.0);
+        scene.add_entity(ground);
+
+        let mut cube = Entity::new("cube");
+        cube.physics = Some(PhysicsBody::dynamic_box([0.5, 0.5, 0.5]));
+        cube.transform.position = Vec3::new(0.0, 5.0, 0.0);
+        let cube_id = cube.id;
+        scene.add_entity(cube);
+
+        // 矩阵：0 层与 2 层互不碰撞。方块一开始在 0 层，所以能停住。
+        let mut config = WorldConfig::default();
+        config.layers.set_collides(0, 2, false);
+        let mut world = World::new(scene, std::env::temp_dir(), config);
+
+        for _ in 0..180 {
+            world.update(1.0 / 60.0);
+        }
+        let resting = entity_y(&world, "cube");
+        assert!(
+            (0.3..1.2).contains(&resting),
+            "换层之前方块应当停在地面上，实际 y={resting}"
+        );
+
+        assert_eq!(world.entity_layer(cube_id), Some(0));
+        assert!(world.set_entity_layer(cube_id, 2));
+        assert_eq!(world.entity_layer(cube_id), Some(2));
+
+        for _ in 0..180 {
+            world.update(1.0 / 60.0);
+        }
+        let fallen = entity_y(&world, "cube");
+        assert!(
+            fallen < -5.0,
+            "换到 2 层之后必须穿过 0 层的地面，实际 y={fallen}"
+        );
+
+        // 不存在的实体只返回 false，不 panic。
+        assert!(!world.set_entity_layer(EntityId::new(), 3));
     }
 
     /// 一个只会往前走的角色组件（测试用）。

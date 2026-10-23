@@ -79,6 +79,11 @@ pub struct CheckReport {
     pub invalid_metas: Vec<String>,
     /// 两个资产共用一个 GUID。
     pub guid_conflicts: Vec<String>,
+    /// 实体声明的层索引超出 0..=31 的（"场景: 实体 -> layer N"）。
+    ///
+    /// 运行时会把越界值取模兜底（不 panic），但那是**保命**不是**正确**：
+    /// 越界通常意味着手写场景抄错了层号，只有报出来才修得掉。
+    pub invalid_layers: Vec<String>,
     /// 发布清单（`build.scenes`）的有效顺序，已规范化去重。
     ///
     /// 空清单不在这里体现：`scene_order()` 会退化成只有入口场景，那是"未配置"
@@ -112,6 +117,7 @@ impl CheckReport {
             || !self.orphan_metas.is_empty()
             || !self.invalid_metas.is_empty()
             || !self.guid_conflicts.is_empty()
+            || !self.invalid_layers.is_empty()
             || !self.build_missing_scenes.is_empty()
     }
 
@@ -131,6 +137,7 @@ impl CheckReport {
             + self.orphan_metas.len()
             + self.invalid_metas.len()
             + self.guid_conflicts.len()
+            + self.invalid_layers.len()
             + self.build_missing_scenes.len()
     }
 
@@ -204,6 +211,9 @@ impl CheckReport {
         }
         for c in &self.guid_conflicts {
             let _ = writeln!(out, "  guid conflict:  {c}");
+        }
+        for l in &self.invalid_layers {
+            let _ = writeln!(out, "  bad layer:      {l}");
         }
         for s in &self.build_missing_scenes {
             let _ = writeln!(out, "  build scene missing: {s}");
@@ -380,6 +390,14 @@ fn check_scene_references(
     let at = |name: &str| format!("{relative}: {name}");
 
     for entity in &scene.entities {
+        // 层索引越界：读盘刻意**不修正**（修正会把配置错误藏起来），运行时按
+        // `sanitize_layer` 取模兜底 —— 所以这里必须报，否则"我明明设了第 40 层"
+        // 永远查不出来，只会表现为一群实体莫名挤在同一层上。
+        if entity.layer as usize >= crate::layers::LAYER_COUNT {
+            report
+                .invalid_layers
+                .push(format!("{} -> layer {}", at(&entity.name), entity.layer));
+        }
         // `builtin://cube` 这类是**生成的几何**（渲染器直接造，盘上没有文件），
         // 当成缺失资产报出来就是狼来了 —— 调用方只要真的断了引用才该知道。
         if entity.has_model() {

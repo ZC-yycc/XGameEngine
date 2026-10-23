@@ -394,7 +394,7 @@ const fn api(
     }
 }
 
-/// 全部 155 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
+/// 全部 158 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
 const FUNCTIONS: &[ApiDef] = &[
     api("transform", "pos", "pos(ctx)", "Vec3", r#"自身**世界**坐标 → `{x, y, z}` 表"#),
     api("transform", "set_pos", "set_pos(ctx, x, y, z)", "nil", r#"设置**世界**坐标（有父节点时自动换算回局部）"#),
@@ -435,6 +435,9 @@ const FUNCTIONS: &[ApiDef] = &[
     api("spawn", "spawn_prefab_under", "spawn_prefab_under(ctx, path, parent, x, y, z)", "EntityId | nil", r#"同上，但把实例根挂到 `parent` 底下，坐标为**局部**"#),
     api("physics", "has_physics", "has_physics(ctx, id)", "boolean", r#"这个实体有没有刚体"#),
     api("physics", "raycast", "raycast(ctx, ox, oy, oz, dx, dy, dz, max_dist)", "RayHit", r#"射线检测，返回一个表"#),
+    api("physics", "raycast_masked", "raycast_masked(ctx, ox, oy, oz, dx, dy, dz, max_dist, layer_mask)", "RayHit", r#"只命中 `layer_mask` 里那些层的射线（第 N 位 = 第 N 层；不看碰撞矩阵）"#),
+    api("physics", "set_layer", "set_layer(ctx, id, layer)", "boolean", r#"把实体换到某一层（0–31，越界取模）；碰撞组由运行时按项目矩阵立刻改写"#),
+    api("physics", "layer", "layer(ctx, id)", "integer | nil", r#"实体所在的层；实体不存在返回 nil"#),
     api("physics", "apply_force", "apply_force(ctx, id, x, y, z)", "nil", r#"施力（持续，下一帧清零）"#),
     api("physics", "apply_impulse", "apply_impulse(ctx, id, x, y, z)", "nil", r#"施冲量（瞬间改速度）"#),
     api("physics", "add_torque", "add_torque(ctx, id, x, y, z)", "nil", r#"施加力矩"#),
@@ -582,7 +585,7 @@ mod tests {
         let doc = script_api();
         assert_eq!(doc.format_version, SCRIPT_API_FORMAT_VERSION);
         assert_eq!(doc.categories.len(), 17);
-        assert_eq!(doc.function_count(), 155);
+        assert_eq!(doc.function_count(), 158);
         assert_eq!(doc.hooks.len(), 6);
         assert_eq!(doc.value_types.len(), 7);
         assert!(!doc.conventions.is_empty());
@@ -621,7 +624,7 @@ mod tests {
             );
             assert!(!function.params.is_empty(), "{} 没有参数", function.name);
         }
-        assert_eq!(names.len(), 155);
+        assert_eq!(names.len(), 158);
     }
 
     #[test]

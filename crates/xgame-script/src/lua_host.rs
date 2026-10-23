@@ -453,6 +453,7 @@ impl LuaHost {
                 ScriptCommand::EntitySpawned { id, .. } => report.spawned.push(id),
                 ScriptCommand::EntitiesRemoved { ids } => report.removed.extend(ids),
                 ScriptCommand::Reparented { child } => report.reparented.push(child),
+                ScriptCommand::Relayered { id, layer } => report.relayered.push((id, layer)),
                 // 一帧多次切换请求只认最后一个：中间那些场景永远不会被装载，
                 // 也就不该产生"装载了又立刻丢弃"的副作用。
                 ScriptCommand::LoadScene { path } => report.scene_load = Some(path),
@@ -1490,7 +1491,7 @@ mod tests {
     ///
     /// 不靠运行期枚举全局表：Lua 基础库也有 `error` 等函数，而引擎恰好覆盖了
     /// 同名全局；用集合差分会把被覆盖的名字漏掉。直接读注册源码能精确拿到
-    /// 引擎自己注册的 155 个名字。
+    /// 引擎自己注册的 158 个名字。
     fn registered_global_names(source: &str) -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let mut rest = source;
@@ -1535,7 +1536,7 @@ mod tests {
             actual, expected,
             "脚本 API 清单与 lua_api/ui_api 的注册名不一致"
         );
-        assert_eq!(actual.len(), 155, "注册名数量应为 155");
+        assert_eq!(actual.len(), 158, "注册名数量应为 158（2026-10-23 加 set_layer / layer / raycast_masked）");
 
         let host = LuaHost::new();
         let globals = host.lua.globals();

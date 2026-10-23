@@ -46,13 +46,13 @@ impl GameRuntime {
     pub fn start(
         scene: Scene,
         project: &xgame_core::ProjectHandle,
-        runtime: &xgame_core::RuntimeConfig,
         behaviors: xgame_runtime::BehaviorRegistry,
     ) -> Self {
         let project_root = project.root();
         let input_map = load_input_map(project_root);
-        // 重力 / 固定步长来自 project.ron 的 `runtime` 节（⚙ 项目设置面板可改），
-        // 不再用 WorldConfig::default() —— 否则清单里改了重力 Play 却纹丝不动。
+        // 重力 / 固定步长来自 project.ron 的 `runtime` 节、层矩阵来自 `layers` 节
+        //（⚙ 项目设置面板可改），不再用 WorldConfig::default() —— 否则清单里
+        // 改了重力 / 层，Play 起来却纹丝不动。
         //
         // 音频引擎在这里**尝试打开真设备**（`World::new` 里是 silent）：
         // 编辑器是宿主，只有宿主知道"现在要不要出声"。打不开自动降级无声，
@@ -61,7 +61,7 @@ impl GameRuntime {
         // 场景装载器 = 项目句柄：Play 期间脚本 `load_scene()` 也照常生效
         // （与独立游戏同一条路径）。切过去的场景在 Play 结束时被
         // `play_snapshot` 整个丢弃 —— 运行期切换不写回项目文件。
-        let world = World::new(scene, project_root, WorldConfig::from_project_runtime(runtime))
+        let world = World::new(scene, project_root, WorldConfig::from_project(project.manifest()))
             .with_input_map(input_map)
             .with_behavior_registry(behaviors)
             .with_audio_engine(xgame_runtime::AudioEngine::open(project_root))

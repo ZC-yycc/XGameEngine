@@ -145,6 +145,7 @@ pub fn schemas() -> Vec<Value> {
                     "rotation_euler_deg": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "局部旋转，欧拉角（度，XYZ 顺序）" },
                     "scale": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "局部缩放 [x, y, z]" },
                     "parent": { "type": "string", "description": "父实体名字（按名字查找）；空串 = 断开挂到根" },
+                    "layer": { "type": "integer", "minimum": 0, "maximum": 31, "description": "层索引 0–31（决定与哪些层碰撞 / 触发；矩阵在 project.ron 的 layers 节）。越界直接拒绝" },
                 },
                 "required": ["project", "name"],
             },
@@ -229,7 +230,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "script_api_read",
-            "description": "返回脚本 API 的机器可读清单（JSON）：155 个全局函数（签名 / 参数 / 返回值 / 语义）、6 个生命周期钩子、17 个类别、值类型与全局约定。写 .lua 之前先读；与 `xgame-editor --export-script-api` 同源，不需要 project。",
+            "description": "返回脚本 API 的机器可读清单（JSON）：158 个全局函数（签名 / 参数 / 返回值 / 语义）、6 个生命周期钩子、17 个类别、值类型与全局约定。写 .lua 之前先读；与 `xgame-editor --export-script-api` 同源，不需要 project。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -578,6 +579,21 @@ fn entity_upsert(args: &Value) -> Result<String, CallError> {
         if let Some(v) = vec3_arg(args, "scale")? {
             entity.transform.scale = v;
         }
+        // 层：0–31。越界**直接拒绝**而不是取模 —— 智能体写错层号时，
+        // "静默变成别的层"会让它以为设置生效了（与 asset_import 的钳制不同，
+        // 那里钳制有明确的物理意义，这里没有）。
+        if let Some(layer) = args.get("layer").filter(|v| !v.is_null()) {
+            let layer = layer
+                .as_i64()
+                .ok_or_else(|| fail("`layer` 必须是整数（0–31）"))?;
+            if !(0..xgame_core::LAYER_COUNT as i64).contains(&layer) {
+                return Err(fail(format!(
+                    "`layer` 超出范围 0–{}：{layer}",
+                    xgame_core::LAYER_COUNT - 1
+                )));
+            }
+            entity.layer = layer as u8;
+        }
     }
 
     save_scene_of(&project, &rel, &scene)?;
@@ -640,6 +656,8 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         "orphan_metas": report.orphan_metas,
         "invalid_metas": report.invalid_metas,
         "guid_conflicts": report.guid_conflicts,
+        // 层索引越界（运行时取模兜底，但那是保命不是正确）：与 --check 同一份报告。
+        "invalid_layers": report.invalid_layers,
         "invalid_scenes": report.invalid_scenes,
         // 发布清单（`project.ron` 的 `build.scenes`）：顺序即关卡索引。
         // 未配置清单时 `build_scene_order` 为空 —— 与"配了一个场景"是两回事。
@@ -1093,7 +1111,7 @@ mod tests {
             .iter()
             .flat_map(|category| category["functions"].as_array().expect("functions 数组"))
             .collect();
-        assert_eq!(functions.len(), 155, "函数总数");
+        assert_eq!(functions.len(), 158, "函数总数");
         assert!(
             functions.iter().any(|function| function["name"] == "spawn_prefab"),
             "缺 spawn_prefab"
@@ -2040,6 +2058,51 @@ mod tests {
             meta_before
         );
         assert_eq!(project.assets().guid_of("Resources/Box.glb"), Some(&guid));
+
+        cleanup(&project);
+    }
+
+    /// `entity_upsert` 的 `layer`：写进场景、越界**拒绝**（不取模）。
+    ///
+    /// 拒绝而不是钳制是刻意的：层号写错时"静默落到别的层"会让智能体以为
+    /// 设置已经生效，而它没法从返回值里看出自己被改了号。
+    #[test]
+    fn entity_upsert_writes_layer_and_rejects_out_of_range() {
+        let project = temp_project("layer");
+
+        run(
+            &project,
+            "entity_upsert",
+            json!({ "name": "Enemy", "model": "builtin://cube", "layer": 3 }),
+        )
+        .expect("设置层应成功");
+        let scene = entry_scene(&project);
+        assert_eq!(
+            scene.find_by_name("Enemy").expect("实体应存在").layer,
+            3,
+            "层要落进场景文件"
+        );
+
+        // 场景文件里确实出现了 `layer: 3`（不是只改了内存）。
+        let raw = std::fs::read_to_string(project.path(&project.manifest().entry_scene)).unwrap();
+        assert!(raw.contains("layer"), "层要写到盘上: {raw}");
+
+        // 越界 / 非整数都拒绝，且**不动盘**。
+        for bad in [json!(32), json!(-1), json!("3")] {
+            let err = run(
+                &project,
+                "entity_upsert",
+                json!({ "name": "Enemy", "layer": bad }),
+            )
+            .expect_err("越界层号必须被拒绝");
+            assert!(matches!(err, CallError::Failed(_)), "{err:?}");
+        }
+        let scene = entry_scene(&project);
+        assert_eq!(
+            scene.find_by_name("Enemy").expect("实体应存在").layer,
+            3,
+            "被拒绝的调用不能改到层"
+        );
 
         cleanup(&project);
     }

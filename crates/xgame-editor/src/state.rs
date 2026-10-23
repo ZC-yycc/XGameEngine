@@ -1887,7 +1887,6 @@ impl EditorState {
         let mut runtime = crate::game_runtime::GameRuntime::start(
             self.scene.clone(),
             &self.project,
-            &self.project.manifest().runtime,
             registry,
         );
         // Play 跑的是**当前编辑的场景**（多场景编辑下未必是清单里的启动场景）：
@@ -2899,6 +2898,14 @@ fn reject_settings(
                 sane_runtime.fixed_dt
             ));
             draft.runtime = sane_runtime;
+        }
+
+        // 层矩阵同理：越界索引 / 空名字只是噪声源，统一按 `sanitized` 收敛
+        //（空掩码 0 是**有效配置**"这层谁都不碰"，刻意保留）。
+        let sane_layers = draft.layers.sanitized();
+        if sane_layers != draft.layers {
+            self.log_warning("层配置有越界索引 / 空名字，已自动纠正".to_string());
+            draft.layers = sane_layers;
         }
 
         // 画面参数同理（曝光 0 / 负数 / NaN 会让视口全黑或出 NaN 像素）。

@@ -13,6 +13,11 @@ use crate::id::EntityId;
 use crate::light::Light;
 use crate::transform::Transform;
 
+/// `Entity.layer` 的 `skip_serializing_if`：0 层（默认）不写进场景文件。
+fn is_default_layer(layer: &u8) -> bool {
+    *layer == crate::layers::DEFAULT_LAYER
+}
+
 /// 场景图中的单个游戏对象。
 ///
 /// 每个实体有一个稳定标识符（`id`）、名称、变换和关联模型路径。
@@ -32,6 +37,18 @@ pub struct Entity {
     /// 没有任何意义，强制写一段单位变换只是噪音。
     #[serde(default)]
     pub transform: Transform,
+    /// 层索引（0–31）。决定它与哪些层发生碰撞 / 触发（矩阵在 `project.ron`
+    /// 的 `layers` 节，见 [`crate::layers`]）。
+    ///
+    /// 缺省 = 0（`Default` 层），且默认矩阵全通 —— 所以旧场景文件没有这个
+    /// 字段时行为与引入层之前**逐位一致**；`skip_serializing_if` 让 0 层的
+    /// 实体不写这一行（绝大多数实体都在 0 层）。
+    ///
+    /// 越界值（> 31）不会被读盘时静默修正：`--check` 会把它报出来，
+    /// 运行时按 [`crate::layers::sanitize_layer`] 取模 —— 报错交给工具，
+    /// 运行保证不 panic 也不越位。
+    #[serde(default, skip_serializing_if = "is_default_layer")]
+    pub layer: u8,
     /// glTF 模型路径（相对于工作区）。空字符串表示没有模型。
     ///
     /// 缺省 = 空串：纯 UI / 纯逻辑实体（触发器、生成点、HUD）本来就没有网格，
@@ -191,6 +208,7 @@ impl Entity {
         Self {
             name: name.into(),
             transform: Transform::IDENTITY,
+            layer: crate::layers::DEFAULT_LAYER,
             model: String::new(),
             material_asset: None,
             id: EntityId::new(),
@@ -231,6 +249,12 @@ impl Entity {
     /// 设置变换。
     pub fn with_transform(mut self, transform: Transform) -> Self {
         self.transform = transform;
+        self
+    }
+
+    /// 设置层索引（越界按 [`crate::layers::sanitize_layer`] 取模）。
+    pub fn with_layer(mut self, layer: u8) -> Self {
+        self.layer = crate::layers::sanitize_layer(layer);
         self
     }
 
@@ -411,7 +435,7 @@ impl Scene {
     /// 唯一的相机选择规则，三宿主（独立游戏 / 编辑器 Play / 无头截图）与
     /// 脚本 API 全读这一处 —— 各写一套的话，"编辑器里看到的是 A 机位、
     /// 打包出来是 B 机位"这类 bug 会一直复发（项目设置早已吃过这个亏，
-    /// 所以走 `from_project_runtime` 单入口）。
+    /// 所以走 `from_project` 单入口）。
     ///
     /// 规则（按优先级）：
     /// 1. 第一个 `active == true` 的相机；

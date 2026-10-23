@@ -62,6 +62,25 @@ pub struct Collider {
     pub density: f32,
     /// 相对于父刚体原点的局部偏移。
     pub offset: Vec3,
+    /// 碰撞组成员位：本碰撞体属于哪些层（第 N 位 = 第 N 层）。
+    ///
+    /// **默认 `0xFFFF_FFFF`（属于所有层）**，与 [`Collider::filter`] 一起保证
+    /// 不配层时的行为与引入层之前完全一致。物理层不认识"层"这个名字概念 ——
+    /// 名字、矩阵、层号 → 位掩码的翻译在 `xgame-core::layers` 与运行时里做。
+    #[serde(default = "full_group_mask")]
+    pub memberships: u32,
+    /// 碰撞组过滤位：本碰撞体愿意和哪些层碰撞（第 N 位 = 与第 N 层碰）。
+    ///
+    /// rapier 的判定是**双侧相与**：`(自成员 & 对方掩码) != 0 &&
+    /// (对方成员 & 自掩码) != 0`。所以把矩阵两侧都写对才算数 ——
+    /// `Layers::set_collides` 正是这么写的。
+    #[serde(default = "full_group_mask")]
+    pub filter: u32,
+}
+
+/// 全通掩码（默认值）。
+fn full_group_mask() -> u32 {
+    u32::MAX
 }
 
 impl Default for Collider {
@@ -75,6 +94,8 @@ impl Default for Collider {
             is_sensor: false,
             density: 1.0,
             offset: Vec3::ZERO,
+            memberships: u32::MAX,
+            filter: u32::MAX,
         }
     }
 }

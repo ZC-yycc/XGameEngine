@@ -654,7 +654,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     );
 
     // 重力 / 固定步长走与两个宿主相同的入口（单入口 = 行为一致）。
-    let config = WorldConfig::from_project_runtime(&project.manifest().runtime);
+    let config = WorldConfig::from_project(project.manifest());
     let fixed_dt = config.fixed_dt;
     let dt = args.dt.unwrap_or(fixed_dt);
 

@@ -32,6 +32,11 @@ pub fn body_from_scene(def: &PhysicsBody, world: Transform) -> (RigidBody, Colli
         is_sensor: def.is_sensor,
         density: 1.0,
         offset: Vec3::ZERO,
+        // 层不在这里决定：`PhysicsBody` 是纯物理声明，层属于实体（`Entity.layer`），
+        // 由运行时在建体时按项目矩阵算好再写进来（`World::sync_bodies`）。
+        // 这里给全通，保证"不配层"的老场景行为与以前一致。
+        memberships: u32::MAX,
+        filter: u32::MAX,
     };
 
     let rigid_body = RigidBody {

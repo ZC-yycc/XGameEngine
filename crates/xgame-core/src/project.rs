@@ -46,6 +46,7 @@ use crate::asset::{
     encode_scene_references, AssetDatabase, AssetGuid, AssetKind, AssetMoveReport, ImportSettings,
 };
 use crate::config::{BuildConfig, ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
+use crate::layers::Layers;
 use crate::material::{MaterialAsset, MATERIAL_EXTENSION};
 use crate::prefab::{Prefab, PREFAB_EXTENSION};
 use crate::scene::Scene;
@@ -174,6 +175,13 @@ pub struct Project {
     /// `prefabs_dir` / `scripts_dir` 同一套路，不强制升级项目文件。
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    /// 层与碰撞矩阵（32 层名字 + 谁和谁碰）。
+    ///
+    /// 放在清单而不是场景里：层是**项目级约定**（所有关卡共享一份排队规则），
+    /// 每张场景各配一套会让"同一个敌人进第二关就穿墙"。同样是后加字段、
+    /// 同样 `#[serde(default)]`：默认全通，老清单不写这一节，行为不变。
+    #[serde(default, skip_serializing_if = "Layers::is_default")]
+    pub layers: Layers,
     /// 画面渲染参数（色调映射 / 曝光）。
     ///
     /// 同样是后加字段、同样靠 `#[serde(default)]` 兼容旧清单。放在清单而不是
@@ -242,6 +250,7 @@ impl Default for Project {
             window: WindowConfig::default(),
             content: ContentConfig::default(),
             runtime: RuntimeConfig::default(),
+            layers: Layers::default(),
             render: RenderConfig::default(),
             build: BuildConfig::default(),
         }

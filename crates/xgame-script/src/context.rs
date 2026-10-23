@@ -145,6 +145,12 @@ pub enum ScriptCommand {
     EntitiesRemoved { ids: Vec<EntityId> },
     /// 实体换了父节点，运行时需要把它的刚体移到新的世界位置。
     Reparented { child: EntityId },
+    /// 实体换了层，运行时需要把碰撞组改成新层对应的那一对位掩码。
+    ///
+    /// 场景字段脚本已经写好了，但**碰撞组在物理层的碰撞体上**：只有运行时
+    /// 能改（`World::set_entity_layer`）。走命令而不是让脚本直接改物理，
+    /// 是因为脚本手里没有层 → 掩码的翻译表（`Layers` 属于项目配置）。
+    Relayered { id: EntityId, layer: u8 },
     /// 脚本请求切换场景（项目相对路径）。
     ///
     /// **不能在钩子里直接换**：此刻 `scene` 正被 `&mut` 借给 `GameCtx`，

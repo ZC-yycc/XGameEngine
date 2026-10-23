@@ -16,13 +16,13 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；821 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；838 条 + 7 条基准 ignore）
 # CI 在 GitHub Actions（windows-latest）跑 check / clippy / test + 示例项目冒烟，
 # 命令带 --locked；workflow 见 .github/workflows/ci.yml，取舍见决策记录 §三十四。
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --export-schema --out schema.json  # 场景格式说明书（JSON；无 --out 打 stdout）
-cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（155 函数 / 6 钩子；无 --out 打 stdout）
+cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（158 函数 / 6 钩子；无 --out 打 stdout）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
 cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
@@ -53,6 +53,14 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
   但 `xgame-script` 从 `lua_api.rs` / `ui_api.rs` 的 `globals.set("…")` 提取注册名
   逐名比对，`xgame-editor` 从 `Docs/脚本API.md` 的 API 表提取函数名比对；改注册 /
   文档必须同步清单。规则见 `Docs/决策记录.md` §三十三。
+- **层与碰撞（`core::layers`）**：`Layers` 只存**覆盖**（`names` / `masks` 两张
+  `BTreeMap`），默认全通 ⇒ 老 `project.ron` 逐位不变；`collides()` 是**两侧相与**
+  （与 rapier 同语义），`set_collides()` **对称写两侧**。改层必须走
+  `World::set_entity_layer()`（写场景 + 立刻 `physics.set_body_groups`）——
+  等 `sync_bodies` 就是永远不生效（早退判据里没有"层"）。射线掩码用
+  `QueryFilter::predicate` 只看**成员位**、不看矩阵（Unity `layerMask` 语义）；
+  角色控制器例外，它的 `QueryFilter.groups` 必须带自身组。规则见
+  `Docs/决策记录.md` §三十六。
 - **编辑器热重载**：`crates/xgame-editor/src/hot_reload.rs` 每秒只扫内容目录的 metadata；
   改动由 `EditorState::hot_reload_tick` 应用，**动作后必须 `rebase`**（自己补的 `.meta`
   不能当外部改动，否则每秒自激）。场景文件永不自动覆盖；`--ui-shot` 不启用。

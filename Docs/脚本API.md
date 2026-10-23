@@ -169,6 +169,9 @@ spawn_prefab_under(ctx, "Prefabs/Bullet.prefab.ron", self_id(ctx), 0.0, 1.5, 0.0
 |---|---|
 | `has_physics(ctx, id)` | 这个实体有没有刚体 |
 | `raycast(ctx, ox, oy, oz, dx, dy, dz, max_dist)` | 射线检测，返回一个表 |
+| `raycast_masked(ctx, ox, oy, oz, dx, dy, dz, max_dist, layer_mask)` | 只命中 `layer_mask` 里那些层（第 N 位 = 第 N 层）；**不看碰撞矩阵** |
+| `set_layer(ctx, id, layer)` | 把实体换到某一层（0–31，越界取模）；碰撞组当场改写 |
+| `layer(ctx, id)` | 实体所在的层；实体不存在返回 `nil` |
 | `apply_force(ctx, id, x, y, z)` | 施力（持续，下一帧清零） |
 | `apply_impulse(ctx, id, x, y, z)` | 施冲量（瞬间改速度） |
 | `add_torque(ctx, id, x, y, z)` | 施加力矩 |
@@ -191,6 +194,19 @@ end
 ```
 
 > `raycast` 会自动忽略**传感器**，并排除自身刚体（避免从自己内部出发打到自己）。
+
+**层掩码**（`raycast_masked`）只筛"目标在哪一层"，与碰撞矩阵无关：摄像机射线
+只打几何体层时，即便几何体层和摄像机层被设成互不碰撞，射线照样打得中 —— 矩阵
+管接触，查询掩码管"我想看什么"。掩码是 32 位整数，第 N 位为 1 表示"包含第 N 层"：
+
+```lua
+-- 只看第 1、3 层（0b1010）
+local r = raycast_masked(ctx, p.x, p.y, p.z, 0.0, -1.0, 0.0, 5.0, 0xA)
+```
+
+`set_layer` 改的是**实体属性**：场景里 `layer` 字段立刻写入，物理侧碰撞组由运行时
+消费 `Relayered` 通知后立刻改写（同一帧内，不必等下一帧）。层号与"谁和谁碰"的
+矩阵在 `project.ron` 的 `layers` 节，编辑器「⚙ 项目设置 → 层与碰撞矩阵」可改。
 
 ### 4.4.1 角色控制器
 

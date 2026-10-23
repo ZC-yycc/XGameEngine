@@ -11,7 +11,7 @@
 //!
 //! 重力 / 固定步长此前硬编码在 `WorldConfig::default()` 里，想调只能改引擎
 //! 源码重编译。现在它们是**数据**：改完 Apply，编辑器 Play 与独立游戏二进制
-//! 下次启动就用新值（两端走同一个 `WorldConfig::from_project_runtime`）。
+//! 下次启动就用新值（两端走同一个 `WorldConfig::from_project`）。
 //! 数据化的另一层意义是给 **AI 智能体**用：能被程序读写校验的配置，
 //! 才能被智能体批量调参与自动验证，而不是"打开 GUI 拖滑块"。
 
@@ -39,6 +39,204 @@ fn text_field(ui: &mut egui::Ui, value: &mut String) {
     );
 }
 
+/// 矩阵格子边长（含 2px 间隙）。
+///
+/// 32 列 × 12px（含 1px 间隙）≈ 384px：配合左侧行标刚好塞进加宽后的设置窗口。
+/// 再大就得横向滚动，"一眼看完整张矩阵"是这块 UI 的全部意义。
+const LAYER_CELL: f32 = 11.0;
+
+/// 层名字网格的行间距（同时也是 [`layer_names`] 算可视高度的依据）。
+const NAMES_ROW_GAP: f32 = 3.0;
+
+/// 矩阵左侧行标列宽（两位序号 + 一点点右留白）。
+const LAYER_GUTTER: f32 = 13.0;
+
+/// 矩阵上方表头（列号）高度。
+const LAYER_HEAD: f32 = 12.0;
+
+/// 矩阵格子之间的间隙。
+const LAYER_GAP: f32 = 1.0;
+
+/// 页脚（`Apply` / `Reset` / `Cancel` 那一行）要从滚动区的可用高度里扣掉的量：
+/// 按钮高 `FIELD_HEIGHT + 6` + 上方 `add_space(10)` + 一点余量。
+const FOOTER_RESERVE: f32 = 52.0;
+
+/// 标题栏要从窗口高度里扣掉的量（egui 的标题栏 + 一点内边距）。
+const TITLE_RESERVE: f32 = 34.0;
+
+/// 设置窗口宽度。矩阵按 32 × 11px + 1px 间隙（≈ 383px）+ 行标 13px 设计，
+/// 470 正好塞得下；变宽会让其他区块的输入框跟着拉长，整页比例全变。
+const SETTINGS_WIDTH: f32 = 470.0;
+
+/// 层名字编辑区：32 行，`序号 + 名字`。
+///
+/// 名字留空 = 退回 `Layer N` 显示（`Layers::set_name` 会删掉条目），
+/// 所以"清空"是恢复默认，而不是造出一个空名字的层。
+fn layer_names(ui: &mut egui::Ui, layers: &mut xgame_core::Layers) -> bool {
+    let mut changed = false;
+    egui::ScrollArea::vertical()
+        .id_salt("layer_names")
+        // 32 行全铺开会把下面的矩阵顶出窗口；这里只给 5 行的高度。
+        // 高度要按"实际行高"算：网格行高 = 控件高 `FIELD_HEIGHT` + 行间距 3，
+        // 直接用 `ROW_HEIGHT * 5`（=110）会小于真实 5 行（≈115），
+        // 第 5 行被裁掉一半 —— 看起来像渲染错位。
+        .max_height((theme::FIELD_HEIGHT + NAMES_ROW_GAP) * 5.0 + 2.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            egui::Grid::new("layer_names_grid")
+                .num_columns(2)
+                .spacing([8.0, NAMES_ROW_GAP])
+                .show(ui, |ui| {
+                    for layer in 0..xgame_core::LAYER_COUNT as u8 {
+                        ui.label(
+                            egui::RichText::new(format!("{layer:>2}"))
+                                .monospace()
+                                .size(10.0)
+                                .color(theme::colors::TEXT_SECONDARY),
+                        );
+                        let mut name = layers.name(layer).to_string();
+                        let resp = ui.add_sized(
+                            egui::vec2(150.0, theme::FIELD_HEIGHT),
+                            egui::TextEdit::singleline(&mut name)
+                                .hint_text(format!("Layer {layer}")),
+                        );
+                        if resp.changed() {
+                            layers.set_name(layer, name);
+                            changed = true;
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    changed
+}
+
+/// 32×32 碰撞矩阵。
+///
+/// 语义是"勾上 = 两层碰撞"，**默认全勾**（与 `Layers` 的默认一致）。
+/// 点一格会同时改两侧（`set_collides` 写两份掩码），所以矩阵永远对称 ——
+/// 手改 RON 写出不对称的一对时，这里显示的是**实际生效**的值
+///（`collides` 与 rapier 一样要求两侧都同意）。
+///
+/// 布局是**手工画在一张画布上**，不用 `Grid`（实测数据都写在下面）：
+/// - `Grid` 的行高由格子里的子控件决定。塞 `ui.label` 时行距 25px、
+///   塞定尺 `allocate_exact_size` 时 21px —— 都不是 `LAYER_CELL + 1`。
+///   32 行就是 670~800px，矩阵顶出窗口，页脚的 Apply 直接被挤出屏幕
+///   （只看代码绝对看不出来，必须量截图）。
+/// - 1024 个格子做成 1024 个 widget 也是白拿 1024 次交互区计算。
+///
+/// 现在只有 1 个交互矩形 + 1 次命中测试，几何完全可控：整体
+/// `LAYER_GUTTER + 32 × 12` 宽、`LAYER_HEAD + 32 × 12` 高，一格不多。
+fn layer_matrix(ui: &mut egui::Ui, layers: &mut xgame_core::Layers) -> bool {
+    let mut changed = false;
+    let count = xgame_core::LAYER_COUNT;
+    let pitch = LAYER_CELL + LAYER_GAP;
+    // 最后一列/行后面不留间隙，否则右下角多出一块空白。
+    let size = egui::vec2(
+        LAYER_GUTTER + pitch * count as f32 - LAYER_GAP,
+        LAYER_HEAD + pitch * count as f32 - LAYER_GAP,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    // 原点 = 第 0 行第 0 列格子的左上角（左上角留给表头与行标）。
+    let origin = rect.min + egui::vec2(LAYER_GUTTER, LAYER_HEAD);
+    let cell_rect = |row: usize, col: usize| {
+        egui::Rect::from_min_size(
+            origin + egui::vec2(col as f32 * pitch, row as f32 * pitch),
+            egui::vec2(LAYER_CELL, LAYER_CELL),
+        )
+    };
+
+    // 表头：每 4 列标一个号（11px 宽塞不下两位数字），完整的一对在悬浮提示里。
+    for col in 0..count {
+        if col % 4 != 0 {
+            continue;
+        }
+        let center = origin + egui::vec2(col as f32 * pitch + LAYER_CELL * 0.5, -LAYER_HEAD * 0.5);
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            format!("{col}"),
+            egui::FontId::monospace(8.0),
+            theme::colors::TEXT_SECONDARY,
+        );
+    }
+
+    // 行标：11px 的行高塞不下"层名 + 序号"，名字只在悬浮提示里给。
+    for row in 0..count {
+        let center = origin + egui::vec2(-3.0, row as f32 * pitch + LAYER_CELL * 0.5);
+        painter.text(
+            center,
+            egui::Align2::RIGHT_CENTER,
+            format!("{row:>2}"),
+            egui::FontId::monospace(8.0),
+            theme::colors::TEXT_SECONDARY,
+        );
+    }
+
+    // 指针落在哪个格子：间隙也算最近的格子（1px 的缝不该"点空"）。
+    let hovered = response.hover_pos().and_then(|pos| {
+        let rel = pos - origin;
+        if rel.x < 0.0 || rel.y < 0.0 {
+            return None;
+        }
+        let col = (rel.x / pitch) as usize;
+        let row = (rel.y / pitch) as usize;
+        (row < count && col < count).then_some((row, col))
+    });
+
+    for row in 0..count {
+        for col in 0..count {
+            let r = cell_rect(row, col);
+            let on = layers.collides(row as u8, col as u8);
+            if on {
+                painter.rect_filled(r, 1.5, theme::colors::ACCENT_BLUE);
+            } else {
+                painter.rect_filled(r, 1.5, theme::colors::INPUT_BG);
+                painter.rect_stroke(
+                    r,
+                    1.5,
+                    egui::Stroke::new(1.0_f32, theme::colors::INPUT_BORDER),
+                );
+            }
+        }
+    }
+
+    // 悬浮高亮：白框标出当前格，再给一条带层名的提示 ——
+    // 矩阵这么密，没有提示根本不知道点的是哪一对。
+    let response = if let Some((row, col)) = hovered {
+        let r = cell_rect(row, col);
+        painter.rect_stroke(
+            r.expand(0.5),
+            1.5,
+            egui::Stroke::new(1.0_f32, theme::colors::TEXT_BRIGHT),
+        );
+        let on = layers.collides(row as u8, col as u8);
+        response
+            .on_hover_text(format!(
+                "{} × {}：{}",
+                layers.label(row as u8),
+                layers.label(col as u8),
+                if on {
+                    "碰撞（点一下关掉）"
+                } else {
+                    "不碰撞（点一下打开）"
+                }
+            ))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
+
+    if response.clicked() {
+        if let Some((row, col)) = hovered {
+            layers.set_collides(row as u8, col as u8, !layers.collides(row as u8, col as u8));
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     if !state.settings_open {
         return;
@@ -58,22 +256,34 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
     let mut reset = false;
     let mut cancel = false;
 
-    // 内容比一屏高：**必须给滚动区一个上限**，否则窗口会按内容高度长到屏幕外，
-    // 顶部的标题栏和底部的 Apply / Cancel 一起被裁掉（用户连确认都点不到）。
-    // 上限按窗口高度算，留出标题栏与页脚的位置。
-    let body_max = (ctx.screen_rect().height() - 190.0).max(240.0);
+    // 内容比一屏高：**必须给滚动区一个上限**，否则窗口会按内容高度长到屏幕外。
+    // 上限在闭包里算 —— 它要用 `ui.available_height()`（见那里的注释）。
+
+    // 窗口高度按屏幕定死（内容恒定地比一屏高，自适应只会让高度随内容抖动）。
+    // 上限 920：再高也只是让滚动区更长，反而在 1080 的屏上顶到边缘。
+    let window_h = (ctx.screen_rect().height() - 60.0).clamp(360.0, 920.0);
 
     egui::Window::new("Project Settings")
         .open(&mut open)
         .collapsible(false)
-        // 固定高度上限之后，拉大窗口只会把滚动区撑在同一高度上，不如不给拖。
         .resizable(false)
-        .default_width(470.0)
+        .fixed_size(egui::vec2(SETTINGS_WIDTH, window_h))
+        .default_width(SETTINGS_WIDTH)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             let Some(draft) = state.settings_draft.as_mut() else {
                 return;
             };
+
+            // **页脚必须先从可用高度里扣掉**：窗口自己能长多高不是
+            // `screen_rect()` 说了算的（实测 1400 高的屏上，窗口内部只给到
+            // 1005 —— 上下还留着锚点边距）。按屏幕算 `body_max` 会让滚动区
+            // 吃掉全部可用高度，页脚的 Apply / Reset / Cancel 被挤出窗口外，
+            // 用户连"确认"都点不到。所以基准一律用 `ui.available_height()`。
+            // 滚动区高度 = 窗口总高 - 标题栏 - 页脚。三者都是**常量**，
+            // 不依赖窗口自身的高度（依赖它就会形成反馈环：窗口小时算出的上限
+            // 更小 → 窗口更小，实测能让整个面板缩成 400px 高）。
+            let body_max = (window_h - TITLE_RESERVE - FOOTER_RESERVE).max(200.0);
 
             egui::ScrollArea::vertical()
                 .max_height(body_max)
@@ -261,6 +471,30 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         }
                         ui.end_row();
                     });
+
+                ui.add_space(10.0);
+
+                // ── 层与碰撞矩阵 ──
+                //
+                // 层是**项目级约定**：同一批层号在所有关卡里含义相同，所以矩阵
+                // 放项目设置而不是场景文件。默认全通 —— 不动它就跟引入层之前
+                // 完全一样；只有在真需要"这几类东西互不搭理"时才进来关格子。
+                theme::section_bar(ui, "层与碰撞矩阵");
+                theme::note(
+                    ui,
+                    "每个实体有一个层（Inspector 顶部的 Layer），这里决定谁和谁碰。\
+                     默认全通（不配 = 老行为）；矩阵对称，点一格同时改两侧；\
+                     落盘只写改动（project.ron 的 layers 节）。",
+                );
+                ui.add_space(4.0);
+                layer_names(ui, &mut draft.layers);
+                ui.add_space(6.0);
+                theme::note(
+                    ui,
+                    "碰撞矩阵：行 = 层，列 = 与哪些层碰撞（蓝色 = 碰撞）。默认全勾；\
+                     点一下切换，两侧同时生效。列号每 4 列标一个，悬浮可看完整一对。",
+                );
+                layer_matrix(ui, &mut draft.layers);
 
                 ui.add_space(10.0);
 
@@ -478,7 +712,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                         text_field(ui, &mut c.scripts_dir);
                         ui.end_row();
                     });
-            });
+                });
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {

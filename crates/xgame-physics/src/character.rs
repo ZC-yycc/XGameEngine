@@ -377,6 +377,59 @@ mod tests {
         );
     }
 
+    /// 角色移动必须遵守**自己那一层的碰撞矩阵**。
+    ///
+    /// 这条同时钉住两件事：矩阵关掉的一对，角色能穿过去（不是"撞上了再把
+    /// 位移退回去"）；而矩阵没动的默认情况下角色照常被挡住 —— 否则这个
+    /// 测试在"过滤根本没生效"的实现下也会绿。
+    #[test]
+    fn character_respects_its_own_layer() {
+        let def = CharacterController::default();
+        let layer_geom = 1u32 << 1;
+        let layer_char = 1u32 << 2;
+
+        let mut w = test_world();
+        let floor = add_box(
+            &mut w,
+            Vec3::new(0.0, -0.1, 0.0),
+            Vec3::new(10.0, 0.1, 10.0),
+            Quat::IDENTITY,
+        );
+        let wall = add_box(
+            &mut w,
+            Vec3::new(0.0, 0.9, -2.0),
+            Vec3::new(0.5, 0.9, 0.1),
+            Quat::IDENTITY,
+        );
+        let body = add_character(
+            &mut w,
+            Vec3::new(0.0, standing_y(&def, rest_gap(&def)), 0.0),
+            &def,
+        );
+
+        // 默认全通：挡住。
+        let blocked = drive(&mut w, body, &def, Vec3::new(0.0, 0.0, -3.0), 40);
+        assert!(blocked.collisions > 0, "默认矩阵下角色应当撞到墙");
+        assert!(
+            pos_of(&w, body).z > -1.9,
+            "默认矩阵下角色不该穿墙，实际 {:?}",
+            pos_of(&w, body)
+        );
+
+        // 把地板留在 0 层（全通），墙 → 1 层，角色 → 2 层，并关掉 1×2。
+        w.set_body_groups(floor, 1 << 0, u32::MAX);
+        w.set_body_groups(wall, layer_geom, !layer_char);
+        w.set_body_groups(body, layer_char, !layer_geom);
+
+        let through = drive(&mut w, body, &def, Vec3::new(0.0, 0.0, -3.0), 40);
+        assert_eq!(through.collisions, 0, "关掉 1×2 之后角色不该再撞到墙");
+        assert!(
+            pos_of(&w, body).z < -2.5,
+            "关掉 1×2 之后角色应当穿过墙，实际 {:?}",
+            pos_of(&w, body)
+        );
+    }
+
     /// 极端坡度不能产生 >90° 的角度（那会把墙判成地板）。
     #[test]
     fn extreme_slope_limit_stays_below_90_degrees() {

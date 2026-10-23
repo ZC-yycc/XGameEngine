@@ -46,6 +46,7 @@
 | **运行时预制体实例化** | ✅ 完成 | 脚本 `spawn_prefab` / `spawn_prefab_under`：整棵子树进场景（层级 / 变换 / 物理 / 粒子 / 音频 / 相机 / UI 全带上）、每个新实体贴实例来源、刚体由运行时补建；位置语义"设置不叠加"（世界位置 / 局部偏移两种）；失败三种各自一条日志并返回 `nil`；见 PLAN.md 四十五、决策记录 §二十七 |
 | **时间缩放 / 暂停** | ✅ 完成 | `set_time_scale` / `time_scale` 两个脚本 API（Unity `Time.timeScale` 语义）：`0` = 暂停模拟、`0.3` = 慢动作、`2.0` = 二倍速。缩放**只在 `GameClock::tick` 一处消费**，所以物理固定步 / 脚本 `delta`+`time` / 粒子 / 动画钟同帧同源；音频与 UI 不受影响（暂停菜单必须还能点）；编辑器 Play 的预览动画同步跟手；无头报告加 `time_scale` 让 CI 能断言"真的暂停了"；见 PLAN.md 四十六、决策记录 §二十八 |
 | **资产 / 脚本热重载** | ✅ 完成 | 1 Hz 轮询内容目录（只看 metadata）：Play 中改 `.lua` 自动重编译、编辑态刷新清单；资产 / `.meta` 变更刷新资产库并丢渲染缓存；预制体刷新清单。**场景不自动覆盖**、脏材质草稿保留、`project.ron` / 已实例化预制体 / 已解码音频不重载；只读会话不启用。见 PLAN.md 四十九、决策记录 §三十一 |
+| **层与碰撞矩阵** | ✅ 完成 | 32 层进 `project.ron` 的 `layers` 节（只存覆盖，默认全通 = 老工程逐位一致）；`Entity.layer` + Inspector 层下拉 + 设置面板 32×32 矩阵（对称写、两侧相与）；rapier `InteractionGroups` 建体 / 运行时可改组，角色控制器认自己的层；射线掩码只看成员位（Unity `layerMask` 语义）；脚本 `layer` / `set_layer` / `raycast_masked`；`--check` / MCP 报 `invalid_layers`。见 PLAN.md 五十四、决策记录 §三十六 |
 
 ---
 
@@ -140,7 +141,7 @@
 | 多相机 / 分屏 | ⬜ 待做 | 单帧只渲染一台主相机（不做 Unity 那种多相机叠画 / split screen） |
 | 游戏 UI | ✅ 完成（最小集） | Canvas 等价物 = 实体 + 锚点；文本 / 图片 / 按钮 / 面板；`ui_*` 23 API；缺裁剪、九宫格、输入框、手柄导航 |
 | 输入系统 | ✅ 完成 | `InputMap`（`input.ron`）+ 编辑器 / 游戏共用；无手柄 / 触摸 |
-| 项目设置 | ✅ 完成 | 项目名 / 入口场景 / 窗口 / 重力 / 步长 / 画面（曝光 / ACES / Bloom / FXAA / TAA），草稿 + Apply；单入口 `from_project_runtime`。内容目录只在 RON 里手改 |
+| 项目设置 | ✅ 完成 | 项目名 / 入口场景 / 窗口 / 重力 / 步长 / 画面（曝光 / ACES / Bloom / FXAA / TAA），草稿 + Apply；单入口 `from_project`。内容目录只在 RON 里手改 |
 | 未保存保护 / Save As | ✅ 完成 | 脏标记 + 双路径确认 + 标题星号 + 快捷键 |
 | 无头检查 `--check` | ✅ 完成 | 退出码 0/1/2，CI 与智能体的可机读入口；已接入 GitHub Actions（PLAN 五十二） |
 | 无头运行 `--headless` | ✅ 完成 | 固定 dt 逐位可复现；`--screenshot` 离屏出图 |
@@ -176,7 +177,7 @@
 - **单一运行时** —— 无头验证与玩家实跑完全一致；
 - **MCP 工具面** —— 12 个工具（读说明书 / 读脚本契约 / 读 / 改 / 查 / 看效果 / 看资产 /
   改导入参数 / 整理目录）；
-- **安全网** —— 821 条回归测试、每条先证红，GitHub Actions 在 push / PR 自动跑。
+- **安全网** —— 838 条回归测试、每条先证红，GitHub Actions 在 push / PR 自动跑。
 
 进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出 + 脚本 API
 清单导出 ✅（`--export-schema` + `schema_read` / `--export-script-api` +

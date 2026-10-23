@@ -302,10 +302,11 @@ clock.tick(dt)
   ├─ dispatch_start                尚未启动过的实体（含上一帧脚本生成的）跑一次
   └─ 固定步长循环（与渲染帧率解耦，max_steps = 5 防死亡螺旋）
        ├─ dispatch_fixed_update    脚本的 fixed_update
-       ├─ 消费脚本通知             补建 / 清理刚体、重定位换过父节点的刚体
+       ├─ 消费脚本通知             补建 / 清理刚体、重定位换过父节点的刚体、改层（`Relayered` 立刻改组）
        ├─ sync_bodies              一次无分配扫描：待补建为空 且 物理实体数 == 已有刚体数
        │                             ⇒ 判定"集合没变"，清理扫描与 sync_queries 整段跳过
        │                             顺带记下 has_kinematic / has_dynamic 供下面两步早退
+       │                             新建刚体时按 `entity.layer` 取 `InteractionGroups`
        ├─ push_kinematic_bodies    运动学体：把脚本摆的世界变换推给物理（无运动学体则直接返回）
        ├─ physics.step(fixed_dt)   顺带维护查询流水线（所以稳态下不必再 sync_queries）
        └─ pull_dynamic_bodies      动态体：物理世界变换 → 局部（无动态体则直接返回）
@@ -330,6 +331,17 @@ clock.tick(dt)
 
 **动态体由物理驱动、运动学体由脚本驱动** —— 这条分工决定了上面两个方向的数据流。
 一个刚体只属于其中一类，所以两者不会互相覆盖。
+
+**层的两条通道互不影响**（决策记录 §三十六）：
+
+- **碰撞通道**：建体时按 `entity.layer` 取 `Layers::groups()` 落到
+  `InteractionGroups`，两侧掩码相与才碰；运行时改层走
+  `World::set_entity_layer()`，它**立刻** `physics.set_body_groups()` —— 不能等
+  `sync_bodies`，因为稳态早退判据里没有"层"这一项。
+- **查询通道**：`raycast_masked` 只看 `memberships & mask`，**不看矩阵**
+  （Unity `layerMask` 语义）。所以"幽灵层"（不与任何层碰撞、只给射线用）是可表达的。
+  角色控制器是例外：它内部 `QueryFilter` 必须带上自身组，否则会出现
+  "射线查不到、人却撞住了"。
 
 **场景切换只有一个时机**（`apply_pending_scene_load`，见上图）：脚本的 `load_scene()`
 只登记请求，因为钩子执行期间场景正被可变借用。放在"消费脚本通知"之后、`sync_bodies`
@@ -1298,17 +1310,18 @@ Scene(
 | `editor/panels/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
-| `editor/game_runtime.rs` | 121 | `start()`（`WorldConfig::from_project_runtime` 接项目清单）、`fixed_update()` |
+| `editor/game_runtime.rs` | 121 | `start()`（`WorldConfig::from_project(project.manifest())` 接项目清单：运行时 + 层）、`fixed_update()` |
 | `editor/frame_policy.rs` | 277 | `plan()`（纯函数，五输入：playing / interacting / had_input / animating / since_last_input）、`FrameClock` |
 | `editor/headless.rs` | 1334 | `run()`（CLI `--headless`：固定 dt 帧循环 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
 | `editor/schema_cli.rs` | 213 | `--export-schema` 参数解析（stdout / `--out` / `--help`）、`render_json()`（`serde_json` 美化 + 末尾换行）、`cli()`（退出码 0/1） |
 | `editor/script_api_cli.rs` | 331 | `--export-script-api` 的参数解析 / `render_json()` / `cli()`；测试含“文档 API 表函数名 == 清单”防漂移 |
 | `core/schema.rs` | 2967 | `scene_schema()`（36 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
-| `core/script_api.rs` | 701 | `script_api()`（155 个函数 / 17 类 / 6 钩子 / 值类型 / 全局约定）；手写数据 + 6 条结构测试；注册名与文档名分别由 `xgame-script` / `xgame-editor` 测试钉住 |
+| `core/script_api.rs` | 704 | `script_api()`（158 个函数 / 17 类 / 6 钩子 / 值类型 / 全局约定）；手写数据 + 6 条结构测试；注册名与文档名分别由 `xgame-script` / `xgame-editor` 测试钉住 |
 | `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
 | `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |
 | `core/project.rs` | 1269 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_scenes()`（`Scenes/*.ron`，排除 `.prefab.ron`；场景菜单与 `--check` 的真相源）、`load_scene()` / `write_scene()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`、`list_materials()` / `load_material()` / `write_material()`（材质 albedo 的 GUID⇄路径边界）；清单含 `runtime` 节（重力 / 固定步长） |
+| `core/layers.rs` | 308 | `LAYER_COUNT`（32）/ `DEFAULT_LAYER`、`Layers`（**只存覆盖**：`names` / `masks` 两张 `BTreeMap`）、`collides()`（**两侧相与**，与 rapier 同语义）、`set_collides()`（对称写两侧）、`groups(layer)`（→ `(memberships, filter)`）、`label()`（`"3  Enemy"` / `"7  Layer 7"`）、`sanitized()`（丢越界 / 空名，**保留 mask 0**）、`sanitize_layer()`（取模 32） |
 | `core/asset.rs` | 1068 | `AssetGuid`（32 位十六进制，生成器 = 进程随机 + 纳秒 + 原子序号）、`AssetMeta`（`.meta` 的 RON：guid/kind/import）、`AssetDatabase`（扫描建 guid↔path、诊断缺/孤儿/坏/冲突、`ensure_metas`、`set_import`、`resolve_reference`/`encode_reference`）、`encode_*`/`decode_*`（场景 / 预制体 / 材质的磁盘⇄内存引用转换） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 1026 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`）；`Entity::animator`（`#[serde(default)]`，旧场景读作 None） |
@@ -1339,7 +1352,7 @@ Scene(
 | `editor/panels/assets.rs` | 678 | `show_content()`（目录树 + 类型图标 + 详情 + 导入设置 + 材质新建 / 草稿编辑 / Apply·Revert / 指派 + 双击/拖拽放入场景；`join_path`/`join_dir` 保证同名文件不串）|
 | `editor/panels/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|
 | `editor/panels/toolbar.rs` | 364 | `show()`（含 ⌂ Projects / 💾 Save · Save As · Scenes / 🔨 Build / ⚙ 设置；Scenes 菜单列出磁盘场景、新建、设启动场景，播放中禁用） |
-| `editor/panels/settings.rs` | 198 | `show()`（项目设置窗口：草稿编辑 → Apply 校验写回 `project.ron`） |
+| `editor/panels/settings.rs` | 761 | `show()`（项目设置窗口：草稿编辑 → Apply 校验写回 `project.ron`）、`layer_names()`（32 行层名，留空 = 恢复默认）、`layer_matrix()`（32×32 矩阵：**一张画布 + 一个交互矩形 + 一次命中测试**，不用 `Grid` —— 行高会被子控件撑到 21~25px，见决策记录 §三十六.7） |
 | `editor/panels/console.rs` | 46 | `show_content()` |
 | `editor/panels/dock.rs` | 117 | `create_tile_tree()`、`EditorBehavior` |
 | `editor/panels/theme.rs` | 124 | `install()`、`unity_dark_visuals()` |

@@ -362,6 +362,33 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             touched |= resp.changed();
         });
 
+        // ── 层 ──
+        //
+        // 放在 Name 下面而不是塞进 Physics 区块：层是**实体属性**（Unity 的
+        // Layer 也在 Inspector 顶部），纯逻辑实体（触发区、生成点）没有刚体
+        // 也照样有层。名字来自 `project.ron` 的 `layers` 节，没起名的层显示
+        // `N  Layer N` —— 只有层号可见才找得到自己想选的那层。
+        let layer_names = state.project.manifest().layers.clone();
+        row(ui, "Layer", |ui| {
+            let current = xgame_core::sanitize_layer(entity.layer);
+            egui::ComboBox::from_id_salt("inspector_layer")
+                .selected_text(layer_names.label(current))
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for layer in 0..xgame_core::LAYER_COUNT as u8 {
+                        let active = layer == current;
+                        if ui
+                            .selectable_label(active, layer_names.label(layer))
+                            .clicked()
+                            && !active
+                        {
+                            entity.layer = layer;
+                            touched = true;
+                        }
+                    }
+                });
+        });
+
         // ── 变换组件 ──
         theme::section_bar(ui, "Transform");
         ui.indent("transform", |ui| {

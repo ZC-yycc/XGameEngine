@@ -256,6 +256,7 @@ fn primitives() -> Vec<PrimitiveSchema> {
     vec![
         primitive("f32", "1.5", "32 位浮点；建议带小数点，和现有场景文件保持一致。"),
         primitive("f64", "1.5", "64 位浮点（目前只出现在 FieldValue::F64）。"),
+        primitive("u8", "0", "无符号 8 位整数（目前只用于 Entity.layer：0–31）。"),
         primitive("u32", "512", "无符号 32 位整数。"),
         primitive("i32", "-1", "有符号 32 位整数（FieldValue::I32）。"),
         primitive("i64", "-1", "有符号 64 位整数（FieldValue::I64）。"),
@@ -586,6 +587,12 @@ fn scene_types() -> Vec<TypeSchema> {
                     "局部空间变换（相对 parent）；省略 = 单位变换。纯 UI 实体可以整段省略。",
                 ),
                 def(
+                    "layer",
+                    "u8",
+                    &0u8,
+                    "层索引 0..=31（决定与哪些层碰撞 / 触发）；省略 = 0。矩阵在 project.ron 的 layers 节，默认全通。越界值由 --check 报告。",
+                ),
+                def(
                     "model",
                     "String",
                     &"",
@@ -648,6 +655,7 @@ fn scene_types() -> Vec<TypeSchema> {
             ],
             vec![
                 "components（运行时组件容器，#[serde(skip)]）不是落盘字段，刻意不在目录里。",
+                "layer 省略 = 0（Default 层）；默认碰撞矩阵全通，所以老场景不写层时物理行为与引入层之前完全一致。",
                 "transform 是局部的；世界变换由 parent 链现算，场景文件不存世界变换。",
                 "scripts / behaviors / behavior_params 都按名字寻址：改名等于换目标，改列表顺序只影响执行顺序。",
                 "可选组件字段省略 = None；Vec / map 省略 = 空。没有 physics 的实体不会突然被重力拽走。",
@@ -1605,7 +1613,7 @@ mod tests {
 
     /// 字段 `ty` 里允许直接出现的叶类型。
     const PRIMITIVES: &[&str] = &[
-        "f32", "f64", "u32", "i32", "i64", "u64", "bool", "String", "Vec2", "Vec3", "Vec4",
+        "f32", "f64", "u8", "u32", "i32", "i64", "u64", "bool", "String", "Vec2", "Vec3", "Vec4",
         "Quat",
     ];
 
@@ -2315,6 +2323,7 @@ mod tests {
         let Entity {
             name,
             transform,
+            layer,
             model,
             material_asset,
             id,
@@ -2339,6 +2348,7 @@ mod tests {
             &[
                 "name",
                 "transform",
+                "layer",
                 "model",
                 "material_asset",
                 "id",

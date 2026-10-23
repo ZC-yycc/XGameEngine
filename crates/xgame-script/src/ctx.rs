@@ -1016,12 +1016,38 @@ impl GameCtx<'_> {
 
     /// 沿方向发射线（默认忽略传感器、排除自己），返回命中结果。
     pub fn raycast(&mut self, origin: Vec3, dir: Vec3, max_dist: f32) -> RayHit {
+        self.raycast_filtered(origin, dir, max_dist, None)
+    }
+
+    /// 带**层掩码**的射线：只命中落在 `layer_mask` 里的实体（第 N 位 = 第 N 层）。
+    ///
+    /// 掩码只看实体在哪一层，**不看碰撞矩阵**（Unity `Physics.Raycast(layerMask)`
+    /// 同语义）：摄像机射线只打几何体层，不该因为几何体层与摄像机层被设成
+    /// 不碰撞就失效。
+    pub fn raycast_masked(
+        &mut self,
+        origin: Vec3,
+        dir: Vec3,
+        max_dist: f32,
+        layer_mask: u32,
+    ) -> RayHit {
+        self.raycast_filtered(origin, dir, max_dist, Some(layer_mask))
+    }
+
+    fn raycast_filtered(
+        &mut self,
+        origin: Vec3,
+        dir: Vec3,
+        max_dist: f32,
+        layer_mask: Option<u32>,
+    ) -> RayHit {
         let Some(physics) = self.physics.as_deref() else {
             return RayHit::miss();
         };
         let filter = RaycastFilter {
             ignore_sensors: true,
             exclude_body: self.entity_opt().and_then(|id| body_of(self.scene, id)),
+            layer_mask,
             ..RaycastFilter::default()
         };
         let hit = physics.raycast_with_filter(origin, dir, max_dist, true, filter);
@@ -1030,6 +1056,26 @@ impl GameCtx<'_> {
             .and_then(|h| h.body_id)
             .and_then(|body| entity_of_body(self.scene, body));
         RayHit::from_hit(hit, entity)
+    }
+
+    /// 目标实体所在的层（已收敛到 0–31）；实体不存在返回 `None`。
+    pub fn layer(&mut self, id: EntityId) -> Option<u8> {
+        let index = self.scene.index_of(id)?;
+        Some(xgame_core::sanitize_layer(self.scene.entities[index].layer))
+    }
+
+    /// 把实体换到某一层（越界按取模收敛）。
+    ///
+    /// 场景字段立刻写；物理侧的碰撞组要等运行时消费 [`ScriptCommand::Relayered`]
+    /// 才生效 —— 那时才拿得到项目矩阵（脚本层不认识 `Layers` 配置）。
+    pub fn set_layer(&mut self, id: EntityId, layer: u8) -> bool {
+        let layer = xgame_core::sanitize_layer(layer);
+        let Some(index) = self.scene.index_of(id) else {
+            return false;
+        };
+        self.scene.entities[index].layer = layer;
+        self.push_command(ScriptCommand::Relayered { id, layer });
+        true
     }
 
     /// 给目标刚体加持续力。
@@ -2254,5 +2300,65 @@ pub(crate) mod tests {
         assert_eq!(scene.parent_index(root_index), None, "应当挂在场景根");
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].level, LogLevel::Warn);
+    }
+
+    /// 层 API：场景字段立刻写，物理侧只登记通知（脚本没有矩阵，不能自己算掩码）。
+    #[test]
+    fn layer_api_writes_scene_and_reports_to_runtime() {
+        let mut scene = Scene::new("layers");
+        scene.add_entity(Entity::new("crate"));
+        let id = scene.entities[0].id;
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+
+        {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "LayerProbe",
+                scene_name: "",
+                scene_order: &[],
+                loader: None,
+                clock: None,
+                entity: id,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+
+            assert_eq!(ctx.layer(id), Some(0), "新实体默认在 0 层");
+            assert!(ctx.set_layer(id, 5));
+            assert_eq!(ctx.layer(id), Some(5));
+
+            // 越界取模：33 → 1，不是"静默改成 0"也不是 panic。
+            assert!(ctx.set_layer(id, 33));
+            assert_eq!(ctx.layer(id), Some(1));
+
+            // 不存在的实体：只返回 false，不写任何东西。
+            assert!(!ctx.set_layer(EntityId::from_raw(9999), 3));
+            assert_eq!(ctx.layer(EntityId::from_raw(9999)), None);
+
+            // 没接物理时射线是 miss（不 panic），带掩码的版本同理。
+            assert!(!ctx.raycast_masked(Vec3::ZERO, Vec3::NEG_Z, 10.0, 0xFFFF).hit);
+        }
+
+        // 场景字段真的被改了（`set_layer` 不是只发通知）。
+        assert_eq!(scene.entities[0].layer, 1, "最后一次换层要落在场景字段上");
+
+        let relayered: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                ScriptCommand::Relayered { id, layer } => Some((*id, *layer)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relayered,
+            vec![(id, 5), (id, 1)],
+            "每次成功的换层都要通知运行时（失败的调用不能留下通知）"
+        );
     }
 }

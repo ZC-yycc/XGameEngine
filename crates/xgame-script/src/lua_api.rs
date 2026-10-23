@@ -733,6 +733,45 @@ fn register_physics(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     )?;
 
     globals.set(
+        "raycast_masked",
+        lua.create_function(
+            |lua,
+             (ctx, ox, oy, oz, dx, dy, dz, max_dist, mask): (
+                LuaCtx,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                u32,
+            )| {
+                let hit = ctx.game().raycast_masked(
+                    Vec3::new(ox, oy, oz),
+                    Vec3::new(dx, dy, dz),
+                    max_dist,
+                    mask,
+                );
+                ray_hit_table(lua, hit)
+            },
+        )?,
+    )?;
+
+    globals.set(
+        "set_layer",
+        lua.create_function(|_, (ctx, id, layer): (LuaCtx, i64, i64)| {
+            // 负 / 越界的层号按取模收敛（与 Rust 侧 `sanitize_layer` 同一条规则），
+            // 不 panic 也不静默改成 0 —— 脚本传 -1 的意图通常是"最后一层"。
+            Ok(ctx.game().set_layer(id_of(id), layer as u8))
+        })?,
+    )?;
+    globals.set(
+        "layer",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().layer(id_of(id))))?,
+    )?;
+
+    globals.set(
         "apply_force",
         lua.create_function(|_, (ctx, id, x, y, z): (LuaCtx, i64, f32, f32, f32)| {
             ctx.game().apply_force(id_of(id), Vec3::new(x, y, z));

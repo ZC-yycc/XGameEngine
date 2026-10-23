@@ -5045,3 +5045,131 @@ Agent-Native 的 ③ 是「机器可读契约」：智能体能读写 RON 不等
 - **`asset_delete`**：与 move 同族（要处理孤儿 `.meta` 与引用方提示）；
 - **`project_write`**：改 `project.ron`（入口场景 / 渲染参数）目前只能直接编辑文件；
 - **自托管 GPU runner**：把 `--screenshot` 的逐字节确定性纳入 CI。
+
+## 五十四、层与碰撞矩阵：让"碰不碰"成为数据（2026-10-23）
+
+### 一、为什么是它
+
+`Docs/差距分析.md` 的 P2 表里，`标签与层 / 碰撞矩阵` 一直空着。它不是"少一个功能"
+那么简单：没有它，"谁和谁碰"只能写在脚本里逐个判断（`if id ~= player then`），
+而**物理层根本不认这个判断** —— 子弹照样撞队友、触发器照样推箱子。这属于"挡住
+正确性"的一类问题，且被它挡住的还有：触发器 / 伤害判定 / 摄像机避让 / 分帧层
+（UI 相机不该进物理世界）。
+
+选它的第二个理由：它一口气打通 core → physics → runtime → script → editor → MCP →
+schema → `--check` 八个环节，是"数据在底层、能力在各层"的典型样本，能顺带验证
+几条老红线（默认值不改老行为、脚本只读场景、`sync_bodies` 早退）。
+
+### 二、做了什么
+
+**core（真相源）**
+
+- 新增 `layers.rs`：`LAYER_COUNT = 32`、`Layers { names, masks }`（只存覆盖）、
+  `collides(a,b)`（**两侧相与**）、`set_collides`（对称写）、`groups(layer)`、
+  `label(layer)`（`"3  Enemy"` / `"7  Layer 7"`）、`sanitize_layer`（取模 32）。
+- `Project.layers`（默认序列化成 `()`）+ `Entity.layer`（0 层不落盘）。
+- `schema.rs` 导出 `layer` 字段与 `u8` 原语；`check.rs` 新增 `invalid_layers`
+  （越界层号逐条报"场景: 实体 -> layer N"）。
+
+**physics**
+
+- `Collider.memberships / filter`（默认 `u32::MAX`，老场景逐位一致）。
+- `add_collider` 落到 `InteractionGroups`；`set_body_groups()` 支持运行时改组，
+  刻意不重建 query pipeline；`RaycastFilter.layer_mask` 用 `predicate` 实现
+  （只看成员位，不看矩阵）；`move_character` 的 `QueryFilter.groups` 补上自身组。
+
+**runtime**
+
+- `WorldConfig.layers`；`World::set_entity_layer()`（写场景 + 立刻改 rapier）；
+  `sync_bodies` 建体时按 `entity.layer` 取组；`consume_script_commands` 消费
+  `Relayered`。`WorldConfig::from_project_runtime` 改名 `from_project`（吃整份清单）。
+
+**script（Lua）**
+
+- `ctx:layer(id)` / `ctx:set_layer(id, layer)` / `ctx:raycast_masked(...)`；
+  改层走 `ScriptCommand::Relayered`。脚本 API 计数 155 → 158（`Docs/脚本API.md`、
+  `script_api.rs`、`script_api_cli.rs`、MCP 工具描述、`lua_host.rs` 断言同步）。
+
+**editor**
+
+- Inspector 顶部加 `Layer` 下拉（32 项，显示层名，写 `entity.layer` + `touched`）。
+- 设置面板新增「层与碰撞矩阵」：32 行层名编辑 + 32×32 矩阵。矩阵是**一张画布 +
+  一个交互矩形 + 一次命中测试**（`Grid` 的行高把矩阵撑到 670~800px、把页脚按钮
+  挤出屏幕 —— 见决策记录 §三十六.7）。
+- `apply_settings_draft` 对 `layers` 做 `sanitized()` 并告警。
+
+**MCP**
+
+- `entity_upsert` 支持 `layer`（越界 / 非整数**拒绝**）；`project_check` 输出
+  `invalid_layers`。
+
+### 三、刻意的取舍
+
+- **只做 32 层**：与 rapier 的 32 位组掩码一致，不多不少。层的"名字"只是 UI 糖，
+  物理层只认 0..31。
+- **矩阵对称写**：点一格改两侧。允许不对称（数据上能表达）只会制造"看得到但不算"
+  的假象 —— rapier 要求两侧都同意。
+- **查询掩码不参与碰撞矩阵**：Unity 语义照搬（`layerMask` 只筛成员）。这样"幽灵层"
+  （不与任何层碰撞、只给射线用）才是可表达的状态。
+- **改层立刻生效**：`set_entity_layer` 不等 `sync_bodies`。等重同步 = 永远不生效
+  （早退判据里没有层）。
+- **越界取模 + 报错**：取模保证不崩，`invalid_layers` 保证不骗人。
+- **不做"层预设 / 禁用场景"**：Unity 的 `Layer Collision Matrix` 之上的那些
+  （预设、按场景禁用）是效率工具，不是正确性工具，留给 P2 剩下的部分。
+
+### 四、验证（本地实跑）
+
+- 各 crate（分别 `cargo test -p …` 实跑）：core **242 passed / 5 ignored**（基准）、
+  physics **37**、runtime **54 passed / 4 ignored**、script **38**、editor **189**、
+  mcp **37**。本轮新增 17 条：
+  - core `layers.rs` 9 条：默认全通 + 默认落盘 `()`、对称关闭、手改不对称两侧相与、
+    0 掩码不被修、sanitize、label 回退、越界取模、只存覆盖的 roundtrip、
+    `layer` 只在非 0 时落盘；
+  - physics 4 条：互不碰撞的两层穿过彼此 / `set_body_groups` 立刻生效 /
+    射线掩码无视碰撞矩阵 / 角色控制器认自己的层；
+  - runtime 2 条：建体时按层过滤 / `set_entity_layer` 不等重同步；
+  - script 1 条：Lua `set_layer` 写场景并上报 `Relayered`；
+  - mcp 1 条：`entity_upsert` 写层并拒绝越界。
+- **先证红**：把 `move_character` 的 `QueryFilter.groups` 改回 `None`，
+  `character_respects_its_own_layer` 立刻红（`0 passed; 1 failed`），恢复后绿。
+- **UI 自检**：`--ui-shot --ui-settings --ui-size …` 四档（1280×900 / 1440×900 /
+  1920×1080 / 1280×1400）。判据是像素而不是肉眼：每行 **32 个 9px 蓝格**、
+  横跨 380px（右边界离窗口边 76px，无横向溢出）；`Apply` 那块 80×26 纯蓝矩形在
+  四档里都能找到（y=838 / 838 / 968 / 1128）—— 也就是说页脚没有被挤出窗口。
+- **全量**：`cargo test --workspace --all-targets` → 见下方"验证结果"。
+- `cargo clippy --workspace --all-targets`：0 告警。
+
+### 四·五、UI 上踩的两个坑（都写进了决策记录 §三十六.7 / §三十六.7.1）
+
+- `Grid` 的行高不可控（`ui.label` 25px、定尺控件 21px，都不是 `LAYER_CELL + 1`），
+  32 行把矩阵撑到 670~800px；`Grid.min_col_width` 默认 40px，32 列把窗口撑到半屏宽。
+  → 矩阵改成一张画布 + 一个交互矩形 + 一次命中测试。
+- 设置窗口高度靠 `screen_rect - 190` 算：`egui::Window` 自身上限只有 1005，
+  1400 高的屏上滚动区吃掉全部可用高度，**页脚的 Apply 被挤出窗口外**。
+  改用 `ui.available_height()` 又掉进反馈环（面板塌成 400px 高）。
+  → 固定窗口高度，滚动区高度 = 常量 - 常量 - 常量。
+
+### 五、还没做 / 已知边界
+
+- **层预设与"按场景禁用层"**：只做了矩阵本身。
+- **`only_dynamic` 与层掩码的组合**没单独测（各自都有测试，组合没测）。
+- **编辑器资产 rename / move UI** 仍是空缺（上轮遗留，与本轮无关）。
+- **矩阵没做键盘操作**：只能点，不能方向键移动 + 空格切换（无障碍后面统一做）。
+- **`RaycastFilter.layer_mask` 只看成员位**这个语义只写在决策记录里 + 一条测试钉住，
+  脚本 API 文档里也写了，但没有"与 Unity 对照"的说明（怕读者以为它等价于矩阵）。
+
+### 六、下一步候选
+
+- **触发器 / 事件**（`on_trigger_enter`）：层的下一站，`QueryFilter` 已经齐了；
+- **质量设置（P2 #23）**：与层同属"项目级物理配置"，可以共用设置面板的节；
+- **层预设**：把常用的"角色 / 环境 / 子弹 / UI"做成预设，一键铺矩阵；
+- **编辑器资产 rename / move UI**（上轮遗留）。
+
+### 验证结果
+
+- `cargo test --workspace --all-targets -j 2 -- --test-threads=4`：**838 passed /
+  0 failed / 7 ignored**（上一轮 821，本轮 +17）。
+- `cargo clippy --workspace --all-targets`：**0 告警**（首轮 6 条 `identity_op`
+  是测试里写 `u32::MAX & !(1 << 2)` 的冗余，已删）。
+- 无头冒烟：`--check` / `--headless` 对 `projects/SampleScene` 退出码 0，
+  且 `project.ron` **没有**被写入 `layers` 节（默认值不落盘这条真的成立）。
