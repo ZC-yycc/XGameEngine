@@ -5173,3 +5173,137 @@ schema → `--check` 八个环节，是"数据在底层、能力在各层"的典
   是测试里写 `u32::MAX & !(1 << 2)` 的冗余，已删）。
 - 无头冒烟：`--check` / `--headless` 对 `projects/SampleScene` 退出码 0，
   且 `project.ron` **没有**被写入 `layers` 节（默认值不落盘这条真的成立）。
+
+## 五十五、形变目标（morph target）：CPU 变形 + 顶点缓冲按需重写（2026-10-24）
+
+### 一、为什么是它
+
+`Docs/差距分析.md` 的 P1 #12 里，morph target 是动画系统最后一块**内容面**缺口。
+它和别处的缺口不同 —— 不是"少了功能"，而是**静默丢数据**：
+`gltf_loader.rs` 遇到 `targets[]` 时不报错、不崩，只打一条 `warn` 就跳过；动画里
+的 `MorphTargetWeights` 通道同样直接 `continue`。导入一个带表情的角色，引擎照
+常渲染，只是那张脸永远是基准形状，而没有第二个地方会提醒你。
+
+选它的第二个理由：它一口气串起 **core（组件 / schema）→ render（加载 / 变形 /
+顶点缓冲）→ animation（权重轨道）→ script（2 个 API）→ editor（Inspector 滑条）→
+docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一遍。
+
+### 二、做了什么
+
+**加载（`xgame-render/src/gltf_loader.rs`）**
+
+- 新 `parse_morph_targets(mesh, primitive, buffers, base, scale)`：读
+  `primitive.morph_targets()` 的 POSITION / NORMAL 增量，按 **target-major** 平铺
+  （`positions[t * vertex_count + v]`）。
+- **增量乘 `model_scale`**（法线增量不乘：均匀缩放不改方向，长度由归一化收回）。
+  不乘的话，把导入缩放从 1 调到 2，模型大一倍而表情幅度纹丝不动。
+- 目标名读 `mesh.extras.targetNames`（非标准但全行业导出器都写这里）；为此给
+  gltf crate 打开 `extras` 特性，并加 `serde_json` 依赖 —— `extras` 在 gltf 里是
+  **未解析的 JSON 原文**（`Box<RawValue>`），要自己反序列化一次。缺名字退回
+  `Target N`。
+- 默认权重读 `mesh.weights()`，按目标数补齐。
+- `GltfPrimitive` 新增 `morph: Option<MorphTargets>`；带 morph 的图元顶点缓冲多一个
+  `COPY_DST` 用途（其余图元的 usage 一位不变）。
+- 动画解析：`GltfProperty::MorphTargetWeights` 不再跳过，落成
+  `TrackPath::MorphWeights` 轨道（标量流按 `times.len()` 分组，`CUBICSPLINE`
+  复用同一套"取中段值"降采样）。
+
+**变形（新文件 `xgame-render/src/morph.rs`）**
+
+- `MorphTargets`：增量 + 基准顶点 + 一个 `Mutex<MorphState>`（已应用权重 / 复用
+  缓冲）。**纯函数 `morph_vertices`** 单独拎出来 —— 这是唯一能在无显卡 CI 上
+  逐位断言的部件。
+- `apply_source(queue, buffer, source)`：解析权重 → 与上次比对 → 变了才
+  `morph_vertices` + `write_buffer`。**权重没变就不写**（静止的表情零开销）。
+- 权重解析三层：实体短表用模型默认补齐、长表截断（换模型不错位到别的表情上）。
+- 法线**只在真的加过增量之后**才归一化 —— 权重全 0 时连最后一位都不该动，
+  否则"关掉表情"与"从来没有表情"在截图里会差出浮点级噪声。
+
+**动画 / 渲染接线（`animation.rs`、`scene_pipeline.rs`）**
+
+- `Track::stride()` 现算（`MorphWeights` 的 stride 是逐轨道的目标数，不能像
+  变换通道写死 3/4）；`sample_clip_into` 显式跳过权重轨道。
+- 新 `sample_morph_weights(clip, t, out)`：剪辑没有权重轨道时返回 `false` 且
+  **不动**输出缓冲 —— 调用方据此退回实体权重，而不是把脸清零。
+- `ScenePipeline::render` 里：先采剪辑权重（**不要求模型有蒙皮**，静态网格也能带
+  morph），再按"剪辑 > 实体 `morph_weights`"选来源，逐图元 `apply_morph`。
+  **顺序必须是形变 → 蒙皮**：形变改的是基础顶点，蒙皮矩阵随后才把它们搬到骨骼空间。
+
+**core / 脚本 / 编辑器**
+
+- `Entity.morph_weights: Vec<f32>`（`skip_serializing_if = "Vec::is_empty"`，
+  旧场景文件 → 空表）；`schema.rs` 加目录项（穷举解构测试当场逼着改）。
+- `GameCtx::morph` / `set_morph`：钳 `[0,1]`、拒绝 NaN、**允许稀疏写**、下标上限
+  256、**立刻生效**（渲染每帧读场景，不走命令队列 —— 与 `set_layer` 不同，
+  换层要同步物理侧）。脚本 API 160 个。
+- Inspector 新增 Morph 区块：滑块逐目标，标题用 `targetNames`；
+  模型没有 morph 时整段不显示（**不给 "Add" 按钮** —— morph 是资产属性，
+  不是能凭空挂上去的组件）。扫的时候不扩容、拖动才扩容：进面板不该把场景改脏。
+
+### 三、刻意的取舍
+
+- **CPU 变形，不是 GPU storage 累加**。商业引擎走 GPU；这里 v1 走 CPU，理由
+  与 CPU 粒子同构：只有权重变化才重算、面部网格量级很小（几千顶点 × 76 字节）、
+  换来**零着色器改动 / 零新增绑定 / 零槽位分配**，而代价那一侧是一个能被单测
+  钉死的纯函数。增量本来就是 target-major 平铺的，将来搬进 storage buffer
+  不需要改数据布局。
+- **法线增量不做导入缩放**：均匀缩放不改变方向，乘了反而要再归一化回去。
+- **长度不自洽整段放弃**：增量错位会把顶点挪到不存在的位置，画出来是一团谁都
+  认不出的几何，比"没有表情"难查得多。
+- **`Mutex` 而不是 `&mut self`**：图元挂在 `GltfMesh` 上、渲染期只有 `&GltfMesh`
+  （模型缓存共享给多个实体），改成可变借用会把"多实体共用一份网格"这条结构推翻。
+  锁只在单线程渲染里出现，零竞争。
+- **动画优先于手动权重**：Unity 同款语义 —— 被动画驱动的属性不听手动覆盖。
+  想做"表情叠加"，就做成单独的剪辑。
+- **不做 tangent 增量**：引擎的 PBR 不算法线贴图 TBN，收了没有消费者。
+
+### 四、验证
+
+- **先证红**：`morph_vertices` / 解析 / 采样各有断言（见下）；把
+  `morph_deltas_are_baked_with_model_scale` 里的 `* scale` 去掉，
+  它立刻红在 `[0.1, 0.2, 0.3] != [0.2, 0.4, 0.6]`。
+- **合成 glTF**（不碰磁盘、不需要显卡）：测试里手写一个带两个目标、带
+  `targetNames` / `weights` 的三角形，用 `gltf::import_slice` + 内嵌 base64
+  缓冲跑通"解析 → 名字 / 默认权重 / 增量"整条 CPU 链路。仓库里的 `Fox.glb`
+  没有 morph 目标，靠它只能测到"没有 morph 时返回 None"。
+- **新增 20 条**：morph.rs 9（零权重逐位不变 / 满权重到目标 / 半权重 / 多目标累加 /
+  钳位与 NaN / 法线归一化 / 越界忽略 / 补齐截断 / 错位增量被拒）、
+  animation.rs 4（逐目标采样 / stride 现算 / 无轨道返回 false 且不清表 /
+  权重轨道不碰姿态）、gltf_loader.rs 3（名字默认值目标数 / 增量烘焙缩放 /
+  无 targets → None）、core 3（RON 往返 / 空表不落盘 / 旧文件兼容）、
+  script 1（钳位 + 稀疏写 + 越界与非有限值拒绝 + 不进命令队列）。
+
+### 五、还没做 / 已知边界
+
+- **多网格角色的权重轨道只取第一条**：glTF 把权重轨道挂在节点上，一个角色理论上
+  可以有多个带 morph 的网格（头 / 身体分开）各自一条轨道，当前取第一条并在
+  文档里写明。
+- **Inspector 显示的是第一个带 morph 图元的目标名**，目标数取所有图元的最大值
+  （保证每一条都调得到）。
+- **没有可视化的端到端验证**：仓库里没有带 morph 的样例资产，所以"改权重 → 画面
+  真的变了"这条只能靠单测 + 代码审查保证；补一份带表情的样例资产要连 GUID /
+  `.meta` 一起进，留作后续。
+- **GPU 变形**：万级顶点 / 几十个角色同屏时再换（分层已留好）。
+
+### 六、下一步候选
+
+- **P1 剩下的手柄 / 触摸输入**（改动集中在 `xgame-input`，风险最小）；
+- **动画 Phase B**（分层状态机 / 根运动 / 逐条转移时长）—— 动画阶段收口的最后一块；
+- **带 morph 的样例资产**：把"改权重 → 画面变了"变成可截图的回归；
+- **存档 / 读档**（P2 #32）—— 玩法侧最缺的一块。
+
+### 验证结果
+
+- `cargo test --workspace --all-targets -j 2 -- --test-threads=4`：**858 passed /
+  0 failed / 7 ignored**（上一轮 838，本轮 +20）。
+- `cargo clippy --workspace --all-targets`：**0 告警**（首轮 1 条
+  `needless_range_loop` 在 `morph_vertices` 的权重循环上，改成 `iter().take().enumerate()`）。
+- 先证红实跑：把 `parse_morph_targets` 里的 `* scale` 去掉，
+  `morph_deltas_are_baked_with_model_scale` 立刻红（`0 passed; 1 failed`，
+  `[0.1, 0.2, 0.3] != [0.2, 0.4, 0.6]`），恢复后绿。
+- 无头冒烟：`--check projects/SampleScene` 退出码 0（scenes=1 / entities=24 /
+  assets=15，全部引用可解析）。
+- **一次偶发**：首轮全量跑里 `xgame-editor --bin` 进程崩过一次
+  （`STATUS_ACCESS_VIOLATION`，4 线程并行跑 GPU 相关测试时）；单线程与复跑 4 线程
+  均 189/189 绿，判定为环境偶发，未改动任何代码。若后续复现要查 wgpu 侧的并发建
+  设备路径（`acquire_gpu_test_permit` 已串行化，但设备销毁时机不受它管）。

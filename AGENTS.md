@@ -16,7 +16,7 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；838 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；858 条 + 7 条基准 ignore）
 # CI 在 GitHub Actions（windows-latest）跑 check / clippy / test + 示例项目冒烟，
 # 命令带 --locked；workflow 见 .github/workflows/ci.yml，取舍见决策记录 §三十四。
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
@@ -61,6 +61,11 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
   `QueryFilter::predicate` 只看**成员位**、不看矩阵（Unity `layerMask` 语义）；
   角色控制器例外，它的 `QueryFilter.groups` 必须带自身组。规则见
   `Docs/决策记录.md` §三十六。
+- **形变目标（morph target）**：`crates/xgame-render/src/morph.rs`。**CPU 变形 + 顶点缓冲
+  按需重写**（不是 GPU storage 累加）：权重变了才 `write_buffer`，没变零开销。增量数据
+  target-major 平铺且**已乘 `model_scale`**；权重优先级 = **剪辑权重轨道 > `Entity.morph_weights`
+  > 模型默认**（动画驱动的属性不听手动覆盖，Unity 同款）。图元没有 `morph` 就是静态网格,
+  不要为它留空分支。规则见 `Docs/决策记录.md` §三十七。
 - **编辑器热重载**：`crates/xgame-editor/src/hot_reload.rs` 每秒只扫内容目录的 metadata；
   改动由 `EditorState::hot_reload_tick` 应用，**动作后必须 `rebase`**（自己补的 `.meta`
   不能当外部改动，否则每秒自激）。场景文件永不自动覆盖；`--ui-shot` 不启用。
@@ -144,6 +149,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 关卡顺序 | `build.scenes` 顺序即关卡索引（下标 **0 起**）；**未配置 = 空**（不退回 `[entry_scene]`，脚本 `scene_index()` 返回 nil）；`entry_scene` 仍是唯一启动来源，清单第一项不兼任；`--check` 里"缺场景"算问题（exit 2）、"未列入"只提示（exit 0）；构建前逐关试装，路径规则只有 `normalize_scene_relative`（core） | §二十六 |
 | 预制体实例化 | 装载 trait `SceneLoader` 在 **core**（脚本层要能命名它，runtime 只 `pub use` 转出）；`spawn_prefab` / `spawn_prefab_under` **立即生成**（返回的 ID 当帧可用）；位置是**设置不是叠加**（世界 / 局部两种，子节点相对位置原样保留）；每个新实体逐条推 `ScriptCommand::EntitySpawned`（运行时据此补刚体）；失败三种（没装载器 / 读不到 / 空预制体）各自一条日志 + 返回 `nil`，**不留半个实例** | §二十七 |
 | 动画脚本控制 | 状态机优先（配了可用机器时 `clip/speed/looping` 由状态表决定）；`set_anim_clip` 只写 `Animator.clip` 并复用 `AnimationDriver` 的淡入；叠加层 / 层剪辑硬切；越界值钳住、非有限值忽略 | §三十 |
+| 形变目标（morph） | CPU 变形（权重不变就不重写缓冲）；增量 target-major 且已乘 `model_scale`；权重优先级 剪辑 > 实体 > 模型默认；长度不自洽**整段放弃**；索引逐下标、钳 0~1、上限 256；`set_morph` 立刻生效（不走命令队列） | §三十七 |
 | 热重载 | 1 Hz 轮询内容目录（只查 metadata）；`poll` 推进基线、**动作后必须 `rebase`**（防自激）；场景永不自动覆盖；脏材质草稿保留；`--ui-shot` 不启用 | §三十一 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |
 | CI | Windows + stable + `--locked`；单 job 顺序跑；不跑 `--screenshot` / 基准 / fmt | §三十四 |

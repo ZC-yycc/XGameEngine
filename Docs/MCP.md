@@ -211,7 +211,7 @@
 - **返回**（JSON 文本）：与 `xgame-editor --export-script-api` **完全同源**
   （`xgame_core::script_api::script_api`），含 `format_version` /
   `engine_version` / `conventions` / `hooks` / `value_types` / `categories`。
-- **内容规模**：158 个全局函数、17 个类别、6 个生命周期钩子、7 个值类型。
+- **内容规模**：160 个全局函数、17 个类别、6 个生命周期钩子、7 个值类型。
   每个函数有 `name` / `signature` / `params` / `returns` / `summary`；每个类别有
   稳定的 ASCII `id`（如 `transform` / `physics` / `ui`）与中文名。
 - **确定性**：没有时间戳 / 随机 ID；函数与类别按 [`脚本API.md`](脚本API.md) 的
@@ -292,7 +292,7 @@
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |
-| `crates/xgame-core/src/script_api.rs` | 脚本 API 清单（158 函数 / 17 类 / 6 钩子 / 值类型 / 约定）+ 确定性数据 + 防漂移测试（`--export-script-api` 与 `script_api_read` 共用的唯一内容源） |
+| `crates/xgame-core/src/script_api.rs` | 脚本 API 清单（160 函数 / 17 类 / 6 钩子 / 值类型 / 约定）+ 确定性数据 + 防漂移测试（`--export-script-api` 与 `script_api_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/script_api_cli.rs` | `--export-script-api` 的参数解析、JSON 序列化、stdout / `--out` 出口；文档函数名比对 |
 | `crates/xgame-core/src/check.rs` | `check_project()`（编辑器 `--check` 与 `project_check` 共用） |
 | `crates/xgame-core/src/asset.rs` | `AssetGuid` / `AssetMeta` / `AssetDatabase`（`asset_list` / `asset_import` / `asset_move` 与 `--check` 的资产诊断都读它） |

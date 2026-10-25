@@ -400,6 +400,38 @@ end
 | `set_anim_layer_weight(ctx, name, value)` | 写**自己实体**层栈中按层名匹配的层的权重（自动钳在 0~1） |
 | `set_anim_layer_clip(ctx, name, clip)` | 按层名切该层剪辑（硬切；层名不存在 = no-op） |
 
+### 4.11 形变目标（morph target）
+
+| 函数 | 说明 |
+|---|---|
+| `morph(ctx, id, target)` | 读实体第 `target` 个形变目标的权重；没有这个目标返回 `0` |
+| `set_morph(ctx, id, target, value)` | 写形变目标权重（钳在 0~1，可稀疏写；返回是否写入） |
+
+形变目标（blend shape）是顶点级的表情 / 形变：`0` = 基准形状，`1` = 完全变成
+那个目标。`target` 是**下标**，顺序与模型里 `targets[]` 一致（Inspector 的 Morph
+区块按同样的顺序列出名字，照那边数）。
+
+- **钳位**：写 `5.0` 存 `1.0`，`NaN` / `inf` 直接拒绝（返回 `false`），
+  越界下标（≥256）也拒绝 —— 脚本算错不该把场景文件撑爆。
+- **稀疏写**：`set_morph(ctx, id, 5, 1.0)` 会把 0..5 补成 0，其余表达式不用先
+  把整张表铺平。
+- **立刻生效**：渲染每帧读场景里的权重，不走命令队列（与 `set_layer` 不同）。
+- **动画优先**：剪辑里带权重轨道时（口型 / 表情动画），动画值**覆盖**这里写的
+  值 —— 与 Unity 一致，被动画驱动的属性不听手动覆盖。要"动画之上再叠一层"，
+  把这个目标做成单独的剪辑，别指望手动相加。
+
+```lua
+-- 受击时闭眼 0.2 秒（假设模型的目标 0 是 blink）
+function start(ctx)
+    state_timer = 0
+end
+
+function update(ctx)
+    state_timer = state_timer + delta(ctx)
+    set_morph(ctx, self_id(ctx), 0, state_timer < 0.2 and 1.0 or 0.0)
+end
+```
+
 层栈（`Animator.layers`）里每层可以是 Additive（加增量）或 Override（整段覆盖），
 配**骨骼遮罩**后就是"只管某个部位"的层（如只盖上半身、腿照走）。脚本按层的
 **名字**查找：重名按栈内顺序取第一个命中，层名不存在 / 没挂动画组件时**静默无操作**
