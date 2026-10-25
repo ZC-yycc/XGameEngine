@@ -84,6 +84,16 @@ pub struct CheckReport {
     /// 运行时会把越界值取模兜底（不 panic），但那是**保命**不是**正确**：
     /// 越界通常意味着手写场景抄错了层号，只有报出来才修得掉。
     pub invalid_layers: Vec<String>,
+    /// 场景文件里有**重复实体 ID** 的（"场景: id N ×K"）。
+    ///
+    /// 为什么要单独查：`load_scene` 会在加载边界把重复 ID 修掉
+    /// （`Scene::ensure_unique_ids`），于是"加载后再看"永远看不见这档事 ——
+    /// 报告全绿，而文件里的落盘伤一直跟着项目走。它是"删一个物体连带删别的"
+    /// 的成因，必须在**修之前**看原始文本才知道有没有。
+    ///
+    /// 修法是打开场景保存一次（修好的 ID 就写回去了）；重复 ID 下父子关系
+    /// 已不可还原，层级可能要手工校正。
+    pub duplicate_ids: Vec<String>,
     /// 发布清单（`build.scenes`）的有效顺序，已规范化去重。
     ///
     /// 空清单不在这里体现：`scene_order()` 会退化成只有入口场景，那是"未配置"
@@ -118,6 +128,7 @@ impl CheckReport {
             || !self.invalid_metas.is_empty()
             || !self.guid_conflicts.is_empty()
             || !self.invalid_layers.is_empty()
+            || !self.duplicate_ids.is_empty()
             || !self.build_missing_scenes.is_empty()
     }
 
@@ -138,6 +149,7 @@ impl CheckReport {
             + self.invalid_metas.len()
             + self.guid_conflicts.len()
             + self.invalid_layers.len()
+            + self.duplicate_ids.len()
             + self.build_missing_scenes.len()
     }
 
@@ -214,6 +226,9 @@ impl CheckReport {
         }
         for l in &self.invalid_layers {
             let _ = writeln!(out, "  bad layer:      {l}");
+        }
+        for d in &self.duplicate_ids {
+            let _ = writeln!(out, "  duplicate id:   {d}");
         }
         for s in &self.build_missing_scenes {
             let _ = writeln!(out, "  build scene missing: {s}");
@@ -306,6 +321,23 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
             // 单张关卡坏掉不阻断检查：报告里点名，其他场景照常查完。
             Err(e) => report.invalid_scenes.push(format!("{relative} ({e})")),
         }
+    }
+
+    // -- 重复实体 ID（只在原始文本上看得见）--------------------------------
+    //
+    // 必须放在**所有场景都装完之后**、并且独立于 `scenes` 里的内存副本：
+    // `load_scene` 已经把重复 ID 修好了（`ensure_unique_ids`），从内存里查
+    // 永远是干净的。这里按 `loaded` 的顺序回到磁盘原文再看一遍，输出才是
+    // 确定性的（同一次检查、多跑几次结果一致，方便 diff）。
+    for relative in &loaded {
+        if let Ok(duplicates) = project.scene_duplicate_ids(relative) {
+            for (id, count) in duplicates {
+                report
+                    .duplicate_ids
+                    .push(format!("{relative}: id {} ×{count}", id.raw()));
+            }
+        }
+        // 读不出来 / 解析失败上面已经按 `invalid_scenes` 报过，不重复报。
     }
 
     // -- 资产库诊断（只读，不生成任何文件）--------------------------------
@@ -513,6 +545,49 @@ mod tests {
         assert!(!report.has_issues(), "{}", report.render());
         assert_eq!(report.scenes, 1, "默认项目只有入口场景");
         assert!(report.entities >= 1, "默认场景至少有一个实体");
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 重复 ID 必须在**原始文件**上被看见。
+    ///
+    /// 加载边界会顺手把重复 ID 修掉（`Scene::ensure_unique_ids`），所以"加载后
+    /// 再检查"永远干净 —— 报告必须回到文件本身去看，否则 CI 全绿而落盘伤一直
+    /// 跟着项目走（它是"删一个物体连带删别的"的成因）。
+    ///
+    /// 旧实现根本没有这个字段（编译都过不去，那是最强形式的"红"）；顺带钉住
+    /// **只读**契约：查一次不能把文件改好。
+    #[test]
+    fn duplicate_entity_ids_are_reported_even_though_loading_repairs_them() {
+        let project = temp_project("dup_ids");
+        let entry = project.manifest().entry_scene.clone();
+        let mut scene = project.load_entry_scene().expect("加载默认场景");
+        let shared = scene.add_entity(crate::Entity::new("Twin"));
+        let mut second = crate::Entity::new("Twin Twin");
+        second.id = shared;
+        scene.entities.push(second);
+        project.write_scene(&entry, &scene).expect("写回场景");
+
+        let report = check_project(project.root()).expect("检查应能跑完");
+        assert!(
+            !report.duplicate_ids.is_empty(),
+            "重复 ID 必须被报出来：{}",
+            report.render()
+        );
+        assert!(
+            report.duplicate_ids[0].contains("×2"),
+            "应当报出出现次数，实际 {}",
+            report.duplicate_ids[0]
+        );
+        // 文本输出也要有：CI 读的是 `--check` 的标准输出，不是结构体。
+        assert!(
+            report.render().contains("duplicate id"),
+            "报告文本必须包含这一行：{}",
+            report.render()
+        );
+
+        let after = project.scene_duplicate_ids(&entry).expect("再读一次");
+        assert!(!after.is_empty(), "检查必须只读，不能把重复 ID 修好写回去");
+
         let _ = std::fs::remove_dir_all(project.root());
     }
 

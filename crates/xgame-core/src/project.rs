@@ -46,6 +46,7 @@ use crate::asset::{
     encode_scene_references, AssetDatabase, AssetGuid, AssetKind, AssetMoveReport, ImportSettings,
 };
 use crate::config::{BuildConfig, ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
+use crate::id::EntityId;
 use crate::layers::Layers;
 use crate::material::{MaterialAsset, MATERIAL_EXTENSION};
 use crate::prefab::{Prefab, PREFAB_EXTENSION};
@@ -994,6 +995,24 @@ impl ProjectHandle {
     /// 加载清单里指定的入口场景。
     pub fn load_entry_scene(&self) -> Result<Scene, String> {
         self.load_scene(&self.manifest.entry_scene)
+    }
+
+    /// 只读地统计某个场景文件里的重复实体 ID（**不修复、不写盘**）。
+    ///
+    /// `--check` 专用。`load_scene` 会在加载边界调 `ensure_unique_ids` 把重复
+    /// ID 修掉，于是一切"加载后再检查"的路径都看不见这类落盘伤 —— 而它正是
+    /// "删一个物体连带删别的"的成因。这里回到**原始文本**再解析一遍：只报告，
+    /// 不动数据（检查必须只读，见模块文档）。
+    ///
+    /// 注意这是**第二次解析**同一个文件。检查是低频 CLI 命令，多一次解析换
+    /// "CI 能看见文件里的病"，划算。
+    pub fn scene_duplicate_ids(&self, relative: &str) -> Result<Vec<(EntityId, usize)>, String> {
+        let path = self.path(relative);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
+        let scene: Scene =
+            ron::from_str(&text).map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))?;
+        Ok(scene.duplicate_ids())
     }
 
     /// 把场景写回项目内的相对路径。

@@ -930,6 +930,31 @@ impl Scene {
         repaired
     }
 
+    /// **只报告**重复的实体 ID（`(id, 出现次数)`，按首次出现排序）。
+    ///
+    /// 与 [`Self::ensure_unique_ids`] 是一对：那个在加载边界**修数据**，这个
+    /// 只**看数据**。存在的理由很具体 —— 加载期既然会顺手修好，任何"加载后
+    /// 再检查"的路径（`--check` / CI / MCP）就永远看不到落盘伤，而落盘伤正是
+    /// "删一个物体连带删别的"的成因。想知道文件里到底有没有病，只能在修之前看。
+    ///
+    /// 顺序按**首次出现**排，不用 `HashMap` 的迭代顺序：`--check` 的输出要能
+    /// 直接 diff，随机顺序会让每次运行都不一样。
+    pub fn duplicate_ids(&self) -> Vec<(EntityId, usize)> {
+        let mut counts: std::collections::HashMap<EntityId, usize> =
+            std::collections::HashMap::with_capacity(self.entities.len());
+        for entity in &self.entities {
+            *counts.entry(entity.id).or_insert(0) += 1;
+        }
+        let mut reported: std::collections::HashSet<EntityId> = std::collections::HashSet::new();
+        self.entities
+            .iter()
+            .filter_map(|entity| {
+                let count = counts[&entity.id];
+                (count > 1 && reported.insert(entity.id)).then_some((entity.id, count))
+            })
+            .collect()
+    }
+
     /// 场景是否为空（无实体）。
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()

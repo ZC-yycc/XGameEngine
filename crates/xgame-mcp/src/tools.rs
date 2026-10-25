@@ -661,6 +661,9 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         "guid_conflicts": report.guid_conflicts,
         // 层索引越界（运行时取模兜底，但那是保命不是正确）：与 --check 同一份报告。
         "invalid_layers": report.invalid_layers,
+        // 场景文件里的重复实体 ID：加载期会被悄悄修好，所以这是唯一能看到
+        // 落盘伤的字段（"删一个物体连带删别的"的成因）。
+        "duplicate_ids": report.duplicate_ids,
         "invalid_scenes": report.invalid_scenes,
         // 发布清单（`project.ron` 的 `build.scenes`）：顺序即关卡索引。
         // 未配置清单时 `build_scene_order` 为空 —— 与"配了一个场景"是两回事。
