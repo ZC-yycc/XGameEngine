@@ -83,13 +83,14 @@ impl LuaCtx {
 // 不会把随机值当地址解引用 —— 伪造 lightuserdata 需要 Lua 语言层没有的操作。
 impl FromLua for LuaCtx {
     fn from_lua(value: Value, _lua: &Lua) -> mlua::Result<Self> {
-        let mlua::LightUserData(ptr) = value.as_light_userdata().ok_or_else(|| {
-            Error::FromLuaConversionError {
-                from: value.type_name(),
-                to: "ScriptCtx".to_owned(),
-                message: Some("期望脚本上下文句柄（第一个参数）".to_owned()),
-            }
-        })?;
+        let mlua::LightUserData(ptr) =
+            value
+                .as_light_userdata()
+                .ok_or_else(|| Error::FromLuaConversionError {
+                    from: value.type_name(),
+                    to: "ScriptCtx".to_owned(),
+                    message: Some("期望脚本上下文句柄（第一个参数）".to_owned()),
+                })?;
         // SAFETY: 槽由 LuaHost 独占持有，任何脚本可见的执行都发生在钩子调用
         // 窗口内（见 `LuaCtx` 类型文档的安全论证），窗口内槽已写入本次 ctx。
         Ok(unsafe { *(ptr as *const LuaCtx) })
@@ -180,7 +181,9 @@ fn ray_hit_table(lua: &Lua, hit: RayHit) -> mlua::Result<Table> {
 fn register_math(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     globals.set(
         "vec3",
-        lua.create_function(|lua, (x, y, z): (f32, f32, f32)| vec3_to_lua(lua, Vec3::new(x, y, z)))?,
+        lua.create_function(|lua, (x, y, z): (f32, f32, f32)| {
+            vec3_to_lua(lua, Vec3::new(x, y, z))
+        })?,
     )?;
     globals.set(
         "vec2",
@@ -370,9 +373,7 @@ fn register_camera(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     // 返回 0 同一个哨兵值，脚本不必处理 nil）。
     globals.set(
         "active_camera",
-        lua.create_function(|_, ctx: LuaCtx| {
-            Ok(ctx.game().active_camera().map_or(0, raw_i64))
-        })?,
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().active_camera().map_or(0, raw_i64)))?,
     )?;
     globals.set(
         "set_active_camera",
@@ -439,9 +440,7 @@ fn register_entity(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     )?;
     globals.set(
         "entity_model",
-        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
-            Ok(ctx.game().entity_model(id_of(id)))
-        })?,
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().entity_model(id_of(id))))?,
     )?;
     globals.set(
         "set_entity_model",
@@ -466,7 +465,8 @@ fn register_entity(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     globals.set(
         "set_material",
         lua.create_function(
-            |_, (ctx, id, r, g, b, a, metallic, roughness): (
+            |_,
+             (ctx, id, r, g, b, a, metallic, roughness): (
                 LuaCtx,
                 i64,
                 f32,
@@ -600,15 +600,25 @@ fn register_spawn(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         "spawn_entity_at",
         lua.create_function(
             |_, (ctx, name, model, x, y, z): (LuaCtx, String, String, f32, f32, f32)| {
-                Ok(raw_i64(ctx.game().spawn_entity_at(&name, &model, Vec3::new(x, y, z))))
+                Ok(raw_i64(ctx.game().spawn_entity_at(
+                    &name,
+                    &model,
+                    Vec3::new(x, y, z),
+                )))
             },
         )?,
     )?;
     globals.set(
         "spawn_ball",
-        lua.create_function(|_, (ctx, name, radius, x, y, z): (LuaCtx, String, f32, f32, f32, f32)| {
-            Ok(raw_i64(ctx.game().spawn_ball(&name, radius, Vec3::new(x, y, z))))
-        })?,
+        lua.create_function(
+            |_, (ctx, name, radius, x, y, z): (LuaCtx, String, f32, f32, f32, f32)| {
+                Ok(raw_i64(ctx.game().spawn_ball(
+                    &name,
+                    radius,
+                    Vec3::new(x, y, z),
+                )))
+            },
+        )?,
     )?;
     globals.set(
         "spawn_static_box",
@@ -626,14 +636,12 @@ fn register_spawn(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     // 成功，所以直接给 id；预制体要读盘，失败是常态，脚本必须能判）。
     globals.set(
         "spawn_prefab",
-        lua.create_function(
-            |_, (ctx, path, x, y, z): (LuaCtx, String, f32, f32, f32)| {
-                Ok(ctx
-                    .game()
-                    .spawn_prefab(&path, Vec3::new(x, y, z))
-                    .map(raw_i64))
-            },
-        )?,
+        lua.create_function(|_, (ctx, path, x, y, z): (LuaCtx, String, f32, f32, f32)| {
+            Ok(ctx
+                .game()
+                .spawn_prefab(&path, Vec3::new(x, y, z))
+                .map(raw_i64))
+        })?,
     )?;
     globals.set(
         "spawn_prefab_under",
@@ -690,7 +698,8 @@ fn register_scene(lua: &Lua, globals: &Table) -> mlua::Result<()> {
             // 负数在 Lua 里可能来自 `index - 1` 算错：按越界处理（记 error），
             // 不当成 usize 溢出后变成天文数字。
             if index < 0 {
-                ctx.game().error(format!("load_scene_at({index}) 失败：关卡下标不能为负"));
+                ctx.game()
+                    .error(format!("load_scene_at({index}) 失败：关卡下标不能为负"));
                 return Ok(());
             }
             ctx.game().load_scene_at(index as usize);
@@ -724,9 +733,9 @@ fn register_physics(lua: &Lua, globals: &Table) -> mlua::Result<()> {
                 f32,
                 f32,
             )| {
-                let hit = ctx
-                    .game()
-                    .raycast(Vec3::new(ox, oy, oz), Vec3::new(dx, dy, dz), max_dist);
+                let hit =
+                    ctx.game()
+                        .raycast(Vec3::new(ox, oy, oz), Vec3::new(dx, dy, dz), max_dist);
                 ray_hit_table(lua, hit)
             },
         )?,
@@ -834,9 +843,7 @@ fn register_physics(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     )?;
     globals.set(
         "character_jump",
-        lua.create_function(|_, (ctx, speed): (LuaCtx, f32)| {
-            Ok(ctx.game().character_jump(speed))
-        })?,
+        lua.create_function(|_, (ctx, speed): (LuaCtx, f32)| Ok(ctx.game().character_jump(speed)))?,
     )?;
     globals.set(
         "character_velocity",
@@ -1067,13 +1074,11 @@ fn register_state(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         lua.create_function(|_, ctx: LuaCtx| {
             if let Some(t) = ctx.state() {
                 // mlua 的 Table 没有 clear()，遍历键逐个置 nil。
-                let keys: Vec<Value> = match t
-                    .pairs::<Value, Value>()
-                    .collect::<mlua::Result<Vec<_>>>()
-                {
-                    Ok(pairs) => pairs.into_iter().map(|(k, _)| k).collect(),
-                    Err(_) => return Ok(()),
-                };
+                let keys: Vec<Value> =
+                    match t.pairs::<Value, Value>().collect::<mlua::Result<Vec<_>>>() {
+                        Ok(pairs) => pairs.into_iter().map(|(k, _)| k).collect(),
+                        Err(_) => return Ok(()),
+                    };
                 for k in keys {
                     let _ = t.set(k, Value::Nil);
                 }
@@ -1131,6 +1136,23 @@ fn register_animation(lua: &Lua, globals: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // -- 形变目标（morph target）--
+    //
+    // 逐下标接口：目标名活在渲染资产里，脚本层看不到网格。
+    globals.set(
+        "morph",
+        lua.create_function(|_, (ctx, id, target): (LuaCtx, i64, i64)| {
+            Ok(ctx.game().morph(id_of(id), target.max(0) as usize))
+        })?,
+    )?;
+    globals.set(
+        "set_morph",
+        lua.create_function(|_, (ctx, id, target, value): (LuaCtx, i64, i64, f32)| {
+            Ok(ctx
+                .game()
+                .set_morph(id_of(id), target.max(0) as usize, value))
+        })?,
+    )?;
     globals.set(
         "set_anim_param",
         lua.create_function(|_, (ctx, name, value): (LuaCtx, String, f32)| {
@@ -1164,10 +1186,12 @@ fn register_animation(lua: &Lua, globals: &Table) -> mlua::Result<()> {
 fn register_audio(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     globals.set(
         "play_sound",
-        lua.create_function(|_, (ctx, clip, volume, pitch): (LuaCtx, String, f32, f32)| {
-            ctx.game().play_sound(&clip, volume, pitch);
-            Ok(())
-        })?,
+        lua.create_function(
+            |_, (ctx, clip, volume, pitch): (LuaCtx, String, f32, f32)| {
+                ctx.game().play_sound(&clip, volume, pitch);
+                Ok(())
+            },
+        )?,
     )?;
     globals.set(
         "play_sound_at",

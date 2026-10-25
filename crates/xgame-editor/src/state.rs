@@ -8,15 +8,15 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
-use xgame_math::glam::{Quat, Vec3};
+use strum::Display;
 use xgame_core::prefab::{prefab_display_name, Prefab, PrefabInstanceRef};
 use xgame_core::project::{normalize_scene_relative, ProjectHandle};
 use xgame_core::{
-    AssetKind, Entity, EntityId, FieldDesc, ImportSettings, Inspect, MaterialAsset, Scene, Transform,
+    AssetKind, Entity, EntityId, FieldDesc, ImportSettings, Inspect, MaterialAsset, Scene,
+    Transform,
 };
+use xgame_math::glam::{Quat, Vec3};
 use xgame_physics::DebugLine;
-use strum::Display;
-
 
 /// 资产文件名去掉扩展名（`Resources/Box.glb` → `Box`；`A.prefab.ron` → `A`）。
 ///
@@ -199,7 +199,6 @@ impl LogLevel {
     }
 }
 
-
 /// 控制台保留的最大消息条数。
 ///
 /// 面板只渲染最近 500 条（见 `panels/console.rs`），所以这个上限纯粹是**内存**
@@ -258,8 +257,8 @@ impl EditorCamera {
 impl Default for EditorCamera {
     fn default() -> Self {
         Self {
-            yaw: -2.356,                // ≈ −135° — 从 (+, +, +) 方向看向原点
-            pitch: -0.524,              // ≈ −30°  — 略微向下
+            yaw: -2.356,   // ≈ −135° — 从 (+, +, +) 方向看向原点
+            pitch: -0.524, // ≈ −30°  — 略微向下
             position: Vec3::new(5.0, 5.0, 5.0),
             sensitivity: Self::DEFAULT_SENSITIVITY,
             pan_speed: Self::DEFAULT_PAN_SPEED,
@@ -268,7 +267,6 @@ impl Default for EditorCamera {
 }
 
 impl EditorCamera {
-    
     /// 由 yaw/pitch 计算的前方向单位向量。
     pub fn forward(&self) -> Vec3 {
         Vec3::new(
@@ -286,7 +284,7 @@ impl EditorCamera {
 
     pub fn rotate(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * self.sensitivity;
-        self.pitch -= dy * self.sensitivity;   // egui 的 dy 向下为正，所以取反
+        self.pitch -= dy * self.sensitivity; // egui 的 dy 向下为正，所以取反
         self.pitch = self.pitch.clamp(
             -std::f32::consts::FRAC_PI_2 + 0.01,
             std::f32::consts::FRAC_PI_2 - 0.01,
@@ -528,7 +526,6 @@ pub struct EditorState {
     #[cfg(test)]
     pub(crate) last_render_view_proj: Option<glam::Mat4>,
 
-
     // -- Game runtime (play mode) --
     /// 游戏运行时——仅在 Play 模式下为 `Some`。
     /// 拥有物理世界、输入与脚本宿主。
@@ -767,12 +764,12 @@ impl EditorState {
         //
         // 只探测入口场景：切场景不弹框。多场景留下的副本仍然在磁盘上，等它
         // 作为启动场景打开时会再问一次。
-        let pending_autosave = project
-            .autosave_modified(&current_scene)
-            .map(|written| crate::autosave::AutosaveNotice {
+        let pending_autosave = project.autosave_modified(&current_scene).map(|written| {
+            crate::autosave::AutosaveNotice {
                 scene: current_scene.clone(),
                 written: Some(written),
-            });
+            }
+        });
         // 其它场景的副本：不弹框，但打开时在 Console 里说一声 ——
         // 否则它们会安静地堆在 `.autosave/` 里没人知道。
         let other_autosaves = project
@@ -1108,10 +1105,10 @@ impl EditorState {
             }
             AssetKind::Model => {
                 self.push_undo();
-                let id = self.next_entity_id;
-                self.next_entity_id += 1;
                 let idx = self.scene.entities.len();
-                let mut entity = Entity::new(format!("{} ({id})", asset_stem(relative)));
+                let stem = asset_stem(relative);
+                let name = self.claim_entity_name(|id| format!("{stem} ({id})"));
+                let mut entity = Entity::new(name);
                 entity.model = relative.to_string();
                 entity.transform.position = position;
                 self.scene.entities.push(entity);
@@ -1148,7 +1145,6 @@ impl EditorState {
         point.y = point.y.max(0.0);
         point
     }
-
 
     /// 是否处于编辑模式（非 Play 且非 Pause）。
     pub fn is_editing(&self) -> bool {
@@ -1273,10 +1269,14 @@ impl EditorState {
             self.log_warning("Cannot undo while playing");
             return;
         }
+        // 撤销整份换掉场景，索引的**含义**随之改变：同一个下标可能已经是另一个
+        // 实体。只做 `clamp_selection`（夹到合法范围）是不够的 —— 索引合法但指向
+        // 别人，下一次 Delete 就删错对象。按 ID 记住"选中了谁"，换完照 ID 找回来。
+        let selected_id = self.selected_id();
         match self.undo_stack.undo(&self.scene) {
             Some(previous) => {
                 self.scene = previous;
-                self.clamp_selection();
+                self.reselect(selected_id);
                 self.undo_pending = None;
                 self.log_info("Undo");
             }
@@ -1290,10 +1290,11 @@ impl EditorState {
             self.log_warning("Cannot redo while playing");
             return;
         }
+        let selected_id = self.selected_id();
         match self.undo_stack.redo(&self.scene) {
             Some(next) => {
                 self.scene = next;
-                self.clamp_selection();
+                self.reselect(selected_id);
                 self.undo_pending = None;
                 self.log_info("Redo");
             }
@@ -1328,6 +1329,22 @@ impl EditorState {
     /// 与其在十几处逐个补 `get()`，不如在每帧入口做一次 O(1) 收敛：越界就夹回
     /// 合法的邻居（空场景则清空选择）。这层"总闸"让所有路径天然安全，新增操作
     /// 也不必再记得维护它。
+    /// 当前选中实体的 ID（没有选中、或索引已越界时为 `None`）。
+    ///
+    /// 选中状态对外是**索引**（面板、gizmo、Inspector 都按索引取），但任何
+    /// "整份换掉场景"的操作都必须先把它换成 ID —— 索引只在同一份场景里有意义。
+    fn selected_id(&self) -> Option<EntityId> {
+        self.selected_entity
+            .and_then(|i| self.scene.entities.get(i))
+            .map(|e| e.id)
+    }
+
+    /// 按 ID 恢复选中；实体已经不存在就取消选中，绝不退回"同下标的另一个实体"。
+    fn reselect(&mut self, id: Option<EntityId>) {
+        self.selected_entity = id.and_then(|id| self.scene.index_of(id));
+        self.clamp_selection();
+    }
+
     pub fn clamp_selection(&mut self) {
         if let Some(i) = self.selected_entity {
             if i >= self.scene.entities.len() {
@@ -1375,11 +1392,29 @@ impl EditorState {
         if self.console_messages.len() >= MAX_CONSOLE_MESSAGES {
             self.console_messages.drain(..CONSOLE_TRIM_BATCH);
         }
-        self.console_messages
-            .push(LogMessage::new(level, text));
+        self.console_messages.push(LogMessage::new(level, text));
     }
 
     // -- 实体操作 --
+
+    /// 领取一个**不与场景里现有实体重名**的名字。
+    ///
+    /// `next_entity_id` 只是显示用的序号：场景从盘上加载回来时它不会跟着走
+    /// （新进程从 1 开始），于是"新建实体"会和读盘实体撞出两个同名对象
+    /// （两个 `GameObject (1)`）。删除日志、层级面板都只有名字 —— 重名会让
+    /// 作者以为删错了对象，也让排查"删一个少两个"这类问题时看不出谁是谁。
+    ///
+    /// 这里直接按**场景现状**去重，而不是去猜序号该从哪儿续。
+    fn claim_entity_name(&mut self, make: impl Fn(u32) -> String) -> String {
+        loop {
+            let id = self.next_entity_id;
+            self.next_entity_id += 1;
+            let name = make(id);
+            if !self.scene.entities.iter().any(|e| e.name == name) {
+                return name;
+            }
+        }
+    }
 
     /// 向场景添加一个新的空实体并返回其索引。
     ///
@@ -1390,14 +1425,11 @@ impl EditorState {
             return usize::MAX;
         }
         self.push_undo();
-        let id = self.next_entity_id;
-        self.next_entity_id += 1;
+        let name = self.claim_entity_name(|id| format!("GameObject ({id})"));
         let idx = self.scene.entities.len();
-        self.scene.entities.push(
-            Entity::new(format!("GameObject ({})", id)),
-        );
+        self.scene.entities.push(Entity::new(name.clone()));
         self.selected_entity = Some(idx);
-        self.log_info(format!("Created new GameObject ({})", id));
+        self.log_info(format!("Created {name}"));
         idx
     }
 
@@ -1411,8 +1443,6 @@ impl EditorState {
             return usize::MAX;
         }
         self.push_undo();
-        let id = self.next_entity_id;
-        self.next_entity_id += 1;
         let idx = self.scene.entities.len();
 
         let (label, element) = match kind {
@@ -1424,11 +1454,12 @@ impl EditorState {
         let size = element.size();
         let element = element.at([0.0, 0.0], 40.0, 40.0, size[0], size[1]);
 
-        let mut entity = Entity::new(format!("{label} ({id})"));
+        let name = self.claim_entity_name(|id| format!("{label} ({id})"));
+        let mut entity = Entity::new(name.clone());
         entity.ui = Some(element);
         self.scene.entities.push(entity);
         self.selected_entity = Some(idx);
-        self.log_info(format!("Created {label} ({id})"));
+        self.log_info(format!("Created {name}"));
         idx
     }
 
@@ -1443,14 +1474,14 @@ impl EditorState {
             return usize::MAX;
         }
         self.push_undo();
-        let id = self.next_entity_id;
-        self.next_entity_id += 1;
         let idx = self.scene.entities.len();
-        let mut entity = Entity::new(format!("{} ({})", kind.label(), id));
+        let label = kind.label();
+        let name = self.claim_entity_name(|id| format!("{label} ({id})"));
+        let mut entity = Entity::new(name.clone());
         entity.model = kind.uri();
         self.scene.entities.push(entity);
         self.selected_entity = Some(idx);
-        self.log_info(format!("Created {} ({})", kind.label(), id));
+        self.log_info(format!("Created {name}"));
         idx
     }
 
@@ -1515,13 +1546,26 @@ impl EditorState {
         let Some(idx) = self.selected_entity else {
             return;
         };
+        // 索引越界（选中了已经被别处删掉的对象）：先挡掉再压撤销栈，
+        // 否则会留下一个"什么也没改"的撤销步骤。
+        if idx >= self.scene.entities.len() {
+            return;
+        }
         self.push_undo();
 
+        // 名字要在删除**之前**取：`remove_subtree` 返回的是"按场景顺序"筛出来的
+        // 实体，`removed[0]` 不一定是这棵子树的根（重排过层级的场景里很常见），
+        // 用它会打出另一个实体的名字 —— 作者会以为删错了对象。
+        let name = self
+            .scene
+            .entities
+            .get(idx)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
         let removed = self.scene.remove_subtree(idx);
         if removed.is_empty() {
             return;
         }
-        let name = removed[0].name.clone();
         let children = removed.len() - 1;
         // 索引在整棵子树被移除后整体位移，收敛到合法范围
         self.selected_entity = if self.scene.entities.is_empty() {
@@ -1766,10 +1810,7 @@ impl EditorState {
             self.log_error(format!("应用预制体失败: {e}"));
             return;
         }
-        self.log_success(format!(
-            "已把改动应用到预制体 '{}' ({source})",
-            prefab.name
-        ));
+        self.log_success(format!("已把改动应用到预制体 '{}' ({source})", prefab.name));
     }
 
     /// 用资产覆盖回实例（Unity 的 Revert）。
@@ -1884,11 +1925,8 @@ impl EditorState {
         // （脚本编译错误），那时状态应该还是"干净的编辑态"。
         self.play_snapshot = Some(self.scene.clone());
         let registry = self.plugins.build_registry();
-        let mut runtime = crate::game_runtime::GameRuntime::start(
-            self.scene.clone(),
-            &self.project,
-            registry,
-        );
+        let mut runtime =
+            crate::game_runtime::GameRuntime::start(self.scene.clone(), &self.project, registry);
         // Play 跑的是**当前编辑的场景**（多场景编辑下未必是清单里的启动场景）：
         // 脚本 `current_scene()` 与"切到 B 再切回来"都靠这个起点。
         runtime.set_current_scene(&self.current_scene);
@@ -1951,9 +1989,7 @@ impl EditorState {
             crate::plugin_build::BuildOutcome::Success(dlls) => {
                 let synced = crate::plugin_build::sync_plugins_dir(self.project.root(), &dlls);
                 if synced.is_empty() {
-                    self.log_error(
-                        "插件编译成功，但产物一个都没能拷进 Plugins/（见上方错误）",
-                    );
+                    self.log_error("插件编译成功，但产物一个都没能拷进 Plugins/（见上方错误）");
                     self.pending_play = false;
                     return;
                 }
@@ -2034,7 +2070,10 @@ impl EditorState {
         name: &str,
     ) -> Option<(&str, &mut dyn Inspect)> {
         if self.game_runtime.is_some() {
-            let (live_name, comp) = self.game_runtime.as_mut()?.behavior_at_mut(entity_id, slot)?;
+            let (live_name, comp) = self
+                .game_runtime
+                .as_mut()?
+                .behavior_at_mut(entity_id, slot)?;
             // 下标对上了但类型换了（Play 期间改场景改不到这里，但 Edit 侧
             // 快照恢复后索引会平移）—— 让调用方知道这份数据不适用。
             return (live_name == name).then_some((live_name, comp));
@@ -2220,7 +2259,9 @@ impl EditorState {
     pub fn particle_stats(&self) -> xgame_particle::ParticleStats {
         self.game_runtime
             .as_ref()
-            .map_or(xgame_particle::ParticleStats::default(), |rt| rt.particle_stats())
+            .map_or(xgame_particle::ParticleStats::default(), |rt| {
+                rt.particle_stats()
+            })
     }
 
     /// 最近一帧的绘制读数（合批 / 剔除 / 半透明）。
@@ -2785,9 +2826,7 @@ impl EditorState {
             self.log_error(format!("设置启动场景失败: {message}"));
             return Err(message);
         }
-        self.log_success(format!(
-            "启动场景已设为 {relative}（下次打开 / 构建生效）"
-        ));
+        self.log_success(format!("启动场景已设为 {relative}（下次打开 / 构建生效）"));
         Ok(())
     }
 
@@ -2845,20 +2884,19 @@ impl EditorState {
         ));
         Ok(())
     }
-/// 设置没通过校验：记一条 error、把草稿放回去（窗口继续显示），返回 `Err`。
-///
-/// 独立成函数而不是闭包：闭包捕获 `&mut self` 会把它锁到最后一个使用点，
-/// 中间任何 `self.log_warning(...)` 都变成借用冲突（补"发布清单"校验时踩到了）。
-fn reject_settings(
-    state: &mut EditorState,
-    message: String,
-    draft: xgame_core::project::Project,
-) -> Result<(), String> {
-    state.log_error(format!("设置未应用: {message}"));
-    state.settings_draft = Some(draft);
-    Err(message)
-}
-
+    /// 设置没通过校验：记一条 error、把草稿放回去（窗口继续显示），返回 `Err`。
+    ///
+    /// 独立成函数而不是闭包：闭包捕获 `&mut self` 会把它锁到最后一个使用点，
+    /// 中间任何 `self.log_warning(...)` 都变成借用冲突（补"发布清单"校验时踩到了）。
+    fn reject_settings(
+        state: &mut EditorState,
+        message: String,
+        draft: xgame_core::project::Project,
+    ) -> Result<(), String> {
+        state.log_error(format!("设置未应用: {message}"));
+        state.settings_draft = Some(draft);
+        Err(message)
+    }
 
     /// 把设置草稿写回内存清单并落盘（校验集中在这里，面板只管画）。
     ///
@@ -2867,7 +2905,6 @@ fn reject_settings(
         let Some(mut draft) = self.settings_draft.take() else {
             return Ok(());
         };
-
 
         draft.name = draft.name.trim().to_string();
         if draft.name.is_empty() {
@@ -2957,9 +2994,7 @@ fn reject_settings(
         }
         draft.build.scenes = order;
         for duplicate in duplicates {
-            self.log_warning(format!(
-                "发布清单里 '{duplicate}' 重复，已只保留第一次出现"
-            ));
+            self.log_warning(format!("发布清单里 '{duplicate}' 重复，已只保留第一次出现"));
         }
         // 入口不在清单里只提醒、不拦：入口可以是"启动器"场景（不进关卡轮转），
         // 那时脚本的 `scene_index()` 会返回 nil —— 语义是对的，不该强迫用户改。
@@ -3061,7 +3096,10 @@ mod tests {
             .expect("模型应能放进场景");
         assert_eq!(state.scene.entities.len(), before + 1);
         let entity = &state.scene.entities[idx];
-        assert_eq!(entity.model, "Resources/Box.glb", "实体引用必须是路径（内存态）");
+        assert_eq!(
+            entity.model, "Resources/Box.glb",
+            "实体引用必须是路径（内存态）"
+        );
         assert_eq!(entity.transform.position, Vec3::new(1.0, 0.0, -2.0));
         assert!(
             entity.name.starts_with("Box"),
@@ -3072,11 +3110,7 @@ mod tests {
         assert!(state.can_undo(), "放置必须进撤销栈");
 
         state.undo();
-        assert_eq!(
-            state.scene.entities.len(),
-            before,
-            "撤销应撤掉这次放置"
-        );
+        assert_eq!(state.scene.entities.len(), before, "撤销应撤掉这次放置");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -3088,7 +3122,9 @@ mod tests {
         std::fs::create_dir_all(state.project.path("Resources")).unwrap();
         std::fs::write(state.project.path("Resources/Box.glb"), b"glb").unwrap();
         let mut prefab = Prefab::new("Tower");
-        prefab.entities.push(Entity::new("Body").with_model("Resources/Box.glb"));
+        prefab
+            .entities
+            .push(Entity::new("Body").with_model("Resources/Box.glb"));
         let relative = state.project.prefab_path_for("Tower");
         state.project.write_prefab(&relative, &prefab).unwrap();
         state.refresh_assets();
@@ -3098,7 +3134,10 @@ mod tests {
             .spawn_asset_at(&relative, Vec3::new(3.0, 0.0, 4.0))
             .expect("预制体应能实例化");
         assert_eq!(state.scene.entities.len(), before + 1);
-        assert_eq!(state.scene.entities[idx].transform.position, Vec3::new(3.0, 0.0, 4.0));
+        assert_eq!(
+            state.scene.entities[idx].transform.position,
+            Vec3::new(3.0, 0.0, 4.0)
+        );
         assert!(
             state.scene.entities[idx].prefab.is_some(),
             "实例化出来的实体必须带来源标记"
@@ -3173,10 +3212,7 @@ mod tests {
 
         let second = state.create_material("Wood").expect("重名也应能创建");
         assert_eq!(second, "Resources/Materials/Wood 2.mat");
-        assert!(
-            state.project.path(&first).is_file(),
-            "新建不得覆盖已有材质"
-        );
+        assert!(state.project.path(&first).is_file(), "新建不得覆盖已有材质");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -3294,7 +3330,9 @@ mod tests {
 
         state.scene = xgame_core::Scene::new("clamp");
         for i in 0..3 {
-            state.scene.add_entity(xgame_core::Entity::new(format!("e{i}")));
+            state
+                .scene
+                .add_entity(xgame_core::Entity::new(format!("e{i}")));
         }
 
         // 远越界 → 收到最后一个。
@@ -3312,6 +3350,69 @@ mod tests {
         state.selected_entity = Some(0);
         state.clamp_selection();
         assert_eq!(state.selected_entity, Some(0));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 撤销后选中必须按 **ID** 还原，不能留在"同一个下标上的另一个实体"。
+    ///
+    /// 索引只在同一份场景里有意义。旧实现只调 `clamp_selection()` 把索引夹到
+    /// 合法范围 —— 夹完的索引**合法但指向别人**，下一次 Delete 就删错对象
+    /// （而且随后的子树删除会把那个实体的子节点一起带走）。
+    #[test]
+    fn undo_does_not_leave_selection_pointing_at_another_entity() {
+        let (mut state, base) = temp_state("undo_select");
+        state.scene = xgame_core::Scene::new("undo");
+        let a = state.scene.add_entity(xgame_core::Entity::new("A"));
+        let b = state.scene.add_entity(xgame_core::Entity::new("B"));
+
+        state.selected_entity = Some(state.scene.index_of(b).unwrap());
+        state.create_entity();
+        assert_eq!(state.scene.entities.len(), 3, "新建后应当有 3 个实体");
+        let created = state.selected_entity.expect("新建实体应当被选中");
+        let created_id = state.scene.entities[created].id;
+
+        state.undo();
+
+        assert_eq!(state.scene.entities.len(), 2, "撤销应当回到 2 个实体");
+        assert!(
+            state.scene.index_of(created_id).is_none(),
+            "被撤销掉的实体不该还在场景里"
+        );
+        assert_eq!(
+            state.selected_entity, None,
+            "选中的实体已经不存在，必须取消选中 —— 不能退回同下标的 B"
+        );
+        assert!(state.scene.index_of(a).is_some(), "A 应当还在");
+        assert!(state.scene.index_of(b).is_some(), "B 应当还在");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 新建实体不能和"从盘上读回来"的实体重名。
+    ///
+    /// 显示序号 `next_entity_id` 不随场景加载同步（新进程从 1 开始），旧实现
+    /// 于是会造出第二个 `GameObject (1)`。删除日志与层级面板都只有名字 ——
+    /// 重名会让作者以为删错了对象，也让"删一个少两个"的现场无法辨认。
+    #[test]
+    fn created_entities_never_reuse_an_existing_name() {
+        let (mut state, base) = temp_state("unique_name");
+        state.scene = xgame_core::Scene::new("names");
+        state
+            .scene
+            .add_entity(xgame_core::Entity::new("GameObject (1)"));
+        state.next_entity_id = 1; // 新进程的真实起点
+
+        state.create_entity();
+
+        let names: Vec<&str> = state
+            .scene
+            .entities
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1], "新建实体不能与已有实体重名：{names:?}");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -3517,7 +3618,11 @@ mod tests {
         let mut reopened = EditorState::new(project);
         assert!(reopened.pending_autosave.is_some(), "重开项目应当发现副本");
         assert!(
-            !reopened.scene.entities.iter().any(|e| e.name == "recovered"),
+            !reopened
+                .scene
+                .entities
+                .iter()
+                .any(|e| e.name == "recovered"),
             "恢复前不能自动生效（要不要恢复由用户决定）"
         );
 
@@ -3698,7 +3803,9 @@ mod tests {
     #[test]
     fn hot_reload_never_overwrites_the_open_scene() {
         let (mut state, base) = temp_state("hot_scene");
-        state.scene.add_entity(xgame_core::Entity::new("unsaved edit"));
+        state
+            .scene
+            .add_entity(xgame_core::Entity::new("unsaved edit"));
         let before_name = state.scene.name.clone();
 
         let t0 = std::time::Instant::now();
@@ -3711,7 +3818,11 @@ mod tests {
         assert!(!state.hot_reload_tick(t0 + std::time::Duration::from_secs(2)));
         assert_eq!(state.scene.name, before_name, "内存场景不该被磁盘覆盖");
         assert!(
-            state.scene.entities.iter().any(|e| e.name == "unsaved edit"),
+            state
+                .scene
+                .entities
+                .iter()
+                .any(|e| e.name == "unsaved edit"),
             "未保存的编辑必须原样保留"
         );
 
@@ -3821,7 +3932,9 @@ mod tests {
             .write_scene("Scenes/Level2.ron", &level2)
             .expect("先放一个第二场景");
 
-        state.scene.add_entity(xgame_core::Entity::new("entry stuff"));
+        state
+            .scene
+            .add_entity(xgame_core::Entity::new("entry stuff"));
         state.save_scene().expect("保存入口场景");
         let entry_before = state.project.load_scene(&entry).expect("读回入口场景");
 
@@ -3834,7 +3947,9 @@ mod tests {
             "切场景不该改启动场景"
         );
 
-        state.scene.add_entity(xgame_core::Entity::new("level2 stuff"));
+        state
+            .scene
+            .add_entity(xgame_core::Entity::new("level2 stuff"));
         state.save_scene().expect("保存当前场景");
 
         let level2_after = state
@@ -3842,7 +3957,10 @@ mod tests {
             .load_scene("Scenes/Level2.ron")
             .expect("读回 Level2");
         assert!(
-            level2_after.entities.iter().any(|e| e.name == "level2 stuff"),
+            level2_after
+                .entities
+                .iter()
+                .any(|e| e.name == "level2 stuff"),
             "Save 必须写当前场景"
         );
         let entry_after = state.project.load_scene(&entry).expect("再读入口场景");
@@ -3852,7 +3970,10 @@ mod tests {
             "入口场景文件必须一个字节都没变"
         );
         assert!(
-            !entry_after.entities.iter().any(|e| e.name == "level2 stuff"),
+            !entry_after
+                .entities
+                .iter()
+                .any(|e| e.name == "level2 stuff"),
             "当前场景的内容不许漏进入口场景"
         );
         assert!(!state.scene_dirty(), "保存后应当干净");
@@ -3872,11 +3993,15 @@ mod tests {
         state.save_scene_as("Level2").expect("另存为应成功");
 
         assert_eq!(
-            state.project.manifest().entry_scene, old_entry,
+            state.project.manifest().entry_scene,
+            old_entry,
             "另存为只是做副本，不能偷偷改启动场景"
         );
         assert_eq!(state.current_scene, "Scenes/Level2.ron");
-        assert!(state.project.path("Scenes/Level2.ron").is_file(), "新文件应落盘");
+        assert!(
+            state.project.path("Scenes/Level2.ron").is_file(),
+            "新文件应落盘"
+        );
         assert!(old_path.is_file(), "旧场景文件必须原样保留");
         assert!(!state.scene_dirty(), "另存为后应当干净");
         assert_eq!(state.scene.name, "Level2", "场景名应同步成新名");
@@ -4036,7 +4161,9 @@ mod tests {
         assert!(state.pending_scene_change.is_none());
 
         // 新建同理：脏时只挂起。
-        state.scene.add_entity(xgame_core::Entity::new("dirty again"));
+        state
+            .scene
+            .add_entity(xgame_core::Entity::new("dirty again"));
         state.request_new_scene();
         assert!(state.pending_scene_change == Some(SceneChange::New));
         assert!(!state.new_scene_open, "确认前不该弹命名框");
@@ -4074,12 +4201,20 @@ mod tests {
         a.behavior_params.insert("Tuned".to_owned(), fields);
         state.scene.add_entity(a);
         state.scene.add_entity(xgame_core::Entity::new("b"));
-        state.scene.entities.last_mut().expect("b 在末尾").behaviors.push("Tuned".to_owned());
+        state
+            .scene
+            .entities
+            .last_mut()
+            .expect("b 在末尾")
+            .behaviors
+            .push("Tuned".to_owned());
         // 按**名**取 id：新建项目自带一个默认实体，`entities[0]` 不一定是 "a"。
         let id_a = state.scene.find_by_name("a").expect("a 应当在").id;
         let id_b = state.scene.find_by_name("b").expect("b 应当在").id;
 
-        let (_, comp) = state.inspect_component(id_a, 0, "Tuned").expect("应当能构造");
+        let (_, comp) = state
+            .inspect_component(id_a, 0, "Tuned")
+            .expect("应当能构造");
         assert_eq!(
             comp.inspect_get(0),
             FieldValue::F32(66.0),
@@ -4088,7 +4223,9 @@ mod tests {
         assert_eq!(comp.inspect_get(1), FieldValue::String("存盘值".into()));
 
         // 没存参数 ⇒ 保留构造默认值（缺字段不动）。
-        let (_, comp) = state.inspect_component(id_b, 0, "Tuned").expect("应当能构造");
+        let (_, comp) = state
+            .inspect_component(id_b, 0, "Tuned")
+            .expect("应当能构造");
         assert_eq!(comp.inspect_get(0), FieldValue::F32(0.0));
         assert_eq!(comp.inspect_get(1), FieldValue::String(String::new()));
 
@@ -4141,7 +4278,13 @@ mod tests {
             1.0 / 60.0,
             "fixed_dt=0 必须退回默认"
         );
-        assert!(state.project.manifest().runtime.gravity.iter().all(|x| x.is_finite()));
+        assert!(state
+            .project
+            .manifest()
+            .runtime
+            .gravity
+            .iter()
+            .all(|x| x.is_finite()));
 
         let _ = std::fs::remove_dir_all(&base);
     }

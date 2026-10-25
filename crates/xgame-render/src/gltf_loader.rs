@@ -260,6 +260,18 @@ pub struct GltfPrimitive {
     /// `None` = 静态网格，顶点不参与蒙皮。绑定姿态（实体没配动画）时也走
     /// `None` 的等价路径 —— 着色器里 `params.x == 0` 直接用原始顶点。
     pub skin: Option<usize>,
+    /// 形变目标（morph target）。`None` = 这个图元没有顶点级形变。
+    ///
+    /// 带 morph 的图元会额外留一份 CPU 顶点（变形的基准），顶点缓冲也多一个
+    /// `COPY_DST` 用途 —— 权重一变就整段重写（见 [`crate::morph`]）。
+    pub morph: Option<crate::morph::MorphTargets>,
+}
+
+impl GltfPrimitive {
+    /// 为一个实体创建独立的形变顶点缓冲；静态图元返回 `None`。
+    pub fn create_morph_buffer(&self, device: &wgpu::Device) -> Option<crate::morph::MorphBuffer> {
+        self.morph.as_ref().map(|morph| morph.create_buffer(device))
+    }
 }
 
 /// 从 glTF 文件加载的 GPU 驻留图元集合。
@@ -428,14 +440,7 @@ impl GltfMesh {
                     .map(|iter| {
                         // JOINTS_0 是 u8/u16 两种组件类型，统一转 u16 再落 f32。
                         iter.into_u16()
-                            .map(|j| {
-                                [
-                                    j[0] as f32,
-                                    j[1] as f32,
-                                    j[2] as f32,
-                                    j[3] as f32,
-                                ]
-                            })
+                            .map(|j| [j[0] as f32, j[1] as f32, j[2] as f32, j[3] as f32])
                             .collect()
                     })
                     .unwrap_or_default();
@@ -470,10 +475,21 @@ impl GltfMesh {
 
                 let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
 
+                // --- 形变目标（morph target）---
+                //
+                // 增量在这里就把 `model_scale` 乘进去了：与顶点位置同一套烘焙
+                // 规则，否则改导入缩放会让"表情幅度"和"模型尺寸"脱钩。
+                let morph = parse_morph_targets(&mesh, &primitive, &buffers, &vertices, scale);
+                // 带 morph 的图元要能被 `write_buffer` 整段重写（CPU 变形）。
+                let mut vertex_usage = wgpu::BufferUsages::VERTEX;
+                if morph.is_some() {
+                    vertex_usage |= wgpu::BufferUsages::COPY_DST;
+                }
+
                 let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("glTF vertex buffer"),
                     contents: vertex_bytes,
-                    usage: wgpu::BufferUsages::VERTEX,
+                    usage: vertex_usage,
                 });
 
                 let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -492,6 +508,7 @@ impl GltfMesh {
                     material,
                     material_id,
                     skin: mesh_skin,
+                    morph,
                 });
             }
         }
@@ -525,8 +542,14 @@ impl GltfMesh {
         let old_vertex_count = verts.len() / 24;
         // 记录布局 = 位置(12) + 法线(12) + 颜色(12) + UV(8) + 关节(16) + 权重(16) = 76。
         let mut new_verts: Vec<u8> = Vec::with_capacity(old_vertex_count * 76);
-        let no_joints = [0f32; 4].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
-        let root_weight = [1f32, 0.0, 0.0, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        let no_joints = [0f32; 4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>();
+        let root_weight = [1f32, 0.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>();
 
         for i in 0..old_vertex_count {
             let base = i * 24;
@@ -560,6 +583,7 @@ impl GltfMesh {
                 material: MaterialParams::default(),
                 material_id: next_material_id(),
                 skin: None,
+                morph: None,
             }],
             vertex_size: GltfVertex::STRIDE,
             // 回退立方体就是边长 1、中心在原点的单位盒。
@@ -601,6 +625,7 @@ impl GltfMesh {
                 material: MaterialParams::default(),
                 material_id: next_material_id(),
                 skin: None,
+                morph: None,
             }],
             vertex_size: GltfVertex::STRIDE,
             bounds: Bounds::from_points(data.vertices.iter().map(|v| v.position)),
@@ -623,7 +648,12 @@ impl GltfMesh {
         model: &str,
     ) -> Result<Self> {
         if let Some(builtin) = crate::mesh::BuiltinMesh::from_model_path(model) {
-            return Ok(Self::from_mesh_data(device, queue, &builtin.build(), builtin.label()));
+            return Ok(Self::from_mesh_data(
+                device,
+                queue,
+                &builtin.build(),
+                builtin.label(),
+            ));
         }
         // 读 `.meta`（只读）。没有 `.meta` 或解析失败 → 默认设置，
         // 与资产管线"坏 meta 不阻断出图"的约定一致。
@@ -663,12 +693,10 @@ pub struct AnimData {
 /// # v1 的取舍
 ///
 /// - `CUBICSPLINE` 降采样成线性（见下）；
-/// - morph target（`weights` 通道）跳过并告警 —— 那是网格变形，不是骨骼动画；
+/// - 形变目标权重（`MorphTargetWeights`）**收下**但不进姿态：它是网格属性，
+///   单独一条轨道（[`crate::animation::TrackPath::MorphWeights`]）；
 /// - 节点的 `matrix` 形态做一次矩阵分解成 TRS（少数老工具才这么写）。
-pub fn parse_animation_data(
-    document: &gltf::Document,
-    buffers: &[gltf::buffer::Data],
-) -> AnimData {
+pub fn parse_animation_data(document: &gltf::Document, buffers: &[gltf::buffer::Data]) -> AnimData {
     parse_animation_data_scaled(document, buffers, 1.0)
 }
 
@@ -774,7 +802,9 @@ pub fn parse_animation_data_scaled(
     }
 
     // -- 动画剪辑 --
-    use gltf::animation::{util::ReadOutputs, Interpolation as GltfInterp, Property as GltfProperty};
+    use gltf::animation::{
+        util::ReadOutputs, Interpolation as GltfInterp, Property as GltfProperty,
+    };
     let mut animations = Vec::new();
     for anim in document.animations() {
         let mut tracks = Vec::new();
@@ -801,12 +831,30 @@ pub fn parse_animation_data_scaled(
                 GltfProperty::Translation => TrackPath::Translation,
                 GltfProperty::Rotation => TrackPath::Rotation,
                 GltfProperty::Scale => TrackPath::Scale,
-                // morph target 不是骨骼动画，跳过（有资产用到时日志会说明去向）。
+                // 形变目标权重：**不是**骨骼动画，但也别丢 —— 它是口型 / 表情
+                // 的唯一来源。单独一条轨道类型，由 `sample_morph_weights` 消费。
                 GltfProperty::MorphTargetWeights => {
-                    log::warn!(
-                        "animation '{}': morph-target channels are not supported yet — skipped",
-                        anim.name().unwrap_or("<unnamed>")
-                    );
+                    let Some(ReadOutputs::MorphTargetWeights(iter)) = reader.read_outputs() else {
+                        continue;
+                    };
+                    let cubic = matches!(sampler.interpolation(), GltfInterp::CubicSpline);
+                    let interpolation = match sampler.interpolation() {
+                        GltfInterp::Step => Interpolation::Step,
+                        _ => Interpolation::Linear,
+                    };
+                    // 权重是**标量流**（每帧 N 个目标），没有 `[f32; k]` 的分量结构。
+                    // 每个标量包成一条长度为 1 的样本，复用同一套样条降采样。
+                    let flat: Vec<Vec<f32>> = iter.into_f32().map(|w| vec![w]).collect();
+                    let values = take_spline_values(flat, cubic);
+                    if !values.is_empty() {
+                        tracks.push(crate::animation::Track {
+                            node: channel.target().node().index() as u32,
+                            path: TrackPath::MorphWeights,
+                            interpolation,
+                            times: times.clone(),
+                            values,
+                        });
+                    }
                     continue;
                 }
             };
@@ -818,18 +866,15 @@ pub fn parse_animation_data_scaled(
             };
 
             let mut values = match reader.read_outputs() {
-                Some(ReadOutputs::Translations(iter)) => take_spline_values(
-                    iter.map(|v| v.to_vec()).collect(),
-                    cubic,
-                ),
-                Some(ReadOutputs::Scales(iter)) => take_spline_values(
-                    iter.map(|v| v.to_vec()).collect(),
-                    cubic,
-                ),
-                Some(ReadOutputs::Rotations(iter)) => take_spline_values(
-                    iter.into_f32().map(|v| v.to_vec()).collect(),
-                    cubic,
-                ),
+                Some(ReadOutputs::Translations(iter)) => {
+                    take_spline_values(iter.map(|v| v.to_vec()).collect(), cubic)
+                }
+                Some(ReadOutputs::Scales(iter)) => {
+                    take_spline_values(iter.map(|v| v.to_vec()).collect(), cubic)
+                }
+                Some(ReadOutputs::Rotations(iter)) => {
+                    take_spline_values(iter.into_f32().map(|v| v.to_vec()).collect(), cubic)
+                }
                 _ => continue,
             };
             if path == TrackPath::Translation && scale != 1.0 {
@@ -862,6 +907,123 @@ pub fn parse_animation_data_scaled(
         animations,
         mesh_skins,
     }
+}
+
+/// 解析一个图元的形变目标（glTF `mesh.primitives[].targets`）。
+///
+/// 纯 CPU、不碰 GPU —— 这样它能在没有显卡的 CI 上用合成 glTF 直接测。
+///
+/// 布局是 **target-major**：`positions[target * vertex_count + vertex]`。
+/// 变形内层循环是"一个权重扫一遍全部顶点"（同权重的访存连续），
+/// 所以按 target 分段比按顶点分段省一次跨步跳跃。
+///
+/// 任何长度不自洽的情况一律**整段放弃**（返回 `None`，图元当静态网格渲染）：
+/// 增量错位会把顶点挪到不存在的位置，画出来是一团谁都认不出的几何，
+/// 比"没有表情"难查得多。
+fn parse_morph_targets(
+    mesh: &gltf::Mesh<'_>,
+    primitive: &gltf::Primitive<'_>,
+    buffers: &[gltf::buffer::Data],
+    base: &[GltfVertex],
+    scale: f32,
+) -> Option<crate::morph::MorphTargets> {
+    let targets: Vec<gltf::mesh::MorphTarget<'_>> = primitive.morph_targets().collect();
+    if targets.is_empty() || base.is_empty() {
+        return None;
+    }
+    let target_count = targets.len();
+    let vertex_count = base.len();
+    let mut positions = vec![[0.0f32; 3]; target_count * vertex_count];
+    let mut normals = vec![[0.0f32; 3]; target_count * vertex_count];
+    let mut has_normals = false;
+
+    for (t, target) in targets.iter().enumerate() {
+        let offset = t * vertex_count;
+        if let Some(accessor) = target.positions() {
+            let Some(iter) =
+                gltf::accessor::Iter::<[f32; 3]>::new(accessor, |buf| Some(&buffers[buf.index()]))
+            else {
+                log::warn!(
+                    "morph target {t}: unreadable POSITION — morph disabled for this primitive"
+                );
+                return None;
+            };
+            let mut read = 0;
+            for (v, delta) in iter.enumerate() {
+                if v >= vertex_count {
+                    break;
+                }
+                // 与顶点位置同一套烘焙规则（见 `from_file_with` 的注释）。
+                positions[offset + v] = [delta[0] * scale, delta[1] * scale, delta[2] * scale];
+                read += 1;
+            }
+            if read != vertex_count {
+                log::warn!(
+                    "morph target {t}: {read} deltas but mesh has {vertex_count} vertices — morph disabled"
+                );
+                return None;
+            }
+        } else {
+            // 规范的 morph target 必须有 POSITION；缺了当"零位移"处理，
+            // 目标仍然存在（权重表对得上号），只是不改变几何。
+            log::warn!("morph target {t}: no POSITION delta — treated as zero displacement");
+        }
+        if let Some(accessor) = target.normals() {
+            let Some(iter) =
+                gltf::accessor::Iter::<[f32; 3]>::new(accessor, |buf| Some(&buffers[buf.index()]))
+            else {
+                continue;
+            };
+            // 法线增量不做 `model_scale`：均匀缩放不改变方向（长度由归一化收回）。
+            for (v, delta) in iter.enumerate().take(vertex_count) {
+                normals[offset + v] = delta;
+            }
+            has_normals = true;
+        }
+    }
+
+    let names = morph_target_names(mesh, target_count);
+    let mut defaults = mesh
+        .weights()
+        .map(|weights| weights.to_vec())
+        .unwrap_or_default();
+    defaults.resize(target_count, 0.0);
+    if !has_normals {
+        normals.clear();
+    }
+    let built = crate::morph::MorphTargets::new(names, defaults, positions, normals, base.to_vec());
+    if built.is_none() {
+        log::warn!("morph targets rejected (inconsistent shape) — primitive stays static");
+    }
+    built
+}
+
+/// 目标名：glTF 把它们放在 `mesh.extras.targetNames`（非标准字段，但 Blender /
+/// Maya / Unity 的导出器都写这里）。
+///
+/// `extras` 在 gltf crate 里是**未解析的 JSON 原文**（`Box<RawValue>`），
+/// 所以要自己反序列化一次。没有名字时退回 `Target N` —— Inspector 上
+/// 一排"Target 0..19"很难用，但总比不显示好。
+fn morph_target_names(mesh: &gltf::Mesh<'_>, count: usize) -> Vec<String> {
+    let mut names: Vec<String> = mesh
+        .extras()
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+        .and_then(|value| value.get("targetNames").and_then(|n| n.as_array()).cloned())
+        .map(|list| {
+            list.iter()
+                .take(count)
+                .map(|v| v.as_str().unwrap_or_default().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.resize(count, String::new());
+    for (i, name) in names.iter_mut().enumerate() {
+        if name.trim().is_empty() {
+            *name = format!("Target {i}");
+        }
+    }
+    names
 }
 
 /// CUBICSPLINE 输出取"值"那一段，其余插值原样返回。
@@ -992,15 +1154,23 @@ fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]
         let ny = az * bx - ax * bz;
         let nz = ax * by - ay * bx;
 
-        normals[i0][0] += nx; normals[i0][1] += ny; normals[i0][2] += nz;
-        normals[i1][0] += nx; normals[i1][1] += ny; normals[i1][2] += nz;
-        normals[i2][0] += nx; normals[i2][1] += ny; normals[i2][2] += nz;
+        normals[i0][0] += nx;
+        normals[i0][1] += ny;
+        normals[i0][2] += nz;
+        normals[i1][0] += nx;
+        normals[i1][1] += ny;
+        normals[i1][2] += nz;
+        normals[i2][0] += nx;
+        normals[i2][1] += ny;
+        normals[i2][2] += nz;
     }
 
     for n in &mut normals {
         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
         if len > 0.0 {
-            n[0] /= len; n[1] /= len; n[2] /= len;
+            n[0] /= len;
+            n[1] /= len;
+            n[2] /= len;
         } else {
             *n = [0.0, 0.0, 1.0];
         }
@@ -1156,7 +1326,14 @@ mod tests {
             .iter()
             .find(|t| t.path == TrackPath::Translation)
             .unwrap();
-        assert_eq!(scaled_track.values, base_track.values.iter().map(|v| v * 2.0).collect::<Vec<_>>());
+        assert_eq!(
+            scaled_track.values,
+            base_track
+                .values
+                .iter()
+                .map(|v| v * 2.0)
+                .collect::<Vec<_>>()
+        );
 
         // 非法缩放（NaN / 0 / 负）退回 1.0，不能把模型弄没。
         let fallback = parse_animation_data_scaled(&doc, &buffers, f32::NAN);
@@ -1188,7 +1365,11 @@ mod tests {
 
         assert_eq!(data.skins.len(), 1, "狐狸有一张蒙皮");
         assert_eq!(data.skins[0].joints.len(), 24, "24 根骨头");
-        assert_eq!(data.skins[0].inverse_bind.len(), 24, "IBM 必须与关节数一一对应");
+        assert_eq!(
+            data.skins[0].inverse_bind.len(),
+            24,
+            "IBM 必须与关节数一一对应"
+        );
 
         assert_eq!(data.nodes.len(), 26, "26 个节点（场景根 + 网格 + 骨架）");
         assert_eq!(data.mesh_skins.get(&0), Some(&0), "mesh0 被挂在蒙皮0 上");
@@ -1201,10 +1382,9 @@ mod tests {
         assert!(walk.duration > 0.0, "时长必须为正，实得 {}", walk.duration);
         assert!(!walk.tracks.is_empty(), "Walk 不能是空轨道");
         for track in &walk.tracks {
-            let stride = match track.path {
-                TrackPath::Translation | TrackPath::Scale => 3,
-                TrackPath::Rotation => 4,
-            };
+            // `Track::stride` 现算（MorphWeights 的 stride 是逐轨道的目标数，
+            // 不能像变换通道那样写死）。
+            let stride = track.stride();
             assert_eq!(
                 track.values.len(),
                 track.times.len() * stride,
@@ -1256,7 +1436,10 @@ mod tests {
         let data = parse_animation_data(&doc, &buffers);
         let pose = crate::animation::default_pose(&data.nodes);
         for (i, node) in data.nodes.iter().enumerate() {
-            assert!((pose[i].translation - node.translation).length() < 1e-6, "节点 {i} 位移被改动");
+            assert!(
+                (pose[i].translation - node.translation).length() < 1e-6,
+                "节点 {i} 位移被改动"
+            );
             // 逐分量比，不用 angle_between：资产里的四元数常常只是"近似归一"
             // （1e-6 量级的模长误差会被 acos 放大成 ~1e-3 弧度的假差异），
             // 而 default_pose 是**原样拷贝**，逐位相等才是它该有的承诺。
@@ -1265,7 +1448,163 @@ mod tests {
                 node.rotation.to_array(),
                 "节点 {i} 旋转被改动"
             );
-            assert!((pose[i].scale - node.scale).length() < 1e-6, "节点 {i} 缩放被改动");
+            assert!(
+                (pose[i].scale - node.scale).length() < 1e-6,
+                "节点 {i} 缩放被改动"
+            );
         }
+    }
+
+    // -- 形变目标（morph target）--------------------------------------------
+
+    /// 最小 base64 编码器。
+    ///
+    /// 测试要把顶点数据塞进 `data:` URI，而本 crate 只间接依赖 base64
+    /// （gltf 的 `import` 特性内部用），拿不到它。17 行自造一个比加依赖干净。
+    fn base64(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            out.push(TABLE[(n >> 18) as usize & 63] as char);
+            out.push(TABLE[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 {
+                TABLE[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[n as usize & 63] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    /// 合成一个带两个形变目标的三角形 glTF（内嵌缓冲，不碰磁盘）。
+    ///
+    /// 为什么要合成而不是用现成资产：仓库里的 `Fox.glb` 没有 morph 目标，
+    /// 而"目标名 / 默认权重 / 增量有没有乘导入缩放"这三件事必须能在
+    /// **没有显卡**的 CI 上断言。
+    fn morph_gltf() -> String {
+        // 三个顶点：原点 / X 单位 / Y 单位。
+        let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let smile = [[0.1f32, 0.2, 0.3]; 3];
+        let frown = [[0.0f32, 0.0, 0.5]; 3];
+        let mut bytes = Vec::with_capacity(108);
+        for p in positions.iter().chain(smile.iter()).chain(frown.iter()) {
+            for value in p {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let template = r#"{
+  "asset": {"version": "2.0"},
+  "scene": 0,
+  "scenes": [{"nodes": [0]}],
+  "nodes": [{"mesh": 0}],
+  "meshes": [{
+    "name": "Face",
+    "extras": {"targetNames": ["Smile", "Frown"]},
+    "weights": [0.25, 0.0],
+    "primitives": [{
+      "attributes": {"POSITION": 0},
+      "targets": [{"POSITION": 1}, {"POSITION": 2}]
+    }]
+  }],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]},
+    {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
+    {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC3"}
+  ],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 36, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 72, "byteLength": 36}
+  ],
+  "buffers": [{"byteLength": 108, "uri": "data:application/octet-stream;base64,%B64%"}]
+}"#;
+        template
+            .replace("%B64%", &base64(&bytes))
+            .replace("%LEN%", &bytes.len().to_string())
+    }
+
+    /// 三个基准顶点（与合成资产的 POSITION 一致）。
+    fn morph_base_vertices() -> Vec<GltfVertex> {
+        [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+            .into_iter()
+            .map(|position| GltfVertex {
+                position,
+                normal: [0.0, 0.0, 1.0],
+                color: [1.0; 3],
+                tex_coord: [0.0; 2],
+                joints: [0.0; 4],
+                weights: [1.0, 0.0, 0.0, 0.0],
+            })
+            .collect()
+    }
+
+    /// 目标名 / 默认权重 / 目标数都要从资产里**读出来**，不能靠调用方猜。
+    #[test]
+    fn morph_targets_carry_names_defaults_and_count() {
+        let json = morph_gltf();
+        let (document, buffers, _images) =
+            gltf::import_slice(json.as_bytes()).expect("合成 glTF 应能解析");
+        let mesh = document.meshes().next().expect("一个 mesh");
+        let primitive = mesh.primitives().next().expect("一个图元");
+        let base = morph_base_vertices();
+
+        let morph = parse_morph_targets(&mesh, &primitive, &buffers, &base, 1.0)
+            .expect("这个图元带两个形变目标");
+        assert_eq!(morph.names(), ["Smile", "Frown"]);
+        assert_eq!(morph.defaults(), [0.25, 0.0], "mesh.weights 应是默认权重");
+        assert_eq!(morph.target_count(), 2);
+        assert_eq!(morph.vertex_count(), 3);
+    }
+
+    /// 增量必须乘上 `model_scale` —— 与顶点位置同一套烘焙规则。
+    ///
+    /// 不乘的话，把导入缩放从 1 改成 2，模型会大一倍而表情幅度纹丝不动，
+    /// 看起来像"表情失效了"。
+    #[test]
+    fn morph_deltas_are_baked_with_model_scale() {
+        let json = morph_gltf();
+        let (document, buffers, _images) = gltf::import_slice(json.as_bytes()).unwrap();
+        let mesh = document.meshes().next().unwrap();
+        let primitive = mesh.primitives().next().unwrap();
+        let base = morph_base_vertices();
+
+        let doubled = parse_morph_targets(&mesh, &primitive, &buffers, &base, 2.0).unwrap();
+        let deltas = doubled.position_deltas();
+        // target-major：第 0 个目标的前三个分量就是顶点 0 的增量。
+        assert_eq!(deltas[0], [0.2, 0.4, 0.6], "增量应已乘 2");
+        // 第 1 个目标（Frown）从下标 1 * 3 = 3 开始（3 个顶点 × 前一个目标）。
+        assert_eq!(deltas[3], [0.0, 0.0, 1.0], "第二个目标不该串到第一个上");
+
+        let plain = parse_morph_targets(&mesh, &primitive, &buffers, &base, 1.0).unwrap();
+        assert_eq!(plain.position_deltas()[0], [0.1, 0.2, 0.3], "缩放 1 时原样");
+    }
+
+    /// 没有 targets 的网格不该凭空长出一个空 `MorphTargets`。
+    #[test]
+    fn mesh_without_targets_has_no_morph() {
+        let json = morph_gltf().replace(
+            r#""targets": [{"POSITION": 1}, {"POSITION": 2}]"#,
+            r#""targets": []"#,
+        );
+        let (document, buffers, _images) = gltf::import_slice(json.as_bytes()).unwrap();
+        let mesh = document.meshes().next().unwrap();
+        let primitive = mesh.primitives().next().unwrap();
+        let base = morph_base_vertices();
+        assert!(
+            parse_morph_targets(&mesh, &primitive, &buffers, &base, 1.0).is_none(),
+            "没有形变目标的图元应返回 None"
+        );
     }
 }

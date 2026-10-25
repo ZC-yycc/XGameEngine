@@ -73,13 +73,11 @@ pub fn render_json() -> Result<String, String> {
 fn write_file(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!("创建目录 {} 失败: {error}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("创建目录 {} 失败: {error}", parent.display()))?;
         }
     }
-    std::fs::write(path, text)
-        .map_err(|error| format!("写入 {} 失败: {error}", path.display()))
+    std::fs::write(path, text).map_err(|error| format!("写入 {} 失败: {error}", path.display()))
 }
 
 /// CLI 入口；`main` 只负责分发和 `process::exit`。
@@ -161,9 +159,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_bad_arguments() {
-        assert!(parse(&args(&["--out"]))
-            .unwrap_err()
-            .contains("缺少路径"));
+        assert!(parse(&args(&["--out"])).unwrap_err().contains("缺少路径"));
         assert!(parse(&args(&["--out", "   "]))
             .unwrap_err()
             .contains("不能为空"));
@@ -188,7 +184,9 @@ mod tests {
             env!("CARGO_PKG_VERSION"),
             "引擎版本来自 core crate"
         );
-        let categories = value["categories"].as_array().expect("categories 必须是数组");
+        let categories = value["categories"]
+            .as_array()
+            .expect("categories 必须是数组");
         assert_eq!(categories.len(), 17, "类别数");
         assert_eq!(
             value["hooks"].as_array().expect("hooks 必须是数组").len(),
@@ -211,9 +209,11 @@ mod tests {
                     .len()
             })
             .sum();
-        assert_eq!(function_count, 158, "函数总数");
+        assert_eq!(function_count, 160, "函数总数");
         assert!(
-            categories.iter().any(|category| category["id"] == "transform"),
+            categories
+                .iter()
+                .any(|category| category["id"] == "transform"),
             "缺 transform 类别"
         );
     }
@@ -224,7 +224,10 @@ mod tests {
         let path = temp_json_path("out");
         let _ = std::fs::remove_file(&path);
 
-        let code = cli(&args(&["--out", path.to_str().expect("临时路径必须是 UTF-8")]));
+        let code = cli(&args(&[
+            "--out",
+            path.to_str().expect("临时路径必须是 UTF-8"),
+        ]));
         assert_eq!(code, 0, "写文件应成功");
         let written = std::fs::read_to_string(&path).expect("文件应可读");
         assert_eq!(written, render_json().unwrap());
@@ -251,7 +254,7 @@ mod tests {
             documented, manifest,
             "Docs/脚本API.md 与机器清单的函数名不一致"
         );
-        assert_eq!(documented.len(), 158, "文档 API 表应有 158 个函数");
+        assert_eq!(documented.len(), 160, "文档 API 表应有 160 个函数");
     }
 
     /// 从 Markdown 的 API 表第一列提取函数名。

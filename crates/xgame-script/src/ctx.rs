@@ -388,7 +388,12 @@ impl GameCtx<'_> {
     /// 局部欧拉角（度，Y-X-Z）。
     pub fn rot(&mut self) -> Vec3 {
         self.entity_index()
-            .and_then(|i| self.scene.entities.get(i).map(|e| euler_degrees(e.transform.rotation)))
+            .and_then(|i| {
+                self.scene
+                    .entities
+                    .get(i)
+                    .map(|e| euler_degrees(e.transform.rotation))
+            })
             .unwrap_or(Vec3::ZERO)
     }
 
@@ -570,7 +575,11 @@ impl GameCtx<'_> {
 
     /// 按名字查实体 ID（找不到返回 `None`）。
     pub fn find_entity_id(&mut self, name: &str) -> Option<EntityId> {
-        self.scene.entities.iter().find(|e| e.name == name).map(|e| e.id)
+        self.scene
+            .entities
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.id)
     }
 
     /// 实体的显示名称。
@@ -751,7 +760,12 @@ impl GameCtx<'_> {
     pub fn entity_rot(&mut self, id: EntityId) -> Vec3 {
         self.scene
             .find_entity(id)
-            .and_then(|i| self.scene.entities.get(i).map(|e| euler_degrees(e.transform.rotation)))
+            .and_then(|i| {
+                self.scene
+                    .entities
+                    .get(i)
+                    .map(|e| euler_degrees(e.transform.rotation))
+            })
             .unwrap_or(Vec3::ZERO)
     }
 
@@ -777,8 +791,12 @@ impl GameCtx<'_> {
 
     /// 自己到目标实体的世界距离（目标不存在返回 0）。
     pub fn distance_to(&mut self, other: EntityId) -> f32 {
-        let Some(self_i) = self.entity_index() else { return 0.0 };
-        let Some(other_i) = self.scene.find_entity(other) else { return 0.0 };
+        let Some(self_i) = self.entity_index() else {
+            return 0.0;
+        };
+        let Some(other_i) = self.scene.find_entity(other) else {
+            return 0.0;
+        };
         world_position(self.scene, self_i).distance(world_position(self.scene, other_i))
     }
 
@@ -791,8 +809,14 @@ impl GameCtx<'_> {
         if removed.is_empty() {
             return;
         }
-        let ids: Vec<EntityId> = removed.iter().map(|e| e.id).collect();
-        self.push_command(ScriptCommand::EntitiesRemoved { ids });
+        let entities = removed
+            .into_iter()
+            .map(|entity| crate::RemovedEntity {
+                id: entity.id,
+                scripts: entity.scripts,
+            })
+            .collect();
+        self.push_command(ScriptCommand::EntitiesRemoved { entities });
     }
 
     /// 改实体的父节点（`None` = 挂到场景根）。成环时拒绝（`Scene::set_parent`）。
@@ -988,7 +1012,9 @@ impl GameCtx<'_> {
             if !self.scene.set_parent(root, Some(parent_index)) {
                 self.push_log(
                     LogLevel::Warn,
-                    format!("spawn_prefab_under('{path}')：挂父节点被拒绝（会成环？），实例留在场景根"),
+                    format!(
+                        "spawn_prefab_under('{path}')：挂父节点被拒绝（会成环？），实例留在场景根"
+                    ),
                 );
             }
         }
@@ -1080,7 +1106,9 @@ impl GameCtx<'_> {
 
     /// 给目标刚体加持续力。
     pub fn apply_force(&mut self, id: EntityId, force: Vec3) {
-        let Some(body) = body_of(self.scene, id) else { return };
+        let Some(body) = body_of(self.scene, id) else {
+            return;
+        };
         if let Some(physics) = self.physics.as_deref_mut() {
             physics.apply_force(body, force);
         }
@@ -1088,7 +1116,9 @@ impl GameCtx<'_> {
 
     /// 给目标刚体加瞬时冲量。
     pub fn apply_impulse(&mut self, id: EntityId, impulse: Vec3) {
-        let Some(body) = body_of(self.scene, id) else { return };
+        let Some(body) = body_of(self.scene, id) else {
+            return;
+        };
         if let Some(physics) = self.physics.as_deref_mut() {
             physics.apply_impulse(body, impulse);
         }
@@ -1096,7 +1126,9 @@ impl GameCtx<'_> {
 
     /// 给目标刚体加扭矩。
     pub fn add_torque(&mut self, id: EntityId, torque: Vec3) {
-        let Some(body) = body_of(self.scene, id) else { return };
+        let Some(body) = body_of(self.scene, id) else {
+            return;
+        };
         if let Some(physics) = self.physics.as_deref_mut() {
             physics.apply_torque(body, torque);
         }
@@ -1104,7 +1136,9 @@ impl GameCtx<'_> {
 
     /// 目标刚体的线速度（无刚体返回零向量）。
     pub fn velocity(&mut self, id: EntityId) -> Vec3 {
-        let Some(body) = body_of(self.scene, id) else { return Vec3::ZERO };
+        let Some(body) = body_of(self.scene, id) else {
+            return Vec3::ZERO;
+        };
         self.physics
             .as_deref()
             .and_then(|p| p.body_velocity(body))
@@ -1113,7 +1147,9 @@ impl GameCtx<'_> {
 
     /// 设置目标刚体的线速度。
     pub fn set_velocity(&mut self, id: EntityId, velocity: Vec3) {
-        let Some(body) = body_of(self.scene, id) else { return };
+        let Some(body) = body_of(self.scene, id) else {
+            return;
+        };
         if let Some(physics) = self.physics.as_deref_mut() {
             physics.set_velocity(body, velocity);
         }
@@ -1121,7 +1157,10 @@ impl GameCtx<'_> {
 
     /// 当前重力。
     pub fn gravity(&mut self) -> Vec3 {
-        self.physics.as_deref().map(|p| p.gravity()).unwrap_or(Vec3::ZERO)
+        self.physics
+            .as_deref()
+            .map(|p| p.gravity())
+            .unwrap_or(Vec3::ZERO)
     }
 
     /// 设置重力。
@@ -1284,7 +1323,9 @@ impl GameCtx<'_> {
 
     /// 直接改角色速度（被击退、被传送带推动等外部控制用）。
     pub fn character_set_velocity(&mut self, velocity: Vec3) {
-        let Some(index) = self.entity_index() else { return };
+        let Some(index) = self.entity_index() else {
+            return;
+        };
         let state = self.scene.entities[index]
             .components
             .get_or_insert_with(xgame_core::CharacterState::default);
@@ -1359,12 +1400,16 @@ impl GameCtx<'_> {
 
     /// 动作是否**本帧**按下。
     pub fn action_pressed(&mut self, action: &str) -> bool {
-        self.input.map(|i| i.action_pressed(action)).unwrap_or(false)
+        self.input
+            .map(|i| i.action_pressed(action))
+            .unwrap_or(false)
     }
 
     /// 动作是否**本帧**松开。
     pub fn action_released(&mut self, action: &str) -> bool {
-        self.input.map(|i| i.action_released(action)).unwrap_or(false)
+        self.input
+            .map(|i| i.action_released(action))
+            .unwrap_or(false)
     }
 
     /// 轴的当前值（-1..=1，双向轴）。
@@ -1508,13 +1553,59 @@ impl GameCtx<'_> {
         }
     }
 
+    /// 目标实体的第 `target` 个形变目标权重（没有这个目标 → `0.0`）。
+    ///
+    /// 下标含义来自**模型**（glTF `targets[]` 的顺序）。脚本层看不到网格
+    /// （那是渲染资产的内部结构），所以这里是逐下标的接口；模型的目标名
+    /// 在 Inspector 上能看到，写脚本时照那边的顺序数。
+    pub fn morph(&mut self, id: EntityId, target: usize) -> f32 {
+        self.scene
+            .index_of(id)
+            .and_then(|i| self.scene.entities[i].morph_weights.get(target).copied())
+            .unwrap_or(0.0)
+    }
+
+    /// 写第 `target` 个形变目标权重。
+    ///
+    /// 语义（与 Unity `SkinnedMeshRenderer.SetBlendShapeWeight` 对齐）：
+    /// - 钳在 `[0, 1]`，非有限值直接忽略 —— 脚本算错不该把脸拉飞；
+    /// - **允许稀疏写**：`set_morph(id, 5, 1.0)` 会把 0..5 补成 0，否则
+    ///   "只动第 5 个表情"这件事没有写法；
+    /// - 下标上限 256（超过一律拒绝）：这是个来自脚本的 `usize`，
+    ///   不设防的话 `set_morph(id, 1e9, 1)` 会当场把场景文件撑爆。
+    /// - **立刻生效**：渲染每帧读场景里的这份权重，不走命令队列
+    ///   （与 `set_layer` 不同 —— 换层要同步物理侧，morph 只影响渲染）。
+    ///   代价是：剪辑里有权重轨道时动画覆盖它，见 [`crate::ctx`] 的说明。
+    pub fn set_morph(&mut self, id: EntityId, target: usize, value: f32) -> bool {
+        /// 目标数上限：真实面部资产在 10~100 量级，256 是"绝不会误伤真需求"
+        /// 又"挡得住脚本算飞"的那个数。
+        const MAX_MORPH_TARGETS: usize = 256;
+        if !value.is_finite() || target >= MAX_MORPH_TARGETS {
+            return false;
+        }
+        let value = value.clamp(0.0, 1.0);
+        let Some(index) = self.scene.index_of(id) else {
+            return false;
+        };
+        let weights = &mut self.scene.entities[index].morph_weights;
+        if weights.len() <= target {
+            weights.resize(target + 1, 0.0);
+        }
+        weights[target] = value;
+        true
+    }
+
     /// 写本实体状态机的参数（键不存在就创建）。
     ///
     /// 没挂 animator / 没配机器 → **静默 no-op**：脚本照常跑，只是机器不动。
     /// 这让"通用移动脚本挂到任意实体上"成为可能，不需要调用方先探测组件。
     pub fn set_anim_param(&mut self, name: &str, value: f32) {
         if let Some(i) = self.entity_index() {
-            if let Some(animator) = self.scene.entities.get_mut(i).and_then(|e| e.animator.as_mut())
+            if let Some(animator) = self
+                .scene
+                .entities
+                .get_mut(i)
+                .and_then(|e| e.animator.as_mut())
             {
                 if let Some(machine) = animator.machine.as_mut() {
                     machine.parameters.insert(name.to_owned(), value);
@@ -1613,7 +1704,8 @@ fn quat_from_degrees(v: Vec3) -> Quat {
 /// 实体 ID → 物理刚体句柄。
 fn body_of(scene: &Scene, id: EntityId) -> Option<u64> {
     let index = scene.find_entity(id)?;
-    scene.entities
+    scene
+        .entities
         .get(index)?
         .component::<PhysicsHandle>()
         .map(|h| h.0)
@@ -1662,7 +1754,10 @@ pub(crate) mod tests {
 
         set_world_position(&mut scene, child, Vec3::new(12.0, 5.0, 0.0));
 
-        assert_eq!(scene.entities[child].transform.position, Vec3::new(2.0, 5.0, 0.0));
+        assert_eq!(
+            scene.entities[child].transform.position,
+            Vec3::new(2.0, 5.0, 0.0)
+        );
         let world = scene.world_matrix(child).w_axis.truncate();
         assert!((world - Vec3::new(12.0, 5.0, 0.0)).length() < 1e-4);
     }
@@ -1700,12 +1795,7 @@ pub(crate) mod tests {
                 "Resources/Materials/Wood.mat"
             );
 
-            ctx.set_entity_material(
-                id,
-                [0.8, f32::NAN, f32::INFINITY, 1.0],
-                5.0,
-                -2.0,
-            );
+            ctx.set_entity_material(id, [0.8, f32::NAN, f32::INFINITY, 1.0], 5.0, -2.0);
         }
 
         let entity = &scene.entities[0];
@@ -1746,7 +1836,10 @@ pub(crate) mod tests {
             ctx.set_entity_material_asset(id, "");
         }
         assert!(scene.entities[0].material.is_none());
-        assert!(scene.entities[0].material_asset.is_none(), "空串 = 清空引用");
+        assert!(
+            scene.entities[0].material_asset.is_none(),
+            "空串 = 清空引用"
+        );
     }
 
     /// 动画 setter：只写自己的 animator；越界 / 非有限值被钳住或忽略；
@@ -1796,7 +1889,10 @@ pub(crate) mod tests {
             ctx.set_anim_speed(-2.0);
             assert_eq!(ctx.scene.entities[0].animator.as_ref().unwrap().speed, 0.0);
             ctx.set_anim_speed(999.0);
-            assert_eq!(ctx.scene.entities[0].animator.as_ref().unwrap().speed, 100.0);
+            assert_eq!(
+                ctx.scene.entities[0].animator.as_ref().unwrap().speed,
+                100.0
+            );
             ctx.set_anim_looping(false);
             ctx.set_anim_fade_time(f32::INFINITY); // 非有限值：忽略
             assert_eq!(
@@ -2032,7 +2128,9 @@ pub(crate) mod tests {
             }
             other => panic!("第 2 条应是 Play，得到 {other:?}"),
         }
-        assert!(matches!(&batch[2], xgame_core::AudioCommand::StopClip(c) if c == "Resources/Audio/Beep.wav"));
+        assert!(
+            matches!(&batch[2], xgame_core::AudioCommand::StopClip(c) if c == "Resources/Audio/Beep.wav")
+        );
         assert!(matches!(&batch[3], xgame_core::AudioCommand::StopAll));
 
         // 没接音频：一条命令都不该产生，也不该 panic。
@@ -2084,8 +2182,7 @@ pub(crate) mod tests {
         let mut scene = Scene::new("Template");
         let root = scene.add_entity(Entity::new("Enemy"));
         let root_index = scene.index_of(root).unwrap();
-        scene.entities[root_index].physics =
-            Some(PhysicsBody::dynamic_ball(0.5));
+        scene.entities[root_index].physics = Some(PhysicsBody::dynamic_ball(0.5));
         let child = scene.add_entity(
             Entity::new("Gun")
                 .with_model("builtin://cube")
@@ -2135,15 +2232,18 @@ pub(crate) mod tests {
         assert_eq!(child.transform.position, Vec3::new(0.0, 1.0, 0.0));
         assert_eq!(child.parent, Some(root_id), "内部父引用被重映射");
         // 每个新实体都带着实例来源（编辑器 Play 里的 Prefab 面板仍认得出它）
-        assert!(scene
-            .entities
-            .iter()
-            .all(|e| e.prefab.as_ref().is_some_and(|p| p.source == "Prefabs/Enemy.prefab.ron")));
+        assert!(scene.entities.iter().all(|e| e
+            .prefab
+            .as_ref()
+            .is_some_and(|p| p.source == "Prefabs/Enemy.prefab.ron")));
         // 每个新实体一条 EntitySpawned（运行时据此补刚体）——含根上那颗球
         assert_eq!(commands.len(), 2);
         assert!(matches!(
             &commands[0],
-            ScriptCommand::EntitySpawned { physics: Some(_), .. }
+            ScriptCommand::EntitySpawned {
+                physics: Some(_),
+                ..
+            }
         ));
         assert!(logs.is_empty(), "成功路径不该有日志");
     }
@@ -2189,7 +2289,10 @@ pub(crate) mod tests {
             Vec3::new(0.25, 1.5, 0.0),
             "挂到父节点下时入参是**局部**位置"
         );
-        assert_eq!(scene.parent_index(root_index), Some(scene.index_of(player).unwrap()));
+        assert_eq!(
+            scene.parent_index(root_index),
+            Some(scene.index_of(player).unwrap())
+        );
         // 父节点带着子节点走：根的世界位置 = 父位置 + 局部偏移
         let world = scene.world_matrix(root_index).w_axis.truncate();
         assert!((world - Vec3::new(0.25, 1.5, 0.0)).length() < 1e-4);
@@ -2227,7 +2330,8 @@ pub(crate) mod tests {
         assert_eq!(logs[0].level, LogLevel::Error);
         assert!(
             logs[0].message.contains("装载器"),
-            "日志要说清是接线问题：{}", logs[0].message
+            "日志要说清是接线问题：{}",
+            logs[0].message
         );
     }
 
@@ -2342,7 +2446,10 @@ pub(crate) mod tests {
             assert_eq!(ctx.layer(EntityId::from_raw(9999)), None);
 
             // 没接物理时射线是 miss（不 panic），带掩码的版本同理。
-            assert!(!ctx.raycast_masked(Vec3::ZERO, Vec3::NEG_Z, 10.0, 0xFFFF).hit);
+            assert!(
+                !ctx.raycast_masked(Vec3::ZERO, Vec3::NEG_Z, 10.0, 0xFFFF)
+                    .hit
+            );
         }
 
         // 场景字段真的被改了（`set_layer` 不是只发通知）。
@@ -2359,6 +2466,65 @@ pub(crate) mod tests {
             relayered,
             vec![(id, 5), (id, 1)],
             "每次成功的换层都要通知运行时（失败的调用不能留下通知）"
+        );
+    }
+
+    /// 形变目标 API：钳位、稀疏写、越界拒绝、非有限值拒绝。
+    ///
+    /// 这四条各自对应一种"脚本算错了"的现实写法；少任何一条都会让错误
+    /// 悄悄写进场景文件（而不是当场被挡掉）。
+    #[test]
+    fn morph_api_clamps_sparse_writes_and_rejects_junk() {
+        let mut scene = Scene::new("face");
+        scene.add_entity(Entity::new("head"));
+        let id = scene.entities[0].id;
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+
+        {
+            let mut ctx = GameCtx {
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: None,
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "MorphProbe",
+                scene_name: "",
+                scene_order: &[],
+                loader: None,
+                clock: None,
+                entity: id,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+
+            assert_eq!(ctx.morph(id, 0), 0.0, "没写过的目标读出来是 0");
+
+            // 稀疏写：只想动第 2 个目标，中间两个补 0。
+            assert!(ctx.set_morph(id, 2, 0.75));
+            assert_eq!(ctx.morph(id, 0), 0.0);
+            assert_eq!(ctx.morph(id, 2), 0.75);
+
+            // 钳位：超出 0..1 的值被夹住，而不是原样存盘。
+            assert!(ctx.set_morph(id, 2, 5.0));
+            assert_eq!(ctx.morph(id, 2), 1.0);
+            assert!(ctx.set_morph(id, 2, -3.0));
+            assert_eq!(ctx.morph(id, 2), 0.0);
+
+            // 非有限值 / 越界下标：拒绝，且**不改**已有值。
+            assert!(!ctx.set_morph(id, 0, f32::NAN));
+            assert!(!ctx.set_morph(id, 9999, 1.0));
+            assert_eq!(ctx.morph(id, 0), 0.0);
+
+            // morph 只影响渲染，不需要命令队列（对照上面的换层：那个要通知物理）。
+            assert!(commands.is_empty(), "形变权重不该往命令队列里塞东西");
+        }
+
+        assert_eq!(
+            scene.entities[0].morph_weights,
+            vec![0.0, 0.0, 0.0],
+            "三次写入落在同一张表上（稀疏写补 0）"
         );
     }
 }

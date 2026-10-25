@@ -27,7 +27,7 @@
 //! | `function start(ctx)` | 实体进入运行时后一次 |
 //! | `function update(ctx)` | 每个渲染帧 |
 //! | `function fixed_update(ctx)` | 每个物理固定步长 |
-//! | `function on_destroy(ctx)` | 实体被销毁前 |
+//! | `function on_destroy(ctx)` | 实体被销毁后（自身已离开场景，状态仍可读） |
 //!
 //! 完整 API 见 [`GameCtx`] 的方法表（`ctx.rs` —— 真相源；`lua_api.rs` 只是
 //! 每个函数一行的转发壳，也可看仓库 `Docs/脚本API.md`）。
@@ -58,7 +58,7 @@ mod ui_api;
 mod ui_ctx;
 
 pub use context::{
-    FrameCtx, LogLevel, ScriptCommand, ScriptCtx, ScriptLog, SpawnRequest,
+    FrameCtx, LogLevel, RemovedEntity, ScriptCommand, ScriptCtx, ScriptLog, SpawnRequest,
 };
 pub use ctx::{GameCtx, RayHit};
 pub use host::{CommandReport, Hook, PreloadReport};

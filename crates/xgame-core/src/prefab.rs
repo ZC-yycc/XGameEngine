@@ -182,16 +182,26 @@ impl Prefab {
     ///
     /// `source` 是资产的项目相对路径，写进 [`PrefabInstanceRef::source`]。
     pub fn instantiate(&self, source: &str) -> Vec<Entity> {
+        // 先给**每一条**实体各分配一个新 ID —— 按位置分，不按旧 ID 分。
+        //
+        // 旧实现是 `id_map.insert(entity.id, EntityId::new())`：映射的键是**旧 ID**，
+        // 文件里若有两条件物撞了同一个 ID，后一次 insert 会覆盖前一次，于是两条
+        // 实体最后拿到**同一个**新 ID。实例化出来的子树自带重复 ID，之后"删一个
+        // 连带删另一个"，而且会被下一次保存写回文件，越传越广。
+        let new_ids: Vec<EntityId> = self.entities.iter().map(|_| EntityId::new()).collect();
+        // 父引用只能按"旧 ID → 第一次出现的那个新 ID"重定向（撞 ID 时无法区分父子，
+        // 保守取第一个 —— 与 `Scene::ensure_unique_ids` 的取舍一致）。
         let mut id_map: HashMap<EntityId, EntityId> = HashMap::with_capacity(self.entities.len());
-        for entity in &self.entities {
-            id_map.insert(entity.id, EntityId::new());
+        for (entity, new_id) in self.entities.iter().zip(&new_ids) {
+            id_map.entry(entity.id).or_insert(*new_id);
         }
 
         self.entities
             .iter()
-            .map(|original| {
+            .zip(&new_ids)
+            .map(|(original, &new_id)| {
                 let mut entity = original.clone();
-                entity.id = id_map[&original.id];
+                entity.id = new_id;
                 entity.parent = original.parent.and_then(|p| id_map.get(&p).copied());
                 let is_root = entity.parent.is_none();
                 entity.prefab = Some(PrefabInstanceRef {
@@ -253,9 +263,7 @@ mod tests {
     /// 造一个 3 个实体、两层深的小场景：Root -> Child -> Grandchild。
     fn sample_scene() -> (Scene, usize) {
         let mut scene = Scene::new("Sample");
-        let root = scene.add_entity(
-            Entity::new("Root").with_model("builtin://cube"),
-        );
+        let root = scene.add_entity(Entity::new("Root").with_model("builtin://cube"));
         let child = scene.add_entity(
             Entity::new("Child")
                 .with_model("builtin://sphere")
@@ -266,7 +274,10 @@ mod tests {
                 .with_model("builtin://cylinder")
                 .with_transform(Transform::from_translation(Vec3::new(0.0, 0.5, 0.0))),
         );
-        scene.set_parent(scene.index_of(child).unwrap(), Some(scene.index_of(root).unwrap()));
+        scene.set_parent(
+            scene.index_of(child).unwrap(),
+            Some(scene.index_of(root).unwrap()),
+        );
         scene.set_parent(
             scene.index_of(grandchild).unwrap(),
             Some(scene.index_of(child).unwrap()),
@@ -343,7 +354,10 @@ mod tests {
         for e in &instances {
             let link = e.prefab.as_ref().expect("实例实体必须带来源");
             assert_eq!(link.source, "Prefabs/Root.prefab.ron");
-            assert!(old_ids.contains(&link.source_id), "source_id 应当指向资产内的实体");
+            assert!(
+                old_ids.contains(&link.source_id),
+                "source_id 应当指向资产内的实体"
+            );
         }
         // 父子结构完整（重映射后）
         let root_id = roots[0].id;
@@ -417,5 +431,34 @@ mod tests {
         let mut scene = Scene::new("S");
         assert!(scene.instantiate_prefab(&prefab, "x.prefab.ron").is_none());
         assert!(prefab.instantiate("x.prefab.ron").is_empty());
+    }
+
+    /// 资产文件里撞了 ID 时，实例化仍须给出互不相同的新 ID。
+    ///
+    /// 旧实现按**旧 ID** 建「旧 → 新」映射，两条同 ID 的实体会互相覆盖，最后
+    /// 共用同一个新 ID —— 实例化出来的子树自带重复 ID，之后删一条就带走另一条。
+    #[test]
+    fn instantiate_keeps_new_ids_distinct_when_the_source_has_duplicates() {
+        let mut prefab = Prefab::new("Dup");
+        let shared = EntityId::from_raw(4242);
+        let mut a = Entity::new("A");
+        a.id = shared;
+        let mut b = Entity::new("B");
+        b.id = shared;
+        prefab.entities.push(a);
+        prefab.entities.push(b);
+
+        let out = prefab.instantiate("Prefabs/Dup.prefab.ron");
+        assert_eq!(out.len(), 2);
+        assert_ne!(
+            out[0].id, out[1].id,
+            "两条源实体撞 ID 时，实例也必须各拿一个新 ID"
+        );
+        // `source_id` 仍指回资产里的原 ID，Apply / Revert 的对位不受影响。
+        assert!(
+            out.iter()
+                .all(|e| e.prefab.as_ref().is_some_and(|p| p.source_id == shared)),
+            "source_id 应当保持资产里的原值"
+        );
     }
 }

@@ -57,10 +57,20 @@ pub fn handle_line(line: &str) -> Option<String> {
 
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(e) => return Some(error_line(&Value::Null, -32700, &format!("parse error: {e}"))),
+        Err(e) => {
+            return Some(error_line(
+                &Value::Null,
+                -32700,
+                &format!("parse error: {e}"),
+            ))
+        }
     };
     if !msg.is_object() {
-        return Some(error_line(&Value::Null, -32600, "invalid request: not an object"));
+        return Some(error_line(
+            &Value::Null,
+            -32600,
+            "invalid request: not an object",
+        ));
     }
 
     let id = msg.get("id").cloned();
@@ -109,15 +119,16 @@ fn call_tool(params: &Value) -> Result<Value, (i64, String)> {
         .get("name")
         .and_then(Value::as_str)
         .ok_or((-32602, "tools/call requires params.name".to_string()))?;
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     if !args.is_object() {
         return Err((-32602, "params.arguments must be an object".to_string()));
     }
     match tools::call(name, &args) {
         Ok(output) => Ok(tool_result_content(output)),
-        Err(tools::CallError::UnknownTool(name)) => {
-            Err((-32602, format!("unknown tool: {name}")))
-        }
+        Err(tools::CallError::UnknownTool(name)) => Err((-32602, format!("unknown tool: {name}"))),
         Err(tools::CallError::Failed(message)) => {
             Ok(json!({ "content": [{ "type": "text", "text": message }], "isError": true }))
         }
@@ -146,8 +157,7 @@ fn result_line(id: &Value, result: Value) -> String {
 }
 
 fn error_line(id: &Value, code: i64, message: &str) -> String {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-        .to_string()
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }).to_string()
 }
 
 #[cfg(test)]
@@ -167,7 +177,10 @@ mod tests {
         );
         assert_eq!(resp["id"], 1);
         let result = &resp["result"];
-        assert_eq!(result["protocolVersion"], "2025-06-18", "认识的版本必须回显");
+        assert_eq!(
+            result["protocolVersion"], "2025-06-18",
+            "认识的版本必须回显"
+        );
         assert!(result["capabilities"]["tools"].is_object());
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
     }
@@ -223,11 +236,7 @@ mod tests {
                 .unwrap_or_default();
             if tool["name"] == "schema_read" || tool["name"] == "script_api_read" {
                 // 字段 / 脚本契约是引擎的，不属于某个项目 —— 不要求 project。
-                assert!(
-                    required.is_empty(),
-                    "{} 不该要求 project",
-                    tool["name"]
-                );
+                assert!(required.is_empty(), "{} 不该要求 project", tool["name"]);
                 continue;
             }
             assert!(

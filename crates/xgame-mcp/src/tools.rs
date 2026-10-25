@@ -230,7 +230,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "script_api_read",
-            "description": "返回脚本 API 的机器可读清单（JSON）：158 个全局函数（签名 / 参数 / 返回值 / 语义）、6 个生命周期钩子、17 个类别、值类型与全局约定。写 .lua 之前先读；与 `xgame-editor --export-script-api` 同源，不需要 project。",
+            "description": "返回脚本 API 的机器可读清单（JSON）：160 个全局函数（签名 / 参数 / 返回值 / 语义）、6 个生命周期钩子、17 个类别、值类型与全局约定。写 .lua 之前先读；与 `xgame-editor --export-script-api` 同源，不需要 project。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -356,7 +356,9 @@ fn pretty(value: &Value) -> String {
 
 /// 取 `[x, y, z]`；缺省/null = 不改该字段。
 fn vec3_arg(args: &Value, key: &str) -> Result<Option<Vec3>, CallError> {
-    let Some(value) = args.get(key) else { return Ok(None) };
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
     if value.is_null() {
         return Ok(None);
     }
@@ -368,10 +370,11 @@ fn vec3_arg(args: &Value, key: &str) -> Result<Option<Vec3>, CallError> {
     for (item, slot) in arr.iter().zip(out.iter_mut()) {
         let n = item
             .as_f64()
-            .ok_or_else(|| fail(format!("`{key}` 里有不是数字的元素")))?
-            as f32;
+            .ok_or_else(|| fail(format!("`{key}` 里有不是数字的元素")))? as f32;
         if !n.is_finite() {
-            return Err(fail(format!("`{key}` 含非有限值（NaN / Infinity / 超出 f32 范围）")));
+            return Err(fail(format!(
+                "`{key}` 含非有限值（NaN / Infinity / 超出 f32 范围）"
+            )));
         }
         *slot = n;
     }
@@ -499,8 +502,8 @@ fn scene_write(args: &Value) -> Result<String, CallError> {
     let project = open_project(args)?;
     let rel = scene_rel(args, &project.manifest().entry_scene)?;
     let text = require_str(args, "ron")?;
-    let scene: Scene = ron::from_str(text)
-        .map_err(|e| fail(format!("RON 解析失败，未写入任何文件: {e}")))?;
+    let scene: Scene =
+        ron::from_str(text).map_err(|e| fail(format!("RON 解析失败，未写入任何文件: {e}")))?;
     save_scene_of(&project, &rel, &scene)?;
     Ok(pretty(&json!({
         "scene": rel,
@@ -989,7 +992,8 @@ fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let third = *chunk.get(2).unwrap_or(&0);
-        let n = ((chunk[0] as u32) << 16) | ((*chunk.get(1).unwrap_or(&0) as u32) << 8) | third as u32;
+        let n =
+            ((chunk[0] as u32) << 16) | ((*chunk.get(1).unwrap_or(&0) as u32) << 8) | third as u32;
         out.push(TABLE[(n >> 18 & 63) as usize] as char);
         out.push(TABLE[(n >> 12 & 63) as usize] as char);
         out.push(if chunk.len() > 1 {
@@ -1062,7 +1066,10 @@ mod tests {
         mut args: Value,
     ) -> Result<ToolOutput, CallError> {
         let obj = args.as_object_mut().expect("测试参数必须是对象");
-        obj.insert("project".into(), json!(project.root().display().to_string()));
+        obj.insert(
+            "project".into(),
+            json!(project.root().display().to_string()),
+        );
         call(name, &args)
     }
 
@@ -1111,9 +1118,11 @@ mod tests {
             .iter()
             .flat_map(|category| category["functions"].as_array().expect("functions 数组"))
             .collect();
-        assert_eq!(functions.len(), 158, "函数总数");
+        assert_eq!(functions.len(), 160, "函数总数");
         assert!(
-            functions.iter().any(|function| function["name"] == "spawn_prefab"),
+            functions
+                .iter()
+                .any(|function| function["name"] == "spawn_prefab"),
             "缺 spawn_prefab"
         );
         assert!(
@@ -1216,8 +1225,8 @@ mod tests {
     fn scene_path_traversal_rejected() {
         let project = temp_project("traversal");
         for bad in ["../evil.ron", "C:/abs/evil.ron", "/abs/evil.ron"] {
-            let err = run(&project, "scene_read", json!({ "scene": bad }))
-                .expect_err("路径穿越必须被拒");
+            let err =
+                run(&project, "scene_read", json!({ "scene": bad })).expect_err("路径穿越必须被拒");
             match err {
                 CallError::Failed(msg) => assert!(msg.contains("相对路径"), "{bad}: {msg}"),
                 other => panic!("应是 Failed，得到 {other:?}"),
@@ -1254,8 +1263,7 @@ mod tests {
         assert_eq!(e.transform.position, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(e.transform.scale, Vec3::new(2.0, 2.0, 2.0));
         assert!(
-            (e.transform.rotation.angle_between(Quat::IDENTITY)
-                - std::f32::consts::FRAC_PI_2)
+            (e.transform.rotation.angle_between(Quat::IDENTITY) - std::f32::consts::FRAC_PI_2)
                 .abs()
                 < 1e-4,
             "90° 应转对，得到 {:?}",
@@ -1271,7 +1279,11 @@ mod tests {
         .expect("补丁更新应成功");
         let scene = entry_scene(&project);
         let e = scene.find_by_name("Crate").expect("仍在");
-        assert_eq!(e.transform.position, Vec3::new(1.0, 2.0, 3.0), "未传字段不能被动");
+        assert_eq!(
+            e.transform.position,
+            Vec3::new(1.0, 2.0, 3.0),
+            "未传字段不能被动"
+        );
         assert_eq!(e.transform.scale, Vec3::new(3.0, 3.0, 3.0));
         cleanup(&project);
     }
@@ -1321,14 +1333,20 @@ mod tests {
             json!({ "name": "Child", "parent": "Nope" }),
         )
         .expect_err("不存在的父必须拒绝");
-        assert!(matches!(&err, CallError::Failed(m) if m.contains("找不到父实体")), "{err:?}");
+        assert!(
+            matches!(&err, CallError::Failed(m) if m.contains("找不到父实体")),
+            "{err:?}"
+        );
         let err = run(
             &project,
             "entity_upsert",
             json!({ "name": "Child", "parent": "Child" }),
         )
         .expect_err("自己当父必须拒绝");
-        assert!(matches!(&err, CallError::Failed(m) if m.contains("自己")), "{err:?}");
+        assert!(
+            matches!(&err, CallError::Failed(m) if m.contains("自己")),
+            "{err:?}"
+        );
         cleanup(&project);
     }
 
@@ -1343,8 +1361,7 @@ mod tests {
         project.write_scene(&rel, &scene).expect("写入重名场景");
 
         for tool in ["entity_upsert", "entity_remove"] {
-            let err = run(&project, tool, json!({ "name": "Dup" }))
-                .expect_err("重名必须被拒");
+            let err = run(&project, tool, json!({ "name": "Dup" })).expect_err("重名必须被拒");
             assert!(
                 matches!(&err, CallError::Failed(m) if m.contains("歧义")),
                 "{tool}: {err:?}"
@@ -1367,14 +1384,14 @@ mod tests {
 
         let err = run(&project, "entity_remove", json!({ "name": "Ghost" }))
             .expect_err("不存在的实体删除应报错");
-        assert!(matches!(&err, CallError::Failed(m) if m.contains("没有名为")), "{err:?}");
+        assert!(
+            matches!(&err, CallError::Failed(m) if m.contains("没有名为")),
+            "{err:?}"
+        );
 
         run(&project, "entity_remove", json!({ "name": "Parent" })).expect("删父");
         let scene = entry_scene(&project);
-        assert!(
-            scene.find_by_name("Parent").is_none(),
-            "父已删"
-        );
+        assert!(scene.find_by_name("Parent").is_none(), "父已删");
         let leaf = scene.find_by_name("Leaf").expect("子节点不连坐，必须还在");
         assert_eq!(leaf.parent, None, "子节点提升到根");
         cleanup(&project);
@@ -1425,9 +1442,10 @@ mod tests {
             "this is not ron",
         )
         .expect("写坏材质");
-        scene
-            .entities
-            .push(Entity::new("BrokenTexture").with_material_asset("Resources/Materials/BrokenTexture.mat"));
+        scene.entities.push(
+            Entity::new("BrokenTexture")
+                .with_material_asset("Resources/Materials/BrokenTexture.mat"),
+        );
         scene
             .entities
             .push(Entity::new("BadAsset").with_material_asset("Resources/Materials/Bad.mat"));
@@ -1443,7 +1461,10 @@ mod tests {
             "{report}"
         );
         assert_eq!(
-            report["missing_material_textures"].as_array().unwrap().len(),
+            report["missing_material_textures"]
+                .as_array()
+                .unwrap()
+                .len(),
             1,
             "{report}"
         );
@@ -1460,8 +1481,7 @@ mod tests {
     #[test]
     fn unknown_tool_is_distinct_error() {
         let project = temp_project("unknown");
-        let err = run(&project, "definitely_not_a_tool", json!({}))
-            .expect_err("未知工具必须报错");
+        let err = run(&project, "definitely_not_a_tool", json!({})).expect_err("未知工具必须报错");
         assert_eq!(err, CallError::UnknownTool("definitely_not_a_tool".into()));
         cleanup(&project);
     }
@@ -1571,12 +1591,10 @@ mod tests {
         assert_eq!(envelope["exit_code"], 2);
         assert_eq!(envelope["report"]["ok"], false);
         assert_eq!(envelope["report"]["logs"]["error"], 5);
-        assert!(
-            !envelope["report"]["error_samples"]
-                .as_array()
-                .expect("error_samples 数组")
-                .is_empty()
-        );
+        assert!(!envelope["report"]["error_samples"]
+            .as_array()
+            .expect("error_samples 数组")
+            .is_empty());
         cleanup(&project);
     }
 
@@ -1614,7 +1632,11 @@ mod tests {
         // 每 3 字节 → 4 字符（含填充）的定长关系，随机长度扫一遍。
         for len in 0..64usize {
             let bytes: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
-            assert_eq!(base64_encode(&bytes).len(), len.div_ceil(3) * 4, "len={len}");
+            assert_eq!(
+                base64_encode(&bytes).len(),
+                len.div_ceil(3) * 4,
+                "len={len}"
+            );
         }
     }
 
@@ -1623,8 +1645,11 @@ mod tests {
     fn run_headless_screenshot_returns_inline_image() {
         editor_exe_for_tests();
         let project = temp_project("headless_shot");
-        let out = match run_full(&project, "run_headless", json!({ "frames": 3, "screenshot": true }))
-        {
+        let out = match run_full(
+            &project,
+            "run_headless",
+            json!({ "frames": 3, "screenshot": true }),
+        ) {
             Ok(out) => out,
             // 无 GPU 环境跳过（与渲染层测试同一套约定）：截图拿下适配器失败
             // 走退出码 1，错误文本里带"GPU 适配器"。
@@ -1637,7 +1662,9 @@ mod tests {
         };
         let envelope: Value = serde_json::from_str(&out.text).expect("信封必须是 JSON");
         assert_eq!(envelope["exit_code"], 0);
-        let bytes = envelope["screenshot"]["bytes"].as_u64().expect("截图字节数");
+        let bytes = envelope["screenshot"]["bytes"]
+            .as_u64()
+            .expect("截图字节数");
         assert!(bytes > 1000, "PNG 太小（{bytes} 字节），多半没画出东西");
         // 报告的 screenshot 节带实际机位（自动取景的结果必须是可复现的具体值）。
         let report_shot = &envelope["report"]["screenshot"];
@@ -1687,7 +1714,10 @@ mod tests {
         let text = run(&project, "asset_list", json!({})).expect("asset_list 应成功");
         let out: Value = serde_json::from_str(&text).expect("返回必须是 JSON");
         assert_eq!(out["count"], 0);
-        assert_eq!(out["diagnostics"]["missing_meta"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            out["diagnostics"]["missing_meta"].as_array().unwrap().len(),
+            2
+        );
         assert_eq!(out["diagnostics"]["has_issues"], true);
         assert!(
             !project.path("Resources/Box.glb.meta").exists(),
@@ -1745,7 +1775,10 @@ mod tests {
         assert_eq!(out["has_issues"], true);
         assert_eq!(out["dangling_guids"].as_array().unwrap().len(), 1, "{out}");
         assert!(
-            out["dangling_guids"][0].as_str().unwrap().contains("guid://"),
+            out["dangling_guids"][0]
+                .as_str()
+                .unwrap()
+                .contains("guid://"),
             "{out}"
         );
         assert!(out["missing_models"].as_array().unwrap().is_empty());
@@ -1791,8 +1824,12 @@ mod tests {
 
         // 只给 path：补一张身份证，不碰其它文件（对照编辑器「导入全部」的语义）。
         let out: Value = serde_json::from_str(
-            &run(&project, "asset_import", json!({ "path": "Resources/Box.glb" }))
-                .expect("导入应成功"),
+            &run(
+                &project,
+                "asset_import",
+                json!({ "path": "Resources/Box.glb" }),
+            )
+            .expect("导入应成功"),
         )
         .unwrap();
         assert_eq!(out["created"], true, "{out}");
@@ -1883,8 +1920,8 @@ mod tests {
 
         // 场景不归资产库管：生成 `.meta` 会让场景被当成资产，直接拒绝。
         let scene_rel = project.manifest().entry_scene.clone();
-        let err = run(&project, "asset_import", json!({ "path": scene_rel }))
-            .expect_err("场景必须拒绝");
+        let err =
+            run(&project, "asset_import", json!({ "path": scene_rel })).expect_err("场景必须拒绝");
         assert!(matches!(err, CallError::Failed(_)));
         assert!(!project.path(format!("{scene_rel}.meta")).exists());
 
@@ -1950,8 +1987,8 @@ mod tests {
         assert!(!project.path("Resources/Box.glb.meta").exists());
 
         // 引用没断：静态检查干净，场景读回来解析到新路径。
-        let check: Value = serde_json::from_str(&run(&project, "project_check", json!({})).unwrap())
-            .unwrap();
+        let check: Value =
+            serde_json::from_str(&run(&project, "project_check", json!({})).unwrap()).unwrap();
         assert_eq!(check["has_issues"], false, "{check}");
         assert!(
             check["dangling_guids"].as_array().unwrap().is_empty(),

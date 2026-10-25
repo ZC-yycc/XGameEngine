@@ -43,10 +43,10 @@
 
 mod color;
 mod config;
-mod scene;
-mod transform;
 pub mod prefab;
 pub mod project;
+mod scene;
+mod transform;
 
 // 新增模块
 mod animation;
@@ -56,8 +56,8 @@ pub mod camera;
 mod character;
 mod check;
 mod component;
-pub mod inspect;
 mod id;
+pub mod inspect;
 pub mod layers;
 mod light;
 mod loader;
@@ -82,17 +82,17 @@ pub use config::{
     SkyConfig, TaaConfig, ToneMapMode, WindowConfig,
 };
 pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
+pub use project::{
+    normalize_scene_relative, same_scene_path, AssetMigrationReport, Project, ProjectError,
+    ProjectHandle, DEFAULT_ENTRY_SCENE, PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION,
+};
 pub use scene::{Entity, Scene};
 pub use transform::Transform;
-pub use project::{
-    AssetMigrationReport, Project, ProjectError, ProjectHandle, DEFAULT_ENTRY_SCENE,
-    PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION, normalize_scene_relative, same_scene_path,
-};
 
 // -- 导出：新增基础设施
 pub use animation::{
-    AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState,
-    AnimTransition, Animator,
+    AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState, AnimTransition,
+    Animator,
 };
 pub use asset::{
     decode_prefab_references, decode_scene_references, encode_prefab_references,
@@ -101,23 +101,19 @@ pub use asset::{
     AssetKind, AssetMeta, AssetMoveReport, AssetRecord, GuidConflict, ImportSettings, InvalidMeta,
     GUID_SCHEME, META_EXTENSION,
 };
-pub use audio::{
-    AudioCommand, AudioPort, AudioStats, AudioSource, ListenerPose, PlaySound,
-};
+pub use audio::{AudioCommand, AudioPort, AudioSource, AudioStats, ListenerPose, PlaySound};
 pub use camera::{look_rotation, Camera};
 pub use character::{
     CharacterContacts, CharacterController, CharacterState, MAX_CHARACTER_CONTACTS,
 };
 pub use component::{Component, ComponentMap, ModelPath, Name};
-pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};
 pub use id::{EntityId, EntityMap, EntitySet};
+pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};
 pub use layers::{sanitize_layer, Layers, DEFAULT_LAYER, LAYER_COUNT};
 pub use light::{Light, LightKind};
 pub use loader::SceneLoader;
 pub use material::{MaterialAsset, MaterialOverride, MATERIAL_EXTENSION};
-pub use particle::{
-    EmissionShape, ParticleBlend, ParticleEmitter, MAX_PARTICLES_LIMIT,
-};
+pub use particle::{EmissionShape, ParticleBlend, ParticleEmitter, MAX_PARTICLES_LIMIT};
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
 pub use ray::{Ray, RayHit};
 pub use schema::{scene_schema, SchemaDoc, SCHEMA_FORMAT_VERSION};

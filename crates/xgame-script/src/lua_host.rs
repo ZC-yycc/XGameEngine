@@ -142,23 +142,23 @@ impl LuaHost {
         let budget = Arc::new(AtomicU64::new(INSTRUCTION_BUDGET));
         // 指令计数沙箱：每 HOOK_INTERVAL 条指令回调一次，扣预算，扣到 0 中断。
         // 这是"死循环脚本只毁掉自己这一帧，不卡死整个游戏"的唯一防线。
-        lua.set_hook(
-            HookTriggers::new().every_nth_instruction(HOOK_INTERVAL),
-            {
-                let budget = Arc::clone(&budget);
-                move |_lua, _debug| {
-                    let remaining = budget.load(Ordering::Relaxed);
-                    if remaining == 0 {
-                        // 返回错误 → 中断这次 Lua 调用，错误冒泡到 `call` 的 Err。
-                        return Err(mlua::Error::RuntimeError(
-                            "指令数超限，疑似死循环，已中断本次调用".to_owned(),
-                        ));
-                    }
-                    budget.store(remaining.saturating_sub(HOOK_INTERVAL as u64), Ordering::Relaxed);
-                    Ok(VmState::Continue)
+        lua.set_hook(HookTriggers::new().every_nth_instruction(HOOK_INTERVAL), {
+            let budget = Arc::clone(&budget);
+            move |_lua, _debug| {
+                let remaining = budget.load(Ordering::Relaxed);
+                if remaining == 0 {
+                    // 返回错误 → 中断这次 Lua 调用，错误冒泡到 `call` 的 Err。
+                    return Err(mlua::Error::RuntimeError(
+                        "指令数超限，疑似死循环，已中断本次调用".to_owned(),
+                    ));
                 }
-            },
-        );
+                budget.store(
+                    remaining.saturating_sub(HOOK_INTERVAL as u64),
+                    Ordering::Relaxed,
+                );
+                Ok(VmState::Continue)
+            }
+        });
 
         // 把整套装进全局表（失败只可能是 VM 状态异常）。
         if let Err(err) = lua_api::register(&lua) {
@@ -188,6 +188,11 @@ impl LuaHost {
     /// 已编译脚本数量。
     pub fn script_count(&self) -> usize {
         self.scripts.len()
+    }
+
+    /// 当前持有的 `(实体, 脚本)` 状态表数量（诊断与生命周期回归测试用）。
+    pub fn entity_state_count(&self) -> usize {
+        self.states.len()
     }
 
     /// 同一个脚本是否已经编译过。
@@ -307,15 +312,23 @@ impl LuaHost {
         }
     }
 
-    /// 在实体被移除**之前**派发 `on_destroy`。
-    pub fn dispatch_destroy(&mut self, frame: &mut FrameCtx<'_>, entity: EntityId, scripts: &[String]) {
+    /// 在实体被移除**之后**派发 `on_destroy`，随后释放该实体的全部脚本状态。
+    ///
+    /// 此时钩子仍可读自己的 `state_*`，但自身已不在场景中；这与 Rust 组件轨
+    /// 的销毁语义一致。`scripts` 来自移除命令保存的清单，不能再到场景里反查。
+    pub fn dispatch_destroy(
+        &mut self,
+        frame: &mut FrameCtx<'_>,
+        entity: EntityId,
+        scripts: &[String],
+    ) {
         for path in scripts {
             if is_lua(path) {
                 let path_id = self.intern.intern(path);
                 self.run_hook(frame, entity, path_id, Hook::Destroy, None);
             }
         }
-        self.started.remove(&entity);
+        self.forget_entity(entity);
     }
 
     /// 派发一次碰撞事件（`started` = 进入接触）。
@@ -451,7 +464,7 @@ impl LuaHost {
         for command in commands {
             match command {
                 ScriptCommand::EntitySpawned { id, .. } => report.spawned.push(id),
-                ScriptCommand::EntitiesRemoved { ids } => report.removed.extend(ids),
+                ScriptCommand::EntitiesRemoved { entities } => report.removed.extend(entities),
                 ScriptCommand::Reparented { child } => report.reparented.push(child),
                 ScriptCommand::Relayered { id, layer } => report.relayered.push((id, layer)),
                 // 一帧多次切换请求只认最后一个：中间那些场景永远不会被装载，
@@ -579,7 +592,8 @@ impl LuaHost {
         }
 
         let funcs = detect_funcs(&env);
-        self.scripts.insert(path.to_owned(), CompiledScript { funcs });
+        self.scripts
+            .insert(path.to_owned(), CompiledScript { funcs });
         true
     }
 }
@@ -698,7 +712,10 @@ mod tests {
         let funcs = detect_funcs(&env);
         assert!(funcs.start.is_some(), "没识别出 start");
         assert!(funcs.update.is_some(), "没识别出 update");
-        assert!(funcs.fixed_update.is_none(), "没定义 fixed_update 不该被识别");
+        assert!(
+            funcs.fixed_update.is_none(),
+            "没定义 fixed_update 不该被识别"
+        );
         assert!(funcs.destroy.is_none(), "没定义 on_destroy 不该被识别");
     }
 
@@ -728,7 +745,10 @@ mod tests {
             entity.material_asset.as_deref(),
             Some("Resources/Materials/Wood.mat")
         );
-        let material = entity.material.as_ref().expect("Lua set_material 应写入覆盖");
+        let material = entity
+            .material
+            .as_ref()
+            .expect("Lua set_material 应写入覆盖");
         assert_eq!(material.base_color, Some([0.5, 0.6, 0.7, 1.0]));
         assert_eq!(material.metallic, Some(0.25));
         assert_eq!(material.roughness, Some(0.75));
@@ -773,10 +793,9 @@ mod tests {
         cam.scripts.push(path.clone());
         let me = scene.add_entity(cam);
         // 目标放在世界 +X 方向，相机在原点 → 看向它之后 forward 应变成 +X。
-        scene.add_entity(
-            Entity::new("Target")
-                .with_transform(xgame_core::Transform::from_translation(Vec3::new(10.0, 0.0, 0.0))),
-        );
+        scene.add_entity(Entity::new("Target").with_transform(
+            xgame_core::Transform::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+        ));
 
         let mut host = LuaHost::new();
         let report = host.preload(&project.dir, &scene);
@@ -843,10 +862,7 @@ mod tests {
         assert!(report.failed.is_empty(), "编译失败: {:?}", report.failed);
         host.dispatch_start(FrameCtx::new(&mut scene, 0.016, 0.0));
 
-        let emitter = scene.entities[0]
-            .particle
-            .as_ref()
-            .expect("发射器应还在");
+        let emitter = scene.entities[0].particle.as_ref().expect("发射器应还在");
         assert!(!emitter.emitting, "Lua 关掉了发射");
         assert_eq!(emitter.rate, 30.0);
         assert_eq!(emitter.burst, 16, "两次 burst 必须累积");
@@ -925,7 +941,10 @@ mod tests {
             .collect();
         assert!(errors.is_empty(), "脚本调音频 API 不应报错: {errors:?}");
 
-        assert!((port.master_volume - 0.3).abs() < 1e-6, "主音量应落到 port 上");
+        assert!(
+            (port.master_volume - 0.3).abs() < 1e-6,
+            "主音量应落到 port 上"
+        );
         let batch = port.drain();
         assert_eq!(batch.len(), 3, "play×2 + stop 应产生三条命令: {batch:?}");
     }
@@ -1191,10 +1210,7 @@ mod tests {
             "Survey",
             "叠加层剪辑应被脚本切换"
         );
-        assert_eq!(
-            animator.layers[0].clip, "Run",
-            "层栈剪辑应被脚本按层名切换"
-        );
+        assert_eq!(animator.layers[0].clip, "Run", "层栈剪辑应被脚本按层名切换");
     }
 
     #[test]
@@ -1382,8 +1398,9 @@ mod tests {
         assert!(spawned.is_empty(), "没有装载器时什么都不该生成");
         assert_eq!(scene.entities.len(), 1, "只有原来那个 actor");
         assert!(
-            host.take_logs().iter().any(|l| l.level == LogLevel::Error
-                && l.message.contains("装载器")),
+            host.take_logs()
+                .iter()
+                .any(|l| l.level == LogLevel::Error && l.message.contains("装载器")),
             "失败要留下可诊断的日志"
         );
 
@@ -1473,11 +1490,7 @@ mod tests {
         let mut clock = xgame_core::GameClock::new();
         host.dispatch_update(FrameCtx::new(&mut scene, 0.016, 0.0).with_clock(&mut clock));
 
-        let logs: Vec<String> = host
-            .take_logs()
-            .into_iter()
-            .map(|l| l.message)
-            .collect();
+        let logs: Vec<String> = host.take_logs().into_iter().map(|l| l.message).collect();
         for expected in ["default_ok", "set_ok", "nan_ignored", "neg_clamped"] {
             assert!(
                 logs.iter().any(|m| m == expected),
@@ -1491,7 +1504,7 @@ mod tests {
     ///
     /// 不靠运行期枚举全局表：Lua 基础库也有 `error` 等函数，而引擎恰好覆盖了
     /// 同名全局；用集合差分会把被覆盖的名字漏掉。直接读注册源码能精确拿到
-    /// 引擎自己注册的 158 个名字。
+    /// 引擎自己注册的 160 个名字。
     fn registered_global_names(source: &str) -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let mut rest = source;
@@ -1506,10 +1519,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("globals.set 名字缺右引号: {after:.80}"));
             let name = &after[..end];
             assert!(!name.is_empty(), "globals.set 名字不能为空");
-            assert!(
-                names.insert(name.to_string()),
-                "重复注册全局函数: {name}"
-            );
+            assert!(names.insert(name.to_string()), "重复注册全局函数: {name}");
             rest = &after[end + 1..];
         }
         names
@@ -1536,7 +1546,11 @@ mod tests {
             actual, expected,
             "脚本 API 清单与 lua_api/ui_api 的注册名不一致"
         );
-        assert_eq!(actual.len(), 158, "注册名数量应为 158（2026-10-23 加 set_layer / layer / raycast_masked）");
+        assert_eq!(
+            actual.len(),
+            160,
+            "注册名数量应为 160（2026-10-24 加 morph / set_morph）"
+        );
 
         let host = LuaHost::new();
         let globals = host.lua.globals();

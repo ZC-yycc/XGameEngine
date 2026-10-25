@@ -59,8 +59,8 @@ mod game_runtime;
 mod gizmo;
 mod headless;
 mod hot_reload;
-mod input_bridge;
 mod hub;
+mod input_bridge;
 mod panels;
 mod plugin_build;
 mod plugin_session;
@@ -231,7 +231,10 @@ impl EditorApp {
         let now = Instant::now();
         let policy = FramePolicy::from_env();
         let probe = frame_probe::FrameProbe::from_env();
-        log::info!("帧调度策略：{policy:?}（探针{}）", if probe.enabled() { "开" } else { "关" });
+        log::info!(
+            "帧调度策略：{policy:?}（探针{}）",
+            if probe.enabled() { "开" } else { "关" }
+        );
 
         // ── 命令行参数 ──
         // `xgame-editor <项目路径>` 直接进编辑器，跳过枢纽。
@@ -495,9 +498,7 @@ impl eframe::App for EditorApp {
         let write_autosave = self.write_autosave;
         if ctx.input(|i| i.viewport().close_requested()) {
             if let Some(session) = self.session.as_mut() {
-                if session.state.exit_dialog.is_none()
-                    && session.state.scene_dirty_memo(pass_nr)
-                {
+                if session.state.exit_dialog.is_none() && session.state.scene_dirty_memo(pass_nr) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     session.state.exit_dialog = Some(ExitTarget::Quit);
                 } else if session.state.exit_dialog.is_none() && write_autosave {
@@ -1084,9 +1085,10 @@ fn editor_ui(
     // 画在最后：确认框 / 另存为要盖在设置窗口之上（同层后画的在上）。
     panels::assets::show_overlays(&mut session.state, ctx);
 
-    if let Some(action) = session
-        .preferences_window
-        .show(&mut session.state, &mut session.tree, ctx)
+    if let Some(action) =
+        session
+            .preferences_window
+            .show(&mut session.state, &mut session.tree, ctx)
     {
         match action {
             panels::preferences::PreferencesAction::Apply(next) => {
@@ -1109,11 +1111,7 @@ fn editor_ui(
     panels::settings::show(&mut session.state, ctx);
     dialogs::show_save_as_dialog(&mut session.state, ctx);
     dialogs::show_new_scene_dialog(&mut session.state, ctx);
-    dialogs::show_scene_change_dialog(
-        &mut session.state,
-        ctx,
-        ctx.cumulative_pass_nr(),
-    );
+    dialogs::show_scene_change_dialog(&mut session.state, ctx, ctx.cumulative_pass_nr());
     if let Some(target) =
         dialogs::show_exit_dialog(&mut session.state, ctx, ctx.cumulative_pass_nr())
     {
@@ -1132,13 +1130,16 @@ fn editor_ui(
     // 是唤醒间隔，统计时必须与连续帧分开（见 `profiler` 模块文档）。
     let work_us = t_frame_start.elapsed();
     let dt_us = (ctx.input(|i| i.stable_dt).max(0.0) * 1_000_000.0) as u128;
-    session.state.profiler.record(profiler::FrameSample::from_micros(
-        dt_us,
-        work_us.as_micros(),
-        runtime_us.as_micros(),
-        ui_us.as_micros(),
-        live,
-    ));
+    session
+        .state
+        .profiler
+        .record(profiler::FrameSample::from_micros(
+            dt_us,
+            work_us.as_micros(),
+            runtime_us.as_micros(),
+            ui_us.as_micros(),
+            live,
+        ));
 }
 
 /// 底部状态栏。
@@ -1533,13 +1534,21 @@ mod tests {
 
         // 第一次出现 → 放行
         assert_eq!(
-            frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(10.0, 20.0))]),
+            frame(
+                &ctx,
+                &mut last,
+                vec![egui::Event::PointerMoved(p(10.0, 20.0))]
+            ),
             1,
             "首次出现的指针位置应当放行"
         );
         // 同一位置再来一次（Windows 的空转来源）→ 丢掉
         assert_eq!(
-            frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(10.0, 20.0))]),
+            frame(
+                &ctx,
+                &mut last,
+                vec![egui::Event::PointerMoved(p(10.0, 20.0))]
+            ),
             0,
             "位置没变的 PointerMoved 应当被丢掉"
         );
@@ -1559,7 +1568,11 @@ mod tests {
         );
         // 真的移动了 → 放行
         assert_eq!(
-            frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(31.0, 40.0))]),
+            frame(
+                &ctx,
+                &mut last,
+                vec![egui::Event::PointerMoved(p(31.0, 40.0))]
+            ),
             1,
             "指针真的移动时必须放行，否则界面会卡住不跟手"
         );
@@ -1581,11 +1594,29 @@ mod tests {
         let mut last = None;
         let p = |x, y| egui::pos2(x, y);
 
-        assert_eq!(frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(5.0, 5.0))]), 1);
-        assert_eq!(frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(5.0, 5.0))]), 0);
+        assert_eq!(
+            frame(
+                &ctx,
+                &mut last,
+                vec![egui::Event::PointerMoved(p(5.0, 5.0))]
+            ),
+            1
+        );
+        assert_eq!(
+            frame(
+                &ctx,
+                &mut last,
+                vec![egui::Event::PointerMoved(p(5.0, 5.0))]
+            ),
+            0
+        );
         assert_eq!(frame(&ctx, &mut last, vec![egui::Event::PointerGone]), 1);
         assert_eq!(
-            frame(&ctx, &mut last, vec![egui::Event::PointerMoved(p(5.0, 5.0))]),
+            frame(
+                &ctx,
+                &mut last,
+                vec![egui::Event::PointerMoved(p(5.0, 5.0))]
+            ),
             1,
             "离开再回到同一点必须放行，否则悬停会失效"
         );

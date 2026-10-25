@@ -68,8 +68,8 @@ pub mod prelude {
     pub use xgame_input::{key_from_winit, Input, InputMap, KeyCode, MouseButton};
 
     // -- 数学（glam 常用类型 + 整个命名空间 + 投影工具）-------------------
-    pub use xgame_math::glam::{Mat4, Quat, Vec2, Vec3};
     pub use xgame_math::glam;
+    pub use xgame_math::glam::{Mat4, Quat, Vec2, Vec3};
     pub use xgame_math::projection;
 
     // -- 渲染 -------------------------------------------------------------
@@ -77,9 +77,7 @@ pub mod prelude {
     pub use xgame_render::gltf_loader::GltfMesh;
     // 后处理链（HDR 中间标 + 曝光 / 色调映射）：宿主画场景时几乎必然要用。
     pub use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
-    pub use xgame_render::scene_pipeline::{
-        supported_sample_count, SceneLighting, ScenePipeline,
-    };
+    pub use xgame_render::scene_pipeline::{supported_sample_count, SceneLighting, ScenePipeline};
     // 屏幕空间 UI：与场景管线一样是"宿主画一帧"的组成部分。
     pub use xgame_render::ui_renderer::UiRenderer;
     // TAA：历史缓冲 + resolve，以及宿主算抖动要用的两个换算函数。

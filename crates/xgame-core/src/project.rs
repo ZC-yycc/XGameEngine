@@ -396,12 +396,11 @@ impl ProjectHandle {
             }
         })?;
 
-        let manifest: Project = ron::from_str(&text).map_err(|source| {
-            ProjectError::ParseManifest {
+        let manifest: Project =
+            ron::from_str(&text).map_err(|source| ProjectError::ParseManifest {
                 path: manifest_path,
                 source,
-            }
-        })?;
+            })?;
 
         // 扫描一次资产库。项目级文件数通常是几百，毫秒级；放在打开项目时做，
         // 换来"每次加载场景都不必扫盘"。
@@ -446,10 +445,8 @@ impl ProjectHandle {
             handle.manifest.content.models_dir.as_str(),
         ] {
             let dir = handle.path(sub);
-            std::fs::create_dir_all(&dir).map_err(|source| ProjectError::CreateDir {
-                path: dir,
-                source,
-            })?;
+            std::fs::create_dir_all(&dir)
+                .map_err(|source| ProjectError::CreateDir { path: dir, source })?;
         }
 
         // 清单 + 默认场景
@@ -570,11 +567,7 @@ impl ProjectHandle {
     }
 
     /// 改写某个资产的导入设置（写回 `.meta` 并刷新索引）。
-    pub fn set_asset_import(
-        &self,
-        relative: &str,
-        import: ImportSettings,
-    ) -> Result<(), String> {
+    pub fn set_asset_import(&self, relative: &str, import: ImportSettings) -> Result<(), String> {
         self.assets().set_import(relative, import)
     }
 
@@ -770,8 +763,8 @@ impl ProjectHandle {
         let path = self.path(relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
-        let mut prefab = Prefab::from_ron(&text)
-            .map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+        let mut prefab =
+            Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
         {
             let assets = self.assets();
             decode_prefab_references(&mut prefab, &assets);
@@ -1051,8 +1044,19 @@ impl ProjectHandle {
 
     /// 解析场景文本（`guid://` 解码成路径 + UI / 粒子数值夹取）。
     fn parse_scene_text(&self, text: &str, path: &Path) -> Result<Scene, String> {
-        let mut scene = ron::from_str(text)
-            .map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))?;
+        let mut scene: Scene =
+            ron::from_str(text).map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))?;
+        // 重复 ID 是旧版本计数器不对齐留下的**落盘伤**（见 `EntityId::reserve`）。
+        // 在这里修掉，否则"删一个物体连带删别的"会从文件里继续复现。
+        let repaired = scene.ensure_unique_ids();
+        if repaired > 0 {
+            eprintln!(
+                "warning: '{}' 有 {} 个重复的实体 ID，已重新分配；\
+                 请保存一次场景把修复结果写回（层级可能需手工校正）",
+                path.display(),
+                repaired
+            );
+        }
         {
             let assets = self.assets();
             decode_scene_references(&mut scene, &assets);
@@ -1140,11 +1144,12 @@ impl ProjectHandle {
     pub fn save(&self) -> Result<(), ProjectError> {
         let path = self.root.join(PROJECT_FILE_NAME);
         let pretty = ron::ser::PrettyConfig::default();
-        let text =
-            ron::ser::to_string_pretty(&self.manifest, pretty).map_err(|e| ProjectError::Write {
+        let text = ron::ser::to_string_pretty(&self.manifest, pretty).map_err(|e| {
+            ProjectError::Write {
                 path: path.clone(),
                 source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-            })?;
+            }
+        })?;
         std::fs::write(&path, text).map_err(|source| ProjectError::Write { path, source })
     }
 }
@@ -1295,7 +1300,13 @@ fn collect_prefabs(scan_dir: &Path, project_root: &Path, out: &mut Vec<String>) 
 ///
 /// 与 `collect_prefabs` 同构，只是把"后缀"参数化了 —— 预制体、脚本、
 /// 以后还有音频，各自的目录不同但收集逻辑一模一样。
-fn collect_by_extension(scan_dir: &Path, project_root: &Path, extension: &str, out: &mut Vec<String>) {    let Ok(entries) = std::fs::read_dir(scan_dir) else {
+fn collect_by_extension(
+    scan_dir: &Path,
+    project_root: &Path,
+    extension: &str,
+    out: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(scan_dir) else {
         return; // 目录还不存在 = 一个都没有，不是错误
     };
     for entry in entries.flatten() {
@@ -1439,10 +1450,7 @@ mod tests {
 
         assert_eq!(
             handle.list_scripts(),
-            vec![
-                "Scripts/a.lua".to_owned(),
-                "Scripts/sub/b.lua".to_owned(),
-            ],
+            vec!["Scripts/a.lua".to_owned(), "Scripts/sub/b.lua".to_owned(),],
             "只列 .lua、按字典序、子目录递归、非脚本与已删语言的残留不混入"
         );
 
@@ -1526,7 +1534,10 @@ mod tests {
         let text = std::fs::read_to_string(handle.root().join(".gitignore"))
             .expect("新建项目应当带 .gitignore");
         for needle in ["Build/", "Plugins/", AUTOSAVE_DIR] {
-            assert!(text.contains(needle), ".gitignore 应当忽略 {needle}，实际：\n{text}");
+            assert!(
+                text.contains(needle),
+                ".gitignore 应当忽略 {needle}，实际：\n{text}"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&base);
@@ -1569,7 +1580,10 @@ mod tests {
         );
         assert!(handle.autosave_modified(DEFAULT_ENTRY_SCENE).is_some());
 
-        assert!(handle.remove_autosave(DEFAULT_ENTRY_SCENE), "第一次删除应成功");
+        assert!(
+            handle.remove_autosave(DEFAULT_ENTRY_SCENE),
+            "第一次删除应成功"
+        );
         assert!(
             !handle.remove_autosave(DEFAULT_ENTRY_SCENE),
             "文件已经不在了，重复删除不该报成功"
@@ -1597,8 +1611,7 @@ mod tests {
         handle
             .write_autosave(DEFAULT_ENTRY_SCENE, &scene)
             .expect("写自动保存");
-        let text =
-            std::fs::read_to_string(handle.autosave_path(DEFAULT_ENTRY_SCENE)).unwrap();
+        let text = std::fs::read_to_string(handle.autosave_path(DEFAULT_ENTRY_SCENE)).unwrap();
         assert!(text.contains("guid://"), "副本里应当是 GUID 引用：\n{text}");
         assert!(
             !text.contains("Resources/Box.glb"),
@@ -1607,10 +1620,7 @@ mod tests {
 
         // 读回来是**路径**（内存态）—— 与 `load_scene` 同一条边界。
         let back = handle.read_autosave(DEFAULT_ENTRY_SCENE).expect("读回副本");
-        assert!(back
-            .entities
-            .iter()
-            .any(|e| e.model == "Resources/Box.glb"));
+        assert!(back.entities.iter().any(|e| e.model == "Resources/Box.glb"));
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1707,7 +1717,11 @@ mod tests {
 
         // 挪走模型 + meta，预制体仍能解析。
         std::fs::create_dir_all(handle.path("Resources/Models")).unwrap();
-        std::fs::rename(handle.path("Resources/Box.glb"), handle.path("Resources/Models/Box.glb")).unwrap();
+        std::fs::rename(
+            handle.path("Resources/Box.glb"),
+            handle.path("Resources/Models/Box.glb"),
+        )
+        .unwrap();
         std::fs::rename(
             handle.path("Resources/Box.glb.meta"),
             handle.path("Resources/Models/Box.glb.meta"),
@@ -1783,7 +1797,8 @@ mod tests {
         assert_eq!(report.rewritten_materials, 1);
         assert_eq!(report.rewritten_scenes, 1);
 
-        let material_text = std::fs::read_to_string(handle.path("Resources/Materials/Legacy.mat")).unwrap();
+        let material_text =
+            std::fs::read_to_string(handle.path("Resources/Materials/Legacy.mat")).unwrap();
         assert!(material_text.contains("guid://"), "{material_text}");
         let scene_text = std::fs::read_to_string(handle.path("Scenes/legacy.ron")).unwrap();
         assert!(scene_text.contains("guid://"), "{scene_text}");
@@ -1946,7 +1961,10 @@ mod tests {
             .expect("write");
 
         let listed = handle.list_prefabs();
-        assert_eq!(listed, vec!["Prefabs/Enemies/Goblin.prefab.ron".to_string()]);
+        assert_eq!(
+            listed,
+            vec!["Prefabs/Enemies/Goblin.prefab.ron".to_string()]
+        );
         let loaded = handle.load_prefab(&listed[0]).expect("load");
         assert_eq!(loaded.name, "Goblin");
 
@@ -2057,7 +2075,9 @@ mod tests {
         project.entry_scene = "Scenes/Main.ron".into();
         assert!(project.build.scenes.is_empty(), "默认不写清单");
         assert!(project.scene_order().is_empty());
-        assert!(!project.scene_order().contains(&"Scenes/Main.ron".to_string()));
+        assert!(!project
+            .scene_order()
+            .contains(&"Scenes/Main.ron".to_string()));
 
         // 只有空白项也算"没配"。
         project.build.scenes = vec!["".into(), "   ".into()];
@@ -2071,8 +2091,8 @@ mod tests {
         project.build.scenes = vec![
             " Scenes\\Menu.ron ".into(),
             "Scenes/Level1.ron".into(),
-            "Scenes/Menu.ron".into(),   // 重复（规范化后与第一项相同）
-            "".into(),                  // 空串
+            "Scenes/Menu.ron".into(), // 重复（规范化后与第一项相同）
+            "".into(),                // 空串
             "Scenes/Level2.ron".into(),
         ];
         assert_eq!(
@@ -2083,8 +2103,12 @@ mod tests {
                 "Scenes/Level2.ron".to_string(),
             ]
         );
-        assert!(project.scene_order().contains(&"Scenes/Level1.ron".to_string()));
-        assert!(!project.scene_order().contains(&"Scenes/Level9.ron".to_string()));
+        assert!(project
+            .scene_order()
+            .contains(&"Scenes/Level1.ron".to_string()));
+        assert!(!project
+            .scene_order()
+            .contains(&"Scenes/Level9.ron".to_string()));
     }
 
     /// 清单是后加字段：旧清单（没有 `build` 节）必须能反序列化，

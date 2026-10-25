@@ -69,14 +69,24 @@ pub enum TrackPath {
     Translation,
     Rotation,
     Scale,
+    /// 形变目标权重（glTF `KHR_animation_pointer` 之前的标准写法：
+    /// channel 指向**节点**，输出是"每帧一组权重"，分量数 = 该网格的目标数）。
+    ///
+    /// 它不进 [`LocalPose`]：权重是网格的属性，不是节点的姿态。采样入口是
+    /// [`sample_morph_weights`]。
+    MorphWeights,
 }
 
 impl TrackPath {
     /// 每个关键帧的分量数（位移/缩放 3，旋转 4）。
+    ///
+    /// `MorphWeights` 的 stride 是**逐轨道**的（= 目标数），返回 0 只是
+    /// 占位；请用 [`Track::stride`]。
     fn stride(self) -> usize {
         match self {
             TrackPath::Translation | TrackPath::Scale => 3,
             TrackPath::Rotation => 4,
+            TrackPath::MorphWeights => 0,
         }
     }
 }
@@ -102,6 +112,25 @@ pub struct Track {
     pub times: Vec<f32>,
     /// 关键帧值，`stride()` 个分量连续排布：`times.len() * stride` 长。
     pub values: Vec<f32>,
+}
+
+impl Track {
+    /// 每个关键帧的分量数。
+    ///
+    /// 变换通道是常量；`MorphWeights` 由"值总数 ÷ 关键帧数"现算 ——
+    /// 加载时 `CUBICSPLINE` 已经降采样成线性，这个除法对两种插值都成立。
+    pub fn stride(&self) -> usize {
+        match self.path {
+            TrackPath::MorphWeights => {
+                if self.times.is_empty() {
+                    0
+                } else {
+                    self.values.len() / self.times.len()
+                }
+            }
+            _ => self.path.stride(),
+        }
+    }
 }
 
 /// 一段动画剪辑（glTF `animations[]`）。
@@ -157,7 +186,11 @@ fn key_segment(times: &[f32], t: f32) -> (usize, usize, f32) {
     let i1 = times.partition_point(|&x| x <= t);
     let i0 = i1 - 1;
     let span = times[i1] - times[i0];
-    let u = if span > 0.0 { (t - times[i0]) / span } else { 0.0 };
+    let u = if span > 0.0 {
+        (t - times[i0]) / span
+    } else {
+        0.0
+    };
     (i0, i1, u)
 }
 
@@ -171,11 +204,15 @@ pub fn sample_clip_into(clip: &AnimClip, t: f32, pose: &mut [LocalPose]) {
         if idx >= pose.len() || track.times.is_empty() {
             continue;
         }
+        // 权重轨道不是姿态：它改的是网格顶点，由 `sample_morph_weights` 消费。
+        if track.path == TrackPath::MorphWeights {
+            continue;
+        }
         let (i0, i1, mut u) = key_segment(&track.times, t);
         if track.interpolation == Interpolation::Step {
             u = 0.0;
         }
-        let s = track.path.stride();
+        let s = track.stride();
         // 越界读保护：坏资产少几个分量时宁可跳过这条轨道，也不要 panic。
         if (i1 + 1) * s > track.values.len() {
             continue;
@@ -196,8 +233,48 @@ pub fn sample_clip_into(clip: &AnimClip, t: f32, pose: &mut [LocalPose]) {
                 let b = Quat::from_slice(&track.values[i1 * s..i1 * s + 4]);
                 pose[idx].rotation = a.slerp(b, u);
             }
+            // 上面已经 `continue` 掉了；列出来是为了让"新增通道必须在这里
+            // 做一次决断"变成编译错误，而不是被 `_ =>` 静默吞掉。
+            TrackPath::MorphWeights => {}
         }
     }
+}
+
+/// 采样剪辑里的形变权重轨道，写进 `out`（长度 = 目标数）。
+///
+/// # 为什么只看第一条权重轨道
+///
+/// glTF 把权重轨道挂在**节点**上，一个角色理论上可以有多个带 morph 的网格、
+/// 各自一条轨道。当前引擎一个实体 = 一个模型 = 一套可见网格，多网格角色
+/// （头 / 身体分开）的权重轨道会取到第一条 —— 这是明确的 v1 边界，
+/// 写在 `PLAN.md` 的"还没做"里，不假装支持。
+///
+/// 剪辑没有权重轨道时返回 `false`（`out` 不动）：调用方据此退回
+/// "实体权重 / 资产默认"，而不是把所有权重清零。
+pub fn sample_morph_weights(clip: &AnimClip, t: f32, out: &mut Vec<f32>) -> bool {
+    let Some(track) = clip
+        .tracks
+        .iter()
+        .find(|track| track.path == TrackPath::MorphWeights && !track.times.is_empty())
+    else {
+        return false;
+    };
+    let count = track.stride();
+    if count == 0 {
+        return false;
+    }
+    let (i0, i1, mut u) = key_segment(&track.times, t);
+    if track.interpolation == Interpolation::Step {
+        u = 0.0;
+    }
+    out.clear();
+    out.reserve(count);
+    for c in 0..count {
+        let a = track.values[i0 * count + c];
+        let b = track.values[i1 * count + c];
+        out.push(a + (b - a) * u);
+    }
+    true
 }
 
 /// 局部姿态 → 各节点**全局**矩阵（沿父链连乘）。
@@ -215,11 +292,8 @@ fn global_of(
     if let Some(m) = memo[i] {
         return m;
     }
-    let local = Mat4::from_scale_rotation_translation(
-        pose[i].scale,
-        pose[i].rotation,
-        pose[i].translation,
-    );
+    let local =
+        Mat4::from_scale_rotation_translation(pose[i].scale, pose[i].rotation, pose[i].translation);
     let global = match nodes[i].parent {
         Some(p) if depth <= nodes.len() && (p as usize) < nodes.len() && p as usize != i => {
             global_of(p as usize, nodes, pose, memo, depth + 1) * local
@@ -400,13 +474,7 @@ pub fn compute_bones_blended(
     alpha: f32,
     skin: &Skin,
 ) -> Vec<Mat4> {
-    compute_bones_composed(
-        nodes,
-        skin,
-        (clip_b, t_b),
-        Some((clip_a, t_a, alpha)),
-        &[],
-    )
+    compute_bones_composed(nodes, skin, (clip_b, t_b), Some((clip_a, t_a, alpha)), &[])
 }
 
 /// 把叠加层增量按 `weight` 加进基础**局部姿态**（additive blending 的核心一步）。
@@ -687,23 +755,20 @@ impl AnimationDriver {
                 }
             };
             // -- 2. 条目（首建直接落解析值，不触发假淡入）--
-            let entry = self
-                .entries
-                .entry(entity.id)
-                .or_insert_with(|| Entry {
-                    state: state.clone(),
-                    clip: clip.clone(),
-                    t: 0.0,
-                    speed,
-                    looping,
-                    prev: None,
-                    additive_clip: String::new(),
-                    additive_t: 0.0,
-                    additive_speed: 1.0,
-                    additive_looping: true,
-                    additive_weight: 0.0,
-                    layer_clocks: Vec::new(),
-                });
+            let entry = self.entries.entry(entity.id).or_insert_with(|| Entry {
+                state: state.clone(),
+                clip: clip.clone(),
+                t: 0.0,
+                speed,
+                looping,
+                prev: None,
+                additive_clip: String::new(),
+                additive_t: 0.0,
+                additive_speed: 1.0,
+                additive_looping: true,
+                additive_weight: 0.0,
+                layer_clocks: Vec::new(),
+            });
             // -- 3. 换剪辑 → 交叉淡入 --
             if entry.clip != clip {
                 entry.prev = if animator.fade_time > 0.0 && animator.is_active() {
@@ -941,8 +1006,7 @@ impl AnimationDriver {
             .entries
             .iter()
             .map(|(id, e)| {
-                let mut packed =
-                    ((e.t.to_bits() as u64) << 32) | e.additive_t.to_bits() as u64;
+                let mut packed = ((e.t.to_bits() as u64) << 32) | e.additive_t.to_bits() as u64;
                 // 层栈时钟按配置顺序折进来（splitmix64 是双射，任一层在走都会变）。
                 for l in &e.layer_clocks {
                     packed = mix(packed, l.t.to_bits() as u64);
@@ -1106,7 +1170,10 @@ mod tests {
         );
         // 方向也要对：绕 +Y 的右手旋转把 +X 转向 −Z（右手法则）。
         let rotated = pose[0].rotation * Vec3::X;
-        assert!(rotated.z < 0.0, "绕 +Y 转 45° 后 +X 应有 −z 分量，实得 {rotated:?}");
+        assert!(
+            rotated.z < 0.0,
+            "绕 +Y 转 45° 后 +X 应有 −z 分量，实得 {rotated:?}"
+        );
     }
 
     #[test]
@@ -1127,7 +1194,10 @@ mod tests {
             pose[0].rotation.angle_between(Quat::from_rotation_z(0.3)) < 1e-5,
             "没被瞄准的旋转通道必须保持默认"
         );
-        assert!((pose[0].scale.x - 2.0).abs() < 1e-6, "没被瞄准的缩放通道必须保持默认");
+        assert!(
+            (pose[0].scale.x - 2.0).abs() < 1e-6,
+            "没被瞄准的缩放通道必须保持默认"
+        );
     }
 
     #[test]
@@ -1198,19 +1268,37 @@ mod tests {
         let pose = default_pose(&nodes);
         let g = global_matrices(&nodes, &pose);
         let pos = g[0].w_axis.truncate();
-        assert!((pos - Vec3::new(3.0, 5.0, 0.0)).length() < 1e-6, "实得 {pos:?}");
+        assert!(
+            (pos - Vec3::new(3.0, 5.0, 0.0)).length() < 1e-6,
+            "实得 {pos:?}"
+        );
     }
 
     /// 成环的畸形资产不能栈溢出（超深按根处理）。
     #[test]
     fn cyclic_parents_degrade_instead_of_overflowing() {
         let nodes = vec![
-            AnimNode { parent: Some(1), name: String::new(), translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE },
-            AnimNode { parent: Some(0), name: String::new(), translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            AnimNode {
+                parent: Some(1),
+                name: String::new(),
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            AnimNode {
+                parent: Some(0),
+                name: String::new(),
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
         ];
         let pose = default_pose(&nodes);
         let g = global_matrices(&nodes, &pose);
-        assert!(g.iter().all(|m| m.w_axis.is_finite()), "成环也必须给出有限矩阵");
+        assert!(
+            g.iter().all(|m| m.w_axis.is_finite()),
+            "成环也必须给出有限矩阵"
+        );
     }
 
     // -- 蒙皮矩阵 --
@@ -1259,9 +1347,11 @@ mod tests {
         };
         let a = move_x_clip(); // t=1 → (2,0,0)
         let b = move_y_clip(); // t=1 → (0,4,0)
-        let at = |alpha: f32| compute_bones_blended(&nodes, &a, 1.0, &b, 1.0, alpha, &skin)[0]
-            .w_axis
-            .truncate();
+        let at = |alpha: f32| {
+            compute_bones_blended(&nodes, &a, 1.0, &b, 1.0, alpha, &skin)[0]
+                .w_axis
+                .truncate()
+        };
 
         let mid = at(0.5);
         assert!(
@@ -1269,11 +1359,20 @@ mod tests {
             "alpha=0.5 应是两姿势的中点，实得 {mid:?}"
         );
         let only_a = at(0.0);
-        assert!((only_a - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5, "alpha=0 应是纯旧剪辑");
+        assert!(
+            (only_a - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5,
+            "alpha=0 应是纯旧剪辑"
+        );
         let only_b = at(1.0);
-        assert!((only_b - Vec3::new(0.0, 4.0, 0.0)).length() < 1e-5, "alpha=1 应是纯新剪辑");
+        assert!(
+            (only_b - Vec3::new(0.0, 4.0, 0.0)).length() < 1e-5,
+            "alpha=1 应是纯新剪辑"
+        );
         let clamped = at(9.0);
-        assert!((clamped - only_b).length() < 1e-5, "alpha 越界应钳在纯新剪辑");
+        assert!(
+            (clamped - only_b).length() < 1e-5,
+            "alpha 越界应钳在纯新剪辑"
+        );
     }
 
     // -- 时间归一 --
@@ -1281,11 +1380,21 @@ mod tests {
     #[test]
     fn clip_time_loops_wraps_and_oneshot_clamps() {
         assert!((clip_time(1.5, 1.0, true) - 0.5).abs() < 1e-6, "循环应取模");
-        assert!((clip_time(9.0, 1.0, true) - 0.0).abs() < 1e-6, "整圈应绕回 0");
-        assert!((clip_time(9.0, 1.0, false) - 1.0).abs() < 1e-6, "非循环应钳在末帧");
+        assert!(
+            (clip_time(9.0, 1.0, true) - 0.0).abs() < 1e-6,
+            "整圈应绕回 0"
+        );
+        assert!(
+            (clip_time(9.0, 1.0, false) - 1.0).abs() < 1e-6,
+            "非循环应钳在末帧"
+        );
         assert_eq!(clip_time(f32::NAN, 1.0, true), 0.0, "NaN 不该扩散进采样");
         assert_eq!(clip_time(-1.0, 1.0, false), 0.0, "负时间钳在 0");
-        assert_eq!(clip_time(0.5, 0.0, true), 0.0, "零时长剪辑恒为 0（不产生 NaN）");
+        assert_eq!(
+            clip_time(0.5, 0.0, true),
+            0.0,
+            "零时长剪辑恒为 0（不产生 NaN）"
+        );
     }
 
     // -- 播放时钟 --
@@ -1309,7 +1418,10 @@ mod tests {
         // 换剪辑 → 从头播。
         e.animator.as_mut().unwrap().clip = "Run".into();
         d.tick(0.25, std::slice::from_ref(&e));
-        assert!((d.time(id).unwrap() - 0.25).abs() < 1e-6, "换剪辑应归零重走");
+        assert!(
+            (d.time(id).unwrap() - 0.25).abs() < 1e-6,
+            "换剪辑应归零重走"
+        );
     }
 
     #[test]
@@ -1324,7 +1436,10 @@ mod tests {
             (d.time(e.id).unwrap() - 0.5).abs() < 1e-6,
             "暂停后时间不该继续走"
         );
-        assert!(d.time(e.id).is_some(), "条目要留着 —— 画面冻结在当前帧而不是弹回绑定姿态");
+        assert!(
+            d.time(e.id).is_some(),
+            "条目要留着 —— 画面冻结在当前帧而不是弹回绑定姿态"
+        );
     }
 
     #[test]
@@ -1356,12 +1471,19 @@ mod tests {
             "旧剪辑时钟应继续走（0.4+0.1），实得 {}",
             f.t
         );
-        assert!((f.alpha - 0.4).abs() < 1e-6, "alpha 应是 0.1/0.25，实得 {}", f.alpha);
+        assert!(
+            (f.alpha - 0.4).abs() < 1e-6,
+            "alpha 应是 0.1/0.25，实得 {}",
+            f.alpha
+        );
         assert!((d.time(id).unwrap() - 0.1).abs() < 1e-6, "新剪辑从 0 起播");
 
         d.tick(0.2, std::slice::from_ref(&e)); // 累计 0.3 ≥ 0.25
         assert!(d.fade_from(id).is_none(), "淡入完成后应清掉旧剪辑");
-        assert!((d.time(id).unwrap() - 0.3).abs() < 1e-6, "主时钟不受淡入影响");
+        assert!(
+            (d.time(id).unwrap() - 0.3).abs() < 1e-6,
+            "主时钟不受淡入影响"
+        );
     }
 
     #[test]
@@ -1373,7 +1495,10 @@ mod tests {
         e.animator.as_mut().unwrap().clip = "Run".into();
         d.tick(0.1, std::slice::from_ref(&e));
         assert!(d.fade_from(e.id).is_none(), "fade_time = 0 应硬切");
-        assert!((d.time(e.id).unwrap() - 0.1).abs() < 1e-6, "硬切后新剪辑从 0 起播");
+        assert!(
+            (d.time(e.id).unwrap() - 0.1).abs() < 1e-6,
+            "硬切后新剪辑从 0 起播"
+        );
     }
 
     #[test]
@@ -1389,7 +1514,10 @@ mod tests {
             d.fade_from(e.id).is_none(),
             "暂停中切换不该淡入（没有'正在播的姿势'可淡出）"
         );
-        assert!((d.time(e.id).unwrap()).abs() < 1e-6, "切换照旧把新剪辑时钟归零");
+        assert!(
+            (d.time(e.id).unwrap()).abs() < 1e-6,
+            "切换照旧把新剪辑时钟归零"
+        );
     }
 
     #[test]
@@ -1413,7 +1541,10 @@ mod tests {
         };
         assert!((prev_t2 - prev_t1).abs() < 1e-6, "暂停中旧剪辑时钟该冻结");
         assert!((alpha2 - alpha1).abs() < 1e-6, "暂停中淡入进度该冻结");
-        assert!((d.time(e.id).unwrap() - 0.1).abs() < 1e-6, "暂停中主时钟也该冻结");
+        assert!(
+            (d.time(e.id).unwrap() - 0.1).abs() < 1e-6,
+            "暂停中主时钟也该冻结"
+        );
     }
 
     /// 淡入中途连切两刀（0.25s 内 Walk→Run→Survey）：丢弃旧淡入，从当前主剪辑
@@ -1547,7 +1678,10 @@ mod tests {
 
         assert_eq!(d.state(e.id), Some("Idle"), "应停在 entry 状态");
         let (clip, t, looping) = d.playback(e.id).expect("有 animator 就该有解析结果");
-        assert_eq!(clip, "Survey", "entry 状态的剪辑才是入口（Animator.clip 被覆盖）");
+        assert_eq!(
+            clip, "Survey",
+            "entry 状态的剪辑才是入口（Animator.clip 被覆盖）"
+        );
         assert!((t - 0.1).abs() < 1e-6, "按状态速度推进");
         assert!(looping, "循环方式也来自状态表");
     }
@@ -1559,7 +1693,12 @@ mod tests {
         let mut e = entity_with_machine();
         d.tick(0.3, std::slice::from_ref(&e));
 
-        e.animator.as_mut().unwrap().machine.as_mut().unwrap()
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
             .parameters
             .insert("speed".into(), 0.6);
         d.tick(0.1, std::slice::from_ref(&e));
@@ -1568,9 +1707,14 @@ mod tests {
         let (clip, t, looping) = d.playback(e.id).unwrap();
         assert_eq!(clip, "Walk", "换状态 = 换剪辑");
         // 转移与新剪辑推进在同一 tick：0.1 × Walk 速度 0.5 = 0.05。
-        assert!((t - 0.05).abs() < 1e-6, "新剪辑应从 0 起播并当帧推进，实得 {t}");
+        assert!(
+            (t - 0.05).abs() < 1e-6,
+            "新剪辑应从 0 起播并当帧推进，实得 {t}"
+        );
         assert!(!looping, "新状态是非循环，循环方式也跟着换");
-        let f = d.fade_from(e.id).expect("换状态应交叉淡入（复用换剪辑机制）");
+        let f = d
+            .fade_from(e.id)
+            .expect("换状态应交叉淡入（复用换剪辑机制）");
         assert_eq!(f.clip, "Survey", "应从旧状态的剪辑淡出");
         assert!(f.looping, "旧剪辑按**它自己**的循环方式淡出");
     }
@@ -1583,14 +1727,22 @@ mod tests {
         // 直接从 Walk 起步（半速、非循环）；参数停在滞回区间 0.3~0.5 内，
         // 保证首帧不会被转移带走。
         e.animator.as_mut().unwrap().machine.as_mut().unwrap().entry = "Walk".into();
-        e.animator.as_mut().unwrap().machine.as_mut().unwrap()
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
             .parameters
             .insert("speed".into(), 0.4);
         e.animator.as_mut().unwrap().speed = 7.0; // 单剪辑速度，必须被无视
 
         d.tick(0.4, std::slice::from_ref(&e));
         let (_, t, looping) = d.playback(e.id).unwrap();
-        assert!((t - 0.2).abs() < 1e-6, "应按状态速度 0.5×0.4=0.2 走，实得 {t}");
+        assert!(
+            (t - 0.2).abs() < 1e-6,
+            "应按状态速度 0.5×0.4=0.2 走，实得 {t}"
+        );
         assert!(!looping, "非循环状态应报非循环");
     }
 
@@ -1600,12 +1752,24 @@ mod tests {
         let mut d = AnimationDriver::new();
         let mut e = entity_with_machine();
         // 把 Idle 冻住（speed 0），但机器还有活状态 → is_active 仍为真。
-        e.animator.as_mut().unwrap().machine.as_mut().unwrap().states[0].speed = 0.0;
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
+            .states[0]
+            .speed = 0.0;
         d.tick(0.5, std::slice::from_ref(&e));
         let (_, t, _) = d.playback(e.id).unwrap();
         assert!(t.abs() < 1e-6, "冻结状态时钟不该走");
 
-        e.animator.as_mut().unwrap().machine.as_mut().unwrap()
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
             .parameters
             .insert("speed".into(), 0.6);
         d.tick(0.1, std::slice::from_ref(&e));
@@ -1669,7 +1833,10 @@ mod tests {
             apply_additive_into(&mut p, &add, &r, w);
             p[0].translation
         };
-        assert!((at(1.0) - Vec3::new(1.0, 5.0, 0.0)).length() < 1e-6, "全额增量");
+        assert!(
+            (at(1.0) - Vec3::new(1.0, 5.0, 0.0)).length() < 1e-6,
+            "全额增量"
+        );
         assert!((at(0.5) - Vec3::new(0.5, 5.0, 0.0)).length() < 1e-6, "半权");
         assert!((at(0.0) - base_t).length() < 1e-6, "零权重纹丝不动");
     }
@@ -1711,7 +1878,10 @@ mod tests {
             let mut base = default_pose(&nodes);
             apply_additive_into(&mut base, &add, &r, w);
             let angle = base[0].rotation.angle_between(Quat::IDENTITY);
-            assert!((angle - want).abs() < 1e-3, "w={w} 应转 {want} rad，实得 {angle}");
+            assert!(
+                (angle - want).abs() < 1e-3,
+                "w={w} 应转 {want} rad，实得 {angle}"
+            );
         }
     }
 
@@ -1743,8 +1913,9 @@ mod tests {
             inverse_bind: vec![Mat4::IDENTITY],
         };
         let expected = compute_bones_additive(&nodes, &old, 0.5, &skin, &add, 0.5, 1.0);
-        let combined =
-            compute_bones_blended_additive(&nodes, &old, 0.5, &new, 0.5, 0.0, &skin, &add, 0.5, 1.0);
+        let combined = compute_bones_blended_additive(
+            &nodes, &old, 0.5, &new, 0.5, 0.0, &skin, &add, 0.5, 1.0,
+        );
         assert_eq!(expected, combined, "alpha=0 应退化成'纯旧基础 + 叠加'");
     }
 
@@ -1767,15 +1938,28 @@ mod tests {
         d.tick(0.5, std::slice::from_ref(&e));
         let a = d.additive(e.id).expect("配了叠加层就该有解析结果");
         assert_eq!(a.clip, "Run");
-        assert!((a.t - 1.0).abs() < 1e-6, "按叠加层自己的速度 2.0 推进，实得 {}", a.t);
+        assert!(
+            (a.t - 1.0).abs() < 1e-6,
+            "按叠加层自己的速度 2.0 推进，实得 {}",
+            a.t
+        );
         assert!((a.weight - 0.6).abs() < 1e-6);
         let (clip, t, _) = d.playback(e.id).unwrap();
         assert_eq!(clip, "Walk", "基础层不受叠加层影响");
         assert!((t - 0.5).abs() < 1e-6);
 
-        e.animator.as_mut().unwrap().additive.as_mut().unwrap().weight = 7.0;
+        e.animator
+            .as_mut()
+            .unwrap()
+            .additive
+            .as_mut()
+            .unwrap()
+            .weight = 7.0;
         d.tick(0.0, std::slice::from_ref(&e));
-        assert!((d.additive(e.id).unwrap().weight - 1.0).abs() < 1e-6, "权重应钳在 1.0");
+        assert!(
+            (d.additive(e.id).unwrap().weight - 1.0).abs() < 1e-6,
+            "权重应钳在 1.0"
+        );
 
         e.animator.as_mut().unwrap().additive = None;
         d.tick(0.1, std::slice::from_ref(&e));
@@ -1793,7 +1977,11 @@ mod tests {
 
         let a = d.additive(e.id).unwrap();
         assert_eq!(a.clip, "Survey");
-        assert!((a.t - 0.2).abs() < 1e-6, "换叠加剪辑应从 0 重播（0.1×2.0），实得 {}", a.t);
+        assert!(
+            (a.t - 0.2).abs() < 1e-6,
+            "换叠加剪辑应从 0 重播（0.1×2.0），实得 {}",
+            a.t
+        );
         assert!(d.fade_from(e.id).is_none(), "叠加层切换不该触发基础层淡入");
         let (_, t, _) = d.playback(e.id).unwrap();
         assert!((t - 0.5).abs() < 1e-6, "基础层时钟照走");
@@ -1805,7 +1993,14 @@ mod tests {
     fn driver_frozen_base_still_advances_additive_and_signature() {
         let mut d = AnimationDriver::new();
         let mut e = entity_with_machine();
-        e.animator.as_mut().unwrap().machine.as_mut().unwrap().states[0].speed = 0.0;
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
+            .states[0]
+            .speed = 0.0;
         e.animator.as_mut().unwrap().additive = Some(AnimAdditive {
             clip: "Run".into(),
             ..Default::default()
@@ -1814,7 +2009,10 @@ mod tests {
         d.tick(0.5, std::slice::from_ref(&e));
         let (_, base_t, _) = d.playback(e.id).unwrap();
         assert!(base_t.abs() < 1e-6, "冻结状态基础时钟不该走");
-        assert!((d.additive(e.id).unwrap().t - 0.5).abs() < 1e-6, "叠加层时钟要继续走");
+        assert!(
+            (d.additive(e.id).unwrap().t - 0.5).abs() < 1e-6,
+            "叠加层时钟要继续走"
+        );
         let sig1 = d.signature();
         d.tick(0.1, std::slice::from_ref(&e));
         assert_ne!(sig1, d.signature(), "叠加层在走 → 指纹必须变，否则画面冻结");
@@ -1872,13 +2070,22 @@ mod tests {
         let nodes = root_child_nodes();
         assert!(mask_covers(&nodes, 0, &[]), "空名单 = 整副骨架");
         assert!(mask_covers(&nodes, 1, &["Child".into()]), "命中自身");
-        assert!(!mask_covers(&nodes, 0, &["Child".into()]), "只列子 → 父不被覆盖");
-        assert!(mask_covers(&nodes, 1, &["Root".into()]), "祖先命中 → 子孙一并覆盖");
+        assert!(
+            !mask_covers(&nodes, 0, &["Child".into()]),
+            "只列子 → 父不被覆盖"
+        );
+        assert!(
+            mask_covers(&nodes, 1, &["Root".into()]),
+            "祖先命中 → 子孙一并覆盖"
+        );
         assert!(!mask_covers(&nodes, 1, &["Nope".into()]), "没命中不覆盖");
 
         // 匿名节点（名字空串）不能靠空名单项互认进来。
         let anon = vec![root_node()];
-        assert!(!mask_covers(&anon, 0, &["".into()]), "匿名节点不与空串名单项互认");
+        assert!(
+            !mask_covers(&anon, 0, &["".into()]),
+            "匿名节点不与空串名单项互认"
+        );
 
         // 畸形：A→B→A 成环 —— 沿父链能命中就返回，没命中也要收尾而不是挂起。
         let cycle = vec![
@@ -1897,7 +2104,10 @@ mod tests {
                 scale: Vec3::ONE,
             },
         ];
-        assert!(mask_covers(&cycle, 0, &["B".into()]), "环里沿父链也要能命中");
+        assert!(
+            mask_covers(&cycle, 0, &["B".into()]),
+            "环里沿父链也要能命中"
+        );
         assert!(
             !mask_covers(&cycle, 0, &["Nope".into()]),
             "成环没命中也要返回（不死循环）"
@@ -1981,10 +2191,7 @@ mod tests {
             (on[1].w_axis.truncate() - Vec3::new(0.0, 4.0, 0.0)).length() < 1e-6,
             "名单内的骨吃到增量"
         );
-        assert!(
-            on[0].w_axis.truncate().length() < 1e-6,
-            "名单外的骨不动"
-        );
+        assert!(on[0].w_axis.truncate().length() < 1e-6, "名单外的骨不动");
 
         let off = compute_bones_composed(
             &nodes,
@@ -2076,7 +2283,11 @@ mod tests {
             assert!((layers[0].t - 0.5).abs() < 1e-6, "upper 按速度 1 推进");
             assert!((layers[0].weight - 0.6).abs() < 1e-6);
             assert_eq!(layers[1].clip, "Run");
-            assert!((layers[1].t - 1.0).abs() < 1e-6, "legs 按速度 2 推进，实得 {}", layers[1].t);
+            assert!(
+                (layers[1].t - 1.0).abs() < 1e-6,
+                "legs 按速度 2 推进，实得 {}",
+                layers[1].t
+            );
         }
 
         // 重排 + 插入新层：各层按名字对齐，进度延续（不按位置错位）。
@@ -2110,14 +2321,8 @@ mod tests {
         // 换本层剪辑：只有它归零重播，别的层照走。
         e.animator.as_mut().unwrap().layers[2].clip = "Run".into();
         d.tick(0.1, std::slice::from_ref(&e));
-        assert!(
-            (d.layers(e.id)[2].t - 0.1).abs() < 1e-6,
-            "换剪辑归零重播"
-        );
-        assert!(
-            (d.layers(e.id)[1].t - 1.4).abs() < 1e-6,
-            "别的层不受影响"
-        );
+        assert!((d.layers(e.id)[2].t - 0.1).abs() < 1e-6, "换剪辑归零重播");
+        assert!((d.layers(e.id)[1].t - 1.4).abs() < 1e-6, "别的层不受影响");
 
         // 删层 → prune；权重越界 → 钳 [0,1]（dt=0 只同步不推进）。
         e.animator.as_mut().unwrap().layers.remove(0);
@@ -2125,7 +2330,10 @@ mod tests {
         d.tick(0.0, std::slice::from_ref(&e));
         assert_eq!(d.layers(e.id).len(), 2, "删掉的层不再出现，剩 legs + upper");
         assert_eq!(d.layers(e.id)[1].name, "upper");
-        assert!((d.layers(e.id)[1].weight - 1.0).abs() < 1e-6, "权重钳在 1.0");
+        assert!(
+            (d.layers(e.id)[1].weight - 1.0).abs() < 1e-6,
+            "权重钳在 1.0"
+        );
     }
 
     /// 冻结基础层（当前状态速度 0、别的状态还活）+ 活层栈：层时钟照走且指纹
@@ -2134,7 +2342,14 @@ mod tests {
     fn driver_layer_stack_advances_under_frozen_base_and_moves_signature() {
         let mut d = AnimationDriver::new();
         let mut e = entity_with_machine();
-        e.animator.as_mut().unwrap().machine.as_mut().unwrap().states[0].speed = 0.0;
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
+            .states[0]
+            .speed = 0.0;
         e.animator.as_mut().unwrap().layers = vec![AnimLayer {
             name: "upper".into(),
             clip: "Survey".into(),
@@ -2146,10 +2361,7 @@ mod tests {
             d.playback(e.id).unwrap().1.abs() < 1e-6,
             "冻结状态的基础时钟不该走"
         );
-        assert!(
-            (d.layers(e.id)[0].t - 0.4).abs() < 1e-6,
-            "层时钟要继续走"
-        );
+        assert!((d.layers(e.id)[0].t - 0.4).abs() < 1e-6, "层时钟要继续走");
         let sig1 = d.signature();
         d.tick(0.1, std::slice::from_ref(&e));
         assert_ne!(sig1, d.signature(), "层时钟在走 → 指纹必须变，否则画面冻结");
@@ -2186,5 +2398,76 @@ mod tests {
             d.time(e.id).is_some_and(|t| t > 0.0),
             "恢复实时后时钟应继续走"
         );
+    }
+
+    // -- 形变目标权重轨道 ---------------------------------------------------
+
+    /// 两个目标、两个关键帧：0 秒时 (0, 1)，1 秒时 (1, 0)。
+    fn lip_sync_clip() -> AnimClip {
+        AnimClip {
+            name: "Talk".into(),
+            duration: 1.0,
+            tracks: vec![Track {
+                node: 0,
+                path: TrackPath::MorphWeights,
+                interpolation: Interpolation::Linear,
+                times: vec![0.0, 1.0],
+                values: vec![0.0, 1.0, 1.0, 0.0],
+            }],
+        }
+    }
+
+    #[test]
+    fn morph_weight_track_samples_every_target() {
+        let clip = lip_sync_clip();
+        let mut out = Vec::new();
+        assert!(sample_morph_weights(&clip, 0.0, &mut out));
+        assert_eq!(out, [0.0, 1.0]);
+
+        assert!(sample_morph_weights(&clip, 0.5, &mut out));
+        assert_eq!(out, [0.5, 0.5], "两个目标各自线性插值");
+
+        assert!(sample_morph_weights(&clip, 1.0, &mut out));
+        assert_eq!(out, [1.0, 0.0]);
+    }
+
+    /// 轨道 stride 必须由"值总数 ÷ 关键帧数"现算 —— 写死 3/4 的变换通道
+    /// 规则套到权重轨道上会读串行。
+    #[test]
+    fn morph_weight_stride_follows_target_count() {
+        let clip = lip_sync_clip();
+        assert_eq!(clip.tracks[0].stride(), 2);
+        // 关键帧值数对不上目标数时（坏资产）不应 panic，只按向下取整读。
+        let ragged = Track {
+            node: 0,
+            path: TrackPath::MorphWeights,
+            interpolation: Interpolation::Linear,
+            times: vec![0.0, 1.0],
+            values: vec![0.0, 1.0, 1.0],
+        };
+        assert_eq!(ragged.stride(), 1);
+    }
+
+    /// 剪辑没有权重轨道时返回 `false`，且**不动**输出缓冲 ——
+    /// 调用方据此退回实体权重 / 资产默认，而不是把脸清零。
+    #[test]
+    fn clip_without_morph_track_reports_false() {
+        let clip = move_x_clip();
+        let mut out = vec![0.7, 0.3];
+        assert!(!sample_morph_weights(&clip, 0.5, &mut out));
+        assert_eq!(out, [0.7, 0.3], "没有轨道时不许清空调用方的表");
+    }
+
+    /// 权重轨道**不参与**姿态采样：它挂在节点上，但改的是顶点。
+    #[test]
+    fn morph_track_does_not_touch_the_pose() {
+        let clip = lip_sync_clip();
+        let mut pose = vec![LocalPose {
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }];
+        sample_clip_into(&clip, 0.5, &mut pose);
+        assert_eq!(pose[0].translation, Vec3::new(1.0, 2.0, 3.0));
     }
 }

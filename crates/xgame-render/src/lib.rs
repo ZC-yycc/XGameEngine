@@ -9,6 +9,7 @@ pub mod gltf_loader;
 pub mod material_library;
 pub mod mesh;
 pub mod model;
+pub mod morph;
 pub mod particles;
 pub mod postfx;
 pub mod scene;

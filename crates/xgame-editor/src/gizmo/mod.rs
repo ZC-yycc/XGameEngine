@@ -21,20 +21,23 @@
 //! 统一处理 NaN/Inf、相机后方点、NDC 越界等异常情况，返回标记值
 //! `(-10000, -10000)`。调用方通过 [`is_valid_screen`] 检查即可。
 
-mod math;
-mod shapes;
-mod draw;
-mod pick;
 mod drag;
+mod draw;
+mod math;
+mod pick;
+mod shapes;
 
 // ── 公共 API 重导出 ──
 
-pub use math::{gizmo_world_size, project_to_screen, screen_to_ray};
-pub use draw::draw_gizmo;
-pub use pick::{pick_gizmo, axis_param_under_mouse, hit_position_on_axis, hit_position_on_plane, ray_aabb, UNIT_BOUNDS};
-pub use drag::{compute_transform, TransformDelta};
-use xgame_math::glam::Vec3;
 use crate::state::{GizmoDrag, GizmoPart};
+pub use drag::{compute_transform, TransformDelta};
+pub use draw::draw_gizmo;
+pub use math::{gizmo_world_size, project_to_screen, screen_to_ray};
+pub use pick::{
+    axis_param_under_mouse, hit_position_on_axis, hit_position_on_plane, pick_gizmo, ray_aabb,
+    UNIT_BOUNDS,
+};
+use xgame_math::glam::Vec3;
 
 /// 操作柄对应的世界轴方向。
 ///

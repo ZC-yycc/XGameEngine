@@ -136,18 +136,18 @@
 //! - 单级拟合 [`fit_directional_shadow`] 保留着：它是"关掉 CSM"的等价退路，
 //!   也是 CSM 精度账的基准（测试里拿两者的纹素尺寸直接比）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use xgame_math::glam::{Mat4, Vec3};
 
-use xgame_core::{Entity, Light, LightKind, ProjectHandle, SkyConfig};
 use crate::animation::AnimationDriver;
 use crate::frustum::Frustum;
 use crate::gltf_loader::{Bounds, GltfMesh, GltfPrimitive, GltfVertex, MaterialParams};
 use crate::material_library::{MaterialKey, MaterialLibrary};
 use crate::sky::{self, SkyResources, SkyUniform};
+use xgame_core::{Entity, Light, LightKind, ProjectHandle, SkyConfig};
 
 /// 每帧最多渲染的实体数量。
 ///
@@ -472,6 +472,24 @@ fn batch_prim<'a>(
     mesh.primitives.get(batch.prim as usize)
 }
 
+/// 静态图元返回共享缓冲，形变图元返回该实体独占的缓冲。
+/// wgpu 资源句柄克隆只增加引用计数，不复制显存。
+fn batch_vertex_buffer<'a>(
+    entities: &[Entity],
+    buffers: &'a HashMap<(xgame_core::EntityId, usize), crate::morph::MorphBuffer>,
+    prim: &'a GltfPrimitive,
+    batch: &DrawBatch,
+) -> wgpu::BufferSlice<'a> {
+    let key = (
+        entities[batch.entity as usize].id,
+        prim as *const GltfPrimitive as usize,
+    );
+    buffers.get(&key).map_or_else(
+        || prim.vertex_buffer.slice(..),
+        |output| output.buffer.slice(..),
+    )
+}
+
 impl MaterialUniform {
     /// 原样携带 glTF 的 metallic-roughness 参数，PBR BRDF 直接消费。
     ///
@@ -618,14 +636,9 @@ pub struct ShadowCascades {
 fn frustum_corners(inv_view_proj: &Mat4) -> Option<[[Vec3; 4]; 2]> {
     let mut quads = [[Vec3::ZERO; 4]; 2];
     for (q, z) in [0.0f32, 1.0].into_iter().enumerate() {
-        for (i, (x, y)) in [
-            (-1.0f32, -1.0f32),
-            (1.0, -1.0),
-            (1.0, 1.0),
-            (-1.0, 1.0),
-        ]
-        .into_iter()
-        .enumerate()
+        for (i, (x, y)) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .into_iter()
+            .enumerate()
         {
             let p = inv_view_proj.project_point3(Vec3::new(x, y, z));
             if !p.is_finite() {
@@ -809,8 +822,7 @@ pub fn cascade_shadow_matrices(
             return None;
         }
 
-        let proj =
-            Mat4::orthographic_rh(cx - half, cx + half, cy - half, cy + half, near_z, far_z);
+        let proj = Mat4::orthographic_rh(cx - half, cx + half, cy - half, cy + half, near_z, far_z);
         out.view_proj[c] = proj * view;
         out.splits[c] = d1;
         out.texel_world[c] = texel;
@@ -1268,6 +1280,16 @@ pub struct ScenePipeline {
     /// 骨骼矩阵复用暂存（与 `draw_staging` 同理：一次 write 搞定整段）。
     bone_staging: Vec<[f32; 16]>,
 
+    // -- 形变目标 --
+    /// 本帧从剪辑里采样出来的权重（复用缓冲，避免每帧为每个角色新分配）。
+    ///
+    /// 只在**剪辑带权重轨道**时被写入；其余情况直接用实体的 `morph_weights`。
+    morph_weights: Vec<f32>,
+    /// （实体 ID，图元地址）→ 独占顶点缓冲。图元地址能区分模型热重载前后的
+    /// 资源；每帧按实际使用者回收，实体删除或换模型不会留下无界 GPU 缓存。
+    morph_buffers: HashMap<(xgame_core::EntityId, usize), crate::morph::MorphBuffer>,
+    morph_buffers_used: HashSet<(xgame_core::EntityId, usize)>,
+
     // -- 阴影 --
     /// 阴影 pass 的布局：binding 0 = 阴影 uniform，binding 1 = 逐实例数据
     /// （storage 数组，阴影只用其中的模型矩阵与蒙皮槽位），binding 2 = 蒙皮骨骼。
@@ -1336,7 +1358,7 @@ pub struct ScenePipeline {
     /// （图元地址 + 材质 key）→ 不透明批次下标（本帧复用，`clear()` 保留容量）。
     ///
     /// 只按图元地址分组会让"同一个图元、不同 `.mat`"的两个实体被错误合批。
-    batch_index: HashMap<(usize, MaterialKey), u32>,
+    batch_index: HashMap<(usize, MaterialKey, Option<xgame_core::EntityId>), u32>,
     /// 写实例数据时的每批游标（长度 = 当前正在填的批次表长度）。
     batch_cursor: Vec<u32>,
 
@@ -1349,7 +1371,7 @@ pub struct ScenePipeline {
     /// 与 `shadow_batches` 对应的待写实例数据。
     shadow_pending: Vec<PendingDraw>,
     /// 图元地址 → 阴影专用批次下标。
-    shadow_batch_index: HashMap<usize, u32>,
+    shadow_batch_index: HashMap<(usize, Option<xgame_core::EntityId>), u32>,
 
     /// 视锥剔除开关（默认开）。见 [`ScenePipeline::set_frustum_culling`]。
     frustum_culling: bool,
@@ -1375,85 +1397,85 @@ impl ScenePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, sample_count: u32) -> Self {
         let mut global_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::with_capacity(12);
         global_entries.extend([
-                // 0: 相机（顶点阶段要 view_proj，片元阶段要相机位置算半程向量）
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+            // 0: 相机（顶点阶段要 view_proj，片元阶段要相机位置算半程向量）
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                // 1: 光照
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+                count: None,
+            },
+            // 1: 光照
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                // 2: 逐实例数据（模型矩阵 + 蒙皮槽位 + 材质）。storage 数组：
-                //    一个实例一段，顶点着色器靠 `@builtin(instance_index)`
-                //    直接索引（批量绘制时它从 first_instance 起递增）。
-                //    逐实例而不是逐 draw/逐实体的理由见 `DrawUniform` 的说明。
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+                count: None,
+            },
+            // 2: 逐实例数据（模型矩阵 + 蒙皮槽位 + 材质）。storage 数组：
+            //    一个实例一段，顶点着色器靠 `@builtin(instance_index)`
+            //    直接索引（批量绘制时它从 first_instance 起递增）。
+            //    逐实例而不是逐 draw/逐实体的理由见 `DrawUniform` 的说明。
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                // 3: 阴影深度图（片元阶段比较采样）
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        // 深度纹理只能用 Depth 采样类型（不是 Float）。
-                        // 维度必须是 D2Array：一层一个级联，着色器按 index 取层。
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
+                count: None,
+            },
+            // 3: 阴影深度图（片元阶段比较采样）
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    // 深度纹理只能用 Depth 采样类型（不是 Float）。
+                    // 维度必须是 D2Array：一层一个级联，着色器按 index 取层。
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
                 },
-                // 4: 深度比较采样器
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
+                count: None,
+            },
+            // 4: 深度比较采样器
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+            // 5: 阴影 uniform（光源视图投影 + 偏置 / 开关）
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                // 5: 阴影 uniform（光源视图投影 + 偏置 / 开关）
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+                count: None,
+            },
+            // 6: 蒙皮骨骼矩阵（顶点阶段只读存储）
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                // 6: 蒙皮骨骼矩阵（顶点阶段只读存储）
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ]);
+                count: None,
+            },
+        ]);
         // 7..11：天空（绑定号契约集中在 sky.rs，见那里的说明）。
         global_entries.extend(sky::global_layout_entries());
         let global_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1557,7 +1579,12 @@ impl ScenePipeline {
                 splits: [0.0; MAX_SHADOW_CASCADES],
                 forward: [0.0; 4],
                 // z = 0：默认阴影关闭。没有标记任何灯时片元着色器不采样这张图。
-                params: [1.0 / DEFAULT_SHADOW_RESOLUTION as f32, SHADOW_DEPTH_BIAS, 0.0, 0.0],
+                params: [
+                    1.0 / DEFAULT_SHADOW_RESOLUTION as f32,
+                    SHADOW_DEPTH_BIAS,
+                    0.0,
+                    0.0,
+                ],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1620,8 +1647,22 @@ impl ScenePipeline {
             &bones_buffer,
         );
 
-        let pipeline = Self::build_pipeline(device, &global_bgl, &material_bgl, format, sample_count, false);
-        let blend_pipeline = Self::build_pipeline(device, &global_bgl, &material_bgl, format, sample_count, true);
+        let pipeline = Self::build_pipeline(
+            device,
+            &global_bgl,
+            &material_bgl,
+            format,
+            sample_count,
+            false,
+        );
+        let blend_pipeline = Self::build_pipeline(
+            device,
+            &global_bgl,
+            &material_bgl,
+            format,
+            sample_count,
+            true,
+        );
         let shadow_pipeline = Self::build_shadow_pipeline(device, &shadow_bgl);
 
         Self {
@@ -1636,6 +1677,9 @@ impl ScenePipeline {
             bones_buffer,
             bone_slots: MIN_BONE_SLOTS,
             bone_staging: Vec::new(),
+            morph_weights: Vec::new(),
+            morph_buffers: HashMap::new(),
+            morph_buffers_used: HashSet::new(),
             shadow_bgl,
             shadow_pipeline,
             shadow_buffer,
@@ -1748,9 +1792,18 @@ impl ScenePipeline {
             label: Some("scene_global_bg"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: lights_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: draw_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: lights_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: draw_buffer.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(shadow_view),
@@ -1759,8 +1812,14 @@ impl ScenePipeline {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(shadow_sampler),
                 },
-                wgpu::BindGroupEntry { binding: 5, resource: shadow_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: bones_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: shadow_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: bones_buffer.as_entire_binding(),
+                },
                 // 7..11：天空。对象的身份不变（内容变），所以这里没有"重建
                 // 绑定组"的需求 —— 这正是纹理固定分配换来的。
                 wgpu::BindGroupEntry {
@@ -1809,8 +1868,14 @@ impl ScenePipeline {
                         size: wgpu::BufferSize::new(64),
                     }),
                 },
-                wgpu::BindGroupEntry { binding: 1, resource: draw_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: bones_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: draw_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: bones_buffer.as_entire_binding(),
+                },
             ],
         })
     }
@@ -1916,7 +1981,11 @@ impl ScenePipeline {
         });
 
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(if blend { "scene_pipeline_blend" } else { "scene_pipeline" }),
+            label: Some(if blend {
+                "scene_pipeline_blend"
+            } else {
+                "scene_pipeline"
+            }),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &vs,
@@ -1969,7 +2038,10 @@ impl ScenePipeline {
     /// 剔除背面（而非正面）：正面剔除能缓解 peter-panning，但会让单面几何
     /// （内置 Plane 就只有一个面）从光的方向看过去整个消失、投不出影子。
     /// 对"开箱即用的图元"来说，看得见影子比少一点 peter-panning 重要。
-    fn build_shadow_pipeline(device: &wgpu::Device, shadow_bgl: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
+    fn build_shadow_pipeline(
+        device: &wgpu::Device,
+        shadow_bgl: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
         let vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene_shadow_vs"),
             source: wgpu::ShaderSource::Wgsl(SHADOW_VERT_SRC.into()),
@@ -2019,7 +2091,11 @@ impl ScenePipeline {
     /// `packed` 由调用方按"过滤掉强度为 0 的、截断到 [`MAX_LIGHTS`]"的顺序备好；
     /// `shadow_slot` 是其中那盏使用阴影贴图的方向光的下标
     /// （由 [`pick_shadow_slot`] 决定）。只有它会打上 `shadow_params.x = 1`。
-    fn build_lights(ambient: [f32; 3], packed: &[&Light], shadow_slot: Option<usize>) -> LightsUniform {
+    fn build_lights(
+        ambient: [f32; 3],
+        packed: &[&Light],
+        shadow_slot: Option<usize>,
+    ) -> LightsUniform {
         let mut uniform = LightsUniform {
             ambient: [ambient[0], ambient[1], ambient[2], 0.0],
             lights: [GpuLight::ZERO; MAX_LIGHTS],
@@ -2216,11 +2292,7 @@ impl ScenePipeline {
                 );
             }
         }
-        queue.write_buffer(
-            &self.shadow_buffer,
-            0,
-            bytemuck::bytes_of(&shadow_uniform),
-        );
+        queue.write_buffer(&self.shadow_buffer, 0, bytemuck::bytes_of(&shadow_uniform));
 
         // --- 天空 / 环境（内容 key 变了才重建）---
         //
@@ -2268,6 +2340,7 @@ impl ScenePipeline {
         self.shadow_batches.clear();
         self.shadow_pending.clear();
         self.shadow_batch_index.clear();
+        self.morph_buffers_used.clear();
         // 骨骼暂存同理：本帧每个动画实体占一个新槽，槽位随实体序单调递增。
         self.bone_staging.clear();
         let mut bone_slots_used = 0u32;
@@ -2332,9 +2405,18 @@ impl ScenePipeline {
             // 剪辑名一律问驱动（状态机模式下由状态表解析，Animator.clip 只是
             // 单剪辑模式的配置），别回头读组件。
             let mut params = [0u32; 4];
+            // 剪辑里的形变权重轨道（口型 / 表情动画）。**不要求模型有蒙皮** ——
+            // 静态网格同样可以带 morph，所以这段放在骨骼分支外面单独采。
+            self.morph_weights.clear();
+            let mut clip_drives_morph = false;
             if let (Some((clip_name, time, looping)), true) =
                 (anim.playback(entity.id), entity.animator.is_some())
             {
+                if let Some(clip) = mesh.clip(clip_name) {
+                    let t = crate::animation::clip_time(time, clip.duration, looping);
+                    clip_drives_morph =
+                        crate::animation::sample_morph_weights(clip, t, &mut self.morph_weights);
+                }
                 let skin_idx = mesh.primitives.iter().find_map(|p| p.skin);
                 if let (Some(clip), Some(skin_idx)) = (mesh.clip(clip_name), skin_idx) {
                     if let Some(skin) = mesh.skins.get(skin_idx) {
@@ -2344,11 +2426,8 @@ impl ScenePipeline {
                         // （资产改名等）就退回硬切 —— 宁可跳一下，不能画错。
                         let fade = anim.fade_from(entity.id).and_then(|f| {
                             mesh.clip(f.clip).map(|c| {
-                                let prev_t = crate::animation::clip_time(
-                                    f.t,
-                                    c.duration,
-                                    f.looping,
-                                );
+                                let prev_t =
+                                    crate::animation::clip_time(f.t, c.duration, f.looping);
                                 (c, prev_t, f.alpha)
                             })
                         });
@@ -2358,11 +2437,7 @@ impl ScenePipeline {
                         let mut stack: Vec<crate::animation::LayerInput> = Vec::new();
                         if let Some(a) = anim.additive(entity.id) {
                             if let Some(c) = mesh.clip(a.clip) {
-                                let add_t = crate::animation::clip_time(
-                                    a.t,
-                                    c.duration,
-                                    a.looping,
-                                );
+                                let add_t = crate::animation::clip_time(a.t, c.duration, a.looping);
                                 stack.push(crate::animation::LayerInput {
                                     clip: c,
                                     t: add_t,
@@ -2408,6 +2483,40 @@ impl ScenePipeline {
                 }
             }
 
+            // -- 形变目标（morph target）--
+            //
+            // 权重来源二选一：剪辑带权重轨道时**以动画为准**（Unity 同款语义：
+            // 被动画驱动的属性不听手动覆盖），否则用实体的 `morph_weights`
+            // （脚本 / Inspector 写的那份）。模型自带默认权重在
+            // `MorphTargets::resolve_into` 里兜底。
+            //
+            // 顺序必须是"形变 → 蒙皮"：形变改的是**基础顶点**，蒙皮矩阵随后
+            // 才把它们搬到骨骼空间（GPU 侧做）。反过来是两套坐标系对不上。
+            //
+            // 没有 morph 的模型整段跳过；有权重的模型里，`apply_source` 还会
+            // 比对上次值，**权重没变就不重写顶点缓冲**（静止的表情零开销）。
+            if mesh.primitives.iter().any(|p| p.morph.is_some()) {
+                let source: &[f32] = if clip_drives_morph {
+                    &self.morph_weights
+                } else {
+                    &entity.morph_weights
+                };
+                for prim in &mesh.primitives {
+                    if prim.morph.is_none() {
+                        continue;
+                    }
+                    let key = (entity.id, prim as *const GltfPrimitive as usize);
+                    let output = self
+                        .morph_buffers
+                        .entry(key)
+                        .or_insert_with(|| prim.create_morph_buffer(device).expect("已检查 morph"));
+                    if let Some(morph) = &prim.morph {
+                        morph.apply_source(queue, output, source);
+                    }
+                    self.morph_buffers_used.insert(key);
+                }
+            }
+
             // -- 攒本实体的每个图元 --
             //
             // 模型矩阵 / 蒙皮槽位是逐实体的，材质是逐图元的：每个图元一个
@@ -2435,9 +2544,7 @@ impl ScenePipeline {
             }
             // 借出的 Arc 在本实体收集期间保持有效；`Arc` 是为了不与上面
             // 对 `self.materials` 的可变借用打架（库自己还持有同一份）。
-            let asset = asset_key
-                .and_then(|key| self.materials.asset(key))
-                .cloned();
+            let asset = asset_key.and_then(|key| self.materials.asset(key)).cloned();
 
             for (pi, prim) in mesh.primitives.iter().enumerate() {
                 if draw_slots_used >= MAX_RENDER_DRAWS {
@@ -2465,7 +2572,10 @@ impl ScenePipeline {
                     }
                     // 不透明：按图元地址分组（与主 pass 同一套规则），但只写
                     // 阴影批次；不需要材质绑定组（深度 pass 不采样材质）。
-                    let key = prim as *const GltfPrimitive as usize;
+                    let key = (
+                        prim as *const GltfPrimitive as usize,
+                        prim.morph.is_some().then_some(entity.id),
+                    );
                     let batch = match self.shadow_batch_index.get(&key) {
                         Some(b) => *b,
                         None => {
@@ -2501,7 +2611,11 @@ impl ScenePipeline {
                     // 不透明：按（图元地址 + 材质 key）找批次，找不到就新开一批
                     // （顺序 = 首次遇到）。材质 key 是必需的：同一个图元挂不同
                     // `.mat` 的实体不能合成一批（会互相覆盖材质）。
-                    let key = (prim as *const GltfPrimitive as usize, material_key);
+                    let key = (
+                        prim as *const GltfPrimitive as usize,
+                        material_key,
+                        prim.morph.is_some().then_some(entity.id),
+                    );
                     let batch = match self.batch_index.get(&key) {
                         Some(b) => *b,
                         None => {
@@ -2525,6 +2639,8 @@ impl ScenePipeline {
         }
 
         // --- 槽位分配 + 实例数据落 staging ---
+        self.morph_buffers
+            .retain(|key, _| self.morph_buffers_used.contains(key));
         //
         // 不透明批次占 [0, n)：一批一段**连续**槽位（`first` = 前缀和），
         // 实例下标 = first + 批内序号 —— 与 `draw_indexed` 的 first_instance
@@ -2533,8 +2649,11 @@ impl ScenePipeline {
         //
         // 远 → 近。`partial_cmp` 对 NaN 返回 None，退化成"保持原序"即可，
         // 不值得为一个坏变换把整帧干掉。
-        self.blended_draws
-            .sort_by(|a, b| b.dist.partial_cmp(&a.dist).unwrap_or(std::cmp::Ordering::Equal));
+        self.blended_draws.sort_by(|a, b| {
+            b.dist
+                .partial_cmp(&a.dist)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut next_slot = 0u32;
         for batch in &mut self.opaque_batches {
             batch.first = next_slot;
@@ -2650,7 +2769,10 @@ impl ScenePipeline {
                     let Some(prim) = batch_prim(entities, model_cache, batch) else {
                         continue;
                     };
-                    spass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+                    spass.set_vertex_buffer(
+                        0,
+                        batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
+                    );
                     spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
                     spass.draw_indexed(
                         0..prim.num_indices,
@@ -2679,7 +2801,10 @@ impl ScenePipeline {
                 resolve_target,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.12, g: 0.12, b: 0.14, a: 1.0,
+                        r: 0.12,
+                        g: 0.12,
+                        b: 0.14,
+                        a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
                 },
@@ -2710,7 +2835,10 @@ impl ScenePipeline {
                 .bind_group(batch.material)
                 .expect("材质绑定组缺失");
             rpass.set_bind_group(1, material, &[]);
-            rpass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+            rpass.set_vertex_buffer(
+                0,
+                batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
+            );
             rpass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
             rpass.draw_indexed(
                 0..prim.num_indices,
@@ -2739,7 +2867,10 @@ impl ScenePipeline {
                     .bind_group(draw.batch.material)
                     .expect("材质绑定组缺失");
                 rpass.set_bind_group(1, material, &[]);
-                rpass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+                rpass.set_vertex_buffer(
+                    0,
+                    batch_vertex_buffer(entities, &self.morph_buffers, prim, &draw.batch),
+                );
                 rpass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
                 rpass.draw_indexed(
                     0..prim.num_indices,
@@ -2866,7 +2997,11 @@ mod tests {
         let out = unit.transformed(&rot);
         // 转角后 x/z 半宽从 0.5 变成 sqrt(2)/2 ≈ 0.7071
         let expected = 0.5f32 * 2f32.sqrt();
-        assert!((out.half_extent().x - expected).abs() < 1e-4, "got {:?}", out.half_extent());
+        assert!(
+            (out.half_extent().x - expected).abs() < 1e-4,
+            "got {:?}",
+            out.half_extent()
+        );
         assert!((out.half_extent().z - expected).abs() < 1e-4);
         // y 不受绕 Y 旋转影响
         assert!((out.half_extent().y - 0.5).abs() < 1e-5);
@@ -2961,7 +3096,11 @@ mod tests {
         let span = (far_center - eye).dot(forward) - near_d;
 
         for c in 0..cascades.count {
-            let d0 = if c == 0 { near_d } else { cascades.splits[c - 1] };
+            let d0 = if c == 0 {
+                near_d
+            } else {
+                cascades.splits[c - 1]
+            };
             let d1 = cascades.splits[c];
             let (t0, t1) = ((d0 - near_d) / span, (d1 - near_d) / span);
             for k in 0..4 {
@@ -3019,11 +3158,16 @@ mod tests {
     fn shadow_cascades_are_deterministic() {
         let eye = Vec3::new(1.0, 7.0, 20.0);
         let inv = probe_camera(eye, Vec3::new(0.0, 0.0, 0.0)).inverse();
-        let a = cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4)
-            .expect("a");
-        let b = cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4)
-            .expect("b");
-        assert_eq!(a.view_proj[0].to_cols_array(), b.view_proj[0].to_cols_array());
+        let a =
+            cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4)
+                .expect("a");
+        let b =
+            cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4)
+                .expect("b");
+        assert_eq!(
+            a.view_proj[0].to_cols_array(),
+            b.view_proj[0].to_cols_array()
+        );
         assert_eq!(a.splits, b.splits);
         assert_eq!(a.texel_world, b.texel_world);
     }
@@ -3076,7 +3220,10 @@ mod tests {
             2,
         )
         .expect("零方向也要能拟合");
-        assert!(cascades.view_proj[0].to_cols_array().iter().all(|v| v.is_finite()));
+        assert!(cascades.view_proj[0]
+            .to_cols_array()
+            .iter()
+            .all(|v| v.is_finite()));
     }
 
     /// 相机远平面比场景大得多时，覆盖距离必须按**场景**收紧（不是按远平面）：
@@ -3183,7 +3330,10 @@ mod tests {
         // 上游（更靠近灯）= +y，下游 = -y。
         let near = project(&m, Vec3::new(0.0, 4.0, 0.0)).z;
         let far = project(&m, Vec3::new(0.0, -4.0, 0.0)).z;
-        assert!(near < far, "靠近光源的点深度必须更小：near={near} far={far}");
+        assert!(
+            near < far,
+            "靠近光源的点深度必须更小：near={near} far={far}"
+        );
     }
 
     #[test]

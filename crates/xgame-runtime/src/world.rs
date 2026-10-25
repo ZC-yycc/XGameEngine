@@ -59,11 +59,11 @@ use xgame_core::{
 };
 use xgame_input::{Input, InputMap, MouseButton};
 use xgame_math::glam::{Mat4, Vec2, Vec3};
-use xgame_ui::{layout, update_interaction, UiEvent, UiInteraction, UiPointer, UiTree};
 use xgame_physics::{
     body_from_scene, Collider, CollisionEvent, DebugLine, PhysicsConfig, PhysicsWorld, RigidBody,
 };
 use xgame_script::{FrameCtx, GameCtx, LogLevel, LuaHost, ScriptLog};
+use xgame_ui::{layout, update_interaction, UiEvent, UiInteraction, UiPointer, UiTree};
 
 use crate::camera_view::CameraView;
 use crate::registry::{BehaviorInstance, BehaviorRegistry};
@@ -668,7 +668,10 @@ impl World {
         if !preload.failed.is_empty() {
             self.push_runtime_log(
                 LogLevel::Error,
-                format!("场景 '{relative}' 有脚本编译失败：{}", preload.failed.join(", ")),
+                format!(
+                    "场景 '{relative}' 有脚本编译失败：{}",
+                    preload.failed.join(", ")
+                ),
             );
         }
     }
@@ -953,9 +956,7 @@ impl World {
                     time,
                 };
                 match phase {
-                    Phase::Start => {
-                        (instance.hooks.start)(&mut instance.component, &mut game, 0.0)
-                    }
+                    Phase::Start => (instance.hooks.start)(&mut instance.component, &mut game, 0.0),
                     Phase::Update => {
                         (instance.hooks.update)(&mut instance.component, &mut game, delta)
                     }
@@ -1205,14 +1206,41 @@ impl World {
             return;
         }
 
-        for id in report.removed {
+        for removed in report.removed {
             // 先通知组件（on_destroy），再清刚体。
-            self.destroy_behaviors(id, delta, time);
-            if let Some(body) = self.body_of_entity.remove(&id) {
+            self.destroy_behaviors(removed.id, delta, time);
+            // 实体已经从场景移除，所以脚本路径必须随通知带来；此时再查场景
+            // 永远查不到。销毁钩子读的是本实体在移除前留下的状态表，随后
+            // forget_entity 会把 started 与状态表一起清掉。
+            let World {
+                scene,
+                physics,
+                input,
+                scripts,
+                audio_port,
+                clock,
+                current_scene,
+                scene_order,
+                scene_loader,
+                ..
+            } = self;
+            let frame = FrameCtx::new(scene, delta, time)
+                .with_input(input)
+                .with_physics(physics)
+                .with_audio(audio_port)
+                .with_clock(clock)
+                .with_scene_name(current_scene.as_deref().unwrap_or(""))
+                .with_scene_order(scene_order.as_slice());
+            let mut frame = match scene_loader.as_deref() {
+                Some(loader) => frame.with_loader(loader),
+                None => frame,
+            };
+            scripts.dispatch_destroy(&mut frame, removed.id, &removed.scripts);
+            if let Some(body) = self.body_of_entity.remove(&removed.id) {
                 self.physics.remove_body(body);
             }
             // 角色的接触面备忘随实体一起清掉。
-            self.character_contacts.remove(&id);
+            self.character_contacts.remove(&removed.id);
         }
 
         // 生成的实体：`sync_bodies` 会统一补建（它按"有 physics 但没有刚体"来扫）。
@@ -1428,7 +1456,7 @@ impl World {
                 self.entity_of_body(event.body_b),
             ) else {
                 // 对不上实体的刚体（脚本直接建的临时刚体）没有收件人。
-                continue
+                continue;
             };
             if a == b {
                 continue;
@@ -1671,8 +1699,8 @@ enum Phase {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use xgame_core::project::ProjectHandle;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use xgame_core::project::ProjectHandle;
 
     use xgame_core::{AudioSource, Entity, EntityId, PhysicsBody, Prefab};
 
@@ -1703,7 +1731,10 @@ mod tests {
         assert_eq!(cfg.gravity, Vec3::new(0.0, -20.0, 0.0));
         assert_eq!(cfg.fixed_dt, 1.0 / 120.0);
         // substeps 不在清单里，保持默认。
-        assert_eq!(cfg.physics_sub_steps, WorldConfig::default().physics_sub_steps);
+        assert_eq!(
+            cfg.physics_sub_steps,
+            WorldConfig::default().physics_sub_steps
+        );
         // 层矩阵也跟着清单走，且两侧都被写过（运行时拿的是同一份）。
         assert_eq!(cfg.layers.name(1), "Player");
         assert!(!cfg.layers.collides(1, 2));
@@ -1897,11 +1928,7 @@ mod tests {
             "1 秒 × 2 m/s 应走到 x≈2，实际 x={}",
             p.x
         );
-        assert!(
-            p.y.abs() < 0.05,
-            "应贴着地面走（脚底 y≈0），实际 y={}",
-            p.y
-        );
+        assert!(p.y.abs() < 0.05, "应贴着地面走（脚底 y≈0），实际 y={}", p.y);
         let state = player
             .component::<xgame_core::CharacterState>()
             .copied()
@@ -2116,7 +2143,14 @@ mod tests {
         let player_id = world.scene().find_by_name("player").expect("角色还在").id;
         assert_eq!(HIT_OTHER.load(Ordering::Relaxed), player_id.raw());
         assert!(
-            world.scene().find_by_name("player").unwrap().transform.position.x > 1.5,
+            world
+                .scene()
+                .find_by_name("player")
+                .unwrap()
+                .transform
+                .position
+                .x
+                > 1.5,
             "传感器不该挡住角色"
         );
     }
@@ -2171,7 +2205,13 @@ mod tests {
             world.update(1.0 / 60.0);
         }
 
-        let x = world.scene().find_by_name("actor").unwrap().transform.position.x;
+        let x = world
+            .scene()
+            .find_by_name("actor")
+            .unwrap()
+            .transform
+            .position
+            .x;
         // start 摆到 1.0，之后每帧 +0.1。
         assert!((x - 2.0).abs() < 1e-3, "脚本应当把 x 推到约 2.0，实际 {x}");
 
@@ -2395,7 +2435,10 @@ mod tests {
         }
         let actor = world.scene().find_by_name("actor").expect("实体应当还在");
         // start 把 y 抬到 5 且只跑一次（之后 10 帧 update 不动 y）。
-        assert!((actor.transform.position.y - 5.0).abs() < 1e-6, "start 应当生效且只生效一次");
+        assert!(
+            (actor.transform.position.y - 5.0).abs() < 1e-6,
+            "start 应当生效且只生效一次"
+        );
         // update 每帧 +dt：10 帧 ≈ 0.167。
         assert!(
             actor.transform.position.x > 0.1,
@@ -2522,7 +2565,11 @@ mod tests {
         // 读默认值 → 改 → 写回
         let (name, comp) = world.behavior_at_mut(id, 0).expect("第 0 个组件存在");
         assert_eq!(name, "Tunable");
-        assert_eq!(comp.inspect_get(0), FieldValue::F32(0.0), "默认构造 ⇒ speed = 0");
+        assert_eq!(
+            comp.inspect_get(0),
+            FieldValue::F32(0.0),
+            "默认构造 ⇒ speed = 0"
+        );
         comp.inspect_set(0, FieldValue::F32(42.0));
         comp.inspect_set(1, FieldValue::String("hello".into()));
         // 类型不匹配的写入必须被忽略（Lua 侧传错类型的常见后果）。
@@ -2564,7 +2611,11 @@ mod tests {
         let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
             .with_behavior_registry(registry);
 
-        let id = world.scene().find_by_name("tuned").expect("tuned 应当在").id;
+        let id = world
+            .scene()
+            .find_by_name("tuned")
+            .expect("tuned 应当在")
+            .id;
         let (_, comp) = world.behavior_at_mut(id, 0).expect("组件已装配");
         assert_eq!(
             comp.inspect_get(0),
@@ -2577,9 +2628,17 @@ mod tests {
             "存盘的 label 必须在装配时套上"
         );
 
-        let plain_id = world.scene().find_by_name("plain_with_behavior_b").expect("在").id;
+        let plain_id = world
+            .scene()
+            .find_by_name("plain_with_behavior_b")
+            .expect("在")
+            .id;
         let (_, comp) = world.behavior_at_mut(plain_id, 0).expect("组件已装配");
-        assert_eq!(comp.inspect_get(0), FieldValue::F32(0.0), "没存参数 ⇒ 保留默认");
+        assert_eq!(
+            comp.inspect_get(0),
+            FieldValue::F32(0.0),
+            "没存参数 ⇒ 保留默认"
+        );
         assert_eq!(comp.inspect_get(1), FieldValue::String(String::new()));
 
         // 错位防线：存盘里出现组件没有的字段 / 类型不符 —— 静默吸收，
@@ -2616,11 +2675,89 @@ mod tests {
         // bomber 在第一帧的 update 里 destroy(victim)；命令在同帧被消费。
         world.update(1.0 / 60.0);
 
-        assert_eq!(DESTROYED.load(Ordering::Relaxed), 1, "victim 的 on_destroy 应当跑一次");
-        assert!(world.scene().find_by_name("victim").is_none(), "victim 应当已离开场景");
+        assert_eq!(
+            DESTROYED.load(Ordering::Relaxed),
+            1,
+            "victim 的 on_destroy 应当跑一次"
+        );
+        assert!(
+            world.scene().find_by_name("victim").is_none(),
+            "victim 应当已离开场景"
+        );
         // 第二帧不该再收到任何回调（实例已清）。
         world.update(1.0 / 60.0);
-        assert_eq!(DESTROYED.load(Ordering::Relaxed), 1, "on_destroy 不该重复派发");
+        assert_eq!(
+            DESTROYED.load(Ordering::Relaxed),
+            1,
+            "on_destroy 不该重复派发"
+        );
+    }
+
+    #[test]
+    fn destroying_an_entity_runs_lua_on_destroy_and_releases_its_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_lua_destroy_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/bomb.lua"),
+            r#"
+            function update(ctx)
+                local target = entity_id(ctx, "victim")
+                if target ~= 0 then destroy(ctx, target) end
+            end
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Scripts/victim.lua"),
+            r#"
+            function start(ctx) state_set(ctx, "token", "alive") end
+            function on_destroy(ctx)
+                log(ctx, "lua_destroyed:" .. state_get_or(ctx, "token", "missing"))
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("lua_destroy");
+        let mut bomb = Entity::new("bomb");
+        bomb.scripts.push("Scripts/bomb.lua".to_owned());
+        scene.add_entity(bomb);
+        let mut victim = Entity::new("victim");
+        victim.scripts.push("Scripts/victim.lua".to_owned());
+        scene.add_entity(victim);
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+
+        world.update(1.0 / 60.0);
+        let logs = world.take_logs();
+        assert_eq!(
+            logs.iter()
+                .filter(|entry| entry.message == "lua_destroyed:alive")
+                .count(),
+            1,
+            "Lua on_destroy 应读到销毁前的状态且只跑一次：{logs:?}"
+        );
+        assert_eq!(
+            world.scripts().entity_state_count(),
+            1,
+            "销毁后只能保留存活 bomb 的状态表"
+        );
+
+        world.update(1.0 / 60.0);
+        assert!(
+            world
+                .take_logs()
+                .iter()
+                .all(|entry| entry.message != "lua_destroyed:alive"),
+            "on_destroy 不该在后续帧重复派发"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 未注册的行为名：记日志跳过，不 panic、不影响其它实体。
@@ -2675,7 +2812,8 @@ mod tests {
         bytes.extend_from_slice(&data_len.to_le_bytes());
         for i in 0..samples {
             let t = i as f32 / SAMPLE_RATE as f32;
-            let sample = (0.5 * (2.0 * std::f32::consts::PI * 440.0 * t).sin() * i16::MAX as f32) as i16;
+            let sample =
+                (0.5 * (2.0 * std::f32::consts::PI * 440.0 * t).sin() * i16::MAX as f32) as i16;
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         std::fs::write(dir.join(name), bytes).unwrap();
@@ -2714,8 +2852,7 @@ mod tests {
 
         let mut scene = Scene::new("wav");
         scene.add_entity(
-            Entity::new("beep")
-                .with_audio(AudioSource::new("Beep.wav").with_looping(true)),
+            Entity::new("beep").with_audio(AudioSource::new("Beep.wav").with_looping(true)),
         );
         let mut world = World::new(scene, &dir, WorldConfig::default());
         world.update(1.0 / 60.0);
@@ -2733,8 +2870,7 @@ mod tests {
     fn spatial_source_pushes_emitter_positions_each_frame() {
         let mut scene = Scene::new("spatial");
         scene.add_entity(
-            Entity::new("engine")
-                .with_audio(AudioSource::new("Engine.wav").with_spatial(true)),
+            Entity::new("engine").with_audio(AudioSource::new("Engine.wav").with_spatial(true)),
         );
         let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
 
@@ -2767,9 +2903,10 @@ mod tests {
         assert_eq!(world.audio_stats().requests, 0);
 
         // 运行中新增带音频源的实体（实体数 1 → 2）。
-        world.scene_mut().entities.push(
-            Entity::new("beep").with_audio(AudioSource::new("Beep.wav")),
-        );
+        world
+            .scene_mut()
+            .entities
+            .push(Entity::new("beep").with_audio(AudioSource::new("Beep.wav")));
         world.update(1.0 / 60.0);
         assert_eq!(
             world.audio_stats().requests,
@@ -2855,7 +2992,11 @@ mod tests {
 
         let mut world = World::new(scene, &dir, WorldConfig::default());
         world.update(1.0 / 60.0);
-        assert_eq!(world.audio_stats().requests, 1, "脚本的 play_sound 应到达引擎");
+        assert_eq!(
+            world.audio_stats().requests,
+            1,
+            "脚本的 play_sound 应到达引擎"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2959,8 +3100,14 @@ mod tests {
         world.load_scene("Scenes/B.ron").expect("应当能加载 B");
 
         assert_eq!(world.scene().entities.len(), 3, "B 有 3 个实体");
-        assert!(world.scene().find_by_name("tower").is_none(), "旧场景实体必须消失");
-        assert!(world.scene().find_by_name("ball").is_some(), "新场景实体应当就位");
+        assert!(
+            world.scene().find_by_name("tower").is_none(),
+            "旧场景实体必须消失"
+        );
+        assert!(
+            world.scene().find_by_name("ball").is_some(),
+            "新场景实体应当就位"
+        );
         assert_eq!(
             world.physics().stats().0,
             2,
@@ -2979,7 +3126,9 @@ mod tests {
             .with_scene_loader(project.clone())
             .with_current_scene("Scenes/A.ron");
 
-        let err = world.load_scene("Scenes/Nope.ron").expect_err("不存在的场景应当报错");
+        let err = world
+            .load_scene("Scenes/Nope.ron")
+            .expect_err("不存在的场景应当报错");
         assert!(err.contains("Nope.ron"), "错误里要带路径，实际：{err}");
 
         assert_eq!(world.scene().entities.len(), 3, "旧场景必须原封不动");
@@ -3118,7 +3267,11 @@ mod tests {
 
         world.update(1.0 / 60.0);
         let logs: Vec<String> = world.take_logs().into_iter().map(|l| l.message).collect();
-        assert_eq!(world.current_scene(), Some("Scenes/B.ron"), "帧末应当已经切过去");
+        assert_eq!(
+            world.current_scene(),
+            Some("Scenes/B.ron"),
+            "帧末应当已经切过去"
+        );
         assert_eq!(world.scene_index(), Some(1));
         assert_eq!(world.scene_loads(), 1);
         assert!(
@@ -3159,7 +3312,11 @@ mod tests {
             .find(|log| log.level == crate::LogLevel::Error)
             .expect("越界应当有一条错误日志");
         assert!(hit.message.contains("越界"), "实际：{}", hit.message);
-        assert_eq!(world.current_scene(), Some("Scenes/A.ron"), "场景必须原地不动");
+        assert_eq!(
+            world.current_scene(),
+            Some("Scenes/A.ron"),
+            "场景必须原地不动"
+        );
         assert_eq!(world.scene_loads(), 0);
     }
 
@@ -3186,7 +3343,8 @@ mod tests {
         let root_index = template.index_of(root).unwrap();
         template.entities[root_index].physics = Some(PhysicsBody::dynamic_ball(0.5));
         let child = template.add_entity(
-            Entity::new("Gun").with_transform(Transform::from_translation(Vec3::new(0.0, 1.0, 0.0))),
+            Entity::new("Gun")
+                .with_transform(Transform::from_translation(Vec3::new(0.0, 1.0, 0.0))),
         );
         let child_index = template.index_of(child).unwrap();
         template.set_parent(child_index, Some(root_index));
@@ -3307,7 +3465,11 @@ mod tests {
 
         let err = world.load_scene_at(2).expect_err("越界必须报错");
         assert!(err.contains("越界"), "实际：{err}");
-        assert_eq!(world.current_scene(), Some("Scenes/B.ron"), "失败的切换不动场景");
+        assert_eq!(
+            world.current_scene(),
+            Some("Scenes/B.ron"),
+            "失败的切换不动场景"
+        );
     }
 
     /// `set_time_scale(ctx, 0)` = 暂停模拟。四件事一起守，少一件就说明缩放
@@ -3473,7 +3635,10 @@ mod tests {
         assert_eq!(first + second, 4, "两帧 × 2 倍速 = 4 个固定步");
 
         world.set_time_scale(1.0);
-        assert_eq!(world.update(1.0 / 60.0).fixed_steps, 1, "回到实时应当是 1 步");
+        assert_eq!(
+            world.update(1.0 / 60.0).fixed_steps,
+            1,
+            "回到实时应当是 1 步"
+        );
     }
 }
-

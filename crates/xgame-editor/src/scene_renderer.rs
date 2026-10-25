@@ -15,12 +15,12 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 
+use xgame_core::{Entity, EntityId, RenderConfig, Scene};
 use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
 use xgame_render::ui_renderer::UiRenderer;
-use xgame_core::{Entity, EntityId, RenderConfig, Scene};
 
 /// 视口"还活着"的判定窗口：距上次 `render` 进入本函数超过这个时间就认为
 /// 场景视图已经不出图了（面板被关掉），不再为动画请求帧。
@@ -323,10 +323,11 @@ impl SceneRenderer {
         let hdr = HdrTargets::new(&self.device, "editor", w, h, self.sample_count);
 
         // Register with egui-wgpu（注册的必须是**单采样**那张 —— egui 只认它）
-        let tid = self
-            .egui_renderer
-            .write()
-            .register_native_texture(&self.device, &ldr_view, wgpu::FilterMode::Linear);
+        let tid = self.egui_renderer.write().register_native_texture(
+            &self.device,
+            &ldr_view,
+            wgpu::FilterMode::Linear,
+        );
 
         self.render_view = Some(ldr_view);
         self.hdr = Some(hdr);
@@ -386,6 +387,40 @@ impl SceneRenderer {
         names
     }
 
+    /// 某模型的形变目标名列表（Inspector 的 Morph 滑条用），另附目标总数。
+    ///
+    /// 一个模型可能由多个图元拼成，而 morph 目标挂在**图元**上。这里取
+    /// "第一个带 morph 的图元"的名字表 + 所有图元里最大的目标数：
+    ///
+    /// - 名字给滑条做标题（各图元的目标名通常一致，因为来自同一份 Blender 资产）；
+    /// - 目标数取最大值，保证滑条能覆盖到每一个目标 —— 少一条就是有一个表情
+    ///   **永远调不到**，而那正是这轮要修的问题。
+    ///
+    /// 返回空 = 这个模型没有形变目标（Inspector 整段不显示）。
+    pub fn morph_targets(&self, model: &str) -> (Vec<String>, usize) {
+        let Some(mesh) = self.model_cache.get(model) else {
+            return (Vec::new(), 0);
+        };
+        let mut names: Vec<String> = Vec::new();
+        let mut count = 0usize;
+        for primitive in &mesh.primitives {
+            let Some(morph) = primitive.morph.as_ref() else {
+                continue;
+            };
+            count = count.max(morph.target_count());
+            if names.is_empty() {
+                names.extend(morph.names().iter().cloned());
+            }
+        }
+        names.resize(count, String::new());
+        for (i, name) in names.iter_mut().enumerate() {
+            if name.trim().is_empty() {
+                *name = format!("Target {i}");
+            }
+        }
+        (names, count)
+    }
+
     /// 某实体状态机的**当前状态名**（Inspector 显示"现在站在哪"用）。
     ///
     /// 单剪辑模式 / 还没 tick 过 → `None`（面板只在机器模式下显示这一行）。
@@ -429,18 +464,17 @@ impl SceneRenderer {
             if !self.model_cache.contains_key(&entity.model)
                 && !self.load_failed.contains(&entity.model)
             {
-                match GltfMesh::load(
-                    &self.device,
-                    &self.queue,
-                    &self.project_root,
-                    &entity.model,
-                ) {
+                match GltfMesh::load(&self.device, &self.queue, &self.project_root, &entity.model) {
                     Ok(m) => {
                         log::info!("Loaded model '{}' for animation", entity.model);
                         self.model_cache.insert(entity.model.clone(), m);
                     }
                     Err(e) => {
-                        log::warn!("Failed to load model '{}' for animation: {:#}", entity.model, e);
+                        log::warn!(
+                            "Failed to load model '{}' for animation: {:#}",
+                            entity.model,
+                            e
+                        );
                         self.load_failed.insert(entity.model.clone());
                     }
                 }
@@ -610,7 +644,8 @@ impl SceneRenderer {
                 // 状态机配置同样进指纹：**参数值**变了（脚本每帧推、Inspector
                 // DragValue 拖）要触发重绘，否则转移换的状态不显示；states/
                 // transitions/entry 改了同理（编辑期改 RON 后重载场景才画对）。
-                if let Some(m) = animator.active_machine() {                    for byte in m.entry.as_bytes() {
+                if let Some(m) = animator.active_machine() {
+                    for byte in m.entry.as_bytes() {
                         hash = mix_bits(hash, *byte as u64);
                     }
                     // BTreeMap 天然有序 → 参数表哈希稳定，与插入顺序无关。
@@ -1071,7 +1106,11 @@ mod tests {
 
         // 1. 变换
         let moved = [entity("Box", "builtin://cube", Vec3::new(1.0, 0.0, 0.0))];
-        assert_ne!(reference, signature(&moved, &lights, ambient), "变换没进指纹");
+        assert_ne!(
+            reference,
+            signature(&moved, &lights, ambient),
+            "变换没进指纹"
+        );
 
         // 2. 旋转 / 缩放（同一位置，只有这两个分量变）
         let mut rotated = entity("Box", "builtin://cube", Vec3::ZERO);
@@ -1317,14 +1356,25 @@ mod tests {
         let base = signature(std::slice::from_ref(&fox), &lights, ambient);
 
         // 只改参数值 —— 结构一个字节没动，指纹也必须变。
-        fox.animator.as_mut().unwrap().machine.as_mut().unwrap()
+        fox.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
             .parameters
             .insert("speed".to_string(), 0.6);
         let bumped = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(base, bumped, "参数值没进指纹（脚本推参数就不重绘）");
 
         // 改转移阈值也要变。
-        fox.animator.as_mut().unwrap().machine.as_mut().unwrap().transitions[0]
+        fox.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
+            .transitions[0]
             .when = AnimCondition::AtLeast {
             param: "speed".into(),
             value: 0.9,
@@ -1333,7 +1383,13 @@ mod tests {
         assert_ne!(bumped, retuned, "转移阈值没进指纹");
 
         // 状态表（clip/speed/looping）也要变。
-        fox.animator.as_mut().unwrap().machine.as_mut().unwrap().states[0]
+        fox.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
+            .states[0]
             .clip = "Walk".into();
         let restated = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(retuned, restated, "状态表没进指纹");
@@ -1372,12 +1428,24 @@ mod tests {
         assert_ne!(plain, layered, "挂上叠加层没进指纹");
 
         // 权重是脚本每帧推的量 —— 只改权重也必须变。
-        fox.animator.as_mut().unwrap().additive.as_mut().unwrap().weight = 0.3;
+        fox.animator
+            .as_mut()
+            .unwrap()
+            .additive
+            .as_mut()
+            .unwrap()
+            .weight = 0.3;
         let lighter = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(layered, lighter, "权重没进指纹（脚本推权重不重绘）");
 
         // 换叠加剪辑也要变。
-        fox.animator.as_mut().unwrap().additive.as_mut().unwrap().clip = "Survey".into();
+        fox.animator
+            .as_mut()
+            .unwrap()
+            .additive
+            .as_mut()
+            .unwrap()
+            .clip = "Survey".into();
         let retargeted = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(lighter, retargeted, "叠加剪辑没进指纹");
 
@@ -1421,8 +1489,7 @@ mod tests {
 
         // 遮罩切分变了要变：["Spine1"] 与 ["Spine","1"] 的字节流相同，
         // 靠分隔字节才区分得开 —— 这条测试钉住分隔。
-        fox.animator.as_mut().unwrap().layers[0].mask =
-            vec!["Spine".to_string(), "1".to_string()];
+        fox.animator.as_mut().unwrap().layers[0].mask = vec!["Spine".to_string(), "1".to_string()];
         let masked = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(lighter, masked, "遮罩（含切分）没进指纹");
 

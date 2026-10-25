@@ -133,6 +133,20 @@ pub struct Entity {
     /// 不出现这一行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animator: Option<crate::animation::Animator>,
+    /// 形变目标权重（morph target / blend shape）。**空** = 用模型自带的默认权重。
+    ///
+    /// 这一层是"静态表情 / 手动摆脸"：脚本 `set_morph`、Inspector 滑条写这里。
+    /// 它是**逐下标**的，下标含义来自模型 —— 换模型后长度对不上时，短的用模型
+    /// 默认补齐、长的丢弃（见 `xgame_render::morph::MorphTargets::resolve_into`），
+    /// 绝不把权重错位到别的表情上。
+    ///
+    /// 与动画的优先级：剪辑里**有**权重轨道时以动画为准（Unity 同款语义，
+    /// 被动画驱动的属性不听手动覆盖），没有轨道才用这里的值。
+    ///
+    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → 空，
+    /// `skip_serializing_if` 让不带表情的实体不写这一行。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub morph_weights: Vec<f32>,
     /// 音频源。`None` = 静默实体。
     ///
     /// 兼容策略与 `animator` 同款（旧文件 → `None`；没配音频不写这一行）。
@@ -219,6 +233,7 @@ impl Entity {
             behavior_params: BTreeMap::new(),
             physics: None,
             animator: None,
+            morph_weights: Vec::new(),
             audio: None,
             material: None,
             controller: None,
@@ -344,42 +359,84 @@ impl PartialEq for Entity {
     ///   问的本来就是"落盘内容一样吗"（脏检查的语义），运行时组件与此无关；
     /// - 它装的是 `Box<dyn Any>`，类型擦除后根本没法比，硬比只能比个寂寞。
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.transform == other.transform
-            && self.model == other.model
-            // 材质资产引用是落盘内容：换了材质按保存必须有反应。
-            && self.material_asset == other.material_asset
-            && self.id == other.id
-            && self.parent == other.parent
-            && self.prefab == other.prefab
-            && self.scripts == other.scripts
-            && self.behaviors == other.behaviors
-            // 组件参数也是落盘内容（P1.5）——脏检查必须比它，否则调完参按
-            // 保存没反应 / 关窗不提示未保存。
-            && self.behavior_params == other.behavior_params
-            && self.physics == other.physics
-            && self.animator == other.animator
-            && self.audio == other.audio
-            // 材质覆盖同样是落盘内容：调完颜色按保存得有反应。
-            && self.material == other.material
-            // 角色参数同样是落盘内容：Inspector 里调完半径按保存得有反应。
-            && self.controller == other.controller
-            // UI 元素同理，但**只比落盘字段**：`UiState`（悬停 / 按下 / 点击）
-            // 每帧都在变，算进相等就永远是"未保存"。见 `UiElement::data_eq`。
-            && match (&self.ui, &other.ui) {
+        // 穷尽解构是编译期检查：以后给 Entity 加字段却忘了决定它是否参与
+        // 脏检查，这里会编译失败，而不是悄悄把新字段排除在保存提示之外。
+        let Self {
+            name,
+            transform,
+            layer,
+            model,
+            material_asset,
+            id,
+            parent,
+            prefab,
+            scripts,
+            behaviors,
+            behavior_params,
+            physics,
+            animator,
+            morph_weights,
+            audio,
+            material,
+            controller,
+            ui,
+            particle,
+            camera,
+            components: _,
+        } = self;
+        let Self {
+            name: other_name,
+            transform: other_transform,
+            layer: other_layer,
+            model: other_model,
+            material_asset: other_material_asset,
+            id: other_id,
+            parent: other_parent,
+            prefab: other_prefab,
+            scripts: other_scripts,
+            behaviors: other_behaviors,
+            behavior_params: other_behavior_params,
+            physics: other_physics,
+            animator: other_animator,
+            morph_weights: other_morph_weights,
+            audio: other_audio,
+            material: other_material,
+            controller: other_controller,
+            ui: other_ui,
+            particle: other_particle,
+            camera: other_camera,
+            components: _,
+        } = other;
+
+        name == other_name
+            && transform == other_transform
+            && layer == other_layer
+            && model == other_model
+            && material_asset == other_material_asset
+            && id == other_id
+            && parent == other_parent
+            && prefab == other_prefab
+            && scripts == other_scripts
+            && behaviors == other_behaviors
+            && behavior_params == other_behavior_params
+            && physics == other_physics
+            && animator == other_animator
+            && morph_weights == other_morph_weights
+            && audio == other_audio
+            && material == other_material
+            && controller == other_controller
+            // UI / 粒子只比落盘字段，忽略各自的交互态和 burst 运行态。
+            && match (ui, other_ui) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a.data_eq(b),
                 _ => false,
             }
-            // 粒子同理：`burst` 是脚本写进去的运行态，不算改动。
-            && match (&self.particle, &other.particle) {
+            && match (particle, other_particle) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a.data_eq(b),
                 _ => false,
             }
-            // 相机参数是落盘内容：改了 FOV 按保存必须有反应。相机没有运行态
-            // 字段（不像 UI / 粒子），所以直接比结构。
-            && self.camera == other.camera
+            && camera == other_camera
     }
 }
 
@@ -564,12 +621,17 @@ impl Scene {
             return vec![None; n];
         }
 
-        let index_of: std::collections::HashMap<EntityId, usize> = self
-            .entities
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.id, i))
-            .collect();
+        // ID → 索引。**第一个**出现的实体占住这个 ID。
+        //
+        // 不能用 `.collect()`（它让后出现的覆盖前面的）：`index_of` / `find_entity`
+        // 都是 `position()`，取的是第一个匹配；批量路径若取最后一个，同一个场景
+        // 就会出现"逐次查父节点得到一个结果、`child_map` 得到另一个结果"。
+        // 撞 ID 时这会直接把子节点挂到别的实体名下 —— 删除时连带删掉不该删的东西。
+        let mut index_of: std::collections::HashMap<EntityId, usize> =
+            std::collections::HashMap::with_capacity(n);
+        for (i, entity) in self.entities.iter().enumerate() {
+            index_of.entry(entity.id).or_insert(i);
+        }
 
         // 父 ID 不存在 / 父就是自己 → 视作根，与 `parent_index` 的语义保持一致。
         self.entities
@@ -635,10 +697,9 @@ impl Scene {
                 None => break,
             }
         }
-        chain
-            .iter()
-            .rev()
-            .fold(Mat4::IDENTITY, |m, &i| m * self.entities[i].transform.local_matrix())
+        chain.iter().rev().fold(Mat4::IDENTITY, |m, &i| {
+            m * self.entities[i].transform.local_matrix()
+        })
     }
 
     /// 一次性算出所有实体的世界矩阵（与 `entities` 同序同长）。
@@ -733,9 +794,7 @@ impl Scene {
         if index >= self.entities.len() {
             return;
         }
-        let parent = self.entities[index]
-            .parent
-            .and_then(|id| self.index_of(id));
+        let parent = self.entities[index].parent.and_then(|id| self.index_of(id));
         let local = match parent {
             None => position,
             Some(p) => {
@@ -811,16 +870,30 @@ impl Scene {
     /// 删除某个实体**连同其整棵子树**，返回被删掉的实体。
     ///
     /// 这是编辑器 `Delete` 的语义（与 Unity 一致：删父节点，子节点一起走）。
+    ///
+    /// # 为什么按**索引掩码**筛，而不是先收集 ID 再按 ID 比对
+    ///
+    /// 旧实现是 `ids.contains(&entity.id)`。它隐含了一个"ID 全场景唯一"的前提，
+    /// 而这个前提会被读盘破坏（文件里存的是上一次运行的 ID，进程重启后计数器
+    /// 又从 1 开始）—— 一旦两条件实物撞了 ID，删其中一条会把另一条也带走，
+    /// 现象就是"删一个物体，别的物体跟着消失"。
+    ///
+    /// `subtree` 给出的是**索引**，索引天然唯一，用掩码筛就没有这个前提。
+    /// 顺带把 `O(n²)`（外层 n 次 × `contains` 线性扫）降成 `O(n)`。
     pub fn remove_subtree(&mut self, index: usize) -> Vec<Entity> {
         let doomed = self.subtree(index);
         if doomed.is_empty() {
             return Vec::new();
         }
-        let ids: Vec<EntityId> = doomed.iter().map(|&i| self.entities[i].id).collect();
-        let mut removed = Vec::new();
-        let mut kept = Vec::with_capacity(self.entities.len());
-        for entity in std::mem::take(&mut self.entities) {
-            if ids.contains(&entity.id) {
+        let mut mask = vec![false; self.entities.len()];
+        for &i in &doomed {
+            mask[i] = true;
+        }
+
+        let mut removed = Vec::with_capacity(doomed.len());
+        let mut kept = Vec::with_capacity(self.entities.len() - doomed.len());
+        for (i, entity) in std::mem::take(&mut self.entities).into_iter().enumerate() {
+            if mask[i] {
                 removed.push(entity);
             } else {
                 kept.push(entity);
@@ -828,6 +901,33 @@ impl Scene {
         }
         self.entities = kept;
         removed
+    }
+
+    /// 修复**重复 ID**，返回被重新分配的条数。
+    ///
+    /// 读盘边界调一次（见 `ProjectHandle::parse_scene_text`）。存在意义：
+    /// 旧版本的计数器不对齐会把这个 bug **写进文件**（两条件物同一个 `id:`），
+    /// 光修分配器救不回已有的坏文件 —— 这里把后出现的重复项改成一个新 ID，
+    /// 让它们重新可区分。
+    ///
+    /// # 已知局限
+    ///
+    /// 文件里既然出现重复 ID，"谁是谁的父节点"这件事**已经不可还原**了：
+    /// 指向该 ID 的 `parent` 会落到第一个同 ID 的实体上。层级可能因此差一层，
+    /// 但"删除连坐"这种破坏性后果不会再发生 —— 修的是可恢复性，不是原样复原。
+    pub fn ensure_unique_ids(&mut self) -> usize {
+        let mut seen: std::collections::HashSet<EntityId> =
+            std::collections::HashSet::with_capacity(self.entities.len());
+        let mut repaired = 0;
+        for entity in &mut self.entities {
+            if seen.insert(entity.id) {
+                continue;
+            }
+            entity.id = EntityId::new();
+            seen.insert(entity.id);
+            repaired += 1;
+        }
+        repaired
     }
 
     /// 场景是否为空（无实体）。
@@ -854,7 +954,11 @@ impl Scene {
     /// 预制体为空时返回 `None`（不产生任何改动）。追加的实体是一棵自包含的树，
     /// 落在场景根层——调用方若想让它挂在某个父节点下，再调 [`set_parent`](Self::set_parent)
     /// （会保留世界变换）。
-    pub fn instantiate_prefab(&mut self, prefab: &crate::prefab::Prefab, source: &str) -> Option<usize> {
+    pub fn instantiate_prefab(
+        &mut self,
+        prefab: &crate::prefab::Prefab,
+        source: &str,
+    ) -> Option<usize> {
         if prefab.is_empty() {
             return None;
         }
@@ -903,6 +1007,49 @@ mod tests {
         assert_eq!(e.name, "Test");
         // ID 自动分配且非零
         assert_ne!(e.id.raw(), 0);
+    }
+
+    #[test]
+    fn persisted_layer_participates_in_equality() {
+        let saved = Entity::new("Actor");
+        let mut edited = saved.clone();
+        edited.layer = 3;
+        assert_ne!(saved, edited, "仅修改层也必须让场景变脏");
+    }
+
+    #[test]
+    fn persisted_morph_weights_participate_in_equality() {
+        let saved = Entity::new("Face");
+        let mut edited = saved.clone();
+        edited.morph_weights = vec![0.5];
+        assert_ne!(saved, edited, "仅修改形变权重也必须让场景变脏");
+    }
+
+    /// 形变目标权重随实体走一遍 RON 往返，一个分量都不能丢。
+    ///
+    /// 权重是**浮点数组**：一旦序列化格式漂了（比如被写成字符串或整型），
+    /// 表情会在存盘再打开之后变成全 0 —— 而且没有任何报错。
+    #[test]
+    fn morph_weights_survive_a_ron_roundtrip() {
+        let mut entity = Entity::new("Face");
+        entity.morph_weights = vec![0.25, 1.0, 0.0, 0.5];
+        let text = ron::to_string(&entity).expect("实体可序列化");
+        let back: Entity = ron::from_str(&text).expect("实体可反序列化");
+        assert_eq!(back.morph_weights, entity.morph_weights);
+    }
+
+    /// 没有形变权重的实体**不写**这一行：场景文件不该被空数组灌满。
+    #[test]
+    fn entity_without_morph_weights_omits_the_field() {
+        let text = ron::to_string(&Entity::new("Plain")).expect("可序列化");
+        assert!(!text.contains("morph_weights"), "空表不该落盘：{text}");
+    }
+
+    /// 旧场景文件没有这个字段 → 空表（行为与引入 morph 之前逐位一致）。
+    #[test]
+    fn old_scene_without_morph_field_still_loads() {
+        let entity: Entity = ron::from_str(r#"(name: "Legacy")"#).expect("旧实体可反序列化");
+        assert!(entity.morph_weights.is_empty());
     }
 
     #[test]
@@ -1037,8 +1184,14 @@ mod tests {
         scene.add_entity(Entity::new("Idle Cam").with_camera(idle.clone()));
         let main = scene.add_entity(Entity::new("Main Cam").with_camera(Default::default()));
 
-        assert_eq!(scene.active_camera_index(), Some(scene.index_of(main).unwrap()));
-        assert_eq!(scene.active_camera().map(|e| e.name.as_str()), Some("Main Cam"));
+        assert_eq!(
+            scene.active_camera_index(),
+            Some(scene.index_of(main).unwrap())
+        );
+        assert_eq!(
+            scene.active_camera().map(|e| e.name.as_str()),
+            Some("Main Cam")
+        );
 
         // 唯一 / 全部 inactive：退回第一个相机，而不是"没有相机"。
         let mut only_idle = Scene::new("OnlyIdle");
@@ -1057,10 +1210,12 @@ mod tests {
     fn hierarchy_scene() -> (Scene, [usize; 3]) {
         let mut scene = Scene::new("Hierarchy");
         let root = scene.add_entity(
-            Entity::new("Root").with_transform(Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))),
+            Entity::new("Root")
+                .with_transform(Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))),
         );
         let child = scene.add_entity(
-            Entity::new("Child").with_transform(Transform::from_translation(Vec3::new(0.0, 2.0, 0.0))),
+            Entity::new("Child")
+                .with_transform(Transform::from_translation(Vec3::new(0.0, 2.0, 0.0))),
         );
         let grandchild = scene.add_entity(
             Entity::new("Grandchild")
@@ -1086,10 +1241,12 @@ mod tests {
         // 的局部重算——这里要验证的正是矩阵级联本身。
         let mut scene = Scene::new("Hierarchy");
         let root_id = scene.add_entity(
-            Entity::new("Root").with_transform(Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))),
+            Entity::new("Root")
+                .with_transform(Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))),
         );
         let child_id = scene.add_entity(
-            Entity::new("Child").with_transform(Transform::from_translation(Vec3::new(0.0, 2.0, 0.0))),
+            Entity::new("Child")
+                .with_transform(Transform::from_translation(Vec3::new(0.0, 2.0, 0.0))),
         );
         let grandchild_id = scene.add_entity(
             Entity::new("Grandchild")
@@ -1150,7 +1307,11 @@ mod tests {
         );
         // 批量结果必须与逐个解算完全一致 —— 一致性比数值本身更重要。
         for (i, mat) in m.iter().enumerate() {
-            assert_eq!(*mat, scene.world_matrix(i), "第 {i} 个节点批量/单个结果不一致");
+            assert_eq!(
+                *mat,
+                scene.world_matrix(i),
+                "第 {i} 个节点批量/单个结果不一致"
+            );
         }
     }
 
@@ -1189,7 +1350,11 @@ mod tests {
         let check = |scene: &Scene| {
             let (parent_indices, child_map) = scene.hierarchy();
             for i in 0..scene.entities.len() {
-                assert_eq!(parent_indices[i], scene.parent_index(i), "父索引不一致: {i}");
+                assert_eq!(
+                    parent_indices[i],
+                    scene.parent_index(i),
+                    "父索引不一致: {i}"
+                );
                 assert_eq!(child_map[i], scene.children(i), "子列表不一致: {i}");
             }
             let roots: Vec<usize> = (0..scene.entities.len())
@@ -1227,7 +1392,10 @@ mod tests {
         // 把 grandchild 从 child 挪到 root 下
         assert!(scene.set_parent(g, Some(r)));
         let after = scene.world_transform(g);
-        assert!((before.position - after.position).length() < 1e-5, "世界位置应当保持不变");
+        assert!(
+            (before.position - after.position).length() < 1e-5,
+            "世界位置应当保持不变"
+        );
         assert_eq!(scene.children(r).len(), 2);
 
         // 挪回根层（解除父子）
@@ -1265,13 +1433,112 @@ mod tests {
         let _ = (c, g);
     }
 
+    /// 撞 ID 时，删一条不能把另一条一起带走。
+    ///
+    /// 这是"删一个物体、别的物体跟着消失"的最小复现。旧实现先收集要删的 ID 再
+    /// 用 `ids.contains(&entity.id)` 筛选，隐含"ID 全场景唯一"的前提；读盘回来的
+    /// 实体与新分配的实体一旦共用 ID，两条都会被收走。
+    #[test]
+    fn remove_subtree_spares_other_entities_that_share_an_id() {
+        let mut scene = Scene::new("Collide");
+        let shared = EntityId::from_raw(777);
+
+        // 模拟"从文件读出来"的实体：ID 是上一次运行分配的。
+        let mut loaded = Entity::new("Loaded");
+        loaded.id = shared;
+        scene.add_entity(loaded);
+        let loaded_child_id = scene.add_entity(Entity::new("LoadedChild"));
+        assert!(scene.set_parent(
+            scene.index_of(loaded_child_id).unwrap(),
+            Some(scene.index_of(shared).unwrap())
+        ));
+
+        // 模拟"计数器没对齐时新建的实体"：拿到同一个 ID。
+        let mut fresh = Entity::new("Fresh");
+        fresh.id = shared;
+        let fresh_idx = scene.entities.len();
+        scene.add_entity(fresh);
+
+        let removed = scene.remove_subtree(fresh_idx);
+        assert_eq!(removed.len(), 1, "只该删掉 Fresh：{removed:?}");
+        assert_eq!(removed[0].name, "Fresh");
+        assert_eq!(scene.entities.len(), 2, "Loaded 与它的子节点必须还在");
+        assert!(scene.index_of(shared).is_some(), "Loaded 仍在场景里");
+        assert!(
+            scene.index_of(loaded_child_id).is_some(),
+            "Loaded 的子节点也必须还在"
+        );
+    }
+
+    #[test]
+    fn ensure_unique_ids_reassigns_duplicates() {
+        let mut scene = Scene::new("Dup");
+        let shared = EntityId::from_raw(31);
+        let mut a = Entity::new("A");
+        a.id = shared;
+        let mut b = Entity::new("B");
+        b.id = shared;
+        let mut c = Entity::new("C");
+        c.id = EntityId::from_raw(32);
+        scene.add_entity(a);
+        scene.add_entity(b);
+        scene.add_entity(c);
+
+        assert_eq!(scene.ensure_unique_ids(), 1, "只有第二个 A/B 需要改");
+        // 第一个出现的保留原 ID（父引用都指向它）
+        assert_eq!(scene.entities[0].id, shared);
+        assert_ne!(scene.entities[1].id, shared);
+        assert_eq!(scene.entities[2].id, EntityId::from_raw(32));
+        // 幂等：再调一次没有可修的
+        assert_eq!(scene.ensure_unique_ids(), 0);
+    }
+
+    /// ID 必须原样往返：这条同时守着自定义 `Deserialize` 的**格式兼容性**
+    /// （RON 里仍是 `id: (12)`），以及"保存一次不该把 ID 洗一遍"。
+    #[test]
+    fn scene_ids_round_trip_unchanged() {
+        let mut scene = Scene::new("RT");
+        scene.add_entity(Entity::new("A"));
+        scene.add_entity(Entity::new("B"));
+        let before: Vec<EntityId> = scene.entities.iter().map(|e| e.id).collect();
+
+        let text = ron::to_string(&scene).expect("场景应当能序列化");
+        let mut back: Scene = ron::from_str(&text).expect("场景应当能反序列化");
+
+        let after: Vec<EntityId> = back.entities.iter().map(|e| e.id).collect();
+        assert_eq!(before, after, "ID 必须原样往返");
+        assert_eq!(back.ensure_unique_ids(), 0, "往返不该产生重复 ID");
+    }
+
+    /// 读盘必须把全局计数器推过已加载的 ID。
+    ///
+    /// 不推的后果是下一条 `EntityId::new()` 返回一个**已被占用**的 ID ——
+    /// 这正是"删一个连坐删别的"的源头。
+    #[test]
+    fn deserializing_an_id_reserves_the_id_counter() {
+        #[derive(serde::Deserialize)]
+        struct Holder {
+            id: EntityId,
+        }
+
+        let loaded: Holder = ron::from_str("(id: (4000000))").expect("newtype 的 RON 形态");
+        assert_eq!(loaded.id.raw(), 4_000_000);
+        assert!(
+            EntityId::new().raw() > 4_000_000,
+            "读盘后新建的 ID 必须排在已加载 ID 之后，否则会撞"
+        );
+    }
+
     #[test]
     fn remove_entity_promotes_children() {
         let (mut scene, [r, c, g]) = hierarchy_scene();
         scene.remove_entity(scene.entities[c].id);
         // grandchild 被提升到 root 下，而不是随 child 一起消失
         assert_eq!(scene.entities.len(), 2);
-        assert_eq!(scene.children(r), vec![scene.index_of(scene.entities[1].id).unwrap()]);
+        assert_eq!(
+            scene.children(r),
+            vec![scene.index_of(scene.entities[1].id).unwrap()]
+        );
         let _ = g;
     }
 
@@ -1351,7 +1618,9 @@ mod tests {
         fields.insert("speed".to_owned(), FieldValue::F32(75.0));
         fields.insert("enabled".to_owned(), FieldValue::Bool(true));
         fields.insert("label".to_owned(), FieldValue::String("玩家".into()));
-        entity.behavior_params.insert("Spinner".to_owned(), fields.clone());
+        entity
+            .behavior_params
+            .insert("Spinner".to_owned(), fields.clone());
         scene.add_entity(entity);
 
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
@@ -1485,9 +1754,7 @@ mod tests {
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
         assert!(text.contains("material"), "材质覆盖必须落盘");
         let restored: Scene = ron::from_str(&text).unwrap();
-        let m = restored.entities[0]
-            .material
-            .expect("往返后材质覆盖仍在");
+        let m = restored.entities[0].material.expect("往返后材质覆盖仍在");
         assert_eq!(m.base_color, Some([0.8, 0.25, 0.2, 1.0]));
         assert_eq!(m.metallic, Some(0.0));
         assert_eq!(m.roughness, Some(0.65));
@@ -1578,20 +1845,20 @@ mod tests {
     #[test]
     fn controller_survives_ron_roundtrip() {
         let mut scene = Scene::new("A");
-        scene.add_entity(Entity::new("Player").with_controller(crate::CharacterController {
-            radius: 0.4,
-            height: 2.0,
-            step_offset: 0.5,
-            slope_limit: 60.0,
-            skin_width: 0.01,
-            snap_to_ground: 0.4,
-        }));
+        scene.add_entity(
+            Entity::new("Player").with_controller(crate::CharacterController {
+                radius: 0.4,
+                height: 2.0,
+                step_offset: 0.5,
+                slope_limit: 60.0,
+                skin_width: 0.01,
+                snap_to_ground: 0.4,
+            }),
+        );
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
         assert!(text.contains("controller"), "角色组件必须落盘");
         let restored: Scene = ron::from_str(&text).unwrap();
-        let c = restored.entities[0]
-            .controller
-            .expect("往返后角色组件仍在");
+        let c = restored.entities[0].controller.expect("往返后角色组件仍在");
         assert_eq!(c.radius, 0.4);
         assert_eq!(c.height, 2.0);
         assert_eq!(c.step_offset, 0.5);
@@ -1605,7 +1872,10 @@ mod tests {
         let mut scene = Scene::new("A");
         scene.add_entity(Entity::new("Plain"));
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
-        assert!(!text.contains("controller"), "普通实体不该写出 controller 字段");
+        assert!(
+            !text.contains("controller"),
+            "普通实体不该写出 controller 字段"
+        );
 
         // 旧文件路径：手工构造一条不含 controller 的实体 RON。
         let old = r#"Scene(
@@ -1697,7 +1967,11 @@ mod tests {
         scene.entities[ci].parent = Some(rid);
         let ri = scene.index_of(rid).unwrap();
 
-        assert_eq!(scene.prefab_instance_root(ci), Some(ri), "内部节点应上溯到实例根");
+        assert_eq!(
+            scene.prefab_instance_root(ci),
+            Some(ri),
+            "内部节点应上溯到实例根"
+        );
         assert_eq!(scene.prefab_instance_root(ri), Some(ri), "根解析到自身");
 
         let nid = scene.add_entity(Entity::new("Plain"));

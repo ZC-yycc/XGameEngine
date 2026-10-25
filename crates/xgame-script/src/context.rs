@@ -135,14 +135,21 @@ pub struct ScriptLog {
 /// 那这个枚举还留着干什么？告诉**运行时**它该做什么 —— 场景是脚本改的，
 /// 但刚体是运行时建的，得有人把新实体的物理体补上、把删掉的清掉。
 #[derive(Debug, Clone)]
+pub struct RemovedEntity {
+    pub id: EntityId,
+    /// 移除时随实体保存的脚本路径；实体离开场景后仍能据此派发 on_destroy。
+    pub scripts: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub enum ScriptCommand {
     /// 新实体已经进入场景，运行时需要为它建立物理体（如果声明了的话）。
     EntitySpawned {
         id: EntityId,
         physics: Option<PhysicsBody>,
     },
-    /// 这些实体已经离开场景（含整棵子树），运行时需要销毁对应的物理体。
-    EntitiesRemoved { ids: Vec<EntityId> },
+    /// 这些实体已经离开场景（含整棵子树），运行时需要派发销毁钩子并清理物理体。
+    EntitiesRemoved { entities: Vec<RemovedEntity> },
     /// 实体换了父节点，运行时需要把它的刚体移到新的世界位置。
     Reparented { child: EntityId },
     /// 实体换了层，运行时需要把碰撞组改成新层对应的那一对位掩码。

@@ -216,7 +216,9 @@ pub fn scene_schema() -> SchemaDoc {
                 kind: "scene".into(),
                 file_suffix: ".ron".into(),
                 root_type: "Scene".into(),
-                path_note: "项目内相对路径，通常放在 Scenes/ 下（清单 entry_scene 指向的也是这种路径）。".into(),
+                path_note:
+                    "项目内相对路径，通常放在 Scenes/ 下（清单 entry_scene 指向的也是这种路径）。"
+                        .into(),
                 summary: "一张场景：实体平铺列表 + 场景级灯光 + 环境光。".into(),
                 example_ron: pretty(&scene_example()),
             },
@@ -254,19 +256,43 @@ fn conventions() -> Vec<String> {
 
 fn primitives() -> Vec<PrimitiveSchema> {
     vec![
-        primitive("f32", "1.5", "32 位浮点；建议带小数点，和现有场景文件保持一致。"),
+        primitive(
+            "f32",
+            "1.5",
+            "32 位浮点；建议带小数点，和现有场景文件保持一致。",
+        ),
         primitive("f64", "1.5", "64 位浮点（目前只出现在 FieldValue::F64）。"),
-        primitive("u8", "0", "无符号 8 位整数（目前只用于 Entity.layer：0–31）。"),
+        primitive(
+            "u8",
+            "0",
+            "无符号 8 位整数（目前只用于 Entity.layer：0–31）。",
+        ),
         primitive("u32", "512", "无符号 32 位整数。"),
         primitive("i32", "-1", "有符号 32 位整数（FieldValue::I32）。"),
         primitive("i64", "-1", "有符号 64 位整数（FieldValue::I64）。"),
-        primitive("u64", "0", "无符号 64 位整数（实体 ID 的底层是 u64；FieldValue 没有 U64 变体）。"),
+        primitive(
+            "u64",
+            "0",
+            "无符号 64 位整数（实体 ID 的底层是 u64；FieldValue 没有 U64 变体）。",
+        ),
         primitive("bool", "true", "true / false。"),
         primitive("String", "\"text\"", "双引号字符串；允许 // 行注释。"),
         primitive("Vec2", "(0.0, 0.0)", "固定长度元组，不是 [0.0, 0.0]。"),
-        primitive("Vec3", "(0.0, 1.0, 0.0)", "固定长度元组，不是 [0.0, 1.0, 0.0]。"),
-        primitive("Vec4", "(1.0, 0.0, 0.0, 1.0)", "固定长度元组；颜色按 RGBA 顺序。"),
-        primitive("Quat", "(0.0, 0.0, 0.0, 1.0)", "四元数，分量顺序 x, y, z, w；单位四元数 = 无旋转。"),
+        primitive(
+            "Vec3",
+            "(0.0, 1.0, 0.0)",
+            "固定长度元组，不是 [0.0, 1.0, 0.0]。",
+        ),
+        primitive(
+            "Vec4",
+            "(1.0, 0.0, 0.0, 1.0)",
+            "固定长度元组；颜色按 RGBA 顺序。",
+        ),
+        primitive(
+            "Quat",
+            "(0.0, 0.0, 0.0, 1.0)",
+            "四元数，分量顺序 x, y, z, w；单位四元数 = 无旋转。",
+        ),
     ]
 }
 
@@ -634,6 +660,12 @@ fn scene_types() -> Vec<TypeSchema> {
                 ),
                 opt("physics", "PhysicsBody", "物理属性；None = 不参与物理（纯视觉 / 纯逻辑）。"),
                 opt("animator", "Animator", "动画播放器；None = 不播动画（绑定姿态 / 静态网格）。"),
+                def(
+                    "morph_weights",
+                    "Vec<f32>",
+                    &Vec::<f32>::new(),
+                    "形变目标（morph target / blend shape）权重，逐下标对应模型的目标；空 = 用模型自带默认值。剪辑带权重轨道时以动画为准。",
+                ),
                 opt("audio", "AudioSource", "音频源；None = 静默实体。"),
                 opt(
                     "material",
@@ -1044,7 +1076,12 @@ fn physics_types() -> Vec<TypeSchema> {
             Some(pretty(&PhysicsBody::static_box([12.0, 0.5, 12.0]))),
             vec![
                 def("kind", "BodyKind", &BodyKind::Dynamic, "运动学类型。"),
-                def("shape", "CollisionShape", &CollisionShape::Auto, "碰撞体形状。"),
+                def(
+                    "shape",
+                    "CollisionShape",
+                    &CollisionShape::Auto,
+                    "碰撞体形状。",
+                ),
                 def(
                     "mass",
                     "f32",
@@ -1052,7 +1089,12 @@ fn physics_types() -> Vec<TypeSchema> {
                     "质量（千克）；0 = 按碰撞体密度自动推算。",
                 ),
                 def("friction", "f32", &0.5, "库仑摩擦（0 无摩擦，1 高摩擦）。"),
-                def("restitution", "f32", &0.0, "弹性（0 完全非弹性，1 完全弹性）。"),
+                def(
+                    "restitution",
+                    "f32",
+                    &0.0,
+                    "弹性（0 完全非弹性，1 完全弹性）。",
+                ),
                 def(
                     "gravity_scale",
                     "f32",
@@ -1584,7 +1626,12 @@ fn inspect_types() -> Vec<TypeSchema> {
                 newtype_variant("String", "String", "String(\"text\")", "字符串。"),
                 newtype_variant("Vec2", "Vec2", "Vec2((0.0, 0.0))", "二维向量。"),
                 newtype_variant("Vec3", "Vec3", "Vec3((0.0, 1.0, 0.0))", "三维向量。"),
-                newtype_variant("Vec4", "Vec4", "Vec4((1.0, 1.0, 1.0, 1.0))", "四维向量 / 颜色。"),
+                newtype_variant(
+                    "Vec4",
+                    "Vec4",
+                    "Vec4((1.0, 1.0, 1.0, 1.0))",
+                    "四维向量 / 颜色。",
+                ),
             ],
             vec!["带标签形式：变体名是磁盘格式的一部分，改名会破坏已有场景文件。"],
         ),
@@ -1686,7 +1733,11 @@ mod tests {
         T: Default + DeserializeOwned + PartialEq + std::fmt::Debug,
     {
         let parsed: T = parse(default_of(doc, name));
-        assert_eq!(parsed, T::default(), "{name} 的 default_ron 与 Default 不一致");
+        assert_eq!(
+            parsed,
+            T::default(),
+            "{name} 的 default_ron 与 Default 不一致"
+        );
     }
 
     fn assert_variant_examples<Enum, F>(doc: &SchemaDoc, name: &str, variant_name: F)
@@ -1834,11 +1885,7 @@ mod tests {
 
         for ty in &doc.types {
             assert!(!ty.summary.is_empty(), "{} 缺 summary", ty.name);
-            assert!(
-                ty.example_ron.is_some(),
-                "{} 必须有可解析示例",
-                ty.name
-            );
+            assert!(ty.example_ron.is_some(), "{} 必须有可解析示例", ty.name);
             match ty.kind {
                 TypeKind::Struct => {
                     assert!(!ty.fields.is_empty(), "{} 是结构体但没有字段", ty.name);
@@ -2157,10 +2204,8 @@ mod tests {
         use crate::project::ProjectHandle;
 
         let doc = scene_schema();
-        let base = std::env::temp_dir().join(format!(
-            "xgame_schema_roundtrip_{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("xgame_schema_roundtrip_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let project = ProjectHandle::create(&base, "SchemaRoundTrip").expect("创建临时项目");
@@ -2189,8 +2234,13 @@ mod tests {
             "落盘不应保留资产路径:\n{disk}"
         );
 
-        let loaded = project.load_scene("Scenes/Schema.ron").expect("示例场景应当能读回");
-        assert_eq!(loaded, scene, "示例场景经 ProjectHandle 往返后必须逐字段一致");
+        let loaded = project
+            .load_scene("Scenes/Schema.ron")
+            .expect("示例场景应当能读回");
+        assert_eq!(
+            loaded, scene,
+            "示例场景经 ProjectHandle 往返后必须逐字段一致"
+        );
 
         // 同一份内存场景再写一次：GUID 不能重新分配，字段顺序也必须稳定。
         project
@@ -2205,9 +2255,11 @@ mod tests {
         project
             .write_prefab("Prefabs/Schema.prefab.ron", &prefab)
             .expect("示例预制体应当能写盘");
-        let prefab_disk =
-            std::fs::read_to_string(root.join("Prefabs/Schema.prefab.ron")).unwrap();
-        assert!(prefab_disk.contains("guid://"), "预制体资产引用也必须是 GUID");
+        let prefab_disk = std::fs::read_to_string(root.join("Prefabs/Schema.prefab.ron")).unwrap();
+        assert!(
+            prefab_disk.contains("guid://"),
+            "预制体资产引用也必须是 GUID"
+        );
         let prefab_back = project
             .load_prefab("Prefabs/Schema.prefab.ron")
             .expect("示例预制体应当能读回");
@@ -2334,6 +2386,7 @@ mod tests {
             behavior_params,
             physics,
             animator,
+            morph_weights,
             audio,
             material,
             controller,
@@ -2359,6 +2412,7 @@ mod tests {
                 "behavior_params",
                 "physics",
                 "animator",
+                "morph_weights",
                 "audio",
                 "material",
                 "controller",
@@ -2664,7 +2718,9 @@ mod tests {
         assert_fields(
             &doc,
             "UiTextStyle",
-            &["content", "size", "color", "align", "valign", "wrap", "bold"],
+            &[
+                "content", "size", "color", "align", "valign", "wrap", "bold",
+            ],
         );
 
         let UiImageStyle {
@@ -2902,7 +2958,12 @@ mod tests {
             "ParticleBlend",
         ] {
             for variant in &schema_of(&doc, type_name).variants {
-                assert_eq!(variant.kind, VariantKind::Unit, "{type_name}.{}", variant.name);
+                assert_eq!(
+                    variant.kind,
+                    VariantKind::Unit,
+                    "{type_name}.{}",
+                    variant.name
+                );
                 assert!(variant.fields.is_empty());
                 assert!(variant.payload.is_none());
             }

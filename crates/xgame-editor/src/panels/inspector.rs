@@ -178,7 +178,10 @@ fn show_behavior_fields(
 
         ui.horizontal(|ui| {
             let label = egui::RichText::new(desc.display_label()).size(11.0);
-            let text = ui.add_sized([label_w, ui.spacing().interact_size.y], egui::Label::new(label));
+            let text = ui.add_sized(
+                [label_w, ui.spacing().interact_size.y],
+                egui::Label::new(label),
+            );
             if !desc.tooltip.is_empty() {
                 text.on_hover_text(desc.tooltip);
             }
@@ -257,8 +260,11 @@ fn show_field_widget(
             } else {
                 desc.tooltip.to_owned()
             };
-            let resp = ui
-                .add(egui::TextEdit::singleline(&mut s).hint_text(hint).desired_width(140.0));
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut s)
+                    .hint_text(hint)
+                    .desired_width(140.0),
+            );
             sig.collect(&resp);
             if resp.changed() {
                 comp.inspect_set(index, FieldValue::String(s));
@@ -279,15 +285,8 @@ fn show_field_widget(
             // 那会让同一帧里**别的**字段的改动把这里一个没动过的值也写回去。
             let mut local = false;
             ui.horizontal(|ui| {
-                for (axis, f) in ["X", "Y", "Z", "W"]
-                    .iter()
-                    .zip(arr.iter_mut().take(dims))
-                {
-                    ui.label(
-                        egui::RichText::new(*axis)
-                            .weak()
-                            .size(10.0),
-                    );
+                for (axis, f) in ["X", "Y", "Z", "W"].iter().zip(arr.iter_mut().take(dims)) {
+                    ui.label(egui::RichText::new(*axis).weak().size(10.0));
                     let speed = desc.speed.map_or(0.1, |s| s as f64);
                     let resp = ui.add(egui::DragValue::new(f).speed(speed));
                     sig.collect(&resp);
@@ -392,89 +391,89 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // ── 变换组件 ──
         theme::section_bar(ui, "Transform");
         ui.indent("transform", |ui| {
-                // 三轴输入框的宽度按面板剩余空间算：面板够宽时等于 `FIELD_WIDTH`
-                // （与旧画面逐像素一致），窗口收到 1280 时自动压窄 —— 否则最后的
-                // Z 列会被面板右边缘裁掉，数值看不见也拖不到。
-                // 必须在放第一个控件之前算：放完一个 `available_width()` 就少一截。
-                let axis_w = theme::axis_field_width(ui);
-                theme::field_row(ui, "Position", |ui| {
-                    for (axis, value) in [
-                        ("X", &mut entity.transform.position.x),
-                        ("Y", &mut entity.transform.position.y),
-                        ("Z", &mut entity.transform.position.z),
-                    ] {
-                        theme::axis_label(ui, axis);
-                        let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    }
-                });
-
-                // 旋转（欧拉角显示，内部仍是四元数）
-                //
-                // 顺序用 **YXZ**（不是 XYZ）：脚本 API 的 `rot` / `set_rot` 就是 YXZ，
-                // 面板必须与它一致，否则"面板上读到 153°、脚本里读到 −130°"，
-                // 作者会以为其中一处坏了。
-                // 对相机这类物体，YXZ 还给出人类可读的 yaw / pitch（俯角 18°），
-                // XYZ 分解在同样位姿下会折成 (−46°, 153°, 160°) 这种读不出来的三元组。
-                let euler = entity
-                    .transform
-                    .rotation
-                    .to_euler(xgame_math::glam::EulerRot::YXZ);
-                // `to_euler` 按 (y, x, z) 序返回；面板按 X / Y / Z 排列显示。
-                let mut rot = [
-                    euler.1.to_degrees(),
-                    euler.0.to_degrees(),
-                    euler.2.to_degrees(),
-                ];
-                // 把 −0.000 抹成 0：四元数分解常在零附近给出负零，
-                // 面板上显示 "−0.000°" 像是算错了（实际是同一角度）。
-                for value in &mut rot {
-                    if value.abs() < 1e-3 {
-                        *value = 0.0;
-                    }
+            // 三轴输入框的宽度按面板剩余空间算：面板够宽时等于 `FIELD_WIDTH`
+            // （与旧画面逐像素一致），窗口收到 1280 时自动压窄 —— 否则最后的
+            // Z 列会被面板右边缘裁掉，数值看不见也拖不到。
+            // 必须在放第一个控件之前算：放完一个 `available_width()` 就少一截。
+            let axis_w = theme::axis_field_width(ui);
+            theme::field_row(ui, "Position", |ui| {
+                for (axis, value) in [
+                    ("X", &mut entity.transform.position.x),
+                    ("Y", &mut entity.transform.position.y),
+                    ("Z", &mut entity.transform.position.z),
+                ] {
+                    theme::axis_label(ui, axis);
+                    let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 }
-                // 走 `field_row`（而不是手搓 horizontal）：标签列宽必须与 Position /
-                // Scale 完全一致，否则 "Rotation" 比 "Position" 窄一点，下面 Scale 的
-                // 三个输入框就跟着往左挪一档。
-                let rotation_changed = theme::field_row(ui, "Rotation", |ui| {
-                    let mut any = false;
-                    // 用 zip(iter_mut) 而不是数组字面量：`[&mut rot[0], &mut rot[1], ...]`
-                    // 会被借用检查器判成"同一数组的多次可变借用"——数组索引不是字段，
-                    // 拿不到字段级借用拆分。
-                    for (axis, value) in ["X", "Y", "Z"].into_iter().zip(rot.iter_mut()) {
-                        theme::axis_label(ui, axis);
-                        let resp = theme::drag_field_w(ui, axis_w, value, 0.5, "°");
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                        any |= resp.changed();
-                    }
-                    any
-                });
-                if rotation_changed {
-                    entity.transform.rotation = xgame_math::glam::Quat::from_euler(
-                        xgame_math::glam::EulerRot::YXZ,
-                        rot[1].to_radians(),
-                        rot[0].to_radians(),
-                        rot[2].to_radians(),
+            });
+
+            // 旋转（欧拉角显示，内部仍是四元数）
+            //
+            // 顺序用 **YXZ**（不是 XYZ）：脚本 API 的 `rot` / `set_rot` 就是 YXZ，
+            // 面板必须与它一致，否则"面板上读到 153°、脚本里读到 −130°"，
+            // 作者会以为其中一处坏了。
+            // 对相机这类物体，YXZ 还给出人类可读的 yaw / pitch（俯角 18°），
+            // XYZ 分解在同样位姿下会折成 (−46°, 153°, 160°) 这种读不出来的三元组。
+            let euler = entity
+                .transform
+                .rotation
+                .to_euler(xgame_math::glam::EulerRot::YXZ);
+            // `to_euler` 按 (y, x, z) 序返回；面板按 X / Y / Z 排列显示。
+            let mut rot = [
+                euler.1.to_degrees(),
+                euler.0.to_degrees(),
+                euler.2.to_degrees(),
+            ];
+            // 把 −0.000 抹成 0：四元数分解常在零附近给出负零，
+            // 面板上显示 "−0.000°" 像是算错了（实际是同一角度）。
+            for value in &mut rot {
+                if value.abs() < 1e-3 {
+                    *value = 0.0;
+                }
+            }
+            // 走 `field_row`（而不是手搓 horizontal）：标签列宽必须与 Position /
+            // Scale 完全一致，否则 "Rotation" 比 "Position" 窄一点，下面 Scale 的
+            // 三个输入框就跟着往左挪一档。
+            let rotation_changed = theme::field_row(ui, "Rotation", |ui| {
+                let mut any = false;
+                // 用 zip(iter_mut) 而不是数组字面量：`[&mut rot[0], &mut rot[1], ...]`
+                // 会被借用检查器判成"同一数组的多次可变借用"——数组索引不是字段，
+                // 拿不到字段级借用拆分。
+                for (axis, value) in ["X", "Y", "Z"].into_iter().zip(rot.iter_mut()) {
+                    theme::axis_label(ui, axis);
+                    let resp = theme::drag_field_w(ui, axis_w, value, 0.5, "°");
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    any |= resp.changed();
+                }
+                any
+            });
+            if rotation_changed {
+                entity.transform.rotation = xgame_math::glam::Quat::from_euler(
+                    xgame_math::glam::EulerRot::YXZ,
+                    rot[1].to_radians(),
+                    rot[0].to_radians(),
+                    rot[2].to_radians(),
+                );
+            }
+
+            // 缩放（不允许 0 或负数——那会让法线矩阵退化，整个物体变黑）
+            theme::field_row(ui, "Scale", |ui| {
+                for (axis, value) in [
+                    ("X", &mut entity.transform.scale.x),
+                    ("Y", &mut entity.transform.scale.y),
+                    ("Z", &mut entity.transform.scale.z),
+                ] {
+                    theme::axis_label(ui, axis);
+                    let resp = ui.add_sized(
+                        egui::vec2(axis_w, theme::FIELD_HEIGHT),
+                        egui::DragValue::new(value)
+                            .speed(0.05)
+                            .range(0.01..=f32::MAX),
                     );
+                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 }
-
-                // 缩放（不允许 0 或负数——那会让法线矩阵退化，整个物体变黑）
-                theme::field_row(ui, "Scale", |ui| {
-                    for (axis, value) in [
-                        ("X", &mut entity.transform.scale.x),
-                        ("Y", &mut entity.transform.scale.y),
-                        ("Z", &mut entity.transform.scale.z),
-                    ] {
-                        theme::axis_label(ui, axis);
-                        let resp = ui.add_sized(
-                            egui::vec2(axis_w, theme::FIELD_HEIGHT),
-                            egui::DragValue::new(value)
-                                .speed(0.05)
-                                .range(0.01..=f32::MAX),
-                        );
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    }
-                });
+            });
 
             // 世界坐标用小一号的等宽字：它是只读参考，不该和可编辑控件抢注意力。
             // 用空标签的 `field_row` 占位，值才能落在与上面三行同一条竖线上。
@@ -1079,6 +1078,48 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             });
         }
 
+        // ── 形变目标（morph target / blend shape）──
+        //
+        // 只有模型**真的带**形变目标时才出现。刻意不给 "Add" 按钮：morph 是
+        // 资产属性（glTF `mesh.primitives[].targets`），不是能凭空挂上去的组件 ——
+        // 给个按钮但点了什么都不会发生，比不显示更糟。
+        //
+        // 权重按**下标**存（`morph_weights`），名字只在这里用来做标题：名字来自
+        // `mesh.extras.targetNames`，只活在渲染资产里，core 层不认识它。
+        let (morph_names, morph_count) = state
+            .scene_renderer
+            .as_ref()
+            .map(|r| r.morph_targets(&entity.model))
+            .unwrap_or_default();
+        if morph_count > 0 {
+            theme::section_bar(ui, "Morph");
+            ui.indent("morph", |ui| {
+                for index in 0..morph_count {
+                    let label = morph_names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Target {index}"));
+                    let mut value = entity.morph_weights.get(index).copied().unwrap_or(0.0);
+                    theme::field_row(ui, &label, |ui| {
+                        let response = ui.add_sized(
+                            egui::vec2(ui.available_width(), theme::FIELD_HEIGHT),
+                            egui::Slider::new(&mut value, 0.0..=1.0),
+                        );
+                        if response.changed() {
+                            // 只在**真的拖了**才扩容：进面板不该把场景改脏
+                            // （稀疏写过的模型会带一张短表，其余目标是 0）。
+                            if entity.morph_weights.len() <= index {
+                                entity.morph_weights.resize(index + 1, 0.0);
+                            }
+                            entity.morph_weights[index] = value.clamp(0.0, 1.0);
+                            touched = true;
+                        }
+                        response
+                            .on_hover_text("形变目标权重（0 = 基准形状，1 = 完全变成这个目标）");
+                    });
+                }
+            });
+        }
 
         // ── 脚本 ──
         //
@@ -1147,7 +1188,6 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             theme::note(ui, "钩子: start / update / fixed_update / on_destroy");
         });
 
-
         // ── Behaviors（Rust 组件，双轨架构 P0.5）──
         //
         // 与上面的 Scripts 同构：存的是**组件名**而不是代码，顺序即执行顺序。
@@ -1190,8 +1230,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                                 let params: Vec<&str> =
                                     table.iter().map(|f| f.display_label()).collect();
                                 if params.is_empty() {
-                                    "已注册的 Rust 组件；顺序即执行顺序；没有可调参数"
-                                        .to_owned()
+                                    "已注册的 Rust 组件；顺序即执行顺序；没有可调参数".to_owned()
                                 } else {
                                     format!(
                                         "已注册的 Rust 组件；顺序即执行顺序\n\
@@ -1300,7 +1339,6 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 theme::note(ui, "还没有挂组件");
             }
         });
-
 
         // ── 物理 ──
         //
@@ -1441,8 +1479,14 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                             collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                         });
                     }
-                    CollisionShape::Capsule { half_height, radius }
-                    | CollisionShape::Cylinder { half_height, radius } => {
+                    CollisionShape::Capsule {
+                        half_height,
+                        radius,
+                    }
+                    | CollisionShape::Cylinder {
+                        half_height,
+                        radius,
+                    } => {
                         row(ui, "Height", |ui| {
                             let resp = ui.add_sized(
                                 egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
@@ -1483,23 +1527,25 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 });
                 row(ui, "Mass", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut body.mass)
-                            .speed(0.1)
-                            .range(0.0..=10_000.0),
-                    )
-                    .on_hover_text("0 = 按碰撞体密度自动推算");
+                    let resp = ui
+                        .add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut body.mass)
+                                .speed(0.1)
+                                .range(0.0..=10_000.0),
+                        )
+                        .on_hover_text("0 = 按碰撞体密度自动推算");
                     collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 });
                 row(ui, "Gravity", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut body.gravity_scale)
-                            .speed(0.01)
-                            .range(-5.0..=5.0),
-                    )
-                    .on_hover_text("重力倍率：1 = 正常，0 = 悬浮，负数 = 反重力");
+                    let resp = ui
+                        .add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut body.gravity_scale)
+                                .speed(0.01)
+                                .range(-5.0..=5.0),
+                        )
+                        .on_hover_text("重力倍率：1 = 正常，0 = 悬浮，负数 = 反重力");
                     collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                 });
                 let sensor = ui
@@ -1509,7 +1555,6 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 touched |= sensor;
             }
         });
-
 
         // ── 角色控制器 ──
         //
@@ -1597,10 +1642,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     0.0..=2.0,
                     "贴地吸附距离：走下矮台阶时被吸住的最大落差",
                 );
-                theme::note(
-                    ui,
-                    format!("胶囊中心 = 脚底 + {:.2} m", c.center_height()),
-                );
+                theme::note(ui, format!("胶囊中心 = 脚底 + {:.2} m", c.center_height()));
             }
         });
 
@@ -1613,7 +1655,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             let mut enabled = entity.audio.is_some();
             if ui
                 .checkbox(&mut enabled, "Has audio source")
-                .on_hover_text("挂一个音频源：autoplay 进场景就响；\n非 autoplay 的剪辑由脚本 play_sound 触发")
+                .on_hover_text(
+                    "挂一个音频源：autoplay 进场景就响；\n非 autoplay 的剪辑由脚本 play_sound 触发",
+                )
                 .changed()
             {
                 entity.audio = if enabled {
@@ -1809,7 +1853,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             let mut enabled = entity.particle.is_some();
             if ui
                 .checkbox(&mut enabled, "Has particle emitter")
-                .on_hover_text("CPU 粒子（billboard）。进 Play 开始喷，\n场景存盘只存参数、不存粒子状态")
+                .on_hover_text(
+                    "CPU 粒子（billboard）。进 Play 开始喷，\n场景存盘只存参数、不存粒子状态",
+                )
                 .changed()
             {
                 entity.particle = if enabled {
@@ -1991,9 +2037,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                             let mut r = radius;
                             let resp = ui.add_sized(
                                 egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                                egui::DragValue::new(&mut r)
-                                    .speed(0.05)
-                                    .range(0.0..=1.0e4),
+                                egui::DragValue::new(&mut r).speed(0.05).range(0.0..=1.0e4),
                             );
                             ui.label(theme::dim_note("m"));
                             collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
@@ -2110,7 +2154,6 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 });
             }
         });
-
 
         // ── 材质资产 + 覆盖 ──
         //
@@ -2277,7 +2320,8 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             // 留着不出错（装配按 behaviors 查表，孤儿根本读不到），但会污染场景
             // 文件，还会在"删了又加回来"时让旧参数神秘复活。
             let behaviors = &slot.behaviors;
-            slot.behavior_params.retain(|name, _| behaviors.contains(name));
+            slot.behavior_params
+                .retain(|name, _| behaviors.contains(name));
         }
     }
 

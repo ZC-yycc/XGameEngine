@@ -5533,6 +5533,7 @@ dependencies = [
  "pollster 0.3.0",
  "ron",
  "serde",
+ "serde_json",
  "wgpu",
  "winit",
  "xgame-core",

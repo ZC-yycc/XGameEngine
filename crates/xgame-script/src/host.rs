@@ -6,6 +6,8 @@
 
 use xgame_core::EntityId;
 
+use crate::context::RemovedEntity;
+
 /// 脚本可以实现的生命周期钩子。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hook {
@@ -19,7 +21,7 @@ pub enum Hook {
     CollisionEnter,
     /// 与另一个碰撞体**结束**接触时调用一次（参数：对方实体 id）。
     CollisionExit,
-    /// 实体被销毁前调用一次。
+    /// 实体被销毁后调用一次（自身已不在场景，状态表仍可读）。
     Destroy,
 }
 
@@ -52,8 +54,8 @@ pub struct PreloadReport {
 pub struct CommandReport {
     /// 新生成的实体（运行时按需建物理体）。
     pub spawned: Vec<EntityId>,
-    /// 被移除的实体，含整棵子树。
-    pub removed: Vec<EntityId>,
+    /// 被移除的实体及其脚本清单，含整棵子树。
+    pub removed: Vec<RemovedEntity>,
     /// 换了父节点的实体（运行时应把刚体移到新的世界位置）。
     pub reparented: Vec<EntityId>,
     /// 换了层的实体（运行时按项目矩阵改碰撞组）。同一帧同一实体多次更改时
