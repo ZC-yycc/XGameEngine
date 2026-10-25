@@ -203,7 +203,9 @@ impl GameCtx<'_> {
 
     /// 本帧是否被点击（在元素上按下并在元素上松开）。
     pub fn ui_clicked(&mut self, id: EntityId) -> bool {
-        self.ui_element(id).map(|ui| ui.state.clicked).unwrap_or(false)
+        self.ui_element(id)
+            .map(|ui| ui.state.clicked)
+            .unwrap_or(false)
     }
 
     /// 本帧是否悬停。
@@ -225,7 +227,8 @@ impl GameCtx<'_> {
         entity.ui = Some(element);
         entity.parent = parent;
         self.scene.entities.push(entity);
-        self.commands.push(ScriptCommand::EntitySpawned { id, physics: None });
+        self.commands
+            .push(ScriptCommand::EntitySpawned { id, physics: None });
         id
     }
 

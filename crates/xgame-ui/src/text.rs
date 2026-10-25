@@ -333,7 +333,11 @@ impl TextEngine {
             return 0;
         }
 
-        let face_index = if text.bold && self.faces.len() > 1 { 1usize } else { 0 };
+        let face_index = if text.bold && self.faces.len() > 1 {
+            1usize
+        } else {
+            0
+        };
         let px = (text.size * 4.0).round().max(4.0) / 4.0;
 
         // 字段逐个借出：字体（只读）与缓存 / 图集（可变）必须能同时活着。
@@ -359,7 +363,11 @@ impl TextEngine {
         chars.extend(text.content.chars());
         lines.clear();
         {
-            let max_width = if text.wrap { content.width() } else { f32::INFINITY };
+            let max_width = if text.wrap {
+                content.width()
+            } else {
+                f32::INFINITY
+            };
             let mut line_start = 0usize;
             let mut width = 0.0f32;
             let mut last_break: Option<usize> = None;
@@ -479,7 +487,8 @@ impl TextEngine {
                     pen += advance;
                     continue;
                 }
-                let Some(sprite) = glyph_sprite(font, face_index as u8, px, ch, glyphs, atlas) else {
+                let Some(sprite) = glyph_sprite(font, face_index as u8, px, ch, glyphs, atlas)
+                else {
                     pen += advance;
                     continue;
                 };

@@ -484,7 +484,11 @@ impl PostFx {
                     ToneMapMode::Off => 0,
                 },
                 manual_srgb: u32::from(self.manual_srgb),
-                bloom_intensity: if bloom_on { settings.bloom.intensity } else { 0.0 },
+                bloom_intensity: if bloom_on {
+                    settings.bloom.intensity
+                } else {
+                    0.0
+                },
                 bloom_w0: BLOOM_WEIGHTS[0],
                 bloom_w1: BLOOM_WEIGHTS[1],
                 bloom_w2: BLOOM_WEIGHTS[2],
@@ -577,9 +581,7 @@ impl PostFx {
         if !fxaa_on {
             self.fxaa_scratch = None;
         }
-        if fxaa_on
-            && self.fxaa_scratch.as_ref().map(|scratch| scratch.size) != Some(source_size)
-        {
+        if fxaa_on && self.fxaa_scratch.as_ref().map(|scratch| scratch.size) != Some(source_size) {
             self.fxaa_scratch = Some(FxaaScratch::new(
                 device,
                 source_size,
@@ -1592,8 +1594,7 @@ pub(crate) mod cpu {
 
     /// 线性值 → 8 位 sRGB 字节（GPU 读回的 PNG 像素就是这么存的）。
     pub(crate) fn to_srgb_u8(c: [f32; 3]) -> [u8; 3] {
-        srgb_encode(c)
-            .map(|x| (x.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8)
+        srgb_encode(c).map(|x| (x.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8)
     }
 }
 
@@ -1637,7 +1638,10 @@ mod tests {
         let four = to_srgb_u8(aces_tone_map([4.0; 3]));
         let sixteen = to_srgb_u8(aces_tone_map([16.0; 3]));
         assert!(four[0] < 254, "4.0 的高光不该被裁到纯白：{four:?}");
-        assert!(sixteen[0] > four[0], "更亮的高光必须更亮：16 -> {sixteen:?}, 4 -> {four:?}");
+        assert!(
+            sixteen[0] > four[0],
+            "更亮的高光必须更亮：16 -> {sixteen:?}, 4 -> {four:?}"
+        );
         // 旧管线（Off）里两者都是 255 —— 这条测试在 ACES 缺席时必红。
         let off = RenderConfig {
             exposure: 1.0,
@@ -1657,12 +1661,18 @@ mod tests {
             tone_map: ToneMapMode::Aces,
             ..RenderConfig::default()
         };
-        let two = RenderConfig { exposure: 2.0, ..one };
+        let two = RenderConfig {
+            exposure: 2.0,
+            ..one
+        };
         assert_eq!(tone_map([0.5; 3], two), aces_tone_map([1.0; 3]));
         assert_eq!(tone_map([0.5; 3], one), aces_tone_map([0.5; 3]));
         let brighter = to_srgb_u8(tone_map([0.3; 3], two))[0];
         let normal = to_srgb_u8(tone_map([0.3; 3], one))[0];
-        assert!(brighter > normal, "曝光 2× 必须更亮：{brighter} vs {normal}");
+        assert!(
+            brighter > normal,
+            "曝光 2× 必须更亮：{brighter} vs {normal}"
+        );
     }
 
     /// `ToneMapMode::Off` = 旧管线：线性值钳制后显示（高光裁剪）。
@@ -1813,8 +1823,7 @@ mod tests {
             ..RenderConfig::default()
         };
         let glow = [[0.4; 3], [0.2; 3], [0.1; 3]];
-        let weighted =
-            0.4 * BLOOM_WEIGHTS[0] + 0.2 * BLOOM_WEIGHTS[1] + 0.1 * BLOOM_WEIGHTS[2];
+        let weighted = 0.4 * BLOOM_WEIGHTS[0] + 0.2 * BLOOM_WEIGHTS[1] + 0.1 * BLOOM_WEIGHTS[2];
         let got = composite([0.1; 3], glow, settings);
         let want = aces_tone_map([0.1 + weighted; 3]);
         for ch in 0..3 {

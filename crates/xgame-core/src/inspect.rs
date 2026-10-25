@@ -74,10 +74,7 @@ impl FieldKind {
 
     /// 这个类型是否是"可拖拽的数值"（编辑器据此决定用拖拽值还是别的控件）。
     pub fn is_numeric(self) -> bool {
-        !matches!(
-            self,
-            FieldKind::Bool | FieldKind::String
-        )
+        !matches!(self, FieldKind::Bool | FieldKind::String)
     }
 }
 
@@ -384,7 +381,11 @@ mod tests {
 
     #[test]
     fn desc_helpers_and_defaults() {
-        let fields = Handwritten { speed: 0.0, enabled: false }.inspect_fields();
+        let fields = Handwritten {
+            speed: 0.0,
+            enabled: false,
+        }
+        .inspect_fields();
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].display_label(), "Speed", "有 label 用 label");
         assert_eq!(fields[1].display_label(), "enabled", "没 label 用字段名");
@@ -397,7 +398,10 @@ mod tests {
 
     #[test]
     fn roundtrip_get_set_and_name_lookup() {
-        let mut c = Handwritten { speed: 1.5, enabled: false };
+        let mut c = Handwritten {
+            speed: 1.5,
+            enabled: false,
+        };
 
         // 下标读改写回
         let (desc, value) = c.inspect_field(0).expect("字段 0 存在");
@@ -407,7 +411,10 @@ mod tests {
         assert_eq!(c.speed, 9.0);
 
         // 按名读改写回（Lua 侧的路径）
-        assert_eq!(c.inspect_get_by_name("enabled"), Some(FieldValue::Bool(false)));
+        assert_eq!(
+            c.inspect_get_by_name("enabled"),
+            Some(FieldValue::Bool(false))
+        );
         assert!(c.inspect_set_by_name("enabled", FieldValue::Bool(true)));
         assert!(c.enabled);
 
@@ -420,7 +427,10 @@ mod tests {
 
     #[test]
     fn set_with_wrong_variant_is_ignored_and_out_of_range_reads_default() {
-        let mut c = Handwritten { speed: 3.0, enabled: true };
+        let mut c = Handwritten {
+            speed: 3.0,
+            enabled: true,
+        };
 
         // 错误变体写入：忽略（不覆盖、不 panic）
         c.inspect_set(0, FieldValue::String("oops".into()));
@@ -443,7 +453,11 @@ mod tests {
             FieldKind::Vec3,
             FieldKind::Vec4,
         ] {
-            assert_eq!(kind.default_value().kind(), kind, "{kind:?} 的零值类型必须自洽");
+            assert_eq!(
+                kind.default_value().kind(),
+                kind,
+                "{kind:?} 的零值类型必须自洽"
+            );
         }
     }
 
@@ -451,7 +465,10 @@ mod tests {
     fn display_is_human_readable() {
         assert_eq!(FieldValue::F32(1.5).display(), "1.5");
         assert_eq!(FieldValue::Bool(true).display(), "true");
-        assert_eq!(FieldValue::Vec3(Vec3::new(1.0, 2.0, 3.0)).display(), "(1, 2, 3)");
+        assert_eq!(
+            FieldValue::Vec3(Vec3::new(1.0, 2.0, 3.0)).display(),
+            "(1, 2, 3)"
+        );
         assert_eq!(FieldValue::String("hi".into()).display(), "\"hi\"");
         assert_eq!(FieldValue::F32(1.0).as_f32(), Some(1.0));
         assert_eq!(FieldValue::F64(2.0).as_f32(), Some(2.0));
@@ -462,7 +479,10 @@ mod tests {
     /// 且陈旧 / 错型的条目被静默吸收而不是把实例搞坏。
     #[test]
     fn capture_then_apply_roundtrips_and_tolerates_stale_entries() {
-        let mut src = Handwritten { speed: 75.0, enabled: true };
+        let mut src = Handwritten {
+            speed: 75.0,
+            enabled: true,
+        };
         let values = capture_field_values(&src);
         assert_eq!(values.len(), 2, "表里两个字段都要存下来");
         assert_eq!(values.get("speed"), Some(&FieldValue::F32(75.0)));
@@ -475,7 +495,10 @@ mod tests {
             Some(&FieldValue::F32(0.0))
         );
 
-        let mut dst = Handwritten { speed: 1.0, enabled: false };
+        let mut dst = Handwritten {
+            speed: 1.0,
+            enabled: false,
+        };
         apply_field_values(&mut dst, &values);
         assert_eq!(dst.speed, 75.0);
         assert!(dst.enabled);
@@ -490,7 +513,10 @@ mod tests {
         assert!(dst.enabled, "错型写入不许把原值冲掉");
 
         // 空表 = 什么都不动（缺字段保留构造默认值）
-        let mut untouched = Handwritten { speed: 2.0, enabled: true };
+        let mut untouched = Handwritten {
+            speed: 2.0,
+            enabled: true,
+        };
         apply_field_values(&mut untouched, &FieldValues::new());
         assert_eq!(untouched.speed, 2.0);
         assert!(untouched.enabled);
@@ -504,7 +530,10 @@ mod tests {
             ("speed".to_owned(), FieldValue::F32(75.0)),
             ("enabled".to_owned(), FieldValue::Bool(true)),
             ("label".to_owned(), FieldValue::String("玩家".into())),
-            ("offset".to_owned(), FieldValue::Vec3(Vec3::new(1.0, 2.0, 3.0))),
+            (
+                "offset".to_owned(),
+                FieldValue::Vec3(Vec3::new(1.0, 2.0, 3.0)),
+            ),
             ("count".to_owned(), FieldValue::I64(-7)),
         ]
         .into_iter()

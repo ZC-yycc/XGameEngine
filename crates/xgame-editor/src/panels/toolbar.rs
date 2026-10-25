@@ -133,8 +133,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                             ui.close_menu();
                         }
                         // 已经是启动场景时禁用：避免用户以为点了会有什么变化。
-                        let can_set_startup =
-                            !current.is_empty() && current != startup;
+                        let can_set_startup = !current.is_empty() && current != startup;
                         if ui
                             .add_enabled(
                                 can_set_startup,
@@ -265,7 +264,8 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                 icons::v_separator(ui);
 
                 // ── 视图开关 ──
-                if icons::icon_button(ui, Icon::Grid, 24.0, "显示网格", state.show_grid).clicked() {
+                if icons::icon_button(ui, Icon::Grid, 24.0, "显示网格", state.show_grid).clicked()
+                {
                     state.show_grid = !state.show_grid;
                 }
                 if icons::icon_button(

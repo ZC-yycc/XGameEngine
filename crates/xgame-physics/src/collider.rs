@@ -40,11 +40,17 @@ impl ColliderShape {
     }
 
     pub fn capsule(half_height: f32, radius: f32) -> Self {
-        Self::Capsule { half_height, radius }
+        Self::Capsule {
+            half_height,
+            radius,
+        }
     }
 
     pub fn cylinder(half_height: f32, radius: f32) -> Self {
-        Self::Cylinder { half_height, radius }
+        Self::Cylinder {
+            half_height,
+            radius,
+        }
     }
 }
 
@@ -117,7 +123,10 @@ impl Collider {
 
     pub fn capsule(half_height: f32, radius: f32) -> Self {
         Self {
-            shape: ColliderShape::Capsule { half_height, radius },
+            shape: ColliderShape::Capsule {
+                half_height,
+                radius,
+            },
             ..Default::default()
         }
     }

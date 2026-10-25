@@ -244,7 +244,10 @@ pub fn plane(size: f32) -> MeshData {
         ([h, 0.0, -h], [1.0, 1.0]),
         ([-h, 0.0, -h], [0.0, 1.0]),
     ];
-    let vertices = corners.into_iter().map(|(p, uv)| vertex(p, n, uv)).collect();
+    let vertices = corners
+        .into_iter()
+        .map(|(p, uv)| vertex(p, n, uv))
+        .collect();
     MeshData {
         vertices,
         indices: vec![0, 1, 2, 0, 2, 3],
@@ -265,8 +268,16 @@ pub fn cylinder(radius: f32, height: f32, segments: u32) -> MeshData {
         let (sin_t, cos_t) = theta.sin_cos();
         let n = [cos_t, 0.0, sin_t];
         let u = i as f32 / segments as f32;
-        vertices.push(vertex([cos_t * radius, half_h, sin_t * radius], n, [u, 0.0]));
-        vertices.push(vertex([cos_t * radius, -half_h, sin_t * radius], n, [u, 1.0]));
+        vertices.push(vertex(
+            [cos_t * radius, half_h, sin_t * radius],
+            n,
+            [u, 0.0],
+        ));
+        vertices.push(vertex(
+            [cos_t * radius, -half_h, sin_t * radius],
+            n,
+            [u, 1.0],
+        ));
     }
     for i in 0..segments {
         let top0 = i * 2;
@@ -328,42 +339,118 @@ pub fn create_coloured_cube() -> (Vec<u8>, u64, Vec<u32>) {
 
     let vertices: &[Vertex] = &[
         // +X face (red)
-        Vertex { position: [ 0.5,  0.5,  0.5], color: [1.0, 0.0, 0.0] },
-        Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 0.0, 0.0] },
-        Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 0.0, 0.0] },
-        Vertex { position: [ 0.5,  0.5, -0.5], color: [1.0, 0.0, 0.0] },
+        Vertex {
+            position: [0.5, 0.5, 0.5],
+            color: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, 0.5],
+            color: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, -0.5],
+            color: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, -0.5],
+            color: [1.0, 0.0, 0.0],
+        },
         // -X face (green)
-        Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 1.0, 0.0] },
-        Vertex { position: [-0.5, -0.5, -0.5], color: [0.0, 1.0, 0.0] },
-        Vertex { position: [-0.5, -0.5,  0.5], color: [0.0, 1.0, 0.0] },
-        Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 1.0, 0.0] },
+        Vertex {
+            position: [-0.5, 0.5, -0.5],
+            color: [0.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, -0.5],
+            color: [0.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, 0.5],
+            color: [0.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, 0.5, 0.5],
+            color: [0.0, 1.0, 0.0],
+        },
         // +Y face (blue)
-        Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 0.0, 1.0] },
-        Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] },
-        Vertex { position: [ 0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] },
-        Vertex { position: [ 0.5,  0.5, -0.5], color: [0.0, 0.0, 1.0] },
+        Vertex {
+            position: [-0.5, 0.5, -0.5],
+            color: [0.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [-0.5, 0.5, 0.5],
+            color: [0.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, 0.5],
+            color: [0.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, -0.5],
+            color: [0.0, 0.0, 1.0],
+        },
         // -Y face (yellow)
-        Vertex { position: [-0.5, -0.5,  0.5], color: [1.0, 1.0, 0.0] },
-        Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 1.0, 0.0] },
-        Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 1.0, 0.0] },
-        Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 1.0, 0.0] },
+        Vertex {
+            position: [-0.5, -0.5, 0.5],
+            color: [1.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, -0.5],
+            color: [1.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, -0.5],
+            color: [1.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, 0.5],
+            color: [1.0, 1.0, 0.0],
+        },
         // +Z face (cyan)
-        Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 1.0, 1.0] },
-        Vertex { position: [-0.5, -0.5,  0.5], color: [0.0, 1.0, 1.0] },
-        Vertex { position: [ 0.5, -0.5,  0.5], color: [0.0, 1.0, 1.0] },
-        Vertex { position: [ 0.5,  0.5,  0.5], color: [0.0, 1.0, 1.0] },
+        Vertex {
+            position: [-0.5, 0.5, 0.5],
+            color: [0.0, 1.0, 1.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, 0.5],
+            color: [0.0, 1.0, 1.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, 0.5],
+            color: [0.0, 1.0, 1.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, 0.5],
+            color: [0.0, 1.0, 1.0],
+        },
         // -Z face (magenta)
-        Vertex { position: [ 0.5,  0.5, -0.5], color: [1.0, 0.0, 1.0] },
-        Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 0.0, 1.0] },
-        Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 0.0, 1.0] },
-        Vertex { position: [-0.5,  0.5, -0.5], color: [1.0, 0.0, 1.0] },
+        Vertex {
+            position: [0.5, 0.5, -0.5],
+            color: [1.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, -0.5],
+            color: [1.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, -0.5],
+            color: [1.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [-0.5, 0.5, -0.5],
+            color: [1.0, 0.0, 1.0],
+        },
     ];
 
     let indices: &[u32] = &[
         // +X       -X       +Y        -Y        +Z        -Z
-         0,1,2,    4,5,6,   8,9,10,   12,13,14, 16,17,18, 20,21,22,
-         0,2,3,    4,6,7,   8,10,11,  12,14,15, 16,18,19, 20,22,23,
+        0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 17, 18, 20, 21, 22, 0, 2, 3, 4, 6, 7, 8, 10, 11,
+        12, 14, 15, 16, 18, 19, 20, 22, 23,
     ];
 
-    (bytemuck::cast_slice(vertices).to_vec(), std::mem::size_of::<Vertex>() as u64, indices.to_vec())
+    (
+        bytemuck::cast_slice(vertices).to_vec(),
+        std::mem::size_of::<Vertex>() as u64,
+        indices.to_vec(),
+    )
 }

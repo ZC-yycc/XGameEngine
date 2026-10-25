@@ -359,10 +359,9 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
                     continue;
                 }
                 if is_guid_reference(&asset.albedo) {
-                    report.dangling_guids.push(format!(
-                        "{entity} -> {material} albedo -> {}",
-                        asset.albedo
-                    ));
+                    report
+                        .dangling_guids
+                        .push(format!("{entity} -> {material} albedo -> {}", asset.albedo));
                 } else if !project.path(&asset.albedo).is_file() {
                     report
                         .missing_material_textures
@@ -462,9 +461,11 @@ fn check_scene_references(
                         .dangling_guids
                         .push(format!("{} -> {}", at(&entity.name), image.path));
                 } else if !project.path(&image.path).is_file() {
-                    report
-                        .missing_ui_images
-                        .push(format!("{} -> {}", at(&entity.name), image.path));
+                    report.missing_ui_images.push(format!(
+                        "{} -> {}",
+                        at(&entity.name),
+                        image.path
+                    ));
                 }
             }
         }
@@ -614,11 +615,7 @@ mod tests {
         std::fs::create_dir_all(project.path("Resources/Textures")).unwrap();
         std::fs::create_dir_all(project.path("Resources/Materials")).unwrap();
         std::fs::write(project.path("Resources/Textures/OK.png"), b"png").unwrap();
-        std::fs::write(
-            project.path("Resources/Materials/Good.mat"),
-            "()",
-        )
-        .unwrap();
+        std::fs::write(project.path("Resources/Materials/Good.mat"), "()").unwrap();
         std::fs::write(
             project.path("Resources/Materials/NoTex.mat"),
             "(albedo: \"Resources/Textures/Gone.png\")",
@@ -799,11 +796,8 @@ mod tests {
     fn build_list_missing_or_illegal_scene_is_an_issue() {
         let mut project = temp_project("build_bad");
         let entry = project.manifest().entry_scene.clone();
-        project.manifest_mut().build.scenes = vec![
-            entry,
-            "Scenes/Ghost.ron".into(),
-            "../Outside.ron".into(),
-        ];
+        project.manifest_mut().build.scenes =
+            vec![entry, "Scenes/Ghost.ron".into(), "../Outside.ron".into()];
         project.save().unwrap();
 
         let report = check_project(project.root()).unwrap();

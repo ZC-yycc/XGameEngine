@@ -72,7 +72,11 @@ impl RowCache {
         collapsed_version: u64,
         filter: &str,
     ) -> Vec<Row> {
-        let key = (structure_fingerprint(scene), collapsed_version, filter.to_owned());
+        let key = (
+            structure_fingerprint(scene),
+            collapsed_version,
+            filter.to_owned(),
+        );
         if self.key.as_ref() == Some(&key) {
             return std::mem::take(&mut self.rows);
         }
@@ -289,8 +293,11 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     egui::pos2(x, rect.top()),
                     egui::vec2(14.0, row_height),
                 );
-                let arrow_resp =
-                    ui.interact(arrow_hit, ui.id().with(("fold", row.idx)), egui::Sense::click());
+                let arrow_resp = ui.interact(
+                    arrow_hit,
+                    ui.id().with(("fold", row.idx)),
+                    egui::Sense::click(),
+                );
                 icons::paint(
                     painter,
                     egui::Rect::from_center_size(arrow_hit.center(), egui::Vec2::splat(9.0)),
@@ -346,7 +353,14 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             // 右侧徽标（从右往左排）：物理 P / 脚本 S（多份带数量）。
             let mut badge_x = rect.right() - 6.0;
             if row.has_physics {
-                badge_x -= badge(painter, badge_x, center_y, "P", colors::BADGE_PHYSICS, selected);
+                badge_x -= badge(
+                    painter,
+                    badge_x,
+                    center_y,
+                    "P",
+                    colors::BADGE_PHYSICS,
+                    selected,
+                );
             }
             if row.script_count > 0 {
                 let label = if row.script_count > 1 {
@@ -354,7 +368,14 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 } else {
                     "S".to_owned()
                 };
-                badge(painter, badge_x, center_y, &label, colors::BADGE_SCRIPT, selected);
+                badge(
+                    painter,
+                    badge_x,
+                    center_y,
+                    &label,
+                    colors::BADGE_SCRIPT,
+                    selected,
+                );
             }
 
             // 交互
@@ -604,11 +625,8 @@ fn badge(
     } else {
         color
     };
-    let galley = painter.layout_no_wrap(
-        text.to_owned(),
-        egui::FontId::proportional(9.0),
-        text_color,
-    );
+    let galley =
+        painter.layout_no_wrap(text.to_owned(), egui::FontId::proportional(9.0), text_color);
     let width = (galley.size().x + 7.0).max(13.0);
     let rect = egui::Rect::from_min_size(
         egui::pos2(right - width, center_y - 6.5),

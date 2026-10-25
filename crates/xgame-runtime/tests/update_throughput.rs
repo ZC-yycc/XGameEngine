@@ -44,7 +44,8 @@ fn build_scene(mode: &str) -> Scene {
             "sparse" => {
                 if i < 64 {
                     e.physics = Some(PhysicsBody::dynamic_box([0.5, 0.5, 0.5]));
-                    e.transform.position = Vec3::new((i % 8) as f32 * 3.0, 2.0, (i / 8) as f32 * 3.0);
+                    e.transform.position =
+                        Vec3::new((i % 8) as f32 * 3.0, 2.0, (i / 8) as f32 * 3.0);
                 } else {
                     e.physics = Some(PhysicsBody::static_box([0.5, 0.5, 0.5]));
                     e.transform.position = Vec3::new((i % 40) as f32, -0.5, (i / 40) as f32);
@@ -55,8 +56,7 @@ fn build_scene(mode: &str) -> Scene {
             _ => {
                 if i % 2 == 0 {
                     e.physics = Some(PhysicsBody::dynamic_box([0.5, 0.5, 0.5]));
-                    e.transform.position =
-                        Vec3::new((i % 40) as f32, 1.0 + (i / 40) as f32, 0.0);
+                    e.transform.position = Vec3::new((i % 40) as f32, 1.0 + (i / 40) as f32, 0.0);
                 } else {
                     e.physics = Some(PhysicsBody::static_box([0.5, 0.5, 0.5]));
                     e.transform.position = Vec3::new((i % 40) as f32, -0.5, 0.0);

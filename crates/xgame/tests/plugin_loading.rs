@@ -121,9 +121,7 @@ fn workspace_plugin_dll(lib_name: &str, package: &str) -> PathBuf {
 fn build_package_once(repo_root: &std::path::Path, package: &str) {
     static DONE: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
     let done = DONE.get_or_init(|| Mutex::new(Vec::new()));
-    let mut guard = done
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = done.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if guard.iter().any(|p| p == package) {
         return;
     }
@@ -178,7 +176,10 @@ fn cargo_exe() -> PathBuf {
         return PathBuf::from(c);
     }
     if let Some(home) = std::env::var_os("USERPROFILE") {
-        let p = PathBuf::from(home).join(".cargo").join("bin").join("cargo.exe");
+        let p = PathBuf::from(home)
+            .join(".cargo")
+            .join("bin")
+            .join("cargo.exe");
         if p.exists() {
             return p;
         }

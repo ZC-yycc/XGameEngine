@@ -104,11 +104,7 @@ fn build_scene(mode: &str) -> Scene {
 
 /// 量一档：预热后跑 `FRAMES` 帧，返回每帧微秒数。
 fn measure(mode: &str, label: &str) -> f64 {
-    let dir = std::env::temp_dir().join(format!(
-        "xgame_bench_{}_{}",
-        std::process::id(),
-        mode
-    ));
+    let dir = std::env::temp_dir().join(format!("xgame_bench_{}_{}", std::process::id(), mode));
     if mode == "scripts_lua" {
         std::fs::create_dir_all(dir.join("Scripts")).unwrap();
         std::fs::write(

@@ -3,17 +3,14 @@
 //! 构建类 Unity 的拆分布局，支持可拖拽的标签头。
 //! 每个面板包裹在 `Tabs` 容器中，标签栏作为停靠/取消停靠的拖拽手柄。
 
+use crate::panels::theme;
+use crate::state::EditorState;
 use egui_tiles::{
-    Behavior, SimplificationOptions, Tiles, TileId, UiResponse, Tree,
-    Linear, LinearDir,
+    Behavior, Linear, LinearDir, SimplificationOptions, TileId, Tiles, Tree, UiResponse,
 };
 use serde::{Deserialize, Serialize};
 use strum::Display;
 use xgame_derive::Panel;
-use crate::panels::theme;
-use crate::state::EditorState;
-
-
 
 /// 编辑器中所有可停靠的面板类型。
 ///
@@ -193,9 +190,7 @@ pub fn normalize_layout(mut tree: Tree<PanelTab>) -> Tree<PanelTab> {
 /// `make_active` 只按谓词命中 pane，祖先容器的激活链由 egui_tiles 自己补，
 /// 所以这里不需要知道这棵树是怎么分组的（布局再改也不会失配）。
 pub fn activate(tree: &mut Tree<PanelTab>, pane: PanelTab) {
-    let hit = tree.make_active(|_, tile| {
-        matches!(tile, egui_tiles::Tile::Pane(p) if *p == pane)
-    });
+    let hit = tree.make_active(|_, tile| matches!(tile, egui_tiles::Tile::Pane(p) if *p == pane));
     if !hit {
         log::warn!("面板 {:?} 不在当前布局里，无法激活", pane);
     }
@@ -463,19 +458,24 @@ mod tests {
                 _ => None,
             })
             .expect("Console 与 Profiler 应当在同一个页签组里");
-        assert_eq!(shared.first().copied(), Some(console), "默认激活的应当是 Output Log");
+        assert_eq!(
+            shared.first().copied(),
+            Some(console),
+            "默认激活的应当是 Output Log"
+        );
         assert!(tab_tile(profiler).is_none(), "pane 本身不是 tab 容器");
 
-        assert!(tree.make_active(|_, tile| matches!(tile, egui_tiles::Tile::Pane(p) if *p == PanelTab::Profiler)));
+        assert!(tree.make_active(
+            |_, tile| matches!(tile, egui_tiles::Tile::Pane(p) if *p == PanelTab::Profiler)
+        ));
         // 激活之后，那个 tab 容器的 active 应当换成 Profiler。
         let active = tree
             .tiles
             .iter()
             .find_map(|(_, tile)| match tile {
-                egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs)) => tabs
-                    .children
-                    .contains(&profiler)
-                    .then_some(tabs.active),
+                egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs)) => {
+                    tabs.children.contains(&profiler).then_some(tabs.active)
+                }
                 _ => None,
             })
             .flatten();

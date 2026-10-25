@@ -39,7 +39,7 @@ pub fn project_to_screen(
     screen_offset: egui::Vec2,
 ) -> egui::Pos2 {
     let clip = *view_proj * Vec4::new(point.x, point.y, point.z, 1.0);
-    
+
     // 只检查相机后方，允许超出屏幕边缘
     if !clip.is_finite() || clip.w <= 1e-6 {
         return sentinel();
@@ -52,7 +52,7 @@ pub fn project_to_screen(
 
     // 移除严格的 NDC 裁剪，只做基本的 w 检查
     // 允许超出屏幕边缘的顶点（用于线条延伸）
-    
+
     let x = (ndc.x + 1.0) * 0.5 * screen_size.x + screen_offset.x;
     let y = (1.0 - ndc.y) * 0.5 * screen_size.y + screen_offset.y;
 

@@ -106,7 +106,10 @@ mod tests {
         recents.promote(PathBuf::from("/b"));
         recents.promote(PathBuf::from("/a"));
 
-        assert_eq!(recents.paths, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(
+            recents.paths,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
     }
 
     #[test]

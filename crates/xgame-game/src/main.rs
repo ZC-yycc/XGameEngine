@@ -225,7 +225,10 @@ impl GameApp {
             }
             Ok(None) => InputMap::default_game(),
             Err(e) => {
-                log::warn!("输入映射 {} 解析失败，改用默认映射: {e}", input_path.display());
+                log::warn!(
+                    "输入映射 {} 解析失败，改用默认映射: {e}",
+                    input_path.display()
+                );
                 InputMap::default_game()
             }
         };
@@ -338,14 +341,18 @@ impl GameApp {
                     }
                 }
             }
-            WindowEvent::MouseInput { state: btn_state, button, .. } => {
-                state.handle_mouse_button(MouseButton::from(*button), *btn_state == ElementState::Pressed);
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button,
+                ..
+            } => {
+                state.handle_mouse_button(
+                    MouseButton::from(*button),
+                    *btn_state == ElementState::Pressed,
+                );
             }
             WindowEvent::CursorMoved { position, .. } => {
-                state.handle_cursor_moved(glam::Vec2::new(
-                    position.x as f32,
-                    position.y as f32,
-                ));
+                state.handle_cursor_moved(glam::Vec2::new(position.x as f32, position.y as f32));
             }
             WindowEvent::CursorLeft { .. } => {
                 // 指针出了窗口：UI 悬停要清掉（否则按钮会一直亮着）。
@@ -384,8 +391,7 @@ impl GameApp {
         // 吃的是**缩放后**的 dt（`world.frame_dt()`）：脚本 `set_time_scale(0)`
         // 暂停时，动画必须一起停 —— 否则角色冻在原地却还在跑步。
         let anim_dt = self.world.frame_dt();
-        self.anim_driver
-            .tick(anim_dt, &self.world.scene().entities);
+        self.anim_driver.tick(anim_dt, &self.world.scene().entities);
         for log in self.world.take_logs() {
             emit_script_log(&log);
         }
@@ -416,8 +422,12 @@ impl GameApp {
         // -- 惰性加载模型（路径按项目根解析）--
         for entity in &scene.entities {
             if !entity.model.is_empty() && !self.model_cache.contains_key(&entity.model) {
-                match GltfMesh::load(&self.device, &self.queue, self.project.root(), &entity.model)
-                {
+                match GltfMesh::load(
+                    &self.device,
+                    &self.queue,
+                    self.project.root(),
+                    &entity.model,
+                ) {
                     Ok(m) => {
                         log::info!(
                             "Loaded model '{}' ({} primitives)",
@@ -442,11 +452,11 @@ impl GameApp {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("game_encoder"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("game_encoder"),
+            });
 
         // 世界矩阵解算一次，渲染与物理同步共用同一份。
         let world_matrices = scene.world_matrices();
@@ -543,10 +553,7 @@ const INPUT_MAP_FILE: &str = "input.ron";
 
 /// 把脚本日志转发到 `log` 宏（最终由 env_logger 打到控制台）。
 fn emit_script_log(log: &ScriptLog) {
-    let entity = log
-        .entity
-        .map(|id| format!(" [{id}]"))
-        .unwrap_or_default();
+    let entity = log.entity.map(|id| format!(" [{id}]")).unwrap_or_default();
     match log.level {
         LogLevel::Info => log::info!(target: "script", "{}{entity}: {}", log.script, log.message),
         LogLevel::Warn => log::warn!(target: "script", "{}{entity}: {}", log.script, log.message),

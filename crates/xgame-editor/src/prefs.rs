@@ -101,7 +101,8 @@ impl EditorPreferences {
         );
         // 间隔可能是手改出来的离谱值（1 秒 = 逐帧写盘；十天 = 等于没有）。
         // `0` 是合法的"关闭"，不能被夹成 10。
-        self.autosave_interval_secs = crate::autosave::sanitize_interval(self.autosave_interval_secs);
+        self.autosave_interval_secs =
+            crate::autosave::sanitize_interval(self.autosave_interval_secs);
         self
     }
 

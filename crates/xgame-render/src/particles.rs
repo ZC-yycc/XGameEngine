@@ -472,7 +472,10 @@ mod tests {
         let view = projection::look_at(Vec3::new(5.0, 0.0, 0.0), Vec3::ZERO, Vec3::Y);
         let proj = projection::perspective(60f32.to_radians(), 1.0, 0.1, 100.0);
         let (right, up) = billboard_basis(&(proj * view));
-        assert!((right - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5, "right = {right:?}");
+        assert!(
+            (right - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5,
+            "right = {right:?}"
+        );
         assert!((up - Vec3::Y).length() < 1e-5, "up = {up:?}");
     }
 

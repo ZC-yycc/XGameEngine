@@ -121,9 +121,7 @@ pub fn normalize_asset_relative(raw: &str) -> Result<String, String> {
             .iter()
             .any(|skip| part.eq_ignore_ascii_case(skip))
     }) {
-        return Err(format!(
-            "资产不能放进构建 / 缓存目录 `{skipped}`: {raw}"
-        ));
+        return Err(format!("资产不能放进构建 / 缓存目录 `{skipped}`: {raw}"));
     }
     Ok(normalized)
 }
@@ -451,10 +449,8 @@ impl AssetMeta {
 
     /// 序列化为 `.meta` 文本（带换行，方便 diff 与手改）。
     pub fn to_ron(&self) -> Result<String, String> {
-        let mut text =
-            ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()).map_err(|e| {
-                format!("{e}")
-            })?;
+        let mut text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("{e}"))?;
         text.push('\n');
         Ok(text)
     }
@@ -620,9 +616,7 @@ impl AssetDatabase {
         for (guid, mut paths) in claimed_by {
             if paths.len() > 1 {
                 paths.sort();
-                db.diagnostics
-                    .conflicts
-                    .push(GuidConflict { guid, paths });
+                db.diagnostics.conflicts.push(GuidConflict { guid, paths });
             }
         }
 
@@ -781,7 +775,9 @@ impl AssetDatabase {
                 }
             }
             self.insert_record(&relative, kind, &meta);
-            self.diagnostics.invalid_meta.retain(|bad| bad.path != meta_rel);
+            self.diagnostics
+                .invalid_meta
+                .retain(|bad| bad.path != meta_rel);
             self.diagnostics
                 .orphan_meta
                 .retain(|path| path != &meta_rel);
@@ -797,8 +793,7 @@ impl AssetDatabase {
 
     /// 把一份 `.meta` 登记进内存索引（[`ensure_meta`](Self::ensure_meta) 用）。
     fn insert_record(&mut self, relative: &str, kind: AssetKind, meta: &AssetMeta) {
-        self.by_path
-            .insert(relative.to_string(), meta.guid.clone());
+        self.by_path.insert(relative.to_string(), meta.guid.clone());
         self.by_guid.insert(
             meta.guid.clone(),
             AssetRecord {
@@ -836,7 +831,8 @@ impl AssetDatabase {
                 .to_ron()
                 .map_err(|e| format!("序列化 {} 失败: {e}", meta_path.display()))?;
             if let Err(e) = std::fs::write(&meta_path, text) {
-                first_error.get_or_insert_with(|| format!("写入 {} 失败: {e}", meta_path.display()));
+                first_error
+                    .get_or_insert_with(|| format!("写入 {} 失败: {e}", meta_path.display()));
                 continue;
             }
 
@@ -976,7 +972,9 @@ impl AssetDatabase {
             return Err(format!("目标资产已存在，拒绝覆盖: {to}"));
         }
         if to_meta.symlink_metadata().is_ok() {
-            return Err(format!("目标 .meta 已存在，拒绝覆盖: {to}.{META_EXTENSION}"));
+            return Err(format!(
+                "目标 .meta 已存在，拒绝覆盖: {to}.{META_EXTENSION}"
+            ));
         }
 
         let meta_text = std::fs::read_to_string(&from_meta).map_err(|e| {
@@ -995,9 +993,8 @@ impl AssetDatabase {
         }
 
         if let Some(parent) = to_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                format!("创建目标目录 {} 失败: {e}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建目标目录 {} 失败: {e}", parent.display()))?;
         }
 
         std::fs::rename(&from_path, &to_path)
@@ -1329,7 +1326,10 @@ mod tests {
     fn guid_parse_requires_exactly_32_hex() {
         assert!(AssetGuid::parse("0123456789abcdef0123456789abcdef").is_some());
         assert!(AssetGuid::parse("0123456789ABCDEF0123456789ABCDEF").is_some());
-        assert!(AssetGuid::parse("0123456789abcdef").is_none(), "短 GUID 必须拒绝");
+        assert!(
+            AssetGuid::parse("0123456789abcdef").is_none(),
+            "短 GUID 必须拒绝"
+        );
         assert!(
             AssetGuid::parse("0123456789abcdef0123456789abcdeg").is_none(),
             "非十六进制必须拒绝"
@@ -1407,11 +1407,11 @@ mod tests {
             read_import_settings(&root, "Resources/Bad.png"),
             ImportSettings::default()
         );
-        assert_eq!(
-            read_import_settings(&root, ""),
-            ImportSettings::default()
+        assert_eq!(read_import_settings(&root, ""), ImportSettings::default());
+        assert!(
+            !root.join("Resources/Gone.png.meta").exists(),
+            "读取不得补 meta"
         );
-        assert!(!root.join("Resources/Gone.png.meta").exists(), "读取不得补 meta");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1419,15 +1419,24 @@ mod tests {
     /// `.prefab.ron` 必须先于 `.ron` 判定；`project.ron` 不是资产。
     #[test]
     fn kind_inference_order() {
-        assert_eq!(AssetKind::from_path("Prefabs/A.prefab.ron"), Some(AssetKind::Prefab));
+        assert_eq!(
+            AssetKind::from_path("Prefabs/A.prefab.ron"),
+            Some(AssetKind::Prefab)
+        );
         assert_eq!(AssetKind::from_path("Scenes/A.ron"), Some(AssetKind::Scene));
         assert_eq!(AssetKind::from_path("project.ron"), None);
-        assert_eq!(AssetKind::from_path("Resources/Box.glb"), Some(AssetKind::Model));
+        assert_eq!(
+            AssetKind::from_path("Resources/Box.glb"),
+            Some(AssetKind::Model)
+        );
         assert_eq!(
             AssetKind::from_path("Resources/Materials/Wood.mat"),
             Some(AssetKind::Material)
         );
-        assert_eq!(AssetKind::from_path("Scripts/a.lua"), Some(AssetKind::Script));
+        assert_eq!(
+            AssetKind::from_path("Scripts/a.lua"),
+            Some(AssetKind::Script)
+        );
         assert_eq!(AssetKind::from_path("src/main.rs"), None);
         assert_eq!(AssetKind::from_path("Cargo.toml"), None);
     }
@@ -1460,13 +1469,22 @@ mod tests {
         put(&root, "Resources/Box.glb", b"glb");
         put(&root, "Resources/Audio/Beep.wav", b"wav");
         put(&root, "Scripts/Player.lua", b"-- lua");
-        put(&root, "Prefabs/Enemy.prefab.ron", b"(name:\"E\",entities:[])");
+        put(
+            &root,
+            "Prefabs/Enemy.prefab.ron",
+            b"(name:\"E\",entities:[])",
+        );
         put(&root, "project.ron", b"(name:\"x\")");
         put(&root, "src/main.rs", b"fn main() {}");
 
         let mut db = AssetDatabase::scan(&root);
         assert_eq!(db.len(), 0, "还没有任何 meta，索引应为空");
-        assert_eq!(db.diagnostics().missing_meta.len(), 4, "{:?}", db.diagnostics());
+        assert_eq!(
+            db.diagnostics().missing_meta.len(),
+            4,
+            "{:?}",
+            db.diagnostics()
+        );
         assert!(
             !db.diagnostics()
                 .missing_meta
@@ -1568,7 +1586,11 @@ mod tests {
             "Resources/NotThere.glb",
             "悬空路径保持可读，方便 check 报出人类懂的名字"
         );
-        let abs = if cfg!(windows) { "C:/x/Box.glb" } else { "/x/Box.glb" };
+        let abs = if cfg!(windows) {
+            "C:/x/Box.glb"
+        } else {
+            "/x/Box.glb"
+        };
         assert_eq!(db.encode_reference(abs), abs);
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1581,7 +1603,11 @@ mod tests {
         put(&root, "Resources/Box.glb", b"glb");
         put(&root, "Scripts/Player.lua", b"-- lua");
         put(&root, "Resources/Audio/Beep.wav", b"wav");
-        put(&root, "Prefabs/Enemy.prefab.ron", b"(name:\"E\",entities:[])");
+        put(
+            &root,
+            "Prefabs/Enemy.prefab.ron",
+            b"(name:\"E\",entities:[])",
+        );
         put(&root, "Resources/Materials/Wood.mat", b"(metallic: 0.0)");
         let mut db = AssetDatabase::scan(&root);
         db.ensure_metas().unwrap();
@@ -1610,15 +1636,28 @@ mod tests {
             .unwrap()
             .starts_with(GUID_SCHEME));
         assert!(scene.entities[0].scripts[0].starts_with(GUID_SCHEME));
-        assert!(scene.entities[0].audio.as_ref().unwrap().clip.starts_with(GUID_SCHEME));
-        assert!(scene.entities[0].prefab.as_ref().unwrap().source.starts_with(GUID_SCHEME));
+        assert!(scene.entities[0]
+            .audio
+            .as_ref()
+            .unwrap()
+            .clip
+            .starts_with(GUID_SCHEME));
+        assert!(scene.entities[0]
+            .prefab
+            .as_ref()
+            .unwrap()
+            .source
+            .starts_with(GUID_SCHEME));
 
         decode_scene_references(&mut scene, &db);
         let back = &scene.entities[0];
         assert_eq!(back.model, original.model);
         assert_eq!(back.material_asset, original.material_asset);
         assert_eq!(back.scripts, original.scripts);
-        assert_eq!(back.audio.as_ref().unwrap().clip, original.audio.as_ref().unwrap().clip);
+        assert_eq!(
+            back.audio.as_ref().unwrap().clip,
+            original.audio.as_ref().unwrap().clip
+        );
         assert_eq!(
             back.prefab.as_ref().unwrap().source,
             original.prefab.as_ref().unwrap().source
@@ -1649,8 +1688,14 @@ mod tests {
 
         let db = AssetDatabase::scan(&root);
         assert_eq!(db.diagnostics().conflicts.len(), 1);
-        assert_eq!(db.diagnostics().conflicts[0].paths, vec!["Resources/A.glb", "Resources/B.glb"]);
-        assert_eq!(db.resolve_reference(&shared.to_reference()).as_deref(), Some("Resources/A.glb"));
+        assert_eq!(
+            db.diagnostics().conflicts[0].paths,
+            vec!["Resources/A.glb", "Resources/B.glb"]
+        );
+        assert_eq!(
+            db.resolve_reference(&shared.to_reference()).as_deref(),
+            Some("Resources/A.glb")
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1659,13 +1704,27 @@ mod tests {
     #[test]
     fn orphan_and_invalid_meta_are_reported() {
         let root = temp_root("orphan");
-        put(&root, "Resources/Gone.glb.meta", b"(guid:\"0123456789abcdef0123456789abcdef\")");
+        put(
+            &root,
+            "Resources/Gone.glb.meta",
+            b"(guid:\"0123456789abcdef0123456789abcdef\")",
+        );
         put(&root, "Resources/Bad.glb", b"x");
         put(&root, "Resources/Bad.glb.meta", b"not ron at all (((");
 
         let db = AssetDatabase::scan(&root);
-        assert_eq!(db.diagnostics().orphan_meta.len(), 1, "{:?}", db.diagnostics());
-        assert_eq!(db.diagnostics().invalid_meta.len(), 1, "{:?}", db.diagnostics());
+        assert_eq!(
+            db.diagnostics().orphan_meta.len(),
+            1,
+            "{:?}",
+            db.diagnostics()
+        );
+        assert_eq!(
+            db.diagnostics().invalid_meta.len(),
+            1,
+            "{:?}",
+            db.diagnostics()
+        );
         assert!(db.diagnostics().has_issues());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1746,10 +1805,7 @@ mod tests {
             "Resources/a?b.glb",
             "Resources/a:b.glb",
         ] {
-            assert!(
-                normalize_asset_relative(bad).is_err(),
-                "必须拒绝 {bad:?}"
-            );
+            assert!(normalize_asset_relative(bad).is_err(), "必须拒绝 {bad:?}");
         }
     }
 
@@ -1933,9 +1989,7 @@ mod tests {
             .is_err());
         // 场景不归资产库搬。
         put(&root, "Scenes/A.ron", b"x");
-        assert!(db
-            .move_asset("Resources/Box.glb", "Scenes/A.ron")
-            .is_err());
+        assert!(db.move_asset("Resources/Box.glb", "Scenes/A.ron").is_err());
         // 路径穿越。
         assert!(db.move_asset("Resources/Box.glb", "../Box.glb").is_err());
         // 同路径。
@@ -1959,7 +2013,10 @@ mod tests {
             .is_err());
 
         // 反复失败后源资产 / meta 原样，索引也没被改坏。
-        assert_eq!(std::fs::read(root.join("Resources/Box.glb")).unwrap(), b"box");
+        assert_eq!(
+            std::fs::read(root.join("Resources/Box.glb")).unwrap(),
+            b"box"
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("Resources/Box.glb.meta")).unwrap(),
             meta_before

@@ -330,7 +330,11 @@ fn emit_element(
     // -- 2. 图片 --
     if let Some(image) = &ui.image {
         if !image.path.is_empty() && image.fill > 0.0 && !content.is_empty() {
-            let target = fit_image(content, image_sizes.get(&image.path).copied(), image.keep_aspect);
+            let target = fit_image(
+                content,
+                image_sizes.get(&image.path).copied(),
+                image.keep_aspect,
+            );
             if !target.is_empty() {
                 let index = draw.image_index(&image.path);
                 let mut tint = Color::from(image.tint);
@@ -411,7 +415,10 @@ mod tests {
         let has_font = painter.text().has_font();
         let draw = painter.build(&scene, Vec2::new(800.0, 600.0));
 
-        assert!(matches!(draw.commands[0], UiCommand::Rects { count: 1, .. }));
+        assert!(matches!(
+            draw.commands[0],
+            UiCommand::Rects { count: 1, .. }
+        ));
         assert_eq!(draw.quads.len(), 1);
         if has_font {
             assert!(
@@ -444,10 +451,8 @@ mod tests {
         let mut scene = Scene::new("batch");
         for i in 0..50 {
             let mut entity = Entity::new(format!("Panel{i}"));
-            entity.ui = Some(
-                UiElement::panel(20.0, 20.0)
-                    .at([0.0, 0.0], i as f32 * 22.0, 0.0, 20.0, 20.0),
-            );
+            entity.ui =
+                Some(UiElement::panel(20.0, 20.0).at([0.0, 0.0], i as f32 * 22.0, 0.0, 20.0, 20.0));
             scene.entities.push(entity);
         }
         let mut painter = Painter::new();
@@ -492,17 +497,29 @@ mod tests {
         element.text.align = UiAlign::Center;
         let scene = scene_with(element);
         let draw = painter.build(&scene, Vec2::new(800.0, 600.0));
-        let min = draw.sprites.iter().map(|s| s.rect.min.x).fold(f32::MAX, f32::min);
-        let max = draw.sprites.iter().map(|s| s.rect.max.x).fold(f32::MIN, f32::max);
+        let min = draw
+            .sprites
+            .iter()
+            .map(|s| s.rect.min.x)
+            .fold(f32::MAX, f32::min);
+        let max = draw
+            .sprites
+            .iter()
+            .map(|s| s.rect.max.x)
+            .fold(f32::MIN, f32::max);
         let center = (min + max) * 0.5;
-        assert!((center - 200.0).abs() < 2.0, "文本中心应在 200 附近: {center}");
+        assert!(
+            (center - 200.0).abs() < 2.0,
+            "文本中心应在 200 附近: {center}"
+        );
     }
 
     /// 填充比例同时裁剪矩形与 UV（血条语义）。
     #[test]
     fn image_fill_crops_rect_and_uv() {
         let mut painter = Painter::new();
-        let mut element = UiElement::image("Resources/hp.png").at([0.0, 0.0], 0.0, 0.0, 200.0, 20.0);
+        let mut element =
+            UiElement::image("Resources/hp.png").at([0.0, 0.0], 0.0, 0.0, 200.0, 20.0);
         element.image.as_mut().unwrap().fill = 0.25;
         element.image.as_mut().unwrap().keep_aspect = false;
         let draw = painter.build(&scene_with(element), Vec2::new(800.0, 600.0));
@@ -518,7 +535,8 @@ mod tests {
     fn keep_aspect_letterboxes_image() {
         let mut painter = Painter::new();
         painter.set_image_size("Resources/wide.png", Vec2::new(256.0, 128.0));
-        let mut element = UiElement::image("Resources/wide.png").at([0.0, 0.0], 0.0, 0.0, 200.0, 200.0);
+        let mut element =
+            UiElement::image("Resources/wide.png").at([0.0, 0.0], 0.0, 0.0, 200.0, 200.0);
         element.image.as_mut().unwrap().fill = 1.0;
         let draw = painter.build(&scene_with(element), Vec2::new(800.0, 600.0));
         let sprite = draw.sprites[0];

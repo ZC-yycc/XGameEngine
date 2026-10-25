@@ -637,9 +637,10 @@ impl UiRenderer {
             if bound != Some(*texture) {
                 let bind_group = match texture {
                     UiTexture::Atlas => Some(atlas_bg),
-                    UiTexture::Image(index) => {
-                        self.images.get(*index as usize).map(|entry| &entry.bind_group)
-                    }
+                    UiTexture::Image(index) => self
+                        .images
+                        .get(*index as usize)
+                        .map(|entry| &entry.bind_group),
                 };
                 let Some(bind_group) = bind_group else {
                     continue;

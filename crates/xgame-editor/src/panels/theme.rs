@@ -154,10 +154,8 @@ pub fn section_bar(ui: &mut egui::Ui, title: &str) {
     ui.add_space(SECTION_GAP);
 
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width, CATEGORY_HEIGHT),
-        egui::Sense::hover(),
-    );
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, CATEGORY_HEIGHT), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, PANEL_HEADER_BG);
     painter.rect_filled(
@@ -231,10 +229,8 @@ pub fn field_row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::
                 // 截断：状态机参数名 / 行为字段名是用户起的，长名字不该把
                 // 控件列顶出去（悬停能看全）。
                 ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(label).color(colors::TEXT_SECONDARY),
-                    )
-                    .truncate(),
+                    egui::Label::new(egui::RichText::new(label).color(colors::TEXT_SECONDARY))
+                        .truncate(),
                 );
             },
         );
@@ -290,11 +286,7 @@ pub fn axis_color(axis: &str) -> Color32 {
 pub fn axis_label(ui: &mut egui::Ui, axis: &str) {
     ui.add_sized(
         egui::vec2(AXIS_TAG_WIDTH, FIELD_HEIGHT),
-        egui::Label::new(
-            egui::RichText::new(axis)
-                .color(axis_color(axis))
-                .size(11.0),
-        ),
+        egui::Label::new(egui::RichText::new(axis).color(axis_color(axis)).size(11.0)),
     );
 }
 
@@ -303,9 +295,7 @@ pub fn axis_label(ui: &mut egui::Ui, axis: &str) {
 /// 面板里所有解释性文字统一走它，别就地写 `.weak().size(11.0)` ——
 /// 一处改字号就得全局翻一遍，而且 `weak()` 在暗色主题下的对比度并不一致。
 pub fn dim_note(text: impl Into<String>) -> egui::RichText {
-    egui::RichText::new(text)
-        .size(11.0)
-        .color(colors::TEXT_DIM)
+    egui::RichText::new(text).size(11.0).color(colors::TEXT_DIM)
 }
 
 /// 分类内容里的一行说明文字（弱提示，**会自动换行**）。
@@ -439,7 +429,10 @@ pub fn install(ctx: &egui::Context) {
     // Heading 只给弹窗标题用；面板里的"分类标题"是另一套（22px 条 + 12.5 粗体），
     // 别把 Heading 塞进 Inspector —— 20px 的标题在 280px 宽的面板里像标语。
     text_styles.insert(TextStyle::Heading, egui::FontId::proportional(15.0));
-    text_styles.insert(egui::TextStyle::Name("Bold".into()), egui::FontId::new(12.5, bold_family()));
+    text_styles.insert(
+        egui::TextStyle::Name("Bold".into()),
+        egui::FontId::new(12.5, bold_family()),
+    );
 
     let style = egui::Style {
         // UE 编辑器信息密度高，间距压得比 egui 默认更紧一点。
@@ -504,9 +497,7 @@ const CJK_FONT_CANDIDATES: &[&str] = &[
 pub fn install_fonts(ctx: &egui::Context) {
     let cjk = load_cjk_font();
     if cjk.is_none() {
-        log::warn!(
-            "未找到可用的系统中文字体，界面中文会显示为方块。候选: {CJK_FONT_CANDIDATES:?}"
-        );
+        log::warn!("未找到可用的系统中文字体，界面中文会显示为方块。候选: {CJK_FONT_CANDIDATES:?}");
     }
 
     let mut fonts = egui::FontDefinitions::default();
@@ -518,7 +509,11 @@ pub fn install_fonts(ctx: &egui::Context) {
 
         // 追加（而不是插入到最前），保留 egui 自带字体对西文/图标的主导权。
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts.families.entry(family).or_default().push("cjk".to_owned());
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("cjk".to_owned());
         }
     }
 
@@ -612,7 +607,10 @@ fn looks_like_font(bytes: &[u8]) -> bool {
     let tag: [u8; 4] = bytes[..4].try_into().unwrap_or([0; 4]);
     matches!(
         tag,
-        [0x00, 0x01, 0x00, 0x00] | [b't', b'r', b'u', b'e'] | [b'O', b'T', b'T', b'O'] | [b't', b't', b'c', b'f']
+        [0x00, 0x01, 0x00, 0x00]
+            | [b't', b'r', b'u', b'e']
+            | [b'O', b'T', b'T', b'O']
+            | [b't', b't', b'c', b'f']
     )
 }
 

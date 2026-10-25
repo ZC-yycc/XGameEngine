@@ -171,7 +171,12 @@ impl PluginSession {
         T: xgame::Behavior + Default + 'static,
     {
         self.registry.register::<T>(name);
-        let mut names: Vec<String> = self.registry.names().into_iter().map(str::to_owned).collect();
+        let mut names: Vec<String> = self
+            .registry
+            .names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
         names.sort();
         self.names = names;
     }
@@ -278,7 +283,10 @@ mod tests {
         let synced = sync_plugins_dir(&root, std::slice::from_ref(&built));
         assert_eq!(synced.len(), 1, "应同步一个产物");
         let dst = synced[0].clone();
-        assert!(dst.starts_with(root.join(PLUGINS_DIR)), "必须落在 Plugins/ 下");
+        assert!(
+            dst.starts_with(root.join(PLUGINS_DIR)),
+            "必须落在 Plugins/ 下"
+        );
         assert_eq!(std::fs::read(&dst).unwrap(), b"built");
 
         let _ = std::fs::remove_file(&built);

@@ -121,8 +121,12 @@ impl AnimMachine {
                 continue;
             };
             let met = match &t.when {
-                AnimCondition::AtLeast { value: threshold, .. } => value >= *threshold,
-                AnimCondition::Below { value: threshold, .. } => value < *threshold,
+                AnimCondition::AtLeast {
+                    value: threshold, ..
+                } => value >= *threshold,
+                AnimCondition::Below {
+                    value: threshold, ..
+                } => value < *threshold,
             };
             if met && self.state(&t.to).is_some() {
                 return Some(&t.to);
@@ -511,7 +515,10 @@ mod tests {
         let add = a.animator.additive.as_ref().expect("additive 应解析出来");
         assert_eq!(add.clip, "Run");
         assert!((add.weight - 0.4).abs() < f32::EPSILON);
-        assert!((add.speed - 1.0).abs() < f32::EPSILON, "缺失 speed 补默认 1.0");
+        assert!(
+            (add.speed - 1.0).abs() < f32::EPSILON,
+            "缺失 speed 补默认 1.0"
+        );
         assert!(add.looping, "缺失 looping 补默认 true");
         assert!(
             a.animator.active_machine().is_some(),
@@ -520,7 +527,10 @@ mod tests {
 
         let s = ron::to_string(&a.animator).expect("应能序列化");
         let back: Animator = ron::from_str(&s).expect("应能反序列化");
-        assert_eq!(back.additive, a.animator.additive, "additive 应活过 RON 往返");
+        assert_eq!(
+            back.additive, a.animator.additive,
+            "additive 应活过 RON 往返"
+        );
     }
 
     /// 层栈默认语义：Additive 模式、全额权重、空遮罩（= 整副骨架）、Animator 默认空栈。
@@ -560,13 +570,20 @@ mod tests {
 
         let upper = &a.animator.layers[0];
         assert_eq!(upper.name, "upper");
-        assert_eq!(upper.mode, AnimLayerMode::Override, "RON 裸标识符解析成枚举变体");
+        assert_eq!(
+            upper.mode,
+            AnimLayerMode::Override,
+            "RON 裸标识符解析成枚举变体"
+        );
         assert!((upper.weight - 0.6).abs() < f32::EPSILON);
         assert_eq!(upper.mask, vec!["Spine1".to_string(), "Neck".to_string()]);
 
         let bounce = &a.animator.layers[1];
         assert_eq!(bounce.mode, AnimLayerMode::Additive, "缺失 mode 补默认");
-        assert!((bounce.weight - 1.0).abs() < f32::EPSILON, "缺失 weight 补默认 1.0");
+        assert!(
+            (bounce.weight - 1.0).abs() < f32::EPSILON,
+            "缺失 weight 补默认 1.0"
+        );
         assert!(bounce.mask.is_empty(), "缺失 mask 补空名单（整副骨架）");
 
         let s = ron::to_string(&a.animator).expect("应能序列化");
@@ -581,16 +598,32 @@ mod tests {
     fn transitions_fire_on_thresholds_with_hysteresis() {
         let m = locomotion();
         assert_eq!(m.transition_for("Idle", &params(0.4)), None, "阈值下不触发");
-        assert_eq!(m.transition_for("Idle", &params(0.5)), Some("Walk"), "≥ 阈值触发");
-        assert_eq!(m.transition_for("Walk", &params(0.4)), None, "滞回区间保持 Walk");
+        assert_eq!(
+            m.transition_for("Idle", &params(0.5)),
+            Some("Walk"),
+            "≥ 阈值触发"
+        );
+        assert_eq!(
+            m.transition_for("Walk", &params(0.4)),
+            None,
+            "滞回区间保持 Walk"
+        );
         assert_eq!(
             m.transition_for("Walk", &params(0.3)),
             None,
             "Below 是严格小于：恰好 0.3 不退回"
         );
-        assert_eq!(m.transition_for("Walk", &params(0.29)), Some("Idle"), "低于阈值才退回");
+        assert_eq!(
+            m.transition_for("Walk", &params(0.29)),
+            Some("Idle"),
+            "低于阈值才退回"
+        );
         assert_eq!(m.transition_for("Walk", &params(2.0)), Some("Run"));
-        assert_eq!(m.transition_for("Run", &params(1.9)), None, "滞回区间保持 Run");
+        assert_eq!(
+            m.transition_for("Run", &params(1.9)),
+            None,
+            "滞回区间保持 Run"
+        );
         assert_eq!(m.transition_for("Run", &params(1.79)), Some("Walk"));
         assert_eq!(
             m.transition_for("Idle", &params(3.0)),

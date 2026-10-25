@@ -9,10 +9,10 @@
 //!
 //! 在 Play 模式下，如果 `show_physics_debug` 启用，会叠加绘制碰撞体线框。
 
-use xgame_math::glam::{Mat4, Vec3};
+use crate::gizmo;
 use crate::panels::theme;
 use crate::state::{EditorState, GizmoPart, PlayMode, ToolMode};
-use crate::gizmo;
+use xgame_math::glam::{Mat4, Vec3};
 
 /// 把世界坐标点换算成某父节点下的局部坐标。
 ///
@@ -30,7 +30,12 @@ fn world_point_to_local(parent_world: Mat4, world_point: Vec3) -> Vec3 {
 ///
 /// `screen_offset` 是视口在面板中的偏移（`rect.min.to_vec2()`），
 /// 用于将 gizmo::project_to_screen 返回的视口相对坐标转换为面板相对坐标。
-fn project_to_screen(point: Vec3, view_proj: &Mat4, screen_size: egui::Vec2, screen_offset: egui::Vec2) -> egui::Pos2 {
+fn project_to_screen(
+    point: Vec3,
+    view_proj: &Mat4,
+    screen_size: egui::Vec2,
+    screen_offset: egui::Vec2,
+) -> egui::Pos2 {
     gizmo::project_to_screen(point, view_proj, screen_size, screen_offset)
 }
 
@@ -93,7 +98,7 @@ fn setup_viewport(ui: &mut egui::Ui, state: &mut EditorState) -> ViewportInfo {
 
     let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
     state.viewport_rect = rect;
-    
+
     ViewportInfo {
         pixel_size: (vp_w, vp_h),
         rect,
@@ -108,17 +113,18 @@ fn setup_viewport(ui: &mut egui::Ui, state: &mut EditorState) -> ViewportInfo {
 /// 没有相机实体时（老项目 / 没配相机）照旧用编辑器的自由飞行相机，
 /// 所以这个改动对既有场景零影响。
 fn build_view_projection(state: &EditorState, vp_w: u32, vp_h: u32) -> Mat4 {
-    let aspect = if vp_h > 0 { vp_w as f32 / vp_h as f32 } else { 1.0 };
+    let aspect = if vp_h > 0 {
+        vp_w as f32 / vp_h as f32
+    } else {
+        1.0
+    };
     if let Some(camera) = play_camera(state) {
         return camera.view_projection(aspect);
     }
     let proj = xgame_math::projection::perspective(60f32.to_radians(), aspect, 0.1, 100.0);
     let cam = &state.editor_camera;
-    let view = xgame_math::projection::look_at(
-        cam.position,
-        cam.position + cam.forward(),
-        glam::Vec3::Y,
-    );
+    let view =
+        xgame_math::projection::look_at(cam.position, cam.position + cam.forward(), glam::Vec3::Y);
     proj * view
 }
 
@@ -128,10 +134,7 @@ fn build_view_projection(state: &EditorState, vp_w: u32, vp_h: u32) -> Mat4 {
 /// （[`build_view_projection`]）与飞行相机是否让位（[`handle_fly_camera`]）。
 /// 两处各判一次就会出现"用着游戏相机、鼠标却还在转自由相机"的错位。
 fn play_camera(state: &EditorState) -> Option<xgame_runtime::CameraView> {
-    state
-        .game_runtime
-        .as_ref()
-        .and_then(|rt| rt.camera_view())
+    state.game_runtime.as_ref().and_then(|rt| rt.camera_view())
 }
 
 /// 渲染 3D 场景并返回纹理 ID。
@@ -141,7 +144,12 @@ fn play_camera(state: &EditorState) -> Option<xgame_runtime::CameraView> {
 /// 光标下，任何异步/跨帧都会表现为"不跟手"。稳态渲染实测单帧 CPU 仅 ~0.4ms
 /// （指纹门控让静态帧整帧跳过），同步渲染完全可承受，且没有第二个线程与窗口的
 /// 模态移动循环抢资源。
-fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4) -> Option<egui::TextureId> {
+fn render_scene(
+    state: &mut EditorState,
+    vp_w: u32,
+    vp_h: u32,
+    view_proj: &Mat4,
+) -> Option<egui::TextureId> {
     // 记下"这一帧渲染用的是哪个相机"，供帧序回归测试断言（见 `show_content`
     // 的帧序说明）。渲染必须发生在本帧输入之后 —— 这条不变量决定了视口跟不跟手。
     #[cfg(test)]
@@ -171,12 +179,10 @@ fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4)
     //（Pause 不推进 `World::update`，动画若继续走就成了"物理冻住、角色还在跑"）。
     // 编辑态恒 1.0 —— 脚本在编辑态根本不跑，这里只是把语义写明确。
     let anim_time_scale = match state.play_mode {
-        PlayMode::Playing => {
-            state
-                .game_runtime
-                .as_ref()
-                .map_or(1.0, |rt| rt.time_scale())
-        }
+        PlayMode::Playing => state
+            .game_runtime
+            .as_ref()
+            .map_or(1.0, |rt| rt.time_scale()),
         PlayMode::Paused => 0.0,
         PlayMode::Edit => 1.0,
     };
@@ -187,10 +193,7 @@ fn render_scene(state: &mut EditorState, vp_w: u32, vp_h: u32, view_proj: &Mat4)
         &state.scene,
         view_proj,
         &eye,
-        xgame_render::scene_pipeline::SceneLighting::new(
-            state.scene.ambient,
-            &state.scene.lights,
-        ),
+        xgame_render::scene_pipeline::SceneLighting::new(state.scene.ambient, &state.scene.lights),
         settings,
         state
             .game_runtime
@@ -227,15 +230,15 @@ fn draw_physics_debug_lines(
     if !state.show_physics_debug || state.game_runtime.is_none() {
         return;
     }
-    
+
     let debug_lines = state.debug_lines();
     if debug_lines.is_empty() {
         return;
     }
-    
+
     let screen_size = state.viewport_logical_size;
     let offset = rect.min.to_vec2();
-    
+
     for line in &debug_lines {
         let start_screen = project_to_screen(line.start, view_proj, screen_size, offset);
         let end_screen = project_to_screen(line.end, view_proj, screen_size, offset);
@@ -282,7 +285,12 @@ fn pick_entity(
     view_proj: &Mat4,
     screen_offset: egui::Vec2,
 ) -> Option<usize> {
-    let (origin, dir) = gizmo::screen_to_ray(mouse_pos, view_proj, state.viewport_logical_size, screen_offset);
+    let (origin, dir) = gizmo::screen_to_ray(
+        mouse_pos,
+        view_proj,
+        state.viewport_logical_size,
+        screen_offset,
+    );
 
     let mut closest_dist = f32::MAX;
     let mut closest_idx = None;
@@ -293,7 +301,9 @@ fn pick_entity(
         if !entity.has_model() {
             continue;
         }
-        let Some(world) = world_matrices.get(idx) else { continue };
+        let Some(world) = world_matrices.get(idx) else {
+            continue;
+        };
 
         // 本地包围盒 → 世界 AABB（变换 8 个角点再求盒，旋转也能正确处理）。
         // 包围盒由渲染器加载模型后缓存；还没加载过的退回单位盒。
@@ -387,15 +397,15 @@ fn handle_gizmo_interaction(
         }
         return None;
     };
-    
+
     let entity_world = state.scene.world_transform(selected_idx);
     // Gizmo 画在**世界**位置：实体的局部变换在父节点之下，直接拿来当世界坐标会偏。
     let entity_pos = entity_world.position;
     let screen_offset = viewport.rect.min.to_vec2();
-    
+
     // 构建当前帧的 Gizmo 上下文
     let mut ctx = build_gizmo_ctx(state, view_proj, screen_offset, entity_pos);
-    
+
     // ── 更新悬停状态 ──
     //
     // 按住左键期间**冻结**悬停，不重新拾取。原因：egui 要等指针移动过一段距离
@@ -410,7 +420,7 @@ fn handle_gizmo_interaction(
         };
         ctx.hovered = state.gizmo_hovered; // 同步更新 ctx
     }
-    
+
     // ── 开始拖拽（指针已移动一段距离且当前悬停在 gizmo 上）──
     if drag_started && state.gizmo_active.is_none() {
         if let Some(hovered_part) = state.gizmo_hovered {
@@ -433,7 +443,7 @@ fn handle_gizmo_interaction(
                     ToolMode::Scale => entity.transform.scale,
                     ToolMode::Rotate | ToolMode::Rect => Vec3::ZERO,
                 };
-                
+
                 let start_hit = match hovered_part {
                     GizmoPart::AxisX | GizmoPart::AxisY | GizmoPart::AxisZ => {
                         let axis = gizmo::handle_axis(hovered_part).unwrap_or(Vec3::Y);
@@ -463,12 +473,10 @@ fn handle_gizmo_interaction(
                 // 后者是平面交点，位移永远垂直于轴、投影恒为 0。详见
                 // `gizmo::axis_param_under_mouse` 的注释。
                 let start_axis = match gizmo::handle_axis(hovered_part) {
-                    Some(axis) => {
-                        gizmo::axis_param_under_mouse(mp, &ctx, axis).unwrap_or(0.0)
-                    }
+                    Some(axis) => gizmo::axis_param_under_mouse(mp, &ctx, axis).unwrap_or(0.0),
                     None => 0.0,
                 };
-                
+
                 state.gizmo_active = Some(crate::state::GizmoDrag {
                     part: hovered_part,
                     start_value,
@@ -481,13 +489,13 @@ fn handle_gizmo_interaction(
                     start_screen_pos: mp,
                     start_rotation: entity_world.rotation,
                 });
-                
+
                 // 更新 ctx 中的 active 状态
                 ctx.active = state.gizmo_active.clone();
             }
         }
     }
-    
+
     // ── 更新拖拽（每帧）──
     if let Some(drag) = state.gizmo_active.clone() {
         if let Some(mp) = mouse_pos {
@@ -504,7 +512,8 @@ fn handle_gizmo_interaction(
                 if let Some(entity) = state.scene.entities.get_mut(selected_idx) {
                     match delta {
                         gizmo::TransformDelta::Position(new_world_pos) => {
-                            entity.transform.position = world_point_to_local(parent_world, new_world_pos);
+                            entity.transform.position =
+                                world_point_to_local(parent_world, new_world_pos);
                         }
                         gizmo::TransformDelta::Rotation(world_delta) => {
                             // 世界旋转 = 增量 × 起始世界旋转；再左乘父旋转的逆得到局部值。
@@ -512,13 +521,15 @@ fn handle_gizmo_interaction(
                             let new_world_rot = world_delta * drag.start_rotation;
                             entity.transform.rotation = parent_rot.inverse() * new_world_rot;
                         }
-                        gizmo::TransformDelta::Scale(new_scale) => entity.transform.scale = new_scale,
+                        gizmo::TransformDelta::Scale(new_scale) => {
+                            entity.transform.scale = new_scale
+                        }
                     }
                 }
             }
         }
     }
-    
+
     // ── 释放拖拽：把拖拽前的快照推入撤销栈 ──
     if drag_stopped {
         state.gizmo_active = None;
@@ -526,7 +537,7 @@ fn handle_gizmo_interaction(
             state.push_undo_snapshot(snapshot);
         }
     }
-    
+
     // ── 返回最终 ctx 供调用方绘制 ──
     // ctx 是函数开头建的快照，本帧里 hovered / active 都被改过（刚悬停、刚开始
     // 或刚结束拖拽），交出去之前同步回最新值，避免比实际状态晚一帧。
@@ -561,14 +572,14 @@ fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Re
     }
 
     let right_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
-    
+
     if response.hovered() && right_down {
         state.fly_state = true;
     }
     if !right_down {
         state.fly_state = false;
     }
-    
+
     if !state.fly_state {
         return;
     }
@@ -578,11 +589,11 @@ fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Re
     // 集中到一处决策，免得散落各处的 `request_repaint` 互相打架、也免得漏掉某一处
     // （漏掉的那一处就表现为"这个操作画面不跟手"）。
     let dt = ui.input(|i| i.stable_dt);
-    
+
     // 不再要求悬停：见上面第 1 条。
     let delta = ui.input(|i| i.pointer.delta());
     state.editor_camera.rotate(delta.x, delta.y);
-    
+
     // 键盘移动
     if ui.input(|i| i.key_down(egui::Key::W)) {
         state.editor_camera.pan_forward(1.0, dt);
@@ -602,7 +613,7 @@ fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Re
     if ui.input(|i| i.key_down(egui::Key::E)) {
         state.editor_camera.move_up(1.0, dt);
     }
-    
+
     // 滚轮缩放
     if response.hovered() {
         let scroll = ui.input(|i| i.raw_scroll_delta.y);
@@ -611,7 +622,7 @@ fn handle_fly_camera(state: &mut EditorState, ui: &egui::Ui, response: &egui::Re
             state.zoom_indicator = 1.5;
         }
     }
-    
+
     state.zoom_indicator = (state.zoom_indicator - dt).max(0.0);
 }
 
@@ -671,7 +682,12 @@ fn draw_zoom_indicator(state: &EditorState, painter: &egui::Painter, rect: egui:
 /// `from_black_alpha(128)` 的药丸底 + 1px 暗边、颜色只用「亮 / 暗」两档。
 /// 旧实现有一条独立的顶部栏，白白吃掉 22px 视口高度，
 /// 而它显示的两条信息（场景名、相机位置）用叠加层表达更省地方也更像 UE。
-fn draw_viewport_hud(state: &EditorState, painter: &egui::Painter, rect: egui::Rect, ui: &egui::Ui) {
+fn draw_viewport_hud(
+    state: &EditorState,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ui: &egui::Ui,
+) {
     use crate::panels::theme::colors;
 
     // 左上：场景名
@@ -785,10 +801,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     let gizmo_ctx = handle_gizmo_interaction(state, view_proj, &viewport, &pointer);
 
     // 实体拾取（左键纯点击，且没点在 gizmo 上）
-    if pointer.clicked
-        && state.gizmo_active.is_none()
-        && state.gizmo_hovered.is_none()
-    {
+    if pointer.clicked && state.gizmo_active.is_none() && state.gizmo_hovered.is_none() {
         if let Some(mp) = pointer.pos {
             let screen_offset = viewport.rect.min.to_vec2();
             state.selected_entity = pick_entity(state, mp, &view_proj, screen_offset);
@@ -833,18 +846,13 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 面板可能被拖成非活动页签而不绘制，清理放在这里会漏。
     if ui.input(|i| i.pointer.any_released()) {
         if let Some(drop) = asset_drop {
-            if xgame_core::AssetKind::from_path(&drop.path)
-                == Some(xgame_core::AssetKind::Material)
+            if xgame_core::AssetKind::from_path(&drop.path) == Some(xgame_core::AssetKind::Material)
             {
                 // 材质不是"生成实体"的资产：它要贴到已有实体上。优先用鼠标
                 // 下面的实体，其次退回当前选中 —— 拖到空白处时仍有一个明确目标。
-                let target = pick_entity(
-                    state,
-                    drop.cursor,
-                    &view_proj,
-                    viewport.rect.min.to_vec2(),
-                )
-                .or(state.selected_entity);
+                let target =
+                    pick_entity(state, drop.cursor, &view_proj, viewport.rect.min.to_vec2())
+                        .or(state.selected_entity);
                 match target {
                     Some(index) => {
                         state.assign_material(index, &drop.path);
@@ -893,8 +901,12 @@ fn compute_asset_drop(
         return None;
     }
     let screen_offset = viewport.rect.min.to_vec2();
-    let (origin, dir) =
-        gizmo::screen_to_ray(cursor, view_proj, state.viewport_logical_size, screen_offset);
+    let (origin, dir) = gizmo::screen_to_ray(
+        cursor,
+        view_proj,
+        state.viewport_logical_size,
+        screen_offset,
+    );
     let point = ray_ground_point(origin, dir).unwrap_or_else(|| state.placement_point_in_front());
     Some(AssetDrop {
         path,
@@ -940,13 +952,12 @@ fn draw_asset_drop_hint(
     );
     painter.circle_stroke(screen, 5.0_f32, stroke);
     let name = asset_display_name(&drop.path);
-    let label = if xgame_core::AssetKind::from_path(&drop.path)
-        == Some(xgame_core::AssetKind::Material)
-    {
-        format!("指派材质 {name}")
-    } else {
-        name
-    };
+    let label =
+        if xgame_core::AssetKind::from_path(&drop.path) == Some(xgame_core::AssetKind::Material) {
+            format!("指派材质 {name}")
+        } else {
+            name
+        };
     painter.text(
         drop.cursor + egui::vec2(14.0, 10.0),
         Align2::LEFT_TOP,
@@ -1027,17 +1038,14 @@ mod tests {
     #[test]
     fn plain_click_yields_clicked_not_drag_started() {
         let frames = drive(&[
-            (200.0, 150.0, None),       // 悬停
-            (200.0, 150.0, Some(true)), // 按下
-            (200.0, 150.0, Some(false)),// 原地松手
+            (200.0, 150.0, None),        // 悬停
+            (200.0, 150.0, Some(true)),  // 按下
+            (200.0, 150.0, Some(false)), // 原地松手
         ]);
 
         assert_eq!(frames.len(), 3);
         for (i, &(_, drag_started)) in frames.iter().enumerate() {
-            assert!(
-                !drag_started,
-                "第 {i} 帧不该被判成拖拽开始：指针没移动过"
-            );
+            assert!(!drag_started, "第 {i} 帧不该被判成拖拽开始：指针没移动过");
         }
         assert!(
             frames[2].0,
@@ -1076,11 +1084,11 @@ mod tests {
     ///
     /// 返回的项目目录由调用方负责删（测试正常跑完时删，断言失败时留着便于排查）。
     fn test_state(tag: &str) -> (EditorState, std::path::PathBuf) {
-        let base = std::env::temp_dir().join(format!("xgame_sceneview_{tag}_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("xgame_sceneview_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        let handle =
-            xgame_core::ProjectHandle::create(&base, "PickTest").expect("创建临时项目");
+        let handle = xgame_core::ProjectHandle::create(&base, "PickTest").expect("创建临时项目");
 
         let mut state = EditorState::new(handle);
         // 用自己造的干净场景，别依赖默认场景里有什么。
@@ -1096,7 +1104,12 @@ mod tests {
     ///
     /// 面板用 `Frame::none()`：视口的屏幕偏移就等于「顶栏高度」这一行，
     /// 测试里才好算出该点哪里。
-    fn frame(ctx: &egui::Context, state: &mut EditorState, events: Vec<egui::Event>, screen: egui::Rect) {
+    fn frame(
+        ctx: &egui::Context,
+        state: &mut EditorState,
+        events: Vec<egui::Event>,
+        screen: egui::Rect,
+    ) {
         let input = egui::RawInput {
             screen_rect: Some(screen),
             events,
@@ -1151,10 +1164,18 @@ mod tests {
 
         // 光标要落到**立方体自己的投影位置**上，而不是"视口正中"这个替身。
         let center = entity_screen_pos(&state, screen);
-        assert!(viewport_rect(screen, vp).contains(center), "立方体应当投影在视口内: {center:?}");
+        assert!(
+            viewport_rect(screen, vp).contains(center),
+            "立方体应当投影在视口内: {center:?}"
+        );
 
         // 第 2~4 帧：移过去 → 按下 → 原地松手（一次纯点击，没有任何拖动）。
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(center)], screen);
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(center)],
+            screen,
+        );
         frame(&ctx, &mut state, vec![button(center, true)], screen);
         frame(&ctx, &mut state, vec![button(center, false)], screen);
 
@@ -1181,14 +1202,24 @@ mod tests {
         let center = entity_screen_pos(&state, screen);
 
         // 先点中立方体
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(center)], screen);
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(center)],
+            screen,
+        );
         frame(&ctx, &mut state, vec![button(center, true)], screen);
         frame(&ctx, &mut state, vec![button(center, false)], screen);
         assert_eq!(state.selected_entity, Some(0));
 
         // 再点左上角（视口里的空白，那里没有东西）
         let empty = egui::pos2(8.0, top_bar_h + 8.0);
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(empty)], screen);
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(empty)],
+            screen,
+        );
         frame(&ctx, &mut state, vec![button(empty, true)], screen);
         frame(&ctx, &mut state, vec![button(empty, false)], screen);
 
@@ -1246,10 +1277,18 @@ mod tests {
             vp,
             rect.min.to_vec2(),
         );
-        assert!(rect.contains(on_axis), "轴上的点应当落在视口里: {on_axis:?}");
+        assert!(
+            rect.contains(on_axis),
+            "轴上的点应当落在视口里: {on_axis:?}"
+        );
 
         // 悬停 → 按下 → 拖动（指针移动过阈值才算拖拽）→ 松手。
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(on_axis)], screen);
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(on_axis)],
+            screen,
+        );
         assert_eq!(
             state.gizmo_hovered,
             Some(GizmoPart::AxisX),
@@ -1263,7 +1302,12 @@ mod tests {
         frame(&ctx, &mut state, vec![button(on_axis, true)], screen);
         // 这一帧才被判成拖拽开始，抓取参考点（`start_hit`）也在这时记录，
         // 所以本帧不会产生位移 —— 头 ~6px 是 egui 的拖拽阈值死区。
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(drag_to)], screen);
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(drag_to)],
+            screen,
+        );
         assert!(state.gizmo_active.is_some(), "移动过阈值后应当进入拖拽态");
         assert_eq!(
             state.scene.entities[0].transform.position, before,
@@ -1271,7 +1315,12 @@ mod tests {
         );
 
         // 再动一帧才开始真正改位置。
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(drag_more)], screen);
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(drag_more)],
+            screen,
+        );
         let mid = state.scene.entities[0].transform.position;
         assert!(
             (mid - before).length() > 1e-4,
@@ -1327,18 +1376,33 @@ mod tests {
             rect.min.to_vec2(),
         );
 
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(on_axis)], screen);
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(on_axis)],
+            screen,
+        );
         frame(&ctx, &mut state, vec![button(on_axis, true)], screen);
 
         // 跨过拖拽阈值的这一步：只记录参考点。
         let mut cursor = on_axis + egui::vec2(8.0, 0.0);
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(cursor)], screen);
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(cursor)],
+            screen,
+        );
         assert!(state.gizmo_active.is_some(), "跨过阈值后应当进入拖拽态");
         let at_drag_start = state.scene.entities[0].transform.position;
 
         for dx in step_px {
             cursor += egui::vec2(*dx, 0.0);
-            frame(&ctx, &mut state, vec![egui::Event::PointerMoved(cursor)], screen);
+            frame(
+                &ctx,
+                &mut state,
+                vec![egui::Event::PointerMoved(cursor)],
+                screen,
+            );
         }
         frame(&ctx, &mut state, vec![button(cursor, false)], screen);
 
@@ -1406,13 +1470,23 @@ mod tests {
         let yaw_before = state.editor_camera.yaw;
         state.last_render_view_proj = None;
         let p1 = p0 + egui::vec2(60.0, 0.0);
-        frame(&ctx, &mut state, vec![egui::Event::PointerMoved(p1)], screen);
-        assert_ne!(state.editor_camera.yaw, yaw_before, "这一帧应当已经转过视角");
+        frame(
+            &ctx,
+            &mut state,
+            vec![egui::Event::PointerMoved(p1)],
+            screen,
+        );
+        assert_ne!(
+            state.editor_camera.yaw, yaw_before,
+            "这一帧应当已经转过视角"
+        );
 
         // 关键断言：渲染用的矩阵必须是**转过之后**那台相机算出来的。
         let (w, h) = state.viewport_pixel_size;
         let expected = build_view_projection(&state, w, h);
-        let got = state.last_render_view_proj.expect("这一帧应当渲染过离屏场景");
+        let got = state
+            .last_render_view_proj
+            .expect("这一帧应当渲染过离屏场景");
         let (a, b) = (got.to_cols_array(), expected.to_cols_array());
         assert!(
             a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-6),
@@ -1465,7 +1539,10 @@ mod tests {
         // ① 点在柱子上 → 必须选到柱子。
         let block_center = state.scene.world_transform(1).position;
         let on_block = gizmo::project_to_screen(block_center, &view_proj, vp, rect.min.to_vec2());
-        assert!(rect.contains(on_block), "柱子的屏幕位置应当落在视口里: {on_block:?}");
+        assert!(
+            rect.contains(on_block),
+            "柱子的屏幕位置应当落在视口里: {on_block:?}"
+        );
         select_first_entity(&ctx, &mut state, screen, on_block);
         assert_eq!(state.selected_entity, Some(1), "点在柱子上必须选中柱子");
 
@@ -1506,12 +1583,20 @@ mod tests {
 
         let at = entity_screen_pos(&state, screen);
         select_first_entity(&ctx, &mut state, screen, at);
-        assert_eq!(state.selected_entity, Some(0), "工具快捷键测试要先选中一个实体");
+        assert_eq!(
+            state.selected_entity,
+            Some(0),
+            "工具快捷键测试要先选中一个实体"
+        );
 
         // 非飞行态：W 切到 Translate。
         state.tool_mode = ToolMode::Rotate;
         frame(&ctx, &mut state, vec![key(egui::Key::W)], screen);
-        assert_eq!(state.tool_mode, ToolMode::Translate, "非飞行态 W 应当切工具");
+        assert_eq!(
+            state.tool_mode,
+            ToolMode::Translate,
+            "非飞行态 W 应当切工具"
+        );
 
         // 飞行态：W 只用来推相机，不该动工具。
         //
@@ -1558,8 +1643,11 @@ mod drop_tests {
             .expect("垂直向下应命中");
         assert!((hit - Vec3::ZERO).length() < 1e-6);
 
-        let slant = ray_ground_point(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.5, -1.0, 0.0).normalize())
-            .expect("斜向下应命中");
+        let slant = ray_ground_point(
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.5, -1.0, 0.0).normalize(),
+        )
+        .expect("斜向下应命中");
         assert!((slant.y).abs() < 1e-6, "命中点必须在地面上");
         assert!(slant.x > 0.0, "应落在射线方向一侧");
 

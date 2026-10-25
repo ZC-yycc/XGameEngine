@@ -125,12 +125,7 @@ impl MaterialLibrary {
     }
 
     /// 确保模型自带材质的绑定组存在。
-    pub fn bind_model(
-        &mut self,
-        device: &wgpu::Device,
-        material_id: u64,
-        texture: &Texture,
-    ) {
+    pub fn bind_model(&mut self, device: &wgpu::Device, material_id: u64, texture: &Texture) {
         if self.model_bind_groups.contains_key(&material_id) {
             return;
         }
@@ -235,9 +230,7 @@ impl MaterialLibrary {
         }
 
         let bind_group = match texture_path.as_deref().and_then(|p| self.textures.get(p)) {
-            Some(texture) => {
-                self.create_bind_group(device, texture, "scene_asset_material_bg")
-            }
+            Some(texture) => self.create_bind_group(device, texture, "scene_asset_material_bg"),
             None => {
                 if self.white.is_none() {
                     self.white = Some(Texture::white(device, queue));

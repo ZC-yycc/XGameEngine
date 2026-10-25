@@ -61,9 +61,9 @@ impl BuildTask {
         match self.rx.try_recv() {
             Ok(o) => Some(o),
             Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Some(BuildOutcome::Failed("构建线程意外退出（可能 panic）".into()))
-            }
+            Err(mpsc::TryRecvError::Disconnected) => Some(BuildOutcome::Failed(
+                "构建线程意外退出（可能 panic）".into(),
+            )),
         }
     }
 }
@@ -182,7 +182,12 @@ pub fn plugin_dll_mtimes(project_root: &Path) -> Vec<(PathBuf, Option<SystemTime
     let mut dlls = collect_dylibs(&project_root.join(PLUGINS_DIR));
     dlls.sort();
     dlls.iter()
-        .map(|p| (p.clone(), std::fs::metadata(p).and_then(|m| m.modified()).ok()))
+        .map(|p| {
+            (
+                p.clone(),
+                std::fs::metadata(p).and_then(|m| m.modified()).ok(),
+            )
+        })
         .collect()
 }
 
@@ -195,9 +200,9 @@ pub fn needs_build(project_root: &Path) -> bool {
     let entries = plugin_dll_mtimes(project_root);
     let dll_mtimes: Vec<Option<SystemTime>> = entries.iter().map(|(_, m)| *m).collect();
     let src = newest_source_mtime(project_root);
-    let editor = std::env::current_exe().ok().and_then(|p| {
-        std::fs::metadata(p).and_then(|m| m.modified()).ok()
-    });
+    let editor = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
     !is_fresh(&dll_mtimes, src, editor)
 }
 
@@ -224,7 +229,10 @@ pub fn spawn_build(project_root: &Path) -> Result<BuildTask, String> {
         // 接收端可能已随编辑器关闭被丢弃 —— 失败无所谓，线程即将结束。
         let _ = tx.send(outcome);
     });
-    Ok(BuildTask { rx, started: Instant::now() })
+    Ok(BuildTask {
+        rx,
+        started: Instant::now(),
+    })
 }
 
 /// 同步跑一次 `cargo build` 并解析产物（`spawn_build` 的线程体，拆出来便于测试）。
@@ -336,7 +344,9 @@ pub fn sync_plugins_dir(project_root: &Path, built: &[PathBuf]) -> Vec<PathBuf> 
     }
     let mut synced = Vec::new();
     for dll in built {
-        let Some(name) = dll.file_name() else { continue; };
+        let Some(name) = dll.file_name() else {
+            continue;
+        };
         let dst = dir.join(name);
         match std::fs::copy(dll, &dst) {
             Ok(_) => {
@@ -405,7 +415,9 @@ pub fn sweep_temp_copies() {
     };
     for e in rd.flatten() {
         let name = e.file_name();
-        let Some(name) = name.to_str() else { continue; };
+        let Some(name) = name.to_str() else {
+            continue;
+        };
         let Some(pid_str) = name.strip_prefix("xgame-plugin-") else {
             continue;
         };
@@ -498,7 +510,10 @@ not json at all
             "应只挑出 cdylib 的 DLL，忽略 rlib / pdb / .dll.lib，实际 {dlls:?}"
         );
         let name = dlls[0].file_name().unwrap().to_str().unwrap();
-        assert!(name.eq_ignore_ascii_case("behaviors_demo.dll"), "实际拿到 {name}");
+        assert!(
+            name.eq_ignore_ascii_case("behaviors_demo.dll"),
+            "实际拿到 {name}"
+        );
     }
 
     /// 构建失败时保留 stderr 尾部（编译错误在末尾）。
@@ -609,7 +624,10 @@ not json at all
         std::thread::sleep(std::time::Duration::from_millis(30));
         std::fs::write(src.join("lib.rs"), b"pub fn a() {}").unwrap();
 
-        assert!(newest_source_mtime(&root).is_some(), "应扫到 Cargo.toml / src");
+        assert!(
+            newest_source_mtime(&root).is_some(),
+            "应扫到 Cargo.toml / src"
+        );
         assert!(needs_build(&root), "源文件比 DLL 新时必须重建");
 
         // 2) 重写产物（模拟"编译完成 + 同步"）⇒ 新鲜，不再触发构建。

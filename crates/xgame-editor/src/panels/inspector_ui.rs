@@ -22,7 +22,13 @@ use crate::panels::theme;
 ///
 /// Inspector 里凡是"物理上不可能为负"的量（半径 / 边框 / 内边距 / 字号）
 /// 都要给范围：拖成负数不会崩，但会得到"圆角内凹""字号 0"这类诡异画面。
-fn drag(ui: &mut egui::Ui, width: f32, value: &mut f32, speed: f64, range: std::ops::RangeInclusive<f32>) -> bool {
+fn drag(
+    ui: &mut egui::Ui,
+    width: f32,
+    value: &mut f32,
+    speed: f64,
+    range: std::ops::RangeInclusive<f32>,
+) -> bool {
     ui.add_sized(
         egui::vec2(width, theme::FIELD_HEIGHT),
         egui::DragValue::new(value).speed(speed).range(range),
@@ -114,21 +120,29 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
         // 说明行走 `dim_note`，两行的标签就是 `Min` / `Max`，短且不重复。
         ui.label(theme::dim_note("Anchor（0..1，父矩形）"));
         row(ui, "Min", |ui| {
-            changed |= theme::drag_field_w(ui, field_w, &mut element.anchor_min[0], 0.01, "").changed();
-            changed |= theme::drag_field_w(ui, field_w, &mut element.anchor_min[1], 0.01, "").changed();
+            changed |=
+                theme::drag_field_w(ui, field_w, &mut element.anchor_min[0], 0.01, "").changed();
+            changed |=
+                theme::drag_field_w(ui, field_w, &mut element.anchor_min[1], 0.01, "").changed();
         });
         row(ui, "Max", |ui| {
-            changed |= theme::drag_field_w(ui, field_w, &mut element.anchor_max[0], 0.01, "").changed();
-            changed |= theme::drag_field_w(ui, field_w, &mut element.anchor_max[1], 0.01, "").changed();
+            changed |=
+                theme::drag_field_w(ui, field_w, &mut element.anchor_max[0], 0.01, "").changed();
+            changed |=
+                theme::drag_field_w(ui, field_w, &mut element.anchor_max[1], 0.01, "").changed();
         });
         ui.label(theme::dim_note("Offset（像素）"));
         row(ui, "Min", |ui| {
-            changed |= theme::drag_field_w(ui, field_w, &mut element.offset_min[0], 1.0, "").changed();
-            changed |= theme::drag_field_w(ui, field_w, &mut element.offset_min[1], 1.0, "").changed();
+            changed |=
+                theme::drag_field_w(ui, field_w, &mut element.offset_min[0], 1.0, "").changed();
+            changed |=
+                theme::drag_field_w(ui, field_w, &mut element.offset_min[1], 1.0, "").changed();
         });
         row(ui, "Max", |ui| {
-            changed |= theme::drag_field_w(ui, field_w, &mut element.offset_max[0], 1.0, "").changed();
-            changed |= theme::drag_field_w(ui, field_w, &mut element.offset_max[1], 1.0, "").changed();
+            changed |=
+                theme::drag_field_w(ui, field_w, &mut element.offset_max[0], 1.0, "").changed();
+            changed |=
+                theme::drag_field_w(ui, field_w, &mut element.offset_max[1], 1.0, "").changed();
         });
         row(ui, "Size", |ui| {
             let size = element.size();
@@ -150,16 +164,34 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
             changed |= color_edit(ui, &mut element.style.background);
         });
         row(ui, "Radius", |ui| {
-            changed |= drag(ui, theme::FIELD_WIDTH, &mut element.style.corner_radius, 0.5, 0.0..=512.0);
+            changed |= drag(
+                ui,
+                theme::FIELD_WIDTH,
+                &mut element.style.corner_radius,
+                0.5,
+                0.0..=512.0,
+            );
         });
         row(ui, "Width", |ui| {
-            changed |= drag(ui, theme::FIELD_WIDTH, &mut element.style.border_width, 0.1, 0.0..=64.0);
+            changed |= drag(
+                ui,
+                theme::FIELD_WIDTH,
+                &mut element.style.border_width,
+                0.1,
+                0.0..=64.0,
+            );
         });
         row(ui, "Border", |ui| {
             changed |= color_edit(ui, &mut element.style.border_color);
         });
         row(ui, "Padding", |ui| {
-            changed |= drag(ui, theme::FIELD_WIDTH, &mut element.style.padding, 0.5, 0.0..=256.0);
+            changed |= drag(
+                ui,
+                theme::FIELD_WIDTH,
+                &mut element.style.padding,
+                0.5,
+                0.0..=256.0,
+            );
         });
 
         ui.add_space(theme::PANEL_MARGIN);
@@ -174,7 +206,13 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
             changed |= resp.changed();
         });
         row(ui, "Size", |ui| {
-            changed |= drag(ui, theme::FIELD_WIDTH, &mut element.text.size, 0.5, 1.0..=512.0);
+            changed |= drag(
+                ui,
+                theme::FIELD_WIDTH,
+                &mut element.text.size,
+                0.5,
+                1.0..=512.0,
+            );
         });
         row(ui, "Color", |ui| {
             changed |= color_edit(ui, &mut element.text.color);
@@ -238,8 +276,7 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
             row(ui, "Path", |ui| {
                 let resp = ui.add_sized(
                     egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
-                    egui::TextEdit::singleline(&mut image.path)
-                        .hint_text("Resources/xxx.png"),
+                    egui::TextEdit::singleline(&mut image.path).hint_text("Resources/xxx.png"),
                 );
                 changed |= resp.changed();
             });

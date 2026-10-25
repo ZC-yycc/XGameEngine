@@ -133,9 +133,8 @@ impl PreferencesWindow {
                     .spacing([10.0, 5.0])
                     .min_col_width(96.0)
                     .show(ui, |ui| {
-                        ui.label("间隔").on_hover_text(
-                            "每隔多少秒在项目的 .autosave/ 下留一份副本；0 = 关闭",
-                        );
+                        ui.label("间隔")
+                            .on_hover_text("每隔多少秒在项目的 .autosave/ 下留一份副本；0 = 关闭");
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::DragValue::new(&mut draft.autosave_interval_secs)
@@ -160,10 +159,7 @@ impl PreferencesWindow {
 
                 // ── 布局 ──
                 theme::section_bar(ui, "面板布局");
-                theme::note(
-                    ui,
-                    "拖动页签、调整分隔条后自动保存，下次启动恢复。",
-                );
+                theme::note(ui, "拖动页签、调整分隔条后自动保存，下次启动恢复。");
                 theme::note(ui, format!("保存位置：{store}"));
                 ui.add_space(4.0);
                 if ui

@@ -52,7 +52,10 @@ pub fn panel_derive(input: TokenStream) -> TokenStream {
     let name = input.ident;
 
     let variants = if let syn::Data::Enum(data) = input.data {
-        data.variants.iter().map(|v| v.ident.clone()).collect::<Vec<_>>()
+        data.variants
+            .iter()
+            .map(|v| v.ident.clone())
+            .collect::<Vec<_>>()
     } else {
         panic!("Panel can only be derived for enums");
     };
@@ -61,8 +64,8 @@ pub fn panel_derive(input: TokenStream) -> TokenStream {
         let snake = to_snake_case(&variant.to_string());
         // Build path: crate::panels::<snake>::show_content
         let path_str = format!("crate::panels::{}::show_content", snake);
-        let path: syn::Path = syn::parse_str(&path_str)
-            .expect("invalid module path generated from variant name");
+        let path: syn::Path =
+            syn::parse_str(&path_str).expect("invalid module path generated from variant name");
         quote! {
             Self::#variant => #path(state, ui),
         }

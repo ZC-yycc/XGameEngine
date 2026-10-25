@@ -273,7 +273,11 @@ impl ListenerPose {
         let up = Vec3::Y;
         let right = {
             let r = forward.cross(up);
-            if r.length_squared() < 1e-8 { Vec3::X } else { r.normalize() }
+            if r.length_squared() < 1e-8 {
+                Vec3::X
+            } else {
+                r.normalize()
+            }
         };
         let z = right.cross(up);
         let q = Quat::from_mat3(&Mat3::from_cols(right, up, z));
@@ -331,7 +335,8 @@ impl AudioPort {
 
     /// 更新某实体的空间化声源位置。
     pub fn emitter_position(&mut self, entity: EntityId, position: [f32; 3]) {
-        self.commands.push(AudioCommand::EmitterPosition { entity, position });
+        self.commands
+            .push(AudioCommand::EmitterPosition { entity, position });
     }
 
     /// 停止某 clip 的全部实例。
@@ -434,8 +439,8 @@ mod tests {
     /// 旧场景文件（没有 audio 字段的年代）与手写精简场景都靠这条。
     #[test]
     fn audio_source_ron_defaults_when_fields_omitted() {
-        let source: AudioSource = ron::from_str(r#"(clip: "Resources/Audio/Beep.wav")"#)
-            .expect("省略字段应可解析");
+        let source: AudioSource =
+            ron::from_str(r#"(clip: "Resources/Audio/Beep.wav")"#).expect("省略字段应可解析");
         assert_eq!(source.clip, "Resources/Audio/Beep.wav");
         assert_eq!(source.volume, 1.0);
         assert_eq!(source.pitch, 1.0);
@@ -498,16 +503,25 @@ mod tests {
         // 局部 +X 翻到世界 -X —— 转身后世界 +X 确实到了左手边，物理正确。
         let q_front = ListenerPose::new([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]).orientation();
         let right = Quat::from_xyzw(q_front[0], q_front[1], q_front[2], q_front[3]) * Vec3::X;
-        assert!((right - Vec3::X).length() < 1e-5, "转身前右耳在 +X: {right:?}");
+        assert!(
+            (right - Vec3::X).length() < 1e-5,
+            "转身前右耳在 +X: {right:?}"
+        );
         let right = Quat::from_xyzw(q[0], q[1], q[2], q[3]) * Vec3::X;
-        assert!((right + Vec3::X).length() < 1e-5, "转身后 +X 到左手边: {right:?}");
+        assert!(
+            (right + Vec3::X).length() < 1e-5,
+            "转身后 +X 到左手边: {right:?}"
+        );
 
         // 默认姿态：站在 (5,5,5) 看向原点 —— forward 会被归一化。
         let pose = ListenerPose::default();
         assert_eq!(pose.position, [5.0, 5.0, 5.0]);
         let len = pose.forward.iter().map(|c| c * c).sum::<f32>().sqrt();
         assert!((len - 1.0).abs() < 1e-5, "默认 forward 应为单位向量");
-        assert!(pose.forward.iter().all(|c| *c < 0.0), "看向原点应各分量为负");
+        assert!(
+            pose.forward.iter().all(|c| *c < 0.0),
+            "看向原点应各分量为负"
+        );
     }
 
     /// 竖直朝向（forward ≈ +Y）不产生 NaN：退化分支必须给出合法四元数。
@@ -524,7 +538,10 @@ mod tests {
     /// `AudioSource::to_play_sound` 把组件参数摊平到播放请求。
     #[test]
     fn source_maps_to_play_sound() {
-        let source = AudioSource::new("x.wav").with_volume(0.3).with_pitch(2.0).with_looping(true);
+        let source = AudioSource::new("x.wav")
+            .with_volume(0.3)
+            .with_pitch(2.0)
+            .with_looping(true);
         let play = source.to_play_sound(Some([1.0, 2.0, 3.0]));
         assert_eq!(play.clip, "x.wav");
         assert_eq!(play.volume, 0.3);

@@ -136,7 +136,10 @@ impl PhysicsBody {
     pub fn kinematic_capsule(half_height: f32, radius: f32) -> Self {
         Self {
             kind: BodyKind::Kinematic,
-            shape: CollisionShape::Capsule { half_height, radius },
+            shape: CollisionShape::Capsule {
+                half_height,
+                radius,
+            },
             ..Default::default()
         }
     }

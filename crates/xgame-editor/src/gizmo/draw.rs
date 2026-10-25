@@ -4,14 +4,12 @@
 
 use xgame_math::glam::Vec3;
 
-use super::{
-    GizmoCtx,
-    axis_part, axis_width, ring_part, part_axis,
-    part_color, is_highlighted,
-    AXIS_DIRS, CUBE_SIZE, PLANE_FILL, ARROW_HEAD_FRACTION
-};
 use super::math::{all_valid_screen, is_valid_screen, project_to_screen};
-use super::shapes::{TranslateShape, RotateShape, ScaleShape};
+use super::shapes::{RotateShape, ScaleShape, TranslateShape};
+use super::{
+    axis_part, axis_width, is_highlighted, part_axis, part_color, ring_part, GizmoCtx,
+    ARROW_HEAD_FRACTION, AXIS_DIRS, CUBE_SIZE, PLANE_FILL,
+};
 use crate::state::{GizmoPart, ToolMode};
 
 // ---------------------------------------------------------------------------
@@ -41,19 +39,22 @@ const MIN_AREA: f32 = 4.0;
 
 /// 绘制 3D 线段（投影后以 2D 线段渲染）。
 fn draw_line_3d(
-    painter:                    &egui::Painter,
-    from:                       Vec3,
-    to:                         Vec3,
-    ctx:                        &GizmoCtx,
-    color:                      egui::Color32,
-    width:                      f32,
+    painter: &egui::Painter,
+    from: Vec3,
+    to: Vec3,
+    ctx: &GizmoCtx,
+    color: egui::Color32,
+    width: f32,
 ) {
     let a = project_to_screen(from, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
     let b = project_to_screen(to, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
     if !is_valid_screen(a) || !is_valid_screen(b) {
         return;
     }
-    painter.add(egui::Shape::line_segment([a, b], egui::Stroke::new(width, color)));
+    painter.add(egui::Shape::line_segment(
+        [a, b],
+        egui::Stroke::new(width, color),
+    ));
 }
 
 /// 绘制填充凸多边形（3D → 2D 投影），带退化检测。
@@ -61,11 +62,11 @@ fn draw_line_3d(
 /// 额外检查投影后多边形的包围盒：若超过屏幕尺寸的 1.5 倍，说明顶点
 /// 位于屏幕远端边缘且构成巨型三角形，egui 不做视口裁剪，会污染全屏。
 fn draw_convex_poly_3d(
-    painter:                    &egui::Painter,
-    vertices_3d:                &[Vec3],
-    ctx:                        &GizmoCtx,
-    fill:                       egui::Color32,
-    stroke:                     egui::Stroke,
+    painter: &egui::Painter,
+    vertices_3d: &[Vec3],
+    ctx: &GizmoCtx,
+    fill: egui::Color32,
+    stroke: egui::Stroke,
 ) {
     let points: Vec<egui::Pos2> = vertices_3d
         .iter()
@@ -74,13 +75,13 @@ fn draw_convex_poly_3d(
     if !all_valid_screen(&points) {
         return;
     }
-    
+
     // 检查多边形是否退化（面积太小或接近线形）
     let area = polygon_area(&points);
     if area < MIN_AREA {
         return;
     }
-    
+
     // 包围盒防护：防止顶点虽然各自"有效"但多边形跨屏
     if polygon_bbox_too_large(&points, ctx.screen_size) {
         return;
@@ -97,12 +98,12 @@ fn triangle_area(a: egui::Pos2, b: egui::Pos2, c: egui::Pos2) -> f32 {
 
 /// 三角形面积足够大时才绘制
 fn draw_triangle_if_valid(
-    painter:                    &egui::Painter,
-    a:                          egui::Pos2,
-    b:                          egui::Pos2,
-    c:                          egui::Pos2,
-    fill:                       egui::Color32,
-    min_area:                   f32,
+    painter: &egui::Painter,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    c: egui::Pos2,
+    fill: egui::Color32,
+    min_area: f32,
 ) {
     if triangle_area(a, b, c) > min_area {
         painter.add(egui::Shape::convex_polygon(
@@ -115,13 +116,13 @@ fn draw_triangle_if_valid(
 
 /// 四边形面积足够大时才绘制（拆成两个三角形判断）
 fn draw_quad_if_valid(
-    painter:                    &egui::Painter,
-    a:                          egui::Pos2,
-    b:                          egui::Pos2,
-    c:                          egui::Pos2,
-    d:                          egui::Pos2,
-    fill:                       egui::Color32,
-    min_area:                   f32,
+    painter: &egui::Painter,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    c: egui::Pos2,
+    d: egui::Pos2,
+    fill: egui::Color32,
+    min_area: f32,
 ) {
     let area = triangle_area(a, b, c) + triangle_area(a, c, d);
     if area > min_area {
@@ -169,33 +170,44 @@ fn polygon_bbox_too_large(points: &[egui::Pos2], screen_size: egui::Vec2) -> boo
 
 /// 在屏幕坐标绘制方块（3D 中心点 → 屏幕方块），带退化检测。
 fn draw_cube_at(
-    painter:                    &egui::Painter,
-    center_3d:                  Vec3,
-    ctx:                        &GizmoCtx,
-    fill:                       egui::Color32,
-    stroke_color:               egui::Color32,
+    painter: &egui::Painter,
+    center_3d: Vec3,
+    ctx: &GizmoCtx,
+    fill: egui::Color32,
+    stroke_color: egui::Color32,
 ) {
-    let s_center = project_to_screen(center_3d, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
+    let s_center = project_to_screen(
+        center_3d,
+        &ctx.view_proj,
+        ctx.screen_size,
+        ctx.screen_offset,
+    );
     if !is_valid_screen(s_center) {
         return;
     }
     let half = ctx.gizmo_size * CUBE_SIZE * 3.0;
-    
+
     // 检查退化：如果方块在屏幕上太小，跳过填充只画十字线
     if half < 0.5 {
         // 退化时画一个小十字线代替
         let stroke = egui::Stroke::new(1.5_f32, stroke_color);
         painter.add(egui::Shape::line_segment(
-            [egui::pos2(s_center.x - 2.0, s_center.y), egui::pos2(s_center.x + 2.0, s_center.y)],
+            [
+                egui::pos2(s_center.x - 2.0, s_center.y),
+                egui::pos2(s_center.x + 2.0, s_center.y),
+            ],
             stroke,
         ));
         painter.add(egui::Shape::line_segment(
-            [egui::pos2(s_center.x, s_center.y - 2.0), egui::pos2(s_center.x, s_center.y + 2.0)],
+            [
+                egui::pos2(s_center.x, s_center.y - 2.0),
+                egui::pos2(s_center.x, s_center.y + 2.0),
+            ],
             stroke,
         ));
         return;
     }
-    
+
     painter.add(egui::Shape::convex_polygon(
         vec![
             egui::pos2(s_center.x - half, s_center.y - half),
@@ -230,7 +242,13 @@ fn draw_translate(painter: &egui::Painter, ctx: &GizmoCtx) {
             PLANE_FILL
         };
         let sw = if hl { 2.5_f32 } else { 1.5_f32 };
-        draw_convex_poly_3d(painter, &plane.corners, ctx, fill, egui::Stroke::new(sw, color));
+        draw_convex_poly_3d(
+            painter,
+            &plane.corners,
+            ctx,
+            fill,
+            egui::Stroke::new(sw, color),
+        );
     }
 
     // 2. 轴线 + 箭头头部
@@ -251,18 +269,22 @@ fn draw_translate(painter: &egui::Painter, ctx: &GizmoCtx) {
 
 /// 绘制箭头头部，跳过退化面
 fn draw_arrow_head(
-    painter:                    &egui::Painter,
-    ctx:                        &GizmoCtx,
-    ah:                         &super::shapes::ArrowHead,
-    part:                       GizmoPart,
-    lw:                         f32,
+    painter: &egui::Painter,
+    ctx: &GizmoCtx,
+    ah: &super::shapes::ArrowHead,
+    part: GizmoPart,
+    lw: f32,
 ) {
     let axis_dir = part_axis(part);
     let half_base = ctx.gizmo_size * ARROW_HEAD_FRACTION * 0.4;
     let back_center = ah.tip - axis_dir * ctx.gizmo_size * ARROW_HEAD_FRACTION * 0.8;
 
     // 计算底面局部坐标系
-    let up = if axis_dir.x.abs() < 0.99 { Vec3::X } else { Vec3::Y };
+    let up = if axis_dir.x.abs() < 0.99 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
     let right = axis_dir.cross(up).normalize() * half_base;
     let up = right.cross(axis_dir).normalize() * half_base;
 
@@ -347,7 +369,8 @@ fn draw_rotate(painter: &egui::Painter, ctx: &GizmoCtx) {
         if hl && pts.len() >= 3 {
             let area = polygon_area(&pts);
             if area > MIN_AREA * 10.0 {
-                let fill = egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 40);
+                let fill =
+                    egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 40);
                 // 绘制环面填充 - 通过将 ring 视为多边形带
                 // 由于 ring 是环形，需要特殊处理。这里简化为只在面积足够大时绘制。
                 // 实际上环形填充比较复杂，先保持线段绘制为主。

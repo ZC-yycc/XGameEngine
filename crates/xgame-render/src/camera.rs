@@ -168,14 +168,14 @@ impl OrbitCamera {
 
     /// 按滚轮增量缩放。
     pub fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance - delta * self.zoom_speed)
-            .clamp(self.min_distance, self.max_distance);
+        self.distance =
+            (self.distance - delta * self.zoom_speed).clamp(self.min_distance, self.max_distance);
     }
 
     /// 从球坐标重新计算相机位置，相对于当前轨道目标。
     pub fn update(&mut self) {
-        self.camera.eye = self.camera.target
-            + Self::spherical_to_cartesian(self.yaw, self.pitch, self.distance);
+        self.camera.eye =
+            self.camera.target + Self::spherical_to_cartesian(self.yaw, self.pitch, self.distance);
     }
 
     fn spherical_to_cartesian(yaw: f32, pitch: f32, distance: f32) -> Vec3 {

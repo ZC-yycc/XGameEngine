@@ -380,8 +380,7 @@ impl TaaConfig {
     /// 容错读取：历史权重非法（NaN / 无穷 / 越界）退回默认值。
     pub fn sanitized(self) -> Self {
         let weight = if self.history_weight.is_finite() {
-            self.history_weight
-                .clamp(0.0, Self::MAX_HISTORY_WEIGHT)
+            self.history_weight.clamp(0.0, Self::MAX_HISTORY_WEIGHT)
         } else {
             Self::default().history_weight
         };
@@ -624,17 +623,33 @@ mod tests {
     #[test]
     fn runtime_config_sanitized_rejects_garbage() {
         // 固定步长 0 = 累加器永远凑不满一步 = 时间静止，必须退回默认。
-        let zero = RuntimeConfig { fixed_dt: 0.0, ..Default::default() }.sanitized();
+        let zero = RuntimeConfig {
+            fixed_dt: 0.0,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(zero.fixed_dt, 1.0 / 60.0);
 
-        let nan = RuntimeConfig { fixed_dt: f32::NAN, ..Default::default() }.sanitized();
+        let nan = RuntimeConfig {
+            fixed_dt: f32::NAN,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(nan.fixed_dt, 1.0 / 60.0);
 
-        let wild = RuntimeConfig { gravity: [f32::NAN, -1e30, 0.0], ..Default::default() }.sanitized();
+        let wild = RuntimeConfig {
+            gravity: [f32::NAN, -1e30, 0.0],
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(wild.gravity, RuntimeConfig::default().gravity);
 
         // 合法但过慢的步长要夹住（10Hz 物理肉眼可见地卡）。
-        let slow = RuntimeConfig { fixed_dt: 0.5, ..Default::default() }.sanitized();
+        let slow = RuntimeConfig {
+            fixed_dt: 0.5,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(slow.fixed_dt, 1.0 / 10.0);
     }
 
@@ -654,22 +669,46 @@ mod tests {
     /// 合法但离谱的量级（0.001 / 1e6）夹进安全范围。
     #[test]
     fn render_config_sanitized_rejects_garbage() {
-        let zero = RenderConfig { exposure: 0.0, ..Default::default() }.sanitized();
+        let zero = RenderConfig {
+            exposure: 0.0,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(zero.exposure, 1.0, "曝光 0 = 全黑，必须退回默认");
 
-        let negative = RenderConfig { exposure: -3.0, ..Default::default() }.sanitized();
+        let negative = RenderConfig {
+            exposure: -3.0,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(negative.exposure, 1.0);
 
-        let nan = RenderConfig { exposure: f32::NAN, ..Default::default() }.sanitized();
+        let nan = RenderConfig {
+            exposure: f32::NAN,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(nan.exposure, 1.0);
 
-        let inf = RenderConfig { exposure: f32::INFINITY, ..Default::default() }.sanitized();
+        let inf = RenderConfig {
+            exposure: f32::INFINITY,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(inf.exposure, 1.0);
 
-        let tiny = RenderConfig { exposure: 0.0001, ..Default::default() }.sanitized();
+        let tiny = RenderConfig {
+            exposure: 0.0001,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(tiny.exposure, RenderConfig::MIN_EXPOSURE);
 
-        let huge = RenderConfig { exposure: 1e9, ..Default::default() }.sanitized();
+        let huge = RenderConfig {
+            exposure: 1e9,
+            ..Default::default()
+        }
+        .sanitized();
         assert_eq!(huge.exposure, RenderConfig::MAX_EXPOSURE);
 
         // 合法值原样保留，色调映射开关不受曝光夹取影响。
@@ -819,7 +858,8 @@ mod tests {
 
     /// Bloom 容错：NaN / 负数 / 超限。intensity 负数 = 关（不是"反向光晕"）。
     #[test]
-    fn bloom_config_sanitized_rejects_garbage() {        let nan = BloomConfig {
+    fn bloom_config_sanitized_rejects_garbage() {
+        let nan = BloomConfig {
             intensity: f32::NAN,
             ..Default::default()
         }

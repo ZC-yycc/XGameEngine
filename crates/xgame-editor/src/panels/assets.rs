@@ -173,14 +173,8 @@ fn header(state: &mut EditorState, ui: &mut egui::Ui) {
                     renderer.invalidate_assets();
                 }
             }
-            if icons::icon_button(
-                ui,
-                icons::Icon::Plus,
-                18.0,
-                "新建材质资产（.mat）",
-                false,
-            )
-            .clicked()
+            if icons::icon_button(ui, icons::Icon::Plus, 18.0, "新建材质资产（.mat）", false)
+                .clicked()
             {
                 state.material_create_dialog = true;
                 state.material_create_name = "New Material".to_string();
@@ -277,10 +271,8 @@ fn dir_row(ui: &mut egui::Ui, name: &str, depth: usize, key: &str) -> bool {
     let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
 
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width, theme::ROW_HEIGHT),
-        egui::Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, theme::ROW_HEIGHT), egui::Sense::click());
     let painter = ui.painter();
     if response.hovered() {
         painter.rect_filled(rect, 0.0, theme::colors::ROW_HOVER_BG);
@@ -305,7 +297,12 @@ fn dir_row(ui: &mut egui::Ui, name: &str, depth: usize, key: &str) -> bool {
         Pos2::new(arrow.right() + 8.0, rect.center().y),
         Vec2::splat(11.0),
     );
-    icons::paint(painter, folder, icons::Icon::Folder, theme::colors::BADGE_PHYSICS);
+    icons::paint(
+        painter,
+        folder,
+        icons::Icon::Folder,
+        theme::colors::BADGE_PHYSICS,
+    );
     painter.text(
         Pos2::new(folder.right() + 5.0, rect.center().y),
         Align2::LEFT_CENTER,
@@ -435,10 +432,8 @@ fn details(state: &mut EditorState, ui: &mut egui::Ui, actions: &mut Vec<Action>
 
     ui.add_space(2.0);
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(12.0, theme::ROW_HEIGHT),
-            egui::Sense::hover(),
-        );
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(12.0, theme::ROW_HEIGHT), egui::Sense::hover());
         icons::paint(ui.painter(), rect, kind_icon(kind), kind_color(kind));
         ui.label(
             egui::RichText::new(kind.label())
@@ -717,10 +712,7 @@ fn material_editor(state: &mut EditorState, ui: &mut egui::Ui, relative: &str) {
                 .on_hover_text("丢弃未保存改动")
                 .clicked();
             assign = ui
-                .add_enabled(
-                    selected_entity.is_some(),
-                    egui::Button::new("Assign"),
-                )
+                .add_enabled(selected_entity.is_some(), egui::Button::new("Assign"))
                 .on_hover_text("指派给当前选中的实体（替换它原来的材质资产）")
                 .clicked();
         });
@@ -754,7 +746,9 @@ fn create_material_dialog(state: &mut EditorState, ctx: &egui::Context) {
         return;
     }
     // 预览在窗口闭包外算：闭包里同时可变借用名字、不可变借用 project 会打架。
-    let preview = state.project.material_path_for(state.material_create_name.trim());
+    let preview = state
+        .project
+        .material_path_for(state.material_create_name.trim());
     let mut confirm = false;
     let mut cancel = false;
 

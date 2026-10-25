@@ -38,17 +38,17 @@ fn hud_scene(count: usize) -> Scene {
         scene.entities.push(panel);
 
         let mut label = Entity::new(format!("Label{i}"));
-        label.ui = Some(
-            UiElement::text(format!("血量 {i} / 100"))
-                .at([0.0, 0.0], x + 4.0, y + 2.0, 112.0, 24.0),
-        );
+        label.ui = Some(UiElement::text(format!("血量 {i} / 100")).at(
+            [0.0, 0.0],
+            x + 4.0,
+            y + 2.0,
+            112.0,
+            24.0,
+        ));
         scene.entities.push(label);
 
         let mut button = Entity::new(format!("Button{i}"));
-        button.ui = Some(
-            UiElement::button("确定")
-                .at([0.0, 0.0], x + 130.0, y, 80.0, 28.0),
-        );
+        button.ui = Some(UiElement::button("确定").at([0.0, 0.0], x + 130.0, y, 80.0, 28.0));
         scene.entities.push(button);
 
         x += 220.0;

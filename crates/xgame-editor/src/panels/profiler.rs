@@ -42,8 +42,8 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 少了行距，图例占掉 24px，下面那行绘制读数整行落到了状态栏底下（1280×800
     // 静态截图可见）。行高问字体、再补一个 `item_spacing.y` —— 与 egui 自己的
     // 排版同源，改字号也不会再错位。
-    let row = ui.fonts(|f| f.row_height(&egui::FontId::proportional(10.5)))
-        + ui.spacing().item_spacing.y;
+    let row =
+        ui.fonts(|f| f.row_height(&egui::FontId::proportional(10.5))) + ui.spacing().item_spacing.y;
     let reserved = row * 2.0 + theme::SECTION_GAP;
     let graph_height = (ui.available_height() - reserved).max(MIN_GRAPH_HEIGHT);
     graph(ui, &state.profiler, &summary, graph_height);
@@ -77,7 +77,9 @@ fn header(ui: &mut egui::Ui, profiler: &mut Profiler) {
                 .size(11.0)
                 .color(theme::colors::TEXT_SECONDARY),
             )
-            .on_hover_text("累计记录帧数 · 窗口容量。窗口满了之后只保留最近 600 帧（60fps 下 10 秒）");
+            .on_hover_text(
+                "累计记录帧数 · 窗口容量。窗口满了之后只保留最近 600 帧（60fps 下 10 秒）",
+            );
             if profiler.paused {
                 icons::small_icon(ui, icons::Icon::Pause, 9.0, theme::colors::WARN);
             }
@@ -280,7 +282,8 @@ fn legend(ui: &mut egui::Ui, summary: &Summary) {
         theme::colors::TEXT_DIM,
         f32::INFINITY,
     );
-    ui.add(egui::Label::new(galley).truncate()).on_hover_text(text);
+    ui.add(egui::Label::new(galley).truncate())
+        .on_hover_text(text);
 }
 
 /// 底部读数：绘制批次数 / 剔除比例 / 粒子。

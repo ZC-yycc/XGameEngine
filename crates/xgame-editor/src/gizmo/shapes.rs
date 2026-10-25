@@ -5,8 +5,8 @@
 
 use xgame_math::glam::Vec3;
 
-use super::{AXIS_DIRS, ARROW_HEAD_FRACTION, PLANE_HANDLE_SIZE, RING_RADIUS, RING_SEGMENTS};
 use super::math;
+use super::{ARROW_HEAD_FRACTION, AXIS_DIRS, PLANE_HANDLE_SIZE, RING_RADIUS, RING_SEGMENTS};
 
 // ---------------------------------------------------------------------------
 // Translate 形状
@@ -51,18 +51,26 @@ impl TranslateShape {
 
             axes[i] = (entity_pos, arrow_base);
 
-            arrow_heads[i] = ArrowHead {
-                tip,
-            };
+            arrow_heads[i] = ArrowHead { tip };
         }
 
         let planes = [
-            PlaneHandle { corners: plane_corners(entity_pos, Vec3::X, Vec3::Y, plane_size) },
-            PlaneHandle { corners: plane_corners(entity_pos, Vec3::X, Vec3::Z, plane_size) },
-            PlaneHandle { corners: plane_corners(entity_pos, Vec3::Y, Vec3::Z, plane_size) },
+            PlaneHandle {
+                corners: plane_corners(entity_pos, Vec3::X, Vec3::Y, plane_size),
+            },
+            PlaneHandle {
+                corners: plane_corners(entity_pos, Vec3::X, Vec3::Z, plane_size),
+            },
+            PlaneHandle {
+                corners: plane_corners(entity_pos, Vec3::Y, Vec3::Z, plane_size),
+            },
         ];
 
-        Self { axes, arrow_heads, planes }
+        Self {
+            axes,
+            arrow_heads,
+            planes,
+        }
     }
 }
 
@@ -134,6 +142,10 @@ impl ScaleShape {
             cube_centers[i] = tip;
         }
 
-        Self { axes, cube_centers, center: entity_pos }
+        Self {
+            axes,
+            cube_centers,
+            center: entity_pos,
+        }
     }
 }

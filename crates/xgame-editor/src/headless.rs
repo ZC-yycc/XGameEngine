@@ -59,8 +59,8 @@ use serde_json::json;
 use xgame_core::{ProjectHandle, RenderConfig, Scene};
 use xgame_math::glam::Vec3;
 use xgame_render::animation::AnimationDriver;
-use xgame_render::screenshot::{ScreenshotRenderer, ShotCamera};
 use xgame_render::scene_pipeline::SceneLighting;
+use xgame_render::screenshot::{ScreenshotRenderer, ShotCamera};
 use xgame_runtime::{BehaviorRegistry, LogLevel, ScriptLog, World, WorldConfig};
 
 /// 默认跑多少帧。300 帧 ≈ 5 秒 @ 60Hz —— 够看到落体落定、脚本跑若干循环，
@@ -254,10 +254,13 @@ pub fn parse_args(args: &[String]) -> Result<HeadlessArgs, String> {
 
 /// `WxH` 形式的截图尺寸（大小写 x/X 都收）。
 fn parse_shot_size(raw: &str) -> Result<(u32, u32), String> {
-    let bad = || format!("--shot-size 需要 WxH（如 1280x720），收到 {raw:?}\n\n{}", usage());
-    let (w, h) = raw
-        .split_once(['x', 'X'])
-        .ok_or_else(bad)?;
+    let bad = || {
+        format!(
+            "--shot-size 需要 WxH（如 1280x720），收到 {raw:?}\n\n{}",
+            usage()
+        )
+    };
+    let (w, h) = raw.split_once(['x', 'X']).ok_or_else(bad)?;
     let w: u32 = w.trim().parse().map_err(|_| bad())?;
     let h: u32 = h.trim().parse().map_err(|_| bad())?;
     if !(16..=MAX_SHOT_EDGE).contains(&w) || !(16..=MAX_SHOT_EDGE).contains(&h) {
@@ -271,7 +274,12 @@ fn parse_shot_size(raw: &str) -> Result<(u32, u32), String> {
 
 /// `x,y,z` 形式的三维向量（逗号分隔，必须是有限数）。
 fn parse_vec3(raw: &str, flag: &str) -> Result<[f32; 3], String> {
-    let bad = || format!("{flag} 需要 x,y,z 三个数（逗号分隔），收到 {raw:?}\n\n{}", usage());
+    let bad = || {
+        format!(
+            "{flag} 需要 x,y,z 三个数（逗号分隔），收到 {raw:?}\n\n{}",
+            usage()
+        )
+    };
     let parts: Vec<&str> = raw.split(',').collect();
     if parts.len() != 3 {
         return Err(bad());
@@ -633,8 +641,7 @@ impl HeadlessReport {
 pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     let setup_start = Instant::now();
 
-    let project =
-        ProjectHandle::open(&args.project).map_err(|e| format!("打开项目失败: {e}"))?;
+    let project = ProjectHandle::open(&args.project).map_err(|e| format!("打开项目失败: {e}"))?;
     let scene = project
         .load_entry_scene()
         .map_err(|e| format!("加载入口场景失败: {e}"))?;
@@ -1036,11 +1043,20 @@ mod tests {
         assert!(parse_args(&to_strings(&shot_only)).is_ok());
 
         // 相机参数成对：缺一不可。
-        assert!(parse_args(&to_strings(&["--screenshot", "a.png", "--camera-pos", "1,2,3"])).is_err());
-        assert!(
-            parse_args(&to_strings(&["--screenshot", "a.png", "--camera-target", "0,0,0"]))
-                .is_err()
-        );
+        assert!(parse_args(&to_strings(&[
+            "--screenshot",
+            "a.png",
+            "--camera-pos",
+            "1,2,3"
+        ]))
+        .is_err());
+        assert!(parse_args(&to_strings(&[
+            "--screenshot",
+            "a.png",
+            "--camera-target",
+            "0,0,0"
+        ]))
+        .is_err());
         assert!(parse_args(&to_strings(&[
             "--screenshot",
             "a.png",
@@ -1097,10 +1113,7 @@ mod tests {
         ];
         for case in bad {
             let raw = to_strings(case);
-            assert!(
-                parse_args(&raw).is_err(),
-                "参数 {case:?} 应当被拒绝"
-            );
+            assert!(parse_args(&raw).is_err(), "参数 {case:?} 应当被拒绝");
         }
         // 上限边界：正好 MAX_FRAMES 合法、+1 非法。
         let ok = vec!["--frames".to_string(), MAX_FRAMES.to_string()];
@@ -1145,7 +1158,10 @@ mod tests {
         assert!((report.total_time - 25.0 * report.dt).abs() < 1e-3);
         assert!(report.frame_us.mean > 0.0);
         assert!(report.frame_us.max >= report.frame_us.min);
-        assert!(report.frame_us.p50 >= report.frame_us.min && report.frame_us.p50 <= report.frame_us.max);
+        assert!(
+            report.frame_us.p50 >= report.frame_us.min
+                && report.frame_us.p50 <= report.frame_us.max
+        );
         cleanup(&project);
     }
 
@@ -1157,7 +1173,10 @@ mod tests {
         let mut args = opts(&project, 25);
         args.dt = Some(1.0 / 120.0);
         let report = run(&args).expect("无头运行应成功");
-        assert_eq!(report.fixed_steps, 12, "25 帧 × 半速 = 12 个整步 + 半个余量");
+        assert_eq!(
+            report.fixed_steps, 12,
+            "25 帧 × 半速 = 12 个整步 + 半个余量"
+        );
         assert_ne!(report.dt, report.fixed_dt);
         cleanup(&project);
     }
@@ -1174,7 +1193,9 @@ mod tests {
             "function update(ctx)\n    log(ctx, 'tick')\nend\n",
         );
         patch_scene(&project, |scene| {
-            scene.entities.push(Entity::new("Logger").with_script("Scripts/tick.lua"));
+            scene
+                .entities
+                .push(Entity::new("Logger").with_script("Scripts/tick.lua"));
         });
 
         let report = run(&opts(&project, 10)).expect("无头运行应成功");
@@ -1198,7 +1219,9 @@ mod tests {
             "local n = 0\nfunction update(ctx)\n    n = n + 1\n    if n == 5 then set_time_scale(ctx, 0) end\nend\n",
         );
         patch_scene(&project, |scene| {
-            scene.entities.push(Entity::new("Pauser").with_script("Scripts/pause.lua"));
+            scene
+                .entities
+                .push(Entity::new("Pauser").with_script("Scripts/pause.lua"));
         });
 
         let report = run(&opts(&project, 20)).expect("无头运行应成功");
@@ -1224,7 +1247,9 @@ mod tests {
             "function update(ctx)\n    error(ctx, 'boom')\nend\n",
         );
         patch_scene(&project, |scene| {
-            scene.entities.push(Entity::new("Boomer").with_script("Scripts/boom.lua"));
+            scene
+                .entities
+                .push(Entity::new("Boomer").with_script("Scripts/boom.lua"));
         });
 
         let report = run(&opts(&project, 12)).expect("无头运行仍应跑完");
@@ -1246,14 +1271,19 @@ mod tests {
         let project = temp_project("broken");
         write_script(&project, "broken.lua", "function update(ctx)  -- 未闭合");
         patch_scene(&project, |scene| {
-            scene.entities.push(Entity::new("Broken").with_script("Scripts/broken.lua"));
+            scene
+                .entities
+                .push(Entity::new("Broken").with_script("Scripts/broken.lua"));
         });
 
         let report = run(&opts(&project, 5)).expect("无头运行仍应跑完");
         assert!(report.log_error >= 1, "编译失败必须有 error 日志");
         assert!(report.has_issues());
         assert!(
-            report.error_samples.iter().any(|s| s.contains("脚本加载失败")),
+            report
+                .error_samples
+                .iter()
+                .any(|s| s.contains("脚本加载失败")),
             "样本要指认编译失败: {:?}",
             report.error_samples
         );
@@ -1271,7 +1301,9 @@ mod tests {
             "function update(ctx)\n    error(ctx, 'boom')\nend\n",
         );
         patch_scene(&project, |scene| {
-            scene.entities.push(Entity::new("Boomer").with_script("Scripts/boom.lua"));
+            scene
+                .entities
+                .push(Entity::new("Boomer").with_script("Scripts/boom.lua"));
         });
 
         let report = run(&opts(&project, 30)).expect("无头运行应成功");
@@ -1336,7 +1368,9 @@ mod tests {
             "function update(ctx)\n    local nan = 0/0\n    set_pos(ctx, nan, nan, nan)\nend\n",
         );
         patch_scene(&project, |scene| {
-            scene.entities.push(Entity::new("NaN").with_script("Scripts/nan.lua"));
+            scene
+                .entities
+                .push(Entity::new("NaN").with_script("Scripts/nan.lua"));
         });
 
         let report = run(&opts(&project, 3)).expect("无头运行应成功");
@@ -1408,7 +1442,10 @@ mod tests {
             Err(e) => panic!("截图运行失败: {e}"),
         };
 
-        let shot = report.screenshot.as_ref().expect("报告必须带 screenshot 节");
+        let shot = report
+            .screenshot
+            .as_ref()
+            .expect("报告必须带 screenshot 节");
         assert_eq!((shot.width, shot.height), (320, 240));
         assert_eq!(
             shot.camera_mode, "auto",
@@ -1417,7 +1454,10 @@ mod tests {
         assert!(shot.eye.iter().all(|v| v.is_finite()));
         // 自动取景把整个场景框进视锥 ⇒ 剔除读数必须是 0（不是"碰巧没剔"，
         // 而是"没有可剔的东西"）。这也钉死了截图走的是生产剔除路径。
-        assert!(shot.render_stats.draw_calls >= 1, "立方体至少占一个 draw call");
+        assert!(
+            shot.render_stats.draw_calls >= 1,
+            "立方体至少占一个 draw call"
+        );
         assert_eq!(
             shot.render_stats.culled_instances, 0,
             "自动取景框住全场，不该有实例被剔除"
@@ -1490,7 +1530,10 @@ mod tests {
             }
             Err(e) => panic!("截图运行失败: {e}"),
         };
-        let shot = report.screenshot.as_ref().expect("报告必须带 screenshot 节");
+        let shot = report
+            .screenshot
+            .as_ref()
+            .expect("报告必须带 screenshot 节");
         assert_eq!(shot.eye, [0.0, 0.0, 4.0]);
         assert_eq!(shot.target, [0.0, 0.0, 0.0]);
         assert_eq!(shot.camera_mode, "explicit", "命令行机位优先级最高");
@@ -1527,7 +1570,10 @@ mod tests {
             }
             Err(e) => panic!("截图运行失败: {e}"),
         };
-        let shot = report.screenshot.as_ref().expect("报告必须带 screenshot 节");
+        let shot = report
+            .screenshot
+            .as_ref()
+            .expect("报告必须带 screenshot 节");
         assert_eq!(shot.camera_mode, "scene");
         assert_eq!(shot.eye, [7.0, 3.0, -2.0], "机位必须来自场景相机实体");
 
@@ -1603,7 +1649,10 @@ mod tests {
             assert!(value["audio"].get(key).is_some(), "audio 缺字段 {key}");
         }
         for key in ["alive", "emitters", "capacity"] {
-            assert!(value["particles"].get(key).is_some(), "particles 缺字段 {key}");
+            assert!(
+                value["particles"].get(key).is_some(),
+                "particles 缺字段 {key}"
+            );
         }
         for key in ["exposure", "tone_map", "bloom", "sky", "fxaa", "taa"] {
             assert!(value["render"].get(key).is_some(), "render 缺字段 {key}");
@@ -1626,7 +1675,9 @@ mod tests {
         assert_eq!(value["render"]["sky"]["sun_size"], f64::from(1.5f32));
         for key in ["zenith", "horizon", "ground"] {
             assert!(
-                value["render"]["sky"][key].as_array().is_some_and(|a| a.len() == 3),
+                value["render"]["sky"][key]
+                    .as_array()
+                    .is_some_and(|a| a.len() == 3),
                 "sky.{key} 应当是三通道数组"
             );
         }
@@ -1664,7 +1715,9 @@ mod tests {
             "function update(ctx)\n    error(ctx, 'boom')\nend\n",
         );
         patch_scene(&project, |scene| {
-            scene.entities.push(Entity::new("Boomer").with_script("Scripts/boom.lua"));
+            scene
+                .entities
+                .push(Entity::new("Boomer").with_script("Scripts/boom.lua"));
         });
         assert_eq!(cli(&clean), 2, "跑完但有 error 日志 = 2");
 
@@ -1685,8 +1738,8 @@ mod tests {
     /// 日志 / 物理，会在 CI 里被这条测试抓出来。
     #[test]
     fn bundled_sample_project_runs_clean_headless() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../projects/SampleScene");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/SampleScene");
         if !root.join("project.ron").is_file() {
             return; // 脱离仓库单独分发时跳过
         }
@@ -1698,7 +1751,11 @@ mod tests {
         })
         .expect("示例项目应当能无头跑");
 
-        assert!(!report.has_issues(), "示例项目必须干净: {:?}", report.error_samples);
+        assert!(
+            !report.has_issues(),
+            "示例项目必须干净: {:?}",
+            report.error_samples
+        );
         assert!(report.entities >= 5, "示例场景实体数: {}", report.entities);
         assert!(report.bodies >= 1, "示例场景有物理实体");
         assert_eq!(report.fixed_steps, 60);

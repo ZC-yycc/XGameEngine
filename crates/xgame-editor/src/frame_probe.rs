@@ -110,9 +110,7 @@ impl FrameProbe {
         let _ = writeln!(
             out,
             "t_us={t_us} dt_us={dt_us} w_us={w_us} {ptr} rt={} d={} p={pass_nr} live={}",
-            raw_time as u8,
-            will_discard as u8,
-            live as u8
+            raw_time as u8, will_discard as u8, live as u8
         );
     }
 }

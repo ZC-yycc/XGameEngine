@@ -131,8 +131,8 @@ impl Texture {
         label: &str,
     ) -> Result<Self, String> {
         let path = path.as_ref();
-        let image = image::open(path)
-            .map_err(|e| format!("无法读取纹理 '{}': {e}", path.display()))?;
+        let image =
+            image::open(path).map_err(|e| format!("无法读取纹理 '{}': {e}", path.display()))?;
         let rgba = image.to_rgba8();
         let (width, height) = rgba.dimensions();
         Ok(Self::from_rgba8_with(

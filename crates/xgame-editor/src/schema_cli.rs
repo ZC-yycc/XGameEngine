@@ -73,13 +73,11 @@ pub fn render_json() -> Result<String, String> {
 fn write_file(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!("创建目录 {} 失败: {error}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("创建目录 {} 失败: {error}", parent.display()))?;
         }
     }
-    std::fs::write(path, text)
-        .map_err(|error| format!("写入 {} 失败: {error}", path.display()))
+    std::fs::write(path, text).map_err(|error| format!("写入 {} 失败: {error}", path.display()))
 }
 
 /// 命令行入口（`main` 只负责分发与 `process::exit`）。
@@ -184,10 +182,7 @@ mod tests {
         assert_eq!(value["roots"][1]["root_type"], "Prefab");
         let types = value["types"].as_array().expect("types 数组");
         assert!(types.len() >= 30, "类型目录太小: {}", types.len());
-        assert!(
-            types.iter().any(|ty| ty["name"] == "Entity"),
-            "缺 Entity"
-        );
+        assert!(types.iter().any(|ty| ty["name"] == "Entity"), "缺 Entity");
         assert!(
             types
                 .iter()
@@ -202,7 +197,10 @@ mod tests {
         let path = temp_json_path("out");
         let _ = std::fs::remove_file(&path);
 
-        let code = cli(&args(&["--out", path.to_str().expect("临时路径必须是 UTF-8")]));
+        let code = cli(&args(&[
+            "--out",
+            path.to_str().expect("临时路径必须是 UTF-8"),
+        ]));
         assert_eq!(code, 0, "写文件应成功");
         let written = std::fs::read_to_string(&path).expect("文件应存在");
         assert_eq!(written, render_json().unwrap());

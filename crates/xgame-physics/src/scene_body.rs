@@ -67,12 +67,20 @@ fn collider_shape(shape: CollisionShape, scale: Vec3) -> ColliderShape {
             half_extents: Vec3::from_array(half_extents),
         },
         CollisionShape::Ball { radius } => ColliderShape::Ball { radius },
-        CollisionShape::Capsule { half_height, radius } => {
-            ColliderShape::Capsule { half_height, radius }
-        }
-        CollisionShape::Cylinder { half_height, radius } => {
-            ColliderShape::Cylinder { half_height, radius }
-        }
+        CollisionShape::Capsule {
+            half_height,
+            radius,
+        } => ColliderShape::Capsule {
+            half_height,
+            radius,
+        },
+        CollisionShape::Cylinder {
+            half_height,
+            radius,
+        } => ColliderShape::Cylinder {
+            half_height,
+            radius,
+        },
         // `Auto`：用实体缩放的绝对值当边长。
         //
         // 取**绝对值**而不是原值：负缩放是镜像（很常见的一种"翻转模型"技巧），

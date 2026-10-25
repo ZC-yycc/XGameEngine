@@ -109,14 +109,17 @@ fn derive_builds_the_declared_table() {
     );
 
     let speed = &table[0];
-    assert_eq!(speed.name, "speed", "寻址名永远是 Rust 字段名，不随 label 变");
-    assert_eq!(speed.kind, FieldKind::F32);
     assert_eq!(
-        speed.label,
-        Some("Speed"),
-        "`label` 只改显示名，不改寻址名"
+        speed.name, "speed",
+        "寻址名永远是 Rust 字段名，不随 label 变"
     );
-    assert_eq!(speed.min, Some(-720.0), "负号必须被认出来（`syn::Lit` 不含符号）");
+    assert_eq!(speed.kind, FieldKind::F32);
+    assert_eq!(speed.label, Some("Speed"), "`label` 只改显示名，不改寻址名");
+    assert_eq!(
+        speed.min,
+        Some(-720.0),
+        "负号必须被认出来（`syn::Lit` 不含符号）"
+    );
     assert_eq!(speed.max, Some(720.0));
     assert_eq!(speed.speed, Some(5.0));
     assert_eq!(speed.unit, "°/s");
@@ -136,7 +139,10 @@ fn derive_builds_the_declared_table() {
     assert_eq!(name.step, None);
     assert_eq!(name.unit, "");
     assert_eq!(name.tooltip, "");
-    assert!(!name.has_range(), "没声明边界 ⇒ 编辑器给裸拖拽值，不强加范围");
+    assert!(
+        !name.has_range(),
+        "没声明边界 ⇒ 编辑器给裸拖拽值，不强加范围"
+    );
 
     // 每种类型都要出现，否则"支持 N 种类型"这句话是空头支票。
     let kinds: Vec<FieldKind> = table.iter().map(|f| f.kind).collect();
@@ -191,7 +197,11 @@ fn get_and_set_agree_on_every_index() {
     for (i, desc) in table.iter().enumerate() {
         let (d, v) = t.inspect_field(i).expect("下标在表内");
         assert_eq!(d.name, desc.name, "inspect_field 的描述与表不一致");
-        assert_eq!(v, sample(desc.kind), "inspect_field 的值与 inspect_get 不一致");
+        assert_eq!(
+            v,
+            sample(desc.kind),
+            "inspect_field 的值与 inspect_get 不一致"
+        );
     }
 }
 

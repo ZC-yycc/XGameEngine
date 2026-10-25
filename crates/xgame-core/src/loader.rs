@@ -54,8 +54,10 @@ pub trait SceneLoader {
     /// "预制体是空的"，两种故障的处理方式完全不同。
     fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {
         let _ = relative;
-        Err("当前宿主没有接入预制体装载器（预制体生成需要 with_scene_loader + 项目句柄）"
-            .to_string())
+        Err(
+            "当前宿主没有接入预制体装载器（预制体生成需要 with_scene_loader + 项目句柄）"
+                .to_string(),
+        )
     }
 }
 

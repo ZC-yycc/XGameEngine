@@ -191,10 +191,8 @@ impl ProjectHub {
                                 ui.add_space(8.0);
                                 if ui
                                     .add(
-                                        egui::Button::new("打开项目").min_size(egui::vec2(
-                                            96.0,
-                                            theme::FIELD_HEIGHT + 6.0,
-                                        )),
+                                        egui::Button::new("打开项目")
+                                            .min_size(egui::vec2(96.0, theme::FIELD_HEIGHT + 6.0)),
                                     )
                                     .clicked()
                                 {
@@ -234,10 +232,7 @@ impl ProjectHub {
                                     ui.painter().hline(
                                         rect.x_range(),
                                         rect.center().y,
-                                        egui::Stroke::new(
-                                            1.0_f32,
-                                            theme::colors::SEPARATOR_SOFT,
-                                        ),
+                                        egui::Stroke::new(1.0_f32, theme::colors::SEPARATOR_SOFT),
                                     );
                                 }
                                 ui.add_space(4.0);
@@ -270,8 +265,7 @@ impl ProjectHub {
                                                             ui.set_min_width(112.0);
                                                             let response = ui.add(
                                                                 egui::Label::new(
-                                                                    RichText::new(name)
-                                                                        .size(12.0),
+                                                                    RichText::new(name).size(12.0),
                                                                 )
                                                                 .truncate()
                                                                 .sense(egui::Sense::click()),

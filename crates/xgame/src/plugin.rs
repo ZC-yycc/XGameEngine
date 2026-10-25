@@ -284,11 +284,9 @@ pub fn load_plugins_dir(
         .map(|e| e.path())
         .filter(|p| {
             p.is_file()
-                && p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| {
-                        e.eq_ignore_ascii_case(std::env::consts::DLL_SUFFIX.trim_start_matches('.'))
-                    })
+                && p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                    e.eq_ignore_ascii_case(std::env::consts::DLL_SUFFIX.trim_start_matches('.'))
+                })
         })
         .collect();
     dlls.sort();
@@ -396,7 +394,11 @@ mod tests {
     #[test]
     fn version_code_is_stable_and_never_zero() {
         assert_eq!(version_code("0.1.0"), 0x5800_0100);
-        assert_ne!(version_code("0.0.0"), 0, "魔数保证版本码永不为 0（0 是错误码）");
+        assert_ne!(
+            version_code("0.0.0"),
+            0,
+            "魔数保证版本码永不为 0（0 是错误码）"
+        );
         assert_ne!(version_code("0.1.0"), version_code("0.2.0"));
         // 预发布后缀不参与握手：只认 release 三段号。
         assert_eq!(version_code("0.1.0-rc.1"), version_code("0.1.0"));

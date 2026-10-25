@@ -153,7 +153,11 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([from, tip - dir * s * 0.12], stroke);
             let half = Vec2::new(-dir.y, dir.x) * s * 0.15;
             painter.add(Shape::convex_polygon(
-                vec![tip, tip - dir * s * 0.28 + half, tip - dir * s * 0.28 - half],
+                vec![
+                    tip,
+                    tip - dir * s * 0.28 + half,
+                    tip - dir * s * 0.28 - half,
+                ],
                 color,
                 Stroke::NONE,
             ));
@@ -294,10 +298,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             for (i, x) in [0.30_f32, 0.50, 0.70].iter().enumerate() {
                 let y = c.y + (i as f32 - 1.0) * s * 0.22;
                 painter.line_segment(
-                    [
-                        Pos2::new(c.x - s * 0.30, y),
-                        Pos2::new(c.x + s * 0.30, y),
-                    ],
+                    [Pos2::new(c.x - s * 0.30, y), Pos2::new(c.x + s * 0.30, y)],
                     Stroke::new(t * 0.8, color),
                 );
                 let knob_x = c.x + (x - 0.5) * s * 1.1;
@@ -418,7 +419,10 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 Stroke::new(t, color),
             ));
             painter.line_segment(
-                [Pos2::new(c.x, c.y - h * 0.28), Pos2::new(c.x, c.y + h * 0.22)],
+                [
+                    Pos2::new(c.x, c.y - h * 0.28),
+                    Pos2::new(c.x, c.y + h * 0.22),
+                ],
                 Stroke::new(t, color),
             );
             painter.circle_filled(Pos2::new(c.x, c.y + h * 0.48), t * 0.5, color);
@@ -480,8 +484,14 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Plus => {
             let r = s * 0.26;
-            painter.line_segment([c - Vec2::X * r, c + Vec2::X * r], Stroke::new(t * 1.1, color));
-            painter.line_segment([c - Vec2::Y * r, c + Vec2::Y * r], Stroke::new(t * 1.1, color));
+            painter.line_segment(
+                [c - Vec2::X * r, c + Vec2::X * r],
+                Stroke::new(t * 1.1, color),
+            );
+            painter.line_segment(
+                [c - Vec2::Y * r, c + Vec2::Y * r],
+                Stroke::new(t * 1.1, color),
+            );
         }
         Icon::Image => {
             // 相框 + 内部一座山 + 一颗太阳：小尺寸下仍能读出"这是图片"。
@@ -614,7 +624,10 @@ pub fn icon_text_button_colored(
         icon_color.unwrap_or(visuals.fg_stroke.color),
     );
     ui.painter().galley(
-        Pos2::new(icon_rect.right() + gap, rect.center().y - galley.size().y * 0.5),
+        Pos2::new(
+            icon_rect.right() + gap,
+            rect.center().y - galley.size().y * 0.5,
+        ),
         galley,
         visuals.text_color(),
     );
@@ -628,10 +641,7 @@ pub fn text_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui::Respo
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
-    let size = Vec2::new(
-        galley.size().x + 14.0,
-        super::theme::FIELD_HEIGHT + 2.0,
-    );
+    let size = Vec2::new(galley.size().x + 14.0, super::theme::FIELD_HEIGHT + 2.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let visuals = ui.style().interact(&response);
     if response.hovered() || response.is_pointer_button_down_on() {
@@ -680,8 +690,7 @@ pub fn close_button(ui: &mut egui::Ui, tooltip: &str) -> bool {
     let size = 16.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
     if response.hovered() {
-        ui.painter()
-            .rect_filled(rect, 2.0, colors::BUTTON_HOVER);
+        ui.painter().rect_filled(rect, 2.0, colors::BUTTON_HOVER);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let color = if response.hovered() {
@@ -714,10 +723,7 @@ pub fn chip(ui: &mut egui::Ui, label: &str, tooltip: &str) -> bool {
     };
     ui.painter().rect_filled(rect, 3.0, bg);
     ui.painter().galley(
-        Pos2::new(
-            rect.left() + 6.0,
-            rect.center().y - galley.size().y * 0.5,
-        ),
+        Pos2::new(rect.left() + 6.0, rect.center().y - galley.size().y * 0.5),
         galley,
         colors::TEXT_PRIMARY,
     );

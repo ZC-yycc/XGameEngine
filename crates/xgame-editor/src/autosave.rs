@@ -47,7 +47,6 @@ impl AutosaveNotice {
     }
 }
 
-
 /// 默认自动保存间隔（秒）。
 pub const DEFAULT_INTERVAL_SECS: u64 = 60;
 /// 间隔下限：比这更密就等于逐帧写盘。
@@ -204,7 +203,10 @@ mod tests {
 
         let t1 = t0 + Duration::from_secs(60);
         autosave.mark_attempt(t1);
-        assert!(!autosave.due_at(t1 + Duration::from_secs(1)), "写完之后要重新起算");
+        assert!(
+            !autosave.due_at(t1 + Duration::from_secs(1)),
+            "写完之后要重新起算"
+        );
         assert!(autosave.due_at(t1 + Duration::from_secs(60)));
     }
 
@@ -227,8 +229,14 @@ mod tests {
         let autosave = AutoSave::new(60, t0);
 
         assert_eq!(autosave.wait(t0), Some(Duration::from_secs(60)));
-        assert_eq!(autosave.wait(t0 + Duration::from_secs(30)), Some(Duration::from_secs(30)));
-        assert_eq!(autosave.wait(t0 + Duration::from_secs(90)), Some(Duration::ZERO));
+        assert_eq!(
+            autosave.wait(t0 + Duration::from_secs(30)),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            autosave.wait(t0 + Duration::from_secs(90)),
+            Some(Duration::ZERO)
+        );
     }
 
     /// 改间隔要立刻生效，不能让用户等旧计时器走完。
@@ -261,7 +269,10 @@ mod tests {
 
         assert_eq!(autosave.last_success(), Some(t0), "失败不改变上次成功时间");
         assert_eq!(autosave.last_error(), Some("磁盘满"));
-        assert!(autosave.due_at(t1 + Duration::from_secs(60)), "失败后照常重试一次");
+        assert!(
+            autosave.due_at(t1 + Duration::from_secs(60)),
+            "失败后照常重试一次"
+        );
     }
 
     #[test]

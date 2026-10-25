@@ -36,7 +36,11 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     .size(11.0)
                     .color(theme::colors::TEXT_SECONDARY),
             );
-            ui.label(egui::RichText::new("messages").size(11.0).color(theme::colors::TEXT_DIM));
+            ui.label(
+                egui::RichText::new("messages")
+                    .size(11.0)
+                    .color(theme::colors::TEXT_DIM),
+            );
         });
     });
 
@@ -56,26 +60,19 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     icons::small_icon(ui, icon, 11.0, color);
                     // 单行截断：一条 2KB 的报错不应该把控制台撑成一面墙。
                     ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&msg.text)
-                                .size(11.5)
-                                .color(color),
-                        )
-                        .truncate(),
+                        egui::Label::new(egui::RichText::new(&msg.text).size(11.5).color(color))
+                            .truncate(),
                     )
                     .on_hover_text(&msg.text);
                     if msg.count > 1 {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("×{}", msg.count))
-                                        .monospace()
-                                        .size(10.5)
-                                        .color(theme::colors::TEXT_DIM),
-                                );
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("×{}", msg.count))
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(theme::colors::TEXT_DIM),
+                            );
+                        });
                     }
                 });
             }

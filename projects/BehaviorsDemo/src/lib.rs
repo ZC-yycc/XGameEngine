@@ -49,9 +49,7 @@ pub struct Spinner {
 
 impl Default for Spinner {
     fn default() -> Self {
-        Self {
-            speed: SPIN_SPEED,
-        }
+        Self { speed: SPIN_SPEED }
     }
 }
 
@@ -225,7 +223,10 @@ mod tests {
         }
 
         // 起始 3.0，幅度 0.6 ⇒ 应当在 [2.4, 3.6] 之间来回。
-        assert!(min_y < 2.8 && max_y > 3.2, "应当真的浮起来了，实际 [{min_y:.3}, {max_y:.3}]");
+        assert!(
+            min_y < 2.8 && max_y > 3.2,
+            "应当真的浮起来了，实际 [{min_y:.3}, {max_y:.3}]"
+        );
         assert!(
             (min_y - 2.4).abs() < 0.05 && (max_y - 3.6).abs() < 0.05,
             "浮动必须围绕 start 高度 3.0 对称，实际 [{min_y:.3}, {max_y:.3}]"
@@ -245,7 +246,9 @@ mod tests {
         register_all(&mut registry);
 
         // -- Spinner：表 + 调参 ------------------------------------------------
-        let table = registry.field_table("Spinner").expect("Spinner 应当有字段表");
+        let table = registry
+            .field_table("Spinner")
+            .expect("Spinner 应当有字段表");
         assert_eq!(table.len(), 1);
         assert_eq!(table[0].name, "speed");
         assert_eq!(table[0].kind, FieldKind::F32);

@@ -1,4 +1,4 @@
-﻿//! 程序化天空盒 + 环境光照（IBL）。
+//! 程序化天空盒 + 环境光照（IBL）。
 //!
 //! # 天空是一个解析函数
 //!
@@ -119,12 +119,7 @@ impl SkyUniform {
             None => (Vec3::ZERO, [0.0; 3], 0.0),
         };
         Self {
-            sun_dir: [
-                dir.x,
-                dir.y,
-                dir.z,
-                if cfg.enabled { 1.0 } else { 0.0 },
-            ],
+            sun_dir: [dir.x, dir.y, dir.z, if cfg.enabled { 1.0 } else { 0.0 }],
             sun_color: [color[0], color[1], color[2], sun_intensity],
             zenith: [cfg.zenith[0], cfg.zenith[1], cfg.zenith[2], cfg.intensity],
             horizon: [cfg.horizon[0], cfg.horizon[1], cfg.horizon[2], cfg.sun_size],
@@ -685,9 +680,10 @@ impl SkyResources {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: std::num::NonZeroU64::new(
-                            std::mem::size_of::<PrefilterParams>() as u64,
-                        ),
+                        min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<
+                            PrefilterParams,
+                        >()
+                            as u64),
                     },
                     count: None,
                 },
@@ -714,7 +710,7 @@ impl SkyResources {
                         buffer: &prefilter_params,
                         offset: 0,
                         size: std::num::NonZeroU64::new(
-                            std::mem::size_of::<PrefilterParams>() as u64,
+                            std::mem::size_of::<PrefilterParams>() as u64
                         ),
                     }),
                 },
@@ -1185,15 +1181,11 @@ mod tests {
 
         // 与太阳成 30° 的方向：盘面半径 1.5° ⇒ 只剩余光滑落 + 渐变。
         let perp = sun_dir.cross(Vec3::Y).normalize();
-        let away = (sun_dir * 30f32.to_radians().cos()
-            + perp * 30f32.to_radians().sin())
-        .normalize();
+        let away =
+            (sun_dir * 30f32.to_radians().cos() + perp * 30f32.to_radians().sin()).normalize();
         let away_r = cpu::sky_radiance(&lit, away);
         for i in 0..3 {
-            assert!(
-                away_r[i] < 2.0,
-                "盘外 30° 不该有盘面贡献: {away_r:?}"
-            );
+            assert!(away_r[i] < 2.0, "盘外 30° 不该有盘面贡献: {away_r:?}");
         }
 
         // 无方向光：太阳强度 0，正对原太阳方向也不亮。天空渐变本身会随方向
@@ -1289,10 +1281,7 @@ mod tests {
                 "面 {face} 的中心方向应当是法轴: {center:?} vs {forward:?}"
             );
             let du = (cpu::face_direction(face, 0.6, 0.5) - center).normalize();
-            assert!(
-                du.dot(right) > 0.99,
-                "面 {face}：u 增大应当沿右向"
-            );
+            assert!(du.dot(right) > 0.99, "面 {face}：u 增大应当沿右向");
             let dv = (cpu::face_direction(face, 0.5, 0.4) - center).normalize();
             assert!(dv.dot(up) > 0.99, "面 {face}：v 减小应当沿上向");
             // 三根轴两两正交。
@@ -1322,13 +1311,55 @@ mod tests {
         let base_key = uniform_key(&base);
 
         let variants: Vec<SkyUniform> = vec![
-            SkyUniform::build(&SkyConfig { enabled: false, ..base_cfg }, sun),
-            SkyUniform::build(&SkyConfig { intensity: 1.7, ..base_cfg }, sun),
-            SkyUniform::build(&SkyConfig { sun_size: 4.0, ..base_cfg }, sun),
-            SkyUniform::build(&SkyConfig { sun_intensity: 0.5, ..base_cfg }, sun),
-            SkyUniform::build(&SkyConfig { zenith: [0.2, 0.3, 0.5], ..base_cfg }, sun),
-            SkyUniform::build(&SkyConfig { horizon: [0.3, 0.4, 0.6], ..base_cfg }, sun),
-            SkyUniform::build(&SkyConfig { ground: [0.1, 0.1, 0.1], ..base_cfg }, sun),
+            SkyUniform::build(
+                &SkyConfig {
+                    enabled: false,
+                    ..base_cfg
+                },
+                sun,
+            ),
+            SkyUniform::build(
+                &SkyConfig {
+                    intensity: 1.7,
+                    ..base_cfg
+                },
+                sun,
+            ),
+            SkyUniform::build(
+                &SkyConfig {
+                    sun_size: 4.0,
+                    ..base_cfg
+                },
+                sun,
+            ),
+            SkyUniform::build(
+                &SkyConfig {
+                    sun_intensity: 0.5,
+                    ..base_cfg
+                },
+                sun,
+            ),
+            SkyUniform::build(
+                &SkyConfig {
+                    zenith: [0.2, 0.3, 0.5],
+                    ..base_cfg
+                },
+                sun,
+            ),
+            SkyUniform::build(
+                &SkyConfig {
+                    horizon: [0.3, 0.4, 0.6],
+                    ..base_cfg
+                },
+                sun,
+            ),
+            SkyUniform::build(
+                &SkyConfig {
+                    ground: [0.1, 0.1, 0.1],
+                    ..base_cfg
+                },
+                sun,
+            ),
             SkyUniform::build(
                 &base_cfg,
                 Some((Vec3::new(0.1, 0.9, 0.4).normalize(), [1.0, 0.9, 0.8])),
@@ -1384,7 +1415,3 @@ mod tests {
         assert_eq!(on.sun_dir[3], 1.0);
     }
 }
-
-
-
-

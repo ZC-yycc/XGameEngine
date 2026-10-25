@@ -7,19 +7,19 @@ use glam::{Quat, Vec3};
 use xgame_core::{CharacterController, Color, Transform};
 use xgame_math::glam;
 
+use rapier3d::control::{EffectiveCharacterMovement, KinematicCharacterController};
 use rapier3d::dynamics::{
-    CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager,
-    MultibodyJointSet, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+    CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
+    RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
 };
 use rapier3d::geometry::{
-    BroadPhaseMultiSap as DefaultBroadPhase, ColliderBuilder, ColliderHandle,
-    ColliderSet, Group, InteractionGroups, NarrowPhase,
+    BroadPhaseMultiSap as DefaultBroadPhase, ColliderBuilder, ColliderHandle, ColliderSet, Group,
+    InteractionGroups, NarrowPhase,
 };
-use rapier3d::control::{EffectiveCharacterMovement, KinematicCharacterController};
 use rapier3d::math::Isometry;
 use rapier3d::parry::shape::Capsule;
-use rapier3d::prelude::{ActiveEvents, Ray};
 use rapier3d::pipeline::{PhysicsPipeline, QueryFilter, QueryFilterFlags, QueryPipeline};
+use rapier3d::prelude::{ActiveEvents, Ray};
 
 use crate::character::{
     build_rapier_controller, character_capsule, ground_prediction, CharacterMoveResult,
@@ -273,7 +273,11 @@ impl PhysicsWorld {
             .translation(translation)
             .linvel(glam_to_na_vec3(body.linear_velocity))
             .angvel(glam_to_na_vec3(body.angular_velocity))
-            .gravity_scale(if body.gravity_enabled { body.gravity_scale } else { 0.0 })
+            .gravity_scale(if body.gravity_enabled {
+                body.gravity_scale
+            } else {
+                0.0
+            })
             .linear_damping(body.linear_damping)
             .angular_damping(body.angular_damping)
             .can_sleep(body.can_sleep)
@@ -360,10 +364,18 @@ impl PhysicsWorld {
             .translation(glam_to_na_vec3(collider.offset));
 
         let rapier_handle = self.collider_set.insert_with_parent(
-            cb, body_record.rapier_handle, &mut self.rigid_body_set,
+            cb,
+            body_record.rapier_handle,
+            &mut self.rigid_body_set,
         );
 
-        self.colliders.insert(cid, ColliderRecord { rapier_handle, body_id });
+        self.colliders.insert(
+            cid,
+            ColliderRecord {
+                rapier_handle,
+                body_id,
+            },
+        );
         self.collider_handles.insert(rapier_handle, cid);
         self.body_colliders.entry(body_id).or_default().push(cid);
         Some(cid)
@@ -383,7 +395,9 @@ impl PhysicsWorld {
         };
         let mut changed = false;
         for cid in collider_ids {
-            let Some(record) = self.colliders.get(&cid) else { continue };
+            let Some(record) = self.colliders.get(&cid) else {
+                continue;
+            };
             if let Some(collider) = self.collider_set.get_mut(record.rapier_handle) {
                 collider.set_collision_groups(groups);
                 changed = true;
@@ -483,7 +497,9 @@ impl PhysicsWorld {
             let body_b = self.resolve_collider_body(c2);
             if let (Some(a), Some(b)) = (body_a, body_b) {
                 self.pending_events.push(CollisionEvent {
-                    body_a: a, body_b: b, started,
+                    body_a: a,
+                    body_b: b,
+                    started,
                 });
             }
         }
@@ -636,7 +652,11 @@ impl PhysicsWorld {
             // 用**沿期望方向**的投影而不是位移长度：贴墙时 `handle_slopes`
             // 的推离分量是反方向的一小段，按长度算会误判成"已经走了"，
             // 自动上台阶永远等不到机会（实测在原地来回抖 1.5cm）。
-            let dir = if want_h > 1e-4 { flat / want_h } else { Vec3::ZERO };
+            let dir = if want_h > 1e-4 {
+                flat / want_h
+            } else {
+                Vec3::ZERO
+            };
             let got_h = Vec3::new(movement.translation.x, 0.0, movement.translation.z)
                 .dot(dir)
                 .max(0.0);
@@ -730,9 +750,7 @@ impl PhysicsWorld {
         // ---- 最终着地判定与地面法线 ----
         // 法线探测距离宽容到 snap 距离（下滑时也能拿到坡面法线）；
         // grounded 判定则严格用 predict_ground 的间隙窗口。
-        let (ground_normal, grounded) = match self
-            .probe_ground(handle, &c, &new_pos, lookahead)
-        {
+        let (ground_normal, grounded) = match self.probe_ground(handle, &c, &new_pos, lookahead) {
             Some((normal, gap)) => (
                 normal,
                 normal.dot(Vec3::Y) >= GROUND_NORMAL_MIN_DOT && gap <= prediction + 1e-5,
@@ -814,7 +832,14 @@ impl PhysicsWorld {
         let advance = dir * (horiz_len + radius + 0.02);
 
         // 1. 头顶得先有空间，否则就是"钻进天花板"。
-        let lift = self.probe_move(controller, shape, char_pos, Vec3::Y * step_height, filter, dt);
+        let lift = self.probe_move(
+            controller,
+            shape,
+            char_pos,
+            Vec3::Y * step_height,
+            filter,
+            dt,
+        );
         if lift.translation.y < step_height - 1e-3 {
             return None;
         }
@@ -835,7 +860,14 @@ impl PhysicsWorld {
         //    落了整整一个 `step_height`（只剩皮肤的余量）就说明前面是平地，
         //    不是台阶 —— 那叫"抬起来又放回原地"，采纳它只会把角色塞进墙里。
         let down_dist = step_height + 0.05;
-        let down = self.probe_move(controller, shape, &advanced, -Vec3::Y * down_dist, filter, dt);
+        let down = self.probe_move(
+            controller,
+            shape,
+            &advanced,
+            -Vec3::Y * down_dist,
+            filter,
+            dt,
+        );
         if down.translation.y <= -(step_height - rest - 1e-3) {
             return None;
         }
@@ -1016,8 +1048,19 @@ impl PhysicsWorld {
     ///
     /// `distance` 是沿**归一化方向**的长度；`direction` 传零向量时返回 `None`
     /// （而不是抛错）—— 调用方多半是脚本，不该因为一次笔误打断整帧。
-    pub fn raycast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<PhysicsRayHit> {
-        self.raycast_with_filter(origin, direction, max_distance, true, RaycastFilter::default())
+    pub fn raycast(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+    ) -> Option<PhysicsRayHit> {
+        self.raycast_with_filter(
+            origin,
+            direction,
+            max_distance,
+            true,
+            RaycastFilter::default(),
+        )
     }
 
     /// 带过滤条件的射线检测。
@@ -1044,12 +1087,11 @@ impl PhysicsWorld {
         // 于是"射线想看第 5 层"会被第 5 层自己的碰撞矩阵挡掉 —— 与 Unity
         // 的 layerMask 语义不符。这里只查成员位。
         let mask = filter.layer_mask;
-        let layer_predicate = |_handle: ColliderHandle, collider: &rapier3d::geometry::Collider| {
-            match mask {
+        let layer_predicate =
+            |_handle: ColliderHandle, collider: &rapier3d::geometry::Collider| match mask {
                 Some(mask) => (collider.collision_groups().memberships.bits() & mask) != 0,
                 None => true,
-            }
-        };
+            };
         let mut query_filter = self.build_query_filter(filter);
         if mask.is_some() {
             query_filter.predicate = Some(&layer_predicate);
@@ -1116,7 +1158,9 @@ impl PhysicsWorld {
 
         for record in self.colliders.values() {
             // 获取碰撞体及其形状
-            let Some(collider) = self.collider_set.get(record.rapier_handle) else { continue };
+            let Some(collider) = self.collider_set.get(record.rapier_handle) else {
+                continue;
+            };
 
             // 用形状 + 位置计算世界空间 AABB
             let shape = collider.shape();
@@ -1138,17 +1182,34 @@ impl PhysicsWorld {
             ];
 
             const EDGES: [(usize, usize); 12] = [
-                (0, 1), (1, 2), (2, 3), (3, 0),
-                (4, 5), (5, 6), (6, 7), (7, 4),
-                (0, 4), (1, 5), (2, 6), (3, 7),
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (7, 4),
+                (0, 4),
+                (1, 5),
+                (2, 6),
+                (3, 7),
             ];
 
             // 判断是否为动态体（绿色）或静态体（红色）
             let c = if let Some(body_record) = self.bodies.get(&record.body_id) {
                 if let Some(rb) = self.rigid_body_set.get(body_record.rapier_handle) {
-                    if rb.is_dynamic() { green } else { red }
-                } else { color }
-            } else { color };
+                    if rb.is_dynamic() {
+                        green
+                    } else {
+                        red
+                    }
+                } else {
+                    color
+                }
+            } else {
+                color
+            };
 
             for (a, b) in EDGES {
                 lines.push(DebugLine::new(corners[a], corners[b], c));
@@ -1198,9 +1259,7 @@ fn glam_to_na_point(v: glam::Vec3) -> rapier3d::na::Point3<f32> {
 }
 
 fn glam_quat_to_na_rotation(q: glam::Quat) -> rapier3d::na::UnitQuaternion<f32> {
-    rapier3d::na::UnitQuaternion::from_quaternion(rapier3d::na::Quaternion::new(
-        q.w, q.x, q.y, q.z,
-    ))
+    rapier3d::na::UnitQuaternion::from_quaternion(rapier3d::na::Quaternion::new(q.w, q.x, q.y, q.z))
 }
 
 /// 裸位掩码 → rapier 的碰撞组。
@@ -1220,23 +1279,31 @@ fn collider_to_shared_shape(shape: &ColliderShape) -> rapier3d::geometry::Shared
             rapier3d::geometry::SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z)
         }
         ColliderShape::Ball { radius } => rapier3d::geometry::SharedShape::ball(*radius),
-        ColliderShape::Capsule { half_height, radius } => {
-            rapier3d::geometry::SharedShape::capsule(
-                rapier3d::na::Point3::new(0.0, -*half_height, 0.0),
-                rapier3d::na::Point3::new(0.0, *half_height, 0.0),
-                *radius,
-            )
-        }
-        ColliderShape::Cylinder { half_height, radius } => {
-            rapier3d::geometry::SharedShape::cylinder(*half_height, *radius)
-        }
-        ColliderShape::Trimesh { vertices, indices } => {
-            rapier3d::geometry::SharedShape::trimesh(
-                vertices.iter().map(|v| rapier3d::na::Point3::new(v[0], v[1], v[2])).collect(),
-                indices.iter().map(|t| [t[0], t[1], t[2]]).collect(),
-            )
-        }
-        ColliderShape::HeightField { heights, nx, nz, scale } => {
+        ColliderShape::Capsule {
+            half_height,
+            radius,
+        } => rapier3d::geometry::SharedShape::capsule(
+            rapier3d::na::Point3::new(0.0, -*half_height, 0.0),
+            rapier3d::na::Point3::new(0.0, *half_height, 0.0),
+            *radius,
+        ),
+        ColliderShape::Cylinder {
+            half_height,
+            radius,
+        } => rapier3d::geometry::SharedShape::cylinder(*half_height, *radius),
+        ColliderShape::Trimesh { vertices, indices } => rapier3d::geometry::SharedShape::trimesh(
+            vertices
+                .iter()
+                .map(|v| rapier3d::na::Point3::new(v[0], v[1], v[2]))
+                .collect(),
+            indices.iter().map(|t| [t[0], t[1], t[2]]).collect(),
+        ),
+        ColliderShape::HeightField {
+            heights,
+            nx,
+            nz,
+            scale,
+        } => {
             let data = rapier3d::na::DMatrix::from_row_slice(*nx as usize, *nz as usize, heights);
             rapier3d::geometry::SharedShape::heightfield(data, na_vector(scale.x, scale.y, scale.z))
         }
@@ -1537,7 +1604,10 @@ mod tests {
                 ..RaycastFilter::default()
             },
         );
-        assert!(hit.is_some(), "掩码包含目标层时必须命中（矩阵不参与查询过滤）");
+        assert!(
+            hit.is_some(),
+            "掩码包含目标层时必须命中（矩阵不参与查询过滤）"
+        );
         assert_eq!(hit.unwrap().body_id, Some(target));
 
         // 别的层掩码：打不到。
@@ -1554,6 +1624,8 @@ mod tests {
         assert!(miss.is_none(), "掩码不含目标层时必须打不到");
 
         // 不给掩码 = 和以前一样，全都算。
-        assert!(world.raycast(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 100.0).is_some());
+        assert!(world
+            .raycast(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 100.0)
+            .is_some());
     }
 }

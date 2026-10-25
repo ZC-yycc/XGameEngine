@@ -133,19 +133,17 @@ mod tests {
     /// 站在原点、朝 -Z 看、90° 视场、近 0.1 远 100 的相机。
     fn camera() -> Mat4 {
         let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), Vec3::Y);
-        let proj = Mat4::perspective_rh(
-            std::f32::consts::FRAC_PI_2,
-            1.0,
-            0.1,
-            100.0,
-        );
+        let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.1, 100.0);
         proj * view
     }
 
     #[test]
     fn point_in_front_is_visible_and_point_behind_is_not() {
         let f = Frustum::from_view_proj(&camera()).expect("标准透视矩阵必须能提平面");
-        assert!(f.contains_point(Vec3::new(0.0, 0.0, -5.0)), "正前方的点可见");
+        assert!(
+            f.contains_point(Vec3::new(0.0, 0.0, -5.0)),
+            "正前方的点可见"
+        );
         assert!(
             !f.contains_point(Vec3::new(0.0, 0.0, 5.0)),
             "相机背后的点不可见"
@@ -156,50 +154,50 @@ mod tests {
     fn near_plane_follows_wgpu_depth_convention() {
         // 相机原点与近平面之间的点必须被裁掉；差一点跨进近平面的点必须留下。
         let f = Frustum::from_view_proj(&camera()).unwrap();
-        assert!(!f.contains_point(Vec3::new(0.0, 0.0, -0.05)), "近平面以内的点不可见");
-        assert!(f.contains_point(Vec3::new(0.0, 0.0, -0.2)), "近平面之外可见");
-        assert!(!f.contains_point(Vec3::new(0.0, 0.0, 5.0)), "相机背后的点不可见");
+        assert!(
+            !f.contains_point(Vec3::new(0.0, 0.0, -0.05)),
+            "近平面以内的点不可见"
+        );
+        assert!(
+            f.contains_point(Vec3::new(0.0, 0.0, -0.2)),
+            "近平面之外可见"
+        );
+        assert!(
+            !f.contains_point(Vec3::new(0.0, 0.0, 5.0)),
+            "相机背后的点不可见"
+        );
     }
 
     #[test]
     fn far_plane_culls_runaway_points() {
         let f = Frustum::from_view_proj(&camera()).unwrap();
         assert!(f.contains_point(Vec3::new(0.0, 0.0, -50.0)));
-        assert!(!f.contains_point(Vec3::new(0.0, 0.0, -150.0)), "远平面之外不可见");
+        assert!(
+            !f.contains_point(Vec3::new(0.0, 0.0, -150.0)),
+            "远平面之外不可见"
+        );
     }
 
     #[test]
     fn aabb_crossing_the_near_plane_is_kept() {
         let f = Frustum::from_view_proj(&camera()).unwrap();
         // 盒子从相机背后（z = +1）一直伸到前方 z = -2：与视锥相交。
-        assert!(f.intersects_aabb(
-            Vec3::new(-0.5, -0.5, -2.0),
-            Vec3::new(0.5, 0.5, 1.0)
-        ));
+        assert!(f.intersects_aabb(Vec3::new(-0.5, -0.5, -2.0), Vec3::new(0.5, 0.5, 1.0)));
     }
 
     #[test]
     fn aabb_fully_behind_camera_is_culled() {
         let f = Frustum::from_view_proj(&camera()).unwrap();
-        assert!(!f.intersects_aabb(
-            Vec3::new(-0.5, -0.5, 1.0),
-            Vec3::new(0.5, 0.5, 2.0)
-        ));
+        assert!(!f.intersects_aabb(Vec3::new(-0.5, -0.5, 1.0), Vec3::new(0.5, 0.5, 2.0)));
     }
 
     #[test]
     fn aabb_fully_outside_the_side_is_culled() {
         let f = Frustum::from_view_proj(&camera()).unwrap();
         // 90° 视场：z=-10 处半宽为 10；盒子在 x=20 处完全在外侧。
-        assert!(!f.intersects_aabb(
-            Vec3::new(19.0, -0.5, -11.0),
-            Vec3::new(21.0, 0.5, -9.0)
-        ));
+        assert!(!f.intersects_aabb(Vec3::new(19.0, -0.5, -11.0), Vec3::new(21.0, 0.5, -9.0)));
         // 贴着边缘的盒子必须留下（保守性）。
-        assert!(f.intersects_aabb(
-            Vec3::new(8.9, -0.5, -11.0),
-            Vec3::new(9.1, 0.5, -9.0)
-        ));
+        assert!(f.intersects_aabb(Vec3::new(8.9, -0.5, -11.0), Vec3::new(9.1, 0.5, -9.0)));
     }
 
     #[test]
@@ -215,11 +213,7 @@ mod tests {
     fn orthographic_frustum_contains_whole_scene_box() {
         // 阴影拟合用的正交矩阵：盒内任意点都必须在视锥内。
         let proj = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 50.0);
-        let view = Mat4::look_at_rh(
-            Vec3::new(0.0, 20.0, 0.0),
-            Vec3::ZERO,
-            Vec3::Z,
-        );
+        let view = Mat4::look_at_rh(Vec3::new(0.0, 20.0, 0.0), Vec3::ZERO, Vec3::Z);
         let f = Frustum::from_view_proj(&(proj * view)).unwrap();
         let bounds = Bounds {
             min: Vec3::new(-5.0, -5.0, -5.0),
@@ -244,10 +238,7 @@ mod tests {
         };
         let fast = b.transformed_affine(&m);
         let slow = b.transformed(&m);
-        for (a, e) in [
-            (fast.min, slow.min),
-            (fast.max, slow.max),
-        ] {
+        for (a, e) in [(fast.min, slow.min), (fast.max, slow.max)] {
             assert!(
                 (a - e).abs().max_element() < 1e-5,
                 "解析式 {a:?} 与角点法 {e:?} 必须一致"

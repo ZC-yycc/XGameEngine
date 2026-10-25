@@ -63,12 +63,24 @@ pub enum Binding {
 impl Binding {
     /// `Ctrl+键`。
     pub fn ctrl(key: KeyCode) -> Self {
-        Binding::Combo { key, ctrl: true, shift: false, alt: false, sup: false }
+        Binding::Combo {
+            key,
+            ctrl: true,
+            shift: false,
+            alt: false,
+            sup: false,
+        }
     }
 
     /// `Shift+键`。
     pub fn shift(key: KeyCode) -> Self {
-        Binding::Combo { key, ctrl: false, shift: true, alt: false, sup: false }
+        Binding::Combo {
+            key,
+            ctrl: false,
+            shift: true,
+            alt: false,
+            sup: false,
+        }
     }
 
     /// UI 上显示的名字，例如 `"Ctrl+S"`。
@@ -76,12 +88,26 @@ impl Binding {
         match self {
             Binding::Key(k) => k.display_name().to_owned(),
             Binding::Mouse(m) => m.display_name().to_owned(),
-            Binding::Combo { key, ctrl, shift, alt, sup } => {
+            Binding::Combo {
+                key,
+                ctrl,
+                shift,
+                alt,
+                sup,
+            } => {
                 let mut parts: Vec<&str> = Vec::new();
-                if *ctrl { parts.push("Ctrl"); }
-                if *shift { parts.push("Shift"); }
-                if *alt { parts.push("Alt"); }
-                if *sup { parts.push("Super"); }
+                if *ctrl {
+                    parts.push("Ctrl");
+                }
+                if *shift {
+                    parts.push("Shift");
+                }
+                if *alt {
+                    parts.push("Alt");
+                }
+                if *sup {
+                    parts.push("Super");
+                }
                 parts.push(key.display_name());
                 parts.join("+")
             }
@@ -93,9 +119,13 @@ impl Binding {
         match self {
             Binding::Key(k) => state.key_down(*k),
             Binding::Mouse(m) => state.mouse_down(*m),
-            Binding::Combo { key, ctrl, shift, alt, sup } => {
-                state.key_down(*key) && state.modifiers_match(*ctrl, *shift, *alt, *sup)
-            }
+            Binding::Combo {
+                key,
+                ctrl,
+                shift,
+                alt,
+                sup,
+            } => state.key_down(*key) && state.modifiers_match(*ctrl, *shift, *alt, *sup),
         }
     }
 
@@ -107,9 +137,13 @@ impl Binding {
             // 组合键只认"主键刚按下"这一瞬间，并要求修饰键当时是精确的那一组。
             // 反过来（修饰键刚按下就算触发）会让 `Ctrl+S` 在你先按 Ctrl 时
             // 毫无预兆地立刻触发一次。
-            Binding::Combo { key, ctrl, shift, alt, sup } => {
-                state.key_pressed(*key) && state.modifiers_match(*ctrl, *shift, *alt, *sup)
-            }
+            Binding::Combo {
+                key,
+                ctrl,
+                shift,
+                alt,
+                sup,
+            } => state.key_pressed(*key) && state.modifiers_match(*ctrl, *shift, *alt, *sup),
         }
     }
 
@@ -181,7 +215,8 @@ impl InputMap {
         positive: Vec<Binding>,
         negative: Vec<Binding>,
     ) -> &mut Self {
-        self.axes.insert(axis.into(), AxisBinding { positive, negative });
+        self.axes
+            .insert(axis.into(), AxisBinding { positive, negative });
         self
     }
 
@@ -213,8 +248,11 @@ impl InputMap {
         map.bind("TogglePause", Binding::Key(KeyCode::KeyP));
         // 数字键快速切换 —— 多对一：物理位置 Digit1..Digit5 是绝大多数玩家的直觉。
         for (i, code) in [
-            KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
-            KeyCode::Digit4, KeyCode::Digit5,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
         ]
         .into_iter()
         .enumerate()
@@ -224,13 +262,22 @@ impl InputMap {
 
         map.bind_axis(
             "MoveX",
-            vec![Binding::Key(KeyCode::KeyD), Binding::Key(KeyCode::ArrowRight)],
-            vec![Binding::Key(KeyCode::KeyA), Binding::Key(KeyCode::ArrowLeft)],
+            vec![
+                Binding::Key(KeyCode::KeyD),
+                Binding::Key(KeyCode::ArrowRight),
+            ],
+            vec![
+                Binding::Key(KeyCode::KeyA),
+                Binding::Key(KeyCode::ArrowLeft),
+            ],
         );
         map.bind_axis(
             "MoveY",
             vec![Binding::Key(KeyCode::KeyW), Binding::Key(KeyCode::ArrowUp)],
-            vec![Binding::Key(KeyCode::KeyS), Binding::Key(KeyCode::ArrowDown)],
+            vec![
+                Binding::Key(KeyCode::KeyS),
+                Binding::Key(KeyCode::ArrowDown),
+            ],
         );
         // 上下轴单独一条：`MoveY` 是"水平方向的前后"，`Lift` 是垂直升降。
         map.bind_axis(
@@ -284,7 +331,10 @@ pub struct Input {
 
 impl Input {
     pub fn new(map: InputMap) -> Self {
-        Self { state: InputState::new(), map }
+        Self {
+            state: InputState::new(),
+            map,
+        }
     }
 
     /// 使用默认游戏映射。
@@ -357,14 +407,8 @@ impl Input {
         let Some(binding) = self.map.axes.get(axis) else {
             return 0.0;
         };
-        let pos = binding
-            .positive
-            .iter()
-            .any(|b| b.is_down(&self.state)) as i32;
-        let neg = binding
-            .negative
-            .iter()
-            .any(|b| b.is_down(&self.state)) as i32;
+        let pos = binding.positive.iter().any(|b| b.is_down(&self.state)) as i32;
+        let neg = binding.negative.iter().any(|b| b.is_down(&self.state)) as i32;
         (pos - neg) as f32
     }
 

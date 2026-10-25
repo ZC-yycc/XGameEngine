@@ -39,9 +39,7 @@ use kira::listener::ListenerHandle;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::sound::PlaybackState;
 use kira::track::{SpatialTrackBuilder, SpatialTrackDistances, SpatialTrackHandle};
-use kira::{
-    AudioManager, AudioManagerSettings, Capacities, Decibels, DefaultBackend, Tween,
-};
+use kira::{AudioManager, AudioManagerSettings, Capacities, Decibels, DefaultBackend, Tween};
 use xgame_core::{AudioCommand, AudioStats, EntityId, ListenerPose, PlaySound};
 
 /// 默认后端的管理器类型（别名只为压低签名噪音）。
@@ -167,7 +165,12 @@ impl AudioEngine {
     }
 
     /// 结算一批命令：刷监听者与主音量 → 逐条执行 → GC。
-    pub fn apply(&mut self, commands: &[AudioCommand], listener: &ListenerPose, master_volume: f32) {
+    pub fn apply(
+        &mut self,
+        commands: &[AudioCommand],
+        listener: &ListenerPose,
+        master_volume: f32,
+    ) {
         self.last_batch = commands.len();
         self.update_listener(listener);
         self.update_master_volume(master_volume);
@@ -240,9 +243,8 @@ impl AudioEngine {
         // kira 只认 `StaticSoundData` 自己的 `SoundData` 实现。
         let mut data = (*data).clone();
         data.settings.volume = kira::Value::Fixed(linear_to_decibels(request.volume));
-        data.settings.playback_rate = kira::Value::Fixed(kira::PlaybackRate(
-            request.pitch.clamp(0.05, 16.0) as f64,
-        ));
+        data.settings.playback_rate =
+            kira::Value::Fixed(kira::PlaybackRate(request.pitch.clamp(0.05, 16.0) as f64));
         if request.looping {
             data.settings.loop_region = Some(kira::sound::Region::from(..));
         }
@@ -448,7 +450,8 @@ mod tests {
         bytes.extend_from_slice(&data_len.to_le_bytes());
         for i in 0..samples {
             let t = i as f32 / SAMPLE_RATE as f32;
-            let sample = (0.5 * (2.0 * std::f32::consts::PI * 440.0 * t).sin() * i16::MAX as f32) as i16;
+            let sample =
+                (0.5 * (2.0 * std::f32::consts::PI * 440.0 * t).sin() * i16::MAX as f32) as i16;
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         std::fs::write(path, bytes).expect("写测试 WAV");
@@ -586,9 +589,17 @@ mod tests {
     fn linear_volume_maps_to_decibels_safely() {
         assert_eq!(linear_to_decibels(1.0), Decibels::IDENTITY);
         assert_eq!(linear_to_decibels(0.0), Decibels::SILENCE);
-        assert_eq!(linear_to_decibels(2.0), Decibels::IDENTITY, "超界 clamp 到 1.0");
+        assert_eq!(
+            linear_to_decibels(2.0),
+            Decibels::IDENTITY,
+            "超界 clamp 到 1.0"
+        );
         assert_eq!(linear_to_decibels(f32::NAN), Decibels::SILENCE);
         let half = linear_to_decibels(0.5);
-        assert!((half.0 - (-6.0206)).abs() < 1e-3, "0.5 线性 ≈ -6 dB: {:?}", half.0);
+        assert!(
+            (half.0 - (-6.0206)).abs() < 1e-3,
+            "0.5 线性 ≈ -6 dB: {:?}",
+            half.0
+        );
     }
 }

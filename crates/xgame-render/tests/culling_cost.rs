@@ -58,7 +58,9 @@ use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::GltfMesh;
 use xgame_render::mesh::BuiltinMesh;
 use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
-use xgame_render::scene_pipeline::{supported_sample_count, FrameStats, SceneLighting, ScenePipeline};
+use xgame_render::scene_pipeline::{
+    supported_sample_count, FrameStats, SceneLighting, ScenePipeline,
+};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -146,7 +148,11 @@ fn actor_scene(unique_meshes: bool) -> Scene {
     scene
 }
 
-fn actor_cache(device: &wgpu::Device, queue: &wgpu::Queue, unique: bool) -> HashMap<String, GltfMesh> {
+fn actor_cache(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    unique: bool,
+) -> HashMap<String, GltfMesh> {
     let data = BuiltinMesh::Cube.build();
     let mut cache = HashMap::with_capacity(if unique { ACTORS + 1 } else { 1 });
     if unique {
@@ -321,10 +327,16 @@ fn run_round(
         let _ = tx.send(r);
     });
     device.poll(wgpu::Maintain::Wait);
-    rx.recv().expect("读回通道断开").expect("映射时间戳缓冲失败");
+    rx.recv()
+        .expect("读回通道断开")
+        .expect("映射时间戳缓冲失败");
     let ticks: Vec<u64> = {
         let view = slice.get_mapped_range();
-        view.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect()
+        view.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
+            .collect()
     };
     readback.unmap();
 
@@ -445,7 +457,10 @@ fn measure(
     }
 
     let pick = |f: fn(&Round) -> f64, idx: usize| {
-        let mut v: Vec<f64> = rounds.iter().map(|r| f(if idx == 0 { &r.0 } else { &r.1 })).collect();
+        let mut v: Vec<f64> = rounds
+            .iter()
+            .map(|r| f(if idx == 0 { &r.0 } else { &r.1 }))
+            .collect();
         median(&mut v)
     };
     let off = Round {
@@ -467,7 +482,10 @@ fn measure(
         off.scene_us > 0.0 && on.scene_us > 0.0,
         "{label}: 时间戳读数为 0：适配器是不是没真正写入查询？读数不可信"
     );
-    assert_eq!(off_stats.culled_entities, 0, "{label}: 关剔除时不该有实体被跳过");
+    assert_eq!(
+        off_stats.culled_entities, 0,
+        "{label}: 关剔除时不该有实体被跳过"
+    );
     assert_eq!(
         off_stats.opaque_instances, ACTORS,
         "{label}: 关剔除时必须全部进主 pass"

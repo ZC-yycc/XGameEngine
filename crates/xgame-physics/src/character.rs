@@ -366,9 +366,23 @@ mod tests {
             ..Default::default()
         };
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
-        add_box(&mut w, Vec3::new(1.5, 0.1, 0.0), Vec3::new(0.5, 0.1, 1.0), Quat::IDENTITY);
-        let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, rest_gap(&def)), 0.0), &def);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
+        add_box(
+            &mut w,
+            Vec3::new(1.5, 0.1, 0.0),
+            Vec3::new(0.5, 0.1, 1.0),
+            Quat::IDENTITY,
+        );
+        let body = add_character(
+            &mut w,
+            Vec3::new(0.0, standing_y(&def, rest_gap(&def)), 0.0),
+            &def,
+        );
         drive(&mut w, body, &def, Vec3::new(1.5, 0.0, 0.0), 60);
         let p = pos_of(&w, body);
         assert!(
@@ -456,7 +470,10 @@ mod tests {
             "胶囊总高应等于 height（{expected}），实际 {h}"
         );
         let w = aabb.maxs.x - aabb.mins.x;
-        assert!((w - 2.0 * def.radius).abs() < 1e-4, "胶囊直径应等于 2·radius");
+        assert!(
+            (w - 2.0 * def.radius).abs() < 1e-4,
+            "胶囊直径应等于 2·radius"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -475,7 +492,12 @@ mod tests {
     #[test]
     fn standing_on_ground_stays_grounded() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let rest = rest_gap(&def);
         let ground_y = standing_y(&def, rest);
@@ -500,8 +522,18 @@ mod tests {
     fn snap_pulls_character_down_a_low_step() {
         let mut w = test_world();
         // 上层台面 y=0（x ≤ 0），下层地面 y=-0.18（x ≥ 0）。
-        add_box(&mut w, Vec3::new(-3.0, -0.5, 0.0), Vec3::new(3.0, 0.5, 6.0), Quat::IDENTITY);
-        add_box(&mut w, Vec3::new(3.0, -0.68, 0.0), Vec3::new(3.0, 0.5, 6.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(-3.0, -0.5, 0.0),
+            Vec3::new(3.0, 0.5, 6.0),
+            Quat::IDENTITY,
+        );
+        add_box(
+            &mut w,
+            Vec3::new(3.0, -0.68, 0.0),
+            Vec3::new(3.0, 0.5, 6.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(-0.6, standing_y(&def, 0.0), 0.0), &def);
 
@@ -510,7 +542,10 @@ mod tests {
         assert!(start.grounded, "应站在上层台面上");
         let r = drive(&mut w, body, &def, Vec3::new(1.2, -0.5, 0.0), 70);
         let p = pos_of(&w, body);
-        assert!(r.grounded, "落下 0.18m 后仍应着地（snap 应把角色吸到下层地面）");
+        assert!(
+            r.grounded,
+            "落下 0.18m 后仍应着地（snap 应把角色吸到下层地面）"
+        );
         assert!(
             (p.y - (def.radius + def.half_height() - 0.18)).abs() < 0.03,
             "应站在下层地面上（期望 y≈{}），实际 y={}（0.18m 的落差没被 snap 吃掉？）",
@@ -523,7 +558,12 @@ mod tests {
     #[test]
     fn hovering_beyond_prediction_is_not_grounded() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, 0.05), 0.0), &def);
 
@@ -540,9 +580,19 @@ mod tests {
     #[test]
     fn tall_wall_blocks_horizontal_movement() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         // 墙面在 x = 2.0。
-        add_box(&mut w, Vec3::new(2.5, 1.5, 0.0), Vec3::new(0.5, 1.5, 3.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(2.5, 1.5, 0.0),
+            Vec3::new(0.5, 1.5, 3.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, 0.0), 0.0), &def);
 
@@ -568,8 +618,18 @@ mod tests {
     #[test]
     fn slide_along_wall_preserves_tangential_motion() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
-        add_box(&mut w, Vec3::new(2.5, 1.5, 0.0), Vec3::new(0.5, 1.5, 3.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
+        add_box(
+            &mut w,
+            Vec3::new(2.5, 1.5, 0.0),
+            Vec3::new(0.5, 1.5, 3.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, 0.0), 0.0), &def);
 
@@ -579,11 +639,7 @@ mod tests {
         let r = drive(&mut w, body, &def, Vec3::new(5.0, 3.0, 0.0), 40);
         let p = pos_of(&w, body);
         assert!(r.collisions > 0, "应该撞到墙");
-        assert!(
-            p.x < 1.71,
-            "x 应被墙挡停，实际 x={}（说明穿墙了）",
-            p.x
-        );
+        assert!(p.x < 1.71, "x 应被墙挡停，实际 x={}（说明穿墙了）", p.x);
         assert!(
             p.y > standing_y(&def, 0.0) + 1.5,
             "切向上升分量应被保留（3 m/s × 0.67 s ≈ 2 m），实际 y={}",
@@ -595,9 +651,19 @@ mod tests {
     #[test]
     fn autosteps_over_low_step() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         // 台阶：顶面 y = 0.2，从 x = 1.0 延伸到 x = 2.0。
-        add_box(&mut w, Vec3::new(1.5, 0.1, 0.0), Vec3::new(0.5, 0.1, 1.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(1.5, 0.1, 0.0),
+            Vec3::new(0.5, 0.1, 1.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, 0.0), 0.0), &def);
 
@@ -622,9 +688,19 @@ mod tests {
     #[test]
     fn tall_step_blocks_completely() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         // 台阶：顶面 y = 1.0，x 从 1.0 起。
-        add_box(&mut w, Vec3::new(1.5, 0.5, 0.0), Vec3::new(0.5, 0.5, 1.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(1.5, 0.5, 0.0),
+            Vec3::new(0.5, 0.5, 1.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, 0.0), 0.0), &def);
 
@@ -662,11 +738,7 @@ mod tests {
         let r = drive(&mut w, body, &def, Vec3::new(2.0, -0.5, 0.0), 60);
         let p = pos_of(&w, body);
         assert!(r.grounded, "爬坡过程中应保持接触");
-        assert!(
-            p.y > y0 + 0.3,
-            "30° 坡应爬得上去：y0={y0}，实际 y={}",
-            p.y
-        );
+        assert!(p.y > y0 + 0.3, "30° 坡应爬得上去：y0={y0}，实际 y={}", p.y);
     }
 
     /// 60° 坡（> 45° limit）+ 纯下落：应顺着坡面滑下来。
@@ -696,11 +768,7 @@ mod tests {
             r.sliding_down_slope,
             "超过滑落角的坡应标记 is_sliding_down_slope"
         );
-        assert!(
-            p.y < y0 - 0.2,
-            "60° 坡应滑落下去：y0={y0}，实际 y={}",
-            p.y
-        );
+        assert!(p.y < y0 - 0.2, "60° 坡应滑落下去：y0={y0}，实际 y={}", p.y);
     }
 
     /// 坡面法线：站在 30° 坡上，`ground_normal` 应≈坡面法线。
@@ -729,7 +797,12 @@ mod tests {
     #[test]
     fn jump_leaves_ground_and_lands_back() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, 0.0), 0.0), &def);
         drive(&mut w, body, &def, Vec3::ZERO, 5);
@@ -778,7 +851,12 @@ mod tests {
     #[test]
     fn fast_downward_move_does_not_tunnel() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, 5.0, 0.0), &def);
 
@@ -798,8 +876,18 @@ mod tests {
     #[test]
     fn fast_horizontal_move_does_not_tunnel() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
-        add_box(&mut w, Vec3::new(2.5, 1.5, 0.0), Vec3::new(0.5, 1.5, 3.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
+        add_box(
+            &mut w,
+            Vec3::new(2.5, 1.5, 0.0),
+            Vec3::new(0.5, 1.5, 3.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, 0.0), 0.0), &def);
 
@@ -821,7 +909,12 @@ mod tests {
     #[test]
     fn penetrating_character_is_pushed_back_out() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         // 站姿再往下 5cm = 脚底陷进地面 5cm。
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, -0.05), 0.0), &def);
@@ -840,13 +933,16 @@ mod tests {
     #[test]
     fn zero_movement_still_detects_ground() {
         let mut w = test_world();
-        add_box(&mut w, Vec3::new(0.0, -0.5, 0.0), Vec3::new(10.0, 0.5, 10.0), Quat::IDENTITY);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(10.0, 0.5, 10.0),
+            Quat::IDENTITY,
+        );
         let def = CharacterController::default();
         let body = add_character(&mut w, Vec3::new(0.0, standing_y(&def, 0.0), 0.0), &def);
         w.sync_queries();
-        let r = w
-            .move_character(body, &def, Vec3::ZERO, DT)
-            .unwrap();
+        let r = w.move_character(body, &def, Vec3::ZERO, DT).unwrap();
         assert!(r.grounded, "零位移也应报告着地状态");
     }
 

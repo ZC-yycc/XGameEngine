@@ -61,12 +61,16 @@ impl GameRuntime {
         // 场景装载器 = 项目句柄：Play 期间脚本 `load_scene()` 也照常生效
         // （与独立游戏同一条路径）。切过去的场景在 Play 结束时被
         // `play_snapshot` 整个丢弃 —— 运行期切换不写回项目文件。
-        let world = World::new(scene, project_root, WorldConfig::from_project(project.manifest()))
-            .with_input_map(input_map)
-            .with_behavior_registry(behaviors)
-            .with_audio_engine(xgame_runtime::AudioEngine::open(project_root))
-            .with_scene_loader(project.clone())
-            .with_scene_order(project.manifest().scene_order());
+        let world = World::new(
+            scene,
+            project_root,
+            WorldConfig::from_project(project.manifest()),
+        )
+        .with_input_map(input_map)
+        .with_behavior_registry(behaviors)
+        .with_audio_engine(xgame_runtime::AudioEngine::open(project_root))
+        .with_scene_loader(project.clone())
+        .with_scene_order(project.manifest().scene_order());
         Self {
             world,
             report: FrameReport::default(),

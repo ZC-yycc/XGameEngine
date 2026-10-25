@@ -31,9 +31,7 @@ pub(crate) fn register_ui(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     )?;
     globals.set(
         "ui_text",
-        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
-            Ok(ctx.game().ui_text(id_of(id)))
-        })?,
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().ui_text(id_of(id))))?,
     )?;
     globals.set(
         "ui_set_text_size",
@@ -70,9 +68,7 @@ pub(crate) fn register_ui(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     )?;
     globals.set(
         "ui_visible",
-        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
-            Ok(ctx.game().ui_visible(id_of(id)))
-        })?,
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().ui_visible(id_of(id))))?,
     )?;
     globals.set(
         "ui_set_enabled",
@@ -83,27 +79,19 @@ pub(crate) fn register_ui(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     )?;
     globals.set(
         "ui_enabled",
-        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
-            Ok(ctx.game().ui_enabled(id_of(id)))
-        })?,
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().ui_enabled(id_of(id))))?,
     )?;
     globals.set(
         "ui_has",
-        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
-            Ok(ctx.game().ui_has(id_of(id)))
-        })?,
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().ui_has(id_of(id))))?,
     )?;
     globals.set(
         "ui_clicked",
-        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
-            Ok(ctx.game().ui_clicked(id_of(id)))
-        })?,
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().ui_clicked(id_of(id))))?,
     )?;
     globals.set(
         "ui_hovered",
-        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
-            Ok(ctx.game().ui_hovered(id_of(id)))
-        })?,
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().ui_hovered(id_of(id))))?,
     )?;
 
     // -- 外观 --

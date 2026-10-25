@@ -26,7 +26,10 @@ impl Ray {
         } else {
             Vec3::NEG_Z
         };
-        Self { origin, direction: dir }
+        Self {
+            origin,
+            direction: dir,
+        }
     }
 
     /// 射线上距原点 `t` 处的点。
@@ -52,7 +55,13 @@ pub struct RayHit {
 
 impl RayHit {
     pub fn new(entity: Option<EntityId>, point: Vec3, normal: Vec3, distance: f32) -> Self {
-        Self { entity, point, normal, distance, is_sensor: false }
+        Self {
+            entity,
+            point,
+            normal,
+            distance,
+            is_sensor: false,
+        }
     }
 }
 

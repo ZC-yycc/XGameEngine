@@ -23,8 +23,7 @@ use crate::lifecycle::{Behavior, Ctx};
 pub(crate) type HookFn = fn(&mut Box<dyn Behavior>, &mut Ctx, f32);
 
 /// 碰撞钩子的函数指针形状（多一个"对方实体"参数）。
-pub(crate) type CollisionHookFn =
-    fn(&mut Box<dyn Behavior>, &mut Ctx, xgame_core::EntityId);
+pub(crate) type CollisionHookFn = fn(&mut Box<dyn Behavior>, &mut Ctx, xgame_core::EntityId);
 
 /// 四个钩子（装配期从注册项拷出，见模块文档"为什么拷进实例"）。
 #[derive(Clone, Copy)]
@@ -99,9 +98,7 @@ impl BehaviorRegistry {
                     collision_enter: |component, ctx, other| {
                         component.on_collision_enter(ctx, other)
                     },
-                    collision_exit: |component, ctx, other| {
-                        component.on_collision_exit(ctx, other)
-                    },
+                    collision_exit: |component, ctx, other| component.on_collision_exit(ctx, other),
                     on_destroy: |component, ctx, _| component.on_destroy(ctx),
                 },
                 // 表是 `'static` 的，所以能从一个临时实例上取下来存住 ——

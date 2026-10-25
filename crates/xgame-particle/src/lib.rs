@@ -56,8 +56,8 @@
 
 use std::collections::HashMap;
 
-use xgame_math::glam::{Quat, Vec3};
 use xgame_core::{EntityId, ParticleBlend, ParticleEmitter, Scene, Transform};
+use xgame_math::glam::{Quat, Vec3};
 
 // ---------------------------------------------------------------------------
 // 随机数
@@ -294,8 +294,7 @@ impl ParticleSystem {
                 self.scratch.push(entity.id);
             }
         }
-        self.emitters
-            .retain(|id, _| self.scratch.contains(id));
+        self.emitters.retain(|id, _| self.scratch.contains(id));
 
         let alive = self.quads.len();
         self.animating = animating;
@@ -796,6 +795,10 @@ mod tests {
         system.update(0.25, &mut scene);
         let quad = system.quads()[0];
         assert!((quad.size - 0.5).abs() < 0.01, "size={}", quad.size);
-        assert!((quad.color[3] - 0.5).abs() < 0.01, "alpha={}", quad.color[3]);
+        assert!(
+            (quad.color[3] - 0.5).abs() < 0.01,
+            "alpha={}",
+            quad.color[3]
+        );
     }
 }

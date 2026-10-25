@@ -58,7 +58,13 @@ impl FrameSample {
     ///
     /// 抽象时钟可能在调试暂停 / 系统休眠后跳几百秒，`as u32` 会回绕成一个
     /// 看着很正常的小数字 —— 那种假读数比溢出更难查。
-    pub fn from_micros(dt_us: u128, work_us: u128, runtime_us: u128, ui_us: u128, live: bool) -> Self {
+    pub fn from_micros(
+        dt_us: u128,
+        work_us: u128,
+        runtime_us: u128,
+        ui_us: u128,
+        live: bool,
+    ) -> Self {
         Self {
             dt_us: clamp_us(dt_us),
             work_us: clamp_us(work_us),
@@ -181,7 +187,11 @@ impl Profiler {
         let cap = self.samples.len();
         // 线性容器 `len < cap` 时 `head == len`，起点正好是 0；
         // 写满之后起点才是"最旧的那一格"。
-        let start = if cap == 0 { 0 } else { (self.head + cap - self.len) % cap };
+        let start = if cap == 0 {
+            0
+        } else {
+            (self.head + cap - self.len) % cap
+        };
         (0..self.len).map(move |i| &self.samples[(start + i) % cap])
     }
 
@@ -270,14 +280,24 @@ mod tests {
             p.record(sample(i as u32, true));
         }
         assert_eq!(p.len(), WINDOW_FRAMES, "窗口长度固定，不扩容");
-        assert_eq!(p.recorded(), (WINDOW_FRAMES + 100) as u64, "累计帧数不受窗口限制");
+        assert_eq!(
+            p.recorded(),
+            (WINDOW_FRAMES + 100) as u64,
+            "累计帧数不受窗口限制"
+        );
         // 最旧的 100 颗被挤掉，第一颗应当是 dt=100。
         assert_eq!(p.iter().next().map(|s| s.dt_us), Some(100));
         // 最新的一颗在末尾。
-        assert_eq!(p.iter().last().map(|s| s.dt_us), Some((WINDOW_FRAMES + 99) as u32));
+        assert_eq!(
+            p.iter().last().map(|s| s.dt_us),
+            Some((WINDOW_FRAMES + 99) as u32)
+        );
         // 时间顺序严格递增 —— 环形下标的环绕最容易在这里写错。
         let dts: Vec<u32> = p.iter().map(|s| s.dt_us).collect();
-        assert!(dts.windows(2).all(|w| w[1] == w[0] + 1), "遍历顺序必须是最旧 → 最新");
+        assert!(
+            dts.windows(2).all(|w| w[1] == w[0] + 1),
+            "遍历顺序必须是最旧 → 最新"
+        );
     }
 
     /// 暂停 = 停止采新样本，但窗口原样保留；恢复后接着写。
@@ -387,7 +407,10 @@ mod tests {
         let s = FrameSample::from_micros(u128::MAX, 0, 0, 0, true);
         assert_eq!(s.dt_us, u32::MAX);
         let s = FrameSample::from_micros(1234, 500, 100, 200, false);
-        assert_eq!((s.dt_us, s.work_us, s.runtime_us, s.ui_us), (1234, 500, 100, 200));
+        assert_eq!(
+            (s.dt_us, s.work_us, s.runtime_us, s.ui_us),
+            (1234, 500, 100, 200)
+        );
         assert!(!s.live);
     }
 }

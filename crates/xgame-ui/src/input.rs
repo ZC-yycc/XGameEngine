@@ -296,10 +296,18 @@ mod tests {
         let mut interaction = UiInteraction::default();
         let mut events = Vec::new();
 
-        let down = UiPointer { down: true, pressed: true, ..pointer(50.0, 30.0) };
+        let down = UiPointer {
+            down: true,
+            pressed: true,
+            ..pointer(50.0, 30.0)
+        };
         step(&mut scene, Some(down), &mut interaction, &mut events);
 
-        let up_outside = UiPointer { down: false, released: true, ..pointer(400.0, 300.0) };
+        let up_outside = UiPointer {
+            down: false,
+            released: true,
+            ..pointer(400.0, 300.0)
+        };
         step(&mut scene, Some(up_outside), &mut interaction, &mut events);
         assert!(!state(&scene, id).clicked);
         assert_eq!(interaction.pressed(), None);
@@ -312,17 +320,31 @@ mod tests {
         let mut interaction = UiInteraction::default();
         let mut events = Vec::new();
 
-        let down = UiPointer { down: true, pressed: true, ..pointer(50.0, 30.0) };
+        let down = UiPointer {
+            down: true,
+            pressed: true,
+            ..pointer(50.0, 30.0)
+        };
         step(&mut scene, Some(down), &mut interaction, &mut events);
 
-        let drag = UiPointer { down: true, ..pointer(400.0, 300.0) };
+        let drag = UiPointer {
+            down: true,
+            ..pointer(400.0, 300.0)
+        };
         step(&mut scene, Some(drag), &mut interaction, &mut events);
         assert!(!state(&scene, id).hovered, "拖出后不再悬停");
 
-        let back = UiPointer { down: true, ..pointer(50.0, 30.0) };
+        let back = UiPointer {
+            down: true,
+            ..pointer(50.0, 30.0)
+        };
         step(&mut scene, Some(back), &mut interaction, &mut events);
 
-        let up = UiPointer { down: false, released: true, ..pointer(50.0, 30.0) };
+        let up = UiPointer {
+            down: false,
+            released: true,
+            ..pointer(50.0, 30.0)
+        };
         step(&mut scene, Some(up), &mut interaction, &mut events);
         assert!(state(&scene, id).clicked);
     }
@@ -334,7 +356,12 @@ mod tests {
         let mut interaction = UiInteraction::default();
         let mut events = Vec::new();
 
-        step(&mut scene, Some(pointer(50.0, 30.0)), &mut interaction, &mut events);
+        step(
+            &mut scene,
+            Some(pointer(50.0, 30.0)),
+            &mut interaction,
+            &mut events,
+        );
         assert!(state(&scene, id).hovered);
 
         step(&mut scene, None, &mut interaction, &mut events);
@@ -353,7 +380,11 @@ mod tests {
 
         let mut interaction = UiInteraction::default();
         let mut events = Vec::new();
-        let down = UiPointer { down: true, pressed: true, ..pointer(100.0, 100.0) };
+        let down = UiPointer {
+            down: true,
+            pressed: true,
+            ..pointer(100.0, 100.0)
+        };
         step(&mut scene, Some(down), &mut interaction, &mut events);
 
         assert!(!state(&scene, panel_id).pressed);

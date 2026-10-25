@@ -194,14 +194,15 @@ pub fn build(project: &ProjectHandle) -> Result<BuildReport, BuildError> {
         }
     }
     if !unloadable.is_empty() {
-        return Err(BuildError::SceneUnloadable {
-            scenes: unloadable,
-        });
+        return Err(BuildError::SceneUnloadable { scenes: unloadable });
     }
 
     let player = locate_player()?;
 
-    let output_dir = project.root().join(BUILD_DIR).join(safe_file_name(project.name()));
+    let output_dir = project
+        .root()
+        .join(BUILD_DIR)
+        .join(safe_file_name(project.name()));
     prepare_output_dir(&output_dir)?;
 
     // 1) 播放器 → <项目名>.exe
@@ -276,7 +277,9 @@ fn locate_player() -> Result<PathBuf, BuildError> {
         return Ok(found.clone());
     }
 
-    Err(BuildError::PlayerNotFound { searched: candidates })
+    Err(BuildError::PlayerNotFound {
+        searched: candidates,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -327,10 +330,7 @@ fn normalize_relative(raw: &str) -> Option<String> {
     }
     let path = Path::new(trimmed);
     // 只接受纯普通路径段——挡掉 `..`（越界到项目外）和绝对路径（`C:\`、`\`）
-    if path
-        .components()
-        .all(|c| matches!(c, Component::Normal(_)))
-    {
+    if path.components().all(|c| matches!(c, Component::Normal(_))) {
         Some(trimmed.to_string())
     } else {
         None

@@ -12,12 +12,9 @@ use xgame_math::glam::Vec3;
 
 use xgame_render::gltf_loader::Bounds;
 
-use crate::state::GizmoPart;
-use super::{
-    GizmoCtx, AXIS_DIRS, CUBE_SIZE,
-    PLANE_HANDLE_SIZE, RING_RADIUS, RING_SEGMENTS,
-};
 use super::math::{all_valid_screen, is_valid_screen, project_to_screen, screen_to_ray};
+use super::{GizmoCtx, AXIS_DIRS, CUBE_SIZE, PLANE_HANDLE_SIZE, RING_RADIUS, RING_SEGMENTS};
+use crate::state::GizmoPart;
 
 // ---------------------------------------------------------------------------
 // 射线 × 轴对齐包围盒（实体拾取用）
@@ -96,8 +93,11 @@ pub fn pick_gizmo(mouse_pos: egui::Pos2, ctx: &GizmoCtx) -> Option<GizmoPart> {
     );
 
     // 检查鼠标是否在视口有效范围内
-    if viewport_mouse.x < 0.0 || viewport_mouse.x > ctx.screen_size.x
-        || viewport_mouse.y < 0.0 || viewport_mouse.y > ctx.screen_size.y {
+    if viewport_mouse.x < 0.0
+        || viewport_mouse.x > ctx.screen_size.x
+        || viewport_mouse.y < 0.0
+        || viewport_mouse.y > ctx.screen_size.y
+    {
         return None;
     }
 
@@ -122,7 +122,10 @@ pub fn pick_gizmo(mouse_pos: egui::Pos2, ctx: &GizmoCtx) -> Option<GizmoPart> {
     }
 
     // --- 平面操作柄（仅 Translate）---
-    for (idx, plane_axes) in [(Vec3::X, Vec3::Y), (Vec3::X, Vec3::Z), (Vec3::Y, Vec3::Z)].iter().enumerate() {
+    for (idx, plane_axes) in [(Vec3::X, Vec3::Y), (Vec3::X, Vec3::Z), (Vec3::Y, Vec3::Z)]
+        .iter()
+        .enumerate()
+    {
         let part = match idx {
             0 => GizmoPart::PlaneXY,
             1 => GizmoPart::PlaneXZ,
@@ -187,12 +190,13 @@ fn update_best(best: &mut Option<(GizmoPart, f32)>, part: GizmoPart, dist: f32) 
 ///
 /// 所以这里直接求「直线 P(s) = entity_pos + axis·s」与鼠标射线的最近点对
 /// （Ericson《Real-Time Collision Detection》里 ClosestPtSegmentRay 的直线版本）。
-pub fn axis_param_under_mouse(
-    mouse_pos: egui::Pos2,
-    ctx: &GizmoCtx,
-    axis: Vec3,
-) -> Option<f32> {
-    let (origin, ray) = screen_to_ray(mouse_pos, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
+pub fn axis_param_under_mouse(mouse_pos: egui::Pos2, ctx: &GizmoCtx, axis: Vec3) -> Option<f32> {
+    let (origin, ray) = screen_to_ray(
+        mouse_pos,
+        &ctx.view_proj,
+        ctx.screen_size,
+        ctx.screen_offset,
+    );
     let len = ray.length();
     if len < 1e-10 {
         return None;
@@ -201,7 +205,7 @@ pub fn axis_param_under_mouse(
 
     let r = ctx.entity_pos - origin;
     let b = axis.dot(d); // = d1·d2
-    // denom = a·e − b² = 1 − b²（axis 与 d 都是单位向量）
+                         // denom = a·e − b² = 1 − b²（axis 与 d 都是单位向量）
     let denom = 1.0 - b * b;
     if denom.abs() < 1e-6 {
         return None; // 视线几乎与轴平行，轴上位置不可判
@@ -220,13 +224,14 @@ pub fn axis_param_under_mouse(
 /// 注意：这个交点的位移**垂直于** `axis`，所以**不能**拿它算轴坐标 —— 需要轴坐标
 /// 请用 [`axis_param_under_mouse`]。这里保留它是给「旋转环起始方向」用的：
 /// 那是平面内的方向，正好需要平面上的点。
-pub fn hit_position_on_axis(
-    mouse_pos: egui::Pos2,
-    ctx: &GizmoCtx,
-    axis: Vec3,
-) -> Option<Vec3> {
+pub fn hit_position_on_axis(mouse_pos: egui::Pos2, ctx: &GizmoCtx, axis: Vec3) -> Option<Vec3> {
     // 射线计算需要使用屏幕绝对坐标（包含偏移量）
-    let (ray_origin, ray_dir) = screen_to_ray(mouse_pos, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
+    let (ray_origin, ray_dir) = screen_to_ray(
+        mouse_pos,
+        &ctx.view_proj,
+        ctx.screen_size,
+        ctx.screen_offset,
+    );
     if ray_dir.length_squared() < 1e-10 {
         return None;
     }
@@ -249,12 +254,13 @@ pub fn hit_position_on_axis(
 /// 计算鼠标射线与指定平面的交点（用于平面拖拽）。
 ///
 /// 注意：`mouse_pos` 应该是**屏幕绝对坐标**（包含偏移量）。
-pub fn hit_position_on_plane(
-    mouse_pos: egui::Pos2,
-    ctx: &GizmoCtx,
-    normal: Vec3,
-) -> Option<Vec3> {
-    let (ray_origin, ray_dir) = screen_to_ray(mouse_pos, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
+pub fn hit_position_on_plane(mouse_pos: egui::Pos2, ctx: &GizmoCtx, normal: Vec3) -> Option<Vec3> {
+    let (ray_origin, ray_dir) = screen_to_ray(
+        mouse_pos,
+        &ctx.view_proj,
+        ctx.screen_size,
+        ctx.screen_offset,
+    );
     if ray_dir.length_squared() < 1e-10 {
         return None;
     }
@@ -277,14 +283,9 @@ pub fn hit_position_on_plane(
 // ---------------------------------------------------------------------------
 
 /// 检测屏幕点是否靠近 3D 线段投影。
-/// 
+///
 /// 注意：`mouse` 参数应该是**视口相对坐标**（不包含偏移量）。
-fn pick_axis(
-    _part: GizmoPart,
-    ctx: &GizmoCtx,
-    axis: Vec3,
-    mouse: egui::Pos2,
-) -> f32 {
+fn pick_axis(_part: GizmoPart, ctx: &GizmoCtx, axis: Vec3, mouse: egui::Pos2) -> f32 {
     let start = ctx.entity_pos;
     let end = ctx.entity_pos + axis * ctx.gizmo_size;
 
@@ -310,18 +311,17 @@ fn pick_axis(
 /// 检测屏幕点是否靠近箭头头部投影（箭头头部抽像为端点）。
 ///
 /// 注意：`mouse` 参数应该是**视口相对坐标**（不包含偏移量）。
-fn pick_arrow_head(
-    ctx: &GizmoCtx,
-    axis: Vec3,
-    mouse: egui::Pos2,
-) -> f32 {
+fn pick_arrow_head(ctx: &GizmoCtx, axis: Vec3, mouse: egui::Pos2) -> f32 {
     let tip = ctx.entity_pos + axis * ctx.gizmo_size;
     let tip_screen = project_to_screen(tip, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
     if !is_valid_screen(tip_screen) {
         return -1.0;
     }
 
-    let tip_viewport = egui::pos2(tip_screen.x - ctx.screen_offset.x, tip_screen.y - ctx.screen_offset.y);
+    let tip_viewport = egui::pos2(
+        tip_screen.x - ctx.screen_offset.x,
+        tip_screen.y - ctx.screen_offset.y,
+    );
     let dist = mouse.distance(tip_viewport);
     if dist < ARROW_HEAD_HIT_RADIUS {
         dist
@@ -333,11 +333,7 @@ fn pick_arrow_head(
 /// 检测屏幕点是否在平面操作柄的投影四边形内部（或边缘附近）。
 ///
 /// 注意：`mouse` 参数应该是**视口相对坐标**（不包含偏移量）。
-fn pick_plane(
-    ctx: &GizmoCtx,
-    axes: (Vec3, Vec3),
-    mouse: egui::Pos2,
-) -> f32 {
+fn pick_plane(ctx: &GizmoCtx, axes: (Vec3, Vec3), mouse: egui::Pos2) -> f32 {
     let size = ctx.gizmo_size * PLANE_HANDLE_SIZE;
     let corners = [
         ctx.entity_pos,
@@ -362,7 +358,13 @@ fn pick_plane(
         .collect();
 
     // 检查点是否在四边形内部
-    if point_in_convex_quad(mouse, viewport_corners[0], viewport_corners[1], viewport_corners[2], viewport_corners[3]) {
+    if point_in_convex_quad(
+        mouse,
+        viewport_corners[0],
+        viewport_corners[1],
+        viewport_corners[2],
+        viewport_corners[3],
+    ) {
         // 内部：返回一个较小的距离值以确保优先于轴线
         return PLANE_HIT_RADIUS * 0.5;
     }
@@ -392,11 +394,7 @@ fn pick_plane(
 /// 检测屏幕点是否靠近旋转圆环的投影。
 ///
 /// 注意：`mouse` 参数应该是**视口相对坐标**（不包含偏移量）。
-fn pick_ring(
-    ctx: &GizmoCtx,
-    axis: Vec3,
-    mouse: egui::Pos2,
-) -> f32 {
+fn pick_ring(ctx: &GizmoCtx, axis: Vec3, mouse: egui::Pos2) -> f32 {
     let radius = ctx.gizmo_size * RING_RADIUS;
     let (u, v) = super::math::perpendicular_axes(axis);
 
@@ -407,12 +405,16 @@ fn pick_ring(
     for s in 0..=n {
         let theta = (s as f32 / n as f32) * std::f32::consts::TAU;
         let point = ctx.entity_pos + (u * theta.cos() + v * theta.sin()) * radius;
-        let screen_pt = project_to_screen(point, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
+        let screen_pt =
+            project_to_screen(point, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
         if !is_valid_screen(screen_pt) {
             continue;
         }
 
-        let viewport_pt = egui::pos2(screen_pt.x - ctx.screen_offset.x, screen_pt.y - ctx.screen_offset.y);
+        let viewport_pt = egui::pos2(
+            screen_pt.x - ctx.screen_offset.x,
+            screen_pt.y - ctx.screen_offset.y,
+        );
         let d = mouse.distance(viewport_pt);
         if d < best_dist {
             best_dist = d;
@@ -429,17 +431,21 @@ fn pick_ring(
 /// 检测屏幕点是否靠近 3D 方块中心的屏幕投影。
 ///
 /// 注意：`mouse` 参数应该是**视口相对坐标**（不包含偏移量）。
-fn pick_cube_at(
-    ctx: &GizmoCtx,
-    center_3d: Vec3,
-    mouse: egui::Pos2,
-) -> f32 {
-    let screen_pt = project_to_screen(center_3d, &ctx.view_proj, ctx.screen_size, ctx.screen_offset);
+fn pick_cube_at(ctx: &GizmoCtx, center_3d: Vec3, mouse: egui::Pos2) -> f32 {
+    let screen_pt = project_to_screen(
+        center_3d,
+        &ctx.view_proj,
+        ctx.screen_size,
+        ctx.screen_offset,
+    );
     if !is_valid_screen(screen_pt) {
         return -1.0;
     }
 
-    let viewport_pt = egui::pos2(screen_pt.x - ctx.screen_offset.x, screen_pt.y - ctx.screen_offset.y);
+    let viewport_pt = egui::pos2(
+        screen_pt.x - ctx.screen_offset.x,
+        screen_pt.y - ctx.screen_offset.y,
+    );
     let half_screen = ctx.gizmo_size * CUBE_SIZE * 3.0;
     let hit_radius = CUBE_HIT_RADIUS.max(half_screen);
 
@@ -502,7 +508,10 @@ mod tests {
     fn ray_hits_the_near_face_of_the_box() {
         let t = ray_aabb(Vec3::new(5.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0), &cube())
             .expect("应当命中");
-        assert!((t - 4.5).abs() < 1e-5, "近面在 x=0.5，从 x=5 出发应当 t=4.5，实得 {t}");
+        assert!(
+            (t - 4.5).abs() < 1e-5,
+            "近面在 x=0.5，从 x=5 出发应当 t=4.5，实得 {t}"
+        );
     }
 
     #[test]
@@ -519,7 +528,10 @@ mod tests {
 
     #[test]
     fn ray_starting_inside_hits_at_zero() {
-        assert_eq!(ray_aabb(Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), &cube()), Some(0.0));
+        assert_eq!(
+            ray_aabb(Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), &cube()),
+            Some(0.0)
+        );
     }
 
     /// 退化盒（某个轴零厚度，内置 Plane 就是这种）也要能正确求交 ——

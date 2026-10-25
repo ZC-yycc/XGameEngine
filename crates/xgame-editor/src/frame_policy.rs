@@ -250,7 +250,11 @@ mod tests {
         );
         // 没有事件 → 停。哪怕"刚刚才输入过"也一样 —— 这正是旧行为的特征。
         assert_eq!(
-            plan(FramePolicy::Reactive, inputs(false, false, false), Duration::ZERO),
+            plan(
+                FramePolicy::Reactive,
+                inputs(false, false, false),
+                Duration::ZERO
+            ),
             FramePlan::Idle,
             "Reactive 不该因为\"刚输入过\"就继续出帧，否则它就不是纯事件驱动了"
         );
@@ -285,7 +289,11 @@ mod tests {
     #[test]
     fn hybrid_keeps_running_within_the_grace_window() {
         assert_eq!(
-            plan(FramePolicy::Hybrid, inputs(false, false, false), ACTIVE_GRACE / 2),
+            plan(
+                FramePolicy::Hybrid,
+                inputs(false, false, false),
+                ACTIVE_GRACE / 2
+            ),
             FramePlan::Now,
             "刚输入过的一小段时间内仍要满速，否则松手瞬间画面会僵住"
         );
@@ -294,7 +302,11 @@ mod tests {
     #[test]
     fn hybrid_idles_once_the_grace_window_expires() {
         assert_eq!(
-            plan(FramePolicy::Hybrid, inputs(false, false, false), ACTIVE_GRACE),
+            plan(
+                FramePolicy::Hybrid,
+                inputs(false, false, false),
+                ACTIVE_GRACE
+            ),
             FramePlan::Idle,
             "宽限期一过就该停下来，否则又变成无边界空转"
         );
@@ -325,13 +337,21 @@ mod tests {
 
         // 过了半个宽限期 → 还在。
         assert_eq!(
-            clock.plan(FramePolicy::Hybrid, FrameInputs::idle(), t0 + ACTIVE_GRACE / 2),
+            clock.plan(
+                FramePolicy::Hybrid,
+                FrameInputs::idle(),
+                t0 + ACTIVE_GRACE / 2
+            ),
             FramePlan::Now
         );
 
         // 超过宽限期 → 停。
         assert_eq!(
-            clock.plan(FramePolicy::Hybrid, FrameInputs::idle(), t0 + ACTIVE_GRACE * 2),
+            clock.plan(
+                FramePolicy::Hybrid,
+                FrameInputs::idle(),
+                t0 + ACTIVE_GRACE * 2
+            ),
             FramePlan::Idle
         );
 

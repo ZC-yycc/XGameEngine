@@ -260,10 +260,7 @@ fn walk(
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if SKIP_DIRS
-            .iter()
-            .any(|skip| name.eq_ignore_ascii_case(skip))
-        {
+        if SKIP_DIRS.iter().any(|skip| name.eq_ignore_ascii_case(skip)) {
             continue;
         }
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
@@ -421,7 +418,11 @@ mod tests {
         let t0 = Instant::now();
         let mut watcher = ProjectWatcher::new(&project, t0);
 
-        write(&project, "Scripts/a.lua", "function start(ctx) -- 改长了\nend");
+        write(
+            &project,
+            "Scripts/a.lua",
+            "function start(ctx) -- 改长了\nend",
+        );
         write(&project, "Scripts/sub/b.lua", "function update(ctx) end");
         let changes = watcher.poll(&project, at(t0, 2));
 
@@ -468,7 +469,10 @@ mod tests {
             "唤醒间隔不能超过扫描间隔"
         );
 
-        assert!(watcher.poll(&project, at(t0, 2)).is_empty(), "没变化就该是空集");
+        assert!(
+            watcher.poll(&project, at(t0, 2)).is_empty(),
+            "没变化就该是空集"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -503,7 +507,11 @@ mod tests {
 
         assert_eq!(changes.count(Kind::Prefab), 1, "{changes:?}");
         assert_eq!(changes.count(Kind::Scene), 1, "{changes:?}");
-        assert_eq!(changes.count(Kind::Asset), 0, ".ron 不该混进资产: {changes:?}");
+        assert_eq!(
+            changes.count(Kind::Asset),
+            0,
+            ".ron 不该混进资产: {changes:?}"
+        );
         assert!(changes.prefabs_changed());
         let _ = std::fs::remove_dir_all(&base);
     }

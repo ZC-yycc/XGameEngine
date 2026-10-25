@@ -135,11 +135,8 @@ fn bench_scene() -> Scene {
     for i in 0..64 {
         let mut e = Entity::new(format!("c{i}"));
         e.model = "builtin://cube".to_owned();
-        e.transform.position = Vec3::new(
-            (i % 8) as f32 * 1.6 - 5.6,
-            0.5,
-            (i / 8) as f32 * 1.6 - 5.6,
-        );
+        e.transform.position =
+            Vec3::new((i % 8) as f32 * 1.6 - 5.6, 0.5, (i / 8) as f32 * 1.6 - 5.6);
         scene.add_entity(e);
     }
     scene
@@ -421,12 +418,7 @@ fn run_round(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("bench_resolve"),
     });
-    encoder.resolve_query_set(
-        stamps,
-        0..(FRAMES * STAMPS_PER_FRAME) as u32,
-        resolve,
-        0,
-    );
+    encoder.resolve_query_set(stamps, 0..(FRAMES * STAMPS_PER_FRAME) as u32, resolve, 0);
     encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, byte_len);
     queue.submit(std::iter::once(encoder.finish()));
 
@@ -436,10 +428,16 @@ fn run_round(
         let _ = tx.send(r);
     });
     device.poll(wgpu::Maintain::Wait);
-    rx.recv().expect("读回通道断开").expect("映射时间戳缓冲失败");
+    rx.recv()
+        .expect("读回通道断开")
+        .expect("映射时间戳缓冲失败");
     let ticks: Vec<u64> = {
         let view = slice.get_mapped_range();
-        view.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect()
+        view.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
+            .collect()
     };
     readback.unmap();
 
@@ -529,17 +527,46 @@ fn postfx_cost() {
     });
     let warmup_start = Instant::now();
     while warmup_start.elapsed() < WARMUP_TIME {
-        ldr.frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye);
-        hdr.frame(
+        ldr.frame(
             &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+        );
+        hdr.frame(
+            &device,
+            &queue,
+            &warmup,
+            0,
+            &scene,
+            &matrices,
+            &cache,
+            &anim,
+            &view_proj,
+            &eye,
             RenderConfig::default(),
         );
         bloom.frame(
-            &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+            &device,
+            &queue,
+            &warmup,
+            0,
+            &scene,
+            &matrices,
+            &cache,
+            &anim,
+            &view_proj,
+            &eye,
             bloom_settings,
         );
         fxaa.frame(
-            &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+            &device,
+            &queue,
+            &warmup,
+            0,
+            &scene,
+            &matrices,
+            &cache,
+            &anim,
+            &view_proj,
+            &eye,
             fxaa_settings,
         );
     }
@@ -583,19 +610,46 @@ fn postfx_cost() {
         });
         let h = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
             hdr.frame(
-                &device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &scene,
+                &matrices,
+                &cache,
+                &anim,
+                &view_proj,
+                &eye,
                 RenderConfig::default(),
             );
         });
         let b = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
             bloom.frame(
-                &device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &scene,
+                &matrices,
+                &cache,
+                &anim,
+                &view_proj,
+                &eye,
                 bloom_settings,
             );
         });
         let f = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
             fxaa.frame(
-                &device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &scene,
+                &matrices,
+                &cache,
+                &anim,
+                &view_proj,
+                &eye,
                 fxaa_settings,
             );
         });
@@ -647,10 +701,7 @@ fn postfx_cost() {
         ldr_scene > 0.0 && hdr_scene > 0.0,
         "时间戳读数为 0：适配器是不是没真正写入查询？读数不可信"
     );
-    assert!(
-        hdr_post > 0.0,
-        "后处理段读数为 0：全屏 pass 没被执行？"
-    );
+    assert!(hdr_post > 0.0, "后处理段读数为 0：全屏 pass 没被执行？");
     // Bloom 链真被记录了才会比纯 ACES 的后处理段贵（9 趟额外的全屏 pass）。
     // 阈值放宽到 1 µs：只要链缺席，差额就是 0，这条必红。
     assert!(
@@ -760,10 +811,16 @@ fn run_single_frame(
         let _ = tx.send(r);
     });
     device.poll(wgpu::Maintain::Wait);
-    rx.recv().expect("读回通道断开").expect("映射时间戳缓冲失败");
+    rx.recv()
+        .expect("读回通道断开")
+        .expect("映射时间戳缓冲失败");
     let ticks: Vec<u64> = {
         let view = slice.get_mapped_range();
-        view.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect()
+        view.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
+            .collect()
     };
     readback.unmap();
 
@@ -864,9 +921,25 @@ fn sky_ibl_cost() {
     });
     let warmup_start = Instant::now();
     while warmup_start.elapsed() < PIPELINE_WARMUP {
-        paths[0].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off);
-        paths[1].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off);
-        paths[2].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, churn_settings(0));
+        paths[0].frame(
+            &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off,
+        );
+        paths[1].frame(
+            &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off,
+        );
+        paths[2].frame(
+            &device,
+            &queue,
+            &warmup,
+            0,
+            &scene,
+            &matrices,
+            &cache,
+            &anim,
+            &view_proj,
+            &eye,
+            churn_settings(0),
+        );
     }
     device.poll(wgpu::Maintain::Wait);
 
@@ -886,9 +959,25 @@ fn sky_ibl_cost() {
     // -- 阶段 C：稳态热身（三档各就各位）。
     let warmup_start = Instant::now();
     while warmup_start.elapsed() < WARMUP_TIME {
-        paths[0].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off);
-        paths[1].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, sky_on);
-        paths[2].frame(&device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, churn_settings(0));
+        paths[0].frame(
+            &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, off,
+        );
+        paths[1].frame(
+            &device, &queue, &warmup, 0, &scene, &matrices, &cache, &anim, &view_proj, &eye, sky_on,
+        );
+        paths[2].frame(
+            &device,
+            &queue,
+            &warmup,
+            0,
+            &scene,
+            &matrices,
+            &cache,
+            &anim,
+            &view_proj,
+            &eye,
+            churn_settings(0),
+        );
     }
     device.poll(wgpu::Maintain::Wait);
 
@@ -921,14 +1010,32 @@ fn sky_ibl_cost() {
         });
         let (resolve, readback) = make_buffers();
         let o = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
-            paths[0].frame(&device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye, off);
+            paths[0].frame(
+                &device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+                off,
+            );
         });
         let s = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
-            paths[1].frame(&device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye, sky_on);
+            paths[1].frame(
+                &device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye,
+                sky_on,
+            );
         });
         let c = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
             let frame = base / STAMPS_PER_FRAME as u32;
-            paths[2].frame(&device, &queue, &stamps, base, &scene, &matrices, &cache, &anim, &view_proj, &eye, churn_settings(frame));
+            paths[2].frame(
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &scene,
+                &matrices,
+                &cache,
+                &anim,
+                &view_proj,
+                &eye,
+                churn_settings(frame),
+            );
         });
         println!(
             "  第 {} 轮: 关 场景{:.1}/CPU{:.1} | 稳态 场景{:.1}/CPU{:.1} | 重建 场景{:.1}/CPU{:.1}（µs/帧）",

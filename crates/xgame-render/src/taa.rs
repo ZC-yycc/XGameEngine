@@ -117,10 +117,7 @@ pub fn jitter_to_uv(jitter_px: [f32; 2], size: (u32, u32)) -> [f32; 2] {
     if size.0 == 0 || size.1 == 0 {
         return [0.0, 0.0];
     }
-    [
-        jitter_px[0] / size.0 as f32,
-        -jitter_px[1] / size.1 as f32,
-    ]
+    [jitter_px[0] / size.0 as f32, -jitter_px[1] / size.1 as f32]
 }
 
 /// 把 NDC 平移量塞进投影矩阵。
@@ -450,9 +447,9 @@ impl TaaResolver {
 
         // 没有可用历史（刚重置 / 上一帧矩阵不可信 / view_proj 退化）→ 直通。
         let blend = match self.prev_view_proj {
-            Some(_) if self.frames_since_reset > 0 && invertible => {
-                config.history_weight.clamp(0.0, TaaConfig::MAX_HISTORY_WEIGHT)
-            }
+            Some(_) if self.frames_since_reset > 0 && invertible => config
+                .history_weight
+                .clamp(0.0, TaaConfig::MAX_HISTORY_WEIGHT),
             _ => 0.0,
         };
 
@@ -461,10 +458,7 @@ impl TaaResolver {
             0,
             bytemuck::bytes_of(&TaaParams {
                 inv_view_proj: inv_view_proj.to_cols_array_2d(),
-                prev_view_proj: self
-                    .prev_view_proj
-                    .unwrap_or(*view_proj)
-                    .to_cols_array_2d(),
+                prev_view_proj: self.prev_view_proj.unwrap_or(*view_proj).to_cols_array_2d(),
                 camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 1.0],
                 prev_jitter_uv: jitter_to_uv(self.prev_jitter, size),
                 texel: [1.0 / size.0 as f32, 1.0 / size.1 as f32],

@@ -43,10 +43,8 @@ fn prefab_row(ui: &mut egui::Ui, path: &str, name: &str) -> egui::Response {
     use egui::{Align2, FontId, Pos2, Vec2};
 
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width, theme::ROW_HEIGHT),
-        egui::Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, theme::ROW_HEIGHT), egui::Sense::click());
     let painter = ui.painter();
     if response.hovered() {
         painter.rect_filled(rect, 0.0, theme::colors::ROW_HOVER_BG);
@@ -301,7 +299,10 @@ fn delete_prefab_dialog(state: &mut EditorState, ui: &egui::Ui) {
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(&ctx, |ui| {
-            ui.label(format!("确定删除预制体资产 “{}” 吗？", prefab_display_name(&target)));
+            ui.label(format!(
+                "确定删除预制体资产 “{}” 吗？",
+                prefab_display_name(&target)
+            ));
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new("该操作不可撤销，文件会从磁盘上删除。")
@@ -309,7 +310,12 @@ fn delete_prefab_dialog(state: &mut EditorState, ui: &egui::Ui) {
                     .size(11.0),
             );
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(target.clone()).monospace().weak().size(11.0));
+            ui.label(
+                egui::RichText::new(target.clone())
+                    .monospace()
+                    .weak()
+                    .size(11.0),
+            );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Delete").clicked() {

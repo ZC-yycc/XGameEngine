@@ -195,7 +195,7 @@ impl UiStyle {
     /// 夹取到合法范围。坏数据（负半径 / NaN）不允许流进渲染器。
     pub fn sanitized(&self) -> Self {
         Self {
-            background: self.background, 
+            background: self.background,
             border_color: sanitize_color(self.border_color),
             border_width: finite_or(self.border_width, 0.0).clamp(0.0, 64.0),
             corner_radius: finite_or(self.corner_radius, 0.0).clamp(0.0, 512.0),
@@ -539,9 +539,18 @@ impl UiElement {
     /// 夹取所有数值，保证坏数据不会让布局 / 渲染出现 NaN。
     pub fn sanitized(&self) -> Self {
         let mut out = self.clone();
-        out.anchor_min = [finite_or(out.anchor_min[0], 0.0), finite_or(out.anchor_min[1], 0.0)];
-        out.anchor_max = [finite_or(out.anchor_max[0], 0.0), finite_or(out.anchor_max[1], 0.0)];
-        out.offset_min = [finite_or(out.offset_min[0], 0.0), finite_or(out.offset_min[1], 0.0)];
+        out.anchor_min = [
+            finite_or(out.anchor_min[0], 0.0),
+            finite_or(out.anchor_min[1], 0.0),
+        ];
+        out.anchor_max = [
+            finite_or(out.anchor_max[0], 0.0),
+            finite_or(out.anchor_max[1], 0.0),
+        ];
+        out.offset_min = [
+            finite_or(out.offset_min[0], 0.0),
+            finite_or(out.offset_min[1], 0.0),
+        ];
         out.offset_max = [
             finite_or(out.offset_max[0], 0.0),
             finite_or(out.offset_max[1], 0.0),

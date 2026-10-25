@@ -3,10 +3,10 @@
 //! 通过 `compute_transform` 入口执行，该函数根据工具模式和被拖拽的操作柄类型
 //! 选择不同的计算策略：轴拖拽、平面拖拽、旋转拖拽、均匀缩放。
 
-use xgame_math::glam::{Quat, Vec3};
-use crate::state::{GizmoDrag, GizmoPart, ToolMode};
-use super::GizmoCtx;
 use super::pick::hit_position_on_plane;
+use super::GizmoCtx;
+use crate::state::{GizmoDrag, GizmoPart, ToolMode};
+use xgame_math::glam::{Quat, Vec3};
 
 /// 旋转拖拽的灵敏度倍率。
 const ROTATE_SENSITIVITY: f32 = 1.0;
@@ -33,10 +33,10 @@ pub enum TransformDelta {
 ///
 /// 返回 `Some(delta)` 表示变换需要更新，`None` 表示无效状态。
 pub fn compute_transform(
-    drag:                       &GizmoDrag,
-    current_mouse_pos:          egui::Pos2,
-    ctx:                        &GizmoCtx,
-    tool_mode:                  ToolMode,
+    drag: &GizmoDrag,
+    current_mouse_pos: egui::Pos2,
+    ctx: &GizmoCtx,
+    tool_mode: ToolMode,
 ) -> Option<TransformDelta> {
     match tool_mode {
         ToolMode::Translate => compute_translate(drag, current_mouse_pos, ctx),
@@ -69,9 +69,9 @@ fn axis_param_anchored(
 // ---------------------------------------------------------------------------
 
 fn compute_translate(
-    drag:                       &GizmoDrag,
-    mouse_pos:                  egui::Pos2,
-    ctx:                        &GizmoCtx,
+    drag: &GizmoDrag,
+    mouse_pos: egui::Pos2,
+    ctx: &GizmoCtx,
 ) -> Option<TransformDelta> {
     match drag.part {
         // ── 轴拖拽 ──
@@ -247,9 +247,9 @@ fn part_to_axis(part: GizmoPart) -> Vec3 {
 /// 获取平面操作柄的法线方向。
 fn plane_normal(part: GizmoPart) -> Vec3 {
     match part {
-        GizmoPart::PlaneXY => Vec3::Z,  // XY 平面法线为 Z
-        GizmoPart::PlaneXZ => Vec3::Y,  // XZ 平面法线为 Y
-        GizmoPart::PlaneYZ => Vec3::X,  // YZ 平面法线为 X
+        GizmoPart::PlaneXY => Vec3::Z, // XY 平面法线为 Z
+        GizmoPart::PlaneXZ => Vec3::Y, // XZ 平面法线为 Y
+        GizmoPart::PlaneYZ => Vec3::X, // YZ 平面法线为 X
         _ => Vec3::Y,
     }
 }
@@ -261,14 +261,17 @@ fn plane_normal(part: GizmoPart) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gizmo::{axis_param_under_mouse, gizmo_world_size, hit_position_on_axis, project_to_screen};
+    use crate::gizmo::{
+        axis_param_under_mouse, gizmo_world_size, hit_position_on_axis, project_to_screen,
+    };
 
     /// 和编辑器默认视角一致：相机在 (5,5,5) 看向原点。
     const EYE: Vec3 = Vec3::new(5.0, 5.0, 5.0);
 
     fn test_ctx(entity_pos: Vec3) -> GizmoCtx {
-        let view_proj = xgame_math::projection::perspective(60f32.to_radians(), 4.0 / 3.0, 0.1, 100.0)
-            * xgame_math::projection::look_at(EYE, Vec3::ZERO, Vec3::Y);
+        let view_proj =
+            xgame_math::projection::perspective(60f32.to_radians(), 4.0 / 3.0, 0.1, 100.0)
+                * xgame_math::projection::look_at(EYE, Vec3::ZERO, Vec3::Y);
         GizmoCtx {
             view_proj,
             screen_size: egui::vec2(1200.0, 800.0),
@@ -291,7 +294,13 @@ mod tests {
     }
 
     /// 造一个"已经抓住轴上某点"的拖拽状态（`scene_view` 里那套起始量的最小复刻）。
-    fn drag_on_axis(ctx: &GizmoCtx, axis: Vec3, at_k: f32, part: GizmoPart, start_value: Vec3) -> GizmoDrag {
+    fn drag_on_axis(
+        ctx: &GizmoCtx,
+        axis: Vec3,
+        at_k: f32,
+        part: GizmoPart,
+        start_value: Vec3,
+    ) -> GizmoDrag {
         let grab = at(ctx, on_axis(ctx, axis, at_k));
         GizmoDrag {
             part,
@@ -323,9 +332,14 @@ mod tests {
         }
 
         // 而"直线投影"这个量是跟着 k 走的，不是常量。
-        let s1 = axis_param_under_mouse(at(&ctx, on_axis(&ctx, Vec3::X, 0.5)), &ctx, Vec3::X).unwrap();
-        let s2 = axis_param_under_mouse(at(&ctx, on_axis(&ctx, Vec3::X, 1.5)), &ctx, Vec3::X).unwrap();
-        assert!((s2 - s1).abs() > 1e-3, "轴坐标必须随鼠标位置变化: {s1} vs {s2}");
+        let s1 =
+            axis_param_under_mouse(at(&ctx, on_axis(&ctx, Vec3::X, 0.5)), &ctx, Vec3::X).unwrap();
+        let s2 =
+            axis_param_under_mouse(at(&ctx, on_axis(&ctx, Vec3::X, 1.5)), &ctx, Vec3::X).unwrap();
+        assert!(
+            (s2 - s1).abs() > 1e-3,
+            "轴坐标必须随鼠标位置变化: {s1} vs {s2}"
+        );
     }
 
     /// **回归**：沿轴平移必须跟着鼠标走。
@@ -338,7 +352,8 @@ mod tests {
 
         // 把鼠标挪到轴上更远处（1.4 倍），位移应当约 0.7 倍 gizmo 长度
         let moved = at(&ctx, on_axis(&ctx, Vec3::X, 1.4));
-        let delta = compute_transform(&drag, moved, &ctx, ToolMode::Translate).expect("应当算出位移");
+        let delta =
+            compute_transform(&drag, moved, &ctx, ToolMode::Translate).expect("应当算出位移");
 
         match delta {
             TransformDelta::Position(p) => {
@@ -404,7 +419,10 @@ mod tests {
         };
 
         // 当前：转到 45° 方向
-        let cur = at(&ctx, ctx.entity_pos + (Vec3::X + Vec3::Y) * (r / 2f32.sqrt()));
+        let cur = at(
+            &ctx,
+            ctx.entity_pos + (Vec3::X + Vec3::Y) * (r / 2f32.sqrt()),
+        );
         let delta = compute_transform(&drag, cur, &ctx, ToolMode::Rotate).expect("应当算出旋转");
 
         match delta {
@@ -456,7 +474,8 @@ mod tests {
             let mut ctx = base.clone();
             ctx.entity_pos = pos; // ← 真实交互就是这么干的（这就是自反馈的来源）
 
-            match compute_transform(&drag, mouse, &ctx, ToolMode::Translate).expect("应当算出位移") {
+            match compute_transform(&drag, mouse, &ctx, ToolMode::Translate).expect("应当算出位移")
+            {
                 TransformDelta::Position(p) => {
                     // 世界位移只沿轴，且其余分量不动
                     assert!(

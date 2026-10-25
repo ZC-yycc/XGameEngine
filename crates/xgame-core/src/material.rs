@@ -165,15 +165,13 @@ mod tests {
     /// （"只改粗糙度"不该把金属度也钉死）。
     #[test]
     fn partial_override_deserializes_field_by_field() {
-        let o: MaterialOverride =
-            ron::from_str("(roughness: Some(0.2))").expect("应当可解析");
+        let o: MaterialOverride = ron::from_str("(roughness: Some(0.2))").expect("应当可解析");
         assert_eq!(o.roughness, Some(0.2));
         assert_eq!(o.metallic, None);
         assert_eq!(o.base_color, None);
 
         // 整字段缺席（不是写 `None`，而是根本不写）走 serde default。
-        let o: MaterialOverride =
-            ron::from_str("(metallic: Some(0.5))").expect("应当可解析");
+        let o: MaterialOverride = ron::from_str("(metallic: Some(0.5))").expect("应当可解析");
         assert_eq!(o.metallic, Some(0.5));
         assert_eq!(o.roughness, None);
     }

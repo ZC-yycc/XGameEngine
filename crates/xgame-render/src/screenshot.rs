@@ -144,7 +144,9 @@ pub fn frame_bounds(
     let half_h = (half_v.tan() * aspect).atan();
     let half_min = half_v.min(half_h);
     let dist = radius / half_min.sin().max(1e-3) * 1.06;
-    let dir = direction.try_normalize().unwrap_or_else(default_shot_direction);
+    let dir = direction
+        .try_normalize()
+        .unwrap_or_else(default_shot_direction);
     ShotCamera::looking_at(center + dir * dist, center, fov_y)
 }
 
@@ -420,7 +422,9 @@ impl ScreenshotRenderer {
                 default_shot_direction_for(scene),
             )
         });
-        let radius = bounds.map(|b| b.radius()).unwrap_or(EMPTY_SCENE_FALLBACK_RADIUS);
+        let radius = bounds
+            .map(|b| b.radius())
+            .unwrap_or(EMPTY_SCENE_FALLBACK_RADIUS);
         let (near, far) = clip_planes(&camera, radius);
 
         let view = Mat4::look_at_rh(camera.eye, camera.target, camera.up);
@@ -494,8 +498,13 @@ impl ScreenshotRenderer {
             settings,
         );
         // UI：截图与玩家看到的必须是同一张画面 —— 只画 3D 的截图会漏掉 HUD。
-        self.ui
-            .prepare(&self.device, &self.queue, scene, self.size, &self.project_root);
+        self.ui.prepare(
+            &self.device,
+            &self.queue,
+            scene,
+            self.size,
+            &self.project_root,
+        );
         self.ui.render(
             &self.device,
             &self.queue,
@@ -748,7 +757,10 @@ mod tests {
         let radius = test_bounds().radius();
         let (near, far) = clip_planes(&cam, radius);
         let dist = (cam.eye - cam.target).length();
-        assert!(near > 0.0 && near < dist + radius, "near={near} dist={dist}");
+        assert!(
+            near > 0.0 && near < dist + radius,
+            "near={near} dist={dist}"
+        );
         assert!(far > dist + radius, "far={far} 必须罩住整个包围球");
     }
 
@@ -805,11 +817,7 @@ mod tests {
 
     impl Drop for GpuTestPermit {
         fn drop(&mut self) {
-            let mut active = self
-                .gate
-                .active
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut active = self.gate.active.lock().unwrap_or_else(|e| e.into_inner());
             *active -= 1;
             self.gate.cv.notify_one();
         }
@@ -962,12 +970,7 @@ mod tests {
     fn material_probe_scene() -> Scene {
         let mut scene = Scene::new("material");
         scene.ambient = [0.0, 0.0, 0.0];
-        scene.lights = vec![Light::directional(
-            "sun",
-            [0.6, -1.0, -0.75],
-            [1.0; 3],
-            1.0,
-        )];
+        scene.lights = vec![Light::directional("sun", [0.6, -1.0, -0.75], [1.0; 3], 1.0)];
         scene.lights[0].casts_shadow = false;
         let mut e = Entity::new("Cube");
         e.model = "builtin://cube".to_owned();
@@ -978,12 +981,7 @@ mod tests {
     fn fxaa_probe_scene() -> Scene {
         let mut scene = Scene::new("fxaa-edge");
         scene.ambient = [0.01, 0.01, 0.01];
-        scene.lights = vec![Light::directional(
-            "key",
-            [0.25, -0.6, -1.0],
-            [1.0; 3],
-            2.5,
-        )];
+        scene.lights = vec![Light::directional("key", [0.25, -0.6, -1.0], [1.0; 3], 2.5)];
         scene.lights[0].casts_shadow = false;
         let mut blade = Entity::new("Blade");
         blade.model = "builtin://cube".to_owned();
@@ -1073,14 +1071,7 @@ mod tests {
         let anim = AnimationDriver::new();
         let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
 
-        let off = render_frames(
-            &mut shot,
-            &scene,
-            &anim,
-            camera,
-            RenderConfig::default(),
-            1,
-        );
+        let off = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
         let on = render_frames(&mut shot, &scene, &anim, camera, taa_on(), 12);
 
         assert_ne!(off, on, "TAA 开关没接进渲染链：两张图逐字节相同");
@@ -1148,8 +1139,8 @@ mod tests {
         first.save_png(&path_a).expect("落盘失败");
 
         // 全新渲染器 = 新设备 / 新历史缓冲，等价于"另一个进程跑一遍"。
-        let mut second = ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240)
-            .expect("第二次创建渲染器失败");
+        let mut second =
+            ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240).expect("第二次创建渲染器失败");
         render_frames(&mut second, &scene, &anim, camera, taa_on(), 5);
         second.save_png(&path_b).expect("落盘失败");
 
@@ -1185,7 +1176,10 @@ mod tests {
         let first = render_frames(&mut shot, &scene, &anim, camera, taa_on(), 1);
 
         let (m_off, m_on) = (mean(&off), mean(&first));
-        assert!(m_on > 0.05, "TAA 首帧整屏发黑（平均亮度 {m_on:.3}）—— 检查 resolve 输出的视图");
+        assert!(
+            m_on > 0.05,
+            "TAA 首帧整屏发黑（平均亮度 {m_on:.3}）—— 检查 resolve 输出的视图"
+        );
         assert!(
             (m_on - m_off).abs() < 0.05,
             "TAA 首帧应当≈不抖动的同一帧（{m_off:.3} vs {m_on:.3}）：首帧不该直接混历史"
@@ -1335,8 +1329,8 @@ mod tests {
         let (w, h) = first.save_png(&path_a).expect("第一次落盘失败");
 
         // 重建整个渲染器（新设备、新管线、新附件），模拟"两次进程运行"。
-        let mut second = ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240)
-            .expect("第二次创建渲染器失败");
+        let mut second =
+            ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240).expect("第二次创建渲染器失败");
         second
             .render_scene(
                 &scene,
@@ -1618,7 +1612,9 @@ mod tests {
         // 渲染器取用的 near/far 由场景包围盒半径决定 —— 对表必须用同一组。
         let world = scene.world_matrices();
         let bounds = scene_bounds(&scene.entities, &world, &shot.model_cache);
-        let radius = bounds.map(|b| b.radius()).unwrap_or(EMPTY_SCENE_FALLBACK_RADIUS);
+        let radius = bounds
+            .map(|b| b.radius())
+            .unwrap_or(EMPTY_SCENE_FALLBACK_RADIUS);
         let (near, far) = clip_planes(&camera, radius);
         let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
             * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
@@ -1724,8 +1720,8 @@ mod tests {
             .expect("第一次渲染失败");
         first.save_png(&path_a).expect("第一次落盘失败");
 
-        let mut second = ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240)
-            .expect("第二次创建渲染器失败");
+        let mut second =
+            ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240).expect("第二次创建渲染器失败");
         second
             .render_scene(
                 &scene,
@@ -1739,10 +1735,7 @@ mod tests {
 
         let bytes_a = std::fs::read(&path_a).unwrap();
         let bytes_b = std::fs::read(&path_b).unwrap();
-        assert_eq!(
-            bytes_a, bytes_b,
-            "天空开着时两次截图的 PNG 必须逐字节一致"
-        );
+        assert_eq!(bytes_a, bytes_b, "天空开着时两次截图的 PNG 必须逐字节一致");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2206,7 +2199,12 @@ mod tests {
     fn tilted_lit_white_cube(intensity: f32) -> Scene {
         let mut scene = Scene::new("hdr");
         scene.ambient = [0.0, 0.0, 0.0];
-        scene.lights = vec![Light::directional("sun", [0.6, -1.0, -0.75], [1.0; 3], intensity)];
+        scene.lights = vec![Light::directional(
+            "sun",
+            [0.6, -1.0, -0.75],
+            [1.0; 3],
+            intensity,
+        )];
         scene.lights[0].casts_shadow = false;
         let mut e = Entity::new("Cube");
         e.model = "builtin://cube".to_owned();
@@ -2286,7 +2284,8 @@ mod tests {
     /// 这条测试立刻变红）。
     #[test]
     fn exposure_scales_highlights_before_the_curve_on_gpu() {
-        let Some(mut shot) = gpu_or_skip("exposure_scales_highlights_before_the_curve_on_gpu") else {
+        let Some(mut shot) = gpu_or_skip("exposure_scales_highlights_before_the_curve_on_gpu")
+        else {
             return;
         };
         let scene = tilted_lit_white_cube(4.0);
@@ -2541,9 +2540,14 @@ mod tests {
             ground.model = "builtin://plane".to_owned();
             ground.transform.scale = Vec3::new(10.0, 1.0, 10.0);
             scene.add_entity(ground);
-            for (i, p) in [(-1.5, 0.5, -0.5), (1.5, 0.5, -0.5), (-1.5, 0.5, 1.0), (1.5, 0.5, 1.0)]
-                .into_iter()
-                .enumerate()
+            for (i, p) in [
+                (-1.5, 0.5, -0.5),
+                (1.5, 0.5, -0.5),
+                (-1.5, 0.5, 1.0),
+                (1.5, 0.5, 1.0),
+            ]
+            .into_iter()
+            .enumerate()
             {
                 let mut e = Entity::new(format!("c{i}"));
                 e.model = if per_draw {
@@ -2557,8 +2561,11 @@ mod tests {
             scene
         };
 
-        let camera =
-            ShotCamera::looking_at(Vec3::new(0.0, 4.0, 6.0), Vec3::new(0.0, 0.0, 0.2), DEFAULT_FOV_Y);
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 4.0, 6.0),
+            Vec3::new(0.0, 0.0, 0.2),
+            DEFAULT_FOV_Y,
+        );
         let render = |shot: &mut ScreenshotRenderer, scene: &Scene| {
             shot.render_scene(
                 scene,
@@ -2820,8 +2827,7 @@ mod tests {
         };
         let scene = fxaa_probe_scene();
         let anim = AnimationDriver::new();
-        let camera =
-            ShotCamera::looking_at(Vec3::new(0.0, 0.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 0.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
 
         let mut render = |enabled: bool| {
             let settings = RenderConfig {
@@ -2853,7 +2859,10 @@ mod tests {
 
         let steps_off = hard_luma_steps(&off, 320, 240, 0.25);
         let steps_on = hard_luma_steps(&on, 320, 240, 0.25);
-        assert!(steps_off > 200, "测试前提：1× MSAA 的斜边必须有大量硬台阶（{steps_off}）");
+        assert!(
+            steps_off > 200,
+            "测试前提：1× MSAA 的斜边必须有大量硬台阶（{steps_off}）"
+        );
         assert!(
             steps_on < steps_off,
             "FXAA 应当把硬台阶磨成中间调：{steps_off} → {steps_on}"
@@ -2904,11 +2913,8 @@ mod tests {
             e.model = "builtin://cube".to_owned();
             if i % 2 == 0 {
                 let g = (i / 2) as f32;
-                e.transform.position = Vec3::new(
-                    (g % 4.0 - 1.5) * 0.7,
-                    (g / 4.0 - 1.5) * 0.7,
-                    -4.0,
-                );
+                e.transform.position =
+                    Vec3::new((g % 4.0 - 1.5) * 0.7, (g / 4.0 - 1.5) * 0.7, -4.0);
             } else {
                 // 相机背后：z 为正，任何朝向 -Z 的相机都看不见。
                 let g = (i / 2) as f32;
@@ -2928,8 +2934,7 @@ mod tests {
             return;
         };
         let scene = interleaved_visible_and_hidden_cubes();
-        let camera =
-            ShotCamera::looking_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), DEFAULT_FOV_Y);
+        let camera = ShotCamera::looking_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), DEFAULT_FOV_Y);
         let render = |shot: &mut ScreenshotRenderer| {
             shot.render_scene(
                 &scene,
@@ -2971,8 +2976,7 @@ mod tests {
             return;
         };
         let scene = interleaved_visible_and_hidden_cubes();
-        let camera =
-            ShotCamera::looking_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), DEFAULT_FOV_Y);
+        let camera = ShotCamera::looking_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), DEFAULT_FOV_Y);
         let render = |shot: &mut ScreenshotRenderer| {
             shot.render_scene(
                 &scene,
@@ -3032,11 +3036,7 @@ mod tests {
         caster.transform.position = Vec3::new(-12.0, 5.0, 0.0);
         scene.add_entity(caster);
 
-        let camera = ShotCamera::looking_at(
-            Vec3::new(0.0, 14.0, 18.0),
-            Vec3::ZERO,
-            DEFAULT_FOV_Y,
-        );
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 14.0, 18.0), Vec3::ZERO, DEFAULT_FOV_Y);
         let render = |shot: &mut ScreenshotRenderer, scene: &Scene| {
             shot.render_scene(
                 scene,
@@ -3052,15 +3052,10 @@ mod tests {
         // 先把模型装进缓存，才能用同一套取景参数算出投影坐标。
         let _ = render(&mut shot, &scene);
         let world = scene.world_matrices();
-        let bounds = scene_bounds(&scene.entities, &world, &shot.model_cache)
-            .expect("场景有几何");
+        let bounds = scene_bounds(&scene.entities, &world, &shot.model_cache).expect("场景有几何");
         let (near, far) = clip_planes(&camera, bounds.radius());
-        let view_proj = Mat4::perspective_rh(
-            camera.fov_y,
-            shot.aspect(),
-            near,
-            far,
-        ) * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
+            * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
         let project = |p: Vec3| {
             let clip = view_proj * p.extend(1.0);
             clip.truncate() / clip.w

@@ -43,11 +43,12 @@ pub fn show_autosave_recovery_dialog(state: &mut EditorState, ctx: &egui::Contex
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
-            ui.label(format!(
-                "场景「{label}」有一份自动保存的副本{age}。"
-            ));
+            ui.label(format!("场景「{label}」有一份自动保存的副本{age}。"));
             ui.label("它来自上一次没有正常退出的会话 —— 可能是崩溃或被强制结束。");
-            theme_note(ui, "恢复之后仍然是未保存状态：要按 Ctrl+S 才会写进场景文件。");
+            theme_note(
+                ui,
+                "恢复之后仍然是未保存状态：要按 Ctrl+S 才会写进场景文件。",
+            );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
@@ -181,11 +182,7 @@ pub fn show_exit_dialog(
 /// 与关窗确认同一套三选一语义，只是放行后执行的是 [`SceneChange`]：
 /// 保存成功 / 不保存 → 切换；取消 → 清掉挂起请求，留在当前场景。
 /// 弹窗开着期间用户自己 Ctrl+S（或用菜单保存）后不再脏，就直接放行。
-pub fn show_scene_change_dialog(
-    state: &mut EditorState,
-    ctx: &egui::Context,
-    pass_nr: u64,
-) {
+pub fn show_scene_change_dialog(state: &mut EditorState, ctx: &egui::Context, pass_nr: u64) {
     let Some(change) = state.pending_scene_change.clone() else {
         return;
     };
@@ -283,17 +280,16 @@ pub fn show_new_scene_dialog(state: &mut EditorState, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.label("创建一个空场景（主相机 + 方向光）并切过去。");
-            ui.label("启动场景不变 —— 要让游戏从这里开始，用 Scenes 菜单的 Set Current as Startup。");
+            ui.label(
+                "启动场景不变 —— 要让游戏从这里开始，用 Scenes 菜单的 Set Current as Startup。",
+            );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label("Name:");
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut state.new_scene_name).desired_width(220.0),
                 );
-                if resp.lost_focus()
-                    && can_edit
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                {
+                if resp.lost_focus() && can_edit && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     confirm = true;
                 }
             });
@@ -307,7 +303,10 @@ pub fn show_new_scene_dialog(state: &mut EditorState, ctx: &egui::Context) {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(can_edit, egui::Button::new("创建")).clicked() {
+                if ui
+                    .add_enabled(can_edit, egui::Button::new("创建"))
+                    .clicked()
+                {
                     confirm = true;
                 }
                 if ui.button("取消").clicked() {
@@ -351,17 +350,15 @@ pub fn show_save_as_dialog(state: &mut EditorState, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.label("写成一个新的场景文件，并把编辑器切过去 —— 旧文件保持原样。");
-            ui.label("启动场景不变；要让游戏从新场景开始，用 Scenes 菜单的 Set Current as Startup。");
+            ui.label(
+                "启动场景不变；要让游戏从新场景开始，用 Scenes 菜单的 Set Current as Startup。",
+            );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label("Name:");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut state.save_as_name).desired_width(220.0),
-                );
-                if resp.lost_focus()
-                    && can_edit
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                {
+                let resp = ui
+                    .add(egui::TextEdit::singleline(&mut state.save_as_name).desired_width(220.0));
+                if resp.lost_focus() && can_edit && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     confirm = true;
                 }
             });
@@ -375,7 +372,10 @@ pub fn show_save_as_dialog(state: &mut EditorState, ctx: &egui::Context) {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(can_edit, egui::Button::new("保存")).clicked() {
+                if ui
+                    .add_enabled(can_edit, egui::Button::new("保存"))
+                    .clicked()
+                {
                     confirm = true;
                 }
                 if ui.button("取消").clicked() {

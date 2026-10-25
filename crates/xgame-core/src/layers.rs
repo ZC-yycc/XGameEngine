@@ -237,7 +237,11 @@ mod tests {
         let mut layers = Layers::default();
         layers.masks.insert(5, 0);
         let clean = layers.sanitized();
-        assert_eq!(clean.mask(5), 0, "用户明确配的「不碰任何东西」不能被修回全通");
+        assert_eq!(
+            clean.mask(5),
+            0,
+            "用户明确配的「不碰任何东西」不能被修回全通"
+        );
         assert!(!clean.collides(5, 5));
     }
 
@@ -299,7 +303,10 @@ mod tests {
         layers.set_collides(1, 2, false);
         let text = ron::to_string(&layers).unwrap();
         assert!(text.contains("Player"), "改过的名字要落盘: {text}");
-        assert!(!text.contains("Layer 0"), "没改过的层不该出现在文件里: {text}");
+        assert!(
+            !text.contains("Layer 0"),
+            "没改过的层不该出现在文件里: {text}"
+        );
 
         let back: Layers = ron::from_str(&text).unwrap();
         assert_eq!(back, layers);

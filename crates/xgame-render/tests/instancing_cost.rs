@@ -42,7 +42,9 @@ use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::GltfMesh;
 use xgame_render::mesh::BuiltinMesh;
 use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
-use xgame_render::scene_pipeline::{supported_sample_count, FrameStats, SceneLighting, ScenePipeline};
+use xgame_render::scene_pipeline::{
+    supported_sample_count, FrameStats, SceneLighting, ScenePipeline,
+};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -103,7 +105,11 @@ fn gpu() -> Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)> {
 /// 每 3 个实体给一次实体级材质覆盖：逐实例材质是实例化的核心命题之一
 /// （覆盖写进实例数据而不是材质绑定组），带上它才是真实的负载。
 fn actor_scene(unique_meshes: bool) -> Scene {
-    let mut scene = Scene::new(if unique_meshes { "instancing-unique" } else { "instancing-shared" });
+    let mut scene = Scene::new(if unique_meshes {
+        "instancing-unique"
+    } else {
+        "instancing-shared"
+    });
     scene.ambient = [0.03, 0.03, 0.05];
     scene.lights = vec![Light::directional(
         "sun",
@@ -325,10 +331,16 @@ fn run_round(
         let _ = tx.send(r);
     });
     device.poll(wgpu::Maintain::Wait);
-    rx.recv().expect("读回通道断开").expect("映射时间戳缓冲失败");
+    rx.recv()
+        .expect("读回通道断开")
+        .expect("映射时间戳缓冲失败");
     let ticks: Vec<u64> = {
         let view = slice.get_mapped_range();
-        view.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect()
+        view.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
+            .collect()
     };
     readback.unmap();
 
@@ -386,8 +398,30 @@ fn instancing_cost() {
     });
     let warmup_start = Instant::now();
     while warmup_start.elapsed() < WARMUP_TIME {
-        shared.frame(&device, &queue, &warmup, 0, &shared_scene, &shared_matrices, &shared_cache, &anim, &view_proj, &eye);
-        unique.frame(&device, &queue, &warmup, 0, &unique_scene, &unique_matrices, &unique_cache, &anim, &view_proj, &eye);
+        shared.frame(
+            &device,
+            &queue,
+            &warmup,
+            0,
+            &shared_scene,
+            &shared_matrices,
+            &shared_cache,
+            &anim,
+            &view_proj,
+            &eye,
+        );
+        unique.frame(
+            &device,
+            &queue,
+            &warmup,
+            0,
+            &unique_scene,
+            &unique_matrices,
+            &unique_cache,
+            &anim,
+            &view_proj,
+            &eye,
+        );
     }
     device.poll(wgpu::Maintain::Wait);
 
@@ -420,10 +454,32 @@ fn instancing_cost() {
         });
         let (resolve, readback) = make_buffers();
         let (s, s_stats) = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
-            shared.frame(&device, &queue, &stamps, base, &shared_scene, &shared_matrices, &shared_cache, &anim, &view_proj, &eye)
+            shared.frame(
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &shared_scene,
+                &shared_matrices,
+                &shared_cache,
+                &anim,
+                &view_proj,
+                &eye,
+            )
         });
         let (u, u_stats) = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
-            unique.frame(&device, &queue, &stamps, base, &unique_scene, &unique_matrices, &unique_cache, &anim, &view_proj, &eye)
+            unique.frame(
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &unique_scene,
+                &unique_matrices,
+                &unique_cache,
+                &anim,
+                &view_proj,
+                &eye,
+            )
         });
         println!(
             "  第 {} 轮: 共享 场景{:.1}/CPU{:.1} | 各自 场景{:.1}/CPU{:.1}（µs/帧）",
@@ -437,7 +493,10 @@ fn instancing_cost() {
     }
 
     let pick = |f: fn(&Round) -> f64, idx: usize| {
-        let mut v: Vec<f64> = rounds.iter().map(|r| f(if idx == 0 { &r.0 } else { &r.1 })).collect();
+        let mut v: Vec<f64> = rounds
+            .iter()
+            .map(|r| f(if idx == 0 { &r.0 } else { &r.1 }))
+            .collect();
         median(&mut v)
     };
     let s_scene = pick(|r| r.scene_us, 0);

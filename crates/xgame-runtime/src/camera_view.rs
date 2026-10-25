@@ -107,12 +107,7 @@ impl CameraView {
         } else {
             1.0
         };
-        projection::perspective(
-            self.fov_deg.to_radians(),
-            aspect,
-            self.near,
-            self.far,
-        )
+        projection::perspective(self.fov_deg.to_radians(), aspect, self.near, self.far)
     }
 
     /// 视图投影矩阵（渲染侧唯一入口）。
@@ -163,11 +158,17 @@ mod tests {
         assert!((view.forward - Vec3::Z).length() < 1e-5);
 
         let front = ndc(&view, Vec3::new(0.0, 0.0, 5.0));
-        assert!(front.x.abs() < 1e-4 && front.y.abs() < 1e-4, "正前方不在画面中心: {front:?}");
+        assert!(
+            front.x.abs() < 1e-4 && front.y.abs() < 1e-4,
+            "正前方不在画面中心: {front:?}"
+        );
 
         // 面朝 +Z 站着时，"右手边"是世界 −X：世界 +X 的点必须落在画面左侧。
         let right_of_world = ndc(&view, Vec3::new(2.0, 0.0, 5.0));
-        assert!(right_of_world.x < 0.0, "世界 +X 应出现在画面左侧: {right_of_world:?}");
+        assert!(
+            right_of_world.x < 0.0,
+            "世界 +X 应出现在画面左侧: {right_of_world:?}"
+        );
 
         // 世界 +Y（上方）的点必须在上半屏。
         let above = ndc(&view, Vec3::new(0.0, 2.0, 5.0));
@@ -179,7 +180,11 @@ mod tests {
         // 绕 Y 转 90°：本地 +Z 转到世界 +X，那么世界 +X 的点就在正前方。
         let scene = scene_with_camera(Vec3::ZERO, Quat::from_rotation_y(90f32.to_radians()));
         let view = CameraView::from_scene(&scene).unwrap();
-        assert!((view.forward - Vec3::X).length() < 1e-4, "forward={:?}", view.forward);
+        assert!(
+            (view.forward - Vec3::X).length() < 1e-4,
+            "forward={:?}",
+            view.forward
+        );
         let center = ndc(&view, Vec3::new(5.0, 0.0, 0.0));
         assert!(center.x.abs() < 1e-4 && center.y.abs() < 1e-4);
     }
@@ -192,9 +197,7 @@ mod tests {
             Entity::new("Player Rig")
                 .with_transform(Transform::from_translation(Vec3::new(10.0, 0.0, 0.0))),
         );
-        let cam = scene.add_entity(
-            Entity::new("Shoulder Cam").with_camera(Camera::default()),
-        );
+        let cam = scene.add_entity(Entity::new("Shoulder Cam").with_camera(Camera::default()));
         // `set_parent` 是"保留世界变换"语义（编辑器拖拽要的），所以先挂再接
         // 局部偏移 —— 作者在 Inspector 里也是这么配的（挂进去之后调局部值）。
         assert!(scene.set_parent(
@@ -217,12 +220,13 @@ mod tests {
             active: false,
             ..Camera::default()
         };
-        scene.add_entity(
-            Entity::new("Idle").with_camera(idle),
-        );
+        scene.add_entity(Entity::new("Idle").with_camera(idle));
         let main = scene.add_entity(Entity::new("Main").with_camera(Camera::default()));
         let view = CameraView::from_scene(&scene).unwrap();
-        assert_eq!(view.entity, scene.entities[scene.index_of(main).unwrap()].id);
+        assert_eq!(
+            view.entity,
+            scene.entities[scene.index_of(main).unwrap()].id
+        );
     }
 
     #[test]
@@ -270,7 +274,11 @@ mod tests {
             Quat::from_rotation_x(90f32.to_radians()),
         );
         let view = CameraView::from_scene(&scene).unwrap();
-        assert!((view.forward - Vec3::NEG_Y).length() < 1e-4, "forward={:?}", view.forward);
+        assert!(
+            (view.forward - Vec3::NEG_Y).length() < 1e-4,
+            "forward={:?}",
+            view.forward
+        );
         assert!(view.view_projection(1.5).is_finite());
         // 俯视时地面上正下方的点应在画面中心。
         let below = ndc(&view, Vec3::new(0.0, 0.0, 0.0));
