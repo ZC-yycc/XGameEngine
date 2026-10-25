@@ -145,8 +145,14 @@ impl UiTree {
         let count = scene.entities.len();
         self.index_of.clear();
         self.index_of.reserve(count);
+        // `entry().or_insert()`：撞 ID 时取**第一个**，与 `Scene::index_of` /
+        // `find_entity`（`position()`，也是第一个）同解。用 `insert` 会变成
+        // "后出现的覆盖前面的" —— 同一份场景在两套寻址下给出不同父子关系，
+        // 表现是 UI 元素挂到了别人身上（布局错位、点击命中错）。
+        // 重复 ID 本身会在读盘边界被修掉（`Scene::ensure_unique_ids`），但这里
+        // 不能依赖它：内存里传进来的场景不保证经过那道门。
         for (i, entity) in scene.entities.iter().enumerate() {
-            self.index_of.insert(entity.id, i);
+            self.index_of.entry(entity.id).or_insert(i);
         }
 
         self.ancestor.clear();
@@ -393,6 +399,42 @@ mod tests {
         assert_eq!(items[1].depth, 1);
         // 子元素相对父矩形：父在 (10,10) 起 400×300，子锚点 (0,0) 偏移 (0,0)。
         assert_eq!(items[1].rect.min, Vec2::new(10.0, 10.0));
+    }
+
+    /// 撞 ID 时 UI 树的父子关系必须与 `Scene::index_of` 同解（都取第一个）。
+    ///
+    /// 旧实现用 `insert` 建 ID→索引表：后出现的同 ID 实体覆盖前面的，于是子元素
+    /// 被挂到**后一个**实体名下 —— 同一份场景，`scene.index_of(id)` 说 0、UI 树
+    /// 说是 1。表现是布局错位、点击命中到别的元素上。
+    #[test]
+    fn duplicate_ids_resolve_to_the_first_entity_like_the_scene() {
+        let mut scene = Scene::new("dup");
+
+        let mut first = Entity::new("First");
+        first.ui = Some(UiElement::panel(400.0, 300.0));
+        let shared = first.id;
+        scene.entities.push(first);
+
+        // 第二条与第一条撞 ID（旧版本计数器留下的落盘伤）。
+        let mut second = Entity::new("Second");
+        second.id = shared;
+        second.ui = Some(UiElement::panel(200.0, 200.0));
+        scene.entities.push(second);
+
+        let mut child = Entity::new("Child");
+        child.parent = Some(shared);
+        child.ui = Some(UiElement::panel(10.0, 10.0));
+        scene.entities.push(child);
+
+        assert_eq!(scene.index_of(shared), Some(0), "场景侧取的是第一个");
+
+        let mut tree = UiTree::new();
+        tree.build(&scene);
+        assert_eq!(tree.children(0).len(), 1, "子元素应当挂在第一个实体下");
+        assert!(
+            tree.children(1).is_empty(),
+            "第二个实体不该凭空多出子元素（与 Scene 的父子关系不一致）"
+        );
     }
 
     /// NaN 锚点：整个子树被跳过，而不是把 NaN 顶点塞进绘制数据。

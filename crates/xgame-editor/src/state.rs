@@ -31,6 +31,19 @@ fn asset_stem(relative: &str) -> String {
     }
 }
 
+/// 复制出来的实体的名字：`X` → `X (Copy)` → `X (Copy 2)` → …
+///
+/// 为什么带序号而不是一律 `X (Copy)`：连按两次 Ctrl+D 会得到两个同名实体，
+/// 而层级面板、删除日志、控制台里只有名字 —— 重名之后作者根本无法确认
+/// "我删的到底是哪一个"。同 `GameObject (1)` 重名是同一个坑。
+fn copy_name(base: &str, n: usize) -> String {
+    if n <= 1 {
+        format!("{base} (Copy)")
+    } else {
+        format!("{base} (Copy {n})")
+    }
+}
+
 /// 场景文件在界面上的显示名（`Scenes/Level2.ron` → `Level2`）。
 ///
 /// 菜单里不该出现整条项目相对路径：一排 `Scenes/...` 前缀只会把真正不同的
@@ -1215,21 +1228,22 @@ impl EditorState {
 
         self.push_undo();
 
-        // 先给每个待粘贴实体分配新 ID，建立 旧→新 映射
-        let mut id_map: HashMap<EntityId, EntityId> = HashMap::new();
-        for entity in &items {
-            id_map.insert(entity.id, EntityId::new());
+        // 与 `duplicate_entity` 同一实现：新 ID 按位置分配。以旧 ID 为键建映射
+        // 时，源里撞 ID 的两条实体会共用**一个**新 ID（`insert` 覆盖），于是
+        // "粘贴"成了把重复 ID 引进场景的入口。
+        let new_ids: Vec<EntityId> = items.iter().map(|_| EntityId::new()).collect();
+        let mut redirect: HashMap<EntityId, EntityId> = HashMap::with_capacity(items.len());
+        for (original, new_id) in items.iter().zip(&new_ids) {
+            redirect.entry(original.id).or_insert(*new_id);
         }
 
         let mut first_idx = None;
         for (k, original) in items.iter().enumerate() {
             let mut entity = original.clone();
-            entity.id = id_map[&original.id];
-            entity.parent = match original.parent {
-                Some(pid) if id_map.contains_key(&pid) => Some(id_map[&pid]),
-                _ => None, // 粘贴到根层
-            };
-            entity.name = format!("{} (Copy)", original.name);
+            entity.id = new_ids[k];
+            // 父节点不在这一批里 → 落到场景根层（避免引用一个可能已被删掉的外部父节点）。
+            entity.parent = original.parent.and_then(|pid| redirect.get(&pid).copied());
+            entity.name = self.unique_name(|n| copy_name(&original.name, n));
             if k == 0 {
                 // 错开一点位置。完全重叠的话用户看不出粘贴成功了，会以为快捷键没生效。
                 entity.transform.position.x += 0.5;
@@ -1416,6 +1430,22 @@ impl EditorState {
         }
     }
 
+    /// 在场景里给 `make(1)` / `make(2)` … 找一个还没被占用的名字。
+    ///
+    /// 与 [`Self::claim_entity_name`] 分开：那个会连带消耗 `next_entity_id`
+    /// （名字里带序号的新建流程用），这里只解决"名字撞了"这一类问题
+    /// （复制 / 粘贴出来的 `X (Copy)`）。
+    fn unique_name(&self, make: impl Fn(usize) -> String) -> String {
+        let mut n = 1;
+        loop {
+            let name = make(n);
+            if !self.scene.entities.iter().any(|e| e.name == name) {
+                return name;
+            }
+            n += 1;
+        }
+    }
+
     /// 向场景添加一个新的空实体并返回其索引。
     ///
     /// 在 Play 模式下不可用。
@@ -1504,21 +1534,32 @@ impl EditorState {
             .map(|&i| self.scene.entities[i].clone())
             .collect();
 
-        // 旧 ID → 新 ID。子树内部的父子引用按这张映射重定向；根的外部父节点
-        // 保持不变（副本与原来并排）。
-        let mut id_map: HashMap<EntityId, EntityId> = HashMap::new();
-        for entity in &originals {
-            id_map.insert(entity.id, EntityId::new());
+        // 新 ID 按**位置**分配，不以旧 ID 建映射：源子树里一旦出现重复 ID
+        // （旧版本计数器留下的落盘伤，或手写 RON），以旧 ID 为键会让两条实体
+        // 拿到**同一个**新 ID —— 复制动作自己就把重复带进场景，而按 ID 找实体
+        // 的每条路径（删除、父子解析、脚本状态）都会跟着错。
+        // 与 `Prefab::instantiate` 同一实现、同一理由。
+        let new_ids: Vec<EntityId> = originals.iter().map(|_| EntityId::new()).collect();
+        // 旧 ID → 新 ID 只用于**重定向父子引用**：撞 ID 时取第一个，与
+        // `Scene::index_of` / `find_entity`（`position()`）同解。
+        let mut redirect: HashMap<EntityId, EntityId> = HashMap::with_capacity(originals.len());
+        for (original, new_id) in originals.iter().zip(&new_ids) {
+            redirect.entry(original.id).or_insert(*new_id);
         }
 
         let mut first_new = None;
         for (k, original) in originals.iter().enumerate() {
             let mut clone = original.clone();
-            clone.id = id_map[&original.id];
+            clone.id = new_ids[k];
             // 父引用指向的实体也在这批副本里就映射到新 ID，否则（指向子树外的
             // 父节点）保留原 ID 不变。
-            clone.parent = original.parent.map(|pid| *id_map.get(&pid).unwrap_or(&pid));
-            clone.name = format!("{} (Copy)", original.name);
+            clone.parent = original
+                .parent
+                .map(|pid| redirect.get(&pid).copied().unwrap_or(pid));
+            // 名字也要去重：连按两次 Ctrl+D 会造出两个 `X (Copy)`，而层级面板
+            // 与删除日志只有名字 —— 重名让"删错了"无从辨认。与 `create_entity`
+            // 的重名坑同源，见 `claim_entity_name`。
+            clone.name = self.unique_name(|n| copy_name(&original.name, n));
             if k == 0 {
                 // 只挪子树根；子节点跟着父走，额外偏移会让整棵树散开。
                 clone.transform.position.x += 0.5;
@@ -3413,6 +3454,76 @@ mod tests {
             .collect();
         assert_eq!(names.len(), 2);
         assert_ne!(names[0], names[1], "新建实体不能与已有实体重名：{names:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 连续复制同一个实体，名字不能重复。
+    ///
+    /// 旧实现一律 `format!("{} (Copy)")`：连按两次 Ctrl+D 就得到两个
+    /// `A (Copy)`。层级面板与删除日志只有名字，重名之后作者无法确认
+    /// "我删的到底是哪一个" —— 与新建实体重名是同一个坑。
+    #[test]
+    fn duplicated_entities_never_reuse_an_existing_name() {
+        let (mut state, base) = temp_state("dup_names");
+        state.scene = xgame_core::Scene::new("dup");
+        state.scene.add_entity(xgame_core::Entity::new("A"));
+        state.selected_entity = Some(0);
+
+        state.duplicate_entity();
+        state.selected_entity = Some(0); // 再复制一次**原实体**，才会撞名
+        state.duplicate_entity();
+
+        let names: Vec<&str> = state
+            .scene
+            .entities
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "复制的名字必须唯一，实际 {names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 复制子树时，源里撞 ID 的实体不能共用同一个新 ID。
+    ///
+    /// 旧实现以**旧 ID** 为键建 `id_map`：父子撞 ID 时第二次 `insert` 覆盖
+    /// 第一次，两条副本拿到同一个新 ID —— 复制动作自己把重复 ID 带进场景，
+    /// 接着按 ID 找实体的每条路径（删除、父子解析、脚本状态）一起错。
+    #[test]
+    fn duplicate_keeps_new_ids_distinct_when_the_subtree_has_duplicate_ids() {
+        let (mut state, base) = temp_state("dup_ids");
+        state.scene = xgame_core::Scene::new("dup");
+        let root_id = state.scene.add_entity(xgame_core::Entity::new("Root"));
+        let child_id = state.scene.add_entity(xgame_core::Entity::new("Child"));
+        let root = state.scene.index_of(root_id).expect("刚加进去");
+        let child = state.scene.index_of(child_id).expect("刚加进去");
+        // 手工造一份"落盘伤"：子节点与父节点撞 ID。
+        state.scene.entities[child].id = root_id;
+        state.scene.entities[child].parent = Some(root_id);
+        state.selected_entity = Some(root);
+
+        let before = state.scene.entities.len();
+        state.duplicate_entity();
+
+        // 场景里本来就有重复（上面手工造的），所以不能断言"全场景唯一"——
+        // 要断言的是**副本之间**不共用 ID：旧实现以旧 ID 为键，父子撞 ID 时
+        // 第二次 `insert` 覆盖第一次，两条副本拿到同一个新 ID。
+        let copies = &state.scene.entities[before..];
+        assert_eq!(copies.len(), 2, "应当把整棵子树复制出来");
+        assert_ne!(
+            copies[0].id, copies[1].id,
+            "两条副本拿到了同一个新 ID —— 复制动作自己造出了重复 ID"
+        );
+        assert_ne!(copies[0].id, root_id, "副本不能沿用源实体的 ID");
+        assert_ne!(copies[1].id, root_id, "副本不能沿用源实体的 ID");
 
         let _ = std::fs::remove_dir_all(&base);
     }
