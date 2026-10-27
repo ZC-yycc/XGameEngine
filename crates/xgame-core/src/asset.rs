@@ -786,7 +786,7 @@ impl AssetDatabase {
         }
 
         let meta = AssetMeta::fresh(kind);
-        std::fs::write(&meta_path, meta.to_ron()?)
+        crate::project::write_atomic_new(&meta_path, &meta.to_ron()?)
             .map_err(|e| format!("写入 {} 失败: {e}", meta_path.display()))?;
         self.insert_record(&relative, kind, &meta);
         Ok(meta.guid)
@@ -831,7 +831,7 @@ impl AssetDatabase {
             let text = meta
                 .to_ron()
                 .map_err(|e| format!("序列化 {} 失败: {e}", meta_path.display()))?;
-            if let Err(e) = std::fs::write(&meta_path, text) {
+            if let Err(e) = crate::project::write_atomic_new(&meta_path, &text) {
                 first_error
                     .get_or_insert_with(|| format!("写入 {} 失败: {e}", meta_path.display()));
                 continue;
@@ -898,7 +898,7 @@ impl AssetDatabase {
             import,
         };
         let meta_path = self.root.join(format!("{relative}.{META_EXTENSION}"));
-        std::fs::write(&meta_path, meta.to_ron()?)
+        crate::project::write_atomic(&meta_path, &meta.to_ron()?)
             .map_err(|e| format!("写入 {} 失败: {e}", meta_path.display()))?;
 
         if let Some(record) = self.by_guid.get_mut(&guid) {
@@ -1512,6 +1512,61 @@ mod tests {
         let back = AssetMeta::from_ron(&text).unwrap();
         assert_eq!(back.import.model_scale, 2.5);
         assert!(back.import.texture_srgb, "缺省字段走默认值");
+    }
+
+    #[test]
+    fn meta_creation_does_not_replace_a_concurrent_registration() {
+        let root = temp_root("meta_create_collision");
+        put(&root, "Resources/Box.glb", b"glb");
+        let mut db = AssetDatabase::scan(&root);
+        let meta_path = root.join("Resources/Box.glb.meta");
+        let other = AssetMeta::fresh(AssetKind::Model);
+        std::fs::write(&meta_path, other.to_ron().unwrap()).unwrap();
+        let before = std::fs::read(&meta_path).unwrap();
+        assert!(
+            db.ensure_meta("Resources/Box.glb").is_ok(),
+            "已有合法身份应直接接入索引"
+        );
+        assert_eq!(db.guid_of("Resources/Box.glb"), Some(&other.guid));
+        assert_eq!(std::fs::read(&meta_path).unwrap(), before);
+
+        // 批量扫描后的待生成清单也可能过期；不得替换后来写入的身份。
+        put(&root, "Resources/New.png", b"png");
+        db.refresh();
+        let other_new = AssetMeta::fresh(AssetKind::Texture);
+        let new_path = root.join("Resources/New.png.meta");
+        std::fs::write(&new_path, other_new.to_ron().unwrap()).unwrap();
+        let new_before = std::fs::read(&new_path).unwrap();
+        assert!(db.ensure_metas().is_err());
+        assert_eq!(std::fs::read(&new_path).unwrap(), new_before);
+        assert!(db.guid_of("Resources/New.png").is_none());
+        db.refresh();
+        assert_eq!(db.guid_of("Resources/New.png"), Some(&other_new.guid));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn import_update_failure_preserves_meta_and_index() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_root("import_replace_failure");
+        put(&root, "Resources/Box.glb", b"glb");
+        let mut db = AssetDatabase::scan(&root);
+        let guid = db.ensure_meta("Resources/Box.glb").unwrap();
+        let path = root.join("Resources/Box.glb.meta");
+        let before = std::fs::read(&path).unwrap();
+        let previous = db.import_of("Resources/Box.glb");
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(3).open(&path).unwrap();
+        let changed = ImportSettings { model_scale: 2.5, ..previous };
+        assert!(db.set_import("Resources/Box.glb", changed).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(db.guid_of("Resources/Box.glb"), Some(&guid));
+        assert_eq!(db.import_of("Resources/Box.glb"), previous);
+        drop(lock);
+        db.set_import("Resources/Box.glb", changed).unwrap();
+        assert_eq!(db.import_of("Resources/Box.glb"), changed);
+        assert_eq!(AssetMeta::from_ron(&std::fs::read_to_string(&path).unwrap()).unwrap().guid, guid);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// 扫描：有资产没 `.meta` → 记 missing_meta；生成后索引可用且幂等。

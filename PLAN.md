@@ -5310,6 +5310,20 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 六十五、G0 资产 `.meta` 保存可靠性（2026-10-27）
+
+### 事实与选择
+
+G0 的主文件暂存冲突已处理，但 `AssetDatabase::ensure_meta`、`ensure_metas` 和 `set_import` 仍直接写目标 `.meta`。这是资产 GUID 与导入设置的持久身份：直接截断可能损坏旧设置；批量扫描后若另一写入者抢先生成，旧实现还会覆盖其身份。此次只处理资产元数据写侧，不新增依赖。
+
+### 实施与红绿验证
+
+Windows 下先新增 `import_update_failure_preserves_meta_and_index`：打开旧文件并允许读写、禁止替换；旧 `set_import` 返回成功，测试断言报错失败（1 failed）。新实现更新走现有 `project::write_atomic`，失败旧字节与索引均不变，解除占用后更新成功。首次生成使用同目录暂存 + `hard_link` 原子创建目标；目标已存在时拒绝覆盖，批量生成保留错误并等待 `refresh` 读入后来创建的 GUID。新冲突测试检查这条路径；core 263 项测试通过。
+
+### 尚存边界
+
+失败或异常中止后的暂存清理、目录断电持久化、批量生成跨资产事务以及 `input.ron` / 迁移文件写入仍待处理；本轮结果不表示 G0 全部关闭。本轮全工作区 `check --all-targets --locked -j 2`、`clippy --all-targets --locked -D warnings`、`test --all-targets --locked` 均通过（原有 917 项 + 新增 2 项 = 919 passed，7 ignored）；release workspace 构建成功，dist 三个程序与 release 哈希一致；dist 编辑器对 SampleScene 实际 `--check` 返回 0（1 场景、24 实体、15 资产）。本轮未复跑桌面窗口 GPU 组合验收。
+
 ## 六十四、G0 主保存残留暂存文件阻塞（2026-10-27）
 
 本轮只处理主保存暂存冲突。此前 `ProjectHandle::write_atomic` 固定用 `<目标>.tmp` 且 `create_new`；进程异常退出遗留暂存文件后，清单、场景、预制体、材质和自动保存均可能持续报 `AlreadyExists`。回归 `stale_staging_file_does_not_block_main_saves` 已在旧实现实际运行失败（Windows code 80，project.ron 暂存已存在）。

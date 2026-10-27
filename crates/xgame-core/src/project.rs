@@ -1266,7 +1266,19 @@ fn sanitize_asset_name_or(name: &str, fallback: &str) -> String {
 /// 每次保存用独立名字：异常退出留下的暂存内容可供排查，且不会阻断后续保存。
 /// Windows 的 `rename` 会覆盖已存在的目标（MoveFileEx + REPLACE_EXISTING），
 /// 与 Unix 语义一致。任何失败都返回错误，绝不退回覆盖写，避免损坏旧文件。
-fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> {
+    write_staged(path, text, false).map_err(|source| ProjectError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// 首次登记资产时只发布到空位；并发生成者不能覆盖对方的 GUID。
+pub(crate) fn write_atomic_new(path: &Path, text: &str) -> std::io::Result<()> {
+    write_staged(path, text, true)
+}
+
+fn write_staged(path: &Path, text: &str, create_only: bool) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
@@ -1279,16 +1291,27 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> {
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
             Ok(file) => break (tmp, file),
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(source) => return Err(ProjectError::Write { path: path.to_path_buf(), source }),
+            Err(source) => return Err(source),
         }
     };
     let result = file.write_all(text.as_bytes()).and_then(|_| file.sync_all());
     drop(file);
-    let result = result.and_then(|_| std::fs::rename(&tmp, path));
+    let result = result.and_then(|_| {
+        if create_only {
+            // hard_link 创建目标时拒绝已存在的名字；rename 在 Windows 会覆盖，
+            // 不能用于首次分配 GUID（另一进程可能已抢先登记）。
+            std::fs::hard_link(&tmp, path)?;
+            // 发布已经成功，清暂存失败只留下残留，不能把成功误报为写入失败。
+            let _ = std::fs::remove_file(&tmp);
+            Ok(())
+        } else {
+            std::fs::rename(&tmp, path)
+        }
+    });
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    result.map_err(|source| ProjectError::Write { path: path.to_path_buf(), source })
+    result
 }
 
 /// 递归收集预制体资产，把相对**项目根**的路径（正斜杠形式）写进 `out`。
