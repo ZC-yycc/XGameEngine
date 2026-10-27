@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use winit::{
     application::ApplicationHandler,
@@ -124,7 +125,7 @@ struct GameApp {
 }
 
 impl GameApp {
-    async fn new(window: &winit::window::Window, project: ProjectHandle) -> Self {
+    async fn new(window: Arc<Window>, project: ProjectHandle) -> Self {
         // -- wgpu 初始化 --
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -132,9 +133,8 @@ impl GameApp {
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window).unwrap();
-        // SAFETY: the window outlives the surface (see `GameRunner` field order).
-        let surface: wgpu::Surface<'static> = unsafe { std::mem::transmute(surface) };
+        // Surface 持有窗口的共享所有权，退出与初始化失败均不依赖字段析构顺序。
+        let surface: wgpu::Surface<'static> = instance.create_surface(window.clone()).unwrap();
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -252,8 +252,7 @@ impl GameApp {
         // 入口（`WorldConfig::from_project`）—— 两端行为永远一致。
         //
         // 音频：这里尝试打开真设备（`World::new` 里是 silent，无卡自动降级）。
-        // 监听者不用每帧推：本宿主的相机是固定机位 (5,5,5)→原点，
-        // 与 `ListenerPose::default()` 完全一致（引擎开设备时就是这个姿态）。
+        // 运行时帧末同步场景相机监听姿态；无相机时使用默认 (5,5,5)→原点。
         //
         // 场景装载器 = 项目句柄本身（`ProjectHandle` 是共享资产索引的轻句柄，
         // clone 不重新扫盘）：脚本 `load_scene()` 靠它把 GUID 引用解码成路径。
@@ -577,13 +576,8 @@ struct GameRunner {
     /// 项目句柄。`resumed` 时移交给 `GameApp::new`，所以这里用 `Option` 包一层。
     project: Option<ProjectHandle>,
     /// 主窗口，`resumed` 里创建。
-    window: Option<Window>,
-    /// 渲染 + 游戏逻辑。
-    ///
-    /// **字段顺序即析构顺序的反序**：`app` 声明在 `window` 之后 → 先于 `window`
-    /// 析构。`GameApp` 内部持有 `wgpu::Surface<'static>`（靠 `transmute` 借来窗口
-    /// 的生命周期，见 `GameApp::new` 的 SAFETY 注释），必须保证 surface 先于窗口
-    /// 销毁，这个顺序就是为了它。
+    window: Option<Arc<Window>>,
+    /// 渲染 + 游戏逻辑；Surface 自己持有窗口的 Arc。
     app: Option<GameApp>,
     /// 上一帧的时间戳，用来算真实帧间隔。
     last_frame: std::time::Instant,
@@ -593,12 +587,12 @@ impl ApplicationHandler for GameRunner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // 某些平台会重复投递 `resumed`（例如 Android 从后台回到前台），只处理第一次。
         if self.app.is_none() {
-            let window = event_loop.create_window(self.attributes.clone()).unwrap();
+            let window = Arc::new(event_loop.create_window(self.attributes.clone()).unwrap());
             let project = self
                 .project
                 .take()
                 .expect("resumed 在窗口创建前被重复触发，项目句柄已被取走");
-            self.app = Some(pollster::block_on(GameApp::new(&window, project)));
+            self.app = Some(pollster::block_on(GameApp::new(window.clone(), project)));
             self.window = Some(window);
         }
     }
@@ -644,6 +638,15 @@ impl ApplicationHandler for GameRunner {
                 ..
             } => event_loop.exit(),
             _ => {}
+        }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(app) = self.app.as_mut() {
+            app.world.unload_scene();
+            for log in app.world.take_logs() {
+                emit_script_log(&log);
+            }
         }
     }
 

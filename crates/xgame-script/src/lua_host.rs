@@ -377,6 +377,10 @@ impl LuaHost {
         hook: Hook,
         arg: Option<EntityId>,
     ) {
+        // 前面的回调可能已经删除这个实体；Destroy 使用移除通知，允许实体不在场。
+        if !matches!(hook, Hook::Destroy) && frame.scene.find_entity(entity).is_none() {
+            return;
+        }
         // 借 `self.intern` 得到的 `&str` 传不进 `&mut self` 的方法（借用检查器
         // 看不出"它就是 self 身上的一块"），所以加载这一步在方法内部自己解析 id；
         // 钩子体再单独 resolve 一次（O(1) 下标）。
@@ -433,9 +437,12 @@ impl LuaHost {
         // 调用钩子。错误（含沙箱超限）记成日志，不 panic、不中断这一帧。
         // 带参数的钩子（碰撞）多传一个"对方实体 id"：Lua 里是普通整数，
         // 与脚本侧 `self_id()` / `find_entity()` 的口径一致。
-        let result = match arg {
-            Some(other) => func.call::<()>((light, other.raw() as i64)),
-            None => func.call::<()>(light),
+        let result = {
+            let _window = lua_api::ContextWindow::enter(&self.lua, light);
+            match arg {
+                Some(other) => func.call::<()>((light, other.raw() as i64)),
+                None => func.call::<()>(light),
+            }
         };
         if let Err(err) = result {
             let message = format!("{err}");
@@ -570,6 +577,8 @@ impl LuaHost {
             return false;
         }
         env.set_metatable(Some(meta));
+        // 顶层执行也是独立调用，不能继承其他脚本或钩子耗尽的预算。
+        self.budget.store(INSTRUCTION_BUDGET, Ordering::Relaxed);
 
         // 加载并执行。Lua 没有 Rhai 那种"编译成 AST 再单独跑顶层"的两段式，
         // 直接 `load(...).set_environment(env).exec()` 就是"编译 + 跑顶层"。
@@ -679,6 +688,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn removed_entity_does_not_run_queued_update() {
+        let project = TempProject::new("removed_queue");
+        let killer = project.write_script("killer", "function update(ctx) destroy(ctx, entity_id(ctx, 'victim')) end");
+        let victim = project.write_script("victim", "function update(ctx) log(ctx, 'stale update') end");
+        let mut scene = scene_with_script(&killer);
+        let mut entity = Entity::new("victim");
+        entity.scripts.push(victim);
+        scene.add_entity(entity);
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+        assert_eq!(scene.entities.len(), 1);
+        assert!(host.take_logs().is_empty(), "已删除实体不能继续执行快照里的 update");
+    }
+
+    #[test]
+    fn saved_context_is_rejected_outside_hook_window() {
+        let project = TempProject::new("inactive_context");
+        let script = project.write_script("save_ctx", "function update(ctx) _G.saved_ctx = ctx end");
+        let mut scene = scene_with_script(&script);
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+        let saved: Value = host.lua.globals().get("saved_ctx").unwrap();
+        // 只尝试转换，不调用 GameCtx，旧实现的红灯也不能解引用失效的栈地址。
+        assert!(<LuaCtx as mlua::FromLua>::from_lua(saved, &host.lua).is_err());
+    }
+
+    #[test]
+    fn top_level_budget_is_independent_after_an_exhausted_script() {
+        let project = TempProject::new("top_level_budget");
+        let bad = project.write_script("exhausted", "while true do end");
+        let good = project.write_script("healthy", "local sum = 0; for i = 1, 10000 do sum = sum + i end");
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+        assert!(!host.ensure_loaded(&bad));
+        assert!(host.ensure_loaded(&good), "前一个脚本耗尽预算不能污染下一个脚本的顶层执行");
     }
 
     fn scene_with_script(relative: &str) -> Scene {

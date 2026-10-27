@@ -5307,3 +5307,88 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
   （`STATUS_ACCESS_VIOLATION`，4 线程并行跑 GPU 相关测试时）；单线程与复跑 4 线程
   均 189/189 绿，判定为环境偶发，未改动任何代码。若后续复现要查 wgpu 侧的并发建
   设备路径（`acquire_gpu_test_permit` 已串行化，但设备销毁时机不受它管）。
+
+---
+
+## 五十七、G0 追加正确性审计与修复（2026-10-27）
+
+本轮从已有未提交修复继续推进，保留全部改动，不创建 commit。R01—R12 与额外 G0 的逐项状态集中到 `Docs/差距分析.md` 顶部；既有报告保持快照，不将 200 项标为完成。
+
+### 新增回归先红证据与实现
+
+所有测试使用 PowerShell、指定 cargo.exe、CARGO_INCREMENTAL=0、`-j 2` 与 `--test-threads=4`，LIB/INCLUDE 参照构建脚本配置。
+
+| 测试 | 旧实现失败证据 | 修改 |
+|---|---|---|
+| `config_and_material_saves_preserve_locked_targets` | 任务 q9y4vm：0 passed / 1 failed，project.ron 拒绝=false、保留=false | 配置与材质复用 write_atomic；同一测试覆盖两个路径 |
+| `top_level_budget_is_independent_after_an_exhausted_script` | uc56g3：正常第二脚本加载失败，0/1 | 顶层 exec 前独立重置预算 |
+| `saved_context_is_rejected_outside_hook_window` | 1utnnn：钩子结束后的句柄仍转换成功，0/1 | VM 活动槽地址校验，RAII 关闭窗口；测试不解引用过期 GameCtx |
+| `removed_entity_does_not_run_queued_update` | 6ijbau：删除已成功，但仍执行旧快照 update，0/1 | 非 Destroy 钩子执行前检查实体仍在场 |
+| `removing_current_behavior_does_not_skip_successor` | bauu0u 的 Rust 测试：后继位置未更新，0/1 | Rust 按阶段入口实体身份快照派发，每组件前复查实体 |
+| `zero_viewport_clears_previous_ui_state` | 9q8llj：hovered/pressed/clicked 全为 true，预期全 false，0/1 | 零视口清空布局并走统一状态清理 |
+
+Lua 删除测试第一次使用了不存在的 `find_entity`，实体未删除，不计有效红灯；改成真实 API `entity_id` 后重跑获得上表证据。先前模块绿灯 qkf15i 为 core 258 + script 41，不包含之后新增的两个派发回归和 UI 回归。
+
+### 验证与产物（环境阻塞，未完成刷新）
+
+- 首遍 check/clippy 通过；首遍 test 包含新增零视口回归并失败，之后修复。
+- 最终代码任务 `np4c2g` 的 workspace/all-targets check、clippy `-D warnings`、test 均通过，包含 runtime 54、script 42、render 188 条；未据截断输出重新统计全局数量。随后同任务 release 失败，所以整个任务状态为失败，不能把它写成构建通过。
+- release 先报 `target/release/xgame_mcp.pdb` 拒绝访问与 editor LNK1104，重试又报 C 盘临时文件 LNK1108。检查 C 盘 Free=0，E 盘约 183GB；未发现引擎进程，相关输出非只读。迁移 TEMP/TMP 到已有 `.workbuddy/tmp` 后仍访问失败，隔离 `target/g0-20261027` 构建也在新依赖对象文件报拒绝访问。未删除文件、终止进程或绕过权限。
+- 为持久保存测试输出而补跑任务 `2dsyz3`（E 盘 TEMP）失败：core 242 passed / 16 failed，失败集中在文件替换/清理的 PermissionDenied；另有 Cargo 全局缓存 disk full。该失败不抹去此前同代码通过事实，但说明当前环境下验证不可重复，不能仅报全绿。
+- 日志：`.workbuddy/logs/g0-validation-20261027.log`、`g0-final-20261027.log` 是 PowerShell transcript，工具模式下不保证收齐 native 输出；完整补录失败输出为 `g0-tests-final-20261027.log` / `.stderr.log`，隔离构建为 `g0-release-isolated-20261027.log` / `.stderr.log`（PowerShell UTF16）。完整成功输出保留在工具任务 np4c2g。
+- **dist 未刷新，新增 release GPU/发布冒烟未执行**。原有 dist 和旧证据保留，不当成本轮产物。需恢复 C 盘空间并排查 E 盘文件访问限制后，再完成 release、适用 GPU 截图、真实打包运行与 dist 更新。
+
+### 保留边界
+
+配置/材质主写入已扩大保护范围，但 input/meta/迁移写入、固定 tmp 残留、并发编辑冲突和断电持久性仍未解决。ctx 采用“当前钩子上下文”语义，旧句柄在下一有效窗口内仍映到当前 ctx；未新增 generation 语义，未运行 Miri。结构派发的存在检查采用线性查询，新增大规模行为负载开销未量化，不宣称性能优化。递归销毁/卸载中新增、多角色动态 GPU、morph bounds、真实发布包输入切关与 ABI 指纹门禁仍未关闭。
+
+## 五十六、G0 首轮修复与正式优先级采纳（2026-10-26）
+
+### 实施依据与范围
+
+正式采纳《引擎全面对标与差距深度分析-2026-10-26》的 G0—G4 阶段，排序回写 `Docs/差距分析.md`：**G0 优先于 G1—G4**。报告原文保持 afe30cc 基线的审计快照，其“未运行 / 候选”不改成事后实施结论；本节之前的 P0—P3 推荐与数量均是历史记录。
+
+本次文档同步逐项核对了工作区 14 个 Rust 文件的 `git diff`，R01—R12 均有代码改动。选择先修保存、发布与组合正确性，是因为功能存在不能证明多个实例、卸载、异常写入或独立包中也正确。没有以新效果或架构重写代替这些验证。
+
+| 风险 | 本轮实施与取舍 |
+|---|---|
+| R01/R02 | 构建枚举 scripts_dir（含自定义目录），复制可选根 input.ron；在 staging 完成复制后发布，失败回滚，回滚失败保留旧包；拒绝源/输出相互包含及相关链接冲突。未宣称完整资源依赖构建系统或断电事务。 |
+| R03/R04 | 每角色骨骼槽固定 256、空位补单位矩阵；CUBICSPLINE 按每关键帧入切线/值/出切线取值，morph 先按目标数分组。仍降级线性插值，没有实现 Hermite。 |
+| R05 | 独立游戏 Surface 持有 Arc<Window>，删除借用生命周期 transmute，不再靠字段析构顺序保证安全。 |
+| R06 | scene/prefab 主保存接原子替换：独占 tmp、写入、sync_all、rename；失败不退回直接覆盖。范围不扩展为配置/材质等全部主写入；已有 tmp 阻止保存，需确认写入者结束后处理残留。 |
+| R07 | Apply 保留同来源 source_id、重映射父引用；新增节点在写盘成功后绑定来源并记录场景 Undo。不等于字段 override、嵌套或 Revert 保留实例 ID。 |
+| R08 | 暂停冻结既有固定步积压，恢复继续消费；保留单帧步数上限，不清空或丢弃积压。 |
+| R09 | range 传入 GPU，最后 20% 平滑收尾，范围外零贡献；非有限/非正范围禁用，近处沿用旧衰减。 |
+| R10 | World 帧末按更新后场景相机姿态同步 listener，场景相机优先于本帧脚本/宿主手动设置；无相机保留已有 listener。 |
+| R11 | unload_scene 幂等；切关、编辑器 Stop、headless 正常完成、独立游戏正常退出接入。旧状态供钩子读取，卸载结构命令不进入下一场景；Stop 先交换最新运行场景，headless 先冻结终点统计/截图再收卸载日志。 |
+| R12 | 场景正有限 mass 按形状体积换算密度实现总质量，附加质量归零；零值等沿用自动密度。 |
+
+稳定契约集中记录于 `Docs/决策记录.md` §四十，本表记录本轮选择及范围。
+
+### 已有验证与证据边界
+
+本轮已完成 `cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets`，结果 **901 passed / 0 failed / 7 ignored**；dist 已刷新。SampleScene / CharacterDemo / MyGame 的 headless 截图通过；独立包真实窗口启动、退出通过。既有日志位于 `.workbuddy/logs/g0-validation-20261026.log`、`g0-tests-20261026.log`、`g0-headless-*.json`、`g0-package-headless.json`；真实窗口启动/退出结果由本轮交接确认，空 stdout/stderr 本身不能证明退出成功。本次文档同步未重新执行编译、测试或窗口验证。
+
+**R01/R02 已补跑旧行为红灯并恢复转绿（2026-10-26）**。仅用 Edit 临时删除 `content_dirs()` 的 `content.scripts_dir.as_str()` 行及根 `input.ron` 复制块，保留新测试、staging、路径检查及其他修复；没有回退整个 builder。PowerShell 设置 `$env:CARGO_INCREMENTAL='0'`，补入 `$env:USERPROFILE/.cargo/bin` 到当前进程 PATH 后，分别执行：
+
+```powershell
+cargo test -p xgame-editor -j2 --bin xgame-editor builder::tests::package_includes_scripts_and_input -- --exact --nocapture
+cargo test -p xgame-editor -j2 --bin xgame-editor builder::tests::package_preserves_custom_input_bytes -- --exact --nocapture
+```
+
+- R01：`0 passed / 1 failed / 204 filtered out`，退出码 101；临时版本 `builder.rs:641:95` 读取 `Scripts/nested/main.lua` 时 `NotFound`（系统错误 3，路径不存在）。首个默认目录分支已失败，自定义目录分支未执行。
+- R02：`0 passed / 1 failed / 204 filtered out`，退出码 101；临时版本 `builder.rs:654:71` 读取产物 `input.ron` 时 `NotFound`（系统错误 2，文件不存在）。
+- 用 Edit 原位恢复上述两处后，原命令各得 `1 passed / 0 failed / 204 filtered out`，退出码均 0；R01 此时完整通过默认 `Scripts` 与自定义 `Logic/Lua` 两个分支。
+- 首次调用因 PowerShell PATH 未包含 Cargo 而未运行测试，不计作红灯；补齐 PATH 后才得到以上实际测试失败。红灯/绿灯工具任务分别为 `idjr0t` / `s10rd8`。builder 恢复后 SHA-256 为 `0C5F5420731CA92D3B972D28F50A1D6B806778958F714478F64155E1AD6BDDD6`。
+
+本次是保留其他修复的最小旧行为复现，补齐失败证据，不追溯宣称原实施时已先证红；没有重跑全量、更新 dist 或执行完整发布包端到端验收。未逐项核实的其他红灯也不补写为已跑。
+
+### BehaviorsDemo 旧插件刷新与原项目复验
+
+用户已验证旧 DLL 导致退出 `0xC0000374`，同批 release DLL 在隔离副本通过。本次先确认备份父目录存在，再将原 `projects/BehaviorsDemo/Plugins/behaviors_demo.dll` 备份到 `.workbuddy/artifacts/g0-validation-20261026/old-plugin/behaviors_demo.dll`，以 `target/release/behaviors_demo.dll` 刷新原项目插件，并逐字节核对。旧 DLL SHA-256 为 `1c8d8decbcabebc807ccf0962213c1c89b4ba388a092a7e1ecb89faa4c6507bd`，新 DLL 与 release 源均为 `c6c5112a61905cad0071451c86245bc02b790348801f3231895cc891ef2c383d`。
+
+执行 `dist/xgame-editor.exe --headless --frames 300 --screenshot .workbuddy/shots/g0-BehaviorsDemo-updated.png projects/BehaviorsDemo`：首次后台运行报告成功，但工具未显示数值退出码；同命令再运行并显式捕获进程退出码 **0**。报告 `ok=true`、frames/fixed_steps 均为 300、error/warn 均为 0、non_finite_transforms=0，截图 1280×720。含命令、退出码与完整 stdout/stderr 的报告保存在 `.workbuddy/artifacts/g0-validation-20261026/old-plugin/updated-validation.json`。本次仅刷新插件和执行该项验证，未重跑全量测试。
+
+### 未关闭事项
+
+R01—R12 已改不等于 G0 全关。原项目旧插件已刷新并复验通过；ABI 兼容拒绝门禁仍待做，继续保留 ABI/旧 DLL 风险、复杂生命周期与 ctx 调用窗口、双角色蒙皮/morph/动态 TAA 的 GPU 验证、其他主文件写入、完整发布包输入/切关/插件端到端 CI 等待办。普通示例截图和窗口冒烟不能代替这些定向用例。仅同步文档与追加工作日志，不创建代码提交。

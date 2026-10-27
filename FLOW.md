@@ -128,6 +128,14 @@ main()                           crates/xgame-game/src/main.rs
 
 ---
 
+## G0 调用与保存边界（2026-10-27）
+
+- 主保存 `save/write_material/write_scene/write_prefab` → 同目录独占 tmp → 写入与 sync_all → rename 替换；失败返回，旧目标不直接覆写。
+- Lua 顶层加载有独立指令预算；生命周期钩子进入 VM 活动 ctx 窗口，结束后 RAII 关闭。顶层或窗口外保存的句柄不可转换成可用上下文。
+- Lua 非 Destroy 派发先确认实体仍存在；Rust 行为按阶段入口 ID 快照派发，删除不影响后继遍历。
+- 零尺寸 UI 视口仍清理上一帧状态与布局，不留下 clicked/pressed/hovered。
+- 运行时帧末用活动场景相机同步 listener；切关、Stop 和正常退出调用幂等 unload_scene。完整语义和边界见决策记录 §四十、§四十一。
+
 ## 二、每帧循环
 
 ### 编辑器每帧

@@ -81,7 +81,8 @@ impl GameClock {
     ///
     /// 调用后必须用 `reset_step_counter()` 重置步数限制。
     pub fn consume_fixed_update(&mut self) -> bool {
-        if self.accumulator >= self.fixed_dt && self.max_steps > 0 {
+        // 暂停只冻结积压，恢复后继续消费；不改变既有的保留时间策略。
+        if self.time_scale > 0.0 && self.accumulator >= self.fixed_dt && self.max_steps > 0 {
             self.accumulator -= self.fixed_dt;
             self.max_steps -= 1;
             true
@@ -295,6 +296,25 @@ impl Stopwatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_backlog_is_frozen_until_resume() {
+        let mut clock = GameClock::new();
+        clock.set_time_scale(100.0);
+        clock.tick(0.1);
+        while clock.consume_fixed_update() {}
+        clock.reset_step_counter();
+        let backlog = clock.accumulator();
+        clock.set_time_scale(0.0);
+        for _ in 0..3 {
+            clock.tick(0.1);
+            assert!(!clock.consume_fixed_update());
+            assert_eq!(clock.accumulator(), backlog);
+            clock.reset_step_counter();
+        }
+        clock.set_time_scale(1.0);
+        assert!(clock.consume_fixed_update());
+    }
 
     /// 缩放的**唯一**作用点必须是 `tick`：`delta_time` / `total_time` /
     /// 固定步累计器三者同源，才不会出现"物理慢速、脚本却按实时走"。

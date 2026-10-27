@@ -842,10 +842,15 @@ pub fn parse_animation_data_scaled(
                         GltfInterp::Step => Interpolation::Step,
                         _ => Interpolation::Linear,
                     };
-                    // 权重是**标量流**（每帧 N 个目标），没有 `[f32; k]` 的分量结构。
-                    // 每个标量包成一条长度为 1 的样本，复用同一套样条降采样。
-                    let flat: Vec<Vec<f32>> = iter.into_f32().map(|w| vec![w]).collect();
-                    let values = take_spline_values(flat, cubic);
+                    // 标量流先按每帧目标数分组，不能把各目标当作独立关键帧。
+                    let flat: Vec<f32> = iter.into_f32().collect();
+                    let samples = times.len() * if cubic { 3 } else { 1 };
+                    if flat.is_empty() || !flat.len().is_multiple_of(samples) {
+                        continue;
+                    }
+                    let stride = flat.len() / samples;
+                    let values = take_spline_values(
+                        flat.chunks_exact(stride).map(<[f32]>::to_vec).collect(), cubic);
                     if !values.is_empty() {
                         tracks.push(crate::animation::Track {
                             node: channel.target().node().index() as u32,
@@ -1026,19 +1031,15 @@ fn morph_target_names(mesh: &gltf::Mesh<'_>, count: usize) -> Vec<String> {
     names
 }
 
-/// CUBICSPLINE 输出取"值"那一段，其余插值原样返回。
-///
-/// glTF 的三次样条输出是 3N 个元素的**三段块**（前 N 个入切线、中 N 个值、
-/// 后 N 个出切线，见规范 `animation.sampler.output`）。切线是给样条求值用的，
-/// 我们 v1 走线性插值 → 只留中间那段值，两端丢弃。
-fn take_spline_values(mut items: Vec<Vec<f32>>, cubic: bool) -> Vec<f32> {
-    if cubic && items.len() >= 3 {
-        let n = items.len() / 3;
-        let tail = items.split_off(n); // tail = [值段, 出切线段]
-        items = tail;
-        items.truncate(n); // 只留值段
+/// 每个关键帧按入切线、值、出切线排列；保留值并继续降级为线性插值。
+/// 每个 item 是完整向量（morph 则是该帧的全部目标权重）。
+fn take_spline_values(items: Vec<Vec<f32>>, cubic: bool) -> Vec<f32> {
+    if cubic && !items.len().is_multiple_of(3) {
+        return Vec::new();
     }
-    items.into_iter().flatten().collect()
+    items.into_iter().enumerate()
+        .filter(|(i, _)| !cubic || i % 3 == 1)
+        .flat_map(|(_, value)| value).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1187,6 +1188,39 @@ fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]
 mod tests {
     use super::*;
     use crate::animation::{clip_time, compute_bones, TrackPath};
+
+    #[test]
+    fn regression_r04_spline_three_keys_vectors_and_rotations() {
+        for width in [3, 4] {
+            let items: Vec<Vec<f32>> = (0..9).map(|i| vec![i as f32; width]).collect();
+            let expected: Vec<f32> = [1.0, 4.0, 7.0].into_iter()
+                .flat_map(|v| vec![v; width]).collect();
+            assert_eq!(take_spline_values(items.clone(), true), expected);
+            assert_eq!(take_spline_values(items.clone(), false), items.into_iter().flatten().collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn regression_r04_morph_spline_three_keys_two_targets() {
+        let json = r#"{
+            "asset":{"version":"2.0"}, "nodes":[{}],
+            "buffers":[{"byteLength":84}],
+            "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12},
+                           {"buffer":0,"byteOffset":12,"byteLength":72}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"SCALAR","min":[0],"max":[2]},
+                         {"bufferView":1,"componentType":5126,"count":18,"type":"SCALAR"}],
+            "animations":[{"samplers":[{"input":0,"output":1,"interpolation":"CUBICSPLINE"}],
+                "channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]
+        }"#;
+        let gltf = gltf::Gltf::from_slice(json.as_bytes()).unwrap();
+        let values = [0.0f32, 1.0, 2.0, -1.0, -2.0, 0.1, 0.2, -3.0, -4.0,
+            -5.0, -6.0, 0.3, 0.4, -7.0, -8.0, -9.0, -10.0, 0.5, 0.6, -11.0, -12.0];
+        let buffers = [gltf::buffer::Data(values.into_iter().flat_map(f32::to_le_bytes).collect())];
+        let data = parse_animation_data(&gltf.document, &buffers);
+        let track = &data.animations[0].tracks[0];
+        assert_eq!(track.times, [0.0, 1.0, 2.0]);
+        assert_eq!(track.values, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+    }
 
     // -- 材质覆盖合并 -------------------------------------------------------
 

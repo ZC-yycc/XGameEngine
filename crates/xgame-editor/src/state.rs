@@ -1827,7 +1827,7 @@ impl EditorState {
 
     /// 把实例当前的改动**写回**预制体资产（Unity 的 Apply）。
     ///
-    /// 只写资产文件，不改场景——所以不进撤销栈（撤销栈管的是场景）。
+    /// 已有节点保持来源身份；新增节点在写盘成功后绑定来源，场景改动进入撤销栈。
     pub fn apply_prefab(&mut self, root_idx: usize) {
         if !self.is_editing() {
             self.log_warning("Cannot apply a prefab while playing");
@@ -1845,11 +1845,22 @@ impl EditorState {
             return;
         };
 
-        let mut prefab = Prefab::from_subtree(&self.scene, root_idx);
-        prefab.name = prefab_display_name(&source);
+        let mut prefab = Prefab::new(prefab_display_name(&source));
+        prefab.capture_subtree(&self.scene, root_idx);
         if let Err(e) = self.project.write_prefab(&source, &prefab) {
             self.log_error(format!("应用预制体失败: {e}"));
             return;
+        }
+        let links: Vec<_> = self.scene.subtree(root_idx).into_iter()
+            .zip(&prefab.entities)
+            .map(|(idx, entity)| (idx, PrefabInstanceRef {
+                source: source.clone(), source_id: entity.id, is_root: idx == root_idx,
+            })).collect();
+        if links.iter().any(|(idx, link)| self.scene.entities[*idx].prefab.as_ref() != Some(link)) {
+            self.push_undo();
+            for (idx, link) in links {
+                self.scene.entities[idx].prefab = Some(link);
+            }
         }
         self.log_success(format!("已把改动应用到预制体 '{}' ({source})", prefab.name));
     }
@@ -2206,10 +2217,13 @@ impl EditorState {
                 ));
             }
         }
+        if let Some(mut runtime) = self.game_runtime.take() {
+            runtime.unload_with_scene(&mut self.scene);
+            self.forward_runtime_logs(runtime.take_logs());
+        }
         if let Some(snapshot) = self.play_snapshot.take() {
             self.scene = snapshot;
         }
-        self.game_runtime = None;
         self.selected_entity = None;
         self.log_info("⏹ Stop — 场景已还原到进入 Play 之前的状态");
     }
@@ -2233,6 +2247,10 @@ impl EditorState {
             runtime.take_logs()
         };
 
+        self.forward_runtime_logs(logs);
+    }
+
+    fn forward_runtime_logs(&mut self, logs: Vec<xgame_runtime::ScriptLog>) {
         for log in logs {
             let who = log
                 .entity
@@ -3113,6 +3131,80 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let handle = xgame_core::ProjectHandle::create(&base, "StateTest").expect("创建临时项目");
         (EditorState::new(handle), base)
+    }
+
+    #[test]
+    fn apply_preserves_source_ids_across_instances_and_revert() {
+        let (mut state, base) = temp_state("apply_ids");
+        let mut template = Prefab::new("Stable");
+        let root = Entity::new("Root");
+        let mut child = Entity::new("Child");
+        child.parent = Some(root.id);
+        template.entities = vec![root, child];
+        let source = "Prefabs/Stable.prefab.ron";
+        state.project.write_prefab(source, &template).unwrap();
+        let a = state.instantiate_prefab_by_path(source).unwrap();
+        let b = state.instantiate_prefab_by_path(source).unwrap();
+        state.scene.entities[a + 1].name = "Changed".into();
+        state.apply_prefab(a);
+        let saved = state.project.load_prefab(source).unwrap();
+        assert_eq!(saved.entities[0].id, template.entities[0].id);
+        assert_eq!(saved.entities[1].id, template.entities[1].id);
+        assert_eq!(saved.entities[1].parent, Some(template.entities[0].id));
+        for i in state.scene.subtree(b) {
+            assert!(saved.index_of(state.scene.entities[i].prefab.as_ref().unwrap().source_id).is_some());
+        }
+        state.revert_prefab(b);
+        let reverted = state.selected_entity.unwrap();
+        assert_eq!(state.scene.entities[reverted + 1].name, "Changed");
+        state.apply_prefab(reverted);
+        assert_eq!(state.project.load_prefab(source).unwrap().entities[0].id, template.entities[0].id);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn apply_binds_new_nodes_only_after_success_and_keeps_them_stable() {
+        let (mut state, base) = temp_state("apply_new");
+        let mut template = Prefab::new("Stable");
+        template.entities.push(Entity::new("Root"));
+        let source = "Prefabs/Stable.prefab.ron";
+        state.project.write_prefab(source, &template).unwrap();
+        let root = state.instantiate_prefab_by_path(source).unwrap();
+        let mut child = Entity::new("Added");
+        child.parent = Some(state.scene.entities[root].id);
+        let child_idx = state.scene.entities.len();
+        state.scene.entities.push(child);
+        let before = std::fs::read(state.project.path(source)).unwrap();
+        let tmp = state.project.path(source).with_extension("ron.tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        state.apply_prefab(root);
+        assert!(state.scene.entities[child_idx].prefab.is_none());
+        assert_eq!(std::fs::read(state.project.path(source)).unwrap(), before);
+        std::fs::remove_dir(tmp).unwrap();
+        state.apply_prefab(root);
+        let id = state.scene.entities[child_idx].prefab.as_ref().unwrap().source_id;
+        state.apply_prefab(root);
+        let saved = state.project.load_prefab(source).unwrap();
+        assert_eq!(saved.entities[1].id, id);
+        assert_eq!(saved.entities[1].parent, Some(template.entities[0].id));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn stop_unloads_latest_scene_before_restoring_snapshot() {
+        let (mut state, base) = temp_state("stop_unload");
+        std::fs::create_dir_all(state.project.scripts_dir()).unwrap();
+        std::fs::write(state.project.path("Scripts/stop.lua"),
+            "function on_destroy(ctx) log(ctx, 'latest-unloaded') end").unwrap();
+        let before = state.scene.entities.len();
+        state.enter_play_mode();
+        state.scene.entities.push(Entity::new("Latest").with_script("Scripts/stop.lua"));
+        state.exit_play_mode();
+        assert_eq!(state.scene.entities.len(), before);
+        assert_eq!(state.console_messages.iter().filter(|m| m.text.contains("latest-unloaded")).count(), 1);
+        state.exit_play_mode();
+        assert_eq!(state.console_messages.iter().filter(|m| m.text.contains("latest-unloaded")).count(), 1);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     // -- 资源浏览器（P0 资产管线）------------------------------------------

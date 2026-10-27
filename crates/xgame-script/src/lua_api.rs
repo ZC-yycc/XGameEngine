@@ -37,8 +37,8 @@ use crate::ctx::RayHit;
 /// # 为什么这样仍然安全
 ///
 /// - 指针**永远**指向宿主持有的槽：槽在 [`LuaHost`] 的堆上，任何脚本可见的
-///   读取都发生在某次钩子调用内（脚本代码只在钩子调用窗口里跑，没有别的
-///   宿主入口），而槽在每次调用入口就被写成本次 ctx —— 所以读到的一定是
+///   读取必须通过 VM 的活动窗口与地址校验；顶层加载虽然也能执行脚本，
+///   但窗口未开启时会在读取槽之前拒绝。槽在每次钩子入口写成本次 ctx，读到的是
 ///   **当前正在执行的这次调用**的地址束，被指向的对象（`GameCtx`）此刻由
 ///   调用栈上的 `&mut` 独占（调用窗口约定见 `context.rs` 模块文档）。
 /// - 脚本把句柄存起来下帧再用（违约）时，读到的也是**下帧那次调用**的
@@ -81,8 +81,27 @@ impl LuaCtx {
 // 这里手写：lightuserdata → 槽地址 → 解出一份 `Copy`（`ScriptCtx: Copy`）。
 // 参数校验仍由类型层做：不是 lightuserdata（脚本传了数字 / 表 / nil）直接报错，
 // 不会把随机值当地址解引用 —— 伪造 lightuserdata 需要 Lua 语言层没有的操作。
+pub(crate) struct ContextWindow {
+    lua: Lua,
+}
+
+struct ActiveContext(usize);
+
+impl ContextWindow {
+    pub(crate) fn enter(lua: &Lua, handle: mlua::LightUserData) -> Self {
+        lua.set_app_data(ActiveContext(handle.0 as usize));
+        Self { lua: lua.clone() }
+    }
+}
+
+impl Drop for ContextWindow {
+    fn drop(&mut self) {
+        self.lua.remove_app_data::<ActiveContext>();
+    }
+}
+
 impl FromLua for LuaCtx {
-    fn from_lua(value: Value, _lua: &Lua) -> mlua::Result<Self> {
+    fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> {
         let mlua::LightUserData(ptr) =
             value
                 .as_light_userdata()
@@ -91,8 +110,10 @@ impl FromLua for LuaCtx {
                     to: "ScriptCtx".to_owned(),
                     message: Some("期望脚本上下文句柄（第一个参数）".to_owned()),
                 })?;
-        // SAFETY: 槽由 LuaHost 独占持有，任何脚本可见的执行都发生在钩子调用
-        // 窗口内（见 `LuaCtx` 类型文档的安全论证），窗口内槽已写入本次 ctx。
+        if !lua.app_data_ref::<ActiveContext>().is_some_and(|active| active.0 == ptr as usize) {
+            return Err(Error::RuntimeError("脚本上下文已失效：只能在生命周期钩子内使用".into()));
+        }
+        // SAFETY: 先验证当前 VM 的活动槽地址；RAII 窗口只覆盖 GameCtx 活着的调用。
         Ok(unsafe { *(ptr as *const LuaCtx) })
     }
 }

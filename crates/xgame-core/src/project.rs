@@ -735,7 +735,7 @@ impl ProjectHandle {
             path: path.clone(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
         })?;
-        std::fs::write(&path, text).map_err(|source| ProjectError::Write { path, source })
+        write_atomic(&path, &text)
     }
 
     /// 由预制体名推出它在项目里的**相对路径**（`Prefabs/<安全名>.prefab.ron`）。
@@ -810,7 +810,7 @@ impl ProjectHandle {
             path: path.clone(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
         })?;
-        std::fs::write(&path, text).map_err(|source| ProjectError::Write { path, source })
+        write_atomic(&path, &text)
     }
 
     /// 列出项目里所有预制体资产（**项目相对路径**，按字典序）。
@@ -1029,7 +1029,7 @@ impl ProjectHandle {
                 source,
             })?;
         }
-        std::fs::write(&path, text).map_err(|source| ProjectError::Write { path, source })
+        write_atomic(&path, &text)
     }
 
     /// 把场景序列化成落盘文本（资产引用已编码成 GUID）。
@@ -1169,7 +1169,7 @@ impl ProjectHandle {
                 source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
             }
         })?;
-        std::fs::write(&path, text).map_err(|source| ProjectError::Write { path, source })
+        write_atomic(&path, &text)
     }
 }
 
@@ -1264,26 +1264,25 @@ fn sanitize_asset_name_or(name: &str, fallback: &str) -> String {
 /// 原子写：先写 `<文件名>.tmp` 再 rename 覆盖目标。
 ///
 /// Windows 的 `rename` 会覆盖已存在的目标（MoveFileEx + REPLACE_EXISTING），
-/// 与 Unix 语义一致。rename 失败（文件被占用、跨卷）时退回直接写 ——
-/// "写成功但不原子"好过"什么都没写"，而且这条路径只在异常情况下走。
+/// 与 Unix 语义一致。任何失败都返回错误，绝不退回覆盖写，避免损坏旧文件。
 fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> {
     let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => format!("{ext}.tmp"),
         None => "tmp".to_owned(),
     });
-    std::fs::write(&tmp, text).map_err(|source| ProjectError::Write {
-        path: tmp.clone(),
-        source,
-    })?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        log::warn!("临时文件 rename 失败，改为直接写入: {e}");
-        let _ = std::fs::remove_file(&tmp);
-        std::fs::write(path, text).map_err(|source| ProjectError::Write {
-            path: path.to_path_buf(),
-            source,
+    use std::io::Write;
+    // 独占暂存文件，避免并发保存互相截断；已有暂存文件留给原写入者。
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(&tmp).map_err(|source| ProjectError::Write {
+            path: path.to_path_buf(), source,
         })?;
+    let result = file.write_all(text.as_bytes()).and_then(|_| file.sync_all());
+    drop(file);
+    let result = result.and_then(|_| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    Ok(())
+    result.map_err(|source| ProjectError::Write { path: path.to_path_buf(), source })
 }
 
 /// 递归收集预制体资产，把相对**项目根**的路径（正斜杠形式）写进 `out`。
@@ -1397,6 +1396,79 @@ fn sanitize_particles(entities: &mut [crate::Entity]) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replace_failure_preserves_old_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (base, handle) = temp_project("atomic_replace");
+        let path = handle.path("Scenes/locked.ron");
+        std::fs::write(&path, "旧内容").unwrap();
+        // 允许读写但不允许删除/替换：旧实现会偷偷退回覆盖写。
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(3).open(&path).unwrap();
+        let result = super::write_atomic(&path, "新内容");
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "旧内容");
+        assert!(!path.with_extension("ron.tmp").exists());
+        drop(lock);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn config_and_material_saves_preserve_locked_targets() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (base, mut handle) = temp_project("atomic_config_material");
+        let material_path = "Resources/locked.mat";
+        handle.write_material(material_path, &MaterialAsset::default()).unwrap();
+        let mut results = Vec::new();
+        for relative in [PROJECT_FILE_NAME, material_path] {
+            let path = handle.path(relative);
+            let before = std::fs::read(&path).unwrap();
+            let lock = std::fs::OpenOptions::new().read(true).share_mode(3).open(&path).unwrap();
+            let result = if relative == PROJECT_FILE_NAME {
+                handle.manifest.name = "更新后的项目".into();
+                handle.save()
+            } else {
+                let material = MaterialAsset { metallic: 0.73, ..Default::default() };
+                handle.write_material(relative, &material)
+            };
+            results.push((relative, result.is_err(), std::fs::read(&path).unwrap() == before));
+            drop(lock);
+        }
+        std::fs::remove_dir_all(base).unwrap();
+        for (relative, rejected, preserved) in results {
+            assert!(rejected && preserved, "{relative}: 必须拒绝替换并保留原字节，拒绝={rejected}, 保留={preserved}");
+        }
+    }
+
+    #[test]
+    fn main_saves_preserve_old_files_when_staging_fails() {
+        let (base, handle) = temp_project("atomic_main");
+        let scene_path = "Scenes/atomic.ron";
+        let prefab_path = "Prefabs/atomic.prefab.ron";
+        let scene = crate::Scene::new("旧场景");
+        let prefab = crate::Prefab::new("旧模板");
+        handle.write_scene(scene_path, &scene).unwrap();
+        handle.write_prefab(prefab_path, &prefab).unwrap();
+        for relative in [scene_path, prefab_path] {
+            let path = handle.path(relative);
+            let before = std::fs::read(&path).unwrap();
+            let tmp = path.with_extension("ron.tmp");
+            std::fs::create_dir(&tmp).unwrap();
+            let result = if relative == scene_path {
+                handle.write_scene(relative, &crate::Scene::new("新场景"))
+            } else {
+                handle.write_prefab(relative, &crate::Prefab::new("新模板"))
+            };
+            assert!(result.is_err(), "暂存失败必须报告错误");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            std::fs::remove_dir(tmp).unwrap();
+        }
+        assert_eq!(handle.load_scene(scene_path).unwrap().name, "旧场景");
+        assert_eq!(handle.load_prefab(prefab_path).unwrap().name, "旧模板");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     /// 加载边界会把 NaN 换成默认值：一个手写的 `nan` 不该让 UI 整棵树消失。
     #[test]
     fn ui_values_are_clamped_at_load_boundary() {

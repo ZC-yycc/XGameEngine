@@ -323,7 +323,7 @@ struct GpuLight {
     pos_type: [f32; 4],
     /// rgb = 光色（线性），a = 强度。
     color_intensity: [f32; 4],
-    /// x = 这盏灯是否使用阴影贴图（1 / 0），其余预留。
+    /// x = 这盏灯是否使用阴影贴图（1 / 0），y = 点光范围，其余预留。
     ///
     /// 只允许**一盏**方向光取 1（见模块头的说明）；多盏同时标记会让它们
     /// 共享同一张深度图，后者的矩阵会覆盖前者，结果是错误但"看起来像阴影"
@@ -1157,7 +1157,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let to_light = light.pos_type.xyz - input.world_pos;
             let dist = length(to_light);
             l = to_light / max(dist, 1e-4);
-            atten = 1.0 / (1.0 + 0.09 * dist + 0.032 * dist * dist);
+            let range = light.shadow_params.y;
+            if (range <= 0.0 || dist >= range) { continue; }
+            // 保留近处旧亮度，仅在半径最后 20% 平滑收尾。
+            let fade = 1.0 - smoothstep(0.8, 1.0, dist / range);
+            atten = fade / (1.0 + 0.09 * dist + 0.032 * dist * dist);
         }
 
         let n_dot_l = max(dot(n, l), 0.0);
@@ -2121,7 +2125,16 @@ impl ScenePipeline {
                 LightKind::Point => GpuLight {
                     pos_type: [light.position[0], light.position[1], light.position[2], 1.0],
                     color_intensity: color,
-                    shadow_params: [0.0; 4],
+                    shadow_params: [
+                        0.0,
+                        if light.range.is_finite() {
+                            light.range.max(0.0)
+                        } else {
+                            0.0
+                        },
+                        0.0,
+                        0.0,
+                    ],
                 },
             };
             count += 1;
@@ -2463,7 +2476,7 @@ impl ScenePipeline {
                                 mask: &l.mask,
                             });
                         }
-                        let mut bones = crate::animation::compute_bones_composed(
+                        let bones = crate::animation::compute_bones_composed(
                             &mesh.nodes,
                             skin,
                             (clip, t),
@@ -2472,10 +2485,8 @@ impl ScenePipeline {
                         );
                         // 超过槽位容量的骨架（>256 骨）解析时已告警；这里截断
                         // 保证 staging 的槽距不被撑歪——宁可末梢骨不对，不能整帧错位。
-                        bones.truncate(BONES_PER_SLOT);
                         let slot = bone_slots_used;
-                        self.bone_staging
-                            .extend(bones.iter().map(|m| m.to_cols_array()));
+                        append_bone_slot(&mut self.bone_staging, &bones);
                         bone_slots_used += 1;
                         // 存槽位 + 1：0 是"不蒙皮"的哨兵，着色器里直接 `> 0u` 判分支。
                         params[0] = slot + 1;
@@ -2891,9 +2902,65 @@ impl ScenePipeline {
     }
 }
 
+fn append_bone_slot(staging: &mut Vec<[f32; 16]>, bones: &[Mat4]) {
+    let end = staging.len() + BONES_PER_SLOT;
+    staging.extend(bones.iter().take(BONES_PER_SLOT).map(|m| m.to_cols_array()));
+    // 主 pass 与阴影 pass 都按固定 256 骨寻址，空位不能借用下一角色的数据。
+    staging.resize(end, Mat4::IDENTITY.to_cols_array());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_r03_two_small_skeletons_have_fixed_slots() {
+        let first = vec![Mat4::from_translation(Vec3::X); 2];
+        let second = vec![Mat4::from_translation(Vec3::Y); 3];
+        let mut staging = Vec::new();
+        append_bone_slot(&mut staging, &first);
+        append_bone_slot(&mut staging, &second);
+        assert_eq!(staging.len(), 2 * BONES_PER_SLOT);
+        for (slot, bones) in [first, second].iter().enumerate() {
+            for (joint, matrix) in bones.iter().enumerate() {
+                let uploaded = Mat4::from_cols_array(&staging[slot * BONES_PER_SLOT + joint]);
+                assert_eq!(uploaded.transform_point3(Vec3::ONE), matrix.transform_point3(Vec3::ONE));
+            }
+            assert!(staging[slot * BONES_PER_SLOT + bones.len()..(slot + 1) * BONES_PER_SLOT]
+                .iter().all(|m| *m == Mat4::IDENTITY.to_cols_array()));
+        }
+    }
+
+    #[test]
+    fn bone_slots_bound_empty_and_oversized_skeletons() {
+        let mut staging = Vec::new();
+        append_bone_slot(&mut staging, &[]);
+        append_bone_slot(&mut staging, &vec![Mat4::ZERO; BONES_PER_SLOT + 1]);
+        append_bone_slot(&mut staging, &[Mat4::IDENTITY]);
+        assert_eq!(staging.len(), 3 * BONES_PER_SLOT);
+        assert!(staging[..BONES_PER_SLOT].iter().all(|m| *m == Mat4::IDENTITY.to_cols_array()));
+        assert!(staging[BONES_PER_SLOT..2 * BONES_PER_SLOT].iter().all(|m| *m == Mat4::ZERO.to_cols_array()));
+        assert_eq!(staging[2 * BONES_PER_SLOT], Mat4::IDENTITY.to_cols_array());
+    }
+
+    #[test]
+    fn point_range_invalid_values_are_disabled_and_directional_ignores_range() {
+        for range in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let light = Light::point("范围", [0.0; 3], [1.0; 3], 1.0, range);
+            let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], None);
+            assert_eq!(uniform.lights[0].shadow_params[1], 0.0);
+        }
+        let light = Light::default();
+        let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], Some(0));
+        assert_eq!(uniform.lights[0].shadow_params, [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn regression_r09_point_range_reaches_gpu() {
+        let light = Light::point("范围", [0.0; 3], [1.0; 3], 1.0, 7.0);
+        let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], None);
+        assert_eq!(uniform.lights[0].shadow_params[1], 7.0);
+    }
 
     fn project(m: &Mat4, p: Vec3) -> Vec3 {
         let clip = *m * p.extend(1.0);

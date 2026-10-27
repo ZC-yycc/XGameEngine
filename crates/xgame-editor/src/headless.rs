@@ -815,7 +815,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         None => None,
     };
 
-    let report = HeadlessReport {
+    let mut report = HeadlessReport {
         project: project.name().to_owned(),
         root: project.root().display().to_string(),
         scene: project.manifest().entry_scene.clone(),
@@ -851,6 +851,21 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         scene_dump,
         screenshot,
     };
+
+    // 终点统计与截图先冻结；卸载钩子的诊断仍必须进入本次报告。
+    world.unload_scene();
+    for log in world.take_logs() {
+        match log.level {
+            LogLevel::Info => report.log_info += 1,
+            LogLevel::Warn => report.log_warn += 1,
+            LogLevel::Error => {
+                report.log_error += 1;
+                if report.error_samples.len() < MAX_ERROR_SAMPLES {
+                    report.error_samples.push(format_log(&log));
+                }
+            }
+        }
+    }
 
     if let Some(path) = &args.report {
         std::fs::write(path, report.render())
@@ -1184,6 +1199,21 @@ mod tests {
     // -- 日志 --------------------------------------------------------------
 
     /// 脚本每帧打一条 info：计数、报告干净。
+    #[test]
+    fn normal_completion_reports_unload_errors() {
+        let project = temp_project("unload_errors");
+        write_script(&project, "unload.lua", "function on_destroy(ctx) error(ctx, 'unload-marker') end");
+        patch_scene(&project, |scene| {
+            scene.entities.push(Entity::new("Unload").with_script("Scripts/unload.lua"));
+        });
+        let report = run(&opts(&project, 1)).unwrap();
+        assert_eq!(report.log_error, 1);
+        assert!(report.has_issues());
+        assert!(report.error_samples[0].contains("unload-marker"));
+        assert_eq!(report.entities, 2);
+        cleanup(&project);
+    }
+
     #[test]
     fn script_logs_are_counted() {
         let project = temp_project("logs");

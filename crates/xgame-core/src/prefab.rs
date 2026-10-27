@@ -99,7 +99,7 @@ impl Prefab {
             .map(|e| e.name.clone())
             .unwrap_or_else(|| "Prefab".to_string());
         let mut prefab = Self::new(name);
-        prefab.capture_subtree(scene, root);
+        prefab.capture_subtree_ids(scene, root, None);
         prefab
     }
 
@@ -107,19 +107,34 @@ impl Prefab {
     ///
     /// `Apply` 走这条：把实例当前的样子（含用户改过的变换）重新采集回资产结构。
     pub fn capture_subtree(&mut self, scene: &Scene, root: usize) {
-        let indices = scene.subtree(root);
-        let ids: Vec<EntityId> = indices.iter().map(|&i| scene.entities[i].id).collect();
+        let source = scene.entities.get(root)
+            .and_then(|e| e.prefab.as_ref())
+            .map(|p| p.source.as_str());
+        self.capture_subtree_ids(scene, root, source);
+    }
 
+    fn capture_subtree_ids(&mut self, scene: &Scene, root: usize, source: Option<&str>) {
+        let indices = scene.subtree(root);
+        let ids: Vec<EntityId> = indices.iter().map(|&i| {
+            let entity = &scene.entities[i];
+            match source {
+                Some(source) => entity.prefab.as_ref()
+                    .filter(|p| p.source == source)
+                    .map(|p| p.source_id)
+                    .unwrap_or_default(),
+                None => entity.id,
+            }
+        }).collect();
+        let mut id_map = HashMap::new();
+        for (&i, &id) in indices.iter().zip(&ids) {
+            id_map.entry(scene.entities[i].id).or_insert(id);
+        }
         self.entities = indices
-            .iter()
-            .map(|&i| {
+            .iter().zip(&ids)
+            .map(|(&i, &id)| {
                 let mut entity = scene.entities[i].clone();
-                // 指向子树外的父引用一律清零（只有根可能这样）。
-                if let Some(parent) = entity.parent {
-                    if !ids.contains(&parent) {
-                        entity.parent = None;
-                    }
-                }
+                entity.id = id;
+                entity.parent = entity.parent.and_then(|p| id_map.get(&p).copied());
                 // 资产本身不携带「我是某个预制体的实例」这条信息——否则
                 // 预制体里嵌套预制体，写文件时会把实例元数据也腌进去，回头
                 // 一实例化就自带了错误的来源路径。
@@ -284,6 +299,37 @@ mod tests {
         );
         let root = scene.index_of(root).unwrap();
         (scene, root)
+    }
+
+    #[test]
+    fn applying_instance_preserves_ids_and_remaps_new_children() {
+        let (scene, root) = sample_scene();
+        let mut prefab = Prefab::from_subtree(&scene, root);
+        let ids: Vec<_> = prefab.entities.iter().map(|e| e.id).collect();
+        let source = "Prefabs/Root.prefab.ron";
+        let mut instance = Scene::new("Instance");
+        instance.entities = prefab.instantiate(source);
+        let mut added = Entity::new("Added");
+        added.parent = Some(instance.entities[1].id);
+        instance.entities.push(added);
+        prefab.capture_subtree(&instance, 0);
+        for (name, id) in ["Root", "Child", "Grandchild"].into_iter().zip(&ids) {
+            assert_eq!(prefab.entities.iter().find(|e| e.name == name).unwrap().id, *id);
+        }
+        assert_eq!(prefab.entities.iter().find(|e| e.name == "Added").unwrap().parent, Some(ids[1]));
+        assert!(prefab.entities.iter().all(|e| e.prefab.is_none()));
+    }
+
+    #[test]
+    fn creating_another_prefab_from_instance_keeps_scene_ids() {
+        let (scene, root) = sample_scene();
+        let original = Prefab::from_subtree(&scene, root);
+        let mut instance = Scene::new("Instance");
+        instance.entities = original.instantiate("Prefabs/Old.prefab.ron");
+        let created = Prefab::from_subtree(&instance, 0);
+        for entity in &instance.entities {
+            assert!(created.index_of(entity.id).is_some());
+        }
     }
 
     #[test]

@@ -1739,6 +1739,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 验证范围确实被片元着色器消费，同时保留近处旧亮度。
+    #[test]
+    fn regression_r09_point_range_changes_pixels() {
+        let Some(mut shot) = gpu_or_skip("regression_r09_point_range_changes_pixels") else {
+            return;
+        };
+        let builtin = crate::mesh::BuiltinMesh::Cube;
+        let mut mesh = GltfMesh::from_mesh_data(&shot.device, &shot.queue, &builtin.build(), builtin.label());
+        for prim in &mut mesh.primitives {
+            prim.material.metallic = 0.0;
+            prim.material.roughness = 0.9;
+        }
+        shot.inject_model("test://range", mesh);
+        let mut scene = Scene::new("范围回归");
+        scene.ambient = [0.0; 3];
+        let mut entity = Entity::new("立方体");
+        entity.model = "test://range".into();
+        scene.add_entity(entity);
+        let mut samples = Vec::new();
+        for range in [1.0, 10.0, 20.0, 2.5, 2.5 / 0.9, 0.0, -1.0] {
+            scene.lights = vec![Light::point("点光", [0.0, 0.0, 3.0], [1.0; 3], 0.3, range)];
+            shot.render_scene(&scene, &AnimationDriver::new(),
+                Some(ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y)),
+                SceneLighting::new(scene.ambient, &scene.lights), RenderConfig::default()).unwrap();
+            samples.push(pixel_avg(&shot.read_rgba().unwrap(), 320, 160, 120));
+        }
+        assert!(samples[1][0] > samples[0][0] + 30.0, "范围外应熄灭，范围内应照亮：{samples:?}");
+        assert_eq!(samples[1], samples[2], "近处保留旧衰减，不随 range 改亮度");
+        assert_eq!(samples[0], samples[3], "边界贡献为零");
+        assert!(samples[4][0] > samples[0][0] && samples[4][0] < samples[1][0], "收尾区应平滑衰减：{samples:?}");
+        assert_eq!(samples[0], samples[5]);
+        assert_eq!(samples[0], samples[6]);
+    }
+
     /// **PBR 红线测试**：同一盏灯、同一几何，金属面（metallic=1）的中心像素
     /// 必须比绝缘面（metallic=0）**暗** —— 金属没有漫反射，能量全在镜面项，
     /// 高粗糙度下几乎不反光。旧 Blinn-Phong 实现恰好相反（把金属度翻译成

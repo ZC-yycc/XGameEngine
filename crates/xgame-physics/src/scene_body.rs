@@ -25,12 +25,25 @@ pub fn body_from_scene(def: &PhysicsBody, world: Transform) -> (RigidBody, Colli
     };
 
     let shape = collider_shape(def.shape, world.scale);
+    // 场景 mass 是总质量：按形状体积换算密度，惯量也由同一形状计算。
+    let density = if def.kind == BodyKind::Dynamic && def.mass.is_finite() && def.mass > 0.0 {
+        let unit_mass = crate::world::collider_to_shared_shape(&shape)
+            .mass_properties(1.0)
+            .mass();
+        if unit_mass.is_finite() && unit_mass > 0.0 {
+            def.mass / unit_mass
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
     let collider = Collider {
         shape,
         friction: def.friction,
         restitution: def.restitution,
         is_sensor: def.is_sensor,
-        density: 1.0,
+        density,
         offset: Vec3::ZERO,
         // 层不在这里决定：`PhysicsBody` 是纯物理声明，层属于实体（`Entity.layer`），
         // 由运行时在建体时按项目矩阵算好再写进来（`World::sync_bodies`）。
@@ -49,7 +62,8 @@ pub fn body_from_scene(def: &PhysicsBody, world: Transform) -> (RigidBody, Colli
         },
         linear_velocity: Vec3::ZERO,
         angular_velocity: Vec3::ZERO,
-        mass: def.mass,
+        // 总质量已全部分配给碰撞体，不再叠加刚体附加质量。
+        mass: 0.0,
         angular_damping: 0.05,
         linear_damping: 0.0,
         gravity_enabled: def.kind == BodyKind::Dynamic,
@@ -129,6 +143,13 @@ mod tests {
             }
             other => panic!("期望 Cuboid，得到 {other:?}"),
         }
+    }
+
+    #[test]
+    fn zero_mass_keeps_automatic_density() {
+        let (body, collider) = body_from_scene(&PhysicsBody::dynamic_ball(2.0), Transform::IDENTITY);
+        assert_eq!(body.mass, 0.0);
+        assert_eq!(collider.density, 1.0);
     }
 
     #[test]

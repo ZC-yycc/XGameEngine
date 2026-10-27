@@ -1273,7 +1273,7 @@ fn interaction_groups(memberships: u32, filter: u32) -> InteractionGroups {
     )
 }
 
-fn collider_to_shared_shape(shape: &ColliderShape) -> rapier3d::geometry::SharedShape {
+pub(crate) fn collider_to_shared_shape(shape: &ColliderShape) -> rapier3d::geometry::SharedShape {
     match shape {
         ColliderShape::Cuboid { half_extents } => {
             rapier3d::geometry::SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z)
@@ -1318,6 +1318,24 @@ fn collider_to_shared_shape(shape: &ColliderShape) -> rapier3d::geometry::Shared
 mod tests {
     use super::*;
     use glam::Vec3;
+
+    #[test]
+    fn scene_mass_is_total_mass_for_different_volumes() {
+        for radius in [0.5, 2.0] {
+            let mut world = PhysicsWorld::new(PhysicsConfig::default());
+            let mut def = xgame_core::PhysicsBody::dynamic_ball(radius);
+            def.mass = 3.0;
+            let (body, collider) = crate::scene_body::body_from_scene(&def, Transform::IDENTITY);
+            let id = world.add_body(body);
+            world.add_collider(id, collider).unwrap();
+            let handle = world.bodies[&id].rapier_handle;
+            let rb = &mut world.rigid_body_set[handle];
+            rb.recompute_mass_properties_from_colliders(&world.collider_set);
+            assert!((rb.mass() - 3.0).abs() < 1e-5, "实际质量 {}", rb.mass());
+            rb.apply_impulse(rapier3d::na::Vector3::new(3.0, 0.0, 0.0), true);
+            assert!((rb.linvel().x - 1.0).abs() < 1e-5);
+        }
+    }
 
     #[test]
     fn drop_body_frees_colliders() {

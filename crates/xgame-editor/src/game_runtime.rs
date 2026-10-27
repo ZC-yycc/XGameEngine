@@ -106,6 +106,13 @@ impl GameRuntime {
         std::mem::swap(editor_scene, self.world.scene_mut());
     }
 
+    /// 卸载编辑器持有的最新运行场景；交换顺序与逐帧更新一致。
+    pub fn unload_with_scene(&mut self, editor_scene: &mut Scene) {
+        std::mem::swap(editor_scene, self.world.scene_mut());
+        self.world.unload_scene();
+        std::mem::swap(editor_scene, self.world.scene_mut());
+    }
+
     /// 取走本帧脚本产生的日志。
     pub fn take_logs(&mut self) -> Vec<ScriptLog> {
         self.world.take_logs()

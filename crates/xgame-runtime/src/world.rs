@@ -226,6 +226,7 @@ pub struct World {
     /// 空 = 宿主没配清单（单场景项目 / 老项目）—— 那时脚本只能按路径切换，
     /// `scene_count()` 返回 0，与"清单里没有当前场景"是同一个可观察结果。
     scene_order: Vec<String>,
+    unloaded: bool,
 }
 
 /// 单个实体已实例化的组件集合。
@@ -284,6 +285,7 @@ impl World {
             pending_scene_load: None,
             scene_loads: 0,
             scene_order: Vec::new(),
+            unloaded: false,
         };
         // 建完刚体顺手刷新加速结构：编辑器在暂停状态下也要能射线拾取。
         world.sync_bodies();
@@ -616,6 +618,7 @@ impl World {
     /// "随实体走"的数据。
     fn swap_scene(&mut self, scene: Scene, relative: &str) {
         let previous = self.scene.entities.len();
+        self.unload_scene();
 
         // -- 1. 物理：旧刚体全丢 --
         //
@@ -648,6 +651,7 @@ impl World {
 
         // -- 4. 换本体 --
         self.scene = scene;
+        self.unloaded = false;
         self.current_scene = Some(relative.to_owned());
         self.scene_loads += 1;
 
@@ -717,7 +721,9 @@ impl World {
     fn update_ui(&mut self) {
         let (w, h) = self.ui_viewport;
         if w == 0 || h == 0 {
+            self.ui.items.clear();
             self.ui.interaction.reset();
+            update_interaction(&mut self.scene, &[], None, &mut self.ui.interaction, &mut self.ui.events);
             return;
         }
         let pointer = self.ui_pointer.map(|pos| UiPointer {
@@ -753,6 +759,9 @@ impl World {
     /// `dt` 是**真实帧间隔**（调用方负责夹一个上限，否则窗口被拖动几秒之后
     /// 这里会一次补上千个固定步）。
     pub fn update(&mut self, dt: f32) -> FrameReport {
+        if self.unloaded {
+            return self.last_report;
+        }
         self.clock.tick(dt);
         let time = self.clock.total_time();
         let frame_dt = self.clock.delta_time();
@@ -813,6 +822,10 @@ impl World {
         self.particles.update(frame_dt, &mut self.scene);
 
         // -- 4. 音频（帧末：本帧的实体增删与物理回写都已落定） --
+        // 与本帧渲染使用同一份更新后的相机世界姿态；无相机则保留宿主监听。
+        if let Some(camera) = self.camera_view() {
+            self.set_listener(camera.position.to_array(), camera.forward.to_array());
+        }
         self.sync_audio();
         self.flush_audio();
 
@@ -916,19 +929,21 @@ impl World {
         } = self;
         let (logs, commands) = scripts.buffers_mut();
 
-        let mut index = 0usize;
-        while index < scene.entities.len() {
-            let entity = &scene.entities[index];
-            let id = entity.id;
-            let has_behaviors = !entity.behaviors.is_empty();
-            index += 1;
-            if !has_behaviors {
+        // 删除会移动 Vec 下标；按阶段入口身份快照派发，新实体留到下一阶段装配。
+        let queue: Vec<_> = scene.entities.iter()
+            .filter(|entity| !entity.behaviors.is_empty())
+            .map(|entity| entity.id).collect();
+        for id in queue {
+            if scene.find_entity(id).is_none() {
                 continue;
             }
             let Some(instances) = behavior_instances.get_mut(&id) else {
                 continue;
             };
             for instance in instances.iter_mut() {
+                if scene.find_entity(id).is_none() {
+                    break;
+                }
                 // start-before-update：Start 阶段只对还没 start 过的组件跑，
                 // 标记先记后跑，与脚本轨同款语义 —— 钩子里生成的实体等下
                 // 一轮才跑 start。标记挂在组件上而不是实体集合上：热路径
@@ -1046,6 +1061,39 @@ impl World {
             };
             (instance.hooks.on_destroy)(&mut instance.component, &mut game, 0.0);
         }
+    }
+
+    /// 卸载当前场景的行为与脚本，供切关、Stop 和宿主正常退出调用。
+    /// 旧场景和状态在钩子中仍可读；卸载产生的结构命令不进入下一场景。
+    /// 重复调用不重复派发；调用后须换场景或释放运行时。
+    pub fn unload_scene(&mut self) {
+        if self.unloaded {
+            return;
+        }
+        self.unloaded = true;
+        let entities: Vec<_> = self.scene.entities.iter()
+            .map(|entity| (entity.id, entity.scripts.clone())).collect();
+        let time = self.clock.total_time();
+        for (id, paths) in entities {
+            self.destroy_behaviors(id, 0.0, time);
+            let mut frame = FrameCtx::new(&mut self.scene, 0.0, time)
+                .with_input(&self.input)
+                .with_physics(&mut self.physics)
+                .with_audio(&mut self.audio_port)
+                .with_clock(&mut self.clock)
+                .with_scene_name(self.current_scene.as_deref().unwrap_or(""))
+                .with_scene_order(&self.scene_order);
+            if let Some(loader) = self.scene_loader.as_deref() {
+                frame = frame.with_loader(loader);
+            }
+            self.scripts.dispatch_destroy(&mut frame, id, &paths);
+        }
+        self.scripts.reset_scene_state();
+        self.behavior_instances.clear();
+        self.pending_scene_load = None;
+        self.scripts.buffers_mut().1.clear();
+        self.audio_port.stop_all();
+        self.flush_audio();
     }
 
     /// 脚本日志（编辑器控制台 / 游戏日志）。
@@ -2447,6 +2495,35 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct RemoveSelf;
+    impl Lifecycle for RemoveSelf {
+        fn update(&mut self, ctx: &mut Ctx, _dt: f32) {
+            let id = ctx.find_entity_id("remove_self").unwrap();
+            ctx.destroy(id);
+        }
+    }
+    xgame_core::impl_no_inspect!(RemoveSelf);
+
+    #[test]
+    fn removing_current_behavior_does_not_skip_successor() {
+        let mut scene = Scene::new("stable_dispatch");
+        let mut first = Entity::new("remove_self");
+        first.behaviors.push("RemoveSelf".into());
+        scene.add_entity(first);
+        let mut next = Entity::new("next");
+        next.behaviors.push("Drifter".into());
+        let id = next.id;
+        scene.add_entity(next);
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<RemoveSelf>("RemoveSelf");
+        registry.register::<Drifter>("Drifter");
+        let mut world = World::new(scene, ".", WorldConfig::default()).with_behavior_registry(registry);
+        world.update(0.1);
+        let next = world.scene.find_entity(id).unwrap();
+        assert!(world.scene.entities[next].transform.position.x > 0.0, "删除当前实体不能跳过后继组件");
+    }
+
     static DESTROYED: AtomicU32 = AtomicU32::new(0);
 
     #[derive(Default)]
@@ -2691,6 +2768,77 @@ mod tests {
             1,
             "on_destroy 不该重复派发"
         );
+    }
+
+    #[test]
+    fn zero_viewport_clears_previous_ui_state() {
+        let mut scene = Scene::new("ui_reset");
+        let mut button = Entity::new("button");
+        let mut ui = xgame_core::UiElement::button("OK");
+        ui.state.clicked = true;
+        ui.state.pressed = true;
+        ui.state.hovered = true;
+        button.ui = Some(ui);
+        scene.add_entity(button);
+        let mut world = World::new(scene, ".", WorldConfig::default());
+        world.set_ui_viewport((0, 0));
+        world.update(0.0);
+        assert_eq!(world.scene.entities[0].ui.as_ref().unwrap().state, xgame_core::UiState::default());
+    }
+
+    #[test]
+    fn camera_listener_matches_updated_world_pose() {
+        let mut scene = Scene::new("listener");
+        let mut camera = Entity::new("camera");
+        camera.camera = Some(xgame_core::Camera::default());
+        camera.transform.position = Vec3::new(8.0, 2.0, 3.0);
+        scene.add_entity(camera);
+        let mut world = World::new(scene, ".", WorldConfig::default());
+        world.update(0.0);
+        let cam = world.camera_view().unwrap();
+        assert_eq!(world.audio_port.listener.position, cam.position.to_array());
+        assert_eq!(world.audio_port.listener.forward, cam.forward.to_array());
+        world.scene_mut().entities[0].transform.position = Vec3::new(3.0, 4.0, 5.0);
+        world.update(0.0);
+        assert_eq!(world.audio_port.listener.position, [3.0, 4.0, 5.0]);
+        world.scene_mut().entities[0].camera = None;
+        world.set_listener([1.0, 2.0, 3.0], [0.0, 0.0, 1.0]);
+        world.update(0.0);
+        assert_eq!(world.audio_port.listener.position, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn scene_unload_runs_destroy_with_old_state_once() {
+        let dir = std::env::temp_dir().join(format!("xgame_unload_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("unload.lua"), r#"
+            function start(ctx) state_set(ctx, "token", "alive") end
+            function on_destroy(ctx)
+                log(ctx, "unloaded:" .. state_get_or(ctx, "token", "missing"))
+            end
+        "#).unwrap();
+        let mut scene = Scene::new("old");
+        let mut entity = Entity::new("victim");
+        entity.scripts.push("unload.lua".into());
+        scene.add_entity(entity);
+        let mut switching = World::new(scene.clone(), &dir, WorldConfig::default());
+        switching.update(0.0);
+        switching.take_logs();
+        switching.swap_scene(Scene::new("new"), "new.ron");
+        assert_eq!(switching.take_logs().iter().filter(|log| log.message == "unloaded:alive").count(), 1);
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+        world.update(0.0);
+        world.take_logs();
+        world.unload_scene();
+        world.update(1.0);
+        assert_eq!(world.scripts().entity_state_count(), 0);
+        world.unload_scene();
+        world.swap_scene(Scene::new("new"), "new.ron");
+        let logs = world.take_logs();
+        assert_eq!(logs.iter().filter(|log| log.message == "unloaded:alive").count(), 1);
+        world.swap_scene(Scene::new("next"), "next.ron");
+        assert!(!world.take_logs().iter().any(|log| log.message.starts_with("unloaded:")));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
