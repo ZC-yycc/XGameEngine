@@ -5390,10 +5390,7 @@ Windows 下先新增 `import_update_failure_preserves_meta_and_index`：打开�
 ### 全量验证与发布
 
 - check / clippy `-D warnings` / test 全绿：27 套件 **942 passed / 0 failed / 8 ignored**。
-- release workspace 同批重建、`一键构建.cmd` 刷新 dist；dist 两个可执行文件的
-  `xgame-src-v1:` 一致（`eb39fa2b…`）。示例插件 DLL 同批刷新为
-  `8B0EDFCD…C621E`（引擎源码变了，指纹门禁要求同批），BehaviorsDemo 无头 60 帧
-  零 error、SampleScene `--check` 退出 0。
+- release workspace 同批重建、`一键构建.cmd` 刷新 dist（最后一次按提交后的 HEAD 源码重建）；dist 两个可执行文件与示例插件 DLL 的两份指纹都一致（`xgame-src-v1:6961134d…`、`xgame-build-v1:bbdd032f…`）。示例插件 DLL 刷新为 `12F8A994…3AB1`（引擎源码变了，指纹门禁要求同批），BehaviorsDemo 无头 60 帧零 error，SampleScene / BehaviorsDemo `--check` 均退出 0。
 
 ### 边界
 
