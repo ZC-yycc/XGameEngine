@@ -5310,6 +5310,14 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 六十七、G0 资产引用迁移单文件写盘保护（2026-10-27）
+
+`ProjectHandle::rewrite_literals` 之前直接 `fs::write` 覆写场景、预制体和材质：中途写入失败会截断旧内容；Windows 上目标允许写却禁止删除时，直接覆写还会绕过预期的替换失败。迁移继续保留原文注释和格式，只把写回收敛到主保存已有的 `write_atomic`，沿用同目录独占暂存、同步和替换。迁移报告仍按文件计数并收集错误；失败文件可在解除占用后重试。
+
+Windows 回归 `migration_locked_target_preserves_original_and_reports_error` 以不共享删除的读句柄锁住老场景，验证逐文件报错、原字节及旧版暂存残留不变，再解除占用验证迁移成功。旧实现下会在错误断言处失败，因为 `fs::write` 在该句柄下可以直接覆写。此处只保证单文件替换；多个文件间仍可能部分完成，目录同步和残留回收另行处理。
+
+验证：原实现定向回归 0 passed / 1 failed，报告误把锁定目标记为 `rewritten_scenes: 1`；改后定向回归通过。全工作区 `check --all-targets --locked`、`clippy --all-targets --locked -- -D warnings` 通过；冷构建时插件嵌套编译超出 240 秒门限，先明确预建同 profile 的两个 DLL，重跑 `test --workspace --all-targets --locked` 全绿。初次使用独立 `CARGO_TARGET_DIR` 是因为原 `target/debug/.cargo-build-lock` 拒绝访问；不将该环境故障计入功能回归。release workspace 在独立目录构建成功；三份 EXE 已逐一复制到 `dist` 并核对哈希。`dist/xgame-editor.exe` 对 SampleScene 的 `--check` 返回 0（1 场景 / 24 实体 / 15 资产），`--headless --frames 30` 返回 0（`ok=true`，30 固定步、0 错误、0 非有限变换）。此次无 UI 变更，未执行 UI 截图；不据此关闭 G0 的多文件事务与断电验收。
+
 ## 六十六、G0 `input.ron` 保存保护（2026-10-27）
 
 ### 事实与选择

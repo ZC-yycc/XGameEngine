@@ -975,8 +975,9 @@ impl ProjectHandle {
         if !changed {
             return Ok(false);
         }
-        std::fs::write(&path, replaced)
-            .map_err(|source| ProjectError::Write { path, source })
+        // 迁移仍保留原文注释和空白；写盘复用主保存的暂存与替换，
+        // 目标被占用或写入中断时不能截断原场景、预制体或材质。
+        write_atomic(&path, &replaced)
             .map(|_| true)
             .map_err(|e| e.to_string())
     }
@@ -1468,6 +1469,46 @@ mod tests {
         for (relative, rejected, preserved) in results {
             assert!(rejected && preserved, "{relative}: 必须拒绝替换并保留原字节，拒绝={rejected}, 保留={preserved}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_locked_target_preserves_original_and_reports_error() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (base, handle) = temp_project("migration_lock");
+        let asset = "Resources/Box.glb";
+        std::fs::write(handle.path(asset), b"glb").unwrap();
+        handle.ensure_asset_metas().unwrap();
+        let scene = "Scenes/locked.ron";
+        let original =
+            format!("(name: \"Legacy\", entities: [(name: \"Box\", model: \"{asset}\")])\n");
+        let path = handle.path(scene);
+        std::fs::write(&path, &original).unwrap();
+        let legacy_tmp = path.with_extension("ron.tmp");
+        std::fs::write(&legacy_tmp, b"earlier interrupted migration").unwrap();
+        // 允许文件内容读写，却拒绝删除/替换；旧的直接 write 会悄悄成功。
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let report = handle.migrate_asset_references();
+        assert!(
+            report.errors.iter().any(|e| e.contains(scene)),
+            "{report:?}"
+        );
+        assert_eq!(report.rewritten_scenes, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+        assert_eq!(
+            std::fs::read(&legacy_tmp).unwrap(),
+            b"earlier interrupted migration"
+        );
+        drop(lock);
+        let report = handle.migrate_asset_references();
+        assert!(!report.has_errors(), "{report:?}");
+        assert_eq!(report.rewritten_scenes, 1);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("guid://"));
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
