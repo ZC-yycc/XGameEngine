@@ -315,7 +315,29 @@ impl InputMap {
             .enumerate_arrays(true);
         let text = ron::ser::to_string_pretty(self, ron)
             .map_err(|e| InputMapError::Parse(e.to_string()))?;
-        std::fs::write(path, text).map_err(InputMapError::Io)
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
+        // 每次独占一个同目录暂存名，旧崩溃残留不能挡住新保存。
+        let (tmp, mut file) = loop {
+            let id = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
+            let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+                Some(ext) => format!("{ext}.tmp.{}.{id}", std::process::id()),
+                None => format!("tmp.{}.{id}", std::process::id()),
+            });
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+                Ok(file) => break (tmp, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(InputMapError::Io(e)),
+            }
+        };
+        let result = file.write_all(text.as_bytes()).and_then(|_| file.sync_all());
+        drop(file);
+        let result = result.and_then(|_| std::fs::rename(&tmp, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.map_err(InputMapError::Io)
     }
 }
 
@@ -499,6 +521,35 @@ mod tests {
         // 再加一个 Shift：修饰键不再精确匹配，绑定应当失效。
         press(&mut input, KeyCode::ShiftLeft);
         assert!(!input.action_pressed("Save"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn save_rejects_locked_target_without_changing_old_map() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "xgame_input_save_lock_{}_{}.ron",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut old = InputMap::new();
+        old.bind("Old", Binding::Key(KeyCode::KeyA));
+        old.save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // 旧版本的固定暂存残留也不得阻断保存，更不能被这次失败清掉。
+        let legacy_tmp = path.with_extension("ron.tmp");
+        std::fs::write(&legacy_tmp, b"incomplete previous save").unwrap();
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(3).open(&path).unwrap();
+        let mut new = InputMap::new();
+        new.bind("New", Binding::Key(KeyCode::KeyB));
+        assert!(new.save(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read(&legacy_tmp).unwrap(), b"incomplete previous save");
+        drop(lock);
+        new.save(&path).unwrap();
+        assert!(InputMap::load(&path).unwrap().unwrap().actions.contains_key("New"));
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(legacy_tmp).unwrap();
     }
 
     #[test]
