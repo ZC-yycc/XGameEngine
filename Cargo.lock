@@ -5477,6 +5477,7 @@ dependencies = [
  "ron",
  "serde",
  "winit",
+ "xgame-core",
  "xgame-math",
 ]
 

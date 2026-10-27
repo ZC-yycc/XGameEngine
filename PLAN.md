@@ -5358,6 +5358,37 @@ Windows 下先新增 `import_update_failure_preserves_meta_and_index`：打开�
 
 失败或异常中止后的暂存清理、目录断电持久化、批量生成跨资产事务以及 `input.ron` / 迁移文件写入仍待处理；本轮结果不表示 G0 全部关闭。本轮全工作区 `check --all-targets --locked -j 2`、`clippy --all-targets --locked -D warnings`、`test --all-targets --locked` 均通过（原有 917 项 + 新增 2 项 = 919 passed，7 ignored）；release workspace 构建成功，dist 三个程序与 release 哈希一致；dist 编辑器对 SampleScene 实际 `--check` 返回 0（1 场景、24 实体、15 资产）。本轮未复跑桌面窗口 GPU 组合验收。
 
+## 六十五、G0 写盘实现统一与遗留暂存回收（2026-10-27）
+
+从 8b9e14a 继续，沿 G0「保存可靠性」主线只处理写盘与暂存残留。前置事实有两条：同一段「同目录独占暂存 + `sync_all` + 替换」在 `core::project`、`editor::prefs`、`input::action` 各有一份，而且三份的差错点各不相同（一份补建父目录、一份支持"只发布到空位"、一份两者都没有）；差距分析与 PLAN 六十四 都记着"历史暂存不自动回收"，项目目录会一直攒垃圾。
+
+### 实现
+
+- 新增 `xgame_core::fsx`，三个入口：`write_atomic`（替换发布）、`write_atomic_new`（`hard_link` 只发布到空位，保护首次分配的 GUID）、`sweep_staging`（超龄暂存回收）；发布成功后追加父目录 fsync（仅 POSIX 有效）。三处副本改成委派，`ProjectHandle` 的各个保存入口与 `.meta` 写入的调用点不变。
+- 命名即判据：暂存叫 `<主名>.<扩展名>.tmp.<进程号>.<序号>`，回收只认收尾**恰好两段数字**的名字。单段数字（`notes.tmp.5`）与旧版固定名（`scene.ron.tmp`）跟用户文件无法区分，猜错就是删用户文件，所以一律不动。阈值 600 秒，防止误删并发写入者正在用的那份。
+- 回收挂在发布成功之后，**不在** `ProjectHandle::open`：后者是 `--check` 的入口，检查必须只读（§十四）。
+- `xgame-input` 因此新增 `xgame-core` 依赖；§四十五 里"输入 crate 不引入 core 依赖"那条边界由决策记录 §四十九 明确取消，方向仍是向下。
+
+### 红绿
+
+- 先写 `project::tests::main_save_reclaims_abandoned_staging`，在旧实现实跑失败：`crates/xgame-core/src/project.rs:1646: 超龄暂存应被回收`（0 passed / 1 failed / 266 filtered）。同一条用例同时钉住三件事：超龄的回收、新写下的不动、不匹配命名的用户文件不动。
+- 实现后补 `fsx` 的 8 条：命名匹配表（含 `notes.tmp.5` / `scene.ron.tmp` / `scene.ron.tmp..7` 等反例）、只回收超龄、零阈值全收、写盘不留暂存且补建父目录、`write_atomic_new` 拒绝已存在目标、保存顺手回收、覆盖替换、Windows 锁定目标时保留旧字节且失败路径不留暂存。
+
+### 成本
+
+release 实测（本机，`fsx::tests::sweep_cost`，默认 ignore）：扫描 100 个条目的目录 82.5 µs（1000 次 82.5 ms），一次写盘 4.26 ms（200 次 852 ms，`fsync` 主导）。回收约占一次保存的 2%，不做额外节流 —— 加节流就要引入进程级状态与"这次到底扫没扫"的不确定性，不值。
+
+### 全量验证与发布
+
+- workspace `check --all-targets --locked`、`clippy -D warnings`、`test --all-targets --locked -- --test-threads=4` 全部退出 0：27 套件 **937 passed / 0 failed / 8 ignored**（本轮新增 9 条，含 1 条默认 ignore 的成本测量）。
+- release workspace 构建成功；`一键构建.cmd`（`tools/build-release.ps1`）退出 0，dist 三个 EXE 刷新。
+- 冒烟：dist 版 `--check` 对 SampleScene 退出 0（1 场景 / 24 实体 / 15 资产）、对 BehaviorsDemo 退出 0；`--headless --frames 120 --screenshot`（BehaviorsDemo）与 60 帧 SampleScene 均退出 0，截图已查看（地面 + 方块 + 球，阴影正常）。
+- 插件指纹：本轮改的是引擎源码，示例 DLL 的构建指纹随之失效。先做负对照 —— 把 §六十一 之前的旧 DLL 换回去，无头实跑打出 `插件加载失败，已跳过：… 缺少构建指纹符号 xgame_plugin_descriptor_v1`；换回同批 release DLL 后同一命令零 error。`projects/BehaviorsDemo/Plugins/behaviors_demo.dll` 已刷新，SHA-256 `36532B20…C1E1A`。
+
+### 边界
+
+同一目标的多进程同时保存仍是最后完成者胜出；多文件迁移不是整体事务；Windows 上没有目录 fsync（只剩 NTFS 元数据日志），断电后的目录持久性仍未验证。旧固定 `.tmp` 与打包临时目录 `.xgame-staging-*` 不回收 —— 前者与用户文件无法区分，后者内含 `project.ron`，已被扫描器当成"另一个项目"跳过，不会污染资产库，只是占盘。G0 不整体关闭。
+
 ## 六十四、G0 主保存残留暂存文件阻塞（2026-10-27）
 
 本轮只处理主保存暂存冲突。此前 `ProjectHandle::write_atomic` 固定用 `<目标>.tmp` 且 `create_new`；进程异常退出遗留暂存文件后，清单、场景、预制体、材质和自动保存均可能持续报 `AlreadyExists`。回归 `stale_staging_file_does_not_block_main_saves` 已在旧实现实际运行失败（Windows code 80，project.ron 暂存已存在）。

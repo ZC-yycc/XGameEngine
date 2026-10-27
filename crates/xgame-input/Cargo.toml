@@ -5,6 +5,7 @@ edition = "2021"
 description = "XGameEngine input abstraction: device state, action mapping, axes"
 
 [dependencies]
+xgame-core = { path = "../xgame-core" }
 xgame-math = { path = "../xgame-math" }
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"

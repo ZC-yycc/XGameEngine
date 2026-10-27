@@ -9,6 +9,14 @@
 
 ## 整体路线图
 
+### 2026-10-27 G0 写盘实现统一与遗留暂存回收
+
+| 项目 | 状态 |
+|---|---|
+| 写盘单实现 | `xgame_core::fsx` 收敛 core / editor / input 三份副本；新增超龄暂存回收（命名即判据、600 秒阈值）与 POSIX 父目录 fsync |
+| 验证 | 旧实现红灯（超龄暂存不回收）；workspace check/clippy/test 全绿 **937 passed / 0 failed / 8 ignored**，release 与 dist 三 EXE 刷新，SampleScene / BehaviorsDemo 检查与无头截图通过、插件指纹负对照有效；见 PLAN 第六十五节 |
+| 边界 | 多进程同目标保存仍最后完成者胜出；Windows 无目录 fsync，断电目录持久性未验；旧固定 `.tmp` 与打包临时目录不回收；G0 未关闭 |
+
 ### 2026-10-27 G0 资产引用迁移词法保护
 
 | 项目 | 状态 |

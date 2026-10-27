@@ -43,6 +43,12 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
   `ProjectHandle::load_scene` / `write_scene` / `load_prefab` / `write_prefab`（`core::asset`
   的 `encode_*` / `decode_*`）。别把 GUID 往热路径或 243 个消费点上引；也别让 `.meta` 生成
   混进 `--check`（检查必须只读）。规则见 `Docs/决策记录.md` §十四。
+- **落盘只有一个入口**：`xgame_core::fsx`（`write_atomic` / `write_atomic_new` /
+  `sweep_staging`）。别再在别的 crate 里抄一份"同目录暂存 + rename"——这条坑已经
+  踩过三次，三份副本的差错点各不相同。暂存名 `<主名>.<扩展名>.tmp.<进程号>.<序号>`
+  同时是**回收判据**，改命名必须同步 `is_staging_name`；回收挂在保存成功之后，
+  绝不挂在 `ProjectHandle::open`（那里是 `--check`，必须只读）。规则见
+  `Docs/决策记录.md` §四十九。
 - **场景 schema**：`xgame-core::schema::scene_schema()` 是 `--export-schema` 与 MCP
   `schema_read` 的**唯一内容源**（别在编辑器 / MCP 里再抄一份）。目录是手写的，靠
   **穷举解构 + 枚举穷举匹配 + 默认值 / 示例反解 + 类型引用校验 + ProjectHandle 往返**
@@ -148,6 +154,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | FXAA | 默认关；显示空间 luma；`textureSampleLevel(..., 0.0)`；平坦区回原值 | §十二 |
 | TAA | 默认关；抖动**只**叠相机（阴影拟合 / 剔除用未抖动矩阵）；重投影要补上一帧抖动；历史必须被邻域钳制；首帧 / 越界直通；抖动是纯函数（截图确定性）；开着时 FXAA 让位 | §二十九 |
 | 资产管线 | 磁盘 GUID / 内存路径；GUID 永不变；`--check` 只读；迁移只替换字面量（不吃注释） | §十四 |
+| 写盘 / 暂存 | 落盘只有一份实现 `xgame_core::fsx`；暂存名即回收判据（改命名必须同步 `is_staging_name`）；回收只在保存成功后（打开项目是 `--check` 的入口，必须只读）；Windows 无目录 fsync | §四十九 |
 | 场景 schema | 唯一源 `scene_schema()`；CLI / MCP 同源；输出确定性；运行时字段不进目录；加落盘字段必须同步目录 | §三十二 |
 | 自动保存 | 副本只在 `<项目>/.autosave/`（进 `Scenes/` 会被当场景）；**不算保存**（不动 `saved_snapshot`）；手动保存 / 正常退出即清；写盘格式与 `write_scene` 同源 + 原子写；空闲停帧时靠 `request_repaint_after` 唤醒 | §二十四 |
 | 场景切换 | 只在**帧末**一处应用（`apply_pending_scene_load`）；脚本 `load_scene` 只登记请求（钩子期间场景正被可变借用）；装不上就**不动** + 一条 error 日志；只重置"与实体绑定"的状态（物理 / 粒子 / 音频 autoplay / UI 交互 / `started` / `states`），**日志缓冲与脚本全局变量不能清**；装载来源由宿主注入 `with_scene_loader`，没接是**可诊断的错误** | §二十五 |

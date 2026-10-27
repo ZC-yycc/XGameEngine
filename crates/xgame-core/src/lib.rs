@@ -19,6 +19,7 @@
 //! | `character` | 角色控制器参数 `CharacterController`（可序列化）+ 运行时状态 `CharacterState` |
 //! | `material` | 材质：共享资产 `MaterialAsset`（`.mat`）+ 逐实体覆盖 `MaterialOverride` |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
+//! | `fsx` | 原子写盘与遗留暂存回收（所有落盘入口的唯一实现） |
 //! | `inspect` | 组件字段检视契约 `Inspect` + `FieldDesc`/`FieldValue`（Inspector 与 Lua 参数的同一份真相源）|
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
 //! | `asset` | 资产身份 `AssetGuid` + `.meta` + `AssetDatabase`（GUID 引用、导入设置、诊断） |
@@ -56,6 +57,8 @@ pub mod camera;
 mod character;
 mod check;
 mod component;
+// 原子写盘 + 遗留暂存回收：所有落盘入口共用一份实现（见模块文档的"为什么"）。
+pub mod fsx;
 mod id;
 pub mod inspect;
 pub mod layers;

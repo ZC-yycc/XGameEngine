@@ -306,38 +306,17 @@ impl InputMap {
     }
 
     /// 存到 RON 文件（`pretty` 输出，方便手改与 diff）。
+    ///
+    /// 落盘走 `xgame_core::fsx::write_atomic`（同目录独占暂存 + 同步 + 替换）：
+    /// 半截的 `input.ron` 会让整个项目的按键在下次启动时退回默认映射，
+    /// 比"保存失败"糟得多。
     pub fn save(&self, path: &Path) -> Result<(), InputMapError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(InputMapError::Io)?;
-        }
         let ron = ron::ser::PrettyConfig::new()
             .depth_limit(4)
             .enumerate_arrays(true);
         let text = ron::ser::to_string_pretty(self, ron)
             .map_err(|e| InputMapError::Parse(e.to_string()))?;
-        use std::io::Write;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
-        // 每次独占一个同目录暂存名，旧崩溃残留不能挡住新保存。
-        let (tmp, mut file) = loop {
-            let id = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
-            let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-                Some(ext) => format!("{ext}.tmp.{}.{id}", std::process::id()),
-                None => format!("tmp.{}.{id}", std::process::id()),
-            });
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
-                Ok(file) => break (tmp, file),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(InputMapError::Io(e)),
-            }
-        };
-        let result = file.write_all(text.as_bytes()).and_then(|_| file.sync_all());
-        drop(file);
-        let result = result.and_then(|_| std::fs::rename(&tmp, path));
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result.map_err(InputMapError::Io)
+        xgame_core::fsx::write_atomic(path, text).map_err(InputMapError::Io)
     }
 }
 

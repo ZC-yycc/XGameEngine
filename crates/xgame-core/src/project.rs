@@ -1250,11 +1250,10 @@ fn sanitize_asset_name_or(name: &str, fallback: &str) -> String {
 
 /// 原子写：同目录独占暂存文件，再 rename 覆盖目标。
 ///
-/// 每次保存用独立名字：异常退出留下的暂存内容可供排查，且不会阻断后续保存。
-/// Windows 的 `rename` 会覆盖已存在的目标（MoveFileEx + REPLACE_EXISTING），
-/// 与 Unix 语义一致。任何失败都返回错误，绝不退回覆盖写，避免损坏旧文件。
+/// 实现已收敛到 [`crate::fsx`]（三处副本的差错点各不相同，见该模块文档）；
+/// 这里只负责把 IO 错误映射成项目错误。
 pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> {
-    write_staged(path, text, false).map_err(|source| ProjectError::Write {
+    crate::fsx::write_atomic(path, text).map_err(|source| ProjectError::Write {
         path: path.to_path_buf(),
         source,
     })
@@ -1262,43 +1261,7 @@ pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> 
 
 /// 首次登记资产时只发布到空位；并发生成者不能覆盖对方的 GUID。
 pub(crate) fn write_atomic_new(path: &Path, text: &str) -> std::io::Result<()> {
-    write_staged(path, text, true)
-}
-
-fn write_staged(path: &Path, text: &str, create_only: bool) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
-    let (tmp, mut file) = loop {
-        let id = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
-        let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-            Some(ext) => format!("{ext}.tmp.{}.{id}", std::process::id()),
-            None => format!("tmp.{}.{id}", std::process::id()),
-        });
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
-            Ok(file) => break (tmp, file),
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(source) => return Err(source),
-        }
-    };
-    let result = file.write_all(text.as_bytes()).and_then(|_| file.sync_all());
-    drop(file);
-    let result = result.and_then(|_| {
-        if create_only {
-            // hard_link 创建目标时拒绝已存在的名字；rename 在 Windows 会覆盖，
-            // 不能用于首次分配 GUID（另一进程可能已抢先登记）。
-            std::fs::hard_link(&tmp, path)?;
-            // 发布已经成功，清暂存失败只留下残留，不能把成功误报为写入失败。
-            let _ = std::fs::remove_file(&tmp);
-            Ok(())
-        } else {
-            std::fs::rename(&tmp, path)
-        }
-    });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    crate::fsx::write_atomic_new(path, text)
 }
 
 /// 只替换 RON 里的字符串 token；注释、字符字面量和普通文字原样复制。
@@ -1602,6 +1565,51 @@ mod tests {
         assert!(!report.has_errors(), "{report:?}");
         assert_eq!(report.rewritten_scenes, 1);
         assert!(std::fs::read_to_string(&path).unwrap().contains("guid://"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// 把文件的修改时间挪到过去：模拟"上一次保存崩在中途留下的暂存"。
+    fn age_file(path: &std::path::Path, ago: std::time::Duration) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        let when = std::time::SystemTime::now() - ago;
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(when)
+                .set_accessed(when),
+        )
+        .unwrap();
+    }
+
+    /// 崩溃留下的暂存文件必须被后续保存回收，否则项目目录会一直攒垃圾
+    /// （旧实现只保证"不阻断保存"，从不清理）。
+    #[test]
+    fn main_save_reclaims_abandoned_staging() {
+        let (base, handle) = temp_project("staging_gc");
+        let scene_path = "Scenes/gc.ron";
+        handle
+            .write_scene(scene_path, &crate::Scene::new("旧场景"))
+            .unwrap();
+        let path = handle.path(scene_path);
+
+        let abandoned = path.with_extension(format!("ron.tmp.{}.7", std::process::id()));
+        std::fs::write(&abandoned, b"abandoned").unwrap();
+        age_file(&abandoned, std::time::Duration::from_secs(3600));
+        // 另一份刚写下的暂存可能是别的进程正在用的，不能动。
+        let fresh = path.with_extension(format!("ron.tmp.{}.8", std::process::id()));
+        std::fs::write(&fresh, b"fresh").unwrap();
+        // 用户自己的同名风格文件（缺少两段数字）也不能被当成垃圾。
+        let user_file = path.with_extension("ron.tmp");
+        std::fs::write(&user_file, b"user").unwrap();
+        age_file(&user_file, std::time::Duration::from_secs(3600));
+
+        handle
+            .write_scene(scene_path, &crate::Scene::new("新场景"))
+            .unwrap();
+
+        assert!(!abandoned.exists(), "超龄暂存应被回收");
+        assert!(fresh.exists(), "新鲜暂存可能属于并发写入者，不能回收");
+        assert!(user_file.exists(), "不匹配暂存命名的文件不能动");
+        assert_eq!(handle.load_scene(scene_path).unwrap().name, "新场景");
         std::fs::remove_dir_all(base).unwrap();
     }
 

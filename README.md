@@ -974,7 +974,7 @@ xgame-math     glam 重导出 + projection 辅助
 xgame-render   wgpu 管线、glTF、PostFx（HDR / ACES / Bloom / FXAA / TAA）、天空 IBL、实例化与剔除
 xgame-physics  rapier3d 刚体、碰撞体、物理世界、射线、调试绘制
     ↑
-xgame-input    键鼠状态 + 动作映射（与 winit 解耦）
+xgame-input    键鼠状态 + 动作映射（与 winit 解耦；落盘走 core::fsx）
 xgame-script   Lua 宿主 + GameCtx 方法层（不依赖渲染 / 编辑器）
 xgame-audio    kira 封装（设备 / 空间轨道 / 解码缓存 / silent 降级）
     ↑
