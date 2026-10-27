@@ -3162,8 +3162,10 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn apply_binds_new_nodes_only_after_success_and_keeps_them_stable() {
+        use std::os::windows::fs::OpenOptionsExt;
         let (mut state, base) = temp_state("apply_new");
         let mut template = Prefab::new("Stable");
         template.entities.push(Entity::new("Root"));
@@ -3175,12 +3177,16 @@ mod tests {
         let child_idx = state.scene.entities.len();
         state.scene.entities.push(child);
         let before = std::fs::read(state.project.path(source)).unwrap();
-        let tmp = state.project.path(source).with_extension("ron.tmp");
-        std::fs::create_dir(&tmp).unwrap();
+        // 禁止目标删除/替换，但仍允许读取：稳定注入 rename 失败。
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(state.project.path(source))
+            .unwrap();
         state.apply_prefab(root);
         assert!(state.scene.entities[child_idx].prefab.is_none());
         assert_eq!(std::fs::read(state.project.path(source)).unwrap(), before);
-        std::fs::remove_dir(tmp).unwrap();
+        drop(lock);
         state.apply_prefab(root);
         let id = state.scene.entities[child_idx].prefab.as_ref().unwrap().source_id;
         state.apply_prefab(root);

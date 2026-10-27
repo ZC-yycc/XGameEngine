@@ -5310,6 +5310,16 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 六十四、G0 主保存残留暂存文件阻塞（2026-10-27）
+
+本轮只处理主保存暂存冲突。此前 `ProjectHandle::write_atomic` 固定用 `<目标>.tmp` 且 `create_new`；进程异常退出遗留暂存文件后，清单、场景、预制体、材质和自动保存均可能持续报 `AlreadyExists`。回归 `stale_staging_file_does_not_block_main_saves` 已在旧实现实际运行失败（Windows code 80，project.ron 暂存已存在）。
+
+现改为目标同目录的 `<扩展名>.tmp.<进程号>.<原子序号>`，`create_new` 独占；名字碰撞继续取下一序号，仅清理本次创建且写入/替换失败的暂存文件，不碰旧残留。沿用 `sync_all` 后 rename 的原子替换，禁止直接覆写目标。旧版暂存目录与文件均不阻断新保存；编辑器 Apply 原测试的固定 tmp 注入改为 Windows 禁止替换的目标文件句柄，以稳定验证失败时实例节点不绑定、目标字节不变。
+
+**已验证**：旧实现回归先红；修改后 core 261 项通过；workspace `check --all-targets --locked -j 2`、clippy `-D warnings`、`test --all-targets --locked -j 2 -- --test-threads=4` 均退出 0；SampleScene debug 与 dist release `--check` 均退出 0（1 场景、24 实体、15 资产）。release workspace 构建成功，dist 三个 EXE 与 target/release 对应文件哈希相同。`cargo fmt --all -- --check` 对仓库大量历史文件报差异，未批量格式化，也不宣称格式门禁通过。
+
+**遗留与下一步**：未自动回收历史暂存文件，其他写入入口及断电目录持久化未专项验收；同一目标的多进程同时保存仍是最后完成者胜出。G0 保存可靠性下一步可选单独核验 meta/input/迁移写入的失败保护。本轮未复跑桌面 GPU 发布包三关验收，不能用此前历史结果冒充本轮结果。
+
 ## 六十三、G3 跨平台构建的实施顺序（2026-10-27，计划，尚未实施）
 
 用户要求先把其他平台构建纳入计划，之后再实现。本节记录实施取舍；当前没有修改跨平台代码、CI 或发布脚本，也没有运行 Linux/macOS/Web 的构建和验证。正式阶段和排序以差距分析「跨平台构建计划」为准，ROADMAP 仅记待做状态。

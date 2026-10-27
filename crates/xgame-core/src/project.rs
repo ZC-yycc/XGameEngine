@@ -1261,21 +1261,27 @@ fn sanitize_asset_name_or(name: &str, fallback: &str) -> String {
     }
 }
 
-/// 原子写：先写 `<文件名>.tmp` 再 rename 覆盖目标。
+/// 原子写：同目录独占暂存文件，再 rename 覆盖目标。
 ///
+/// 每次保存用独立名字：异常退出留下的暂存内容可供排查，且不会阻断后续保存。
 /// Windows 的 `rename` 会覆盖已存在的目标（MoveFileEx + REPLACE_EXISTING），
 /// 与 Unix 语义一致。任何失败都返回错误，绝不退回覆盖写，避免损坏旧文件。
 fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> {
-    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{ext}.tmp"),
-        None => "tmp".to_owned(),
-    });
     use std::io::Write;
-    // 独占暂存文件，避免并发保存互相截断；已有暂存文件留给原写入者。
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
-        .open(&tmp).map_err(|source| ProjectError::Write {
-            path: path.to_path_buf(), source,
-        })?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
+    let (tmp, mut file) = loop {
+        let id = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) => format!("{ext}.tmp.{}.{id}", std::process::id()),
+            None => format!("tmp.{}.{id}", std::process::id()),
+        });
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => break (tmp, file),
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => return Err(ProjectError::Write { path: path.to_path_buf(), source }),
+        }
+    };
     let result = file.write_all(text.as_bytes()).and_then(|_| file.sync_all());
     drop(file);
     let result = result.and_then(|_| std::fs::rename(&tmp, path));
@@ -1442,7 +1448,39 @@ mod tests {
     }
 
     #[test]
-    fn main_saves_preserve_old_files_when_staging_fails() {
+    fn stale_staging_file_does_not_block_main_saves() {
+        let (base, mut handle) = temp_project("stale_staging");
+        let scene_path = "Scenes/stale.ron";
+        let prefab_path = "Prefabs/stale.prefab.ron";
+        let material_path = "Resources/stale.mat";
+        handle.write_scene(scene_path, &crate::Scene::new("旧场景")).unwrap();
+        handle.write_prefab(prefab_path, &crate::Prefab::new("旧模板")).unwrap();
+        handle.write_material(material_path, &MaterialAsset::default()).unwrap();
+        for relative in [PROJECT_FILE_NAME, scene_path, prefab_path, material_path] {
+            let path = handle.path(relative);
+            let stale = path.with_extension(format!("{}.tmp", path.extension().unwrap().to_string_lossy()));
+            std::fs::write(&stale, b"unfinished previous save").unwrap();
+            let result = match relative {
+                PROJECT_FILE_NAME => {
+                    handle.manifest.name = "新项目".into();
+                    handle.save()
+                }
+                p if p == scene_path => handle.write_scene(p, &crate::Scene::new("新场景")),
+                p if p == prefab_path => handle.write_prefab(p, &crate::Prefab::new("新模板")),
+                p => handle.write_material(p, &MaterialAsset { metallic: 0.75, ..Default::default() }),
+            };
+            result.unwrap();
+            assert_eq!(std::fs::read(&stale).unwrap(), b"unfinished previous save");
+        }
+        assert_eq!(ProjectHandle::open(handle.root()).unwrap().manifest.name, "新项目");
+        assert_eq!(handle.load_scene(scene_path).unwrap().name, "新场景");
+        assert_eq!(handle.load_prefab(prefab_path).unwrap().name, "新模板");
+        assert_eq!(handle.load_material(material_path).unwrap().metallic, 0.75);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn legacy_staging_directory_does_not_block_main_saves() {
         let (base, handle) = temp_project("atomic_main");
         let scene_path = "Scenes/atomic.ron";
         let prefab_path = "Prefabs/atomic.prefab.ron";
@@ -1460,12 +1498,12 @@ mod tests {
             } else {
                 handle.write_prefab(relative, &crate::Prefab::new("新模板"))
             };
-            assert!(result.is_err(), "暂存失败必须报告错误");
-            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(result.is_ok(), "旧版暂存目录不得阻断新保存: {result:?}");
+            assert_ne!(std::fs::read(&path).unwrap(), before);
             std::fs::remove_dir(tmp).unwrap();
         }
-        assert_eq!(handle.load_scene(scene_path).unwrap().name, "旧场景");
-        assert_eq!(handle.load_prefab(prefab_path).unwrap().name, "旧模板");
+        assert_eq!(handle.load_scene(scene_path).unwrap().name, "新场景");
+        assert_eq!(handle.load_prefab(prefab_path).unwrap().name, "新模板");
         std::fs::remove_dir_all(base).unwrap();
     }
 
