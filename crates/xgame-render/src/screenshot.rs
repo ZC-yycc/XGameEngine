@@ -3001,6 +3001,103 @@ mod tests {
         assert_eq!(culled.opaque_batches, unculled.opaque_batches);
     }
 
+    // 参考图直接平移 CPU 顶点，不复用骨骼采样或槽位上传，避免同错假绿。
+    fn dual_skin_probe(shadows: bool) {
+        use crate::animation::{AnimClip, AnimNode, Interpolation, Skin, Track, TrackPath};
+        use xgame_math::glam::Quat;
+
+        let Some(mut shot) = gpu_or_skip("dual_skin_probe") else {
+            assert!(std::env::var_os("XGAME_GPU_EVIDENCE_DIR").is_none(), "请求 GPU 证据时不允许跳过");
+            return;
+        };
+        let mut scene = Scene::new("dual-skin");
+        scene.ambient = [0.22; 3];
+        scene.lights = vec![Light::directional("sun", [0.0, -1.0, 0.0], [1.0; 3], 1.6)];
+        scene.lights[0].casts_shadow = shadows;
+        let mut ground = Entity::new("ground");
+        ground.model = "builtin://plane".into();
+        ground.transform.scale = Vec3::new(12.0, 1.0, 12.0);
+        scene.add_entity(ground);
+        for (i, count) in [2usize, 5].into_iter().enumerate() {
+            let mut data = crate::mesh::BuiltinMesh::Cube.build();
+            for v in &mut data.vertices {
+                v.joints = [(count - 1) as f32, 0.0, 0.0, 0.0];
+                v.weights = [1.0, 0.0, 0.0, 0.0];
+            }
+            let mut mesh = GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, "skin");
+            mesh.primitives[0].skin = Some(0);
+            mesh.nodes = (0..count).map(|_| AnimNode {
+                parent: None, name: String::new(), translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY, scale: Vec3::ONE,
+            }).collect();
+            mesh.skins = vec![Skin { joints: (0..count as u32).collect(), inverse_bind: vec![Mat4::IDENTITY; count] }];
+            let sign = if i == 0 { 1.0 } else { -1.0 };
+            mesh.animations = vec![AnimClip { name: "move".into(), duration: 1.0, tracks: vec![Track {
+                node: (count - 1) as u32, path: TrackPath::Translation, interpolation: Interpolation::Linear,
+                times: vec![0.0, 1.0], values: vec![0.0, 0.0, 0.0, sign, 0.0, 0.0],
+            }] }];
+            // 两条路径使用相同保守盒，确保阴影拟合不会成为比较中的变量。
+            mesh.bounds = Bounds { min: Vec3::splat(-2.0), max: Vec3::splat(2.0) };
+            shot.inject_model(format!("skin-{i}"), mesh);
+            let mut entity = Entity::new(format!("actor-{i}"));
+            entity.model = format!("skin-{i}");
+            entity.transform.position = Vec3::new(if i == 0 { -1.5 } else { 1.5 }, 1.5, 0.0);
+            entity.animator = Some(xgame_core::Animator { clip: "move".into(), looping: false, ..Default::default() });
+            scene.add_entity(entity);
+        }
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 5.0, 9.0), Vec3::new(0.0, 0.5, 0.0), DEFAULT_FOV_Y);
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene, anim: &AnimationDriver| {
+            shot.render_scene(scene, anim, Some(camera), SceneLighting::new(scene.ambient, &scene.lights), RenderConfig::default()).unwrap();
+            shot.read_rgba().unwrap()
+        };
+        let mut previous: Option<Vec<u8>> = None;
+        for (frame, time) in [0.0, 0.5, 1.0, 0.0].into_iter().enumerate() {
+            let mut anim = AnimationDriver::new();
+            anim.tick(time, &scene.entities);
+            let actual = render(&mut shot, &scene, &anim);
+            assert_eq!(shot.frame_stats().opaque_instances, 3, "两个角色与地面必须参与绘制");
+            if let Some(previous) = previous { assert!(actual != previous, "姿态变化必须改变像素"); }
+            previous = Some(actual.clone());
+            if let Some(dir) = std::env::var_os("XGAME_GPU_EVIDENCE_DIR") {
+                shot.save_png(&PathBuf::from(dir).join(format!("dual-skin-shadow-{shadows}-{frame}.png"))).unwrap();
+            }
+            let mut reference = scene.clone();
+            for i in 0..2 {
+                let mut data = crate::mesh::BuiltinMesh::Cube.build();
+                for v in &mut data.vertices { v.position[0] += if i == 0 { time } else { -time }; }
+                let mut mesh = GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, "reference");
+                mesh.bounds = Bounds { min: Vec3::splat(-2.0), max: Vec3::splat(2.0) };
+                shot.inject_model(format!("reference-{i}"), mesh);
+                reference.entities[i + 1].model = format!("reference-{i}");
+                reference.entities[i + 1].animator = None;
+            }
+            let expected = render(&mut shot, &reference, &AnimationDriver::new());
+            let different = actual.as_chunks::<4>().0.iter().zip(expected.as_chunks::<4>().0.iter()).filter(|(a, b)| a != b).count();
+            assert_eq!(different, 0, "双角色姿态必须等于独立 CPU 参考：shadow={shadows}, t={time}");
+            if shadows {
+                reference.lights[0].casts_shadow = false;
+                let unshadowed = render(&mut shot, &reference, &AnimationDriver::new());
+                for side in 0..2 {
+                    let dark = expected.as_chunks::<4>().0.iter().zip(unshadowed.as_chunks::<4>().0.iter()).enumerate()
+                        .filter(|(p, (a, b))| p % 320 / 160 == side && a[0] as u16 + 8 < b[0] as u16).count();
+                    assert!(dark > 50, "每个角色都必须投出可见阴影：side={side}, pixels={dark}");
+                }
+            }
+            // 交换实体顺序令 2/5 骨角色轮流占据第一个槽，且重用上一帧 GPU 缓冲。
+            scene.entities.swap(1, 2);
+            let reordered = render(&mut shot, &scene, &anim);
+            assert!(actual == reordered, "槽位重排不能改变主画面或阴影");
+            scene.entities.swap(1, 2);
+        }
+        eprintln!("dual_skin_probe shadows={shadows}: 4 poses, both slot orders, GPU pixel assertions executed");
+    }
+
+    #[test]
+    fn dual_skin_dynamic_pixels_match_cpu_reference() { dual_skin_probe(false); }
+
+    #[test]
+    fn dual_skin_dynamic_shadows_match_cpu_reference() { dual_skin_probe(true); }
+
     fn load_morph_probe(shot: &ScreenshotRenderer, scale: f32) -> GltfMesh {
         static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let serial = NEXT_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

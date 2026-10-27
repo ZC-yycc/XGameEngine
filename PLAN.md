@@ -5310,6 +5310,37 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 五十九、G0 异骨数双角色 GPU 姿态与阴影验收（2026-10-27）
+
+从 545406c 干净工作区继续，按正式优先级选择完整交付 R03/031 的 GPU 证据。既有固定槽距实现未发现新缺陷，本轮新增自动化回归而非声称再次修复运行时。其余包输入/切关/插件及 ABI 指纹继续保留。
+
+### 验证设计与红绿证据
+
+在现有 `screenshot.rs` 测试模块合成 2 骨、5 骨两个角色，顶点绑定各自最后一根骨，动画沿相反方向平移；同一个 ScreenshotRenderer 重用 GPU 缓冲，依次采样 0、0.5、1、0 秒并交换两角色实体顺序。参考画面直接平移 CPU 顶点，不复用骨骼采样/上传；两条路径使用同一保守盒隔离阴影拟合影响。主画面与阴影分别一项测试，要求逐像素完全一致、姿态改变确实改变像素、左右各有超过 50 个阴影变暗像素。测试断言三个实例参与绘制，避免空画面假绿。
+
+- 当前实现初跑两项通过，日志 `.workbuddy/logs/g0-skin-initial.log`。
+- 仅临时移除 `append_bone_slot` 的补齐逻辑，模拟 R03 历史上传行为；任务 `8id0rl` 实际 **0 passed / 2 failed**，t=0 主画面差异 **1224** 像素，含阴影差异 **1629** 像素；日志 `g0-skin-red.log`。这是历史缺陷补证，不是 HEAD 新缺陷。
+- Edit 恢复补齐后任务 `t7lp2u` **2 passed / 0 failed**，四姿态、双顺序均执行，日志 `g0-skin-green.log`。生产文件 `scene_pipeline.rs` 最终无 diff。
+- `XGAME_GPU_EVIDENCE_DIR` 可指向已存在目录，保存八张 `dual-skin-shadow-{true,false}-{0..3}.png`；指定证据目录却拿不到 GPU 时必须失败，普通 CI 沿用无 GPU 跳过规则。
+- 全量首遍 clippy 拒绝新增测试的多余借用及 chunks_exact 用法，已修正；此编译/lint 失败不算功能红灯。rustfmt 当前工具链未安装，未宣称格式化通过。
+
+### 全量与发布结果
+
+沿用项目 PowerShell 环境脚本，cargo 绝对路径、CARGO_INCREMENTAL=0、-j2、测试线程 4，TEMP/TMP 在 E 盘项目内，LIB/INCLUDE 使用既有 MSVC onecore 与 SDK。
+
+- 最终任务 `0daw80`：check、clippy `-D warnings` 均退出 0；27 套件 **912 passed / 0 failed / 7 ignored**，新增两项 GPU 测试通过且指定证据目录，不允许无 GPU 假跳过。日志 `.workbuddy/logs/g0-skin-full-retry.log`。
+- 前一遍 `cu1daq` 在 spinner-plugin 测试链接报 LNK1104，目标 EXE 不存在且没有编译残留进程，C/E 空间充足；未删除或修改权限，原命令重试通过。失败日志 `g0-skin-full-final.log` 保留，不将瞬态失败说成永久解决。
+- release workspace 任务 `j61ik6` 成功，日志 `g0-skin-release.log`。dist 三 EXE 已刷新，SHA-256 与 target/release 逐个相同：editor `4D53183B977020EFF91686DDE21BCEF546EC7D2BEE9C7585EF2FCF0D16998F57`；game `002FBDF0120D120CFA335AA6CF144386BFB4A4FBC4A12C99001F250076A12D11`；mcp `A442A350C519FACC36CFC2EC6743B5A9AC336925CD7E75ADDE0EC6DE22F82270`。
+- 原项目 SampleScene `--check` **退出 2**：上轮 Build/SampleScene 的 15 份资产被递归扫描导致重复 GUID。证据 `g0-skin-check.json`（实际为文本）；未删除旧包掩盖问题，登记为后续 G0。
+- 原项目 120 帧 GPU 截图、真实 `--build`、新包目录 `--check` 与 120 帧 headless 全部退出 0（任务 `g6pp25`）。两份运行报告均 ok=true、120 fixed_steps、error/warn=0、non_finite_transforms=0；音频 available=false 属静音降级。日志 `g0-skin-smoke.json`、`g0-skin-build.json`、`g0-skin-package-check.log`、`g0-skin-package.json`。
+- 新包 `projects/SampleScene/Build/SampleScene`；未启动包内玩家窗口或注入输入，scene_loads=0，不当作完整发布端到端验收。
+- 截图 `.workbuddy/shots/dual-skin-shadow-{true,false}-{0..3}.png` 共八张与 `g0-skin-SampleScene.png`；已查看初态/末态阴影图及 SampleScene，场景、狐狸、阴影、UI 可见。
+- `git diff --check` 通过；本地项目日记 `.workbuddy/memory/2026-10-27.md` 已更新，按既有忽略规则不纳入 Git。
+
+### 交付边界
+
+这是合成 GPU 槽位回归：覆盖异骨数、末关节索引、动态平移、槽位重排、缓冲复用和方向光阴影。不等于真实 glTF 导入、多关节混合权重、旋转/层级/非单位逆绑定、任意骨骼位移的保守 bounds、动态 TAA 或跨 GPU 逐位一致性。未新增第二份运行时或更改 crate 依赖方向。当前工具没有独立代理入口，使用并行只读检查；未清理个人目录、修改系统权限。
+
 ## 五十八、G0 morph 保守包围盒与发布复验（2026-10-27）
 
 从 e19df1f 干净工作区继续，按正式 G0 优先级处理 029。现有 glTF bounds 只并原始顶点，而视锥剔除早于 morph 采样，导致原始姿态在视野外、形变后进入视野的实体整帧消失。导入时按每顶点全部目标的正负增量计算 `[0,1]` 全权重组合保守盒，合并到共享 mesh bounds；相机剔除、阴影拟合、自动取景沿用同一数据源。无 morph 路径不变，不引入每帧扫描。
