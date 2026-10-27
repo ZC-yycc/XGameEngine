@@ -851,7 +851,7 @@ impl ProjectHandle {
     /// 场景文件在本仓库里不只是数据，还是**文档**：示例场景大量用注释解释
     /// "这块地面为什么是这个颜色"。整份重新序列化会把注释全部吃掉，
     /// 一次迁移就把教程变成裸数据。所以这里只在原文里替换
-    /// `"Resources/Box.glb"` → `"guid://…"`，其余一个字节都不动。
+    /// 资产字段的 `"Resources/Box.glb"` → `"guid://…"`，注释与普通字段原样保留。
     ///
     /// 幂等：已经迁移过的引用是 `guid://…`，不再匹配路径，也不会重复改写。
     pub fn migrate_asset_references(&self) -> AssetMigrationReport {
@@ -938,8 +938,8 @@ impl ProjectHandle {
 
     /// 把一组"内存路径引用"在原文里改写成 GUID 字面量；返回是否真的改了。
     ///
-    /// 场景 / 预制体 / 材质三个阶段共用 —— 三个文件的引用形态不同
-    /// （实体字段 vs `albedo`），但"替换完整引号字面量"这条规则只有一份。
+    /// 场景 / 预制体 / 材质三个阶段共用 —— 只替换资产字段里的字符串，
+    /// 避免注释或恰好同名的普通字段被误改。
     fn rewrite_literals(
         &self,
         relative: &str,
@@ -947,34 +947,20 @@ impl ProjectHandle {
         mut references: Vec<String>,
     ) -> Result<bool, String> {
         let path = self.path(relative);
-        let mut replaced = text;
-        let mut changed = false;
-        {
+        let replaced = {
             let assets = self.assets();
             references.sort();
             references.dedup();
-            for reference in references {
-                if reference.is_empty()
-                    || reference.contains("://")
-                    || Path::new(&reference).is_absolute()
-                {
-                    continue;
-                }
-                let Some(guid) = assets.guid_of(&reference) else {
-                    continue; // 悬空路径：没有身份证，保持原样让 check 报出来
-                };
-                let literal = format!("\"{reference}\"");
-                if replaced.contains(&literal) {
-                    let with_guid = format!("\"{}\"", guid.to_reference());
-                    replaced = replaced.replace(&literal, &with_guid);
-                    changed = true;
-                }
-            }
-        }
-
-        if !changed {
+            let replacements: std::collections::BTreeMap<_, _> = references
+                .into_iter()
+                .filter(|r| !r.is_empty() && !r.contains("://") && !Path::new(r).is_absolute())
+                .filter_map(|r| assets.guid_of(&r).map(|guid| (r, guid.to_reference())))
+                .collect();
+            replace_asset_literals(&text, &replacements)
+        };
+        let Some(replaced) = replaced else {
             return Ok(false);
-        }
+        };
         // 迁移仍保留原文注释和空白；写盘复用主保存的暂存与替换，
         // 目标被占用或写入中断时不能截断原场景、预制体或材质。
         write_atomic(&path, &replaced)
@@ -1313,6 +1299,114 @@ fn write_staged(path: &Path, text: &str, create_only: bool) -> std::io::Result<(
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// 只替换 RON 里的字符串 token；注释、字符字面量和普通文字原样复制。
+///
+/// 先按场景/预制体/材质解析过一次，故这里只需扫描词法边界；用 RON 解码
+/// token 再查路径，避免转义引号和反斜杠让文本匹配误伤别的字段。
+fn replace_asset_literals(
+    text: &str,
+    replacements: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i..].starts_with(b"/*") {
+            i += 2;
+            let mut depth = 1;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            let start = i;
+            let raw = bytes[i] == b'r'
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric())
+                && (i + 1 == bytes.len() || bytes[i + 1] == b'"' || bytes[i + 1] == b'#');
+            if raw {
+                i += 1;
+                while i < bytes.len() && bytes[i] == b'#' {
+                    i += 1;
+                }
+            }
+            if i < bytes.len() && bytes[i] == b'"' {
+                let hashes = if raw { i - start - 1 } else { 0 };
+                i += 1;
+                while i < bytes.len() {
+                    if !raw && bytes[i] == b'\\' {
+                        i = (i + 2).min(bytes.len());
+                    } else if bytes[i] == b'"'
+                        && bytes
+                            .get(i + 1..i + 1 + hashes)
+                            .is_some_and(|suffix| suffix.iter().all(|b| *b == b'#'))
+                    {
+                        i += 1 + hashes;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if let Ok(value) = ron::from_str::<String>(&text[start..i]) {
+                    let before = text[..start].trim_end();
+                    let asset_field = [
+                        "model:",
+                        "material_asset: Some(",
+                        "clip:",
+                        "source:",
+                        "albedo:",
+                    ]
+                    .iter()
+                    .any(|field| before.ends_with(field))
+                        || before.rsplit_once("scripts:").is_some_and(|(_, tail)| {
+                            tail.trim_start().starts_with('[') && !tail.contains(']')
+                        });
+                    if asset_field {
+                        if let Some(guid) = replacements.get(&value) {
+                            out.push_str(&text[copied..start]);
+                            out.push_str(&format!("\"{guid}\""));
+                            copied = i;
+                        }
+                    }
+                }
+            } else if bytes[start] == b'\'' {
+                // 字符字面量内的引号不是字符串起点。
+                i = start + 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i = (i + 2).min(bytes.len());
+                    } else if bytes[i] == b'\'' {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+            } else {
+                i = start + 1;
+            }
+        }
+    }
+    if copied == 0 {
+        None
+    } else {
+        out.push_str(&text[copied..]);
+        Some(out)
+    }
 }
 
 /// 递归收集预制体资产，把相对**项目根**的路径（正斜杠形式）写进 `out`。
@@ -2012,6 +2106,57 @@ mod tests {
         assert_eq!(again.rewritten_scenes, 0);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn migration_preserves_comments_and_unrelated_strings() {
+        let (base, handle) = temp_project("migration_comments");
+        let asset = "Resources/Box.glb";
+        std::fs::write(handle.path(asset), b"glb").unwrap();
+        let original = format!(
+            "// model: \"{asset}\" (documentation)\n/* \"{asset}\" */\n(\n    name: \"{asset}\",\n    entities: [(name: \"Box\", model: \"{asset}\")],\n)\n"
+        );
+        let path = handle.path("Scenes/comments.ron");
+        std::fs::write(&path, &original).unwrap();
+
+        let report = handle.migrate_asset_references();
+        assert!(!report.has_errors(), "{report:?}");
+        assert_eq!(report.rewritten_scenes, 1);
+        let changed = std::fs::read_to_string(&path).unwrap();
+        let guid = handle.assets().guid_of(asset).unwrap().to_reference();
+        assert_eq!(
+            changed,
+            format!(
+                "// model: \"{asset}\" (documentation)\n/* \"{asset}\" */\n(\n    name: \"{asset}\",\n    entities: [(name: \"Box\", model: \"{guid}\")],\n)\n"
+            )
+        );
+        assert_eq!(
+            handle.load_scene("Scenes/comments.ron").unwrap().entities[0].model,
+            asset
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn migration_scanner_respects_nested_comments_and_escaped_strings() {
+        let asset = "Resources/Box.glb".to_owned();
+        let guid = "guid://test".to_owned();
+        let replacements = std::collections::BTreeMap::from([(asset.clone(), guid.clone())]);
+        let text = r###"(/* outer /* model: "Resources/Box.glb" */ */
+            name: "Resources/Box.glb", // model: "Resources/Box.glb"
+            scripts: ["Resources/Box.glb"],
+            model: "Resources/Box.glb",
+            note: "escaped quote: \"Resources/Box.glb\"",
+            other: r#"Resources/Box.glb"#,
+        )"###;
+        let changed = replace_asset_literals(text, &replacements).unwrap();
+        assert!(changed.contains("/* outer /* model: \"Resources/Box.glb\" */ */"));
+        assert!(changed.contains("name: \"Resources/Box.glb\""));
+        assert!(changed.contains("// model: \"Resources/Box.glb\""));
+        assert!(changed.contains("scripts: [\"guid://test\"]"));
+        assert!(changed.contains("model: \"guid://test\""));
+        assert!(changed.contains("note: \"escaped quote: \\\"Resources/Box.glb\\\"\""));
+        assert!(changed.contains("other: r#\"Resources/Box.glb\"#"));
     }
 
     #[test]

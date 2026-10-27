@@ -14,6 +14,10 @@
 
 ---
 
+## 七十、G0 资产引用迁移词法保护（2026-10-27）
+
+`--migrate-assets` 原先对已解析出的资产路径做整份文本 `replace`：同一段引号文字出现在注释或实体名称里也被改成 GUID，违背「迁移只改引用且保留注释」的契约。新增场景回归在旧实现实跑失败，显示行注释、块注释与实体名称均被改写。现在先解析文件确认有效与收集引用，再单遍扫描 RON token：跳过行注释、嵌套块注释、字符字面量，识别转义与 raw 字符串，只在资产字段把值存在索引中的路径替换为 GUID；其他文本原字节保留。额外词法回归覆盖嵌套注释、转义字符串及脚本数组，迁移相关 4 项定向测试通过。全工作区 check、clippy -D warnings、test --all-targets 顺序复验通过；最初测试与 release 并行时插件装载测试 3 项指纹不匹配，串行复验未复现。release workspace 与一键构建通过，dist 三 EXE 已刷新；打包示例 --check=0（1 场景、24 实体、15 资产），30 帧无头 ok=true、错误 0、非有限变换 0。沿用现有同目录独占暂存写盘，改动只发生在低频显式迁移路径。
+
 ## 六十九、G0 最近项目列表写盘保护（2026-10-27）
 
 项目枢纽的 `RecentProjects::save` 原本直接 `fs::write`，目标文件允许写入但拒绝替换时旧内容可能被截断。Windows 锁定目标回归先在旧实现实跑失败（错误地返回成功）；修复后与 `EditorPreferences::save_to` 共享内部 `write_staged`：同目录独占暂存、`sync_all`、替换目标，失败不动旧文件、解锁可重试。旧版固定暂存残留不阻断，最近项目 4 项、偏好 12 项定向测试通过。读取损坏文件仍退空列表，UI 保存失败仍记录警告。两份修改文件 rustfmt --check 通过，全工作区 check、clippy -D warnings、test --all-targets 全绿。release workspace 完成，dist 三 EXE 与 target/release 各自 SHA256 一致；发布版 SampleScene `--check` 返回 0（1 场景、24 实体、15 资产），30 帧无头 `ok=true`、错误 0、非有限变换 0。仓库整体 `cargo fmt --all -- --check` 仍受其他文件历史格式差异影响，未扩大格式化范围。
