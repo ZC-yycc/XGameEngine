@@ -5310,6 +5310,36 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 五十八、G0 morph 保守包围盒与发布复验（2026-10-27）
+
+从 e19df1f 干净工作区继续，按正式 G0 优先级处理 029。现有 glTF bounds 只并原始顶点，而视锥剔除早于 morph 采样，导致原始姿态在视野外、形变后进入视野的实体整帧消失。导入时按每顶点全部目标的正负增量计算 `[0,1]` 全权重组合保守盒，合并到共享 mesh bounds；相机剔除、阴影拟合、自动取景沿用同一数据源。无 morph 路径不变，不引入每帧扫描。
+
+### 先红后绿
+
+- 新增真实 glTF 导入测试 `morph_import_bounds_cover_combined_targets_and_scale` 与 GPU 测试 `morph_culling_matches_unculled_pixels`。旧实现任务 `8sa61b`：7 passed / 2 failed，分别失败于“X 形变必须进入包围盒”和“形变后剔除开关必须逐像素一致”。GPU 测试先确认形变确实进入画面，避免空画面假绿。
+- 初次测试的私有模块引用编译错误、临时文件同名导致 PermissionDenied 不计有效红灯；修正为公开 re-export 与进程内唯一临时名后才获得上段双红。
+- 修改后任务 `k46x73`：10 passed / 0 failed，包含上述两项 GPU 测试及新增纯 CPU 正负增量/分数权重测试。GPU 测试未 skip，逐次切换权重后开关剔除逐字节一致；导入测试覆盖 scale 1/2 及同时启用多个目标。
+
+### 全量与交付验证
+
+使用 PowerShell cargo 绝对路径、CARGO_INCREMENTAL=0、`-j2`、`--test-threads=4`，LIB/INCLUDE 按构建脚本选择 onecore 与 Windows SDK，TEMP/TMP 指向项目 `.workbuddy/tmp`。
+
+- `cargo check --locked --workspace --all-targets -j2`：退出 0。
+- `cargo clippy --locked --workspace --all-targets -j2 -- -D warnings`：退出 0。
+- `cargo test --locked --workspace --all-targets -j2 -- --test-threads=4`：27 套件，**910 passed / 0 failed / 7 ignored**（新增 3 条）。任务 `ky7j4c`，日志 `.workbuddy/logs/g0-morph-full.log`（PowerShell UTF16）。
+- `cargo build --locked --release --workspace -j2`：退出 0，任务 `9qeto1`，日志 `.workbuddy/logs/g0-morph-release.log`。刷新 dist 的 editor/game/mcp 三个 EXE，逐个 SHA-256 与 release 相同；未删除 dist 其他内容。
+- 新 dist `--check projects/SampleScene`：退出 0，1 scene / 24 entities / 15 assets。
+- 新 dist `--headless --frames 120 --screenshot .workbuddy/shots/g0-morph-round-SampleScene.png projects/SampleScene`：退出 0，ok=true，120 fixed_steps，error/warn=0，non_finite_transforms=0。截图已查看，三维场景、阴影、UI 正常可见；这是普通冒烟截图，不作为 morph 专项截图。
+- 新 dist `--build projects/SampleScene`：退出 0，33 个资产文件，产物 `projects/SampleScene/Build/SampleScene`。该项目未配置 build.scenes，报告 scene_count=0，不等于切关已验证。
+- 用新 editor 对该真实产物目录运行 headless 120 帧：退出 0，ok=true，error/warn=0，non_finite_transforms=0。未运行包内玩家窗口与键鼠输入，不把该项称为完整独立玩家端到端验收。
+- `git diff --check`：通过。rustfmt 未安装，格式化命令失败；未将其记为已执行成功。
+
+初始只读空间检查 C 盘约 11.3 GiB、E 盘约 172.5 GiB，无 cargo/rustc/link 占用；本轮 release 与全量测试未复现上一轮环境阻塞，未清理个人目录或改权限。当前工具未提供 Agent/子代理入口，采用分项检查与串行修改，未宣称完成独立子代理审查。
+
+### 剩余边界
+
+保守盒覆盖有限合法资产与现行钳位权重组合，会牺牲部分剔除精度；不宣称任意骨骼位移、异常非有限资产、容量超限策略已完成。双角色异骨数 GPU、动态 TAA、包自定义输入/切遍关卡、插件 ABI 指纹、其他主写入与复杂生命周期仍按正式优先级继续。G0 未全部关闭。文档职责仍以差距分析为唯一优先级入口，决策约束见 §四十二。
+
 ## 五十七、G0 追加正确性审计与修复（2026-10-27）
 
 本轮从已有未提交修复继续推进，保留全部改动，不创建 commit。R01—R12 与额外 G0 的逐项状态集中到 `Docs/差距分析.md` 顶部；既有报告保持快照，不将 200 项标为完成。

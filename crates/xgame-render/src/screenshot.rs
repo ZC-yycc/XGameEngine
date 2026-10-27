@@ -3001,6 +3001,70 @@ mod tests {
         assert_eq!(culled.opaque_batches, unculled.opaque_batches);
     }
 
+    fn load_morph_probe(shot: &ScreenshotRenderer, scale: f32) -> GltfMesh {
+        static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("xgame-morph-bounds-{}-{serial}.gltf", std::process::id()));
+        std::fs::write(&path, crate::gltf_loader::tests::morph_gltf()).unwrap();
+        let mesh = GltfMesh::from_file_with(
+            &shot.device,
+            &shot.queue,
+            &path,
+            xgame_core::ImportSettings { model_scale: scale, ..Default::default() },
+        ).expect("合成 morph 资产应能加载");
+        std::fs::remove_file(path).unwrap();
+        mesh
+    }
+
+    #[test]
+    fn morph_import_bounds_cover_combined_targets_and_scale() {
+        let Some(shot) = gpu_or_skip("morph_import_bounds_cover_combined_targets_and_scale") else {
+            return;
+        };
+        for scale in [1.0, 2.0] {
+            let mesh = load_morph_probe(&shot, scale);
+            assert!(mesh.bounds.max.x >= 1.1 * scale, "X 形变必须进入包围盒");
+            assert!(mesh.bounds.max.y >= 1.2 * scale, "Y 形变必须进入包围盒");
+            assert!(mesh.bounds.max.z >= 0.8 * scale, "两个目标同时启用必须累加");
+        }
+    }
+
+    #[test]
+    fn morph_culling_matches_unculled_pixels() {
+        let Some(mut shot) = gpu_or_skip("morph_culling_matches_unculled_pixels") else {
+            return;
+        };
+        let mesh = load_morph_probe(&shot, 1.0);
+        shot.model_cache.insert("morph-probe".into(), mesh);
+        let mut scene = Scene::new("morph-culling");
+        scene.ambient = [1.0; 3];
+        scene.lights.clear();
+        let mut entity = Entity::new("face");
+        entity.model = "morph-probe".into();
+        // 绑定姿态位于左侧视锥外；形变将顶点向右和远处移动，进入画面。
+        entity.transform.position = Vec3::new(-3.85, -0.5, -5.0);
+        entity.transform.scale.z = -1.0;
+        scene.add_entity(entity);
+        let camera = ShotCamera::looking_at(Vec3::ZERO, -Vec3::Z, DEFAULT_FOV_Y);
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene| {
+            shot.render_scene(scene, &AnimationDriver::new(), Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights), RenderConfig::default()).unwrap();
+            shot.read_rgba().unwrap()
+        };
+        shot.set_frustum_culling(false);
+        scene.entities[0].morph_weights = vec![0.0, 0.0];
+        let hidden = render(&mut shot, &scene);
+        for weights in [vec![1.0, 1.0], vec![0.5, 1.0], vec![1.0, 1.0]] {
+            scene.entities[0].morph_weights = weights;
+            shot.set_frustum_culling(false);
+            let reference = render(&mut shot, &scene);
+            assert_ne!(reference, hidden, "形变后三角形必须真的进入画面");
+            shot.set_frustum_culling(true);
+            let culled = render(&mut shot, &scene);
+            assert!(reference == culled, "形变后剔除开关必须逐像素一致");
+        }
+    }
+
     /// **像素等价**：开 / 关剔除的图像必须逐字节一致。剔除把"屏幕外的东西"
     /// 丢掉，屏幕上的像素没有任何理由变化；这条挂了说明剔除判据写错了
     /// （包围盒 / 视锥平面 / 槽位分配其中之一）。

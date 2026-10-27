@@ -156,6 +156,26 @@ impl MorphTargets {
         }
     }
 
+    /// 所有合法权重组合的保守盒；导入时计算一次，避免剔除先于权重采样而漏画。
+    pub fn conservative_bounds(&self) -> crate::gltf_loader::Bounds {
+        use xgame_math::glam::Vec3;
+        use crate::gltf_loader::Bounds;
+
+        let mut bounds = Bounds::EMPTY;
+        for (v, vertex) in self.base.iter().enumerate() {
+            let mut min = Vec3::from(vertex.position);
+            let mut max = min;
+            for t in 0..self.target_count() {
+                let delta = Vec3::from(self.positions[t * self.vertex_count() + v]);
+                // 每个权重独立落在 0..=1；不能只并各个单目标的终点。
+                min += delta.min(Vec3::ZERO);
+                max += delta.max(Vec3::ZERO);
+            }
+            bounds = bounds.union(&Bounds { min, max });
+        }
+        bounds
+    }
+
     /// 为一个实体创建独立的 GPU 顶点缓冲，初值是未变形的原始顶点。
     pub fn create_buffer(&self, device: &wgpu::Device) -> MorphBuffer {
         MorphBuffer {
@@ -311,6 +331,26 @@ mod tests {
             base,
         )
         .expect("形状自洽")
+    }
+
+    #[test]
+    fn morph_bounds_cover_mixed_sign_targets_and_fractional_weights() {
+        let morph = MorphTargets::new(
+            vec!["A".into(), "B".into()], vec![0.0; 2],
+            vec![[2.0, -3.0, 1.0], [-4.0, 2.0, -2.0]], Vec::new(),
+            vec![vertex([1.0, 2.0, 3.0])],
+        ).unwrap();
+        let bounds = morph.conservative_bounds();
+        assert_eq!(bounds.min.to_array(), [-3.0, -1.0, 1.0]);
+        assert_eq!(bounds.max.to_array(), [3.0, 4.0, 4.0]);
+        let mut output = Vec::new();
+        for a in [0.0, 0.25, 0.5, 1.0] {
+            for b in [0.0, 0.25, 0.5, 1.0] {
+                morph_vertices(&morph.base, &morph.positions, &[], 2, &[a, b], &mut output);
+                let p = xgame_math::glam::Vec3::from(output[0].position);
+                assert!(p.cmpge(bounds.min).all() && p.cmple(bounds.max).all());
+            }
+        }
     }
 
     #[test]

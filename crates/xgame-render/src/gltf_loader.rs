@@ -480,6 +480,9 @@ impl GltfMesh {
                 // 增量在这里就把 `model_scale` 乘进去了：与顶点位置同一套烘焙
                 // 规则，否则改导入缩放会让"表情幅度"和"模型尺寸"脱钩。
                 let morph = parse_morph_targets(&mesh, &primitive, &buffers, &vertices, scale);
+                if let Some(morph) = &morph {
+                    bounds = bounds.union(&morph.conservative_bounds());
+                }
                 // 带 morph 的图元要能被 `write_buffer` 整段重写（CPU 变形）。
                 let mut vertex_usage = wgpu::BufferUsages::VERTEX;
                 if morph.is_some() {
@@ -1185,7 +1188,7 @@ fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::animation::{clip_time, compute_bones, TrackPath};
 
@@ -1527,7 +1530,7 @@ mod tests {
     /// 为什么要合成而不是用现成资产：仓库里的 `Fox.glb` 没有 morph 目标，
     /// 而"目标名 / 默认权重 / 增量有没有乘导入缩放"这三件事必须能在
     /// **没有显卡**的 CI 上断言。
-    fn morph_gltf() -> String {
+    pub(crate) fn morph_gltf() -> String {
         // 三个顶点：原点 / X 单位 / Y 单位。
         let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let smile = [[0.1f32, 0.2, 0.3]; 3];
