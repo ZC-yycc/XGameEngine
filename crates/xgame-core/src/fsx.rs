@@ -349,6 +349,61 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// 并发写同一个目标：读者要么读到旧内容、要么读到某一次完整的新内容，
+    /// 不会读到半截；最后也没留下暂存。
+    ///
+    /// 这条钉的是"独占暂存 + 替换"在**多写者**下的行为，以及回收扫描不会误删
+    /// 别人还在用的那份（阈值 600 秒，刚建出来的暂存一律不动）。
+    ///
+    /// 读失败（Windows 上替换瞬间的共享冲突）**不算**问题：那是"文件正在被换掉"，
+    /// 不是"内容坏了"。所以只对读成功的结果做断言。
+    #[test]
+    fn concurrent_writers_never_expose_a_half_written_file() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = temp_dir("concurrent");
+        let path = dir.join("scene.ron");
+        write_atomic(&path, "seed").unwrap();
+        let writers = 4;
+        let remaining = std::sync::Arc::new(AtomicUsize::new(writers));
+
+        std::thread::scope(|scope| {
+            for id in 0..writers {
+                let path = path.clone();
+                let remaining = remaining.clone();
+                scope.spawn(move || {
+                    for round in 0..50u32 {
+                        write_atomic(&path, format!("writer {id} round {round}")).unwrap();
+                    }
+                    remaining.fetch_sub(1, Ordering::Relaxed);
+                });
+            }
+            let path = path.clone();
+            let remaining = remaining.clone();
+            scope.spawn(move || {
+                // 写者全部收工就退出，不靠外部信号（否则自己等自己，死锁）。
+                while remaining.load(Ordering::Relaxed) > 0 {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    assert!(
+                        text == "seed"
+                            || (text.starts_with("writer ") && text.contains(" round ")),
+                        "读到了半截内容: {text:?}"
+                    );
+                }
+            });
+        });
+
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "scene.ron")
+            .collect();
+        assert!(leftovers.is_empty(), "并发写入不该留下暂存: {leftovers:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// 成本测量（默认 ignore，不进 CI 门禁）。
     ///
     /// 为什么要有它：回收扫描挂在每次保存成功之后，必须能说清它值多少时间。

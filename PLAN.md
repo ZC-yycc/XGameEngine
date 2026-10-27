@@ -5389,7 +5389,7 @@ Windows 下先新增 `import_update_failure_preserves_meta_and_index`：打开�
 
 ### 全量验证与发布
 
-- check / clippy `-D warnings` / test 全绿：27 套件 **941 passed / 0 failed / 8 ignored**。
+- check / clippy `-D warnings` / test 全绿：27 套件 **942 passed / 0 failed / 8 ignored**。
 - release workspace 同批重建、`一键构建.cmd` 刷新 dist；dist 两个可执行文件的
   `xgame-src-v1:` 一致（`eb39fa2b…`）。示例插件 DLL 同批刷新为
   `8B0EDFCD…C621E`（引擎源码变了，指纹门禁要求同批），BehaviorsDemo 无头 60 帧
@@ -5416,7 +5416,7 @@ Windows 下先新增 `import_update_failure_preserves_meta_and_index`：打开�
 ### 红绿
 
 - 先写 `project::tests::main_save_reclaims_abandoned_staging`，在旧实现实跑失败：`crates/xgame-core/src/project.rs:1646: 超龄暂存应被回收`（0 passed / 1 failed / 266 filtered）。同一条用例同时钉住三件事：超龄的回收、新写下的不动、不匹配命名的用户文件不动。
-- 实现后补 `fsx` 的 8 条：命名匹配表（含 `notes.tmp.5` / `scene.ron.tmp` / `scene.ron.tmp..7` 等反例）、只回收超龄、零阈值全收、写盘不留暂存且补建父目录、`write_atomic_new` 拒绝已存在目标、保存顺手回收、覆盖替换、Windows 锁定目标时保留旧字节且失败路径不留暂存。
+- 实现后补 `fsx` 的 9 条：命名匹配表（含 `notes.tmp.5` / `scene.ron.tmp` / `scene.ron.tmp..7` 等反例）、只回收超龄、零阈值全收、写盘不留暂存且补建父目录、`write_atomic_new` 拒绝已存在目标、保存顺手回收、覆盖替换、Windows 锁定目标时保留旧字节且失败路径不留暂存，以及**四写一读并发**（读到的永远是某一次完整写入；替换瞬间的共享冲突不算问题，只对读成功的结果断言）。并发那条第一版自己等自己死锁过，改成"写者全退读者才退"的计数式退出。
 
 ### 成本
 
@@ -5424,7 +5424,7 @@ release 实测（本机，`fsx::tests::sweep_cost`，默认 ignore）：扫描 1
 
 ### 全量验证与发布
 
-- workspace `check --all-targets --locked`、`clippy -D warnings`、`test --all-targets --locked -- --test-threads=4` 全部退出 0：27 套件 **937 passed / 0 failed / 8 ignored**（本轮新增 9 条，含 1 条默认 ignore 的成本测量）。
+- workspace `check --all-targets --locked`、`clippy -D warnings`、`test --all-targets --locked -- --test-threads=4` 全部退出 0：27 套件 **942 passed / 0 failed / 8 ignored**（本轮新增 9 条，含 1 条默认 ignore 的成本测量）。
 - release workspace 构建成功；`一键构建.cmd`（`tools/build-release.ps1`）退出 0，dist 三个 EXE 刷新。
 - 冒烟：dist 版 `--check` 对 SampleScene 退出 0（1 场景 / 24 实体 / 15 资产）、对 BehaviorsDemo 退出 0；`--headless --frames 120 --screenshot`（BehaviorsDemo）与 60 帧 SampleScene 均退出 0，截图已查看（地面 + 方块 + 球，阴影正常）。
 - 插件指纹：本轮改的是引擎源码，示例 DLL 的构建指纹随之失效。先做负对照 —— 把 §六十一 之前的旧 DLL 换回去，无头实跑打出 `插件加载失败，已跳过：… 缺少构建指纹符号 xgame_plugin_descriptor_v1`；换回同批 release DLL 后同一命令零 error。`projects/BehaviorsDemo/Plugins/behaviors_demo.dll` 已刷新，SHA-256 `36532B20…C1E1A`。

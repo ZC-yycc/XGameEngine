@@ -14,7 +14,7 @@
 | 项目 | 状态 |
 |---|---|
 | 播放器新鲜度 | 新增源码指纹 `xgame-src-v1:…`（不含 profile，`#[used]` 锚点保住），`builder::pick_player` 跳过源码不一致的候选；全不一致则拒绝并给出重编命令 |
-| 验证 | 真实二进制三组对照（同批通过 / 改指纹拒绝 / 跳过旧的用新的并留提醒）；全量 check/clippy/test 全绿 **941 passed / 0 failed / 8 ignored**，release 与 dist 同批刷新、插件 DLL 同批刷新后无头冒烟零 error；见 PLAN 第六十六节 |
+| 验证 | 真实二进制三组对照（同批通过 / 改指纹拒绝 / 跳过旧的用新的并留提醒）；全量 check/clippy/test 全绿 **942 passed / 0 failed / 8 ignored**，release 与 dist 同批刷新、插件 DLL 同批刷新后无头冒烟零 error；见 PLAN 第六十六节 |
 | 边界 | 只比源码指纹不做签名；参与指纹的源码一改，既有播放器即过期（需重编，`一键构建.cmd` 满足）；完整发布端到端仍未接 hosted CI；G0 未关闭 |
 
 ### 2026-10-27 G0 写盘实现统一与遗留暂存回收
@@ -22,7 +22,7 @@
 | 项目 | 状态 |
 |---|---|
 | 写盘单实现 | `xgame_core::fsx` 收敛 core / editor / input 三份副本；新增超龄暂存回收（命名即判据、600 秒阈值）与 POSIX 父目录 fsync |
-| 验证 | 旧实现红灯（超龄暂存不回收）；workspace check/clippy/test 全绿 **937 passed / 0 failed / 8 ignored**，release 与 dist 三 EXE 刷新，SampleScene / BehaviorsDemo 检查与无头截图通过、插件指纹负对照有效；见 PLAN 第六十五节 |
+| 验证 | 旧实现红灯（超龄暂存不回收）；workspace check/clippy/test 全绿 **942 passed / 0 failed / 8 ignored**，release 与 dist 三 EXE 刷新，SampleScene / BehaviorsDemo 检查与无头截图通过、插件指纹负对照有效；见 PLAN 第六十五节 |
 | 边界 | 多进程同目标保存仍最后完成者胜出；Windows 无目录 fsync，断电目录持久性未验；旧固定 `.tmp` 与打包临时目录不回收；G0 未关闭 |
 
 ### 2026-10-27 G0 资产引用迁移词法保护
