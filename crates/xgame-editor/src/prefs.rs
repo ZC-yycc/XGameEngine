@@ -15,8 +15,9 @@
 //!
 //! # 写盘是原子的
 //!
-//! 先写 `editor.ron.tmp` 再 rename。拖页签时保存是"顺手"发生的，写到一半被
+//! 同目录独占暂存、同步后替换。拖页签时保存是"顺手"发生的，写到一半被
 //! 杀进程不该留下半截 RON（下次启动会静默回退默认布局，用户的调整全白费）。
+//! 替换失败必须留下旧文件，不能退回覆写。
 
 use std::path::{Path, PathBuf};
 
@@ -186,7 +187,7 @@ impl EditorPreferences {
         }
     }
 
-    /// 写盘（先临时文件再 rename）。
+    /// 写盘（同目录独占暂存、同步后替换；失败不覆盖原文件）。
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -194,17 +195,34 @@ impl EditorPreferences {
         let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        let tmp = path.with_extension("ron.tmp");
-        std::fs::write(&tmp, &text)?;
-        // Windows 的 rename 会覆盖已存在的目标（MoveFileEx + REPLACE_EXISTING）。
-        // 杀软 / 索引器短暂占用目标时可能失败，此时退回直接写：宁可冒半截风险，
-        // 也不要"拖了布局但下次启动全没了"。
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            log::warn!("偏好临时文件 rename 失败，改为直接写入: {e}");
-            std::fs::write(path, text)?;
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
+        let (tmp, mut file) = loop {
+            let id = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
+            let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+                Some(ext) => format!("{ext}.tmp.{}.{id}", std::process::id()),
+                None => format!("tmp.{}.{id}", std::process::id()),
+            });
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+            {
+                Ok(file) => break (tmp, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        };
+        let result = file
+            .write_all(text.as_bytes())
+            .and_then(|_| file.sync_all());
+        drop(file);
+        let result = result.and_then(|_| std::fs::rename(&tmp, path));
+        if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
-        Ok(())
+        result
     }
 }
 
@@ -372,6 +390,44 @@ mod tests {
         assert!(prefs.sync_layout(&tree));
         assert_eq!(prefs.layout.as_ref(), Some(&tree));
         assert!(!prefs.sync_layout(&tree));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_preferences_preserve_previous_contents_and_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = temp_path("locked-save");
+        let old = EditorPreferences::default();
+        old.save_to(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let new = EditorPreferences {
+            camera_speed: 12.5,
+            ..old
+        };
+        assert!(new.save_to(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(lock);
+        new.save_to(&path).unwrap();
+        assert_eq!(EditorPreferences::load_from(&path), new);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stale_preference_staging_does_not_block_save() {
+        let path = temp_path("stale-save");
+        let legacy = path.with_extension("ron.tmp");
+        std::fs::write(&legacy, "旧版残留").unwrap();
+        let prefs = EditorPreferences::default();
+        prefs.save_to(&path).unwrap();
+        assert_eq!(EditorPreferences::load_from(&path), prefs);
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "旧版残留");
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(legacy).unwrap();
     }
 
     /// 枚举变体名就是磁盘格式：`PanelTab::SceneView` 必须写成 `SceneView`。
