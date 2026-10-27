@@ -44,20 +44,16 @@ impl RecentProjects {
         let Some(path) = store_path() else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                log::warn!("无法创建配置目录 {}: {e}", parent.display());
-                return;
-            }
+        if let Err(e) = self.save_to(&path) {
+            log::warn!("无法写入最近项目列表 {}: {e}", path.display());
         }
-        match ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()) {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(&path, text) {
-                    log::warn!("无法写入最近项目列表 {}: {e}", path.display());
-                }
-            }
-            Err(e) => log::warn!("序列化最近项目列表失败: {e}"),
-        }
+    }
+
+    /// 指定路径写盘，供失败注入与配置路径隔离测试使用。
+    fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        crate::prefs::write_staged(path, &text)
     }
 
     /// 把项目路径提到最前（去重 + 裁剪到上限），然后落盘。
@@ -98,6 +94,61 @@ fn store_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_path(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "xgame-recents-{tag}-{}-{}.ron",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_recents_preserve_previous_bytes_then_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = temp_path("locked");
+        let old = RecentProjects {
+            paths: vec![PathBuf::from("/old")],
+        };
+        old.save_to(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let new = RecentProjects {
+            paths: vec![PathBuf::from("/new")],
+        };
+        assert!(new.save_to(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(lock);
+        new.save_to(&path).unwrap();
+        let persisted: RecentProjects =
+            ron::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted.paths, new.paths);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stale_recents_staging_does_not_block_save() {
+        let path = temp_path("stale");
+        let legacy = path.with_extension("ron.tmp");
+        std::fs::write(&legacy, b"old staging").unwrap();
+        let recents = RecentProjects {
+            paths: vec![PathBuf::from("/new")],
+        };
+        recents.save_to(&path).unwrap();
+        let persisted: RecentProjects =
+            ron::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted.paths, recents.paths);
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"old staging");
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(legacy).unwrap();
+    }
 
     #[test]
     fn add_dedupes_and_moves_to_front() {

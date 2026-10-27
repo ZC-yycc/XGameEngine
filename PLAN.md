@@ -14,6 +14,10 @@
 
 ---
 
+## 六十九、G0 最近项目列表写盘保护（2026-10-27）
+
+项目枢纽的 `RecentProjects::save` 原本直接 `fs::write`，目标文件允许写入但拒绝替换时旧内容可能被截断。Windows 锁定目标回归先在旧实现实跑失败（错误地返回成功）；修复后与 `EditorPreferences::save_to` 共享内部 `write_staged`：同目录独占暂存、`sync_all`、替换目标，失败不动旧文件、解锁可重试。旧版固定暂存残留不阻断，最近项目 4 项、偏好 12 项定向测试通过。读取损坏文件仍退空列表，UI 保存失败仍记录警告。两份修改文件 rustfmt --check 通过，全工作区 check、clippy -D warnings、test --all-targets 全绿。release workspace 完成，dist 三 EXE 与 target/release 各自 SHA256 一致；发布版 SampleScene `--check` 返回 0（1 场景、24 实体、15 资产），30 帧无头 `ok=true`、错误 0、非有限变换 0。仓库整体 `cargo fmt --all -- --check` 仍受其他文件历史格式差异影响，未扩大格式化范围。
+
 ## 六十八、G0 编辑器偏好保存与输出目录（2026-10-27）
 
 `outputs/` 是本地构建、截图和验收的混合产物目录，新增文件不应进入版本控制；根级忽略规则覆盖整个目录，已被跟踪的历史截图继续留在 Git 中。修复 `EditorPreferences::save_to`：原实现固定 `editor.ron.tmp` 且替换失败会直接覆写目标，Windows 上目标句柄拒绝删除但允许写入时会突破旧文件保护。改成独占同目录暂存、`sync_all` 后替换；失败不覆盖目标，旧暂存残留不阻断重试。锁定目标回归在旧实现下实跑失败（预期错误却返回成功），新实现偏好 12 项通过。全工作区 `check` 与 `clippy -- -D warnings` 通过，`test --workspace --all-targets` 全绿；本轮文件独立 rustfmt 检查通过，整个仓库 `cargo fmt --all -- --check` 因此前未格式化的其他文件失败（未扩大改动范围）。release 构建刷新 dist 三个 EXE；发布版 SampleScene `--check` 返回 0（1 场景、24 实体、15 资产），30 帧无头 `ok=true`、错误日志 0、非有限变换 0，dist 编辑器 EXE 与 release 源哈希一致。

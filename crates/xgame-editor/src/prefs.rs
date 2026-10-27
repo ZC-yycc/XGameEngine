@@ -189,41 +189,45 @@ impl EditorPreferences {
 
     /// 写盘（同目录独占暂存、同步后替换；失败不覆盖原文件）。
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let text = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        use std::io::Write;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
-        let (tmp, mut file) = loop {
-            let id = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
-            let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-                Some(ext) => format!("{ext}.tmp.{}.{id}", std::process::id()),
-                None => format!("tmp.{}.{id}", std::process::id()),
-            });
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)
-            {
-                Ok(file) => break (tmp, file),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(e),
-            }
-        };
-        let result = file
-            .write_all(text.as_bytes())
-            .and_then(|_| file.sync_all());
-        drop(file);
-        let result = result.and_then(|_| std::fs::rename(&tmp, path));
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result
+        write_staged(path, &text)
     }
+}
+
+/// 两份编辑器配置共用同一条替换路径，避免最近项目列表退回直接覆写。
+pub(crate) fn write_staged(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
+    let (tmp, mut file) = loop {
+        let id = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) => format!("{ext}.tmp.{}.{id}", std::process::id()),
+            None => format!("tmp.{}.{id}", std::process::id()),
+        });
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
+    let result = file
+        .write_all(text.as_bytes())
+        .and_then(|_| file.sync_all());
+    drop(file);
+    let result = result.and_then(|_| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// 有限值钳制：非有限输入直接换默认值（不是钳到端点 —— NaN 钳完还是 NaN）。
