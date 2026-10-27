@@ -5310,6 +5310,28 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 六十二、G0 真实发布包自定义输入 / 切关 / 插件（2026-10-27）
+
+从干净的 9226714 继续，只补真实发布组合验收。已读 ROADMAP、最新差距、插件/场景/CI 决策、PLAN、builder、game 输入桥及现有测试。现有 Rust 测试没有桌面发布驱动；采用 Windows PowerShell 验收脚本调用真实 --build 和播放器，复用 BehaviorsDemo 的模型场景、Spinner DLL，未修改引擎 Rust 源码、依赖、架构或 CI。
+
+### 实测与证据
+
+- 新脚本 `tools/test-published-player.ps1` 生成三关和自定义 Gameplay 脚本目录、J 键 Advance 动作/Travel 轴，原字节打包验证。包移出源目录、源目录改名保留，以非项目 cwd 无参数运行；路径定位不靠源项目。每关 5 个唯一日志断言（START/PLUGIN/PRESS/RELEASE/DESTROY），插件证据为只有 Rust Spinner 会修改的实体 yaw 变化超过 5°。按下与松开分帧等待确认，松开才切关。无新引擎 bug，不伪造旧实现红灯。
+- 正例 grxfz9 退出 0：`outputs/published-player-36723efff89f49bfaafd2d12ab5c4eb4/`。最终刷新 dist 后 a0ribz 再次退出 0：`outputs/published-player-ad75db134051426884e30ac0121f3e7e/`，result.json ok=true、scenes=3、assertions=15、exit_code=0；player.log 明确 Scenes/0→1→2，两次切关，三次插件旋转、三次按下/松开与三次销毁，零 ERROR/panic。
+- 负对照 q48t9g：错绑为 K，`outputs/published-player-4603d232c980494a894aeb67652c1abb/`，超时 G0 PRESS 0，任务失败。g4olll：省略 DLL，`outputs/published-player-6daf03d153ad4866a918b0a7638fd96f/`，超时 G0 PLUGIN 0，任务失败。均正常发窗口关闭消息，不强杀，不删证据。
+- 最终三张 scene-0.png/scene-1.png/scene-2.png 已由主代理查看；窗口有地面、两立方体、球体及阴影。日志确认 RTX 2060/Vulkan/610.88，HDR+ACES、MSAA x4。三关使用相同视觉夹具，截图相同不作为切关证据，身份依据脚本和运行时日志。保留 Vulkan present mode 警告，不称零 warning。
+- 脚本开发期失败仅为夹具漏填必填字段、PowerShell 重复大小写代理键、日志共享读取、无 BOM 中文注释解析导致句柄赋值被吞；不是引擎缺陷。重复代理仅在调用进程删除小写键，不改系统配置。脚本最终 UTF-8 BOM，无 Rust 文件需要 rustfmt。
+
+### 全量与发布
+
+沿用 `.workbuddy/validate-g0.ps1` 的 LIB/INCLUDE/TEMP，全部 cargo 为 PowerShell 绝对路径、CARGO_INCREMENTAL=0、-j2 --locked，测试 --test-threads=4。任务 iqo8km check/clippy -D warnings/test 全部退出 0；27 套件 **917 passed / 0 failed / 7 ignored**，日志 `.workbuddy/logs/g0-published-{check,clippy,test}.log`。任务 wxyvwp release workspace 退出 0，日志 `g0-published-release.log`。PowerShell 将原生命令 stderr 包装成 NativeCommandError 的展示不等于 cargo 失败，最终以各命令 LASTEXITCODE 及 Finished/test result 判断。
+
+仅复制刷新 dist 三 EXE，不清目录，SHA-256 与 target/release 一致且与上一轮相同：editor EA74558BFA5F9773C2222D6E4D7A69378153B1EE44A8DF1A8F1E8AB96D6DA2AD；game CA0055FBE4C9B8F95CA8D5CEAF81967713BDF3854A08B961B39121165B454C85；mcp 4E73645FE8DA2F4C666598B88D06EFC7F7F78BB9A65E168F032F2BB8381450F4。本轮未改指纹源码；Demo 现有 DLL 与同批 release 哈希均为 6F722DCCAEE062549718DF2D89431E90585A9823C4E81A5FB636BA0650544744，无需替换，上一轮备份保留。测试包复制同批 release DLL 并校验哈希。
+
+### 边界
+
+新增本地端到端验收（真实播放器/GPU/窗口消息链），不计入 Rust 单测数量。未验证物理键盘、系统焦点、IME、鼠标/手柄、任意项目依赖、跨平台、通用播放器新鲜度；现有 hosted CI 未接桌面 GPU 门禁。没有新依赖与播放器烟测特例，不复制 World 循环，不用 headless 充当真实播放器。G0 不整体关闭。ROADMAP/差距/决策/README 已同步，日记 append-only，提交推送不跳 hooks。
+
 ## 六十一、G0 插件注册前兼容检查（2026-10-27）
 
 ### 实现与契约

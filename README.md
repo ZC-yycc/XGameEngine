@@ -47,6 +47,18 @@ cargo run -p xgame-mcp
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
 
+## 真实发布包验收（Windows 桌面 + GPU）
+
+先完成同批 workspace release 构建并刷新 dist，再运行：
+
+```powershell
+powershell -NoProfile -File tools/test-published-player.ps1
+```
+
+脚本调用真实 `--build`，将生成的包移至独立目录，保留源项目但使原路径失效；从非项目工作目录无参数启动包内 EXE。通过 Windows 键盘消息走 winit 输入桥，逐关验证自定义 J 键动作/轴、松开后切关、真实 Spinner DLL 的旋转和销毁日志。三关各保存窗口截图，`outputs/published-player-<唯一编号>/` 保留包、源项目、日志与 result.json；失败抛错，不清理证据。参数 `-Fault input` / `-Fault plugin` 为预期失败的负对照，`-TimeoutSeconds` 控制单个断言等待上限。
+
+这覆盖真实播放器和 GPU 窗口，但消息注入不等于物理键盘/系统焦点/IME 验证；截图需人工查看。现有 hosted CI 未接此桌面 GPU 门禁，不用 headless 代替。若 Windows PowerShell 因环境同时存在大小写重复的代理变量拒绝 Start-Process，需在运行进程内消除重复键，勿修改系统代理配置。脚本为 UTF-8 BOM，保证 Windows PowerShell 5.1 正确解析中文注释。
+
 ## Rust 插件兼容检查
 
 使用 `xgame::export_plugin!` 导出插件；宏同时生成原入口与版本化 C 描述符 `xgame_plugin_descriptor_v1`。宿主在注册前校验构建指纹，缺少描述符或指纹不匹配时拒绝调用原入口，并报告插件路径与重编提示。旧 DLL 即使版本号相同也需要重新构建。

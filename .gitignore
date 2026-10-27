@@ -34,3 +34,6 @@ projects/*/Plugins/
 # "要不要恢复一台他不认识的机器上的现场"。
 projects/*/.autosave/
 /.workbuddy
+
+# 真实发布验收的独立包与现场证据；不提交可执行文件和临时源项目。
+/outputs/published-player-*/
