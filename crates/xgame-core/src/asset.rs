@@ -588,7 +588,8 @@ impl AssetDatabase {
             ..Self::default()
         };
 
-        collect(&root, &root, &mut files, &mut metas, &mut db.diagnostics);
+        let content_roots = scan_content_roots(&root);
+        collect(&root, &root, &content_roots, &mut files, &mut metas, &mut db.diagnostics);
 
         // 同一个 GUID 可能被多份 `.meta` 声称 —— 按资产路径排序后取第一个，
         // 其余记冲突。为什么要确定"第一个"：解析必须是确定性的，否则同一个
@@ -1137,9 +1138,47 @@ pub fn is_dangling_reference(reference: &str, db: &AssetDatabase) -> bool {
 // 内部：目录遍历
 // ---------------------------------------------------------------------------
 
+// 只把有效清单视为项目边界；内容树内的同名文件不改变资产归属。
+// 保留全项目扫描，避免遗漏用户放在默认内容目录之外的资产。
+fn scan_content_roots(root: &Path) -> Vec<PathBuf> {
+    let Some(project) = read_scan_project(root) else {
+        return Vec::new();
+    };
+    let content = &project.content;
+    let mut paths = vec![
+        content.scenes_dir.clone(), content.models_dir.clone(),
+        content.textures_dir.clone(), content.audio_dir.clone(),
+        content.shaders_dir.clone(), content.prefabs_dir.clone(),
+        content.scripts_dir.clone(),
+    ];
+    paths.extend(content.search_paths.iter().cloned());
+    for scene in std::iter::once(&project.entry_scene).chain(project.build.scenes.iter()) {
+        let scene = scene.replace('\\', "/");
+        if let Some(parent) = Path::new(&scene).parent() {
+            paths.push(parent.to_string_lossy().into_owned());
+        }
+    }
+    paths.into_iter().filter_map(|raw| {
+        let raw = raw.replace('\\', "/");
+        let path = Path::new(raw.trim());
+        if path.as_os_str().is_empty() || path.is_absolute()
+            || path.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+        {
+            return None;
+        }
+        Some(root.join(path))
+    }).collect()
+}
+
+fn read_scan_project(root: &Path) -> Option<crate::project::Project> {
+    let text = std::fs::read_to_string(root.join(crate::project::PROJECT_FILE_NAME)).ok()?;
+    ron::from_str(&text).ok()
+}
+
 fn collect(
     root: &Path,
     dir: &Path,
+    content_roots: &[PathBuf],
     files: &mut Vec<(String, AssetKind)>,
     metas: &mut BTreeMap<String, AssetMeta>,
     diagnostics: &mut AssetDiagnostics,
@@ -1157,7 +1196,20 @@ fn collect(
             if SKIPPED_DIRS.iter().any(|skip| name == *skip) {
                 continue;
             }
-            collect(root, &path, files, metas, diagnostics);
+            // 发布包是另一个项目（默认 Build 或任意搬移后的输出目录）。
+            // 显式内容根与其祖先/子树优先，不能因里面有清单而吞掉合法资产。
+            let overlaps_content = content_roots.iter().any(|content| {
+                #[cfg(windows)]
+                let (path, content) = (
+                    PathBuf::from(path.to_string_lossy().to_lowercase()),
+                    PathBuf::from(content.to_string_lossy().to_lowercase()),
+                );
+                path.starts_with(&content) || content.starts_with(&path)
+            });
+            if !overlaps_content && read_scan_project(&path).is_some() {
+                continue;
+            }
+            collect(root, &path, content_roots, files, metas, diagnostics);
             continue;
         }
         let Some(relative) = relative_posix(root, &path) else {
@@ -1509,6 +1561,59 @@ mod tests {
         assert!(AssetMeta::from_ron(&text).is_ok());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_isolates_published_projects_and_refreshes() {
+        for output in ["Build/Game", "Exports/Custom/Game"] {
+            let root = temp_root("published");
+            let manifest = crate::project::Project::default();
+            let text = ron::to_string(&manifest).unwrap();
+            put(&root, "project.ron", text.as_bytes());
+            put(&root, "Resources/Box.glb", b"glb");
+            let mut db = AssetDatabase::scan(&root);
+            db.ensure_metas().unwrap();
+            let guid = db.guid_of("Resources/Box.glb").unwrap().clone();
+            let meta = std::fs::read(root.join("Resources/Box.glb.meta")).unwrap();
+            put(&root, &format!("{output}/project.ron"), text.as_bytes());
+            put(&root, &format!("{output}/Resources/Box.glb"), b"glb");
+            put(&root, &format!("{output}/Resources/Box.glb.meta"), &meta);
+            put(&root, &format!("{output}/Resources/Missing.png"), b"png");
+            db.refresh();
+            assert!(!db.diagnostics().has_issues(), "{output}: {:?}", db.diagnostics());
+            assert_eq!(db.path_of(&guid), Some("Resources/Box.glb"));
+            assert_eq!(db.ensure_metas().unwrap(), 0);
+            assert!(!root.join(format!("{output}/Resources/Missing.png.meta")).exists());
+            let package = AssetDatabase::scan(root.join(output));
+            assert_eq!(package.path_of(&guid), Some("Resources/Box.glb"));
+            assert_eq!(package.diagnostics().missing_meta, ["Resources/Missing.png"]);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn scan_preserves_content_roots_and_ordinary_build_assets() {
+        let root = temp_root("content_boundaries");
+        let mut manifest = crate::project::Project::default();
+        manifest.content.models_dir = "Build/Models".into();
+        manifest.content.search_paths = vec!["Extra".into(), "Container/Assets".into()];
+        manifest.entry_scene = "Levels/main.ron".into();
+        manifest.build.scenes = vec!["Chapters/one.ron".into()];
+        put(&root, "project.ron", ron::to_string(&manifest).unwrap().as_bytes());
+        for dir in ["Build/Models", "Resources/Nested", "Extra", "Levels", "Chapters", "Loose/Build", "Loose"] {
+            put(&root, &format!("{dir}/keep.png"), b"png");
+            if dir != "Loose/Build" && dir != "Loose" {
+                put(&root, &format!("{dir}/project.ron"), ron::to_string(&manifest).unwrap().as_bytes());
+            }
+        }
+        put(&root, "Container/project.ron", ron::to_string(&manifest).unwrap().as_bytes());
+        put(&root, "Container/Assets/keep.png", b"png");
+        put(&root, "Broken/project.ron", b"not a project");
+        put(&root, "Broken/keep.png", b"png");
+        let mut db = AssetDatabase::scan(&root);
+        assert_eq!(db.ensure_metas().unwrap(), 9, "显式内容、散放资产和无效清单均不能误排除");
+        assert_eq!(db.len(), 9);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// 核心价值：**资产改名 / 挪目录后，GUID 引用依然解析得到**。

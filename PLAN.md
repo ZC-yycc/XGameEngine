@@ -5310,6 +5310,31 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 六十、发布副本污染原项目资产扫描（2026-10-27）
+
+从已推送的 4df0eae 继续。根因是资产库递归扫描项目根，真实 Build 包复制了源资产的 `.meta`，导致重复 GUID。先新增回归，在未改生产实现时任务 VxIaUW 实测 **0 passed / 1 failed**：`Build/Game/Resources/Box.glb` 与源文件冲突，包内 `Missing.png` 还污染缺失 meta 诊断。旧 dist 对实际 SampleScene（保留既有 Build 包 35 文件）复验同样 **15 个冲突，退出 2**，任务 wjxjsw。
+
+### 设计审查
+
+阅读 core 扫描/刷新、ContentConfig、BuildConfig 和 builder 的内容收集、路径解析、输出重叠拒绝后，确认当前没有可配置 output 字段。采用有效嵌套项目清单作为独立包边界，同时让显式内容根优先；完整约束只写在决策记录 §十四。没有增加 Build 名称黑名单，也没有缩窄为内容目录白名单。普通 Build 资产、散放资产、无效清单目录和显式声明的内容继续扫描；自定义存放位置的完整包也能隔离。没有修改构建器、运行时和渲染。
+
+### 回归与全量
+
+- 新增 2 项自动化测试：默认/自定义目录下发布副本隔离（含 refresh、GUID 解析、包内独立扫描和 ensure_metas 不写包），以及 9 个合法资产的内容根/祖先/子树保护。
+- 定向扫描 **4 passed / 0 failed**（e61M6L），其中新增两项；随后补充内容根祖先场景由最终全量覆盖。
+- `--locked --workspace --all-targets` check 与 clippy `-D warnings` 通过；全量任务 arnl0i **27 套件，914 passed / 0 failed / 7 ignored**。日志 `.workbuddy/logs/g0-build-scan-full.log`。
+- 使用既有 `.workbuddy/validate-g0.ps1` 的工具链、E 盘 TEMP、MSVC/SDK 环境。首次裸 cargo 因 PATH 不含 cargo 未运行，改用既有安装绝对路径；不将环境失败当回归红灯。
+- 没有单独重跑上一批双角色 GPU 专项；全量测试包含既有渲染测试。
+
+### 发布实测
+
+- release workspace 任务 eowc2h 退出 0，日志 `.workbuddy/logs/g0-build-scan-release.log`。dist 三 EXE 已刷新，与 target/release SHA-256 逐个相同：editor `58E1C9FB70E90A9E3251707B3B645014E460508EBCB355FB8F695E4287399DA4`；game `B0FF29FEA81595DFC640C72FC2809415F99D5FC6BB2A56622A8C39A0B8169559`；mcp `4E73645FE8DA2F4C666598B88D06EFC7F7F78BB9A65E168F032F2BB8381450F4`。
+- 任务 kis5u7：不删除、不重建已有 Build 包，先用新 dist 检查原项目与旧包，**两次退出 0**。旧包原有 35 个文件完整保留到这次验证。
+- 任务 khfhpu：真实 `--build projects/SampleScene` 退出 0，33 个资产文件，目录 Prefabs/Resources/Scenes/Scripts；包内合计 35 文件，播放器 SHA-256 与新 dist game 相同。之后原项目与新包 `--check` **再次均退出 0**。
+- 四次成功检查计数一致：scenes=1、entities=24、lights=1、script_refs=5、audio_refs=1、material_refs=7、assets=15，零资产问题。最终实际 Build 目录仍在原位置，未通过删除掩盖。
+- SampleScene 未配置发布关卡清单，scene_count=0；本轮不声称完成真实输入/切关/插件或 ABI 门禁。只读扫描与发布隔离问题已修复，其余 G0 边界沿用差距分析。
+- 已更新既有 ROADMAP、差距分析、决策记录及本地日记 `.workbuddy/memory/2026-10-27.md`；日志、日记、dist 和实际 Build 按既有规则不入库。
+
 ## 五十九、G0 异骨数双角色 GPU 姿态与阴影验收（2026-10-27）
 
 从 545406c 干净工作区继续，按正式优先级选择完整交付 R03/031 的 GPU 证据。既有固定槽距实现未发现新缺陷，本轮新增自动化回归而非声称再次修复运行时。其余包输入/切关/插件及 ABI 指纹继续保留。
