@@ -9,7 +9,16 @@
 
 ## 整体路线图
 
-### 2026-10-27 发布目录扫描隔离
+### 2026-10-27 插件注册前兼容检查
+
+| 项目 | 状态 |
+|---|---|
+| G0 插件门禁 | 已实现版本化 C 描述符与构建指纹，缺失/不匹配在原入口前拒绝；红绿证据见 PLAN 第六十一节 |
+| 全量验证 | check/clippy 通过；27 套件 917 passed / 0 failed / 7 ignored |
+| 发布与冒烟 | release workspace 成功；dist 三 EXE 与 Demo DLL 同批刷新并核对哈希，旧 DLL 已备份；Demo 120 帧真实 GPU 截图与 SampleScene check 均退出 0 |
+| 边界 | 仅当前 workspace 构建单元的保守检查，非完整 Rust ABI 证明；下游 flags/feature、OS 加载时初始化不覆盖；G0 未整体关闭 |
+
+### 2026-10-27 发布目录扫描隔离（历史）
 
 | 项目 | 状态 |
 |---|---|

@@ -62,21 +62,12 @@ fn workspace_plugin_dll(lib_name: &str, package: &str) -> PathBuf {
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     );
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    // 1) 当前测试二进制的 target 子目录（CARGO_TARGET_TMPDIR = target/<profile>/tmp）。
-    if let Ok(tmp) = std::env::var("CARGO_TARGET_TMPDIR") {
-        candidates.push(PathBuf::from(tmp).parent().unwrap().join(&file));
-    }
-    // 2) 仓库根的 target/{当前 profile, 另一 profile}（`env!` 保证路径与本测试同源）。
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest.parent().unwrap().parent().unwrap().to_owned();
-    let (first, second) = if cfg!(debug_assertions) {
-        ("debug", "release")
-    } else {
-        ("release", "debug")
-    };
-    candidates.push(repo_root.join("target").join(first).join(&file));
-    candidates.push(repo_root.join("target").join(second).join(&file));
+    // 只接受本测试所在 profile 的产物，绝不回退到另一 profile 的旧 DLL。
+    let exe = std::env::current_exe().unwrap();
+    let profile_dir = exe.parent().unwrap().parent().unwrap();
+    let candidates = vec![profile_dir.join(&file)];
 
     // **先保证产物与源码一致，再找产物** —— 顺序反了就会捡到一个"存在但过期"
     // 的 DLL，而过期的插件会把测试进程打崩（见 `build_package_once`）。
@@ -134,13 +125,18 @@ fn build_package_once(repo_root: &std::path::Path, package: &str) {
 fn build_plugin_package(repo_root: &std::path::Path, package: &str) {
     let cargo = cargo_exe();
     let mut cmd = std::process::Command::new(&cargo);
-    cmd.args(["build", "-p", package])
+    cmd.args(["build", "-p", package, "--locked", "-j2"])
+        .env("CARGO_INCREMENTAL", "0")
         .current_dir(repo_root)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    if !cfg!(debug_assertions) {
-        cmd.arg("--release");
-    }
+    let exe = std::env::current_exe().unwrap();
+    let profile_dir = exe.parent().unwrap().parent().unwrap();
+    let profile = profile_dir.file_name().unwrap().to_str().unwrap();
+    cmd.args([
+        "--profile",
+        if profile == "debug" { "dev" } else { profile },
+    ]);
     let mut child = cmd
         .spawn()
         .unwrap_or_else(|e| panic!("无法启动 {cargo:?} 构建插件包 {package}：{e}"));
@@ -195,6 +191,89 @@ fn counter(plugin: &LoadedPlugin, name: &[u8]) -> u32 {
     let sym: libloading::Symbol<'_, *const AtomicU32> = unsafe { plugin.get(name) }
         .unwrap_or_else(|e| panic!("插件缺少计数符号 {:?}：{e}", String::from_utf8_lossy(name)));
     unsafe { &**sym }.load(Ordering::Relaxed)
+}
+
+/// 负例只用标准库，不借用任何 Rust 注册表布局；旧加载器调用入口也能安全证红。
+fn assert_incompatible_plugin_rejected(with_descriptor: bool) {
+    let dir = std::env::temp_dir().join(format!(
+        "xgame-g0-{}-{}",
+        std::process::id(),
+        with_descriptor
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("fixture.rs");
+    let dll = dir.join(format!("fixture{}", std::env::consts::DLL_SUFFIX));
+    let descriptor = if with_descriptor {
+        r#"
+#[no_mangle]
+pub unsafe extern "C" fn xgame_plugin_descriptor_v1(out: *mut u8, capacity: usize) -> usize {
+    let bytes = b"xgame-build-v1:00000000000000000000000000000000";
+    if !out.is_null() && capacity >= bytes.len() {
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+    }
+    bytes.len()
+}
+"#
+    } else {
+        ""
+    };
+    std::fs::write(
+        &source,
+        format!(
+            r#"
+use std::sync::atomic::{{AtomicU32, Ordering}};
+static CALLS: AtomicU32 = AtomicU32::new(0);
+#[no_mangle]
+pub extern "C" fn fixture_calls() -> u32 {{ CALLS.load(Ordering::SeqCst) }}
+#[no_mangle]
+pub extern "C" fn xgame_plugin_entry(_: *const std::ffi::c_void) -> u32 {{
+    CALLS.fetch_add(1, Ordering::SeqCst);
+    {version}
+}}
+{descriptor}
+"#,
+            version = xgame::plugin::ENGINE_VERSION_CODE
+        ),
+    )
+    .unwrap();
+    let rustc = std::env::var_os("RUSTC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            cargo_exe().with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+        });
+    let output = std::process::Command::new(rustc)
+        .args(["--crate-type", "cdylib", "--edition=2021"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&dll)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "负例编译失败：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 额外持有库，加载失败后仍能经固定 C 函数读取入口计数。
+    let observer = unsafe { libloading::Library::new(&dll) }.unwrap();
+    let calls: libloading::Symbol<'_, unsafe extern "C" fn() -> u32> =
+        unsafe { observer.get(b"fixture_calls") }.unwrap();
+    let mut registry = BehaviorRegistry::new();
+    let result = load_plugin(&dll, &mut registry);
+    let count = unsafe { calls() };
+    assert_eq!(count, 0, "不兼容插件不得进入原 entry；加载结果：{result:?}");
+    let err = result.unwrap_err();
+    assert!(err.contains("构建指纹") && err.contains("fixture"), "{err}");
+    assert!(registry.names().is_empty());
+}
+
+#[test]
+fn incompatible_plugin_missing_fingerprint_never_enters_entry() {
+    assert_incompatible_plugin_rejected(false);
+}
+
+#[test]
+fn incompatible_plugin_wrong_fingerprint_never_enters_entry() {
+    assert_incompatible_plugin_rejected(true);
 }
 
 /// 全链路：加载 → 注册 → World 驱动 → 四钩子都有可观测证据。

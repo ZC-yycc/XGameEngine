@@ -6,18 +6,18 @@
 //! 的内存表示都可能随编译单元而异）。用户插件与引擎是**两个独立编译产物**，
 //! 直接互传 Rust 值等于把稳定性押在"碰巧一致"上。三道防线：
 //!
-//! 1. **C ABI 入口符号**：`export_plugin!` 只导出一个 `extern "C"` 函数
-//!    （dlsym 按名字能找到的东西），函数表与句柄全部 `#[repr(C)]`；
+//! 1. **C ABI 入口符号**：入口与宿主块使用 C 布局，但裸句柄后面的
+//!    `BehaviorRegistry`、trait 对象及 Rust 值仍不具有稳定 ABI；
 //! 2. **版本握手**：`EngineApi::version` 必须等于宿主的 [`ENGINE_VERSION_CODE`]。
-//!    门面 crate 版本一致 ⇒ 同 rustc、同依赖、同 build flags 编译 ⇒ 这些
-//!    "Rust ABI"（`BehaviorRegistry` 的内存布局、`Lifecycle` vtable）实践上
-//!    一致 —— UE 对 C++ 模块要求同款 MSVC 是同一个道理；
-//! 3. **对象纪律**：插件构造的组件对象，其 vtable 指回插件代码；宿主只经
-//!    注册表里的函数指针调用，永不跨边界释放对象（分配器纪律）。
+//!    版本相同仅说明版本码一致，不能证明 rustc、依赖、源码或编译参数相同；
+//! 3. **对象纪律**：组件构造、分发及销毁依赖插件代码，库必须活得比对象久。
+//!    函数指针并不能自动保证所有 Rust 值的分配器与布局兼容。
 //!
 //! 握手失败的两侧行为：插件拒载（[`PLUGIN_ERR_VERSION`]）并经日志打出自己的
 //! 版本；宿主把返回码翻译成可读报错（[`load_plugin`]）。Rust ABI 不稳定是
-//! 已知风险，这道闸门是整个 UE 式插件模式能成立的前提。
+//! 已知风险。注册前另以 `xgame_plugin_descriptor_v1` 比对构建指纹，缺失或
+//! 不匹配即拒绝，不进入旧入口。指纹包含 xgame 构建单元可见的工具链、配置及
+//! 引擎库源码，不能覆盖下游全部 flags，匹配也不代表稳定 ABI 或可信插件。
 //!
 //! # 能力从哪来：`Ctx`，不是函数表
 //!
@@ -90,6 +90,28 @@ pub const fn version_code(v: &str) -> u32 {
 
 /// 本引擎的版本码（`ENGINE_VERSION` 的打包形式，握手的比对基准）。
 pub const ENGINE_VERSION_CODE: u32 = version_code(crate::ENGINE_VERSION);
+
+/// 当前 xgame 构建单元的保守指纹；不承诺稳定 Rust ABI，也不覆盖下游全部 flags。
+pub const BUILD_FINGERPRINT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/plugin-fingerprint.txt"));
+
+/// v1 描述符协议：返回所需字节数；空指针或容量不足时不写入。
+/// 调用方拥有缓冲区，无 Rust 结构、分配或所有权跨边界传递。
+pub type PluginDescriptorFn = unsafe extern "C" fn(*mut u8, usize) -> usize;
+
+/// 写出构建指纹，供宏生成的固定 C ABI 导出使用。
+///
+/// # Safety
+/// 非空且容量足够时，`out` 必须指向至少 `capacity` 字节的可写缓冲区。
+pub unsafe fn write_build_descriptor(out: *mut u8, capacity: usize) -> usize {
+    if !out.is_null() && capacity >= BUILD_FINGERPRINT.len() {
+        // SAFETY: 调用方保证缓冲区可写；静态指纹与调用方缓冲区不重叠。
+        unsafe {
+            std::ptr::copy_nonoverlapping(BUILD_FINGERPRINT.as_ptr(), out, BUILD_FINGERPRINT.len())
+        };
+    }
+    BUILD_FINGERPRINT.len()
+}
 
 /// 插件日志级别（C 布局 u32）。
 ///
@@ -207,6 +229,21 @@ impl LoadedPlugin {
     ///
     /// 与 [`load_plugin`] 的区别：那个从零打开文件，这个复用已打开的句柄。
     pub fn register_into(&self, registry: &mut BehaviorRegistry) -> Result<(), String> {
+        // 必须在查找/调用旧入口以及传出任何 Rust 注册表句柄之前完成。
+        let descriptor: libloading::Symbol<'_, PluginDescriptorFn> =
+            unsafe { self._lib.get(b"xgame_plugin_descriptor_v1") }.map_err(|_| {
+                format!("插件 {} 缺少构建指纹符号 xgame_plugin_descriptor_v1，请与宿主使用相同源码和构建配置重新编译", self.path.display())
+            })?;
+        let mut bytes = [0u8; BUILD_FINGERPRINT.len()];
+        // SAFETY: 固定 C 协议；本地缓冲区在调用期间可写。插件必须遵守容量约定。
+        let size = unsafe { descriptor(bytes.as_mut_ptr(), bytes.len()) };
+        if size != bytes.len() || bytes != BUILD_FINGERPRINT {
+            return Err(format!(
+                "插件 {} 构建指纹不匹配（宿主 {}），请与宿主使用相同源码、工具链和构建配置重新编译",
+                self.path.display(),
+                String::from_utf8_lossy(BUILD_FINGERPRINT)
+            ));
+        }
         let ret = {
             let entry: libloading::Symbol<'_, PluginEntryFn> =
                 // SAFETY: 库句柄由 self 持有且存活，符号名是导出契约的一部分。
@@ -340,11 +377,25 @@ extern "C" fn engine_log_sink(level: u32, msg: *const c_char, len: usize) {
 /// 导出插件入口符号（用户插件 crate 的最后一行）。
 ///
 /// 展开成一个 `#[no_mangle] pub unsafe extern "C" fn xgame_plugin_entry` ——
-/// 宿主（`load_plugin`）dlsym 的唯一目标。闭包参数是宿主注册表的借用，
+/// 以及固定 C ABI 的 `xgame_plugin_descriptor_v1`。宿主先核对描述符，
+/// 再调用原入口。闭包参数是宿主注册表的借用，
 /// 在这里 `register::<T>("Name")` 把组件写进宿主的表。
 #[macro_export]
 macro_rules! export_plugin {
     (|$registry:ident| $body:block) => {
+        /// 固定 C ABI 构建描述符，供宿主在注册之前检查。
+        ///
+        /// # Safety
+        /// 非空且容量足够时，out 必须指向 capacity 字节的可写缓冲区。
+        #[no_mangle]
+        pub unsafe extern "C" fn xgame_plugin_descriptor_v1(
+            out: *mut u8,
+            capacity: usize,
+        ) -> usize {
+            // SAFETY: 透传描述符协议的缓冲区契约。
+            unsafe { $crate::plugin::write_build_descriptor(out, capacity) }
+        }
+
         /// 插件入口符号（由 `xgame::export_plugin!` 生成）。
         ///
         /// # Safety
@@ -389,6 +440,27 @@ mod tests {
             .lock()
             .unwrap()
             .push(String::from_utf8_lossy(bytes).into_owned());
+    }
+
+    #[test]
+    fn descriptor_respects_capacity_and_reports_exact_bytes() {
+        assert_eq!(
+            unsafe { write_build_descriptor(std::ptr::null_mut(), 0) },
+            BUILD_FINGERPRINT.len()
+        );
+        let mut short = [0xa5u8; 1];
+        assert_eq!(
+            unsafe { write_build_descriptor(short.as_mut_ptr(), short.len()) },
+            BUILD_FINGERPRINT.len()
+        );
+        assert_eq!(short, [0xa5]);
+        let mut full = vec![0xa5; BUILD_FINGERPRINT.len() + 1];
+        assert_eq!(
+            unsafe { write_build_descriptor(full.as_mut_ptr(), BUILD_FINGERPRINT.len()) },
+            BUILD_FINGERPRINT.len()
+        );
+        assert_eq!(&full[..BUILD_FINGERPRINT.len()], BUILD_FINGERPRINT);
+        assert_eq!(full[BUILD_FINGERPRINT.len()], 0xa5);
     }
 
     #[test]

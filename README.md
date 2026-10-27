@@ -47,6 +47,21 @@ cargo run -p xgame-mcp
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
 
+## Rust 插件兼容检查
+
+使用 `xgame::export_plugin!` 导出插件；宏同时生成原入口与版本化 C 描述符 `xgame_plugin_descriptor_v1`。宿主在注册前校验构建指纹，缺少描述符或指纹不匹配时拒绝调用原入口，并报告插件路径与重编提示。旧 DLL 即使版本号相同也需要重新构建。
+
+在当前 workspace 中，将宿主与插件按同一工具链、源码、锁文件及 profile 构建。例如在 PowerShell 中运行：
+
+```powershell
+$env:CARGO_INCREMENTAL = '0'
+cargo build --workspace --release --locked -j2
+```
+
+将同批 `target/release` 的宿主程序用于运行，并将 `behaviors_demo.dll` 放到 `projects/BehaviorsDemo/Plugins/`；替换已有插件前先备份，避免混用 debug/release 或历史 DLL。遇到“构建指纹不匹配”时应统一配置并重编两侧，不要改写描述符绕过检查。
+
+此检查仅比较当前 workspace 中 xgame 构建单元可见的信息，是保守拒绝门禁，**不是完整 Rust ABI 兼容证明**。下游全部 flags、依赖 feature 合并、第三方源码状态以及 OS 加载动态库时执行的初始化均不在保证范围内；也不防伪造描述符或恶意插件。详细契约见 `Docs/决策记录.md` §四。
+
 ## CI
 
 推送到 `master`、开 PR 或手动 dispatch 时，GitHub Actions（`.github/workflows/ci.yml`）会在

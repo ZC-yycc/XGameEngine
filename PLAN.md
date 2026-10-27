@@ -5310,6 +5310,59 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 六十一、G0 插件注册前兼容检查（2026-10-27）
+
+### 实现与契约
+
+先纠正 plugin.rs、决策记录 §四及双轨计划 C4 中“版本一致即可推出同编译器/依赖/flags”的错误说明。新增标准库 build.rs，以固定摘要算法覆盖 rustc -vV、TARGET/HOST、PROFILE、OPT_LEVEL、DEBUG、panic、target features、xgame features、可见 rustflags/wrapper，以及引擎库源码、Cargo 清单/锁文件/构建脚本；输入排序，文件标识使用仓库相对路径，导出描述符不含绝对路径。无新增依赖。
+
+export_plugin! 增加 xgame_plugin_descriptor_v1：固定 C ABI，字节缓冲区+容量，返回所需长度，空指针/容量不足不写。LoadedPlugin::register_into 首先检查符号与长度/字节，失败不调用原 entry；PluginHost 布局及原版本握手保留。测试 DLL 仅定位当前测试 profile，嵌套构建同 profile，不再回退另一 profile 的历史 DLL。
+
+### 实跑红绿证据
+
+- 修改加载器之前，任务 v7izur 执行 `cargo test -p xgame --test plugin_loading incompatible_plugin --locked -j2 -- --test-threads=4 --nocapture`：**0 passed / 2 failed / 4 filtered**。缺指纹和错误指纹的标准库真实 cdylib 均被旧加载器返回 Ok，入口计数均为 **1**（期望 0），并非编译或环境失败。
+- 修改后 ben3ct：xgame 全目标 **16 passed / 0 failed**；补同长度错指纹及描述符空指针/容量/尾部哨兵检查后 boih2u：三个包定向 check/clippy 通过，**21 passed / 0 failed**。两个负例均 entry=0；spinner 与 BehaviorsDemo 真实 DLL 注册及 World 驱动通过。
+- 本轮仅 rustfmt `crates/xgame/build.rs`、`crates/xgame/src/plugin.rs`、`crates/xgame/tests/plugin_loading.rs`。首次工具缺失，rustup component add rustfmt 成功后格式化；之后重新构建指纹，源码未再修改。
+
+### 全量命令与数量
+
+全部 cargo 在 PowerShell 执行，绝对路径 `C:/Users/Administrator/.cargo/bin/cargo.exe`，`CARGO_INCREMENTAL=0`、`-j2 --locked`、测试线程 4；环境来自已读取的 `.workbuddy/validate-g0.ps1`（MSVC onecore/Windows SDK LIB 与 INCLUDE，E 盘 TEMP/TMP），未猜路径。
+
+```powershell
+& $cargo check --locked --workspace --all-targets -j2
+& $cargo clippy --locked --workspace --all-targets -j2 -- -D warnings
+& $cargo test --locked --workspace --all-targets -j2 -- --test-threads=4
+& $cargo build --locked --release --workspace -j2
+```
+
+任务 51vfu4 全量退出 0；Transcript 未捕获原生命令的输出，因此任务 1p7vzm 重跑并直接捕获输出，退出 0。最终日志 `.workbuddy/logs/g0-plugin-full-captured.log`：**27 套件、917 passed / 0 failed / 7 ignored**。7 项为默认忽略测试，不把返回 ok 的可跳过 GPU 用例一律视为 GPU 实跑。release 任务 1e01dn 退出 0（35.25 秒）；其真实工具输出记录 xgame、两个插件和 editor/game 编译及 Finished release，Transcript 本身不含原生输出，不能以其空内容作编译证据。
+
+### 发布刷新与真实 GPU 证据
+
+没有运行 build-release.ps1，没有清 dist 或删除缓存。复制 target/release 三 EXE 到 dist，并逐个校验 SHA-256 相同：
+
+- editor：EA74558BFA5F9773C2222D6E4D7A69378153B1EE44A8DF1A8F1E8AB96D6DA2AD
+- game：CA0055FBE4C9B8F95CA8D5CEAF81967713BDF3854A08B961B39121165B454C85
+- mcp：4E73645FE8DA2F4C666598B88D06EFC7F7F78BB9A65E168F032F2BB8381450F4
+- 同批 behaviors_demo.dll：6F722DCCAEE062549718DF2D89431E90585A9823C4E81A5FB636BA0650544744；复制到 projects/BehaviorsDemo/Plugins 后哈希相同。
+
+旧 DLL 以禁止覆盖方式备份在 `projects/BehaviorsDemo/Plugins/behaviors_demo.dll.pre-g0-compat-f658ef94be2946f982e15b95f17297fa.bak`，旧哈希 C6C5112A61905CAD0071451C86245BC02B790348801F3231895CC891EF2C383D。
+
+任务 gf1ar7 实跑：
+
+```powershell
+./dist/xgame-editor.exe --headless --frames 120 --screenshot outputs/plugin-compat-smoke.png --report .workbuddy/logs/g0-plugin-smoke.json --dump-scene .workbuddy/logs/g0-plugin-smoke-scene.ron projects/BehaviorsDemo
+./dist/xgame-editor.exe --check projects/SampleScene
+```
+
+两者退出 **0**。GPU 日志确认 **NVIDIA GeForce RTX 2060 / Vulkan / driver 610.88**，并非无适配器跳过；PNG 已查看，地面、立方体、球体及阴影可见。报告 ok=true、120 frames/120 fixed_steps、4 entities、logs info=2/warn=0/error=0、non_finite_transforms=0、scene_loads=0；截图 1280×720、2 draw calls、4 opaque instances。场景转储 RustSpinner 四元数 `(0, 0.9659258, 0, 0.25881907)`，对应 150°，与 LuaSpinner 相同，证明真实插件已驱动实体。audio.available=false 为静音降级。
+
+SampleScene 检查：scenes=1、entities=24、lights=1、script_refs=5、audio_refs=1、material_refs=7、assets=15，all referenced assets exist。完整日志 `.workbuddy/logs/g0-plugin-smoke.log`、`g0-plugin-smoke.json`、`g0-plugin-smoke-scene.ron`、`g0-plugin-sample-check.log`；截图 `outputs/plugin-compat-smoke.png`。
+
+### 边界与交付
+
+仅当前 workspace 的 xgame 构建单元保守检查，非完整 Rust ABI 证明；无法覆盖下游全部 flags、依赖 feature 合并、第三方源码状态，OS 动态库加载时的初始化发生在描述符校验之前。摘要不作密码学认证，匹配不证明任意插件可信；源码非 ABI 改动也可能触发保守拒绝。不宣称通用播放器新鲜度、完整包输入/切关/插件 CI 或全部 G0 已关闭。ROADMAP 顶端、差距分析顶端及 128/173、README 插件用法已同步；每日日志 append-only。按用户本轮授权提交推送，不跳 hooks。
+
 ## 六十、发布副本污染原项目资产扫描（2026-10-27）
 
 从已推送的 4df0eae 继续。根因是资产库递归扫描项目根，真实 Build 包复制了源资产的 `.meta`，导致重复 GUID。先新增回归，在未改生产实现时任务 VxIaUW 实测 **0 passed / 1 failed**：`Build/Game/Resources/Box.glb` 与源文件冲突，包内 `Missing.png` 还污染缺失 meta 诊断。旧 dist 对实际 SampleScene（保留既有 Build 包 35 文件）复验同样 **15 个冲突，退出 2**，任务 wjxjsw。
