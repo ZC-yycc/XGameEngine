@@ -155,6 +155,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | TAA | 默认关；抖动**只**叠相机（阴影拟合 / 剔除用未抖动矩阵）；重投影要补上一帧抖动；历史必须被邻域钳制；首帧 / 越界直通；抖动是纯函数（截图确定性）；开着时 FXAA 让位 | §二十九 |
 | 资产管线 | 磁盘 GUID / 内存路径；GUID 永不变；`--check` 只读；迁移只替换字面量（不吃注释） | §十四 |
 | 写盘 / 暂存 | 落盘只有一份实现 `xgame_core::fsx`；暂存名即回收判据（改命名必须同步 `is_staging_name`）；回收只在保存成功后（打开项目是 `--check` 的入口，必须只读）；Windows 无目录 fsync | §四十九 |
+| 打包 / 播放器 | 只认**源码指纹一致**的播放器（`xgame-src-v1:…`，不含 profile）；`#[used]` 锚点不能删，删了常量会被链接器回收、门禁永远报旧引擎；插件门禁用另一份含 profile 的 `xgame-build-v1:…` | §五十 |
 | 场景 schema | 唯一源 `scene_schema()`；CLI / MCP 同源；输出确定性；运行时字段不进目录；加落盘字段必须同步目录 | §三十二 |
 | 自动保存 | 副本只在 `<项目>/.autosave/`（进 `Scenes/` 会被当场景）；**不算保存**（不动 `saved_snapshot`）；手动保存 / 正常退出即清；写盘格式与 `write_scene` 同源 + 原子写；空闲停帧时靠 `request_repaint_after` 唤醒 | §二十四 |
 | 场景切换 | 只在**帧末**一处应用（`apply_pending_scene_load`）；脚本 `load_scene` 只登记请求（钩子期间场景正被可变借用）；装不上就**不动** + 一条 error 日志；只重置"与实体绑定"的状态（物理 / 粒子 / 音频 autoplay / UI 交互 / `started` / `states`），**日志缓冲与脚本全局变量不能清**；装载来源由宿主注入 `with_scene_loader`，没接是**可诊断的错误** | §二十五 |

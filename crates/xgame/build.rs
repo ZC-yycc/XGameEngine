@@ -64,10 +64,23 @@ fn main() {
     );
     keys.sort();
     keys.dedup();
+    // 第二份指纹：只回答"这是不是同一份引擎源码"。插件门禁要的是同一**构建单元**
+    // （Rust ABI），而打包时判断播放器新不新鲜要的是同一份**源码** —— debug 编辑器
+    // 配 release 播放器是开发期的正常组合。所以这里把 profile / 优化等级 / 调试信息
+    // 三样排除，其余输入与构建指纹逐字一致。
+    let mut source = [0xcbf29ce484222325, 0x84222325cbf29ce4];
+    feed(&mut source, b"xgame-src-v1");
+    feed(&mut source, &output.stdout);
+    const PROFILE_ONLY_KEYS: &[&str] = &["PROFILE", "OPT_LEVEL", "DEBUG"];
     for key in keys {
         println!("cargo:rerun-if-env-changed={key}");
+        let value = env::var(&key).unwrap_or_default();
         feed(&mut hash, key.as_bytes());
-        feed(&mut hash, env::var(&key).unwrap_or_default().as_bytes());
+        feed(&mut hash, value.as_bytes());
+        if !PROFILE_ONLY_KEYS.contains(&key.as_str()) {
+            feed(&mut source, key.as_bytes());
+            feed(&mut source, value.as_bytes());
+        }
     }
     let mut files = vec![
         root.join("Cargo.toml"),
@@ -98,13 +111,15 @@ fn main() {
             .to_str()
             .unwrap()
             .replace('\\', "/");
+        let contents = fs::read(&file).expect("读取指纹输入");
         feed(&mut hash, relative.as_bytes());
-        feed(&mut hash, &fs::read(file).expect("读取指纹输入"));
+        feed(&mut hash, &contents);
+        feed(&mut source, relative.as_bytes());
+        feed(&mut source, &contents);
     }
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let fingerprint = format!("xgame-build-v1:{:016x}{:016x}", hash[0], hash[1]);
-    fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("plugin-fingerprint.txt"),
-        fingerprint,
-    )
-    .expect("写入构建指纹");
+    fs::write(out_dir.join("plugin-fingerprint.txt"), fingerprint).expect("写入构建指纹");
+    let source_fingerprint = format!("xgame-src-v1:{:016x}{:016x}", source[0], source[1]);
+    fs::write(out_dir.join("source-fingerprint.txt"), source_fingerprint).expect("写入源码指纹");
 }

@@ -5358,6 +5358,50 @@ Windows 下先新增 `import_update_failure_preserves_meta_and_index`：打开�
 
 失败或异常中止后的暂存清理、目录断电持久化、批量生成跨资产事务以及 `input.ron` / 迁移文件写入仍待处理；本轮结果不表示 G0 全部关闭。本轮全工作区 `check --all-targets --locked -j 2`、`clippy --all-targets --locked -D warnings`、`test --all-targets --locked` 均通过（原有 917 项 + 新增 2 项 = 919 passed，7 ignored）；release workspace 构建成功，dist 三个程序与 release 哈希一致；dist 编辑器对 SampleScene 实际 `--check` 返回 0（1 场景、24 实体、15 资产）。本轮未复跑桌面窗口 GPU 组合验收。
 
+## 六十六、G0 打包拒绝旧引擎播放器（2026-10-27）
+
+接 173「通用播放器选择的新鲜度仍未关闭」。`builder::locate_player` 只判"文件存在、
+取第一个候选"，于是"改完引擎只重编编辑器"就会把旧引擎的 `xgame-game.exe` 打进成品，
+没有任何征兆。
+
+### 实现
+
+- `crates/xgame/build.rs` 增加第二份指纹 `xgame-src-v1:…`：与插件用的
+  `xgame-build-v1:…` 同一套输入，但**排除** `PROFILE` / `OPT_LEVEL` / `DEBUG`，
+  所以 debug 编辑器配 release 播放器仍算同一份源码。
+- `xgame::plugin::SOURCE_FINGERPRINT` + `embeds_source_fingerprint(bytes)`；
+  常量用 `#[used]` 锚点保住 —— 实测没有锚点时链接器会把没人引用的常量整段丢掉
+  （`xgame-game.exe` 里搜不到 `xgame-src-v1:`），插件的 `@BUILD_FINGERPRINT` 之所以
+  健在是因为握手代码真的读它。
+- `builder::pick_player`：顺序不变，但跳过源码不一致的候选；跳过时写一条
+  `BuildReport::warnings`，全部不一致则 `BuildError::PlayerStale`（含重编命令与
+  已查过的路径）。`build_with_player` 的闭包类型从 `PathBuf` 换成 `PlayerPick`，
+  测试用 `PlayerPick::plain` 绕过指纹判据。
+
+### 红绿与端到端
+
+新增能力，旧代码没有对应分支可先红；改为**真实二进制负对照**，比单测更硬：
+
+- 阳性：`dist/xgame-editor.exe` + `dist/xgame-game.exe`（同批）→ `--build` 退出 0。
+- 负对照 1（旧引擎）：把包内播放器的 `xgame-src-v1:` 后一个十六进制字符改掉 → 同一命令退出 **1**，错误里带"不是同一份引擎源码…cargo build -p xgame-game"。
+- 负对照 2（跳过旧的用新的）：把改过的播放器放回编辑器同目录、另放一份正确播放器到 `outputs/release/` → 退出 **0**，warning 明确写出"跳过了 …（用的是 …）"。
+- 单测 4 条：指纹格式与两份不相等、整段相等才命中（少一字节不命中）、旧候选在前时仍选新的并留提醒、第一个就对时无噪音。证据目录 `outputs/freshness/`。
+
+### 全量验证与发布
+
+- check / clippy `-D warnings` / test 全绿：27 套件 **941 passed / 0 failed / 8 ignored**。
+- release workspace 同批重建、`一键构建.cmd` 刷新 dist；dist 两个可执行文件的
+  `xgame-src-v1:` 一致（`eb39fa2b…`）。示例插件 DLL 同批刷新为
+  `8B0EDFCD…C621E`（引擎源码变了，指纹门禁要求同批），BehaviorsDemo 无头 60 帧
+  零 error、SampleScene `--check` 退出 0。
+
+### 边界
+
+只比源码指纹，不做内容签名，不防篡改。指纹的输入是**各 lib crate 的 `src`、各
+`Cargo.toml` / `Cargo.lock`、工具链与 flags**（编辑器自己的 bin 代码不在其中 ——
+它不会进播放器），所以动了这些就得先重编播放器再打包；`一键构建.cmd` 本身满足。
+完整发布端到端仍只有本地脚本验收，没有接进 hosted CI。G0 不整体关闭。
+
 ## 六十五、G0 写盘实现统一与遗留暂存回收（2026-10-27）
 
 从 8b9e14a 继续，沿 G0「保存可靠性」主线只处理写盘与暂存残留。前置事实有两条：同一段「同目录独占暂存 + `sync_all` + 替换」在 `core::project`、`editor::prefs`、`input::action` 各有一份，而且三份的差错点各不相同（一份补建父目录、一份支持"只发布到空位"、一份两者都没有）；差距分析与 PLAN 六十四 都记着"历史暂存不自动回收"，项目目录会一直攒垃圾。

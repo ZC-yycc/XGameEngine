@@ -95,6 +95,34 @@ pub const ENGINE_VERSION_CODE: u32 = version_code(crate::ENGINE_VERSION);
 pub const BUILD_FINGERPRINT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/plugin-fingerprint.txt"));
 
+/// 只覆盖「引擎源码 + 工具链」的指纹，不含 profile / 优化等级 / 调试信息。
+///
+/// 与 [`BUILD_FINGERPRINT`] 分工不同：插件门禁要的是**同一构建单元**（Rust ABI 层面
+/// 才谈得上能不能跨 DLL 调用），而"打包时挑到的播放器是不是同一份引擎"要的是
+/// **同一份源码** —— debug 编辑器配 release 播放器是开发期完全正常的组合。
+pub const SOURCE_FINGERPRINT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/source-fingerprint.txt"));
+
+/// 让上面那份指纹在**链接之后**仍然留在二进制里。
+///
+/// 没有这行锚点，链接器会把没人引用的常量整段丢掉（实测：`xgame-game.exe` 里
+/// 就找不到 `xgame-src-v1:`），而插件那里之所以没这问题，是因为握手代码真的
+/// 读 `BUILD_FINGERPRINT`。`#[used]` 在 MSVC 目标上会变成 `/INCLUDE:`，
+/// 正好挡住 `/OPT:REF` 的回收。
+#[used]
+static SOURCE_FINGERPRINT_ANCHOR: &&[u8] = &SOURCE_FINGERPRINT;
+
+/// `bytes` 里是否嵌着当前源码指纹（即"这个二进制是同一份引擎编出来的"）。
+///
+/// 之所以不需要额外的清单文件：`SOURCE_FINGERPRINT` 是常量，会被链接进**每个**
+/// 依赖 `xgame` 的可执行文件 —— 编辑器与播放器都算。于是可执行文件本身就能
+/// 自证引擎版本，拷来拷去的 `.exe` 不会失去这份证据。
+pub fn embeds_source_fingerprint(bytes: &[u8]) -> bool {
+    bytes
+        .windows(SOURCE_FINGERPRINT.len())
+        .any(|window| window == SOURCE_FINGERPRINT)
+}
+
 /// v1 描述符协议：返回所需字节数；空指针或容量不足时不写入。
 /// 调用方拥有缓冲区，无 Rust 结构、分配或所有权跨边界传递。
 pub type PluginDescriptorFn = unsafe extern "C" fn(*mut u8, usize) -> usize;
@@ -440,6 +468,34 @@ mod tests {
             .lock()
             .unwrap()
             .push(String::from_utf8_lossy(bytes).into_owned());
+    }
+
+    #[test]
+    fn source_fingerprint_is_distinct_and_self_describing() {
+        let text = std::str::from_utf8(SOURCE_FINGERPRINT).expect("指纹是 ASCII");
+        assert!(text.starts_with("xgame-src-v1:"), "{text}");
+        assert_eq!(text.len(), "xgame-src-v1:".len() + 32, "{text}");
+        assert!(
+            text.trim_start_matches("xgame-src-v1:").bytes().all(|b| b.is_ascii_hexdigit()),
+            "{text}"
+        );
+        // 两份指纹覆盖的输入不同（一份含 profile），值不该撞在一起。
+        assert_ne!(SOURCE_FINGERPRINT, BUILD_FINGERPRINT);
+    }
+
+    #[test]
+    fn source_fingerprint_is_found_only_inside_a_matching_binary() {
+        let mut payload = b"MZ\x90\x00 fake executable payload".to_vec();
+        payload.extend_from_slice(SOURCE_FINGERPRINT);
+        payload.extend_from_slice(b"\x00trailing");
+        assert!(embeds_source_fingerprint(&payload));
+
+        // 少一个字节就不是"同一份源码"了 —— 判据必须是整段相等。
+        assert!(!embeds_source_fingerprint(
+            &SOURCE_FINGERPRINT[..SOURCE_FINGERPRINT.len() - 1]
+        ));
+        assert!(!embeds_source_fingerprint(b"no fingerprint here"));
+        assert!(!embeds_source_fingerprint(&[]));
     }
 
     #[test]

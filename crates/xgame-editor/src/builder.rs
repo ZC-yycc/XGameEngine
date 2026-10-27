@@ -99,6 +99,13 @@ pub enum BuildError {
     SceneUnloadable { scenes: Vec<String> },
     /// 内容源与构建目录互相包含，或存在无法安全复制的链接。
     PathConflict { source: PathBuf, output: PathBuf },
+    /// 播放器存在，但和编辑器不是同一份引擎源码编出来的。
+    ///
+    /// 为什么直接拒绝而不是警告后继续：拷进去的是一整个引擎，源码不同的播放器
+    /// 跑的是**旧的**物理 / 脚本 / 渲染行为。作者在编辑器里验过的效果、修过的 bug，
+    /// 到了成品里可能全都不成立 —— 这种"看起来成功、实际是旧引擎"的成品比一次
+    /// 明确的失败糟得多。
+    PlayerStale { searched: Vec<PathBuf> },
     /// 文件操作失败。
     Io {
         path: PathBuf,
@@ -144,6 +151,18 @@ impl fmt::Display for BuildError {
                 "构建路径冲突或不安全的目录链接：源 {}，输出 {}",
                 source.display(), output.display()
             ),
+            Self::PlayerStale { searched } => write!(
+                f,
+                "找到的播放器 '{}' 与编辑器不是同一份引擎源码编出来的（源码指纹不同），\
+                 打包出去的游戏会跑旧引擎。请重新构建播放器：cargo build -p xgame-game\
+                 （发布包用 一键构建.cmd）\n已检查过：{}",
+                PLAYER_EXE,
+                searched
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ),
             Self::Io { path, source } => {
                 write!(f, "文件操作失败 ({}): {source}", path.display())
             }
@@ -179,7 +198,7 @@ pub fn build(project: &ProjectHandle) -> Result<BuildReport, BuildError> {
 
 fn build_with_player(
     project: &ProjectHandle,
-    player: impl FnOnce() -> Result<PathBuf, BuildError>,
+    player: impl FnOnce() -> Result<PlayerPick, BuildError>,
 ) -> Result<BuildReport, BuildError> {
     // 快速失败：入口场景都不在，构建出来也是个空游戏。
     // 放在动手之前，避免留下一个半成品目录。
@@ -211,7 +230,8 @@ fn build_with_player(
         return Err(BuildError::SceneUnloadable { scenes: unloadable });
     }
 
-    let player = player()?;
+    let pick = player()?;
+    let player = pick.path;
 
     let output_dir = project
         .root()
@@ -281,7 +301,8 @@ fn build_with_player(
     if let Some(dir) = plugins.dir {
         packed_dirs.push(dir);
     }
-    let mut warnings = plugins.warnings;
+    let mut warnings = pick.warnings;
+    warnings.extend(plugins.warnings);
     let executable = output_dir.join(executable.file_name().expect("播放器有文件名"));
     staging.publish(&package_dir, &output_dir, &mut warnings)?;
 
@@ -299,11 +320,28 @@ fn build_with_player(
 // 播放器定位
 // ---------------------------------------------------------------------------
 
+/// 挑中的播放器 + 打包时要一起报出去的提醒。
+#[derive(Debug)]
+pub(crate) struct PlayerPick {
+    pub path: PathBuf,
+    /// 例如"同目录那个是旧引擎，改用了 target/release 下的"。走
+    /// [`BuildReport::warnings`]，因为点按钮的人看不到 stderr。
+    pub warnings: Vec<String>,
+}
+
+impl PlayerPick {
+    /// 测试用：认一个播放器，不产生提醒。
+    #[cfg(test)]
+    fn plain(path: PathBuf) -> Self {
+        Self { path, warnings: Vec::new() }
+    }
+}
+
 /// 定位 `xgame-game` 播放器可执行文件。
 ///
 /// 查找顺序：编辑器同目录 → 兄弟 profile 目录（`target/debug` ↔ `target/release`）。
 /// 后一条是为了照顾「编辑器用 debug 跑、播放器只构建过 release」这种开发期常见情况。
-fn locate_player() -> Result<PathBuf, BuildError> {
+fn locate_player() -> Result<PlayerPick, BuildError> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Ok(exe) = std::env::current_exe() {
@@ -317,13 +355,60 @@ fn locate_player() -> Result<PathBuf, BuildError> {
         }
     }
 
-    if let Some(found) = candidates.iter().find(|p| p.is_file()) {
-        return Ok(found.clone());
+    pick_player(&candidates)
+}
+
+/// 在候选里挑**引擎源码一致**的播放器。
+///
+/// 只看"文件存在"是不够的：`dist/xgame-game.exe` 与 `target/release` 里的那份都
+/// 可能比当前源码旧。改了物理 / 脚本又只重编了编辑器，打包就会把一个旧引擎塞进
+/// 成品，而且没有任何征兆。判据是播放器二进制里嵌着的源码指纹（见
+/// [`xgame::plugin::SOURCE_FINGERPRINT`]），它随可执行文件走，拷到哪都不会失效。
+///
+/// 顺序仍然是"先找到的先用"，只是**跳过**源码不一致的：所以 debug 编辑器配
+/// release 播放器照旧能打包，而旧引擎的那份会被越过并留一条提醒。
+fn pick_player(candidates: &[PathBuf]) -> Result<PlayerPick, BuildError> {
+    let existing: Vec<PathBuf> = candidates
+        .iter()
+        .filter(|path| path.is_file())
+        .cloned()
+        .collect();
+    if existing.is_empty() {
+        return Err(BuildError::PlayerNotFound {
+            searched: candidates.to_vec(),
+        });
     }
 
-    Err(BuildError::PlayerNotFound {
-        searched: candidates,
-    })
+    let mut skipped: Vec<PathBuf> = Vec::new();
+    for path in &existing {
+        // 读不出来（权限 / 正在被占用）就当它不可用：宁可报"都不是同一份源码"，
+        // 也不要凭文件存在就把一个来路不明的二进制打进成品。
+        let matches = std::fs::read(path)
+            .map(|bytes| xgame::plugin::embeds_source_fingerprint(&bytes))
+            .unwrap_or(false);
+        if matches {
+            let warnings = if skipped.is_empty() {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "跳过了与引擎源码不一致的播放器：{}（用的是 {}）",
+                    skipped
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                    path.display()
+                )]
+            };
+            return Ok(PlayerPick {
+                path: path.clone(),
+                warnings,
+            });
+        }
+        skipped.push(path.clone());
+    }
+
+    Err(BuildError::PlayerStale { searched: existing })
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +712,9 @@ mod tests {
         }
 
         fn build(&self) -> Result<BuildReport, BuildError> {
-            build_with_player(&self.project, || Ok(self.player.clone()))
+            // 测试不经过 `locate_player`：那要求磁盘上真有同一份源码编出来的
+            // xgame-game。指纹判据由 `pick_player` 的定向测试单独钉住。
+            build_with_player(&self.project, || Ok(PlayerPick::plain(self.player.clone())))
         }
     }
 
@@ -719,6 +806,79 @@ mod tests {
         std::fs::create_dir(fixture.project.root().join("input.ron")).unwrap();
         assert!(fixture.build().is_err());
         assert_eq!(std::fs::read(fixture.output().join("old.bin")).unwrap(), b"old");
+    }
+
+    // -----------------------------------------------------------------
+    // 播放器新鲜度：只有"文件存在"是不够的
+    // -----------------------------------------------------------------
+
+    /// 造一个假播放器：`fresh` 决定它带不带当前源码指纹。
+    fn fake_player(dir: &Path, name: &str, fresh: bool) -> PathBuf {
+        let path = dir.join(name);
+        let mut bytes = b"MZ fake player payload".to_vec();
+        if fresh {
+            bytes.extend_from_slice(xgame::plugin::SOURCE_FINGERPRINT);
+            bytes.extend_from_slice(b" tail");
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn pick_player_prefers_a_matching_fingerprint_over_an_earlier_stale_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_pick_player_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = fake_player(&dir, "stale.exe", false);
+        let fresh = fake_player(&dir, "fresh.exe", true);
+
+        // 旧的那个排在前面，但必须被跳过 —— 否则打出去的就是旧引擎。
+        let pick = pick_player(&[stale.clone(), fresh.clone()]).unwrap();
+        assert_eq!(pick.path, fresh);
+        assert_eq!(pick.warnings.len(), 1, "跳过旧播放器要有一条提醒: {:?}", pick.warnings);
+        assert!(pick.warnings[0].contains("stale.exe"), "{:?}", pick.warnings);
+
+        // 只剩旧的：明确拒绝，并把找过的路径都列出来。
+        let error = pick_player(std::slice::from_ref(&stale)).unwrap_err();
+        match &error {
+            BuildError::PlayerStale { searched } => assert_eq!(searched, &vec![stale.clone()]),
+            other => panic!("应报 PlayerStale，实际 {other}"),
+        }
+        let text = error.to_string();
+        assert!(text.contains("cargo build -p xgame-game"), "{text}");
+        assert!(text.contains("stale.exe"), "{text}");
+
+        // 一个都不存在：还是原来的 PlayerNotFound。
+        let missing = dir.join("missing.exe");
+        assert!(matches!(
+            pick_player(&[missing]),
+            Err(BuildError::PlayerNotFound { .. })
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pick_player_without_a_earlier_stale_candidate_stays_quiet() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_pick_player_quiet_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fresh = fake_player(&dir, "fresh.exe", true);
+        let pick = pick_player(std::slice::from_ref(&fresh)).unwrap();
+        assert_eq!(pick.path, fresh);
+        assert!(pick.warnings.is_empty(), "第一个就是对的，不该有噪音");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
