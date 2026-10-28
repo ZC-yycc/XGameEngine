@@ -159,6 +159,29 @@ impl Prefab {
         self.entities.iter().position(|e| e.id == id)
     }
 
+    /// **只报告**重复的实体 ID（`(id, 出现次数)`，按首次出现排序）。
+    ///
+    /// # 为什么预制体的重复 ID 只能报告、不能在加载边界修
+    ///
+    /// 场景的重复 ID 是**同文件内引用**（`parent` 指向本文件里的 ID），
+    /// 所以 `Scene::ensure_unique_ids` 可以"重分配 + 让人手工校正层级"——
+    /// 损失有界，且能阻止坏数据继续传播。
+    ///
+    /// 预制体的 ID 是**跨文件引用**：场景里每个实例的
+    /// [`PrefabInstanceRef::source_id`] 都指向该预制体文件里的 ID。在加载边界
+    /// 重分配它们，会让所有既有场景实例的 `source_id` 集体失配 —— `Apply` 时
+    /// `capture_subtree_ids` 取不到对应值、退回 `EntityId::new()`，于是整棵树
+    /// 被当成"新增"，资产里凭空多出一份重复实体。**跨文件引用不许静默改**，
+    /// 所以这里只提供"看"，修法是把该预制体在编辑器里打开、重新保存一次。
+    ///
+    /// 重复 ID 的实际危害：`index_of` 用 `position` 取**第一个**匹配，于是
+    /// `parent_index` / `children` 对第二条及以后的同 ID 实体给出错误结果
+    /// （父子层级错位），而 `instantiate` 虽然按位置分配新 ID（不会产出重复
+    /// ID），父引用也只能落到第一个同 ID 实体上。
+    pub fn duplicate_ids(&self) -> Vec<(EntityId, usize)> {
+        crate::id::duplicate_ids(self.entities.iter().map(|e| e.id))
+    }
+
     /// 父节点索引（与 [`Scene::parent_index`] 同语义）。
     pub fn parent_index(&self, index: usize) -> Option<usize> {
         let parent_id = self.entities.get(index)?.parent?;

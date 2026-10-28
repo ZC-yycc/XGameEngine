@@ -1002,6 +1002,21 @@ impl ProjectHandle {
         Ok(scene.duplicate_ids())
     }
 
+    /// 只读地统计某个预制体文件里的重复实体 ID（**不修复、不写盘**）。
+    ///
+    /// `--check` 专用，与 [`Self::scene_duplicate_ids`] 对称，但**不能**像场景那样
+    /// 在加载边界修：预制体的 ID 被场景里的 `PrefabInstanceRef::source_id` 跨文件
+    /// 引用，重分配会让所有既有实例的 `source_id` 失配（`Apply` 时整棵树被当成新增）。
+    /// 详见 [`crate::prefab::Prefab::duplicate_ids`]。
+    pub fn prefab_duplicate_ids(&self, relative: &str) -> Result<Vec<(EntityId, usize)>, String> {
+        let path = self.path(relative);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
+        let prefab =
+            Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+        Ok(prefab.duplicate_ids())
+    }
+
     /// 把场景写回项目内的相对路径。
     ///
     /// 写盘前把资产引用编码成 GUID（并补齐缺 `.meta` 的资产身份证）——

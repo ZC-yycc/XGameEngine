@@ -94,6 +94,21 @@ pub struct CheckReport {
     /// 修法是打开场景保存一次（修好的 ID 就写回去了）；重复 ID 下父子关系
     /// 已不可还原，层级可能要手工校正。
     pub duplicate_ids: Vec<String>,
+    /// 预制体文件里有**重复实体 ID** 的（"预制体: id N ×K"）。
+    ///
+    /// 与 [`Self::duplicate_ids`] 分开报，因为**修法不同**：场景的重复 ID 会在
+    /// 加载边界被 `Scene::ensure_unique_ids` 重分配（同文件引用，损失有界）；
+    /// 预制体的 ID 被场景里的 `PrefabInstanceRef::source_id` 跨文件引用，
+    /// 加载边界**不许**改 —— 改了就让所有既有实例的 `source_id` 集体失配，
+    /// `Apply` 时整棵树被当成"新增"。所以这里只报告，修法是打开该预制体重新保存。
+    pub duplicate_prefab_ids: Vec<String>,
+    /// 场景里 `PrefabInstanceRef::source_id` 在对应预制体里**找不到**的。
+    ///
+    /// 跨文件引用的完整性检查。成因：预制体被编辑过（删了实体）、或在外部
+    /// 手改过 ID。后果是 `Apply` / `Revert` 对不上位 —— `capture_subtree_ids`
+    /// 取不到值就退回 `EntityId::new()`，于是资产里凭空多出一份重复实体。
+    /// 按 `(场景, 预制体)` 聚合报一条，避免一个 20 节点实例刷 20 行。
+    pub dangling_source_ids: Vec<String>,
     /// 发布清单（`build.scenes`）的有效顺序，已规范化去重。
     ///
     /// 空清单不在这里体现：`scene_order()` 会退化成只有入口场景，那是"未配置"
@@ -129,6 +144,8 @@ impl CheckReport {
             || !self.guid_conflicts.is_empty()
             || !self.invalid_layers.is_empty()
             || !self.duplicate_ids.is_empty()
+            || !self.duplicate_prefab_ids.is_empty()
+            || !self.dangling_source_ids.is_empty()
             || !self.build_missing_scenes.is_empty()
     }
 
@@ -150,6 +167,8 @@ impl CheckReport {
             + self.guid_conflicts.len()
             + self.invalid_layers.len()
             + self.duplicate_ids.len()
+            + self.duplicate_prefab_ids.len()
+            + self.dangling_source_ids.len()
             + self.build_missing_scenes.len()
     }
 
@@ -229,6 +248,12 @@ impl CheckReport {
         }
         for d in &self.duplicate_ids {
             let _ = writeln!(out, "  duplicate id:   {d}");
+        }
+        for d in &self.duplicate_prefab_ids {
+            let _ = writeln!(out, "  duplicate prefab id: {d}");
+        }
+        for d in &self.dangling_source_ids {
+            let _ = writeln!(out, "  dangling source: {d}");
         }
         for s in &self.build_missing_scenes {
             let _ = writeln!(out, "  build scene missing: {s}");
@@ -340,6 +365,24 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
         // 读不出来 / 解析失败上面已经按 `invalid_scenes` 报过，不重复报。
     }
 
+    // -- 预制体文件的重复实体 ID（同样只在原始文本上看得见）----------------
+    //
+    // 场景那份可以在加载边界修，预制体这份**不能**（ID 被场景的 `source_id`
+    // 跨文件引用，重分配会让所有既有实例失配），所以这里只报告。汇总在
+    // `project.list_prefabs()` 上而不是场景引用上：没被任何场景用到的预制体
+    // 也可能是坏的，打开它就立刻掉进同一个坑。
+    for relative in project.list_prefabs() {
+        if let Ok(duplicates) = project.prefab_duplicate_ids(&relative) {
+            for (id, count) in duplicates {
+                report
+                    .duplicate_prefab_ids
+                    .push(format!("{relative}: id {} ×{count}", id.raw()));
+            }
+        }
+        // 解析失败的预制体此处静默跳过：内容级诊断不在本轮范围，硬报会
+        // 把"坏 RON"和"重复 ID"混成一类问题。
+    }
+
     // -- 资产库诊断（只读，不生成任何文件）--------------------------------
     {
         let assets = project.assets();
@@ -366,11 +409,22 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     // -- 场景引用 ---------------------------------------------------------
     // 材质按路径**跨场景**去重：同一个材质挂在一百个实体上时，坏文件只该报一次。
     let mut materials: BTreeMap<String, String> = BTreeMap::new();
+    // 预制体 ID 集合缓存：同一份预制体被十个实例引用时只解析一次。
+    // `None` = 读不出来（已在 `missing_prefabs` / `dangling_guids` 报过），
+    // 缓存住这个"坏"避免每个实例都重试一遍磁盘。
+    let mut prefab_ids: BTreeMap<String, Option<crate::id::EntitySet>> = BTreeMap::new();
     for (relative, scene) in &scenes {
         report.scenes += 1;
         report.entities += scene.entities.len();
         report.lights += scene.lights.len();
-        check_scene_references(&project, relative, scene, &mut report, &mut materials);
+        check_scene_references(
+            &project,
+            relative,
+            scene,
+            &mut report,
+            &mut materials,
+            &mut prefab_ids,
+        );
     }
 
     // -- 材质内容（引用的材质能不能读、里面的贴图在不在）------------------
@@ -417,8 +471,12 @@ fn check_scene_references(
     scene: &crate::Scene,
     report: &mut CheckReport,
     materials: &mut BTreeMap<String, String>,
+    prefab_ids: &mut BTreeMap<String, Option<crate::id::EntitySet>>,
 ) {
     let at = |name: &str| format!("{relative}: {name}");
+    // 悬空 `source_id` 按预制体聚合成一条，避免一个 20 节点实例刷 20 行。
+    // 值 = (缺失数量, 首个缺失实体的名字, 首个缺失的 source_id)。
+    let mut dangling_sources: BTreeMap<String, (usize, String, u64)> = BTreeMap::new();
 
     for entity in &scene.entities {
         // 层索引越界：读盘刻意**不修正**（修正会把配置错误藏起来），运行时按
@@ -515,7 +573,40 @@ fn check_scene_references(
                         .push(format!("{} -> {}", at(&entity.name), link.source));
                 }
             }
+            // 跨文件引用的完整性：`source_id` 必须能在**对应的**预制体里找到。
+            // 与上面的"文件在不在"是两件事 —— 文件在、但里面那个实体没了
+            // （预制体被编辑过），`Apply` / `Revert` 就对不上位，而且不报错。
+            if !is_guid_reference(&link.source) {
+                let known = prefab_ids
+                    .entry(link.source.clone())
+                    .or_insert_with(|| {
+                        project
+                            .load_prefab(&link.source)
+                            .ok()
+                            .map(|p| p.entities.iter().map(|e| e.id).collect())
+                    })
+                    .as_ref();
+                if let Some(known) = known {
+                    if !known.contains(&link.source_id) {
+                        let slot = dangling_sources.entry(link.source.clone()).or_insert((
+                            0,
+                            entity.name.clone(),
+                            link.source_id.raw(),
+                        ));
+                        slot.0 += 1;
+                    }
+                }
+            }
         }
+    }
+
+    for (source, (count, first_name, first_id)) in dangling_sources {
+        // 文案保持纯 ASCII（见 `render` 的说明）：控制台代码页不是 UTF-8 时，
+        // 中文会变成乱码，而 CI 读的就是这行文本。实体名本身可能含中文，
+        // 那是**数据**，不是这里的文案。
+        report.dangling_source_ids.push(format!(
+            "{relative}: {source} missing {count} source_id(s) (first: {first_name} -> id {first_id})"
+        ));
     }
 }
 
@@ -587,6 +678,134 @@ mod tests {
 
         let after = project.scene_duplicate_ids(&entry).expect("再读一次");
         assert!(!after.is_empty(), "检查必须只读，不能把重复 ID 修好写回去");
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 预制体里的重复 ID 必须被报告，且**绝不能**在加载边界被修。
+    ///
+    /// 场景那份可以在加载边界重分配（同文件引用，损失有界）；预制体的 ID 被
+    /// 场景里的 `PrefabInstanceRef::source_id` 跨文件引用 —— 一旦重分配，
+    /// 所有既有实例的 `source_id` 集体失配，`Apply` 会把整棵树当成"新增"。
+    /// 所以这条测试同时钉两件事：**报得出来** + **没被改**。
+    #[test]
+    fn duplicate_prefab_ids_are_reported_and_never_repaired() {
+        use crate::prefab::Prefab;
+
+        let project = temp_project("dup_prefab_ids");
+        let mut prefab = Prefab::new("Twin");
+        let first = crate::Entity::new("A");
+        let shared = first.id;
+        prefab.entities.push(first);
+        let mut second = crate::Entity::new("B");
+        second.id = shared;
+        prefab.entities.push(second);
+        let relative = "Prefabs/Twin.prefab.ron";
+        project.write_prefab(relative, &prefab).expect("写预制体");
+
+        let report = check_project(project.root()).expect("检查应能跑完");
+        assert!(
+            report.has_issues(),
+            "预制体重复 ID 必须算问题（`--check` 退出码由它决定）：{}",
+            report.render()
+        );
+        assert!(
+            !report.duplicate_prefab_ids.is_empty(),
+            "预制体的重复 ID 必须被报出来：{}",
+            report.render()
+        );
+        assert!(
+            report.duplicate_prefab_ids[0].contains("×2"),
+            "应当报出出现次数，实际 {}",
+            report.duplicate_prefab_ids[0]
+        );
+        assert!(
+            report.render().contains("duplicate prefab id"),
+            "报告文本必须包含这一行：{}",
+            report.render()
+        );
+
+        // 只读 + 不修：再读一次，两个实体仍然是同一个 ID。
+        let after = project.load_prefab(relative).expect("再读一次");
+        assert_eq!(
+            after.entities[0].id, after.entities[1].id,
+            "预制体的重复 ID 不许在加载边界被静默重分配（跨文件引用）"
+        );
+        assert!(
+            !project
+                .prefab_duplicate_ids(relative)
+                .expect("只读统计")
+                .is_empty(),
+            "检查必须只读，不能把文件里的重复 ID 改好"
+        );
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 场景里 `source_id` 指向预制体里不存在的实体，必须被报告。
+    ///
+    /// 这是"文件在、但里面那个实体没了"（预制体被编辑过 / ID 被手改）。
+    /// 不报的后果是 `Apply` / `Revert` 静默对不上位：`capture_subtree_ids`
+    /// 取不到值就退回 `EntityId::new()`，资产里凭空多出一份重复实体。
+    #[test]
+    fn dangling_source_id_is_reported() {
+        use crate::prefab::{Prefab, PrefabInstanceRef};
+
+        let project = temp_project("dangling_source");
+        let mut prefab = Prefab::new("Solo");
+        let alive = crate::Entity::new("Alive");
+        let alive_id = alive.id;
+        prefab.entities.push(alive);
+        let prefab_relative = "Prefabs/Solo.prefab.ron";
+        project
+            .write_prefab(prefab_relative, &prefab)
+            .expect("写预制体");
+
+        let mut scene = project.load_entry_scene().expect("加载默认场景");
+        // 对得上的一份 + 对不上的一份。
+        let mut ok = crate::Entity::new("GoodInstance");
+        ok.prefab = Some(PrefabInstanceRef {
+            source: prefab_relative.to_string(),
+            source_id: alive_id,
+            is_root: true,
+        });
+        scene.entities.push(ok);
+        let mut bad = crate::Entity::new("StaleInstance");
+        bad.prefab = Some(PrefabInstanceRef {
+            source: prefab_relative.to_string(),
+            source_id: crate::EntityId::from_raw(9_999),
+            is_root: true,
+        });
+        scene.entities.push(bad);
+        let entry = project.manifest().entry_scene.clone();
+        project.write_scene(&entry, &scene).expect("写场景");
+
+        let report = check_project(project.root()).expect("检查应能跑完");
+        assert!(
+            report.has_issues(),
+            "悬空 source_id 必须算问题（`--check` 退出码由它决定）：{}",
+            report.render()
+        );
+        assert_eq!(
+            report.dangling_source_ids.len(),
+            1,
+            "同一预制体只聚合成一条：{}",
+            report.render()
+        );
+        let line = &report.dangling_source_ids[0];
+        assert!(
+            line.contains("missing 1 source_id") && line.contains("StaleInstance"),
+            "应点名缺失数量与首个实体，实际 {line}"
+        );
+        assert!(
+            !line.contains("GoodInstance"),
+            "对得上的实例不该出现在报告里：{line}"
+        );
+        assert!(
+            report.render().contains("dangling source"),
+            "报告文本必须包含这一行：{}",
+            report.render()
+        );
 
         let _ = std::fs::remove_dir_all(project.root());
     }

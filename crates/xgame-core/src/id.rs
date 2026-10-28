@@ -129,6 +129,36 @@ pub type EntityMap<V> = std::collections::HashMap<EntityId, V>;
 /// 以 `EntityId` 为元素的集合。
 pub type EntitySet = std::collections::HashSet<EntityId>;
 
+/// 统计重复的实体 ID：`(id, 出现次数)`，按**首次出现**排序。
+///
+/// 场景与预制体共用这一份实现 —— 两边的"唯一性作用域"不同（见
+/// `Scene::duplicate_ids` 与 `Prefab::duplicate_ids` 的说明），但**怎么看**应当
+/// 一致，否则同一份坏数据在两个入口给出不同顺序的报告。
+///
+/// 顺序不能用 `HashMap` 的迭代顺序：`--check` 的输出要能直接 diff，随机顺序会
+/// 让每次运行都不一样。这里用"首次出现过的 ID 序列"当排序依据，一遍扫描出结果。
+pub fn duplicate_ids<I>(ids: I) -> Vec<(EntityId, usize)>
+where
+    I: IntoIterator<Item = EntityId>,
+{
+    let mut counts: EntityMap<usize> = EntityMap::new();
+    let mut first_seen: Vec<EntityId> = Vec::new();
+    for id in ids {
+        let slot = counts.entry(id).or_insert(0);
+        if *slot == 0 {
+            first_seen.push(id);
+        }
+        *slot += 1;
+    }
+    first_seen
+        .into_iter()
+        .filter_map(|id| {
+            let count = counts[&id];
+            (count > 1).then_some((id, count))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;

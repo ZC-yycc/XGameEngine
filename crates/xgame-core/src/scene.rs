@@ -940,19 +940,7 @@ impl Scene {
     /// 顺序按**首次出现**排，不用 `HashMap` 的迭代顺序：`--check` 的输出要能
     /// 直接 diff，随机顺序会让每次运行都不一样。
     pub fn duplicate_ids(&self) -> Vec<(EntityId, usize)> {
-        let mut counts: std::collections::HashMap<EntityId, usize> =
-            std::collections::HashMap::with_capacity(self.entities.len());
-        for entity in &self.entities {
-            *counts.entry(entity.id).or_insert(0) += 1;
-        }
-        let mut reported: std::collections::HashSet<EntityId> = std::collections::HashSet::new();
-        self.entities
-            .iter()
-            .filter_map(|entity| {
-                let count = counts[&entity.id];
-                (count > 1 && reported.insert(entity.id)).then_some((entity.id, count))
-            })
-            .collect()
+        crate::id::duplicate_ids(self.entities.iter().map(|e| e.id))
     }
 
     /// 场景是否为空（无实体）。
