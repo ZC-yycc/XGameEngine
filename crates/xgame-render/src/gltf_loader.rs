@@ -343,6 +343,27 @@ impl GltfVertex {
             attributes: Self::ATTRIBUTES,
         }
     }
+
+    /// 清零超出骨槽容量的关节影响（固定容量超限策略的顶点侧一半）。
+    ///
+    /// 槽位只有 [`crate::scene_pipeline::BONES_PER_SLOT`] 根骨，超过的骨架在
+    /// 上传时被截断；顶点若还引用截断区的骨，着色器的 `base + index` 会读进
+    /// **下一个实体的槽**（别人一动它跟着变形）。这里把越界影响的权重清零、
+    /// 下标归 0 占位：shader 的 `1/wsum` 会把剩下的影响重归一；全清零 = 冻结
+    /// 在绑定姿态（`wsum == 0` 分支）。宁可末梢不动，不能读别人的骨。
+    pub fn clamp_skin_influences(&mut self) {
+        for slot in self.joints.iter_mut().zip(self.weights.iter_mut()) {
+            let (joint, weight) = slot;
+            // NaN 下标同样清零（比较为假走这里）。
+            if !matches!(
+                (*joint).partial_cmp(&(crate::scene_pipeline::BONES_PER_SLOT as f32)),
+                Some(std::cmp::Ordering::Less)
+            ) {
+                *joint = 0.0;
+                *weight = 0.0;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +483,7 @@ impl GltfMesh {
                 let material_id = next_material_id();
 
                 // 交错排列为 GltfVertex 数组
-                let vertices: Vec<GltfVertex> = (0..vertex_count)
+                let mut vertices: Vec<GltfVertex> = (0..vertex_count)
                     .map(|i| GltfVertex {
                         position: positions[i],
                         normal: normals[i],
@@ -472,6 +493,10 @@ impl GltfMesh {
                         weights: weights[i],
                     })
                     .collect();
+                // 固定容量超限策略的顶点侧：越界关节影响清零（防读进邻槽）。
+                vertices
+                    .iter_mut()
+                    .for_each(GltfVertex::clamp_skin_influences);
 
                 let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
 
@@ -607,9 +632,14 @@ impl GltfMesh {
         data: &crate::mesh::MeshData,
         label: &str,
     ) -> Self {
+        // 与真实导入同一条超限策略：越界关节影响清零（见 `clamp_skin_influences`）。
+        let mut vertices = data.vertices.clone();
+        vertices
+            .iter_mut()
+            .for_each(GltfVertex::clamp_skin_influences);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
-            contents: bytemuck::cast_slice(&data.vertices),
+            contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -766,7 +796,7 @@ pub fn parse_animation_data_scaled(
     // -- 蒙皮 --
     let mut skins = Vec::new();
     for skin in document.skins() {
-        let joints: Vec<u32> = skin.joints().map(|j| j.index() as u32).collect();
+        let mut joints: Vec<u32> = skin.joints().map(|j| j.index() as u32).collect();
         if joints.len() > crate::scene_pipeline::BONES_PER_SLOT {
             log::warn!(
                 "skin '{}' has {} joints — only the first {} are supported (v1 limit)",
@@ -775,6 +805,10 @@ pub fn parse_animation_data_scaled(
                 crate::scene_pipeline::BONES_PER_SLOT
             );
         }
+        // 固定容量超限策略：关节表**截断**到骨槽容量（末梢骨丢弃），保证
+        // `bones[k]` 与顶点 JOINTS_0 的下标空间一致 —— 顶点侧的越界影响由
+        // `GltfVertex::clamp_skin_influences` 清零，两边共同堵死"读进邻槽"。
+        joints.truncate(crate::scene_pipeline::BONES_PER_SLOT);
         let reader = skin.reader(|buf| Some(&buffers[buf.index()]));
         // 缺 IBM accessor 的蒙皮按"单位阵"处理（= 不做绑定空间校正），
         // 顶多姿态不准，不会黑屏或 panic。
@@ -782,6 +816,7 @@ pub fn parse_animation_data_scaled(
             .read_inverse_bind_matrices()
             .map(|iter| iter.map(|m| Mat4::from_cols_array_2d(&m)).collect())
             .unwrap_or_else(|| vec![Mat4::IDENTITY; joints.len()]);
+        inverse_bind.truncate(crate::scene_pipeline::BONES_PER_SLOT);
         if scale != 1.0 {
             // 均匀缩放 s 下 IBM' = S·IBM·S⁻¹：线性部分不变，平移乘 s。
             // （推导见 `parse_animation_data_scaled` 的文档。）
@@ -1131,7 +1166,7 @@ fn decode_image_data(data: &gltf::image::Data) -> Option<Vec<u8>> {
 // 面法线计算
 // ---------------------------------------------------------------------------
 
-fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+pub(crate) fn compute_face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let vertex_count = positions.len();
     let mut normals = vec![[0.0f32; 3]; vertex_count];
 
@@ -1784,5 +1819,174 @@ pub(crate) mod tests {
             parse_morph_targets(&mesh, &primitive, &buffers, &base, 1.0).is_none(),
             "没有形变目标的图元应返回 None"
         );
+    }
+    /// 合成一个 300 骨蒙皮的三角形 glTF（内嵌缓冲，不碰磁盘）。
+    ///
+    /// 骨槽固定 256 个位置（`BONES_PER_SLOT`）：三个顶点的影响分别跨在
+    /// 边界上 —— v0 = [255, 256] 各 0.5（一半越界）、v1 = 四个全越界、
+    /// v2 = 只在界内；动画平移节点 255（界内最后一根骨）。超限策略要求
+    /// 蒙皮截断到 256 根、越界影响清零（渲染侧回归见 screenshot.rs 的
+    /// `oversized_skin_influences_freeze_instead_of_leaking_into_the_next_slot`）。
+    pub(crate) fn oversized_skin_gltf() -> String {
+        let mut bytes: Vec<u8> = Vec::new();
+        // POSITION：原点 / X 单位 / Y 单位。
+        for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for v in p {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        // NORMAL：都朝 +Z（相机在 +Z 侧看得见正面）。
+        for _ in 0..3 {
+            for v in [0.0f32, 0.0, 1.0] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        // JOINTS_0（u16×4）。
+        for row in [[255u16, 256, 0, 0], [256, 257, 298, 299], [255, 0, 0, 0]] {
+            for v in row {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        // WEIGHTS_0（f32×4）。
+        for row in [
+            [0.5f32, 0.5, 0.0, 0.0],
+            [0.25, 0.25, 0.25, 0.25],
+            [1.0, 0.0, 0.0, 0.0],
+        ] {
+            for v in row {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        // 索引（u16×3），之后补 2 字节让 f32 对齐到 4。
+        for v in [0u16, 1, 2] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0u8; 2]);
+        // 动画时间轴（f32×2）。
+        for v in [0.0f32, 1.0] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        // 动画值：节点 255 的平移 (0,0,0) → (1,0,0)。
+        for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0]] {
+            for v in p {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+
+        let nodes = (0..300)
+            .map(|_| r#"{"translation": [0.0, 0.0, 0.0]}"#)
+            .chain(std::iter::once(r#"{"mesh": 0, "skin": 0}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let joint_list = (0..300)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let template = r#"{
+  "asset": {"version": "2.0"},
+  "scene": 0,
+  "scenes": [{"nodes": [300, 0]}],
+  "nodes": [%NODES%],
+  "skins": [{"joints": [%JOINTS%]}],
+  "animations": [{
+    "name": "move",
+    "channels": [{"sampler": 0, "target": {"node": 255, "path": "translation"}}],
+    "samplers": [{"input": 5, "output": 6, "interpolation": "LINEAR"}]
+  }],
+  "meshes": [{
+    "primitives": [{
+      "attributes": {"POSITION": 0, "NORMAL": 1, "JOINTS_0": 2, "WEIGHTS_0": 3},
+      "indices": 4
+    }]
+  }],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]},
+    {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
+    {"bufferView": 2, "componentType": 5123, "count": 3, "type": "VEC4"},
+    {"bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC4"},
+    {"bufferView": 4, "componentType": 5123, "count": 3, "type": "SCALAR"},
+    {"bufferView": 5, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0.0], "max": [1.0]},
+    {"bufferView": 6, "componentType": 5126, "count": 2, "type": "VEC3"}
+  ],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 36, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 72, "byteLength": 24},
+    {"buffer": 0, "byteOffset": 96, "byteLength": 48},
+    {"buffer": 0, "byteOffset": 144, "byteLength": 6},
+    {"buffer": 0, "byteOffset": 152, "byteLength": 8},
+    {"buffer": 0, "byteOffset": 160, "byteLength": 24}
+  ],
+  "buffers": [{"byteLength": %LEN%, "uri": "data:application/octet-stream;base64,%B64%"}]
+}"#;
+        template
+            .replace("%NODES%", &nodes)
+            .replace("%JOINTS%", &joint_list)
+            .replace("%B64%", &base64(&bytes))
+            .replace("%LEN%", &bytes.len().to_string())
+    }
+
+    /// 300 骨的蒙皮必须**截断到骨槽容量**：`Skin` 的关节表与逆绑定矩阵都
+    /// 只留前 256 根（顶点影响的钳制是另一半，见 `clamp_skin_influences`）。
+    /// 不截断的话 `bones[k]` 与顶点下标对不上号，超出部分还会顶到邻槽。
+    #[test]
+    fn oversized_skin_truncates_to_the_bone_slot_capacity() {
+        let path =
+            std::env::temp_dir().join(format!("xgame-oversized-trunc-{}.gltf", std::process::id()));
+        std::fs::write(&path, oversized_skin_gltf()).unwrap();
+        let (doc, buffers, _) = gltf::import(&path).expect("合成超限骨架应能解析");
+        std::fs::remove_file(&path).unwrap();
+        let data = parse_animation_data(&doc, &buffers);
+        assert_eq!(data.skins.len(), 1);
+        assert_eq!(data.skins[0].joints.len(), 256, "关节表必须截断到骨槽容量");
+        assert_eq!(
+            data.skins[0].inverse_bind.len(),
+            256,
+            "逆绑定矩阵必须与关节表同步截断"
+        );
+    }
+
+    /// 越界关节影响的清零规则（固定容量超限策略的顶点侧一半）：
+    /// 下标 ≥ 骨槽容量的影响权重清零、下标归 0 占位；界内影响原样保留。
+    /// 全越界 = 全清零，shader 的 `wsum == 0` 分支会把顶点冻结在绑定姿态。
+    #[test]
+    fn clamp_skin_influences_zeroes_out_of_slot_indices() {
+        let mut mixed = GltfVertex {
+            position: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            color: [1.0; 3],
+            tex_coord: [0.0; 2],
+            joints: [255.0, 256.0, 300.0, 0.0],
+            weights: [0.4, 0.3, 0.2, 0.1],
+        };
+        mixed.clamp_skin_influences();
+        assert_eq!(mixed.joints, [255.0, 0.0, 0.0, 0.0], "越界下标归 0 占位");
+        assert_eq!(mixed.weights, [0.4, 0.0, 0.0, 0.1], "只清越界的权重");
+
+        let mut frozen = GltfVertex {
+            position: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            color: [1.0; 3],
+            tex_coord: [0.0; 2],
+            joints: [256.0, 257.0, 298.0, 299.0],
+            weights: [0.25; 4],
+        };
+        frozen.clamp_skin_influences();
+        assert_eq!(
+            frozen.weights, [0.0; 4],
+            "全越界 = 全清零（冻结在绑定姿态）"
+        );
+
+        let mut kept = GltfVertex {
+            position: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            color: [1.0; 3],
+            tex_coord: [0.0; 2],
+            joints: [0.0, 1.0, 254.0, 255.0],
+            weights: [0.25; 4],
+        };
+        kept.clamp_skin_influences();
+        assert_eq!(kept.joints, [0.0, 1.0, 254.0, 255.0], "界内影响不动");
+        assert_eq!(kept.weights, [0.25; 4]);
     }
 }

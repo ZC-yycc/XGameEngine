@@ -799,8 +799,14 @@ mod tests {
     #[test]
     fn removed_entity_does_not_run_queued_update() {
         let project = TempProject::new("removed_queue");
-        let killer = project.write_script("killer", "function update(ctx) destroy(ctx, entity_id(ctx, 'victim')) end");
-        let victim = project.write_script("victim", "function update(ctx) log(ctx, 'stale update') end");
+        let killer = project.write_script(
+            "killer",
+            "function update(ctx) destroy(ctx, entity_id(ctx, 'victim')) end",
+        );
+        let victim = project.write_script(
+            "victim",
+            "function update(ctx) log(ctx, 'stale update') end",
+        );
         let mut scene = scene_with_script(&killer);
         let mut entity = Entity::new("victim");
         entity.scripts.push(victim);
@@ -809,13 +815,17 @@ mod tests {
         host.set_root(&project.dir);
         host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
         assert_eq!(scene.entities.len(), 1);
-        assert!(host.take_logs().is_empty(), "已删除实体不能继续执行快照里的 update");
+        assert!(
+            host.take_logs().is_empty(),
+            "已删除实体不能继续执行快照里的 update"
+        );
     }
 
     #[test]
     fn saved_context_is_rejected_outside_hook_window() {
         let project = TempProject::new("inactive_context");
-        let script = project.write_script("save_ctx", "function update(ctx) _G.saved_ctx = ctx end");
+        let script =
+            project.write_script("save_ctx", "function update(ctx) _G.saved_ctx = ctx end");
         let mut scene = scene_with_script(&script);
         let mut host = LuaHost::new();
         host.set_root(&project.dir);
@@ -829,11 +839,17 @@ mod tests {
     fn top_level_budget_is_independent_after_an_exhausted_script() {
         let project = TempProject::new("top_level_budget");
         let bad = project.write_script("exhausted", "while true do end");
-        let good = project.write_script("healthy", "local sum = 0; for i = 1, 10000 do sum = sum + i end");
+        let good = project.write_script(
+            "healthy",
+            "local sum = 0; for i = 1, 10000 do sum = sum + i end",
+        );
         let mut host = LuaHost::new();
         host.set_root(&project.dir);
         assert!(!host.ensure_loaded(&bad));
-        assert!(host.ensure_loaded(&good), "前一个脚本耗尽预算不能污染下一个脚本的顶层执行");
+        assert!(
+            host.ensure_loaded(&good),
+            "前一个脚本耗尽预算不能污染下一个脚本的顶层执行"
+        );
     }
 
     fn scene_with_script(relative: &str) -> Scene {
@@ -932,10 +948,7 @@ mod tests {
             host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
             total += host.take_logs().len();
         }
-        assert!(
-            total > 0,
-            "报错必须至少被记录一次，否则限流等于隐瞒故障"
-        );
+        assert!(total > 0, "报错必须至少被记录一次，否则限流等于隐瞒故障");
         assert!(
             total <= 10,
             "持续报错必须被限流：100 帧里报了 {total} 条（应当是指数退避，量级在个位数）"

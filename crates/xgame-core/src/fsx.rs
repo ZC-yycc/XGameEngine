@@ -324,7 +324,8 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn locked_target_keeps_old_bytes_and_cleans_staging() {        use std::os::windows::fs::OpenOptionsExt;
+    fn locked_target_keeps_old_bytes_and_cleans_staging() {
+        use std::os::windows::fs::OpenOptionsExt;
         let dir = temp_dir("locked");
         let path = dir.join("scene.ron");
         write_atomic(&path, "旧内容").unwrap();
@@ -387,8 +388,7 @@ mod tests {
                         continue;
                     };
                     assert!(
-                        text == "seed"
-                            || (text.starts_with("writer ") && text.contains(" round ")),
+                        text == "seed" || (text.starts_with("writer ") && text.contains(" round ")),
                         "读到了半截内容: {text:?}"
                     );
                 }

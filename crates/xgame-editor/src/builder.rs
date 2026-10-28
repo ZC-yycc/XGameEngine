@@ -157,7 +157,8 @@ impl fmt::Display for BuildError {
             Self::PathConflict { source, output } => write!(
                 f,
                 "构建路径冲突或不安全的目录链接：源 {}，输出 {}",
-                source.display(), output.display()
+                source.display(),
+                output.display()
             ),
             Self::PlayerStale { searched } => write!(
                 f,
@@ -266,19 +267,28 @@ fn build_with_player(
         .join(safe_file_name(project.name()));
     let content = &project.manifest().content;
     for raw in [
-        &content.scenes_dir, &content.models_dir, &content.textures_dir,
-        &content.audio_dir, &content.shaders_dir, &content.prefabs_dir, &content.scripts_dir,
+        &content.scenes_dir,
+        &content.models_dir,
+        &content.textures_dir,
+        &content.audio_dir,
+        &content.shaders_dir,
+        &content.prefabs_dir,
+        &content.scripts_dir,
     ] {
         if !raw.is_empty() && normalize_relative(raw).is_none() {
             return Err(BuildError::PathConflict {
-                source: project.path(raw), output: output_dir.clone(),
+                source: project.path(raw),
+                output: output_dir.clone(),
             });
         }
     }
     let dirs = content_dirs(project);
     validate_output(project, &dirs, &output_dir)?;
     if paths_overlap(&resolved_path(&player)?, &resolved_path(&output_dir)?) {
-        return Err(BuildError::PathConflict { source: player, output: output_dir });
+        return Err(BuildError::PathConflict {
+            source: player,
+            output: output_dir,
+        });
     }
     let staging = Staging::new(output_dir.parent().expect("输出有父目录"))?;
     validate_output(project, &dirs, &staging.path)?;
@@ -422,7 +432,10 @@ impl PlayerPick {
     /// 测试用：认一个播放器，不产生提醒。
     #[cfg(test)]
     fn plain(path: PathBuf) -> Self {
-        Self { path, warnings: Vec::new() }
+        Self {
+            path,
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -622,19 +635,31 @@ fn paths_overlap(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-fn validate_output(project: &ProjectHandle, dirs: &[String], output: &Path) -> Result<(), BuildError> {
+fn validate_output(
+    project: &ProjectHandle,
+    dirs: &[String],
+    output: &Path,
+) -> Result<(), BuildError> {
     let destination = resolved_path(output)?;
     let root = resolved_path(project.root())?;
     // 项目根可以包含默认输出，但输出绝不能包含项目根。
     if root.starts_with(&destination) {
-        return Err(BuildError::PathConflict { source: root, output: output.into() });
+        return Err(BuildError::PathConflict {
+            source: root,
+            output: output.into(),
+        });
     }
     for relative in dirs.iter().map(String::as_str).chain([
-        crate::plugin_build::PLUGINS_DIR, PROJECT_FILE_NAME, "input.ron",
+        crate::plugin_build::PLUGINS_DIR,
+        PROJECT_FILE_NAME,
+        "input.ron",
     ]) {
         let source = resolved_path(&project.path(relative))?;
         if paths_overlap(&source, &destination) {
-            return Err(BuildError::PathConflict { source, output: output.into() });
+            return Err(BuildError::PathConflict {
+                source,
+                output: output.into(),
+            });
         }
     }
     Ok(())
@@ -651,23 +676,37 @@ impl Staging {
         std::fs::create_dir_all(parent).map_err(io_err(parent))?;
         loop {
             let path = parent.join(format!(
-                ".xgame-staging-{}-{}", std::process::id(),
+                ".xgame-staging-{}-{}",
+                std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             match std::fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path, preserve: false }),
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        preserve: false,
+                    })
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(io_err(path)(e)),
             }
         }
     }
 
-    fn publish(mut self, package: &Path, output: &Path, warnings: &mut Vec<String>) -> Result<(), BuildError> {
+    fn publish(
+        mut self,
+        package: &Path,
+        output: &Path,
+        warnings: &mut Vec<String>,
+    ) -> Result<(), BuildError> {
         let backup = self.path.join("previous");
         let had_previous = match std::fs::symlink_metadata(output) {
             Ok(meta) => {
                 if !meta.is_dir() || meta.file_type().is_symlink() {
-                    return Err(BuildError::PathConflict { source: output.into(), output: output.into() });
+                    return Err(BuildError::PathConflict {
+                        source: output.into(),
+                        output: output.into(),
+                    });
                 }
                 std::fs::rename(output, &backup).map_err(io_err(output))?;
                 true
@@ -681,7 +720,8 @@ impl Staging {
                     // 回滚也失败时，绝不能让 Drop 删除唯一的旧发布副本。
                     self.preserve = true;
                     return Err(io_err(&backup)(std::io::Error::other(format!(
-                        "发布失败：{e}；恢复失败：{rollback}；旧发布保留在 {}", backup.display()
+                        "发布失败：{e}；恢复失败：{rollback}；旧发布保留在 {}",
+                        backup.display()
                     ))));
                 }
             }
@@ -690,7 +730,10 @@ impl Staging {
         if had_previous {
             if let Err(e) = std::fs::remove_dir_all(&backup) {
                 self.preserve = true;
-                warnings.push(format!("发布成功，但旧包清理失败 ({}): {e}", backup.display()));
+                warnings.push(format!(
+                    "发布成功，但旧包清理失败 ({}): {e}",
+                    backup.display()
+                ));
             }
         }
         Ok(())
@@ -711,7 +754,10 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<usize, BuildError> {
     if metadata.file_type().is_symlink()
         || paths_overlap(&resolved_path(src)?, &resolved_path(dst)?)
     {
-        return Err(BuildError::PathConflict { source: src.into(), output: dst.into() });
+        return Err(BuildError::PathConflict {
+            source: src.into(),
+            output: dst.into(),
+        });
     }
     std::fs::create_dir_all(dst).map_err(io_err(dst))?;
 
@@ -723,7 +769,10 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<usize, BuildError> {
 
         let kind = entry.file_type().map_err(io_err(&from))?;
         if kind.is_symlink() {
-            return Err(BuildError::PathConflict { source: from, output: to });
+            return Err(BuildError::PathConflict {
+                source: from,
+                output: to,
+            });
         }
         if kind.is_dir() {
             count += copy_dir(&from, &to)?;
@@ -807,7 +856,11 @@ mod tests {
             let project = ProjectHandle::create(&base, "demo").unwrap();
             let player = base.join(PLAYER_EXE);
             std::fs::write(&player, b"player").unwrap();
-            Self { base, project, player }
+            Self {
+                base,
+                project,
+                player,
+            }
         }
 
         fn output(&self) -> PathBuf {
@@ -838,8 +891,14 @@ mod tests {
             std::fs::write(src.join("nested/main.lua"), b"return 42").unwrap();
             std::fs::write(fixture.project.root().join("input.ron"), b"custom input").unwrap();
             let report = fixture.build().unwrap();
-            assert_eq!(std::fs::read(report.output_dir.join(scripts).join("nested/main.lua")).unwrap(), b"return 42");
-            assert_eq!(std::fs::read(report.output_dir.join("input.ron")).unwrap(), b"custom input");
+            assert_eq!(
+                std::fs::read(report.output_dir.join(scripts).join("nested/main.lua")).unwrap(),
+                b"return 42"
+            );
+            assert_eq!(
+                std::fs::read(report.output_dir.join("input.ron")).unwrap(),
+                b"custom input"
+            );
             assert!(report.packed_dirs.contains(&scripts.to_string()));
             assert!(report.executable.is_file());
         }
@@ -851,7 +910,10 @@ mod tests {
         let bytes = b"(actions: {\"jump\": [Key(Space)]})";
         std::fs::write(fixture.project.root().join("input.ron"), bytes).unwrap();
         let report = fixture.build().unwrap();
-        assert_eq!(std::fs::read(report.output_dir.join("input.ron")).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read(report.output_dir.join("input.ron")).unwrap(),
+            bytes
+        );
     }
 
     // -- 清单外依赖：包里必须自带场景引用的东西 --------------------------------
@@ -945,8 +1007,16 @@ mod tests {
         // 播放器复制完成后，清单复制失败，不能先删除旧发布目录。
         std::fs::remove_file(fixture.project.root().join(PROJECT_FILE_NAME)).unwrap();
         assert!(fixture.build().is_err());
-        assert_eq!(std::fs::read(fixture.output().join("old.bin")).unwrap(), b"old release");
-        assert_eq!(std::fs::read_dir(fixture.output().parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read(fixture.output().join("old.bin")).unwrap(),
+            b"old release"
+        );
+        assert_eq!(
+            std::fs::read_dir(fixture.output().parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -957,7 +1027,12 @@ mod tests {
         fixture.build().unwrap();
         assert!(!fixture.output().join("stale.bin").exists());
         assert!(!fixture.output().join("input.ron").exists());
-        assert_eq!(std::fs::read_dir(fixture.output().parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(fixture.output().parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -980,8 +1055,13 @@ mod tests {
         std::fs::write(fixture.output().join("old.bin"), b"old").unwrap();
         let staging = Staging::new(fixture.output().parent().unwrap()).unwrap();
         let missing_package = staging.path.join("missing");
-        assert!(staging.publish(&missing_package, &fixture.output(), &mut Vec::new()).is_err());
-        assert_eq!(std::fs::read(fixture.output().join("old.bin")).unwrap(), b"old");
+        assert!(staging
+            .publish(&missing_package, &fixture.output(), &mut Vec::new())
+            .is_err());
+        assert_eq!(
+            std::fs::read(fixture.output().join("old.bin")).unwrap(),
+            b"old"
+        );
     }
 
     #[test]
@@ -991,7 +1071,10 @@ mod tests {
         std::fs::write(fixture.output().join("old.bin"), b"old").unwrap();
         std::fs::create_dir(fixture.project.root().join("input.ron")).unwrap();
         assert!(fixture.build().is_err());
-        assert_eq!(std::fs::read(fixture.output().join("old.bin")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(fixture.output().join("old.bin")).unwrap(),
+            b"old"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1027,8 +1110,17 @@ mod tests {
         // 旧的那个排在前面，但必须被跳过 —— 否则打出去的就是旧引擎。
         let pick = pick_player(&[stale.clone(), fresh.clone()]).unwrap();
         assert_eq!(pick.path, fresh);
-        assert_eq!(pick.warnings.len(), 1, "跳过旧播放器要有一条提醒: {:?}", pick.warnings);
-        assert!(pick.warnings[0].contains("stale.exe"), "{:?}", pick.warnings);
+        assert_eq!(
+            pick.warnings.len(),
+            1,
+            "跳过旧播放器要有一条提醒: {:?}",
+            pick.warnings
+        );
+        assert!(
+            pick.warnings[0].contains("stale.exe"),
+            "{:?}",
+            pick.warnings
+        );
 
         // 只剩旧的：明确拒绝，并把找过的路径都列出来。
         let error = pick_player(std::slice::from_ref(&stale)).unwrap_err();
@@ -1081,7 +1173,11 @@ mod tests {
     #[test]
     fn build_directory_link_to_source_is_rejected() {
         let fixture = Fixture::new();
-        std::os::unix::fs::symlink(fixture.project.root().join("Resources"), fixture.project.root().join("Build")).unwrap();
+        std::os::unix::fs::symlink(
+            fixture.project.root().join("Resources"),
+            fixture.project.root().join("Build"),
+        )
+        .unwrap();
         assert!(fixture.build().is_err());
         assert!(!fixture.project.root().join("Resources/demo").exists());
     }

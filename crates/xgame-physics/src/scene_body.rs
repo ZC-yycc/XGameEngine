@@ -155,7 +155,8 @@ mod tests {
 
     #[test]
     fn zero_mass_keeps_automatic_density() {
-        let (body, collider) = body_from_scene(&PhysicsBody::dynamic_ball(2.0), Transform::IDENTITY);
+        let (body, collider) =
+            body_from_scene(&PhysicsBody::dynamic_ball(2.0), Transform::IDENTITY);
         assert_eq!(body.mass, 0.0);
         assert_eq!(collider.density, 1.0);
     }

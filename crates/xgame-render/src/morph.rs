@@ -158,8 +158,8 @@ impl MorphTargets {
 
     /// 所有合法权重组合的保守盒；导入时计算一次，避免剔除先于权重采样而漏画。
     pub fn conservative_bounds(&self) -> crate::gltf_loader::Bounds {
-        use xgame_math::glam::Vec3;
         use crate::gltf_loader::Bounds;
+        use xgame_math::glam::Vec3;
 
         let mut bounds = Bounds::EMPTY;
         for (v, vertex) in self.base.iter().enumerate() {
@@ -336,10 +336,13 @@ mod tests {
     #[test]
     fn morph_bounds_cover_mixed_sign_targets_and_fractional_weights() {
         let morph = MorphTargets::new(
-            vec!["A".into(), "B".into()], vec![0.0; 2],
-            vec![[2.0, -3.0, 1.0], [-4.0, 2.0, -2.0]], Vec::new(),
+            vec!["A".into(), "B".into()],
+            vec![0.0; 2],
+            vec![[2.0, -3.0, 1.0], [-4.0, 2.0, -2.0]],
+            Vec::new(),
             vec![vertex([1.0, 2.0, 3.0])],
-        ).unwrap();
+        )
+        .unwrap();
         let bounds = morph.conservative_bounds();
         assert_eq!(bounds.min.to_array(), [-3.0, -1.0, 1.0]);
         assert_eq!(bounds.max.to_array(), [3.0, 4.0, 4.0]);

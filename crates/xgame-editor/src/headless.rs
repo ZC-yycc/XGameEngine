@@ -1202,9 +1202,15 @@ mod tests {
     #[test]
     fn normal_completion_reports_unload_errors() {
         let project = temp_project("unload_errors");
-        write_script(&project, "unload.lua", "function on_destroy(ctx) error(ctx, 'unload-marker') end");
+        write_script(
+            &project,
+            "unload.lua",
+            "function on_destroy(ctx) error(ctx, 'unload-marker') end",
+        );
         patch_scene(&project, |scene| {
-            scene.entities.push(Entity::new("Unload").with_script("Scripts/unload.lua"));
+            scene
+                .entities
+                .push(Entity::new("Unload").with_script("Scripts/unload.lua"));
         });
         let report = run(&opts(&project, 1)).unwrap();
         assert_eq!(report.log_error, 1);

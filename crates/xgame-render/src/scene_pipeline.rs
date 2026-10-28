@@ -2924,10 +2924,16 @@ mod tests {
         for (slot, bones) in [first, second].iter().enumerate() {
             for (joint, matrix) in bones.iter().enumerate() {
                 let uploaded = Mat4::from_cols_array(&staging[slot * BONES_PER_SLOT + joint]);
-                assert_eq!(uploaded.transform_point3(Vec3::ONE), matrix.transform_point3(Vec3::ONE));
+                assert_eq!(
+                    uploaded.transform_point3(Vec3::ONE),
+                    matrix.transform_point3(Vec3::ONE)
+                );
             }
-            assert!(staging[slot * BONES_PER_SLOT + bones.len()..(slot + 1) * BONES_PER_SLOT]
-                .iter().all(|m| *m == Mat4::IDENTITY.to_cols_array()));
+            assert!(
+                staging[slot * BONES_PER_SLOT + bones.len()..(slot + 1) * BONES_PER_SLOT]
+                    .iter()
+                    .all(|m| *m == Mat4::IDENTITY.to_cols_array())
+            );
         }
     }
 
@@ -2938,8 +2944,12 @@ mod tests {
         append_bone_slot(&mut staging, &vec![Mat4::ZERO; BONES_PER_SLOT + 1]);
         append_bone_slot(&mut staging, &[Mat4::IDENTITY]);
         assert_eq!(staging.len(), 3 * BONES_PER_SLOT);
-        assert!(staging[..BONES_PER_SLOT].iter().all(|m| *m == Mat4::IDENTITY.to_cols_array()));
-        assert!(staging[BONES_PER_SLOT..2 * BONES_PER_SLOT].iter().all(|m| *m == Mat4::ZERO.to_cols_array()));
+        assert!(staging[..BONES_PER_SLOT]
+            .iter()
+            .all(|m| *m == Mat4::IDENTITY.to_cols_array()));
+        assert!(staging[BONES_PER_SLOT..2 * BONES_PER_SLOT]
+            .iter()
+            .all(|m| *m == Mat4::ZERO.to_cols_array()));
         assert_eq!(staging[2 * BONES_PER_SLOT], Mat4::IDENTITY.to_cols_array());
     }
 

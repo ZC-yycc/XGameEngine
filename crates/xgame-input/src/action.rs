@@ -509,7 +509,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "xgame_input_save_lock_{}_{}.ron",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let mut old = InputMap::new();
         old.bind("Old", Binding::Key(KeyCode::KeyA));
@@ -518,15 +521,26 @@ mod tests {
         // 旧版本的固定暂存残留也不得阻断保存，更不能被这次失败清掉。
         let legacy_tmp = path.with_extension("ron.tmp");
         std::fs::write(&legacy_tmp, b"incomplete previous save").unwrap();
-        let lock = std::fs::OpenOptions::new().read(true).share_mode(3).open(&path).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
         let mut new = InputMap::new();
         new.bind("New", Binding::Key(KeyCode::KeyB));
         assert!(new.save(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert_eq!(std::fs::read(&legacy_tmp).unwrap(), b"incomplete previous save");
+        assert_eq!(
+            std::fs::read(&legacy_tmp).unwrap(),
+            b"incomplete previous save"
+        );
         drop(lock);
         new.save(&path).unwrap();
-        assert!(InputMap::load(&path).unwrap().unwrap().actions.contains_key("New"));
+        assert!(InputMap::load(&path)
+            .unwrap()
+            .unwrap()
+            .actions
+            .contains_key("New"));
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(legacy_tmp).unwrap();
     }

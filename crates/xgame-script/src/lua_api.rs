@@ -110,8 +110,13 @@ impl FromLua for LuaCtx {
                     to: "ScriptCtx".to_owned(),
                     message: Some("期望脚本上下文句柄（第一个参数）".to_owned()),
                 })?;
-        if !lua.app_data_ref::<ActiveContext>().is_some_and(|active| active.0 == ptr as usize) {
-            return Err(Error::RuntimeError("脚本上下文已失效：只能在生命周期钩子内使用".into()));
+        if !lua
+            .app_data_ref::<ActiveContext>()
+            .is_some_and(|active| active.0 == ptr as usize)
+        {
+            return Err(Error::RuntimeError(
+                "脚本上下文已失效：只能在生命周期钩子内使用".into(),
+            ));
         }
         // SAFETY: 先验证当前 VM 的活动槽地址；RAII 窗口只覆盖 GameCtx 活着的调用。
         Ok(unsafe { *(ptr as *const LuaCtx) })

@@ -476,7 +476,9 @@ mod tests {
         assert!(text.starts_with("xgame-src-v1:"), "{text}");
         assert_eq!(text.len(), "xgame-src-v1:".len() + 32, "{text}");
         assert!(
-            text.trim_start_matches("xgame-src-v1:").bytes().all(|b| b.is_ascii_hexdigit()),
+            text.trim_start_matches("xgame-src-v1:")
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit()),
             "{text}"
         );
         // 两份指纹覆盖的输入不同（一份含 profile），值不该撞在一起。

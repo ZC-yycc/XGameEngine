@@ -731,7 +731,13 @@ impl World {
         if w == 0 || h == 0 {
             self.ui.items.clear();
             self.ui.interaction.reset();
-            update_interaction(&mut self.scene, &[], None, &mut self.ui.interaction, &mut self.ui.events);
+            update_interaction(
+                &mut self.scene,
+                &[],
+                None,
+                &mut self.ui.interaction,
+                &mut self.ui.events,
+            );
             return;
         }
         // 位置与按键分开传：指针在视口外时 `pos = None`，但 `released` 边沿
@@ -941,9 +947,12 @@ impl World {
         let (logs, commands) = scripts.buffers_mut();
 
         // 删除会移动 Vec 下标；按阶段入口身份快照派发，新实体留到下一阶段装配。
-        let queue: Vec<_> = scene.entities.iter()
+        let queue: Vec<_> = scene
+            .entities
+            .iter()
             .filter(|entity| !entity.behaviors.is_empty())
-            .map(|entity| entity.id).collect();
+            .map(|entity| entity.id)
+            .collect();
         for id in queue {
             if scene.find_entity(id).is_none() {
                 continue;
@@ -1082,8 +1091,12 @@ impl World {
             return;
         }
         self.unloaded = true;
-        let entities: Vec<_> = self.scene.entities.iter()
-            .map(|entity| (entity.id, entity.scripts.clone())).collect();
+        let entities: Vec<_> = self
+            .scene
+            .entities
+            .iter()
+            .map(|entity| (entity.id, entity.scripts.clone()))
+            .collect();
         let time = self.clock.total_time();
         for (id, paths) in entities {
             self.destroy_behaviors(id, 0.0, time);
@@ -2536,10 +2549,14 @@ mod tests {
         let mut registry = BehaviorRegistry::new();
         registry.register::<RemoveSelf>("RemoveSelf");
         registry.register::<Drifter>("Drifter");
-        let mut world = World::new(scene, ".", WorldConfig::default()).with_behavior_registry(registry);
+        let mut world =
+            World::new(scene, ".", WorldConfig::default()).with_behavior_registry(registry);
         world.update(0.1);
         let next = world.scene.find_entity(id).unwrap();
-        assert!(world.scene.entities[next].transform.position.x > 0.0, "删除当前实体不能跳过后继组件");
+        assert!(
+            world.scene.entities[next].transform.position.x > 0.0,
+            "删除当前实体不能跳过后继组件"
+        );
     }
 
     static DESTROYED: AtomicU32 = AtomicU32::new(0);
@@ -2801,7 +2818,10 @@ mod tests {
         let mut world = World::new(scene, ".", WorldConfig::default());
         world.set_ui_viewport((0, 0));
         world.update(0.0);
-        assert_eq!(world.scene.entities[0].ui.as_ref().unwrap().state, xgame_core::UiState::default());
+        assert_eq!(
+            world.scene.entities[0].ui.as_ref().unwrap().state,
+            xgame_core::UiState::default()
+        );
     }
 
     #[test]
@@ -2829,12 +2849,16 @@ mod tests {
     fn scene_unload_runs_destroy_with_old_state_once() {
         let dir = std::env::temp_dir().join(format!("xgame_unload_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("unload.lua"), r#"
+        std::fs::write(
+            dir.join("unload.lua"),
+            r#"
             function start(ctx) state_set(ctx, "token", "alive") end
             function on_destroy(ctx)
                 log(ctx, "unloaded:" .. state_get_or(ctx, "token", "missing"))
             end
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let mut scene = Scene::new("old");
         let mut entity = Entity::new("victim");
         entity.scripts.push("unload.lua".into());
@@ -2843,7 +2867,14 @@ mod tests {
         switching.update(0.0);
         switching.take_logs();
         switching.swap_scene(Scene::new("new"), "new.ron");
-        assert_eq!(switching.take_logs().iter().filter(|log| log.message == "unloaded:alive").count(), 1);
+        assert_eq!(
+            switching
+                .take_logs()
+                .iter()
+                .filter(|log| log.message == "unloaded:alive")
+                .count(),
+            1
+        );
         let mut world = World::new(scene, &dir, WorldConfig::default());
         world.update(0.0);
         world.take_logs();
@@ -2853,9 +2884,17 @@ mod tests {
         world.unload_scene();
         world.swap_scene(Scene::new("new"), "new.ron");
         let logs = world.take_logs();
-        assert_eq!(logs.iter().filter(|log| log.message == "unloaded:alive").count(), 1);
+        assert_eq!(
+            logs.iter()
+                .filter(|log| log.message == "unloaded:alive")
+                .count(),
+            1
+        );
         world.swap_scene(Scene::new("next"), "next.ron");
-        assert!(!world.take_logs().iter().any(|log| log.message.starts_with("unloaded:")));
+        assert!(!world
+            .take_logs()
+            .iter()
+            .any(|log| log.message.starts_with("unloaded:")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3096,8 +3135,7 @@ mod tests {
         }
         let logs = world.take_logs();
         assert!(
-            logs.iter()
-                .any(|e| e.message == "second:destroyed:alive"),
+            logs.iter().any(|e| e.message == "second:destroyed:alive"),
             "被牵连的实体也必须收到 on_destroy 且能读到自己的状态：{logs:?}"
         );
         assert_eq!(

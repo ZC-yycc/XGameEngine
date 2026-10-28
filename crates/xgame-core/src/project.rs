@@ -1506,7 +1506,11 @@ mod tests {
         let path = handle.path("Scenes/locked.ron");
         std::fs::write(&path, "旧内容").unwrap();
         // 允许读写但不允许删除/替换：旧实现会偷偷退回覆盖写。
-        let lock = std::fs::OpenOptions::new().read(true).share_mode(3).open(&path).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
         let result = super::write_atomic(&path, "新内容");
         assert!(result.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "旧内容");
@@ -1521,25 +1525,41 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
         let (base, mut handle) = temp_project("atomic_config_material");
         let material_path = "Resources/locked.mat";
-        handle.write_material(material_path, &MaterialAsset::default()).unwrap();
+        handle
+            .write_material(material_path, &MaterialAsset::default())
+            .unwrap();
         let mut results = Vec::new();
         for relative in [PROJECT_FILE_NAME, material_path] {
             let path = handle.path(relative);
             let before = std::fs::read(&path).unwrap();
-            let lock = std::fs::OpenOptions::new().read(true).share_mode(3).open(&path).unwrap();
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(&path)
+                .unwrap();
             let result = if relative == PROJECT_FILE_NAME {
                 handle.manifest.name = "更新后的项目".into();
                 handle.save()
             } else {
-                let material = MaterialAsset { metallic: 0.73, ..Default::default() };
+                let material = MaterialAsset {
+                    metallic: 0.73,
+                    ..Default::default()
+                };
                 handle.write_material(relative, &material)
             };
-            results.push((relative, result.is_err(), std::fs::read(&path).unwrap() == before));
+            results.push((
+                relative,
+                result.is_err(),
+                std::fs::read(&path).unwrap() == before,
+            ));
             drop(lock);
         }
         std::fs::remove_dir_all(base).unwrap();
         for (relative, rejected, preserved) in results {
-            assert!(rejected && preserved, "{relative}: 必须拒绝替换并保留原字节，拒绝={rejected}, 保留={preserved}");
+            assert!(
+                rejected && preserved,
+                "{relative}: 必须拒绝替换并保留原字节，拒绝={rejected}, 保留={preserved}"
+            );
         }
     }
 
@@ -1634,12 +1654,21 @@ mod tests {
         let scene_path = "Scenes/stale.ron";
         let prefab_path = "Prefabs/stale.prefab.ron";
         let material_path = "Resources/stale.mat";
-        handle.write_scene(scene_path, &crate::Scene::new("旧场景")).unwrap();
-        handle.write_prefab(prefab_path, &crate::Prefab::new("旧模板")).unwrap();
-        handle.write_material(material_path, &MaterialAsset::default()).unwrap();
+        handle
+            .write_scene(scene_path, &crate::Scene::new("旧场景"))
+            .unwrap();
+        handle
+            .write_prefab(prefab_path, &crate::Prefab::new("旧模板"))
+            .unwrap();
+        handle
+            .write_material(material_path, &MaterialAsset::default())
+            .unwrap();
         for relative in [PROJECT_FILE_NAME, scene_path, prefab_path, material_path] {
             let path = handle.path(relative);
-            let stale = path.with_extension(format!("{}.tmp", path.extension().unwrap().to_string_lossy()));
+            let stale = path.with_extension(format!(
+                "{}.tmp",
+                path.extension().unwrap().to_string_lossy()
+            ));
             std::fs::write(&stale, b"unfinished previous save").unwrap();
             let result = match relative {
                 PROJECT_FILE_NAME => {
@@ -1648,12 +1677,21 @@ mod tests {
                 }
                 p if p == scene_path => handle.write_scene(p, &crate::Scene::new("新场景")),
                 p if p == prefab_path => handle.write_prefab(p, &crate::Prefab::new("新模板")),
-                p => handle.write_material(p, &MaterialAsset { metallic: 0.75, ..Default::default() }),
+                p => handle.write_material(
+                    p,
+                    &MaterialAsset {
+                        metallic: 0.75,
+                        ..Default::default()
+                    },
+                ),
             };
             result.unwrap();
             assert_eq!(std::fs::read(&stale).unwrap(), b"unfinished previous save");
         }
-        assert_eq!(ProjectHandle::open(handle.root()).unwrap().manifest.name, "新项目");
+        assert_eq!(
+            ProjectHandle::open(handle.root()).unwrap().manifest.name,
+            "新项目"
+        );
         assert_eq!(handle.load_scene(scene_path).unwrap().name, "新场景");
         assert_eq!(handle.load_prefab(prefab_path).unwrap().name, "新模板");
         assert_eq!(handle.load_material(material_path).unwrap().metallic, 0.75);

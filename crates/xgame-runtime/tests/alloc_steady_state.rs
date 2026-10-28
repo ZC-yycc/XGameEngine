@@ -97,13 +97,8 @@ fn build_ui_scene() -> Scene {
     let mut scene = Scene::new("alloc-ui");
     for i in 0..12 {
         let mut e = Entity::new(format!("btn{i}"));
-        e.ui = Some(UiElement::button("OK").at(
-            [0.0, 0.0],
-            10.0,
-            10.0 + i as f32 * 50.0,
-            120.0,
-            40.0,
-        ));
+        e.ui =
+            Some(UiElement::button("OK").at([0.0, 0.0], 10.0, 10.0 + i as f32 * 50.0, 120.0, 40.0));
         scene.add_entity(e);
     }
     scene
@@ -152,7 +147,8 @@ fn assert_zero_alloc(label: &str, scene: Scene, viewport: Option<(u32, u32)>) {
     );
 
     assert_eq!(
-        count, 0,
+        count,
+        0,
         "[{label}] {MEASURED_FRAMES} 帧稳态里分配了 {count} 次 / {bytes} 字节\
          （每帧 {:.1} 次）；热路径应复用缓冲，别每帧新建",
         count as f64 / MEASURED_FRAMES as f64

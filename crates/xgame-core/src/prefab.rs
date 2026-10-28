@@ -107,7 +107,9 @@ impl Prefab {
     ///
     /// `Apply` 走这条：把实例当前的样子（含用户改过的变换）重新采集回资产结构。
     pub fn capture_subtree(&mut self, scene: &Scene, root: usize) {
-        let source = scene.entities.get(root)
+        let source = scene
+            .entities
+            .get(root)
             .and_then(|e| e.prefab.as_ref())
             .map(|p| p.source.as_str());
         self.capture_subtree_ids(scene, root, source);
@@ -115,22 +117,28 @@ impl Prefab {
 
     fn capture_subtree_ids(&mut self, scene: &Scene, root: usize, source: Option<&str>) {
         let indices = scene.subtree(root);
-        let ids: Vec<EntityId> = indices.iter().map(|&i| {
-            let entity = &scene.entities[i];
-            match source {
-                Some(source) => entity.prefab.as_ref()
-                    .filter(|p| p.source == source)
-                    .map(|p| p.source_id)
-                    .unwrap_or_default(),
-                None => entity.id,
-            }
-        }).collect();
+        let ids: Vec<EntityId> = indices
+            .iter()
+            .map(|&i| {
+                let entity = &scene.entities[i];
+                match source {
+                    Some(source) => entity
+                        .prefab
+                        .as_ref()
+                        .filter(|p| p.source == source)
+                        .map(|p| p.source_id)
+                        .unwrap_or_default(),
+                    None => entity.id,
+                }
+            })
+            .collect();
         let mut id_map = HashMap::new();
         for (&i, &id) in indices.iter().zip(&ids) {
             id_map.entry(scene.entities[i].id).or_insert(id);
         }
         self.entities = indices
-            .iter().zip(&ids)
+            .iter()
+            .zip(&ids)
             .map(|(&i, &id)| {
                 let mut entity = scene.entities[i].clone();
                 entity.id = id;
@@ -354,9 +362,20 @@ mod tests {
         instance.entities.push(added);
         prefab.capture_subtree(&instance, 0);
         for (name, id) in ["Root", "Child", "Grandchild"].into_iter().zip(&ids) {
-            assert_eq!(prefab.entities.iter().find(|e| e.name == name).unwrap().id, *id);
+            assert_eq!(
+                prefab.entities.iter().find(|e| e.name == name).unwrap().id,
+                *id
+            );
         }
-        assert_eq!(prefab.entities.iter().find(|e| e.name == "Added").unwrap().parent, Some(ids[1]));
+        assert_eq!(
+            prefab
+                .entities
+                .iter()
+                .find(|e| e.name == "Added")
+                .unwrap()
+                .parent,
+            Some(ids[1])
+        );
         assert!(prefab.entities.iter().all(|e| e.prefab.is_none()));
     }
 

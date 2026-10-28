@@ -2072,12 +2072,26 @@ impl EditorState {
             self.log_error(format!("应用预制体失败: {e}"));
             return;
         }
-        let links: Vec<_> = self.scene.subtree(root_idx).into_iter()
+        let links: Vec<_> = self
+            .scene
+            .subtree(root_idx)
+            .into_iter()
             .zip(&prefab.entities)
-            .map(|(idx, entity)| (idx, PrefabInstanceRef {
-                source: source.clone(), source_id: entity.id, is_root: idx == root_idx,
-            })).collect();
-        if links.iter().any(|(idx, link)| self.scene.entities[*idx].prefab.as_ref() != Some(link)) {
+            .map(|(idx, entity)| {
+                (
+                    idx,
+                    PrefabInstanceRef {
+                        source: source.clone(),
+                        source_id: entity.id,
+                        is_root: idx == root_idx,
+                    },
+                )
+            })
+            .collect();
+        if links
+            .iter()
+            .any(|(idx, link)| self.scene.entities[*idx].prefab.as_ref() != Some(link))
+        {
             self.push_undo();
             for (idx, link) in links {
                 self.scene.entities[idx].prefab = Some(link);
@@ -3374,13 +3388,18 @@ mod tests {
         assert_eq!(saved.entities[1].id, template.entities[1].id);
         assert_eq!(saved.entities[1].parent, Some(template.entities[0].id));
         for i in state.scene.subtree(b) {
-            assert!(saved.index_of(state.scene.entities[i].prefab.as_ref().unwrap().source_id).is_some());
+            assert!(saved
+                .index_of(state.scene.entities[i].prefab.as_ref().unwrap().source_id)
+                .is_some());
         }
         state.revert_prefab(b);
         let reverted = state.selected_entity.unwrap();
         assert_eq!(state.scene.entities[reverted + 1].name, "Changed");
         state.apply_prefab(reverted);
-        assert_eq!(state.project.load_prefab(source).unwrap().entities[0].id, template.entities[0].id);
+        assert_eq!(
+            state.project.load_prefab(source).unwrap().entities[0].id,
+            template.entities[0].id
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -3463,7 +3482,11 @@ mod tests {
         assert_eq!(std::fs::read(state.project.path(source)).unwrap(), before);
         drop(lock);
         state.apply_prefab(root);
-        let id = state.scene.entities[child_idx].prefab.as_ref().unwrap().source_id;
+        let id = state.scene.entities[child_idx]
+            .prefab
+            .as_ref()
+            .unwrap()
+            .source_id;
         state.apply_prefab(root);
         let saved = state.project.load_prefab(source).unwrap();
         assert_eq!(saved.entities[1].id, id);
@@ -3475,16 +3498,36 @@ mod tests {
     fn stop_unloads_latest_scene_before_restoring_snapshot() {
         let (mut state, base) = temp_state("stop_unload");
         std::fs::create_dir_all(state.project.scripts_dir()).unwrap();
-        std::fs::write(state.project.path("Scripts/stop.lua"),
-            "function on_destroy(ctx) log(ctx, 'latest-unloaded') end").unwrap();
+        std::fs::write(
+            state.project.path("Scripts/stop.lua"),
+            "function on_destroy(ctx) log(ctx, 'latest-unloaded') end",
+        )
+        .unwrap();
         let before = state.scene.entities.len();
         state.enter_play_mode();
-        state.scene.entities.push(Entity::new("Latest").with_script("Scripts/stop.lua"));
+        state
+            .scene
+            .entities
+            .push(Entity::new("Latest").with_script("Scripts/stop.lua"));
         state.exit_play_mode();
         assert_eq!(state.scene.entities.len(), before);
-        assert_eq!(state.console_messages.iter().filter(|m| m.text.contains("latest-unloaded")).count(), 1);
+        assert_eq!(
+            state
+                .console_messages
+                .iter()
+                .filter(|m| m.text.contains("latest-unloaded"))
+                .count(),
+            1
+        );
         state.exit_play_mode();
-        assert_eq!(state.console_messages.iter().filter(|m| m.text.contains("latest-unloaded")).count(), 1);
+        assert_eq!(
+            state
+                .console_messages
+                .iter()
+                .filter(|m| m.text.contains("latest-unloaded"))
+                .count(),
+            1
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 

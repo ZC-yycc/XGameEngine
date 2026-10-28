@@ -1746,7 +1746,8 @@ mod tests {
             return;
         };
         let builtin = crate::mesh::BuiltinMesh::Cube;
-        let mut mesh = GltfMesh::from_mesh_data(&shot.device, &shot.queue, &builtin.build(), builtin.label());
+        let mut mesh =
+            GltfMesh::from_mesh_data(&shot.device, &shot.queue, &builtin.build(), builtin.label());
         for prim in &mut mesh.primitives {
             prim.material.metallic = 0.0;
             prim.material.roughness = 0.9;
@@ -1760,15 +1761,30 @@ mod tests {
         let mut samples = Vec::new();
         for range in [1.0, 10.0, 20.0, 2.5, 2.5 / 0.9, 0.0, -1.0] {
             scene.lights = vec![Light::point("点光", [0.0, 0.0, 3.0], [1.0; 3], 0.3, range)];
-            shot.render_scene(&scene, &AnimationDriver::new(),
-                Some(ShotCamera::looking_at(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO, DEFAULT_FOV_Y)),
-                SceneLighting::new(scene.ambient, &scene.lights), RenderConfig::default()).unwrap();
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(ShotCamera::looking_at(
+                    Vec3::new(0.0, 0.0, 4.0),
+                    Vec3::ZERO,
+                    DEFAULT_FOV_Y,
+                )),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .unwrap();
             samples.push(pixel_avg(&shot.read_rgba().unwrap(), 320, 160, 120));
         }
-        assert!(samples[1][0] > samples[0][0] + 30.0, "范围外应熄灭，范围内应照亮：{samples:?}");
+        assert!(
+            samples[1][0] > samples[0][0] + 30.0,
+            "范围外应熄灭，范围内应照亮：{samples:?}"
+        );
         assert_eq!(samples[1], samples[2], "近处保留旧衰减，不随 range 改亮度");
         assert_eq!(samples[0], samples[3], "边界贡献为零");
-        assert!(samples[4][0] > samples[0][0] && samples[4][0] < samples[1][0], "收尾区应平滑衰减：{samples:?}");
+        assert!(
+            samples[4][0] > samples[0][0] && samples[4][0] < samples[1][0],
+            "收尾区应平滑衰减：{samples:?}"
+        );
         assert_eq!(samples[0], samples[5]);
         assert_eq!(samples[0], samples[6]);
     }
@@ -3007,7 +3023,10 @@ mod tests {
         use xgame_math::glam::Quat;
 
         let Some(mut shot) = gpu_or_skip("dual_skin_probe") else {
-            assert!(std::env::var_os("XGAME_GPU_EVIDENCE_DIR").is_none(), "请求 GPU 证据时不允许跳过");
+            assert!(
+                std::env::var_os("XGAME_GPU_EVIDENCE_DIR").is_none(),
+                "请求 GPU 证据时不允许跳过"
+            );
             return;
         };
         let mut scene = Scene::new("dual-skin");
@@ -3026,28 +3045,61 @@ mod tests {
             }
             let mut mesh = GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, "skin");
             mesh.primitives[0].skin = Some(0);
-            mesh.nodes = (0..count).map(|_| AnimNode {
-                parent: None, name: String::new(), translation: Vec3::ZERO,
-                rotation: Quat::IDENTITY, scale: Vec3::ONE,
-            }).collect();
-            mesh.skins = vec![Skin { joints: (0..count as u32).collect(), inverse_bind: vec![Mat4::IDENTITY; count] }];
+            mesh.nodes = (0..count)
+                .map(|_| AnimNode {
+                    parent: None,
+                    name: String::new(),
+                    translation: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::ONE,
+                })
+                .collect();
+            mesh.skins = vec![Skin {
+                joints: (0..count as u32).collect(),
+                inverse_bind: vec![Mat4::IDENTITY; count],
+            }];
             let sign = if i == 0 { 1.0 } else { -1.0 };
-            mesh.animations = vec![AnimClip { name: "move".into(), duration: 1.0, tracks: vec![Track {
-                node: (count - 1) as u32, path: TrackPath::Translation, interpolation: Interpolation::Linear,
-                times: vec![0.0, 1.0], values: vec![0.0, 0.0, 0.0, sign, 0.0, 0.0],
-            }] }];
+            mesh.animations = vec![AnimClip {
+                name: "move".into(),
+                duration: 1.0,
+                tracks: vec![Track {
+                    node: (count - 1) as u32,
+                    path: TrackPath::Translation,
+                    interpolation: Interpolation::Linear,
+                    times: vec![0.0, 1.0],
+                    values: vec![0.0, 0.0, 0.0, sign, 0.0, 0.0],
+                }],
+            }];
             // 两条路径使用相同保守盒，确保阴影拟合不会成为比较中的变量。
-            mesh.bounds = Bounds { min: Vec3::splat(-2.0), max: Vec3::splat(2.0) };
+            mesh.bounds = Bounds {
+                min: Vec3::splat(-2.0),
+                max: Vec3::splat(2.0),
+            };
             shot.inject_model(format!("skin-{i}"), mesh);
             let mut entity = Entity::new(format!("actor-{i}"));
             entity.model = format!("skin-{i}");
             entity.transform.position = Vec3::new(if i == 0 { -1.5 } else { 1.5 }, 1.5, 0.0);
-            entity.animator = Some(xgame_core::Animator { clip: "move".into(), looping: false, ..Default::default() });
+            entity.animator = Some(xgame_core::Animator {
+                clip: "move".into(),
+                looping: false,
+                ..Default::default()
+            });
             scene.add_entity(entity);
         }
-        let camera = ShotCamera::looking_at(Vec3::new(0.0, 5.0, 9.0), Vec3::new(0.0, 0.5, 0.0), DEFAULT_FOV_Y);
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 5.0, 9.0),
+            Vec3::new(0.0, 0.5, 0.0),
+            DEFAULT_FOV_Y,
+        );
         let render = |shot: &mut ScreenshotRenderer, scene: &Scene, anim: &AnimationDriver| {
-            shot.render_scene(scene, anim, Some(camera), SceneLighting::new(scene.ambient, &scene.lights), RenderConfig::default()).unwrap();
+            shot.render_scene(
+                scene,
+                anim,
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .unwrap();
             shot.read_rgba().unwrap()
         };
         let mut previous: Option<Vec<u8>> = None;
@@ -3055,32 +3107,67 @@ mod tests {
             let mut anim = AnimationDriver::new();
             anim.tick(time, &scene.entities);
             let actual = render(&mut shot, &scene, &anim);
-            assert_eq!(shot.frame_stats().opaque_instances, 3, "两个角色与地面必须参与绘制");
-            if let Some(previous) = previous { assert!(actual != previous, "姿态变化必须改变像素"); }
+            assert_eq!(
+                shot.frame_stats().opaque_instances,
+                3,
+                "两个角色与地面必须参与绘制"
+            );
+            if let Some(previous) = previous {
+                assert!(actual != previous, "姿态变化必须改变像素");
+            }
             previous = Some(actual.clone());
             if let Some(dir) = std::env::var_os("XGAME_GPU_EVIDENCE_DIR") {
-                shot.save_png(&PathBuf::from(dir).join(format!("dual-skin-shadow-{shadows}-{frame}.png"))).unwrap();
+                shot.save_png(
+                    &PathBuf::from(dir).join(format!("dual-skin-shadow-{shadows}-{frame}.png")),
+                )
+                .unwrap();
             }
             let mut reference = scene.clone();
             for i in 0..2 {
                 let mut data = crate::mesh::BuiltinMesh::Cube.build();
-                for v in &mut data.vertices { v.position[0] += if i == 0 { time } else { -time }; }
-                let mut mesh = GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, "reference");
-                mesh.bounds = Bounds { min: Vec3::splat(-2.0), max: Vec3::splat(2.0) };
+                for v in &mut data.vertices {
+                    v.position[0] += if i == 0 { time } else { -time };
+                }
+                let mut mesh =
+                    GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, "reference");
+                mesh.bounds = Bounds {
+                    min: Vec3::splat(-2.0),
+                    max: Vec3::splat(2.0),
+                };
                 shot.inject_model(format!("reference-{i}"), mesh);
                 reference.entities[i + 1].model = format!("reference-{i}");
                 reference.entities[i + 1].animator = None;
             }
             let expected = render(&mut shot, &reference, &AnimationDriver::new());
-            let different = actual.as_chunks::<4>().0.iter().zip(expected.as_chunks::<4>().0.iter()).filter(|(a, b)| a != b).count();
-            assert_eq!(different, 0, "双角色姿态必须等于独立 CPU 参考：shadow={shadows}, t={time}");
+            let different = actual
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(expected.as_chunks::<4>().0.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                different, 0,
+                "双角色姿态必须等于独立 CPU 参考：shadow={shadows}, t={time}"
+            );
             if shadows {
                 reference.lights[0].casts_shadow = false;
                 let unshadowed = render(&mut shot, &reference, &AnimationDriver::new());
                 for side in 0..2 {
-                    let dark = expected.as_chunks::<4>().0.iter().zip(unshadowed.as_chunks::<4>().0.iter()).enumerate()
-                        .filter(|(p, (a, b))| p % 320 / 160 == side && a[0] as u16 + 8 < b[0] as u16).count();
-                    assert!(dark > 50, "每个角色都必须投出可见阴影：side={side}, pixels={dark}");
+                    let dark = expected
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(unshadowed.as_chunks::<4>().0.iter())
+                        .enumerate()
+                        .filter(|(p, (a, b))| {
+                            p % 320 / 160 == side && a[0] as u16 + 8 < b[0] as u16
+                        })
+                        .count();
+                    assert!(
+                        dark > 50,
+                        "每个角色都必须投出可见阴影：side={side}, pixels={dark}"
+                    );
                 }
             }
             // 交换实体顺序令 2/5 骨角色轮流占据第一个槽，且重用上一帧 GPU 缓冲。
@@ -3093,22 +3180,33 @@ mod tests {
     }
 
     #[test]
-    fn dual_skin_dynamic_pixels_match_cpu_reference() { dual_skin_probe(false); }
+    fn dual_skin_dynamic_pixels_match_cpu_reference() {
+        dual_skin_probe(false);
+    }
 
     #[test]
-    fn dual_skin_dynamic_shadows_match_cpu_reference() { dual_skin_probe(true); }
+    fn dual_skin_dynamic_shadows_match_cpu_reference() {
+        dual_skin_probe(true);
+    }
 
     fn load_morph_probe(shot: &ScreenshotRenderer, scale: f32) -> GltfMesh {
         static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let serial = NEXT_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("xgame-morph-bounds-{}-{serial}.gltf", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "xgame-morph-bounds-{}-{serial}.gltf",
+            std::process::id()
+        ));
         std::fs::write(&path, crate::gltf_loader::tests::morph_gltf()).unwrap();
         let mesh = GltfMesh::from_file_with(
             &shot.device,
             &shot.queue,
             &path,
-            xgame_core::ImportSettings { model_scale: scale, ..Default::default() },
-        ).expect("合成 morph 资产应能加载");
+            xgame_core::ImportSettings {
+                model_scale: scale,
+                ..Default::default()
+            },
+        )
+        .expect("合成 morph 资产应能加载");
         std::fs::remove_file(path).unwrap();
         mesh
     }
@@ -3144,8 +3242,14 @@ mod tests {
         scene.add_entity(entity);
         let camera = ShotCamera::looking_at(Vec3::ZERO, -Vec3::Z, DEFAULT_FOV_Y);
         let render = |shot: &mut ScreenshotRenderer, scene: &Scene| {
-            shot.render_scene(scene, &AnimationDriver::new(), Some(camera),
-                SceneLighting::new(scene.ambient, &scene.lights), RenderConfig::default()).unwrap();
+            shot.render_scene(
+                scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .unwrap();
             shot.read_rgba().unwrap()
         };
         shot.set_frustum_culling(false);
@@ -3287,5 +3391,546 @@ mod tests {
             lit + 20.0 < unlit,
             "屏幕外投影物的影子必须落在地面上：有阴影 {lit:.1} vs 无阴影 {unlit:.1}"
         );
+    }
+    // =========================================================================
+    // 蒙皮验收：多关节权重混合 / 骨槽容量超限 / 真实 glTF
+    // =========================================================================
+
+    /// 纯平移骨架的立方体：骨 `k` 在 t=1 时刻平移到 `moves[k].1`。
+    ///
+    /// 每个顶点的影响由 `assign(i)` 给定（下标 + 权重）。偏移取 2 的幂次、
+    /// 权重取二进制分数 —— CPU 参考与 GPU 的所有乘加都精确可表示，
+    /// 逐像素比较不需要给浮点容差留后门。
+    fn skinned_cube(
+        shot: &ScreenshotRenderer,
+        key: &str,
+        joint_count: u32,
+        assign: impl Fn(usize) -> ([f32; 4], [f32; 4]),
+        moves: &[(u32, Vec3)],
+    ) -> GltfMesh {
+        use crate::animation::{AnimClip, AnimNode, Interpolation, Skin, Track, TrackPath};
+        use xgame_math::glam::Quat;
+
+        let mut data = crate::mesh::BuiltinMesh::Cube.build();
+        for (i, v) in data.vertices.iter_mut().enumerate() {
+            let (joints, weights) = assign(i);
+            v.joints = joints;
+            v.weights = weights;
+        }
+        let mut mesh = GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, key);
+        mesh.primitives[0].skin = Some(0);
+        mesh.nodes = (0..joint_count)
+            .map(|_| AnimNode {
+                parent: None,
+                name: String::new(),
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            })
+            .collect();
+        mesh.skins = vec![Skin {
+            joints: (0..joint_count).collect(),
+            inverse_bind: vec![Mat4::IDENTITY; joint_count as usize],
+        }];
+        mesh.animations = vec![AnimClip {
+            name: "move".into(),
+            duration: 1.0,
+            tracks: moves
+                .iter()
+                .map(|(node, offset)| Track {
+                    node: *node,
+                    path: TrackPath::Translation,
+                    interpolation: Interpolation::Linear,
+                    times: vec![0.0, 1.0],
+                    values: vec![0.0, 0.0, 0.0, offset.x, offset.y, offset.z],
+                })
+                .collect(),
+        }];
+        // 两条路径使用相同保守盒，阴影拟合 / 取景不会成为比较中的变量。
+        mesh.bounds = Bounds {
+            min: Vec3::splat(-2.0),
+            max: Vec3::splat(2.0),
+        };
+        mesh
+    }
+
+    /// 静态参考网格（纯平移烘焙）：顶点位置加 `delta`，不带蒙皮。
+    fn baked_cube(shot: &ScreenshotRenderer, key: &str, delta: impl Fn(usize) -> Vec3) -> GltfMesh {
+        let mut data = crate::mesh::BuiltinMesh::Cube.build();
+        for (i, v) in data.vertices.iter_mut().enumerate() {
+            v.position = (Vec3::from(v.position) + delta(i)).to_array();
+        }
+        let mut mesh = GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, key);
+        mesh.bounds = Bounds {
+            min: Vec3::splat(-2.0),
+            max: Vec3::splat(2.0),
+        };
+        mesh
+    }
+
+    fn pixel_differences(a: &[u8], b: &[u8]) -> usize {
+        a.as_chunks::<4>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<4>().0.iter())
+            .filter(|(x, y)| x != y)
+            .count()
+    }
+
+    /// 逐像素差异诊断：`(精确差异像素数, 最大单通道差, 超过 2/255 的像素数)`。
+    ///
+    /// GPU 与 CPU 的 f32 求值顺序可能差一个 ULP，经光照放大后落在 8-bit
+    /// 输出上就是 ±1 的碎差；真 bug（骨骼用错 / 只取一根骨）则会产生大面积
+    /// 显著差异。这个三元组把"噪声"与"错误"分开。
+    fn pixel_diff_stats(a: &[u8], b: &[u8]) -> (usize, u8, usize) {
+        let mut exact = 0usize;
+        let mut max_delta = 0u8;
+        let mut over_two = 0usize;
+        for (x, y) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0.iter()) {
+            if x == y {
+                continue;
+            }
+            exact += 1;
+            let delta = x
+                .iter()
+                .zip(y.iter())
+                .map(|(c, d)| c.abs_diff(*d))
+                .max()
+                .unwrap_or(0);
+            max_delta = max_delta.max(delta);
+            if delta > 2 {
+                over_two += 1;
+            }
+        }
+        (exact, max_delta, over_two)
+    }
+
+    /// **多关节权重混合**（R03/031 验收）：一个顶点可同时受最多 4 根骨影响，
+    /// 按 `skin = (Σ wₖ·boneₖ) / Σwₖ` 线性混合。此前的 GPU 回归每顶点只绑
+    /// 一根骨（权重 `[1,0,0,0]`），着色器的 `w.y / w.z / w.w` 分支从未被
+    /// 渲染路径走过 —— 这条把混合公式本身钉在逐像素一致上。
+    ///
+    /// 覆盖四种模式：4 骨分数权重、双骨、**权重和为 2**（归一化分支）、
+    /// 同一骨重复 4 次。
+    #[test]
+    fn multi_joint_skin_blending_matches_cpu_reference() {
+        let Some(mut shot) = gpu_or_skip("multi_joint_skin_blending_matches_cpu_reference") else {
+            assert!(
+                std::env::var_os("XGAME_GPU_EVIDENCE_DIR").is_none(),
+                "请求 GPU 证据时不允许跳过"
+            );
+            return;
+        };
+        let offsets = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::new(0.0, 0.0, 0.25),
+            Vec3::new(-0.5, 0.0, 0.0),
+        ];
+        let patterns: [([f32; 4], [f32; 4]); 4] = [
+            ([0.0, 1.0, 2.0, 3.0], [0.5, 0.25, 0.125, 0.125]),
+            ([0.0, 1.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0]),
+            ([2.0, 3.0, 0.0, 0.0], [1.0, 1.0, 0.0, 0.0]),
+            ([1.0, 1.0, 1.0, 1.0], [0.25, 0.25, 0.25, 0.25]),
+        ];
+        let moves = [
+            (0, offsets[0]),
+            (1, offsets[1]),
+            (2, offsets[2]),
+            (3, offsets[3]),
+        ];
+        let mesh = skinned_cube(&shot, "multi-joint", 4, |i| patterns[i % 4], &moves);
+        shot.inject_model("multi-joint", mesh);
+        let mut scene = Scene::new("multi-joint");
+        scene.ambient = [0.22; 3];
+        scene.lights = vec![Light::directional("sun", [0.0, -1.0, 0.0], [1.0; 3], 1.6)];
+        scene.lights[0].casts_shadow = false;
+        let mut actor = Entity::new("actor");
+        actor.model = "multi-joint".into();
+        actor.transform.position = Vec3::new(0.0, 1.5, 0.0);
+        actor.animator = Some(xgame_core::Animator {
+            clip: "move".into(),
+            looping: false,
+            ..Default::default()
+        });
+        scene.add_entity(actor);
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 5.0, 9.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene, anim: &AnimationDriver| {
+            shot.render_scene(
+                scene,
+                anim,
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .unwrap();
+            shot.read_rgba().unwrap()
+        };
+
+        let mut previous: Option<Vec<u8>> = None;
+        for time in [0.0, 0.5, 1.0, 0.0] {
+            let mut anim = AnimationDriver::new();
+            anim.tick(time, &scene.entities);
+            let actual = render(&mut shot, &scene, &anim);
+            assert_eq!(shot.frame_stats().opaque_instances, 1, "角色必须参与绘制");
+            if let Some(previous) = previous.as_ref() {
+                assert!(actual != *previous, "姿态变化必须改变像素");
+            }
+            previous = Some(actual.clone());
+
+            // CPU 参考：纯平移骨架下 skin·v = v + Σ (wₖ/Σw)·tₖ。
+            let mut reference = scene.clone();
+            let baked = baked_cube(&shot, "multi-joint-ref", |i| {
+                let (joints, weights) = patterns[i % 4];
+                let wsum: f32 = weights.iter().sum();
+                let mut delta = Vec3::ZERO;
+                for k in 0..4 {
+                    delta += offsets[joints[k] as usize] * (weights[k] / wsum);
+                }
+                delta * time
+            });
+            shot.inject_model("multi-joint-ref", baked);
+            reference.entities[0].model = "multi-joint-ref".into();
+            reference.entities[0].animator = None;
+            let expected = render(&mut shot, &reference, &AnimationDriver::new());
+            let different = pixel_differences(&actual, &expected);
+            assert_eq!(
+                different, 0,
+                "多关节混合必须与独立 CPU 参考逐像素一致：t={time}"
+            );
+        }
+    }
+
+    /// **骨槽容量超限的顶点影响必须清零，不许读进下一个实体的槽**
+    /// （R03/031 的"固定容量超限策略"）。
+    ///
+    /// 骨架超过 256 骨时矩阵上传会截断到槽内，但顶点上的关节索引若仍指向
+    /// 256 以外，着色器的 `base + index` 会读进**下一个实体的槽** —— 邻居的
+    /// 骨骼运动会泄漏进这个角色（画面症状：别人一动它跟着变形）。
+    ///
+    /// 场景：A 是 300 骨三角形（**走真实导入路径**：`from_file_with` 加载
+    /// `oversized_skin_gltf()`，顶点影响跨在 256 边界上），B 是 2 骨玩具。
+    /// 修复后：索引 ≥ 256 的影响清零（shader 的 `1/wsum` 把剩下的重归一），
+    /// 半越界的顶点只跟骨 255 动、全越界的顶点冻结在绑定姿态；B 照常。
+    #[test]
+    fn oversized_skin_influences_freeze_instead_of_leaking_into_the_next_slot() {
+        let Some(mut shot) =
+            gpu_or_skip("oversized_skin_influences_freeze_instead_of_leaking_into_the_next_slot")
+        else {
+            assert!(
+                std::env::var_os("XGAME_GPU_EVIDENCE_DIR").is_none(),
+                "请求 GPU 证据时不允许跳过"
+            );
+            return;
+        };
+        // A：真实导入路径的 300 骨三角形（v0 = [255, 256] 各 0.5、
+        // v1 = 四个全越界、v2 = 只在界内；动画平移节点 255）。
+        let path = std::env::temp_dir().join(format!(
+            "xgame-oversized-skin-gpu-{}.gltf",
+            std::process::id()
+        ));
+        std::fs::write(&path, crate::gltf_loader::tests::oversized_skin_gltf()).unwrap();
+        let mut a = GltfMesh::from_file_with(
+            &shot.device,
+            &shot.queue,
+            &path,
+            xgame_core::ImportSettings::default(),
+        )
+        .expect("合成超限骨架应能加载");
+        std::fs::remove_file(&path).unwrap();
+        a.bounds = Bounds {
+            min: Vec3::splat(-2.0),
+            max: Vec3::splat(2.0),
+        };
+        // B：2 骨玩具，骨 0 平移 (0,0,1)。若 A 的越界下标泄漏，读到的正是
+        // B 的骨 0 —— B 一动 A 的顶点就跟。
+        let b = skinned_cube(
+            &shot,
+            "oversized-b",
+            2,
+            |_| ([0.0; 4], [1.0, 0.0, 0.0, 0.0]),
+            &[(0, Vec3::new(0.0, 0.0, 1.0))],
+        );
+        shot.inject_model("oversized-a", a);
+        shot.inject_model("oversized-b", b);
+        let mut scene = Scene::new("oversized");
+        scene.ambient = [0.22; 3];
+        scene.lights = vec![Light::directional("sun", [0.0, -1.0, 0.0], [1.0; 3], 1.6)];
+        scene.lights[0].casts_shadow = false;
+        for (name, key, x) in [
+            ("actor-a", "oversized-a", -1.5),
+            ("actor-b", "oversized-b", 1.5),
+        ] {
+            let mut actor = Entity::new(name);
+            actor.model = key.into();
+            actor.transform.position = Vec3::new(x, 1.5, 0.0);
+            actor.animator = Some(xgame_core::Animator {
+                clip: "move".into(),
+                looping: false,
+                ..Default::default()
+            });
+            scene.add_entity(actor);
+        }
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 5.0, 9.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene, anim: &AnimationDriver| {
+            shot.render_scene(
+                scene,
+                anim,
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .unwrap();
+            shot.read_rgba().unwrap()
+        };
+
+        let mut previous: Option<Vec<u8>> = None;
+        for time in [0.0, 0.5, 1.0] {
+            let mut anim = AnimationDriver::new();
+            anim.tick(time, &scene.entities);
+            let actual = render(&mut shot, &scene, &anim);
+            assert_eq!(
+                shot.frame_stats().opaque_instances,
+                2,
+                "两个角色必须参与绘制"
+            );
+            if let Some(previous) = previous.as_ref() {
+                assert!(actual != *previous, "骨 255 的平移必须真的进入画面");
+            }
+            previous = Some(actual.clone());
+
+            let mut reference = scene.clone();
+            // A 的参考：v0/v2 跟骨 255（t 时刻平移 (t,0,0)），v1 冻结在绑定姿态。
+            let ref_a = {
+                let positions = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+                let data = crate::mesh::MeshData {
+                    vertices: positions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| {
+                            let moved = if i == 1 {
+                                *p
+                            } else {
+                                [p[0] + time, p[1], p[2]]
+                            };
+                            crate::gltf_loader::GltfVertex {
+                                position: moved,
+                                normal: [0.0, 0.0, 1.0],
+                                color: [1.0; 3],
+                                tex_coord: [0.0; 2],
+                                joints: [0.0; 4],
+                                weights: [0.0; 4],
+                            }
+                        })
+                        .collect(),
+                    indices: vec![0, 1, 2],
+                };
+                let mut m =
+                    GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, "oversized-a-ref");
+                m.bounds = Bounds {
+                    min: Vec3::splat(-2.0),
+                    max: Vec3::splat(2.0),
+                };
+                m
+            };
+            // B 的参考：全跟骨 0（t 时刻平移 (0,0,t)）。
+            let ref_b = baked_cube(&shot, "oversized-b-ref", |_| Vec3::new(0.0, 0.0, time));
+            shot.inject_model("oversized-a-ref", ref_a);
+            shot.inject_model("oversized-b-ref", ref_b);
+            reference.entities[0].model = "oversized-a-ref".into();
+            reference.entities[0].animator = None;
+            reference.entities[1].model = "oversized-b-ref".into();
+            reference.entities[1].animator = None;
+            let expected = render(&mut shot, &reference, &AnimationDriver::new());
+            let different = pixel_differences(&actual, &expected);
+            assert_eq!(
+                different, 0,
+                "超限影响必须清零（冻结 / 重归一），不能读邻居的槽：t={time}"
+            );
+        }
+    }
+
+    /// **真实 glTF 多关节蒙皮**（R03/031 的"真实 glTF"验收）：24 骨狐狸的
+    /// Walk 剪辑在三个时刻的 GPU 蒙皮结果，与测试内**独立计算**的 CPU 蒙皮
+    /// 参考对照。骨骼矩阵与引擎同源（`compute_bones_composed`，另有单测覆盖），
+    /// 蒙皮求和公式在测试里另写一份 —— 对照的是混合公式本身。
+    ///
+    /// 真实权重是任意小数、骨骼带旋转 / 层级 / 非单位逆绑定，GPU 与 CPU 的
+    /// 浮点求值顺序可能差一个 ULP，因此允许 0.5% 以内的边缘像素不同；混合
+    /// 权重若真算错（比如只取第一根骨），差异会是整只狐狸级别的。
+    #[test]
+    fn real_fox_walk_pose_matches_cpu_skinning_reference() {
+        let Some(mut shot) = gpu_or_skip("real_fox_walk_pose_matches_cpu_skinning_reference")
+        else {
+            assert!(
+                std::env::var_os("XGAME_GPU_EVIDENCE_DIR").is_none(),
+                "请求 GPU 证据时不允许跳过"
+            );
+            return;
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../projects/SampleScene/Resources/Fox.gltf");
+        let mut animated = GltfMesh::from_file_with(
+            &shot.device,
+            &shot.queue,
+            &path,
+            xgame_core::ImportSettings::default(),
+        )
+        .expect("示例狐狸应能加载");
+        assert_eq!(animated.skins.len(), 1, "狐狸有一张蒙皮");
+        assert_eq!(animated.skins[0].joints.len(), 24, "24 根骨头");
+        let nodes = animated.nodes.clone();
+        let skin = animated.skins[0].clone();
+        let walk = animated.clip("Walk").expect("Walk 剪辑").clone();
+        let fox_bounds = animated.bounds;
+
+        // CPU 侧独立读顶点（不经过引擎的网格加载器）；示例狐狸没有 NORMAL
+        // 属性，基座法线与引擎同源（缺属性时的平面法线），蒙皮求和另写一份。
+        let (doc, buffers, _) = gltf::import(&path).expect("解析 Fox.gltf");
+        let prim = doc.meshes().next().unwrap().primitives().next().unwrap();
+        let reader = prim.reader(|b| Some(&buffers[b.index()]));
+        let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().collect();
+        let normals: Vec<[f32; 3]> = reader
+            .read_normals()
+            .map(|iter| iter.collect())
+            .unwrap_or_else(|| {
+                let indices: Vec<u32> = reader
+                    .read_indices()
+                    .map(|iter| iter.into_u32().collect())
+                    .unwrap_or_else(|| (0..positions.len() as u32).collect());
+                crate::gltf_loader::compute_face_normals(&positions, &indices)
+            });
+        let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0).unwrap().into_f32().collect();
+        let joints: Vec<[u16; 4]> = reader.read_joints(0).unwrap().into_u16().collect();
+        let weights: Vec<[f32; 4]> = reader.read_weights(0).unwrap().into_f32().collect();
+        let indices: Vec<u32> = reader
+            .read_indices()
+            .map(|iter| iter.into_u32().collect())
+            .unwrap_or_else(|| (0..positions.len() as u32).collect());
+        assert_eq!(positions.len(), 1728, "示例狐狸的顶点数");
+
+        // 参考网格要跟真实狐狸同纹理同材质，否则像素没有可比性。
+        // `std::mem::swap` 进出交换：每次迭代把真纹理换进参考网格、渲染后
+        // 换回来 —— 放循环里只 `replace` 一次会在第一次迭代偷走源纹理。
+        let mut reference_load = GltfMesh::from_file_with(
+            &shot.device,
+            &shot.queue,
+            &path,
+            xgame_core::ImportSettings::default(),
+        )
+        .expect("示例狐狸应能加载（第二份）");
+        let fox_material = reference_load.primitives[0].material;
+
+        // 保守盒取真实狐狸那份：两条路径同一份，取景 / 剔除不会成为变量。
+        animated.bounds = fox_bounds;
+        shot.inject_model("fox-anim", animated);
+        let mut scene = Scene::new("fox");
+        scene.ambient = [0.22; 3];
+        scene.lights = vec![Light::directional("sun", [0.0, -1.0, 0.0], [1.0; 3], 1.6)];
+        scene.lights[0].casts_shadow = false;
+        let mut actor = Entity::new("fox");
+        actor.model = "fox-anim".into();
+        actor.animator = Some(xgame_core::Animator {
+            clip: "Walk".into(),
+            looping: true,
+            ..Default::default()
+        });
+        scene.add_entity(actor);
+
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene, anim: &AnimationDriver| {
+            shot.render_scene(
+                scene,
+                anim,
+                None,
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .unwrap();
+            shot.read_rgba().unwrap()
+        };
+
+        let total = 320 * 240;
+        let mut previous: Option<Vec<u8>> = None;
+        for fraction in [0.0f32, 0.35, 0.7] {
+            let time = walk.duration * fraction;
+            let mut anim = AnimationDriver::new();
+            anim.tick(time, &scene.entities);
+            let actual = render(&mut shot, &scene, &anim);
+            if let Some(previous) = previous.as_ref() {
+                let moved = pixel_differences(&actual, previous);
+                assert!(
+                    moved > total / 20,
+                    "Walk 必须真的动起来：t={time} 只有 {moved} 像素变化"
+                );
+            }
+            previous = Some(actual.clone());
+
+            // CPU 蒙皮参考：skin = (Σ wₖ·boneₖ) / Σwₖ，与 shader 同一公式
+            // （在测试里另写一份；法线同式，方向由 fragment 归一化收回）。
+            let bones =
+                crate::animation::compute_bones_composed(&nodes, &skin, (&walk, time), None, &[]);
+            let mut verts: Vec<crate::gltf_loader::GltfVertex> =
+                Vec::with_capacity(positions.len());
+            for i in 0..positions.len() {
+                let wsum = weights[i][0] + weights[i][1] + weights[i][2] + weights[i][3];
+                let mut blend = Mat4::ZERO;
+                for k in 0..4 {
+                    let w = weights[i][k];
+                    if w != 0.0 {
+                        blend += bones[joints[i][k] as usize] * w;
+                    }
+                }
+                blend *= 1.0 / wsum;
+                let p = (blend * Vec3::from(positions[i]).extend(1.0)).truncate();
+                // 法线**不归一**：shader 把混合后的原长法线交给插值、fragment
+                // 才 normalize —— 提前归一会让三角形内部的插值方向不同。
+                let n = (blend * Vec3::from(normals[i]).extend(0.0)).truncate();
+                verts.push(crate::gltf_loader::GltfVertex {
+                    position: p.to_array(),
+                    normal: n.to_array(),
+                    color: [1.0; 3],
+                    tex_coord: uvs[i],
+                    joints: [0.0; 4],
+                    weights: [0.0; 4],
+                });
+            }
+            let baked = crate::mesh::MeshData {
+                vertices: verts,
+                indices: indices.clone(),
+            };
+            let mut reference =
+                GltfMesh::from_mesh_data(&shot.device, &shot.queue, &baked, "fox-reference");
+            reference.bounds = fox_bounds;
+            // swap 真纹理进来，渲染后 swap 回去（下一轮还要用）。
+            std::mem::swap(
+                &mut reference.primitives[0].texture,
+                &mut reference_load.primitives[0].texture,
+            );
+            reference.primitives[0].material = fox_material;
+            shot.inject_model("fox-reference", reference);
+            let mut reference_scene = scene.clone();
+            reference_scene.entities[0].model = "fox-reference".into();
+            reference_scene.entities[0].animator = None;
+            let expected = render(&mut shot, &reference_scene, &AnimationDriver::new());
+            // 把真纹理换回 reference_load，供下一轮迭代使用。
+            let mut reference_mesh = shot.model_cache.remove("fox-reference").unwrap();
+            std::mem::swap(
+                &mut reference_mesh.primitives[0].texture,
+                &mut reference_load.primitives[0].texture,
+            );
+            let (different, max_delta, over_two) = pixel_diff_stats(&actual, &expected);
+            assert!(
+                over_two * 200 <= total,
+                "真实狐狸蒙皮与 CPU 参考差异过大：exact={different} max_delta={max_delta} over2={over_two} / {total}（t={time}）"
+            );
+        }
     }
 }

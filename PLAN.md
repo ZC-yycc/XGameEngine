@@ -6516,3 +6516,50 @@ cargo test -p xgame-editor -j2 --bin xgame-editor builder::tests::package_preser
 ### 未关闭事项
 
 R01—R12 已改不等于 G0 全关。原项目旧插件已刷新并复验通过；ABI 兼容拒绝门禁仍待做，继续保留 ABI/旧 DLL 风险、复杂生命周期与 ctx 调用窗口、双角色蒙皮/morph/动态 TAA 的 GPU 验证、其他主文件写入、完整发布包输入/切关/插件端到端 CI 等待办。普通示例截图和窗口冒烟不能代替这些定向用例。仅同步文档与追加工作日志，不创建代码提交。
+
+---
+
+## 八十四、蒙皮链路收尾：CUBICSPLINE + 骨槽超限 + 真实 glTF 验收（2026-10-28）
+
+蒙皮管线在第十三轮打通后还剩三块：CUBICSPLINE 动画采样（glTF 规范里的三次样条）、
+骨槽容量超限策略（>256 骨时的行为）、真实 glTF 资产的端到端验收。本轮逐块补完。
+
+### 一、CUBICSPLINE：Hermite 三次样条采样
+
+glTF 的 `CUBICSPLINE` 内插在每个关键帧存 3 个值（in-tangent / value / out-tangent），
+段内用 Hermite 基函数插值。`AnimSampler` 原先只支持 LINEAR / STEP。
+
+- 先写红灯：已知 Hermite 公式手算期望值，断言采样输出与手算逐位一致。
+- 实现：`sample_cubic` 按 `h₀(t)·pₖ + h₁(t)·mₖ₊₁ + h₂(t)·pₖ₊₁ + h₃(t)·mₖ` 求值，
+  其中 `h₀=2t³-3t²+1`、`h₁=t³-2t²+t`、`h₂=-2t³+3t²`、`h₃=t³-t²`。
+- 旋转轨道的 CUBICSPLINE 结果需归一化（四元数插值后长度≠1）。
+
+### 二、骨槽容量超限：clamp_skin_influences
+
+GPU 骨槽 `BONES_PER_SLOT = 256`，超限时必须截断。策略：
+
+- 顶点级：越界关节的权重清零、下标归 0 占位（`clamp_skin_influences`）；
+  shader 的 `1/wsum` 自动重归一剩余影响；全清零 = 冻结在绑定姿态（`wsum==0` 分支）。
+- Skin 级：`bones[]` 截断到 256 并补单位阵。
+- 红灯实证：构造 >256 骨场景，验证截断后不读邻居槽、不崩溃。
+
+### 三、多关节权重混合合成测试
+
+补覆盖：一个顶点受 4 根骨影响、权重任意小数（非 0/1），CPU 独立计算蒙皮结果与
+GPU 渲染逐像素对照。验证混合公式 `skin = (Σ wₖ·boneₖ) / Σwₖ` 在任意权重下正确。
+
+### 四、真实 glTF（Fox.gltf）端到端验收
+
+24 骨狐狸的 Walk 剪辑，三个时刻 GPU 蒙皮 vs CPU 独立烘焙参考，逐像素对照。
+
+- **排查过程**（层层排除）：
+  1. `Animator::speed` 默认 = 1.0（读源码确认）→ 排除时钟缩放。
+  2. `clip_time` 包装的 t 与裸 time 产出骨骼矩阵逐位一致（bone_mismatch=0）→ 排除时钟不同源。
+  3. PNG 视觉对比发现 actual 有纹理、expected 全白 → **根因是 `std::mem::replace` 在循环内偷走纹理**。
+- **修复**：纹理交换改用 `std::mem::swap` 进出（换入→渲染→换回），保证每轮迭代都有真纹理。
+- **修复后**：三个时刻 `exact=0 max_delta=0 over2=0`——逐位一致。
+
+### 五、clippy 零警告收尾
+
+`gltf_loader.rs` 的 `!(f32 < …)` 对部分序类型（NaN）语义不精确，改用
+`partial_cmp` + `matches!` 保留「NaN 走清零分支」的原语义。
