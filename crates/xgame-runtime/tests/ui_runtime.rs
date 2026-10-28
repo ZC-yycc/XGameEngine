@@ -309,3 +309,63 @@ fn releasing_outside_the_viewport_clears_the_button() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 脚本本帧改的 UI 位置，**下一帧**才影响命中测试。
+///
+/// 这是刻意的取舍（见 `World::update` 第 0 步的注释）：UI 阶段排在脚本之前，
+/// 因为 `ui_clicked(ctx, id)` 必须是**本帧**状态 —— 脚本在 `update` 里读它时
+/// 点击标志得已经写好。代价就是"当帧改的矩形当帧不算"，与 Unity 的 EventSystem
+/// 同一个取舍。这条测试把该契约钉住，免得以后有人为了"更跟手"把顺序调到脚本之后。
+#[test]
+fn script_moved_ui_takes_effect_on_the_next_frame() {
+    let root = temp_root("ui-order");
+    write_script(
+        &root,
+        "Move.lua",
+        r#"
+local moved = false
+
+function update(ctx)
+    if not moved then
+        moved = true
+        ui_set_pos(ctx, self_id(ctx), 400.0, 300.0)
+    end
+end
+"#,
+    );
+    let (scene, id) = button_scene("Scripts/Move.lua");
+    let mut world = World::new(scene, root.clone(), WorldConfig::default());
+    world.set_ui_viewport((800, 600));
+
+    // 第一帧：布局用的是旧位置 (10,10)，脚本随后把按钮挪到 (400,300)。
+    world.set_ui_pointer(Some(Vec2::new(450.0, 320.0)));
+    world
+        .input_mut()
+        .state_mut()
+        .handle_mouse_button(MouseButton::Left, true);
+    world.update(1.0 / 60.0);
+    assert_eq!(
+        world.ui_pressed(),
+        None,
+        "当帧布局仍是旧位置，点新位置不该命中"
+    );
+    world
+        .input_mut()
+        .state_mut()
+        .handle_mouse_button(MouseButton::Left, false);
+    world.update(1.0 / 60.0);
+
+    // 下一帧：布局用新位置，同一个点应当命中。
+    world
+        .input_mut()
+        .state_mut()
+        .handle_mouse_button(MouseButton::Left, true);
+    world.update(1.0 / 60.0);
+    assert_eq!(
+        world.ui_pressed(),
+        Some(id),
+        "下一帧新位置应当可点（脚本改的矩形迟一帧生效）"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

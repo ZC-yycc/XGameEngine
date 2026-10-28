@@ -14,6 +14,170 @@
 
 ---
 
+## 七十二、三个 G0 数值 / 交互边界（2026-10-28）
+
+接 041（极小体积）、101（极值 ID）、067（视口外松键）。三项都是"实现缺一条边界"，
+不是新功能；共同点是有缺陷时**不报错**，只是行为悄悄不对。
+
+### 1. 极小碰撞体的质量守恒（R12 / 041）
+
+`scene_body` 按 `mass / unit_mass` 求密度。半径 1e-20 的球体积在 f32 下下溢成 0，
+density 随之变 inf，rapier 拿它乘体积后**实际质量 = 0** —— 声明 2.5 kg 的实体变成
+0 kg，物体会飘走或原地抖。旧实现的 `unit_mass > 0` 只挡住了"别算密度"，没挡住
+"算出来的密度不可用"。
+
+改：密度不可表达时（`unit_mass` 非正 / 非有限，或 `density` 非有限）退回**附加质量**
+（`RigidBody.mass`），惯量仍按形状几何算。两条路径相加恒为声明值。
+
+红灯：`tiny_collider_still_weighs_the_declared_mass` 在旧实现下（半径 1e-20）实得质量 0；
+1e-6 / 1e-9 两档旧实现本来就对，一并钉住。
+
+### 2. 极值实体 ID（101）
+
+`EntityId::new()` 是 `fetch_add`，`reserve` 用 `fetch_max(raw + 1)`。文件里写
+`id: (18446744073709551615)` 会把水位顶到 `u64::MAX`，下一次 `new()` 返回**同一个值**
+—— 两个实体共用一个 ID，随后 `remove_subtree` 按 ID 匹配就连坐删除。
+
+改：`MAX_ASSIGNABLE_ID = u64::MAX - 1`，读盘严格大于它即返回 serde 错误（错误信息
+带原值与上限，便于定位是哪个文件被手改）；`new()` 换成 CAS 循环并跳过 0
+（`fetch_add` 回绕会落到 0，而 0 从未被分配过）。
+
+红灯：临时把校验短路，`max_id_is_rejected_at_the_load_boundary` 实得
+`Ok(Holder { id: EntityId(18446744073709551615) })`。
+
+边界：`--check` 遇到这种场景会因加载失败退出 1（预期行为）；"跨文件诊断"
+（同一 ID 在场景与预制体之间是否冲突）仍未做 —— 预制体的 `source_id` 是跨文件引用，
+语义上不该算冲突，要做先得定规则。
+
+### 3. 视口外松手（067）
+
+`UiPointer` 曾把"位置"和"按键"合成一个 `Option`：指针不在视口就整条丢掉。于是
+"按下在按钮上 → 鼠标移出视口 → 松手"那一帧的 `released` 边沿消失，捕获残留在按钮上，
+`Release` 事件也发不出去（要等指针回到视口、被"幽灵按下"清理兜底才恢复）。
+
+改：`UiPointer.pos: Option<Vec2>`，按键电平 / 边沿始终有效；runtime 永远传 `Some(...)`
+（视口尺寸为 0 时仍传 `None`，那表示"没有 UI 可交互"）。新增 `World::ui_pressed()`
+与 `ui_hovered()` 对称 —— 捕获状态比 `state.pressed` 更早暴露这类缺陷，因为后者的
+可见症状要等指针回到视口才消失。
+
+红灯：`releasing_outside_the_viewport_clears_the_button` 在旧映射下第二帧捕获仍在
+（实跑失败）。
+
+顺带补了 `hidden_parent_makes_children_unhittable`：父节点隐藏后子按钮不进命中表
+（`layout::walk` 早就是整棵子树跳过，此前没有测试钉住），以及 UI 层的
+`holding_outside_the_viewport_keeps_the_capture`（拖出视口再拖回来松手仍算点击）。
+
+### 4. 脚本改 UI 的当帧时序（067 收尾）
+
+`World::update` 里 UI 阶段排在**脚本之前**：`ui_clicked(ctx, id)` 是"本帧"状态，
+脚本在 `update` 里读它时点击标志必须已经写好。代价是"脚本本帧挪的矩形本帧不算"——
+下一帧才参与命中。这个取舍此前只写在注释里，没有测试钉住。
+
+新增 `script_moved_ui_takes_effect_on_the_next_frame`：第一帧点**新**位置断言不命中
+（布局还是旧位置），松手；第二帧点同一点断言命中。为了证明它真的钉住顺序，临时把
+`self.update_ui()` 从第 0 步移到 `run_dispatch(Phase::Update, …)` 之后实跑，结果是
+`right: None` → `0 passed; 1 failed`（红灯成立），还原后绿。**这一条不改代码**，
+只是把已有契约变成回归。
+
+附带效用：以后若有人为了"更跟手"把 UI 调到脚本之后，这条测试会先红。
+
+### 验证与边界
+
+- `check` / `clippy -D warnings` 通过；`test --workspace --all-targets`
+  **954 passed / 0 failed / 9 ignored**（上轮 953，+1 即本轮新增的时序回归）。
+- 曾观察到**一次** `xgame-render --lib` 失败，随后 6 次单跑 + 3 次全量复跑（共 9 次）
+  未复现；结合历史同类现象判为 wgpu 并发建设备的环境抖动，未改代码，如实记录。
+- **dist 陈旧**：收尾重建时 `xgame-editor.exe` / `xgame-game.exe` 的字节与旧 dist **不同**
+  （`xgame-mcp.exe` 相同），而源码指纹前后一致（`xgame-src-v1:6c6ca992…`）。说明上一轮
+  的 dist 虽然与当时的 `target/release` 互相一致，但那两份产物并非当时源码的产物 ——
+  「dist 与 target/release 哈希相同」只能证明两者同源，**不能**证明它们新鲜。现在已按
+  当前源码重建；紧接着再构建一次，三个 EXE 全部字节相同（可复现构建成立），插件 DLL
+  同步刷新至 `4039B487…`。
+
+---
+
+## 七十一、CUBICSPLINE 三次样条采样（R04 / 032 关闭，2026-10-28）
+
+`Docs/差距分析.md` 里 R04 / 032 的表述是"逐关键帧取值与 morph stride 已修；
+仍线性降级，Hermite 与多节点动画保真待做"。本轮把 Hermite 做掉，顺带把
+"轨道形状"从隐式约定变成显式 API。
+
+### 问题：切线在读入时就被扔掉
+
+`gltf_loader::take_spline_values` 对 `CUBICSPLINE` 只挑每帧中间那份值，入 / 出切线
+直接丢弃，运行时退化成线性。数值上"没崩"，但动作的加减速被抹平 —— Blender /
+Maya 默认导出的插值就是三次样条，所以这不是罕见分支，而是**大多数资产会被降级**。
+而且这是单向损失：切线一旦没进内存，运行时再想补也补不回来。
+
+### 实现
+
+- `Interpolation` 加第三个变体 `CubicSpline`；读入端 `parse_interpolation` **穷举**
+  三种映射（不用 `_ =>`），gltf 升级后若新增插值类型会编译不过，逼着做决断。
+- `Track::values` 的布局变成"每帧 `frame_len()` 个浮点" = `stride()`（值分量数）×
+  `slots()`（每帧组数：样条 3，其余 1）。三个派生量收在 `Track` 上 ——
+  `frame_start(k)` / `value_start(k)` / `frame_len()`，"值在中间那份"由
+  `Interpolation::value_slot()` 一处表达；采样、加载、测试读同一处，不各算一遍。
+- 采样：`hermite_basis(u)` 给 `(h00,h10,h01,h11)`，`eval_vec3` / `eval_quat` 按插值
+  分派。切线单位是**每秒**，进 Hermite 前乘段长 `dt`（glTF 规范 C.2）。
+- 旋转：逐分量 Hermite 出的四元数不在单位球上，**必须归一化**；长度接近 0 时
+  （手工改过的曲线）退回 `slerp`，避免 NaN 顺着蒙皮矩阵扩散到整块网格。
+- `sample_morph_weights` 同样按 `slots()` 分组；形状不严丝合缝
+  （`values.len() != times.len() * frame_len()`）就返回 `false` —— morph 的 stride
+  是现算的，串一位画出来就是一张扭曲的脸。
+- 线性 / 阶梯两条路径的读数与从前逐位一致：同样取 `value_start(i0)`、同样 `lerp`、
+  阶梯同样令 `u = 0`。
+
+### 一个自己踩的坑
+
+`value_start(k)` 第一版写成 `frame_start(k) + (slots-1) * stride`，于是把**出切线**
+当成值读了：段中点实得 1.25 而不是 0.75。`slots-1` 只在"三份里取最后一份"时成立，
+而值在中间。改成显式的 `value_slot()` 后才对。这种错不会 panic，只会让动画
+"看起来怪"，所以形状必须由测试钉住，不能靠肉眼。
+
+### 红绿
+
+新增 4 条测试，其中 3 条在旧实现下**实跑失败**（`2 passed / 3 failed`）：
+
+| 测试 | 旧实现读数 | 期望 |
+|---|---|---|
+| `cubic_spline_midpoint_is_hermite_not_linear` | 0.5 | 0.75 |
+| `cubic_spline_scales_tangent_by_segment_length` | 0.5 | 1.0 |
+| `morph_spline_three_keys_two_targets` | 6 个值（切线被丢） | 18 个值 + 中点 0.45 / 0.55 |
+
+`cubic_spline_rotation_is_normalized` 在旧实现下也过（slerp 本身落在单位球上），
+它的作用是钉住新路径：样条出来的四元数必须仍归一，且跨度内不得出现 NaN。
+原 `regression_r04_spline_three_keys_vectors_and_rotations` 测的正是"只取中间那份"
+这一被推翻的行为，改写为 `spline_keeps_tangents`（断言 `frame_len == 3 × stride`
+且第 1 帧三段数据原位保留）。
+
+### 成本
+
+新增基准 `crates/xgame-render/tests/animation_cost.rs`（默认 `#[ignore]`）：
+28 骨 × 3 通道 = 84 条轨道、16 帧，单次 `sample_clip_into`（同机 release，
+7 轮取最快轮，重复三次）：
+
+| 档位 | 单次采样 |
+|---|---|
+| 线性 | 2031–2061 ns |
+| 阶梯 | 891–902 ns |
+| 三次样条 | 1652–1662 ns（0.80–0.81 × 线性） |
+
+样条**比线性便宜**，原因在旋转通道：`Quat::slerp` 要 `acos` 加两次 `sin`，
+而 Hermite 是 4 次乘加 + 一次 `normalize()`。所以"保真"这一刀在本实现下不付成本，
+反而不亏。数字只用于同机背靠背比较，跨机器无意义。
+
+### 验证与边界
+
+- workspace `check --all-targets` / `clippy --all-targets -- -D warnings` 通过；
+  `test --workspace --all-targets` **945 passed / 0 failed / 9 ignored**
+  （上轮 942 / 8；+4 新增 −1 改写删除 = +3）。
+- 多节点动画由真实 Fox 资产（24 骨）的既有端到端用例覆盖（`compute_bones` 走
+  同一条 `sample_clip_into`），本轮未改这条路径。
+- **未做**：CUBICSPLINE 的 morph 多网格（仍只取第一条权重轨道，v1 边界，与插值无关）、
+  根运动、动画 Phase B。
+
+---
+
 ## 七十、G0 资产引用迁移词法保护（2026-10-27）
 
 `--migrate-assets` 原先对已解析出的资产路径做整份文本 `replace`：同一段引号文字出现在注释或实体名称里也被改成 GUID，违背「迁移只改引用且保留注释」的契约。新增场景回归在旧实现实跑失败，显示行注释、块注释与实体名称均被改写。现在先解析文件确认有效与收集引用，再单遍扫描 RON token：跳过行注释、嵌套块注释、字符字面量，识别转义与 raw 字符串，只在资产字段把值存在索引中的路径替换为 GUID；其他文本原字节保留。额外词法回归覆盖嵌套注释、转义字符串及脚本数组，迁移相关 4 项定向测试通过。全工作区 check、clippy -D warnings、test --all-targets 顺序复验通过；最初测试与 release 并行时插件装载测试 3 项指纹不匹配，串行复验未复现。release workspace 与一键构建通过，dist 三 EXE 已刷新；打包示例 --check=0（1 场景、24 实体、15 资产），30 帧无头 ok=true、错误 0、非有限变换 0。沿用现有同目录独占暂存写盘，改动只发生在低频显式迁移路径。
@@ -5319,149 +5483,6 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
   （`STATUS_ACCESS_VIOLATION`，4 线程并行跑 GPU 相关测试时）；单线程与复跑 4 线程
   均 189/189 绿，判定为环境偶发，未改动任何代码。若后续复现要查 wgpu 侧的并发建
   设备路径（`acquire_gpu_test_permit` 已串行化，但设备销毁时机不受它管）。
-
----
-
-## 七十二、三个 G0 数值 / 交互边界（2026-10-28）
-
-接 041（极小体积）、101（极值 ID）、067（视口外松键）。三项都是"实现缺一条边界"，
-不是新功能；共同点是有缺陷时**不报错**，只是行为悄悄不对。
-
-### 1. 极小碰撞体的质量守恒（R12 / 041）
-
-`scene_body` 按 `mass / unit_mass` 求密度。半径 1e-20 的球体积在 f32 下下溢成 0，
-density 随之变 inf，rapier 拿它乘体积后**实际质量 = 0** —— 声明 2.5 kg 的实体变成
-0 kg，物体会飘走或原地抖。旧实现的 `unit_mass > 0` 只挡住了"别算密度"，没挡住
-"算出来的密度不可用"。
-
-改：密度不可表达时（`unit_mass` 非正 / 非有限，或 `density` 非有限）退回**附加质量**
-（`RigidBody.mass`），惯量仍按形状几何算。两条路径相加恒为声明值。
-
-红灯：`tiny_collider_still_weighs_the_declared_mass` 在旧实现下（半径 1e-20）实得质量 0；
-1e-6 / 1e-9 两档旧实现本来就对，一并钉住。
-
-### 2. 极值实体 ID（101）
-
-`EntityId::new()` 是 `fetch_add`，`reserve` 用 `fetch_max(raw + 1)`。文件里写
-`id: (18446744073709551615)` 会把水位顶到 `u64::MAX`，下一次 `new()` 返回**同一个值**
-—— 两个实体共用一个 ID，随后 `remove_subtree` 按 ID 匹配就连坐删除。
-
-改：`MAX_ASSIGNABLE_ID = u64::MAX - 1`，读盘严格大于它即返回 serde 错误（错误信息
-带原值与上限，便于定位是哪个文件被手改）；`new()` 换成 CAS 循环并跳过 0
-（`fetch_add` 回绕会落到 0，而 0 从未被分配过）。
-
-红灯：临时把校验短路，`max_id_is_rejected_at_the_load_boundary` 实得
-`Ok(Holder { id: EntityId(18446744073709551615) })`。
-
-边界：`--check` 遇到这种场景会因加载失败退出 1（预期行为）；"跨文件诊断"
-（同一 ID 在场景与预制体之间是否冲突）仍未做 —— 预制体的 `source_id` 是跨文件引用，
-语义上不该算冲突，要做先得定规则。
-
-### 3. 视口外松手（067）
-
-`UiPointer` 曾把"位置"和"按键"合成一个 `Option`：指针不在视口就整条丢掉。于是
-"按下在按钮上 → 鼠标移出视口 → 松手"那一帧的 `released` 边沿消失，捕获残留在按钮上，
-`Release` 事件也发不出去（要等指针回到视口、被"幽灵按下"清理兜底才恢复）。
-
-改：`UiPointer.pos: Option<Vec2>`，按键电平 / 边沿始终有效；runtime 永远传 `Some(...)`
-（视口尺寸为 0 时仍传 `None`，那表示"没有 UI 可交互"）。新增 `World::ui_pressed()`
-与 `ui_hovered()` 对称 —— 捕获状态比 `state.pressed` 更早暴露这类缺陷，因为后者的
-可见症状要等指针回到视口才消失。
-
-红灯：`releasing_outside_the_viewport_clears_the_button` 在旧映射下第二帧捕获仍在
-（实跑失败）。
-
-顺带补了 `hidden_parent_makes_children_unhittable`：父节点隐藏后子按钮不进命中表
-（`layout::walk` 早就是整棵子树跳过，此前没有测试钉住），以及 UI 层的
-`holding_outside_the_viewport_keeps_the_capture`（拖出视口再拖回来松手仍算点击）。
-
-### 验证与边界
-
-- `check` / `clippy -D warnings` 通过；`test --workspace --all-targets`
-  **953 passed / 0 failed / 9 ignored**（+8：id 3、物理 1、UI 3、运行时 1）。
-- 067 的第三项（脚本改 UI 布局的当帧时序）仍未专项验证；这一条不动代码，只差测试。
-
----
-
-## 七十一、CUBICSPLINE 三次样条采样（R04 / 032 关闭，2026-10-28）
-
-`Docs/差距分析.md` 里 R04 / 032 的表述是"逐关键帧取值与 morph stride 已修；
-仍线性降级，Hermite 与多节点动画保真待做"。本轮把 Hermite 做掉，顺带把
-"轨道形状"从隐式约定变成显式 API。
-
-### 问题：切线在读入时就被扔掉
-
-`gltf_loader::take_spline_values` 对 `CUBICSPLINE` 只挑每帧中间那份值，入 / 出切线
-直接丢弃，运行时退化成线性。数值上"没崩"，但动作的加减速被抹平 —— Blender /
-Maya 默认导出的插值就是三次样条，所以这不是罕见分支，而是**大多数资产会被降级**。
-而且这是单向损失：切线一旦没进内存，运行时再想补也补不回来。
-
-### 实现
-
-- `Interpolation` 加第三个变体 `CubicSpline`；读入端 `parse_interpolation` **穷举**
-  三种映射（不用 `_ =>`），gltf 升级后若新增插值类型会编译不过，逼着做决断。
-- `Track::values` 的布局变成"每帧 `frame_len()` 个浮点" = `stride()`（值分量数）×
-  `slots()`（每帧组数：样条 3，其余 1）。三个派生量收在 `Track` 上 ——
-  `frame_start(k)` / `value_start(k)` / `frame_len()`，"值在中间那份"由
-  `Interpolation::value_slot()` 一处表达；采样、加载、测试读同一处，不各算一遍。
-- 采样：`hermite_basis(u)` 给 `(h00,h10,h01,h11)`，`eval_vec3` / `eval_quat` 按插值
-  分派。切线单位是**每秒**，进 Hermite 前乘段长 `dt`（glTF 规范 C.2）。
-- 旋转：逐分量 Hermite 出的四元数不在单位球上，**必须归一化**；长度接近 0 时
-  （手工改过的曲线）退回 `slerp`，避免 NaN 顺着蒙皮矩阵扩散到整块网格。
-- `sample_morph_weights` 同样按 `slots()` 分组；形状不严丝合缝
-  （`values.len() != times.len() * frame_len()`）就返回 `false` —— morph 的 stride
-  是现算的，串一位画出来就是一张扭曲的脸。
-- 线性 / 阶梯两条路径的读数与从前逐位一致：同样取 `value_start(i0)`、同样 `lerp`、
-  阶梯同样令 `u = 0`。
-
-### 一个自己踩的坑
-
-`value_start(k)` 第一版写成 `frame_start(k) + (slots-1) * stride`，于是把**出切线**
-当成值读了：段中点实得 1.25 而不是 0.75。`slots-1` 只在"三份里取最后一份"时成立，
-而值在中间。改成显式的 `value_slot()` 后才对。这种错不会 panic，只会让动画
-"看起来怪"，所以形状必须由测试钉住，不能靠肉眼。
-
-### 红绿
-
-新增 4 条测试，其中 3 条在旧实现下**实跑失败**（`2 passed / 3 failed`）：
-
-| 测试 | 旧实现读数 | 期望 |
-|---|---|---|
-| `cubic_spline_midpoint_is_hermite_not_linear` | 0.5 | 0.75 |
-| `cubic_spline_scales_tangent_by_segment_length` | 0.5 | 1.0 |
-| `morph_spline_three_keys_two_targets` | 6 个值（切线被丢） | 18 个值 + 中点 0.45 / 0.55 |
-
-`cubic_spline_rotation_is_normalized` 在旧实现下也过（slerp 本身落在单位球上），
-它的作用是钉住新路径：样条出来的四元数必须仍归一，且跨度内不得出现 NaN。
-原 `regression_r04_spline_three_keys_vectors_and_rotations` 测的正是"只取中间那份"
-这一被推翻的行为，改写为 `spline_keeps_tangents`（断言 `frame_len == 3 × stride`
-且第 1 帧三段数据原位保留）。
-
-### 成本
-
-新增基准 `crates/xgame-render/tests/animation_cost.rs`（默认 `#[ignore]`）：
-28 骨 × 3 通道 = 84 条轨道、16 帧，单次 `sample_clip_into`（同机 release，
-7 轮取最快轮，重复三次）：
-
-| 档位 | 单次采样 |
-|---|---|
-| 线性 | 2031–2061 ns |
-| 阶梯 | 891–902 ns |
-| 三次样条 | 1652–1662 ns（0.80–0.81 × 线性） |
-
-样条**比线性便宜**，原因在旋转通道：`Quat::slerp` 要 `acos` 加两次 `sin`，
-而 Hermite 是 4 次乘加 + 一次 `normalize()`。所以"保真"这一刀在本实现下不付成本，
-反而不亏。数字只用于同机背靠背比较，跨机器无意义。
-
-### 验证与边界
-
-- workspace `check --all-targets` / `clippy --all-targets -- -D warnings` 通过；
-  `test --workspace --all-targets` **945 passed / 0 failed / 9 ignored**
-  （上轮 942 / 8；+4 新增 −1 改写删除 = +3）。
-- 多节点动画由真实 Fox 资产（24 骨）的既有端到端用例覆盖（`compute_bones` 走
-  同一条 `sample_clip_into`），本轮未改这条路径。
-- **未做**：CUBICSPLINE 的 morph 多网格（仍只取第一条权重轨道，v1 边界，与插值无关）、
-  根运动、动画 Phase B。
 
 ---
 

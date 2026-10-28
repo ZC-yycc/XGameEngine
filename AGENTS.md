@@ -166,6 +166,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 形变目标（morph） | CPU 变形（权重不变就不重写缓冲）；增量 target-major 且已乘 `model_scale`；权重优先级 剪辑 > 实体 > 模型默认；长度不自洽**整段放弃**；索引逐下标、钳 0~1、上限 256；`set_morph` 立刻生效（不走命令队列） | §三十七 |
 | 动画插值布局 | `CUBICSPLINE` 切线**读入即保留**（每帧入切线 / 值 / 出切线三份，不降级）；`Track::values` 长度必须 = `times.len() × frame_len()`，帧内偏移只用 `frame_start` / `value_start`（**值在中间那份**，写错不 panic 只是动画整体偏移）；切线单位是**每秒**，进 Hermite 前乘段长；旋转逐分量 Hermite 后**必须归一化**，长度退化退回 slerp | §五十一 |
 | UI 指针语义 | 位置（`pos: Option<Vec2>`）与按键（`down`/`pressed`/`released`）**分开**：`pos = None` 只表示不在视口，边沿仍要送达，否则"视口外松手"收不了尾；捕获状态用 `World::ui_pressed()` 断言，别只看 `state.pressed`（它要等指针回视口才归零，测试会假绿）；父节点隐藏 = 整棵子树不进命中表 | §五十二 |
+| UI 与脚本时序 | `update_ui()` 在 `update()` **第 0 步**（早于 start/fixed/update）：`ui_clicked` 必须读本帧状态；代价是脚本本帧改的 UI 矩形**下一帧**才参与命中，这是刻意取舍，`script_moved_ui_takes_effect_on_the_next_frame` 钉住它 —— 想调顺序先改这条测试 | §五十二.4 |
 | 热重载 | 1 Hz 轮询内容目录（只查 metadata）；`poll` 推进基线、**动作后必须 `rebase`**（防自激）；场景永不自动覆盖；脏材质草稿保留；`--ui-shot` 不启用 | §三十一 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |
 | CI | Windows + stable + `--locked`；单 job 顺序跑；不跑 `--screenshot` / 基准 / fmt | §三十四 |
