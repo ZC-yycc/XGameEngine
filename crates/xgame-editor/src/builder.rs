@@ -111,6 +111,14 @@ pub enum BuildError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// 打包后的游戏**缺东西**：源码工程里有、包里没有。
+    ///
+    /// 为什么直接拒绝而不是警告后继续：复制目录不会报错，清单之外的引用会静默
+    /// 落不进包里 —— 作者在编辑器里一切正常，玩家拿到的成品却少一整棵子树 /
+    /// 一关黑屏。这种"看起来成功、实际残缺"的产物比一次明确的失败糟得多。
+    PackageIncomplete { missing: Vec<String> },
+    /// 打包后的产物自己读不出来（入口场景坏掉 / 清单丢了）。
+    PackageUnreadable { reason: String },
 }
 
 impl fmt::Display for BuildError {
@@ -166,6 +174,25 @@ impl fmt::Display for BuildError {
             Self::Io { path, source } => {
                 write!(f, "文件操作失败 ({}): {source}", path.display())
             }
+            Self::PackageIncomplete { missing } => {
+                writeln!(
+                    f,
+                    "打包后的游戏缺少 {} 项引用（源码工程里有、包里没有，玩家会看不到 / 玩不了）:",
+                    missing.len()
+                )?;
+                for line in missing {
+                    writeln!(f, "  - {line}")?;
+                }
+                write!(
+                    f,
+                    "把文件放进清单里的内容目录（Scenes / Resources / Prefabs / Scripts …），\
+                     或在 project.ron 的 content 里声明它们所在的目录，然后重新构建"
+                )
+            }
+            Self::PackageUnreadable { reason } => write!(
+                f,
+                "打包后的产物读不出来（构建已中止，没有覆盖上一版发布）: {reason}"
+            ),
         }
     }
 }
@@ -303,6 +330,11 @@ fn build_with_player(
     }
     let mut warnings = pick.warnings;
     warnings.extend(plugins.warnings);
+
+    // 5) 发布前自检：包里不能比源码工程少引用。
+    //    放在 `publish` 之前 —— 失败时上一版发布目录原封不动。
+    audit_package(project, &package_dir)?;
+
     let executable = output_dir.join(executable.file_name().expect("播放器有文件名"));
     staging.publish(&package_dir, &output_dir, &mut warnings)?;
 
@@ -314,6 +346,63 @@ fn build_with_player(
         scene_count: order.len(),
         warnings,
     })
+}
+
+/// 打包完成前的自检：**包里不能比源码工程少引用**。
+///
+/// 复制目录本身不会报错，所以清单之外的引用（预制体放在 `Assets/`、脚本放在
+/// 自定义目录、关卡放在 `Extra/`）会静默落不进包里。前面几步已经补上了
+/// "清单里每一关的父目录"，这条则是兜底 —— 任何形态的清单外依赖都在这里现形。
+///
+/// 判据是**构建有没有引入新问题**，不是"工程有没有问题"：打包前后一样缺的东西
+/// 归 `--check` 管，一条早就存在的坏引用不该让作者连包都打不出来。
+fn audit_package(project: &ProjectHandle, package_dir: &Path) -> Result<(), BuildError> {
+    let packaged = xgame_core::check_project(package_dir)
+        .map_err(|reason| BuildError::PackageUnreadable { reason })?;
+    // 源码工程读不出来（`--check` 会硬失败那种）时不当基线：构建已经逐关试装过，
+    // 硬把它当成"基线为空"只会把每一行都报成构建漏的。
+    let baseline = xgame_core::check_project(project.root())
+        .map(|report| report.reference_issues())
+        .unwrap_or_default();
+    let missing: Vec<String> = packaged
+        .reference_issues()
+        .into_iter()
+        .filter(|line| !baseline.contains(line))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(BuildError::PackageIncomplete {
+        missing: explain_guids(project, missing),
+    })
+}
+
+/// 把报错里的 `guid://…` 补回"源码工程里它指向哪个文件"。
+///
+/// 场景存的是身份（GUID），玩家看不到的东西作者也看不出：只说"悬空 GUID
+/// `cf757711…`"等于没说 —— 那句话既不能定位文件，也不能提示怎么修。这里按
+/// **源码工程**的资产库翻译回路径，作者一眼就知道是哪个文件没进包。
+fn explain_guids(project: &ProjectHandle, missing: Vec<String>) -> Vec<String> {
+    use xgame_core::AssetGuid;
+
+    let db = project.assets();
+    missing
+        .into_iter()
+        .map(|line| {
+            let Some(start) = line.find("guid://") else {
+                return line;
+            };
+            let raw = &line[start + "guid://".len()..];
+            let Some(guid) = AssetGuid::parse(raw.get(..32).unwrap_or(raw)) else {
+                return line;
+            };
+            // `db` 只在这一行里用一次：拿到路径就放锁，别把 guard 带出闭包。
+            match db.path_of(&guid).map(str::to_owned) {
+                Some(path) => format!("{line}  （源码工程里是 {path}，它没进包）"),
+                None => line,
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +535,20 @@ fn content_dirs(project: &ProjectHandle) -> Vec<String> {
         let parent = parent.to_string_lossy();
         if let Some(dir) = normalize_relative(parent.as_ref()) {
             dirs.insert(dir);
+        }
+    }
+
+    // 发布清单（`build.scenes`）里每一关的父目录。
+    //
+    // 关卡可以放在 `scenes_dir` 之外（`Extra/boss.ron`）——`--check` 认这种写法，
+    // 构建却不认的话就会出现"编辑器里能玩、成品里第二关黑屏"。
+    for raw in &manifest.build.scenes {
+        let normalized = raw.trim().replace('\\', "/");
+        if let Some(parent) = Path::new(&normalized).parent() {
+            let parent = parent.to_string_lossy();
+            if let Some(dir) = normalize_relative(parent.as_ref()) {
+                dirs.insert(dir);
+            }
         }
     }
 
@@ -749,6 +852,89 @@ mod tests {
         std::fs::write(fixture.project.root().join("input.ron"), bytes).unwrap();
         let report = fixture.build().unwrap();
         assert_eq!(std::fs::read(report.output_dir.join("input.ron")).unwrap(), bytes);
+    }
+
+    // -- 清单外依赖：包里必须自带场景引用的东西 --------------------------------
+
+    /// `build.scenes` 里某一关放在内容目录之外（`Extra/boss.ron`）时也必须进包。
+    ///
+    /// 否则玩家切到第二关那一刻黑屏 —— 而编辑器里一切正常，`--check` 也只查
+    /// 磁盘上的源码工程，看不出"发布包少了一个文件"。
+    #[test]
+    fn levels_outside_content_dirs_are_packaged() {
+        let mut fixture = Fixture::new();
+        let scene = fixture.project.load_entry_scene().unwrap();
+        fixture
+            .project
+            .write_scene("Extra/boss.ron", &scene)
+            .unwrap();
+        fixture.project.manifest_mut().build.scenes = vec![
+            xgame_core::DEFAULT_ENTRY_SCENE.to_string(),
+            "Extra/boss.ron".into(),
+        ];
+        fixture.project.save().unwrap();
+
+        let report = fixture.build().expect("清单里的关卡也该能打包");
+        assert!(
+            report.output_dir.join("Extra/boss.ron").is_file(),
+            "清单里的关卡必须进包，实际打了: {:?}",
+            report.packed_dirs
+        );
+        assert!(
+            report.packed_dirs.contains(&"Extra".to_string()),
+            "目录清单要如实报告: {:?}",
+            report.packed_dirs
+        );
+    }
+
+    /// 场景引用了内容目录之外的预制体：源码里有、包里没有 —— 构建必须失败。
+    ///
+    /// 这是"清单外依赖"最隐蔽的形态：复制目录不会报错，编辑器里一切正常，
+    /// 打包出来的游戏却少一整棵子树。宁可明确失败，也不要发一个残缺的包。
+    #[test]
+    fn build_rejects_a_package_that_lost_references() {
+        let fixture = Fixture::new();
+        let mut prefab = xgame_core::prefab::Prefab::new("Loose");
+        prefab.entities.push(xgame_core::Entity::new("Root"));
+        fixture
+            .project
+            .write_prefab("Assets/Loose.prefab.ron", &prefab)
+            .unwrap();
+        let mut scene = fixture.project.load_entry_scene().unwrap();
+        scene.instantiate_prefab(&prefab, "Assets/Loose.prefab.ron");
+        fixture
+            .project
+            .write_scene(xgame_core::DEFAULT_ENTRY_SCENE, &scene)
+            .unwrap();
+
+        let error = fixture.build().expect_err("包里缺引用不能静默通过");
+        let text = error.to_string();
+        assert!(
+            text.contains("Assets/Loose.prefab.ron"),
+            "要点名缺了什么: {text}"
+        );
+        assert!(
+            !fixture.output().join("project.ron").exists(),
+            "失败不该留下半成品"
+        );
+    }
+
+    /// 源码工程**本来就缺**的资产只提醒、不挡构建。
+    ///
+    /// 判据是"构建有没有引入新问题"：打包前后一样缺的东西归 `--check` 管，
+    /// 一条早就存在的坏引用不该让作者连包都打不出来。
+    #[test]
+    fn already_missing_assets_do_not_block_the_build() {
+        let fixture = Fixture::new();
+        let mut scene = fixture.project.load_entry_scene().unwrap();
+        scene.entities[0].model = "Resources/Nope.glb".to_string();
+        fixture
+            .project
+            .write_scene(xgame_core::DEFAULT_ENTRY_SCENE, &scene)
+            .unwrap();
+
+        let report = fixture.build().expect("源码本来就缺的资产不该挡构建");
+        assert!(report.output_dir.join("project.ron").is_file());
     }
 
     #[test]

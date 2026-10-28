@@ -14,6 +14,74 @@
 
 ---
 
+## 七十九、打包不能靠"复制几个目录"：发布前必须验自包含（R01/R02 的"清单外依赖"，2026-10-28）
+
+R01/R02 剩下的那句"清单外依赖"，具体是这个形状：构建只复制 `content` 里声明的
+目录（外加入口场景的父目录），**复制目录本身不会报错**。于是清单之外的引用会**静默**
+落不进包里 —— 编辑器里一切正常，`--check` 也只看源码工程，玩家拿到的成品却少一整
+棵子树，或者在切到第二关那一刻黑屏。
+
+### 两个缺口
+
+1. **关卡可以放在 `scenes_dir` 之外**：`--check` 认 `Extra/boss.ron`（预制体/关卡
+   都能在自定义目录），构建却只带 `scenes_dir` 与入口场景的父目录 → 第二关没进包。
+2. **引用可以指向任何地方**：预制体放在 `Assets/`、脚本放在自定义目录时，资产库照样
+   登记（它扫整个工程），`--check` 全绿，包里却没有这些文件。
+
+### 做法
+
+- `content_dirs` 补上**发布清单里每一关的父目录**（与入口场景同款处理）。这条解决
+  缺口 1，且不改变"只打清单里的目录"这个基本盘。
+- 发布前自检 `audit_package`：对**包**跑一次 `check_project`，再对**源码工程**跑一次，
+  取**差集**。差集非空 = 构建把东西弄丢了 → `BuildError::PackageIncomplete`，构建失败，
+  上一版发布目录原封不动（自检放在 `publish` 之前）。
+- 判据是**"构建有没有引入新问题"**，不是"工程有没有问题"：打包前后一样缺的东西归
+  `--check` 管，一条早就存在的坏引用不该让作者连包都打不出来（`already_missing_assets_do_not_block_the_build` 钉住这条）。
+- `CheckReport::reference_issues()` 是差集用的那一份列表：**只**收引用 / 装载类
+  （模型、材质、贴图、脚本、音频、UI 图、预制体、悬空 GUID、坏材质、坏场景）。
+  `missing_metas` / `guid_conflicts` / `duplicate_ids` / `invalid_layers` 这类**身份与
+  格式**问题前后一模一样，让构建替它们背锅没有意义。
+- 错误里的 `guid://…` **翻译回源码工程路径**（`explain_guids`）。场景存的是身份，
+  只说"悬空 GUID `3444c856…`"等于没说：那句话既不能定位文件，也不能提示怎么修。
+
+### 先证红
+
+两条测试在旧实现下实跑：
+
+```
+levels_outside_content_dirs_are_packaged     FAILED  （包里没有 Extra/boss.ron，
+                                                       packed_dirs = [Prefabs, Resources, Scenes]）
+build_rejects_a_package_that_lost_references FAILED  （构建"成功"了，返回了 BuildReport）
+```
+
+第三条 `already_missing_assets_do_not_block_the_build` 是防"过拦"的护栏，它从第一版
+就是绿的 —— 记在这里是为了说明这个门禁的边界，而不是把它当成红灯。
+
+### 真实 CLI 正负对照（`dist` 里的二进制）
+
+把一个预制体从 `Prefabs/` 挪到 `Assets/`（GUID 不变），再跑同一份 `dist`：
+
+```
+--check  → check: OK (all referenced assets exist)          exit 0   （源码工程没问题）
+--build  → build FAILED: 打包后的游戏缺少 1 项引用…          exit 1
+             - Scenes/scene.ron: Pillar -> guid://3444c856…（源码工程里是
+               Assets/Pillar.prefab.ron，它没进包）
+```
+
+这正是这个门禁存在的理由：`--check` 看得见的部分它全绿，看不见的那一半由构建兜住。
+
+### 量到的
+
+- 全量 `--workspace --all-targets`：**971 passed / 0 failed / 9 ignored**（+3）。
+- clippy `-p xgame-core -p xgame-editor --all-targets`：0 警告。
+- `dist` 重建后：样例项目 `--check`=0、`--build` 成功（新自检在真项目上无误报）；
+  **构建出来的包**直接跑 60 帧无头 `ok=true` / `non_finite_transforms=0`；
+  BehaviorsDemo 与 dist 样例同样 60 帧通过。
+- 已知没做的：包内**真实窗口 + 键鼠输入**的玩家端到端、并发发布、断电事务
+  （R01/R02 的其余部分）仍未关闭。
+
+---
+
 ## 七十八、Revert 不许换 ID：一次"还原"不该把整棵子树的身份洗一遍（R07/103，2026-10-28）
 
 R07/103 只剩一句没关：**Revert 之后实例里的实体 ID 还在不在原位**。老实现走的是

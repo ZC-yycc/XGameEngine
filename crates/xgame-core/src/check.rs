@@ -172,6 +172,36 @@ impl CheckReport {
             + self.build_missing_scenes.len()
     }
 
+    /// **引用 / 装载**类问题（"引用的东西不在盘上"或"场景装不起来"）。
+    ///
+    /// 与 [`Self::issue_count`] 的差别是**归谁管**：身份与格式类问题
+    /// （`missing_metas` / `orphan_metas` / `guid_conflicts` / `duplicate_ids` /
+    /// `invalid_layers`）在同一个工程的打包前后**一模一样**，让构建替它们背锅
+    /// 没有意义 —— 那些归 `--check` 管。
+    ///
+    /// 存在的理由很具体：打包只复制清单声明的内容目录，清单外的引用会**静默**
+    /// 落不进包里。比对源码工程与发布包的这一份列表，就能判断"构建有没有把东西
+    /// 弄丢"（见 `xgame_editor::builder` 的 `audit_package`）。
+    pub fn reference_issues(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for group in [
+            &self.missing_models,
+            &self.missing_materials,
+            &self.missing_material_textures,
+            &self.invalid_materials,
+            &self.missing_scripts,
+            &self.missing_audio,
+            &self.missing_ui_images,
+            &self.missing_prefabs,
+            &self.dangling_guids,
+            &self.invalid_scenes,
+            &self.build_missing_scenes,
+        ] {
+            out.extend(group.iter().cloned());
+        }
+        out
+    }
+
     /// 人和机器都能读的摘要（标准输出用；纯 ASCII，避开控制台编码坑）。
     pub fn render(&self) -> String {
         let mut out = String::new();
