@@ -97,7 +97,7 @@ end
 | `local_pos(ctx)` / `set_local_pos(ctx, x, y, z)` | **局部**坐标 |
 | `translate(ctx, dx, dy, dz)` | 世界空间平移增量 |
 | `rot(ctx)` | 自身**局部**欧拉角（度），顺序 Y-X-Z → `{x, y, z}` 表 |
-| `set_rot(ctx, x, y, z)` | 设置局部欧拉角（度） |
+| `set_rot(ctx, x, y, z)` | 设置局部欧拉角（度，顺序同 `rot`：Y-X-Z；与 Inspector / MCP 同一约定） |
 | `rotate(ctx, dx, dy, dz)` | 叠加旋转增量（度） |
 | `scale(ctx)` / `set_scale(ctx, x, y, z)` | 局部缩放 |
 | `forward(ctx)` / `right(ctx)` / `up(ctx)` | 世界空间的朝向向量 |

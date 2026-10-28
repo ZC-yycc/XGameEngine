@@ -25,7 +25,7 @@
 //! 绝对路径、盘符 —— 这是"智能体能把引擎玩坏到什么程度"的边界之一，
 //! 宁可拒绝也别写出项目外。
 
-use glam::{EulerRot, Quat, Vec3};
+use glam::Vec3;
 use serde_json::{json, Value};
 
 use xgame_core::{check_project, Entity, ProjectHandle, Scene};
@@ -119,7 +119,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "scene_write",
-            "description": format!("用给定 RON 文本**整体替换**一个场景。先解析验证：坏数据一个字节都不落盘。适合成批改结构（加实体、改层级、动灯光）。{write_caveat}"),
+            "description": format!("用给定 RON 文本**整体替换**一个场景。先解析、再做语义体检：坏数据一个字节都不落盘。体检覆盖重复实体 ID、悬空 / 自指 / 成环的 parent、NaN 或无穷的变换与光源数值、未归一化的四元数、越界层号 —— 这些都能通过 RON 解析，但运行时会表现为「实体消失 / 整帧全黑 / 层级面板空白 / 删一个连带删两个」，所以在这里拦住并指出具体实体与字段。适合成批改结构（加实体、改层级、动灯光）。{write_caveat}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -142,7 +142,7 @@ pub fn schemas() -> Vec<Value> {
                     "model": { "type": "string", "description": "模型资产相对路径，或 builtin://cube / builtin://sphere 等内建几何；传入即覆盖" },
                     "scripts": { "type": "array", "items": { "type": "string" }, "description": "挂接的脚本相对路径列表（整表覆盖）" },
                     "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "局部位置 [x, y, z]" },
-                    "rotation_euler_deg": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "局部旋转，欧拉角（度，XYZ 顺序）" },
+                    "rotation_euler_deg": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "局部旋转，欧拉角（度，分量序 [x, y, z]，施加顺序 YXZ —— 与编辑器 Inspector 和脚本 set_rot 完全一致；单轴时与 XYZ 相同，多轴时不同）" },
                     "scale": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "局部缩放 [x, y, z]" },
                     "parent": { "type": "string", "description": "父实体名字（按名字查找）；空串 = 断开挂到根" },
                     "layer": { "type": "integer", "minimum": 0, "maximum": 31, "description": "层索引 0–31（决定与哪些层碰撞 / 触发；矩阵在 project.ron 的 layers 节）。越界直接拒绝" },
@@ -497,13 +497,22 @@ fn scene_read(args: &Value) -> Result<String, CallError> {
     scene_to_ron(&scene)
 }
 
-/// `scene_write` —— 先解析、后落盘：坏数据一个字节都不写。
+/// `scene_write` —— 先解析、再体检、最后落盘：坏数据一个字节都不写。
+///
+/// 两道门的分工：`ron::from_str` 只保证**语法**，[`xgame_core::scene_defects`]
+/// 保证**语义**（重复 ID / 悬空父节点 / 层级环 / 非有限变换 / 非单位旋转 /
+/// 层越界）。少第二道门时，"写成功"只意味着字节落了盘 —— 坏掉的部分要等有人
+/// 打开编辑器才暴露，而那时智能体手上没有任何"哪一行错了"的信息。
+///
+/// **编辑器保存不走这道门**：那边宁可存下脏数据也不能拒绝保存（拒绝 = 用户
+/// 改不动也救不回），体检只做外部写入的准入检查。
 fn scene_write(args: &Value) -> Result<String, CallError> {
     let project = open_project(args)?;
     let rel = scene_rel(args, &project.manifest().entry_scene)?;
     let text = require_str(args, "ron")?;
     let scene: Scene =
         ron::from_str(text).map_err(|e| fail(format!("RON 解析失败，未写入任何文件: {e}")))?;
+    reject_if_defective(&scene)?;
     save_scene_of(&project, &rel, &scene)?;
     Ok(pretty(&json!({
         "scene": rel,
@@ -511,6 +520,36 @@ fn scene_write(args: &Value) -> Result<String, CallError> {
         "entities": scene.entities.len(),
         "lights": scene.lights.len(),
     })))
+}
+
+/// 语义缺陷超过这个条数就不再逐条列出（报错本身要能读完）。
+const MAX_REPORTED_DEFECTS: usize = 12;
+
+/// 场景有语义缺陷就拒绝写入，返回可操作的错误（每条都说清"哪个实体、什么伤"）。
+fn reject_if_defective(scene: &Scene) -> Result<(), CallError> {
+    let defects = xgame_core::scene_defects(scene);
+    if defects.is_empty() {
+        return Ok(());
+    }
+    let mut lines: Vec<String> = defects
+        .iter()
+        .take(MAX_REPORTED_DEFECTS)
+        .map(|d| format!("- {}", d.describe()))
+        .collect();
+    if defects.len() > MAX_REPORTED_DEFECTS {
+        lines.push(format!(
+            "- （另有 {} 处同类问题未列出）",
+            defects.len() - MAX_REPORTED_DEFECTS
+        ));
+    }
+    Err(fail(format!(
+        "场景语义检查未通过，未写入任何文件（共 {} 处）：\n{}\n\
+         这些数据能通过 RON 解析，但运行时不会报错，只会表现为「实体消失 / 层级面板空白 / \
+         删一个连带删两个 / 物体变歪」。改掉再写：重复 ID 改 `id`，悬空父节点改 `parent`，\
+         成环的层级断开一处，NaN 与未归一化的四元数重算。",
+        defects.len(),
+        lines.join("\n")
+    )))
 }
 
 /// `entity_upsert` —— 按名字创建/补丁更新，整场景写回。
@@ -576,8 +615,10 @@ fn entity_upsert(args: &Value) -> Result<String, CallError> {
             entity.transform.position = v;
         }
         if let Some(deg) = vec3_arg(args, "rotation_euler_deg")? {
-            let r = deg * (std::f32::consts::PI / 180.0);
-            entity.transform.rotation = Quat::from_euler(EulerRot::XYZ, r.x, r.y, r.z);
+            // 走 core 的唯一入口（`YXZ`）：与 Inspector 面板、脚本 `set_rot`
+            // 给出同一个姿态。曾经这里自己写 `EulerRot::XYZ`，单轴旋转看不出
+            // 差别，一混轴就和面板对不上（见决策记录 §六十四）。
+            entity.transform.rotation = xgame_core::euler_deg_to_quat(deg);
         }
         if let Some(v) = vec3_arg(args, "scale")? {
             entity.transform.scale = v;
@@ -1037,6 +1078,8 @@ fn tail_chars(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `Quat` 只在测试里用（构造未归一化 / 期望姿态），放顶层导入会在非测试构建里报 unused。
+    use glam::Quat;
 
     /// 临时项目（用完记得删）。
     fn temp_project(tag: &str) -> ProjectHandle {
@@ -1223,6 +1266,62 @@ mod tests {
         cleanup(&project);
     }
 
+    /// 语义坏的场景：RON 能解析，但用不了 —— 必须拒绝且不落盘。
+    ///
+    /// 三种伤一次给全（`NaN` 坐标 / 悬空父节点 / 未归一化四元数）。它们的共同
+    /// 点是**运行时一个字都不报**：物体消失、层级面板空白、删一个连带删两个。
+    /// 没有这道门时 `scene_write` 会说"成功"，把问题留给打开编辑器的人。
+    #[test]
+    fn scene_write_rejects_semantically_broken_scenes() {
+        let project = temp_project("semantics");
+        let before = std::fs::read_to_string(project.entry_scene_path()).expect("读原文件");
+
+        let mut scene = Scene::new("broken");
+        scene.entities.push(Entity::new("Bad"));
+        scene.entities[0].transform.position.x = f32::NAN;
+        scene.entities.push(Entity::new("Orphan"));
+        scene.entities[1].parent = Some(xgame_core::EntityId::from_raw(9999));
+        scene.entities.push(Entity::new("Skewed"));
+        scene.entities[2].transform.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 2.0);
+        let text = scene_to_ron(&scene).expect("序列化");
+
+        let err = run(&project, "scene_write", json!({ "ron": text })).expect_err("必须拒绝");
+        match err {
+            CallError::Failed(msg) => {
+                for needle in [
+                    "语义检查未通过",
+                    "non-finite transform",
+                    "dangling parent",
+                    "rotation not unit",
+                ] {
+                    assert!(msg.contains(needle), "报错缺少「{needle}」: {msg}");
+                }
+            }
+            other => panic!("应是 Failed，得到 {other:?}"),
+        }
+        let after = std::fs::read_to_string(project.entry_scene_path()).expect("读原文件");
+        assert_eq!(before, after, "被拒的写请求不能改动文件");
+        cleanup(&project);
+    }
+
+    /// 把上面那三处伤修好之后，同一份文本必须写得进去 —— 否则闸门就是"永远拒"。
+    #[test]
+    fn scene_write_accepts_the_same_scene_once_the_defects_are_fixed() {
+        let project = temp_project("semantics_ok");
+        let mut scene = Scene::new("fixed");
+        scene.entities.push(Entity::new("Bad"));
+        scene.entities[0].transform.position.x = 0.0;
+        scene.entities.push(Entity::new("Child"));
+        scene.set_parent(1, Some(0));
+        scene.entities.push(Entity::new("Skewed"));
+        scene.entities[2].transform.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 1.0);
+        let text = scene_to_ron(&scene).expect("序列化");
+
+        run(&project, "scene_write", json!({ "ron": text })).expect("修好后应写入");
+        assert_eq!(entry_scene(&project).entities.len(), 3);
+        cleanup(&project);
+    }
+
     /// 路径穿越与绝对路径必须被拒绝 —— 智能体的破坏半径止于项目目录。
     #[test]
     fn scene_path_traversal_rejected() {
@@ -1288,6 +1387,47 @@ mod tests {
             "未传字段不能被动"
         );
         assert_eq!(e.transform.scale, Vec3::new(3.0, 3.0, 3.0));
+        cleanup(&project);
+    }
+
+    /// `rotation_euler_deg` 必须与 Inspector / 脚本**同一个约定**（`YXZ`）。
+    ///
+    /// 这条测试存在的理由：旧实现自己写 `EulerRot::XYZ`，而上面那条
+    /// `entity_upsert_creates_then_patches` 用的是单轴 `[0, 90, 0]` ——
+    /// **单轴时两种顺序恰好同解**，所以它一直是绿的。混合轴才会分叉。
+    #[test]
+    fn entity_upsert_rotation_matches_the_engine_convention() {
+        let project = temp_project("upsert_rot");
+        run(
+            &project,
+            "entity_upsert",
+            json!({
+                "name": "Spin",
+                "rotation_euler_deg": [30.0, 45.0, 60.0],
+            }),
+        )
+        .expect("写旋转应成功");
+
+        let scene = entry_scene(&project);
+        let e = scene.find_by_name("Spin").expect("实体应在场景里");
+        let want = xgame_core::euler_deg_to_quat(Vec3::new(30.0, 45.0, 60.0));
+        // 逐分量比：同一组输入走同一个函数，落盘再读回是 f32 原值，不引入误差。
+        // （不用 `angle_between` —— 它对"差 0.4 rad"和"差 1.2 rad"一样宽容，
+        // 分不清是约定错了还是精度问题。）
+        for i in 0..4 {
+            assert!(
+                (e.transform.rotation.to_array()[i] - want.to_array()[i]).abs() < 1e-6,
+                "必须与 core 的 YXZ 入口逐分量一致：{:?} vs {want:?}",
+                e.transform.rotation
+            );
+        }
+        // 负对照：XYZ 顺序在这里是另一个姿态，必须明显不同（否则本测试挡不住回退）。
+        let rad = Vec3::new(30.0_f32, 45.0, 60.0) * std::f32::consts::PI / 180.0;
+        let xyz = Quat::from_euler(glam::EulerRot::XYZ, rad.x, rad.y, rad.z);
+        let diff = (0..4)
+            .map(|i| (want.to_array()[i] - xyz.to_array()[i]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(diff > 0.1, "YXZ 与 XYZ 在混合轴下必须不同（实测 {diff}）");
         cleanup(&project);
     }
 

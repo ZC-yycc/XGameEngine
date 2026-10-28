@@ -2437,15 +2437,10 @@ mod tests {
             .scene()
             .find_by_name("Spinner")
             .expect("Spinner 应当还在");
-        let (yaw, _, _) = spinner
-            .transform
-            .rotation
-            .to_euler(xgame_math::glam::EulerRot::YXZ);
-        assert!(
-            yaw.to_degrees().abs() > 30.0,
-            "Spinner 应当在自转，实际 yaw = {}",
-            yaw.to_degrees()
-        );
+        // `quat_to_euler_deg` 直接给度数（别再 `.to_degrees()` —— 那是把度数
+        // 当弧度再转一次，测试会因为数值放大而假绿）。
+        let yaw = xgame_core::quat_to_euler_deg(spinner.transform.rotation).y;
+        assert!(yaw.abs() > 30.0, "Spinner 应当在自转，实际 yaw = {yaw}°");
     }
 
     /// 示例项目在仓库里的位置（相对本 crate）。

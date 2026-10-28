@@ -109,6 +109,16 @@ pub struct CheckReport {
     /// 取不到值就退回 `EntityId::new()`，于是资产里凭空多出一份重复实体。
     /// 按 `(场景, 预制体)` 聚合报一条，避免一个 20 节点实例刷 20 行。
     pub dangling_source_ids: Vec<String>,
+    /// 场景的**语义**缺陷（"场景: 描述"），来自 [`crate::validate::scene_defects`]。
+    ///
+    /// 与上一条的区别：那些查的是"引用通不通"，这里查的是"数据本身能不能用"
+    /// —— 悬空父节点、层级成环、`NaN` 坐标、未归一化的四元数。它们**都能通过
+    /// RON 解析**，所以只有主动体检才看得见；症状是"实体不在层级树里 / 位置是
+    /// NaN / 删一个连带删两个"，与加载失败完全不同源。
+    ///
+    /// 重复 ID 与越界层号不在这里（各有专门字段，那两条在加载边界/文本层就已
+    /// 查过，重复报只会让问题数虚高）。
+    pub semantic_defects: Vec<String>,
     /// 发布清单（`build.scenes`）的有效顺序，已规范化去重。
     ///
     /// 空清单不在这里体现：`scene_order()` 会退化成只有入口场景，那是"未配置"
@@ -146,6 +156,7 @@ impl CheckReport {
             || !self.duplicate_ids.is_empty()
             || !self.duplicate_prefab_ids.is_empty()
             || !self.dangling_source_ids.is_empty()
+            || !self.semantic_defects.is_empty()
             || !self.build_missing_scenes.is_empty()
     }
 
@@ -169,6 +180,7 @@ impl CheckReport {
             + self.duplicate_ids.len()
             + self.duplicate_prefab_ids.len()
             + self.dangling_source_ids.len()
+            + self.semantic_defects.len()
             + self.build_missing_scenes.len()
     }
 
@@ -284,6 +296,9 @@ impl CheckReport {
         }
         for d in &self.dangling_source_ids {
             let _ = writeln!(out, "  dangling source: {d}");
+        }
+        for d in &self.semantic_defects {
+            let _ = writeln!(out, "  semantic:       {d}");
         }
         for s in &self.build_missing_scenes {
             let _ = writeln!(out, "  build scene missing: {s}");
@@ -455,6 +470,17 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
             &mut materials,
             &mut prefab_ids,
         );
+        // 语义体检：重复 ID 与越界层号在这里跳过 —— 它们分别由
+        // `duplicate_ids`（磁盘原文）与 `invalid_layers`（实体字段）报过，
+        // 同一件事报两遍会让 `issue_count` 虚高。
+        for defect in crate::validate::scene_defects(scene) {
+            if defect.kind.is_reported_elsewhere() {
+                continue;
+            }
+            report
+                .semantic_defects
+                .push(format!("{relative}: {}", defect.describe()));
+        }
     }
 
     // -- 材质内容（引用的材质能不能读、里面的贴图在不在）------------------
@@ -708,6 +734,56 @@ mod tests {
 
         let after = project.scene_duplicate_ids(&entry).expect("再读一次");
         assert!(!after.is_empty(), "检查必须只读，不能把重复 ID 修好写回去");
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 语义体检接进 `--check`：层级成环与非有限变换都要报，且算问题（进退出码）。
+    ///
+    /// 与上面那条重复 ID 的区别：这一层查的是**能通过 RON 解析**的数据伤。
+    /// 症状是"实体不在层级树里 / 位置是 NaN / 删一个连带删两个"，没有一个会
+    /// 报错，所以只有主动体检才看得见。
+    #[test]
+    fn semantic_defects_are_reported() {
+        let project = temp_project("semantic");
+        let entry = project.manifest().entry_scene.clone();
+        let mut scene = project.load_entry_scene().expect("加载默认场景");
+        // ① 两节点成环（都不再是根 → 层级面板里两个都"消失"）。
+        let a = scene.add_entity(crate::Entity::new("LoopA"));
+        let b = scene.add_entity(crate::Entity::new("LoopB"));
+        let ai = scene.find_entity(a).expect("刚加");
+        let bi = scene.find_entity(b).expect("刚加");
+        scene.entities[ai].parent = Some(b);
+        scene.entities[bi].parent = Some(a);
+        // ② 非有限坐标（世界矩阵被污染成 NaN，整个子树消失）。
+        let nan = scene.add_entity(crate::Entity::new("Nan"));
+        let ni = scene.find_entity(nan).expect("刚加");
+        scene.entities[ni].transform.position.y = f32::NEG_INFINITY;
+        project.write_scene(&entry, &scene).expect("写回场景");
+
+        let report = check_project(project.root()).expect("检查应能跑完");
+        let joined = report.semantic_defects.join("\n");
+        assert!(joined.contains("parent cycle"), "缺环报告：{joined}");
+        assert!(
+            joined.contains("non-finite transform"),
+            "缺 NaN 报告：{joined}"
+        );
+        assert!(
+            report.has_issues(),
+            "语义缺陷必须算问题（退出码由它决定）：{}",
+            report.render()
+        );
+        assert!(
+            report.render().contains("semantic:"),
+            "报告文本必须包含这一行：{}",
+            report.render()
+        );
+        // 这两条属于"数据本身"，不是"引用的东西不在盘上"：不该让打包去背锅。
+        assert!(
+            report.reference_issues().is_empty(),
+            "语义缺陷不该进 reference_issues：{:?}",
+            report.reference_issues()
+        );
 
         let _ = std::fs::remove_dir_all(project.root());
     }

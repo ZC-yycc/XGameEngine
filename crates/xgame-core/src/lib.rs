@@ -8,7 +8,7 @@
 //! |---|---|
 //! | `color` | RGBA 颜色类型（线性浮点存储） |
 //! | `config` | 引擎/窗口/内容路径配置 |
-//! | `transform` | 层级空间变换（位置/旋转/缩放）|
+//! | `transform` | 层级空间变换（位置/旋转/缩放）+ 欧拉角换算唯一入口（`YXZ`，度）|
 //! | `scene` | 场景图：`Scene`, `Entity` |
 //! | `prefab` | 预制体：`Prefab`, `PrefabInstanceRef`（可复用的实体子树模板）|
 //! | `id` | 稳定实体标识符 `EntityId` |
@@ -29,6 +29,7 @@
 //! | `particle` | 粒子发射器 `ParticleEmitter`（纯声明；模拟在 `xgame-particle`，绘制在 `xgame-render`）|
 //! | `schema` | 场景格式的机器可读说明书（`--export-schema` / MCP `schema_read` 的真相源）|
 //! | `script_api` | 脚本 API 的机器可读清单（`--export-script-api` / MCP `script_api_read` 的真相源）|
+//! | `validate` | 场景**语义**体检（重复 ID / 悬空父节点 / 层级环 / 非有限变换 / 非单位旋转 / 层越界）|
 //!
 //! # 依赖方向
 //!
@@ -71,6 +72,10 @@ pub mod ray;
 mod time;
 pub mod ui;
 
+// 场景语义体检（重复 ID / 悬空父节点 / 层级环 / 非有限变换 / 非单位旋转 / 层越界）：
+// `--check` 与 MCP `scene_write` 共用一份判定，别在调用侧各写一套。
+mod validate;
+
 // 场景格式的机器可读说明书（Agent-Native ③）：--export-schema / MCP schema_read 的真相源。
 pub mod schema;
 
@@ -90,7 +95,7 @@ pub use project::{
     ProjectHandle, DEFAULT_ENTRY_SCENE, PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION,
 };
 pub use scene::{Entity, Scene};
-pub use transform::Transform;
+pub use transform::{euler_deg_to_quat, quat_to_euler_deg, Transform};
 
 // -- 导出：新增基础设施
 pub use animation::{
@@ -123,3 +128,4 @@ pub use schema::{scene_schema, SchemaDoc, SCHEMA_FORMAT_VERSION};
 pub use script_api::{script_api, ScriptApiDoc, SCRIPT_API_FORMAT_VERSION};
 pub use time::{GameClock, Stopwatch, Timer, MAX_TIME_SCALE};
 pub use ui::{UiAlign, UiElement, UiImageStyle, UiKind, UiState, UiStyle, UiTextStyle, UiVAlign};
+pub use validate::{scene_defects, Defect, DefectKind};

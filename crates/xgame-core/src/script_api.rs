@@ -443,7 +443,7 @@ const FUNCTIONS: &[ApiDef] = &[
         "set_rot",
         "set_rot(ctx, x, y, z)",
         "nil",
-        r#"设置局部欧拉角（度）"#,
+        r#"设置局部欧拉角（度，顺序同 `rot`：Y-X-Z；与 Inspector / MCP 同一约定）"#,
     ),
     api(
         "transform",

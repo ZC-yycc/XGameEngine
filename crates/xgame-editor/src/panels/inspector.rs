@@ -410,21 +410,13 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
 
             // 旋转（欧拉角显示，内部仍是四元数）
             //
-            // 顺序用 **YXZ**（不是 XYZ）：脚本 API 的 `rot` / `set_rot` 就是 YXZ，
-            // 面板必须与它一致，否则"面板上读到 153°、脚本里读到 −130°"，
-            // 作者会以为其中一处坏了。
+            // 换算是 `xgame_core::quat_to_euler_deg` / `euler_deg_to_quat`
+            // （顺序固定 **YXZ**）：脚本 API 的 `rot` / `set_rot` 与 MCP 的
+            // `rotation_euler_deg` 都走同一个入口，否则"面板上读到 153°、
+            // 脚本里读到 −130°"，作者会以为其中一处坏了。
             // 对相机这类物体，YXZ 还给出人类可读的 yaw / pitch（俯角 18°），
             // XYZ 分解在同样位姿下会折成 (−46°, 153°, 160°) 这种读不出来的三元组。
-            let euler = entity
-                .transform
-                .rotation
-                .to_euler(xgame_math::glam::EulerRot::YXZ);
-            // `to_euler` 按 (y, x, z) 序返回；面板按 X / Y / Z 排列显示。
-            let mut rot = [
-                euler.1.to_degrees(),
-                euler.0.to_degrees(),
-                euler.2.to_degrees(),
-            ];
+            let mut rot = xgame_core::quat_to_euler_deg(entity.transform.rotation).to_array();
             // 把 −0.000 抹成 0：四元数分解常在零附近给出负零，
             // 面板上显示 "−0.000°" 像是算错了（实际是同一角度）。
             for value in &mut rot {
@@ -449,12 +441,8 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 any
             });
             if rotation_changed {
-                entity.transform.rotation = xgame_math::glam::Quat::from_euler(
-                    xgame_math::glam::EulerRot::YXZ,
-                    rot[1].to_radians(),
-                    rot[0].to_radians(),
-                    rot[2].to_radians(),
-                );
+                let degrees = xgame_math::glam::Vec3::from_array(rot);
+                entity.transform.rotation = xgame_core::euler_deg_to_quat(degrees);
             }
 
             // 缩放（不允许 0 或负数——那会让法线矩阵退化，整个物体变黑）

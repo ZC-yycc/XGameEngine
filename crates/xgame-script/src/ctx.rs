@@ -43,7 +43,7 @@ use xgame_core::{
     SceneLoader,
 };
 use xgame_input::{Input, KeyCode, MouseButton};
-use xgame_math::glam::{EulerRot, Quat, Vec2, Vec3};
+use xgame_math::glam::{Quat, Vec2, Vec3};
 use xgame_physics::{PhysicsRayHit, PhysicsWorld, RaycastFilter};
 
 use crate::context::{LogLevel, ScriptCommand, ScriptLog, SpawnRequest};
@@ -1687,18 +1687,14 @@ fn set_world_position(scene: &mut Scene, index: usize, world_pos: Vec3) {
     }
 }
 
+/// 欧拉角换算走 core 的**唯一入口**（`YXZ`）：脚本、Inspector、MCP 三个入口
+/// 必须给出同一个姿态，别在这里再抄一份 `from_euler`。
 fn euler_degrees(q: Quat) -> Vec3 {
-    let (y, x, z) = q.to_euler(EulerRot::YXZ);
-    Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees())
+    xgame_core::quat_to_euler_deg(q)
 }
 
 fn quat_from_degrees(v: Vec3) -> Quat {
-    Quat::from_euler(
-        EulerRot::YXZ,
-        v.y.to_radians(),
-        v.x.to_radians(),
-        v.z.to_radians(),
-    )
+    xgame_core::euler_deg_to_quat(v)
 }
 
 /// 实体 ID → 物理刚体句柄。

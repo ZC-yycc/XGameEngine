@@ -228,7 +228,7 @@
             name: "Crate.C",
             transform: (
                 position: (0.0, 12.0, 0.0),
-                rotation: (0.0, 0.3, 0.0, 0.95),
+                rotation: (0.0, 0.30113, 0.0, 0.95358),
                 scale: (0.8, 0.8, 0.8),
             ),
             model: "builtin://cube",
