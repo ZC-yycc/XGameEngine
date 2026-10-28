@@ -131,6 +131,11 @@ pub fn create_tile_tree() -> Tree<PanelTab> {
 /// 3. 没有不可达的孤儿 tile（它们会跟着下次保存越积越多）；
 /// 4. 每个 [`PanelTab::ALL`] 变体恰好出现一次 —— 少一个就永远打不开那个面板，
 ///    多一个则说明文件被改坏了。
+/// 5. [`Container::Tabs`] 的页签子项必须全是 pane —— 拖页签条背景会拖动整个
+///    Tabs 容器，`egui_tiles` 又允许把容器当页签插进去；自绘 [`EditorBehavior::tab_ui`]
+///    只画得了 pane 页签，混进容器就是「拖一下面板就闪退」的现场。
+/// 6. `Linear` 的 shares 必须全是有限值 —— NaN 会在布局除法里传染，整块停靠区
+///    变成不可见。
 pub fn is_usable_layout(tree: &Tree<PanelTab>) -> bool {
     let Some(root) = tree.root() else {
         return false;
@@ -155,6 +160,23 @@ pub fn is_usable_layout(tree: &Tree<PanelTab>) -> bool {
                 // 空容器是没有任何意义的中间层，也说明布局来自坏数据。
                 if children.peek().is_none() {
                     return false;
+                }
+                match container {
+                    // 页签子项必须是 pane：容器页签自绘画不了，拖拽事故的产物。
+                    egui_tiles::Container::Tabs(_) => {
+                        if container.children().any(|child| {
+                            !matches!(tree.tiles.get(*child), Some(egui_tiles::Tile::Pane(_)))
+                        }) {
+                            return false;
+                        }
+                    }
+                    // shares 进过除法，NaN / 无穷会把整块布局算没。
+                    egui_tiles::Container::Linear(linear) => {
+                        if linear.shares.iter().any(|(_, share)| !share.is_finite()) {
+                            return false;
+                        }
+                    }
+                    egui_tiles::Container::Grid(_) => {}
                 }
                 stack.extend(children.copied());
             }
@@ -231,6 +253,28 @@ impl Behavior<PanelTab> for EditorBehavior<'_> {
         pane.title().to_owned().into()
     }
 
+    /// 页签标题的统一入口：pane 走 [`Self::tab_title_for_pane`]，其余给兜底。
+    ///
+    /// 拖页签条背景会拖动整个 Tabs 容器，`egui_tiles` 也允许把容器当页签插进
+    /// 任意 Tabs（见 `Tiles::insert_at` 的 `Tabs` 分支）——页签子项**不一定**是
+    /// pane。`tab_ui` / `drag_ui` 都从这里取标题，任何 tile 类型都不许 panic。
+    fn tab_title_for_tile(&mut self, tiles: &Tiles<PanelTab>, tile_id: TileId) -> egui::WidgetText {
+        match tiles.get(tile_id) {
+            Some(egui_tiles::Tile::Pane(pane)) => self.tab_title_for_pane(pane),
+            Some(egui_tiles::Tile::Container(container)) => {
+                // 容器页签：显示容器类型，至少让人认得出这是个分组而不是面板。
+                match container.kind() {
+                    egui_tiles::ContainerKind::Tabs => "页签组",
+                    egui_tiles::ContainerKind::Horizontal => "横向分组",
+                    egui_tiles::ContainerKind::Vertical => "纵向分组",
+                    egui_tiles::ContainerKind::Grid => "网格分组",
+                }
+                .into()
+            }
+            None => "丢失的面板".into(),
+        }
+    }
+
     fn is_tab_closable(&self, _tiles: &Tiles<PanelTab>, _tile_id: TileId) -> bool {
         false
     }
@@ -268,6 +312,9 @@ impl Behavior<PanelTab> for EditorBehavior<'_> {
     ///
     /// 点击 / 拖拽的**语义**仍由 egui_tiles 处理（`Tabs` 读返回的 `Response`），
     /// 这里只负责画。
+    ///
+    /// 标题走 [`Self::tab_title_for_tile`]：页签子项不保证是 pane（拖页签条背景
+    /// 会把容器拖成页签），任何 tile 类型都必须画得出来，不能 panic。
     fn tab_ui(
         &mut self,
         _tiles: &mut Tiles<PanelTab>,
@@ -278,13 +325,7 @@ impl Behavior<PanelTab> for EditorBehavior<'_> {
     ) -> egui::Response {
         use theme::colors;
 
-        // 标题仍然走 `tab_title_for_pane`（拿一份 pane 副本喂它，避免与
-        // `&mut self` 的可变借用打架）。
-        let pane = match _tiles.get(tile_id) {
-            Some(egui_tiles::Tile::Pane(pane)) => pane.clone(),
-            _ => unreachable!("页签对应的 pane 必须存在"),
-        };
-        let text = self.tab_title_for_pane(&pane);
+        let text = self.tab_title_for_tile(_tiles, tile_id);
 
         let font = if state.active {
             egui::FontId::new(12.5, theme::bold_family())
@@ -344,6 +385,21 @@ impl Behavior<PanelTab> for EditorBehavior<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一个挂在临时目录上的编辑器状态（用完记得删目录）。
+    fn temp_state(tag: &str) -> (EditorState, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "xgame_dock_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let handle = xgame_core::ProjectHandle::create(&base, "DockTest").expect("创建临时项目");
+        (EditorState::new(handle), base)
+    }
 
     /// 每个 `PanelTab` 变体在布局里都必须有一个 pane —— 漏掉一个变体的表现是
     /// "能编译、能跑，但那个面板永远打不开"，`Panel` 派生也不会报错。
@@ -430,6 +486,125 @@ mod tests {
         let mut tree = create_tile_tree();
         let _ = tree.tiles.insert_pane(PanelTab::Hierarchy);
         assert!(!is_usable_layout(&tree));
+    }
+
+    /// 拖拽事故布局：`Tabs` 的页签子项是**容器**而不是 pane。
+    ///
+    /// 拖页签条背景 = 拖整个 `Tabs` 容器，`egui_tiles` 允许把任意 tile 当页签插进
+    /// 任意 `Tabs`（`insert_at` 的 `Tabs` 分支甚至会把父节点包成新 Tabs）。自绘
+    /// `tab_ui` 只画得了 pane 页签，这种结构就是「拖一下 Prefabs 面板就闪退」的
+    /// 现场。七个面板都在、无环无孤儿 —— 除了「页签子项类型」这一条，别的判据
+    /// 全过，所以校验必须专门盯它。
+    #[test]
+    fn tabs_with_container_children_is_rejected() {
+        let mut tiles = Tiles::default();
+        let hierarchy = tiles.insert_pane(PanelTab::Hierarchy);
+        let assets = tiles.insert_pane(PanelTab::Assets);
+        let prefabs = tiles.insert_pane(PanelTab::Prefabs);
+        let scene = tiles.insert_pane(PanelTab::SceneView);
+        let inspector = tiles.insert_pane(PanelTab::Inspector);
+        let console = tiles.insert_pane(PanelTab::Console);
+        let profiler = tiles.insert_pane(PanelTab::Profiler);
+
+        // 正常的 pane 页签组（子树本身没毛病）。
+        let hier_tabs = tiles.insert_tab_tile(vec![hierarchy]);
+        let misc_tabs = tiles.insert_tab_tile(vec![console, profiler]);
+        let mid = tiles.insert_container(Linear::new(LinearDir::Vertical, vec![hier_tabs, misc_tabs]));
+        let right_tabs = tiles.insert_tab_tile(vec![assets, prefabs, scene, inspector]);
+
+        // 根是 Tabs，两个子项都是容器 —— 事故形态。
+        let root = tiles.insert_tab_tile(vec![mid, right_tabs]);
+        let tree = Tree::new("editor_tree", root, tiles);
+
+        assert!(
+            !is_usable_layout(&tree),
+            "Tabs 页签里混着容器的布局必须被拒收（否则自绘 tab_ui 会闪退）"
+        );
+    }
+
+    /// 出厂布局的页签子项必须全是 pane —— 把不变量钉在测试里。
+    #[test]
+    fn factory_tabs_contain_only_panes() {
+        let tree = create_tile_tree();
+        for (_, tile) in tree.tiles.iter() {
+            if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs)) = tile {
+                for child in &tabs.children {
+                    assert!(
+                        matches!(tree.tiles.get(*child), Some(egui_tiles::Tile::Pane(_))),
+                        "出厂布局的页签子项必须是 pane，发现 {child:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 分隔条的 shares 带 NaN / 无穷大会让布局计算烂掉，也拒收。
+    #[test]
+    fn non_finite_shares_are_rejected() {
+        let mut tiles = Tiles::default();
+        let ids = PanelTab::ALL
+            .iter()
+            .map(|pane| tiles.insert_pane(pane.clone()))
+            .collect::<Vec<_>>();
+        let mut left = Linear::new(LinearDir::Horizontal, vec![ids[0], ids[1]]);
+        left.shares.set_share(ids[0], f32::NAN);
+        let left = tiles.insert_container(left);
+        let right = tiles.insert_tab_tile(ids[2..].to_vec());
+        let root = tiles.insert_container(Linear::new(LinearDir::Horizontal, vec![left, right]));
+        let tree = Tree::new("editor_tree", root, tiles);
+        assert!(!is_usable_layout(&tree), "NaN share 的布局不是合法布局");
+    }
+
+    /// 自绘 `tab_ui` 假定「页签子项必是 pane」——拖拽把容器塞成页签、或 tile
+    /// 已被删时，画页签不能崩（`unreachable!` 闪退是不可接受的）。
+    ///
+    /// 旧实现在这里 `unreachable!("页签对应的 pane 必须存在")`，直接 panic。
+    #[test]
+    fn tab_ui_survives_container_and_missing_tiles() {
+        let (mut state, base) = temp_state("tabui");
+        let mut tiles = Tiles::default();
+        let pane = tiles.insert_pane(PanelTab::Hierarchy);
+        let container = tiles.insert_container(Linear::new(LinearDir::Horizontal, vec![pane]));
+        let missing = TileId(999);
+
+        let ctx = egui::Context::default();
+        // 注册 bold 族：`FontFamily::Name` 指向未注册族会 panic。测试不需要真
+        // 中文字体，给个默认回退链就够。
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        fonts
+            .families
+            .insert(egui::FontFamily::Name(theme::BOLD_FAMILY.into()), proportional);
+        ctx.set_fonts(fonts);
+
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut behavior = EditorBehavior { state: &mut state };
+                for (label, tile, active) in [
+                    ("container-inactive", container, false),
+                    ("container-active", container, true),
+                    ("missing-inactive", missing, false),
+                    ("missing-active", missing, true),
+                ] {
+                    let tab = egui_tiles::TabState {
+                        active,
+                        is_being_dragged: false,
+                        closable: false,
+                    };
+                    let response =
+                        behavior.tab_ui(&mut tiles, ui, egui::Id::new(label), tile, &tab);
+                    assert!(
+                        response.rect.is_finite(),
+                        "{label} 的页签响应矩形应当是有限值"
+                    );
+                }
+            });
+        });
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// Profiler 与 Output Log 同组：默认激活的必须是 Output Log（老截图逐像素不变），

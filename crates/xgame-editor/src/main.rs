@@ -417,12 +417,21 @@ impl EditorApp {
     /// 返回枢纽 / 关窗 / 退出时调用；没有会话（停在枢纽）时只写数值部分。
     /// `save_preferences == false`（`--ui-shot` 默认路径）时**什么都不做** ——
     /// 截图不能顺手改掉用户的 `editor.ron`。
+    ///
+    /// 布局同样要过 [`panels::dock::is_usable_layout`]：坏树不落盘，保留磁盘上
+    /// 上一份合法布局（松手帧已经把会话内的坏树回滚过了，这里是最后一道闸）。
     fn persist_preferences(&mut self) {
         if !self.save_preferences {
             return;
         }
         let changed = match self.session.as_ref() {
-            Some(session) => self.preferences.sync_layout(&session.tree),
+            Some(session) if panels::dock::is_usable_layout(&session.tree) => {
+                self.preferences.sync_layout(&session.tree)
+            }
+            Some(_) => {
+                log::warn!("退出时的面板布局不合法，保留磁盘上原有布局");
+                false
+            }
             None => false,
         };
         // 布局没变就不写盘：同一个会话反复关闭 / 退出不该重复写。
@@ -1079,11 +1088,20 @@ fn editor_ui(
     // 拖拽中的每一帧树都不同，逐帧保存会变成高频磁盘写；而每帧比较需要
     // 深比较 + 克隆，也没必要。没拖过时 `layout` 与树不同（首次运行为 None），
     // 第一次松手会顺手把默认布局写下来 —— 这正是"从没保存过"该有的结果。
-    if save_preferences
-        && ctx.input(|i| i.pointer.any_released())
-        && editor_prefs.sync_layout(&session.tree)
-    {
-        editor_prefs.save();
+    //
+    // **先校验再落盘**：拖页签条背景会拖动整个 Tabs 容器，egui_tiles 允许把
+    // 容器当页签插进任意 Tabs（`insert_at` 的 `Tabs` 分支）——松手帧 `move_tile`
+    // 刚把这种坏结构造出来，原样写进 `editor.ron` 会让下次启动首帧闪退。坏树
+    // 不落盘，并回滚到上次合法布局（`layout_for_startup` 对坏文件回退出厂）。
+    if save_preferences && ctx.input(|i| i.pointer.any_released()) {
+        if panels::dock::is_usable_layout(&session.tree) {
+            if editor_prefs.sync_layout(&session.tree) {
+                editor_prefs.save();
+            }
+        } else {
+            log::warn!("拖拽产生了非法的面板布局（页签中混入容器 / 非法分隔比例），已回滚");
+            session.tree = editor_prefs.layout_for_startup();
+        }
     }
 
     // ── 6.5. 资源拖拽收尾 ──

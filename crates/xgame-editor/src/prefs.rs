@@ -301,6 +301,45 @@ mod tests {
         assert!(dock::is_usable_layout(&restored));
     }
 
+    /// 拖拽事故布局（Tabs 页签里混着容器）必须回退出厂布局。
+    ///
+    /// 用户现场：把 Prefabs 页签拖到自身/邻近面板后闪退，坏树经 `sync_layout`
+    /// 落盘，之后每次启动都恢复坏布局 → 首帧再崩。恢复入口必须把这种树认成
+    /// 「已损坏」，而不是原样喂给 `Tree::ui`。
+    #[test]
+    fn layout_with_container_tab_falls_back_to_default() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let hierarchy = tiles.insert_pane(PanelTab::Hierarchy);
+        let assets = tiles.insert_pane(PanelTab::Assets);
+        let prefabs = tiles.insert_pane(PanelTab::Prefabs);
+        let scene = tiles.insert_pane(PanelTab::SceneView);
+        let inspector = tiles.insert_pane(PanelTab::Inspector);
+        let console = tiles.insert_pane(PanelTab::Console);
+        let profiler = tiles.insert_pane(PanelTab::Profiler);
+
+        let hier_tabs = tiles.insert_tab_tile(vec![hierarchy]);
+        let misc_tabs = tiles.insert_tab_tile(vec![console, profiler]);
+        let mid = tiles.insert_container(egui_tiles::Linear::new(
+            egui_tiles::LinearDir::Vertical,
+            vec![hier_tabs, misc_tabs],
+        ));
+        let right_tabs = tiles.insert_tab_tile(vec![assets, prefabs, scene, inspector]);
+        // 根是 Tabs、两个子项都是容器 —— 与崩溃现场 editor.ron 同形。
+        let root = tiles.insert_tab_tile(vec![mid, right_tabs]);
+        let tree = egui_tiles::Tree::new("editor_tree", root, tiles);
+
+        let prefs = EditorPreferences {
+            layout: Some(tree),
+            ..Default::default()
+        };
+        let restored = prefs.layout_for_startup();
+        assert_eq!(
+            restored,
+            dock::create_tile_tree(),
+            "页签里混容器的布局必须回退出厂布局"
+        );
+    }
+
     #[test]
     fn corrupt_file_falls_back_to_defaults() {
         let path = temp_path("corrupt");
