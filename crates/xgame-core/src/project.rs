@@ -104,10 +104,23 @@ pub fn same_scene_path(a: &str, b: &str) -> bool {
 ///
 /// 规则：
 /// - 反斜杠转正斜杠（Windows 手改清单的高频写法）；
+/// - 开头的 `./` 直接吃掉（`./Scenes/a.ron` 与 `Scenes/a.ron` 是同一个文件；
+///   智能体与手写清单都爱带它，拒绝只会制造"同一条路径两种写法"的分叉）；
 /// - 拒绝绝对路径 / `..`（拼上项目根就能跳到任意位置）；
 /// - 必须 `.ron` 结尾且不是 `.prefab.ron`（预制体不是场景）。
+///
+/// **MCP 的 `scene` 参数也走这一条**（`xgame-mcp` 的 `scene_rel` 只在前面补
+/// 一个 `.ron` 后缀）。此前那里自己写了一份更松的检查：接受 `a.RON`、
+/// `./a.ron`、甚至 `a.prefab.ron`，于是"编辑器不认的路径，智能体能写"。
 pub fn normalize_scene_relative(raw: &str) -> Result<String, String> {
-    let rel = raw.trim().replace('\\', "/");
+    let mut rel = raw.trim().replace('\\', "/");
+    // 只吃**开头**的 `./`。`Path::components` 会把夹在中间的 `.` 自动消掉
+    // （`a/./b` → `a/b`），但开头那个会变成 `CurDir` 组件、被下面的 match 拒掉 ——
+    // 同一个文件两种写法得到两种结果，没必要。
+    while let Some(rest) = rel.strip_prefix("./") {
+        rel = rest.to_string();
+    }
+
     if rel.is_empty() {
         return Err("场景路径不能为空".into());
     }
@@ -2551,5 +2564,42 @@ mod tests {
                 "{bad:?} 不该被当成场景路径"
             );
         }
+    }
+
+    /// 开头的 `./` 吃掉；夹在中间的 `.` 由 `Path::components` 自动消掉。
+    ///
+    /// 这条规则存在的理由：MCP 的 `scene` 参数此前自己写了一份更松的检查，
+    /// `./Scenes/a.ron` 被原样传下去、`a.prefab.ron` 也被当成场景。两处规则
+    /// 一松一紧，就是"编辑器不认的路径，智能体能写"。
+    #[test]
+    fn normalize_scene_relative_strips_leading_dot_slash() {
+        assert_eq!(
+            normalize_scene_relative("./Scenes/a.ron").unwrap(),
+            "Scenes/a.ron"
+        );
+        assert_eq!(
+            normalize_scene_relative("././Scenes/a.ron").unwrap(),
+            "Scenes/a.ron"
+        );
+        assert_eq!(
+            normalize_scene_relative("  .\\Scenes\\a.ron  ").unwrap(),
+            "Scenes/a.ron"
+        );
+        // 中间的 `.` 不是非法，`Path::components` 已经规范化掉了。
+        assert_eq!(
+            normalize_scene_relative("Scenes/./a.ron").unwrap(),
+            "Scenes/a.ron"
+        );
+        // 指向父目录的仍然拒绝（包括藏在 `./` 后面的）。
+        assert!(normalize_scene_relative("./../Escape.ron").is_err());
+        // 只有 `.` 也不是场景。
+        assert!(normalize_scene_relative("./").is_err());
+    }
+
+    /// 扩展名大小写：`.RON` 不认（编辑器写出来的一律小写，大小写差异属于配置错误）。
+    #[test]
+    fn normalize_scene_relative_is_case_sensitive_on_extension() {
+        assert!(normalize_scene_relative("Scenes/A.RON").is_err());
+        assert!(normalize_scene_relative("Scenes/A.ron").is_ok());
     }
 }

@@ -312,23 +312,28 @@ fn open_project(args: &Value) -> Result<ProjectHandle, CallError> {
 }
 
 /// 解析 `scene` 参数 → 项目内相对路径（保证带 `.ron`）；缺省用入口场景。
+///
+/// 规范化本身**不在这里**：补完后缀就交给 `xgame_core::normalize_scene_relative`
+/// —— 编辑器、`--check`、构建器用的是同一条规则。此前这里自己写了一份更松的
+/// 检查（接受 `a.RON`、`./a.ron`、甚至 `a.prefab.ron`），结果是"编辑器不认的
+/// 路径，智能体能写"，正是 194 说的"路径不同入口"。
 fn scene_rel(args: &Value, default: &str) -> Result<String, CallError> {
     let raw = match str_arg(args, "scene").map(str::trim) {
         None => default,
         Some("") => return Err(fail("`scene` 不能为空串")),
         Some(s) => s,
     };
-    if raw.contains("..") || raw.contains(':') || raw.starts_with('/') || raw.starts_with('\\') {
-        return Err(fail(format!(
-            "scene 必须是项目内相对路径（拒绝绝对路径 / `..` 穿越）: {raw}"
-        )));
-    }
-    // Windows 智能体爱给反斜杠：统一成 `/` 再判断扩展名。
-    let raw = raw.replace('\\', "/");
-    Ok(if raw.to_lowercase().ends_with(".ron") {
-        raw
+    // 智能体常给不带扩展名的路径：补 `.ron` 再交给 core 判断（core 负责
+    // 反斜杠、`./`、绝对路径 / `..`、以及"预制体不是场景"）。
+    let with_ext = if raw.to_lowercase().ends_with(".ron") {
+        raw.to_string()
     } else {
         format!("{raw}.ron")
+    };
+    xgame_core::normalize_scene_relative(&with_ext).map_err(|e| {
+        fail(format!(
+            "scene 必须是项目内相对路径（拒绝绝对路径 / `..` 穿越 / 非场景文件）: {e}"
+        ))
     })
 }
 
@@ -1337,6 +1342,30 @@ mod tests {
         // 反斜杠的"项目内"路径不穿越，反而是合法的（统一成 / 后补 .ron）。
         let ok = run(&project, "scene_read", json!({ "scene": "Scenes\\scene" }));
         assert!(ok.is_ok(), "{ok:?}");
+        cleanup(&project);
+    }
+
+    /// `scene` 参数与编辑器**同一条规则**：`./` 吃掉、预制体 / 大写扩展名拒绝。
+    ///
+    /// 此前 `scene_rel` 自己写了一份松检查，`./Scenes/scene.ron` 被原样传下去、
+    /// `x.prefab.ron` 被当成场景去解析 —— 两处规则一松一紧就是 194 说的
+    /// "路径不同入口"。
+    #[test]
+    fn scene_argument_uses_the_editor_path_rule() {
+        let project = temp_project("scene_path_rule");
+        // 前导 `./` 与反斜杠都该被规范化成同一个项目内路径。
+        for ok in ["./Scenes/scene.ron", ".\\Scenes\\scene.ron", "Scenes/scene"] {
+            let out = run(&project, "scene_read", json!({ "scene": ok }));
+            assert!(out.is_ok(), "{ok:?} 应当可用: {out:?}");
+        }
+        // 预制体不是场景；大写扩展名不被当场景（与编辑器同一判据）。
+        for bad in ["Prefabs/Thing.prefab.ron", "Scenes/scene.RON"] {
+            let err = run(&project, "scene_read", json!({ "scene": bad })).expect_err("必须拒绝");
+            match err {
+                CallError::Failed(msg) => assert!(msg.contains("相对路径"), "{bad}: {msg}"),
+                other => panic!("应是 Failed，得到 {other:?}"),
+            }
+        }
         cleanup(&project);
     }
 

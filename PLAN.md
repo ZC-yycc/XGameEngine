@@ -110,21 +110,42 @@ semantic: Scenes/scene.ron: rotation not unit at 'Crate.C' (|q|^2 = 0.992500)
   `--check` 退出 **2** 并打印 `parent cycle at 'Crate.A' (chain Crate.A -> Crate.C ->
   Crate.A, 2 nodes)`；恢复后四个示例项目（SampleScene / BehaviorsDemo /
   CharacterDemo / MyGame）全部退出 **0**。
-- 全量 `check` / `clippy -D warnings` / `test` 通过：**1021 passed / 0 failed /
-  9 ignored**（本轮新增 17 条：core 变换 3、`validate` 10、`check` 1、MCP 3；总数比
-  基线的 999 多出的另一部分来自同一工作树里编辑器侧的并行改动）。
+- 全量 `check` / `clippy -D warnings` / `test` 通过：**1024 passed / 0 failed /
+  9 ignored**（本轮新增 20 条：core 变换 3、`validate` 10、`check` 1、`project` 路径 2、
+  MCP 4；总数比基线的 999 多出的另一部分来自同一工作树里编辑器侧的并行改动）。
 - 踩到一个流程坑：改引擎源码后 `cargo test --workspace --all-targets` **不会重建
   cdylib**（`--all-targets` 不含 cdylib 产物），磁盘上还是旧 DLL → 插件指纹门禁把
   `plugin_loading` 的三条判红。正确顺序是先 `cargo build -p behaviors-demo -p
   spinner-plugin`。这不是回归，是门禁按设计工作。
 
-### 五、刻意没做的
+### 五、顺带收口：`scene` 参数不再自己写一套路径规则
+
+194 的"路径不同入口"这半本轮只做了一小块，但很典型：MCP 的 `scene` 参数原先自己
+查一遍"有没有 `..` / 盘符 / 绝对路径"，就把原串传下去。于是同一个场景**编辑器不认、
+智能体能写**：
+
+| 输入 | 旧 MCP | 编辑器 / `--check` / 构建器 |
+|---|---|---|
+| `./Scenes/a.ron` | 原样带进文件路径 | `Path::components` 让开头的 `.` 变成 `CurDir` → 拒绝 |
+| `Prefabs/x.prefab.ron` | 当场景去解析（报一个莫名其妙的 RON 错） | 明确拒绝（预制体不是场景） |
+| `Scenes/a.RON` | 大小写不敏感放行 | 拒绝（引擎写出来的一律小写）|
+
+现在 `scene_rel` 只做一件事：缺扩展名就补 `.ron`，其余交给
+`core::normalize_scene_relative`。顺带给 core 加了"吃掉开头 `./`"——`Path::components`
+本来就会把夹在中间的 `.` 消掉，只留开头那个被拒，同一个文件两种写法两种结果没必要。
+
+**资产路径没合并**：`normalize_asset_relative` 还要查冒号、结尾空格 / 点、Windows
+非法字符（资产名要给用户手写，严格更划算）。两条规则各自成立，合并留给后续专项。
+
+### 六、刻意没做的
 
 - **不自动修复**：改成"顺手把四元数归一化 / 给重复 ID 重新分配"看起来更友好，但那
   会悄悄改写作者数据 —— 作者永远不知道自己写错过。拒绝 + 指路更诚实。
 - **预制体文件不体检**：MCP 没有写预制体的通道；预制体一旦被实例化就落进场景，
   场景这一侧会照到。
-- 194 的**路径同源**（场景 / 资产 / 构建三套路径入口）没动，留给后续专项。
+- 194 的**路径同源**只做了一半：`scene` 参数收口到 `core::normalize_scene_relative`，
+  但资产路径那条更严的规则（冒号 / 结尾空格与点 / Windows 非法字符）没有合并 ——
+  资产名要给用户手写，严格更划算，硬合并会把场景路径也一起收紧。留给后续专项。
 
 ## 八十三、视口导航：F 聚焦与数字键对轴（2026-10-28）
 
