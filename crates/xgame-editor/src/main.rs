@@ -61,6 +61,7 @@ mod headless;
 mod hot_reload;
 mod hub;
 mod input_bridge;
+mod logging;
 mod panels;
 mod plugin_build;
 mod plugin_session;
@@ -79,7 +80,7 @@ use std::time::Instant;
 use frame_policy::{FrameClock, FrameInputs, FramePlan, FramePolicy};
 use hub::{HubAction, ProjectHub};
 use panels::dock::PanelTab;
-use state::{EditorState, ExitTarget, PlayMode};
+use state::{EditorState, ExitTarget, LogLevel, PlayMode};
 
 // ---------------------------------------------------------------------------
 // 应用状态
@@ -447,6 +448,19 @@ impl eframe::App for EditorApp {
         // 这一条**只是**为了别让这些幽灵事件干扰"本帧有没有真实输入"的判断 ——
         // 「要不要连续出帧」现在由 `frame_policy` 明确决策，不再靠这个副作用。
         drop_redundant_pointer_moves(ctx, &mut self.last_pointer_pos);
+
+        // ── 引擎日志进控制台 ──
+        //
+        // 上一帧（以及本帧开始之前）产生的 `log::warn!` / `log::info!` 在这里落地：
+        // 资产装不上、骨骼超上限、脚本报错……没有这一步它们只进 stderr，而双击
+        // exe 启动的用户**没有终端**，等于什么都看不到。策略见 `logging` 模块头。
+        if let Some(session) = self.session.as_mut() {
+            for record in logging::take_records() {
+                session
+                    .state
+                    .log(LogLevel::from_log(record.level), record.console_text());
+            }
+        }
 
         // ── 帧调度（这一帧之后还要不要再排一帧）──
         //
@@ -1327,7 +1341,9 @@ fn status_bar(ctx: &egui::Context, state: &EditorState, live: bool) {
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), eframe::Error> {
-    env_logger::init();
+    // 日志后端：stderr（`RUST_LOG` 语义不变）+ 控制台面板 + `<配置目录>/logs/Editor.log`。
+    // 见 `logging` 模块头：没有这个，双击 exe 跑出来的崩溃现场一行都留不下。
+    logging::init();
 
     // ── 无头项目检查 / 无头运行 ──
     //

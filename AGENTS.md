@@ -143,6 +143,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 脚本层 | 单轨 `.lua`；环境表挂真元表；驻留 id 永不清；API 名不改 | 决策记录 §二、§三 |
 | 脚本沙箱 | 两半：指令预算（20 万条/钩子）挡死循环，**内存上限 128 MiB/VM** 挡无限增长；超限**只毁掉那一次调用**（VM 不许报废）；报错必须写「内存超限」而不是 Lua 原文 `not enough memory`；设不上限只警告，不许拖垮引擎 | §六十 |
 | 钩子里的结构改动 | 钩子里 `spawn`/`destroy` 对 Scene **立即生效**、命令**下一帧**才结算；链式销毁深达 8 环也要求每环**恰好一次**且按序；`unload_scene` 期间 spawn 只属于正在拆掉的旧世界，**不许漏进下一场景** | §五十七、§六十一 |
+| 日志（控制台 / `Editor.log`） | 唯一后端 `xgame-editor::logging`：一条 `log::warn!` 同时去 stderr（`RUST_LOG` 语义不变）/ 控制台有界队列 / `logs/Editor.log`；收信策略「自家 info + 所有人 warn/error，第三方 info 与 debug/trace 不收」不许松（落档网比 stderr 宽是刻意的）；时间戳是**启动以来秒数**不是本地时钟；面板筛选只影响显示、`Clear` 才清消息；右侧一栏必须 `main_wrap = false`（默认 true 会在 1280 折行） | §六十二 |
 | 插件 / 组件 | `Plugins/` 唯一目录；临时副本加载；旧 DLL 句柄永不卸载；参数键用注册名 | §四 |
 | 音频 | 脚本层不引 kira；监听者/主音量不进命令束；`follow` 是实体绑定；每渲染帧同步 | §五 |
 | 无头 / MCP | 不做第二份帧循环；退出码 2 不是工具失败；JSON 字段名是契约 | §六 |

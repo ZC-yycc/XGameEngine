@@ -354,7 +354,7 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
 /// 用系统文件管理器打开目录。
 ///
 /// Windows 上 `explorer` 即使成功也可能返回非 0 退出码，所以这里**不检查**退出码。
-fn open_in_file_manager(dir: &std::path::Path) {
+pub(crate) fn open_in_file_manager(dir: &std::path::Path) {
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(dir).spawn();
     #[cfg(target_os = "macos")]

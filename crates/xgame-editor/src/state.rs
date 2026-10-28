@@ -210,13 +210,102 @@ impl LogLevel {
             LogLevel::Success => colors::PLAY_GREEN,
         }
     }
+
+    /// `log` 门面的等级 → 控制台等级。
+    ///
+    /// 引擎只往控制台送 `error` / `warn` / 自己的 `info`（见 [`crate::logging::captures`]），
+    /// `debug` / `trace` 到不了这里；真到了也按 Info 显示 —— 丢一条比 panic 好。
+    pub fn from_log(level: log::Level) -> Self {
+        match level {
+            log::Level::Error => LogLevel::Error,
+            log::Level::Warn => LogLevel::Warning,
+            _ => LogLevel::Info,
+        }
+    }
+}
+
+/// 控制台面板的筛选条件：四个等级开关 + 一条关键词。
+///
+/// 默认**全开**：面板一打开就是"所有消息"，筛选是用户主动收窄。搜索零分配
+/// （见 [`contains_ignore_ascii_case`]），因为面板每帧都要对最多 500 条消息
+/// 各跑一次匹配。
+#[derive(Debug, Clone)]
+pub struct ConsoleFilter {
+    pub info: bool,
+    pub warning: bool,
+    pub error: bool,
+    pub success: bool,
+    pub query: String,
+}
+
+impl Default for ConsoleFilter {
+    fn default() -> Self {
+        Self {
+            info: true,
+            warning: true,
+            error: true,
+            success: true,
+            query: String::new(),
+        }
+    }
+}
+
+impl ConsoleFilter {
+    /// 只按等级判断。
+    pub fn allows(&self, level: LogLevel) -> bool {
+        match level {
+            LogLevel::Info => self.info,
+            LogLevel::Warning => self.warning,
+            LogLevel::Error => self.error,
+            LogLevel::Success => self.success,
+        }
+    }
+
+    /// 是否真的在收窄（面板据此决定条数标签显示 `N` 还是 `N / M`）。
+    pub fn is_active(&self) -> bool {
+        !(self.info && self.warning && self.error && self.success) || !self.query.trim().is_empty()
+    }
+
+    /// 本帧要用的关键词（已 trim + 转小写）。每帧算一次，别放进逐条匹配里。
+    pub fn needle(&self) -> String {
+        self.query.trim().to_lowercase()
+    }
+
+    /// 等级 + 关键词。`needle` 必须是 [`Self::needle`] 的返回值。
+    pub fn matches(&self, msg: &LogMessage, needle: &str) -> bool {
+        self.allows(msg.level) && contains_ignore_ascii_case(&msg.text, needle)
+    }
+}
+
+/// `haystack` 是否包含 `needle`（ASCII 部分大小写不敏感），**不分配**。
+///
+/// 中文没有大小写，走普通子串查找；只有含 ASCII 的关键词才逐字节比较。按字节
+/// `windows` 扫是安全的：ASCII 字节不可能出现在多字节 UTF-8 序列内部，所以
+/// 不会出现"半个汉字匹配上"的假阳性。
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if !needle.is_ascii() {
+        return haystack.contains(needle);
+    }
+    let hay = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    hay.windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// 控制台保留的最大消息条数。
 ///
-/// 面板只渲染最近 500 条（见 `panels/console.rs`），所以这个上限纯粹是**内存**
+/// 面板只渲染最近 [`CONSOLE_RENDER_LIMIT`] 条，所以这个上限纯粹是**内存**
 /// 护栏：一个每帧打日志的脚本不该把编辑器的内存拖垮。1000 条足够保留"刚才发生了什么"。
 const MAX_CONSOLE_MESSAGES: usize = 1000;
+
+/// 控制台每帧最多画多少行。
+///
+/// 上限而不是"全画"：一个刷屏的脚本能让消息表涨到 1000 条，全都布局一遍要几毫秒。
+/// 用户看的永远是尾部（`stick_to_bottom`），画 500 条和画 1000 条在观感上没区别。
+pub const CONSOLE_RENDER_LIMIT: usize = 500;
 
 /// 触顶时一次性丢弃的条数。
 ///
@@ -498,6 +587,9 @@ pub struct EditorState {
 
     // -- Console --
     pub console_messages: Vec<LogMessage>,
+    /// 控制台的筛选条件（等级开关 + 关键词）。只影响**显示**，`Clear` 清的是
+    /// 全量消息 —— "看不见所以清不掉"会让人以为日志丢了。
+    pub console_filter: ConsoleFilter,
 
     // -- New entity tracking --
     pub next_entity_id: u32,
@@ -810,6 +902,7 @@ impl EditorState {
             show_physics_debug: false,
 
             console_messages: Vec::new(),
+            console_filter: ConsoleFilter::default(),
             next_entity_id: 1,
 
             viewport_logical_size: egui::Vec2::ZERO,
@@ -1407,6 +1500,28 @@ impl EditorState {
             self.console_messages.drain(..CONSOLE_TRIM_BATCH);
         }
         self.console_messages.push(LogMessage::new(level, text));
+    }
+
+    /// 通过筛选的消息**下标**，按时间顺序（最旧在前），最多 `limit` 条。
+    ///
+    /// 返回下标而不是 `&LogMessage`：面板要先把列表长度交给标题栏（借用期结束），
+    /// 再重新借消息表画行。返回引用会让"先算长度、再画标题栏"这两步互斥。
+    ///
+    /// 从**末尾**往前扫：面板只看最近的那些，筛掉一堆 Info 时也应该只看尾部就够，
+    /// 不必把 1000 条全过一遍。找到 `limit` 条就停，然后反转成时间序。
+    pub fn visible_console_indices(&self, limit: usize) -> Vec<usize> {
+        let needle = self.console_filter.needle();
+        let mut out: Vec<usize> = Vec::new();
+        for (index, msg) in self.console_messages.iter().enumerate().rev() {
+            if self.console_filter.matches(msg, &needle) {
+                out.push(index);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        out.reverse();
+        out
     }
 
     // -- 实体操作 --
@@ -4597,5 +4712,84 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // -- 控制台筛选（面板只显示、不清消息）--
+
+    /// 关掉 Info 之后，Info 的行不显示，但**消息表里还在** —— `Clear` 才是清，
+    /// 否则用户会以为"点了两下筛选，日志就没了"。
+    #[test]
+    fn console_filter_hides_a_level_without_dropping_the_messages() {
+        let (mut state, base) = temp_state("console_filter_level");
+        state.log_info("ordinary");
+        state.log_warning("careful");
+        state.log_error("broken");
+        assert_eq!(state.visible_console_indices(CONSOLE_RENDER_LIMIT).len(), 3);
+
+        state.console_filter.info = false;
+        let visible = state.visible_console_indices(CONSOLE_RENDER_LIMIT);
+        assert_eq!(visible.len(), 2, "Info 被筛掉");
+        assert_eq!(
+            visible
+                .iter()
+                .map(|i| state.console_messages[*i].text.as_str())
+                .collect::<Vec<_>>(),
+            ["careful", "broken"],
+            "顺序必须还是时间序"
+        );
+        assert_eq!(state.console_messages.len(), 3, "筛选不得清消息");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 关键词过滤：ASCII 不区分大小写，中文按原样（中文本来没有大小写）。
+    #[test]
+    fn console_filter_matches_ascii_case_insensitively_and_chinese_verbatim() {
+        let (mut state, base) = temp_state("console_filter_query");
+        state.log_error("Failed to load Assets/Hero.glb");
+        state.log_error("脚本报错：找不到实体 Fox");
+        state.log_info("saved");
+
+        state.console_filter.query = "FAILED".into();
+        assert_eq!(state.visible_console_indices(CONSOLE_RENDER_LIMIT).len(), 1);
+        state.console_filter.query = "hero.GLB".into();
+        assert_eq!(state.visible_console_indices(CONSOLE_RENDER_LIMIT).len(), 1);
+        state.console_filter.query = "找不到实体".into();
+        assert_eq!(state.visible_console_indices(CONSOLE_RENDER_LIMIT).len(), 1);
+        state.console_filter.query = "   ".into();
+        assert_eq!(
+            state.visible_console_indices(CONSOLE_RENDER_LIMIT).len(),
+            3,
+            "只输空格等于没筛"
+        );
+        assert!(!state.console_filter.is_active(), "空白关键词不算筛选");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 条数上限从**最新**的那头取，返回的仍是时间序。
+    #[test]
+    fn visible_console_indices_caps_from_the_newest_end() {
+        let (mut state, base) = temp_state("console_limit");
+        for i in 0..10 {
+            state.log_info(format!("m{i}"));
+        }
+        let visible = state.visible_console_indices(3);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|i| state.console_messages[*i].text.as_str())
+                .collect::<Vec<_>>(),
+            ["m7", "m8", "m9"]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `log` 门面等级到控制台等级的映射：warn → Warning、error → Error，
+    /// debug / trace 到不了控制台（策略在 `logging::captures`），真到了按 Info。
+    #[test]
+    fn log_levels_map_onto_the_console_levels() {
+        assert_eq!(LogLevel::from_log(log::Level::Error), LogLevel::Error);
+        assert_eq!(LogLevel::from_log(log::Level::Warn), LogLevel::Warning);
+        assert_eq!(LogLevel::from_log(log::Level::Info), LogLevel::Info);
+        assert_eq!(LogLevel::from_log(log::Level::Debug), LogLevel::Info);
     }
 }
