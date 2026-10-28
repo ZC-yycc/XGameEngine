@@ -38,6 +38,18 @@ const INSTRUCTION_BUDGET: u64 = 200_000;
 /// 才中断。1024 是"正常脚本几乎无感、死循环在微秒级被掐断"的折中。
 const HOOK_INTERVAL: u32 = 1024;
 
+/// 单个脚本 VM 的内存上限（字节）。
+///
+/// 与 [`INSTRUCTION_BUDGET`] 是一对沙箱：那个挡"算不完"（死循环），这个挡
+/// "存不下"（`local t = {} while true do t[#t+1] = string.rep("x", 1 << 20) end`）。
+/// 没有这条上限时，一个失控脚本能把进程内存吃光 —— 结局是操作系统 OOM 杀进程，
+/// 编辑器里未保存的场景跟着一起没。脚本是**用户内容**，防护不能靠"作者会写对"。
+///
+/// 128 MiB 刻意设得很宽松：脚本 API 的持久状态表、编译后的 chunk、几百个实体的
+/// 状态加起来通常不到 1 MiB。留这么大是为了不误伤"用 Lua 搓了张大表"的正当玩法，
+/// 同时又让无限增长在跨过某个数量级时立刻失败。
+pub const MEMORY_LIMIT: usize = 128 * 1024 * 1024;
+
 /// 报错计数表超过这个条数就扫一遍、把已不在场景里的实体条目删掉。
 ///
 /// 条目只在"某个 (实体, 脚本, 钩子) 报过错且之后没成功过"时存在，正常项目
@@ -129,6 +141,8 @@ pub struct LuaHost {
     error_streak: HashMap<(EntityId, u32, u8), u32>,
     /// 脚本路径的解析基准（项目根目录）。
     root: Option<PathBuf>,
+    /// 内存上限（字节）。只用于**报错文案**：真正的强制在 `lua.set_memory_limit`。
+    memory_limit: usize,
 }
 
 impl Default for LuaHost {
@@ -139,6 +153,14 @@ impl Default for LuaHost {
 
 impl LuaHost {
     pub fn new() -> Self {
+        Self::with_memory_limit(MEMORY_LIMIT)
+    }
+
+    /// 同 [`Self::new`]，但自定义脚本 VM 的内存上限（字节）。
+    ///
+    /// 生产路径只有 [`MEMORY_LIMIT`] 这一个值；参数化是为了让测试能用几 MiB 的
+    /// 小限额验证"超限会抛错"，不必为了触发上限去真的吃几百兆内存。
+    pub fn with_memory_limit(limit: usize) -> Self {
         // 沙箱：只开安全的标准库。关掉 io / os / package / debug / ffi ——
         // 脚本是**用户内容**（可能是下载的 mod），不该能读写文件、起进程、
         // 或绕过宿主的类型检查。coroutine 开着（Lua 并发惯用法，且无副作用）。
@@ -153,6 +175,17 @@ impl LuaHost {
                 Lua::new()
             }
         };
+
+        // 内存上限：与指令预算互补的那一半沙箱。
+        //
+        // 指令预算挡的是"算不完"（死循环），这个挡的是"存不下"（
+        // `while true do t[#t+1] = {} end`）。没有它，一个失控脚本会把进程内存
+        // 吃光，结局是操作系统 OOM 杀进程 —— 编辑器里未保存的场景一起没。
+        // 设置失败只会发生在"分配器不归 mlua 管"的模块模式，打一条警告即可：
+        // 不能因为设不上限就让引擎跑不起来。
+        if let Err(err) = lua.set_memory_limit(limit) {
+            log::warn!("设置脚本内存上限失败（{err}），脚本将可以无限占用内存");
+        }
 
         let budget = Arc::new(AtomicU64::new(INSTRUCTION_BUDGET));
         // 指令计数沙箱：每 HOOK_INTERVAL 条指令回调一次，扣预算，扣到 0 中断。
@@ -193,6 +226,31 @@ impl LuaHost {
             commands: Vec::new(),
             error_streak: HashMap::new(),
             root: None,
+            memory_limit: limit,
+        }
+    }
+
+    /// 脚本 VM 当前占用的内存（字节）。诊断与回归测试用。
+    pub fn used_memory(&self) -> usize {
+        self.lua.used_memory()
+    }
+
+    /// 本次 VM 的内存上限（字节）。
+    pub fn memory_limit(&self) -> usize {
+        self.memory_limit
+    }
+
+    /// 把一次 Lua 错误整理成给作者看的一句话。
+    ///
+    /// 内存超限要**说清楚是超限**：Lua 的原文是 `not enough memory`，作者看到
+    /// 这句只会怀疑引擎坏了，而不是"我这张表太大了"。
+    fn describe_error(&self, err: &mlua::Error) -> String {
+        match err {
+            mlua::Error::MemoryError(_) => format!(
+                "脚本内存超限（上限 {} MiB），已中断本次调用。常见成因是在钩子里不断往表里塞东西",
+                self.memory_limit / (1024 * 1024)
+            ),
+            other => format!("{other}"),
         }
     }
 
@@ -483,10 +541,11 @@ impl LuaHost {
             // 指数退避：第 1、2、4、8、16… 次各报一条，中间的静默。100 帧持续
             // 报错也只是 7 条，而 1 次的偶发出错照样看得见。
             if count.is_power_of_two() {
+                let described = self.describe_error(&err);
                 let message = if count == 1 {
-                    format!("{err}")
+                    described
                 } else {
-                    format!("{err}（该钩子已连续报错 {count} 次，后续只在 2 的幂次再报）")
+                    format!("{described}（该钩子已连续报错 {count} 次，后续只在 2 的幂次再报）")
                 };
                 self.logs.push(ScriptLog {
                     level: LogLevel::Error,
@@ -850,7 +909,6 @@ mod tests {
         );
     }
 
-
     /// 一个每帧都报错的脚本不能每帧刷一条日志。
     ///
     /// 这是"错误熔断"的最小形态：持续故障只报有限的几次，而不是 60 条/秒。
@@ -881,6 +939,87 @@ mod tests {
         assert!(
             total <= 10,
             "持续报错必须被限流：100 帧里报了 {total} 条（应当是指数退避，量级在个位数）"
+        );
+    }
+
+    /// 失控脚本必须撞上限，而不是把进程内存吃光。
+    ///
+    /// 用 8 MiB 的限额（生产是 128 MiB）走同一条路径：为了触发上限去真的吃
+    /// 128 MiB 会把测试变成内存炸弹，而限额是参数化的，测小的就是测大的。
+    ///
+    /// 没有这条上限时的结局不是"脚本报错"，是**操作系统 OOM 杀进程** ——
+    /// 编辑器里没保存的场景跟着一起没。所以这条测试断言的不是错误文本好看，
+    /// 而是"进程还活着且内存被挡住了"。
+    #[test]
+    fn a_runaway_script_hits_the_memory_limit_instead_of_the_oom_killer() {
+        let project = TempProject::new("memory_limit");
+        let script = project.write_script(
+            "hog",
+            // 每次 1 MiB × 32 次 = 32 MiB，是限额的 4 倍。
+            "function update(ctx)\n\
+             local chunks = {}\n\
+             for i = 1, 32 do chunks[i] = string.rep('x', 1024 * 1024) end\n\
+             end",
+        );
+        let mut scene = scene_with_script(&script);
+        let limit = 8 * 1024 * 1024;
+        let mut host = LuaHost::with_memory_limit(limit);
+        host.set_root(&project.dir);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+
+        let logs = host.take_logs();
+        assert!(
+            logs.iter().any(|log| log.message.contains("内存超限")),
+            "必须报「内存超限」而不是让分配过去，实际日志 {logs:?}"
+        );
+        assert!(
+            host.used_memory() <= limit,
+            "内存必须被真正挡住：上限 {limit} B，实际 {} B",
+            host.used_memory()
+        );
+    }
+
+    /// 超限只毁掉**那一次调用**，VM 与后续帧照常工作。
+    ///
+    /// 这条是"上限可用"与"上限有毒"的分界线：如果一次超限之后 VM 就废了，
+    /// 作者会看到"改完脚本还是全都不动了"，比 OOM 更难查。
+    #[test]
+    fn the_vm_recovers_after_a_memory_limit_hit() {
+        let project = TempProject::new("memory_recover");
+        let script = project.write_script(
+            "burst",
+            "local frame = 0\n\
+             function update(ctx)\n\
+             frame = frame + 1\n\
+             if frame == 1 then\n\
+             local chunks = {}\n\
+             for i = 1, 32 do chunks[i] = string.rep('x', 1024 * 1024) end\n\
+             else\n\
+             log(ctx, 'recovered')\n\
+             end\n\
+             end",
+        );
+        let mut scene = scene_with_script(&script);
+        let mut host = LuaHost::with_memory_limit(8 * 1024 * 1024);
+        host.set_root(&project.dir);
+
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+        let first = host.take_logs();
+        assert!(
+            first.iter().any(|log| log.message.contains("内存超限")),
+            "第一帧应当超限，实际 {first:?}"
+        );
+
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+        let second = host.take_logs();
+        assert!(
+            second.iter().any(|log| log.message.contains("recovered")),
+            "第二帧必须恢复正常执行，实际 {second:?}"
+        );
+        assert!(
+            host.used_memory() < host.memory_limit(),
+            "回收之后的占用应当低于上限，实际 {} B",
+            host.used_memory()
         );
     }
 
