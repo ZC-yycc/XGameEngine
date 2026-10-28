@@ -11,7 +11,7 @@
 
 use crate::gizmo;
 use crate::panels::theme;
-use crate::state::{EditorState, GizmoPart, PlayMode, ToolMode};
+use crate::state::{AxisView, EditorState, GizmoPart, PlayMode, ToolMode};
 use xgame_math::glam::{Mat4, Vec3};
 
 /// 把世界坐标点换算成某父节点下的局部坐标。
@@ -121,7 +121,7 @@ fn build_view_projection(state: &EditorState, vp_w: u32, vp_h: u32) -> Mat4 {
     if let Some(camera) = play_camera(state) {
         return camera.view_projection(aspect);
     }
-    let proj = xgame_math::projection::perspective(60f32.to_radians(), aspect, 0.1, 100.0);
+    let proj = xgame_math::projection::perspective(EDITOR_FOV_DEG.to_radians(), aspect, 0.1, 100.0);
     let cam = &state.editor_camera;
     let view =
         xgame_math::projection::look_at(cam.position, cam.position + cam.forward(), glam::Vec3::Y);
@@ -323,6 +323,127 @@ fn pick_entity(
     }
 
     closest_idx
+}
+
+// ============================================================================
+// 视口导航（F 聚焦 / 数字键对轴）
+// ============================================================================
+
+/// 编辑器视口的垂直 FOV。
+///
+/// 必须与 [`build_view_projection`] 是**同一个常量**：两处各写一个 60，改了一处之后
+/// 就会变成"按 F 聚焦之后还差一点点装不下"，而且没人会想到是常量不同步。
+const EDITOR_FOV_DEG: f32 = 60.0;
+
+/// 把一组实体的世界包围盒并起来；一个可见体都没有时返回 `None`。
+fn union_bounds(
+    state: &EditorState,
+    indices: impl IntoIterator<Item = usize>,
+) -> Option<xgame_render::gltf_loader::Bounds> {
+    use xgame_render::gltf_loader::Bounds;
+    let matrices = state.scene.world_matrices();
+    let mut out = Bounds::EMPTY;
+    for index in indices {
+        let Some(entity) = state.scene.entities.get(index) else {
+            continue;
+        };
+        // UI 元素与空节点没有可见体：拿单位盒兜底会把画面撑得莫名其妙。
+        if !entity.has_model() {
+            continue;
+        }
+        let Some(world) = matrices.get(index) else {
+            continue;
+        };
+        // 与拾取共用同一套"本地盒 → 世界 AABB"的折算（8 角点，旋转也对）。
+        let local = state
+            .scene_renderer
+            .as_ref()
+            .and_then(|r| r.mesh_bounds(&entity.model))
+            .unwrap_or(gizmo::UNIT_BOUNDS);
+        out = out.union(&local.transformed(world));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// 包围盒的"半径"：用**对角线一半**而不是最长边的一半。
+///
+/// 聚焦用的是包围球，球要真的包住盒子；取最长边的话，薄而长的物体（一堵墙）
+/// 四角会露在球外，按 F 之后角落被切掉。
+fn bounds_radius(bounds: &xgame_render::gltf_loader::Bounds) -> f32 {
+    bounds.half_extent().length()
+}
+
+/// 视口导航快捷键。
+///
+/// - `F`：聚焦当前选择（含子树）。没有选择就聚焦整个场景 —— 迷路时按 F 是本能。
+/// - `1` / `3` / `7`：前视 / 右视 / 顶视；配 `Ctrl` 取反（后视 / 左视 / 底视）。
+///
+/// 两个键同一帧按下时**先对轴再聚焦**：反过来的话就是"按旧朝向退了距离、然后把
+/// 朝向拧走"，两个动作的结果都不对。
+fn handle_navigation_keys(state: &mut EditorState, ui: &egui::Ui, (vp_w, vp_h): (u32, u32)) {
+    if !state.is_editing() || state.fly_state {
+        return;
+    }
+    // 有文本输入焦点时不抢键：在层级搜索框里打 "f" / "1" 不该让相机飞走。
+    if ui.ctx().wants_keyboard_input() {
+        return;
+    }
+
+    let (focus, axis) = ui.input(|i| {
+        let axis = if i.key_pressed(egui::Key::Num7) {
+            Some(if i.modifiers.ctrl {
+                AxisView::Bottom
+            } else {
+                AxisView::Top
+            })
+        } else if i.key_pressed(egui::Key::Num1) {
+            Some(if i.modifiers.ctrl {
+                AxisView::Back
+            } else {
+                AxisView::Front
+            })
+        } else if i.key_pressed(egui::Key::Num3) {
+            Some(if i.modifiers.ctrl {
+                AxisView::Left
+            } else {
+                AxisView::Right
+            })
+        } else {
+            None
+        };
+        (i.key_pressed(egui::Key::F), axis)
+    });
+
+    if let Some(view) = axis {
+        state.editor_camera.set_axis_view(view);
+        // 一条可见的回执：快捷键是"按了就忘"的东西，控制台里留一行能帮人记住
+        // 这套键位（连续按同一个键会被去重成 ×N，不会刷屏）。
+        state.log_info(format!("视角：{}", view.label()));
+    }
+    if !focus {
+        return;
+    }
+
+    let target = match state.selected_entity {
+        Some(root) => union_bounds(state, state.scene.subtree(root)),
+        None => union_bounds(state, 0..state.scene.entities.len()),
+    };
+    let Some(bounds) = target else {
+        // 静默失败最难受：按了没反应，用户不知道是键没生效还是场景里没东西。
+        state.log_warning("没有可聚焦的物体（选中项没有模型，场景里也没有可见实体）");
+        return;
+    };
+    let aspect = if vp_h > 0 {
+        vp_w as f32 / vp_h as f32
+    } else {
+        1.0
+    };
+    state.editor_camera.focus_on(
+        bounds.center(),
+        bounds_radius(&bounds),
+        EDITOR_FOV_DEG.to_radians(),
+        aspect,
+    );
 }
 
 // ============================================================================
@@ -792,11 +913,16 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 1) 飞行相机：先把本帧的旋转 / 平移落到相机上。
     handle_fly_camera(state, ui, &viewport.response);
 
-    // 2) 用**最新**相机算视图投影矩阵，后面的交互与渲染共用这一份。
+    // 2) 视口导航快捷键（F 聚焦 / 数字键对轴）。必须在算视图投影**之前**：
+    //    这一步改的是相机，同一帧的渲染和拾取都该用新值。放到后面就是在按键那帧
+    //    白等一帧 —— 按完 F 画面不动，用户会以为没生效。
+    handle_navigation_keys(state, ui, viewport.pixel_size);
+
+    // 3) 用**最新**相机算视图投影矩阵，后面的交互与渲染共用这一份。
     let (vp_w, vp_h) = viewport.pixel_size;
     let view_proj = build_view_projection(state, vp_w, vp_h);
 
-    // 3) 鼠标信号 → gizmo 拖拽 / 拾取 / 工具快捷键（只改状态，不落笔）。
+    // 4) 鼠标信号 → gizmo 拖拽 / 拾取 / 工具快捷键（只改状态，不落笔）。
     let pointer = PointerInput::read(&viewport.response, ui, state.is_editing());
     let gizmo_ctx = handle_gizmo_interaction(state, view_proj, &viewport, &pointer);
 
@@ -821,11 +947,11 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
         }
     }
 
-    // 4) 现在才重画离屏 3D —— 用的就是本帧最新的相机与场景，同帧上屏。
+    // 5) 现在才重画离屏 3D —— 用的就是本帧最新的相机与场景，同帧上屏。
     let tex_id = render_scene(state, vp_w, vp_h, &view_proj);
     draw_render_texture(&painter, viewport.rect, tex_id);
 
-    // 5) 叠加层：画在 3D 之上。
+    // 6) 叠加层：画在 3D 之上。
     if let Some(ctx) = gizmo_ctx {
         gizmo::draw_gizmo(&painter, &ctx, state.tool_mode);
     }
@@ -833,7 +959,7 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     draw_zoom_indicator(state, &painter, viewport.rect);
     draw_viewport_hud(state, &painter, viewport.rect, ui);
 
-    // 6) 资源拖放（Assets 面板 → 视口）。
+    // 7) 资源拖放（Assets 面板 → 视口）。
     //
     // 落点用"鼠标射线 × y=0 地面平面"：这一版不做表面吸附（命中实体 AABB 再取
     // 上表面），因为项目约定地面就在 y=0 附近，先保证"拖进来就落在看得见的地方"；
@@ -980,6 +1106,7 @@ fn asset_display_name(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::fit_distance;
 
     /// 视口里的一次合成鼠标脚本。每项是 `(x, y, 按下状态)`：
     /// `None` = 只移动指针，`Some(true)` = 按下左键，`Some(false)` = 松开左键。
@@ -1110,8 +1237,24 @@ mod tests {
         events: Vec<egui::Event>,
         screen: egui::Rect,
     ) {
+        frame_with(ctx, state, events, screen, egui::Modifiers::default());
+    }
+
+    /// 带修饰键的一帧。
+    ///
+    /// 修饰键必须同时写进 `RawInput.modifiers`：面板里读的 `i.modifiers` 来自那里，
+    /// 不是事件自带的那个字段（egui 用后者管"快捷键是否被吃"）。只给事件设
+    /// modifiers 时，`Ctrl+7` 会被当成 `7` —— 测试里表现为"切不到底视"。
+    fn frame_with(
+        ctx: &egui::Context,
+        state: &mut EditorState,
+        events: Vec<egui::Event>,
+        screen: egui::Rect,
+        modifiers: egui::Modifiers,
+    ) {
         let input = egui::RawInput {
             screen_rect: Some(screen),
+            modifiers,
             events,
             ..Default::default()
         };
@@ -1565,6 +1708,121 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::default(),
         }
+    }
+
+    /// **端到端回归（F 聚焦）**：相机在很远的地方时按 F，选中的物体必须回到画面正中，
+    /// 而且整个包围盒都在视口里。
+    ///
+    /// 只断言"相机动了"是不够的：把 `focus_on` 的距离写成 `radius` 而不是
+    /// `radius / sin(half_fov)` 也能让相机动起来，但物体只会占据画面的一小块。
+    /// 所以这里同时钉三件事：① 物体中心投影到视口中心；② 8 个 AABB 角点全在视口内；
+    /// ③ 相机与物体的距离等于 `fit_distance` 算出来的值。
+    #[test]
+    fn pressing_f_frames_the_selected_entity() {
+        let (mut state, base) = test_state("frame_focus");
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+
+        // 先把相机扔到很远的斜上方：物体此时肯定不在画面里。
+        state.editor_camera.position = Vec3::new(60.0, 40.0, 60.0);
+        state.editor_camera.yaw = -2.4;
+        state.editor_camera.pitch = -0.5;
+        state.selected_entity = Some(0);
+        frame(&ctx, &mut state, vec![], screen);
+
+        let center = state.scene.world_transform(0).position;
+        assert!(
+            (state.editor_camera.eye() - center).length() > 40.0,
+            "测试前提：相机一开始离物体很远"
+        );
+
+        frame(&ctx, &mut state, vec![key(egui::Key::F)], screen);
+
+        let vp = state.viewport_logical_size;
+        let rect = viewport_rect(screen, vp);
+        let (w, h) = state.viewport_pixel_size;
+        let view_proj = build_view_projection(&state, w, h);
+        let offset = rect.min.to_vec2();
+        let on_screen = gizmo::project_to_screen(center, &view_proj, vp, offset);
+        assert!(
+            (on_screen - rect.center()).length() < 2.0,
+            "F 之后物体中心应当落在视口中心：{on_screen:?} vs {:?}",
+            rect.center()
+        );
+
+        // 包围盒 8 个角点都要在视口内（`union_bounds` 在没有渲染器时退回单位盒）。
+        for dx in [-0.5f32, 0.5] {
+            for dy in [-0.5f32, 0.5] {
+                for dz in [-0.5f32, 0.5] {
+                    let corner = center + Vec3::new(dx, dy, dz);
+                    let p = gizmo::project_to_screen(corner, &view_proj, vp, offset);
+                    assert!(rect.contains(p), "角点 {corner:?} 投影到 {p:?} 落在视口外");
+                }
+            }
+        }
+
+        let expected = fit_distance(
+            gizmo::UNIT_BOUNDS.half_extent().length(),
+            60f32.to_radians(),
+            w as f32 / h as f32,
+        );
+        let actual = (state.editor_camera.eye() - center).length();
+        assert!(
+            (actual - expected).abs() < 1e-2,
+            "距离 {actual} 应当等于 fit_distance 的 {expected}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 数字键对轴（端到端走一遍按键 → 相机朝向）：7 顶视、1 前视、3 右视，
+    /// 配 `Ctrl` 取反。位置不能动 —— 先对轴再按 F 是最常用的组合。
+    #[test]
+    fn number_keys_snap_the_camera_to_axis_views() {
+        let (mut state, base) = test_state("axis_keys");
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        frame(&ctx, &mut state, vec![], screen);
+
+        let cases = [
+            (egui::Key::Num7, false, AxisView::Top),
+            (egui::Key::Num7, true, AxisView::Bottom),
+            (egui::Key::Num1, false, AxisView::Front),
+            (egui::Key::Num1, true, AxisView::Back),
+            (egui::Key::Num3, false, AxisView::Right),
+            (egui::Key::Num3, true, AxisView::Left),
+        ];
+        for (key_code, ctrl, expected) in cases {
+            let position_before = state.editor_camera.position;
+            let modifiers = egui::Modifiers {
+                ctrl,
+                ..egui::Modifiers::default()
+            };
+            let event = egui::Event::Key {
+                key: key_code,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            };
+            frame_with(&ctx, &mut state, vec![event], screen, modifiers);
+            let (yaw, pitch) = expected.yaw_pitch();
+            assert!(
+                (state.editor_camera.yaw - yaw).abs() < 1e-5
+                    && (state.editor_camera.pitch - pitch).abs() < 1e-5,
+                "{:?}（ctrl={ctrl}）没切到 {}：yaw={} pitch={}",
+                key_code,
+                expected.label(),
+                state.editor_camera.yaw,
+                state.editor_camera.pitch
+            );
+            assert!(
+                (state.editor_camera.position - position_before).length() < 1e-6,
+                "对轴只改朝向，不该移动相机"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 工具切换快捷键在**飞行模式**下必须让位。

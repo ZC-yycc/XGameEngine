@@ -354,6 +354,99 @@ impl EditorCamera {
     /// 转视角灵敏度下限 / 上限。
     pub const MIN_SENSITIVITY: f32 = 0.0005;
     pub const MAX_SENSITIVITY: f32 = 0.02;
+    /// pitch 的硬边界（**不能**是正好 ±90°）。
+    ///
+    /// 正交视角本身是合法的，但 `right = forward × Y` 在 forward 与 Y 平行时退化成
+    /// 零向量，`pan_right` 会除零得到 NaN，进而把相机位置污染成 NaN（画面上就是
+    /// 全黑）。留 0.01 rad ≈ 0.57° 的斜角，肉眼看不出来。
+    pub const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
+}
+
+/// 聚焦时相机与包围球之间的距离系数。
+///
+/// 1.15 = 球刚好贴边之后再退 15%：贴边在数值上"刚好"，视觉上东西顶到画面边缘
+/// 反而让人想再滚一下滚轮。
+pub const FOCUS_MARGIN: f32 = 1.15;
+
+/// 聚焦时假设的最小半径。
+///
+/// 点状实体（空模型 / 零尺寸缩放）算出来半径是 0，距离也就是 0 —— 相机贴在物体
+/// 中心上。给个下限，至少退到能看见周围一圈的位置。
+pub const MIN_FOCUS_RADIUS: f32 = 0.25;
+
+/// 让半径 `radius` 的包围球刚好落进画面的相机距离。
+///
+/// **球**而不是 AABB：球对朝向不敏感，转视角时物体不会突然出画；代价是看到的东西
+/// 略小（球的体积比盒子大）。Unity / Blender 的 F 都是这个取舍。
+///
+/// 垂直与水平半视角取**较小**的那个：宽窗口的限制来自垂直方向，窄（竖）窗口来自
+/// 水平方向。只按垂直算会在窄窗口里把物体切掉两条边。
+pub fn fit_distance(radius: f32, fov_y: f32, aspect: f32) -> f32 {
+    let radius = if radius.is_finite() {
+        radius.max(MIN_FOCUS_RADIUS)
+    } else {
+        MIN_FOCUS_RADIUS
+    };
+    let half_v = (fov_y * 0.5).clamp(1e-3, std::f32::consts::FRAC_PI_2 - 1e-3);
+    let aspect = if aspect.is_finite() && aspect > 1e-3 {
+        aspect
+    } else {
+        1.0
+    };
+    let half_h = (half_v.tan() * aspect).atan();
+    let half = half_v.min(half_h);
+    (radius / half.sin()) * FOCUS_MARGIN
+}
+
+/// 轴对齐视角预设（数字键 1 / 3 / 7，配 Ctrl 取反方向）。
+///
+/// 只改朝向，**不动位置**：先对轴再按 F 是最常用的组合（顶视图里框一片再聚焦）。
+///
+/// 注意这不是"正交投影"—— 渲染管线只有透视相机，这里给的是**正对着某根轴看**。
+/// 名字里不出现 Ortho 就是这个原因，别在文档里混着叫。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisView {
+    /// 朝 +Z 看（相机在 -Z 侧）。
+    Front,
+    /// 朝 -Z 看。
+    Back,
+    /// 朝 -X 看（相机在 +X 侧）。
+    Right,
+    /// 朝 +X 看。
+    Left,
+    /// 俯视（朝 -Y 看）。
+    Top,
+    /// 仰视（朝 +Y 看）。
+    Bottom,
+}
+
+impl AxisView {
+    /// 该视角对应的 (yaw, pitch)。pitch 已被 [`EditorCamera::PITCH_LIMIT`] 夹过。
+    pub fn yaw_pitch(self) -> (f32, f32) {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let top = EditorCamera::PITCH_LIMIT;
+        match self {
+            // forward = (cos p · cos y, sin p, cos p · sin y)
+            AxisView::Front => (FRAC_PI_2, 0.0),  // forward = +Z
+            AxisView::Back => (-FRAC_PI_2, 0.0),  // forward = -Z
+            AxisView::Left => (0.0, 0.0),         // forward = +X
+            AxisView::Right => (PI, 0.0),         // forward = -X
+            AxisView::Top => (FRAC_PI_2, -top),   // forward ≈ -Y
+            AxisView::Bottom => (FRAC_PI_2, top), // forward ≈ +Y
+        }
+    }
+
+    /// 状态栏 / 提示里用的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            AxisView::Front => "前视",
+            AxisView::Back => "后视",
+            AxisView::Right => "右视",
+            AxisView::Left => "左视",
+            AxisView::Top => "顶视",
+            AxisView::Bottom => "底视",
+        }
+    }
 }
 
 impl Default for EditorCamera {
@@ -387,10 +480,23 @@ impl EditorCamera {
     pub fn rotate(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * self.sensitivity;
         self.pitch -= dy * self.sensitivity; // egui 的 dy 向下为正，所以取反
-        self.pitch = self.pitch.clamp(
-            -std::f32::consts::FRAC_PI_2 + 0.01,
-            std::f32::consts::FRAC_PI_2 - 0.01,
-        );
+        self.pitch = self.pitch.clamp(-Self::PITCH_LIMIT, Self::PITCH_LIMIT);
+    }
+
+    /// 切到轴对齐视角。只改朝向，位置不动（见 [`AxisView`]）。
+    pub fn set_axis_view(&mut self, view: AxisView) {
+        let (yaw, pitch) = view.yaw_pitch();
+        self.yaw = yaw;
+        self.pitch = pitch.clamp(-Self::PITCH_LIMIT, Self::PITCH_LIMIT);
+    }
+
+    /// 把 `center` 放到画面中心：沿**当前朝向**退到刚好装下半径 `radius` 的位置。
+    ///
+    /// 朝向不变是刻意的 —— 用户先转好角度再按 F 是常见操作，聚焦时把视角归正
+    /// 会让人重新找方向（Unity 的 F 也不改朝向）。
+    pub fn focus_on(&mut self, center: Vec3, radius: f32, fov_y: f32, aspect: f32) {
+        let distance = fit_distance(radius, fov_y, aspect);
+        self.position = center - self.forward() * distance;
     }
 
     /// 用滚轮调整移动速度。
@@ -4791,5 +4897,122 @@ mod tests {
         assert_eq!(LogLevel::from_log(log::Level::Warn), LogLevel::Warning);
         assert_eq!(LogLevel::from_log(log::Level::Info), LogLevel::Info);
         assert_eq!(LogLevel::from_log(log::Level::Debug), LogLevel::Info);
+    }
+
+    // -- 视口导航（F 聚焦 / 轴对齐视角）--
+
+    /// 球越大退得越远；FOV 越大退得越近。两条都是单调的，否则"聚焦"在某些参数下
+    /// 会把物体推出画面。
+    #[test]
+    fn fit_distance_grows_with_radius_and_shrinks_with_fov() {
+        let fov = 60f32.to_radians();
+        let near = fit_distance(1.0, fov, 1.5);
+        let far = fit_distance(2.0, fov, 1.5);
+        assert!((far - near * 2.0).abs() < 1e-4, "半径翻倍 → 距离翻倍");
+        assert!(
+            fit_distance(1.0, 90f32.to_radians(), 1.5) < near,
+            "FOV 大 → 更近"
+        );
+        assert!(
+            fit_distance(1.0, 30f32.to_radians(), 1.5) > near,
+            "FOV 小 → 更远"
+        );
+    }
+
+    /// 窄（竖着的）视口要退得更远：限制来自**水平**半视角，只按垂直算会把物体切边。
+    /// 宽视口反过来——限制来自垂直半视角，加宽不再影响距离。
+    #[test]
+    fn fit_distance_accounts_for_narrow_viewports() {
+        let fov = 60f32.to_radians();
+        let square = fit_distance(1.0, fov, 1.0);
+        let tall = fit_distance(1.0, fov, 0.5);
+        let wide = fit_distance(1.0, fov, 2.0);
+        assert!(tall > square, "竖视口要更远：{tall} vs {square}");
+        assert!(
+            (wide - square).abs() < 1e-4,
+            "宽视口不再变近：{wide} vs {square}"
+        );
+        // 退化输入不许产生 NaN / 0 距离（相机会贴在物体中心上）。
+        for aspect in [0.0, -1.0, f32::NAN] {
+            let d = fit_distance(1.0, fov, aspect);
+            assert!(d.is_finite() && d > 0.0, "aspect={aspect} → {d}");
+        }
+        assert!(fit_distance(f32::NAN, fov, 1.5).is_finite());
+    }
+
+    /// 点状目标（零尺寸缩放 / 空模型）不能把相机放到物体中心上。
+    #[test]
+    fn fit_distance_floors_a_point_like_target() {
+        let fov = 60f32.to_radians();
+        assert_eq!(
+            fit_distance(0.0, fov, 1.5),
+            fit_distance(MIN_FOCUS_RADIUS, fov, 1.5)
+        );
+        assert!(fit_distance(0.0, fov, 1.5) > 0.5);
+    }
+
+    /// 聚焦只动位置：朝向不变、目标落在当前视线正前方、距离等于 `fit_distance`。
+    #[test]
+    fn focus_on_keeps_the_orientation_and_centers_the_target() {
+        let mut camera = EditorCamera {
+            yaw: 0.7,
+            pitch: 0.3,
+            position: Vec3::new(-20.0, 1.0, 4.0),
+            ..EditorCamera::default()
+        };
+        let forward_before = camera.forward();
+        let center = Vec3::new(3.0, 2.0, -1.0);
+        let fov = 60f32.to_radians();
+        camera.focus_on(center, 2.0, fov, 1.5);
+        assert!(
+            (camera.forward() - forward_before).length() < 1e-5,
+            "朝向必须不变"
+        );
+        let to_target = center - camera.eye();
+        let expected = fit_distance(2.0, fov, 1.5);
+        assert!(
+            (to_target.length() - expected).abs() < 1e-3,
+            "距离 {} ≠ {}",
+            to_target.length(),
+            expected
+        );
+        assert!(
+            (to_target.normalize() - forward_before).length() < 1e-4,
+            "目标必须在视线正前方"
+        );
+    }
+
+    /// 六个轴视角看的方向必须对，而且 pitch 不能被夹到正好 ±90°：
+    /// 那样 `forward × Y` 退化成零向量，`pan_right` 会算出 NaN 把相机毁掉。
+    #[test]
+    fn axis_views_look_down_the_expected_direction_and_never_degenerate() {
+        let cases = [
+            (AxisView::Front, Vec3::Z),
+            (AxisView::Back, Vec3::NEG_Z),
+            (AxisView::Left, Vec3::X),
+            (AxisView::Right, Vec3::NEG_X),
+            (AxisView::Top, Vec3::NEG_Y),
+            (AxisView::Bottom, Vec3::Y),
+        ];
+        for (view, expected) in cases {
+            let mut camera = EditorCamera::default();
+            camera.set_axis_view(view);
+            let forward = camera.forward();
+            // 容差 2e-2：顶/底视为了躲开 ±90° 的退化，故意偏了 `PITCH_LIMIT`
+            // （0.01 rad），所以与正下/正上差 0.01，肉眼看不出但那不是 1e-3。
+            assert!(
+                (forward - expected).length() < 2e-2,
+                "{} 的朝向是 {forward:?}，期望 {expected:?}",
+                view.label()
+            );
+            assert!(camera.pitch.abs() < std::f32::consts::FRAC_PI_2);
+            // 平移一次必须仍然是有限值（退化朝向会在这里炸成 NaN）。
+            camera.pan_right(1.0, 0.016);
+            assert!(
+                camera.position.is_finite(),
+                "{} 平移后位置 NaN",
+                view.label()
+            );
+        }
     }
 }

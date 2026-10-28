@@ -584,7 +584,11 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     }
 
     // ── 键盘快捷键 ──
-    if is_editing {
+    //
+    // 有文本输入焦点时一律不抢键：在「Search…」框里按退格删掉一个字，不该顺手
+    // 把选中的实体删掉。面板一多，谁也说不清焦点在谁身上 —— 由 egui 的
+    // `wants_keyboard_input` 统一回答。
+    if is_editing && !ui.ctx().wants_keyboard_input() {
         if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
             state.delete_selected();
         }
