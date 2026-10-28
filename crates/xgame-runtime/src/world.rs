@@ -3989,4 +3989,150 @@ mod tests {
             "回到实时应当是 1 步"
         );
     }
+
+    /// 8 环深链递归销毁：每一环**恰好**收到一次 `on_destroy`，顺序从头到尾。
+    ///
+    /// 前一轮钉的是两环（`destroying_inside_on_destroy_...`）。深链问的是别的
+    /// 问题：跨帧结算的命令不能在下一帧丢、某一环不能被跳过、也不能被通知两次
+    /// —— 漏一环的症状是"状态表永远不释放 + 实体的 on_destroy 逻辑（掉道具、
+    /// 扣分）没跑"，而这两种症状在日志里都只是"没看到那一行"。
+    #[test]
+    fn a_long_destroy_chain_notifies_every_link_exactly_once() {
+        const LINKS: usize = 8;
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_lua_deep_chain_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        for i in 0..LINKS {
+            let next = i + 1;
+            // 自毁由第 0 环的 `update` 发起：脚本里没有"手动触发"的入口，
+            // 让第一环自己动手最省事，也更接近真实用法（子弹销毁自己）。
+            let arm = if i == 0 {
+                "local fired = false\n\
+                 function update(ctx)\n\
+                 if fired then return end\n\
+                 fired = true\n\
+                 destroy(ctx, self_id(ctx))\n\
+                 end\n"
+            } else {
+                ""
+            };
+            let chain = if next < LINKS {
+                format!(
+                    "local next_link = entity_id(ctx, 'link{next}')\n\
+                     if next_link ~= 0 then destroy(ctx, next_link) end\n"
+                )
+            } else {
+                String::new()
+            };
+            std::fs::write(
+                dir.join(format!("Scripts/link{i}.lua")),
+                format!("{arm}function on_destroy(ctx)\n log(ctx, 'dead:{i}')\n{chain}end\n"),
+            )
+            .unwrap();
+        }
+
+        let mut scene = Scene::new("chain");
+        for i in 0..LINKS {
+            let mut entity = Entity::new(format!("link{i}"));
+            entity.scripts.push(format!("Scripts/link{i}.lua"));
+            scene.add_entity(entity);
+        }
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+
+        let mut observed: Vec<String> = Vec::new();
+        // 每一环要等下一帧结算，多跑两帧确认"结算完就停"，不重复通知。
+        for _ in 0..LINKS + 3 {
+            world.update(1.0 / 60.0);
+            for log in world.take_logs() {
+                if log.message.starts_with("dead:") {
+                    observed.push(log.message);
+                }
+            }
+        }
+
+        let expected: Vec<String> = (0..LINKS).map(|i| format!("dead:{i}")).collect();
+        assert_eq!(
+            observed, expected,
+            "8 环必须按顺序各通知一次（漏一环 = 状态表不释放，重复 = 逻辑跑两遍）"
+        );
+        assert!(
+            world.scene().entities.is_empty(),
+            "链走完之后不该剩实体，实际剩 {} 个",
+            world.scene().entities.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 卸载期间脚本 `spawn` 出来的实体**不许漏进下一场景**。
+    ///
+    /// 卸载时 `on_destroy` 照样跑（R11 的语义），脚本完全可以在里面 spawn ——
+    /// 但那属于**正在被拆掉的旧世界**。`unload_scene` 末尾清掉结构命令、`swap_scene`
+    /// 整块换掉场景，所以新场景里不该出现"上一关的幽灵"。漏出去的症状是：切关后
+    /// 多出几个看不见用途的实体，甚至带着旧场景的脚本继续跑。
+    #[test]
+    fn spawning_during_unload_does_not_leak_into_the_next_scene() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_unload_spawn_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = ProjectHandle::create(&dir, "UnloadSpawn").expect("建临时项目");
+        std::fs::create_dir_all(project.root().join("Scripts")).unwrap();
+        std::fs::write(
+            project.root().join("Scripts/dying.lua"),
+            r#"
+            function on_destroy(ctx)
+                log(ctx, "dying:spawn")
+                spawn_entity(ctx, "ghost", "")
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut a = Scene::new("A");
+        a.add_entity(Entity::new("marker").with_script("Scripts/dying.lua"));
+        project.write_scene("Scenes/A.ron", &a).expect("写 A");
+        let mut b = Scene::new("B");
+        b.add_entity(Entity::new("fresh"));
+        project.write_scene("Scenes/B.ron", &b).expect("写 B");
+
+        let scene = project.load_scene("Scenes/A.ron").expect("读 A");
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron");
+        world.update(1.0 / 60.0);
+        world.load_scene("Scenes/B.ron").expect("切到 B");
+
+        let logs: Vec<String> = world
+            .take_logs()
+            .into_iter()
+            .map(|log| log.message)
+            .collect();
+        assert!(
+            logs.iter().any(|message| message == "dying:spawn"),
+            "卸载钩子必须跑过（否则这条测试证明不了泄漏与否）：{logs:?}"
+        );
+
+        let names: Vec<&str> = world
+            .scene()
+            .entities
+            .iter()
+            .map(|entity| entity.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["fresh"], "新场景只该有自己的实体");
+        assert_eq!(world.scene_loads(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
