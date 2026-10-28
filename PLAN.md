@@ -14,6 +14,72 @@
 
 ---
 
+## 七十八、Revert 不许换 ID：一次"还原"不该把整棵子树的身份洗一遍（R07/103，2026-10-28）
+
+R07/103 只剩一句没关：**Revert 之后实例里的实体 ID 还在不在原位**。老实现走的是
+"删掉整棵子树 → 按资产重新实例化"，于是每次还原都把子树里每个 `EntityId` 换成新
+的。用户看到的后果有两条：
+
+1. 场景文件里凭空多出一大段纯 ID 变化 —— 明明只点了一下"还原"；
+2. 任何**按 ID 记住**这些实体的地方（外部工具、用户脚本里存的 id、跨帧缓存）全部
+   失联。Unity 的 Revert 也是保留 ID 的。
+
+### 做法：ID 由调用方给，不写死在 `Prefab` 里
+
+`Prefab::instantiate` 拆成两层：
+
+```rust
+pub fn instantiate(&self, source: &str) -> Vec<Entity>          // 新增实例：全新 ID
+pub fn instantiate_with(&self, source: &str,
+                        id_for: impl FnMut(EntityId) -> EntityId) // Revert：按 source_id 认回
+```
+
+`id_for` 的入参是**资产里的**实体 ID（也就是实例的 `source_id`），所以 Revert 只要
+先把「旧实例的 `source_id → 当前实体 ID`」做成对照表，再原样传进去即可 —— 父子重
+定向仍然按资产 ID 建索引，一处逻辑，两条入口共用。
+
+### 三条语义（都有测试）
+
+| 情况 | ID 从哪来 |
+|---|---|
+| 实例里已有（按 `source_id` 对上） | **沿用旧 ID** |
+| 资产里新增 | 新 ID |
+| 实例里多出来（资产里没有） | 删除 |
+
+`Scene::revert_prefab(root, &prefab, source)` 是新入口，返回**新实例根索引**（子树
+被整块重建、脱离原位追加到末尾，索引会变，调用方必须用返回值）。它刻意**不动根的
+世界变换** —— 那是宿主的事：用户把实例拖到别处再点"还原"，要的是内容回到出厂，
+位置留在原地。
+
+### 两个顺手关掉的坑
+
+- **空资产不动手**：旧路径是"先把实例删掉，再发现没东西可放"，用户点一下还原反而
+  丢了整棵子树。现在 `prefab.is_empty()` 直接返回 `None`，场景逐位不变。
+- **手改过的场景撞 ID 要自愈**：沿用旧 ID 的前提是旧数据本身合法。文件里若两条实体
+  共用一个 ID（只有编辑器外部改文件才会这样），沿用会让重复进结果；`revert_prefab`
+  末尾补一次 `ensure_unique_ids()`，只可能动到"多出来的那条"。
+
+### 先证红
+
+测试写在编辑器侧（`crates/xgame-editor/src/state.rs`），先用老路径实跑：
+
+```
+assertion `left == right` failed: Revert 换掉了实例里的实体 ID
+  left: [EntityId(7), EntityId(8)]
+ right: [EntityId(4), EntityId(5)]
+```
+
+换成 `scene.revert_prefab` 后转绿；core 侧另补三条（保 ID / 空资产 / 撞 ID 自愈）。
+
+### 量到的
+
+- 全量 `--workspace --all-targets`：**968 passed / 0 failed / 9 ignored**（+4 条）。
+- clippy `-p xgame-core -p xgame-editor --all-targets`：0 警告。
+- 已知没做的：**嵌套预制体**（实例里再嵌实例）与**字段级覆盖**（实例只改一个字段、
+  Revert 只还原那个字段）仍未关闭 —— 那是 Unity 的 Revert 的另一半语义。
+
+---
+
 ## 七十七、销毁钩子里的结构性改动：补上两条没有被钉住的契约（R11/121 的一半，2026-10-28）
 
 R11/121 说"递归销毁 / 卸载中新增、异常退出仍待验证"。异常退出（断电、强杀）不是

@@ -1867,8 +1867,10 @@ impl EditorState {
 
     /// 用资产覆盖回实例（Unity 的 Revert）。
     ///
-    /// 实例整棵重建，但**根的世界变换保留**——否则"还原"会把用户摆好的位置
-    /// 也一起抹掉，那不是还原，是回到出厂设置。
+    /// 两件事由 [`Scene::revert_prefab`](xgame_core::Scene::revert_prefab) 负责：
+    /// 内容回到资产版本，且实例里已有的实体**按 `source_id` 认回原 ID**。
+    /// 编辑器这边只管"保住用户亲手摆的东西"——根的世界变换与父节点：还原是还原
+    /// 内容，把用户摆好的位置也一起抹掉那就叫回到出厂设置了。
     pub fn revert_prefab(&mut self, root_idx: usize) {
         if !self.is_editing() {
             self.log_warning("Cannot revert a prefab while playing");
@@ -1902,15 +1904,14 @@ impl EditorState {
         let old_world = self.scene.world_matrix(root_idx);
 
         self.push_undo();
-        self.scene.remove_subtree(root_idx);
-
-        let Some(new_root) = self.scene.instantiate_prefab(&prefab, &source) else {
-            self.log_warning("预制体是空的，实例已移除");
-            self.selected_entity = None;
+        let Some(new_root) = self.scene.revert_prefab(root_idx, &prefab, &source) else {
+            // 空资产：什么都不删。旧行为是"先把实例删掉再发现没东西可放"，
+            // 用户点一下还原反而丢了整棵子树。
+            self.log_warning("预制体是空的，实例保持不变");
             return;
         };
 
-        // 让新实例根回到原来的世界位置，再挂回原来的父节点下。
+        // 让实例根回到原来的世界位置，再挂回原来的父节点下。
         // 此刻它还没有父，把局部设成世界即可；`set_parent` 保留世界变换。
         self.scene.entities[new_root].transform = Transform::from_matrix(old_world);
         let parent = parent_id.and_then(|id| self.scene.index_of(id));
@@ -3159,6 +3160,59 @@ mod tests {
         assert_eq!(state.scene.entities[reverted + 1].name, "Changed");
         state.apply_prefab(reverted);
         assert_eq!(state.project.load_prefab(source).unwrap().entities[0].id, template.entities[0].id);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Revert 只把**内容**还原成资产版本，实例里的实体 ID 必须原地不动。
+    ///
+    /// 整棵重建的写法会把子树里每个 ID 都换一遍，于是场景文件凭空多出一大段纯
+    /// ID 变化，用户只是点了"还原"；而按 ID 记住这些实体的地方（外部工具、用户
+    /// 脚本里存的 id、跨帧缓存）也全部失联。Unity 的 Revert 同样保留 ID。
+    #[test]
+    fn revert_keeps_instance_entity_ids() {
+        let (mut state, base) = temp_state("revert_ids");
+        let mut template = Prefab::new("Stable");
+        let root = Entity::new("Root");
+        let mut child = Entity::new("Child");
+        child.parent = Some(root.id);
+        template.entities = vec![root, child];
+        let source = "Prefabs/Stable.prefab.ron";
+        state.project.write_prefab(source, &template).unwrap();
+
+        let root_idx = state.instantiate_prefab_by_path(source).unwrap();
+        // 实例里改掉一处内容：Revert 要有东西可还原，才不至于空跑通过。
+        state.scene.entities[root_idx + 1].name = "Changed".into();
+        // 旁边再放一个普通实体，确认实例重排没有波及无关实体。
+        let bystander = Entity::new("Bystander");
+        let bystander_id = bystander.id;
+        state.scene.entities.push(bystander);
+
+        let before: Vec<EntityId> = state
+            .scene
+            .subtree(root_idx)
+            .into_iter()
+            .map(|i| state.scene.entities[i].id)
+            .collect();
+
+        state.revert_prefab(root_idx);
+
+        let new_root = state.selected_entity.expect("还原后应选中新实例根");
+        let after: Vec<EntityId> = state
+            .scene
+            .subtree(new_root)
+            .into_iter()
+            .map(|i| state.scene.entities[i].id)
+            .collect();
+        assert_eq!(after, before, "Revert 换掉了实例里的实体 ID");
+        assert_eq!(
+            state.scene.entities[new_root + 1].name,
+            "Child",
+            "内容应回到资产版本"
+        );
+        assert!(
+            state.scene.index_of(bystander_id).is_some(),
+            "无关实体的 ID 也必须还在"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 

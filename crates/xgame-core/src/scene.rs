@@ -985,6 +985,67 @@ impl Scene {
         Some(base + root_offset)
     }
 
+    /// 用资产覆盖回实例（Unity 的 Revert），**保留实例内实体的 ID**。
+    ///
+    /// 与 [`Self::instantiate_prefab`] 的差别只在"ID 从哪来"：
+    ///
+    /// | | 新增实例 | Revert |
+    /// |---|---|---|
+    /// | 实例里已有（按 `source_id` 对位） | — | **沿用旧 ID** |
+    /// | 资产里新增 | 新 ID | 新 ID |
+    /// | 实例里多出来（资产里没有） | — | 删除 |
+    ///
+    /// 为什么必须保留旧 ID：整棵重建会把子树里每个实体的 ID 全换一遍，于是
+    /// ① 场景文件的 diff 变成纯噪音（用户只是点了"还原"，却看到整块 ID 变了）；
+    /// ② 任何按 ID 记住这些实体的地方（跨帧缓存、外部工具、用户脚本里存的 id）
+    /// 全部失效。Unity 的 Revert 也是保留 ID 的。
+    ///
+    /// `root` 必须落在实例根上；返回**新实例根**的索引。索引会变（子树被整块
+    /// 重建、可能不在末尾），调用方必须用返回值而不是旧索引。
+    ///
+    /// 根的**世界变换**刻意不由这里还原 —— 那是宿主（编辑器 / 工具）的事：
+    /// 用户把实例拖到别处之后再点"还原"，要的是内容回到出厂，位置留在原地。
+    pub fn revert_prefab(
+        &mut self,
+        root: usize,
+        prefab: &crate::prefab::Prefab,
+        source: &str,
+    ) -> Option<usize> {
+        if prefab.is_empty() || root >= self.entities.len() {
+            return None;
+        }
+        // 旧实体的 `来源资产 ID → 当前实体 ID`：Revert 后要按它把 ID 认回去。
+        // 只认**同一个来源**的实例实体，避免把别的预制体的 ID 错认过来。
+        let keep: std::collections::HashMap<EntityId, EntityId> = self
+            .subtree(root)
+            .into_iter()
+            .filter_map(|index| {
+                let entity = self.entities.get(index)?;
+                let link = entity.prefab.as_ref().filter(|p| p.source == source)?;
+                Some((link.source_id, entity.id))
+            })
+            .collect();
+
+        // 整块替换：删掉旧子树，再按资产的实体表重建。索引在这里全部重排。
+        self.remove_subtree(root);
+
+        let base = self.entities.len();
+        let rebuilt = prefab.instantiate_with(source, |source_id| {
+            keep.get(&source_id).copied().unwrap_or_else(EntityId::new)
+        });
+        let root_offset = rebuilt
+            .iter()
+            .position(|e| e.prefab.as_ref().is_some_and(|p| p.is_root))?;
+        self.entities.extend(rebuilt);
+
+        let new_root = base + root_offset;
+        // 保险：万一旧数据里两条实体共用了同一个 ID（手改过的场景），沿用会造出
+        // 重复 ID。这里补一次去重 —— 只可能动到"多出来的那条"，正常的实例不受影响。
+        self.ensure_unique_ids();
+        // `ensure_unique_ids` 可能重排 ID 但不会改变索引顺序，所以 `new_root` 仍有效。
+        Some(new_root)
+    }
+
     /// 找实体所属的**预制体实例根**索引。
     ///
     /// 沿父链上溯，遇到第一个 `is_root` 的实体即为答案；自己就是实例内实体、
@@ -1993,5 +2054,114 @@ mod tests {
             None,
             "普通实体不属于任何实例"
         );
+    }
+
+    // -- Revert -----------------------------------------------------------------
+
+    /// 造一份「Root + 两个子节点」的资产。
+    fn three_node_prefab() -> crate::prefab::Prefab {
+        let mut prefab = crate::prefab::Prefab::new("Enemy");
+        let root = Entity::new("Root");
+        let mut a = Entity::new("A");
+        a.parent = Some(root.id);
+        let mut b = Entity::new("B");
+        b.parent = Some(root.id);
+        prefab.entities = vec![root, a, b];
+        prefab
+    }
+
+    #[test]
+    fn revert_prefab_keeps_ids_and_drops_removed_nodes() {
+        let source = "Prefabs/Enemy.prefab.ron";
+        let v1 = three_node_prefab();
+        let mut scene = Scene::new("S");
+        let root_idx = scene.instantiate_prefab(&v1, source).unwrap();
+        // 实例里"资产 ID → 场景 ID"的对照：这是 Revert 保 ID 的唯一依据。
+        let instance_id = |s: &Scene, asset_id: EntityId| -> EntityId {
+            s.entities
+                .iter()
+                .find(|e| e.prefab.as_ref().is_some_and(|p| p.source_id == asset_id))
+                .unwrap_or_else(|| panic!("实例里找不到 source_id {asset_id:?}"))
+                .id
+        };
+        let root_id = instance_id(&scene, v1.entities[0].id);
+        let a_id = instance_id(&scene, v1.entities[1].id);
+        let b_id = instance_id(&scene, v1.entities[2].id);
+        assert_eq!(
+            scene.entities[root_idx].id, root_id,
+            "实例根就在返回的索引上"
+        );
+
+        // 资产 v2：Root + A（改名）+ C —— B 被删掉、C 是新增。
+        // 从 v1 克隆，资产 ID 天然稳定（这就是"资产内 ID 稳定"的语义）。
+        let mut v2 = v1.clone();
+        v2.entities[1].name = "A renamed".into();
+        let mut c = Entity::new("C");
+        c.parent = Some(v1.entities[0].id);
+        v2.entities[2] = c;
+
+        let new_root = scene
+            .revert_prefab(root_idx, &v2, source)
+            .expect("非空资产应能还原");
+        // 按**名字**取 ID：`subtree` 是 DFS（兄弟逆序），拿位置对号会脆。
+        let node = |s: &Scene, name: &str| -> usize {
+            s.subtree(new_root)
+                .into_iter()
+                .find(|&i| s.entities[i].name == name)
+                .unwrap_or_else(|| panic!("还原后找不到实体 {name}"))
+        };
+        assert_eq!(scene.subtree(new_root).len(), 3, "资产里有三个实体");
+        assert_eq!(node(&scene, "Root"), new_root, "实例根就在返回的索引上");
+        assert_eq!(
+            scene.entities[node(&scene, "Root")].id,
+            root_id,
+            "实例根必须沿用原 ID"
+        );
+        assert_eq!(
+            scene.entities[node(&scene, "A renamed")].id,
+            a_id,
+            "存活节点必须沿用原 ID"
+        );
+        let c_id = scene.entities[node(&scene, "C")].id;
+        assert_ne!(c_id, b_id, "资产里新增的节点不能捡被删节点的 ID");
+        assert_ne!(c_id, root_id);
+        assert_ne!(c_id, a_id);
+        assert!(scene.index_of(b_id).is_none(), "资产里已删的节点必须消失");
+        assert_eq!(scene.parent_index(node(&scene, "C")), Some(new_root));
+        assert_eq!(scene.duplicate_ids(), Vec::new(), "还原后不能有重复 ID");
+    }
+
+    /// 空资产：**什么都不动**。旧路径是"先把实例删掉，再发现没东西可放"，
+    /// 用户点一下还原反而丢了整棵子树。
+    #[test]
+    fn revert_prefab_with_an_empty_asset_keeps_the_instance() {
+        let source = "Prefabs/Keep.prefab.ron";
+        let mut v1 = crate::prefab::Prefab::new("Keep");
+        v1.entities = vec![Entity::new("Root")];
+        let mut scene = Scene::new("S");
+        let root_idx = scene.instantiate_prefab(&v1, source).unwrap();
+        let root_id = scene.entities[root_idx].id;
+
+        let empty = crate::prefab::Prefab::new("Empty");
+        assert!(scene.revert_prefab(root_idx, &empty, source).is_none());
+        assert_eq!(scene.entity_count(), 1, "空资产不该删掉实例");
+        assert_eq!(scene.entities[0].id, root_id);
+    }
+
+    /// 手改过的场景里实例内部可能撞 ID；沿用旧 ID 不能把重复带进结果。
+    #[test]
+    fn revert_prefab_repairs_duplicate_ids_in_a_hand_edited_instance() {
+        let source = "Prefabs/Dup.prefab.ron";
+        let v1 = three_node_prefab();
+        let mut scene = Scene::new("S");
+        let root_idx = scene.instantiate_prefab(&v1, source).unwrap();
+        let root_id = scene.entities[root_idx].id;
+        // 手改：子节点被写成和根同一个 ID（只有编辑器外部改文件才会这样）。
+        scene.entities[root_idx + 1].id = root_id;
+        assert_eq!(scene.duplicate_ids().len(), 1, "前置条件：确实撞了");
+
+        let new_root = scene.revert_prefab(root_idx, &v1, source).unwrap();
+        assert_eq!(scene.entities[new_root].id, root_id, "根保留原 ID");
+        assert_eq!(scene.duplicate_ids(), Vec::new(), "还原后必须自愈");
     }
 }

@@ -220,13 +220,30 @@ impl Prefab {
     ///
     /// `source` 是资产的项目相对路径，写进 [`PrefabInstanceRef::source`]。
     pub fn instantiate(&self, source: &str) -> Vec<Entity> {
+        self.instantiate_with(source, |_| EntityId::new())
+    }
+
+    /// 同 [`Self::instantiate`]，但由调用方决定每个实体拿到什么 ID。
+    ///
+    /// 唯一的另一个调用方是 `Scene::revert_prefab`：它要**保留**实例里已有的
+    /// ID（按 `source_id` 对位），否则一次 Revert 就会把整棵子树的 ID 全换掉 ——
+    /// 场景文件 diff 变成纯噪音，外部对实体 ID 的引用也一起断掉。
+    ///
+    /// `id_for` 的入参是资产里的实体 ID（也就是实例的 `source_id`），必须**对同一
+    /// 个入参给出同一个结果**：父子重定向是按资产 ID 建索引的，同一个资产 ID 落到
+    /// 两个不同结果时父引用只能取第一次出现的那个（与撞 ID 的既有取舍一致）。
+    pub fn instantiate_with(
+        &self,
+        source: &str,
+        mut id_for: impl FnMut(EntityId) -> EntityId,
+    ) -> Vec<Entity> {
         // 先给**每一条**实体各分配一个新 ID —— 按位置分，不按旧 ID 分。
         //
         // 旧实现是 `id_map.insert(entity.id, EntityId::new())`：映射的键是**旧 ID**，
         // 文件里若有两条件物撞了同一个 ID，后一次 insert 会覆盖前一次，于是两条
         // 实体最后拿到**同一个**新 ID。实例化出来的子树自带重复 ID，之后"删一个
         // 连带删另一个"，而且会被下一次保存写回文件，越传越广。
-        let new_ids: Vec<EntityId> = self.entities.iter().map(|_| EntityId::new()).collect();
+        let new_ids: Vec<EntityId> = self.entities.iter().map(|e| id_for(e.id)).collect();
         // 父引用只能按"旧 ID → 第一次出现的那个新 ID"重定向（撞 ID 时无法区分父子，
         // 保守取第一个 —— 与 `Scene::ensure_unique_ids` 的取舍一致）。
         let mut id_map: HashMap<EntityId, EntityId> = HashMap::with_capacity(self.entities.len());
