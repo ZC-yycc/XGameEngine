@@ -38,6 +38,13 @@ const INSTRUCTION_BUDGET: u64 = 200_000;
 /// 才中断。1024 是"正常脚本几乎无感、死循环在微秒级被掐断"的折中。
 const HOOK_INTERVAL: u32 = 1024;
 
+/// 报错计数表超过这个条数就扫一遍、把已不在场景里的实体条目删掉。
+///
+/// 条目只在"某个 (实体, 脚本, 钩子) 报过错且之后没成功过"时存在，正常项目
+/// 远达不到这个量级，所以这条清理路径几乎不会走；设上限是为了防住
+/// "每帧 spawn + 报错 + destroy"这种病态脚本把表撑大。
+const ERROR_STREAK_SOFT_LIMIT: usize = 1024;
+
 /// 四个生命周期钩子的函数句柄（编译期从环境表取一次）。
 ///
 /// 以前这里是一组 bool（`Hooks`），钩子函数每帧每实体现从 env 表查
@@ -112,6 +119,14 @@ pub struct LuaHost {
     /// 待回收的日志与命令。
     logs: Vec<ScriptLog>,
     commands: Vec<ScriptCommand>,
+    /// 连续报错计数（限流用）：`(实体, 脚本驻留 id, 钩子序号)` → 连续次数。
+    ///
+    /// 一个每帧都出错的脚本如果不限流，就会 60 条/秒地刷日志面板，并且每次
+    /// `format!` 都在热路径上分配。这里按**指数退避**只报第 1、2、4、8…次，
+    /// 中间的静默；同一钩子成功执行一次就清零，下次再错重新算。
+    ///
+    /// **不**做"错够几次就禁用脚本"：那会悄悄改变游戏行为，比刷屏更难查。
+    error_streak: HashMap<(EntityId, u32, u8), u32>,
     /// 脚本路径的解析基准（项目根目录）。
     root: Option<PathBuf>,
 }
@@ -176,6 +191,7 @@ impl LuaHost {
             intern: PathIntern::new(),
             logs: Vec::new(),
             commands: Vec::new(),
+            error_streak: HashMap::new(),
             root: None,
         }
     }
@@ -208,12 +224,17 @@ impl LuaHost {
     pub fn invalidate_all(&mut self) {
         self.scripts.clear();
         self.failed.clear();
+        // 脚本内容变了，报错序列要从头算 —— 否则改好之后的第一条错误会被
+        // 当作"第 N 次"静默掉，正好把用户最想看的那条吞了。
+        self.error_streak.clear();
     }
 
     /// 让某个脚本失效（同样不清驻留表，理由见 [`LuaHost::invalidate_all`]）。
     pub fn invalidate(&mut self, path: &str) {
         self.scripts.remove(path);
         self.failed.remove(path);
+        // 同上：这个脚本的报错计数作废（键里的驻留 id 无法反查路径，只能全清）。
+        self.error_streak.clear();
     }
 
     /// 清空**运行时**状态（`start` 是否跑过），保留编译缓存。
@@ -222,6 +243,8 @@ impl LuaHost {
         self.states.clear();
         self.logs.clear();
         self.commands.clear();
+        // 新的 Play 会话应当重新报错；否则第一次错误会被上一次会话的计数吞掉。
+        self.error_streak.clear();
     }
 
     /// 场景切换：只清与**实体**绑定的运行时状态（`start` 标记 + 每实体状态表）。
@@ -236,6 +259,8 @@ impl LuaHost {
     pub fn reset_scene_state(&mut self) {
         self.started.clear();
         self.states.clear();
+        // 实体 ID 随场景整体换掉，旧的报错计数对新场景没有意义。
+        self.error_streak.clear();
     }
 
     /// 编译场景里用到的全部 `.lua` 脚本。
@@ -381,6 +406,12 @@ impl LuaHost {
         if !matches!(hook, Hook::Destroy) && frame.scene.find_entity(entity).is_none() {
             return;
         }
+        // 实体被删后它的报错计数会残留；超过软上限时扫一遍清掉（见常量说明）。
+        if self.error_streak.len() > ERROR_STREAK_SOFT_LIMIT {
+            let scene = &*frame.scene;
+            self.error_streak
+                .retain(|key, _| scene.find_entity(key.0).is_some());
+        }
         // 借 `self.intern` 得到的 `&str` 传不进 `&mut self` 的方法（借用检查器
         // 看不出"它就是 self 身上的一块"），所以加载这一步在方法内部自己解析 id；
         // 钩子体再单独 resolve 一次（O(1) 下标）。
@@ -445,13 +476,29 @@ impl LuaHost {
             }
         };
         if let Err(err) = result {
-            let message = format!("{err}");
-            self.logs.push(ScriptLog {
-                level: LogLevel::Error,
-                script: path.to_owned(),
-                entity: Some(entity),
-                message,
-            });
+            let key = (entity, path_id, hook as u8);
+            let streak = self.error_streak.entry(key).or_insert(0);
+            *streak += 1;
+            let count = *streak;
+            // 指数退避：第 1、2、4、8、16… 次各报一条，中间的静默。100 帧持续
+            // 报错也只是 7 条，而 1 次的偶发出错照样看得见。
+            if count.is_power_of_two() {
+                let message = if count == 1 {
+                    format!("{err}")
+                } else {
+                    format!("{err}（该钩子已连续报错 {count} 次，后续只在 2 的幂次再报）")
+                };
+                self.logs.push(ScriptLog {
+                    level: LogLevel::Error,
+                    script: path.to_owned(),
+                    entity: Some(entity),
+                    message,
+                });
+            }
+        } else if !self.error_streak.is_empty() {
+            // 成功执行一次 → 清零。`is_empty` 短路是刻意的：正常运行时这张表
+            // 是空的，热路径上不该为"可能没出错"付一次哈希查找。
+            self.error_streak.remove(&(entity, path_id, hook as u8));
         }
     }
 
@@ -736,6 +783,105 @@ mod tests {
         entity.scripts.push(relative.to_owned());
         scene.add_entity(entity);
         scene
+    }
+
+    /// 成功执行一次就把报错计数清零 —— 恢复之后再次出错必须重新报。
+    ///
+    /// 没有这一条，"限流"很容易退化成"每个脚本一辈子只报一次"，那等于把
+    /// 修复后复发的问题永久藏起来。
+    #[test]
+    fn a_recovered_script_reports_its_next_error_again() {
+        let project = TempProject::new("error_recover");
+        // 第 3 帧故意不报错，其余帧报错。
+        let script = project.write_script(
+            "flaky",
+            "function update(ctx)\n\
+             \x20 _G.n = (_G.n or 0) + 1\n\
+             \x20 if _G.n == 3 then return end\n\
+             \x20 error('boom')\n\
+             end",
+        );
+        let mut scene = scene_with_script(&script);
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+
+        let mut per_frame = Vec::new();
+        for _ in 0..4 {
+            host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+            per_frame.push(host.take_logs().len());
+        }
+        assert_eq!(
+            per_frame,
+            vec![1, 1, 0, 1],
+            "第 3 帧成功后计数应清零，第 4 帧的错误要重新报出来（实际 {per_frame:?}）"
+        );
+    }
+
+    /// 限流后的日志必须说明"还在错、已经错了几次"。
+    ///
+    /// 只报第 1 次而不带计数的话，用户会以为一次性错误已经好了 —— 持续故障
+    /// 反而更难发现，那就是限流的副作用盖过了收益。
+    #[test]
+    fn throttled_error_says_how_many_times_it_failed() {
+        let project = TempProject::new("error_count_in_text");
+        let script = project.write_script("broken", "function update(ctx) error('boom') end");
+        let mut scene = scene_with_script(&script);
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+
+        let mut messages = Vec::new();
+        for _ in 0..4 {
+            host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+            for log in host.take_logs() {
+                messages.push(log.message);
+            }
+        }
+        assert!(
+            messages.iter().any(|m| m.contains("连续报错 2 次")),
+            "第 2 次的日志应当带上次数，实际 {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("连续报错 4 次")),
+            "第 4 次的日志应当带上次数，实际 {messages:?}"
+        );
+        assert!(
+            messages.len() < 4,
+            "4 帧里应当只报 1/2/4 三次，实际 {messages:?}"
+        );
+    }
+
+
+    /// 一个每帧都报错的脚本不能每帧刷一条日志。
+    ///
+    /// 这是"错误熔断"的最小形态：持续故障只报有限的几次，而不是 60 条/秒。
+    /// 不限流的后果有两个，都不轻：日志面板瞬间被淹掉（用户看不到别的问题），
+    /// 而且每次 `format!("{err}")` 都在热路径上分配 —— 一个坏脚本就能把稳态
+    /// 零分配整个破坏掉。
+    ///
+    /// 注意**不**做"报错几次就禁用脚本"：那会悄悄改变游戏行为，比刷屏更难查。
+    ///
+    /// 顺带钉住另一件事：错误**必须至少被看见一次**，否则限流就成了隐瞒。
+    #[test]
+    fn repeated_script_errors_are_throttled() {
+        let project = TempProject::new("error_streak");
+        let script = project.write_script("broken", "function update(ctx) error('boom') end");
+        let mut scene = scene_with_script(&script);
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+
+        let mut total = 0;
+        for _ in 0..100 {
+            host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+            total += host.take_logs().len();
+        }
+        assert!(
+            total > 0,
+            "报错必须至少被记录一次，否则限流等于隐瞒故障"
+        );
+        assert!(
+            total <= 10,
+            "持续报错必须被限流：100 帧里报了 {total} 条（应当是指数退避，量级在个位数）"
+        );
     }
 
     #[test]
