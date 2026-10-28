@@ -170,4 +170,5 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | UI 与脚本时序 | `update_ui()` 在 `update()` **第 0 步**（早于 start/fixed/update）：`ui_clicked` 必须读本帧状态；代价是脚本本帧改的 UI 矩形**下一帧**才参与命中，这是刻意取舍，`script_moved_ui_takes_effect_on_the_next_frame` 钉住它 —— 想调顺序先改这条测试 | §五十二.4 |
 | 热重载 | 1 Hz 轮询内容目录（只查 metadata）；`poll` 推进基线、**动作后必须 `rebase`**（防自激）；场景永不自动覆盖；脏材质草稿保留；`--ui-shot` 不启用 | §三十一 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |
+| 热路径分配 | `World::update` 预热后**每帧零分配**由 `alloc_steady_state` 门禁钉住（不 ignore，进 CI）；新增缓冲要提前分配复用，`collect`/`format!` 进每帧路径即回归 | §五十四 |
 | CI | Windows + stable + `--locked`；单 job 顺序跑；不跑 `--screenshot` / 基准 / fmt | §三十四 |
