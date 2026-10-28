@@ -1444,12 +1444,19 @@ impl World {
             .filter(|e| e.physics.is_some() || e.controller.is_some())
             .map(|e| e.id)
             .collect();
-        let dead: Vec<EntityId> = self
+        // 待删列表按 ID 排序：`body_of_entity` 是 `HashMap`，直接拿 `keys()` 的
+        // 顺序是**哈希顺序**（每个 `World` 实例的种子都不同）。当前 rapier 对
+        // `remove_body` 的先后不敏感（`determinism::removing_several_bodies_at_once_
+        // is_order_stable` 实测逐位一致），但那是它的实现细节、不是契约 —— 一旦
+        // 换成顺序敏感的求解器，轨迹就会随哈希种子分叉，而且症状是"偶发对不上"。
+        // 排序只在结构性变化的帧执行，稳态快路径根本走不到这里。
+        let mut dead: Vec<EntityId> = self
             .body_of_entity
             .keys()
             .copied()
             .filter(|id| !live.contains(id))
             .collect();
+        dead.sort_unstable_by_key(|id| id.raw());
         for id in dead {
             if let Some(body) = self.body_of_entity.remove(&id) {
                 self.physics.remove_body(body);
