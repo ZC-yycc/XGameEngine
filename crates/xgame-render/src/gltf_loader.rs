@@ -695,7 +695,8 @@ pub struct AnimData {
 ///
 /// # v1 的取舍
 ///
-/// - `CUBICSPLINE` 降采样成线性（见下）；
+/// - `CUBICSPLINE` **完整保留**（每帧入切线 / 值 / 出切线三份），采样端走 Hermite
+///   求值 —— 降成线性会把 Blender / Maya 默认导出的加减速抹平；
 /// - 形变目标权重（`MorphTargetWeights`）**收下**但不进姿态：它是网格属性，
 ///   单独一条轨道（[`crate::animation::TrackPath::MorphWeights`]）；
 /// - 节点的 `matrix` 形态做一次矩阵分解成 TRS（少数老工具才这么写）。
@@ -805,9 +806,7 @@ pub fn parse_animation_data_scaled(
     }
 
     // -- 动画剪辑 --
-    use gltf::animation::{
-        util::ReadOutputs, Interpolation as GltfInterp, Property as GltfProperty,
-    };
+    use gltf::animation::{util::ReadOutputs, Property as GltfProperty};
     let mut animations = Vec::new();
     for anim in document.animations() {
         let mut tracks = Vec::new();
@@ -840,52 +839,43 @@ pub fn parse_animation_data_scaled(
                     let Some(ReadOutputs::MorphTargetWeights(iter)) = reader.read_outputs() else {
                         continue;
                     };
-                    let cubic = matches!(sampler.interpolation(), GltfInterp::CubicSpline);
-                    let interpolation = match sampler.interpolation() {
-                        GltfInterp::Step => Interpolation::Step,
-                        _ => Interpolation::Linear,
-                    };
-                    // 标量流先按每帧目标数分组，不能把各目标当作独立关键帧。
+                    let interpolation = parse_interpolation(sampler.interpolation());
+                    // 标量流按"时点 × 组"分组：每帧 1 组（线性 / 阶梯）
+                    // 或 3 组（入切线 / 值 / 出切线）。
                     let flat: Vec<f32> = iter.into_f32().collect();
-                    let samples = times.len() * if cubic { 3 } else { 1 };
-                    if flat.is_empty() || !flat.len().is_multiple_of(samples) {
+                    let groups = times.len() * interpolation.slots();
+                    if flat.is_empty() || !flat.len().is_multiple_of(groups) {
                         continue;
                     }
-                    let stride = flat.len() / samples;
-                    let values = take_spline_values(
-                        flat.chunks_exact(stride).map(<[f32]>::to_vec).collect(), cubic);
-                    if !values.is_empty() {
-                        tracks.push(crate::animation::Track {
-                            node: channel.target().node().index() as u32,
-                            path: TrackPath::MorphWeights,
-                            interpolation,
-                            times: times.clone(),
-                            values,
-                        });
-                    }
+                    tracks.push(crate::animation::Track {
+                        node: channel.target().node().index() as u32,
+                        path: TrackPath::MorphWeights,
+                        interpolation,
+                        times: times.clone(),
+                        values: flat,
+                    });
                     continue;
                 }
             };
-            let cubic = matches!(sampler.interpolation(), GltfInterp::CubicSpline);
-            let interpolation = match sampler.interpolation() {
-                GltfInterp::Step => Interpolation::Step,
-                // CUBICSPLINE 降采样成线性：见下面 `take_spline_values`。
-                _ => Interpolation::Linear,
-            };
-
-            let mut values = match reader.read_outputs() {
-                Some(ReadOutputs::Translations(iter)) => {
-                    take_spline_values(iter.map(|v| v.to_vec()).collect(), cubic)
-                }
-                Some(ReadOutputs::Scales(iter)) => {
-                    take_spline_values(iter.map(|v| v.to_vec()).collect(), cubic)
-                }
+            let interpolation = parse_interpolation(sampler.interpolation());
+            // 变换通道的分量数是固定的：旋转 4，位移 / 缩放 3。
+            let components = if path == TrackPath::Rotation { 4 } else { 3 };
+            // 输出数组**原样收下**：CUBICSPLINE 每帧三份（入切线 / 值 / 出切线），
+            // 线性与阶梯每帧一份。切线是内容的一部分，丢了就补不回来。
+            let mut values: Vec<f32> = match reader.read_outputs() {
+                Some(ReadOutputs::Translations(iter)) => iter.flat_map(|v| v.to_vec()).collect(),
+                Some(ReadOutputs::Scales(iter)) => iter.flat_map(|v| v.to_vec()).collect(),
                 Some(ReadOutputs::Rotations(iter)) => {
-                    take_spline_values(iter.into_f32().map(|v| v.to_vec()).collect(), cubic)
+                    iter.into_f32().flat_map(|v| v.to_vec()).collect()
                 }
                 _ => continue,
             };
+            // 形状对不上（资产脏）就整条丢掉：硬读会串帧，画出来是抽搐。
+            if values.len() != times.len() * components * interpolation.slots() {
+                continue;
+            }
             if path == TrackPath::Translation && scale != 1.0 {
+                // 值本身和切线都是位移量（切线单位是米/秒），一起乘。
                 for value in values.as_chunks_mut::<3>().0 {
                     value[0] *= scale;
                     value[1] *= scale;
@@ -1034,15 +1024,19 @@ fn morph_target_names(mesh: &gltf::Mesh<'_>, count: usize) -> Vec<String> {
     names
 }
 
-/// 每个关键帧按入切线、值、出切线排列；保留值并继续降级为线性插值。
-/// 每个 item 是完整向量（morph 则是该帧的全部目标权重）。
-fn take_spline_values(items: Vec<Vec<f32>>, cubic: bool) -> Vec<f32> {
-    if cubic && !items.len().is_multiple_of(3) {
-        return Vec::new();
+/// glTF 的三种插值一一对应，**不做任何降级**。
+///
+/// 早先这里把 `CUBICSPLINE` 映射成线性、读入时丢掉切线，动作会变"匀速"；
+/// 现在原样保留，由采样端的 Hermite 求值消费。
+fn parse_interpolation(interpolation: gltf::animation::Interpolation) -> Interpolation {
+    use gltf::animation::Interpolation as GltfInterp;
+    // 穷举匹配而非 `_ =>`：gltf 升级后新增插值类型时这里会编译不过，
+    // 逼着做一次显式决断，而不是悄悄退化成线性。
+    match interpolation {
+        GltfInterp::Linear => Interpolation::Linear,
+        GltfInterp::Step => Interpolation::Step,
+        GltfInterp::CubicSpline => Interpolation::CubicSpline,
     }
-    items.into_iter().enumerate()
-        .filter(|(i, _)| !cubic || i % 3 == 1)
-        .flat_map(|(_, value)| value).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,15 +1186,23 @@ pub(crate) mod tests {
     use super::*;
     use crate::animation::{clip_time, compute_bones, TrackPath};
 
+    /// CUBICSPLINE 的输出是"每帧三份"，加载器必须整段保留。
+    ///
+    /// 旧实现只挑中间那份（切线全丢），这条断言正是那个行为的反义：
+    /// 值换了位置、切线也在，`frame_len` 必须是 3 × stride。
     #[test]
-    fn regression_r04_spline_three_keys_vectors_and_rotations() {
-        for width in [3, 4] {
-            let items: Vec<Vec<f32>> = (0..9).map(|i| vec![i as f32; width]).collect();
-            let expected: Vec<f32> = [1.0, 4.0, 7.0].into_iter()
-                .flat_map(|v| vec![v; width]).collect();
-            assert_eq!(take_spline_values(items.clone(), true), expected);
-            assert_eq!(take_spline_values(items.clone(), false), items.into_iter().flatten().collect::<Vec<_>>());
-        }
+    fn regression_r04_spline_keeps_tangents() {
+        let data = cubic_translation_fixture([0.0, 1.0, 2.0]);
+        let track = &data.animations[0].tracks[0];
+        assert_eq!(track.interpolation, Interpolation::CubicSpline);
+        assert_eq!(track.stride(), 3, "vec3 的值分量数");
+        assert_eq!(track.frame_len(), 9, "每帧 3 组 × 3 分量");
+        assert_eq!(track.values.len(), 3 * track.frame_len(), "3 帧完整数据");
+        // 第 1 帧布局：入切线 (0,0,0) / 值 (0,1,0) / 出切线 (0,0,0)
+        assert_eq!(
+            &track.values[9..18],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        );
     }
 
     #[test]
@@ -1216,13 +1218,152 @@ pub(crate) mod tests {
                 "channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]
         }"#;
         let gltf = gltf::Gltf::from_slice(json.as_bytes()).unwrap();
-        let values = [0.0f32, 1.0, 2.0, -1.0, -2.0, 0.1, 0.2, -3.0, -4.0,
-            -5.0, -6.0, 0.3, 0.4, -7.0, -8.0, -9.0, -10.0, 0.5, 0.6, -11.0, -12.0];
-        let buffers = [gltf::buffer::Data(values.into_iter().flat_map(f32::to_le_bytes).collect())];
+        let values = [
+            0.0f32, 1.0, 2.0, -1.0, -2.0, 0.1, 0.2, -3.0, -4.0, -5.0, -6.0, 0.3, 0.4, -7.0, -8.0,
+            -9.0, -10.0, 0.5, 0.6, -11.0, -12.0,
+        ];
+        let buffers = [gltf::buffer::Data(
+            values.into_iter().flat_map(f32::to_le_bytes).collect(),
+        )];
         let data = parse_animation_data(&gltf.document, &buffers);
         let track = &data.animations[0].tracks[0];
         assert_eq!(track.times, [0.0, 1.0, 2.0]);
-        assert_eq!(track.values, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+        // 三帧 × (入切线, 值, 出切线) × 2 个目标 —— 切线必须原样保留，
+        // 降采样成 [0.1,0.2,0.3,0.4,0.5,0.6] 就等于把曲线拍平。
+        #[rustfmt::skip]
+        assert_eq!(
+            track.values,
+            [
+                -1.0, -2.0, 0.1, 0.2, -3.0, -4.0,
+                -5.0, -6.0, 0.3, 0.4, -7.0, -8.0,
+                -9.0, -10.0, 0.5, 0.6, -11.0, -12.0,
+            ]
+        );
+        // 段 [0,1] 中点：target0 = .5·0.1 + .125·(-3) + .5·0.3 - .125·(-5) = 0.45，
+        // target1 同理 0.55；线性插值只会给 0.2 / 0.3。
+        let mut out = Vec::new();
+        assert!(crate::animation::sample_morph_weights(
+            &data.animations[0],
+            0.5,
+            &mut out
+        ));
+        assert!((out[0] - 0.45).abs() < 1e-5, "target0 实得 {}", out[0]);
+        assert!((out[1] - 0.55).abs() < 1e-5, "target1 实得 {}", out[1]);
+    }
+
+    /// 单节点、单平移通道的 CUBICSPLINE 合成资产。
+    ///
+    /// 值曲线是 `0 → 1 → 0`，只有第 0 帧带 2/秒的出切线，第 1 帧的入切线为 0。
+    /// 段 [t0,t1] 中点上：真样条给 `0.5·p0 + 0.125·(2·dt) + 0.5·p1`，
+    /// 线性插值给 `0.5·(p0+p1)` —— 两者差 0.25，不会互相混淆。
+    fn cubic_translation_fixture(times: [f32; 3]) -> AnimData {
+        let json = r#"{
+            "asset":{"version":"2.0"}, "nodes":[{}],
+            "buffers":[{"byteLength":120}],
+            "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12},
+                           {"buffer":0,"byteOffset":12,"byteLength":108}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"SCALAR","min":[0],"max":[4]},
+                         {"bufferView":1,"componentType":5126,"count":9,"type":"VEC3"}],
+            "animations":[{"samplers":[{"input":0,"output":1,"interpolation":"CUBICSPLINE"}],
+                "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]
+        }"#;
+        let gltf = gltf::Gltf::from_slice(json.as_bytes()).unwrap();
+        // 时间 0/1/2，随后每帧 (入切线, 值, 出切线) 三份 vec3。
+        #[rustfmt::skip]
+        let numbers = [
+            times[0], times[1], times[2],
+            0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 2.0, 0.0,
+            0.0, 0.0, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,
+        ];
+        let buffers = [gltf::buffer::Data(
+            numbers.into_iter().flat_map(f32::to_le_bytes).collect(),
+        )];
+        parse_animation_data(&gltf.document, &buffers)
+    }
+
+    /// R04 / 032 的核心断言：CUBICSPLINE 的中点是 Hermite 值，不是线性值。
+    ///
+    /// 旧实现（读入时降采样成线性、丢切线）这里必然是 0.5 —— 这正是
+    /// `Docs/差距分析.md` 里"Hermite 待做"那一条的红灯形式。
+    #[test]
+    fn regression_r04_cubic_spline_midpoint_is_hermite_not_linear() {
+        use crate::animation::{default_pose, sample_clip_into};
+        let data = cubic_translation_fixture([0.0, 1.0, 2.0]);
+        let clip = &data.animations[0];
+        let mut pose = default_pose(&data.nodes);
+        sample_clip_into(clip, 0.5, &mut pose);
+        let y = pose[0].translation.y;
+        assert!(
+            (y - 0.75).abs() < 1e-5,
+            "段中点应为 Hermite 0.75（线性降采样会给 0.5），实得 {y}"
+        );
+
+        // 端点必须精确等于关键帧值，否则整段动画会整体漂移。
+        let mut at_start = default_pose(&data.nodes);
+        sample_clip_into(clip, 0.0, &mut at_start);
+        assert_eq!(at_start[0].translation.y, 0.0, "首帧");
+        let mut at_end = default_pose(&data.nodes);
+        sample_clip_into(clip, 2.0, &mut at_end);
+        assert_eq!(at_end[0].translation.y, 0.0, "末帧");
+    }
+
+    /// 切线单位是**每秒**（glTF 规范 C.2），段长 2 秒时 Hermite 里要乘 2。
+    ///
+    /// 忘了乘 dt 会把曲线抬得不够：段中点得 0.75 而不是 1.0。
+    #[test]
+    fn regression_r04_cubic_spline_scales_tangent_by_segment_length() {
+        use crate::animation::{default_pose, sample_clip_into};
+        let data = cubic_translation_fixture([0.0, 2.0, 4.0]);
+        let clip = &data.animations[0];
+        let mut pose = default_pose(&data.nodes);
+        sample_clip_into(clip, 1.0, &mut pose);
+        let y = pose[0].translation.y;
+        assert!(
+            (y - 1.0).abs() < 1e-5,
+            "2 秒段的切线换算后中点应为 1.0，实得 {y}"
+        );
+    }
+
+    /// 四元数的三次样条逐分量插值必然脱离单位球 —— 采样端必须归一化。
+    ///
+    /// 不归一化的话，蒙皮矩阵带一个恒定缩放，网格会随着动画越画越大。
+    #[test]
+    fn regression_r04_cubic_spline_rotation_is_normalized() {
+        use crate::animation::{default_pose, sample_clip_into};
+        let json = r#"{
+            "asset":{"version":"2.0"}, "nodes":[{}],
+            "buffers":[{"byteLength":160}],
+            "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12},
+                           {"buffer":0,"byteOffset":12,"byteLength":144}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"SCALAR","min":[0],"max":[2]},
+                         {"bufferView":1,"componentType":5126,"count":9,"type":"VEC4"}],
+            "animations":[{"samplers":[{"input":0,"output":1,"interpolation":"CUBICSPLINE"}],
+                "channels":[{"sampler":0,"target":{"node":0,"path":"rotation"}}]}]
+        }"#;
+        let gltf = gltf::Gltf::from_slice(json.as_bytes()).unwrap();
+        // 0° → 90° → 0°（绕 Z 轴），出切线故意给大，逼出非单位长度的样条值。
+        use std::f32::consts::FRAC_1_SQRT_2;
+        #[rustfmt::skip]
+        let numbers = [
+            0.0f32, 1.0, 2.0,
+            0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 1.0,   0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,   0.0, 0.0, FRAC_1_SQRT_2, FRAC_1_SQRT_2,   0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 1.0,   0.0, 0.0, 0.0, 0.0,
+        ];
+        let buffers = [gltf::buffer::Data(
+            numbers.into_iter().flat_map(f32::to_le_bytes).collect(),
+        )];
+        let data = parse_animation_data(&gltf.document, &buffers);
+        for t in [0.25f32, 0.5, 0.75, 1.25] {
+            let mut pose = default_pose(&data.nodes);
+            sample_clip_into(&data.animations[0], t, &mut pose);
+            let len = pose[0].rotation.length();
+            assert!(
+                (len - 1.0).abs() < 1e-4,
+                "t={t} 的四元数长度应为 1，实得 {len}"
+            );
+        }
     }
 
     // -- 材质覆盖合并 -------------------------------------------------------
@@ -1420,11 +1561,11 @@ pub(crate) mod tests {
         assert!(!walk.tracks.is_empty(), "Walk 不能是空轨道");
         for track in &walk.tracks {
             // `Track::stride` 现算（MorphWeights 的 stride 是逐轨道的目标数，
-            // 不能像变换通道那样写死）。
-            let stride = track.stride();
+            // 不能像变换通道那样写死）；每帧在 `values` 里占 `frame_len` 个浮点
+            // —— 样条是 3 倍（入切线 / 值 / 出切线）。
             assert_eq!(
                 track.values.len(),
-                track.times.len() * stride,
+                track.times.len() * track.frame_len(),
                 "轨道 {} 的值/时间必须对齐",
                 track.node
             );

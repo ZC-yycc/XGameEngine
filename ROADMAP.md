@@ -9,6 +9,14 @@
 
 ## 整体路线图
 
+### 2026-10-28 CUBICSPLINE 三次样条采样（R04 / 032）
+
+| 项目 | 状态 |
+|---|---|
+| 动画保真 | `CUBICSPLINE` 不再降级：每帧入切线 / 值 / 出切线完整保留，采样走 Hermite（切线按"每秒"乘段长、旋转结果归一化）；`Track` 的 `frame_start` / `value_start` / `frame_len` 成为唯一布局入口 |
+| 验证 | 3 条旧实现红灯实跑（中点 0.5 应为 0.75、2 秒段 0.5 应为 1.0、morph 只剩 6 个值）；全量 check/clippy 通过，**945 passed / 0 failed / 9 ignored**；新增采样成本基准（84 轨道样条 0.80× 线性）；见 PLAN 第七十一节 |
+| 边界 | morph 多网格仍只取第一条权重轨道（v1 边界，与插值无关）；根运动与动画 Phase B 未做；G0 不因此关闭 |
+
 ### 2026-10-27 G0 打包拒绝旧引擎播放器
 
 | 项目 | 状态 |
@@ -403,8 +411,8 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
 前五片已落地：
 
 - [x] 骨骼蒙皮（GPU skinning；阴影 pass 同步蒙皮；每实体一个 256 骨槽位）
-- [x] 动画片段加载（glTF → `AnimClip` / `Track`；LINEAR / STEP 运行时插值，CUBICSPLINE 降采样）
-- [x] 关键帧插值（位置 / 缩放线性、旋转 slerp；循环取模、非循环钳位）
+- [x] 动画片段加载（glTF → `AnimClip` / `Track`；LINEAR / STEP / **CUBICSPLINE Hermite 样条**运行时插值 —— 切线完整保留、按每秒乘段长、旋转归一化，见 PLAN.md 七十一 / 决策记录 §五十一）
+- [x] 关键帧插值（线性 / 阶梯 / 三次样条三档；旋转 slerp、样条结果归一化；循环取模、非循环钳位）
 - [x] `Animator` 组件（clip / speed / looping / autoplay / fade_time，随场景落盘）
 - [x] 播放时钟 `AnimationDriver`（编辑器墙钟、游戏按帧 dt；换剪辑归零）
 - [x] 编辑器 Animation 区块（剪辑下拉 / Speed / Fade / Loop / Autoplay / 摘除；指纹与帧策略）

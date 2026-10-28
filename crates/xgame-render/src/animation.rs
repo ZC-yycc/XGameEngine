@@ -17,8 +17,9 @@
 //! 单剪辑播放 + 换剪辑时的**交叉淡入** + 声明式**动画状态机**（参数阈值驱动的
 //! 剪辑切换，见 `xgame_core::AnimMachine`）+ **叠加（additive）混合**（增量 =
 //! 叠加剪辑当前帧 − 其第 0 帧参考姿势，见 `compute_bones_additive`）+ **混合层栈**
-//! （多层 Additive/Override × 骨骼遮罩，见 [`compute_bones_composed`]），LINEAR/STEP
-//! 插值（CUBICSPLINE 读入时降采样成线性）。旋转用 slerp，循环用取模、非循环钳在末帧。
+//! （多层 Additive/Override × 骨骼遮罩，见 [`compute_bones_composed`]），三种插值
+//! （LINEAR / STEP / **CUBICSPLINE Hermite 样条**）。旋转用 slerp，循环用取模、
+//! 非循环钳在末帧。
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -91,14 +92,47 @@ impl TrackPath {
     }
 }
 
-/// 关键帧插值方式。
+/// 关键帧插值方式（glTF 的三种原样保留）。
 ///
-/// glTF 的 `CUBICSPLINE` 在**读入时**降采样成 LINEAR（取输出数组的中间那份值，
-/// 切线丢弃），运行时只保留两种形态 —— 分支越少，采样这个每帧必走的路径越稳。
+/// # 为什么 `CubicSpline` 不再降采样
+///
+/// 早先版本在读入时把 `CUBICSPLINE` 取中间那份值降成 LINEAR、切线直接丢弃，
+/// 理由是"运行时分支越少越稳"。代价是**内容失真且不可逆**：Blender / Maya
+/// 默认导出的就是三次样条，降成线性后加减速被抹平 —— 挥砍变成匀速平移、
+/// 起跳没有蓄力。切线一旦在读入时扔掉就再也补不回来，所以现在完整保留，
+/// 采样端走 Hermite（见 [`hermite_basis`]）。
+///
+/// 线性 / 阶梯两条路径的标志位分支与从前逐位一致（同样的 `lerp` / 取左帧），
+/// 新增的只是第三种枚举值，不是给热路径加一层判断。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interpolation {
     Linear,
     Step,
+    /// 每关键帧三份值：`(入切线, 值, 出切线)`，切线单位是**每秒**。
+    CubicSpline,
+}
+
+impl Interpolation {
+    /// 每关键帧在 [`Track::values`] 里占几"组"值：样条三组，其余一组。
+    ///
+    /// 布局常量只在这里定义一次 —— 采样、加载、测试全都读它，
+    /// 免得出现"某处以为只有一份值"的错位。
+    #[inline]
+    pub(crate) fn slots(self) -> usize {
+        match self {
+            Interpolation::CubicSpline => 3,
+            Interpolation::Linear | Interpolation::Step => 1,
+        }
+    }
+
+    /// 本帧三组值里"值"是哪一组（样条是中间那份，其余只有一份）。
+    #[inline]
+    fn value_slot(self) -> usize {
+        match self {
+            Interpolation::CubicSpline => 1,
+            Interpolation::Linear | Interpolation::Step => 0,
+        }
+    }
 }
 
 /// 一条关键帧轨道：`node` 节点的某个通道随时间变化。
@@ -110,26 +144,58 @@ pub struct Track {
     pub interpolation: Interpolation,
     /// 严格递增的时间（秒）。
     pub times: Vec<f32>,
-    /// 关键帧值，`stride()` 个分量连续排布：`times.len() * stride` 长。
+    /// 关键帧值，每帧 [`Track::frame_len`] 个浮点紧凑排布 —— 总长
+    /// `times.len() × frame_len()`。
+    ///
+    /// 线性 / 阶梯每帧一组值（`stride()` 个分量）；CUBICSPLINE 每帧三组
+    /// （入切线 / 值 / 出切线），切线单位是**每秒**。
     pub values: Vec<f32>,
 }
 
 impl Track {
-    /// 每个关键帧的分量数。
+    /// 每关键帧的**值**分量数（不含样条的入 / 出切线）。
     ///
-    /// 变换通道是常量；`MorphWeights` 由"值总数 ÷ 关键帧数"现算 ——
-    /// 加载时 `CUBICSPLINE` 已经降采样成线性，这个除法对两种插值都成立。
+    /// 变换通道是常量；`MorphWeights` 的 stride 是"目标数"，由
+    /// "浮点总数 ÷ (关键帧数 × 每帧组数)"现算。
     pub fn stride(&self) -> usize {
         match self.path {
-            TrackPath::MorphWeights => {
-                if self.times.is_empty() {
-                    0
-                } else {
-                    self.values.len() / self.times.len()
-                }
-            }
+            // 关键帧数 × 每帧组数 = 0（空轨道）时 `checked_div` 给 None → 0。
+            TrackPath::MorphWeights => self
+                .values
+                .len()
+                .checked_div(self.times.len() * self.interpolation.slots())
+                .unwrap_or(0),
             _ => self.path.stride(),
         }
+    }
+
+    /// 关键帧 `k` 在 [`Track::values`] 里的起始浮点下标（样条时=入切线）。
+    #[inline]
+    pub fn frame_start(&self, k: usize) -> usize {
+        k * self.stride() * self.interpolation.slots()
+    }
+
+    /// 关键帧 `k` 的**值**起始下标（样条跳过入切线）。
+    #[inline]
+    pub fn value_start(&self, k: usize) -> usize {
+        self.frame_start(k) + self.interpolation.value_slot() * self.stride()
+    }
+
+    /// 每关键帧占的浮点数（= `stride() × 组数`）。
+    ///
+    /// `values.len() == times.len() × frame_len()` 是"轨道形状自洽"的唯一判据。
+    #[inline]
+    pub fn frame_len(&self) -> usize {
+        self.stride() * self.interpolation.slots()
+    }
+
+    /// 采样前的一次性形状校验：坏资产（少分量 / 长度不自洽）宁可跳过这条轨道，
+    /// 也不要在每帧必走的路径上 panic。
+    ///
+    /// `i0 <= i1` 时只要 `(i1+1)` 帧完整，两帧的入 / 值 / 出三份就都读得到。
+    fn readable(&self, i1: usize) -> bool {
+        let stride = self.stride();
+        stride > 0 && (i1 + 1) * self.frame_len() <= self.values.len()
     }
 }
 
@@ -194,6 +260,76 @@ fn key_segment(times: &[f32], t: f32) -> (usize, usize, f32) {
     (i0, i1, u)
 }
 
+/// Hermite 基函数：段内比例 `u∈[0,1]` → `(h00, h10, h01, h11)`。
+///
+/// 三次样条在 glTF 里就是这个形式（规范附录 C）：
+/// `p(u) = h00·p0 + h10·m0 + h01·p1 + h11·m1`，其中 `m0/m1` 是**已乘段长**的切线。
+#[inline]
+fn hermite_basis(u: f32) -> (f32, f32, f32, f32) {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    (
+        2.0 * u3 - 3.0 * u2 + 1.0,
+        u3 - 2.0 * u2 + u,
+        -2.0 * u3 + 3.0 * u2,
+        u3 - u2,
+    )
+}
+
+/// 平移 / 缩放通道求值：`i0 → i1` 段、段内比例 `u`、段长 `dt`（秒）。
+///
+/// 三种插值都在这里分派 —— 调用方只说"这条轨道这段时间的值"，
+/// 不会出现"某条通道忘了走样条"这种漏分支。
+fn eval_vec3(track: &Track, i0: usize, i1: usize, u: f32, dt: f32) -> Vec3 {
+    let s = track.stride();
+    let p0 = Vec3::from_slice(&track.values[track.value_start(i0)..][..3]);
+    match track.interpolation {
+        Interpolation::Step => p0,
+        Interpolation::Linear => {
+            let p1 = Vec3::from_slice(&track.values[track.value_start(i1)..][..3]);
+            p0.lerp(p1, u)
+        }
+        Interpolation::CubicSpline => {
+            let p1 = Vec3::from_slice(&track.values[track.value_start(i1)..][..3]);
+            // 切线单位是"每秒"，乘段长换成本段量纲（漏乘会让长段欠冲）。
+            let m0 = Vec3::from_slice(&track.values[track.frame_start(i0) + 2 * s..][..3]) * dt;
+            let m1 = Vec3::from_slice(&track.values[track.frame_start(i1)..][..3]) * dt;
+            let (h00, h10, h01, h11) = hermite_basis(u);
+            p0 * h00 + m0 * h10 + p1 * h01 + m1 * h11
+        }
+    }
+}
+
+/// 旋转通道求值。
+///
+/// 样条结果**必须归一化**：逐分量 Hermite 出来的四元数不在单位球上，
+/// 直接合成矩阵等于给蒙皮乘了一个随动画变化的缩放（模型会越动越大）。
+fn eval_quat(track: &Track, i0: usize, i1: usize, u: f32, dt: f32) -> Quat {
+    let s = track.stride();
+    let q0 = Quat::from_slice(&track.values[track.value_start(i0)..][..4]);
+    match track.interpolation {
+        Interpolation::Step => q0,
+        Interpolation::Linear => {
+            let q1 = Quat::from_slice(&track.values[track.value_start(i1)..][..4]);
+            q0.slerp(q1, u)
+        }
+        Interpolation::CubicSpline => {
+            let q1 = Quat::from_slice(&track.values[track.value_start(i1)..][..4]);
+            let m0 = Quat::from_slice(&track.values[track.frame_start(i0) + 2 * s..][..4]) * dt;
+            let m1 = Quat::from_slice(&track.values[track.frame_start(i1)..][..4]) * dt;
+            let (h00, h10, h01, h11) = hermite_basis(u);
+            let raw = q0 * h00 + m0 * h10 + q1 * h01 + m1 * h11;
+            // 极端切线能把长度压到 0 附近（手工改过的曲线 / 坏资产）：
+            // 那时归一化会吐 NaN，退回 slerp 至少方向是对的。
+            if raw.length_squared() > 1e-12 {
+                raw.normalize()
+            } else {
+                q0.slerp(q1, u)
+            }
+        }
+    }
+}
+
 /// 把 `clip` 在时刻 `t` 的采样结果**覆盖写进** `pose`（按轨道逐节点）。
 ///
 /// `pose` 应由 [`default_pose`] 铺好：轨道没瞄到的节点保持默认姿态（绑定姿态）。
@@ -208,30 +344,21 @@ pub fn sample_clip_into(clip: &AnimClip, t: f32, pose: &mut [LocalPose]) {
         if track.path == TrackPath::MorphWeights {
             continue;
         }
-        let (i0, i1, mut u) = key_segment(&track.times, t);
-        if track.interpolation == Interpolation::Step {
-            u = 0.0;
-        }
-        let s = track.stride();
+        let (i0, i1, u) = key_segment(&track.times, t);
         // 越界读保护：坏资产少几个分量时宁可跳过这条轨道，也不要 panic。
-        if (i1 + 1) * s > track.values.len() {
+        if !track.readable(i1) {
             continue;
         }
+        let dt = track.times[i1] - track.times[i0];
         match track.path {
             TrackPath::Translation => {
-                let a = Vec3::from_slice(&track.values[i0 * s..i0 * s + 3]);
-                let b = Vec3::from_slice(&track.values[i1 * s..i1 * s + 3]);
-                pose[idx].translation = a.lerp(b, u);
+                pose[idx].translation = eval_vec3(track, i0, i1, u, dt);
             }
             TrackPath::Scale => {
-                let a = Vec3::from_slice(&track.values[i0 * s..i0 * s + 3]);
-                let b = Vec3::from_slice(&track.values[i1 * s..i1 * s + 3]);
-                pose[idx].scale = a.lerp(b, u);
+                pose[idx].scale = eval_vec3(track, i0, i1, u, dt);
             }
             TrackPath::Rotation => {
-                let a = Quat::from_slice(&track.values[i0 * s..i0 * s + 4]);
-                let b = Quat::from_slice(&track.values[i1 * s..i1 * s + 4]);
-                pose[idx].rotation = a.slerp(b, u);
+                pose[idx].rotation = eval_quat(track, i0, i1, u, dt);
             }
             // 上面已经 `continue` 掉了；列出来是为了让"新增通道必须在这里
             // 做一次决断"变成编译错误，而不是被 `_ =>` 静默吞掉。
@@ -260,19 +387,43 @@ pub fn sample_morph_weights(clip: &AnimClip, t: f32, out: &mut Vec<f32>) -> bool
         return false;
     };
     let count = track.stride();
-    if count == 0 {
+    // 形状必须严丝合缝：morph 的 stride 是现算的，长度对不上说明资产脏，
+    // 硬读会串到相邻目标的分量上（画出来是一张扭曲的脸）。
+    if count == 0 || track.values.len() != track.times.len() * track.frame_len() {
         return false;
     }
-    let (i0, i1, mut u) = key_segment(&track.times, t);
-    if track.interpolation == Interpolation::Step {
-        u = 0.0;
-    }
+    let (i0, i1, u) = key_segment(&track.times, t);
+    let dt = track.times[i1] - track.times[i0];
     out.clear();
     out.reserve(count);
-    for c in 0..count {
-        let a = track.values[i0 * count + c];
-        let b = track.values[i1 * count + c];
-        out.push(a + (b - a) * u);
+    match track.interpolation {
+        Interpolation::Step | Interpolation::Linear => {
+            let a = track.value_start(i0);
+            let b = track.value_start(i1);
+            let u = if track.interpolation == Interpolation::Step {
+                0.0
+            } else {
+                u
+            };
+            for c in 0..count {
+                let va = track.values[a + c];
+                out.push(va + (track.values[b + c] - va) * u);
+            }
+        }
+        Interpolation::CubicSpline => {
+            let a = track.value_start(i0);
+            let b = track.value_start(i1);
+            let out0 = track.frame_start(i0) + 2 * count;
+            let in1 = track.frame_start(i1);
+            let (h00, h10, h01, h11) = hermite_basis(u);
+            for c in 0..count {
+                let p0 = track.values[a + c];
+                let p1 = track.values[b + c];
+                let m0 = track.values[out0 + c] * dt;
+                let m1 = track.values[in1 + c] * dt;
+                out.push(p0 * h00 + m0 * h10 + p1 * h01 + m1 * h11);
+            }
+        }
     }
     true
 }

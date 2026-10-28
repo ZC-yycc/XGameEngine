@@ -5322,6 +5322,88 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 七十一、CUBICSPLINE 三次样条采样（R04 / 032 关闭，2026-10-28）
+
+`Docs/差距分析.md` 里 R04 / 032 的表述是"逐关键帧取值与 morph stride 已修；
+仍线性降级，Hermite 与多节点动画保真待做"。本轮把 Hermite 做掉，顺带把
+"轨道形状"从隐式约定变成显式 API。
+
+### 问题：切线在读入时就被扔掉
+
+`gltf_loader::take_spline_values` 对 `CUBICSPLINE` 只挑每帧中间那份值，入 / 出切线
+直接丢弃，运行时退化成线性。数值上"没崩"，但动作的加减速被抹平 —— Blender /
+Maya 默认导出的插值就是三次样条，所以这不是罕见分支，而是**大多数资产会被降级**。
+而且这是单向损失：切线一旦没进内存，运行时再想补也补不回来。
+
+### 实现
+
+- `Interpolation` 加第三个变体 `CubicSpline`；读入端 `parse_interpolation` **穷举**
+  三种映射（不用 `_ =>`），gltf 升级后若新增插值类型会编译不过，逼着做决断。
+- `Track::values` 的布局变成"每帧 `frame_len()` 个浮点" = `stride()`（值分量数）×
+  `slots()`（每帧组数：样条 3，其余 1）。三个派生量收在 `Track` 上 ——
+  `frame_start(k)` / `value_start(k)` / `frame_len()`，"值在中间那份"由
+  `Interpolation::value_slot()` 一处表达；采样、加载、测试读同一处，不各算一遍。
+- 采样：`hermite_basis(u)` 给 `(h00,h10,h01,h11)`，`eval_vec3` / `eval_quat` 按插值
+  分派。切线单位是**每秒**，进 Hermite 前乘段长 `dt`（glTF 规范 C.2）。
+- 旋转：逐分量 Hermite 出的四元数不在单位球上，**必须归一化**；长度接近 0 时
+  （手工改过的曲线）退回 `slerp`，避免 NaN 顺着蒙皮矩阵扩散到整块网格。
+- `sample_morph_weights` 同样按 `slots()` 分组；形状不严丝合缝
+  （`values.len() != times.len() * frame_len()`）就返回 `false` —— morph 的 stride
+  是现算的，串一位画出来就是一张扭曲的脸。
+- 线性 / 阶梯两条路径的读数与从前逐位一致：同样取 `value_start(i0)`、同样 `lerp`、
+  阶梯同样令 `u = 0`。
+
+### 一个自己踩的坑
+
+`value_start(k)` 第一版写成 `frame_start(k) + (slots-1) * stride`，于是把**出切线**
+当成值读了：段中点实得 1.25 而不是 0.75。`slots-1` 只在"三份里取最后一份"时成立，
+而值在中间。改成显式的 `value_slot()` 后才对。这种错不会 panic，只会让动画
+"看起来怪"，所以形状必须由测试钉住，不能靠肉眼。
+
+### 红绿
+
+新增 4 条测试，其中 3 条在旧实现下**实跑失败**（`2 passed / 3 failed`）：
+
+| 测试 | 旧实现读数 | 期望 |
+|---|---|---|
+| `cubic_spline_midpoint_is_hermite_not_linear` | 0.5 | 0.75 |
+| `cubic_spline_scales_tangent_by_segment_length` | 0.5 | 1.0 |
+| `morph_spline_three_keys_two_targets` | 6 个值（切线被丢） | 18 个值 + 中点 0.45 / 0.55 |
+
+`cubic_spline_rotation_is_normalized` 在旧实现下也过（slerp 本身落在单位球上），
+它的作用是钉住新路径：样条出来的四元数必须仍归一，且跨度内不得出现 NaN。
+原 `regression_r04_spline_three_keys_vectors_and_rotations` 测的正是"只取中间那份"
+这一被推翻的行为，改写为 `spline_keeps_tangents`（断言 `frame_len == 3 × stride`
+且第 1 帧三段数据原位保留）。
+
+### 成本
+
+新增基准 `crates/xgame-render/tests/animation_cost.rs`（默认 `#[ignore]`）：
+28 骨 × 3 通道 = 84 条轨道、16 帧，单次 `sample_clip_into`（同机 release，
+7 轮取最快轮，重复三次）：
+
+| 档位 | 单次采样 |
+|---|---|
+| 线性 | 2031–2061 ns |
+| 阶梯 | 891–902 ns |
+| 三次样条 | 1652–1662 ns（0.80–0.81 × 线性） |
+
+样条**比线性便宜**，原因在旋转通道：`Quat::slerp` 要 `acos` 加两次 `sin`，
+而 Hermite 是 4 次乘加 + 一次 `normalize()`。所以"保真"这一刀在本实现下不付成本，
+反而不亏。数字只用于同机背靠背比较，跨机器无意义。
+
+### 验证与边界
+
+- workspace `check --all-targets` / `clippy --all-targets -- -D warnings` 通过；
+  `test --workspace --all-targets` **945 passed / 0 failed / 9 ignored**
+  （上轮 942 / 8；+4 新增 −1 改写删除 = +3）。
+- 多节点动画由真实 Fox 资产（24 骨）的既有端到端用例覆盖（`compute_bones` 走
+  同一条 `sample_clip_into`），本轮未改这条路径。
+- **未做**：CUBICSPLINE 的 morph 多网格（仍只取第一条权重轨道，v1 边界，与插值无关）、
+  根运动、动画 Phase B。
+
+---
+
 ## 六十七、G0 资产引用迁移单文件写盘保护（2026-10-27）
 
 `ProjectHandle::rewrite_literals` 之前直接 `fs::write` 覆写场景、预制体和材质：中途写入失败会截断旧内容；Windows 上目标允许写却禁止删除时，直接覆写还会绕过预期的替换失败。迁移继续保留原文注释和格式，只把写回收敛到主保存已有的 `write_atomic`，沿用同目录独占暂存、同步和替换。迁移报告仍按文件计数并收集错误；失败文件可在解除占用后重试。
