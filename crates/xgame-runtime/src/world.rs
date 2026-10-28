@@ -2926,6 +2926,188 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 在 `on_destroy` 里 spawn：新实体真的进场景，命令只结算一次。
+    ///
+    /// 销毁钩子里生成实体是"死亡即分裂"（爆炸碎片、掉落物）的常规写法。这里钉
+    /// 三件事：① 新实体进场景且字段正确；② `on_destroy` 只派发一次、spawn 只
+    /// 结算一次（命令在"派发途中产生"，容易丢或重复）；③ 后续帧不会重复。
+    ///
+    /// **注意 `spawn_entity` 不带脚本** —— Lua 侧没有给已有实体挂脚本的 API，
+    /// 所以"分裂出带行为的实体"要走 `spawn_prefab`（预制体里的实体自带
+    /// `scripts`）。这是能力边界，不是本测试的疏漏。
+    #[test]
+    fn spawning_inside_on_destroy_lands_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_lua_phoenix_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/bomb.lua"),
+            r#"
+            function update(ctx)
+                local target = entity_id(ctx, "parent")
+                if target ~= 0 then destroy(ctx, target) end
+            end
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Scripts/parent.lua"),
+            r#"
+            function on_destroy(ctx)
+                spawn_entity_at(ctx, "phoenix", "builtin://cube", 1.0, 2.0, 3.0)
+                log(ctx, "parent:spawned")
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("phoenix");
+        let mut bomb = Entity::new("bomb");
+        bomb.scripts.push("Scripts/bomb.lua".to_owned());
+        scene.add_entity(bomb);
+        let mut parent = Entity::new("parent");
+        parent.scripts.push("Scripts/parent.lua".to_owned());
+        scene.add_entity(parent);
+
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+        world.update(1.0 / 60.0);
+        let logs = world.take_logs();
+        assert_eq!(
+            logs.iter()
+                .filter(|e| e.message == "parent:spawned")
+                .count(),
+            1,
+            "on_destroy 里的 spawn 应当恰好结算一次：{logs:?}"
+        );
+
+        let phoenix = world
+            .scene()
+            .find_by_name("phoenix")
+            .expect("on_destroy 里 spawn 的实体应当进场景");
+        assert_eq!(phoenix.model, "builtin://cube");
+        assert!(
+            (phoenix.transform.position.x - 1.0).abs() < 1e-6
+                && (phoenix.transform.position.y - 2.0).abs() < 1e-6
+                && (phoenix.transform.position.z - 3.0).abs() < 1e-6,
+            "spawn_entity_at 的位置应当生效，实际 {:?}",
+            phoenix.transform.position
+        );
+
+        // 后续帧不能再派发一次销毁、也不能再 spawn 一个。
+        for _ in 0..5 {
+            world.update(1.0 / 60.0);
+        }
+        assert!(
+            world
+                .take_logs()
+                .iter()
+                .all(|e| e.message != "parent:spawned"),
+            "on_destroy 不该重复派发"
+        );
+        assert_eq!(
+            world
+                .scene()
+                .entities
+                .iter()
+                .filter(|e| e.name == "phoenix")
+                .count(),
+            1,
+            "spawn 只该发生一次"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 在 `on_destroy` 里再销毁另一个实体：后者的 `on_destroy` 也必须跑到。
+    ///
+    /// 这条覆盖"销毁命令在销毁派发途中产生"的链路：命令进缓冲、下一帧消费。
+    /// 如果实现把它当成"已经在处理的批次"忽略掉，被牵连的实体就永远不会收到
+    /// 销毁通知（状态表也永远不释放）。
+    #[test]
+    fn destroying_inside_on_destroy_still_reaches_the_second_entity() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_lua_chain_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/trigger.lua"),
+            r#"
+            function update(ctx)
+                local target = entity_id(ctx, "first")
+                if target ~= 0 then destroy(ctx, target) end
+            end
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Scripts/first.lua"),
+            r#"
+            function on_destroy(ctx)
+                log(ctx, "first:destroyed")
+                local second = entity_id(ctx, "second")
+                if second ~= 0 then destroy(ctx, second) end
+            end
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Scripts/second.lua"),
+            r#"
+            function start(ctx) state_set(ctx, "token", "alive") end
+            function on_destroy(ctx)
+                log(ctx, "second:destroyed:" .. state_get_or(ctx, "token", "missing"))
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("chain");
+        let mut trigger = Entity::new("trigger");
+        trigger.scripts.push("Scripts/trigger.lua".to_owned());
+        scene.add_entity(trigger);
+        let mut first = Entity::new("first");
+        first.scripts.push("Scripts/first.lua".to_owned());
+        scene.add_entity(first);
+        let mut second = Entity::new("second");
+        second.scripts.push("Scripts/second.lua".to_owned());
+        scene.add_entity(second);
+
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+        world.update(1.0 / 60.0);
+        let logs = world.take_logs();
+        assert!(
+            logs.iter().any(|e| e.message == "first:destroyed"),
+            "第一个实体应当先收到销毁：{logs:?}"
+        );
+
+        // 链式销毁可能在下一帧才结算，多跑两帧再断言。
+        for _ in 0..2 {
+            world.update(1.0 / 60.0);
+        }
+        let logs = world.take_logs();
+        assert!(
+            logs.iter()
+                .any(|e| e.message == "second:destroyed:alive"),
+            "被牵连的实体也必须收到 on_destroy 且能读到自己的状态：{logs:?}"
+        );
+        assert_eq!(
+            world.scripts().entity_state_count(),
+            1,
+            "只剩 trigger 的状态表（second 的应当释放）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 未注册的行为名：记日志跳过，不 panic、不影响其它实体。
     #[test]
     fn unregistered_behaviors_are_skipped_not_fatal() {
