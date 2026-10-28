@@ -25,19 +25,26 @@ pub fn body_from_scene(def: &PhysicsBody, world: Transform) -> (RigidBody, Colli
     };
 
     let shape = collider_shape(def.shape, world.scale);
-    // 场景 mass 是总质量：按形状体积换算密度，惯量也由同一形状计算。
-    let density = if def.kind == BodyKind::Dynamic && def.mass.is_finite() && def.mass > 0.0 {
-        let unit_mass = crate::world::collider_to_shared_shape(&shape)
-            .mass_properties(1.0)
-            .mass();
-        if unit_mass.is_finite() && unit_mass > 0.0 {
-            def.mass / unit_mass
+    // 场景 mass 是总质量：优先按"体积 × 密度"兑现，让惯量由同一形状算出。
+    //
+    // 体积下溢时（半径 1e-20 这类极小碰撞体）`unit_mass` 会变成 0，
+    // `mass / unit_mass` 随之是 inf —— 密度一旦被 rapier 拿去乘体积，声明 2.5 kg
+    // 的实体就变成 0 kg（实测），物体会飘走或原地抖。这种形状没法用密度表达，
+    // 退回"附加质量"：质量直接挂在刚体上，惯量仍按形状几何算。
+    let (density, extra_mass) =
+        if def.kind == BodyKind::Dynamic && def.mass.is_finite() && def.mass > 0.0 {
+            let unit_mass = crate::world::collider_to_shared_shape(&shape)
+                .mass_properties(1.0)
+                .mass();
+            let density = def.mass / unit_mass;
+            if unit_mass.is_finite() && unit_mass > 0.0 && density.is_finite() {
+                (density, 0.0)
+            } else {
+                (1.0, def.mass)
+            }
         } else {
-            1.0
-        }
-    } else {
-        1.0
-    };
+            (1.0, 0.0)
+        };
     let collider = Collider {
         shape,
         friction: def.friction,
@@ -62,8 +69,9 @@ pub fn body_from_scene(def: &PhysicsBody, world: Transform) -> (RigidBody, Colli
         },
         linear_velocity: Vec3::ZERO,
         angular_velocity: Vec3::ZERO,
-        // 总质量已全部分配给碰撞体，不再叠加刚体附加质量。
-        mass: 0.0,
+        // 能按密度表达时质量全在碰撞体上，这里为 0；密度表达不了时（体积下溢 /
+        // 密度溢出）才把总质量挂在这里，两者相加仍是 `def.mass`。
+        mass: extra_mass,
         angular_damping: 0.05,
         linear_damping: 0.0,
         gravity_enabled: def.kind == BodyKind::Dynamic,

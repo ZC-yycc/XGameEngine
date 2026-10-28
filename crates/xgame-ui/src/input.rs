@@ -26,10 +26,14 @@ use xgame_math::glam::Vec2;
 use crate::layout::{hit_test, LayoutItem};
 
 /// 本帧指针状态（由宿主从窗口 / egui 映射到**视口物理像素**）。
+///
+/// **位置与按键是两件事**：`pos = None` 只表示"指针不在视口里"，按键电平与
+/// 边沿仍然有效。早先把两者合成一个 `Option`，于是"在视口外松手"这一帧
+/// 整个被丢掉 —— 捕获永远留在按钮上，按钮卡在按下态直到下一次在别处点击。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiPointer {
-    /// 指针位置（视口左上角原点，物理像素）。
-    pub pos: Vec2,
+    /// 指针位置（视口左上角原点，物理像素）。`None` = 指针不在视口内。
+    pub pos: Option<Vec2>,
     /// 主键是否按住（电平）。
     pub down: bool,
     /// 本帧是否刚按下（边沿）。
@@ -121,7 +125,9 @@ pub fn update_interaction(
         }
     }
 
-    let hit = pointer.and_then(|p| hit_test(scene, items, p.pos));
+    let hit = pointer
+        .and_then(|p| p.pos)
+        .and_then(|pos| hit_test(scene, items, pos));
     let hit_id = hit.map(|item| item.id);
 
     // -- 2. 悬停变化（指针移出视口也算离开）--
@@ -252,10 +258,20 @@ mod tests {
 
     fn pointer(x: f32, y: f32) -> UiPointer {
         UiPointer {
-            pos: Vec2::new(x, y),
+            pos: Some(Vec2::new(x, y)),
             down: false,
             pressed: false,
             released: false,
+        }
+    }
+
+    /// 指针离开视口：位置没了，按键状态照旧带过来。
+    fn pointer_outside(down: bool, pressed: bool, released: bool) -> UiPointer {
+        UiPointer {
+            pos: None,
+            down,
+            pressed,
+            released,
         }
     }
 
@@ -367,6 +383,130 @@ mod tests {
         step(&mut scene, None, &mut interaction, &mut events);
         assert!(!state(&scene, id).hovered);
         assert_eq!(interaction.hovered(), None);
+    }
+
+    /// 在视口外松手必须收尾：捕获清空、发出 Release、不触发 Click。
+    ///
+    /// 早先 `UiPointer` 是一个 `Option`（指针不在视口就整条丢掉），于是这一帧
+    /// 的 `released` 边沿也没了 —— 捕获永远留在按钮上，按钮一直亮着"按下"，
+    /// 直到下一次在别处点击。位置与按键必须是两件事。
+    #[test]
+    fn release_outside_the_viewport_clears_the_capture() {
+        let (mut scene, id) = scene_with_button();
+        let mut interaction = UiInteraction::default();
+        let mut events = Vec::new();
+
+        let down = UiPointer {
+            down: true,
+            pressed: true,
+            ..pointer(50.0, 30.0)
+        };
+        step(&mut scene, Some(down), &mut interaction, &mut events);
+        assert_eq!(interaction.pressed(), Some(id));
+
+        // 指针移出视口后松手：位置没了，松手边沿还在。
+        step(
+            &mut scene,
+            Some(pointer_outside(false, false, true)),
+            &mut interaction,
+            &mut events,
+        );
+        assert_eq!(interaction.pressed(), None, "视口外松手必须清掉捕获");
+        assert!(!state(&scene, id).clicked, "在按钮外松手不算点击");
+        assert!(
+            events.iter().any(|e| e.kind == UiEventKind::Release),
+            "要给捕获方发 Release，脚本才收得到松手"
+        );
+
+        // 回到按钮上也不该再显示按下。
+        step(
+            &mut scene,
+            Some(pointer(50.0, 30.0)),
+            &mut interaction,
+            &mut events,
+        );
+        assert!(!state(&scene, id).pressed, "捕获已清，不能再亮按下");
+    }
+
+    /// 按住不放、把指针拖到视口外再拖回来松手：仍然算点击（按下即捕获）。
+    #[test]
+    fn holding_outside_the_viewport_keeps_the_capture() {
+        let (mut scene, id) = scene_with_button();
+        let mut interaction = UiInteraction::default();
+        let mut events = Vec::new();
+
+        let down = UiPointer {
+            down: true,
+            pressed: true,
+            ..pointer(50.0, 30.0)
+        };
+        step(&mut scene, Some(down), &mut interaction, &mut events);
+
+        step(
+            &mut scene,
+            Some(pointer_outside(true, false, false)),
+            &mut interaction,
+            &mut events,
+        );
+        assert_eq!(interaction.pressed(), Some(id), "按住不动，捕获不该丢");
+        assert!(!state(&scene, id).hovered, "视口外没有悬停");
+
+        let up = UiPointer {
+            down: false,
+            released: true,
+            ..pointer(50.0, 30.0)
+        };
+        step(&mut scene, Some(up), &mut interaction, &mut events);
+        assert!(state(&scene, id).clicked, "拖回来松手仍算点击");
+    }
+
+    /// 父节点隐藏 = 整棵子树不参与命中（Unity `SetActive(false)` 语义）。
+    ///
+    /// 只按"元素自己的 visible"过滤是不够的：隐藏的 HUD 若仍在命中表里，
+    /// 会继续吃掉点击，玩家点了没反应还查不出原因。
+    #[test]
+    fn hidden_parent_makes_children_unhittable() {
+        let mut scene = Scene::new("hidden-parent");
+        let mut panel = Entity::new("Panel");
+        panel.ui = Some(UiElement::panel(400.0, 300.0).at([0.0, 0.0], 0.0, 0.0, 400.0, 300.0));
+        let panel_id = panel.id;
+        scene.entities.push(panel);
+
+        let mut button = Entity::new("Button");
+        button.parent = Some(panel_id);
+        button.ui = Some(UiElement::button("OK").at([0.0, 0.0], 10.0, 10.0, 100.0, 40.0));
+        let button_id = button.id;
+        scene.entities.push(button);
+
+        let mut interaction = UiInteraction::default();
+        let mut events = Vec::new();
+        let down = UiPointer {
+            down: true,
+            pressed: true,
+            ..pointer(50.0, 30.0)
+        };
+        step(&mut scene, Some(down), &mut interaction, &mut events);
+        assert_eq!(interaction.pressed(), Some(button_id), "可见时应能按下");
+
+        // 松手复位，再隐藏父节点。
+        let up = UiPointer {
+            down: false,
+            released: true,
+            ..pointer(50.0, 30.0)
+        };
+        step(&mut scene, Some(up), &mut interaction, &mut events);
+        let panel_index = scene.find_entity(panel_id).unwrap();
+        scene.entities[panel_index].ui.as_mut().unwrap().visible = false;
+
+        let down = UiPointer {
+            down: true,
+            pressed: true,
+            ..pointer(50.0, 30.0)
+        };
+        step(&mut scene, Some(down), &mut interaction, &mut events);
+        assert_eq!(interaction.pressed(), None, "隐藏父节点下的按钮不该被按下");
+        assert!(!state(&scene, button_id).pressed);
+        assert!(!state(&scene, button_id).hovered, "也不该有悬停");
     }
 
     /// 装饰元素（interactable = false）不吃点击。

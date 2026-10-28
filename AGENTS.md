@@ -160,11 +160,12 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 自动保存 | 副本只在 `<项目>/.autosave/`（进 `Scenes/` 会被当场景）；**不算保存**（不动 `saved_snapshot`）；手动保存 / 正常退出即清；写盘格式与 `write_scene` 同源 + 原子写；空闲停帧时靠 `request_repaint_after` 唤醒 | §二十四 |
 | 场景切换 | 只在**帧末**一处应用（`apply_pending_scene_load`）；脚本 `load_scene` 只登记请求（钩子期间场景正被可变借用）；装不上就**不动** + 一条 error 日志；只重置"与实体绑定"的状态（物理 / 粒子 / 音频 autoplay / UI 交互 / `started` / `states`），**日志缓冲与脚本全局变量不能清**；装载来源由宿主注入 `with_scene_loader`，没接是**可诊断的错误** | §二十五 |
 | 关卡顺序 | `build.scenes` 顺序即关卡索引（下标 **0 起**）；**未配置 = 空**（不退回 `[entry_scene]`，脚本 `scene_index()` 返回 nil）；`entry_scene` 仍是唯一启动来源，清单第一项不兼任；`--check` 里"缺场景"算问题（exit 2）、"未列入"只提示（exit 0）；构建前逐关试装，路径规则只有 `normalize_scene_relative`（core） | §二十六 |
-| 实体身份 | ID 是**跨进程**契约：反序列化必须**预留**计数器；删除按**索引**掩码（不按 ID 匹配）；复制 / 粘贴按**位置**分配新 ID（不以旧 ID 建映射）；父子解析与**所有** ID→索引建表一律**首占位**（含 `UiTree`）；名字也是身份（复制带序号去重）；加载期修复必须配**只读**检测（`--check` 的 `duplicate_ids`）；预制体**不**修重复 ID（`source_id` 是跨文件引用） | §三十八、§三十九 |
+| 实体身份 | ID 是**跨进程**契约：反序列化必须**预留**计数器；删除按**索引**掩码（不按 ID 匹配）；复制 / 粘贴按**位置**分配新 ID（不以旧 ID 建映射）；父子解析与**所有** ID→索引建表一律**首占位**（含 `UiTree`）；名字也是身份（复制带序号去重）；加载期修复必须配**只读**检测（`--check` 的 `duplicate_ids`）；预制体**不**修重复 ID（`source_id` 是跨文件引用）；`u64::MAX` 是**坏数据哨兵**（读盘拒绝，否则顶死计数器 → 两实体共用 ID） | §三十八、§三十九、§五十二 |
 | 预制体实例化 | 装载 trait `SceneLoader` 在 **core**（脚本层要能命名它，runtime 只 `pub use` 转出）；`spawn_prefab` / `spawn_prefab_under` **立即生成**（返回的 ID 当帧可用）；位置是**设置不是叠加**（世界 / 局部两种，子节点相对位置原样保留）；每个新实体逐条推 `ScriptCommand::EntitySpawned`（运行时据此补刚体）；失败三种（没装载器 / 读不到 / 空预制体）各自一条日志 + 返回 `nil`，**不留半个实例** | §二十七 |
 | 动画脚本控制 | 状态机优先（配了可用机器时 `clip/speed/looping` 由状态表决定）；`set_anim_clip` 只写 `Animator.clip` 并复用 `AnimationDriver` 的淡入；叠加层 / 层剪辑硬切；越界值钳住、非有限值忽略 | §三十 |
 | 形变目标（morph） | CPU 变形（权重不变就不重写缓冲）；增量 target-major 且已乘 `model_scale`；权重优先级 剪辑 > 实体 > 模型默认；长度不自洽**整段放弃**；索引逐下标、钳 0~1、上限 256；`set_morph` 立刻生效（不走命令队列） | §三十七 |
 | 动画插值布局 | `CUBICSPLINE` 切线**读入即保留**（每帧入切线 / 值 / 出切线三份，不降级）；`Track::values` 长度必须 = `times.len() × frame_len()`，帧内偏移只用 `frame_start` / `value_start`（**值在中间那份**，写错不 panic 只是动画整体偏移）；切线单位是**每秒**，进 Hermite 前乘段长；旋转逐分量 Hermite 后**必须归一化**，长度退化退回 slerp | §五十一 |
+| UI 指针语义 | 位置（`pos: Option<Vec2>`）与按键（`down`/`pressed`/`released`）**分开**：`pos = None` 只表示不在视口，边沿仍要送达，否则"视口外松手"收不了尾；捕获状态用 `World::ui_pressed()` 断言，别只看 `state.pressed`（它要等指针回视口才归零，测试会假绿）；父节点隐藏 = 整棵子树不进命中表 | §五十二 |
 | 热重载 | 1 Hz 轮询内容目录（只查 metadata）；`poll` 推进基线、**动作后必须 `rebase`**（防自激）；场景永不自动覆盖；脏材质草稿保留；`--ui-shot` 不启用 | §三十一 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |
 | CI | Windows + stable + `--locked`；单 job 顺序跑；不跑 `--screenshot` / 基准 / fmt | §三十四 |

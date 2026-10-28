@@ -710,6 +710,14 @@ impl World {
         self.ui.interaction.hovered()
     }
 
+    /// 当前被"按下捕获"的 UI 实体（与 [`World::ui_hovered`] 对称）。
+    ///
+    /// 调试 / 测试用：它比 `UiElement::state.pressed` 更早暴露"捕获没释放"
+    /// 这类缺陷 —— 状态的可见症状要等指针回到视口才消失。
+    pub fn ui_pressed(&self) -> Option<EntityId> {
+        self.ui.interaction.pressed()
+    }
+
     /// 本帧的 UI 事件（调试 / 测试用；玩法侧读 `UiElement::state`）。
     pub fn ui_events(&self) -> &[UiEvent] {
         &self.ui.events
@@ -726,8 +734,11 @@ impl World {
             update_interaction(&mut self.scene, &[], None, &mut self.ui.interaction, &mut self.ui.events);
             return;
         }
-        let pointer = self.ui_pointer.map(|pos| UiPointer {
-            pos,
+        // 位置与按键分开传：指针在视口外时 `pos = None`，但 `released` 边沿
+        // 仍然要送达 —— 否则"在视口外松手"那一帧收不了尾，捕获会一直挂在
+        // 按钮上（`Release` 事件也发不出去），直到指针回到视口才被兜底清掉。
+        let pointer = Some(UiPointer {
+            pos: self.ui_pointer,
             down: self.input.mouse_down(MouseButton::Left),
             pressed: self.input.mouse_pressed(MouseButton::Left),
             released: self.input.state().mouse_released(MouseButton::Left),

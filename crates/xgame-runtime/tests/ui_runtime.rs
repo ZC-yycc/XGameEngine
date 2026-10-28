@@ -253,3 +253,59 @@ end
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 在视口外松手：捕获必须收尾，按钮不能卡在按下态。
+///
+/// 这就是 `UiPointer` 把"位置"与"按键"分开的直接理由 —— 旧实现用
+/// `pointer = None` 表示"指针不在视口"，于是那一帧的 `released` 边沿被整条
+/// 丢掉，捕获永远留在按钮上：玩家把鼠标拖出视口松手，回来时按钮还亮着。
+#[test]
+fn releasing_outside_the_viewport_clears_the_button() {
+    let mut scene = Scene::new("ui-runtime");
+    let mut button = Entity::new("button");
+    button.ui = Some(UiElement::button("OK").at([0.0, 0.0], 10.0, 10.0, 120.0, 40.0));
+    let id = button.id;
+    scene.add_entity(button);
+
+    let root = temp_root("release-outside");
+    let mut world = World::new(scene, root.clone(), WorldConfig::default());
+    world.set_ui_viewport((800, 600));
+
+    let pressed = |world: &World| -> bool {
+        let index = world.scene().find_entity(id).expect("按钮还在");
+        world.scene().entities[index]
+            .ui
+            .as_ref()
+            .expect("还是 UI 元素")
+            .state
+            .pressed
+    };
+
+    // 在按钮上按下。
+    world.set_ui_pointer(Some(Vec2::new(50.0, 30.0)));
+    world
+        .input_mut()
+        .state_mut()
+        .handle_mouse_button(MouseButton::Left, true);
+    world.update(1.0 / 60.0);
+    assert!(pressed(&world), "按住时按钮应显示按下");
+
+    // 指针移出视口（鼠标去点编辑器别的面板），然后在视口外松手。
+    world.set_ui_pointer(None);
+    world
+        .input_mut()
+        .state_mut()
+        .handle_mouse_button(MouseButton::Left, false);
+    world.update(1.0 / 60.0);
+    assert!(
+        world.ui_pressed().is_none(),
+        "视口外松手那一帧就必须清掉捕获，而不是等指针回到视口再兜底"
+    );
+
+    // 回到视口内、不再按着。
+    world.set_ui_pointer(Some(Vec2::new(50.0, 30.0)));
+    world.update(1.0 / 60.0);
+    assert!(!pressed(&world), "视口外松手后不该再显示按下");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

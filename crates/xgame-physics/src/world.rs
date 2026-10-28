@@ -1337,6 +1337,44 @@ mod tests {
         }
     }
 
+    /// R12 / 041：体积下溢时，`mass / unit_mass` 会退化成 0 或 inf，
+    /// 声明 2.5 kg 的实体会变轻（甚至不动），或拿到 NaN 惯量。
+    ///
+    /// 极小球体（半径 1e-9 米 ≈ 1 纳米）在真实项目里不常见，但"缩放填错一个数量级"
+    /// 很常见，而这类错误在旧实现下**不会报错**，只是物体飘走或原地抖动。
+    #[test]
+    fn tiny_collider_still_weighs_the_declared_mass() {
+        for radius in [1e-6f32, 1e-9, 1e-20] {
+            let mut world = PhysicsWorld::new(PhysicsConfig::default());
+            let mut def = xgame_core::PhysicsBody::dynamic_ball(radius);
+            def.mass = 2.5;
+            let (body, collider) = crate::scene_body::body_from_scene(&def, Transform::IDENTITY);
+            let id = world.add_body(body);
+            world.add_collider(id, collider).unwrap();
+            let handle = world.bodies[&id].rapier_handle;
+            let rb = &mut world.rigid_body_set[handle];
+            rb.recompute_mass_properties_from_colliders(&world.collider_set);
+            assert!(
+                rb.mass().is_finite(),
+                "radius {radius}: 质量 {} 非有限",
+                rb.mass()
+            );
+            assert!(
+                (rb.mass() - 2.5).abs() < 1e-3,
+                "radius {radius}: 实际质量 {}，应为 2.5",
+                rb.mass()
+            );
+            // 质量对得上，冲量给出的速度就必须对得上 —— 这条把"质量是个有限数
+            // 但乘在惯量里变成 NaN"的情况也一并挡住。
+            rb.apply_impulse(rapier3d::na::Vector3::new(2.5, 0.0, 0.0), true);
+            assert!(
+                (rb.linvel().x - 1.0).abs() < 1e-3,
+                "radius {radius}: 速度 {} 应为 1",
+                rb.linvel().x
+            );
+        }
+    }
+
     #[test]
     fn drop_body_frees_colliders() {
         let mut world = PhysicsWorld::new(PhysicsConfig::default());

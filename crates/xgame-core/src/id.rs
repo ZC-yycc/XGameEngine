@@ -25,10 +25,31 @@ static COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct EntityId(u64);
 
+/// 可分配 ID 的上限。
+///
+/// `u64::MAX` 是**坏数据哨兵**：它会把水位顶到天花板，于是下一次 `EntityId::new()`
+/// 立刻返回与文件里那个实体**相同**的 ID，再下一次还会回绕到 0 —— "删一个连坐删
+/// 别的"就是这么来的。读盘边界直接拒绝，比事后修补便宜得多。
+pub const MAX_ASSIGNABLE_ID: u64 = u64::MAX - 1;
+
 impl EntityId {
     /// 分配一个新的唯一 ID（进程内原子递增）。
+    ///
+    /// `fetch_add` 在 `u64::MAX` 处会回绕到 0，而 0 从来不是分配器的产物
+    /// （手写文件里可能有）—— 回绕后就会撞车。这里用 CAS 循环跳过 0。
+    /// 真正走到"空间耗尽"需要 2⁶⁴ 次分配，属于纯理论；语义上保证的是
+    /// **不回绕**，而不是无限供应。
     pub fn new() -> Self {
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+        let mut current = COUNTER.load(Ordering::Relaxed);
+        loop {
+            let next = current.wrapping_add(1);
+            let next = if next == 0 { 1 } else { next };
+            match COUNTER.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return Self(current),
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// 收下一个**外部来源**的 ID（读盘 / 反序列化），并把计数器推到它之后。
@@ -44,11 +65,17 @@ impl EntityId {
     ///
     /// 这条链是"删一个物体却连带删了别的"的直接成因，所以在**读盘边界**就把计数器
     /// 推过去，而不是指望每个调用方自己记得补一刀。
-    fn reserve(raw: u64) -> Self {
+    ///
+    /// 超过 [`MAX_ASSIGNABLE_ID`] 的值直接拒绝：接受它等于把计数器顶死（见该常量）。
+    fn reserve(raw: u64) -> Result<Self, String> {
+        if raw > MAX_ASSIGNABLE_ID {
+            return Err(format!(
+                "实体 ID {raw} 超过可分配上限 {MAX_ASSIGNABLE_ID}：文件里的 ID 被手改过？"
+            ));
+        }
         // `fetch_max`（而不是 `store`）：多个场景并发加载时不能把计数器往回拽。
-        // `saturating_add`：`u64::MAX` 是坏数据，别让它回绕成 0。
         COUNTER.fetch_max(raw.saturating_add(1), Ordering::Relaxed);
-        Self(raw)
+        Ok(Self(raw))
     }
 
     /// 从原始 u64 值构造（用于反序列化或测试）。
@@ -81,7 +108,8 @@ impl<'de> Deserialize<'de> for EntityId {
         #[derive(Deserialize)]
         struct Raw(u64);
 
-        Raw::deserialize(deserializer).map(|raw| Self::reserve(raw.0))
+        Raw::deserialize(deserializer)
+            .and_then(|raw| Self::reserve(raw.0).map_err(serde::de::Error::custom))
     }
 }
 
@@ -100,3 +128,52 @@ pub type EntityMap<V> = std::collections::HashMap<EntityId, V>;
 
 /// 以 `EntityId` 为元素的集合。
 pub type EntitySet = std::collections::HashSet<EntityId>;
+
+#[cfg(test)]
+mod tests {
+    use std::hint::black_box;
+
+    use super::*;
+
+    /// 极值 ID 必须在读盘边界就被拒绝。
+    ///
+    /// 接受它的后果不是"这个实体有点怪"，而是**污染全局计数器**：水位被顶到
+    /// `u64::MAX` 之后，下一次 `new()` 直接返回同一个值 —— 两个实体共用一个 ID。
+    #[test]
+    fn max_id_is_rejected_at_the_load_boundary() {
+        let err =
+            ron::from_str::<EntityId>("(18446744073709551615)").expect_err("u64::MAX 必须被拒绝");
+        let text = err.to_string();
+        assert!(
+            text.contains("18446744073709551615"),
+            "错误信息要带原值才好定位，实得：{text}"
+        );
+        assert!(
+            text.contains("18446744073709551614"),
+            "错误信息要给出可分配上限，实得：{text}"
+        );
+    }
+
+    /// 上限本身（`u64::MAX - 1`）仍然合法 —— 拒绝面只覆盖那一个哨兵值。
+    /// 这里只断言"判定"，不真的把它读进来：那会把全局计数器顶死，污染同进程的
+    /// 其他测试。
+    #[test]
+    fn only_the_sentinel_is_out_of_range() {
+        // `black_box` 挡掉常量折叠，否则 clippy 会把这几条断言判成恒真。
+        let accept = |raw: u64| black_box(raw) <= MAX_ASSIGNABLE_ID;
+        assert!(accept(0), "手写文件里的 0 照旧接受");
+        assert!(accept(1));
+        assert!(accept(4096));
+        assert!(accept(MAX_ASSIGNABLE_ID), "上限本身合法");
+        assert!(!accept(u64::MAX), "只有哨兵值被拒");
+    }
+
+    /// 分配器只前进、不回退，返回的 ID 也永远不是 0。
+    #[test]
+    fn new_ids_are_increasing_and_never_zero() {
+        let a = EntityId::new();
+        let b = EntityId::new();
+        assert!(a.raw() > 0 && b.raw() > 0, "0 不参与分配");
+        assert!(b.raw() > a.raw(), "{b:?} 必须排在 {a:?} 之后");
+    }
+}

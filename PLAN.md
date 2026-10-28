@@ -5322,6 +5322,67 @@ docs** 六层，正好把"数据在 core、能力在各层"这条主线再压一
 
 ---
 
+## 七十二、三个 G0 数值 / 交互边界（2026-10-28）
+
+接 041（极小体积）、101（极值 ID）、067（视口外松键）。三项都是"实现缺一条边界"，
+不是新功能；共同点是有缺陷时**不报错**，只是行为悄悄不对。
+
+### 1. 极小碰撞体的质量守恒（R12 / 041）
+
+`scene_body` 按 `mass / unit_mass` 求密度。半径 1e-20 的球体积在 f32 下下溢成 0，
+density 随之变 inf，rapier 拿它乘体积后**实际质量 = 0** —— 声明 2.5 kg 的实体变成
+0 kg，物体会飘走或原地抖。旧实现的 `unit_mass > 0` 只挡住了"别算密度"，没挡住
+"算出来的密度不可用"。
+
+改：密度不可表达时（`unit_mass` 非正 / 非有限，或 `density` 非有限）退回**附加质量**
+（`RigidBody.mass`），惯量仍按形状几何算。两条路径相加恒为声明值。
+
+红灯：`tiny_collider_still_weighs_the_declared_mass` 在旧实现下（半径 1e-20）实得质量 0；
+1e-6 / 1e-9 两档旧实现本来就对，一并钉住。
+
+### 2. 极值实体 ID（101）
+
+`EntityId::new()` 是 `fetch_add`，`reserve` 用 `fetch_max(raw + 1)`。文件里写
+`id: (18446744073709551615)` 会把水位顶到 `u64::MAX`，下一次 `new()` 返回**同一个值**
+—— 两个实体共用一个 ID，随后 `remove_subtree` 按 ID 匹配就连坐删除。
+
+改：`MAX_ASSIGNABLE_ID = u64::MAX - 1`，读盘严格大于它即返回 serde 错误（错误信息
+带原值与上限，便于定位是哪个文件被手改）；`new()` 换成 CAS 循环并跳过 0
+（`fetch_add` 回绕会落到 0，而 0 从未被分配过）。
+
+红灯：临时把校验短路，`max_id_is_rejected_at_the_load_boundary` 实得
+`Ok(Holder { id: EntityId(18446744073709551615) })`。
+
+边界：`--check` 遇到这种场景会因加载失败退出 1（预期行为）；"跨文件诊断"
+（同一 ID 在场景与预制体之间是否冲突）仍未做 —— 预制体的 `source_id` 是跨文件引用，
+语义上不该算冲突，要做先得定规则。
+
+### 3. 视口外松手（067）
+
+`UiPointer` 曾把"位置"和"按键"合成一个 `Option`：指针不在视口就整条丢掉。于是
+"按下在按钮上 → 鼠标移出视口 → 松手"那一帧的 `released` 边沿消失，捕获残留在按钮上，
+`Release` 事件也发不出去（要等指针回到视口、被"幽灵按下"清理兜底才恢复）。
+
+改：`UiPointer.pos: Option<Vec2>`，按键电平 / 边沿始终有效；runtime 永远传 `Some(...)`
+（视口尺寸为 0 时仍传 `None`，那表示"没有 UI 可交互"）。新增 `World::ui_pressed()`
+与 `ui_hovered()` 对称 —— 捕获状态比 `state.pressed` 更早暴露这类缺陷，因为后者的
+可见症状要等指针回到视口才消失。
+
+红灯：`releasing_outside_the_viewport_clears_the_button` 在旧映射下第二帧捕获仍在
+（实跑失败）。
+
+顺带补了 `hidden_parent_makes_children_unhittable`：父节点隐藏后子按钮不进命中表
+（`layout::walk` 早就是整棵子树跳过，此前没有测试钉住），以及 UI 层的
+`holding_outside_the_viewport_keeps_the_capture`（拖出视口再拖回来松手仍算点击）。
+
+### 验证与边界
+
+- `check` / `clippy -D warnings` 通过；`test --workspace --all-targets`
+  **953 passed / 0 failed / 9 ignored**（+8：id 3、物理 1、UI 3、运行时 1）。
+- 067 的第三项（脚本改 UI 布局的当帧时序）仍未专项验证；这一条不动代码，只差测试。
+
+---
+
 ## 七十一、CUBICSPLINE 三次样条采样（R04 / 032 关闭，2026-10-28）
 
 `Docs/差距分析.md` 里 R04 / 032 的表述是"逐关键帧取值与 morph stride 已修；
