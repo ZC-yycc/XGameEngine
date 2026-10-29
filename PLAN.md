@@ -6775,3 +6775,51 @@ check: WARN 1 issue(s)
 - 不校验 `Entity.scripts` / 音频引用在**运行时**的读取（`--check` 已经点名，运行时
   只读项目内文件的情形由 `load_scene` 的边界兜住场景文件本身）；
 - 不动 `search_paths`（语义未定义清楚，等有消费方再说）。
+
+## 八十六、写读稳定性门禁：随机场景 + 坏数据 + 示例工程 + 无改动不写盘（2026-10-29）
+
+上一轮修的是"路径写不进去"，这一轮问的是另一个问题：**写得进去的东西，读回来还是不是
+同一份**。场景 / 预制体 / 清单是用户数据的唯一载体，全 RON 纯文本，靠"改了什么 diff 里
+就有什么"吃饭 —— 只要加载边界悄悄改写了某个字段，下次保存就会产生一整片与用户操作
+无关的 diff（脏检查误报、评审噪音、冲突解决改错行）。
+
+### 一、门禁：`crates/xgame-core/tests/scene_roundtrip.rs`
+
+五条用例，全部确定性（xorshift，同种子同序列，失败信息带种子）：
+
+| 用例 | 盯的东西 |
+|---|---|
+| `random_scenes_survive_save_load_save` | 40 个随机场景（覆盖 Entity 全部 20 个字段）：`t1 == t2 == t3` 逐字节，`l1 == l2` 逐字段，且引用真实资产时落盘**必须**是 `guid://` |
+| `random_prefabs_survive_save_load_save` | 同一套断言走预制体那条序列化路径 |
+| `hostile_scenes_load_and_settle` | 重复 ID / 悬空父 / 自指 / 成环 / 越界 UI·粒子·morph：**装得进来**（不 panic 不死循环）、夹取之后再写**不再变** |
+| `example_projects_stabilise_after_one_save` | 四个入库示例工程：打开→存→存，第二轮必须逐字节相同、字段相等 |
+| `unchanged_save_does_not_touch_the_file` | 内容没变时**不写盘**（mtime 不动） |
+
+生成器故意用**带引号 / 反斜杠 / 换行 / emoji / 全角空格的名字**：RON 转义不对称是最
+隐蔽的一类数据损伤（写进去能读出来、读出来写不回去）。
+
+### 二、过程中确认的两条事实（都写进了决策记录 §六十六）
+
+1. **保存会吃掉注释**。第一次 `example_projects_stabilise_after_one_save` 就是红的：
+   `BehaviorsDemo/Scenes/main.ron` 存一次少 7 行（90 → 83），掉的正是 `// ── Rust 轨道 ──`
+   这些教程注释。这不是 bug —— 保存走的是"内存模型重新序列化"，注释不在模型里；
+   想保住注释只有 `--migrate-assets` 那条**词法替换**的路（§十四）。测试因此改成断言
+   **第二次起不动**，而不是"第一次逐字节相同"。
+2. **无改动的保存不该碰盘**。新闻：`write_scene` / `write_prefab` 在待写文本与盘上
+   内容逐字节相同时直接返回。理由不是省 IO，而是编辑器的热重载扫描**按 mtime** 判
+   "外部改动" —— 白刷一次 mtime 就等于凭空触发一次重载；顺带让"文件被占用 / 只读"
+   在没改动时也能存得下去。红灯实证：把这一行改成 `if false && …` 后
+   `unchanged_save_does_not_touch_the_file` 立刻红（mtime 差 410 µs）。
+
+### 三、验证
+
+- `cargo clippy -D warnings` 0 告警；`cargo test --workspace --all-targets`
+  **1034 passed / 0 failed / 9 ignored**（+6，31 个套件）；
+- 门禁自身耗时 ~13 s（40 个种子 × 3 次写）；第一个版本每个种子写 3 个**新文件**，
+  `write_scene` 每次重扫资产库 → 文件数线性增长、扫描量平方增长，实测 40 s。
+  改成复用同一个文件名后降到 13 s —— 这也是"写盘会重扫资产库"这条事实的实测。
+
+### 四、刻意不做
+
+- 不做注释保留（那等于自己写一个 RON 的 CST，代价远超收益）；
+- 不把这条门禁做成 `#[ignore]` 的基准 —— 它跑 13 秒但抓的是数据损伤，进 CI 值得。

@@ -979,6 +979,13 @@ impl ProjectHandle {
     /// 写盘前把资产引用编码成 GUID（并补齐缺 `.meta` 的资产身份证）。
     /// 这样"改了资产名再保存"就把新身份固化进文件，而不是继续存路径。
     pub fn write_prefab(&self, relative: &str, prefab: &Prefab) -> Result<(), ProjectError> {
+        // 路径校验放在最前面：不合法就**不该去扫资产库**（那是几百毫秒的活）。
+        let relative = normalize_project_relative(relative).map_err(|defect| {
+            ProjectError::InvalidPath {
+                relative: relative.to_owned(),
+                reason: defect.to_string(),
+            }
+        })?;
         let encoded = {
             let mut assets = self.assets();
             // 与 `write_scene` 同理：编码前保证索引是最新的。
@@ -994,23 +1001,21 @@ impl ProjectHandle {
         };
         let prefab = encoded.as_ref().unwrap_or(prefab);
 
-        let relative = normalize_project_relative(relative).map_err(|defect| {
-            ProjectError::InvalidPath {
-                relative: relative.to_owned(),
-                reason: defect.to_string(),
-            }
-        })?;
         let path = self.path(&relative);
+        let text = prefab.to_ron().map_err(|e| ProjectError::Write {
+            path: path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        })?;
+        // 与 `write_scene` 同一条：内容没变就不动盘。
+        if unchanged_on_disk(&path, &text) {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
                 path: parent.to_path_buf(),
                 source,
             })?;
         }
-        let text = prefab.to_ron().map_err(|e| ProjectError::Write {
-            path: path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-        })?;
         write_atomic(&path, &text)
     }
 
@@ -1228,6 +1233,10 @@ impl ProjectHandle {
     /// 写盘前把资产引用编码成 GUID（并补齐缺 `.meta` 的资产身份证）——
     /// 于是"打开旧项目 + 保存一次"就完成了从路径引用到 GUID 引用的迁移，
     /// 不需要额外的迁移命令。
+    ///
+    /// **内容一个字节都没变时不动盘**：一次 `Ctrl+S` 不该刷新 mtime —— 编辑器
+    /// 的热重载扫描按 mtime 判"外部改动"，白刷一次等于凭空触发一次重载；
+    /// 对只读 / 被占用的文件，也变成"没改动就存得下去"。
     pub fn write_scene(&self, relative: &str, scene: &Scene) -> Result<(), ProjectError> {
         let relative = normalize_scene_relative(relative).map_err(|reason| ProjectError::InvalidPath {
             relative: relative.to_owned(),
@@ -1235,6 +1244,9 @@ impl ProjectHandle {
         })?;
         let path = self.path(&relative);
         let text = self.scene_text(scene, &path)?;
+        if unchanged_on_disk(&path, &text) {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
                 path: parent.to_path_buf(),
@@ -1495,6 +1507,18 @@ pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), ProjectError> 
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// 盘上内容与待写文本**逐字节相同**时返回 `true`（调用方据此跳过写入）。
+///
+/// 读失败（文件不存在 / 没权限）一律返回 `false`：那种情况该不该写由后续的
+/// 真实写入去报错，别在这里静默吞掉 —— 吞掉之后"保存成功但文件不存在"就成了
+/// 一个新的、更难查的坑。
+fn unchanged_on_disk(path: &Path, text: &str) -> bool {
+    match std::fs::read(path) {
+        Ok(bytes) => bytes == text.as_bytes(),
+        Err(_) => false,
+    }
 }
 
 /// 首次登记资产时只发布到空位；并发生成者不能覆盖对方的 GUID。
