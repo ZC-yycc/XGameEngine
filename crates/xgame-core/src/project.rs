@@ -102,47 +102,183 @@ pub fn same_scene_path(a: &str, b: &str) -> bool {
 /// 另存为新场景）、`--check`（校验发布清单）、构建器（打包前逐关装载）。
 /// 三处各抄一份的结果必然漂移，而漂移的后果是"检查通过、构建成功、运行时打不开"。
 ///
-/// 规则：
-/// - 反斜杠转正斜杠（Windows 手改清单的高频写法）；
-/// - 开头的 `./` 直接吃掉（`./Scenes/a.ron` 与 `Scenes/a.ron` 是同一个文件；
-///   智能体与手写清单都爱带它，拒绝只会制造"同一条路径两种写法"的分叉）；
-/// - 拒绝绝对路径 / `..`（拼上项目根就能跳到任意位置）；
-/// - 必须 `.ron` 结尾且不是 `.prefab.ron`（预制体不是场景）。
+/// 规则 = [`normalize_project_relative`]（越界 + Windows 不认的写法）再要求
+/// `.ron` 结尾、且不是 `.prefab.ron`（预制体不是场景）。
 ///
 /// **MCP 的 `scene` 参数也走这一条**（`xgame-mcp` 的 `scene_rel` 只在前面补
 /// 一个 `.ron` 后缀）。此前那里自己写了一份更松的检查：接受 `a.RON`、
 /// `./a.ron`、甚至 `a.prefab.ron`，于是"编辑器不认的路径，智能体能写"。
 pub fn normalize_scene_relative(raw: &str) -> Result<String, String> {
-    let mut rel = raw.trim().replace('\\', "/");
+    let normalized = normalize_project_relative(raw).map_err(|e| e.to_string())?;
+    if !normalized.ends_with(".ron") || normalized.ends_with(".prefab.ron") {
+        return Err(format!("场景文件必须以 .ron 结尾: {raw}"));
+    }
+    Ok(normalized)
+}
+
+/// 项目内相对路径的**唯一**校验入口（场景 / 预制体 / 资产 / 脚本共用）。
+///
+/// 返回规范化后的路径（正斜杠、吃掉开头的 `./`），**不检查**扩展名与目录白名单
+/// —— 那些是各消费方自己的事（见 [`normalize_scene_relative`] 与
+/// [`crate::asset::normalize_asset_relative`]）。
+///
+/// 规则分两类，理由都是"Windows 会**静默**改写，于是写下的字符串和盘上的文件
+/// 不是同一个"：
+/// - **越界**：绝对路径 / 盘符 / `..`。`ProjectHandle::path` 只是 `root.join(..)`，
+///   而 `Path::join` 遇到绝对路径会**整个替换**掉根；
+/// - **Windows 不认**：冒号（NTFS 备用数据流）、结尾空格与点（Win32 直接吃掉）、
+///   控制字符与 `< > " | ? *`、以及保留设备名（`CON` / `NUL` / `COM1` …，
+///   `File::create("CON.ron")` 打开的是控制台，写进去的字节直接消失）。
+///
+/// 这条纪律此前**只有资产侧**有（`normalize_asset_relative` 早就挡了字符），
+/// 场景侧只挡越界 —— 于是 `Scenes/Level:1.ron` 这个写法能被写进发布清单，保存
+/// 显示成功、场景从此只存在于这台机器的 NTFS 数据流里（git 存不下）。
+pub fn normalize_project_relative(raw: &str) -> Result<String, PathDefect> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(PathDefect::Empty);
+    }
+    let mut rel = trimmed.replace('\\', "/");
     // 只吃**开头**的 `./`。`Path::components` 会把夹在中间的 `.` 自动消掉
     // （`a/./b` → `a/b`），但开头那个会变成 `CurDir` 组件、被下面的 match 拒掉 ——
     // 同一个文件两种写法得到两种结果，没必要。
     while let Some(rest) = rel.strip_prefix("./") {
         rel = rest.to_string();
     }
-
     if rel.is_empty() {
-        return Err("场景路径不能为空".into());
+        return Err(PathDefect::Empty);
     }
     // Windows 盘符（`C:`）与 UNC 前缀在非 Windows 上不一定被 `Path` 认成绝对路径，
     // 这里显式再挡一次；编辑器的主要平台是 Windows，不能靠平台差异放行。
     if rel.starts_with('/') || rel.as_bytes().get(1) == Some(&b':') {
-        return Err(format!("场景路径必须是项目相对路径: {raw}"));
+        return Err(PathDefect::Absolute);
     }
 
-    let path = Path::new(&rel);
     let mut parts = Vec::new();
-    for component in path.components() {
+    for component in Path::new(&rel).components() {
         match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
-            _ => return Err(format!("场景路径不能包含 `..` 或绝对路径: {raw}")),
+            Component::Normal(part) => {
+                let part = part.to_string_lossy();
+                validate_path_component(&part)?;
+                parts.push(part.into_owned());
+            }
+            _ => return Err(PathDefect::ParentEscape),
         }
     }
-    let normalized = parts.join("/");
-    if !normalized.ends_with(".ron") || normalized.ends_with(".prefab.ron") {
-        return Err(format!("场景文件必须以 .ron 结尾: {raw}"));
+    if parts.is_empty() {
+        return Err(PathDefect::Empty);
     }
-    Ok(normalized)
+    Ok(parts.join("/"))
+}
+
+/// 项目相对路径不合法时**具体哪里不合法**。
+///
+/// 分成枚举而不是直接给字符串，是为了让 `--check` 能输出纯 ASCII 的短标签
+/// （控制台代码页不是 UTF-8，中文原因会在 CI 日志里变成乱码、也匹配不上），
+/// 而编辑器 / 报错仍然拿到一句能读的中文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathDefect {
+    /// 空路径（或只有 `./`）。
+    Empty,
+    /// 绝对路径 / 盘符 / UNC 前缀。
+    Absolute,
+    /// `..` 或根组件（会跳到项目外）。
+    ParentEscape,
+    /// 组件含冒号（Windows 会当成 NTFS 备用数据流）。
+    Colon { part: String },
+    /// 组件以空格或点结尾（Windows 会静默吃掉）。
+    TrailingSpaceOrDot { part: String },
+    /// 组件含控制字符或 `< > " | ? *`。
+    IllegalChar { part: String },
+    /// 组件是 Windows 保留设备名（`CON` / `NUL` / `COM1` …）。
+    ReservedName { part: String },
+}
+
+impl PathDefect {
+    /// 纯 ASCII 的短标签（`--check` 报告用）。
+    pub fn ascii(&self) -> &'static str {
+        match self {
+            Self::Empty => "empty path",
+            Self::Absolute => "absolute path or drive prefix",
+            Self::ParentEscape => "`..` escapes the project",
+            Self::Colon { .. } => "colon (NTFS alternate data stream)",
+            Self::TrailingSpaceOrDot { .. } => "trailing space or dot",
+            Self::IllegalChar { .. } => "illegal character (control or < > \" | ? *)",
+            Self::ReservedName { .. } => "windows reserved device name",
+        }
+    }
+}
+
+impl std::fmt::Display for PathDefect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "路径不能为空"),
+            Self::Absolute => write!(f, "必须是项目相对路径（不能以 `/` 或盘符开头）"),
+            Self::ParentEscape => write!(f, "路径不能包含 `..` 或根组件"),
+            Self::Colon { part } => write!(
+                f,
+                "路径组件 `{part}` 含冒号（Windows 会把 `名字:后缀` 当成备用数据流）"
+            ),
+            Self::TrailingSpaceOrDot { part } => write!(
+                f,
+                "路径组件 `{part}` 以空格或点结尾（Windows 会静默吃掉这两个字符）"
+            ),
+            Self::IllegalChar { part } => write!(
+                f,
+                "路径组件 `{part}` 含非法字符（控制字符或 < > \" | ? *）"
+            ),
+            Self::ReservedName { part } => write!(
+                f,
+                "路径组件 `{part}` 是 Windows 保留设备名（打开的是设备，不是文件）"
+            ),
+        }
+    }
+}
+
+/// Windows 保留设备名：这些名字（**带不带扩展名都一样**）在 Win32 上打开的是
+/// 设备而不是文件。
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// 这个名字是不是 Windows 保留设备名（只看第一个 `.` 之前的部分）。
+///
+/// `CON` / `con.ron` 都算；`CONSOLE` / `console.ron` / `COM10` 不算 —— 保留的是
+/// **整名相等**（且大小写不敏感），别按前缀匹配，否则正常的词会被误杀。
+fn is_reserved_device_name(part: &str) -> bool {
+    let base = part.split('.').next().unwrap_or(part);
+    RESERVED_DEVICE_NAMES
+        .iter()
+        .any(|name| base.eq_ignore_ascii_case(name))
+}
+
+/// 单个路径组件的字符级校验（[`normalize_project_relative`] 的一部分）。
+fn validate_path_component(part: &str) -> Result<(), PathDefect> {
+    if part.contains(':') {
+        return Err(PathDefect::Colon {
+            part: part.to_string(),
+        });
+    }
+    if part.ends_with([' ', '.']) {
+        return Err(PathDefect::TrailingSpaceOrDot {
+            part: part.to_string(),
+        });
+    }
+    if part
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+    {
+        return Err(PathDefect::IllegalChar {
+            part: part.to_string(),
+        });
+    }
+    if is_reserved_device_name(part) {
+        return Err(PathDefect::ReservedName {
+            part: part.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// 新建项目时写下的 `.gitignore`。
@@ -253,6 +389,42 @@ impl Project {
         }
         order
     }
+
+    /// 清单里的**内容目录**有哪些写法不合法（越界 / Windows 不认）。
+    ///
+    /// 只查内容目录：入口场景与 `build.scenes` 各有自己的判定入口
+    /// （前者装载时硬失败、后者进 `build_missing_scenes`），在这里再报一遍
+    /// 只会让同一个错出现两次、问题数虚高。
+    ///
+    /// 为什么要单独查：这些目录全是**手改清单的重灾区**，而越界的写法不会在
+    /// 读取时报错 —— `list_scenes` 扫到项目外、构建复制到项目外，症状是
+    /// "编辑器里什么都没有，但检查全绿"。
+    pub fn content_path_defects(&self) -> Vec<String> {
+        let content = &self.content;
+        let mut out = Vec::new();
+        for (label, raw) in [
+            ("content.scenes_dir", content.scenes_dir.as_str()),
+            ("content.models_dir", content.models_dir.as_str()),
+            ("content.textures_dir", content.textures_dir.as_str()),
+            ("content.audio_dir", content.audio_dir.as_str()),
+            ("content.shaders_dir", content.shaders_dir.as_str()),
+            ("content.prefabs_dir", content.prefabs_dir.as_str()),
+            ("content.scripts_dir", content.scripts_dir.as_str()),
+        ] {
+            // 空目录名是合法的：它表示"就在项目根下"（老清单里可能出现）。
+            if raw.trim().is_empty() {
+                continue;
+            }
+            if let Err(defect) = normalize_project_relative(raw) {
+                // 标签用 ASCII：报告要能被 CI 的文本匹配与 GBK 控制台一起看。
+                out.push(format!(
+                    "{PROJECT_FILE_NAME} -> {label} {raw} ({})",
+                    defect.ascii()
+                ));
+            }
+        }
+        out
+    }
 }
 
 impl Default for Project {
@@ -317,6 +489,13 @@ pub enum ProjectError {
 
     #[error("项目名不能为空，且不能只由非法字符组成")]
     InvalidName,
+
+    /// 项目相对路径不合法（越界 / Windows 不认的写法）。
+    ///
+    /// 与 [`Self::Write`] 分开：那个是"盘上出了事"，这个是"根本不该去碰盘"。
+    /// 混在一起会让调用方以为是磁盘问题，跑去查权限。
+    #[error("路径不合法 ({relative}): {reason}")]
+    InvalidPath { relative: String, reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -774,7 +953,10 @@ impl ProjectHandle {
     /// 磁盘上的资产引用是 GUID，这里解码成项目相对路径再交给上层 ——
     /// 调用方永远只看见能直接打开的路径。
     pub fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {
-        let path = self.path(relative);
+        // 与 `load_scene` 同一条边界：预制体路径来自场景里的 `source`，
+        // 手写 RON 里一句 `../..` 就能读到项目外。
+        let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
+        let path = self.path(&relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
         let mut prefab =
@@ -812,7 +994,13 @@ impl ProjectHandle {
         };
         let prefab = encoded.as_ref().unwrap_or(prefab);
 
-        let path = self.path(relative);
+        let relative = normalize_project_relative(relative).map_err(|defect| {
+            ProjectError::InvalidPath {
+                relative: relative.to_owned(),
+                reason: defect.to_string(),
+            }
+        })?;
+        let path = self.path(&relative);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
                 path: parent.to_path_buf(),
@@ -985,8 +1173,13 @@ impl ProjectHandle {
     ///
     /// 磁盘上的资产引用是 GUID，这里解码成项目相对路径。悬空 GUID（资产被删）
     /// 会原样保留 `guid://…` 字符串，好让 `--check` 与 Inspector 都能指出断链。
+    ///
+    /// 路径先过 [`normalize_scene_relative`]：`path()` 只是 `root.join(..)`，而
+    /// `join` 遇到绝对路径会**整个替换**掉根 —— 手写 / 下载来的清单里一句
+    /// `/etc/passwd` 就能让引擎去读项目外的文件。
     pub fn load_scene(&self, relative: &str) -> Result<Scene, String> {
-        let path = self.path(relative);
+        let relative = normalize_scene_relative(relative)?;
+        let path = self.path(&relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
         self.parse_scene_text(&text, &path)
@@ -1036,7 +1229,11 @@ impl ProjectHandle {
     /// 于是"打开旧项目 + 保存一次"就完成了从路径引用到 GUID 引用的迁移，
     /// 不需要额外的迁移命令。
     pub fn write_scene(&self, relative: &str, scene: &Scene) -> Result<(), ProjectError> {
-        let path = self.path(relative);
+        let relative = normalize_scene_relative(relative).map_err(|reason| ProjectError::InvalidPath {
+            relative: relative.to_owned(),
+            reason,
+        })?;
+        let path = self.path(&relative);
         let text = self.scene_text(scene, &path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
@@ -1249,9 +1446,22 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 fn sanitize_dir_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        // 控制字符也要滤掉：`"\u{1}"` 这种名字在资源管理器里看不见、在日志里
+        // 还会把终端搞乱，而它是能通过 RON 字符串存下来的。
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
         .collect();
-    cleaned.trim().trim_end_matches('.').to_string()
+    let cleaned = cleaned.trim().trim_end_matches('.').to_string();
+    // 保留设备名：`CON` 这类名字在 Windows 上打开的是**设备**而不是文件，
+    // 写进去的字节直接消失。这里加下划线避让 —— 用它的地方（新建项目 / 场景 /
+    // 预制体 / 材质）都是"从用户输入生成文件名"，拒绝会让用户莫名其妙，
+    // 而改名后仍一眼认得出原来输入的是什么。
+    if is_reserved_device_name(&cleaned) {
+        format!("{cleaned}_")
+    } else {
+        cleaned
+    }
 }
 
 /// 把资产名收拾成安全的文件名（不含扩展名）。
@@ -2601,5 +2811,106 @@ mod tests {
     fn normalize_scene_relative_is_case_sensitive_on_extension() {
         assert!(normalize_scene_relative("Scenes/A.RON").is_err());
         assert!(normalize_scene_relative("Scenes/A.ron").is_ok());
+    }
+
+    /// Windows 会**静默改写**这些名字，于是"清单里写的字符串"和"盘上那个文件"
+    /// 不是同一个 —— 保存看起来成功、下次打开却找不到，或者 git 根本存不下。
+    ///
+    /// 这一条此前只挡越界（`..` / 绝对路径），非法字符全靠下游各自手写；
+    /// 资产侧早就挡了，场景侧没有 —— 于是 `Scenes/CON.ron` 能被写进发布清单。
+    #[test]
+    fn normalize_scene_relative_rejects_windows_hostile_names() {
+        for bad in [
+            // NTFS 备用数据流：写进去的内容跑到 `Level` 的 ADS 上，git 存不下来。
+            "Scenes/Level:1.ron",
+            // 组件结尾的空格 / 点：Win32 会静默吃掉，落盘路径与清单字符串不一致。
+            "Scenes/Level /A.ron",
+            "Scenes/Level./A.ron",
+            // 控制字符与 Windows 非法字符（含 `?` / `*`，它们在 NTFS 上直接创建失败）。
+            "Scenes/a\tb.ron",
+            "Scenes/a\u{7}b.ron",
+            "Scenes/a<b.ron",
+            "Scenes/a>b.ron",
+            "Scenes/a|b.ron",
+            "Scenes/a?b.ron",
+            "Scenes/a*b.ron",
+            // 保留设备名：`File::create("CON.ron")` 打开的是控制台，写进去的数据消失。
+            "Scenes/CON.ron",
+            "Scenes/nul.ron",
+            "Scenes/Aux.ron",
+            "Scenes/com1.ron",
+            "Scenes/LPT9.ron",
+        ] {
+            assert!(
+                normalize_scene_relative(bad).is_err(),
+                "{bad:?} 不该被当成合法场景路径"
+            );
+        }
+        // 负对照：名字里带空格 / 中文 / 保留字的**前缀**都照常放行
+        // （`console` 不是 `CON`，别把正常的词误杀）。
+        for ok in [
+            "Scenes/Level 2.ron",
+            "Scenes/第二关.ron",
+            "Scenes/a-b_c.ron",
+            "Scenes/console.ron",
+            "Scenes/connection.ron",
+        ] {
+            assert!(
+                normalize_scene_relative(ok).is_ok(),
+                "{ok:?} 应该被接受"
+            );
+        }
+    }
+
+    /// 写盘边界同样要拦：路径不合法时**不产生任何文件**，而不是交给操作系统
+    /// 去静默改写（写到 ADS / 另一个目录名下，用户完全看不见）。
+    ///
+    /// 两条都是**今天真的会静默成功**的写法 —— 不是"理论上可能"：
+    /// - `Scenes/Level:1.ron` → NTFS 备用数据流，内容挂在 `Scenes/Level` 的 ADS 上。
+    ///   目录扫描看不见它（枚举只给出基名 `Level`），git 也存不下流内容 ——
+    ///   保存"成功"、场景从此只在这台机器上存在。
+    /// - `Scenes/sub /x.ron` → Win32 静默吃掉目录名结尾的空格，文件落进 `Scenes/sub`。
+    #[test]
+    fn write_scene_rejects_hostile_paths() {
+        let base = std::env::temp_dir().join(format!(
+            "xgame-scene-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = ProjectHandle::create(&base, "PathGate").expect("建项目");
+
+        let err = project
+            .write_scene("Scenes/Level:1.ron", &default_scene())
+            .expect_err("备用数据流写法必须被拒绝");
+        assert!(
+            err.to_string().contains("Level:1.ron"),
+            "错误信息要点名是哪个路径: {err}"
+        );
+        assert!(
+            !project.path("Scenes/Level").exists(),
+            "拒绝之后不能留下 ADS 宿主文件"
+        );
+
+        let err = project
+            .write_scene("Scenes/sub /x.ron", &default_scene())
+            .expect_err("目录名结尾空格必须被拒绝");
+        assert!(
+            err.to_string().contains("sub "),
+            "错误信息要点名是哪个路径: {err}"
+        );
+        assert!(
+            !project.path("Scenes/sub").exists(),
+            "拒绝之后不能悄悄把目录建在别的名字下"
+        );
+
+        // 负对照：同样的字只是不在结尾，就完全合法。
+        project
+            .write_scene("Scenes/Level 2.ron", &default_scene())
+            .expect("正常名字必须能写");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

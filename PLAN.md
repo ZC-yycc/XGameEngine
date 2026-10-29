@@ -6696,3 +6696,82 @@ GPU 渲染逐像素对照。验证混合公式 `skin = (Σ wₖ·boneₖ) / Σw�
 
 `gltf_loader.rs` 的 `!(f32 < …)` 对部分序类型（NaN）语义不精确，改用
 `partial_cmp` + `matches!` 保留「NaN 走清零分支」的原语义。
+
+---
+
+## 八十五、路径纪律：一条规则、两个边界、一套诊断（194 关闭，2026-10-29）
+
+上一轮把"场景路径"这一半收进了 `core::normalize_scene_relative`，但两件事没做：
+资产侧那条**更严**的规则（冒号 / 结尾空格与点 / Windows 非法字符）没并过来，而且
+这条规则只挡"越界"，不挡"Windows 会静默改名的写法"。本轮一次做完，顺便把引用的
+越界也变成可诊断的。
+
+### 一、先证明是**真的会静默损坏**，不是理论洁癖
+
+三条写法在改造前全部返回成功：
+
+| 写法 | 实际发生了什么 |
+|---|---|
+| `Scenes/Level:1.ron` | 内容写进 `Scenes/Level` 的 NTFS **备用数据流**。目录枚举只给基名 `Level`（`list_scenes` 看不见）、`git` 存不下流内容 —— 保存报成功，场景从此只在这台机器上存在 |
+| `Scenes/sub /x.ron` | Win32 吃掉目录名结尾的空格，文件落进 `Scenes/sub`。此后"清单里写的路径"和"盘上的位置"不是同一个 |
+| `Scenes/CON.ron` | `CreateFile` 打开的是**控制台设备**，写进去的字节直接消失 |
+
+红灯证据（都是改造前实跑）：
+- `write_scene_rejects_hostile_paths` → `expect_err` 那行 panic（`write_scene` 返回 `Ok`）；
+- `normalize_scene_relative_rejects_windows_hostile_names` → 第一个用例
+  (`Scenes/Level:1.ron`) 就断言失败；
+- `normalize_asset_relative_accepts_only_in_project_assets` → 保留设备名那一批没被拒；
+- `references_escaping_the_project_are_reported` → `unsafe_paths` 为空、`has_issues()` 假；
+- `manifest_content_dirs_are_validated` → 内容目录写 `../outside-scenes` 时全绿；
+- `state::tests::scene_path_and_name_validation`（编辑器）→ `CON` / `nul` / `a\tb` 被接受。
+
+### 二、实现：一份判定 + 两个边界
+
+- `core::project::normalize_project_relative`：正斜杠、吃开头 `./`、拒绝对 / 盘符 /
+  `..`，逐组件拒冒号 / 结尾空格与点 / 控制字符与 `< > " | ? *` / 保留设备名。
+- 错误类型是 `PathDefect` 枚举而不是字符串：中文 `Display` 给编辑器与报错，
+  `ascii()` 给 `--check`（`render()` 的契约是纯 ASCII）。
+- `normalize_scene_relative` = 它 + `.ron` 非 `.prefab.ron`；
+  `normalize_asset_relative` = 它 + 资产类型 + 跳过目录。
+- **读写两个边界都过**：`load_scene` / `write_scene` / `load_prefab` / `write_prefab`；
+  `write_scene` 用 `ProjectError::InvalidPath`（与 `Write` 分开，别让调用方去查权限）。
+- 删掉**第四份**路径规则：构建器 `content_dirs` 里手写的 `normalize_relative` 改为直接
+  调 core（原来只挡 `..` / 绝对 / 冒号，`Scenes/foo ` 照样进包）。
+- `sanitize_dir_name`（新建项目 / 场景 / 预制体 / 材质）补控制字符过滤 + 保留设备名加
+  下划线（`CON` → `CON_`）：这里要"改成能用的名字"，不是拒绝 —— 与 `normalize_*` 的
+  语义刻意相反。编辑器 `scene_path_for_name` 只留"不能含路径分隔符"（那是语义问题），
+  其余全交给 core。
+
+### 三、`--check`：`unsafe_paths`
+
+九类路径引用（model / material / albedo / script / audio / ui image / prefab）+ 清单
+内容目录统一进 `CheckReport::unsafe_paths`，算问题（退出码 2）且进 `reference_issues()`
+（打包自包含的差集判据要看得见它）。越界时**跳过**"文件在不在"的探测 —— 负对照实测
+从 2 条降到 1 条：
+
+```
+check: WARN 1 issue(s)
+  unsafe path:    Scenes/scene.ron: Main Camera -> model ../../secret.glb (`..` escapes the project)
+```
+
+清单目录：`project.ron -> content.scenes_dir ../outside-scenes (`..` escapes the project)`。
+入口场景本身写坏仍是**硬失败**（退出码 1），因为那是启动契约 —— 实跑
+`entry_scene: "Scenes/co:ne.ron"` 得退出码 1。
+
+### 四、验证
+
+- 五条红灯（见上表）+ 一条编辑器红线，改后全绿；
+- `cargo check` / `clippy -D warnings` 0 告警；`cargo test --workspace --all-targets`
+  **1028 passed / 0 failed / 9 ignored**（+4）；
+- 四个示例项目 `--check` 全部退出 0（无假阳性）；
+- 真实 CLI 三组负对照：越界模型引用 exit 2 且只报一条、清单目录越界 exit 2、
+  入口场景冒号 exit 1；
+- `--ui-shot` 1280×800 / 1920×1080 各一张，编辑器布局与视口渲染正常
+  （`.workbuddy/shots/path-1280.png` / `path-1920.png`）。
+
+### 五、刻意不做
+
+- 不自动"修"坏路径（把 `Level:1.ron` 改成 `Level1.ron` 会悄悄改变用户数据的含义）；
+- 不校验 `Entity.scripts` / 音频引用在**运行时**的读取（`--check` 已经点名，运行时
+  只读项目内文件的情形由 `load_scene` 的边界兜住场景文件本身）；
+- 不动 `search_paths`（语义未定义清楚，等有消费方再说）。

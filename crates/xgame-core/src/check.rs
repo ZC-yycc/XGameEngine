@@ -133,6 +133,18 @@ pub struct CheckReport {
     /// 未配置清单时不报告 —— 否则每个老项目都会刷一屏"你的关卡都没列入"，
     /// 而它们本来就没打算配置发布清单。
     pub build_unlisted_scenes: Vec<String>,
+    /// 路径型引用（非 `guid://`）里**越出项目根**或**Windows 不认**的写法
+    /// （"场景: 实体 -> 路径 (原因)"）。
+    ///
+    /// 为什么要单独查：`ProjectHandle::path` 只是 `root.join(相对路径)`，而
+    /// `Path::join` 遇到绝对路径会**整个替换**掉根；`../..` 则逐级上跳。于是
+    /// 手写 / 下载来的场景可以引用项目外的任意文件，而且读得到就算"存在"，
+    /// 今天的检查一句都不报。资产侧（`normalize_asset_relative`）早就有这道门，
+    /// 场景侧一直只挡 `..` 与绝对路径的场景**文件本身**，引用的资产没人管。
+    ///
+    /// **算问题**（进退出码 2）：这种引用在别人机器上必然断，在作者机器上却是
+    /// "能跑"，正是最难查的一类。
+    pub unsafe_paths: Vec<String>,
 }
 
 impl CheckReport {
@@ -157,6 +169,7 @@ impl CheckReport {
             || !self.duplicate_prefab_ids.is_empty()
             || !self.dangling_source_ids.is_empty()
             || !self.semantic_defects.is_empty()
+            || !self.unsafe_paths.is_empty()
             || !self.build_missing_scenes.is_empty()
     }
 
@@ -181,6 +194,7 @@ impl CheckReport {
             + self.duplicate_prefab_ids.len()
             + self.dangling_source_ids.len()
             + self.semantic_defects.len()
+            + self.unsafe_paths.len()
             + self.build_missing_scenes.len()
     }
 
@@ -207,6 +221,7 @@ impl CheckReport {
             &self.missing_prefabs,
             &self.dangling_guids,
             &self.invalid_scenes,
+            &self.unsafe_paths,
             &self.build_missing_scenes,
         ] {
             out.extend(group.iter().cloned());
@@ -300,6 +315,9 @@ impl CheckReport {
         for d in &self.semantic_defects {
             let _ = writeln!(out, "  semantic:       {d}");
         }
+        for p in &self.unsafe_paths {
+            let _ = writeln!(out, "  unsafe path:    {p}");
+        }
         for s in &self.build_missing_scenes {
             let _ = writeln!(out, "  build scene missing: {s}");
         }
@@ -325,6 +343,11 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     let entry_key = entry.replace('\\', "/");
 
     let mut report = CheckReport::default();
+    // 清单**自己**写的内容目录也要体检：越界的写法不会在读取时报错，只会让
+    // 扫描 / 打包悄悄跑到项目外，症状是"检查全绿、成品缺整棵子树"。
+    report
+        .unsafe_paths
+        .extend(project.manifest().content_path_defects());
     let mut scenes = vec![(entry.clone(), entry_scene)];
     // 已经装载过的场景键（正斜杠）。清单里的关卡未必在 `Scenes/` 下（比如
     // `Levels/L1.ron`），所以两个来源都要装载，靠这份集合去重 —— 否则同一张
@@ -488,8 +511,12 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
         if is_guid_reference(&material) {
             continue; // 上面已按悬空 GUID 报过，不再重复
         }
-        if !project.path(&material).is_file() {
-            report
+        // 越界的材质路径已经点名，**不必再探盘、更不能去读它**（读的可能是
+        // 项目外的任意文件）。
+        if note_unsafe_path(&mut report, &entity, "material", &material) {
+            continue;
+        }
+        if !project.path(&material).is_file() {            report
                 .missing_materials
                 .push(format!("{entity} -> {material}"));
             continue;
@@ -504,7 +531,9 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
                     report
                         .dangling_guids
                         .push(format!("{entity} -> {material} albedo -> {}", asset.albedo));
-                } else if !project.path(&asset.albedo).is_file() {
+                } else if !note_unsafe_path(&mut report, &material, "albedo", &asset.albedo)
+                    && !project.path(&asset.albedo).is_file()
+                {
                     report
                         .missing_material_textures
                         .push(format!("{material} -> {}", asset.albedo));
@@ -514,6 +543,27 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     }
 
     Ok(report)
+}
+
+/// 记一条"路径型引用越界 / Windows 不认"的问题，返回它是不是**不合法**。
+///
+/// 只在**非 `guid://`** 的引用上调用：GUID 引用没有路径语义，越界是另一回事
+/// （由 `dangling_guids` 管）。`builtin://` 也不是文件，调用方自己排除。
+///
+/// 返回值是给调用方用的：路径不合法时**不必**再去探"文件在不在" —— 那个路径
+/// 在本机碰巧有文件，与"这个引用合不合法"是两件事，报两遍只会让问题数虚高。
+/// 标签用 [`PathDefect::ascii`] 而不是中文：报告要能被 CI 文本匹配，
+/// 也要能在 GBK 控制台上看清。
+fn note_unsafe_path(report: &mut CheckReport, at: &str, kind: &str, raw: &str) -> bool {
+    match crate::project::normalize_project_relative(raw) {
+        Ok(_) => false,
+        Err(defect) => {
+            report
+                .unsafe_paths
+                .push(format!("{at} -> {kind} {raw} ({})", defect.ascii()));
+            true
+        }
+    }
 }
 
 /// 检查单张场景里的实体引用。
@@ -552,6 +602,7 @@ fn check_scene_references(
                     .dangling_guids
                     .push(format!("{} -> {}", at(&entity.name), entity.model));
             } else if !entity.model.starts_with("builtin://")
+                && !note_unsafe_path(report, &at(&entity.name), "model", &entity.model)
                 && !project.path(&entity.model).is_file()
             {
                 report
@@ -579,7 +630,9 @@ fn check_scene_references(
                 report
                     .dangling_guids
                     .push(format!("{} -> {}", at(&entity.name), script));
-            } else if !project.path(script).is_file() {
+            } else if !note_unsafe_path(report, &at(&entity.name), "script", script)
+                && !project.path(script).is_file()
+            {
                 report
                     .missing_scripts
                     .push(format!("{} -> {}", at(&entity.name), script));
@@ -592,7 +645,9 @@ fn check_scene_references(
                     report
                         .dangling_guids
                         .push(format!("{} -> {}", at(&entity.name), audio.clip));
-                } else if !project.path(&audio.clip).is_file() {
+                } else if !note_unsafe_path(report, &at(&entity.name), "audio", &audio.clip)
+                    && !project.path(&audio.clip).is_file()
+                {
                     report
                         .missing_audio
                         .push(format!("{} -> {}", at(&entity.name), audio.clip));
@@ -606,12 +661,12 @@ fn check_scene_references(
                     report
                         .dangling_guids
                         .push(format!("{} -> {}", at(&entity.name), image.path));
-                } else if !project.path(&image.path).is_file() {
-                    report.missing_ui_images.push(format!(
-                        "{} -> {}",
-                        at(&entity.name),
-                        image.path
-                    ));
+                } else if !note_unsafe_path(report, &at(&entity.name), "ui image", &image.path)
+                    && !project.path(&image.path).is_file()
+                {
+                    report
+                        .missing_ui_images
+                        .push(format!("{} -> {}", at(&entity.name), image.path));
                 }
             }
         }
@@ -623,7 +678,9 @@ fn check_scene_references(
                     report
                         .dangling_guids
                         .push(format!("{} -> {}", at(&entity.name), link.source));
-                } else if !project.path(&link.source).is_file() {
+                } else if !note_unsafe_path(report, &at(&entity.name), "prefab", &link.source)
+                    && !project.path(&link.source).is_file()
+                {
                     report
                         .missing_prefabs
                         .push(format!("{} -> {}", at(&entity.name), link.source));
@@ -947,6 +1004,67 @@ mod tests {
         assert!(text.contains("missing model"), "{text}");
         assert!(text.contains("missing script"), "{text}");
         assert!(text.contains("missing audio"), "{text}");
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 路径型引用必须落在项目内：`../../x.glb` 这类写法今天能通过检查
+    /// （`Path::join` 遇到绝对路径会**整个替换**掉项目根），于是"从外面下载来的
+    /// 场景能读走项目外的任意文件"。它不是加载失败，是**加载成功但来源不对**。
+    #[test]
+    fn references_escaping_the_project_are_reported() {
+        let project = temp_project("escape");
+        let mut scene = project.load_entry_scene().expect("加载默认场景");
+        scene.entities.push(
+            crate::Entity::new("Escape").with_model("../../secret.glb"),
+        );
+        scene.entities.push(
+            crate::Entity::new("Absolute").with_model("/etc/passwd"),
+        );
+        // 负对照：正常的项目内相对路径一句都不该报。
+        scene.entities.push(
+            crate::Entity::new("Normal").with_model("builtin://cube"),
+        );
+        let entry = project.manifest().entry_scene.clone();
+        project.write_scene(&entry, &scene).expect("写场景");
+
+        let report = check_project(project.root()).expect("检查应成功");
+        assert_eq!(report.unsafe_paths.len(), 2, "{}", report.render());
+        assert!(
+            report.unsafe_paths.iter().any(|p| p.contains("secret.glb")),
+            "{:?}",
+            report.unsafe_paths
+        );
+        assert!(
+            report.has_issues(),
+            "越界引用必须进退出码 2，而不是只当提示"
+        );
+        assert!(report.reference_issues().iter().any(|p| p.contains("secret.glb")));
+        assert!(report.render().contains("unsafe path"), "{}", report.render());
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 清单里的内容目录也是路径：`../..` 会让扫描与打包一起跑出项目外。
+    ///
+    /// 今天这种写法**一声不响** —— `list_scenes` 扫不到任何东西、构建复制不到
+    /// 目录，症状是"检查全绿、成品缺整棵子树"。`--check` 必须点名。
+    #[test]
+    fn manifest_content_dirs_are_validated() {
+        let mut project = temp_project("manifest_paths");
+        project.manifest_mut().content.scenes_dir = "../outside-scenes".into();
+        project.save().expect("写清单");
+
+        let report = check_project(project.root()).expect("检查应成功");
+        assert!(report.has_issues(), "{}", report.render());
+        assert!(
+            report
+                .unsafe_paths
+                .iter()
+                .any(|p| p.contains("content.scenes_dir")),
+            "内容目录越界必须点名: {:?}",
+            report.unsafe_paths
+        );
 
         let _ = std::fs::remove_dir_all(project.root());
     }

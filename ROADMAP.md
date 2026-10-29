@@ -9,6 +9,17 @@
 
 ## 整体路线图
 
+### 2026-10-29 路径纪律：一条规则、两个边界、一套诊断（194 关闭）
+
+| 项目 | 状态 |
+|---|---|
+| 规则统一 | 场景 / 资产 / 预制体 / 清单内容目录共用 `core::project::normalize_project_relative`：越界（绝对 / 盘符 / `..`）与 Windows 不认的写法（冒号 / 组件结尾空格与点 / 控制字符 / 保留设备名 `CON`·`NUL`·`COM1`…）一律拒绝；**删掉构建器里第四份手写规则** |
+| 两个边界 | `load_scene` / `write_scene` / `load_prefab` / `write_prefab` 在**碰盘之前**校验；`write_scene` 报 `ProjectError::InvalidPath`（与 `Write` 分开） |
+| 新增诊断 | `--check` 的 `unsafe_paths`：九类路径引用（model / material / albedo / script / audio / ui image / prefab）+ 清单内容目录，**算问题**（退出码 2）且进 `reference_issues()`；越界时不再重复报"文件缺失"；原因标签纯 ASCII |
+| 真实战果 | 改造前 `write_scene("Scenes/Level:1.ron")` 返回 `Ok` —— 内容进了 NTFS **备用数据流**：`list_scenes` 看不见它、git 存不下流内容，保存却报成功 |
+| 验证 | 5 条旧实现红灯 + 1 条编辑器红灯；全量 **1028 passed / 0 failed / 9 ignored**；四示例项目 `--check` 全 0；三组 CLI 负对照（越界引用 exit 2 / 清单目录 exit 2 / 入口场景 exit 1）；1280 与 1920 `--ui-shot`；见 PLAN 第八十五节 |
+| 仍缺 | 运行时对脚本 / 音频引用越界读取的校验（`--check` 已点名）；`search_paths` 语义未定，未纳入 |
+
 ### 2026-10-28 语义写前校验 + 欧拉约定统一（194 部分）
 
 | 项目 | 状态 |

@@ -2933,16 +2933,19 @@ impl EditorState {
 
     /// 把一个用户输入的**场景名**变成项目相对路径（不加扩展名时补 `.ron`）。
     ///
-    /// 名字只作文件名：路径分隔符、`..` 与 Windows 非法字符会被拒绝，
-    /// 防手滑把场景写到项目外面去。
+    /// 名字只是文件名：路径分隔符在这里挡（它会被拼成子目录，不是用户的本意），
+    /// **其余全部交给 `core::normalize_scene_relative`** —— `..`、绝对路径、
+    /// 冒号、控制字符、`CON` 这类保留设备名、`.prefab.ron` 都在那一处判定。
+    /// 编辑器不再自己写一份字符黑名单：两处一松一紧的结果是"编辑器能建、
+    /// `--check` 报错"，或者反过来。
     pub fn scene_path_for_name(&self, raw_name: &str) -> Result<String, String> {
         let name = raw_name.trim();
-        let name = name.strip_suffix(".ron").unwrap_or(name).trim_end();
+        let name = name.strip_suffix(".ron").unwrap_or(name).trim();
         if name.is_empty() {
             return Err("场景名不能为空".into());
         }
-        if name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) || name.contains("..") {
-            return Err(format!("场景名含非法字符: {name}"));
+        if name.contains(['/', '\\']) {
+            return Err(format!("场景名不能包含路径分隔符: {name}"));
         }
         let scenes_dir = self
             .project
@@ -2957,7 +2960,7 @@ impl EditorState {
         } else {
             format!("{scenes_dir}/{name}.ron")
         };
-        normalize_scene_relative(&relative)
+        normalize_scene_relative(&relative).map_err(|e| format!("场景名不合法: {e}"))
     }
 
     /// 打开另一个场景并把它设为当前编辑场景。
@@ -4634,7 +4637,11 @@ mod tests {
             state.scene_path_for_name("Level2.ron").unwrap(),
             "Scenes/Level2.ron"
         );
-        for bad in ["", "   ", "../evil", "a/b", "a\\b", "x.prefab", "C:evil"] {
+        // 场景名走的是**同一条**项目相对路径规则（`core::normalize_project_relative`），
+        // 不在编辑器里另写一份 —— 两处一松一紧就是"编辑器能建、`--check` 报错"。
+        for bad in [
+            "", "   ", "../evil", "a/b", "a\\b", "x.prefab", "C:evil", "CON", "nul", "a\tb",
+        ] {
             assert!(
                 state.scene_path_for_name(bad).is_err(),
                 "`{bad}` 不该被当成合法场景名"

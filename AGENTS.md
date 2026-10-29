@@ -145,6 +145,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 钩子里的结构改动 | 钩子里 `spawn`/`destroy` 对 Scene **立即生效**、命令**下一帧**才结算；链式销毁深达 8 环也要求每环**恰好一次**且按序；`unload_scene` 期间 spawn 只属于正在拆掉的旧世界，**不许漏进下一场景** | §五十七、§六十一 |
 | 日志（控制台 / `Editor.log`） | 唯一后端 `xgame-editor::logging`：一条 `log::warn!` 同时去 stderr（`RUST_LOG` 语义不变）/ 控制台有界队列 / `logs/Editor.log`；收信策略「自家 info + 所有人 warn/error，第三方 info 与 debug/trace 不收」不许松（落档网比 stderr 宽是刻意的）；时间戳是**启动以来秒数**不是本地时钟；面板筛选只影响显示、`Clear` 才清消息；右侧一栏必须 `main_wrap = false`（默认 true 会在 1280 折行） | §六十二 |
 | 视口导航（F / 数字键） | F 只动位置**不改朝向**（包围球装框，半径下限 0.25 / 边距 1.15）；数字键轴视角只转朝向**不动位置**、**不是正交投影**（别混着叫）；`PITCH_LIMIT = π/2 − 0.01`防 `forward × Y` 退化出 NaN；导航键在算 view_proj **之前**；快捷键必须过 `wants_keyboard_input` | §六十三 |
+| 路径（场景 / 资产 / 预制体 / 清单 / 引用） | 判定只有 `core::normalize_project_relative` **一处**（越界 + 冒号 / 结尾空格与点 / 控制字符 / Windows 保留设备名）；读写两个边界（`load_*` / `write_*`）都在碰盘前校验；`--check` 用 `unsafe_paths` 点名并进退出码 2（标签纯 ASCII、不与"文件缺失"重复计）；从**名字**生成文件名走 `sanitize_dir_name`（清洗），从**输入**拿路径走 `normalize_*`（拒绝） | §六十五 |
 | 插件 / 组件 | `Plugins/` 唯一目录；临时副本加载；旧 DLL 句柄永不卸载；参数键用注册名 | §四 |
 | 音频 | 脚本层不引 kira；监听者/主音量不进命令束；`follow` 是实体绑定；每渲染帧同步 | §五 |
 | 无头 / MCP | 不做第二份帧循环；退出码 2 不是工具失败；JSON 字段名是契约 | §六 |

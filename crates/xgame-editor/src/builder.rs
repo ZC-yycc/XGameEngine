@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use xgame_core::project::{ProjectHandle, PROJECT_FILE_NAME};
 
@@ -569,23 +569,12 @@ fn content_dirs(project: &ProjectHandle) -> Vec<String> {
 }
 
 /// 把清单里写的相对目录整理成可用的形式；非法或越界的写法返回 `None`。
+///
+/// 判定**只有一处**：`xgame_core::normalize_project_relative`（场景 / 资产 /
+/// 清单三条入口共用）。这里曾经是第四份手写的路径规则 —— 只挡 `..`、绝对路径
+/// 和冒号，于是 `Scenes/foo ` 这种 Windows 会静默改名的目录照样进包。
 fn normalize_relative(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    if raw.starts_with(['/', '\\']) || raw.contains(':') {
-        return None;
-    }
-    let normalized = raw.replace('\\', "/");
-    let trimmed = normalized.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let path = Path::new(trimmed);
-    // 只接受纯普通路径段——挡掉 `..`（越界到项目外）和绝对路径（`C:\`、`\`）
-    if path.components().all(|c| matches!(c, Component::Normal(_))) {
-        Some(trimmed.to_string())
-    } else {
-        None
-    }
+    xgame_core::normalize_project_relative(raw).ok()
 }
 
 /// 把项目名收拾成安全的目录名 / 文件名。

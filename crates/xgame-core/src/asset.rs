@@ -71,52 +71,17 @@ pub const META_EXTENSION: &str = "meta";
 /// [`AssetDatabase::move_asset`] 会单独拒绝场景：搬场景会让 `project.ron`
 /// 的入口 / 发布清单断链，那不是资产库能单方面决定的事）。
 pub fn normalize_asset_relative(raw: &str) -> Result<String, String> {
-    let rel = raw.trim().replace('\\', "/");
-    if rel.is_empty() {
-        return Err("资产路径不能为空".into());
-    }
-    // Windows 盘符与 UNC 前缀：跨平台都先用字面量挡一次，别依赖 Path 的
-    // 平台差异（与 `normalize_scene_relative` 同一条纪律）。
-    if rel.starts_with('/') || rel.as_bytes().get(1) == Some(&b':') {
-        return Err(format!("资产路径必须是项目内相对路径: {raw}"));
-    }
-
-    let path = Path::new(&rel);
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => {
-                let part = part.to_string_lossy();
-                // Windows 的 `file:stream` 写法会把写入引到别的数据流；
-                // 资产名里不需要冒号，直接拒绝。
-                if part.contains(':') {
-                    return Err(format!("资产路径不能包含冒号: {raw}"));
-                }
-                // Windows 会**静默**吃掉结尾的空格 / 点：写 `Box.glb ` 实际生成
-                // `Box.glb`，于是"我写下的 .meta"和"扫描看到的资产"对不上。
-                // 控制字符与 Windows 非法字符同理 —— 跨平台先挡，项目才可移植。
-                if part.ends_with([' ', '.'])
-                    || part
-                        .chars()
-                        .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
-                {
-                    return Err(format!("资产路径含非法字符: {raw}"));
-                }
-                parts.push(part.into_owned());
-            }
-            _ => return Err(format!("资产路径不能包含 `..` / 根组件: {raw}")),
-        }
-    }
-    if parts.is_empty() {
-        return Err(format!("资产路径不能为空: {raw}"));
-    }
-    let normalized = parts.join("/");
+    // 越界与"Windows 不认的写法"共用**同一条**规则（`normalize_project_relative`）：
+    // 场景 / 预制体 / 资产三个入口的路径纪律必须一模一样，否则就是
+    // "编辑器能写、`--check` 报错"或者反过来。
+    let normalized = crate::project::normalize_project_relative(raw)
+        .map_err(|defect| format!("{defect}: {raw}"))?;
     if AssetKind::from_path(&normalized).is_none() {
         return Err(format!("不是可登记的资产类型: {raw}"));
     }
     // 目录树里任何一级命中跳过名单，扫描器都永远看不到这个文件（`collect`
     // 是逐级剪枝的）；允许写进去等于制造"写成功但永不存在"的资产。
-    if let Some(skipped) = parts.iter().find(|part| {
+    if let Some(skipped) = normalized.split('/').find(|part| {
         SKIPPED_DIRS
             .iter()
             .any(|skip| part.eq_ignore_ascii_case(skip))
@@ -2025,8 +1990,23 @@ mod tests {
             "Resources/Box./A.glb",
             "Resources/a?b.glb",
             "Resources/a:b.glb",
+            // Windows 保留设备名：`File::create("Resources/CON.glb")` 打开的是
+            // 控制台设备，写进去的字节直接消失（读回来永远是空的）。
+            // 资产侧此前只挡了字符，没挡设备名。
+            "Resources/CON.glb",
+            "Resources/nul.glb",
+            "Resources/com1.glb",
+            "Resources/Lpt3.glb",
         ] {
             assert!(normalize_asset_relative(bad).is_err(), "必须拒绝 {bad:?}");
+        }
+        // 负对照：`console` / `connection` 之类只是**前缀**相同的正常名字。
+        for ok in [
+            "Resources/console.glb",
+            "Resources/connection.glb",
+            "Resources/com10.glb",
+        ] {
+            assert!(normalize_asset_relative(ok).is_ok(), "必须接受 {ok:?}");
         }
     }
 

@@ -91,8 +91,9 @@ pub use config::{
 };
 pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
 pub use project::{
-    normalize_scene_relative, same_scene_path, AssetMigrationReport, Project, ProjectError,
-    ProjectHandle, DEFAULT_ENTRY_SCENE, PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION,
+    normalize_project_relative, normalize_scene_relative, same_scene_path, AssetMigrationReport,
+    Project, ProjectError, ProjectHandle, DEFAULT_ENTRY_SCENE, PROJECT_FILE_NAME,
+    PROJECT_FORMAT_VERSION,
 };
 pub use scene::{Entity, Scene};
 pub use transform::{euler_deg_to_quat, quat_to_euler_deg, Transform};
