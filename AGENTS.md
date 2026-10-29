@@ -147,6 +147,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 视口导航（F / 数字键） | F 只动位置**不改朝向**（包围球装框，半径下限 0.25 / 边距 1.15）；数字键轴视角只转朝向**不动位置**、**不是正交投影**（别混着叫）；`PITCH_LIMIT = π/2 − 0.01`防 `forward × Y` 退化出 NaN；导航键在算 view_proj **之前**；快捷键必须过 `wants_keyboard_input` | §六十三 |
 | 路径（场景 / 资产 / 预制体 / 清单 / 引用） | 判定只有 `core::normalize_project_relative` **一处**（越界 + 冒号 / 结尾空格与点 / 控制字符 / Windows 保留设备名）；读写两个边界（`load_*` / `write_*`）都在碰盘前校验；`--check` 用 `unsafe_paths` 点名并进退出码 2（标签纯 ASCII、不与"文件缺失"重复计）；从**名字**生成文件名走 `sanitize_dir_name`（清洗），从**输入**拿路径走 `normalize_*`（拒绝） | §六十五 |
 | 写读稳定性 | `save → load → save` **第二轮起**必须逐字节不变（`tests/scene_roundtrip.rs` 五条门禁，进 CI）；保存**会吃掉注释**是已知取舍（要保注释走 `--migrate-assets`）；待写文本与盘上相同时**不写盘**（mtime 是热重载判据）；给 `Entity` 加字段时 `PartialEq` 的穷尽解构会逼你决定它是否进脏检查 | §六十六 |
+| 性能 / 物理 | `rapier3d` 必须开 `simd-stable`（稀疏动态 -36% / 密集接触 -6.5%）；代价是跨版本浮点不保证（同版本逐位确定性仍成立）；`World::update` 的五次全实体扫描**刻意不优化**（24 ns/实体，已在两万 FPS 上限）；`parallel` 特性不启用（打乱体间顺序） | §六十七 |
 | 插件 / 组件 | `Plugins/` 唯一目录；临时副本加载；旧 DLL 句柄永不卸载；参数键用注册名 | §四 |
 | 音频 | 脚本层不引 kira；监听者/主音量不进命令束；`follow` 是实体绑定；每渲染帧同步 | §五 |
 | 无头 / MCP | 不做第二份帧循环；退出码 2 不是工具失败；JSON 字段名是契约 | §六 |

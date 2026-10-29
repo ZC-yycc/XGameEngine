@@ -5,7 +5,11 @@ edition = "2021"
 description = "XGameEngine physics (rapier3d integration)"
 
 [dependencies]
-rapier3d = "0.22"
+# `simd-stable`：rapier 的求解器 / 岛管理走 `wide` 的 SIMD 实现（不需要 nightly）。
+# 密集接触是最贵的一档（1000 个互挤方块），这里省下的正是我们唯一的真瓶颈。
+# 代价：浮点求值顺序变化 → 物理行为有微小的数值差异（测试用容差，不是逐位比对）；
+# **逐位确定性门禁不受影响** —— 它比的是"同一个二进制跑两遍"，不是跨构建。
+rapier3d = { version = "0.22", features = ["simd-stable"] }
 glam = { version = "0.29", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
