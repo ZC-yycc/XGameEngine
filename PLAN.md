@@ -6968,7 +6968,7 @@ rapier 的求解器 / 岛管理走 `wide` 的 SIMD 实现（stable Rust 可用�
   `search_paths_resolve_scripts_outside_scripts_dir`），恢复后全绿；
 - 存档的 10 条新测试是**新能力**（没有旧实现可红），但每条都在钉一条会被"好心人"
   改错的语义：读档替换语义、实体变量生命周期、撞 ID 取第一个、坏档拒绝、
-  同状态字节相同、`slot1` / `slot1.sav` 同文件；
+  同状态字节相同、`slot1` / `slot1.sav` 同文件、被占用的目标保留旧档、`Saves` 被文件占住只报错；
 - 全量测试与 clippy 结果见下方"验证记录"。
 
 ### 五、刻意不做
@@ -6981,8 +6981,8 @@ rapier 的求解器 / 岛管理走 `wide` 的 SIMD 实现（stable Rust 可用�
 
 ### 验证记录
 
-- `cargo test --workspace --all-targets -- --test-threads=2`：**1061 passed / 0 failed /
-  11 ignored**（36 套件；新增 22 条测试 + 2 条基准），clippy `-D warnings` **0 告警**；
+- `cargo test --workspace --all-targets -- --test-threads=2`：**1063 passed / 0 failed /
+  11 ignored**（36 套件；新增 24 条测试 + 2 条基准），clippy `-D warnings` **0 告警**；
 - 四个示例项目 `--check` 全部退出 **0**（`search_paths` 的体检没有假阳性）；
 - **真实 CLI 端到端**（`--headless`，临时项目 = SampleScene 副本 + 一个探针脚本）：
   第 10 帧写变量并 `save_game("slot1")` → 第 20 帧把自己传送到 (40,40,40) →

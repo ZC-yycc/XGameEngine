@@ -227,3 +227,64 @@ fn save_file_is_human_readable_ron() {
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// 落盘纪律：目标被占用时**保留旧存档**，且不留下半截文件。
+///
+/// 与场景保存同一条契约（`fsx::write_atomic`）—— 存档也必须是"要么旧内容、
+/// 要么完整新内容"，否则玩家读到的是一份截断的档。
+#[cfg(windows)]
+#[test]
+fn locked_target_keeps_the_previous_save() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let root = temp_root("locked");
+    let first = sample_save();
+    write_save(&root, "slot1", &first).expect("首次写档");
+    let before = std::fs::read(root.join("Saves/slot1.sav")).unwrap();
+
+    // 允许读写但不允许删除 / 替换（share_mode = 3）。
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(root.join("Saves/slot1.sav"))
+        .unwrap();
+
+    let mut second = sample_save();
+    second.game_time = 999.0;
+    let result = write_save(&root, "slot1", &second);
+    let after = std::fs::read(root.join("Saves/slot1.sav")).unwrap();
+    drop(lock);
+
+    assert!(result.is_err(), "被占用的目标必须报错，不能静默成功");
+    assert_eq!(before, after, "旧存档必须原样保留");
+    // 暂存文件不留在盘上（失败路径自己清）。
+    let leftovers: Vec<_> = std::fs::read_dir(root.join("Saves"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(leftovers.is_empty(), "失败后不该留下暂存文件");
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// `Saves` 这个名字被一个**文件**占着：报错，不 panic，也不覆盖那个文件。
+#[test]
+fn saves_path_taken_by_a_file_is_an_error_not_a_panic() {
+    let root = temp_root("blocked");
+    std::fs::write(root.join(SAVE_DIR), b"not a directory").unwrap();
+
+    let result = write_save(&root, "slot1", &sample_save());
+    assert!(result.is_err(), "目录建不出来必须报错");
+    assert_eq!(
+        std::fs::read(root.join(SAVE_DIR)).unwrap(),
+        b"not a directory",
+        "那个文件不该被删掉或覆盖"
+    );
+    // 读 / 列 / 删在这种情况下都只是"没有"，不 panic。
+    assert!(!save_exists(&root, "slot1"));
+    assert!(list_saves(&root).is_empty());
+    assert!(delete_save(&root, "slot1").is_err() || !delete_save(&root, "slot1").unwrap());
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
