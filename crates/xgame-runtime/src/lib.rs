@@ -48,7 +48,7 @@ pub use registry::BehaviorRegistry;
 // 资产装载注入点住在 core：脚本层（`GameCtx`）要能按路径实例化预制体，而依赖方向
 // 是 `script ← runtime`，脚本层看不到本 crate 的类型。转出一致名，宿主侧的
 // `use xgame_runtime::SceneLoader` 不因此改变；设计取舍见 core 的 `loader` 模块。
-pub use world::{FrameReport, World, WorldConfig};
+pub use world::{FrameReport, SaveApplyReport, World, WorldConfig};
 pub use xgame_core::SceneLoader;
 // 音频引擎从这里再导出：宿主（编辑器 / 独立游戏）只需要 runtime 一个入口，
 // 不必自己再依赖 xgame-audio。
@@ -56,4 +56,4 @@ pub use xgame_audio::AudioEngine;
 
 // 常用类型顺手重导出，免得宿主到处写 `xgame_script::...`。
 pub use xgame_input::InputMap;
-pub use xgame_script::{LogLevel, ScriptLog};
+pub use xgame_script::{LogLevel, SaveContext, ScriptLog};

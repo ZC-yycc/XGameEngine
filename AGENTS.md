@@ -147,6 +147,8 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 视口导航（F / 数字键） | F 只动位置**不改朝向**（包围球装框，半径下限 0.25 / 边距 1.15）；数字键轴视角只转朝向**不动位置**、**不是正交投影**（别混着叫）；`PITCH_LIMIT = π/2 − 0.01`防 `forward × Y` 退化出 NaN；导航键在算 view_proj **之前**；快捷键必须过 `wants_keyboard_input` | §六十三 |
 | 路径（场景 / 资产 / 预制体 / 清单 / 引用） | 判定只有 `core::normalize_project_relative` **一处**（越界 + 冒号 / 结尾空格与点 / 控制字符 / Windows 保留设备名）；读写两个边界（`load_*` / `write_*`）都在碰盘前校验；`--check` 用 `unsafe_paths` 点名并进退出码 2（标签纯 ASCII、不与"文件缺失"重复计）；从**名字**生成文件名走 `sanitize_dir_name`（清洗），从**输入**拿路径走 `normalize_*`（拒绝） | §六十五 |
 | 写读稳定性 | `save → load → save` **第二轮起**必须逐字节不变（`tests/scene_roundtrip.rs` 五条门禁，进 CI）；保存**会吃掉注释**是已知取舍（要保注释走 `--migrate-assets`）；待写文本与盘上相同时**不写盘**（mtime 是热重载判据）；给 `Entity` 加字段时 `PartialEq` 的穷尽解构会逼你决定它是否进脏检查 | §六十六 |
+| 存档（SaveGame） | 存"状态覆盖层"：实体**局部**变换 + 刚体速度 + 全局 / 每实体变量；**不存** `state_*` / 时钟 / 生成物；读档**替换**不合并、对不上的实体跳过并计数、存档场景不同先切场景；实体变量跟实体走（切场景 / 销毁 / 读档后只留当前场景存在的 ID）；写前体检不合法即拒；存 / 读是帧末请求；读档实体查找**必须一次建索引**（`find_entity` 是线性的，逐条调就是 O(n²)） | §六十八 |
+| 运行时读路径 / `search_paths` | 脚本与音频的读取只有 `core::resolve_read_path` 一处（先 `normalize_project_relative`，再直接命中，再按 `search_paths` 兜底）；`search_paths` 是**读的兜底根**（有序、条目自身也要合规、不合规运行时跳过且 `--check` 报），只影响读不影响写；`LuaHost` / `AudioEngine` 必须拿到**同一份**列表 | §六十九 |
 | 性能 / 物理 | `rapier3d` 必须开 `simd-stable`（稀疏动态 -36% / 密集接触 -6.5%）；代价是跨版本浮点不保证（同版本逐位确定性仍成立）；`World::update` 的五次全实体扫描**刻意不优化**（24 ns/实体，已在两万 FPS 上限）；`parallel` 特性不启用（打乱体间顺序） | §六十七 |
 | 插件 / 组件 | `Plugins/` 唯一目录；临时副本加载；旧 DLL 句柄永不卸载；参数键用注册名 | §四 |
 | 音频 | 脚本层不引 kira；监听者/主音量不进命令束；`follow` 是实体绑定；每渲染帧同步 | §五 |

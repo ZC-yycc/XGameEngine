@@ -140,6 +140,7 @@ pub(crate) fn register(lua: &Lua) -> mlua::Result<()> {
     register_input(lua, &globals)?;
     register_time_and_log(lua, &globals)?;
     register_state(lua, &globals)?;
+    register_save(lua, &globals)?;
     register_animation(lua, &globals)?;
     register_audio(lua, &globals)?;
     crate::ui_api::register_ui(lua, &globals)?;
@@ -733,6 +734,124 @@ fn register_scene(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         })?,
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 存档
+// ---------------------------------------------------------------------------
+
+/// 存档 API：`save_game` / `load_game` / `has_save` / `save_slots` + 变量表。
+///
+/// 存 / 读是**请求**（帧末结算，见 `ScriptCommand::SaveGame`）；其余四个是即时
+/// 查询 / 写入。`Value` 只收数字 / 布尔 / 字符串 —— 表、函数、实体引用都不进存档
+/// （存档要能被人类读懂、被别的语言解析）。
+fn register_save(lua: &Lua, globals: &Table) -> mlua::Result<()> {
+    globals.set(
+        "save_game",
+        lua.create_function(|_, (ctx, slot): (LuaCtx, String)| {
+            ctx.game().save_game(&slot);
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "load_game",
+        lua.create_function(|_, (ctx, slot): (LuaCtx, String)| {
+            ctx.game().load_game(&slot);
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "has_save",
+        lua.create_function(|_, (ctx, slot): (LuaCtx, String)| Ok(ctx.game().has_save(&slot)))?,
+    )?;
+
+    globals.set(
+        "save_slots",
+        lua.create_function(|lua, ctx: LuaCtx| {
+            let slots = ctx.game().save_slots();
+            let table = lua.create_table()?;
+            for (index, slot) in slots.into_iter().enumerate() {
+                // 1 起（Lua 惯例）：返回的是数组式表，`#slots` 直接可用。
+                table.set(index + 1, slot)?;
+            }
+            Ok(table)
+        })?,
+    )?;
+
+    globals.set(
+        "save_set",
+        lua.create_function(|_, (ctx, key, value): (LuaCtx, String, Value)| {
+            let Some(value) = save_value_of(value) else {
+                return Ok(false);
+            };
+            Ok(ctx.game().set_save_var(&key, value))
+        })?,
+    )?;
+
+    globals.set(
+        "save_get",
+        lua.create_function(|lua, (ctx, key): (LuaCtx, String)| {
+            match ctx.game().save_var(&key) {
+                Some(value) => Ok(Some(lua_save_value(lua, value)?)),
+                None => Ok(None),
+            }
+        })?,
+    )?;
+
+    globals.set(
+        "save_remove",
+        lua.create_function(|_, (ctx, key): (LuaCtx, String)| {
+            Ok(ctx.game().remove_save_var(&key))
+        })?,
+    )?;
+
+    globals.set(
+        "entity_save_set",
+        lua.create_function(|_, (ctx, id, key, value): (LuaCtx, i64, String, Value)| {
+            let Some(value) = save_value_of(value) else {
+                return Ok(false);
+            };
+            Ok(ctx.game().set_entity_save_var(id_of(id), &key, value))
+        })?,
+    )?;
+
+    globals.set(
+        "entity_save_get",
+        lua.create_function(|lua, (ctx, id, key): (LuaCtx, i64, String)| {
+            match ctx.game().entity_save_var(id_of(id), &key) {
+                Some(value) => Ok(Some(lua_save_value(lua, value)?)),
+                None => Ok(None),
+            }
+        })?,
+    )?;
+
+    Ok(())
+}
+
+/// Lua 值 → 存档值。只有数字 / 布尔 / 字符串收；其它类型返回 `None`
+/// （调用方回 `false`，不 panic —— 脚本传了张表不该把整帧搞崩）。
+fn save_value_of(value: Value) -> Option<xgame_core::SaveValue> {
+    match value {
+        Value::Integer(i) => Some(xgame_core::SaveValue::Number(i as f64)),
+        Value::Number(n) if n.is_finite() => Some(xgame_core::SaveValue::Number(n)),
+        Value::Boolean(b) => Some(xgame_core::SaveValue::Bool(b)),
+        Value::String(s) => s
+            .to_str()
+            .ok()
+            .map(|text| xgame_core::SaveValue::Text(text.to_string())),
+        _ => None,
+    }
+}
+
+/// 存档值 → Lua 值（文本要现造 `LuaString`，所以借 VM）。
+fn lua_save_value(lua: &Lua, value: xgame_core::SaveValue) -> mlua::Result<Value> {
+    Ok(match value {
+        xgame_core::SaveValue::Number(n) => Value::Number(n),
+        xgame_core::SaveValue::Bool(b) => Value::Boolean(b),
+        xgame_core::SaveValue::Text(t) => Value::String(lua.create_string(&t)?),
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -84,6 +84,10 @@ pub struct GameCtx<'a> {
     /// 游戏时钟（时间缩放的唯一真相源）。`None` = 宿主没接：
     /// `set_time_scale` 静默 no-op、`time_scale()` 恒为 1.0。
     pub clock: Option<&'a mut GameClock>,
+    /// 存档上下文（变量表 + 项目根）。`None` = 宿主没接：存档相关调用
+    /// 静默 no-op（`has_save` 返回 `false`、`save_var` 返回 `None`），
+    /// 与"没接物理时 `raycast` 返回 miss"同款容错哲学。
+    pub save: Option<&'a mut crate::host::SaveContext>,
     /// 触发本次调用的实体（"self"）。[`EntityId::raw`] 为 `0` 表示没有实体上下文。
     pub entity: EntityId,
     /// 本帧真实帧间隔（秒）。
@@ -292,6 +296,96 @@ impl GameCtx<'_> {
 
     fn push_command(&mut self, command: ScriptCommand) {
         self.commands.push(command);
+    }
+
+    // -----------------------------------------------------------------------
+    // 存档
+    // -----------------------------------------------------------------------
+
+    /// 存档到某个槽（`"slot1"` → `Saves/slot1.sav`）。
+    ///
+    /// **帧末结算**：此刻场景与物理正被这次派发借走，而且"实体的位置"与
+    /// "刚体的速度"必须同一时刻读，否则存下来的是错配的一帧。失败原因
+    /// （槽名非法 / 写盘失败）由运行时记成 Error 日志 —— 脚本侧拿不到返回值，
+    /// 与 `load_scene` 一样是"请求"而不是"调用"。
+    ///
+    /// 要**确认**存成功再往下走（比如"存完才退出游戏"）的脚本，用
+    /// [`has_save`](Self::has_save) 在下一帧验证，不要在同一次钩子里判。
+    pub fn save_game(&mut self, slot: &str) {
+        self.push_command(ScriptCommand::SaveGame {
+            slot: slot.to_owned(),
+        });
+    }
+
+    /// 从某个槽读档（帧末结算）。
+    ///
+    /// 存档里记了场景且与当前场景不同时，运行时**先切场景再套状态** ——
+    /// 这就是"主菜单里读档直接回到关卡"能成立的原因。套不上状态的实体
+    /// （存档之后才生成的 / 已经销毁的）按 ID 跳过，数量记在无头报告里。
+    pub fn load_game(&mut self, slot: &str) {
+        self.push_command(ScriptCommand::LoadGame {
+            slot: slot.to_owned(),
+        });
+    }
+
+    /// 这个槽有没有存档（**立即**读盘判定，不触发加载）。
+    pub fn has_save(&self, slot: &str) -> bool {
+        self.save
+            .as_deref()
+            .and_then(|save| save.root.as_deref())
+            .is_some_and(|root| xgame_core::save_exists(root, slot))
+    }
+
+    /// 列出所有存档槽（升序槽名）。
+    pub fn save_slots(&self) -> Vec<String> {
+        self.save
+            .as_deref()
+            .and_then(|save| save.root.as_deref())
+            .map(xgame_core::list_saves)
+            .unwrap_or_default()
+    }
+
+    /// 记一个全局存档变量（跨场景保留）。
+    ///
+    /// 返回 `false` = 宿主没接存档上下文，或值是非有限数（`NaN` / `inf` 不许
+    /// 进存档：读回来会让物理与渲染出怪）。
+    pub fn set_save_var(&mut self, key: &str, value: xgame_core::SaveValue) -> bool {
+        self.save
+            .as_deref_mut()
+            .is_some_and(|save| save.vars.set_global(key, value))
+    }
+
+    /// 读一个全局存档变量。
+    pub fn save_var(&self, key: &str) -> Option<xgame_core::SaveValue> {
+        self.save
+            .as_deref()
+            .and_then(|save| save.vars.global(key).cloned())
+    }
+
+    /// 删除一个全局存档变量（返回它是否存在过）。
+    pub fn remove_save_var(&mut self, key: &str) -> bool {
+        self.save
+            .as_deref_mut()
+            .is_some_and(|save| save.vars.remove_global(key))
+    }
+
+    /// 记一个实体变量（跟着实体走：切场景时清空，见 `SaveVars::clear_entities`）。
+    pub fn set_entity_save_var(
+        &mut self,
+        id: EntityId,
+        key: &str,
+        value: xgame_core::SaveValue,
+    ) -> bool {
+        self.save
+            .as_deref_mut()
+            .is_some_and(|save| save.vars.set_entity(id, key, value))
+    }
+
+    /// 读一个实体变量。
+    pub fn entity_save_var(&self, id: EntityId, key: &str) -> Option<xgame_core::SaveValue> {
+        self.save
+            .as_deref()
+            .and_then(|save| save.vars.entity(id, key).cloned())
     }
 
     // -----------------------------------------------------------------------
@@ -1769,6 +1863,7 @@ pub(crate) mod tests {
 
         {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -1813,6 +1908,7 @@ pub(crate) mod tests {
         let mut commands = Vec::new();
         {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -1863,6 +1959,7 @@ pub(crate) mod tests {
         let mut commands = Vec::new();
         {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -1920,6 +2017,7 @@ pub(crate) mod tests {
         // 没挂 animator 的实体：全部静默 no-op，不 panic、不写日志。
         {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -1963,6 +2061,7 @@ pub(crate) mod tests {
         let mut commands = Vec::new();
         {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -2002,6 +2101,7 @@ pub(crate) mod tests {
         scene.add_entity(bare);
         let bare_id = scene.entities[1].id;
         let mut ctx = GameCtx {
+            save: None,
             scene: &mut scene,
             physics: None,
             input: None,
@@ -2038,6 +2138,7 @@ pub(crate) mod tests {
         let mut logs = Vec::new();
         let mut commands = Vec::new();
         let mut ctx = GameCtx {
+            save: None,
             scene: &mut scene,
             physics: None,
             input: None,
@@ -2080,6 +2181,7 @@ pub(crate) mod tests {
 
         {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -2132,6 +2234,7 @@ pub(crate) mod tests {
         // 没接音频：一条命令都不该产生，也不该 panic。
         let port2 = xgame_core::AudioPort::new();
         let mut ctx = GameCtx {
+            save: None,
             scene: &mut scene,
             physics: None,
             input: None,
@@ -2199,6 +2302,7 @@ pub(crate) mod tests {
         let mut commands = Vec::new();
         let root_id = {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -2256,6 +2360,7 @@ pub(crate) mod tests {
         let mut commands = Vec::new();
         let root_id = {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -2302,6 +2407,7 @@ pub(crate) mod tests {
         let mut commands = Vec::new();
         let result = {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -2339,6 +2445,7 @@ pub(crate) mod tests {
         let mut commands = Vec::new();
         let result = {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -2373,6 +2480,7 @@ pub(crate) mod tests {
         let mut commands = Vec::new();
         let root_id = {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -2413,6 +2521,7 @@ pub(crate) mod tests {
 
         {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,
@@ -2479,6 +2588,7 @@ pub(crate) mod tests {
 
         {
             let mut ctx = GameCtx {
+                save: None,
                 scene: &mut scene,
                 physics: None,
                 input: None,

@@ -281,6 +281,103 @@ fn validate_path_component(part: &str) -> Result<(), PathDefect> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 运行时读路径：脚本 / 音频的解析入口
+// ---------------------------------------------------------------------------
+
+/// 运行时**读**路径解析失败的原因。
+///
+/// 分成两类而不是一句话，是因为两者的处置完全不同：
+/// - [`Invalid`](Self::Invalid)：路径本身不合规（越界 / Windows 不认的写法）。
+///   这是**永久性**失败 —— 同一份工程换台机器也读不到，必须报错；
+/// - [`Missing`](Self::Missing)：路径合规但盘上没有。可能是打包漏了文件，
+///   也可能是作者写错，报错里要能看见**找过哪些目录**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadPathError {
+    /// 路径本身不合规。
+    Invalid(PathDefect),
+    /// 合规但没找到（含按 `search_paths` 逐个找过）。
+    Missing {
+        /// 规范化之后的项目相对路径。
+        relative: String,
+        /// 实际试过的候选（项目相对路径，按尝试顺序）。
+        tried: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for ReadPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(defect) => write!(f, "{defect}"),
+            Self::Missing { relative, tried } => {
+                write!(f, "文件不存在: {relative}")?;
+                if tried.len() > 1 {
+                    write!(f, "（已按 search_paths 试过: {}）", tried.join(", "))?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// 把一个**项目相对**的读路径解析成绝对路径（脚本 / 音频的共用入口）。
+///
+/// # 为什么要这一层
+///
+/// 运行时此前是 `root.join(path)` 直接读：`Path::join` 遇到绝对路径会**整个
+/// 替换**掉根，遇到 `..` 会逐级上跳 —— 于是一份手写 / 下载来的场景可以让运行时
+/// 读项目外的任意文件（`--check` 的 `unsafe_paths` 会点名，但**不跑检查的宿主
+/// 仍然会去读**）。检查是工具，门禁必须在读取的地方。
+///
+/// 规范化只走 [`normalize_project_relative`] 这一条规则（与场景 / 资产相同），
+/// 不在读取路径上再养第三份判断。
+///
+/// # `search_paths` 的语义（此前是"未定义"）
+///
+/// 有序的**附加搜索根**（项目相对目录）。解析顺序：
+/// 1. 直接 `root/<relative>`；
+/// 2. 依次试 `root/<search_path>/<relative>`；
+/// 3. 都没有 → [`ReadPathError::Missing`]，报错里列出所有试过的路径。
+///
+/// 三条约束：
+/// - 每个条目本身也要过 `normalize_project_relative`（不许越界 / 不许 Windows
+///   不认的写法）；不合规的条目**跳过**（`--check` 会把它们报成问题），
+///   不会让一次读取变成"读到项目外"；
+/// - 只影响**读**：写盘（保存场景 / 存档）永远落在清单声明的位置，不四处探路；
+/// - 空列表 = 行为与引入本函数之前**逐位一致**（直接那条命中，或报缺失）。
+///
+/// # 已知边界
+///
+/// 只按"文件存在"判定，不区分大小写（Windows 文件系统本身不区分）；
+/// 不做符号链接逃逸检测 —— 链接目标在项目外时仍会被读到，那是**工程作者**
+/// 主动放进仓库的东西，与"脚本里写 `../..`"不是一类问题。
+pub fn resolve_read_path(
+    root: &Path,
+    relative: &str,
+    search_paths: &[String],
+) -> Result<PathBuf, ReadPathError> {
+    let rel = normalize_project_relative(relative).map_err(ReadPathError::Invalid)?;
+    let direct = root.join(&rel);
+    if direct.is_file() {
+        return Ok(direct);
+    }
+    let mut tried = vec![rel.clone()];
+    for entry in search_paths {
+        let Ok(dir) = normalize_project_relative(entry) else {
+            continue;
+        };
+        let candidate = format!("{dir}/{rel}");
+        if root.join(&candidate).is_file() {
+            return Ok(root.join(candidate));
+        }
+        tried.push(candidate);
+    }
+    Err(ReadPathError::Missing {
+        relative: rel,
+        tried,
+    })
+}
+
 /// 新建项目时写下的 `.gitignore`。
 ///
 /// 三条都是**本引擎产生的东西**：`Build/`（编辑器 Build 按钮）、
@@ -296,6 +393,9 @@ Plugins/
 
 # 自动保存副本（编辑器崩溃恢复用，属于本机现场，不入库）
 .autosave/
+
+# 存档（玩家进度：本机玩出来的数据，不是关卡内容；要联机共享就手动提交）
+Saves/
 ";
 
 // ---------------------------------------------------------------------------
@@ -419,6 +519,18 @@ impl Project {
                 // 标签用 ASCII：报告要能被 CI 的文本匹配与 GBK 控制台一起看。
                 out.push(format!(
                     "{PROJECT_FILE_NAME} -> {label} {raw} ({})",
+                    defect.ascii()
+                ));
+            }
+        }
+        // `search_paths` 的条目同样要体检：它们直接参与运行时读路径解析
+        // （见 [`resolve_read_path`]），越界的条目会让读取探到项目外。
+        // 运行时对不合规条目是**跳过**，所以这里必须报出来 —— 否则"配了但没生效"
+        // 会变成无声的行为差。
+        for (index, raw) in content.search_paths.iter().enumerate() {
+            if let Err(defect) = normalize_project_relative(raw) {
+                out.push(format!(
+                    "{PROJECT_FILE_NAME} -> content.search_paths[{index}] {raw} ({})",
                     defect.ascii()
                 ));
             }

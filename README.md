@@ -27,7 +27,7 @@ cargo run -p xgame-editor -- --check projects/SampleScene
 # （无 --out 打 stdout；同一份代码两次导出逐字节相同）
 cargo run -p xgame-editor -- --export-schema --out schema.json
 
-# 脚本 API 清单 —— 导出 160 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
+# 脚本 API 清单 —— 导出 169 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
 # （与 MCP `script_api_read` 同源；无 --out 打 stdout）
 cargo run -p xgame-editor -- --export-script-api --out script_api.json
 
@@ -888,6 +888,7 @@ clock.tick(dt)
 | 编辑器缩放 | 拖边框时**节流重建**离屏目标（≤10Hz），尺寸一稳定立刻按最终尺寸重建。实测一次拖拽重建次数 43 → 1 |
 | 渲染实例化 | 同图元（网格指针相同）合并成一次实例化 draw，逐实例数据走 storage buffer；2000 实体同网格场景 **2001 批 → 2 批**、CPU 2225 → 344 µs/帧（-84%） |
 | 视锥剔除 | 实体级世界 AABB × 六个归一化视锥平面；相机外但影子会进画面的投影物只跑阴影 pass；2000 实体窄视场未合批场景 **2000 → 868 批**、CPU 3295 → 1146 µs/帧（-65%） |
+| 存档 | 读档按 `EntityId` **一次建索引**再匹配（`Scene::find_entity` 是线性查找，逐条调就是 O(n²)：8000 实体 50 ms → 1.7 ms）；写盘走 `fsx` 原子写含 fsync，2000 实体 1–12 ms —— 手动存档量级，**不适合每帧调** |
 | 游戏 UI | 布局 + 文本排版 + 合批是**每帧恒定**成本（不像 3D 有指纹门控可跳过）：900 元素 / 3190 字形 **753 µs/帧**（60fps 预算 4.5%）。矩形与字形共用一条管线 + 同一张图集，**整屏 1 次 draw call**；没有 UI 实体时一次 `any` 扫描就整段跳过 |
 
 > 渲染侧的两条纪律：剔除**开 / 关画面逐字节一致**（宁可白画不能黑屏），合批的批次
@@ -982,7 +983,7 @@ Build/<项目名>/
 | 工具 | 干什么 |
 |---|---|
 | `schema_read` | 读场景格式的机器可读说明书（36 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
-| `script_api_read` | 读脚本 API 的机器可读清单（160 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
+| `script_api_read` | 读脚本 API 的机器可读清单（169 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
 | `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |

@@ -960,6 +960,14 @@ impl PhysicsWorld {
         Some(Vec3::new(v.x, v.y, v.z))
     }
 
+    /// 当前角速度（存档采集用；与 [`body_velocity`](Self::body_velocity) 对称）。
+    pub fn body_angular_velocity(&self, body_id: u64) -> Option<Vec3> {
+        let record = self.bodies.get(&body_id)?;
+        let rb = self.rigid_body_set.get(record.rapier_handle)?;
+        let v = *rb.angvel();
+        Some(Vec3::new(v.x, v.y, v.z))
+    }
+
     /// 直接设置线速度（运动学体与动态体都适用）。
     pub fn set_velocity(&mut self, body_id: u64, velocity: Vec3) {
         if let Some(record) = self.bodies.get(&body_id) {

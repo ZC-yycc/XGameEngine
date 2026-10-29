@@ -721,7 +721,57 @@ end
 > 都已接）。没接的运行时（例如单元测试直接 `World::new`）会记一条
 > "宿主没有接入场景装载器"的错误 —— 静默失败会让人以为脚本写错了。
 
+### 4.17 存档与变量（SaveGame）
+
+| 函数 | 说明 |
+|---|---|
+| `save_game(ctx, slot)` | 请求存档到 `Saves/<slot>.sav`。**本帧末尾**才写盘 |
+| `load_game(ctx, slot)` | 请求读档。**本帧末尾**生效；存档场景与当前不同时先切场景 |
+| `has_save(ctx, slot)` | 这个槽有没有存档（立即判，不加载） |
+| `save_slots(ctx)` | 全部槽名（升序数组式表，`#slots` 可用） |
+| `save_set(ctx, key, v)` / `save_get(ctx, key)` / `save_remove(ctx, key)` | 全局变量 |
+| `entity_save_set(ctx, id, k, v)` / `entity_save_get(ctx, id, k)` | 每实体变量 |
+
+**存什么**：每个实体的局部变换 + 刚体速度，加上你自己写进来的变量。**不存**脚本
+`state_*`（那是 Lua 值，可能是表 / 函数）、不存时钟、也不"复活"存档之后才生成的
+实体 —— 读档是"把现在这些实体的状态拨回去"，不是"重建那一刻"。
+
+```lua
+-- 存档：血量这种玩法数据自己写进变量，引擎不知道它的语义
+function save_now(ctx)
+    local me = self_id(ctx)
+    entity_save_set(ctx, me, "hp", 75)
+    save_set(ctx, "coins", 12)
+    save_set(ctx, "checkpoint", "gate")
+    save_game(ctx, "slot1")
+end
+
+-- 读档：变量会在**同一帧末尾**恢复，下一帧的钩子里就能读到
+function load_now(ctx)
+    load_game(ctx, "slot1")
+end
+
+function start(ctx)
+    local hp = entity_save_get(ctx, self_id(ctx), "hp")
+    if hp then set_health(hp) end
+end
+```
+
+语义要点：
+
+- **请求式**：`save_game` / `load_game` 只登记，帧末统一结算（与 `load_scene`
+  同一时机）。所以"存完立刻读回来验证"要等下一帧 —— 用 `has_save` 判存在性。
+- **变量只收数字 / 布尔 / 字符串**，其它类型 `save_set` 回 `false` 且不写。
+  `NaN` / `∞` 一律拒绝（读回来会让物理与渲染出怪）。
+- **全局变量跨场景保留**（与脚本全局变量同款语义），**实体变量跟着实体走**：
+  切场景、实体销毁时清空。
+- **读档是替换不是合并**：存档里没有的键会被清掉（否则"读档后血条显示上一次的数"）。
+- **实体对不上就跳过**，数量写进日志（`跳过 N 个`）和无头报告；不会生成新实体。
+- 存档路径同样**只认项目相对路径**：`slot` 里写 `../x`、盘符、`a:b`、`CON`
+  会被拒绝（错误日志），`slot1` 与 `slot1.sav` 落到同一个文件。
+
 ---
+
 
 ## 五、输入映射（`input.ron`）
 

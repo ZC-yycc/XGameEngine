@@ -86,6 +86,9 @@ pub struct AudioEngine {
     playback: Playback,
     /// clip 路径解析基准（项目根目录）。
     root: PathBuf,
+    /// 附加搜索根（`project.ron` 的 `content.search_paths`，语义见
+    /// [`xgame_core::resolve_read_path`]）。
+    search_paths: Vec<String>,
     /// 解码缓存：clip 路径 → 共享音频数据（`StaticSoundData` 的帧是 `Arc`，
     /// 克隆是常数成本）。
     clips: HashMap<String, Arc<StaticSoundData>>,
@@ -150,6 +153,7 @@ impl AudioEngine {
         Self {
             playback,
             root,
+            search_paths: Vec::new(),
             clips: HashMap::new(),
             failed: HashSet::new(),
             sounds: Vec::new(),
@@ -157,6 +161,14 @@ impl AudioEngine {
             stopped: 0,
             last_batch: 0,
         }
+    }
+
+    /// 设置附加搜索根（`project.ron` 的 `content.search_paths`）。
+    ///
+    /// 只影响**还没解码**的 clip（已解码的缓存键是原路径，语义不变）。
+    /// 语义与门禁在 [`xgame_core::resolve_read_path`]。
+    pub fn set_search_paths(&mut self, paths: Vec<String>) {
+        self.search_paths = paths;
     }
 
     /// 是否真的连着输出设备。
@@ -327,7 +339,16 @@ impl AudioEngine {
         if self.failed.contains(clip) {
             return None;
         }
-        let path: PathBuf = self.root.join(clip);
+        let path: PathBuf = match xgame_core::resolve_read_path(&self.root, clip, &self.search_paths)
+        {
+            Ok(path) => path,
+            Err(err) => {
+                // 路径门禁：越界 / Windows 不认的写法在这里挡住，不落盘读。
+                self.failed.insert(clip.to_owned());
+                log::warn!("音频路径不可用 '{clip}': {err}");
+                return None;
+            }
+        };
         match StaticSoundData::from_file(&path) {
             Ok(data) => {
                 let data = Arc::new(data);
@@ -580,6 +601,63 @@ mod tests {
 
         engine.apply(&[AudioCommand::StopAll], &pose, 1.0);
         assert_eq!(engine.stats().active, 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 越界 clip 路径在解码之前被拒绝：不会去读项目外的文件，也不会进缓存。
+    ///
+    /// 旧实现是 `root.join(clip)` —— `../../x.wav` 会真的被解码播放；
+    /// 绝对路径更糟，`Path::join` 直接把根整个替换掉。
+    #[test]
+    fn clip_path_escape_is_rejected_before_decoding() {
+        let root = temp_root("escape");
+        // 项目外放一份真 WAV：只要路径门禁失效，它就会被解码（cached_clips = 1）。
+        let outside_dir = root.parent().unwrap().to_path_buf();
+        let outside = outside_dir.join(format!(
+            "xgame_audio_outside_{}_{}.wav",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_test_wav(&outside);
+        let clip = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+
+        let mut engine = AudioEngine::silent(&root);
+        let pose = ListenerPose::default();
+        engine.apply(&[AudioCommand::Play(PlaySound::new(&clip))], &pose, 1.0);
+
+        let stats = engine.stats();
+        assert_eq!(stats.requests, 1, "请求照旧计数（在解码之前）");
+        assert_eq!(stats.cached_clips, 0, "越界路径绝不能解码");
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.failed_clips, 1, "进 failed 表，不每帧重试");
+
+        std::fs::remove_file(&outside).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `search_paths` 是音频解析的兜底目录（与脚本同一条规则）。
+    #[test]
+    fn search_paths_resolve_audio_outside_the_root() {
+        let root = temp_root("search");
+        std::fs::create_dir_all(root.join("Mods/Sfx")).unwrap();
+        write_test_wav(&root.join("Mods/Sfx/Shared.wav"));
+
+        let mut engine = AudioEngine::silent(&root);
+        engine.set_search_paths(vec!["Mods/Sfx".into()]);
+        let pose = ListenerPose::default();
+        engine.apply(
+            &[AudioCommand::Play(PlaySound::new("Shared.wav"))],
+            &pose,
+            1.0,
+        );
+
+        let stats = engine.stats();
+        assert_eq!(stats.cached_clips, 1, "兜底目录里的 clip 应当被解码");
+        assert_eq!(stats.active, 1);
 
         let _ = std::fs::remove_dir_all(&root);
     }

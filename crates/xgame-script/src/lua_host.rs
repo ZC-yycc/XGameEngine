@@ -141,6 +141,11 @@ pub struct LuaHost {
     error_streak: HashMap<(EntityId, u32, u8), u32>,
     /// 脚本路径的解析基准（项目根目录）。
     root: Option<PathBuf>,
+    /// 附加搜索根（`project.ron` 的 `content.search_paths`）。
+    ///
+    /// 语义与门禁都在 [`xgame_core::resolve_read_path`]：先直接命中、再按顺序
+    /// 试这些目录；不合规的条目运行时跳过（`--check` 会报）。
+    search_paths: Vec<String>,
     /// 内存上限（字节）。只用于**报错文案**：真正的强制在 `lua.set_memory_limit`。
     memory_limit: usize,
 }
@@ -226,6 +231,7 @@ impl LuaHost {
             commands: Vec::new(),
             error_streak: HashMap::new(),
             root: None,
+            search_paths: Vec::new(),
             memory_limit: limit,
         }
     }
@@ -257,6 +263,14 @@ impl LuaHost {
     /// 设置脚本路径的解析基准（项目根目录）。
     pub fn set_root(&mut self, root: impl Into<PathBuf>) {
         self.root = Some(root.into());
+    }
+
+    /// 设置附加搜索根（`project.ron` 的 `content.search_paths`）。
+    ///
+    /// 只影响**还没加载**的脚本：已经编译进缓存的不重读（与热重载的语义一致 ——
+    /// 换搜索路径不是"脚本内容变了"）。
+    pub fn set_search_paths(&mut self, paths: Vec<String>) {
+        self.search_paths = paths;
     }
 
     /// 已编译脚本数量。
@@ -514,6 +528,7 @@ impl LuaHost {
             scene_order: frame.scene_order,
             loader: frame.loader,
             clock: frame.clock.as_deref_mut(),
+            save: frame.save.as_deref_mut(),
             entity,
             delta: frame.delta,
             time: frame.time,
@@ -583,6 +598,9 @@ impl LuaHost {
                 // 一帧多次切换请求只认最后一个：中间那些场景永远不会被装载，
                 // 也就不该产生"装载了又立刻丢弃"的副作用。
                 ScriptCommand::LoadScene { path } => report.scene_load = Some(path),
+                // 与场景切换同款：一帧只做最后一次请求。
+                ScriptCommand::SaveGame { slot } => report.save_game = Some(slot),
+                ScriptCommand::LoadGame { slot } => report.load_game = Some(slot),
             }
         }
         report
@@ -623,7 +641,21 @@ impl LuaHost {
             return false;
         };
 
-        let full = root.join(path);
+        let full = match xgame_core::resolve_read_path(&root, path, &self.search_paths) {
+            Ok(full) => full,
+            Err(err) => {
+                // 路径门禁：`../..` / 绝对路径 / Windows 不认的写法在这里就挡住，
+                // 绝不落到 `fs::read_to_string`。报错里带原因与试过的目录。
+                self.logs.push(ScriptLog {
+                    level: LogLevel::Error,
+                    script: path.to_owned(),
+                    entity: None,
+                    message: format!("脚本路径不可用 '{path}': {err}"),
+                });
+                self.failed.insert(path.to_owned());
+                return false;
+            }
+        };
         let source = match std::fs::read_to_string(&full) {
             Ok(source) => source,
             Err(err) => {
@@ -858,6 +890,96 @@ mod tests {
         entity.scripts.push(relative.to_owned());
         scene.add_entity(entity);
         scene
+    }
+
+    /// 越界脚本路径在**读取之前**就被拒绝：不读盘、不执行，报错说清原因。
+    ///
+    /// 旧实现是 `root.join(path)`：`../outside.lua` 会真的被读进来并执行 ——
+    /// 一份手写 / 下载来的场景就能让运行时跑项目外的代码。`--check` 会点名这种
+    /// 引用，但**不跑检查的宿主（独立游戏）照样会读**，所以门禁必须在读取处。
+    #[test]
+    fn script_path_escape_is_rejected_before_reading() {
+        let project = TempProject::new("path_escape");
+        // 项目**外**放一份脚本，用 `..` 指过去。
+        let outside = project.dir.parent().unwrap().join(format!(
+            "xgame_escape_{}_{}.lua",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&outside, "function update(ctx) log(ctx, 'ESCAPED') end").unwrap();
+        let relative = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+
+        let mut scene = scene_with_script(&relative);
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+
+        let logs = host.take_logs();
+        assert!(
+            logs.iter()
+                .any(|l| l.level == LogLevel::Error && l.message.contains("脚本路径不可用")),
+            "越界路径必须报「脚本路径不可用」，实际: {logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|l| l.message.contains("ESCAPED")),
+            "项目外的脚本一个字都不许执行: {logs:?}"
+        );
+        std::fs::remove_file(&outside).unwrap();
+    }
+
+    /// `search_paths` 是脚本解析的兜底目录：`Scripts/` 之外的共享脚本能被找到。
+    #[test]
+    fn search_paths_resolve_scripts_outside_scripts_dir() {
+        let project = TempProject::new("search_paths");
+        std::fs::create_dir_all(project.dir.join("Mods/Shared")).unwrap();
+        std::fs::write(
+            project.dir.join("Mods/Shared/shared.lua"),
+            "function update(ctx) log(ctx, 'SHARED RAN') end",
+        )
+        .unwrap();
+
+        let mut scene = scene_with_script("shared.lua");
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+        host.set_search_paths(vec!["Mods/Shared".into()]);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+
+        let logs = host.take_logs();
+        assert!(
+            logs.iter().any(|l| l.message.contains("SHARED RAN")),
+            "兜底目录里的脚本应当被执行: {logs:?}"
+        );
+    }
+
+    /// 越界的 `search_paths` 条目被跳过 —— 它不能把搜索范围扩到项目外。
+    #[test]
+    fn invalid_search_path_cannot_widen_script_search() {
+        let project = TempProject::new("bad_search");
+        // 刻意在项目**外**放一份与待加载脚本**同名**的文件：只有真的把 `..`
+        // 当成搜索根，它才会被找到。
+        let outside = project.dir.parent().unwrap().join("nope.lua");
+        std::fs::write(&outside, "function update(ctx) log(ctx, 'ESCAPED') end").unwrap();
+
+        let mut scene = scene_with_script("nope.lua");
+        let mut host = LuaHost::new();
+        host.set_root(&project.dir);
+        host.set_search_paths(vec!["..".into(), "C:/Windows".into()]);
+        host.dispatch_update(FrameCtx::new(&mut scene, 0.0, 0.0));
+
+        let logs = host.take_logs();
+        assert!(
+            logs.iter()
+                .any(|l| l.level == LogLevel::Error && l.message.contains("脚本路径不可用")),
+            "缺失脚本必须报错（而不是从越界目录里找到）: {logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|l| l.message.contains("ESCAPED")),
+            "越界搜索根不得命中: {logs:?}"
+        );
+        std::fs::remove_file(&outside).unwrap();
     }
 
     /// 成功执行一次就把报错计数清零 —— 恢复之后再次出错必须重新报。
@@ -1851,7 +1973,7 @@ mod tests {
     ///
     /// 不靠运行期枚举全局表：Lua 基础库也有 `error` 等函数，而引擎恰好覆盖了
     /// 同名全局；用集合差分会把被覆盖的名字漏掉。直接读注册源码能精确拿到
-    /// 引擎自己注册的 160 个名字。
+    /// 引擎自己注册的 169 个名字。
     fn registered_global_names(source: &str) -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let mut rest = source;
@@ -1895,8 +2017,8 @@ mod tests {
         );
         assert_eq!(
             actual.len(),
-            160,
-            "注册名数量应为 160（2026-10-24 加 morph / set_morph）"
+            169,
+            "注册名数量应为 169（2026-10-29 加存档 9 个：save_game / load_game / has_save / save_slots / save_set / save_get / save_remove / entity_save_set / entity_save_get）"
         );
 
         let host = LuaHost::new();

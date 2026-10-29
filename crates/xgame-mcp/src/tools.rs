@@ -230,7 +230,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "script_api_read",
-            "description": "返回脚本 API 的机器可读清单（JSON）：160 个全局函数（签名 / 参数 / 返回值 / 语义）、6 个生命周期钩子、17 个类别、值类型与全局约定。写 .lua 之前先读；与 `xgame-editor --export-script-api` 同源，不需要 project。",
+            "description": "返回脚本 API 的机器可读清单（JSON）：169 个全局函数（签名 / 参数 / 返回值 / 语义）、6 个生命周期钩子、18 个类别、值类型与全局约定。写 .lua 之前先读；与 `xgame-editor --export-script-api` 同源，不需要 project。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -1163,13 +1163,13 @@ mod tests {
             xgame_core::script_api::SCRIPT_API_FORMAT_VERSION
         );
         let categories = value["categories"].as_array().expect("categories 数组");
-        assert_eq!(categories.len(), 17, "类别数");
+        assert_eq!(categories.len(), 18, "类别数");
         assert_eq!(value["hooks"].as_array().expect("hooks 数组").len(), 6);
         let functions: Vec<&Value> = categories
             .iter()
             .flat_map(|category| category["functions"].as_array().expect("functions 数组"))
             .collect();
-        assert_eq!(functions.len(), 160, "函数总数");
+        assert_eq!(functions.len(), 169, "函数总数");
         assert!(
             functions
                 .iter()

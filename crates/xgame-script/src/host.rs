@@ -4,9 +4,41 @@
 //! P3 删除 —— P2.5 闸门判定 Lua 三负载全占优（规则见计划文档 §六，数据见
 //! PLAN.md 二十），本模块只留下两轨共用过的类型，API 面不变。
 
-use xgame_core::EntityId;
+use std::path::PathBuf;
+
+use xgame_core::{EntityId, SaveVars};
 
 use crate::context::RemovedEntity;
+
+/// 脚本侧的存档上下文：**变量表 + 项目根**。
+///
+/// 变量表住在这里而不是塞进 `Entity`：它是玩法层数据，引擎不解释语义；塞进
+/// 实体会让场景文件长出一块作者没写过的字段，还会把"关卡长什么样"与
+/// "这一局玩到哪"混进同一次保存（见 `xgame_core::savegame` 的模块文档）。
+///
+/// 项目根只给**查询**用（`has_save` / `save_slots`）：真正的存 / 读动作是
+/// `ScriptCommand`，由运行时在帧末统一做 —— 那里才拿得到刚体速度、也才能
+/// 处理"存档里的场景与当前场景不同"（要切场景）。
+///
+/// `root == None`（测试 / 宿主没接）时所有查询静默返回"没有"，
+/// 与"没接音频时播放静默 no-op"同款容错哲学。
+#[derive(Debug, Clone, Default)]
+pub struct SaveContext {
+    /// 项目根目录（`SaveContext` 由 `World` 持有，恒为 `Some`；测试可为 `None`）。
+    pub root: Option<PathBuf>,
+    /// 活变量表（存档时摊进快照，读档时替换回来）。
+    pub vars: SaveVars,
+}
+
+impl SaveContext {
+    /// 绑定项目根的上下文。
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: Some(root.into()),
+            vars: SaveVars::default(),
+        }
+    }
+}
 
 /// 脚本可以实现的生命周期钩子。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +96,11 @@ pub struct CommandReport {
     /// 脚本请求加载的场景（项目相对路径）。同一帧多次请求时**最后一个生效** ——
     /// 一帧只换一次场景，不允许"切三次最后停在第二次"这种中间态。
     pub scene_load: Option<String>,
+    /// 脚本请求存档（槽名）。帧末结算：此刻场景正被 `&mut` 借给 `GameCtx`，
+    /// 而且刚体速度只有在帧末才与实体的可见状态对齐。
+    pub save_game: Option<String>,
+    /// 脚本请求读档（槽名）。帧末结算；存档里的场景与当前不同时由运行时切过去。
+    pub load_game: Option<String>,
 }
 
 impl CommandReport {
@@ -74,5 +111,7 @@ impl CommandReport {
             && self.reparented.is_empty()
             && self.relayered.is_empty()
             && self.scene_load.is_none()
+            && self.save_game.is_none()
+            && self.load_game.is_none()
     }
 }

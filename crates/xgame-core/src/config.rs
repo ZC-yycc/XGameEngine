@@ -128,7 +128,19 @@ pub struct ContentConfig {
     /// 一个还没写脚本的项目完全合法。
     #[serde(default = "default_scripts_dir")]
     pub scripts_dir: String,
-    /// 附加搜索路径列表。
+    /// 附加搜索路径列表（有序，项目相对目录）。
+    ///
+    /// **语义**（2026-10-29 定义并落地，见 [`crate::project::resolve_read_path`]）：
+    /// 运行时按项目相对路径读文件（脚本 / 音频）时，先试 `根/<相对路径>`，
+    /// 再依次试 `根/<条目>/<相对路径>`。条目本身也过
+    /// [`crate::project::normalize_project_relative`]，不合规的条目在运行时被
+    /// **跳过**、由 `--check` 报成问题 —— 它绝不会让读取探到项目外。
+    ///
+    /// 只影响**读**；写盘永远落在清单声明的位置。空列表 = 与引入该字段之前
+    /// 行为逐位一致（老工程全是空列表）。
+    ///
+    /// 典型用途：把共享脚本放 `Mods/Shared/Scripts`，让 `Scripts/` 与它一起被搜；
+    /// 或者团队把公共资产放在独立目录里复用。
     pub search_paths: Vec<String>,
 }
 

@@ -164,6 +164,14 @@ pub enum ScriptCommand {
     /// 换掉它意味着在派发中途把脚下那份场景抽走。所以只登记请求，
     /// 由运行时在**本帧末尾**统一应用（见 `World::apply_pending_scene_load`）。
     LoadScene { path: String },
+    /// 脚本请求存档到某个槽（帧末结算，见 `World::save_game`）。
+    ///
+    /// 为什么不在钩子里直接写：那一刻 `Scene` / `PhysicsWorld` 正被 `&mut`
+    /// 借给 `GameCtx`，而采集要**同一时刻**读实体的局部变换与刚体的速度
+    /// （分两次读会把"一帧前的速度"配"这一刻的位置"存下来）。
+    SaveGame { slot: String },
+    /// 脚本请求读档（帧末结算）。存档里的场景与当前不同时，运行时会先切场景。
+    LoadGame { slot: String },
 }
 
 /// 脚本请求生成的实体。
@@ -225,6 +233,9 @@ pub struct FrameCtx<'a> {
     /// no-op、`time_scale()` 恒返回 1.0 —— 与"没接物理时 `raycast` 返回 miss"
     /// 同款容错，脚本不必先探测。
     pub clock: Option<&'a mut GameClock>,
+    /// 存档上下文（变量表 + 项目根）。宿主没注入 = `None`：存档相关调用静默
+    /// no-op（`has_save` 返回 `false`、`save_var` 返回 `None`）。
+    pub save: Option<&'a mut crate::host::SaveContext>,
     /// 本帧帧间隔（秒，**已按 `time_scale` 缩放**）。暂停时恒为 0。
     pub delta: f32,
     /// 游戏已运行的总时长（秒，同样按 `time_scale` 缩放；暂停时不再增长）。
@@ -242,6 +253,7 @@ impl<'a> FrameCtx<'a> {
             scene_order: &[],
             loader: None,
             clock: None,
+            save: None,
             delta,
             time,
         }
@@ -287,6 +299,15 @@ impl<'a> FrameCtx<'a> {
     /// 另给一份副本会让"暂停了但物理还在走"。
     pub fn with_clock(mut self, clock: &'a mut GameClock) -> Self {
         self.clock = Some(clock);
+        self
+    }
+
+    /// 注入存档上下文（变量表 + 项目根）。
+    ///
+    /// 与时钟同理：必须是运行时自己那一份 —— 另给一份副本会让"脚本设的变量"
+    /// 与"存档写出去的内容"分叉。
+    pub fn with_save(mut self, save: &'a mut crate::host::SaveContext) -> Self {
+        self.save = Some(save);
         self
     }
 }

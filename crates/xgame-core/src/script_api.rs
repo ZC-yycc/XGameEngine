@@ -323,6 +323,11 @@ const CATEGORIES: &[CategoryDef] = &[
         summary: "按 (实体, 脚本) 保存持久键值；跨帧 / 跨热重载保留。",
     },
     CategoryDef {
+        id: "save",
+        name: "存档",
+        summary: "存档 / 读档（Saves/<槽>.sav）+ 跨会话保留的变量（全局 / 每实体）。",
+    },
+    CategoryDef {
         id: "math",
         name: "数学",
         summary: "Lua 表形式的向量构造 / 运算与标量工具（不接 ctx）。",
@@ -394,7 +399,7 @@ const fn api(
     }
 }
 
-/// 全部 160 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
+/// 全部 169 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
 const FUNCTIONS: &[ApiDef] = &[
     api(
         "transform",
@@ -964,6 +969,69 @@ const FUNCTIONS: &[ApiDef] = &[
         r#"清空当前 (实体, 脚本) 的全部状态"#,
     ),
     api(
+        "save",
+        "save_game",
+        "save_game(ctx, slot)",
+        "nil",
+        r#"请求存档到 `Saves/<slot>.sav`（帧末结算；失败记 Error 日志）"#,
+    ),
+    api(
+        "save",
+        "load_game",
+        "load_game(ctx, slot)",
+        "nil",
+        r#"请求读档（帧末结算；存档场景与当前不同时先切场景）"#,
+    ),
+    api(
+        "save",
+        "has_save",
+        "has_save(ctx, slot)",
+        "boolean",
+        r#"这个槽有没有存档（立即读盘判定，不加载）"#,
+    ),
+    api(
+        "save",
+        "save_slots",
+        "save_slots(ctx)",
+        "table",
+        r#"全部存档槽名（数组式表，升序）"#,
+    ),
+    api(
+        "save",
+        "save_set",
+        "save_set(ctx, key, value)",
+        "boolean",
+        r#"写全局存档变量（数字 / 布尔 / 字符串；非有限数拒绝）"#,
+    ),
+    api(
+        "save",
+        "save_get",
+        "save_get(ctx, key)",
+        "any",
+        r#"读全局存档变量 → 数字 / 布尔 / 字符串（没有返回 nil）"#,
+    ),
+    api(
+        "save",
+        "save_remove",
+        "save_remove(ctx, key)",
+        "boolean",
+        r#"删全局存档变量（返回它是否存在过）"#,
+    ),
+    api(
+        "save",
+        "entity_save_set",
+        "entity_save_set(ctx, id, key, value)",
+        "boolean",
+        r#"写实体变量（切场景 / 实体销毁时清）"#,
+    ),
+    api(
+        "save",
+        "entity_save_get",
+        "entity_save_get(ctx, id, key)",
+        "any",
+        r#"读实体变量 → 数字 / 布尔 / 字符串（没有返回 nil）"#,
+    ),
+    api(
         "math",
         "vec3",
         "vec3(x, y, z)",
@@ -1510,8 +1578,8 @@ mod tests {
     fn catalog_has_the_expected_shape() {
         let doc = script_api();
         assert_eq!(doc.format_version, SCRIPT_API_FORMAT_VERSION);
-        assert_eq!(doc.categories.len(), 17);
-        assert_eq!(doc.function_count(), 160);
+        assert_eq!(doc.categories.len(), 18);
+        assert_eq!(doc.function_count(), 169);
         assert_eq!(doc.hooks.len(), 6);
         assert_eq!(doc.value_types.len(), 7);
         assert!(!doc.conventions.is_empty());
@@ -1554,7 +1622,7 @@ mod tests {
             );
             assert!(!function.params.is_empty(), "{} 没有参数", function.name);
         }
-        assert_eq!(names.len(), 160);
+        assert_eq!(names.len(), 169);
     }
 
     #[test]
@@ -1633,9 +1701,10 @@ mod tests {
             .flat_map(|category| &category.functions)
         {
             for ty in function.returns.split('|').map(str::trim) {
+                // 基元 / nil / any / table（Lua 基础类型：`save_slots` 返回槽名数组）。
                 if matches!(
                     ty,
-                    "nil" | "number" | "integer" | "boolean" | "string" | "any"
+                    "nil" | "number" | "integer" | "boolean" | "string" | "any" | "table"
                 ) {
                     continue;
                 }

@@ -82,6 +82,11 @@ pub struct WorldConfig {
     /// 进运行时是因为**建刚体的那一刻**就要用它算碰撞组：
     /// 实体层 → (`memberships`, `filter`) 的翻译只做一次，物理层只认位掩码。
     pub layers: xgame_core::Layers,
+    /// 附加搜索根（`project.ron` 的 `content.search_paths`）。
+    ///
+    /// 运行时按项目相对路径读脚本 / 音频时的兜底目录；语义与门禁在
+    /// [`xgame_core::resolve_read_path`]。默认空 = 与引入之前逐位一致。
+    pub search_paths: Vec<String>,
 }
 
 impl Default for WorldConfig {
@@ -91,6 +96,7 @@ impl Default for WorldConfig {
             fixed_dt: 1.0 / 60.0,
             physics_sub_steps: 1,
             layers: xgame_core::Layers::default(),
+            search_paths: Vec::new(),
         }
     }
 }
@@ -113,6 +119,7 @@ impl WorldConfig {
             fixed_dt: rt.fixed_dt,
             physics_sub_steps: 1,
             layers: project.layers.clone().sanitized(),
+            search_paths: project.content.search_paths.clone(),
         }
     }
 }
@@ -128,6 +135,21 @@ pub struct FrameReport {
     pub bodies: usize,
     /// 碰撞体数。
     pub colliders: usize,
+}
+
+/// 读档的结果（无头报告 / 日志用）。
+///
+/// `applied + missing` 是存档里的实体总数：`missing` 非零是**正常**的
+/// （存档之后才生成的实体、已经销毁的实体都不该被"复活"），但它必须可见 ——
+/// 否则"读档后一半东西没动"会被当成引擎 bug 查半天。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SaveApplyReport {
+    /// 按 ID 找到并对上状态的实体数。
+    pub applied: usize,
+    /// 存档里有、当前场景里没有的实体数（跳过）。
+    pub missing: usize,
+    /// 是否为读档切换了场景（存档里的场景与当前不同）。
+    pub scene_switched: bool,
 }
 
 /// UI 运行态：布局缓冲 + 交互状态（容量跨帧复用）。
@@ -155,6 +177,14 @@ pub struct World {
     body_of_entity: HashMap<EntityId, u64>,
     /// 脚本路径解析基准（项目根目录）。
     root: PathBuf,
+    /// 附加搜索根（`content.search_paths`）。注入音频引擎时要同步给它 ——
+    /// 两个消费者必须看同一份列表，否则"脚本找得到、音频找不到"。
+    search_paths: Vec<String>,
+    /// 存档上下文：变量表 + 项目根。脚本与 Rust 行为都经 `GameCtx::save` 看到它。
+    ///
+    /// 变量表住在运行时而不是实体上：它是**玩法层数据**（血量 / 金币 / 钥匙），
+    /// 引擎不解释语义，也不该让它们混进场景文件（那是"关卡长什么样"）。
+    save_context: crate::SaveContext,
     /// 上一帧的统计，供 UI 读取。
     last_report: FrameReport,
     /// `sync_bodies` 的复用暂存（"有 physics 但还没建刚体"的实体索引）。
@@ -247,12 +277,14 @@ impl World {
 
         let mut scripts = LuaHost::new();
         scripts.set_root(root.clone());
+        scripts.set_search_paths(config.search_paths.clone());
         scripts.preload(&root, &scene);
 
         // 音频引擎刻意 **silent**：`World::new` 在测试里被反复构造，抢声卡
         // 会让"同一段测试有时连着设备、有时没有"——行为不确定的测试等于没有。
         // 真设备引擎由宿主经 `with_audio_engine` 注入（编辑器 Play / 独立游戏）。
-        let audio = AudioEngine::silent(root.clone());
+        let mut audio = AudioEngine::silent(root.clone());
+        audio.set_search_paths(config.search_paths.clone());
 
         let mut world = Self {
             scene,
@@ -262,7 +294,11 @@ impl World {
             scripts,
             clock: GameClock::new().with_fixed_dt(config.fixed_dt),
             body_of_entity: HashMap::new(),
-            root,
+            // `root` 还要给存档上下文一份（存档路径同样按项目根解析），
+            // 所以先 clone：这是构造期一次分配，不在热路径上。
+            root: root.clone(),
+            search_paths: config.search_paths.clone(),
+            save_context: crate::SaveContext::new(root),
             last_report: FrameReport::default(),
             scratch_physics_indices: Vec::new(),
             has_kinematic: false,
@@ -321,6 +357,7 @@ impl World {
     /// 的命令 —— 下一次 `flush_audio` 就按新引擎结算。
     pub fn with_audio_engine(mut self, engine: AudioEngine) -> Self {
         self.audio = engine;
+        self.audio.set_search_paths(self.search_paths.clone());
         self
     }
 
@@ -560,6 +597,159 @@ impl World {
         self.scene_loads
     }
 
+    // -----------------------------------------------------------------------
+    // 存档
+    // -----------------------------------------------------------------------
+
+    /// 活变量表（只读）。宿主可以拿它做 HUD（"金币 12"）。
+    pub fn save_vars(&self) -> &xgame_core::SaveVars {
+        &self.save_context.vars
+    }
+
+    /// 记一个全局存档变量。返回 `false` = 值是非有限数（`NaN` / `inf` 不收）。
+    pub fn set_save_var(&mut self, key: &str, value: xgame_core::SaveValue) -> bool {
+        self.save_context.vars.set_global(key, value)
+    }
+
+    /// 读一个全局存档变量。
+    pub fn save_var(&self, key: &str) -> Option<&xgame_core::SaveValue> {
+        self.save_context.vars.global(key)
+    }
+
+    /// 记一个实体变量（实体销毁 / 切场景时清）。
+    pub fn set_entity_save_var(
+        &mut self,
+        id: EntityId,
+        key: &str,
+        value: xgame_core::SaveValue,
+    ) -> bool {
+        self.save_context.vars.set_entity(id, key, value)
+    }
+
+    /// 读一个实体变量。
+    pub fn entity_save_var(&self, id: EntityId, key: &str) -> Option<&xgame_core::SaveValue> {
+        self.save_context.vars.entity(id, key)
+    }
+
+    /// 采集当前状态（**不写盘**）。变量表一并摊进去。
+    ///
+    /// 位置 / 旋转 / 缩放取实体的**局部**变换（场景文件的唯一真相），速度取刚体
+    /// 的当前速度。两者同一次扫描里读，避免"这一刻的位置配上一帧的速度"。
+    pub fn capture_save(&self) -> xgame_core::SaveGame {
+        let mut save = xgame_core::SaveGame::new();
+        save.scene = self.current_scene.clone().unwrap_or_default();
+        save.game_time = self.clock.total_time();
+        save.entities.reserve(self.scene.entities.len());
+        for entity in &self.scene.entities {
+            let mut state = xgame_core::savegame::EntityState {
+                id: entity.id.raw(),
+                position: entity.transform.position.to_array(),
+                rotation: entity.transform.rotation.to_array(),
+                scale: entity.transform.scale.to_array(),
+                linear_velocity: [0.0; 3],
+                angular_velocity: [0.0; 3],
+                vars: std::collections::BTreeMap::new(),
+            };
+            if let Some(body) = self.body_of_entity.get(&entity.id).copied() {
+                if let Some(v) = self.physics.body_velocity(body) {
+                    state.linear_velocity = v.to_array();
+                }
+                if let Some(v) = self.physics.body_angular_velocity(body) {
+                    state.angular_velocity = v.to_array();
+                }
+            }
+            save.entities.push(state);
+        }
+        self.save_context.vars.write_into(&mut save);
+        if save.validated().is_err() {
+            // 采集自活状态却带着伤，说明**场景里已经是坏数据**（脚本把实体写成
+            // NaN / 非单位旋转）。这里不修也不 panic：原样返回，让 `write_save`
+            // 在落盘边界拒绝并报出具体实体。
+        }
+        save
+    }
+
+    /// 把一份存档套到**当前场景**上（不切场景）。
+    ///
+    /// 按 `EntityId` 匹配：找不到的计入 [`SaveApplyReport::missing`] 并跳过 ——
+    /// 不生成、不复活。读档是"把现在这些实体的状态拨回去"，不是"重建那一刻"。
+    pub fn apply_save(&mut self, save: &xgame_core::SaveGame) -> SaveApplyReport {
+        let mut report = SaveApplyReport::default();
+        // 一次建表，避免 `find_entity`（线性查找）把读档变成 O(n²)：
+        // 8000 实体的关卡上实测 50.0 ms → 0.6 ms（见 PLAN 第八十八节）。
+        // `or_insert` 而不是 `insert`：撞 ID 时取**第一个**，与 `find_entity`
+        // （`position()`）同解 —— 两套寻址给出不同结果是最难查的一类错位。
+        let mut index_of: HashMap<EntityId, usize> = HashMap::with_capacity(self.scene.entities.len());
+        for (index, entity) in self.scene.entities.iter().enumerate() {
+            index_of.entry(entity.id).or_insert(index);
+        }
+        for state in &save.entities {
+            let id = EntityId::from_raw(state.id);
+            let Some(&index) = index_of.get(&id) else {
+                report.missing += 1;
+                continue;
+            };
+            self.scene.entities[index].transform.position = Vec3::from_array(state.position);
+            // 归一化：存档体检只保证容差内的单位四元数，留着微小模长的四元数
+            // 会让子节点每帧被拉一点点（`scale` 会漂）。
+            self.scene.entities[index].transform.rotation =
+                xgame_math::glam::Quat::from_array(state.rotation).normalize();
+            self.scene.entities[index].transform.scale = Vec3::from_array(state.scale);
+
+            if let Some(body) = self.body_of_entity.get(&id).copied() {
+                let world = self.scene.world_transform(index);
+                // 角色实体的刚体在**胶囊中心**（脚底 + 半高），与 `sync_bodies`
+                // 建体时的落点一致；直接按实体原点传送会让角色半个身子陷进地面。
+                let target = match self.scene.entities[index].controller {
+                    Some(controller) => world.position + Vec3::Y * controller.sanitized().center_height(),
+                    None => world.position,
+                };
+                self.physics.teleport(body, target);
+                self.physics.set_rotation(body, world.rotation);
+                self.physics
+                    .set_velocity(body, Vec3::from_array(state.linear_velocity));
+                self.physics
+                    .set_angular_velocity(body, Vec3::from_array(state.angular_velocity));
+            }
+            report.applied += 1;
+        }
+        // 变量表**替换**（不是合并）：读档要回到那一刻，合并会把存档之后新写的键
+        // 留下来，症状是"读档后血量显示的是上一次的数"。
+        self.save_context.vars.read_from(save);
+        // 但实体变量只留**当前场景里真的存在**的那些：ID 只在单个文件内唯一，
+        // 读过一份别的场景的档之后，旧 ID 挂着的变量会等下一个人来读（也顺手
+        // 让"切场景清实体变量"这条语义在读档路径上同样成立）。
+        self.save_context
+            .vars
+            .per_entity
+            .retain(|id, _| index_of.contains_key(id));
+        report
+    }
+
+    /// 存档到 `Saves/<slot>.sav`，返回写入的项目相对路径。
+    pub fn save_game(&mut self, slot: &str) -> Result<String, String> {
+        let save = self.capture_save();
+        xgame_core::write_save(&self.root, slot, &save).map_err(|e| e.to_string())
+    }
+
+    /// 从 `Saves/<slot>.sav` 读档。
+    ///
+    /// 存档里的场景与当前不同就**先切场景再套状态** —— 这是"主菜单读档直接回到
+    /// 关卡"能成立的原因。切场景失败时旧场景原封不动（`load_scene` 的既有契约），
+    /// 变量表也不会被改动（错误在这里就返回了）。
+    pub fn load_game(&mut self, slot: &str) -> Result<SaveApplyReport, String> {
+        let save = xgame_core::read_save(&self.root, slot).map_err(|e| e.to_string())?;
+        let current = self.current_scene.clone().unwrap_or_default();
+        let mut switched = false;
+        if !save.scene.is_empty() && !xgame_core::same_scene_path(&save.scene, &current) {
+            self.load_scene(&save.scene)?;
+            switched = true;
+        }
+        let mut report = self.apply_save(&save);
+        report.scene_switched = switched;
+        Ok(report)
+    }
+
     /// 立刻装载并切换到另一份场景（宿主 / 测试入口）。
     ///
     /// 骨架逻辑全在 [`World::swap_scene`]；这里只负责"先装载、成功了再换"——
@@ -640,8 +830,12 @@ impl World {
         // 抹掉，正好抹掉最该留下的诊断。
         self.scripts.reset_scene_state();
 
-        // -- 3. 粒子 / UI / 音频 --
+        // -- 3. 粒子 / UI / 音频 / 实体变量 --
         self.particles.clear();
+        // 实体变量是**实体绑定态**：ID 只在单个文件内唯一，跨场景留着必然串味
+        // （新场景的 7 号实体读到旧场景 7 号的血量）。全局变量照旧保留 ——
+        // 与脚本全局变量同款语义（决策记录 §二十五）。
+        self.save_context.vars.clear_entities();
         self.ui = UiRuntime::default();
         self.audio_autoplayed.clear();
         // 0 = 强迫下一帧重新实扫一遍（与 `World::new` 同一手法）。
@@ -880,6 +1074,7 @@ impl World {
             current_scene,
             scene_order,
             scene_loader,
+            save_context,
             ..
         } = self;
 
@@ -889,7 +1084,8 @@ impl World {
             .with_audio(audio_port)
             .with_clock(clock)
             .with_scene_name(current_scene.as_deref().unwrap_or(""))
-            .with_scene_order(scene_order.as_slice());
+            .with_scene_order(scene_order.as_slice())
+            .with_save(save_context);
         let frame = match scene_loader.as_deref() {
             Some(loader) => frame.with_loader(loader),
             None => frame,
@@ -942,6 +1138,7 @@ impl World {
             current_scene,
             scene_order,
             scene_loader,
+            save_context,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
@@ -975,6 +1172,7 @@ impl World {
                     instance.started = true;
                 }
                 let mut game = GameCtx {
+                    save: Some(save_context),
                     scene: &mut *scene,
                     physics: Some(&mut *physics),
                     input: Some(input),
@@ -1059,11 +1257,13 @@ impl World {
             current_scene,
             scene_order,
             scene_loader,
+            save_context,
             ..
         } = self;
         let (logs, commands) = scripts.buffers_mut();
         for mut instance in instances {
             let mut game = GameCtx {
+                save: Some(save_context),
                 scene: &mut *scene,
                 physics: Some(&mut *physics),
                 input: Some(input),
@@ -1294,6 +1494,7 @@ impl World {
                 current_scene,
                 scene_order,
                 scene_loader,
+                save_context,
                 ..
             } = self;
             let frame = FrameCtx::new(scene, delta, time)
@@ -1302,7 +1503,8 @@ impl World {
                 .with_audio(audio_port)
                 .with_clock(clock)
                 .with_scene_name(current_scene.as_deref().unwrap_or(""))
-                .with_scene_order(scene_order.as_slice());
+                .with_scene_order(scene_order.as_slice())
+                .with_save(save_context);
             let mut frame = match scene_loader.as_deref() {
                 Some(loader) => frame.with_loader(loader),
                 None => frame,
@@ -1313,6 +1515,9 @@ impl World {
             }
             // 角色的接触面备忘随实体一起清掉。
             self.character_contacts.remove(&removed.id);
+            // 实体变量同理：实体没了，挂它身上的玩法数据不该留在表里等下一个
+            // 撞 ID 的实体来读（ID 不复用，但表会一直长）。
+            self.save_context.vars.clear_entity(removed.id);
         }
 
         // 生成的实体：`sync_bodies` 会统一补建（它按"有 physics 但没有刚体"来扫）。
@@ -1341,6 +1546,27 @@ impl World {
         // 场景切换请求：这里只登记，真正的交换在 `apply_pending_scene_load`。
         // 固定步长循环里也会调到这里，所以**不能**就地换场景 ——
         // 那样本步的 `pull_dynamic_bodies` 会把旧刚体位姿写进新场景。
+        // 存 / 读档：**先存后读**（同一帧里既存又读的脚本，语义是"存下这一刻再回到那一刻"
+        // —— 反过来会读到刚写的东西，等于什么都没做）。
+        if let Some(slot) = report.save_game {
+            match self.save_game(&slot) {
+                Ok(path) => log::info!("已存档: {path}"),
+                Err(err) => log::error!("存档失败 '{slot}': {err}"),
+            }
+        }
+        if let Some(slot) = report.load_game {
+            match self.load_game(&slot) {
+                Ok(r) => log::info!(
+                    "已读档 '{slot}': 套用 {} 个实体，跳过 {} 个（存档里多出来的），切换场景={}",
+                    r.applied,
+                    r.missing,
+                    r.scene_switched
+                ),
+                Err(err) => log::error!("读档失败 '{slot}': {err}"),
+            }
+        }
+
+        // 场景切换请求：这里只登记，真正的交换在 `apply_pending_scene_load`。
         if let Some(path) = report.scene_load {
             self.request_scene_load(path);
         }
@@ -1567,12 +1793,14 @@ impl World {
                 current_scene,
                 scene_order,
                 scene_loader,
+                save_context,
                 ..
             } = self;
             let (logs, commands) = scripts.buffers_mut();
             if let Some(instances) = behavior_instances.get_mut(&entity) {
                 for instance in instances.iter_mut() {
                     let mut game = GameCtx {
+                        save: Some(save_context),
                         scene: &mut *scene,
                         physics: Some(&mut *physics),
                         input: Some(input),
@@ -1607,6 +1835,7 @@ impl World {
             current_scene,
             scene_order,
             scene_loader,
+            save_context,
             ..
         } = self;
         // 与其它派发路径**同款注入**：早先这里只给了 input/physics/audio，
@@ -1619,7 +1848,8 @@ impl World {
             .with_audio(audio_port)
             .with_clock(clock)
             .with_scene_name(current_scene.as_deref().unwrap_or(""))
-            .with_scene_order(scene_order.as_slice());
+            .with_scene_order(scene_order.as_slice())
+            .with_save(save_context);
         let frame = match scene_loader.as_deref() {
             Some(loader) => frame.with_loader(loader),
             None => frame,

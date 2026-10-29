@@ -6881,3 +6881,112 @@ rapier 的求解器 / 岛管理走 `wide` 的 SIMD 实现（stable Rust 可用�
 - 编译时间与二进制体积略增（多了 `wide` 一个 crate），打包冒烟见下方；
 - 未做：作业系统 / 并行求解器（`parallel` 特性会打乱体间顺序，与"同输入逐位同轨迹"
   的门禁正面冲突，需要先决定要不要放弃那条契约）。
+
+---
+
+## 八十八、存档系统 + 运行时读路径门禁 + 读档实体查找去 O(n²)（2026-10-29）
+
+这一轮挑了三个"能力空白 / 缺陷会静默"的模块，都在**同一份不变量**上加东西：
+路径只有一条规则、读档只有一个答案、性能数据的判据是"同机背靠背两组 3 次"。
+优先级依据见 [`Docs/差距分析.md`](Docs/差距分析.md)（P2 #32 + 194 的残留）。
+
+### 一、存档（`SaveGame`）：从"完全没有"到完整闭环
+
+差距分析里 P2 #32 写的是"缺失（场景是唯一的持久化形态）"。此前每个项目想存进度
+只有两条歪路：导出场景（会把运行时生成物写进去、还会冲掉作者的场景文件），
+或者往 `log()` 里打（等于没有）。
+
+新增 `crates/xgame-core/src/savegame.rs`（格式 + 槽位路径 + 原子写 + 体检）：
+
+- `SaveGame`：`format_version` / 场景路径 / `game_time` / 全局变量 / 实体状态数组；
+- `EntityState`：局部变换 + 线速度 / 角速度（零速度不写这一行）+ 每实体变量；
+- 槽名 → `Saves/<slot>.sav`，整条路径过 `normalize_project_relative`；
+  `slot1` 与 `slot1.sav` 落到同一个文件；
+- 写前体检：版本相等、数值有限、旋转在 1e-3 容差内是单位四元数，不合法**拒绝**
+  而不是"修一修"；实体按 ID 排序 ⇒ 同状态两次写盘逐字节相同。
+
+运行时侧（`xgame-runtime`）：`capture_save` / `apply_save` / `save_game` /
+`load_game` + `SaveVars`（全局 + 每实体）+ 4 个读写变量的方法。语义重点：
+
+- **读档是替换不是合并**（合并 = 读档后血条显示上一次的数）；
+- **对不上的实体不复活**，计入 `SaveApplyReport::missing` 并写进日志；
+- 存档里的场景与当前不同 → **先切场景再套状态**；
+- 实体变量跟着实体走（切场景 / 销毁 / 读档后只留当前场景存在的 ID），全局变量保留。
+
+脚本侧 9 个 API：`save_game` / `load_game` / `has_save` / `save_slots` /
+`save_set` / `save_get` / `save_remove` / `entity_save_set` / `entity_save_get`。
+存 / 读是**帧末请求**（`ScriptCommand::SaveGame/LoadGame`），因为钩子里场景与物理
+正被 `&mut` 借走，而且"位置"与"速度"必须同一时刻读。函数总数 160 → 169，
+类别 17 → 18，`Docs/脚本API.md` 与三处计数断言同步（含 MCP 工具描述）。
+
+### 二、运行时读路径门禁 + `search_paths` 语义
+
+194 的残留是"运行时对脚本 / 音频引用越界读取没有门禁"：`root.join(path)` 遇绝对路径
+会整个替换根、遇 `..` 逐级上跳。`--check` 会点名，但**独立游戏不跑检查**。
+
+新增 `core::resolve_read_path(root, relative, search_paths)`：先过
+`normalize_project_relative`，再直接命中，再按 `search_paths` 兜底，都没有则报
+`Missing { tried }`。`LuaHost` 与 `AudioEngine` 的读取都改走它；`search_paths`
+（此前是没人消费的空字段）被定死为"读的兜底根"，条目自身也要合规、不合规运行时
+跳过且 `--check` 报进 `unsafe_paths`；`World` 构造时给两个消费者注入同一份列表。
+
+### 三、性能：读档的实体查找从 O(n²) 到 O(n)
+
+新增基准 `crates/xgame-runtime/tests/savegame_cost.rs`（默认 `#[ignore]`，
+200 / 2000 / 8000 实体三档）。第一版结果就暴露自己写的 bug：
+
+| 实体数 | 采集 | 序列化+写盘 | 解析 | **套用（改前）** | 套用（改后） |
+|---|---|---|---|---|---|
+| 200 | 11.9 µs | 4.8–35.7 ms | 0.9 ms | 37.6 µs | 26.5 µs |
+| 2000 | 113 µs | 11.7–38.3 ms | 4.6 ms | 3408 µs | **321 µs**（-91%） |
+| 8000 | 601 µs | 24.0–55.8 ms | 17.4 ms | 50024 µs | **1738 µs**（-96.5%） |
+
+原因：`apply_save` 对每条状态调 `Scene::find_entity`（线性查找）→ O(n²)。
+改成一次建 `HashMap` 后线性。表用 `entry().or_insert()` 与 `find_entity` 的"取第一个"
+同解，并有一条撞 ID 的测试钉住这一点。
+
+**其它测量**（同机 release，用来确认这一轮没有回归）：
+
+- `update_throughput`：50.5 / 127.4 / 517.9 / 13170 µs（纯视觉 / 全静态 / 稀疏动态 /
+  密集接触）—— 与上轮 49.0 / 124.0 / 518.5 / 13753 一致，存档不参与帧路径；
+- 新增 `ui_layout_cost`：1001 元素 HUD 的 `world.update` **运行时侧** 83.1 µs/帧，
+  其中 `UiTree::build` 36.2 µs、`layout::visit` 11.0 µs。**不能**据此说"UI 不是瓶颈" ——
+  README 里 900 元素 753 µs 那一档还包括**文本排版与合批**（render 侧），本轮没量。
+  能说的只有：运行时布局 / 命中测试在 1000 元素量级只占 83 µs，物理仍是最大项
+  （密集接触 13.2 ms，见 §八十七）；
+- `culling_cost`：剔除关闭 1016 µs / 开启 220 µs CPU（2000 实体），与本轮改动无关。
+
+### 四、验证
+
+- **先证红**（路径门禁）：把 `LuaHost` / `AudioEngine` 的解析临时退回 `root.join`
+  → 4 条新测试全红（`clip_path_escape_is_rejected_before_decoding`、
+  `search_paths_resolve_audio_outside_the_root`、`script_path_escape_is_rejected_before_reading`、
+  `search_paths_resolve_scripts_outside_scripts_dir`），恢复后全绿；
+- 存档的 10 条新测试是**新能力**（没有旧实现可红），但每条都在钉一条会被"好心人"
+  改错的语义：读档替换语义、实体变量生命周期、撞 ID 取第一个、坏档拒绝、
+  同状态字节相同、`slot1` / `slot1.sav` 同文件；
+- 全量测试与 clippy 结果见下方"验证记录"。
+
+### 五、刻意不做
+
+- 运行时生成物不随存档复原（要复原得先有实体原型注册表，是下一版的事）；
+- 不存脚本 `state_*`（Lua 值没有落盘格式；要跨会话保存就写进变量）；
+- 不自动存档、不做存档点触发器（引擎只提供"存 / 读"，何时存是玩法决定）；
+- 不做跨版本存档迁移（`format_version` 不等就报错，宁可让玩家看见）；
+- `search_paths` 不做"猜扩展名 / 猜目录"，不检测符号链接逃逸。
+
+### 验证记录
+
+- `cargo test --workspace --all-targets -- --test-threads=2`：**1058 passed / 0 failed /
+  11 ignored**（36 套件；新增 19 条测试 + 2 条基准），clippy `-D warnings` **0 告警**；
+- 四个示例项目 `--check` 全部退出 **0**（`search_paths` 的体检没有假阳性）；
+- **真实 CLI 端到端**（`--headless`，临时项目 = SampleScene 副本 + 一个探针脚本）：
+  第 10 帧写变量并 `save_game("slot1")` → 第 20 帧把自己传送到 (40,40,40) →
+  第 30 帧 `has_save` 为 true、`#save_slots` 为 1 并 `load_game` → 第 34 帧再存 `slot2`；
+  两份 `.sav` 里同一个实体的位置 / 变量**完全相同**（`(0.0, -0.5, 0.0)`、
+  `hp = 75`、`coins = 12`），说明读档真的把状态拨回去了；
+- **发布产物**：`一键构建.cmd` 成功刷新 `dist/`（三个 exe），
+  `dist\xgame-editor.exe --check dist\projects\SampleScene` 退出 **0**，
+  用**发布版**跑同一份存档探针得到同样的两个 `.sav`；
+- 带 `Saves/` 目录的项目 `--check` 只报我手写脚本缺 `.meta`（既有规则），
+  证明 `Saves/` 不会被当成内容目录扫进去。

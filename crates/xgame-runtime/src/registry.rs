@@ -188,6 +188,7 @@ mod tests {
         let mut logs = Vec::new();
         let mut commands = Vec::new();
         let mut ctx = GameCtx {
+            save: None,
             scene: &mut scene,
             physics: None,
             input: None,

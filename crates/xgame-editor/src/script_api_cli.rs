@@ -187,7 +187,7 @@ mod tests {
         let categories = value["categories"]
             .as_array()
             .expect("categories 必须是数组");
-        assert_eq!(categories.len(), 17, "类别数");
+        assert_eq!(categories.len(), 18, "类别数");
         assert_eq!(
             value["hooks"].as_array().expect("hooks 必须是数组").len(),
             6,
@@ -209,7 +209,7 @@ mod tests {
                     .len()
             })
             .sum();
-        assert_eq!(function_count, 160, "函数总数");
+        assert_eq!(function_count, 169, "函数总数");
         assert!(
             categories
                 .iter()
@@ -254,7 +254,7 @@ mod tests {
             documented, manifest,
             "Docs/脚本API.md 与机器清单的函数名不一致"
         );
-        assert_eq!(documented.len(), 160, "文档 API 表应有 160 个函数");
+        assert_eq!(documented.len(), 169, "文档 API 表应有 169 个函数");
     }
 
     /// 从 Markdown 的 API 表第一列提取函数名。
