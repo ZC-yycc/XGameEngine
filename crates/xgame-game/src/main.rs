@@ -111,6 +111,8 @@ struct GameApp {
     postfx: PostFx,
     /// TAA 的历史缓冲与 resolve（`render.taa.enabled` 关着时不用，也不建历史纹理）。
     taa: TaaResolver,
+    /// SSAO 乘算（`render.ssao.enabled` 关着时整段跳过，也不建 AO 纹理）。
+    ssao: SsaoPass,
     /// 屏幕空间 UI（后处理之后画到交换链上）。
     ui: UiRenderer,
     /// `hdr` 的**代数**：resize 重建时 +1，作为 `postfx` 绑定组的缓存键
@@ -203,6 +205,7 @@ impl GameApp {
         // 显示目标 = 交换链格式：非 sRGB 的交换链由着色器手动编码（见 postfx）。
         let postfx = PostFx::new(&device, config.format);
         let taa = TaaResolver::new(&device, sample_count);
+        let ssao = SsaoPass::new(&device, sample_count);
         let ui = UiRenderer::new(&device, config.format);
 
         // -- 场景（路径都按项目根解析）--
@@ -294,6 +297,7 @@ impl GameApp {
             hdr,
             postfx,
             taa,
+            ssao,
             ui,
             target_gen: 0,
             sample_count,
@@ -318,6 +322,8 @@ impl GameApp {
         // TAA 的历史跟着目标走：尺寸变了，重投影全部对不上，绑定组里钉着的
         // 颜色 / 深度视图也已经作废。
         self.taa.reset();
+        // SSAO 的 AO 纹理 / scratch 同理（钉着旧深度视图的绑定组也作废）。
+        self.ssao.reset();
     }
 
     /// 把窗口事件翻译成引擎输入。
@@ -527,6 +533,25 @@ impl GameApp {
             )
         } else {
             (&self.hdr.color_view, self.target_gen)
+        };
+
+        // SSAO 乘算（开着时）—— TAA 之后、后处理之前：AO 要在曝光 / 色调
+        // 映射之前乘进场景色。关着时整段跳过（不建纹理、不记 pass）。
+        let (source_view, source_gen) = if settings.ssao.enabled {
+            self.ssao.apply(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                source_view,
+                source_gen,
+                &self.hdr.depth_view,
+                self.hdr.size,
+                &view_proj,
+                &eye,
+                settings.ssao,
+            )
+        } else {
+            (source_view, source_gen)
         };
 
         // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → 交换链。Bloom 链跟

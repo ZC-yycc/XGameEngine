@@ -22,10 +22,12 @@
 //! 重建一次之后就稳定了；比做 LRU 淘汰简单一个数量级，也不会出现
 //! "某个字形被淘汰后同一帧又立刻请求"的抖动。
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+use ab_glyph::{Font, FontVec, GlyphId, PxScale, ScaleFont};
 use xgame_core::{Color, UiAlign, UiTextStyle, UiVAlign};
 use xgame_math::glam::Vec2;
 
@@ -243,14 +245,76 @@ struct GlyphSprite {
     offset: Vec2,
 }
 
+/// 一段文本的排版缓存键里与内容无关的部分。
+///
+/// 对齐方式（`align` / `valign`）**不进键**：它们只在最后把行摆进内容矩形时
+/// 用一次，同一段文字换对齐方式复用同一份折行结果。内容矩形的**宽度**进键
+/// （换行结果由它决定），位置不进。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct LayoutShape {
+    face: u8,
+    size_q: u32,
+    /// 换行宽度（`None` = 不换行）。f32 不能 `Hash`，用位模式。
+    wrap_width_bits: Option<u32>,
+}
+
+/// 一条排版缓存记录。
+struct LayoutEntry {
+    key: LayoutKey,
+    layout: CachedLayout,
+}
+
+/// 缓存键（内容原文 + 排版形状）。
+struct LayoutKey {
+    content: String,
+    shape: LayoutShape,
+}
+
+impl LayoutKey {
+    /// 命中判定：指纹只用来定位桶，**内容必须逐字节相等**才算命中
+    /// （64 位哈希撞车时宁可重排一次，也不能把两段文字画成同一段）。
+    fn matches(&self, content: &str, shape: LayoutShape) -> bool {
+        self.shape == shape && self.content == content
+    }
+}
+
+/// 排版结果：一段文本在给定字号 / 换行宽度下的**全部**形状信息。
+///
+/// 不含位置与颜色 —— 那些属于元素，逐帧组装即可。字段全部是排版阶段的
+/// 中间量（字符、推进量、字距、行区间与行宽），命中缓存后逐帧只剩
+/// “查字形 + 摆位置”。
+struct CachedLayout {
+    line_height: f32,
+    ascent: f32,
+    chars: Vec<char>,
+    /// 每个字符的推进量（不含字距）。
+    advances: Vec<f32>,
+    /// 与前一个字符的字距；行首不使用（与旧实现 `prev = None` 一致）。
+    kerns: Vec<f32>,
+    lines: Vec<Line>,
+    /// 淘汰用的逻辑时钟（每次命中刷新）。
+    last_used: u64,
+}
+
+/// 排版缓存容量上限。
+///
+/// 每条记录 = 一段文字的字符与行区间（几十到几百字节）。1024 条足以装下
+/// 一屏 HUD + 常见动态文本；超出后按最近使用淘汰一半，避免逐帧变化的
+/// 数字把内存拖成无界增长。
+const LAYOUT_CACHE_CAPACITY: usize = 1024;
+
 /// 文本引擎：字体 + 字形缓存 + 图集。
 pub struct TextEngine {
     faces: Vec<Face>,
     glyphs: HashMap<GlyphKey, GlyphSprite>,
     atlas: GlyphAtlas,
-    /// 排版 scratch（复用，避免每帧为每段文本各分配一次）。
-    chars: Vec<char>,
-    lines: Vec<Line>,
+    /// 排版缓存：指纹 → 记录。
+    layouts: HashMap<u64, LayoutEntry>,
+    /// 逻辑时钟：只用于淘汰，不表示真实时间。
+    layout_tick: u64,
+    layout_cache_enabled: bool,
+    layout_hits: u64,
+    layout_misses: u64,
     warned: bool,
 }
 
@@ -290,8 +354,11 @@ impl TextEngine {
             faces,
             glyphs: HashMap::new(),
             atlas: GlyphAtlas::new(),
-            chars: Vec::new(),
-            lines: Vec::new(),
+            layouts: HashMap::new(),
+            layout_tick: 0,
+            layout_cache_enabled: true,
+            layout_hits: 0,
+            layout_misses: 0,
             warned: false,
         }
     }
@@ -311,10 +378,39 @@ impl TextEngine {
         self.glyphs.len()
     }
 
+    /// 排版缓存统计：`(命中, 未命中, 条目数)`。
+    ///
+    /// 命中/未命中是**累计**的（跨帧累加），条目数是当前值。A/B 基准与
+    /// 回归测试靠它证明缓存真的在工作，而不是"看起来没变慢"。
+    pub fn layout_cache_stats(&self) -> (u64, u64, usize) {
+        (self.layout_hits, self.layout_misses, self.layouts.len())
+    }
+
+    /// 开关排版缓存（基准 A/B 用；关掉时同时清空已有条目）。
+    pub fn set_layout_cache_enabled(&mut self, enabled: bool) {
+        self.layout_cache_enabled = enabled;
+        if !enabled {
+            self.layouts.clear();
+        }
+    }
+
+    /// 排版缓存是否开着。
+    pub fn layout_cache_enabled(&self) -> bool {
+        self.layout_cache_enabled
+    }
+
+    /// 清空排版缓存（图集重建与内容热重载之外的诊断入口）。
+    pub fn clear_layout_cache(&mut self) {
+        self.layouts.clear();
+    }
+
     /// 把一段文本排进 `out`，返回新增的精灵数量。
     ///
     /// `content` 是**内容矩形**（已经扣掉内边距与边框），文本在其中按
     /// `align` / `valign` 摆放；`alpha` 是整体透明度乘子（禁用态用）。
+    ///
+    /// 折行与逐字推进量按「内容 + 字号 + 换行宽度」缓存：HUD 文案绝大多数
+    /// 帧不变，第二帧起只剩查字形与摆位置。对齐方式不进键（见 [`LayoutShape`]）。
     pub fn emit(
         &mut self,
         text: &UiTextStyle,
@@ -325,197 +421,116 @@ impl TextEngine {
         if text.content.is_empty() || content.is_empty() {
             return 0;
         }
-        if self.faces.is_empty() {
-            if !self.warned {
-                self.warned = true;
+
+        // 字段逐个借出：缓存 / 字体 / 字形 / 图集各自可变或只读，
+        // 拆开之后 `emit_layout` 能同时拿到它们。
+        let TextEngine {
+            faces,
+            glyphs,
+            atlas,
+            layouts,
+            layout_tick,
+            layout_cache_enabled,
+            layout_hits,
+            layout_misses,
+            warned,
+        } = self;
+
+        if faces.is_empty() {
+            if !*warned {
+                *warned = true;
                 log::warn!("UI 文本：缺少字体，文本不会显示");
             }
             return 0;
         }
 
-        let face_index = if text.bold && self.faces.len() > 1 {
+        let face_index = if text.bold && faces.len() > 1 {
             1usize
         } else {
             0
         };
+        let face = face_index as u8;
         let px = (text.size * 4.0).round().max(4.0) / 4.0;
-
-        // 字段逐个借出：字体（只读）与缓存 / 图集（可变）必须能同时活着。
-        // 这是把三者拆成独立字段（而不是塞进一个 `Inner`）的全部理由。
-        let TextEngine {
-            faces,
-            glyphs,
-            atlas,
-            chars,
-            lines,
-            ..
-        } = self;
+        let size_q = (px * 4.0).round() as u32;
+        let wrap_width_bits = text.wrap.then(|| content.width().to_bits());
+        let shape = LayoutShape {
+            face,
+            size_q,
+            wrap_width_bits,
+        };
+        let fingerprint = layout_fingerprint(&text.content, shape);
+        *layout_tick = (*layout_tick).wrapping_add(1);
+        let tick = *layout_tick;
         let font = &faces[face_index].font;
 
-        let scaled = font.as_scaled(PxScale::from(px));
-        let ascent = scaled.ascent();
-        let descent = scaled.descent();
-        let line_gap = scaled.line_gap();
-        let line_height = (ascent - descent + line_gap).max(px);
-
-        // -- 1. 拆行 --
-        chars.clear();
-        chars.extend(text.content.chars());
-        lines.clear();
-        {
-            let max_width = if text.wrap {
-                content.width()
-            } else {
-                f32::INFINITY
-            };
-            let mut line_start = 0usize;
-            let mut width = 0.0f32;
-            let mut last_break: Option<usize> = None;
-            let mut prev = None;
-            for i in 0..chars.len() {
-                let ch = chars[i];
-                if ch == '\n' {
-                    lines.push(Line {
-                        start: line_start,
-                        end: i,
-                        width: 0.0,
-                    });
-                    line_start = i + 1;
-                    width = 0.0;
-                    last_break = None;
-                    prev = None;
-                    continue;
+        // -- 1. 命中：直接出精灵 --
+        if *layout_cache_enabled {
+            if let Some(entry) = layouts.get_mut(&fingerprint) {
+                if entry.key.matches(&text.content, shape) {
+                    entry.layout.last_used = tick;
+                    *layout_hits += 1;
+                    // 重新取不可变借用：`emit_layout` 还要可变借 glyphs / atlas。
+                    let entry = layouts.get(&fingerprint).expect("上一步刚查到");
+                    return emit_layout(
+                        &entry.layout,
+                        text,
+                        content,
+                        alpha,
+                        out,
+                        font,
+                        face,
+                        size_q,
+                        glyphs,
+                        atlas,
+                    );
                 }
-                let id = scaled.glyph_id(ch);
-                let mut advance = scaled.h_advance(id);
-                if let Some(prev_id) = prev {
-                    advance += scaled.kern(prev_id, id);
-                }
-                if width + advance > max_width && i > line_start {
-                    // 优先在最近的断点处折行；找不到断点（超长单词 / 连续数字）
-                    // 就硬断 —— 溢出到别的元素上比断在单词中间更难看。
-                    let brk = match last_break {
-                        Some(b) if b > line_start => b,
-                        _ => i,
-                    };
-                    lines.push(Line {
-                        start: line_start,
-                        end: brk,
-                        width: 0.0,
-                    });
-                    line_start = brk;
-                    width = 0.0;
-                    last_break = None;
-                    prev = None;
-                    // 断点之后的字符要重新累加（最多一行，代价可忽略）。
-                    for (k, &ch) in chars[brk..i].iter().enumerate() {
-                        let id = scaled.glyph_id(ch);
-                        let mut advance = scaled.h_advance(id);
-                        if let Some(prev_id) = prev {
-                            advance += scaled.kern(prev_id, id);
-                        }
-                        width += advance;
-                        if can_break_after(ch) {
-                            last_break = Some(brk + k + 1);
-                        }
-                        prev = Some(id);
-                    }
-                }
-                width += advance;
-                if can_break_after(ch) {
-                    last_break = Some(i + 1);
-                }
-                prev = Some(id);
             }
-            lines.push(Line {
-                start: line_start,
-                end: chars.len(),
-                width: 0.0,
-            });
         }
 
-        // -- 2. 行宽（换行分支里记的是中间值，这里统一重算）--
-        for line in lines.iter_mut() {
-            let mut width = 0.0;
-            let mut prev = None;
-            for &ch in &chars[line.start..line.end] {
-                let id = scaled.glyph_id(ch);
-                let mut advance = scaled.h_advance(id);
-                if let Some(prev_id) = prev {
-                    advance += scaled.kern(prev_id, id);
-                }
-                width += advance;
-                prev = Some(id);
-            }
-            line.width = width;
-        }
-
-        // -- 3. 垂直起点 --
-        let total_height = line_height * lines.len() as f32;
-        let mut baseline = match text.valign {
-            UiVAlign::Top => content.min.y,
-            UiVAlign::Middle => content.center().y - total_height * 0.5,
-            UiVAlign::Bottom => content.max.y - total_height,
-        } + ascent;
-
-        // -- 4. 逐行逐字生成四边形 --
-        let start = out.len();
-        let alpha = alpha.clamp(0.0, 1.0);
-        let base = Color::from(text.color);
-        let color = Color {
-            a: base.a * alpha,
-            ..base
+        // -- 2. 未命中：重排一次，再出精灵 --
+        *layout_misses += 1;
+        let max_width = if text.wrap {
+            content.width()
+        } else {
+            f32::INFINITY
         };
-        let atlas_size = atlas.size() as f32;
-        for line in lines.iter() {
-            let start_x = match text.align {
-                UiAlign::Left => content.min.x,
-                UiAlign::Center => content.center().x - line.width * 0.5,
-                UiAlign::Right => content.max.x - line.width,
-            };
-            let mut pen = start_x;
-            let mut prev = None;
-            for &ch in &chars[line.start..line.end] {
-                let id = scaled.glyph_id(ch);
-                let mut advance = scaled.h_advance(id);
-                if let Some(prev_id) = prev {
-                    advance += scaled.kern(prev_id, id);
-                }
-                prev = Some(id);
+        let layout = build_layout(font, &text.content, px, max_width, tick);
+        let count = emit_layout(
+            &layout,
+            text,
+            content,
+            alpha,
+            out,
+            font,
+            face,
+            size_q,
+            glyphs,
+            atlas,
+        );
 
-                if ch == ' ' || ch == '\t' {
-                    pen += advance;
-                    continue;
-                }
-                let Some(sprite) = glyph_sprite(font, face_index as u8, px, ch, glyphs, atlas)
-                else {
-                    pen += advance;
-                    continue;
-                };
-                // 落在整数像素上：字形按整像素光栅化，小数坐标只会让双线性
-                // 采样把边缘糊掉。
-                let min = Vec2::new(
-                    (pen + sprite.offset.x).round(),
-                    (baseline + sprite.offset.y).round(),
+        if *layout_cache_enabled {
+            // 指纹碰撞（另一段文字占着同一指纹）时这次就不缓存：
+            // 宁可多排一次，也不能覆盖别人的记录。
+            let free = match layouts.get(&fingerprint) {
+                Some(existing) => existing.key.matches(&text.content, shape),
+                None => true,
+            };
+            if free {
+                layouts.insert(
+                    fingerprint,
+                    LayoutEntry {
+                        key: LayoutKey {
+                            content: text.content.clone(),
+                            shape,
+                        },
+                        layout,
+                    },
                 );
-                let max = min + Vec2::new(sprite.w as f32, sprite.h as f32);
-                out.push(UiSprite {
-                    rect: UiRect { min, max },
-                    uv: [
-                        sprite.x as f32 / atlas_size,
-                        sprite.y as f32 / atlas_size,
-                        (sprite.x + sprite.w) as f32 / atlas_size,
-                        (sprite.y + sprite.h) as f32 / atlas_size,
-                    ],
-                    color,
-                    mode: SpriteMode::AlphaMask,
-                    texture: UiTexture::Atlas,
-                });
-                pen += advance;
+                evict_layouts(layouts);
             }
-            baseline += line_height;
         }
-        out.len() - start
+
+        count
     }
 
     /// 一段文本的排版宽度（单行、不换行）—— 测试与自适应宽度用。
@@ -536,6 +551,214 @@ impl TextEngine {
             prev = Some(id);
         }
         width
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 排版缓存
+// ---------------------------------------------------------------------------
+
+/// 内容 + 形状 → 64 位指纹。指纹只负责定位缓存桶，命中还要逐字节比对内容。
+fn layout_fingerprint(content: &str, shape: LayoutShape) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    shape.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// 重排一段文本（缓存未命中时走这里）。
+///
+/// 与旧实现逐行同构：推进量 / 字距先算一遍（旧实现每帧要算两遍），
+/// 再折行、最后统一重算行宽。`max_width` 只影响折行，不影响字宽。
+fn build_layout(
+    font: &FontVec,
+    content: &str,
+    px: f32,
+    max_width: f32,
+    tick: u64,
+) -> CachedLayout {
+    let scaled = font.as_scaled(PxScale::from(px));
+    let ascent = scaled.ascent();
+    let descent = scaled.descent();
+    let line_gap = scaled.line_gap();
+    let line_height = (ascent - descent + line_gap).max(px);
+
+    let chars: Vec<char> = content.chars().collect();
+    let mut advances = Vec::with_capacity(chars.len());
+    let mut kerns = Vec::with_capacity(chars.len());
+    let mut prev: Option<GlyphId> = None;
+    for &ch in &chars {
+        let id = scaled.glyph_id(ch);
+        advances.push(scaled.h_advance(id));
+        kerns.push(prev.map_or(0.0, |prev_id| scaled.kern(prev_id, id)));
+        prev = Some(id);
+    }
+
+    // -- 拆行 --
+    let mut lines = Vec::new();
+    let mut line_start = 0usize;
+    let mut width = 0.0f32;
+    let mut last_break: Option<usize> = None;
+    for i in 0..chars.len() {
+        let ch = chars[i];
+        if ch == '\n' {
+            lines.push(Line {
+                start: line_start,
+                end: i,
+                width: 0.0,
+            });
+            line_start = i + 1;
+            width = 0.0;
+            last_break = None;
+            continue;
+        }
+        let advance = advances[i] + if i > line_start { kerns[i] } else { 0.0 };
+        if width + advance > max_width && i > line_start {
+            // 优先在最近的断点处折行；找不到断点（超长单词 / 连续数字）
+            // 就硬断 —— 溢出到别的元素上比断在单词中间更难看。
+            let brk = match last_break {
+                Some(b) if b > line_start => b,
+                _ => i,
+            };
+            lines.push(Line {
+                start: line_start,
+                end: brk,
+                width: 0.0,
+            });
+            line_start = brk;
+            width = 0.0;
+            last_break = None;
+            // 断点之后的字符要重新累加（最多一行，代价可忽略）。
+            for k in brk..i {
+                width += advances[k] + if k > brk { kerns[k] } else { 0.0 };
+                if can_break_after(chars[k]) {
+                    last_break = Some(k + 1);
+                }
+            }
+        }
+        width += advance;
+        if can_break_after(ch) {
+            last_break = Some(i + 1);
+        }
+    }
+    lines.push(Line {
+        start: line_start,
+        end: chars.len(),
+        width: 0.0,
+    });
+
+    // -- 行宽（换行分支里记的是中间值，这里统一重算）--
+    for line in lines.iter_mut() {
+        let mut width = 0.0;
+        for i in line.start..line.end {
+            width += advances[i] + if i > line.start { kerns[i] } else { 0.0 };
+        }
+        line.width = width;
+    }
+
+    CachedLayout {
+        line_height,
+        ascent,
+        chars,
+        advances,
+        kerns,
+        lines,
+        last_used: tick,
+    }
+}
+
+/// 逐行逐字生成四边形（缓存命中与未命中共用）。
+#[allow(clippy::too_many_arguments)]
+fn emit_layout(
+    layout: &CachedLayout,
+    text: &UiTextStyle,
+    content: UiRect,
+    alpha: f32,
+    out: &mut Vec<UiSprite>,
+    font: &FontVec,
+    face: u8,
+    size_q: u32,
+    glyphs: &mut HashMap<GlyphKey, GlyphSprite>,
+    atlas: &mut GlyphAtlas,
+) -> usize {
+    let px = size_q as f32 / 4.0;
+
+    // -- 垂直起点 --
+    let total_height = layout.line_height * layout.lines.len() as f32;
+    let mut baseline = match text.valign {
+        UiVAlign::Top => content.min.y,
+        UiVAlign::Middle => content.center().y - total_height * 0.5,
+        UiVAlign::Bottom => content.max.y - total_height,
+    } + layout.ascent;
+
+    // -- 逐行逐字生成四边形 --
+    let start = out.len();
+    let alpha = alpha.clamp(0.0, 1.0);
+    let base = Color::from(text.color);
+    let color = Color {
+        a: base.a * alpha,
+        ..base
+    };
+    let atlas_size = atlas.size() as f32;
+    for line in layout.lines.iter() {
+        let start_x = match text.align {
+            UiAlign::Left => content.min.x,
+            UiAlign::Center => content.center().x - line.width * 0.5,
+            UiAlign::Right => content.max.x - line.width,
+        };
+        let mut pen = start_x;
+        for i in line.start..line.end {
+            let ch = layout.chars[i];
+            let advance = layout.advances[i] + if i > line.start { layout.kerns[i] } else { 0.0 };
+
+            if ch == ' ' || ch == '\t' {
+                pen += advance;
+                continue;
+            }
+            let Some(sprite) = glyph_sprite(font, face, px, ch, glyphs, atlas) else {
+                pen += advance;
+                continue;
+            };
+            // 落在整数像素上：字形按整像素光栅化，小数坐标只会让双线性
+            // 采样把边缘糊掉。
+            let min = Vec2::new(
+                (pen + sprite.offset.x).round(),
+                (baseline + sprite.offset.y).round(),
+            );
+            let max = min + Vec2::new(sprite.w as f32, sprite.h as f32);
+            out.push(UiSprite {
+                rect: UiRect { min, max },
+                uv: [
+                    sprite.x as f32 / atlas_size,
+                    sprite.y as f32 / atlas_size,
+                    (sprite.x + sprite.w) as f32 / atlas_size,
+                    (sprite.y + sprite.h) as f32 / atlas_size,
+                ],
+                color,
+                mode: SpriteMode::AlphaMask,
+                texture: UiTexture::Atlas,
+            });
+            pen += advance;
+        }
+        baseline += layout.line_height;
+    }
+    out.len() - start
+}
+
+/// 缓存满了就按最近使用淘汰一半（见 [`LAYOUT_CACHE_CAPACITY`]）。
+fn evict_layouts(layouts: &mut HashMap<u64, LayoutEntry>) {
+    if layouts.len() <= LAYOUT_CACHE_CAPACITY {
+        return;
+    }
+    let mut ticks: Vec<u64> = layouts.values().map(|entry| entry.layout.last_used).collect();
+    let mid = ticks.len() / 2;
+    ticks.select_nth_unstable(mid);
+    let cutoff = ticks[mid];
+    // `>=`：与中位数同刻度的记录留不留都不影响有界性，这里留新的那一半。
+    layouts.retain(|_, entry| entry.layout.last_used >= cutoff);
+    // 极端情况（所有记录同一刻度）保留过多：整体丢掉重来。
+    if layouts.len() > LAYOUT_CACHE_CAPACITY {
+        layouts.clear();
     }
 }
 
@@ -778,6 +1001,120 @@ mod tests {
             atlas.pixels()[(7 * size + 7) as usize],
             14,
             "旧内容 (7,7) 在**新步长**下仍应保留"
+        );
+    }
+
+    /// 同样的内容第二帧必须命中；对齐方式不进键，换对齐仍应命中。
+    #[test]
+    fn layout_cache_hits_on_repeat_and_ignores_alignment() {
+        let mut engine = TextEngine::new();
+        if !engine.has_font() {
+            return;
+        }
+        let mut out = Vec::new();
+        engine.emit(
+            &style("cache me please", 20.0),
+            rect(400.0, 80.0),
+            1.0,
+            &mut out,
+        );
+        assert_eq!(engine.layout_cache_stats(), (0, 1, 1));
+
+        out.clear();
+        engine.emit(
+            &style("cache me please", 20.0),
+            rect(400.0, 80.0),
+            1.0,
+            &mut out,
+        );
+        assert_eq!(engine.layout_cache_stats(), (1, 1, 1));
+
+        out.clear();
+        let mut centered = style("cache me please", 20.0);
+        centered.align = UiAlign::Center;
+        engine.emit(&centered, rect(400.0, 80.0), 1.0, &mut out);
+        assert_eq!(
+            engine.layout_cache_stats(),
+            (2, 1, 1),
+            "对齐只影响最终摆放，不该让折行缓存失效"
+        );
+    }
+
+    /// 内容 / 字号 / 换行宽度任一变化都必须重新排版。
+    #[test]
+    fn layout_cache_key_covers_width_content_and_size() {
+        let mut engine = TextEngine::new();
+        if !engine.has_font() {
+            return;
+        }
+        let mut out = Vec::new();
+        engine.emit(&style("hello world", 20.0), rect(400.0, 80.0), 1.0, &mut out);
+        engine.emit(&style("hello world", 20.0), rect(80.0, 80.0), 1.0, &mut out);
+        engine.emit(&style("hello worlds", 20.0), rect(400.0, 80.0), 1.0, &mut out);
+        engine.emit(&style("hello world", 21.0), rect(400.0, 80.0), 1.0, &mut out);
+        assert_eq!(
+            engine.layout_cache_stats(),
+            (0, 4, 4),
+            "四个维度各变一次，应四次都未命中"
+        );
+    }
+
+    /// 缓存命中 / 未命中的输出必须逐字段一致，且与关缓存时一致。
+    #[test]
+    fn cached_output_is_identical_to_uncached() {
+        use xgame_core::UiTextStyle;
+        let mut cached = TextEngine::new();
+        if !cached.has_font() {
+            return;
+        }
+        let mut plain = TextEngine::new();
+        plain.set_layout_cache_enabled(false);
+
+        let cases = [
+            ("hello world hello world", 18.0, 400.0, 80.0, UiAlign::Left),
+            ("hello world hello world", 18.0, 90.0, 80.0, UiAlign::Left),
+            ("中文折行测试，标点也要能断。", 24.0, 120.0, 120.0, UiAlign::Center),
+            ("Right aligned", 32.0, 300.0, 60.0, UiAlign::Right),
+        ];
+        for (content, size, width, height, align) in cases {
+            let text = UiTextStyle {
+                content: content.to_owned(),
+                size,
+                align,
+                ..UiTextStyle::default()
+            };
+            let area = rect(width, height);
+            let mut first = Vec::new();
+            let mut plain_out = Vec::new();
+            cached.emit(&text, area, 0.75, &mut first);
+            plain.emit(&text, area, 0.75, &mut plain_out);
+            assert_eq!(first, plain_out, "缓存首次排版应与关缓存时一致: {content}");
+
+            let mut second = Vec::new();
+            cached.emit(&text, area, 0.75, &mut second);
+            assert_eq!(first, second, "缓存命中的输出必须逐字段一致: {content}");
+        }
+    }
+
+    /// 逐帧变化的文案不能把缓存撑成无界（满了按最近使用淘汰）。
+    #[test]
+    fn layout_cache_stays_bounded() {
+        let mut engine = TextEngine::new();
+        if !engine.has_font() {
+            return;
+        }
+        let mut out = Vec::new();
+        let total = LAYOUT_CACHE_CAPACITY + 200;
+        for i in 0..total {
+            let text = style(&format!("score {i}"), 16.0);
+            out.clear();
+            engine.emit(&text, rect(200.0, 24.0), 1.0, &mut out);
+        }
+        let (_, misses, entries) = engine.layout_cache_stats();
+        assert_eq!(misses as usize, total, "每段新文案都该未命中一次");
+        assert!(
+            entries <= LAYOUT_CACHE_CAPACITY,
+            "缓存条目必须有界: {entries} > {LAYOUT_CACHE_CAPACITY}"
         );
     }
 }

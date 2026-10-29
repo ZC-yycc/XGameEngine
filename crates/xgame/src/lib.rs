@@ -59,7 +59,7 @@ pub mod prelude {
     pub use xgame_core::{
         BloomConfig, BodyKind, Entity, EntityId, FxaaConfig, GameClock, PhysicsBody, PhysicsHandle,
         QualityConfig, QualityPreset, QualitySettings, RenderConfig, SaveGame, SaveValue, Scene,
-        ToneMapMode, Transform,
+        SsaoConfig, ToneMapMode, Transform,
     };
 
     // -- 检视（P1）：字段表 + 派生宏 --------------------------------------
@@ -84,6 +84,7 @@ pub mod prelude {
     // TAA：历史缓冲 + resolve，以及宿主算抖动要用的两个换算函数。
     // 宿主只碰这三样，`taa` 模块的其余内容（uniform 布局 / WGSL）不对外。
     pub use xgame_render::taa::{jitter_to_ndc, jitter_to_uv, TaaResolver};
+    pub use xgame_render::ssao::SsaoPass;
 
     // -- 运行时 -----------------------------------------------------------
     pub use xgame_runtime::{

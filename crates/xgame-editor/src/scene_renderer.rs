@@ -109,6 +109,8 @@ pub struct SceneRenderer {
     /// 历史缓冲是**每张显示目标**的：切视口尺寸 / 切换项目就把历史作废
     /// （`recreate_targets` 里 `reset`），否则重投影会去读一张完全不同尺寸的画面。
     taa: xgame_render::taa::TaaResolver,
+    /// SSAO 乘算（`render.ssao.enabled` 关着时整段跳过，也不建 AO 纹理）。
+    ssao: xgame_render::ssao::SsaoPass,
     /// 屏幕空间 UI（在 `postfx` **之后**画到同一张 LDR 目标上）。
     ///
     /// 排在色调映射之后是硬约束：UI 颜色不该随场景曝光变化，见
@@ -169,6 +171,7 @@ impl SceneRenderer {
         let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
         let postfx = PostFx::new(&device, surface_format);
         let taa = xgame_render::taa::TaaResolver::new(&device, sample_count);
+        let ssao = xgame_render::ssao::SsaoPass::new(&device, sample_count);
         let ui = UiRenderer::new(&device, surface_format);
 
         Self {
@@ -184,6 +187,7 @@ impl SceneRenderer {
             hdr: None,
             postfx,
             taa,
+            ssao,
             ui,
             target_gen: 0,
             pending_size: None,
@@ -311,6 +315,7 @@ impl SceneRenderer {
         // TAA 的历史也是"这张目标的内容"：尺寸一变，重投影全部对不上，
         // 而且绑定组里钉着旧的颜色 / 深度视图 —— 必须作废。
         self.taa.reset();
+        self.ssao.reset();
         // 目标换代：`postfx` 的绑定组按这个计数失效重建（源视图换了）。
         self.target_gen = self.target_gen.wrapping_add(1);
 
@@ -596,6 +601,11 @@ impl SceneRenderer {
         // 指纹 —— 那个值每帧都变，掺进来等于把静态帧门控彻底废掉。
         hash = mix_bits(hash, render.taa.enabled as u64);
         hash = mix_bits(hash, render.taa.history_weight.to_bits() as u64);
+        // SSAO 同理：开关与三个参数都直接改变每个像素。
+        hash = mix_bits(hash, render.ssao.enabled as u64);
+        hash = mix_bits(hash, render.ssao.strength.to_bits() as u64);
+        hash = mix_bits(hash, render.ssao.radius.to_bits() as u64);
+        hash = mix_bits(hash, render.ssao.bias.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.intensity.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.threshold.to_bits() as u64);
         hash = mix_bits(hash, render.bloom.knee.to_bits() as u64);
@@ -961,6 +971,25 @@ impl SceneRenderer {
             )
         } else {
             (&hdr.color_view, self.target_gen)
+        };
+
+        // SSAO 乘算（开着时）—— 在 TAA 之后、后处理之前：AO 是"光照怎么被
+        // 遮"的调制，要在曝光 / 色调映射之前乘进场景色。关着时整段跳过。
+        let (source_view, source_gen) = if settings.ssao.enabled {
+            self.ssao.apply(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                source_view,
+                source_gen,
+                &hdr.depth_view,
+                hdr.size,
+                view_proj,
+                camera_pos,
+                settings.ssao,
+            )
+        } else {
+            (source_view, source_gen)
         };
 
         // 后处理：HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → egui 注册的 LDR 显示

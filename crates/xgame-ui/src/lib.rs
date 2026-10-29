@@ -30,7 +30,7 @@ pub mod input;
 pub mod layout;
 pub mod text;
 
-pub use draw::{Painter, SpriteMode, UiCommand, UiDrawData, UiQuad, UiSprite, UiTexture};
+pub use draw::{Painter, SpriteMode, UiClip, UiCommand, UiDrawData, UiQuad, UiSprite, UiTexture};
 pub use input::{update_interaction, UiEvent, UiEventKind, UiInteraction, UiPointer};
 pub use layout::{visit, LayoutItem, UiRect, UiTree};
 pub use text::{GlyphAtlas, TextEngine};

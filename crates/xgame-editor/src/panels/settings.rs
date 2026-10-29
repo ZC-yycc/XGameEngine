@@ -581,6 +581,50 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                             .on_hover_text("TAA 关着时这一项不生效");
                             ui.end_row();
 
+                            ui.label("SSAO").on_hover_text(
+                                "屏幕空间环境光遮蔽：接触阴影 / 缝隙压暗（半分辨率深度）。\
+                             默认关（画质增强默认不动画面）；开着时 AO 直接乘进场景色\
+                             （含直接光）。噪声是确定性的，同机截图逐字节可复现",
+                            );
+                            ui.checkbox(&mut draft.render.ssao.enabled, "");
+                            ui.end_row();
+
+                            ui.label("SSAO 强度").on_hover_text(
+                                "遮蔽强度：0 = 无遮蔽效果；2.0 是「看得出但不脏」的常用上限。\
+                             保存时夹进 [0, 4]",
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut draft.render.ssao.strength)
+                                    .range(0.0..=xgame_core::SsaoConfig::MAX_STRENGTH)
+                                    .speed(0.02)
+                                    .fixed_decimals(2),
+                            );
+                            ui.end_row();
+
+                            ui.label("SSAO 半径").on_hover_text(
+                                "采样半径（世界单位）：太大 = 远处物体也遮蔽近处；\
+                             太小 = 看不出。保存时夹进 [0, 10]",
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut draft.render.ssao.radius)
+                                    .range(0.0..=xgame_core::SsaoConfig::MAX_RADIUS)
+                                    .speed(0.01)
+                                    .fixed_decimals(2),
+                            );
+                            ui.end_row();
+
+                            ui.label("SSAO 偏置").on_hover_text(
+                                "深度比较偏置（世界单位）：挡掉「表面遮蔽自己」的 acne。\
+                             保存时夹进 [0, 1]",
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut draft.render.ssao.bias)
+                                    .range(0.0..=xgame_core::SsaoConfig::MAX_BIAS)
+                                    .speed(0.005)
+                                    .fixed_decimals(3),
+                            );
+                            ui.end_row();
+
                             ui.label("泛光强度").on_hover_text(
                                 "Bloom 光晕的叠加比例：0 = 关闭（渲染器整段跳过，零成本）；\
                              常用 0.4~0.8。保存时夹进 [0, 10]",

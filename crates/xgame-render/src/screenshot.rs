@@ -186,6 +186,8 @@ pub struct ScreenshotRenderer {
     /// TAA 的历史缓冲与 resolve（`render.taa.enabled` 关着时全程不用，
     /// 历史纹理也不会被创建）。采样数在构造时交给它（深度纹理类型按它选）。
     taa: crate::taa::TaaResolver,
+    /// SSAO 乘算（`render.ssao.enabled` 关着时整段跳过，也不建 AO 纹理）。
+    ssao: crate::ssao::SsaoPass,
     /// 屏幕空间 UI（后处理之后画到同一张 LDR 上；无头截图也要有 UI）。
     ui: crate::ui_renderer::UiRenderer,
     /// 模型标识 → 已上传的网格（与编辑器 / 游戏同一条加载入口）。
@@ -299,6 +301,7 @@ impl ScreenshotRenderer {
         }
         let postfx = PostFx::new(&device, format);
         let taa = crate::taa::TaaResolver::new(&device, sample_count);
+        let ssao = crate::ssao::SsaoPass::new(&device, sample_count);
         let ui = crate::ui_renderer::UiRenderer::new(&device, format);
 
         Ok(Self {
@@ -311,6 +314,7 @@ impl ScreenshotRenderer {
             hdr,
             postfx,
             taa,
+            ssao,
             ui,
             model_cache: HashMap::new(),
             project_root: project_root.to_path_buf(),
@@ -507,6 +511,24 @@ impl ScreenshotRenderer {
             )
         } else {
             (&self.hdr.color_view, 0u64)
+        };
+        // SSAO 乘算（开着时）—— TAA 之后、后处理之前：AO 要在曝光 / 色调
+        // 映射之前乘进场景色。关着时整段跳过（不建纹理、不记 pass）。
+        let (source_view, source_gen) = if settings.ssao.enabled {
+            self.ssao.apply(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                source_view,
+                source_gen,
+                &self.hdr.depth_view,
+                self.size,
+                &view_proj,
+                &camera.eye,
+                settings.ssao,
+            )
+        } else {
+            (source_view, source_gen)
         };
         // HDR 场景图 → 曝光 +（Bloom）→ 色调映射 → LDR 显示目标。截图器建一次
         // 用一次、目标从不重建 ⇒ 目标代数恒为 0（绑定组缓存只填一次）；
@@ -1234,6 +1256,155 @@ mod tests {
         // 重投影两条路径都走到。跑完不 panic / 不出设备错误 = 这条分支通了。
         let on = render_frames(&mut shot, &scene, &anim, camera, taa_on(), 2);
         assert_ne!(off, on, "TAA 在 MSAA 路径下没有生效");
+    }
+
+    // -----------------------------------------------------------------
+    // SSAO（屏幕空间环境光遮蔽）：GPU 侧像素测试组
+    // -----------------------------------------------------------------
+
+    fn ssao_on() -> RenderConfig {
+        RenderConfig {
+            ssao: xgame_core::SsaoConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// 两个靠在一起的立方体（内角）：遮蔽最明显的地方。
+    fn ssao_probe_scene() -> Scene {
+        let mut scene = Scene::new("ssao-corner");
+        scene.ambient = [0.35, 0.35, 0.35];
+        scene.lights = vec![Light::directional("key", [0.3, -0.8, -1.0], [1.0; 3], 1.2)];
+        scene.lights[0].casts_shadow = false;
+        let mut floor = Entity::new("Floor");
+        floor.model = "builtin://cube".to_owned();
+        floor.transform.position = Vec3::new(0.0, -0.6, 0.0);
+        floor.transform.scale = Vec3::new(4.0, 1.2, 4.0);
+        scene.add_entity(floor);
+        let mut wall = Entity::new("Wall");
+        wall.model = "builtin://cube".to_owned();
+        wall.transform.position = Vec3::new(0.0, 0.6, -1.2);
+        wall.transform.scale = Vec3::new(4.0, 1.2, 0.6);
+        scene.add_entity(wall);
+        scene
+    }
+
+    /// 平均亮度。
+    fn mean_luma(rgba: &[u8]) -> f32 {
+        let (pixels, _) = rgba.as_chunks::<4>();
+        let sum: f32 = pixels.iter().map(|p| luma_of([p[0], p[1], p[2]])).sum();
+        sum / pixels.len() as f32
+    }
+
+    /// 逐像素最大变暗量（off − on，只计正变暗）。
+    fn max_darken(off: &[u8], on: &[u8]) -> f32 {
+        let (pa, _) = off.as_chunks::<4>();
+        let (pb, _) = on.as_chunks::<4>();
+        pa.iter()
+            .zip(pb.iter())
+            .map(|(a, b)| luma_of([a[0], a[1], a[2]]) - luma_of([b[0], b[1], b[2]]))
+            .fold(0.0f32, f32::max)
+    }
+
+    /// SSAO 真的在干活：开着的画面必须整体更暗（AO 只会乘 ≤1 的系数），
+    /// 且接触角上必须有看得见的压暗（不是只差几个量化级的"名义生效"）。
+    #[test]
+    fn ssao_darkens_contact_regions() {
+        let Some(mut shot) = gpu_or_skip("ssao_darkens_contact_regions") else {
+            return;
+        };
+        let scene = ssao_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(Vec3::new(2.6, 2.2, 3.6), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        let off = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        let on = render_frames(&mut shot, &scene, &anim, camera, ssao_on(), 1);
+        assert_ne!(off, on, "SSAO 开关没接进渲染链：两张图逐字节相同");
+
+        let (m_off, m_on) = (mean_luma(&off), mean_luma(&on));
+        assert!(
+            m_on < m_off,
+            "SSAO 只会压暗：均值不该变亮（off={m_off:.4} on={m_on:.4}）"
+        );
+        let darken = max_darken(&off, &on);
+        assert!(
+            darken > 0.03,
+            "接触角的压暗量必须看得出来（最大单像素变暗 {darken:.4}）"
+        );
+        eprintln!("SSAO：均值 {m_off:.4} → {m_on:.4}，最大单像素变暗 {darken:.4}");
+    }
+
+    /// SSAO 开着时截图仍然**逐字节确定**：两个全新渲染器各渲一帧，PNG 相同。
+    ///
+    /// 噪声是像素坐标的整数哈希（无随机相位、无时间项），kernel 是固定种子
+    /// LCG —— 序列一旦引入随机数或墙钟，这条立刻失效。
+    #[test]
+    fn ssao_keeps_two_runs_byte_identical() {
+        let Some(mut first) = gpu_or_skip("ssao_keeps_two_runs_byte_identical") else {
+            return;
+        };
+        let scene = ssao_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(Vec3::new(2.6, 2.2, 3.6), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_ssao_det_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录失败");
+        let path_a = dir.join("a.png");
+        let path_b = dir.join("b.png");
+
+        render_frames(&mut first, &scene, &anim, camera, ssao_on(), 1);
+        first.save_png(&path_a).expect("落盘失败");
+
+        // 全新渲染器 = 新设备 / 新 AO 纹理，等价于"另一个进程跑一遍"。
+        let mut second =
+            ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240).expect("第二次创建渲染器失败");
+        render_frames(&mut second, &scene, &anim, camera, ssao_on(), 1);
+        second.save_png(&path_b).expect("落盘失败");
+
+        let bytes_a = std::fs::read(&path_a).unwrap();
+        let bytes_b = std::fs::read(&path_b).unwrap();
+        assert_eq!(bytes_a, bytes_b, "SSAO 开着时两次运行的 PNG 必须逐字节一致");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `strength = 0` 时画面必须与关着**逐位一致**（AO 着色器早退成全 1，
+    /// 乘算变直通）—— "强度 0 = 无遮蔽效果"的契约。
+    #[test]
+    fn ssao_strength_zero_matches_disabled() {
+        let Some(mut shot) = gpu_or_skip("ssao_strength_zero_matches_disabled") else {
+            return;
+        };
+        let scene = ssao_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(Vec3::new(2.6, 2.2, 3.6), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        let off = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        let zero = render_frames(
+            &mut shot,
+            &scene,
+            &anim,
+            camera,
+            RenderConfig {
+                ssao: xgame_core::SsaoConfig {
+                    enabled: true,
+                    strength: 0.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            1,
+        );
+        assert_eq!(off, zero, "strength=0 必须与关着逐位一致");
     }
 
     /// 介于前景 / 背景之间的中间调像素数：抗锯齿的"灰边"就是这些像素。

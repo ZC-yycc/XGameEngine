@@ -95,6 +95,13 @@ pub struct UiElement {
     /// 是否接受指针事件。`false` = 纯装饰（点击会穿透到下层）。
     #[serde(default = "default_true")]
     pub interactable: bool,
+    /// 是否把**后代**裁到本元素矩形内（自身仍完整绘制）。
+    ///
+    /// 裁剪区沿层级**继承并取交集**：祖先的裁剪同样作用于更深的后代。
+    /// 命中测试也遵守裁剪 —— 被裁掉的部分点不到。
+    /// 只支持矩形裁剪（GPU scissor）；圆角不参与裁剪形状。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clip_children: bool,
     /// 运行时状态：不落盘，由 [`crate::ui`] 的交互步骤每帧写回。
     #[serde(skip)]
     pub state: UiState,
@@ -365,6 +372,11 @@ fn default_true() -> bool {
     true
 }
 
+/// serde 用：`false` 不落盘（默认关的开关不制造场景 diff）。
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// `f32::is_finite` 的兜底：坏值（NaN / 无穷）替换成给定默认值。
 fn finite_or(value: f32, fallback: f32) -> f32 {
     if value.is_finite() {
@@ -398,6 +410,7 @@ impl UiElement {
             image: None,
             visible: true,
             interactable: false,
+            clip_children: false,
             state: UiState::default(),
         }
     }
@@ -534,6 +547,7 @@ impl UiElement {
             && self.image == other.image
             && self.visible == other.visible
             && self.interactable == other.interactable
+            && self.clip_children == other.clip_children
     }
 
     /// 夹取所有数值，保证坏数据不会让布局 / 渲染出现 NaN。
@@ -594,7 +608,23 @@ mod tests {
         assert_eq!(element.offset_max, [240.0, 40.0]);
         assert!(element.visible);
         assert!(element.interactable);
+        assert!(!element.clip_children, "裁剪默认关");
         assert_eq!(element.state, UiState::default());
+    }
+
+    /// 裁剪开关：默认不落盘，开了能往返。
+    #[test]
+    fn clip_children_is_off_by_default_and_round_trips() {
+        let element = UiElement::panel(100.0, 40.0);
+        let ron = ron::ser::to_string(&element).expect("序列化");
+        assert!(!ron.contains("clip_children"), "默认关不该落盘: {ron}");
+
+        let mut clipping = element;
+        clipping.clip_children = true;
+        let ron = ron::ser::to_string(&clipping).expect("序列化");
+        assert!(ron.contains("clip_children"), "开了要落盘: {ron}");
+        let back: UiElement = ron::from_str(&ron).expect("反序列化");
+        assert!(back.clip_children);
     }
 
     #[test]

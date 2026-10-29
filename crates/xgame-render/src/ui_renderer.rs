@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use wgpu::util::DeviceExt as _;
 use xgame_core::Scene;
 use xgame_math::glam::Vec2;
-use xgame_ui::{SpriteMode, UiCommand, UiTexture};
+use xgame_ui::{SpriteMode, UiClip, UiCommand, UiTexture};
 
 use crate::postfx::needs_manual_srgb;
 
@@ -226,6 +226,17 @@ pub struct UiStats {
     pub elements: usize,
 }
 
+/// 一次 draw：实例区间 + 纹理 + 裁剪区。
+///
+/// 裁剪区不同的相邻区间**不能合并**（scissor 是 pass 级状态，合并就等于
+/// 把一批图元画进另一批的裁剪框）。
+#[derive(Clone, Debug, PartialEq)]
+struct UiRun {
+    range: Range<u32>,
+    texture: UiTexture,
+    clip: Option<UiClip>,
+}
+
 /// UI 渲染器：持有绘制数据（CPU）与 GPU 资源。
 pub struct UiRenderer {
     painter: xgame_ui::Painter,
@@ -239,8 +250,8 @@ pub struct UiRenderer {
 
     /// 本帧的实例数据（矩形 + 精灵，按绘制顺序）。
     instances: Vec<UiInstance>,
-    /// 实例区间 → 纹理。相邻且同纹理的区间在录制时合并成一次 draw。
-    runs: Vec<(Range<u32>, UiTexture)>,
+    /// 实例区间 → 纹理 + 裁剪区。相邻且同纹理、同裁剪区的区间在录制时合并。
+    runs: Vec<UiRun>,
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
 
@@ -544,8 +555,12 @@ impl UiRenderer {
         {
             let draw = self.painter.draw();
             for command in &draw.commands {
-                let texture = match *command {
-                    UiCommand::Rects { start, count } => {
+                let (texture, clip) = match *command {
+                    UiCommand::Rects {
+                        start,
+                        count,
+                        clip,
+                    } => {
                         for quad in &draw.quads[start as usize..(start + count) as usize] {
                             self.instances.push(UiInstance {
                                 rect: [
@@ -562,12 +577,13 @@ impl UiRenderer {
                         }
                         // 矩形不采样纹理，但绑定组要一致才能与文字同批 ——
                         // 用图集，于是"背景 + 文字"天然是一次 draw。
-                        UiTexture::Atlas
+                        (UiTexture::Atlas, clip)
                     }
                     UiCommand::Sprites {
                         start,
                         count,
                         texture,
+                        clip,
                     } => {
                         for sprite in &draw.sprites[start as usize..(start + count) as usize] {
                             self.instances.push(UiInstance {
@@ -591,10 +607,10 @@ impl UiRenderer {
                                 border_color: [0.0; 4],
                             });
                         }
-                        texture
+                        (texture, clip)
                     }
                 };
-                push_run(&mut self.runs, texture, self.instances.len() as u32);
+                push_run(&mut self.runs, texture, clip, self.instances.len() as u32);
             }
         }
 
@@ -633,22 +649,31 @@ impl UiRenderer {
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
 
         let mut bound: Option<UiTexture> = None;
-        for (range, texture) in &self.runs {
-            if bound != Some(*texture) {
-                let bind_group = match texture {
+        let mut scissor: Option<Option<UiClip>> = None;
+        for run in &self.runs {
+            if scissor != Some(run.clip) {
+                // 空裁剪区整段跳过（GPU 的 scissor 宽高不能为 0）。
+                let Some((x, y, width, height)) = run_scissor(run.clip, viewport) else {
+                    continue;
+                };
+                pass.set_scissor_rect(x, y, width, height);
+                scissor = Some(run.clip);
+            }
+            if bound != Some(run.texture) {
+                let bind_group = match run.texture {
                     UiTexture::Atlas => Some(atlas_bg),
                     UiTexture::Image(index) => self
                         .images
-                        .get(*index as usize)
+                        .get(index as usize)
                         .map(|entry| &entry.bind_group),
                 };
                 let Some(bind_group) = bind_group else {
                     continue;
                 };
                 pass.set_bind_group(1, bind_group, &[]);
-                bound = Some(*texture);
+                bound = Some(run.texture);
             }
-            pass.draw(0..4, range.clone());
+            pass.draw(0..4, run.range.clone());
         }
         true
     }
@@ -761,32 +786,43 @@ impl UiRenderer {
     }
 }
 
-/// 把命令序列压成"同纹理的连续区间"。
+/// 把命令序列压成"同纹理、同裁剪区的连续区间"。
 ///
 /// `prepare` 用它算 draw call 读数，`render` 用同样的规则切区间 —— 一处规则，
 /// 两处不会漂移。
-fn coalesce_draws(commands: &[UiCommand]) -> Vec<(Range<u32>, UiTexture)> {
-    let mut runs: Vec<(Range<u32>, UiTexture)> = Vec::new();
+fn coalesce_draws(commands: &[UiCommand]) -> Vec<UiRun> {
+    let mut runs: Vec<UiRun> = Vec::new();
     let mut offset = 0u32;
     for command in commands {
-        let (count, texture) = match *command {
-            UiCommand::Rects { count, .. } => (count, UiTexture::Atlas),
-            UiCommand::Sprites { count, texture, .. } => (count, texture),
+        let (count, texture, clip) = match *command {
+            UiCommand::Rects { count, clip, .. } => (count, UiTexture::Atlas, clip),
+            UiCommand::Sprites {
+                count,
+                texture,
+                clip,
+                ..
+            } => (count, texture, clip),
         };
-        push_run_at(&mut runs, texture, offset, count);
+        push_run_at(&mut runs, texture, clip, offset, count);
         offset += count;
     }
     runs
 }
 
-fn push_run(runs: &mut Vec<(Range<u32>, UiTexture)>, texture: UiTexture, end: u32) {
-    let start = runs.last().map(|(range, _)| range.end).unwrap_or(0);
-    push_run_at(runs, texture, start, end.saturating_sub(start));
+fn push_run(
+    runs: &mut Vec<UiRun>,
+    texture: UiTexture,
+    clip: Option<UiClip>,
+    end: u32,
+) {
+    let start = runs.last().map(|run| run.range.end).unwrap_or(0);
+    push_run_at(runs, texture, clip, start, end.saturating_sub(start));
 }
 
 fn push_run_at(
-    runs: &mut Vec<(Range<u32>, UiTexture)>,
+    runs: &mut Vec<UiRun>,
     texture: UiTexture,
+    clip: Option<UiClip>,
     start: u32,
     count: u32,
 ) {
@@ -794,8 +830,35 @@ fn push_run_at(
         return;
     }
     match runs.last_mut() {
-        Some((range, last)) if *last == texture && range.end == start => range.end += count,
-        _ => runs.push((start..start + count, texture)),
+        Some(run) if run.texture == texture && run.clip == clip && run.range.end == start => {
+            run.range.end += count;
+        }
+        _ => runs.push(UiRun {
+            range: start..start + count,
+            texture,
+            clip,
+        }),
+    }
+}
+
+/// 一段 run 的 scissor（整数像素，左上原点）。
+///
+/// 返回 `None` = 裁剪区是空的，这段什么也画不出来。`None` 裁剪映射到整个
+/// 视口（显式设一次，避免沿用上一段的 scissor）。
+fn run_scissor(clip: Option<UiClip>, viewport: (u32, u32)) -> Option<(u32, u32, u32, u32)> {
+    match clip {
+        None => Some((0, 0, viewport.0, viewport.1)),
+        Some(clip) => {
+            let x = clip.x.min(viewport.0);
+            let y = clip.y.min(viewport.1);
+            let width = clip.width.min(viewport.0 - x);
+            let height = clip.height.min(viewport.1 - y);
+            if width == 0 || height == 0 {
+                None
+            } else {
+                Some((x, y, width, height))
+            }
+        }
     }
 }
 
@@ -954,6 +1017,21 @@ fn draw_signature(draw: &xgame_ui::UiDrawData) -> u64 {
     mix(draw.sprites.len() as u64);
     mix(draw.commands.len() as u64);
     mix(draw.atlas_version);
+    for command in &draw.commands {
+        let clip = match *command {
+            UiCommand::Rects { clip, .. } | UiCommand::Sprites { clip, .. } => clip,
+        };
+        match clip {
+            None => mix(0),
+            Some(clip) => {
+                mix(1);
+                mix(clip.x as u64);
+                mix(clip.y as u64);
+                mix(clip.width as u64);
+                mix(clip.height as u64);
+            }
+        }
+    }
     for quad in &draw.quads {
         for v in [
             quad.rect.min.x,
@@ -1007,41 +1085,147 @@ mod tests {
     #[test]
     fn rects_and_glyphs_share_one_draw() {
         let commands = vec![
-            UiCommand::Rects { start: 0, count: 2 },
+            UiCommand::Rects {
+                start: 0,
+                count: 2,
+                clip: None,
+            },
             UiCommand::Sprites {
                 start: 0,
                 count: 30,
                 texture: UiTexture::Atlas,
+                clip: None,
             },
-            UiCommand::Rects { start: 2, count: 1 },
+            UiCommand::Rects {
+                start: 2,
+                count: 1,
+                clip: None,
+            },
             UiCommand::Sprites {
                 start: 30,
                 count: 12,
                 texture: UiTexture::Atlas,
+                clip: None,
             },
         ];
         let runs = coalesce_draws(&commands);
         assert_eq!(runs.len(), 1, "同纹理的相邻区间必须合并: {runs:?}");
-        assert_eq!(runs[0].0, 0..45);
+        assert_eq!(runs[0].range, 0..45);
     }
 
     /// 图片是另一张纹理，必须切断批次 —— 但两侧各自仍要合并。
     #[test]
     fn image_breaks_the_batch() {
         let commands = vec![
-            UiCommand::Rects { start: 0, count: 1 },
+            UiCommand::Rects {
+                start: 0,
+                count: 1,
+                clip: None,
+            },
             UiCommand::Sprites {
                 start: 0,
                 count: 1,
                 texture: UiTexture::Image(0),
+                clip: None,
             },
-            UiCommand::Rects { start: 1, count: 1 },
+            UiCommand::Rects {
+                start: 1,
+                count: 1,
+                clip: None,
+            },
         ];
         let runs = coalesce_draws(&commands);
         assert_eq!(runs.len(), 3);
-        assert_eq!(runs[0], (0..1, UiTexture::Atlas));
-        assert_eq!(runs[1], (1..2, UiTexture::Image(0)));
-        assert_eq!(runs[2], (2..3, UiTexture::Atlas));
+        assert_eq!(runs[0].range, 0..1);
+        assert_eq!(runs[0].texture, UiTexture::Atlas);
+        assert_eq!(runs[1].range, 1..2);
+        assert_eq!(runs[1].texture, UiTexture::Image(0));
+        assert_eq!(runs[2].range, 2..3);
+        assert_eq!(runs[2].texture, UiTexture::Atlas);
+    }
+
+    /// 裁剪区变化必须切批（scissor 是 pass 级状态，合并会画错）。
+    #[test]
+    fn clip_changes_split_the_batch() {
+        let clip = UiClip {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 50,
+        };
+        let commands = vec![
+            UiCommand::Rects {
+                start: 0,
+                count: 1,
+                clip: None,
+            },
+            UiCommand::Sprites {
+                start: 0,
+                count: 2,
+                texture: UiTexture::Atlas,
+                clip: Some(clip),
+            },
+            UiCommand::Rects {
+                start: 1,
+                count: 3,
+                clip: Some(clip),
+            },
+            UiCommand::Rects {
+                start: 4,
+                count: 1,
+                clip: None,
+            },
+        ];
+        let runs = coalesce_draws(&commands);
+        assert_eq!(runs.len(), 3, "同一裁剪区内的不同图元仍要合并: {runs:?}");
+        assert_eq!(runs[0].range, 0..1);
+        assert_eq!(runs[0].clip, None);
+        assert_eq!(runs[1].range, 1..6);
+        assert_eq!(runs[1].clip, Some(clip));
+        assert_eq!(runs[2].range, 6..7);
+        assert_eq!(runs[2].clip, None);
+    }
+
+    /// scissor 夹进视口；空裁剪区返回 `None`（GPU 不接受 0 宽高）。
+    #[test]
+    fn scissor_clamps_to_viewport_and_skips_empty() {
+        assert_eq!(run_scissor(None, (1280, 720)), Some((0, 0, 1280, 720)));
+        assert_eq!(
+            run_scissor(
+                Some(UiClip {
+                    x: 10,
+                    y: 20,
+                    width: 100,
+                    height: 50,
+                }),
+                (64, 64)
+            ),
+            Some((10, 20, 54, 44))
+        );
+        assert_eq!(
+            run_scissor(
+                Some(UiClip {
+                    x: 10,
+                    y: 10,
+                    width: 0,
+                    height: 5,
+                }),
+                (64, 64)
+            ),
+            None
+        );
+        assert_eq!(
+            run_scissor(
+                Some(UiClip {
+                    x: 100,
+                    y: 100,
+                    width: 10,
+                    height: 10,
+                }),
+                (64, 64)
+            ),
+            None
+        );
     }
 
     #[test]

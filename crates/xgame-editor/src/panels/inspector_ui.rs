@@ -96,6 +96,12 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
                 .on_hover_text("关掉 = 不接受点击（按钮会显示为半透明禁用态）")
                 .changed();
         });
+        row(ui, "Clip", |ui| {
+            changed |= ui
+                .checkbox(&mut element.clip_children, "")
+                .on_hover_text("把后代裁到本元素矩形内（自身完整绘制；命中测试同样生效）")
+                .changed();
+        });
 
         ui.add_space(theme::PANEL_MARGIN);
 

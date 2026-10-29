@@ -84,6 +84,16 @@ impl UiRect {
         }
     }
 
+    /// 交集：不相交时得到 `min > max` 的空矩形（[`Self::is_empty`] 为真）。
+    ///
+    /// 裁剪区沿层级继承就是靠这个 —— 子孙只能被裁得更小，永远不能放大。
+    pub fn intersection(&self, other: UiRect) -> Self {
+        Self {
+            min: self.min.max(other.min),
+            max: self.max.min(other.max),
+        }
+    }
+
     /// 退化成空矩形（宽或高 <= 0）。空矩形不参与命中测试与绘制。
     pub fn is_empty(&self) -> bool {
         self.width() <= 0.0 || self.height() <= 0.0
@@ -103,6 +113,11 @@ pub struct LayoutItem {
     pub id: EntityId,
     /// 解算出的像素矩形。
     pub rect: UiRect,
+    /// 祖先裁剪区（已经过继承交集）；`None` = 不裁剪。
+    ///
+    /// **不含自身的 `clip_children`**：这个元素自己仍完整绘制，裁剪只作用于
+    /// 它的后代。命中测试也要求点落在这个区域内。
+    pub clip: Option<UiRect>,
     /// 嵌套深度（根为 0）。HUD 调试与缩进显示用。
     pub depth: u32,
 }
@@ -224,19 +239,29 @@ pub fn visit(scene: &Scene, tree: &UiTree, viewport: Vec2, out: &mut Vec<LayoutI
     let root_rect = UiRect::viewport(viewport);
     let mut warned = false;
     for &index in tree.roots() {
-        walk(scene, tree, index, root_rect, 0, out, &mut warned);
+        walk(scene, tree, index, root_rect, None, 0, out, &mut warned);
     }
 }
 
+// 参数多是刻意的：递归状态（parent / clip / depth）与输出缓冲都是独立量，
+// 捆成一个 struct 只是把 8 个名字换成 8 个字段名，读起来并不会更短。
+#[allow(clippy::too_many_arguments)]
 fn walk(
     scene: &Scene,
     tree: &UiTree,
     index: usize,
     parent: UiRect,
+    clip: Option<UiRect>,
     depth: u32,
     out: &mut Vec<LayoutItem>,
     warned: &mut bool,
 ) {
+    // 祖先裁剪区已经空掉：整棵子树都不可见（裁剪只会继续变小）。
+    if let Some(active) = clip {
+        if active.is_empty() {
+            return;
+        }
+    }
     let Some(entity) = scene.entities.get(index) else {
         return;
     };
@@ -269,11 +294,21 @@ fn walk(
         index,
         id: entity.id,
         rect,
+        clip,
         depth,
     });
 
+    // 裁剪只向下继承：自身矩形只有在开了 `clip_children` 时才约束后代。
+    let child_clip = if ui.clip_children {
+        Some(match clip {
+            Some(outer) => outer.intersection(rect),
+            None => rect,
+        })
+    } else {
+        clip
+    };
     for &child in tree.children(index) {
-        walk(scene, tree, child, rect, depth + 1, out, warned);
+        walk(scene, tree, child, rect, child_clip, depth + 1, out, warned);
     }
 }
 
@@ -308,7 +343,10 @@ pub fn hit_test(scene: &Scene, items: &[LayoutItem], point: Vec2) -> Option<Layo
         else {
             return false;
         };
-        ui.is_hittable() && !item.rect.is_empty() && item.rect.contains(point)
+        ui.is_hittable()
+            && !item.rect.is_empty()
+            && item.rect.contains(point)
+            && item.clip.is_none_or(|clip| clip.contains(point))
     })
 }
 
@@ -458,6 +496,83 @@ mod tests {
         let mut items = Vec::new();
         visit(&scene, &tree, Vec2::new(800.0, 600.0), &mut items);
         assert!(items.is_empty(), "NaN 矩形及其子树都不该进布局");
+    }
+
+    /// 裁剪沿层级继承并取交集；被裁掉的部分**点不到**。
+    #[test]
+    fn clip_children_clips_descendants_and_hit_testing() {
+        let mut scene = Scene::new("clip");
+        let mut root = Entity::new("Clip");
+        let mut root_ui = UiElement::panel(200.0, 200.0).at([0.0, 0.0], 100.0, 100.0, 200.0, 200.0);
+        root_ui.clip_children = true;
+        root.ui = Some(root_ui);
+        let root_id = root.id;
+        scene.entities.push(root);
+
+        // 中间层**没有**开 clip，但祖先的裁剪区仍要传到它的子节点。
+        let mut mid = Entity::new("Mid");
+        mid.parent = Some(root_id);
+        mid.ui = Some(UiElement::panel(300.0, 300.0).at([0.0, 0.0], 150.0, 150.0, 300.0, 300.0));
+        let mid_id = mid.id;
+        scene.entities.push(mid);
+
+        let mut button = Entity::new("Button");
+        button.parent = Some(mid_id);
+        button.ui = Some(UiElement::button("OK").at([0.0, 0.0], 30.0, 30.0, 100.0, 40.0));
+        scene.entities.push(button);
+
+        let mut tree = UiTree::new();
+        tree.build(&scene);
+        let mut items = Vec::new();
+        visit(&scene, &tree, Vec2::new(800.0, 600.0), &mut items);
+        assert_eq!(items.len(), 3);
+
+        let root_clip = Some(UiRect::new(
+            Vec2::new(100.0, 100.0),
+            Vec2::new(300.0, 300.0),
+        ));
+        assert!(items[0].clip.is_none(), "裁剪元素自身不裁");
+        assert_eq!(items[1].clip, root_clip);
+        // 中间层没开 clip：祖先的裁剪区直接穿过去，不能被它的矩形二次收窄
+        // （普通布局容器本来就允许子节点溢出自己的矩形）。
+        assert_eq!(items[2].clip, root_clip);
+
+        // 中间层也开 clip：两层裁剪取交集 = 250..300。
+        scene.entities[1].ui.as_mut().unwrap().clip_children = true;
+        let mut items = Vec::new();
+        visit(&scene, &tree, Vec2::new(800.0, 600.0), &mut items);
+        assert_eq!(
+            items[2].clip,
+            Some(UiRect::new(Vec2::new(250.0, 250.0), Vec2::new(300.0, 300.0)))
+        );
+
+        let hit = hit_test(&scene, &items, Vec2::new(290.0, 290.0)).expect("裁剪区内应命中");
+        assert_eq!(scene.entities[hit.index].name, "Button");
+        assert!(
+            hit_test(&scene, &items, Vec2::new(340.0, 310.0)).is_none(),
+            "按钮矩形覆盖该点，但它被祖先裁掉了 —— 不该能点"
+        );
+    }
+
+    /// 没开 `clip_children` 的面板不约束后代（默认行为逐位不变）。
+    #[test]
+    fn panel_without_clip_children_leaves_descendants_unclipped() {
+        let mut scene = Scene::new("noclip");
+        let mut parent = Entity::new("Panel");
+        parent.ui = Some(UiElement::panel(100.0, 100.0).at([0.0, 0.0], 0.0, 0.0, 100.0, 100.0));
+        let parent_id = parent.id;
+        scene.entities.push(parent);
+        let mut child = Entity::new("Child");
+        child.parent = Some(parent_id);
+        child.ui = Some(UiElement::panel(50.0, 50.0).at([0.0, 0.0], 200.0, 200.0, 50.0, 50.0));
+        scene.entities.push(child);
+
+        let mut tree = UiTree::new();
+        tree.build(&scene);
+        let mut items = Vec::new();
+        visit(&scene, &tree, Vec2::new(800.0, 600.0), &mut items);
+        assert_eq!(items.len(), 2);
+        assert!(items[1].clip.is_none());
     }
 
     /// 命中测试：后画的优先；不可交互的元素让点击穿透。

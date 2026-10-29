@@ -109,6 +109,8 @@ struct EditorSession {
     /// 窗口本身放在会话里（它要同时改 `EditorState` 与布局树），但**偏好数据**
     /// 在 `EditorApp`：那是跨项目、跨会话的，不随关闭项目消失。
     preferences_window: panels::preferences::PreferencesWindow,
+    /// 命令面板（Ctrl+Shift+P / F1）：模糊搜索 + 执行编辑器动作。
+    command_palette: panels::command_palette::CommandPalette,
     /// 上一次发给操作系统的窗口标题。
     ///
     /// `ViewportCommand::Title` 最终落到 winit 的 `SetWindowText`，是一条真实的
@@ -196,6 +198,12 @@ struct UiShot {
     profiler: bool,
     /// 抓图前打开 Preferences 窗口。
     open_preferences: bool,
+    /// 抓图前打开命令面板（`--ui-command`）。
+    ///
+    /// 命令面板是键盘优先的浮层，肉眼点开后没法进"改 UI 前后逐像素对比"的
+    /// 自检回路 —— 与 `--ui-settings` 同理，给开关才能截到它。
+    /// 打开时**不**聚焦查询框：聚焦 TextEdit 的光标按墙钟闪烁，逐字节不可复现。
+    open_command: bool,
     /// 抓图时**保留**「发现自动保存」恢复框。
     ///
     /// 默认**忽略**恢复框：它取决于磁盘上有没有 `.autosave/` 残留 —— 那是开发机
@@ -357,6 +365,15 @@ impl EditorApp {
             }
         }
 
+        // `--ui-command`：把命令面板拉开。不聚焦查询框 —— 聚焦 TextEdit 的
+        // 光标按墙钟闪烁，会让"同一份代码截出的图逐字节不变"这条验收失效。
+        if app.ui_shot.as_ref().map(|s| s.open_command).unwrap_or(false) {
+            if let Some(session) = app.session.as_mut() {
+                let state = &session.state;
+                session.command_palette.open(state, false);
+            }
+        }
+
         app
     }
 
@@ -418,6 +435,7 @@ impl EditorApp {
             tree: self.preferences.layout_for_startup(),
             state,
             preferences_window: panels::preferences::PreferencesWindow::new(),
+            command_palette: panels::command_palette::CommandPalette::new(),
             // 空串保证进入编辑器后的第一帧一定会把标题刷成项目名。
             window_title: String::new(),
         });
@@ -648,8 +666,8 @@ struct LaunchArgs {
 ///
 /// 只认 `--ui-shot <png>` / `--ui-frames <n>` / `--ui-select <实体名>` /
 /// `--ui-asset <资产路径>` / `--ui-settings` / `--ui-play` / `--ui-profiler` /
-/// `--ui-preferences` / `--ui-restore-prefs` / `--ui-size <WxH>` 十个开关，
-/// 其余非开关参数按顺序取**第一个**当项目路径。
+/// `--ui-preferences` / `--ui-command` / `--ui-restore-prefs` / `--ui-size <WxH>`
+/// 十一个开关，其余非开关参数按顺序取**第一个**当项目路径。
 /// `--check` / `--headless` 在 `main` 更早的分支就分流了，不会走到这里。
 fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut out = LaunchArgs::default();
@@ -661,6 +679,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut play = false;
     let mut profiler = false;
     let mut open_preferences = false;
+    let mut open_command = false;
     let mut recover_autosave = false;
     let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
 
@@ -711,6 +730,9 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
             "--ui-preferences" => {
                 open_preferences = true;
             }
+            "--ui-command" => {
+                open_command = true;
+            }
             "--ui-restore-prefs" => {
                 out.restore_prefs = true;
             }
@@ -752,6 +774,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         play,
         profiler,
         open_preferences,
+        open_command,
         recover_autosave,
         size,
     });
@@ -1036,6 +1059,25 @@ fn editor_ui(
         session.state.redo();
     }
 
+    // ── 3c. Ctrl+Shift+P / F1 命令面板 ──
+    //
+    // 刻意**不过 `wants_keyboard_input`**：命令面板的意义就是在任何地方
+    // （包括正在输入框里打字时）都能一把召出。与 Ctrl+S 同一档全局快捷键。
+    // 再按一次收起（toggle）—— 面板查询框聚焦时按 Ctrl+Shift+P 不该被
+    // TextEdit 吃掉，那是"关掉面板"的预期路径。
+    let want_palette = ctx.input(|i| {
+        (i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::P))
+            || i.key_pressed(egui::Key::F1)
+    });
+    if want_palette {
+        if session.command_palette.is_open() {
+            session.command_palette.close();
+        } else {
+            let focus_query = true;
+            session.command_palette.open(&session.state, focus_query);
+        }
+    }
+
     // ── 4. Physics step (only when actively playing) ──
     //
     // 这一段单独计时进 Profiler 面板（"运行时推进"）：脚本、物理、音频都在
@@ -1164,6 +1206,12 @@ fn editor_ui(
     // 崩溃恢复框画在最末：它只在打开项目后的头几帧存在，盖在其他弹窗之上
     // 才不会被"未保存更改"压住（两个都开着时，恢复框是更紧急的那个）。
     dialogs::show_autosave_recovery_dialog(&mut session.state, ctx);
+
+    // 命令面板画在**最顶层**（在恢复框之后）：它是用户主动召出的瞬时浮层，
+    // 打开期间必须盖住一切 —— 被别的弹窗压住一半的搜索框没法用。
+    session
+        .command_palette
+        .show(&mut session.state, &mut session.tree, ctx);
 
     // ── 8. 帧采样（Profiler 面板的数据面）──
     //
@@ -1731,6 +1779,7 @@ mod tests {
             "--ui-play",
             "--ui-profiler",
             "--ui-preferences",
+            "--ui-command",
             "--ui-restore-prefs",
             "--ui-size",
             "1280x800",
@@ -1749,6 +1798,10 @@ mod tests {
         assert!(
             shot.open_preferences,
             "--ui-preferences 应当置位（否则 Preferences 窗口永远截不到）"
+        );
+        assert!(
+            shot.open_command,
+            "--ui-command 应当置位（否则命令面板永远截不到）"
         );
         assert!(args.restore_prefs, "--ui-restore-prefs 应当置位");
         assert_eq!(shot.size, egui::vec2(1280.0, 800.0));

@@ -1496,6 +1496,12 @@ fn ui_types() -> Vec<TypeSchema> {
                     &true,
                     "是否接受指针事件；false = 纯装饰（点击穿透）。注意：省略时的 serde 默认是 true，不是 UiElement::default() 面板预设的 false。",
                 ),
+                def(
+                    "clip_children",
+                    "bool",
+                    &false,
+                    "是否把后代裁到本元素矩形内（自身完整绘制）；裁剪区沿层级继承并取交集，命中测试同样生效。矩形裁剪（GPU scissor），圆角不参与。",
+                ),
             ],
             vec![
                 "绘制顺序 = 实体层级的深度优先先序遍历（同层按场景顺序），后面的盖住前面的；没有 z 序字段。",
@@ -2763,6 +2769,7 @@ mod tests {
             image,
             visible,
             interactable,
+            clip_children,
             state,
         } = UiElement::default();
         assert_fields(
@@ -2779,6 +2786,7 @@ mod tests {
                 "image",
                 "visible",
                 "interactable",
+                "clip_children",
             ],
         );
         // state 是运行时字段：目录里不该有它（上面的期望列表已排除）。

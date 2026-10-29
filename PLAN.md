@@ -7202,3 +7202,84 @@ wgpu 对可渲染格式只保证 1× 与 4×；2× / 8× 要适配器私有特�
 - `quality_cost`（release）：低 / 中 / 高 = 102.2 / 156.1 / 223.2 µs（场景段 GPU），
   三档各 8 轮区间不重叠（99.3–102.2 / 156.1–156.9 / 218.8–224.6）；
 - `--check` 四个示例项目退出 0（没配 `quality` 节，行为不变）。
+
+---
+
+## 九十二、质量冲刺：UI 文本排版缓存 + UI 裁剪 + 命令面板 + SSAO（2026-10-29）
+
+一轮连做四个模块（M1→M4），全部"先量后改 / 先红后绿 / 默认关不改旧画面"。
+红线见 [`Docs/决策记录.md`](Docs/决策记录.md) §七十三~§七十六。
+
+### M1 · UI 文本排版缓存（xgame-ui/src/text.rs）——实测 -65%
+
+排版（分段 / 换行 / 字宽累加）在文本不变时每帧重算是纯浪费。缓存键 =
+「内容 + face + 字号量化 + 换行宽度」→ `CachedLayout`（chars / advances /
+kerns / lines / line_height / ascent）；**对齐方式不进键**（对齐只在 emit
+阶段消费，同一排版可服务左 / 中 / 右）。1024 条容量按 tick 淘汰一半；命中
+后还要**指纹定位 + 内容逐字节校验**（防哈希碰撞静默出错字）。
+
+图集翻倍的一个真 bug 顺手修掉：`Painter::build` 检测图集边长变化后**重跑
+一遍合成**修正 UV —— 图集在一帧内翻倍时旧 UV 全部越界（新增测试钉住）。
+
+- 实测（`ui_cost`，900 元素 / 600 图元 / 3190 字形 / 1200 批）：
+  基线 **759.4** → **264.6 / 266.6** µs/帧（**-65%**，占 60fps 预算 1.59%）。
+- 新增 7 条测试（命中 / 对齐不影响键 / 键覆盖宽度内容字号 / 缓存与关缓存
+  逐字段一致 / 缓存有界 / 图集帧内翻倍 UV 全合法 / 恒等输出）。
+
+### M2 · UI 裁剪（core 字段 + 布局继承 + 绘制批 + GPU scissor + 命中测试）
+
+`UiElement.clip_children`：**只裁后代**（自身完整绘制）；裁剪区沿层级继承
+**取交集**；矩形裁剪（GPU scissor），圆角不参与；命中测试同样要求点落在
+裁剪区内（被裁掉的部分点不到）。`clip_children=false` 默认不落盘。
+
+- `layout.rs`：`UiRect::intersection` + `LayoutItem.clip`；空裁剪区跳过整棵
+  子树；`hit_test` 检查 clip。
+- `draw.rs`：`UiClip`（整数像素）随命令下发；合批必须同裁剪区。
+- `ui_renderer.rs`：`UiRun` 带 clip、按 clip 切批；`set_scissor_rect` 夹视口
+  并跳过空裁剪；`draw_signature` 纳入 clip。
+- 验证：325 core + 41 ui + 206 render 全绿；`--headless --screenshot` 对照
+  （裁剪开：子面板被裁在父矩形内、批数 2；裁剪关：完整溢出、合并 1 批）。
+- 实测回归：`ui_cost` 264.6 → **274.5 µs/帧**（+3.7%，合批多一次 clip 比较；
+  对基线仍 -64%）。
+
+### M3 · 命令面板 / 全局搜索（panels/command_palette.rs）
+
+Ctrl+Shift+P / F1 召出，模糊搜索（子序列 + 连续 / 词首计分）+ ↑↓ 选中 /
+Enter 执行 / Esc 关闭。38 条命令覆盖文件 / 编辑 / 播放 / 创建 / 视图 /
+构建 / 工具 / 窗口 —— 每条都是**既有动作入口的转发**（不重写业务逻辑），
+Play 态按 `is_editing` 置灰。导航键在画查询框**之前** `consume_key`（否则
+聚焦的 TextEdit 会吃掉方向键与 Enter）。
+
+- `--ui-command` 截图开关（打开面板但**不聚焦查询框**：聚焦 TextEdit 的
+  光标按墙钟闪烁会破坏逐字节可复现）；1280 / 1440 / 1920 三档截图自检。
+- 新增 4 条测试（模糊计分序 / 大小写不敏感 / 空查询保序 / 中文子序列）。
+
+### M4 · SSAO（xgame-render/ssao.rs，默认关，确定性噪声）
+
+半分辨率深度 SSAO：AO 生成（深度梯度重建法线 + 16 样本半球 kernel +
+像素哈希旋转）→ 可分离 5 抽头模糊 ×2 → 乘回场景色（线性上采样）。
+**确定性噪声**：kernel 固定种子 LCG、旋转角 = 像素坐标整数哈希（无随机
+相位、无时间项）—— `--screenshot` 的逐字节契约在 SSAO 开着时也成立
+（GPU 测试钉住）。关着 = 整段跳过，画面逐位不变。
+
+- `SsaoConfig`（enabled / strength / radius / bias）进 `RenderConfig`，
+  默认关 + 不落盘（与 Bloom / TAA 同一纪律）；`strength=0` = 无遮蔽效果
+  （shader 早退，画面与关着逐位一致，测试钉住）。
+- 接口仿 `TaaResolver::apply`（返回 (scratch 视图, 源代号)）：三宿主在
+  TAA resolve 与 postfx 之间插一段，PostFx 与既有基准零改动；代号占
+  bit 62，与 TAA（bit 63）/ 宿主小整数永不相撞。
+- 退化矩阵（NaN / 不可逆）→ 强度按 0 直通（与 TAA 同语义）。
+- 实测（`ssao_cost`，1280×720 / RTX 2060 / 4× MSAA）：四趟 pass
+  **+116.0 µs/帧**（尾段 24.4 → 140.4 µs，+475.6%），绝对值 ≈ 279 µs/帧
+  总量，占 60fps 预算 1.7%。GPU 像素测试：接触角最大单像素变暗 0.063、
+  两遍逐字节一致、strength=0 与关着逐字节一致。
+- 新增 9 条测试（config 2 + ssao 纯函数 3 + GPU 像素 3 + 图集回归 1）；
+  新基准 `ssao_cost`（默认 ignore）。
+
+### 验证记录
+
+- `cargo test --workspace --all-targets -j 2 -- --test-threads=2`：
+  **1112 passed / 0 failed / 14 ignored**（基线 1088/13）。
+- `cargo clippy --workspace --all-targets`：0 告警。
+- 实测：`ui_cost` 274.5 µs/帧（M1 后 264.6，基线 759.4）；
+  `ssao_cost` 尾段差额 +116.0 µs/帧。

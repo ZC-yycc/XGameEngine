@@ -403,6 +403,87 @@ impl TaaConfig {
     }
 }
 
+/// SSAO（屏幕空间环境光遮蔽）参数。
+///
+/// **默认关**：与 Bloom / 天空 / FXAA / TAA 同一条纪律 —— 画质增强默认不动
+/// 画面。关着时渲染器**整段跳过**（不建 AO 纹理、不跑 pass），画面与 SSAO
+/// 上线前逐位一致。
+///
+/// 半分辨率深度 SSAO：只吃深度缓冲（不需要 G-buffer 法线），法线由深度
+/// 梯度重建；AO 图在半分辨率上算完再模糊、上采样乘回场景色。噪声是
+/// **确定性的**（像素坐标整数哈希驱动 kernel 旋转，没有随机相位）——
+/// 同机同输入逐字节一致，`--screenshot` 的可复现契约在 SSAO 开着时也成立。
+///
+/// 代价与取舍写清楚：
+/// - 法线来自深度梯度，**平滑曲面上会有法线噪声**（半分辨率 + 模糊压掉了
+///   大部分）；有 G-buffer 之前这是无解的，不是调参能修的。
+/// - 遮蔽是**屏幕空间**的：物体移出屏幕的遮挡贡献当场消失（边缘处 AO 会
+///   变浅）。业界同款限制。
+/// - AO 直接乘在最终颜色上（含直接光）：比"只乘环境光"保守，但在没有
+///   光照分解的前向管线下这是唯一正确的接法。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SsaoConfig {
+    /// 是否启用 SSAO。
+    pub enabled: bool,
+    /// 遮蔽强度（0 = 无遮蔽效果；2.0 是"看得出但不脏"的常用上限）。
+    pub strength: f32,
+    /// 采样半径（世界单位）。太大 = 远处物体也遮蔽近处；太小 = 看不出。
+    pub radius: f32,
+    /// 深度比较偏置（世界单位）：挡掉"表面遮蔽自己"的 acne。
+    pub bias: f32,
+}
+
+impl Default for SsaoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strength: 1.0,
+            radius: 0.5,
+            bias: 0.025,
+        }
+    }
+}
+
+impl SsaoConfig {
+    /// 遮蔽强度上限：再大只是把接触阴影压成死黑，画面信息全丢。
+    pub const MAX_STRENGTH: f32 = 4.0;
+    /// 采样半径上限（世界单位）：10 米的遮蔽半径已经不是"接触阴影"了。
+    pub const MAX_RADIUS: f32 = 10.0;
+    /// 偏置上限：偏置比半径还大时遮蔽整体失效，但那也是合法的"关"法。
+    pub const MAX_BIAS: f32 = 1.0;
+
+    /// 与默认值完全一致时不落盘（`skip_serializing_if` 用）：没开过的项目
+    /// `project.ron` 里不出现这一节。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// 容错读取：NaN / 无穷落回默认值，合法但离谱的量级夹进安全范围。
+    pub fn sanitized(self) -> Self {
+        let strength = if self.strength.is_finite() {
+            self.strength.clamp(0.0, Self::MAX_STRENGTH)
+        } else {
+            Self::default().strength
+        };
+        let radius = if self.radius.is_finite() {
+            self.radius.clamp(0.0, Self::MAX_RADIUS)
+        } else {
+            Self::default().radius
+        };
+        let bias = if self.bias.is_finite() {
+            self.bias.clamp(0.0, Self::MAX_BIAS)
+        } else {
+            Self::default().bias
+        };
+        Self {
+            enabled: self.enabled,
+            strength,
+            radius,
+            bias,
+        }
+    }
+}
+
 /// 程序化天空盒与环境光照（IBL）参数。
 ///
 /// 天空是一个**解析函数**：天顶 / 地平线 / 地面三段颜色渐变 + 太阳盘 + 太阳
@@ -540,6 +621,9 @@ pub struct RenderConfig {
     /// TAA（时域抗锯齿）参数，见 [`TaaConfig`]。同样后加 + 默认关。
     #[serde(default, skip_serializing_if = "TaaConfig::is_default")]
     pub taa: TaaConfig,
+    /// SSAO（屏幕空间环境光遮蔽）参数，见 [`SsaoConfig`]。同样后加 + 默认关。
+    #[serde(default, skip_serializing_if = "SsaoConfig::is_default")]
+    pub ssao: SsaoConfig,
     /// LOD 距离偏置：乘在每级 `max_distance` 上。
     ///
     /// - `1.0`（默认）= 按作者写的阈值，逐位与引入 LOD 之前一致；
@@ -571,6 +655,7 @@ impl Default for RenderConfig {
             sky: SkyConfig::default(),
             fxaa: FxaaConfig::default(),
             taa: TaaConfig::default(),
+            ssao: SsaoConfig::default(),
             lod_bias: default_lod_bias(),
         }
     }
@@ -605,6 +690,7 @@ impl RenderConfig {
             // 结构完整（漏写会编译失败，这是刻意的）。
             fxaa: self.fxaa,
             taa: self.taa.sanitized(),
+            ssao: self.ssao.sanitized(),
             // 偏置刻意不夹：见字段说明（坏值由 `lod::LodGroup::resolve` 兜底）。
             lod_bias: self.lod_bias,
         }
@@ -865,6 +951,68 @@ mod tests {
         }
         .sanitized();
         assert_eq!(negative.history_weight, 0.0, "负权重 = 只用当前帧");
+    }
+
+    /// SSAO 默认必须**关**，且默认配置不落盘（与 Bloom / TAA 同一条纪律）。
+    #[test]
+    fn ssao_defaults_to_off_and_roundtrips() {
+        assert!(!SsaoConfig::default().enabled, "SSAO 默认必须关闭");
+        assert!(SsaoConfig::default().is_default());
+
+        let text = ron::to_string(&RenderConfig::default()).expect("serialize");
+        assert!(!text.contains("ssao"), "未开过的 SSAO 不该落盘: {text}");
+
+        let on = RenderConfig {
+            ssao: SsaoConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = ron::to_string(&on).expect("serialize");
+        assert!(text.contains("ssao"), "开着的 SSAO 必须落盘: {text}");
+        let back: RenderConfig = ron::from_str(&text).expect("deserialize");
+        assert_eq!(back, on);
+        assert!(back.ssao.enabled);
+        assert_eq!(back.ssao.strength, SsaoConfig::default().strength);
+    }
+
+    /// SSAO 容错：NaN / 无穷落回默认；超限夹到上限；负数按 0（= 无遮蔽效果）。
+    #[test]
+    fn ssao_config_sanitized_rejects_garbage() {
+        let nan = SsaoConfig {
+            strength: f32::NAN,
+            radius: f32::INFINITY,
+            bias: f32::NAN,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(nan.strength, SsaoConfig::default().strength);
+        assert_eq!(nan.radius, SsaoConfig::default().radius);
+        assert_eq!(nan.bias, SsaoConfig::default().bias);
+
+        let clamped = SsaoConfig {
+            enabled: true,
+            strength: 100.0,
+            radius: 50.0,
+            bias: 9.0,
+        }
+        .sanitized();
+        assert_eq!(clamped.strength, SsaoConfig::MAX_STRENGTH);
+        assert_eq!(clamped.radius, SsaoConfig::MAX_RADIUS);
+        assert_eq!(clamped.bias, SsaoConfig::MAX_BIAS);
+        assert!(clamped.enabled, "夹取不该顺手改开关");
+
+        let negative = SsaoConfig {
+            strength: -1.0,
+            radius: -0.5,
+            bias: -0.1,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(negative.strength, 0.0);
+        assert_eq!(negative.radius, 0.0);
+        assert_eq!(negative.bias, 0.0);
     }
 
     /// TAA 开着时 FXAA 必须自动让位（两者叠加只是糊两遍）。

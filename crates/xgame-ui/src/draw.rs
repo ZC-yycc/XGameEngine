@@ -82,6 +82,23 @@ pub struct UiSprite {
     pub texture: UiTexture,
 }
 
+/// 裁剪区（整数像素，左上原点，右下开区间）。
+///
+/// 在 CPU 侧就量化成整数：GPU scissor 只接受整数，而且相邻元素只要量化后
+/// 相同就能继续合批 —— 浮点上的微小差异不该切断批次。`width/height = 0`
+/// 表示空裁剪区（这条批什么也画不出来）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiClip {
+    /// 左边界（含）。
+    pub x: u32,
+    /// 上边界（含）。
+    pub y: u32,
+    /// 宽度（像素）。
+    pub width: u32,
+    /// 高度（像素）。
+    pub height: u32,
+}
+
 /// 一条绘制指令（同一类图元的一段连续区间）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiCommand {
@@ -91,6 +108,8 @@ pub enum UiCommand {
         start: u32,
         /// 数量。
         count: u32,
+        /// 裁剪区（`None` = 不裁剪）。
+        clip: Option<UiClip>,
     },
     /// 画 `sprites[start..start+count]`（同一张纹理）。
     Sprites {
@@ -100,6 +119,8 @@ pub enum UiCommand {
         count: u32,
         /// 纹理。
         texture: UiTexture,
+        /// 裁剪区（`None` = 不裁剪）。
+        clip: Option<UiClip>,
     },
 }
 
@@ -120,6 +141,8 @@ pub struct UiDrawData {
     pub atlas_version: u64,
     /// 本帧参与绘制的元素数（统计 / 测试用）。
     pub element_count: usize,
+    /// 当前元素的裁剪区（`Painter` 在合成每个元素前设置；内部状态）。
+    pub(crate) clip: Option<UiClip>,
 }
 
 impl UiDrawData {
@@ -132,33 +155,54 @@ impl UiDrawData {
         self.images.clear();
         self.atlas_version = 0;
         self.element_count = 0;
+        self.clip = None;
     }
 
-    /// 追加一个矩形，尽量并入上一条矩形批。
+    /// 设置后续图元的裁剪区（`None` = 不裁剪）。
+    ///
+    /// 浮点裁剪矩形在这里量化成整数 scissor：GPU 只认整数，且量化后相同的
+    /// 相邻元素还能继续合批。超出视口的部分先夹掉。
+    pub fn set_clip(&mut self, clip: Option<UiRect>) {
+        self.clip = clip.map(|rect| quantize_clip(rect, self.viewport));
+    }
+
+    /// 追加一个矩形，尽量并入上一条**同裁剪区**的矩形批。
     pub fn push_quad(&mut self, quad: UiQuad) {
         let start = self.quads.len() as u32;
+        let clip = self.clip;
         self.quads.push(quad);
         match self.commands.last_mut() {
-            Some(UiCommand::Rects { start: s, count }) if *s + *count == start => *count += 1,
-            _ => self.commands.push(UiCommand::Rects { start, count: 1 }),
+            Some(UiCommand::Rects {
+                start: s,
+                count,
+                clip: c,
+            }) if *s + *count == start && *c == clip => *count += 1,
+            _ => self.commands.push(UiCommand::Rects {
+                start,
+                count: 1,
+                clip,
+            }),
         }
     }
 
-    /// 追加一个精灵，尽量并入上一条同纹理的精灵批。
+    /// 追加一个精灵，尽量并入上一条同纹理、同裁剪区的精灵批。
     pub fn push_sprite(&mut self, sprite: UiSprite) {
         let start = self.sprites.len() as u32;
         let texture = sprite.texture;
+        let clip = self.clip;
         self.sprites.push(sprite);
         match self.commands.last_mut() {
             Some(UiCommand::Sprites {
                 start: s,
                 count,
                 texture: t,
-            }) if *s + *count == start && *t == texture => *count += 1,
+                clip: c,
+            }) if *s + *count == start && *t == texture && *c == clip => *count += 1,
             _ => self.commands.push(UiCommand::Sprites {
                 start,
                 count: 1,
                 texture,
+                clip,
             }),
         }
     }
@@ -173,16 +217,19 @@ impl UiDrawData {
         }
         let start = start as u32;
         let count = (end - start as usize) as u32;
+        let clip = self.clip;
         match self.commands.last_mut() {
             Some(UiCommand::Sprites {
                 start: s,
                 count: c,
                 texture: t,
-            }) if *s + *c == start && *t == texture => *c += count,
+                clip: prev,
+            }) if *s + *c == start && *t == texture && *prev == clip => *c += count,
             _ => self.commands.push(UiCommand::Sprites {
                 start,
                 count,
                 texture,
+                clip,
             }),
         }
     }
@@ -194,6 +241,28 @@ impl UiDrawData {
         }
         self.images.push(path.to_owned());
         (self.images.len() - 1) as u32
+    }
+}
+
+/// 量化裁剪矩形到整数像素并夹进视口。
+///
+/// 左 / 上取 floor、右 / 下取 ceil：部分覆盖的像素必须保留，否则边缘会
+/// 出现"裁剪框比元素小一格"的缝隙。空矩形得到 `width = height = 0`。
+fn quantize_clip(rect: UiRect, viewport: Vec2) -> UiClip {
+    if !rect.min.is_finite() || !rect.max.is_finite() || !viewport.is_finite() {
+        return UiClip::default();
+    }
+    let vw = viewport.x.max(0.0);
+    let vh = viewport.y.max(0.0);
+    let x0 = rect.min.x.max(0.0).min(vw).floor();
+    let y0 = rect.min.y.max(0.0).min(vh).floor();
+    let x1 = rect.max.x.max(0.0).min(vw).ceil();
+    let y1 = rect.max.y.max(0.0).min(vh).ceil();
+    UiClip {
+        x: x0 as u32,
+        y: y0 as u32,
+        width: (x1 - x0).max(0.0) as u32,
+        height: (y1 - y0).max(0.0) as u32,
     }
 }
 
@@ -254,6 +323,20 @@ impl Painter {
         self.tree.build(scene);
         layout::visit(scene, &self.tree, viewport, &mut self.items);
 
+        // 图集可能在本次合成中翻倍（新字形按需光栅化）。已写下的精灵 UV 是
+        // 按**当时**的边长归一化的，边长一变就全错（采样到别的字形或图集外）。
+        // 字形此时已全部进缓存，重来一遍只是再摆一次位置；翻倍最多一次，
+        // 所以这里不需要循环。
+        let atlas_size = self.text.atlas().size();
+        self.paint(scene, viewport);
+        if self.text.atlas().size() != atlas_size {
+            self.paint(scene, viewport);
+        }
+        &self.draw
+    }
+
+    /// 按已算好的布局条目合成绘制数据（`build` 可能调用两次）。
+    fn paint(&mut self, scene: &Scene, viewport: Vec2) {
         let Painter {
             text,
             items,
@@ -271,11 +354,11 @@ impl Painter {
             let Some(ui) = entity.ui.as_ref() else {
                 continue;
             };
+            draw.set_clip(item.clip);
             emit_element(ui, item.rect, text, image_sizes, draw);
         }
 
         draw.atlas_version = text.atlas().version();
-        draw
     }
 }
 
@@ -543,6 +626,119 @@ mod tests {
         assert!((sprite.rect.width() - 200.0).abs() < 1e-3);
         assert!((sprite.rect.height() - 100.0).abs() < 1e-3);
         assert!((sprite.rect.min.y - 50.0).abs() < 1e-3, "垂直居中");
+    }
+
+    /// 图集在一帧内翻倍时，**全部**精灵的 UV 都要按最终边长归一化。
+    ///
+    /// 旧实现只在合成开始时读一次边长：翻倍后写下的 texel 坐标除以旧边长，
+    /// UV 会越界（采样到图集外）。`build` 必须在边长变化后重来一遍。
+    #[test]
+    fn atlas_growth_mid_frame_normalizes_every_sprite() {
+        let mut painter = Painter::new();
+        if !painter.text().has_font() {
+            return;
+        }
+        let before = painter.text().atlas().size();
+        // 900 个不同的 CJK 字形 × 48px：一帧内必然把 1024² 撑到 2048²。
+        let content: String = (0..900u32)
+            .filter_map(|i| char::from_u32(0x4E00 + i))
+            .collect();
+        let mut element =
+            UiElement::text(content.as_str()).at([0.0, 0.0], 0.0, 0.0, 4000.0, 200.0);
+        element.text.size = 48.0;
+        element.text.wrap = false;
+        let scene = scene_with(element);
+        let viewport = Vec2::new(4096.0, 256.0);
+
+        let draw = painter.build(&scene, viewport);
+        let first = draw.sprites.clone();
+        let atlas_size = painter.text().atlas().size();
+        assert!(
+            atlas_size > before,
+            "测试前提：图集应当在本帧内翻倍"
+        );
+        assert!(!first.is_empty());
+        for sprite in &first {
+            assert!(
+                sprite.uv.iter().all(|v| (0.0..=1.0).contains(v)),
+                "UV 越过图集边界: {:?}（边长 {atlas_size}）",
+                sprite.uv
+            );
+        }
+        let draw = painter.build(&scene, viewport);
+        assert_eq!(first, draw.sprites, "第二次合成不得再变化");
+    }
+
+    /// 裁剪区进入绘制批：父元素不裁，子元素的图元带上父矩形量化后的 scissor。
+    #[test]
+    fn clip_children_batches_carry_quantized_scissor() {
+        let mut scene = Scene::new("clip-draw");
+        let mut root = Entity::new("Clip");
+        let mut ui = UiElement::panel(100.0, 100.0).at([0.0, 0.0], 10.0, 10.0, 100.0, 100.0);
+        ui.clip_children = true;
+        root.ui = Some(ui);
+        let root_id = root.id;
+        scene.entities.push(root);
+
+        let mut child = Entity::new("Child");
+        child.parent = Some(root_id);
+        child.ui = Some(UiElement::button("OK").at([0.0, 0.0], 10.0, 10.0, 60.0, 30.0));
+        scene.entities.push(child);
+
+        let mut painter = Painter::new();
+        let draw = painter.build(&scene, Vec2::new(800.0, 600.0));
+        let expected = UiClip {
+            x: 10,
+            y: 10,
+            width: 100,
+            height: 100,
+        };
+        let clip_of = |command: &UiCommand| match *command {
+            UiCommand::Rects { clip, .. } | UiCommand::Sprites { clip, .. } => clip,
+        };
+        assert!(draw.commands.len() >= 2, "父 + 子至少两条批");
+        assert_eq!(clip_of(&draw.commands[0]), None, "裁剪元素自身不裁");
+        assert!(
+            draw.commands[1..]
+                .iter()
+                .all(|command| clip_of(command) == Some(expected)),
+            "后代的所有批都要带裁剪区: {:?}",
+            draw.commands
+        );
+    }
+
+    /// 裁剪开关必须改变批记录：关掉之后父子矩形会合并成同一批。
+    ///
+    /// 这条同时盯住“别把 clip 写进合批判据之外”的回归 —— 合并后的批若还带着
+    /// 旧 scissor，后代就会被错误裁剪（或相反，裁剪彻底失效）。
+    #[test]
+    fn clip_toggle_changes_command_clips() {
+        let mut scene = Scene::new("clip-sig");
+        let mut root = Entity::new("Clip");
+        let mut ui = UiElement::panel(100.0, 100.0).at([0.0, 0.0], 10.0, 10.0, 100.0, 100.0);
+        ui.clip_children = true;
+        root.ui = Some(ui);
+        let root_id = root.id;
+        scene.entities.push(root);
+        let mut child = Entity::new("Child");
+        child.parent = Some(root_id);
+        child.ui = Some(UiElement::panel(50.0, 50.0).at([0.0, 0.0], 0.0, 0.0, 50.0, 50.0));
+        scene.entities.push(child);
+
+        let mut painter = Painter::new();
+        let clip_of = |command: &UiCommand| match *command {
+            UiCommand::Rects { clip, .. } | UiCommand::Sprites { clip, .. } => clip,
+        };
+        let draw = painter.build(&scene, Vec2::new(800.0, 600.0));
+        assert_eq!(draw.commands.len(), 2, "父子裁剪区不同，不能合并: {:?}", draw.commands);
+        let with_clip = clip_of(&draw.commands[1]);
+        assert!(with_clip.is_some(), "开了裁剪就该带 scissor");
+
+        scene.entities[0].ui.as_mut().unwrap().clip_children = false;
+        let draw = painter.build(&scene, Vec2::new(800.0, 600.0));
+        assert_eq!(draw.commands.len(), 1, "关掉裁剪后两块面板应合并成一批");
+        assert_eq!(clip_of(&draw.commands[0]), None, "关掉裁剪后不该再限制后代");
+        assert_eq!(draw.quads.len(), 2, "合批不能吞掉图元");
     }
 
     /// 悬停变亮、按下变暗：静态明度差就是"这个按钮能点"的全部反馈。

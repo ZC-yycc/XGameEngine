@@ -618,6 +618,14 @@ impl HeadlessReport {
                     "enabled": self.render.taa.enabled,
                     "history_weight": self.render.taa.history_weight,
                 },
+                // SSAO：`enabled` 决定这张截图带不带接触阴影（确定性噪声，
+                // 同机同输入逐字节可复现）。
+                "ssao": {
+                    "enabled": self.render.ssao.enabled,
+                    "strength": self.render.ssao.strength,
+                    "radius": self.render.ssao.radius,
+                    "bias": self.render.ssao.bias,
+                },
             },
             "scene_dump": self.scene_dump,
             "screenshot": screenshot,

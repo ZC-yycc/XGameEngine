@@ -467,6 +467,12 @@ fn project_info(args: &Value) -> Result<String, CallError> {
             "fxaa": {
                 "enabled": render.fxaa.enabled,
             },
+            "ssao": {
+                "enabled": render.ssao.enabled,
+                "strength": render.ssao.strength,
+                "radius": render.ssao.radius,
+                "bias": render.ssao.bias,
+            },
         },
         "scenes": list_scenes(&project),
         "scripts": project.list_scripts(),
