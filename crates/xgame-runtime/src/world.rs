@@ -700,7 +700,8 @@ impl World {
                 let world = self.scene.world_transform(index);
                 // 角色实体的刚体在**胶囊中心**（脚底 + 半高），与 `sync_bodies`
                 // 建体时的落点一致；直接按实体原点传送会让角色半个身子陷进地面。
-                let target = match self.scene.entities[index].controller {
+                let controller = self.scene.entities[index].controller;
+                let target = match controller {
                     Some(controller) => world.position + Vec3::Y * controller.sanitized().center_height(),
                     None => world.position,
                 };
@@ -710,6 +711,23 @@ impl World {
                     .set_velocity(body, Vec3::from_array(state.linear_velocity));
                 self.physics
                     .set_angular_velocity(body, Vec3::from_array(state.angular_velocity));
+
+                // 角色控制器的**运行时状态**也要一起拨回去：`CharacterState.velocity`
+                // 是"上一次移动反推出来的速度"，读档后不复位的话，角色会带着读档
+                // 前那一刻的速度继续冲（从高处读档 = 直接甩出去）。速度本体不进存档
+                // （那是"走到了哪"的派生量），所以这里按存档里的刚体速度复位，
+                // 着地标志交给下一帧的 move 重新求解。
+                if controller.is_some() {
+                    if let Some(runtime) = self.scene.entities[index]
+                        .components
+                        .get_mut::<xgame_core::CharacterState>()
+                    {
+                        runtime.velocity = Vec3::from_array(state.linear_velocity);
+                        runtime.grounded = false;
+                        runtime.sliding_down_slope = false;
+                        runtime.contacts = xgame_core::CharacterContacts::new();
+                    }
+                }
             }
             report.applied += 1;
         }
@@ -1546,6 +1564,15 @@ impl World {
         // 场景切换请求：这里只登记，真正的交换在 `apply_pending_scene_load`。
         // 固定步长循环里也会调到这里，所以**不能**就地换场景 ——
         // 那样本步的 `pull_dynamic_bodies` 会把旧刚体位姿写进新场景。
+        // 同帧既读档又切场景：读档先套用（含它自己的场景切换），帧末那次
+        // `request_scene_load` 随后覆盖它 —— 结果确定，但几乎肯定是作者写错了
+        // （两个动作都想要"自己去哪"）。喊一声，不静默。
+        if report.load_game.is_some() && report.scene_load.is_some() {
+            log::warn!(
+                "同一帧既请求读档又请求切场景：读档会先套用，帧末的切场景随后覆盖它（只保留一个）"
+            );
+        }
+
         // 存 / 读档：**先存后读**（同一帧里既存又读的脚本，语义是"存下这一刻再回到那一刻"
         // —— 反过来会读到刚写的东西，等于什么都没做）。
         if let Some(slot) = report.save_game {

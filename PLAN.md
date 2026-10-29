@@ -6911,7 +6911,11 @@ rapier 的求解器 / 岛管理走 `wide` 的 SIMD 实现（stable Rust 可用�
 - **读档是替换不是合并**（合并 = 读档后血条显示上一次的数）；
 - **对不上的实体不复活**，计入 `SaveApplyReport::missing` 并写进日志；
 - 存档里的场景与当前不同 → **先切场景再套状态**；
-- 实体变量跟着实体走（切场景 / 销毁 / 读档后只留当前场景存在的 ID），全局变量保留。
+- 实体变量跟着实体走（切场景 / 销毁 / 读档后只留当前场景存在的 ID），全局变量保留；
+- **角色运行时状态一起复位**：`CharacterState.velocity` 是"上次移动反推出来的速度"，
+  不复位的话读档后角色会带着读档前那一刻的速度继续冲（红灯实证：关掉复位 → 测试红）；
+- 同一帧既 `load_game` 又 `load_scene`：读档先套用、帧末切场景随后覆盖（结果确定，
+  并打一条 warn —— 两个动作都想要"这次运行在哪张图"，几乎肯定是作者写错）。
 
 脚本侧 9 个 API：`save_game` / `load_game` / `has_save` / `save_slots` /
 `save_set` / `save_get` / `save_remove` / `entity_save_set` / `entity_save_get`。
@@ -6977,8 +6981,8 @@ rapier 的求解器 / 岛管理走 `wide` 的 SIMD 实现（stable Rust 可用�
 
 ### 验证记录
 
-- `cargo test --workspace --all-targets -- --test-threads=2`：**1058 passed / 0 failed /
-  11 ignored**（36 套件；新增 19 条测试 + 2 条基准），clippy `-D warnings` **0 告警**；
+- `cargo test --workspace --all-targets -- --test-threads=2`：**1061 passed / 0 failed /
+  11 ignored**（36 套件；新增 22 条测试 + 2 条基准），clippy `-D warnings` **0 告警**；
 - 四个示例项目 `--check` 全部退出 **0**（`search_paths` 的体检没有假阳性）；
 - **真实 CLI 端到端**（`--headless`，临时项目 = SampleScene 副本 + 一个探针脚本）：
   第 10 帧写变量并 `save_game("slot1")` → 第 20 帧把自己传送到 (40,40,40) →

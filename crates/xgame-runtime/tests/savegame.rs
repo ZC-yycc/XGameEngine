@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use xgame_core::{Entity, PhysicsBody, Prefab, SaveValue, Scene, SceneLoader};
+use xgame_core::{
+    CharacterContacts, CharacterController, CharacterState, Entity, PhysicsBody, Prefab, SaveValue,
+    Scene, SceneLoader,
+};
 use xgame_math::glam::Vec3;
 use xgame_runtime::{World, WorldConfig};
 
@@ -337,6 +340,188 @@ fn duplicate_ids_resolve_like_find_entity() {
     assert_eq!(
         world.scene().entities[1].transform.position.x, 9.0,
         "第二个保持不动（与 find_entity 的 '取第一个' 一致）"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// 读档要把**角色运行时状态**一起拨回去。
+///
+/// `CharacterState.velocity` 是"上一次移动反推出来的速度"，读档后不复位的话，
+/// 角色会带着读档前那一刻的速度继续冲（在高处读档 = 直接甩出去）。
+#[test]
+fn load_resets_character_runtime_velocity() {
+    let root = temp_root("character");
+    let mut sc = Scene::new("char");
+    let mut player = Entity::new("player");
+    player.controller = Some(CharacterController::default());
+    player.transform.position = Vec3::new(0.0, 1.0, 0.0);
+    player.components.insert(CharacterState {
+        velocity: Vec3::new(3.0, -18.0, 0.0),
+        grounded: true,
+        sliding_down_slope: true,
+        contacts: CharacterContacts::new(),
+        ..CharacterState::default()
+    });
+    sc.add_entity(player);
+    let mut world = World::new(sc, &root, WorldConfig::default());
+    let id = world.scene().entities[0].id;
+
+    world.save_game("slot1").expect("存档");
+
+    // 模拟"读档前玩家正以另一个速度移动"。
+    let idx = world.scene().find_entity(id).unwrap();
+    world.scene_mut().entities[idx]
+        .components
+        .get_or_insert_with(CharacterState::default)
+        .velocity = Vec3::new(0.0, -40.0, 0.0);
+    world.scene_mut().entities[idx]
+        .components
+        .get_mut::<CharacterState>()
+        .unwrap()
+        .grounded = true;
+
+    world.load_game("slot1").expect("读档");
+    let state = *world.scene().entities[idx]
+        .component::<CharacterState>()
+        .expect("角色状态应当还在");
+    assert!(
+        state.velocity.length() < 1e-3,
+        "读档后不该保留读档前那一刻的速度: {:?}",
+        state.velocity
+    );
+    assert!(!state.grounded, "着地标志交给下一帧重新求解");
+    assert!(!state.sliding_down_slope);
+    assert!(state.contacts.is_empty(), "接触面备忘随读档一起清空");
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// 不动点：`capture → 存 → 改乱 → 读 → capture` 的第二份采集必须与第一份相等。
+///
+/// 这是存档最该有的性质（与场景的 `save → load → save` 门禁同款）：
+/// 只要它成立，"读档之后再存档"就不会让数据一点点漂掉。比较用 1e-4 容差，
+/// 因为读档时会把旋转归一化（1 ulp 级别的差是容许的，肉眼不可见的漂移不是）。
+#[test]
+fn save_load_capture_is_a_fixed_point() {
+    let root = temp_root("fixed_point");
+    let mut sc = Scene::new("fixed");
+    for i in 0..200 {
+        let mut e = Entity::new(format!("e{i}"));
+        e.transform.position = Vec3::new(i as f32 * 0.37, 2.0 + (i % 7) as f32 * 0.5, -1.5);
+        e.transform.rotation = xgame_math::glam::Quat::from_rotation_y(i as f32 * 0.11).normalize();
+        e.transform.scale = Vec3::splat(1.0 + (i % 3) as f32 * 0.25);
+        if i % 3 == 0 {
+            e.physics = Some(PhysicsBody::dynamic_box([0.4, 0.4, 0.4]));
+        }
+        sc.add_entity(e);
+    }
+    let mut world = World::new(sc, &root, WorldConfig::default());
+    // 落几帧：让动态体带上真实速度。
+    for _ in 0..7 {
+        world.update(1.0 / 60.0);
+    }
+    for i in 0..20 {
+        world.set_save_var(&format!("k{i}"), SaveValue::Number(i as f64));
+    }
+    let first = world.capture_save();
+    world.save_game("slot1").expect("存档");
+
+    // 把世界改乱：位置、速度、变量全动。
+    let n = world.scene().entities.len();
+    for i in 0..n {
+        let idx = i;
+        world.scene_mut().entities[idx].transform.position.x += 5.0;
+        world.scene_mut().entities[idx].transform.scale = Vec3::splat(3.0);
+    }
+    world.set_save_var("k0", SaveValue::Text("dirty".into()));
+    world.set_save_var("extra", SaveValue::Bool(true));
+    for _ in 0..10 {
+        world.update(1.0 / 60.0);
+    }
+
+    let report = world.load_game("slot1").expect("读档");
+    assert_eq!(report.applied, n);
+    let second = world.capture_save();
+
+    assert_eq!(second.entities.len(), first.entities.len());
+    assert_eq!(second.vars, first.vars, "全局变量必须逐字段回到存档那一刻");
+    for (a, b) in first.entities.iter().zip(second.entities.iter()) {
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.vars, b.vars, "实体 {} 的变量", a.id);
+        for (x, y) in a
+            .position
+            .iter()
+            .zip(b.position.iter())
+            .chain(a.rotation.iter().zip(b.rotation.iter()))
+            .chain(a.scale.iter().zip(b.scale.iter()))
+            .chain(a.linear_velocity.iter().zip(b.linear_velocity.iter()))
+            .chain(a.angular_velocity.iter().zip(b.angular_velocity.iter()))
+        {
+            assert!(
+                (x - y).abs() < 1e-4,
+                "实体 {} 的状态漂了: {x} vs {y}",
+                a.id
+            );
+        }
+    }
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// 同一帧里既 `load_game` 又 `load_scene`：**最后停在切场景请求那一份**。
+///
+/// 这条钉的是顺序（读档先套用、帧末切场景随后覆盖），而不是"谁更对" ——
+/// 两个动作都想决定"这次运行在哪张图"，本来就该是作者的 bug；引擎只保证
+/// 结果确定 + 一条 warn，不让他们在半路上猜。
+#[test]
+fn load_game_and_load_scene_in_one_frame_ends_at_the_scene_request() {
+    let root = temp_root("both");
+    std::fs::create_dir_all(root.join("Scripts")).unwrap();
+    std::fs::write(
+        root.join("Scripts/Both.lua"),
+        r#"
+function update(ctx)
+    if _G.done then return end
+    _G.done = true
+    load_game(ctx, "slot1")
+    load_scene(ctx, "Scenes/Other.ron")
+end
+"#,
+    )
+    .unwrap();
+
+    let scenes = Arc::new(Mutex::new(HashMap::new()));
+    let mut other = Scene::new("other");
+    other.add_entity(Entity::new("mark"));
+    scenes
+        .lock()
+        .unwrap()
+        .insert("Scenes/Other.ron".to_string(), other);
+
+    let mut sc = Scene::new("start");
+    let mut probe = Entity::new("probe");
+    probe.scripts.push("Scripts/Both.lua".into());
+    sc.add_entity(probe);
+    let mut world = World::new(sc, &root, WorldConfig::default())
+        .with_scene_loader(MemoryLoader {
+            scenes: Arc::clone(&scenes),
+        })
+        .with_current_scene("Scenes/Start.ron");
+
+    // **在任何一帧跑之前**存档：此时脚本还没执行，存档里没有"读档 + 切场景"。
+    world.save_game("slot1").expect("存档");
+
+    world.update(1.0 / 60.0);
+    world.update(1.0 / 60.0);
+    assert_eq!(
+        world.current_scene(),
+        Some("Scenes/Other.ron"),
+        "帧末的切场景请求是最后一个动作，它生效"
+    );
+    assert_eq!(
+        world.scene().entities.len(),
+        1,
+        "停在 Other 场景（读档套用的是 Start，已被随后的切场景覆盖）"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
