@@ -1006,6 +1006,11 @@ impl AssetDatabase {
 /// 把实体上所有资产引用从**内存路径**编码成**磁盘 GUID**。
 pub fn encode_entity_references(entity: &mut Entity, db: &AssetDatabase) {
     encode_slot(&mut entity.model, db);
+    // LOD 各级也是模型引用：漏了它们，改名 / 迁移之后远处那一级会**静默**
+    // 退回字面量路径（GUID 管线只认这一处转换）。
+    for level in &mut entity.lod.levels {
+        encode_slot(&mut level.model, db);
+    }
     if let Some(material) = &mut entity.material_asset {
         encode_slot(material, db);
     }
@@ -1032,6 +1037,9 @@ pub fn encode_entity_references(entity: &mut Entity, db: &AssetDatabase) {
 /// 能把它当成"悬空 GUID"点名，UI 也能显示出来让人知道这里断链了。
 pub fn decode_entity_references(entity: &mut Entity, db: &AssetDatabase) {
     decode_slot(&mut entity.model, db);
+    for level in &mut entity.lod.levels {
+        decode_slot(&mut level.model, db);
+    }
     if let Some(material) = &mut entity.material_asset {
         decode_slot(material, db);
     }

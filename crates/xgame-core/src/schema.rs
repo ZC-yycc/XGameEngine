@@ -44,6 +44,7 @@ use crate::character::CharacterController;
 use crate::id::EntityId;
 use crate::inspect::{FieldValue, FieldValues};
 use crate::light::{Light, LightKind};
+use crate::lod::{LodGroup, LodLevel};
 use crate::material::{MaterialAsset, MaterialOverride};
 use crate::particle::{EmissionShape, ParticleBlend, ParticleEmitter};
 use crate::physics::{BodyKind, CollisionShape, PhysicsBody};
@@ -311,6 +312,12 @@ fn asset_references() -> Vec<AssetReferenceSchema> {
             "模型路径：模型资产经 .meta 登记后写成 guid://<32 hex>；builtin://… 与未登记路径保持原样",
             "项目相对路径，例如 Resources/Box.glb；程序化几何用 builtin://cube / builtin://sphere",
             "空串 = 没有模型（纯逻辑 / UI 实体）。同一字段在磁盘与内存里形态不同，唯一转换点是 ProjectHandle::load_scene / write_scene。",
+        ),
+        asset_ref(
+            "LodGroup.levels[].model",
+            "guid://<32 hex>",
+            "项目相对路径，例如 Resources/Models/Hero_Low.glb",
+            "每一级的模型都走同一条 GUID 管线（与 Entity.model 同款）；漏掉一级，远处那级在改名后会静默断链。",
         ),
         asset_ref(
             "Entity.material_asset",
@@ -622,7 +629,13 @@ fn scene_types() -> Vec<TypeSchema> {
                     "model",
                     "String",
                     &"",
-                    "模型路径（资产引用）或 builtin://cube / builtin://sphere 等程序化几何；空串 = 没有模型。",
+                    "模型路径（资产引用）或 builtin://cube / builtin://sphere 等程序化几何；空串 = 没有模型。lod.levels 非空时本字段被忽略。",
+                ),
+                def(
+                    "lod",
+                    "LodGroup",
+                    &LodGroup::default(),
+                    "距离分级 + 绘制距离；空 = 没有 LOD（用 model）。非空时 model 被忽略，第 0 级就是最近一级。",
                 ),
                 opt(
                     "material_asset",
@@ -691,6 +704,51 @@ fn scene_types() -> Vec<TypeSchema> {
                 "transform 是局部的；世界变换由 parent 链现算，场景文件不存世界变换。",
                 "scripts / behaviors / behavior_params 都按名字寻址：改名等于换目标，改列表顺序只影响执行顺序。",
                 "可选组件字段省略 = None；Vec / map 省略 = 空。没有 physics 的实体不会突然被重力拽走。",
+            ],
+        ),
+        struct_schema(
+            "LodGroup",
+            "一个实体的 LOD 组：各级模型 + 生效距离（详见 Entity.lod）。",
+            Some(default_of::<LodGroup>()),
+            Some(pretty(&LodGroup {
+                levels: vec![
+                    LodLevel::new("Resources/Models/Hero.glb", 20.0),
+                    LodLevel::new("Resources/Models/Hero_Low.glb", 0.0),
+                ],
+            })),
+            vec![def(
+                "levels",
+                "Vec<LodLevel>",
+                &Vec::<LodLevel>::new(),
+                "各级；顺序不影响判定（按 max_distance 取最小覆盖者）。空 = 没有 LOD。",
+            )],
+            vec![
+                "距离 = 相机位置到实体轴心（世界位置）的直线距离，不是到包围盒表面。",
+                "超过全部有限级的 max_distance = 不画（绘制距离）；最后一级写 0 = 无限远。",
+                "project.ron 的 render.lod_bias 乘在阈值上：>1 推远、<1 拉近、<=0 关掉 LOD。",
+            ],
+        ),
+        struct_schema(
+            "LodLevel",
+            "LOD 的一级：用哪个模型、生效到多远。",
+            Some(default_of::<LodLevel>()),
+            Some(pretty(&LodLevel::new("Resources/Models/Hero_Low.glb", 30.0))),
+            vec![
+                def(
+                    "model",
+                    "String",
+                    &"",
+                    "这一级的模型（资产引用 / builtin://）；空串的级不参与判定。",
+                ),
+                def(
+                    "max_distance",
+                    "f32",
+                    &0.0,
+                    "这一级生效的最大距离（世界单位）；0 / 负数 / 非有限值 = 无限远（只作兜底）。",
+                ),
+            ],
+            vec![
+                "同一实体的各级共享 Animator：剪辑名要在每一级模型里同名，否则换级后动画会退回绑定姿态。",
             ],
         ),
         struct_schema(
@@ -1845,6 +1903,8 @@ mod tests {
         let expected = [
             "Scene",
             "Entity",
+            "LodGroup",
+            "LodLevel",
             "Transform",
             "Light",
             "LightKind",
@@ -1935,6 +1995,7 @@ mod tests {
             fields,
             [
                 "Entity.model",
+                "LodGroup.levels[].model",
                 "Entity.material_asset",
                 "Entity.scripts",
                 "AudioSource.clip",
@@ -2377,6 +2438,7 @@ mod tests {
             transform,
             layer,
             model,
+            lod,
             material_asset,
             id,
             parent,
@@ -2403,6 +2465,7 @@ mod tests {
                 "transform",
                 "layer",
                 "model",
+                "lod",
                 "material_asset",
                 "id",
                 "parent",
@@ -2421,6 +2484,14 @@ mod tests {
                 "camera",
             ],
         );
+
+        let LodGroup { levels } = LodGroup::default();
+        let LodLevel {
+            model,
+            max_distance,
+        } = LodLevel::default();
+        assert_fields(&doc, "LodGroup", &["levels"]);
+        assert_fields(&doc, "LodLevel", &["model", "max_distance"]);
 
         let Transform {
             position,

@@ -401,14 +401,17 @@ impl ScreenshotRenderer {
         // 模型懒加载：与编辑器 SceneRenderer 同一条入口，失败只警告
         // （画不出来的实体留空，整张图照常出）。
         for entity in &scene.entities {
-            if entity.model.is_empty() || self.model_cache.contains_key(&entity.model) {
-                continue;
-            }
-            match GltfMesh::load(&self.device, &self.queue, &self.project_root, &entity.model) {
-                Ok(m) => {
-                    self.model_cache.insert(entity.model.clone(), m);
+            // 逐级加载：截图也要能看到"这个距离上该是哪一级"。
+            for model in entity.model_paths() {
+                if self.model_cache.contains_key(model) {
+                    continue;
                 }
-                Err(e) => log::warn!("截图：加载模型 '{}' 失败: {:#}", entity.model, e),
+                match GltfMesh::load(&self.device, &self.queue, &self.project_root, model) {
+                    Ok(m) => {
+                        self.model_cache.insert(model.to_string(), m);
+                    }
+                    Err(e) => log::warn!("截图：加载模型 '{model}' 失败: {:#}", e),
+                }
             }
         }
 
@@ -465,6 +468,7 @@ impl ScreenshotRenderer {
             &camera.eye,
             lighting,
             settings.sky,
+            settings.lod_bias,
             particles,
         );
         // TAA resolve（开着时）—— 必须在后处理**之前**：曝光 / 色调映射要作用在
@@ -3015,6 +3019,188 @@ mod tests {
         );
         // 合批结构不受剔除影响：同图元仍是一批（只是少了实例）。
         assert_eq!(culled.opaque_batches, unculled.opaque_batches);
+    }
+
+    // =========================================================================
+    // LOD（距离分级 + 绘制距离）
+    // =========================================================================
+
+    /// 一个立方体，顶点整体平移 / 缩放后作为 LOD 的某一级。
+    ///
+    /// 用**几何差别**而不是材质差别来区分各级：材质要走资产库（贴图 / `.mat`
+    /// 都要落盘），而这里要证明的是"这个距离上画的是哪一份网格"。
+    fn lod_cube(shot: &ScreenshotRenderer, key: &str, scale: f32, offset: Vec3) -> GltfMesh {
+        let mut data = crate::mesh::BuiltinMesh::Cube.build();
+        for vertex in data.vertices.iter_mut() {
+            vertex.position = (Vec3::from(vertex.position) * scale + offset).to_array();
+        }
+        GltfMesh::from_mesh_data(&shot.device, &shot.queue, &data, key)
+    }
+
+    /// 与背景不同的像素数 + 它们的**水平质心**（像素坐标）。
+    ///
+    /// 背景是纯色清屏（天空默认关），所以"和左上角像素不一样"就是"画了东西"。
+    /// 质心用来判断画的是哪一份网格 —— 只看像素数会被"大小不同但正好抵消"骗过。
+    fn object_pixels(rgba: &[u8], width: u32, height: u32) -> (usize, f32) {
+        let background = pixel_at(rgba, width, 0, 0);
+        let mut count = 0usize;
+        let mut sum_x = 0f64;
+        for y in 0..height {
+            for x in 0..width {
+                let p = pixel_at(rgba, width, x, y);
+                let diff = p
+                    .iter()
+                    .zip(background.iter())
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap_or(0);
+                if diff > 6 {
+                    count += 1;
+                    sum_x += x as f64;
+                }
+            }
+        }
+        let centroid = if count == 0 {
+            0.0
+        } else {
+            (sum_x / count as f64) as f32
+        };
+        (count, centroid)
+    }
+
+    /// 一台看向原点的相机，距离由 `distance` 给定。
+    fn lod_camera(distance: f32) -> ShotCamera {
+        ShotCamera::looking_at(Vec3::new(0.0, 0.0, distance), Vec3::ZERO, DEFAULT_FOV_Y)
+    }
+
+    fn lod_probe_scene(levels: Vec<xgame_core::LodLevel>) -> Scene {
+        let mut scene = Scene::new("lod");
+        // 纯环境光：不受光源方向影响，像素只由"画了哪份网格"决定。
+        scene.ambient = [1.0; 3];
+        scene.lights.clear();
+        let mut entity = Entity::new("prop");
+        entity.lod = xgame_core::LodGroup { levels };
+        scene.add_entity(entity);
+        scene
+    }
+
+    /// 距离变了要换**另一份网格**。
+    ///
+    /// 近处画 1 m 立方体（居中），远处画 6 m 立方体（整体右移 6 m）：
+    /// 若实现"只换了计数、画面还画第 0 级"，质心不会动 —— 这条测试就是它的红。
+    #[test]
+    fn lod_switches_to_far_level_by_distance() {
+        let Some(mut shot) = gpu_or_skip("lod_switches_to_far_level_by_distance") else {
+            return;
+        };
+        let near = lod_cube(&shot, "lod-near", 1.0, Vec3::ZERO);
+        let far = lod_cube(&shot, "lod-far", 6.0, Vec3::new(6.0, 0.0, 0.0));
+        shot.inject_model("lod-near", near);
+        shot.inject_model("lod-far", far);
+
+        let scene = lod_probe_scene(vec![
+            xgame_core::LodLevel::new("lod-near", 10.0),
+            xgame_core::LodLevel::new("lod-far", 0.0),
+        ]);
+
+        let render = |shot: &mut ScreenshotRenderer, distance: f32| {
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(lod_camera(distance)),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            (shot.frame_stats(), shot.read_rgba().expect("读回失败"))
+        };
+
+        let (near_stats, near_rgba) = render(&mut shot, 5.0);
+        assert_eq!(near_stats.low_lod_instances, 0, "5 米在阈值内：必须用第 0 级");
+        assert_eq!(near_stats.distance_culled_entities, 0);
+        assert_eq!(near_stats.opaque_instances, 1);
+        let (near_count, near_center) = object_pixels(&near_rgba, 320, 240);
+        assert!(near_count > 0, "近处必须画出来");
+
+        let (far_stats, far_rgba) = render(&mut shot, 40.0);
+        assert_eq!(far_stats.low_lod_instances, 1, "40 米必须换到第 1 级");
+        assert_eq!(far_stats.distance_culled_entities, 0, "最后一级是无限远");
+        let (far_count, far_center) = object_pixels(&far_rgba, 320, 240);
+        assert!(far_count > 0, "远处必须画出来");
+
+        // 第 1 级整体右移 6 米：40 米外的 6 米偏移 ≈ 50 像素。
+        assert!(
+            far_center - near_center > 20.0,
+            "画面质心必须跟着换级移动：近 {near_center:.1} vs 远 {far_center:.1}"
+        );
+    }
+
+    /// 超出最后一级的有限阈值 = **整实体不画**，而且**不投影**。
+    ///
+    /// 只做"主 pass 跳过、阴影照投"是最容易漏的一半：玩家会看到一团空气投下的
+    /// 影子，比物体消失本身更难解释。
+    #[test]
+    fn lod_beyond_draw_distance_is_culled_and_casts_no_shadow() {
+        let Some(mut shot) = gpu_or_skip("lod_beyond_draw_distance_is_culled_and_casts_no_shadow")
+        else {
+            return;
+        };
+        let near = lod_cube(&shot, "lod-near", 1.0, Vec3::ZERO);
+        shot.inject_model("lod-near", near);
+
+        let mut scene = lod_probe_scene(vec![xgame_core::LodLevel::new("lod-near", 10.0)]);
+        scene.lights = vec![Light::directional("sun", [0.4, -1.0, -0.3], [1.0; 3], 3.0)];
+        scene.lights[0].casts_shadow = true;
+
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(lod_camera(40.0)),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            RenderConfig::default(),
+        )
+        .expect("渲染失败");
+
+        let stats = shot.frame_stats();
+        assert_eq!(stats.distance_culled_entities, 1, "40 米 > 10 米阈值：跳过");
+        assert_eq!(stats.opaque_instances, 0, "主 pass 一个实例都不该有");
+        assert_eq!(stats.culled_entities, 0, "这是距离剔除，不是视锥剔除");
+        assert_eq!(stats.shadow_only_instances, 0, "被距离剔除的实体不许投影");
+        let rgba = shot.read_rgba().expect("读回失败");
+        assert_eq!(object_pixels(&rgba, 320, 240).0, 0, "画面里不该有它");
+    }
+
+    /// `lod_bias <= 0` = 关掉 LOD：同一份场景在 40 米外照样画第 0 级。
+    #[test]
+    fn lod_bias_zero_disables_switching_and_culling() {
+        let Some(mut shot) = gpu_or_skip("lod_bias_zero_disables_switching_and_culling") else {
+            return;
+        };
+        let near = lod_cube(&shot, "lod-near", 1.0, Vec3::ZERO);
+        shot.inject_model("lod-near", near);
+
+        let scene = lod_probe_scene(vec![xgame_core::LodLevel::new("lod-near", 10.0)]);
+        let settings = RenderConfig {
+            lod_bias: 0.0,
+            ..RenderConfig::default()
+        };
+        shot.render_scene(
+            &scene,
+            &AnimationDriver::new(),
+            Some(lod_camera(40.0)),
+            SceneLighting::new(scene.ambient, &scene.lights),
+            settings,
+        )
+        .expect("渲染失败");
+
+        let stats = shot.frame_stats();
+        assert_eq!(stats.distance_culled_entities, 0, "关掉 LOD 后不做距离剔除");
+        assert_eq!(stats.opaque_instances, 1);
+        assert_eq!(stats.low_lod_instances, 0, "永远是第 0 级");
+        assert!(
+            object_pixels(&shot.read_rgba().expect("读回失败"), 320, 240).0 > 0,
+            "关掉 LOD 后远处也要画出来"
+        );
     }
 
     // 参考图直接平移 CPU 顶点，不复用骨骼采样或槽位上传，避免同错假绿。

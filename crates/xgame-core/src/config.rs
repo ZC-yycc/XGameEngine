@@ -540,6 +540,26 @@ pub struct RenderConfig {
     /// TAA（时域抗锯齿）参数，见 [`TaaConfig`]。同样后加 + 默认关。
     #[serde(default, skip_serializing_if = "TaaConfig::is_default")]
     pub taa: TaaConfig,
+    /// LOD 距离偏置：乘在每级 `max_distance` 上。
+    ///
+    /// - `1.0`（默认）= 按作者写的阈值，逐位与引入 LOD 之前一致；
+    /// - `> 1` 把切换点推远（更好的画质 / 更强的机器）；
+    /// - `0 < bias < 1` 拉近（弱机降负载）；
+    /// - `<= 0` **关掉 LOD**：永远第 0 级、也不做绘制距离剔除（排查"远处
+    ///   突然变样"时的开关）。
+    ///
+    /// 坏值（`NaN` / `±∞`）在渲染侧按 1 处理，不在这里夹取 —— 夹取会让
+    /// "作者写了什么"与"实际跑什么"分叉，而这个字段本身就是调试用的。
+    #[serde(default = "default_lod_bias", skip_serializing_if = "is_default_lod_bias")]
+    pub lod_bias: f32,
+}
+
+fn default_lod_bias() -> f32 {
+    1.0
+}
+
+fn is_default_lod_bias(bias: &f32) -> bool {
+    *bias == 1.0
 }
 
 impl Default for RenderConfig {
@@ -551,6 +571,7 @@ impl Default for RenderConfig {
             sky: SkyConfig::default(),
             fxaa: FxaaConfig::default(),
             taa: TaaConfig::default(),
+            lod_bias: default_lod_bias(),
         }
     }
 }
@@ -584,6 +605,8 @@ impl RenderConfig {
             // 结构完整（漏写会编译失败，这是刻意的）。
             fxaa: self.fxaa,
             taa: self.taa.sanitized(),
+            // 偏置刻意不夹：见字段说明（坏值由 `lod::LodGroup::resolve` 兜底）。
+            lod_bias: self.lod_bias,
         }
     }
 

@@ -528,24 +528,114 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             });
         });
 
+        // ── LOD（距离分级 + 绘制距离）──
+        //
+        // 语义（与 `xgame_core::lod` 同一份）：`levels` 非空时 `model` 被忽略，
+        // 第 0 级就是最近一级；超出最后一级的 `max_distance` 直接不画
+        // （写 0 = 无限远）。距离从相机量到**实体轴心**。
+        theme::section_bar(ui, "LOD");
+        ui.indent("lod", |ui| {
+            if entity.lod.is_empty() {
+                let add = icons::add_row(
+                    ui,
+                    "Add LOD",
+                    "两级起：第 0 级 = 当前模型、20 米内；第 1 级先复制同一模型、无限远。\n把第 1 级的模型换成低模，把第 0 级的距离调成想换模的位置。",
+                );
+                if add.clicked() {
+                    // 用当前模型起两段**同款**的级：一按就消失是最糟的默认值，
+                    // 作者要的是"先有个结构、再逐级换低模"。
+                    let seed = if entity.model.is_empty() {
+                        "builtin://cube".to_owned()
+                    } else {
+                        entity.model.clone()
+                    };
+                    entity.lod = xgame_core::LodGroup {
+                        levels: vec![
+                            xgame_core::LodLevel::new(seed.clone(), 20.0),
+                            xgame_core::LodLevel::new(seed, 0.0),
+                        ],
+                    };
+                    touched = true;
+                }
+                theme::note(ui, "没有 LOD：任何距离都画 model 同一个网格");
+            } else {
+                let mut remove: Option<usize> = None;
+                for index in 0..entity.lod.levels.len() {
+                    theme::field_row(ui, &format!("L{index}"), |ui| {
+                        let level = &mut entity.lod.levels[index];
+                        let resp = ui.add_sized(
+                            egui::vec2(ui.available_width(), theme::FIELD_HEIGHT),
+                            egui::TextEdit::singleline(&mut level.model)
+                                .hint_text("Resources/… 或 builtin://cube"),
+                        );
+                        if resp.changed() {
+                            touched = true;
+                        }
+                    });
+                    theme::field_row(ui, "Max Dist", |ui| {
+                        let level = &mut entity.lod.levels[index];
+                        let resp = ui.add_sized(
+                            egui::vec2(ui.available_width() - 26.0, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut level.max_distance)
+                                .speed(0.5)
+                                .range(0.0..=f32::MAX),
+                        )
+                        .on_hover_text("这一级生效的最大距离（米）；0 = 无限远（永不按距离剔除）");
+                        if resp.changed() {
+                            touched = true;
+                        }
+                        if icons::close_button(ui, "删掉这一级（LOD 组本身保留）") {
+                            remove = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = remove {
+                    entity.lod.levels.remove(index);
+                    if entity.lod.is_empty() && !entity.lod.levels.is_empty() {
+                        // 删到只剩空模型级：整组当作没有 LOD，退回 `model`。
+                        entity.lod.levels.clear();
+                    }
+                    touched = true;
+                }
+                if icons::add_row(ui, "Add Level", "追加一级；距离填 0 表示无限远")
+                    .clicked()
+                {
+                    let seed = entity
+                        .lod
+                        .levels
+                        .last()
+                        .map(|level| level.model.clone())
+                        .unwrap_or_default();
+                    entity.lod.levels.push(xgame_core::LodLevel::new(seed, 0.0));
+                    touched = true;
+                }
+                if ui.button("Remove LOD").clicked() {
+                    // 只拆 LOD 结构，不动 `model` —— 作者随时能回到"一个模型"。
+                    entity.lod = xgame_core::LodGroup::default();
+                    touched = true;
+                }
+                theme::note(ui, "超出最后一级 = 不画；最后一级填 0 = 无限远");
+            }
+        });
+
         // ── 动画 ──
         //
         // 没有模型就没东西可播；但**已经有**动画组件时即使模型被清空也要显示，
         // 否则组件会被藏到永远摘不掉。剪辑列表来自渲染器的资产缓存 —— 模型还没
         // 加载时是空的，弱提示占位，下一帧预加载完成后自然有选项。
-        if !entity.model.is_empty() || entity.animator.is_some() {
+        if entity.has_model() || entity.animator.is_some() {
             theme::section_bar(ui, "Animation");
             ui.indent("animation", |ui| {
                 let clips = state
                     .scene_renderer
                     .as_ref()
-                    .map(|r| r.animation_clip_names(&entity.model))
+                    .map(|r| entity.model_at(0).map_or_else(Vec::new, |m| r.animation_clip_names(m)))
                     .unwrap_or_default();
                 // 骨骼名：层栈遮罩的下拉来源（去重、跳过匿名；模型未加载 → 空）。
                 let bone_names = state
                     .scene_renderer
                     .as_ref()
-                    .map(|r| r.bone_names(&entity.model))
+                    .map(|r| entity.model_at(0).map_or_else(Vec::new, |m| r.bone_names(m)))
                     .unwrap_or_default();
                 let model_empty = entity.model.is_empty();
 
@@ -1077,7 +1167,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         let (morph_names, morph_count) = state
             .scene_renderer
             .as_ref()
-            .map(|r| r.morph_targets(&entity.model))
+            .map(|r| entity.model_at(0).map_or_else(Default::default, |m| r.morph_targets(m)))
             .unwrap_or_default();
         if morph_count > 0 {
             theme::section_bar(ui, "Morph");

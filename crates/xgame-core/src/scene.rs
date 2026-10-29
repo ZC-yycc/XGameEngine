@@ -55,6 +55,17 @@ pub struct Entity {
     /// 强制写一行 `model: ""` 只是噪音。
     #[serde(default)]
     pub model: String,
+    /// LOD 组（距离分级 + 绘制距离）。**空 = 没有 LOD**（绝大多数实体）。
+    ///
+    /// `levels` 非空时 [`Entity::model`] 被**完全忽略**（渲染与拾取都用第 0 级）——
+    /// 不写"基础模型 + 追加级"的双轨语义，避免"改了 Model 却看不见变化"。
+    /// 判定规则、距离口径与偏置语义见 [`crate::lod`] 的模块文档（那里是唯一
+    /// 一份实现，渲染器只是调用方）。
+    ///
+    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → 空组，
+    /// `skip_serializing_if` 让没有 LOD 的实体不写这一行。
+    #[serde(default, skip_serializing_if = "crate::lod::LodGroup::is_empty")]
+    pub lod: crate::lod::LodGroup,
     /// 共享材质资产路径（项目相对路径，例如 `Resources/Materials/Wood.mat`）。
     ///
     /// `None` = 用模型自带材质。引用了材质资产后，资产里的金属度 / 粗糙度
@@ -224,6 +235,7 @@ impl Entity {
             transform: Transform::IDENTITY,
             layer: crate::layers::DEFAULT_LAYER,
             model: String::new(),
+            lod: crate::lod::LodGroup::default(),
             material_asset: None,
             id: EntityId::new(),
             parent: None,
@@ -252,6 +264,14 @@ impl Entity {
     /// 给实体附加模型路径。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// 给实体附上一个 LOD 组（各级模型 + 距离阈值，见 [`crate::lod`]）。
+    ///
+    /// 与 [`Entity::with_model`] 二选一：`lod` 非空时 `model` 被忽略。
+    pub fn with_lod(mut self, lod: crate::lod::LodGroup) -> Self {
+        self.lod = lod;
         self
     }
 
@@ -346,9 +366,52 @@ impl Entity {
         self.components.get_mut()
     }
 
-    /// 实体是否有模型关联。
+    /// 实体是否有模型关联（含 LOD 各级）。
+    ///
+    /// LOD 实体可以把 `model` 留空、只写 `lod.levels` —— 那种实体**有几何**，
+    /// `--check` 必须照旧检查各级的模型文件。
     pub fn has_model(&self) -> bool {
-        !self.model.is_empty()
+        !self.model.is_empty() || !self.lod.is_empty()
+    }
+
+    /// 距离 `distance` 下这个实体该用哪一级、哪个模型（`bias` 见 [`crate::lod`]）。
+    ///
+    /// `None` = 这个距离上不该画（没有模型，或超出绘制距离）。**判定在查模型
+    /// 缓存之前完成** —— 远处实体即使网格没加载也能被判"不画"。
+    pub fn lod_at(&self, distance: f32, bias: f32) -> Option<(usize, &str)> {
+        if self.lod.is_empty() {
+            // 没有 LOD：`model` 就是唯一一级，且不做距离剔除（老场景逐位不变）。
+            return (!self.model.is_empty()).then_some((0, self.model.as_str()));
+        }
+        self.lod.resolve(distance, bias)
+    }
+
+    /// 第 `level` 级用的模型（作者下标；空模型 / 越界 → `None`）。
+    ///
+    /// 渲染器把级号记进批次，画的时候按它回查模型 —— 两种形态（有 / 没有 LOD）
+    /// 必须在**同一个函数**里归一，否则"关掉 LOD 的实体"会查不到模型。
+    pub fn model_at(&self, level: usize) -> Option<&str> {
+        let path = if self.lod.is_empty() {
+            if level == 0 {
+                &self.model
+            } else {
+                return None;
+            }
+        } else {
+            &self.lod.levels.get(level)?.model
+        };
+        (!path.is_empty()).then_some(path.as_str())
+    }
+
+    /// 这个实体**可能用到**的全部模型路径（`model` + 各级 LOD）。
+    ///
+    /// 宿主预加载用：所有级都得进缓存，否则"走近了突然空白一帧"。
+    /// `model` 即使在有 LOD 时被忽略也照样带上 —— 多加载一份的代价远小于
+    /// "作者删掉 LOD 后模型不在缓存里"的诡异首帧。
+    pub fn model_paths(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.model.as_str())
+            .chain(self.lod.levels.iter().map(|level| level.model.as_str()))
+            .filter(|path| !path.is_empty())
     }
 }
 
@@ -366,6 +429,7 @@ impl PartialEq for Entity {
             transform,
             layer,
             model,
+            lod,
             material_asset,
             id,
             parent,
@@ -389,6 +453,7 @@ impl PartialEq for Entity {
             transform: other_transform,
             layer: other_layer,
             model: other_model,
+            lod: other_lod,
             material_asset: other_material_asset,
             id: other_id,
             parent: other_parent,
@@ -412,6 +477,7 @@ impl PartialEq for Entity {
             && transform == other_transform
             && layer == other_layer
             && model == other_model
+            && lod == other_lod
             && material_asset == other_material_asset
             && id == other_id
             && parent == other_parent

@@ -458,28 +458,27 @@ impl SceneRenderer {
             let Some(animator) = &entity.animator else {
                 continue;
             };
-            if !animator.is_active() || entity.model.is_empty() {
+            if !animator.is_active() {
                 continue;
             }
-            if !self.model_cache.contains_key(&entity.model)
-                && !self.load_failed.contains(&entity.model)
-            {
-                match GltfMesh::load(&self.device, &self.queue, &self.project_root, &entity.model) {
+            // 判定用**第 0 级**模型（有 LOD 时就是最近那级）：剪辑存在性问的是
+            // "动画配好了没"，与当前机位无关；拿当前级去问会让"走远了就停帧"。
+            let Some(model) = entity.model_at(0) else {
+                continue;
+            };
+            if !self.model_cache.contains_key(model) && !self.load_failed.contains(model) {
+                match GltfMesh::load(&self.device, &self.queue, &self.project_root, model) {
                     Ok(m) => {
-                        log::info!("Loaded model '{}' for animation", entity.model);
-                        self.model_cache.insert(entity.model.clone(), m);
+                        log::info!("Loaded model '{model}' for animation");
+                        self.model_cache.insert(model.to_string(), m);
                     }
                     Err(e) => {
-                        log::warn!(
-                            "Failed to load model '{}' for animation: {:#}",
-                            entity.model,
-                            e
-                        );
-                        self.load_failed.insert(entity.model.clone());
+                        log::warn!("Failed to load model '{model}' for animation: {:#}", e);
+                        self.load_failed.insert(model.to_string());
                     }
                 }
             }
-            if let Some(mesh) = self.model_cache.get(&entity.model) {
+            if let Some(mesh) = self.model_cache.get(model) {
                 if !mesh.has_animation() {
                     continue;
                 }
@@ -860,22 +859,23 @@ impl SceneRenderer {
         // 不做，更不会去反复读一个坏路径的磁盘文件 —— 那正是"静态界面也卡"的经典成因。
         let mut loaded = Vec::new();
         for entity in &scene.entities {
-            if !entity.model.is_empty() && !self.model_cache.contains_key(&entity.model) {
-                // entity.model 是项目相对路径（或内置图元标识）；缓存键保持原样不变，
+            // **逐级**预加载：只加载 `model` 会让 LOD 实体走近后空白一帧，
+            // 而"走近了才坏"恰恰是最难在编辑器里复现的一类问题。
+            for model in entity.model_paths() {
+                if self.model_cache.contains_key(model) {
+                    continue;
+                }
+                // 路径是项目相对路径（或内置图元标识）；缓存键保持原样不变，
                 // 解析与分派都交给 GltfMesh::load。
-                match GltfMesh::load(&self.device, &self.queue, &self.project_root, &entity.model) {
+                match GltfMesh::load(&self.device, &self.queue, &self.project_root, model) {
                     Ok(m) => {
-                        log::info!(
-                            "Loaded model '{}' ({} primitives)",
-                            entity.model,
-                            m.primitives.len()
-                        );
-                        loaded.push((entity.model.clone(), m.bounds));
-                        self.model_cache.insert(entity.model.clone(), m);
+                        log::info!("Loaded model '{model}' ({} primitives)", m.primitives.len());
+                        loaded.push((model.to_string(), m.bounds));
+                        self.model_cache.insert(model.to_string(), m);
                     }
                     Err(e) => {
-                        log::warn!("Failed to load model '{}': {:#}", entity.model, e);
-                        self.load_failed.insert(entity.model.clone());
+                        log::warn!("Failed to load model '{model}': {:#}", e);
+                        self.load_failed.insert(model.to_string());
                     }
                 }
             }
@@ -923,6 +923,7 @@ impl SceneRenderer {
             camera_pos,
             lighting,
             settings.sky,
+            settings.lod_bias,
             particles,
         );
 

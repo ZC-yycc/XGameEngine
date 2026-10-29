@@ -420,22 +420,17 @@ impl GameApp {
 
         // -- 惰性加载模型（路径按项目根解析）--
         for entity in &scene.entities {
-            if !entity.model.is_empty() && !self.model_cache.contains_key(&entity.model) {
-                match GltfMesh::load(
-                    &self.device,
-                    &self.queue,
-                    self.project.root(),
-                    &entity.model,
-                ) {
+            // 逐级加载（LOD 各级都要进缓存）：否则走近的瞬间会空一帧。
+            for model in entity.model_paths() {
+                if self.model_cache.contains_key(model) {
+                    continue;
+                }
+                match GltfMesh::load(&self.device, &self.queue, self.project.root(), model) {
                     Ok(m) => {
-                        log::info!(
-                            "Loaded model '{}' ({} primitives)",
-                            entity.model,
-                            m.primitives.len()
-                        );
-                        self.model_cache.insert(entity.model.clone(), m);
+                        log::info!("Loaded model '{model}' ({} primitives)", m.primitives.len());
+                        self.model_cache.insert(model.to_string(), m);
                     }
-                    Err(e) => log::warn!("Failed to load model '{}': {:#}", entity.model, e),
+                    Err(e) => log::warn!("Failed to load model '{model}': {:#}", e),
                 }
             }
         }
@@ -499,6 +494,7 @@ impl GameApp {
             &eye,
             SceneLighting::new(scene.ambient, &scene.lights),
             settings.sky,
+            settings.lod_bias,
             // 粒子：与编辑器视口同一条 pass（见 `ScenePipeline::render`）。
             self.world.particle_quads(),
         );

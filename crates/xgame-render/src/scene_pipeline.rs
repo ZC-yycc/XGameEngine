@@ -270,6 +270,17 @@ pub struct FrameStats {
     pub shadow_only_batches: usize,
     /// 只在阴影 pass 出现的不透明实例数。
     pub shadow_only_instances: usize,
+    /// 因**超出 LOD 绘制距离**而整实体跳过的数量（与视锥剔除分开记）。
+    ///
+    /// 两种"看不见"的成因完全不同：视锥外是相机朝向问题（转一下就有了），
+    /// 绘制距离外是内容设定（走近了才有）。混在一个计数里，量"LOD 到底省了
+    /// 多少"就永远说不清。
+    pub distance_culled_entities: usize,
+    /// 用**非第 0 级**画出来的实例数（LOD 真的在降级时它 > 0）。
+    ///
+    /// 口径是"主 pass 的实例"，阴影专用批次不计 —— 那些连画面都不进，
+    /// 拿它证明"远处换了低模"会假绿。
+    pub low_lod_instances: usize,
 }
 
 impl FrameStats {
@@ -435,6 +446,12 @@ struct DrawBatch {
     /// 的时候本来就省不下什么）。
     entity: u32,
     prim: u32,
+    /// 这一批用的 **LOD 级号**（作者下标；没有 LOD 的实体恒为 0）。
+    ///
+    /// 批次必须记住级号而不是"实体当前该用哪级"：同一个实体的不同级是**不同
+    /// 网格**，图元指针 / 顶点缓冲都不一样；画的时候按实体回查会拿到错的那一级
+    /// （远处画成高模，或者图元下标越界直接不画）。
+    lod_level: u16,
     /// 这批用哪套材质绑定组。
     ///
     /// **批次键必须包含它**：同一个图元被两个实体分别指定不同 `.mat` 时，
@@ -468,7 +485,8 @@ fn batch_prim<'a>(
     batch: &DrawBatch,
 ) -> Option<&'a GltfPrimitive> {
     let entity = entities.get(batch.entity as usize)?;
-    let mesh = model_cache.get(entity.model.as_str())?;
+    // 级号 → 模型路径的唯一归一出口（有 LOD 用第 N 级，没有 LOD 只有第 0 级）。
+    let mesh = model_cache.get(entity.model_at(batch.lod_level as usize)?)?;
     mesh.primitives.get(batch.prim as usize)
 }
 
@@ -548,10 +566,12 @@ pub fn scene_bounds(
 ) -> Option<Bounds> {
     let mut bounds = Bounds::EMPTY;
     for (i, entity) in entities.iter().enumerate() {
-        if entity.model.is_empty() {
+        // 取第 0 级（最精细那级）：阴影拟合与自动取景要的是"最坏情况"的
+        // 体积，低模通常只是高模的子集。没有 LOD 时它就是 `model`。
+        let Some(path) = entity.model_at(0) else {
             continue;
-        }
-        let Some(mesh) = model_cache.get(&entity.model) else {
+        };
+        let Some(mesh) = model_cache.get(path) else {
             continue;
         };
         let world = world_matrices
@@ -2216,6 +2236,7 @@ impl ScenePipeline {
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
         sky: SkyConfig,
+        lod_bias: f32,
         particle_quads: &[xgame_particle::ParticleQuad],
     ) {
         // --- 光源打包 + 阴影准备（都在 CPU 侧，先算完再开 pass）---
@@ -2363,24 +2384,42 @@ impl ScenePipeline {
         // 剔除读数：被整实体跳过的数量 / 绘制项数（按图元计）。
         let mut culled_entities = 0usize;
         let mut culled_instances = 0usize;
+        let mut distance_culled_entities = 0usize;
+        let mut low_lod_instances = 0usize;
 
         for (i, entity) in entities.iter().enumerate() {
             if i >= MAX_RENDER_ENTITIES || draw_slots_used >= MAX_RENDER_DRAWS {
                 break;
             }
-            if entity.model.is_empty() {
-                continue;
-            }
-            let Some(mesh) = model_cache.get(&entity.model) else {
-                continue;
-            };
-
             // 世界矩阵由调用方解算好（层级在 core 里维护）；越界时退回局部矩阵，
             // 保证即使调用方少传了一段也不会画出诡异的东西。
             let world = world_matrices
                 .get(i)
                 .copied()
                 .unwrap_or_else(|| entity.transform.local_matrix());
+
+            // -- LOD / 绘制距离（先于一切网格工作）--
+            //
+            // 距离从相机量到**实体轴心**（见 `xgame_core::lod` 的模块文档）：
+            // 只看变换、不看网格，所以"远处不画"的实体连网格都不必在缓存里。
+            // 没有 LOD 的实体走同一条函数但不算开方（`lod_at` 不看距离）。
+            let pivot = Vec3::new(world.w_axis.x, world.w_axis.y, world.w_axis.z);
+            let dist = (pivot - *camera_pos).length_squared();
+            let distance = if entity.lod.is_empty() {
+                0.0
+            } else {
+                dist.sqrt()
+            };
+            let Some((lod_level, model_path)) = entity.lod_at(distance, lod_bias) else {
+                // 没有任何几何的实体（纯 UI / 纯逻辑）不算"被距离剔除"。
+                if entity.has_model() {
+                    distance_culled_entities += 1;
+                }
+                continue;
+            };
+            let Some(mesh) = model_cache.get(model_path) else {
+                continue;
+            };
 
             // -- 视锥剔除（实体级，先于蒙皮 / 材质 / 实例数据）--
             //
@@ -2533,10 +2572,8 @@ impl ScenePipeline {
             // 模型矩阵 / 蒙皮槽位是逐实体的，材质是逐图元的：每个图元一个
             // 实例槽位（`DrawUniform`），槽位在批次分组之后统一分配（见下）。
             //
-            // 半透明排序用的是**世界坐标**——实体被父节点挪过位置之后，
-            // 局部坐标早就不是它在屏幕上的深度了。
-            let world_pos = Vec3::new(world.w_axis.x, world.w_axis.y, world.w_axis.z);
-            let dist = (world_pos - *camera_pos).length_squared();
+            // 半透明排序用的是**世界坐标**（上面算 `dist` 用的就是轴心）——
+            // 实体被父节点挪过位置之后，局部坐标早就不是它在屏幕上的深度了。
 
             // -- 共享材质资产（逐实体解析一次，逐图元复用 key）--
             //
@@ -2562,6 +2599,10 @@ impl ScenePipeline {
                     break;
                 }
                 draw_slots_used += 1;
+                // 读数口径 = 主 pass 的实例（阴影专用批次不算，见字段说明）。
+                if draw_in_main && lod_level > 0 {
+                    low_lod_instances += 1;
+                }
 
                 // 有效材质 = 模型 → 材质资产 → 实体级覆盖（后者逐字段打补丁）。
                 let effective = prim
@@ -2596,6 +2637,7 @@ impl ScenePipeline {
                                 count: 0,
                                 entity: i as u32,
                                 prim: pi as u32,
+                                lod_level: lod_level as u16,
                                 // 深度 pass 不采样材质；填模型 key 只是让字段有值。
                                 material: MaterialKey::Model(prim.material_id),
                             });
@@ -2614,6 +2656,7 @@ impl ScenePipeline {
                             count: 1,
                             entity: i as u32,
                             prim: pi as u32,
+                            lod_level: lod_level as u16,
                             material: material_key,
                         },
                         uniform,
@@ -2636,6 +2679,7 @@ impl ScenePipeline {
                                 count: 0,
                                 entity: i as u32,
                                 prim: pi as u32,
+                                lod_level: lod_level as u16,
                                 material: material_key,
                             });
                             self.batch_index.insert(key, b);
@@ -2736,6 +2780,8 @@ impl ScenePipeline {
             culled_instances,
             shadow_only_batches: self.shadow_batches.len(),
             shadow_only_instances: self.shadow_pending.len(),
+            distance_culled_entities,
+            low_lod_instances,
         };
 
         // --- 阴影 pass：每层画一遍深度（必须在主 pass 之前）---

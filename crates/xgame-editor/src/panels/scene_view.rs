@@ -307,10 +307,12 @@ fn pick_entity(
 
         // 本地包围盒 → 世界 AABB（变换 8 个角点再求盒，旋转也能正确处理）。
         // 包围盒由渲染器加载模型后缓存；还没加载过的退回单位盒。
+        // 有 LOD 的实体按**第 0 级**（最精细那级）算盒：近距离拾取要贴住作者
+        // 看到的那一版轮廓；远距离拾取差几厘米可以接受，用低模的盒会差更多。
         let local = state
             .scene_renderer
             .as_ref()
-            .and_then(|r| r.mesh_bounds(&entity.model))
+            .and_then(|r| entity.model_at(0).and_then(|model| r.mesh_bounds(model)))
             .unwrap_or(gizmo::UNIT_BOUNDS);
         let aabb = local.transformed(world);
 
@@ -355,10 +357,12 @@ fn union_bounds(
             continue;
         };
         // 与拾取共用同一套"本地盒 → 世界 AABB"的折算（8 角点，旋转也对）。
+        // 有 LOD 的实体按**第 0 级**（最精细那级）算盒：近距离拾取要贴住作者
+        // 看到的那一版轮廓；远距离拾取差几厘米可以接受，用低模的盒会差更多。
         let local = state
             .scene_renderer
             .as_ref()
-            .and_then(|r| r.mesh_bounds(&entity.model))
+            .and_then(|r| entity.model_at(0).and_then(|model| r.mesh_bounds(model)))
             .unwrap_or(gizmo::UNIT_BOUNDS);
         out = out.union(&local.transformed(world));
     }

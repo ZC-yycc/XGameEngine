@@ -220,6 +220,22 @@ fn random_entity(rng: &mut Rng) -> Entity {
         entity.material_asset = Some(rng.pick(MATERIALS).to_string());
     }
     if rng.chance(0.3) {
+        // LOD：各级模型也是资产引用，必须与 `model` 走同一条 GUID 管线；
+        // 无限级（0）与有限级都要覆盖，否则"最后一级写 0"的写法没进过盘。
+        let mut levels = Vec::new();
+        for index in 0..rng.below(3) + 1 {
+            levels.push(xgame_core::LodLevel::new(
+                rng.pick(MODELS).to_string(),
+                if index == 0 && rng.chance(0.5) {
+                    0.0
+                } else {
+                    rng.f32(1.0, 200.0)
+                },
+            ));
+        }
+        entity.lod = xgame_core::LodGroup { levels };
+    }
+    if rng.chance(0.3) {
         entity.scripts.push(rng.pick(SCRIPTS).to_string());
     }
     if rng.chance(0.2) {

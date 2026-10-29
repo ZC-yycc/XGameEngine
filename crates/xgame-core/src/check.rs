@@ -545,6 +545,46 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     Ok(report)
 }
 
+/// 检查一条模型引用（主模型或 LOD 某一级），把它归进对应的诊断桶。
+///
+/// 顺序是刻意的：空串跳过（没有模型不是问题）→ 悬空 GUID → `builtin://`
+/// （程序化几何，盘上没有文件）→ 路径纪律 → 文件存在性。路径越界时**不再**
+/// 探文件（本机碰巧有那个文件与"这个引用合不合法"是两件事，报两遍只会让
+/// 问题数虚高）。
+///
+/// `kind` 同时用于两处：`unsafe_paths` 的原因标签（`model` / `lod[1]`），
+/// 以及缺失模型消息的括注 —— 一个实体有几级 LOD 时，只说路径分不清是哪一级
+/// 缺了文件。
+fn check_model_reference(
+    report: &mut CheckReport,
+    project: &ProjectHandle,
+    at: &str,
+    kind: &str,
+    path: &str,
+) {
+    if path.is_empty() {
+        return;
+    }
+    if is_guid_reference(path) {
+        // 加载期解码失败的悬空 GUID 会原样留在内存里。
+        report.dangling_guids.push(format!("{at} -> {path}"));
+        return;
+    }
+    if path.starts_with("builtin://") {
+        return;
+    }
+    if note_unsafe_path(report, at, kind, path) {
+        return;
+    }
+    if !project.path(path).is_file() {
+        if kind == "model" {
+            report.missing_models.push(format!("{at} -> {path}"));
+        } else {
+            report.missing_models.push(format!("{at} -> {path} ({kind})"));
+        }
+    }
+}
+
 /// 记一条"路径型引用越界 / Windows 不认"的问题，返回它是不是**不合法**。
 ///
 /// 只在**非 `guid://`** 的引用上调用：GUID 引用没有路径语义，越界是另一回事
@@ -595,20 +635,21 @@ fn check_scene_references(
         }
         // `builtin://cube` 这类是**生成的几何**（渲染器直接造，盘上没有文件），
         // 当成缺失资产报出来就是狼来了 —— 调用方只要真的断了引用才该知道。
-        if entity.has_model() {
-            if is_guid_reference(&entity.model) {
-                // 加载期解码失败的悬空 GUID 会原样留在内存里。
-                report
-                    .dangling_guids
-                    .push(format!("{} -> {}", at(&entity.name), entity.model));
-            } else if !entity.model.starts_with("builtin://")
-                && !note_unsafe_path(report, &at(&entity.name), "model", &entity.model)
-                && !project.path(&entity.model).is_file()
-            {
-                report
-                    .missing_models
-                    .push(format!("{} -> {}", at(&entity.name), entity.model));
+        //
+        // LOD 各级也是模型引用，且**必须逐级检查**：远处那一级缺文件时画面
+        // 只在"走近了"才坏，而作者的编辑器预览多半停在近处。
+        check_model_reference(report, project, &at(&entity.name), "model", &entity.model);
+        for (index, level) in entity.lod.levels.iter().enumerate() {
+            if level.model.is_empty() {
+                continue;
             }
+            check_model_reference(
+                report,
+                project,
+                &at(&entity.name),
+                &format!("lod[{index}]"),
+                &level.model,
+            );
         }
         if let Some(material) = &entity.material_asset {
             if !material.is_empty() {
@@ -1004,6 +1045,37 @@ mod tests {
         assert!(text.contains("missing model"), "{text}");
         assert!(text.contains("missing script"), "{text}");
         assert!(text.contains("missing audio"), "{text}");
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// LOD 各级也是模型引用：缺哪一级都要被点名（带级号），
+    /// `builtin://` 的级照旧不算缺失。
+    #[test]
+    fn lod_level_references_are_reported() {
+        let project = temp_project("lod-refs");
+        let mut scene = project.load_entry_scene().expect("加载默认场景");
+        let mut entity = crate::Entity::new("Prop");
+        entity.lod = crate::lod::LodGroup {
+            levels: vec![
+                crate::lod::LodLevel::new("Resources/NotThere_Near.glb", 10.0),
+                crate::lod::LodLevel::new("builtin://cube", 30.0),
+                crate::lod::LodLevel::new("Resources/NotThere_Far.glb", 0.0),
+            ],
+        };
+        scene.entities.push(entity);
+        let entry = project.manifest().entry_scene.clone();
+        project.write_scene(&entry, &scene).expect("写场景");
+
+        let report = check_project(project.root()).expect("检查应成功");
+        assert_eq!(report.missing_models.len(), 2, "{}", report.render());
+        let text = report.render();
+        assert!(text.contains("NotThere_Near.glb"), "{text}");
+        assert!(text.contains("NotThere_Far.glb"), "{text}");
+        assert!(!text.contains("builtin://cube"), "内置几何不能算缺失：{text}");
+        // 缺失消息带级号：一个实体有几级时只说路径分不清是哪一级。
+        assert!(text.contains("(lod[0])"), "{text}");
+        assert!(text.contains("(lod[2])"), "{text}");
 
         let _ = std::fs::remove_dir_all(project.root());
     }
