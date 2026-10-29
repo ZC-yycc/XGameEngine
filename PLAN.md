@@ -7067,3 +7067,72 @@ rapier 的求解器 / 岛管理走 `wide` 的 SIMD 实现（stable Rust 可用�
 - `lod_cost`（release）：无 LOD 685.9 µs vs 有 LOD 101.1 µs（场景段 GPU），
   两组各 8 轮区间不重叠；CPU 段 275.6 → 284.4 µs（噪声级，LOD 判定成本在噪声里）；
 - `--check` 四个示例项目退出 0（LOD 字段默认为空，老工程行为不变）。
+
+## 九十、音频总线（BGM / SFX / Voice）+ 修掉"默认主音量 0 = 全局静音"（2026-10-29）
+
+这一轮交付差距分析 P2 #29 的**分组音量**那一半，并顺手修掉一个埋了整个音频
+子系统生命周期的真缺陷。红线见 [`Docs/决策记录.md`](Docs/决策记录.md) §七十一。
+
+### 一、顺带修的缺陷（先说它，因为它是"静默失败"）
+
+`AudioPort` 早年 `#[derive(Default)]`，`master_volume: f32` 得 **0.0**；而
+`linear_to_decibels(0.0)` 返回 `Decibels::SILENCE`，帧末又每帧把它写到 kira
+主轨上 —— 也就是说**不显式调 `set_master_volume` 的项目，一条声音都听不见**。
+全仓库没人调过它（只有脚本 API 里那个入口），SampleScene 的 Beep.wav 因此
+一直是哑的。这类"默认值选错一格"的缺陷最难发现：接口全绿、日志干净、
+只是没声音。
+
+修法不是补一行 `set_master_volume(1.0)`，而是让**混音的默认值本身**等于
+"不改变声音"：`AudioMix::default()` = 全 1.0（红灯 `default_mix_is_unity_not_silence`
+钉住）。以后加混音字段一律 1.0 起步，`f32` 的零默认在这条路径上禁止。
+
+### 二、总线形态：固定三组 + 一份乘法
+
+- `AudioBus`（`Sfx`（默认）/ `Bgm` / `Voice`）——固定枚举而不是自由字符串
+  （拼错一个字母 = 两个永远调不到一起的组）；脚本按名字选组，未知名字
+  **告警并忽略**，不悄悄归 `sfx`。
+- `AudioMix { master, buses[3] }`：有效音量 = 声源 × 总线
+  （`effective_volume` 唯一一份乘法）；**主音量不乘在这里** —— 它在 kira 主轨上
+  统一执行，改一次立即作用于所有声音，而逐句柄重设音量会覆盖句柄自己的
+  音量动画。因此总线音量**变了才**逐句柄 `set_volume`（与 `last_mix` 比对）。
+- 不用 kira 的 `TrackBuilder` 分组轨：空间声的子轨挂在监听者下
+  （`add_spatial_sub_track`），没有"再套一层总线轨"的入口；逐句柄 `set_volume`
+  对空间 / 非空间是同一条路径。
+- `AudioSource.bus`（Inspector 下拉）：缺省 `Sfx` **不落盘**（老场景逐字节不变）。
+
+### 三、脚本面（169 → 173 个函数，类别仍 18）
+
+`play_sound_bus` / `play_sound_at_bus`（`play_sound*` 的签名**不加可选参数**——
+音频 API 一律固定参数）+ `set_bus_volume` / `bus_volume`。`set_bus_volume`
+立即作用于该组**已在响**的声音（设置菜单滑条语义）。`Docs/脚本API.md` 补一节
+"音量总线"，6 处计数断言同步（script_api ×2 / lua_host / script_api_cli ×2 / MCP）。
+
+### 四、验证
+
+- **红灯两处**：① 默认混音退回 0（旧行为）→ `default_mix_is_unity_not_silence`
+  与 `effective_volume_multiplies_source_and_bus` 红；② 有效音量不乘总线 →
+  后者红（计数、落盘都照常绿 —— 这条乘法只有这条测试守得住）。
+- 新增 6 条测试：core 4（总线名解析 / 默认混音 / 有效音量 / 落盘可选）、
+  音频引擎 1（`bus_active` 分组计数）、脚本层 1（`bus_api_groups_sounds_and_updates_volumes`，
+  含未知名字告警）；`lua_host` 的端到端 Lua 测试扩到覆盖 `play_sound_bus` /
+  `set_bus_volume` / `bus_volume`（未知总线必须 `nil`）。
+- 全量 **1081 passed / 0 failed / 12 ignored**，clippy 0 告警（见"验证记录"）。
+- `--ui-shot` 1280×1600 / 1920×1200 自检 Inspector 的 Audio 区块（Bus 下拉 +
+  三行对齐无溢出）；四示例项目 `--check` 退出 0。
+
+### 五、刻意不做
+
+- **流式长音频**（BGM 从盘上流式读）：要换 kira 的 `StreamingSoundData` 与缓存
+  策略，另起一轮；
+- **遮挡低通 / 混响**（用物理射线给声音加环境效果）：P2 #29 的另一小半，依赖
+  射线批处理，收益偏观感；
+- **总线静音 / 独奏开关**：`set_bus_volume(bus, 0)` 就是静音，`1.0` 就是恢复，
+  不重复造一组 API；
+- **淡入淡出**：`update_bus_volumes` 已经只在变化的那一帧重设音量（刻意给
+  句柄动画留了位置），但 Tween 参数现在还是"立即生效"。
+
+### 验证记录
+
+- `cargo test --workspace --all-targets -- --test-threads=2`：**1081 passed /
+  0 failed / 12 ignored**，clippy **0 告警**；
+- `--check` 四个示例项目退出 0（`AudioSource.bus` 默认不落盘，老工程行为不变）。

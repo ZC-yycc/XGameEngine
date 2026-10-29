@@ -37,6 +37,126 @@ use serde::{Deserialize, Serialize};
 use crate::id::EntityId;
 
 // ---------------------------------------------------------------------------
+// 音量总线（BGM / SFX / Voice 分组）
+// ---------------------------------------------------------------------------
+
+/// 音量总线：声音按用途分组，一组一个音量旋钮。
+///
+/// 为什么是固定枚举而不是任意字符串：音量分组的**集合**是产品决定
+/// （做游戏的今天就知道要"音乐 / 音效 / 对白"三组），而开放字符串会让
+/// "两个地方拼错一个字母 = 两个永远调不到一起的组"成为常态。要加第 4 组，
+/// 加变体（编译器会把所有 match 点亮）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioBus {
+    /// 音效（脚步、撞击、按钮）。默认组。
+    #[default]
+    Sfx,
+    /// 背景音乐（通常循环）。
+    Bgm,
+    /// 对白 / 语音。
+    Voice,
+}
+
+impl AudioBus {
+    /// 全部总线（顺序 = [`AudioBus::index`]）。
+    pub const ALL: [AudioBus; 3] = [AudioBus::Sfx, AudioBus::Bgm, AudioBus::Voice];
+
+    /// 数组下标（`AudioMix::buses` / `AudioStats::bus_active` 用）。
+    pub fn index(self) -> usize {
+        match self {
+            Self::Sfx => 0,
+            Self::Bgm => 1,
+            Self::Voice => 2,
+        }
+    }
+
+    /// 脚本 / 文档里的名字（纯 ASCII 小写）。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sfx => "sfx",
+            Self::Bgm => "bgm",
+            Self::Voice => "voice",
+        }
+    }
+
+    /// 按名字解析（ASCII 大小写不敏感）。未知名字返回 `None` ——
+    /// 调用方（脚本 API）应当**报错并忽略**，而不是悄悄塞进 Sfx：
+    /// 悄悄改组等于"作者调了 BGM 音量却没反应"。
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "sfx" | "s" => Some(Self::Sfx),
+            "bgm" | "music" | "m" => Some(Self::Bgm),
+            "voice" | "v" => Some(Self::Voice),
+            _ => None,
+        }
+    }
+
+    /// `skip_serializing_if` 用：默认组不落盘（老场景文件逐字节不变）。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 一组混音音量：主音量 + 三条总线（线性 `0.0..=1.0`）。
+///
+/// # 默认值是 1.0，不是 0.0
+///
+/// 这条不是随手写的：`#[derive(Default)]` 对 `f32` 给 0.0，而 0.0 的主音量
+/// = **全局静音** —— 引擎此前就是这样（`AudioPort` 派生 `Default`，
+/// `master_volume` 默认 0.0，没人显式设过 1.0，于是不写 `set_master_volume`
+/// 的项目一条声音都听不见）。混音的"默认"必须是**不改变声音**。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioMix {
+    /// 主音量（乘在整条混音链末端，由 kira 主轨执行）。
+    pub master: f32,
+    /// 各总线音量，下标见 [`AudioBus::index`]。
+    pub buses: [f32; 3],
+}
+
+impl Default for AudioMix {
+    fn default() -> Self {
+        Self {
+            master: 1.0,
+            buses: [1.0; 3],
+        }
+    }
+}
+
+impl AudioMix {
+    /// 某条总线的音量。
+    pub fn bus(&self, bus: AudioBus) -> f32 {
+        self.buses[bus.index()]
+    }
+
+    /// 设某条总线的音量（clamp 到 `0.0..=1.0`；`NaN` 退回 0.0）。
+    pub fn set_bus(&mut self, bus: AudioBus, volume: f32) {
+        self.buses[bus.index()] = clamp_unit(volume);
+    }
+
+    /// 设主音量（同 [`Self::set_bus`] 的容错）。
+    pub fn set_master(&mut self, volume: f32) {
+        self.master = clamp_unit(volume);
+    }
+
+    /// 一次播放的**实际**线性音量 = 声源音量 × 总线音量。
+    ///
+    /// 主音量不乘在这里：它由 kira 主轨统一执行（改一次主音量要立刻作用到
+    /// 已经在响的所有声音，而逐句柄重设音量会把"淡出"之类的句柄动画覆盖掉）。
+    pub fn effective_volume(&self, bus: AudioBus, source_volume: f32) -> f32 {
+        clamp_unit(source_volume) * self.bus(bus)
+    }
+}
+
+/// 线性音量的容错夹取：`NaN` / 无穷按 0 处理，超界夹到 `0.0..=1.0`。
+fn clamp_unit(volume: f32) -> f32 {
+    if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 组件
 // ---------------------------------------------------------------------------
 
@@ -68,6 +188,12 @@ pub struct AudioSource {
     pub min_distance: f32,
     /// 空间化：听不见的最远距离。
     pub max_distance: f32,
+    /// 音量总线（BGM / SFX / Voice 分组）。缺省 = [`AudioBus::Sfx`]。
+    ///
+    /// 总线只影响**音量归组**（`set_bus_volume` 一次调一整组），不改变空间化 /
+    /// 停止语义。默认 `Sfx` 且不落盘 —— 老场景文件逐字节不变。
+    #[serde(skip_serializing_if = "AudioBus::is_default")]
+    pub bus: AudioBus,
 }
 
 impl Default for AudioSource {
@@ -81,6 +207,7 @@ impl Default for AudioSource {
             spatial: false,
             min_distance: 1.0,
             max_distance: 50.0,
+            bus: AudioBus::default(),
         }
     }
 }
@@ -118,6 +245,12 @@ impl AudioSource {
         self
     }
 
+    /// 指定音量总线（缺省 [`AudioBus::Sfx`]）。
+    pub fn with_bus(mut self, bus: AudioBus) -> Self {
+        self.bus = bus;
+        self
+    }
+
     /// 把组件参数摊成一次播放请求。
     ///
     /// `position` 是世界坐标（空间化时用）；`follow` 由调用方（World）按需
@@ -133,6 +266,7 @@ impl AudioSource {
             min_distance: self.min_distance,
             max_distance: self.max_distance,
             follow: None,
+            bus: self.bus,
         }
     }
 }
@@ -158,6 +292,8 @@ pub struct PlaySound {
     pub min_distance: f32,
     /// 空间化最远距离。
     pub max_distance: f32,
+    /// 音量总线（缺省 [`AudioBus::Sfx`]）。
+    pub bus: AudioBus,
     /// 跟随的实体：**无论是否空间化**，它都把声音绑到该实体上
     /// （`StopEntity` 按它匹配 —— 实体删除 / 组件摘除时停音）；
     /// 空间化声源还按实体世界坐标逐帧更新发射位置（**覆盖** `position`）。
@@ -176,7 +312,14 @@ impl PlaySound {
             min_distance: 1.0,
             max_distance: 50.0,
             follow: None,
+            bus: AudioBus::default(),
         }
+    }
+
+    /// 指定音量总线（缺省 [`AudioBus::Sfx`]）。
+    pub fn with_bus(mut self, bus: AudioBus) -> Self {
+        self.bus = bus;
+        self
     }
 
     /// 摆到世界坐标上（空间化）。
@@ -307,8 +450,8 @@ fn normalize_or_back(v: [f32; 3]) -> [f32; 3] {
 pub struct AudioPort {
     /// 监听者姿态（每帧由宿主写入：编辑器相机 / 游戏相机）。
     pub listener: ListenerPose,
-    /// 主音量（线性 `0.0..=1.0`，引擎 clamp）。
-    pub master_volume: f32,
+    /// 混音音量（主 + 三条总线；默认全是 1.0，见 [`AudioMix`]）。
+    pub mix: AudioMix,
     /// 待执行命令。私有：只能经方法进 —— 保证每个命令都带完整的默认语义。
     commands: Vec<AudioCommand>,
 }
@@ -323,9 +466,24 @@ impl AudioPort {
         self.listener = ListenerPose::new(position, forward);
     }
 
-    /// 设置主音量（clamp 到 `0.0..=1.0`）。
+    /// 设置主音量（clamp 到 `0.0..=1.0`，坏值退回 0）。
     pub fn set_master_volume(&mut self, volume: f32) {
-        self.master_volume = volume.clamp(0.0, 1.0);
+        self.mix.set_master(volume);
+    }
+
+    /// 当前主音量。
+    pub fn master_volume(&self) -> f32 {
+        self.mix.master
+    }
+
+    /// 设置某条总线的音量（clamp 到 `0.0..=1.0`）。
+    pub fn set_bus_volume(&mut self, bus: AudioBus, volume: f32) {
+        self.mix.set_bus(bus, volume);
+    }
+
+    /// 某条总线的当前音量。
+    pub fn bus_volume(&self, bus: AudioBus) -> f32 {
+        self.mix.bus(bus)
     }
 
     /// 请求播放一次。
@@ -395,16 +553,24 @@ pub struct AudioStats {
     pub failed_clips: usize,
     /// 上一批 drain 进来的命令数（"这帧音频层干没干活"一眼可见）。
     pub last_batch: usize,
+    /// 各总线上的活动声音数（下标见 [`AudioBus::index`]）。
+    ///
+    /// 存在的理由：总线归组是否生效只有这个读数在无声模式下也看得见 ——
+    /// 没有输出设备时拿不到 kira 句柄，测试只能断言"这条声音进了哪个组"。
+    pub bus_active: [usize; 3],
 }
 
 impl fmt::Display for AudioStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "audio: {} requests={} active={} stopped={} clips={}/{} last_batch={}",
+            "audio: {} requests={} active={} (sfx={} bgm={} voice={}) stopped={} clips={}/{} last_batch={}",
             if self.available { "device" } else { "silent" },
             self.requests,
             self.active,
+            self.bus_active[AudioBus::Sfx.index()],
+            self.bus_active[AudioBus::Bgm.index()],
+            self.bus_active[AudioBus::Voice.index()],
             self.stopped,
             self.cached_clips,
             self.failed_clips,
@@ -478,9 +644,80 @@ mod tests {
         assert!(port.is_empty(), "drain 之后应取空");
 
         port.set_master_volume(3.0);
-        assert_eq!(port.master_volume, 1.0, "主音量必须 clamp");
+        assert_eq!(port.master_volume(), 1.0, "主音量必须 clamp");
         port.set_master_volume(-1.0);
-        assert_eq!(port.master_volume, 0.0);
+        assert_eq!(port.master_volume(), 0.0);
+    }
+
+    /// 总线名解析：三个名字 + 常见别名，未知名返回 `None`（不许悄悄归 Sfx）。
+    #[test]
+    fn audio_bus_names_round_trip() {
+        for bus in AudioBus::ALL {
+            assert_eq!(AudioBus::from_name(bus.name()), Some(bus));
+            // 大小写与首尾空格是手写场景的常态。
+            let upper = bus.name().to_ascii_uppercase();
+            assert_eq!(AudioBus::from_name(&upper), Some(bus));
+            assert_eq!(AudioBus::from_name(&format!("  {} ", bus.name())), Some(bus));
+        }
+        assert_eq!(AudioBus::from_name("music"), Some(AudioBus::Bgm));
+        assert_eq!(AudioBus::from_name("s"), Some(AudioBus::Sfx));
+        assert_eq!(AudioBus::from_name("nonsense"), None);
+        assert_eq!(AudioBus::from_name(""), None);
+    }
+
+    /// **默认混音必须是"不改变声音"**（主音量 1.0、每条总线 1.0）。
+    ///
+    /// 这条是"默认主音量 0 = 全局静音"那个坑的红：旧实现里 `AudioPort` 派生
+    /// `Default`，`master_volume` 得 0.0，不显式调 `set_master_volume` 的项目
+    /// 一条声音都听不见。`AudioMix::default()` 把默认定成 1.0，坑就此封死。
+    #[test]
+    fn default_mix_is_unity_not_silence() {
+        let mix = AudioMix::default();
+        assert_eq!(mix.master, 1.0);
+        for bus in AudioBus::ALL {
+            assert_eq!(mix.bus(bus), 1.0, "{} 的默认音量必须是 1.0", bus.name());
+        }
+        let port = AudioPort::new();
+        assert_eq!(port.master_volume(), 1.0, "默认主音量不许是 0（那是静音）");
+        assert_eq!(port.bus_volume(AudioBus::Bgm), 1.0);
+    }
+
+    /// 有效音量 = 声源 × 总线（主音量另算，见 [`AudioMix::effective_volume`]）。
+    #[test]
+    fn effective_volume_multiplies_source_and_bus() {
+        let mut mix = AudioMix::default();
+        mix.set_bus(AudioBus::Bgm, 0.5);
+        assert_eq!(mix.effective_volume(AudioBus::Bgm, 0.8), 0.4);
+        assert_eq!(mix.effective_volume(AudioBus::Sfx, 0.8), 0.8, "别的总线不受影响");
+        // 主音量不进这条乘法（它在 kira 主轨上）。
+        mix.set_master(0.1);
+        assert_eq!(mix.effective_volume(AudioBus::Sfx, 0.8), 0.8);
+
+        // 容错：坏音量按 0 处理，超界夹取。
+        mix.set_bus(AudioBus::Voice, f32::NAN);
+        assert_eq!(mix.bus(AudioBus::Voice), 0.0);
+        mix.set_bus(AudioBus::Voice, 7.0);
+        assert_eq!(mix.bus(AudioBus::Voice), 1.0);
+        assert_eq!(mix.effective_volume(AudioBus::Voice, f32::INFINITY), 0.0);
+    }
+
+    /// 总线落盘策略：默认组不写进场景文件（老文件逐字节不变），写了要能读回。
+    #[test]
+    fn audio_source_bus_is_optional_in_ron() {
+        let source = AudioSource::new("Resources/Audio/Beep.wav");
+        let text = ron::to_string(&source).expect("序列化");
+        assert!(!text.contains("bus"), "默认组不该落盘: {text}");
+
+        let bgm = AudioSource::new("Resources/Audio/Song.wav").with_bus(AudioBus::Bgm);
+        let text = ron::to_string(&bgm).expect("序列化");
+        assert!(text.contains("Bgm"), "非默认组要落盘: {text}");
+        let back: AudioSource = ron::from_str(&text).expect("反序列化");
+        assert_eq!(back.bus, AudioBus::Bgm);
+
+        // 旧文件（没有 bus 字段）→ 默认 Sfx。
+        let old: AudioSource =
+            ron::from_str(r#"(clip: "Resources/Audio/Beep.wav")"#).expect("省略字段应可解析");
+        assert_eq!(old.bus, AudioBus::Sfx);
     }
 
     /// 监听者姿态的坐标约定（与 kira"未旋转 = -Z 朝前、+X 在右"对齐）：

@@ -433,6 +433,16 @@ impl World {
         self.audio_port.set_master_volume(volume);
     }
 
+    /// 设置某条音量总线（BGM / SFX / Voice）的音量（线性 `0.0..=1.0`）。
+    pub fn set_bus_volume(&mut self, bus: xgame_core::AudioBus, volume: f32) {
+        self.audio_port.set_bus_volume(bus, volume);
+    }
+
+    /// 某条音量总线的当前音量。
+    pub fn bus_volume(&self, bus: xgame_core::AudioBus) -> f32 {
+        self.audio_port.bus_volume(bus)
+    }
+
     /// 音频子系统的可观测状态（状态栏 / 测试断言）。
     pub fn audio_stats(&self) -> AudioStats {
         self.audio.stats()
@@ -1477,12 +1487,12 @@ impl World {
         }
     }
 
-    /// 帧末结算：drain 命令束，连同当前监听者姿态与主音量交给音频引擎。
+    /// 帧末结算：drain 命令束，连同当前监听者姿态与**整套混音音量**交给音频引擎。
     fn flush_audio(&mut self) {
         let commands = self.audio_port.drain();
         let listener = self.audio_port.listener;
-        let master_volume = self.audio_port.master_volume;
-        self.audio.apply(&commands, &listener, master_volume);
+        let mix = self.audio_port.mix;
+        self.audio.apply(&commands, &listener, &mix);
     }
 
     // -----------------------------------------------------------------------

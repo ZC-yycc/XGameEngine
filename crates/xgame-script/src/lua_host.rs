@@ -1391,6 +1391,15 @@ mod tests {
                 stop_sound(ctx, "Resources/Audio/Beep.wav")
                 set_listener(ctx, 5.0, 5.0, 5.0, 0.0, 0.0, -1.0)
                 set_master_volume(ctx, 0.3)
+                -- 音量总线：按名归组 + 改组音量 + 回读（未知总线必须是 nil）
+                play_sound_bus(ctx, "Resources/Audio/Song.wav", "bgm", 1.0, 1.0)
+                set_bus_volume(ctx, "bgm", 0.4)
+                if bus_volume(ctx, "bgm") == nil then
+                    error("bus_volume('bgm') 应返回数字")
+                end
+                if bus_volume(ctx, "nope") ~= nil then
+                    error("未知总线的 bus_volume 应返回 nil")
+                end
             end
             "#,
         );
@@ -1411,11 +1420,25 @@ mod tests {
         assert!(errors.is_empty(), "脚本调音频 API 不应报错: {errors:?}");
 
         assert!(
-            (port.master_volume - 0.3).abs() < 1e-6,
+            (port.master_volume() - 0.3).abs() < 1e-6,
             "主音量应落到 port 上"
         );
+        assert!(
+            (port.bus_volume(xgame_core::AudioBus::Bgm) - 0.4).abs() < 1e-6,
+            "总线音量应落到 port 上"
+        );
         let batch = port.drain();
-        assert_eq!(batch.len(), 3, "play×2 + stop 应产生三条命令: {batch:?}");
+        assert_eq!(
+            batch.len(),
+            4,
+            "play×2 + stop + play_sound_bus 应产生四条命令: {batch:?}"
+        );
+        assert!(
+            matches!(&batch[3], xgame_core::AudioCommand::Play(p)
+                if p.bus == xgame_core::AudioBus::Bgm && p.clip == "Resources/Audio/Song.wav"),
+            "第 4 条应是归入 Bgm 的 Play: {:?}",
+            batch[3]
+        );
     }
 
     #[test]
@@ -1973,7 +1996,7 @@ mod tests {
     ///
     /// 不靠运行期枚举全局表：Lua 基础库也有 `error` 等函数，而引擎恰好覆盖了
     /// 同名全局；用集合差分会把被覆盖的名字漏掉。直接读注册源码能精确拿到
-    /// 引擎自己注册的 169 个名字。
+    /// 引擎自己注册的 173 个名字。
     fn registered_global_names(source: &str) -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let mut rest = source;
@@ -2017,8 +2040,8 @@ mod tests {
         );
         assert_eq!(
             actual.len(),
-            169,
-            "注册名数量应为 169（2026-10-29 加存档 9 个：save_game / load_game / has_save / save_slots / save_set / save_get / save_remove / entity_save_set / entity_save_get）"
+            173,
+            "注册名数量应为 173（2026-10-29 加音量总线 4 个：play_sound_bus / play_sound_at_bus / set_bus_volume / bus_volume）"
         );
 
         let host = LuaHost::new();

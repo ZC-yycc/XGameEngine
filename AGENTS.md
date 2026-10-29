@@ -22,7 +22,7 @@ cargo test --workspace --all-targets         # 测试（要求全绿；858 条 +
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --export-schema --out schema.json  # 场景格式说明书（JSON；无 --out 打 stdout）
-cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（158 函数 / 6 钩子；无 --out 打 stdout）
+cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（173 函数 / 6 钩子；无 --out 打 stdout）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
 cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
@@ -151,7 +151,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 运行时读路径 / `search_paths` | 脚本与音频的读取只有 `core::resolve_read_path` 一处（先 `normalize_project_relative`，再直接命中，再按 `search_paths` 兜底）；`search_paths` 是**读的兜底根**（有序、条目自身也要合规、不合规运行时跳过且 `--check` 报），只影响读不影响写；`LuaHost` / `AudioEngine` 必须拿到**同一份**列表 | §六十九 |
 | 性能 / 物理 | `rapier3d` 必须开 `simd-stable`（稀疏动态 -36% / 密集接触 -6.5%）；代价是跨版本浮点不保证（同版本逐位确定性仍成立）；`World::update` 的五次全实体扫描**刻意不优化**（24 ns/实体，已在两万 FPS 上限）；`parallel` 特性不启用（打乱体间顺序） | §六十七 |
 | 插件 / 组件 | `Plugins/` 唯一目录；临时副本加载；旧 DLL 句柄永不卸载；参数键用注册名 | §四 |
-| 音频 | 脚本层不引 kira；监听者/主音量不进命令束；`follow` 是实体绑定；每渲染帧同步 | §五 |
+| 音频 | 脚本层不引 kira；监听者/主音量不进命令束；`follow` 是实体绑定；每渲染帧同步。总线是**固定三组**（`Sfx`/`Bgm`/`Voice`），有效音量 = 声源 × 总线（主音量在 kira 主轨）；**混音默认必须是 1.0**（0 = 全局静音，这个坑踩过一次）；总线音量变了才逐句柄重设音量 | §五、§七十一 |
 | 无头 / MCP | 不做第二份帧循环；退出码 2 不是工具失败；JSON 字段名是契约 | §六 |
 | PBR / 材质 | `intensity × π` 亮度标定；材质逐 draw；截图顺光；`MIN_ROUGHNESS = 0.04` | §七 |
 | 材质资产（`.mat`） | 资产是完整材质（替换 PBR，albedo 空 = 纯白）；优先级 模型 → 资产 → 覆盖；批次键必须带材质 | §十七 |

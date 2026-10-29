@@ -113,7 +113,9 @@ pub use asset::{
     AssetKind, AssetMeta, AssetMoveReport, AssetRecord, GuidConflict, ImportSettings, InvalidMeta,
     GUID_SCHEME, META_EXTENSION,
 };
-pub use audio::{AudioCommand, AudioPort, AudioSource, AudioStats, ListenerPose, PlaySound};
+pub use audio::{
+    AudioBus, AudioCommand, AudioMix, AudioPort, AudioSource, AudioStats, ListenerPose, PlaySound,
+};
 pub use camera::{look_rotation, Camera};
 pub use character::{
     CharacterContacts, CharacterController, CharacterState, MAX_CHARACTER_CONTACTS,

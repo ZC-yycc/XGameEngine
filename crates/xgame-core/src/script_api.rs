@@ -399,7 +399,7 @@ const fn api(
     }
 }
 
-/// 全部 169 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
+/// 全部 173 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
 const FUNCTIONS: &[ApiDef] = &[
     api(
         "transform",
@@ -1207,6 +1207,34 @@ const FUNCTIONS: &[ApiDef] = &[
     ),
     api(
         "audio",
+        "play_sound_bus",
+        "play_sound_bus(ctx, clip, bus, volume, pitch)",
+        "nil",
+        r#"播一次非空间化音效并归入音量总线（`bus`：`sfx` / `bgm` / `voice`；未知名字告警并忽略）"#,
+    ),
+    api(
+        "audio",
+        "play_sound_at_bus",
+        "play_sound_at_bus(ctx, clip, x, y, z, bus, volume)",
+        "nil",
+        r#"播一次空间化音效并归入音量总线（`bus`：`sfx` / `bgm` / `voice`）"#,
+    ),
+    api(
+        "audio",
+        "set_bus_volume",
+        "set_bus_volume(ctx, bus, v)",
+        "nil",
+        r#"设一条音量总线的音量（`0.0` 静音 ~ `1.0` 原音量），立即作用于该组**已在响**的声音"#,
+    ),
+    api(
+        "audio",
+        "bus_volume",
+        "bus_volume(ctx, bus)",
+        "number | nil",
+        r#"读一条音量总线的当前音量；总线名未知返回 `nil`"#,
+    ),
+    api(
+        "audio",
         "stop_sound",
         "stop_sound(ctx, clip)",
         "nil",
@@ -1579,7 +1607,7 @@ mod tests {
         let doc = script_api();
         assert_eq!(doc.format_version, SCRIPT_API_FORMAT_VERSION);
         assert_eq!(doc.categories.len(), 18);
-        assert_eq!(doc.function_count(), 169);
+        assert_eq!(doc.function_count(), 173);
         assert_eq!(doc.hooks.len(), 6);
         assert_eq!(doc.value_types.len(), 7);
         assert!(!doc.conventions.is_empty());
@@ -1622,7 +1650,7 @@ mod tests {
             );
             assert!(!function.params.is_empty(), "{} 没有参数", function.name);
         }
-        assert_eq!(names.len(), 169);
+        assert_eq!(names.len(), 173);
     }
 
     #[test]

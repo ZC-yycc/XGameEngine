@@ -40,7 +40,7 @@ use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::sound::PlaybackState;
 use kira::track::{SpatialTrackBuilder, SpatialTrackDistances, SpatialTrackHandle};
 use kira::{AudioManager, AudioManagerSettings, Capacities, Decibels, DefaultBackend, Tween};
-use xgame_core::{AudioCommand, AudioStats, EntityId, ListenerPose, PlaySound};
+use xgame_core::{AudioBus, AudioCommand, AudioMix, AudioStats, EntityId, ListenerPose, PlaySound};
 
 /// 默认后端的管理器类型（别名只为压低签名噪音）。
 type Manager = AudioManager<DefaultBackend>;
@@ -71,6 +71,10 @@ struct ActiveSound {
     entity: Option<EntityId>,
     /// 是否循环（循环声不 GC）。
     looping: bool,
+    /// 音量总线（改总线音量时按它重算句柄音量）。
+    bus: AudioBus,
+    /// 声源自带音量（未乘总线；总线音量变了要拿它重算）。
+    source_volume: f32,
     /// 起播时刻（无声模式 GC 用墙钟）。
     started: Instant,
     /// 折算后的时长（秒，已除以 pitch）。
@@ -102,6 +106,10 @@ pub struct AudioEngine {
     stopped: u64,
     /// 上一批命令数。
     last_batch: usize,
+    /// 当前混音（主 + 总线）。与 `last_mix` 比对，**变了才**逐句柄重设音量。
+    mix: AudioMix,
+    /// 上一批生效的混音（`mix` 变化检测用）。
+    last_mix: AudioMix,
 }
 
 impl AudioEngine {
@@ -160,6 +168,8 @@ impl AudioEngine {
             requests: 0,
             stopped: 0,
             last_batch: 0,
+            mix: AudioMix::default(),
+            last_mix: AudioMix::default(),
         }
     }
 
@@ -176,16 +186,16 @@ impl AudioEngine {
         matches!(self.playback, Playback::Device { .. })
     }
 
-    /// 结算一批命令：刷监听者与主音量 → 逐条执行 → GC。
-    pub fn apply(
-        &mut self,
-        commands: &[AudioCommand],
-        listener: &ListenerPose,
-        master_volume: f32,
-    ) {
+    /// 结算一批命令：刷监听者与混音音量 → 逐条执行 → GC。
+    ///
+    /// `mix` 是**整套**音量（主 + 三条总线）：主音量交给 kira 主轨，
+    /// 总线音量乘进每个声源的句柄音量（见 [`AudioMix::effective_volume`]）。
+    pub fn apply(&mut self, commands: &[AudioCommand], listener: &ListenerPose, mix: &AudioMix) {
         self.last_batch = commands.len();
         self.update_listener(listener);
-        self.update_master_volume(master_volume);
+        self.mix = *mix;
+        self.update_master_volume(mix.master);
+        self.update_bus_volumes();
         for command in commands {
             match command {
                 AudioCommand::Play(sound) => self.play(sound),
@@ -202,6 +212,10 @@ impl AudioEngine {
 
     /// 当前可观测状态。
     pub fn stats(&self) -> AudioStats {
+        let mut bus_active = [0usize; 3];
+        for sound in &self.sounds {
+            bus_active[sound.bus.index()] += 1;
+        }
         AudioStats {
             available: self.is_available(),
             requests: self.requests,
@@ -210,6 +224,7 @@ impl AudioEngine {
             cached_clips: self.clips.len(),
             failed_clips: self.failed.len(),
             last_batch: self.last_batch,
+            bus_active,
         }
     }
 
@@ -236,6 +251,29 @@ impl AudioEngine {
             .set_volume(linear_to_decibels(volume), Tween::default());
     }
 
+    /// 总线音量变了才逐句柄重设音量。
+    ///
+    /// 为什么不是"每个声音一条子轨"（kira 的 `TrackBuilder` 分组）：空间声的
+    /// 子轨挂在监听者下（`add_spatial_sub_track`），没有"再套一层总线轨"的
+    /// 入口；而逐句柄 `set_volume` 对两种声源是同一条路径。每帧无条件重设
+    /// 会把句柄上的音量动画（将来要做淡入淡出）顶掉 —— 所以**只在混音
+    /// 真的变了的那一帧**重设。
+    fn update_bus_volumes(&mut self) {
+        if self.mix == self.last_mix {
+            return;
+        }
+        self.last_mix = self.mix;
+        let Playback::Device { .. } = &self.playback else {
+            return;
+        };
+        for sound in &mut self.sounds {
+            let volume = self.mix.effective_volume(sound.bus, sound.source_volume);
+            if let Some(handle) = &mut sound.handle {
+                handle.set_volume(linear_to_decibels(volume), Tween::default());
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // 内部：播放
     // -----------------------------------------------------------------------
@@ -254,7 +292,10 @@ impl AudioEngine {
         // 缓存里那份保持"出厂设置"。注意不能克隆 `Arc` 本身去播：
         // kira 只认 `StaticSoundData` 自己的 `SoundData` 实现。
         let mut data = (*data).clone();
-        data.settings.volume = kira::Value::Fixed(linear_to_decibels(request.volume));
+        // 有效音量 = 声源 × 总线（主音量在 kira 主轨上，见 `AudioMix`）。
+        data.settings.volume = kira::Value::Fixed(linear_to_decibels(
+            self.mix.effective_volume(request.bus, request.volume),
+        ));
         data.settings.playback_rate =
             kira::Value::Fixed(kira::PlaybackRate(request.pitch.clamp(0.05, 16.0) as f64));
         if request.looping {
@@ -324,6 +365,8 @@ impl AudioEngine {
             clip: request.clip.clone(),
             entity: request.follow,
             looping: request.looping,
+            bus: request.bus,
+            source_volume: request.volume,
             started: Instant::now(),
             duration,
             handle,
@@ -507,9 +550,7 @@ mod tests {
             &[AudioCommand::Play(
                 PlaySound::new("Beep.wav").with_volume(0.5),
             )],
-            &pose,
-            1.0,
-        );
+            &pose, &AudioMix::default());
 
         let stats = engine.stats();
         assert_eq!(stats.requests, 1, "请求应在解码前计数");
@@ -522,18 +563,50 @@ mod tests {
         // 再播一次同 clip：缓存命中（cached_clips 仍为 1），活动变 2。
         engine.apply(
             &[AudioCommand::Play(PlaySound::new("Beep.wav"))],
-            &pose,
-            1.0,
-        );
+            &pose, &AudioMix::default());
         assert_eq!(engine.stats().active, 2);
         assert_eq!(engine.stats().cached_clips, 1);
 
         // StopClip：全部实例停止并计数。
-        engine.apply(&[AudioCommand::StopClip("Beep.wav".into())], &pose, 1.0);
+        engine.apply(&[AudioCommand::StopClip("Beep.wav".into())], &pose, &AudioMix::default());
         let stats = engine.stats();
         assert_eq!(stats.active, 0);
         assert_eq!(stats.stopped, 2);
         assert_eq!(stats.last_batch, 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 总线归组：`bus_active` 按组分开计数 —— 这是无声模式下唯一能看见
+    /// "这条声音进了哪个组"的读数（拿不到 kira 句柄，音量本身量不了）。
+    #[test]
+    fn sounds_are_counted_per_bus() {
+        let root = temp_root("bus");
+        write_test_wav(&root.join("Beep.wav"));
+        let mut engine = AudioEngine::silent(&root);
+        let pose = ListenerPose::default();
+
+        engine.apply(
+            &[
+                AudioCommand::Play(PlaySound::new("Beep.wav")), // 默认 Sfx
+                AudioCommand::Play(PlaySound::new("Beep.wav").with_bus(AudioBus::Bgm)),
+                AudioCommand::Play(PlaySound::new("Beep.wav").with_bus(AudioBus::Bgm)),
+                AudioCommand::Play(PlaySound::new("Beep.wav").with_bus(AudioBus::Voice)),
+            ],
+            &pose,
+            &AudioMix::default(),
+        );
+
+        let stats = engine.stats();
+        assert_eq!(stats.active, 4);
+        assert_eq!(
+            stats.bus_active,
+            [1, 2, 1],
+            "sfx=1 bgm=2 voice=1：分组计数必须与总线一致"
+        );
+
+        engine.apply(&[AudioCommand::StopAll], &pose, &AudioMix::default());
+        assert_eq!(engine.stats().bus_active, [0, 0, 0]);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -548,14 +621,10 @@ mod tests {
 
         engine.apply(
             &[AudioCommand::Play(PlaySound::new("Nope.wav"))],
-            &pose,
-            1.0,
-        );
+            &pose, &AudioMix::default());
         engine.apply(
             &[AudioCommand::Play(PlaySound::new("Nope.wav"))],
-            &pose,
-            1.0,
-        );
+            &pose, &AudioMix::default());
         let stats = engine.stats();
         assert_eq!(stats.requests, 2, "两次请求都要计数");
         assert_eq!(stats.failed_clips, 1, "同一 clip 只记一次失败");
@@ -580,9 +649,7 @@ mod tests {
                 AudioCommand::Play(PlaySound::new("Beep.wav").following(b)),
                 AudioCommand::Play(PlaySound::new("Beep.wav")), // 无主
             ],
-            &pose,
-            1.0,
-        );
+            &pose, &AudioMix::default());
         assert_eq!(engine.stats().active, 3);
 
         engine.apply(
@@ -590,16 +657,14 @@ mod tests {
                 entity: a,
                 position: [1.0, 2.0, 3.0],
             }],
-            &pose,
-            1.0,
-        );
+            &pose, &AudioMix::default());
 
-        engine.apply(&[AudioCommand::StopEntity(a)], &pose, 1.0);
+        engine.apply(&[AudioCommand::StopEntity(a)], &pose, &AudioMix::default());
         let stats = engine.stats();
         assert_eq!(stats.active, 2, "只停 A 的声音");
         assert_eq!(stats.stopped, 1);
 
-        engine.apply(&[AudioCommand::StopAll], &pose, 1.0);
+        engine.apply(&[AudioCommand::StopAll], &pose, &AudioMix::default());
         assert_eq!(engine.stats().active, 0);
 
         let _ = std::fs::remove_dir_all(&root);
@@ -627,7 +692,7 @@ mod tests {
 
         let mut engine = AudioEngine::silent(&root);
         let pose = ListenerPose::default();
-        engine.apply(&[AudioCommand::Play(PlaySound::new(&clip))], &pose, 1.0);
+        engine.apply(&[AudioCommand::Play(PlaySound::new(&clip))], &pose, &AudioMix::default());
 
         let stats = engine.stats();
         assert_eq!(stats.requests, 1, "请求照旧计数（在解码之前）");
@@ -651,9 +716,7 @@ mod tests {
         let pose = ListenerPose::default();
         engine.apply(
             &[AudioCommand::Play(PlaySound::new("Shared.wav"))],
-            &pose,
-            1.0,
-        );
+            &pose, &AudioMix::default());
 
         let stats = engine.stats();
         assert_eq!(stats.cached_clips, 1, "兜底目录里的 clip 应当被解码");

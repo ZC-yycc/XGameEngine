@@ -272,6 +272,12 @@ fn random_entity(rng: &mut Rng) -> Entity {
             spatial: rng.chance(0.5),
             min_distance: rng.f32(0.1, 3.0),
             max_distance: rng.f32(3.0, 60.0),
+            // 总线三种都要进过盘（默认组不落盘、非默认组落盘）。
+            bus: rng.pick(&[
+                xgame_core::AudioBus::Sfx,
+                xgame_core::AudioBus::Bgm,
+                xgame_core::AudioBus::Voice,
+            ]),
         });
     }
     if rng.chance(0.3) {

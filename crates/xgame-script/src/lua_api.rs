@@ -1348,6 +1348,37 @@ fn register_audio(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         )?,
     )?;
     globals.set(
+        "play_sound_bus",
+        lua.create_function(
+            |_, (ctx, clip, bus, volume, pitch): (LuaCtx, String, String, f32, f32)| {
+                ctx.game().play_sound_bus(&clip, &bus, volume, pitch);
+                Ok(())
+            },
+        )?,
+    )?;
+    globals.set(
+        "play_sound_at_bus",
+        lua.create_function(
+            |_, (ctx, clip, x, y, z, bus, volume): (LuaCtx, String, f32, f32, f32, String, f32)| {
+                ctx.game().play_sound_at_bus(&clip, x, y, z, &bus, volume);
+                Ok(())
+            },
+        )?,
+    )?;
+    globals.set(
+        "set_bus_volume",
+        lua.create_function(|_, (ctx, bus, volume): (LuaCtx, String, f32)| {
+            ctx.game().set_bus_volume(&bus, volume);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "bus_volume",
+        lua.create_function(|_, (ctx, bus): (LuaCtx, String)| {
+            Ok(ctx.game().bus_volume(&bus))
+        })?,
+    )?;
+    globals.set(
         "stop_sound",
         lua.create_function(|_, (ctx, clip): (LuaCtx, String)| {
             ctx.game().stop_sound(&clip);

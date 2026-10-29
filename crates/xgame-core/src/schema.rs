@@ -38,7 +38,7 @@ use crate::animation::{
     AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState, AnimTransition,
     Animator,
 };
-use crate::audio::AudioSource;
+use crate::audio::{AudioBus, AudioSource};
 use crate::camera::Camera;
 use crate::character::CharacterController;
 use crate::id::EntityId;
@@ -1246,6 +1246,21 @@ fn physics_types() -> Vec<TypeSchema> {
 
 fn audio_material_types() -> Vec<TypeSchema> {
     vec![
+        enum_schema(
+            "AudioBus",
+            "音量总线：声音按用途分组，一组一个音量旋钮。",
+            Some(default_of::<AudioBus>()),
+            Some(pretty(&AudioBus::Bgm)),
+            vec![
+                unit_variant("Sfx", "音效（默认组；省略时就是它）。"),
+                unit_variant("Bgm", "背景音乐。"),
+                unit_variant("Voice", "对白 / 语音。"),
+            ],
+            vec![
+                "只影响音量归组（set_bus_volume 一次调一整组），不改变空间化 / 停止语义。",
+                "脚本按名字选组（sfx / bgm / voice，大小写不敏感）；未知名字告警并忽略。",
+            ],
+        ),
         struct_schema(
             "AudioSource",
             "实体上的音频源组件：一个可循环、可空间化的音效声明。",
@@ -1275,6 +1290,12 @@ fn audio_material_types() -> Vec<TypeSchema> {
                 ),
                 def("min_distance", "f32", &1.0, "空间化：满音量的最近距离。"),
                 def("max_distance", "f32", &50.0, "空间化：听不见的最远距离。"),
+                def(
+                    "bus",
+                    "AudioBus",
+                    &AudioBus::default(),
+                    "音量总线（Sfx / Bgm / Voice）；Sfx 是默认组且不落盘。",
+                ),
             ],
             vec![
                 "Entity.audio 省略 = 静默实体；autoplay 默认 true 是刻意的（挂上音频源通常就是希望进场景就响）。",
@@ -1922,6 +1943,7 @@ mod tests {
             "PhysicsBody",
             "BodyKind",
             "CollisionShape",
+            "AudioBus",
             "AudioSource",
             "MaterialOverride",
             "MaterialAsset",
@@ -2335,6 +2357,7 @@ mod tests {
         let doc = scene_schema();
 
         assert_variants(&doc, "LightKind", &["Directional", "Point"]);
+        assert_variants(&doc, "AudioBus", &["Sfx", "Bgm", "Voice"]);
         assert_variants(&doc, "BodyKind", &["Static", "Dynamic", "Kinematic"]);
         assert_variants(
             &doc,
@@ -2659,6 +2682,7 @@ mod tests {
             spatial,
             min_distance,
             max_distance,
+            bus,
         } = AudioSource::default();
         assert_fields(
             &doc,
@@ -2672,6 +2696,7 @@ mod tests {
                 "spatial",
                 "min_distance",
                 "max_distance",
+                "bus",
             ],
         );
 

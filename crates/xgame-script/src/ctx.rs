@@ -409,6 +409,71 @@ impl GameCtx<'_> {
         }
     }
 
+    /// 按音量总线播放一次非空间化音效（`bus`: `sfx` / `bgm` / `voice`）。
+    ///
+    /// 与 [`Self::play_sound`] 唯一的区别是**归组**：总线只决定"调音量时
+    /// 跟哪一组走"，其余语义（命令进 `AudioPort`、帧末结算）完全一致。
+    pub fn play_sound_bus(&mut self, clip: &str, bus: &str, volume: f32, pitch: f32) {
+        let Some(bus) = self.resolve_bus(bus) else {
+            return;
+        };
+        if let Some(audio) = &mut self.audio {
+            audio.play(
+                PlaySound::new(clip)
+                    .with_volume(volume)
+                    .with_pitch(pitch)
+                    .with_bus(bus),
+            );
+        }
+    }
+
+    /// 按音量总线播放一次空间化音效（`bus`: `sfx` / `bgm` / `voice`）。
+    pub fn play_sound_at_bus(&mut self, clip: &str, x: f32, y: f32, z: f32, bus: &str, volume: f32) {
+        let Some(bus) = self.resolve_bus(bus) else {
+            return;
+        };
+        if let Some(audio) = &mut self.audio {
+            audio.play(
+                PlaySound::new(clip)
+                    .at([x, y, z])
+                    .with_volume(volume)
+                    .with_bus(bus),
+            );
+        }
+    }
+
+    /// 设置某条音量总线的音量（线性 `0.0..=1.0`）。
+    ///
+    /// 立即作用于该总线上**已在响**的声音（不是只对之后的播放生效）。
+    pub fn set_bus_volume(&mut self, bus: &str, volume: f32) {
+        let Some(bus) = self.resolve_bus(bus) else {
+            return;
+        };
+        if let Some(audio) = &mut self.audio {
+            audio.set_bus_volume(bus, volume);
+        }
+    }
+
+    /// 读某条音量总线的当前音量；未知名字返回 `None`（Lua 侧是 `nil`）。
+    pub fn bus_volume(&self, bus: &str) -> Option<f32> {
+        let bus = xgame_core::AudioBus::from_name(bus)?;
+        self.audio
+            .as_ref()
+            .map(|audio| audio.bus_volume(bus))
+    }
+
+    /// 按名字解析总线。未知名字**告警并放弃**（不悄悄归 Sfx）：
+    /// 悄悄改组等于"作者调了 BGM 音量却没反应"，是最难查的一类静默失败。
+    fn resolve_bus(&mut self, name: &str) -> Option<xgame_core::AudioBus> {
+        match xgame_core::AudioBus::from_name(name) {
+            Some(bus) => Some(bus),
+            None => {
+                self.warn(format!("未知音量总线 '{name}'（可选：sfx / bgm / voice）"));
+                None
+            }
+        }
+    }
+
     /// 停止某 clip 的全部实例。
     pub fn stop_sound(&mut self, clip: &str) {
         if let Some(audio) = &mut self.audio {
@@ -2205,7 +2270,7 @@ pub(crate) mod tests {
             ctx.stop_all_sounds();
         }
 
-        assert_eq!(port.master_volume, 1.0, "主音量应被 clamp");
+        assert_eq!(port.master_volume(), 1.0, "主音量应被 clamp");
         let batch = port.drain();
         // 注意：set_listener / set_master_volume 直接改 port 字段、不进命令束
         // —— 监听者与主音量是"当前状态"，不是"一次性事件"。
@@ -2253,6 +2318,75 @@ pub(crate) mod tests {
         ctx.play_sound("x.wav", 1.0, 1.0);
         ctx.stop_all_sounds();
         assert!(port2.is_empty(), "没接音频时应静默 no-op");
+    }
+
+    /// 音量总线：按名字归组、改组音量、未知名字告警并忽略。
+    #[test]
+    fn bus_api_groups_sounds_and_updates_volumes() {
+        let mut scene = Scene::new("bus");
+        scene.add_entity(Entity::new("speaker"));
+        let id = scene.entities[0].id;
+        let mut logs = Vec::new();
+        let mut commands = Vec::new();
+        let mut port = xgame_core::AudioPort::new();
+
+        {
+            let mut ctx = GameCtx {
+                save: None,
+                scene: &mut scene,
+                physics: None,
+                input: None,
+                audio: Some(&mut port),
+                logs: &mut logs,
+                commands: &mut commands,
+                source: "Bus",
+                scene_name: "",
+                scene_order: &[],
+                loader: None,
+                clock: None,
+                entity: id,
+                delta: 1.0 / 60.0,
+                time: 0.0,
+            };
+            ctx.play_sound_bus("Music.wav", "bgm", 1.0, 1.0);
+            ctx.play_sound_at_bus("Line.wav", 1.0, 2.0, 3.0, "Voice", 0.9);
+            ctx.play_sound_bus("Sfx.wav", "sfx", 1.0, 1.0);
+            ctx.set_bus_volume("music", 0.25); // 别名 → Bgm
+            ctx.play_sound_bus("Nope.wav", "banana", 1.0, 1.0); // 未知名：不播
+        }
+
+        let batch = port.drain();
+        assert_eq!(batch.len(), 3, "未知名字的那条不该产生命令");
+        let buses: Vec<_> = batch
+            .iter()
+            .map(|c| match c {
+                xgame_core::AudioCommand::Play(p) => p.bus,
+                other => panic!("应是 Play，得到 {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            buses,
+            [
+                xgame_core::AudioBus::Bgm,
+                xgame_core::AudioBus::Voice,
+                xgame_core::AudioBus::Sfx
+            ],
+            "总线名（含大小写）必须解析到对应组"
+        );
+        assert_eq!(
+            port.bus_volume(xgame_core::AudioBus::Bgm),
+            0.25,
+            "music 是 Bgm 的别名"
+        );
+        assert_eq!(port.bus_volume(xgame_core::AudioBus::Sfx), 1.0);
+        assert_eq!(port.bus_volume(xgame_core::AudioBus::Voice), 1.0);
+
+        // 未知名字：一条 warn，音量不动。
+        assert!(
+            logs.iter().any(|l| l.message.contains("banana")),
+            "未知名字必须告警：{:?}",
+            logs
+        );
     }
 
     // -----------------------------------------------------------------------

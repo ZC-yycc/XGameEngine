@@ -1769,6 +1769,30 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         touched = true;
                     }
                 });
+                row(ui, "Bus", |ui| {
+                    let mut bus = audio.bus;
+                    egui::ComboBox::from_id_salt("inspector_audio_bus")
+                        .selected_text(bus.name())
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for candidate in xgame_core::AudioBus::ALL {
+                                if ui
+                                    .selectable_label(bus == candidate, candidate.name())
+                                    .clicked()
+                                {
+                                    bus = candidate;
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "音量总线（BGM / SFX / Voice 分组）：\n组音量由脚本 set_bus_volume 一次调一整组",
+                        );
+                    if bus != audio.bus {
+                        audio.bus = bus;
+                        touched = true;
+                    }
+                });
                 row(ui, "Pitch", |ui| {
                     let resp = ui.add_sized(
                         egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),

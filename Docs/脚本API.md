@@ -4,7 +4,7 @@
 > 脚本放在项目的 `Scripts/` 目录（`.lua`），实体用**项目相对路径**引用它。
 >
 > **机器可读清单**：`xgame-editor --export-script-api [--out api.json]`，或 MCP
-> `script_api_read`。本文件的 155 个函数名与清单由测试钉住；参数 / 返回值 /
+> `script_api_read`。本文件的 173 个函数名与清单由测试钉住；参数 / 返回值 /
 > 全局约定以清单为准，本文件继续承担叙述、示例与易错点说明。
 
 ---
@@ -465,6 +465,10 @@ end
 | `stop_all_sounds(ctx)` | 停止所有声音（脚本播的 + 组件 autoplay 的） |
 | `set_listener(ctx, x, y, z, fx, fy, fz)` | 设置听者位置与朝向（`fx/fy/fz` 是朝前向量） |
 | `set_master_volume(ctx, v)` | 主音量（`0.0` 静音，`1.0` 原音量） |
+| `play_sound_bus(ctx, clip, bus, volume, pitch)` | 播一次非空间化音效并归入音量总线（`bus`：`sfx` / `bgm` / `voice`） |
+| `play_sound_at_bus(ctx, clip, x, y, z, bus, volume)` | 播一次空间化音效并归入音量总线 |
+| `set_bus_volume(ctx, bus, v)` | 设一条音量总线的音量（`0.0` 静音 ~ `1.0` 原音量），立即作用于该组**已在响**的声音 |
+| `bus_volume(ctx, bus)` | 读一条音量总线的当前音量；总线名未知返回 `nil` |
 
 `clip` 是**项目相对路径**（如 `"Resources/Audio/Beep.wav"`）。`volume` / `pitch`
 都是 `1.0` 为基准（pitch 同时改速度与音高）。
@@ -477,6 +481,12 @@ function update(ctx)
     end
 end
 ```
+
+**音量总线**：声音按用途分三组（`sfx` 音效 / `bgm` 背景音乐 / `voice` 对白），
+一组一个旋钮。`set_bus_volume` 立即作用于该组**已在响**的声音（游戏设置菜单里
+"音乐音量"滑条要的就是这个）；主音量是所有组之上再乘一次。`AudioSource` 组件
+在 Inspector 里也能选总线（缺省 `sfx`）。总线名大小写不敏感，`music` 是 `bgm`
+的别名；未知名字会告警并**忽略**（不会悄悄归到 `sfx`）。
 
 > 没有音频设备时这些调用照样安全（引擎无声降级、照常受理），脚本不必探测。
 > 听者默认跟随编辑器相机；纯脚本驱动的听者一般用在顶视角 / 固定机位玩法。
