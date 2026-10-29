@@ -383,19 +383,30 @@ impl EditorApp {
             // MSAA 的采样数由设备能力决定：不支持的格式上硬开 4× 会让管线创建失败。
             // **按 HDR 格式问** —— 场景 pass 画进 `Rgba16Float`（见 `xgame_render::postfx`），
             // 采样数是格式相关的量，拿交换链格式问出来的答案在 HDR 附件上不一定成立。
-            let sample_count = xgame_render::scene_pipeline::supported_sample_count(
+            let adapter_msaa = xgame_render::scene_pipeline::supported_sample_count(
                 &gpu.adapter,
                 xgame_render::postfx::HDR_FORMAT,
             );
-            log::info!("视口渲染：MSAA x{sample_count}");
+            // 质量档位（`project.ron` 的 `quality` 节）：MSAA / 阴影默认分辨率 /
+            // LOD 缩放。没配这一节 = 适配器最大采样（与引入档位之前一致）。
+            let quality = state.project.manifest().quality.resolve(adapter_msaa);
+            log::info!(
+                "视口渲染：MSAA x{}（阴影 {}、LOD 缩放 {:.2}）",
+                quality.msaa,
+                quality.shadow_resolution,
+                quality.lod_scale
+            );
             state.scene_renderer = Some(scene_renderer::SceneRenderer::new(
                 &gpu.device,
                 &gpu.queue,
                 gpu.egui_renderer.clone(),
                 gpu.target_format,
                 project_root,
-                sample_count,
+                quality.msaa,
             ));
+            if let Some(renderer) = state.scene_renderer.as_mut() {
+                renderer.set_quality(quality);
+            }
             // 渲染共享材质资产要项目句柄（`.mat` / 贴图 / 导入设置）。
             if let Some(renderer) = state.scene_renderer.as_mut() {
                 renderer.set_project(Some(state.project.clone()));

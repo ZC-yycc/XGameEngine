@@ -192,6 +192,9 @@ pub struct ScreenshotRenderer {
     model_cache: HashMap<String, GltfMesh>,
     /// 磁盘模型的解析基准（`builtin://` 用不到）。
     project_root: PathBuf,
+    /// 质量档位的解析结果（LOD 缩放在渲染时乘进 `render.lod_bias`）。
+    /// 无项目 / 没配 `quality` 节时 = "今天的行为"。
+    quality: xgame_core::QualitySettings,
 }
 
 impl ScreenshotRenderer {
@@ -252,9 +255,16 @@ impl ScreenshotRenderer {
         .context("创建 GPU 设备失败")?;
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let sample_count = forced_sample_count
-            .unwrap_or_else(|| supported_sample_count(&adapter, HDR_FORMAT))
-            .max(1);
+        // 质量档位：有项目就按它的 `quality` 节取档（测试可强制采样数覆盖）。
+        // 无项目（临时目录 / 裸资源）＝ "没配 quality 节"的行为。
+        let adapter_msaa = supported_sample_count(&adapter, HDR_FORMAT);
+        // 打开一次项目：既取质量档位，又绑给管线（材质资产要用）。
+        let project = xgame_core::ProjectHandle::open(project_root).ok();
+        let quality = project
+            .as_ref()
+            .map(|project| project.manifest().quality.resolve(adapter_msaa))
+            .unwrap_or_else(|| xgame_core::QualitySettings::reference(adapter_msaa));
+        let sample_count = forced_sample_count.unwrap_or(quality.msaa).max(1);
         log::info!(
             "截图渲染：{}（MSAA x{sample_count}）{width}x{height}",
             adapter.get_info().name
@@ -280,10 +290,11 @@ impl ScreenshotRenderer {
 
         let hdr = HdrTargets::new(&device, "screenshot", width, height, sample_count);
         let mut pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        pipeline.set_default_shadow_resolution(quality.shadow_resolution);
         // 有 `project.ron` 才绑定项目：截图也走共享材质资产这条正门。
         // 临时目录 / 单测里的裸资源没有项目清单，绑定失败就退回"只有模型材质"，
         // 不影响任何既有测试。
-        if let Ok(project) = xgame_core::ProjectHandle::open(project_root) {
+        if let Some(project) = project {
             pipeline.set_project(Some(project));
         }
         let postfx = PostFx::new(&device, format);
@@ -303,7 +314,15 @@ impl ScreenshotRenderer {
             ui,
             model_cache: HashMap::new(),
             project_root: project_root.to_path_buf(),
+            quality,
         })
+    }
+
+    /// 覆盖质量档位（测试用：无头截图要能复现"低配长什么样"）。
+    pub fn set_quality(&mut self, quality: xgame_core::QualitySettings) {
+        self.quality = quality;
+        self.pipeline
+            .set_default_shadow_resolution(quality.shadow_resolution);
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -468,7 +487,8 @@ impl ScreenshotRenderer {
             &camera.eye,
             lighting,
             settings.sky,
-            settings.lod_bias,
+            // LOD 最终偏置 = 作者的内容旋钮 × 档位缩放（见 `xgame_core::quality`）。
+            settings.lod_bias * self.quality.lod_scale,
             particles,
         );
         // TAA resolve（开着时）—— 必须在后处理**之前**：曝光 / 色调映射要作用在

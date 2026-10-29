@@ -439,6 +439,11 @@ pub struct Project {
     /// 不是"这张地图"的属性。
     #[serde(default)]
     pub render: RenderConfig,
+    /// 质量档位（低 / 中 / 高 + 显式覆盖）。**全空 = 不存在**（不落盘）——
+    /// 老项目没有这一节时行为与引入档位之前逐位一致（MSAA 取适配器最大、
+    /// 阴影默认 2048、LOD 缩放 1.0）。语义见 [`crate::quality`]。
+    #[serde(default, skip_serializing_if = "crate::quality::QualityConfig::is_empty")]
+    pub quality: crate::quality::QualityConfig,
     /// 构建 / 发布设置（版本号 + 有序关卡清单）。
     ///
     /// 同样是后加字段、同样 `#[serde(default)]`：老清单没有这一节，
@@ -550,6 +555,7 @@ impl Default for Project {
             runtime: RuntimeConfig::default(),
             layers: Layers::default(),
             render: RenderConfig::default(),
+            quality: crate::quality::QualityConfig::default(),
             build: BuildConfig::default(),
         }
     }
@@ -2818,6 +2824,37 @@ mod tests {
         assert_eq!(off, crate::config::ToneMapMode::Off);
         assert_eq!(ron::to_string(&aces).unwrap(), "Aces");
         assert_eq!(ron::to_string(&off).unwrap(), "Off");
+    }
+
+    /// 老清单没有 `quality` 节 → "今天的行为"（适配器最大采样 / 2048 / 1.0）。
+    #[test]
+    fn old_manifest_without_quality_uses_pre_quality_behavior() {
+        let ron = r#"(format_version: 1, name: "Old")"#;
+        let project: Project = ron::from_str(ron).expect("老清单应当能反序列化");
+        assert!(project.quality.is_empty(), "没有 quality 节 = 不存在");
+        let settings = project.quality.resolve(4);
+        assert_eq!(settings.msaa, 4);
+        assert_eq!(settings.shadow_resolution, crate::DEFAULT_SHADOW_RESOLUTION);
+        assert_eq!(settings.lod_scale, 1.0);
+    }
+
+    /// `quality` 节写盘 → 读回一致；全空时**不写这一节**（老项目逐字节不变）。
+    #[test]
+    fn quality_survives_manifest_roundtrip() {
+        let mut project = Project::new("Quality");
+        let text = ron::to_string(&project).expect("序列化");
+        assert!(!text.contains("quality"), "全空的 quality 节不该落盘: {text}");
+
+        project.quality = crate::quality::QualityConfig {
+            preset: Some(crate::quality::QualityPreset::Low),
+            msaa: None,
+            shadow_resolution: Some(2048),
+            lod_scale: None,
+        };
+        let text = ron::to_string(&project).expect("序列化");
+        assert!(text.contains("quality"), "配了就必须落盘");
+        let back: Project = ron::from_str(&text).expect("反序列化");
+        assert_eq!(back.quality, project.quality);
     }
 
     // -- 发布清单（build 节）------------------------------------------------

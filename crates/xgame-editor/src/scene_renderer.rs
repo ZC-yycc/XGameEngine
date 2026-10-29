@@ -146,6 +146,9 @@ pub struct SceneRenderer {
     /// 视口面板关掉后这个时间会自然过期 → `viewport_animating` 停止请求帧，
     /// 免得"视口藏着一只在播动画的狐狸"把编辑器拖成满速空转。
     viewport_seen: Option<std::time::Instant>,
+    /// 质量档位的解析结果（阴影默认分辨率 + LOD 缩放；MSAA 在构造期已定）。
+    /// 默认 = "没配 quality 节"的行为，见 [`xgame_core::quality`]。
+    quality: xgame_core::QualitySettings,
 }
 
 impl SceneRenderer {
@@ -193,7 +196,21 @@ impl SceneRenderer {
             load_failed: HashSet::new(),
             anim_driver: AnimationDriver::new(),
             viewport_seen: None,
+            quality: xgame_core::QualitySettings {
+                msaa: sample_count.max(1),
+                shadow_resolution: xgame_core::DEFAULT_SHADOW_RESOLUTION,
+                lod_scale: 1.0,
+            },
         }
+    }
+
+    /// 应用质量档位（阴影默认分辨率 + LOD 缩放）。
+    ///
+    /// MSAA 在构造期已定（管线创建参数），这里只管运行期可调的两项。
+    pub fn set_quality(&mut self, quality: xgame_core::QualitySettings) {
+        self.quality = quality;
+        self.pipeline
+            .set_default_shadow_resolution(quality.shadow_resolution);
     }
 
     // -- Viewport management --
@@ -923,7 +940,8 @@ impl SceneRenderer {
             camera_pos,
             lighting,
             settings.sky,
-            settings.lod_bias,
+            // LOD 最终偏置 = 作者的内容旋钮 × 档位缩放（见 `xgame_core::quality`）。
+            settings.lod_bias * self.quality.lod_scale,
             particles,
         );
 

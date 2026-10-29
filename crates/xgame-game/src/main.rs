@@ -116,6 +116,8 @@ struct GameApp {
     /// `hdr` 的**代数**：resize 重建时 +1，作为 `postfx` 绑定组的缓存键
     /// （纹理视图没有稳定身份，不能按指针判等）。
     target_gen: u64,
+    /// 质量档位的解析结果（LOD 缩放在渲染时乘进 `render.lod_bias`）。
+    quality: QualitySettings,
     /// 主 pass 的采样数（1 = 未开 MSAA，见 `supported_sample_count`）。
     sample_count: u32,
     model_cache: HashMap<String, GltfMesh>,
@@ -180,12 +182,21 @@ impl GameApp {
 
         // 采样数由设备能力决定：不支持的格式上硬开 4× 会让管线创建失败。
         // **按 HDR 格式问** —— 场景 pass 画进 `Rgba16Float`，采样数是格式相关的量。
-        let sample_count = supported_sample_count(&adapter, HDR_FORMAT);
-        log::info!("渲染：HDR（{HDR_FORMAT:?}）+ ACES 色调映射，MSAA x{sample_count}");
+        // 质量档位（`project.ron` 的 `quality` 节）在适配器能力内取档；
+        // 没配这一节 = 适配器最大（与引入档位之前一致）。
+        let adapter_msaa = supported_sample_count(&adapter, HDR_FORMAT);
+        let quality = project.manifest().quality.resolve(adapter_msaa);
+        let sample_count = quality.msaa;
+        log::info!(
+            "渲染：HDR（{HDR_FORMAT:?}）+ ACES 色调映射，MSAA x{sample_count}（阴影 {}、LOD 缩放 {:.2}）",
+            quality.shadow_resolution,
+            quality.lod_scale
+        );
 
         let (width, height) = (config.width.max(1), config.height.max(1));
         let hdr = HdrTargets::new(&device, "game", width, height, sample_count);
         let mut pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        pipeline.set_default_shadow_resolution(quality.shadow_resolution);
         // 共享材质资产（`.mat`）需要项目句柄才能把项目相对路径解析成绝对路径。
         // 独立游戏只在启动时绑定一次；资产热重载是编辑器的能力。
         pipeline.set_project(Some(project.clone()));
@@ -286,6 +297,7 @@ impl GameApp {
             ui,
             target_gen: 0,
             sample_count,
+            quality,
             model_cache: HashMap::new(),
             anim_driver: AnimationDriver::new(),
         }
@@ -494,7 +506,8 @@ impl GameApp {
             &eye,
             SceneLighting::new(scene.ambient, &scene.lights),
             settings.sky,
-            settings.lod_bias,
+            // LOD 最终偏置 = 作者的内容旋钮 × 档位缩放（见 `xgame_core::quality`）。
+            settings.lod_bias * self.quality.lod_scale,
             // 粒子：与编辑器视口同一条 pass（见 `ScenePipeline::render`）。
             self.world.particle_quads(),
         );

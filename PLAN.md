@@ -7136,3 +7136,69 @@ rapier 的求解器 / 岛管理走 `wide` 的 SIMD 实现（stable Rust 可用�
 - `cargo test --workspace --all-targets -- --test-threads=2`：**1081 passed /
   0 failed / 12 ignored**，clippy **0 告警**；
 - `--check` 四个示例项目退出 0（`AudioSource.bus` 默认不落盘，老工程行为不变）。
+
+## 九十一、质量档位：低 / 中 / 高，只管"机器向"三颗螺丝（2026-10-29）
+
+差距分析 P2 #23 的原话是「MSAA 取适配器档位、阴影分辨率按灯设置，无低 / 中 /
+高档位预设」。这一轮把这组"机器向"的取舍收成 `project.ron` 的一个 `quality` 节。
+红线见 [`Docs/决策记录.md`](Docs/决策记录.md) §七十二。
+
+### 一、范围：三颗螺丝，不碰画面风格
+
+| 旋钮 | 低 | 中（= 今天） | 高 | 没配 `quality` 节 |
+|---|---|---|---|---|
+| MSAA | 1× | 4× | 4× | 适配器最大 |
+| 阴影贴图默认边长 | 1024 | 2048 | 4096 | 2048 |
+| LOD 阈值缩放 | 0.6 | 1.0 | 1.25 | 1.0 |
+
+曝光 / 色调映射 / 天空 / Bloom / FXAA / TAA 是**内容**，不由档位改写 ——
+判据是"改档位不得改变项目长什么样，只改变花多少 GPU 预算"。
+
+### 二、踩到并绕开的一个坑：MSAA 2×
+
+第一版档位表写的是 1× / 2× / 4×，基准一跑就崩：`Rgba16Float` 上开 2×
+（RTX 2060）→ `Sample count 2 is not supported by format`，**管线创建直接失败**。
+wgpu 对可渲染格式只保证 1× 与 4×；2× / 8× 要适配器私有特性。于是
+`snap_msaa` 只在 {1, 4} 里取，中档定为 4×（= 今天的行为），高档靠阴影精度
+拉开差距。这条已经写进决策记录 §七十二，别再把 2× 写回档位表。
+
+### 三、实现落点
+
+- **core**（纯函数）：`quality.rs` —— `QualityPreset` / `QualityConfig` /
+  `QualitySettings::resolve(adapter_msaa)`；`Project.quality` 全空不落盘；
+  `DEFAULT_SHADOW_RESOLUTION`（2048）只有 core 一份，render re-export。
+- **渲染**：`ScenePipeline::set_default_shadow_resolution`（只改"灯没写时"的
+  默认值，灯写了 `shadow_resolution` 仍以灯为准）。
+- **三宿主同源**：编辑器视口 / 独立游戏 / 无头截图都走同一个 `resolve`；
+  MSAA 在管线创建期定（运行期换档要重建管线，不做）；LOD 最终阈值 =
+  `render.lod_bias × quality.lod_scale`。
+- 门面 `xgame::prelude` 导出三个质量类型（插件 / 游戏侧可读档位）。
+
+### 四、验证
+
+- **红灯**：`resolve` 忽略档位（退回 `reference`）→ `presets_map_to_their_table`
+  与 `explicit_overrides_win_and_are_clamped` 红（落盘、名字解析照常绿）。
+- 新增 7 条测试：core 5（档位表 / 覆盖与夹取 / 落盘可选 / 名字解析 /
+  reference 行为）、project 2（老清单无 `quality` 节 = 今天的行为；`quality`
+  节往返 + 全空不落盘）。
+- 新增基准 `quality_cost`（默认 `#[ignore]`，2000 方块 + 4 级 CSM，三档交替
+  8 轮）：**低 102.2 µs / 中 156.1 µs / 高 223.2 µs**（场景段 GPU，区间不重叠）；
+  后处理段三档同为 25 µs。
+- 全量 **1088 passed / 0 failed / 13 ignored**，clippy 0 告警（见"验证记录"）。
+
+### 五、刻意不做
+
+- **运行期换档**：MSAA 是管线创建参数，换档要重建管线 / 深度图；设置菜单要的
+  "立即生效"先不做（改档 = 重启生效，Unity 的 MSAA 同款）；
+- **档位改 TAA / FXAA / Bloom**：那是画面风格（作者决策），不是机器预算；
+- **逐灯阴影距离 / 级联数进档位**：`MAX_SHADOW_DISTANCE` 与 `SHADOW_CASCADES`
+  是渲染参数，进档位前要先有"阴影距离"这个内容旋钮；
+- **编辑器档位下拉**：清单手改 + 启动生效即可，UI 等有"设置面板"时一起做。
+
+### 验证记录
+
+- `cargo test --workspace --all-targets -- --test-threads=2`：**1088 passed /
+  0 failed / 13 ignored**，clippy **0 告警**；
+- `quality_cost`（release）：低 / 中 / 高 = 102.2 / 156.1 / 223.2 µs（场景段 GPU），
+  三档各 8 轮区间不重叠（99.3–102.2 / 156.1–156.9 / 218.8–224.6）；
+- `--check` 四个示例项目退出 0（没配 `quality` 节，行为不变）。

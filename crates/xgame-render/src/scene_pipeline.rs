@@ -178,7 +178,7 @@ const MIN_BONE_SLOTS: u32 = 8;
 ///
 /// 2048² 是"看起来干净"和"不吃太多显存"之间一个稳妥的折中：一张
 /// Depth32Float 的 2048² 约 16 MB，单次全场景深度重绘也远轻于主 pass。
-pub const DEFAULT_SHADOW_RESOLUTION: u32 = 2048;
+pub const DEFAULT_SHADOW_RESOLUTION: u32 = xgame_core::DEFAULT_SHADOW_RESOLUTION;
 
 /// 首选的多重采样数（MSAA）。
 ///
@@ -1399,6 +1399,9 @@ pub struct ScenePipeline {
 
     /// 视锥剔除开关（默认开）。见 [`ScenePipeline::set_frustum_culling`]。
     frustum_culling: bool,
+    /// 灯没写 `shadow_resolution` 时用的阴影贴图边长（质量档位决定，
+    /// 见 [`xgame_core::quality`]）。默认 [`DEFAULT_SHADOW_RESOLUTION`]。
+    default_shadow_resolution: u32,
 
     /// 上一帧的绘制统计（见 [`FrameStats`]）。合批与剔除是否生效的读数口。
     stats: FrameStats,
@@ -1726,6 +1729,7 @@ impl ScenePipeline {
             shadow_pending: Vec::new(),
             shadow_batch_index: HashMap::new(),
             frustum_culling: true,
+            default_shadow_resolution: DEFAULT_SHADOW_RESOLUTION,
             stats: FrameStats::default(),
             particles: crate::particles::ParticleRenderer::new(device, format, sample_count),
         }
@@ -1748,6 +1752,22 @@ impl ScenePipeline {
     /// 靠版本对比猜。
     pub fn set_frustum_culling(&mut self, enabled: bool) {
         self.frustum_culling = enabled;
+    }
+
+    /// 设置"灯没写 `shadow_resolution` 时"的阴影贴图边长（质量档位入口）。
+    ///
+    /// 只改**默认值**：灯自己写了分辨率时仍以灯为准（作者逐灯精调优先于档位）。
+    /// 边长夹到 `256..=8192`；下一次带阴影的帧会按它重建深度图。
+    pub fn set_default_shadow_resolution(&mut self, resolution: u32) {
+        self.default_shadow_resolution = resolution.clamp(
+            xgame_core::quality::MIN_SHADOW_RESOLUTION,
+            xgame_core::quality::MAX_SHADOW_RESOLUTION,
+        );
+    }
+
+    /// 当前的阴影贴图默认边长（测试 / 诊断用）。
+    pub fn default_shadow_resolution(&self) -> u32 {
+        self.default_shadow_resolution
     }
 
     /// 当前是否开了视锥剔除。
@@ -2252,7 +2272,7 @@ impl ScenePipeline {
         // 算每层纹素的世界尺寸（进而决定吸附步长），顺序反了就得重拟合一遍。
         let shadow_resolution = match shadow_slot {
             Some(slot) => match packed[slot].shadow_resolution {
-                0 => DEFAULT_SHADOW_RESOLUTION,
+                0 => self.default_shadow_resolution,
                 r => r.max(1),
             },
             None => self.shadow_resolution,

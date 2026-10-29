@@ -70,6 +70,7 @@ mod loader;
 pub mod material;
 pub mod particle;
 pub mod physics;
+pub mod quality;
 pub mod ray;
 pub mod savegame;
 mod time;
@@ -130,6 +131,7 @@ pub use loader::SceneLoader;
 pub use material::{MaterialAsset, MaterialOverride, MATERIAL_EXTENSION};
 pub use particle::{EmissionShape, ParticleBlend, ParticleEmitter, MAX_PARTICLES_LIMIT};
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
+pub use quality::{QualityConfig, QualityPreset, QualitySettings, DEFAULT_SHADOW_RESOLUTION};
 pub use ray::{Ray, RayHit};
 pub use savegame::{
     delete_save, list_saves, read_save, save_exists, save_slot_path, save_slot_relative, write_save,
