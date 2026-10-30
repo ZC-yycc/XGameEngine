@@ -553,13 +553,15 @@ fn build_commands(state: &EditorState) -> Vec<Command> {
             true,
         ),
         cmd("视图", "切换网格", "grid", "", PaletteAction::ToggleGrid, false),
+        // `edit_only = true`：正交只影响编辑态视口（Play 态用游戏相机），
+        // Play 里点它什么都不会变 —— 那就干脆不让点。
         cmd(
             "视图",
             "切换正交投影",
             "ortho projection",
             "5",
             PaletteAction::ToggleOrtho,
-            false,
+            true,
         ),
         cmd(
             "视图",
