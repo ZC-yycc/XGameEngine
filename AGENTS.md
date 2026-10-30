@@ -22,7 +22,7 @@ cargo test --workspace --all-targets         # 测试（要求全绿；858 条 +
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --export-schema --out schema.json  # 场景格式说明书（JSON；无 --out 打 stdout）
-cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（173 函数 / 6 钩子；无 --out 打 stdout）
+cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（176 函数 / 6 钩子；无 --out 打 stdout）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
 cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
@@ -109,9 +109,9 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - **运行态（Play/Pause）的界面语义**：`scene_dirty_memo` 恒为 false（运行时副本不算
   改动）、`save_scene` / `save_scene_as` 硬拒绝、Pause/Stop 用 `add_enabled_ui` 禁用。
   任何"只在编辑态有意义"的新按钮都要照这三条办。
-- **`--ui-shot` 的九个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
+- **`--ui-shot` 的十个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
   `--ui-profiler` / `--ui-preferences` / `--ui-command` / `--ui-restore-prefs` /
-  `--ui-autosave-recover` / `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
+  `--ui-autosave-recover` / `--ui-ortho` / `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
   `rowscan.py`（按行扫颜色分段量像素）。**用 `--ui-size` 至少扫 1280 / 1440 / 1920
   三档** —— 窄窗口的溢出只有跑过才看得见。截图默认**只读**：不写 `editor.ron`、
   不写 `.autosave/`、不弹恢复框（磁盘残留会让像素不确定）。

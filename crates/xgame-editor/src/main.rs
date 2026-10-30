@@ -111,6 +111,12 @@ struct EditorSession {
     preferences_window: panels::preferences::PreferencesWindow,
     /// 命令面板（Ctrl+Shift+P / F1）：模糊搜索 + 执行编辑器动作。
     command_palette: panels::command_palette::CommandPalette,
+    /// 手柄后端（Play 态每帧排空事件）。
+    ///
+    /// 放在**会话**里而不是 `EditorApp`：它只在有项目（能进 Play）时才有意义，
+    /// 而且 `update` 里已经可变借用了 `session`，另开一个 `self.` 字段会打架。
+    /// `None` 表示这台机器上没有可用的手柄后端（初始化失败只记一条 warn）。
+    gamepads: Option<xgame_input::GamepadHub>,
     /// 上一次发给操作系统的窗口标题。
     ///
     /// `ViewportCommand::Title` 最终落到 winit 的 `SetWindowText`，是一条真实的
@@ -204,6 +210,11 @@ struct UiShot {
     /// 自检回路 —— 与 `--ui-settings` 同理，给开关才能截到它。
     /// 打开时**不**聚焦查询框：聚焦 TextEdit 的光标按墙钟闪烁，逐字节不可复现。
     open_command: bool,
+    /// 抓图前把视口切到**正交投影**（`--ui-ortho`）。
+    ///
+    /// 正交是渲染路径上的开关，肉眼验证要能截出图来；同时它让
+    /// "正交下拾取 / gizmo 还准不准"有一个可复现的取证点。
+    ortho: bool,
     /// 抓图时**保留**「发现自动保存」恢复框。
     ///
     /// 默认**忽略**恢复框：它取决于磁盘上有没有 `.autosave/` 残留 —— 那是开发机
@@ -365,6 +376,14 @@ impl EditorApp {
             }
         }
 
+        // `--ui-ortho`：把视口相机切成正交（对齐轴视角，免得默认斜角看不出区别）。
+        if app.ui_shot.as_ref().map(|s| s.ortho).unwrap_or(false) {
+            if let Some(session) = app.session.as_mut() {
+                session.state.editor_camera.ortho = true;
+                session.state.editor_camera.set_axis_view(crate::state::AxisView::Front);
+            }
+        }
+
         // `--ui-command`：把命令面板拉开。不聚焦查询框 —— 聚焦 TextEdit 的
         // 光标按墙钟闪烁，会让"同一份代码截出的图逐字节不变"这条验收失效。
         if app.ui_shot.as_ref().map(|s| s.open_command).unwrap_or(false) {
@@ -433,6 +452,9 @@ impl EditorApp {
         self.session = Some(EditorSession {
             // 存过就恢复，没存过 / 校验不过就回退出厂布局（见 prefs 模块文档）。
             tree: self.preferences.layout_for_startup(),
+            gamepads: xgame_input::GamepadHub::new()
+                .map_err(|e| log::warn!("{e}（手柄不可用，键鼠照常）"))
+                .ok(),
             state,
             preferences_window: panels::preferences::PreferencesWindow::new(),
             command_palette: panels::command_palette::CommandPalette::new(),
@@ -680,6 +702,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut profiler = false;
     let mut open_preferences = false;
     let mut open_command = false;
+    let mut ortho = false;
     let mut recover_autosave = false;
     let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
 
@@ -733,6 +756,9 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
             "--ui-command" => {
                 open_command = true;
             }
+            "--ui-ortho" => {
+                ortho = true;
+            }
             "--ui-restore-prefs" => {
                 out.restore_prefs = true;
             }
@@ -775,6 +801,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         profiler,
         open_preferences,
         open_command,
+        ortho,
         recover_autosave,
         size,
     });
@@ -1099,6 +1126,11 @@ fn editor_ui(
         let ui_viewport = session.state.viewport_pixel_size;
 
         if let Some(runtime) = session.state.game_runtime.as_mut() {
+            // 手柄先于键鼠灌入：两者写的是同一份 `InputState` 的不同部分
+            // （手柄走 `handle_pad_*`），顺序只影响日志可读性。
+            if let Some(hub) = session.gamepads.as_mut() {
+                hub.poll(runtime.input_mut().state_mut());
+            }
             input_bridge::sync(ctx, runtime.input_mut());
             runtime.set_ui_viewport(ui_viewport);
             runtime.set_ui_pointer(ui_pointer);
@@ -1781,6 +1813,7 @@ mod tests {
             "--ui-preferences",
             "--ui-command",
             "--ui-restore-prefs",
+            "--ui-ortho",
             "--ui-size",
             "1280x800",
             "--ui-select",
@@ -1803,6 +1836,7 @@ mod tests {
             shot.open_command,
             "--ui-command 应当置位（否则命令面板永远截不到）"
         );
+        assert!(shot.ortho, "--ui-ortho 应当置位（正交视口要能截到）");
         assert!(args.restore_prefs, "--ui-restore-prefs 应当置位");
         assert_eq!(shot.size, egui::vec2(1280.0, 800.0));
         assert_eq!(shot.select.as_deref(), Some("Fox"));

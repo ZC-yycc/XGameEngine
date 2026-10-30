@@ -15,7 +15,7 @@ use xgame_core::{
     AssetKind, Entity, EntityId, FieldDesc, ImportSettings, Inspect, MaterialAsset, Scene,
     Transform,
 };
-use xgame_math::glam::{Quat, Vec3};
+use xgame_math::glam::{Mat4, Quat, Vec3};
 use xgame_physics::DebugLine;
 
 /// 资产文件名去掉扩展名（`Resources/Box.glb` → `Box`；`A.prefab.ron` → `A`）。
@@ -341,6 +341,17 @@ pub struct EditorCamera {
     pub sensitivity: f32,
     /// 平移速度（世界单位/秒）。
     pub pan_speed: f32,
+    /// 是否用**正交**投影（数字键 `5` 切换，与 Unity 的 Numpad5 同手位）。
+    ///
+    /// 只作用于编辑器视口。场景里的相机实体（`Entity::camera`）是给游戏用的，
+    /// 它的投影方式属于项目数据，不受这个开关影响 —— 否则"我在编辑器里切了
+    /// 正交"会悄悄改变打包后的画面。
+    pub ortho: bool,
+    /// 正交视口的**垂直可见高度**（世界单位）。透视下这个值不参与计算。
+    ///
+    /// 用"高度"而不是"缩放倍率"：滚轮放大时用户关心的是"现在这一屏有多高"，
+    /// 而且它和场景尺度同一单位 —— 直接写 12 就是 12 米高，不必换算。
+    pub ortho_height: f32,
 }
 
 impl EditorCamera {
@@ -360,6 +371,19 @@ impl EditorCamera {
     /// 零向量，`pan_right` 会除零得到 NaN，进而把相机位置污染成 NaN（画面上就是
     /// 全黑）。留 0.01 rad ≈ 0.57° 的斜角，肉眼看不出来。
     pub const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
+    /// 正交视口高度的下限（世界单位）。
+    ///
+    /// 再小就会出现"深度精度被拉爆"的条纹（正交投影的深度分辨率与可见高度
+    /// 成正比），而且 0 会让投影矩阵退化。
+    pub const MIN_ORTHO_HEIGHT: f32 = 0.05;
+    /// 正交视口高度的上限。给一个能装下整张地图的数，再大没有实际意义。
+    pub const MAX_ORTHO_HEIGHT: f32 = 5000.0;
+    /// 正交投影的裁剪范围（沿视线方向，相对相机位置的**有符号**距离）。
+    ///
+    /// 正交投影允许 `near` 为负 —— 编辑器里相机经常"站"在物体中间（顶视图
+    /// 贴着地面），用 0..1000 会把脚下的东西裁掉。取 ±1000 覆盖常见场景尺度，
+    /// 深度精度（24 位）在 5000 个单位上仍然足够。
+    pub const ORTHO_DEPTH: f32 = 1000.0;
 }
 
 /// 聚焦时相机与包围球之间的距离系数。
@@ -398,12 +422,38 @@ pub fn fit_distance(radius: f32, fov_y: f32, aspect: f32) -> f32 {
     (radius / half.sin()) * FOCUS_MARGIN
 }
 
+/// 正交视口：让半径 `radius` 的包围球刚好落进画面的**垂直可见高度**。
+///
+/// 窄窗口（`aspect < 1`）的限制来自水平方向，所以按 `1/aspect` 放大；
+/// 与 [`fit_distance`] 取"两个半视角里较小的那个"是同一个道理。
+pub fn fit_ortho_height(radius: f32, aspect: f32) -> f32 {
+    let radius = if radius.is_finite() {
+        radius.max(MIN_FOCUS_RADIUS)
+    } else {
+        MIN_FOCUS_RADIUS
+    };
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        1.0
+    };
+    let half_h = radius * (1.0 / aspect.min(1.0)) * FOCUS_MARGIN;
+    (half_h * 2.0).clamp(
+        EditorCamera::MIN_ORTHO_HEIGHT,
+        EditorCamera::MAX_ORTHO_HEIGHT,
+    )
+}
+
+/// 默认正交视口高度（世界单位）。10 米高对"看一个房间"够用，也不至于把
+/// 单个箱子缩成一个点。
+pub const DEFAULT_ORTHO_HEIGHT: f32 = 10.0;
+
 /// 轴对齐视角预设（数字键 1 / 3 / 7，配 Ctrl 取反方向）。
 ///
 /// 只改朝向，**不动位置**：先对轴再按 F 是最常用的组合（顶视图里框一片再聚焦）。
 ///
-/// 注意这不是"正交投影"—— 渲染管线只有透视相机，这里给的是**正对着某根轴看**。
-/// 名字里不出现 Ortho 就是这个原因，别在文档里混着叫。
+/// 注意"对轴视角"与"正交投影"是两件独立的事：`1`/`3`/`7` 只改朝向（透视下也能
+/// 正对着轴看），`5` 才切正交投影。名字里不出现 Ortho 就是这个原因，别混着叫。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AxisView {
     /// 朝 +Z 看（相机在 -Z 侧）。
@@ -457,6 +507,8 @@ impl Default for EditorCamera {
             position: Vec3::new(5.0, 5.0, 5.0),
             sensitivity: Self::DEFAULT_SENSITIVITY,
             pan_speed: Self::DEFAULT_PAN_SPEED,
+            ortho: false,
+            ortho_height: DEFAULT_ORTHO_HEIGHT,
         }
     }
 }
@@ -497,12 +549,65 @@ impl EditorCamera {
     pub fn focus_on(&mut self, center: Vec3, radius: f32, fov_y: f32, aspect: f32) {
         let distance = fit_distance(radius, fov_y, aspect);
         self.position = center - self.forward() * distance;
+        if self.ortho {
+            // 正交下"退多远"不改变物体大小，装框靠视口高度；位置只影响裁剪
+            // （`ortho_projection` 用 ±ORTHO_DEPTH，所以退回原距离也不会裁掉）。
+            self.ortho_height = fit_ortho_height(radius, aspect);
+        }
     }
 
-    /// 用滚轮调整移动速度。
+    /// 滚轮：正交时缩放**视口高度**，透视时调整移动速度。
+    ///
+    /// 两种模式下滚轮的语义本来就不同：透视下"远近"没有绝对尺度（滚轮 historically
+    /// 调的是飞行速度），正交下"画面多高"才是用户眼里的缩放。混用同一个数会让
+    /// 一边怪怪的，所以按投影模式分流。
     pub fn zoom(&mut self, delta: f32) {
+        if self.ortho {
+            // 指数缩放：每一格滚轮的**倍率**相同（线性加减在近处太慢、远处太快）。
+            let factor = (-delta * 0.0025).exp();
+            self.ortho_height =
+                (self.ortho_height * factor).clamp(Self::MIN_ORTHO_HEIGHT, Self::MAX_ORTHO_HEIGHT);
+            return;
+        }
         self.pan_speed =
             (self.pan_speed + delta * 0.05).clamp(Self::MIN_PAN_SPEED, Self::MAX_PAN_SPEED);
+    }
+
+    /// 按倍率缩放飞行速度（`[` / `]` 快捷键），夹在同一对边界里。
+    pub fn scale_pan_speed(&mut self, factor: f32) {
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        self.pan_speed =
+            (self.pan_speed * factor).clamp(Self::MIN_PAN_SPEED, Self::MAX_PAN_SPEED);
+    }
+
+    /// 切换正交 / 透视，返回切换后的状态（调用方拿它写一行日志回执）。
+    pub fn toggle_ortho(&mut self) -> bool {
+        self.ortho = !self.ortho;
+        self.ortho
+    }
+
+    /// 正交投影矩阵。`aspect` = 宽 / 高（视口物理像素）。
+    ///
+    /// 可见高度 = [`Self::ortho_height`]，宽度按宽高比推出来（像素是方的）。
+    pub fn ortho_projection(&self, aspect: f32) -> Mat4 {
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            1.0
+        };
+        let half_h = (self.ortho_height * 0.5)
+            .clamp(Self::MIN_ORTHO_HEIGHT * 0.5, Self::MAX_ORTHO_HEIGHT * 0.5);
+        let half_w = half_h * aspect;
+        Mat4::orthographic_rh(
+            -half_w,
+            half_w,
+            -half_h,
+            half_h,
+            -Self::ORTHO_DEPTH,
+            Self::ORTHO_DEPTH,
+        )
     }
 
     /// 沿相机右方向平移（A / D）— 移动 position。
@@ -5030,6 +5135,151 @@ mod tests {
             (to_target.normalize() - forward_before).length() < 1e-4,
             "目标必须在视线正前方"
         );
+    }
+
+    /// 正交投影的**可见高度必须就是 `ortho_height`**：世界空间里偏离视线
+    /// `half_h` 的点要正好落在画面上下边缘（NDC ±1）。
+    ///
+    /// 这条挂了说明"滚轮缩放看到的"和"实际画出来的"不是一个尺度 —— 用户会发现
+    /// 数字对不上（比如按 F 装框后物体仍然出画）。
+    #[test]
+    fn ortho_projection_visible_height_matches_the_setting() {
+        let camera = EditorCamera {
+            ortho: true,
+            ortho_height: 8.0,
+            ..EditorCamera::default()
+        };
+        let aspect = 16.0 / 9.0;
+        let view = xgame_math::projection::look_at(
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::Y,
+        );
+        let vp = camera.ortho_projection(aspect) * view;
+
+        let project = |p: Vec3| {
+            let clip = vp * p.extend(1.0);
+            clip.truncate() / clip.w
+        };
+        // 上边缘：y = +half_h → ndc.y = 1。
+        let top = project(Vec3::new(0.0, 4.0, -5.0));
+        assert!((top.y - 1.0).abs() < 1e-4, "上边缘应到 NDC 1，实际 {}", top.y);
+        // 右边缘：x = half_h * aspect → ndc.x = 1（像素是方的）。
+        let right = project(Vec3::new(4.0 * aspect, 0.0, -5.0));
+        assert!((right.x - 1.0).abs() < 1e-4, "右边缘应到 NDC 1，实际 {}", right.x);
+        // 正交下**深度不影响屏幕位置**（这正是它与透视的区别）。
+        let near_point = project(Vec3::new(0.0, 4.0, -1.0));
+        assert!((near_point.y - top.y).abs() < 1e-5);
+    }
+
+    /// 正交下"射线"必须是**平行**的：屏幕不同位置射出的方向相同。
+    ///
+    /// 拾取（`pick_entity`）与 gizmo 全靠 `screen_to_ray`，它走的是
+    /// `view_proj` 求逆 —— 这条证明"换了投影矩阵之后拾取不用改"，
+    /// 也钉住"正交不是把透视相机转个方向"。
+    #[test]
+    fn ortho_screen_rays_are_parallel_and_aim_forward() {
+        let camera = EditorCamera {
+            ortho: true,
+            ortho_height: 6.0,
+            ..EditorCamera::default()
+        };
+        let aspect = 4.0 / 3.0;
+        let view = xgame_math::projection::look_at(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(1.0, 2.0, 2.0),
+            Vec3::Y,
+        );
+        let vp = camera.ortho_projection(aspect) * view;
+        let size = egui::Vec2::new(800.0, 600.0);
+        let (o1, d1) =
+            crate::gizmo::screen_to_ray(egui::pos2(100.0, 100.0), &vp, size, egui::Vec2::ZERO);
+        let (o2, d2) =
+            crate::gizmo::screen_to_ray(egui::pos2(700.0, 500.0), &vp, size, egui::Vec2::ZERO);
+        assert!(
+            (d1 - d2).length() < 1e-4,
+            "正交下不同像素的射线方向必须一致：{d1:?} vs {d2:?}"
+        );
+        // 这个视图矩阵朝 -Z 看（见上面的 look_at 参数）。
+        assert!((d1 - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-4, "方向就是相机朝向");
+        assert!((o1 - o2).length() > 1.0, "但起点必须随像素平移");
+    }
+
+    /// 切换正交**不动朝向也不动位置**；聚焦在正交下靠视口高度装框。
+    #[test]
+    fn toggling_ortho_keeps_the_pose_and_focus_fits_the_height() {
+        let mut camera = EditorCamera::default();
+        let (yaw, pitch, position) = (camera.yaw, camera.pitch, camera.position);
+        assert!(!camera.ortho, "默认是透视");
+        assert!(camera.toggle_ortho());
+        assert_eq!((camera.yaw, camera.pitch, camera.position), (yaw, pitch, position));
+        assert!(!camera.toggle_ortho());
+        assert!(!camera.ortho);
+
+        camera.ortho = true;
+        camera.ortho_height = 1.0;
+        camera.focus_on(Vec3::ZERO, 3.0, 60f32.to_radians(), 1.5);
+        // 半径 3 的球要装进高度 ~6 × 1.15 的窗口（宽视口限制来自垂直方向）。
+        let expected = fit_ortho_height(3.0, 1.5);
+        assert!(
+            (camera.ortho_height - expected).abs() < 1e-4,
+            "装框高度 {} ≠ {}",
+            camera.ortho_height,
+            expected
+        );
+        assert!(camera.ortho_height > 6.0, "必须把球整个装下（含边距）");
+        // 竖视口要更大：限制来自水平方向。
+        assert!(fit_ortho_height(3.0, 0.5) > fit_ortho_height(3.0, 1.5));
+    }
+
+    /// `[` / `]` 的速度倍率必须夹在同一对边界里，坏倍率不许把相机搞死。
+    #[test]
+    fn speed_shortcut_scales_within_bounds() {
+        let mut camera = EditorCamera::default();
+        let before = camera.pan_speed;
+        camera.scale_pan_speed(2.0);
+        assert!((camera.pan_speed - before * 2.0).abs() < 1e-5);
+        for _ in 0..50 {
+            camera.scale_pan_speed(10.0);
+        }
+        assert_eq!(camera.pan_speed, EditorCamera::MAX_PAN_SPEED);
+        for _ in 0..50 {
+            camera.scale_pan_speed(0.1);
+        }
+        assert_eq!(camera.pan_speed, EditorCamera::MIN_PAN_SPEED);
+        // 坏输入（0 / 负数 / NaN）不许改动任何东西。
+        let fixed = camera.pan_speed;
+        for bad in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            camera.scale_pan_speed(bad);
+            assert_eq!(camera.pan_speed, fixed, "坏倍率 {bad} 不该改动速度");
+        }
+    }
+
+    /// 滚轮在两种模式下改的东西不同：正交改**视口高度**（指数缩放且夹住），
+    /// 透视改移动速度。
+    #[test]
+    fn wheel_zooms_the_ortho_height_and_clamps_it() {
+        let mut camera = EditorCamera::default();
+        let speed = camera.pan_speed;
+        camera.zoom(120.0);
+        assert!(camera.pan_speed > speed, "透视下滚轮调速度");
+        assert_eq!(camera.ortho_height, DEFAULT_ORTHO_HEIGHT);
+
+        camera.ortho = true;
+        let speed = camera.pan_speed;
+        camera.zoom(120.0);
+        assert_eq!(camera.pan_speed, speed, "正交下不该动速度");
+        assert!(camera.ortho_height < DEFAULT_ORTHO_HEIGHT, "向下滚 = 放大");
+
+        // 反复放大不能把视口压成 0（会让投影矩阵退化）。
+        for _ in 0..200 {
+            camera.zoom(500.0);
+        }
+        assert!(camera.ortho_height >= EditorCamera::MIN_ORTHO_HEIGHT);
+        for _ in 0..200 {
+            camera.zoom(-5000.0);
+        }
+        assert!(camera.ortho_height <= EditorCamera::MAX_ORTHO_HEIGHT);
     }
 
     /// 六个轴视角看的方向必须对，而且 pitch 不能被夹到正好 ±90°：

@@ -121,10 +121,15 @@ fn build_view_projection(state: &EditorState, vp_w: u32, vp_h: u32) -> Mat4 {
     if let Some(camera) = play_camera(state) {
         return camera.view_projection(aspect);
     }
-    let proj = xgame_math::projection::perspective(EDITOR_FOV_DEG.to_radians(), aspect, 0.1, 100.0);
     let cam = &state.editor_camera;
     let view =
         xgame_math::projection::look_at(cam.position, cam.position + cam.forward(), glam::Vec3::Y);
+    // 正交开关只属于编辑态的自由相机（Play 态走游戏相机，上面已经返回）。
+    let proj = if cam.ortho {
+        cam.ortho_projection(aspect)
+    } else {
+        xgame_math::projection::perspective(EDITOR_FOV_DEG.to_radians(), aspect, 0.1, 100.0)
+    };
     proj * view
 }
 
@@ -393,7 +398,7 @@ fn handle_navigation_keys(state: &mut EditorState, ui: &egui::Ui, (vp_w, vp_h): 
         return;
     }
 
-    let (focus, axis) = ui.input(|i| {
+    let (focus, axis, ortho) = ui.input(|i| {
         let axis = if i.key_pressed(egui::Key::Num7) {
             Some(if i.modifiers.ctrl {
                 AxisView::Bottom
@@ -415,9 +420,36 @@ fn handle_navigation_keys(state: &mut EditorState, ui: &egui::Ui, (vp_w, vp_h): 
         } else {
             None
         };
-        (i.key_pressed(egui::Key::F), axis)
+        (
+            i.key_pressed(egui::Key::F),
+            axis,
+            i.key_pressed(egui::Key::Num5),
+        )
     });
 
+    // `[` / `]` 调飞行速度：滚轮已经占给缩放了（正交下是视口高度），
+    // 而"飞太快刹不住 / 太慢走不到"是视口里最常见的第二个抱怨。
+    if !state.fly_state {
+        let (slower, faster) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::OpenBracket),
+                i.key_pressed(egui::Key::CloseBracket),
+            )
+        });
+        if slower || faster {
+            let step = if faster { 1.25 } else { 0.8 };
+            state.editor_camera.scale_pan_speed(step);
+            state.log_info(format!(
+                "相机速度：{:.1} 单位/秒",
+                state.editor_camera.pan_speed
+            ));
+        }
+    }
+
+    if ortho {
+        let on = state.editor_camera.toggle_ortho();
+        state.log_info(if on { "投影：正交" } else { "投影：透视" });
+    }
     if let Some(view) = axis {
         state.editor_camera.set_axis_view(view);
         // 一条可见的回执：快捷键是"按了就忘"的东西，控制台里留一行能帮人记住

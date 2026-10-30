@@ -355,6 +355,14 @@ impl ScreenshotRenderer {
         self.pipeline.set_frustum_culling(enabled);
     }
 
+    /// 开关阴影**逐级**剔除（默认开）—— 只给 A/B 测试与基准用。
+    ///
+    /// 关掉时每级都画全部投影物（引入前的行为）。开与关的像素必须逐位一致
+    /// （`cascaded_shadow_culling_matches_unculled_pixels` 钉死）。
+    pub fn set_cascaded_shadow_culling(&mut self, enabled: bool) {
+        self.pipeline.set_cascaded_shadow_culling(enabled);
+    }
+
     pub fn aspect(&self) -> f32 {
         self.size.0 as f32 / self.size.1.max(1) as f32
     }
@@ -3679,6 +3687,100 @@ mod tests {
                 .unwrap_or(0);
             panic!(
                 "剔除不许改画面；首个差异在第 {idx} 字节（像素 {}）: {} vs {}",
+                idx / 4,
+                unculled[idx],
+                culled[idx]
+            );
+        }
+    }
+
+    /// 多级联阴影的测试场景：地面 + 从近到远排开的方块。
+    ///
+    /// 深度跨度（约 34 个单位）刚好让 4 级级联各管一段 —— 每级只有一部分
+    /// 方块在它的拟合框里，逐级剔除才有可剔的东西。全部挤在一小片区域里
+    /// 会让"每级都能看见所有人"，那样的场景测不出任何差别。
+    fn multi_cascade_shadow_scene() -> Scene {
+        let mut scene = Scene::new("cascaded-shadow");
+        scene.ambient = [0.05; 3];
+        scene.lights = vec![Light::directional("sun", [0.45, -1.0, -0.35], [1.0; 3], 2.0)];
+        assert!(scene.lights[0].casts_shadow);
+
+        let mut ground = Entity::new("Ground");
+        ground.model = "builtin://plane".to_owned();
+        ground.transform.scale = Vec3::new(60.0, 1.0, 60.0);
+        scene.add_entity(ground);
+
+        for i in 0..12 {
+            let mut e = Entity::new(format!("Caster{i}"));
+            e.model = "builtin://cube".to_owned();
+            let z = -3.0 - i as f32 * 2.6;
+            e.transform.position = Vec3::new(((i % 3) as f32 - 1.0) * 2.2, 1.0, z);
+            scene.add_entity(e);
+        }
+        scene
+    }
+
+    /// **像素等价**：阴影逐级剔除开 / 关的画面必须逐字节一致。
+    ///
+    /// 剔除只决定"某一级的深度图里要不要画这个实例"，而每一级的拟合框都**完全
+    /// 罩住**它对应的子视锥 —— 框外的东西本来就会被裁掉。所以两档的画面没有
+    /// 任何理由不同；这条挂了说明成员位判错（某一级漏了该投影的物体 → 影子缺
+    /// 一块）或者段切分错位（画了别人的实例数据 → 影子错位）。
+    #[test]
+    fn cascaded_shadow_culling_matches_unculled_pixels() {
+        let Some(mut shot) = gpu_or_skip("cascaded_shadow_culling_matches_unculled_pixels") else {
+            return;
+        };
+        let scene = multi_cascade_shadow_scene();
+        // 站在地面南侧略高处俯视：4 级级联铺满 z = -3 .. -34 这一段。
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 7.0, 6.0),
+            Vec3::new(0.0, 0.0, -16.0),
+            DEFAULT_FOV_Y,
+        );
+        let render = |shot: &mut ScreenshotRenderer| {
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.read_rgba().expect("读回失败")
+        };
+
+        shot.set_cascaded_shadow_culling(false);
+        let unculled = render(&mut shot);
+        let plain = shot.frame_stats();
+        // 关掉时每级都画全部投影物：提交数必须是 4 ×（不透明 + 阴影专用）。
+        let casters = plain.opaque_instances + plain.shadow_only_instances;
+        assert!(casters > 0, "前提：场景里必须有投影物");
+        assert_eq!(
+            plain.shadow_instances_submitted,
+            4 * casters,
+            "关掉剔除时四级各画一遍全部投影物"
+        );
+
+        shot.set_cascaded_shadow_culling(true);
+        let culled = render(&mut shot);
+        let fast = shot.frame_stats();
+        assert!(
+            fast.shadow_instances_submitted < plain.shadow_instances_submitted,
+            "剔除必须真的少画：{} vs {}",
+            fast.shadow_instances_submitted,
+            plain.shadow_instances_submitted
+        );
+
+        assert_eq!(unculled.len(), culled.len());
+        if unculled != culled {
+            let idx = unculled
+                .iter()
+                .zip(&culled)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            panic!(
+                "逐级剔除不许改画面；首个差异在第 {idx} 字节（像素 {}）: {} vs {}",
                 idx / 4,
                 unculled[idx],
                 culled[idx]

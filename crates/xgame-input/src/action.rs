@@ -30,13 +30,16 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::key::{KeyCode, MouseButton};
+use crate::pad::{apply_deadzone, GamepadAxis, GamepadButton};
 use crate::state::InputState;
 
 /// 一条按键绑定。
 ///
 /// 用 `BTreeMap` 而非 `HashMap` 承载动作表，是为了**序列化结果稳定**：
 /// 同一个 `InputMap` 存两次得到字节相同的文件，diff 才干净、才适合进版本库。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// 注意：`PadAxis` 带一个 `f32` 阈值，所以这里不能派生 `Eq` / `Hash`。
+// 需要"两条绑定是否相同"的地方用 `PartialEq`（阈值按位比较，够用）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Binding {
     /// 单个键（忽略修饰键状态）。
     Key(KeyCode),
@@ -58,6 +61,26 @@ pub enum Binding {
         #[serde(default)]
         sup: bool,
     },
+    /// 手柄上的一个语义按键（`PadButton(South)`）。
+    PadButton(GamepadButton),
+    /// 手柄的一根轴当按钮用：**越过阈值**就算按下（扳机最典型的用法）。
+    ///
+    /// 写成轴而不是"扳机专用按键"：扳机在部分后端只上报轴、不按钮化，
+    /// 而且"按到一半算不算按下"是个**手感**参数，应该由作者定。
+    PadAxis {
+        axis: GamepadAxis,
+        /// 触发阈值（0..1）。低于它的按压不算按下。
+        #[serde(default = "default_pad_threshold")]
+        threshold: f32,
+    },
+}
+
+/// 轴当按钮用时的默认阈值。
+///
+/// 0.5 与各家驱动的"数字化扳机"一致；调低（0.2）会让轻碰就开火，
+/// 调高（0.8）适合"扣到底才蓄力"的设计。
+fn default_pad_threshold() -> f32 {
+    0.5
 }
 
 impl Binding {
@@ -88,6 +111,10 @@ impl Binding {
         match self {
             Binding::Key(k) => k.display_name().to_owned(),
             Binding::Mouse(m) => m.display_name().to_owned(),
+            Binding::PadButton(button) => button.display_name().to_owned(),
+            Binding::PadAxis { axis, threshold } => {
+                format!("{} > {threshold:.2}", axis.display_name())
+            }
             Binding::Combo {
                 key,
                 ctrl,
@@ -114,6 +141,11 @@ impl Binding {
         }
     }
 
+    /// 这条绑定是不是手柄绑定（"项目自己表达过手柄意见"的判据）。
+    pub fn is_pad(&self) -> bool {
+        matches!(self, Binding::PadButton(_) | Binding::PadAxis { .. })
+    }
+
     /// 这一刻绑定是否成立。
     fn is_down(&self, state: &InputState) -> bool {
         match self {
@@ -126,6 +158,8 @@ impl Binding {
                 alt,
                 sup,
             } => state.key_down(*key) && state.modifiers_match(*ctrl, *shift, *alt, *sup),
+            Binding::PadButton(button) => state.pad_button_down(*button),
+            Binding::PadAxis { axis, threshold } => state.pad_axis(*axis) >= *threshold,
         }
     }
 
@@ -144,6 +178,9 @@ impl Binding {
                 alt,
                 sup,
             } => state.key_pressed(*key) && state.modifiers_match(*ctrl, *shift, *alt, *sup),
+            Binding::PadButton(button) => state.pad_button_pressed(*button),
+            // 轴没有"按键事件"，边沿要靠上一帧的值比出来（见 `PadState::axis_crossed_up`）。
+            Binding::PadAxis { axis, threshold } => state.pad_axis_crossed_up(*axis, *threshold),
         }
     }
 
@@ -153,12 +190,14 @@ impl Binding {
             Binding::Key(k) => state.key_released(*k),
             Binding::Mouse(m) => state.mouse_released(*m),
             Binding::Combo { key, .. } => state.key_released(*key),
+            Binding::PadButton(button) => state.pad_button_released(*button),
+            Binding::PadAxis { axis, threshold } => state.pad_axis_crossed_down(*axis, *threshold),
         }
     }
 }
 
 /// 一条双向轴（例如 `MoveX = D - A`）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AxisBinding {
     /// 正方向按键（+1）。
     #[serde(default)]
@@ -166,6 +205,48 @@ pub struct AxisBinding {
     /// 负方向按键（-1）。
     #[serde(default)]
     pub negative: Vec<Binding>,
+    /// 模拟量来源（摇杆）：直接给出 `-1..1` 的连续值，而不是 ±1 的台阶。
+    ///
+    /// 与按键**相加**再夹到 `-1..1`：键盘推满 + 摇杆推满等于推满，不会溢出；
+    /// 只想用摇杆时不写 `positive`/`negative` 即可。
+    ///
+    /// 空表不落盘（老项目保存后字节不变）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analog: Vec<AnalogBinding>,
+}
+
+/// 一条模拟轴绑定（摇杆 → 轴值）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalogBinding {
+    /// 取自哪根手柄轴。
+    pub axis: GamepadAxis,
+    /// 缩放系数（负数用于反向，例如"推左 = 右转"）。
+    #[serde(default = "one")]
+    pub scale: f32,
+    /// 死区（0..1）：绝对值小于它的输入压成 0，其余重标定到满量程。
+    #[serde(default = "default_pad_deadzone")]
+    pub deadzone: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+/// 摇杆默认死区。
+///
+/// 0.15 是各家的常见值（Unity 默认 0.19、Godot 轴向 0.5 但那是"轴向死区"）：
+/// 廉价手柄的摇杆回中误差常到 0.08，低于这个数就开始"自己走"。
+fn default_pad_deadzone() -> f32 {
+    0.15
+}
+
+impl AnalogBinding {
+    /// 取这根轴**应用死区与缩放之后**的值。
+    pub fn value(&self, state: &InputState) -> f32 {
+        let raw = state.pad_axis(self.axis);
+        // 扳机是单极（0..1），死区重标定之后仍然是 0..1；摇杆是双极。
+        apply_deadzone(raw, self.deadzone) * self.scale
+    }
 }
 
 /// 动作 → 绑定 的映射表。
@@ -215,8 +296,14 @@ impl InputMap {
         positive: Vec<Binding>,
         negative: Vec<Binding>,
     ) -> &mut Self {
-        self.axes
-            .insert(axis.into(), AxisBinding { positive, negative });
+        self.axes.insert(
+            axis.into(),
+            AxisBinding {
+                positive,
+                negative,
+                analog: Vec::new(),
+            },
+        );
         self
     }
 
@@ -289,7 +376,79 @@ impl InputMap {
         // 这里用 `Mouse` 绑定表达不了"鼠标位移"，所以视角轴由相机代码直接读
         // `InputState::mouse_delta`，不进这张表 —— 见下面的 `look_delta`。
 
+        // 手柄：与键盘**共存**（多对一），插上手柄就能走，不用先删键位。
+        map.apply_pad_defaults();
+
         map
+    }
+
+    /// 这张表里是否已经有任何**手柄**绑定。
+    pub fn has_pad_bindings(&self) -> bool {
+        self.actions.values().flatten().any(Binding::is_pad)
+            || self.axes.values().any(|a| {
+                !a.analog.is_empty()
+                    || a.positive.iter().chain(a.negative.iter()).any(Binding::is_pad)
+            })
+    }
+
+    /// 补上**默认手柄绑定**（只增不改：已有的绑定一条都不动）。
+    ///
+    /// 动作名沿用 [`Self::default_game`] 那套（`Jump` / `Fire` / …）：自定义表里
+    /// 没有这些名字时它们会被创建，多出来的动作对游戏没有影响（没人读就不会
+    /// 触发任何逻辑），但玩家插上手柄就有反应。
+    ///
+    /// 轴只**追加**模拟源，不覆盖作者写的按键。
+    pub fn apply_pad_defaults(&mut self) {
+        use GamepadAxis as A;
+        use GamepadButton as B;
+
+        self.bind("Jump", Binding::PadButton(B::South));
+        self.bind("Interact", Binding::PadButton(B::West));
+        // 扳机当按钮：阈值 0.4 比驱动的"数字化"阈值略低，扣到一半就开火，
+        // 手感上更像"轻按即射"；要蓄力就把阈值调高。
+        self.bind(
+            "Fire",
+            Binding::PadAxis {
+                axis: A::RightTrigger,
+                threshold: 0.4,
+            },
+        );
+        self.bind(
+            "Aim",
+            Binding::PadAxis {
+                axis: A::LeftTrigger,
+                threshold: 0.4,
+            },
+        );
+        self.bind("Sprint", Binding::PadButton(B::LeftStick));
+        self.bind("TogglePause", Binding::PadButton(B::Start));
+
+        // 左摇杆 = 移动，右摇杆 = 视角。`+Y` 在上（与 `W` 的正方向一致）。
+        self.axes.entry("MoveX".into()).or_default().analog.push(
+            AnalogBinding { axis: A::LeftX, scale: 1.0, deadzone: default_pad_deadzone() },
+        );
+        self.axes.entry("MoveY".into()).or_default().analog.push(
+            AnalogBinding { axis: A::LeftY, scale: 1.0, deadzone: default_pad_deadzone() },
+        );
+        self.axes.entry("LookX".into()).or_default().analog.push(
+            AnalogBinding { axis: A::RightX, scale: 1.0, deadzone: default_pad_deadzone() },
+        );
+        self.axes.entry("LookY".into()).or_default().analog.push(
+            AnalogBinding { axis: A::RightY, scale: 1.0, deadzone: default_pad_deadzone() },
+        );
+    }
+
+    /// 老项目（写 `input.ron` 时还没有手柄支持）加载后自动补默认手柄绑定。
+    ///
+    /// 判据是"**这张表里一条手柄绑定都没有**"：作者只要动过手柄绑定（哪怕
+    /// 只是删掉一条），就说明他表达过意见，之后不再自动补 —— 否则玩家改的
+    /// 键位会被下次启动悄悄恢复。这条规则只在宿主的加载路径上生效，
+    /// `load` 本身是纯粹的反序列化。
+    pub fn with_pad_defaults_if_absent(mut self) -> Self {
+        if !self.has_pad_bindings() {
+            self.apply_pad_defaults();
+        }
+        self
     }
 
     /// 从 RON 文件加载。文件不存在时返回 `Ok(None)`（调用方退回默认映射），
@@ -410,7 +569,11 @@ impl Input {
         };
         let pos = binding.positive.iter().any(|b| b.is_down(&self.state)) as i32;
         let neg = binding.negative.iter().any(|b| b.is_down(&self.state)) as i32;
-        (pos - neg) as f32
+        // 按键给 ±1 的台阶，摇杆给连续值，两者**相加再夹住**：
+        // 谁在用哪套设备都不必区分，混用也不会越界（键盘推满 + 摇杆推满 = 1.0）。
+        let digital = (pos - neg) as f32;
+        let analog: f32 = binding.analog.iter().map(|a| a.value(&self.state)).sum();
+        (digital + analog).clamp(-1.0, 1.0)
     }
 
     /// 二维轴组合。
@@ -448,6 +611,32 @@ impl Input {
 
     pub fn scroll(&self) -> xgame_math::glam::Vec2 {
         self.state.scroll()
+    }
+
+    // -----------------------------------------------------------------------
+    // 手柄直通（不需要映射的场景：UI 导航、调试面板、脚本 API）
+    // -----------------------------------------------------------------------
+
+    /// 当前接了几台手柄。
+    pub fn pad_count(&self) -> usize {
+        self.state.pad_count()
+    }
+
+    /// 有没有任何一台手柄在连着。
+    pub fn pad_connected(&self) -> bool {
+        self.state.pad_count() > 0
+    }
+
+    pub fn pad_button_down(&self, button: GamepadButton) -> bool {
+        self.state.pad_button_down(button)
+    }
+
+    pub fn pad_button_pressed(&self, button: GamepadButton) -> bool {
+        self.state.pad_button_pressed(button)
+    }
+
+    pub fn pad_axis(&self, axis: GamepadAxis) -> f32 {
+        self.state.pad_axis(axis)
     }
 
     /// 视角位移（鼠标移动 + 右摇杆类的输入），FPS 相机直接消费。
@@ -543,6 +732,160 @@ mod tests {
             .contains_key("New"));
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(legacy_tmp).unwrap();
+    }
+
+    #[test]
+    fn pad_button_binding_triggers_the_action() {
+        let mut input = Input::with_default_map();
+        assert!(!input.action_down("Jump"));
+        input.state_mut().handle_pad_button(0, GamepadButton::South, true);
+        assert!(input.action_pressed("Jump"), "默认映射里 South = 跳");
+        input.end_frame();
+        assert!(input.action_down("Jump"));
+        assert!(!input.action_pressed("Jump"), "边沿只活一帧");
+        input.state_mut().handle_pad_button(0, GamepadButton::South, false);
+        assert!(input.action_released("Jump"));
+        assert!(!input.action_down("Jump"));
+    }
+
+    #[test]
+    fn trigger_axis_is_thresholded_only_on_crossing() {
+        let mut input = Input::with_default_map();
+        // 默认 Fire 绑右扳机，阈值 0.4。
+        input.state_mut().handle_pad_axis(0, GamepadAxis::RightTrigger, 0.2);
+        assert!(!input.action_down("Fire"), "没到阈值不算按下");
+        input.end_frame();
+
+        input.state_mut().handle_pad_axis(0, GamepadAxis::RightTrigger, 0.5);
+        assert!(input.action_down("Fire"));
+        assert!(input.action_pressed("Fire"), "越过阈值的那一帧是边沿");
+        input.end_frame();
+
+        // 继续加深不该重复触发。
+        input.state_mut().handle_pad_axis(0, GamepadAxis::RightTrigger, 0.9);
+        assert!(input.action_down("Fire"));
+        assert!(!input.action_pressed("Fire"));
+
+        input.state_mut().handle_pad_axis(0, GamepadAxis::RightTrigger, 0.1);
+        assert!(input.action_released("Fire"));
+    }
+
+    #[test]
+    fn analog_axis_combines_with_keys_and_clamps() {
+        let mut input = Input::with_default_map();
+        // 摇杆推到一半：轴值连续（不是 ±1 的台阶）。
+        input.state_mut().handle_pad_axis(0, GamepadAxis::LeftX, 0.62);
+        let half = input.axis("MoveX");
+        assert!(half > 0.4 && half < 0.8, "摇杆要给出连续值，实际 {half}");
+
+        // 键盘同向再叠加：夹在 1.0，不会变成 1.62。
+        press(&mut input, KeyCode::KeyD);
+        assert_eq!(input.axis("MoveX"), 1.0);
+
+        // 反向摇杆 + 正向键 = 抵消一部分，仍在范围内。
+        input.state_mut().handle_pad_axis(0, GamepadAxis::LeftX, -0.5);
+        let v = input.axis("MoveX");
+        assert!((-1.0..=1.0).contains(&v), "轴值必须夹在 -1..=1，实际 {v}");
+    }
+
+    #[test]
+    fn analog_deadzone_is_applied_and_rescaled() {
+        let mut input = Input::with_default_map();
+        // 死区 0.15 以内：不动。
+        input.state_mut().handle_pad_axis(0, GamepadAxis::LeftY, 0.1);
+        assert_eq!(input.axis("MoveY"), 0.0);
+        // 推到底：必须正好 1.0（重标定，不是截断）。
+        input.state_mut().handle_pad_axis(0, GamepadAxis::LeftY, 1.0);
+        assert_eq!(input.axis("MoveY"), 1.0);
+        // 向上为正（与 W 同向）。
+        assert!(input.axis("MoveY") > 0.0);
+    }
+
+    #[test]
+    fn multiple_pads_take_the_strongest_reading() {
+        let mut input = Input::with_default_map();
+        input.state_mut().handle_pad_axis(0, GamepadAxis::LeftX, 0.4);
+        input.state_mut().handle_pad_axis(1, GamepadAxis::LeftX, -0.9);
+        // 取绝对值最大的那台（-0.9），不是求和（-0.5）也不是第一台。
+        assert!(input.pad_axis(GamepadAxis::LeftX) < -0.5);
+        assert_eq!(input.pad_count(), 2);
+
+        // 任意一台按下就成立。
+        input.state_mut().handle_pad_button(1, GamepadButton::South, true);
+        assert!(input.pad_button_down(GamepadButton::South));
+    }
+
+    #[test]
+    fn disconnecting_a_pad_clears_its_state() {
+        let mut input = Input::with_default_map();
+        input.state_mut().pad_connected(7, "Pad");
+        input.state_mut().handle_pad_button(7, GamepadButton::South, true);
+        assert!(input.action_down("Jump"));
+        input.state_mut().pad_disconnected(7);
+        assert!(!input.action_down("Jump"), "拔掉之后不能还按着");
+        assert_eq!(input.pad_count(), 0);
+    }
+
+    #[test]
+    fn scene_reset_keeps_pads_connected_but_releases_buttons() {
+        let mut input = Input::with_default_map();
+        input.state_mut().pad_connected(0, "Pad");
+        input.state_mut().handle_pad_button(0, GamepadButton::South, true);
+        input.reset();
+        assert_eq!(input.pad_count(), 1, "手柄是硬件事实，切场景不该丢");
+        assert!(!input.pad_button_down(GamepadButton::South), "但按键要松开");
+    }
+
+    #[test]
+    fn pad_defaults_are_added_once_and_never_override_author_bindings() {
+        // 作者写过一条手柄绑定 ⇒ 一个默认值都不补。
+        let mut authored = InputMap::new();
+        authored.bind("Jump", Binding::Key(KeyCode::Space));
+        authored.bind("Jump", Binding::PadButton(GamepadButton::North));
+        let mapped = authored.clone().with_pad_defaults_if_absent();
+        assert_eq!(mapped.actions["Jump"], authored.actions["Jump"]);
+
+        // 完全没有手柄绑定 ⇒ 补上一整套，且不动已有的键位。
+        let mut plain = InputMap::new();
+        plain.bind("Jump", Binding::Key(KeyCode::Space));
+        assert!(!plain.has_pad_bindings());
+        let filled = plain.with_pad_defaults_if_absent();
+        assert!(filled.has_pad_bindings());
+        assert_eq!(
+            filled.actions["Jump"].first(),
+            Some(&Binding::Key(KeyCode::Space)),
+            "补默认值不能把作者的键位挤掉（只能追加）"
+        );
+        assert!(filled.actions["Jump"].contains(&Binding::PadButton(GamepadButton::South)));
+    }
+
+    #[test]
+    fn input_ron_without_analog_field_still_loads() {
+        // 老项目文件里没有 `analog` 字段：必须能读，而且读出来是空表。
+        let old = r#"(
+            actions: { "Jump": [Key(Space)] },
+            axes: { "MoveX": (positive: [Key(KeyD)], negative: [Key(KeyA)]) },
+        )"#;
+        let map: InputMap = ron::from_str(old).expect("老文件必须能读");
+        assert!(map.axes["MoveX"].analog.is_empty());
+    }
+
+    #[test]
+    fn empty_analog_is_not_written_to_disk() {
+        // 写盘稳定性：没写 analog 的表保存后不该多出一行 `analog: []`。
+        let mut map = InputMap::new();
+        map.bind_axis(
+            "MoveX",
+            vec![Binding::Key(KeyCode::KeyD)],
+            vec![Binding::Key(KeyCode::KeyA)],
+        );
+        let text = ron::ser::to_string_pretty(&map, ron::ser::PrettyConfig::new()).unwrap();
+        assert!(!text.contains("analog"), "空模拟表不落盘：{text}");
+
+        let full = InputMap::default_game();
+        let text = ron::ser::to_string_pretty(&full, ron::ser::PrettyConfig::new()).unwrap();
+        let back: InputMap = ron::from_str(&text).expect("带模拟轴的映射必须能读回");
+        assert!(!back.axes["MoveX"].analog.is_empty());
     }
 
     #[test]

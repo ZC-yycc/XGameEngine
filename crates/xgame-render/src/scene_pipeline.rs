@@ -281,6 +281,17 @@ pub struct FrameStats {
     /// 口径是"主 pass 的实例"，阴影专用批次不计 —— 那些连画面都不进，
     /// 拿它证明"远处换了低模"会假绿。
     pub low_lod_instances: usize,
+    /// 本帧阴影 pass 真正提交的**实例数之和**（各级相加）。
+    ///
+    /// 这是逐级剔除唯一诚实的读数：级数 × 实例数在剔除前恒等于
+    /// `4 × (不透明实例 + 阴影专用实例)`，剔除后按级联成员位收缩。
+    /// 拿它比"场景段 GPU 时间"更稳 —— 时间是显卡状态，实例数是本帧逻辑。
+    pub shadow_instances_submitted: usize,
+    /// 本帧阴影 pass 发出的 `draw_indexed` 次数之和（各级相加）。
+    ///
+    /// 与实例数一起看：剔除把实例切碎成"每批每级一段"，段数会变多；
+    /// 只有实例数明显下降、段数没有失控，这笔交易才划算。
+    pub shadow_draw_calls: usize,
 }
 
 impl FrameStats {
@@ -468,6 +479,32 @@ struct PendingDraw {
     /// 所属不透明批次。
     batch: u32,
     uniform: DrawUniform,
+    /// 该实体落在哪几级级联里（位掩码，bit k = 第 k 级）。
+    ///
+    /// 收集阶段就算好，是因为**包围盒只在那个循环里存在**：阴影 pass 再想
+    /// 判一次就得把世界矩阵与网格包围盒重算一遍（那是剔除想省掉的那份工作）。
+    /// 未开逐级剔除时恒为 [`ALL_CASCADES_MASK`]，于是老路径一位不变。
+    cascade_mask: u8,
+}
+
+/// 全部级联都算命中（逐级剔除关闭时的保守值）。
+const ALL_CASCADES_MASK: u8 = (1u8 << MAX_SHADOW_CASCADES) - 1;
+
+/// 阴影 pass 的一段连续实例：同一批、同一组级联成员位。
+///
+/// 为什么要"分段"而不是"逐实例"：实例数据在 `draw_buffer` 里是一段连续槽位，
+/// `draw_indexed` 只能按 `first_instance..count` 取连续区间。要让某一级只画
+/// 命中它的实例，就得把同一批的实例**按成员位排好**，让每个成员组合各占一段。
+#[derive(Copy, Clone, Debug)]
+struct ShadowRun {
+    /// 批次下标。指向 `opaque_batches` 还是 `shadow_batches` 由持有它的表决定。
+    batch: u32,
+    /// 级联成员位（bit k = 第 k 级要画这一段）。
+    mask: u8,
+    /// 这一段第一个实例的槽位。
+    first: u32,
+    /// 实例数。
+    count: u32,
 }
 
 /// 半透明绘制项：距离是排序键（远→近），每项独立一次 draw call。
@@ -476,6 +513,58 @@ struct BlendedDraw {
     dist: f32,
     batch: DrawBatch,
     uniform: DrawUniform,
+}
+
+/// 把"已按 `(批, 级联成员位)` 排好序"的实例表切成连续段（见 [`ShadowRun`]）。
+///
+/// 前提只有一个：`draws` 已按 `(batch, cascade_mask)` 排序。排序由调用方保证，
+/// 但**正确性不依赖它** —— 顺序不成立时只是切碎成更多段（画面照样对，只是慢）。
+/// 把 `(批次, 成员位, 下标)` 打包成一个 `u64` 排序键。
+///
+/// 布局：`[批次 32 位][成员位 8 位][下标 24 位]`。按下标顺序由低到高排列，
+/// 于是"同一批、同一成员位"的实例在排序后一定是连续的一段。
+/// 下标 24 位 = 1600 万，远超 [`MAX_RENDER_DRAWS`]（8192）。
+fn pack_draw_key(batch: u32, mask: u8, index: u32) -> u64 {
+    debug_assert!(index < (1 << 24), "下标超出打包宽度");
+    ((batch as u64) << 32) | ((mask as u64) << 24) | index as u64
+}
+
+fn unpack_draw_index(key: u64) -> u32 {
+    (key & 0x00FF_FFFF) as u32
+}
+
+fn push_shadow_runs(order: &[u64], batches: &[DrawBatch], out: &mut Vec<ShadowRun>) {
+    out.clear();
+    let mut i = 0usize;
+    while i < order.len() {
+        let batch = (order[i] >> 32) as u32;
+        let batch_start = i;
+        while i < order.len() && (order[i] >> 32) as u32 == batch {
+            let mask = ((order[i] >> 24) & 0xFF) as u8;
+            let run_start = i;
+            while i < order.len() {
+                let key = order[i];
+                if (key >> 32) as u32 != batch || ((key >> 24) & 0xFF) as u8 != mask {
+                    break;
+                }
+                i += 1;
+            }
+            // 全 0 掩码 = 不在任何一级的拟合框里：它投不出落进画面的影子，
+            // 整段不提交（只可能出现在"逐级剔除开 + 相机剔除关"的组合里）。
+            if mask == 0 {
+                continue;
+            }
+            let Some(first) = batches.get(batch as usize).map(|b| b.first) else {
+                continue;
+            };
+            out.push(ShadowRun {
+                batch,
+                mask,
+                first: first + (run_start - batch_start) as u32,
+                count: (i - run_start) as u32,
+            });
+        }
+    }
 }
 
 /// 从批次记录解析出图元（见 [`DrawBatch::entity`] 的说明）。
@@ -638,6 +727,12 @@ pub struct ShadowCascades {
     pub splits: [f32; MAX_SHADOW_CASCADES],
     /// 相机前向（单位向量）。着色器用它把世界坐标换算成"视线方向深度"。
     pub forward: Vec3,
+    /// 每级的拟合框沿**视线方向**的跨度 `(近端, 远端)`。
+    ///
+    /// 逐级剔除的安全前置剪枝要用它（见 `render` 收集阶段的说明）：实体在框里
+    /// ⇒ 它的视线深度必然落在这段里。注意它通常**比 `splits` 那一段更宽** ——
+    /// 框是子视锥在光源空间的外接盒，斜射光下会沿视线方向被拉长。
+    pub view_range: [(f32, f32); MAX_SHADOW_CASCADES],
     /// 每层一个纹素覆盖的世界尺寸（米）。诊断 / 实测用：它直接决定影子边缘
     /// 能有多锐，也是"CSM 把精度提了多少倍"的唯一量化口径。
     pub texel_world: [f32; MAX_SHADOW_CASCADES],
@@ -781,6 +876,7 @@ pub fn cascade_shadow_matrices(
         view_proj: [Mat4::IDENTITY; MAX_SHADOW_CASCADES],
         splits: [0.0; MAX_SHADOW_CASCADES],
         forward,
+        view_range: [(0.0, 0.0); MAX_SHADOW_CASCADES],
         texel_world: [0.0; MAX_SHADOW_CASCADES],
     };
 
@@ -846,6 +942,34 @@ pub fn cascade_shadow_matrices(
         out.view_proj[c] = proj * view;
         out.splits[c] = d1;
         out.texel_world[c] = texel;
+
+        // 拟合框沿视线方向的跨度：反推 8 个角点再投影到 `forward`。
+        //
+        // 这是逐级剔除的**剪枝**依据（不是判据）：框是凸体、视线深度是线性函数，
+        // 所以框内任意点的深度必然落在这段里 —— "深度区间不相交"⇒"一定不在框里"。
+        // 反过来不成立：斜射光下框沿光线方向被拉长，能装下视线深度之外的投影物，
+        // 所以区间相交时**仍然**要做完整视锥测试。
+        let inv = out.view_proj[c].inverse();
+        let mut dmin = f32::INFINITY;
+        let mut dmax = f32::NEG_INFINITY;
+        for i in 0..8 {
+            let ndc = Vec3::new(
+                if i & 1 == 0 { -1.0 } else { 1.0 },
+                if i & 2 == 0 { -1.0 } else { 1.0 },
+                if i & 4 == 0 { 0.0 } else { 1.0 },
+            );
+            let p = inv.transform_point3(ndc);
+            if !p.is_finite() {
+                return None;
+            }
+            let d = (p - camera_pos).dot(forward);
+            dmin = dmin.min(d);
+            dmax = dmax.max(d);
+        }
+        if !dmin.is_finite() || !dmax.is_finite() {
+            return None;
+        }
+        out.view_range[c] = (dmin, dmax);
     }
 
     Some(out)
@@ -1399,6 +1523,27 @@ pub struct ScenePipeline {
 
     /// 视锥剔除开关（默认开）。见 [`ScenePipeline::set_frustum_culling`]。
     frustum_culling: bool,
+    /// 阴影**逐级**剔除开关（默认开）。见
+    /// [`ScenePipeline::set_cascaded_shadow_culling`]。
+    cascaded_shadow_culling: bool,
+    /// 本帧不透明批次里"按级联成员位切好"的段（写入端见收集阶段末尾）。
+    shadow_runs: Vec<ShadowRun>,
+    /// 本帧阴影专用批次的段（同上，槽位在 `shadow_batches` 那一段）。
+    shadow_only_runs: Vec<ShadowRun>,
+    /// 本帧每级级联的视锥（长度 = 级数）。`None` = 那级的矩阵退化，
+    /// 判成员位时按"全都命中"处理 —— 宁可多画，不能漏影子。
+    cascade_frustums: Vec<Option<Frustum>>,
+    /// 每级拟合框沿视线方向的跨度（长度 = 级数）。逐级剔除的前置剪枝。
+    cascade_view_range: Vec<(f32, f32)>,
+    /// 不透明实例的写入顺序：打包成 `u64` 的 `(批 | 成员位 | 下标)`，按值排序。
+    ///
+    /// 为什么打包而不是排下标：按下标排要在每次比较里随机访问 `pending_draws`
+    /// （4 字节键、400 KB 数组 ⇒ 几乎每次比较都吃一次缓存缺失）。把判定字段
+    /// 直接放进键里，排序变成纯粹的 `u64` 比较 —— 实测这一段从 20 µs 掉到 5 µs 级。
+    /// 未开逐级剔除时为空，那条路径按原序直接遍历。
+    draw_order: Vec<u64>,
+    /// 阴影专用实例的写入顺序（同上，打包格式一致）。
+    shadow_order: Vec<u64>,
     /// 灯没写 `shadow_resolution` 时用的阴影贴图边长（质量档位决定，
     /// 见 [`xgame_core::quality`]）。默认 [`DEFAULT_SHADOW_RESOLUTION`]。
     default_shadow_resolution: u32,
@@ -1729,6 +1874,13 @@ impl ScenePipeline {
             shadow_pending: Vec::new(),
             shadow_batch_index: HashMap::new(),
             frustum_culling: true,
+            cascaded_shadow_culling: true,
+            shadow_runs: Vec::new(),
+            shadow_only_runs: Vec::new(),
+            cascade_frustums: Vec::new(),
+            cascade_view_range: Vec::new(),
+            draw_order: Vec::new(),
+            shadow_order: Vec::new(),
             default_shadow_resolution: DEFAULT_SHADOW_RESOLUTION,
             stats: FrameStats::default(),
             particles: crate::particles::ParticleRenderer::new(device, format, sample_count),
@@ -1773,6 +1925,25 @@ impl ScenePipeline {
     /// 当前是否开了视锥剔除。
     pub fn frustum_culling(&self) -> bool {
         self.frustum_culling
+    }
+
+    /// 开关阴影**逐级**剔除（默认开）—— 只给 A/B 测试与基准用。
+    ///
+    /// 开：每级只画落在该级视锥里的实例（含"相机外但影子落在该级里"的投影物）。
+    /// 关：每级都画全部投影物 —— 这是引入逐级剔除前的行为，画面**必须**逐位一致
+    /// （`cascaded_shadow_culling_matches_unculled_pixels` 钉死），否则说明成员位
+    /// 或段切分写错了。
+    ///
+    /// 与 [`Self::set_frustum_culling`] 是**两个独立的旋钮**：前者管主 pass 看什么，
+    /// 后者管阴影 pass 看什么。关掉相机剔除并不等于关掉阴影剔除（阴影的成员位是
+    /// 拿级联视锥单独判的）。
+    pub fn set_cascaded_shadow_culling(&mut self, enabled: bool) {
+        self.cascaded_shadow_culling = enabled;
+    }
+
+    /// 当前是否开了阴影逐级剔除。
+    pub fn cascaded_shadow_culling(&self) -> bool {
+        self.cascaded_shadow_culling
     }
 
     /// 创建阴影深度图层（深度数组，一层一个级联）。
@@ -2371,13 +2542,18 @@ impl ScenePipeline {
         // 阴影视锥只在真的开了阴影时才有意义；矩阵退化时保守地认为所有
         // 物体都投影（`is_none_or`）。
         //
-        // 剔除用**最后一级**（覆盖最远、最宽）：它能见 = 至少某一层能见。
-        // 用第 0 层会漏掉"近处看不见、影子却落在远处"的那批物体。
-        let shadow_frustum = cascades.as_ref().and_then(|c| {
-            c.view_proj
-                .get(c.count.saturating_sub(1))
-                .and_then(Frustum::from_view_proj)
-        });
+        // 每级各存一个：**逐级剔除**靠它判成员位，"相机外但影子落在第 k 级里"
+        // 的投影物要跟着第 k 级走。空间上不同级的拟合框基本不重叠（都在相机
+        // 视锥的不同深度段上），所以一个投影物通常只属于 1~2 级。
+        self.cascade_frustums.clear();
+        self.cascade_view_range.clear();
+        if let Some(c) = &cascades {
+            for k in 0..c.count {
+                self.cascade_frustums
+                    .push(Frustum::from_view_proj(&c.view_proj[k]));
+                self.cascade_view_range.push(c.view_range[k]);
+            }
+        }
 
         // --- 收集绘制项：分组（不透明）+ 排序键（半透明），实例数据攒进 staging ---
         // 不透明与半透明分开收集：半透明要按到相机的距离从远到近排序，
@@ -2398,6 +2574,9 @@ impl ScenePipeline {
         // 骨骼暂存同理：本帧每个动画实体占一个新槽，槽位随实体序单调递增。
         self.bone_staging.clear();
         let mut bone_slots_used = 0u32;
+        // 相机前向（阴影级联的视线轴）：逐级剔除的快速判据用它量深度。
+        // 没有阴影时用 `NEG_Z` 占位（那条分支根本不会被走到）。
+        let cascade_forward = cascades.as_ref().map(|c| c.forward);
         // 本帧用掉的**实例槽位**数（不透明实例 + 半透明绘制项 + 阴影专用实例），
         // 上限 [`MAX_RENDER_DRAWS`]：超出静默丢弃（见该常量的说明）。
         let mut draw_slots_used = 0usize;
@@ -2451,20 +2630,64 @@ impl ScenePipeline {
             //   相机内               → 主 pass（阴影 pass 复用同一批）
             //   相机外、影子里       → `shadow_batches`（只投影，不进主 pass）
             //   两边都外             → 整实体跳过
-            let mut draw_in_main = true;
+            //
+            // 包围盒**只算一次**：相机剔除与阴影逐级剔除都要用它，两边各算一遍
+            // 等于把"剔除省下的那份工作"又花回去。
+            let need_bounds =
+                camera_frustum.is_some() || (shadow_enabled && self.cascaded_shadow_culling);
+            let bounds = need_bounds.then(|| cull_bounds(mesh, &world, entity.animator.is_some()));
+
+            let mut in_camera = true;
             if let Some(camera_frustum) = camera_frustum {
-                let bounds = cull_bounds(mesh, &world, entity.animator.is_some());
-                let in_camera = camera_frustum.intersects_bounds(&bounds);
-                let in_shadow = shadow_enabled
-                    && shadow_frustum
-                        .as_ref()
-                        .is_none_or(|f| f.intersects_bounds(&bounds));
-                if !in_camera && !in_shadow {
-                    culled_entities += 1;
-                    culled_instances += mesh.primitives.len();
-                    continue;
+                in_camera = camera_frustum.intersects_bounds(
+                    bounds.as_ref().expect("开了相机剔除就一定有包围盒"),
+                );
+            }
+
+            // 级联成员位：这一实体落在哪几级的拟合框里。
+            //
+            // 两条判据，**结果等价但代价差三倍**：
+            //
+            // 先用**视线深度区间**做一次安全剪枝，再做完整视锥测试：
+            //
+            // - 剪枝（便宜）：实体在某一级的拟合框里 ⇒ 它的视线深度必然落在
+            //   那个框的跨度 `[D0, D1]` 里（框是凸体、深度是线性函数，极值在
+            //   角点上）。所以"区间与 [D0, D1] 不相交"⇒"一定不在框里"，四个
+            //   视锥测试里通常只剩 1~2 个要真做。
+            // - 判据（精确）：`intersects_bounds`。**不能**把剪枝当判据用：
+            //   斜射光下拟合框沿光线方向被拉长，能装下视线深度之外的投影物
+            //   （正是 `offscreen_casters_still_cast_shadows` 那种情况）——
+            //   拿深度区间当判据会把这些投影物漏掉，影子凭空缺一块。
+            //
+            // 关掉逐级剔除时给保守值（全都算命中）—— 那正是引入它之前的
+            // "每级都画一遍"，A/B 像素等价测试拿这一点做对照。
+            let mut cascade_mask = if shadow_enabled { ALL_CASCADES_MASK } else { 0 };
+            if shadow_enabled && self.cascaded_shadow_culling {
+                if let Some(bounds) = bounds.as_ref() {
+                    cascade_mask = 0;
+                    // 实体的视线深度区间（一次点积，四级共用）。
+                    let center_depth = (bounds.center() - *camera_pos)
+                        .dot(cascade_forward.unwrap_or(Vec3::NEG_Z));
+                    let radius = bounds.radius();
+                    let (zmin, zmax) = (center_depth - radius, center_depth + radius);
+                    for (k, frustum) in self.cascade_frustums.iter().enumerate() {
+                        if let Some((d0, d1)) = self.cascade_view_range.get(k) {
+                            if zmax < *d0 || zmin > *d1 {
+                                continue;
+                            }
+                        }
+                        if frustum.is_none_or(|f| f.intersects_bounds(bounds)) {
+                            cascade_mask |= 1 << k;
+                        }
+                    }
                 }
-                draw_in_main = in_camera;
+            }
+
+            let draw_in_main = in_camera;
+            if camera_frustum.is_some() && !in_camera && (!shadow_enabled || cascade_mask == 0) {
+                culled_entities += 1;
+                culled_instances += mesh.primitives.len();
+                continue;
             }
 
             // -- 蒙皮槽位 --
@@ -2666,7 +2889,11 @@ impl ScenePipeline {
                         }
                     };
                     self.shadow_batches[batch as usize].count += 1;
-                    self.shadow_pending.push(PendingDraw { batch, uniform });
+                    self.shadow_pending.push(PendingDraw {
+                        batch,
+                        uniform,
+                        cascade_mask,
+                    });
                 } else if effective.blend {
                     // 半透明：一项一个批次（不做合批，见模块头），距离排序键留好。
                     self.blended_draws.push(BlendedDraw {
@@ -2708,7 +2935,11 @@ impl ScenePipeline {
                     };
                     let batch_ref = &mut self.opaque_batches[batch as usize];
                     batch_ref.count += 1;
-                    self.pending_draws.push(PendingDraw { batch, uniform });
+                    self.pending_draws.push(PendingDraw {
+                        batch,
+                        uniform,
+                        cascade_mask,
+                    });
                 }
             }
         }
@@ -2729,6 +2960,34 @@ impl ScenePipeline {
                 .partial_cmp(&a.dist)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        // 阴影逐级剔除要求"同一批的实例按级联成员位聚在一起"（`draw_indexed`
+        // 只能取连续区间）。不透明实例之间**顺序无意义**（都写深度、不混合），
+        // 所以这里可以放心重排。
+        //
+        // 排的是**下标**不是绘制项本身：`PendingDraw` 带着一整个 `DrawUniform`
+        // （约 200 字节），两千个元素互换位置要搬 400 KB 内存 —— 实测那一步
+        // 就要 40 µs 上下，把阴影省下的 GPU 时间在 CPU 上又吐回去。排 4 字节的
+        // 下标，代价是一个数量级以下。
+        //
+        // 关掉逐级剔除时保持原序 —— 那条路径要与引入前的行为逐位一致。
+        self.draw_order.clear();
+        self.shadow_order.clear();
+        if self.cascaded_shadow_culling {
+            self.draw_order.extend(
+                self.pending_draws
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| pack_draw_key(d.batch, d.cascade_mask, i as u32)),
+            );
+            self.draw_order.sort_unstable();
+            self.shadow_order.extend(
+                self.shadow_pending
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| pack_draw_key(d.batch, d.cascade_mask, i as u32)),
+            );
+            self.shadow_order.sort_unstable();
+        }
         let mut next_slot = 0u32;
         for batch in &mut self.opaque_batches {
             batch.first = next_slot;
@@ -2743,6 +3002,22 @@ impl ScenePipeline {
             next_slot += batch.count;
         }
 
+        // --- 阴影分段（`first` 定下来之后才能算）---
+        //
+        // 逐级剔除关掉时清空：阴影 pass 退回"每级画全部"的老路径，代价是
+        // 4 × 实例数，但那正是 A/B 对照的基准档。
+        if shadow_enabled && self.cascaded_shadow_culling {
+            push_shadow_runs(&self.draw_order, &self.opaque_batches, &mut self.shadow_runs);
+            push_shadow_runs(
+                &self.shadow_order,
+                &self.shadow_batches,
+                &mut self.shadow_only_runs,
+            );
+        } else {
+            self.shadow_runs.clear();
+            self.shadow_only_runs.clear();
+        }
+
         let stride = DRAW_STRIDE;
         self.draw_staging.clear();
         self.draw_staging.resize(next_slot as usize * stride, 0);
@@ -2751,12 +3026,23 @@ impl ScenePipeline {
             self.batch_cursor.clear();
             self.batch_cursor
                 .extend(self.opaque_batches.iter().map(|b| b.first));
-            for draw in &self.pending_draws {
-                let cursor = &mut self.batch_cursor[draw.batch as usize];
-                let offset = *cursor as usize * stride;
-                *cursor += 1;
-                self.draw_staging[offset..offset + stride]
-                    .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+            if self.cascaded_shadow_culling {
+                for &key in &self.draw_order {
+                    let draw = &self.pending_draws[unpack_draw_index(key) as usize];
+                    let cursor = &mut self.batch_cursor[draw.batch as usize];
+                    let offset = *cursor as usize * stride;
+                    *cursor += 1;
+                    self.draw_staging[offset..offset + stride]
+                        .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                }
+            } else {
+                for draw in &self.pending_draws {
+                    let cursor = &mut self.batch_cursor[draw.batch as usize];
+                    let offset = *cursor as usize * stride;
+                    *cursor += 1;
+                    self.draw_staging[offset..offset + stride]
+                        .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                }
             }
             // 半透明：排序后一路往后排。
             for draw in &self.blended_draws {
@@ -2768,12 +3054,23 @@ impl ScenePipeline {
             self.batch_cursor.clear();
             self.batch_cursor
                 .extend(self.shadow_batches.iter().map(|b| b.first));
-            for draw in &self.shadow_pending {
-                let cursor = &mut self.batch_cursor[draw.batch as usize];
-                let offset = *cursor as usize * stride;
-                *cursor += 1;
-                self.draw_staging[offset..offset + stride]
-                    .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+            if self.cascaded_shadow_culling {
+                for &key in &self.shadow_order {
+                    let draw = &self.shadow_pending[unpack_draw_index(key) as usize];
+                    let cursor = &mut self.batch_cursor[draw.batch as usize];
+                    let offset = *cursor as usize * stride;
+                    *cursor += 1;
+                    self.draw_staging[offset..offset + stride]
+                        .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                }
+            } else {
+                for draw in &self.shadow_pending {
+                    let cursor = &mut self.batch_cursor[draw.batch as usize];
+                    let offset = *cursor as usize * stride;
+                    *cursor += 1;
+                    self.draw_staging[offset..offset + stride]
+                        .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                }
             }
             // 一次写完整段实例数据（见 `draw_staging` 的说明）。
             queue.write_buffer(&self.draw_buffer, 0, &self.draw_staging);
@@ -2802,6 +3099,8 @@ impl ScenePipeline {
             shadow_only_instances: self.shadow_pending.len(),
             distance_culled_entities,
             low_lod_instances,
+            shadow_instances_submitted: 0,
+            shadow_draw_calls: 0,
         };
 
         // --- 阴影 pass：每层画一遍深度（必须在主 pass 之前）---
@@ -2815,6 +3114,9 @@ impl ScenePipeline {
         // 每层的 UV 映射得各自缩放、PCF 在象限边界上要夹紧，代码复杂度不值
         // 那点收益。层数 = `cascades.count`，空场景时整段跳过。
         if let Some(c) = &cascades {
+            let cascaded = self.cascaded_shadow_culling;
+            let mut shadow_submitted = 0usize;
+            let mut shadow_calls = 0usize;
             for cascade in 0..c.count {
                 let Some(layer_view) = self.shadow_layer_views.get(cascade) else {
                     break;
@@ -2842,22 +3144,81 @@ impl ScenePipeline {
                     &self.shadow_pass_bind_group,
                     &[(cascade as u64 * SHADOW_PASS_STRIDE) as u32],
                 );
-                for batch in self.opaque_batches.iter().chain(self.shadow_batches.iter()) {
-                    let Some(prim) = batch_prim(entities, model_cache, batch) else {
-                        continue;
-                    };
-                    spass.set_vertex_buffer(
-                        0,
-                        batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
-                    );
-                    spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
-                    spass.draw_indexed(
-                        0..prim.num_indices,
-                        0,
-                        batch.first..batch.first + batch.count,
-                    );
+                if cascaded {
+                    // 逐级剔除：只提交成员位带本级的段。
+                    //
+                    // 两张批次表分开走（段里的 `batch` 是各自表内的下标），
+                    // 每张表内相邻段多半属于同一批 —— 记住绑过的图元，
+                    // 避免为每一段重设顶点 / 索引缓冲。
+                    let bit = 1u8 << cascade;
+                    for (table, runs, batches) in [
+                        (0u8, &self.shadow_runs[..], &self.opaque_batches[..]),
+                        (1u8, &self.shadow_only_runs[..], &self.shadow_batches[..]),
+                    ] {
+                        let mut bound: Option<(u8, u32, &GltfPrimitive)> = None;
+                        for run in runs {
+                            if run.mask & bit == 0 {
+                                continue;
+                            }
+                            let Some(batch) = batches.get(run.batch as usize) else {
+                                continue;
+                            };
+                            let prim = match bound {
+                                Some((t, b, prim)) if t == table && b == run.batch => prim,
+                                _ => {
+                                    let Some(prim) = batch_prim(entities, model_cache, batch)
+                                    else {
+                                        continue;
+                                    };
+                                    spass.set_vertex_buffer(
+                                        0,
+                                        batch_vertex_buffer(
+                                            entities,
+                                            &self.morph_buffers,
+                                            prim,
+                                            batch,
+                                        ),
+                                    );
+                                    spass.set_index_buffer(
+                                        prim.index_buffer.slice(..),
+                                        prim.index_format,
+                                    );
+                                    bound = Some((table, run.batch, prim));
+                                    prim
+                                }
+                            };
+                            spass.draw_indexed(
+                                0..prim.num_indices,
+                                0,
+                                run.first..run.first + run.count,
+                            );
+                            shadow_submitted += run.count as usize;
+                            shadow_calls += 1;
+                        }
+                    }
+                } else {
+                    // 老路径（逐级剔除关）：每级画全部投影物。A/B 基准的对照档。
+                    for batch in self.opaque_batches.iter().chain(self.shadow_batches.iter()) {
+                        let Some(prim) = batch_prim(entities, model_cache, batch) else {
+                            continue;
+                        };
+                        spass.set_vertex_buffer(
+                            0,
+                            batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
+                        );
+                        spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
+                        spass.draw_indexed(
+                            0..prim.num_indices,
+                            0,
+                            batch.first..batch.first + batch.count,
+                        );
+                        shadow_submitted += batch.count as usize;
+                        shadow_calls += 1;
+                    }
                 }
             }
+            self.stats.shadow_instances_submitted = shadow_submitted;
+            self.stats.shadow_draw_calls = shadow_calls;
         }
 
         // 粒子：实例数据与相机基在开 pass 之前就备好（`prepare` 里做了 alpha

@@ -399,7 +399,7 @@ const fn api(
     }
 }
 
-/// 全部 173 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
+/// 全部 176 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
 const FUNCTIONS: &[ApiDef] = &[
     api(
         "transform",
@@ -827,6 +827,27 @@ const FUNCTIONS: &[ApiDef] = &[
         "axis(ctx, axis)",
         "number",
         r#"轴的值（-1 … 1）"#,
+    ),
+    api(
+        "input",
+        "pad_button_down",
+        "pad_button_down(ctx, button)",
+        "boolean",
+        r#"手柄按键是否按住（任意一台手柄）：`south` / `east` / `west` / `north` / `left_bumper` / `right_bumper` / `left_trigger` / `right_trigger` / `select` / `start` / `guide` / `left_stick` / `right_stick` / `dpad_up` / `dpad_down` / `dpad_left` / `dpad_right`"#,
+    ),
+    api(
+        "input",
+        "pad_axis",
+        "pad_axis(ctx, axis)",
+        "number",
+        r#"手柄轴的值：摇杆 `left_x` / `left_y` / `right_x` / `right_y` 为 -1…1（`+y` 向上），扳机 `left_trigger` / `right_trigger` 为 0…1"#,
+    ),
+    api(
+        "input",
+        "pad_connected",
+        "pad_connected(ctx)",
+        "boolean",
+        r#"是否有手柄连着"#,
     ),
     api(
         "input",
@@ -1607,7 +1628,7 @@ mod tests {
         let doc = script_api();
         assert_eq!(doc.format_version, SCRIPT_API_FORMAT_VERSION);
         assert_eq!(doc.categories.len(), 18);
-        assert_eq!(doc.function_count(), 173);
+        assert_eq!(doc.function_count(), 176);
         assert_eq!(doc.hooks.len(), 6);
         assert_eq!(doc.value_types.len(), 7);
         assert!(!doc.conventions.is_empty());
@@ -1650,7 +1671,7 @@ mod tests {
             );
             assert!(!function.params.is_empty(), "{} 没有参数", function.name);
         }
-        assert_eq!(names.len(), 173);
+        assert_eq!(names.len(), 176);
     }
 
     #[test]

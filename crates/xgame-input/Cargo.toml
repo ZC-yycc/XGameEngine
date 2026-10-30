@@ -15,6 +15,12 @@ ron = "0.8"
 # 只有编辑器 / 独立游戏这两个真正接窗口的二进制才打开这个 feature。
 winit = { version = "0.30", optional = true }
 
+# 可选：手柄后端（`gilrs` 会在后台线程里读平台设备）。
+# 与 `winit` 同一个理由：核心层保持"无窗口、无设备"才能被单测与回放复用。
+# 只有编辑器与独立游戏打开它。
+gilrs = { version = "0.11", optional = true }
+
 [features]
 default = []
 winit = ["dep:winit"]
+gilrs = ["dep:gilrs"]

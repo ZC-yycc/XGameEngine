@@ -43,7 +43,9 @@ xgame-derive = { path = "../xgame-derive" }
 xgame-math = { path = "../xgame-math" }
 xgame-render = { path = "../xgame-render" }
 xgame-physics = { path = "../xgame-physics" }
-xgame-input = { path = "../xgame-input" }
+# `gilrs`：Play 态要能用手柄试玩（与独立游戏同一套后端）。
+# 编辑器不是库 crate，把设备后端收进来不影响插件构建。
+xgame-input = { path = "../xgame-input", features = ["gilrs"] }
 xgame-script = { path = "../xgame-script" }
 xgame-runtime = { path = "../xgame-runtime" }
 xgame-particle = { path = "../xgame-particle" }

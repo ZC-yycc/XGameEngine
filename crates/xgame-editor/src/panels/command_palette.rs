@@ -48,6 +48,7 @@ pub enum PaletteAction {
     OpenScene(String),
     SetStartupScene,
     ToggleGrid,
+    ToggleOrtho,
     TogglePhysicsDebug,
     OpenSettings,
     OpenPreferences,
@@ -402,6 +403,10 @@ fn execute(action: PaletteAction, state: &mut EditorState, tree: &mut egui_tiles
             let _ = state.set_startup_scene(&current);
         }
         PaletteAction::ToggleGrid => state.show_grid = !state.show_grid,
+        PaletteAction::ToggleOrtho => {
+            let on = state.editor_camera.toggle_ortho();
+            state.log_info(if on { "投影：正交" } else { "投影：透视" });
+        }
         PaletteAction::TogglePhysicsDebug => {
             state.show_physics_debug = !state.show_physics_debug
         }
@@ -548,6 +553,14 @@ fn build_commands(state: &EditorState) -> Vec<Command> {
             true,
         ),
         cmd("视图", "切换网格", "grid", "", PaletteAction::ToggleGrid, false),
+        cmd(
+            "视图",
+            "切换正交投影",
+            "ortho projection",
+            "5",
+            PaletteAction::ToggleOrtho,
+            false,
+        ),
         cmd(
             "视图",
             "切换物理调试绘制",

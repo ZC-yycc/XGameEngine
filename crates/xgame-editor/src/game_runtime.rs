@@ -229,7 +229,9 @@ impl GameRuntime {
 pub(crate) fn load_input_map(project_root: &Path) -> InputMap {
     let path = project_root.join(INPUT_MAP_FILE);
     match InputMap::load(&path) {
-        Ok(Some(map)) => map,
+        // 老项目（写 `input.ron` 时还没有手柄支持）自动补默认手柄绑定；
+        // 作者一旦写了自己的手柄绑定就不再补（判据见 `with_pad_defaults_if_absent`）。
+        Ok(Some(map)) => map.with_pad_defaults_if_absent(),
         Ok(None) => InputMap::default_game(),
         Err(e) => {
             log::warn!("输入映射 {} 解析失败，改用默认映射: {e}", path.display());

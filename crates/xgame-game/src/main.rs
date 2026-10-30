@@ -89,6 +89,11 @@ struct GameApp {
     project: ProjectHandle,
     /// 运行时世界：场景 + 物理 + 输入 + 脚本。
     world: World,
+    /// 手柄后端：每帧排空一次事件队列。
+    ///
+    /// `None` = 这台机器上初始化失败（没有 XInput / 没有权限）。手柄不可用
+    /// **不该**让游戏起不来，所以只记一条 warn 就继续。
+    gamepads: Option<xgame_input::GamepadHub>,
     /// 已加载的 Rust 插件句柄（`Plugins/*.dll`，P0.5）。
     ///
     /// **必须声明在 `world` 之后**：struct 字段按声明顺序 drop，`world` 里的
@@ -235,7 +240,8 @@ impl GameApp {
         let input_map = match InputMap::load(&input_path) {
             Ok(Some(map)) => {
                 log::info!("已加载输入映射 {}", input_path.display());
-                map
+                // 老项目自动补默认手柄绑定（作者一旦写过手柄绑定就不再补）。
+                map.with_pad_defaults_if_absent()
             }
             Ok(None) => InputMap::default_game(),
             Err(e) => {
@@ -285,9 +291,15 @@ impl GameApp {
         // `load_scene_at(i)` 都读它。未配置 = 空，脚本只能按路径切。
         .with_scene_order(project.manifest().scene_order());
 
+        // 手柄后端：初始化失败只记 warn（没有 XInput 的机器照样能玩键鼠）。
+        let gamepads = xgame_input::GamepadHub::new()
+            .map_err(|e| log::warn!("{e}（手柄不可用，键鼠照常）"))
+            .ok();
+
         Self {
             project,
             world,
+            gamepads,
             plugins,
             pipeline,
             device,
@@ -393,6 +405,11 @@ impl GameApp {
     }
 
     fn update(&mut self, dt: f32) {
+        // 手柄事件：**每帧**排空一次（不调用就完全没反应，连插拔都收不到）。
+        // 必须在 `world.update` 之前 —— 脚本这一帧要读到本帧的摇杆值。
+        if let Some(hub) = self.gamepads.as_mut() {
+            hub.poll(self.world.input_mut().state_mut());
+        }
         // UI 的视口与指针：窗口坐标即物理像素（winit 给的 CursorMoved 就是），
         // 所以这里不需要缩放。编辑器那边则要把 egui 的逻辑点换算成视口像素。
         self.world

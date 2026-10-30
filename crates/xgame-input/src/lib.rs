@@ -36,11 +36,18 @@
 
 mod action;
 mod key;
+mod pad;
 mod state;
 
-pub use action::{AxisBinding, Binding, Input, InputMap, InputMapError};
+pub use action::{AnalogBinding, AxisBinding, Binding, Input, InputMap, InputMapError};
 pub use key::{KeyCode, MouseButton};
+pub use pad::{apply_deadzone, GamepadAxis, GamepadButton, PadState, AXIS_COUNT};
 pub use state::InputState;
 
 #[cfg(feature = "winit")]
 pub use key::key_from_winit;
+
+#[cfg(feature = "gilrs")]
+mod gamepad_hub;
+#[cfg(feature = "gilrs")]
+pub use gamepad_hub::GamepadHub;

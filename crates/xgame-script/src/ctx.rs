@@ -42,7 +42,7 @@ use xgame_core::{
     same_scene_path, Entity, EntityId, GameClock, PhysicsBody, PhysicsHandle, PlaySound, Scene,
     SceneLoader,
 };
-use xgame_input::{Input, KeyCode, MouseButton};
+use xgame_input::{GamepadAxis, GamepadButton, Input, KeyCode, MouseButton};
 use xgame_math::glam::{Quat, Vec2, Vec3};
 use xgame_physics::{PhysicsRayHit, PhysicsWorld, RaycastFilter};
 
@@ -1574,6 +1574,34 @@ impl GameCtx<'_> {
     /// 轴的当前值（-1..=1，双向轴）。
     pub fn axis(&mut self, axis: &str) -> f32 {
         self.input.map(|i| i.axis(axis)).unwrap_or(0.0)
+    }
+
+    // -- 手柄（语义名，见 `Docs/脚本API.md` 的「手柄」一节）--
+
+    /// 手柄按键是否按住（**任意一台**手柄成立即可）。
+    ///
+    /// 名字写错了记一条警告：手柄按键名（`south` / `left_bumper` …）不像
+    /// `W` 那样有直觉，打错只会表现为"按了没反应"，很难自己发现。
+    pub fn pad_button_down(&mut self, button: &str) -> bool {
+        let Some(b) = GamepadButton::from_name(button) else {
+            self.warn(format!("未知手柄按键 '{button}'"));
+            return false;
+        };
+        self.input.map(|i| i.pad_button_down(b)).unwrap_or(false)
+    }
+
+    /// 手柄某根轴的当前值（摇杆 -1..=1，扳机 0..=1）。
+    pub fn pad_axis(&mut self, axis: &str) -> f32 {
+        let Some(a) = GamepadAxis::from_name(axis) else {
+            self.warn(format!("未知手柄轴 '{axis}'"));
+            return 0.0;
+        };
+        self.input.map(|i| i.pad_axis(a)).unwrap_or(0.0)
+    }
+
+    /// 有没有手柄连着（做"请插入手柄"提示用）。
+    pub fn pad_connected(&mut self) -> bool {
+        self.input.map(|i| i.pad_connected()).unwrap_or(false)
     }
 
     /// 按键是否按住。名字未知时记一条警告 —— 打错键名很难自己发现。

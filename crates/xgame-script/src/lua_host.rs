@@ -1996,7 +1996,7 @@ mod tests {
     ///
     /// 不靠运行期枚举全局表：Lua 基础库也有 `error` 等函数，而引擎恰好覆盖了
     /// 同名全局；用集合差分会把被覆盖的名字漏掉。直接读注册源码能精确拿到
-    /// 引擎自己注册的 173 个名字。
+    /// 引擎自己注册的 176 个名字。
     fn registered_global_names(source: &str) -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let mut rest = source;
@@ -2040,8 +2040,8 @@ mod tests {
         );
         assert_eq!(
             actual.len(),
-            173,
-            "注册名数量应为 173（2026-10-29 加音量总线 4 个：play_sound_bus / play_sound_at_bus / set_bus_volume / bus_volume）"
+            176,
+            "注册名数量应为 176（2026-10-30 加手柄 3 个：pad_button_down / pad_axis / pad_connected）"
         );
 
         let host = LuaHost::new();

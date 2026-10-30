@@ -1047,6 +1047,23 @@ fn register_input(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     )?;
 
     globals.set(
+        "pad_button_down",
+        lua.create_function(|_, (ctx, button): (LuaCtx, String)| {
+            Ok(ctx.game().pad_button_down(&button))
+        })?,
+    )?;
+    globals.set(
+        "pad_axis",
+        lua.create_function(|_, (ctx, axis): (LuaCtx, String)| {
+            Ok(ctx.game().pad_axis(&axis))
+        })?,
+    )?;
+    globals.set(
+        "pad_connected",
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().pad_connected()))?,
+    )?;
+
+    globals.set(
         "key_down",
         lua.create_function(|_, (ctx, key): (LuaCtx, String)| Ok(ctx.game().key_down(&key)))?,
     )?;

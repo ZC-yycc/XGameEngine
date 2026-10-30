@@ -22,3 +22,6 @@ serde = { version = "1", features = ["derive"] }
 # 引擎侧只依赖门面 crate：宿主代码 `use xgame::prelude::*;` 拿到全部类型，
 # 引擎内部的模块布局变化不再波及这里。winit 按键翻译的 feature 由门面开启。
 xgame = { path = "../xgame" }
+# 手柄后端：宿主自己开 feature，不用门面转手 —— `xgame` 同时是插件 SDK，
+# 不该把设备后端带进每一个插件 cdylib。
+xgame-input = { path = "../xgame-input", features = ["gilrs"] }
