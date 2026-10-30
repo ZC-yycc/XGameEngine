@@ -27,7 +27,7 @@ cargo run -p xgame-editor -- --check projects/SampleScene
 # （无 --out 打 stdout；同一份代码两次导出逐字节相同）
 cargo run -p xgame-editor -- --export-schema --out schema.json
 
-# 脚本 API 清单 —— 导出 178 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
+# 脚本 API 清单 —— 导出 179 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
 # （与 MCP `script_api_read` 同源；无 --out 打 stdout）
 cargo run -p xgame-editor -- --export-script-api --out script_api.json
 
@@ -361,9 +361,9 @@ lights: [
 
 - **每种只做一盏**。第一盏开了 `casts_shadow` 的方向光 / 点光各自投影。多盏各自的
   阴影贴图意味着每盏一遍全场景重绘 —— 先把一盏做扎实，比铺开十几盏半成品值得。
-- **点光六面不做逐面剔除**（v1）：漏画一面的症状（某个方向没影子、其余五面正常）
-  比浪费难查得多。实测（2000 方块 / 1280×720 / RTX 2060）六面共提交 8070 实例、
-  场景段 GPU +89.7 µs —— 比方向光"4 级全画"的 8000 实例 / +99.8 µs 还便宜一点。
+- **点光六面做保守逐面剔除**：每实体算 6 位面掩码，只许多画、不许漏画；GPU 用
+  4 字节索引重映射表选实例，不复制整份实例数据。2000 方块实测提交量
+  **12000 → 2013（−83%）**、场景段 GPU **195 → 115 µs**；开关两档像素逐字节一致。
 - **正交视锥按场景世界包围盒拟合**，而不是拍一个固定大小的盒子：贴图分辨率固定，
   视锥开太大精度就被稀释成噪点，开太小边缘的物体直接没影子。
 - **半透明图元不投阴影**。玻璃本来也不该在地上投一块实心黑斑。
@@ -418,22 +418,35 @@ lights: [
             speed: 1.5,       // 叠加层自己的时钟速度
             looping: true,
         )),
-        // 可选：混合层栈 —— 每层独立时钟 + Additive/Override 模式 + 骨骼遮罩，按数组
-        // 顺序依次合到当前姿势上（后层盖前层）。求值次序：基础 → additive → layers。
+        // 可选：混合层栈 / 分层状态机 —— 每层独立时钟 + Additive/Override 模式 +
+        // 骨骼遮罩，按数组顺序依次合到当前姿势上。求值次序：基础 → additive → layers。
         layers: [
             (
                 name: "upper",       // 脚本 set_anim_layer_weight(ctx, "upper", w) 按名查找
                 mode: Override,      // Override = 向这层姿势整段 lerp（Additive = 加增量）
-                clip: "Survey",
+                clip: "Walk",         // machine 可用时只作直接层后备，不决定实际播放
                 weight: 0.0,         // 0 = 这层不参与；走路段脚本推到 0.6（见 FoxLocomotion.lua）
                 speed: 1.0,
                 looping: true,
+                fade_time: 0.25,     // 本层机器缺省淡入；转移自己的 duration 优先
+                machine: Some((
+                    entry: "Natural",
+                    parameters: { "survey": 0.0 },
+                    states: [
+                        (name: "Natural", clip: "Walk"),
+                        (name: "Survey", clip: "Survey"),
+                    ],
+                    transitions: [
+                        (from: "Natural", to: "Survey", when: AtLeast(param: "survey", value: 0.5), duration: Some(0.35)),
+                        (from: "Survey", to: "Natural", when: Below(param: "survey", value: 0.5), duration: Some(0.15)),
+                    ],
+                )),
                 mask: ["b_Spine01_02"],  // 骨骼遮罩 = 子树根名单：该骨及其全部子孙
                                           // （脊柱/颈/头/双臂）被这层作用；留空 = 整副骨架
             ),
         ],
     )),
-    scripts: ["Scripts/FoxLocomotion.lua"],  // 推 speed/层栈权重（见 Docs/脚本API.md 4.9/4.10）
+    scripts: ["Scripts/FoxLocomotion.lua"],  // 推 speed/层机器参数/权重（见 Docs/脚本API.md 4.9/4.10）
 ),
 ```
 
@@ -462,17 +475,21 @@ lights: [
   `最终姿势 = 基础姿势 + weight × (叠加剪辑当前帧 − 它的第 0 帧)`（第 0 帧是参考
   姿势/"零增量"帧；平移/缩放线性差、旋转按权重 slerp 一个局部增量）。走路边呼吸、
   跑路边回头这类"同时发生"的动作靠它，不必烘进每条移动剪辑（O(M+N) 取代 O(M×N)）。
-  叠加层有**自己的时钟**（`speed` / `looping`）但与基础层共用同一个播放闸门；与
-  状态机正交 —— 状态机换状态照常换基础层，叠加层不受惊。换叠加剪辑是硬切（想平滑
+  叠加层有**自己的时钟**（`speed` / `looping`），与基础层只共享 `autoplay` 总闸、
+  不共享活跃判据；与状态机正交 —— 状态机换状态照常换基础层，叠加层不受惊。
+  换叠加剪辑是硬切（想平滑
   就把 weight 脚本拉 0 再拉回）；权重 0 的叠加层零成本、与没配逐位一致。
-- **混合层栈**：`layers` 里每层是 `name + mode + clip + weight + speed + looping + mask`，
+- **混合层栈 / 分层状态机**：`layers` 里每层是
+  `name + mode + clip/machine + weight + speed + looping + fade_time + mask`，
   按数组顺序**依次合到当前已合成的姿势**上（后层盖前层）。两种模式 ——
   `Additive` 加增量（与 `additive` 快捷字段同语义），`Override` 向该层姿势整段 lerp；
   **骨骼遮罩**是子树根名单（`mask: ["b_Spine01_02"]` = 该骨及其全部子孙；留空 =
   整副骨架），"走路上半身张望、腿照走"这类分区域重定向靠它。每层独立时钟按**层名**
   与配置对齐（Inspector 重排不丢各自进度、换本层剪辑只归零那一层），与基础层共用
-  同一个播放闸门；脚本 `set_anim_layer_weight(ctx, name, w)` 按名推权重（重名取第一个
-  命中、未知名字静默 no-op）。零权重或剪辑不在模型里的层直接跳过、不付采样代价。
+  同一个 `autoplay` 播放闸门。每层可选一台独立 `machine`，自己的参数、当前状态、
+  时钟与交叉淡入互不串台；脚本 `set_anim_layer_param(ctx, layer, param, value)` 只推
+  指定身体部位，`set_anim_layer_weight(ctx, name, w)` 按名推权重（重名取第一个命中、
+  未知名字静默 no-op）。零权重或剪辑不在模型里的层直接跳过、不付采样代价。
 - **形变目标（morph target / blend shape）**：`0` = 基准形状，`1` = 完全变成那个
   目标，多个目标按权重**相加**。来源有两处：**动画剪辑里的权重轨道**（口型 / 表情，
   优先级最高）和 **`Entity.morph_weights`**（Inspector 的 Morph 滑条、脚本
@@ -494,8 +511,8 @@ lights: [
 
 v1 的边界（ROADMAP 阶段七有完整清单）：**单剪辑 + 换剪辑淡入 + 阈值状态机 +
 单层叠加混合 + 多层混合栈与骨骼遮罩 + 形变目标** —— 遮罩是二值的（权重整体缩放，
-边界不羽化）、没有分层状态机 / 根运动 / 逐条转移时长（统一 `fade_time`）、换本层剪辑
-是硬切；负速度不做倒放（停在第 0 帧）。每个模型取第一张蒙皮，超过 256 骨的骨架会在
+边界不羽化）、没有根运动；直接层换剪辑是硬切（分层机器转移可逐条配时长）；
+负速度不做倒放（停在第 0 帧）。每个模型取第一张蒙皮，超过 256 骨的骨架会在
 加载时告警并截断；glTF 匿名节点进不了遮罩名单（只能靠有名字的祖先进）。形变目标
 只取剪辑里的**第一条**权重轨道（多网格角色分头/身的资产没覆盖），且只收位置与法线
 增量（tangent 增量没有消费者）。
@@ -1062,7 +1079,7 @@ Build/<项目名>/
 | 工具 | 干什么 |
 |---|---|
 | `schema_read` | 读场景格式的机器可读说明书（36 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
-| `script_api_read` | 读脚本 API 的机器可读清单（178 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
+| `script_api_read` | 读脚本 API 的机器可读清单（179 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
 | `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |

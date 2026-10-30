@@ -7549,3 +7549,94 @@ GPU 三条（半影变宽 / 两个旋钮必须连通 / 软阴影开着仍逐字�
 场景段 **131.74 → 143.65 µs（+11.9 µs，+9.0%）**，CPU +5 µs（uniform 多 16
 字节）；成本只落在片元侧，阴影 pass 与实例提交逐位不变。全量测试全绿、
 clippy 0 告警（`xgame-derive` 的 MSVC 链接器 stdout 噪音与本轮无关）。
+
+## 九十七、分层动画状态机（P1 #12 只剩根运动，2026-10-30）
+
+### 97.1 为什么先做分层状态机，不做根运动
+
+差距分析的当前最高优先级是动画 Phase B。根运动需要先定“根骨位移由谁拥有”：动画
+资产与采样在 render，实体变换 / 角色控制器 / 物理在 runtime；若直接从渲染回写实体，
+会让控制器和物理成为第二个位置所有者，撞墙、上坡、转身与网络预留都只会得到半实现。
+
+分层状态机的边界更完整：现有 `AnimMachine`、`AnimLayer`、`AnimationDriver` 和
+`compute_bones_composed` 已经分别提供数据、时钟与合成接点，可以在不改 crate 依赖方向、
+不复制宿主帧循环的前提下闭环。因此本轮选它；根运动明确保留为 Phase B 最后一块。
+
+### 97.2 落盘数据：每层可选一台机器
+
+`AnimLayer` 新增：
+
+- `machine: Option<AnimMachine>`：可用时覆盖直接层的 `clip / speed / looping`；
+- `fade_time: f32`：层机器逐条转移没写 `duration` 时的缺省值，默认 0.25 秒。
+
+两字段都按兼容纪律处理：`machine=None`、`fade_time=0.25` 不落盘。Schema 目录用穷举
+解构同步字段与示例，随机场景 save→load→save 也会生成层机器，防 GUID 编解码边界吞字段。
+
+旧实现红灯先证：`layered_machine_config_survives_ron_roundtrip` 只从 RON 文本观察结果，
+不引用新字段，所以能在旧结构体上编译；旧版保存结果只剩
+`name/mode/clip/weight/speed/looping/mask`，`machine`、`fade_time` 和状态剪辑 `AimFire`
+全部丢失。实现后配置与缺省省略同时通过。
+
+### 97.3 驱动：每层独立状态 / 时钟 / 淡入
+
+`LayerClock` 增加 `state` 与自己的 `Prev`。驱动仍按层名认回时钟，但每层分别：
+
+1. 校验旧状态仍在本机，否则回 entry；
+2. 用本机参数按书写顺序求值一步转移；
+3. 解析本状态的剪辑 / 速度 / 循环；
+4. 切换时冻结旧剪辑时钟、速度、循环与本次 duration；
+5. 只推进自己的当前时钟与淡入。
+
+审阅时额外发现“聚合活跃判据串通道”：`Animator::is_active()` 扩成“任一通道活着”后，
+若继续拿它控制基础 / 所有层，会让活跃 upper 唤醒冻结基础，也会让活跃基础替冻结 upper
+推进淡入。修正为**只共享 autoplay 总闸、每通道独立判断**。做过受控变异：临时退回
+聚合门控，两条新增回归都以 101 失败（基础误建淡入；upper alpha 0.2→0.6），恢复后
+通过。这不是只靠代码审阅得出的推断。
+
+### 97.4 渲染：层内部先混，再叠到整副姿势
+
+`LayerInput` 带可选 `(旧剪辑, 旧时间, alpha)`。Override 采旧 / 新局部姿势后混合，
+再按层权重与骨骼遮罩盖到当前合成姿势。Additive 同时混“当前帧”与“第 0 帧参考”，
+再做二者之差；否则切状态时参考基准硬跳，alpha=0 也会冒出新剪辑增量。
+
+`scene_pipeline` 从每个 `LayerClock` 解析新旧剪辑；旧剪辑缺失退硬切，直接层仍传
+`fade=None`，不多采一次。`override_layer_fade_blends_old_and_new_layer_poses` 用最终骨骼
+矩阵证明淡入真的进入姿势合成且仍服从遮罩，不只是在驱动里存了一个好看的 alpha。
+
+### 97.5 作者闭环：Lua、Inspector、示例与文档
+
+- 新增 `set_anim_layer_param`：只写指定层机器，缺组件 / 层 / 机器静默 no-op，非有限值
+  忽略；Lua 端到端同时断言基础参数与层参数不串台。脚本 API 178 → 179，注册源码、
+  机器清单、Markdown 表、CLI 与 MCP 数量断言同步。
+- Inspector 在每层下显示 `Machine entry → 当前状态`，并用既有 field row / theme 控件
+  编辑参数；结构图仍写 RON，不在面板复制状态图编辑器。
+- 编辑器场景指纹复用 `mix_machine`，层机器参数 / 状态 / 转移 duration 与层 fade 都入指纹；
+  `viewport_animating` 分基础 / additive / layers 判断，零权重层不让静态视口空转。
+- SampleScene 的 `upper` 从固定 Survey 层改成 Natural(Walk) ⇄ Survey 的独立机器；
+  `FoxLocomotion.lua` 同时推 `upper.survey` 与层权重，基础 locomotion 继续管腿。
+- README、脚本 API、schema、MCP、FLOW、ROADMAP、差距分析与决策记录同步；当前唯一优先级
+  真相源已把 P1 #12 收成“只剩根运动”。
+
+### 97.6 验证
+
+定向验证已通过：core 动画配置 17 条、render 动画 54 条（含两条通道隔离回归）、
+Lua 分层参数、编辑器指纹、脚本清单与随机场景稳定性。最终门禁：
+
+- `cargo check --workspace --all-targets --locked` 通过；`RUSTFLAGS="-D warnings" cargo
+  clippy --workspace --all-targets --locked` 通过，0 告警；
+- `CARGO_INCREMENTAL=0 cargo test --workspace --all-targets --locked -- --test-threads=2`
+  共 40 个测试目标，**1182 passed / 0 failed / 17 ignored**（ignored 都是手工成本基准）。
+  首轮默认增量链接时，MCP 的 5 条桥接测试因嵌套构建编辑器触发 MSVC LNK1120；直接复现
+  是 28 个本 crate 内部符号缺失，关增量重建后编辑器链接成功，MCP 41 条与全 workspace
+  随即全绿，故判定为本机陈旧增量缓存，不是功能断言失败；
+- SampleScene `--check`：1 场景 / 24 实体 / 15 资产，引用全在；300 帧无头：
+  `ok=true`、脚本 error/warn 0、非有限变换 0；
+- Inspector 用 `--ui-select Fox` 实抓 **1280×800 / 1440×900 / 1920×1080** 三档 PNG：
+  窄档无横向溢出，中档可见 `Machine Natural → Natural`，宽档完整显示 `survey` 参数、
+  Fade 与 Scripts，层级 / 列宽 / 控件边界正常；
+- `tools/build-release.ps1` 完整重建 release workspace 与 `dist/`。包内 SampleScene 34 个
+  文件与源码逐个 SHA-256 一致；发布编辑器 `--check` 与 60 帧无头再验均干净；Editor / Game
+  内嵌源码指纹一致（`xgame-src-v1:2f09a53af6d305063e36316a87995099`）。
+
+至此分层状态机实现、作者闭环、回归门禁、三档 UI 与发布包全部验收；动画 Phase B 只剩
+根运动，按差距分析继续排 P1 #12。

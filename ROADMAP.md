@@ -9,6 +9,13 @@
 
 ## 整体路线图
 
+### 2026-10-30 第四轮：分层动画状态机（P1 #12 收口一块，§八十五）
+
+| 项目 | 状态 |
+|---|---|
+| 分层状态机 | `AnimLayer.machine`：每个身体部位各有参数表、当前状态、播放时钟与交叉淡入；状态覆盖本层 `clip/speed/looping`，逐条 `duration` 覆盖本层 `fade_time`。`AnimationDriver` 按层名保留独立运行态，渲染侧对 Override / Additive 都实际混合旧→新层姿势；基础层冻结时活层仍可推进。脚本 `set_anim_layer_param`（API **179** 个）只推指定层。Inspector 显示每层 entry→当前状态并可调参数；SampleScene 的 `upper` 层已改成 Natural⇄Survey 两状态演示。默认 `machine=None` 且新字段缺省不落盘。见 PLAN 九十七 / 决策记录 §八十五 |
+| 验证 | 旧实现红灯：层 RON 的 `machine/fade_time/AimFire` 保存后全部丢失；新增配置往返、双层机器隔离、逐条淡入、最终骨骼姿势混合、冻结基础层、通道门控隔离、指纹、Lua 与随机场景稳定性回归。根运动仍未做，动画阶段继续进行中 |
+
 ### 2026-10-30 第三轮：软阴影（PCSS）+ 级间混合（P2 #20 的画质半边，§八十四）
 
 | 项目 | 状态 |
@@ -457,7 +464,7 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 | **六·七** | ✅ 完成 | 编辑器产品化第一波：项目设置、未保存保护、无头检查 `--check`、差距分析入库 |
 | **P0 资产管线** | ✅ 完成 | 资产 GUID + `.meta` + 资产库诊断 + `--migrate-assets` + 资源浏览器（浏览 / 拖入场景）+ MCP `asset_list`；导入参数消费见「材质资产」；见 PLAN.md 三十二、决策记录 §十四 |
 | **双轨 P0–P3** | ✅ 完成 | Rust 组件（UE 插件模式）+ Lua 脚本（Unity 模式 + 热更）双轨；P2.5 基准判定后 P3 删 Rhai，脚本层收敛单一 Lua 轨。决策 D1–D11 见[计划文档](Docs/双轨语言架构计划.md)，实施记录见 PLAN.md 十五–二十一 |
-| **七** | 🟨 进行中 | 动画系统（主要切片 ✅：骨骼蒙皮 + 单剪辑 + 交叉淡入 + 阈值状态机 + 叠加 + 多层混合栈与骨骼遮罩 + **形变目标 morph target**；Phase B（分层状态机 / 根运动 / 逐条转移时长）待做） |
+| **七** | 🟨 进行中 | 动画系统（主要切片 ✅：骨骼蒙皮 + 单剪辑 + 交叉淡入 + 阈值状态机 + 叠加 + 多层混合栈与骨骼遮罩 + **分层状态机** + **逐条转移时长** + **形变目标 morph target**；Phase B 只剩根运动） |
 | **八** | ✅ 完成 | 音频系统（kira：`AudioSource` + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，见 PLAN.md 二十二） |
 | **Agent-Native ①②③** | ✅ 完成 | MCP 工具面（12 工具，含 `asset_list` / `asset_import` / `asset_move` / `schema_read` / `script_api_read`）+ 无头运行 `--headless` / `--screenshot` + 场景格式说明书 `--export-schema` + 脚本 API 清单 `--export-script-api`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) / PLAN.md 五十、五十一 |
 | **CI / 自动化** | ✅ 完成 | GitHub Actions（Windows + stable + clippy + rust-cache）：`check` / `clippy` / `test` + 示例项目 `--check` / `--headless` + 两份 JSON 导出；无 GPU 的 runner 上渲染测试自动 skip；见 PLAN.md 五十二、决策记录 §三十四 |
@@ -697,14 +704,16 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
 - [x] 阈值状态机（参数表 + 转移表（AtLeast ≥ / Below <）+ 滞回；坏配置安全退回单剪辑；脚本 `set_anim_param`）
 - [x] 叠加（additive）混合 v1（增量 = 叠加剪辑当前帧 − 第 0 帧；独立时钟；权重 0 逐位一致）
 - [x] 多层混合栈与骨骼遮罩 v1（每层 name / mode / clip / weight / speed / looping / mask；按数组顺序合成；遮罩 = 骨骼子树根名单；`compute_bones_composed` 唯一路径）
+- [x] 分层状态机（每个 `AnimLayer` 独立参数 / 状态 / 时钟 / 淡入；脚本 `set_anim_layer_param`；Inspector 观察与调参；见 PLAN.md 九十七 / 决策记录 §八十五）
+- [x] 逐条转移时长（`AnimTransition.duration` 覆盖所在机器的缺省淡入；`0` = 硬切；见 PLAN.md 九十四 / 决策记录 §八十一）
 - [x] 脚本直接控制：基础剪辑 / 速度 / 循环 / 淡入 + 叠加层与层栈剪辑（6 个 API；状态机优先，见 PLAN.md 四十八）
 - [x] 形变目标（morph target / blend shape）：glTF `targets[]` + `targetNames` 解析、
       增量按导入缩放烘焙、权重来源"剪辑权重轨道 > 实体 `morph_weights` > 模型默认"、
       CPU 变形 + 顶点缓冲按需重写、Inspector Morph 滑条、脚本 `morph` / `set_morph`
       （见 PLAN.md 五十五、决策记录 §三十七）
-- [ ] 分层状态机（Phase B）；逐条转移时长、根运动
+- [ ] 根运动（Phase B 最后一块）
 
-> 明确不含：真倒放（负速 = 停在第 0 帧）、逐条转移时长（统一 `fade_time`）、遮罩羽化
+> 明确不含：真倒放（负速 = 停在第 0 帧）、根运动、遮罩羽化
 > （二值权重）。每个模型取第一张蒙皮，超过 256 骨的骨架解析时告警截断。
 
 ## 第八阶段：音频系统 ✅

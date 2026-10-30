@@ -250,14 +250,36 @@ fn random_entity(rng: &mut Rng) -> Entity {
         entity.physics = Some(random_physics(rng));
     }
     if rng.chance(0.3) {
-        entity.animator = Some(Animator {
+        let mut animator = Animator {
             clip: "Walk".into(),
             speed: rng.f32(0.1, 3.0),
             looping: rng.chance(0.5),
             autoplay: rng.chance(0.5),
             fade_time: rng.f32(0.0, 1.0),
             ..Default::default()
-        });
+        };
+        // 分层机器也进入随机 save→load→save 门禁；它的参数/状态/逐条时长
+        // 若在 GUID 编解码边界丢掉，第二轮字节稳定测试会直接报出来。
+        if rng.chance(0.5) {
+            animator.layers.push(xgame_core::AnimLayer {
+                name: "upper".into(),
+                mode: xgame_core::AnimLayerMode::Override,
+                fade_time: rng.f32(0.0, 1.0),
+                machine: Some(xgame_core::AnimMachine {
+                    entry: "Idle".into(),
+                    parameters: BTreeMap::from([("fire".into(), rng.f32(0.0, 1.0))]),
+                    states: vec![xgame_core::AnimState {
+                        name: "Idle".into(),
+                        clip: "Walk".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                mask: vec!["Spine".into()],
+                ..Default::default()
+            });
+        }
+        entity.animator = Some(animator);
     }
     if rng.chance(0.2) {
         entity.morph_weights = vec![rng.f32(0.0, 1.0), rng.f32(0.0, 1.0)];

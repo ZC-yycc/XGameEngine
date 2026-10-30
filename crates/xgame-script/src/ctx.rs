@@ -1741,7 +1741,8 @@ impl GameCtx<'_> {
     /// 按层名切换**层栈**里的剪辑。
     ///
     /// 重名按栈内顺序取第一个命中；层名不存在 / 没挂 animator → 静默 no-op。
-    /// 与叠加层同款：换层剪辑是硬切，权重 / 速度 / 循环 / 遮罩不变。
+    /// 没配可用机器时，换层剪辑是硬切，权重 / 速度 / 循环 / 遮罩不变；配了可用
+    /// 机器时实际剪辑由状态表覆盖，这个字段只被记下、不会抢走机器控制权。
     pub fn set_anim_layer_clip(&mut self, layer: &str, clip: &str) {
         if let Some(layers) = self.animator_mut().map(|a| &mut a.layers) {
             if let Some(l) = layers.iter_mut().find(|l| l.name == layer) {
@@ -1807,6 +1808,25 @@ impl GameCtx<'_> {
                 if let Some(machine) = animator.machine.as_mut() {
                     machine.parameters.insert(name.to_owned(), value);
                 }
+            }
+        }
+    }
+
+    /// 写本实体某个**混合层状态机**的参数（键不存在就创建）。
+    ///
+    /// 层名重名按栈顺序取第一个；层不存在、没配机器或值非有限时静默 no-op。
+    /// 参数只进指定层，基础机器和其它身体部位的机器不受影响。
+    pub fn set_anim_layer_param(&mut self, layer: &str, name: &str, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        if let Some(layers) = self.animator_mut().map(|animator| &mut animator.layers) {
+            if let Some(machine) = layers
+                .iter_mut()
+                .find(|candidate| candidate.name == layer)
+                .and_then(|candidate| candidate.machine.as_mut())
+            {
+                machine.parameters.insert(name.to_owned(), value);
             }
         }
     }
@@ -2099,6 +2119,7 @@ pub(crate) mod tests {
             ctx.set_anim_additive_clip("Survey");
             ctx.set_anim_layer_clip("upper", "Run");
             ctx.set_anim_layer_clip("missing", "Nope"); // 层名不存在：no-op
+            ctx.set_anim_layer_param("upper", "fire", 1.0); // 还没配层机器：no-op
         }
 
         let owner_animator = scene.entities[0].animator.as_ref().unwrap();
@@ -2142,6 +2163,7 @@ pub(crate) mod tests {
             ctx.set_anim_fade_time(0.1);
             ctx.set_anim_additive_clip("Survey");
             ctx.set_anim_layer_clip("upper", "Run");
+            ctx.set_anim_layer_param("upper", "fire", 1.0);
         }
         assert!(logs.is_empty(), "no-op 不该刷日志: {logs:?}");
     }

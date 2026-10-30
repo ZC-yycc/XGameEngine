@@ -489,6 +489,10 @@ pub struct LayerInput<'a> {
     pub clip: &'a AnimClip,
     /// 这层的当前时间（已按循环 / 钳位归一）。
     pub t: f32,
+    /// 本层状态机正在交叉淡入时的旧剪辑、旧时间与混合权重。
+    ///
+    /// `None` 是历史直接剪辑层；那条路径不多采样一次，结果逐位不变。
+    pub fade: Option<(&'a AnimClip, f32, f32)>,
     /// 权重 ∈ [0,1]（越界引擎侧钳位）。
     pub weight: f32,
     /// 模式：`Additive` = 加增量（减第 0 帧参考），`Override` = 向这层姿势 lerp。
@@ -577,11 +581,15 @@ pub fn compute_bones_composed(
         match layer.mode {
             AnimLayerMode::Additive => {
                 let mut add_pose = default_pose(nodes);
-                sample_clip_into(layer.clip, layer.t, &mut add_pose);
+                sample_clip_with_fade(nodes, layer.clip, layer.t, layer.fade, &mut add_pose);
                 // 参考姿势 = 本层剪辑第 0 帧：没轨道的节点两份都停在绑定姿态 →
                 // 增量恒 0，叠加层"没动的骨头"不干扰基础层。
                 let mut ref_pose = default_pose(nodes);
-                sample_clip_into(layer.clip, 0.0, &mut ref_pose);
+                // 状态机淡入时，参考姿势也必须按同一 alpha 从旧剪辑第 0 帧混到
+                // 新剪辑第 0 帧。只混当前姿势会让参考点在切换帧硬跳，Additive
+                // 层即使 alpha=0 也会突然吃到新剪辑的增量基准。
+                let ref_fade = layer.fade.map(|(old, _, alpha)| (old, 0.0, alpha));
+                sample_clip_with_fade(nodes, layer.clip, 0.0, ref_fade, &mut ref_pose);
                 for i in 0..nodes.len() {
                     if mask_covers(nodes, i, layer.mask) {
                         blend_additive(&mut pose[i], &add_pose[i], &ref_pose[i], w);
@@ -590,7 +598,7 @@ pub fn compute_bones_composed(
             }
             AnimLayerMode::Override => {
                 let mut layer_pose = default_pose(nodes);
-                sample_clip_into(layer.clip, layer.t, &mut layer_pose);
+                sample_clip_with_fade(nodes, layer.clip, layer.t, layer.fade, &mut layer_pose);
                 for i in 0..nodes.len() {
                     if mask_covers(nodes, i, layer.mask) {
                         blend_override(&mut pose[i], &layer_pose[i], w);
@@ -600,6 +608,30 @@ pub fn compute_bones_composed(
         }
     }
     bones_from_pose(nodes, &pose, skin)
+}
+
+/// 采样一份当前剪辑；有淡入时先采旧剪辑，再向当前剪辑混合。
+///
+/// 层状态机和基础层共享同一条局部姿势混合规则（平移/缩放 lerp、旋转 slerp），
+/// 但缓冲由调用方提供，便于 Additive 同时对“当前姿势”和“第 0 帧参考”复用。
+fn sample_clip_with_fade(
+    nodes: &[AnimNode],
+    clip: &AnimClip,
+    t: f32,
+    fade: Option<(&AnimClip, f32, f32)>,
+    pose: &mut [LocalPose],
+) {
+    match fade {
+        Some((old_clip, old_t, alpha)) => {
+            sample_clip_into(old_clip, old_t, pose);
+            // `pose` 此刻含旧剪辑，不能拿它当新剪辑的默认姿势：两条剪辑未覆盖
+            // 同一通道时，新侧必须从绑定姿势起算。
+            let mut current = default_pose(nodes);
+            sample_clip_into(clip, t, &mut current);
+            blend_into(pose, &current, alpha.clamp(0.0, 1.0));
+        }
+        None => sample_clip_into(clip, t, pose),
+    }
 }
 
 /// 采样一个剪辑并算出某张蒙皮的**蒙皮矩阵**（`globals[joint] × inverse_bind`）。
@@ -670,6 +702,7 @@ pub fn compute_bones_additive(
         &[LayerInput {
             clip: add_clip,
             t: add_t,
+            fade: None,
             weight,
             mode: AnimLayerMode::Additive,
             mask: &[],
@@ -703,6 +736,7 @@ pub fn compute_bones_blended_additive(
         &[LayerInput {
             clip: add_clip,
             t: add_t,
+            fade: None,
             weight,
             mode: AnimLayerMode::Additive,
             mask: &[],
@@ -748,12 +782,15 @@ pub struct Additive<'a> {
 /// 层栈某一层的解析时钟（[`AnimationDriver::layers`] 按**配置顺序**返回切片）。
 ///
 /// 与配置**按 name 对齐**同步：Inspector 重排层各保各的进度、删层即 prune、
-/// 换本层剪辑只归零它自己的时钟（硬切，与叠加层同语义）。`mode` / `mask` /
-/// `weight` 都由 tick 跟配置对齐（越界权重钳位），渲染侧只问驱动、不回头读组件。
+/// 直接层换本层剪辑只归零它自己的时钟（硬切，与叠加层同语义）；机器层换状态则
+/// 保留旧剪辑 / 时钟做交叉淡入。`mode` / `mask` / `weight` 都由 tick 跟配置对齐
+/// （越界权重钳位），渲染侧只问驱动、不回头读组件。
 #[derive(Clone, Debug)]
 pub struct LayerClock {
     /// 层名（脚本 `set_anim_layer_weight` 按名查找的就是它）。
     pub name: String,
+    /// 本层机器的当前状态；直接剪辑模式恒为空串。
+    state: String,
     /// 本层剪辑名（空 = 未解析，渲染侧跳过这层）。
     pub clip: String,
     /// 本层当前时间。
@@ -768,6 +805,26 @@ pub struct LayerClock {
     pub mode: AnimLayerMode,
     /// 骨骼遮罩子树根名单（空 = 整副骨架）。
     pub mask: Vec<String>,
+    /// 本层自己的交叉淡入；直接剪辑模式不建立它。
+    prev: Option<Prev>,
+}
+
+impl LayerClock {
+    /// 本层状态机的当前状态名（直接剪辑模式返回 `None`）。
+    pub fn state(&self) -> Option<&str> {
+        (!self.state.is_empty()).then_some(self.state.as_str())
+    }
+
+    /// 本层正在进行的交叉淡入。
+    pub fn fade_from(&self) -> Option<FadeFrom<'_>> {
+        let prev = self.prev.as_ref()?;
+        Some(FadeFrom {
+            clip: prev.clip.as_str(),
+            t: prev.t,
+            looping: prev.looping,
+            alpha: prev.alpha,
+        })
+    }
 }
 
 /// 进行中的交叉淡入，给渲染侧采样用（[`AnimationDriver::fade_from`]）。
@@ -786,6 +843,7 @@ pub struct FadeFrom<'a> {
 }
 
 /// 交叉淡入的**来源**剪辑（换剪辑时把旧剪辑连同它的时钟一起记下来）。
+#[derive(Clone, Debug)]
 struct Prev {
     clip: String,
     t: f32,
@@ -867,10 +925,11 @@ impl AnimationDriver {
     ///   得到本帧的 (状态, 剪辑, 速度, 循环)；没有状态机就取 Animator 的
     ///   clip/speed/looping。求值每 tick 都做，暂停中改参数也立刻换姿势
     ///   （与单剪辑模式"暂停中改 clip 硬切"同一语义）。
-    /// - 剪辑名变了 → 时间归零（换剪辑从头播）。淡入时长 > 0 且当时正在播放 →
+    /// - 剪辑名变了 → 时间归零（换剪辑从头播）。淡入时长 > 0 且**该通道**当时正在播放 →
     ///   记下旧剪辑（连同它的时钟、速度、循环方式）做交叉淡入，见
     ///   [`fade_from`](Self::fade_from)；暂停中切换 / `fade_time = 0` → 硬切。
-    ///   换状态与换剪辑走同一条路径 —— 状态机的转移就是一次换剪辑。
+    ///   换状态与换剪辑走同一条路径 —— 状态机的转移就是一次换剪辑。autoplay 是
+    ///   总闸，但基础 / additive / 各层的活跃判据独立，不能互相唤醒冻结时钟。
     /// - 实体被删 / 动画组件被摘掉 → 条目清理，防泄漏。
     ///
     /// 淡入中途再次换剪辑：旧的淡入被丢弃，从**当前主剪辑**重新淡入新剪辑
@@ -882,6 +941,15 @@ impl AnimationDriver {
             let Some(animator) = &entity.animator else {
                 continue;
             };
+            // autoplay 是所有通道共用的总闸，但“能不能推进”必须逐通道判断。
+            // `Animator::is_active()` 的语义已经扩成“任一通道活着”：拿它控制
+            // 基础淡入会让一条活跃上身层把 speed=0 的基础层也唤醒。
+            let base_active = animator.autoplay && animator.base_is_active();
+            let additive_active = animator.autoplay
+                && animator
+                    .additive
+                    .as_ref()
+                    .is_some_and(|layer| !layer.clip.is_empty() && layer.speed > 0.0);
             // -- 1. 解析本帧目标播放 --
             //
             // 机器模式：当前状态必须还在表里（配置被 RON 改坏 → 退回 entry），
@@ -934,7 +1002,7 @@ impl AnimationDriver {
             });
             // -- 3. 换剪辑 → 交叉淡入 --
             if entry.clip != clip {
-                entry.prev = if fade > 0.0 && animator.is_active() {
+                entry.prev = if fade > 0.0 && base_active {
                     Some(Prev {
                         clip: entry.clip.clone(),
                         t: entry.t,
@@ -979,33 +1047,101 @@ impl AnimationDriver {
             }
             // -- 4.6 层栈同步：按 name 对齐旧时钟（重排 / 删层各保各的进度）--
             //
-            // 换本层剪辑只归零这一层自己的时钟（硬切，与叠加层同语义）；权重钳
-            // [0,1]；mode / mask 跟配置走。没配层的实体这里只是把 vec 清空。
+            // 直接剪辑层换 clip 仍然硬切；配了 machine 的层则独立求值一步转移，
+            // 用本层自己的状态 / 时钟 / 淡入。两台层机器不共享 current state，
+            // 否则“上半身开火”会把“腿部跑步”的状态一起顶掉。
             let old = std::mem::take(&mut entry.layer_clocks);
             entry.layer_clocks = animator
                 .layers
                 .iter()
                 .map(|cfg| {
-                    let mut clock = old
+                    let previous = old
                         .iter()
                         .find(|c| c.name == cfg.name)
-                        .cloned()
-                        .unwrap_or_else(|| LayerClock {
+                        .cloned();
+                    let existed = previous.is_some();
+                    let (state, clip, speed, looping, fade, machine_mode) =
+                        match cfg.active_machine() {
+                            None => (
+                                String::new(),
+                                cfg.clip.clone(),
+                                cfg.speed,
+                                cfg.looping,
+                                0.0,
+                                false,
+                            ),
+                            Some(machine) => {
+                                let current = previous
+                                    .as_ref()
+                                    .map(|clock| clock.state.as_str())
+                                    .filter(|state| machine.state(state).is_some())
+                                    .unwrap_or(machine.entry.as_str());
+                                let transition =
+                                    machine.transition_from(current, &machine.parameters);
+                                let next = transition
+                                    .map(|transition| transition.to.as_str())
+                                    .unwrap_or(current);
+                                // `next` 与基础机器同样经过 transition_from 的目标校验。
+                                let state = machine
+                                    .state(next)
+                                    .expect("可用层机器的当前/目标状态必须存在");
+                                let fade = transition
+                                    .and_then(|transition| transition.duration)
+                                    .filter(|duration| duration.is_finite())
+                                    .map(|duration| duration.max(0.0))
+                                    .unwrap_or(cfg.fade_time);
+                                (
+                                    next.to_owned(),
+                                    state.clip.clone(),
+                                    state.speed,
+                                    state.looping,
+                                    fade,
+                                    true,
+                                )
+                            }
+                        };
+                    let mut clock = previous.unwrap_or_else(|| LayerClock {
                             name: cfg.name.clone(),
-                            clip: String::new(),
+                            state: state.clone(),
+                            clip: clip.clone(),
                             t: 0.0,
-                            speed: cfg.speed,
-                            looping: cfg.looping,
+                            speed,
+                            looping,
                             weight: 0.0,
                             mode: cfg.mode,
                             mask: Vec::new(),
+                            prev: None,
                         });
-                    if clock.clip != cfg.clip {
-                        clock.clip = cfg.clip.clone();
+                    if clock.clip != clip {
+                        // 只有机器层做交叉淡入；直接层保持历史“换 clip 硬切”。
+                        clock.prev = if existed
+                            && machine_mode
+                            && fade.is_finite()
+                            && fade > 0.0
+                            && animator.autoplay
+                            && cfg.is_active()
+                        {
+                            Some(Prev {
+                                clip: clock.clip.clone(),
+                                t: clock.t,
+                                speed: clock.speed,
+                                looping: clock.looping,
+                                fade_t: 0.0,
+                                alpha: 0.0,
+                                duration: fade,
+                            })
+                        } else {
+                            None
+                        };
+                        clock.clip = clip;
                         clock.t = 0.0;
+                    } else if !machine_mode {
+                        // 摘掉机器立即回到直接层；不能把机器时代未完的淡入拖过去。
+                        clock.prev = None;
                     }
-                    clock.speed = cfg.speed;
-                    clock.looping = cfg.looping;
+                    clock.state = state;
+                    clock.speed = speed;
+                    clock.looping = looping;
                     clock.weight = cfg.weight.clamp(0.0, 1.0);
                     clock.mode = cfg.mode;
                     if clock.mask != cfg.mask {
@@ -1015,20 +1151,10 @@ impl AnimationDriver {
                 })
                 .collect();
             // -- 5. 推进时钟 --
-            if animator.is_active() {
+            if base_active {
                 // 负速在 v1 是"静止"而不是倒放（与单剪辑语义一致）：状态表里
                 // 写了负速度 → 该状态定格，但转移照常求值，机器不会卡死。
                 entry.t += dt * entry.speed.max(0.0);
-                // 叠加层时钟与基础层共用同一个闸门（v1 边界，AnimAdditive 文档）。
-                if !entry.additive_clip.is_empty() {
-                    entry.additive_t += dt * entry.additive_speed.max(0.0);
-                }
-                // 层栈同闸门；空剪辑的层不推进（时间停 0，解析时被跳过）。
-                for clock in &mut entry.layer_clocks {
-                    if !clock.clip.is_empty() {
-                        clock.t += dt * clock.speed.max(0.0);
-                    }
-                }
                 let mut fade_done = false;
                 if let Some(prev) = entry.prev.as_mut() {
                     // 旧剪辑的时钟也继续走 —— 淡出的那半边若定格，混合出来的
@@ -1047,6 +1173,34 @@ impl AnimationDriver {
                 }
                 if fade_done {
                     entry.prev = None;
+                }
+            }
+            // additive 只与基础层共享 autoplay，不共享“基础层是否能走”的判据。
+            if additive_active {
+                entry.additive_t += dt * entry.additive_speed.max(0.0);
+            }
+            // 每个混合层也独立判断：一个活跃层不能替另一个冻结层推进时钟或淡入。
+            // `layer_clocks` 刚按配置顺序重建，zip 在这里是一一对应的。
+            for (clock, cfg) in entry.layer_clocks.iter_mut().zip(&animator.layers) {
+                if !animator.autoplay || !cfg.is_active() {
+                    continue;
+                }
+                if !clock.clip.is_empty() {
+                    clock.t += dt * clock.speed.max(0.0);
+                }
+                let mut layer_fade_done = false;
+                if let Some(prev) = clock.prev.as_mut() {
+                    prev.t += dt * prev.speed.max(0.0);
+                    prev.fade_t += dt;
+                    prev.alpha = if prev.duration > 0.0 {
+                        (prev.fade_t / prev.duration).min(1.0)
+                    } else {
+                        1.0
+                    };
+                    layer_fade_done = prev.duration <= 0.0 || prev.fade_t >= prev.duration;
+                }
+                if layer_fade_done {
+                    clock.prev = None;
                 }
             }
         }
@@ -1115,6 +1269,19 @@ impl AnimationDriver {
             .filter(|s| !s.is_empty())
     }
 
+    /// 某实体**指定混合层**状态机的当前状态名。
+    ///
+    /// 层名重名时与脚本 setter 同语义：按栈顺序取第一个。直接剪辑层、坏机器、
+    /// 还没 tick 过或层名不存在都返回 `None`。
+    pub fn layer_state(&self, id: EntityId, layer: &str) -> Option<&str> {
+        self.entries
+            .get(&id)?
+            .layer_clocks
+            .iter()
+            .find(|clock| clock.name == layer)?
+            .state()
+    }
+
     /// 某实体的**叠加层**解析结果（结构体 [`Additive`]）；没配 / clip 写空 → `None`。
     ///
     /// 渲染侧拿它调 [`compute_bones_additive`]：增量 = 叠加剪辑当前帧 − 其第 0 帧
@@ -1177,6 +1344,9 @@ impl AnimationDriver {
                 // 层栈时钟按配置顺序折进来（splitmix64 是双射，任一层在走都会变）。
                 for l in &e.layer_clocks {
                     packed = mix(packed, l.t.to_bits() as u64);
+                    if let Some(prev) = &l.prev {
+                        packed = mix(packed, prev.alpha.to_bits() as u64);
+                    }
                 }
                 (id.raw(), packed)
             })
@@ -2388,6 +2558,7 @@ mod tests {
                 &[LayerInput {
                     clip: &upper,
                     t: 1.0,
+                    fade: None,
                     weight,
                     mode: AnimLayerMode::Override,
                     mask,
@@ -2436,6 +2607,7 @@ mod tests {
             &[LayerInput {
                 clip: &inc,
                 t: 1.0,
+                fade: None,
                 weight: 1.0,
                 mode: AnimLayerMode::Additive,
                 mask: &mask_child,
@@ -2455,6 +2627,7 @@ mod tests {
             &[LayerInput {
                 clip: &inc,
                 t: 1.0,
+                fade: None,
                 weight: 1.0,
                 mode: AnimLayerMode::Additive,
                 mask: &mask_no,
@@ -2485,6 +2658,7 @@ mod tests {
                 LayerInput {
                     clip: &first,
                     t: 1.0,
+                    fade: None,
                     weight: 1.0,
                     mode: AnimLayerMode::Override,
                     mask: &mask,
@@ -2492,6 +2666,7 @@ mod tests {
                 LayerInput {
                     clip: &second,
                     t: 1.0,
+                    fade: None,
                     weight: 1.0,
                     mode: AnimLayerMode::Override,
                     mask: &mask,
@@ -2501,6 +2676,41 @@ mod tests {
         assert!(
             (bones[1].w_axis.truncate() - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-6,
             "后层 w=1 应完全盖掉前层"
+        );
+    }
+
+    /// 分层状态机的淡入必须真的进入姿势合成，而不是只让驱动报告一个 alpha。
+    #[test]
+    fn override_layer_fade_blends_old_and_new_layer_poses() {
+        let nodes = root_child_nodes();
+        let base = move_x_clip();
+        let old = translate_clip("Aim", 1, Vec3::new(0.0, 4.0, 0.0));
+        let new = translate_clip("Fire", 1, Vec3::new(0.0, 0.0, 6.0));
+        let skin = flat_skin(2);
+        let mask = vec!["Child".to_string()];
+
+        let bones = compute_bones_composed(
+            &nodes,
+            &skin,
+            (&base, 0.0),
+            None,
+            &[LayerInput {
+                clip: &new,
+                t: 1.0,
+                fade: Some((&old, 1.0, 0.5)),
+                weight: 1.0,
+                mode: AnimLayerMode::Override,
+                mask: &mask,
+            }],
+        );
+        assert!(
+            (bones[1].w_axis.truncate() - Vec3::new(0.0, 2.0, 3.0)).length() < 1e-6,
+            "旧层姿势 (0,4,0) 与新层姿势 (0,0,6) 半混应为 (0,2,3)，实得 {:?}",
+            bones[1].w_axis.truncate()
+        );
+        assert!(
+            bones[0].w_axis.truncate().length() < 1e-6,
+            "层淡入仍必须服从骨骼遮罩"
         );
     }
 
@@ -2521,6 +2731,190 @@ mod tests {
             },
         ];
         Entity::new("Fox").with_animator(a)
+    }
+
+    fn layer_machine(name: &str, idle: &str, active: &str, param: &str) -> AnimLayer {
+        AnimLayer {
+            name: name.into(),
+            mode: AnimLayerMode::Override,
+            weight: 1.0,
+            fade_time: 1.0,
+            machine: Some(AnimMachine {
+                entry: "Idle".into(),
+                parameters: std::collections::BTreeMap::from([(param.to_string(), 0.0)]),
+                states: vec![
+                    AnimState {
+                        name: "Idle".into(),
+                        clip: idle.into(),
+                        speed: 1.0,
+                        looping: true,
+                    },
+                    AnimState {
+                        name: "Active".into(),
+                        clip: active.into(),
+                        speed: 2.0,
+                        looping: false,
+                    },
+                ],
+                transitions: vec![AnimTransition {
+                    from: "Idle".into(),
+                    to: "Active".into(),
+                    when: AnimCondition::AtLeast {
+                        param: param.into(),
+                        value: 0.5,
+                    },
+                    duration: Some(0.5),
+                }],
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// 两个身体部位各跑一台机器：参数、状态、时钟、淡入都不能串台。
+    #[test]
+    fn layered_machines_keep_independent_state_clocks_and_fades() {
+        let mut driver = AnimationDriver::new();
+        let mut entity = entity_with_animator("Walk");
+        let id = entity.id;
+        {
+            let animator = entity.animator.as_mut().unwrap();
+            animator.layers = vec![
+                layer_machine("upper", "Aim", "Fire", "fire"),
+                layer_machine("face", "Calm", "Blink", "blink"),
+            ];
+        }
+
+        driver.tick(0.25, std::slice::from_ref(&entity));
+        assert_eq!(driver.layer_state(id, "upper"), Some("Idle"));
+        assert_eq!(driver.layer_state(id, "face"), Some("Idle"));
+        assert!((driver.layers(id)[0].t - 0.25).abs() < 1e-6);
+        assert!((driver.layers(id)[1].t - 0.25).abs() < 1e-6);
+
+        // 只推 upper.fire；face 的机器参数与状态保持原样。
+        entity.animator.as_mut().unwrap().layers[0]
+            .machine
+            .as_mut()
+            .unwrap()
+            .parameters
+            .insert("fire".into(), 1.0);
+        driver.tick(0.25, std::slice::from_ref(&entity));
+
+        assert_eq!(driver.layer_state(id, "upper"), Some("Active"));
+        assert_eq!(driver.layer_state(id, "face"), Some("Idle"));
+        assert_eq!(driver.layers(id)[0].clip, "Fire");
+        assert_eq!(driver.layers(id)[1].clip, "Calm");
+        assert!(
+            (driver.layers(id)[0].t - 0.5).abs() < 1e-6,
+            "Active 自己是 2x，转移当帧应推进 0.25×2"
+        );
+        assert!(
+            (driver.layers(id)[1].t - 0.5).abs() < 1e-6,
+            "face 继续按自己的 1x 时钟走"
+        );
+        let fade = driver.layers(id)[0].fade_from().expect("upper 应独立淡入");
+        assert_eq!(fade.clip, "Aim");
+        assert!((fade.alpha - 0.5).abs() < 1e-6, "逐条 0.5s 已走 0.25s");
+        assert!(
+            driver.layers(id)[1].fade_from().is_none(),
+            "没转移的 face 不能被 upper 的淡入污染"
+        );
+        assert_eq!(driver.state(id), None, "基础层没有机器，层状态不能冒充基础状态");
+
+        driver.tick(0.25, std::slice::from_ref(&entity));
+        assert!(
+            driver.layers(id)[0].fade_from().is_none(),
+            "本层逐条时长走满后只清自己的淡入"
+        );
+    }
+
+    /// 基础剪辑冻结时，只要某个层机器能走，Animator 总闸仍应保持活跃。
+    #[test]
+    fn active_layer_machine_can_drive_a_frozen_base() {
+        let mut driver = AnimationDriver::new();
+        let mut entity = entity_with_animator("Bind");
+        {
+            let animator = entity.animator.as_mut().unwrap();
+            animator.speed = 0.0;
+            animator.layers = vec![layer_machine("upper", "Aim", "Fire", "fire")];
+            assert!(animator.is_active(), "活层不能被冻结基础层关掉总闸");
+        }
+        driver.tick(0.2, std::slice::from_ref(&entity));
+        assert_eq!(driver.time(entity.id), Some(0.0), "基础时钟保持冻结");
+        assert!(
+            (driver.layers(entity.id)[0].t - 0.2).abs() < 1e-6,
+            "层机器时钟应独立推进"
+        );
+    }
+
+    /// “任一通道活着”只用于宿主判断是否持续出帧，不能反过来唤醒冻结的基础层。
+    #[test]
+    fn active_layer_does_not_make_a_frozen_base_switch_fade() {
+        let mut driver = AnimationDriver::new();
+        let mut entity = entity_with_animator("Bind");
+        {
+            let animator = entity.animator.as_mut().unwrap();
+            animator.speed = 0.0;
+            animator.layers = vec![AnimLayer {
+                name: "upper".into(),
+                clip: "Aim".into(),
+                speed: 1.0,
+                ..Default::default()
+            }];
+        }
+        driver.tick(0.2, std::slice::from_ref(&entity));
+        entity.animator.as_mut().unwrap().clip = "OtherBind".into();
+        driver.tick(0.1, std::slice::from_ref(&entity));
+
+        assert!(
+            driver.fade_from(entity.id).is_none(),
+            "上身层在播不能让 speed=0 的基础层换剪辑时凭空开始淡入"
+        );
+        assert_eq!(driver.time(entity.id), Some(0.0), "基础时钟仍应冻结");
+        assert!(
+            (driver.layers(entity.id)[0].t - 0.3).abs() < 1e-6,
+            "活跃层仍按自己的时钟推进"
+        );
+    }
+
+    /// 淡入已经开始后若这一层整体冻结，活跃的基础层也不能替它推进淡入进度。
+    #[test]
+    fn active_base_does_not_advance_a_frozen_layer_fade() {
+        let mut driver = AnimationDriver::new();
+        let mut entity = entity_with_animator("Walk");
+        entity.animator.as_mut().unwrap().layers = vec![layer_machine(
+            "upper", "Aim", "Fire", "fire",
+        )];
+        driver.tick(0.1, std::slice::from_ref(&entity));
+        {
+            let machine = entity.animator.as_mut().unwrap().layers[0]
+                .machine
+                .as_mut()
+                .unwrap();
+            machine.parameters.insert("fire".into(), 1.0);
+        }
+        driver.tick(0.1, std::slice::from_ref(&entity));
+        let before = driver.layers(entity.id)[0]
+            .fade_from()
+            .expect("转移应已启动")
+            .alpha;
+
+        for state in &mut entity.animator.as_mut().unwrap().layers[0]
+            .machine
+            .as_mut()
+            .unwrap()
+            .states
+        {
+            state.speed = 0.0;
+        }
+        driver.tick(0.2, std::slice::from_ref(&entity));
+        let after = driver.layers(entity.id)[0]
+            .fade_from()
+            .expect("冻结应保留未完成淡入")
+            .alpha;
+        assert!(
+            (after - before).abs() < 1e-6,
+            "基础层在播不能替冻结的 upper 推淡入：{before} -> {after}"
+        );
     }
 
     /// 层时钟按 name 对齐同步：重排不丢进度、新层从 0 起播、删层即 prune、

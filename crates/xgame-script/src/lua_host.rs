@@ -1588,16 +1588,20 @@ mod tests {
         );
     }
 
-    /// `set_anim_param` 把值写进**自己实体**的机器参数表。
+    /// 基础 / 分层参数 setter 各写自己的机器，不能串台。
     #[test]
     fn set_anim_param_writes_the_owning_entities_machine() {
-        use xgame_core::{AnimMachine, AnimState};
+        use xgame_core::{AnimLayer, AnimMachine, AnimState};
 
         let project = TempProject::new("anim_param");
         let path = project.write_script(
             "locomotion",
             r#"
-            function update(ctx) set_anim_param(ctx, "speed", 2.5) end
+            function update(ctx)
+                set_anim_param(ctx, "speed", 2.5)
+                set_anim_layer_param(ctx, "upper", "fire", 1.0)
+                set_anim_layer_param(ctx, "missing", "fire", 9.0)
+            end
             "#,
         );
 
@@ -1617,6 +1621,19 @@ mod tests {
             if name == "with_machine" {
                 let mut a = xgame_core::Animator::new("Walk");
                 a.machine = Some(machine.clone());
+                a.layers.push(AnimLayer {
+                    name: "upper".into(),
+                    machine: Some(AnimMachine {
+                        entry: "Aim".into(),
+                        states: vec![AnimState {
+                            name: "Aim".into(),
+                            clip: "Aim".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
                 entity.animator = Some(a);
             }
             scene.add_entity(entity);
@@ -1638,6 +1655,21 @@ mod tests {
             m.parameters.get("speed").copied(),
             Some(2.5),
             "带机器的实体应写入参数"
+        );
+        assert_eq!(
+            scene.entities[0].animator.as_ref().unwrap().layers[0]
+                .machine
+                .as_ref()
+                .unwrap()
+                .parameters
+                .get("fire")
+                .copied(),
+            Some(1.0),
+            "分层参数只写指定层机器"
+        );
+        assert!(
+            !m.parameters.contains_key("fire"),
+            "层参数不能串进基础机器"
         );
         // 没挂机器的实体静默 no-op —— 脚本照常跑，不报错。
         assert!(scene.entities[1]
@@ -1996,7 +2028,7 @@ mod tests {
     ///
     /// 不靠运行期枚举全局表：Lua 基础库也有 `error` 等函数，而引擎恰好覆盖了
     /// 同名全局；用集合差分会把被覆盖的名字漏掉。直接读注册源码能精确拿到
-    /// 引擎自己注册的 178 个名字。
+    /// 引擎自己注册的 179 个名字。
     fn registered_global_names(source: &str) -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let mut rest = source;
@@ -2040,8 +2072,8 @@ mod tests {
         );
         assert_eq!(
             actual.len(),
-            178,
-            "注册名数量应为 178（2026-10-30 加手柄 3 个 + 触摸 2 个：touch_count / touch）"
+            179,
+            "注册名数量应为 179（分层状态机增加 set_anim_layer_param）"
         );
 
         let host = LuaHost::new();

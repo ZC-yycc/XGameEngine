@@ -930,6 +930,15 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         // 到 "Weight" 已经错开一个字母 —— 一列对不齐的表头比没有
                         // 表头更显乱。改成每个控件一条悬停说明，信息一样给全。
                         for idx in 0..animator.layers.len() {
+                            let layer_current_state = state
+                                .scene_renderer
+                                .as_ref()
+                                .and_then(|renderer| {
+                                    renderer.animation_layer_state(
+                                        entity.id,
+                                        &animator.layers[idx].name,
+                                    )
+                                });
                             // ── 第一行：摘除 / 名字 / 模式 / 剪辑 / 权重 ──
                             //
                             // 一行要塞五个控件，宽度是硬约束（面板 ~284px）：
@@ -1097,6 +1106,56 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                                     },
                                 );
                             });
+                            // ── 第三行：本层状态机参数 ──
+                            //
+                            // 状态图结构仍在 RON 编辑；Inspector 负责把最常用的运行期
+                            // 观察/调参闭环补上，和基础 machine 的 UI 同一层级。
+                            if let Some(machine) = animator.layers[idx]
+                                .machine
+                                .as_mut()
+                                .filter(|machine| machine.is_usable())
+                            {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Machine")
+                                            .color(theme::colors::TEXT_DIM),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(machine.entry.as_str())
+                                                .monospace(),
+                                        )
+                                        .truncate(),
+                                    );
+                                    if let Some(current) = layer_current_state {
+                                        ui.label(
+                                            egui::RichText::new(format!("→ {current}"))
+                                                .monospace()
+                                                .color(theme::colors::TEXT_SECONDARY),
+                                        );
+                                    }
+                                });
+                                for (name, value) in machine.parameters.iter_mut() {
+                                    row(ui, name.as_str(), |ui| {
+                                        let response = theme::drag_field_w(
+                                            ui,
+                                            theme::FIELD_WIDTH,
+                                            value,
+                                            0.05,
+                                            "",
+                                        )
+                                        .on_hover_text(
+                                            "本层状态机参数；脚本 set_anim_layer_param 写同一份值",
+                                        );
+                                        collect(
+                                            &response,
+                                            &mut touched,
+                                            &mut drag_began,
+                                            &mut drag_ended,
+                                        );
+                                    });
+                                }
+                            }
                         }
                         if let Some(idx) = remove_layer {
                             animator.layers.remove(idx);

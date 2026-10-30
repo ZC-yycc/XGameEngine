@@ -944,7 +944,7 @@ fn animation_types() -> Vec<TypeSchema> {
                 def("speed", "f32", &1.0, "本状态的播放速度，覆盖 Animator.speed。"),
                 def("looping", "bool", &true, "本状态是否循环，覆盖 Animator.looping。"),
             ],
-            vec!["机器模式下 speed / looping 由状态表决定；autoplay / fade_time 仍取 Animator。"],
+            vec!["机器模式下 speed / looping 由状态表决定；autoplay 仍取 Animator，缺省 fade_time 取机器所在通道（基础 Animator / 分层 AnimLayer）。"],
         ),
         enum_schema(
             "AnimCondition",
@@ -993,7 +993,7 @@ fn animation_types() -> Vec<TypeSchema> {
                 opt(
                     "duration",
                     "f32",
-                    "这条转移的过渡时长（秒）。None = 用 Animator.fade_time；0 = 硬切。",
+                    "这条转移的过渡时长（秒）。None = 用所在机器的缺省时长（基础取 Animator.fade_time，分层取 AnimLayer.fade_time）；0 = 硬切。",
                 ),
             ],
             vec!["转移按书写顺序求值，第一条满足条件的生效；坏一条不会卡死整台机器。"],
@@ -1021,7 +1021,7 @@ fn animation_types() -> Vec<TypeSchema> {
             ],
             vec![
                 "可用性只看 entry 是否命中一个状态；配置写坏时引擎照常跑，只是不动。",
-                "v1 只有浮点参数 + 阈值条件，没有 trigger / 分层转移；过渡时长统一用 Animator.fade_time。",
+                "v1 只有浮点参数 + 阈值条件，没有 trigger；机器既可挂基础层，也可挂 AnimLayer 形成分层转移。",
             ],
         ),
         struct_schema(
@@ -1063,7 +1063,7 @@ fn animation_types() -> Vec<TypeSchema> {
         ),
         struct_schema(
             "AnimLayer",
-            "混合层栈里的一层：模式 + 剪辑 + 权重 + 独立时钟 + 骨骼遮罩。",
+            "混合层栈里的一层：模式 + 播放源（直接剪辑或独立状态机）+ 权重 + 独立时钟 + 骨骼遮罩。",
             Some(default_of::<AnimLayer>()),
             Some(pretty(&AnimLayer {
                 name: "Aim".into(),
@@ -1072,15 +1072,33 @@ fn animation_types() -> Vec<TypeSchema> {
                 weight: 0.8,
                 speed: 1.0,
                 looping: true,
+                fade_time: 0.2,
+                machine: Some(machine.clone()),
                 mask: vec!["Spine1".into()],
             })),
             vec![
                 def("name", "String", &"", "层名；脚本按名推权重，空名 / 重名按栈内顺序取第一个。"),
                 def("mode", "AnimLayerMode", &AnimLayerMode::Additive, "求值模式。"),
-                def("clip", "String", &"", "这层播的剪辑；空串 = 不生效。"),
+                def(
+                    "clip",
+                    "String",
+                    &"",
+                    "直接层播的剪辑；空串 = 不生效。可用 machine 存在时由状态表覆盖。",
+                ),
                 def("weight", "f32", &1.0, "权重 0..=1（引擎侧钳位）。"),
                 def("speed", "f32", &1.0, "这层自己的播放速度。"),
                 def("looping", "bool", &true, "这层是否循环。"),
+                def(
+                    "fade_time",
+                    "f32",
+                    &0.25,
+                    "本层状态切换的缺省淡入时长；逐条 duration 优先。",
+                ),
+                opt(
+                    "machine",
+                    "AnimMachine",
+                    "本层独立状态机；Some 且 entry 可用时覆盖 clip / speed / looping。",
+                ),
                 def(
                     "mask",
                     "Vec<String>",
@@ -1090,6 +1108,7 @@ fn animation_types() -> Vec<TypeSchema> {
             ],
             vec![
                 "mask 是二值遮罩：节点名等于名单里任一项、或某个祖先等于，这层才作用于它。",
+                "每层机器有独立参数、当前状态、时钟与淡入；层名重名时运行时按栈内第一个对齐。",
                 "求值次序：基础 → Animator.additive → layers[0..]（后层盖前层）。",
             ],
         ),
@@ -2637,12 +2656,24 @@ mod tests {
             weight,
             speed,
             looping,
+            fade_time,
+            machine,
             mask,
         } = AnimLayer::default();
         assert_fields(
             &doc,
             "AnimLayer",
-            &["name", "mode", "clip", "weight", "speed", "looping", "mask"],
+            &[
+                "name",
+                "mode",
+                "clip",
+                "weight",
+                "speed",
+                "looping",
+                "fade_time",
+                "machine",
+                "mask",
+            ],
         );
 
         let Animator {

@@ -3781,6 +3781,7 @@ impl ScenePipeline {
                                 stack.push(crate::animation::LayerInput {
                                     clip: c,
                                     t: add_t,
+                                    fade: None,
                                     weight: a.weight,
                                     mode: xgame_core::AnimLayerMode::Additive,
                                     mask: &[],
@@ -3795,9 +3796,20 @@ impl ScenePipeline {
                                 continue;
                             };
                             let l_t = crate::animation::clip_time(l.t, c.duration, l.looping);
+                            let layer_fade = l.fade_from().and_then(|fade| {
+                                mesh.clip(fade.clip).map(|old| {
+                                    let old_t = crate::animation::clip_time(
+                                        fade.t,
+                                        old.duration,
+                                        fade.looping,
+                                    );
+                                    (old, old_t, fade.alpha)
+                                })
+                            });
                             stack.push(crate::animation::LayerInput {
                                 clip: c,
                                 t: l_t,
+                                fade: layer_fade,
                                 weight: l.weight,
                                 mode: l.mode,
                                 mask: &l.mask,

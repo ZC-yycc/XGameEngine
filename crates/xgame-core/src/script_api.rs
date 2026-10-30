@@ -399,7 +399,7 @@ const fn api(
     }
 }
 
-/// 全部 178 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
+/// 全部 179 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
 const FUNCTIONS: &[ApiDef] = &[
     api(
         "transform",
@@ -1213,6 +1213,13 @@ const FUNCTIONS: &[ApiDef] = &[
         r#"按层名切该层剪辑（硬切；层名不存在 = no-op）"#,
     ),
     api(
+        "animation_layers",
+        "set_anim_layer_param",
+        "set_anim_layer_param(ctx, layer, name, value)",
+        "nil",
+        r#"写指定混合层自己的状态机参数（只影响该层；机器不存在 = no-op）"#,
+    ),
+    api(
         "animation",
         "morph",
         "morph(ctx, id, target)",
@@ -1642,7 +1649,7 @@ mod tests {
         let doc = script_api();
         assert_eq!(doc.format_version, SCRIPT_API_FORMAT_VERSION);
         assert_eq!(doc.categories.len(), 18);
-        assert_eq!(doc.function_count(), 178);
+        assert_eq!(doc.function_count(), 179);
         assert_eq!(doc.hooks.len(), 6);
         assert_eq!(doc.value_types.len(), 7);
         assert!(!doc.conventions.is_empty());
@@ -1685,7 +1692,7 @@ mod tests {
             );
             assert!(!function.params.is_empty(), "{} 没有参数", function.name);
         }
-        assert_eq!(names.len(), 178);
+        assert_eq!(names.len(), 179);
     }
 
     #[test]

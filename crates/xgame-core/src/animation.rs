@@ -19,6 +19,17 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// 动画交叉淡入的缺省时长（基础层与分层状态机同一口径）。
+const DEFAULT_FADE_TIME: f32 = 0.25;
+
+fn default_fade_time() -> f32 {
+    DEFAULT_FADE_TIME
+}
+
+fn is_default_fade_time(value: &f32) -> bool {
+    *value == DEFAULT_FADE_TIME
+}
+
 // ---------------------------------------------------------------------------
 // 动画状态机（v1：参数阈值驱动的声明式切换）
 // ---------------------------------------------------------------------------
@@ -77,7 +88,8 @@ pub struct AnimTransition {
     pub from: String,
     pub to: String,
     pub when: AnimCondition,
-    /// 这条转移自己的**过渡时长**（秒）；`None` = 用 `Animator::fade_time`。
+    /// 这条转移自己的**过渡时长**（秒）；`None` = 用所在机器的缺省时长：
+    /// 基础机器取 [`Animator::fade_time`]，层机器取 [`AnimLayer::fade_time`]。
     ///
     /// 为什么需要逐条：一套动作里"走路→跑步"要 0.3 秒混，"受击→僵直"要 0 秒硬切
     /// （被打中的那一帧就该断掉），全局一个数不可能同时满足。`Some(0.0)` 是
@@ -88,10 +100,10 @@ pub struct AnimTransition {
 
 /// 动画状态机：参数表 + 状态表 + 转移表。
 ///
-/// 刻意做小的部分：没有**分层**状态机（每个身体部位一套转移 —— 那种需求用
-/// 混合层栈表达）、没有一次性 trigger 参数。一个浮点参数表 + 阈值条件已经能
-/// 表达人形角色最基本的 Idle/Walk/Run 移动组合。过渡时长可以逐条配
-/// （[`AnimTransition::duration`]），没配的退回 `Animator::fade_time`。
+/// 刻意做小的部分：没有一次性 trigger 参数。一个浮点参数表 + 阈值条件已经能
+/// 表达人形角色最基本的 Idle/Walk/Run 移动组合；同一结构也可挂在 [`AnimLayer`]
+/// 上，形成每个身体部位独立的一台机器。过渡时长可以逐条配
+/// （[`AnimTransition::duration`]），没配的退回所在播放通道自己的 `fade_time`。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnimMachine {
@@ -170,9 +182,10 @@ impl AnimMachine {
 /// 不必烘进每条移动剪辑（O(M+N) 取代 O(M×N) 的剪辑数量）。交叉淡入只解决
 /// "换"剪辑；"叠"必须有它。
 ///
-/// v1 边界：**全骨架、单层**（骨骼遮罩 / 多层栈留后续）；换叠加剪辑是硬切
-/// （想平滑就把 weight 脚本拉到 0、换好剪辑再拉回）；叠加层时钟与基础层共用
-/// 同一个 `is_active` 闸门（基础层冻住，叠加层也冻）。
+/// v1 边界：**全骨架、单层**（骨骼遮罩 / 多层栈由 [`AnimLayer`] 表达）；换叠加
+/// 剪辑是硬切（想平滑就把 weight 脚本拉到 0、换好剪辑再拉回）。叠加层与基础层
+/// 只共享 [`Animator::autoplay`] 总闸，各自按自己的速度推进 —— 基础层冻结不该连带
+/// 冻住仍在播放的呼吸 / 受击增量。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnimAdditive {
@@ -211,14 +224,19 @@ pub enum AnimLayerMode {
     Override,
 }
 
-/// 混合层栈里的一层：模式 + 剪辑 + 权重 + 独立时钟 + 骨骼遮罩。
+/// 混合层栈里的一层：模式 + 播放源 + 权重 + 独立时钟 + 骨骼遮罩。
 ///
 /// 与 [`AnimAdditive`]（单层快捷方式）的关系：`Animator.additive` 等价于排在
 /// `layers` **之前**求值的一个 Additive 层；栈内各层按数组顺序依次合到
 /// "当前已合成的姿势"上（后层盖前层）。
 ///
-/// v1 边界：二值遮罩（权重整体缩放，不羽化边界）；换本层剪辑是硬切（想平滑就
-/// 脚本把 weight 拉 0 再拉回）；时钟与基础层共用同一个 `is_active` 闸门。
+/// `machine` 可选：没配时直接播 `clip`（脚本换剪辑仍是硬切，保持旧语义）；配了
+/// 可用机器时，`clip` / `speed` / `looping` 被状态表覆盖，转移按本层自己的状态、
+/// 参数、时钟与淡入推进。于是 locomotion 管腿、aim/fire 管上身，两台机器互不抢
+/// 当前状态。`fade_time` 是本层转移未写 `duration` 时的后备值。
+///
+/// v1 边界：二值遮罩（权重整体缩放，不羽化边界）；所有层仍共用
+/// [`Animator::autoplay`] 总闸门。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnimLayer {
@@ -235,6 +253,19 @@ pub struct AnimLayer {
     pub speed: f32,
     /// 这层是否循环。
     pub looping: bool,
+    /// 本层状态切换的缺省交叉淡入时长（秒）；逐条 `AnimTransition.duration` 优先。
+    ///
+    /// 缺省值不落盘：老场景里没有这个字段，读写后不该只因引擎升级就多一行。
+    #[serde(
+        default = "default_fade_time",
+        skip_serializing_if = "is_default_fade_time"
+    )]
+    pub fade_time: f32,
+    /// 本层自己的状态机。可用时覆盖 `clip` / `speed` / `looping`。
+    ///
+    /// `None` 不落盘，既保持老场景字节稳定，也让“分层状态机默认关闭”一眼可见。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<AnimMachine>,
     /// 骨骼遮罩 = **子树根名单**：节点名等于名单里任一名字、或其某个祖先等于，
     /// 则这层作用于它（`mask: ["Spine1"]` = 上半身；`["LeftUpLeg","RightUpLeg"]`
     /// = 双腿）。空名单 = 整副骨架。glTF 匿名节点匹配不到（只能靠有名字的祖先入列）。
@@ -250,7 +281,24 @@ impl Default for AnimLayer {
             weight: 1.0,
             speed: 1.0,
             looping: true,
+            fade_time: DEFAULT_FADE_TIME,
+            machine: None,
             mask: Vec::new(),
+        }
+    }
+}
+
+impl AnimLayer {
+    /// 当前生效的层状态机（坏配置退回直接剪辑模式）。
+    pub fn active_machine(&self) -> Option<&AnimMachine> {
+        self.machine.as_ref().filter(|m| m.is_usable())
+    }
+
+    /// 这层有没有可能推进的播放时钟（不含 `weight`；零权重时相位仍可继续走）。
+    pub fn is_active(&self) -> bool {
+        match self.active_machine() {
+            Some(machine) => machine.states.iter().any(|state| state.speed > 0.0),
+            None => !self.clip.is_empty() && self.speed > 0.0,
         }
     }
 }
@@ -301,7 +349,7 @@ impl Default for Animator {
             speed: 1.0,
             looping: true,
             autoplay: true,
-            fade_time: 0.25,
+            fade_time: DEFAULT_FADE_TIME,
             machine: None,
             additive: None,
             layers: Vec::new(),
@@ -324,15 +372,34 @@ impl Animator {
     /// ——负速的语义是"从第 0 帧起倒放"，而第 0 帧倒着走只会钳回 0，画面纹丝不动，
     /// 继续请求出帧就是白烧 CPU（倒放要从剪辑末尾起步才有意义，留到 v2）。
     ///
-    /// 机器模式下的门控：`autoplay` 且**存在速度为正的状态**。
+    /// 机器模式下的门控：`autoplay` 且**任一实际播放通道**可能推进。基础层、
+    /// additive 与混合层栈共享 `autoplay`，但各自按自己的速度判断；这让基础姿势
+    /// 冻住时，上半身状态机仍能从 Aim 转到 Fire。
     ///
     /// 不按"当前状态"判 —— 一个速度 0 的状态（冻姿势）仍要继续求值转移，
     /// 否则机器会卡死在冻结状态里；而所有状态都是 0 才是真正的"整台不播"，
     /// 那就别请求出帧了。
     pub fn is_active(&self) -> bool {
-        match self.machine.as_ref().filter(|m| m.is_usable()) {
-            Some(m) => self.autoplay && m.states.iter().any(|s| s.speed > 0.0),
-            None => self.autoplay && self.speed > 0.0,
+        if !self.autoplay {
+            return false;
+        }
+        let base = self.base_is_active();
+        let additive = self
+            .additive
+            .as_ref()
+            .is_some_and(|layer| !layer.clip.is_empty() && layer.speed > 0.0);
+        base || additive || self.layers.iter().any(AnimLayer::is_active)
+    }
+
+    /// 只看**基础层**有没有可能推进（不含 `autoplay` 总闸与附加层）。
+    ///
+    /// 编辑器帧策略要分别判断“基础 / additive / layers 哪条真的会改画面”；若只问
+    /// [`is_active`](Self::is_active)，一个权重为 0 的活层会让冻结的基础剪辑也被误判
+    /// 成每帧变化，视口就会空转。
+    pub fn base_is_active(&self) -> bool {
+        match self.active_machine() {
+            Some(machine) => machine.states.iter().any(|state| state.speed > 0.0),
+            None => self.speed > 0.0,
         }
     }
 
@@ -564,6 +631,8 @@ mod tests {
         assert!((d.weight - 1.0).abs() < f32::EPSILON, "默认全额");
         assert!((d.speed - 1.0).abs() < f32::EPSILON, "默认原速");
         assert!(d.looping, "默认循环");
+        assert!((d.fade_time - 0.25).abs() < f32::EPSILON, "层转移默认淡入 0.25s");
+        assert!(d.machine.is_none(), "默认不启用层状态机");
         assert!(d.mask.is_empty(), "默认整副骨架");
         assert!(Animator::default().layers.is_empty(), "默认空栈");
     }
@@ -609,9 +678,62 @@ mod tests {
         );
         assert!(bounce.mask.is_empty(), "缺失 mask 补空名单（整副骨架）");
 
-        let s = ron::to_string(&a.animator).expect("应能序列化");
-        let back: Animator = ron::from_str(&s).expect("应能反序列化");
+        let default_layer = ron::to_string(&AnimLayer::default()).expect("默认层应能序列化");
+        assert!(
+            !default_layer.contains("fade_time") && !default_layer.contains("machine"),
+            "层的缺省新字段不该制造落盘噪音：{default_layer}"
+        );
+
+        let saved = ron::to_string(&a.animator).expect("应能序列化");
+        let back: Animator = ron::from_str(&saved).expect("应能反序列化");
         assert_eq!(back.layers, a.animator.layers, "层栈应活过 RON 往返");
+    }
+
+    /// 分层状态机的配置不能在「读一遍再保存」时被静默吃掉。
+    ///
+    /// 这条回归刻意只从 RON 文本观察结果，不直接引用尚未加入结构体的新字段：
+    /// 旧实现会把 `machine` / `fade_time` 当未知字段忽略，因此测试能在旧代码上
+    /// **编译并红灯**，证明真实的数据丢失，而不是拿编译错误冒充回归证据。
+    #[test]
+    fn layered_machine_config_survives_ron_roundtrip() {
+        let text = r#"(
+            name: "upper",
+            mode: Override,
+            clip: "AimIdle",
+            fade_time: 0.4,
+            machine: Some((
+                entry: "Idle",
+                parameters: {"aim": 0.0},
+                states: [
+                    (name: "Idle", clip: "AimIdle"),
+                    (name: "Fire", clip: "AimFire", looping: false),
+                ],
+                transitions: [(
+                    from: "Idle",
+                    to: "Fire",
+                    when: AtLeast(param: "aim", value: 0.5),
+                    duration: Some(0.1),
+                )],
+            )),
+            mask: ["Spine"],
+        )"#;
+        let layer: AnimLayer = ron::from_str(text).expect("分层机器配置应能读取");
+        let saved = ron::to_string(&layer).expect("分层机器配置应能保存");
+        assert!(
+            saved.contains("machine"),
+            "保存后不能丢掉层状态机，实际：{saved}"
+        );
+        assert!(
+            saved.contains("fade_time"),
+            "保存后不能丢掉层自己的淡入时长，实际：{saved}"
+        );
+        assert!(saved.contains("AimFire"), "状态剪辑也必须活过往返：{saved}");
+
+        let back: AnimLayer = ron::from_str(&saved).expect("保存结果应能再读");
+        assert!((back.fade_time - 0.4).abs() < f32::EPSILON);
+        let machine = back.active_machine().expect("层机器应保持可用");
+        assert_eq!(machine.entry, "Idle");
+        assert_eq!(machine.parameters.get("aim"), Some(&0.0));
     }
 
     /// 逐条过渡时长：缺省时**不落盘**（老场景逐字节不变），写了就活过往返。

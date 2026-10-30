@@ -16,13 +16,13 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 ```sh
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
-cargo test --workspace --all-targets         # 测试（要求全绿；858 条 + 7 条基准 ignore）
+cargo test --workspace --all-targets         # 测试（要求全绿；1182 条 + 17 条基准 ignore）
 # CI 在 GitHub Actions（windows-latest）跑 check / clippy / test + 示例项目冒烟，
 # 命令带 --locked；workflow 见 .github/workflows/ci.yml，取舍见决策记录 §三十四。
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
 cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --export-schema --out schema.json  # 场景格式说明书（JSON；无 --out 打 stdout）
-cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（178 函数 / 6 钩子；无 --out 打 stdout）
+cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（179 函数 / 6 钩子；无 --out 打 stdout）
 cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
 cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
@@ -180,7 +180,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 点光立方体阴影 | 6 面深度图 + `texture_depth_cube`；与方向光**并列**（`GpuLight.shadow_params.x` = 级联、`.z` = 立方体）；参考深度用**主轴分量** `max(|dx|,|dy|,|dz|)`（用 `length()` 会让整面向轴外越远越黑）；**u 轴必须镜像**（`scale(-1,1,1)`，不翻影子会翻到另一侧）；up 向量按 WebGPU 映射表选；只认第一盏 `casts_shadow` 且 `range > 0` 的点光，关着时逐位一致 | §八十 |
 | 点光逐面剔除 | 面掩码是**保守**判据（球 vs 棱锥的必要条件，只许多画不许漏画；真理源 = 与投影矩阵同解的那条测试）；剔除走**索引重映射表**（`face_list` 每条 4 字节 + 顶点着色器换槽位），别改成"复制实例数据"或"着色器塌零面积三角形"——两条都实测过，一条 CPU 贵 100 µs、一条 GPU 一点不省；光照半径外整实体不投；`face_bit` 放在阴影 pass 的**分段**里且整段打包一次写；相机外的投影物也要进 `shadow_batches`（点光那一侧） | §八十三 |
 | 软阴影 / 级间混合 | `render.shadow` 节（`softness` / `cascade_blend`）**默认全 0 = 关**，关着走 3×3 PCF + 硬级间切换老路径逐位一致（`is_default` 是整体相等判据）；采样盘是**固定泊松常量表**（禁随机 —— 截图逐字节确定的硬合同）；blocker search 用 `textureLoad` 取原始深度且**下标必须夹进图内**（uv=1.0 越界读 0 会被当"深度 0 遮挡物"）；`texture_depth_2d_array` 的 `textureLoad` 是 **4 参**（t, coords, array_index, level）；级间混合要**重叠拟合**（非第 0 级近端铺 `overlap × 本级跨度`），着色器 `b.y > 0.5` 守卫**宁可不混绝不混"全亮"**；band = split×blend 与 overlap_d = 级跨度×overlap 是**同一个旋钮**两处消费 | §八十四 |
-| 逐条转移时长 | `AnimTransition.duration` 覆盖 `Animator.fade_time`（`Some(0.0)` = 硬切）；**除数在切换那一刻定格**（`Prev.duration`，别每帧读全局）；缺省 `skip_serializing_if` 不落盘 ⇒ 老场景逐字节不变 | §八十一 |
+| 逐条转移时长 | `AnimTransition.duration` 覆盖所在机器的缺省时长（基础 `Animator.fade_time` / 分层 `AnimLayer.fade_time`；`Some(0.0)` = 硬切）；**除数在切换那一刻定格**（`Prev.duration`，别每帧现读配置）；缺省 `skip_serializing_if` 不落盘 ⇒ 老场景逐字节不变 | §八十一、§八十五 |
 | 控制台溯源 | 报错行的位置优先级 = **正文里的脚本 `path:line`**（只认 `.lua:`，别的后缀不猜）> 引擎 `file!()/line!()`；去重时补位置；源码查看器是**窗口**不是第八个面板（布局校验是"七个面板各一次"）；只读、512 KiB 上限、行号越界夹到最后一行 | §八十二 |
 | 动画脚本控制 | 状态机优先（配了可用机器时 `clip/speed/looping` 由状态表决定）；`set_anim_clip` 只写 `Animator.clip` 并复用 `AnimationDriver` 的淡入；叠加层 / 层剪辑硬切；越界值钳住、非有限值忽略 | §三十 |
 | 形变目标（morph） | CPU 变形（权重不变就不重写缓冲）；增量 target-major 且已乘 `model_scale`；权重优先级 剪辑 > 实体 > 模型默认；长度不自洽**整段放弃**；索引逐下标、钳 0~1、上限 256；`set_morph` 立刻生效（不走命令队列） | §三十七 |

@@ -1357,6 +1357,15 @@ fn register_animation(lua: &Lua, globals: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    globals.set(
+        "set_anim_layer_param",
+        lua.create_function(
+            |_, (ctx, layer, name, value): (LuaCtx, String, String, f32)| {
+                ctx.game().set_anim_layer_param(&layer, &name, value);
+                Ok(())
+            },
+        )?,
+    )?;
     Ok(())
 }
 

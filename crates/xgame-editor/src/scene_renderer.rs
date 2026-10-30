@@ -450,6 +450,11 @@ impl SceneRenderer {
         self.anim_driver.state(id)
     }
 
+    /// 某个混合层状态机的当前状态（Inspector 逐层显示用）。
+    pub fn animation_layer_state(&self, id: EntityId, layer: &str) -> Option<&str> {
+        self.anim_driver.layer_state(id, layer)
+    }
+
     /// 预览动画钟的时间缩放（`tick_wall` 的乘数）。
     ///
     /// 由 `scene_view::render_scene` 每帧写：Play 态来自运行时的 `time_scale`、
@@ -464,7 +469,7 @@ impl SceneRenderer {
     /// 三个条件缺一不可：
     ///
     /// 1. 实体配了 `animator` 且 [`is_active`](xgame_core::Animator::is_active)
-    ///    （开自动播放；机器模式下是"还有速度为正的状态"，见其文档）；
+    ///    （开自动播放；基础 / additive / layers 任一通道可能推进，见其文档）；
     /// 2. 模型能加载、**剪辑存在** —— 加载失败或剪辑名写错时返回假，否则一个
     ///    坏资产就能让编辑器永远满速空转（这是本函数存在的首要理由）。
     ///    机器模式下要的是「**任一状态**的剪辑在模型里」：entry 剪辑缺失但
@@ -504,21 +509,35 @@ impl SceneRenderer {
                 if !mesh.has_animation() {
                     continue;
                 }
-                let clip_ok = match animator.active_machine() {
-                    Some(m) => m.states.iter().any(|s| mesh.clip(&s.clip).is_some()),
-                    None => mesh.clip(&animator.clip).is_some(),
-                };
+                let clip_ok = animator.base_is_active()
+                    && match animator.active_machine() {
+                        Some(m) => m.states.iter().any(|s| mesh.clip(&s.clip).is_some()),
+                        None => mesh.clip(&animator.clip).is_some(),
+                    };
                 // 叠加层：权重 > 0 且剪辑在模型里 → 也要出帧（哪怕基础层冻结，
                 // 增量还在动）。权重 0 的叠加层贡献零画面，不为它烧帧。
                 let additive_ok = animator
                     .additive
                     .as_ref()
-                    .is_some_and(|a| a.weight > 0.0 && mesh.clip(&a.clip).is_some());
+                    .is_some_and(|a| {
+                        a.weight > 0.0 && a.speed > 0.0 && mesh.clip(&a.clip).is_some()
+                    });
                 // 层栈：任一层权重 > 0 且剪辑在模型里 → 同理要出帧。
-                let layers_ok = animator
-                    .layers
-                    .iter()
-                    .any(|l| l.weight > 0.0 && mesh.clip(&l.clip).is_some());
+                let layers_ok = animator.layers.iter().any(|layer| {
+                    if layer.weight <= 0.0 {
+                        return false;
+                    }
+                    if !layer.is_active() {
+                        return false;
+                    }
+                    match layer.active_machine() {
+                        Some(machine) => machine
+                            .states
+                            .iter()
+                            .any(|state| mesh.clip(&state.clip).is_some()),
+                        None => mesh.clip(&layer.clip).is_some(),
+                    }
+                });
                 if clip_ok || additive_ok || layers_ok {
                     active = true;
                 }
@@ -675,50 +694,7 @@ impl SceneRenderer {
                 // DragValue 拖）要触发重绘，否则转移换的状态不显示；states/
                 // transitions/entry 改了同理（编辑期改 RON 后重载场景才画对）。
                 if let Some(m) = animator.active_machine() {
-                    for byte in m.entry.as_bytes() {
-                        hash = mix_bits(hash, *byte as u64);
-                    }
-                    // BTreeMap 天然有序 → 参数表哈希稳定，与插入顺序无关。
-                    for (name, value) in &m.parameters {
-                        for byte in name.as_bytes() {
-                            hash = mix_bits(hash, *byte as u64);
-                        }
-                        hash = mix_bits(hash, value.to_bits() as u64);
-                    }
-                    for s in &m.states {
-                        for byte in s.name.as_bytes() {
-                            hash = mix_bits(hash, *byte as u64);
-                        }
-                        for byte in s.clip.as_bytes() {
-                            hash = mix_bits(hash, *byte as u64);
-                        }
-                        hash = mix_bits(hash, s.speed.to_bits() as u64);
-                        hash = mix_bits(hash, s.looping as u64);
-                    }
-                    for t in &m.transitions {
-                        for byte in t.from.as_bytes() {
-                            hash = mix_bits(hash, *byte as u64);
-                        }
-                        for byte in t.to.as_bytes() {
-                            hash = mix_bits(hash, *byte as u64);
-                        }
-                        match &t.when {
-                            xgame_core::AnimCondition::AtLeast { param, value } => {
-                                hash = mix_bits(hash, 0);
-                                for byte in param.as_bytes() {
-                                    hash = mix_bits(hash, *byte as u64);
-                                }
-                                hash = mix_bits(hash, value.to_bits() as u64);
-                            }
-                            xgame_core::AnimCondition::Below { param, value } => {
-                                hash = mix_bits(hash, 1);
-                                for byte in param.as_bytes() {
-                                    hash = mix_bits(hash, *byte as u64);
-                                }
-                                hash = mix_bits(hash, value.to_bits() as u64);
-                            }
-                        }
-                    }
+                    hash = mix_machine(hash, m);
                 }
                 // 叠加层：clip/weight/speed/looping 进指纹 —— 脚本每帧推权重、
                 // Inspector 拖权重都要触发重绘，否则增量效果改了画面不动。
@@ -744,6 +720,10 @@ impl SceneRenderer {
                     hash = mix_bits(hash, l.weight.to_bits() as u64);
                     hash = mix_bits(hash, l.speed.to_bits() as u64);
                     hash = mix_bits(hash, l.looping as u64);
+                    hash = mix_bits(hash, l.fade_time.to_bits() as u64);
+                    if let Some(machine) = l.active_machine() {
+                        hash = mix_machine(hash, machine);
+                    }
                     for m in &l.mask {
                         for byte in m.as_bytes() {
                             hash = mix_bits(hash, *byte as u64);
@@ -1024,6 +1004,64 @@ impl SceneRenderer {
         self.last_signature = Some(signature);
         loaded
     }
+}
+
+/// 把状态机的完整落盘配置搅进场景指纹。
+///
+/// 基础机器与每个层机器共用，避免以后给状态 / 转移加字段时只补一边。参数表是
+/// `BTreeMap`，遍历顺序确定；字符串之间混入固定分隔，防不同切分拼出同一字节串。
+fn mix_machine(mut hash: u64, machine: &xgame_core::AnimMachine) -> u64 {
+    for byte in machine.entry.as_bytes() {
+        hash = mix_bits(hash, *byte as u64);
+    }
+    hash = mix_bits(hash, 0xFB);
+    for (name, value) in &machine.parameters {
+        for byte in name.as_bytes() {
+            hash = mix_bits(hash, *byte as u64);
+        }
+        hash = mix_bits(hash, value.to_bits() as u64);
+        hash = mix_bits(hash, 0xFC);
+    }
+    for state in &machine.states {
+        for byte in state.name.as_bytes().iter().chain(state.clip.as_bytes()) {
+            hash = mix_bits(hash, *byte as u64);
+        }
+        hash = mix_bits(hash, state.speed.to_bits() as u64);
+        hash = mix_bits(hash, state.looping as u64);
+        hash = mix_bits(hash, 0xFD);
+    }
+    for transition in &machine.transitions {
+        for byte in transition
+            .from
+            .as_bytes()
+            .iter()
+            .chain(transition.to.as_bytes())
+        {
+            hash = mix_bits(hash, *byte as u64);
+        }
+        match &transition.when {
+            xgame_core::AnimCondition::AtLeast { param, value } => {
+                hash = mix_bits(hash, 0);
+                for byte in param.as_bytes() {
+                    hash = mix_bits(hash, *byte as u64);
+                }
+                hash = mix_bits(hash, value.to_bits() as u64);
+            }
+            xgame_core::AnimCondition::Below { param, value } => {
+                hash = mix_bits(hash, 1);
+                for byte in param.as_bytes() {
+                    hash = mix_bits(hash, *byte as u64);
+                }
+                hash = mix_bits(hash, value.to_bits() as u64);
+            }
+        }
+        hash = mix_bits(
+            hash,
+            transition.duration.map_or(u64::MAX, |value| value.to_bits() as u64),
+        );
+        hash = mix_bits(hash, 0xFE);
+    }
+    hash
 }
 
 /// 把一个 64 位值搅进哈希（splitmix64 的收尾混合）。
@@ -1517,7 +1555,7 @@ mod tests {
     /// 加层、脚本按名推权重、改遮罩切分都要触发重绘。
     #[test]
     fn signature_tracks_layer_config() {
-        use xgame_core::{AnimLayer, AnimLayerMode};
+        use xgame_core::{AnimLayer, AnimLayerMode, AnimMachine, AnimState};
 
         let lights = [Light::default()];
         let ambient = [0.06, 0.06, 0.08];
@@ -1552,6 +1590,32 @@ mod tests {
         fox.animator.as_mut().unwrap().layers[0].mode = AnimLayerMode::Additive;
         let remoded = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(masked, remoded, "求值模式没进指纹");
+
+        // 层机器的参数是脚本每帧推的量；只改它也必须重画。
+        fox.animator.as_mut().unwrap().layers[0].machine = Some(AnimMachine {
+            entry: "Aim".into(),
+            parameters: std::collections::BTreeMap::from([("fire".to_string(), 0.0)]),
+            states: vec![AnimState {
+                name: "Aim".into(),
+                clip: "Aim".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let machined = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(remoded, machined, "挂层机器没进指纹");
+        fox.animator.as_mut().unwrap().layers[0]
+            .machine
+            .as_mut()
+            .unwrap()
+            .parameters
+            .insert("fire".into(), 1.0);
+        let parameterized = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(machined, parameterized, "层机器参数没进指纹");
+
+        fox.animator.as_mut().unwrap().layers[0].fade_time = 0.7;
+        let retimed = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(parameterized, retimed, "层机器缺省淡入没进指纹");
 
         // 清空栈回到纯基础。
         fox.animator.as_mut().unwrap().layers.clear();
