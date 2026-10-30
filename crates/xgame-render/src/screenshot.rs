@@ -363,6 +363,12 @@ impl ScreenshotRenderer {
         self.pipeline.set_cascaded_shadow_culling(enabled);
     }
 
+    /// 开关点光立方体阴影的逐面剔除（默认开）。只给 A/B 像素等价测试用 ——
+    /// 开与关的画面必须逐位一致。
+    pub fn set_point_shadow_culling(&mut self, enabled: bool) {
+        self.pipeline.set_point_shadow_culling(enabled);
+    }
+
     pub fn aspect(&self) -> f32 {
         self.size.0 as f32 / self.size.1.max(1) as f32
     }
@@ -3923,18 +3929,17 @@ mod tests {
         let on_scene = point_shadow_probe_scene(true);
         let with_shadow = render_frames(&mut shot, &on_scene, &anim, camera, RenderConfig::default(), 1);
         let stats = shot.frame_stats();
-        // 3 个实例（地板 + 两只箱子）× 6 面 —— 少一面就少 3。
-        assert_eq!(
-            stats.point_shadow_instances, 18,
-            "六个面都要把全部投影物画一遍（实际 {}）",
+        // 3 个实例（地板 + 两只箱子）× 6 面 = 18 是**不剔除**时的上限；
+        // 逐面剔除后只会更少（地板六面都占、两只箱子各自只占 2 面）。
+        // 两条都要：多了说明剔除没生效，少了到 0 说明把某一面整段剔空了。
+        assert!(
+            stats.point_shadow_instances > 0 && stats.point_shadow_instances < 18,
+            "逐面剔除要少画但不能画空（实际 {}）",
             stats.point_shadow_instances
         );
-        // 每面一遍：draw 次数 = 6 × 批次表长度（合批之后地板 1 批、两只箱子 1 批）。
-        let batches = stats.opaque_batches + stats.shadow_only_batches;
-        assert_eq!(
-            stats.point_shadow_draw_calls,
-            batches * crate::scene_pipeline::POINT_SHADOW_FACES,
-            "六面各画一遍全部批次（批次 {batches}）"
+        assert!(
+            stats.point_shadow_draw_calls > 0,
+            "六个面至少要各发一次 draw"
         );
 
         let off_scene = point_shadow_probe_scene(false);
@@ -3979,6 +3984,175 @@ mod tests {
         assert!(
             (lit_ctrl - unlit_ctrl).abs() < 8.0,
             "没有被遮住的地方不该变暗：有阴影 {lit_ctrl:.1} vs 无阴影 {unlit_ctrl:.1}"
+        );
+    }
+
+    /// **像素等价**：点光立方体的逐面剔除开 / 关，画面必须逐字节一致。
+    ///
+    /// 六面是六个 90° 棱锥，**把空间铺满**（只在棱边重叠），所以"这一面看不见这个
+    /// 物体"与"它的深度不会出现在这一面的深度图里"是同一件事。两档画面没有理由
+    /// 不同；这条挂了说明面掩码算错（漏一面 = 某个方向的影子缺一块）或者点光那段
+    /// 槽位写错位（影子挪到别处、甚至拿别人的模型画）。
+    ///
+    /// 场景里刻意放了**光照半径外**的箱子：那一条走的是"整实体不进点光槽位"的
+    /// 更狠的剪枝，与逐面掩码是两条独立的分支。
+    #[test]
+    fn point_light_shadow_culling_matches_unculled_pixels() {
+        let Some(mut shot) = gpu_or_skip("point_light_shadow_culling_matches_unculled_pixels") else {
+            return;
+        };
+        let mut scene = Scene::new("point-shadow-cull");
+        scene.ambient = [0.02; 3];
+        let mut lamp = Light::point("lamp", [0.0, 8.0, 0.0], [1.0; 3], 9.0, 60.0);
+        lamp.casts_shadow = true;
+        scene.lights = vec![lamp];
+        let mut floor = Entity::new("Floor");
+        floor.model = "builtin://plane".to_owned();
+        floor.transform.scale = Vec3::new(40.0, 1.0, 40.0);
+        scene.add_entity(floor);
+        // 六个方向各一只：少一面就会在对照里差像素。最后一只在灯**上方**，
+        // 只有 `+Y` 面看得见它。
+        let spots = [
+            Vec3::new(3.5, 1.5, 0.0),
+            Vec3::new(-3.5, 1.5, 0.0),
+            Vec3::new(0.0, 1.5, 3.5),
+            Vec3::new(0.0, 1.5, -3.5),
+            Vec3::new(0.0, 10.5, 0.0),
+            // 光照半径（9）之外：整实体不进点光那段槽位。
+            Vec3::new(16.0, 1.5, 16.0),
+        ];
+        for (i, p) in spots.into_iter().enumerate() {
+            let mut caster = Entity::new(format!("Caster{i}"));
+            caster.model = "builtin://cube".to_owned();
+            caster.transform.position = p;
+            caster.transform.scale = Vec3::splat(1.5);
+            scene.add_entity(caster);
+        }
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 10.0, 16.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let render = |shot: &mut ScreenshotRenderer| {
+            shot.render_scene(
+                &scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.read_rgba().expect("读回失败")
+        };
+
+        shot.set_point_shadow_culling(false);
+        let unculled = render(&mut shot);
+        let plain = shot.frame_stats();
+        let casters = plain.opaque_instances + plain.shadow_only_instances;
+        assert!(casters >= spots.len(), "前提：场景里必须有投影物");
+        assert_eq!(
+            plain.point_shadow_instances,
+            casters * crate::scene_pipeline::POINT_SHADOW_FACES,
+            "关掉剔除时六面各画一遍全部投影物"
+        );
+
+        shot.set_point_shadow_culling(true);
+        let culled = render(&mut shot);
+        let fast = shot.frame_stats();
+        assert!(
+            fast.point_shadow_instances < plain.point_shadow_instances,
+            "逐面剔除必须真的少画：{} vs {}",
+            fast.point_shadow_instances,
+            plain.point_shadow_instances
+        );
+        assert!(fast.point_shadow_instances > 0, "不能把六面全剔空");
+
+        assert_eq!(unculled.len(), culled.len());
+        if unculled != culled {
+            let idx = unculled
+                .iter()
+                .zip(&culled)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            panic!(
+                "逐面剔除不许改画面；首个差异在第 {idx} 字节（像素 {}）: {} vs {}",
+                idx / 4,
+                unculled[idx],
+                culled[idx]
+            );
+        }
+    }
+
+    /// **相机外的投影物仍要给点光投影**。
+    ///
+    /// 收集阶段原来只在"方向光的某级级联命中"时把相机外实体留在
+    /// `shadow_batches` 里；点光那一半没被考虑，于是灯挂在高处、物体在画面上方
+    /// 之外时，地上会少一块影子。这条用像素钉住：物体在视野外（画面里看不见它
+    /// 本身），它脚下的地面必须变暗。
+    #[test]
+    fn point_shadow_caster_outside_the_camera_still_casts() {
+        let Some(mut shot) = gpu_or_skip("point_shadow_caster_outside_the_camera_still_casts")
+        else {
+            return;
+        };
+        let build = |shadows: bool| {
+            let mut scene = Scene::new("point-shadow-offscreen");
+            scene.ambient = [0.02; 3];
+            let mut lamp = Light::point("lamp", [0.0, 12.0, 0.0], [1.0; 3], 8.0, 60.0);
+            lamp.casts_shadow = shadows;
+            scene.lights = vec![lamp];
+            let mut floor = Entity::new("Floor");
+            floor.model = "builtin://plane".to_owned();
+            floor.transform.scale = Vec3::new(30.0, 1.0, 30.0);
+            scene.add_entity(floor);
+            // 箱子吊在灯下 3 个单位：相机平视时它在画面上沿之外。
+            let mut caster = Entity::new("Caster");
+            caster.model = "builtin://cube".to_owned();
+            caster.transform.position = Vec3::new(0.0, 9.0, 0.0);
+            caster.transform.scale = Vec3::splat(1.4);
+            scene.add_entity(caster);
+            scene
+        };
+        // 相机贴着地面平视原点：画面里只有地板，箱子在视野上方之外。
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 1.6, 14.0),
+            Vec3::new(0.0, 1.6, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let on = build(true);
+        let with_shadow = render_frames(&mut shot, &on, &AnimationDriver::new(), camera, RenderConfig::default(), 1);
+        let stats = shot.frame_stats();
+        // 箱子在相机外、但在光照半径内：必须进阴影专用批次。
+        assert!(
+            stats.shadow_only_instances >= 1,
+            "相机外的投影物必须留在 shadow_batches（实际 {}）",
+            stats.shadow_only_instances
+        );
+        let off = build(false);
+        let without_shadow = render_frames(&mut shot, &off, &AnimationDriver::new(), camera, RenderConfig::default(), 1);
+
+        // 灯正下方的地面：开阴影后必须变暗。
+        let world = on.world_matrices();
+        let bounds = scene_bounds(&on.entities, &world, &shot.model_cache).expect("场景有几何");
+        let (near, far) = clip_planes(&camera, bounds.radius());
+        let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
+            * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let to_pixel = |p: Vec3| {
+            let clip = view_proj * p.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            (
+                ((ndc.x * 0.5 + 0.5) * 320.0).round() as u32,
+                ((1.0 - (ndc.y * 0.5 + 0.5)) * 240.0).round() as u32,
+            )
+        };
+        let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        let (px, py) = to_pixel(Vec3::new(0.0, 0.0, 0.0));
+        assert!(px < 320 && py < 240, "影子落点必须在画面内: ({px}, {py})");
+        let lit = luma(pixel_avg(&with_shadow, 320, px, py));
+        let unlit = luma(pixel_avg(&without_shadow, 320, px, py));
+        assert!(
+            lit + 20.0 < unlit,
+            "相机外的箱子也必须投影：有阴影 {lit:.1} vs 无阴影 {unlit:.1}"
         );
     }
 

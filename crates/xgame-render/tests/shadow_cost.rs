@@ -567,10 +567,13 @@ fn point_light_shadow_cost() {
     }
 
     let mut off_scene_us = Vec::new();
+    let mut plain_scene_us = Vec::new();
     let mut on_scene_us = Vec::new();
     let mut off_cpu_us = Vec::new();
+    let mut plain_cpu_us = Vec::new();
     let mut on_cpu_us = Vec::new();
     let mut stats_off = FrameStats::default();
+    let mut stats_plain = FrameStats::default();
     let mut stats_on = FrameStats::default();
 
     for _ in 0..ROUNDS {
@@ -592,6 +595,27 @@ fn point_light_shadow_cost() {
         off_cpu_us.push(r.cpu_us);
         stats_off = s;
 
+        // 逐面剔除**关**：六面各画一遍全部投影物（引入前的行为）。
+        path.pipeline.set_point_shadow_culling(false);
+        let (r, s) = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
+            path.frame(
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &scene_on,
+                &matrices,
+                &cache,
+                &anim,
+                &view_proj,
+                &eye,
+            )
+        });
+        plain_scene_us.push(r.scene_us);
+        plain_cpu_us.push(r.cpu_us);
+        stats_plain = s;
+
+        path.pipeline.set_point_shadow_culling(true);
         let (r, s) = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
             path.frame(
                 &device,
@@ -612,23 +636,46 @@ fn point_light_shadow_cost() {
     }
 
     let a = median(&mut off_scene_us);
+    let p = median(&mut plain_scene_us);
     let b = median(&mut on_scene_us);
     let a_c = median(&mut off_cpu_us);
+    let p_c = median(&mut plain_cpu_us);
     let b_c = median(&mut on_cpu_us);
 
     println!("\n== 点光立方体阴影成本（{WIDTH}x{HEIGHT} / {ACTORS} 方块 / 6 面）==");
-    println!("档位            GPU µs    CPU µs   六面实例");
-    println!("点光阴影关    {a:9.2} {a_c:9.2} {:12}", stats_off.point_shadow_instances);
-    println!("点光阴影开    {b:9.2} {b_c:9.2} {:12}", stats_on.point_shadow_instances);
-    println!("\n六面成本     : {:+.2} µs (+{:.1}%)", b - a, (b - a) / a * 100.0);
+    println!("档位              GPU µs    CPU µs   六面实例  draw");
     println!(
-        "六面实例数   : {}（每面 {}）",
-        stats_on.point_shadow_instances,
-        stats_on.point_shadow_instances / 6
+        "点光阴影关      {a:9.2} {a_c:9.2} {:10} {:5}",
+        stats_off.point_shadow_instances, stats_off.point_shadow_draw_calls
     );
     println!(
-        "六面 draw 数 : {}（每面 {} 批）",
-        stats_on.point_shadow_draw_calls,
-        stats_on.point_shadow_draw_calls / 6
+        "阴影开·免剔     {p:9.2} {p_c:9.2} {:10} {:5}",
+        stats_plain.point_shadow_instances, stats_plain.point_shadow_draw_calls
+    );
+    println!(
+        "阴影开·逐面剔   {b:9.2} {b_c:9.2} {:10} {:5}",
+        stats_on.point_shadow_instances, stats_on.point_shadow_draw_calls
+    );
+    println!("\n六面成本（免剔）  : {:+.2} µs (+{:.1}%)", p - a, (p - a) / a * 100.0);
+    println!("六面成本（逐面剔）: {:+.2} µs (+{:.1}%)", b - a, (b - a) / a * 100.0);
+    println!(
+        "逐面剔除收益      : {:+.2} µs ({:+.1}% 相对免剔)",
+        b - p,
+        (b - p) / p * 100.0
+    );
+    if stats_plain.point_shadow_instances > 0 {
+        println!(
+            "六面实例提交      : {} → {} （{:+.1}%）",
+            stats_plain.point_shadow_instances,
+            stats_on.point_shadow_instances,
+            (stats_on.point_shadow_instances as f64
+                / stats_plain.point_shadow_instances as f64
+                - 1.0)
+                * 100.0
+        );
+    }
+    println!(
+        "六面 draw 数      : 免剔 {} → 剔 {}",
+        stats_plain.point_shadow_draw_calls, stats_on.point_shadow_draw_calls
     );
 }

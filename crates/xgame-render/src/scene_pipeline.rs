@@ -127,10 +127,11 @@
 //!   独立：一盏方向光 + 一盏点光可以同时投影，互不覆盖对方的深度图。
 //! - **每种只做一盏**。多盏灯各自的阴影贴图意味着每盏一次全场景重绘 + 一张贴图，
 //!   收益远不如先把一盏做扎实。第一盏生效，后面的 `casts_shadow` 暂时忽略。
-//! - **点光六面不做逐面剔除**（v1）：立方体每个面只看得到一小块场景，全画是
-//!   浪费；但"漏画一面"的症状（某个方向没影子、其余五面正常）比浪费难查得多，
-//!   所以先保证全，读数 `FrameStats::point_shadow_instances` 摊开成本，
-//!   逐面剔除留作后续优化。
+//! - **点光六面逐面剔除**（[`point_face_mask`]）：每实体算一个 6 位面掩码，
+//!   按面把"看得见的实例"排成一段，顶点着色器用一张 u32 索引表把段内下标换回
+//!   真实槽位（`vs_shadow` 开头的注释写了为什么不是复制实例数据）。
+//!   剔除是**保守**的（球 vs 棱锥的必要条件，只会多画不会漏画），A/B 两档画面
+//!   必须逐位一致。
 //! - **覆盖距离 = min(相机远平面, 场景延伸, 120)**，不是相机远平面：编辑器远
 //!   平面常是 1000，照它切等于把 99% 的纹素花在看不见的地方。
 //! - **每层吸附到纹素网格**：否则相机一动，影子边缘就随纹素相位抖（shimmer）。
@@ -325,10 +326,14 @@ pub struct FrameStats {
     /// 与实例数一起看：剔除把实例切碎成"每批每级一段"，段数会变多；
     /// 只有实例数明显下降、段数没有失控，这笔交易才划算。
     pub shadow_draw_calls: usize,
-    /// 本帧**点光立方体**阴影提交的实例数（六面相加）。
+    /// 本帧**点光立方体**阴影的有效实例数（六面相加，逐面剔除后）。
     ///
     /// 与方向光的级联分开记：点光六面不共享剔除结果，量"点光贵多少"必须看
     /// 它自己的数（六面全画时 ≈ `6 × (不透明实例 + 阴影专用实例)`）。
+    ///
+    /// 这里数的是**真会画进深度图的实例**，不是提交量：逐面剔除发生在顶点
+    /// 着色器里（不带当前面的实例塌成零面积三角形），提交量仍是"每面全部"。
+    /// 所以这个数就是剔除的收益口径，拿它除以提交量 = 剔除率。
     pub point_shadow_instances: usize,
     /// 本帧点光阴影发出的 draw 次数（六面相加）。
     pub point_shadow_draw_calls: usize,
@@ -438,6 +443,33 @@ struct ShadowUniform {
 /// 所以取 256 而不是 64。
 const SHADOW_PASS_STRIDE: u64 = 256;
 
+/// 阴影 pass 每段的**完整**内容（步长 [`SHADOW_PASS_STRIDE`]）。
+///
+/// 一段 = 64 字节矩阵 + 4 字节 `face_bit` + 填充到 256。`face_bit` 是点光
+/// 立方体逐面剔除的开关：0 = 不剔（方向光那一路永远是 0），非 0 时顶点着色器
+/// 走索引重映射表，只画面掩码带这一位的实例。写在段内而不是全局 uniform 上，
+/// 是因为同一个 shadow pass 管线要服务"方向光 4 层"和"点光 6 面"两条缓冲，
+/// 每段各自带一个值，动态偏移选段时顺带把剔除开关也选对了。
+///
+/// 为什么打包成一个结构体而不是"矩阵写一次、位写一次"：`queue.write_buffer`
+/// 每次都有固定开销（staging belt 分配 + 一条拷贝命令），逐段两次写 = 每帧
+/// 十几次调用，比内容本身还贵。整段打包一次写，两条缓冲各一次调用。
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct ShadowPassSegment {
+    light_view_proj: [[f32; 4]; 4],
+    face_bit: u32,
+    // 填充到 256 字节。拆两个字段只是因为 bytemuck 的 Pod 只对 ≤32 元素的
+    // 数组有实现（47 个 u32 得拆成 32 + 15）。
+    _pad: [u32; 32],
+    _pad_tail: [u32; 15],
+}
+
+const _: () = assert!(
+    std::mem::size_of::<ShadowPassSegment>() as u64 == SHADOW_PASS_STRIDE,
+    "ShadowPassSegment 必须正好占一段"
+);
+
 /// 点光立方体阴影的 uniform（主 pass 片元采样用）。
 ///
 /// 与 [`ShadowUniform`] 分开而不是合并：方向光的级联（4 层 + 视线切分）与点光的
@@ -546,6 +578,12 @@ struct PendingDraw {
     /// 判一次就得把世界矩阵与网格包围盒重算一遍（那是剔除想省掉的那份工作）。
     /// 未开逐级剔除时恒为 [`ALL_CASCADES_MASK`]，于是老路径一位不变。
     cascade_mask: u8,
+    /// 该实体落在点光立方体的哪几面里（位掩码，bit k = 第 k 面）。
+    ///
+    /// 与 `cascade_mask` 同理在收集阶段算（包围盒只在那里存在）。点光阴影关着
+    /// 或实体整球在光照半径外时为 0 —— 后者连实例都不进点光那段槽位。
+    /// 见 [`point_face_mask`]。
+    point_mask: u8,
 }
 
 /// 全部级联都算命中（逐级剔除关闭时的保守值）。
@@ -563,6 +601,25 @@ struct ShadowRun {
     /// 级联成员位（bit k = 第 k 级要画这一段）。
     mask: u8,
     /// 这一段第一个实例的槽位。
+    first: u32,
+    /// 实例数。
+    count: u32,
+}
+
+/// 点光立方体的逐面剔除段：`first` 指向**索引重映射表**
+/// （[`ScenePipeline::point_face_list`]）里的位置，不是实例槽位。
+///
+/// 与 [`ShadowRun`] 分开而不是复用：那边的 `first` 直接是槽位（那一路没有
+/// 重映射表），两处的语义不同，共用一个结构体早晚会被读错。
+#[derive(Copy, Clone, Debug)]
+struct PointRun {
+    /// 源批次表：0 = `opaque_batches`，1 = `shadow_batches`。
+    table: u8,
+    /// 源表里的批次下标（拿到它的图元 / 材质去绑顶点与索引缓冲）。
+    batch: u32,
+    /// 面掩码（bit k = 第 k 面要画这一段）。
+    mask: u8,
+    /// 重映射表里的起点。
     first: u32,
     /// 实例数。
     count: u32,
@@ -592,6 +649,84 @@ fn pack_draw_key(batch: u32, mask: u8, index: u32) -> u64 {
 
 fn unpack_draw_index(key: u64) -> u32 {
     (key & 0x00FF_FFFF) as u32
+}
+
+/// 打包点光逐面剔除的一条待排键。
+///
+/// 布局：`[源表 8 位][批 24 位][面掩码 8 位][真实槽位 24 位]`。排完之后
+/// "同一批、同一面掩码"的实例连成一段，段内槽位递增 —— 段就是
+/// [`PointRun`]，而"真实槽位"按排好的顺序落进索引重映射表。
+fn pack_point_entry(table: u8, batch: u32, mask: u8, slot: u32) -> u64 {
+    debug_assert!(slot < (1 << 24), "槽位超出打包宽度");
+    debug_assert!(batch < (1 << 24), "批下标超出打包宽度");
+    ((table as u64) << 56) | ((batch as u64) << 32) | ((mask as u64) << 24) | slot as u64
+}
+
+fn unpack_point_slot(key: u64) -> u32 {
+    (key & 0x00FF_FFFF) as u32
+}
+
+/// 把点光条目切成 [`PointRun`]，同时填出索引重映射表
+/// （`face_list[i]` = 第 i 条在 `draws` 里的真实槽位）。
+///
+/// 不用整体 `sort_unstable`：条目按收集顺序本来就是"表 → 批"连续的
+/// （`draw_order` 的排序键第一位就是批，表 0 / 表 1 各填一段），只有面掩码
+/// 是乱的。所以每段 `(表, 批)` 里做一次**计数排序**（64 个桶 = 6 位掩码），
+/// 两趟线性扫描就完事 —— 2000 条下整体排序约 25 µs，这里约 5 µs。
+///
+/// 条目若真不连续（`cascaded_shadow_culling` 关掉时是收集顺序），同一张批
+/// 会被切成几段、多出几个 draw call，**画面照旧**：段的语义从来都是"连续
+/// 的同掩码实例"，不连续只是多切几段。
+fn build_point_runs(entries: &[u64], face_list: &mut Vec<u32>, runs: &mut Vec<PointRun>) {
+    face_list.clear();
+    runs.clear();
+    // 桶里先存"这一掩码已填几条"，前缀和阶段之前当计数器用。
+    let mut bucket = [0u32; 64];
+    let mut i = 0usize;
+    while i < entries.len() {
+        let head_hi = entries[i] >> 32;
+        let table = (head_hi >> 24) as u8;
+        let batch = (head_hi & 0x00FF_FFFF) as u32;
+        let mut j = i;
+        while j < entries.len() && entries[j] >> 32 == head_hi {
+            let mask = ((entries[j] >> 24) & 0xFF) as usize;
+            bucket[mask] += 1;
+            j += 1;
+        }
+        // 前缀和：每个掩码桶在本段里的起点（顺手把计数器清零，散射时复用）。
+        let mut start = [0u32; 64];
+        let mut acc = 0u32;
+        for m in 0..64 {
+            start[m] = acc;
+            acc += bucket[m];
+            bucket[m] = 0;
+        }
+        // 散射：同掩码的实例排在一起，段内保持原相对顺序（稳定）。
+        let base = face_list.len() as u32;
+        face_list.resize(base as usize + (j - i), 0);
+        for &key in &entries[i..j] {
+            let mask = ((key >> 24) & 0xFF) as usize;
+            let pos = base + start[mask] + bucket[mask];
+            bucket[mask] += 1;
+            face_list[pos as usize] = unpack_point_slot(key);
+        }
+        // 一个非空桶 = 一段。
+        for m in 0..64 {
+            let count = bucket[m];
+            if count == 0 {
+                continue;
+            }
+            runs.push(PointRun {
+                table,
+                batch,
+                mask: m as u8,
+                first: base + start[m],
+                count,
+            });
+            bucket[m] = 0;
+        }
+        i = j;
+    }
 }
 
 fn push_shadow_runs(order: &[u64], batches: &[DrawBatch], out: &mut Vec<ShadowRun>) {
@@ -871,6 +1006,74 @@ pub fn point_shadow_reference_depth(axis_distance: f32, near: f32, far: f32) -> 
         return 0.0;
     }
     (far / (far - near)) * (1.0 - near / axis_distance)
+}
+
+/// 六面全命中（逐面剔除关闭 / 退化输入时的保守值）。
+pub const ALL_POINT_FACES_MASK: u8 = (1u8 << POINT_SHADOW_FACES) - 1;
+
+/// 一个包围球落在点光立方体的**哪几面**里（6 位掩码，bit = 面序）。
+///
+/// # 为什么可以剔
+///
+/// 立方体六个 90° 棱锥把空间**恰好铺满**（没有缝、没有重叠除边界），所以"这一面
+/// 看不见这个物体"与"这个物体的深度不会出现在这一面的深度图里"是同一件事。
+/// 逐面全画时六个面各跑一遍全场景：2000 方块的阵子上实测六面 8070 个实例，
+/// 而每个物体真正能落在的面通常只有 1~3 个。
+///
+/// # 判据为什么是"保守"的
+///
+/// 物体用**包围球**近似（半径 = 世界 AABB 的半径），所以判据要做球-棱锥的相交：
+/// 棱锥 `+X` 由四个半空间给出（`±(dx±dy) >= 0`、`±(dx±dz) >= 0`，法向模长 √2）。
+/// 球与凸区域相交 ⇒ 对每个半空间都有 `s(center) >= -r·|n|`，这是**必要**条件
+/// 而非充分条件 —— 球在棱锥棱边附近会被多算进一个面。多算的代价只是多画几个
+/// 实例，少算的代价是**某个方向凭空缺一块影子**，所以这里刻意选宽松的一侧。
+///
+/// # 光照半径（far）剪枝
+///
+/// 远平面 = 灯的 `range`：比它更远的投影物会被近远平面裁掉，本来也投不出影子
+/// （着色器里 `axis >= far` 的片元直接判受光）。球的**最小**主轴距离是
+/// `max(|d|) - r`，超过远平面就整球都在立方体外 —— 这一条最便宜、也最有效
+/// （真实场景里灯往往只罩住一小片）。
+pub fn point_face_mask(offset: Vec3, radius: f32, far: f32) -> u8 {
+    // 退化输入一律"全都算命中"：宁可多画六个面，也不能因为一个坏数缺影子。
+    if !offset.is_finite() || !radius.is_finite() || !far.is_finite() {
+        return ALL_POINT_FACES_MASK;
+    }
+    let r = radius.max(0.0);
+    let (dx, dy, dz) = (offset.x, offset.y, offset.z);
+    // 整球在光照半径之外（沿主轴方向的最近点都超出远平面）。
+    if dx.abs().max(dy.abs()).max(dz.abs()) - r > far {
+        return 0;
+    }
+    // 侧面平面的法向是 `(1, ±1, 0)/√2` 之类：球的容差是 `r · √2`。
+    let slack = r * std::f32::consts::SQRT_2;
+    // 四个半空间 `main ± a >= -slack`、`main ± b >= -slack` 合起来就是
+    // `main + slack >= max(|a|, |b|)` —— 一面一个比较，六个面一共 3 个绝对值、
+    // 3 个 max、6 次比较。这个函数每帧对每个实体调一次（2000 实例下实测
+    // 26 µs 的四半空间版本），所以这里的算术量是**有预算**的。
+    let (ax, ay, az) = (dx.abs(), dy.abs(), dz.abs());
+    let (rx, ry, rz) = (ay.max(az), ax.max(az), ax.max(ay));
+    let mut mask = 0u8;
+    // 面序固定为 `+X, -X, +Y, -Y, +Z, -Z`（与 [`POINT_SHADOW_FACES`] 一致）。
+    if dx + slack >= rx {
+        mask |= 1 << 0;
+    }
+    if -dx + slack >= rx {
+        mask |= 1 << 1;
+    }
+    if dy + slack >= ry {
+        mask |= 1 << 2;
+    }
+    if -dy + slack >= ry {
+        mask |= 1 << 3;
+    }
+    if dz + slack >= rz {
+        mask |= 1 << 4;
+    }
+    if -dz + slack >= rz {
+        mask |= 1 << 5;
+    }
+    mask
 }
 
 /// 一帧的级联阴影参数（CPU 拟合的结果）。
@@ -1562,10 +1765,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 /// 阴影 pass 的顶点着色器：只把顶点变换到光源裁剪空间，片元阶段不需要——
 /// 深度图只关心深度，管线里 `fragment: None`。
 const SHADOW_VERT_SRC: &str = r#"
-// 阴影 pass 的 uniform：每层被**动态偏移**切一段，段内只有一个矩阵
-// （见 Rust 侧的 `SHADOW_PASS_STRIDE`）。这里刻意不声明主 pass 的整组级联 ——
-// 段长 256 字节，声明了多余字段只会读到未写入的填充。
-struct ShadowPassUniform { light_view_proj: mat4x4<f32> }
+// 阴影 pass 的 uniform：每层被**动态偏移**切一段（见 Rust 侧的
+// `SHADOW_PASS_STRIDE`）。段内除了矩阵还有一个 `face_bit`：
+// 点光立方体逐面剔除的位掩码，0 = 不剔（方向光那一路永远是 0）。
+struct ShadowPassUniform {
+    light_view_proj: mat4x4<f32>,
+    face_bit: u32,
+}
 // 与主 pass 同一份逐实例数据；阴影只要 model / params 两个字段，
 // 但结构体声明保持与缓冲布局一致（字段齐全，未用的不读取）。
 struct DrawUniform  {
@@ -1578,6 +1784,10 @@ struct DrawUniform  {
 @group(0) @binding(0) var<uniform> shadow: ShadowPassUniform;
 @group(0) @binding(1) var<storage, read> draws: array<DrawUniform>;
 @group(0) @binding(2) var<storage, read> bones: array<mat4x4<f32>>;
+// 点光逐面剔除的**索引重映射表**：`face_list[i]` = 第 i 个待画实例在 `draws`
+// 里的真实槽位。方向光那一路不读（`face_bit == 0` 时直通），但绑定组布局
+// 两条 pass 共用，所以缓冲还是要绑。
+@group(0) @binding(3) var<storage, read> face_list: array<u32>;
 
 const BONES_PER_SLOT: u32 = 256u;
 
@@ -1588,7 +1798,22 @@ fn vs_shadow(
     @location(5) weights: vec4<f32>,
     @builtin(instance_index) instance_index: u32,
 ) -> @builtin(position) vec4<f32> {
-    let draw = draws[instance_index];
+    // 点光逐面剔除：**索引重映射**。这一面看得见的实例被排成一段（`face_list`
+    // 里是它们在 `draws` 里的真实槽位），`draw_indexed` 的实例区间走的是这张表的
+    // 下标，所以真正画出去的只有这一面该画的那些。
+    //
+    // 为什么不在 CPU 上按面重新复制一份实例数据（那样也能做到只画该画的）：
+    // 实例数据每条 ~200 字节，六面各来一份就是每帧几百 KB 的拷贝，实测把 GPU
+    // 省下的时间几乎全吃掉；也不塌成零面积三角形（实测那样 GPU 一点不省 ——
+    // 贵的是顶点与图元装配，不是光栅化）。一张 u32 索引表（每条 4 字节）是
+    // 唯一划算的形状。
+    //
+    // 方向光那一路 `face_bit == 0`（不剔）：走直通，索引就是槽位本身。
+    var idx = instance_index;
+    if (shadow.face_bit != 0u) {
+        idx = face_list[instance_index];
+    }
+    let draw = draws[idx];
     // 阴影也走蒙皮：不然跑动的角色会投出一具绑定姿态的静止影子。
     // 与主 pass 同一套分支（params.x == 0 → 原始顶点），两边永远一致。
     var pos = position;
@@ -1765,10 +1990,24 @@ pub struct ScenePipeline {
     /// 阴影**逐级**剔除开关（默认开）。见
     /// [`ScenePipeline::set_cascaded_shadow_culling`]。
     cascaded_shadow_culling: bool,
+    /// 点光立方体阴影的**逐面**剔除开关（默认开）。见
+    /// [`ScenePipeline::set_point_shadow_culling`]。
+    point_shadow_culling: bool,
+    /// 点光逐面剔除的索引重映射表（GPU）：`face_list[i]` = 第 i 个待画实例在
+    /// `draws` 里的真实槽位。见 `vs_shadow` 开头的注释。
+    face_list_buffer: wgpu::Buffer,
+    /// 上表的 CPU 侧副本（每帧重填，条目 = 一面看得见的实例一条）。
+    point_face_list: Vec<u32>,
+    /// 待排的 `(表, 批, 面掩码, 真实槽位)` 打包键，排完就是重映射表的顺序。
+    point_entries: Vec<u64>,
+    /// 点光实例按 `(表, 批, 面掩码)` 切好的段（`first` 指向 `point_face_list`）。
+    point_runs: Vec<PointRun>,
     /// 本帧不透明批次里"按级联成员位切好"的段（写入端见收集阶段末尾）。
     shadow_runs: Vec<ShadowRun>,
     /// 本帧阴影专用批次的段（同上，槽位在 `shadow_batches` 那一段）。
     shadow_only_runs: Vec<ShadowRun>,
+
+
     /// 本帧每级级联的视锥（长度 = 级数）。`None` = 那级的矩阵退化，
     /// 判成员位时按"全都命中"处理 —— 宁可多画，不能漏影子。
     cascade_frustums: Vec<Option<Frustum>>,
@@ -1976,6 +2215,18 @@ impl ScenePipeline {
                     },
                     count: None,
                 },
+                // 3: 点光逐面剔除的索引重映射表（见 `face_list` 的说明）。
+                //    方向光那一路不读它，但两条 pass 共用这个布局。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -1996,6 +2247,16 @@ impl ScenePipeline {
                 lights: [GpuLight::ZERO; MAX_LIGHTS],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // 点光逐面剔除的索引重映射表：每条 4 字节（真实槽位号），最多
+        // `MAX_RENDER_DRAWS` 条。与实例数据（每条 ~200 字节）相比小两个数量级，
+        // 所以"按面复制一份实例"那种做法不划算 —— 见 `vs_shadow` 开头的注释。
+        let face_list_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_point_face_list_sb"),
+            size: MAX_RENDER_DRAWS as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let draw_buffer_size = MAX_RENDER_DRAWS as u64 * DRAW_STRIDE as u64;
@@ -2103,6 +2364,7 @@ impl ScenePipeline {
             &shadow_pass_buffer,
             &draw_buffer,
             &bones_buffer,
+            &face_list_buffer,
         );
         // 点光阴影与方向光**共用布局**，只是换一条 uniform 缓冲（6 段而不是 4 段）。
         let point_shadow_pass_bind_group = Self::create_shadow_pass_bind_group(
@@ -2111,6 +2373,7 @@ impl ScenePipeline {
             &point_shadow_pass_buffer,
             &draw_buffer,
             &bones_buffer,
+            &face_list_buffer,
         );
 
         let pipeline = Self::build_pipeline(
@@ -2176,6 +2439,11 @@ impl ScenePipeline {
             shadow_batch_index: HashMap::new(),
             frustum_culling: true,
             cascaded_shadow_culling: true,
+            point_shadow_culling: true,
+            face_list_buffer,
+            point_face_list: Vec::new(),
+            point_entries: Vec::new(),
+            point_runs: Vec::new(),
             shadow_runs: Vec::new(),
             shadow_only_runs: Vec::new(),
             cascade_frustums: Vec::new(),
@@ -2245,6 +2513,20 @@ impl ScenePipeline {
     /// 当前是否开了阴影逐级剔除。
     pub fn cascaded_shadow_culling(&self) -> bool {
         self.cascaded_shadow_culling
+    }
+
+    /// 开关点光立方体阴影的**逐面**剔除（默认开）—— 只给 A/B 测试与基准用。
+    ///
+    /// 开：每一面只提交落在该面棱锥里的实例（外加"整球在光照半径外"的整实体剪枝）。
+    /// 关：每面都画全部投影物 —— 这是引入逐面剔除前的行为，画面**必须**逐位一致
+    /// （`point_light_shadow_culling_matches_unculled_pixels` 钉死）。
+    pub fn set_point_shadow_culling(&mut self, enabled: bool) {
+        self.point_shadow_culling = enabled;
+    }
+
+    /// 当前是否开了点光阴影逐面剔除。
+    pub fn point_shadow_culling(&self) -> bool {
+        self.point_shadow_culling
     }
 
     /// 创建阴影深度图层（深度数组，一层一个级联）。
@@ -2423,6 +2705,7 @@ impl ScenePipeline {
         shadow_buffer: &wgpu::Buffer,
         draw_buffer: &wgpu::Buffer,
         bones_buffer: &wgpu::Buffer,
+        face_list_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_shadow_pass_bg"),
@@ -2436,7 +2719,10 @@ impl ScenePipeline {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: shadow_buffer,
                         offset: 0,
-                        size: wgpu::BufferSize::new(64),
+                        // 整段（[`SHADOW_PASS_STRIDE`]）都算绑定范围：段内除了
+                        // 64 字节矩阵还有一个 `face_bit`（逐面剔除的开关），
+                        // 按矩阵大小绑会让着色器读到绑定范围之外。
+                        size: wgpu::BufferSize::new(SHADOW_PASS_STRIDE),
                     }),
                 },
                 wgpu::BindGroupEntry {
@@ -2446,6 +2732,10 @@ impl ScenePipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: bones_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: face_list_buffer.as_entire_binding(),
                 },
             ],
         })
@@ -2556,6 +2846,7 @@ impl ScenePipeline {
             &self.shadow_buffer,
             &self.draw_buffer,
             &self.bones_buffer,
+            &self.face_list_buffer,
         );
     }
 
@@ -2837,6 +3128,59 @@ impl ScenePipeline {
         (submitted, calls)
     }
 
+    /// 点光立方体的**逐面**绘制：只画面掩码带本面的段。
+    ///
+    /// 实例区间走的是索引重映射表（[`Self::point_face_list`]）—— `run.first`
+    /// 是表里的位置，不是槽位；顶点着色器拿它换回真实槽位。所以这里画出去的
+    /// 实例数就是 `run.count` 的和，不多不少。
+    ///
+    /// 相邻段多半同批，记住绑过的图元省掉重复绑定（同
+    /// [`Self::draw_all_shadow_casters`] 的做法）。
+    fn draw_point_shadow_runs(
+        &self,
+        spass: &mut wgpu::RenderPass<'_>,
+        face: usize,
+        entities: &[Entity],
+        model_cache: &HashMap<String, GltfMesh>,
+    ) -> (usize, usize) {
+        let bit = 1u8 << face;
+        let mut submitted = 0usize;
+        let mut calls = 0usize;
+        let mut bound: Option<(u8, u32)> = None;
+        let mut prim_ref: Option<&GltfPrimitive> = None;
+        for run in &self.point_runs {
+            if run.mask & bit == 0 {
+                continue;
+            }
+            if bound != Some((run.table, run.batch)) {
+                let batch = if run.table == 0 {
+                    self.opaque_batches.get(run.batch as usize)
+                } else {
+                    self.shadow_batches.get(run.batch as usize)
+                };
+                let Some((batch, prim)) = batch.and_then(|b| batch_prim(entities, model_cache, b).map(|p| (b, p)))
+                else {
+                    bound = None;
+                    continue;
+                };
+                spass.set_vertex_buffer(
+                    0,
+                    batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
+                );
+                spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
+                bound = Some((run.table, run.batch));
+                prim_ref = Some(prim);
+            }
+            let Some(prim) = prim_ref else {
+                continue;
+            };
+            spass.draw_indexed(0..prim.num_indices, 0, run.first..run.first + run.count);
+            submitted += run.count as usize;
+            calls += 1;
+        }
+        (submitted, calls)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -2962,21 +3306,43 @@ impl ScenePipeline {
                 0.0,
             ],
         };
+        // 阴影 pass 的分段（每层一段）：整段打包一次下发，见 `ShadowPassSegment`。
+        let mut shadow_pass_segments = [ShadowPassSegment {
+            light_view_proj: [[0.0; 4]; 4],
+            face_bit: 0,
+            _pad: [0; 32],
+            _pad_tail: [0; 15],
+        }; MAX_SHADOW_CASCADES];
         if let Some(c) = &cascades {
             shadow_uniform.forward = [c.forward.x, c.forward.y, c.forward.z, 0.0];
             shadow_uniform.params[3] = c.count as f32;
-            for i in 0..c.count {
-                shadow_uniform.light_view_proj[i] = c.view_proj[i].to_cols_array_2d();
-                shadow_uniform.splits[i] = c.splits[i];
-                // 阴影 pass 每层段只放矩阵：动态偏移选层（见 `SHADOW_PASS_STRIDE`）。
-                queue.write_buffer(
-                    &self.shadow_pass_buffer,
-                    i as u64 * SHADOW_PASS_STRIDE,
-                    bytemuck::cast_slice(&c.view_proj[i].to_cols_array()),
-                );
+            for ((seg, dst), src) in shadow_pass_segments
+                .iter_mut()
+                .zip(shadow_uniform.light_view_proj.iter_mut())
+                .zip(c.view_proj.iter())
+                .take(c.count)
+            {
+                *dst = src.to_cols_array_2d();
+                // 阴影 pass 每层段 = 矩阵 + `face_bit`。方向光这一路
+                // **永远不按面剔**，所以位是 0（0 = 不剔）。
+                seg.light_view_proj = *dst;
+                seg.face_bit = 0;
+            }
+            for (dst, src) in shadow_uniform
+                .splits
+                .iter_mut()
+                .zip(c.splits.iter())
+                .take(c.count)
+            {
+                *dst = *src;
             }
         }
         queue.write_buffer(&self.shadow_buffer, 0, bytemuck::bytes_of(&shadow_uniform));
+        queue.write_buffer(
+            &self.shadow_pass_buffer,
+            0,
+            bytemuck::cast_slice(&shadow_pass_segments),
+        );
 
         // 点光立方体阴影：主 pass 的参数 + 6 面各自的矩阵（阴影 pass 动态偏移选面）。
         // 没点光投影时写一份"关闭"的 uniform —— 片元靠 `params.z` 整段跳过，
@@ -2986,6 +3352,13 @@ impl ScenePipeline {
             light_pos: [0.0; 4],
             params: [0.0, 0.0, 0.0, POINT_SHADOW_DEPTH_BIAS],
         };
+        // 点光阴影 pass 的分段（每面一段）：同样整段打包一次下发。
+        let mut point_shadow_pass_segments = [ShadowPassSegment {
+            light_view_proj: [[0.0; 4]; 4],
+            face_bit: 0,
+            _pad: [0; 32],
+            _pad_tail: [0; 15],
+        }; POINT_SHADOW_FACES];
         if let Some((center, near, far, mats)) = &point_shadow {
             point_uniform.light_pos = [center.x, center.y, center.z, *far];
             point_uniform.params = [
@@ -2996,14 +3369,20 @@ impl ScenePipeline {
                 1.0,
                 POINT_SHADOW_DEPTH_BIAS,
             ];
+            // 每面一个位：逐面剔除开着时告诉着色器"这一趟只画第 i 面"
+            // （顶点着色器拿它决定用不用索引重映射表）；关掉时写 0（= 不剔），
+            // 与引入剔除前的行为逐位一致。
             for (i, m) in mats.iter().enumerate() {
                 point_uniform.face_view_proj[i] = m.to_cols_array_2d();
-                queue.write_buffer(
-                    &self.point_shadow_pass_buffer,
-                    i as u64 * SHADOW_PASS_STRIDE,
-                    bytemuck::cast_slice(&m.to_cols_array()),
-                );
+                point_shadow_pass_segments[i].light_view_proj = m.to_cols_array_2d();
+                point_shadow_pass_segments[i].face_bit =
+                    if self.point_shadow_culling { 1 << i } else { 0 };
             }
+            queue.write_buffer(
+                &self.point_shadow_pass_buffer,
+                0,
+                bytemuck::cast_slice(&point_shadow_pass_segments),
+            );
         }
         queue.write_buffer(
             &self.point_shadow_buffer,
@@ -3125,8 +3504,9 @@ impl ScenePipeline {
             //
             // 包围盒**只算一次**：相机剔除与阴影逐级剔除都要用它，两边各算一遍
             // 等于把"剔除省下的那份工作"又花回去。
-            let need_bounds =
-                camera_frustum.is_some() || (shadow_enabled && self.cascaded_shadow_culling);
+            let need_bounds = camera_frustum.is_some()
+                || (shadow_enabled && self.cascaded_shadow_culling)
+                || (point_shadow.is_some() && self.point_shadow_culling);
             let bounds = need_bounds.then(|| cull_bounds(mesh, &world, entity.animator.is_some()));
 
             let mut in_camera = true;
@@ -3175,8 +3555,28 @@ impl ScenePipeline {
                 }
             }
 
+            // 点光立方体的面掩码：这一实体的包围球落在哪几面里。
+            //
+            // 逐面剔除关掉时给保守值 0b111111（每面都画），和方向光的逐级剔除
+            // 同一个套路 —— A/B 像素等价测试拿它做对照。整球在光照半径外时是 0，
+            // 六面全部塌掉（最便宜也最有效的一刀）。
+            let mut point_mask = 0u8;
+            if let Some((light_center, _, far, _)) = point_shadow.as_ref() {
+                if self.point_shadow_culling {
+                    if let Some(bounds) = bounds.as_ref() {
+                        point_mask =
+                            point_face_mask(bounds.center() - *light_center, bounds.radius(), *far);
+                    }
+                } else {
+                    point_mask = ALL_POINT_FACES_MASK;
+                }
+            }
             let draw_in_main = in_camera;
-            if camera_frustum.is_some() && !in_camera && (!shadow_enabled || cascade_mask == 0) {
+            // 相机外还不够：只要还能给**任何**一条阴影链路投影，就得留在
+            // `shadow_batches` 里。点光那一半此前完全没被考虑 —— 相机外的物体
+            // 会被整实体跳过，于是"灯在相机后面"时地上少一块影子。
+            let casts_shadow = (shadow_enabled && cascade_mask != 0) || point_mask != 0;
+            if camera_frustum.is_some() && !in_camera && !casts_shadow {
                 culled_entities += 1;
                 culled_instances += mesh.primitives.len();
                 continue;
@@ -3385,6 +3785,7 @@ impl ScenePipeline {
                         batch,
                         uniform,
                         cascade_mask,
+                        point_mask,
                     });
                 } else if effective.blend {
                     // 半透明：一项一个批次（不做合批，见模块头），距离排序键留好。
@@ -3431,6 +3832,7 @@ impl ScenePipeline {
                         batch,
                         uniform,
                         cascade_mask,
+                        point_mask,
                     });
                 }
             }
@@ -3493,7 +3895,6 @@ impl ScenePipeline {
             batch.first = next_slot;
             next_slot += batch.count;
         }
-
         // --- 阴影分段（`first` 定下来之后才能算）---
         //
         // 逐级剔除关掉时清空：阴影 pass 退回"每级画全部"的老路径，代价是
@@ -3509,8 +3910,13 @@ impl ScenePipeline {
             self.shadow_runs.clear();
             self.shadow_only_runs.clear();
         }
-
         let stride = DRAW_STRIDE;
+        // 点光逐面剔除的重映射表：只有"真的在逐面剔"时才填（关掉时走
+        // `draw_all_shadow_casters` 的直通路径，不需要这张表）。
+        let point_culling = self.point_shadow_culling && point_shadow.is_some();
+        self.point_entries.clear();
+        self.point_face_list.clear();
+        self.point_runs.clear();
         self.draw_staging.clear();
         self.draw_staging.resize(next_slot as usize * stride, 0);
         if next_slot > 0 {
@@ -3522,18 +3928,28 @@ impl ScenePipeline {
                 for &key in &self.draw_order {
                     let draw = &self.pending_draws[unpack_draw_index(key) as usize];
                     let cursor = &mut self.batch_cursor[draw.batch as usize];
-                    let offset = *cursor as usize * stride;
+                    let slot = *cursor;
+                    let offset = slot as usize * stride;
                     *cursor += 1;
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                    if point_culling && draw.point_mask != 0 {
+                        self.point_entries
+                            .push(pack_point_entry(0, draw.batch, draw.point_mask, slot));
+                    }
                 }
             } else {
                 for draw in &self.pending_draws {
                     let cursor = &mut self.batch_cursor[draw.batch as usize];
-                    let offset = *cursor as usize * stride;
+                    let slot = *cursor;
+                    let offset = slot as usize * stride;
                     *cursor += 1;
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                    if point_culling && draw.point_mask != 0 {
+                        self.point_entries
+                            .push(pack_point_entry(0, draw.batch, draw.point_mask, slot));
+                    }
                 }
             }
             // 半透明：排序后一路往后排。
@@ -3550,22 +3966,56 @@ impl ScenePipeline {
                 for &key in &self.shadow_order {
                     let draw = &self.shadow_pending[unpack_draw_index(key) as usize];
                     let cursor = &mut self.batch_cursor[draw.batch as usize];
-                    let offset = *cursor as usize * stride;
+                    let slot = *cursor;
+                    let offset = slot as usize * stride;
                     *cursor += 1;
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                    if point_culling && draw.point_mask != 0 {
+                        self.point_entries
+                            .push(pack_point_entry(1, draw.batch, draw.point_mask, slot));
+                    }
                 }
             } else {
                 for draw in &self.shadow_pending {
                     let cursor = &mut self.batch_cursor[draw.batch as usize];
-                    let offset = *cursor as usize * stride;
+                    let slot = *cursor;
+                    let offset = slot as usize * stride;
                     *cursor += 1;
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                    if point_culling && draw.point_mask != 0 {
+                        self.point_entries
+                            .push(pack_point_entry(1, draw.batch, draw.point_mask, slot));
+                    }
                 }
             }
             // 一次写完整段实例数据（见 `draw_staging` 的说明）。
             queue.write_buffer(&self.draw_buffer, 0, &self.draw_staging);
+            // 点光逐面剔除的重映射表：排好、切段、下发。条目数 = 落进立方体的
+            // 实例数（不是六面展开的数），每条 4 字节 —— 这张表之所以比"按面
+            // 复制一份实例数据"便宜两个数量级，就是因为每条只有一个槽位号。
+            if point_culling {
+                // 逐级剔除开着时（默认）条目**按 `(表, 批)` 连着**：上面两趟
+                // 循环按 `draw_order` / `shadow_order` 的顺序走，而那两个键的
+                // 第一位就是批、表 0 / 表 1 各填一段。`build_point_runs` 只在
+                // 每段里按面掩码做计数排序，所以这里不用再整体排序
+                // （2000 条实测 25 µs）。
+                //
+                // 关掉逐级剔除时填的是收集顺序，批会来回穿插 —— 那时排一次，
+                // 把同批的归到一起，免得分段散成几百个 draw call。
+                if !self.cascaded_shadow_culling {
+                    self.point_entries.sort_unstable();
+                }
+                build_point_runs(&self.point_entries, &mut self.point_face_list, &mut self.point_runs);
+                if !self.point_face_list.is_empty() {
+                    queue.write_buffer(
+                        &self.face_list_buffer,
+                        0,
+                        bytemuck::cast_slice(&self.point_face_list),
+                    );
+                }
+            }
         }
 
         // 骨骼：容量不够先翻倍重建（连带换两个绑定组，必须在开 pass 之前），
@@ -3705,10 +4155,10 @@ impl ScenePipeline {
         // --- 点光立方体阴影：每个面一个 pass ---
         //
         // 与方向光的级联**并列**而不是互斥：一盏方向光 + 一盏点光可以同时投影。
-        // 6 个面各画一遍全部投影物（v1 不做逐面剔除）—— 立方体从光源往六个方向
-        // 看，每个面实际上只看得到一小块场景，所以这里确实多画了很多。先保证
-        // "六面都全"（漏一面 = 那个方向没有影子，且其余五面完全正常，光看截图
-        // 极难发现），逐面剔除留作后续优化，读数在 `point_shadow_instances` 里。
+        //
+        // 逐面剔除（默认开）：每面只提交面掩码带自己的段（见 [`point_face_mask`]）。
+        // 关掉时退回"六面各画全部投影物"—— 那是引入剔除前的行为，画面必须逐位
+        // 一致（`point_light_shadow_culling_matches_unculled_pixels` 钉死）。
         if let Some((_, _, _, _)) = &point_shadow {
             let mut submitted = 0usize;
             let mut calls = 0usize;
@@ -3735,7 +4185,11 @@ impl ScenePipeline {
                     &self.point_shadow_pass_bind_group,
                     &[(face as u64 * SHADOW_PASS_STRIDE) as u32],
                 );
-                let (s, c) = self.draw_all_shadow_casters(&mut spass, entities, model_cache);
+                let (s, c) = if self.point_shadow_culling {
+                    self.draw_point_shadow_runs(&mut spass, face, entities, model_cache)
+                } else {
+                    self.draw_all_shadow_casters(&mut spass, entities, model_cache)
+                };
                 submitted += s;
                 calls += c;
             }
@@ -4590,6 +5044,133 @@ mod tests {
             (axis_depth - len_depth).abs() > 1e-3,
             "这条测试的前提是两种算法结果不同（主轴 {axis_depth} vs 长度 {len_depth}）"
         );
+    }
+
+    /// **面掩码与真实投影矩阵同解**：一个点落在哪几面的裁剪体里，掩码就得是哪几位。
+    ///
+    /// 这是逐面剔除的唯一"真理源"对照 —— 掩码是手写的四半空间判据，矩阵是
+    /// [`point_shadow_matrices`]（采样端真正用的那份）。两边一偏，症状是"某个
+    /// 方向的影子缺一块"，而其余五面完全正常，看截图极难发现。
+    #[test]
+    fn point_face_mask_matches_the_projection_frusta() {
+        let (near, far) = (0.05f32, 40.0f32);
+        let center = Vec3::new(1.5, -2.0, 0.5);
+        let mats = point_shadow_matrices(center, near, far);
+        let inside = |m: &Mat4, p: Vec3| {
+            let clip = *m * p.extend(1.0);
+            let w = clip.w;
+            w > 0.0 && clip.x.abs() <= w && clip.y.abs() <= w && clip.z >= 0.0 && clip.z <= w
+        };
+        let mut checked = 0;
+        for i in 0..8 {
+            for j in 0..8 {
+                for k in 0..8 {
+                    // 步长刻意取 3.7 而不是整数：避开棱锥棱边上的"恰好相等"。
+                    let p = Vec3::new(
+                        -13.0 + i as f32 * 3.7 + 0.11,
+                        -13.0 + j as f32 * 3.7 + 0.23,
+                        -13.0 + k as f32 * 3.7 + 0.37,
+                    );
+                    let offset = p - center;
+                    // 近平面以内 / 远平面以外的点不在任何一张图里，掩码不做保证。
+                    if offset.abs().max_element() < near * 4.0
+                        || offset.abs().max_element() > far * 0.99
+                    {
+                        continue;
+                    }
+                    let expected = mats.iter().enumerate().fold(0u8, |acc, (f, m)| {
+                        if inside(m, p) {
+                            acc | (1 << f)
+                        } else {
+                            acc
+                        }
+                    });
+                    let mask = point_face_mask(offset, 0.0, far);
+                    assert_eq!(
+                        mask, expected,
+                        "点 {p:?}（相对灯 {offset:?}）的掩码与投影矩阵不符"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 300, "样本太少（{checked}），测试本身失效");
+    }
+
+    /// 光照半径外的整实体一律不投影（最短主轴距离都超出远平面）。
+    #[test]
+    fn point_face_mask_prunes_beyond_the_light_range() {
+        let far = 10.0f32;
+        // 沿 +X 距离 11、半径 0.5：最近点 10.5 > 10 —— 六面都不需要它。
+        assert_eq!(point_face_mask(Vec3::new(11.0, 0.0, 0.0), 0.5, far), 0);
+        // 半径够大探回半径内：至少 `+X` 那一面。
+        assert_eq!(point_face_mask(Vec3::new(9.6, 0.0, 0.0), 0.5, far), 1);
+        // 退化输入不剪枝（宁可六面全画，不能因为一个坏数缺影子）。
+        assert_eq!(
+            point_face_mask(Vec3::new(f32::NAN, 0.0, 0.0), 0.5, far),
+            ALL_POINT_FACES_MASK
+        );
+        assert_eq!(
+            point_face_mask(Vec3::new(1.0, 0.0, 0.0), f32::NAN, far),
+            ALL_POINT_FACES_MASK
+        );
+    }
+
+    /// 球心落在某一面里时，掩码必然带那一位；横跨棱锥棱边时两面都在（保守）。
+    #[test]
+    fn point_face_mask_is_conservative_at_the_pyramid_edges() {
+        // 正对着某一面：只该有一位。
+        assert_eq!(point_face_mask(Vec3::new(8.0, 1.0, -1.0), 0.0, 100.0), 0b000001);
+        assert_eq!(point_face_mask(Vec3::new(-8.0, 1.0, -1.0), 0.0, 100.0), 0b000010);
+        assert_eq!(point_face_mask(Vec3::new(1.0, 8.0, -1.0), 0.0, 100.0), 0b000100);
+        assert_eq!(point_face_mask(Vec3::new(1.0, -8.0, -1.0), 0.0, 100.0), 0b001000);
+        assert_eq!(point_face_mask(Vec3::new(1.0, 1.0, 8.0), 0.0, 100.0), 0b010000);
+        assert_eq!(point_face_mask(Vec3::new(1.0, 1.0, -8.0), 0.0, 100.0), 0b100000);
+        // 正好在 `+X`/`+Y` 的分界面上：两面都算（保守那一侧）。
+        let both = point_face_mask(Vec3::new(5.0, 5.0, 0.0), 0.0, 100.0);
+        assert_eq!(both & 0b000001, 0b000001);
+        assert_eq!(both & 0b000100, 0b000100);
+        // 球半径大到跨过棱锥侧面：相邻面也必须带上。
+        let wide = point_face_mask(Vec3::new(10.0, 6.0, 0.0), 4.0, 100.0);
+        assert_ne!(wide & 0b000001, 0, "球心在 +X 面，+X 必带");
+        assert_ne!(wide & 0b000100, 0, "半径 4 已经跨过 +Y 的侧面");
+    }
+
+    /// 掩码的**单位成本**（一次性摸底，不是验收线）。
+    ///
+    /// 逐面剔除是"CPU 换 GPU"的交易：它每帧要对每个实体算一次掩码。这个输出让
+    /// 那笔交易能算清 —— 2000 个实体里的绝大多数走的是"整球在半径外"的一条
+    /// 比较，只有真正落进立方体的才进六面循环。
+    #[test]
+    #[ignore = "只有想重测掩码成本时才手动跑（--ignored --nocapture）"]
+    fn point_face_mask_cost_probe() {
+        let far = 60.0f32;
+        let light = Vec3::new(0.0, 40.0, -130.0);
+        let mut samples = Vec::with_capacity(2000);
+        for i in 0..2000 {
+            let (gx, gz) = ((i % 45) as f32, (i / 45) as f32);
+            let p = Vec3::new(
+                (gx - 22.0) * 6.0,
+                0.5,
+                -(gz + 1.0) * 6.0,
+            );
+            samples.push((p - light, 0.87f32));
+        }
+        // 预热
+        let mut acc = 0u8;
+        for &(o, r) in &samples {
+            acc |= point_face_mask(o, r, far);
+        }
+        let rounds = 200;
+        let start = std::time::Instant::now();
+        for _ in 0..rounds {
+            for &(o, r) in &samples {
+                acc |= point_face_mask(o, r, far);
+            }
+        }
+        let per_call = start.elapsed().as_secs_f64() * 1e9 / (rounds * samples.len()) as f64;
+        println!("point_face_mask: {per_call:.2} ns/次（acc = {acc}）");
+        assert!(acc != 0);
     }
 
     /// 只认**有 range 的点光**：range ≤ 0 的灯本来就不出光，给它拟合立方体
