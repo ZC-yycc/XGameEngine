@@ -123,9 +123,14 @@
 //! 2048² 的图，近处拿到的纹素密度比"整场景一个视锥"细一个量级。
 //!
 //! 几个刻意的取舍：
-//! - **只做方向光**。点光阴影要 6 面立方体贴图，成本高得多，留到以后。
-//! - **只做一盏**。多盏灯各自的阴影贴图意味着每盏一次全场景重绘 + 一张贴图，
+//! - **方向光做级联、点光做立方体**（[`point_shadow_matrices`]）。两条链路各自
+//!   独立：一盏方向光 + 一盏点光可以同时投影，互不覆盖对方的深度图。
+//! - **每种只做一盏**。多盏灯各自的阴影贴图意味着每盏一次全场景重绘 + 一张贴图，
 //!   收益远不如先把一盏做扎实。第一盏生效，后面的 `casts_shadow` 暂时忽略。
+//! - **点光六面不做逐面剔除**（v1）：立方体每个面只看得到一小块场景，全画是
+//!   浪费；但"漏画一面"的症状（某个方向没影子、其余五面正常）比浪费难查得多，
+//!   所以先保证全，读数 `FrameStats::point_shadow_instances` 摊开成本，
+//!   逐面剔除留作后续优化。
 //! - **覆盖距离 = min(相机远平面, 场景延伸, 120)**，不是相机远平面：编辑器远
 //!   平面常是 1000，照它切等于把 99% 的纹素花在看不见的地方。
 //! - **每层吸附到纹素网格**：否则相机一动，影子边缘就随纹素相位抖（shimmer）。
@@ -249,6 +254,34 @@ const SHADOW_SPLIT_LAMBDA: f32 = 0.7;
 /// `MAX_LIGHTS`。改的时候别漏。
 pub const MAX_LIGHTS: usize = 8;
 
+/// 立方体阴影的面数。
+///
+/// 面序是 **WebGPU 的立方体贴图约定**：`+X, -X, +Y, -Y, +Z, -Z`。面序错了
+/// 画面会表现为"整块影子转了 90° 或被翻到另一面"，但在只测一个面的用例里
+/// 看不出来 —— 所以矩阵生成函数（[`point_shadow_matrices`]）和渲染时的层号
+/// 必须共用这一个常量。
+pub const POINT_SHADOW_FACES: usize = 6;
+
+/// 点光立方体阴影的默认**单面**边长（像素）。
+///
+/// 立方体是 6 面：同样 2048² 的一面，在点光下就是 6 张深度图。所以默认取方向光
+/// 默认值的一半 —— 总纹素量 `6 × (N/2)² = 1.5N²`，与 4 级 CSM 的 `4N²` 仍在
+/// 同一量级；再往上加，一张点光影子就要吃 100 MB 级别的显存。
+pub const DEFAULT_POINT_SHADOW_RESOLUTION: u32 = xgame_core::DEFAULT_SHADOW_RESOLUTION / 2;
+
+/// 点光立方体阴影的**单面**边长上限。
+///
+/// 6 面加起来是 `6 × N²` 个深度像素：2048 已经是 96 MB，4096 就是 384 MB ——
+/// 显式配置也不能把显存一次吃穿（方向光的 4096 只有 4 层，不能照抄这个数）。
+pub const MAX_POINT_SHADOW_RESOLUTION: u32 = 2048;
+
+/// 点光阴影的深度偏置（NDC 深度单位）。
+///
+/// 立方体阴影的参考深度是**透视**映射（`far/(far-near)·(1-near/dist)`），近处
+/// 精度高、远处被压到接近 1 —— 与方向光的正交映射不同，所以偏置单独给一份，
+/// 便于两套各自调而不互相牵制。
+const POINT_SHADOW_DEPTH_BIAS: f32 = 0.0035;
+
 /// 一帧的绘制统计（合批效果与剔除效果的读数口）。
 ///
 /// 存在的理由：实例化把"绘制项"与"draw call"解耦之后，画面正确性可以靠像素
@@ -292,6 +325,13 @@ pub struct FrameStats {
     /// 与实例数一起看：剔除把实例切碎成"每批每级一段"，段数会变多；
     /// 只有实例数明显下降、段数没有失控，这笔交易才划算。
     pub shadow_draw_calls: usize,
+    /// 本帧**点光立方体**阴影提交的实例数（六面相加）。
+    ///
+    /// 与方向光的级联分开记：点光六面不共享剔除结果，量"点光贵多少"必须看
+    /// 它自己的数（六面全画时 ≈ `6 × (不透明实例 + 阴影专用实例)`）。
+    pub point_shadow_instances: usize,
+    /// 本帧点光阴影发出的 draw 次数（六面相加）。
+    pub point_shadow_draw_calls: usize,
 }
 
 impl FrameStats {
@@ -397,6 +437,27 @@ struct ShadowUniform {
 /// 步长必须是 `min_uniform_buffer_offset_alignment`（wgpu 保证 ≥256）的倍数，
 /// 所以取 256 而不是 64。
 const SHADOW_PASS_STRIDE: u64 = 256;
+
+/// 点光立方体阴影的 uniform（主 pass 片元采样用）。
+///
+/// 与 [`ShadowUniform`] 分开而不是合并：方向光的级联（4 层 + 视线切分）与点光的
+/// 立方体（6 面 + 光源位置）除了"都是阴影"之外没有共同字段，合并只会让两边都
+/// 得带着对方的字段跑。
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct PointShadowUniform {
+    /// 6 个面的视图投影矩阵，顺序 = [`POINT_SHADOW_FACES`] 说明的立方体面序。
+    /// 主 pass 其实用不到它们（立方体采样只给方向），留着是为了诊断与测试对照。
+    face_view_proj: [[[f32; 4]; 4]; POINT_SHADOW_FACES],
+    /// xyz = 光源世界坐标，w = 远平面（= 点光 `range`）。
+    ///
+    /// 超出 `range` 的片元本来就不受这盏灯照射（衰减为 0），所以不必查图 ——
+    /// 把远平面放进 uniform 让片元可以提前返回，省掉一次立方体采样。
+    light_pos: [f32; 4],
+    /// x = 近平面（算参考深度用），y = 一个纹素在方向空间的步长（PCF 偏移），
+    /// z = 开关（> 0.5 表示启用），w = 深度偏置。
+    params: [f32; 4],
+}
 
 /// 一次绘制项（= 一个实例）的全部数据：模型矩阵 + 蒙皮槽位 + 材质。
 ///
@@ -706,11 +767,110 @@ fn cull_bounds(mesh: &GltfMesh, world: &Mat4, animated: bool) -> Bounds {
 /// `packed` 是"过滤掉强度为 0 的、截断到 [`MAX_LIGHTS`] 之后"的顺序，也就是
 /// 着色器看到的数组顺序；标记必须落在同一个下标上，否则会给错误的灯打上阴影。
 ///
-/// 只认方向光：点光阴影要 6 面立方体贴图，不在这一版的范围内。
+/// 只认方向光：点光走另一条立方体阴影的链路（[`pick_point_shadow_slot`]）。
 fn pick_shadow_slot(packed: &[&Light]) -> Option<usize> {
     packed
         .iter()
         .position(|l| l.casts_shadow && l.kind == LightKind::Directional)
+}
+
+/// 选出唯一一盏使用**立方体阴影**的点光 —— 在打包后光源列表里的下标。
+///
+/// 与方向光同理，只认第一盏（每盏点光 = 6 面全场景深度重绘，多开一盏的边际
+/// 收益远不如先把一盏做对）。`range` 不是正有限值的点光直接跳过：衰减为 0 的
+/// 灯不产生光照，也就不需要影子 —— 强行给它拟合一个立方体只会白烧六遍场景。
+fn pick_point_shadow_slot(packed: &[&Light]) -> Option<usize> {
+    packed.iter().position(|l| {
+        l.casts_shadow
+            && l.kind == LightKind::Point
+            && l.range.is_finite()
+            && l.range > 0.0
+    })
+}
+
+/// 点光立方体阴影的 6 个面视图投影矩阵（世界 → 该面裁剪空间）。
+///
+/// 面序 = WebGPU 的立方体贴图约定（`+X, -X, +Y, -Y, +Z, -Z`），每面 90° 视角、
+/// 1:1 纵横比、裁剪范围 `[near, far]`。三件事必须同时成立，否则"影子对不上"：
+///
+/// 1. **面序**要与采样时硬件选的层号一致（见 [`POINT_SHADOW_FACES`]）；
+/// 2. **纵横比 = 1**（立方体每面是正方形，给 16:9 会把远处压扁）；
+/// 3. **up 向量不能与朝向平行**（`+Y` 面用 `+Z` 作 up，`-Y` 面用 `-Z`）——
+///    平行时 `look_at` 退化，矩阵里全是 NaN，六面里恰好有一面永远没有影子。
+///
+/// 纯函数，不碰 GPU：立方体的几何正确性靠它单测，不靠截图猜。
+pub fn point_shadow_matrices(center: Vec3, near: f32, far: f32) -> [Mat4; POINT_SHADOW_FACES] {
+    let near = if near.is_finite() { near.max(1e-3) } else { 1e-3 };
+    let far = if far.is_finite() { far.max(near + 1e-3) } else { near + 1e-3 };
+    let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, near, far);
+    // 面序与 up 向量成对写死：这两张表错位一格，六面就会整体转 90°。
+    //
+    // up 的取向**不是随便挑的**：立方体采样时方向量按 WebGPU 的映射表换算成
+    // (u,v)（`+X` 面 `sc = -z/|x|, tc = -y/|x|` 之类），而渲染时 NDC 的 y 朝上、
+    // 纹理 v 朝下。两套约定要能对上，`±X` / `±Z` 面的 up 必须是 `+Y`，`+Y` 面
+    // 必须是 `-Z`、`-Y` 面必须是 `+Z` —— 取反的后果是**那个面绕水平轴镜像**：
+    // 影子还在，只是落在上下颠倒的位置（脚下没有、头顶反而有）。
+    // `point_shadow_orientation_matches_cube_lookup` 拿映射表逐点钉死这件事。
+    const DIRS: [[f32; 3]; POINT_SHADOW_FACES] = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    const UPS: [[f32; 3]; POINT_SHADOW_FACES] = [
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ];
+    let mut out = [Mat4::IDENTITY; POINT_SHADOW_FACES];
+    // 水平轴翻转（u 轴镜像）。**六个面都要**，不是某一个面。
+    //
+    // 原因：立方体采样按 WebGPU 的方向 → (u,v) 映射表取纹素，而那张表对每个面
+    // 都是"右手系朝向下 u 反向"的（`+X` 面 `sc = -z`，而右手系里朝 +X 看时
+    // `+Z` 在右边）。不翻的话影子会**左右镜像**：实测"点光在原点、箱子在 +Z 侧"
+    // 时影子出现在 -Z 侧。竖直轴（v）不需要翻 —— up 向量已经按表选对了。
+    // 这是本文件里最容易被"看起来像有影子"骗过去的一处：镜像后的影子形状与
+    // 位置都合法，只有拿真实几何对表才能发现。
+    let flip_u = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
+    for (i, m) in out.iter_mut().enumerate() {
+        let dir = Vec3::from(DIRS[i]);
+        let up = Vec3::from(UPS[i]);
+        *m = flip_u * proj * Mat4::look_at_rh(center, center + dir, up);
+    }
+    out
+}
+
+/// 立方体阴影的**参考深度**：与 [`point_shadow_matrices`] 里那个透视矩阵的
+/// `z/w` 完全一致。
+///
+/// # 为什么举 `axis_distance` 而不是欧氏距离
+///
+/// 立方体每面是一次 90° 透视投影，透视深度用的是**视空间 z**，而立方体每面的
+/// 视空间 z 正是片元到光源距离的**主轴分量**（`max(|dx|,|dy|,|dz|)`）—— 不是
+/// 欧氏长度。拿欧氏长度去算参考深度，离轴越远算出来的越"深"，于是整面都判成
+/// 被遮挡：画面上表现为"开了点光阴影之后，斜着的墙面几乎全黑"。这个错很隐蔽
+/// （垂直于光轴的平面上看不出来），必须由测试把语义钉死。
+///
+/// # 为什么单独抽出来
+///
+/// 立方体采样（`textureSampleCompareLevel(cube, smp, dir, ref)`）要求 `ref` 与
+/// 画进图里的深度在**同一个尺度**上。硬件只按方向选面，不帮我们算深度 —— 所以
+/// 片元必须自己用 `(far/(far-near))·(1-near/axis)` 算。写错的表现是"影子整体
+/// 沿光线平移"或"整面全黑"，很难从画面上判断对错。
+///
+/// 所以公式只有一份实现，测试拿矩阵逐点核对（`point_shadow_depth_matches_projection`）。
+pub fn point_shadow_reference_depth(axis_distance: f32, near: f32, far: f32) -> f32 {
+    let near = near.max(1e-3);
+    let far = far.max(near + 1e-3);
+    if !axis_distance.is_finite() || axis_distance <= near {
+        return 0.0;
+    }
+    (far / (far - near)) * (1.0 - near / axis_distance)
 }
 
 /// 一帧的级联阴影参数（CPU 拟合的结果）。
@@ -1146,6 +1306,15 @@ struct ShadowUniform {
     params: vec4<f32>,
 }
 
+// 点光立方体阴影（Rust 侧 `PointShadowUniform`，字段顺序与长度必须一致）。
+struct PointShadowUniform {
+    face_view_proj: array<mat4x4<f32>, 6>,
+    // xyz = 光源世界坐标, w = 远平面（= 点光 range）
+    light_pos: vec4<f32>,
+    // x = 近平面, y = 方向空间的 PCF 步长, z = 开关, w = 深度偏置
+    params: vec4<f32>,
+}
+
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> lights: LightsUniform;
 @group(0) @binding(3) var shadow_tex: texture_depth_2d_array;
@@ -1158,6 +1327,9 @@ struct ShadowUniform {
 @group(0) @binding(9) var env_cube: texture_cube<f32>;
 @group(0) @binding(10) var env_smp: sampler;
 @group(0) @binding(11) var brdf_lut: texture_2d<f32>;
+// 12 / 13：点光立方体阴影。采样器复用 4 号（深度比较采样器）。
+@group(0) @binding(12) var point_shadow_tex: texture_depth_cube;
+@group(0) @binding(13) var<uniform> point_shadow: PointShadowUniform;
 @group(1) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(1) @binding(1) var base_color_smp: sampler;
 
@@ -1215,6 +1387,47 @@ fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
                 i32(cascade),
                 depth - bias,
             );
+        }
+    }
+    return sum / 9.0;
+}
+
+// --- 点光立方体阴影 ---
+//
+// 与方向光的两点不同：
+// 1. 选面交给硬件（方向量直接采样 `texture_depth_cube`），不再自己选层；
+// 2. 参考深度是**透视**映射，必须自己算 —— 立方体采样只挑面、不帮我们换算
+//    深度尺度。公式与 Rust 的 `point_shadow_reference_depth` 是同一份
+//    （`perspective_rh` 的 z/w），写错的症状是"影子整体沿光线平移"。
+fn point_shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
+    if (point_shadow.params.z < 0.5) {
+        return 1.0;
+    }
+    let near = point_shadow.params.x;
+    let far = point_shadow.light_pos.w;
+    let to_frag = world_pos - point_shadow.light_pos.xyz;
+    // **主轴分量**（面法向上的深度），不是欧氏长度：立方体每面是 90° 透视投影，
+    // 透视深度用的就是它。用长度会把斜面上的片元算得比存图更深，整面判成阴影。
+    let axis = max(abs(to_frag.x), max(abs(to_frag.y), abs(to_frag.z)));
+    // 超出光照半径（本来就照不到）、或落在近平面以内（灯具内部）：完全受光。
+    if (axis >= far || axis <= near) {
+        return 1.0;
+    }
+    let bias = point_shadow.params.w * (1.0 + 2.0 * (1.0 - ndotl));
+    let ref_depth = (far / (far - near)) * (1.0 - near / axis) - bias;
+    let dist = length(to_frag);
+    let dir = to_frag / max(dist, 1e-4);
+    // 两条与光线垂直的切向量。参考轴不能在 dir 方向平行，否则叉积退化成零向量
+    // （PCF 九次采样全落在同一个纹素上，等于没做 PCF）。
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.9);
+    let tangent = normalize(cross(up, dir));
+    let bitangent = cross(dir, tangent);
+    let step = point_shadow.params.y;
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let offset = tangent * (f32(dx) * step) + bitangent * (f32(dy) * step);
+            sum = sum + textureSampleCompareLevel(point_shadow_tex, shadow_smp, dir + offset, ref_depth);
         }
     }
     return sum / 9.0;
@@ -1317,9 +1530,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let radiance = light.color_intensity.rgb * light.color_intensity.a * atten * PI;
 
         // 只有被标记的那盏灯查阴影图；其余灯（含未受光的背光面）跳过采样。
+        // 方向光走级联数组（shadow_params.x），点光走立方体（shadow_params.z）——
+        // 两种阴影可以同时存在，所以是两个独立标记。
         var shade = 1.0;
         if (shadows_on && light.shadow_params.x > 0.5 && n_dot_l > 0.0) {
             shade = shadow_factor(input.world_pos, n_dot_l);
+        } else if (light.shadow_params.z > 0.5 && n_dot_l > 0.0) {
+            shade = point_shadow_factor(input.world_pos, n_dot_l);
         }
 
         let h = normalize(l + v);
@@ -1469,6 +1686,28 @@ pub struct ScenePipeline {
     /// wgpu 不允许把"数组视图"当渲染目标的多层切片直接画 —— 只能给单层视图。
     shadow_layer_views: Vec<wgpu::TextureView>,
     shadow_resolution: u32,
+
+    // -- 点光立方体阴影 --
+    /// 立方体深度图（6 层，格式与方向光阴影一致）。
+    point_shadow_texture: wgpu::Texture,
+    /// 立方体视图（dimension = Cube）：主 pass 按方向采样。
+    point_shadow_view: wgpu::TextureView,
+    /// 每面一张单层视图：6 次 pass 各画一面。
+    ///
+    /// 顺序 = [`POINT_SHADOW_FACES`]；`point_shadow_matrices` 的第 i 个矩阵必须
+    /// 画进第 i 张视图，否则立方体每一面都是别人的画面。
+    point_shadow_face_views: Vec<wgpu::TextureView>,
+    /// 主 pass 的立方体阴影 uniform（6 个矩阵 + 光源位置 + 参数）。
+    point_shadow_buffer: wgpu::Buffer,
+    /// 6 面各自的视图投影矩阵（步长 [`SHADOW_PASS_STRIDE`]，动态偏移选面）。
+    ///
+    /// 与方向光的 `shadow_pass_buffer` 同款做法、**分开一条缓冲**：两套 pass 的
+    /// 有效段数不同（4 / 6），共用一条缓冲要么多算段长，要么让两边的偏移算法
+    /// 互相牵制，不如各管各的。
+    point_shadow_pass_buffer: wgpu::Buffer,
+    /// 点光阴影 pass 的绑定组（与方向光同一个 `shadow_bgl`，换一条 uniform 缓冲）。
+    point_shadow_pass_bind_group: wgpu::BindGroup,
+    point_shadow_resolution: u32,
 
     /// 天空盒 + 环境光照（IBL）资源。纹理常驻、内容按 key 重建（见
     /// [`crate::sky`] 的模块文档）；`global_bind_group` 持有它的三张表与
@@ -1650,6 +1889,30 @@ impl ScenePipeline {
         ]);
         // 7..11：天空（绑定号契约集中在 sky.rs，见那里的说明）。
         global_entries.extend(sky::global_layout_entries());
+        // 12 / 13：点光立方体阴影（深度立方体 + 参数）。采样器复用 4 号。
+        global_entries.extend([
+            wgpu::BindGroupLayoutEntry {
+                binding: 12,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    // 立方体：硬件按方向自己挑面，这是点光阴影成立的前提。
+                    view_dimension: wgpu::TextureViewDimension::Cube,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 13,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ]);
         let global_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene_global_bgl"),
             entries: &global_entries,
@@ -1786,6 +2049,27 @@ impl ScenePipeline {
         let (shadow_texture, shadow_view, shadow_layer_views) =
             Self::create_shadow_target(device, shadow_resolution);
 
+        // -- 点光立方体阴影资源 --
+        let point_shadow_resolution = DEFAULT_POINT_SHADOW_RESOLUTION;
+        let (point_shadow_texture, point_shadow_view, point_shadow_face_views) =
+            Self::create_point_shadow_target(device, point_shadow_resolution);
+        let point_shadow_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_point_shadow_ub"),
+            contents: bytemuck::bytes_of(&PointShadowUniform {
+                face_view_proj: [[[f32::NAN; 4]; 4]; POINT_SHADOW_FACES],
+                light_pos: [0.0; 4],
+                // z = 0：默认关闭。没有点光开 `casts_shadow` 时片元不采样立方体。
+                params: [0.0, 0.0, 0.0, POINT_SHADOW_DEPTH_BIAS],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let point_shadow_pass_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_point_shadow_pass_ub"),
+            size: SHADOW_PASS_STRIDE * POINT_SHADOW_FACES as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // 蒙皮骨骼缓冲：先给一小段（8 槽 × 256 骨 ≈ 128 KB），实体多了再翻倍。
         let bones_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene_bones_sb"),
@@ -1807,6 +2091,8 @@ impl ScenePipeline {
             &shadow_view,
             &shadow_sampler,
             &shadow_buffer,
+            &point_shadow_view,
+            &point_shadow_buffer,
             &bones_buffer,
             &sky,
         );
@@ -1815,6 +2101,14 @@ impl ScenePipeline {
             device,
             &shadow_bgl,
             &shadow_pass_buffer,
+            &draw_buffer,
+            &bones_buffer,
+        );
+        // 点光阴影与方向光**共用布局**，只是换一条 uniform 缓冲（6 段而不是 4 段）。
+        let point_shadow_pass_bind_group = Self::create_shadow_pass_bind_group(
+            device,
+            &shadow_bgl,
+            &point_shadow_pass_buffer,
             &draw_buffer,
             &bones_buffer,
         );
@@ -1862,6 +2156,13 @@ impl ScenePipeline {
             shadow_view,
             shadow_layer_views,
             shadow_resolution,
+            point_shadow_texture,
+            point_shadow_view,
+            point_shadow_face_views,
+            point_shadow_buffer,
+            point_shadow_pass_buffer,
+            point_shadow_pass_bind_group,
+            point_shadow_resolution,
             sky,
             sample_count,
             draw_staging: Vec::new(),
@@ -1990,6 +2291,49 @@ impl ScenePipeline {
         (texture, view, layers)
     }
 
+    /// 建**点光**立方体阴影的深度目标：一张 6 层深度图 + 一个立方体视图 + 6 张单层视图。
+    ///
+    /// 与方向光的 [`Self::create_shadow_target`] 结构相同，唯一区别是给整体视图
+    /// 指定 `dimension = Cube` —— 立方体采样靠它挑面，不指定就成了"一张 6 层图"，
+    /// `texture_depth_cube` 绑定直接不匹配。
+    fn create_point_shadow_target(
+        device: &wgpu::Device,
+        resolution: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView, Vec<wgpu::TextureView>) {
+        let resolution = resolution.max(1);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene_point_shadow_depth"),
+            size: wgpu::Extent3d {
+                width: resolution,
+                height: resolution,
+                depth_or_array_layers: POINT_SHADOW_FACES as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("scene_point_shadow_cube"),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        let faces = (0..POINT_SHADOW_FACES as u32)
+            .map(|i| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("scene_point_shadow_face"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: i,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        (texture, view, faces)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create_global_bind_group(
         device: &wgpu::Device,
@@ -2000,6 +2344,8 @@ impl ScenePipeline {
         shadow_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
         shadow_buffer: &wgpu::Buffer,
+        point_shadow_view: &wgpu::TextureView,
+        point_shadow_buffer: &wgpu::Buffer,
         bones_buffer: &wgpu::Buffer,
         sky: &SkyResources,
     ) -> wgpu::BindGroup {
@@ -2056,6 +2402,16 @@ impl ScenePipeline {
                 wgpu::BindGroupEntry {
                     binding: 11,
                     resource: wgpu::BindingResource::TextureView(&sky.brdf_view),
+                },
+                // 12 / 13：点光立方体阴影。采样器复用 4 号（深度比较采样器，
+                // 立方体与二维数组共用同一套比较语义）。
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(point_shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: point_shadow_buffer.as_entire_binding(),
                 },
             ],
         })
@@ -2119,6 +2475,38 @@ impl ScenePipeline {
             &self.shadow_view,
             &self.shadow_sampler,
             &self.shadow_buffer,
+            &self.point_shadow_view,
+            &self.point_shadow_buffer,
+            &self.bones_buffer,
+            &self.sky,
+        );
+    }
+
+    /// 点光立方体阴影的目标分辨率与当前不一致时重建（并换全局绑定组）。
+    ///
+    /// 与 [`Self::ensure_shadow_resolution`] 同款：稳态是一次数值比较，
+    /// 只有灯里的 `shadow_resolution` 真的变了才会重建 6 层深度图。
+    fn ensure_point_shadow_resolution(&mut self, device: &wgpu::Device, resolution: u32) {
+        let resolution = resolution.max(1);
+        if resolution == self.point_shadow_resolution {
+            return;
+        }
+        let (texture, view, faces) = Self::create_point_shadow_target(device, resolution);
+        self.point_shadow_texture = texture;
+        self.point_shadow_view = view;
+        self.point_shadow_face_views = faces;
+        self.point_shadow_resolution = resolution;
+        self.global_bind_group = Self::create_global_bind_group(
+            device,
+            &self.global_bgl,
+            &self.camera_buffer,
+            &self.lights_buffer,
+            &self.draw_buffer,
+            &self.shadow_view,
+            &self.shadow_sampler,
+            &self.shadow_buffer,
+            &self.point_shadow_view,
+            &self.point_shadow_buffer,
             &self.bones_buffer,
             &self.sky,
         );
@@ -2157,6 +2545,8 @@ impl ScenePipeline {
             &self.shadow_view,
             &self.shadow_sampler,
             &self.shadow_buffer,
+            &self.point_shadow_view,
+            &self.point_shadow_buffer,
             &self.bones_buffer,
             &self.sky,
         );
@@ -2310,6 +2700,7 @@ impl ScenePipeline {
         ambient: [f32; 3],
         packed: &[&Light],
         shadow_slot: Option<usize>,
+        point_shadow_slot: Option<usize>,
     ) -> LightsUniform {
         let mut uniform = LightsUniform {
             ambient: [ambient[0], ambient[1], ambient[2], 0.0],
@@ -2354,6 +2745,13 @@ impl ScenePipeline {
         if let Some(slot) = shadow_slot {
             if slot < count {
                 uniform.lights[slot].shadow_params[0] = 1.0;
+            }
+        }
+        // 点光阴影的标记走 shadow_params.z：x 一直是"方向光级联"，两种阴影可以
+        // 同时存在（一盏方向光 + 一盏点光），所以必须各占一个位。
+        if let Some(slot) = point_shadow_slot {
+            if slot < count {
+                uniform.lights[slot].shadow_params[2] = 1.0;
             }
         }
 
@@ -2409,6 +2807,36 @@ impl ScenePipeline {
     /// **只动相机 uniform**：剔除视锥与级联阴影拟合仍然用未抖动的 `view_proj`
     /// —— 阴影的"整数纹素宽度 + 中心吸附"经不起每帧半个像素的来回拉扯，
     /// 抖进去就是影子边缘持续抖动（比锯齿难看得多）。
+    /// 把**全部**投影物画一遍深度（不分级、不分面）。返回 `(实例数, draw 数)`。
+    ///
+    /// 两处要用同一套"取图元 → 绑顶点 / 索引缓冲 → `draw_indexed`"的动作：
+    /// 逐级剔除**关掉**时的方向光阴影，以及点光立方体的六个面。合成一处是刻意的
+    /// —— 六个面里漏画一类批次（比如只画了 `opaque_batches`、忘了阴影专用批次）
+    /// 的表现是"某个方向缺影子"，而其余五面完全正常，从截图几乎看不出来。
+    fn draw_all_shadow_casters(
+        &self,
+        spass: &mut wgpu::RenderPass<'_>,
+        entities: &[Entity],
+        model_cache: &HashMap<String, GltfMesh>,
+    ) -> (usize, usize) {
+        let mut submitted = 0usize;
+        let mut calls = 0usize;
+        for batch in self.opaque_batches.iter().chain(self.shadow_batches.iter()) {
+            let Some(prim) = batch_prim(entities, model_cache, batch) else {
+                continue;
+            };
+            spass.set_vertex_buffer(
+                0,
+                batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
+            );
+            spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
+            spass.draw_indexed(0..prim.num_indices, 0, batch.first..batch.first + batch.count);
+            submitted += batch.count as usize;
+            calls += 1;
+        }
+        (submitted, calls)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -2438,6 +2866,32 @@ impl ScenePipeline {
             .take(MAX_LIGHTS)
             .collect();
         let shadow_slot = pick_shadow_slot(&packed);
+        let point_shadow_slot = pick_point_shadow_slot(&packed);
+
+        // 点光立方体：6 个面的视图投影。范围取灯的 `range` —— 超出它光照已经衰减
+        // 到 0，再往外画深度纯属浪费。近平面取远平面的 0.5%（下限 2 cm）：点光
+        // 常常贴在天花板上，近平面给大了会把灯具附近整个裁掉，影子在地上缺一块。
+        let point_shadow = point_shadow_slot.map(|slot| {
+            let light = packed[slot];
+            let center = Vec3::from(light.position);
+            let far = light.range.max(0.05);
+            let near = (far * 0.005).max(0.02);
+            (center, near, far, point_shadow_matrices(center, near, far))
+        });
+        let point_resolution = match point_shadow_slot {
+            Some(slot) => match packed[slot].shadow_resolution {
+                // 没写分辨率时按方向光默认值的一半算（6 面 vs 4 级，总纹素量同一量级）。
+                0 => (self.default_shadow_resolution / 2)
+                    .clamp(256, DEFAULT_POINT_SHADOW_RESOLUTION),
+                // 显式写了也**封顶 2048**：立方体是 6 面，2048²×6 已经是 96 MB
+                // 深度图；照抄方向光的 4096 会变成 384 MB，那是个一点就崩的旋钮。
+                r => r.clamp(64, MAX_POINT_SHADOW_RESOLUTION),
+            },
+            None => self.point_shadow_resolution,
+        };
+        if point_shadow_slot.is_some() {
+            self.ensure_point_shadow_resolution(device, point_resolution);
+        }
 
         // 分辨率取自那盏灯（0 = 用默认值）。**必须先定分辨率**：级联拟合要用它
         // 算每层纹素的世界尺寸（进而决定吸附步长），顺序反了就得重拟合一遍。
@@ -2487,7 +2941,12 @@ impl ScenePipeline {
         queue.write_buffer(
             &self.lights_buffer,
             0,
-            bytemuck::bytes_of(&Self::build_lights(lighting.ambient, &packed, shadow_slot)),
+            bytemuck::bytes_of(&Self::build_lights(
+                lighting.ambient,
+                &packed,
+                shadow_slot,
+                point_shadow_slot,
+            )),
         );
 
         // 主 pass 的级联 uniform：没阴影时矩阵填 0（shader 靠 params.w = 0 整段跳过，
@@ -2518,6 +2977,39 @@ impl ScenePipeline {
             }
         }
         queue.write_buffer(&self.shadow_buffer, 0, bytemuck::bytes_of(&shadow_uniform));
+
+        // 点光立方体阴影：主 pass 的参数 + 6 面各自的矩阵（阴影 pass 动态偏移选面）。
+        // 没点光投影时写一份"关闭"的 uniform —— 片元靠 `params.z` 整段跳过，
+        // 不采样立方体，画面与没有这个功能时逐位一致。
+        let mut point_uniform = PointShadowUniform {
+            face_view_proj: [[[0.0; 4]; 4]; POINT_SHADOW_FACES],
+            light_pos: [0.0; 4],
+            params: [0.0, 0.0, 0.0, POINT_SHADOW_DEPTH_BIAS],
+        };
+        if let Some((center, near, far, mats)) = &point_shadow {
+            point_uniform.light_pos = [center.x, center.y, center.z, *far];
+            point_uniform.params = [
+                *near,
+                // PCF 步长（方向空间）：立方体每面覆盖 90°，方向分量在面上从
+                // -1 走到 1，所以一个纹素 ≈ 2/分辨率。
+                2.0 / self.point_shadow_resolution as f32,
+                1.0,
+                POINT_SHADOW_DEPTH_BIAS,
+            ];
+            for (i, m) in mats.iter().enumerate() {
+                point_uniform.face_view_proj[i] = m.to_cols_array_2d();
+                queue.write_buffer(
+                    &self.point_shadow_pass_buffer,
+                    i as u64 * SHADOW_PASS_STRIDE,
+                    bytemuck::cast_slice(&m.to_cols_array()),
+                );
+            }
+        }
+        queue.write_buffer(
+            &self.point_shadow_buffer,
+            0,
+            bytemuck::bytes_of(&point_uniform),
+        );
 
         // --- 天空 / 环境（内容 key 变了才重建）---
         //
@@ -3101,6 +3593,8 @@ impl ScenePipeline {
             low_lod_instances,
             shadow_instances_submitted: 0,
             shadow_draw_calls: 0,
+            point_shadow_instances: 0,
+            point_shadow_draw_calls: 0,
         };
 
         // --- 阴影 pass：每层画一遍深度（必须在主 pass 之前）---
@@ -3198,27 +3692,55 @@ impl ScenePipeline {
                     }
                 } else {
                     // 老路径（逐级剔除关）：每级画全部投影物。A/B 基准的对照档。
-                    for batch in self.opaque_batches.iter().chain(self.shadow_batches.iter()) {
-                        let Some(prim) = batch_prim(entities, model_cache, batch) else {
-                            continue;
-                        };
-                        spass.set_vertex_buffer(
-                            0,
-                            batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
-                        );
-                        spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
-                        spass.draw_indexed(
-                            0..prim.num_indices,
-                            0,
-                            batch.first..batch.first + batch.count,
-                        );
-                        shadow_submitted += batch.count as usize;
-                        shadow_calls += 1;
-                    }
+                    let (submitted, calls) =
+                        self.draw_all_shadow_casters(&mut spass, entities, model_cache);
+                    shadow_submitted += submitted;
+                    shadow_calls += calls;
                 }
             }
             self.stats.shadow_instances_submitted = shadow_submitted;
             self.stats.shadow_draw_calls = shadow_calls;
+        }
+
+        // --- 点光立方体阴影：每个面一个 pass ---
+        //
+        // 与方向光的级联**并列**而不是互斥：一盏方向光 + 一盏点光可以同时投影。
+        // 6 个面各画一遍全部投影物（v1 不做逐面剔除）—— 立方体从光源往六个方向
+        // 看，每个面实际上只看得到一小块场景，所以这里确实多画了很多。先保证
+        // "六面都全"（漏一面 = 那个方向没有影子，且其余五面完全正常，光看截图
+        // 极难发现），逐面剔除留作后续优化，读数在 `point_shadow_instances` 里。
+        if let Some((_, _, _, _)) = &point_shadow {
+            let mut submitted = 0usize;
+            let mut calls = 0usize;
+            for face in 0..POINT_SHADOW_FACES {
+                let Some(face_view) = self.point_shadow_face_views.get(face) else {
+                    break;
+                };
+                let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("point_shadow_pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: face_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                spass.set_pipeline(&self.shadow_pipeline);
+                spass.set_bind_group(
+                    0,
+                    &self.point_shadow_pass_bind_group,
+                    &[(face as u64 * SHADOW_PASS_STRIDE) as u32],
+                );
+                let (s, c) = self.draw_all_shadow_casters(&mut spass, entities, model_cache);
+                submitted += s;
+                calls += c;
+            }
+            self.stats.point_shadow_instances = submitted;
+            self.stats.point_shadow_draw_calls = calls;
         }
 
         // 粒子：实例数据与相机基在开 pass 之前就备好（`prepare` 里做了 alpha
@@ -3384,18 +3906,18 @@ mod tests {
     fn point_range_invalid_values_are_disabled_and_directional_ignores_range() {
         for range in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             let light = Light::point("范围", [0.0; 3], [1.0; 3], 1.0, range);
-            let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], None);
+            let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], None, None);
             assert_eq!(uniform.lights[0].shadow_params[1], 0.0);
         }
         let light = Light::default();
-        let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], Some(0));
+        let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], Some(0), None);
         assert_eq!(uniform.lights[0].shadow_params, [1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
     fn regression_r09_point_range_reaches_gpu() {
         let light = Light::point("范围", [0.0; 3], [1.0; 3], 1.0, 7.0);
-        let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], None);
+        let uniform = ScenePipeline::build_lights([0.0; 3], &[&light], None, None);
         assert_eq!(uniform.lights[0].shadow_params[1], 7.0);
     }
 
@@ -3909,15 +4431,227 @@ mod tests {
         let slot = pick_shadow_slot(&packed);
         assert_eq!(slot, Some(1));
 
-        let u = ScenePipeline::build_lights([0.0; 3], &packed, slot);
+        let u = ScenePipeline::build_lights([0.0; 3], &packed, slot, None);
         assert_eq!(u.ambient[3], 2.0, "两盏灯都应被写入");
         assert_eq!(u.lights[1].shadow_params[0], 1.0, "方向光应被标为投射阴影");
         assert_eq!(u.lights[0].shadow_params[0], 0.0, "点光不该被标");
 
         // 没有任何灯投射阴影时，标记必须全是 0（片元着色器据此跳过采样）。
-        let u_none = ScenePipeline::build_lights([0.0; 3], &packed, None);
+        let u_none = ScenePipeline::build_lights([0.0; 3], &packed, None, None);
         assert_eq!(u_none.lights[0].shadow_params[0], 0.0);
         assert_eq!(u_none.lights[1].shadow_params[0], 0.0);
+    }
+
+    // -- 点光立方体阴影（纯函数部分）--
+
+    /// 立方体六面各自的矩阵必须把**本面轴上的点**装进裁剪空间。
+    ///
+    /// 这条钉的是面序与 up 向量成对正确：六面里只要有一对写反（比如 `+X` 用了
+    /// `-X` 的 up），那个面就是空/翻的 —— 采样时会表现为某个方向整体没影子。
+    #[test]
+    fn point_shadow_faces_cover_their_own_direction() {
+        let center = Vec3::new(0.5, 3.0, -1.5);
+        let (near, far) = (0.1f32, 25.0f32);
+        let mats = point_shadow_matrices(center, near, far);
+        const DIRS: [[f32; 3]; POINT_SHADOW_FACES] = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        for (i, d) in DIRS.iter().enumerate() {
+            let p = center + Vec3::from(*d) * 6.0;
+            let clip = mats[i] * p.extend(1.0);
+            assert!(clip.w > 0.0, "面 {i} 的 w 必须为正（点必须在相机前方）");
+            assert!(
+                clip.x.abs() <= clip.w * 1.001 && clip.y.abs() <= clip.w * 1.001,
+                "面 {i} 没把自家轴上的点装进画面: ndc = ({}, {})",
+                clip.x / clip.w,
+                clip.y / clip.w
+            );
+            let ndc_z = clip.z / clip.w;
+            assert!(
+                (0.0..=1.0).contains(&ndc_z),
+                "面 {i} 的深度越界: {ndc_z}"
+            );
+        }
+    }
+
+    /// 立方体的**面内坐标取向**必须与 WebGPU 的方向 → (面, u, v) 映射表一致。
+    ///
+    /// 这条守的是 up 向量：面选对了、深度也对，但 up 取了反号时，那个面会绕水平
+    /// 轴镜像 —— 影子还在，只是翻到了上下颠倒的位置。地板上的用例看不出来
+    /// （影子正好在面中心附近），侧面一次就露馅（本目录的
+    /// `point_shadow_reaches_side_directions` 就是这么发现第一版的 up 全取反了）。
+    #[test]
+    fn point_shadow_orientation_matches_cube_lookup() {
+        // WebGPU 的方向 → 立方体面 / 面内坐标（sc, tc 在 [-1,1]）。
+        fn face_uv(d: Vec3) -> (usize, f32, f32) {
+            let (ax, ay, az) = (d.x.abs(), d.y.abs(), d.z.abs());
+            let (face, sc, tc) = if ax >= ay && ax >= az {
+                if d.x > 0.0 {
+                    (0, -d.z / ax, -d.y / ax)
+                } else {
+                    (1, d.z / ax, -d.y / ax)
+                }
+            } else if ay >= az {
+                if d.y > 0.0 {
+                    (2, d.x / ay, d.z / ay)
+                } else {
+                    (3, d.x / ay, -d.z / ay)
+                }
+            } else if d.z > 0.0 {
+                (4, d.x / az, -d.y / az)
+            } else {
+                (5, -d.x / az, -d.y / az)
+            };
+            (face, (sc + 1.0) * 0.5, (tc + 1.0) * 0.5)
+        }
+
+        let center = Vec3::new(1.0, 2.0, -3.0);
+        let (near, far) = (0.1f32, 40.0f32);
+        let mats = point_shadow_matrices(center, near, far);
+        // 每个面取若干**偏离中心**的方向：面中心对取向不敏感（镜像不变），
+        // 只有偏心的点才能把 up 取反照出来。
+        let dirs = [
+            Vec3::new(1.0, 0.4, -0.25),
+            Vec3::new(-1.0, -0.35, 0.6),
+            Vec3::new(0.3, 1.0, 0.45),
+            Vec3::new(-0.5, -1.0, -0.3),
+            Vec3::new(0.2, -0.6, 1.0),
+            Vec3::new(-0.45, 0.35, -1.0),
+            Vec3::new(0.8, -0.7, 0.1),
+        ];
+        for d in dirs {
+            let d = d.normalize();
+            let (face, u, v) = face_uv(d);
+            let p = center + d * 8.0;
+            let clip = mats[face] * p.extend(1.0);
+            assert!(
+                clip.w > 0.0,
+                "方向 {d:?} 判定为面 {face}，但矩阵说它在相机后面"
+            );
+            let ndc = clip.truncate() / clip.w;
+            let (ru, rv) = (ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+            assert!(
+                (ru - u).abs() < 2e-3 && (rv - v).abs() < 2e-3,
+                "方向 {d:?} 在面 {face}: 映射表给 (u,v)=({u:.3}, {v:.3})，\
+                 渲染矩阵给 ({ru:.3}, {rv:.3}) —— 该面的 up 取向反了"
+            );
+        }
+    }
+
+    /// 参考深度公式必须与 `perspective_rh` 的 `z/w` **逐点一致**。
+    /// 片元着色器用 `point_shadow_reference_depth` 的公式算比较值、深度图里存的
+    /// 是同一个矩阵的 `z/w`。两者一旦漂移，症状是"影子整体沿光线平移一段"，
+    /// 画面上看起来像是偏置调大了 —— 所以这条一致性必须由测试钉死，不能靠肉眼。
+    #[test]
+    fn point_shadow_depth_matches_projection() {
+        let center = Vec3::ZERO;
+        let (near, far) = (0.2f32, 30.0f32);
+        let mats = point_shadow_matrices(center, near, far);
+        for dist in [1.0f32, 2.0, 5.0, 12.5, 22.0, 29.0] {
+            let p = Vec3::new(dist, 0.0, 0.0); // 第 0 面（+X）的轴上
+            let clip = mats[0] * p.extend(1.0);
+            let ndc = clip.z / clip.w;
+            let formula = point_shadow_reference_depth(dist, near, far);
+            assert!(
+                (ndc - formula).abs() < 1e-5,
+                "dist = {dist}: 矩阵给出 {ndc}，公式给出 {formula}"
+            );
+        }
+        // 退化输入不许产出 NaN（近平面 ≥ 远平面是坏配置，不是崩溃理由）。
+        assert!(point_shadow_reference_depth(5.0, 10.0, 1.0).is_finite());
+        assert!(point_shadow_reference_depth(f32::INFINITY, near, far).is_finite());
+    }
+
+    /// **离轴**点的深度也必须对上 —— 这一条钉的是"主轴分量"语义。
+    ///
+    /// 第一版拿欧氏长度算参考深度：轴上的点恰好相等（长度 = 主轴分量），所以
+    /// 上面那条测试是绿的；但斜面上离轴越远，算出来的深度越大于存图深度，
+    /// 整面都被判成阴影（实测"斜墙开点光阴影后几乎全黑"）。
+    #[test]
+    fn point_shadow_depth_uses_the_major_axis_not_the_distance() {
+        let (near, far) = (0.1f32, 30.0f32);
+        let mats = point_shadow_matrices(Vec3::ZERO, near, far);
+        // (6, 2, -1) 属于 +X 面，主轴分量 = 6，欧氏长度 ≈ 6.4 —— 两者必须给出不同的值。
+        let p = Vec3::new(6.0, 2.0, -1.0);
+        let clip = mats[0] * p.extend(1.0);
+        let ndc = clip.z / clip.w;
+        let axis_depth = point_shadow_reference_depth(6.0, near, far);
+        let len_depth = point_shadow_reference_depth(p.length(), near, far);
+        assert!(
+            (ndc - axis_depth).abs() < 1e-5,
+            "离轴点必须按主轴分量算深度：矩阵 {ndc}，主轴 {axis_depth}，长度 {len_depth}"
+        );
+        assert!(
+            (axis_depth - len_depth).abs() > 1e-3,
+            "这条测试的前提是两种算法结果不同（主轴 {axis_depth} vs 长度 {len_depth}）"
+        );
+    }
+
+    /// 只认**有 range 的点光**：range ≤ 0 的灯本来就不出光，给它拟合立方体
+    /// 等于白烧六遍场景；方向光走级联，不归这里管。
+    #[test]
+    fn pick_point_shadow_slot_requires_a_point_light_with_range() {
+        let mut sun = Light::directional("sun", [0.0, -1.0, 0.0], [1.0; 3], 1.0);
+        sun.casts_shadow = true;
+        let mut dead = Light::point("dead", [0.0, 3.0, 0.0], [1.0; 3], 1.0, 0.0);
+        dead.casts_shadow = true;
+        let mut lamp = Light::point("lamp", [0.0, 3.0, 0.0], [1.0; 3], 1.0, 12.0);
+        lamp.casts_shadow = true;
+
+        let packed: Vec<&Light> = vec![&sun, &dead, &lamp];
+        assert_eq!(
+            pick_point_shadow_slot(&packed),
+            Some(2),
+            "range 为 0 的点光必须跳过，方向光不参与"
+        );
+
+        lamp.casts_shadow = false;
+        let packed: Vec<&Light> = vec![&sun, &lamp];
+        assert_eq!(pick_point_shadow_slot(&packed), None);
+    }
+
+    /// 点光阴影的标记必须落在 `shadow_params.z`（方向光用 x）—— 两种阴影同时
+    /// 存在时各占一位，混用会让"开了点光阴影"变成"把方向光的图当立方体查"。
+    #[test]
+    fn build_lights_marks_the_point_shadow_slot() {
+        let mut sun = Light::directional("sun", [0.0, -1.0, 0.0], [1.0; 3], 1.0);
+        sun.casts_shadow = true;
+        let mut lamp = Light::point("lamp", [0.0, 3.0, 0.0], [1.0; 3], 1.0, 12.0);
+        lamp.casts_shadow = true;
+
+        let packed: Vec<&Light> = vec![&sun, &lamp];
+        let dir_slot = pick_shadow_slot(&packed);
+        let point_slot = pick_point_shadow_slot(&packed);
+        assert_eq!(dir_slot, Some(0));
+        assert_eq!(point_slot, Some(1));
+
+        let u = ScenePipeline::build_lights([0.0; 3], &packed, dir_slot, point_slot);
+        assert_eq!(u.lights[0].shadow_params[0], 1.0, "方向光标记在 x");
+        assert_eq!(u.lights[0].shadow_params[2], 0.0, "方向光不该带点光标记");
+        assert_eq!(u.lights[1].shadow_params[0], 0.0, "点光不该带级联标记");
+        assert_eq!(u.lights[1].shadow_params[2], 1.0, "点光标记在 z");
+    }
+
+    /// 着色器里的参考深度必须用**主轴分量**（与 [`point_shadow_reference_depth`] 同义）。
+    ///
+    /// WGSL 是字符串常量，没法直接单测；这条按"文本契约"钉住式子。改成欧氏长度
+    /// 的后果是斜面上的片元被系统性判成阴影 —— 离轴越远越明显，实测在宽视场的
+    /// 挡板用例里能暗掉大半面，而正面看又"像是有影子"。
+    #[test]
+    fn point_shadow_shader_depth_uses_the_major_axis() {
+        assert!(
+            SCENE_FRAG_SRC.contains("max(abs(to_frag.x), max(abs(to_frag.y), abs(to_frag.z)))"),
+            "点光阴影的参考深度必须取主轴分量，不能用 length()"
+        );
+        assert!(
+            SCENE_FRAG_SRC.contains("(1.0 - near / axis)"),
+            "参考深度式必须与 Rust 的 point_shadow_reference_depth 一致"
+        );
     }
 
     // -- 视锥剔除 --

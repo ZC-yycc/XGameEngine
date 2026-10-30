@@ -80,7 +80,7 @@ use std::time::Instant;
 use frame_policy::{FrameClock, FrameInputs, FramePlan, FramePolicy};
 use hub::{HubAction, ProjectHub};
 use panels::dock::PanelTab;
-use state::{EditorState, ExitTarget, LogLevel, PlayMode};
+use state::{EditorState, ExitTarget, LogLevel, LogSource, PlayMode};
 
 // ---------------------------------------------------------------------------
 // 应用状态
@@ -210,6 +210,11 @@ struct UiShot {
     /// 自检回路 —— 与 `--ui-settings` 同理，给开关才能截到它。
     /// 打开时**不**聚焦查询框：聚焦 TextEdit 的光标按墙钟闪烁，逐字节不可复现。
     open_command: bool,
+    /// 抓图前把**源码查看器**拉开并定位（`--ui-source <路径>:<行号>`）。
+    ///
+    /// 查看器是点出来的浮层，不给开关就永远进不了截图 —— 行号列宽、目标行高亮、
+    /// 滚动落点都只能靠肉眼，改版时等于没法自检。
+    source: Option<(String, u32)>,
     /// 抓图前把视口切到**正交投影**（`--ui-ortho`）。
     ///
     /// 正交是渲染路径上的开关，肉眼验证要能截出图来；同时它让
@@ -384,6 +389,13 @@ impl EditorApp {
             }
         }
 
+        // `--ui-source`：把源码查看器拉开并定位到指定行。
+        if let Some((path, line)) = app.ui_shot.as_ref().and_then(|s| s.source.clone()) {
+            if let Some(session) = app.session.as_mut() {
+                session.state.open_source(&state::LogSource::new(path, line));
+            }
+        }
+
         // `--ui-command`：把命令面板拉开。不聚焦查询框 —— 聚焦 TextEdit 的
         // 光标按墙钟闪烁，会让"同一份代码截出的图逐字节不变"这条验收失效。
         if app.ui_shot.as_ref().map(|s| s.open_command).unwrap_or(false) {
@@ -516,9 +528,15 @@ impl eframe::App for EditorApp {
         // exe 启动的用户**没有终端**，等于什么都看不到。策略见 `logging` 模块头。
         if let Some(session) = self.session.as_mut() {
             for record in logging::take_records() {
+                // 引擎日志也带上源码位置（`log::warn!` 所在的那一行）：控制台里
+                // 点一下就跳到那里。打包后的 exe 没有源码，查看器会如实说找不到。
+                let source = record
+                    .file
+                    .as_ref()
+                    .map(|file| LogSource::new(file.clone(), record.line));
                 session
                     .state
-                    .log(LogLevel::from_log(record.level), record.console_text());
+                    .log_with_source(LogLevel::from_log(record.level), record.console_text(), source);
             }
         }
 
@@ -703,6 +721,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut open_preferences = false;
     let mut open_command = false;
     let mut ortho = false;
+    let mut source: Option<(String, u32)> = None;
     let mut recover_autosave = false;
     let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
 
@@ -759,6 +778,14 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
             "--ui-ortho" => {
                 ortho = true;
             }
+            "--ui-source" => {
+                if let Some(spec) = raw.get(i + 1) {
+                    source = Some(parse_source_spec(spec));
+                    i += 1;
+                } else {
+                    log::error!("--ui-source 需要 <项目相对路径>:<行号>");
+                }
+            }
             "--ui-restore-prefs" => {
                 out.restore_prefs = true;
             }
@@ -802,10 +829,26 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         open_preferences,
         open_command,
         ortho,
+        source,
         recover_autosave,
         size,
     });
     out
+}
+
+/// 解析 `--ui-source` 的 `<路径>:<行号>`。
+///
+/// 行号缺省按 1 处理（只给文件也能截）；`:0` 与负数按 1 —— 行号从 1 起，
+/// "第 0 行"没有意义，静默夹住比报错更好排查。Windows 盘符里的冒号（`C://...`）
+/// 不会误切：只按**最后一个**冒号切，且要求后面全是数字。
+fn parse_source_spec(text: &str) -> (String, u32) {
+    let trimmed = text.trim();
+    if let Some((path, line)) = trimmed.rsplit_once(':') {
+        if let Ok(line) = line.trim().parse::<u32>() {
+            return (path.to_owned(), line.max(1));
+        }
+    }
+    (trimmed.to_owned(), 1)
 }
 
 /// 解析 `1280x800` 形式的尺寸（`x` / `X` / `*` 都收，前后空格忽略）。
@@ -1226,6 +1269,9 @@ fn editor_ui(
     }
 
     panels::settings::show(&mut session.state, ctx);
+    // 源码查看器：与控制台同层，但画在设置之后（点报错就该看到源码，而不是被
+    // 设置窗口压住）。关窗 / 确认对话框仍画在它之上。
+    panels::source_viewer::show(&mut session.state, ctx);
     dialogs::show_save_as_dialog(&mut session.state, ctx);
     dialogs::show_new_scene_dialog(&mut session.state, ctx);
     dialogs::show_scene_change_dialog(&mut session.state, ctx, ctx.cumulative_pass_nr());
@@ -1814,6 +1860,8 @@ mod tests {
             "--ui-command",
             "--ui-restore-prefs",
             "--ui-ortho",
+            "--ui-source",
+            "Scripts/player.lua:42",
             "--ui-size",
             "1280x800",
             "--ui-select",
@@ -1837,9 +1885,33 @@ mod tests {
             "--ui-command 应当置位（否则命令面板永远截不到）"
         );
         assert!(shot.ortho, "--ui-ortho 应当置位（正交视口要能截到）");
+        assert_eq!(
+            shot.source,
+            Some(("Scripts/player.lua".to_owned(), 42)),
+            "--ui-source 应当解析出路径与行号"
+        );
         assert!(args.restore_prefs, "--ui-restore-prefs 应当置位");
         assert_eq!(shot.size, egui::vec2(1280.0, 800.0));
         assert_eq!(shot.select.as_deref(), Some("Fox"));
         assert!(!shot.open_settings);
+    }
+
+    /// `--ui-source` 的 `<路径>:<行号>` 解析：只按最后一个冒号切，行号从 1 起。
+    #[test]
+    fn parse_source_spec_handles_windows_paths_and_bare_paths() {
+        assert_eq!(
+            parse_source_spec("Scripts/a.lua:42"),
+            ("Scripts/a.lua".to_owned(), 42)
+        );
+        // 只给文件：行号按 1 起（截图上也要能出内容）
+        assert_eq!(parse_source_spec("Scripts/a.lua"), ("Scripts/a.lua".to_owned(), 1));
+        // 盘符里的冒号不能被当成行号分隔
+        assert_eq!(
+            parse_source_spec(r"C://work//a.lua:7"),
+            (r"C://work//a.lua".to_owned(), 7)
+        );
+        // 行号 0 / 非数字 → 退回 1
+        assert_eq!(parse_source_spec("a.lua:0"), ("a.lua".to_owned(), 1));
+        assert_eq!(parse_source_spec("a.lua:x"), ("a.lua:x".to_owned(), 1));
     }
 }

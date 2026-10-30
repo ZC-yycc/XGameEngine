@@ -77,13 +77,21 @@ pub struct AnimTransition {
     pub from: String,
     pub to: String,
     pub when: AnimCondition,
+    /// 这条转移自己的**过渡时长**（秒）；`None` = 用 `Animator::fade_time`。
+    ///
+    /// 为什么需要逐条：一套动作里"走路→跑步"要 0.3 秒混，"受击→僵直"要 0 秒硬切
+    /// （被打中的那一帧就该断掉），全局一个数不可能同时满足。`Some(0.0)` 是
+    /// **硬切**，与把 `fade_time` 写 0 同义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f32>,
 }
 
 /// 动画状态机：参数表 + 状态表 + 转移表。
 ///
-/// v1 刻意做小：没有分层、没有过渡时长逐条配置（统一用 `Animator::fade_time`）、
-/// 没有"一次性 trigger 参数"。一个浮点参数表 + 阈值条件已经能表达
-/// 人形角色最基本的 Idle/Walk/Run 移动组合，其余等真实需求来了再加。
+/// 刻意做小的部分：没有**分层**状态机（每个身体部位一套转移 —— 那种需求用
+/// 混合层栈表达）、没有一次性 trigger 参数。一个浮点参数表 + 阈值条件已经能
+/// 表达人形角色最基本的 Idle/Walk/Run 移动组合。过渡时长可以逐条配
+/// （[`AnimTransition::duration`]），没配的退回 `Animator::fade_time`。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnimMachine {
@@ -113,6 +121,16 @@ impl AnimMachine {
         current: &str,
         parameters: &BTreeMap<String, f32>,
     ) -> Option<&str> {
+        self.transition_from(current, parameters).map(|t| t.to.as_str())
+    }
+
+    /// 同 [`transition_for`](Self::transition_for)，但返回**整条转移** ——
+    /// 调用方要用它自己的过渡时长（[`AnimTransition::duration`]）。
+    pub fn transition_from(
+        &self,
+        current: &str,
+        parameters: &BTreeMap<String, f32>,
+    ) -> Option<&AnimTransition> {
         for t in &self.transitions {
             if t.from != current {
                 continue;
@@ -129,7 +147,7 @@ impl AnimMachine {
                 } => value < *threshold,
             };
             if met && self.state(&t.to).is_some() {
-                return Some(&t.to);
+                return Some(t);
             }
         }
         None
@@ -258,7 +276,8 @@ pub struct Animator {
     pub autoplay: bool,
     /// 换剪辑时的交叉淡入时长（秒）。`> 0` 时切剪辑不硬跳，而是从旧剪辑的当前
     /// 姿势在这么多秒内混到新剪辑；`0` = 硬切。只对**播放中**的切换生效。
-    /// 机器模式下，这条同样管**换状态**的过渡时长（v1 全局一条，逐条转移时长留 v2）。
+    /// 机器模式下，这条是**换状态**的缺省过渡时长：转移自己写了 `duration`
+    /// 就用它（见 `AnimTransition::duration`），没写才用这里。
     pub fade_time: f32,
     /// 动画状态机。`Some` 且 [`AnimMachine::is_usable`] 时进入机器模式：
     /// `clip` / `speed` / `looping` 被状态表覆盖（`autoplay` / `fade_time` 仍生效），
@@ -428,6 +447,7 @@ mod tests {
                         param: "speed".into(),
                         value: 0.5,
                     },
+                    duration: None,
                 },
                 AnimTransition {
                     from: "Walk".into(),
@@ -436,6 +456,7 @@ mod tests {
                         param: "speed".into(),
                         value: 0.3,
                     },
+                    duration: None,
                 },
                 AnimTransition {
                     from: "Walk".into(),
@@ -444,6 +465,7 @@ mod tests {
                         param: "speed".into(),
                         value: 2.0,
                     },
+                    duration: None,
                 },
                 AnimTransition {
                     from: "Run".into(),
@@ -452,6 +474,7 @@ mod tests {
                         param: "speed".into(),
                         value: 1.8,
                     },
+                    duration: None,
                 },
             ],
         }
@@ -591,6 +614,39 @@ mod tests {
         assert_eq!(back.layers, a.animator.layers, "层栈应活过 RON 往返");
     }
 
+    /// 逐条过渡时长：缺省时**不落盘**（老场景逐字节不变），写了就活过往返。
+    ///
+    /// `duration: None` 走 `skip_serializing_if`，所以旧文件与"没写这条"的
+    /// 新文件序列化结果一致 —— 这是"新增能力默认关 = 逐字节一致"的落点。
+    #[test]
+    fn transition_duration_is_optional_and_round_trips() {
+        #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+        struct Wrap {
+            transitions: Vec<AnimTransition>,
+        }
+        // 老写法（没有 duration 字段）
+        let old: Wrap = ron::from_str(
+            r#"(transitions: [(from: "Idle", to: "Walk", when: AtLeast(param: "speed", value: 0.5))])"#,
+        )
+        .unwrap();
+        assert_eq!(old.transitions[0].duration, None, "缺省 = 用全局 fade_time");
+        let text = ron::to_string(&old).unwrap();
+        assert!(
+            !text.contains("duration"),
+            "None 不该落盘，实际: {text}"
+        );
+
+        // 新写法
+        let new: Wrap = ron::from_str(
+            r#"(transitions: [(from: "Idle", to: "Walk",
+                 when: AtLeast(param: "speed", value: 0.5), duration: Some(0.0))])"#,
+        )
+        .unwrap();
+        assert_eq!(new.transitions[0].duration, Some(0.0), "0 = 硬切");
+        let back: Wrap = ron::from_str(&ron::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new, "显式时长应活过 RON 往返");
+    }
+
     /// 阈值配对：升速跨 0.5 进 Walk、跨 2.0 进 Run；降速低于 0.3 退回 Idle、
     /// 低于 1.8 退回 Walk。滞回区间（0.3~0.5、1.8~2.0）内不动。
     /// `AtLeast` 是 `≥`、`Below` 是严格 `<` —— 同一阈值的两条**互补不重叠**。
@@ -656,6 +712,7 @@ mod tests {
                     param: "speed".into(),
                     value: 0.5,
                 },
+                duration: None,
             },
         );
         assert_eq!(

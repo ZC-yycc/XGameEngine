@@ -799,6 +799,10 @@ struct Prev {
     /// 当前混合权重 ∈ [0,1]：0 = 纯旧剪辑，1 = 淡入完成。tick 里算好存下，
     /// 渲染侧查询时不再需要 Animator 配置。
     alpha: f32,
+    /// 这次淡入的**总时长**（秒）。切换那一刻定格：转移自己的 `duration` 与
+    /// `Animator::fade_time` 取哪个，是在启动这次淡入时决定的，之后再改配置
+    /// 不该把进行中的过渡一把拽完（那会表现为"改了一下参数，角色突然跳帧"）。
+    duration: f32,
 }
 
 struct Entry {
@@ -882,12 +886,13 @@ impl AnimationDriver {
             //
             // 机器模式：当前状态必须还在表里（配置被 RON 改坏 → 退回 entry），
             // 然后求值一步转移（每 tick 最多走一条边，不链跳）。
-            let (state, clip, speed, looping) = match animator.active_machine() {
+            let (state, clip, speed, looping, fade) = match animator.active_machine() {
                 None => (
                     String::new(),
                     animator.clip.clone(),
                     animator.speed,
                     animator.looping,
+                    animator.fade_time,
                 ),
                 Some(m) => {
                     let current = self
@@ -896,13 +901,20 @@ impl AnimationDriver {
                         .map(|e| e.state.as_str())
                         .filter(|s| m.state(s).is_some())
                         .unwrap_or(m.entry.as_str());
-                    let next = m.transition_for(current, &m.parameters).unwrap_or(current);
+                    let transition = m.transition_from(current, &m.parameters);
+                    let next = transition.map(|t| t.to.as_str()).unwrap_or(current);
                     // next 只能是 current（已校验在表内）或转移表里校验过的目标
-                    // （transition_for 跳过缺失状态）—— 必查得到。
+                    // （transition_from 跳过缺失状态）—— 必查得到。
                     let Some(s) = m.state(next) else {
                         continue;
                     };
-                    (next.to_owned(), s.clip.clone(), s.speed, s.looping)
+                    // 过渡时长逐条覆盖：转移自己写了的用它，没写退回全局。
+                    let fade = transition
+                        .and_then(|t| t.duration)
+                        .filter(|d| d.is_finite())
+                        .map(|d| d.max(0.0))
+                        .unwrap_or(animator.fade_time);
+                    (next.to_owned(), s.clip.clone(), s.speed, s.looping, fade)
                 }
             };
             // -- 2. 条目（首建直接落解析值，不触发假淡入）--
@@ -922,7 +934,7 @@ impl AnimationDriver {
             });
             // -- 3. 换剪辑 → 交叉淡入 --
             if entry.clip != clip {
-                entry.prev = if animator.fade_time > 0.0 && animator.is_active() {
+                entry.prev = if fade > 0.0 && animator.is_active() {
                     Some(Prev {
                         clip: entry.clip.clone(),
                         t: entry.t,
@@ -932,6 +944,7 @@ impl AnimationDriver {
                         looping: entry.looping,
                         fade_t: 0.0,
                         alpha: 0.0,
+                        duration: fade,
                     })
                 } else {
                     None
@@ -1022,12 +1035,15 @@ impl AnimationDriver {
                     // 姿势会在过渡中"粘住"一下，看起来像卡帧。
                     prev.t += dt * prev.speed;
                     prev.fade_t += dt;
-                    prev.alpha = if animator.fade_time > 0.0 {
-                        (prev.fade_t / animator.fade_time).min(1.0)
+                    // 除数用**这次过渡自己的**时长（切换时刻定格），不是当前的
+                    // `animator.fade_time`：编辑期改全局淡入时长不该把进行中的
+                    // 过渡一把拽完。
+                    prev.alpha = if prev.duration > 0.0 {
+                        (prev.fade_t / prev.duration).min(1.0)
                     } else {
                         1.0
                     };
-                    fade_done = animator.fade_time <= 0.0 || prev.fade_t >= animator.fade_time;
+                    fade_done = prev.duration <= 0.0 || prev.fade_t >= prev.duration;
                 }
                 if fade_done {
                     entry.prev = None;
@@ -1784,7 +1800,8 @@ mod tests {
                         param: "speed".into(),
                         value: 0.5,
                     },
-                },
+                    duration: None,
+                    },
                 AnimTransition {
                     from: "Walk".into(),
                     to: "Idle".into(),
@@ -1792,7 +1809,8 @@ mod tests {
                         param: "speed".into(),
                         value: 0.3,
                     },
-                },
+                    duration: None,
+                    },
                 AnimTransition {
                     from: "Walk".into(),
                     to: "Run".into(),
@@ -1800,7 +1818,8 @@ mod tests {
                         param: "speed".into(),
                         value: 2.0,
                     },
-                },
+                    duration: None,
+                    },
                 AnimTransition {
                     from: "Run".into(),
                     to: "Walk".into(),
@@ -1808,7 +1827,8 @@ mod tests {
                         param: "speed".into(),
                         value: 1.8,
                     },
-                },
+                    duration: None,
+                    },
             ],
         }
     }
@@ -1868,6 +1888,89 @@ mod tests {
             .expect("换状态应交叉淡入（复用换剪辑机制）");
         assert_eq!(f.clip, "Survey", "应从旧状态的剪辑淡出");
         assert!(f.looping, "旧剪辑按**它自己**的循环方式淡出");
+    }
+
+    /// 转移自己写的过渡时长优先于 `Animator.fade_time`。
+    ///
+    /// 全局一个数不可能同时表达"走路→跑步慢慢混"和"受击→僵直立刻断"。
+    #[test]
+    fn transition_duration_overrides_the_global_fade() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_machine();
+        {
+            let a = e.animator.as_mut().unwrap();
+            a.fade_time = 0.25; // 全局淡入
+            // Idle → Walk 这条自己要求 1.0 秒
+            a.machine.as_mut().unwrap().transitions[0].duration = Some(1.0);
+        }
+        d.tick(0.3, std::slice::from_ref(&e));
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
+            .parameters
+            .insert("speed".into(), 0.6);
+
+        // 转移发生 + 已淡入 0.5 秒：进度必须是 0.5/1.0，而按全局 0.25 早该结束了。
+        d.tick(0.5, std::slice::from_ref(&e));
+        let f = d.fade_from(e.id).expect("1 秒的过渡在半秒时仍在进行");
+        assert!(
+            (f.alpha - 0.5).abs() < 1e-5,
+            "淡入进度应按转移自己的 1.0 秒算，实得 {}",
+            f.alpha
+        );
+
+        d.tick(0.5, std::slice::from_ref(&e));
+        assert!(d.fade_from(e.id).is_none(), "满 1 秒后过渡必须结束");
+    }
+
+    /// 转移没写时长 → 退回 `Animator.fade_time`（老行为，逐位一致）。
+    #[test]
+    fn transition_without_duration_uses_the_global_fade() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_machine();
+        e.animator.as_mut().unwrap().fade_time = 0.5;
+        d.tick(0.3, std::slice::from_ref(&e));
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
+            .parameters
+            .insert("speed".into(), 0.6);
+        d.tick(0.25, std::slice::from_ref(&e));
+        let f = d.fade_from(e.id).expect("进行中");
+        assert!(
+            (f.alpha - 0.5).abs() < 1e-5,
+            "缺省时按全局 0.5 秒算，实得 {}",
+            f.alpha
+        );
+    }
+
+    /// `duration: 0` = 硬切：当帧换剪辑，没有交叉淡入。
+    #[test]
+    fn zero_transition_duration_is_a_hard_cut() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_machine();
+        e.animator.as_mut().unwrap().machine.as_mut().unwrap().transitions[0].duration = Some(0.0);
+        d.tick(0.3, std::slice::from_ref(&e));
+        e.animator
+            .as_mut()
+            .unwrap()
+            .machine
+            .as_mut()
+            .unwrap()
+            .parameters
+            .insert("speed".into(), 0.6);
+        d.tick(0.1, std::slice::from_ref(&e));
+        assert_eq!(d.state(e.id), Some("Walk"));
+        assert!(
+            d.fade_from(e.id).is_none(),
+            "duration = 0 是硬切，不该留下淡入状态"
+        );
     }
 
     /// 状态表的 speed 覆盖 Animator.speed：Walk 状态半速 → 时钟按 dt×0.5 走。

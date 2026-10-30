@@ -16,5 +16,6 @@ pub mod preferences;
 pub mod profiler;
 pub mod scene_view;
 pub mod settings;
+pub mod source_viewer;
 pub mod theme;
 pub mod toolbar;

@@ -109,9 +109,9 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - **运行态（Play/Pause）的界面语义**：`scene_dirty_memo` 恒为 false（运行时副本不算
   改动）、`save_scene` / `save_scene_as` 硬拒绝、Pause/Stop 用 `add_enabled_ui` 禁用。
   任何"只在编辑态有意义"的新按钮都要照这三条办。
-- **`--ui-shot` 的十个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
+- **`--ui-shot` 的十一个状态开关**：`--ui-select` / `--ui-settings` / `--ui-play` /
   `--ui-profiler` / `--ui-preferences` / `--ui-command` / `--ui-restore-prefs` /
-  `--ui-autosave-recover` / `--ui-ortho` / `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
+  `--ui-autosave-recover` / `--ui-ortho` / `--ui-source <路径>:<行号>` / `--ui-size WxH`。改 UI 必须截图自检，配 `.workbuddy/tools/crop.py`（局部放大）与
   `rowscan.py`（按行扫颜色分段量像素）。**用 `--ui-size` 至少扫 1280 / 1440 / 1920
   三档** —— 窄窗口的溢出只有跑过才看得见。截图默认**只读**：不写 `editor.ron`、
   不写 `.autosave/`、不弹恢复框（磁盘残留会让像素不确定）。
@@ -177,6 +177,9 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 欧拉角 / 旋转约定 | 换算只有 `core::{euler_deg_to_quat, quat_to_euler_deg}` 一处，顺序固定 **`YXZ`**（分量序始终 `[x,y,z]`）。**单轴旋转在 `XYZ`/`YXZ` 下同解**，所以只用单轴断言等于没测；改顺序 = 重新解释所有已落盘意图 | §六十四 |
 | 场景语义体检 | 能通过 RON 解析 ≠ 能用。判定只有 `validate::scene_defects` 一份（七类）；MCP `scene_write` **非空即拒绝**且不落盘；`--check` 报三类新诊断并进退出码 2；**编辑器保存刻意不拦**（拒绝保存 = 用户改不动也救不回）；不自动修复 | §六十四 |
 | 打包自包含 | 只复制清单内容目录 **+ 清单里每关的父目录**；发布前 `audit_package` 对包与源码工程各跑 `check_project` 取 `reference_issues()` **差集**，非空即失败（判据 = 构建有没有引入新问题，早就存在的坏引用不挡构建）；`reference_issues()` **只**收引用/装载类；报错里 `guid://` 必须翻回源码路径；自检放在 `publish` 之前 | §五十九 |
+| 点光立方体阴影 | 6 面深度图 + `texture_depth_cube`；与方向光**并列**（`GpuLight.shadow_params.x` = 级联、`.z` = 立方体）；参考深度用**主轴分量** `max(|dx|,|dy|,|dz|)`（用 `length()` 会让整面向轴外越远越黑）；**u 轴必须镜像**（`scale(-1,1,1)`，不翻影子会翻到另一侧）；up 向量按 WebGPU 映射表选；v1 六面全画不剔除（8070 实例 / +89.7 µs，优化路线见决策记录）；只认第一盏 `casts_shadow` 且 `range > 0` 的点光，关着时逐位一致 | §八十 |
+| 逐条转移时长 | `AnimTransition.duration` 覆盖 `Animator.fade_time`（`Some(0.0)` = 硬切）；**除数在切换那一刻定格**（`Prev.duration`，别每帧读全局）；缺省 `skip_serializing_if` 不落盘 ⇒ 老场景逐字节不变 | §八十一 |
+| 控制台溯源 | 报错行的位置优先级 = **正文里的脚本 `path:line`**（只认 `.lua:`，别的后缀不猜）> 引擎 `file!()/line!()`；去重时补位置；源码查看器是**窗口**不是第八个面板（布局校验是"七个面板各一次"）；只读、512 KiB 上限、行号越界夹到最后一行 | §八十二 |
 | 动画脚本控制 | 状态机优先（配了可用机器时 `clip/speed/looping` 由状态表决定）；`set_anim_clip` 只写 `Animator.clip` 并复用 `AnimationDriver` 的淡入；叠加层 / 层剪辑硬切；越界值钳住、非有限值忽略 | §三十 |
 | 形变目标（morph） | CPU 变形（权重不变就不重写缓冲）；增量 target-major 且已乘 `model_scale`；权重优先级 剪辑 > 实体 > 模型默认；长度不自洽**整段放弃**；索引逐下标、钳 0~1、上限 256；`set_morph` 立刻生效（不走命令队列） | §三十七 |
 | 动画插值布局 | `CUBICSPLINE` 切线**读入即保留**（每帧入切线 / 值 / 出切线三份，不降级）；`Track::values` 长度必须 = `times.len() × frame_len()`，帧内偏移只用 `frame_start` / `value_start`（**值在中间那份**，写错不 panic 只是动画整体偏移）；切线单位是**每秒**，进 Hermite 前乘段长；旋转逐分量 Hermite 后**必须归一化**，长度退化退回 slerp | §五十一 |

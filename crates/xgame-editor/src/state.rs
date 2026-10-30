@@ -313,12 +313,76 @@ pub const CONSOLE_RENDER_LIMIT: usize = 500;
 /// 都会被调用的热点。成批丢把这次搬运摊到几百条日志上，代价可以忽略。
 const CONSOLE_TRIM_BATCH: usize = 200;
 
+/// 从一条消息正文里认出脚本位置（Lua 报错的 `Scripts/player.lua:42:` 前缀）。
+///
+/// # 为什么用文本识别而不是结构化的错误类型
+///
+/// 报错穿过三层（mlua → `LuaHost` → `log::error!` → 控制台），中间每一层都只
+/// 传字符串；为这一件事把"带位置的结构体"贯穿下去，要改的东西远多于这一段
+/// 解析。代价是识别依赖 Lua 的错误格式 —— 所以**只在 `.lua:` 上认**，别的
+/// 后缀一律不猜（猜错就会把消息正文里提到的路径当成出错位置，比没有更糟）。
+pub fn script_error_source(text: &str) -> Option<LogSource> {
+    let marker = text.find(".lua:")?;
+    // 路径 = 标记之前、最后一个分隔符之后的那一段（`(` / 空白 / 引号都算分隔）。
+    let head = &text[..marker];
+    let start = head
+        .rfind(|c: char| c.is_whitespace() || matches!(c, '(' | '[' | '\'' | '"' | '「' | ':'))
+        .map(|i| i + c_len(text, i))
+        .unwrap_or(0);
+    let path = text[start..marker + 4].trim();
+    if path.is_empty() || path.starts_with(".lua") {
+        return None;
+    }
+    let rest = &text[marker + 5..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let line = digits.parse::<u32>().ok()?;
+    Some(LogSource::new(path, line))
+}
+
+/// 单字节字符的字节长度（上面那个 `rfind` 给的是字节下标，往后挪一格要按 UTF-8
+/// 宽度算，否则中文分隔符后面会切在半个字符上）。
+fn c_len(text: &str, index: usize) -> usize {
+    text[index..].chars().next().map_or(1, |c| c.len_utf8())
+}
+
+/// 一条消息的**源码位置**：控制台里点一下就能跳到那一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogSource {
+    /// 显示与解析用的路径。脚本是项目相对路径（`Scripts/player.lua`），
+    /// 引擎日志是 `file!()` 给的仓库相对路径。
+    pub path: String,
+    /// 行号，**1 起**。`0` = 只知道文件、不知道行。
+    pub line: u32,
+}
+
+impl LogSource {
+    pub fn new(path: impl Into<String>, line: u32) -> Self {
+        Self {
+            path: path.into(),
+            line,
+        }
+    }
+
+    /// 面板上的定位文字：`Scripts/player.lua:42`（没有行号时只显示路径）。
+    pub fn label(&self) -> String {
+        if self.line > 0 {
+            format!("{}:{}", self.path, self.line)
+        } else {
+            self.path.clone()
+        }
+    }
+}
+
 /// 单条控制台消息。
 #[derive(Debug, Clone)]
 pub struct LogMessage {
     pub level: LogLevel,
     pub text: String,
     pub count: u32,
+    /// 这条消息指向的源码位置（脚本报错 / 引擎日志的 `file:line`）。
+    ///
+    /// 没有它时控制台行为与以前完全一样 —— 只是那几行不可点。
+    pub source: Option<LogSource>,
 }
 
 impl LogMessage {
@@ -327,7 +391,13 @@ impl LogMessage {
             level,
             text: text.into(),
             count: 1,
+            source: None,
         }
+    }
+
+    pub fn with_source(mut self, source: Option<LogSource>) -> Self {
+        self.source = source;
+        self
     }
 }
 
@@ -801,6 +871,8 @@ pub struct EditorState {
     /// 控制台的筛选条件（等级开关 + 关键词）。只影响**显示**，`Clear` 清的是
     /// 全量消息 —— "看不见所以清不掉"会让人以为日志丢了。
     pub console_filter: ConsoleFilter,
+    /// 打开中的源码查看窗口（控制台点带位置的报错会填它）。`None` = 没开。
+    pub source_view: Option<crate::panels::source_viewer::SourceView>,
 
     // -- New entity tracking --
     pub next_entity_id: u32,
@@ -1114,6 +1186,7 @@ impl EditorState {
 
             console_messages: Vec::new(),
             console_filter: ConsoleFilter::default(),
+            source_view: None,
             next_entity_id: 1,
 
             viewport_logical_size: egui::Vec2::ZERO,
@@ -1693,12 +1766,43 @@ impl EditorState {
         self.log(LogLevel::Success, text);
     }
 
+    /// 打开源码查看器并定位到某一行。路径先按**项目根**解析（脚本就是项目
+    /// 相对路径），解析不到就原样找 —— 找不到也开窗，把"打不开哪个文件"说清楚。
+    pub fn open_source(&mut self, source: &LogSource) {
+        let root = self.project.path("").to_path_buf();
+        self.source_view = Some(crate::panels::source_viewer::SourceView::open(
+            &source.path,
+            source.line,
+            Some(&root),
+        ));
+    }
+
     pub fn log(&mut self, level: LogLevel, text: impl Into<String>) {
+        self.log_with_source(level, text, None);
+    }
+
+    /// 记一条消息，并附上**源码位置**（`None` 时不带）。
+    ///
+    /// 位置的优先级：消息正文里的 `脚本路径:行号`（Lua 报错自带）> 调用方给的
+    /// `fallback`（引擎 `file!()`/`line!()`）。前者对作者更有用（那是他写的
+    /// 那行），后者只有引擎开发者才需要。
+    pub fn log_with_source(
+        &mut self,
+        level: LogLevel,
+        text: impl Into<String>,
+        fallback: Option<LogSource>,
+    ) {
         let text: String = text.into();
+        let source = script_error_source(&text).or(fallback);
         // Deduplicate consecutive identical messages
         if let Some(last) = self.console_messages.last_mut() {
             if last.level == level && last.text == text {
                 last.count += 1;
+                // 去重时补上位置：同一句报错第二次才带上位置的话，第一次那条
+                // 就成了"永远点不动"的死行。
+                if last.source.is_none() {
+                    last.source = source;
+                }
                 return;
             }
         }
@@ -1710,7 +1814,8 @@ impl EditorState {
         if self.console_messages.len() >= MAX_CONSOLE_MESSAGES {
             self.console_messages.drain(..CONSOLE_TRIM_BATCH);
         }
-        self.console_messages.push(LogMessage::new(level, text));
+        self.console_messages
+            .push(LogMessage::new(level, text).with_source(source));
     }
 
     /// 通过筛选的消息**下标**，按时间顺序（最旧在前），最多 `limit` 条。
@@ -5314,5 +5419,74 @@ mod tests {
                 view.label()
             );
         }
+    }
+
+    // -- 控制台点击溯源 --
+
+    /// Lua 报错的 `路径:行号:` 前缀能被认出来（这是"点报错跳源码"的入口）。
+    #[test]
+    fn script_error_source_reads_the_lua_location() {
+        let src = script_error_source("Scripts/player.lua:42: attempt to index a nil value").unwrap();
+        assert_eq!(src.path, "Scripts/player.lua");
+        assert_eq!(src.line, 42);
+        assert_eq!(src.label(), "Scripts/player.lua:42");
+
+        // Windows 反斜杠、以及被包在括号里的形式
+        let src = script_error_source(
+            "runtime error: Scripts\\enemy.lua:7: bad argument #1",
+        )
+        .unwrap();
+        assert_eq!(src.path, "Scripts\\enemy.lua");
+        assert_eq!(src.line, 7);
+
+        // 已知边界：没设 chunk 名的脚本报错是 `[string "..."]:12:`，不带扩展名、
+        // 也没有可解析的路径 —— 认不出来就如实不认（点了也没文件可开）。
+        assert!(script_error_source("[string \"...\"]:12: oops").is_none());
+    }
+
+    /// 不是 Lua 位置的一律不猜：宁可不可点，也不要把正文里提到的路径当成出错点。
+    #[test]
+    fn script_error_source_ignores_other_text() {
+        assert!(script_error_source("场景加载失败：Scenes/Level.ron 里引用了缺失的模型").is_none());
+        assert!(script_error_source("脚本内存超限（上限 128 MiB），已中断本次调用").is_none());
+        assert!(script_error_source("Scripts/player.lua: 没有行号").is_none());
+        assert!(script_error_source("").is_none());
+    }
+
+    /// 消息带位置时进控制台；同一条重复出现时，位置不会被丢掉。
+    #[test]
+    fn console_messages_carry_and_keep_their_source() {
+        let (mut state, base) = temp_state("console_source");
+        state.log(LogLevel::Error, "Scripts/player.lua:9: boom");
+        let msg = state.console_messages.last().unwrap();
+        assert_eq!(
+            msg.source.as_ref().map(|s| (s.path.as_str(), s.line)),
+            Some(("Scripts/player.lua", 9))
+        );
+
+        // 重复：计数 +1，位置仍在。
+        state.log(LogLevel::Error, "Scripts/player.lua:9: boom");
+        let msg = state.console_messages.last().unwrap();
+        assert_eq!(msg.count, 2);
+        assert!(msg.source.is_some(), "去重不该把位置弄丢");
+
+        // 引擎日志的位置作为**兜底**：正文里没有脚本位置时才用它。
+        state.log_with_source(
+            LogLevel::Warning,
+            "骨骼超上限",
+            Some(LogSource::new("crates/xgame-render/src/animation.rs", 77)),
+        );
+        let msg = state.console_messages.last().unwrap();
+        assert_eq!(msg.source.as_ref().unwrap().line, 77);
+
+        // 正文里有脚本位置时优先用它（作者看的是自己那行，不是引擎那行）。
+        state.log_with_source(
+            LogLevel::Error,
+            "Scripts/b.lua:3: bad",
+            Some(LogSource::new("crates/xgame-render/src/animation.rs", 77)),
+        );
+        let msg = state.console_messages.last().unwrap();
+        assert_eq!(msg.source.as_ref().unwrap().path, "Scripts/b.lua");
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

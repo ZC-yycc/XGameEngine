@@ -318,6 +318,13 @@ fn readings(ui: &mut egui::Ui, state: &EditorState) {
             particles.alive, particles.capacity, particles.emitters
         ));
     }
+    // 点光立方体阴影只在有灯开 `casts_shadow` 时出现，平时不占这一行的宽度。
+    if stats.point_shadow_instances > 0 {
+        text.push_str(&format!(
+            " · point shadow {} inst / {} draws",
+            stats.point_shadow_instances, stats.point_shadow_draw_calls
+        ));
+    }
 
     ui.add(
         egui::Label::new(
@@ -331,6 +338,7 @@ fn readings(ui: &mut egui::Ui, state: &EditorState) {
     .on_hover_text(
         "draw = 主 pass 发出的 draw call 数（不透明批次 + 半透明逐项）\n\
          culled = 被视锥剔除的绘制项占比（相机一转它就动 = 剔除在干活）\n\
-         particles = 活着 / 上限；撞上限时新粒子不再出生",
+         particles = 活着 / 上限；撞上限时新粒子不再出生\n\
+         point shadow = 点光立方体阴影六面提交的实例 / draw 数（六面全画，不做逐面剔除）",
     );
 }

@@ -16,7 +16,7 @@
 
 use crate::logging;
 use crate::panels::{icons, theme};
-use crate::state::{ConsoleFilter, EditorState, LogLevel, CONSOLE_RENDER_LIMIT};
+use crate::state::{ConsoleFilter, EditorState, LogLevel, LogSource, CONSOLE_RENDER_LIMIT};
 
 /// 等级 → (图标, 颜色)。颜色统一问 [`LogLevel::color`]，这里只决定图形。
 fn level_style(level: LogLevel) -> (icons::Icon, egui::Color32) {
@@ -180,6 +180,10 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
     // 不用 `ui.separator()`：紧贴页签条下方，那条线会和页签的底边叠成双线。
     header(state, indices.len(), ui);
 
+    // 点击后要 `&mut state` 才能开源码窗口，而这一整段还在只读地借消息表 ——
+    // 所以先记下来、出了滚动区再开。
+    let mut clicked: Option<LogSource> = None;
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .stick_to_bottom(true)
@@ -194,11 +198,33 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     icons::small_icon(ui, icon, 11.0, color);
                     // 单行截断：一条 2KB 的报错不应该把控制台撑成一面墙。
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&msg.text).size(11.5).color(color))
-                            .truncate(),
-                    )
-                    .on_hover_text(&msg.text);
+                    // 带位置的报错可点（打开源码查看器），其余保持纯文本。
+                    let has_source = msg.source.is_some();
+                    // 只有**脚本**报错加下划线：引擎日志几乎每条都有 `file:line`，
+                    // 全加下划线会让控制台看起来像一页链接（实测截图确认过），
+                    // 而它的主要读者（引擎开发者）看悬停提示就够了。两者都可点。
+                    let is_script = msg
+                        .source
+                        .as_ref()
+                        .is_some_and(|s| s.path.ends_with(".lua"));
+                    let text = if is_script {
+                        egui::RichText::new(&msg.text).size(11.5).color(color).underline()
+                    } else {
+                        egui::RichText::new(&msg.text).size(11.5).color(color)
+                    };
+                    let label = egui::Label::new(text).truncate();
+                    let label = if has_source {
+                        label.sense(egui::Sense::click())
+                    } else {
+                        label
+                    };
+                    let resp = ui.add(label).on_hover_text(match &msg.source {
+                        Some(src) => format!("{}\n\n点击打开源码：{}", msg.text, src.label()),
+                        None => msg.text.clone(),
+                    });
+                    if has_source && resp.clicked() {
+                        clicked = msg.source.clone();
+                    }
                     if msg.count > 1 {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
@@ -212,4 +238,8 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
                 });
             }
         });
+
+    if let Some(source) = clicked {
+        state.open_source(&source);
+    }
 }

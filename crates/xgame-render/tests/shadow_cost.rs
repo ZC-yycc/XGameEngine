@@ -489,3 +489,146 @@ fn shadow_pass_cost_and_cascaded_culling() {
         stats_culled.shadow_only_batches
     );
 }
+
+// ---------------------------------------------------------------------------
+// 点光立方体阴影：六面各画一遍全部投影物的成本
+// ---------------------------------------------------------------------------
+
+/// 同一片方块阵，灯换成**吊在阵心上方的点光**；`cast_shadow` 决定它投不投影。
+///
+/// 点光阴影的成本结构完全不同：方向光是"4 级各画一遍"，点光是"6 面各画一遍
+/// **全部**投影物"（v1 不做逐面剔除）。用同一片阵子量，两套数字才能直接对表。
+fn point_scene(cast_shadow: bool) -> Scene {
+    let mut scene = actor_scene(false);
+    scene.lights = vec![Light::point(
+        "lamp",
+        [0.0, 40.0, -130.0],
+        [1.0, 0.98, 0.92],
+        60.0,
+        400.0,
+    )];
+    scene.lights[0].casts_shadow = cast_shadow;
+    scene
+}
+
+#[test]
+#[ignore = "需要显卡与时间戳查询；`--ignored --nocapture` 手动跑"]
+fn point_light_shadow_cost() {
+    let Some((device, queue, adapter)) = gpu() else {
+        return;
+    };
+    let cache = actor_cache(&device, &queue);
+    let (eye, view_proj) = actor_camera();
+    let anim = AnimationDriver::default();
+    let mut path = BenchPath::new(&device, &adapter);
+    let _ = path.format;
+
+    let stamps = device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("bench_point_shadow_stamps"),
+        ty: wgpu::QueryType::Timestamp,
+        count: (FRAMES * STAMPS_PER_FRAME) as u32,
+    });
+    let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bench_point_shadow_resolve"),
+        size: (FRAMES * STAMPS_PER_FRAME * 8) as u64,
+        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bench_point_shadow_readback"),
+        size: (FRAMES * STAMPS_PER_FRAME * 8) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let scene_off = point_scene(false);
+    let scene_on = point_scene(true);
+    let matrices: Vec<Mat4> = scene_on
+        .entities
+        .iter()
+        .map(|e| e.transform.local_matrix())
+        .collect();
+
+    let warm_start = Instant::now();
+    while warm_start.elapsed() < WARMUP_TIME {
+        path.frame(
+            &device,
+            &queue,
+            &stamps,
+            0,
+            &scene_on,
+            &matrices,
+            &cache,
+            &anim,
+            &view_proj,
+            &eye,
+        );
+        device.poll(wgpu::Maintain::Poll);
+    }
+
+    let mut off_scene_us = Vec::new();
+    let mut on_scene_us = Vec::new();
+    let mut off_cpu_us = Vec::new();
+    let mut on_cpu_us = Vec::new();
+    let mut stats_off = FrameStats::default();
+    let mut stats_on = FrameStats::default();
+
+    for _ in 0..ROUNDS {
+        let (r, s) = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
+            path.frame(
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &scene_off,
+                &matrices,
+                &cache,
+                &anim,
+                &view_proj,
+                &eye,
+            )
+        });
+        off_scene_us.push(r.scene_us);
+        off_cpu_us.push(r.cpu_us);
+        stats_off = s;
+
+        let (r, s) = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
+            path.frame(
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &scene_on,
+                &matrices,
+                &cache,
+                &anim,
+                &view_proj,
+                &eye,
+            )
+        });
+        on_scene_us.push(r.scene_us);
+        on_cpu_us.push(r.cpu_us);
+        stats_on = s;
+    }
+
+    let a = median(&mut off_scene_us);
+    let b = median(&mut on_scene_us);
+    let a_c = median(&mut off_cpu_us);
+    let b_c = median(&mut on_cpu_us);
+
+    println!("\n== 点光立方体阴影成本（{WIDTH}x{HEIGHT} / {ACTORS} 方块 / 6 面）==");
+    println!("档位            GPU µs    CPU µs   六面实例");
+    println!("点光阴影关    {a:9.2} {a_c:9.2} {:12}", stats_off.point_shadow_instances);
+    println!("点光阴影开    {b:9.2} {b_c:9.2} {:12}", stats_on.point_shadow_instances);
+    println!("\n六面成本     : {:+.2} µs (+{:.1}%)", b - a, (b - a) / a * 100.0);
+    println!(
+        "六面实例数   : {}（每面 {}）",
+        stats_on.point_shadow_instances,
+        stats_on.point_shadow_instances / 6
+    );
+    println!(
+        "六面 draw 数 : {}（每面 {} 批）",
+        stats_on.point_shadow_draw_calls,
+        stats_on.point_shadow_draw_calls / 6
+    );
+}

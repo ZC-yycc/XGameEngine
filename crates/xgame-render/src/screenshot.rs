@@ -3871,6 +3871,216 @@ mod tests {
             "屏幕外投影物的影子必须落在地面上：有阴影 {lit:.1} vs 无阴影 {unlit:.1}"
         );
     }
+
+    // -----------------------------------------------------------------
+    // 点光立方体阴影：GPU 侧像素测试
+    // -----------------------------------------------------------------
+
+    /// 地板 + 两只分居 ±X 的箱子 + 一盏吊在正上方的点光。
+    ///
+    /// 两只箱子刻意错开在相反方向：立方体的 `+X` 与 `-X` 是两张不同的面，
+    /// 面序 / 矩阵配对写错时**只有一侧**会没有影子，另一侧完全正常 —— 单只
+    /// 箱子的用例看不出这种错。
+    fn point_shadow_probe_scene(point_shadow: bool) -> Scene {
+        let mut scene = Scene::new("point-shadow");
+        scene.ambient = [0.02; 3];
+        let mut lamp = Light::point("lamp", [0.0, 7.0, 0.0], [1.0; 3], 6.0, 40.0);
+        lamp.casts_shadow = point_shadow;
+        scene.lights = vec![lamp];
+        let mut floor = Entity::new("Floor");
+        floor.model = "builtin://plane".to_owned();
+        floor.transform.scale = Vec3::new(30.0, 1.0, 30.0);
+        scene.add_entity(floor);
+        for (i, x) in [-4.0f32, 4.0].into_iter().enumerate() {
+            let mut caster = Entity::new(format!("Caster{i}"));
+            caster.model = "builtin://cube".to_owned();
+            caster.transform.position = Vec3::new(x, 2.0, 0.0);
+            caster.transform.scale = Vec3::splat(2.0);
+            scene.add_entity(caster);
+        }
+        scene
+    }
+
+    /// 点光的影子必须落在**几何上正确的方向**，且不能把没被遮住的地方也压暗。
+    ///
+    /// 三个采样点：
+    /// - 两处影子中心（±4.6, 0, 0）：开阴影后必须明显变暗；
+    /// - 一处对照（0, 0, 0，正好在灯下面却不在任何箱子的影子里）：必须不变 ——
+    ///   这条挡住"参考深度尺度错 → 整块地板全判为阴影"这类错误（那也会让前两条
+    ///   变暗通过，假绿）。
+    #[test]
+    fn point_light_shadows_land_on_the_floor() {
+        let Some(mut shot) = gpu_or_skip("point_light_shadows_land_on_the_floor") else {
+            return;
+        };
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 9.0, 16.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            DEFAULT_FOV_Y,
+        );
+
+        let on_scene = point_shadow_probe_scene(true);
+        let with_shadow = render_frames(&mut shot, &on_scene, &anim, camera, RenderConfig::default(), 1);
+        let stats = shot.frame_stats();
+        // 3 个实例（地板 + 两只箱子）× 6 面 —— 少一面就少 3。
+        assert_eq!(
+            stats.point_shadow_instances, 18,
+            "六个面都要把全部投影物画一遍（实际 {}）",
+            stats.point_shadow_instances
+        );
+        // 每面一遍：draw 次数 = 6 × 批次表长度（合批之后地板 1 批、两只箱子 1 批）。
+        let batches = stats.opaque_batches + stats.shadow_only_batches;
+        assert_eq!(
+            stats.point_shadow_draw_calls,
+            batches * crate::scene_pipeline::POINT_SHADOW_FACES,
+            "六面各画一遍全部批次（批次 {batches}）"
+        );
+
+        let off_scene = point_shadow_probe_scene(false);
+        let without_shadow =
+            render_frames(&mut shot, &off_scene, &anim, camera, RenderConfig::default(), 1);
+        assert_eq!(
+            shot.frame_stats().point_shadow_instances,
+            0,
+            "没开点光阴影时不该跑立方体 pass"
+        );
+
+        // 投影用的是与渲染同一套取景参数（模型已进缓存，`scene_bounds` 可用）。
+        let world = on_scene.world_matrices();
+        let bounds = scene_bounds(&on_scene.entities, &world, &shot.model_cache).expect("场景有几何");
+        let (near, far) = clip_planes(&camera, bounds.radius());
+        let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
+            * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let to_pixel = |p: Vec3| {
+            let clip = view_proj * p.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            (
+                ((ndc.x * 0.5 + 0.5) * 320.0).round() as u32,
+                ((1.0 - (ndc.y * 0.5 + 0.5)) * 240.0).round() as u32,
+            )
+        };
+        let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+
+        for x in [-4.6f32, 4.6] {
+            let (px, py) = to_pixel(Vec3::new(x, 0.0, 0.0));
+            assert!(px < 320 && py < 240, "影子落点必须在画面内: ({px}, {py})");
+            let lit = luma(pixel_avg(&with_shadow, 320, px, py));
+            let unlit = luma(pixel_avg(&without_shadow, 320, px, py));
+            assert!(
+                lit + 20.0 < unlit,
+                "x = {x} 处的影子必须落在地面上：有阴影 {lit:.1} vs 无阴影 {unlit:.1}"
+            );
+        }
+
+        let (cx, cy) = to_pixel(Vec3::ZERO);
+        let lit_ctrl = luma(pixel_avg(&with_shadow, 320, cx, cy));
+        let unlit_ctrl = luma(pixel_avg(&without_shadow, 320, cx, cy));
+        assert!(
+            (lit_ctrl - unlit_ctrl).abs() < 8.0,
+            "没有被遮住的地方不该变暗：有阴影 {lit_ctrl:.1} vs 无阴影 {unlit_ctrl:.1}"
+        );
+    }
+
+    /// 影子落在**竖直挡板**上时，位置必须正确（不只是"某处有个影子"）。
+    ///
+    /// 灯放在原点、挡板在 `+X` 侧、箱子刻意偏在 `+Z` 一侧：影子必须落在
+    /// `+Z` 那半边。立方体的水平轴（`u`）一旦镜像，影子会**原样翻到 `-Z` 侧**
+    /// —— 形状、大小、软硬都完全正常，只看"有没有影子"永远发现不了。
+    /// 这一条同时钉住参考深度用**主轴分量**（第一版用欧氏长度时整面墙都是黑的）。
+    #[test]
+    fn point_shadow_lands_on_the_correct_side_of_a_wall() {
+        let Some(mut shot) = gpu_or_skip("point_shadow_lands_on_the_correct_side_of_a_wall") else {
+            return;
+        };
+        let build = |shadows: bool| {
+            let mut scene = Scene::new("point-shadow-wall");
+            scene.ambient = [0.02; 3];
+            // 光在原点、挡板内表面在 x = 5.75：光线几乎垂直打在挡板上，
+            // 避开掠射角的自遮挡（那是偏置问题，会把"位置对不对"淹掉）。
+            let mut lamp = Light::point("lamp", [0.0, 0.0, 0.0], [1.0; 3], 12.0, 30.0);
+            lamp.casts_shadow = shadows;
+            scene.lights = vec![lamp];
+            let mut wall = Entity::new("Wall");
+            wall.model = "builtin://cube".to_owned();
+            wall.transform.position = Vec3::new(6.0, 0.0, 0.0);
+            wall.transform.scale = Vec3::new(0.5, 10.0, 10.0);
+            scene.add_entity(wall);
+            let mut caster = Entity::new("Caster");
+            caster.model = "builtin://cube".to_owned();
+            caster.transform.position = Vec3::new(3.0, 0.0, 1.2);
+            caster.transform.scale = Vec3::splat(0.8);
+            scene.add_entity(caster);
+            scene
+        };
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(
+            Vec3::new(1.0, 1.0, 14.0),
+            Vec3::new(6.0, 0.0, 0.0),
+            DEFAULT_FOV_Y,
+        );
+
+        let on_scene = build(true);
+        let with_shadow = render_frames(&mut shot, &on_scene, &anim, camera, RenderConfig::default(), 1);
+        let off_scene = build(false);
+        let without_shadow =
+            render_frames(&mut shot, &off_scene, &anim, camera, RenderConfig::default(), 1);
+
+        let world = on_scene.world_matrices();
+        let bounds = scene_bounds(&on_scene.entities, &world, &shot.model_cache).expect("场景有几何");
+        let (near, far) = clip_planes(&camera, bounds.radius());
+        let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
+            * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let to_pixel = |p: Vec3| {
+            let clip = view_proj * p.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            (
+                ((ndc.x * 0.5 + 0.5) * 320.0).round() as u32,
+                ((1.0 - (ndc.y * 0.5 + 0.5)) * 240.0).round() as u32,
+            )
+        };
+        let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        let sample = |rgba: &[u8], p: Vec3| {
+            let (px, py) = to_pixel(p);
+            assert!(px < 320 && py < 240, "采样点必须在画面内: ({px}, {py})");
+            luma(pixel_avg(rgba, 320, px, py))
+        };
+
+        // 箱子中心 (3, 0, 1.2) → 光线打到 x = 5.75 的落点 (5.75, 0, 2.4)。
+        let shadow = sample(&with_shadow, Vec3::new(5.75, 0.0, 2.4));
+        let lit = sample(&without_shadow, Vec3::new(5.75, 0.0, 2.4));
+        assert!(
+            shadow + 20.0 < lit,
+            "影子必须落在箱子那一侧（z = +2.4）：有阴影 {shadow:.1} vs 无阴影 {lit:.1}"
+        );
+
+        // 镜像位置必须**不受影响**（u 轴镜像时它才是暗的那一侧）。
+        let mirrored = sample(&with_shadow, Vec3::new(5.75, 0.0, -2.4));
+        let mirrored_lit = sample(&without_shadow, Vec3::new(5.75, 0.0, -2.4));
+        assert!(
+            (mirrored - mirrored_lit).abs() < 8.0,
+            "镜像位置不该有影子（有 {mirrored:.1} vs 无 {mirrored_lit:.1}）"
+        );
+    }
+
+    /// 点光阴影开着时，两次全新渲染器的结果必须逐字节一致（无随机相位）。
+    #[test]
+    fn point_shadow_is_deterministic_across_runs() {
+        let Some(mut shot) = gpu_or_skip("point_shadow_is_deterministic_across_runs") else {
+            return;
+        };
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 9.0, 16.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let scene = point_shadow_probe_scene(true);
+        let a = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        let b = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        assert_eq!(a, b, "同一渲染器连渲两帧必须逐字节一致");
+    }
+
     // =========================================================================
     // 蒙皮验收：多关节权重混合 / 骨槽容量超限 / 真实 glTF
     // =========================================================================

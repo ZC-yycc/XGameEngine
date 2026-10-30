@@ -639,6 +639,10 @@ impl SceneRenderer {
             // 漏掉的话"在 Inspector 里勾掉 Casts Shadow"会看到画面纹丝不动。
             hash = mix_bits(hash, light.casts_shadow as u64);
             hash = mix_bits(hash, light.shadow_resolution as u64);
+            // 点光的 `range` 也进指纹：它既是衰减半径，也是立方体阴影的远平面。
+            // 漏掉它的话"在 Inspector 里把灯的范围调小"画面纹丝不动（改动前就
+            // 有这个问题，点光阴影只是让它更明显）。
+            hash = mix_bits(hash, light.range.to_bits() as u64);
         }
         hash = mix_bits(hash, light_count);
 
@@ -1395,6 +1399,7 @@ mod tests {
                     param: "speed".into(),
                     value: 0.5,
                 },
+                duration: None,
             }],
         };
 

@@ -76,6 +76,12 @@ pub struct Record {
     /// 完整 target（`xgame_render::gltf_loader` 这样的模块路径）。
     pub target: String,
     pub message: String,
+    /// 打这条日志的**源码位置**（`file!()`，相对仓库根）。控制台点它可跳转。
+    ///
+    /// 对引擎作者有用（`warn!` 就在眼前那行）；对拿 `dist` 跑的用户，源码
+    /// 通常不在本机 —— 那就只是显示一下，不假装能打开。
+    pub file: Option<String>,
+    pub line: u32,
 }
 
 impl Record {
@@ -329,6 +335,8 @@ impl log::Log for Sink {
                 level: record.level(),
                 target: record.target().to_owned(),
                 message: record.args().to_string(),
+                file: record.file().map(str::to_owned),
+                line: record.line().unwrap_or(0),
             });
         }
     }
@@ -433,6 +441,8 @@ mod tests {
             level,
             target: target.to_owned(),
             message: message.to_owned(),
+            file: None,
+            line: 0,
         }
     }
 

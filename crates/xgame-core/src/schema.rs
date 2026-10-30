@@ -913,6 +913,7 @@ fn animation_types() -> Vec<TypeSchema> {
                     param: "speed".into(),
                     value: 0.5,
                 },
+                duration: None,
             },
             AnimTransition {
                 from: "Run".into(),
@@ -921,6 +922,7 @@ fn animation_types() -> Vec<TypeSchema> {
                     param: "speed".into(),
                     value: 0.1,
                 },
+                duration: None,
             },
         ],
     };
@@ -982,11 +984,17 @@ fn animation_types() -> Vec<TypeSchema> {
                     param: "speed".into(),
                     value: 0.5,
                 },
+                duration: None,
             })),
             vec![
                 req("from", "String", "源状态名。"),
                 req("to", "String", "目标状态名；目标不存在时这条转移被跳过。"),
                 req("when", "AnimCondition", "触发条件。"),
+                opt(
+                    "duration",
+                    "f32",
+                    "这条转移的过渡时长（秒）。None = 用 Animator.fade_time；0 = 硬切。",
+                ),
             ],
             vec!["转移按书写顺序求值，第一条满足条件的生效；坏一条不会卡死整台机器。"],
         ),
@@ -2582,15 +2590,21 @@ mod tests {
         } = AnimState::default();
         assert_fields(&doc, "AnimState", &["name", "clip", "speed", "looping"]);
 
-        let AnimTransition { from, to, when } = AnimTransition {
+        let AnimTransition {
+            from,
+            to,
+            when,
+            duration,
+        } = AnimTransition {
             from: "a".into(),
             to: "b".into(),
             when: AnimCondition::Below {
                 param: "p".into(),
                 value: 0.0,
             },
+            duration: None,
         };
-        assert_fields(&doc, "AnimTransition", &["from", "to", "when"]);
+        assert_fields(&doc, "AnimTransition", &["from", "to", "when", "duration"]);
 
         let AnimMachine {
             entry,
