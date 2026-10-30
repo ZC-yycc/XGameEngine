@@ -516,7 +516,8 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
         if note_unsafe_path(&mut report, &entity, "material", &material) {
             continue;
         }
-        if !project.path(&material).is_file() {            report
+        if !project.path(&material).is_file() {
+            report
                 .missing_materials
                 .push(format!("{entity} -> {material}"));
             continue;
@@ -576,13 +577,26 @@ fn check_model_reference(
     if note_unsafe_path(report, at, kind, path) {
         return;
     }
-    if !project.path(path).is_file() {
+    if !read_reference_exists(project, path) {
         if kind == "model" {
             report.missing_models.push(format!("{at} -> {path}"));
         } else {
-            report.missing_models.push(format!("{at} -> {path} ({kind})"));
+            report
+                .missing_models
+                .push(format!("{at} -> {path} ({kind})"));
         }
     }
+}
+
+/// 模型、脚本与音频都走运行时的统一读路径解析，检查不能另养一份
+/// `project.path(...).is_file()`，否则 `search_paths` 在运行时有效、体检却误报。
+fn read_reference_exists(project: &ProjectHandle, relative: &str) -> bool {
+    crate::project::resolve_read_path(
+        project.root(),
+        relative,
+        &project.manifest().content.search_paths,
+    )
+    .is_ok()
 }
 
 /// 记一条"路径型引用越界 / Windows 不认"的问题，返回它是不是**不合法**。
@@ -672,7 +686,7 @@ fn check_scene_references(
                     .dangling_guids
                     .push(format!("{} -> {}", at(&entity.name), script));
             } else if !note_unsafe_path(report, &at(&entity.name), "script", script)
-                && !project.path(script).is_file()
+                && !read_reference_exists(project, script)
             {
                 report
                     .missing_scripts
@@ -687,7 +701,7 @@ fn check_scene_references(
                         .dangling_guids
                         .push(format!("{} -> {}", at(&entity.name), audio.clip));
                 } else if !note_unsafe_path(report, &at(&entity.name), "audio", &audio.clip)
-                    && !project.path(&audio.clip).is_file()
+                    && !read_reference_exists(project, &audio.clip)
                 {
                     report
                         .missing_audio
@@ -705,9 +719,11 @@ fn check_scene_references(
                 } else if !note_unsafe_path(report, &at(&entity.name), "ui image", &image.path)
                     && !project.path(&image.path).is_file()
                 {
-                    report
-                        .missing_ui_images
-                        .push(format!("{} -> {}", at(&entity.name), image.path));
+                    report.missing_ui_images.push(format!(
+                        "{} -> {}",
+                        at(&entity.name),
+                        image.path
+                    ));
                 }
             }
         }
@@ -1049,6 +1065,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.root());
     }
 
+    /// 模型、脚本与音频的运行时读取都认 `search_paths`，检查也必须用同一条
+    /// 解析规则。旧实现直接查 `project.path(reference)`，三类引用都会被误报缺失。
+    #[test]
+    fn search_path_references_are_not_reported_missing() {
+        let mut project = temp_project("search_path_refs");
+        project.manifest_mut().content.search_paths = vec!["Mods".into()];
+        project.save().expect("写清单");
+
+        let mut scene = project.load_entry_scene().expect("加载默认场景");
+        scene.entities.push(
+            crate::Entity::new("Shared")
+                .with_model("Resources/Shared.glb")
+                .with_script("Scripts/Shared.lua")
+                .with_audio(crate::AudioSource::new("Resources/Shared.wav")),
+        );
+        let entry = project.manifest().entry_scene.clone();
+        project.write_scene(&entry, &scene).expect("写场景");
+
+        for (relative, bytes) in [
+            ("Mods/Resources/Shared.glb", b"glb".as_slice()),
+            ("Mods/Scripts/Shared.lua", b"return {}".as_slice()),
+            ("Mods/Resources/Shared.wav", b"wav".as_slice()),
+        ] {
+            let path = project.path(relative);
+            std::fs::create_dir_all(path.parent().expect("测试文件有父目录")).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        let report = check_project(project.root()).expect("检查应成功");
+        assert!(report.missing_models.is_empty(), "{}", report.render());
+        assert!(report.missing_scripts.is_empty(), "{}", report.render());
+        assert!(report.missing_audio.is_empty(), "{}", report.render());
+
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
     /// LOD 各级也是模型引用：缺哪一级都要被点名（带级号），
     /// `builtin://` 的级照旧不算缺失。
     #[test]
@@ -1072,7 +1124,10 @@ mod tests {
         let text = report.render();
         assert!(text.contains("NotThere_Near.glb"), "{text}");
         assert!(text.contains("NotThere_Far.glb"), "{text}");
-        assert!(!text.contains("builtin://cube"), "内置几何不能算缺失：{text}");
+        assert!(
+            !text.contains("builtin://cube"),
+            "内置几何不能算缺失：{text}"
+        );
         // 缺失消息带级号：一个实体有几级时只说路径分不清是哪一级。
         assert!(text.contains("(lod[0])"), "{text}");
         assert!(text.contains("(lod[2])"), "{text}");
@@ -1087,16 +1142,16 @@ mod tests {
     fn references_escaping_the_project_are_reported() {
         let project = temp_project("escape");
         let mut scene = project.load_entry_scene().expect("加载默认场景");
-        scene.entities.push(
-            crate::Entity::new("Escape").with_model("../../secret.glb"),
-        );
-        scene.entities.push(
-            crate::Entity::new("Absolute").with_model("/etc/passwd"),
-        );
+        scene
+            .entities
+            .push(crate::Entity::new("Escape").with_model("../../secret.glb"));
+        scene
+            .entities
+            .push(crate::Entity::new("Absolute").with_model("/etc/passwd"));
         // 负对照：正常的项目内相对路径一句都不该报。
-        scene.entities.push(
-            crate::Entity::new("Normal").with_model("builtin://cube"),
-        );
+        scene
+            .entities
+            .push(crate::Entity::new("Normal").with_model("builtin://cube"));
         let entry = project.manifest().entry_scene.clone();
         project.write_scene(&entry, &scene).expect("写场景");
 
@@ -1111,8 +1166,15 @@ mod tests {
             report.has_issues(),
             "越界引用必须进退出码 2，而不是只当提示"
         );
-        assert!(report.reference_issues().iter().any(|p| p.contains("secret.glb")));
-        assert!(report.render().contains("unsafe path"), "{}", report.render());
+        assert!(report
+            .reference_issues()
+            .iter()
+            .any(|p| p.contains("secret.glb")));
+        assert!(
+            report.render().contains("unsafe path"),
+            "{}",
+            report.render()
+        );
 
         let _ = std::fs::remove_dir_all(project.root());
     }

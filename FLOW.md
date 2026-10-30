@@ -120,7 +120,11 @@ main()                           crates/xgame-game/src/main.rs
              ├── Surface → SurfaceConfiguration（vsync 取自项目清单）
              ├── ScenePipeline::new()
              ├── project.load_entry_scene()
-             └── PhysicsWorld::new() + entity→body 映射
+             └── World::new()
+                   ├── PhysicsWorld / GameClock / LuaHost / AudioEngine
+                   ├── 运行态唯一 AnimationDriver
+                   └── ProjectHandle 场景装载器 + GltfAnimationLoader（纯 CPU 动画）
+                         └── 与 GPU 模型共用 resolve_model_source（search_paths + 命中文件旁 .meta）
 ```
 
 > ② 是「把项目做成软件」的关键：构建产物把 `<项目名>.exe` 和 `project.ron` 放在同一个
@@ -258,9 +262,10 @@ Edit ──▶ [▶ Play] ──▶ Playing ──▶ [⏸ Pause] ──▶ Paus
   └────────────────── [⏹ Stop] ───────────────────────┘
 ```
 
-- **Playing**：创建 `GameRuntime` → 保存实体变换 → 启动 `PhysicsWorld`
+- **Playing**：创建 `GameRuntime`（内部是一份完整 `World`）→ 保存编辑态场景快照 →
+  由同一个运行时推进脚本 / 物理 / 动画 / 根运动 / 粒子 / 音频
 - **Paused**：暂停物理步进，场景视图保持最后状态
-- **Edit**：销毁 `GameRuntime` → 恢复保存的变换
+- **Edit**：卸载并销毁 `GameRuntime` → 恢复进入 Play 前的完整场景快照
 
 #### 阶段 3：保存快捷键
 
@@ -322,6 +327,9 @@ clock.tick(dt)
   ├─ 消费脚本通知
   ├─ 应用场景切换请求              脚本 load_scene() 在这里才真的换场景（唯一的时机）
   ├─ sync_bodies                   （换场景时旧刚体已在切换里全部销毁，这里建新场景的）
+  ├─ animation.tick(frame_dt)      运行态唯一动画时钟；脚本本帧改的参数当帧生效
+  ├─ apply_root_motion             基础通道平移 → 普通实体 / 运动学体 / 角色控制器
+  │                                 （动态 / 静态体拒绝；普通无头也走这一段）
   ├─ sync_audio                    autoplay 首播、空间声源推位置、失联停音
   ├─ flush_audio                   drain 命令束交给音频引擎（帧末一次结算）
   └─ input.end_frame()             清掉"仅本帧有效"的输入边沿
@@ -448,7 +456,9 @@ scene_view::show_content(state, ui)
   │
   ├── ⑥ render_scene(用本帧最新的相机与场景)   ← **现在才画 3D（UI 线程同步）**
   │   │
-  │   ├── 【动画时钟】anim_driver.tick_wall(每个配了 animator 的实体)
+  │   ├── 【动画时钟】按模式选择唯一来源
+  │   │     ├── Edit：edit_anim_driver.tick_wall（只服务无 World 的编辑预览）
+  │   │     └── Play / Pause：只借 World::animation()，渲染绝不再推进第二次
   │   │     ├── 状态机模式：从当前状态求值一步转移 → 解析 (状态, 剪辑, 速度, 循环)
   │   │     │   （换状态 = 换剪辑，复用同一条交叉淡入）
   │   │     ├── 叠加层同步解析（剪辑/权重/速度；换叠加剪辑只归零它自己的时钟）
@@ -464,7 +474,8 @@ scene_view::show_content(state, ui)
   │   │     （剪辑 / 速度 / 循环 / 自动播放 / 淡入时长 / **状态机 entry+参数+状态表+转移表**
   │   │      / **叠加层剪辑+权重+速度+循环** / **层栈每层名字+模式+剪辑/机器+权重+速度+循环+淡入+遮罩**，
   │   │       遮罩项之间带分隔字节防不同切分撞哈希）
-  │   │     + **动画时钟签名**（基础、叠加、层栈**所有**时钟都进：基础层冻结而叠加层 /
+  │   │     + 根运动配置（开关 / 节点名 / XYZ）+ **动画时钟签名**
+  │   │       （基础、叠加、层栈**所有**时钟都进：基础层冻结而叠加层 /
   │   │       层栈在走时也要出帧），收成一个 u64（逐位比较）
   │   │     └── 与上次**完全相同** → 整段跳过 ★
   │   │         ★ 指纹**排在解算世界矩阵之前**：静态帧连 `world_matrices()` 都省掉
@@ -476,13 +487,14 @@ scene_view::show_content(state, ui)
   │   │     │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
   │   │     │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
   │   │     │     │   └── 攒完一次 `write_buffer` 写完整段（旧的逐实体写 = 每帧 N 次分配 + N 条命令）
-  │   │     │     ├── [动画实体] `compute_bones_composed` **一条路**：基础姿态
+  │   │     │     ├── [动画实体] `compute_bones_composed_with_root_motion` **一条路**：基础姿态
   │   │     │     │               （单剪辑；换剪辑/换状态淡入中 → 旧剪辑连同时钟一起
   │   │     │     │               淡出、两份局部姿态按权重混合）→ 逐层合入
   │   │     │     │               （additive 快捷层先，layers 按数组顺序盖上去、后层盖前层；
   │   │     │     │               Additive = 加增量（减第 0 帧参考），Override = 向该层
   │   │     │     │               姿态 lerp；机器转移先在层姿势内部混旧→新；每层只作用于
-  │   │     │     │               **遮罩命中**的骨骼；零权重/
+  │   │     │     │               **遮罩命中**的骨骼；runtime 已消费的基础平移轴先
+  │   │     │     │               重置回绑定平移，未消费轴 / additive / layers 保留；零权重/
   │   │     │     │               剪辑缺失的层跳过）→ 关节矩阵进
   │   │     │     │               **骨骼槽位**（每实体 256 骨定长）
   │   │     │     │     └── 容量不够先翻倍重建骨骼缓冲（连带换两个绑定组，必须在开 pass 之前）
@@ -661,7 +673,9 @@ _"moving a window doesn't warrant a repaint"_，后来被并进大组里丢了�
 选中态、gizmo、网格开关、物理调试线都不在其中（它们画在 egui 叠加层上，与离屏纹理无关）。
 指纹与上一帧逐位相同 → 整段渲染跳过，`painter.image` 照旧贴上一帧那张纹理。
 动画时钟是**唯一每帧都变的指纹输入** —— 这正是"有剪辑在播就逐帧画、播完自动回到
-静态门控"的机制（时钟先 tick 再算指纹，见 render 开头）。
+静态门控"的机制。Edit 先用墙钟 tick 再算指纹；Play / Pause 则只读取
+`World::animation()` 已推进或冻结的时钟。根运动的开关 / 节点名 / XYZ 也进配置指纹：
+即使暂停中改“哪些轴由 runtime 消费”，骨架剥离也会立刻重画。
 
 > **为什么收「局部变换 + 父引用」，而不是直接收世界矩阵。**
 > 着色器读的是世界矩阵，但世界矩阵是 `(局部变换, 层级)` 的**纯函数** —— 两者一样，
@@ -1019,11 +1033,13 @@ WindowEvent::RedrawRequested
 
 ```
 GameApp::update(dt)
-  ├── clock.tick(dt)
-  ├── while clock.consume_fixed_update():
-  │     physics.step(fixed_dt)
-  ├── clock.reset_step_counter()
-  └── sync_transforms()
+  ├── 手柄 / 窗口输入 → World::input_mut()
+  ├── UI 视口 / 指针 → World
+  └── World::update(dt)
+        ├── 脚本 start / fixed_update / update
+        ├── 固定步长物理 + 场景切换
+        ├── AnimationDriver + 根运动
+        └── 粒子 / 音频 / 输入帧末清理
 
 GameApp::render()
   ├── 计算 view_proj 矩阵 (固定轨道相机: (5,5,5) → 原点)
@@ -1031,31 +1047,14 @@ GameApp::render()
   ├── surface.get_current_texture()
   ├── encoder = device.create_command_encoder()
   ├── ScenePipeline::render(queue, encoder, frame_view, depth_view,
-  │                         entities, model_cache, view_proj, camera_pos)
+  │                         entities, model_cache, world.animation(), view_proj, camera_pos)
   └── queue.submit() + frame.present()
 ```
 
-> **示例项目在 Play / 独立运行时会"塌"**：`GameApp::new` 给**每个有模型的实体**都建
-> 动态刚体（`RigidBody::dynamic_at`），而 `projects/SampleScene` 里没有静态地面 ——
-> 于是全部物体在重力下无限下落，几秒后就掉出视野。这是既有行为，不是渲染问题。
-
-```
-GameApp::update(dt)
-  ├── clock.tick(dt)
-  ├── while clock.consume_fixed_update():
-  │     physics.step(fixed_dt)
-  ├── clock.reset_step_counter()
-  └── sync_transforms()
-
-GameApp::render()
-  ├── 计算 view_proj 矩阵 (固定轨道相机: (5,5,5) → 原点)
-  ├── 惰性加载模型 (GltfMesh::load(device, queue, project.root(), entity.model))
-  ├── surface.get_current_texture()
-  ├── encoder = device.create_command_encoder()
-  ├── ScenePipeline::render(queue, encoder, frame_view, depth_view,
-  │                         entities, model_cache, view_proj, camera_pos)
-  └── queue.submit() + frame.present()
-```
+> 独立游戏不再自建第二套 `PhysicsWorld` / `GameClock` 或“见模型就建动态体”。刚体只由
+> 场景里的 `physics` / `controller` 配置声明，编辑器 Play、独立游戏与普通无头都跑同一段
+> `World::update`。动画同理：`World` 在不渲染时也推进时钟与根运动，`render()` 只读取
+> 最终状态做蒙皮。
 
 ---
 
@@ -1183,19 +1182,21 @@ EditorState（中央状态，所有面板共享可变引用）
   ├── scene_renderer: Option<SceneRenderer>   视口渲染器（UI 线程同步渲染，主循环内构造）
   │     ├── model_cache                      模型网格 + 包围盒（拾取 mesh_bounds 读这里）
   │     ├── last_signature                   上一帧输入指纹（静态帧整段跳过的依据）
-  │     ├── anim_driver                      每实体动画时钟（render 内墙钟推进，进指纹）
+  │     ├── edit_anim_driver                 仅 Edit 模式的墙钟动画预览
   │     ├── load_failed                      模型加载失败记录（坏资产不反复重试读盘）
   │     ├── viewport_seen                    上次进 render 的时刻（视口面板活着的判据）
   │     └── texture_id                       离屏纹理（本帧 render 后即为本帧画面）
   │
-  └── game_runtime: Option<GameRuntime>      物理运行时 (仅 Playing)
-        ├── physics: PhysicsWorld             rapier3d 世界
-        ├── entity_to_body                  实体索引 → 刚体 ID
-        ├── saved_states                     备份**局部**变换 (退出时恢复)
-        └── clock: GameClock                  固定步长 60Hz
+  └── game_runtime: Option<GameRuntime>      Play / Pause 的薄宿主
+        └── world: xgame_runtime::World
+              ├── scene / PhysicsWorld / GameClock / LuaHost / AudioEngine
+              ├── animation: AnimationDriver   运行态唯一时钟
+              ├── animation_assets             CPU 动画资产 + 失败负缓存
+              └── entity→body / 粒子 / UI / 存档等运行态
 
-      物理只认世界空间：建刚体读 Scene::world_transform；回写时把世界变换左乘
-      父世界矩阵的逆换算回局部（GameRuntime / xgame-game 的 sync_transforms）。
+      编辑器每帧用 O(1) `swap` 把 `state.scene` 交给 World，update 后再换回供面板 / 渲染读。
+      物理与根运动都在世界空间工作；根增量经完整世界矩阵线性部分变换（保留父级剪切），
+      写回统一由 Scene 换算到实体的局部变换。
 ```
 
 **预制体数据流**（`xgame-core::prefab`）：
@@ -1220,10 +1221,7 @@ Revert  load_prefab → remove_subtree(实例根) → instantiate_prefab
 ```
 GameApp
   ├── project: ProjectHandle              已打开的项目（根目录 + 清单）
-  ├── scene: Scene
-  ├── physics: PhysicsWorld
-  ├── entity_to_body: HashMap<usize, u64>
-  ├── clock: GameClock
+  ├── world: xgame_runtime::World         场景 / 脚本 / 物理 / 动画 / 粒子 / 音频
   ├── pipeline: ScenePipeline
   ├── device / queue / surface / config
   ├── depth_view / depth_texture
@@ -1316,11 +1314,11 @@ Scene(
 | `core/check.rs` | 573 | `check_project()`（无头验证清单 / **全部场景** / 引用，退出码 0/1/2 契约的依据；**编辑器 `--check` 与 MCP `project_check` 共用同一份**）、`CheckReport`（含材质 / 材质贴图 / 非入口坏场景诊断）、`check_scene_references()`（单场景引用检查，问题带场景路径前缀） |
 | `editor/dialogs.rs` | 395 | `show_exit_dialog()`（保存 / 不保存 / 取消 → 放行凭证）、`show_scene_change_dialog()`（切换 / 新建前的同一套三选一）、`show_new_scene_dialog()`、`show_save_as_dialog()`、`show_autosave_recovery_dialog()`（恢复 / 丢弃 / 稍后） |
 | `editor/state.rs` | 4189 | `EditorState::new()`、`UndoStack`（含上限）、`GizmoDrag`（含 `axis_anchor`）、`clamp_selection()`、`log()`（控制台带上限）、`save_scene()`（写 `current_scene`，成功后清副本）/ `save_scene_as()` / `new_scene()` / `open_scene()` / `set_startup_scene()`、`scene_dirty()` / `scene_dirty_memo()`（脏检查）、`autosave_tick()` / `autosave_wait()` / `recover_autosave()` / `discard_autosave()` / `drop_autosave_of_current()`、`hot_reload_tick()` / `hot_reload_wait()` / `reload_open_material()`（外部改动应用 + 草稿策略）、`apply_settings_draft()`、`create_primitive()`、`undo()`、`paste_entity()`、预制体操作、材质草稿 / 新建 / 保存 / 指派（`material_draft` / `create_material` / `save_material_draft` / `assign_material`） |
-| `editor/scene_renderer.rs` | 1045 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + **材质资产引用** + Animator 配置（含淡入时长、**状态机 entry/参数/状态表/转移表**、**叠加层剪辑/权重/速度/循环**、**层栈每层名字/模式/剪辑/权重/速度/循环/遮罩**（分隔字节防撞））+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（先 tick 动画时钟再比指纹；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`invalidate_assets()` / `invalidate_materials()`（改导入设置 / 存材质 / 热重载检测到资产变化后丢缓存）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判、叠加层与层栈按"权重>0 且剪辑存在"判，顺手预加载）、`animation_clip_names()`、`bone_names()`（骨骼名去重跳过匿名，Inspector 遮罩下拉用）、`animation_state()`（状态机当前状态，Inspector 用）、`mesh_bounds()`（拾取用） |
+| `editor/scene_renderer.rs` | 1045 | `SceneRenderer::new()`（含 `project_root`）、`scene_signature()`（局部变换 + 父引用 + **材质资产引用** + Animator 配置（含根运动节点/轴、淡入时长、**状态机 entry/参数/状态表/转移表**、**叠加层剪辑/权重/速度/循环**、**层栈每层名字/模式/剪辑/权重/速度/循环/遮罩**（分隔字节防撞））+ 动画时钟签名，含阴影开关/分辨率）、`plan_resize()`（缩放节流状态机）、`render()`（Edit 才 tick 私有墙钟；Play/Pause 读取 runtime 时钟；指纹没变整段跳过、连世界矩阵都不解算，返回新加载模型的包围盒）、`invalidate_assets()` / `invalidate_materials()`（改导入设置 / 存材质 / 热重载检测到资产变化后丢缓存）、`viewport_animating()`（帧策略的动画输入，机器模式按"任一状态剪辑存在"判、叠加层与层栈按"权重>0 且剪辑存在"判，顺手预加载）、`animation_clip_names()`、`bone_names()`（骨骼名去重跳过匿名，Inspector 节点 / 遮罩下拉用）、`edit_animation_state()` / `edit_animation_layer_state()`、`mesh_bounds()`（拾取用） |
 | `editor/panels/scene_view.rs` | 1143 | `show_content()`、`PointerInput::read()`、`handle_gizmo_interaction()`、`pick_entity()`（射线 × 世界 AABB） |
 | `editor/gizmo/pick.rs` | 543 | `pick_gizmo()`、`axis_param_under_mouse()`、`ray_aabb()` / `UNIT_BOUNDS`（实体拾取） |
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
-| `editor/game_runtime.rs` | 121 | `start()`（`WorldConfig::from_project(project.manifest())` 接项目清单：运行时 + 层）、`fixed_update()` |
+| `editor/game_runtime.rs` | 121 | `start()`（`WorldConfig::from_project(project.manifest())` + 场景 / CPU 动画装载器）、`update_with_scene()`（O(1) swap 后跑唯一 `World::update`）、`animation()`（Play / Pause 只读运行态时钟） |
 | `editor/frame_policy.rs` | 277 | `plan()`（纯函数，五输入：playing / interacting / had_input / animating / since_last_input）、`FrameClock` |
 | `editor/headless.rs` | 1334 | `run()`（CLI `--headless`：固定 dt 帧循环 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
 | `editor/schema_cli.rs` | 213 | `--export-schema` 参数解析（stdout / `--out` / `--help`）、`render_json()`（`serde_json` 美化 + 末尾换行）、`cli()`（退出码 0/1） |
@@ -1330,18 +1328,19 @@ Scene(
 | `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
 | `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |
-| `core/project.rs` | 1269 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_scenes()`（`Scenes/*.ron`，排除 `.prefab.ron`；场景菜单与 `--check` 的真相源）、`load_scene()` / `write_scene()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`、`list_materials()` / `load_material()` / `write_material()`（材质 albedo 的 GUID⇄路径边界）；清单含 `runtime` 节（重力 / 固定步长） |
+| `core/project.rs` | 1269 | `ProjectHandle::open()`、`create()`、`path()`、`save()`、`list_scenes()`（`Scenes/*.ron`，排除 `.prefab.ron`；场景菜单与 `--check` 的真相源）、`load_scene()` / `write_scene()`、`list_prefabs()`、`load_prefab()`、`write_prefab()`、`list_materials()` / `load_material()` / `write_material()`（材质 albedo 的 GUID⇄路径边界）；`resolve_read_path()` 是模型 / 脚本 / 音频直接路径 + `search_paths` 的唯一解析入口；清单含 `runtime` 节（重力 / 固定步长） |
 | `core/layers.rs` | 308 | `LAYER_COUNT`（32）/ `DEFAULT_LAYER`、`Layers`（**只存覆盖**：`names` / `masks` 两张 `BTreeMap`）、`collides()`（**两侧相与**，与 rapier 同语义）、`set_collides()`（对称写两侧）、`groups(layer)`（→ `(memberships, filter)`）、`label()`（`"3  Enemy"` / `"7  Layer 7"`）、`sanitized()`（丢越界 / 空名，**保留 mask 0**）、`sanitize_layer()`（取模 32） |
 | `core/asset.rs` | 1068 | `AssetGuid`（32 位十六进制，生成器 = 进程随机 + 纳秒 + 原子序号）、`AssetMeta`（`.meta` 的 RON：guid/kind/import）、`AssetDatabase`（扫描建 guid↔path、诊断缺/孤儿/坏/冲突、`ensure_metas`、`set_import`、`resolve_reference`/`encode_reference`）、`encode_*`/`decode_*`（场景 / 预制体 / 材质的磁盘⇄内存引用转换） |
 | `core/prefab.rs` | 421 | `Prefab`、`PrefabInstanceRef`、`from_subtree()`、`instantiate()`、`prefab_display_name()` |
 | `core/scene.rs` | 1026 | `Scene::world_matrices()` / `world_matrices_with_parents()`（链缓冲复用、`Mat4` + done 位图）、`hierarchy()` / `parent_indices()` / `child_map()`（批量解父子，O(n)）、`set_parent()`（保世界变换+防环）、`children()`、`subtree()`、`remove_subtree()`、`instantiate_prefab()`、`prefab_instance_root()`；`Entity` / `Scene` 带 `PartialEq`（脏检查用，跳过不落盘的 `ComponentMap`）；`Entity::animator`（`#[serde(default)]`，旧场景读作 None） |
 | `core/ui.rs` | 673 | `UiElement`（kind / 锚点 / 偏移 / `UiStyle` / `UiTextStyle` / `UiImageStyle` / 运行时 `UiState`）、`data_eq()`（脏检查忽略运行时状态）、`sanitized()`；`*UiKind::ALL` / `UiAlign` / `UiVAlign` |
-| `core/animation.rs` | 588 | `Animator`（clip / speed / looping / autoplay / fade_time / machine / additive / layers）、`is_active()`（机器感知：模式下 = autoplay 且存在 speed > 0 的状态）、`AnimMachine`（entry / parameters / states / transitions，`state()` / `transition_for()` 首条命中 / `is_usable()` 坏机器退回单剪辑）、`AnimState`（每状态自己的 clip/speed/looping，覆盖 Animator 字段）、`AnimCondition`（AtLeast ≥ / Below 严格 <，同阈值互补；缺参数永不匹配）、`AnimAdditive`（单层快捷方式：clip/weight/speed/looping，与机器正交，默认 weight 1.0/speed 1.0/循环）、`AnimLayer` / `AnimLayerMode`（层栈每层：name + mode(Additive/Override) + clip + weight + speed + looping + mask（骨骼子树根名单，空 = 整副骨架），与 additive 并存、内部排在它之后求值） |
-| `render/animation.rs` | 1883 | `AnimClip` / `Track` / `Skin` / `AnimNode`（含 `name`，遮罩按名选子树）、`sample_clip_into()`（二分钳位、坏轨道跳过）、`global_matrices()`（成环护栏）、`compute_bones_composed()`（**唯一的全量路径**：基础 + 可选淡入 → 逐层合入（LayerInput：Additive 加增量（参考 = 本层第 0 帧）/ Override 向该层 lerp，`mask_covers()` 按子树根名单逐骨裁剪，环护栏），旧 `compute_bones()` / `compute_bones_blended()` / `compute_bones_additive()` / `compute_bones_blended_additive()` 全是薄封装 + `apply_additive_into()`（单节点核心 `blend_additive`），`clip_time()`、`AnimationDriver`（tick：每帧求值一步状态转移 → 解析 (状态, 剪辑, 速度, 循环)，换状态/换剪辑同一条淡入路径；叠加层独立时钟与权重解析，换叠加剪辑只归零它自己；**层栈时钟按层名对齐同步**（重排不丢进度、换本层剪辑归零、删层 prune、权重钳位、mode/遮罩跟配置），全部时钟共用 `is_active` 闸门；`playback()` / `state()` / `fade_from()`（含旧剪辑自己的循环方式）/ `additive()` / `layers()`，signature（基础+叠加+层栈**所有**时钟都进），换剪辑归零 + 淡入状态） |
+| `core/animation.rs` | 588 | 落盘配置：`Animator`（clip / speed / looping / autoplay / fade_time / machine / additive / layers / root_motion）、`RootMotion`（显式节点 + XYZ）、`AnimMachine` / `AnimState` / `AnimTransition`、`AnimAdditive`、`AnimLayer` / `AnimLayerMode` |
+| `core/animation_runtime.rs` | 3579 | 纯 CPU 动画共享层：`AnimationAsset` / `AnimClip` / `Track` / `Skin` / `AnimNode`、三种插值采样、`compute_bones_composed_with_root_motion()`（基础淡入 → 剥 runtime 已消费轴 → additive / layers）、`root_motion_delta()`（循环展开 / 非循环钳位 / 淡入增量混合）、`AnimationDriver`（运行态唯一时钟、帧区间快照、分层时钟与确定性 signature）、`AnimationLoader` 注入契约 |
+| `render/animation.rs` | 7 | `xgame_core::animation_runtime::*` 的兼容转出；旧模块路径保留，render 不再拥有第二份 CPU 动画实现 |
 | `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
-| `render/scene_pipeline.rs` | 3328 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体采样骨骼进槽位（剪辑名/时间/循环问驱动 `playback()`，换剪辑/换状态淡入中 → 旧剪辑按自己的循环方式采样后按权重混合；把 additive 快捷层 + 驱动 `layers()` 解析成 `LayerInput` 栈（剪辑缺失的层不进栈），统一交 `compute_bones_composed` 一条路出矩阵）+ `ensure_bones_capacity()` 扩容重建；材质解析与批次键 `(图元, MaterialKey)`）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()`、`set_project()` / `invalidate_materials()` |
+| `render/scene_pipeline.rs` | 3328 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体从共享驱动读取基础 / 淡入 / additive / layers，统一交 `compute_bones_composed_with_root_motion`；仅有效根运动实体剥已消费轴）+ `ensure_bones_capacity()` 扩容重建；材质解析与批次键 `(图元, MaterialKey)`）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()`、`set_project()` / `invalidate_materials()` |
 | `render/material_library.rs` | 210 | `MaterialLibrary`：`.mat` 解析 / albedo 纹理上传 / 绑定组缓存 / 负缓存、`MaterialKey::{Model, Asset}` 命名空间、`set_project()` / `invalidate()` / `revision()` |
-| `render/gltf_loader.rs` | 1155 | `GltfMesh::from_file()` / `load()`（读 `.meta` 导入设置：`model_scale` 烘焙 / 纹理 sRGB·nearest）、`read_material()`（叠加共享材质资产）、`parse_animation_data()`（节点层级 / 皮肤 / 通道 → AnimClip+Skin，CUBICSPLINE 降采样；`AnimNode` 记 glTF 节点名 —— 遮罩按名选子树的来源）、`clip()` / `has_animation()`、`Bounds`（网格本地包围盒） |
+| `render/gltf_loader.rs` | 1155 | `GltfMesh::from_file()` / `load_with_search_paths()`（GPU 模型）、`GltfAnimationLoader`（无 GPU 的 runtime 动画装载器）；二者先共用 `resolve_model_source()` 命中同一文件与并排 `.meta`，再共用 `parse_animation_data_scaled()` 与 `model_scale` 烘焙规则；节点层级 / 皮肤 / LINEAR·STEP·CUBICSPLINE 通道只解析一份；`clip()` / `has_animation()`、`Bounds` |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |
 | `render/ui_renderer.rs` | 1050 | `UiRenderer::new()` / `prepare()`（排版 + 内容签名）/ `render()`（一条实例化管线：圆角 SDF + 纹理；矩形与字形共用图集 → 相邻同批）、`UiStats`、字形图集上传、图片纹理缓存（sRGB / 行对齐补齐） |
 | `render/postfx.rs` | 1845 | `PostFx::render(source_view, source_gen, ...)`（HDR → 曝光 / Bloom / ACES → LDR，可选 FXAA 第二趟；`source_gen` 让 TAA 的乒乓源切换时绑定组仍能命中）；`bind_cache`（**多槽**，容量 8）；`FxaaPipelines` / `FxaaScratch`；`effective_fxaa()`（TAA 开着自动让位）；`HDR_FORMAT` |

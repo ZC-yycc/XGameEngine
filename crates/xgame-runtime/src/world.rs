@@ -51,11 +51,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use xgame_audio::AudioEngine;
 use xgame_core::{
-    same_scene_path, AudioPort, AudioStats, EntityId, GameClock, Inspect, PhysicsHandle, PlaySound,
-    Scene, SceneLoader, Transform,
+    same_scene_path, AnimationAsset, AnimationDriver, AnimationLoader, AudioPort, AudioStats,
+    EntityId, GameClock, Inspect, MotionFade, MotionSpan, PhysicsHandle, PlaySound, Scene,
+    SceneLoader, Transform,
 };
 use xgame_input::{Input, InputMap, MouseButton};
 use xgame_math::glam::{Mat4, Vec2, Vec3};
@@ -172,6 +174,13 @@ pub struct World {
     /// 日志与命令缓冲也由它持有（`LuaHost::buffers_mut`），组件轨与脚本轨共用。
     scripts: LuaHost,
     clock: GameClock,
+    /// 运行态唯一动画时钟。独立游戏、编辑器 Play 与普通无头都只读这一份；
+    /// 渲染是消费者，不再各自推进第二只钟。
+    animation: AnimationDriver,
+    /// 模型路径 → CPU 动画资产。`Err` 也缓存（失败负缓存），坏路径不能每帧读盘告警。
+    animation_assets: HashMap<String, Result<Arc<AnimationAsset>, String>>,
+    /// glTF 动画装载来源（宿主注入；无根运动配置时完全不调用）。
+    animation_loader: Option<Box<dyn AnimationLoader>>,
     /// 实体 → 刚体。用 `EntityId` 而不是索引做键：脚本可以增删实体，
     /// 索引随时会变。
     body_of_entity: HashMap<EntityId, u64>,
@@ -293,6 +302,9 @@ impl World {
             input: Input::with_default_map(),
             scripts,
             clock: GameClock::new().with_fixed_dt(config.fixed_dt),
+            animation: AnimationDriver::new(),
+            animation_assets: HashMap::new(),
+            animation_loader: None,
             body_of_entity: HashMap::new(),
             // `root` 还要给存档上下文一份（存档路径同样按项目根解析），
             // 所以先 clone：这是构造期一次分配，不在热路径上。
@@ -372,6 +384,21 @@ impl World {
     pub fn with_scene_loader(mut self, loader: impl SceneLoader + 'static) -> Self {
         self.scene_loader = Some(Box::new(loader));
         self
+    }
+
+    /// 注入 CPU 动画装载器。真实宿主传 render 的 glTF 适配器；测试可传内存资产。
+    pub fn with_animation_loader(mut self, loader: impl AnimationLoader + 'static) -> Self {
+        self.animation_loader = Some(Box::new(loader));
+        self.animation_assets.clear();
+        self
+    }
+
+    /// 丢掉 CPU 动画资产（含失败负缓存），下一帧按当前模型与 `.meta` 重新装载。
+    ///
+    /// 编辑器资产热重载必须同时清 GPU 网格与这份缓存，否则画面已换成新模型，
+    /// 根运动却仍采旧轨道；独立游戏没有热重载入口，不会无故调用。
+    pub fn invalidate_animation_assets(&mut self) {
+        self.animation_assets.clear();
     }
 
     /// 告诉运行时"起始跑的是哪份场景文件"（宿主从清单的 `entry_scene` 取）。
@@ -458,6 +485,11 @@ impl World {
 
     pub fn scene_mut(&mut self) -> &mut Scene {
         &mut self.scene
+    }
+
+    /// 运行态唯一动画驱动（渲染 / Inspector 只读）。
+    pub fn animation(&self) -> &AnimationDriver {
+        &self.animation
     }
 
     pub fn input(&self) -> &Input {
@@ -563,9 +595,6 @@ impl World {
     }
 
     /// 上一帧的**帧间隔**（秒，已按 `time_scale` 缩放）。
-    ///
-    /// 宿主的动画钟必须吃这一份而不是原始 dt —— 否则脚本一暂停，
-    /// 物理冻住、角色却还在原地跑步。
     pub fn frame_dt(&self) -> f32 {
         self.clock.delta_time()
     }
@@ -689,7 +718,8 @@ impl World {
         // 8000 实体的关卡上实测 50.0 ms → 0.6 ms（见 PLAN 第八十八节）。
         // `or_insert` 而不是 `insert`：撞 ID 时取**第一个**，与 `find_entity`
         // （`position()`）同解 —— 两套寻址给出不同结果是最难查的一类错位。
-        let mut index_of: HashMap<EntityId, usize> = HashMap::with_capacity(self.scene.entities.len());
+        let mut index_of: HashMap<EntityId, usize> =
+            HashMap::with_capacity(self.scene.entities.len());
         for (index, entity) in self.scene.entities.iter().enumerate() {
             index_of.entry(entity.id).or_insert(index);
         }
@@ -712,7 +742,9 @@ impl World {
                 // 建体时的落点一致；直接按实体原点传送会让角色半个身子陷进地面。
                 let controller = self.scene.entities[index].controller;
                 let target = match controller {
-                    Some(controller) => world.position + Vec3::Y * controller.sanitized().center_height(),
+                    Some(controller) => {
+                        world.position + Vec3::Y * controller.sanitized().center_height()
+                    }
                     None => world.position,
                 };
                 self.physics.teleport(body, target);
@@ -840,9 +872,9 @@ impl World {
 
         // -- 1. 物理：旧刚体全丢 --
         //
-        // 实体 id 是进程内单调分配的（`id.rs`），新场景的 id 一定不与旧的重合，
-        // 所以"留着等 sync_bodies 清理"虽然也会清对，但那要多跑一遍全场景扫描，
-        // 而且中间态里 `body_of_entity` 是一张跨场景的垃圾表。
+        // 实体 id 只保证**单个文件内**唯一，新场景完全可能复用旧 id；因此不能
+        // 留着等 `sync_bodies` 猜存活关系。这里先整表排空，既避免同 id 认错旧刚体，
+        // 也不让切换中间态出现一张跨场景的垃圾映射。
         let stale: Vec<u64> = self.body_of_entity.drain().map(|(_, body)| body).collect();
         for body in stale {
             self.physics.remove_body(body);
@@ -1051,6 +1083,14 @@ impl World {
         //    autoplay 音源当帧就开始推进，而不用空等一帧。
         self.apply_pending_scene_load();
         self.sync_bodies();
+
+        // -- 3.2 动画 + 根运动：运行态唯一时钟 / 唯一位移落点 --
+        //
+        // 放在脚本与场景切换之后，保持历史宿主时序（旧版也是 `World::update` 返回后
+        // 才 tick 动画）：脚本本帧改的剪辑 / 参数当帧生效，切到的新场景也从第 0 帧
+        // 起步。渲染只读 `animation()`，普通无头不渲染也照样推进。
+        self.animation.tick(frame_dt, &self.scene.entities);
+        self.apply_root_motion(frame_dt);
 
         // -- 3.5 粒子：本帧的实体增删与脚本 burst 都已落定 --
         //
@@ -1319,6 +1359,10 @@ impl World {
             return;
         }
         self.unloaded = true;
+        // 动画时钟按实体 ID 索引，而 ID 只保证单个文件内唯一。先清掉旧场景条目，
+        // 否则下一场景复用同一个 ID 时会从旧剪辑的半途继续；资产缓存不带实体态，
+        // 可以安全保留，避免切回场景后重读 glTF。
+        self.animation.clear();
         let entities: Vec<_> = self
             .scene
             .entities
@@ -1746,6 +1790,144 @@ impl World {
         self.scratch_physics_indices = to_create;
     }
 
+    /// 从共享动画时钟提取根运动，并按实体类型交给唯一的位置所有者。
+    ///
+    /// - 普通实体 / 父级实体：`Scene::set_world_position`（正确换回局部坐标）；
+    /// - 运动学体：先改场景，再同步刚体；
+    /// - 角色：必须走 `PhysicsWorld::move_character`，保留碰撞 / 坡面 / 台阶；
+    /// - 动态 / 静态体：[`Entity::effective_root_motion`] 已拒绝，不与物理争所有权。
+    fn apply_root_motion(&mut self, dt: f32) {
+        // 查询管线要反映脚本本帧传送 / 新建的体；角色根运动随后用它扫掠。
+        let has_character_motion =
+            self.scene.entities.iter().any(|entity| {
+                entity.controller.is_some() && entity.effective_root_motion().is_some()
+            });
+        if has_character_motion {
+            self.physics.sync_queries();
+        }
+
+        for index in 0..self.scene.entities.len() {
+            let (id, model, root, controller, body) = {
+                let entity = &self.scene.entities[index];
+                let Some(root) = entity.effective_root_motion() else {
+                    continue;
+                };
+                let Some(model) = entity.model_at(0) else {
+                    continue;
+                };
+                (
+                    entity.id,
+                    model,
+                    root,
+                    entity.controller,
+                    self.body_of_entity.get(&entity.id).copied(),
+                )
+            };
+            // 分字段借用而不是复制 `model` / `root.node`：根运动是逐帧热路径，
+            // 为了绕过 `&mut self` 每帧造两条 String 会直接打破零分配门禁。
+            let asset = match Self::animation_asset_cached(
+                &mut self.animation_assets,
+                self.animation_loader.as_deref(),
+                model,
+            ) {
+                Some(asset) => asset,
+                None => continue,
+            };
+            // 只在这个小作用域借动画驱动；算完纯数据增量就释放，后面才能改场景 / 物理。
+            let local_delta = {
+                let Some(frame) = self.animation.motion_frame(id) else {
+                    continue;
+                };
+                let Some(current) = asset.clip(frame.clip) else {
+                    continue;
+                };
+                let fade = frame.fade.and_then(|fade| {
+                    asset.clip(fade.clip).map(|old| MotionFade {
+                        span: MotionSpan {
+                            clip: old,
+                            from: fade.from,
+                            to: fade.to,
+                            looping: fade.looping,
+                        },
+                        alpha_from: fade.alpha_from,
+                        alpha_to: fade.alpha_to,
+                    })
+                });
+                xgame_core::animation_runtime::root_motion_delta(
+                    &asset,
+                    &root.node,
+                    root.axes,
+                    MotionSpan {
+                        clip: current,
+                        from: frame.from,
+                        to: frame.to,
+                        looping: frame.looping,
+                    },
+                    fade,
+                )
+            };
+            if local_delta == Vec3::ZERO || !local_delta.is_finite() {
+                continue;
+            }
+            // 根运动在模型局部空间：直接乘完整世界矩阵的**线性部分**，与模型
+            // 顶点实际经历的变换同解。不能先分解成世界 rotation/scale 再相乘：
+            // 父级非均匀缩放 + 子级旋转会产生剪切，TRS 分解会丢掉那部分信息。
+            let world_matrix = self.scene.world_matrix(index);
+            let world_position = world_matrix.transform_point3(Vec3::ZERO);
+            let world_delta = world_matrix.transform_vector3(local_delta);
+
+            if let (Some(def), Some(body)) = (controller, body) {
+                if let Some(result) =
+                    self.physics
+                        .move_character(body, &def, world_delta, dt.max(1e-5))
+                {
+                    let center = self
+                        .physics
+                        .body_transform(body)
+                        .map(|transform| transform.position)
+                        .unwrap_or(world_position + result.effective_translation);
+                    let feet = center - Vec3::Y * def.sanitized().center_height();
+                    self.scene.set_world_position(index, feet);
+                    let state = self.scene.entities[index]
+                        .components
+                        .get_or_insert_with(xgame_core::CharacterState::default);
+                    state.grounded = result.grounded;
+                    state.ground_normal = result.ground_normal;
+                    state.sliding_down_slope = result.sliding_down_slope;
+                    state.contacts = result.contacts;
+                }
+                continue;
+            }
+
+            self.scene
+                .set_world_position(index, world_position + world_delta);
+            if let Some(body) = body {
+                // 这里只可能是运动学体；静态 / 动态已在 effective_root_motion 拒绝。
+                let updated = self.scene.world_transform(index);
+                self.physics.teleport(body, updated.position);
+                self.physics.set_rotation(body, updated.rotation);
+            }
+        }
+    }
+
+    fn animation_asset_cached(
+        assets: &mut HashMap<String, Result<Arc<AnimationAsset>, String>>,
+        loader: Option<&dyn AnimationLoader>,
+        model: &str,
+    ) -> Option<Arc<AnimationAsset>> {
+        if !assets.contains_key(model) {
+            let loaded = match loader {
+                Some(loader) => loader.load_animation(model).map(Arc::new),
+                None => Err("宿主没有接入动画装载器（需要 with_animation_loader）".to_owned()),
+            };
+            if let Err(error) = &loaded {
+                log::warn!("根运动动画资产 '{model}' 加载失败：{error}");
+            }
+            assets.insert(model.to_owned(), loaded);
+        }
+        assets.get(model)?.as_ref().ok().cloned()
+    }
+
     /// 运动学体：把脚本 / 动画摆好的世界变换推给物理。
     fn push_kinematic_bodies(&mut self) {
         // 场景里没有运动学体时，连世界矩阵都不必解算 —— 这是纯静态 / 纯动态场景
@@ -2048,7 +2230,76 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use xgame_core::project::ProjectHandle;
 
-    use xgame_core::{AudioSource, Entity, EntityId, PhysicsBody, Prefab};
+    use xgame_core::animation_runtime::{AnimClip, AnimNode, Interpolation, Track, TrackPath};
+    use xgame_core::{Animator, AudioSource, Entity, EntityId, PhysicsBody, Prefab, RootMotion};
+
+    #[derive(Clone)]
+    struct MemoryAnimationLoader {
+        asset: AnimationAsset,
+    }
+
+    #[derive(Clone)]
+    struct CountingAnimationLoader {
+        loads: Arc<AtomicUsize>,
+    }
+
+    impl AnimationLoader for CountingAnimationLoader {
+        fn load_animation(&self, _model: &str) -> Result<AnimationAsset, String> {
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            Ok(root_motion_asset(Vec3::X))
+        }
+    }
+
+    impl AnimationLoader for MemoryAnimationLoader {
+        fn load_animation(&self, _model: &str) -> Result<AnimationAsset, String> {
+            Ok(self.asset.clone())
+        }
+    }
+
+    fn root_motion_asset(delta: Vec3) -> AnimationAsset {
+        AnimationAsset {
+            nodes: vec![AnimNode {
+                parent: None,
+                name: "MotionRoot".into(),
+                translation: Vec3::ZERO,
+                rotation: xgame_math::glam::Quat::IDENTITY,
+                scale: Vec3::ONE,
+            }],
+            clips: vec![AnimClip {
+                name: "Walk".into(),
+                duration: 1.0,
+                tracks: vec![Track {
+                    node: 0,
+                    path: TrackPath::Translation,
+                    interpolation: Interpolation::Linear,
+                    times: vec![0.0, 1.0],
+                    values: vec![0.0, 0.0, 0.0, delta.x, delta.y, delta.z],
+                }],
+            }],
+        }
+    }
+
+    fn root_motion_entity(name: &str) -> Entity {
+        let mut entity = Entity::new(name);
+        entity.model = "Resources/Mover.gltf".into();
+        entity.animator = Some(Animator {
+            clip: "Walk".into(),
+            root_motion: Some(RootMotion {
+                node: "MotionRoot".into(),
+                axes: [true; 3],
+            }),
+            ..Animator::default()
+        });
+        entity
+    }
+
+    fn world_with_root_motion(scene: Scene, delta: Vec3) -> World {
+        World::new(scene, std::env::temp_dir(), WorldConfig::default()).with_animation_loader(
+            MemoryAnimationLoader {
+                asset: root_motion_asset(delta),
+            },
+        )
+    }
 
     fn entity_y(world: &World, name: &str) -> f32 {
         world
@@ -2130,6 +2381,170 @@ mod tests {
 
         // 地面是静态体，不该被重力拖着走。
         assert_eq!(entity_y(&world, "ground"), -0.5);
+    }
+
+    #[test]
+    fn root_motion_moves_plain_and_parented_entities_in_world_space() {
+        let mut scene = Scene::new("root-motion");
+        let mut parent = Entity::new("parent");
+        parent.transform.position = Vec3::new(5.0, 0.0, 0.0);
+        parent.transform.rotation =
+            xgame_math::glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let parent_id = scene.add_entity(parent);
+        let mut child = root_motion_entity("child");
+        child.parent = Some(parent_id);
+        scene.add_entity(child);
+        scene.add_entity(root_motion_entity("plain"));
+
+        let mut world = world_with_root_motion(scene, Vec3::X * 2.0);
+        world.update(0.5);
+        let child = world.scene().find_by_name("child").unwrap();
+        let child_index = world.scene().index_of(child.id).unwrap();
+        assert!(
+            (world.scene().world_transform(child_index).position - Vec3::new(5.0, 0.0, -1.0))
+                .length()
+                < 1e-5,
+            "父级旋转应把局部 +X 根运动转成世界 -Z"
+        );
+        assert_eq!(
+            world
+                .scene()
+                .find_by_name("plain")
+                .unwrap()
+                .transform
+                .position,
+            Vec3::X
+        );
+    }
+
+    /// 父级非均匀缩放与子级旋转组合后会产生剪切，不能先把世界矩阵分解成 TRS
+    /// 再用 `rotation * scale * delta`：分解已经丢了剪切项。根位移应直接走世界
+    /// 矩阵的线性部分，与网格顶点实际经历的变换完全一致。
+    #[test]
+    fn root_motion_uses_the_full_parent_world_linear_transform() {
+        let mut scene = Scene::new("root-motion-sheared-parent");
+        let mut parent = Entity::new("parent");
+        parent.transform.position = Vec3::new(3.0, 1.0, -2.0);
+        parent.transform.scale = Vec3::new(2.0, 1.0, 0.5);
+        let parent_id = scene.add_entity(parent);
+
+        let mut child = root_motion_entity("child");
+        child.parent = Some(parent_id);
+        child.transform.rotation = xgame_math::glam::Quat::from_rotation_y(0.7);
+        let child_id = scene.add_entity(child);
+        let child_index = scene.index_of(child_id).unwrap();
+        let before = scene.world_matrix(child_index);
+        let expected = before.transform_point3(Vec3::ZERO) + before.transform_vector3(Vec3::X);
+
+        let mut world = world_with_root_motion(scene, Vec3::X * 2.0);
+        world.update(0.5);
+        let actual = world.scene().world_transform(child_index).position;
+        assert!(
+            (actual - expected).length() < 1e-5,
+            "根运动必须走完整世界线性矩阵：expected={expected:?}, actual={actual:?}"
+        );
+    }
+
+    #[test]
+    fn invalidating_animation_assets_reloads_positive_cache() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let mut scene = Scene::new("root-motion-reload");
+        scene.add_entity(root_motion_entity("walker"));
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default())
+            .with_animation_loader(CountingAnimationLoader {
+                loads: Arc::clone(&loads),
+            });
+
+        world.update(0.1);
+        world.update(0.1);
+        assert_eq!(loads.load(Ordering::Relaxed), 1, "稳态必须命中正缓存");
+
+        world.invalidate_animation_assets();
+        world.update(0.1);
+        assert_eq!(loads.load(Ordering::Relaxed), 2, "失效后下一帧必须重读资产");
+    }
+
+    #[test]
+    fn root_motion_moves_kinematic_body_but_not_static_or_dynamic() {
+        let mut scene = Scene::new("root-motion-physics");
+        let mut kinematic = root_motion_entity("kinematic");
+        kinematic.physics = Some(PhysicsBody::kinematic_capsule(0.5, 0.25));
+        kinematic.transform.position.z = -4.0;
+        scene.add_entity(kinematic);
+        let mut fixed = root_motion_entity("static");
+        fixed.physics = Some(PhysicsBody::static_box([0.5; 3]));
+        scene.add_entity(fixed);
+        let mut dynamic = root_motion_entity("dynamic");
+        dynamic.physics = Some(PhysicsBody::dynamic_box([0.5; 3]));
+        dynamic.transform.position.z = 4.0;
+        scene.add_entity(dynamic);
+
+        let config = WorldConfig {
+            gravity: Vec3::ZERO,
+            ..WorldConfig::default()
+        };
+        let mut world = World::new(scene, std::env::temp_dir(), config).with_animation_loader(
+            MemoryAnimationLoader {
+                asset: root_motion_asset(Vec3::X * 2.0),
+            },
+        );
+        world.update(0.5);
+        assert!(
+            (world
+                .scene()
+                .find_by_name("kinematic")
+                .unwrap()
+                .transform
+                .position
+                .x
+                - 1.0)
+                .abs()
+                < 1e-5
+        );
+        assert_eq!(
+            world
+                .scene()
+                .find_by_name("static")
+                .unwrap()
+                .transform
+                .position
+                .x,
+            0.0
+        );
+        assert_eq!(
+            world
+                .scene()
+                .find_by_name("dynamic")
+                .unwrap()
+                .transform
+                .position
+                .x,
+            0.0
+        );
+    }
+
+    #[test]
+    fn character_root_motion_uses_collision_sweep() {
+        let mut scene = Scene::new("root-motion-character");
+        let mut wall = Entity::new("wall");
+        wall.transform.position = Vec3::new(1.0, 1.0, 0.0);
+        wall.physics = Some(PhysicsBody::static_box([0.1, 1.0, 1.0]));
+        scene.add_entity(wall);
+        let mut character = root_motion_entity("character");
+        character.controller = Some(xgame_core::CharacterController::default());
+        scene.add_entity(character);
+
+        let mut world = world_with_root_motion(scene, Vec3::X * 4.0);
+        world.update(0.5);
+        let x = world
+            .scene()
+            .find_by_name("character")
+            .unwrap()
+            .transform
+            .position
+            .x;
+        assert!(x > 0.0, "角色应实际尝试移动");
+        assert!(x < 0.8, "墙在 x=1，角色根运动必须被控制器挡住，实际 x={x}");
     }
 
     /// 层与碰撞矩阵在运行时这条链路上真的生效：**建刚体时**就带对了碰撞组。
@@ -3158,6 +3573,36 @@ mod tests {
             .iter()
             .any(|log| log.message.starts_with("unloaded:")));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 实体 ID 只在单个场景文件内唯一：换场景后新实体可能复用旧 ID。
+    /// 动画时钟若不随场景卸载清空，新实体就会从旧实体播到一半的位置继续。
+    #[test]
+    fn scene_switch_clears_animation_clock_before_entity_id_reuse() {
+        let mut old_scene = Scene::new("old");
+        let mut old_entity = Entity::new("old fox");
+        old_entity.animator = Some(Animator::new("Walk"));
+        let reused_id = old_entity.id;
+        old_scene.add_entity(old_entity);
+
+        let mut world = World::new(old_scene, ".", WorldConfig::default());
+        world.update(0.25);
+        assert!(
+            world.animation().time(reused_id).is_some(),
+            "前置条件：旧场景应已建立动画时钟"
+        );
+
+        let mut new_scene = Scene::new("new");
+        let mut new_entity = Entity::new("new fox");
+        new_entity.id = reused_id;
+        new_entity.animator = Some(Animator::new("Walk"));
+        new_scene.add_entity(new_entity);
+        world.swap_scene(new_scene, "new.ron");
+
+        assert!(
+            world.animation().time(reused_id).is_none(),
+            "新场景复用实体 ID 时必须从第 0 帧建立新时钟"
+        );
     }
 
     #[test]

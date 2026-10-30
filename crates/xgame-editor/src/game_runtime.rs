@@ -70,6 +70,10 @@ impl GameRuntime {
         .with_behavior_registry(behaviors)
         .with_audio_engine(xgame_runtime::AudioEngine::open(project_root))
         .with_scene_loader(project.clone())
+        .with_animation_loader(xgame_render::gltf_loader::GltfAnimationLoader::new(
+            project_root,
+            project.manifest().content.search_paths.clone(),
+        ))
         .with_scene_order(project.manifest().scene_order());
         Self {
             world,
@@ -141,12 +145,14 @@ impl GameRuntime {
         self.world.current_scene()
     }
 
-    /// 运行时的时间缩放（脚本 `set_time_scale` 写的值）。
-    ///
-    /// 编辑器视口用它同步**预览动画钟**：脚本暂停时，编辑器的动画预览也得停，
-    /// 否则 Play 态里"物理冻住、角色还在跑步"。
-    pub fn time_scale(&self) -> f32 {
-        self.world.time_scale()
+    /// Play 态唯一动画时钟（视口 / Inspector 只读）。
+    pub fn animation(&self) -> &xgame_core::AnimationDriver {
+        self.world.animation()
+    }
+
+    /// 资产 / `.meta` 热重载时同步丢掉 runtime 的 CPU 动画正负缓存。
+    pub fn invalidate_animation_assets(&mut self) {
+        self.world.invalidate_animation_assets();
     }
 
     /// 按下标取一个组件的 `(注册名, 可检视对象)` —— Inspector 在 Play 中改

@@ -77,7 +77,7 @@ pub mod prelude {
 
     // -- 渲染 -------------------------------------------------------------
     pub use xgame_render::animation::AnimationDriver;
-    pub use xgame_render::gltf_loader::GltfMesh;
+    pub use xgame_render::gltf_loader::{GltfAnimationLoader, GltfMesh};
     // 后处理链（HDR 中间标 + 曝光 / 色调映射）：宿主画场景时几乎必然要用。
     pub use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
     pub use xgame_render::scene_pipeline::{supported_sample_count, SceneLighting, ScenePipeline};
@@ -85,8 +85,8 @@ pub mod prelude {
     pub use xgame_render::ui_renderer::UiRenderer;
     // TAA：历史缓冲 + resolve，以及宿主算抖动要用的两个换算函数。
     // 宿主只碰这三样，`taa` 模块的其余内容（uniform 布局 / WGSL）不对外。
-    pub use xgame_render::taa::{jitter_to_ndc, jitter_to_uv, TaaResolver};
     pub use xgame_render::ssao::SsaoPass;
+    pub use xgame_render::taa::{jitter_to_ndc, jitter_to_uv, TaaResolver};
 
     // -- 运行时 -----------------------------------------------------------
     pub use xgame_runtime::{

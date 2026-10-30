@@ -194,6 +194,8 @@ pub struct ScreenshotRenderer {
     model_cache: HashMap<String, GltfMesh>,
     /// 磁盘模型的解析基准（`builtin://` 用不到）。
     project_root: PathBuf,
+    /// 模型读取的有序兜底根；与普通 runtime 的 CPU 动画装载器同源。
+    search_paths: Vec<String>,
     /// 质量档位的解析结果（LOD 缩放在渲染时乘进 `render.lod_bias`）。
     /// 无项目 / 没配 `quality` 节时 = "今天的行为"。
     quality: xgame_core::QualitySettings,
@@ -266,6 +268,10 @@ impl ScreenshotRenderer {
             .as_ref()
             .map(|project| project.manifest().quality.resolve(adapter_msaa))
             .unwrap_or_else(|| xgame_core::QualitySettings::reference(adapter_msaa));
+        let search_paths = project
+            .as_ref()
+            .map(|project| project.manifest().content.search_paths.clone())
+            .unwrap_or_default();
         let sample_count = forced_sample_count.unwrap_or(quality.msaa).max(1);
         log::info!(
             "截图渲染：{}（MSAA x{sample_count}）{width}x{height}",
@@ -318,6 +324,7 @@ impl ScreenshotRenderer {
             ui,
             model_cache: HashMap::new(),
             project_root: project_root.to_path_buf(),
+            search_paths,
             quality,
         })
     }
@@ -443,7 +450,13 @@ impl ScreenshotRenderer {
                 if self.model_cache.contains_key(model) {
                     continue;
                 }
-                match GltfMesh::load(&self.device, &self.queue, &self.project_root, model) {
+                match GltfMesh::load_with_search_paths(
+                    &self.device,
+                    &self.queue,
+                    &self.project_root,
+                    model,
+                    &self.search_paths,
+                ) {
                     Ok(m) => {
                         self.model_cache.insert(model.to_string(), m);
                     }
@@ -3323,7 +3336,10 @@ mod tests {
         };
 
         let (near_stats, near_rgba) = render(&mut shot, 5.0);
-        assert_eq!(near_stats.low_lod_instances, 0, "5 米在阈值内：必须用第 0 级");
+        assert_eq!(
+            near_stats.low_lod_instances, 0,
+            "5 米在阈值内：必须用第 0 级"
+        );
         assert_eq!(near_stats.distance_culled_entities, 0);
         assert_eq!(near_stats.opaque_instances, 1);
         let (near_count, near_center) = object_pixels(&near_rgba, 320, 240);
@@ -3710,7 +3726,12 @@ mod tests {
     fn multi_cascade_shadow_scene() -> Scene {
         let mut scene = Scene::new("cascaded-shadow");
         scene.ambient = [0.05; 3];
-        scene.lights = vec![Light::directional("sun", [0.45, -1.0, -0.35], [1.0; 3], 2.0)];
+        scene.lights = vec![Light::directional(
+            "sun",
+            [0.45, -1.0, -0.35],
+            [1.0; 3],
+            2.0,
+        )];
         assert!(scene.lights[0].casts_shadow);
 
         let mut ground = Entity::new("Ground");
@@ -3929,7 +3950,14 @@ mod tests {
         );
 
         let on_scene = point_shadow_probe_scene(true);
-        let with_shadow = render_frames(&mut shot, &on_scene, &anim, camera, RenderConfig::default(), 1);
+        let with_shadow = render_frames(
+            &mut shot,
+            &on_scene,
+            &anim,
+            camera,
+            RenderConfig::default(),
+            1,
+        );
         let stats = shot.frame_stats();
         // 3 个实例（地板 + 两只箱子）× 6 面 = 18 是**不剔除**时的上限；
         // 逐面剔除后只会更少（地板六面都占、两只箱子各自只占 2 面）。
@@ -3945,8 +3973,14 @@ mod tests {
         );
 
         let off_scene = point_shadow_probe_scene(false);
-        let without_shadow =
-            render_frames(&mut shot, &off_scene, &anim, camera, RenderConfig::default(), 1);
+        let without_shadow = render_frames(
+            &mut shot,
+            &off_scene,
+            &anim,
+            camera,
+            RenderConfig::default(),
+            1,
+        );
         assert_eq!(
             shot.frame_stats().point_shadow_instances,
             0,
@@ -3955,7 +3989,8 @@ mod tests {
 
         // 投影用的是与渲染同一套取景参数（模型已进缓存，`scene_bounds` 可用）。
         let world = on_scene.world_matrices();
-        let bounds = scene_bounds(&on_scene.entities, &world, &shot.model_cache).expect("场景有几何");
+        let bounds =
+            scene_bounds(&on_scene.entities, &world, &shot.model_cache).expect("场景有几何");
         let (near, far) = clip_planes(&camera, bounds.radius());
         let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
             * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
@@ -4000,7 +4035,8 @@ mod tests {
     /// 更狠的剪枝，与逐面掩码是两条独立的分支。
     #[test]
     fn point_light_shadow_culling_matches_unculled_pixels() {
-        let Some(mut shot) = gpu_or_skip("point_light_shadow_culling_matches_unculled_pixels") else {
+        let Some(mut shot) = gpu_or_skip("point_light_shadow_culling_matches_unculled_pixels")
+        else {
             return;
         };
         let mut scene = Scene::new("point-shadow-cull");
@@ -4122,7 +4158,14 @@ mod tests {
             DEFAULT_FOV_Y,
         );
         let on = build(true);
-        let with_shadow = render_frames(&mut shot, &on, &AnimationDriver::new(), camera, RenderConfig::default(), 1);
+        let with_shadow = render_frames(
+            &mut shot,
+            &on,
+            &AnimationDriver::new(),
+            camera,
+            RenderConfig::default(),
+            1,
+        );
         let stats = shot.frame_stats();
         // 箱子在相机外、但在光照半径内：必须进阴影专用批次。
         assert!(
@@ -4131,7 +4174,14 @@ mod tests {
             stats.shadow_only_instances
         );
         let off = build(false);
-        let without_shadow = render_frames(&mut shot, &off, &AnimationDriver::new(), camera, RenderConfig::default(), 1);
+        let without_shadow = render_frames(
+            &mut shot,
+            &off,
+            &AnimationDriver::new(),
+            camera,
+            RenderConfig::default(),
+            1,
+        );
 
         // 灯正下方的地面：开阴影后必须变暗。
         let world = on.world_matrices();
@@ -4197,13 +4247,27 @@ mod tests {
         );
 
         let on_scene = build(true);
-        let with_shadow = render_frames(&mut shot, &on_scene, &anim, camera, RenderConfig::default(), 1);
+        let with_shadow = render_frames(
+            &mut shot,
+            &on_scene,
+            &anim,
+            camera,
+            RenderConfig::default(),
+            1,
+        );
         let off_scene = build(false);
-        let without_shadow =
-            render_frames(&mut shot, &off_scene, &anim, camera, RenderConfig::default(), 1);
+        let without_shadow = render_frames(
+            &mut shot,
+            &off_scene,
+            &anim,
+            camera,
+            RenderConfig::default(),
+            1,
+        );
 
         let world = on_scene.world_matrices();
-        let bounds = scene_bounds(&on_scene.entities, &world, &shot.model_cache).expect("场景有几何");
+        let bounds =
+            scene_bounds(&on_scene.entities, &world, &shot.model_cache).expect("场景有几何");
         let (near, far) = clip_planes(&camera, bounds.radius());
         let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
             * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
@@ -4337,7 +4401,10 @@ mod tests {
         // 影子中心：立方体 (0,1.6,0) 沿光向投到地面 ≈ (0.96, 0, -0.72)。
         let (sx, sy) = to_pixel(Vec3::new(0.96, 0.0, -0.72));
         let (lx, ly) = to_pixel(Vec3::new(-2.0, 0.0, 2.0));
-        assert!(sx < 320 && sy < 240 && lx < 320 && ly < 240, "采样点必须在画面内");
+        assert!(
+            sx < 320 && sy < 240 && lx < 320 && ly < 240,
+            "采样点必须在画面内"
+        );
 
         let shadow_level = luma(pixel_avg(&hard, 320, sx, sy));
         let lit_level = luma(pixel_avg(&hard, 320, lx, ly));
@@ -4382,15 +4449,35 @@ mod tests {
             DEFAULT_FOV_Y,
         );
         let render = |shot: &mut ScreenshotRenderer, shadow: ShadowConfig| {
-            render_frames(shot, &scene, &anim, camera, RenderConfig { shadow, ..Default::default() }, 1)
+            render_frames(
+                shot,
+                &scene,
+                &anim,
+                camera,
+                RenderConfig {
+                    shadow,
+                    ..Default::default()
+                },
+                1,
+            )
         };
         let hard = render(&mut shot, ShadowConfig::default());
-        let soft = render(&mut shot, ShadowConfig { softness: 1.0, cascade_blend: 0.0 });
-        let blended = render(&mut shot, ShadowConfig { softness: 0.0, cascade_blend: 0.4 });
+        let soft = render(
+            &mut shot,
+            ShadowConfig {
+                softness: 1.0,
+                cascade_blend: 0.0,
+            },
+        );
+        let blended = render(
+            &mut shot,
+            ShadowConfig {
+                softness: 0.0,
+                cascade_blend: 0.4,
+            },
+        );
 
-        let differing = |a: &[u8], b: &[u8]| {
-            a.iter().zip(b).filter(|(x, y)| x != y).count()
-        };
+        let differing = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
         let soft_diff = differing(&hard, &soft);
         let blend_diff = differing(&hard, &blended);
         assert!(

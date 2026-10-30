@@ -413,6 +413,25 @@ impl Entity {
             .chain(self.lod.levels.iter().map(|level| level.model.as_str()))
             .filter(|path| !path.is_empty())
     }
+
+    /// 当前实体可由 runtime 消费的根运动配置。
+    ///
+    /// 动态体的位置归物理求解器，静态体按定义不动；两者若再接受动画位移就会出现
+    /// 第二个位置所有者。因此它们返回 `None`，渲染侧也不会从骨架里剥掉根位移。
+    /// 角色控制器优先于误配的 `physics`，普通实体与运动学体则由 runtime 唯一落地。
+    pub fn effective_root_motion(&self) -> Option<&crate::animation::RootMotion> {
+        let root = self.animator.as_ref()?.root_motion.as_ref()?;
+        if self.controller.is_some()
+            || self.physics.is_none()
+            || self
+                .physics
+                .is_some_and(|body| body.kind == crate::physics::BodyKind::Kinematic)
+        {
+            Some(root)
+        } else {
+            None
+        }
+    }
 }
 
 impl PartialEq for Entity {
@@ -751,21 +770,55 @@ impl Scene {
         if index >= self.entities.len() {
             return Mat4::IDENTITY;
         }
-        let mut chain: Vec<usize> = Vec::new();
-        let mut current = index;
-        loop {
-            if chain.contains(&current) {
-                break; // 环：就此打住，把当前节点当根
+        // 沿父链向上时把矩阵左乘进结果，就能直接得到“根…父×自身”，无需先把
+        // 整条链塞进临时 Vec 再反转。根运动与角色控制器每帧都会走这里，哪怕一只
+        // 根实体每帧一次小分配也违反 World::update 的零分配合同。
+        //
+        // 坏数据里的环仍与旧实现同语义：Floyd 先算出“进入环前长度 + 环长”，
+        // 随后每个唯一节点恰好乘一次；不能只用步数上限多乘一个重复节点。
+        let next = |current: usize| self.parent_index(current);
+        let mut slow = Some(index);
+        let mut fast = Some(index);
+        let meeting = loop {
+            slow = slow.and_then(next);
+            fast = fast.and_then(next).and_then(next);
+            match (slow, fast) {
+                (Some(a), Some(b)) if a == b => break Some(a),
+                (None, _) | (_, None) => break None,
+                _ => {}
             }
-            chain.push(current);
-            match self.parent_index(current) {
-                Some(p) => current = p,
-                None => break,
+        };
+
+        let unique_count = meeting.map(|meeting| {
+            let mut prefix = 0usize;
+            let mut a = index;
+            let mut b = meeting;
+            while a != b {
+                a = next(a).expect("Floyd 环入口的两条链都必须留在环上");
+                b = next(b).expect("Floyd 环入口的两条链都必须留在环上");
+                prefix += 1;
             }
+            let mut cycle = 1usize;
+            let mut cursor = next(a).expect("检测到的环至少有一条父边");
+            while cursor != a {
+                cursor = next(cursor).expect("环内父边不能中断");
+                cycle += 1;
+            }
+            prefix + cycle
+        });
+
+        let mut out = Mat4::IDENTITY;
+        let mut current = Some(index);
+        let mut visited = 0usize;
+        while let Some(i) = current {
+            if unique_count.is_some_and(|limit| visited >= limit) {
+                break;
+            }
+            out = self.entities[i].transform.local_matrix() * out;
+            visited += 1;
+            current = next(i);
         }
-        chain.iter().rev().fold(Mat4::IDENTITY, |m, &i| {
-            m * self.entities[i].transform.local_matrix()
-        })
+        out
     }
 
     /// 一次性算出所有实体的世界矩阵（与 `entities` 同序同长）。

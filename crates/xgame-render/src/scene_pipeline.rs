@@ -922,10 +922,7 @@ fn pick_shadow_slot(packed: &[&Light]) -> Option<usize> {
 /// 灯不产生光照，也就不需要影子 —— 强行给它拟合一个立方体只会白烧六遍场景。
 fn pick_point_shadow_slot(packed: &[&Light]) -> Option<usize> {
     packed.iter().position(|l| {
-        l.casts_shadow
-            && l.kind == LightKind::Point
-            && l.range.is_finite()
-            && l.range > 0.0
+        l.casts_shadow && l.kind == LightKind::Point && l.range.is_finite() && l.range > 0.0
     })
 }
 
@@ -941,8 +938,16 @@ fn pick_point_shadow_slot(packed: &[&Light]) -> Option<usize> {
 ///
 /// 纯函数，不碰 GPU：立方体的几何正确性靠它单测，不靠截图猜。
 pub fn point_shadow_matrices(center: Vec3, near: f32, far: f32) -> [Mat4; POINT_SHADOW_FACES] {
-    let near = if near.is_finite() { near.max(1e-3) } else { 1e-3 };
-    let far = if far.is_finite() { far.max(near + 1e-3) } else { near + 1e-3 };
+    let near = if near.is_finite() {
+        near.max(1e-3)
+    } else {
+        1e-3
+    };
+    let far = if far.is_finite() {
+        far.max(near + 1e-3)
+    } else {
+        near + 1e-3
+    };
     let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, near, far);
     // 面序与 up 向量成对写死：这两张表错位一格，六面就会整体转 90°。
     //
@@ -2147,7 +2152,6 @@ pub struct ScenePipeline {
     /// 本帧阴影专用批次的段（同上，槽位在 `shadow_batches` 那一段）。
     shadow_only_runs: Vec<ShadowRun>,
 
-
     /// 本帧每级级联的视锥（长度 = 级数）。`None` = 那级的矩阵退化，
     /// 判成员位时按"全都命中"处理 —— 宁可多画，不能漏影子。
     cascade_frustums: Vec<Option<Frustum>>,
@@ -3263,7 +3267,11 @@ impl ScenePipeline {
                 batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
             );
             spass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
-            spass.draw_indexed(0..prim.num_indices, 0, batch.first..batch.first + batch.count);
+            spass.draw_indexed(
+                0..prim.num_indices,
+                0,
+                batch.first..batch.first + batch.count,
+            );
             submitted += batch.count as usize;
             calls += 1;
         }
@@ -3300,7 +3308,8 @@ impl ScenePipeline {
                 } else {
                     self.shadow_batches.get(run.batch as usize)
                 };
-                let Some((batch, prim)) = batch.and_then(|b| batch_prim(entities, model_cache, b).map(|p| (b, p)))
+                let Some((batch, prim)) =
+                    batch.and_then(|b| batch_prim(entities, model_cache, b).map(|p| (b, p)))
                 else {
                     bound = None;
                     continue;
@@ -3368,8 +3377,9 @@ impl ScenePipeline {
         let point_resolution = match point_shadow_slot {
             Some(slot) => match packed[slot].shadow_resolution {
                 // 没写分辨率时按方向光默认值的一半算（6 面 vs 4 级，总纹素量同一量级）。
-                0 => (self.default_shadow_resolution / 2)
-                    .clamp(256, DEFAULT_POINT_SHADOW_RESOLUTION),
+                0 => {
+                    (self.default_shadow_resolution / 2).clamp(256, DEFAULT_POINT_SHADOW_RESOLUTION)
+                }
                 // 显式写了也**封顶 2048**：立方体是 6 面，2048²×6 已经是 96 MB
                 // 深度图；照抄方向光的 4096 会变成 384 MB，那是个一点就崩的旋钮。
                 r => r.clamp(64, MAX_POINT_SHADOW_RESOLUTION),
@@ -3664,9 +3674,8 @@ impl ScenePipeline {
 
             let mut in_camera = true;
             if let Some(camera_frustum) = camera_frustum {
-                in_camera = camera_frustum.intersects_bounds(
-                    bounds.as_ref().expect("开了相机剔除就一定有包围盒"),
-                );
+                in_camera = camera_frustum
+                    .intersects_bounds(bounds.as_ref().expect("开了相机剔除就一定有包围盒"));
             }
 
             // 级联成员位：这一实体落在哪几级的拟合框里。
@@ -3691,8 +3700,8 @@ impl ScenePipeline {
                 if let Some(bounds) = bounds.as_ref() {
                     cascade_mask = 0;
                     // 实体的视线深度区间（一次点积，四级共用）。
-                    let center_depth = (bounds.center() - *camera_pos)
-                        .dot(cascade_forward.unwrap_or(Vec3::NEG_Z));
+                    let center_depth =
+                        (bounds.center() - *camera_pos).dot(cascade_forward.unwrap_or(Vec3::NEG_Z));
                     let radius = bounds.radius();
                     let (zmin, zmax) = (center_depth - radius, center_depth + radius);
                     for (k, frustum) in self.cascade_frustums.iter().enumerate() {
@@ -3815,12 +3824,16 @@ impl ScenePipeline {
                                 mask: &l.mask,
                             });
                         }
-                        let bones = crate::animation::compute_bones_composed(
+                        let root_motion = entity
+                            .effective_root_motion()
+                            .map(|root| (root.node.as_str(), root.axes));
+                        let bones = crate::animation::compute_bones_composed_with_root_motion(
                             &mesh.nodes,
                             skin,
                             (clip, t),
                             fade,
                             &stack,
+                            root_motion,
                         );
                         // 超过槽位容量的骨架（>256 骨）解析时已告警；这里截断
                         // 保证 staging 的槽距不被撑歪——宁可末梢骨不对，不能整帧错位。
@@ -4065,7 +4078,11 @@ impl ScenePipeline {
         // 逐级剔除关掉时清空：阴影 pass 退回"每级画全部"的老路径，代价是
         // 4 × 实例数，但那正是 A/B 对照的基准档。
         if shadow_enabled && self.cascaded_shadow_culling {
-            push_shadow_runs(&self.draw_order, &self.opaque_batches, &mut self.shadow_runs);
+            push_shadow_runs(
+                &self.draw_order,
+                &self.opaque_batches,
+                &mut self.shadow_runs,
+            );
             push_shadow_runs(
                 &self.shadow_order,
                 &self.shadow_batches,
@@ -4099,8 +4116,12 @@ impl ScenePipeline {
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
                     if point_culling && draw.point_mask != 0 {
-                        self.point_entries
-                            .push(pack_point_entry(0, draw.batch, draw.point_mask, slot));
+                        self.point_entries.push(pack_point_entry(
+                            0,
+                            draw.batch,
+                            draw.point_mask,
+                            slot,
+                        ));
                     }
                 }
             } else {
@@ -4112,8 +4133,12 @@ impl ScenePipeline {
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
                     if point_culling && draw.point_mask != 0 {
-                        self.point_entries
-                            .push(pack_point_entry(0, draw.batch, draw.point_mask, slot));
+                        self.point_entries.push(pack_point_entry(
+                            0,
+                            draw.batch,
+                            draw.point_mask,
+                            slot,
+                        ));
                     }
                 }
             }
@@ -4137,8 +4162,12 @@ impl ScenePipeline {
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
                     if point_culling && draw.point_mask != 0 {
-                        self.point_entries
-                            .push(pack_point_entry(1, draw.batch, draw.point_mask, slot));
+                        self.point_entries.push(pack_point_entry(
+                            1,
+                            draw.batch,
+                            draw.point_mask,
+                            slot,
+                        ));
                     }
                 }
             } else {
@@ -4150,8 +4179,12 @@ impl ScenePipeline {
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
                     if point_culling && draw.point_mask != 0 {
-                        self.point_entries
-                            .push(pack_point_entry(1, draw.batch, draw.point_mask, slot));
+                        self.point_entries.push(pack_point_entry(
+                            1,
+                            draw.batch,
+                            draw.point_mask,
+                            slot,
+                        ));
                     }
                 }
             }
@@ -4172,7 +4205,11 @@ impl ScenePipeline {
                 if !self.cascaded_shadow_culling {
                     self.point_entries.sort_unstable();
                 }
-                build_point_runs(&self.point_entries, &mut self.point_face_list, &mut self.point_runs);
+                build_point_runs(
+                    &self.point_entries,
+                    &mut self.point_face_list,
+                    &mut self.point_runs,
+                );
                 if !self.point_face_list.is_empty() {
                     queue.write_buffer(
                         &self.face_list_buffer,
@@ -4805,12 +4842,26 @@ mod tests {
     fn shadow_cascades_are_deterministic() {
         let eye = Vec3::new(1.0, 7.0, 20.0);
         let inv = probe_camera(eye, Vec3::new(0.0, 0.0, 0.0)).inverse();
-        let a =
-            cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4, 0.0)
-                .expect("a");
-        let b =
-            cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4, 0.0)
-                .expect("b");
+        let a = cascade_shadow_matrices(
+            &inv,
+            eye,
+            Vec3::new(0.2, -1.0, 0.1),
+            probe_scene(),
+            2048,
+            4,
+            0.0,
+        )
+        .expect("a");
+        let b = cascade_shadow_matrices(
+            &inv,
+            eye,
+            Vec3::new(0.2, -1.0, 0.1),
+            probe_scene(),
+            2048,
+            4,
+            0.0,
+        )
+        .expect("b");
         assert_eq!(
             a.view_proj[0].to_cols_array(),
             b.view_proj[0].to_cols_array()
@@ -4886,12 +4937,26 @@ mod tests {
         let eye = Vec3::new(0.0, 6.0, 24.0);
         let bounds = probe_scene();
         let dir = Vec3::new(0.4, -1.0, 0.3);
-        let plain =
-            cascade_shadow_matrices(&probe_camera(eye, Vec3::ZERO).inverse(), eye, dir, bounds, 2048, SHADOW_CASCADES, 0.0)
-                .expect("plain");
-        let blended =
-            cascade_shadow_matrices(&probe_camera(eye, Vec3::ZERO).inverse(), eye, dir, bounds, 2048, SHADOW_CASCADES, 0.25)
-                .expect("blended");
+        let plain = cascade_shadow_matrices(
+            &probe_camera(eye, Vec3::ZERO).inverse(),
+            eye,
+            dir,
+            bounds,
+            2048,
+            SHADOW_CASCADES,
+            0.0,
+        )
+        .expect("plain");
+        let blended = cascade_shadow_matrices(
+            &probe_camera(eye, Vec3::ZERO).inverse(),
+            eye,
+            dir,
+            bounds,
+            2048,
+            SHADOW_CASCADES,
+            0.25,
+        )
+        .expect("blended");
 
         // 切分点不能动：重叠改的是拟合框，不是层级划分。
         assert_eq!(plain.splits, blended.splits);
@@ -4959,13 +5024,27 @@ mod tests {
         let eye = Vec3::new(0.0, 6.0, 24.0);
         let bounds = probe_scene();
         let dir = Vec3::new(0.4, -1.0, 0.3);
-        let base =
-            cascade_shadow_matrices(&probe_camera(eye, Vec3::ZERO).inverse(), eye, dir, bounds, 2048, SHADOW_CASCADES, 0.0)
-                .expect("base");
+        let base = cascade_shadow_matrices(
+            &probe_camera(eye, Vec3::ZERO).inverse(),
+            eye,
+            dir,
+            bounds,
+            2048,
+            SHADOW_CASCADES,
+            0.0,
+        )
+        .expect("base");
         for bad in [-0.5f32, f32::NAN, f32::INFINITY] {
-            let got =
-                cascade_shadow_matrices(&probe_camera(eye, Vec3::ZERO).inverse(), eye, dir, bounds, 2048, SHADOW_CASCADES, bad)
-                    .expect("bad");
+            let got = cascade_shadow_matrices(
+                &probe_camera(eye, Vec3::ZERO).inverse(),
+                eye,
+                dir,
+                bounds,
+                2048,
+                SHADOW_CASCADES,
+                bad,
+            )
+            .expect("bad");
             for c in 0..SHADOW_CASCADES {
                 assert_eq!(
                     base.view_proj[c].to_cols_array(),
@@ -5199,10 +5278,7 @@ mod tests {
                 clip.y / clip.w
             );
             let ndc_z = clip.z / clip.w;
-            assert!(
-                (0.0..=1.0).contains(&ndc_z),
-                "面 {i} 的深度越界: {ndc_z}"
-            );
+            assert!((0.0..=1.0).contains(&ndc_z), "面 {i} 的深度越界: {ndc_z}");
         }
     }
 
@@ -5393,12 +5469,30 @@ mod tests {
     #[test]
     fn point_face_mask_is_conservative_at_the_pyramid_edges() {
         // 正对着某一面：只该有一位。
-        assert_eq!(point_face_mask(Vec3::new(8.0, 1.0, -1.0), 0.0, 100.0), 0b000001);
-        assert_eq!(point_face_mask(Vec3::new(-8.0, 1.0, -1.0), 0.0, 100.0), 0b000010);
-        assert_eq!(point_face_mask(Vec3::new(1.0, 8.0, -1.0), 0.0, 100.0), 0b000100);
-        assert_eq!(point_face_mask(Vec3::new(1.0, -8.0, -1.0), 0.0, 100.0), 0b001000);
-        assert_eq!(point_face_mask(Vec3::new(1.0, 1.0, 8.0), 0.0, 100.0), 0b010000);
-        assert_eq!(point_face_mask(Vec3::new(1.0, 1.0, -8.0), 0.0, 100.0), 0b100000);
+        assert_eq!(
+            point_face_mask(Vec3::new(8.0, 1.0, -1.0), 0.0, 100.0),
+            0b000001
+        );
+        assert_eq!(
+            point_face_mask(Vec3::new(-8.0, 1.0, -1.0), 0.0, 100.0),
+            0b000010
+        );
+        assert_eq!(
+            point_face_mask(Vec3::new(1.0, 8.0, -1.0), 0.0, 100.0),
+            0b000100
+        );
+        assert_eq!(
+            point_face_mask(Vec3::new(1.0, -8.0, -1.0), 0.0, 100.0),
+            0b001000
+        );
+        assert_eq!(
+            point_face_mask(Vec3::new(1.0, 1.0, 8.0), 0.0, 100.0),
+            0b010000
+        );
+        assert_eq!(
+            point_face_mask(Vec3::new(1.0, 1.0, -8.0), 0.0, 100.0),
+            0b100000
+        );
         // 正好在 `+X`/`+Y` 的分界面上：两面都算（保守那一侧）。
         let both = point_face_mask(Vec3::new(5.0, 5.0, 0.0), 0.0, 100.0);
         assert_eq!(both & 0b000001, 0b000001);
@@ -5422,11 +5516,7 @@ mod tests {
         let mut samples = Vec::with_capacity(2000);
         for i in 0..2000 {
             let (gx, gz) = ((i % 45) as f32, (i / 45) as f32);
-            let p = Vec3::new(
-                (gx - 22.0) * 6.0,
-                0.5,
-                -(gz + 1.0) * 6.0,
-            );
+            let p = Vec3::new((gx - 22.0) * 6.0, 0.5, -(gz + 1.0) * 6.0);
             samples.push((p - light, 0.87f32));
         }
         // 预热

@@ -32,11 +32,9 @@
 //!   就是一个可读的错误（退出码 1），而不是静默降级。
 //! - **不加载资产到 GPU**（截图为唯一例外，见上）：模型 / 纹理是渲染器
 //!   的事；引用完整性由 `--check` / MCP `project_check` 管。
-//! - **不推进动画播放时钟**：动画采样在渲染宿主侧（`AnimationDriver`），
-//!   脚本推的 `set_anim_param` 等参数照常写入场景，只是没人消费 ——
-//!   骨骼姿态是渲染专用数据，无头运行里没有观察者。`--screenshot` 例外：
-//!   那时候有观察者了，时钟按同一串 dt 逐帧推进，骨骼姿态停在模拟终点
-//!   （与编辑器 Play 的行为同构）。
+//! - **动画照常推进**：播放时钟与根运动住在 runtime；普通无头也会消费根运动，
+//!   所以 `--dump-scene` 能直接验收动画驱动的实体位移。骨骼矩阵仍只在真正渲染
+//!   （`--screenshot`）时计算，普通无头不建 GPU。
 //! - **不重新编译 Rust 插件**：`Plugins/*.dll` 按现状加载（与打包出的游戏
 //!   同一条路径）；改了插件源码要先在编辑器里 Play 一次或重跑 PIE 构建。
 //!
@@ -58,7 +56,6 @@ use std::time::Instant;
 use serde_json::json;
 use xgame_core::{ProjectHandle, RenderConfig, Scene};
 use xgame_math::glam::Vec3;
-use xgame_render::animation::AnimationDriver;
 use xgame_render::scene_pipeline::SceneLighting;
 use xgame_render::screenshot::{ScreenshotRenderer, ShotCamera};
 use xgame_runtime::{BehaviorRegistry, LogLevel, ScriptLog, World, WorldConfig};
@@ -685,6 +682,10 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         .with_input_map(input_map)
         .with_behavior_registry(behaviors)
         .with_scene_loader(project.clone())
+        .with_animation_loader(xgame_render::gltf_loader::GltfAnimationLoader::new(
+            project.root(),
+            project.manifest().content.search_paths.clone(),
+        ))
         .with_current_scene(entry_scene)
         .with_scene_order(project.manifest().scene_order());
 
@@ -692,10 +693,6 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
 
     // ── 帧循环：固定 dt、逐帧计时、日志随手收 ──
     //
-    // 截图请求会额外挂一个动画时钟（渲染观察者）：按同一串 dt 逐帧 tick，
-    // 骨骼姿态与编辑器 Play 的推进方式一致，停在模拟终点。不截图时不建 ——
-    // 无截图路径的每帧成本与"动画从未存在"逐位一致。
-    let mut shot_anim = args.screenshot.as_ref().map(|_| AnimationDriver::new());
     let mut frame_samples_us: Vec<f64> = Vec::with_capacity(args.frames as usize);
     let mut fixed_steps: u64 = 0;
     let mut log_info: u64 = 0;
@@ -707,11 +704,6 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     for _ in 0..args.frames {
         let frame_start = Instant::now();
         let frame = world.update(dt);
-        if let Some(anim) = shot_anim.as_mut() {
-            // 与独立游戏同一份口径：动画吃缩放后的 dt，脚本暂停时截图里的姿势
-            // 也停在那一刻（否则同一份脚本在游戏里停、在截图里还在跑）。
-            anim.tick(world.frame_dt(), &world.scene().entities);
-        }
         frame_samples_us.push(micros(frame_start.elapsed()));
 
         fixed_steps += u64::from(frame.fixed_steps);
@@ -751,9 +743,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     // 需要 GPU，初始化 / 渲染 / 落盘任何一步失败都整体报失败（exit 1）。
     let screenshot = match &args.screenshot {
         Some(path) => {
-            let anim = shot_anim
-                .as_ref()
-                .expect("截图请求在帧循环前就建好了动画时钟");
+            let anim = world.animation();
             let (width, height) = args.shot_size;
             let mut renderer = ScreenshotRenderer::new(project.root(), width, height)
                 .map_err(|e| format!("截图初始化失败: {e:#}"))?;

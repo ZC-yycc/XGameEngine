@@ -131,7 +131,7 @@ pub struct ContentConfig {
     /// 附加搜索路径列表（有序，项目相对目录）。
     ///
     /// **语义**（2026-10-29 定义并落地，见 [`crate::project::resolve_read_path`]）：
-    /// 运行时按项目相对路径读文件（脚本 / 音频）时，先试 `根/<相对路径>`，
+    /// 运行时按项目相对路径读文件（模型 / 脚本 / 音频）时，先试 `根/<相对路径>`，
     /// 再依次试 `根/<条目>/<相对路径>`。条目本身也过
     /// [`crate::project::normalize_project_relative`]，不合规的条目在运行时被
     /// **跳过**、由 `--check` 报成问题 —— 它绝不会让读取探到项目外。
@@ -683,7 +683,10 @@ pub struct RenderConfig {
     ///
     /// 坏值（`NaN` / `±∞`）在渲染侧按 1 处理，不在这里夹取 —— 夹取会让
     /// "作者写了什么"与"实际跑什么"分叉，而这个字段本身就是调试用的。
-    #[serde(default = "default_lod_bias", skip_serializing_if = "is_default_lod_bias")]
+    #[serde(
+        default = "default_lod_bias",
+        skip_serializing_if = "is_default_lod_bias"
+    )]
     pub lod_bias: f32,
 }
 

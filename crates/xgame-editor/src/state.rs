@@ -648,8 +648,7 @@ impl EditorCamera {
         if !factor.is_finite() || factor <= 0.0 {
             return;
         }
-        self.pan_speed =
-            (self.pan_speed * factor).clamp(Self::MIN_PAN_SPEED, Self::MAX_PAN_SPEED);
+        self.pan_speed = (self.pan_speed * factor).clamp(Self::MIN_PAN_SPEED, Self::MAX_PAN_SPEED);
     }
 
     /// 切换正交 / 透视，返回切换后的状态（调用方拿它写一行日志回执）。
@@ -1327,6 +1326,9 @@ impl EditorState {
                 // 不丢缓存的话"改了导入参数但视口纹丝不动"。
                 if let Some(renderer) = self.scene_renderer.as_mut() {
                     renderer.invalidate_assets();
+                }
+                if let Some(runtime) = self.game_runtime.as_mut() {
+                    runtime.invalidate_animation_assets();
                 }
             }
             Err(e) => self.log_error(format!("保存导入设置失败: {e}")),
@@ -3026,6 +3028,9 @@ impl EditorState {
             // 材质库不够 —— 与改导入设置走同一条失效路径。
             if let Some(renderer) = self.scene_renderer.as_mut() {
                 renderer.invalidate_assets();
+            }
+            if let Some(runtime) = self.game_runtime.as_mut() {
+                runtime.invalidate_animation_assets();
             }
             notes.push(format!(
                 "检测到 {} 个资产变更：已重新加载材质 / 模型 / 贴图",
@@ -5255,11 +5260,7 @@ mod tests {
             ..EditorCamera::default()
         };
         let aspect = 16.0 / 9.0;
-        let view = xgame_math::projection::look_at(
-            Vec3::ZERO,
-            Vec3::new(0.0, 0.0, -1.0),
-            Vec3::Y,
-        );
+        let view = xgame_math::projection::look_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), Vec3::Y);
         let vp = camera.ortho_projection(aspect) * view;
 
         let project = |p: Vec3| {
@@ -5268,10 +5269,18 @@ mod tests {
         };
         // 上边缘：y = +half_h → ndc.y = 1。
         let top = project(Vec3::new(0.0, 4.0, -5.0));
-        assert!((top.y - 1.0).abs() < 1e-4, "上边缘应到 NDC 1，实际 {}", top.y);
+        assert!(
+            (top.y - 1.0).abs() < 1e-4,
+            "上边缘应到 NDC 1，实际 {}",
+            top.y
+        );
         // 右边缘：x = half_h * aspect → ndc.x = 1（像素是方的）。
         let right = project(Vec3::new(4.0 * aspect, 0.0, -5.0));
-        assert!((right.x - 1.0).abs() < 1e-4, "右边缘应到 NDC 1，实际 {}", right.x);
+        assert!(
+            (right.x - 1.0).abs() < 1e-4,
+            "右边缘应到 NDC 1，实际 {}",
+            right.x
+        );
         // 正交下**深度不影响屏幕位置**（这正是它与透视的区别）。
         let near_point = project(Vec3::new(0.0, 4.0, -1.0));
         assert!((near_point.y - top.y).abs() < 1e-5);
@@ -5306,7 +5315,10 @@ mod tests {
             "正交下不同像素的射线方向必须一致：{d1:?} vs {d2:?}"
         );
         // 这个视图矩阵朝 -Z 看（见上面的 look_at 参数）。
-        assert!((d1 - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-4, "方向就是相机朝向");
+        assert!(
+            (d1 - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-4,
+            "方向就是相机朝向"
+        );
         assert!((o1 - o2).length() > 1.0, "但起点必须随像素平移");
     }
 
@@ -5317,7 +5329,10 @@ mod tests {
         let (yaw, pitch, position) = (camera.yaw, camera.pitch, camera.position);
         assert!(!camera.ortho, "默认是透视");
         assert!(camera.toggle_ortho());
-        assert_eq!((camera.yaw, camera.pitch, camera.position), (yaw, pitch, position));
+        assert_eq!(
+            (camera.yaw, camera.pitch, camera.position),
+            (yaw, pitch, position)
+        );
         assert!(!camera.toggle_ortho());
         assert!(!camera.ortho);
 
@@ -5426,16 +5441,15 @@ mod tests {
     /// Lua 报错的 `路径:行号:` 前缀能被认出来（这是"点报错跳源码"的入口）。
     #[test]
     fn script_error_source_reads_the_lua_location() {
-        let src = script_error_source("Scripts/player.lua:42: attempt to index a nil value").unwrap();
+        let src =
+            script_error_source("Scripts/player.lua:42: attempt to index a nil value").unwrap();
         assert_eq!(src.path, "Scripts/player.lua");
         assert_eq!(src.line, 42);
         assert_eq!(src.label(), "Scripts/player.lua:42");
 
         // Windows 反斜杠、以及被包在括号里的形式
-        let src = script_error_source(
-            "runtime error: Scripts\\enemy.lua:7: bad argument #1",
-        )
-        .unwrap();
+        let src =
+            script_error_source("runtime error: Scripts\\enemy.lua:7: bad argument #1").unwrap();
         assert_eq!(src.path, "Scripts\\enemy.lua");
         assert_eq!(src.line, 7);
 

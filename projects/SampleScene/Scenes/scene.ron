@@ -397,6 +397,12 @@
                         mask: ["b_Spine01_02"],
                     ),
                 ],
+                // 根运动只消费基础通道的水平位移；Fox 实际带位移轨道的是髋骨，
+                // 不是场景根 / 骨架包装根。Y 轴起伏继续留给骨架姿势，避免实体离地。
+                root_motion: Some((
+                    node: "b_Hip_01",
+                    axes: (true, false, true),
+                )),
             )),
             scripts: [
                 "guid://58a14f446aa341711d5d7b75806b8ecc",

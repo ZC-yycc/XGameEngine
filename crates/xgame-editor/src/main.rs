@@ -385,20 +385,30 @@ impl EditorApp {
         if app.ui_shot.as_ref().map(|s| s.ortho).unwrap_or(false) {
             if let Some(session) = app.session.as_mut() {
                 session.state.editor_camera.ortho = true;
-                session.state.editor_camera.set_axis_view(crate::state::AxisView::Front);
+                session
+                    .state
+                    .editor_camera
+                    .set_axis_view(crate::state::AxisView::Front);
             }
         }
 
         // `--ui-source`：把源码查看器拉开并定位到指定行。
         if let Some((path, line)) = app.ui_shot.as_ref().and_then(|s| s.source.clone()) {
             if let Some(session) = app.session.as_mut() {
-                session.state.open_source(&state::LogSource::new(path, line));
+                session
+                    .state
+                    .open_source(&state::LogSource::new(path, line));
             }
         }
 
         // `--ui-command`：把命令面板拉开。不聚焦查询框 —— 聚焦 TextEdit 的
         // 光标按墙钟闪烁，会让"同一份代码截出的图逐字节不变"这条验收失效。
-        if app.ui_shot.as_ref().map(|s| s.open_command).unwrap_or(false) {
+        if app
+            .ui_shot
+            .as_ref()
+            .map(|s| s.open_command)
+            .unwrap_or(false)
+        {
             if let Some(session) = app.session.as_mut() {
                 let state = &session.state;
                 session.command_palette.open(state, false);
@@ -534,9 +544,11 @@ impl eframe::App for EditorApp {
                     .file
                     .as_ref()
                     .map(|file| LogSource::new(file.clone(), record.line));
-                session
-                    .state
-                    .log_with_source(LogLevel::from_log(record.level), record.console_text(), source);
+                session.state.log_with_source(
+                    LogLevel::from_log(record.level),
+                    record.console_text(),
+                    source,
+                );
             }
         }
 
@@ -565,10 +577,11 @@ impl eframe::App for EditorApp {
             // 不会把编辑器拖进满速空转。
             animating: self.session.as_mut().is_some_and(|s| {
                 let state = &mut s.state;
-                let anim = match (&mut state.scene_renderer, &state.scene) {
-                    (Some(renderer), scene) => renderer.viewport_animating(scene),
-                    (None, _) => false,
-                };
+                let anim = state.play_mode != PlayMode::Paused
+                    && match (&mut state.scene_renderer, &state.scene) {
+                        (Some(renderer), scene) => renderer.viewport_animating(scene),
+                        (None, _) => false,
+                    };
                 // 粒子也算"在动"：视角不动、只有粒子在飞时，缺这一条就会被
                 // 当成空闲停下来 —— 火焰会一格一格地跳。
                 anim || state.particles_animating()
@@ -1904,7 +1917,10 @@ mod tests {
             ("Scripts/a.lua".to_owned(), 42)
         );
         // 只给文件：行号按 1 起（截图上也要能出内容）
-        assert_eq!(parse_source_spec("Scripts/a.lua"), ("Scripts/a.lua".to_owned(), 1));
+        assert_eq!(
+            parse_source_spec("Scripts/a.lua"),
+            ("Scripts/a.lua".to_owned(), 1)
+        );
         // 盘符里的冒号不能被当成行号分隔
         assert_eq!(
             parse_source_spec(r"C://work//a.lua:7"),

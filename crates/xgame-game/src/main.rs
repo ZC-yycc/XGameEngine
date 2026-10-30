@@ -128,9 +128,6 @@ struct GameApp {
     /// 主 pass 的采样数（1 = 未开 MSAA，见 `supported_sample_count`）。
     sample_count: u32,
     model_cache: HashMap<String, GltfMesh>,
-    /// 每实体的动画播放时钟。用**帧 dt** 推进（游戏循环本来就有），与编辑器
-    /// 墙钟推进的 `SceneRenderer` 是同一份逻辑的两个宿主。
-    anim_driver: AnimationDriver,
 }
 
 impl GameApp {
@@ -286,6 +283,10 @@ impl GameApp {
         .with_behavior_registry(behaviors)
         .with_audio_engine(AudioEngine::open(project.root()))
         .with_scene_loader(project.clone())
+        .with_animation_loader(GltfAnimationLoader::new(
+            project.root(),
+            project.manifest().content.search_paths.clone(),
+        ))
         .with_current_scene(entry_scene)
         // 关卡顺序来自 `project.ron` 的 `build.scenes`：脚本的 `scene_index()` /
         // `load_scene_at(i)` 都读它。未配置 = 空，脚本只能按路径切。
@@ -315,7 +316,6 @@ impl GameApp {
             sample_count,
             quality,
             model_cache: HashMap::new(),
-            anim_driver: AnimationDriver::new(),
         }
     }
 
@@ -439,12 +439,6 @@ impl GameApp {
         let pointer = input.state().has_cursor().then(|| input.mouse_pos());
         self.world.set_ui_pointer(pointer);
         self.world.update(dt);
-        // 动画时钟跟着**帧时间**走：物理/脚本推进的同一拍，保证动画与游戏逻辑
-        // 用的是同一个 dt（掉帧时两边一起慢，不会各走各的）。
-        // 吃的是**缩放后**的 dt（`world.frame_dt()`）：脚本 `set_time_scale(0)`
-        // 暂停时，动画必须一起停 —— 否则角色冻在原地却还在跑步。
-        let anim_dt = self.world.frame_dt();
-        self.anim_driver.tick(anim_dt, &self.world.scene().entities);
         for log in self.world.take_logs() {
             emit_script_log(&log);
         }
@@ -479,7 +473,13 @@ impl GameApp {
                 if self.model_cache.contains_key(model) {
                     continue;
                 }
-                match GltfMesh::load(&self.device, &self.queue, self.project.root(), model) {
+                match GltfMesh::load_with_search_paths(
+                    &self.device,
+                    &self.queue,
+                    self.project.root(),
+                    model,
+                    &self.project.manifest().content.search_paths,
+                ) {
                     Ok(m) => {
                         log::info!("Loaded model '{model}' ({} primitives)", m.primitives.len());
                         self.model_cache.insert(model.to_string(), m);
@@ -542,7 +542,7 @@ impl GameApp {
             &scene.entities,
             &world_matrices,
             &self.model_cache,
-            &self.anim_driver,
+            self.world.animation(),
             &view_proj,
             jitter_ndc,
             &eye,

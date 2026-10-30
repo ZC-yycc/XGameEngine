@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use wgpu::util::DeviceExt;
 
@@ -8,7 +8,10 @@ use xgame_math::glam::{Mat4, Quat, Vec3};
 
 use crate::animation::{Interpolation, TrackPath};
 use crate::texture::{Texture, TextureOptions};
-use xgame_core::{read_import_settings, ImportSettings, MaterialAsset};
+use xgame_core::{
+    read_import_settings, resolve_read_path, AnimationAsset, AnimationLoader, ImportSettings,
+    MaterialAsset,
+};
 
 // ---------------------------------------------------------------------------
 // 轴对齐包围盒
@@ -300,6 +303,67 @@ impl GltfMesh {
     /// 这个模型有没有可用的蒙皮动画（Inspector 决定要不要显示动画区块）。
     pub fn has_animation(&self) -> bool {
         !self.animations.is_empty() && !self.skins.is_empty()
+    }
+}
+
+/// 解析磁盘模型的真实文件与并排导入设置。
+///
+/// 先把 GPU 路径原样收成纯函数，便于用不需要显卡的回归测试钉住
+/// `search_paths` 与 `.meta` 必须和 CPU 动画装载器同解。
+fn resolve_model_source(
+    project_root: &Path,
+    model: &str,
+    search_paths: &[String],
+) -> Result<(PathBuf, ImportSettings)> {
+    let path = resolve_read_path(project_root, model, search_paths)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    // `.meta` 与真正命中的文件并排；search_paths 命中时不能仍去直接路径旁找，
+    // 否则渲染与根运动会吃到不同的 model_scale。
+    let relative = path
+        .strip_prefix(project_root)
+        .unwrap_or(path.as_path())
+        .to_string_lossy()
+        .replace('\\', "/");
+    let settings = read_import_settings(project_root, &relative);
+    Ok((path, settings))
+}
+
+/// 给 runtime 使用的**纯 CPU** glTF 动画装载器。
+///
+/// 它与 [`GltfMesh`] 共用本文件的 [`parse_animation_data_scaled`]，所以节点、剪辑和
+/// `model_scale` 不会出现“渲染看到一套、根运动采另一套”。这里只读 glTF 缓冲，不建
+/// wgpu 设备，也不上传顶点；普通 `--headless` 因而能完整推进根运动。
+#[derive(Clone, Debug)]
+pub struct GltfAnimationLoader {
+    root: PathBuf,
+    search_paths: Vec<String>,
+}
+
+impl GltfAnimationLoader {
+    pub fn new(root: impl Into<PathBuf>, search_paths: Vec<String>) -> Self {
+        Self {
+            root: root.into(),
+            search_paths,
+        }
+    }
+}
+
+impl AnimationLoader for GltfAnimationLoader {
+    fn load_animation(&self, model: &str) -> Result<AnimationAsset, String> {
+        // 内置图元没有 glTF 节点 / 剪辑，直接给空资产；这不是加载失败，也不该每帧告警。
+        if crate::mesh::BuiltinMesh::from_model_path(model).is_some() {
+            return Ok(AnimationAsset::default());
+        }
+        let (path, settings) = resolve_model_source(&self.root, model, &self.search_paths)
+            .map_err(|error| format!("{error:#}"))?;
+        let (document, buffers, _) = gltf::import(&path)
+            .with_context(|| format!("解析 glTF '{}'", path.display()))
+            .map_err(|err| format!("{err:#}"))?;
+        let data = parse_animation_data_scaled(&document, &buffers, settings.model_scale);
+        Ok(AnimationAsset {
+            nodes: data.nodes,
+            clips: data.animations,
+        })
     }
 }
 
@@ -680,6 +744,20 @@ impl GltfMesh {
         project_root: &Path,
         model: &str,
     ) -> Result<Self> {
+        Self::load_with_search_paths(device, queue, project_root, model, &[])
+    }
+
+    /// 与 [`Self::load`] 相同，但按项目清单的 `content.search_paths` 有序兜底。
+    ///
+    /// 宿主应传入与 [`GltfAnimationLoader`] 相同的列表，保证 GPU 网格与 CPU
+    /// 动画命中同一文件及其并排 `.meta`。保留 [`Self::load`] 作为空列表兼容入口。
+    pub fn load_with_search_paths(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        project_root: &Path,
+        model: &str,
+        search_paths: &[String],
+    ) -> Result<Self> {
         if let Some(builtin) = crate::mesh::BuiltinMesh::from_model_path(model) {
             return Ok(Self::from_mesh_data(
                 device,
@@ -690,8 +768,8 @@ impl GltfMesh {
         }
         // 读 `.meta`（只读）。没有 `.meta` 或解析失败 → 默认设置，
         // 与资产管线"坏 meta 不阻断出图"的约定一致。
-        let settings = read_import_settings(project_root, model);
-        Self::from_file_with(device, queue, project_root.join(model), settings)
+        let (path, settings) = resolve_model_source(project_root, model, search_paths)?;
+        Self::from_file_with(device, queue, path, settings)
     }
 }
 
@@ -1609,6 +1687,57 @@ pub(crate) mod tests {
                 "关键帧时间必须单调不减"
             );
         }
+    }
+
+    /// runtime 的 CPU 装载器必须与 GPU 模型加载共用同一份解析与导入缩放。
+    #[test]
+    fn animation_loader_reads_fox_without_a_gpu() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/SampleScene");
+        let loader = GltfAnimationLoader::new(&root, Vec::new());
+        let asset = loader
+            .load_animation("Resources/Fox.gltf")
+            .expect("CPU 动画装载不应需要 GPU");
+        assert_eq!(asset.clips.len(), 3);
+        assert!(
+            asset.node_index("b_Hip_01").is_some(),
+            "根运动节点必须可按名找到"
+        );
+        assert!(asset.clip("Walk").is_some());
+    }
+
+    /// CPU 根运动与 GPU 网格必须命中 `search_paths` 里的同一个文件，并读取该文件
+    /// 旁边的 `.meta`。旧 GPU 路径直接 `project_root.join(model)`，这里会回到不存在的
+    /// `Resources/Fox.gltf`，同时把缩放误读成默认 1.0。
+    #[test]
+    fn model_source_search_paths_and_meta_match_cpu_loader() {
+        struct TempRoot(PathBuf);
+        impl Drop for TempRoot {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let root = TempRoot(std::env::temp_dir().join(format!(
+            "xgame-model-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let fallback = root.0.join("Mods/Resources/Fox.gltf");
+        std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        std::fs::write(&fallback, b"model placeholder").unwrap();
+
+        let mut meta = xgame_core::AssetMeta::fresh(xgame_core::AssetKind::Model);
+        meta.import.model_scale = 2.5;
+        std::fs::write(fallback.with_extension("gltf.meta"), meta.to_ron().unwrap()).unwrap();
+
+        let search_paths = vec!["Mods".to_owned()];
+        let (path, settings) =
+            resolve_model_source(&root.0, "Resources/Fox.gltf", &search_paths).unwrap();
+        assert_eq!(path, fallback, "GPU 与 CPU 必须命中同一个模型文件");
+        assert_eq!(settings.model_scale, 2.5, "必须读取命中文件旁的 .meta");
     }
 
     /// 端到端：Walk 中点采样出 24 个有限矩阵，且与第 0 帧**不同** ——

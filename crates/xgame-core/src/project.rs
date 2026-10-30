@@ -223,10 +223,9 @@ impl std::fmt::Display for PathDefect {
                 f,
                 "路径组件 `{part}` 以空格或点结尾（Windows 会静默吃掉这两个字符）"
             ),
-            Self::IllegalChar { part } => write!(
-                f,
-                "路径组件 `{part}` 含非法字符（控制字符或 < > \" | ? *）"
-            ),
+            Self::IllegalChar { part } => {
+                write!(f, "路径组件 `{part}` 含非法字符（控制字符或 < > \" | ? *）")
+            }
             Self::ReservedName { part } => write!(
                 f,
                 "路径组件 `{part}` 是 Windows 保留设备名（打开的是设备，不是文件）"
@@ -282,7 +281,7 @@ fn validate_path_component(part: &str) -> Result<(), PathDefect> {
 }
 
 // ---------------------------------------------------------------------------
-// 运行时读路径：脚本 / 音频的解析入口
+// 运行时读路径：模型 / 脚本 / 音频的解析入口
 // ---------------------------------------------------------------------------
 
 /// 运行时**读**路径解析失败的原因。
@@ -320,7 +319,7 @@ impl std::fmt::Display for ReadPathError {
     }
 }
 
-/// 把一个**项目相对**的读路径解析成绝对路径（脚本 / 音频的共用入口）。
+/// 把一个**项目相对**的读路径解析成绝对路径（模型 / 脚本 / 音频的共用入口）。
 ///
 /// # 为什么要这一层
 ///
@@ -442,7 +441,10 @@ pub struct Project {
     /// 质量档位（低 / 中 / 高 + 显式覆盖）。**全空 = 不存在**（不落盘）——
     /// 老项目没有这一节时行为与引入档位之前逐位一致（MSAA 取适配器最大、
     /// 阴影默认 2048、LOD 缩放 1.0）。语义见 [`crate::quality`]。
-    #[serde(default, skip_serializing_if = "crate::quality::QualityConfig::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::quality::QualityConfig::is_empty"
+    )]
     pub quality: crate::quality::QualityConfig,
     /// 构建 / 发布设置（版本号 + 有序关卡清单）。
     ///
@@ -1098,12 +1100,11 @@ impl ProjectHandle {
     /// 这样"改了资产名再保存"就把新身份固化进文件，而不是继续存路径。
     pub fn write_prefab(&self, relative: &str, prefab: &Prefab) -> Result<(), ProjectError> {
         // 路径校验放在最前面：不合法就**不该去扫资产库**（那是几百毫秒的活）。
-        let relative = normalize_project_relative(relative).map_err(|defect| {
-            ProjectError::InvalidPath {
+        let relative =
+            normalize_project_relative(relative).map_err(|defect| ProjectError::InvalidPath {
                 relative: relative.to_owned(),
                 reason: defect.to_string(),
-            }
-        })?;
+            })?;
         let encoded = {
             let mut assets = self.assets();
             // 与 `write_scene` 同理：编码前保证索引是最新的。
@@ -1356,10 +1357,11 @@ impl ProjectHandle {
     /// 的热重载扫描按 mtime 判"外部改动"，白刷一次等于凭空触发一次重载；
     /// 对只读 / 被占用的文件，也变成"没改动就存得下去"。
     pub fn write_scene(&self, relative: &str, scene: &Scene) -> Result<(), ProjectError> {
-        let relative = normalize_scene_relative(relative).map_err(|reason| ProjectError::InvalidPath {
-            relative: relative.to_owned(),
-            reason,
-        })?;
+        let relative =
+            normalize_scene_relative(relative).map_err(|reason| ProjectError::InvalidPath {
+                relative: relative.to_owned(),
+                reason,
+            })?;
         let path = self.path(&relative);
         let text = self.scene_text(scene, &path)?;
         if unchanged_on_disk(&path, &text) {
@@ -2843,7 +2845,10 @@ mod tests {
     fn quality_survives_manifest_roundtrip() {
         let mut project = Project::new("Quality");
         let text = ron::to_string(&project).expect("序列化");
-        assert!(!text.contains("quality"), "全空的 quality 节不该落盘: {text}");
+        assert!(
+            !text.contains("quality"),
+            "全空的 quality 节不该落盘: {text}"
+        );
 
         project.quality = crate::quality::QualityConfig {
             preset: Some(crate::quality::QualityPreset::Low),
@@ -3028,10 +3033,7 @@ mod tests {
             "Scenes/console.ron",
             "Scenes/connection.ron",
         ] {
-            assert!(
-                normalize_scene_relative(ok).is_ok(),
-                "{ok:?} 应该被接受"
-            );
+            assert!(normalize_scene_relative(ok).is_ok(), "{ok:?} 应该被接受");
         }
     }
 

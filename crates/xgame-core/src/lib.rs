@@ -53,6 +53,7 @@ mod transform;
 
 // 新增模块
 mod animation;
+pub mod animation_runtime;
 mod asset;
 mod audio;
 pub mod camera;
@@ -65,8 +66,8 @@ mod id;
 pub mod inspect;
 pub mod layers;
 mod light;
-pub mod lod;
 mod loader;
+pub mod lod;
 pub mod material;
 pub mod particle;
 pub mod physics;
@@ -96,8 +97,8 @@ pub use config::{
 pub use prefab::{Prefab, PrefabInstanceRef, PREFAB_EXTENSION};
 pub use project::{
     normalize_project_relative, normalize_scene_relative, resolve_read_path, same_scene_path,
-    AssetMigrationReport, PathDefect, Project, ProjectError, ProjectHandle, ReadPathError, DEFAULT_ENTRY_SCENE,
-    PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION,
+    AssetMigrationReport, PathDefect, Project, ProjectError, ProjectHandle, ReadPathError,
+    DEFAULT_ENTRY_SCENE, PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION,
 };
 pub use scene::{Entity, Scene};
 pub use transform::{euler_deg_to_quat, quat_to_euler_deg, Transform};
@@ -105,7 +106,11 @@ pub use transform::{euler_deg_to_quat, quat_to_euler_deg, Transform};
 // -- 导出：新增基础设施
 pub use animation::{
     AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState, AnimTransition,
-    Animator,
+    Animator, RootMotion,
+};
+pub use animation_runtime::{
+    AnimationAsset, AnimationDriver, AnimationLoader, MotionFade, MotionFadePlayback,
+    MotionPlayback, MotionSpan,
 };
 pub use asset::{
     decode_prefab_references, decode_scene_references, encode_prefab_references,
@@ -125,17 +130,17 @@ pub use component::{Component, ComponentMap, ModelPath, Name};
 pub use id::{EntityId, EntityMap, EntitySet};
 pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};
 pub use layers::{sanitize_layer, Layers, DEFAULT_LAYER, LAYER_COUNT};
-pub use lod::{LodGroup, LodLevel};
 pub use light::{Light, LightKind};
 pub use loader::SceneLoader;
+pub use lod::{LodGroup, LodLevel};
 pub use material::{MaterialAsset, MaterialOverride, MATERIAL_EXTENSION};
 pub use particle::{EmissionShape, ParticleBlend, ParticleEmitter, MAX_PARTICLES_LIMIT};
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
 pub use quality::{QualityConfig, QualityPreset, QualitySettings, DEFAULT_SHADOW_RESOLUTION};
 pub use ray::{Ray, RayHit};
 pub use savegame::{
-    delete_save, list_saves, read_save, save_exists, save_slot_path, save_slot_relative, write_save,
-    EntityState, SaveError, SaveGame, SaveValue, SaveVars, SAVE_DIR, SAVE_EXTENSION,
+    delete_save, list_saves, read_save, save_exists, save_slot_path, save_slot_relative,
+    write_save, EntityState, SaveError, SaveGame, SaveValue, SaveVars, SAVE_DIR, SAVE_EXTENSION,
     SAVE_FORMAT_VERSION,
 };
 pub use schema::{scene_schema, SchemaDoc, SCHEMA_FORMAT_VERSION};

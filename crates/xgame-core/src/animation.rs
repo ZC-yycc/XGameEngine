@@ -3,10 +3,10 @@
 //! 这里只放**要落盘的配置**：播哪个剪辑、速度、是否循环、是否自动播放、换剪辑
 //! 淡入时长、可选的**动画状态机**（参数表 / 状态表 / 转移表）、可选的**叠加层**
 //! （additive：在基础姿势上加增量）与**混合层栈**（多层 Additive/Override +
-//! 骨骼遮罩）。采样时钟与蒙皮矩阵计算属于渲染层
-//! （见 `xgame_render::animation`）——
-//! 动画数据（glTF 里的骨骼与关键帧）本身就是渲染资产，把它拆到 core 之外
-//! 可以让 core 继续对 GPU / glTF 一无所知。
+//! 骨骼遮罩）。CPU 剪辑数据、采样与播放时钟在 [`crate::animation_runtime`]：runtime
+//! 必须在没有 GPU 的普通无头运行里消费根运动；render 只复用同一份采样结果做蒙皮。
+//! glTF 解析器仍只在 `xgame-render`，通过 [`crate::AnimationLoader`] 把纯 CPU 数据注入
+//! runtime，因此 core 继续对 GPU / glTF 一无所知。
 //!
 //! # 为什么是 `Entity` 的一等字段，而不是 `ComponentMap`
 //!
@@ -133,7 +133,8 @@ impl AnimMachine {
         current: &str,
         parameters: &BTreeMap<String, f32>,
     ) -> Option<&str> {
-        self.transition_from(current, parameters).map(|t| t.to.as_str())
+        self.transition_from(current, parameters)
+            .map(|t| t.to.as_str())
     }
 
     /// 同 [`transition_for`](Self::transition_for)，但返回**整条转移** ——
@@ -311,6 +312,28 @@ impl AnimLayer {
 /// `#[serde(default)]` 在**结构体**级别：反序列化时缺哪个字段就从
 /// [`Default`] 补哪个字段。于是旧场景文件（没有 `animator`）反序列化成
 /// `None`（`Option` 缺省），手写的半截配置（比如只有 `clip`）也能补全。
+///
+/// 根运动默认关闭（[`Animator::root_motion`] 为 `None`）。打开时必须显式写
+/// glTF 节点名：同一模型常同时有场景根、骨架包装根和髋骨，猜“第一个根节点”
+/// 会把不同 DCC 导出的资产解释成不同结果。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RootMotion {
+    /// 提取平移的 glTF 节点名；空串或找不到节点时不产生位移。
+    pub node: String,
+    /// X/Y/Z 逐轴开关。默认只取水平面，避免走路剪辑的髋部起伏把角色抬离地面。
+    pub axes: [bool; 3],
+}
+
+impl Default for RootMotion {
+    fn default() -> Self {
+        Self {
+            node: String::new(),
+            axes: [true, false, true],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Animator {
@@ -340,6 +363,11 @@ pub struct Animator {
     /// 骨骼遮罩，按数组顺序依次合到当前姿势上。求值次序：基础 → `additive` →
     /// `layers[0..]`（后层盖前层）。
     pub layers: Vec<AnimLayer>,
+    /// 根运动：从基础播放通道的显式节点提取**平移增量**，由运行时移动实体 / 角色。
+    ///
+    /// `None` = 关闭且不落盘；叠加层与分层层栈不参与根运动。旋转仍留在骨架姿势里。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_motion: Option<RootMotion>,
 }
 
 impl Default for Animator {
@@ -353,6 +381,7 @@ impl Default for Animator {
             machine: None,
             additive: None,
             layers: Vec::new(),
+            root_motion: None,
         }
     }
 }
@@ -631,7 +660,10 @@ mod tests {
         assert!((d.weight - 1.0).abs() < f32::EPSILON, "默认全额");
         assert!((d.speed - 1.0).abs() < f32::EPSILON, "默认原速");
         assert!(d.looping, "默认循环");
-        assert!((d.fade_time - 0.25).abs() < f32::EPSILON, "层转移默认淡入 0.25s");
+        assert!(
+            (d.fade_time - 0.25).abs() < f32::EPSILON,
+            "层转移默认淡入 0.25s"
+        );
         assert!(d.machine.is_none(), "默认不启用层状态机");
         assert!(d.mask.is_empty(), "默认整副骨架");
         assert!(Animator::default().layers.is_empty(), "默认空栈");
@@ -753,10 +785,7 @@ mod tests {
         .unwrap();
         assert_eq!(old.transitions[0].duration, None, "缺省 = 用全局 fade_time");
         let text = ron::to_string(&old).unwrap();
-        assert!(
-            !text.contains("duration"),
-            "None 不该落盘，实际: {text}"
-        );
+        assert!(!text.contains("duration"), "None 不该落盘，实际: {text}");
 
         // 新写法
         let new: Wrap = ron::from_str(
@@ -910,5 +939,40 @@ mod tests {
         assert_eq!(back, a, "往返后配置必须逐字段一致");
         let m = back.active_machine().expect("机器仍在");
         assert_eq!(m.transition_for("Idle", &params(0.5)), Some("Walk"));
+    }
+
+    /// 根运动配置不能在「读一遍再保存」时被 serde 当未知字段静默吃掉。
+    ///
+    /// 刻意只从 RON 文本观察结果，不引用尚未加入结构体的新类型：旧实现能编译，
+    /// 但会把 `root_motion` 整段丢掉，因此这是真正证明能力缺失的红灯。
+    #[test]
+    fn root_motion_config_survives_ron_roundtrip() {
+        let text = r#"(
+            clip: "Walk",
+            root_motion: Some((
+                node: "b_Hip_01",
+                axes: (true, false, true),
+            )),
+        )"#;
+        let animator: Animator = ron::from_str(text).expect("带根运动的 Animator 应能读取");
+        let saved = ron::to_string(&animator).expect("Animator 应能保存");
+        assert!(
+            saved.contains("root_motion"),
+            "保存后不能丢掉根运动配置，实际：{saved}"
+        );
+        assert!(
+            saved.contains("b_Hip_01"),
+            "显式运动根节点名必须活过往返，实际：{saved}"
+        );
+        let back: Animator = ron::from_str(&saved).expect("保存结果应能再读");
+        let root = back.root_motion.expect("根运动配置应保留");
+        assert_eq!(root.node, "b_Hip_01");
+        assert_eq!(root.axes, [true, false, true]);
+
+        let default_text = ron::to_string(&Animator::default()).expect("默认 Animator 应能保存");
+        assert!(
+            !default_text.contains("root_motion"),
+            "默认关闭的新能力不应给旧场景制造落盘噪音：{default_text}"
+        );
     }
 }

@@ -172,6 +172,9 @@ fn header(state: &mut EditorState, ui: &mut egui::Ui) {
                 if let Some(renderer) = state.scene_renderer.as_mut() {
                     renderer.invalidate_assets();
                 }
+                if let Some(runtime) = state.game_runtime.as_mut() {
+                    runtime.invalidate_animation_assets();
+                }
             }
             if icons::icon_button(ui, icons::Icon::Plus, 18.0, "新建材质资产（.mat）", false)
                 .clicked()

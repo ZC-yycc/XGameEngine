@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 
+use xgame_core::AnimationDriver;
 use xgame_core::{Entity, EntityId, RenderConfig, Scene};
-use xgame_render::animation::AnimationDriver;
 use xgame_render::gltf_loader::{Bounds, GltfMesh};
 use xgame_render::postfx::{HdrTargets, PostFx, HDR_FORMAT};
 use xgame_render::scene_pipeline::{SceneLighting, ScenePipeline, MAX_LIGHTS};
@@ -88,6 +88,8 @@ pub struct SceneRenderer {
 
     /// 当前项目的根目录，用于把 `entity.model`（项目相对路径）解析成绝对路径。
     project_root: PathBuf,
+    /// 模型读取的有序兜底根；必须与 runtime 的 CPU 动画装载器看同一份列表。
+    search_paths: Vec<String>,
 
     // Render target (recreated when viewport size changes)
     viewport_size: (u32, u32),
@@ -141,9 +143,12 @@ pub struct SceneRenderer {
     /// [`SceneRenderer::viewport_animating`] 一个"这动画永远起不来"的判据。
     load_failed: HashSet<String>,
 
-    /// 动画播放时钟（每实体一份，见 [`AnimationDriver`]）。
-    /// 编辑器编辑模式没有自己的帧时钟，由 [`SceneRenderer::render`] 用墙钟推进。
-    anim_driver: AnimationDriver,
+    /// 编辑态动画预览时钟（每实体一份，见 [`AnimationDriver`]）。
+    ///
+    /// Play / Pause 的唯一时钟住在 `xgame_runtime::World`，渲染器只借用它；这里
+    /// 只服务没有 `World::update` 的 Edit 模式，避免 Play 一帧被 runtime 与墙钟
+    /// 各推进一次。
+    edit_anim_driver: AnimationDriver,
     /// 上一次真正进入 [`SceneRenderer::render`] 的时刻。
     /// 视口面板关掉后这个时间会自然过期 → `viewport_animating` 停止请求帧，
     /// 免得"视口藏着一只在播动画的狐狸"把编辑器拖成满速空转。
@@ -181,6 +186,7 @@ impl SceneRenderer {
             surface_format,
             pipeline,
             project_root,
+            search_paths: Vec::new(),
             viewport_size: (0, 0),
             render_view: None,
             _ldr_texture: None,
@@ -198,7 +204,7 @@ impl SceneRenderer {
             last_signature: None,
             model_cache: HashMap::new(),
             load_failed: HashSet::new(),
-            anim_driver: AnimationDriver::new(),
+            edit_anim_driver: AnimationDriver::new(),
             viewport_seen: None,
             quality: xgame_core::QualitySettings {
                 msaa: sample_count.max(1),
@@ -224,6 +230,10 @@ impl SceneRenderer {
     /// 编辑器在打开项目后调用一次；之后 `ProjectHandle` 内部的资产库会随
     /// 保存 / 刷新更新，不需要重新绑定。
     pub fn set_project(&mut self, project: Option<xgame_core::ProjectHandle>) {
+        self.search_paths = project
+            .as_ref()
+            .map(|project| project.manifest().content.search_paths.clone())
+            .unwrap_or_default();
         self.pipeline.set_project(project);
         self.last_signature = None;
     }
@@ -443,25 +453,14 @@ impl SceneRenderer {
         (names, count)
     }
 
-    /// 某实体状态机的**当前状态名**（Inspector 显示"现在站在哪"用）。
-    ///
-    /// 单剪辑模式 / 还没 tick 过 → `None`（面板只在机器模式下显示这一行）。
-    pub fn animation_state(&self, id: EntityId) -> Option<&str> {
-        self.anim_driver.state(id)
+    /// Edit 模式状态机的当前状态。Play / Pause 的 Inspector 直接读 runtime 时钟。
+    pub fn edit_animation_state(&self, id: EntityId) -> Option<&str> {
+        self.edit_anim_driver.state(id)
     }
 
-    /// 某个混合层状态机的当前状态（Inspector 逐层显示用）。
-    pub fn animation_layer_state(&self, id: EntityId, layer: &str) -> Option<&str> {
-        self.anim_driver.layer_state(id, layer)
-    }
-
-    /// 预览动画钟的时间缩放（`tick_wall` 的乘数）。
-    ///
-    /// 由 `scene_view::render_scene` 每帧写：Play 态来自运行时的 `time_scale`、
-    /// 编辑器 Pause 写 0、编辑态写 1。**必须每帧写**而不是只在进出 Play 时写 ——
-    /// 少写一帧就会让已经暂停的动画继续走一格。
-    pub fn set_anim_time_scale(&mut self, scale: f32) {
-        self.anim_driver.set_wall_time_scale(scale);
+    /// Edit 模式混合层状态机的当前状态。
+    pub fn edit_animation_layer_state(&self, id: EntityId, layer: &str) -> Option<&str> {
+        self.edit_anim_driver.layer_state(id, layer)
     }
 
     /// 视口里是否有动画正在**连续播放**（帧策略的输入之一，见 `FrameInputs::animating`）。
@@ -494,7 +493,13 @@ impl SceneRenderer {
                 continue;
             };
             if !self.model_cache.contains_key(model) && !self.load_failed.contains(model) {
-                match GltfMesh::load(&self.device, &self.queue, &self.project_root, model) {
+                match GltfMesh::load_with_search_paths(
+                    &self.device,
+                    &self.queue,
+                    &self.project_root,
+                    model,
+                    &self.search_paths,
+                ) {
                     Ok(m) => {
                         log::info!("Loaded model '{model}' for animation");
                         self.model_cache.insert(model.to_string(), m);
@@ -516,12 +521,9 @@ impl SceneRenderer {
                     };
                 // 叠加层：权重 > 0 且剪辑在模型里 → 也要出帧（哪怕基础层冻结，
                 // 增量还在动）。权重 0 的叠加层贡献零画面，不为它烧帧。
-                let additive_ok = animator
-                    .additive
-                    .as_ref()
-                    .is_some_and(|a| {
-                        a.weight > 0.0 && a.speed > 0.0 && mesh.clip(&a.clip).is_some()
-                    });
+                let additive_ok = animator.additive.as_ref().is_some_and(|a| {
+                    a.weight > 0.0 && a.speed > 0.0 && mesh.clip(&a.clip).is_some()
+                });
                 // 层栈：任一层权重 > 0 且剪辑在模型里 → 同理要出帧。
                 let layers_ok = animator.layers.iter().any(|layer| {
                     if layer.weight <= 0.0 {
@@ -690,6 +692,24 @@ impl SceneRenderer {
                 hash = mix_bits(hash, animator.looping as u64);
                 hash = mix_bits(hash, animator.autoplay as u64);
                 hash = mix_bits(hash, animator.fade_time.to_bits() as u64);
+                // 根运动会改变两类着色输入：runtime 消费轴后实体位置会变，render
+                // 同时把这些轴从基础骨架姿势剥掉。暂停 / autoplay=false 时改节点或
+                // 轴也必须立刻重画，不能等挪相机才刷新。先混存在标记，再混名字与
+                // 三个位，避免 None 与“空节点 + 全关”落成同一串输入。
+                match &animator.root_motion {
+                    Some(root) => {
+                        hash = mix_bits(hash, 0xA1);
+                        for byte in root.node.as_bytes() {
+                            hash = mix_bits(hash, *byte as u64);
+                        }
+                        hash = mix_bits(hash, 0xA2);
+                        let axes = u64::from(root.axes[0])
+                            | (u64::from(root.axes[1]) << 1)
+                            | (u64::from(root.axes[2]) << 2);
+                        hash = mix_bits(hash, axes);
+                    }
+                    None => hash = mix_bits(hash, 0xA0),
+                }
                 // 状态机配置同样进指纹：**参数值**变了（脚本每帧推、Inspector
                 // DragValue 拖）要触发重绘，否则转移换的状态不显示；states/
                 // transitions/entry 改了同理（编辑期改 RON 后重载场景才画对）。
@@ -801,6 +821,7 @@ impl SceneRenderer {
     pub fn render(
         &mut self,
         scene: &Scene,
+        runtime_animation: Option<&AnimationDriver>,
         view_proj: &Mat4,
         camera_pos: &Vec3,
         lighting: SceneLighting<'_>,
@@ -822,12 +843,13 @@ impl SceneRenderer {
             return Vec::new();
         }
 
-        // 动画时钟**先于指纹**推进：有剪辑在播时时间每帧都变，指纹跟着变，
-        // 于是门控放行、下一帧继续来；没动画/已暂停时时间冻结，指纹稳定，
-        // 静态场景照旧"没动就不画"。时钟只在真的走到这一步时才 tick ——
-        // 面板关掉（render 不再被调）时间自然停走，重开接着播。
-        self.anim_driver.tick_wall(&scene.entities);
-        let anim_hash = self.anim_driver.signature();
+        // Edit 没有运行时帧循环，才由墙钟推进预览；Play / Pause 只读 World 的
+        // 唯一时钟。时钟**先于指纹**取值：播放中每帧签名变化，暂停时稳定。
+        if runtime_animation.is_none() {
+            self.edit_anim_driver.tick_wall(&scene.entities);
+        }
+        let anim = runtime_animation.unwrap_or(&self.edit_anim_driver);
+        let anim_hash = anim.signature();
 
         // 指纹门控的兜底：调用方（`render_scene`）本帧输入处理完才调到这里，指纹
         // 由这里自己算并比对。指纹比对是零分配线性扫描，漏拦一次就是一整帧 GPU 白画。
@@ -878,7 +900,13 @@ impl SceneRenderer {
                 }
                 // 路径是项目相对路径（或内置图元标识）；缓存键保持原样不变，
                 // 解析与分派都交给 GltfMesh::load。
-                match GltfMesh::load(&self.device, &self.queue, &self.project_root, model) {
+                match GltfMesh::load_with_search_paths(
+                    &self.device,
+                    &self.queue,
+                    &self.project_root,
+                    model,
+                    &self.search_paths,
+                ) {
                     Ok(m) => {
                         log::info!("Loaded model '{model}' ({} primitives)", m.primitives.len());
                         loaded.push((model.to_string(), m.bounds));
@@ -928,7 +956,7 @@ impl SceneRenderer {
             &scene.entities,
             &world_matrices,
             &self.model_cache,
-            &self.anim_driver,
+            anim,
             view_proj,
             jitter_ndc,
             camera_pos,
@@ -1057,7 +1085,9 @@ fn mix_machine(mut hash: u64, machine: &xgame_core::AnimMachine) -> u64 {
         }
         hash = mix_bits(
             hash,
-            transition.duration.map_or(u64::MAX, |value| value.to_bits() as u64),
+            transition
+                .duration
+                .map_or(u64::MAX, |value| value.to_bits() as u64),
         );
         hash = mix_bits(hash, 0xFE);
     }
@@ -1298,6 +1328,33 @@ mod tests {
         fox.animator.as_mut().unwrap().fade_time = 0.0;
         let hard = signature(std::slice::from_ref(&fox), &lights, ambient);
         assert_ne!(paused, hard, "改淡入时长没进指纹");
+
+        fox.animator.as_mut().unwrap().root_motion = Some(xgame_core::RootMotion {
+            node: "b_Hip_01".into(),
+            axes: [true, false, true],
+        });
+        let rooted = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(hard, rooted, "挂上根运动没进指纹");
+
+        fox.animator
+            .as_mut()
+            .unwrap()
+            .root_motion
+            .as_mut()
+            .unwrap()
+            .node = "Root".into();
+        let other_node = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(rooted, other_node, "根运动节点名没进指纹");
+
+        fox.animator
+            .as_mut()
+            .unwrap()
+            .root_motion
+            .as_mut()
+            .unwrap()
+            .axes = [true, true, true];
+        let other_axes = signature(std::slice::from_ref(&fox), &lights, ambient);
+        assert_ne!(other_node, other_axes, "根运动轴开关没进指纹");
     }
 
     /// 暂停状态下改材质也必须触发重绘 —— 与动画配置同一条理由：视口读的是

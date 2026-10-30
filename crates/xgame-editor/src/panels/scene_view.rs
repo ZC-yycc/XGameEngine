@@ -11,7 +11,7 @@
 
 use crate::gizmo;
 use crate::panels::theme;
-use crate::state::{AxisView, EditorState, GizmoPart, PlayMode, ToolMode};
+use crate::state::{AxisView, EditorState, GizmoPart, ToolMode};
 use xgame_math::glam::{Mat4, Vec3};
 
 /// 把世界坐标点换算成某父节点下的局部坐标。
@@ -180,22 +180,14 @@ fn render_scene(
     // **游戏相机**的位置，否则画面是从 A 机位看、高光却按 B 机位算。
     // 先算再借 renderer：`play_camera` 读 `state`，与 `scene_renderer` 的可变借用打架。
     let eye = play_camera(state).map_or_else(|| state.editor_camera.eye(), |c| c.position);
-    // 预览动画钟跟**运行态**对齐：Play 吃脚本写的时间缩放，编辑器 Pause 直接归零
-    //（Pause 不推进 `World::update`，动画若继续走就成了"物理冻住、角色还在跑"）。
-    // 编辑态恒 1.0 —— 脚本在编辑态根本不跑，这里只是把语义写明确。
-    let anim_time_scale = match state.play_mode {
-        PlayMode::Playing => state
-            .game_runtime
-            .as_ref()
-            .map_or(1.0, |rt| rt.time_scale()),
-        PlayMode::Paused => 0.0,
-        PlayMode::Edit => 1.0,
-    };
+    // Play / Pause 只借 runtime 的唯一动画时钟；Edit 没有 World，渲染器才用墙钟。
+    // 先拿引用再借 renderer，两个字段拆借后可以同时存活。
+    let runtime_animation = state.game_runtime.as_ref().map(|rt| rt.animation());
     let renderer = state.scene_renderer.as_mut()?;
     renderer.set_viewport_size(vp_w, vp_h);
-    renderer.set_anim_time_scale(anim_time_scale);
     renderer.render(
         &state.scene,
+        runtime_animation,
         view_proj,
         &eye,
         xgame_render::scene_pipeline::SceneLighting::new(state.scene.ambient, &state.scene.lights),
@@ -448,7 +440,11 @@ fn handle_navigation_keys(state: &mut EditorState, ui: &egui::Ui, (vp_w, vp_h): 
 
     if ortho {
         let on = state.editor_camera.toggle_ortho();
-        state.log_info(if on { "投影：正交" } else { "投影：透视" });
+        state.log_info(if on {
+            "投影：正交"
+        } else {
+            "投影：透视"
+        });
     }
     if let Some(view) = axis {
         state.editor_camera.set_axis_view(view);

@@ -282,6 +282,14 @@ fn build_with_player(
             });
         }
     }
+    for raw in &content.search_paths {
+        if normalize_relative(raw).is_none() {
+            return Err(BuildError::PathConflict {
+                source: project.path(raw),
+                output: output_dir.clone(),
+            });
+        }
+    }
     let dirs = content_dirs(project);
     validate_output(project, &dirs, &output_dir)?;
     if paths_overlap(&resolved_path(&player)?, &resolved_path(&output_dir)?) {
@@ -519,9 +527,9 @@ fn pick_player(candidates: &[PathBuf]) -> Result<PlayerPick, BuildError> {
 
 /// 项目里需要打进产物的目录（去重后按名称排序）。
 ///
-/// 取清单里声明的各个内容目录（默认配置下 `textures_dir` / `audio_dir` 与
-/// `models_dir` 同为 `Resources`，去重后只留一份），外加**入口场景所在的目录**——
-/// 否则把入口场景放在 `Levels/main.ron` 这种自定义位置的项目会漏掉它。
+/// 取清单里声明的各个内容目录和 `search_paths`（默认配置下 `textures_dir` /
+/// `audio_dir` 与 `models_dir` 同为 `Resources`，去重后只留一份），外加**入口场景
+/// 所在的目录**——否则把入口场景放在 `Levels/main.ron` 这种自定义位置的项目会漏掉它。
 ///
 /// 清单里的路径是用户可改的，所以这里会过滤掉越界（`..`、绝对路径）的写法。
 fn content_dirs(project: &ProjectHandle) -> Vec<String> {
@@ -538,6 +546,13 @@ fn content_dirs(project: &ProjectHandle) -> Vec<String> {
         content.prefabs_dir.as_str(),
         content.scripts_dir.as_str(),
     ] {
+        if let Some(dir) = normalize_relative(raw) {
+            dirs.insert(dir);
+        }
+    }
+    // 运行时能从兜底根读到的模型、脚本与音频也必须随包走；否则源码工程正常，
+    // 发布产物却会在第一次读取时丢资产。非法条目由构建入口拒绝，这里仍只收合法项。
+    for raw in &content.search_paths {
         if let Some(dir) = normalize_relative(raw) {
             dirs.insert(dir);
         }
@@ -893,6 +908,30 @@ mod tests {
         }
     }
 
+    /// `search_paths` 是运行时可读根；只把传统内容目录复制进包，会让源码工程
+    /// 能加载的模型、脚本和音频在发布后一起消失。
+    #[test]
+    fn package_includes_search_path_roots() {
+        let mut fixture = Fixture::new();
+        fixture.project.manifest_mut().content.search_paths = vec!["Mods".into()];
+        fixture.project.save().unwrap();
+
+        let shared = fixture.project.path("Mods/Scripts/Shared.lua");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, b"return 42").unwrap();
+
+        let report = fixture.build().expect("合法搜索根必须随发布包复制");
+        assert_eq!(
+            std::fs::read(report.output_dir.join("Mods/Scripts/Shared.lua")).unwrap(),
+            b"return 42"
+        );
+        assert!(
+            report.packed_dirs.contains(&"Mods".to_string()),
+            "目录清单要如实报告: {:?}",
+            report.packed_dirs
+        );
+    }
+
     #[test]
     fn package_preserves_custom_input_bytes() {
         let fixture = Fixture::new();
@@ -1156,6 +1195,18 @@ mod tests {
             assert!(fixture.build().is_err(), "必须拒绝 {source}");
             assert!(!fixture.output().exists());
         }
+    }
+
+    /// 搜索根与普通内容目录一样参与磁盘读取和复制，越界写法不能只在
+    /// `--check` 里提示后仍继续打包。
+    #[test]
+    fn escaping_search_path_is_rejected() {
+        let mut fixture = Fixture::new();
+        fixture.project.manifest_mut().content.search_paths = vec!["../Shared".into()];
+        fixture.project.save().unwrap();
+
+        fixture.build().expect_err("越界搜索根必须阻断构建");
+        assert!(!fixture.output().exists(), "失败不该留下半成品");
     }
 
     #[cfg(unix)]

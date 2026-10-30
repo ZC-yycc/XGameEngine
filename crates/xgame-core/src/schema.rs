@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::animation::{
     AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState, AnimTransition,
-    Animator,
+    Animator, RootMotion,
 };
 use crate::audio::{AudioBus, AudioSource};
 use crate::camera::Camera;
@@ -1113,8 +1113,35 @@ fn animation_types() -> Vec<TypeSchema> {
             ],
         ),
         struct_schema(
+            "RootMotion",
+            "根运动配置：从显式 glTF 节点提取逐帧平移增量，由运行时移动实体。",
+            Some(default_of::<RootMotion>()),
+            Some(pretty(&RootMotion {
+                node: "b_Hip_01".into(),
+                axes: [true, false, true],
+            })),
+            vec![
+                def(
+                    "node",
+                    "String",
+                    &"",
+                    "提取平移的 glTF 节点名；空串 / 找不到 = 不产生根运动。",
+                ),
+                def(
+                    "axes",
+                    "[bool; 3]",
+                    &[true, false, true],
+                    "X/Y/Z 逐轴开关；默认只取水平 X/Z，避免髋部起伏抬离地面。",
+                ),
+            ],
+            vec![
+                "根节点必须显式命名，不猜第一个 glTF 根节点。",
+                "v1 只提取基础播放通道的平移；旋转、additive 与 layers 仍留在骨架姿势中。",
+            ],
+        ),
+        struct_schema(
             "Animator",
-            "实体上的动画播放器配置（单剪辑 / 状态机 / 叠加层 / 混合层栈）。",
+            "实体上的动画播放器配置（单剪辑 / 状态机 / 叠加层 / 混合层栈 / 可选根运动）。",
             Some(default_of::<Animator>()),
             Some(pretty(&Animator {
                 clip: "Idle".into(),
@@ -1139,10 +1166,16 @@ fn animation_types() -> Vec<TypeSchema> {
                     &Vec::<AnimLayer>::new(),
                     "混合层栈；按数组顺序依次合到当前姿势上。",
                 ),
+                opt(
+                    "root_motion",
+                    "RootMotion",
+                    "根运动；None = 默认关闭且不落盘，Some 时由运行时消费基础通道的节点平移增量。",
+                ),
             ],
             vec![
                 "机器模式与叠加层正交：状态机换基础层，叠加层按自己的时钟独立播放。",
                 "autoplay / fade_time 在机器模式下仍然生效；is_active 还要看是否存在速度为正的状态。",
+                "runtime 消费位移后，render 只把已消费轴重置为节点绑定平移，未消费轴 / additive / layers 保留；动态体与静态体不接受根运动。",
             ],
         ),
     ]
@@ -1972,6 +2005,7 @@ mod tests {
             "AnimAdditive",
             "AnimLayerMode",
             "AnimLayer",
+            "RootMotion",
             "Animator",
             "PhysicsBody",
             "BodyKind",
@@ -2685,6 +2719,7 @@ mod tests {
             machine,
             additive,
             layers,
+            root_motion,
         } = Animator::default();
         assert_fields(
             &doc,
@@ -2698,8 +2733,12 @@ mod tests {
                 "machine",
                 "additive",
                 "layers",
+                "root_motion",
             ],
         );
+
+        let RootMotion { node, axes } = RootMotion::default();
+        assert_fields(&doc, "RootMotion", &["node", "axes"]);
 
         let PhysicsBody {
             kind,

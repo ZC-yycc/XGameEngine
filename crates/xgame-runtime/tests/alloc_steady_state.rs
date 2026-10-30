@@ -22,8 +22,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use xgame_core::{Entity, PhysicsBody, Scene, UiElement};
-use xgame_math::glam::Vec3;
+use xgame_core::animation_runtime::{AnimClip, AnimNode, Interpolation, Track, TrackPath};
+use xgame_core::{
+    AnimationAsset, AnimationLoader, Animator, Entity, PhysicsBody, RootMotion, Scene, UiElement,
+};
+use xgame_math::glam::{Quat, Vec3};
 use xgame_runtime::{World, WorldConfig};
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
@@ -109,8 +112,7 @@ fn build_ui_scene() -> Scene {
 /// 第三个返回值是**活跃性证明**：如果 `update` 因为某种原因没真的跑，分配次数
 /// 一样会是 0，那这条测试就成了永远为绿的空转。用**增量**而不是绝对值，是为了
 /// 不把预热帧算进去（第一版就是这么写错的：断言 1.0s，实际 1.5s）。
-fn measure_steady_state(scene: Scene, viewport: Option<(u32, u32)>) -> (usize, usize, f32) {
-    let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+fn measure_steady_state(mut world: World, viewport: Option<(u32, u32)>) -> (usize, usize, f32) {
     if let Some((w, h)) = viewport {
         world.set_ui_viewport((w, h));
     }
@@ -136,8 +138,8 @@ fn measure_steady_state(scene: Scene, viewport: Option<(u32, u32)>) -> (usize, u
 }
 
 /// 断言一个场景在稳态下零分配（并顺带证明它真的在推进）。
-fn assert_zero_alloc(label: &str, scene: Scene, viewport: Option<(u32, u32)>) {
-    let (count, bytes, elapsed) = measure_steady_state(scene, viewport);
+fn assert_zero_alloc(label: &str, world: World, viewport: Option<(u32, u32)>) {
+    let (count, bytes, elapsed) = measure_steady_state(world, viewport);
 
     // 先证明这 N 帧真的推进了世界：否则"零分配"可能只是"什么都没跑"。
     let expected = MEASURED_FRAMES as f32 / 60.0;
@@ -153,6 +155,52 @@ fn assert_zero_alloc(label: &str, scene: Scene, viewport: Option<(u32, u32)>) {
          （每帧 {:.1} 次）；热路径应复用缓冲，别每帧新建",
         count as f64 / MEASURED_FRAMES as f64
     );
+}
+
+#[derive(Clone)]
+struct MemoryAnimationLoader;
+
+impl AnimationLoader for MemoryAnimationLoader {
+    fn load_animation(&self, _model: &str) -> Result<AnimationAsset, String> {
+        Ok(AnimationAsset {
+            nodes: vec![AnimNode {
+                parent: None,
+                name: "MotionRoot".into(),
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            }],
+            clips: vec![AnimClip {
+                name: "Walk".into(),
+                duration: 1.0,
+                tracks: vec![Track {
+                    node: 0,
+                    path: TrackPath::Translation,
+                    interpolation: Interpolation::Linear,
+                    times: vec![0.0, 1.0],
+                    values: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                }],
+            }],
+        })
+    }
+}
+
+/// 动画时钟现在住在 `World::update`，因此带根运动的常规游戏帧也必须守住零分配。
+fn root_motion_world() -> World {
+    let mut scene = Scene::new("alloc-root-motion");
+    let mut entity = Entity::new("walker");
+    entity.model = "Resources/Walker.gltf".into();
+    entity.animator = Some(Animator {
+        clip: "Walk".into(),
+        root_motion: Some(RootMotion {
+            node: "MotionRoot".into(),
+            axes: [true, false, false],
+        }),
+        ..Animator::default()
+    });
+    scene.add_entity(entity);
+    World::new(scene, std::env::temp_dir(), WorldConfig::default())
+        .with_animation_loader(MemoryAnimationLoader)
 }
 
 /// 稳态每帧零分配。**这是门禁，不是基准** —— 数字一旦不再是 0，说明有人
@@ -186,6 +234,26 @@ fn steady_state_update_does_not_allocate() {
         );
     }
 
-    assert_zero_alloc("entities+physics", build_scene(), None);
-    assert_zero_alloc("ui", build_ui_scene(), Some((1280, 720)));
+    assert_zero_alloc(
+        "entities+physics",
+        World::new(build_scene(), std::env::temp_dir(), WorldConfig::default()),
+        None,
+    );
+    assert_zero_alloc(
+        "ui",
+        World::new(
+            build_ui_scene(),
+            std::env::temp_dir(),
+            WorldConfig::default(),
+        ),
+        Some((1280, 720)),
+    );
+
+    let mut root_motion = root_motion_world();
+    root_motion.update(1.0 / 60.0);
+    assert!(
+        root_motion.scene().entities[0].transform.position.x > 0.0,
+        "根运动变体必须先证明动画资产、采样与实体位移整条链真的跑起来"
+    );
+    assert_zero_alloc("animation+root-motion", root_motion, None);
 }

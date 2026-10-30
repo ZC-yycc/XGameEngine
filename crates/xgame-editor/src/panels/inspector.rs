@@ -667,6 +667,85 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     let mut remove = false;
                     let mut remove_machine = false;
                     if let Some(animator) = entity.animator.as_mut() {
+                        // 根运动属于**基础通道**，放在机器 / 叠加 / 层栈之前。层栈可以
+                        // 任意增长，若把它放在末尾，窄窗口里即使开着也要滚过所有层才
+                        // 找得到；同时这也让“只从基础通道提取”在界面层级上一眼可见。
+                        let mut root_motion_enabled = animator.root_motion.is_some();
+                        if ui
+                            .checkbox(&mut root_motion_enabled, "Root Motion")
+                            .on_hover_text(
+                                "从基础动画通道提取指定节点的逐帧平移，\n\
+                                 Play / 独立游戏 / 无头运行都由 runtime 移动实体",
+                            )
+                            .changed()
+                        {
+                            animator.root_motion = root_motion_enabled
+                                .then(xgame_core::RootMotion::default);
+                            touched = true;
+                        }
+                        if let Some(root_motion) = animator.root_motion.as_mut() {
+                            row(ui, "Node", |ui| {
+                                let selected = if root_motion.node.is_empty() {
+                                    "（选择节点）"
+                                } else {
+                                    root_motion.node.as_str()
+                                };
+                                egui::ComboBox::from_id_salt("root_motion_node")
+                                    .width(ui.available_width())
+                                    .selected_text(
+                                        egui::RichText::new(selected).monospace().size(11.0),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        if bone_names.is_empty() {
+                                            ui.label(theme::dim_note(if model_empty {
+                                                "没有模型"
+                                            } else {
+                                                "模型未加载或没有命名节点"
+                                            }));
+                                        }
+                                        for node in &bone_names {
+                                            if ui
+                                                .selectable_label(
+                                                    root_motion.node == *node,
+                                                    node.as_str(),
+                                                )
+                                                .clicked()
+                                            {
+                                                root_motion.node.clone_from(node);
+                                                touched = true;
+                                            }
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "显式选择 glTF 节点；通常是髋骨。\n猜场景根会因导出器不同而漂移",
+                                    );
+                            });
+                            row(ui, "Axes", |ui| {
+                                for (index, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+                                    if ui
+                                        .checkbox(&mut root_motion.axes[index], axis)
+                                        .on_hover_text("勾选后由 runtime 消费该轴位移")
+                                        .changed()
+                                    {
+                                        touched = true;
+                                    }
+                                }
+                            });
+                            if entity.controller.is_none()
+                                && entity.physics.is_some_and(|body| {
+                                    body.kind != xgame_core::BodyKind::Kinematic
+                                })
+                            {
+                                theme::note(
+                                    ui,
+                                    "动态 / 静态刚体的位置归物理所有，根运动不会生效",
+                                );
+                            } else if root_motion.node.is_empty() {
+                                theme::note(ui, "请选择一个有平移轨道的节点");
+                            }
+                        }
+
                         // 机器模式：clip/speed/looping 由状态表决定，这三行换成
                         // 机器信息 + 参数调节；Fade/Autoplay 两行仍生效、照常显示。
                         //
@@ -675,10 +754,12 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         let machine_usable =
                             animator.machine.as_ref().is_some_and(|m| m.is_usable());
                         if machine_usable {
-                            let current = state
-                                .scene_renderer
-                                .as_ref()
-                                .and_then(|r| r.animation_state(entity.id));
+                            let current = match state.game_runtime.as_ref() {
+                                Some(runtime) => runtime.animation().state(entity.id),
+                                None => state.scene_renderer.as_ref().and_then(|renderer| {
+                                    renderer.edit_animation_state(entity.id)
+                                }),
+                            };
                             let entry_name = animator
                                 .machine
                                 .as_ref()
@@ -930,15 +1011,17 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         // 到 "Weight" 已经错开一个字母 —— 一列对不齐的表头比没有
                         // 表头更显乱。改成每个控件一条悬停说明，信息一样给全。
                         for idx in 0..animator.layers.len() {
-                            let layer_current_state = state
-                                .scene_renderer
-                                .as_ref()
-                                .and_then(|renderer| {
-                                    renderer.animation_layer_state(
+                            let layer_current_state = match state.game_runtime.as_ref() {
+                                Some(runtime) => runtime
+                                    .animation()
+                                    .layer_state(entity.id, &animator.layers[idx].name),
+                                None => state.scene_renderer.as_ref().and_then(|renderer| {
+                                    renderer.edit_animation_layer_state(
                                         entity.id,
                                         &animator.layers[idx].name,
                                     )
-                                });
+                                }),
+                            };
                             // ── 第一行：摘除 / 名字 / 模式 / 剪辑 / 权重 ──
                             //
                             // 一行要塞五个控件，宽度是硬约束（面板 ~284px）：
@@ -1200,6 +1283,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         {
                             touched = true;
                         }
+
                     }
                     if remove_machine {
                         if let Some(animator) = entity.animator.as_mut() {
@@ -1226,7 +1310,11 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         let (morph_names, morph_count) = state
             .scene_renderer
             .as_ref()
-            .map(|r| entity.model_at(0).map_or_else(Default::default, |m| r.morph_targets(m)))
+            .map(|r| {
+                entity
+                    .model_at(0)
+                    .map_or_else(Default::default, |m| r.morph_targets(m))
+            })
             .unwrap_or_default();
         if morph_count > 0 {
             theme::section_bar(ui, "Morph");
