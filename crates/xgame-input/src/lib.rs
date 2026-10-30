@@ -38,11 +38,13 @@ mod action;
 mod key;
 mod pad;
 mod state;
+mod touch;
 
 pub use action::{AnalogBinding, AxisBinding, Binding, Input, InputMap, InputMapError};
 pub use key::{KeyCode, MouseButton};
 pub use pad::{apply_deadzone, GamepadAxis, GamepadButton, PadState, AXIS_COUNT};
 pub use state::InputState;
+pub use touch::{TouchPhase, TouchPoint};
 
 #[cfg(feature = "winit")]
 pub use key::key_from_winit;

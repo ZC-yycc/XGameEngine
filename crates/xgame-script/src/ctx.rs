@@ -1599,6 +1599,16 @@ impl GameCtx<'_> {
         self.input.map(|i| i.pad_axis(a)).unwrap_or(0.0)
     }
 
+    /// 当前按着的手指数量。
+    pub fn touch_count(&mut self) -> usize {
+        self.input.map(|i| i.touch_count()).unwrap_or(0)
+    }
+
+    /// 某个触点（`None` = 这根手指已经不在 / id 不对）。
+    pub fn touch(&mut self, id: u64) -> Option<xgame_input::TouchPoint> {
+        self.input.and_then(|i| i.touch(id))
+    }
+
     /// 有没有手柄连着（做"请插入手柄"提示用）。
     pub fn pad_connected(&mut self) -> bool {
         self.input.map(|i| i.pad_connected()).unwrap_or(false)

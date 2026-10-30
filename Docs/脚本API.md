@@ -255,6 +255,8 @@ end
 | `pad_button_down(ctx, "south")` | 手柄按键是否按住（任意一台；`south`/`east`/`west`/`north`、`left_bumper`、`left_trigger`、`dpad_up`…） |
 | `pad_axis(ctx, "left_x")` | 手柄轴：摇杆 `left_x`/`left_y`/`right_x`/`right_y` 为 -1…1（`+y` 向上），扳机 `left_trigger`/`right_trigger` 为 0…1 |
 | `pad_connected(ctx)` | 是否有手柄连着 |
+| `touch_count(ctx)` | 当前按着的手指数量 |
+| `touch(ctx, id)` | 触点表 `{x, y, force, phase}`（`phase` = `started`/`moved`/`ended`/`cancelled`）；不在时返回 nil。**第一根手指同时驱动鼠标**，`ui_*` 按钮在触摸屏上照常可点 |
 | `key_down(ctx, "W")` / `key_pressed(ctx, "W")` | 直接按物理键位查询 |
 | `mouse_down(ctx, "Left")` / `mouse_pressed(ctx, "Left")` | 鼠标按键 |
 | `mouse_pos(ctx)` / `mouse_delta(ctx)` / `scroll(ctx)` | 指针状态 → `{x, y}` 表 |

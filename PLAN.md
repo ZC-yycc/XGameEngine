@@ -7326,7 +7326,13 @@ feature 门禁）。
 **老项目**：`with_pad_defaults_if_absent()`（"一条手柄绑定都没有"才补），
 宿主加载 `input.ron` 时调用；`reset()` 保留已连接名单但松开按键。
 
-**未验证**：真机。脚本 API 3 个 → 总数 176（4 处计数断言 + 文档 + MCP 描述同步）。
+**触摸（P1 #15 的另一半）**：`touch.rs`（`TouchPhase` 四相位 + `TouchPoint`）、
+`InputState.touches`（`BTreeMap`，顺序稳定）、首点驱动鼠标、帧末清理 Ended/Cancelled、
+失焦清空；宿主接 winit `WindowEvent::Touch`；脚本 `touch_count` / `touch(ctx, id)`
+（返回 `{x, y, force, phase}`，不在时 nil）。5 条新测试（鼠标模拟 / 第二指不抢光标 /
+取消当抬起 / 失焦清空 / force 夹取）。
+
+**未验证**：真机手柄与触摸屏。脚本 API 5 个 → 总数 178（4 处计数断言 + 文档 + MCP 描述同步）。
 
 ### 93.3 编辑器正交投影（P2 #28）
 

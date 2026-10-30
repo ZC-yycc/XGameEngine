@@ -396,6 +396,25 @@ impl GameApp {
                 };
                 state.handle_scroll(scroll);
             }
+            WindowEvent::Touch(touch) => {
+                // 触摸：坐标用**物理像素**（与 `CursorMoved` 同口径，UI 视口就是
+                // 物理像素）。相位一对一映射，`Cancelled` 交给 `InputState` 当
+                // 抬起处理 —— 否则被系统打断的手指会永远按着。
+                let phase = match touch.phase {
+                    winit::event::TouchPhase::Started => TouchPhase::Started,
+                    winit::event::TouchPhase::Moved => TouchPhase::Moved,
+                    winit::event::TouchPhase::Ended => TouchPhase::Ended,
+                    winit::event::TouchPhase::Cancelled => TouchPhase::Cancelled,
+                };
+                // `Force::normalized()` 给的是 f64（0..1）；引擎内部统一 f32。
+                let force = touch.force.map_or(0.0, |f| f.normalized() as f32);
+                state.handle_touch(
+                    touch.id,
+                    phase,
+                    glam::Vec2::new(touch.location.x as f32, touch.location.y as f32),
+                    force,
+                );
+            }
             WindowEvent::Focused(focused) => {
                 // 失焦要清掉所有"按住"状态，否则切回来时角色会自己一直走。
                 state.set_focused(*focused);

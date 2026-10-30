@@ -25,6 +25,7 @@ use xgame_math::glam::Vec2;
 
 use crate::key::{KeyCode, MouseButton};
 use crate::pad::{GamepadAxis, GamepadButton, PadState};
+use crate::touch::{TouchPhase, TouchPoint};
 
 /// 一帧内允许缓存的文本输入长度上限。
 ///
@@ -66,6 +67,12 @@ pub struct InputState {
     /// 遍历顺序虽然不影响结果，但**诊断与日志**会带上顺序，`BTreeMap`
     /// 至少让同一台机器的两份日志可比较。
     pads: BTreeMap<u32, PadState>,
+
+    /// 当前按着的手指（id 由系统给，抬起的那一帧还在表里，见 `touch` 模块）。
+    ///
+    /// `BTreeMap` 而不是 `HashMap`：遍历顺序稳定 ⇒ 日志、脚本、回放里的
+    /// "第一根手指"永远是同一根。
+    touches: BTreeMap<u64, TouchPoint>,
 }
 
 impl InputState {
@@ -161,6 +168,42 @@ impl InputState {
         self.pads.remove(&pad);
     }
 
+    /// 注入一个触摸事件。
+    ///
+    /// 除了记进触点表，还会**把第一根手指映射成鼠标**（位置 + 左键）：
+    /// `ui_*` 那套屏幕空间 UI 只认鼠标，不映射的话触摸设备上按钮点不动，
+    /// 等于"引擎支持触摸但 UI 不支持"。多指时只有 id 最小的那根驱动鼠标
+    /// （否则两根手指抢同一个光标，指针会来回跳）。
+    pub fn handle_touch(&mut self, id: u64, phase: TouchPhase, position: Vec2, force: f32) {
+        let point = TouchPoint::new(phase, position, force);
+        let primary = self.touches.keys().next().copied();
+        self.touches.insert(id, point);
+
+        // 谁驱动鼠标：id 最小的那根（含本帧新按下的这根）。
+        let driver = self.touches.keys().next().copied();
+        let Some(driver) = driver else {
+            return;
+        };
+        match phase {
+            TouchPhase::Started | TouchPhase::Moved => {
+                if driver == id {
+                    self.handle_cursor_moved(position);
+                    if phase == TouchPhase::Started {
+                        self.handle_mouse_button(MouseButton::Left, true);
+                    }
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                // 抬起时也要把光标放到最后的位置：`mouse_pressed` 之后紧跟
+                // `mouse_released` 时，UI 的"按下 → 抬起"判定要看到同一个点。
+                if driver == id || primary == Some(id) {
+                    self.handle_cursor_moved(position);
+                    self.handle_mouse_button(MouseButton::Left, false);
+                }
+            }
+        }
+    }
+
     /// 注入一次手柄按键事件。
     ///
     /// 没登记过的手柄会自动补一条空记录：后端的 `Connected` 事件可能早于
@@ -200,6 +243,9 @@ impl InputState {
             for pad in self.pads.values_mut() {
                 pad.release_all_buttons();
             }
+            // 触摸同样要清：窗口失焦时系统往往**不会**补发"抬起"，
+            // 留着就是一根永远按着的手指。
+            self.touches.clear();
         }
         self.focused = focused;
     }
@@ -219,6 +265,8 @@ impl InputState {
         for pad in self.pads.values_mut() {
             pad.end_frame();
         }
+        // 抬起 / 取消的触点在帧末消失（本帧内 `touch_ended` 还要能读到它）。
+        self.touches.retain(|_, point| !point.phase.is_finished());
     }
 
     /// 强制清空全部状态（场景重载 / 切换时用，避免上一个场景的残留输入）。
@@ -331,11 +379,49 @@ impl InputState {
             .any(|p| p.axis_crossed_down(axis, threshold))
     }
 
+    // -----------------------------------------------------------------------
+    // 触摸查询
+    // -----------------------------------------------------------------------
+
+    /// 当前按着的手指数量（抬起 / 取消的那一帧**不**计入）。
+    pub fn touch_count(&self) -> usize {
+        self.touches
+            .values()
+            .filter(|t| !t.phase.is_finished())
+            .count()
+    }
+
+    /// 所有触点（含本帧刚抬起的那根 —— 它带着 `Ended` 相位）。
+    pub fn touches(&self) -> impl Iterator<Item = (u64, TouchPoint)> + '_ {
+        self.touches.iter().map(|(id, point)| (*id, *point))
+    }
+
+    pub fn touch(&self, id: u64) -> Option<TouchPoint> {
+        self.touches.get(&id).copied()
+    }
+
+    /// 这根手指本帧是否刚按下。
+    pub fn touch_started(&self, id: u64) -> bool {
+        self.touches
+            .get(&id)
+            .is_some_and(|t| t.phase == TouchPhase::Started)
+    }
+
+    /// 这根手指本帧是否刚抬起（含被系统取消）。
+    pub fn touch_ended(&self, id: u64) -> bool {
+        self.touches.get(&id).is_some_and(|t| t.phase.is_finished())
+    }
+
     /// 本帧是否有任何键刚按下（"按任意键继续"）。
     ///
-    /// 手柄按键也算 —— 主机玩家看到"按任意键"时手里只有手柄。
+    /// 手柄按键与触摸也算 —— 主机 / 手机玩家看到"按任意键"时手里没有键盘。
     pub fn any_key_pressed(&self) -> bool {
-        !self.keys_pressed.is_empty() || self.pads.values().any(|p| p.anything_pressed())
+        !self.keys_pressed.is_empty()
+            || self.pads.values().any(|p| p.anything_pressed())
+            || self
+                .touches
+                .values()
+                .any(|t| t.phase == TouchPhase::Started)
     }
 
     /// 当前按住的键（顺序未定义，用于调试面板）。
@@ -452,6 +538,60 @@ mod tests {
         s.end_frame();
         assert_eq!(s.mouse_delta(), Vec2::ZERO);
         assert_eq!(s.mouse_pos(), Vec2::new(12.0, 7.0), "位置要保留，位移才清");
+    }
+
+    #[test]
+    fn first_touch_drives_the_mouse_so_ui_keeps_working() {
+        let mut s = InputState::new();
+        s.handle_touch(3, TouchPhase::Started, Vec2::new(100.0, 50.0), 0.0);
+        // 指针位置与左键都要跟上：`ui_*` 那套只认鼠标。
+        assert_eq!(s.mouse_pos(), Vec2::new(100.0, 50.0));
+        assert!(s.mouse_down(MouseButton::Left));
+        assert!(s.mouse_pressed(MouseButton::Left));
+        s.end_frame();
+
+        s.handle_touch(3, TouchPhase::Moved, Vec2::new(140.0, 70.0), 0.0);
+        assert_eq!(s.mouse_pos(), Vec2::new(140.0, 70.0));
+        assert_eq!(s.mouse_delta(), Vec2::new(40.0, 20.0));
+        s.end_frame();
+
+        s.handle_touch(3, TouchPhase::Ended, Vec2::new(140.0, 70.0), 0.0);
+        assert!(s.mouse_released(MouseButton::Left));
+        assert!(!s.mouse_down(MouseButton::Left));
+        assert!(s.touch_ended(3), "抬手那一帧必须还能读到 Ended");
+        s.end_frame();
+        assert!(s.touch(3).is_none(), "帧末要清掉抬起的手指");
+    }
+
+    #[test]
+    fn second_finger_does_not_steal_the_mouse() {
+        let mut s = InputState::new();
+        s.handle_touch(1, TouchPhase::Started, Vec2::new(10.0, 10.0), 0.0);
+        s.end_frame();
+        s.handle_touch(2, TouchPhase::Started, Vec2::new(200.0, 200.0), 0.0);
+        // 第二根手指不驱动光标（否则捏合时指针会来回跳）。
+        assert_eq!(s.mouse_pos(), Vec2::new(10.0, 10.0));
+        assert_eq!(s.touch_count(), 2);
+        assert!(s.touch(2).is_some());
+    }
+
+    #[test]
+    fn cancelled_touch_is_treated_as_finished() {
+        let mut s = InputState::new();
+        s.handle_touch(7, TouchPhase::Started, Vec2::new(5.0, 5.0), 0.0);
+        s.handle_touch(7, TouchPhase::Cancelled, Vec2::new(5.0, 5.0), 0.0);
+        assert!(!s.mouse_down(MouseButton::Left), "取消也要松开左键");
+        s.end_frame();
+        assert!(s.touch(7).is_none());
+        assert_eq!(s.touch_count(), 0);
+    }
+
+    #[test]
+    fn losing_focus_drops_all_touches() {
+        let mut s = InputState::new();
+        s.handle_touch(1, TouchPhase::Started, Vec2::new(1.0, 1.0), 0.0);
+        s.set_focused(false);
+        assert_eq!(s.touch_count(), 0, "失焦时系统不会补发抬起");
     }
 
     #[test]

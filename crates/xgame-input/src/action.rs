@@ -639,6 +639,24 @@ impl Input {
         self.state.pad_axis(axis)
     }
 
+    // -----------------------------------------------------------------------
+    // 触摸直通
+    // -----------------------------------------------------------------------
+
+    /// 当前按着的手指数量。
+    pub fn touch_count(&self) -> usize {
+        self.state.touch_count()
+    }
+
+    /// 所有触点（含本帧刚抬起的那根）。
+    pub fn touches(&self) -> impl Iterator<Item = (u64, crate::TouchPoint)> + '_ {
+        self.state.touches()
+    }
+
+    pub fn touch(&self, id: u64) -> Option<crate::TouchPoint> {
+        self.state.touch(id)
+    }
+
     /// 视角位移（鼠标移动 + 右摇杆类的输入），FPS 相机直接消费。
     ///
     /// 单独开一个方法，是因为"鼠标位移"没法表达成按键绑定，

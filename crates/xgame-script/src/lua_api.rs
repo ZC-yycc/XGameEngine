@@ -1064,6 +1064,27 @@ fn register_input(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     )?;
 
     globals.set(
+        "touch_count",
+        lua.create_function(|_, ctx: LuaCtx| Ok(ctx.game().touch_count()))?,
+    )?;
+    globals.set(
+        "touch",
+        // 返回表 `{x, y, force, phase}`；手指不在时返回 **nil**（不是空表）——
+        // 脚本里 `if t then` 才是自然的写法，空表永远为真会让判断全部失效。
+        lua.create_function(|lua, (ctx, id): (LuaCtx, u64)| {
+            Ok(match ctx.game().touch(id) {
+                Some(point) => {
+                    let t = vec2_to_lua(lua, point.position)?;
+                    t.set("force", point.force)?;
+                    t.set("phase", point.phase.name())?;
+                    Some(t)
+                }
+                None => None,
+            })
+        })?,
+    )?;
+
+    globals.set(
         "key_down",
         lua.create_function(|_, (ctx, key): (LuaCtx, String)| Ok(ctx.game().key_down(&key)))?,
     )?;

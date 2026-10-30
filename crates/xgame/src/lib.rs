@@ -66,7 +66,9 @@ pub mod prelude {
     pub use crate::{inspect, FieldDesc, FieldKind, FieldValue, Inspect};
 
     // -- 输入 -------------------------------------------------------------
-    pub use xgame_input::{key_from_winit, Input, InputMap, KeyCode, MouseButton};
+    pub use xgame_input::{
+        key_from_winit, Input, InputMap, KeyCode, MouseButton, TouchPhase, TouchPoint,
+    };
 
     // -- 数学（glam 常用类型 + 整个命名空间 + 投影工具）-------------------
     pub use xgame_math::glam;

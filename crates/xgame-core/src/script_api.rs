@@ -399,7 +399,7 @@ const fn api(
     }
 }
 
-/// 全部 176 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
+/// 全部 178 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
 const FUNCTIONS: &[ApiDef] = &[
     api(
         "transform",
@@ -848,6 +848,20 @@ const FUNCTIONS: &[ApiDef] = &[
         "pad_connected(ctx)",
         "boolean",
         r#"是否有手柄连着"#,
+    ),
+    api(
+        "input",
+        "touch_count",
+        "touch_count(ctx)",
+        "integer",
+        r#"当前按着的手指数量（抬起 / 被系统取消的那一帧不计）"#,
+    ),
+    api(
+        "input",
+        "touch",
+        "touch(ctx, id)",
+        "table",
+        r#"某个触点表 `{x, y, force, phase}`；`phase` 是 `started` / `moved` / `ended` / `cancelled`。手指不在时返回 nil。第一根手指会同时驱动鼠标，所以 `ui_*` 按钮在触摸屏上照常可点"#,
     ),
     api(
         "input",
@@ -1628,7 +1642,7 @@ mod tests {
         let doc = script_api();
         assert_eq!(doc.format_version, SCRIPT_API_FORMAT_VERSION);
         assert_eq!(doc.categories.len(), 18);
-        assert_eq!(doc.function_count(), 176);
+        assert_eq!(doc.function_count(), 178);
         assert_eq!(doc.hooks.len(), 6);
         assert_eq!(doc.value_types.len(), 7);
         assert!(!doc.conventions.is_empty());
@@ -1671,7 +1685,7 @@ mod tests {
             );
             assert!(!function.params.is_empty(), "{} 没有参数", function.name);
         }
-        assert_eq!(names.len(), 176);
+        assert_eq!(names.len(), 178);
     }
 
     #[test]

@@ -27,7 +27,7 @@ cargo run -p xgame-editor -- --check projects/SampleScene
 # （无 --out 打 stdout；同一份代码两次导出逐字节相同）
 cargo run -p xgame-editor -- --export-schema --out schema.json
 
-# 脚本 API 清单 —— 导出 176 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
+# 脚本 API 清单 —— 导出 178 个函数 / 6 个钩子 / 参数 / 返回值 / 约定（JSON）
 # （与 MCP `script_api_read` 同源；无 --out 打 stdout）
 cargo run -p xgame-editor -- --export-script-api --out script_api.json
 
@@ -1000,7 +1000,7 @@ Build/<项目名>/
 | 工具 | 干什么 |
 |---|---|
 | `schema_read` | 读场景格式的机器可读说明书（36 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
-| `script_api_read` | 读脚本 API 的机器可读清单（176 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
+| `script_api_read` | 读脚本 API 的机器可读清单（178 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
 | `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |
