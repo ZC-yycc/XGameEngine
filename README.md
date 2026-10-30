@@ -760,6 +760,40 @@ InputMap(
 编辑器里按 Play 试玩时，egui 的键鼠状态会通过 `input_bridge` 灌进运行时，
 所以脚本里的 `action_pressed` 在编辑器里同样能用。
 
+### 手柄与触摸
+
+手柄与键盘**共存**（多对一），插上就能用，不用删键位：
+
+```ron
+InputMap(
+    actions: {
+        "Jump": [Key(Space), PadButton(South)],
+        // 扳机当按钮：越过阈值算按下
+        "Fire": [Mouse(Left), PadAxis(axis: RightTrigger, threshold: 0.4)],
+    },
+    axes: {
+        // 摇杆走 analog：连续值 + 死区重标定（推到底 = 恰好 1.0）
+        "MoveX": (
+            positive: [Key(KeyD)],
+            negative: [Key(KeyA)],
+            analog: [(axis: LeftX, scale: 1.0, deadzone: 0.15)],
+        ),
+    },
+)
+```
+
+- 按键名是**物理位置**：`south` / `east` / `west` / `north`（下 / 右 / 左 / 上），
+  外加 `left_bumper` / `right_bumper` / `left_trigger` / `right_trigger` / `start` /
+  `select` / `left_stick` / `right_stick` / `dpad_*`。Xbox / PlayStation / Switch 的
+  字母差异由后端翻译，游戏逻辑里不该写"A 键"。
+- 轴的 `+y` 是"上 / 前"（与 `W` 同向）；扳机是 `0..1`。
+- 脚本里也能直查：`pad_button_down(ctx, "south")` / `pad_axis(ctx, "left_x")` /
+  `pad_connected(ctx)`。
+- `input.ron` 里**一条手柄绑定都没有**时，加载后会补上一套默认绑定（Jump = 南键、
+  Fire = 右扳机、左摇杆 = 移动、右摇杆 = 视角）；作者写过一条就不再补。
+- **触摸**：多点触点可用（`touch_count(ctx)` / `touch(ctx, id)`），并且**第一根手指
+  同时驱动鼠标** —— 于是 `ui_*` 那套按钮在触摸屏上直接可点。
+
 ## 物理
 
 物理属性是**场景数据**（`Entity::physics`），不是"凡是带模型的实体都变成盒子"：
