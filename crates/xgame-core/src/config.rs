@@ -594,6 +594,52 @@ impl SkyConfig {
     }
 }
 
+/// 阴影的**画质**参数（软阴影 / 级间混合），持久化在 `project.ron` 的
+/// `render.shadow` 节。
+///
+/// **默认关**（两个 0.0）：与 Bloom / 天空 / FXAA / TAA 同一条纪律 —— 画质增强
+/// 默认不动画面。关着时着色器走今天那条 3×3 PCF + 硬级间切换的路径，逐位一致。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShadowConfig {
+    /// 软阴影（PCSS）的灯光尺寸。
+    ///
+    /// - `0.0`（默认）= 硬阴影：3×3 PCF，与引入 PCSS 之前逐位一致；
+    /// - `> 0` = 灯光的相对尺寸（0.5 是"一盏有体积的灯"的常用值）：先做
+    ///   blocker search 估出半影宽度，再按宽度做 PCF。值越大影子边缘越糊、
+    ///   离遮挡物越远的影子越散。
+    ///
+    /// 坏值（负数 / NaN）按 0 处理（[`Self::sanitized`]），不夹取上界 ——
+    /// 上界没有物理意义，太大的值只是"糊成一片"，不该由引擎替作者决定。
+    pub softness: f32,
+    /// 级间混合带宽（占**该级远端切分距离**的比例）。
+    ///
+    /// - `0.0`（默认）= 不混合：两级在切分处硬接，近处细、远处粗看得出一条缝；
+    /// - `> 0` = 在切分前这么多比例的深度带里把两级混起来，缝被抹平。
+    ///   `0.05` 是肉眼刚好看不见缝、额外采样又只落在薄薄一条带上的取值。
+    ///
+    /// 混合带里要采样两级，代价只落在这条带上（其余像素照旧一级一次）。
+    pub cascade_blend: f32,
+}
+
+impl ShadowConfig {
+    /// 与默认值完全一致时不落盘（`skip_serializing_if` 用）：没开过的项目
+    /// `project.ron` 里不出现这一节。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// 容错读取：清单是**手改的文本**，负数 / NaN / 无穷不能直接交给着色器
+    /// （负半径会让 PCF 的采样点绕到反方向，NaN 会让整片影子消失）。
+    /// 非有限值与负值一律当 0（= 关）。
+    pub fn sanitized(self) -> Self {
+        let clean = |v: f32| if v.is_finite() && v > 0.0 { v } else { 0.0 };
+        Self {
+            softness: clean(self.softness),
+            cascade_blend: clean(self.cascade_blend),
+        }
+    }
+}
+
 /// 画面渲染参数（色调映射 / 曝光 / 泛光 / 天空），持久化在 `project.ron` 的
 /// `render` 节。
 ///
@@ -624,6 +670,9 @@ pub struct RenderConfig {
     /// SSAO（屏幕空间环境光遮蔽）参数，见 [`SsaoConfig`]。同样后加 + 默认关。
     #[serde(default, skip_serializing_if = "SsaoConfig::is_default")]
     pub ssao: SsaoConfig,
+    /// 阴影画质参数（软阴影 / 级间混合），见 [`ShadowConfig`]。同样后加 + 默认关。
+    #[serde(default, skip_serializing_if = "ShadowConfig::is_default")]
+    pub shadow: ShadowConfig,
     /// LOD 距离偏置：乘在每级 `max_distance` 上。
     ///
     /// - `1.0`（默认）= 按作者写的阈值，逐位与引入 LOD 之前一致；
@@ -656,6 +705,7 @@ impl Default for RenderConfig {
             fxaa: FxaaConfig::default(),
             taa: TaaConfig::default(),
             ssao: SsaoConfig::default(),
+            shadow: ShadowConfig::default(),
             lod_bias: default_lod_bias(),
         }
     }
@@ -691,6 +741,7 @@ impl RenderConfig {
             fxaa: self.fxaa,
             taa: self.taa.sanitized(),
             ssao: self.ssao.sanitized(),
+            shadow: self.shadow.sanitized(),
             // 偏置刻意不夹：见字段说明（坏值由 `lod::LodGroup::resolve` 兜底）。
             lod_bias: self.lod_bias,
         }
@@ -1013,6 +1064,71 @@ mod tests {
         assert_eq!(negative.strength, 0.0);
         assert_eq!(negative.radius, 0.0);
         assert_eq!(negative.bias, 0.0);
+    }
+
+    /// 软阴影 / 级间混合默认必须**关**，且默认配置不落盘（与 Bloom / TAA / SSAO
+    /// 同一条纪律）：没开过的项目 `project.ron` 里不出现 `render.shadow` 节，
+    /// 老项目读进来就是全 0 = 走引入软阴影之前的 3×3 PCF 老路径。
+    #[test]
+    fn shadow_defaults_to_off_and_roundtrips() {
+        assert_eq!(
+            ShadowConfig::default(),
+            ShadowConfig {
+                softness: 0.0,
+                cascade_blend: 0.0
+            },
+            "两个参数默认都必须是 0（= 关）"
+        );
+        assert!(ShadowConfig::default().is_default());
+
+        let text = ron::to_string(&RenderConfig::default()).expect("serialize");
+        assert!(!text.contains("shadow"), "未开过的软阴影不该落盘: {text}");
+
+        let on = RenderConfig {
+            shadow: ShadowConfig {
+                softness: 0.5,
+                cascade_blend: 0.05,
+            },
+            ..Default::default()
+        };
+        let text = ron::to_string(&on).expect("serialize");
+        assert!(text.contains("shadow"), "开着的软阴影必须落盘: {text}");
+        let back: RenderConfig = ron::from_str(&text).expect("deserialize");
+        assert_eq!(back, on);
+
+        // 老项目（清单里没有 shadow 节）读进来 = 默认全关：新字段不许改老画面。
+        let legacy: RenderConfig =
+            ron::from_str("(exposure: 1.0, tone_map: Aces)").expect("老 render 配置也要能读");
+        assert_eq!(legacy.shadow, ShadowConfig::default());
+    }
+
+    /// 软阴影容错：清单是手改的文本，负数 / NaN / 无穷不能直接进着色器
+    /// （负尺寸会把采样点绕到反方向，NaN 会让整片影子消失），一律当 0（= 关）。
+    #[test]
+    fn shadow_config_sanitized_rejects_garbage() {
+        let nan = ShadowConfig {
+            softness: f32::NAN,
+            cascade_blend: f32::INFINITY,
+        }
+        .sanitized();
+        assert_eq!(nan.softness, 0.0);
+        assert_eq!(nan.cascade_blend, 0.0);
+
+        let negative = ShadowConfig {
+            softness: -0.5,
+            cascade_blend: -0.1,
+        }
+        .sanitized();
+        assert_eq!(negative.softness, 0.0);
+        assert_eq!(negative.cascade_blend, 0.0);
+
+        let ok = ShadowConfig {
+            softness: 0.5,
+            cascade_blend: 0.05,
+        }
+        .sanitized();
+        assert_eq!(ok.softness, 0.5);
+        assert_eq!(ok.cascade_blend, 0.05);
     }
 
     /// TAA 开着时 FXAA 必须自动让位（两者叠加只是糊两遍）。

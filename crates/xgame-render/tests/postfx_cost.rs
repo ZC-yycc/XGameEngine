@@ -279,6 +279,7 @@ impl LdrPath {
             SceneLighting::new(scene.ambient, &scene.lights),
             SkyConfig::default(),
             1.0, // LOD 偏置：基准按作者阈值（LOD 关着时无影响）
+            xgame_core::ShadowConfig::default(),
             &[], // 无粒子：这条 bench 量的是场景 / 后处理成本
         );
         encoder.write_timestamp(stamps, base + 1);
@@ -365,6 +366,7 @@ impl HdrPath {
             SceneLighting::new(scene.ambient, &scene.lights),
             settings.sky,
             settings.lod_bias,
+            settings.shadow,
             &[], // 无粒子：这条 bench 量的是场景 / 后处理成本
         );
         encoder.write_timestamp(stamps, base + 1);

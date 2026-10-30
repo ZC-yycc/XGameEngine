@@ -956,6 +956,8 @@ impl SceneRenderer {
             settings.sky,
             // LOD 最终偏置 = 作者的内容旋钮 × 档位缩放（见 `xgame_core::quality`）。
             settings.lod_bias * self.quality.lod_scale,
+            // 软阴影 / 级间混合画质参数（`project.ron` 的 `render.shadow` 节）。
+            settings.shadow,
             particles,
         );
 

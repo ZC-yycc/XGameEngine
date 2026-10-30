@@ -230,6 +230,7 @@ impl BenchPath {
             SceneLighting::new(scene.ambient, &scene.lights),
             RenderConfig::default().sky,
             lod_bias,
+            xgame_core::ShadowConfig::default(),
             &[],
         );
         encoder.write_timestamp(stamps, base + 1);

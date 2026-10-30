@@ -8,16 +8,18 @@
 //!
 //! # 比什么
 //!
-//! 同一个场景、同一台相机、同一套管线，只切三件事：
+//! 同一个场景、同一台相机、同一套管线，只切四件事：
 //!
-//! | 档位 | 阴影 pass | 每级提交的实例 |
-//! |---|---|---|
-//! | `shadows = off` | 整段跳过 | 0 |
-//! | `shadows = on`，逐级剔除关 | 4 级各画一遍**全部**相机可见实例 | 4 × 相机可见 |
-//! | `shadows = on`，逐级剔除开 | 每级只画落在该级视锥里的实例 | Σ 命中数 |
+//! | 档位 | 阴影 pass | 片元侧 | 每级提交的实例 |
+//! |---|---|---|---|
+//! | `shadows = off` | 整段跳过 | 3×3 PCF | 0 |
+//! | `shadows = on`，逐级剔除关 | 4 级各画一遍**全部**相机可见实例 | 3×3 PCF | 4 × 相机可见 |
+//! | `shadows = on`，逐级剔除开 | 每级只画落在该级视锥里的实例 | 3×3 PCF | Σ 命中数 |
+//! | `shadows = on`，剔除开 + **软阴影**（softness = 1.0） | 同上 | PCSS | Σ 命中数 |
 //!
 //! 中档（逐级剔除关）就是引入剔除前的行为，所以这张表本身就是 A/B 对照：
-//! 第三行与第二行的差 = 剔除的收益，与第一行的差 = 阴影本身的成本。
+//! 第三行与第二行的差 = 剔除的收益，与第一行的差 = 阴影本身的成本，
+//! 第四行与第三行的差 = **PCSS 软阴影的片元侧成本**（只多采样，不碰阴影 pass）。
 //!
 //! # 场景
 //!
@@ -195,6 +197,7 @@ impl BenchPath {
         anim: &AnimationDriver,
         view_proj: &Mat4,
         eye: &Vec3,
+        shadow: xgame_core::ShadowConfig,
     ) -> FrameStats {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("bench_shadow_encoder"),
@@ -217,6 +220,7 @@ impl BenchPath {
             SceneLighting::new(scene.ambient, &scene.lights),
             RenderConfig::default().sky,
             1.0,
+            shadow,
             &[],
         );
         encoder.write_timestamp(stamps, base + 1);
@@ -366,20 +370,33 @@ fn shadow_pass_cost_and_cascaded_culling() {
             &anim,
             &view_proj,
             &eye,
+            xgame_core::ShadowConfig::default(),
         );
         device.poll(wgpu::Maintain::Poll);
     }
 
-    // 三档交替：A = 阴影关，B = 阴影开 + 逐级剔除关，C = 阴影开 + 逐级剔除开。
+    // 四档交替：A = 阴影关，B = 阴影开 + 逐级剔除关，C = 阴影开 + 逐级剔除开，
+    // D = C + 软阴影（PCSS，softness = 1.0）。D − C 就是 PCSS 的片元侧成本。
+    const HARD: xgame_core::ShadowConfig = xgame_core::ShadowConfig {
+        softness: 0.0,
+        cascade_blend: 0.0,
+    };
+    const SOFT: xgame_core::ShadowConfig = xgame_core::ShadowConfig {
+        softness: 1.0,
+        cascade_blend: 0.0,
+    };
     let mut a_scene = Vec::new();
     let mut b_scene = Vec::new();
     let mut c_scene = Vec::new();
+    let mut d_scene = Vec::new();
     let mut a_cpu = Vec::new();
     let mut b_cpu = Vec::new();
     let mut c_cpu = Vec::new();
+    let mut d_cpu = Vec::new();
     let mut stats_off = FrameStats::default();
     let mut stats_plain = FrameStats::default();
     let mut stats_culled = FrameStats::default();
+    let mut stats_soft = FrameStats::default();
 
     for _ in 0..ROUNDS {
         path.pipeline.set_cascaded_shadow_culling(false);
@@ -395,6 +412,7 @@ fn shadow_pass_cost_and_cascaded_culling() {
                 &anim,
                 &view_proj,
                 &eye,
+                HARD,
             )
         });
         a_scene.push(r.scene_us);
@@ -413,6 +431,7 @@ fn shadow_pass_cost_and_cascaded_culling() {
                 &anim,
                 &view_proj,
                 &eye,
+                HARD,
             )
         });
         b_scene.push(r.scene_us);
@@ -432,19 +451,42 @@ fn shadow_pass_cost_and_cascaded_culling() {
                 &anim,
                 &view_proj,
                 &eye,
+                HARD,
             )
         });
         c_scene.push(r.scene_us);
         c_cpu.push(r.cpu_us);
         stats_culled = s;
+
+        // 软阴影只改片元侧采样，不碰阴影 pass —— 与 C 同一条阴影收集路径。
+        let (r, s) = run_round(&device, &queue, &stamps, &resolve, &readback, |base| {
+            path.frame(
+                &device,
+                &queue,
+                &stamps,
+                base,
+                &scene_on,
+                &matrices,
+                &cache,
+                &anim,
+                &view_proj,
+                &eye,
+                SOFT,
+            )
+        });
+        d_scene.push(r.scene_us);
+        d_cpu.push(r.cpu_us);
+        stats_soft = s;
     }
 
     let a = median(&mut a_scene);
     let b = median(&mut b_scene);
     let c = median(&mut c_scene);
+    let d = median(&mut d_scene);
     let a_c = median(&mut a_cpu);
     let b_c = median(&mut b_cpu);
     let c_c = median(&mut c_cpu);
+    let d_c = median(&mut d_cpu);
 
     println!("\n=== shadow_cost （{WIDTH}x{HEIGHT}，{ACTORS} 方块，{ROUNDS} 轮中位）===");
     println!("时段      场景段 GPU µs   CPU µs   阴影实例提交");
@@ -461,9 +503,18 @@ fn shadow_pass_cost_and_cascaded_culling() {
         stats_culled.shadow_instances_submitted
     );
     println!(
+        "阴影开·软阴影 {d:9.2} {d_c:9.2} {:12}",
+        stats_soft.shadow_instances_submitted
+    );
+    println!(
         "\n阴影本身成本 : {:+.2} µs (+{:.1}%)",
         b - a,
         (b - a) / a * 100.0
+    );
+    println!(
+        "PCSS 软阴影  : {:+.2} µs ({:+.1}% 相对硬阴影)",
+        d - c,
+        (d - c) / c * 100.0
     );
     println!(
         "逐级剔除收益 : {:+.2} µs ({:+.1}% 相对免剔)",
@@ -562,6 +613,7 @@ fn point_light_shadow_cost() {
             &anim,
             &view_proj,
             &eye,
+            xgame_core::ShadowConfig::default(),
         );
         device.poll(wgpu::Maintain::Poll);
     }
@@ -589,6 +641,7 @@ fn point_light_shadow_cost() {
                 &anim,
                 &view_proj,
                 &eye,
+                xgame_core::ShadowConfig::default(),
             )
         });
         off_scene_us.push(r.scene_us);
@@ -609,6 +662,7 @@ fn point_light_shadow_cost() {
                 &anim,
                 &view_proj,
                 &eye,
+                xgame_core::ShadowConfig::default(),
             )
         });
         plain_scene_us.push(r.scene_us);
@@ -628,6 +682,7 @@ fn point_light_shadow_cost() {
                 &anim,
                 &view_proj,
                 &eye,
+                xgame_core::ShadowConfig::default(),
             )
         });
         on_scene_us.push(r.scene_us);

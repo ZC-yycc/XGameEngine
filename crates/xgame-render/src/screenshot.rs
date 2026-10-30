@@ -507,6 +507,8 @@ impl ScreenshotRenderer {
             settings.sky,
             // LOD 最终偏置 = 作者的内容旋钮 × 档位缩放（见 `xgame_core::quality`）。
             settings.lod_bias * self.quality.lod_scale,
+            // 软阴影 / 级间混合画质参数（`project.ron` 的 `render.shadow` 节）。
+            settings.shadow,
             particles,
         );
         // TAA resolve（开着时）—— 必须在后处理**之前**：曝光 / 色调映射要作用在
@@ -693,8 +695,8 @@ mod tests {
     use super::*;
 
     use xgame_core::{
-        BloomConfig, Entity, FxaaConfig, Light, MaterialAsset, MaterialOverride, SkyConfig,
-        TaaConfig, ToneMapMode,
+        BloomConfig, Entity, FxaaConfig, Light, MaterialAsset, MaterialOverride, ShadowConfig,
+        SkyConfig, TaaConfig, ToneMapMode,
     };
     use xgame_math::glam::Quat;
 
@@ -4253,6 +4255,178 @@ mod tests {
         let a = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
         let b = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
         assert_eq!(a, b, "同一渲染器连渲两帧必须逐字节一致");
+    }
+
+    // =========================================================================
+    // 软阴影（PCSS）与级间混合 —— `render.shadow` 节的两个画质旋钮
+    // =========================================================================
+
+    /// 软阴影测试场景：悬空立方体 + 45° 斜射光，影子完整落在地面可见区。
+    /// 第二只箱子放得更远：它的影子落在更深的级联里，级间混合 / 重叠拟合
+    /// 的变化在它身上也看得到。
+    fn soft_shadow_probe_scene() -> Scene {
+        let mut scene = Scene::new("soft-shadow");
+        scene.ambient = [0.18, 0.18, 0.22];
+        scene.lights = vec![Light::directional("sun", [0.6, -1.0, -0.45], [1.0; 3], 1.6)];
+        let mut ground = Entity::new("Ground");
+        ground.model = "builtin://plane".to_owned();
+        ground.transform.scale = Vec3::new(14.0, 1.0, 14.0);
+        scene.add_entity(ground);
+        let mut cube = Entity::new("Cube");
+        cube.model = "builtin://cube".to_owned();
+        cube.transform.position = Vec3::new(0.0, 1.6, 0.0);
+        cube.transform.scale = Vec3::splat(1.2);
+        scene.add_entity(cube);
+        let mut far_box = Entity::new("FarBox");
+        far_box.model = "builtin://cube".to_owned();
+        far_box.transform.position = Vec3::new(-2.2, 1.2, -5.0);
+        far_box.transform.scale = Vec3::new(2.0, 2.4, 0.8);
+        scene.add_entity(far_box);
+        scene
+    }
+
+    /// **PCSS 的本体**：灯光有尺寸时，影子边缘必须有随距离展开的半影。
+    ///
+    /// 硬阴影（softness = 0）走 3×3 PCF，边缘过渡只有一两个像素；开软阴影
+    /// （softness = 1.0）后先估遮挡物距离、再按半影宽度做 12 tap 可变半径
+    /// PCF，过渡带显著变宽。若 `soft` uniform 没接进着色器（或 PCSS 分支
+    /// 被写坏成恒走老路径），两图逐字节相同、中间调像素数相等 —— 这条就红。
+    #[test]
+    fn soft_shadows_widen_the_penumbra() {
+        let Some(mut shot) = gpu_or_skip("soft_shadows_widen_the_penumbra") else {
+            return;
+        };
+        let scene = soft_shadow_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 5.0, 8.0),
+            Vec3::new(0.0, 0.4, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let hard = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        let soft = render_frames(
+            &mut shot,
+            &scene,
+            &anim,
+            camera,
+            RenderConfig {
+                shadow: ShadowConfig {
+                    softness: 1.0,
+                    cascade_blend: 0.0,
+                },
+                ..Default::default()
+            },
+            1,
+        );
+
+        // 平台亮度取自已知的世界点：影子中心 vs 远离影子的地面。
+        let world = scene.world_matrices();
+        let bounds = scene_bounds(&scene.entities, &world, &shot.model_cache).expect("场景有几何");
+        let (near, far) = clip_planes(&camera, bounds.radius());
+        let view_proj = Mat4::perspective_rh(camera.fov_y, shot.aspect(), near, far)
+            * Mat4::look_at_rh(camera.eye, camera.target, camera.up);
+        let to_pixel = |p: Vec3| {
+            let clip = view_proj * p.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            (
+                ((ndc.x * 0.5 + 0.5) * 320.0).round() as u32,
+                ((1.0 - (ndc.y * 0.5 + 0.5)) * 240.0).round() as u32,
+            )
+        };
+        let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        // 影子中心：立方体 (0,1.6,0) 沿光向投到地面 ≈ (0.96, 0, -0.72)。
+        let (sx, sy) = to_pixel(Vec3::new(0.96, 0.0, -0.72));
+        let (lx, ly) = to_pixel(Vec3::new(-2.0, 0.0, 2.0));
+        assert!(sx < 320 && sy < 240 && lx < 320 && ly < 240, "采样点必须在画面内");
+
+        let shadow_level = luma(pixel_avg(&hard, 320, sx, sy));
+        let lit_level = luma(pixel_avg(&hard, 320, lx, ly));
+        assert!(
+            lit_level > shadow_level + 25.0,
+            "影子必须可见（lit {lit_level:.1} vs shadow {shadow_level:.1}）"
+        );
+        // 中间调 = 半影。硬边的过渡带只有一两个像素宽。
+        let penumbra_pixels = |rgba: &[u8]| {
+            let lo = shadow_level + 0.3 * (lit_level - shadow_level);
+            let hi = shadow_level + 0.7 * (lit_level - shadow_level);
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| {
+                    let l = luma([p[0] as f32, p[1] as f32, p[2] as f32]);
+                    l > lo && l < hi
+                })
+                .count()
+        };
+        let hard_transition = penumbra_pixels(&hard);
+        let soft_transition = penumbra_pixels(&soft);
+        assert!(
+            soft_transition > hard_transition * 3 / 2 && soft_transition >= hard_transition + 25,
+            "软阴影的半影必须比硬边宽（soft {soft_transition} vs hard {hard_transition}）"
+        );
+    }
+
+    /// **两个旋钮必须真的连通**：softness / cascade_blend 任一非零都要能
+    /// 改变画面。uniform 漏接（`soft` 恒写 0）或着色器分支短路时，两组
+    /// 对比全部逐字节相同 —— 这条就是红的。
+    #[test]
+    fn soft_shadow_knobs_reach_the_shader() {
+        let Some(mut shot) = gpu_or_skip("soft_shadow_knobs_reach_the_shader") else {
+            return;
+        };
+        let scene = soft_shadow_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 5.0, 8.0),
+            Vec3::new(0.0, 0.4, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let render = |shot: &mut ScreenshotRenderer, shadow: ShadowConfig| {
+            render_frames(shot, &scene, &anim, camera, RenderConfig { shadow, ..Default::default() }, 1)
+        };
+        let hard = render(&mut shot, ShadowConfig::default());
+        let soft = render(&mut shot, ShadowConfig { softness: 1.0, cascade_blend: 0.0 });
+        let blended = render(&mut shot, ShadowConfig { softness: 0.0, cascade_blend: 0.4 });
+
+        let differing = |a: &[u8], b: &[u8]| {
+            a.iter().zip(b).filter(|(x, y)| x != y).count()
+        };
+        let soft_diff = differing(&hard, &soft);
+        let blend_diff = differing(&hard, &blended);
+        assert!(
+            soft_diff > 400,
+            "softness 必须改变画面（差异字节数 {soft_diff}）"
+        );
+        assert!(
+            blend_diff > 200,
+            "cascade_blend 必须改变画面（差异字节数 {blend_diff}）"
+        );
+    }
+
+    /// 软阴影开着时两次渲染必须逐字节一致：采样盘是编译期常量（泊松盘），
+    /// 不许有任何随机相位 —— 无头截图的"同机逐字节确定"契约在这里也成立。
+    #[test]
+    fn soft_shadow_is_deterministic() {
+        let Some(mut shot) = gpu_or_skip("soft_shadow_is_deterministic") else {
+            return;
+        };
+        let scene = soft_shadow_probe_scene();
+        let anim = AnimationDriver::new();
+        let camera = ShotCamera::looking_at(
+            Vec3::new(0.0, 5.0, 8.0),
+            Vec3::new(0.0, 0.4, 0.0),
+            DEFAULT_FOV_Y,
+        );
+        let settings = RenderConfig {
+            shadow: ShadowConfig {
+                softness: 1.0,
+                cascade_blend: 0.2,
+            },
+            ..Default::default()
+        };
+        let a = render_frames(&mut shot, &scene, &anim, camera, settings, 1);
+        let b = render_frames(&mut shot, &scene, &anim, camera, settings, 1);
+        assert_eq!(a, b, "软阴影开着时连渲两帧必须逐字节一致");
     }
 
     // =========================================================================

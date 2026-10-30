@@ -433,6 +433,12 @@ struct ShadowUniform {
     /// x = 1/分辨率（PCF 偏移），y = 深度偏置，z = 开关（>0.5 表示启用），
     /// w = 有效层数（0 = 没有阴影图可用）。
     params: [f32; 4],
+    /// 阴影**画质**开关（见 [`xgame_core::ShadowConfig`]）：
+    /// x = 软阴影（PCSS）灯光尺寸（0 = 关，走 3×3 PCF），
+    /// y = 级间混合带宽（占本级跨度的比例，0 = 关）。
+    ///
+    /// 两个都是 0 时着色器走老路径，逐位一致 —— 所以默认关不付任何代价。
+    soft: [f32; 4],
 }
 
 /// 阴影 pass 的 uniform 步长（字节）。
@@ -1174,6 +1180,11 @@ pub fn cascade_splits(near: f32, far: f32, count: usize) -> Vec<f32> {
 ///    （否则相机一动，影子边缘就随纹素相位抖 —— 也就是常说的 shimmer）。
 ///
 /// 返回 `None` 表示矩阵退化 / 场景为空 / 覆盖距离没有厚度，调用方应关闭阴影。
+///
+/// `overlap`（0.0~1.0）是**级间混合**的重叠量：非零时每一级（第 0 级除外）的
+/// 近端往前多铺 `overlap × 本级跨度`，于是切分前那条混合带里的片元在两级里
+/// 都采得到（不铺的话下一章的图在切分处根本没覆盖，混进去等于混一团"全亮"）。
+/// = 0 时拟合结果与引入混合前逐位一致。
 pub fn cascade_shadow_matrices(
     inv_view_proj: &Mat4,
     camera_pos: Vec3,
@@ -1181,6 +1192,7 @@ pub fn cascade_shadow_matrices(
     scene: Bounds,
     resolution: u32,
     count: usize,
+    overlap: f32,
 ) -> Option<ShadowCascades> {
     if count == 0 || count > MAX_SHADOW_CASCADES || scene.is_empty() {
         return None;
@@ -1246,7 +1258,14 @@ pub fn cascade_shadow_matrices(
     for c in 0..count {
         let d0 = if c == 0 { near_d } else { splits[c - 1] };
         let d1 = splits[c];
-        let (t0, t1) = (at(d0), at(d1));
+        // 级间混合的重叠：本级（非第 0 级）的近端往前多铺一点，让切分前的
+        // 混合带在两级里都采得到（`overlap = 0` 时 `overlap_d` 也是 0，逐位一致）。
+        let overlap_d = if c > 0 && overlap.is_finite() && overlap > 0.0 {
+            (d1 - d0) * overlap
+        } else {
+            0.0
+        };
+        let (t0, t1) = (at(d0 - overlap_d), at(d1));
 
         let mut corners = [Vec3::ZERO; 8];
         for k in 0..4 {
@@ -1507,6 +1526,9 @@ struct ShadowUniform {
     forward: vec4<f32>,
     // x = 1/分辨率, y = 深度偏置, z = 开关, w = 有效层数
     params: vec4<f32>,
+    // x = 软阴影（PCSS）灯光尺寸（0 = 关，走 3x3 PCF），
+    // y = 级间混合带宽（占本级跨度的比例，0 = 关）。
+    soft: vec4<f32>,
 }
 
 // 点光立方体阴影（Rust 侧 `PointShadowUniform`，字段顺序与长度必须一致）。
@@ -1547,11 +1569,133 @@ struct VertexOutput {
     @location(5) @interpolate(flat) material: vec4<f32>,
 }
 
+// --- 方向光阴影 ---
+//
 // 3x3 PCF：把 9 个比较结果平均一下，边缘不那么硬。
 //
 // 用 `textureSampleCompareLevel` 而不是 `textureSampleCompare`——后者要走隐式
 // 导数，而它处在一个"按灯循环里的 if 分支"中（非一致控制流），WGSL 的一致性
 // 分析会因此报错。深度图没有 mip，本来也只需要 level 0，正好。
+//
+// 软阴影（PCSS，`shadow.soft.x > 0`）与级间混合（`shadow.soft.y > 0`）都是
+// **默认关**：关着时走下面这条 3x3 PCF + 硬接的老路径，逐位一致。
+
+// 半影估计与软化 PCF 的固定采样盘（poisson）。常量表 ⇒ 跨帧逐位确定 ——
+// 截图确定性是硬要求（无头截图要能逐字节复现），所以这里不用任何随机数。
+const BLOCKER_TAPS: i32 = 8;
+const BLOCKER_OFFSETS: array<vec2<f32>, 8> = array<vec2<f32>, 8>(
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(0.5278, 0.7826),
+    vec2<f32>(-0.9231, 0.2345),
+    vec2<f32>(0.2341, -0.9214),
+    vec2<f32>(-0.4832, -0.7621),
+    vec2<f32>(0.8732, -0.3412),
+    vec2<f32>(-0.7823, 0.4832),
+    vec2<f32>(0.1234, 0.3421),
+);
+const SOFT_PCF_TAPS: i32 = 12;
+const SOFT_PCF_OFFSETS: array<vec2<f32>, 12> = array<vec2<f32>, 12>(
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(0.5278, 0.7826),
+    vec2<f32>(-0.9231, 0.2345),
+    vec2<f32>(0.2341, -0.9214),
+    vec2<f32>(-0.4832, -0.7621),
+    vec2<f32>(0.8732, -0.3412),
+    vec2<f32>(-0.7823, 0.4832),
+    vec2<f32>(0.1234, 0.3421),
+    vec2<f32>(-0.2341, 0.9214),
+    vec2<f32>(0.7621, -0.4832),
+    vec2<f32>(-0.9214, -0.2341),
+    vec2<f32>(0.3421, -0.8732),
+);
+
+// 一层级联里的阴影值。y = 1 表示片元落在这一层的图里（0 = 图外，按"全亮"处理，
+// 否则边缘会被裁出一条黑带）。
+fn cascade_shadow_at(world_pos: vec3<f32>, cascade: u32, ndotl: f32) -> vec2<f32> {
+    let light_clip = shadow.light_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
+    let ndc = light_clip.xyz / light_clip.w;
+    // NDC → 纹理 UV。y 要翻：NDC 的 y 朝上，纹理的 v 朝下。
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return vec2<f32>(1.0, 0.0);
+    }
+    // 掠射角下采样点跨度大、自遮挡更严重，所以偏置随 ndotl 变小而放大。
+    let bias = shadow.params.y * (1.0 + 2.0 * (1.0 - ndotl));
+    let depth = ndc.z;
+
+    if (shadow.soft.x > 0.0) {
+        // --- PCSS：先找遮挡物，再按半影宽度做 PCF ---
+        //
+        // 三步：① 在一个盘里找"比片元更近"的遮挡物，求它们的平均深度；
+        // ② 遮挡物离接收面越远，半影越宽（`penumbra ∝ receiver - blocker`）；
+        // ③ 用这个宽度做 PCF。所以贴着墙根的影子硬、离墙远的影子糊 —— 这正是
+        // 单一固定核做不到的。
+        let search_uv = shadow.params.x * (2.0 + 8.0 * shadow.soft.x);
+        var blocker_sum = 0.0;
+        var blocker_count = 0.0;
+        for (var i = 0; i < BLOCKER_TAPS; i = i + 1) {
+            let coord = uv + BLOCKER_OFFSETS[i] * search_uv;
+            if (coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0) {
+                continue;
+            }
+            // `textureLoad` 取**原始深度**（比较采样器只能给 0/1，估不了距离）。
+            // 深度数组纹理的 `textureLoad` 要 4 个参数（含 level）：没有 mip，
+            // level 恒为 0。下标夹进图内 —— uv 恰好 1.0 时乘出来的下标等于
+            // 宽度，越界读在 WebGPU 里返回 0，会被当成"深度 0 的遮挡物"。
+            let dims = vec2<i32>(textureDimensions(shadow_tex));
+            let pix = clamp(
+                vec2<i32>(coord * vec2<f32>(dims)),
+                vec2<i32>(0),
+                dims - vec2<i32>(1),
+            );
+            let d = textureLoad(shadow_tex, pix, i32(cascade), 0);
+            if (d < depth) {
+                blocker_sum = blocker_sum + d;
+                blocker_count = blocker_count + 1.0;
+            }
+        }
+        if (blocker_count < 0.5) {
+            return vec2<f32>(1.0, 1.0);
+        }
+        let blocker = blocker_sum / blocker_count;
+        // 正交光下"遮挡物到接收面的距离"就用深度差近似（光沿 -forward 看，
+        // 深度差与沿光距离差只差一个常数倍，收进 light size 里）。
+        let penumbra = clamp(
+            (depth - blocker) * shadow.soft.x * 12.0,
+            shadow.params.x,
+            shadow.params.x * 24.0,
+        );
+        var sum = 0.0;
+        for (var i = 0; i < SOFT_PCF_TAPS; i = i + 1) {
+            let offset = SOFT_PCF_OFFSETS[i] * penumbra;
+            sum = sum + textureSampleCompareLevel(
+                shadow_tex,
+                shadow_smp,
+                uv + offset,
+                i32(cascade),
+                depth - bias,
+            );
+        }
+        return vec2<f32>(sum / f32(SOFT_PCF_TAPS), 1.0);
+    }
+
+    // --- 硬阴影：3x3 PCF ---
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let offset = vec2<f32>(f32(dx), f32(dy)) * shadow.params.x;
+            sum = sum + textureSampleCompareLevel(
+                shadow_tex,
+                shadow_smp,
+                uv + offset,
+                i32(cascade),
+                depth - bias,
+            );
+        }
+    }
+    return vec2<f32>(sum / 9.0, 1.0);
+}
+
 fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
     // 选层：级联是按**相机视线方向的线性深度**切的，不是 NDC 深度。
     // 用线性深度是因为 `splits` 本身就是世界单位，跨相机/跨投影都可比。
@@ -1568,31 +1712,27 @@ fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
         }
     }
 
-    let light_clip = shadow.light_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
-    let ndc = light_clip.xyz / light_clip.w;
-    // NDC → 纹理 UV。y 要翻：NDC 的 y 朝上，纹理的 v 朝下。
-    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    // 落出光源视锥（含近平面之后）的部分当作"完全受光"，否则边缘会被裁出一条黑带。
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        return 1.0;
-    }
-    // 掠射角下采样点跨度大、自遮挡更严重，所以偏置随 ndotl 变小而放大。
-    let bias = shadow.params.y * (1.0 + 2.0 * (1.0 - ndotl));
-    let depth = ndc.z;
-    var sum = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let offset = vec2<f32>(f32(dx), f32(dy)) * shadow.params.x;
-            sum = sum + textureSampleCompareLevel(
-                shadow_tex,
-                shadow_smp,
-                uv + offset,
-                i32(cascade),
-                depth - bias,
-            );
+    let a = cascade_shadow_at(world_pos, cascade, ndotl);
+    // --- 级间混合 ---
+    //
+    // 切分处两级的纹素密度差一截，硬接就是一条看得见的缝。在切分前一条薄带里
+    // 把两级混起来（`shadow.soft.y` = 带宽占本级跨度的比例），缝就抹平了。
+    //
+    // 为什么下一章要**重叠**着拟合：不重叠的话带里的片元落在下一章的图外，
+    // `cascade_shadow_at` 返回"全亮"，混进去等于把缝抹成一圈淡影子。
+    // 重叠量由 CPU 侧的 `cascade_shadow_matrices(overlap)` 给（= 0 时逐位一致）。
+    if (shadow.soft.y > 0.0 && cascade + 1u < count) {
+        let split = shadow.splits[cascade];
+        let band = split * shadow.soft.y;
+        if (view_depth > split - band) {
+            let b = cascade_shadow_at(world_pos, cascade + 1u, ndotl);
+            if (b.y > 0.5) {
+                let t = clamp((view_depth - (split - band)) / max(band, 1e-5), 0.0, 1.0);
+                return mix(a.x, b.x, t);
+            }
         }
     }
-    return sum / 9.0;
+    return a.x;
 }
 
 // --- 点光立方体阴影 ---
@@ -2281,6 +2421,8 @@ impl ScenePipeline {
                     0.0,
                     0.0,
                 ],
+                // 默认软阴影 / 级间混合全关：着色器走 3×3 PCF + 硬级间切换的老路径。
+                soft: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -3200,6 +3342,7 @@ impl ScenePipeline {
         lighting: SceneLighting<'_>,
         sky: SkyConfig,
         lod_bias: f32,
+        shadow_cfg: xgame_core::ShadowConfig,
         particle_quads: &[xgame_particle::ParticleQuad],
     ) {
         // --- 光源打包 + 阴影准备（都在 CPU 侧，先算完再开 pass）---
@@ -3262,11 +3405,15 @@ impl ScenePipeline {
                     bounds,
                     self.shadow_resolution,
                     SHADOW_CASCADES,
+                    shadow_cfg.sanitized().cascade_blend,
                 )
             }),
             None => None,
         };
         let shadow_enabled = cascades.is_some();
+        // 阴影画质（软阴影 / 级间混合）：坏值在这儿再清一次 —— 着色器拿它当
+        // 半径用，负数会让采样点绕到反方向、NaN 会让整片影子消失。
+        let shadow_quality = shadow_cfg.sanitized();
 
         // --- 每帧全局 uniform ---
         //
@@ -3303,6 +3450,12 @@ impl ScenePipeline {
                 1.0 / self.shadow_resolution as f32,
                 SHADOW_DEPTH_BIAS,
                 if shadow_enabled { 1.0 } else { 0.0 },
+                0.0,
+            ],
+            soft: [
+                shadow_quality.softness,
+                shadow_quality.cascade_blend,
+                0.0,
                 0.0,
             ],
         };
@@ -4563,6 +4716,7 @@ mod tests {
             probe_scene(),
             2048,
             SHADOW_CASCADES,
+            0.0,
         )
         .expect("应当拟合出级联");
 
@@ -4616,6 +4770,7 @@ mod tests {
             bounds,
             2048,
             SHADOW_CASCADES,
+            0.0,
         )
         .expect("应当拟合出级联");
 
@@ -4639,10 +4794,10 @@ mod tests {
         let eye = Vec3::new(1.0, 7.0, 20.0);
         let inv = probe_camera(eye, Vec3::new(0.0, 0.0, 0.0)).inverse();
         let a =
-            cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4)
+            cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4, 0.0)
                 .expect("a");
         let b =
-            cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4)
+            cascade_shadow_matrices(&inv, eye, Vec3::new(0.2, -1.0, 0.1), probe_scene(), 2048, 4, 0.0)
                 .expect("b");
         assert_eq!(
             a.view_proj[0].to_cols_array(),
@@ -4663,7 +4818,8 @@ mod tests {
             Vec3::new(0.0, -1.0, 0.0),
             Bounds::EMPTY,
             2048,
-            4
+            4,
+            0.0
         )
         .is_none());
         assert!(cascade_shadow_matrices(
@@ -4672,7 +4828,8 @@ mod tests {
             Vec3::new(0.0, -1.0, 0.0),
             probe_scene(),
             2048,
-            0
+            0,
+            0.0
         )
         .is_none());
         // 逆矩阵退化成零：角点全是原点，切不出来。
@@ -4682,7 +4839,8 @@ mod tests {
             Vec3::new(0.0, -1.0, 0.0),
             probe_scene(),
             2048,
-            4
+            4,
+            0.0
         )
         .is_none());
     }
@@ -4698,12 +4856,113 @@ mod tests {
             probe_scene(),
             2048,
             2,
+            0.0,
         )
         .expect("零方向也要能拟合");
         assert!(cascades.view_proj[0]
             .to_cols_array()
             .iter()
             .all(|v| v.is_finite()));
+    }
+
+    /// **级间混合的重叠拟合**：`overlap > 0` 时每个非第 0 级的拟合框必须往
+    /// 相机方向多铺 `overlap × 本级跨度`，让切分前的混合带在下一级的图里
+    /// 也采得到。`overlap` 参数引入之前（= 恒 0），`view_range` 的近端不动，
+    /// 这条断言的严格不等式就是红的。
+    #[test]
+    fn cascade_overlap_extends_the_fit_toward_the_camera() {
+        let eye = Vec3::new(0.0, 6.0, 24.0);
+        let bounds = probe_scene();
+        let dir = Vec3::new(0.4, -1.0, 0.3);
+        let plain =
+            cascade_shadow_matrices(&probe_camera(eye, Vec3::ZERO).inverse(), eye, dir, bounds, 2048, SHADOW_CASCADES, 0.0)
+                .expect("plain");
+        let blended =
+            cascade_shadow_matrices(&probe_camera(eye, Vec3::ZERO).inverse(), eye, dir, bounds, 2048, SHADOW_CASCADES, 0.25)
+                .expect("blended");
+
+        // 切分点不能动：重叠改的是拟合框，不是层级划分。
+        assert_eq!(plain.splits, blended.splits);
+        // 第 0 级没有"上一级"，重叠对它无效 —— 矩阵逐位一致。
+        assert_eq!(
+            plain.view_proj[0].to_cols_array(),
+            blended.view_proj[0].to_cols_array()
+        );
+        assert_eq!(plain.view_range[0], blended.view_range[0]);
+
+        for c in 1..SHADOW_CASCADES {
+            // 拟合框近端往相机方向铺了：沿视线的最小覆盖深度严格变小。
+            assert!(
+                blended.view_range[c].0 < plain.view_range[c].0,
+                "第 {c} 级的近端必须更靠近相机：{} vs {}",
+                blended.view_range[c].0,
+                plain.view_range[c].0
+            );
+        }
+    }
+
+    /// 铺出来的重叠区**必须真的盖住混合带里的点**：取"切分点往相机方向
+    /// 半个重叠量"的轴上点，投进下一级的拟合框必须是图内（NDC 全落在
+    /// [-1,1]×[-1,1]、深度 [0,1]）。不铺重叠时这个点在 slab 之外 ——
+    /// 混合带里"下一级返回全亮"的缝就是这么来的。
+    #[test]
+    fn cascade_overlap_covers_points_in_front_of_the_split() {
+        let eye = Vec3::new(0.0, 6.0, 24.0);
+        let bounds = probe_scene();
+        let dir = Vec3::new(0.4, -1.0, 0.3);
+        let overlap = 0.25;
+        let cascades = cascade_shadow_matrices(
+            &probe_camera(eye, Vec3::ZERO).inverse(),
+            eye,
+            dir,
+            bounds,
+            2048,
+            SHADOW_CASCADES,
+            overlap,
+        )
+        .expect("blended");
+
+        for c in 1..SHADOW_CASCADES {
+            let (d0, d1) = (cascades.splits[c - 1], cascades.splits[c]);
+            let overlap_d = (d1 - d0) * overlap;
+            // 半个重叠量处：既在原 slab 外（证明确实需要铺），又在铺完的框内。
+            let p = eye + cascades.forward * (d0 - overlap_d * 0.5);
+            let ndc = project(&cascades.view_proj[c], p);
+            assert!(
+                ndc.x.abs() <= 1.001 && ndc.y.abs() <= 1.001,
+                "第 {c} 级的重叠区没盖住切分前的点：ndc = {ndc:?}"
+            );
+            assert!(
+                (-0.001..=1.001).contains(&ndc.z),
+                "第 {c} 级的重叠区深度越界：ndc.z = {}",
+                ndc.z
+            );
+        }
+    }
+
+    /// `overlap` 的非法值（负数 / NaN / 无穷）必须与 0 逐位一致：清单是手改的
+    /// 文本，坏值只能意味着"关"，不能意味着"奇怪的拟合"。
+    #[test]
+    fn cascade_overlap_garbage_is_treated_as_zero() {
+        let eye = Vec3::new(0.0, 6.0, 24.0);
+        let bounds = probe_scene();
+        let dir = Vec3::new(0.4, -1.0, 0.3);
+        let base =
+            cascade_shadow_matrices(&probe_camera(eye, Vec3::ZERO).inverse(), eye, dir, bounds, 2048, SHADOW_CASCADES, 0.0)
+                .expect("base");
+        for bad in [-0.5f32, f32::NAN, f32::INFINITY] {
+            let got =
+                cascade_shadow_matrices(&probe_camera(eye, Vec3::ZERO).inverse(), eye, dir, bounds, 2048, SHADOW_CASCADES, bad)
+                    .expect("bad");
+            for c in 0..SHADOW_CASCADES {
+                assert_eq!(
+                    base.view_proj[c].to_cols_array(),
+                    got.view_proj[c].to_cols_array(),
+                    "overlap = {bad} 必须与 0 逐位一致（第 {c} 级）"
+                );
+            }
+            assert_eq!(base.view_range, got.view_range);
+        }
     }
 
     /// 相机远平面比场景大得多时，覆盖距离必须按**场景**收紧（不是按远平面）：
@@ -4719,6 +4978,7 @@ mod tests {
             bounds,
             2048,
             SHADOW_CASCADES,
+            0.0,
         )
         .expect("应当拟合出级联");
         let cover = cascades.splits[SHADOW_CASCADES - 1];
@@ -4750,7 +5010,8 @@ mod tests {
     /// 而不是报错 —— 只能靠测试钉住。
     #[test]
     fn shadow_uniform_matches_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<ShadowUniform>(), 304);
+        // 256（矩阵数组）+ 16（splits）+ 16（forward）+ 16（params）+ 16（soft）。
+        assert_eq!(std::mem::size_of::<ShadowUniform>(), 320);
         // uniform 的结构体尺寸必须是 16 的倍数（WGSL 的地址空间对齐要求）。
         assert_eq!(std::mem::size_of::<ShadowUniform>() % 16, 0);
         // 阴影 pass 的动态偏移步长必须能容纳一个矩阵，且是 256 的倍数。

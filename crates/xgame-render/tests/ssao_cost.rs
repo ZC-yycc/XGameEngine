@@ -202,6 +202,7 @@ impl Path {
             SceneLighting::new(scene.ambient, &scene.lights),
             settings.sky,
             settings.lod_bias,
+            settings.shadow,
             &[],
         );
         encoder.write_timestamp(stamps, base + 1);
