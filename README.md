@@ -1107,7 +1107,7 @@ Build/<项目名>/
 ## MCP（AI 智能体接口）
 
 `xgame-mcp` 是本引擎的 **MCP server** —— 把"读说明书、读脚本契约、读项目、改场景、
-动实体、跑检查、无头实跑"暴露成 10 个标准 MCP 工具，Cursor / Claude 等任何 MCP
+动实体、跑检查、无头实跑"暴露成 12 个标准 MCP 工具，Cursor / Claude 等任何 MCP
 客户端接上就能**不用鼠标直接操纵引擎**做游戏开发。无窗口、无 GPU，stdio 起服务
 （按行 JSON-RPC）。
 

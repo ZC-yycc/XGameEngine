@@ -46,14 +46,19 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+      # plugin_loading 会在 dlopen 前让 Cargo 复核 cdylib 新鲜度；cargo test 本身不产
+      # cdylib，若留到测试进程里冷构建，hosted runner 会撞到测试的 240 秒上限。
+      # 同批提前产出两个测试插件，也顺便准备后面的发布包组合验收二进制。
+      - name: Build plugins and package acceptance binaries
+        run: >-
+          cargo build --locked -p xgame-editor -p xgame-game
+          -p behaviors-demo -p spinner-plugin
+
       - name: Test
         run: cargo test --locked --workspace --all-targets
 
       # 发布包组合门禁：debug 即可验证内容与运行时契约，不做 release / GPU 渲染。
       # 夹具会把包搬离源码目录，再经确定性输入时间线验 input.ron、Rust 插件与三关切换。
-      - name: Build package acceptance binaries
-        run: cargo build --locked -p xgame-editor -p xgame-game -p behaviors-demo
-
       - name: Packaged headless acceptance
         run: >-
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-published-player.ps1

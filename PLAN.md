@@ -7956,3 +7956,26 @@ Windows PowerShell 5.1 能解析中文注释。
 - 本地已按 hosted workflow 命令链完整通过；真正的 GitHub `windows-latest` 只能在本次
   提交推送后发生，推送前不把它写成已运行。没有执行 GPU 截图或默认窗口模式复验；两者
   沿用既有本地证据，不计入本轮结果。
+
+### 100.7 Hosted 首轮红灯与 CI 顺序修正
+
+提交 `d527aee` 推送后的 GitHub Actions run `41385533515` 是第一份真实 hosted 证据：
+`check` 与严格 clippy 通过，但全量测试里的
+`behaviors_demo_plugin_drives_entities` / `behaviors_demo_plugin_registers_across_the_boundary`
+分别在嵌套 `cargo build -p behaviors-demo` 时撞到固定 240 秒上限，`Test` 因此失败；后面的
+发布包组合门禁与 CLI 冒烟全部被跳过，不能把这次 run 记成发布验收通过。
+
+这不是本轮输入时间线断言失败，而是 CI 冷环境第一次把既有顺序缺口照出来：
+`cargo test --all-targets` 不产 cdylib，插件测试为防旧 DLL 跨库破坏内存必须在 dlopen 前
+让 Cargo 复核新鲜度；若 DLL 尚未生成，复核就退化成测试进程里的完整冷构建。子进程 stderr
+被测试刻意丢弃，所以这里只记录“达到 240 秒上限”，不把 panic 文案里的“多半抢锁”冒充
+为已证实根因。
+
+workflow 现改为在 `Test` 前用同一 debug profile 一次构建 `xgame-editor` / `xgame-game` /
+`behaviors-demo` / `spinner-plugin`。插件测试内部的新鲜度复核仍保留，只是变成无工作量调用；
+同批编辑器、播放器和 BehaviorsDemo DLL 继续供后面的发布包门禁复用。本机按新顺序实跑：
+预构建 38.05 秒，六条真实 dlopen 测试 **6 passed / 0 failed**（2.81 秒），全 workspace
+**1215 passed / 0 failed / 18 ignored**；发布包正例再次得到 6 个输入事件、2 次切关与
+`G0_COMPLETE`，证据目录为
+`C:\Users\Administrator\AppData\Local\Temp\opencode\xgame-published-acceptance\published-player-4412e7691b1743bfb667cecbc0c7735d`。
+最终 hosted 结论仍只认修复提交推送后产生的新 run。
