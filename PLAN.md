@@ -8152,3 +8152,88 @@ LOD 仍先早退；没有有效 Animator 播放态、剪辑或蒙皮时继续走
 
 未验证边界：D3D12 / Metal / WebGPU 的跨后端像素行为、超过 256 骨后的末梢质量（仍按既有
 清零 / 截断合同降级），以及多皮肤模型的独立骨槽能力；这些都没有被本轮状态外推为完成。
+
+## 一百零二、G0 并发发布：最终目录交换跨进程互斥（2026-11-02）
+
+### 102.1 选择理由与范围
+
+正式 G0 清单里，发布内容、自定义 InputMap、Rust 插件、多关切换、自包含审计与播放器
+新鲜度已经有本地 / hosted 组合证据；R01 / R02 / 172 仍明确留下“并发发布与断电事务”。
+断电需要进程强杀 / 掉电恢复模型和目录持久性证据，物理输入又依赖外部设备；并发发布则
+是当前 Windows 环境能稳定造出旧行为红灯、又直接影响成品目录可信度的最高优先剩余项。
+
+本轮只关闭**遵守构建协议的多个进程同时发布同一项目**。不改包格式、不加依赖、不重写
+自包含审计，也不把 rename + rollback 冒充断电原子交换。
+
+### 102.2 旧实现红灯：独立 staging 没有保护最终交换
+
+原实现每次 `Staging::new` 都创建 `.xgame-staging-<pid>-<seq>`，复制与审计互不污染；但
+`Staging::publish` 的三步没有互斥：
+
+1. 输出目录改名到当前 staging 的 `previous`；
+2. 当前 `package` 改名为输出目录；
+3. 删除 `previous`。
+
+两个进程交错时，一方可能把另一方刚就位的新包移成自己的 `previous`；它再发布失败时，
+回滚会因为输出已经存在而失败，只能保留孤立旧包并返回错误。最终目录或许碰巧可运行，
+但“哪个构建成功、旧版在哪里、能否重试”已经分叉。
+
+先加 `publish_waits_for_another_publisher`：主线程打开并锁住约定锁文件，工作线程调用真实
+`Staging::publish`。旧实现完全忽略该锁，定向实跑在 0.05 秒内直接完成，断言稳定失败：
+
+```text
+另一个发布者持锁时不能改动同一个输出目录
+test result: FAILED. 0 passed; 1 failed
+```
+
+这条红灯没有靠随机撞 rename 窗口；它直接证明发布临界区没有加入跨进程协议。
+
+### 102.3 文件锁契约与刻意取舍
+
+`publish` 现在先以 `read + write + create + truncate(false)` 打开
+`Build/.xgame-publish.lock`，调用 Rust 标准库 `File::lock` 后才读取旧输出。锁持有范围覆盖
+旧包移走、新包就位、失败回滚与旧包清理；函数任何出口都会 drop 文件句柄。复制、插件
+打包和 `audit_package` 仍在锁外的唯一 staging 中并行，避免大项目把整段构建串行化。
+
+锁文件刻意**长期保留**。若 A 解锁后删除路径，已在等待旧文件句柄的 B 仍锁旧文件；此时
+C 可创建同名新文件并取得另一把锁，B/C 会同时进入临界区。稳定保留一个锁节点，所有权
+只由句柄决定，正常返回、错误、panic 或进程崩溃都由操作系统释放；不需要 PID 检测、超时
+年龄或手工清理“死锁文件”。同一目标的有效发布按取得锁的顺序落地，最后取得锁者成为
+最终版本。
+
+第一轮严格 clippy 指出 `create(true)` 没显式声明截断语义；补成 `truncate(false)` 后通过。
+锁文件虽不存内容，这个声明仍重要：它说明所有进程打开的是同一个稳定节点，而非每次
+重建 / 清空一份状态文件。
+
+### 102.4 验证
+
+- 旧实现红灯如上；接线后同一回归会先等待 200 ms，释放锁后 5 秒窗口内完成，定向
+  **1 passed / 0 failed**。builder 模块全量 **20 passed / 0 failed**。
+- 改动 Rust 文件独立 `rustfmt --check` 与 `git diff --check` 通过。仓库级 `cargo fmt
+  --all -- --check` 会列出多个本轮未改文件在 rustfmt 1.98 下的既有格式差异；CI 按既定
+  §三十四不跑 fmt，本轮没有借机批量改写无关文件。
+- `cargo check --workspace --all-targets --locked`、workspace 严格 clippy
+  `-- -D warnings` 与 `cargo build --workspace --release --locked` 通过。
+- 全 workspace 用 `--test-threads=1` 实跑 41 个 suite：**1222 passed / 0 failed /
+  19 ignored**；19 项均为约定手动基准，render 为 **205 passed / 1 ignored**，GPU 测试
+  实际执行。
+- 真实跨进程对照：先构建 debug editor / player，再并发启动两个
+  `xgame-editor --build projects/SampleScene`；两者 `$LASTEXITCODE` 都为 **0**，都打印
+  构建完成。最终 `Build/.xgame-publish.lock` 存在，`.xgame-staging-*` 残留为 **0**；对
+  `Build/SampleScene` 跑 `--check` 为 **1 场景 / 24 实体 / 15 资产，exit 0**。
+- release workspace 构建后用 `target/release/xgame-editor.exe` 重打 SampleScene，构建与
+  成品 `--check` 均退出 **0**；直接对成品跑 60 帧无头为 60 fixed steps、warn/error 0、
+  非有限变换 0、`ok=true`。
+- 第一次双进程包装使用 `Start-Process` 时，两份构建都打印成功，但 PowerShell 对象没有
+  留下可读 `ExitCode`，外层脚本因此错误返回 1；随后改用两个 `Start-Job` 显式回传
+  `$LASTEXITCODE` 重跑得到上述双 0。没有把包装脚本失败伪装成业务通过。
+
+### 102.5 完成边界与下一步
+
+本轮关闭“协作构建进程交错发布”这一项，不关闭断电事务：旧输出改名与新输出就位之间仍
+有短暂不存在窗口，Windows 没有目录 fsync，机器掉电后也尚无启动恢复协议。文件锁同样不
+防绕过构建器直接改 `Build/` 的外部程序，也不宣称网络文件系统的锁 / rename 语义。
+
+相邻的下一步应先为发布事务定义**可恢复状态**（例如可判别的 previous / journal 与强杀
+故障注入），验证“进程在每个 rename 边界被杀后，下次构建仍能选择一份完整包并恢复”；
+在没有这组红绿证据前，不把目录交换写成断电安全。

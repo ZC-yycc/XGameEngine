@@ -29,6 +29,8 @@ use xgame_core::project::{ProjectHandle, PROJECT_FILE_NAME};
 
 /// 构建产物所在的目录名（相对项目根）。
 pub const BUILD_DIR: &str = "Build";
+/// 同一项目的最终发布锁；文件长期保留，锁随进程句柄自动释放。
+const PUBLISH_LOCK_FILE: &str = ".xgame-publish.lock";
 
 /// 播放器（游戏运行时）可执行文件名。
 #[cfg(windows)]
@@ -703,6 +705,26 @@ impl Staging {
         output: &Path,
         warnings: &mut Vec<String>,
     ) -> Result<(), BuildError> {
+        // 每个构建有自己的 staging，所以复制与自检可以并行；但下面三步是一个整体：
+        // 旧包移走 → 新包就位 → 旧包清理。两个进程交错执行时，其中一个会把另一个
+        // 的新包当成 previous，失败回滚还可能撞上已经存在的输出目录。
+        //
+        // 锁文件不能在解锁后删除：等待者锁住的是旧句柄，此时第三个进程若创建同名
+        // 新文件，就能拿到另一把锁并闯进临界区。长期保留文件、只让句柄代表所有权，
+        // 进程崩溃后操作系统也会自动释放，不会留下“死锁文件”。
+        let lock_path = output
+            .parent()
+            .expect("构建输出必须有父目录")
+            .join(PUBLISH_LOCK_FILE);
+        let publish_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(io_err(&lock_path))?;
+        publish_lock.lock().map_err(io_err(&lock_path))?;
+
         let backup = self.path.join("previous");
         let had_previous = match std::fs::symlink_metadata(output) {
             Ok(meta) => {
@@ -1042,6 +1064,7 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(fixture.output().parent().unwrap())
                 .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
                 .count(),
             1
         );
@@ -1055,9 +1078,19 @@ mod tests {
         fixture.build().unwrap();
         assert!(!fixture.output().join("stale.bin").exists());
         assert!(!fixture.output().join("input.ron").exists());
+        assert!(
+            fixture
+                .output()
+                .parent()
+                .unwrap()
+                .join(PUBLISH_LOCK_FILE)
+                .is_file(),
+            "成功发布后应留下稳定锁节点"
+        );
         assert_eq!(
             std::fs::read_dir(fixture.output().parent().unwrap())
                 .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
                 .count(),
             1
         );
@@ -1090,6 +1123,65 @@ mod tests {
             std::fs::read(fixture.output().join("old.bin")).unwrap(),
             b"old"
         );
+    }
+
+    #[test]
+    fn publish_waits_for_another_publisher() {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.output()).unwrap();
+        std::fs::write(fixture.output().join("old.bin"), b"old").unwrap();
+
+        let staging = Staging::new(fixture.output().parent().unwrap()).unwrap();
+        let package = staging.path.join("package");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(package.join("new.bin"), b"new").unwrap();
+
+        // 模拟另一个编辑器进程正处在“旧包移走 → 新包发布”的临界区。
+        // 锁文件本身会长期留在 Build/；真正的所有权由文件句柄决定，进程退出即释放。
+        let lock_path = fixture.output().parent().unwrap().join(PUBLISH_LOCK_FILE);
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        lock.lock().unwrap();
+
+        let output = fixture.output();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = staging.publish(&package, &output, &mut Vec::new());
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        assert!(
+            matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(200)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "另一个发布者持锁时不能改动同一个输出目录"
+        );
+        assert_eq!(
+            std::fs::read(fixture.output().join("old.bin")).unwrap(),
+            b"old",
+            "等待期间上一版发布必须保持可用"
+        );
+
+        lock.unlock().unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("释放锁后发布必须继续")
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            std::fs::read(fixture.output().join("new.bin")).unwrap(),
+            b"new"
+        );
+        assert!(!fixture.output().join("old.bin").exists());
     }
 
     #[test]
