@@ -492,10 +492,7 @@ scene_view::show_content(state, ui)
   │   │     ├── 解算世界矩阵 + Phase 1: 模型加载（惰性，entity.model → GltfMesh::load）
   │   │     │   └── 新模型的包围盒记入 model_cache（拾取 mesh_bounds 读这里）
   │   │     ├── Phase 2: wgpu 渲染 (ScenePipeline::render)
-  │   │     │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
-  │   │     │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
-  │   │     │     │   └── 攒完一次 `write_buffer` 写完整段（旧的逐实体写 = 每帧 N 次分配 + N 条命令）
-  │   │     │     ├── [动画实体] `compute_bones_composed_with_root_motion` **一条路**：基础姿态
+  │   │     │     ├── [动画实体先解姿态] `compute_bones_composed_with_root_motion` **一条路**：基础姿态
   │   │     │     │               （单剪辑；换剪辑/换状态淡入中 → 旧剪辑连同时钟一起
   │   │     │     │               淡出、两份局部姿态按权重混合）→ 逐层合入
   │   │     │     │               （additive 快捷层先，layers 按数组顺序盖上去、后层盖前层；
@@ -503,9 +500,14 @@ scene_view::show_content(state, ui)
   │   │     │     │               姿态 lerp；机器转移先在层姿势内部混旧→新；每层只作用于
   │   │     │     │               **遮罩命中**的骨骼；runtime 已消费的基础平移轴先
   │   │     │     │               重置回绑定平移，未消费轴 / additive / layers 保留；零权重/
-  │   │     │     │               剪辑缺失的层跳过）→ 关节矩阵进
-  │   │     │     │               **骨骼槽位**（每实体 256 骨定长）
-  │   │     │     │     └── 容量不够先翻倍重建骨骼缓冲（连带换两个绑定组，必须在开 pass 之前）
+  │   │     │     │               剪辑缺失的层跳过）→ 同一副关节矩阵先变换导入期逐关节盒，
+  │   │     │     │               与绑定姿态 1.5× 兜底求并 → 相机剔除 / 方向光场景拟合 /
+  │   │     │     │               阴影逐级与逐面剔除共用 → 再进**骨骼槽位**（每实体 256 骨定长）
+  │   │     │     ├── 写入 CameraUniform / LightsUniform / ShadowUniform
+  │   │     │     ├── 遍历实体：收集绘制项 + 把 ModelUniform **攒进复用缓冲**
+  │   │     │     │   ├── 姿态盒判定在材质 / 实例写入前完成；被剔实体不上传骨槽
+  │   │     │     │   ├── 攒完一次 `write_buffer` 写完整段（旧的逐实体写 = 每帧 N 次分配 + N 条命令）
+  │   │     │     │   └── 骨骼容量不够则先翻倍重建缓冲（连带换两个绑定组，必须在开 pass 之前）
   │   │     │     ├── 遮挡历史按位核对（相机 / 实例 / 骨骼 / 批次代际 / AABB）
   │   │     │     │   └── [稳定且收益足够] compute 压缩实例 → indirect 参数
   │   │     │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
@@ -1392,10 +1394,10 @@ Scene(
 | `core/animation_runtime.rs` | 3579 | 纯 CPU 动画共享层：`AnimationAsset` / `AnimClip` / `Track` / `Skin` / `AnimNode`、三种插值采样、`compute_bones_composed_with_root_motion()`（基础淡入 → 剥 runtime 已消费轴 → additive / layers）、`root_motion_delta()`（循环展开 / 非循环钳位 / 淡入增量混合）、`AnimationDriver`（运行态唯一时钟、帧区间快照、分层时钟与确定性 signature）、`AnimationLoader` 注入契约 |
 | `render/animation.rs` | 7 | `xgame_core::animation_runtime::*` 的兼容转出；旧模块路径保留，render 不再拥有第二份 CPU 动画实现 |
 | `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
-| `render/scene_pipeline.rs` | 共享 3D 管线 | `ScenePipeline::new_with_occlusion_support()` / `render()`（方向 / 点光阴影、实例收集、蒙皮 / morph、主通道与遮挡接线）；遮挡活跃时用 instance-rate `Uint32` 重映射 + indirect，普通路径仍是直接实例绘制；材质解析与批次键 `(图元, MaterialKey)` |
+| `render/scene_pipeline.rs` | 共享 3D 管线 | `ScenePipeline::new_with_occlusion_support()` / `render()`（先解一次完整蒙皮姿态 → 当前姿态 bounds → 相机 / 方向光 / 点光剔除与阴影拟合 → 同矩阵上传；实例收集、morph、主通道与遮挡接线）；遮挡活跃时用 instance-rate `Uint32` 重映射 + indirect，普通路径仍是直接实例绘制；材质解析与批次键 `(图元, MaterialKey)` |
 | `render/occlusion.rs` | 遮挡核心 | 分组 AABB query、异步 readback、逐位历史、查询前成本门槛 / 查询后收益门槛、compute 实例压缩与 indirect 参数；设备 / 动态 / 失败保守降级 |
 | `render/material_library.rs` | 210 | `MaterialLibrary`：`.mat` 解析 / albedo 纹理上传 / 绑定组缓存 / 负缓存、`MaterialKey::{Model, Asset}` 命名空间、`set_project()` / `invalidate()` / `revision()` |
-| `render/gltf_loader.rs` | 1155 | `GltfMesh::from_file()` / `load_with_search_paths()`（GPU 模型）、`GltfAnimationLoader`（无 GPU 的 runtime 动画装载器）；二者先共用 `resolve_model_source()` 命中同一文件与并排 `.meta`，再共用 `parse_animation_data_scaled()` 与 `model_scale` 烘焙规则；节点层级 / 皮肤 / LINEAR·STEP·CUBICSPLINE 通道只解析一份；`clip()` / `has_animation()`、`Bounds` |
+| `render/gltf_loader.rs` | 模型与动画导入 | `GltfMesh::from_file()` / `load_with_search_paths()`（GPU 模型）、`GltfAnimationLoader`（无 GPU 的 runtime 动画装载器）；二者先共用 `resolve_model_source()` 命中同一文件与并排 `.meta`，再共用 `parse_animation_data_scaled()` 与 `model_scale` 烘焙规则；节点层级 / 皮肤 / LINEAR·STEP·CUBICSPLINE 通道只解析一份；`SkinBounds` 在导入期按顶点 / 关节建立当前姿态保守盒（含 morph→skin 范围）；`clip()` / `has_animation()`、`Bounds` |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |
 | `render/ui_renderer.rs` | 1050 | `UiRenderer::new()` / `prepare()`（排版 + 内容签名）/ `render()`（一条实例化管线：圆角 SDF + 纹理；矩形与字形共用图集 → 相邻同批）、`UiStats`、字形图集上传、图片纹理缓存（sRGB / 行对齐补齐） |
 | `render/postfx.rs` | 1845 | `PostFx::render(source_view, source_gen, ...)`（HDR → 曝光 / Bloom / ACES → LDR，可选 FXAA 第二趟；`source_gen` 让 TAA 的乒乓源切换时绑定组仍能命中）；`bind_cache`（**多槽**，容量 8）；`FxaaPipelines` / `FxaaScratch`；`effective_fxaa()`（TAA 开着自动让位）；`HDR_FORMAT` |

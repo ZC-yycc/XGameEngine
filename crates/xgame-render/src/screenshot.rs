@@ -41,7 +41,8 @@ use crate::animation::AnimationDriver;
 use crate::gltf_loader::{Bounds, GltfMesh};
 use crate::postfx::{HdrTargets, PostFx, HDR_FORMAT};
 use crate::scene_pipeline::{
-    scene_bounds, supported_sample_count, FrameStats, SceneLighting, ScenePipeline,
+    animated_scene_bounds, scene_bounds, supported_sample_count, FrameStats, SceneLighting,
+    ScenePipeline,
 };
 
 /// 截图默认垂直视场角（45°）。比编辑器视口（60°）略窄一点 —— 截图
@@ -487,7 +488,8 @@ impl ScreenshotRenderer {
         }
 
         let world_matrices = scene.world_matrices();
-        let bounds = scene_bounds(&scene.entities, &world_matrices, &self.model_cache);
+        let bounds =
+            animated_scene_bounds(&scene.entities, &world_matrices, &self.model_cache, anim);
         let camera = camera.unwrap_or_else(|| {
             frame_bounds(
                 bounds.as_ref(),
@@ -4899,6 +4901,69 @@ mod tests {
         (exact, max_delta, over_two)
     }
 
+    /// 绑定盒在视锥外、骨骼把整块几何搬回画面时，开剔除不能让角色消失。
+    ///
+    /// 旧固定 1.5× 余量只覆盖实体 x=10 附近；当前姿态在骨 0 的 -10m 平移后位于
+    /// 原点。A/B 两档既要逐像素相同，也要都实际提交这一个实例。
+    #[test]
+    fn current_skin_pose_bounds_keep_runaway_geometry_visible() {
+        let Some(mut shot) = gpu_or_skip("current_skin_pose_bounds_keep_runaway_geometry_visible")
+        else {
+            assert!(
+                std::env::var_os("XGAME_GPU_EVIDENCE_DIR").is_none(),
+                "请求 GPU 证据时不允许跳过"
+            );
+            return;
+        };
+        let mut mesh = skinned_cube(
+            &shot,
+            "runaway-skin",
+            1,
+            |_| ([0.0; 4], [1.0, 0.0, 0.0, 0.0]),
+            &[(0, Vec3::new(-10.0, 0.0, 0.0))],
+        );
+        // `skinned_cube` 的通用比较夹具会放大盒子；这里恢复真实单位立方体，确保
+        // 绑定姿态连 50% 余量也完整落在视锥外。
+        mesh.bounds = Bounds {
+            min: Vec3::splat(-0.5),
+            max: Vec3::splat(0.5),
+        };
+        shot.inject_model("runaway-skin", mesh);
+
+        let mut scene = Scene::new("runaway-skin");
+        scene.ambient = [0.4; 3];
+        let mut actor = Entity::new("actor");
+        actor.model = "runaway-skin".into();
+        actor.transform.position = Vec3::new(10.0, 0.0, 0.0);
+        actor.animator = Some(xgame_core::Animator {
+            clip: "move".into(),
+            looping: false,
+            ..Default::default()
+        });
+        scene.add_entity(actor);
+        let mut anim = AnimationDriver::new();
+        anim.tick(1.0, &scene.entities);
+        let camera = ShotCamera::looking_at(Vec3::new(0.0, 2.0, 8.0), Vec3::ZERO, DEFAULT_FOV_Y);
+
+        shot.set_frustum_culling(false);
+        let unculled = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        assert_eq!(
+            shot.frame_stats().opaque_instances,
+            1,
+            "对照档必须真的画角色"
+        );
+
+        shot.set_frustum_culling(true);
+        let culled = render_frames(&mut shot, &scene, &anim, camera, RenderConfig::default(), 1);
+        assert_eq!(
+            shot.frame_stats().opaque_instances,
+            1,
+            "当前姿态盒必须保住角色"
+        );
+        assert_eq!(shot.frame_stats().culled_entities, 0);
+        assert_eq!(culled, unculled, "开关剔除必须逐字节一致");
+    }
+
     /// **多关节权重混合**（R03/031 验收）：一个顶点可同时受最多 4 根骨影响，
     /// 按 `skin = (Σ wₖ·boneₖ) / Σwₖ` 线性混合。此前的 GPU 回归每顶点只绑
     /// 一根骨（权重 `[1,0,0,0]`），着色器的 `w.y / w.z / w.w` 分支从未被
@@ -5239,16 +5304,20 @@ mod tests {
         });
         scene.add_entity(actor);
 
-        let render = |shot: &mut ScreenshotRenderer, scene: &Scene, anim: &AnimationDriver| {
-            shot.render_scene(
-                scene,
-                anim,
-                None,
-                SceneLighting::new(scene.ambient, &scene.lights),
-                RenderConfig::default(),
-            )
-            .unwrap();
-            shot.read_rgba().unwrap()
+        let render = |shot: &mut ScreenshotRenderer,
+                      scene: &Scene,
+                      anim: &AnimationDriver,
+                      camera: Option<ShotCamera>| {
+            let camera = shot
+                .render_scene(
+                    scene,
+                    anim,
+                    camera,
+                    SceneLighting::new(scene.ambient, &scene.lights),
+                    RenderConfig::default(),
+                )
+                .unwrap();
+            (shot.read_rgba().unwrap(), camera)
         };
 
         let total = 320 * 240;
@@ -5257,7 +5326,7 @@ mod tests {
             let time = walk.duration * fraction;
             let mut anim = AnimationDriver::new();
             anim.tick(time, &scene.entities);
-            let actual = render(&mut shot, &scene, &anim);
+            let (actual, camera) = render(&mut shot, &scene, &anim, None);
             if let Some(previous) = previous.as_ref() {
                 let moved = pixel_differences(&actual, previous);
                 assert!(
@@ -5313,7 +5382,14 @@ mod tests {
             let mut reference_scene = scene.clone();
             reference_scene.entities[0].model = "fox-reference".into();
             reference_scene.entities[0].animator = None;
-            let expected = render(&mut shot, &reference_scene, &AnimationDriver::new());
+            // 当前姿态 bounds 会参与动画版的自动取景；CPU 烘焙参考必须复用**同一台**
+            // 相机，否则比较到的是投影差异而不是 GPU / CPU 蒙皮差异。
+            let (expected, _) = render(
+                &mut shot,
+                &reference_scene,
+                &AnimationDriver::new(),
+                Some(camera),
+            );
             // 把真纹理换回 reference_load，供下一轮迭代使用。
             let mut reference_mesh = shot.model_cache.remove("fox-reference").unwrap();
             std::mem::swap(

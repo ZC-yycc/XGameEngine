@@ -19,9 +19,9 @@ use xgame_core::{
 
 /// 轴对齐包围盒（AABB）。
 ///
-/// 目前唯一的用途是**拟合方向光的阴影正交视锥**——阴影贴图是一张固定分辨率的
-/// 深度图，它只覆盖一个有限的立方体区域，这个区域必须刚好罩住整个场景，
-/// 否则要么边缘的物体没有阴影，要么精度被稀释成一片噪点。
+/// 同一份盒同时供视锥 / 阴影剔除、方向光拟合、遮挡查询与截图自动取景消费。
+/// 这些消费者必须同源：若相机按一只盒剔除、阴影又按另一只盒拟合，边缘姿态就会
+/// 出现“主画面还在但影子被裁掉”或相反的静默缺帧。
 ///
 /// 用"空盒"（`min > max`）表示"还没并进任何点"，这样 [`union`](Self::union)
 /// 第一句就能自洽，不需要额外的 `Option` 或 `initialized` 标记。
@@ -145,6 +145,19 @@ impl Default for Bounds {
     fn default() -> Self {
         Self::EMPTY
     }
+}
+
+/// 蒙皮网格的逐关节局部包围盒。
+///
+/// 顶点着色器的结果是若干 `bone × position` 的**非负归一化凸组合**。因此把一个
+/// 顶点的局部范围记到所有正权重关节名下，当前姿态下分别变换再求并，所得 AABB
+/// 必然覆盖最终混合位置；不必在 CPU 上逐帧再蒙皮全部顶点。
+///
+/// `unskinned` 收下总权重为 0 的顶点：shader 对它们保持原位，不能误挂到第 0 根骨。
+#[derive(Clone, Debug, Default)]
+pub struct SkinBounds {
+    joint_bounds: Vec<Bounds>,
+    unskinned: Bounds,
 }
 
 /// 材质槽位的全局自增 ID。
@@ -284,6 +297,8 @@ pub struct GltfMesh {
     pub vertex_size: u64,
     /// 本地空间的包围盒（未施加任何变换）。阴影拟合时用世界矩阵把它变到世界空间。
     pub bounds: Bounds,
+    /// 逐关节顶点范围：当前姿态剔除 / 阴影拟合用，不含 GPU 资源。
+    pub skin_bounds: SkinBounds,
     /// glTF 场景节点层级（含骨骼），[`crate::animation::AnimNode`] 同序。
     ///
     /// 空 = 静态模型（内置图元 / 无场景结构的 glTF）。
@@ -408,7 +423,7 @@ impl GltfVertex {
         }
     }
 
-    /// 清零超出骨槽容量的关节影响（固定容量超限策略的顶点侧一半）。
+    /// 清零超出骨槽容量或权重非法的关节影响（固定容量超限策略的顶点侧一半）。
     ///
     /// 槽位只有 [`crate::scene_pipeline::BONES_PER_SLOT`] 根骨，超过的骨架在
     /// 上传时被截断；顶点若还引用截断区的骨，着色器的 `base + index` 会读进
@@ -418,15 +433,81 @@ impl GltfVertex {
     pub fn clamp_skin_influences(&mut self) {
         for slot in self.joints.iter_mut().zip(self.weights.iter_mut()) {
             let (joint, weight) = slot;
-            // NaN 下标同样清零（比较为假走这里）。
-            if !matches!(
-                (*joint).partial_cmp(&(crate::scene_pipeline::BONES_PER_SLOT as f32)),
-                Some(std::cmp::Ordering::Less)
-            ) {
+            // glTF 合法权重非负；坏资产里的负数 / NaN 若原样进 shader，归一化后不再是
+            // 凸组合，既可能把顶点甩到任意远，也无法构造有限保守盒。按“无影响”降级。
+            let valid_joint = *joint >= 0.0
+                && matches!(
+                    (*joint).partial_cmp(&(crate::scene_pipeline::BONES_PER_SLOT as f32)),
+                    Some(std::cmp::Ordering::Less)
+                );
+            if !valid_joint || !weight.is_finite() || *weight < 0.0 {
                 *joint = 0.0;
                 *weight = 0.0;
             }
         }
+    }
+}
+
+impl SkinBounds {
+    /// 由一批 CPU 顶点构造。主要加载器会按图元逐段调用 [`Self::include_vertices`]；
+    /// 这个一次性入口也供离线工具 / 基准复用同一套边界数学。
+    pub fn from_vertices(
+        vertices: &[GltfVertex],
+        morph: Option<&crate::morph::MorphTargets>,
+    ) -> Self {
+        let mut bounds = Self::default();
+        bounds.include_vertices(vertices, morph);
+        bounds
+    }
+
+    /// 把一个图元的顶点并进逐关节范围。`morph` 已含同一批基准顶点时，同时收下
+    /// 每个顶点在所有合法形变权重组合下的局部盒（渲染顺序是先 morph、再 skin）。
+    pub(crate) fn include_vertices(
+        &mut self,
+        vertices: &[GltfVertex],
+        morph: Option<&crate::morph::MorphTargets>,
+    ) {
+        for (vertex_index, vertex) in vertices.iter().enumerate() {
+            let point = Vec3::from(vertex.position);
+            let vertex_bounds = morph
+                .and_then(|targets| targets.conservative_vertex_bounds(vertex_index))
+                .unwrap_or(Bounds {
+                    min: point,
+                    max: point,
+                });
+
+            let mut weight_sum = 0.0f32;
+            for (&joint, &weight) in vertex.joints.iter().zip(&vertex.weights) {
+                if weight <= 0.0 || !weight.is_finite() || !joint.is_finite() || joint < 0.0 {
+                    continue;
+                }
+                let joint = joint as usize;
+                if joint >= crate::scene_pipeline::BONES_PER_SLOT {
+                    continue;
+                }
+                if self.joint_bounds.len() <= joint {
+                    self.joint_bounds.resize(joint + 1, Bounds::EMPTY);
+                }
+                self.joint_bounds[joint] = self.joint_bounds[joint].union(&vertex_bounds);
+                weight_sum += weight;
+            }
+            if weight_sum <= 0.0 || !weight_sum.is_finite() {
+                self.unskinned = self.unskinned.union(&vertex_bounds);
+            }
+        }
+    }
+
+    /// 当前蒙皮矩阵下的模型空间保守盒。缺少的骨矩阵按 shader 槽位补位规则视为单位阵。
+    pub fn posed_bounds(&self, bones: &[Mat4]) -> Option<Bounds> {
+        let mut bounds = self.unskinned;
+        for (joint, local) in self.joint_bounds.iter().enumerate() {
+            if local.is_empty() {
+                continue;
+            }
+            let bone = bones.get(joint).copied().unwrap_or(Mat4::IDENTITY);
+            bounds = bounds.union(&local.transformed_affine(&bone));
+        }
+        (!bounds.is_empty()).then_some(bounds)
     }
 }
 
@@ -470,6 +551,7 @@ impl GltfMesh {
         let mut primitives = Vec::new();
         // 整个网格的本地包围盒：各图元的顶点位置并起来。阴影拟合只关心这个。
         let mut bounds = Bounds::EMPTY;
+        let mut skin_bounds = SkinBounds::default();
 
         for mesh in document.meshes() {
             // 这个 mesh 被哪个节点以哪张蒙皮引用（见 `parse_animation_data`）。
@@ -572,6 +654,7 @@ impl GltfMesh {
                 if let Some(morph) = &morph {
                     bounds = bounds.union(&morph.conservative_bounds());
                 }
+                skin_bounds.include_vertices(&vertices, morph.as_ref());
                 // 带 morph 的图元要能被 `write_buffer` 整段重写（CPU 变形）。
                 let mut vertex_usage = wgpu::BufferUsages::VERTEX;
                 if morph.is_some() {
@@ -609,6 +692,7 @@ impl GltfMesh {
             primitives,
             vertex_size: GltfVertex::STRIDE,
             bounds,
+            skin_bounds,
             nodes: anim.nodes,
             skins: anim.skins,
             animations: anim.animations,
@@ -683,6 +767,7 @@ impl GltfMesh {
                 min: Vec3::splat(-0.5),
                 max: Vec3::splat(0.5),
             },
+            skin_bounds: SkinBounds::default(),
             nodes: Vec::new(),
             skins: Vec::new(),
             animations: Vec::new(),
@@ -701,6 +786,8 @@ impl GltfMesh {
         vertices
             .iter_mut()
             .for_each(GltfVertex::clamp_skin_influences);
+        let mut skin_bounds = SkinBounds::default();
+        skin_bounds.include_vertices(&vertices, None);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
             contents: bytemuck::cast_slice(&vertices),
@@ -726,6 +813,7 @@ impl GltfMesh {
             }],
             vertex_size: GltfVertex::STRIDE,
             bounds: Bounds::from_points(data.vertices.iter().map(|v| v.position)),
+            skin_bounds,
             nodes: Vec::new(),
             skins: Vec::new(),
             animations: Vec::new(),
@@ -2117,5 +2205,80 @@ pub(crate) mod tests {
         kept.clamp_skin_influences();
         assert_eq!(kept.joints, [0.0, 1.0, 254.0, 255.0], "界内影响不动");
         assert_eq!(kept.weights, [0.25; 4]);
+
+        let mut malformed = kept;
+        malformed.weights = [-1.0, f32::NAN, 0.5, 0.5];
+        malformed.clamp_skin_influences();
+        assert_eq!(malformed.joints[..2], [0.0; 2], "非法权重的下标也归零");
+        assert_eq!(malformed.weights, [0.0, 0.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn skin_bounds_cover_multi_joint_convex_blending() {
+        let vertex = GltfVertex {
+            position: [1.0, 2.0, 3.0],
+            normal: [0.0, 1.0, 0.0],
+            color: [1.0; 3],
+            tex_coord: [0.0; 2],
+            joints: [0.0, 1.0, 0.0, 0.0],
+            weights: [0.25, 0.75, 0.0, 0.0],
+        };
+        let bones = [
+            Mat4::from_translation(Vec3::new(12.0, -1.0, 0.0)),
+            Mat4::from_translation(Vec3::new(-8.0, 5.0, 2.0)),
+        ];
+        let mut skin_bounds = SkinBounds::default();
+        skin_bounds.include_vertices(&[vertex], None);
+        let bounds = skin_bounds.posed_bounds(&bones).expect("有一个受影响顶点");
+
+        let p = Vec3::from(vertex.position);
+        let actual = bones[0].transform_point3(p) * 0.25 + bones[1].transform_point3(p) * 0.75;
+        assert!(
+            actual.cmpge(bounds.min).all() && actual.cmple(bounds.max).all(),
+            "多关节混合点 {actual:?} 必须落在逐关节并集 {bounds:?} 内"
+        );
+    }
+
+    #[test]
+    fn skin_bounds_cover_morph_then_skin_for_all_weight_combinations() {
+        let base = GltfVertex {
+            position: [1.0, 2.0, 3.0],
+            normal: [0.0, 1.0, 0.0],
+            color: [1.0; 3],
+            tex_coord: [0.0; 2],
+            joints: [0.0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        let morph = crate::morph::MorphTargets::new(
+            vec!["A".into(), "B".into()],
+            vec![0.0; 2],
+            vec![[4.0, -2.0, 1.0], [-1.0, 3.0, -2.0]],
+            Vec::new(),
+            vec![base],
+        )
+        .unwrap();
+        let bone = Mat4::from_translation(Vec3::new(20.0, -7.0, 4.0));
+        let mut skin_bounds = SkinBounds::default();
+        skin_bounds.include_vertices(&[base], Some(&morph));
+        let bounds = skin_bounds.posed_bounds(&[bone]).expect("有形变顶点");
+
+        let mut morphed = Vec::new();
+        for a in [0.0, 0.25, 1.0] {
+            for b in [0.0, 0.5, 1.0] {
+                crate::morph::morph_vertices(
+                    &[base],
+                    morph.position_deltas(),
+                    &[],
+                    2,
+                    &[a, b],
+                    &mut morphed,
+                );
+                let actual = bone.transform_point3(Vec3::from(morphed[0].position));
+                assert!(
+                    actual.cmpge(bounds.min).all() && actual.cmple(bounds.max).all(),
+                    "morph({a}, {b}) → skin 的点 {actual:?} 落在 {bounds:?} 外"
+                );
+            }
+        }
     }
 }

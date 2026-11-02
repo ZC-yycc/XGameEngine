@@ -31,10 +31,12 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use xgame_math::glam::{Quat, Vec3};
+use xgame_math::glam::{Mat4, Quat, Vec3};
 use xgame_render::animation::{
-    default_pose, sample_clip_into, AnimClip, AnimNode, Interpolation, Track, TrackPath,
+    compute_bones, default_pose, sample_clip_into, AnimClip, AnimNode, Interpolation, Skin, Track,
+    TrackPath,
 };
+use xgame_render::gltf_loader::{GltfVertex, SkinBounds};
 
 /// 骨骼数（对齐示例角色：Fox 24 骨，这里取 28 更保守）。
 const BONES: usize = 28;
@@ -156,5 +158,67 @@ fn animation_sampling_cost() {
         step,
         cubic,
         cubic / linear
+    );
+}
+
+/// 当前姿态 bounds 的边际成本：同一副 28 骨、1728 顶点角色，比较“只解骨骼”与
+/// “解骨骼 + 逐关节 AABB”。顶点数只影响导入期建表，不进入每帧计时。
+#[test]
+#[ignore = "基准：cargo test -p xgame-render --release --test animation_cost -- --ignored --nocapture"]
+fn current_skin_bounds_cost() {
+    let nodes = nodes();
+    let clip = clip(Interpolation::Linear);
+    let skin = Skin {
+        joints: (0..BONES as u32).collect(),
+        inverse_bind: vec![Mat4::IDENTITY; BONES],
+    };
+    let vertices: Vec<GltfVertex> = (0..1728)
+        .map(|i| {
+            let joint = (i % BONES) as f32;
+            GltfVertex {
+                position: [
+                    (i % 17) as f32 * 0.03,
+                    (i % 29) as f32 * 0.02,
+                    (i % 11) as f32 * 0.04,
+                ],
+                normal: [0.0, 1.0, 0.0],
+                color: [1.0; 3],
+                tex_coord: [0.0; 2],
+                joints: [joint, ((i + 1) % BONES) as f32, 0.0, 0.0],
+                weights: [0.75, 0.25, 0.0, 0.0],
+            }
+        })
+        .collect();
+    let bounds = SkinBounds::from_vertices(&vertices, None);
+
+    let measure = |with_bounds: bool| {
+        let mut best = f64::MAX;
+        for _ in 0..ROUNDS {
+            let start = Instant::now();
+            for i in 0..SAMPLES {
+                let t = (i as f32 / SAMPLES as f32) * 0.99;
+                let bones = compute_bones(black_box(&nodes), black_box(&clip), &skin, t);
+                if with_bounds {
+                    black_box(bounds.posed_bounds(black_box(&bones)).expect("有顶点"));
+                } else {
+                    black_box(bones);
+                }
+            }
+            best = best.min(start.elapsed().as_secs_f64() * 1e9 / SAMPLES as f64);
+        }
+        best
+    };
+    let bones_only = measure(false);
+    let with_bounds = measure(true);
+    assert!(
+        with_bounds.is_finite() && bones_only.is_finite(),
+        "基准必须真的跑"
+    );
+    println!(
+        "28 骨 / 1728 顶点 ── 骨骼解算 {:.0} ns · 加当前姿态 bounds {:.0} ns · bounds 边际约 {:.0} ns（总计 {:.2}×）",
+        bones_only,
+        with_bounds,
+        (with_bounds - bones_only).max(0.0),
+        with_bounds / bones_only
     );
 }

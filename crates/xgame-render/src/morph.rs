@@ -159,21 +159,37 @@ impl MorphTargets {
     /// 所有合法权重组合的保守盒；导入时计算一次，避免剔除先于权重采样而漏画。
     pub fn conservative_bounds(&self) -> crate::gltf_loader::Bounds {
         use crate::gltf_loader::Bounds;
-        use xgame_math::glam::Vec3;
 
         let mut bounds = Bounds::EMPTY;
-        for (v, vertex) in self.base.iter().enumerate() {
-            let mut min = Vec3::from(vertex.position);
-            let mut max = min;
-            for t in 0..self.target_count() {
-                let delta = Vec3::from(self.positions[t * self.vertex_count() + v]);
-                // 每个权重独立落在 0..=1；不能只并各个单目标的终点。
-                min += delta.min(Vec3::ZERO);
-                max += delta.max(Vec3::ZERO);
+        for vertex in 0..self.vertex_count() {
+            if let Some(vertex_bounds) = self.conservative_vertex_bounds(vertex) {
+                bounds = bounds.union(&vertex_bounds);
             }
-            bounds = bounds.union(&Bounds { min, max });
         }
         bounds
+    }
+
+    /// 一个顶点在所有合法权重组合下的局部保守盒。
+    ///
+    /// 蒙皮 bounds 要把**同一个顶点**的范围登记到它影响的每根关节，不能只拿整个
+    /// 图元的大盒代替（后者会把每根骨都膨胀成整个人，角色几乎永远无法剔除）。
+    pub(crate) fn conservative_vertex_bounds(
+        &self,
+        vertex: usize,
+    ) -> Option<crate::gltf_loader::Bounds> {
+        use crate::gltf_loader::Bounds;
+        use xgame_math::glam::Vec3;
+
+        let base = self.base.get(vertex)?;
+        let mut min = Vec3::from(base.position);
+        let mut max = min;
+        for target in 0..self.target_count() {
+            let delta = Vec3::from(*self.positions.get(target * self.vertex_count() + vertex)?);
+            // 每个权重独立落在 0..=1；不能只并各个单目标的终点。
+            min += delta.min(Vec3::ZERO);
+            max += delta.max(Vec3::ZERO);
+        }
+        Some(Bounds { min, max })
     }
 
     /// 为一个实体创建独立的 GPU 顶点缓冲，初值是未变形的原始顶点。

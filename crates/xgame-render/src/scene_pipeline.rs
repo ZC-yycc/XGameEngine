@@ -913,29 +913,176 @@ pub fn scene_bounds(
     }
 }
 
-/// 蒙皮网格的剔除余量（半长倍率）。
+/// 一个实体在本帧已经解算好的蒙皮姿态。
 ///
-/// 蒙皮在 GPU 顶点着色器里发生，CPU 侧的 `GltfMesh::bounds` 只是**绑定姿态**
-/// 的外壳。走路、挥拳、翻滚都会把肢体甩到盒外；50% 余量（3× 体积）能覆盖
-/// 常见骨骼动画的摆幅，又不会让角色永远"不可剔除"。精确做法是逐帧用当前
-/// 骨骼重新求蒙皮包围盒 —— 那要在 CPU 上再算一遍蒙皮，收益抵不上成本。
+/// 放在剔除之前算，是因为 bounds 本身就依赖这些矩阵；`mesh_key` 防止 LOD 路径在
+/// 预计算与收集之间不一致时把另一副骨架的范围 / 槽位误套过来。
+struct SkinningPose {
+    mesh_key: usize,
+    bones: Vec<Mat4>,
+    local_bounds: Option<Bounds>,
+}
+
+/// 解析实体当前的基础剪辑、淡入与分层动画，产出与 GPU 上传**同一份**骨骼矩阵。
+fn compute_skinning_pose(
+    entity: &Entity,
+    mesh: &GltfMesh,
+    anim: &AnimationDriver,
+) -> Option<SkinningPose> {
+    entity.animator.as_ref()?;
+    let (clip_name, time, looping) = anim.playback(entity.id)?;
+    let clip = mesh.clip(clip_name)?;
+    let skin_idx = mesh
+        .primitives
+        .iter()
+        .find_map(|primitive| primitive.skin)?;
+    let skin = mesh.skins.get(skin_idx)?;
+    let t = crate::animation::clip_time(time, clip.duration, looping);
+    let fade = anim.fade_from(entity.id).and_then(|fade| {
+        mesh.clip(fade.clip).map(|old| {
+            let old_t = crate::animation::clip_time(fade.t, old.duration, fade.looping);
+            (old, old_t, fade.alpha)
+        })
+    });
+
+    // 层栈 = 单层 additive 快捷方式（先求值）++ 配置的 layers。这里必须和上传路径
+    // 共用：bounds 少算任意一层，恰好会在那层把肢体推出绑定盒时漏画。
+    let mut stack: Vec<crate::animation::LayerInput<'_>> = Vec::new();
+    if let Some(additive) = anim.additive(entity.id) {
+        if let Some(add_clip) = mesh.clip(additive.clip) {
+            let add_t =
+                crate::animation::clip_time(additive.t, add_clip.duration, additive.looping);
+            stack.push(crate::animation::LayerInput {
+                clip: add_clip,
+                t: add_t,
+                fade: None,
+                weight: additive.weight,
+                mode: xgame_core::AnimLayerMode::Additive,
+                mask: &[],
+            });
+        }
+    }
+    for layer in anim.layers(entity.id) {
+        if layer.clip.is_empty() {
+            continue;
+        }
+        let Some(layer_clip) = mesh.clip(&layer.clip) else {
+            continue;
+        };
+        let layer_t = crate::animation::clip_time(layer.t, layer_clip.duration, layer.looping);
+        let layer_fade = layer.fade_from().and_then(|fade| {
+            mesh.clip(fade.clip).map(|old| {
+                let old_t = crate::animation::clip_time(fade.t, old.duration, fade.looping);
+                (old, old_t, fade.alpha)
+            })
+        });
+        stack.push(crate::animation::LayerInput {
+            clip: layer_clip,
+            t: layer_t,
+            fade: layer_fade,
+            weight: layer.weight,
+            mode: layer.mode,
+            mask: &layer.mask,
+        });
+    }
+    let root_motion = entity
+        .effective_root_motion()
+        .map(|root| (root.node.as_str(), root.axes));
+    let bones = crate::animation::compute_bones_composed_with_root_motion(
+        &mesh.nodes,
+        skin,
+        (clip, t),
+        fade,
+        &stack,
+        root_motion,
+    );
+    Some(SkinningPose {
+        mesh_key: mesh as *const GltfMesh as usize,
+        local_bounds: mesh.skin_bounds.posed_bounds(&bones),
+        bones,
+    })
+}
+
+/// 阴影拟合用的场景盒：保留第 0 级静态盒，再并入当前姿态盒。
+///
+/// 保留静态盒是刻意的：LOD 的当前模型可能不是第 0 级，而历史契约要求阴影拟合以
+/// 最精细级为基线；再并动态盒只会保守放大，不会把原有投影物裁掉。
+fn scene_bounds_with_skinning(
+    entities: &[Entity],
+    world_matrices: &[Mat4],
+    model_cache: &HashMap<String, GltfMesh>,
+    skinning: &[Option<SkinningPose>],
+) -> Option<Bounds> {
+    let mut bounds = Bounds::EMPTY;
+    for (i, entity) in entities.iter().enumerate() {
+        let world = world_matrices
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| entity.transform.local_matrix());
+        if let Some(mesh) = entity.model_at(0).and_then(|path| model_cache.get(path)) {
+            bounds = bounds.union(&mesh.bounds.transformed_affine(&world));
+        }
+        if let Some(local) = skinning
+            .get(i)
+            .and_then(Option::as_ref)
+            .and_then(|pose| pose.local_bounds)
+        {
+            bounds = bounds.union(&local.transformed_affine(&world));
+        }
+    }
+    (!bounds.is_empty()).then_some(bounds)
+}
+
+/// 截图自动取景用的当前动画姿态场景盒。
+///
+/// 截图器在进入管线前就要先定相机与裁剪面，不能复用
+/// [`ScenePipeline::skinning_poses`]；这里为这条低频路径预解一次第 0 级模型，随后管线
+/// 为实际绘制仍会再解一次。实时宿主不调用本函数，因此不增加连续帧的重复成本。
+pub(crate) fn animated_scene_bounds(
+    entities: &[Entity],
+    world_matrices: &[Mat4],
+    model_cache: &HashMap<String, GltfMesh>,
+    anim: &AnimationDriver,
+) -> Option<Bounds> {
+    let skinning: Vec<Option<SkinningPose>> = entities
+        .iter()
+        .map(|entity| {
+            entity
+                .model_at(0)
+                .and_then(|path| model_cache.get(path))
+                .and_then(|mesh| compute_skinning_pose(entity, mesh, anim))
+        })
+        .collect();
+    scene_bounds_with_skinning(entities, world_matrices, model_cache, &skinning)
+}
+
+/// 蒙皮网格绑定姿态盒的兜底余量（半长倍率）。
+///
+/// 正确性主来源是 [`SkinBounds`](crate::gltf_loader::SkinBounds) 按当前骨矩阵求出的
+/// 保守盒；这里的 50% 只在姿态缺失 / 坏资产降级时兜底，并保留旧资产原有的剔除宽容度。
+/// 不能因已有当前姿态盒就删除它，也不能把它重新当成覆盖任意关节位移的证明。
 const SKINNED_BOUNDS_PADDING: f32 = 1.5;
 
 /// 剔除用的世界包围盒（网格级）。
 ///
-/// `animated` 只在**蒙皮网格**上生效：给绑定姿态包围盒加余量（见
-/// [`SKINNED_BOUNDS_PADDING`]）。静态网格（含内置图元）走精确解析式。
-fn cull_bounds(mesh: &GltfMesh, world: &Mat4, animated: bool) -> Bounds {
+/// `animated` 只在**蒙皮网格**上生效：当前姿态盒与加过余量的绑定姿态盒求并。
+/// 静态网格（含内置图元）仍走精确解析式，不为动画能力平白放大。
+fn cull_bounds(mesh: &GltfMesh, world: &Mat4, animated: bool, posed: Option<&Bounds>) -> Bounds {
     let bounds = mesh.bounds.transformed_affine(world);
     if !animated || mesh.skins.is_empty() || bounds.is_empty() {
         return bounds;
     }
     let center = bounds.center();
     let extent = bounds.half_extent() * SKINNED_BOUNDS_PADDING;
-    Bounds {
+    let padded = Bounds {
         min: center - extent,
         max: center + extent,
-    }
+    };
+    // 50% 绑定姿态余量继续保留作坏资产 / 缺姿态的兜底；当前姿态盒是新增的正确性
+    // 来源。两者求并只会多画，绝不会把既有资产突然剔得更激进。
+    posed
+        .map(|local| padded.union(&local.transformed_affine(world)))
+        .unwrap_or(padded)
 }
 
 /// 选出唯一一盏使用阴影贴图的方向光 —— 在**打包后**的光源列表里的下标。
@@ -2062,6 +2209,8 @@ pub struct ScenePipeline {
     bone_slots: u32,
     /// 骨骼矩阵复用暂存（与 `draw_staging` 同理：一次 write 搞定整段）。
     bone_staging: Vec<[f32; 16]>,
+    /// 本帧每个实体当前姿态的骨骼与模型空间保守盒。先解算再剔除，随后同一份矩阵上传。
+    skinning_poses: Vec<Option<SkinningPose>>,
 
     // -- 形变目标 --
     /// 本帧从剪辑里采样出来的权重（复用缓冲，避免每帧为每个角色新分配）。
@@ -2639,6 +2788,7 @@ impl ScenePipeline {
             bones_buffer,
             bone_slots: MIN_BONE_SLOTS,
             bone_staging: Vec::new(),
+            skinning_poses: Vec::new(),
             morph_weights: Vec::new(),
             morph_buffers: HashMap::new(),
             morph_buffers_used: HashSet::new(),
@@ -3529,10 +3679,40 @@ impl ScenePipeline {
             self.ensure_shadow_resolution(device, shadow_resolution);
         }
 
+        // 蒙皮姿态必须在任何 bounds 消费者之前解算：固定比例的绑定盒无法覆盖任意
+        // 关节位移。收集阶段会复用这里的 `bones` 上传，不会为可见实体再算第二遍。
+        self.skinning_poses.clear();
+        self.skinning_poses.resize_with(entities.len(), || None);
+        for (i, entity) in entities.iter().take(MAX_RENDER_ENTITIES).enumerate() {
+            let world = world_matrices
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| entity.transform.local_matrix());
+            let pivot = Vec3::new(world.w_axis.x, world.w_axis.y, world.w_axis.z);
+            let distance = if entity.lod.is_empty() {
+                0.0
+            } else {
+                (pivot - *camera_pos).length()
+            };
+            let Some((_, model_path)) = entity.lod_at(distance, lod_bias) else {
+                continue;
+            };
+            let Some(mesh) = model_cache.get(model_path) else {
+                continue;
+            };
+            self.skinning_poses[i] = compute_skinning_pose(entity, mesh, anim);
+        }
+
         // 级联阴影：按**当前相机的视锥**切段，每段拟合一个光源正交视锥。
         // 取不到包围盒（空场景）或视锥退化时 `None` —— 整条阴影链路关掉。
         let cascades = match shadow_slot {
-            Some(slot) => scene_bounds(entities, world_matrices, model_cache).and_then(|bounds| {
+            Some(slot) => scene_bounds_with_skinning(
+                entities,
+                world_matrices,
+                model_cache,
+                &self.skinning_poses,
+            )
+            .and_then(|bounds| {
                 let light = packed[slot];
                 cascade_shadow_matrices(
                     &view_proj.inverse(),
@@ -3781,11 +3961,12 @@ impl ScenePipeline {
                 continue;
             };
 
-            // -- 视锥剔除（实体级，先于蒙皮 / 材质 / 实例数据）--
+            // -- 视锥剔除（实体级，先于材质 / 实例数据 / GPU 骨槽上传）--
             //
             // 用**网格级**世界包围盒：网格内部各图元共享一个物体，逐图元求交
-            // 省下的那点实例写不值得再乘一次矩阵。蒙皮网格给余量（见
-            // [`cull_bounds`]），否则动画会把肢体甩到绑定盒外。
+            // 省下的那点实例写不值得再乘一次矩阵。蒙皮网格使用前面已解算的当前
+            // 姿态盒，并与绑定姿态余量求并（见 [`cull_bounds`]）；同一副骨矩阵稍后
+            // 直接上传，不能在剔除与绘制之间各算一套。
             //
             // 三种去向：
             //   相机内               → 主 pass（阴影 pass 复用同一批）
@@ -3803,7 +3984,21 @@ impl ScenePipeline {
                 || (shadow_enabled && self.cascaded_shadow_culling)
                 || (point_shadow.is_some() && self.point_shadow_culling)
                 || mesh_has_occlusion_candidate;
-            let bounds = need_bounds.then(|| cull_bounds(mesh, &world, entity.animator.is_some()));
+            let mesh_key = mesh as *const GltfMesh as usize;
+            let posed_bounds = self
+                .skinning_poses
+                .get(i)
+                .and_then(Option::as_ref)
+                .filter(|pose| pose.mesh_key == mesh_key)
+                .and_then(|pose| pose.local_bounds);
+            let bounds = need_bounds.then(|| {
+                cull_bounds(
+                    mesh,
+                    &world,
+                    entity.animator.is_some(),
+                    posed_bounds.as_ref(),
+                )
+            });
 
             let mut in_camera = true;
             if let Some(camera_frustum) = camera_frustum {
@@ -3899,84 +4094,20 @@ impl ScenePipeline {
                     clip_drives_morph =
                         crate::animation::sample_morph_weights(clip, t, &mut self.morph_weights);
                 }
-                let skin_idx = mesh.primitives.iter().find_map(|p| p.skin);
-                if let (Some(clip), Some(skin_idx)) = (mesh.clip(clip_name), skin_idx) {
-                    if let Some(skin) = mesh.skins.get(skin_idx) {
-                        let t = crate::animation::clip_time(time, clip.duration, looping);
-                        // 换剪辑/换状态交叉淡入中：旧剪辑按它自己的时钟与循环方式
-                        // 采样，两份局部姿势按 alpha 混合。旧剪辑已经不在模型里
-                        // （资产改名等）就退回硬切 —— 宁可跳一下，不能画错。
-                        let fade = anim.fade_from(entity.id).and_then(|f| {
-                            mesh.clip(f.clip).map(|c| {
-                                let prev_t =
-                                    crate::animation::clip_time(f.t, c.duration, f.looping);
-                                (c, prev_t, f.alpha)
-                            })
-                        });
-                        // 层栈 = 单层 additive 快捷方式（先求值）++ 配置的 layers。
-                        // 剪辑不在模型里的层直接不进栈 —— 这层不生效，基础姿势不受
-                        // 影响（与"旧淡出剪辑缺失退硬切"同一取舍：宁缺勿错）。
-                        let mut stack: Vec<crate::animation::LayerInput> = Vec::new();
-                        if let Some(a) = anim.additive(entity.id) {
-                            if let Some(c) = mesh.clip(a.clip) {
-                                let add_t = crate::animation::clip_time(a.t, c.duration, a.looping);
-                                stack.push(crate::animation::LayerInput {
-                                    clip: c,
-                                    t: add_t,
-                                    fade: None,
-                                    weight: a.weight,
-                                    mode: xgame_core::AnimLayerMode::Additive,
-                                    mask: &[],
-                                });
-                            }
-                        }
-                        for l in anim.layers(entity.id) {
-                            if l.clip.is_empty() {
-                                continue;
-                            }
-                            let Some(c) = mesh.clip(&l.clip) else {
-                                continue;
-                            };
-                            let l_t = crate::animation::clip_time(l.t, c.duration, l.looping);
-                            let layer_fade = l.fade_from().and_then(|fade| {
-                                mesh.clip(fade.clip).map(|old| {
-                                    let old_t = crate::animation::clip_time(
-                                        fade.t,
-                                        old.duration,
-                                        fade.looping,
-                                    );
-                                    (old, old_t, fade.alpha)
-                                })
-                            });
-                            stack.push(crate::animation::LayerInput {
-                                clip: c,
-                                t: l_t,
-                                fade: layer_fade,
-                                weight: l.weight,
-                                mode: l.mode,
-                                mask: &l.mask,
-                            });
-                        }
-                        let root_motion = entity
-                            .effective_root_motion()
-                            .map(|root| (root.node.as_str(), root.axes));
-                        let bones = crate::animation::compute_bones_composed_with_root_motion(
-                            &mesh.nodes,
-                            skin,
-                            (clip, t),
-                            fade,
-                            &stack,
-                            root_motion,
-                        );
-                        // 超过槽位容量的骨架（>256 骨）解析时已告警；这里截断
-                        // 保证 staging 的槽距不被撑歪——宁可末梢骨不对，不能整帧错位。
-                        let slot = bone_slots_used;
-                        append_bone_slot(&mut self.bone_staging, &bones);
-                        bone_slots_used += 1;
-                        // 存槽位 + 1：0 是"不蒙皮"的哨兵，着色器里直接 `> 0u` 判分支。
-                        params[0] = slot + 1;
-                    }
-                }
+            }
+            if let Some(pose) = self
+                .skinning_poses
+                .get(i)
+                .and_then(Option::as_ref)
+                .filter(|pose| pose.mesh_key == mesh_key)
+            {
+                // 超过槽位容量的骨架（>256 骨）解析时已告警；这里截断保证 staging
+                // 的槽距不被撑歪——宁可末梢骨不对，不能整帧错位。
+                let slot = bone_slots_used;
+                append_bone_slot(&mut self.bone_staging, &pose.bones);
+                bone_slots_used += 1;
+                // 存槽位 + 1：0 是“不蒙皮”的哨兵，着色器里直接 `> 0u` 判分支。
+                params[0] = slot + 1;
             }
 
             // -- 形变目标（morph target）--
@@ -5822,8 +5953,8 @@ mod tests {
 
     /// 蒙皮网格必须拿到 50% 余量，静态网格必须**一点不多**。
     ///
-    /// 这条测试守的是"动画肢体甩出绑定盒"的修复：如果哪天有人把
-    /// `mesh.skins.is_empty()` 判反、或把余量乘到错误的分支上，这里立刻红。
+    /// 这条测试守的是当前姿态缺失时的兼容兜底：如果哪天有人把
+    /// `mesh.skins.is_empty()` 判反、或把余量乘到静态分支上，这里立刻红。
     #[test]
     fn cull_bounds_pads_skinned_meshes_only() {
         let bounds = Bounds {
@@ -5834,6 +5965,7 @@ mod tests {
             primitives: Vec::new(),
             vertex_size: 0,
             bounds,
+            skin_bounds: crate::gltf_loader::SkinBounds::default(),
             nodes: Vec::new(),
             skins: vec![crate::animation::Skin {
                 joints: vec![0],
@@ -5843,7 +5975,7 @@ mod tests {
         };
         let world = Mat4::IDENTITY;
 
-        let padded = cull_bounds(&mesh, &world, true);
+        let padded = cull_bounds(&mesh, &world, true, None);
         assert_eq!(
             padded.half_extent(),
             Vec3::splat(1.5),
@@ -5852,7 +5984,88 @@ mod tests {
         assert_eq!(padded.center(), Vec3::ZERO);
 
         // 没有动画器（或动画器还没 tick）时不该平白多画 3× 体积。
-        assert_eq!(cull_bounds(&mesh, &world, false), bounds);
+        assert_eq!(cull_bounds(&mesh, &world, false, None), bounds);
+    }
+
+    /// 固定比例余量无法覆盖任意关节位移：GPU 已把顶点搬到 9m 处时，剔除盒也必须到那里。
+    #[test]
+    fn cull_bounds_cover_the_current_skinned_pose() {
+        let mut skin_bounds = crate::gltf_loader::SkinBounds::default();
+        skin_bounds.include_vertices(
+            &[crate::gltf_loader::GltfVertex {
+                position: Vec3::X.to_array(),
+                normal: Vec3::Y.to_array(),
+                color: [1.0; 3],
+                tex_coord: [0.0; 2],
+                joints: [0.0; 4],
+                weights: [1.0, 0.0, 0.0, 0.0],
+            }],
+            None,
+        );
+        let mesh = GltfMesh {
+            primitives: Vec::new(),
+            vertex_size: 0,
+            bounds: Bounds {
+                min: Vec3::splat(-1.0),
+                max: Vec3::splat(1.0),
+            },
+            skin_bounds,
+            nodes: Vec::new(),
+            skins: vec![crate::animation::Skin {
+                joints: vec![0],
+                inverse_bind: vec![Mat4::IDENTITY],
+            }],
+            animations: Vec::new(),
+        };
+        let bone = Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0));
+        let animated_vertex = bone.transform_point3(Vec3::X);
+        let posed = mesh.skin_bounds.posed_bounds(&[bone]).unwrap();
+        let bounds = cull_bounds(&mesh, &Mat4::IDENTITY, true, Some(&posed));
+
+        assert!(
+            bounds.max.x >= animated_vertex.x,
+            "当前姿态顶点 {animated_vertex:?} 落在剔除盒 {bounds:?} 外"
+        );
+    }
+
+    #[test]
+    fn shadow_scene_bounds_include_the_current_skinned_pose() {
+        let static_bounds = Bounds {
+            min: Vec3::splat(-1.0),
+            max: Vec3::splat(1.0),
+        };
+        let mesh = GltfMesh {
+            primitives: Vec::new(),
+            vertex_size: 0,
+            bounds: static_bounds,
+            skin_bounds: crate::gltf_loader::SkinBounds::default(),
+            nodes: Vec::new(),
+            skins: Vec::new(),
+            animations: Vec::new(),
+        };
+        let mut models = HashMap::new();
+        models.insert("actor".to_owned(), mesh);
+        let mesh_key = models.get("actor").unwrap() as *const GltfMesh as usize;
+        let posed = Bounds {
+            min: Vec3::new(8.0, -0.5, -0.5),
+            max: Vec3::new(9.0, 0.5, 0.5),
+        };
+        let mut actor = Entity::new("actor");
+        actor.model = "actor".into();
+        let scene_bounds = scene_bounds_with_skinning(
+            &[actor],
+            &[Mat4::IDENTITY],
+            &models,
+            &[Some(SkinningPose {
+                mesh_key,
+                bones: vec![Mat4::IDENTITY],
+                local_bounds: Some(posed),
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(scene_bounds.min, static_bounds.min, "第 0 级绑定盒仍保留");
+        assert_eq!(scene_bounds.max.x, 9.0, "当前姿态必须进入方向光拟合范围");
     }
 
     /// 非蒙皮网格即便有动画器（节点动画 / 内置图元的平移旋转）也不加余量：
@@ -5867,13 +6080,14 @@ mod tests {
             primitives: Vec::new(),
             vertex_size: 0,
             bounds,
+            skin_bounds: crate::gltf_loader::SkinBounds::default(),
             nodes: Vec::new(),
             skins: Vec::new(),
             animations: Vec::new(),
         };
         let world = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
         assert_eq!(
-            cull_bounds(&mesh, &world, true),
+            cull_bounds(&mesh, &world, true, None),
             bounds.transformed_affine(&world)
         );
     }
