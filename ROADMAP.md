@@ -16,7 +16,7 @@
 | 无头输入重放 | `--input-script` 接受 1 起始帧号的 JSON 键盘边沿，在唯一 `World::update` 前注入生产 `InputState`；乱序稳定排序，越界帧 / 未知键直接失败；报告新增稳定字段 `input_events` |
 | 发布包组合门禁 | `tools/test-published-player.ps1 -Mode headless`：真实 `--build`、播放器 / `input.ron` / DLL 哈希核对、包搬离源码后，6 个 J 键边沿必须驱动 Rust Spinner 门控、两次切关并在第三关生成 `G0_COMPLETE`；GitHub Actions 的 `windows-latest` 已加入同一夹具 |
 | 辨别力 | 正常路径 `input_events=6`、`scene_loads=2`、终点 `Scenes/2.ron`、最终 5 实体、0 error；`-Fault input` 与 `-Fault plugin` 都稳定停在第 0 关。旧实现先因未知 `--input-script` 红灯 |
-| 验证 | headless 定向 24/24；workspace check、严格 clippy 通过；新增 GPU skip 辨别力回归后全量 **1216 passed / 0 failed / 18 ignored**；SampleScene 检查 / 30 帧无头、schema / API 导出与 workflow 同款 debug 发布夹具均通过。前三次 hosted run 依次暴露嵌套 Cargo 超时与驱动原生崩溃，当前 wgpu 前置 skip 修复等待新 run 验收 |
+| 验证 | headless 定向 24/24；workspace check、严格 clippy 通过；新增 GPU skip 辨别力回归后全量 **1216 passed / 0 failed / 18 ignored**；SampleScene 检查 / 30 帧无头、schema / API 导出与 workflow 同款 debug 发布夹具均通过。Hosted run `41400066902` 的 Test、发布包门禁与后续四个 CLI 步骤全部实际 `success`、无 skipped |
 | 边界 | Hosted 门禁不启动包内 `xgame-game.exe`、不建 winit / GPU；默认 `window` 模式继续负责真实播放器、窗口消息与截图。物理设备、焦点、IME 及带 GPU 的自托管 CI 仍未覆盖 |
 
 ### 2026-11-02 第六轮：保守时域遮挡剔除（P2 #16 关闭，§八十七）

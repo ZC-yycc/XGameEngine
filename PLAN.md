@@ -8031,3 +8031,17 @@ render lib 为 **200 passed / 1 ignored**、0.02 秒，说明 CPU 测试仍实�
 `C:\Users\Administrator\AppData\Local\Temp\opencode\xgame-published-acceptance\published-player-41dcef5971ac45168e2786e1430eea5e`：
 6 个输入事件、2 次切关、`Scenes/2.ron`、5 实体、0 error，快照含 `G0_COMPLETE`；SampleScene
 检查 / 30 帧无头与两份 JSON 导出也通过。Hosted 最终结论仍只认本修复推送后的新 run。
+
+### 100.10 Hosted 第四轮全绿：发布包组合门禁实际执行
+
+修复提交 `e166522` 对应 GitHub Actions run `41400066902`、job `125129776342`，从
+2026-11-02 06:28:02Z 跑到 07:04:48Z，顶层结论 `success`。逐 step 读取 API 后确认：
+Check、Clippy、四产物预构建、Test、Packaged headless acceptance、Project check、Headless
+smoke、Export schema、Export script API 全部 `completed / success`，没有把后半段 skipped
+误记成通过。
+
+Job 原始日志汇总 41 个测试 suite，**1216 passed / 0 failed / 18 ignored**；发布包夹具在
+`D:\a\_temp\published-player-0baebb7975de46e9bab98c3920cc3439` 明确打印 `PASS`，随后
+SampleScene `check: OK`，schema / script API 分别导出 85,742 / 59,244 字节。至此 hosted
+确实验证了打包内容、自定义 InputMap、Rust 插件与三关切换的无 GPU 组合路径；它仍没有
+启动包内播放器、winit、Surface、GPU 或物理输入设备，不能外推为这些边界已通过。
