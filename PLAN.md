@@ -8003,3 +8003,31 @@ spinner 共 **3 failed / 3 passed**，发布包门禁再次被跳过。这排除
 `G0_COMPLETE`），证据目录为
 `C:\Users\Administrator\AppData\Local\Temp\opencode\xgame-published-acceptance\published-player-b2ea769940314bcb9878ff2493eedf19`。
 Hosted 结论仍只认下一次新 run。
+
+### 100.9 Hosted 第三轮红灯：驱动原生崩溃必须在 wgpu 之前避开
+
+提交 `c7d9889` 的 run `41394356218` 证明上一轮预构建契约生效：插件套件 **6/6**、MCP
+套件 **41/41** 均通过，不再出现嵌套 Cargo 的 240 秒超时。随后 `xgame-render` 的 200-test
+进程以 `0xc0000005 (STATUS_ACCESS_VIOLATION)` 原生退出；发布包组合门禁与四个 CLI 步骤
+因此全部 skipped。这份日志没有打印到具体测试名，不能把它写成某条用例、某个适配器或
+某段驱动已被定位；能确定的是“等待 `ScreenshotRenderer::new` 返回可读错误”无法覆盖
+进入驱动后的进程级崩溃。
+
+修复继续保持窄测试契约：只在 workflow 的 `Test` 步骤设置精确值
+`XGAME_TEST_SKIP_GPU=1`。`xgame-render::screenshot` 用同一个构造包装覆盖普通、MSAA 1× 与
+材质项目三种 fixture，在 GPU 并发许可、临时目录和任何 wgpu 调用前短路；editor 三条直接
+截图测试也在建临时项目前调用同一判定。空值、`0`、`true`、`01` 均不跳过；若同时请求
+`XGAME_GPU_EVIDENCE_DIR` 则直接失败。生产 `--headless --screenshot` 不读这个测试开关，
+后续发布包 / CLI 步骤也不继承，因此不能用 hosted skip 冒充 GPU 通过。
+
+辨别力回归先在旧实现上因缺少 `gpu_test_fixture_or_skip_from_values` 编译失败（E0425 两处）；
+实现后 1/1 通过，并逐值确认只有 `1` 不执行构造闭包、证据冲突在构造前失败。带 skip 的
+render lib 为 **200 passed / 1 ignored**、0.02 秒，说明 CPU 测试仍实际执行而 GPU fixture
+没有进入驱动；editor 三条截图测试均在 0.00 秒明确早退。去掉变量后，本机
+`render_produces_non_uniform_pixels` 真实运行 0.52 秒通过且没有 skip 输出。
+
+本地随后按 hosted 顺序通过 workspace check、严格 clippy、四个 debug 产物预构建，以及带
+两个精确变量的全量 **1216 passed / 0 failed / 18 ignored**。发布包正例证据目录为
+`C:\Users\Administrator\AppData\Local\Temp\opencode\xgame-published-acceptance\published-player-41dcef5971ac45168e2786e1430eea5e`：
+6 个输入事件、2 次切关、`Scenes/2.ron`、5 实体、0 error，快照含 `G0_COMPLETE`；SampleScene
+检查 / 30 帧无头与两份 JSON 导出也通过。Hosted 最终结论仍只认本修复推送后的新 run。

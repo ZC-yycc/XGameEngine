@@ -1,7 +1,7 @@
 name: CI
 
 # 只跑 Windows：引擎目前只在 Windows 实测，MSVC 是唯一验证过的构建面。
-# GPU 截图测试留给带显卡的自托管 runner；无适配器时渲染测试会自行 skip。
+# GPU 截图测试留给带显卡的自托管 runner；hosted 的 Test 步骤在进入驱动前 skip。
 on:
   push:
     branches: [master]
@@ -59,6 +59,9 @@ jobs:
         env:
           # 上一步成功才会到这里；测试仍检查产物存在，插件还会校验构建指纹。
           XGAME_TEST_PREBUILT_ARTIFACTS: "1"
+          # windows-latest 可能在 wgpu 进入驱动后原生崩溃，来不及返回“无适配器”；
+          # 只约束单元测试，后续发布包 headless 与真实 CLI 冒烟不继承这个变量。
+          XGAME_TEST_SKIP_GPU: "1"
 
       # 发布包组合门禁：debug 即可验证内容与运行时契约，不做 release / GPU 渲染。
       # 夹具会把包搬离源码目录，再经确定性输入时间线验 input.ron、Rust 插件与三关切换。

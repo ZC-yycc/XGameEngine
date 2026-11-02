@@ -26,7 +26,9 @@
 //!
 //! 截图必须要有图形设备（与无头运行的其余部分不同）。拿不到适配器时
 //! [`ScreenshotRenderer::new`] 返回可读错误；测试统一走"拿不到就跳过"，
-//! 让无显卡的 CI 仍然全绿，而本机（有显卡）老老实实跑像素断言。
+//! 本机（有显卡）老老实实跑像素断言。Hosted Windows 还可能在驱动返回错误前
+//! 原生崩溃，所以 CI 的 `Test` 步骤会精确设置 `XGAME_TEST_SKIP_GPU=1`，让测试 fixture
+//! 在任何 wgpu 调用前短路；生产截图入口不读取这个测试开关。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -722,6 +724,53 @@ pub fn load_png_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     Ok((w, h, img.into_raw()))
 }
 
+const GPU_TEST_SKIP_ENV: &str = "XGAME_TEST_SKIP_GPU";
+const GPU_EVIDENCE_ENV: &str = "XGAME_GPU_EVIDENCE_DIR";
+
+/// 按给定环境值决定是否构造 GPU 测试 fixture。
+///
+/// 判定和闭包必须绑在一起：hosted Windows runner 可能在 wgpu 进入驱动后直接
+/// 原生崩溃，等 [`ScreenshotRenderer::new`] 返回错误再跳过已经太晚。只有精确值
+/// `1` 才短路，避免用户环境里偶然存在 `0` / `true` 时把本机像素回归静默跳过。
+fn gpu_test_fixture_or_skip_from_values<T>(
+    skip_value: Option<&std::ffi::OsStr>,
+    evidence_dir: Option<&std::ffi::OsStr>,
+    name: &str,
+    construct: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    if skip_value != Some(std::ffi::OsStr::new("1")) {
+        return construct();
+    }
+    assert!(
+        evidence_dir.is_none(),
+        "请求 {GPU_EVIDENCE_ENV} GPU 证据时不允许用 {GPU_TEST_SKIP_ENV}=1 跳过"
+    );
+    eprintln!("跳过 {name}：{GPU_TEST_SKIP_ENV}=1（hosted CI 不构造 GPU fixture）");
+    None
+}
+
+/// 构造 GPU 测试 fixture，或在 hosted CI 明确请求时于任何 wgpu 调用前跳过。
+///
+/// 这是跨 crate 的测试支撑接口，不是播放器的运行时降级开关；生产
+/// `--headless --screenshot` 不调用它，拿不到 GPU 仍会返回错误。
+#[doc(hidden)]
+pub fn gpu_test_fixture_or_skip<T>(name: &str, construct: impl FnOnce() -> Option<T>) -> Option<T> {
+    let skip_value = std::env::var_os(GPU_TEST_SKIP_ENV);
+    let evidence_dir = std::env::var_os(GPU_EVIDENCE_ENV);
+    gpu_test_fixture_or_skip_from_values(
+        skip_value.as_deref(),
+        evidence_dir.as_deref(),
+        name,
+        construct,
+    )
+}
+
+/// 编辑器截图测试与 render fixture 共用的早退判定。
+#[doc(hidden)]
+pub fn gpu_test_should_skip(name: &str) -> bool {
+    gpu_test_fixture_or_skip(name, || Some(())).is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,7 +933,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // GPU 测试（拿不到适配器就跳过，见模块头"GPU 依赖与测试纪律"）
+    // GPU 测试（无适配器或 hosted 明确禁用时跳过，见模块头"GPU 依赖与测试纪律"）
     // -----------------------------------------------------------------
 
     /// GPU 测试并发上限。
@@ -930,6 +979,49 @@ mod tests {
         GpuTestPermit { gate }
     }
 
+    #[test]
+    fn gpu_fixture_skip_requires_exact_one_and_never_constructs() {
+        use std::cell::Cell;
+        use std::ffi::OsStr;
+
+        for (value, should_skip) in [
+            (None, false),
+            (Some(OsStr::new("")), false),
+            (Some(OsStr::new("0")), false),
+            (Some(OsStr::new("true")), false),
+            (Some(OsStr::new("01")), false),
+            (Some(OsStr::new("1")), true),
+        ] {
+            let constructed = Cell::new(false);
+            let fixture =
+                gpu_test_fixture_or_skip_from_values(value, None, "skip-contract-probe", || {
+                    constructed.set(true);
+                    Some(17)
+                });
+            assert_eq!(fixture.is_none(), should_skip, "环境值 {value:?}");
+            assert_eq!(
+                constructed.get(),
+                !should_skip,
+                "环境值 {value:?} 的 fixture 构造状态不符"
+            );
+        }
+
+        let constructed = Cell::new(false);
+        let conflict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gpu_test_fixture_or_skip_from_values(
+                Some(OsStr::new("1")),
+                Some(OsStr::new("evidence")),
+                "evidence-conflict-probe",
+                || {
+                    constructed.set(true);
+                    Some(17)
+                },
+            )
+        }));
+        assert!(conflict.is_err(), "请求 GPU 证据时不得静默跳过");
+        assert!(!constructed.get(), "配置冲突时也不能构造 GPU fixture");
+    }
+
     /// 带并发许可的截图渲染器：`Deref` 到 [`ScreenshotRenderer`]，测试代码
     /// 照常 `shot.render_scene(...)` / `shot.device`，许可在测试结束时归还。
     struct GpuFixture {
@@ -952,33 +1044,37 @@ mod tests {
 
     /// 建一个截图渲染器；无 GPU 环境跳过（返回 None）。
     fn gpu_or_skip(name: &str) -> Option<GpuFixture> {
-        let permit = acquire_gpu_test_permit();
-        match ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240) {
-            Ok(renderer) => Some(GpuFixture {
-                renderer,
-                _permit: permit,
-            }),
-            Err(e) => {
-                eprintln!("跳过 {name}：{e}");
-                None
+        gpu_test_fixture_or_skip(name, || {
+            let permit = acquire_gpu_test_permit();
+            match ScreenshotRenderer::new(&std::env::temp_dir(), 320, 240) {
+                Ok(renderer) => Some(GpuFixture {
+                    renderer,
+                    _permit: permit,
+                }),
+                Err(e) => {
+                    eprintln!("跳过 {name}：{e}");
+                    None
+                }
             }
-        }
+        })
     }
 
     /// FXAA 的价值在高对比度、**低采样**的斜边上最明显：用 1× MSAA 渲染
     /// 一个绕 Z 轴旋转的薄盒，斜边必然是一格一格的硬台阶。
     fn gpu_or_skip_msaa1(name: &str) -> Option<GpuFixture> {
-        let permit = acquire_gpu_test_permit();
-        match ScreenshotRenderer::new_with_sample_count(&std::env::temp_dir(), 320, 240, 1) {
-            Ok(renderer) => Some(GpuFixture {
-                renderer,
-                _permit: permit,
-            }),
-            Err(e) => {
-                eprintln!("跳过 {name}：{e}");
-                None
+        gpu_test_fixture_or_skip(name, || {
+            let permit = acquire_gpu_test_permit();
+            match ScreenshotRenderer::new_with_sample_count(&std::env::temp_dir(), 320, 240, 1) {
+                Ok(renderer) => Some(GpuFixture {
+                    renderer,
+                    _permit: permit,
+                }),
+                Err(e) => {
+                    eprintln!("跳过 {name}：{e}");
+                    None
+                }
             }
-        }
+        })
     }
 
     /// 临时项目目录（测试结束删掉整棵子树）。
@@ -999,65 +1095,67 @@ mod tests {
         textures: &[(&str, [u8; 4])],
         materials: &[(&str, MaterialAsset)],
     ) -> Option<(GpuFixture, TestProjectDir)> {
-        let permit = acquire_gpu_test_permit();
-        let parent = std::env::temp_dir().join(format!(
-            "xgame_material_shot_{name}_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&parent).expect("建临时项目目录失败");
-        let guard = TestProjectDir(parent.clone());
+        gpu_test_fixture_or_skip(name, || {
+            let permit = acquire_gpu_test_permit();
+            let parent = std::env::temp_dir().join(format!(
+                "xgame_material_shot_{name}_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&parent).expect("建临时项目目录失败");
+            let guard = TestProjectDir(parent.clone());
 
-        let project = match xgame_core::ProjectHandle::create(&parent, "MaterialProject") {
-            Ok(project) => project,
-            Err(e) => {
-                eprintln!("跳过 {name}：创建临时项目失败: {e}");
-                return None;
-            }
-        };
+            let project = match xgame_core::ProjectHandle::create(&parent, "MaterialProject") {
+                Ok(project) => project,
+                Err(e) => {
+                    eprintln!("跳过 {name}：创建临时项目失败: {e}");
+                    return None;
+                }
+            };
 
-        for (relative, rgba) in textures {
-            let path = project.path(relative);
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir).expect("建贴图目录失败");
+            for (relative, rgba) in textures {
+                let path = project.path(relative);
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).expect("建贴图目录失败");
+                }
+                let mut pixels = Vec::with_capacity(8 * 8 * 4);
+                for _ in 0..8 * 8 {
+                    pixels.extend_from_slice(rgba);
+                }
+                image::save_buffer_with_format(
+                    &path,
+                    &pixels,
+                    8,
+                    8,
+                    image::ColorType::Rgba8,
+                    image::ImageFormat::Png,
+                )
+                .expect("写测试贴图失败");
             }
-            let mut pixels = Vec::with_capacity(8 * 8 * 4);
-            for _ in 0..8 * 8 {
-                pixels.extend_from_slice(rgba);
-            }
-            image::save_buffer_with_format(
-                &path,
-                &pixels,
-                8,
-                8,
-                image::ColorType::Rgba8,
-                image::ImageFormat::Png,
-            )
-            .expect("写测试贴图失败");
-        }
 
-        for (relative, material) in materials {
-            project
-                .write_material(relative, material)
-                .expect("写测试材质失败");
-        }
-
-        match ScreenshotRenderer::new(project.root(), 320, 240) {
-            Ok(renderer) => Some((
-                GpuFixture {
-                    renderer,
-                    _permit: permit,
-                },
-                guard,
-            )),
-            Err(e) => {
-                eprintln!("跳过 {name}：{e}");
-                None
+            for (relative, material) in materials {
+                project
+                    .write_material(relative, material)
+                    .expect("写测试材质失败");
             }
-        }
+
+            match ScreenshotRenderer::new(project.root(), 320, 240) {
+                Ok(renderer) => Some((
+                    GpuFixture {
+                        renderer,
+                        _permit: permit,
+                    },
+                    guard,
+                )),
+                Err(e) => {
+                    eprintln!("跳过 {name}：{e}");
+                    None
+                }
+            }
+        })
     }
 
     /// 斜射光下的一颗白模立方体 —— 材质像素测试的受控画面。

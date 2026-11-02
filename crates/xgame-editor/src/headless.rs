@@ -59,6 +59,8 @@ use xgame_core::{ProjectHandle, RenderConfig, Scene};
 use xgame_input::KeyCode;
 use xgame_math::glam::Vec3;
 use xgame_render::scene_pipeline::SceneLighting;
+#[cfg(test)]
+use xgame_render::screenshot::gpu_test_should_skip;
 use xgame_render::screenshot::{ScreenshotRenderer, ShotCamera};
 use xgame_runtime::{BehaviorRegistry, LogLevel, ScriptLog, World, WorldConfig};
 
@@ -1616,6 +1618,9 @@ mod tests {
     /// 无 GPU 的环境（CI）跳过 —— 见 `Docs/无头运行.md`。
     #[test]
     fn screenshot_is_written_with_deterministic_bytes() {
+        if gpu_test_should_skip("screenshot_is_written_with_deterministic_bytes") {
+            return;
+        }
         let project = temp_project("shot");
         patch_scene(&project, |scene| {
             // 去掉默认场景里那台相机（`default_scene` 自带 `camera` 组件），
@@ -1714,6 +1719,9 @@ mod tests {
     /// 显式相机：报告里回写的机位就是给的那个（"这张图从哪拍的"契约）。
     #[test]
     fn explicit_camera_is_reported_back() {
+        if gpu_test_should_skip("explicit_camera_is_reported_back") {
+            return;
+        }
         let project = temp_project("shotcam");
         let mut args = opts(&project, 3);
         let dir = project.root().join("shots");
@@ -1747,6 +1755,9 @@ mod tests {
     /// 顶替它，那智能体和人都看不出玩家实际看到什么。
     #[test]
     fn screenshot_prefers_scene_camera_over_auto_framing() {
+        if gpu_test_should_skip("screenshot_prefers_scene_camera_over_auto_framing") {
+            return;
+        }
         let project = temp_project("shotscene");
         patch_scene(&project, |scene| {
             // 默认场景自带一台 (0,1,-5) 的相机，这里把它挪到好认的位置。
