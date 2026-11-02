@@ -31,6 +31,10 @@ use xgame_core::project::{ProjectHandle, PROJECT_FILE_NAME};
 pub const BUILD_DIR: &str = "Build";
 /// 同一项目的最终发布锁；文件长期保留，锁随进程句柄自动释放。
 const PUBLISH_LOCK_FILE: &str = ".xgame-publish.lock";
+/// 发布事务的可恢复旧包；名字稳定，下一进程才能从目录状态判断上次停在哪一步。
+const PUBLISH_PREVIOUS_PREFIX: &str = ".xgame-previous-";
+/// 先放进旧输出再一起 rename；只有带此空目录的 `previous` 才能由恢复逻辑删除。
+const PUBLISH_TRANSACTION_MARKER: &str = ".xgame-publish-transaction";
 
 /// 播放器（游戏运行时）可执行文件名。
 #[cfg(windows)]
@@ -230,6 +234,62 @@ fn build_with_player(
     project: &ProjectHandle,
     player: impl FnOnce() -> Result<PlayerPick, BuildError>,
 ) -> Result<BuildReport, BuildError> {
+    let output_dir = project
+        .root()
+        .join(BUILD_DIR)
+        .join(safe_file_name(project.name()));
+    let content = &project.manifest().content;
+    for raw in [
+        &content.scenes_dir,
+        &content.models_dir,
+        &content.textures_dir,
+        &content.audio_dir,
+        &content.shaders_dir,
+        &content.prefabs_dir,
+        &content.scripts_dir,
+    ] {
+        if !raw.is_empty() && normalize_relative(raw).is_none() {
+            return Err(BuildError::PathConflict {
+                source: project.path(raw),
+                output: output_dir.clone(),
+            });
+        }
+    }
+    for raw in &content.search_paths {
+        if normalize_relative(raw).is_none() {
+            return Err(BuildError::PathConflict {
+                source: project.path(raw),
+                output: output_dir.clone(),
+            });
+        }
+    }
+    let dirs = content_dirs(project);
+    if let Some(relative) = dirs.iter().find(|relative| {
+        Path::new(relative)
+            .components()
+            .next()
+            .is_some_and(|component| {
+                component
+                    .as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(PUBLISH_TRANSACTION_MARKER)
+            })
+    }) {
+        // 事务标记会短暂放在发布包根；若内容也占这个名字，下一次恢复无法区分
+        // 用户资产与引擎状态。宁可在复制前明确拒绝，不在恢复时猜哪一边能删。
+        return Err(BuildError::PathConflict {
+            source: project.path(relative),
+            output: output_dir,
+        });
+    }
+    validate_output(project, &dirs, &output_dir)?;
+
+    // 恢复必须早于播放器查找、场景试装与复制。否则上次恰好死在第一次 rename 后，
+    // 下一次构建又因无关的输入错误快速失败，正式输出仍会一直缺席。
+    let mut warnings = recover_interrupted_publish(&output_dir)?
+        .into_iter()
+        .collect::<Vec<_>>();
+
     // 快速失败：入口场景都不在，构建出来也是个空游戏。
     // 放在动手之前，避免留下一个半成品目录。
     let entry_scene = project.entry_scene_path();
@@ -262,38 +322,6 @@ fn build_with_player(
 
     let pick = player()?;
     let player = pick.path;
-
-    let output_dir = project
-        .root()
-        .join(BUILD_DIR)
-        .join(safe_file_name(project.name()));
-    let content = &project.manifest().content;
-    for raw in [
-        &content.scenes_dir,
-        &content.models_dir,
-        &content.textures_dir,
-        &content.audio_dir,
-        &content.shaders_dir,
-        &content.prefabs_dir,
-        &content.scripts_dir,
-    ] {
-        if !raw.is_empty() && normalize_relative(raw).is_none() {
-            return Err(BuildError::PathConflict {
-                source: project.path(raw),
-                output: output_dir.clone(),
-            });
-        }
-    }
-    for raw in &content.search_paths {
-        if normalize_relative(raw).is_none() {
-            return Err(BuildError::PathConflict {
-                source: project.path(raw),
-                output: output_dir.clone(),
-            });
-        }
-    }
-    let dirs = content_dirs(project);
-    validate_output(project, &dirs, &output_dir)?;
     if paths_overlap(&resolved_path(&player)?, &resolved_path(&output_dir)?) {
         return Err(BuildError::PathConflict {
             source: player,
@@ -348,7 +376,7 @@ fn build_with_player(
     if let Some(dir) = plugins.dir {
         packed_dirs.push(dir);
     }
-    let mut warnings = pick.warnings;
+    warnings.extend(pick.warnings);
     warnings.extend(plugins.warnings);
 
     // 5) 发布前自检：包里不能比源码工程少引用。
@@ -671,9 +699,167 @@ fn validate_output(
     Ok(())
 }
 
+/// 只靠随机 staging 无法恢复强杀后的状态：下一进程必须能找到上一事务留下的旧包。
+fn previous_release_path(output: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(PUBLISH_PREVIOUS_PREFIX);
+    name.push(output.file_name().expect("构建输出必须有目录名"));
+    output.parent().expect("构建输出必须有父目录").join(name)
+}
+
+struct PublishLock {
+    _file: std::fs::File,
+}
+
+impl PublishLock {
+    fn acquire(output: &Path) -> Result<Self, BuildError> {
+        let lock_path = output
+            .parent()
+            .expect("构建输出必须有父目录")
+            .join(PUBLISH_LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(io_err(&lock_path))?;
+        file.lock().map_err(io_err(&lock_path))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// 检查内部事务路径；链接和普通文件都不能被当成引擎创建的发布目录删除。
+fn release_dir_exists(path: &Path, output: &Path) -> Result<bool, BuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err(BuildError::PathConflict {
+            source: path.into(),
+            output: output.into(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io_err(path)(e)),
+    }
+}
+
+fn transaction_marker_exists(release: &Path, output: &Path) -> Result<bool, BuildError> {
+    let marker = release.join(PUBLISH_TRANSACTION_MARKER);
+    match std::fs::symlink_metadata(&marker) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            let mut entries = std::fs::read_dir(&marker).map_err(io_err(&marker))?;
+            match entries.next() {
+                None => Ok(true),
+                Some(Ok(_)) => Err(BuildError::PathConflict {
+                    source: marker,
+                    output: output.into(),
+                }),
+                Some(Err(e)) => Err(io_err(marker)(e)),
+            }
+        }
+        Ok(_) => Err(BuildError::PathConflict {
+            source: marker,
+            output: output.into(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io_err(marker)(e)),
+    }
+}
+
+fn remove_transaction_marker(release: &Path, output: &Path) -> Result<(), BuildError> {
+    let marker = release.join(PUBLISH_TRANSACTION_MARKER);
+    if transaction_marker_exists(release, output)? {
+        // 只删空目录：即使有人手工造了同名目录并放入内容，也不能递归误删。
+        std::fs::remove_dir(&marker).map_err(io_err(marker))?;
+    }
+    Ok(())
+}
+
+/// 新包提交后先把旧包移回唯一 staging，再递归删除。
+///
+/// `remove_dir_all(previous)` 若被强杀，可能先删掉事务标记、留下不可判别的半个目录；
+/// staging 即使清到一半也不参与下一次发布判定，最多成为可人工清理的构建残留。
+fn retire_previous_into(previous: &Path, staging: &Path) -> Result<Option<String>, BuildError> {
+    let retired = staging.join("previous");
+    std::fs::rename(previous, &retired).map_err(io_err(previous))?;
+    Ok(std::fs::remove_dir_all(&retired).err().map(|e| {
+        format!(
+            "旧包已移出发布状态，但清理失败 ({}): {e}",
+            retired.display()
+        )
+    }))
+}
+
+/// 在持有发布锁时把上一次中断归并回两种稳定状态：只有正式输出，或两者都没有。
+///
+/// - 只有 `previous`：死在旧包移走后，恢复旧包；
+/// - `output + previous`：新包已完成原子改名，保留新包并清理旧包。
+fn recover_interrupted_publish_locked(output: &Path) -> Result<Option<String>, BuildError> {
+    let previous = previous_release_path(output);
+    let output_exists = release_dir_exists(output, output)?;
+    let previous_exists = release_dir_exists(&previous, output)?;
+    match (output_exists, previous_exists) {
+        (false, true) => {
+            if !transaction_marker_exists(&previous, output)? {
+                return Err(BuildError::PathConflict {
+                    source: previous,
+                    output: output.into(),
+                });
+            }
+            std::fs::rename(&previous, output).map_err(io_err(&previous))?;
+            remove_transaction_marker(output, output)?;
+            Ok(Some(format!(
+                "检测到上次发布在旧包移走后中断，已恢复 {}",
+                output.display()
+            )))
+        }
+        (true, true) => {
+            if transaction_marker_exists(output, output)?
+                || !transaction_marker_exists(&previous, output)?
+            {
+                return Err(BuildError::PathConflict {
+                    source: previous,
+                    output: output.into(),
+                });
+            }
+            let cleanup = Staging::new(output.parent().expect("构建输出必须有父目录"))?;
+            let cleanup_warning = retire_previous_into(&previous, &cleanup.path)?;
+            let mut message = format!("检测到上次发布已完成，已归档旧包 {}", previous.display());
+            if let Some(warning) = cleanup_warning {
+                message.push_str(&format!("；{warning}"));
+            }
+            Ok(Some(message))
+        }
+        (true, false) if transaction_marker_exists(output, output)? => {
+            remove_transaction_marker(output, output)?;
+            Ok(Some(format!(
+                "检测到上次发布在旧包移动前中断，已保留 {}",
+                output.display()
+            )))
+        }
+        (false, false) | (true, false) => Ok(None),
+    }
+}
+
+/// 构建开始时先恢复，不让后续无关的预检失败把正式输出继续留在缺席状态。
+fn recover_interrupted_publish(output: &Path) -> Result<Option<String>, BuildError> {
+    let parent = output.parent().expect("构建输出必须有父目录");
+    match std::fs::symlink_metadata(parent) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_err(parent)(e)),
+        Ok(_) => {}
+    }
+    let _lock = PublishLock::acquire(output)?;
+    recover_interrupted_publish_locked(output)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PublishBoundary {
+    TransactionMarked,
+    PreviousMoved,
+    PackageMoved,
+}
+
 struct Staging {
     path: PathBuf,
-    preserve: bool,
 }
 
 impl Staging {
@@ -687,12 +873,7 @@ impl Staging {
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             match std::fs::create_dir(&path) {
-                Ok(()) => {
-                    return Ok(Self {
-                        path,
-                        preserve: false,
-                    })
-                }
+                Ok(()) => return Ok(Self { path }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(io_err(path)(e)),
             }
@@ -700,10 +881,20 @@ impl Staging {
     }
 
     fn publish(
-        mut self,
+        self,
         package: &Path,
         output: &Path,
         warnings: &mut Vec<String>,
+    ) -> Result<(), BuildError> {
+        self.publish_inner(package, output, warnings, |_| {})
+    }
+
+    fn publish_inner(
+        self,
+        package: &Path,
+        output: &Path,
+        warnings: &mut Vec<String>,
+        mut boundary: impl FnMut(PublishBoundary),
     ) -> Result<(), BuildError> {
         // 每个构建有自己的 staging，所以复制与自检可以并行；但下面三步是一个整体：
         // 旧包移走 → 新包就位 → 旧包清理。两个进程交错执行时，其中一个会把另一个
@@ -712,54 +903,52 @@ impl Staging {
         // 锁文件不能在解锁后删除：等待者锁住的是旧句柄，此时第三个进程若创建同名
         // 新文件，就能拿到另一把锁并闯进临界区。长期保留文件、只让句柄代表所有权，
         // 进程崩溃后操作系统也会自动释放，不会留下“死锁文件”。
-        let lock_path = output
-            .parent()
-            .expect("构建输出必须有父目录")
-            .join(PUBLISH_LOCK_FILE);
-        let publish_lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(io_err(&lock_path))?;
-        publish_lock.lock().map_err(io_err(&lock_path))?;
+        let _lock = PublishLock::acquire(output)?;
+        if let Some(message) = recover_interrupted_publish_locked(output)? {
+            warnings.push(message);
+        }
 
-        let backup = self.path.join("previous");
-        let had_previous = match std::fs::symlink_metadata(output) {
-            Ok(meta) => {
-                if !meta.is_dir() || meta.file_type().is_symlink() {
-                    return Err(BuildError::PathConflict {
-                        source: output.into(),
-                        output: output.into(),
-                    });
+        let backup = previous_release_path(output);
+        let had_previous = release_dir_exists(output, output)?;
+        if had_previous {
+            let marker = output.join(PUBLISH_TRANSACTION_MARKER);
+            std::fs::create_dir(&marker).map_err(io_err(&marker))?;
+            boundary(PublishBoundary::TransactionMarked);
+            if let Err(e) = std::fs::rename(output, &backup) {
+                if let Err(cleanup) = remove_transaction_marker(output, output) {
+                    return Err(io_err(output)(std::io::Error::other(format!(
+                        "旧包移动失败：{e}；事务标记清理失败：{cleanup}"
+                    ))));
                 }
-                std::fs::rename(output, &backup).map_err(io_err(output))?;
-                true
+                return Err(io_err(output)(e));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(io_err(output)(e)),
-        };
+            boundary(PublishBoundary::PreviousMoved);
+        }
         if let Err(e) = std::fs::rename(package, output) {
             if had_previous {
                 if let Err(rollback) = std::fs::rename(&backup, output) {
-                    // 回滚也失败时，绝不能让 Drop 删除唯一的旧发布副本。
-                    self.preserve = true;
                     return Err(io_err(&backup)(std::io::Error::other(format!(
                         "发布失败：{e}；恢复失败：{rollback}；旧发布保留在 {}",
                         backup.display()
                     ))));
                 }
+                if let Err(cleanup) = remove_transaction_marker(output, output) {
+                    return Err(io_err(output)(std::io::Error::other(format!(
+                        "发布失败：{e}；旧包已恢复，但事务标记清理失败：{cleanup}"
+                    ))));
+                }
             }
             return Err(io_err(output)(e));
         }
+        boundary(PublishBoundary::PackageMoved);
         if had_previous {
-            if let Err(e) = std::fs::remove_dir_all(&backup) {
-                self.preserve = true;
-                warnings.push(format!(
-                    "发布成功，但旧包清理失败 ({}): {e}",
+            match retire_previous_into(&backup, &self.path) {
+                Ok(Some(warning)) => warnings.push(format!("发布成功，但{warning}")),
+                Ok(None) => {}
+                Err(e) => warnings.push(format!(
+                    "发布成功，但旧包未能移出事务路径 ({}): {e}",
                     backup.display()
-                ));
+                )),
             }
         }
         Ok(())
@@ -768,9 +957,7 @@ impl Staging {
 
 impl Drop for Staging {
     fn drop(&mut self) {
-        if !self.preserve {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -1126,6 +1313,233 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_after_previous_move_is_recovered_before_publish_retry() {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.output()).unwrap();
+        std::fs::write(fixture.output().join("old.bin"), b"old").unwrap();
+
+        // 模拟进程死在“旧包移走”之后：下一次发布即使自己的 package 也有问题，
+        // 仍必须先把上一版恢复到正式输出，不能让 Build/demo 永久消失。
+        let recovery = fixture
+            .output()
+            .parent()
+            .unwrap()
+            .join(".xgame-previous-demo");
+        std::fs::rename(fixture.output(), &recovery).unwrap();
+        std::fs::create_dir(recovery.join(PUBLISH_TRANSACTION_MARKER)).unwrap();
+        let staging = Staging::new(fixture.output().parent().unwrap()).unwrap();
+        let missing_package = staging.path.join("missing");
+        assert!(staging
+            .publish(&missing_package, &fixture.output(), &mut Vec::new())
+            .is_err());
+
+        assert_eq!(
+            std::fs::read(fixture.output().join("old.bin")).unwrap(),
+            b"old"
+        );
+        assert!(!recovery.exists(), "恢复完成后不该留下事务旧包");
+        assert!(!fixture.output().join(PUBLISH_TRANSACTION_MARKER).exists());
+    }
+
+    #[test]
+    fn interrupted_after_package_move_keeps_new_release_and_cleans_previous() {
+        let fixture = Fixture::new();
+        let recovery = fixture
+            .output()
+            .parent()
+            .unwrap()
+            .join(".xgame-previous-demo");
+        std::fs::create_dir_all(&recovery).unwrap();
+        std::fs::write(recovery.join("old.bin"), b"old").unwrap();
+        std::fs::create_dir(recovery.join(PUBLISH_TRANSACTION_MARKER)).unwrap();
+        std::fs::create_dir_all(fixture.output()).unwrap();
+        std::fs::write(fixture.output().join("new.bin"), b"new").unwrap();
+
+        // 新包已经占住正式路径就代表 commit 已完成；下一次发布先清掉旧包。即使
+        // 这一次自己的 package 随后失败，也不能退回上一个事务的旧版本。
+        let staging = Staging::new(fixture.output().parent().unwrap()).unwrap();
+        let missing_package = staging.path.join("missing");
+        assert!(staging
+            .publish(&missing_package, &fixture.output(), &mut Vec::new())
+            .is_err());
+
+        assert_eq!(
+            std::fs::read(fixture.output().join("new.bin")).unwrap(),
+            b"new"
+        );
+        assert!(!recovery.exists(), "已提交的新包不该伴随孤立旧包");
+    }
+
+    #[test]
+    fn recovery_runs_before_unrelated_build_validation_failure() {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.output()).unwrap();
+        std::fs::write(fixture.output().join("old.bin"), b"old").unwrap();
+        let recovery = previous_release_path(&fixture.output());
+        std::fs::rename(fixture.output(), &recovery).unwrap();
+        std::fs::create_dir(recovery.join(PUBLISH_TRANSACTION_MARKER)).unwrap();
+        std::fs::remove_file(fixture.project.entry_scene_path()).unwrap();
+
+        assert!(matches!(
+            fixture.build(),
+            Err(BuildError::EntrySceneMissing(_))
+        ));
+        assert_eq!(
+            std::fs::read(fixture.output().join("old.bin")).unwrap(),
+            b"old",
+            "场景预检失败前也必须先恢复正式输出"
+        );
+        assert!(!recovery.exists());
+    }
+
+    #[test]
+    fn unmarked_previous_directory_is_rejected_without_deleting_anything() {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.output()).unwrap();
+        std::fs::write(fixture.output().join("old.bin"), b"old").unwrap();
+        let recovery = previous_release_path(&fixture.output());
+        std::fs::create_dir(&recovery).unwrap();
+        std::fs::write(recovery.join("user.bin"), b"not an engine directory").unwrap();
+
+        let staging = Staging::new(fixture.output().parent().unwrap()).unwrap();
+        let package = staging.path.join("package");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(package.join("new.bin"), b"new").unwrap();
+        assert!(matches!(
+            staging.publish(&package, &fixture.output(), &mut Vec::new()),
+            Err(BuildError::PathConflict { .. })
+        ));
+
+        assert_eq!(
+            std::fs::read(fixture.output().join("old.bin")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            std::fs::read(recovery.join("user.bin")).unwrap(),
+            b"not an engine directory"
+        );
+    }
+
+    #[test]
+    fn non_empty_transaction_marker_is_rejected_without_deleting_anything() {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.output()).unwrap();
+        std::fs::write(fixture.output().join("new.bin"), b"new").unwrap();
+        let recovery = previous_release_path(&fixture.output());
+        let marker = recovery.join(PUBLISH_TRANSACTION_MARKER);
+        std::fs::create_dir_all(&marker).unwrap();
+        std::fs::write(recovery.join("old.bin"), b"old").unwrap();
+        std::fs::write(marker.join("user.bin"), b"keep").unwrap();
+
+        let staging = Staging::new(fixture.output().parent().unwrap()).unwrap();
+        let package = staging.path.join("package");
+        std::fs::create_dir(&package).unwrap();
+        assert!(matches!(
+            staging.publish(&package, &fixture.output(), &mut Vec::new()),
+            Err(BuildError::PathConflict { .. })
+        ));
+
+        assert_eq!(
+            std::fs::read(fixture.output().join("new.bin")).unwrap(),
+            b"new"
+        );
+        assert_eq!(std::fs::read(recovery.join("old.bin")).unwrap(), b"old");
+        assert_eq!(std::fs::read(marker.join("user.bin")).unwrap(), b"keep");
+    }
+
+    const CRASH_BOUNDARY_ENV: &str = "XGAME_TEST_PUBLISH_CRASH_BOUNDARY";
+    const CRASH_PARENT_ENV: &str = "XGAME_TEST_PUBLISH_CRASH_PARENT";
+    const CRASH_OUTPUT_ENV: &str = "XGAME_TEST_PUBLISH_CRASH_OUTPUT";
+    const CRASH_MARKER_ENV: &str = "XGAME_TEST_PUBLISH_CRASH_MARKER";
+
+    /// 只由 `killed_publish_recovers_at_every_rename_boundary` 启动的子进程入口。
+    /// 没有环境变量时立即通过，因此正常测试枚举不需要特殊过滤规则。
+    #[test]
+    fn publish_crash_child_process() {
+        let Ok(raw_boundary) = std::env::var(CRASH_BOUNDARY_ENV) else {
+            return;
+        };
+        let boundary = match raw_boundary.as_str() {
+            "marked" => PublishBoundary::TransactionMarked,
+            "previous" => PublishBoundary::PreviousMoved,
+            "package" => PublishBoundary::PackageMoved,
+            other => panic!("未知发布故障点: {other}"),
+        };
+        let parent = PathBuf::from(std::env::var_os(CRASH_PARENT_ENV).unwrap());
+        let output = PathBuf::from(std::env::var_os(CRASH_OUTPUT_ENV).unwrap());
+        let marker = PathBuf::from(std::env::var_os(CRASH_MARKER_ENV).unwrap());
+        let staging = Staging::new(&parent).unwrap();
+        let package = staging.path.join("package");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(package.join("new.bin"), b"new").unwrap();
+
+        let result = staging.publish_inner(&package, &output, &mut Vec::new(), |reached| {
+            if reached == boundary {
+                std::fs::write(&marker, b"ready").unwrap();
+                // 父进程会在这里用 Child::kill 强杀；park 保证不会执行析构或后续步骤。
+                loop {
+                    std::thread::park();
+                }
+            }
+        });
+        panic!("故障点没有截住发布: {result:?}");
+    }
+
+    #[test]
+    fn killed_publish_recovers_at_every_rename_boundary() {
+        for (raw_boundary, expected_file, rejected_file) in [
+            ("marked", "old.bin", "new.bin"),
+            ("previous", "old.bin", "new.bin"),
+            ("package", "new.bin", "old.bin"),
+        ] {
+            let fixture = Fixture::new();
+            std::fs::create_dir_all(fixture.output()).unwrap();
+            std::fs::write(fixture.output().join("old.bin"), b"old").unwrap();
+            let marker = fixture.base.join(format!("crash-{raw_boundary}.ready"));
+
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "builder::tests::publish_crash_child_process",
+                    "--quiet",
+                ])
+                .env(CRASH_BOUNDARY_ENV, raw_boundary)
+                .env(CRASH_PARENT_ENV, fixture.output().parent().unwrap())
+                .env(CRASH_OUTPUT_ENV, fixture.output())
+                .env(CRASH_MARKER_ENV, &marker)
+                .spawn()
+                .unwrap();
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !marker.is_file() {
+                if let Some(status) = child.try_wait().unwrap() {
+                    panic!("发布子进程在故障点前退出: {status}");
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("发布子进程没有到达 {raw_boundary} 故障点");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            child.kill().unwrap();
+            let status = child.wait().unwrap();
+            assert!(!status.success(), "强杀的子进程不应正常退出");
+
+            // 能在这里重新取得同一把锁，也同时证明强杀已由操作系统释放文件句柄。
+            let message = recover_interrupted_publish(&fixture.output())
+                .unwrap()
+                .expect("两个 rename 边界都应留下可识别的恢复状态");
+            assert!(message.contains("上次发布"), "{message}");
+            assert!(fixture.output().join(expected_file).is_file());
+            assert!(!fixture.output().join(rejected_file).exists());
+            assert!(!previous_release_path(&fixture.output()).exists());
+            assert!(!fixture.output().join(PUBLISH_TRANSACTION_MARKER).exists());
+        }
+    }
+
+    #[test]
     fn publish_waits_for_another_publisher() {
         let fixture = Fixture::new();
         std::fs::create_dir_all(fixture.output()).unwrap();
@@ -1287,6 +1701,26 @@ mod tests {
             assert!(fixture.build().is_err(), "必须拒绝 {source}");
             assert!(!fixture.output().exists());
         }
+    }
+
+    #[test]
+    fn transaction_marker_package_root_is_reserved() {
+        let mut fixture = Fixture::new();
+        fixture.project.manifest_mut().content.scripts_dir = PUBLISH_TRANSACTION_MARKER.into();
+        fixture.project.save().unwrap();
+        let source = fixture.project.path(PUBLISH_TRANSACTION_MARKER);
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("user.lua"), b"return 42").unwrap();
+
+        assert!(matches!(
+            fixture.build(),
+            Err(BuildError::PathConflict { .. })
+        ));
+        assert_eq!(
+            std::fs::read(source.join("user.lua")).unwrap(),
+            b"return 42"
+        );
+        assert!(!fixture.output().exists());
     }
 
     /// 搜索根与普通内容目录一样参与磁盘读取和复制，越界写法不能只在

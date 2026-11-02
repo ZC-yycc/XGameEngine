@@ -8237,3 +8237,92 @@ C 可创建同名新文件并取得另一把锁，B/C 会同时进入临界区�
 相邻的下一步应先为发布事务定义**可恢复状态**（例如可判别的 previous / journal 与强杀
 故障注入），验证“进程在每个 rename 边界被杀后，下次构建仍能选择一份完整包并恢复”；
 在没有这组红绿证据前，不把目录交换写成断电安全。
+
+## 一百零三、G0 发布事务：进程强杀后的可判别恢复（2026-11-02）
+
+### 103.1 阶段、选择理由与唯一范围
+
+项目仍处于 G0“现有能力组合正确、保存可靠、独立发布可验证”的收口阶段。发布内容、
+InputMap / 插件 / 多关组合、自包含审计、播放器新鲜度与协作进程并发互斥已有本地或 hosted
+证据；上一轮 102.5 明确留下的相邻阻塞是：发布者死在两次 rename 之间时，没有跨进程可
+判别的旧包和恢复协议。
+
+本轮只处理**项目发布最终目录的进程强杀恢复**。不改包内容、播放器格式、自包含审计、
+运行时或其他保存入口，也不把进程终止证据外推为机器断电持久性。它能在当前 Windows 本地
+文件系统稳定造出旧实现红灯，并直接决定上一版成品是否会从正式路径永久消失，因此优先于
+需要外设或其他平台环境的 G0 边界。
+
+### 103.2 旧实现红灯：随机 previous 无法跨进程解释
+
+先加入两个只调用真实 `Staging::publish` 的目录状态回归：
+
+1. 模拟旧包已经移到稳定 previous、正式输出缺席，再让下一次发布自己的 package 也失败；
+   要求下一次发布先恢复上一版。
+2. 模拟新包已在正式路径、previous 仍在，再让下一次发布失败；要求保留新包并清掉上一事务
+   的旧包，不能把旧事务残留继续带下去。
+
+旧实现完全不知道该 previous，两条定向实跑稳定得到 **0 passed / 2 failed**。第一条在读取
+`Build/demo/old.bin` 时得到 Windows `NotFound`，证明上一版会一直离开正式路径；第二条以
+“已提交的新包不该伴随孤立旧包”失败。它们不靠随机撞微小 rename 窗口，也没有先假设新一
+次构建一定成功。
+
+### 103.3 可判别协议与恢复状态机
+
+稳定恢复路径改为 `Build/.xgame-previous-<产物目录名>`，但仅靠名字会误删用户同名目录，
+所以所有权证据随旧包一起移动：
+
+1. 持 `Build/.xgame-publish.lock`，先在旧输出根创建空目录
+   `.xgame-publish-transaction`；
+2. 旧输出整体 rename 到稳定 previous，标记随目录原子移动；
+3. staging 的完整 `package` rename 到正式输出；
+4. 把带标记 previous 原子移回本次唯一 staging，再递归清理；稳定发布状态不留 previous 或
+   标记。
+
+下一次构建在场景试装、播放器查找和组包**之前**先取得同一把锁恢复；`publish` 进锁后再
+检查一次，覆盖当前构建组包期间另一发布者被杀的情况。判据不猜 PID、年龄或 mtime：正式
+输出仍带标记且没有 previous，说明死在第 1 步后，只清标记；只有带标记 previous，说明死
+在第 2 步后，改回正式路径并清标记；正式输出与带标记 previous 并存，说明第 3 步已经提交，
+保留新包并清旧包。package rename 普通失败仍同步回滚，回滚后清标记。
+
+旧包不能直接在稳定 previous 路径上 `remove_dir_all`：递归顺序可能先删事务标记，进程此时
+被杀就会留下无法安全认领的半个 previous。提交完成后先把 previous rename 到当前 staging；
+恢复旧事务时则创建一个唯一恢复 staging 再搬入。后续清理无论失败还是被杀，都只留下不参与
+发布判定的 `.xgame-staging-*`，正式输出与下一次事务不被阻塞。
+
+安全边界也由测试钉住：无标记 previous 即使是普通目录也返回 `PathConflict`，其中用户文件
+保持逐字节不变；链接和普通文件同样拒绝。标记本身只用 `remove_dir` 清空目录，不递归删除
+内容。发布内容根若占用 `.xgame-publish-transaction`（ASCII 大小写不敏感）在复制前拒绝，
+避免把用户资产误认成事务意图。
+
+### 103.4 真强杀夹具与验证
+
+`killed_publish_recovers_at_every_rename_boundary` 启动当前测试二进制的真实子进程。子进程
+走生产 `publish_inner`，分别在“标记已创建 / 旧包已移动 / 新包已移动”后写同步信号并持锁
+park；父进程确认到点后调用 `Child::kill`，不是 panic 或正常返回，因此 `Staging::drop` 与
+Rust 析构都没有机会清现场。随后恢复函数必须重新取得同一锁，并分别选中旧 / 旧 / 新包；
+previous 与正式输出里的事务标记都必须消失。三处均通过，也证明进程终止后操作系统释放了
+文件锁。
+
+最终验证：
+
+- 两条旧实现目录状态回归先 **0/2**，实现后连同强杀、预检前恢复、无标记 / 非空标记目录
+  保护与保留既有发布语义在内，builder **28 passed / 0 failed**。
+- 改动 Rust 文件独立 `rustfmt --check` 与 `git diff --check` 通过；workspace
+  `cargo fmt --all -- --check` 仍列出本轮未改文件在 rustfmt 1.98 下的既有差异，CI 按
+  §三十四不跑 fmt，本轮未批量改写无关文件。
+- `cargo check --workspace --all-targets --locked`、workspace 严格 clippy
+  `-- -D warnings` 与 `cargo build --workspace --release --locked` 通过。
+- 全 workspace 单线程实跑 41 个 suite：**1230 passed / 0 failed / 19 ignored**；19 项均为
+  约定手动基准，render 为 **205 passed / 1 ignored**，GPU 测试实际执行。
+- debug 与 release editor / player 均完成真实 SampleScene 发布。最终 Build 稳态 previous /
+  staging 为 0、成品内事务标记不存在、长期锁存在；release 成品 `--check` 为 1 场景 /
+  24 实体 / 15 资产、exit 0，60 帧无头为 60 fixed steps、warn/error 0、非有限变换 0、
+  `ok=true`。
+
+### 103.5 完成边界
+
+本轮关闭“协作构建进程在发布协议三个确定边界被强制终止后，下一次构建恢复到一份完整正式
+包”。两次 rename 间仍有瞬时输出缺席；若没有下一次构建，就没有主动恢复。Windows 没有
+目录 fsync，本轮也没有断电 / 拔盘实验，所以机器掉电时标记与 rename 的持久顺序仍未证明。
+网络文件系统、绕过构建器直接改 `Build/`、升级前旧协议遗留的随机 previous，以及强杀留下
+的组装 staging 不自动回收；这些边界没有被“进程强杀通过”掩盖。

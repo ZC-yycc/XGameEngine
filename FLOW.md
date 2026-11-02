@@ -1144,20 +1144,29 @@ GameApp::render()
   └─ EditorState::build_project()
        ├── save_scene()                先把场景存盘，否则打出去的是旧内容
        └── builder::build(&project)
-            ├── 入口场景不存在 → 直接报错（快速失败，不留半成品目录）
+            ├── recover()：锁住 Build/.xgame-publish.lock，先归并上次中断状态
+            ├── 入口场景不存在 → 报错（但上一版已经恢复到正式路径）
             ├── locate_player()         编辑器同目录 → 兄弟 profile 目录
             ├── 在同级唯一 staging 目录组装（旧发布仍保持可用）
             ├── 复制播放器 → <项目名>.exe
             ├── 复制 project.ron
             ├── 复制 content_dirs()：内容目录 + 入口场景 / 发布清单各关父目录（去重）
             ├── audit_package()：包 / 源工程引用问题取差集，新增问题即拒绝
-            └── publish()：锁住 Build/.xgame-publish.lock 后替换 <项目>/Build/<项目名>/
+            └── publish()：再次持锁恢复 → 标记旧包 → 两次 rename → 旧包退入 staging 清理
 ```
 
 每次构建的复制与审计都在自己的 staging 中，只有最终“旧包移走 → 新包就位 → 旧包清理”
 串行。`.xgame-publish.lock` 长期留在 `Build/`、不进入项目包；它只是稳定的锁节点，是否占用
 由打开的文件句柄决定，进程退出即释放。锁文件不能在发布后删除，否则等待旧句柄的进程与
 随后新建同名文件的进程会拿到两把不同的锁。
+
+旧输出在第一次 rename 前会短暂带一个空的 `.xgame-publish-transaction` 目录，随后整体移到
+`Build/.xgame-previous-<产物名>`。下一次构建只按锁内目录状态恢复：只有 previous 就还原
+旧包，正式输出与 previous 并存就保留已经提交的新包；正式输出仍带标记则只清标记。没有
+标记的同名目录绝不删除。稳定结束时只剩正式输出与长期锁文件；进程强杀可能留下随机
+staging，但它不会被选作正式包。已提交的 previous 也必须先 rename 回唯一 staging 再递归
+删除，避免清理中强杀先吃掉标记、留下不可判别半目录。这里没有 Windows 目录 fsync，不能
+外推为机器掉电安全。
 
 产物布局是**为 `xgame-game` 的项目定位顺序服务的**：
 
