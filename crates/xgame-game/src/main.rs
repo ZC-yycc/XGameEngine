@@ -151,6 +151,7 @@ impl GameApp {
             .await
             .expect("Failed to find a GPU adapter");
 
+        let occlusion_supported = supports_occlusion_culling(&adapter);
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -199,7 +200,12 @@ impl GameApp {
 
         let (width, height) = (config.width.max(1), config.height.max(1));
         let hdr = HdrTargets::new(&device, "game", width, height, sample_count);
-        let mut pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        let mut pipeline = ScenePipeline::new_with_occlusion_support(
+            &device,
+            HDR_FORMAT,
+            sample_count,
+            occlusion_supported,
+        );
         pipeline.set_default_shadow_resolution(quality.shadow_resolution);
         // 共享材质资产（`.mat`）需要项目句柄才能把项目相对路径解析成绝对路径。
         // 独立游戏只在启动时绑定一次；资产热重载是编辑器的能力。

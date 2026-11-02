@@ -247,6 +247,9 @@ impl ScreenshotRenderer {
         .ok_or_else(|| {
             anyhow!("找不到可用的 GPU 适配器 —— 截图需要图形设备（CI 无显卡时别传 --screenshot）")
         })?;
+        // 查询解析必须留在 GPU 队列时间线上；不支持的后端仍可截图，并由
+        // ScenePipeline 完整走旧直接绘制路径。
+        let occlusion_supported = crate::scene_pipeline::supports_occlusion_culling(&adapter);
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("screenshot device"),
@@ -297,7 +300,12 @@ impl ScreenshotRenderer {
         let ldr_view = ldr.create_view(&wgpu::TextureViewDescriptor::default());
 
         let hdr = HdrTargets::new(&device, "screenshot", width, height, sample_count);
-        let mut pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        let mut pipeline = ScenePipeline::new_with_occlusion_support(
+            &device,
+            HDR_FORMAT,
+            sample_count,
+            occlusion_supported,
+        );
         pipeline.set_default_shadow_resolution(quality.shadow_resolution);
         // 有 `project.ron` 才绑定项目：截图也走共享材质资产这条正门。
         // 临时目录 / 单测里的裸资源没有项目清单，绑定失败就退回"只有模型材质"，
@@ -354,12 +362,23 @@ impl ScreenshotRenderer {
         self.pipeline.frame_stats()
     }
 
+    /// 测试 / 手动基准诊断：返回正常帧异步缓存的遮挡可见实例数。
+    pub fn occlusion_visible_instances(&self) -> Option<usize> {
+        self.pipeline.occlusion_visible_instances()
+    }
+
     /// 开关视锥剔除（默认开）—— 只给 A/B 测试与基准用。
     ///
     /// 生产路径不该关它：剔除是保守的，开与关的像素必须逐位一致
     /// （`frustum_culling_matches_unculled_pixels` 钉死）。
     pub fn set_frustum_culling(&mut self, enabled: bool) {
         self.pipeline.set_frustum_culling(enabled);
+    }
+
+    /// 开关主相机的硬件遮挡剔除。只给像素等价测试与 A/B 基准用；生产路径
+    /// 由管线按设备能力与批次规模决定是否真正启用。
+    pub fn set_occlusion_culling(&mut self, enabled: bool) {
+        self.pipeline.set_occlusion_culling(enabled);
     }
 
     /// 开关阴影**逐级**剔除（默认开）—— 只给 A/B 测试与基准用。
@@ -3239,6 +3258,159 @@ mod tests {
         );
         // 合批结构不受剔除影响：同图元仍是一批（只是少了实例）。
         assert_eq!(culled.opaque_batches, unculled.opaque_batches);
+    }
+
+    /// 遮挡剔除必须有独立开关，才能用同场景做逐像素与性能 A/B。旧管线没有
+    /// 这个入口，因此这条回归在实现接线前会直接编译失败。
+    #[test]
+    fn occlusion_culling_has_an_independent_toggle() {
+        let Some(mut shot) = gpu_or_skip("occlusion_culling_has_an_independent_toggle") else {
+            return;
+        };
+        shot.set_occlusion_culling(false);
+        shot.set_occlusion_culling(true);
+    }
+
+    /// 两组完全重叠的实例：前 128 个在 z=-4，后 128 个在 z=-8。前组写入深度后，
+    /// 后组的查询必须为 0；GPU 压缩应只留下 128 个实例，且开 / 关逐字节一致。
+    #[test]
+    fn occlusion_culling_compacts_hidden_group_without_changing_pixels() {
+        let Some(mut shot) =
+            gpu_or_skip("occlusion_culling_compacts_hidden_group_without_changing_pixels")
+        else {
+            return;
+        };
+        if !shot.pipeline.occlusion_culling_supported() {
+            eprintln!("跳过遮挡真实路径：适配器不能在 GPU 队列上解析查询");
+            return;
+        }
+
+        // 自动门槛会直通低面立方体；把同一份 12 三角形几何重复索引到 4608，
+        // 只提高顶点成本、不改变轮廓，才能同时验证“高成本批次会启用”与精确像素。
+        let mut heavy_cube = crate::mesh::BuiltinMesh::Cube.build();
+        let base_indices = heavy_cube.indices.clone();
+        heavy_cube.indices = base_indices.repeat(128);
+        let heavy_cube = GltfMesh::from_mesh_data(
+            &shot.device,
+            &shot.queue,
+            &heavy_cube,
+            "occlusion-heavy-cube",
+        );
+        shot.inject_model("occlusion-heavy-cube", heavy_cube);
+
+        let mut scene = Scene::new("occlusion-hidden-group");
+        scene.ambient = [1.0; 3];
+        scene.lights.clear();
+        for i in 0..256 {
+            let mut cube = Entity::new(format!("cube-{i}"));
+            cube.model = "occlusion-heavy-cube".to_owned();
+            cube.transform.position = Vec3::new(0.0, 0.0, if i < 128 { -4.0 } else { -8.0 });
+            scene.add_entity(cube);
+        }
+        let camera = ShotCamera::looking_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), DEFAULT_FOV_Y);
+        let render = |shot: &mut ScreenshotRenderer, scene: &Scene, camera: ShotCamera| {
+            shot.render_scene(
+                scene,
+                &AnimationDriver::new(),
+                Some(camera),
+                SceneLighting::new(scene.ambient, &scene.lights),
+                RenderConfig::default(),
+            )
+            .expect("渲染失败");
+            shot.read_rgba().expect("读回失败")
+        };
+
+        shot.set_occlusion_culling(false);
+        let reference = render(&mut shot, &scene, camera);
+        assert!(!shot.frame_stats().occlusion_active);
+
+        shot.set_occlusion_culling(true);
+        let warm = render(&mut shot, &scene, camera);
+        let warm_stats = shot.frame_stats();
+        assert!(!warm_stats.occlusion_active, "首帧只能生成查询历史");
+        assert_eq!(warm_stats.occlusion_query_groups, 2);
+        assert_eq!(reference, warm, "历史刷新帧必须完整绘制");
+
+        let mut culled = render(&mut shot, &scene, camera);
+        for _ in 0..7 {
+            if shot.occlusion_visible_instances().is_some() {
+                break;
+            }
+            culled = render(&mut shot, &scene, camera);
+        }
+        let stats = shot.frame_stats();
+        assert!(stats.occlusion_active, "异步收益判定后必须真实复用遮挡历史");
+        assert_eq!(stats.occlusion_query_groups, 2);
+        assert_eq!(
+            shot.occlusion_visible_instances(),
+            Some(128),
+            "后 128 个完全被前组挡住"
+        );
+        assert_eq!(reference, culled, "遮挡开关必须逐字节一致");
+
+        // 被挡组自己移动到可见位置：实例束变化必须让**这一帧**立即全画，不能
+        // 继续消费旧查询。新结果若证明收益不足，后续稳定帧也必须保持直接绘制。
+        for cube in &mut scene.entities[128..] {
+            cube.transform.position.x = 2.0;
+        }
+        let moved_safe = render(&mut shot, &scene, camera);
+        assert!(
+            !shot.frame_stats().occlusion_active,
+            "实体运动帧必须放弃旧历史"
+        );
+        shot.set_occlusion_culling(false);
+        let moved_reference = render(&mut shot, &scene, camera);
+        assert_eq!(moved_safe, moved_reference, "运动帧不能漏掉刚露出的实例");
+
+        shot.set_occlusion_culling(true);
+        let moved_warm = render(&mut shot, &scene, camera);
+        assert!(!shot.frame_stats().occlusion_active);
+        let mut moved_stable = render(&mut shot, &scene, camera);
+        for _ in 0..7 {
+            if shot.occlusion_visible_instances().is_some() {
+                break;
+            }
+            moved_stable = render(&mut shot, &scene, camera);
+        }
+        assert_eq!(shot.occlusion_visible_instances(), Some(256));
+        assert!(
+            !shot.frame_stats().occlusion_active,
+            "无遮挡结果必须被收益门槛直通"
+        );
+        assert_eq!(moved_warm, moved_stable);
+
+        // 恢复完全遮挡，重新建立一份确实启用压缩的历史，再验证相机变化会立即
+        // 放弃它。这样相机回归不是在“本来就直通”的状态下假绿。
+        for cube in &mut scene.entities[128..] {
+            cube.transform.position.x = 0.0;
+        }
+        let restored_safe = render(&mut shot, &scene, camera);
+        assert!(!shot.frame_stats().occlusion_active);
+        let mut restored_culled = restored_safe.clone();
+        for _ in 0..8 {
+            restored_culled = render(&mut shot, &scene, camera);
+            if shot.frame_stats().occlusion_active {
+                break;
+            }
+        }
+        assert!(shot.frame_stats().occlusion_active);
+        assert_eq!(shot.occlusion_visible_instances(), Some(128));
+        assert_eq!(restored_safe, restored_culled);
+
+        // 相机平移同样使历史失效；矩阵变化帧先完整绘制，再生成新查询。
+        let shifted_camera = ShotCamera::looking_at(
+            Vec3::new(0.75, 0.0, 0.0),
+            Vec3::new(0.75, 0.0, -1.0),
+            DEFAULT_FOV_Y,
+        );
+        let camera_safe = render(&mut shot, &scene, shifted_camera);
+        assert!(
+            !shot.frame_stats().occlusion_active,
+            "相机运动帧必须放弃旧历史"
+        );
+        shot.set_occlusion_culling(false);
+        let camera_reference = render(&mut shot, &scene, shifted_camera);
+        assert_eq!(camera_safe, camera_reference, "相机运动不能造成漏画");
     }
 
     // =========================================================================

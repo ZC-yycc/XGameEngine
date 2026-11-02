@@ -10,6 +10,7 @@ pub mod material_library;
 pub mod mesh;
 pub mod model;
 pub mod morph;
+mod occlusion;
 pub mod particles;
 pub mod postfx;
 pub mod scene;

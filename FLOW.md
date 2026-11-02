@@ -69,8 +69,9 @@ session.tree = preferences.layout_for_startup()  校验通过才恢复；否则�
 `EditorApp::open_project` 接着构造**视口渲染器**，并把**项目根目录**交给它：
 
 ```
-scene_renderer::SceneRenderer::new(device, queue, egui_renderer, format, project_root)
-  └── ScenePipeline::new()        共享渲染管线（位于 xgame-render）
+scene_renderer::SceneRenderer::new(device, queue, egui_renderer, format, project_root, ...)
+  └── ScenePipeline::new_with_occlusion_support()
+      共享渲染管线（位于 xgame-render；适配器不支持时遮挡路径自动关闭）
 ```
 
 > 3D 视口渲染在 **UI 线程上同步进行**：本帧输入处理完 → 重画离屏 3D → 同帧上屏。
@@ -498,18 +499,22 @@ scene_view::show_content(state, ui)
   │   │     │     │               剪辑缺失的层跳过）→ 关节矩阵进
   │   │     │     │               **骨骼槽位**（每实体 256 骨定长）
   │   │     │     │     └── 容量不够先翻倍重建骨骼缓冲（连带换两个绑定组，必须在开 pass 之前）
+  │   │     │     ├── 遮挡历史按位核对（相机 / 实例 / 骨骼 / 批次代际 / AABB）
+  │   │     │     │   └── [稳定且收益足够] compute 压缩实例 → indirect 参数
   │   │     │     ├── [有阴影时] 阴影 RenderPass：只画不透明图元 → 2048² 深度图
   │   │     │     ├── 主 RenderPass (背景 #1E1E24)：
   │   │     │     │   ├── 颜色附件 = **多采样**纹理，resolve 到交给 egui 的单采样纹理
-  │   │     │     │   ├── 逐 primitive: set_global_bg / set_material_bg / draw_indexed
+  │   │     │     │   ├── 普通帧 draw_indexed；稳定遮挡帧按重映射表 draw_indexed_indirect
   │   │     │     │   └── 片元按灯叠加，被标记的灯查阴影图（3×3 PCF）
+  │   │     │     ├── [历史失效且值得查询] 对最终不透明深度画分组 AABB 查询
   │   │     │     └── 提交命令（queue.submit）
   │   │     │
   │   │     └── eframe 上屏与离屏 pass 同在一条队列、按入队顺序执行 →
   │   │           **贴出来的必是本帧纹理**（输入→像素零管线延迟；
   │   │           稳态单帧 CPU 实测 ~0.4ms，无渲染线程、无在飞任务）
   │   │
-  │   └── 没有跨帧状态：不存在贴旧图、轮询交卷或等待预算
+  │   └── 没有跨帧**纹理交付**：不存在贴旧图、轮询交卷或等待预算；遮挡剔除另有
+  │       保守可见性历史，但待定 / 失效时完整绘制，不会延迟本帧画面
   │
   ├── ⑦ painter.image(tex_id, rect, uv)      ← 叠加层，画在 3D 之上
   │     └── 贴的就是本帧 render 的纹理：输入到像素在同一线程同一帧内闭环
@@ -756,6 +761,27 @@ if 有开阴影的方向光 且 场景包围盒非空:
 
 绘制顺序：**先不透明（写深度、背面剔除），后半透明（不写深度、关背面剔除、
 按到相机距离远 → 近排序）**，两条路径各有一条 render pipeline。
+
+**保守时域遮挡剔除**（只作用于主通道不透明批次，阴影不消费结果）：
+
+```text
+输入变化帧
+  ├── 完整 draw_indexed
+  └── 主通道后用最终深度查询分组世界 AABB（每组 ≤128 实例）
+          │
+          └── query resolve → 持久 readback，后续帧只做非阻塞 Poll
+
+后续帧
+  ├── 任一输入位变化 / 主通道 morph 不透明批次 / 待读回 / 映射失败 → 完整绘制
+  ├── 被挡索引工作 < 全帧 1/3                    → 缓存为直接绘制
+  └── 输入逐位相同且收益足够
+        → compute 写 visible_indices + indirect
+        → instance-rate Uint32 重映射 + draw_indexed_indirect
+```
+
+查询前还有两层固定税门槛：单实例至少 512 索引、全帧候选至少 1,000,000 索引工作；
+少于 64 的尾段与相机位于 AABB 内恒可见。TAA 的抖动进入渲染矩阵，因此连续抖动帧会
+自然走完整绘制。完整合同见决策记录 §八十七。
 
 **调试线投影**（将 3D 世界坐标映射到 egui 屏幕坐标）：
 
@@ -1338,7 +1364,8 @@ Scene(
 | `core/animation_runtime.rs` | 3579 | 纯 CPU 动画共享层：`AnimationAsset` / `AnimClip` / `Track` / `Skin` / `AnimNode`、三种插值采样、`compute_bones_composed_with_root_motion()`（基础淡入 → 剥 runtime 已消费轴 → additive / layers）、`root_motion_delta()`（循环展开 / 非循环钳位 / 淡入增量混合）、`AnimationDriver`（运行态唯一时钟、帧区间快照、分层时钟与确定性 signature）、`AnimationLoader` 注入契约 |
 | `render/animation.rs` | 7 | `xgame_core::animation_runtime::*` 的兼容转出；旧模块路径保留，render 不再拥有第二份 CPU 动画实现 |
 | `core/light.rs` | 170 | `Light`、`LightKind`、`normalized_direction()`、`casts_shadow` / `shadow_resolution` |
-| `render/scene_pipeline.rs` | 3328 | `ScenePipeline::new()` / `render()`（含阴影 pass、模型矩阵攒进复用缓冲后一次上传、**蒙皮**：逐实体从共享驱动读取基础 / 淡入 / additive / layers，统一交 `compute_bones_composed_with_root_motion`；仅有效根运动实体剥已消费轴）+ `ensure_bones_capacity()` 扩容重建；材质解析与批次键 `(图元, MaterialKey)`）、`scene_bounds()`、`fit_directional_shadow()`、`pick_shadow_slot()`、`build_lights()`、`material_binding()`、`set_project()` / `invalidate_materials()` |
+| `render/scene_pipeline.rs` | 共享 3D 管线 | `ScenePipeline::new_with_occlusion_support()` / `render()`（方向 / 点光阴影、实例收集、蒙皮 / morph、主通道与遮挡接线）；遮挡活跃时用 instance-rate `Uint32` 重映射 + indirect，普通路径仍是直接实例绘制；材质解析与批次键 `(图元, MaterialKey)` |
+| `render/occlusion.rs` | 遮挡核心 | 分组 AABB query、异步 readback、逐位历史、查询前成本门槛 / 查询后收益门槛、compute 实例压缩与 indirect 参数；设备 / 动态 / 失败保守降级 |
 | `render/material_library.rs` | 210 | `MaterialLibrary`：`.mat` 解析 / albedo 纹理上传 / 绑定组缓存 / 负缓存、`MaterialKey::{Model, Asset}` 命名空间、`set_project()` / `invalidate()` / `revision()` |
 | `render/gltf_loader.rs` | 1155 | `GltfMesh::from_file()` / `load_with_search_paths()`（GPU 模型）、`GltfAnimationLoader`（无 GPU 的 runtime 动画装载器）；二者先共用 `resolve_model_source()` 命中同一文件与并排 `.meta`，再共用 `parse_animation_data_scaled()` 与 `model_scale` 烘焙规则；节点层级 / 皮肤 / LINEAR·STEP·CUBICSPLINE 通道只解析一份；`clip()` / `has_animation()`、`Bounds` |
 | `render/mesh.rs` | 365 | `BuiltinMesh`、`cube()`、`sphere()`、`plane()`、`cylinder()` |

@@ -461,6 +461,7 @@ impl EditorApp {
                 gpu.target_format,
                 project_root,
                 quality.msaa,
+                xgame_render::scene_pipeline::supports_occlusion_culling(&gpu.adapter),
             ));
             if let Some(renderer) = state.scene_renderer.as_mut() {
                 renderer.set_quality(quality);

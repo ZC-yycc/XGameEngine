@@ -206,6 +206,18 @@ pub fn supported_sample_count(adapter: &wgpu::Adapter, format: wgpu::TextureForm
     }
 }
 
+/// 适配器能否执行“上一帧 query buffer → 本帧 compute / indirect”的遮挡路径。
+///
+/// `NONBLOCKING_QUERY_RESOLVE` 保证 query resolve 发生在 GPU 队列时间线上，而不是
+/// CPU 设备时间线阻塞等待尚未提交的查询。indirect 的 `first_instance` 固定为 0，
+/// 实例重映射通过顶点流切片完成，因此不要求可选 device feature。
+pub fn supports_occlusion_culling(adapter: &wgpu::Adapter) -> bool {
+    adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(wgpu::DownlevelFlags::NONBLOCKING_QUERY_RESOLVE)
+}
+
 /// 阴影深度比较的基础偏置（NDC 深度单位）。
 ///
 /// shadow mapping 的经典自遮挡（acne）来自"同一根光线上的表面深度量化误差"，
@@ -315,6 +327,14 @@ pub struct FrameStats {
     /// 口径是"主 pass 的实例"，阴影专用批次不计 —— 那些连画面都不进，
     /// 拿它证明"远处换了低模"会假绿。
     pub low_lod_instances: usize,
+    /// 本帧是否真的复用了稳定历史并走了“GPU 压缩 → indirect”路径。
+    ///
+    /// 第一帧 / 任一输入变化帧都为 false（完整绘制并刷新 AABB 查询）；设备缺
+    /// 能力或没有批次达到阈值时也为 false。不能拿“配置开了”冒充“真剔了”。
+    pub occlusion_active: bool,
+    /// 当前遮挡历史里的 AABB query 组数（每组最多 128 个实例）。
+    /// 稳定帧直接复用结果，不会重复发同一批查询。
+    pub occlusion_query_groups: usize,
     /// 本帧阴影 pass 真正提交的**实例数之和**（各级相加）。
     ///
     /// 这是逐级剔除唯一诚实的读数：级数 × 实例数在剔除前恒等于
@@ -523,6 +543,19 @@ struct DrawUniform {
 /// 由结构体布局决定 —— 必须与这里的值一致，运行期断言在单测里。
 const DRAW_STRIDE: usize = std::mem::size_of::<DrawUniform>();
 
+/// 遮挡压缩结果作为 instance-rate 顶点流读取，而不是依赖 indirect draw 的
+/// `@builtin(instance_index)`。每批绘制时把这条流切到 `batch.first`，indirect 的
+/// `first_instance` 恒为 0，因而不需要 `INDIRECT_FIRST_INSTANCE` 可选能力。
+const VISIBLE_INDEX_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![6 => Uint32];
+
+fn visible_index_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<u32>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &VISIBLE_INDEX_ATTRS,
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct MaterialUniform {
@@ -590,6 +623,8 @@ struct PendingDraw {
     /// 或实体整球在光照半径外时为 0 —— 后者连实例都不进点光那段槽位。
     /// 见 [`point_face_mask`]。
     point_mask: u8,
+    /// 遮挡查询用的保守世界 AABB。设备不支持 / 功能关闭时为 None，不额外算盒。
+    occlusion_bounds: Option<Bounds>,
 }
 
 /// 全部级联都算命中（逐级剔除关闭时的保守值）。
@@ -1435,7 +1470,6 @@ struct DrawUniform  {
 @group(0) @binding(2) var<storage, read> draws: array<DrawUniform>;
 // 所有动画实体的骨骼矩阵排在同一条存储缓冲里，按槽位分段（见 BONES_PER_SLOT）。
 @group(0) @binding(6) var<storage, read> bones: array<mat4x4<f32>>;
-
 // 每个蒙皮槽位预留的骨骼数。必须与 CPU 侧的 `BONES_PER_SLOT` 一致。
 const BONES_PER_SLOT: u32 = 256u;
 
@@ -1474,9 +1508,8 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     );
 }
 
-@vertex
-fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
-    let draw = draws[instance_index];
+fn build_vertex(input: VertexInput, draw_index: u32) -> VertexOutput {
+    let draw = draws[draw_index];
     var pos = input.position;
     var nrm = input.normal;
 
@@ -1512,6 +1545,19 @@ fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> 
     out.base_color = draw.base_color;
     out.material = draw.material;
     return out;
+}
+
+@vertex
+fn vs_main(input: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+    return build_vertex(input, instance_index);
+}
+
+@vertex
+fn vs_main_occlusion(
+    input: VertexInput,
+    @location(6) draw_index: u32,
+) -> VertexOutput {
+    return build_vertex(input, draw_index);
 }
 "#;
 
@@ -1991,6 +2037,8 @@ fn vs_shadow(
 pub struct ScenePipeline {
     /// 不透明变体。
     pipeline: wgpu::RenderPipeline,
+    /// 遮挡压缩后的不透明变体：实例下标先过可见槽位重映射表。
+    occlusion_pipeline: wgpu::RenderPipeline,
     /// 半透明变体：开启 alpha 混合、关闭深度写入（否则半透明物体会
     /// 把它后面的东西提前挡掉）。
     blend_pipeline: wgpu::RenderPipeline,
@@ -2132,6 +2180,12 @@ pub struct ScenePipeline {
 
     /// 视锥剔除开关（默认开）。见 [`ScenePipeline::set_frustum_culling`]。
     frustum_culling: bool,
+    /// 时域 AABB 硬件遮挡查询与实例压缩。能力不足或输入变化时内部降级。
+    occlusion: crate::occlusion::OcclusionCuller,
+    /// 本帧交给遮挡模块的批次元数据（复用，避免每帧分配）。
+    occlusion_batches: Vec<crate::occlusion::BatchInput>,
+    /// 按 draw 槽位排好的世界 AABB；时域历史逐字节比较也用同一份。
+    occlusion_slot_bounds: Vec<Bounds>,
     /// 阴影**逐级**剔除开关（默认开）。见
     /// [`ScenePipeline::set_cascaded_shadow_culling`]。
     cascaded_shadow_culling: bool,
@@ -2189,6 +2243,20 @@ impl ScenePipeline {
     /// 传 1 就是关闭 MSAA。**调用方必须按同一个值准备颜色/深度附件**：
     /// 采样数不匹配的话渲染通道直接校验失败。
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, sample_count: u32) -> Self {
+        Self::new_with_occlusion_support(device, format, sample_count, false)
+    }
+
+    /// 带适配器能力的构造入口。
+    ///
+    /// `query_resolve_on_queue` 必须来自
+    /// [`wgpu::DownlevelFlags::NONBLOCKING_QUERY_RESOLVE`]；`Device` 自身不暴露这项
+    /// 适配器能力。传 false 只关闭遮挡查询，不影响任何既有渲染能力。
+    pub fn new_with_occlusion_support(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        query_resolve_on_queue: bool,
+    ) -> Self {
         let mut global_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::with_capacity(12);
         global_entries.extend([
             // 0: 相机（顶点阶段要 view_proj，片元阶段要相机位置算半程向量）
@@ -2488,6 +2556,13 @@ impl ScenePipeline {
         // 天空资源：必须在全局绑定组之前建 —— 组里持有它的 uniform 缓冲、
         // 立方体与 LUT 的视图（换内容不换对象，见 sky.rs 的生命周期说明）。
         let sky = SkyResources::new(device, &global_bgl, format, sample_count);
+        let occlusion = crate::occlusion::OcclusionCuller::new(
+            device,
+            &camera_buffer,
+            sample_count,
+            MAX_RENDER_DRAWS,
+            query_resolve_on_queue,
+        );
 
         let global_bind_group = Self::create_global_bind_group(
             device,
@@ -2529,6 +2604,16 @@ impl ScenePipeline {
             format,
             sample_count,
             false,
+            false,
+        );
+        let occlusion_pipeline = Self::build_pipeline(
+            device,
+            &global_bgl,
+            &material_bgl,
+            format,
+            sample_count,
+            false,
+            true,
         );
         let blend_pipeline = Self::build_pipeline(
             device,
@@ -2537,11 +2622,13 @@ impl ScenePipeline {
             format,
             sample_count,
             true,
+            false,
         );
         let shadow_pipeline = Self::build_shadow_pipeline(device, &shadow_bgl);
 
         Self {
             pipeline,
+            occlusion_pipeline,
             blend_pipeline,
             global_bgl,
             materials: MaterialLibrary::new(material_bgl),
@@ -2584,6 +2671,9 @@ impl ScenePipeline {
             shadow_pending: Vec::new(),
             shadow_batch_index: HashMap::new(),
             frustum_culling: true,
+            occlusion,
+            occlusion_batches: Vec::new(),
+            occlusion_slot_bounds: Vec::new(),
             cascaded_shadow_culling: true,
             point_shadow_culling: true,
             face_list_buffer,
@@ -2619,6 +2709,30 @@ impl ScenePipeline {
     /// 靠版本对比猜。
     pub fn set_frustum_culling(&mut self, enabled: bool) {
         self.frustum_culling = enabled;
+    }
+
+    /// 开关保守的时域硬件遮挡剔除（默认开，设备 / 小批次 / 动态输入自动降级）。
+    ///
+    /// 关掉时不发 AABB 查询、不跑 compute，主管线与引入本功能前逐条相同。
+    /// 独立开关是 A/B 像素与性能验证的必要入口，不是项目画质旋钮。
+    pub fn set_occlusion_culling(&mut self, enabled: bool) {
+        self.occlusion.set_enabled(enabled);
+    }
+
+    pub fn occlusion_culling(&self) -> bool {
+        self.occlusion.enabled()
+    }
+
+    /// 当前设备能否在 GPU 队列时间线上解析并消费遮挡查询。
+    pub fn occlusion_culling_supported(&self) -> bool {
+        self.occlusion.supported()
+    }
+
+    /// 最近一份已完成遮挡查询的可见实例总数（测试 / 手动基准诊断用）。
+    ///
+    /// 查询结果由正常帧异步缓存；尚未完成时返回 `None`，本方法从不等待 GPU。
+    pub fn occlusion_visible_instances(&self) -> Option<usize> {
+        self.occlusion.visible_instances()
     }
 
     /// 设置"灯没写 `shadow_resolution` 时"的阴影贴图边长（质量档位入口）。
@@ -3003,6 +3117,7 @@ impl ScenePipeline {
         color_format: wgpu::TextureFormat,
         sample_count: u32,
         blend: bool,
+        remapped_instances: bool,
     ) -> wgpu::RenderPipeline {
         let vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene_vs"),
@@ -3021,6 +3136,13 @@ impl ScenePipeline {
             bind_group_layouts: &[global_bgl, material_bgl],
             push_constant_ranges: &[],
         });
+        let direct_buffers = [GltfVertex::layout()];
+        let remapped_buffers = [GltfVertex::layout(), visible_index_layout()];
+        let vertex_buffers = if remapped_instances {
+            &remapped_buffers[..]
+        } else {
+            &direct_buffers[..]
+        };
 
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(if blend {
@@ -3031,8 +3153,12 @@ impl ScenePipeline {
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &vs,
-                entry_point: Some("vs_main"),
-                buffers: &[GltfVertex::layout()],
+                entry_point: Some(if remapped_instances {
+                    "vs_main_occlusion"
+                } else {
+                    "vs_main"
+                }),
+                buffers: vertex_buffers,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -3619,6 +3745,7 @@ impl ScenePipeline {
         let mut culled_instances = 0usize;
         let mut distance_culled_entities = 0usize;
         let mut low_lod_instances = 0usize;
+        let mut occlusion_has_candidate_geometry = false;
 
         for (i, entity) in entities.iter().enumerate() {
             if i >= MAX_RENDER_ENTITIES || draw_slots_used >= MAX_RENDER_DRAWS {
@@ -3667,9 +3794,15 @@ impl ScenePipeline {
             //
             // 包围盒**只算一次**：相机剔除与阴影逐级剔除都要用它，两边各算一遍
             // 等于把"剔除省下的那份工作"又花回去。
+            let mesh_has_occlusion_candidate = self.occlusion.wants_bounds()
+                && mesh
+                    .primitives
+                    .iter()
+                    .any(|prim| crate::occlusion::primitive_is_candidate(prim.num_indices));
             let need_bounds = camera_frustum.is_some()
                 || (shadow_enabled && self.cascaded_shadow_culling)
-                || (point_shadow.is_some() && self.point_shadow_culling);
+                || (point_shadow.is_some() && self.point_shadow_culling)
+                || mesh_has_occlusion_candidate;
             let bounds = need_bounds.then(|| cull_bounds(mesh, &world, entity.animator.is_some()));
 
             let mut in_camera = true;
@@ -3964,6 +4097,7 @@ impl ScenePipeline {
                         uniform,
                         cascade_mask,
                         point_mask,
+                        occlusion_bounds: None,
                     });
                 } else if effective.blend {
                     // 半透明：一项一个批次（不做合批，见模块头），距离排序键留好。
@@ -4006,11 +4140,20 @@ impl ScenePipeline {
                     };
                     let batch_ref = &mut self.opaque_batches[batch as usize];
                     batch_ref.count += 1;
+                    let occlusion_bounds = if mesh_has_occlusion_candidate
+                        && crate::occlusion::primitive_is_candidate(prim.num_indices)
+                    {
+                        bounds
+                    } else {
+                        None
+                    };
+                    occlusion_has_candidate_geometry |= occlusion_bounds.is_some();
                     self.pending_draws.push(PendingDraw {
                         batch,
                         uniform,
                         cascade_mask,
                         point_mask,
+                        occlusion_bounds,
                     });
                 }
             }
@@ -4101,6 +4244,11 @@ impl ScenePipeline {
         self.point_runs.clear();
         self.draw_staging.clear();
         self.draw_staging.resize(next_slot as usize * stride, 0);
+        self.occlusion_slot_bounds.clear();
+        if occlusion_has_candidate_geometry {
+            self.occlusion_slot_bounds
+                .resize(next_slot as usize, Bounds::EMPTY);
+        }
         if next_slot > 0 {
             // 不透明：每批一个游标，实例按收集顺序填进本批的连续槽位。
             self.batch_cursor.clear();
@@ -4115,6 +4263,9 @@ impl ScenePipeline {
                     *cursor += 1;
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                    if let Some(bounds) = draw.occlusion_bounds {
+                        self.occlusion_slot_bounds[slot as usize] = bounds;
+                    }
                     if point_culling && draw.point_mask != 0 {
                         self.point_entries.push(pack_point_entry(
                             0,
@@ -4132,6 +4283,9 @@ impl ScenePipeline {
                     *cursor += 1;
                     self.draw_staging[offset..offset + stride]
                         .copy_from_slice(bytemuck::bytes_of(&draw.uniform));
+                    if let Some(bounds) = draw.occlusion_bounds {
+                        self.occlusion_slot_bounds[slot as usize] = bounds;
+                    }
                     if point_culling && draw.point_mask != 0 {
                         self.point_entries.push(pack_point_entry(
                             0,
@@ -4231,6 +4385,36 @@ impl ScenePipeline {
             );
         }
 
+        // 遮挡计划只描述主通道的不透明批次。morph 顶点存在独立 GPU 缓冲，
+        // 不在下面的逐字节历史束里；只要命中一批 morph 就保守关闭整条时域复用。
+        self.occlusion_batches.clear();
+        let mut occlusion_dynamic_geometry = false;
+        for batch in &self.opaque_batches {
+            let (index_count, primitive_key) =
+                batch_prim(entities, model_cache, batch).map_or((0, 0), |prim| {
+                    occlusion_dynamic_geometry |= prim.morph.is_some();
+                    (prim.num_indices, prim.material_id)
+                });
+            self.occlusion_batches.push(crate::occlusion::BatchInput {
+                first: batch.first,
+                count: batch.count,
+                index_count,
+                primitive_key,
+            });
+        }
+        let bone_bytes: &[u8] = bytemuck::cast_slice(&self.bone_staging);
+        let occlusion_active = self.occlusion.prepare(
+            device,
+            queue,
+            &self.occlusion_batches,
+            &self.occlusion_slot_bounds,
+            render_view_proj,
+            *camera_pos,
+            &self.draw_staging,
+            bone_bytes,
+            occlusion_dynamic_geometry,
+        );
+
         // 统计口径 = 主 pass 真正发出的 draw call（阴影复用不透明批次，不重复计；
         // 阴影专用批次单独计数）。剔除读数给基准与编辑器 HUD 用。
         self.stats = FrameStats {
@@ -4243,6 +4427,8 @@ impl ScenePipeline {
             shadow_only_instances: self.shadow_pending.len(),
             distance_culled_entities,
             low_lod_instances,
+            occlusion_active,
+            occlusion_query_groups: self.occlusion.query_count() as usize,
             shadow_instances_submitted: 0,
             shadow_draw_calls: 0,
             point_shadow_instances: 0,
@@ -4404,6 +4590,12 @@ impl ScenePipeline {
         self.particles
             .prepare(device, queue, view_proj, camera_pos, particle_quads);
 
+        // 历史完全匹配时，先把上一帧查询结果稳定压成实例重映射与 indirect 参数。
+        // 任一输入变化时 `occlusion_active = false`，这里整段跳过、主通道完整绘制。
+        if occlusion_active {
+            self.occlusion.compact(encoder);
+        }
+
         // --- 渲染通道 ---
         // 开了 MSAA 就把渲染目标换成多采样那张，并把最终视图设为 resolve target。
         let (pass_view, resolve_target) = match msaa_color_view {
@@ -4438,9 +4630,13 @@ impl ScenePipeline {
 
         // 不透明：写深度。全局绑定组（含实例数据的 storage）整段绑一次，
         // 逐批只换材质绑定组与顶点/索引缓冲，然后一次实例化 draw。
-        rpass.set_pipeline(&self.pipeline);
+        rpass.set_pipeline(if occlusion_active {
+            &self.occlusion_pipeline
+        } else {
+            &self.pipeline
+        });
         rpass.set_bind_group(0, &self.global_bind_group, &[]);
-        for batch in &self.opaque_batches {
+        for (batch_index, batch) in self.opaque_batches.iter().enumerate() {
             let Some(prim) = batch_prim(entities, model_cache, batch) else {
                 continue;
             };
@@ -4456,11 +4652,20 @@ impl ScenePipeline {
                 batch_vertex_buffer(entities, &self.morph_buffers, prim, batch),
             );
             rpass.set_index_buffer(prim.index_buffer.slice(..), prim.index_format);
-            rpass.draw_indexed(
-                0..prim.num_indices,
-                0,
-                batch.first..batch.first + batch.count,
-            );
+            if occlusion_active {
+                let remap_offset = batch.first as u64 * std::mem::size_of::<u32>() as u64;
+                rpass.set_vertex_buffer(1, self.occlusion.visible_indices().slice(remap_offset..));
+                rpass.draw_indexed_indirect(
+                    self.occlusion.indirect_buffer(),
+                    batch_index as u64 * crate::occlusion::DRAW_INDEXED_INDIRECT_STRIDE,
+                );
+            } else {
+                rpass.draw_indexed(
+                    0..prim.num_indices,
+                    0,
+                    batch.first..batch.first + batch.count,
+                );
+            }
         }
 
         // 天空盒：不透明之后、半透明之前（见模块头的理由）。管线是 z = 1.0
@@ -4499,6 +4704,11 @@ impl ScenePipeline {
         // 粒子：最后画。深度测试让它们被前面的几何遮住，深度写关掉，
         // 于是粒子之间不互相遮挡（也不污染后续 pass 的深度）。
         self.particles.draw(&mut rpass);
+        drop(rpass);
+
+        // 历史失效帧只画每组的 AABB，且不写深度；结果在命令缓冲末尾 resolve，
+        // 供后续稳定帧使用。稳定帧不重复查询，输入变化时才完整绘制并刷新基线。
+        self.occlusion.record_queries(encoder, depth_view);
     }
 
     /// 上一帧的粒子绘制统计（无粒子时为全 0）。
@@ -4517,6 +4727,16 @@ fn append_bone_slot(staging: &mut Vec<[f32; 16]>, bones: &[Mat4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn occlusion_remap_uses_an_instance_vertex_stream() {
+        let layout = visible_index_layout();
+        assert_eq!(layout.array_stride, 4);
+        assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
+        assert_eq!(layout.attributes.len(), 1);
+        assert_eq!(layout.attributes[0].format, wgpu::VertexFormat::Uint32);
+        assert_eq!(layout.attributes[0].shader_location, 6);
+    }
 
     #[test]
     fn regression_r03_two_small_skeletons_have_fixed_slots() {

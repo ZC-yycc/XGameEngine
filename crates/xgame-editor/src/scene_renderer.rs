@@ -166,6 +166,7 @@ impl SceneRenderer {
         surface_format: wgpu::TextureFormat,
         project_root: PathBuf,
         sample_count: u32,
+        occlusion_supported: bool,
     ) -> Self {
         let device = Arc::clone(device);
         let queue = Arc::clone(queue);
@@ -173,7 +174,12 @@ impl SceneRenderer {
         // 场景管线画进 HDR 中间标（Rgba16Float）；显示目标（surface_format）
         // 由后处理 pass 写。**管线格式与显示格式就此分家** —— 这正是高光
         // 不再在写入时被裁掉的原因（见 `xgame_render::postfx` 模块文档）。
-        let pipeline = ScenePipeline::new(&device, HDR_FORMAT, sample_count);
+        let pipeline = ScenePipeline::new_with_occlusion_support(
+            &device,
+            HDR_FORMAT,
+            sample_count,
+            occlusion_supported,
+        );
         let postfx = PostFx::new(&device, surface_format);
         let taa = xgame_render::taa::TaaResolver::new(&device, sample_count);
         let ssao = xgame_render::ssao::SsaoPass::new(&device, sample_count);
