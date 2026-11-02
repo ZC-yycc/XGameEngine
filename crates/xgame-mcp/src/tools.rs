@@ -1092,6 +1092,13 @@ mod tests {
     // `Quat` 只在测试里用（构造未归一化 / 期望姿态），放顶层导入会在非测试构建里报 unused。
     use glam::Quat;
 
+    /// 与插件集成测试共用：CI 已在 `Test` 前显式产出同 profile 的 DLL / EXE。
+    const PREBUILT_ARTIFACTS_ENV: &str = "XGAME_TEST_PREBUILT_ARTIFACTS";
+
+    fn test_artifacts_are_prebuilt() -> bool {
+        matches!(std::env::var(PREBUILT_ARTIFACTS_ENV).as_deref(), Ok("1"))
+    }
+
     /// 临时项目（用完记得删）。
     fn temp_project(tag: &str) -> ProjectHandle {
         let base = std::env::temp_dir().join(format!(
@@ -1666,16 +1673,20 @@ mod tests {
 
     // -- run_headless（spawn 编辑器二进制）---------------------------------
 
-    /// 嵌套构建"当前"编辑器二进制并返回其路径。
+    /// 保证"当前"编辑器二进制已构建并返回其路径。
     ///
     /// 与 `xgame/tests/plugin_loading.rs` 同一套纪律：`cargo test` 不会把 bin
     /// 目标装成 exe，`target/*/xgame-editor.exe` 可能停在上次 `cargo build` 的
     /// 那一刻 —— 而过期的编辑器**不认 `--headless`**：旧入口会把它当未知参数
-    /// 继续走 eframe，弹出一个窗口把测试进程挂死。所以先无条件嵌套跑一次
-    /// `cargo build -p xgame-editor`（指纹新鲜时零点几秒），再拼路径。
+    /// 继续走 eframe，弹出一个窗口把测试进程挂死。默认先嵌套跑一次
+    /// `cargo build -p xgame-editor`；hosted CI 已在外层显式预构建，测试步骤用
+    /// [`PREBUILT_ARTIFACTS_ENV`] 禁掉 hosted 上会等到超时的嵌套调用。
     fn editor_exe_for_tests() -> std::path::PathBuf {
         static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         BUILT.get_or_init(|| {
+            if test_artifacts_are_prebuilt() {
+                return;
+            }
             let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(|p| p.parent())
@@ -1723,7 +1734,11 @@ mod tests {
             .expect("测试二进制有上级目录")
             .join("..")
             .join(format!("xgame-editor{}", std::env::consts::EXE_SUFFIX));
-        assert!(exe.is_file(), "构建后仍未找到编辑器：{}", exe.display());
+        assert!(
+            exe.is_file(),
+            "准备后仍未找到编辑器：{}（{PREBUILT_ARTIFACTS_ENV}=1 时 CI 必须先构建）",
+            exe.display()
+        );
         exe
     }
 

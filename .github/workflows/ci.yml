@@ -47,7 +47,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       # plugin_loading 会在 dlopen 前让 Cargo 复核 cdylib 新鲜度；cargo test 本身不产
-      # cdylib，若留到测试进程里冷构建，hosted runner 会撞到测试的 240 秒上限。
+      # cdylib；hosted 的外层 cargo test 中再起同 target 的 Cargo 实测会等到超时。
       # 同批提前产出两个测试插件，也顺便准备后面的发布包组合验收二进制。
       - name: Build plugins and package acceptance binaries
         run: >-
@@ -56,6 +56,9 @@ jobs:
 
       - name: Test
         run: cargo test --locked --workspace --all-targets
+        env:
+          # 上一步成功才会到这里；测试仍检查产物存在，插件还会校验构建指纹。
+          XGAME_TEST_PREBUILT_ARTIFACTS: "1"
 
       # 发布包组合门禁：debug 即可验证内容与运行时契约，不做 release / GPU 渲染。
       # 夹具会把包搬离源码目录，再经确定性输入时间线验 input.ron、Rust 插件与三关切换。

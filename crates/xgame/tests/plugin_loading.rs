@@ -20,9 +20,10 @@
 //! 而"过期的插件 DLL"在本测试里不是"跑得旧"而是**直接崩进程**：插件注册表
 //! 是跨编译单元的内存布局，DLL 侧写、宿主侧读，结构一变（P1 给
 //! `BehaviorEntry` 加过一个字段）就会读歪 `HashMap`，再经构造函数指针跳过去
-//! = `STATUS_ACCESS_VIOLATION`。所以每次取 DLL 都先嵌套构建一次
+//! = `STATUS_ACCESS_VIOLATION`。所以默认每次取 DLL 都先嵌套构建一次
 //! （见 [`build_package_once`]），把"新鲜"交给 cargo 的完整指纹去判断。
-//! 带超时，防止与外层 cargo 抢目标目录锁时无限挂起。
+//! CI 先显式构建产物，再以 [`PREBUILT_ARTIFACTS_ENV`] 跳过嵌套 Cargo；这是因为
+//! hosted 外层 `cargo test` 期间对同目标目录再起 Cargo，连预构建后的复核也会超时。
 //!
 //! # 为什么同时测两个插件
 //!
@@ -39,6 +40,13 @@ use std::time::{Duration, Instant};
 
 use xgame::plugin::{load_plugin, LoadedPlugin};
 use xgame::prelude::*;
+
+/// CI 已用同 profile 显式构建测试 DLL / EXE 的窄契约；只有精确值 `1` 才生效。
+const PREBUILT_ARTIFACTS_ENV: &str = "XGAME_TEST_PREBUILT_ARTIFACTS";
+
+fn test_artifacts_are_prebuilt() -> bool {
+    matches!(std::env::var(PREBUILT_ARTIFACTS_ENV).as_deref(), Ok("1"))
+}
 
 /// 探测示例插件的 cdylib 路径；找不到就现场构建一次。
 fn example_plugin_dll() -> PathBuf {
@@ -70,15 +78,25 @@ fn workspace_plugin_dll(lib_name: &str, package: &str) -> PathBuf {
     let candidates = vec![profile_dir.join(&file)];
 
     // **先保证产物与源码一致，再找产物** —— 顺序反了就会捡到一个"存在但过期"
-    // 的 DLL，而过期的插件会把测试进程打崩（见 `build_package_once`）。
-    build_package_once(&repo_root, package);
+    // 的 DLL，而过期的插件会把测试进程打崩（见 `build_package_once`）。CI 的显式
+    // 预构建由 workflow 保证；默认本地路径仍让 Cargo 自己复核，不能只凭文件存在。
+    let prebuilt = test_artifacts_are_prebuilt();
+    if !prebuilt {
+        build_package_once(&repo_root, package);
+    }
 
     candidates
         .into_iter()
         .find(|p| p.exists())
         .unwrap_or_else(|| {
+            let preparation = if prebuilt {
+                "显式预构建"
+            } else {
+                "嵌套构建"
+            };
             panic!(
-                "构建后仍未找到插件动态库 {file}；请手动运行 `cargo build -p {package}` \
+                "{preparation}后仍未找到插件动态库 {file}；请手动运行 \
+                 `cargo build -p {package}` \
                  并检查 target 目录布局"
             )
         })

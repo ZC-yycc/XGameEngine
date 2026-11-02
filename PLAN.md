@@ -7979,3 +7979,27 @@ workflow 现改为在 `Test` 前用同一 debug profile 一次构建 `xgame-edit
 `G0_COMPLETE`，证据目录为
 `C:\Users\Administrator\AppData\Local\Temp\opencode\xgame-published-acceptance\published-player-4412e7691b1743bfb667cecbc0c7735d`。
 最终 hosted 结论仍只认修复提交推送后产生的新 run。
+
+### 100.8 Hosted 第二轮红灯：预构建不足以解除嵌套 Cargo
+
+修复提交 `be59c64` 的 run `41389375768` 让四个 debug 二进制预构建成功（18 分 26 秒），
+但 `Test` 里的三条插件正例仍分别在嵌套 Cargo 处耗尽 240 秒：两条 BehaviorsDemo 与一条
+spinner 共 **3 failed / 3 passed**，发布包门禁再次被跳过。这排除了“只是 DLL 没提前生成”
+的解释，证明 hosted 外层 `cargo test` 期间不能再对同一 target 启动 Cargo；即使前一步
+已构建，所谓零工作量复核也不会及时返回。日志仍没有子进程 stderr，所以不进一步声称
+具体是哪把 Cargo 锁。
+
+最终契约是只给 `Test` 步骤设置 `XGAME_TEST_PREBUILT_ARTIFACTS=1`：插件与 MCP 测试看到
+精确值 `1` 时不再嵌套构建，但仍要求预期 DLL / EXE 存在；插件还必须通过加载器已有的
+构建指纹校验。默认本地环境不设置变量，原来的强制 Cargo 新鲜度复核完全保留。MCP 测试
+虽尚未在 hosted 跑到，但代码审查发现它也在测试进程里无条件嵌套构建编辑器，因此同批
+接入这个窄契约，避免修完插件后下一处再重复 240 秒失败。
+
+本机辨别力与正例均实跑：先设置变量但不重建，三条正例在 0.36 秒内全部被“构建指纹
+不匹配”拒绝，证明变量没有绕过 ABI 门禁；随后按 CI 顺序预构建，插件套件
+**6 passed / 0 failed**（0.44 秒），MCP 的五条 `run_headless` 进程测试
+**5 passed / 0 failed**（0.90 秒）。同一环境的完整 workspace 为
+**1215 passed / 0 failed / 18 ignored**；发布包正例也再次通过（6 个输入事件、2 次切关、
+`G0_COMPLETE`），证据目录为
+`C:\Users\Administrator\AppData\Local\Temp\opencode\xgame-published-acceptance\published-player-b2ea769940314bcb9878ff2493eedf19`。
+Hosted 结论仍只认下一次新 run。
