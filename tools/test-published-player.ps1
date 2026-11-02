@@ -2,14 +2,19 @@
     [string]$BinDir = 'dist',
     [string]$Plugin = 'target/release/behaviors_demo.dll',
     [string]$OutputRoot = 'outputs',
+    [ValidateSet('window', 'headless')][string]$Mode = 'window',
     [ValidateSet('none', 'input', 'plugin')][string]$Fault = 'none',
     [int]$TimeoutSeconds = 30
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$bin = (Resolve-Path (Join-Path $root $BinDir)).Path
-$dll = (Resolve-Path (Join-Path $root $Plugin)).Path
-$out = (Resolve-Path (Join-Path $root $OutputRoot)).Path
+function Resolve-RepoPath([string]$path) {
+    $candidate = if ([IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $root $path }
+    return (Resolve-Path $candidate).Path
+}
+$bin = Resolve-RepoPath $BinDir
+$dll = Resolve-RepoPath $Plugin
+$out = Resolve-RepoPath $OutputRoot
 $run = Join-Path $out ('published-player-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($run)
 $source = Join-Path $run 'source'
@@ -48,7 +53,12 @@ function update(ctx)
     end
     if action_released(ctx, "Advance") and not action_down(ctx, "Advance") and axis(ctx, "Travel") == 0 and state_get_or(ctx, "pressed", false) and state_get_or(ctx, "plugin", false) then
         log(ctx, "G0 RELEASE " .. i)
-        if i < 2 then load_scene_at(ctx, i + 1) else log(ctx, "G0 COMPLETE") end
+        if i < 2 then
+            load_scene_at(ctx, i + 1)
+        else
+            spawn_entity(ctx, "G0_COMPLETE", "")
+            log(ctx, "G0 COMPLETE")
+        end
     end
 end
 function on_destroy(ctx)
@@ -74,6 +84,51 @@ if ($Fault -ne 'plugin' -and (Get-FileHash $dll).Hash -ne (Get-FileHash (Join-Pa
 Move-Item $package (Join-Path $run 'package')
 Move-Item $source (Join-Path $run 'source-preserved')
 $exe = Join-Path $run 'package/PublishedAcceptance.exe'
+if ($Mode -eq 'headless') {
+    # Hosted CI 没有 GPU 窗口；按确定时间线把同一组 J 键边沿送进生产
+    # InputState/InputMap。Lua 只在 Rust Spinner 已转动后切关，最终标记因此
+    # 同时证明自定义输入、Rust 插件与三关切换确实组合运行。
+    $events = Join-Path $run 'input-events.json'
+    Save-Text $events @'
+[
+  {"frame": 8, "key": "KeyJ", "pressed": true},
+  {"frame": 9, "key": "KeyJ", "pressed": false},
+  {"frame": 17, "key": "KeyJ", "pressed": true},
+  {"frame": 18, "key": "KeyJ", "pressed": false},
+  {"frame": 26, "key": "KeyJ", "pressed": true},
+  {"frame": 27, "key": "KeyJ", "pressed": false}
+]
+'@
+    $reportPath = Join-Path $run 'headless-report.json'
+    $dumpPath = Join-Path $run 'final-scene.ron'
+    $headless = Start-Process (Join-Path $bin 'xgame-editor.exe') -ArgumentList @(
+        '--headless', '--frames', '30', '--input-script', ('"' + $events + '"'),
+        '--report', ('"' + $reportPath + '"'), '--dump-scene', ('"' + $dumpPath + '"'),
+        ('"' + (Join-Path $run 'package') + '"')
+    ) -WorkingDirectory $run -Wait -PassThru -RedirectStandardOutput (Join-Path $run 'headless-stdout.json') -RedirectStandardError (Join-Path $run 'headless-stderr.log')
+    if ($headless.ExitCode -ne 0) { throw "Headless package run failed: $run ($($headless.ExitCode))" }
+    $report = Get-Content $reportPath -Raw | ConvertFrom-Json
+    if (-not $report.ok) { throw 'Headless report is not clean' }
+    if ($report.input_events -ne 6) { throw "Expected 6 input events, got $($report.input_events)" }
+    if ($report.scene_loads -ne 2) { throw "Expected 2 scene loads, got $($report.scene_loads)" }
+    if ($report.scene_current -ne 'Scenes/2.ron') { throw "Expected final scene Scenes/2.ron, got $($report.scene_current)" }
+    if ($report.entities -ne 5) { throw "Expected final completion entity, got $($report.entities) entities" }
+    if (-not ([IO.File]::ReadAllText($dumpPath).Contains('name: "G0_COMPLETE"'))) { throw 'Final completion marker is missing' }
+    if ($report.logs.error -ne 0) { throw "Expected zero runtime errors, got $($report.logs.error)" }
+    Save-Text (Join-Path $run 'result.json') (@{
+        ok = $true
+        mode = 'headless'
+        scenes = 3
+        scene_loads = $report.scene_loads
+        input_events = $report.input_events
+        final_marker = 'G0_COMPLETE'
+        executable_sha256 = (Get-FileHash $exe).Hash
+        plugin_sha256 = (Get-FileHash $dll).Hash
+    } | ConvertTo-Json)
+    Write-Output "PASS: $run"
+    Write-Output "Evidence: $run"
+    return
+}
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;

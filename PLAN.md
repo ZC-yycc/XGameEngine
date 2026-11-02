@@ -7855,3 +7855,104 @@ instance-rate `Uint32` 顶点流：每批把流切到 `batch.first`，indirect
 
 至此 P2 #16 的距离 LOD、绘制距离与遮挡剔除闭环；后续 HLOD / portal / 全 GPU-driven
 可见性属于新模块，不能借“优化本实现”无数据扩张范围。
+
+## 一百、G0 发布包确定性无头组合门禁（2026-11-02）
+
+### 100.1 选择理由与范围
+
+当前仍处于 G0“现有能力组合正确、独立发布可验证”的收口期。播放器源码指纹、包自包含
+审计、真实窗口三关验收都已有，但 `Docs/差距分析.md` 仍明确记录：包内自定义输入、Rust
+插件与多关切换只在本地 GPU 窗口脚本跑过，`windows-latest` 没有对应门禁。这会留下一个
+高影响断层——源码工程与单元测试全绿，打出的包仍可能漏 `input.ron`、DLL 或非入口关卡。
+
+本轮只关闭这一个组合风险。不新增依赖、不复制帧循环，也不把 hosted runner 说成 GPU
+环境；默认窗口验收保留原样，新增的是同一夹具的确定性无头模式。
+
+动手前顺带按真实代码修正了进展文档中的历史残留：SSAO / LOD / UI 裁剪、手柄 / 触摸、
+音频总线、日志落盘、编辑器视口正交、SaveGame 与脚本 API 数量。编辑器视口正交与运行时
+`Entity::camera` 正交仍明确分开，后者没有实现。
+
+### 100.2 旧实现红灯
+
+先加 `headless::tests::parse_args_accepts_input_script`，要求无头入口接受
+`--input-script acceptance-input.json`。旧实现把它判成未知参数：
+
+```text
+cargo test -p xgame-editor headless::tests::parse_args_accepts_input_script -- --exact --nocapture
+test result: FAILED. 0 passed; 1 failed
+```
+
+这条红灯只证明缺少确定性输入入口，没有拿故障注入伪装引擎回归。实现后该测试恢复为绿，
+再补“乱序按下 / 松开实际经过 InputMap”与“0 / 越界帧、未知键拒绝”两条行为回归。
+
+### 100.3 无头输入仍走生产路径
+
+`HeadlessArgs` 新增可选 `input_script`；JSON 每项只有 `frame`、`key`、`pressed`。`key`
+直接反序列化为 `xgame_input::KeyCode`，避免第二套键名表；帧号从 1 起，加载后用稳定排序
+允许文件乱序而保留同帧书写顺序。0、超过 `--frames` 或未知键都在打开世界前返回
+exit 1，不能静默漏事件让 CI 假绿。
+
+每帧调用唯一 `World::update` 前，只做：
+
+```text
+world.input_mut().state_mut().handle_key(key, pressed)
+```
+
+之后仍由生产 `InputState → InputMap → Lua action_* / axis` 读取，帧末也由原 runtime 清
+边沿。没有第二份时钟、输入映射或玩法循环。报告新增稳定字段 `input_events`；没给时间线
+恒为 0，给了以后记录实际注入数。
+
+### 100.4 同一发布夹具的两种覆盖面
+
+`tools/test-published-player.ps1` 增加 `-Mode window|headless`，默认仍是既有 `window`。
+两种模式都先生成三关项目、调用真实 `--build`、核对播放器与 `input.ron` 原字节哈希及
+插件 DLL 哈希，再把包搬离源码目录。
+
+`headless` 模式生成 6 个 J 键边沿（8/9、17/18、26/27 帧），用同批编辑器对包目录跑
+30 帧。验收 Lua 的切关条件同时要求：自定义 `Advance` 动作 / `Travel` 轴边沿正确，且
+Rust `Spinner` 已把所在实体转过 5 度。第三关松键后额外生成 `G0_COMPLETE` 实体；夹具
+既断言报告终态，也读取 `--dump-scene` 复核名字，避免“只到第三关、最后一次输入根本没
+消费”仍假绿。
+
+最终断言为 `input_events=6`、`scene_loads=2`、`scene_current=Scenes/2.ron`、实体数 5、
+`logs.error=0`、快照含 `G0_COMPLETE`。`result.json` 还保留播放器 / 插件 SHA-256。
+
+Hosted 模式没有启动包内 `xgame-game.exe`，也没建 winit / Surface / GPU；它证明发布
+内容与 runtime 组合，不替代默认窗口模式的真实播放器、窗口消息和截图。物理键盘、系统
+焦点、IME、鼠标 / 手柄 / 触摸仍未覆盖。
+
+### 100.5 CI 与夹具路径修复
+
+`.github/workflows/ci.yml` 在全量测试后按 debug profile 构建 `xgame-editor`、
+`xgame-game`、`behaviors-demo`，再调用同一脚本的 `-Mode headless`。debug 足以验证内容与
+运行时契约，没必要在 hosted runner 重做 release；真实 release / GPU 验收仍归本地发布
+流程。
+
+第一次模拟 CI 时发现脚本把绝对 `$env:RUNNER_TEMP` 无条件 `Join-Path` 到仓库根，得到
+`E:\repo\C:\...`。现在三项输入路径都先判 `Path.IsPathRooted`：绝对路径原样解析，相对
+路径才相对仓库根。修后用批准的绝对临时目录实际跑通。脚本继续保留 UTF-8 BOM，确保
+Windows PowerShell 5.1 能解析中文注释。
+
+### 100.6 验证记录与未冒充项
+
+- 定向 headless 套件：**24 passed / 0 failed**，包括三条新增测试；本轮 Rust 文件单独
+  `rustfmt --check` 通过。
+- `cargo check --locked --workspace --all-targets`、严格 clippy
+  `-- -D warnings` 均通过；全量 **1215 passed / 0 failed / 18 ignored**，ignored 全是约定
+  的手动基准。
+- workflow 同款三二进制 debug 构建通过。SampleScene `--check` 为 1 场景 / 24 实体 /
+  15 资产且 OK；30 帧无头 `ok=true`、`input_events=0`、warn/error 0、非有限变换 0。
+  schema / script API 导出成功，分别为 85,742 / 59,244 字节。
+- 最终发布包正例：
+  `C:\Users\Administrator\AppData\Local\Temp\opencode\xgame-published-acceptance\published-player-a8739944cfe5446a9ceeebe1e1818a07`；
+  报告为 6 个事件、2 次切关、`Scenes/2.ron`、5 实体、0 error，快照确有
+  `G0_COMPLETE`。
+- 负对照：`-Fault input` 错绑 K 与 `-Fault plugin` 省略 DLL 都按预期退出 1，并明确
+  `Expected 2 scene loads, got 0`。缺插件允许降级装载是既有契约，所以失败发生在运行
+  组合断言而非构建阶段。
+- PowerShell 语法检查通过，BOM 仍为 `EF BB BF`；workflow 经 PyYAML 解析通过。
+  本机没有 `actionlint`，未虚构该项结果。全仓 `cargo fmt --check` 会命中大量本轮之外的
+  历史格式漂移，仓库 / CI 本就没有 fmt 门禁；没有借本任务批量改写无关文件。
+- 本地已按 hosted workflow 命令链完整通过；真正的 GitHub `windows-latest` 只能在本次
+  提交推送后发生，推送前不把它写成已运行。没有执行 GPU 截图或默认窗口模式复验；两者
+  沿用既有本地证据，不计入本轮结果。

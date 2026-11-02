@@ -49,6 +49,17 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace --all-targets
 
+      # 发布包组合门禁：debug 即可验证内容与运行时契约，不做 release / GPU 渲染。
+      # 夹具会把包搬离源码目录，再经确定性输入时间线验 input.ron、Rust 插件与三关切换。
+      - name: Build package acceptance binaries
+        run: cargo build --locked -p xgame-editor -p xgame-game -p behaviors-demo
+
+      - name: Packaged headless acceptance
+        run: >-
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-published-player.ps1
+          -Mode headless -BinDir target/debug -Plugin target/debug/behaviors_demo.dll
+          -OutputRoot "$env:RUNNER_TEMP"
+
       # 下面四步是二进制级冒烟：单元测试之外，确认真实 CLI 入口和示例项目仍可用。
       - name: Project check
         run: cargo run --locked -p xgame-editor -- --check projects/SampleScene

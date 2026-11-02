@@ -9,6 +9,16 @@
 
 ## 整体路线图
 
+### 2026-11-02 第七轮：发布包确定性无头组合门禁（G0 173/182 的 CI 缺口关闭）
+
+| 项目 | 状态 |
+|---|---|
+| 无头输入重放 | `--input-script` 接受 1 起始帧号的 JSON 键盘边沿，在唯一 `World::update` 前注入生产 `InputState`；乱序稳定排序，越界帧 / 未知键直接失败；报告新增稳定字段 `input_events` |
+| 发布包组合门禁 | `tools/test-published-player.ps1 -Mode headless`：真实 `--build`、播放器 / `input.ron` / DLL 哈希核对、包搬离源码后，6 个 J 键边沿必须驱动 Rust Spinner 门控、两次切关并在第三关生成 `G0_COMPLETE`；GitHub Actions 的 `windows-latest` 已加入同一夹具 |
+| 辨别力 | 正常路径 `input_events=6`、`scene_loads=2`、终点 `Scenes/2.ron`、最终 5 实体、0 error；`-Fault input` 与 `-Fault plugin` 都稳定停在第 0 关。旧实现先因未知 `--input-script` 红灯 |
+| 验证 | headless 定向 24/24；workspace check、严格 clippy 通过；全量 **1215 passed / 0 failed / 18 ignored**；SampleScene 检查 / 30 帧无头、schema / API 导出与 workflow 同款 debug 发布夹具均通过。推送前不把 hosted runner 记为已运行 |
+| 边界 | Hosted 门禁不启动包内 `xgame-game.exe`、不建 winit / GPU；默认 `window` 模式继续负责真实播放器、窗口消息与截图。物理设备、焦点、IME 及带 GPU 的自托管 CI 仍未覆盖 |
+
 ### 2026-11-02 第六轮：保守时域遮挡剔除（P2 #16 关闭，§八十七）
 
 | 项目 | 状态 |
@@ -186,7 +196,7 @@
 | 防 NaN | `PITCH_LIMIT = π/2 − 0.01`：正对轴时 `forward × Y` 退化 → `pan_right` 算出 NaN 毁掉相机位置 |
 | 快捷键防护 | 导航键在算 view_proj **之前**处理（同帧生效）；视口/层级快捷键先过 `wants_keyboard_input`（Search 框里打 f 不再飞相机） |
 | 测试 | 7 条新增（fit_distance ×3 / focus_on / 轴视角退化 / 端到端按键 ×2），**994 passed / 0 failed / 9 ignored** |
-| 仍缺 | 真·正交投影相机、视口锁定、速度快捷键（滚轮 + Preferences 已可调） |
+| 当时仍缺 | 编辑器视口正交投影与速度快捷键已于 2026-10-30 补齐；当前只剩视口锁定。运行时 `Entity::camera` 的正交模式是另一项能力，仍未实现 |
 
 ### 2026-10-28 编辑器日志落盘 + 控制台增强（27 关闭 / 26 部分）
 
@@ -227,7 +237,7 @@
 | 补的缺口 | ① `build.scenes` 里每关的父目录自动进包（原来只带入入口场景的父目录）；② 清单外部引用（预制体/脚本在自定义目录）由 `audit_package` 兜住 |
 | 报错 | `guid://…` 翻回源码工程路径（`explain_guids`），否则作者拿着 GUID 无从下手；自检在 `publish` 之前，失败时上一版发布不动 |
 | 验证 | 两条旧行为红灯 + 一条防过拦护栏；真实 CLI 正负对照（`--check`=0 / `--build` 退出 1 并点名路径）；构建产物直接跑 60 帧无头 ok；全量 **971 passed / 0 failed / 9 ignored**；见 PLAN 第七十九节 |
-| 边界 | 包内真实窗口 + 键鼠输入的玩家端到端、并发发布、断电事务仍未关闭 |
+| 边界 | 包内容 / InputMap / 插件 / 切关的 hosted 无头组合门禁已于 2026-11-02 补齐；真实窗口本地验收也已有。物理键鼠 / 焦点 / IME、带 GPU 的自托管 CI、并发发布与断电事务仍未关闭 |
 
 ### 2026-10-28 预制体 Revert 保留实例 ID（R07/103 的 ID 那一半）
 
@@ -324,7 +334,7 @@
 |---|---|
 | 播放器新鲜度 | 新增源码指纹 `xgame-src-v1:…`（不含 profile，`#[used]` 锚点保住），`builder::pick_player` 跳过源码不一致的候选；全不一致则拒绝并给出重编命令 |
 | 验证 | 真实二进制三组对照（同批通过 / 改指纹拒绝 / 跳过旧的用新的并留提醒）；全量 check/clippy/test 全绿 **942 passed / 0 failed / 8 ignored**，release 与 dist 同批刷新、插件 DLL 同批刷新后无头冒烟零 error；见 PLAN 第六十六节 |
-| 边界 | 只比源码指纹不做签名；参与指纹的源码一改，既有播放器即过期（需重编，`一键构建.cmd` 满足）；完整发布端到端仍未接 hosted CI；G0 未关闭 |
+| 边界 | 只比源码指纹不做签名；参与指纹的源码一改，既有播放器即过期（需重编，`一键构建.cmd` 满足）；发布包内容 / 输入 / 插件 / 切关已于 2026-11-02 接入 hosted 无头门禁，但真实播放器 GPU 路径仍不在 hosted CI；G0 未整体关闭 |
 
 ### 2026-10-27 G0 写盘实现统一与遗留暂存回收
 
@@ -405,7 +415,7 @@
 | 本地发布验收 | 真实 --build → 搬移独立包 → 无参数播放器；三关自定义动作/轴、插件旋转、两次切关及退出销毁断言通过；见 PLAN 第六十二节 |
 | 回归与发布 | 全量 check/clippy 通过，917 passed / 0 failed / 7 ignored；release workspace 与 dist 三 EXE 刷新完成 |
 | 负对照 | 错绑输入、缺插件各按预期失败；未发现新引擎缺陷，仅增加验收脚本 |
-| 边界 | Windows 消息注入与 GPU 窗口，不覆盖物理键盘/焦点/IME；现有 hosted CI 未接桌面门禁，G0 不整体关闭 |
+| 边界 | Windows 消息注入与 GPU 窗口，不覆盖物理键盘/焦点/IME；2026-11-02 已追加 hosted 无头组合门禁，但它不冒充本条真实播放器验收，G0 不整体关闭 |
 
 ### 2026-10-27 插件注册前兼容检查
 
@@ -484,7 +494,7 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 | **七** | ✅ 完成（v1） | 动画系统：骨骼蒙皮 + 单剪辑 + 交叉淡入 + 阈值状态机 + 叠加 + 多层混合栈与骨骼遮罩 + **分层状态机** + **逐条转移时长** + **根运动** + **形变目标 morph target**；后续 IK / 重定向 / 动画事件等进新阶段 |
 | **八** | ✅ 完成 | 音频系统（kira：`AudioSource` + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，见 PLAN.md 二十二） |
 | **Agent-Native ①②③** | ✅ 完成 | MCP 工具面（12 工具，含 `asset_list` / `asset_import` / `asset_move` / `schema_read` / `script_api_read`）+ 无头运行 `--headless` / `--screenshot` + 场景格式说明书 `--export-schema` + 脚本 API 清单 `--export-script-api`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) / PLAN.md 五十、五十一 |
-| **CI / 自动化** | ✅ 完成 | GitHub Actions（Windows + stable + clippy + rust-cache）：`check` / `clippy` / `test` + 示例项目 `--check` / `--headless` + 两份 JSON 导出；无 GPU 的 runner 上渲染测试自动 skip；见 PLAN.md 五十二、决策记录 §三十四 |
+| **CI / 自动化** | ✅ 完成 | GitHub Actions（Windows + stable + clippy + rust-cache）：`check` / `clippy` / `test` + **发布包 InputMap / 插件 / 三关无头组合门禁** + 示例项目 `--check` / `--headless` + 两份 JSON 导出；无 GPU runner 不冒充真实播放器 / 截图验收；见 PLAN.md 五十二 / 一百、决策记录 §三十四 |
 | **渲染 PBR** | ✅ 完成 | Cook-Torrance + 逐实体材质覆盖 + 无头截图（PLAN.md 二十四） |
 | **渲染 HDR** | ✅ 完成 | HDR 中间标 + ACES + 曝光（二十五）、Bloom（二十六） |
 | **渲染天空** | ✅ 完成 | 程序化天空盒 + 球谐漫反射 + 预过滤镜面 + BRDF LUT（二十七） |
@@ -492,7 +502,7 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 | **渲染 CSM** | ✅ 完成 | 4 级级联阴影：视线方向线性深度切分 + 每级紧致正交拟合 + 纹素吸附；4 层深度数组逐层 pass（PLAN.md 四十一、决策记录 §二十三） |
 | **渲染 TAA** | ✅ 完成 | 时域抗锯齿：Halton 亚像素抖动（只叠在相机上）+ 重投影历史 + 3×3 邻域钳制；两张 HDR 历史乒乓、默认关（PLAN.md 四十七、决策记录 §二十九） |
 | **材质资产** | ✅ 完成 | `.mat` 共享材质（颜色 / 金属度 / 粗糙度 / albedo）+ 项目材质库 + 资产/覆盖两层 + 编辑/指派 + 4 个脚本 API + 导入参数接线（PLAN.md 三十五、决策记录 §十七） |
-| **九** | 🟨 进行中 | 后处理 + 阴影：上述渲染片 + **TAA** + **点光立方体阴影（含逐面剔除）** + **软阴影（PCSS）/ 级间混合** 已落地；**SSAO 待做** |
+| **九** | ✅ 完成（v1） | 后处理 + 阴影：**TAA** + **SSAO** + **点光立方体阴影（含逐面剔除）** + **软阴影（PCSS）/ 级间混合** 已落地；多盏点光投影、G-buffer 法线与 RenderGraph 属后续增强 |
 | **游戏 UI** | ✅ 完成（最小集） | 屏幕空间 UI：锚点布局 + 文本（中文 / 粗体 / 换行 / 对齐）+ 圆角面板 / 图片 / 按钮 + 指针交互（悬停 / 按下 / 点击）+ 23 个 `ui_*` 脚本 API + Inspector 区块；见 PLAN.md 三十四、决策记录 §十六 |
 | ~~**十**~~ | ✅ 完成 | 脚本系统 + 热重载（已并入六·五与双轨 P0–P3） |
 | **粒子系统** | ✅ 完成（CPU 版） | `ParticleEmitter` 组件 + `xgame-particle` 确定性 CPU 模拟 + billboard 实例化 pass（Alpha / Additive）+ Inspector 区块 + 4 个脚本 API；万级以上需上 GPU 模拟（分层已留好）；见 PLAN.md 三十六 |
@@ -596,15 +606,15 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 | 导入设置消费 | ✅ 完成 | `model_scale` 烘焙进顶点 / 节点 / 动画 / 逆绑定，`texture_srgb` / `texture_nearest` 进纹理采样；`audio_streaming` 仍待流式播放 |
 | 多场景管理 | ✅ 完成 | Scenes 菜单列出 `Scenes/*.ron`：切换 / 新建空场景 / 按当前场景保存 / 显式设启动场景；切场景重置撤销与跨场景临时状态；`--check` 覆盖全部场景；**运行期 `load_scene`**（帧末切换，PLAN 四十三）+ **`build.scenes` 有序清单与关卡索引**（PLAN 四十四）。仍无多开 / 平台预设 / 图标 |
 | 角色控制器 | ✅ 完成 | 胶囊控制器 + 自动上台阶 + 坡面 / 陡坡 + 碰撞事件进脚本（见阶段六·六） |
-| 相机实体 | ✅ 完成（最小集） | `Entity::camera` + 单机位解析（active 优先）+ 三宿主同源（独立游戏 / 编辑器 Play / 无头截图）+ 6 个脚本 API；缺正交投影 / 多机位分屏 |
+| 相机实体 | ✅ 完成（最小集） | `Entity::camera` + 单机位解析（active 优先）+ 三宿主同源（独立游戏 / 编辑器 Play / 无头截图）+ 6 个脚本 API；编辑器视口已有正交，运行时相机仍缺正交模式 / 多机位分屏 |
 | 多相机 / 分屏 | ⬜ 待做 | 单帧只渲染一台主相机（不做 Unity 那种多相机叠画 / split screen） |
-| 游戏 UI | ✅ 完成（最小集） | Canvas 等价物 = 实体 + 锚点；文本 / 图片 / 按钮 / 面板；`ui_*` 23 API；缺裁剪、九宫格、输入框、手柄导航 |
-| 输入系统 | ✅ 完成 | `InputMap`（`input.ron`）+ 编辑器 / 游戏共用；无手柄 / 触摸 |
+| 游戏 UI | ✅ 完成（最小集） | Canvas 等价物 = 实体 + 锚点；文本 / 图片 / 按钮 / 面板；`ui_*` 23 API；矩形层级裁剪与命中测试已接通，仍缺九宫格、输入框、手柄导航 |
+| 输入系统 | ✅ 完成 | `InputMap`（`input.ron`）+ 编辑器 / 游戏共用；手柄语义键 / 摇杆 / 热插拔与多点触摸已接通（真机仍待有设备环境验收），仍缺重绑定 UI |
 | 项目设置 | ✅ 完成 | 项目名 / 入口场景 / 窗口 / 重力 / 步长 / 画面（曝光 / ACES / Bloom / FXAA / TAA / 软阴影），草稿 + Apply；单入口 `from_project`。内容目录只在 RON 里手改 |
 | 未保存保护 / Save As | ✅ 完成 | 脏标记 + 双路径确认 + 标题星号 + 快捷键 |
 | 无头检查 `--check` | ✅ 完成 | 退出码 0/1/2，CI 与智能体的可机读入口；已接入 GitHub Actions（PLAN 五十二） |
-| 无头运行 `--headless` | ✅ 完成 | 固定 dt 逐位可复现；`--screenshot` 离屏出图 |
-| 阴影 / 天空 / 后处理 | 🟨 部分 | 4 级 CSM + MSAA + HDR/ACES + Bloom + 天空 IBL + FXAA + **TAA** + **点光立方体阴影（含逐面剔除）** + **软阴影（PCSS）/ 级间混合** 已落地；SSAO 待做 |
+| 无头运行 `--headless` | ✅ 完成 | 固定 dt 逐位可复现；`--input-script` 确定性重放键盘边沿；`--screenshot` 离屏出图 |
+| 阴影 / 天空 / 后处理 | ✅ 完成（v1） | 4 级 CSM + MSAA + HDR/ACES + Bloom + 天空 IBL + FXAA + **TAA** + **SSAO** + **点光立方体阴影（含逐面剔除）** + **软阴影（PCSS）/ 级间混合** 已落地；高阶增强见差距分析 |
 | 实例化 / 剔除 | 🟨 大半对齐 | GPU 实例化 + 视锥剔除 + 阴影补投 + 距离 LOD / 绘制距离 + 保守时域遮挡剔除已落地；仍无 HLOD / portal / GPU-driven 全链路 |
 | Gizmo 吸附 / Rect 工具 | ⬜ 待做 | `gizmo_snap` 字段已在但未接线；Rect 工具无实现 |
 | 编辑器交互稳定性 | ✅ 完成 | 射线 × 世界 AABB 拾取；轴拖拽参考线锚定；选中索引每帧收敛 |
@@ -627,16 +637,17 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 
 - **数据即文本** —— 场景 / 预制体 / 清单 / 输入映射全 RON，可直接读写与 diff；
 - **程序化验证** —— `--check`（退出码 0/1/2）；
-- **程序化实跑** —— `--headless`（固定 dt 逐位可复现）；
+- **程序化实跑** —— `--headless`（固定 dt 逐位可复现，可选确定性键盘时间线）；
 - **程序化观察** —— `--screenshot` 离屏 PNG（同机逐字节一致），MCP 以图片块回传；
 - **程序化配置** —— 重力 / 步长 / 渲染参数都在 `project.ron`；
-- **程序化契约** —— `--export-schema` / MCP `schema_read`：36 个落盘类型、字段、默认值、
+- **程序化契约** —— `--export-schema` / MCP `schema_read`：40 个落盘类型、字段、默认值、
   示例、资产引用规则，确定性 JSON；`--export-script-api` / MCP `script_api_read`：
-  160 个脚本函数、签名、参数、返回值、6 个生命周期钩子与全局约定；
-- **单一运行时** —— 三宿主复用 World；输入、渲染历史、listener 与发布包仍需分别验证；
+  179 个脚本函数、签名、参数、返回值、6 个生命周期钩子与全局约定；
+- **单一运行时** —— 三宿主复用 World；发布包的 InputMap / 插件 / 切关组合已有 hosted
+  无头门禁，真实设备输入、winit / GPU、渲染历史与 listener 仍需按各自宿主分别验证；
 - **MCP 工具面** —— 12 个工具（读说明书 / 读脚本契约 / 读 / 改 / 查 / 看效果 / 看资产 /
   改导入参数 / 整理目录）；
-- **安全网** —— 本轮 901 passed / 7 ignored；GitHub Actions 在 push / PR 自动跑。先证红仍是要求，R01/R02 已事后补齐最小旧行为失败证据并恢复转绿（见 PLAN 第五十六节）。
+- **安全网** —— 最近一次全量记录为 1215 passed / 18 ignored；GitHub Actions 在 push / PR 自动跑。先证红仍是要求；每轮仍须以当次实跑结果为准。
 
 进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出 + 脚本 API
 清单导出 ✅（`--export-schema` + `schema_read` / `--export-script-api` +
@@ -740,9 +751,10 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
 - [x] 3D 空间音频（距离衰减 + 每帧推发射位置；实体绑定 `follow`，摘除 / 删除自动停音）
 - [x] 听者跟随（编辑器 Play 每帧推相机；脚本 `set_listener` 可覆盖）
 - [x] 脚本 API（6 个：`play_sound` / `play_sound_at` / `stop_sound` / `stop_all_sounds` / `set_listener` / `set_master_volume`）
-- [ ] 混音总线分组、流式长音频、音频遮挡 / 低通 —— 有意延后（差距分析 P2）
+- [x] 固定三组混音总线（Sfx / Bgm / Voice；组件选组 + 脚本即时调音）
+- [ ] 流式长音频、音频遮挡 / 低通 —— 有意延后（差距分析 P2）
 
-## 第九阶段：后处理 + 阴影 🟨
+## 第九阶段：后处理 + 阴影 ✅（v1）
 
 - [x] 方向光阴影贴图（单盏、正交视锥拟合、3×3 PCF）
 - [x] 级联阴影贴图（CSM，4 级；视线方向线性深度切分 + 每级紧致拟合 + 纹素吸附；
@@ -759,8 +771,8 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
       两张 HDR 历史乒乓、**默认关**且开着时 FXAA 让位；1× MSAA 12 帧硬台阶 672 → 541、
       中间调 0 → 675 —— PLAN.md 四十七、决策记录 §二十九。**逐物体运动向量仍未做**，
       快速横向移动靠邻域钳制兜）
-- [ ] SSAO（HDR 链已就位）
-- [ ] LOD（距离分级 / 网格切替）
+- [x] SSAO（半分辨率深度重建 + 可分离模糊 + 确定性噪声；默认关）
+- [x] LOD（距离分级 / 网格切替 / 绘制距离）+ 保守时域遮挡剔除
 - [ ] RenderGraph（等出现带依赖分叉的 pass 再抽，见 PLAN.md 二十五）
 
 ---

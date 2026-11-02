@@ -53,8 +53,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use serde::Deserialize;
 use serde_json::json;
 use xgame_core::{ProjectHandle, RenderConfig, Scene};
+use xgame_input::KeyCode;
 use xgame_math::glam::Vec3;
 use xgame_render::scene_pipeline::SceneLighting;
 use xgame_render::screenshot::{ScreenshotRenderer, ShotCamera};
@@ -104,6 +106,11 @@ pub struct HeadlessArgs {
     /// 把跑完后的场景以 RON 写到该路径 —— 观察运行结果的通用出口
     /// （物理落点、脚本改过的变换都在里面，可 diff、可交给 `scene_write`）。
     pub dump_scene: Option<PathBuf>,
+    /// 在指定帧前注入键盘边沿的 JSON 时间线；`None` = 无输入。
+    ///
+    /// 这是 CI / 自动验收入口，不替代窗口宿主的 winit 输入桥。事件仍进入同一份
+    /// [`xgame_input::InputState`]，动作映射和脚本读取路径与玩家实跑完全相同。
+    pub input_script: Option<PathBuf>,
     /// 跑完后离屏渲染一帧、落盘 PNG 到该路径（需要 GPU；未给 = 不截图）。
     pub screenshot: Option<PathBuf>,
     /// 截图尺寸（像素）。
@@ -123,6 +130,7 @@ impl Default for HeadlessArgs {
             dt: None,
             report: None,
             dump_scene: None,
+            input_script: None,
             screenshot: None,
             shot_size: DEFAULT_SHOT_SIZE,
             camera_pos: None,
@@ -146,6 +154,7 @@ pub fn usage() -> String {
   --dt 秒             每帧推进的秒数（默认 = 项目的固定步长；要确定性就沿用默认）
   --report 路径       额外把 JSON 报告写一份到该文件
   --dump-scene 路径   把跑完后的场景以 RON 写到该文件
+  --input-script 路径 按 JSON 时间线在指定帧前注入键盘按下 / 松开事件
   --screenshot 路径   跑完后离屏渲染一帧存成 PNG（需要 GPU；默认取景框住全场）
   --shot-size WxH     截图尺寸（默认 {}x{}，边长上限 {MAX_SHOT_EDGE}）
   --camera-pos x,y,z  截图相机位置（世界坐标，与 --camera-target 成对；缺省自动取景）
@@ -200,6 +209,9 @@ pub fn parse_args(args: &[String]) -> Result<HeadlessArgs, String> {
             }
             "--dump-scene" => {
                 out.dump_scene = Some(PathBuf::from(expect_value(&mut iter, "--dump-scene")?));
+            }
+            "--input-script" => {
+                out.input_script = Some(PathBuf::from(expect_value(&mut iter, "--input-script")?));
             }
             "--screenshot" => {
                 out.screenshot = Some(PathBuf::from(expect_value(&mut iter, "--screenshot")?));
@@ -300,6 +312,41 @@ fn expect_value<'a>(
     iter.next()
         .map(String::as_str)
         .ok_or_else(|| format!("{flag} 缺少值\n\n{}", usage()))
+}
+
+/// 无头输入时间线的一条键盘事件。
+///
+/// `frame` 从 1 起，事件在该帧 [`World::update`] **之前**注入。JSON 示例：
+/// `{"frame": 8, "key": "KeyJ", "pressed": true}`。键名直接复用
+/// [`KeyCode`] 的稳定序列化名，避免再造一套输入枚举。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+struct TimedKeyEvent {
+    frame: u32,
+    key: KeyCode,
+    pressed: bool,
+}
+
+/// 读取并校验输入时间线。
+///
+/// 文件顺序允许乱序，加载时做**稳定排序**：同一帧的多条事件仍按作者书写顺序应用。
+/// 帧号越界直接拒绝，而不是静默丢事件 —— CI 里把 `--frames` 改短后必须明确失败，
+/// 否则验收可能在完全没按到键的情况下假绿。
+fn load_input_script(path: &std::path::Path, frames: u32) -> Result<Vec<TimedKeyEvent>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取输入时间线失败 ({}): {e}", path.display()))?;
+    let mut events: Vec<TimedKeyEvent> = serde_json::from_str(&text)
+        .map_err(|e| format!("解析输入时间线失败 ({}): {e}", path.display()))?;
+    events.sort_by_key(|event| event.frame);
+    for event in &events {
+        if event.frame == 0 || event.frame > frames {
+            return Err(format!(
+                "输入时间线帧号必须在 1..={frames}，收到 {} ({})",
+                event.frame,
+                path.display()
+            ));
+        }
+    }
+    Ok(events)
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +503,8 @@ pub struct HeadlessReport {
     pub engine_version: String,
     /// 跑了多少帧（= 请求的帧数）。
     pub frames: u32,
+    /// 从 `--input-script` 实际注入的键盘事件数（未给时间线 = 0）。
+    pub input_events: usize,
     /// 每帧推进的秒数（显式给了就用给的，否则 = `fixed_dt`）。
     pub dt: f32,
     /// 运行时固定步长（项目清单 `runtime.fixed_dt`）。
@@ -560,6 +609,7 @@ impl HeadlessReport {
             "scene_current": self.scene_current,
             "scene_loads": self.scene_loads,
             "frames": self.frames,
+            "input_events": self.input_events,
             "dt": self.dt,
             "fixed_dt": self.fixed_dt,
             "setup_ms": self.setup_ms,
@@ -646,6 +696,11 @@ impl HeadlessReport {
 pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     let setup_start = Instant::now();
 
+    let input_events = match &args.input_script {
+        Some(path) => load_input_script(path, args.frames)?,
+        None => Vec::new(),
+    };
+
     let project = ProjectHandle::open(&args.project).map_err(|e| format!("打开项目失败: {e}"))?;
     let scene = project
         .load_entry_scene()
@@ -701,7 +756,18 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     let mut error_samples: Vec<String> = Vec::new();
 
     let run_start = Instant::now();
-    for _ in 0..args.frames {
+    let mut input_event_cursor = 0usize;
+    for frame_number in 1..=args.frames {
+        while input_event_cursor < input_events.len()
+            && input_events[input_event_cursor].frame == frame_number
+        {
+            let event = input_events[input_event_cursor];
+            world
+                .input_mut()
+                .state_mut()
+                .handle_key(event.key, event.pressed);
+            input_event_cursor += 1;
+        }
         let frame_start = Instant::now();
         let frame = world.update(dt);
         frame_samples_us.push(micros(frame_start.elapsed()));
@@ -822,6 +888,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         scene_loads: world.scene_loads(),
         engine_version: xgame::ENGINE_VERSION.to_owned(),
         frames: args.frames,
+        input_events: input_event_cursor,
         dt,
         fixed_dt,
         setup_ms,
@@ -956,6 +1023,7 @@ mod tests {
     use super::*;
 
     use xgame_core::{Entity, PhysicsBody, Transform};
+    use xgame_input::{Binding, InputMap};
     use xgame_math::glam::Vec3;
 
     /// 临时项目（用完记得删）。默认场景 = 1 个 "Main Camera" 实体。
@@ -1023,6 +1091,8 @@ mod tests {
             "out/report.json",
             "--dump-scene",
             "out/final.ron",
+            "--input-script",
+            "out/input-events.json",
             "--screenshot",
             "out/shot.png",
             "--shot-size",
@@ -1041,11 +1111,32 @@ mod tests {
         assert_eq!(args.dt, Some(0.02));
         assert_eq!(args.report, Some(PathBuf::from("out/report.json")));
         assert_eq!(args.dump_scene, Some(PathBuf::from("out/final.ron")));
+        assert_eq!(
+            args.input_script,
+            Some(PathBuf::from("out/input-events.json"))
+        );
         assert_eq!(args.screenshot, Some(PathBuf::from("out/shot.png")));
         assert_eq!(args.shot_size, (640, 360));
         assert_eq!(args.camera_pos, Some([1.0, 2.0, 3.0]));
         assert_eq!(args.camera_target, Some([0.0, -1.0, 0.5]));
         assert_eq!(args.project, PathBuf::from("myproj"));
+    }
+
+    /// 发布包组合验收需要在无窗口环境重放确定的按键边沿；旧实现把
+    /// `--input-script` 当未知参数，因而 hosted CI 永远走不到自定义 InputMap。
+    #[test]
+    fn parse_args_accepts_input_script() {
+        let raw = to_strings(&[
+            "--frames",
+            "12",
+            "--input-script",
+            "acceptance-input.json",
+            "myproj",
+        ]);
+        assert!(
+            parse_args(&raw).is_ok(),
+            "无头发布验收必须能读取确定性输入时间线"
+        );
     }
 
     /// 截图相关参数的缺省与成对约束：`--shot-size` 单独给但不截图 = 报错
@@ -1112,6 +1203,7 @@ mod tests {
             &["--dt"],
             &["--report"],
             &["--dump-scene"],
+            &["--input-script"],
             &["--screenshot"],
             &["--shot-size", "0x100"],
             &["--shot-size", "1280"],
@@ -1191,6 +1283,81 @@ mod tests {
             "25 帧 × 半速 = 12 个整步 + 半个余量"
         );
         assert_ne!(report.dt, report.fixed_dt);
+        cleanup(&project);
+    }
+
+    /// 输入时间线进入与真实窗口相同的 InputState → InputMap → Lua API 链；按下与
+    /// 松开各只活一帧。事件文件刻意乱序，加载器应稳定按帧排好而不是漏掉前一帧。
+    #[test]
+    fn input_script_drives_custom_action_edges() {
+        let project = temp_project("input_script");
+        let mut map = InputMap::new();
+        map.bind("Advance", Binding::Key(KeyCode::KeyJ));
+        map.save(&project.root().join(crate::game_runtime::INPUT_MAP_FILE))
+            .expect("写自定义输入映射");
+        write_script(
+            &project,
+            "input.lua",
+            "function update(ctx)\n\
+             if action_pressed(ctx, 'Advance') then log(ctx, 'pressed') end\n\
+             if action_released(ctx, 'Advance') then log(ctx, 'released') end\n\
+             end\n",
+        );
+        patch_scene(&project, |scene| {
+            scene
+                .entities
+                .push(Entity::new("InputProbe").with_script("Scripts/input.lua"));
+        });
+
+        let without_input = run(&opts(&project, 5)).expect("无输入基线应成功");
+        assert_eq!(without_input.input_events, 0);
+        assert_eq!(without_input.log_info, 0, "无输入不能假触发动作");
+
+        let timeline = project.root().join("input-events.json");
+        std::fs::write(
+            &timeline,
+            r#"[
+                {"frame": 4, "key": "KeyJ", "pressed": false},
+                {"frame": 2, "key": "KeyJ", "pressed": true}
+            ]"#,
+        )
+        .unwrap();
+        let mut args = opts(&project, 5);
+        args.input_script = Some(timeline);
+        let report = run(&args).expect("输入时间线应成功");
+        assert_eq!(report.input_events, 2, "两条事件必须全部实际注入");
+        assert_eq!(report.log_info, 2, "按下 / 松开边沿应各触发一次");
+        assert!(!report.has_issues());
+        cleanup(&project);
+    }
+
+    /// 越界帧和未知键都必须在跑世界之前报错；静默忽略会让发布验收假绿。
+    #[test]
+    fn input_script_rejects_invalid_events() {
+        let project = temp_project("input_script_bad");
+        let timeline = project.root().join("input-events.json");
+        let mut args = opts(&project, 3);
+        args.input_script = Some(timeline.clone());
+
+        for text in [
+            r#"[{"frame": 0, "key": "KeyJ", "pressed": true}]"#,
+            r#"[{"frame": 4, "key": "KeyJ", "pressed": true}]"#,
+        ] {
+            std::fs::write(&timeline, text).unwrap();
+            let error = run(&args).expect_err("越界帧必须拒绝");
+            assert!(error.contains("1..=3"), "错误应点明帧范围: {error}");
+        }
+
+        std::fs::write(
+            &timeline,
+            r#"[{"frame": 1, "key": "DefinitelyNotAKey", "pressed": true}]"#,
+        )
+        .unwrap();
+        let error = run(&args).expect_err("未知键必须拒绝");
+        assert!(
+            error.contains("DefinitelyNotAKey"),
+            "错误应点名坏键值: {error}"
+        );
         cleanup(&project);
     }
 
@@ -1647,6 +1814,7 @@ mod tests {
             "scene_current",
             "scene_loads",
             "frames",
+            "input_events",
             "dt",
             "fixed_dt",
             "setup_ms",

@@ -39,6 +39,9 @@ cargo run -p xgame-editor -- --migrate-assets projects/MyOldGame
 # （退出码 0=干净 · 1=加载失败 · 2=跑完有问题；见 Docs/无头运行.md）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
 
+# 确定性键盘时间线 —— 在指定帧前送进生产 InputState / InputMap（JSON 格式见无头文档）
+cargo run -p xgame-editor -- --headless --frames 60 --input-script input-events.json projects/SampleScene
+
 # MCP server —— AI 智能体接口：stdio 起服务，客户端可读写场景、动实体、跑检查、无头实跑
 # （工具参考 Docs/MCP.md）
 cargo run -p xgame-mcp
@@ -47,17 +50,36 @@ cargo run -p xgame-mcp
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
 
-## 真实发布包验收（Windows 桌面 + GPU）
+## 发布包组合验收（Windows）
 
-先完成同批 workspace release 构建并刷新 dist，再运行：
+默认窗口模式先完成同批 workspace release 构建并刷新 `dist`；无头模式也可像 CI 一样
+显式指定同批 debug 产物：
 
 ```powershell
+# 默认 window：启动包内真实播放器，验证 winit 输入桥与 GPU 窗口
 powershell -NoProfile -File tools/test-published-player.ps1
+
+# headless：无 GPU 的 CI 路径；debug 产物示例
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-published-player.ps1 `
+    -Mode headless -BinDir target/debug -Plugin target/debug/behaviors_demo.dll
 ```
 
-脚本调用真实 `--build`，将生成的包移至独立目录，保留源项目但使原路径失效；从非项目工作目录无参数启动包内 EXE。通过 Windows 键盘消息走 winit 输入桥，逐关验证自定义 J 键动作/轴、松开后切关、真实 Spinner DLL 的旋转和销毁日志。三关各保存窗口截图，`outputs/published-player-<唯一编号>/` 保留包、源项目、日志与 result.json；失败抛错，不清理证据。参数 `-Fault input` / `-Fault plugin` 为预期失败的负对照，`-TimeoutSeconds` 控制单个断言等待上限。
+两种模式都调用真实 `--build`，核对包内播放器、`input.ron` 与 Spinner DLL 哈希，再把
+生成包搬离源项目。默认 `window` 从非项目工作目录无参数启动包内 EXE，通过 Windows
+键盘消息走 winit 输入桥，逐关验证自定义 J 键动作 / 轴、真实插件旋转、两次切关与退出
+销毁；三关各保存窗口截图。
 
-这覆盖真实播放器和 GPU 窗口，但消息注入不等于物理键盘/系统焦点/IME 验证；截图需人工查看。现有 hosted CI 未接此桌面 GPU 门禁，不用 headless 代替。若 Windows PowerShell 因环境同时存在大小写重复的代理变量拒绝 Start-Process，需在运行进程内消除重复键，勿修改系统代理配置。脚本为 UTF-8 BOM，保证 Windows PowerShell 5.1 正确解析中文注释。
+`headless` 模式由 hosted CI 使用：把 6 条确定性 J 键边沿送进生产
+`InputState → InputMap → Lua API`，要求插件先使 Spinner 转动、三关全部走完，并从最终
+场景快照复核 `G0_COMPLETE` 标记。它验证的是“发布内容 + 输入映射 + 插件 + 切关”的
+无 GPU 组合，**不会启动包内播放器，也不经过 winit / GPU**，不能代替默认窗口模式。
+
+证据保存在 `outputs/published-player-<唯一编号>/`（`-OutputRoot` 也可给绝对目录）；
+失败抛错且不清理。`-Fault input` / `-Fault plugin` 是预期失败的负对照，
+`-TimeoutSeconds` 控制窗口模式单个断言等待上限。窗口消息仍不等于物理键盘、系统焦点或
+IME；截图需人工查看。若 Windows PowerShell 因环境同时存在大小写重复的代理变量拒绝
+Start-Process，需在运行进程内消除重复键，勿修改系统代理配置。脚本为 UTF-8 BOM，
+保证 Windows PowerShell 5.1 正确解析中文注释。
 
 ## Rust 插件兼容检查
 
@@ -77,10 +99,11 @@ cargo build --workspace --release --locked -j2
 ## CI
 
 推送到 `master`、开 PR 或手动 dispatch 时，GitHub Actions（`.github/workflows/ci.yml`）会在
-`windows-latest` 上跑 `cargo check` / `clippy -D warnings` / `cargo test`，再跑
-示例项目的 `--check` / `--headless` 与 `--export-schema` / `--export-script-api`
-二进制冒烟。所有 cargo 命令带 `--locked`；没有 GPU 的 runner 上渲染测试会自动
-skip，`--screenshot` 留给带显卡的自托管 runner。完整取舍见 `PLAN.md` 五十二与
+`windows-latest` 上跑 `cargo check` / `clippy -D warnings` / `cargo test`，构建同批
+debug 编辑器 / 播放器 / 示例插件并跑上述发布包 `headless` 组合门禁，再跑示例项目的
+`--check` / `--headless` 与 `--export-schema` / `--export-script-api` 二进制冒烟。所有
+cargo 命令带 `--locked`；没有 GPU 的 runner 上渲染测试会自动 skip，真实播放器窗口和
+`--screenshot` 留给带显卡的本地或自托管 runner。完整取舍见 `PLAN.md` 五十二与
 `Docs/决策记录.md` §三十四。
 
 ## 引擎与游戏项目是分开的
@@ -1094,7 +1117,7 @@ Build/<项目名>/
 
 | 工具 | 干什么 |
 |---|---|
-| `schema_read` | 读场景格式的机器可读说明书（36 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
+| `schema_read` | 读场景格式的机器可读说明书（40 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
 | `script_api_read` | 读脚本 API 的机器可读清单（179 个函数 / 签名 / 参数 / 返回值 / 6 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |

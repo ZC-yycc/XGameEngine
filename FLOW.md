@@ -98,11 +98,18 @@ scene_renderer::SceneRenderer::new(device, queue, egui_renderer, format, project
 --build              → editor::builder::build           退出码 0 / 1
 ```
 
+`--headless --input-script events.json` 的输入没有旁路：JSON 先按 1 起始帧号稳定排序，
+每帧进入唯一 `World::update` **之前**调用 `world.input_mut().state_mut().handle_key(...)`，
+再由项目 `input.ron` 的 InputMap 与脚本 API 读取；帧末仍由同一运行时清边沿。它只重放
+键盘按下 / 松开，不创建 winit 事件循环。
+
 导出入口只把 `xgame-core` 的目录 / 清单序列化成 JSON：`--out` 写文件，缺省打 stdout；
 同一份代码两次导出逐字节相同。
 
-> 其中 `--check` / `--headless` 与两份 JSON 导出是 CI 的二进制冒烟项：
-> `.github/workflows/ci.yml` 在 Windows runner 上跑它们。CI 不跑 `--screenshot`
+> 其中 `--check` / `--headless` 与两份 JSON 导出是 CI 的二进制冒烟项；此前还会构建
+> 同批 debug 编辑器 / 播放器 / 示例插件，并用
+> `tools/test-published-player.ps1 -Mode headless` 对搬离源码的发布包重放输入、验插件与
+> 三关切换。CI 不跑 `--screenshot`
 > （hosted runner 没有 GPU），渲染测试在无适配器时自动 skip。见 PLAN 五十二 /
 > 决策记录 §三十四。
 
@@ -1137,10 +1144,12 @@ GameApp::render()
        └── builder::build(&project)
             ├── 入口场景不存在 → 直接报错（快速失败，不留半成品目录）
             ├── locate_player()         编辑器同目录 → 兄弟 profile 目录
-            ├── 清空 <项目>/Build/<项目名>/
+            ├── 在同级唯一 staging 目录组装（旧发布仍保持可用）
             ├── 复制播放器 → <项目名>.exe
             ├── 复制 project.ron
-            └── 复制 content_dirs()：清单里的内容目录（去重）+ 入口场景所在目录
+            ├── 复制 content_dirs()：内容目录 + 入口场景 / 发布清单各关父目录（去重）
+            ├── audit_package()：包 / 源工程引用问题取差集，新增问题即拒绝
+            └── publish()：审计通过后替换 <项目>/Build/<项目名>/
 ```
 
 产物布局是**为 `xgame-game` 的项目定位顺序服务的**：
@@ -1156,6 +1165,25 @@ GameApp::render()
 `xgame-game` 的定位顺序：**命令行参数 → exe 同目录的 `project.ron` → 仓库示例项目**。
 中间那条正是为这个布局准备的，所以构建出来的游戏**双击 exe 就能跑**，不需要参数，
 也不需要启动脚本。
+
+### 发布包组合门禁（tools/test-published-player.ps1）
+
+```
+生成三关验收项目 + 同批 Spinner DLL
+  → xgame-editor --build
+  → 核对播放器 / input.ron / DLL 哈希
+  → 把 package 搬出 source（旧路径失效）
+  ├─ Mode window（默认）
+  │    → 包内 EXE 无参数启动 → WM_KEYDOWN/UP → winit → InputMap
+  │    → 等待逐关日志 + PrintWindow + 正常退出码
+  └─ Mode headless（hosted CI）
+       → xgame-editor --headless --input-script --dump-scene <package>
+       → 6 个边沿 + 插件旋转门控 → 两次切关 → G0_COMPLETE 标记
+```
+
+两条路共享项目、打包、插件与玩法断言，但覆盖边界不同：`window` 验真实播放器 / winit /
+GPU 窗口；`headless` 在无 GPU runner 上验发布内容与 runtime 组合，不启动包内 EXE。
+任一条都不能宣称覆盖物理键盘、焦点或 IME。
 
 ---
 
@@ -1346,11 +1374,11 @@ Scene(
 | `editor/gizmo/drag.rs` | 520 | `compute_transform()`、`axis_param_anchored()`（参考线锚定） |
 | `editor/game_runtime.rs` | 121 | `start()`（`WorldConfig::from_project(project.manifest())` + 场景 / CPU 动画装载器）、`update_with_scene()`（O(1) swap 后跑唯一 `World::update`）、`animation()`（Play / Pause 只读运行态时钟） |
 | `editor/frame_policy.rs` | 277 | `plan()`（纯函数，五输入：playing / interacting / had_input / animating / since_last_input）、`FrameClock` |
-| `editor/headless.rs` | 1334 | `run()`（CLI `--headless`：固定 dt 帧循环 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
+| `editor/headless.rs` | 1950 | `run()`（CLI `--headless`：固定 dt 帧循环 + 可选输入时间线 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
 | `editor/schema_cli.rs` | 213 | `--export-schema` 参数解析（stdout / `--out` / `--help`）、`render_json()`（`serde_json` 美化 + 末尾换行）、`cli()`（退出码 0/1） |
 | `editor/script_api_cli.rs` | 331 | `--export-script-api` 的参数解析 / `render_json()` / `cli()`；测试含“文档 API 表函数名 == 清单”防漂移 |
-| `core/schema.rs` | 2967 | `scene_schema()`（36 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
-| `core/script_api.rs` | 704 | `script_api()`（158 个函数 / 17 类 / 6 钩子 / 值类型 / 全局约定）；手写数据 + 6 条结构测试；注册名与文档名分别由 `xgame-script` / `xgame-editor` 测试钉住 |
+| `core/schema.rs` | 2967 | `scene_schema()`（40 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
+| `core/script_api.rs` | 704 | `script_api()`（179 个函数 / 18 类 / 6 钩子 / 值类型 / 全局约定）；手写数据 + 6 条结构测试；注册名与文档名分别由 `xgame-script` / `xgame-editor` 测试钉住 |
 | `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
 | `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |

@@ -76,7 +76,7 @@
   （`xgame_core::schema::scene_schema`），含 `format_version` / `engine_version` /
   `roots`（场景 `.ron` 与预制体 `.prefab.ron`）/ `conventions` / `primitives` /
   `asset_references` / `types`。
-- **内容规模**：36 个落盘类型。每个类型有 `summary` / `kind` / `default_ron` /
+- **内容规模**：40 个落盘类型。每个类型有 `summary` / `kind` / `default_ron` /
   `example_ron`；字段有 `name` / `ty` / `required` / `default_ron` / `note`；
   枚举有 `variants`（unit / struct / newtype 三种形态，各带可解析示例）。
 - **确定性**：没有时间戳 / 随机 ID；同一份代码两次调用逐字节相同。
