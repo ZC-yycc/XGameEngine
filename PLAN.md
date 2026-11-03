@@ -8587,3 +8587,43 @@ Play 脚本把位置从 x=1 改为 x=123，证明新版本确实执行；同时�
 真实窗口验证使用 Windows 消息，不替代物理设备、Alt+Tab、IME、其他平台或机器掉电验证。
 本机 UI 日志仍可见 wgpu Vulkan `Unrecognized present mode 1000361000` 警告；截图与窗口
 验收正常退出，零告警结论仅指严格 clippy。
+
+## 一百零七、G0 项目检查：损坏预制体不能静默通过（2026-11-03）
+
+### 107.1 事实基础与选择
+
+基线 `950f760`，工作区干净。G0 仍优先于新能力：编辑器 / 发布包 / CI 共用
+`core::check_project`，但它扫描 `list_prefabs()` 时只消费成功解析的重复 ID，失败直接
+跳过；引用检查也把 `load_prefab` 的错误转成 `None`。因此坏文件可让 `--check` 显示
+`OK`，用户直到实例化时才看到问题。当前改动只补检查与报告，无新依赖、无帧循环改动。
+起步 `cargo check --workspace --all-targets --locked` 通过（工具链位于
+`C:\Users\Administrator\.cargo\bin\cargo.exe`，本次 PowerShell PATH 未包含它）。
+
+### 107.2 红绿与实现取舍
+
+两条 core 回归先在旧实现下实跑为 **0 passed / 2 failed**：已补 `.meta`、未引用的坏
+`Prefabs/Broken.prefab.ron` 被报 `OK`；目录外 `Shared/Broken.prefab.ron` 被两个场景
+实体引用时也被报 `OK`。旧实现同样不触及文件本身。第一条专门补 `.meta`，避免把
+缺资产身份证误当成坏内容回归。
+
+检查现在将枚举阶段的解析失败与引用阶段的装载失败合入按相对路径排序的诊断表。
+`invalid_prefabs` 计入退出码、问题数和 `reference_issues`；两处引用同一个坏文件只报
+一次。路径不安全和文件不存在走原来的诊断，不混成坏内容。解析失败原因改用相对路径，
+因为发布审计按**源码与包**的 `reference_issues` 字符串取差集，绝对路径会让同一个坏
+文件在两个根目录下产生不同字符串、误判为打包损坏。预制体重复 ID 仍只读统计，不修。
+
+### 107.3 已运行验证与后续
+
+- 两条定向测试新实现 **2 passed / 0 failed**；`cargo check --workspace --all-targets
+  --locked` 通过，`cargo clippy --workspace --all-targets --locked -- -D warnings`
+  通过；`cargo test -p xgame-core --locked`：单元 **401 passed / 1 ignored**，另有
+  `read_path` 6 条、`savegame` 8 条、`scene_roundtrip` 6 条、doctest 1 条通过。
+- 实际构建 `xgame-editor` 后：`--check projects/MyGame` 退出 0，单场景 / 单实体、
+  `check: OK`。复制为独立临时工程加入无效 RON 预制体后，同一 CLI 报
+  `invalid prefab: Prefabs/Broken.prefab.ron (… Expected colon)`，退出 **2**；
+  此次临时夹具没生成 `.meta`，所以同时报了 `missing .meta`（两项，不冒充单一缺陷）。
+- `cargo test --workspace --all-targets --locked` 全量 **44 个 suite，1258 passed / 0
+  failed / 21 ignored**（完整日志在本机临时目录 `opencode/xgame-prefab-workspace-tests.log`）。
+- 完成边界：只检查预制体**是否可读、可解析**与既有重复 ID / 悬空 `source_id`；
+  不扩展为完整实体语义验证，也不修复坏文件。下一步仍按差距分析 G0 查设备、
+  掉电与其他未验边界；别将本轮体检通过当成发布包窗口或 GPU 验收。

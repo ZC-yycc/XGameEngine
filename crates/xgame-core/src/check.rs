@@ -61,6 +61,8 @@ pub struct CheckReport {
     pub missing_ui_images: Vec<String>,
     /// 引用了但盘上不存在的预制体（只报实例根，避免整棵实例刷屏）。
     pub missing_prefabs: Vec<String>,
+    /// 内容无法读取或解析的预制体（包含没有被场景引用的文件，按路径去重）。
+    pub invalid_prefabs: Vec<String>,
     /// 场景 / 预制体里写了 `guid://…` 但资产库里找不到的（悬空 GUID）。
     ///
     /// 与 `missing_*` 分开报：那些是"路径找不到文件"，这些是"身份查无此物"。
@@ -158,6 +160,7 @@ impl CheckReport {
             || !self.missing_audio.is_empty()
             || !self.missing_ui_images.is_empty()
             || !self.missing_prefabs.is_empty()
+            || !self.invalid_prefabs.is_empty()
             || !self.dangling_guids.is_empty()
             || !self.invalid_scenes.is_empty()
             || !self.missing_metas.is_empty()
@@ -183,6 +186,7 @@ impl CheckReport {
             + self.missing_audio.len()
             + self.missing_ui_images.len()
             + self.missing_prefabs.len()
+            + self.invalid_prefabs.len()
             + self.dangling_guids.len()
             + self.invalid_scenes.len()
             + self.missing_metas.len()
@@ -219,6 +223,7 @@ impl CheckReport {
             &self.missing_audio,
             &self.missing_ui_images,
             &self.missing_prefabs,
+            &self.invalid_prefabs,
             &self.dangling_guids,
             &self.invalid_scenes,
             &self.unsafe_paths,
@@ -281,6 +286,9 @@ impl CheckReport {
         }
         for p in &self.missing_prefabs {
             let _ = writeln!(out, "  missing prefab: {p}");
+        }
+        for p in &self.invalid_prefabs {
+            let _ = writeln!(out, "  invalid prefab: {p}");
         }
         for g in &self.dangling_guids {
             let _ = writeln!(out, "  dangling guid:  {g}");
@@ -439,16 +447,20 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     // 跨文件引用，重分配会让所有既有实例失配），所以这里只报告。汇总在
     // `project.list_prefabs()` 上而不是场景引用上：没被任何场景用到的预制体
     // 也可能是坏的，打开它就立刻掉进同一个坑。
+    let mut invalid_prefabs: BTreeMap<String, String> = BTreeMap::new();
     for relative in project.list_prefabs() {
-        if let Ok(duplicates) = project.prefab_duplicate_ids(&relative) {
-            for (id, count) in duplicates {
-                report
-                    .duplicate_prefab_ids
-                    .push(format!("{relative}: id {} ×{count}", id.raw()));
+        match project.prefab_duplicate_ids(&relative) {
+            Ok(duplicates) => {
+                for (id, count) in duplicates {
+                    report
+                        .duplicate_prefab_ids
+                        .push(format!("{relative}: id {} ×{count}", id.raw()));
+                }
+            }
+            Err(error) => {
+                invalid_prefabs.insert(relative, error);
             }
         }
-        // 解析失败的预制体此处静默跳过：内容级诊断不在本轮范围，硬报会
-        // 把"坏 RON"和"重复 ID"混成一类问题。
     }
 
     // -- 资产库诊断（只读，不生成任何文件）--------------------------------
@@ -478,7 +490,7 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     // 材质按路径**跨场景**去重：同一个材质挂在一百个实体上时，坏文件只该报一次。
     let mut materials: BTreeMap<String, String> = BTreeMap::new();
     // 预制体 ID 集合缓存：同一份预制体被十个实例引用时只解析一次。
-    // `None` = 读不出来（已在 `missing_prefabs` / `dangling_guids` 报过），
+    // `None` = 读不出来；缺失 / 坏路径由原有诊断负责，坏内容单独报一次。
     // 缓存住这个"坏"避免每个实例都重试一遍磁盘。
     let mut prefab_ids: BTreeMap<String, Option<crate::id::EntitySet>> = BTreeMap::new();
     for (relative, scene) in &scenes {
@@ -492,6 +504,7 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
             &mut report,
             &mut materials,
             &mut prefab_ids,
+            &mut invalid_prefabs,
         );
         // 语义体检：重复 ID 与越界层号在这里跳过 —— 它们分别由
         // `duplicate_ids`（磁盘原文）与 `invalid_layers`（实体字段）报过，
@@ -505,6 +518,11 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
                 .push(format!("{relative}: {}", defect.describe()));
         }
     }
+    report.invalid_prefabs.extend(
+        invalid_prefabs
+            .into_iter()
+            .map(|(relative, error)| format!("{relative} ({error})")),
+    );
 
     // -- 材质内容（引用的材质能不能读、里面的贴图在不在）------------------
     for (material, entity) in materials {
@@ -632,6 +650,7 @@ fn check_scene_references(
     report: &mut CheckReport,
     materials: &mut BTreeMap<String, String>,
     prefab_ids: &mut BTreeMap<String, Option<crate::id::EntitySet>>,
+    invalid_prefabs: &mut BTreeMap<String, String>,
 ) {
     let at = |name: &str| format!("{relative}: {name}");
     // 悬空 `source_id` 按预制体聚合成一条，避免一个 20 节点实例刷 20 行。
@@ -750,10 +769,19 @@ fn check_scene_references(
                 let known = prefab_ids
                     .entry(link.source.clone())
                     .or_insert_with(|| {
-                        project
-                            .load_prefab(&link.source)
-                            .ok()
-                            .map(|p| p.entities.iter().map(|e| e.id).collect())
+                        match project.load_prefab(&link.source) {
+                            Ok(prefab) => Some(prefab.entities.iter().map(|e| e.id).collect()),
+                            Err(error) => {
+                                // 原有缺文件 / 越界路径诊断不重复报；文件在而内容坏了
+                                // 才归到预制体诊断。默认目录外的引用也要照到。
+                                if crate::project::normalize_project_relative(&link.source).is_ok()
+                                    && project.path(&link.source).is_file()
+                                {
+                                    invalid_prefabs.entry(link.source.clone()).or_insert(error);
+                                }
+                                None
+                            }
+                        }
                     })
                     .as_ref();
                 if let Some(known) = known {
@@ -959,6 +987,73 @@ mod tests {
             "检查必须只读，不能把文件里的重复 ID 改好"
         );
 
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 没有场景引用的坏预制体也应让只读体检失败；错误必须点名文件且不改写内容。
+    #[test]
+    fn invalid_unreferenced_prefab_is_reported_without_rewriting() {
+        let project = temp_project("invalid_prefab");
+        let relative = "Prefabs/Broken.prefab.ron";
+        project
+            .write_prefab(relative, &crate::prefab::Prefab::new("Broken"))
+            .expect("写入合法预制体");
+        project.ensure_asset_metas().expect("补齐预制体身份文件");
+        let path = project.path(relative);
+        let broken = b"(not valid RON";
+        std::fs::write(&path, broken).expect("破坏预制体内容");
+
+        let report = check_project(project.root()).expect("坏预制体不能阻断其他检查");
+        assert!(
+            report.render().contains("invalid prefab: Prefabs/Broken.prefab.ron"),
+            "{}",
+            report.render()
+        );
+        assert!(report.has_issues(), "坏文件必须导致 --check 退出 2");
+        assert_eq!(report.issue_count(), 1, "只报告内容错误：{}", report.render());
+        assert_eq!(report.reference_issues().len(), 1, "打包差集也应能看到损坏");
+        assert!(
+            !report.render().contains(&project.root().display().to_string()),
+            "错误原因不应带项目绝对路径，否则包与源码的差集会误报"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), broken, "检查必须只读");
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 自定义目录里的预制体不在默认枚举范围内，但被场景引用时仍必须查解析结果。
+    #[test]
+    fn invalid_referenced_prefab_outside_catalog_is_reported_once() {
+        use crate::prefab::PrefabInstanceRef;
+
+        let project = temp_project("invalid_linked_prefab");
+        let relative = "Shared/Broken.prefab.ron";
+        let path = project.path(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "(not valid RON").unwrap();
+        let mut scene = project.load_entry_scene().unwrap();
+        for name in ["First", "Second"] {
+            let mut entity = crate::Entity::new(name);
+            entity.prefab = Some(PrefabInstanceRef {
+                source: relative.to_string(),
+                source_id: crate::EntityId::from_raw(123),
+                is_root: true,
+            });
+            scene.entities.push(entity);
+        }
+        project
+            .write_scene(&project.manifest().entry_scene, &scene)
+            .unwrap();
+
+        let report = check_project(project.root()).expect("检查应继续运行");
+        assert_eq!(
+            report.render().matches("invalid prefab: ").count(),
+            1,
+            "同一坏文件被引用两次只报告一次：{}",
+            report.render()
+        );
+        assert!(report.render().contains(relative), "{}", report.render());
+        assert!(report.missing_prefabs.is_empty(), "文件存在，不应报缺失");
+        assert!(report.has_issues());
         let _ = std::fs::remove_dir_all(project.root());
     }
 

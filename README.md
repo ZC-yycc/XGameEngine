@@ -19,7 +19,7 @@ cargo run -p xgame-editor -- projects/SampleScene
 # 独立游戏 —— 运行一个项目
 cargo run -p xgame-game -- projects/SampleScene
 
-# 无头项目检查 —— 不开窗口，验证清单 / 全部场景 / 资产引用 / 资产身份证
+# 无头项目检查 —— 不开窗口，验证清单 / 全部场景 / 预制体可读性 / 资产引用与身份证
 # （退出码 0=干净 · 1=加载失败 · 2=有问题；给 CI / AI 智能体用）
 cargo run -p xgame-editor -- --check projects/SampleScene
 

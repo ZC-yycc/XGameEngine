@@ -1078,9 +1078,9 @@ impl ProjectHandle {
         let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
         let path = self.path(&relative);
         let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
+            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
         let mut prefab =
-            Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+            Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
         {
             let assets = self.assets();
             decode_prefab_references(&mut prefab, &assets);
@@ -1341,9 +1341,10 @@ impl ProjectHandle {
     pub fn prefab_duplicate_ids(&self, relative: &str) -> Result<Vec<(EntityId, usize)>, String> {
         let path = self.path(relative);
         let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
-        let prefab =
-            Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        // 检查报告要与发布包的同一文件逐字节可比较，原因里不能带项目绝对路径。
+        let prefab = Prefab::from_ron(&text)
+            .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
         Ok(prefab.duplicate_ids())
     }
 
