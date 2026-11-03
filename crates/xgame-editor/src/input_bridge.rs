@@ -129,6 +129,16 @@ fn to_egui(code: KeyCode) -> Option<EguiKey> {
 pub fn sync(ctx: &egui::Context, input: &mut xgame_input::Input) {
     ctx.input(|i| {
         let state = input.state_mut();
+        // 同帧失焦又恢复也要先取消旧操作，不能只看帧末 focused 的最终值。
+        for event in &i.events {
+            if let egui::Event::WindowFocused(focused) = event {
+                state.set_focused(*focused);
+            }
+        }
+        state.set_focused(i.focused);
+        if !i.focused {
+            return;
+        }
 
         // -- 修饰键：从 `modifiers` 读，egui 的 `Key` 里没有它们 --
         state.handle_key(KeyCode::ShiftLeft, i.modifiers.shift);
@@ -200,6 +210,61 @@ pub fn viewport_pointer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_is_forwarded_from_egui_before_reading_devices() {
+        let ctx = egui::Context::default();
+        ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::new(1).unwrap());
+        let mut input = xgame_input::Input::with_default_map();
+        input
+            .state_mut()
+            .handle_pad_button(0, xgame_input::GamepadButton::South, true);
+        input
+            .state_mut()
+            .handle_pad_axis(0, xgame_input::GamepadAxis::LeftX, 0.8);
+        let _ = ctx.run(
+            egui::RawInput {
+                focused: false,
+                events: vec![egui::Event::WindowFocused(false)],
+                ..Default::default()
+            },
+            |ctx| sync(ctx, &mut input),
+        );
+        assert!(!input.state().is_focused(), "Play 必须接到窗口失焦");
+        assert!(!input.action_down("Jump"));
+        assert_eq!(input.axis("MoveX"), 0.0);
+        input.end_frame();
+
+        let _ = ctx.run(
+            egui::RawInput {
+                focused: true,
+                events: vec![egui::Event::WindowFocused(true)],
+                ..Default::default()
+            },
+            |ctx| sync(ctx, &mut input),
+        );
+        assert!(input.state().is_focused());
+        assert!(input.axis("MoveX") > 0.5);
+        assert!(!input.action_pressed("Jump"));
+        input
+            .state_mut()
+            .handle_mouse_button(MouseButton::Left, true);
+        input.end_frame();
+        let _ = ctx.run(
+            egui::RawInput {
+                focused: true,
+                events: vec![
+                    egui::Event::WindowFocused(false),
+                    egui::Event::WindowFocused(true),
+                ],
+                ..Default::default()
+            },
+            |ctx| sync(ctx, &mut input),
+        );
+        assert!(input.state().is_focused());
+        assert!(input.state().focus_lost(), "帧末聚焦不能覆盖中途失焦");
+        assert!(input.state().mouse_released(MouseButton::Left));
+    }
 
     #[test]
     fn viewport_pointer_maps_into_texture_pixels() {

@@ -997,11 +997,15 @@ impl World {
         // 位置与按键分开传：指针在视口外时 `pos = None`，但 `released` 边沿
         // 仍然要送达 —— 否则"在视口外松手"那一帧收不了尾，捕获会一直挂在
         // 按钮上（`Release` 事件也发不出去），直到指针回到视口才被兜底清掉。
+        // 宿主可能还留着失焦前的坐标。取消帧必须撤掉命中位置，否则合成的
+        // Release 会在原按钮上变成 Click；同帧失焦又恢复也要先结束旧捕获。
+        let focus_lost = self.input.state().focus_lost();
+        let pointer_active = self.input.state().is_focused() && !focus_lost;
         let pointer = Some(UiPointer {
-            pos: self.ui_pointer,
-            down: self.input.mouse_down(MouseButton::Left),
-            pressed: self.input.mouse_pressed(MouseButton::Left),
-            released: self.input.state().mouse_released(MouseButton::Left),
+            pos: self.ui_pointer.filter(|_| pointer_active),
+            down: pointer_active && self.input.mouse_down(MouseButton::Left),
+            pressed: pointer_active && self.input.mouse_pressed(MouseButton::Left),
+            released: focus_lost || self.input.state().mouse_released(MouseButton::Left),
         });
         let viewport = Vec2::new(w as f32, h as f32);
         self.ui.tree.build(&self.scene);

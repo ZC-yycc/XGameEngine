@@ -8326,3 +8326,94 @@ previous 与正式输出里的事务标记都必须消失。三处均通过，�
 目录 fsync，本轮也没有断电 / 拔盘实验，所以机器掉电时标记与 rename 的持久顺序仍未证明。
 网络文件系统、绕过构建器直接改 `Build/`、升级前旧协议遗留的随机 previous，以及强杀留下
 的组装 staging 不自动回收；这些边界没有被“进程强杀通过”掩盖。
+
+## 一百零四、G0 输入失焦取消与恢复（2026-11-03）
+
+### 104.1 阶段核对与选择理由
+
+按 ROADMAP → 差距分析 → 决策记录 → PLAN → 双轨语言架构计划 → FLOW 核对，并检查最近
+十次提交。基线为 `f4e2c69730ee49df2741a0d1ccd411d4e5fad370`，工作区干净；编辑器、统一
+运行时、Lua / Rust 玩法、动画、存档和发布闭环均已有实现，当前仍是 G0 可靠性收口。差距
+分析中“没有 SaveGame”“运行时读路径 / search_paths 尚无门禁”及 R06 / 194 的旧残留描述
+已与代码不符，先改为指向现有实现记录，避免以历史缺口选题。
+
+本轮选择输入焦点：播放器虽已转发 winit 焦点事件，输入层却只清按住状态、不生成释放边沿；
+手柄后台轮询可以再次按下按钮，轴查询也仍非零；编辑器 Play 没有把 egui 焦点送到运行时。
+旧指针还会让游戏 UI 保持悬停或捕获。这是一条直接影响成品操作、可在当前 Windows 环境
+造出红绿证据的缺口，因此本轮只完成这条链，没有另开功能模块。
+
+基线 `cargo check --workspace --all-targets --locked` 通过。初始终端找不到 Cargo，使用
+已有 `C:\Users\Administrator\.cargo\bin` 补当前进程 PATH 后继续，没有安装或更换工具链。
+
+### 104.2 红灯先行与实现取舍
+
+修改前实跑的定向回归共七条失败，覆盖输入取消、后台事件、默认焦点 / reset 及运行时 UI。
+实现过程中进一步补强扳机“同帧失焦再恢复”和鼠标返回基线断言，两者也先在尚未修复的实现
+上失败再修正。最终新增八条测试：`xgame-input/tests/focus.rs` 六条、`ui_runtime.rs` 一条
+真实 Lua 点击回归，以及 `input_bridge.rs` 一条 egui 帧输入回归。
+
+实现继续使用现有 `InputState` / `PadState` 与两宿主共有的 `World::update`。失焦需要给
+已开始的操作送达取消；手柄连接和轴物理位置则是恢复输入所需的设备事实，因此不随游戏
+边沿一起清空。恢复时重建轴边沿基线，避免按住扳机切回窗口就额外触发一次开火。
+
+只补 Release 不够：宿主留下的指针仍在原按钮上时，UI 会把它认成 Click。用帧末清理的
+`focus_lost` 锁存中途失焦，在 `World::update_ui` 撤掉命中位置并结束捕获；同帧恢复不能
+覆盖该取消。编辑器先同步焦点再 poll 手柄，使后台事件在进入动作映射前被门控。详细固定
+合同集中写入决策记录 §九十一，README 说明用户可见语义，FLOW 只补事件流。
+
+### 104.3 实际发布包夹具与有效红绿
+
+新增 `tools/test-player-focus.ps1`：创建最小按钮 / Lua 项目，调用真实 editor 构建，搬走
+发布包并移开源码目录，核对包内播放器与指定 bin 的 SHA256，再启动包内 EXE。通过 Windows
+窗口消息进入 winit 正式翻译路径，以 Lua 断言验证“按住 → 失焦取消 → 后台键鼠静默 → 恢复
+→ 再按下并点击”，最后正常关闭窗口，七个阶段标记必须各出现一次且进程退出码为 0。
+
+夹具早期三次尝试停在 `FOCUS HELD` 之前，不计为引擎缺陷红灯。排查后补齐按钮交互属性、
+把系统光标定位到客户区（否则 TrackMouseEvent 会追加 CursorLeft）、记录输入 / 悬停状态，
+并等待真实悬停后再按下。夹具结束恢复原鼠标位置，脚本带 UTF-8 BOM 以兼容 PowerShell 5.1。
+
+有效红绿证据保留在本机 `outputs/`：
+
+- 旧 dist：`player-focus-92eece5c85394835ac346a523f42973a/player.log` 已出现 `FOCUS HELD`，
+  随后等待 `FOCUS CANCELLED` 超时；这证明已有操作未收到取消，不把旧二进制归属猜成某次提交。
+- 新 debug：`player-focus-ffd5c6c6453e40b7a2407831209fb021/result.json` 通过。
+- 最终 release：`player-focus-4bc5cbf1914846f7879a1fcbf3ff2019/result.json` 为 `ok=true`、
+  七阶段、exit 0；运行日志包含取消、后台静默、恢复与再次点击的完整顺序。
+
+这是实际发布包和窗口消息链的验收，需要 Windows 桌面与 GPU；物理 Alt+Tab、系统前台策略
+和外设真机不由合成消息证明，夹具也不加入 hosted 无 GPU 门禁。
+
+### 104.4 全量验证与可运行产物
+
+- `cargo check --workspace --all-targets --locked`、
+  `cargo clippy --workspace --all-targets --locked -- -D warnings`、
+  `cargo build --workspace --locked` 均通过。
+- `cargo test --workspace --all-targets --locked -- --test-threads=1` 共 42 个 suite，
+  **1238 passed / 0 failed / 19 ignored**；GPU 测试实际执行，稳态零分配门禁通过。
+  完整日志为 `outputs/input-focus-workspace-test.log`。
+- `tools/build-release.ps1` 成功刷新 dist 三个 EXE，逐一与 `target/release` 核对哈希；
+  BehaviorsDemo 插件先备份到 outputs，再刷新为同批 release DLL。
+- release 既有发布组合夹具两模式均通过：真实窗口三关为 15 项断言 / exit 0
+  （`published-player-48ef9135431049aab78de53a3d73985d/result.json`）；无头三关为六个输入
+  事件 / 两次切关 / `G0_COMPLETE`（`published-player-3770254102c24a6a87adfe093316fa46/result.json`）。
+  两者与焦点夹具使用相同播放器，SHA256 为
+  `7E0637F546BF50F39255499D48D728714600A4ADC74FFD56F17E8C07D7942AAD`；组合夹具插件为
+  `F2F7973AF196E07FF1FBD72281E22E7406FE8A2B5C7D62A14FA3D564063A331B`。
+- SampleScene `--check` exit 0，300 帧无头 `ok=true`；BehaviorsDemo 60 帧无头 `ok=true`。
+  两份报告的脚本 warn/error 与非有限变换均为 0，分别在 `outputs/input-focus-sample.json`
+  和 `outputs/input-focus-behaviors.json`；无头报告不代表实际音频设备验收。
+- 已打开查看 1280×800、1440×900、1920×1080 的 Play 截图及发布包第三关截图，另用
+  `.workbuddy/tools/crop.py` 放大窄窗口 HUD、`rowscan.py` 检查 1440 截图面板分界，未见
+  布局溢出。截图位于 `outputs/input-focus-<尺寸>.png`，局部图为
+  `.workbuddy/artifacts/crop-focus-hud-1280.png`。
+
+本机窗口与截图使用 RTX 2060 / Vulkan，日志仍有既有
+`Unrecognized present mode 1000361000` 警告，不能把脚本零警告写成全部 GPU 日志零警告。
+
+### 104.5 完成边界与下一步
+
+本轮关闭输入层取消 / 恢复、egui Play 桥接、运行时 UI 捕获以及 Windows 发布包消息链的
+这条缺口。失焦时模拟继续运行，焦点变化不自动暂停游戏。注入测试覆盖手柄与触摸的状态
+语义；物理键鼠、真实 Alt+Tab / 前台切换、IME、手柄 / 触摸真机与其他平台仍未验收，G0
+整体继续进行。下一轮优先在目标桌面与外设环境验证这些相邻边界，沿用差距分析的 G0
+优先级；本轮到此停止扩展模块。

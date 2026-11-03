@@ -81,6 +81,21 @@ IME；截图需人工查看。若 Windows PowerShell 因环境同时存在大小
 Start-Process，需在运行进程内消除重复键，勿修改系统代理配置。脚本为 UTF-8 BOM，
 保证 Windows PowerShell 5.1 正确解析中文注释。
 
+输入焦点可单独验收（需要 Windows 桌面与 GPU）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-player-focus.ps1 -BinDir dist
+```
+
+它创建并发布一个最小按钮项目，搬离源码后启动包内播放器，通过窗口消息验证失焦取消、
+后台输入抑制及恢复后点击；日志与结果在 `outputs/player-focus-<唯一编号>/`。测试期间会
+激活播放器、临时移动鼠标，结束后恢复鼠标位置。它覆盖 winit 消息链，物理 Alt+Tab、IME、
+手柄与触摸真机仍需另验。
+
+游戏窗口失焦时会取消当前输入与 UI 点击，后台输入不会继续驱动玩法。恢复焦点后，键鼠和
+手柄按钮等待新的按下事件，手柄轴恢复当前物理位置且不产生额外按下边沿。编辑器 Play 使用
+同一规则；模拟继续运行，焦点取消不会自动暂停游戏。
+
 ## Rust 插件兼容检查
 
 使用 `xgame::export_plugin!` 导出插件；宏同时生成原入口与版本化 C 描述符 `xgame_plugin_descriptor_v1`。宿主在注册前校验构建指纹，缺少描述符或指纹不匹配时拒绝调用原入口，并报告插件路径与重编提示。旧 DLL 即使版本号相同也需要重新构建。

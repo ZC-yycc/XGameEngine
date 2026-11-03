@@ -267,6 +267,9 @@ pub struct PadState {
     axes: [f32; AXIS_COUNT],
     /// 上一帧末的轴值。扳机"当按键用"时靠它判"刚越过阈值"。
     prev_axes: [f32; AXIS_COUNT],
+    /// 取消边沿独立保存：同帧恢复焦点不能抹掉已经发生的释放。
+    cancelled_axes: Option<[f32; AXIS_COUNT]>,
+    unfocused: bool,
 }
 
 impl PadState {
@@ -279,6 +282,9 @@ impl PadState {
 
     /// 注入一个按键事件（重复按下与键盘同款去重）。
     pub fn handle_button(&mut self, button: GamepadButton, down: bool) {
+        if self.unfocused {
+            return;
+        }
         if down {
             if self.buttons.insert(button) {
                 self.pressed.insert(button);
@@ -307,15 +313,39 @@ impl PadState {
     pub fn end_frame(&mut self) {
         self.pressed.clear();
         self.released.clear();
-        self.prev_axes = self.axes;
+        self.cancelled_axes = None;
+        self.prev_axes = if self.unfocused {
+            [0.0; AXIS_COUNT]
+        } else {
+            self.axes
+        };
     }
 
-    /// 清掉"按住"，但保留轴值（失焦 / 切场景用）。
+    /// 清掉"按住"并生成取消边沿，但保留轴的物理位置。
     ///
     /// 为什么要保留轴：轴是**物理位置**，松开不需要事件；把轴归零会让
     /// "窗口失焦时摇杆还推着"变成"回来之后摇杆突然归中再跳回来"。
     pub fn release_all_buttons(&mut self) {
-        self.buttons.clear();
+        self.released.extend(self.buttons.drain());
+        self.pressed.clear();
+    }
+
+    pub(crate) fn set_focused(&mut self, focused: bool) {
+        let unfocused = !focused;
+        if self.unfocused == unfocused {
+            return;
+        }
+        self.unfocused = unfocused;
+        if focused {
+            // 后台仍更新轴的物理读数；恢复时以最新位置为基线，避免凭空开火。
+            self.prev_axes = self.axes;
+        } else {
+            let cancelled = self.cancelled_axes.get_or_insert([0.0; AXIS_COUNT]);
+            for (i, value) in cancelled.iter_mut().enumerate() {
+                *value = value.max(self.axes[i]).max(self.prev_axes[i]);
+            }
+            self.release_all_buttons();
+        }
     }
 
     pub fn button_down(&self, button: GamepadButton) -> bool {
@@ -331,19 +361,24 @@ impl PadState {
     }
 
     pub fn axis(&self, axis: GamepadAxis) -> f32 {
-        self.axes[axis as usize]
+        if self.unfocused {
+            0.0
+        } else {
+            self.axes[axis as usize]
+        }
     }
 
     /// 这根轴本帧是否**刚越过**阈值（向上）。
     pub fn axis_crossed_up(&self, axis: GamepadAxis, threshold: f32) -> bool {
         let i = axis as usize;
-        self.axes[i] >= threshold && self.prev_axes[i] < threshold
+        !self.unfocused && self.axis(axis) >= threshold && self.prev_axes[i] < threshold
     }
 
     /// 这根轴本帧是否**刚跌回**阈值以下。
     pub fn axis_crossed_down(&self, axis: GamepadAxis, threshold: f32) -> bool {
         let i = axis as usize;
-        self.axes[i] < threshold && self.prev_axes[i] >= threshold
+        self.cancelled_axes.is_some_and(|axes| axes[i] >= threshold)
+            || (self.axis(axis) < threshold && self.prev_axes[i] >= threshold)
     }
 
     /// 当前按住的键（顺序未定义，调试面板用）。
@@ -435,7 +470,10 @@ mod tests {
             Some(GamepadButton::South),
             "Xbox 字母别名要能用（大小写无关）"
         );
-        assert_eq!(GamepadButton::from_name("LB"), Some(GamepadButton::LeftBumper));
+        assert_eq!(
+            GamepadButton::from_name("LB"),
+            Some(GamepadButton::LeftBumper)
+        );
         assert_eq!(GamepadButton::from_name("nope"), None);
         for axis in GamepadAxis::ALL {
             assert_eq!(GamepadAxis::from_name(axis.name()), Some(axis));

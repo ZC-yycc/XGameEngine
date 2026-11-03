@@ -147,6 +147,7 @@ main()                           crates/xgame-game/src/main.rs
 - Lua 非 Destroy 派发先确认实体仍存在；Rust 行为按阶段入口 ID 快照派发，删除不影响后继遍历。
 - 零尺寸 UI 视口仍清理上一帧状态与布局，不留下 clicked/pressed/hovered。
 - 运行时帧末用活动场景相机同步 listener；切关、Stop 和正常退出调用幂等 unload_scene。完整语义和边界见决策记录 §四十、§四十一。
+- 焦点事件 → `InputState::set_focused` → 取消已有输入；编辑器先同步 egui 焦点再 poll 手柄，播放器从 winit 转发。`World::update_ui` 在失焦帧撤掉命中位置并释放捕获，随后脚本读取本帧状态；`end_frame` 清取消边沿。恢复与后台设备语义见决策记录 §九十一。
 
 ## 二、每帧循环
 

@@ -50,6 +50,7 @@ pub struct InputState {
     /// 一个合法位置 —— 分不清"指针在左上角"与"还没有指针事件"。UI 命中
     /// 测试拿它当"指针在不在"，会在窗口刚打开时把左上角的元素点亮。
     cursor_seen: bool,
+    rebase_cursor: bool,
     /// 本帧鼠标的位移。
     ///
     /// 有两个来源，都往里累加：
@@ -59,7 +60,9 @@ pub struct InputState {
     scroll: Vec2,
 
     text: String,
-    focused: bool,
+    // 负向标志让派生 Default 与 new 都默认接受输入（无头宿主没有焦点事件）。
+    unfocused: bool,
+    focus_lost: bool,
 
     /// 已连接手柄（id 由后端分配，稳定到断开为止）。
     ///
@@ -77,11 +80,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new() -> Self {
-        Self {
-            focused: true,
-            mouse_pos: Vec2::ZERO,
-            ..Default::default()
-        }
+        Self::default()
     }
 
     // -----------------------------------------------------------------------
@@ -90,6 +89,9 @@ impl InputState {
 
     /// 注入一次键盘事件。
     pub fn handle_key(&mut self, code: KeyCode, pressed: bool) {
+        if self.unfocused {
+            return;
+        }
         if pressed {
             // `insert` 的返回值区分了"第一次按下"和"重复按下"：
             // 操作系统的按键重复（按住 A 会持续投递 Pressed）不该被当成
@@ -108,6 +110,9 @@ impl InputState {
 
     /// 注入一次鼠标按键事件。
     pub fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool) {
+        if self.unfocused {
+            return;
+        }
         if pressed {
             if self.buttons_down.insert(button) {
                 self.buttons_pressed.insert(button);
@@ -123,9 +128,15 @@ impl InputState {
 
     /// 光标移动到一个**绝对**位置。
     pub fn handle_cursor_moved(&mut self, pos: Vec2) {
-        // 位移的语义保持原样（与 `mouse_pos` 的初值有关，既有测试锁着）：
-        // 这里只额外记录"指针真的出现过"，供 UI 判断悬停。
-        self.mouse_delta += pos - self.mouse_pos;
+        if self.unfocused {
+            return;
+        }
+        // 窗口外的位置变化不属于游戏的鼠标运动，恢复后第一点只重建基线。
+        // 首次启动仍沿用从 (0,0) 累积的约定。
+        if !self.rebase_cursor {
+            self.mouse_delta += pos - self.mouse_pos;
+        }
+        self.rebase_cursor = false;
         self.mouse_pos = pos;
         self.cursor_seen = true;
     }
@@ -140,12 +151,16 @@ impl InputState {
 
     /// 原始相对位移（鼠标被捕获 / 锁定时使用）。
     pub fn handle_mouse_motion(&mut self, delta: Vec2) {
-        self.mouse_delta += delta;
+        if !self.unfocused {
+            self.mouse_delta += delta;
+        }
     }
 
     /// 滚轮 / 触控板滚动。`y` 为正表示向上滚。
     pub fn handle_scroll(&mut self, delta: Vec2) {
-        self.scroll += delta;
+        if !self.unfocused {
+            self.scroll += delta;
+        }
     }
 
     // -- 手柄（后端把插拔与事件翻译成这几个入口）--
@@ -158,7 +173,9 @@ impl InputState {
         match self.pads.get_mut(&pad) {
             Some(existing) => existing.name = name.to_owned(),
             None => {
-                self.pads.insert(pad, PadState::new(name));
+                let mut state = PadState::new(name);
+                state.set_focused(!self.unfocused);
+                self.pads.insert(pad, state);
             }
         }
     }
@@ -175,6 +192,9 @@ impl InputState {
     /// 等于"引擎支持触摸但 UI 不支持"。多指时只有 id 最小的那根驱动鼠标
     /// （否则两根手指抢同一个光标，指针会来回跳）。
     pub fn handle_touch(&mut self, id: u64, phase: TouchPhase, position: Vec2, force: f32) {
+        if self.unfocused {
+            return;
+        }
         let point = TouchPoint::new(phase, position, force);
         let primary = self.touches.keys().next().copied();
         self.touches.insert(id, point);
@@ -210,20 +230,21 @@ impl InputState {
     /// 本帧第一帧输入到达（尤其是在 poll 里第一次 drain 的时候），漏一条
     /// 插拔事件不该让按钮永远读不到。
     pub fn handle_pad_button(&mut self, pad: u32, button: GamepadButton, down: bool) {
-        self.pads
-            .entry(pad)
-            .or_default()
-            .handle_button(button, down);
+        let state = self.pads.entry(pad).or_default();
+        state.set_focused(!self.unfocused);
+        state.handle_button(button, down);
     }
 
     /// 注入一次手柄轴值。
     pub fn handle_pad_axis(&mut self, pad: u32, axis: GamepadAxis, value: f32) {
-        self.pads.entry(pad).or_default().handle_axis(axis, value);
+        let state = self.pads.entry(pad).or_default();
+        state.set_focused(!self.unfocused);
+        state.handle_axis(axis, value);
     }
 
     /// 文本输入（输入法上屏、字符键）。
     pub fn handle_text(&mut self, text: &str) {
-        if self.text.len() + text.len() > MAX_TEXT_LEN {
+        if self.unfocused || self.text.len() + text.len() > MAX_TEXT_LEN {
             return;
         }
         self.text.push_str(text);
@@ -235,19 +256,28 @@ impl InputState {
     /// 回来时那些键会永远卡在"按住"上（典型的症状：切出去再切回来，
     /// 角色一直往一个方向走）。
     pub fn set_focused(&mut self, focused: bool) {
-        if self.focused && !focused {
-            self.keys_down.clear();
-            self.buttons_down.clear();
-            // 手柄同理：窗口失焦后后端仍会继续上报（它是后台轮询），但游戏
-            // 不该在"没焦点"时继续读到一个按住的跳跃键。
-            for pad in self.pads.values_mut() {
-                pad.release_all_buttons();
-            }
-            // 触摸同样要清：窗口失焦时系统往往**不会**补发"抬起"，
-            // 留着就是一根永远按着的手指。
+        if self.is_focused() == focused {
+            return;
+        }
+        self.unfocused = !focused;
+        if !focused {
+            // 取消要送达已有操作的消费者，同时抹掉还没消费的按下与位移。
+            // 只清 down 会漏 Release；只补 Release 会让旧指针误触发 Click。
+            self.focus_lost = true;
+            self.keys_released.extend(self.keys_down.drain());
+            self.buttons_released.extend(self.buttons_down.drain());
+            self.keys_pressed.clear();
+            self.buttons_pressed.clear();
+            self.cursor_seen = false;
+            self.rebase_cursor = true;
+            self.mouse_delta = Vec2::ZERO;
+            self.scroll = Vec2::ZERO;
+            self.text.clear();
             self.touches.clear();
         }
-        self.focused = focused;
+        for pad in self.pads.values_mut() {
+            pad.set_focused(focused);
+        }
     }
 
     /// 帧末清理。
@@ -255,6 +285,7 @@ impl InputState {
     /// 调用时机：**所有**读输入的代码都跑完之后。清掉的是"仅本帧有效"的部分，
     /// 按住状态与光标位置保留。
     pub fn end_frame(&mut self) {
+        self.focus_lost = false;
         self.keys_pressed.clear();
         self.keys_released.clear();
         self.buttons_pressed.clear();
@@ -276,10 +307,14 @@ impl InputState {
     /// 而且重启后第一次运行（没有插拔事件）永远没有手柄。
     pub fn reset(&mut self) {
         let pads = std::mem::take(&mut self.pads);
+        let unfocused = self.unfocused;
         *self = Self::new();
+        self.unfocused = unfocused;
+        self.rebase_cursor = unfocused;
         self.pads = pads;
         for pad in self.pads.values_mut() {
             pad.release_all_buttons();
+            pad.end_frame();
         }
     }
 
@@ -451,7 +486,12 @@ impl InputState {
     }
 
     pub fn is_focused(&self) -> bool {
-        self.focused
+        !self.unfocused
+    }
+
+    /// 本帧是否发生过失焦；即使同帧已恢复，也必须先取消原来的 UI 点击。
+    pub fn focus_lost(&self) -> bool {
+        self.focus_lost
     }
 
     // -- 修饰键便捷查询（动作映射里的 Combo 也走这几个）--

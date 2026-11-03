@@ -310,6 +310,65 @@ fn releasing_outside_the_viewport_clears_the_button() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 失焦是取消点击；即使旧指针仍在按钮上，也必须只收尾一次。
+#[test]
+fn focus_loss_releases_ui_capture_without_clicking() {
+    for regain_before_update in [false, true] {
+        let root = temp_root("focus-cancel");
+        write_script(
+            &root,
+            "Click.lua",
+            r#"
+function update(ctx)
+    if ui_clicked(ctx, self_id(ctx)) then
+        ui_set_text(ctx, self_id(ctx), "clicked")
+    end
+end
+"#,
+        );
+        let (scene, id) = button_scene("Scripts/Click.lua");
+        let mut world = World::new(scene, root.clone(), WorldConfig::default());
+        world.set_ui_viewport((800, 600));
+        world.set_ui_pointer(Some(Vec2::new(50.0, 30.0)));
+        world
+            .input_mut()
+            .state_mut()
+            .handle_mouse_button(MouseButton::Left, true);
+        world.update(1.0 / 60.0);
+        assert_eq!(world.ui_pressed(), Some(id), "先证明按钮确实捕获了指针");
+
+        world.input_mut().state_mut().set_focused(false);
+        if regain_before_update {
+            world.input_mut().state_mut().set_focused(true);
+        }
+        world.update(1.0 / 60.0);
+        assert!(world.ui_pressed().is_none());
+        assert!(world.ui_hovered().is_none(), "失焦帧不能继续使用旧指针");
+        assert_eq!(text_of(&world, id), "OK", "取消不能触发 Lua 的点击逻辑");
+        assert_eq!(
+            world
+                .ui_events()
+                .iter()
+                .filter(|event| {
+                    event.entity == id && event.kind == xgame_ui::UiEventKind::Release
+                })
+                .count(),
+            1,
+            "捕获必须收到一次 Release"
+        );
+
+        world.update(1.0 / 60.0);
+        assert!(!world
+            .ui_events()
+            .iter()
+            .any(|event| event.kind == xgame_ui::UiEventKind::Release));
+        world.input_mut().state_mut().set_focused(true);
+        click_at(&mut world, Vec2::new(50.0, 30.0));
+        assert_eq!(text_of(&world, id), "clicked", "恢复后正常点击仍可用");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 /// 脚本本帧改的 UI 位置，**下一帧**才影响命中测试。
 ///
 /// 这是刻意的取舍（见 `World::update` 第 0 步的注释）：UI 阶段排在脚本之前，

@@ -1183,12 +1183,12 @@ fn editor_ui(
         let ui_viewport = session.state.viewport_pixel_size;
 
         if let Some(runtime) = session.state.game_runtime.as_mut() {
-            // 手柄先于键鼠灌入：两者写的是同一份 `InputState` 的不同部分
-            // （手柄走 `handle_pad_*`），顺序只影响日志可读性。
+            // 先同步窗口焦点，再排空手柄队列；后台仍处理插拔与轴物理位置，
+            // 但输入层不会把后台按钮交给玩法。
+            input_bridge::sync(ctx, runtime.input_mut());
             if let Some(hub) = session.gamepads.as_mut() {
                 hub.poll(runtime.input_mut().state_mut());
             }
-            input_bridge::sync(ctx, runtime.input_mut());
             runtime.set_ui_viewport(ui_viewport);
             runtime.set_ui_pointer(ui_pointer);
         }
