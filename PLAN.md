@@ -8713,3 +8713,52 @@ PowerShell `Stopwatch` 只量命令从启动到退出的耗时（stdout / stderr
 执行 `cargo test --workspace --all-targets --locked -- --test-threads=1`：**44 组、
 1263 passed / 0 failed / 21 ignored**，GPU 截图实际运行。串行全量与 CI 配置全量
 结果均绿；本机默认并行 GPU 的长时间卡住仍如实保留，不把它写成通过。
+
+## 一百零九、G0 预制体语义与发布输入（2026-11-03）
+
+### 109.1 起点和红灯
+
+基线 `dea0994`，工作区干净，`cargo check --workspace --all-targets --locked` 成功。
+最近的预制体检查已覆盖坏 RON 和文件引用，但未实例化的预制体内部成环、非有限变换
+和非单位四元数仍不会进入报告；脚本运行时 `spawn_prefab` 才会暴露后果。另一条发布
+路径把 `input.ron` 原样复制进包，坏映射会让玩家端退回默认键位，链接文件还能绕过
+内容目录已有的链接拒绝规则。
+
+三条测试先在**旧实现**下实跑失败：`unreferenced_prefab_semantic_defects_are_reported_without_rewriting`
+拿到空诊断；`malformed_input_does_not_replace_previous_release` 实际得到成功的
+`BuildReport` 并覆盖上一版；`linked_input_is_not_copied_into_release` 也构建成功。
+Windows 本机能创建链接，第三条没有跳过。起初误用 `--exact` 过滤，运行了 0 项，
+随即用完整/子串名称重跑并得到上述真实红灯；未把空跑算红灯。
+
+### 109.2 实现边界
+
+`validate::entity_defects` 抽取场景实体的原有判定，父索引仍用 `SceneTransforms`
+共用的首占位规则；`scene_defects` 在其后继续检查场景独有的光源。`check_project`
+对枚举到的、或从引用队列装入的预制体各调用一次相同判定；重复 ID / 越界层仍交
+专门报告字段，语义缺陷不进 `reference_issues()` 的发布差集。补测目录外被两个场景
+实体引用的预制体，只报一条语义问题且检查只读。
+
+打包对根目录 `input.ron` 先用 `symlink_metadata` 拒绝链接，再将原字节复制到 staging，
+对**包里那份**调用生产 `InputMap::load`；失败在 `publish` 前返回，上一版目录不动。
+不存在时依旧不打包、由播放器使用默认映射。合法文件的原字节（而非重序列化文本）
+保持不变。三个改动都不在 `World::update` 的逐帧热路径，不据此声称提高了帧率。
+
+### 109.3 实跑验收和保留边界
+
+- 修复后 `check::tests` **28/28**（含目录外预制体），`builder::tests` **32/32**；
+  workspace check / `clippy -- -D warnings` / debug workspace build 通过；修改过的
+  Rust 文件 `rustfmt --check` 及 `git diff --check` 通过。
+- 设置 `XGAME_TEST_PREBUILT_ARTIFACTS=1`（先完成同 profile workspace build），
+  不设置 GPU skip，以 `--test-threads=1` 执行全量 **44 组、1267 passed / 0 failed /
+  21 ignored**；完整日志 `C:\Users\Administrator\AppData\Local\Temp\opencode\xgame-g0-full-tests.log`。
+  RTX 2060/Vulkan 的另一次实际 `--screenshot` 确认设备、1280×720、MSAA 4×、
+  文件产出和 `ok=true`，不是把 GPU 跳过当验收。
+- 源码 SampleScene `--check`=0（1 场景 / 24 实体 / 15 资产）；源码 60 帧无头
+  `ok=true`、0 error、0 非有限变换。实际 `--build` 成功（33 个资产文件），包内
+  `--check`=0、60 帧无头同样 `ok=true`；包内播放器与同批 debug exe 的 SHA-256
+  相同。`tools/test-published-player.ps1 -Mode headless` 用 debug exe / DLL 构建后把
+  发布包搬离源码，6 次输入边沿、2 次切关与 `G0_COMPLETE` 均通过；证据目录
+  `C:\Users\Administrator\AppData\Local\Temp\opencode\published-player-6573732801a34b35a58b0911206d958f`。
+- `--check` 属 core，不依赖 `xgame-input`，其报告仍不解析 `input.ron`；这次的
+  映射语法校验是**发布前**门禁。真实 Alt+Tab / 物理手柄与触摸、机器掉电恢复及
+  其他平台未经本轮验收。未做同机版本前后性能基准；此次没有性能提升的结论。

@@ -20,12 +20,12 @@
 //!
 //! - **只在单文件内判定**。跨文件唯一性由 `(source, source_id)` 表达
 //!   （见决策记录 §五十三），不是本模块的职责。
-//! - 预制体文件不做语义体检：MCP 没有写预制体的通道，而预制体一旦被实例化
-//!   就落进场景，场景这一侧会照到。
+//! - 场景与预制体共用实体体检；光源只属于场景。预制体也可能在未实例化时
+//!   被脚本动态生成，不能依赖已落进场景的实例才发现坏父链和数值。
 //! - 重复 ID 只能在**加载修数据之前**看见（[`Scene::ensure_unique_ids`] 会顺手
 //!   改掉）—— 所以 [`crate::check`] 那份仍从磁盘原文统计，不从内存看。
 
-use crate::scene::Scene;
+use crate::scene::{Entity, Scene};
 
 /// 语义缺陷分类。
 ///
@@ -112,13 +112,32 @@ const UNIT_TOLERANCE: f32 = 1e-3;
 ///
 /// 复制一份场景不会引入任何随机性：环检测按索引序遍历，代表节点取环上最小的索引。
 pub fn scene_defects(scene: &Scene) -> Vec<Defect> {
+    let mut defects = entity_defects(&scene.entities);
+
+    // -- 光源数值 -----------------------------------------------------------
+    // 光源不是实体（`Scene::lights` 是独立数组，自带世界方向与坐标）。
+    for light in &scene.lights {
+        if let Some((field, value)) = first_non_finite_light(light) {
+            defects.push(Defect {
+                kind: DefectKind::NonFiniteLight,
+                entity: Some(light.name.clone()),
+                detail: format!("{field} = {value}"),
+            });
+        }
+    }
+
+    defects
+}
+
+/// 场景与预制体共用的实体体检；只看单文件中的身份、父链与数值。
+pub fn entity_defects(entities: &[Entity]) -> Vec<Defect> {
     let mut defects: Vec<Defect> = Vec::new();
-    let n = scene.entities.len();
+    let n = entities.len();
 
     // -- 重复 ID -----------------------------------------------------------
     // 只在"加载后没修过"的对象上看得见。`scene_write` 拿到的是刚解析的原始
     // 数据，所以这里有东西；`--check` 那份从磁盘原文统计（两条路互补）。
-    for (id, count) in scene.duplicate_ids() {
+    for (id, count) in crate::id::duplicate_ids(entities.iter().map(|e| e.id)) {
         defects.push(Defect {
             kind: DefectKind::DuplicateId,
             entity: None,
@@ -129,14 +148,10 @@ pub fn scene_defects(scene: &Scene) -> Vec<Defect> {
     // -- 父节点指向 ---------------------------------------------------------
     // 用 `parent_indices` 的语义（ID 相同取**第一个**出现的实体）判定"能不能
     // 解析到"，否则同 ID 场景下这里的结论会和渲染时的层级不一致。
-    let index_of: std::collections::HashMap<crate::id::EntityId, usize> = {
-        let mut map = std::collections::HashMap::with_capacity(n);
-        for (i, entity) in scene.entities.iter().enumerate() {
-            map.entry(entity.id).or_insert(i);
-        }
-        map
-    };
-    for entity in &scene.entities {
+    let mut index_of = std::collections::HashMap::with_capacity(n);
+    let mut parents = Vec::with_capacity(n);
+    crate::scene_transforms::parent_indices_into(entities, &mut parents, &mut index_of);
+    for entity in entities {
         let Some(parent_id) = entity.parent else {
             continue;
         };
@@ -158,7 +173,6 @@ pub fn scene_defects(scene: &Scene) -> Vec<Defect> {
     // -- 层级成环 -----------------------------------------------------------
     // 三色标记，整体 O(n)：每个节点只入链一次。**一个环只报一条** —— 把环上
     // 每个节点都报一遍，20 个节点的环会刷 20 行一模一样的话，看不出是一处坏。
-    let parents = scene.parent_indices();
     let mut state = vec![0u8; n]; // 0 = 未访问，1 = 在当前链上，2 = 已归位
     let mut path: Vec<usize> = Vec::new();
     for start in 0..n {
@@ -191,12 +205,12 @@ pub fn scene_defects(scene: &Scene) -> Vec<Defect> {
                     // 首尾各写一次，读起来才像"一条链"而不是一串名字。
                     let mut chain: Vec<String> = ordered
                         .iter()
-                        .map(|&node| scene.entities[node].name.clone())
+                        .map(|&node| entities[node].name.clone())
                         .collect();
-                    chain.push(scene.entities[head].name.clone());
+                    chain.push(entities[head].name.clone());
                     defects.push(Defect {
                         kind: DefectKind::ParentCycle,
-                        entity: Some(scene.entities[head].name.clone()),
+                        entity: Some(entities[head].name.clone()),
                         detail: format!("chain {}, {} nodes", chain.join(" -> "), ordered.len()),
                     });
                 }
@@ -215,7 +229,7 @@ pub fn scene_defects(scene: &Scene) -> Vec<Defect> {
     }
 
     // -- 变换数值 -----------------------------------------------------------
-    for entity in &scene.entities {
+    for entity in entities {
         let t = &entity.transform;
         // 逐分量判定（不依赖 `Quat::is_finite` 的具体版本可用性）。
         let non_finite = !(t.position.is_finite()
@@ -241,7 +255,7 @@ pub fn scene_defects(scene: &Scene) -> Vec<Defect> {
     }
 
     // -- 层索引 -------------------------------------------------------------
-    for entity in &scene.entities {
+    for entity in entities {
         if entity.layer as usize >= crate::layers::LAYER_COUNT {
             defects.push(Defect {
                 kind: DefectKind::LayerOutOfRange,
@@ -251,19 +265,6 @@ pub fn scene_defects(scene: &Scene) -> Vec<Defect> {
                     entity.layer,
                     crate::layers::LAYER_COUNT - 1
                 ),
-            });
-        }
-    }
-
-    // -- 光源数值 -----------------------------------------------------------
-    // 光源不是实体（`Scene::lights` 是独立数组，自带世界方向与坐标），上面那只
-    // 扫实体的循环照不到它。`NaN` 进着色就是整帧全黑 / 全白，比坏的变换还显眼。
-    for light in &scene.lights {
-        if let Some((field, value)) = first_non_finite_light(light) {
-            defects.push(Defect {
-                kind: DefectKind::NonFiniteLight,
-                entity: Some(light.name.clone()),
-                detail: format!("{field} = {value}"),
             });
         }
     }

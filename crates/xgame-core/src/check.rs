@@ -111,7 +111,7 @@ pub struct CheckReport {
     /// 取不到值就退回 `EntityId::new()`，于是资产里凭空多出一份重复实体。
     /// 按 `(场景, 预制体)` 聚合报一条，避免一个 20 节点实例刷 20 行。
     pub dangling_source_ids: Vec<String>,
-    /// 场景的**语义**缺陷（"场景: 描述"），来自 [`crate::validate::scene_defects`]。
+    /// 场景及预制体的**语义**缺陷（"文件: 描述"），与场景共用实体规则。
     ///
     /// 与上一条的区别：那些查的是"引用通不通"，这里查的是"数据本身能不能用"
     /// —— 悬空父节点、层级成环、`NaN` 坐标、未归一化的四元数。它们**都能通过
@@ -614,6 +614,13 @@ fn check_prefab_contents(
     // 预制体的资产引用可能只在实例化时才用到，甚至当前没有任何场景实例。
     match project.load_prefab(relative) {
         Ok(prefab) => {
+            for defect in crate::validate::entity_defects(&prefab.entities) {
+                if !defect.kind.is_reported_elsewhere() {
+                    report
+                        .semantic_defects
+                        .push(format!("{relative}: {}", defect.describe()));
+                }
+            }
             enqueue_prefab_sources(&prefab.entities, pending_prefabs);
             prefab_ids.insert(
                 relative.to_string(),
@@ -1009,6 +1016,78 @@ mod tests {
             report.reference_issues()
         );
 
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 未实例化的资产同样会被脚本在运行时生成；坏父链和变换不能等到生成后才暴露。
+    #[test]
+    fn unreferenced_prefab_semantic_defects_are_reported_without_rewriting() {
+        let project = temp_project("prefab_semantic");
+        let relative = "Prefabs/Semantic.prefab.ron";
+        let mut prefab = crate::prefab::Prefab::new("Semantic");
+        let mut a = crate::Entity::new("LoopA");
+        let mut b = crate::Entity::new("LoopB");
+        a.parent = Some(b.id);
+        b.parent = Some(a.id);
+        b.transform.position.x = f32::INFINITY;
+        prefab.entities.extend([a, b]);
+        let mut skewed = crate::Entity::new("Skewed");
+        skewed.transform.rotation = glam::Quat::from_xyzw(0.0, 0.0, 0.0, 2.0);
+        prefab.entities.push(skewed);
+        project.write_prefab(relative, &prefab).unwrap();
+        project.ensure_asset_metas().unwrap();
+        let before = std::fs::read(project.path(relative)).unwrap();
+
+        let report = check_project(project.root()).unwrap();
+        let lines = report.semantic_defects.join("\n");
+        assert!(
+            lines.contains("Prefabs/Semantic.prefab.ron: parent cycle"),
+            "{lines}"
+        );
+        assert!(lines.contains("non-finite transform at 'LoopB'"), "{lines}");
+        assert!(lines.contains("rotation not unit at 'Skewed'"), "{lines}");
+        assert_eq!(report.issue_count(), 3, "{}", report.render());
+        assert!(report.reference_issues().is_empty());
+        assert_eq!(std::fs::read(project.path(relative)).unwrap(), before);
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 默认目录外的资产只会从实例引用进入队列；仍须按同一条语义规则检查一次。
+    #[test]
+    fn referenced_prefab_outside_catalog_has_semantic_diagnostics() {
+        let project = temp_project("external_prefab_semantic");
+        let relative = "Shared/Broken.prefab.ron";
+        let mut prefab = crate::prefab::Prefab::new("Broken");
+        let mut original = crate::Entity::new("Offscreen");
+        original.transform.position.y = f32::NAN;
+        let original_id = original.id;
+        prefab.entities.push(original);
+        project.write_prefab(relative, &prefab).unwrap();
+        project.ensure_asset_metas().unwrap();
+
+        let mut scene = project.load_entry_scene().unwrap();
+        for name in ["First", "Second"] {
+            let mut instance = crate::Entity::new(name);
+            instance.prefab = Some(crate::prefab::PrefabInstanceRef {
+                source: relative.to_string(),
+                source_id: original_id,
+                is_root: true,
+            });
+            scene.entities.push(instance);
+        }
+        project
+            .write_scene(&project.manifest().entry_scene, &scene)
+            .unwrap();
+
+        let report = check_project(project.root()).unwrap();
+        assert_eq!(report.semantic_defects.len(), 1, "{}", report.render());
+        assert!(
+            report.semantic_defects[0]
+                .contains("Shared/Broken.prefab.ron: non-finite transform at 'Offscreen'"),
+            "{}",
+            report.render()
+        );
+        assert!(report.dangling_source_ids.is_empty(), "{}", report.render());
         let _ = std::fs::remove_dir_all(project.root());
     }
 

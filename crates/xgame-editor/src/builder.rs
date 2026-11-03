@@ -353,8 +353,31 @@ fn build_with_player(
     let mut packed_dirs = Vec::new();
     let input = project.root().join("input.ron");
     match std::fs::symlink_metadata(&input) {
-        Ok(_) => {
-            std::fs::copy(&input, package_dir.join("input.ron")).map_err(io_err(&input))?;
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                // 内容目录拒绝链接，根目录下的输入文件也不能跟到工程外读取。
+                return Err(BuildError::PathConflict {
+                    source: input,
+                    output: package_dir.join("input.ron"),
+                });
+            }
+            let packed_input = package_dir.join("input.ron");
+            std::fs::copy(&input, &packed_input).map_err(io_err(&input))?;
+            // 检查包内实际字节：复制前检查源文件仍可能在两步之间被编辑。
+            // 运行时解析失败会退回默认绑定，成品能启动但自定义操作失效。
+            match xgame_input::InputMap::load(&packed_input) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Err(BuildError::PackageUnreadable {
+                        reason: "input.ron: 已复制的文件不存在".to_string(),
+                    });
+                }
+                Err(error) => {
+                    return Err(BuildError::PackageUnreadable {
+                        reason: format!("input.ron: {error}"),
+                    });
+                }
+            }
             asset_count += 1;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1102,7 +1125,8 @@ mod tests {
             let src = fixture.project.root().join(scripts);
             std::fs::create_dir_all(src.join("nested")).unwrap();
             std::fs::write(src.join("nested/main.lua"), b"return 42").unwrap();
-            std::fs::write(fixture.project.root().join("input.ron"), b"custom input").unwrap();
+            let input = b"(actions: {\"Jump\": [Key(Space)]})";
+            std::fs::write(fixture.project.root().join("input.ron"), input).unwrap();
             let report = fixture.build().unwrap();
             assert_eq!(
                 std::fs::read(report.output_dir.join(scripts).join("nested/main.lua")).unwrap(),
@@ -1110,7 +1134,7 @@ mod tests {
             );
             assert_eq!(
                 std::fs::read(report.output_dir.join("input.ron")).unwrap(),
-                b"custom input"
+                input
             );
             assert!(report.packed_dirs.contains(&scripts.to_string()));
             assert!(report.executable.is_file());
@@ -1151,6 +1175,49 @@ mod tests {
             std::fs::read(report.output_dir.join("input.ron")).unwrap(),
             bytes
         );
+    }
+
+    /// 玩家端加载坏映射会退回默认键位；发布必须在覆盖旧成品之前发现它。
+    #[test]
+    fn malformed_input_does_not_replace_previous_release() {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.output()).unwrap();
+        std::fs::write(fixture.output().join("old.bin"), b"old").unwrap();
+        std::fs::write(fixture.project.root().join("input.ron"), b"(actions: {").unwrap();
+
+        let error = fixture.build().expect_err("坏输入映射不能发布");
+        assert!(error.to_string().contains("input.ron"), "{error}");
+        assert_eq!(
+            std::fs::read(fixture.output().join("old.bin")).unwrap(),
+            b"old"
+        );
+        assert!(!fixture.output().join("demo.exe").exists());
+    }
+
+    /// 复制独立 input.ron 时也要遵守内容目录已有的链接拒绝规则。
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn linked_input_is_not_copied_into_release() {
+        let fixture = Fixture::new();
+        let outside = fixture.base.join("external-input.ron");
+        std::fs::write(&outside, b"(actions: {})").unwrap();
+        let input = fixture.project.root().join("input.ron");
+        #[cfg(windows)]
+        let result = std::os::windows::fs::symlink_file(&outside, &input);
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink(&outside, &input);
+        if let Err(error) = result {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                eprintln!("当前环境无创建符号链接权限，跳过链接夹具: {error}");
+                return;
+            }
+            panic!("创建链接夹具失败: {error}");
+        }
+        assert!(matches!(
+            fixture.build(),
+            Err(BuildError::PathConflict { .. })
+        ));
+        assert!(!fixture.output().exists());
     }
 
     // -- 清单外依赖：包里必须自带场景引用的东西 --------------------------------

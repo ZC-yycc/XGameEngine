@@ -98,6 +98,9 @@ scene_renderer::SceneRenderer::new(device, queue, egui_renderer, format, project
 --build              → editor::builder::build           退出码 0 / 1
 ```
 
+`--check` 对未实例化预制体也检查实体语义；`--build` 对 staging 内已复制的
+`input.ron` 调播放器同款解析，拒绝坏文件与符号链接，失败不替换旧包。
+
 `--headless --input-script events.json` 的输入没有旁路：JSON 先按 1 起始帧号稳定排序，
 每帧进入唯一 `World::update` **之前**调用 `world.input_mut().state_mut().handle_key(...)`，
 再由项目 `input.ron` 的 InputMap 与脚本 API 读取；帧末仍由同一运行时清边沿。它只重放
