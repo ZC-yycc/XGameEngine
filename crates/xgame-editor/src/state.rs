@@ -4541,6 +4541,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 用真实脚本位移证明 fallback 文件被重新编译，不能只检查一条重载日志。
+    #[test]
+    fn hot_reload_updates_a_running_script_from_search_paths() {
+        let (mut state, base) = temp_state("hot_search_script");
+        state.project.manifest_mut().content.search_paths = vec!["Shared".into()];
+        std::fs::create_dir_all(state.project.path("Shared/Scripts")).unwrap();
+        let script_path = state.project.path("Shared/Scripts/Move.lua");
+        std::fs::write(&script_path, "function update(ctx) set_pos(ctx, 1, 0, 0) end").unwrap();
+        let mut entity = xgame_core::Entity::new("hot-search-probe");
+        entity.scripts.push("Scripts/Move.lua".into());
+        let id = state.scene.add_entity(entity);
+        state.hot_reload.rebase(&state.project);
+        state.enter_play_mode();
+        state
+            .game_runtime
+            .as_mut()
+            .unwrap()
+            .update_with_scene(1.0 / 60.0, &mut state.scene);
+        let index = state.scene.find_entity(id).unwrap();
+        assert_eq!(
+            state.scene.entities[index].transform.position.x,
+            1.0,
+            "旧脚本必须真的执行"
+        );
+        std::fs::write(
+            &script_path,
+            "function update(ctx) set_pos(ctx, 123, 0, 0) end",
+        )
+        .unwrap();
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        state.hot_reload_tick(now);
+        state
+            .game_runtime
+            .as_mut()
+            .unwrap()
+            .update_with_scene(1.0 / 60.0, &mut state.scene);
+        assert_eq!(
+            state.scene.entities[index].transform.position.x,
+            123.0,
+            "下一帧必须执行磁盘新版本"
+        );
+        assert!(
+            !state.hot_reload_tick(now + std::time::Duration::from_secs(2)),
+            "rebase 后不能自激"
+        );
+        state.exit_play_mode();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// 外部改场景文件**不**覆盖内存 —— 未保存的编辑优先。
     ///
     /// 这是刻意的取舍：自动重载磁盘场景会把用户正在编辑的内容直接冲掉。

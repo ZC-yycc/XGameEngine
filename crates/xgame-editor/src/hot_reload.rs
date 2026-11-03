@@ -5,7 +5,7 @@
 //! 文件系统通知（`notify` / `ReadDirectoryChangesW`）要么引一个新依赖，要么自己
 //! 写一套平台分支；而且不同编辑器保存文件的方式不一样（直接覆盖 / 写临时文件再
 //! 改名 / 先删后建），事件序列并不统一，还得配一层去抖。本项目的内容目录是
-//! 清单里显式配置的几棵小树（`Scenes` / `Scripts` / `Prefabs` / `Resources`），
+//! 清单里显式配置的几棵小树（内容目录与 `search_paths`），
 //! 一轮扫描只是一串 `metadata` 调用。**1 Hz 轮询**的代价远小于"多一个平台相关
 //! 依赖 + 一套事件去抖逻辑"，而且扫描不读文件内容，测试可以把时间拨快。
 //!
@@ -203,38 +203,42 @@ impl ProjectWatcher {
 
 /// 扫描项目内容目录，返回按项目相对路径排序的快照。
 ///
-/// 只扫清单里声明的目录：项目根下的其它东西（`.autosave/`、`Build/`、用户
+/// 只扫清单里的内容目录与合法搜索根：项目根下的其它东西（`.autosave/`、`Build/`、用户
 /// 自己放的工具脚本）不进入判据。重叠的目录（默认 `Resources` 同时是模型 /
 /// 贴图 / 音频根）只扫一遍。
 fn scan(project: &ProjectHandle) -> Vec<FileStamp> {
     let content = &project.manifest().content;
-    let mut roots: BTreeMap<PathBuf, Kind> = BTreeMap::new();
-    let mut push = |dir: PathBuf, kind: Kind| {
+    // 类别由文件后缀决定，目录只记录“是否也是场景根”。若用单一 Kind 覆盖
+    // 重叠根，Scripts == Scenes 时脚本类别会吃掉场景身份，误触发资产失效。
+    let mut roots: BTreeMap<PathBuf, bool> = BTreeMap::new();
+    let mut push = |relative: &str, scene_root: bool| {
+        let Ok(relative) = xgame_core::normalize_project_relative(relative) else {
+            return;
+        };
         roots
-            .entry(dir)
-            .and_modify(|existing| {
-                if kind.rank() > existing.rank() {
-                    *existing = kind;
-                }
-            })
-            .or_insert(kind);
+            .entry(project.path(relative))
+            .and_modify(|existing| *existing |= scene_root)
+            .or_insert(scene_root);
     };
-    push(project.scripts_dir(), Kind::Script);
-    push(project.scenes_dir(), Kind::Scene);
-    push(project.prefabs_dir(), Kind::Prefab);
+    push(&content.scripts_dir, false);
+    push(&content.scenes_dir, true);
+    push(&content.prefabs_dir, false);
     for dir in [
         &content.models_dir,
         &content.textures_dir,
         &content.audio_dir,
         &content.shaders_dir,
     ] {
-        push(project.path(dir), Kind::Asset);
+        push(dir, false);
+    }
+    for dir in &content.search_paths {
+        push(dir, false);
     }
 
     let root = project.root();
     let mut out = BTreeMap::<String, FileStamp>::new();
-    for (dir, kind) in roots {
-        walk(root, &dir, kind, 0, &mut out);
+    for (dir, scene_root) in roots {
+        walk(root, &dir, scene_root, 0, &mut out);
     }
     out.into_values().collect()
 }
@@ -246,7 +250,7 @@ fn scan(project: &ProjectHandle) -> Vec<FileStamp> {
 fn walk(
     root: &Path,
     dir: &Path,
-    root_kind: Kind,
+    scene_root: bool,
     depth: usize,
     out: &mut BTreeMap<String, FileStamp>,
 ) {
@@ -268,7 +272,7 @@ fn walk(
         };
         if meta.is_dir() {
             if !meta.file_type().is_symlink() {
-                walk(root, &path, root_kind, depth + 1, out);
+                walk(root, &path, scene_root, depth + 1, out);
             }
             continue;
         }
@@ -280,7 +284,7 @@ fn walk(
             .strip_prefix(root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
-        let kind = classify(&path, root_kind);
+        let kind = classify(&path, scene_root);
         let stamp = FileStamp {
             relative: relative.clone(),
             modified: meta.modified().ok(),
@@ -298,8 +302,8 @@ fn walk(
     }
 }
 
-/// 按扩展名分类；`root_kind` 只用来判断"这个 `.ron` / `.lua` 是不是内容根里的"。
-fn classify(path: &Path, root_kind: Kind) -> Kind {
+/// Lua 可从任一内容 / 搜索根加载；场景的 `.ron` 仍由场景根标识，不能自动覆盖。
+fn classify(path: &Path, scene_root: bool) -> Kind {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_ascii_lowercase())
@@ -307,17 +311,13 @@ fn classify(path: &Path, root_kind: Kind) -> Kind {
     if name.ends_with(".prefab.ron") {
         Kind::Prefab
     } else if name.ends_with(".ron") {
-        if root_kind == Kind::Scene {
+        if scene_root {
             Kind::Scene
         } else {
             Kind::Asset
         }
     } else if name.ends_with(".lua") {
-        if root_kind == Kind::Script {
-            Kind::Script
-        } else {
-            Kind::Asset
-        }
+        Kind::Script
     } else {
         Kind::Asset
     }
@@ -558,5 +558,71 @@ mod tests {
             "自己写的 .meta 不能触发第二轮"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn search_path_scripts_and_assets_are_watched_without_duplicate_changes() {
+        let (mut project, base) = temp_project("search_paths");
+        project.manifest_mut().content.search_paths = vec!["Shared".into(), "Shared/Scripts".into()];
+        write(&project, "Shared/Scripts/Move.lua", "function update(ctx) end");
+        let t0 = Instant::now();
+        let mut watcher = ProjectWatcher::new(&project, t0);
+        write(
+            &project,
+            "Shared/Scripts/Move.lua",
+            "function update(ctx) -- changed\nend",
+        );
+        write(&project, "Shared/Resources/Actor.glb", "model");
+        write(&project, "Shared/Resources/Actor.glb.meta", "settings");
+        let changes = watcher.poll(&project, at(t0, 2));
+        assert_eq!(changes.count(Kind::Script), 1, "{changes:?}");
+        assert_eq!(changes.count(Kind::Asset), 2, "{changes:?}");
+        assert!(changes.touched("Shared/Scripts/Move.lua"));
+        watcher.rebase(&project);
+        assert!(watcher.poll(&project, at(t0, 4)).is_empty());
+        std::fs::remove_file(project.path("Shared/Scripts/Move.lua")).unwrap();
+        let changes = watcher.poll(&project, at(t0, 6));
+        assert!(changes
+            .iter()
+            .any(|c| c.kind == Kind::Script && c.what == ChangeKind::Removed));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn overlapping_script_scene_and_search_roots_preserve_file_kinds() {
+        let (mut project, base) = temp_project("overlap");
+        project.manifest_mut().content.scripts_dir = "Scenes".into();
+        project.manifest_mut().content.search_paths = vec!["Scenes".into(), "Resources".into()];
+        let t0 = Instant::now();
+        let mut watcher = ProjectWatcher::new(&project, t0);
+        write(&project, "Scenes/Other.ron", "scene");
+        write(&project, "Scenes/Move.lua", "script");
+        write(&project, "Resources/Behavior.lua", "script");
+        write(&project, "Resources/Item.prefab.ron", "prefab");
+        let changes = watcher.poll(&project, at(t0, 2));
+        assert_eq!(changes.count(Kind::Scene), 1, "{changes:?}");
+        assert_eq!(changes.count(Kind::Script), 2, "{changes:?}");
+        assert_eq!(changes.count(Kind::Prefab), 1, "{changes:?}");
+        assert_eq!(changes.count(Kind::Asset), 0, "{changes:?}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn invalid_search_roots_are_skipped_like_the_runtime_resolver() {
+        let (mut project, base) = temp_project("invalid_search");
+        project.manifest_mut().content.search_paths =
+            vec!["../Outside".into(), "".into(), "Shared".into()];
+        let t0 = Instant::now();
+        let mut watcher = ProjectWatcher::new(&project, t0);
+        write(&project, "Shared/Good.lua", "script");
+        write(&project, "Unwatched/Other.lua", "unrelated");
+        let changes = watcher.poll(&project, at(t0, 2));
+        assert_eq!(
+            changes.iter().count(),
+            1,
+            "不合规根不能退回扫描全项目: {changes:?}"
+        );
+        assert!(changes.touched("Shared/Good.lua"));
+        let _ = std::fs::remove_dir_all(base);
     }
 }

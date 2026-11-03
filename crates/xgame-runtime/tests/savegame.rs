@@ -14,7 +14,7 @@ use xgame_core::{
     CharacterContacts, CharacterController, CharacterState, Entity, PhysicsBody, Prefab, SaveValue,
     Scene, SceneLoader,
 };
-use xgame_math::glam::Vec3;
+use xgame_math::glam::{Quat, Vec3};
 use xgame_runtime::{World, WorldConfig};
 
 fn temp_root(tag: &str) -> PathBuf {
@@ -114,6 +114,151 @@ fn save_then_load_restores_transforms_and_velocity() {
     );
 
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// 平铺快路径仍要保留负缩放的矩阵分解语义，与初次建体保持一致。
+#[test]
+fn flat_load_preserves_signed_scale_body_pose() {
+    for scale in [
+        Vec3::new(-2.0, 3.0, 4.0),
+        Vec3::new(2.0, -3.0, 4.0),
+        Vec3::new(2.0, 3.0, -4.0),
+        Vec3::new(-2.0, -3.0, 4.0),
+    ] {
+        let mut entity = Entity::new("signed-scale");
+        entity.transform.position = Vec3::new(3.0, 4.0, 5.0);
+        entity.transform.rotation = xgame_core::euler_deg_to_quat(Vec3::new(23.0, 41.0, -17.0));
+        entity.transform.scale = scale;
+        entity.physics = Some(PhysicsBody::dynamic_box([0.2; 3]));
+        let mut scene = Scene::new("signed-scale");
+        scene.entities.push(entity);
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+        let body = world.scene().entities[0]
+            .component::<xgame_core::PhysicsHandle>()
+            .unwrap()
+            .0;
+        let expected = world.physics().body_transform(body).unwrap();
+        let save = world.capture_save();
+        world.physics_mut().teleport(body, Vec3::ZERO);
+        world.physics_mut().set_rotation(body, Quat::IDENTITY);
+        assert_eq!(world.apply_save(&save).applied, 1);
+        let restored = world.physics().body_transform(body).unwrap();
+        assert!(restored.position.distance(expected.position) < 1e-5);
+        assert!(restored.rotation.dot(expected.rotation).abs() > 0.99999);
+        assert_eq!(world.scene().entities[0].transform.scale, scale);
+    }
+}
+
+/// 磁盘存档按 ID 排序，不能假设父节点恰好排在子节点前。
+#[test]
+fn load_restores_child_bodies_after_all_parent_transforms() {
+    for reversed_scene in [false, true] {
+        for kind in ["dynamic", "static", "kinematic", "character"] {
+            let character = kind == "character";
+            let root = temp_root("hierarchy");
+            // 先分配子节点 ID：真实 write_save 排序后仍然是子在父前。
+            let mut child = Entity::new("child");
+            let mut parent = Entity::new("parent");
+            let mut middle = Entity::new("middle");
+            parent.transform.position = Vec3::new(3.0, 2.0, -4.0);
+            parent.transform.rotation = Quat::from_rotation_y(0.7);
+            parent.transform.scale = Vec3::splat(1.5);
+            middle.parent = Some(parent.id);
+            middle.transform.position = Vec3::new(2.0, 1.0, 0.0);
+            middle.transform.rotation = Quat::from_rotation_z(-0.3);
+            child.parent = Some(middle.id);
+            child.transform.position = Vec3::new(-1.0, 2.0, 3.0);
+            child.transform.rotation = Quat::from_rotation_x(0.2);
+            if character {
+                child.controller = Some(CharacterController::default());
+            } else {
+                child.physics = Some(PhysicsBody {
+                    kind: match kind {
+                        "static" => xgame_core::BodyKind::Static,
+                        "kinematic" => xgame_core::BodyKind::Kinematic,
+                        _ => xgame_core::BodyKind::Dynamic,
+                    },
+                    ..PhysicsBody::dynamic_box([0.2; 3])
+                });
+            }
+            let child_id = child.id;
+            let mut scene = Scene::new("save-hierarchy");
+            scene.entities = vec![parent, middle, child];
+            if reversed_scene {
+                scene.entities.reverse();
+            }
+            let mut world = World::new(
+                scene,
+                &root,
+                WorldConfig {
+                    gravity: Vec3::ZERO,
+                    ..WorldConfig::default()
+                },
+            );
+            let child_index = world.scene().find_entity(child_id).unwrap();
+            let expected = world.scene().world_transform(child_index);
+            let body = world.scene().entities[child_index]
+                .component::<xgame_core::PhysicsHandle>()
+                .unwrap()
+                .0;
+            world
+                .physics_mut()
+                .set_velocity(body, Vec3::new(0.4, 0.5, -0.2));
+            world
+                .physics_mut()
+                .set_angular_velocity(body, Vec3::new(0.1, -0.2, 0.3));
+            world.save_game("hierarchy").unwrap();
+            let saved = xgame_core::read_save(&root, "hierarchy").unwrap();
+            assert_eq!(saved.entities[0].id, child_id.raw());
+            for entity in &mut world.scene_mut().entities {
+                entity.transform.position += Vec3::new(8.0, -3.0, 5.0);
+                entity.transform.rotation = Quat::from_rotation_z(1.2);
+            }
+            let report = world.load_game("hierarchy").unwrap();
+            assert_eq!(report.applied, 3);
+            assert_eq!(report.missing, 0);
+            let physical = world.physics().body_transform(body).unwrap();
+            let offset = if character {
+                Vec3::Y * CharacterController::default().center_height()
+            } else {
+                Vec3::ZERO
+            };
+            assert!(
+                physical.position.distance(expected.position + offset) < 1e-4,
+                "读档必须使用完整恢复后的父链: physical={:?}, expected={:?}",
+                physical.position,
+                expected.position + offset
+            );
+            assert!(physical.rotation.dot(expected.rotation).abs() > 0.99999);
+            let saved_child = saved.entity(child_id).unwrap();
+            assert_eq!(
+                world.physics().body_velocity(body),
+                Some(Vec3::from_array(saved_child.linear_velocity))
+            );
+            assert_eq!(
+                world.physics().body_angular_velocity(body),
+                Some(Vec3::from_array(saved_child.angular_velocity))
+            );
+            if kind == "dynamic" {
+                assert!(
+                    Vec3::from_array(saved_child.linear_velocity).length() > 0.1,
+                    "动态体速度恢复不能拿两份零值作假绿"
+                );
+                world.physics_mut().set_velocity(body, Vec3::ZERO);
+                world.physics_mut().set_angular_velocity(body, Vec3::ZERO);
+                world.update(1.0 / 60.0);
+                assert!(
+                    world
+                        .scene()
+                        .world_transform(child_index)
+                        .position
+                        .distance(expected.position) < 1e-4,
+                    "下一物理步不能把错误刚体位置重新写回场景"
+                );
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 }
 
 /// 存档之后才生成的实体：读档**不复活**，计入 `missing`。

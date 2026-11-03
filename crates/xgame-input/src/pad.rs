@@ -289,12 +289,8 @@ impl PadState {
             if self.buttons.insert(button) {
                 self.pressed.insert(button);
             }
-            self.released.remove(&button);
-        } else {
-            if self.buttons.remove(&button) {
-                self.released.insert(button);
-            }
-            self.pressed.remove(&button);
+        } else if self.buttons.remove(&button) {
+            self.released.insert(button);
         }
     }
 

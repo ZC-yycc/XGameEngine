@@ -8500,3 +8500,90 @@ listener 是补覆盖，不冒充旧实现失败证据。另加一条手动成�
 的非均匀祖先缩放可能形成剪切，不能据此承诺任意剪切精确回写。活动物理后端和运动学路径
 仍有分配，实测没有证明稳定的总帧提速。G0 的物理设备 / Alt+Tab / IME、机器掉电及其他
 平台边界继续按差距分析保留；本轮不把本机消息链和 GPU 验收外推到这些环境。
+
+## 一百零六、G0 四模块收尾：短按、层级读档、搜索根热重载与窄窗口（2026-11-03）
+
+### 106.1 基线与旧实现红灯
+
+基线 `ed65277`，工作区干净。workspace check 通过，全量 43 个 suite 为 **1244 passed /
+0 failed / 20 ignored**（`outputs/quality-baseline-tests.log`）。选择输入/UI、存档与编辑器
+热重载三条已有功能链，针对组合场景补齐可复现缺陷，优先级仍为差距分析 G0。
+
+十条回归在旧实现实跑失败：键盘 / 鼠标 / 手柄短按三条、Lua 同帧点击、UI 再按捕获、egui
+短按转发、父链读档、搜索根扫描、Play 中 fallback 脚本更新和重叠根分类。证据是本机
+`outputs/quality-{input,ui,save,reload,capture,bridge,overlap}-red.log`。旧读档把子体放到
+`(18.311184, 8.668137, 13)`，实际应为 `(7.775563, 6.80929, -2.1388342)`。
+
+### 106.2 实现与辨别力
+
+数字设备状态保留同帧两种边沿，编辑器从 egui 原序事件补足最终电平的盲区。UI 的 Press /
+Release 提取成共用动作，以最终电平决定执行顺序。真实 Lua 测试断言短按只点击一次、次帧
+不重复、松开再按后捕获仍在并可再次点击；失焦取消由既有回归继续约束。
+
+有父节点时，读档先恢复全场局部变换，再批量解算并同步刚体；测试覆盖正逆实体数组、普通
+中间节点、动态 / 静态 / 运动学 / 角色，并直接比对物理姿态与存档速度。位置型角色不接受
+任意非零刚体速度，因此以实际存档速度作断言；动态体额外断言非零，避免两份零值假绿。
+
+热重载把合法搜索根接入原扫描器，目录只保存场景根身份、文件按后缀分类。回归通过真实
+Play 脚本把位置从 x=1 改为 x=123，证明新版本确实执行；同时覆盖改动去重、删除与 rebase。
+非法搜索根和负缩放平铺读档属于补覆盖，不冒充旧实现失败。固定合同统一记在决策记录
+§九十三，README / FLOW 只解释用户行为与运行流程。
+
+发布验收的 1280 宽截图又发现 Inspector 的 Z 数值框右沿被裁切。局部放大保存为
+`outputs/quality-inspector-1280-before.png`，原图为 `outputs/quality-ui-1280x800-before.png`。
+`axis_field_width` 在整行上计算，却漏扣标签列宽，导致窄面板仍返回固定 54px。第四项修复
+只在主题公式补回 `LABEL_WIDTH`，复用既有三行共用宽度的调用方式，以真实三尺寸截图验证。
+
+修复后三档截图已逐张检查；1280 局部放大为
+`.workbuddy/artifacts/crop-quality-inspector-1280-after.png`。y=193 / 215 的行扫描中，三列
+深色内区宽度为 47 / 47 / 48px，Z 内区止于 x=1261，右侧边框与留白恢复；修复前 Z 内区
+被面板裁在 x=1271。像素记录在 `outputs/quality-ui-width-evidence.json`，另用既有
+`rowscan.py` 核对 1440 行分段（`outputs/quality-ui-rowscan.log`）。
+
+### 106.3 先测后改与平铺路径取舍
+
+修改前保留旧 release 基准 EXE，新旧使用同一夹具同机交替五轮，测量期间不并行构建。
+新增 `save_apply_hierarchy_cost` 按 200 / 2000 / 8000 刚体分别测平铺与层级；每 32 个子体
+共用一个放在数组末尾的视觉父体，每档预热 5 次、测 30 次。断言刚体数、套用实体数、局部
+位置与实际物理位置，避免未做工作却得到低耗时；四档既有 `update_throughput` 同时复测。
+
+第一版所有场景都走两阶段，层级收益明显，但平铺读档约慢 10%。仅恢复单遍仍有回退，因此
+把父节点判定并入 ID 建表，并让无父节点直接分解局部矩阵，省去通用父链查询。负缩放测试
+比对初次建体和恢复后的实际物理姿态，防止为了变快而改变已有旋转语义。第一、第二轮原始
+汇总分别保留在 `outputs/quality-perf-summary.json` 与 `outputs/quality-second-perf-summary.json`。
+
+最终五轮原始日志为 `outputs/quality-final-perf-<轮>-<old|new>-<基准>.log`，汇总为
+`outputs/quality-final-perf-summary.json`；完整数值只记决策记录 §九十三。层级区间完全分离，
+平铺与常规帧区间重叠，不把本次读档收益写成全引擎 FPS 提升。
+
+### 106.4 最终验证与发布
+
+- 最后一次主题公式修改后重新通过 `cargo check --workspace --all-targets --locked` 与
+  `cargo clippy --workspace --all-targets --locked -- -D warnings`；debug / release workspace
+  构建均成功。日志为 `outputs/quality-final-{check,clippy}.log` 及
+  `outputs/quality-{debug,release}-build.log`。
+- 全量 44 个 suite：**1256 passed / 0 failed / 21 ignored**。相对基线新增 12 条常规回归与
+  1 条手动基准；日志 `outputs/quality-workspace-tests.log`，汇总 `outputs/quality-test-summary.json`。
+  设定 GPU 证据目录、未启用 skip，67 条 screenshot 测试全部通过，双角色阴影证据保存于
+  `outputs/quality-gpu-evidence/`。设备为 RTX 2060 / Vulkan。
+- `tools/build-release.ps1` 刷新 dist，editor / game / MCP 的 SHA256 与 `target/release`
+  逐一核对一致。BehaviorsDemo 原 DLL 先备份到 outputs，再换成同批 release 插件。
+- SampleScene / CharacterDemo / MyGame / BehaviorsDemo 四项目 `--check` 均 exit 0；
+  SampleScene 300 帧、BehaviorsDemo 60 帧无头报告均正常。SampleScene 两次 150 帧 GPU
+  截图逐字节相同，SHA256 为 `C152A071F8AC1CA6804E3BCBAF97E0B8146DA1E5FFA230A4C226804B0DF5733B`。
+  UI 三尺寸已在 debug 与最终 release 分别截图，完成目检、裁切放大与行扫描。
+- dist 中的 SampleScene 重新打包，包内播放器哈希正确，包检查与 60 帧无头通过。发布组合
+  夹具 headless / window 均通过；错绑输入和缺插件两组负对照均 exit 1，明确报“应切关 2 次，
+  实际 0 次”，没有把构建异常当成负对照成功。
+- 真实窗口组合与焦点恢复分别通过 15 / 7 项断言，证据目录为
+  `outputs/published-player-afe3f60fc6494b14ae1f8696d9796a28` 与
+  `outputs/player-focus-4ba9c2fafbac4de2b4cf9b8dc5e11d5a`；总验收记录
+  `outputs/quality-release-acceptance.json` 为 `ok=true`，含三个 EXE 和确定性截图哈希。
+
+### 106.5 完成边界
+
+本轮关闭上述四项具体缺陷；G0 整体仍按差距分析推进。输入保持帧级布尔边沿，模拟轴阈值与
+同帧多次点击历史没有扩展；存档生成物、任意剪切 TRS 与已经解码音频的热替换仍是既有边界。
+真实窗口验证使用 Windows 消息，不替代物理设备、Alt+Tab、IME、其他平台或机器掉电验证。
+本机 UI 日志仍可见 wgpu Vulkan `Unrecognized present mode 1000361000` 警告；截图与窗口
+验收正常退出，零告警结论仅指严格 clippy。

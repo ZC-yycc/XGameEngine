@@ -88,6 +88,38 @@ impl UiInteraction {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+
+    fn press(&mut self, hit: Option<EntityId>, events: &mut Vec<UiEvent>) {
+        self.pressed = hit;
+        if let Some(entity) = hit {
+            events.push(UiEvent {
+                entity,
+                kind: UiEventKind::Press,
+            });
+        }
+    }
+
+    fn release(&mut self, scene: &mut Scene, hit: Option<EntityId>, events: &mut Vec<UiEvent>) {
+        let Some(captured) = self.pressed.take() else {
+            return;
+        };
+        if hit == Some(captured) {
+            if let Some(ui) = scene
+                .find_entity(captured)
+                .and_then(|i| scene.entities[i].ui.as_mut())
+            {
+                ui.state.clicked = true;
+            }
+            events.push(UiEvent {
+                entity: captured,
+                kind: UiEventKind::Click,
+            });
+        }
+        events.push(UiEvent {
+            entity: captured,
+            kind: UiEventKind::Release,
+        });
+    }
 }
 
 /// 推进一帧交互：命中测试 → 状态机 → 写回 `UiElement::state`。
@@ -147,43 +179,18 @@ pub fn update_interaction(
         interaction.hovered = hit_id;
     }
 
-    // -- 3. 按下：捕获指针 --
+    // -- 3/4. 消费边沿，最终捕获必须与电平一致 --
     if let Some(p) = pointer {
-        if p.pressed {
-            interaction.pressed = hit_id;
-            if let Some(id) = hit_id {
-                events.push(UiEvent {
-                    entity: id,
-                    kind: UiEventKind::Press,
-                });
-            }
+        // 同帧两个边沿都发生过：最终松开 = Press → Release，最终按住则
+        // Release → Press。固定先按后松会把新一轮按住也清掉。
+        if p.released && p.down {
+            interaction.release(scene, hit_id, events);
         }
-
-        // -- 4. 松开：在同一个元素上才是 Click --
-        if p.released {
-            if let (Some(captured), Some(current)) = (interaction.pressed, hit_id) {
-                if captured == current {
-                    if let Some(entity) = scene
-                        .find_entity(captured)
-                        .and_then(|i| scene.entities.get_mut(i))
-                    {
-                        if let Some(ui) = entity.ui.as_mut() {
-                            ui.state.clicked = true;
-                        }
-                    }
-                    events.push(UiEvent {
-                        entity: captured,
-                        kind: UiEventKind::Click,
-                    });
-                }
-            }
-            if let Some(captured) = interaction.pressed {
-                events.push(UiEvent {
-                    entity: captured,
-                    kind: UiEventKind::Release,
-                });
-            }
-            interaction.pressed = None;
+        if p.pressed {
+            interaction.press(hit_id, events);
+        }
+        if p.released && !p.down {
+            interaction.release(scene, hit_id, events);
         }
 
         // 指针在视口内但没按着、也没捕获 —— 保证不会留下"幽灵按下"。
@@ -303,6 +310,35 @@ mod tests {
         assert!(!state(&scene, id).pressed);
         assert_eq!(interaction.pressed(), None);
         assert!(events.iter().any(|e| e.kind == UiEventKind::Click));
+    }
+
+    #[test]
+    fn release_then_repress_keeps_the_new_capture() {
+        let (mut scene, id) = scene_with_button();
+        let mut interaction = UiInteraction::default();
+        let mut events = Vec::new();
+        let down = UiPointer {
+            down: true,
+            pressed: true,
+            ..pointer(50.0, 30.0)
+        };
+        step(&mut scene, Some(down), &mut interaction, &mut events);
+        step(
+            &mut scene,
+            Some(UiPointer {
+                released: true,
+                ..down
+            }),
+            &mut interaction,
+            &mut events,
+        );
+        assert!(state(&scene, id).clicked);
+        assert_eq!(interaction.pressed(), Some(id), "松开后再按下应保留新捕获");
+        assert!(state(&scene, id).pressed);
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![UiEventKind::Click, UiEventKind::Release, UiEventKind::Press]
+        );
     }
 
     /// 拖出按钮再松开：取消，不触发点击（与桌面按钮一致）。

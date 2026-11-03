@@ -80,3 +80,58 @@ fn save_load_cost() {
     bench(2000, 10);
     bench(8000, 3);
 }
+
+/// 分开测平铺与父链，避免只测无父节点的快路径而漏掉逐条找父的二次复杂度。
+#[test]
+#[ignore = "手动运行的读档层级成本对照，不进 CI"]
+fn save_apply_hierarchy_cost() {
+    for n in [200, 2000, 8000] {
+        for parented in [false, true] {
+            let mut scene = Scene::new("save-hierarchy-cost");
+            for i in 0..n {
+                let mut entity = Entity::new(format!("body{i}"));
+                entity.transform.position = Vec3::new(i as f32 * 4.0, 1.0, 0.0);
+                entity.physics = Some(PhysicsBody::dynamic_box([0.1; 3]));
+                scene.entities.push(entity);
+            }
+            if parented {
+                // 每组 32 个子体共用一个视觉父体；父体排在末尾，查找不能靠首项命中作弊。
+                for first in (0..n).step_by(32) {
+                    let parent = Entity::new(format!("parent{first}"));
+                    for child in &mut scene.entities[first..(first + 32).min(n)] {
+                        child.parent = Some(parent.id);
+                    }
+                    scene.entities.push(parent);
+                }
+            }
+            let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+            assert_eq!(world.physics().stats().0, n);
+            let mut save = world.capture_save();
+            for entity in &mut save.entities {
+                entity.position[1] += 2.0;
+            }
+            for _ in 0..5 {
+                world.apply_save(&save);
+            }
+            let rounds = 30;
+            let start = Instant::now();
+            let mut applied = 0;
+            for _ in 0..rounds {
+                applied += world.apply_save(std::hint::black_box(&save)).applied;
+            }
+            let us = start.elapsed().as_secs_f64() * 1e6 / rounds as f64;
+            assert_eq!(applied, rounds * save.entities.len());
+            assert_eq!(world.scene().entities[0].transform.position.y, 3.0);
+            let body = world.scene().entities[0]
+                .component::<xgame_core::PhysicsHandle>()
+                .unwrap()
+                .0;
+            let expected_y = if parented { 5.0 } else { 3.0 };
+            assert_eq!(
+                world.physics().body_transform(body).unwrap().position.y,
+                expected_y
+            );
+            println!("save_apply_hierarchy_cost[n={n},parented={parented}]: {us:.2} us/apply");
+        }
+    }
+}

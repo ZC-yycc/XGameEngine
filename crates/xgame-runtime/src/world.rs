@@ -723,9 +723,13 @@ impl World {
         // （`position()`）同解 —— 两套寻址给出不同结果是最难查的一类错位。
         let mut index_of: HashMap<EntityId, usize> =
             HashMap::with_capacity(self.scene.entities.len());
+        let mut has_parents = false;
         for (index, entity) in self.scene.entities.iter().enumerate() {
             index_of.entry(entity.id).or_insert(index);
+            has_parents |= entity.parent.is_some();
         }
+        // 平铺场景没有父子顺序依赖，保留单遍恢复，避免给常见读档多付一次匹配成本。
+        let has_parents = has_parents && !self.body_of_entity.is_empty();
         for state in &save.entities {
             let id = EntityId::from_raw(state.id);
             let Some(&index) = index_of.get(&id) else {
@@ -738,43 +742,25 @@ impl World {
             self.scene.entities[index].transform.rotation =
                 xgame_math::glam::Quat::from_array(state.rotation).normalize();
             self.scene.entities[index].transform.scale = Vec3::from_array(state.scale);
-
-            if let Some(body) = self.body_of_entity.get(&id).copied() {
-                let world = self.scene.world_transform(index);
-                // 角色实体的刚体在**胶囊中心**（脚底 + 半高），与 `sync_bodies`
-                // 建体时的落点一致；直接按实体原点传送会让角色半个身子陷进地面。
-                let controller = self.scene.entities[index].controller;
-                let target = match controller {
-                    Some(controller) => {
-                        world.position + Vec3::Y * controller.sanitized().center_height()
-                    }
-                    None => world.position,
-                };
-                self.physics.teleport(body, target);
-                self.physics.set_rotation(body, world.rotation);
-                self.physics
-                    .set_velocity(body, Vec3::from_array(state.linear_velocity));
-                self.physics
-                    .set_angular_velocity(body, Vec3::from_array(state.angular_velocity));
-
-                // 角色控制器的**运行时状态**也要一起拨回去：`CharacterState.velocity`
-                // 是"上一次移动反推出来的速度"，读档后不复位的话，角色会带着读档
-                // 前那一刻的速度继续冲（从高处读档 = 直接甩出去）。速度本体不进存档
-                // （那是"走到了哪"的派生量），所以这里按存档里的刚体速度复位，
-                // 着地标志交给下一帧的 move 重新求解。
-                if controller.is_some() {
-                    if let Some(runtime) = self.scene.entities[index]
-                        .components
-                        .get_mut::<xgame_core::CharacterState>()
-                    {
-                        runtime.velocity = Vec3::from_array(state.linear_velocity);
-                        runtime.grounded = false;
-                        runtime.sliding_down_slope = false;
-                        runtime.contacts = xgame_core::CharacterContacts::new();
-                    }
-                }
+            if !has_parents {
+                self.restore_saved_body(index, state, None);
             }
             report.applied += 1;
+        }
+
+        // 先恢复全部局部变换，再把最终世界姿态送给物理。存档按 ID 排序，子节点
+        // 完全可能先于父节点；边恢复边传送会混用旧父矩阵，下一步又把错误写回场景。
+        // 有层级时一次批量解算；逐条 world_transform 内部找父仍会退化成 O(n²)。
+        if has_parents {
+            self.physics_transforms.update(&self.scene);
+            for state in &save.entities {
+                let id = EntityId::from_raw(state.id);
+                let Some(&index) = index_of.get(&id) else {
+                    continue;
+                };
+                let matrix = self.physics_transforms.matrices()[index];
+                self.restore_saved_body(index, state, Some(matrix));
+            }
         }
         // 变量表**替换**（不是合并）：读档要回到那一刻，合并会把存档之后新写的键
         // 留下来，症状是"读档后血量显示的是上一次的数"。
@@ -787,6 +773,51 @@ impl World {
             .per_entity
             .retain(|id, _| index_of.contains_key(id));
         report
+    }
+
+    /// 两条读档路径共用角色偏移 / 速度复位，避免平铺优化与层级恢复各留一份物理语义。
+    #[inline]
+    fn restore_saved_body(
+        &mut self,
+        index: usize,
+        state: &xgame_core::savegame::EntityState,
+        matrix: Option<xgame_math::glam::Mat4>,
+    ) {
+        let id = EntityId::from_raw(state.id);
+        let Some(body) = self.body_of_entity.get(&id).copied() else {
+            return;
+        };
+        // None 只用于无父节点的路径，局部矩阵就是世界矩阵；仍做矩阵分解，保留
+        // 负缩放的旋转语义，不能直接把局部 rotation 塞给物理。
+        let world = Transform::from_matrix(
+            matrix.unwrap_or_else(|| self.scene.entities[index].transform.local_matrix()),
+        );
+        // 角色实体的刚体在胶囊中心（脚底 + 半高），与 sync_bodies 建体的落点一致。
+        let controller = self.scene.entities[index].controller;
+        let target = match controller {
+            Some(controller) => world.position + Vec3::Y * controller.sanitized().center_height(),
+            None => world.position,
+        };
+        self.physics.teleport(body, target);
+        self.physics.set_rotation(body, world.rotation);
+        self.physics
+            .set_velocity(body, Vec3::from_array(state.linear_velocity));
+        self.physics
+            .set_angular_velocity(body, Vec3::from_array(state.angular_velocity));
+
+        // CharacterState 是上次移动的派生状态。保留旧速度会让高处读档的角色被甩出去；
+        // 速度按存档刚体复位，着地与接触面交给下一次 move 重新求解。
+        if controller.is_some() {
+            if let Some(runtime) = self.scene.entities[index]
+                .components
+                .get_mut::<xgame_core::CharacterState>()
+            {
+                runtime.velocity = Vec3::from_array(state.linear_velocity);
+                runtime.grounded = false;
+                runtime.sliding_down_slope = false;
+                runtime.contacts = xgame_core::CharacterContacts::new();
+            }
+        }
     }
 
     /// 存档到 `Saves/<slot>.sav`，返回写入的项目相对路径。

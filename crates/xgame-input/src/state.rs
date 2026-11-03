@@ -18,6 +18,8 @@
 //! 原因很实际：事件在两帧之间随时到达（winit 可以在一次 `AboutToWait` 里
 //! 塞进好几个按键事件），如果只有一帧一帧的快照，中间那一帧就永远为 false。
 //! 累积则不会漏 —— 一个事件只要发生过，就一定被本帧的 `pressed` 读到。
+//! `pressed` / `released` 可以同时为真，`down` 才是最终电平；相反边沿不能
+//! 互相清除。失焦取消是例外：它会明确撤掉未消费的按下，见 `set_focused`。
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -99,12 +101,8 @@ impl InputState {
             if self.keys_down.insert(code) {
                 self.keys_pressed.insert(code);
             }
-            self.keys_released.remove(&code);
-        } else {
-            if self.keys_down.remove(&code) {
-                self.keys_released.insert(code);
-            }
-            self.keys_pressed.remove(&code);
+        } else if self.keys_down.remove(&code) {
+            self.keys_released.insert(code);
         }
     }
 
@@ -117,12 +115,8 @@ impl InputState {
             if self.buttons_down.insert(button) {
                 self.buttons_pressed.insert(button);
             }
-            self.buttons_released.remove(&button);
-        } else {
-            if self.buttons_down.remove(&button) {
-                self.buttons_released.insert(button);
-            }
-            self.buttons_pressed.remove(&button);
+        } else if self.buttons_down.remove(&button) {
+            self.buttons_released.insert(button);
         }
     }
 

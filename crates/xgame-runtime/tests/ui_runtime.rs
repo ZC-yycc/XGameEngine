@@ -104,6 +104,71 @@ end
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 低帧率 / 事件积压时，完整点击可能在同一个 update 前到达。
+#[test]
+fn lua_sees_same_frame_click_and_repress_keeps_capture() {
+    let root = temp_root("short-click");
+    write_script(
+        &root,
+        "Click.lua",
+        r#"
+local count = 0
+function update(ctx)
+    if ui_clicked(ctx, self_id(ctx)) then
+        count = count + 1
+        ui_set_text(ctx, self_id(ctx), tostring(count))
+    end
+end
+"#,
+    );
+    let (scene, id) = button_scene("Scripts/Click.lua");
+    let mut world = World::new(scene, &root, WorldConfig::default());
+    world.set_ui_viewport((800, 600));
+    world.set_ui_pointer(Some(Vec2::new(50.0, 30.0)));
+    for down in [true, false] {
+        world
+            .input_mut()
+            .state_mut()
+            .handle_mouse_button(MouseButton::Left, down);
+    }
+    world.update(1.0 / 60.0);
+    assert_eq!(text_of(&world, id), "1", "同帧短按也必须到达 Lua");
+    assert_eq!(world.ui_pressed(), None);
+    world.update(1.0 / 60.0);
+    assert_eq!(text_of(&world, id), "1", "下一帧不重复点击");
+
+    world
+        .input_mut()
+        .state_mut()
+        .handle_mouse_button(MouseButton::Left, true);
+    world.update(1.0 / 60.0);
+    for down in [false, true] {
+        world
+            .input_mut()
+            .state_mut()
+            .handle_mouse_button(MouseButton::Left, down);
+    }
+    world.update(1.0 / 60.0);
+    assert_eq!(text_of(&world, id), "2");
+    assert_eq!(
+        world.ui_pressed(),
+        Some(id),
+        "最终按住时，新一轮捕获必须保留"
+    );
+    world
+        .input_mut()
+        .state_mut()
+        .handle_mouse_button(MouseButton::Left, false);
+    world.update(1.0 / 60.0);
+    assert_eq!(text_of(&world, id), "3");
+    assert_eq!(world.ui_pressed(), None);
+    assert!(world
+        .take_logs()
+        .iter()
+        .all(|log| log.level != xgame_script::LogLevel::Error));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// 点在按钮外：不触发。
 #[test]
 fn click_outside_does_not_fire() {

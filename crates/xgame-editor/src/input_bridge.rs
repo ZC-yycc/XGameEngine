@@ -13,7 +13,7 @@
 //!
 //! 1. **修饰键不在 egui 的 `Key` 里**。egui 把 Shift/Ctrl/Alt 放在
 //!    `Modifiers` 结构里，`Key` 枚举里根本没有它们；所以修饰键要单独读
-//!    `modifiers`，其余键走逐个 `key_down`。
+//!    `modifiers`，其余键先转发事件，再用 `key_down` 对齐最终电平。
 //! 2. **按住会被反复写入 `true`**。这不是问题：`InputState::handle_key` 用
 //!    `HashSet::insert` 的返回值区分"首次按下"和"系统按键重复"，
 //!    所以 `action_pressed` 不会被按住刷屏。
@@ -129,10 +129,32 @@ fn to_egui(code: KeyCode) -> Option<EguiKey> {
 pub fn sync(ctx: &egui::Context, input: &mut xgame_input::Input) {
     ctx.input(|i| {
         let state = input.state_mut();
-        // 同帧失焦又恢复也要先取消旧操作，不能只看帧末 focused 的最终值。
+        // 只同步最终电平会吞掉两帧之间完成的短按。按原序转发边沿与焦点，
+        // 后台事件由 InputState 门控；随后再对齐电平，补启动时已按住的按键。
         for event in &i.events {
-            if let egui::Event::WindowFocused(focused) = event {
-                state.set_focused(*focused);
+            match event {
+                egui::Event::WindowFocused(focused) => state.set_focused(*focused),
+                egui::Event::Key { key, pressed, .. } => {
+                    if let Some(&code) = KeyCode::ALL
+                        .iter()
+                        .find(|&&code| to_egui(code) == Some(*key))
+                    {
+                        state.handle_key(code, *pressed);
+                    }
+                }
+                egui::Event::PointerButton {
+                    button, pressed, ..
+                } => {
+                    let button = match button {
+                        egui::PointerButton::Primary => MouseButton::Left,
+                        egui::PointerButton::Secondary => MouseButton::Right,
+                        egui::PointerButton::Middle => MouseButton::Middle,
+                        egui::PointerButton::Extra1 => MouseButton::Back,
+                        egui::PointerButton::Extra2 => MouseButton::Forward,
+                    };
+                    state.handle_mouse_button(button, *pressed);
+                }
+                _ => {}
             }
         }
         state.set_focused(i.focused);
@@ -163,6 +185,14 @@ pub fn sync(ctx: &egui::Context, input: &mut xgame_input::Input) {
         state.handle_mouse_button(MouseButton::Left, i.pointer.primary_down());
         state.handle_mouse_button(MouseButton::Right, i.pointer.secondary_down());
         state.handle_mouse_button(MouseButton::Middle, i.pointer.middle_down());
+        state.handle_mouse_button(
+            MouseButton::Back,
+            i.pointer.button_down(egui::PointerButton::Extra1),
+        );
+        state.handle_mouse_button(
+            MouseButton::Forward,
+            i.pointer.button_down(egui::PointerButton::Extra2),
+        );
 
         // egui 用的是自己的 `Vec2`（emath），跟引擎的 glam::Vec2 是两个类型，
         // 这里逐分量搬一下 —— 顺手也让"坐标单位是逻辑点"这件事写在脸上。
@@ -210,6 +240,45 @@ pub fn viewport_pointer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_frame_key_and_mouse_taps_reach_play_input() {
+        let ctx = egui::Context::default();
+        ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::new(1).unwrap());
+        let mut input = xgame_input::Input::with_default_map();
+        let mut events = Vec::new();
+        for pressed in [true, false] {
+            events.push(egui::Event::Key {
+                key: EguiKey::Space,
+                physical_key: Some(EguiKey::Space),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            });
+            events.push(egui::Event::PointerButton {
+                pos: egui::pos2(20.0, 30.0),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ctx| sync(ctx, &mut input),
+        );
+        for action in ["Jump", "Fire"] {
+            assert!(input.action_pressed(action), "Play 漏掉 {action} 的短按");
+            assert!(input.action_released(action));
+            assert!(!input.action_down(action));
+        }
+        input.end_frame();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| sync(ctx, &mut input));
+        assert!(!input.action_pressed("Jump"));
+        assert!(!input.action_pressed("Fire"));
+    }
 
     #[test]
     fn focus_is_forwarded_from_egui_before_reading_devices() {

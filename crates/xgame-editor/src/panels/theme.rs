@@ -266,10 +266,11 @@ pub fn drag_field_w(
 /// 必须在放置第一个控件**之前**调用：放完一个 `available_width()` 就少一截，
 /// 三行会算出三个不同的宽度，列就对不齐了。
 pub fn axis_field_width(ui: &egui::Ui) -> f32 {
+    // 调用点在 field_row 外，available_width 还包含标签列；漏扣会让窄面板仍取 54px。
     // 6 个控件（3 轴标 + 3 输入框）之间有 6 个间隙（含与标签列之间那一个）。
     // 再留 4px 余量：面板的滚动条宽度、分隔线与 `max_rect` 的取整会各吃掉一点，
     // 算满之后最后一列会贴到边界上（实测截图里 Z 框右沿正好压在窗口边缘）。
-    let fixed = AXIS_TAG_WIDTH * 3.0 + ui.spacing().item_spacing.x * 6.0 + 4.0;
+    let fixed = LABEL_WIDTH + AXIS_TAG_WIDTH * 3.0 + ui.spacing().item_spacing.x * 6.0 + 4.0;
     ((ui.available_width() - fixed) / 3.0).clamp(MIN_AXIS_FIELD, FIELD_WIDTH)
 }
 
