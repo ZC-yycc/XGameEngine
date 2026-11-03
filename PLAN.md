@@ -8417,3 +8417,86 @@ previous 与正式输出里的事务标记都必须消失。三处均通过，�
 语义；物理键鼠、真实 Alt+Tab / 前台切换、IME、手柄 / 触摸真机与其他平台仍未验收，G0
 整体继续进行。下一轮优先在目标桌面与外设环境验证这些相邻边界，沿用差距分析的 G0
 优先级；本轮到此停止扩展模块。
+
+## 一百零五、G0 物理父子层级：本步回写与缓冲复用（2026-11-03）
+
+### 105.1 选择理由与旧实现红灯
+
+基线 `de49c0d`，工作区干净，远端无领先；基线 workspace check 通过，42 个测试 suite 为
+**1238 passed / 0 failed / 19 ignored**。核对差距分析后选 R10 / 084 尚未专项验证的父层级：
+`pull_dynamic_bodies` 在回写前拍下整场旧世界矩阵，父子刚体都运动时，子局部位姿由旧父矩阵
+换算，之后渲染又乘上新父矩阵，父运动被重复叠加。这会直接影响显示、挂载相机与音频监听。
+
+先新增独立物理位姿对照，再改实现。`physics_hierarchy` 的直接父子与普通中间节点两条回归
+在旧实现均于第 0 帧失败（**0 passed / 2 failed / 1 ignored**）。直接父子的子节点视觉位置
+为 `(7.5548997, 6.0190215, -2.0288143)`，物理位置为
+`(7.5729847, 6.004999, -1.9491353)`；证据在本机 `outputs/hierarchy-pose-red.log`。
+回归用实际 `PhysicsWorld::body_transform` 作对照，同时断言固定步数与父刚体实际位移，
+避免场景不运动却得到假绿。
+
+### 105.2 解算收敛与刻意的取舍
+
+新增 `xgame_core::SceneTransforms`：用迭代收链按父先子后解算，`update_with` 在每个节点
+回调后立即传播新世界矩阵。普通中间节点也参加同一遍解算，因此动态父体到动态子体之间
+夹有视觉节点时仍能使用本步父矩阵。根动态体直接接收物理位姿；子节点只换算位置 / 旋转，
+局部视觉缩放保留。角色控制器沿用既有位姿所有权。
+
+原 `Scene::parent_indices` 与批量世界矩阵入口使用同一份身份 / 解算规则，避免单次和复用
+路径各自漂移。`World` 的运动学推送与动态回写共享工作区容量，每次重建父索引；没有引入
+跨帧层级缓存，所以编辑器交换场景、重排、重挂与实体替换不需要新增失效通知。
+
+最终新增六条常规测试：core 三条覆盖重排 / 重挂 / 替换 / 缩短 / 清空、重复 ID 首占位、
+悬空 / 自指父以及环的重复调用；runtime 两条覆盖直接 / 间接父子在正序 / 逆序存放下连续
+90 步的位置、朝向、视觉缩放与相机，另一条覆盖旋转父体上的 listener。前三条 core 测试及
+listener 是补覆盖，不冒充旧实现失败证据。另加一条手动成本基准，默认 ignore。
+
+### 105.3 先分清分配来源，再设门禁
+
+旧完整动态帧确有分配，但最初把它直接断言为零也把 rapier 后端分配算进来，不能据此宣称
+全部来自层级解算。最终门禁使用同负载、同预热的直接 `PhysicsWorld::step` 作独立对照，
+对无接触动态场景要求完整更新的次数与字节完全相等；工作区的 `update` / `update_with`
+另有严格零分配及实际变换变化断言。既有静态 / UI / 根运动零分配门禁全部保留。
+
+门禁完成后临时撤掉动态工作区复用，改为每次创建 `SceneTransforms::default()`，真实得到
+**1152 次 / 244476 字节**，直接后端为 **912 次 / 82176 字节**，测试失败。证据为
+`outputs/hierarchy-allocation-negative.log`；随后恢复成员工作区，debug 与 release 均通过。
+该负对照验证的是最终门禁的辨别力；最初“整帧应为零”的失败记录只作来源诊断。
+
+耗时对照保留修改前编译的 release 基准二进制，用相同夹具在同一台机器交替运行 old / new
+五轮，期间不并行跑构建或其他基准。新增层级基准各使用 512 个动态体、预热 30 帧、测量
+300 帧，断言 300 个固定步、512 个刚体和重力位移；既有 `update_throughput` 四档同时
+复测。完整数值、环境与“区间重叠，不宣称稳定总帧提速”的结论只写在决策记录 §九十二，
+原始日志为 `outputs/hierarchy-perf-<轮>-<old|new>-<基准>.log`，汇总为
+`outputs/hierarchy-perf-summary.json`。
+
+### 105.4 全量验证与发布产物
+
+- `cargo check --workspace --all-targets --locked`、
+  `cargo clippy --workspace --all-targets --locked -- -D warnings`、debug / release workspace
+  构建均通过，clippy 零告警。
+- 全量测试共 43 个 suite，**1244 passed / 0 failed / 20 ignored**；日志为
+  `outputs/hierarchy-workspace-tests.log`。release 定向姿态与分配测试为 3 passed / 0 failed，
+  另有一条手动基准 ignored，见 `outputs/hierarchy-release-tests.log`。
+- 显式设置 `XGAME_GPU_EVIDENCE_DIR` 后，67 条截图测试全部通过，并生成双角色阴影证据图；
+  运行设备为 RTX 2060 / Vulkan。日志中的 skip-contract panic 是预期捕获的辨别力检查，
+  suite 结果为 0 failed，见 `outputs/hierarchy-gpu-tests.log`。
+- `tools/build-release.ps1` 刷新 dist，editor / game / MCP 三个 EXE 的 SHA256 分别与
+  `target/release` 完全相同。BehaviorsDemo 旧插件先备份到 outputs，再换成同批 release DLL。
+- SampleScene、CharacterDemo、MyGame、BehaviorsDemo 四个工程 `--check` 全部 exit 0；
+  SampleScene 300 帧、BehaviorsDemo 60 帧无头报告正常。两次 SampleScene 150 帧 GPU 截图
+  逐字节一致，SHA256 为 `C152A071F8AC1CA6804E3BCBAF97E0B8146DA1E5FFA230A4C226804B0DF5733B`，
+  已打开检查主截图和双角色阴影证据。
+- `dist/projects/SampleScene` 重新构建成游戏包，包内播放器哈希与 dist 一致，包检查及
+  60 帧无头通过。既有发布组合夹具 headless / window 均通过；错绑输入和缺插件两组
+  负对照都按预期 exit 1、停在第 0 关。
+- 真实发布包焦点夹具通过。窗口组合证据在
+  `outputs/published-player-9c596b40ef654a678cc49b336ca94049`，焦点证据在
+  `outputs/player-focus-d3c2aa5221c8462db14901abf703c32b`；总验收记录
+  `outputs/hierarchy-release-acceptance.json` 为 `ok=true`，含三个 EXE 与截图哈希。
+
+### 105.5 完成边界
+
+本轮关闭 R10 的物理父层级专项缺口，并把分配回归纳入常规 CI 测试。场景只存 TRS，带旋转
+的非均匀祖先缩放可能形成剪切，不能据此承诺任意剪切精确回写。活动物理后端和运动学路径
+仍有分配，实测没有证明稳定的总帧提速。G0 的物理设备 / Alt+Tab / IME、机器掉电及其他
+平台边界继续按差距分析保留；本轮不把本机消息链和 GPU 验收外推到这些环境。

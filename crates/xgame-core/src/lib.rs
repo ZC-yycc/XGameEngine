@@ -49,6 +49,7 @@ mod config;
 pub mod prefab;
 pub mod project;
 mod scene;
+mod scene_transforms;
 mod transform;
 
 // 新增模块
@@ -101,6 +102,7 @@ pub use project::{
     DEFAULT_ENTRY_SCENE, PROJECT_FILE_NAME, PROJECT_FORMAT_VERSION,
 };
 pub use scene::{Entity, Scene};
+pub use scene_transforms::SceneTransforms;
 pub use transform::{euler_deg_to_quat, quat_to_euler_deg, Transform};
 
 // -- 导出：新增基础设施

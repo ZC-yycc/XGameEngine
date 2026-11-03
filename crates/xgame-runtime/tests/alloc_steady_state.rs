@@ -1,4 +1,4 @@
-//! 稳态分配门禁：`World::update` 在**预热之后**不该每帧分配。
+//! 稳态分配门禁：无活动物理的帧严格为零；活动动态帧不增加物理后端之外的分配。
 //!
 //! # 为什么要有这条测试
 //!
@@ -12,6 +12,8 @@
 //! `#[global_allocator]` 包一层 `System`，用原子开关控制计数窗口：预热阶段
 //! 允许分配（建刚体、扩容查询结构都是**一次性**的），窗口只覆盖预热之后的
 //! N 帧。测试框架自身的分配在同一个进程里，但都发生在开关之外。
+//! 活动 rapier 步仍会分配，使用同负载直接 `PhysicsWorld::step` 作对照；层级工作区
+//! 单独断言零分配，避免把后端分配混进编排层的结论。
 //!
 //! # 为什么放在 `tests/` 而不是 `src`
 //!
@@ -24,7 +26,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use xgame_core::animation_runtime::{AnimClip, AnimNode, Interpolation, Track, TrackPath};
 use xgame_core::{
-    AnimationAsset, AnimationLoader, Animator, Entity, PhysicsBody, RootMotion, Scene, UiElement,
+    AnimationAsset, AnimationLoader, Animator, BodyKind, Entity, PhysicsBody, RootMotion, Scene,
+    SceneTransforms, UiElement,
 };
 use xgame_math::glam::{Quat, Vec3};
 use xgame_runtime::{World, WorldConfig};
@@ -107,12 +110,42 @@ fn build_ui_scene() -> Scene {
     scene
 }
 
+fn moving_world(kind: BodyKind, parented: bool) -> World {
+    let mut scene = Scene::new("alloc-moving");
+    let parent = scene.add_entity(Entity::new("parent"));
+    for i in 0..32 {
+        let mut entity = Entity::new(format!("body{i}"));
+        entity.parent = parented.then_some(parent);
+        entity.transform.position = Vec3::new(i as f32 * 4.0, 2.0, 0.0);
+        entity.physics = Some(PhysicsBody {
+            kind,
+            ..PhysicsBody::dynamic_box([0.1; 3])
+        });
+        scene.add_entity(entity);
+    }
+    let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+    let report = world.update(1.0 / 60.0);
+    assert_eq!(report.fixed_steps, 1);
+    assert_eq!(report.bodies, 32);
+    if kind == BodyKind::Dynamic {
+        assert!(
+            world.scene().entities[1].transform.position.y < 2.0,
+            "动态路径必须实际积分"
+        );
+    }
+    world
+}
+
 /// 跑 `MEASURED_FRAMES` 帧，返回 `(分配次数, 分配字节数, 计数窗口内的世界时长增量)`。
 ///
 /// 第三个返回值是**活跃性证明**：如果 `update` 因为某种原因没真的跑，分配次数
 /// 一样会是 0，那这条测试就成了永远为绿的空转。用**增量**而不是绝对值，是为了
 /// 不把预热帧算进去（第一版就是这么写错的：断言 1.0s，实际 1.5s）。
-fn measure_steady_state(mut world: World, viewport: Option<(u32, u32)>) -> (usize, usize, f32) {
+fn measure_steady_state(
+    mut world: World,
+    viewport: Option<(u32, u32)>,
+    physics_only: bool,
+) -> (usize, usize, f32) {
     if let Some((w, h)) = viewport {
         world.set_ui_viewport((w, h));
     }
@@ -125,7 +158,11 @@ fn measure_steady_state(mut world: World, viewport: Option<(u32, u32)>) -> (usiz
     ALLOC_BYTES.store(0, Ordering::Relaxed);
     COUNTING.store(true, Ordering::Relaxed);
     for _ in 0..MEASURED_FRAMES {
-        world.update(1.0 / 60.0);
+        if physics_only {
+            world.physics_mut().step(1.0 / 60.0);
+        } else {
+            world.update(1.0 / 60.0);
+        }
     }
     COUNTING.store(false, Ordering::Relaxed);
     let elapsed = world.clock().total_time() - time_before;
@@ -139,7 +176,9 @@ fn measure_steady_state(mut world: World, viewport: Option<(u32, u32)>) -> (usiz
 
 /// 断言一个场景在稳态下零分配（并顺带证明它真的在推进）。
 fn assert_zero_alloc(label: &str, world: World, viewport: Option<(u32, u32)>) {
-    let (count, bytes, elapsed) = measure_steady_state(world, viewport);
+    let (count, bytes, elapsed) = measure_steady_state(world, viewport, false);
+
+    println!("[{label}] {MEASURED_FRAMES} frames: {count} allocations / {bytes} bytes");
 
     // 先证明这 N 帧真的推进了世界：否则"零分配"可能只是"什么都没跑"。
     let expected = MEASURED_FRAMES as f32 / 60.0;
@@ -256,4 +295,46 @@ fn steady_state_update_does_not_allocate() {
         "根运动变体必须先证明动画资产、采样与实体位移整条链真的跑起来"
     );
     assert_zero_alloc("animation+root-motion", root_motion, None);
+
+    // 活动物理后端自身也会分配，不能把它算成层级缓冲的分配，更不能声称整段为零。
+    // 先用同一负载的直接 step 对照实测，再给复用工作区本身设严格的零分配门禁。
+    for (kind, label) in [
+        (BodyKind::Dynamic, "dynamic"),
+        (BodyKind::Kinematic, "kinematic"),
+    ] {
+        for parented in [false, true] {
+            let full = measure_steady_state(moving_world(kind, parented), None, false);
+            let backend = measure_steady_state(moving_world(kind, parented), None, true);
+            println!("[{label}, parented={parented}] full={full:?}, physics-only={backend:?}");
+            assert!((full.2 - 1.0).abs() < 1e-2, "完整帧必须实际推进");
+            if kind == BodyKind::Dynamic {
+                assert_eq!(
+                    (full.0, full.1),
+                    (backend.0, backend.1),
+                    "无接触动态场景的帧编排不能比相同物理步额外分配（parented={parented}）",
+                );
+            }
+        }
+    }
+
+    let mut scene = moving_world(BodyKind::Dynamic, true).scene().clone();
+    let mut transforms = SceneTransforms::default();
+    transforms.update(&scene);
+    ALLOC_COUNT.store(0, Ordering::Relaxed);
+    ALLOC_BYTES.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    for _ in 0..MEASURED_FRAMES {
+        transforms.update(&scene);
+        transforms.update_with(&mut scene, |entity, _| entity.transform.position.x += 0.01);
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOC_COUNT.load(Ordering::Relaxed),
+        0,
+        "层级解算与父子顺序回写必须复用缓冲"
+    );
+    assert!(
+        scene.entities[0].transform.position.x > 0.5,
+        "工作区回写不能空转"
+    );
 }

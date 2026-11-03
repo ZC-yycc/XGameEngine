@@ -60,7 +60,7 @@ use xgame_core::{
     SceneLoader, Transform,
 };
 use xgame_input::{Input, InputMap, MouseButton};
-use xgame_math::glam::{Mat4, Vec2, Vec3};
+use xgame_math::glam::{Vec2, Vec3};
 use xgame_physics::{
     body_from_scene, Collider, CollisionEvent, DebugLine, PhysicsConfig, PhysicsWorld, RigidBody,
 };
@@ -202,6 +202,8 @@ pub struct World {
     /// 都要扫一遍，稳态下这个 `Vec` 一直是空的，但字面量写法会**每帧分配一次**。
     /// 留着容量循环复用，稳态就是零分配。
     scratch_physics_indices: Vec<usize>,
+    /// 物理推送 / 回写共用容量；每次重建父索引，实体重排或重挂不会留下陈旧关系。
+    physics_transforms: xgame_core::SceneTransforms,
     /// 场景里是否存在**运动学**刚体。
     ///
     /// 由 `sync_bodies` 那次扫描顺带记下，供 `push_kinematic_bodies` 早退用。
@@ -313,6 +315,7 @@ impl World {
             save_context: crate::SaveContext::new(root),
             last_report: FrameReport::default(),
             scratch_physics_indices: Vec::new(),
+            physics_transforms: xgame_core::SceneTransforms::default(),
             has_kinematic: false,
             has_dynamic: false,
             behaviors: BehaviorRegistry::default(),
@@ -1941,7 +1944,8 @@ impl World {
             return;
         }
 
-        let world_matrices = self.scene.world_matrices();
+        self.physics_transforms.update(&self.scene);
+        let world_matrices = self.physics_transforms.matrices();
         for (index, entity) in self.scene.entities.iter().enumerate() {
             let Some(def) = &entity.physics else { continue };
             // 角色实体的位姿是角色控制器写的，运动学推送会把刚移动的结果覆盖掉。
@@ -2152,49 +2156,36 @@ impl World {
             return;
         }
 
-        // 父索引与世界矩阵一次解算同时拿到（见 `world_matrices_with_parents`）：
-        // 旧写法先 `parent_indices()` 再 `world_matrices()`，而后者内部又要算一遍
-        // 父索引 —— 每个固定步都白跑一次 `hierarchy()`。
-        let (parent_indices, world_matrices) = self.scene.world_matrices_with_parents();
-
-        for index in 0..self.scene.entities.len() {
-            let id = self.scene.entities[index].id;
-            let Some(def) = &self.scene.entities[index].physics else {
-                continue;
-            };
-            // 角色实体即使误配了动态刚体也不回收 —— 它的位姿归角色控制器管。
-            if self.scene.entities[index].controller.is_some() {
-                continue;
-            }
-            if def.kind != xgame_core::BodyKind::Dynamic {
-                continue;
-            }
-            let Some(body) = self.body_of_entity.get(&id).copied() else {
-                continue;
-            };
-            let Some(phys) = self.physics.body_transform(body) else {
-                continue;
-            };
-
-            let parent_world: Mat4 = parent_indices
-                .get(index)
-                .copied()
-                .flatten()
-                .map(|p| world_matrices[p])
-                .unwrap_or(Mat4::IDENTITY);
-
-            let local = if parent_world.determinant().abs() > 1e-12 {
-                Transform::from_matrix(parent_world.inverse() * phys.local_matrix())
-            } else {
-                phys
-            };
-
-            if let Some(entity) = self.scene.entities.get_mut(index) {
+        // 父刚体与普通中间节点先更新，子刚体才能用本步的父矩阵换回局部坐标。
+        // 不能提前拍一份旧世界矩阵：那会把父位移再叠到子节点上，且与实体存放顺序无关。
+        let physics = &self.physics;
+        let bodies = &self.body_of_entity;
+        self.physics_transforms
+            .update_with(&mut self.scene, |entity, parent| {
+                // 角色位姿归控制器管，即使误配了动态刚体也不能回收。
+                if entity.controller.is_some()
+                    || !entity
+                        .physics
+                        .is_some_and(|def| def.kind == xgame_core::BodyKind::Dynamic)
+                {
+                    return;
+                }
+                let Some(phys) = bodies
+                    .get(&entity.id)
+                    .and_then(|&body| physics.body_transform(body))
+                else {
+                    return;
+                };
+                let local = match parent {
+                    Some(matrix) if matrix.determinant().abs() > 1e-12 => {
+                        Transform::from_matrix(matrix.inverse() * phys.local_matrix())
+                    }
+                    _ => phys,
+                };
                 entity.transform.position = local.position;
                 entity.transform.rotation = local.rotation;
                 // 缩放不动：物理体没有缩放概念，写了会把视觉尺寸吃掉。
-            }
-        }
+            });
     }
 }
 
@@ -3524,6 +3515,36 @@ mod tests {
         world.set_listener([1.0, 2.0, 3.0], [0.0, 0.0, 1.0]);
         world.update(0.0);
         assert_eq!(world.audio_port.listener.position, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn camera_listener_follows_the_current_physics_pose_of_its_parent() {
+        let mut scene = Scene::new("listener-parent");
+        let mut parent = Entity::new("parent");
+        parent.physics = Some(xgame_core::PhysicsBody::dynamic_box([0.1; 3]));
+        let parent_id = parent.id;
+        let mut camera = Entity::new("camera");
+        camera.parent = Some(parent_id);
+        camera.camera = Some(xgame_core::Camera::default());
+        camera.transform.position = Vec3::new(0.0, 2.0, -3.0);
+        // 相机先存放，防止测试暗中依赖父节点恰好排在前面。
+        scene.entities = vec![camera, parent];
+        let mut world = World::new(scene, ".", WorldConfig::default());
+        let body = world.body_of_entity[&parent_id];
+        world.physics.set_velocity(body, Vec3::X);
+        world.physics.set_angular_velocity(body, Vec3::Y);
+        for _ in 0..30 {
+            assert_eq!(world.update(1.0 / 60.0).fixed_steps, 1);
+            let physical = world.physics.body_transform(body).unwrap();
+            let expected_position = physical.position
+                + physical.rotation * Vec3::new(0.0, 2.0, -3.0);
+            let expected_forward = physical.rotation * Vec3::Z;
+            assert!(Vec3::from_array(world.audio_port.listener.position)
+                .distance(expected_position) < 1e-5);
+            assert!(Vec3::from_array(world.audio_port.listener.forward)
+                .distance(expected_forward) < 1e-5);
+        }
+        assert!(world.physics.body_transform(body).unwrap().position.x > 0.4);
     }
 
     #[test]

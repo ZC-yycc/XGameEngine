@@ -698,36 +698,10 @@ impl Scene {
     /// 只需要父方向时用这个，比 [`hierarchy`](Self::hierarchy) 少建一整张子表 ——
     /// 平铺场景里子表是 n 个空 `Vec`，纯浪费。
     pub fn parent_indices(&self) -> Vec<Option<usize>> {
-        let n = self.entities.len();
-
-        // 快路径：整场没有任何父子关系时（平铺场景很常见）不必白建一张 ID 映射表。
-        // `world_matrices` 每帧都调这里，省掉这次哈希表分配是有意义的。
-        if self.entities.iter().all(|e| e.parent.is_none()) {
-            return vec![None; n];
-        }
-
-        // ID → 索引。**第一个**出现的实体占住这个 ID。
-        //
-        // 不能用 `.collect()`（它让后出现的覆盖前面的）：`index_of` / `find_entity`
-        // 都是 `position()`，取的是第一个匹配；批量路径若取最后一个，同一个场景
-        // 就会出现"逐次查父节点得到一个结果、`child_map` 得到另一个结果"。
-        // 撞 ID 时这会直接把子节点挂到别的实体名下 —— 删除时连带删掉不该删的东西。
-        let mut index_of: std::collections::HashMap<EntityId, usize> =
-            std::collections::HashMap::with_capacity(n);
-        for (i, entity) in self.entities.iter().enumerate() {
-            index_of.entry(entity.id).or_insert(i);
-        }
-
-        // 父 ID 不存在 / 父就是自己 → 视作根，与 `parent_index` 的语义保持一致。
-        self.entities
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                e.parent
-                    .and_then(|pid| index_of.get(&pid).copied())
-                    .filter(|&p| p != i)
-            })
-            .collect()
+        let mut parents = Vec::new();
+        let mut index_of = std::collections::HashMap::new();
+        crate::scene_transforms::parent_indices_into(&self.entities, &mut parents, &mut index_of);
+        parents
     }
 
     /// 一次性建好「每个索引 → 子索引列表」（顺序与 [`children`](Self::children) 一致）。
@@ -834,66 +808,12 @@ impl Scene {
 
     /// 一次层级解算**同时**给出父索引与世界矩阵。
     ///
-    /// `World::pull_dynamic_bodies` 每帧两样都要：父索引用来取父世界矩阵，世界矩阵
-    /// 用来把物理算出的世界变换换回局部。分开调 `parent_indices()` +
-    /// `world_matrices()` 会把 `hierarchy()` 跑**两遍**（后者内部也要父索引），
-    /// 而这是每帧每固定步都要走的路径。合起来只解算一次。
+    /// 分开调 `parent_indices()` 与 `world_matrices()` 会重复建父索引。
+    /// 需要逐帧复用缓冲或按父子顺序回写时，使用 [`crate::SceneTransforms`]。
     pub fn world_matrices_with_parents(&self) -> (Vec<Option<usize>>, Vec<Mat4>) {
-        let n = self.entities.len();
-        let parent_indices = self.parent_indices();
-
-        // 先用 `Mat4::IDENTITY` 占位 + 一张"算过了没"的位图，而不是 `Vec<Option<Mat4>>`：
-        // `Mat4` 没有可用 niche，`Option<Mat4>` 会从 64 字节涨到 80，2000 个实体就是
-        // 多出 32KB 的内存搬运 —— 而这个函数在**每一次**解算的世界矩阵都在热路径上
-        // （游戏每帧、运行时每个固定步）。
-        let mut out: Vec<Mat4> = vec![Mat4::IDENTITY; n];
-        let mut done: Vec<bool> = vec![false; n];
-        // 环保护用的"在当前链上"标记。之所以不用 `chain.contains()`：
-        // 那是 O(链长) 的逐次扫描，遇到"子节点排在父节点前面"的深链
-        // （实体 0 是叶子、n-1 是根）整条链会退化成 O(n²)。布尔表是 O(1)。
-        let mut on_chain: Vec<bool> = vec![false; n];
-
-        // 链缓冲**提到循环外**复用。
-        //
-        // 这是本函数最容易踩的性能坑：写成循环体内的 `Vec::new()` 之后，**平铺场景**
-        // （所有实体都是根节点，非常常见）每算一个实体就要为一条长度为 1 的链分配一次，
-        // 整次调用就是 n 次小分配。热路径上的 n 次分配比那点矩阵乘法贵得多。
-        let mut chain: Vec<usize> = Vec::new();
-
-        for i in 0..n {
-            if done[i] {
-                continue;
-            }
-            // 从 i 向上收集一条"还没算过"的链
-            chain.clear();
-            let mut current = i;
-            loop {
-                if done[current] || on_chain[current] {
-                    break;
-                }
-                chain.push(current);
-                on_chain[current] = true;
-                match parent_indices[current] {
-                    Some(p) => current = p,
-                    None => break,
-                }
-            }
-            // 链顶节点的父节点若已算过，就以它为基底；否则从单位阵起算
-            let mut base = chain
-                .last()
-                .and_then(|&last| parent_indices[last])
-                .filter(|&p| done[p])
-                .map(|p| out[p])
-                .unwrap_or(Mat4::IDENTITY);
-
-            for &idx in chain.iter().rev() {
-                base *= self.entities[idx].transform.local_matrix();
-                out[idx] = base;
-                done[idx] = true;
-            }
-        }
-
-        (parent_indices, out)
+        let mut transforms = crate::SceneTransforms::default();
+        transforms.update(self);
+        transforms.into_parts()
     }
 
     /// 实体的世界变换（位置 / 旋转 / 缩放）。
