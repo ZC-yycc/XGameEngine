@@ -8627,3 +8627,89 @@ Play 脚本把位置从 x=1 改为 x=123，证明新版本确实执行；同时�
 - 完成边界：只检查预制体**是否可读、可解析**与既有重复 ID / 悬空 `source_id`；
   不扩展为完整实体语义验证，也不修复坏文件。下一步仍按差距分析 G0 查设备、
   掉电与其他未验边界；别将本轮体检通过当成发布包窗口或 GPU 验收。
+
+## 一百零八、G0 三步闭环：预制体引用、错误同解与发布审计（2026-11-03）
+
+### 108.1 基线与风险
+
+基线 `fe6e40e`、工作区干净，workspace `cargo check --workspace --all-targets --locked`
+通过。当前 G0 的项目检查会检测预制体 RON 能否解析和 ID 是否重复，却没有检查预制体
+实体的模型 / 脚本 / 音频等引用；发布审计恰好复用 `check_project` 的差集，于是只在预制体
+内部的清单外资源会在包里丢失而不被发现。另外，场景与材质解析失败的文字中包含项目
+绝对路径；同一坏文件复制到 staging 后文本不同，被误判为发布新增的问题。
+
+### 108.2 三个步骤的红绿
+
+1. core 回归先在旧实现下失败：合法预制体只有自身引用了缺失的模型 / Lua / 音频，
+   场景正常，`check_project` 仍显示 `OK`（`script_refs=0`）。修复后对预制体实体复用
+   场景引用检查，问题带 `Prefabs/Unused.prefab.ron: OnlyInPrefab`，并继续只读。
+   预制体磁盘 ID 仍单独解析，已加载的 ID 集合缓存供场景实例使用。复查时发现目录外
+   被引用的预制体只查 ID、不查内部依赖；新增回归在当时实现下仍显示 `OK`，补成
+   场景 / 预制体引用入队逐文件检查后，通过且同一文件只报一次。
+2. 两个不同目录的工程写入相同坏场景及坏材质，旧实现的 `invalid_scenes` 因绝对路径
+   不同而实跑失败。`load_scene` / `load_material` 的读取与解析失败改为项目相对路径，
+   两份报告与 `reference_issues` 相同。`read_autosave` 仍按原入口输出自动保存路径。
+3. builder 实际构建夹具新增两条：预制体独有的 `Loose/Only.glb` 没进包必须拒绝且不留下
+   正式输出；坏场景与坏材质在源码和包里相同则可构建。前者临时关闭预制体引用检查后
+   实跑失败（打出了残缺包），后者临时退回场景 / 材质绝对路径错误后实跑失败（误报
+   `PackageIncomplete` 两项）。恢复修复后两条及关联定向测试全绿。
+
+### 108.3 实测与完成边界
+
+修复过程中 workspace check 与严格 clippy（`-D warnings`）通过；core 定向先 24 项、
+补齐目录外预制体后 26 项，builder 关联定向 7 项通过。修复后的 `xgame-editor` 实际运行
+`--check projects/SampleScene` 为 `OK`、退出 0。最终全量与真实发布产物验收以本节后续
+记录为准。检查是低频 CLI，新增的预制体解析不进入 `World::update`；性能对照仅用于判断
+此次检查是否有明显退化，不外推为引擎 FPS 收益。未更改打包复制范围、存盘格式及
+`reference_issues` 的旧问题可抵消原则。G0 的物理设备、断电和其他平台边界仍要专项实测。
+
+### 108.4 真实包的验收
+
+最终 debug 编辑器与播放器重新编译成功。真实 `SampleScene` 原工程 `--check` 退出 0：
+1 场景、24 实体、15 资产，`OK`。`--build` 退出 0，打包 33 个资产文件（Prefabs /
+Resources / Scenes / Scripts；未配置发布关卡，`scene_count=0`）。对产物
+`projects/SampleScene/Build/SampleScene` 再跑 `--check`，同为 1 / 24 / 15、退出 0；
+包内 `--headless --frames 60` 退出 0，`ok=true`、60 次固定步、0 个 error / warn、
+0 个非有限变换。包中 `SampleScene.exe` 与本轮编译的 `target/debug/xgame-game.exe`
+SHA-256 完全相同。这组命令没有验证交互窗口、实体音频设备（无头统计
+`audio.available=false`）或掉电后恢复。
+
+另按 CI 的 `tools/test-published-player.ps1 -Mode headless` 使用本轮 debug 编辑器、
+播放器和重新编译的 `behaviors_demo.dll` 实跑：源码与发布包移到不同目录后，
+三关卡输入时间线消费 6 个事件、完成 2 次切关，并生成 `G0_COMPLETE` 标记，
+`ok=true`。产物与插件哈希按脚本逐项核对；结果位于本机
+`C:\Users\Administrator\AppData\Local\Temp\opencode\published-player-8bf273f3adc6435195c4100e50de1be3\result.json`。
+
+release `xgame-editor` / `xgame-game` 也重新构建成功；release 编辑器对原工程与重新
+生成的包分别跑 `--check`，均退出 0（1 场景 / 24 实体 / 15 资产）。release 包的
+`--headless --frames 60` 退出 0，`ok=true`、60 次固定步、error / warn 与非有限变换
+均为 0；包内播放器与本轮 release `xgame-game.exe` SHA-256 相同。
+
+### 108.5 检查耗时对照
+
+改动前在同机用 debug `xgame-editor.exe --check projects/SampleScene` 连跑 8 次，
+PowerShell `Stopwatch` 只量命令从启动到退出的耗时（stdout / stderr 丢弃、每次确认
+退出 0）：74.24、64.87、61.50、62.04、62.22、61.57、62.05、75.47 ms；
+中位数 62.14 ms，范围 61.50–75.47 ms。全量测试与 release 构建停止后，
+同一口径改动后再量 8 次：72.65、67.51、76.67、61.99、76.15、62.25、63.33、
+62.50 ms；中位数 65.42 ms，范围 61.99–76.67 ms。中位差 +3.28 ms（约 5.3%），
+两组区间明显重叠，8 次启动 / 磁盘缓存噪声不足以判定此项有稳定的检查耗时变化；
+不以这组 CLI 数字推断引擎帧性能，也不声称获得提速。
+
+### 108.6 完整测试与 GPU 边界
+
+最终代码的 workspace `cargo check --workspace --all-targets --locked`、严格 clippy
+`-- -D warnings`、修改的 Rust 文件 `rustfmt --check` 与 `git diff --check` 均通过。
+按 CI 环境 `XGAME_TEST_SKIP_GPU=1` / `XGAME_TEST_PREBUILT_ARTIFACTS=1` 跑
+`cargo test --workspace --all-targets --locked`：**44 组、1263 passed / 0 failed /
+21 ignored**；GPU fixture 在此配置下主动不创建，不能将其计为 GPU 像素验收。
+
+另一轮不跳过 GPU 的全量测试运行到 `xgame-render` 截图用例时长时间无输出，
+测试进程持续占用一个 CPU 核；约 12 分钟后只结束该测试子进程。此轮因此**退出 -1**，
+不是全绿（终止前 21 组已有 873 passed / 0 failed / 1 ignored）。之后不跳过 GPU、
+单线程的 sky 截图定向 4 项实跑通过；不跳过 GPU 的渲染 crate 完整单线程测试
+**205 passed / 0 failed / 1 ignored**，19.50 秒完成。并行 GPU 全量运行卡住不等于
+渲染功能回归。最终另以 `XGAME_TEST_PREBUILT_ARTIFACTS=1`、不设置 GPU 跳过开关，
+执行 `cargo test --workspace --all-targets --locked -- --test-threads=1`：**44 组、
+1263 passed / 0 failed / 21 ignored**，GPU 截图实际运行。串行全量与 CI 配置全量
+结果均绿；本机默认并行 GPU 的长时间卡住仍如实保留，不把它写成通过。

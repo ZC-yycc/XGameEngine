@@ -21,7 +21,7 @@
 //! diff 里会冒出意料之外的文件。所以这里只读索引、只报告；生成 `.meta`
 //! 是编辑器打开项目与保存场景时的动作（[`ProjectHandle::ensure_asset_metas`]）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -37,11 +37,11 @@ pub struct CheckReport {
     pub entities: usize,
     /// 全部场景合计的光源数。
     pub lights: usize,
-    /// 实体上挂的脚本引用总数。
+    /// 场景及预制体实体上挂的脚本引用总数。
     pub script_refs: usize,
-    /// 实体上挂的音频引用总数。
+    /// 场景及预制体实体上挂的音频引用总数。
     pub audio_refs: usize,
-    /// 实体上引用的材质资产总数。
+    /// 场景及预制体实体上引用的材质资产总数。
     pub material_refs: usize,
     /// 已登记的资产数（有 `.meta` 的）。
     pub assets: usize,
@@ -337,7 +337,7 @@ impl CheckReport {
     }
 }
 
-/// 无头检查一个项目：清单能解析、入口场景能加载、**所有场景**引用的资产
+/// 无头检查一个项目：清单能解析、入口场景能加载、场景及预制体引用的资产
 /// 真实存在、资产身份证（`.meta`）齐全且不冲突。
 pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     let project = ProjectHandle::open(root).map_err(|e| e.to_string())?;
@@ -441,6 +441,12 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
         // 读不出来 / 解析失败上面已经按 `invalid_scenes` 报过，不重复报。
     }
 
+    // 材质按路径跨文件去重；预制体 ID 集合缓存让实例引用不必重复读盘。
+    let mut materials: BTreeMap<String, String> = BTreeMap::new();
+    let mut prefab_ids: BTreeMap<String, Option<crate::id::EntitySet>> = BTreeMap::new();
+    let mut checked_prefabs = BTreeSet::new();
+    let mut pending_prefabs = BTreeSet::new();
+
     // -- 预制体文件的重复实体 ID（同样只在原始文本上看得见）----------------
     //
     // 场景那份可以在加载边界修，预制体这份**不能**（ID 被场景的 `source_id`
@@ -449,18 +455,16 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     // 也可能是坏的，打开它就立刻掉进同一个坑。
     let mut invalid_prefabs: BTreeMap<String, String> = BTreeMap::new();
     for relative in project.list_prefabs() {
-        match project.prefab_duplicate_ids(&relative) {
-            Ok(duplicates) => {
-                for (id, count) in duplicates {
-                    report
-                        .duplicate_prefab_ids
-                        .push(format!("{relative}: id {} ×{count}", id.raw()));
-                }
-            }
-            Err(error) => {
-                invalid_prefabs.insert(relative, error);
-            }
-        }
+        checked_prefabs.insert(relative.clone());
+        check_prefab_contents(
+            &project,
+            &relative,
+            &mut report,
+            &mut materials,
+            &mut prefab_ids,
+            &mut invalid_prefabs,
+            &mut pending_prefabs,
+        );
     }
 
     // -- 资产库诊断（只读，不生成任何文件）--------------------------------
@@ -487,20 +491,19 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     }
 
     // -- 场景引用 ---------------------------------------------------------
-    // 材质按路径**跨场景**去重：同一个材质挂在一百个实体上时，坏文件只该报一次。
-    let mut materials: BTreeMap<String, String> = BTreeMap::new();
+    // 同一个材质挂在一百个实体上时，坏文件只该报一次。
     // 预制体 ID 集合缓存：同一份预制体被十个实例引用时只解析一次。
     // `None` = 读不出来；缺失 / 坏路径由原有诊断负责，坏内容单独报一次。
     // 缓存住这个"坏"避免每个实例都重试一遍磁盘。
-    let mut prefab_ids: BTreeMap<String, Option<crate::id::EntitySet>> = BTreeMap::new();
     for (relative, scene) in &scenes {
         report.scenes += 1;
         report.entities += scene.entities.len();
         report.lights += scene.lights.len();
-        check_scene_references(
+        enqueue_prefab_sources(&scene.entities, &mut pending_prefabs);
+        check_entity_references(
             &project,
             relative,
-            scene,
+            &scene.entities,
             &mut report,
             &mut materials,
             &mut prefab_ids,
@@ -516,6 +519,27 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
             report
                 .semantic_defects
                 .push(format!("{relative}: {}", defect.describe()));
+        }
+    }
+    // 默认目录外的预制体仅在场景或另一份预制体引用时可见。逐文件
+    // 入队，环引用也只查一次；避免每发现一份文件就全表扫描。
+    while let Some(relative) = pending_prefabs.pop_first() {
+        if !checked_prefabs.insert(relative.clone()) {
+            continue;
+        }
+        // 缺文件 / 越界引用已在实体检查时报过；这里绝不能探越界文件。
+        if crate::project::normalize_project_relative(&relative).is_ok()
+            && project.path(&relative).is_file()
+        {
+            check_prefab_contents(
+                &project,
+                &relative,
+                &mut report,
+                &mut materials,
+                &mut prefab_ids,
+                &mut invalid_prefabs,
+                &mut pending_prefabs,
+            );
         }
     }
     report.invalid_prefabs.extend(
@@ -562,6 +586,64 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
     }
 
     Ok(report)
+}
+
+/// 从原文统计 ID，再对内容应用与场景相同的引用规则；每份文件只调度一次。
+fn check_prefab_contents(
+    project: &ProjectHandle,
+    relative: &str,
+    report: &mut CheckReport,
+    materials: &mut BTreeMap<String, String>,
+    prefab_ids: &mut BTreeMap<String, Option<crate::id::EntitySet>>,
+    invalid_prefabs: &mut BTreeMap<String, String>,
+    pending_prefabs: &mut BTreeSet<String>,
+) {
+    match project.prefab_duplicate_ids(relative) {
+        Ok(duplicates) => {
+            for (id, count) in duplicates {
+                report
+                    .duplicate_prefab_ids
+                    .push(format!("{relative}: id {} ×{count}", id.raw()));
+            }
+        }
+        Err(error) => {
+            invalid_prefabs.insert(relative.to_string(), error);
+            return;
+        }
+    }
+    // 预制体的资产引用可能只在实例化时才用到，甚至当前没有任何场景实例。
+    match project.load_prefab(relative) {
+        Ok(prefab) => {
+            enqueue_prefab_sources(&prefab.entities, pending_prefabs);
+            prefab_ids.insert(
+                relative.to_string(),
+                Some(prefab.entities.iter().map(|entity| entity.id).collect()),
+            );
+            check_entity_references(
+                project,
+                relative,
+                &prefab.entities,
+                report,
+                materials,
+                prefab_ids,
+                invalid_prefabs,
+            );
+        }
+        Err(error) => {
+            invalid_prefabs.insert(relative.to_string(), error);
+        }
+    }
+}
+
+/// 被实例引用的目录外预制体也要检查内容；只排队，不在实体遍历中递归装载。
+fn enqueue_prefab_sources(entities: &[crate::Entity], pending: &mut BTreeSet<String>) {
+    pending.extend(
+        entities
+            .iter()
+            .filter_map(|entity| entity.prefab.as_ref())
+            .filter(|link| !is_guid_reference(&link.source))
+            .map(|link| link.source.clone()),
+    );
 }
 
 /// 检查一条模型引用（主模型或 LOD 某一级），把它归进对应的诊断桶。
@@ -638,15 +720,15 @@ fn note_unsafe_path(report: &mut CheckReport, at: &str, kind: &str, raw: &str) -
     }
 }
 
-/// 检查单张场景里的实体引用。
+/// 检查场景或预制体里的实体引用。
 ///
 /// `relative` 会拼在每条问题前面（`Scenes/Level2.ron: Ghost -> ...`）：多场景
-/// 项目里只说实体名根本定位不到是哪张关卡。材质收集到 `materials` 里跨场景
-/// 去重，值记"首次引用它的场景 + 实体"，让缺失材质也有落点。
-fn check_scene_references(
+/// 项目里只说实体名根本定位不到文件。材质收集到 `materials` 里跨文件
+/// 去重，值记"首次引用它的文件 + 实体"，让缺失材质也有落点。
+fn check_entity_references(
     project: &ProjectHandle,
     relative: &str,
-    scene: &crate::Scene,
+    entities: &[crate::Entity],
     report: &mut CheckReport,
     materials: &mut BTreeMap<String, String>,
     prefab_ids: &mut BTreeMap<String, Option<crate::id::EntitySet>>,
@@ -657,7 +739,7 @@ fn check_scene_references(
     // 值 = (缺失数量, 首个缺失实体的名字, 首个缺失的 source_id)。
     let mut dangling_sources: BTreeMap<String, (usize, String, u64)> = BTreeMap::new();
 
-    for entity in &scene.entities {
+    for entity in entities {
         // 层索引越界：读盘刻意**不修正**（修正会把配置错误藏起来），运行时按
         // `sanitize_layer` 取模兜底 —— 所以这里必须报，否则"我明明设了第 40 层"
         // 永远查不出来，只会表现为一群实体莫名挤在同一层上。
@@ -1005,15 +1087,24 @@ mod tests {
 
         let report = check_project(project.root()).expect("坏预制体不能阻断其他检查");
         assert!(
-            report.render().contains("invalid prefab: Prefabs/Broken.prefab.ron"),
+            report
+                .render()
+                .contains("invalid prefab: Prefabs/Broken.prefab.ron"),
             "{}",
             report.render()
         );
         assert!(report.has_issues(), "坏文件必须导致 --check 退出 2");
-        assert_eq!(report.issue_count(), 1, "只报告内容错误：{}", report.render());
+        assert_eq!(
+            report.issue_count(),
+            1,
+            "只报告内容错误：{}",
+            report.render()
+        );
         assert_eq!(report.reference_issues().len(), 1, "打包差集也应能看到损坏");
         assert!(
-            !report.render().contains(&project.root().display().to_string()),
+            !report
+                .render()
+                .contains(&project.root().display().to_string()),
             "错误原因不应带项目绝对路径，否则包与源码的差集会误报"
         );
         assert_eq!(std::fs::read(&path).unwrap(), broken, "检查必须只读");
@@ -1055,6 +1146,125 @@ mod tests {
         assert!(report.missing_prefabs.is_empty(), "文件存在，不应报缺失");
         assert!(report.has_issues());
         let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 只存在于预制体里的模型、脚本与音频也会在实例化时加载，检查必须覆盖资产本身。
+    #[test]
+    fn prefab_only_asset_references_are_checked() {
+        let project = temp_project("prefab_only_refs");
+        let relative = "Prefabs/Unused.prefab.ron";
+        let mut prefab = crate::prefab::Prefab::new("Unused");
+        prefab.entities.push(
+            crate::Entity::new("OnlyInPrefab")
+                .with_model("Resources/Missing.glb")
+                .with_script("Scripts/Missing.lua")
+                .with_audio(crate::AudioSource::new("Resources/Missing.wav")),
+        );
+        project.write_prefab(relative, &prefab).unwrap();
+        project.ensure_asset_metas().unwrap();
+        let original = std::fs::read(project.path(relative)).unwrap();
+
+        let report = check_project(project.root()).unwrap();
+        let where_at = "Prefabs/Unused.prefab.ron: OnlyInPrefab";
+        assert!(
+            report
+                .missing_models
+                .iter()
+                .any(|line| line.contains(where_at)),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .missing_scripts
+                .iter()
+                .any(|line| line.contains(where_at)),
+            "{}",
+            report.render()
+        );
+        assert!(
+            report
+                .missing_audio
+                .iter()
+                .any(|line| line.contains(where_at)),
+            "{}",
+            report.render()
+        );
+        assert!(report.has_issues(), "只在预制体里的坏引用也必须使检查失败");
+        assert_eq!(
+            std::fs::read(project.path(relative)).unwrap(),
+            original,
+            "检查只读"
+        );
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 内容目录外的预制体虽不在枚举中，场景引用它时仍必须检查里面的资产。
+    #[test]
+    fn referenced_prefab_outside_catalog_checks_its_assets_once() {
+        use crate::prefab::{Prefab, PrefabInstanceRef};
+
+        let project = temp_project("outside_prefab_refs");
+        let relative = "Shared/Used.prefab.ron";
+        let mut prefab = Prefab::new("Used");
+        let asset_entity = crate::Entity::new("OnlyInShared").with_model("Resources/Missing.glb");
+        let source_id = asset_entity.id;
+        prefab.entities.push(asset_entity);
+        project.write_prefab(relative, &prefab).unwrap();
+
+        let mut scene = project.load_entry_scene().unwrap();
+        for name in ["First", "Second"] {
+            let mut instance = crate::Entity::new(name);
+            instance.prefab = Some(PrefabInstanceRef {
+                source: relative.into(),
+                source_id,
+                is_root: true,
+            });
+            scene.entities.push(instance);
+        }
+        project
+            .write_scene(&project.manifest().entry_scene, &scene)
+            .unwrap();
+
+        let report = check_project(project.root()).unwrap();
+        assert_eq!(
+            report.missing_models,
+            ["Shared/Used.prefab.ron: OnlyInShared -> Resources/Missing.glb"],
+            "同一个外部预制体的引用只应检查一次：{}",
+            report.render()
+        );
+        assert!(report.dangling_source_ids.is_empty(), "{}", report.render());
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    /// 发布审计会比较两个根目录的报告；同一坏内容不能因为绝对路径不同而变成新问题。
+    #[test]
+    fn invalid_scene_and_material_reports_do_not_depend_on_project_root() {
+        let first = temp_project("compare_source");
+        let second = temp_project("compare_package");
+        for project in [&first, &second] {
+            let mut scene = project.load_entry_scene().unwrap();
+            let mut entity = crate::Entity::new("UsesBadMaterial");
+            entity.material_asset = Some("Resources/Materials/Broken.mat".into());
+            scene.entities.push(entity);
+            project
+                .write_scene(&project.manifest().entry_scene, &scene)
+                .unwrap();
+            std::fs::write(project.path("Scenes/Bad.ron"), "(not valid RON").unwrap();
+            let material = project.path("Resources/Materials/Broken.mat");
+            std::fs::create_dir_all(material.parent().unwrap()).unwrap();
+            std::fs::write(material, "(not valid RON").unwrap();
+        }
+
+        let source = check_project(first.root()).unwrap();
+        let package = check_project(second.root()).unwrap();
+        assert_eq!(source.invalid_scenes.len(), 1, "{}", source.render());
+        assert_eq!(source.invalid_materials.len(), 1, "{}", source.render());
+        assert_eq!(source.invalid_scenes, package.invalid_scenes);
+        assert_eq!(source.invalid_materials, package.invalid_materials);
+        assert_eq!(source.reference_issues(), package.reference_issues());
+        let _ = std::fs::remove_dir_all(first.root());
+        let _ = std::fs::remove_dir_all(second.root());
     }
 
     /// 场景里 `source_id` 指向预制体里不存在的实体，必须被报告。

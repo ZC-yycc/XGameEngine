@@ -1218,6 +1218,60 @@ mod tests {
         );
     }
 
+    /// 资产只由预制体持有时仍会被实例化读取，不能让清单外资源从成品中消失。
+    #[test]
+    fn build_rejects_prefab_only_dependency_missing_from_package() {
+        let fixture = Fixture::new();
+        let resource = fixture.project.path("Loose/Only.glb");
+        std::fs::create_dir_all(resource.parent().unwrap()).unwrap();
+        std::fs::write(&resource, b"model bytes").unwrap();
+        let mut prefab = xgame_core::prefab::Prefab::new("Only");
+        prefab
+            .entities
+            .push(xgame_core::Entity::new("OnlyChild").with_model("Loose/Only.glb"));
+        fixture
+            .project
+            .write_prefab("Prefabs/Only.prefab.ron", &prefab)
+            .unwrap();
+
+        let error = fixture.build().expect_err("预制体独有依赖丢失应阻断发布");
+        assert!(
+            error.to_string().contains("Loose/Only.glb"),
+            "要指向丢失的文件：{error}"
+        );
+        assert!(
+            !fixture.output().join("project.ron").exists(),
+            "失败后不得留下残缺成品"
+        );
+    }
+
+    /// 原工程已有的坏文件在包里字节相同，不应因 staging 绝对路径不同而拒绝发布。
+    #[test]
+    fn build_accepts_existing_invalid_scene_and_material() {
+        let fixture = Fixture::new();
+        let mut scene = fixture.project.load_entry_scene().unwrap();
+        let mut entity = xgame_core::Entity::new("BadMaterial");
+        entity.material_asset = Some("Resources/Materials/Bad.mat".into());
+        scene.entities.push(entity);
+        fixture
+            .project
+            .write_scene(xgame_core::DEFAULT_ENTRY_SCENE, &scene)
+            .unwrap();
+        std::fs::write(fixture.project.path("Scenes/Bad.ron"), "(not valid RON").unwrap();
+        let material = fixture.project.path("Resources/Materials/Bad.mat");
+        std::fs::create_dir_all(material.parent().unwrap()).unwrap();
+        std::fs::write(material, "(not valid RON").unwrap();
+
+        let report = fixture
+            .build()
+            .expect("源码与成品的同一坏文件不能被当成新问题");
+        let source = xgame_core::check_project(fixture.project.root()).unwrap();
+        let packaged = xgame_core::check_project(&report.output_dir).unwrap();
+        assert_eq!(source.invalid_scenes.len(), 1);
+        assert_eq!(source.invalid_materials.len(), 1);
+        assert_eq!(source.reference_issues(), packaged.reference_issues());
+    }
+
     /// 源码工程**本来就缺**的资产只提醒、不挡构建。
     ///
     /// 判据是"构建有没有引入新问题"：打包前后一样缺的东西归 `--check` 管，

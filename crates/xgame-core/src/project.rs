@@ -996,10 +996,10 @@ impl ProjectHandle {
                 .unwrap_or_else(|| reference.to_string())
         };
         let path = self.path(&relative);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
-        let mut material = MaterialAsset::from_ron(&text)
-            .map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        let mut material =
+            MaterialAsset::from_ron(&text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
         if !material.albedo.is_empty() {
             let assets = self.assets();
             if let Some(resolved) = assets.resolve_reference(&material.albedo) {
@@ -1077,8 +1077,8 @@ impl ProjectHandle {
         // 手写 RON 里一句 `../..` 就能读到项目外。
         let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
         let path = self.path(&relative);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("无法读取 '{relative}': {e}"))?;
         let mut prefab =
             Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
         {
@@ -1304,9 +1304,11 @@ impl ProjectHandle {
     pub fn load_scene(&self, relative: &str) -> Result<Scene, String> {
         let relative = normalize_scene_relative(relative)?;
         let path = self.path(&relative);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
-        self.parse_scene_text(&text, &path)
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        // 发布前后按诊断文本取差集；解析失败必须使用项目内路径，否则同一
+        // 份坏场景复制到 staging 后会被误判成构建新引入的问题。
+        self.parse_scene_text(&text, Path::new(&relative))
     }
 
     /// 加载清单里指定的入口场景。
@@ -1340,11 +1342,10 @@ impl ProjectHandle {
     /// 详见 [`crate::prefab::Prefab::duplicate_ids`]。
     pub fn prefab_duplicate_ids(&self, relative: &str) -> Result<Vec<(EntityId, usize)>, String> {
         let path = self.path(relative);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("无法读取 '{relative}': {e}"))?;
         // 检查报告要与发布包的同一文件逐字节可比较，原因里不能带项目绝对路径。
-        let prefab = Prefab::from_ron(&text)
-            .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+        let prefab = Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
         Ok(prefab.duplicate_ids())
     }
 
