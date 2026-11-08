@@ -320,6 +320,23 @@ pub struct UiImageStyle {
     pub fill: f32,
     /// 保持宽高比（按内容矩形做最大内接，居中）。
     pub keep_aspect: bool,
+    /// 九宫格边距 `[左, 右, 上, 下]`，单位是**图片像素**而不是屏幕像素 ——
+    /// 美术在源图上量多少就填多少，渲染时按实际缩放比例换算。
+    ///
+    /// 全 0 = 普通拉伸（默认，不落盘）。非 0 时四角原样贴、四边单轴拉伸、
+    /// 中间双轴拉伸：窗口 / 按钮 / 对话气泡这类"任意尺寸但不能把圆角拉花"的
+    /// 元素靠它。目标矩形比两条边加起来还窄时按比例缩边距（中间段退化为 0，
+    /// 不会画出负宽度的四边形）。
+    ///
+    /// 与 [`fill`](Self::fill) 互斥：`fill < 1` 时退回普通拉伸再裁剪 ——
+    /// 进度条要的是线性裁切，不是把九宫格整体压扁。
+    #[serde(default, skip_serializing_if = "slice_is_zero")]
+    pub slice: [f32; 4],
+}
+
+/// `[f32; 4]` 没有 `is_zero`，自己写一个给 `skip_serializing_if` 用。
+fn slice_is_zero(slice: &[f32; 4]) -> bool {
+    slice.iter().all(|value| *value == 0.0)
 }
 
 impl Default for UiImageStyle {
@@ -329,6 +346,7 @@ impl Default for UiImageStyle {
             tint: Color::WHITE.to_array(),
             fill: 1.0,
             keep_aspect: true,
+            slice: [0.0; 4],
         }
     }
 }
@@ -341,6 +359,13 @@ impl UiImageStyle {
             tint: sanitize_color(self.tint),
             fill: finite_or(self.fill, 1.0).clamp(0.0, 1.0),
             keep_aspect: self.keep_aspect,
+            // 负边距没有意义（会让中段反向重叠），非有限值同样按 0 处理。
+            slice: [
+                finite_or(self.slice[0], 0.0).max(0.0),
+                finite_or(self.slice[1], 0.0).max(0.0),
+                finite_or(self.slice[2], 0.0).max(0.0),
+                finite_or(self.slice[3], 0.0).max(0.0),
+            ],
         }
     }
 }
@@ -694,6 +719,22 @@ mod tests {
         let mut c = a.clone();
         c.text.content = "Cancel".into();
         assert!(!a.data_eq(&c), "文本变了必须算改动");
+    }
+
+    /// 九宫格边距：负值与非有限值按 0 处理（负边距会让中段反向重叠）；全 0 不落盘。
+    #[test]
+    fn image_slice_is_sanitized_and_stays_out_of_the_file_when_zero() {
+        let mut image = UiImageStyle::default();
+        assert!(!ron::ser::to_string(&image).unwrap().contains("slice"));
+        image.slice = [8.0, -4.0, f32::NAN, 3.0];
+        assert_eq!(image.sanitized().slice, [8.0, 0.0, 0.0, 3.0]);
+
+        // 非 0 的边距要真的写进文件，并在读回时保持不变。
+        image.slice = [8.0, 16.0, 4.0, 8.0];
+        let text = ron::ser::to_string(&image).unwrap();
+        assert!(text.contains("slice"));
+        let back: UiImageStyle = ron::from_str(&text).unwrap();
+        assert_eq!(back.slice, [8.0, 16.0, 4.0, 8.0]);
     }
 
     #[test]

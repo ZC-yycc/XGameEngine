@@ -413,31 +413,39 @@ fn emit_element(
     // -- 2. 图片 --
     if let Some(image) = &ui.image {
         if !image.path.is_empty() && image.fill > 0.0 && !content.is_empty() {
-            let target = fit_image(
-                content,
-                image_sizes.get(&image.path).copied(),
-                image.keep_aspect,
-            );
+            // 原始尺寸只在切九宫格（换算边距）时要用，但落位与它无关：
+            // 尺寸未知时 `fit_image` 先铺满，等图片加载完的下一帧自然正。
+            let natural = image_sizes.get(&image.path).copied();
+            let target = fit_image(content, natural, image.keep_aspect);
             if !target.is_empty() {
                 let index = draw.image_index(&image.path);
                 let mut tint = Color::from(image.tint);
                 tint.a *= alpha;
-                let mut rect = target;
-                let mut uv = [0.0, 0.0, 1.0, 1.0];
-                if image.fill < 1.0 {
-                    // 从左往右裁剪：矩形与 UV 同步收窄，才能让图案保持比例
-                    // （只裁 UV 会拉伸图案，只裁矩形会露出边缘像素）。
-                    let width = rect.width() * image.fill;
-                    rect.max.x = rect.min.x + width;
-                    uv[2] = image.fill;
+                // 九宫格与 fill 互斥：进度条要的是线性裁切，不是把整张图压扁。
+                // `natural` 未知时不切 —— 边距没法换算，先按普通拉伸画一帧。
+                match (natural, image.fill >= 1.0) {
+                    (Some(natural), true) if slice_is_active(image.slice) => {
+                        push_sliced_sprites(draw, target, natural, image.slice, tint, index);
+                    }
+                    _ => {
+                        let mut rect = target;
+                        let mut uv = [0.0, 0.0, 1.0, 1.0];
+                        if image.fill < 1.0 {
+                            // 从左往右裁剪：矩形与 UV 同步收窄，才能让图案保持比例
+                            // （只裁 UV 会拉伸图案，只裁矩形会露出边缘像素）。
+                            let width = rect.width() * image.fill;
+                            rect.max.x = rect.min.x + width;
+                            uv[2] = image.fill;
+                        }
+                        draw.push_sprite(UiSprite {
+                            rect,
+                            uv,
+                            color: tint,
+                            mode: SpriteMode::Rgba,
+                            texture: UiTexture::Image(index),
+                        });
+                    }
                 }
-                draw.push_sprite(UiSprite {
-                    rect,
-                    uv,
-                    color: tint,
-                    mode: SpriteMode::Rgba,
-                    texture: UiTexture::Image(index),
-                });
             }
         }
     }
@@ -447,6 +455,85 @@ fn emit_element(
         let start = draw.sprites.len();
         text.emit(&ui.text, content, alpha, &mut draw.sprites);
         draw.push_sprite_range(start, draw.sprites.len(), UiTexture::Atlas);
+    }
+}
+
+
+/// 有没有配九宫格边距（四项全 0 = 普通拉伸）。
+fn slice_is_active(slice: [f32; 4]) -> bool {
+    slice.iter().any(|border| *border > 0.0)
+}
+
+/// 九宫格切片：角原样贴、边单轴拉伸、中间双轴拉伸，最多 9 个四边形。
+///
+/// # 两条换算规则
+///
+/// 1. **像素边距**按"目标尺寸 / 原始尺寸"缩放（横竖各一个比例，`keep_aspect`
+///    时两者相同，`Stretch` 时不同 —— 边距必须跟着走，否则贴图与几何错位）；
+/// 2. **UV 边距**是图片像素除以原始尺寸，与目标尺寸无关 —— 这点最容易写反，
+///    写反的症状是"图被拉扯但边角看着还在"，只有拿方角贴图放大才看得出来。
+///
+/// 目标比两边加起来还窄时按比例压缩边距，中段退化为 0（跳过零尺寸格）：
+/// 宁可让两个角贴在一起，也不画出反向的四边形（负宽度在 GPU 上是镜面翻折）。
+fn push_sliced_sprites(
+    draw: &mut UiDrawData,
+    rect: UiRect,
+    natural: Vec2,
+    slice: [f32; 4],
+    color: Color,
+    index: u32,
+) {
+    if natural.x <= 0.0 || natural.y <= 0.0 {
+        return;
+    }
+    let scale = Vec2::new(rect.width() / natural.x, rect.height() / natural.y);
+    let shrink = |near: f32, far: f32, limit: f32| -> (f32, f32) {
+        let sum = near + far;
+        if sum > limit && sum > 0.0 {
+            let k = limit / sum;
+            (near * k, far * k)
+        } else {
+            (near, far)
+        }
+    };
+    let (left, right) = shrink(slice[0].max(0.0) * scale.x, slice[1].max(0.0) * scale.x, rect.width());
+    let (top, bottom) =
+        shrink(slice[2].max(0.0) * scale.y, slice[3].max(0.0) * scale.y, rect.height());
+
+    let xs = [rect.min.x, rect.min.x + left, rect.max.x - right, rect.max.x];
+    let ys = [rect.min.y, rect.min.y + top, rect.max.y - bottom, rect.max.y];
+    let us = [
+        0.0,
+        (slice[0].max(0.0) / natural.x).clamp(0.0, 1.0),
+        (1.0 - slice[1].max(0.0) / natural.x).clamp(0.0, 1.0),
+        1.0,
+    ];
+    let vs = [
+        0.0,
+        (slice[2].max(0.0) / natural.y).clamp(0.0, 1.0),
+        (1.0 - slice[3].max(0.0) / natural.y).clamp(0.0, 1.0),
+        1.0,
+    ];
+
+    for row in 0..3 {
+        for col in 0..3 {
+            let cell = UiRect::new(
+                Vec2::new(xs[col], ys[row]),
+                Vec2::new(xs[col + 1], ys[row + 1]),
+            );
+            // 零尺寸格（没配那一边的边距 / 目标太窄被压缩）直接跳过：画也画不出东西，
+            // 还会让批次里多一条零面积图元。
+            if cell.width() <= 0.0 || cell.height() <= 0.0 {
+                continue;
+            }
+            draw.push_sprite(UiSprite {
+                rect: cell,
+                uv: [us[col], vs[row], us[col + 1], vs[row + 1]],
+                color,
+                mode: SpriteMode::Rgba,
+                texture: UiTexture::Image(index),
+            });
+        }
     }
 }
 
@@ -626,6 +713,133 @@ mod tests {
         assert!((sprite.rect.width() - 200.0).abs() < 1e-3);
         assert!((sprite.rect.height() - 100.0).abs() < 1e-3);
         assert!((sprite.rect.min.y - 50.0).abs() < 1e-3, "垂直居中");
+    }
+
+    /// 九宫格：64×64 的图铺到 200×100，切成 9 块；角原样（像素边距 = 图边距 ×
+    /// 缩放），边单轴拉伸，UV 边距只由**图片尺寸**决定。
+    #[test]
+    fn nine_slice_splits_into_three_by_three_cells() {
+        let mut painter = Painter::new();
+        painter.set_image_size("Resources/frame.png", Vec2::new(64.0, 64.0));
+        let mut element =
+            UiElement::image("Resources/frame.png").at([0.0, 0.0], 0.0, 0.0, 200.0, 100.0);
+        {
+            let image = element.image.as_mut().unwrap();
+            image.keep_aspect = false;
+            image.slice = [8.0, 16.0, 4.0, 8.0]; // 左 右 上 下（图片像素）
+        }
+        let draw = painter.build(&scene_with(element), Vec2::new(800.0, 600.0));
+        assert_eq!(draw.sprites.len(), 9, "应当切成九块，实得 {:?}", draw.sprites.len());
+
+        // 像素边距：左 8×(200/64)=25、右 16×3.125=50、上 4×(100/64)=6.25、
+        // 下 8×1.5625=12.5。第一块 = 左上角，尺寸就是左 × 上。
+        let top_left = draw.sprites[0];
+        assert!((top_left.rect.min.x - 0.0).abs() < 1e-3);
+        assert!((top_left.rect.max.x - 25.0).abs() < 1e-3, "左边距按横向缩放");
+        assert!((top_left.rect.max.y - 6.25).abs() < 1e-3, "上边距按纵向缩放");
+
+        // 中间格：横向从 25 到 200-50=150，纵向从 6.25 到 100-12.5=87.5。
+        let middle = draw.sprites[4];
+        assert!((middle.rect.min.x - 25.0).abs() < 1e-3 && (middle.rect.max.x - 150.0).abs() < 1e-3);
+        assert!((middle.rect.min.y - 6.25).abs() < 1e-3 && (middle.rect.max.y - 87.5).abs() < 1e-3);
+
+        // UV 边距与目标尺寸无关：左 8/64、右 16/64、上 4/64、下 8/64。
+        assert!((top_left.uv[0]).abs() < 1e-6 && (top_left.uv[1]).abs() < 1e-6);
+        assert!((top_left.uv[2] - 8.0 / 64.0).abs() < 1e-6, "uv 右边界应当是左切片");
+        assert!((top_left.uv[3] - 4.0 / 64.0).abs() < 1e-6, "uv 下边界应当是上切片");
+        let bottom_right = draw.sprites[8];
+        assert!((bottom_right.uv[0] - (1.0 - 16.0 / 64.0)).abs() < 1e-6);
+        assert!((bottom_right.uv[2] - 1.0).abs() < 1e-6 && (bottom_right.uv[3] - 1.0).abs() < 1e-6);
+        assert!((bottom_right.rect.max.x - 200.0).abs() < 1e-3);
+        assert!((bottom_right.rect.max.y - 100.0).abs() < 1e-3);
+
+        // 九块拼起来正好覆盖整张图：面积之和 = 目标面积（不重叠、不缺口）。
+        let area: f32 = draw.sprites.iter().map(|s| s.rect.width() * s.rect.height()).sum();
+        assert!((area - 200.0 * 100.0).abs() < 1e-2, "九块面积之和应当等于目标面积，实得 {area}");
+        // 同一张纹理仍然是一批（合批没被切片打断）。
+        assert_eq!(draw.commands.len(), 1, "九块必须落在同一条绘制指令里");
+    }
+
+    /// 只配左右边距 → 只切三块（上下边距 0 的两行是零高度，跳过）。
+    #[test]
+    fn nine_slice_with_one_axis_emits_three_cells() {
+        let mut painter = Painter::new();
+        painter.set_image_size("Resources/bar.png", Vec2::new(32.0, 32.0));
+        let mut element =
+            UiElement::image("Resources/bar.png").at([0.0, 0.0], 0.0, 0.0, 128.0, 32.0);
+        {
+            let image = element.image.as_mut().unwrap();
+            image.keep_aspect = false;
+            image.slice = [8.0, 8.0, 0.0, 0.0];
+        }
+        let draw = painter.build(&scene_with(element), Vec2::new(800.0, 600.0));
+        assert_eq!(draw.sprites.len(), 3, "只有左右边距时应当只有三块");
+        for sprite in &draw.sprites {
+            assert!((sprite.rect.height() - 32.0).abs() < 1e-4, "每一块都是全高");
+        }
+    }
+
+    /// 目标比两条边加起来还窄：边距按比例压缩，绝不产生负宽度或反向 UV。
+    #[test]
+    fn nine_slice_shrinks_borders_when_the_target_is_too_small() {
+        let mut painter = Painter::new();
+        painter.set_image_size("Resources/frame.png", Vec2::new(64.0, 64.0));
+        let mut element =
+            UiElement::image("Resources/frame.png").at([0.0, 0.0], 0.0, 0.0, 20.0, 20.0);
+        {
+            let image = element.image.as_mut().unwrap();
+            image.keep_aspect = false;
+            image.slice = [40.0, 40.0, 40.0, 40.0];
+        }
+        let draw = painter.build(&scene_with(element), Vec2::new(800.0, 600.0));
+        for sprite in &draw.sprites {
+            assert!(sprite.rect.width() > 0.0 && sprite.rect.height() > 0.0);
+            assert!(sprite.uv[2] >= sprite.uv[0] && sprite.uv[3] >= sprite.uv[1], "UV 不许反向");
+        }
+        // 中间格被压到 0 → 只剩四个角。
+        assert_eq!(draw.sprites.len(), 4, "中段退化后应当只剩四角");
+        let area: f32 = draw.sprites.iter().map(|s| s.rect.width() * s.rect.height()).sum();
+        assert!((area - 400.0).abs() < 1e-2, "四角仍然铺满目标，实得 {area}");
+    }
+
+    /// 图片尺寸未知（还没加载完）时不切：边距没法换算，先按普通拉伸画。
+    #[test]
+    fn nine_slice_falls_back_when_the_image_size_is_unknown() {
+        let mut painter = Painter::new();
+        let mut element = UiElement::image("Resources/unknown.png").at(
+            [0.0, 0.0],
+            0.0,
+            0.0,
+            200.0,
+            100.0,
+        );
+        {
+            let image = element.image.as_mut().unwrap();
+            image.keep_aspect = false;
+            image.slice = [8.0, 8.0, 8.0, 8.0];
+        }
+        let draw = painter.build(&scene_with(element), Vec2::new(800.0, 600.0));
+        assert_eq!(draw.sprites.len(), 1, "尺寸未知时退回单张");
+        assert!((draw.sprites[0].rect.width() - 200.0).abs() < 1e-4);
+    }
+
+    /// `fill < 1` 优先于九宫格：进度条要的是线性裁剪，不是把九宫格压扁。
+    #[test]
+    fn fill_takes_precedence_over_nine_slice() {
+        let mut painter = Painter::new();
+        painter.set_image_size("Resources/frame.png", Vec2::new(64.0, 64.0));
+        let mut element =
+            UiElement::image("Resources/frame.png").at([0.0, 0.0], 0.0, 0.0, 200.0, 100.0);
+        {
+            let image = element.image.as_mut().unwrap();
+            image.keep_aspect = false;
+            image.slice = [8.0, 8.0, 8.0, 8.0];
+            image.fill = 0.5;
+        }
+        let draw = painter.build(&scene_with(element), Vec2::new(800.0, 600.0));
+        assert_eq!(draw.sprites.len(), 1);
+        assert!((draw.sprites[0].rect.width() - 100.0).abs() < 1e-4);
+        assert!((draw.sprites[0].uv[2] - 0.5).abs() < 1e-4);
     }
 
     /// 图集在一帧内翻倍时，**全部**精灵的 UV 都要按最终边长归一化。

@@ -8814,3 +8814,41 @@ Windows 本机能创建链接，第三条没有跳过。起初误用 `--exact` �
 （core 416 passed / 1 ignored，runtime 68 passed，脚本各套件全绿）；
 `cargo clippy --workspace --all-targets` 0 告警（顺带修掉新版 clippy 对
 `lua_api.rs` 的那条 `nonminimal_bool`）。
+
+## 一百一十一、九宫格（9-slice）：切开四边形，不是切开批次（2026-11-08）
+
+**问题**：UI 图片只有"整张拉伸"与"按比例内接"。窗口 / 按钮 / 对话气泡要"尺寸随内容
+变、四角原样"，于是只能按最大尺寸出图 —— 小窗口压扁圆角、大窗口拉粗边框。
+
+**做法**（`xgame-ui/src/draw.rs`）：
+
+- `UiImageStyle.slice = [左, 右, 上, 下]`（图片像素，全 0 不落盘）。
+- `push_sliced_sprites` 把目标矩形按 3×3 切成最多 9 个 `UiSprite`：像素边距按
+  `目标 ÷ 原始` 缩放（横竖各一），UV 边距按 `slice ÷ 原始`。
+- 目标过窄 → 按比例压缩边距（`shrink` 闭包），零尺寸格 `continue` 跳过。
+- 图片尺寸未知 / `fill < 1` → 走原来的单张路径（`fit_image` 与 fill 裁剪一行没改）。
+
+**测试（先红后绿）**：
+
+- `nine_slice_splits_into_three_by_three_cells`：9 块、逐格矩形的像素边距、逐格 UV、
+  面积之和 = 目标面积（不重叠不缺口）、`commands.len() == 1`（合批没断）。
+- `nine_slice_with_one_axis_emits_three_cells`：只配左右边距 → 3 块，每块全高。
+- `nine_slice_shrinks_borders_when_the_target_is_too_small`：20px 目标 + 40px 边距 →
+  只剩四角、无零宽 / 反向 UV、面积仍铺满。
+- `nine_slice_falls_back_when_the_image_size_is_unknown`：尺寸未知 → 单张。
+- `fill_takes_precedence_over_nine_slice`：`fill = 0.5` → 单张、宽度与 UV 都裁剪。
+- core：`image_slice_is_sanitized_and_stays_out_of_the_file_when_zero`（负值 / NaN 归零，
+  全 0 不落盘，非 0 往返）。
+- **旧实现红灯**：把 `slice_is_active` 强制返回 `false`（等于退回普通拉伸），
+  三条正向用例实跑 `44 passed; 3 failed`；"尺寸未知"与"fill 优先"两条仍绿 ——
+  它们断言的就是退回路径（这是有意的形状）。
+
+**刻意的取舍**：
+
+- 不做平铺：中段 `repeat` 采样要给每张 UI 纹理单独的采样器地址模式，而现在的采样器
+  是全局一份；"金属包边要平铺"的需求出现之前不动。
+- 不做圆角裁剪：九宫格的圆角在**贴图**里，裁剪形状仍是矩形（`clip_children` 走 GPU
+  scissor）。要圆角遮罩得先有 per-element 模板缓冲，量级不同。
+
+**验证**：`cargo test -p xgame-ui` 47 passed / 0 failed、`cargo test -p xgame-core --lib`
+全绿（含 schema 的 41 个类型与 UiImageStyle 字段表）。

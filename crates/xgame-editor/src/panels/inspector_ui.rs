@@ -301,6 +301,32 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
             row(ui, "Aspect", |ui| {
                 changed |= ui.checkbox(&mut image.keep_aspect, "").changed();
             });
+            row(ui, "Slice", |ui| {
+                // 九宫格边距（左 / 右 / 上 / 下，**图片像素**）。四个框一行：
+                // 宽度必须算，不能写死 —— 面板宽窄差 200px 时写死就会顶出右边缘
+                // （与三轴并排同一条教训，见 theme::axis_field_width 的注释）。
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let width = ((ui.available_width() - 12.0) / 4.0).clamp(26.0, theme::FIELD_WIDTH);
+                for (index, label) in ["L", "R", "T", "B"].iter().enumerate() {
+                    if index > 0 {
+                        ui.add_space(0.0);
+                    }
+                    let resp = ui
+                        .add_sized(
+                            egui::vec2(width, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut image.slice[index])
+                                .speed(0.5)
+                                .range(0.0..=2048.0)
+                                .prefix(format!("{label} ")),
+                        )
+                        .on_hover_text(
+                            "九宫格边距（图片像素，顺序 左/右/上/下）：\n\
+                             非 0 时四角原样贴、四边与中间拉伸，圆角不会被拉花；\n\
+                             全 0 = 普通拉伸（Fill < 1 时强制走普通拉伸）。",
+                        );
+                    changed |= resp.changed();
+                }
+            });
         }
 
         ui.add_space(theme::PANEL_MARGIN);

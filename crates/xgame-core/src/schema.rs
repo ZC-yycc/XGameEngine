@@ -1661,6 +1661,12 @@ fn ui_types() -> Vec<TypeSchema> {
                 def("tint", "[f32; 4]", &[1.0, 1.0, 1.0, 1.0], "着色乘子；白色 = 原图。"),
                 def("fill", "f32", &1.0, "填充比例 0..=1：从左往右裁剪，做血条 / 进度条。"),
                 def("keep_aspect", "bool", &true, "保持宽高比（按内容矩形做最大内接，居中）。"),
+                def(
+                    "slice",
+                    "[f32; 4]",
+                    &[0.0, 0.0, 0.0, 0.0],
+                    "九宫格边距 [左, 右, 上, 下]（图片像素）；全 0 = 普通拉伸，与 fill 互斥。",
+                ),
             ],
             vec!["fill 在加载 / Inspector 边界被钳到 0..=1。"],
         ),
@@ -2954,11 +2960,12 @@ mod tests {
             tint,
             fill,
             keep_aspect,
+            slice,
         } = UiImageStyle::default();
         assert_fields(
             &doc,
             "UiImageStyle",
-            &["path", "tint", "fill", "keep_aspect"],
+            &["path", "tint", "fill", "keep_aspect", "slice"],
         );
 
         let ParticleEmitter {
