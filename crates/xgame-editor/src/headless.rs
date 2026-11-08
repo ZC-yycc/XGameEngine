@@ -746,6 +746,13 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
         .with_current_scene(entry_scene)
         .with_scene_order(project.manifest().scene_order());
 
+    // UI 交互（悬停 / 焦点环）也要能进截图：不接视口尺寸时 `update_ui` 整段早退，
+    // `--input-script` 按下的方向键就永远不会变成焦点环，CI 也就无法断言 UI 状态。
+    // 只在**要截图**时接：不截图的运行保持原来更便宜的路径，性能数字不受影响。
+    if args.screenshot.is_some() {
+        world.set_ui_viewport(args.shot_size);
+    }
+
     let setup_ms = millis(setup_start.elapsed());
 
     // ── 帧循环：固定 dt、逐帧计时、日志随手收 ──

@@ -31,6 +31,9 @@ pub mod layout;
 pub mod text;
 
 pub use draw::{Painter, SpriteMode, UiClip, UiCommand, UiDrawData, UiQuad, UiSprite, UiTexture};
-pub use input::{update_interaction, UiEvent, UiEventKind, UiInteraction, UiPointer};
+pub use input::{
+    update_interaction, FocusDir, FocusInput, UiEvent, UiEventKind, UiFocus, UiInteraction,
+    UiPointer,
+};
 pub use layout::{visit, LayoutItem, UiRect, UiTree};
 pub use text::{GlyphAtlas, TextEngine};

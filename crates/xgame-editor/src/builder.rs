@@ -1207,7 +1207,13 @@ mod tests {
         #[cfg(unix)]
         let result = std::os::unix::fs::symlink(&outside, &input);
         if let Err(error) = result {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
+            // 没有开发者模式 / 管理员权限时 Windows 回 `ERROR_PRIVILEGE_NOT_HELD`
+            // （1314）。它在新版 std 里**不是** `PermissionDenied` 而是
+            // `Uncategorized`，只判 kind 会让这台机器上整条测试红掉 ——
+            // 而"没权限建链接"本来就该跳过，不该失败。
+            let no_privilege = error.kind() == std::io::ErrorKind::PermissionDenied
+                || cfg!(windows) && error.raw_os_error() == Some(1314);
+            if no_privilege {
                 eprintln!("当前环境无创建符号链接权限，跳过链接夹具: {error}");
                 return;
             }

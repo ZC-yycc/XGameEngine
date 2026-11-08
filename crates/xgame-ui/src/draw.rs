@@ -406,6 +406,25 @@ fn emit_element(
         });
     }
 
+    // -- 1.5 焦点环 --
+    //
+    // 与 hover 的明度变化分开画：hover 是"指针停在这儿"，focus 是"方向键 / 摇杆
+    // 选中的是它"。两者可以同时成立（鼠标停着 + 手柄选中同一格），画在一起就分不清
+    // 到底是哪一个。焦点环用一圈 2px 描边 + 外扩一格，压在各层之上（后画）。
+    //
+    // 这里**不按 `kind` 过滤**：焦点只可能落在按钮上（导航的准入条件，见
+    // `UiFocus::update`），但脚本用 `UiFocus::set` 硬指过去时也得画得出来 ——
+    // 画环的条件是"它现在有焦点"，不是"它长得像按钮"。
+    if ui.state.focused {
+        draw.push_quad(UiQuad {
+            rect: rect.inset(-1.0),
+            color: Color::TRANSPARENT,
+            corner_radius: style.corner_radius + 1.0,
+            border_width: 2.0,
+            border_color: FOCUS_RING,
+        });
+    }
+
     // 内容矩形：扣掉内边距与边框（边框画在内侧，文字要让开）。
     let inset = style.padding + style.border_width;
     let content = if inset > 0.0 { rect.inset(inset) } else { rect };
@@ -553,6 +572,9 @@ fn fit_image(rect: UiRect, natural: Option<Vec2>, keep_aspect: bool) -> UiRect {
     let size = natural * scale;
     UiRect::from_min_size(rect.center() - size * 0.5, size)
 }
+
+/// 焦点环颜色（线性 RGBA）：中性偏亮的蓝，压在深色 HUD 与浅色面板上都看得清。
+const FOCUS_RING: Color = Color::new(0.30, 0.62, 1.0, 1.0);
 
 /// 只缩放 RGB，保留 alpha（悬停 / 按下的明度变化不该改变透明度）。
 fn scale_rgb(color: Color, factor: f32) -> Color {

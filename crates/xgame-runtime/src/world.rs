@@ -161,6 +161,8 @@ struct UiRuntime {
     items: Vec<xgame_ui::LayoutItem>,
     interaction: UiInteraction,
     events: Vec<UiEvent>,
+    /// 键鼠 / 手柄的焦点环（跨帧只记"焦点在谁身上"，见 `xgame_ui::UiFocus`）。
+    focus: xgame_ui::UiFocus,
 }
 
 /// 游戏运行时世界。
@@ -1007,6 +1009,11 @@ impl World {
     }
 
     /// 本帧的 UI 事件（调试 / 测试用；玩法侧读 `UiElement::state`）。
+    /// 当前 UI 焦点（方向键 / 手柄导航选中的元素）；`None` = 还没用键盘或手柄选过。
+    pub fn ui_focused(&self) -> Option<EntityId> {
+        self.ui.focus.focused()
+    }
+
     pub fn ui_events(&self) -> &[UiEvent] {
         &self.ui.events
     }
@@ -1057,6 +1064,60 @@ impl World {
             &mut self.ui.interaction,
             &mut self.ui.events,
         );
+        // 焦点环必须在 `update_interaction` **之后**：它每帧先把整份 `UiState`
+        // 清零，早写一步会被抹掉。
+        self.update_ui_focus(pointer_active);
+    }
+
+    /// 手柄 / 键盘的 UI 焦点导航。
+    ///
+    /// 输入映射刻意是**约定**而不是 `input.ron` 里的动作（方向键 / 十字键 / 左摇杆
+    /// 与南键 / Enter）：UI 导航是"任何时候都能用"的系统行为，要求作者先在输入
+    /// 映射里配四条动作才有菜单导航，等于把最基础的可访问性变成配置项。要自定义
+    /// 的那一天再走"重绑定 UI"（差距分析里的独立条目）。
+    ///
+    /// 全部取**边沿**（`pressed` / `crossed_up`）：按住方向键不连发，一下一格。
+    fn update_ui_focus(&mut self, input_active: bool) {
+        if !input_active {
+            // 后台 / 失焦：既不移动焦点也不吃确认键（与指针同一条门控）。
+            self.ui.focus.clear();
+            return;
+        }
+        let nav = self.focus_input();
+        // 鼠标**按下**就把焦点搬过去（不是等松开）：Unity 的 EventSystem 也是
+        // 按下即选中，这样"点一下再立刻推方向键"不会从旧焦点出发走错一格。
+        for event in &self.ui.events {
+            if matches!(
+                event.kind,
+                xgame_ui::UiEventKind::Press | xgame_ui::UiEventKind::Click
+            ) {
+                self.ui.focus.set(Some(event.entity));
+            }
+        }
+        let _ = self.ui.focus.update(&mut self.scene, &self.ui.items, nav);
+    }
+
+    /// 本帧的方向键 / 手柄导航输入（键鼠与手柄各一套，任一成立即算按下）。
+    fn focus_input(&self) -> xgame_ui::FocusInput {
+        use xgame_input::{GamepadAxis, GamepadButton, KeyCode};
+        let stick = 0.5;
+        let state = self.input.state();
+        xgame_ui::FocusInput {
+            left: state.pad_button_pressed(GamepadButton::DPadLeft)
+                || state.pad_axis_crossed_down(GamepadAxis::LeftX, -stick)
+                || state.key_pressed(KeyCode::ArrowLeft),
+            right: state.pad_button_pressed(GamepadButton::DPadRight)
+                || state.pad_axis_crossed_up(GamepadAxis::LeftX, stick)
+                || state.key_pressed(KeyCode::ArrowRight),
+            up: state.pad_button_pressed(GamepadButton::DPadUp)
+                || state.pad_axis_crossed_up(GamepadAxis::LeftY, stick)
+                || state.key_pressed(KeyCode::ArrowUp),
+            down: state.pad_button_pressed(GamepadButton::DPadDown)
+                || state.pad_axis_crossed_down(GamepadAxis::LeftY, -stick)
+                || state.key_pressed(KeyCode::ArrowDown),
+            confirm: state.pad_button_pressed(GamepadButton::South)
+                || state.key_pressed(KeyCode::Enter),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3393,6 +3454,82 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 键盘导航：方向键移动焦点、Enter 确认 —— 走一遍真实的 `World::update` 帧序。
+    ///
+    /// 覆盖的是"UI 焦点环接在运行时里"这条缝：`update_ui` 的调用顺序
+    /// （先 `update_interaction` 清零、再写焦点）、输入门控（失焦不吃方向键）
+    /// 与 `end_frame` 的边沿清理都在这里同时被压到。
+    #[test]
+    fn arrow_keys_move_the_ui_focus_and_enter_clicks() {
+        use xgame_core::UiElement;
+        use xgame_input::KeyCode;
+
+        let mut scene = Scene::new("ui_nav");
+        let mut left = Entity::new("Left");
+        left.ui = Some(UiElement::button("Left").at([0.0, 0.0], 10.0, 10.0, 100.0, 40.0));
+        let left_id = left.id;
+        scene.add_entity(left);
+        let mut right = Entity::new("Right");
+        right.ui = Some(UiElement::button("Right").at([0.0, 0.0], 200.0, 10.0, 100.0, 40.0));
+        let right_id = right.id;
+        scene.add_entity(right);
+
+        let mut world = World::new(scene, std::env::temp_dir(), WorldConfig::default());
+        world.set_ui_viewport((800, 600));
+        world.update(1.0 / 60.0);
+        assert_eq!(world.ui_focused(), None, "还没按方向键时没有焦点");
+
+        // 第一次按右：落到绘制顺序里的第一个。
+        world
+            .input_mut()
+            .state_mut()
+            .handle_key(KeyCode::ArrowRight, true);
+        world.update(1.0 / 60.0);
+        assert_eq!(world.ui_focused(), Some(left_id), "首次方向键选中第一个按钮");
+
+        // 松开再按：走到右边的按钮（按住不连发，靠的就是这对边沿）。
+        world
+            .input_mut()
+            .state_mut()
+            .handle_key(KeyCode::ArrowRight, false);
+        world.update(1.0 / 60.0);
+        world
+            .input_mut()
+            .state_mut()
+            .handle_key(KeyCode::ArrowRight, true);
+        world.update(1.0 / 60.0);
+        assert_eq!(world.ui_focused(), Some(right_id), "第二次按右应当到右邻");
+
+        // Enter 确认：本帧 `ui_clicked` 为真。
+        world.input_mut().state_mut().handle_key(KeyCode::Enter, true);
+        world.update(1.0 / 60.0);
+        let clicked = world
+            .scene()
+            .find_entity(right_id)
+            .and_then(|index| world.scene().entities[index].ui.as_ref())
+            .map(|ui| ui.state.clicked)
+            .unwrap_or(false);
+        assert!(clicked, "Enter 应当把焦点按钮的 clicked 置一帧");
+
+        // 鼠标点击也会把焦点搬过去（键鼠与手柄共用一个焦点）。
+        world
+            .input_mut()
+            .state_mut()
+            .handle_key(KeyCode::Enter, false);
+        world.update(1.0 / 60.0);
+        world.set_ui_pointer(Some(Vec2::new(60.0, 30.0)));
+        world
+            .input_mut()
+            .state_mut()
+            .handle_mouse_button(MouseButton::Left, true);
+        world.update(1.0 / 60.0);
+        assert_eq!(
+            world.ui_focused(),
+            Some(left_id),
+            "在左侧按钮上按下鼠标，焦点应当跟过去"
+        );
     }
 
     /// 仓库里的示例项目：清单、场景、输入映射、脚本四样都要能干净加载。

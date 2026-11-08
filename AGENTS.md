@@ -188,6 +188,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 | 动画插值布局 | `CUBICSPLINE` 切线**读入即保留**（每帧入切线 / 值 / 出切线三份，不降级）；`Track::values` 长度必须 = `times.len() × frame_len()`，帧内偏移只用 `frame_start` / `value_start`（**值在中间那份**，写错不 panic 只是动画整体偏移）；切线单位是**每秒**，进 Hermite 前乘段长；旋转逐分量 Hermite 后**必须归一化**，长度退化退回 slerp | §五十一 |
 | UI 指针语义 | 位置（`pos: Option<Vec2>`）与按键（`down`/`pressed`/`released`）**分开**：`pos = None` 只表示不在视口，边沿仍要送达，否则"视口外松手"收不了尾；捕获状态用 `World::ui_pressed()` 断言，别只看 `state.pressed`（它要等指针回视口才归零，测试会假绿）；父节点隐藏 = 整棵子树不进命中表 | §五十二 |
 | 实体 ID | ID 的唯一性是**每个文件内**的：场景的重复 ID 可在加载边界静默重分配（同文件 `parent`），**预制体的不许**——它被场景的 `PrefabInstanceRef.source_id` 跨文件引用，重分配会让所有既有实例失配、`Apply` 时整棵树被当成新增；`u64::MAX` 是坏数据哨兵，读盘即拒 | §五十二、§五十三 |
+| UI 焦点导航 | 候选集**只有 `UiKind::Button`**（`interactable` 反序列化缺省 `true`，装饰背景板会抢走焦点；别改那个缺省值去修，会翻掉旧场景的点击穿透）；一格一帧（只吃边沿）；不回绕；邻居打分 = 主方向距离 + 1.5×垂直偏移、平手按绘制顺序；`UiState.focused` 必须在 `update_interaction` **之后**写（它每帧整份清零）；鼠标 `Press` 即搬焦点 | §一百零一 |
 | UI 与脚本时序 | `update_ui()` 在 `update()` **第 0 步**（早于 start/fixed/update）：`ui_clicked` 必须读本帧状态；代价是脚本本帧改的 UI 矩形**下一帧**才参与命中，这是刻意取舍，`script_moved_ui_takes_effect_on_the_next_frame` 钉住它 —— 想调顺序先改这条测试 | §五十二.4 |
 | 热重载 | 1 Hz 轮询内容目录（只查 metadata）；`poll` 推进基线、**动作后必须 `rebase`**（防自激）；场景永不自动覆盖；脏材质草稿保留；`--ui-shot` 不启用 | §三十一 |
 | 性能改动 | 先量后改；同机背靠背；基准必须断言"真的跑了"；不为机器上调验收线 | §十三 |

@@ -383,6 +383,12 @@ pub struct UiState {
     pub pressed: bool,
     /// **本帧**完成了一次"在元素上按下并在元素上松开"。
     pub clicked: bool,
+    /// 键鼠 / 手柄的**焦点**是否落在这个元素上（焦点环由它画）。
+    ///
+    /// 与 `hovered` 是两条独立的通道：指针悬停不该抢走手柄的焦点，手柄推方向键
+    /// 也不该让指针明明停着的按钮变亮。鼠标**点击**会把焦点搬到被点的元素上
+    /// （Unity 的 EventSystem 同款），这样"用鼠标点一下再用方向键"不会从零开始。
+    pub focused: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -659,10 +665,12 @@ mod tests {
             hovered: true,
             pressed: true,
             clicked: true,
+            focused: true,
         };
         let ron = ron::ser::to_string(&element).expect("序列化");
         assert!(!ron.contains("hovered"), "悬停态不该落盘: {ron}");
         assert!(!ron.contains("clicked"), "点击态不该落盘: {ron}");
+        assert!(!ron.contains("focused"), "焦点态不该落盘: {ron}");
     }
 
     #[test]
@@ -712,6 +720,7 @@ mod tests {
             hovered: true,
             pressed: true,
             clicked: true,
+            focused: true,
         };
         assert_ne!(a, b, "结构化比较当然看得出运行时状态的区别");
         assert!(a.data_eq(&b), "data_eq 必须忽略运行时状态");
