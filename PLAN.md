@@ -8886,3 +8886,40 @@ Windows 本机能创建链接，第三条没有跳过。起初误用 `--exact` �
 - 不做"临时轴约束"（Unity 里 Ctrl+拖某个平面会约束到轴）与世界 / 局部坐标切换：
   现在的 gizmo 只有世界轴，约束轴与它同一批工作。
 - Rect 工具仍然没有实现（不是本轮范围，差距分析里继续记着）。
+
+## 一百一十三、控制台：分级统计 + 资产定位（2026-11-08）
+
+**问题**：P2 #26 控制台还剩两条 —— "按等级计数统计"与"跳到出错资产"。前者是
+"这一局报了几次错"没法一眼看出；后者是"模型加载失败: Resources/…/Box.glb"里的
+路径是死文字，而那正是最该被点的一段。
+
+**做法**（`panels/console.rs`）：
+
+- `level_counts(&[LogMessage]) -> [u32; 4]`：按 `count` 求和，覆盖整个缓冲区；
+  四个开关的标签变成 `Error 20`（为 0 时保持原名）。
+- `mentions_asset` 零分配预筛 + `asset_in_text(text, exists)` 解析：按空白 / 引号 /
+  括号 / 逗号 / 冒号切 token，过 `normalize_project_relative`，再问资产库。
+- 点击分派：有源码位置 → 打开源码查看器（既有行为）；否则命中资产 → `select_asset`
+  （选中 + 必要时清掉会把目标藏起来的搜索词）。
+- 顺带修掉 `ConsoleFilter::is_active` 的 `nonminimal_bool`（新版 clippy）。
+
+**测试（先红后绿）**：
+
+- `level_counts_sum_occurrences_not_rows`：`×7` 与 `×1` 相加 = 8，空表全零。
+- `asset_in_text_recognizes_project_relative_paths`：引号包裹 / `脚本:行号` 按冒号切 /
+  逗号列表命中第一个存在的 / 不在库里不认 / `../` 与盘符绝对路径不认 /
+  非资产后缀（`build.rs`）不认。
+- `mentions_asset_covers_every_suffix`：九种后缀逐个过预筛（漏一个类型等于那一类
+  资产不可点）。
+- **旧实现红灯**：`level_counts` 恒返回全零、`asset_in_text` 恒返回 `None`，
+  实跑 `9 passed; 2 failed`。
+
+**验证**：`--ui-shot --ui-size 1280x800` 复核 —— 头部读作
+`Clear | Info 11 | Warn 15 | Error 20 | OK | 过滤… | 40 messages | Log 目录`，
+无溢出、无重叠（1280 是这三档里最窄的一档）。
+
+**刻意的取舍**：
+
+- 一条消息里出现多个路径时只跳第一个：弹选择菜单比"点第一个"更烦，而日志里
+  多路径的场合通常是"这一批文件都缺"，点哪个都得回终端。
+- 不做"上一条 / 下一条错误"跳转与按时间过滤，也不展开折叠组（另算一轮）。

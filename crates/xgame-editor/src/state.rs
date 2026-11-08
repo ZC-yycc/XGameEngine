@@ -263,7 +263,9 @@ impl ConsoleFilter {
 
     /// 是否真的在收窄（面板据此决定条数标签显示 `N` 还是 `N / M`）。
     pub fn is_active(&self) -> bool {
-        !(self.info && self.warning && self.error && self.success) || !self.query.trim().is_empty()
+        // 等价写法（clippy `nonminimal_bool` 会建议这个形状）：四个等级全开 **且**
+        // 关键词为空才算"没在收窄"。
+        !(self.info && self.warning && self.error && self.success && self.query.trim().is_empty())
     }
 
     /// 本帧要用的关键词（已 trim + 转小写）。每帧算一次，别放进逐条匹配里。
