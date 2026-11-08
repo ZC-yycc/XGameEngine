@@ -172,6 +172,13 @@ pub enum ScriptCommand {
     SaveGame { slot: String },
     /// 脚本请求读档（帧末结算）。存档里的场景与当前不同时，运行时会先切场景。
     LoadGame { slot: String },
+    /// 脚本请求把 UI 焦点交给某个元素（`None` = 清空）。
+    ///
+    /// 焦点表在 `World` 上而不在场景里（它是"这一帧谁被方向键选着"的瞬时状态），
+    /// 脚本只能改场景字段。所以这里登记请求，由运行时在帧末结算 —— 与
+    /// [`ScriptCommand::LoadScene`] 同一条理由，也与"脚本改 UI 矩形下一帧才参与
+    /// 命中"的时序一致（见决策记录 §五十二.4）。
+    UiFocus { target: Option<xgame_core::EntityId> },
 }
 
 /// 脚本请求生成的实体。

@@ -405,7 +405,7 @@ const fn api(
     }
 }
 
-/// 全部 179 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
+/// 全部 182 个注册名。顺序 = `Docs/脚本API.md` 的表格顺序。
 const FUNCTIONS: &[ApiDef] = &[
     api(
         "transform",
@@ -1465,6 +1465,27 @@ const FUNCTIONS: &[ApiDef] = &[
     ),
     api(
         "ui",
+        "ui_focused",
+        "ui_focused(ctx, id)",
+        "boolean",
+        r#"焦点是否在这个元素上（方向键 / 摇杆 / 鼠标按下都会搬焦点）"#,
+    ),
+    api(
+        "ui",
+        "ui_set_focus",
+        "ui_set_focus(ctx, id)",
+        "nil",
+        r#"把焦点交给这个按钮（只认可见且可交互的 Button；下一帧成为方向键的出发点）"#,
+    ),
+    api(
+        "ui",
+        "ui_clear_focus",
+        "ui_clear_focus(ctx)",
+        "nil",
+        r#"清空焦点（下次推方向键重新选第一个）"#,
+    ),
+    api(
+        "ui",
         "ui_set_rect",
         "ui_set_rect(ctx, id, ax0, ay0, ax1, ay1, ox0, oy0, ox1, oy1)",
         "nil",
@@ -1655,7 +1676,7 @@ mod tests {
         let doc = script_api();
         assert_eq!(doc.format_version, SCRIPT_API_FORMAT_VERSION);
         assert_eq!(doc.categories.len(), 18);
-        assert_eq!(doc.function_count(), 179);
+        assert_eq!(doc.function_count(), 182);
         assert_eq!(doc.hooks.len(), 7);
         assert_eq!(doc.value_types.len(), 7);
         assert!(!doc.conventions.is_empty());
@@ -1698,7 +1719,7 @@ mod tests {
             );
             assert!(!function.params.is_empty(), "{} 没有参数", function.name);
         }
-        assert_eq!(names.len(), 179);
+        assert_eq!(names.len(), 182);
     }
 
     #[test]

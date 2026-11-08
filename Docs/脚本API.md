@@ -4,7 +4,7 @@
 > 脚本放在项目的 `Scripts/` 目录（`.lua`），实体用**项目相对路径**引用它。
 >
 > **机器可读清单**：`xgame-editor --export-script-api [--out api.json]`，或 MCP
-> `script_api_read`。本文件的 179 个函数名与清单由测试钉住；参数 / 返回值 /
+> `script_api_read`。本文件的 182 个函数名与清单由测试钉住；参数 / 返回值 /
 > 全局约定以清单为准，本文件继续承担叙述、示例与易错点说明。
 
 ---
@@ -586,6 +586,9 @@ UI 元素也是实体（`Entity::ui`），id 与其它实体通用。颜色参�
 | `ui_has(ctx, id)` | 这个实体是不是 UI 元素 |
 | `ui_clicked(ctx, id)` | **本帧**完成了一次"在元素上按下并在元素上松开" |
 | `ui_hovered(ctx, id)` | 本帧指针停在元素上 |
+| `ui_focused(ctx, id)` | 焦点是否在这个元素上 |
+| `ui_set_focus(ctx, id)` | 把焦点交给这个按钮（只认可见且可交互的 `Button`） |
+| `ui_clear_focus(ctx)` | 清空焦点 |
 | `ui_set_rect(ctx, id, ax0, ay0, ax1, ay1, ox0, oy0, ox1, oy1)` | 一次设定锚点 + 偏移 |
 | `ui_set_anchor(ctx, id, ax0, ay0, ax1, ay1)` | 只改锚点 |
 | `ui_set_offset(ctx, id, ox0, oy0, ox1, oy1)` | 只改偏移 |
@@ -623,6 +626,12 @@ end
 >
 > **本帧状态**：`ui_clicked` / `ui_hovered` 只在**当帧**为真，必须在 `update`
 > 里读；`fixed_update` 里读会漏（固定步长一帧可能跑 0 次或多次）。
+>
+> **焦点**：`ui_focused` 问的是"方向键 / 摇杆现在选着谁"。`ui_set_focus` 只认
+> **可见且可交互的 Button**（别的目标是彻底 no-op，与导航的准入条件同一条规则），
+> 会把其它元素的焦点一并清掉，并在**下一帧**成为方向键的出发点 —— 与「脚本改
+> UI 矩形下一帧才参与命中」同一条时序。`ui_clear_focus` 之后回到"没选过"，
+> 下次推方向键重新选第一个。菜单"一开就选中默认项"用它。
 >
 > **没有 UI 时**这一切都是空操作：`ui_set_*` 找不到实体就静默返回，
 > 不报错（与其它"容错优先"的 API 一致）。

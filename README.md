@@ -27,7 +27,7 @@ cargo run -p xgame-editor -- --check projects/SampleScene
 # （无 --out 打 stdout；同一份代码两次导出逐字节相同）
 cargo run -p xgame-editor -- --export-schema --out schema.json
 
-# 脚本 API 清单 —— 导出 179 个函数 / 7 个钩子 / 参数 / 返回值 / 约定（JSON）
+# 脚本 API 清单 —— 导出 182 个函数 / 7 个钩子 / 参数 / 返回值 / 约定（JSON）
 # （与 MCP `script_api_read` 同源；无 --out 打 stdout）
 cargo run -p xgame-editor -- --export-script-api --out script_api.json
 
@@ -715,14 +715,22 @@ image: Some((
 - **鼠标按下即搬焦点**：点一下再推方向键，从刚点的那个继续走。
 
 只有 `kind: Button` 的元素进导航（装饰面板是 `Panel`，即便 `interactable` 也不选它）；
-焦点目标被隐藏 / 删掉 / 关掉交互就自动清空。宿主读 `World::ui_focused()`。
+焦点目标被隐藏 / 删掉 / 关掉交互就自动清空。宿主读 `World::ui_focused()`，脚本用
+`ui_set_focus(ctx, id)` / `ui_focused(ctx, id)` / `ui_clear_focus(ctx)` ——
+"菜单一打开就选中第一项"是这两行事：
+
+```lua
+function start(ctx)
+    ui_set_focus(ctx, entity_id(ctx, "Menu.Play"))
+end
+```
 
 > 导航键**不进** `input.ron`：方向键 / 十字键 / 摇杆 + Enter / 南键是"任何时候都能用"
 > 的系统行为，要求先配四条动作才有菜单导航等于把可访问性变成配置项。
 
 **已知限制**：pivot / 旋转缩放动画、输入框、设计分辨率缩放（Canvas Scaler）、
 九宫格只支持拉伸（不支持平铺）、手柄 `West` 还不能当"取消 / 返回"、
-脚本不能查询 / 设置焦点（`ui_focused` 只在宿主侧）。
+焦点不能滚进滚动容器（还没有滚动容器）。
 
 ## 场景层级
 
@@ -1193,7 +1201,7 @@ Build/<项目名>/
 | 工具 | 干什么 |
 |---|---|
 | `schema_read` | 读场景格式的机器可读说明书（41 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
-| `script_api_read` | 读脚本 API 的机器可读清单（179 个函数 / 签名 / 参数 / 返回值 / 7 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
+| `script_api_read` | 读脚本 API 的机器可读清单（182 个函数 / 签名 / 参数 / 返回值 / 7 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
 | `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |

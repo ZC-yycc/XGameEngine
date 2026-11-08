@@ -209,7 +209,7 @@ mod tests {
                     .len()
             })
             .sum();
-        assert_eq!(function_count, 179, "函数总数");
+        assert_eq!(function_count, 182, "函数总数");
         assert!(
             categories
                 .iter()
@@ -254,7 +254,7 @@ mod tests {
             documented, manifest,
             "Docs/脚本API.md 与机器清单的函数名不一致"
         );
-        assert_eq!(documented.len(), 179, "文档 API 表应有 179 个函数");
+        assert_eq!(documented.len(), 182, "文档 API 表应有 182 个函数");
     }
 
     /// 从 Markdown 的 API 表第一列提取函数名。

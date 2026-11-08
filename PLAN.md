@@ -8964,3 +8964,41 @@ HUD 按钮矩形外扩 1px，`824` 个像素变化，其余画面逐像素相同
 
 **刻意的取舍**：导航键不进 `input.ron`（理由见决策记录 §一百零一）；不做脚本查焦点、
 焦点滚入滚动区、West 取消。这三条都要新的运行态通道，不属于"手柄能开菜单"这件事。
+
+## 一百一十五、脚本控焦点：镜像标志 + 帧末命令（2026-11-08）
+
+**问题**：焦点环落地后，宿主能读 `World::ui_focused()`，但**脚本**既读不到也设
+不了 —— "菜单一打开就选中默认项"只能靠玩家先推一下方向键，而且焦点落在谁身上，
+脚本侧完全不可观测（差距分析里这条原本写着"要 `FrameCtx` 带上 UI 运行态，属下一轮"）。
+
+**做法**：
+
+- `GameCtx::ui_focused(id)`：读 `ui.state.focused`。
+- `GameCtx::ui_set_focus(id)`：先判 `kind == Button && visible && interactable`
+  （不满足就**彻底 no-op**），清掉其它元素的焦点标志、给目标置位，再压一条
+  `ScriptCommand::UiFocus { target: Some(id) }`。
+- `GameCtx::ui_clear_focus()`：清标志 + 压 `UiFocus { target: None }`。
+- `ScriptCommand::UiFocus` → `CommandReport.ui_focus: Option<FocusRequest>`
+  （`Set` / `Clear` 两个明确值）→ `consume_script_commands` 里写 `self.ui.focus`。
+- 脚手架：3 个注册名（`ui_api.rs`）、3 条清单条目（`script_api.rs`，179 → **182**）、
+  文档表与全部计数、§一百零二 记录语义。
+
+**测试（先红后绿）**：
+
+- runtime 1 条 `lua_can_set_and_clear_the_ui_focus`，四段断言压四个不同的缝：
+  ① 脚本在 `start` 里设焦点 → **帧末**进焦点表（且先试的隐藏按钮没抢到）；
+  ② 下一帧场景标志与焦点表一致（焦点环靠它画）；
+  ③ 方向键从脚本设的那个出发（不是从头选）；
+  ④ `ui_clear_focus` 之后回到 `None`。
+- **旧实现红灯**：`report.ui_focus` 结算处加 `.filter(|_| false)`，第一条断言即红
+  （`left: None, right: Some(EntityId(2))`）。
+- 计数钉子：`script_api` 的 3 条结构测试、`lua_host` 的注册名三方比对、
+  `script_api_cli` 的文档表比对 —— 改注册不改清单会立刻红。
+
+**刻意的取舍**：
+
+- 不把焦点表搬进 `Scene`：那样脚本读写都自然了，但焦点是**每帧重写**的瞬时状态，
+  进场景就意味着进脏检查 / 存档 / 序列化的候选面（现在的 `UiState` 全部
+  `#[serde(skip)]`，加一个"要落盘的子集"会破掉这条干净的分界）。
+- 不做"焦点历史 / 上一层返回"（`West` 取消要的正是这个）：需要一张焦点栈，
+  而现在连"焦点从哪个元素跳过来"都没记 —— 等真有面板嵌套需求再说。

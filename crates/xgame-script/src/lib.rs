@@ -61,5 +61,5 @@ pub use context::{
     FrameCtx, LogLevel, RemovedEntity, ScriptCommand, ScriptCtx, ScriptLog, SpawnRequest,
 };
 pub use ctx::{GameCtx, RayHit};
-pub use host::{CommandReport, Hook, PreloadReport, SaveContext};
+pub use host::{CommandReport, FocusRequest, Hook, PreloadReport, SaveContext};
 pub use lua_host::LuaHost;

@@ -639,6 +639,13 @@ impl LuaHost {
                 // 与场景切换同款：一帧只做最后一次请求。
                 ScriptCommand::SaveGame { slot } => report.save_game = Some(slot),
                 ScriptCommand::LoadGame { slot } => report.load_game = Some(slot),
+                // 与切场景 / 存档同款：一帧只认最后一次请求。
+                ScriptCommand::UiFocus { target } => {
+                    report.ui_focus = Some(match target {
+                        Some(id) => crate::host::FocusRequest::Set(id),
+                        None => crate::host::FocusRequest::Clear,
+                    });
+                }
             }
         }
         report
@@ -2067,7 +2074,7 @@ mod tests {
     ///
     /// 不靠运行期枚举全局表：Lua 基础库也有 `error` 等函数，而引擎恰好覆盖了
     /// 同名全局；用集合差分会把被覆盖的名字漏掉。直接读注册源码能精确拿到
-    /// 引擎自己注册的 179 个名字。
+    /// 引擎自己注册的 182 个名字。
     fn registered_global_names(source: &str) -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let mut rest = source;
@@ -2111,8 +2118,8 @@ mod tests {
         );
         assert_eq!(
             actual.len(),
-            179,
-            "注册名数量应为 179（分层状态机增加 set_anim_layer_param）"
+            182,
+            "注册名数量应为 182（UI 焦点三件套：ui_focused / ui_set_focus / ui_clear_focus）"
         );
 
         let host = LuaHost::new();

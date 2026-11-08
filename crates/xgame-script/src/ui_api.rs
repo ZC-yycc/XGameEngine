@@ -93,6 +93,24 @@ pub(crate) fn register_ui(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         "ui_hovered",
         lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().ui_hovered(id_of(id))))?,
     )?;
+    globals.set(
+        "ui_focused",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| Ok(ctx.game().ui_focused(id_of(id))))?,
+    )?;
+    globals.set(
+        "ui_set_focus",
+        lua.create_function(|_, (ctx, id): (LuaCtx, i64)| {
+            ctx.game().ui_set_focus(id_of(id));
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "ui_clear_focus",
+        lua.create_function(|_, ctx: LuaCtx| {
+            ctx.game().ui_clear_focus();
+            Ok(())
+        })?,
+    )?;
 
     // -- 外观 --
 

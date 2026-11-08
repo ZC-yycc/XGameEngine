@@ -215,6 +215,71 @@ impl GameCtx<'_> {
             .unwrap_or(false)
     }
 
+    /// 焦点是否在这个元素上（方向键 / 十字键 / 左摇杆 / 鼠标按下都会搬焦点）。
+    pub fn ui_focused(&mut self, id: EntityId) -> bool {
+        self.ui_element(id)
+            .map(|ui| ui.state.focused)
+            .unwrap_or(false)
+    }
+
+    /// 把焦点交给这个元素（菜单一打开就选中默认项）。
+    ///
+    /// # 三条语义
+    ///
+    /// 1. **只认能按的东西**：目标必须是 `kind` 为 Button、可见且可交互的元素。
+    ///    否则**整个调用无效**（不搬焦点、不留半截状态）—— 与"焦点只落在按钮上"
+    ///    的导航准入条件是同一条规则，两处不一致就会造出"脚本能选中、方向键选不中"
+    ///    的幽灵焦点。
+    /// 2. **互斥**：会把其它元素的焦点标志一起清掉。焦点天然唯一，允许两个元素
+    ///    同时说自己有焦点只会让画面出现两圈环。
+    /// 3. **下一帧生效**：真正的焦点表在 `World` 上，脚本改不到；这里写场景标志
+    ///    并登记一条请求，运行时在帧末结算 —— 与「脚本改 UI 矩形下一帧才参与命中」
+    ///    的时序一致（见 `Docs/决策记录.md` §五十二.4）。**同帧**读 `ui_focused`
+    ///    已经为真（标志先写），但**方向键的出发点**要等下一帧。
+    pub fn ui_set_focus(&mut self, id: EntityId) {
+        let index = match self.scene.find_entity(id) {
+            Some(index) => index,
+            None => return,
+        };
+        // 先判能不能聚焦，再动任何状态：不可聚焦的调用必须是彻底的 no-op。
+        let can_focus = self.scene.entities[index]
+            .ui
+            .as_ref()
+            .is_some_and(|ui| ui.kind == UiKind::Button && ui.visible && ui.interactable);
+        if !can_focus {
+            return;
+        }
+        self.clear_focus_flags(Some(id));
+        if let Some(ui) = self.scene.entities[index].ui.as_mut() {
+            ui.state.focused = true;
+        }
+        // 直接写缓冲（与 `ui_spawn` 同款）：`GameCtx::push_command` 是 `ctx.rs` 的
+        // 私有方法，同一个 crate 的两个模块之间不共享它。
+        self.commands.push(ScriptCommand::UiFocus { target: Some(id) });
+    }
+
+    /// 清空焦点：下一次推方向键会重新选第一个。
+    pub fn ui_clear_focus(&mut self) {
+        self.clear_focus_flags(None);
+        self.commands.push(ScriptCommand::UiFocus { target: None });
+    }
+
+    /// 清掉所有元素的焦点标志（`keep` 指向的那个除外，`None` = 全清）。
+    ///
+    /// 逐实体扫一遍是 O(n)，但焦点操作发生在"开菜单 / 切页"这种低频时刻，
+    /// 一帧至多几次 —— 不为此在 `Scene` 上再挂一张反向索引（那张表还得跟着
+    /// 增删实体同步，代价远大于收益）。
+    fn clear_focus_flags(&mut self, keep: Option<EntityId>) {
+        for entity in &mut self.scene.entities {
+            if Some(entity.id) == keep {
+                continue;
+            }
+            if let Some(ui) = entity.ui.as_mut() {
+                ui.state.focused = false;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // 运行时创建
     // -----------------------------------------------------------------------

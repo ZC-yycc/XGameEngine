@@ -1656,6 +1656,19 @@ impl World {
             return;
         }
 
+        // UI 焦点请求：脚本能改场景标志，但焦点表在 `self.ui.focus` 上。
+        //
+        // 放在这一处（帧末结算）而不是在钩子里直接改：钩子执行时 `Scene` 正被
+        // `&mut` 借给 `GameCtx`，而焦点表的读取方 `update_ui` 要同时看场景与布局表。
+        // 于是脚本 `ui_set_focus` 在**下一帧**的 `update_ui` 才真正成为"方向键的
+        // 出发点"——与「脚本改 UI 矩形下一帧才参与命中」同一条时序（§五十二.4）。
+        if let Some(request) = report.ui_focus {
+            match request {
+                xgame_script::FocusRequest::Set(id) => self.ui.focus.set(Some(id)),
+                xgame_script::FocusRequest::Clear => self.ui.focus.clear(),
+            }
+        }
+
         for removed in report.removed {
             // 先通知组件（on_destroy），再清刚体。
             self.destroy_behaviors(removed.id, delta, time);
@@ -3452,6 +3465,106 @@ mod tests {
             "角色应被墙挡在 x≈1.68，实际 x={}",
             p.x
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 脚本能设 / 清 UI 焦点：`ui_set_focus` 下一帧成为方向键的出发点，
+    /// `ui_clear_focus` 之后回到"没选过"的状态；不可聚焦的目标是彻底 no-op。
+    ///
+    /// 走的是"脚本写场景标志 + 帧末结算命令"这条路（焦点表在 `World` 上，
+    /// 脚本改不到），所以这条测试同时钉住了时序：设完焦点**当帧末**就进焦点表，
+    /// 而场景里的 `focused` 标志要等下一帧 `update_ui` 才跟上。
+    #[test]
+    fn lua_can_set_and_clear_the_ui_focus() {
+        use xgame_core::UiElement;
+
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_lua_ui_focus_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/menu.lua"),
+            r#"
+            local n = 0
+            function start(ctx)
+                -- 先试一个隐藏的按钮：它不该抢走焦点（"只认能按的东西"）。
+                ui_set_focus(ctx, entity_id(ctx, "Menu.Hidden"))
+                ui_set_focus(ctx, entity_id(ctx, "Menu.Play"))
+            end
+            function update(ctx)
+                n = n + 1
+                if n == 4 then ui_clear_focus(ctx) end
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("lua_ui_focus");
+        let mut driver = Entity::new("Menu");
+        driver.scripts.push("Scripts/menu.lua".to_owned());
+        scene.add_entity(driver);
+        let mut play = Entity::new("Menu.Play");
+        play.ui = Some(UiElement::button("Play").at([0.0, 0.0], 10.0, 10.0, 100.0, 40.0));
+        let play_id = play.id;
+        scene.add_entity(play);
+        let mut quit = Entity::new("Menu.Quit");
+        quit.ui = Some(UiElement::button("Quit").at([0.0, 0.0], 200.0, 10.0, 100.0, 40.0));
+        let quit_id = quit.id;
+        scene.add_entity(quit);
+        let mut hidden = Entity::new("Menu.Hidden");
+        let mut hidden_ui = UiElement::button("Hidden").at([0.0, 0.0], 10.0, 100.0, 100.0, 40.0);
+        hidden_ui.visible = false;
+        hidden.ui = Some(hidden_ui);
+        scene.add_entity(hidden);
+
+        let mut world = World::new(scene, &dir, WorldConfig::default());
+        world.set_ui_viewport((800, 600));
+
+        // 第 1 帧：`start` 里设焦点，帧末结算进焦点表。
+        world.update(1.0 / 60.0);
+        assert_eq!(
+            world.ui_focused(),
+            Some(play_id),
+            "脚本设的焦点应当帧末生效；隐藏按钮不许抢走"
+        );
+
+        // 第 2 帧：场景里的 `focused` 标志跟上（`update_ui` 写在 `update_interaction` 之后）。
+        world.update(1.0 / 60.0);
+        let flagged = world
+            .scene()
+            .find_entity(play_id)
+            .and_then(|index| world.scene().entities[index].ui.as_ref())
+            .map(|ui| ui.state.focused)
+            .unwrap_or(false);
+        assert!(flagged, "场景标志应当与焦点表一致（焦点环靠它画）");
+
+        // 第 3 帧：按一下右方向键 —— 从脚本设的 Play 出发，走到 Quit。
+        world
+            .input_mut()
+            .state_mut()
+            .handle_key(xgame_input::KeyCode::ArrowRight, true);
+        world.update(1.0 / 60.0);
+        assert_eq!(
+            world.ui_focused(),
+            Some(quit_id),
+            "方向键应当从脚本设的那个出发（不是从头选）"
+        );
+
+        // 第 4 帧：松开方向键；脚本在这一帧调 `ui_clear_focus`，帧末结算。
+        world
+            .input_mut()
+            .state_mut()
+            .handle_key(xgame_input::KeyCode::ArrowRight, false);
+        world.update(1.0 / 60.0);
+
+        // 第 5 帧：焦点已清空。
+        world.update(1.0 / 60.0);
+        assert_eq!(world.ui_focused(), None, "`ui_clear_focus` 之后应当没有焦点");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

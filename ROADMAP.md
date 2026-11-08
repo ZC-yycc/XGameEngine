@@ -9,6 +9,16 @@
 
 ## 整体路线图
 
+### 2026-11-08 第六轮：脚本控焦点（§一百零二）
+
+- [x] `ui_focused(ctx, id)` / `ui_set_focus(ctx, id)` / `ui_clear_focus(ctx)`；
+      API 179 → 182，清单 / 文档表 / 计数三方同步。
+- [x] 设焦点 = 写场景标志（同帧可读、焦点环当帧可见）+ 压 `ScriptCommand::UiFocus`
+      （帧末结算进焦点表，下一帧成为方向键的出发点）—— 与「脚本改 UI 矩形下一帧
+      才参与命中」同一时序。
+- [x] 准入条件与导航候选同一条（`Button` + 可见 + 可交互），不满足就彻底 no-op。
+- [ ] 仍缺：焦点栈（`West` 取消 / 返回上层）、焦点滚入滚动容器；见 PLAN 一百一十五。
+
 ### 2026-11-08 第五轮：UI 手柄 / 键盘焦点导航（P1 #4 的导航缺口，§一百零一）
 
 - [x] `xgame_ui::UiFocus`：方向键 / 十字键 / 左摇杆移动焦点（边沿、一格一帧、不回绕），
@@ -154,7 +164,7 @@
 
 | 项目 | 状态 |
 |---|---|
-| 分层状态机 | `AnimLayer.machine`：每个身体部位各有参数表、当前状态、播放时钟与交叉淡入；状态覆盖本层 `clip/speed/looping`，逐条 `duration` 覆盖本层 `fade_time`。`AnimationDriver` 按层名保留独立运行态，渲染侧对 Override / Additive 都实际混合旧→新层姿势；基础层冻结时活层仍可推进。脚本 `set_anim_layer_param`（API **179** 个）只推指定层。Inspector 显示每层 entry→当前状态并可调参数；SampleScene 的 `upper` 层已改成 Natural⇄Survey 两状态演示。默认 `machine=None` 且新字段缺省不落盘。见 PLAN 九十七 / 决策记录 §八十五 |
+| 分层状态机 | `AnimLayer.machine`：每个身体部位各有参数表、当前状态、播放时钟与交叉淡入；状态覆盖本层 `clip/speed/looping`，逐条 `duration` 覆盖本层 `fade_time`。`AnimationDriver` 按层名保留独立运行态，渲染侧对 Override / Additive 都实际混合旧→新层姿势；基础层冻结时活层仍可推进。脚本 `set_anim_layer_param`（API 当时 179 个，现 182 个）只推指定层。Inspector 显示每层 entry→当前状态并可调参数；SampleScene 的 `upper` 层已改成 Natural⇄Survey 两状态演示。默认 `machine=None` 且新字段缺省不落盘。见 PLAN 九十七 / 决策记录 §八十五 |
 | 验证 | 旧实现红灯：层 RON 的 `machine/fade_time/AimFire` 保存后全部丢失；新增配置往返、双层机器隔离、逐条淡入、最终骨骼姿势混合、冻结基础层、通道门控隔离、指纹、Lua 与随机场景稳定性回归。根运动已于下一轮补齐 |
 
 ### 2026-10-30 第三轮：软阴影（PCSS）+ 级间混合（P2 #20 的画质半边，§八十四）
@@ -757,7 +767,7 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 - **程序化配置** —— 重力 / 步长 / 渲染参数都在 `project.ron`；
 - **程序化契约** —— `--export-schema` / MCP `schema_read`：41 个落盘类型、字段、默认值、
   示例、资产引用规则，确定性 JSON；`--export-script-api` / MCP `script_api_read`：
-  179 个脚本函数、签名、参数、返回值、6 个生命周期钩子与全局约定；
+  182 个脚本函数、签名、参数、返回值、7 个生命周期钩子与全局约定；
 - **单一运行时** —— 三宿主复用 World；发布包的 InputMap / 插件 / 切关组合已有 hosted
   无头门禁，真实设备输入、winit / GPU、渲染历史与 listener 仍需按各自宿主分别验证；
 - **MCP 工具面** —— 12 个工具（读说明书 / 读脚本契约 / 读 / 改 / 查 / 看效果 / 看资产 /

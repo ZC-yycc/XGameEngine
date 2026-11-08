@@ -107,6 +107,19 @@ pub struct CommandReport {
     pub save_game: Option<String>,
     /// 脚本请求读档（槽名）。帧末结算；存档里的场景与当前不同时由运行时切过去。
     pub load_game: Option<String>,
+    /// 脚本请求的 UI 焦点。`Set` / `Clear` 是两种**明确**的请求 ——
+    /// 不能只靠"场景里有没有 `focused` 标志"推断，那样"清空焦点"与
+    /// "没人碰过焦点"分不开。同一帧多次请求时**最后一个生效**。
+    pub ui_focus: Option<FocusRequest>,
+}
+
+/// 脚本对 UI 焦点的请求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusRequest {
+    /// 把焦点交给这个元素。
+    Set(xgame_core::EntityId),
+    /// 清空焦点（下一次推方向键会重新选第一个）。
+    Clear,
 }
 
 impl CommandReport {
@@ -119,5 +132,6 @@ impl CommandReport {
             && self.scene_load.is_none()
             && self.save_game.is_none()
             && self.load_game.is_none()
+            && self.ui_focus.is_none()
     }
 }

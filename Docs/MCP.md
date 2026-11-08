@@ -292,7 +292,7 @@
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |
-| `crates/xgame-core/src/script_api.rs` | 脚本 API 清单（179 函数 / 18 类 / 6 钩子 / 值类型 / 约定）+ 确定性数据 + 防漂移测试（`--export-script-api` 与 `script_api_read` 共用的唯一内容源） |
+| `crates/xgame-core/src/script_api.rs` | 脚本 API 清单（182 函数 / 18 类 / 7 钩子 / 值类型 / 约定）+ 确定性数据 + 防漂移测试（`--export-script-api` 与 `script_api_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/script_api_cli.rs` | `--export-script-api` 的参数解析、JSON 序列化、stdout / `--out` 出口；文档函数名比对 |
 | `crates/xgame-core/src/check.rs` | `check_project()`（编辑器 `--check` 与 `project_check` 共用） |
 | `crates/xgame-core/src/asset.rs` | `AssetGuid` / `AssetMeta` / `AssetDatabase`（`asset_list` / `asset_import` / `asset_move` 与 `--check` 的资产诊断都读它） |
