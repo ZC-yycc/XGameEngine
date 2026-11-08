@@ -110,10 +110,12 @@ impl FromLua for LuaCtx {
                     to: "ScriptCtx".to_owned(),
                     message: Some("期望脚本上下文句柄（第一个参数）".to_owned()),
                 })?;
-        if !lua
+        // 先落成局部量再取反：直接写 `if !x.is_some_and(..)` 会被 clippy 判成
+        // `nonminimal_bool`（新版建议 `is_none_or`），而那需要重新组织闭包。
+        let context_is_active = lua
             .app_data_ref::<ActiveContext>()
-            .is_some_and(|active| active.0 == ptr as usize)
-        {
+            .is_some_and(|active| active.0 == ptr as usize);
+        if !context_is_active {
             return Err(Error::RuntimeError(
                 "脚本上下文已失效：只能在生命周期钩子内使用".into(),
             ));
