@@ -174,7 +174,7 @@ fn conventions() -> Vec<String> {
     ]
 }
 
-/// 六个生命周期钩子。
+/// 七个生命周期钩子。
 fn hooks() -> Vec<ScriptHook> {
     vec![
         hook(
@@ -206,6 +206,12 @@ fn hooks() -> Vec<ScriptHook> {
             "on_collision_exit(ctx, other)",
             "结束接触时一次",
             "离开触发区、停止持续伤害。",
+        ),
+        hook(
+            "on_anim_event",
+            "on_anim_event(ctx, name)",
+            "基础通道剪辑时间轴上的命名时刻被跨过时一次",
+            "脚步、打击帧、特效挂点；事件表在 animator.events 上。",
         ),
         hook(
             "on_destroy",
@@ -1650,7 +1656,7 @@ mod tests {
         assert_eq!(doc.format_version, SCRIPT_API_FORMAT_VERSION);
         assert_eq!(doc.categories.len(), 18);
         assert_eq!(doc.function_count(), 179);
-        assert_eq!(doc.hooks.len(), 6);
+        assert_eq!(doc.hooks.len(), 7);
         assert_eq!(doc.value_types.len(), 7);
         assert!(!doc.conventions.is_empty());
         assert_eq!(doc.engine_version, env!("CARGO_PKG_VERSION"));
@@ -1729,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn hooks_are_the_six_lifecycle_entry_points() {
+    fn hooks_are_the_seven_lifecycle_entry_points() {
         let doc = script_api();
         let names: Vec<&str> = doc.hooks.iter().map(|hook| hook.name.as_str()).collect();
         assert_eq!(
@@ -1740,6 +1746,7 @@ mod tests {
                 "fixed_update",
                 "on_collision_enter",
                 "on_collision_exit",
+                "on_anim_event",
                 "on_destroy",
             ]
         );

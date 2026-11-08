@@ -9,6 +9,17 @@
 
 ## 整体路线图
 
+### 2026-11-08 第一轮：动画事件（P1 #12 后续缺口，§九十七）
+
+- [x] `Animator.events`（时间 + 名字）打在**基础通道当前剪辑**的时间轴上；到点派发脚本
+      `on_anim_event(ctx, name)` 与 Rust 组件 `Lifecycle::on_anim_event`，脚本与组件同序。
+- [x] 判定只有一份（`animation_runtime::crossed_events` 纯函数）：循环跨界按命中时刻升序、
+      一帧跨多圈按圈数各派发、非循环只触发一次、`time = 0` 靠"刚起步"标记、越界时刻不猜。
+- [x] `run_hook` 扩成 `Option<HookArg>`（实体 / 文本），派发纪律（预算 / 限流 / 清零）不复制第二份。
+- [x] Inspector 事件表（增删 / 时间 / 名字 / 越界错误色 / 剪辑时长提示）、schema 增 `AnimEvent`
+      （41 个落盘类型）、脚本 API 钩子 6 → 7。
+- [ ] 仍缺：逐剪辑独立事件表、事件区间、时间轴打点与触发可视化；见 PLAN 一百一十。
+
 ### 2026-11-03 第六轮：预制体语义与发布输入门禁（G0，§九十六）
 
 - [x] 场景与预制体共用实体语义判定；未实例化及目录外被引用的预制体均只读检查，重复 ID / 越界层不重报。
@@ -709,7 +720,7 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 - **程序化实跑** —— `--headless`（固定 dt 逐位可复现，可选确定性键盘时间线）；
 - **程序化观察** —— `--screenshot` 离屏 PNG（同机逐字节一致），MCP 以图片块回传；
 - **程序化配置** —— 重力 / 步长 / 渲染参数都在 `project.ron`；
-- **程序化契约** —— `--export-schema` / MCP `schema_read`：40 个落盘类型、字段、默认值、
+- **程序化契约** —— `--export-schema` / MCP `schema_read`：41 个落盘类型、字段、默认值、
   示例、资产引用规则，确定性 JSON；`--export-script-api` / MCP `script_api_read`：
   179 个脚本函数、签名、参数、返回值、6 个生命周期钩子与全局约定；
 - **单一运行时** —— 三宿主复用 World；发布包的 InputMap / 插件 / 切关组合已有 hosted
@@ -809,6 +820,9 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
       CPU 变形 + 顶点缓冲按需重写、Inspector Morph 滑条、脚本 `morph` / `set_morph`
       （见 PLAN.md 五十五、决策记录 §三十七）
 - [x] 根运动（显式节点 + 逐轴平移；runtime 唯一落地；角色 / 运动学体 / 普通实体闭环；普通无头生效；见 PLAN.md 九十八、决策记录 §八十六）
+- [x] 动画事件（`Animator.events`：基础通道时间轴上的命名时刻；脚本 `on_anim_event` +
+      组件 `Lifecycle::on_anim_event`；循环跨界 / 一圈多次 / 起步帧 / 越界不猜；
+      见 PLAN.md 一百一十、决策记录 §九十七）
 
 > 明确不含：真倒放（负速 = 停在第 0 帧）、根旋转 / additive 与 layers 的根运动、遮罩羽化
 > （二值权重）。每个模型取第一张蒙皮，超过 256 骨的骨架解析时告警截断。

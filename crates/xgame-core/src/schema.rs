@@ -35,8 +35,8 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use crate::animation::{
-    AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState, AnimTransition,
-    Animator, RootMotion,
+    AnimAdditive, AnimCondition, AnimEvent, AnimLayer, AnimLayerMode, AnimMachine, AnimState,
+    AnimTransition, Animator, RootMotion,
 };
 use crate::audio::{AudioBus, AudioSource};
 use crate::camera::Camera;
@@ -1140,8 +1140,36 @@ fn animation_types() -> Vec<TypeSchema> {
             ],
         ),
         struct_schema(
+            "AnimEvent",
+            "基础通道剪辑时间轴上的一次命名事件（脚步 / 打击帧 / 特效挂点）。",
+            Some(default_of::<AnimEvent>()),
+            Some(pretty(&AnimEvent {
+                time: 0.2,
+                name: "footstep".into(),
+            })),
+            vec![
+                def(
+                    "time",
+                    "f32",
+                    &0.0,
+                    "触发时刻（秒，从剪辑 0 起算）；循环剪辑上写 >= 时长永不触发。",
+                ),
+                def(
+                    "name",
+                    "String",
+                    &"",
+                    "事件名；脚本 on_anim_event(ctx, name) 与组件 Lifecycle::on_anim_event 收，引擎不解释语义。",
+                ),
+            ],
+            vec![
+                "事件表挂在 Animator 上而不是剪辑资产里：剪辑来自 glTF，没有可写事件的位置。",
+                "时间按基础通道当前剪辑的本地时间轴解释：换剪辑 / 换状态时归零重新计时。",
+                "分层与叠加层不触发事件 —— 它们的时钟与基础通道无关，出手帧必须唯一。",
+            ],
+        ),
+        struct_schema(
             "Animator",
-            "实体上的动画播放器配置（单剪辑 / 状态机 / 叠加层 / 混合层栈 / 可选根运动）。",
+            "实体上的动画播放器配置（单剪辑 / 状态机 / 叠加层 / 混合层栈 / 可选根运动 / 事件表）。",
             Some(default_of::<Animator>()),
             Some(pretty(&Animator {
                 clip: "Idle".into(),
@@ -1171,11 +1199,18 @@ fn animation_types() -> Vec<TypeSchema> {
                     "RootMotion",
                     "根运动；None = 默认关闭且不落盘，Some 时由运行时消费基础通道的节点平移增量。",
                 ),
+                def(
+                    "events",
+                    "Vec<AnimEvent>",
+                    &Vec::<AnimEvent>::new(),
+                    "基础通道的命名事件表；空 = 不派发且不落盘。",
+                ),
             ],
             vec![
                 "机器模式与叠加层正交：状态机换基础层，叠加层按自己的时钟独立播放。",
                 "autoplay / fade_time 在机器模式下仍然生效；is_active 还要看是否存在速度为正的状态。",
                 "runtime 消费位移后，render 只把已消费轴重置为节点绑定平移，未消费轴 / additive / layers 保留；动态体与静态体不接受根运动。",
+                "事件只在基础通道派发，且需要 autoplay 为真；分层 / 叠加层的事件表不生效（没有这种字段）。",
             ],
         ),
     ]
@@ -2006,6 +2041,7 @@ mod tests {
             "AnimLayerMode",
             "AnimLayer",
             "RootMotion",
+            "AnimEvent",
             "Animator",
             "PhysicsBody",
             "BodyKind",
@@ -2720,6 +2756,7 @@ mod tests {
             additive,
             layers,
             root_motion,
+            events,
         } = Animator::default();
         assert_fields(
             &doc,
@@ -2734,6 +2771,7 @@ mod tests {
                 "additive",
                 "layers",
                 "root_motion",
+                "events",
             ],
         );
 

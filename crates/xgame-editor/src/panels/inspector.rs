@@ -666,6 +666,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 } else {
                     let mut remove = false;
                     let mut remove_machine = false;
+                    // 事件时间轴的边界要用剪辑时长：模型名先取出来，下面
+                    // `entity.animator` 被可变借走之后就取不到 `entity` 了。
+                    let anim_model = entity.model_at(0).map(|model| model.to_owned());
                     if let Some(animator) = entity.animator.as_mut() {
                         // 根运动属于**基础通道**，放在机器 / 叠加 / 层栈之前。层栈可以
                         // 任意增长，若把它放在末尾，窄窗口里即使开着也要滚过所有层才
@@ -914,6 +917,102 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                                     }],
                                     transitions: vec![],
                                 });
+                                touched = true;
+                            }
+                        }
+
+                        // ── 动画事件 ──
+                        //
+                        // 事件表跟**实体**走（剪辑全部来自 glTF，没有能写事件的
+                        // 剪辑资产），时间按基础通道当前剪辑的本地时间轴解释。
+                        // 只在单剪辑模式下给"越界"提示：机器模式下播的是状态表
+                        // 里的剪辑，拿 entry 的时长去判断会误导。
+                        // 表格顺序不影响派发（运行时按命中时刻排序），所以这里
+                        // 不排序 —— 拖动时间时也就不会让行在指尖下跳来跳去。
+                        if icons::add_row(
+                            ui,
+                            "Add Event",
+                            "在基础通道的剪辑时间轴上打一个命名事件：\n\
+                             到点时脚本 on_anim_event(ctx, name) 与组件的\n\
+                             Lifecycle::on_anim_event 各自收到一次。",
+                        )
+                        .clicked()
+                        {
+                            animator.events.push(xgame_core::AnimEvent {
+                                time: 0.0,
+                                name: "event".to_string(),
+                            });
+                            touched = true;
+                        }
+                        if !animator.events.is_empty() {
+                            let clip_len = if animator.active_machine().is_some() {
+                                None
+                            } else {
+                                anim_model.as_deref().and_then(|model| {
+                                    state.scene_renderer.as_ref().and_then(|renderer| {
+                                        renderer.animation_clip_duration(model, &animator.clip)
+                                    })
+                                })
+                            };
+                            let mut remove_event = None;
+                            for idx in 0..animator.events.len() {
+                                let beyond =
+                                    clip_len.is_some_and(|len| animator.events[idx].time > len);
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    if icons::close_button(ui, "删掉这个事件") {
+                                        remove_event = Some(idx);
+                                    }
+                                    if beyond {
+                                        // 越界时刻不会触发（运行时不猜"取模"），
+                                        // 用错误色提示，但不拦编辑。
+                                        ui.visuals_mut().override_text_color =
+                                            Some(theme::colors::ERROR);
+                                    }
+                                    let event = &mut animator.events[idx];
+                                    let mut time = event.time;
+                                    let resp = ui
+                                        .add_sized(
+                                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                            egui::DragValue::new(&mut time)
+                                                .speed(0.01)
+                                                .range(0.0..=600.0)
+                                                .suffix("s"),
+                                        )
+                                        .on_hover_text(match clip_len {
+                                            Some(len) => format!(
+                                                "触发时刻（秒，剪辑时长 {len:.2}s）；超过时长的事件永不派发"
+                                            ),
+                                            None => "触发时刻（秒，从剪辑 0 起算）".to_owned(),
+                                        });
+                                    if resp.changed() {
+                                        event.time = time;
+                                        touched = true;
+                                    }
+                                    // 名字宽度跟着剩余空间走：✕16 + 时间 54 + 间距
+                                    // 之后剩下的都给它，窄窗口也不会把名字挤出面板。
+                                    let mut name = event.name.clone();
+                                    let resp = ui
+                                        .add_sized(
+                                            egui::vec2(
+                                                ui.available_width().max(40.0),
+                                                theme::FIELD_HEIGHT,
+                                            ),
+                                            egui::TextEdit::singleline(&mut name)
+                                                .hint_text("name")
+                                                .font(egui::TextStyle::Monospace),
+                                        )
+                                        .on_hover_text(
+                                            "事件名：脚本 on_anim_event(ctx, name) 收到的字符串",
+                                        );
+                                    if resp.changed() {
+                                        event.name = name;
+                                        touched = true;
+                                    }
+                                });
+                            }
+                            if let Some(index) = remove_event {
+                                animator.events.remove(index);
                                 touched = true;
                             }
                         }

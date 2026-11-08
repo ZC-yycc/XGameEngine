@@ -408,8 +408,21 @@ impl SceneRenderer {
             .unwrap_or_default()
     }
 
-    /// 某模型的骨骼（节点）名列表 —— 去重、跳过匿名 —— Inspector 层栈遮罩下拉用。
+    /// 某模型某个剪辑的时长（秒）。Inspector 用它给动画事件的时间轴画边界：
+    /// 超过时长的事件永不派发（循环剪辑上它落进下一圈的同一相位，运行时不猜）。
     ///
+    /// 与 [`Self::animation_clip_names`] 同款约定：模型还没加载就是 `None`，
+    /// 面板不显示"越界"提示也不拦编辑。
+    pub fn animation_clip_duration(&self, model: &str, clip: &str) -> Option<f32> {
+        self.model_cache
+            .get(model)?
+            .animations
+            .iter()
+            .find(|c| c.name == clip)
+            .map(|c| c.duration)
+    }
+
+    /// 某模型的骨骼（节点）名列表 —— 去重、跳过匿名 —— Inspector 层栈遮罩下拉用。    ///
     /// 模型还没加载时返回空（同 [`Self::animation_clip_names`] 的约定：面板先显示
     /// "未加载"，预加载完成后自然出现选项）。
     pub fn bone_names(&self, model: &str) -> Vec<String> {

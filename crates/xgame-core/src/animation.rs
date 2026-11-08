@@ -304,18 +304,10 @@ impl AnimLayer {
     }
 }
 
-/// 挂在实体上的动画播放器配置。
+/// 根运动配置：把基础通道上某个显式节点的平移增量交给运行时落地。
 ///
-/// 默认值 = 「播第一个剪辑、原速、循环、自动播放、换剪辑 0.25s 淡入」——给一个
-/// 带动画的模型挂上组件后不改任何字段就应当能看到它动起来、切剪辑平滑过渡。
-///
-/// `#[serde(default)]` 在**结构体**级别：反序列化时缺哪个字段就从
-/// [`Default`] 补哪个字段。于是旧场景文件（没有 `animator`）反序列化成
-/// `None`（`Option` 缺省），手写的半截配置（比如只有 `clip`）也能补全。
-///
-/// 根运动默认关闭（[`Animator::root_motion`] 为 `None`）。打开时必须显式写
-/// glTF 节点名：同一模型常同时有场景根、骨架包装根和髋骨，猜“第一个根节点”
-/// 会把不同 DCC 导出的资产解释成不同结果。
+/// 打开时必须显式写 glTF 节点名：同一模型常同时有场景根、骨架包装根和髋骨，
+/// 猜“第一个根节点”会把不同 DCC 导出的资产解释成不同结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RootMotion {
@@ -334,6 +326,41 @@ impl Default for RootMotion {
     }
 }
 
+/// 基础通道剪辑时间轴上的一次**命名事件**（脚步、打击帧、特效挂点、音效）。
+///
+/// # 为什么事件表在 `Animator` 上而不在剪辑资产里
+///
+/// 剪辑全部来自 glTF，而 glTF 没有"事件"这一概念（Unity 的 `AnimationEvent`
+/// 存在它自己的 `.anim` 资产里，我们没有自己的剪辑资产格式）。所以事件跟
+/// **实体**走，时间按**基础通道当前剪辑**的本地时间轴解释：换剪辑 / 换状态时
+/// 基础时钟归零，同一张事件表在新剪辑上重新计时。
+///
+/// 分层与叠加层**不触发**事件：它们的时钟与基础通道无关，"第几帧出手"必须唯一，
+/// 否则上半身状态机的开火帧会和腿部跑步的落脚帧混在一起。
+///
+/// 引擎不解释事件名的语义，只负责在正确的时刻把它交给脚本
+/// （`on_anim_event(ctx, name)`）与 Rust 组件（`Lifecycle::on_anim_event`）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnimEvent {
+    /// 触发时刻（秒，从剪辑 0 起算）。
+    ///
+    /// 超过剪辑时长的事件**永不触发**：循环剪辑上 `time >= duration` 会落进
+    /// 下一圈的同一相位，猜"取模"等于悄悄改作者写下的数，所以宁可不响应
+    /// （Inspector 会把越界的那一行标红）。
+    pub time: f32,
+    /// 事件名。空名事件会被运行时跳过（派发一个空串给脚本没有意义）。
+    pub name: String,
+}
+
+/// 挂在实体上的动画播放器配置。
+///
+/// 默认值 = 「播第一个剪辑、原速、循环、自动播放、换剪辑 0.25s 淡入」——给一个
+/// 带动画的模型挂上组件后不改任何字段就应当能看到它动起来、切剪辑平滑过渡。
+///
+/// `#[serde(default)]` 在**结构体**级别：反序列化时缺哪个字段就从
+/// [`Default`] 补哪个字段。于是旧场景文件（没有 `animator`）反序列化成
+/// `None`（`Option` 缺省），手写的半截配置（比如只有 `clip`）也能补全。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Animator {
@@ -368,6 +395,10 @@ pub struct Animator {
     /// `None` = 关闭且不落盘；叠加层与分层层栈不参与根运动。旋转仍留在骨架姿势里。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_motion: Option<RootMotion>,
+    /// 基础通道的命名事件表（见 [`AnimEvent`]）。空 = 不派发，且**不落盘**
+    /// （老场景逐字节不变）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<AnimEvent>,
 }
 
 impl Default for Animator {
@@ -382,6 +413,7 @@ impl Default for Animator {
             additive: None,
             layers: Vec::new(),
             root_motion: None,
+            events: Vec::new(),
         }
     }
 }
@@ -487,10 +519,43 @@ mod tests {
         assert!(none.animator.looping);
     }
 
+    /// 事件表跟实体走：写得进去、读得回来，且**空表不落盘**（老场景逐字节不变）。
+    #[test]
+    fn anim_events_round_trip_and_stay_out_of_the_file_when_empty() {
+        #[derive(Serialize, Deserialize, Default)]
+        struct Wrap {
+            #[serde(default)]
+            animator: Animator,
+        }
+
+        let empty = Wrap::default();
+        let text = ron::ser::to_string(&empty).unwrap();
+        assert!(
+            !text.contains("events"),
+            "空事件表不该出现在场景文件里，实得 {text}"
+        );
+
+        let mut with = Wrap::default();
+        with.animator.events = vec![
+            AnimEvent {
+                time: 0.2,
+                name: "footstep".into(),
+            },
+            AnimEvent {
+                time: 0.5,
+                name: "hit".into(),
+            },
+        ];
+        let text = ron::ser::to_string(&with).unwrap();
+        let back: Wrap = ron::from_str(&text).unwrap();
+        assert_eq!(back.animator.events, with.animator.events);
+        assert_eq!(back.animator.events[1].name, "hit");
+        assert!((back.animator.events[1].time - 0.5).abs() < f32::EPSILON);
+    }
+
     /// 没开自动播放 / 速度不为正 → 不请求出帧（否则编辑器会满速空转）。
     #[test]
-    fn inactive_when_paused_or_stationary() {
-        let mut a = Animator::new("Walk");
+    fn inactive_when_paused_or_stationary() {        let mut a = Animator::new("Walk");
         assert!(a.is_active());
         a.autoplay = false;
         assert!(!a.is_active(), "关掉自动播放就不该再请求出帧");

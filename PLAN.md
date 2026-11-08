@@ -8762,3 +8762,55 @@ Windows 本机能创建链接，第三条没有跳过。起初误用 `--exact` �
 - `--check` 属 core，不依赖 `xgame-input`，其报告仍不解析 `input.ron`；这次的
   映射语法校验是**发布前**门禁。真实 Alt+Tab / 物理手柄与触摸、机器掉电恢复及
   其他平台未经本轮验收。未做同机版本前后性能基准；此次没有性能提升的结论。
+
+## 一百一十、动画事件：实体级时间轴 + 一份判定（2026-11-08）
+
+**问题**：动画只输出姿势。「脚步在这一步响起」「刀在这个相位判定」「特效在 0.3 秒炸」
+这些必须精确到剪辑时间轴的时刻，之前只能让脚本自己累计 `delta` —— 而那与剪辑时钟
+不同源：换剪辑 / 换状态时剪辑归零，脚本的寄存器不会，于是动画一换状态，脚步就整体
+错位。缺口记在差距分析 P1 #12 的"后续缺口"里（动画事件）。
+
+**做法**：
+
+1. `Animator.events: Vec<AnimEvent { time, name }>`（`skip_serializing_if` 空表不落盘，
+   老场景逐字节不变）。事件跟**实体**走：剪辑来自 glTF，没有可写事件的资产格式。
+2. 驱动只多一个 `frame_span(id) -> (from, to, just_started)`。`just_started` 只在
+   **首建条目**与**换剪辑**那一帧为真（`tick` 里把 `or_insert_with` 换成
+   `Occupied/Vacant` match，顺手复位老条目的标记），活到本帧末供读取。
+3. 纯函数 `animation_runtime::crossed_events`：命中判据 `k·duration + e ∈ (from, to]`，
+   循环 `k` 取遍、非循环只取 `k = 0`，`time = 0` 由 `started` 补一次，越界 / 负时间 /
+   非有限 / 空名全部跳过；命中按时刻升序写入调用方的缓冲（`out` 复用，不返回值）。
+4. 运行时 `dispatch_animation_events`：**没有实体配事件时一次 `any` 短路**；配了的实体
+   每帧查资产缓存（`Arc`，无 IO）取剪辑时长，然后派发。派发走与碰撞同一个
+   `dispatch_collision_to` 形状（组件轨 + 脚本轨各一份），排在动画推进 + 根运动之后，
+   结构性改动沿用"命令下一帧结算"的既有契约。
+5. `run_hook` 的实参从 `Option<EntityId>` 扩成 `Option<HookArg<'_>>`
+   （`Entity` / `Text`）：预算重置、句柄缓存、指数退避、成功清零只有一份实现。
+6. 脚手架：`Hook::AnimEvent`（`on_anim_event`）、`Lifecycle::on_anim_event`（默认空实现）、
+   `script_api` 钩子 6 → 7、`AnimEvent` 进 schema（41 个落盘类型）、Inspector 事件表、
+   README / 脚本 API 文档 / 决策记录 §九十七。
+
+**测试（先红后绿）**：
+
+- `crossed_events` 9 条纯函数用例：基本命中 / 帧边界不漏 / 循环跨圈先尾后头 / 一帧多圈
+  每次一圈 / 非循环只一次 / `time = 0` 只在起步帧 / 坏配置不猜 / 时钟倒退安全。
+- `frame_span` 1 条：首建与换剪辑各为真一帧，其余为假。
+- `Animator.events` 往返 + 空表不落盘 1 条。
+- runtime 3 条：组件轨（同一帧两个事件按时间轴顺序派发、跨圈各来第二次）、
+  静帧不派发、Lua 脚本收到 `ev:footstep`。
+- **旧实现红灯**：把 `dispatch_animation_events` 的短路条件改成恒真（等于不派发），
+  组件轨与脚本轨两条正向测试实跑 `1 passed; 2 failed` —— 静帧那条仍绿，因为它断言的
+  就是"什么都没收到"（这是它该有的形状，不是漏测）。
+
+**刻意的取舍**：
+
+- 事件表不按剪辑分组：分组需要剪辑资产层，而现在的剪辑是"glTF 里有什么就是什么"。
+  同一实体换剪辑沿用同一张表、时间在新剪辑上重算，这条写进 README 的 v1 边界。
+- 不做事件区间（`[from, to]` 持续生效）与时间轴打点拖拽：前者是另一套语义（需要
+  "每帧采样是否在区间内"，与现在的"跨越一次"不同），后者要有剪辑时间轴 UI。
+- 分层 / 叠加层不派发：它们的时钟与基础通道无关，"出手帧"必须唯一；字段也不给。
+
+**验证**：`cargo test -p xgame-core -p xgame-script -p xgame-runtime` 全绿
+（core 416 passed / 1 ignored，runtime 68 passed，脚本各套件全绿）；
+`cargo clippy --workspace --all-targets` 0 告警（顺带修掉新版 clippy 对
+`lua_api.rs` 的那条 `nonminimal_bool`）。

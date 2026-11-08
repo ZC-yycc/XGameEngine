@@ -28,7 +28,7 @@ end
 
 ## 二、生命周期钩子
 
-六个钩子，**全部可选**（没定义就不调用，不需要写空函数）。
+七个钩子，**全部可选**（没定义就不调用，不需要写空函数）。
 
 | 钩子 | 时机 | 典型用途 |
 |---|---|---|
@@ -37,7 +37,14 @@ end
 | `function fixed_update(ctx)` | **每个物理固定步长**一次（60 Hz） | 与物理交互的逻辑 |
 | `function on_collision_enter(ctx, other)` | 与另一个实体**开始**接触时一次 | 拾取、伤害、触发器 |
 | `function on_collision_exit(ctx, other)` | **结束**接触时一次 | 离开触发区、停止持续伤害 |
+| `function on_anim_event(ctx, name)` | 基础通道剪辑跨过事件时刻时一次 | 脚步声、打击判定、特效挂点 |
 | `function on_destroy(ctx)` | 实体被销毁**之前**一次 | 清理、生成特效 |
+
+`name` 是**动画事件名**（`animator.events` 里写的字符串）。事件表挂在 `Animator`
+上，时间按**基础通道当前剪辑**的本地时间轴解释：换剪辑 / 换状态时归零重新计时；
+循环剪辑每圈到点各来一次，一帧跨多个事件时按时间轴顺序派发。分层与叠加层不触发。
+静帧（`autoplay = false`）不派发；速度为 0 的剪辑在**起步那一帧**仍会派发
+`time = 0` 的事件。
 
 `other` 是**对方的实体 id**（整数，与 `self_id()` / `find_entity()` 同一种值）。
 碰撞事件**双方各收一次**（Unity 的 `OnCollisionEnter` 同款语义），持续接触

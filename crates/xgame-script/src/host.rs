@@ -53,6 +53,11 @@ pub enum Hook {
     CollisionEnter,
     /// 与另一个碰撞体**结束**接触时调用一次（参数：对方实体 id）。
     CollisionExit,
+    /// 动画事件：基础通道剪辑时间轴上的命名时刻（参数：事件名）。
+    ///
+    /// 由运行时在 `World::update` 里派发（时钟走完本帧之后），见
+    /// `xgame_core::AnimEvent`。分层 / 叠加层不触发它。
+    AnimEvent,
     /// 实体被销毁后调用一次（自身已不在场景，状态表仍可读）。
     Destroy,
 }
@@ -66,6 +71,7 @@ impl Hook {
             Hook::FixedUpdate => "fixed_update",
             Hook::CollisionEnter => "on_collision_enter",
             Hook::CollisionExit => "on_collision_exit",
+            Hook::AnimEvent => "on_anim_event",
             Hook::Destroy => "on_destroy",
         }
     }

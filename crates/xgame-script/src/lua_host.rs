@@ -57,8 +57,20 @@ pub const MEMORY_LIMIT: usize = 128 * 1024 * 1024;
 /// "每帧 spawn + 报错 + destroy"这种病态脚本把表撑大。
 const ERROR_STREAK_SOFT_LIMIT: usize = 1024;
 
-/// 四个生命周期钩子的函数句柄（编译期从环境表取一次）。
+/// 钩子的额外实参（`start` / `update` 等无参钩子传 `None`）。
 ///
+/// 目前有两种形态：碰撞带**对方实体 id**，动画事件带**事件名**。用一个枚举
+/// 而不是再加一个 `run_hook_xxx`，是为了让"重置预算 / 查句柄 / 报错限流 /
+/// 成功清零"这一整套纪律只有一份实现 —— 之前的 bug 都出在多份副本漂移上。
+#[derive(Clone, Copy)]
+pub enum HookArg<'a> {
+    /// 对方实体 id（碰撞钩子）。
+    Entity(EntityId),
+    /// 事件名（动画事件钩子）。
+    Text(&'a str),
+}
+
+/// 生命周期钩子的函数句柄（编译期从环境表取一次）。///
 /// 以前这里是一组 bool（`Hooks`），钩子函数每帧每实体现从 env 表查
 /// （`env.get` 实测 ~194 ns/次，1000 实体 ≈192 µs/帧，占 no-op 派发 17%）。
 /// 而 `detect_funcs` 本来就要把函数 `raw_get` 出来验存在性 —— 句柄直接留下，
@@ -70,6 +82,7 @@ struct HookFuncs {
     fixed_update: Option<Function>,
     collision_enter: Option<Function>,
     collision_exit: Option<Function>,
+    anim_event: Option<Function>,
     destroy: Option<Function>,
 }
 
@@ -81,6 +94,7 @@ impl HookFuncs {
             Hook::FixedUpdate => self.fixed_update.as_ref(),
             Hook::CollisionEnter => self.collision_enter.as_ref(),
             Hook::CollisionExit => self.collision_exit.as_ref(),
+            Hook::AnimEvent => self.anim_event.as_ref(),
             Hook::Destroy => self.destroy.as_ref(),
         }
     }
@@ -454,13 +468,36 @@ impl LuaHost {
             }
         }
         for (id, path_id) in queue {
-            self.run_hook(&mut frame, id, path_id, hook, Some(other));
+            self.run_hook(&mut frame, id, path_id, hook, Some(HookArg::Entity(other)));
+        }
+    }
+
+    /// 派发一次动画事件（`name` = 事件名）。
+    ///
+    /// 与碰撞同款：只派发给事件所属的实体，事件名作为参数传进去。时间轴与
+    /// "该不该派发"由运行时判定（它才知道剪辑时长），这里只负责调用。
+    pub fn dispatch_anim_event(
+        &mut self,
+        mut frame: FrameCtx<'_>,
+        entity: EntityId,
+        name: &str,
+    ) {
+        // 队列里存驻留 id（与其它派发同款：热路径不克隆路径字符串）。
+        let mut queue: Vec<(EntityId, u32)> = Vec::new();
+        if let Some(e) = frame.scene.entities.iter().find(|e| e.id == entity) {
+            for path in &e.scripts {
+                if is_lua(path) {
+                    queue.push((entity, self.intern.intern(path)));
+                }
+            }
+        }
+        for (id, path_id) in queue {
+            self.run_hook(&mut frame, id, path_id, Hook::AnimEvent, Some(HookArg::Text(name)));
         }
     }
 
     /// 实体离开场景时清掉它的运行时痕迹（`started` 标记与状态表）。
-    pub fn forget_entity(&mut self, entity: EntityId) {
-        self.started.remove(&entity);
+    pub fn forget_entity(&mut self, entity: EntityId) {        self.started.remove(&entity);
         self.states.retain(|(id, _), _| *id != entity);
     }
 
@@ -472,7 +509,7 @@ impl LuaHost {
         entity: EntityId,
         path_id: u32,
         hook: Hook,
-        arg: Option<EntityId>,
+        arg: Option<HookArg<'_>>,
     ) {
         // 前面的回调可能已经删除这个实体；Destroy 使用移除通知，允许实体不在场。
         if !matches!(hook, Hook::Destroy) && frame.scene.find_entity(entity).is_none() {
@@ -544,7 +581,8 @@ impl LuaHost {
         let result = {
             let _window = lua_api::ContextWindow::enter(&self.lua, light);
             match arg {
-                Some(other) => func.call::<()>((light, other.raw() as i64)),
+                Some(HookArg::Entity(other)) => func.call::<()>((light, other.raw() as i64)),
+                Some(HookArg::Text(text)) => func.call::<()>((light, text)),
                 None => func.call::<()>(light),
             }
         };
@@ -786,6 +824,7 @@ fn detect_funcs(env: &Table) -> HookFuncs {
         fixed_update: grab("fixed_update"),
         collision_enter: grab("on_collision_enter"),
         collision_exit: grab("on_collision_exit"),
+        anim_event: grab("on_anim_event"),
         destroy: grab("on_destroy"),
     }
 }

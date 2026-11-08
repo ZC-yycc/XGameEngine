@@ -107,8 +107,8 @@ pub use transform::{euler_deg_to_quat, quat_to_euler_deg, Transform};
 
 // -- 导出：新增基础设施
 pub use animation::{
-    AnimAdditive, AnimCondition, AnimLayer, AnimLayerMode, AnimMachine, AnimState, AnimTransition,
-    Animator, RootMotion,
+    AnimAdditive, AnimCondition, AnimEvent, AnimLayer, AnimLayerMode, AnimMachine, AnimState,
+    AnimTransition, Animator, RootMotion,
 };
 pub use animation_runtime::{
     AnimationAsset, AnimationDriver, AnimationLoader, MotionFade, MotionFadePlayback,

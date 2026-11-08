@@ -1130,6 +1130,13 @@ impl World {
         self.animation.tick(frame_dt, &self.scene.entities);
         self.apply_root_motion(frame_dt);
 
+        // -- 3.3 动画事件：本帧跨过的命名时刻派发给脚本 / 组件 --
+        //
+        // 排在动画推进之后：本帧的时钟已经走完，"跨过了哪几个事件"才是确定的。
+        // 钩子里产生的结构性改动**不**在这里结算 —— 与其它钩子同款契约
+        // （spawn / destroy 对 Scene 立即生效，命令下一帧才结算）。
+        self.dispatch_animation_events(frame_dt, time);
+
         // -- 3.5 粒子：本帧的实体增删与脚本 burst 都已落定 --
         //
         // 放在 `update` 之后：脚本这一帧写的 `particle.burst` 当帧就能炸出来
@@ -1828,6 +1835,150 @@ impl World {
         self.scratch_physics_indices = to_create;
     }
 
+    /// 把本帧跨过的动画事件派发给脚本轨与组件轨。
+    ///
+    /// # 为什么判定放在运行时而不是 `AnimationDriver` 里
+    ///
+    /// "事件时刻到没到"必须知道**剪辑时长**，而时长只存在于动画资产里（驱动只
+    /// 保管一个累加的时钟）。运行时本来就有资产缓存（根运动同一个入口），所以在
+    /// 这里查时长，把纯数学交给 `xgame_core::animation_runtime::crossed_events`
+    /// —— 循环跨界、一圈多次、非循环钳位那些边界条件都只在那个纯函数里写一遍。
+    ///
+    /// # 成本
+    ///
+    /// 没有实体配事件时（绝大多数项目）只做一次 `any` 短路扫描。配了事件的实体
+    /// 每帧多一次资产缓存查表 + 按名找剪辑，都在已加载的 `Arc` 上，没有 IO。
+    fn dispatch_animation_events(&mut self, delta: f32, time: f32) {
+        let any_events = self.scene.entities.iter().any(|entity| {
+            entity
+                .animator
+                .as_ref()
+                .is_some_and(|animator| animator.autoplay && !animator.events.is_empty())
+        });
+        if !any_events {
+            return;
+        }
+
+        // 命中先收集再派发：派发要 `&mut self`，不能一边借场景一边改场景。
+        let mut hits: Vec<(EntityId, String)> = Vec::new();
+        for entity in self.scene.entities.iter() {
+            let Some(animator) = &entity.animator else {
+                continue;
+            };
+            // `autoplay = false` = "静止在第 0 帧"，没有在播就没有事件
+            // （与渲染侧"不动就不出帧"同一条语义）。
+            if !animator.autoplay || animator.events.is_empty() {
+                continue;
+            }
+            let Some((clip_name, _t, looping)) = self.animation.playback(entity.id) else {
+                continue;
+            };
+            let Some((from, to, started)) = self.animation.frame_span(entity.id) else {
+                continue;
+            };
+            let Some(model) = entity.model_at(0) else {
+                continue;
+            };
+            let Some(asset) = Self::animation_asset_cached(
+                &mut self.animation_assets,
+                self.animation_loader.as_deref(),
+                model,
+            ) else {
+                continue;
+            };
+            let Some(clip) = asset.clip(clip_name) else {
+                continue;
+            };
+            let mut indices: Vec<usize> = Vec::new();
+            xgame_core::animation_runtime::crossed_events(
+                &animator.events,
+                from,
+                to,
+                clip.duration,
+                looping,
+                started,
+                &mut indices,
+            );
+            for index in indices {
+                hits.push((entity.id, animator.events[index].name.clone()));
+            }
+        }
+
+        for (entity, name) in hits {
+            self.dispatch_anim_event(entity, &name, delta, time);
+        }
+    }
+
+    /// 给一个实体派发"这一时刻到了某个动画事件"（组件轨 + 脚本轨）。
+    fn dispatch_anim_event(&mut self, entity: EntityId, name: &str, delta: f32, time: f32) {
+        if self.behavior_instances.contains_key(&entity) {
+            let World {
+                scene,
+                physics,
+                input,
+                scripts,
+                audio_port,
+                behavior_instances,
+                clock,
+                current_scene,
+                scene_order,
+                scene_loader,
+                save_context,
+                ..
+            } = self;
+            let (logs, commands) = scripts.buffers_mut();
+            if let Some(instances) = behavior_instances.get_mut(&entity) {
+                for instance in instances.iter_mut() {
+                    let mut game = GameCtx {
+                        save: Some(save_context),
+                        scene: &mut *scene,
+                        physics: Some(&mut *physics),
+                        input: Some(input),
+                        audio: Some(&mut *audio_port),
+                        logs: &mut *logs,
+                        commands: &mut *commands,
+                        source: instance.name,
+                        scene_name: current_scene.as_deref().unwrap_or(""),
+                        scene_order: scene_order.as_slice(),
+                        loader: scene_loader.as_deref(),
+                        clock: Some(&mut *clock),
+                        entity,
+                        delta,
+                        time,
+                    };
+                    (instance.hooks.anim_event)(&mut instance.component, &mut game, name);
+                }
+            }
+        }
+
+        let World {
+            scene,
+            physics,
+            input,
+            scripts,
+            audio_port,
+            clock,
+            current_scene,
+            scene_order,
+            scene_loader,
+            save_context,
+            ..
+        } = self;
+        let frame = FrameCtx::new(scene, delta, time)
+            .with_input(input)
+            .with_physics(physics)
+            .with_audio(audio_port)
+            .with_clock(clock)
+            .with_scene_name(current_scene.as_deref().unwrap_or(""))
+            .with_scene_order(scene_order.as_slice())
+            .with_save(save_context);
+        let frame = match scene_loader.as_deref() {
+            Some(loader) => frame.with_loader(loader),
+            None => frame,
+        };
+        scripts.dispatch_anim_event(frame, entity, name);
+    }
+
     /// 从共享动画时钟提取根运动，并按实体类型交给唯一的位置所有者。
     ///
     /// - 普通实体 / 父级实体：`Scene::set_world_position`（正确换回局部坐标）；
@@ -2325,6 +2476,169 @@ mod tests {
                 asset: root_motion_asset(delta),
             },
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // 动画事件
+    // -----------------------------------------------------------------------
+
+    /// 记录动画事件的组件（测试用）。
+    #[derive(Default)]
+    struct AnimProbe;
+
+    xgame_core::impl_no_inspect!(AnimProbe);
+
+    impl Lifecycle for AnimProbe {
+        fn on_anim_event(&mut self, _ctx: &mut Ctx, name: &str) {
+            anim_probe_push(name);
+        }
+    }
+
+    // 记录走**线程局部**而不是全局 static：cargo 默认并行跑测试，共享一张表
+    // 会让"暂停不该派发"这类断言读到隔壁测试的事件（第一次写就撞上了）。
+    std::thread_local! {
+        static ANIM_PROBE_LOG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn anim_probe_push(name: &str) {
+        ANIM_PROBE_LOG.with(|log| log.borrow_mut().push(name.to_owned()));
+    }
+
+    fn anim_probe_log() -> Vec<String> {
+        ANIM_PROBE_LOG.with(|log| log.borrow().clone())
+    }
+
+    fn anim_probe_clear() {
+        ANIM_PROBE_LOG.with(|log| log.borrow_mut().clear());
+    }
+
+    /// 一个挂着动画事件表的移动体（`Walk` 剪辑，时长 1 秒）。
+    fn event_entity(name: &str, events: Vec<xgame_core::AnimEvent>) -> Entity {
+        let mut entity = Entity::new(name);
+        entity.model = "Resources/Mover.gltf".into();
+        entity.animator = Some(Animator {
+            clip: "Walk".into(),
+            events,
+            ..Animator::default()
+        });
+        entity
+    }
+
+    fn ev(time: f32, name: &str) -> xgame_core::AnimEvent {
+        xgame_core::AnimEvent {
+            time,
+            name: name.into(),
+        }
+    }
+
+    /// 组件轨收动画事件：同一帧跨过两个事件时按**时间轴**顺序派发，与表内
+    /// 书写顺序无关；跨过循环边界后按圈数再来一遍。
+    #[test]
+    fn animation_events_reach_components_in_timeline_order() {
+        anim_probe_clear();
+
+        let mut scene = Scene::new("anim_events");
+        // 故意把晚的那个写在前面：派发顺序必须由时间轴决定。
+        let mut mover = event_entity("mover", vec![ev(0.18, "late"), ev(0.15, "early")]);
+        mover.behaviors.push("Probe".to_owned());
+        scene.add_entity(mover);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<AnimProbe>("Probe");
+        let mut world =
+            world_with_root_motion(scene, Vec3::ZERO).with_behavior_registry(registry);
+
+        // 每帧 0.1 秒：0.15 / 0.18 都落在 (0.1, 0.2] 这一帧里。
+        for _ in 0..3 {
+            world.update(0.1);
+        }
+        assert_eq!(
+            anim_probe_log(),
+            vec!["early".to_string(), "late".to_string()],
+            "一帧跨两个事件时必须按时间轴顺序各派发一次"
+        );
+
+        // 跑满一圈多一点：循环剪辑上每个事件各来第二次。
+        for _ in 0..10 {
+            world.update(0.1);
+        }
+        let log = anim_probe_log();
+        assert_eq!(
+            log.iter().filter(|n| *n == "early").count(),
+            2,
+            "跨过循环边界后 early 应再来一次，实得 {log:?}"
+        );
+        assert_eq!(log.iter().filter(|n| *n == "late").count(), 2);
+    }
+
+    /// `autoplay = false` = 静止在第 0 帧：没有在播就没有事件。
+    #[test]
+    fn animation_events_do_not_fire_when_paused() {
+        anim_probe_clear();
+
+        let mut scene = Scene::new("anim_paused");
+        let mut mover = event_entity("mover", vec![ev(0.0, "go"), ev(0.2, "step")]);
+        mover.animator.as_mut().unwrap().autoplay = false;
+        mover.behaviors.push("Probe".to_owned());
+        scene.add_entity(mover);
+
+        let mut registry = BehaviorRegistry::new();
+        registry.register::<AnimProbe>("Probe");
+        let mut world =
+            world_with_root_motion(scene, Vec3::ZERO).with_behavior_registry(registry);
+        for _ in 0..30 {
+            world.update(1.0 / 60.0);
+        }
+        assert!(
+            anim_probe_log().is_empty(),
+            "没在播的动画不该派发事件，实得 {:?}",
+            anim_probe_log()
+        );
+    }
+
+    /// 脚本轨收动画事件：事件名作为第二个参数传进去。
+    #[test]
+    fn animation_events_reach_lua_scripts() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_anim_event_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/step.lua"),
+            r#"
+            function on_anim_event(ctx, name)
+                log(ctx, "ev:" .. name)
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("lua_anim_event");
+        let mut mover = event_entity("mover", vec![ev(0.2, "footstep")]);
+        mover.scripts.push("Scripts/step.lua".to_owned());
+        scene.add_entity(mover);
+
+        let mut world = World::new(scene, &dir, WorldConfig::default()).with_animation_loader(
+            MemoryAnimationLoader {
+                asset: root_motion_asset(Vec3::ZERO),
+            },
+        );
+        for _ in 0..30 {
+            world.update(1.0 / 60.0);
+        }
+
+        let logs = world.take_logs();
+        assert!(
+            logs.iter().any(|l| l.message == "ev:footstep"),
+            "脚本应收到 on_anim_event(ctx, name)，日志：{logs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn entity_y(world: &World, name: &str) -> f32 {

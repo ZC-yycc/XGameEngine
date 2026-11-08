@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(categories.len(), 18, "类别数");
         assert_eq!(
             value["hooks"].as_array().expect("hooks 必须是数组").len(),
-            6,
+            7,
             "生命周期钩子数"
         );
         assert!(

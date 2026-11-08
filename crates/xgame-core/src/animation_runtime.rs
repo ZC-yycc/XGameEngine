@@ -841,6 +841,102 @@ pub struct MotionSpan<'a> {
     pub looping: bool,
 }
 
+// ---------------------------------------------------------------------------
+// 动画事件（纯函数）
+// ---------------------------------------------------------------------------
+
+/// 边界判定的时间容差（秒）。
+///
+/// 事件的时刻是作者写的十进制数，而时钟是 `dt` 累加出来的浮点和：一帧恰好落在
+/// `0.1` 这种值上的概率约等于零，不用容差就会"事件在 0.3 秒处，帧边界是 0.29999
+/// / 0.31666"地漏掉或推迟一帧。容差只放宽**判定**，不改变派发时刻（事件在跨过的
+/// 那一帧派发，这是所有逐帧引擎的共同语义）。
+const EVENT_EPS: f64 = 1e-6;
+
+/// 基础通道在这一帧跨过的动画事件（按下标写入 `out`，**命中几次就写几次**）。
+///
+/// # 判据
+///
+/// `from` / `to` 是**未取模的原始基础时钟**（与 [`clip_time`] 的输入同源），
+/// `duration` 是该剪辑时长。剪辑本地时间轴上的时刻 `e` 的一次命中 = 存在整数
+/// `k ≥ 0` 使 `k·duration + e ∈ (from, to]`：
+///
+/// - **循环剪辑**：`k` 取遍所有整数。一帧跨多少圈就派发多少次（`dt` 很大或
+///   `speed` 很高时会出现，按命中时刻升序写进 `out`）；
+/// - **非循环剪辑**：只取 `k = 0`，与 [`clip_time`] 的钳位语义一致 —— 播完停在
+///   末帧，不会再回跳触发第二轮。
+///
+/// `started = true` 表示**这一帧是剪辑的第一帧**（首建或换剪辑 / 换状态）：
+/// 此时额外派发 `time ≈ 0` 的事件。不这么做，`time = 0` 的事件永远落在
+/// `(from, to]` 区间之外（因为 `from` 恰好是 0），"进状态立刻出手"就没法写。
+///
+/// 越界与坏数据一律**不猜**：`duration <= 0`、非有限时间、负时间、空名都跳过；
+/// 循环剪辑上 `time >= duration` 视为不可达（写它的人想要"下一圈的同一相位"，
+/// 那本该直接写那个相位）。`out` 由调用方清空 —— 内部按命中时刻排序，因此
+/// 一帧里多个事件严格按时间轴顺序派发。
+pub fn crossed_events(
+    events: &[crate::AnimEvent],
+    from: f32,
+    to: f32,
+    duration: f32,
+    looping: bool,
+    started: bool,
+    out: &mut Vec<usize>,
+) {
+    if !from.is_finite() || !to.is_finite() || !duration.is_finite() || duration <= 0.0 {
+        return;
+    }
+    let from = from.max(0.0) as f64;
+    let to = to.max(0.0) as f64;
+    if to < from {
+        return;
+    }
+    let duration = duration as f64;
+
+    // 命中时刻先收集再排序：一帧里同时命中两个事件时，"谁先"必须由时间轴
+    // 决定，而不是由作者在 Inspector 里插入的顺序决定。
+    let mut hits: Vec<(f64, usize)> = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        // 空名事件没有收件人：宁可当它不存在，也不要给脚本派发一个空串。
+        if event.name.is_empty() || !event.time.is_finite() || event.time < 0.0 {
+            continue;
+        }
+        let e = event.time as f64;
+        if started && e <= EVENT_EPS {
+            hits.push((0.0, index));
+        }
+        if to <= from {
+            continue;
+        }
+        if looping {
+            if e >= duration + EVENT_EPS {
+                continue;
+            }
+            // 最小的 k 使 k·d + e > from（严格大于：`from` 那一刻的事件已被
+            // 上一帧覆盖，否则每帧都会把它再派发一次）。
+            let k_min = ((from + EVENT_EPS - e) / duration).floor() + 1.0;
+            // 最大的 k 使 k·d + e <= to。
+            let k_max = ((to + EVENT_EPS - e) / duration).floor();
+            let mut k = k_min.max(0.0) as i64;
+            let k_max = k_max as i64;
+            while k <= k_max {
+                hits.push((k as f64 * duration + e, index));
+                k += 1;
+            }
+        } else if e <= duration + EVENT_EPS {
+            // 只取 k = 0：末帧之后时钟继续涨，但采样已钳住，事件不再触发。
+            if e > from + EVENT_EPS && e <= to + EVENT_EPS {
+                hits.push((e, index));
+            }
+        }
+    }
+    if hits.is_empty() {
+        return;
+    }
+    hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    out.extend(hits.into_iter().map(|(_, index)| index));
+}
+
 /// 交叉淡入中旧剪辑的本帧时间段与权重区间。
 #[derive(Clone, Copy, Debug)]
 pub struct MotionFade<'a> {
@@ -1098,6 +1194,9 @@ struct Entry {
     looping: bool,
     /// 本帧推进前的基础剪辑时间。
     frame_from: f32,
+    /// 本帧是不是这条剪辑的**第一帧**（条目首建或换剪辑 / 换状态）。
+    /// 动画事件靠它决定 `time = 0` 的那条要不要派发。
+    started: bool,
     /// `None` = 没有淡入（未切换 / 已完成 / 硬切）。
     prev: Option<Prev>,
     /// 淡入恰好在本帧结束时完成时，把旧侧保留到下一次 tick 开始。
@@ -1301,27 +1400,44 @@ impl AnimationDriver {
                 }
             };
             // -- 2. 条目（首建直接落解析值，不触发假淡入）--
-            let entry = self.entries.entry(entity.id).or_insert_with(|| Entry {
-                state: state.to_owned(),
-                clip: clip.to_owned(),
-                t: 0.0,
-                speed,
-                looping,
-                frame_from: 0.0,
-                prev: None,
-                frame_prev: None,
-                additive_clip: String::new(),
-                additive_t: 0.0,
-                additive_speed: 1.0,
-                additive_looping: true,
-                additive_weight: 0.0,
-                layer_clocks: Vec::new(),
-            });
+            // `just_started` 是本帧"剪辑从第 0 帧起算"的标记：**首建**条目与
+            // **换剪辑**都算，事件派发要靠它触发 `time = 0` 的那条（见
+            // [`crossed_events`]）。用 match 而不是 `or_insert_with`，是为了
+            // 顺便把老条目的标记复位 —— 否则它会一直说"我刚起步"。
+            let mut just_started = false;
+            let entry = match self.entries.entry(entity.id) {
+                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                    occupied.get_mut().started = false;
+                    occupied.into_mut()
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    just_started = true;
+                    vacant.insert(Entry {
+                        state: state.to_owned(),
+                        clip: clip.to_owned(),
+                        t: 0.0,
+                        speed,
+                        looping,
+                        frame_from: 0.0,
+                        started: false,
+                        prev: None,
+                        frame_prev: None,
+                        additive_clip: String::new(),
+                        additive_t: 0.0,
+                        additive_speed: 1.0,
+                        additive_looping: true,
+                        additive_weight: 0.0,
+                        layer_clocks: Vec::new(),
+                    })
+                }
+            };
             // 上一帧仅供根运动读取的淡出快照到这里失效；本帧若又完成淡入，下面
             // 会把新的旧侧移进来。
             entry.frame_prev = None;
             // -- 3. 换剪辑 → 交叉淡入 --
             if entry.clip != clip {
+                // 换剪辑 = 时钟归零 = 新剪辑的第一帧，`time = 0` 的事件要派发。
+                just_started = true;
                 entry.prev = if fade > 0.0 && base_active {
                     Some(Prev {
                         clip: entry.clip.clone(),
@@ -1419,6 +1535,8 @@ impl AnimationDriver {
             }
             // -- 5. 推进时钟 --
             entry.frame_from = entry.t;
+            // 起步标记活到下一次 tick 开始（`frame_span` 会读它）。
+            entry.started = just_started;
             if let Some(prev) = entry.prev.as_mut() {
                 prev.frame_from = prev.t;
                 prev.alpha_from = prev.alpha;
@@ -1598,6 +1716,17 @@ impl AnimationDriver {
             looping: p.looping,
             alpha: p.alpha,
         })
+    }
+
+    /// 本帧基础通道的时钟区间与"是否刚起步"：`(帧初, 帧末, 刚起步)`。
+    ///
+    /// 与 [`motion_frame`](Self::motion_frame) 的分工：那个带淡出旧侧、专给根运动
+    /// 算增量；这个只回答"基础时钟这一帧从哪走到哪"，供动画事件判定
+    /// （[`crossed_events`]）用。没 tick 过的实体返回 `None`。
+    pub fn frame_span(&self, id: EntityId) -> Option<(f32, f32, bool)> {
+        self.entries
+            .get(&id)
+            .map(|e| (e.frame_from, e.t, e.started))
     }
 
     /// 某实体在**最近一次 tick** 里基础通道实际走过的时间段。
@@ -3667,5 +3796,132 @@ mod tests {
         }];
         sample_clip_into(&clip, 0.5, &mut pose);
         assert_eq!(pose[0].translation, Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // 动画事件
+    // -----------------------------------------------------------------------
+
+    fn ev(time: f32, name: &str) -> crate::AnimEvent {
+        crate::AnimEvent {
+            time,
+            name: name.into(),
+        }
+    }
+
+    /// 跑一次跨越判定，返回命中的事件名（用它断言顺序与次数）。
+    fn crossed(events: &[crate::AnimEvent], from: f32, to: f32, duration: f32, looping: bool, started: bool) -> Vec<String> {
+        let mut out = Vec::new();
+        crossed_events(events, from, to, duration, looping, started, &mut out);
+        out.into_iter().map(|i| events[i].name.clone()).collect()
+    }
+
+    /// 基本命中：跨过就派发一次，没跨过就不派发。
+    #[test]
+    fn event_fires_when_the_clock_passes_it() {
+        let events = [ev(0.1, "step")];
+        assert_eq!(crossed(&events, 0.0, 0.05, 1.0, true, false), Vec::<String>::new());
+        assert_eq!(crossed(&events, 0.05, 0.2, 1.0, true, false), ["step"]);
+        // 已经过去的时间段不会重放（帧初严格大于：上一帧派发过的不再派发）。
+        assert_eq!(crossed(&events, 0.2, 0.3, 1.0, true, false), Vec::<String>::new());
+    }
+
+    /// 落在帧边界上的事件要归**这一帧**，不能因为浮点求和漏掉。
+    #[test]
+    fn event_on_the_frame_boundary_is_not_lost() {
+        // 0.1 是作者写的十进制数，时钟累加出来是 0.30000001 之类的值。
+        let events = [ev(0.1, "step")];
+        let to = 0.1_f32 + 1e-9;
+        assert_eq!(crossed(&events, 0.0, to, 1.0, true, false), ["step"]);
+        // 恰好等于帧末也算命中；恰好等于帧初则**不算**（上一帧已派发）。
+        assert_eq!(crossed(&events, 0.0, 0.1, 1.0, true, false), ["step"]);
+        assert_eq!(crossed(&events, 0.1, 0.2, 1.0, true, false), Vec::<String>::new());
+    }
+
+    /// 循环跨圈：一帧跨过循环边界时，圈末与圈初的事件都按时间顺序各派发一次。
+    #[test]
+    fn looping_wrap_fires_the_tail_before_the_head() {
+        let events = [ev(0.05, "head"), ev(0.95, "tail")];
+        assert_eq!(crossed(&events, 0.9, 1.1, 1.0, true, false), ["tail", "head"]);
+    }
+
+    /// 一帧跨好几圈：每个事件按圈数各派发一次（`dt` 很大或 speed 很高时）。
+    #[test]
+    fn many_laps_fire_once_per_lap() {
+        let events = [ev(0.5, "step")];
+        assert_eq!(
+            crossed(&events, 0.0, 2.5, 1.0, true, false),
+            ["step", "step", "step"],
+            "0→2.5 跨了三个 0.5 相位"
+        );
+    }
+
+    /// 非循环剪辑只派发一次，播完不回跳（与 `clip_time` 的钳位语义一致）。
+    #[test]
+    fn non_looping_clip_fires_once() {
+        let events = [ev(0.5, "step")];
+        assert_eq!(crossed(&events, 0.0, 1.5, 1.0, false, false), ["step"]);
+        assert_eq!(crossed(&events, 1.5, 9.0, 1.0, false, false), Vec::<String>::new());
+        // 末帧上的事件在钳住之前仍要派发。
+        assert_eq!(crossed(&events, 0.4, 1.0, 1.0, false, false), ["step"]);
+    }
+
+    /// `time = 0` 的事件随剪辑起步派发一次，哪怕这一帧速度为 0（时钟没动）。
+    #[test]
+    fn zero_time_event_fires_on_the_first_frame_only() {
+        let events = [ev(0.0, "go")];
+        assert_eq!(crossed(&events, 0.0, 0.0, 1.0, true, true), ["go"], "起步帧要派发");
+        assert_eq!(
+            crossed(&events, 0.0, 1.0 / 60.0, 1.0, true, false),
+            Vec::<String>::new(),
+            "起步标记只活一帧，不能每帧重放"
+        );
+    }
+
+    /// 坏配置一律不猜：越界时刻、负时间、空名、零时长都不派发。
+    #[test]
+    fn bad_event_config_is_ignored() {
+        // 循环剪辑上 `time >= duration` 落进下一圈的同一相位 —— 不解释成取模。
+        assert_eq!(crossed(&[ev(1.5, "late")], 0.0, 9.0, 1.0, true, false), Vec::<String>::new());
+        // 非循环剪辑上超过时长的事件永远到不了。
+        assert_eq!(crossed(&[ev(1.5, "late")], 0.0, 9.0, 1.0, false, false), Vec::<String>::new());
+        assert_eq!(crossed(&[ev(-1.0, "neg")], 0.0, 9.0, 1.0, true, true), Vec::<String>::new());
+        assert_eq!(crossed(&[ev(0.5, "")], 0.0, 1.0, 1.0, true, false), Vec::<String>::new());
+        assert_eq!(crossed(&[ev(f32::NAN, "nan")], 0.0, 1.0, 1.0, true, true), Vec::<String>::new());
+        // 时长不可用（剪辑没时长 / 资产坏了）时整张表都不响应。
+        assert_eq!(crossed(&[ev(0.0, "go")], 0.0, 1.0, 0.0, true, true), Vec::<String>::new());
+    }
+
+    /// 时钟倒退（不该发生，但输入是 f32）时安全返回，不派发。
+    #[test]
+    fn reversed_span_is_safe() {
+        assert_eq!(crossed(&[ev(0.5, "x")], 1.0, 0.0, 1.0, true, false), Vec::<String>::new());
+    }
+
+    /// `frame_span` 的"刚起步"标记：首建与换剪辑各为真一帧，其余为假。
+    #[test]
+    fn frame_span_marks_only_the_first_frame_of_a_clip() {
+        let mut d = AnimationDriver::new();
+        let mut e = entity_with_animator("Walk");
+        let id = e.id;
+
+        d.tick(0.1, std::slice::from_ref(&e));
+        let (from, to, started) = d.frame_span(id).expect("应当有条目");
+        assert_eq!((from, started), (0.0, true), "首帧应当标记起步");
+        assert!((to - 0.1).abs() < 1e-6);
+        assert_eq!(d.frame_span(id).map(|s| s.2), Some(true), "标记活到本帧末");
+
+        d.tick(0.1, std::slice::from_ref(&e));
+        let (from, to, started) = d.frame_span(id).unwrap();
+        assert!(!started, "第二帧不该再说自己刚起步");
+        assert!((from - 0.1).abs() < 1e-6 && (to - 0.2).abs() < 1e-6);
+
+        // 换剪辑 = 新剪辑的第一帧。
+        e.animator.as_mut().unwrap().clip = "Run".into();
+        d.tick(0.1, std::slice::from_ref(&e));
+        let (from, to, started) = d.frame_span(id).unwrap();
+        assert!(started, "换剪辑应当重新标记起步");
+        assert_eq!(from, 0.0);
+        assert!((to - 0.1).abs() < 1e-6);
     }
 }

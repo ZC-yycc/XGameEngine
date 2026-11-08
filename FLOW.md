@@ -1399,8 +1399,8 @@ Scene(
 | `editor/headless.rs` | 1950 | `run()`（CLI `--headless`：固定 dt 帧循环 + 可选输入时间线 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
 | `editor/schema_cli.rs` | 213 | `--export-schema` 参数解析（stdout / `--out` / `--help`）、`render_json()`（`serde_json` 美化 + 末尾换行）、`cli()`（退出码 0/1） |
 | `editor/script_api_cli.rs` | 331 | `--export-script-api` 的参数解析 / `render_json()` / `cli()`；测试含“文档 API 表函数名 == 清单”防漂移 |
-| `core/schema.rs` | 2967 | `scene_schema()`（40 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
-| `core/script_api.rs` | 704 | `script_api()`（179 个函数 / 18 类 / 6 钩子 / 值类型 / 全局约定）；手写数据 + 6 条结构测试；注册名与文档名分别由 `xgame-script` / `xgame-editor` 测试钉住 |
+| `core/schema.rs` | 2967 | `scene_schema()`（41 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
+| `core/script_api.rs` | 704 | `script_api()`（179 个函数 / 18 类 / 7 钩子 / 值类型 / 全局约定）；手写数据 + 6 条结构测试；注册名与文档名分别由 `xgame-script` / `xgame-editor` 测试钉住 |
 | `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |
 | `editor/plugin_build.rs` | 518 | 后台 `cargo build --message-format=json` + 产物同步进 `Plugins/` |

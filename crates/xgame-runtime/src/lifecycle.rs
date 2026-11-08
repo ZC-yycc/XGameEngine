@@ -63,6 +63,14 @@ pub trait Lifecycle: Any + Send + Sync {
     fn on_collision_exit(&mut self, ctx: &mut Ctx, other: xgame_core::EntityId) {
         let _ = (ctx, other);
     }
+    /// 动画事件：基础通道剪辑时间轴上的命名时刻被跨过（`name` = 事件名）。
+    ///
+    /// 语义与脚本的 `on_anim_event(ctx, name)` 完全一致：事件表挂在
+    /// `Animator::events` 上，时间按基础通道**当前剪辑**的本地时间轴解释；
+    /// 分层与叠加层不触发。一帧跨过多个事件时按时间轴顺序各来一次。
+    fn on_anim_event(&mut self, ctx: &mut Ctx, name: &str) {
+        let _ = (ctx, name);
+    }
     /// 实体被销毁时调用一次。
     ///
     /// 注意调用时机：命令被消费时实体**已经离开场景**（脚本轨的
