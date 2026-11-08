@@ -4,7 +4,7 @@
 //! 选择不同的计算策略：轴拖拽、平面拖拽、旋转拖拽、均匀缩放。
 
 use super::pick::hit_position_on_plane;
-use super::GizmoCtx;
+use super::{GizmoCtx, GizmoSnap};
 use crate::state::{GizmoDrag, GizmoPart, ToolMode};
 use xgame_math::glam::{Quat, Vec3};
 
@@ -32,16 +32,21 @@ pub enum TransformDelta {
 /// 计算拖拽产生的变换变化量。
 ///
 /// 返回 `Some(delta)` 表示变换需要更新，`None` 表示无效状态。
+///
+/// `snap` 把结果吸到步长的整数倍（见 [`GizmoSnap`]）。吸附点在**算完增量之后**：
+/// 先在连续空间里算出"鼠标此刻指向哪里"，再吸到格点上 —— 反过来先吸输入量
+/// 会让拖拽手感变成一格一格跳、且越拖越偏。
 pub fn compute_transform(
     drag: &GizmoDrag,
     current_mouse_pos: egui::Pos2,
     ctx: &GizmoCtx,
     tool_mode: ToolMode,
+    snap: GizmoSnap,
 ) -> Option<TransformDelta> {
     match tool_mode {
-        ToolMode::Translate => compute_translate(drag, current_mouse_pos, ctx),
-        ToolMode::Rotate => compute_rotate(drag, current_mouse_pos, ctx),
-        ToolMode::Scale => compute_scale(drag, current_mouse_pos, ctx),
+        ToolMode::Translate => compute_translate(drag, current_mouse_pos, ctx, snap),
+        ToolMode::Rotate => compute_rotate(drag, current_mouse_pos, ctx, snap),
+        ToolMode::Scale => compute_scale(drag, current_mouse_pos, ctx, snap),
         ToolMode::Rect => None,
     }
 }
@@ -72,6 +77,7 @@ fn compute_translate(
     drag: &GizmoDrag,
     mouse_pos: egui::Pos2,
     ctx: &GizmoCtx,
+    snap: GizmoSnap,
 ) -> Option<TransformDelta> {
     match drag.part {
         // ── 轴拖拽 ──
@@ -92,7 +98,10 @@ fn compute_translate(
             let s_now = axis_param_anchored(mouse_pos, ctx, axis, drag.axis_anchor)?;
             let new_pos = drag.start_value + axis * (s_now - drag.start_axis);
 
-            Some(TransformDelta::Position(new_pos))
+            Some(TransformDelta::Position(GizmoSnap::snap_vec(
+                new_pos,
+                snap.translate,
+            )))
         }
 
         // ── 平面拖拽 ──
@@ -103,7 +112,10 @@ fn compute_translate(
             let delta = hit - drag.start_hit;
             let new_pos = drag.start_value + delta;
 
-            Some(TransformDelta::Position(new_pos))
+            Some(TransformDelta::Position(GizmoSnap::snap_vec(
+                new_pos,
+                snap.translate,
+            )))
         }
 
         _ => None,
@@ -118,6 +130,7 @@ fn compute_rotate(
     drag: &GizmoDrag,
     mouse_pos: egui::Pos2,
     ctx: &GizmoCtx,
+    snap: GizmoSnap,
 ) -> Option<TransformDelta> {
     let axis = match drag.part {
         GizmoPart::RingX => Vec3::X,
@@ -158,6 +171,30 @@ fn compute_rotate(
 
     delta_angle *= ROTATE_SENSITIVITY;
 
+    // 吸附：吸的是**欧拉角分量**（与 Inspector 显示同一把尺子），所以先把
+    // 起始朝向折成欧拉角、加上这次拖出来的角度、吸到步长整数倍，再换回四元数。
+    // 只吸增量的话，起始 8.3° 的物体永远停在 8.3+15k 这种读不出来的数上。
+    if snap.rotate_deg > 0.0 && snap.rotate_deg.is_finite() {
+        let start_euler = xgame_core::quat_to_euler_deg(drag.start_rotation);
+        let mut euler = start_euler;
+        // 轴 → 欧拉分量：YXZ 约定下 X = pitch、Y = yaw、Z = roll。
+        let slot = if axis.x.abs() > 0.5 {
+            0
+        } else if axis.y.abs() > 0.5 {
+            1
+        } else {
+            2
+        };
+        euler[slot] = GizmoSnap::snap_scalar(
+            euler[slot] + delta_angle.to_degrees(),
+            snap.rotate_deg,
+        );
+        let target = xgame_core::euler_deg_to_quat(euler);
+        // `TransformDelta::Rotation` 的语义是"相对起始姿态的增量"，所以这里
+        // 反解出增量；调用方乘回 `start_rotation` 就正好落在吸附后的朝向。
+        return Some(TransformDelta::Rotation(target * drag.start_rotation.inverse()));
+    }
+
     // 构建旋转四元数
     let rot = Quat::from_axis_angle(axis, delta_angle);
 
@@ -173,6 +210,7 @@ fn compute_scale(
     drag: &GizmoDrag,
     mouse_pos: egui::Pos2,
     ctx: &GizmoCtx,
+    snap: GizmoSnap,
 ) -> Option<TransformDelta> {
     match drag.part {
         // ── 均匀缩放 ──
@@ -188,7 +226,10 @@ fn compute_scale(
             let start_scale = drag.start_value;
             let new_scale = start_scale * scale_factor;
 
-            Some(TransformDelta::Scale(new_scale))
+            Some(TransformDelta::Scale(GizmoSnap::snap_vec(
+                new_scale,
+                snap.scale,
+            )))
         }
 
         // ── 轴缩放 ──
@@ -223,7 +264,10 @@ fn compute_scale(
                 new_scale.z = start_scale.z * ratio;
             }
 
-            Some(TransformDelta::Scale(new_scale))
+            Some(TransformDelta::Scale(GizmoSnap::snap_vec(
+                new_scale,
+                snap.scale,
+            )))
         }
 
         _ => None,
@@ -353,7 +397,7 @@ mod tests {
         // 把鼠标挪到轴上更远处（1.4 倍），位移应当约 0.7 倍 gizmo 长度
         let moved = at(&ctx, on_axis(&ctx, Vec3::X, 1.4));
         let delta =
-            compute_transform(&drag, moved, &ctx, ToolMode::Translate).expect("应当算出位移");
+            compute_transform(&drag, moved, &ctx, ToolMode::Translate, GizmoSnap::OFF).expect("应当算出位移");
 
         match delta {
             TransformDelta::Position(p) => {
@@ -382,7 +426,7 @@ mod tests {
 
         // 鼠标退回一半距离 → 缩放约减半
         let nearer = at(&ctx, on_axis(&ctx, Vec3::X, 0.4));
-        let delta = compute_transform(&drag, nearer, &ctx, ToolMode::Scale).expect("应当算出缩放");
+        let delta = compute_transform(&drag, nearer, &ctx, ToolMode::Scale, GizmoSnap::OFF).expect("应当算出缩放");
 
         match delta {
             TransformDelta::Scale(s) => {
@@ -423,7 +467,7 @@ mod tests {
             &ctx,
             ctx.entity_pos + (Vec3::X + Vec3::Y) * (r / 2f32.sqrt()),
         );
-        let delta = compute_transform(&drag, cur, &ctx, ToolMode::Rotate).expect("应当算出旋转");
+        let delta = compute_transform(&drag, cur, &ctx, ToolMode::Rotate, GizmoSnap::OFF).expect("应当算出旋转");
 
         match delta {
             TransformDelta::Rotation(q) => {
@@ -474,7 +518,7 @@ mod tests {
             let mut ctx = base.clone();
             ctx.entity_pos = pos; // ← 真实交互就是这么干的（这就是自反馈的来源）
 
-            match compute_transform(&drag, mouse, &ctx, ToolMode::Translate).expect("应当算出位移")
+            match compute_transform(&drag, mouse, &ctx, ToolMode::Translate, GizmoSnap::OFF).expect("应当算出位移")
             {
                 TransformDelta::Position(p) => {
                     // 世界位移只沿轴，且其余分量不动
@@ -530,9 +574,130 @@ mod tests {
         let mut ctx = base.clone();
         ctx.entity_pos = Vec3::new(37.0, -12.0, 5.0);
 
-        match compute_transform(&drag, mouse, &ctx, ToolMode::Scale).expect("应当算出缩放") {
+        match compute_transform(&drag, mouse, &ctx, ToolMode::Scale, GizmoSnap::OFF).expect("应当算出缩放") {
             TransformDelta::Scale(s) => {
                 assert!((s.x - 0.5).abs() < 0.05, "缩放应当约减半，实得 {}", s.x);
+            }
+            other => panic!("应当是 Scale，实得 {other:?}"),
+        }
+    }
+
+    /// 平移吸附：结果落在步长的整数倍上（**绝对**值，不是增量）。
+    #[test]
+    fn translate_snaps_the_absolute_position() {
+        let ctx = test_ctx(Vec3::ZERO);
+        // 起点故意不在格点上：0.3 —— 吸附后必须落在 0.5 的倍数。
+        let start = Vec3::new(0.3, 0.0, 0.0);
+        let base = test_ctx(start);
+        let axis = Vec3::X;
+        let grab = at(&base, on_axis(&base, axis, 0.7));
+        let drag = GizmoDrag {
+            part: GizmoPart::AxisX,
+            start_value: start,
+            start_hit: Vec3::ZERO,
+            start_axis: axis_param_under_mouse(grab, &base, axis).expect("抓取点应当在轴上"),
+            axis_anchor: start,
+            start_screen_pos: grab,
+            start_rotation: Quat::IDENTITY,
+        };
+        let snap = GizmoSnap {
+            translate: 0.5,
+            ..GizmoSnap::OFF
+        };
+
+        // 鼠标沿轴走约 0.85 → 连续结果 1.15 → 吸附到 1.0。
+        let mouse = at(&base, on_axis(&base, axis, 0.7) + axis * 0.85);
+        match compute_transform(&drag, mouse, &ctx, ToolMode::Translate, snap)
+            .expect("应当算出位移")
+        {
+            TransformDelta::Position(p) => {
+                assert!((p.x - 1.0).abs() < 1e-4, "应当吸到 1.0，实得 {}", p.x);
+                assert!(
+                    (p.x / 0.5).fract().abs() < 1e-4,
+                    "结果必须是 0.5 的整数倍，实得 {}",
+                    p.x
+                );
+                assert_eq!((p.y, p.z), (0.0, 0.0), "没拖的轴不该被吸动");
+            }
+            other => panic!("应当是 Position，实得 {other:?}"),
+        }
+    }
+
+    /// 旋转吸附：吸的是**欧拉分量**，起始朝向不是格点时也落在整数倍上。
+    #[test]
+    fn rotate_snaps_the_absolute_euler_angle() {
+        let ctx = test_ctx(Vec3::ZERO);
+        let r = ctx.gizmo_size * 0.8;
+        let grab_screen = at(&ctx, ctx.entity_pos + Vec3::X * r);
+        let start_hit =
+            hit_position_on_plane(grab_screen, &ctx, Vec3::Z).expect("射线应当与旋转平面相交");
+        // 起始绕 Z 转了 8.3°，再拖 45° → 总 53.3°，最近的 15° 格点是 60°。
+        let start_rotation = Quat::from_rotation_z(8.3f32.to_radians());
+        let drag = GizmoDrag {
+            part: GizmoPart::RingZ,
+            start_value: Vec3::ZERO,
+            start_hit,
+            start_axis: 0.0,
+            axis_anchor: ctx.entity_pos,
+            start_screen_pos: grab_screen,
+            start_rotation,
+        };
+        let snap = GizmoSnap {
+            rotate_deg: 15.0,
+            ..GizmoSnap::OFF
+        };
+
+        // 拖到 45° 方向：抓取点在 0°，当前在 45°，增量约 45°。
+        let cur = at(
+            &ctx,
+            ctx.entity_pos + (Vec3::X + Vec3::Y) * (r / 2f32.sqrt()),
+        );
+        let delta = compute_transform(&drag, cur, &ctx, ToolMode::Rotate, snap)
+            .expect("应当算出旋转");
+        let TransformDelta::Rotation(q) = delta else {
+            panic!("应当是 Rotation");
+        };
+        let applied = q * start_rotation;
+        let euler = xgame_core::quat_to_euler_deg(applied);
+        assert!(
+            (euler.z - 60.0).abs() < 0.5,
+            "起始 8.3° + 45° 应当吸到 60°（最近格点），实得 {}",
+            euler.z
+        );
+        assert!(
+            (euler.z / 15.0).fract().abs() < 1e-3,
+            "结果必须是 15° 的整数倍，实得 {}",
+            euler.z
+        );
+        assert!(
+            (euler.x.abs() + euler.y.abs()) < 1e-3,
+            "只该动被拖的那一个欧拉分量，实得 {euler}"
+        );
+    }
+
+    /// 缩放吸附：结果逐分量吸到步长整数倍；关闭时一切照旧。
+    #[test]
+    fn scale_snaps_per_component_and_off_is_exact() {
+        let ctx = test_ctx(Vec3::ZERO);
+        let drag = drag_on_axis(&ctx, Vec3::X, 0.8, GizmoPart::AxisX, Vec3::ONE);
+        let nearer = at(&ctx, on_axis(&ctx, Vec3::X, 0.4));
+        let snap = GizmoSnap {
+            scale: 0.5,
+            ..GizmoSnap::OFF
+        };
+        match compute_transform(&drag, nearer, &ctx, ToolMode::Scale, snap).expect("应当算出缩放") {
+            TransformDelta::Scale(s) => {
+                assert!((s.x - 0.5).abs() < 1e-4, "0.5 → 吸到 0.5，实得 {}", s.x);
+            }
+            other => panic!("应当是 Scale，实得 {other:?}"),
+        }
+        // 全关时与老行为逐位一致。
+        match compute_transform(&drag, nearer, &ctx, ToolMode::Scale, GizmoSnap::OFF)
+            .expect("应当算出缩放")
+        {
+            TransformDelta::Scale(s) => {
+                assert!((s.x - 0.5).abs() < 0.05);
+                assert_ne!(s.x, 0.5, "关闭吸附时不该被吸到格点（0.5 只是约等于）");
             }
             other => panic!("应当是 Scale，实得 {other:?}"),
         }

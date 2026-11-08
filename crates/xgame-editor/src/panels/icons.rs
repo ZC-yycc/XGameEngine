@@ -51,6 +51,8 @@ pub enum Icon {
     Wave,
     /// 材质（`.mat` 资产）：一滴颜料 / 液滴。
     Material,
+    /// 马蹄形磁铁（拖拽吸附开关）。
+    Magnet,
 }
 
 /// 在 `rect` 内画一个图标。
@@ -352,6 +354,48 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                     Pos2::new(c.x, lid_y + r.height() * 0.26),
                 ],
                 Stroke::new(t * 1.1, color),
+            );
+        }
+        Icon::Magnet => {
+            // 马蹄形磁铁：两条腿 + 半圆头。吸附在商业引擎里一律是这个符号，
+            // 用"格点"会与旁边的网格开关撞脸。
+            let half = s * 0.23;
+            let top = c.y - s * 0.06;
+            let bottom = c.y + s * 0.30;
+            let arc = Stroke::new(t * 1.15, color);
+            let mut pts = Vec::with_capacity(15);
+            for i in 0..=12 {
+                let a = std::f32::consts::PI + std::f32::consts::PI * (i as f32 / 12.0);
+                pts.push(Pos2::new(
+                    c.x + half * a.cos(),
+                    top + half * 0.9 * a.sin(),
+                ));
+            }
+            painter.add(Shape::line(pts, arc));
+            painter.line_segment(
+                [Pos2::new(c.x - half, top), Pos2::new(c.x - half, bottom)],
+                arc,
+            );
+            painter.line_segment(
+                [Pos2::new(c.x + half, top), Pos2::new(c.x + half, bottom)],
+                arc,
+            );
+            // 磁极：两条腿末端的短横线。
+            let pole = Stroke::new(t * 1.6, color);
+            let reach = s * 0.07;
+            painter.line_segment(
+                [
+                    Pos2::new(c.x - half - reach, bottom),
+                    Pos2::new(c.x - half + reach, bottom),
+                ],
+                pole,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x + half - reach, bottom),
+                    Pos2::new(c.x + half + reach, bottom),
+                ],
+                pole,
             );
         }
         Icon::Grid => {

@@ -126,6 +126,48 @@ impl PreferencesWindow {
                         ui.end_row();
                     });
 
+                // ── 拖拽吸附 ──
+                theme::section_bar(ui, "拖拽吸附");
+                egui::Grid::new("pref_snap")
+                    .num_columns(2)
+                    .spacing([10.0, 5.0])
+                    .min_col_width(96.0)
+                    .show(ui, |ui| {
+                        ui.label("启用")
+                            .on_hover_text("工具栏的磁铁按钮同款开关；拖拽时按住 Ctrl 可临时反选");
+                        ui.checkbox(&mut draft.snap_enabled, "");
+                        ui.end_row();
+
+                        ui.label("平移步长");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.snap_translate)
+                                .range(crate::state::MIN_SNAP_STEP..=crate::state::MAX_SNAP_STEP)
+                                .speed(0.05)
+                                .suffix(" m"),
+                        )
+                        .on_hover_text("拖拽结果吸到它的整数倍（绝对位置，不是增量）");
+                        ui.end_row();
+
+                        ui.label("旋转步长");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.snap_rotate_deg)
+                                .range(crate::state::MIN_SNAP_STEP..=crate::state::MAX_SNAP_STEP)
+                                .speed(0.5)
+                                .suffix(" °"),
+                        )
+                        .on_hover_text("吸的是欧拉角分量（与 Inspector 显示同一把尺子）");
+                        ui.end_row();
+
+                        ui.label("缩放步长");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.snap_scale)
+                                .range(crate::state::MIN_SNAP_STEP..=crate::state::MAX_SNAP_STEP)
+                                .speed(0.05)
+                                .suffix(" ×"),
+                        );
+                        ui.end_row();
+                    });
+
                 // ── 自动保存 ──
                 theme::section_bar(ui, "自动保存");
                 egui::Grid::new("pref_autosave")
@@ -223,7 +265,9 @@ mod tests {
             camera_sensitivity: 0.003,
             show_grid: false,
             autosave_interval_secs: 30,
-            layout: None,
+            snap_enabled: true,
+            snap_translate: 1.0,
+            ..EditorPreferences::default()
         };
         window.open(&prefs);
         assert!(window.is_open());

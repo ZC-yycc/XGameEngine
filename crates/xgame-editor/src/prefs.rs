@@ -45,6 +45,23 @@ fn default_autosave_interval() -> u64 {
     crate::autosave::DEFAULT_INTERVAL_SECS
 }
 
+/// 吸附默认关闭：它是"额外的一层约束"，不该让新用户第一次拖拽就被吸走手感。
+fn default_snap_enabled() -> bool {
+    false
+}
+
+fn default_snap_translate() -> f32 {
+    crate::state::DEFAULT_SNAP_TRANSLATE
+}
+
+fn default_snap_rotate_deg() -> f32 {
+    crate::state::DEFAULT_SNAP_ROTATE_DEG
+}
+
+fn default_snap_scale() -> f32 {
+    crate::state::DEFAULT_SNAP_SCALE
+}
+
 /// 跨项目保存的编辑器偏好。
 ///
 /// 字段全部 `#[serde(default)]`：以后加字段时，老文件照常能读。
@@ -65,6 +82,18 @@ pub struct EditorPreferences {
     /// 换项目不该重置（同相机速度）。
     #[serde(default = "default_autosave_interval")]
     pub autosave_interval_secs: u64,
+    /// Gizmo 吸附总开关（工具栏的磁铁按钮也会改它；拖拽时按住 Ctrl 临时反选）。
+    #[serde(default = "default_snap_enabled")]
+    pub snap_enabled: bool,
+    /// 平移吸附步长（世界单位）。
+    #[serde(default = "default_snap_translate")]
+    pub snap_translate: f32,
+    /// 旋转吸附步长（度）。
+    #[serde(default = "default_snap_rotate_deg")]
+    pub snap_rotate_deg: f32,
+    /// 缩放吸附步长（倍率）。
+    #[serde(default = "default_snap_scale")]
+    pub snap_scale: f32,
     /// 停靠布局；`None` = 从没保存过（使用出厂布局）。
     #[serde(default)]
     pub layout: Option<egui_tiles::Tree<PanelTab>>,
@@ -77,6 +106,10 @@ impl Default for EditorPreferences {
             camera_sensitivity: default_camera_sensitivity(),
             show_grid: default_show_grid(),
             autosave_interval_secs: default_autosave_interval(),
+            snap_enabled: default_snap_enabled(),
+            snap_translate: default_snap_translate(),
+            snap_rotate_deg: default_snap_rotate_deg(),
+            snap_scale: default_snap_scale(),
             layout: None,
         }
     }
@@ -104,6 +137,26 @@ impl EditorPreferences {
         // `0` 是合法的"关闭"，不能被夹成 10。
         self.autosave_interval_secs =
             crate::autosave::sanitize_interval(self.autosave_interval_secs);
+        // 吸附步长夹到 [0.01, 100]：0 会让 `round(v / 0)` 变成 inf/NaN，
+        // 而一个 1000 米的平移步长等于"拖一下横穿整个关卡"。
+        self.snap_translate = clamp_finite(
+            self.snap_translate,
+            crate::state::MIN_SNAP_STEP,
+            crate::state::MAX_SNAP_STEP,
+            crate::state::DEFAULT_SNAP_TRANSLATE,
+        );
+        self.snap_rotate_deg = clamp_finite(
+            self.snap_rotate_deg,
+            crate::state::MIN_SNAP_STEP,
+            crate::state::MAX_SNAP_STEP,
+            crate::state::DEFAULT_SNAP_ROTATE_DEG,
+        );
+        self.snap_scale = clamp_finite(
+            self.snap_scale,
+            crate::state::MIN_SNAP_STEP,
+            crate::state::MAX_SNAP_STEP,
+            crate::state::DEFAULT_SNAP_SCALE,
+        );
         self
     }
 
@@ -131,6 +184,10 @@ impl EditorPreferences {
         state.editor_camera.sensitivity = self.camera_sensitivity;
         state.show_grid = self.show_grid;
         state.set_autosave_interval(self.autosave_interval_secs);
+        state.snap_enabled = self.snap_enabled;
+        state.snap_translate = self.snap_translate;
+        state.snap_rotate_deg = self.snap_rotate_deg;
+        state.snap_scale = self.snap_scale;
     }
 
     /// 把当前布局同步进偏好；返回是否真的变了。
@@ -364,6 +421,10 @@ mod tests {
             camera_sensitivity: 0.004,
             show_grid: false,
             autosave_interval_secs: 90,
+            snap_enabled: true,
+            snap_translate: 2.0,
+            snap_rotate_deg: 45.0,
+            snap_scale: 0.5,
             layout: Some(dock::create_tile_tree()),
         };
         prefs.save_to(&path).unwrap();
@@ -373,6 +434,8 @@ mod tests {
         assert_eq!(back.camera_sensitivity, 0.004);
         assert!(!back.show_grid);
         assert_eq!(back.autosave_interval_secs, 90);
+        assert!(back.snap_enabled, "吸附开关要能存回来");
+        assert_eq!(back.snap_rotate_deg, 45.0, "步长要能存回来");
         assert_eq!(back.layout, prefs.layout);
         assert!(dock::is_usable_layout(&back.layout_for_startup()));
 

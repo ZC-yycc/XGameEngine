@@ -48,6 +48,7 @@ pub enum PaletteAction {
     OpenScene(String),
     SetStartupScene,
     ToggleGrid,
+    ToggleSnap,
     ToggleOrtho,
     TogglePhysicsDebug,
     OpenSettings,
@@ -403,6 +404,14 @@ fn execute(action: PaletteAction, state: &mut EditorState, tree: &mut egui_tiles
             let _ = state.set_startup_scene(&current);
         }
         PaletteAction::ToggleGrid => state.show_grid = !state.show_grid,
+        PaletteAction::ToggleSnap => {
+            state.snap_enabled = !state.snap_enabled;
+            state.log_info(if state.snap_enabled {
+                "拖拽吸附：开（按住 Ctrl 临时反选）"
+            } else {
+                "拖拽吸附：关"
+            });
+        }
         PaletteAction::ToggleOrtho => {
             let on = state.editor_camera.toggle_ortho();
             state.log_info(if on { "投影：正交" } else { "投影：透视" });
@@ -553,6 +562,14 @@ fn build_commands(state: &EditorState) -> Vec<Command> {
             true,
         ),
         cmd("视图", "切换网格", "grid", "", PaletteAction::ToggleGrid, false),
+        cmd(
+            "视图",
+            "切换拖拽吸附",
+            "snap magnet",
+            "",
+            PaletteAction::ToggleSnap,
+            false,
+        ),
         // `edit_only = true`：正交只影响编辑态视口（Play 态用游戏相机），
         // Play 里点它什么都不会变 —— 那就干脆不让点。
         cmd(

@@ -261,6 +261,21 @@ pub fn show(state: &mut EditorState, ctx: &egui::Context) {
                     }
                 }
 
+                // 吸附开关：与变换工具同组（它只影响拖拽），按住 Ctrl 时临时反选。
+                // 高亮取"真的会吸"而不是"开关是开的"：步长被调成 0 时开着也不亮 ——
+                // 让"我明明开了却没吸附"这种状态在按钮上就看得见。
+                if icons::icon_button(
+                    ui,
+                    Icon::Magnet,
+                    26.0,
+                    "拖拽吸附（0.5 m / 15° / 0.25×；按住 Ctrl 临时反选；步长在 Preferences 里改）",
+                    state.active_snap(false).is_active(),
+                )
+                .clicked()
+                {
+                    state.snap_enabled = !state.snap_enabled;
+                }
+
                 icons::v_separator(ui);
 
                 // ── 视图开关 ──

@@ -1109,9 +1109,14 @@ pub struct EditorState {
     pub gizmo_hovered: Option<GizmoPart>,
     /// 当前正在拖拽的操作柄状态（`Some` 时处于拖拽中）。
     pub gizmo_active: Option<GizmoDrag>,
-    /// 拖拽捕捉步长（0 表示不捕捉）。
-    #[allow(dead_code)]
-    pub gizmo_snap: f32,
+    /// Gizmo 吸附总开关（Preferences 可调；拖拽中按住 Ctrl 临时反选）。
+    pub snap_enabled: bool,
+    /// 平移吸附步长（世界单位）；`<= 0` = 平移不吸附。
+    pub snap_translate: f32,
+    /// 旋转吸附步长（度）；`<= 0` = 旋转不吸附。
+    pub snap_rotate_deg: f32,
+    /// 缩放吸附步长（倍率）；`<= 0` = 缩放不吸附。
+    pub snap_scale: f32,
 
     // -- Hierarchy panel cache --
     /// 折叠集合的版本号：每次折叠/展开切换 +1。
@@ -1130,7 +1135,47 @@ pub struct EditorState {
     pub profiler: crate::profiler::Profiler,
 }
 
+// ── Gizmo 吸附的出厂步长 ──
+//
+// 数字取"够粗但不粗糙"的档位：0.5 米一格对房间尺度的手摆最省事（Unity 的默认
+// 也是 0.5）；15° 是六十分之一圆的常见刻度；0.25 倍缩放能落在 1/4 与 3/4 上。
+// 三者都只影响拖拽，不影响 Inspector 里手敲的数。
+pub const DEFAULT_SNAP_TRANSLATE: f32 = 0.5;
+pub const DEFAULT_SNAP_ROTATE_DEG: f32 = 15.0;
+pub const DEFAULT_SNAP_SCALE: f32 = 0.25;
+/// 步长的界（Preferences 里的上下限，挡住手改出来的离谱值）。
+pub const MIN_SNAP_STEP: f32 = 0.01;
+pub const MAX_SNAP_STEP: f32 = 100.0;
+
+/// 吸附开关与 Ctrl 的合成：**异或** —— 开着按住 Ctrl = 临时关，关着按住 Ctrl =
+/// 临时开，两种习惯的人都不用先去改设置。
+///
+/// 抽成自由函数（而不是只在 `EditorState` 上做方法）是为了让这条规则能被单测
+/// 直接钉住：造一个真 `EditorState` 要开临时项目，为一条布尔运算付那个代价不值。
+/// 合成只写这一处，别在调用点再判一次 —— 两处判断迟早会漏掉一处，表现成
+/// "设置改了没生效"。
+pub fn resolve_snap(enabled: bool, ctrl: bool, steps: crate::gizmo::GizmoSnap) -> crate::gizmo::GizmoSnap {
+    if enabled != ctrl {
+        steps
+    } else {
+        crate::gizmo::GizmoSnap::OFF
+    }
+}
+
 impl EditorState {
+    /// 本帧生效的吸附步长（见 [`resolve_snap`]）。
+    pub fn active_snap(&self, ctrl: bool) -> crate::gizmo::GizmoSnap {
+        resolve_snap(
+            self.snap_enabled,
+            ctrl,
+            crate::gizmo::GizmoSnap {
+                translate: self.snap_translate,
+                rotate_deg: self.snap_rotate_deg,
+                scale: self.snap_scale,
+            },
+        )
+    }
+
     /// 打开一个项目：加载其入口场景并初始化编辑器状态。
     pub fn new(project: ProjectHandle) -> Self {
         // 入口场景 = 本次会话的起始「当前场景」。之后切换场景只改
@@ -1254,7 +1299,10 @@ impl EditorState {
 
             gizmo_hovered: None,
             gizmo_active: None,
-            gizmo_snap: 0.0,
+            snap_enabled: false,
+            snap_translate: DEFAULT_SNAP_TRANSLATE,
+            snap_rotate_deg: DEFAULT_SNAP_ROTATE_DEG,
+            snap_scale: DEFAULT_SNAP_SCALE,
 
             collapsed_version: 0,
             hierarchy_cache: crate::panels::hierarchy::RowCache::default(),
@@ -5399,6 +5447,27 @@ mod tests {
         assert!(camera.ortho_height > 6.0, "必须把球整个装下（含边距）");
         // 竖视口要更大：限制来自水平方向。
         assert!(fit_ortho_height(3.0, 0.5) > fit_ortho_height(3.0, 1.5));
+    }
+
+    /// 吸附开关与 Ctrl 是**异或**：开着按住 Ctrl 临时关，关着按住 Ctrl 临时开。
+    ///
+    /// 这条写在状态层而不是视口里，是因为"两处各判一次"是这类开关最常见的漂移点
+    /// （改了设置没生效 / 关不掉）。这里顺便钉住"关闭时步长不泄漏"。
+    #[test]
+    fn active_snap_xors_enabled_with_ctrl() {
+        let steps = crate::gizmo::GizmoSnap {
+            translate: DEFAULT_SNAP_TRANSLATE,
+            rotate_deg: DEFAULT_SNAP_ROTATE_DEG,
+            scale: DEFAULT_SNAP_SCALE,
+        };
+        // 关着不按 Ctrl = 不吸；关着按 Ctrl = 临时开。
+        assert_eq!(resolve_snap(false, false, steps), crate::gizmo::GizmoSnap::OFF);
+        assert_eq!(resolve_snap(false, true, steps), steps);
+        // 开着不按 Ctrl = 吸；开着按 Ctrl = 临时关。
+        assert_eq!(resolve_snap(true, false, steps), steps);
+        assert_eq!(resolve_snap(true, true, steps), crate::gizmo::GizmoSnap::OFF);
+        // 步长全 0 = 即便合成出"开"也不吸（`is_active` 为假）。
+        assert!(!resolve_snap(true, false, crate::gizmo::GizmoSnap::OFF).is_active());
     }
 
     /// `[` / `]` 的速度倍率必须夹在同一对边界里，坏倍率不许把相机搞死。

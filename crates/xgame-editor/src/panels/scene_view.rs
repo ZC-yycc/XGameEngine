@@ -67,6 +67,8 @@ struct PointerInput {
     drag_stopped: bool,
     /// 本帧是一次纯点击（按下—几乎没移动—松手）。
     clicked: bool,
+    /// 本帧是否按住 Ctrl：吸附的**临时反选**（开着按 = 临时关，关着按 = 临时开）。
+    ctrl: bool,
 }
 
 impl PointerInput {
@@ -82,6 +84,7 @@ impl PointerInput {
             drag_started: pressed(egui::Response::drag_started_by),
             drag_stopped: pressed(egui::Response::drag_stopped_by),
             clicked: editing && response.clicked(),
+            ctrl: ui.input(|i| i.modifiers.ctrl),
         }
     }
 }
@@ -652,7 +655,10 @@ fn handle_gizmo_interaction(
     // ── 更新拖拽（每帧）──
     if let Some(drag) = state.gizmo_active.clone() {
         if let Some(mp) = mouse_pos {
-            if let Some(delta) = gizmo::compute_transform(&drag, mp, &ctx, state.tool_mode) {
+            // 吸附配置在拖拽的每一帧现取：拖到一半按 Ctrl 临时反选要立刻生效
+            // （Unity 的 Ctrl 语义），而不是等下一次拖拽。
+            let snap = state.active_snap(pointer.ctrl);
+            if let Some(delta) = gizmo::compute_transform(&drag, mp, &ctx, state.tool_mode, snap) {
                 // 把 gizmo 算出的**世界**增量换算回实体的**局部**变换
                 let parent_world = state
                     .scene

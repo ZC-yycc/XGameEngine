@@ -498,7 +498,7 @@ impl EditorApp {
         if !self.save_preferences {
             return;
         }
-        let changed = match self.session.as_ref() {
+        let mut changed = match self.session.as_ref() {
             Some(session) if panels::dock::is_usable_layout(&session.tree) => {
                 self.preferences.sync_layout(&session.tree)
             }
@@ -508,6 +508,15 @@ impl EditorApp {
             }
             None => false,
         };
+        // 吸附开关是**视口里的高频开关**（工具栏一点就切），不在偏好窗口里；
+        // 写盘前从会话状态回收一次 —— 状态是真相，偏好只是它的持久化副本
+        // （与布局从 `tree` 回收同一条思路）。
+        if let Some(session) = self.session.as_ref() {
+            if self.preferences.snap_enabled != session.state.snap_enabled {
+                self.preferences.snap_enabled = session.state.snap_enabled;
+                changed = true;
+            }
+        }
         // 布局没变就不写盘：同一个会话反复关闭 / 退出不该重复写。
         // 数值偏好走 Apply 时已经写过；ResetLayout 也当场写过。
         if changed {

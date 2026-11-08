@@ -13,6 +13,7 @@
 //! draw.rs   将形状投影后绘制为 egui 2D 图元
 //! pick.rs   屏幕空间拾取检测
 //! drag.rs   拖拽变换计算
+//! snap.rs   吸附步长（平移 / 旋转 / 缩放）
 //! ```
 //!
 //! # NaN/Inf 防护策略
@@ -26,6 +27,7 @@ mod draw;
 mod math;
 mod pick;
 mod shapes;
+mod snap;
 
 // ── 公共 API 重导出 ──
 
@@ -37,6 +39,7 @@ pub use pick::{
     axis_param_under_mouse, hit_position_on_axis, hit_position_on_plane, pick_gizmo, ray_aabb,
     UNIT_BOUNDS,
 };
+pub use snap::GizmoSnap;
 use xgame_math::glam::Vec3;
 
 /// 操作柄对应的世界轴方向。

@@ -8852,3 +8852,37 @@ Windows 本机能创建链接，第三条没有跳过。起初误用 `--exact` �
 
 **验证**：`cargo test -p xgame-ui` 47 passed / 0 failed、`cargo test -p xgame-core --lib`
 全绿（含 schema 的 41 个类型与 UiImageStyle 字段表）。
+
+## 一百一十二、Gizmo 吸附：把「未接线的字段」接上（2026-11-08）
+
+**问题**：`EditorState.gizmo_snap` 从 Gizmo 落地起就存在，但没有任何代码读它
+（挂着 `#[allow(dead_code)]`）。手摆关卡要"摆到 2.0 米整"只能回 Inspector 手敲。
+
+**做法**：
+
+- `gizmo/snap.rs`：`GizmoSnap { translate, rotate_deg, scale }` + `snap_scalar` /
+  `snap_vec`（`<= 0` / 非有限 = 不吸）。
+- `compute_transform` 多收一个 `GizmoSnap`，在**算完连续增量之后**吸附：
+  平移 / 缩放吸绝对值的逐分量；旋转吸欧拉分量（`quat_to_euler_deg` →
+  吸格点 → `euler_deg_to_quat` → 反解成相对增量）。
+- `state::resolve_snap(enabled, ctrl, steps)`：开关与 Ctrl 异或，只有一份实现。
+- 工具栏磁铁按钮（新图标 `Icon::Magnet`，矢量绘制）、Preferences 的"拖拽吸附"区块
+  （开关 + 三个步长）、命令面板「切换拖拽吸附」、`editor.ron` 持久化（开关在
+  `persist_preferences` 里从会话状态回收）。
+
+**测试（先红后绿）**：
+
+- `snap` 4 条：就近取整（37 → 30，不是向上取 45）、负值对称、`0`/负数/NaN 步长原样、
+  逐分量吸附、`is_active`。
+- `drag` 3 条：平移吸绝对位置（起点 0.3 → 落点 1.0，且必须是 0.5 的整数倍）、
+  旋转吸欧拉分量（起始 8.3° + 45° → 60°，且只有一个分量变）、缩放逐分量 +
+  "关闭时与老行为一致"（`assert_ne!(0.5)` 保证没有被吸）。
+- `state` 1 条：`resolve_snap` 的四种组合 + 步长全 0 时不吸。
+- **旧实现红灯**：把 `snap_scalar` 改成恒等（等于不吸），`cargo test -p xgame-editor gizmo`
+  实跑 `16 passed; 4 failed`。
+
+**刻意的取舍**：
+
+- 不做"临时轴约束"（Unity 里 Ctrl+拖某个平面会约束到轴）与世界 / 局部坐标切换：
+  现在的 gizmo 只有世界轴，约束轴与它同一批工作。
+- Rect 工具仍然没有实现（不是本轮范围，差距分析里继续记着）。
