@@ -619,6 +619,42 @@ pub enum ProjectError {
 
     #[error("不支持文件格式版本 {version} ({path})；旧格式写入已拒绝")]
     UnsupportedFileVersion { path: PathBuf, version: u32 },
+
+    #[error("v2 文件数据无效 ({path}): {reason}")]
+    InvalidV2 { path: PathBuf, reason: String },
+}
+
+/// v2 草案只能写入新文件或已验证的 v2 文件；不把 v1 覆盖当成隐式迁移。
+fn guard_v2_write<T>(
+    path: &Path,
+    parse: fn(&str) -> Result<T, String>,
+) -> Result<(), ProjectError> {
+    let disk = crate::file_format::disk_version(path).map_err(|source| ProjectError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    match disk {
+        None if !path.exists() => Ok(()),
+        Some(2) => {
+            let text = std::fs::read_to_string(path).map_err(|source| ProjectError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            parse(&text).map_err(|reason| ProjectError::InvalidV2 {
+                path: path.to_path_buf(),
+                reason,
+            })?;
+            Ok(())
+        }
+        Some(version) => Err(ProjectError::UnsupportedFileVersion {
+            path: path.to_path_buf(),
+            version,
+        }),
+        None => Err(ProjectError::InvalidV2 {
+            path: path.to_path_buf(),
+            reason: "现有文件无法解析版本，拒绝覆盖".into(),
+        }),
+    }
 }
 
 /// 旧编辑会话保存时若文件已由外部升级，禁止覆盖其未知组件数据。
@@ -1129,6 +1165,51 @@ impl ProjectHandle {
         Ok(prefab)
     }
 
+    /// 显式 v2 草案写入：旧文件必须已是合法 v2；v1→v2 要走单独的迁移器。
+    pub fn write_prefab_v2(
+        &self,
+        relative: &str,
+        prefab: &crate::scene_v2::PrefabV2,
+    ) -> Result<(), ProjectError> {
+        let relative =
+            normalize_project_relative(relative).map_err(|e| ProjectError::InvalidPath {
+                relative: relative.to_owned(),
+                reason: e.to_string(),
+            })?;
+        let path = self.path(&relative);
+        guard_v2_write(&path, crate::scene_v2::PrefabV2::from_ron)?;
+        prefab.to_ron().map_err(|reason| ProjectError::InvalidV2 {
+            path: path.clone(),
+            reason,
+        })?;
+        let mut copy = prefab.clone();
+        {
+            let mut assets = self.assets();
+            assets.refresh();
+            assets
+                .ensure_metas()
+                .map_err(|reason| ProjectError::InvalidV2 {
+                    path: path.clone(),
+                    reason,
+                })?;
+            crate::asset::encode_prefab_v2_references(&mut copy, &assets);
+        }
+        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidV2 {
+            path: path.clone(),
+            reason,
+        })?;
+        if unchanged_on_disk(&path, &text) {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        write_atomic(&path, &text)
+    }
+
     /// 把预制体写回项目内的相对路径。
     ///
     /// 写盘前把资产引用编码成 GUID（并补齐缺 `.meta` 的资产身份证）。
@@ -1368,6 +1449,67 @@ impl ProjectHandle {
         }
         scene.validate_prefab_sources(&prefabs)?;
         Ok(scene)
+    }
+
+    /// 显式 v2 草案写入；来源资产必须已落盘并通过关联检查，不覆盖 v1。
+    pub fn write_scene_v2(
+        &self,
+        relative: &str,
+        scene: &crate::scene_v2::SceneV2,
+    ) -> Result<(), ProjectError> {
+        let relative =
+            normalize_scene_relative(relative).map_err(|reason| ProjectError::InvalidPath {
+                relative: relative.to_owned(),
+                reason,
+            })?;
+        let path = self.path(&relative);
+        guard_v2_write(&path, crate::scene_v2::SceneV2::from_ron)?;
+        let mut prefabs = std::collections::BTreeMap::new();
+        for entity in &scene.entities {
+            if let Some(reference) = &entity.prefab {
+                if !prefabs.contains_key(&reference.source) {
+                    let prefab = self.load_prefab_v2(&reference.source).map_err(|reason| {
+                        ProjectError::InvalidV2 {
+                            path: path.clone(),
+                            reason,
+                        }
+                    })?;
+                    prefabs.insert(reference.source.clone(), prefab);
+                }
+            }
+        }
+        scene
+            .validate_prefab_sources(&prefabs)
+            .map_err(|reason| ProjectError::InvalidV2 {
+                path: path.clone(),
+                reason,
+            })?;
+        let mut copy = scene.clone();
+        {
+            let mut assets = self.assets();
+            assets.refresh();
+            assets
+                .ensure_metas()
+                .map_err(|reason| ProjectError::InvalidV2 {
+                    path: path.clone(),
+                    reason,
+                })?;
+            crate::asset::encode_scene_v2_references(&mut copy, &assets);
+        }
+        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidV2 {
+            path: path.clone(),
+            reason,
+        })?;
+        if unchanged_on_disk(&path, &text) {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        write_atomic(&path, &text)
     }
 
     /// 从 v1 原始文件只读预览升级结果；已升级的来源预制体沿用其真实组件 ID。

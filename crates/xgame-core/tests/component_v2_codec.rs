@@ -485,3 +485,64 @@ fn project_upgrade_preview_rejects_repeated_v1_map_keys() {
     assert!(project.preview_scene_v2(path).is_ok());
     std::fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn project_v2_write_preserves_ids_and_refuses_v1_overwrite() {
+    let base = std::env::temp_dir().join(format!("xgame-v2-write-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let existing = project.manifest().entry_scene.clone();
+    let before = std::fs::read(project.path(&existing)).unwrap();
+    let source = project.prefab_path_for("Actor");
+    let mut prefab = Prefab::new("Actor");
+    let mut actor = Entity::new("Actor");
+    actor.camera = Some(Camera::default());
+    prefab.entities.push(actor);
+    let v2_prefab = PrefabV2::from_v1(&prefab).unwrap();
+    let mut scene = Scene::new("V2");
+    scene.entities.extend(prefab.instantiate(&source));
+    let v2_scene = SceneV2::from_v1_with_prefabs(
+        &scene,
+        &BTreeMap::from([(source.clone(), v2_prefab.clone())]),
+    )
+    .unwrap();
+    let v2_path = "Scenes/Upgraded.ron";
+
+    assert!(project.write_scene_v2(&existing, &v2_scene).is_err());
+    assert_eq!(std::fs::read(project.path(&existing)).unwrap(), before);
+    assert!(
+        project.write_scene_v2(v2_path, &v2_scene).is_err(),
+        "缺少来源资产不能写场景"
+    );
+    project.write_prefab_v2(&source, &v2_prefab).unwrap();
+    project.write_scene_v2(v2_path, &v2_scene).unwrap();
+    let saved = std::fs::read(project.path(v2_path)).unwrap();
+    let mtime = std::fs::metadata(project.path(v2_path))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&saved).contains("guid://"));
+    assert_eq!(
+        project.load_scene_v2(v2_path).unwrap().to_ron().unwrap(),
+        v2_scene.to_ron().unwrap()
+    );
+    project.write_scene_v2(v2_path, &v2_scene).unwrap();
+    assert_eq!(std::fs::read(project.path(v2_path)).unwrap(), saved);
+    assert_eq!(
+        std::fs::metadata(project.path(v2_path))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        mtime
+    );
+    let corrupted = "(format_version: 2, name: \"Corrupt\", entities: [], unknown_field: 5)";
+    std::fs::write(project.path(v2_path), corrupted).unwrap();
+    assert!(project.write_scene_v2(v2_path, &v2_scene).is_err());
+    assert_eq!(
+        std::fs::read_to_string(project.path(v2_path)).unwrap(),
+        corrupted
+    );
+    assert!(project.write_prefab_v2(&existing, &v2_prefab).is_err());
+    assert!(project.write_scene_v2("../outside.ron", &v2_scene).is_err());
+    std::fs::remove_dir_all(base).unwrap();
+}
