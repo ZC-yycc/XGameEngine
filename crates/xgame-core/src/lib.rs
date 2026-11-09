@@ -51,6 +51,7 @@ pub mod prefab;
 pub mod project;
 mod scene;
 pub mod scene_v2;
+mod v2_animator;
 mod scene_transforms;
 mod transform;
 

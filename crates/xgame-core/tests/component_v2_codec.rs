@@ -172,3 +172,63 @@ fn v2_rejects_duplicate_rust_field_keys() {
         "v2 不能覆盖前一个字段值"
     );
 }
+
+#[test]
+fn v2_rejects_duplicate_animation_parameter_keys() {
+    let mut scene = Scene::new("AnimatorMap");
+    let mut actor = Entity::new("Actor");
+    let animator = Animator {
+        machine: Some(xgame_core::AnimMachine {
+            parameters: [("speed".into(), 1.0)].into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    actor.animator = Some(animator);
+    scene.add_entity(actor);
+    let text = SceneV2::from_v1_plain(&scene).unwrap().to_ron().unwrap();
+    let duplicate = text.replacen("\"speed\":", "\"speed\": 0.0, \"speed\":", 1);
+    assert_ne!(text, duplicate, "必须真的复制一个动画参数键: {text}");
+    assert!(
+        SceneV2::from_ron(&duplicate).is_err(),
+        "不能覆盖第一个参数值"
+    );
+}
+
+#[test]
+fn v2_rejects_duplicate_layer_animation_parameters_and_keeps_defaults() {
+    let mut scene = Scene::new("LayerMap");
+    let mut actor = Entity::new("Actor");
+    let animator = Animator {
+        machine: Some(xgame_core::AnimMachine {
+            parameters: [("base".into(), 1.0)].into(),
+            ..Default::default()
+        }),
+        layers: vec![xgame_core::AnimLayer {
+            machine: Some(xgame_core::AnimMachine {
+                parameters: [("aim".into(), 0.5)].into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    actor.animator = Some(animator);
+    scene.add_entity(actor);
+    let text = SceneV2::from_v1_plain(&scene).unwrap().to_ron().unwrap();
+    let duplicate = text.replacen("\"aim\":", "\"aim\": 0.0, \"aim\":", 1);
+    assert_ne!(duplicate, text, "必须真的复制分层参数键: {text}");
+    assert!(SceneV2::from_ron(&duplicate)
+        .unwrap_err()
+        .contains("重复键"));
+    assert_eq!(SceneV2::from_ron(&text).unwrap().to_v1().unwrap(), scene);
+
+    // 层与播放器的缺省值由 v1 类型定义；v2 的严格读法应与它保持一致。
+    let partial = text.replacen("fade_time: 0.25,", "", 1);
+    assert_ne!(partial, text, "动画默认淡入时长必须出现在样本中");
+    let decoded = SceneV2::from_ron(&partial).unwrap().to_v1().unwrap();
+    assert_eq!(
+        decoded.entities[0].animator.as_ref().unwrap().fade_time,
+        0.25
+    );
+}

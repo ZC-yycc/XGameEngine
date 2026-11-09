@@ -29,10 +29,11 @@ fn parse_v2<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, String> {
 
 use crate::component_id::{ComponentIdSequence, ComponentIdentity};
 use crate::component_upgrade::preview_component_upgrade;
+pub use crate::v2_animator::StrictAnimator;
 use crate::{
-    Animator, AudioSource, BuiltinComponent, Camera, CharacterController, ComponentAddress, Entity,
-    EntityId, Light, LodGroup, MaterialOverride, ParticleEmitter, PhysicsBody, Prefab,
-    PrefabInstanceRef, Scene, Transform, UiElement,
+    AudioSource, BuiltinComponent, Camera, CharacterController, ComponentAddress, Entity, EntityId,
+    Light, LodGroup, MaterialOverride, ParticleEmitter, PhysicsBody, Prefab, PrefabInstanceRef,
+    Scene, Transform, UiElement,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +86,7 @@ pub struct ComponentInstance {
 pub enum ComponentData {
     Render(RenderData),
     Ui(UiElement),
-    Animator(Animator),
+    Animator(StrictAnimator),
     Physics(PhysicsBody),
     Character(CharacterController),
     Audio(AudioSource),
@@ -163,9 +164,9 @@ impl ComponentData {
                     morph_weights: entity.morph_weights.clone(),
                 }),
                 BuiltinComponent::Ui => Self::Ui(entity.ui.clone().expect("只映射已挂载组件")),
-                BuiltinComponent::Animator => {
-                    Self::Animator(entity.animator.clone().expect("只映射已挂载组件"))
-                }
+                BuiltinComponent::Animator => Self::Animator(StrictAnimator(
+                    entity.animator.clone().expect("只映射已挂载组件"),
+                )),
                 BuiltinComponent::Physics => {
                     Self::Physics(entity.physics.expect("只映射已挂载组件"))
                 }
@@ -215,7 +216,7 @@ impl ComponentData {
                 entity.morph_weights = data.morph_weights;
             }
             Self::Ui(value) => entity.ui = Some(value),
-            Self::Animator(value) => entity.animator = Some(value),
+            Self::Animator(value) => entity.animator = Some(value.0),
             Self::Physics(value) => entity.physics = Some(value),
             Self::Character(value) => entity.controller = Some(value),
             Self::Audio(value) => entity.audio = Some(value),
