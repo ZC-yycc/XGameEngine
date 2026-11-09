@@ -57,7 +57,7 @@
 
 ---
 
-## 工具参考（12 个）
+## 工具参考（13 个）
 
 最小完备集，覆盖「读说明书 / 读脚本契约 → 读 → 改 → 查 → 看效果」闭环，外加资产侧
 的「看见 → 导入 → 整理」。除 `schema_read` / `script_api_read` 外，全部工具必填
@@ -108,6 +108,26 @@
 - **入参**：`project`，可选 `scene`
 - **返回**：场景的**完整 RON 文本**（与文件同构：同一序列化配置），可原样传回
   `scene_write`。没有摘要、没有私有格式 —— 智能体拿到的就是人类在编辑器里存的那份。
+
+### 3a. `entity_components_read`
+
+按场景内的实体 ID 查询当前挂载组件（只读），不按名字猜目标。先用 `scene_read`
+取得 ID，尤其在同名实体并存时。
+
+- **入参**：`project`、`entity_id`（**十进制字符串**，不能传 JSON 数字，否则超过
+  2⁵³ 后可能丢失精度），可选 `scene`。
+- **返回**（JSON 文本）：`scene` / `entity_id`（十进制字符串） / `entity_name` /
+  `address_stability: "legacy"` / `components` 数组。每项包括 `address`、`kind`
+  （`builtin` / `rust` / `lua`）、`type_id`、`name`、`data`。内建数据是当前字段的
+  JSON 视图；Rust 数据是已保存的 `Inspect` 参数表（缺省为空对象，不含插件运行态）；
+  Lua 数据只有脚本资产路径，不代表脚本的运行时变量。
+- **地址规则**：`builtin:transform` 恒存在且不可移除；Render 由旧格式中的模型、LOD、
+  材质资产及形变权重组合而成。其它已挂载内建组件使用 `builtin:camera` 等种类地址。
+  Rust、Lua 使用 `rust:0`、`lua:0` 等列表槽位地址，**删除或重排后地址可能指向另一项，
+  使用前重新查询**。当前尚无可跨重排引用的组件实例 ID，返回字段显式标记为 `legacy`。
+- **边界**：该工具只读；添加和移除继续通过 Inspector 的 Add Component / 各组件移除
+  控件完成。离线批量编辑可用 `scene_read` / `scene_write`，并遵守两端不能同时写场景
+  的现有约定。
 
 ### 4. `scene_write`
 
@@ -288,7 +308,7 @@
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 12 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 13 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |
@@ -298,7 +318,7 @@
 | `crates/xgame-core/src/asset.rs` | `AssetGuid` / `AssetMeta` / `AssetDatabase`（`asset_list` / `asset_import` / `asset_move` 与 `--check` 的资产诊断都读它） |
 | `crates/xgame-editor/src/headless.rs` | 无头运行的实现（CLI `--headless`；`run_headless` 工具 spawn 它） |
 
-回归测试：`cargo test -p xgame-mcp`（36 条：协议 9 条 + 12 个工具的行为与信封；
+回归测试：`cargo test -p xgame-mcp`（协议、工具行为与信封；
 其中 `run_headless` 的几条会嵌套 `cargo build -p xgame-editor` 保证被测 exe 新鲜，
 再经真实进程 spawn 跑通）。`schema_read` 另有 `xgame-core` 的 10 条目录测试与
 `xgame-editor` 的 5 条 CLI 测试钉住内容与确定性；`script_api_read` 另有

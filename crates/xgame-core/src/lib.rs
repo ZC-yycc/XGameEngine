@@ -19,6 +19,7 @@
 //! | `character` | 角色控制器参数 `CharacterController`（可序列化）+ 运行时状态 `CharacterState` |
 //! | `material` | 材质：共享资产 `MaterialAsset`（`.mat`）+ 逐实体覆盖 `MaterialOverride` |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
+//! | `component_view` | 旧格式内建、Rust、Lua 组件的发现与添加 / 移除入口 |
 //! | `fsx` | 原子写盘与遗留暂存回收（所有落盘入口的唯一实现） |
 //! | `inspect` | 组件字段检视契约 `Inspect` + `FieldDesc`/`FieldValue`（Inspector 与 Lua 参数的同一份真相源）|
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
@@ -61,6 +62,7 @@ pub mod camera;
 mod character;
 mod check;
 mod component;
+mod component_view;
 // 原子写盘 + 遗留暂存回收：所有落盘入口共用一份实现（见模块文档的"为什么"）。
 pub mod fsx;
 mod id;
@@ -129,6 +131,7 @@ pub use character::{
     CharacterContacts, CharacterController, CharacterState, MAX_CHARACTER_CONTACTS,
 };
 pub use component::{Component, ComponentMap, ModelPath, Name};
+pub use component_view::{AttachedComponent, BuiltinComponent, ComponentAddress};
 pub use id::{EntityId, EntityMap, EntitySet};
 pub use inspect::{FieldDesc, FieldKind, FieldValue, Inspect};
 pub use layers::{sanitize_layer, Layers, DEFAULT_LAYER, LAYER_COUNT};

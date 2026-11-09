@@ -1204,7 +1204,7 @@ Build/<项目名>/
 ## MCP（AI 智能体接口）
 
 `xgame-mcp` 是本引擎的 **MCP server** —— 把"读说明书、读脚本契约、读项目、改场景、
-动实体、跑检查、无头实跑"暴露成 12 个标准 MCP 工具，Cursor / Claude 等任何 MCP
+动实体、跑检查、无头实跑"暴露成 13 个标准 MCP 工具，Cursor / Claude 等任何 MCP
 客户端接上就能**不用鼠标直接操纵引擎**做游戏开发。无窗口、无 GPU，stdio 起服务
 （按行 JSON-RPC）。
 
@@ -1218,6 +1218,7 @@ Build/<项目名>/
 | `script_api_read` | 读脚本 API 的机器可读清单（182 个函数 / 签名 / 参数 / 返回值 / 7 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
+| `entity_components_read` | 按十进制字符串实体 ID 读取内建 / Rust / Lua 挂载列表和当前数据；旧格式 Rust / Lua 槽位地址重排后须重新查询，只读 |
 | `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |
 | `entity_upsert` | 按名字创建/部分更新实体（变换、模型、脚本、父子） |
 | `entity_remove` | 按名字删除实体（重名歧义拒绝；子节点提升不连坐） |

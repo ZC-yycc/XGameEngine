@@ -21,76 +21,10 @@
 
 use crate::panels::{icons, theme};
 use crate::state::EditorState;
-use xgame_core::{EntityId, FieldDesc, FieldKind, FieldValue, Inspect};
+use xgame_core::{
+    BuiltinComponent, ComponentAddress, EntityId, FieldDesc, FieldKind, FieldValue, Inspect,
+};
 use xgame_math::glam::{Vec2, Vec3, Vec4};
-
-/// 内建系统仍读取 Entity 的可选字段；菜单只负责在原有落盘位置创建它们。
-/// 新增插件组件只需注册，不需要改这张内建系统清单。
-#[derive(Clone, Copy)]
-enum BuiltinComponent {
-    Ui,
-    Animator,
-    Physics,
-    Character,
-    Audio,
-    Camera,
-    Particle,
-    MaterialOverride,
-}
-
-impl BuiltinComponent {
-    const ALL: [Self; 8] = [
-        Self::Ui,
-        Self::Animator,
-        Self::Physics,
-        Self::Character,
-        Self::Audio,
-        Self::Camera,
-        Self::Particle,
-        Self::MaterialOverride,
-    ];
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Ui => "UI Element",
-            Self::Animator => "Animator",
-            Self::Physics => "Physics",
-            Self::Character => "Character",
-            Self::Audio => "Audio Source",
-            Self::Camera => "Camera",
-            Self::Particle => "Particle Emitter",
-            Self::MaterialOverride => "Material Override",
-        }
-    }
-
-    fn present(self, entity: &xgame_core::Entity) -> bool {
-        match self {
-            Self::Ui => entity.ui.is_some(),
-            Self::Animator => entity.animator.is_some(),
-            Self::Physics => entity.physics.is_some(),
-            Self::Character => entity.controller.is_some(),
-            Self::Audio => entity.audio.is_some(),
-            Self::Camera => entity.camera.is_some(),
-            Self::Particle => entity.particle.is_some(),
-            Self::MaterialOverride => entity.material.is_some(),
-        }
-    }
-
-    fn add(self, entity: &mut xgame_core::Entity) {
-        match self {
-            Self::Ui => entity.ui = Some(xgame_core::UiElement::panel(320.0, 180.0)),
-            Self::Animator => entity.animator = Some(xgame_core::Animator::default()),
-            Self::Physics => entity.physics = Some(xgame_core::PhysicsBody::default()),
-            Self::Character => entity.controller = Some(xgame_core::CharacterController::default()),
-            Self::Audio => entity.audio = Some(xgame_core::AudioSource::default()),
-            Self::Camera => entity.camera = Some(xgame_core::Camera::default()),
-            Self::Particle => entity.particle = Some(xgame_core::ParticleEmitter::default()),
-            Self::MaterialOverride => {
-                entity.material = Some(xgame_core::MaterialOverride::default());
-            }
-        }
-    }
-}
 
 /// 从一个控件的响应里收集「有改动 / 拖拽开始 / 拖拽结束」三个信号。
 fn collect(
@@ -473,7 +407,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 egui::PopupCloseBehavior::CloseOnClick,
                 |ui| {
                     ui.set_min_width(220.0);
-                    for kind in BuiltinComponent::ALL {
+                    for kind in BuiltinComponent::ADDABLE {
                         if !kind.present(entity) && ui.button(kind.name()).clicked() {
                             // 与原来的 Add Animator 相同：有剪辑时先选模型的第一段。
                             let default_clip = if matches!(kind, BuiltinComponent::Animator) {
@@ -485,7 +419,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                             } else {
                                 None
                             };
-                            kind.add(entity);
+                            entity.add_builtin_component(kind);
                             if let (Some(clip), Some(animator)) =
                                 (default_clip, entity.animator.as_mut())
                             {
@@ -506,8 +440,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                             shown_behaviors = true;
                         }
                         if ui.button(name).clicked() {
-                            entity.behaviors.push(name.clone());
-                            touched = true;
+                            touched |= entity.add_registered_component(name);
                         }
                     }
                     if names.is_empty() {
@@ -525,8 +458,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                             shown_scripts = true;
                         }
                         if ui.button(path).clicked() {
-                            entity.scripts.push(path.clone());
-                            touched = true;
+                            touched |= entity.attach_lua_script(path);
                         }
                     }
                     ui.separator();
@@ -1516,8 +1448,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         touched = true;
                     }
                 if remove {
-                    entity.animator = None;
-                    touched = true;
+                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
+                        BuiltinComponent::Animator,
+                    ));
                 }
             });
         }
@@ -1601,8 +1534,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     });
                 }
                 if let Some(slot) = remove {
-                    entity.scripts.remove(slot);
-                    touched = true;
+                    touched |= entity.remove_attached_component(ComponentAddress::Lua(slot));
                 }
 
                 theme::note(ui, "钩子: start / update / fixed_update / on_destroy");
@@ -1706,8 +1638,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     touched = true;
                 }
                 if let Some(slot) = remove {
-                    entity.behaviors.remove(slot);
-                    touched = true;
+                    touched |= entity.remove_attached_component(ComponentAddress::Rust(slot));
                 }
 
                 // 调参什么时候生效 —— 两种模式的差别就这一句话，说在最前面免得
@@ -1735,12 +1666,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     .on_hover_text("不勾选 = 纯视觉实体，不会被重力拽走")
                     .changed()
                 {
-                    entity.physics = if enabled {
-                        Some(xgame_core::PhysicsBody::default())
-                    } else {
-                        None
-                    };
-                    touched = true;
+                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
+                        BuiltinComponent::Physics,
+                    ));
                 }
 
                 if let Some(body) = entity.physics.as_mut() {
@@ -1955,12 +1883,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     .on_hover_text("由角色控制器驱动：撞墙、自动上台阶、贴地、陡坡滑落")
                     .changed()
                 {
-                    entity.controller = if enabled {
-                        Some(xgame_core::CharacterController::default())
-                    } else {
-                        None
-                    };
-                    touched = true;
+                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
+                        BuiltinComponent::Character,
+                    ));
                 }
 
                 if let Some(c) = entity.controller.as_mut() {
@@ -2047,12 +1972,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 )
                 .changed()
             {
-                entity.audio = if enabled {
-                    Some(xgame_core::AudioSource::default())
-                } else {
-                    None
-                };
-                touched = true;
+                touched |= entity.remove_attached_component(ComponentAddress::Builtin(
+                    BuiltinComponent::Audio,
+                ));
             }
 
             if let Some(audio) = entity.audio.as_mut() {
@@ -2185,12 +2107,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     )
                     .changed()
                 {
-                    entity.camera = if enabled {
-                        Some(xgame_core::Camera::default())
-                    } else {
-                        None
-                    };
-                    touched = true;
+                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
+                        BuiltinComponent::Camera,
+                    ));
                 }
 
                 if let Some(cam) = entity.camera.as_mut() {
@@ -2271,12 +2190,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     )
                     .changed()
                 {
-                    entity.particle = if enabled {
-                        Some(xgame_core::ParticleEmitter::default())
-                    } else {
-                        None
-                    };
-                    touched = true;
+                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
+                        BuiltinComponent::Particle,
+                    ));
                 }
 
                 if let Some(p) = entity.particle.as_mut() {
@@ -2624,12 +2540,13 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 .on_hover_text("在内置白模 / glTF 材质之上逐字段覆盖 PBR 参数；\n只影响勾选的字段")
                 .changed()
             {
-                entity.material = if enabled {
-                    Some(xgame_core::MaterialOverride::default())
+                touched |= if enabled {
+                    entity.add_builtin_component(BuiltinComponent::MaterialOverride)
                 } else {
-                    None
+                    entity.remove_attached_component(ComponentAddress::Builtin(
+                        BuiltinComponent::MaterialOverride,
+                    ))
                 };
-                touched = true;
             }
 
             if let Some(m) = entity.material.as_mut() {

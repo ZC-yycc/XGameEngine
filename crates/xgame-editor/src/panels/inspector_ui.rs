@@ -14,7 +14,9 @@
 //! 锚点并**保持当前尺寸**（居中的预设会把偏移重算成 `±size/2`）。手填仍然
 //! 保留 —— 预设覆盖不到的组合（比如"距右边缘 20px、垂直拉伸"）还得靠数值。
 
-use xgame_core::{Entity, UiAlign, UiElement, UiKind, UiVAlign};
+use xgame_core::{
+    BuiltinComponent, ComponentAddress, Entity, UiAlign, UiElement, UiKind, UiVAlign,
+};
 
 use crate::panels::theme;
 
@@ -54,8 +56,8 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
         .on_hover_text("取消勾选以移除 UI 组件")
         .changed()
     {
-        entity.ui = None;
-        *touched = true;
+        *touched |=
+            entity.remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Ui));
         return;
     }
 

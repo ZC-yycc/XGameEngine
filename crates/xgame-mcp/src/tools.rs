@@ -1,4 +1,4 @@
-//! # 十二个工具 —— 智能体操纵引擎的最小完备集
+//! # 十三个工具 —— 智能体操纵引擎的最小完备集
 //!
 //! 刻意小：**读说明 → 读清单 → 读场景 → 改（整体或单实体）→ 验证** 五步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
@@ -28,7 +28,9 @@
 use glam::Vec3;
 use serde_json::{json, Value};
 
-use xgame_core::{check_project, Entity, ProjectHandle, Scene};
+use xgame_core::{
+    check_project, BuiltinComponent, ComponentAddress, Entity, EntityId, ProjectHandle, Scene,
+};
 
 /// 调用失败的两种（MCP 语义不同，别混 —— 详见库文档"错误分两层"）。
 #[derive(Debug, PartialEq, Eq)]
@@ -46,7 +48,7 @@ fn fail(message: impl Into<String>) -> CallError {
 
 /// 一次工具调用的输出：一段文本 +（可选的）随附图片。
 ///
-/// 十二个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 十三个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
 /// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
 /// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
 /// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
@@ -75,7 +77,7 @@ impl ToolOutput {
     }
 }
 
-/// 12 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 13 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -115,6 +117,19 @@ pub fn schemas() -> Vec<Value> {
                 "type": "object",
                 "properties": { "project": project_prop, "scene": scene_prop },
                 "required": ["project"],
+            },
+        }),
+        json!({
+            "name": "entity_components_read",
+            "description": "按实体 ID 读取已挂载的内建、Rust 和 Lua 组件，返回统一列表及当前配置，不写磁盘。entity_id 是十进制字符串（防止 JSON 数字丢失 u64 精度）。当前是旧场景格式：builtin:* 地址稳定，rust:<槽位> / lua:<槽位> 仅在列表结构不变时有效；重排或删除后必须重新查询。返回 address_stability=legacy，不是 v2 稳定组件实例 ID。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": project_prop,
+                    "scene": scene_prop,
+                    "entity_id": { "type": "string", "description": "场景内实体 ID，十进制字符串；先从 scene_read 读取，避免同名实体歧义" },
+                },
+                "required": ["project", "entity_id"],
             },
         }),
         json!({
@@ -245,6 +260,7 @@ pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
         "schema_read" => schema_read(args).map(ToolOutput::text),
         "project_info" => project_info(args).map(ToolOutput::text),
         "scene_read" => scene_read(args).map(ToolOutput::text),
+        "entity_components_read" => entity_components_read(args).map(ToolOutput::text),
         "scene_write" => scene_write(args).map(ToolOutput::text),
         "entity_upsert" => entity_upsert(args).map(ToolOutput::text),
         "entity_remove" => entity_remove(args).map(ToolOutput::text),
@@ -399,7 +415,7 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 十二个工具
+// 十三个工具
 // ---------------------------------------------------------------------------
 
 /// `schema_read` —— 场景格式的机器可读说明书（项目无关）。
@@ -506,6 +522,72 @@ fn scene_read(args: &Value) -> Result<String, CallError> {
     let rel = scene_rel(args, &project.manifest().entry_scene)?;
     let scene = load_scene_of(&project, &rel)?;
     scene_to_ron(&scene)
+}
+
+/// 编辑器 Add Component 与这里共享 core 的内建组件清单；脚本与行为不去猜注册表。
+fn entity_components_read(args: &Value) -> Result<String, CallError> {
+    let project = open_project(args)?;
+    let rel = scene_rel(args, &project.manifest().entry_scene)?;
+    let scene = load_scene_of(&project, &rel)?;
+    let raw = require_str(args, "entity_id")?;
+    let raw = raw
+        .parse::<u64>()
+        .map_err(|_| fail("entity_id 必须是十进制 u64 字符串；先通过 scene_read 查看实体 ID"))?;
+    let id = EntityId::from_raw(raw);
+    let index = scene
+        .find_entity(id)
+        .ok_or_else(|| fail(format!("场景 {rel} 中找不到实体 ID {raw}")))?;
+    let entity = &scene.entities[index];
+    let components: Vec<_> = entity
+        .attached_components()
+        .into_iter()
+        .map(|component| {
+            let (kind, type_id, data) = match component.address {
+                ComponentAddress::Builtin(builtin) => {
+                    let data = match builtin {
+                        BuiltinComponent::Transform => json!(&entity.transform),
+                        BuiltinComponent::Render => json!({
+                            "model": &entity.model,
+                            "lod": &entity.lod,
+                            "material_asset": &entity.material_asset,
+                            "morph_weights": &entity.morph_weights,
+                        }),
+                        BuiltinComponent::Ui => json!(&entity.ui),
+                        BuiltinComponent::Animator => json!(&entity.animator),
+                        BuiltinComponent::Physics => json!(&entity.physics),
+                        BuiltinComponent::Character => json!(&entity.controller),
+                        BuiltinComponent::Audio => json!(&entity.audio),
+                        BuiltinComponent::Camera => json!(&entity.camera),
+                        BuiltinComponent::Particle => json!(&entity.particle),
+                        BuiltinComponent::MaterialOverride => json!(&entity.material),
+                    };
+                    ("builtin", builtin.code(), data)
+                }
+                ComponentAddress::Rust(_) => (
+                    "rust",
+                    component.name,
+                    component
+                        .params
+                        .map_or_else(|| json!({}), |params| json!(params)),
+                ),
+                ComponentAddress::Lua(_) => ("lua", "lua", json!({ "path": component.name })),
+            };
+            json!({
+                "address": component.address.to_string(),
+                "kind": kind,
+                "type_id": type_id,
+                "name": component.name,
+                "data": data,
+            })
+        })
+        .collect();
+    Ok(pretty(&json!({
+        "scene": rel,
+        "entity_id": raw.to_string(),
+        "entity_name": entity.name,
+        "address_stability": "legacy",
+        "components": components,
+    })))
 }
 
 /// `scene_write` —— 先解析、再体检、最后落盘：坏数据一个字节都不写。
@@ -1247,6 +1329,66 @@ mod tests {
         let text = run(&project, "scene_read", json!({})).expect("scene_read 应成功");
         let scene: Scene = ron::from_str(&text).expect("返回文本必须是合法场景 RON");
         assert!(!scene.entities.is_empty(), "默认场景至少一个实体");
+        cleanup(&project);
+    }
+
+    /// 智能体必须能按稳定的实体 ID 找到完整挂载列表；v1 组件槽位只承诺临时地址。
+    #[test]
+    fn entity_components_read_exposes_builtin_rust_and_lua_without_writing() {
+        let project = temp_project("components_read");
+        let mut scene = entry_scene(&project);
+        let mut actor = Entity::new("Player");
+        actor.camera = Some(xgame_core::Camera::default());
+        actor.behaviors.push("Health".into());
+        actor.behavior_params.insert(
+            "Health".into(),
+            [("value".into(), xgame_core::FieldValue::F32(75.0))]
+                .into_iter()
+                .collect(),
+        );
+        actor.scripts.push("Scripts/player.lua".into());
+        let id = actor.id.raw();
+        scene.add_entity(actor);
+        project
+            .write_scene(&project.manifest().entry_scene, &scene)
+            .expect("写测试场景");
+        let before = std::fs::read(project.entry_scene_path()).expect("读原场景");
+
+        let text = run(
+            &project,
+            "entity_components_read",
+            json!({ "entity_id": id.to_string() }),
+        )
+        .expect("应能查询组件");
+        let info: Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(info["entity_id"], id.to_string());
+        assert_eq!(info["address_stability"], "legacy");
+        let entries = info["components"].as_array().expect("组件列表");
+        assert!(entries.iter().any(|c| c["address"] == "builtin:transform"));
+        assert!(entries.iter().any(|c| c["address"] == "builtin:camera"));
+        assert!(entries.iter().any(|c| c["address"] == "rust:0"
+            && c["name"] == "Health"
+            && c["data"]["value"]["F32"] == 75.0));
+        assert!(entries
+            .iter()
+            .any(|c| c["address"] == "lua:0" && c["name"] == "Scripts/player.lua"));
+        assert!(matches!(
+            run(
+                &project,
+                "entity_components_read",
+                json!({ "entity_id": id })
+            ),
+            Err(CallError::Failed(_))
+        ));
+        assert!(matches!(
+            run(
+                &project,
+                "entity_components_read",
+                json!({ "entity_id": "18446744073709551615" })
+            ),
+            Err(CallError::Failed(_))
+        ));
+        assert_eq!(std::fs::read(project.entry_scene_path()).unwrap(), before);
         cleanup(&project);
     }
 
