@@ -64,6 +64,7 @@ mod check;
 mod component;
 mod component_view;
 pub mod component_id;
+pub mod component_upgrade;
 pub(crate) mod file_format;
 // 原子写盘 + 遗留暂存回收：所有落盘入口共用一份实现（见模块文档的"为什么"）。
 pub mod fsx;

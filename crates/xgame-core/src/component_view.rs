@@ -10,7 +10,7 @@ use crate::inspect::FieldValues;
 use crate::scene::Entity;
 
 /// 内建组件的旧格式类型地址与编辑器显示名都在这一处定义。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuiltinComponent {
     Transform,
     Render,

@@ -51,13 +51,13 @@
     未知工具名（`-32602`）、缺 `params.name`；
   - **工具结果错误**（`result.isError: true` + 文本）：工具跑了但没干成 ——
     项目打不开、RON 解析失败、实体不存在/重名歧义。文本就是给人和模型看的失败原因。
-- **无会话状态**：除 `schema_read` / `script_api_read` 外，每个工具都带 `project`
+- **无会话状态**：除 `component_catalog_read` / `schema_read` / `script_api_read` 外，每个工具都带 `project`
   （项目根路径）参数，server 不维护"当前项目"—— 可并发调用、可开多个实例、测试
   喂行进喂行出。
 
 ---
 
-## 工具参考（14 个）
+## 工具参考（15 个）
 
 最小完备集，覆盖「读说明书 / 读脚本契约 → 读 → 改 → 查 → 看效果」闭环，外加资产侧
 的「看见 → 导入 → 整理」。除 `component_catalog_read` / `schema_read` / `script_api_read` 外，全部工具必填
@@ -136,6 +136,19 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 - **边界**：该工具只读；添加和移除继续通过 Inspector 的 Add Component / 各组件移除
   控件完成。离线批量编辑可用 `scene_read` / `scene_write`，并遵守两端不能同时写场景
   的现有约定。
+
+### 3b. `component_upgrade_preview`
+
+预览 v1 实体将来升级时的组件身份，不落盘；可在动预制体资产之前检查来源关联。
+
+- **入参**：`project`、`entity_id`（十进制字符串），可选 `scene`。
+- **返回**：`status: "preview_only"`、实体 ID / 名称、可选预制体来源路径、
+  `next_component_id`，以及每个已挂载物的旧地址、名称、拟分配的 `component_id`
+  与可选 `source_component_id`（ID 全是十进制字符串）。来源 ID 由资产实体的组件
+  种类、Rust 注册名或 Lua 路径匹配；本地重排不改变对应的来源 ID。
+- **拒绝**：场景或来源预制体有重复实体 ID、旧实体同名 Rust 行为或同路径 Lua
+  脚本、没有行为对应的参数，或来源文件 / 实体无法读取。预览 ID 尚未写入文件，
+  不能拿它当稳定寻址 ID 修改组件；正式转换必须单独执行显式迁移。
 
 ### 4. `scene_write`
 
@@ -316,7 +329,7 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 14 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 15 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |

@@ -1,4 +1,4 @@
-//! # 十四个工具 —— 智能体操纵引擎的最小完备集
+//! # 十五个工具 —— 智能体操纵引擎的最小完备集
 //!
 //! 刻意小：**读说明 → 读清单 → 读场景 → 改（整体或单实体）→ 验证** 五步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
@@ -48,7 +48,7 @@ fn fail(message: impl Into<String>) -> CallError {
 
 /// 一次工具调用的输出：一段文本 +（可选的）随附图片。
 ///
-/// 十四个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 十五个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
 /// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
 /// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
 /// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
@@ -77,7 +77,7 @@ impl ToolOutput {
     }
 }
 
-/// 14 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 15 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -133,6 +133,19 @@ pub fn schemas() -> Vec<Value> {
                     "project": project_prop,
                     "scene": scene_prop,
                     "entity_id": { "type": "string", "description": "场景内实体 ID，十进制字符串；先从 scene_read 读取，避免同名实体歧义" },
+                },
+                "required": ["project", "entity_id"],
+            },
+        }),
+        json!({
+            "name": "component_upgrade_preview",
+            "description": "只读预览 v1 实体将来的组件实例 ID、预制体来源组件 ID 与 next_component_id。entity_id 是十进制字符串。读取场景与来源预制体，重复实体 ID / 同名 Rust 行为 / 同路径 Lua / 孤儿参数等无法无损关联时拒绝；不写盘、不产生 v2 文件。返回的 ID 只是预览，尚未持久化，不可作为 component_patch 的目标。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": project_prop,
+                    "scene": scene_prop,
+                    "entity_id": { "type": "string", "description": "场景内实体 ID，十进制字符串" },
                 },
                 "required": ["project", "entity_id"],
             },
@@ -267,6 +280,7 @@ pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
         "project_info" => project_info(args).map(ToolOutput::text),
         "scene_read" => scene_read(args).map(ToolOutput::text),
         "entity_components_read" => entity_components_read(args).map(ToolOutput::text),
+        "component_upgrade_preview" => component_upgrade_preview(args).map(ToolOutput::text),
         "scene_write" => scene_write(args).map(ToolOutput::text),
         "entity_upsert" => entity_upsert(args).map(ToolOutput::text),
         "entity_remove" => entity_remove(args).map(ToolOutput::text),
@@ -421,7 +435,7 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 十四个工具
+// 十五个工具
 // ---------------------------------------------------------------------------
 
 /// `component_catalog_read` 从场景 schema 筛出可挂载组件的字段说明。
@@ -631,6 +645,82 @@ fn entity_components_read(args: &Value) -> Result<String, CallError> {
         "entity_id": raw.to_string(),
         "entity_name": entity.name,
         "address_stability": "legacy",
+        "components": components,
+    })))
+}
+
+/// 在资产被显式迁移前先给出无歧义的映射，不把预览 ID 冒充已持久化 ID。
+fn component_upgrade_preview(args: &Value) -> Result<String, CallError> {
+    let project = open_project(args)?;
+    let rel = scene_rel(args, &project.manifest().entry_scene)?;
+    let duplicates = project.scene_duplicate_ids(&rel).map_err(fail)?;
+    if !duplicates.is_empty() {
+        return Err(fail(format!(
+            "场景 {rel} 有重复实体 ID，预览不能使用加载时修复后的临时 ID：{duplicates:?}"
+        )));
+    }
+    let scene = load_scene_of(&project, &rel)?;
+    let raw = require_str(args, "entity_id")?;
+    let id = raw
+        .parse::<u64>()
+        .map_err(|_| fail("entity_id 必须是十进制 u64 字符串"))?;
+    let entity = scene
+        .find_entity(EntityId::from_raw(id))
+        .map(|index| &scene.entities[index])
+        .ok_or_else(|| fail(format!("场景 {rel} 中找不到实体 ID {id}")))?;
+
+    let source_prefab = if let Some(reference) = &entity.prefab {
+        let path = xgame_core::normalize_project_relative(&reference.source)
+            .map_err(|e| fail(format!("预制体路径不安全: {e}")))?;
+        let duplicates = project.prefab_duplicate_ids(&path).map_err(fail)?;
+        if !duplicates.is_empty() {
+            return Err(fail(format!(
+                "来源预制体 {path} 有重复实体 ID：{duplicates:?}"
+            )));
+        }
+        let prefab = project
+            .load_prefab(&path)
+            .map_err(|e| fail(format!("加载来源预制体 {path} 失败: {e}")))?;
+        Some(prefab)
+    } else {
+        None
+    };
+    let source = match (&source_prefab, &entity.prefab) {
+        (Some(prefab), Some(reference)) => Some(
+            prefab
+                .entities
+                .iter()
+                .find(|e| e.id == reference.source_id)
+                .ok_or_else(|| {
+                    fail(format!(
+                        "来源预制体缺少实体 ID {}",
+                        reference.source_id.raw()
+                    ))
+                })?,
+        ),
+        _ => None,
+    };
+    let plan =
+        xgame_core::component_upgrade::preview_component_upgrade(entity, source).map_err(fail)?;
+    let components: Vec<_> = plan
+        .components
+        .iter()
+        .map(|component| {
+            json!({
+                "address": component.address.to_string(),
+                "name": component.name,
+                "component_id": component.identity.id.raw().to_string(),
+                "source_component_id": component.identity.source_component_id.map(|id| id.raw().to_string()),
+            })
+        })
+        .collect();
+    Ok(pretty(&json!({
+        "status": "preview_only",
+        "scene": rel,
+        "entity_id": id.to_string(),
+        "entity_name": entity.name,
+        "prefab_source": entity.prefab.as_ref().map(|p| &p.source),
+        "next_component_id": plan.next_component_id.next_id().to_string(),
         "components": components,
     })))
 }
@@ -1460,6 +1550,97 @@ mod tests {
                 && kind["addable"] == false
                 && kind["removable"] == false));
         assert_eq!(catalog["address_stability"], "legacy");
+    }
+
+    /// 预览的来源 ID 由资产组件决定，与实例里重排后的本地 ID 分开。
+    #[test]
+    fn component_upgrade_preview_matches_prefab_source_without_writing() {
+        let project = temp_project("upgrade_preview");
+        let mut prefab = xgame_core::Prefab::new("Actor");
+        let mut source = Entity::new("Actor");
+        source.behaviors = vec!["Health".into(), "Motion".into()];
+        source.scripts.push("Scripts/actor.lua".into());
+        prefab.entities.push(source);
+        let prefab_path = project.prefab_path_for("Actor");
+        project.write_prefab(&prefab_path, &prefab).unwrap();
+        let mut instance = prefab.instantiate(&prefab_path).remove(0);
+        instance.behaviors.swap(0, 1);
+        let id = instance.id.raw();
+        let mut scene = entry_scene(&project);
+        scene.add_entity(instance);
+        project
+            .write_scene(&project.manifest().entry_scene, &scene)
+            .unwrap();
+        let scene_bytes = std::fs::read(project.entry_scene_path()).unwrap();
+        let prefab_bytes = std::fs::read(project.path(&prefab_path)).unwrap();
+
+        let result = run(
+            &project,
+            "component_upgrade_preview",
+            json!({"entity_id": id.to_string()}),
+        )
+        .expect("应返回只读组件身份预览");
+        let preview: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(preview["status"], "preview_only");
+        let components = preview["components"].as_array().unwrap();
+        let motion = components.iter().find(|c| c["name"] == "Motion").unwrap();
+        let health = components.iter().find(|c| c["name"] == "Health").unwrap();
+        assert_eq!(motion["address"], "rust:0");
+        assert_eq!(health["address"], "rust:1");
+        assert_eq!(motion["component_id"], "2");
+        assert_eq!(motion["source_component_id"], "3");
+        assert_eq!(health["component_id"], "3");
+        assert_eq!(health["source_component_id"], "2");
+        assert_eq!(preview["next_component_id"], "5");
+        assert_eq!(
+            std::fs::read(project.entry_scene_path()).unwrap(),
+            scene_bytes
+        );
+        assert_eq!(
+            std::fs::read(project.path(&prefab_path)).unwrap(),
+            prefab_bytes
+        );
+        cleanup(&project);
+    }
+
+    #[test]
+    fn component_upgrade_preview_refuses_ambiguous_legacy_data() {
+        let project = temp_project("upgrade_ambiguous");
+        let mut scene = entry_scene(&project);
+        let mut actor = Entity::new("Actor");
+        actor.behaviors = vec!["Health".into(), "Health".into()];
+        let id = actor.id.raw().to_string();
+        scene.add_entity(actor);
+        let rel = &project.manifest().entry_scene;
+        project.write_scene(rel, &scene).unwrap();
+        let before = std::fs::read(project.entry_scene_path()).unwrap();
+        let err = run(
+            &project,
+            "component_upgrade_preview",
+            json!({"entity_id": id}),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CallError::Failed(reason) if reason.contains("重复")));
+        assert_eq!(std::fs::read(project.entry_scene_path()).unwrap(), before);
+
+        scene.entities.last_mut().unwrap().behaviors.clear();
+        scene
+            .entities
+            .last_mut()
+            .unwrap()
+            .behavior_params
+            .insert("Orphan".into(), Default::default());
+        project.write_scene(rel, &scene).unwrap();
+        let before = std::fs::read(project.entry_scene_path()).unwrap();
+        let err = run(
+            &project,
+            "component_upgrade_preview",
+            json!({"entity_id": id}),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CallError::Failed(reason) if reason.contains("丢数据")));
+        assert_eq!(std::fs::read(project.entry_scene_path()).unwrap(), before);
+        cleanup(&project);
     }
 
     /// 坏 RON：报错且**一个字节都不落盘**（先解析后写的契约）。
