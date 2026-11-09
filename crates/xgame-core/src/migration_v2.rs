@@ -183,12 +183,16 @@ impl ProjectHandle {
         write_journal(&backup, &journal, true)?;
         for item in &rewrites {
             let path = self.path(&item.relative);
-            let current = std::fs::read(&path).map_err(|e| e.to_string());
-            let step = match current {
-                Ok(bytes) if bytes == item.original => fsx::write_atomic(&path, &item.upgraded),
-                Ok(_) => Err(std::io::Error::other("迁移前文件被外部修改")),
-                Err(e) => Err(std::io::Error::other(e)),
-            };
+            let step = self
+                .lock_component_file(&item.relative)
+                .map_err(|e| e.to_string())
+                .and_then(|_lock| {
+                    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                    if bytes != item.original {
+                        return Err("迁移前文件被外部修改".into());
+                    }
+                    fsx::write_atomic(&path, &item.upgraded).map_err(|e| e.to_string())
+                });
             if let Err(error) = step {
                 let recovery = self.restore_components_v2(&backup);
                 return Err(format!(
@@ -218,6 +222,23 @@ impl ProjectHandle {
             return Err("备份必须是本项目根目录下的组件迁移目录".into());
         }
         let mut journal = read_journal(&backup.join(JOURNAL))?;
+        let mut targets: Vec<String> = journal
+            .files
+            .iter()
+            .map(|relative| normalize_project_relative(relative).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        targets.sort();
+        if targets.iter().map(|path| path.to_ascii_lowercase()).collect::<BTreeSet<_>>().len()
+            != targets.len() {
+            return Err("迁移记录含重复文件路径，拒绝重复持锁".into());
+        }
+        let _locks: Vec<_> = targets
+            .iter()
+            .map(|relative| {
+                self.lock_component_file(relative)
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<_, _>>()?;
         let mut originals = Vec::new();
         for relative in &journal.files {
             let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;

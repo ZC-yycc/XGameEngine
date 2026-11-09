@@ -665,12 +665,22 @@ impl SceneV2 {
                 // 旧项与唯一的新项时才能判定为原组件改了字段。多项时宁可分配新 ID。
                 let kind = old_entry.data.kind();
                 if old_entry.identity.source_component_id.is_some()
-                    || !matches!(old_entry.data, ComponentData::Lua { .. } | ComponentData::Rust { .. })
-                    || unmatched.iter().filter(|item| item.data.kind() == kind).count() != 1
+                    || !matches!(
+                        old_entry.data,
+                        ComponentData::Lua { .. } | ComponentData::Rust { .. }
+                    )
+                    || unmatched
+                        .iter()
+                        .filter(|item| item.data.kind() == kind)
+                        .count()
+                        != 1
                 {
                     continue;
                 }
-                let mut candidates = pending.iter().enumerate().filter(|(_, entry)| entry.data.kind() == kind);
+                let mut candidates = pending
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.data.kind() == kind);
                 if let (Some((index, _)), None) = (candidates.next(), candidates.next()) {
                     renamed[index] = Some(old_entry.identity);
                 }

@@ -379,8 +379,8 @@ pub fn resolve_read_path(
 
 /// 新建项目时写下的 `.gitignore`。
 ///
-/// 三条都是**本引擎产生的东西**：`Build/`（编辑器 Build 按钮）、
-/// `Plugins/`（Rust 插件编译产物）、`.autosave/`（崩溃恢复副本）。
+/// 这些都是**本引擎产生的东西**：`Build/`（编辑器 Build 按钮）、
+/// `Plugins/`（Rust 插件编译产物）、`.autosave/`（崩溃恢复副本）及锁文件。
 /// 让用户第一次 `git add .` 就把它们提交进去，之后每次 Play / 自动保存都是
 /// 一次无意义的二进制或整文件 diff —— 这个坑越早堵越好。
 pub const DEFAULT_GITIGNORE: &str = "\
@@ -392,6 +392,9 @@ Plugins/
 
 # 自动保存副本（编辑器崩溃恢复用，属于本机现场，不入库）
 .autosave/
+
+# 组件文件写入的跨进程锁（句柄退出即释放，留盘文件不是场景内容）
+.xgame-component-locks/
 
 # 存档（玩家进度：本机玩出来的数据，不是关卡内容；要联机共享就手动提交）
 Saves/
@@ -764,6 +767,42 @@ pub struct ProjectHandle {
 }
 
 impl ProjectHandle {
+    /// 每个组件文件一把跨进程锁。锁文件留在内容目录外；退出时 OS 释放句柄，
+    /// 再次打开同一锁文件即可继续使用，不依赖删除残留文件判断是否上锁。
+    pub(crate) fn lock_component_file(
+        &self,
+        relative: &str,
+    ) -> Result<std::fs::File, ProjectError> {
+        let relative =
+            normalize_project_relative(relative).map_err(|reason| ProjectError::InvalidPath {
+                relative: relative.to_owned(),
+                reason: reason.to_string(),
+            })?;
+        let path = self
+            .root
+            .join(".xgame-component-locks")
+            .join(format!("{relative}.lock"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| ProjectError::Write {
+                path: path.clone(),
+                source,
+            })?;
+        file.lock()
+            .map_err(|source| ProjectError::Write { path, source })?;
+        Ok(file)
+    }
+
     /// 打开磁盘上已有的项目目录。
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ProjectError> {
         let root = absolute(root.as_ref());
@@ -1205,6 +1244,7 @@ impl ProjectHandle {
                 reason: e.to_string(),
             })?;
         let path = self.path(&relative);
+        let _lock = self.lock_component_file(&relative)?;
         guard_v2_write(&path, crate::scene_v2::PrefabV2::from_ron)?;
         prefab.to_ron().map_err(|reason| ProjectError::InvalidV2 {
             path: path.clone(),
@@ -1249,6 +1289,7 @@ impl ProjectHandle {
                 relative: relative.to_owned(),
                 reason: defect.to_string(),
             })?;
+        let _lock = self.lock_component_file(&relative)?;
         guard_v1_write(&self.path(&relative), prefab.format_version)?;
         let encoded = {
             let mut assets = self.assets();
@@ -1370,7 +1411,9 @@ impl ProjectHandle {
     /// 返回"是否真的改了"。只替换**完整的带引号字面量** —— `"Resources/Box.glb"`
     /// 不会误伤 `"Resources/Box.glb.bak"`（后者不包含前者的收尾引号）。
     fn rewrite_references_in_place(&self, relative: &str, is_prefab: bool) -> Result<bool, String> {
-        let path = self.path(relative);
+        let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
+        let _lock = self.lock_component_file(&relative).map_err(|e| e.to_string())?;
+        let path = self.path(&relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {e}", path.display()))?;
 
@@ -1387,7 +1430,7 @@ impl ProjectHandle {
             collect_entity_references(&scene.entities, &mut references);
         }
 
-        self.rewrite_literals(relative, text, references)
+        self.rewrite_literals(&relative, text, references)
     }
 
     /// 就地改写一份材质文件里的 `albedo` 路径（同样只替换完整字面量）。
@@ -1502,7 +1545,7 @@ impl ProjectHandle {
     }
 
     /// 给 Agent 的前置版本门禁：expected 必须是本次读到的磁盘原文。
-    /// 比较与原子替换之间仍有跨进程竞态；编辑器 v2 会话保护需单独完成。
+    /// 同一文件的比较与原子替换由项目内文件锁串行；不经过该边界写盘的程序不受约束。
     pub fn write_scene_v2_if_unchanged(
         &self,
         relative: &str,
@@ -1524,6 +1567,7 @@ impl ProjectHandle {
                 reason,
             })?;
         let path = self.path(&relative);
+        let _lock = self.lock_component_file(&relative)?;
         guard_v2_write(&path, crate::scene_v2::SceneV2::from_ron)?;
         if let Some(expected) = expected {
             guard_expected_bytes(&path, expected)?;
@@ -1682,6 +1726,7 @@ impl ProjectHandle {
                 reason,
             })?;
         let path = self.path(&relative);
+        let _lock = self.lock_component_file(&relative)?;
         let text = self.scene_text(scene, &path)?;
         if unchanged_on_disk(&path, &text) {
             return Ok(());
@@ -2674,6 +2719,66 @@ mod tests {
         (base, handle)
     }
 
+    #[test]
+    fn v2_scene_write_respects_another_handle_lock() {
+        let (base, project) = temp_project("v2_write_lock");
+        let relative = "Scenes/Locked.ron";
+        let scene =
+            crate::scene_v2::SceneV2::from_v1_plain(&project.load_entry_scene().unwrap()).unwrap();
+        project.write_scene_v2(relative, &scene).unwrap();
+        let expected = std::fs::read(project.path(relative)).unwrap();
+        let guard = project.lock_component_file(relative).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = project.clone();
+        let task = std::thread::spawn(move || {
+            let mut changed = scene;
+            changed.name = "Changed".into();
+            tx.send(writer.write_scene_v2_if_unchanged(relative, &changed, &expected))
+                .unwrap();
+        });
+        assert!(
+            matches!(
+                rx.recv_timeout(std::time::Duration::from_millis(200)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "持锁期间另一份句柄不能完成写入"
+        );
+        drop(guard);
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        task.join().unwrap();
+        assert_eq!(project.load_scene_v2(relative).unwrap().name, "Changed");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_concurrent_writers_with_same_revision_commit_once() {
+        let (base, project) = temp_project("v2_write_conflict");
+        let relative = "Scenes/Locked.ron";
+        let scene =
+            crate::scene_v2::SceneV2::from_v1_plain(&project.load_entry_scene().unwrap()).unwrap();
+        project.write_scene_v2(relative, &scene).unwrap();
+        let expected = std::fs::read(project.path(relative)).unwrap();
+        let handles: Vec<_> = ["First", "Second"]
+            .into_iter()
+            .map(|name| {
+                let project = project.clone();
+                let expected = expected.clone();
+                let mut changed = scene.clone();
+                changed.name = name.into();
+                std::thread::spawn(move || {
+                    project.write_scene_v2_if_unchanged(relative, &changed, &expected)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|task| task.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert_ne!(project.load_scene_v2(relative).unwrap().name, scene.name);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     /// 保存场景必须把资产引用写成 GUID —— 这是"磁盘存 GUID"的第一条判据。
     ///
     /// 旧实现（路径引用）下这条必然红：文件里会是 `Resources/Box.glb`。
@@ -2711,7 +2816,7 @@ mod tests {
 
     // -- 自动保存（崩溃恢复的数据面）--------------------------------------
 
-    /// 新建项目自带 `.gitignore`，且覆盖引擎自己的三个产物目录。
+    /// 新建项目自带 `.gitignore`，且覆盖引擎自己的产物目录与锁文件。
     ///
     /// 旧实现（不写 `.gitignore`）下这条必红。漏掉的后果是用户第一次
     /// `git add .` 就把 `Plugins/` 的 DLL 和 `.autosave/` 的副本一起提交进去。
@@ -2725,7 +2830,7 @@ mod tests {
         let handle = ProjectHandle::create(&base, "IgnoreMe").expect("create");
         let text = std::fs::read_to_string(handle.root().join(".gitignore"))
             .expect("新建项目应当带 .gitignore");
-        for needle in ["Build/", "Plugins/", AUTOSAVE_DIR] {
+        for needle in ["Build/", "Plugins/", AUTOSAVE_DIR, ".xgame-component-locks/"] {
             assert!(
                 text.contains(needle),
                 ".gitignore 应当忽略 {needle}，实际：\n{text}"

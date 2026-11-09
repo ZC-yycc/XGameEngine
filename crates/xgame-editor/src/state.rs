@@ -1148,15 +1148,23 @@ struct V2EditorSession {
     disk_bytes: Vec<u8>,
 }
 
-fn v2_session_after_write(project: &ProjectHandle, relative: &str, identity: SceneV2) -> Result<V2EditorSession, String> {
+fn v2_session_after_write(
+    project: &ProjectHandle,
+    relative: &str,
+    identity: SceneV2,
+) -> Result<V2EditorSession, String> {
     let path = project.path(relative);
     let disk_bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let on_disk = project.load_scene_v2(relative)?;
     if on_disk.to_ron()? != identity.to_ron()?
-        || disk_bytes != std::fs::read(&path).map_err(|e| e.to_string())? {
+        || disk_bytes != std::fs::read(&path).map_err(|e| e.to_string())?
+    {
         return Err("写入场景期间出现外部改动；请重新读取磁盘文件".into());
     }
-    Ok(V2EditorSession { identity, disk_bytes })
+    Ok(V2EditorSession {
+        identity,
+        disk_bytes,
+    })
 }
 
 fn editor_scene(
@@ -2333,7 +2341,13 @@ impl EditorState {
         if root >= self.scene.entities.len() {
             return None;
         }
-        if self.v2_session.is_some() && self.scene.subtree(root).iter().any(|&index| self.scene.entities[index].prefab.is_some()) {
+        if self.v2_session.is_some()
+            && self
+                .scene
+                .subtree(root)
+                .iter()
+                .any(|&index| self.scene.entities[index].prefab.is_some())
+        {
             self.log_warning("v2 预制体实例不能直接转换为另一份预制体；请先解除来源关联");
             return None;
         }
@@ -2346,12 +2360,17 @@ impl EditorState {
         };
         let relative = self.project.prefab_path_for(&display);
         if self.v2_session.is_some() && self.project.path(&relative).exists() {
-            self.log_error(format!("创建预制体失败: {relative} 已存在，不能覆盖既有组件来源 ID"));
+            self.log_error(format!(
+                "创建预制体失败: {relative} 已存在，不能覆盖既有组件来源 ID"
+            ));
             return None;
         }
         if let Some(session) = &self.v2_session {
-            if std::fs::read(self.project.path(&self.current_scene)).ok().as_deref()
-                != Some(session.disk_bytes.as_slice()) {
+            if std::fs::read(self.project.path(&self.current_scene))
+                .ok()
+                .as_deref()
+                != Some(session.disk_bytes.as_slice())
+            {
                 self.log_error("场景已在外部修改；请重新打开后再创建预制体");
                 return None;
             }
@@ -3689,10 +3708,14 @@ impl EditorState {
             return Err(message);
         }
 
-        let next_session = v2_copy.map(|identity| v2_session_after_write(&self.project, &relative, identity)).transpose()?;
+        let next_session = v2_copy
+            .map(|identity| v2_session_after_write(&self.project, &relative, identity))
+            .transpose()?;
         self.scene = scene;
         self.current_scene = relative.clone();
-        if let Some(session) = next_session { self.v2_session = Some(session); }
+        if let Some(session) = next_session {
+            self.v2_session = Some(session);
+        }
         self.mark_saved();
         self.log_success(format!(
             "已另存为 → {}（启动场景仍是 {}）",
@@ -4075,9 +4098,22 @@ mod tests {
         editor.save_scene().unwrap();
         let saved = project.load_scene_v2(&entry).unwrap();
         assert_eq!(saved.entities[0].transform_identity.id, id);
-        assert_eq!(saved.entities[0].components.entries[0].identity.id, camera_id);
-        assert_eq!(saved.entities[0].components.entries[0].identity.source_component_id,
-            Some(project.load_prefab_v2(&path).unwrap().entities[0].components.entries[0].identity.id));
+        assert_eq!(
+            saved.entities[0].components.entries[0].identity.id,
+            camera_id
+        );
+        assert_eq!(
+            saved.entities[0].components.entries[0]
+                .identity
+                .source_component_id,
+            Some(
+                project.load_prefab_v2(&path).unwrap().entities[0]
+                    .components
+                    .entries[0]
+                    .identity
+                    .id
+            )
+        );
         assert_eq!(
             saved.entities[0].transform_identity.source_component_id,
             Some(

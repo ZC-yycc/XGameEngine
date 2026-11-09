@@ -14,10 +14,10 @@
 //!
 //! 编辑器每秒轮询内容目录：脚本 / 资产 / `.meta` 的外部改动会自动热重载，
 //! 但**场景文件不会自动重载**（否则会冲掉未保存的编辑）。反过来，编辑器里
-//! 未保存的场景改动也不感知外部写入 —— 谁后保存谁覆盖。约定：**同一时刻只让
-//! 一边写同一个场景**（要么纯 MCP 改，要么纯编辑器改），该警告也写进了工具
-//! 描述里。资产移动后，编辑器里已打开的场景内存中仍是旧路径，需要重新打开
-//! 该场景再保存。
+//! v1 编辑器未保存的场景改动也不感知外部写入 —— 谁后保存谁覆盖；v2 会话
+//! 保存前会核对原文件，发现外部改动就保留草稿并拒绝覆盖。同一文件的写入
+//! 边界使用跨进程锁串行；资产移动后，编辑器里已打开的场景内存中仍是旧路径，
+//! 需要重新打开该场景再保存。
 //!
 //! # 路径安全
 //!
@@ -90,7 +90,7 @@ pub fn schemas() -> Vec<Value> {
         "type": "string",
         "description": "项目内相对场景路径（如 Scenes/scene.ron；缺 .ron 会自动补全）；缺省 = 清单里的入口场景。绝对路径与 `..` 会被拒绝",
     });
-    let write_caveat = "注意：编辑器每秒轮询内容目录，资产 / 脚本 / `.meta` 的外部改动会自动热重载，但**场景文件不会自动重载**（防冲掉未保存的编辑）。同一时刻只应有一边在写同一个场景：编辑器里未保存的改动之后会覆盖本工具的写入。";
+    let write_caveat = "注意：编辑器不自动重载场景文件。v1 编辑器的未保存改动可能在此工具之后覆盖文件；v2 会话保存前会核对原文，遇外部修改会拒绝写入并保留草稿。";
 
     vec![
         json!({
@@ -162,7 +162,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "component_v2_edit",
-            "description": format!("按场景 / 实体 ID / 组件 ID 定位并只改一条 v2 组件。必须先读 entity_components_v2_read，带回 revision；原文件有改动就拒绝覆盖。action=patch 时 field 用 JSON Pointer 指向组件值中的已有字段（如 /model），value 为该字段 JSON 值；action=replace/add 用 data_ron（schema_read 的 ComponentData 变体 RON）；action=remove 删除；action=move 用 to_index（不含 Transform 的 0 起位置）。Transform 只允许 patch。写前严格解码和场景语义体检。前置字节比较和原子替换之间尚无跨进程锁；编辑器 v2 会话仍未接通。{write_caveat}"),
+            "description": format!("按场景 / 实体 ID / 组件 ID 定位并只改一条 v2 组件。必须先读 entity_components_v2_read，带回 revision；原文件有改动就拒绝覆盖。action=patch 时 field 用 JSON Pointer 指向组件值中的已有字段（如 /model），value 为该字段 JSON 值；action=replace/add 用 data_ron（schema_read 的 ComponentData 变体 RON）；action=remove 删除；action=move 用 to_index（不含 Transform 的 0 起位置）。Transform 只允许 patch。写前严格解码和场景语义体检。同一文件的前置字节比较和原子替换由跨进程锁串行；预制体与场景之间仍无跨文件事务。{write_caveat}"),
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop, "scene": scene_prop,

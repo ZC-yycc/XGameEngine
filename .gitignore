@@ -33,6 +33,7 @@ projects/*/Plugins/
 # 冒出一堆与内容无关的整文件差异；而且一旦入库，下次别人打开项目就会被问
 # "要不要恢复一台他不认识的机器上的现场"。
 projects/*/.autosave/
+projects/*/.xgame-component-locks/
 /.workbuddy
 
 # 本地测试、截图与发布验收产物；已跟踪的历史截图继续保留。
