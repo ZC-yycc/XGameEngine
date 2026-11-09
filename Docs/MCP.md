@@ -94,7 +94,8 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 - **闭环用法**：`schema_read` 拿字段契约 → `scene_read` 看现状 → `scene_write` /
   `entity_upsert` 改 → `project_check` / `run_headless` 验证。
   这组 MCP 修改工具仍只操作 v1；v2 的根和字段目前供格式查阅，不能据此使用
-  `scene_write` 或 `project_check` 操作 v2。
+  `scene_write` 操作 v2。`project_check` 已能只读检查非入口 v2 场景和预制体，
+  但会明确报告运行时尚不支持 v2；v2 入口场景仍按启动失败处理。
 
 ### 2. `project_info`
 

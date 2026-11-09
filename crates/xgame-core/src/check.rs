@@ -28,6 +28,44 @@ use std::path::Path;
 use crate::asset::is_guid_reference;
 use crate::project::ProjectHandle;
 
+/// 检查器按磁盘版本读文件；v2 的只读值适配不能反向用于保存，否则会丢组件身份。
+fn checked_version(project: &ProjectHandle, relative: &str) -> Result<Option<u32>, String> {
+    let relative =
+        crate::project::normalize_project_relative(relative).map_err(|e| e.to_string())?;
+    crate::file_format::disk_version(&project.path(&relative))
+        .map_err(|e| format!("无法读取 '{relative}': {e}"))
+}
+
+fn load_scene_for_check(project: &ProjectHandle, relative: &str) -> Result<crate::Scene, String> {
+    if checked_version(project, relative)? == Some(2) {
+        project.load_scene_v2(relative)?.to_v1()
+    } else {
+        project.load_scene(relative)
+    }
+}
+
+fn load_prefab_for_check(
+    project: &ProjectHandle,
+    relative: &str,
+) -> Result<crate::prefab::Prefab, String> {
+    if checked_version(project, relative)? == Some(2) {
+        project.load_prefab_v2(relative)?.to_v1()
+    } else {
+        project.load_prefab(relative)
+    }
+}
+
+fn note_v2_scene(project: &ProjectHandle, relative: &str, report: &mut CheckReport) {
+    if checked_version(project, relative) == Ok(Some(2))
+        && !report
+            .unsupported_runtime_files
+            .iter()
+            .any(|p| p == relative)
+    {
+        report.unsupported_runtime_files.push(relative.to_owned());
+    }
+}
+
 /// 检查结果：能加载到什么程度、有哪些可疑引用。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CheckReport {
@@ -75,6 +113,8 @@ pub struct CheckReport {
     /// 入口场景坏掉是 `Err`（启动契约断了）；其余关卡坏掉只算问题：多场景
     /// 项目里一张关卡写坏，不该让整条检查命令失去"其他关卡怎么样"的视野。
     pub invalid_scenes: Vec<String>,
+    /// 格式可检查但当前游戏 / 编辑器宿主无法加载的 v2 文件。
+    pub unsupported_runtime_files: Vec<String>,
     /// `.meta` 还在但资产文件没了的（孤儿）。
     pub orphan_metas: Vec<String>,
     /// 解析失败的 `.meta`。
@@ -163,6 +203,7 @@ impl CheckReport {
             || !self.invalid_prefabs.is_empty()
             || !self.dangling_guids.is_empty()
             || !self.invalid_scenes.is_empty()
+            || !self.unsupported_runtime_files.is_empty()
             || !self.missing_metas.is_empty()
             || !self.orphan_metas.is_empty()
             || !self.invalid_metas.is_empty()
@@ -189,6 +230,7 @@ impl CheckReport {
             + self.invalid_prefabs.len()
             + self.dangling_guids.len()
             + self.invalid_scenes.len()
+            + self.unsupported_runtime_files.len()
             + self.missing_metas.len()
             + self.orphan_metas.len()
             + self.invalid_metas.len()
@@ -296,6 +338,9 @@ impl CheckReport {
         for s in &self.invalid_scenes {
             let _ = writeln!(out, "  invalid scene:  {s}");
         }
+        for file in &self.unsupported_runtime_files {
+            let _ = writeln!(out, "  runtime unsupported: {file}");
+        }
         for m in &self.missing_metas {
             let _ = writeln!(out, "  missing .meta:  {m}");
         }
@@ -391,7 +436,8 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
             if loaded.iter().any(|key| key == relative) {
                 continue;
             }
-            match project.load_scene(relative) {
+            note_v2_scene(&project, relative, &mut report);
+            match load_scene_for_check(&project, relative) {
                 Ok(scene) => {
                     loaded.push(relative.clone());
                     scenes.push((relative.clone(), scene));
@@ -414,7 +460,8 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
         if loaded.iter().any(|seen| seen == &key) {
             continue;
         }
-        match project.load_scene(&relative) {
+        note_v2_scene(&project, &relative, &mut report);
+        match load_scene_for_check(&project, &relative) {
             Ok(scene) => {
                 loaded.push(key);
                 scenes.push((relative, scene));
@@ -598,7 +645,15 @@ fn check_prefab_contents(
     invalid_prefabs: &mut BTreeMap<String, String>,
     pending_prefabs: &mut BTreeSet<String>,
 ) {
-    match project.prefab_duplicate_ids(relative) {
+    let duplicate_check = match checked_version(project, relative) {
+        Ok(Some(2)) => {
+            report.unsupported_runtime_files.push(relative.to_owned());
+            Ok(Vec::new()) // v2 解码本身拒绝重复实体 ID。
+        }
+        Ok(_) => project.prefab_duplicate_ids(relative),
+        Err(e) => Err(e),
+    };
+    match duplicate_check {
         Ok(duplicates) => {
             for (id, count) in duplicates {
                 report
@@ -612,7 +667,7 @@ fn check_prefab_contents(
         }
     }
     // 预制体的资产引用可能只在实例化时才用到，甚至当前没有任何场景实例。
-    match project.load_prefab(relative) {
+    match load_prefab_for_check(project, relative) {
         Ok(prefab) => {
             for defect in crate::validate::entity_defects(&prefab.entities) {
                 if !defect.kind.is_reported_elsewhere() {
@@ -858,7 +913,7 @@ fn check_entity_references(
                 let known = prefab_ids
                     .entry(link.source.clone())
                     .or_insert_with(|| {
-                        match project.load_prefab(&link.source) {
+                        match load_prefab_for_check(project, &link.source) {
                             Ok(prefab) => Some(prefab.entities.iter().map(|e| e.id).collect()),
                             Err(error) => {
                                 // 原有缺文件 / 越界路径诊断不重复报；文件在而内容坏了
@@ -923,6 +978,97 @@ mod tests {
         assert!(!report.has_issues(), "{}", report.render());
         assert_eq!(report.scenes, 1, "默认项目只有入口场景");
         assert!(report.entities >= 1, "默认场景至少有一个实体");
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    #[test]
+    fn v2_non_entry_scene_and_unused_prefab_are_checked_without_writes() {
+        use crate::scene_v2::{PrefabV2, SceneV2};
+        let project = temp_project("v2_refs");
+        let mut scene = crate::Scene::new("Second");
+        scene.add_entity(crate::Entity::new("Scripted").with_script("Scripts/Missing.lua"));
+        let scene_path = "Scenes/Second.ron";
+        project
+            .write_scene_v2(scene_path, &SceneV2::from_v1_plain(&scene).unwrap())
+            .unwrap();
+        let mut prefab = crate::prefab::Prefab::new("Unused");
+        prefab
+            .entities
+            .push(crate::Entity::new("Model").with_model("Resources/Missing.glb"));
+        let prefab_path = "Prefabs/Unused.prefab.ron";
+        project
+            .write_prefab_v2(prefab_path, &PrefabV2::from_v1(&prefab).unwrap())
+            .unwrap();
+        let before_scene = std::fs::read(project.path(scene_path)).unwrap();
+        let before_prefab = std::fs::read(project.path(prefab_path)).unwrap();
+        let report = check_project(project.root()).unwrap();
+        assert_eq!(report.scenes, 2, "{}", report.render());
+        assert!(report.invalid_scenes.is_empty(), "{}", report.render());
+        assert!(report.invalid_prefabs.is_empty(), "{}", report.render());
+        assert_eq!(report.unsupported_runtime_files, [scene_path, prefab_path]);
+        assert!(report.has_issues(), "运行时尚不能加载 v2，检查不能虚报 OK");
+        assert_eq!(
+            report.missing_scripts,
+            ["Scenes/Second.ron: Scripted -> Scripts/Missing.lua"]
+        );
+        assert_eq!(
+            report.missing_models,
+            ["Prefabs/Unused.prefab.ron: Model -> Resources/Missing.glb"]
+        );
+        assert_eq!(
+            std::fs::read(project.path(scene_path)).unwrap(),
+            before_scene
+        );
+        assert_eq!(
+            std::fs::read(project.path(prefab_path)).unwrap(),
+            before_prefab
+        );
+        let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    #[test]
+    fn v2_scene_with_broken_component_source_is_reported_without_repair() {
+        use crate::scene_v2::{PrefabV2, SceneV2};
+        let project = temp_project("v2_source");
+        let relative = "Prefabs/Actor.prefab.ron";
+        let mut prefab = crate::prefab::Prefab::new("Actor");
+        prefab
+            .entities
+            .push(crate::Entity::new("Actor").with_model("builtin://cube"));
+        let instance = prefab.instantiate(relative).remove(0);
+        project
+            .write_prefab_v2(relative, &PrefabV2::from_v1(&prefab).unwrap())
+            .unwrap();
+        let mut scene = crate::Scene::new("Second");
+        scene.add_entity(instance);
+        let scene_path = "Scenes/Second.ron";
+        let mut v2 = SceneV2::from_v1_with_prefabs(
+            &scene,
+            &[(relative.to_owned(), PrefabV2::from_v1(&prefab).unwrap())]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        v2.entities[0].components.entries[0]
+            .identity
+            .source_component_id = Some(crate::component_id::ComponentId::from_raw(99).unwrap());
+        let original = v2.to_ron().unwrap();
+        std::fs::write(project.path(scene_path), &original).unwrap();
+        let report = check_project(project.root()).unwrap();
+        assert_eq!(report.invalid_scenes.len(), 1, "{}", report.render());
+        assert!(
+            report.invalid_scenes[0].contains("来源 ID"),
+            "{}",
+            report.render()
+        );
+        assert!(report.invalid_prefabs.is_empty(), "{}", report.render());
+        assert!(report
+            .unsupported_runtime_files
+            .contains(&scene_path.to_owned()));
+        assert_eq!(
+            std::fs::read_to_string(project.path(scene_path)).unwrap(),
+            original
+        );
         let _ = std::fs::remove_dir_all(project.root());
     }
 
