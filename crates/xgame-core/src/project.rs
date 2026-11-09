@@ -1771,7 +1771,7 @@ impl ProjectHandle {
 // ---------------------------------------------------------------------------
 
 /// v1 普通读取保持宽容；只有不可逆的格式升级必须点名被忽略的字段。
-fn parse_v1_upgrade_text<T: serde::de::DeserializeOwned>(
+pub(crate) fn parse_v1_upgrade_text<T: serde::de::DeserializeOwned>(
     text: &str,
     relative: &str,
 ) -> Result<T, String> {

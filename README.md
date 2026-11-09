@@ -35,6 +35,12 @@ cargo run -p xgame-editor -- --export-script-api --out script_api.json
 # （幂等；只替换引用字面量，不动注释与排版）
 cargo run -p xgame-editor -- --migrate-assets projects/MyOldGame
 
+# 显式将场景与预制体文件升级为 v2 组件格式；先预检全部目标，成功后打印备份目录
+cargo run -p xgame-editor -- --migrate-components projects/MyOldGame
+
+# 恢复上一步打印的备份目录（将末尾的示例编号换成输出的真实路径）
+cargo run -p xgame-editor -- --restore-components projects/MyOldGame projects/MyOldGame/.xgame-component-v2-1234-5678
+
 # 无头运行 —— 不开窗口跑 N 帧，stdout 出 JSON 统计（帧耗时 / 实体 / 脚本日志）
 # （退出码 0=干净 · 1=加载失败 · 2=跑完有问题；见 Docs/无头运行.md）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
@@ -49,6 +55,9 @@ cargo run -p xgame-mcp
 # 一键构建可分发软件包（等价于双击根目录的「一键构建.cmd」）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
+
+组件 v2 文件当前用于格式迁移和检查验证；编辑器与独立游戏还不能加载 v2 入口
+场景，执行组件迁移后先用备份恢复，或等待运行时和编辑器接通后再用于项目制作。
 
 ## 发布包组合验收（Windows）
 

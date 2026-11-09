@@ -1577,6 +1577,58 @@ fn main() -> Result<(), eframe::Error> {
                     }
                 }
             }
+            Some("--migrate-components") => {
+                let code = if args.len() != 2 {
+                    eprintln!("usage: xgame-editor --migrate-components <project>");
+                    1
+                } else {
+                    match xgame_core::ProjectHandle::open(Path::new(&args[1])) {
+                        Ok(project) => match project.migrate_components_v2() {
+                            Ok(report) => {
+                                println!(
+                                    "migrated {} file(s); backup: {}",
+                                    report.files.len(),
+                                    report.backup.display()
+                                );
+                                0
+                            }
+                            Err(error) => {
+                                eprintln!("component migration FAILED: {error}");
+                                1
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!("component migration FAILED: {error}");
+                            1
+                        }
+                    }
+                };
+                std::process::exit(code);
+            }
+            Some("--restore-components") => {
+                let code = if args.len() != 3 {
+                    eprintln!("usage: xgame-editor --restore-components <project> <backup-dir>");
+                    1
+                } else {
+                    match xgame_core::ProjectHandle::open(Path::new(&args[1])) {
+                        Ok(project) => match project.restore_components_v2(Path::new(&args[2])) {
+                            Ok(()) => {
+                                println!("component files restored from {}", args[2]);
+                                0
+                            }
+                            Err(error) => {
+                                eprintln!("component restore FAILED: {error}");
+                                1
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!("component restore FAILED: {error}");
+                            1
+                        }
+                    }
+                };
+                std::process::exit(code);
+            }
             Some("--headless") => {
                 let rest = &args[1..];
                 // `--help` 在这里截住：`parse_args` 只认真正的选项，帮助文案

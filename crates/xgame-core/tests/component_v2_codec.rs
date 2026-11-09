@@ -487,6 +487,129 @@ fn project_upgrade_preview_rejects_repeated_v1_map_keys() {
 }
 
 #[test]
+fn explicit_project_upgrade_backs_up_originals_and_can_restore_them() {
+    let base = std::env::temp_dir().join(format!("xgame-v2-migration-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let prefab_path = project.prefab_path_for("Actor");
+    let mut prefab = Prefab::new("Actor");
+    prefab
+        .entities
+        .push(Entity::new("Actor").with_model("builtin://cube"));
+    project.write_prefab(&prefab_path, &prefab).unwrap();
+    let mut scene = project.load_entry_scene().unwrap();
+    scene.add_entity(prefab.instantiate(&prefab_path).remove(0));
+    let scene_path = project.manifest().entry_scene.clone();
+    project.write_scene(&scene_path, &scene).unwrap();
+    let old_scene = std::fs::read(project.path(&scene_path)).unwrap();
+    let old_prefab = std::fs::read(project.path(&prefab_path)).unwrap();
+
+    let result = project.migrate_components_v2().unwrap();
+    assert!(result.files.contains(&scene_path));
+    assert!(result.files.contains(&prefab_path));
+    assert_eq!(
+        std::fs::read(project.path(&scene_path)).unwrap(),
+        std::fs::read(result.backup.join("upgraded").join(&scene_path)).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(result.backup.join("original").join(&scene_path)).unwrap(),
+        old_scene
+    );
+    assert_eq!(
+        std::fs::read(result.backup.join("original").join(&prefab_path)).unwrap(),
+        old_prefab
+    );
+    let upgraded = project.load_scene_v2(&scene_path).unwrap();
+    assert_eq!(upgraded.entities.len(), scene.entities.len());
+    assert!(upgraded.entities.last().unwrap().components.entries[0]
+        .identity
+        .source_component_id
+        .is_some());
+    assert!(project.load_prefab_v2(&prefab_path).is_ok());
+
+    project.restore_components_v2(&result.backup).unwrap();
+    assert_eq!(std::fs::read(project.path(&scene_path)).unwrap(), old_scene);
+    assert_eq!(
+        std::fs::read(project.path(&prefab_path)).unwrap(),
+        old_prefab
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn v2_upgrade_preflight_leaves_all_files_alone_if_one_cannot_convert() {
+    let base =
+        std::env::temp_dir().join(format!("xgame-v2-migration-reject-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let scene_path = project.manifest().entry_scene.clone();
+    let original = std::fs::read(project.path(&scene_path)).unwrap();
+    let broken_path = project.path("Scenes/Broken.ron");
+    std::fs::write(&broken_path, "(format_version: 3)").unwrap();
+    assert!(project.migrate_components_v2().is_err());
+    assert_eq!(std::fs::read(project.path(&scene_path)).unwrap(), original);
+    assert_eq!(std::fs::read(broken_path).unwrap(), b"(format_version: 3)");
+    assert_eq!(project.list_scenes().len(), 2);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn migration_recovery_checks_every_file_before_restoring_any() {
+    let base = std::env::temp_dir().join(format!(
+        "xgame-v2-migration-recovery-{}",
+        std::process::id()
+    ));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let other = "Scenes/Extra.ron";
+    project.write_scene(other, &Scene::new("Extra")).unwrap();
+    let result = project.migrate_components_v2().unwrap();
+    let entry = project.manifest().entry_scene.clone();
+    let upgraded_entry = std::fs::read(project.path(&entry)).unwrap();
+    let upgraded_other = std::fs::read(project.path(other)).unwrap();
+    std::fs::write(project.path(other), b"external edit").unwrap();
+    assert!(project
+        .restore_components_v2(&result.backup)
+        .unwrap_err()
+        .contains("已被修改"));
+    assert_eq!(
+        std::fs::read(project.path(&entry)).unwrap(),
+        upgraded_entry,
+        "拒绝恢复须发生在第一份文件被写之前"
+    );
+    std::fs::write(project.path(other), upgraded_other).unwrap();
+    project.restore_components_v2(&result.backup).unwrap();
+    assert!(project.load_entry_scene().is_ok());
+    assert!(project.load_scene(other).is_ok());
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn interrupted_component_upgrade_blocks_new_upgrades_until_recovered() {
+    let base =
+        std::env::temp_dir().join(format!("xgame-v2-migration-pending-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let other = "Scenes/Extra.ron";
+    project.write_scene(other, &Scene::new("Extra")).unwrap();
+    let result = project.migrate_components_v2().unwrap();
+    let journal = result.backup.join("migration.ron");
+    let completed = std::fs::read_to_string(&journal).unwrap();
+    assert!(completed.contains("Complete"));
+    std::fs::write(&journal, completed.replace("Complete", "Pending")).unwrap();
+    let original = std::fs::read(result.backup.join("original").join(other)).unwrap();
+    std::fs::write(project.path(other), original).unwrap();
+    assert!(project
+        .migrate_components_v2()
+        .unwrap_err()
+        .contains("未恢复"));
+    project.restore_components_v2(&result.backup).unwrap();
+    assert!(project.load_entry_scene().is_ok());
+    assert!(project.load_scene(other).is_ok());
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn project_v2_write_preserves_ids_and_refuses_v1_overwrite() {
     let base = std::env::temp_dir().join(format!("xgame-v2-write-{}", std::process::id()));
     assert!(!base.exists());
