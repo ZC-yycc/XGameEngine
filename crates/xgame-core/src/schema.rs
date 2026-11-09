@@ -50,6 +50,9 @@ use crate::particle::{EmissionShape, ParticleBlend, ParticleEmitter};
 use crate::physics::{BodyKind, CollisionShape, PhysicsBody};
 use crate::prefab::{Prefab, PrefabInstanceRef};
 use crate::scene::{Entity, Scene};
+use crate::scene_v2::{
+    ComponentData, PrefabV2, RenderData, SceneV2, StrictAnimator, StrictFieldValues,
+};
 use crate::transform::Transform;
 use crate::ui::{UiAlign, UiElement, UiImageStyle, UiKind, UiStyle, UiTextStyle, UiVAlign};
 
@@ -231,6 +234,23 @@ pub fn scene_schema() -> SchemaDoc {
                 summary: "一份可复用实体子树；与场景同构，但没有 lights / ambient。".into(),
                 example_ron: pretty(&prefab_example()),
             },
+            RootSchema {
+                kind: "scene_v2".into(),
+                file_suffix: ".ron".into(),
+                root_type: "SceneV2".into(),
+                path_note: "项目内相对路径；必须显式 format_version: 2。".into(),
+                summary: "组件带稳定局部 ID 的场景；当前编辑器仍使用 v1，v2 仅有显式项目读写入口。"
+                    .into(),
+                example_ron: pretty(&scene_v2_example()),
+            },
+            RootSchema {
+                kind: "prefab_v2".into(),
+                file_suffix: ".prefab.ron".into(),
+                root_type: "PrefabV2".into(),
+                path_note: "项目内相对路径；必须显式 format_version: 2。".into(),
+                summary: "组件带稳定来源 ID 的预制体资产；实例另分配本地 ID。".into(),
+                example_ron: pretty(&prefab_v2_example()),
+            },
         ],
         conventions: conventions(),
         primitives: primitives(),
@@ -242,16 +262,18 @@ pub fn scene_schema() -> SchemaDoc {
 fn conventions() -> Vec<String> {
     vec![
         "文件是 RON 文本；根结构见 roots。路径一律是项目相对路径（正斜杠），不要写绝对路径。".into(),
-        "字段缺省值见类型的 default_ron 与字段的 default_ron；required=true 表示必须写。未知字段会被忽略（不报错），但拼错字段名等于没写。".into(),
+        "字段缺省值见类型的 default_ron 与字段的 default_ron；required=true 表示必须写。v1 的未知字段会被忽略；v2 遇到未知字段会拒绝读取。".into(),
         "Entity.id 是场景内稳定标识；parent 与 PrefabInstanceRef.source_id 都按它引用。省略 id 会分配新的进程内 ID（不可复现），手写场景必须显式给唯一 ID。".into(),
         "Transform 是局部空间（相对 parent）；旋转是四元数 (x, y, z, w)，不是欧拉角；矩阵语义是 T * R * S。".into(),
         "可选组件字段省略 = None（实体没有这个组件）；Vec / map 省略 = 空。没有 physics 的实体不参与物理，没有 camera 的实体不是相机。".into(),
-        "运行时字段永不落盘：Entity.components、UiElement.state、ParticleEmitter.burst。写进 RON 也会被忽略。".into(),
+        "v1 的 Entity.components 与 UI / 粒子运行时状态不落盘；v2 的 EntityV2.components 则是持久化组件集合。".into(),
         "颜色一律线性空间 RGB / RGBA，不是 sRGB；长度单位是米，角度单位是度（字段说明另有标注的除外）。".into(),
         "资产引用在磁盘文件里是 guid://<32 位十六进制>，内存 / MCP 里是项目相对路径；转换只发生在 ProjectHandle 读写边界，不要手工编 GUID。builtin:// 是程序化几何，不是资产。".into(),
         "scripts / behaviors 的列表顺序就是执行顺序；behavior_params 外层键是注册的 Rust 行为名，内层是 Inspect 字段名。".into(),
         "同一个场景内 id 必须唯一；parent 必须指向同一张场景 / 同一份预制体里存在的实体，且不能形成环。".into(),
         "预制体实例的实体带 prefab 字段，通常由引擎维护（Apply / Revert 靠它）；手写场景不要伪造，除非确实要接一个已有预制体。".into(),
+        "v2 必须显式写 format_version: 2；每个 EntityV2 的 ComponentSet 存唯一的强类型组件值和局部 ID。当前旧编辑器入口仍拒绝 v2 文件。".into(),
+        "v2 未识别字段或重复参数 Map 键会拒绝解码；v1 仍按原来的宽容方式读取。".into(),
     ]
 }
 
@@ -355,6 +377,10 @@ fn asset_references() -> Vec<AssetReferenceSchema> {
             "项目相对路径，例如 Resources/Textures/Wood.png",
             "空串 = 纯色（1×1 白色），不是保留模型贴图 —— 材质资产是一份完整材质。",
         ),
+        asset_ref("RenderData.model", "guid://<32 hex>", "项目相对模型路径或 builtin://", "v2 Render 模型；LOD 各级仍复用 LodGroup.levels[].model。"),
+        asset_ref("RenderData.material_asset", "guid://<32 hex>", "项目相对材质路径", "v2 Render 的可选共享材质。"),
+        asset_ref("ComponentData.Lua.path", "guid://<32 hex>", "项目相对 Lua 路径", "v2 Lua 组件的脚本资产。"),
+        asset_ref("EntityV2.prefab.source", "guid://<32 hex>", "项目相对预制体路径", "v2 实例的来源资产。"),
     ]
 }
 
@@ -386,6 +412,7 @@ fn types() -> Vec<TypeSchema> {
     types.extend(ui_types());
     types.extend(particle_types());
     types.extend(inspect_types());
+    types.extend(component_v2_types());
     types
 }
 
@@ -568,6 +595,105 @@ fn prefab_example() -> Prefab {
     let mut prefab = Prefab::new("Prefab");
     prefab.entities.push(entity_example());
     prefab
+}
+
+fn scene_v2_example() -> SceneV2 {
+    SceneV2::from_v1_plain(&scene_example()).expect("schema 示例必须是可转换的普通实体")
+}
+
+fn prefab_v2_example() -> PrefabV2 {
+    PrefabV2::from_v1(&prefab_example()).expect("schema 示例必须是可转换的预制体资产")
+}
+
+fn component_v2_types() -> Vec<TypeSchema> {
+    use crate::component_id::{ComponentId, ComponentIdSequence};
+    let entity = &scene_v2_example().entities[0];
+    let identity = entity.transform_identity;
+    let sample = &entity.components.entries[0];
+    let render = RenderData {
+        model: "builtin://cube".into(),
+        lod: LodGroup::default(),
+        material_asset: None,
+        morph_weights: Vec::new(),
+    };
+    vec![
+        struct_schema("SceneV2", "v2 场景文件；独立版本、实体与场景光照。", None,
+            Some(pretty(&scene_v2_example())), vec![
+                req("format_version", "u32", "必须写 2；单文件版本，不能当作项目全局版本。"),
+                req("name", "String", "场景名。"),
+                req("entities", "Vec<EntityV2>", "实体平铺列表；parent 指向本文件内的实体 ID。"),
+                req("lights", "Vec<Light>", "场景级灯光；v2 必须显式写入。"),
+                req("ambient", "[f32; 3]", "线性 RGB 环境光；v2 必须显式写入。"),
+            ], vec!["v2 对未知嵌套字段与重复组件 ID 拒绝解析；项目检查与编辑器尚未启用 v2。"]),
+        struct_schema("PrefabV2", "v2 预制体资产；实体与组件 ID 属于资产自身。", None,
+            Some(pretty(&prefab_v2_example())), vec![
+                req("format_version", "u32", "必须写 2。"),
+                req("name", "String", "预制体名。"),
+                req("entities", "Vec<EntityV2>", "预制体资产实体；不可携带实例来源引用。"),
+            ], vec!["实例的 source_id 指向资产实体 ID，source_component_id 指向资产组件 ID。"]),
+        struct_schema("EntityV2", "v2 实体；元数据与唯一组件数据列表。", None,
+            Some(pretty(entity)), vec![
+                req("id", "EntityId", "场景内实体 ID。"),
+                req("name", "String", "显示名。"),
+                req("parent", "Option<EntityId>", "父实体 ID；根写 None。"),
+                req("prefab", "Option<PrefabInstanceRef>", "实例的资产来源；普通实体写 None。"),
+                req("layer", "u8", "物理层索引。"),
+                req("transform", "Transform", "局部变换；存于实体元数据。"),
+                req("transform_identity", "ComponentIdentity", "不可移除的 Transform 组件身份。"),
+                req("components", "ComponentSet", "其余全部可保存组件的唯一所有者。"),
+            ], vec!["本地组件 ID 只在实体内唯一；v2 文件不再写 Entity.model、scripts、behaviors 等 v1 字段。"]),
+        struct_schema("ComponentSet", "按列表顺序显示、同类按相对顺序运行的组件集合。", None,
+            Some(pretty(&entity.components)), vec![
+                req("next_component_id", "ComponentIdSequence", "持久高水位；删除组件后不回退。"),
+                req("entries", "Vec<ComponentInstance>", "可删除的组件实例；Transform 单独存于实体元数据。"),
+            ], vec!["每条本地 ID 非零、唯一且小于 next_id。"]),
+        struct_schema("ComponentInstance", "组件身份 + 强类型值。", None,
+            Some(pretty(sample)), vec![
+                req("identity", "ComponentIdentity", "本地 ID 与可选预制体来源 ID。"),
+                req("data", "ComponentData", "独立类型值。"),
+            ], Vec::new()),
+        struct_schema("ComponentIdentity", "本地 ID 与预制体资产的对应组件 ID。", None,
+            Some(pretty(&identity)), vec![
+                req("id", "ComponentId", "实体内稳定的本地 ID。"),
+                opt("source_component_id", "ComponentId", "仅实例组件可有；指向来源资产，不等于本地 ID。"),
+            ], Vec::new()),
+        newtype_schema("ComponentId", "非零 u64 组件局部 ID。", None,
+            ron_text(&ComponentId::from_raw(1).unwrap()), vec!["0 和 u64::MAX 不合法；删除后不复用。"]),
+        struct_schema("ComponentIdSequence", "下一个可分配的组件 ID。", None,
+            Some(pretty(&ComponentIdSequence::from_next(2).unwrap())), vec![
+                req("next_id", "u64", "大于全部本地 ID；至少为 1。"),
+            ], Vec::new()),
+        enum_schema("ComponentData", "v2 强类型组件值；同名 Rust/Lua 多实例暂未支持。", None,
+            Some(ron_text(&ComponentData::Render(render.clone()))), vec![
+                newtype_variant("Render", "RenderData", &ron_text(&ComponentData::Render(render.clone())), "模型 / LOD / 材质资产 / 形变权重。"),
+                newtype_variant("Ui", "UiElement", &ron_text(&ComponentData::Ui(UiElement::default())), "屏幕 UI。"),
+                newtype_variant("Animator", "StrictAnimator", &ron_text(&ComponentData::Animator(StrictAnimator(Animator::default()))), "动画；v2 严格拒绝重复参数键。"),
+                newtype_variant("Physics", "PhysicsBody", &ron_text(&ComponentData::Physics(PhysicsBody::default())), "刚体。"),
+                newtype_variant("Character", "CharacterController", &ron_text(&ComponentData::Character(CharacterController::default())), "角色控制。"),
+                newtype_variant("Audio", "AudioSource", &ron_text(&ComponentData::Audio(AudioSource::default())), "音源。"),
+                newtype_variant("Camera", "Camera", &ron_text(&ComponentData::Camera(Camera::default())), "相机。"),
+                newtype_variant("Particle", "ParticleEmitter", &ron_text(&ComponentData::Particle(ParticleEmitter::default())), "粒子。"),
+                newtype_variant("MaterialOverride", "MaterialOverride", &ron_text(&ComponentData::MaterialOverride(MaterialOverride::default())), "逐实体材质覆盖。"),
+                struct_variant("Rust", &ron_text(&ComponentData::Rust { registered_name: "Health".into(), fields: None }), vec![
+                    req("registered_name", "String", "已注册的 Rust 行为名。"),
+                    req("fields", "Option<StrictFieldValues>", "None 与 Some(空表) 的 v1 语义不同。"),
+                ], "参数归本组件实例所有。"),
+                struct_variant("Lua", &ron_text(&ComponentData::Lua { path: "Scripts/player.lua".into() }), vec![
+                    req("path", "String", "Lua 脚本的项目相对路径。"),
+                ], "当前同一路径每实体只允许一份。"),
+            ], vec!["写入 v2 时只能使用现有运行时可表达的组件数量与参数语义。"]),
+        struct_schema("RenderData", "模型、LOD、材质资产与 morph 权重。", None,
+            Some(pretty(&render)), vec![
+                req("model", "String", "模型路径或 builtin://；有 LOD 时忽略。"),
+                req("lod", "LodGroup", "各级模型与绘制距离。"),
+                req("material_asset", "Option<String>", "共享材质资产；None 表示无。"),
+                req("morph_weights", "Vec<f32>", "形变目标权重。"),
+            ], Vec::new()),
+        newtype_schema("StrictFieldValues", "v2 严格参数表，RON 形态与 FieldValues 一致。", None,
+            ron_text(&StrictFieldValues(BTreeMap::new())), vec!["字段名重复即拒绝；字段值仍使用 FieldValue 的变体。"]),
+        newtype_schema("StrictAnimator", "v2 严格 Animator 解码，RON 形态与 Animator 一致。", None,
+            ron_text(&StrictAnimator(Animator::default())), vec!["基础与分层状态机的参数名重复即拒绝。"]),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -2072,6 +2198,18 @@ mod tests {
             "ParticleBlend",
             "FieldValue",
             "FieldValues",
+            "SceneV2",
+            "PrefabV2",
+            "EntityV2",
+            "ComponentSet",
+            "ComponentInstance",
+            "ComponentIdentity",
+            "ComponentId",
+            "ComponentIdSequence",
+            "ComponentData",
+            "RenderData",
+            "StrictFieldValues",
+            "StrictAnimator",
         ];
         let got: Vec<&str> = doc.types.iter().map(|ty| ty.name.as_str()).collect();
         assert_eq!(got, expected, "类型目录少了 / 多了 / 顺序变了");
@@ -2105,7 +2243,7 @@ mod tests {
     #[test]
     fn roots_and_asset_reference_contract_are_complete() {
         let doc = scene_schema();
-        assert_eq!(doc.roots.len(), 2);
+        assert_eq!(doc.roots.len(), 4);
         assert_eq!(doc.roots[0].kind, "scene");
         assert_eq!(doc.roots[0].root_type, "Scene");
         assert_eq!(doc.roots[0].file_suffix, ".ron");
@@ -2118,6 +2256,8 @@ mod tests {
         assert_eq!(scene.name, "Scene");
         let prefab: Prefab = parse(&doc.roots[1].example_ron);
         assert_eq!(prefab.name, "Prefab");
+        assert_eq!(doc.roots[2].kind, "scene_v2");
+        assert_eq!(doc.roots[3].kind, "prefab_v2");
 
         let fields: Vec<&str> = doc
             .asset_references
@@ -2135,6 +2275,10 @@ mod tests {
                 "Entity.prefab.source",
                 "UiImageStyle.path",
                 "MaterialAsset.albedo",
+                "RenderData.model",
+                "RenderData.material_asset",
+                "ComponentData.Lua.path",
+                "EntityV2.prefab.source",
             ],
             "资产引用表漏了字段，或顺序漂移"
         );
@@ -2153,6 +2297,119 @@ mod tests {
     }
 
     #[test]
+    fn v2_component_file_contract_is_discoverable_in_the_shared_schema() {
+        let doc = scene_schema();
+        let scene = doc
+            .roots
+            .iter()
+            .find(|root| root.root_type == "SceneV2")
+            .expect("v2 场景需要在唯一 schema 中可发现");
+        assert!(crate::scene_v2::SceneV2::from_ron(&scene.example_ron).is_ok());
+        let prefab = doc
+            .roots
+            .iter()
+            .find(|root| root.root_type == "PrefabV2")
+            .unwrap();
+        assert!(crate::scene_v2::PrefabV2::from_ron(&prefab.example_ron).is_ok());
+        for name in [
+            "SceneV2",
+            "PrefabV2",
+            "EntityV2",
+            "ComponentSet",
+            "ComponentInstance",
+            "ComponentIdentity",
+            "ComponentId",
+            "ComponentIdSequence",
+            "ComponentData",
+            "RenderData",
+            "StrictFieldValues",
+            "StrictAnimator",
+        ] {
+            assert!(doc.type_schema(name).is_some(), "缺少 v2 类型 {name}");
+        }
+        for variant in &doc.type_schema("ComponentData").unwrap().variants {
+            let data: crate::scene_v2::ComponentData = parse(&variant.example_ron);
+            let name = match data {
+                ComponentData::Render(_) => "Render",
+                ComponentData::Ui(_) => "Ui",
+                ComponentData::Animator(_) => "Animator",
+                ComponentData::Physics(_) => "Physics",
+                ComponentData::Character(_) => "Character",
+                ComponentData::Audio(_) => "Audio",
+                ComponentData::Camera(_) => "Camera",
+                ComponentData::Particle(_) => "Particle",
+                ComponentData::MaterialOverride(_) => "MaterialOverride",
+                ComponentData::Rust { .. } => "Rust",
+                ComponentData::Lua { .. } => "Lua",
+            };
+            assert_eq!(name, variant.name);
+        }
+        let entity = &scene_v2_example().entities[0];
+        assert_eq!(
+            ron::from_str::<crate::scene_v2::EntityV2>(&pretty(entity))
+                .unwrap()
+                .id,
+            entity.id
+        );
+        let _: crate::scene_v2::ComponentSet = parse(
+            &doc.type_schema("ComponentSet")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: crate::scene_v2::ComponentInstance = parse(
+            &doc.type_schema("ComponentInstance")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: crate::component_id::ComponentIdentity = parse(
+            &doc.type_schema("ComponentIdentity")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: crate::component_id::ComponentId = parse(
+            &doc.type_schema("ComponentId")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: crate::component_id::ComponentIdSequence = parse(
+            &doc.type_schema("ComponentIdSequence")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: RenderData = parse(
+            &doc.type_schema("RenderData")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: StrictFieldValues = parse(
+            &doc.type_schema("StrictFieldValues")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: StrictAnimator = parse(
+            &doc.type_schema("StrictAnimator")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+    }
+
+    #[test]
     fn runtime_only_fields_never_leak_into_the_catalog() {
         let doc = scene_schema();
         for (type_name, runtime_field) in [
@@ -2168,7 +2425,8 @@ mod tests {
         for ty in &doc.types {
             for field in &ty.fields {
                 assert!(
-                    !matches!(field.name.as_str(), "components" | "state" | "burst"),
+                    (ty.name == "EntityV2" && field.name == "components")
+                        || !matches!(field.name.as_str(), "components" | "state" | "burst"),
                     "{}.{} 看起来是运行时字段",
                     ty.name,
                     field.name

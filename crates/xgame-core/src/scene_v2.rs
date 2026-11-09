@@ -769,3 +769,101 @@ impl PrefabV2 {
             .map_err(|e| e.to_string())
     }
 }
+
+#[cfg(test)]
+mod schema_contract {
+    use super::*;
+
+    // 新增落盘字段时让目录与字段表同步变成编译/测试门禁。
+    #[allow(unused_variables)]
+    #[test]
+    fn every_v2_file_field_is_listed_in_the_shared_schema() {
+        let doc = crate::schema::scene_schema();
+        let scene = SceneV2::from_v1_plain(&Scene::new("Schema")).unwrap();
+        let SceneV2 {
+            format_version,
+            name,
+            entities,
+            lights,
+            ambient,
+        } = scene;
+        let prefab = PrefabV2::from_v1(&Prefab::new("Schema")).unwrap();
+        let PrefabV2 {
+            format_version,
+            name,
+            entities,
+        } = prefab;
+        let entity = EntityV2::from_v1(&Entity::new("Schema"), None).unwrap();
+        let EntityV2 {
+            id,
+            name,
+            parent,
+            prefab,
+            layer,
+            transform,
+            transform_identity,
+            components,
+        } = entity;
+        let ComponentSet {
+            next_component_id,
+            entries,
+        } = components;
+        let example = ComponentInstance {
+            identity: transform_identity,
+            data: ComponentData::Camera(Camera::default()),
+        };
+        let ComponentInstance { identity, data } = example;
+        let ComponentIdentity {
+            id,
+            source_component_id,
+        } = identity;
+        let render = RenderData {
+            model: String::new(),
+            lod: LodGroup::default(),
+            material_asset: None,
+            morph_weights: Vec::new(),
+        };
+        let RenderData {
+            model,
+            lod,
+            material_asset,
+            morph_weights,
+        } = render;
+        for (name, fields) in [
+            (
+                "SceneV2",
+                vec!["format_version", "name", "entities", "lights", "ambient"],
+            ),
+            ("PrefabV2", vec!["format_version", "name", "entities"]),
+            (
+                "EntityV2",
+                vec![
+                    "id",
+                    "name",
+                    "parent",
+                    "prefab",
+                    "layer",
+                    "transform",
+                    "transform_identity",
+                    "components",
+                ],
+            ),
+            ("ComponentSet", vec!["next_component_id", "entries"]),
+            ("ComponentInstance", vec!["identity", "data"]),
+            ("ComponentIdentity", vec!["id", "source_component_id"]),
+            (
+                "RenderData",
+                vec!["model", "lod", "material_asset", "morph_weights"],
+            ),
+        ] {
+            let catalogued: Vec<_> = doc
+                .type_schema(name)
+                .unwrap()
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect();
+            assert_eq!(catalogued, fields, "{name} 的落盘字段目录需要更新");
+        }
+    }
+}

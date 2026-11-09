@@ -82,9 +82,9 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 - **入参**：无（格式契约属于引擎，不属于某个项目 —— 不需要 `project`）
 - **返回**（JSON 文本）：与 `xgame-editor --export-schema` **完全同源**
   （`xgame_core::schema::scene_schema`），含 `format_version` / `engine_version` /
-  `roots`（场景 `.ron` 与预制体 `.prefab.ron`）/ `conventions` / `primitives` /
+  `roots`（v1/v2 场景 `.ron` 与预制体 `.prefab.ron` 各一项）/ `conventions` / `primitives` /
   `asset_references` / `types`。
-- **内容规模**：41 个落盘类型。每个类型有 `summary` / `kind` / `default_ron` /
+- **内容规模**：53 个落盘类型。每个类型有 `summary` / `kind` / `default_ron` /
   `example_ron`；字段有 `name` / `ty` / `required` / `default_ron` / `note`；
   枚举有 `variants`（unit / struct / newtype 三种形态，各带可解析示例）。
 - **确定性**：没有时间戳 / 随机 ID；同一份代码两次调用逐字节相同。
@@ -93,6 +93,8 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
   `ProjectHandle` 的读写边界。
 - **闭环用法**：`schema_read` 拿字段契约 → `scene_read` 看现状 → `scene_write` /
   `entity_upsert` 改 → `project_check` / `run_headless` 验证。
+  这组 MCP 修改工具仍只操作 v1；v2 的根和字段目前供格式查阅，不能据此使用
+  `scene_write` 或 `project_check` 操作 v2。
 
 ### 2. `project_info`
 
