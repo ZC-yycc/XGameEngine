@@ -5,6 +5,74 @@ use xgame_core::{
 };
 
 #[test]
+fn v2_reference_walk_uses_the_existing_asset_database_rules() {
+    let base = std::env::temp_dir().join(format!("xgame-v2-reference-{}", std::process::id()));
+    assert!(!base.exists(), "测试目录不能覆盖其他进程的文件");
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    for path in [
+        "Resources/Models/Box.glb",
+        "Resources/Models/BoxLow.glb",
+        "Resources/Materials/Box.mat",
+        "Resources/Audio/Sound.wav",
+        "Resources/Textures/Button.png",
+        "Scripts/actor.lua",
+    ] {
+        let full = project.path(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, b"asset").unwrap();
+    }
+    let mut assets = project.assets();
+    assets.refresh();
+    assets.ensure_metas().unwrap();
+
+    let mut legacy = Scene::new("References");
+    let mut actor = Entity::new("Actor");
+    actor.model = "Resources/Models/Box.glb".into();
+    actor.lod.levels.push(xgame_core::LodLevel::new(
+        "Resources/Models/BoxLow.glb",
+        50.0,
+    ));
+    actor.material_asset = Some("Resources/Materials/Box.mat".into());
+    actor.audio = Some(AudioSource {
+        clip: "Resources/Audio/Sound.wav".into(),
+        ..Default::default()
+    });
+    let mut ui = UiElement::default();
+    ui.image = Some(xgame_core::ui::UiImageStyle {
+        path: "Resources/Textures/Button.png".into(),
+        ..Default::default()
+    });
+    actor.ui = Some(ui);
+    actor.scripts.push("Scripts/actor.lua".into());
+    legacy.add_entity(actor);
+    let mut v2 = SceneV2::from_v1_plain(&legacy).unwrap();
+
+    let mut expected = legacy.clone();
+    xgame_core::encode_scene_references(&mut expected, &assets);
+    xgame_core::encode_scene_v2_references(&mut v2, &assets);
+    assert_eq!(v2.clone().to_v1().unwrap(), expected);
+    assert!(v2.to_ron().unwrap().contains("guid://"));
+
+    let mut old_prefab = Prefab::new("References");
+    old_prefab.entities = legacy.entities.clone();
+    let mut v2_prefab = PrefabV2::from_v1(&old_prefab).unwrap();
+    let mut expected_prefab = old_prefab.clone();
+    xgame_core::encode_prefab_references(&mut expected_prefab, &assets);
+    xgame_core::encode_prefab_v2_references(&mut v2_prefab, &assets);
+    assert_eq!(
+        v2_prefab.clone().to_v1().unwrap().entities,
+        expected_prefab.entities
+    );
+    xgame_core::decode_prefab_v2_references(&mut v2_prefab, &assets);
+    assert_eq!(v2_prefab.to_v1().unwrap().entities, old_prefab.entities);
+
+    xgame_core::decode_scene_v2_references(&mut v2, &assets);
+    assert_eq!(v2.to_v1().unwrap(), legacy);
+    drop(assets);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn scene_v2_keeps_typed_values_and_identity_across_ron_roundtrip() {
     let mut legacy = Scene::new("Codec");
     let mut actor = Entity::new("Actor");

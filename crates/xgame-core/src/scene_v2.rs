@@ -207,6 +207,40 @@ impl ComponentData {
 }
 
 impl EntityV2 {
+    /// 所有磁盘资产路径仍由 ProjectHandle 在读写边界转换。
+    pub(crate) fn visit_asset_references(&mut self, visit: &mut impl FnMut(&mut String)) {
+        if let Some(prefab) = &mut self.prefab {
+            visit(&mut prefab.source);
+        }
+        for entry in &mut self.components.entries {
+            match &mut entry.data {
+                ComponentData::Render(render) => {
+                    visit(&mut render.model);
+                    for level in &mut render.lod.levels {
+                        visit(&mut level.model);
+                    }
+                    if let Some(material) = &mut render.material_asset {
+                        visit(material);
+                    }
+                }
+                ComponentData::Lua { path } => visit(path),
+                ComponentData::Audio(audio) => visit(&mut audio.clip),
+                ComponentData::Ui(ui) => {
+                    if let Some(image) = &mut ui.image {
+                        visit(&mut image.path);
+                    }
+                }
+                ComponentData::Animator(_)
+                | ComponentData::Physics(_)
+                | ComponentData::Character(_)
+                | ComponentData::Camera(_)
+                | ComponentData::Particle(_)
+                | ComponentData::MaterialOverride(_)
+                | ComponentData::Rust { .. } => {}
+            }
+        }
+    }
+
     fn from_v1(entity: &Entity) -> Result<Self, String> {
         if entity.prefab.is_some() {
             return Err(format!(
@@ -294,6 +328,12 @@ impl EntityV2 {
 }
 
 impl SceneV2 {
+    pub(crate) fn visit_asset_references(&mut self, mut visit: impl FnMut(&mut String)) {
+        for entity in &mut self.entities {
+            entity.visit_asset_references(&mut visit);
+        }
+    }
+
     pub fn from_v1_plain(scene: &Scene) -> Result<Self, String> {
         if scene.format_version != 1 || !scene.duplicate_ids().is_empty() {
             return Err("场景版本或实体 ID 无法安全转换".into());
@@ -353,6 +393,12 @@ impl SceneV2 {
 }
 
 impl PrefabV2 {
+    pub(crate) fn visit_asset_references(&mut self, mut visit: impl FnMut(&mut String)) {
+        for entity in &mut self.entities {
+            entity.visit_asset_references(&mut visit);
+        }
+    }
+
     pub fn from_v1(prefab: &Prefab) -> Result<Self, String> {
         if prefab.format_version != 1 || !prefab.duplicate_ids().is_empty() {
             return Err("预制体版本或实体 ID 无法安全转换".into());

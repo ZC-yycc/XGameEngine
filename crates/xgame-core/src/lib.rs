@@ -121,8 +121,10 @@ pub use animation_runtime::{
     MotionPlayback, MotionSpan,
 };
 pub use asset::{
-    decode_prefab_references, decode_scene_references, encode_prefab_references,
-    encode_scene_references, is_dangling_reference, is_guid_reference, normalize_asset_relative,
+    decode_prefab_references, decode_prefab_v2_references, decode_scene_references,
+    decode_scene_v2_references, encode_prefab_references, encode_prefab_v2_references,
+    encode_scene_references, encode_scene_v2_references, is_dangling_reference,
+    is_guid_reference, normalize_asset_relative,
     read_import_settings, render_asset_list, AssetDatabase, AssetDiagnostics, AssetGuid, AssetId,
     AssetKind, AssetMeta, AssetMoveReport, AssetRecord, GuidConflict, ImportSettings, InvalidMeta,
     GUID_SCHEME, META_EXTENSION,

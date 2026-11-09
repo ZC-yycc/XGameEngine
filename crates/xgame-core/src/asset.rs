@@ -1088,6 +1088,23 @@ pub fn decode_prefab_references(prefab: &mut crate::prefab::Prefab, db: &AssetDa
     }
 }
 
+/// v2 组件数据复用同一资产库编码判定；只在项目保存边界调用。
+pub fn encode_scene_v2_references(scene: &mut crate::scene_v2::SceneV2, db: &AssetDatabase) {
+    scene.visit_asset_references(|slot| encode_slot(slot, db));
+}
+
+pub fn decode_scene_v2_references(scene: &mut crate::scene_v2::SceneV2, db: &AssetDatabase) {
+    scene.visit_asset_references(|slot| decode_slot(slot, db));
+}
+
+pub fn encode_prefab_v2_references(prefab: &mut crate::scene_v2::PrefabV2, db: &AssetDatabase) {
+    prefab.visit_asset_references(|slot| encode_slot(slot, db));
+}
+
+pub fn decode_prefab_v2_references(prefab: &mut crate::scene_v2::PrefabV2, db: &AssetDatabase) {
+    prefab.visit_asset_references(|slot| decode_slot(slot, db));
+}
+
 fn encode_slot(slot: &mut String, db: &AssetDatabase) {
     if slot.is_empty() {
         return;
