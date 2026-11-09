@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use xgame_core::scene_v2::{PrefabV2, SceneV2};
 use xgame_core::{
     Animator, AudioSource, Camera, CharacterController, Entity, MaterialOverride, ParticleEmitter,
@@ -231,4 +232,69 @@ fn v2_rejects_duplicate_layer_animation_parameters_and_keeps_defaults() {
         decoded.entities[0].animator.as_ref().unwrap().fade_time,
         0.25
     );
+}
+
+#[test]
+fn v2_prefab_instance_uses_asset_component_ids_after_local_reordering() {
+    let source_path = "Prefabs/Actor.prefab.ron";
+    let mut prefab = Prefab::new("Actor");
+    let mut asset = Entity::new("Actor");
+    asset.behaviors = vec!["Health".into(), "Motion".into()];
+    asset.scripts = vec!["Scripts/actor.lua".into()];
+    prefab.entities.push(asset);
+    let source_id = prefab.entities[0].id;
+    let mut upgraded = PrefabV2::from_v1(&prefab).unwrap();
+    // 来源资产可能早已删除过组件；实例必须使用资产实际存盘的 ID。
+    upgraded.entities[0].components.entries[1].identity.id =
+        xgame_core::component_id::ComponentId::from_raw(10).unwrap();
+    upgraded.entities[0].components.next_component_id =
+        xgame_core::component_id::ComponentIdSequence::from_next(11).unwrap();
+    let mut instance = prefab.instantiate(source_path).remove(0);
+    instance.behaviors.swap(0, 1);
+    instance.scripts.push("Scripts/instance.lua".into());
+    let mut scene = Scene::new("Instances");
+    scene.add_entity(instance);
+    let sources = BTreeMap::from([(source_path.to_owned(), upgraded)]);
+
+    let v2 = SceneV2::from_v1_with_prefabs(&scene, &sources).unwrap();
+    let entity = &v2.entities[0];
+    assert_eq!(entity.prefab.as_ref().unwrap().source_id, source_id);
+    assert_eq!(entity.transform_identity.id.raw(), 1);
+    assert_eq!(
+        entity.transform_identity.source_component_id.unwrap().raw(),
+        1
+    );
+    let identity = |index: usize| entity.components.entries[index].identity;
+    assert_eq!(identity(0).id.raw(), 2); // Motion 本地先执行，资产里排第二
+    assert_eq!(identity(0).source_component_id.unwrap().raw(), 10);
+    assert_eq!(identity(1).source_component_id.unwrap().raw(), 2);
+    assert_eq!(identity(2).source_component_id.unwrap().raw(), 4);
+    assert_eq!(identity(3).source_component_id, None); // 实例自行追加
+    assert_eq!(entity.components.next_component_id.next_id(), 6);
+    assert_eq!(
+        SceneV2::from_ron(&v2.to_ron().unwrap())
+            .unwrap()
+            .to_v1()
+            .unwrap(),
+        scene
+    );
+
+    let mut tampered = v2.clone();
+    tampered.entities[0].components.entries[1]
+        .identity
+        .source_component_id = Some(xgame_core::component_id::ComponentId::from_raw(9).unwrap());
+    assert!(tampered.validate_prefab_sources(&sources).is_err());
+    let mut duplicated = v2.clone();
+    duplicated.entities[0].components.entries[1]
+        .identity
+        .source_component_id = duplicated.entities[0].components.entries[0]
+        .identity
+        .source_component_id;
+    assert!(duplicated.to_ron().unwrap_err().contains("重复引用"));
+
+    assert!(SceneV2::from_v1_plain(&scene).is_err());
+    assert!(SceneV2::from_v1_with_prefabs(&scene, &BTreeMap::new()).is_err());
+    let mut broken = sources.clone();
+    broken.get_mut(source_path).unwrap().entities[0].id = xgame_core::EntityId::new();
+    assert!(SceneV2::from_v1_with_prefabs(&scene, &broken).is_err());
 }

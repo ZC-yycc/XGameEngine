@@ -3,7 +3,7 @@
 //! 正式项目加载 / 保存仍只接受 v1。待 GUID 边界、预制体关联和编辑器结构操作
 //! 接好后再开放文件级升级，避免把不能编辑的 v2 文件提前交给用户。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ fn parse_v2<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, String> {
     }
 }
 
-use crate::component_id::{ComponentIdSequence, ComponentIdentity};
+use crate::component_id::{ComponentId, ComponentIdSequence, ComponentIdentity};
 use crate::component_upgrade::preview_component_upgrade;
 pub use crate::v2_animator::StrictAnimator;
 use crate::{
@@ -143,6 +143,23 @@ pub struct RenderData {
     pub morph_weights: Vec<f32>,
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum LegacyComponentKey {
+    Builtin(BuiltinComponent),
+    Rust(String),
+    Lua(String),
+}
+
+impl LegacyComponentKey {
+    fn from_address(address: ComponentAddress, name: &str) -> Self {
+        match address {
+            ComponentAddress::Builtin(kind) => Self::Builtin(kind),
+            ComponentAddress::Rust(_) => Self::Rust(name.to_owned()),
+            ComponentAddress::Lua(_) => Self::Lua(name.to_owned()),
+        }
+    }
+}
+
 impl RenderData {
     fn is_legacy_absent(&self) -> bool {
         self.model.is_empty()
@@ -153,6 +170,26 @@ impl RenderData {
 }
 
 impl ComponentData {
+    fn legacy_key(&self) -> LegacyComponentKey {
+        match self {
+            Self::Render(_) => LegacyComponentKey::Builtin(BuiltinComponent::Render),
+            Self::Ui(_) => LegacyComponentKey::Builtin(BuiltinComponent::Ui),
+            Self::Animator(_) => LegacyComponentKey::Builtin(BuiltinComponent::Animator),
+            Self::Physics(_) => LegacyComponentKey::Builtin(BuiltinComponent::Physics),
+            Self::Character(_) => LegacyComponentKey::Builtin(BuiltinComponent::Character),
+            Self::Audio(_) => LegacyComponentKey::Builtin(BuiltinComponent::Audio),
+            Self::Camera(_) => LegacyComponentKey::Builtin(BuiltinComponent::Camera),
+            Self::Particle(_) => LegacyComponentKey::Builtin(BuiltinComponent::Particle),
+            Self::MaterialOverride(_) => {
+                LegacyComponentKey::Builtin(BuiltinComponent::MaterialOverride)
+            }
+            Self::Rust {
+                registered_name, ..
+            } => LegacyComponentKey::Rust(registered_name.clone()),
+            Self::Lua { path } => LegacyComponentKey::Lua(path.clone()),
+        }
+    }
+
     fn from_v1(entity: &Entity, address: ComponentAddress) -> Self {
         match address {
             ComponentAddress::Builtin(kind) => match kind {
@@ -297,21 +334,34 @@ impl EntityV2 {
         }
     }
 
-    fn from_v1(entity: &Entity) -> Result<Self, String> {
-        if entity.prefab.is_some() {
-            return Err(format!(
-                "实体 {:?} 来自预制体；尚未建立来源组件 ID，不允许转换",
-                entity.name
-            ));
+    fn from_v1(entity: &Entity, source: Option<&EntityV2>) -> Result<Self, String> {
+        if entity.prefab.is_some() != source.is_some() {
+            return Err(format!("实体 {:?} 的预制体来源尚未提供", entity.name));
         }
         let plan = preview_component_upgrade(entity, None)?;
+        let source_ids = source
+            .map(EntityV2::source_keys)
+            .transpose()?
+            .unwrap_or_default();
         let transform_identity = plan.components.first().expect("Transform 恒存在").identity;
+        let transform_identity = ComponentIdentity {
+            source_component_id: source.map(|s| s.transform_identity.id),
+            ..transform_identity
+        };
         let entries = plan
             .components
             .into_iter()
             .skip(1)
             .map(|component| ComponentInstance {
-                identity: component.identity,
+                identity: ComponentIdentity {
+                    source_component_id: source_ids
+                        .get(&LegacyComponentKey::from_address(
+                            component.address,
+                            &component.name,
+                        ))
+                        .copied(),
+                    ..component.identity
+                },
                 data: ComponentData::from_v1(entity, component.address),
             })
             .collect();
@@ -319,7 +369,7 @@ impl EntityV2 {
             id: entity.id,
             name: entity.name.clone(),
             parent: entity.parent,
-            prefab: None,
+            prefab: entity.prefab.clone(),
             layer: entity.layer,
             transform: entity.transform,
             transform_identity,
@@ -331,17 +381,36 @@ impl EntityV2 {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.prefab.is_some() {
-            return Err("预制体实例尚未建立 v2 来源关联".into());
-        }
-        if self.transform_identity.source_component_id.is_some()
-            || self
-                .components
-                .entries
-                .iter()
-                .any(|entry| entry.identity.source_component_id.is_some())
+        if self.prefab.is_none()
+            && (self.transform_identity.source_component_id.is_some()
+                || self
+                    .components
+                    .entries
+                    .iter()
+                    .any(|entry| entry.identity.source_component_id.is_some()))
         {
             return Err("普通实体不能携带预制体来源组件 ID".into());
+        }
+        if self.prefab.is_some() && self.transform_identity.source_component_id.is_none() {
+            return Err("预制体实例缺少 Transform 来源组件 ID".into());
+        }
+        let mut sources = BTreeSet::new();
+        for id in std::iter::once(self.transform_identity.source_component_id)
+            .chain(
+                self.components
+                    .entries
+                    .iter()
+                    .map(|entry| entry.identity.source_component_id),
+            )
+            .flatten()
+        {
+            if !sources.insert(id) {
+                return Err(format!(
+                    "实体 {:?} 重复引用来源组件 ID {}",
+                    self.name,
+                    id.raw()
+                ));
+            }
         }
         self.components.next_component_id.validate(
             std::iter::once(self.transform_identity.id).chain(
@@ -374,12 +443,28 @@ impl EntityV2 {
         let mut entity = Entity::new(self.name);
         entity.id = self.id;
         entity.parent = self.parent;
+        entity.prefab = self.prefab;
         entity.layer = self.layer;
         entity.transform = self.transform;
         for entry in self.components.entries {
             entry.data.apply_to_v1(&mut entity)?;
         }
         Ok(entity)
+    }
+
+    /// 资产实体上的组件身份是来源 ID 的真相；资产组件重排或删除后高水位不回退。
+    fn source_keys(&self) -> Result<BTreeMap<LegacyComponentKey, ComponentId>, String> {
+        self.validate()?;
+        let mut keys = BTreeMap::new();
+        for entry in &self.components.entries {
+            if keys
+                .insert(entry.data.legacy_key(), entry.identity.id)
+                .is_some()
+            {
+                return Err(format!("预制体实体 {:?} 存在无法关联的重复组件", self.name));
+            }
+        }
+        Ok(keys)
     }
 }
 
@@ -391,21 +476,104 @@ impl SceneV2 {
     }
 
     pub fn from_v1_plain(scene: &Scene) -> Result<Self, String> {
+        Self::from_v1_with_prefabs(scene, &BTreeMap::new())
+    }
+
+    /// 来源资产必须先升级并按项目相对路径提供；只做内存转换，不写项目文件。
+    pub fn from_v1_with_prefabs(
+        scene: &Scene,
+        prefabs: &BTreeMap<String, PrefabV2>,
+    ) -> Result<Self, String> {
         if scene.format_version != 1 || !scene.duplicate_ids().is_empty() {
             return Err("场景版本或实体 ID 无法安全转换".into());
         }
         let entities = scene
             .entities
             .iter()
-            .map(EntityV2::from_v1)
+            .map(|entity| {
+                let source = if let Some(reference) = &entity.prefab {
+                    let prefab = prefabs.get(&reference.source).ok_or_else(|| {
+                        format!(
+                            "找不到实体 {:?} 的已升级预制体 {}",
+                            entity.name, reference.source
+                        )
+                    })?;
+                    prefab.validate()?;
+                    Some(
+                        prefab
+                            .entities
+                            .iter()
+                            .find(|e| e.id == reference.source_id)
+                            .ok_or_else(|| {
+                                format!(
+                                    "预制体 {} 缺少来源实体 ID {}",
+                                    reference.source,
+                                    reference.source_id.raw()
+                                )
+                            })?,
+                    )
+                } else {
+                    None
+                };
+                EntityV2::from_v1(entity, source)
+            })
             .collect::<Result<_, _>>()?;
-        Ok(Self {
+        let result = Self {
             format_version: 2,
             name: scene.name.clone(),
             entities,
             lights: scene.lights.clone(),
             ambient: scene.ambient,
-        })
+        };
+        result.validate_prefab_sources(prefabs)?;
+        Ok(result)
+    }
+
+    /// 项目读边界取得来源资产后再次检查，防止来源资产变化使 ID 指向其他组件。
+    pub fn validate_prefab_sources(
+        &self,
+        prefabs: &BTreeMap<String, PrefabV2>,
+    ) -> Result<(), String> {
+        self.validate()?;
+        for entity in &self.entities {
+            let Some(reference) = &entity.prefab else {
+                continue;
+            };
+            let prefab = prefabs
+                .get(&reference.source)
+                .ok_or_else(|| format!("缺少来源预制体 {}", reference.source))?;
+            prefab.validate()?;
+            let source = prefab
+                .entities
+                .iter()
+                .find(|e| e.id == reference.source_id)
+                .ok_or_else(|| {
+                    format!(
+                        "来源预制体 {} 缺少实体 ID {}",
+                        reference.source,
+                        reference.source_id.raw()
+                    )
+                })?;
+            if entity.transform_identity.source_component_id != Some(source.transform_identity.id) {
+                return Err(format!(
+                    "实体 {:?} 的 Transform 来源 ID 不匹配",
+                    entity.name
+                ));
+            }
+            let keys = source.source_keys()?;
+            for entry in &entity.components.entries {
+                if let Some(id) = entry.identity.source_component_id {
+                    if keys.get(&entry.data.legacy_key()) != Some(&id) {
+                        return Err(format!(
+                            "实体 {:?} 的组件来源 ID {} 不匹配",
+                            entity.name,
+                            id.raw()
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn to_v1(self) -> Result<Scene, String> {
@@ -462,7 +630,7 @@ impl PrefabV2 {
         let entities = prefab
             .entities
             .iter()
-            .map(EntityV2::from_v1)
+            .map(|entity| EntityV2::from_v1(entity, None))
             .collect::<Result<_, _>>()?;
         Ok(Self {
             format_version: 2,
@@ -492,6 +660,9 @@ impl PrefabV2 {
                 return Err(format!("重复的预制体实体 ID {}", entity.id.raw()));
             }
             entity.validate()?;
+            if entity.prefab.is_some() {
+                return Err("预制体资产不能包含实例来源引用".into());
+            }
         }
         Ok(())
     }
