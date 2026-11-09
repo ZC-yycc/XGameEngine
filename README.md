@@ -115,6 +115,20 @@ cargo build --workspace --release --locked -j2
 
 此检查仅比较当前 workspace 中 xgame 构建单元可见的信息，是保守拒绝门禁，**不是完整 Rust ABI 兼容证明**。下游全部 flags、依赖 feature 合并、第三方源码状态以及 OS 加载动态库时执行的初始化均不在保证范围内；也不防伪造描述符或恶意插件。详细契约见 `Docs/决策记录.md` §四。
 
+### 在 Inspector 添加自定义组件
+
+在项目插件中定义 `Default + Inspect + Send + Sync` 的具名字段结构体，用
+`#[derive(Inspect)]` 声明可编辑字段，再在插件入口调用
+`registry.register_component::<Health>("Health")`。完整例子见
+`projects/BehaviorsDemo/src/lib.rs`：`Health.value` 会自动显示为滑块，不需要实现
+`Lifecycle` 或修改编辑器。构建并加载插件后，在实体 Inspector 顶部的 **Add Component**
+选择 `Health`；编辑值随场景保存，重新打开和 Play 时恢复。需要每帧逻辑的组件仍用
+`registry.register::<T>("Name")` 并实现 `Lifecycle`，两类组件共用字段控件和存盘规则。
+
+目前自动控件支持 `f32/f64/i32/i64/u32/bool/String/Vec2/Vec3/Vec4`；运行时状态字段
+用 `#[inspect(skip)]` 排除。内建相机、物理等继续使用既有专用面板和场景字段，
+也能从 Add Component 菜单添加。
+
 ## CI
 
 推送到 `master`、开 PR 或手动 dispatch 时，GitHub Actions（`.github/workflows/ci.yml`）会在

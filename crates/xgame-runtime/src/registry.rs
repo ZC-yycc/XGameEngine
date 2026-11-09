@@ -17,6 +17,31 @@ use std::collections::HashMap;
 
 use crate::lifecycle::{Behavior, Ctx};
 
+/// 纯数据组件沿用行为组件的装配和存盘通道；空钩子不会引入另一套场景格式。
+struct DataComponent<T>(T);
+
+impl<T: Default> Default for DataComponent<T> {
+    fn default() -> Self {
+        Self(T::default())
+    }
+}
+
+impl<T: Send + Sync + 'static> crate::lifecycle::Lifecycle for DataComponent<T> {}
+
+impl<T: xgame_core::Inspect> xgame_core::Inspect for DataComponent<T> {
+    fn inspect_fields(&self) -> &'static [xgame_core::FieldDesc] {
+        self.0.inspect_fields()
+    }
+
+    fn inspect_get(&self, index: usize) -> xgame_core::FieldValue {
+        self.0.inspect_get(index)
+    }
+
+    fn inspect_set(&mut self, index: usize, value: xgame_core::FieldValue) {
+        self.0.inspect_set(index, value);
+    }
+}
+
 /// 统一形状的钩子函数指针（`start` / `on_destroy` 忽略 `dt`）。
 ///
 /// 统一签名是为了让四个指针装进一个 `Copy` 结构体，随实例一起拷贝。
@@ -75,6 +100,15 @@ pub struct BehaviorRegistry {
 impl BehaviorRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 注册只有数据与可检视字段的组件，无需实现生命周期钩子或手写面板。
+    /// 名称和字段值仍走 `Entity.behaviors` / `behavior_params` 的既有存盘契约。
+    pub fn register_component<T>(&mut self, name: &'static str)
+    where
+        T: xgame_core::Inspect + Default + Send + Sync + 'static,
+    {
+        self.register::<DataComponent<T>>(name);
     }
 
     /// 注册一个行为组件类型（`T` 必须能默认构造 —— P0 的组件参数尚未
@@ -215,5 +249,54 @@ mod tests {
         // 未注册的名字：构造返回 None（不 panic）。
         assert!(registry.construct_instance("Nope").is_none());
         assert!(registry.construct("Nope").is_none());
+    }
+
+    #[derive(Default)]
+    struct Health {
+        value: f32,
+    }
+
+    impl xgame_core::Inspect for Health {
+        fn inspect_fields(&self) -> &'static [xgame_core::FieldDesc] {
+            static FIELDS: &[xgame_core::FieldDesc] = &[xgame_core::FieldDesc::new(
+                "value",
+                xgame_core::FieldKind::F32,
+            )];
+            FIELDS
+        }
+
+        fn inspect_get(&self, _: usize) -> xgame_core::FieldValue {
+            xgame_core::FieldValue::F32(self.value)
+        }
+
+        fn inspect_set(&mut self, _: usize, value: xgame_core::FieldValue) {
+            if let xgame_core::FieldValue::F32(value) = value {
+                self.value = value;
+            }
+        }
+    }
+
+    #[test]
+    fn data_only_component_uses_the_existing_scene_and_inspector_contract() {
+        let mut registry = BehaviorRegistry::new();
+        registry.register_component::<Health>("Health");
+        assert_eq!(registry.names(), vec!["Health"]);
+
+        let mut component = registry.construct("Health").expect("应能构造纯数据组件");
+        component.inspect_set(0, xgame_core::FieldValue::F32(75.0));
+        let values = xgame_core::inspect::capture_field_values(&*component);
+        let mut scene = Scene::new("test");
+        let mut entity = xgame_core::Entity::new("player");
+        entity.behaviors.push("Health".into());
+        entity.behavior_params.insert("Health".into(), values);
+        scene.entities.push(entity);
+        let saved = ron::to_string(&scene).expect("场景能保存");
+        let loaded: Scene = ron::from_str(&saved).expect("场景能读取");
+        let mut restored = registry.construct("Health").expect("应能重建组件");
+        xgame_core::inspect::apply_field_values(
+            &mut *restored,
+            &loaded.entities[0].behavior_params["Health"],
+        );
+        assert_eq!(restored.inspect_get(0), xgame_core::FieldValue::F32(75.0));
     }
 }

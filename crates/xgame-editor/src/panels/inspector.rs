@@ -24,6 +24,74 @@ use crate::state::EditorState;
 use xgame_core::{EntityId, FieldDesc, FieldKind, FieldValue, Inspect};
 use xgame_math::glam::{Vec2, Vec3, Vec4};
 
+/// 内建系统仍读取 Entity 的可选字段；菜单只负责在原有落盘位置创建它们。
+/// 新增插件组件只需注册，不需要改这张内建系统清单。
+#[derive(Clone, Copy)]
+enum BuiltinComponent {
+    Ui,
+    Animator,
+    Physics,
+    Character,
+    Audio,
+    Camera,
+    Particle,
+    MaterialOverride,
+}
+
+impl BuiltinComponent {
+    const ALL: [Self; 8] = [
+        Self::Ui,
+        Self::Animator,
+        Self::Physics,
+        Self::Character,
+        Self::Audio,
+        Self::Camera,
+        Self::Particle,
+        Self::MaterialOverride,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Ui => "UI Element",
+            Self::Animator => "Animator",
+            Self::Physics => "Physics",
+            Self::Character => "Character",
+            Self::Audio => "Audio Source",
+            Self::Camera => "Camera",
+            Self::Particle => "Particle Emitter",
+            Self::MaterialOverride => "Material Override",
+        }
+    }
+
+    fn present(self, entity: &xgame_core::Entity) -> bool {
+        match self {
+            Self::Ui => entity.ui.is_some(),
+            Self::Animator => entity.animator.is_some(),
+            Self::Physics => entity.physics.is_some(),
+            Self::Character => entity.controller.is_some(),
+            Self::Audio => entity.audio.is_some(),
+            Self::Camera => entity.camera.is_some(),
+            Self::Particle => entity.particle.is_some(),
+            Self::MaterialOverride => entity.material.is_some(),
+        }
+    }
+
+    fn add(self, entity: &mut xgame_core::Entity) {
+        match self {
+            Self::Ui => entity.ui = Some(xgame_core::UiElement::panel(320.0, 180.0)),
+            Self::Animator => entity.animator = Some(xgame_core::Animator::default()),
+            Self::Physics => entity.physics = Some(xgame_core::PhysicsBody::default()),
+            Self::Character => entity.controller = Some(xgame_core::CharacterController::default()),
+            Self::Audio => entity.audio = Some(xgame_core::AudioSource::default()),
+            Self::Camera => entity.camera = Some(xgame_core::Camera::default()),
+            Self::Particle => entity.particle = Some(xgame_core::ParticleEmitter::default()),
+            Self::MaterialOverride => {
+                entity.material = Some(xgame_core::MaterialOverride::default());
+            }
+        }
+    }
+}
+
 /// 从一个控件的响应里收集「有改动 / 拖拽开始 / 拖拽结束」三个信号。
 fn collect(
     resp: &egui::Response,
@@ -388,6 +456,87 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 });
         });
 
+        // ── 统一添加入口 ──
+        // 放在属性列表前面：挂载物理、动画的实体可能要滚很久才能看到列表尾部。
+        // 数据组件来自插件注册表，内建组件仍写回原来的 Entity 字段。
+        ui.add_space(ui.spacing().item_spacing.y);
+        ui.add_enabled_ui(state.is_editing(), |ui| {
+            let popup_id = egui::Id::new("inspector_add_component");
+            let add = icons::add_row(ui, "Add Component", "给选中对象添加内建、Rust 或 Lua 组件");
+            if add.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(popup_id));
+            }
+            egui::popup_below_widget(
+                ui,
+                popup_id,
+                &add,
+                egui::PopupCloseBehavior::CloseOnClick,
+                |ui| {
+                    ui.set_min_width(220.0);
+                    for kind in BuiltinComponent::ALL {
+                        if !kind.present(entity) && ui.button(kind.name()).clicked() {
+                            // 与原来的 Add Animator 相同：有剪辑时先选模型的第一段。
+                            let default_clip = if matches!(kind, BuiltinComponent::Animator) {
+                                state.scene_renderer.as_ref().and_then(|renderer| {
+                                    entity.model_at(0).and_then(|model| {
+                                        renderer.animation_clip_names(model).into_iter().next()
+                                    })
+                                })
+                            } else {
+                                None
+                            };
+                            kind.add(entity);
+                            if let (Some(clip), Some(animator)) =
+                                (default_clip, entity.animator.as_mut())
+                            {
+                                animator.clip = clip;
+                            }
+                            touched = true;
+                        }
+                    }
+                    let names = state.behavior_names();
+                    let mut shown_behaviors = false;
+                    for name in names {
+                        if entity.behaviors.contains(name) {
+                            continue;
+                        }
+                        if !shown_behaviors {
+                            ui.separator();
+                            ui.label("Rust Components");
+                            shown_behaviors = true;
+                        }
+                        if ui.button(name).clicked() {
+                            entity.behaviors.push(name.clone());
+                            touched = true;
+                        }
+                    }
+                    if names.is_empty() {
+                        ui.separator();
+                        theme::note(ui, "Rust 组件：构建项目插件后可选");
+                    }
+                    let mut shown_scripts = false;
+                    for path in &state.script_list {
+                        if entity.scripts.contains(path) {
+                            continue;
+                        }
+                        if !shown_scripts {
+                            ui.separator();
+                            ui.label("Lua Scripts");
+                            shown_scripts = true;
+                        }
+                        if ui.button(path).clicked() {
+                            entity.scripts.push(path.clone());
+                            touched = true;
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("重新扫描 Scripts/").clicked() {
+                        state.refresh_scripts();
+                    }
+                },
+            );
+        });
+
         // ── 变换组件 ──
         theme::section_bar(ui, "Transform");
         ui.indent("transform", |ui| {
@@ -484,7 +633,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 紧挨着 Transform：UI 元素的"矩形"就是锚点 + 偏移，语义上正是
         // 这个实体的变换；放在面板末尾（Material 之后）时，属性多的实体
         // 要滚很久才能看到它 —— 实测截图里它整块在折叠线以下。
-        crate::panels::inspector_ui::show(ui, entity, &mut touched);
+        if entity.ui.is_some() {
+            crate::panels::inspector_ui::show(ui, entity, &mut touched);
+        }
 
         // ── 网格 ──
         theme::section_bar(ui, "Mesh");
@@ -620,10 +771,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
 
         // ── 动画 ──
         //
-        // 没有模型就没东西可播；但**已经有**动画组件时即使模型被清空也要显示，
-        // 否则组件会被藏到永远摘不掉。剪辑列表来自渲染器的资产缓存 —— 模型还没
-        // 加载时是空的，弱提示占位，下一帧预加载完成后自然有选项。
-        if entity.has_model() || entity.animator.is_some() {
+        // 只显示已经挂载的动画组件；模型被清空时仍要能移除它。
+        // 剪辑列表来自渲染器的资产缓存，模型未加载时为空。
+        if entity.animator.is_some() {
             theme::section_bar(ui, "Animation");
             ui.indent("animation", |ui| {
                 let clips = state
@@ -639,32 +789,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     .unwrap_or_default();
                 let model_empty = entity.model.is_empty();
 
-                if entity.animator.is_none() {
-                    if icons::add_row(
-                        ui,
-                        "Add Animator",
-                        "挂一个动画播放器：默认自动播放、原速、循环，\n剪辑默认取该模型的第一段。",
-                    )
-                    .clicked()
-                    {
-                        let animator = xgame_core::Animator {
-                            clip: clips.first().cloned().unwrap_or_default(),
-                            ..xgame_core::Animator::default()
-                        };
-                        entity.animator = Some(animator);
-                        touched = true;
-                    }
-                    // 提示必须**另起一行**：同一行里 `ui.label` 不会换行，
-                    // 中文一旦比剩余宽度长就会顶出面板右边缘被裁掉。
-                    if clips.is_empty() {
-                        ui.label(theme::dim_note(if model_empty {
-                            "没有模型"
-                        } else {
-                            "模型未加载或没有动画剪辑"
-                        }));
-                    }
-                } else {
-                    let mut remove = false;
+                let mut remove = false;
                     let mut remove_machine = false;
                     // 事件时间轴的边界要用剪辑时长：模型名先取出来，下面
                     // `entity.animator` 被可变借走之后就取不到 `entity` 了。
@@ -1390,10 +1515,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         }
                         touched = true;
                     }
-                    if remove {
-                        entity.animator = None;
-                        touched = true;
-                    }
+                if remove {
+                    entity.animator = None;
+                    touched = true;
                 }
             });
         }
@@ -1449,533 +1573,472 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         //
         // 这里存的是**项目相对路径**，不是脚本内容：同一份脚本可以挂在多个实体上，
         // 改一次逻辑全都生效。列表顺序就是执行顺序。
-        theme::section_bar(ui, "Scripts");
-        ui.indent("scripts", |ui| {
-            let mut remove: Option<usize> = None;
-            for (slot, path) in entity.scripts.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    icons::small_icon(ui, icons::Icon::Script, 12.0, theme::colors::BADGE_SCRIPT);
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(path).monospace().size(11.0))
-                            .truncate(),
-                    )
-                    .on_hover_text("项目相对路径；顺序即执行顺序");
-                    // 行尾右对齐：`with_layout` 把剩余宽度全吃掉，✕ 贴右边对齐，
-                    // 多个脚本行之间因此不会因为路径长短而左右乱跳。
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icons::close_button(ui, "把这个脚本从实体上摘掉（脚本文件本身不动）")
-                        {
-                            remove = Some(slot);
-                        }
+        if !entity.scripts.is_empty() {
+            theme::section_bar(ui, "Scripts");
+            ui.indent("scripts", |ui| {
+                let mut remove: Option<usize> = None;
+                for (slot, path) in entity.scripts.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        icons::small_icon(
+                            ui,
+                            icons::Icon::Script,
+                            12.0,
+                            theme::colors::BADGE_SCRIPT,
+                        );
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(path).monospace().size(11.0))
+                                .truncate(),
+                        )
+                        .on_hover_text("项目相对路径；顺序即执行顺序");
+                        // 行尾右对齐：`with_layout` 把剩余宽度全吃掉，✕ 贴右边对齐，
+                        // 多个脚本行之间因此不会因为路径长短而左右乱跳。
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icons::close_button(ui, "把这个脚本从实体上摘掉（脚本文件本身不动）")
+                            {
+                                remove = Some(slot);
+                            }
+                        });
                     });
-                });
-            }
-            if let Some(slot) = remove {
-                entity.scripts.remove(slot);
-                touched = true;
-            }
+                }
+                if let Some(slot) = remove {
+                    entity.scripts.remove(slot);
+                    touched = true;
+                }
 
-            let add_id = egui::Id::new("inspector_add_script");
-            let add = icons::add_row(ui, "Add Script", "从项目 Scripts/ 目录里挑一个 .lua 挂上");
-            if add.clicked() {
-                ui.memory_mut(|m| m.toggle_popup(add_id));
-            }
-            // 用 `popup_below_widget` 而不是 `menu_button`：后者自带边框和菜单
-            // 分隔线的观感，跟这边的扁平行不搭，也没法做到 "整宽点击区"。
-            egui::popup_below_widget(
-                ui,
-                add_id,
-                &add,
-                egui::PopupCloseBehavior::CloseOnClick,
-                |ui| {
-                    ui.set_min_width(220.0);
-                    if state.script_list.is_empty() {
-                        ui.label(theme::dim_note("项目里还没有脚本（.lua）"));
-                    } else {
-                        for path in state.script_list.clone() {
-                            if entity.scripts.contains(&path) {
-                                continue;
-                            }
-                            if ui.button(path.clone()).clicked() {
-                                entity.scripts.push(path);
-                                touched = true;
-                            }
-                        }
-                        ui.separator();
-                    }
-                    if ui.button("重新扫描 Scripts/").clicked() {
-                        state.refresh_scripts();
-                    }
-                },
-            );
-
-            theme::note(ui, "钩子: start / update / fixed_update / on_destroy");
-        });
-
+                theme::note(ui, "钩子: start / update / fixed_update / on_destroy");
+            });
+        }
         // ── Behaviors（Rust 组件，双轨架构 P0.5）──
-        //
-        // 与上面的 Scripts 同构：存的是**组件名**而不是代码，顺序即执行顺序。
-        // 区别在于这些名字来自插件 DLL 的注册表 —— 没构建过插件时是空的，
-        // 场景里已挂的名字就会显示成红色 ⚠（名字写错 / 插件没编译，都该看见）。
-        theme::section_bar(ui, "Behaviors");
-        ui.indent("behaviors", |ui| {
-            let names: Vec<String> = state.behavior_names().to_vec();
-            let mut remove: Option<usize> = None;
-            // 本帧被改动的组件参数（P1.5）：先攒着，出了 `entity.behaviors` 的
-            // 迭代再写 —— 循环还借着 `entity` 的不可变借用，循环里直接写
-            // `entity.behavior_params` 会撞可变借用。按**名**记而不是按下标：
-            // 同一帧点 ✕ 删除会让下标错位，名字不会。
-            let mut pending_params: Option<(String, xgame_core::inspect::FieldValues)> = None;
-            let entity_id = entity.id;
-            for (slot, name) in entity.behaviors.iter().enumerate() {
-                let registered = names.iter().any(|n| n == name);
-                ui.horizontal(|ui| {
-                    icons::small_icon(
-                        ui,
-                        icons::Icon::Component,
-                        12.0,
+        // 场景存注册名而非代码；未注册的名字仍显示警告，方便查插件装载问题。
+        if !entity.behaviors.is_empty() {
+            theme::section_bar(ui, "Behaviors");
+            ui.indent("behaviors", |ui| {
+                let names: Vec<String> = state.behavior_names().to_vec();
+                let mut remove: Option<usize> = None;
+                // 本帧被改动的组件参数（P1.5）：先攒着，出了 `entity.behaviors` 的
+                // 迭代再写 —— 循环还借着 `entity` 的不可变借用，循环里直接写
+                // `entity.behavior_params` 会撞可变借用。按**名**记而不是按下标：
+                // 同一帧点 ✕ 删除会让下标错位，名字不会。
+                let mut pending_params: Option<(String, xgame_core::inspect::FieldValues)> = None;
+                let entity_id = entity.id;
+                for (slot, name) in entity.behaviors.iter().enumerate() {
+                    let registered = names.iter().any(|n| n == name);
+                    ui.horizontal(|ui| {
+                        icons::small_icon(
+                            ui,
+                            icons::Icon::Component,
+                            12.0,
+                            if registered {
+                                theme::colors::BADGE_PREFAB
+                            } else {
+                                theme::colors::WARN
+                            },
+                        );
+                        let text = egui::RichText::new(name.clone()).monospace().size(11.0);
                         if registered {
-                            theme::colors::BADGE_PREFAB
-                        } else {
-                            theme::colors::WARN
-                        },
-                    );
-                    let text = egui::RichText::new(name.clone()).monospace().size(11.0);
-                    if registered {
-                        // 悬停先把"有哪些参数"说清楚 —— 展开之前就知道值不值得
-                        // 展开，也省得对着一个没参数的组件找为什么是空的。
-                        // 查的是常驻缓存的字段表，不构造实例、不重跑插件入口。
-                        // `is_empty` 的判断放进分支体而不是 match guard：
-                        // `Some(t) if t.is_empty()` 这种写法 clippy 会报
-                        // redundant_guard（空切片本可以直接写成 `Some([])`）。
-                        let tip = match state.behavior_field_table(name) {
-                            None => "已注册的 Rust 组件；顺序即执行顺序".to_owned(),
-                            Some(table) => {
-                                let params: Vec<&str> =
-                                    table.iter().map(|f| f.display_label()).collect();
-                                if params.is_empty() {
-                                    "已注册的 Rust 组件；顺序即执行顺序；没有可调参数".to_owned()
-                                } else {
-                                    format!(
-                                        "已注册的 Rust 组件；顺序即执行顺序\n\
+                            // 悬停先把"有哪些参数"说清楚 —— 展开之前就知道值不值得
+                            // 展开，也省得对着一个没参数的组件找为什么是空的。
+                            // 查的是常驻缓存的字段表，不构造实例、不重跑插件入口。
+                            // `is_empty` 的判断放进分支体而不是 match guard：
+                            // `Some(t) if t.is_empty()` 这种写法 clippy 会报
+                            // redundant_guard（空切片本可以直接写成 `Some([])`）。
+                            let tip = match state.behavior_field_table(name) {
+                                None => "已注册的 Rust 组件；顺序即执行顺序".to_owned(),
+                                Some(table) => {
+                                    let params: Vec<&str> =
+                                        table.iter().map(|f| f.display_label()).collect();
+                                    if params.is_empty() {
+                                        "已注册的 Rust 组件；顺序即执行顺序；没有可调参数"
+                                            .to_owned()
+                                    } else {
+                                        format!(
+                                            "已注册的 Rust 组件；顺序即执行顺序\n\
                                          可调参数（{} 个）：{}",
-                                        params.len(),
-                                        params.join("、")
-                                    )
+                                            params.len(),
+                                            params.join("、")
+                                        )
+                                    }
                                 }
-                            }
-                        };
-                        ui.label(text).on_hover_text(tip);
-                    } else {
-                        // 未注册不是错误（用户可能先在场景里写好、再按 Play 编译），
-                        // 但它**必须可见** —— 否则就是"挂了个组件却纹丝不动"。
-                        icons::small_icon(ui, icons::Icon::Warning, 12.0, theme::colors::WARN)
-                            .on_hover_text("未注册：插件还没编译，或名字写错了");
-                        ui.label(text.color(theme::colors::ERROR))
-                            .on_hover_text("插件没编译过 / 组件名不在注册表里");
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icons::close_button(ui, "把这个组件从实体上摘掉") {
-                            remove = Some(slot);
+                            };
+                            ui.label(text).on_hover_text(tip);
+                        } else {
+                            // 未注册不是错误（用户可能先在场景里写好、再按 Play 编译），
+                            // 但它**必须可见** —— 否则就是"挂了个组件却纹丝不动"。
+                            icons::small_icon(ui, icons::Icon::Warning, 12.0, theme::colors::WARN)
+                                .on_hover_text("未注册：插件还没编译，或名字写错了");
+                            ui.label(text.color(theme::colors::ERROR))
+                                .on_hover_text("插件没编译过 / 组件名不在注册表里");
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icons::close_button(ui, "把这个组件从实体上摘掉") {
+                                remove = Some(slot);
+                            }
+                        });
                     });
-                });
 
-                // ── 可调参数（P1）──
-                //
-                // 缩进一级挂在组件名下面：字段属于它上面那行的组件，不是实体的。
-                // 未注册的不画 —— 注册表里没有它就取不到字段表，而"为什么是空的"
-                // 上面那行 ⚠ 已经说清楚了。
-                if registered {
-                    ui.indent(("behavior_fields", slot), |ui| {
-                        let edit = show_behavior_fields(state, ui, entity_id, slot, name);
-                        // 撤销信号接到面板级两段式（外层变量，靠闭包捕获）：
-                        // 拖拽起点挂快照、松手入栈，离散改动按 touched 入栈。
-                        drag_began |= edit.sig.drag_began;
-                        drag_ended |= edit.sig.drag_ended;
-                        if let Some(values) = edit.values {
-                            pending_params = Some((name.clone(), values));
-                        }
-                    });
-                }
-            }
-            // 参数改动写进 `working`（P1.5）：与 Name / Transform 同一条通道，
-            // 写回场景、脏检查、撤销都由 show_content 的既有逻辑统一处理。
-            if let Some((name, values)) = pending_params.take() {
-                if values.is_empty() {
-                    // 没有可检视字段的组件不值得在场景里留一张空表（纯噪音）。
-                    entity.behavior_params.remove(&name);
-                } else {
-                    entity.behavior_params.insert(name, values);
-                }
-                touched = true;
-            }
-            if let Some(slot) = remove {
-                entity.behaviors.remove(slot);
-                touched = true;
-            }
-
-            // 调参什么时候生效 —— 两种模式的差别就这一句话，说在最前面免得
-            // 用户在 Edit 里拖了半天问"为什么没动"。
-            if !entity.behaviors.is_empty() {
-                let hint = if state.is_editing() {
-                    "参数随场景存盘（Ctrl+Z 可撤销）；按 ▶ Play 后生效"
-                } else {
-                    "热调参中 —— 改动立即生效，停止 Play 时丢弃"
-                };
-                theme::note(ui, hint);
-            }
-
-            let add_id = egui::Id::new("inspector_add_behavior");
-            let add = icons::add_row(
-                ui,
-                "Add Behavior",
-                "从插件注册表里挑一个 Rust 组件挂上 —— 直接编译进宿主，没有解释器开销",
-            );
-            if add.clicked() {
-                ui.memory_mut(|m| m.toggle_popup(add_id));
-            }
-            egui::popup_below_widget(
-                ui,
-                add_id,
-                &add,
-                egui::PopupCloseBehavior::CloseOnClick,
-                |ui| {
-                    ui.set_min_width(220.0);
-                    if names.is_empty() {
-                        ui.label(theme::dim_note("还没有已注册的 Rust 组件"));
-                        theme::note(ui, "项目根放 Cargo.toml 后按 ▶ Play 会自动编译插件");
-                    } else {
-                        for name in names.iter() {
-                            if entity.behaviors.contains(name) {
-                                continue;
+                    // ── 可调参数（P1）──
+                    //
+                    // 缩进一级挂在组件名下面：字段属于它上面那行的组件，不是实体的。
+                    // 未注册的不画 —— 注册表里没有它就取不到字段表，而"为什么是空的"
+                    // 上面那行 ⚠ 已经说清楚了。
+                    if registered {
+                        ui.indent(("behavior_fields", slot), |ui| {
+                            let edit = show_behavior_fields(state, ui, entity_id, slot, name);
+                            // 撤销信号接到面板级两段式（外层变量，靠闭包捕获）：
+                            // 拖拽起点挂快照、松手入栈，离散改动按 touched 入栈。
+                            drag_began |= edit.sig.drag_began;
+                            drag_ended |= edit.sig.drag_ended;
+                            if let Some(values) = edit.values {
+                                pending_params = Some((name.clone(), values));
                             }
-                            if ui.button(name.clone()).clicked() {
-                                entity.behaviors.push(name.clone());
-                                touched = true;
-                            }
-                        }
+                        });
                     }
-                },
-            );
+                }
+                // 参数改动写进 `working`（P1.5）：与 Name / Transform 同一条通道，
+                // 写回场景、脏检查、撤销都由 show_content 的既有逻辑统一处理。
+                if let Some((name, values)) = pending_params.take() {
+                    if values.is_empty() {
+                        // 没有可检视字段的组件不值得在场景里留一张空表（纯噪音）。
+                        entity.behavior_params.remove(&name);
+                    } else {
+                        entity.behavior_params.insert(name, values);
+                    }
+                    touched = true;
+                }
+                if let Some(slot) = remove {
+                    entity.behaviors.remove(slot);
+                    touched = true;
+                }
 
-            if entity.behaviors.is_empty() {
-                theme::note(ui, "还没有挂组件");
-            }
-        });
-
+                // 调参什么时候生效 —— 两种模式的差别就这一句话，说在最前面免得
+                // 用户在 Edit 里拖了半天问"为什么没动"。
+                if !entity.behaviors.is_empty() {
+                    let hint = if state.is_editing() {
+                        "参数随场景存盘（Ctrl+Z 可撤销）；按 ▶ Play 后生效"
+                    } else {
+                        "热调参中 —— 改动立即生效，停止 Play 时丢弃"
+                    };
+                    theme::note(ui, hint);
+                }
+            });
+        }
         // ── 物理 ──
         //
         // 取消勾选 = 这个实体不参与物理（纯视觉）。旧场景文件没有 `physics` 字段，
         // 加载出来就是未勾选 —— 与当时"没有任何东西会掉下去"的行为一致。
-        theme::section_bar(ui, "Physics");
-        ui.indent("physics", |ui| {
-            let mut enabled = entity.physics.is_some();
-            if ui
-                .checkbox(&mut enabled, "Participate in physics")
-                .on_hover_text("不勾选 = 纯视觉实体，不会被重力拽走")
-                .changed()
-            {
-                entity.physics = if enabled {
-                    Some(xgame_core::PhysicsBody::default())
-                } else {
-                    None
-                };
-                touched = true;
-            }
-
-            if let Some(body) = entity.physics.as_mut() {
-                use xgame_core::physics::{BodyKind, CollisionShape};
-
-                // 枚举属性一律用**下拉**，不用并排 chip。
-                //
-                // 两个理由：① UE 的 Details 面板对 enum 就是 ComboBox；② 三个
-                // `selectable_label` 加前缀标签在 300px 宽的面板里必然挤成一片，
-                // 五个形状 chip 更是把 "Cylinder" 直接裁掉 —— 溢出不是"有点丑"，
-                // 是**信息丢失**。
-                row(ui, "Type", |ui| {
-                    let current = match body.kind {
-                        BodyKind::Static => "Static",
-                        BodyKind::Dynamic => "Dynamic",
-                        BodyKind::Kinematic => "Kinematic",
+        if entity.physics.is_some() {
+            theme::section_bar(ui, "Physics");
+            ui.indent("physics", |ui| {
+                let mut enabled = entity.physics.is_some();
+                if ui
+                    .checkbox(&mut enabled, "Participate in physics")
+                    .on_hover_text("不勾选 = 纯视觉实体，不会被重力拽走")
+                    .changed()
+                {
+                    entity.physics = if enabled {
+                        Some(xgame_core::PhysicsBody::default())
+                    } else {
+                        None
                     };
-                    egui::ComboBox::from_id_salt("physics_kind")
-                        .width(ui.available_width())
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (kind, label) in [
-                                (BodyKind::Static, "Static"),
-                                (BodyKind::Dynamic, "Dynamic"),
-                                (BodyKind::Kinematic, "Kinematic"),
-                            ] {
-                                if ui.selectable_label(body.kind == kind, label).clicked()
-                                    && body.kind != kind
-                                {
-                                    body.kind = kind;
-                                    touched = true;
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text(match body.kind {
-                            BodyKind::Static => "静态：地面 / 墙，不受力",
-                            BodyKind::Dynamic => "动态：受重力与碰撞（物理驱动）",
-                            BodyKind::Kinematic => "运动学：由脚本驱动位置（脚本驱动）",
-                        });
-                });
+                    touched = true;
+                }
 
-                // -- 形状 --
-                row(ui, "Shape", |ui| {
-                    let shape_names = ["Auto", "Box", "Ball", "Capsule", "Cylinder"];
-                    let current = match body.shape {
-                        CollisionShape::Auto => 0,
-                        CollisionShape::Cuboid { .. } => 1,
-                        CollisionShape::Ball { .. } => 2,
-                        CollisionShape::Capsule { .. } => 3,
-                        CollisionShape::Cylinder { .. } => 4,
-                    };
-                    egui::ComboBox::from_id_salt("physics_shape")
-                        .width(ui.available_width())
-                        .selected_text(shape_names[current])
-                        .show_ui(ui, |ui| {
-                            for (i, name) in shape_names.iter().enumerate() {
-                                if ui.selectable_label(current == i, *name).clicked()
-                                    && current != i
-                                {
-                                    body.shape = match i {
-                                        0 => CollisionShape::Auto,
-                                        1 => CollisionShape::Cuboid {
-                                            // 从 Auto 切到 Box 时，用当前缩放推一个
-                                            // 合理初值，免得一上来就是个 0.5 的小方块。
-                                            half_extents: CollisionShape::auto_half_extents(
-                                                entity.transform.scale.to_array(),
-                                            ),
-                                        },
-                                        2 => CollisionShape::Ball { radius: 0.5 },
-                                        3 => CollisionShape::Capsule {
-                                            half_height: 0.5,
-                                            radius: 0.3,
-                                        },
-                                        _ => CollisionShape::Cylinder {
-                                            half_height: 0.5,
-                                            radius: 0.5,
-                                        },
-                                    };
-                                    touched = true;
-                                }
-                            }
-                        });
-                });
+                if let Some(body) = entity.physics.as_mut() {
+                    use xgame_core::physics::{BodyKind, CollisionShape};
 
-                // -- 形状参数 --
-                //
-                // 必须 `match &mut body.shape` 而不是 `match body.shape`：
-                // `CollisionShape` 是 `Copy`，写成后者会匹配到一个**临时副本**，
-                // `ref mut` 绑在副本上，用户拖动参数时改动会被静默丢弃。
-                match &mut body.shape {
-                    CollisionShape::Auto => {
-                        ui.label(theme::dim_note("按实体缩放的绝对值生成盒子"));
-                    }
-                    CollisionShape::Cuboid { half_extents } => {
-                        row(ui, "Extents", |ui| {
-                            for (axis, value) in
-                                ["X", "Y", "Z"].into_iter().zip(half_extents.iter_mut())
-                            {
-                                theme::axis_label(ui, axis);
+                    // 枚举属性一律用**下拉**，不用并排 chip。
+                    //
+                    // 两个理由：① UE 的 Details 面板对 enum 就是 ComboBox；② 三个
+                    // `selectable_label` 加前缀标签在 300px 宽的面板里必然挤成一片，
+                    // 五个形状 chip 更是把 "Cylinder" 直接裁掉 —— 溢出不是"有点丑"，
+                    // 是**信息丢失**。
+                    row(ui, "Type", |ui| {
+                        let current = match body.kind {
+                            BodyKind::Static => "Static",
+                            BodyKind::Dynamic => "Dynamic",
+                            BodyKind::Kinematic => "Kinematic",
+                        };
+                        egui::ComboBox::from_id_salt("physics_kind")
+                            .width(ui.available_width())
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                for (kind, label) in [
+                                    (BodyKind::Static, "Static"),
+                                    (BodyKind::Dynamic, "Dynamic"),
+                                    (BodyKind::Kinematic, "Kinematic"),
+                                ] {
+                                    if ui.selectable_label(body.kind == kind, label).clicked()
+                                        && body.kind != kind
+                                    {
+                                        body.kind = kind;
+                                        touched = true;
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(match body.kind {
+                                BodyKind::Static => "静态：地面 / 墙，不受力",
+                                BodyKind::Dynamic => "动态：受重力与碰撞（物理驱动）",
+                                BodyKind::Kinematic => "运动学：由脚本驱动位置（脚本驱动）",
+                            });
+                    });
+
+                    // -- 形状 --
+                    row(ui, "Shape", |ui| {
+                        let shape_names = ["Auto", "Box", "Ball", "Capsule", "Cylinder"];
+                        let current = match body.shape {
+                            CollisionShape::Auto => 0,
+                            CollisionShape::Cuboid { .. } => 1,
+                            CollisionShape::Ball { .. } => 2,
+                            CollisionShape::Capsule { .. } => 3,
+                            CollisionShape::Cylinder { .. } => 4,
+                        };
+                        egui::ComboBox::from_id_salt("physics_shape")
+                            .width(ui.available_width())
+                            .selected_text(shape_names[current])
+                            .show_ui(ui, |ui| {
+                                for (i, name) in shape_names.iter().enumerate() {
+                                    if ui.selectable_label(current == i, *name).clicked()
+                                        && current != i
+                                    {
+                                        body.shape = match i {
+                                            0 => CollisionShape::Auto,
+                                            1 => CollisionShape::Cuboid {
+                                                // 从 Auto 切到 Box 时，用当前缩放推一个
+                                                // 合理初值，免得一上来就是个 0.5 的小方块。
+                                                half_extents: CollisionShape::auto_half_extents(
+                                                    entity.transform.scale.to_array(),
+                                                ),
+                                            },
+                                            2 => CollisionShape::Ball { radius: 0.5 },
+                                            3 => CollisionShape::Capsule {
+                                                half_height: 0.5,
+                                                radius: 0.3,
+                                            },
+                                            _ => CollisionShape::Cylinder {
+                                                half_height: 0.5,
+                                                radius: 0.5,
+                                            },
+                                        };
+                                        touched = true;
+                                    }
+                                }
+                            });
+                    });
+
+                    // -- 形状参数 --
+                    //
+                    // 必须 `match &mut body.shape` 而不是 `match body.shape`：
+                    // `CollisionShape` 是 `Copy`，写成后者会匹配到一个**临时副本**，
+                    // `ref mut` 绑在副本上，用户拖动参数时改动会被静默丢弃。
+                    match &mut body.shape {
+                        CollisionShape::Auto => {
+                            ui.label(theme::dim_note("按实体缩放的绝对值生成盒子"));
+                        }
+                        CollisionShape::Cuboid { half_extents } => {
+                            let axis_w = theme::axis_field_width(ui);
+                            row(ui, "Extents", |ui| {
+                                for (axis, value) in
+                                    ["X", "Y", "Z"].into_iter().zip(half_extents.iter_mut())
+                                {
+                                    theme::axis_label(ui, axis);
+                                    let resp = theme::drag_field_range_w(
+                                        ui,
+                                        axis_w,
+                                        value,
+                                        0.02,
+                                        0.001..=f32::MAX,
+                                    );
+                                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                                }
+                            });
+                        }
+                        CollisionShape::Ball { radius } => {
+                            row(ui, "Radius", |ui| {
                                 let resp = ui.add_sized(
                                     egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                                    egui::DragValue::new(value)
+                                    egui::DragValue::new(radius)
                                         .speed(0.02)
                                         .range(0.001..=f32::MAX),
                                 );
                                 collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                            }
-                        });
+                            });
+                        }
+                        CollisionShape::Capsule {
+                            half_height,
+                            radius,
+                        }
+                        | CollisionShape::Cylinder {
+                            half_height,
+                            radius,
+                        } => {
+                            row(ui, "Height", |ui| {
+                                let resp = ui.add_sized(
+                                    egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                    egui::DragValue::new(half_height)
+                                        .speed(0.02)
+                                        .range(0.0..=f32::MAX),
+                                );
+                                collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                            });
+                            row(ui, "Radius", |ui| {
+                                let resp = ui.add_sized(
+                                    egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                    egui::DragValue::new(radius)
+                                        .speed(0.02)
+                                        .range(0.001..=f32::MAX),
+                                );
+                                collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                            });
+                        }
                     }
-                    CollisionShape::Ball { radius } => {
-                        row(ui, "Radius", |ui| {
-                            let resp = ui.add_sized(
-                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                                egui::DragValue::new(radius)
-                                    .speed(0.02)
-                                    .range(0.001..=f32::MAX),
-                            );
-                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                        });
-                    }
-                    CollisionShape::Capsule {
-                        half_height,
-                        radius,
-                    }
-                    | CollisionShape::Cylinder {
-                        half_height,
-                        radius,
-                    } => {
-                        row(ui, "Height", |ui| {
-                            let resp = ui.add_sized(
-                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                                egui::DragValue::new(half_height)
-                                    .speed(0.02)
-                                    .range(0.0..=f32::MAX),
-                            );
-                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                        });
-                        row(ui, "Radius", |ui| {
-                            let resp = ui.add_sized(
-                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                                egui::DragValue::new(radius)
-                                    .speed(0.02)
-                                    .range(0.001..=f32::MAX),
-                            );
-                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                        });
-                    }
-                }
 
-                row(ui, "Friction", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut body.friction)
-                            .speed(0.01)
-                            .range(0.0..=2.0),
-                    );
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-                row(ui, "Bounce", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut body.restitution)
-                            .speed(0.01)
-                            .range(0.0..=1.0),
-                    );
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-                row(ui, "Mass", |ui| {
-                    let resp = ui
-                        .add_sized(
+                    row(ui, "Friction", |ui| {
+                        let resp = ui.add_sized(
                             egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                            egui::DragValue::new(&mut body.mass)
-                                .speed(0.1)
-                                .range(0.0..=10_000.0),
-                        )
-                        .on_hover_text("0 = 按碰撞体密度自动推算");
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-                row(ui, "Gravity", |ui| {
-                    let resp = ui
-                        .add_sized(
-                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                            egui::DragValue::new(&mut body.gravity_scale)
+                            egui::DragValue::new(&mut body.friction)
                                 .speed(0.01)
-                                .range(-5.0..=5.0),
-                        )
-                        .on_hover_text("重力倍率：1 = 正常，0 = 悬浮，负数 = 反重力");
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-                let sensor = ui
-                    .checkbox(&mut body.is_sensor, "Sensor (trigger)")
-                    .on_hover_text("只检测重叠、不产生碰撞力；射线默认会忽略它")
-                    .changed();
-                touched |= sensor;
-            }
-        });
-
+                                .range(0.0..=2.0),
+                        );
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+                    row(ui, "Bounce", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut body.restitution)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        );
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+                    row(ui, "Mass", |ui| {
+                        let resp = ui
+                            .add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                egui::DragValue::new(&mut body.mass)
+                                    .speed(0.1)
+                                    .range(0.0..=10_000.0),
+                            )
+                            .on_hover_text("0 = 按碰撞体密度自动推算");
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+                    row(ui, "Gravity", |ui| {
+                        let resp = ui
+                            .add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                egui::DragValue::new(&mut body.gravity_scale)
+                                    .speed(0.01)
+                                    .range(-5.0..=5.0),
+                            )
+                            .on_hover_text("重力倍率：1 = 正常，0 = 悬浮，负数 = 反重力");
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+                    let sensor = ui
+                        .checkbox(&mut body.is_sensor, "Sensor (trigger)")
+                        .on_hover_text("只检测重叠、不产生碰撞力；射线默认会忽略它")
+                        .changed();
+                    touched |= sensor;
+                }
+            });
+        }
         // ── 角色控制器 ──
         //
         // 与 Physics 正交：勾上之后这个实体的刚体由**运行时托管**
         // （运动学位置 + 胶囊），`physics` 里的类型/形状会被忽略 ——
         // 见 `xgame_core::character` 的模块文档。
-        theme::section_bar(ui, "Character");
-        ui.indent("character", |ui| {
-            let mut enabled = entity.controller.is_some();
-            if ui
-                .checkbox(&mut enabled, "Character controller")
-                .on_hover_text("由角色控制器驱动：撞墙、自动上台阶、贴地、陡坡滑落")
-                .changed()
-            {
-                entity.controller = if enabled {
-                    Some(xgame_core::CharacterController::default())
-                } else {
-                    None
-                };
-                touched = true;
-            }
+        if entity.controller.is_some() {
+            theme::section_bar(ui, "Character");
+            ui.indent("character", |ui| {
+                let mut enabled = entity.controller.is_some();
+                if ui
+                    .checkbox(&mut enabled, "Character controller")
+                    .on_hover_text("由角色控制器驱动：撞墙、自动上台阶、贴地、陡坡滑落")
+                    .changed()
+                {
+                    entity.controller = if enabled {
+                        Some(xgame_core::CharacterController::default())
+                    } else {
+                        None
+                    };
+                    touched = true;
+                }
 
-            if let Some(c) = entity.controller.as_mut() {
-                let mut field = |ui: &mut egui::Ui,
-                                 label: &str,
-                                 value: &mut f32,
-                                 speed: f64,
-                                 range: std::ops::RangeInclusive<f32>,
-                                 hint: &str| {
-                    row(ui, label, |ui| {
-                        let resp = ui
-                            .add_sized(
-                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                                egui::DragValue::new(value).speed(speed).range(range),
-                            )
-                            .on_hover_text(hint);
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    });
-                };
-                field(
-                    ui,
-                    "Height",
-                    &mut c.height,
-                    0.02,
-                    0.5..=5.0,
-                    "总高（含两端半球）。脚底 = 实体原点",
-                );
-                field(
-                    ui,
-                    "Radius",
-                    &mut c.radius,
-                    0.01,
-                    0.05..=2.0,
-                    "胶囊半径。总高必须大于直径，否则会被钳成球",
-                );
-                field(
-                    ui,
-                    "Step",
-                    &mut c.step_offset,
-                    0.01,
-                    0.0..=1.0,
-                    "自动上台阶的最大高度；0 = 不许上台阶",
-                );
-                field(
-                    ui,
-                    "Slope",
-                    &mut c.slope_limit,
-                    0.5,
-                    0.0..=89.0,
-                    "可站立的最大坡度（度）；超过就滑下去",
-                );
-                field(
-                    ui,
-                    "Skin",
-                    &mut c.skin_width,
-                    0.005,
-                    0.001..=0.5,
-                    "与障碍物保持的微小间隙（米），太小会抖、太大会看起来悬空",
-                );
-                field(
-                    ui,
-                    "Snap",
-                    &mut c.snap_to_ground,
-                    0.01,
-                    0.0..=2.0,
-                    "贴地吸附距离：走下矮台阶时被吸住的最大落差",
-                );
-                theme::note(ui, format!("胶囊中心 = 脚底 + {:.2} m", c.center_height()));
-            }
-        });
-
+                if let Some(c) = entity.controller.as_mut() {
+                    let mut field = |ui: &mut egui::Ui,
+                                     label: &str,
+                                     value: &mut f32,
+                                     speed: f64,
+                                     range: std::ops::RangeInclusive<f32>,
+                                     hint: &str| {
+                        row(ui, label, |ui| {
+                            let resp = ui
+                                .add_sized(
+                                    egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                    egui::DragValue::new(value).speed(speed).range(range),
+                                )
+                                .on_hover_text(hint);
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        });
+                    };
+                    field(
+                        ui,
+                        "Height",
+                        &mut c.height,
+                        0.02,
+                        0.5..=5.0,
+                        "总高（含两端半球）。脚底 = 实体原点",
+                    );
+                    field(
+                        ui,
+                        "Radius",
+                        &mut c.radius,
+                        0.01,
+                        0.05..=2.0,
+                        "胶囊半径。总高必须大于直径，否则会被钳成球",
+                    );
+                    field(
+                        ui,
+                        "Step",
+                        &mut c.step_offset,
+                        0.01,
+                        0.0..=1.0,
+                        "自动上台阶的最大高度；0 = 不许上台阶",
+                    );
+                    field(
+                        ui,
+                        "Slope",
+                        &mut c.slope_limit,
+                        0.5,
+                        0.0..=89.0,
+                        "可站立的最大坡度（度）；超过就滑下去",
+                    );
+                    field(
+                        ui,
+                        "Skin",
+                        &mut c.skin_width,
+                        0.005,
+                        0.001..=0.5,
+                        "与障碍物保持的微小间隙（米），太小会抖、太大会看起来悬空",
+                    );
+                    field(
+                        ui,
+                        "Snap",
+                        &mut c.snap_to_ground,
+                        0.01,
+                        0.0..=2.0,
+                        "贴地吸附距离：走下矮台阶时被吸住的最大落差",
+                    );
+                    theme::note(ui, format!("胶囊中心 = 脚底 + {:.2} m", c.center_height()));
+                }
+            });
+        }
         // ── 音频 ──
         //
         // 取消勾选 = 静默实体。旧场景文件没有 `audio` 字段，加载出来就是
         // 未勾选 —— 与当时"没有任何声音"的行为一致。
-        theme::section_bar(ui, "Audio");
-        ui.indent("audio", |ui| {
+        if entity.audio.is_some() {
+            theme::section_bar(ui, "Audio");
+            ui.indent("audio", |ui| {
             let mut enabled = entity.audio.is_some();
             if ui
                 .checkbox(&mut enabled, "Has audio source")
@@ -2102,7 +2165,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 }
             }
         });
-
+        }
         // ── 相机 ──
         //
         // 与 Audio / Particle 同一套"勾选才有"的写法。相机是**普通实体组件**
@@ -2110,399 +2173,404 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         //
         // 没有"预览画面"按钮：Play 态视口直接用这台相机的机位
         // （见 `scene_view::build_view_projection`），那本身就是预览。
-        theme::section_bar(ui, "Camera");
-        ui.indent("camera", |ui| {
-            let mut enabled = entity.camera.is_some();
-            if ui
-                .checkbox(&mut enabled, "Has camera")
-                .on_hover_text(
-                    "勾上之后这个实体就是一台相机：\n\
-                     Play 态视口 / 独立游戏 / 无头截图都从它取机位",
-                )
-                .changed()
-            {
-                entity.camera = if enabled {
-                    Some(xgame_core::Camera::default())
-                } else {
-                    None
-                };
-                touched = true;
-            }
-
-            if let Some(cam) = entity.camera.as_mut() {
-                // `sanitized()` 的边界在这里**手写两遍**是刻意的：Inspector 要能在
-                // 拖拽过程中就拦住坏值，而不是等 `CameraView` 解析时再钳 ——
-                // 否则用户会看到"我拖到 0 了但画面没变化"，比直接拖不动更费解。
-                row(ui, "FOV", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut cam.fov)
-                            .speed(0.5)
-                            .range(1.0..=179.0)
-                            .fixed_decimals(1),
-                    );
-                    ui.label(theme::dim_note("度（垂直）"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-
-                row(ui, "Near", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut cam.near)
-                            .speed(0.01)
-                            .range(0.001..=1.0e4)
-                            .fixed_decimals(3),
-                    );
-                    ui.label(theme::dim_note("米"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    // far 必须 > near：改完 near 顺手把 far 顶上去，
-                    // 免得留下一个"深度范围为空"的相机（整屏没有东西）。
-                    if cam.far <= cam.near {
-                        cam.far = cam.near + 0.001;
-                    }
-                });
-
-                row(ui, "Far", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut cam.far)
-                            .speed(1.0)
-                            .range(0.002..=1.0e5)
-                            .fixed_decimals(1),
-                    );
-                    ui.label(theme::dim_note("米"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    if cam.far <= cam.near {
-                        cam.far = cam.near + 0.001;
-                    }
-                });
-
+        if entity.camera.is_some() {
+            theme::section_bar(ui, "Camera");
+            ui.indent("camera", |ui| {
+                let mut enabled = entity.camera.is_some();
                 if ui
-                    .checkbox(&mut cam.active, "Active")
+                    .checkbox(&mut enabled, "Has camera")
                     .on_hover_text(
-                        "多机位时用哪一台：解析规则是「第一个 active 的相机」，\n\
-                         全部取消勾选时退回场景里第一台（画面不会突然没有相机）",
+                        "勾上之后这个实体就是一台相机：\n\
+                     Play 态视口 / 独立游戏 / 无头截图都从它取机位",
                     )
                     .changed()
                 {
+                    entity.camera = if enabled {
+                        Some(xgame_core::Camera::default())
+                    } else {
+                        None
+                    };
                     touched = true;
                 }
-            }
-        });
 
+                if let Some(cam) = entity.camera.as_mut() {
+                    // `sanitized()` 的边界在这里**手写两遍**是刻意的：Inspector 要能在
+                    // 拖拽过程中就拦住坏值，而不是等 `CameraView` 解析时再钳 ——
+                    // 否则用户会看到"我拖到 0 了但画面没变化"，比直接拖不动更费解。
+                    row(ui, "FOV", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut cam.fov)
+                                .speed(0.5)
+                                .range(1.0..=179.0)
+                                .fixed_decimals(1),
+                        );
+                        ui.label(theme::dim_note("度（垂直）"));
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+
+                    row(ui, "Near", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut cam.near)
+                                .speed(0.01)
+                                .range(0.001..=1.0e4)
+                                .fixed_decimals(3),
+                        );
+                        ui.label(theme::dim_note("米"));
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        // far 必须 > near：改完 near 顺手把 far 顶上去，
+                        // 免得留下一个"深度范围为空"的相机（整屏没有东西）。
+                        if cam.far <= cam.near {
+                            cam.far = cam.near + 0.001;
+                        }
+                    });
+
+                    row(ui, "Far", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut cam.far)
+                                .speed(1.0)
+                                .range(0.002..=1.0e5)
+                                .fixed_decimals(1),
+                        );
+                        ui.label(theme::dim_note("米"));
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        if cam.far <= cam.near {
+                            cam.far = cam.near + 0.001;
+                        }
+                    });
+
+                    if ui
+                        .checkbox(&mut cam.active, "Active")
+                        .on_hover_text(
+                            "多机位时用哪一台：解析规则是「第一个 active 的相机」，\n\
+                         全部取消勾选时退回场景里第一台（画面不会突然没有相机）",
+                        )
+                        .changed()
+                    {
+                        touched = true;
+                    }
+                }
+            });
+        }
         // ── 粒子发射器 ──
         //
         // 与 Audio 同一套"勾选才有"的写法。组件是纯声明（`core::ParticleEmitter`），
         // 模拟住在运行时的 `ParticleSystem` 里：**编辑态看不见粒子，Play 才喷** ——
         // 所以这里没有任何"预览播放"按钮，那需要另造一条编辑器内模拟回路，
         // 而 Play 就是那条回路。
-        theme::section_bar(ui, "Particle");
-        ui.indent("particle", |ui| {
-            let mut enabled = entity.particle.is_some();
-            if ui
-                .checkbox(&mut enabled, "Has particle emitter")
-                .on_hover_text(
-                    "CPU 粒子（billboard）。进 Play 开始喷，\n场景存盘只存参数、不存粒子状态",
-                )
-                .changed()
-            {
-                entity.particle = if enabled {
-                    Some(xgame_core::ParticleEmitter::default())
-                } else {
-                    None
-                };
-                touched = true;
-            }
-
-            if let Some(p) = entity.particle.as_mut() {
-                // 预设：只是"把一组字段填成某个值"，之后照常可改。
-                // 不放 Burst（一次性爆发）—— burst 是运行态动作（脚本 / 按键
-                // 触发），编辑态按了也没有模拟层去消费它。
-                ui.horizontal(|ui| {
-                    ui.label(theme::dim_note("Preset:"));
-                    if icons::chip(ui, "Fire", "火焰：快、短命、加色、往上飘") {
-                        *p = xgame_core::ParticleEmitter::fire();
-                        touched = true;
-                    }
-                    if icons::chip(ui, "Smoke", "烟尘：慢、长大、Alpha、继续上浮") {
-                        *p = xgame_core::ParticleEmitter::smoke();
-                        touched = true;
-                    }
-                    if icons::chip(ui, "Sparks", "火花：小、快、强重力、加色") {
-                        *p = xgame_core::ParticleEmitter::sparks();
-                        touched = true;
-                    }
-                });
-
+        if entity.particle.is_some() {
+            theme::section_bar(ui, "Particle");
+            ui.indent("particle", |ui| {
+                let mut enabled = entity.particle.is_some();
                 if ui
-                    .checkbox(&mut p.emitting, "Emitting")
-                    .on_hover_text("关掉后已出生的粒子走完寿命再消失（不是清屏）")
+                    .checkbox(&mut enabled, "Has particle emitter")
+                    .on_hover_text(
+                        "CPU 粒子（billboard）。进 Play 开始喷，\n场景存盘只存参数、不存粒子状态",
+                    )
                     .changed()
                 {
+                    entity.particle = if enabled {
+                        Some(xgame_core::ParticleEmitter::default())
+                    } else {
+                        None
+                    };
                     touched = true;
                 }
 
-                row(ui, "Rate", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.rate)
-                            .speed(1.0)
-                            .range(0.0..=1.0e5)
-                            .fixed_decimals(0),
-                    );
-                    ui.label(theme::dim_note("/s"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
+                if let Some(p) = entity.particle.as_mut() {
+                    // 预设：只是"把一组字段填成某个值"，之后照常可改。
+                    // 不放 Burst（一次性爆发）—— burst 是运行态动作（脚本 / 按键
+                    // 触发），编辑态按了也没有模拟层去消费它。
+                    ui.horizontal(|ui| {
+                        ui.label(theme::dim_note("Preset:"));
+                        if icons::chip(ui, "Fire", "火焰：快、短命、加色、往上飘") {
+                            *p = xgame_core::ParticleEmitter::fire();
+                            touched = true;
+                        }
+                        if icons::chip(ui, "Smoke", "烟尘：慢、长大、Alpha、继续上浮")
+                        {
+                            *p = xgame_core::ParticleEmitter::smoke();
+                            touched = true;
+                        }
+                        if icons::chip(ui, "Sparks", "火花：小、快、强重力、加色") {
+                            *p = xgame_core::ParticleEmitter::sparks();
+                            touched = true;
+                        }
+                    });
 
-                row(ui, "Max", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.max_particles)
-                            .speed(1.0)
-                            .range(0..=xgame_core::particle::MAX_PARTICLES_LIMIT),
-                    );
-                    ui.label(theme::dim_note("同时存在上限"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-
-                row(ui, "Duration", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.duration)
-                            .speed(0.1)
-                            .range(0.0..=1.0e5)
-                            .fixed_decimals(1),
-                    );
-                    ui.label(theme::dim_note("s（0 = 一直喷）"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    // Loop 是离散勾选（不是拖拽），changed 直接进 touched。
                     if ui
-                        .checkbox(&mut p.looping, "Loop")
-                        .on_hover_text("到时重来（只在 Duration > 0 时有意义）")
+                        .checkbox(&mut p.emitting, "Emitting")
+                        .on_hover_text("关掉后已出生的粒子走完寿命再消失（不是清屏）")
                         .changed()
                     {
                         touched = true;
                     }
-                });
-                row(ui, "Lifetime", |ui| {
-                    let a = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.lifetime[0])
-                            .speed(0.05)
-                            .range(0.001..=1.0e4),
-                    );
-                    ui.label(theme::dim_note("→"));
-                    let b = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.lifetime[1])
-                            .speed(0.05)
-                            .range(0.001..=1.0e4),
-                    );
-                    ui.label(theme::dim_note("s"));
-                    collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
-                    collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
-                });
 
-                row(ui, "Speed", |ui| {
-                    let a = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.speed[0])
-                            .speed(0.1)
-                            .range(0.0..=1.0e4),
-                    );
-                    ui.label(theme::dim_note("→"));
-                    let b = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.speed[1])
-                            .speed(0.1)
-                            .range(0.0..=1.0e4),
-                    );
-                    ui.label(theme::dim_note("m/s"));
-                    collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
-                    collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-
-                row(ui, "Spread", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.spread)
-                            .speed(1.0)
-                            .range(0.0..=180.0)
-                            .fixed_decimals(0),
-                    );
-                    ui.label(theme::dim_note("°（0 = 直线，180 = 全向）"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-
-                // 方向是实体局部向量：三轴宽度与 Transform 同行算法一致。
-                let axis_w = theme::axis_field_width(ui);
-                theme::field_row(ui, "Direction", |ui| {
-                    // zip(iter_mut) 而不是 `[&mut a[0], ...]` 数组字面量：数组索引
-                    // 拿不到字段级借用拆分，会被判成同一数组的多次可变借用。
-                    for (axis, value) in ["X", "Y", "Z"].into_iter().zip(p.direction.iter_mut()) {
-                        theme::axis_label(ui, axis);
-                        let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
+                    row(ui, "Rate", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.rate)
+                                .speed(1.0)
+                                .range(0.0..=1.0e5)
+                                .fixed_decimals(0),
+                        );
+                        ui.label(theme::dim_note("/s"));
                         collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    }
-                });
+                    });
 
-                row(ui, "Shape", |ui| {
-                    let mut shape = p.shape;
-                    egui::ComboBox::from_id_salt("inspector_particle_shape")
-                        .width(ui.available_width())
-                        .selected_text(match shape {
-                            xgame_core::particle::EmissionShape::Point => "Point",
-                            xgame_core::particle::EmissionShape::Sphere { .. } => "Sphere",
-                            xgame_core::particle::EmissionShape::Box { .. } => "Box",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut shape,
-                                xgame_core::particle::EmissionShape::Point,
-                                "Point",
-                            );
-                            ui.selectable_value(
-                                &mut shape,
-                                xgame_core::particle::EmissionShape::Sphere { radius: 0.15 },
-                                "Sphere",
-                            );
-                            ui.selectable_value(
-                                &mut shape,
-                                xgame_core::particle::EmissionShape::Box {
-                                    half_extents: [0.15, 0.15, 0.15],
-                                },
-                                "Box",
-                            );
-                        });
-                    if shape != p.shape {
-                        p.shape = shape;
-                        touched = true;
-                    }
-                });
-                match p.shape {
-                    xgame_core::particle::EmissionShape::Sphere { radius } => {
-                        row(ui, "Radius", |ui| {
-                            let mut r = radius;
-                            let resp = ui.add_sized(
-                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                                egui::DragValue::new(&mut r).speed(0.05).range(0.0..=1.0e4),
-                            );
-                            ui.label(theme::dim_note("m"));
+                    row(ui, "Max", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.max_particles)
+                                .speed(1.0)
+                                .range(0..=xgame_core::particle::MAX_PARTICLES_LIMIT),
+                        );
+                        ui.label(theme::dim_note("同时存在上限"));
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+
+                    row(ui, "Duration", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.duration)
+                                .speed(0.1)
+                                .range(0.0..=1.0e5)
+                                .fixed_decimals(1),
+                        );
+                        ui.label(theme::dim_note("s（0 = 一直喷）"));
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        // Loop 是离散勾选（不是拖拽），changed 直接进 touched。
+                        if ui
+                            .checkbox(&mut p.looping, "Loop")
+                            .on_hover_text("到时重来（只在 Duration > 0 时有意义）")
+                            .changed()
+                        {
+                            touched = true;
+                        }
+                    });
+                    row(ui, "Lifetime", |ui| {
+                        let a = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.lifetime[0])
+                                .speed(0.05)
+                                .range(0.001..=1.0e4),
+                        );
+                        ui.label(theme::dim_note("→"));
+                        let b = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.lifetime[1])
+                                .speed(0.05)
+                                .range(0.001..=1.0e4),
+                        );
+                        ui.label(theme::dim_note("s"));
+                        collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
+                        collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+
+                    row(ui, "Speed", |ui| {
+                        let a = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.speed[0])
+                                .speed(0.1)
+                                .range(0.0..=1.0e4),
+                        );
+                        ui.label(theme::dim_note("→"));
+                        let b = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.speed[1])
+                                .speed(0.1)
+                                .range(0.0..=1.0e4),
+                        );
+                        ui.label(theme::dim_note("m/s"));
+                        collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
+                        collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+
+                    row(ui, "Spread", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.spread)
+                                .speed(1.0)
+                                .range(0.0..=180.0)
+                                .fixed_decimals(0),
+                        );
+                        ui.label(theme::dim_note("°（0 = 直线，180 = 全向）"));
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+
+                    // 方向是实体局部向量：三轴宽度与 Transform 同行算法一致。
+                    let axis_w = theme::axis_field_width(ui);
+                    theme::field_row(ui, "Direction", |ui| {
+                        // zip(iter_mut) 而不是 `[&mut a[0], ...]` 数组字面量：数组索引
+                        // 拿不到字段级借用拆分，会被判成同一数组的多次可变借用。
+                        for (axis, value) in ["X", "Y", "Z"].into_iter().zip(p.direction.iter_mut())
+                        {
+                            theme::axis_label(ui, axis);
+                            let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
                             collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                            if r != radius {
-                                p.shape = xgame_core::particle::EmissionShape::Sphere { radius: r };
-                            }
-                        });
-                    }
-                    xgame_core::particle::EmissionShape::Box { mut half_extents } => {
-                        theme::field_row(ui, "Half", |ui| {
-                            for (axis, value) in
-                                ["X", "Y", "Z"].into_iter().zip(half_extents.iter_mut())
-                            {
-                                theme::axis_label(ui, axis);
-                                let resp = theme::drag_field_w(ui, axis_w, value, 0.05, "");
+                        }
+                    });
+
+                    row(ui, "Shape", |ui| {
+                        let mut shape = p.shape;
+                        egui::ComboBox::from_id_salt("inspector_particle_shape")
+                            .width(ui.available_width())
+                            .selected_text(match shape {
+                                xgame_core::particle::EmissionShape::Point => "Point",
+                                xgame_core::particle::EmissionShape::Sphere { .. } => "Sphere",
+                                xgame_core::particle::EmissionShape::Box { .. } => "Box",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut shape,
+                                    xgame_core::particle::EmissionShape::Point,
+                                    "Point",
+                                );
+                                ui.selectable_value(
+                                    &mut shape,
+                                    xgame_core::particle::EmissionShape::Sphere { radius: 0.15 },
+                                    "Sphere",
+                                );
+                                ui.selectable_value(
+                                    &mut shape,
+                                    xgame_core::particle::EmissionShape::Box {
+                                        half_extents: [0.15, 0.15, 0.15],
+                                    },
+                                    "Box",
+                                );
+                            });
+                        if shape != p.shape {
+                            p.shape = shape;
+                            touched = true;
+                        }
+                    });
+                    match p.shape {
+                        xgame_core::particle::EmissionShape::Sphere { radius } => {
+                            row(ui, "Radius", |ui| {
+                                let mut r = radius;
+                                let resp = ui.add_sized(
+                                    egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                    egui::DragValue::new(&mut r).speed(0.05).range(0.0..=1.0e4),
+                                );
+                                ui.label(theme::dim_note("m"));
                                 collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                            }
-                        });
-                        p.shape = xgame_core::particle::EmissionShape::Box { half_extents };
+                                if r != radius {
+                                    p.shape =
+                                        xgame_core::particle::EmissionShape::Sphere { radius: r };
+                                }
+                            });
+                        }
+                        xgame_core::particle::EmissionShape::Box { mut half_extents } => {
+                            theme::field_row(ui, "Half", |ui| {
+                                for (axis, value) in
+                                    ["X", "Y", "Z"].into_iter().zip(half_extents.iter_mut())
+                                {
+                                    theme::axis_label(ui, axis);
+                                    let resp = theme::drag_field_w(ui, axis_w, value, 0.05, "");
+                                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                                }
+                            });
+                            p.shape = xgame_core::particle::EmissionShape::Box { half_extents };
+                        }
+                        xgame_core::particle::EmissionShape::Point => {}
                     }
-                    xgame_core::particle::EmissionShape::Point => {}
-                }
 
-                theme::field_row(ui, "Gravity", |ui| {
-                    for (axis, value) in ["X", "Y", "Z"].into_iter().zip(p.gravity.iter_mut()) {
-                        theme::axis_label(ui, axis);
-                        let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
+                    theme::field_row(ui, "Gravity", |ui| {
+                        for (axis, value) in ["X", "Y", "Z"].into_iter().zip(p.gravity.iter_mut()) {
+                            theme::axis_label(ui, axis);
+                            let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        }
+                    });
+
+                    row(ui, "Drag", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.drag)
+                                .speed(0.05)
+                                .range(0.0..=1.0e3),
+                        );
+                        ui.label(theme::dim_note("每秒衰减比例"));
                         collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    }
-                });
+                    });
 
-                row(ui, "Drag", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.drag)
-                            .speed(0.05)
-                            .range(0.0..=1.0e3),
-                    );
-                    ui.label(theme::dim_note("每秒衰减比例"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
+                    row(ui, "Size", |ui| {
+                        let a = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.start_size)
+                                .speed(0.01)
+                                .range(0.0..=1.0e4),
+                        );
+                        ui.label(theme::dim_note("→"));
+                        let b = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.end_size)
+                                .speed(0.01)
+                                .range(0.0..=1.0e4),
+                        );
+                        ui.label(theme::dim_note("出生 → 死亡"));
+                        collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
+                        collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
 
-                row(ui, "Size", |ui| {
-                    let a = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.start_size)
-                            .speed(0.01)
-                            .range(0.0..=1.0e4),
-                    );
-                    ui.label(theme::dim_note("→"));
-                    let b = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.end_size)
-                            .speed(0.01)
-                            .range(0.0..=1.0e4),
-                    );
-                    ui.label(theme::dim_note("出生 → 死亡"));
-                    collect(&a, &mut touched, &mut drag_began, &mut drag_ended);
-                    collect(&b, &mut touched, &mut drag_began, &mut drag_ended);
-                });
+                    row(ui, "Color", |ui| {
+                        // 与材质 Tint 同一套写法：先写临时变量，只有真的交互过才回写
+                        // （取色器会把 0.38 量化成 0.38039216，白开一次面板就"未保存"）。
+                        let mut start = p.start_color;
+                        let ra = ui.color_edit_button_rgba_unmultiplied(&mut start);
+                        if ra.changed() {
+                            p.start_color = start;
+                        }
+                        ui.label(theme::dim_note("→"));
+                        let mut end = p.end_color;
+                        let rb = ui.color_edit_button_rgba_unmultiplied(&mut end);
+                        if rb.changed() {
+                            p.end_color = end;
+                        }
+                        ui.label(theme::dim_note("出生 → 死亡"));
+                        collect(&ra, &mut touched, &mut drag_began, &mut drag_ended);
+                        collect(&rb, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
 
-                row(ui, "Color", |ui| {
-                    // 与材质 Tint 同一套写法：先写临时变量，只有真的交互过才回写
-                    // （取色器会把 0.38 量化成 0.38039216，白开一次面板就"未保存"）。
-                    let mut start = p.start_color;
-                    let ra = ui.color_edit_button_rgba_unmultiplied(&mut start);
-                    if ra.changed() {
-                        p.start_color = start;
-                    }
-                    ui.label(theme::dim_note("→"));
-                    let mut end = p.end_color;
-                    let rb = ui.color_edit_button_rgba_unmultiplied(&mut end);
-                    if rb.changed() {
-                        p.end_color = end;
-                    }
-                    ui.label(theme::dim_note("出生 → 死亡"));
-                    collect(&ra, &mut touched, &mut drag_began, &mut drag_ended);
-                    collect(&rb, &mut touched, &mut drag_began, &mut drag_ended);
-                });
+                    row(ui, "Blend", |ui| {
+                        let mut blend = p.blend;
+                        egui::ComboBox::from_id_salt("inspector_particle_blend")
+                            .width(ui.available_width())
+                            .selected_text(match blend {
+                                xgame_core::particle::ParticleBlend::Alpha => "Alpha",
+                                xgame_core::particle::ParticleBlend::Additive => "Additive",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut blend,
+                                    xgame_core::particle::ParticleBlend::Alpha,
+                                    "Alpha（烟雾 / 尘土）",
+                                );
+                                ui.selectable_value(
+                                    &mut blend,
+                                    xgame_core::particle::ParticleBlend::Additive,
+                                    "Additive（火焰 / 火花）",
+                                );
+                            });
+                        if blend != p.blend {
+                            p.blend = blend;
+                            touched = true;
+                        }
+                    });
 
-                row(ui, "Blend", |ui| {
-                    let mut blend = p.blend;
-                    egui::ComboBox::from_id_salt("inspector_particle_blend")
-                        .width(ui.available_width())
-                        .selected_text(match blend {
-                            xgame_core::particle::ParticleBlend::Alpha => "Alpha",
-                            xgame_core::particle::ParticleBlend::Additive => "Additive",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut blend,
-                                xgame_core::particle::ParticleBlend::Alpha,
-                                "Alpha（烟雾 / 尘土）",
-                            );
-                            ui.selectable_value(
-                                &mut blend,
-                                xgame_core::particle::ParticleBlend::Additive,
-                                "Additive（火焰 / 火花）",
-                            );
-                        });
-                    if blend != p.blend {
-                        p.blend = blend;
-                        touched = true;
-                    }
-                });
-
-                row(ui, "Seed", |ui| {
-                    let resp = ui.add_sized(
-                        egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                        egui::DragValue::new(&mut p.seed).speed(1.0),
-                    );
-                    ui.label(theme::dim_note("同种子 ⇒ 逐位可复现"));
-                    collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                });
-            }
-        });
-
+                    row(ui, "Seed", |ui| {
+                        let resp = ui.add_sized(
+                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                            egui::DragValue::new(&mut p.seed).speed(1.0),
+                        );
+                        ui.label(theme::dim_note("同种子 ⇒ 逐位可复现"));
+                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                    });
+                }
+            });
+        }
         // ── 材质资产 + 覆盖 ──
         //
         // 资产负责"这是什么材质"（跨实体共享，`.mat` 可复用）；下面的 Override
@@ -2624,16 +2692,6 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     }
                 });
             }
-        });
-
-        // ── 添加组件（占位）──
-        ui.add_space(4.0);
-        ui.add_enabled_ui(false, |ui| {
-            icons::add_row(
-                ui,
-                "Add Component",
-                "自由组件系统尚未开放序列化；脚本 / 物理已可直接编辑",
-            );
         });
     }
 

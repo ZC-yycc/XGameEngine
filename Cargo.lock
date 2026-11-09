@@ -5651,6 +5651,7 @@ name = "xgame-runtime"
 version = "0.1.0"
 dependencies = [
  "log",
+ "ron",
  "xgame-audio",
  "xgame-core",
  "xgame-input",

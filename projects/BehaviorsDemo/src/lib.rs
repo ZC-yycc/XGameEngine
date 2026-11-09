@@ -132,6 +132,20 @@ impl Lifecycle for Bobber {
 fn register_all(registry: &mut BehaviorRegistry) {
     registry.register::<Spinner>("Spinner");
     registry.register::<Bobber>("Bobber");
+    registry.register_component::<Health>("Health");
+}
+
+/// 纯数据组件只声明字段，不需要写生命周期实现或 Inspector 控件。
+#[derive(Inspect)]
+pub struct Health {
+    #[inspect(min = 0.0, max = 100.0, tooltip = "角色当前生命值")]
+    pub value: f32,
+}
+
+impl Default for Health {
+    fn default() -> Self {
+        Self { value: 100.0 }
+    }
 }
 
 xgame::export_plugin!(|registry| {
@@ -142,7 +156,7 @@ xgame::export_plugin!(|registry| {
 mod tests {
     use super::*;
 
-    /// 注册表里必须正好是这两个名字。
+    /// 注册表里必须正好是这些名字。
     ///
     /// 这条测试守着 `export_plugin!` 那一侧的真相源：如果有人在闭包里加了
     /// 组件却忘了 `register_all`（或反过来），场景里挂的名字就会静默失效 ——
@@ -154,7 +168,11 @@ mod tests {
 
         let mut names: Vec<String> = registry.names().into_iter().map(str::to_owned).collect();
         names.sort();
-        assert_eq!(names, ["Bobber", "Spinner"], "组件名必须与文档一致");
+        assert_eq!(
+            names,
+            ["Bobber", "Health", "Spinner"],
+            "组件名必须与文档一致"
+        );
     }
 
     /// 组件真的能驱动实体（Rust 轨道在**本项目**里的最小闭环）。

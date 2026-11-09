@@ -14,3 +14,6 @@ xgame-particle = { path = "../xgame-particle" }
 xgame-script = { path = "../xgame-script" }
 xgame-audio = { path = "../xgame-audio" }
 log = "0.4"
+
+[dev-dependencies]
+ron = "0.8"

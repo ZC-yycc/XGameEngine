@@ -48,20 +48,14 @@ fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) 
 pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
     theme::section_bar(ui, "UI");
 
-    if entity.ui.is_none() {
-        ui.indent("ui_empty", |ui| {
-            if ui
-                .button("Add UI Element")
-                .on_hover_text("给这个实体挂一个屏幕空间 UI 元素（锚点布局，忽略 Transform）")
-                .clicked()
-            {
-                entity.ui = Some(UiElement::panel(320.0, 180.0));
-                *touched = true;
-            }
-            ui.label(theme::dim_note(
-                "UI 元素的位置由锚点决定；父子关系决定绘制顺序。",
-            ));
-        });
+    let mut enabled = true;
+    if ui
+        .checkbox(&mut enabled, "UI Element")
+        .on_hover_text("取消勾选以移除 UI 组件")
+        .changed()
+    {
+        entity.ui = None;
+        *touched = true;
         return;
     }
 

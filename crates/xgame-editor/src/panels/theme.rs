@@ -254,6 +254,20 @@ pub fn drag_field_w(
     )
 }
 
+/// 物理等有合法值边界的三轴字段也要跟随面板宽度收缩。
+pub fn drag_field_range_w(
+    ui: &mut egui::Ui,
+    width: f32,
+    value: &mut f32,
+    speed: f64,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Response {
+    ui.add_sized(
+        egui::vec2(width, FIELD_HEIGHT),
+        egui::DragValue::new(value).speed(speed).range(range),
+    )
+}
+
 /// 三轴并排时每个输入框该有多宽（够宽就是 [`FIELD_WIDTH`]，窄了按剩余宽度均分）。
 ///
 /// 固定 54px 在窄窗口下会**顶出 Inspector 右边缘**：标签列 58 + 3×(轴标 9 +

@@ -376,12 +376,21 @@ fn behaviors_demo_plugin_registers_across_the_boundary() {
 
     assert!(registry.contains("Spinner"), "Spinner 应当已注册");
     assert!(registry.contains("Bobber"), "Bobber 应当已注册");
+    assert_eq!(registry.names(), ["Bobber", "Health", "Spinner"]);
+    let fields = registry
+        .field_table("Health")
+        .expect("纯数据组件也应提供字段表");
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].name, "value");
+    let mut health = registry
+        .construct("Health")
+        .expect("插件应能构造纯数据组件");
     assert_eq!(
-        registry.names().len(),
-        2,
-        "注册表里应当正好是这两个组件，实际 {:?}",
-        registry.names()
+        health.inspect_get(0),
+        xgame::inspect::FieldValue::F32(100.0)
     );
+    health.inspect_set(0, xgame::inspect::FieldValue::F32(75.0));
+    assert_eq!(health.inspect_get(0), xgame::inspect::FieldValue::F32(75.0));
 
     // 保活到测试结束：句柄 drop 不卸载，但断言期间必须活着。
     let _keep = plugin.path();
