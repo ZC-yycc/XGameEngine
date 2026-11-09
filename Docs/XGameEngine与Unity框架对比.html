@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>XGameEngine 与 Unity 6.2：框架与工作流对比</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f8f9f7; --paper:#fff; --ink:#1c2a2b; --sub:#526164; --rule:#d8e0dd; --accent:#075e58; --soft:#e8f2ef; --warn:#80551a; --warnbg:#fcf3e4; --code:#eef2f1; }
+    @media (prefers-color-scheme:dark) { :root { --bg:#141c1d; --paper:#1c2628; --ink:#edf2ef; --sub:#b5c5c4; --rule:#3d4f50; --accent:#85d2c5; --soft:#203d3b; --warn:#f0c58b; --warnbg:#3b3024; --code:#253334; } }
+    * { box-sizing:border-box; } html { scroll-behavior:smooth; } body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.75 system-ui,-apple-system,"Microsoft YaHei",sans-serif; }
+    a { color:var(--accent); text-underline-offset:3px; } a:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    .shell { max-width:1460px; margin:auto; display:grid; grid-template-columns:246px minmax(0,1fr); gap:38px; padding:24px 34px 90px; }
+    nav { align-self:start; position:sticky; top:18px; max-height:calc(100vh - 36px); overflow:auto; padding:18px 16px; border:1px solid var(--rule); border-radius:10px; background:var(--paper); font-size:13px; line-height:1.5; }
+    nav strong { display:block; margin-bottom:11px; letter-spacing:.06em; } nav a { display:block; padding:5px 8px; border-radius:4px; text-decoration:none; } nav a:hover { background:var(--soft); }
+    main { min-width:0; max-width:1080px; } header { padding:30px 0 32px; border-bottom:2px solid var(--ink); } .eyebrow { color:var(--accent); font-size:12px; font-weight:700; letter-spacing:.13em; text-transform:uppercase; }
+    h1 { font-size:clamp(27px,3vw,43px); line-height:1.28; margin:12px 0 14px; letter-spacing:-.03em; } h2 { margin:54px 0 12px; font-size:26px; line-height:1.35; scroll-margin-top:20px; } h3 { margin:30px 0 9px; font-size:19px; scroll-margin-top:20px; } h4 { margin:20px 0 6px; font-size:16px; } p { margin:9px 0 16px; } .lead { font-size:18px; max-width:900px; } .meta { color:var(--sub); font-size:13px; }
+    .callout { border-left:4px solid var(--accent); padding:12px 17px; background:var(--soft); margin:19px 0; } .caution { border-left-color:var(--warn); background:var(--warnbg); }
+    .columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin:18px 0; } .columns > div { border:1px solid var(--rule); border-radius:8px; padding:14px 18px; background:var(--paper); }
+    .columns h3 { margin:0 0 8px; font-size:16px; } ul,ol { padding-left:1.5em; } li { margin:6px 0; } li::marker { color:var(--accent); }
+    .scroll { overflow:auto; border:1px solid var(--rule); border-radius:8px; background:var(--paper); margin:18px 0 24px; }
+    table { width:100%; border-collapse:collapse; font-size:14px; line-height:1.65; } th { background:var(--soft); text-align:left; font-size:13px; } th,td { border-bottom:1px solid var(--rule); padding:11px 13px; vertical-align:top; } tr:last-child td { border-bottom:0; } td:first-child { font-weight:650; min-width:125px; } .wide td:nth-child(2),.wide td:nth-child(3) { min-width:225px; }
+    .tag { display:inline-block; white-space:nowrap; border-radius:4px; padding:1px 6px; border:1px solid var(--rule); font-size:11px; font-weight:650; } .same { background:var(--soft); } .different { background:var(--warnbg); }
+    code,pre { font-family:ui-monospace,SFMono-Regular,Consolas,"Microsoft YaHei",monospace; } code { background:var(--code); padding:.08em .32em; border-radius:3px; font-size:.9em; overflow-wrap:anywhere; } pre { background:var(--code); padding:19px; border-radius:8px; overflow:auto; line-height:1.65; font-size:13px; border:1px solid var(--rule); } pre code { background:none; padding:0; }
+    figcaption,.caption { color:var(--sub); font-size:12px; margin:6px 0; } figure { margin:22px 0; } .reference { font-size:12px; font-weight:600; white-space:nowrap; } details { border:1px solid var(--rule); border-radius:7px; padding:9px 14px; margin:10px 0; background:var(--paper); } summary { cursor:pointer; font-weight:650; } .sources li { margin:9px 0; overflow-wrap:anywhere; } .top { display:block; text-align:right; font-size:12px; margin:12px 0; }
+    @media (max-width:1000px) { .shell { display:block; padding:18px 20px 70px; } nav { position:static; max-height:none; margin-bottom:15px; } nav a { display:inline-block; margin-right:7px; } } @media (max-width:680px) { .columns { grid-template-columns:1fr; } body { font-size:15px; } th,td { padding:9px 10px; } } @media print { :root { color-scheme:light; --bg:#fff; --paper:#fff; --ink:#111; --sub:#444; --rule:#bbb; --accent:#005b52; --soft:#eff5f2; --warnbg:#fff5e8; --code:#f3f4f4; } .shell { display:block; padding:0; } nav,.top { display:none; } h2,h3 { break-after:avoid; } tr,figure,.callout { break-inside:avoid; } a { color:var(--ink); } }
+  </style>
+</head>
+<body>
+<div class="shell" id="top">
+  <nav aria-label="报告目录"><strong>目录 / CONTENTS</strong>
+    <a href="#scope">01 · 口径与结论</a><a href="#model">02 · 对象和组件架构</a><a href="#sample">03 · 一个角色如何表达</a>
+    <a href="#inspector">04 · Inspector 与扩展</a><a href="#scene">05 · 场景、层级、预制体</a><a href="#runtime">06 · 帧循环与生命周期</a>
+    <a href="#scripting">07 · 编程与状态</a><a href="#systems">08 · 引擎子系统</a><a href="#assets">09 · 资产、编辑器与构建</a>
+    <a href="#migration">10 · 迁移影响与演进</a><a href="#sources">11 · 资料与源码</a>
+  </nav>
+  <main>
+    <header>
+      <div class="eyebrow">Architecture review / 2026-11-09</div>
+      <h1>XGameEngine 与 Unity 6.2<br>框架与工作流对比</h1>
+      <p class="lead">从“对象由什么组成、数据存在哪、谁在什么时候执行”出发，比较两套引擎。重点回答：XGameEngine 的 <code>Entity</code> 到底有多像 Unity <code>GameObject</code>，以及当前的 Add Component 是否意味着底层组件模型已统一。</p>
+      <p class="meta">XGameEngine 基线：仓库提交 <code>edb243d0b13b</code>；Unity 基线：Unity 6.2 官方手册。本文是对当下实现的架构快照，不把设计目标或历史矩阵当作已实现功能。HTML 内嵌样式、无外部脚本，保存后可离线阅读；源码与官方手册链接需要网络。</p>
+    </header>
+
+    <section id="scope">
+      <h2>01 · 口径与核心结论</h2>
+      <div class="callout"><strong>一句话：</strong>XGameEngine 的 <code>Entity</code> 是 GameObject 式的场景对象；它的“组件”则还不是 Unity 的一份统一、可序列化、可逐实例管理的组件列表。相似的是组合对象的使用意图，差别在保存、实例身份、调度和编辑器呈现。<a class="reference" href="#x-scene">[X1]</a> <a class="reference" href="#u-go">[U1]</a></div>
+      <div class="columns">
+        <div><h3>如何读本文的“对应”</h3><p><span class="tag same">功能相似</span> 指用户能完成类似任务，比如给实体加相机；<span class="tag different">机制不同</span> 指真实存储与生命周期不相同。表格不以“有 / 没有”掩盖“有基础实现但能力边界不同”。</p></div>
+        <div><h3>证据和范围</h3><p>XGameEngine 的现状优先看当前源码与 README、ROADMAP；优先级只用 <a href="#x-gap">差距分析的 G0—G4</a>，历史 P0—P3 矩阵只作历史。Unity 的术语和行为链接到 6.2 手册；选配包和平台能力不代表所有项目默认开启。</p></div>
+      </div>
+      <div class="scroll"><table class="wide"><thead><tr><th>层面</th><th>XGameEngine</th><th>Unity 6.2</th><th>判断</th></tr></thead><tbody>
+        <tr><td>场景对象</td><td><code>Scene.entities: Vec&lt;Entity&gt;</code>，实体有 ID、名称、局部 Transform、父 ID。</td><td>Scene 中的 GameObject，始终附带 Transform；对象以组件赋予功能。</td><td><span class="tag same">概念接近</span> <a class="reference" href="#x-scene">[X1]</a> <a class="reference" href="#u-go">[U1]</a></td></tr>
+        <tr><td>可保存的功能</td><td>内建字段 + <code>behaviors/behavior_params</code> + <code>scripts</code>，场景光源在 <code>Scene.lights</code>。</td><td>GameObject 上的内建组件与用户脚本组件，Light 本身也是组件。</td><td><span class="tag different">分散存储</span> <a class="reference" href="#x-scene">[X1]</a> <a class="reference" href="#u-go">[U1]</a></td></tr>
+        <tr><td>扩展代码</td><td>Rust 行为 / 纯数据注册组件与 Lua 资产；两轨分开装配与调度。</td><td>常见对象扩展为 C# MonoBehaviour 组件；还可使用其他 Unity 编程技术。</td><td><span class="tag different">执行模型不同</span> <a class="reference" href="#x-registry">[X3]</a> <a class="reference" href="#u-components">[U2]</a></td></tr>
+        <tr><td>内容与交付</td><td>小型 3D 引擎，Windows/CI 有实测路径；G0 组合正确性和发布验证仍在进行。</td><td>多平台构建配置及成熟的内容制作生态；具体能力取决于版本、包和目标平台。</td><td><span class="tag different">成熟度不同</span> <a class="reference" href="#x-gap">[X11]</a> <a class="reference" href="#u-build">[U9]</a></td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section id="model">
+      <h2>02 · 对象与组件：最关键的结构差异</h2>
+      <figure><pre><code>Unity 6.2                                    XGameEngine
+Scene                                       Scene
+ └─ GameObject                               ├─ entities: Vec&lt;Entity&gt;
+     ├─ Transform（必有，不能移除）             │   └─ Entity { id, parent, transform,
+     ├─ MeshFilter / MeshRenderer            │      model, physics?, camera?, audio?,
+     ├─ Rigidbody / Collider                 │      animator?, ui?, particle?, ...,
+     ├─ Camera / Light / AudioSource          │      behaviors: [注册名],
+     └─ MonoBehaviour × N                     │      behavior_params: {名: 字段值},
+                                              │      scripts: [Lua 路径],
+                                              │      components: ComponentMap（不落盘） }
+                                              └─ lights: Vec&lt;Light&gt;（场景级）
+
+                       World（运行时）
+                         ├─ Rust BehaviorRegistry → BehaviorInstanceSet
+                         ├─ LuaHost → 脚本编译/调用
+                         ├─ PhysicsWorld / AnimationDriver / AudioEngine / ...
+                         └─ 按 Entity 字段装配内建系统</code></pre><figcaption>结构是职责示意，不表示 Unity 内部物理内存布局；XGameEngine 侧依据 Entity、Scene、World 和 BehaviorRegistry。<a href="#x-scene">[X1]</a> <a href="#x-world">[X4]</a> <a href="#x-registry">[X3]</a> <a href="#u-go">[U1]</a></figcaption></figure>
+      <h3>2.1 <code>Entity</code> 更接近 GameObject，而不是一张 ECS 表</h3>
+      <p>实体有稳定 <code>EntityId</code>、名称、局部变换、指向父实体 ID 的引用；场景按实体列表保存，世界矩阵从层级解算。一个实体既能承载模型与物理，也可以只是脚本、UI 或相机的宿主。Unity GameObject 也作为行为和表现的组合容器，并固定拥有一个不可移除的 Transform。区别是 Unity 的 Transform 是组件，XGameEngine 的 Transform 是实体内嵌字段；UI 的锚点布局甚至不使用实体的 3D Transform。<a class="reference" href="#x-scene">[X1]</a> <a class="reference" href="#x-ui">[X12]</a> <a class="reference" href="#u-go">[U1]</a></p>
+      <h3>2.2 三条可保存通道，加一条运行时通道</h3>
+      <div class="scroll"><table class="wide"><thead><tr><th>通道</th><th>写入场景 / 预制体的内容</th><th>运行时与 Inspector 的实际含义</th><th>与 Unity 的距离</th></tr></thead><tbody>
+        <tr><td>内建字段</td><td><code>physics?</code>、<code>animator?</code>、<code>audio?</code>、<code>controller?</code>、<code>ui?</code>、<code>particle?</code>、<code>camera?</code>；模型、LOD、材质为其他实体字段。<code>lights</code> 在场景上。</td><td>各系统识别具体字段；同种可选字段每个实体至多一份；Inspector 多为手写面板。</td><td>能表达许多相似功能，但不是动态添加的统一组件对象。<a class="reference" href="#x-scene">[X1]</a></td></tr>
+        <tr><td>Rust 注册组件</td><td><code>behaviors: Vec&lt;String&gt;</code> 保存注册名；<code>behavior_params</code> 按注册名存字段值。</td><td>插件注册类型，World 装配独立实例；<code>register_component&lt;T&gt;</code> 让纯数据类型通过同一通道、空生命周期参与 Inspector。</td><td>最接近用户自定义组件，但实例身份仍以注册名及列表槽位约定；参数键按名，无跨内建 / Lua 的统一序列化层。<a class="reference" href="#x-registry">[X3]</a> <a class="reference" href="#x-scene">[X1]</a></td></tr>
+        <tr><td>Lua 脚本</td><td><code>scripts: Vec&lt;String&gt;</code> 保存项目相对路径，不内联脚本内容。</td><td><code>LuaHost</code> 预加载并按生命周期派发；Inspector 独立 Scripts 列表，不经过 Rust 组件注册表的 <code>Inspect</code> 字段机制。</td><td>“给对象挂脚本”操作相似，但不是一个带 Unity 序列化字段的 MonoBehaviour 实例。<a class="reference" href="#x-lua">[X5]</a> <a class="reference" href="#x-inspector">[X6]</a></td></tr>
+        <tr><td><code>ComponentMap</code></td><td><strong>不写入：</strong><code>#[serde(skip)]</code>；克隆时创建空 Map。</td><td>实体上以 Rust <code>TypeId</code> 存取，单类型单件，适合运行时状态；<code>add_component&lt;T&gt;</code> 操作的是这张 Map。</td><td>名字叫 Component，但它不是可保存、可在 Inspector 任意增删的 Unity 组件容器。<a class="reference" href="#x-component">[X2]</a> <a class="reference" href="#x-scene">[X1]</a></td></tr>
+      </tbody></table></div>
+      <p>“不是 ECS”是对<strong>当前主场景模型</strong>的判断：实体是带多个字段的对象，渲染/物理/脚本由 World 编排，现有运行时 Map 用于按类型查询；不能仅凭存在 <code>ComponentMap</code> 就推断全引擎已采用稀疏组件表或 Unity DOTS ECS。Unity 的传统 GameObject 工作流本身也不同于 Unity Entities/DOTS。<a class="reference" href="#x-world">[X4]</a> <a class="reference" href="#u-go">[U1]</a></p>
+      <h3>2.3 组合性、数量和顺序</h3>
+      <p>Unity 对象可以附加多个组件；具体能否重复、是否要求其他组件，受组件类型和约束影响。XGameEngine 的内建 <code>Option</code> 天然单件，<code>ComponentMap</code> 每 Rust 类型单件；编辑器 Add Component 会跳过已存在的 Rust 注册名与 Lua 路径。Rust 与 Lua 各自列表的顺序有执行语义，但二者没有一个跨语言、跨内建字段的组件序列；不能把三个列表在界面上排成一列就当作“Unity 式执行顺序”。<a class="reference" href="#x-add">[X7]</a> <a class="reference" href="#x-world">[X4]</a> <a class="reference" href="#u-inspector">[U3]</a></p>
+    </section>
+
+    <section id="sample">
+      <h2>03 · 对照实例：一个可移动角色怎么表达</h2>
+      <div class="columns"><div><h3>Unity 的典型做法</h3><p>GameObject “Player” + Transform；视项目选用 MeshFilter / MeshRenderer（或 SkinnedMeshRenderer）、Collider、Rigidbody / CharacterController、Animator、AudioSource、若干 MonoBehaviour。场景或 Prefab 保存各组件及其可序列化字段；Light 可作为对象的组件。<a class="reference" href="#u-go">[U1]</a> <a class="reference" href="#u-serial">[U5]</a></p></div><div><h3>XGameEngine 的典型做法</h3><p><code>Entity("Player")</code>：<code>model</code> 指 glTF，<code>physics</code> 和可选 <code>controller</code> 描述碰撞与移动，<code>animator</code>、<code>audio</code> 分别是可选字段；<code>behaviors</code> 挂 Rust 逻辑，<code>scripts</code> 挂 Lua 逻辑。灯需要改场景 <code>lights</code>，不是加在 Player 上。<a class="reference" href="#x-scene">[X1]</a></p></div></div>
+      <pre><code>Entity(
+  name: "Player", id: (7), parent: None,
+  transform: (...), model: "guid://…",  // 磁盘写 GUID，内存解成项目路径
+  physics: Some((...)), controller: Some((...)),
+  animator: Some((...)), audio: Some((...)),
+  behaviors: ["Health", "PlayerMotor"],
+  behavior_params: { "Health": { "value": ... } },
+  scripts: ["guid://…"],
+)</code></pre>
+      <p class="caption">上面是教学用结构示意，省略真实字段类型 / RON 枚举语法 / GUID 值，不应直接复制为场景文件；实际磁盘字段与可用示例以 <a href="#x-schema">scene_schema()</a>、现有项目场景及 <a href="#x-asset">资产编码逻辑</a> 为准。</p>
+      <p>这也解释“一个对象身上看起来有多个功能”与“所有功能都是同一种 Component”之间的差别。迁移工具不能只把 Unity 的 <code>GetComponent&lt;Rigidbody&gt;()</code> 改名：在 XGameEngine 中要访问的是 <code>Entity.physics</code>、World 物理状态或脚本 API，具体取决于要读配置还是当前模拟结果。</p>
+    </section>
+
+    <section id="inspector">
+      <h2>04 · Inspector、添加 / 移除与自定义字段</h2>
+      <div class="scroll"><table class="wide"><thead><tr><th>操作</th><th>XGameEngine 当前行为</th><th>Unity 6.2</th></tr></thead><tbody>
+        <tr><td>添加</td><td>单个 Add Component 菜单列出缺失的内建功能、已注册 Rust 组件和脚本资产；加入后仍写回各自的数据通道。</td><td>Inspector 的 Add Component 添加对象组件；脚本可作为组件挂载。<a class="reference" href="#x-add">[X7]</a> <a class="reference" href="#u-inspector">[U3]</a></td></tr>
+        <tr><td>展示</td><td>Transform / Model 与可选内建区块由专用面板绘制；Rust 列在 Behaviors，Lua 列在 Scripts。未挂载的可选区块不显示。</td><td>每个附加组件通常作为自己的 Inspector 区块呈现，可管理其属性。<a class="reference" href="#x-inspector">[X6]</a> <a class="reference" href="#u-inspector">[U3]</a></td></tr>
+        <tr><td>移除</td><td>Lua / Rust 列表行已有关闭按钮；部分内建功能在各自面板有移除控制，方式和位置并不统一。目前没有每个组件同款的标题菜单 / 右键移除体验。</td><td>Inspector 提供组件菜单管理（包括移除）；Transform 不可移除。<a class="reference" href="#x-inspector">[X6]</a> <a class="reference" href="#u-inspector">[U3]</a></td></tr>
+        <tr><td>字段检视</td><td>Rust <code>Inspect</code> 字段表 + 派生宏可生成标量、布尔、字符串、向量控件；<code>register_component&lt;T&gt;</code> 的纯数据组件也可调，值进 <code>behavior_params</code>。复杂内建面板仍手写。</td><td>Unity 序列化器支持合规字段展示；自定义 Inspector / Property Drawer 等可扩展。字段支持范围和编辑规则不是自动一致的。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#u-serial">[U5]</a></td></tr>
+        <tr><td>编辑态 / Play 态</td><td>编辑态取惰性构造副本并将字段值写场景；Play / Pause 读取运行中 Rust 实例，可在运行态调参，但场景保存受运行态限制。</td><td>Inspector 能检视 Play 中对象；Play 模式中的改动与保存规则由 Unity 工作流决定，不应把 X 的运行时调参与持久化画等号。<a class="reference" href="#x-state">[X9]</a></td></tr>
+        <tr><td>撤销与脏标记</td><td>编辑器在改动前拍整份 Scene 快照；可保存的 Rust 参数经 working Entity 写回后参与撤销与脏检查。运行时 Map 不落盘也不参与此类场景比较。</td><td>Unity 编辑器有对象与组件级的常规编辑、撤销与序列化工作流；实现机制不相同。<a class="reference" href="#x-flow">[X10]</a> <a class="reference" href="#u-inspector">[U3]</a></td></tr>
+      </tbody></table></div>
+      <div class="callout caution"><strong>当前 UX 的精确边界：</strong>“统一 Add Component”指添加入口统一。已挂载项还保留 Scripts / Behaviors 与各内建面板的分区；没有统一的组件卡片标题、折叠、移除与跨类型重排。若只想改善操作，可以在 Inspector 建一个映射现有字段的统一视图；若要求 Unity 式统一组件实例语义，场景格式与运行时都需要重新设计。<a class="reference" href="#x-add">[X7]</a> <a class="reference" href="#x-inspector">[X6]</a></div>
+    </section>
+
+    <section id="scene">
+      <h2>05 · 场景、层级、预制体与引用</h2>
+      <h3>5.1 场景与父子关系</h3>
+      <p>XGameEngine 场景保存实体数组；每个实体只记录 <code>parent: Option&lt;EntityId&gt;</code>，子列表在需要时反推；本地 Transform 通过父链转为世界矩阵。编辑器可以重挂父节点并保持世界变换。Unity 则以 Scene / Hierarchy 中的 GameObject 父子关系呈现，Transform 负责层级空间关系。两者都支持层级，但 XGameEngine 的 Light 列表是场景数据，相机是实体上的可选字段；Unity 两者通常都是 GameObject 上的组件。<a class="reference" href="#x-scene">[X1]</a> <a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#u-go">[U1]</a></p>
+      <h3>5.2 Prefab 的“引用”不等于同步语义相同</h3>
+      <div class="scroll"><table class="wide"><thead><tr><th>问题</th><th>XGameEngine</th><th>Unity 6.2</th></tr></thead><tbody>
+        <tr><td>资产结构</td><td><code>Prefab { name, entities }</code>：一份较小的场景，无场景光源和环境光；实体带内部父 ID。</td><td>Prefab 资产存 GameObject、组件和子对象层级；可作为模板生成实例。<a class="reference" href="#x-prefab">[X13]</a> <a class="reference" href="#u-prefab">[U6]</a></td></tr>
+        <tr><td>实例记录</td><td>场景中存实体副本 + 各实体 <code>PrefabInstanceRef { source, source_id, is_root }</code>；来源 ID 匹配 Apply / Revert。</td><td>Prefab 资产与实例存在关联，并支持实例属性覆盖及相关工作流。<a class="reference" href="#x-prefab">[X13]</a> <a class="reference" href="#u-prefab">[U6]</a></td></tr>
+        <tr><td>修改传播</td><td>改资产不会隐式刷新已保存的场景实例；手工 Apply / Revert 操作，Revert 保留已有实体 ID 和实例位置。</td><td>Prefab 资产的改动通常传播到未覆盖的实例属性；实例的 overrides 可保留 / 应用 / 还原。两者心智模型不同。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#u-overrides">[U7]</a></td></tr>
+        <tr><td>扩展组合</td><td>支持一棵子树重复实例化与脚本调用 <code>spawn_prefab</code>、<code>spawn_prefab_under</code>；不要推断已有 Unity 完整的嵌套 Prefab / Variant 覆盖体系。</td><td>官方提供嵌套 Prefab、Prefab Variant 等工作流。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#u-prefab">[U6]</a></td></tr>
+      </tbody></table></div>
+      <h3>5.3 多场景与切关</h3>
+      <p>XGameEngine 可在编辑器切换场景，用 <code>project.ron</code> 的 <code>entry_scene</code> 定启动场景、<code>build.scenes</code> 定有序关卡；脚本 <code>load_scene</code> 在帧末换场景，重置与当前实体绑定的运行时系统状态。当前没有多场景并存的流式加载。Unity 可在编辑器同时处理多个 Scene，并有加法式加载的相关工作流；不能将 X 的“多个场景文件 / 顺序关卡”算作相同的运行时叠加载场景能力。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#x-gap">[X11]</a> <a class="reference" href="#u-multi">[U8]</a></p>
+    </section>
+
+    <section id="runtime">
+      <h2>06 · 帧循环、事件与生命周期</h2>
+      <figure><pre><code>XGameEngine World::update(dt)
+  0  UI 布局 / 指针与焦点命中
+  1  Start 阶段：Rust 组件 → Lua
+  2  固定步循环：FixedUpdate（Rust → Lua）→ 命令 → 刚体同步
+                 → 物理 step → 碰撞 / 角色事件
+  3  Update（Rust → Lua）→ 命令 → 帧末切场景
+  4  动画 / 根运动 / 动画事件 → 粒子 → 音频 / 监听 → 输入清理
+  5  宿主读取世界状态并渲染（编辑器 Play 与独立游戏复用同一 World）</code></pre><figcaption>依据当前 <code>World::update</code> 的顺序作简化，步骤不是可供用户配置的 Unity PlayerLoop。<a href="#x-world">[X4]</a></figcaption></figure>
+      <div class="scroll"><table class="wide"><thead><tr><th>主题</th><th>XGameEngine</th><th>Unity 6.2 的对照</th></tr></thead><tbody>
+        <tr><td>调度顺序</td><td>每个阶段先 Rust 行为，再 Lua；同一实体的 Rust / Lua 各按各自列表顺序派发；跨实体顺序按引擎当前派发逻辑。</td><td>MonoBehaviour 生命周期函数的阶段顺序有文档；不同对象同一事件函数的调用顺序一般不能任意依赖，可通过执行顺序配置约束脚本类的顺序。<a class="reference" href="#x-world">[X4]</a> <a class="reference" href="#u-order">[U4]</a></td></tr>
+        <tr><td>主要钩子</td><td>Lua <code>start/update/fixed_update/on_destroy</code> 及其他事件钩子；Rust <code>Lifecycle</code> 提供启动、帧 / 固定帧、碰撞、动画事件与销毁等入口。</td><td>MonoBehaviour 包括 Awake、OnEnable、Start、FixedUpdate、Update、LateUpdate 等更完整的事件生命周期；不要机械等同同名函数。<a class="reference" href="#x-registry">[X3]</a> <a class="reference" href="#u-order">[U4]</a></td></tr>
+        <tr><td>固定步与物理</td><td>引擎时钟消费固定步、同步运动学与动态刚体，并分发碰撞；最大步数保护防止积压失控。</td><td>Unity 固定更新和物理仿真有定义好的顺序，但具体配置可变化；迁移时需重新核对输入采样 / 碰撞回调时机。<a class="reference" href="#x-world">[X4]</a> <a class="reference" href="#u-order">[U4]</a></td></tr>
+        <tr><td>结构性命令</td><td>Lua / Rust 钩子可改变 Scene；部分命令在指定阶段或下一帧结算，切场景集中在帧末。即使 API 名类似也应按本引擎时序编写逻辑。</td><td>Unity 有自己的 Instantiate / Destroy、事件和帧末执行规则；不是一一同构。<a class="reference" href="#x-world">[X4]</a></td></tr>
+        <tr><td>编辑器 / 游戏一致性</td><td>编辑器 Play 和独立游戏使用同一段 <code>World::update</code>，无头模式也走该世界。</td><td>Unity Editor Play 和 Player 共用 Unity 运行时概念，但编辑器模拟、构建配置和平台差异需分别测试。<a class="reference" href="#x-flow">[X10]</a></td></tr>
+      </tbody></table></div>
+      <p>迁移时尤其不要依赖“Inspector 区块从上到下 = 钩子先后”：X 的 Rust/Lua 分轨规则已经写在 World 中；Unity 的组件排列也不直接等价于任意生命周期脚本执行顺序。<a class="reference" href="#x-world">[X4]</a> <a class="reference" href="#u-order">[U4]</a></p>
+    </section>
+
+    <section id="scripting">
+      <h2>07 · 编程、序列化与运行时状态</h2>
+      <div class="scroll"><table class="wide"><thead><tr><th>方面</th><th>XGameEngine</th><th>Unity 6.2</th></tr></thead><tbody>
+        <tr><td>主语言与复用</td><td>引擎 Rust；游戏逻辑支持 Rust 插件注册的行为 / 数据组件及 Lua 脚本资产；Lua 单轨脚本宿主，不支持仓库已移除的 Rhai 或 C# 脚本。</td><td>GameObject 常见自定义行为使用 C# MonoBehaviour；可通过 Unity 脚本和组件 API 实现扩展。<a class="reference" href="#x-decision">[X14]</a> <a class="reference" href="#u-components">[U2]</a></td></tr>
+        <tr><td>字段持久化</td><td>Rust 可检视字段被提取为 <code>behavior_params</code> 存盘，运行时按注册名恢复；Lua 源码按资产路径引用；任意 Rust 对象和 Lua 全局变量不会自动变成场景属性。</td><td>Unity 序列化符合条件的组件字段，规则限定哪些类型和字段可以持久化；ScriptableObject 等另有用途。<a class="reference" href="#x-registry">[X3]</a> <a class="reference" href="#u-serial">[U5]</a></td></tr>
+        <tr><td>运行时临时状态</td><td><code>ComponentMap</code> 不序列化且克隆不复制；Rust 行为实例由 World 装配，Lua VM/宿主另管运行态。</td><td>组件实例与序列化字段、Play 中临时值同处对象工作流；具体保存 / 恢复按 Unity 序列化和编辑器规则。</td></tr>
+        <tr><td>热重载</td><td>编辑器轮询内容目录：Lua 保存后可重新编译，模型 / 材质 / 贴图等清缓存；Rust 插件需编译并通过兼容指纹，Windows 通过临时副本加载，旧 DLL 句柄不卸载。</td><td>Unity 脚本编译与代码重载有独立工作流；两者都能迭代，但重载状态、粒度与 ABI 约束不同。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#x-decision">[X14]</a></td></tr>
+        <tr><td>脚本安全与调试</td><td>Lua 有指令预算和内存上限；仓库差距分析明确仍缺脚本调试器。Rust 插件是本机代码，指纹是保守门禁，不是沙箱或完整 ABI 证明。</td><td>Unity 提供成熟的 C# 调试生态与编辑器工具；具体调试器取决于安装和配置。<a class="reference" href="#x-decision">[X14]</a> <a class="reference" href="#x-gap">[X11]</a></td></tr>
+        <tr><td>存档</td><td>SaveGame 存局部变换、刚体速度和变量覆盖层；不保存动态生成物、时钟或任意组件实例状态。</td><td>游戏存档通常由项目自行设计；不要把 Unity 场景 / Prefab 序列化直接理解成自动的玩家存档。<a class="reference" href="#x-gap">[X11]</a></td></tr>
+      </tbody></table></div>
+      <div class="callout"><strong>一个容易误导的命名：</strong>Rust <code>register_component&lt;Health&gt;</code> 的“数据组件”确实可以随场景保存与编辑；它实际通过 <code>DataComponent&lt;T&gt;</code> 包装成同一行为注册通道。它和实体上的 <code>ComponentMap.insert(Health)</code> 是两条不同的路径，后者不会随场景保存。<a class="reference" href="#x-registry">[X3]</a> <a class="reference" href="#x-component">[X2]</a></div>
+    </section>
+
+    <section id="systems">
+      <h2>08 · 渲染、物理、动画、音频、输入与 UI</h2>
+      <p>本节对照<strong>能力轮廓</strong>，不把“同名技术”当作画面品质、导入保真、工具链或性能完全等价的证据。X 的功能依据当前 README 与差距分析；Unity 的可用功能还会受所选渲染管线及包影响。</p>
+      <div class="scroll"><table class="wide"><thead><tr><th>子系统</th><th>XGameEngine 当前能力</th><th>Unity 对照与实际差距</th></tr></thead><tbody>
+        <tr><td>渲染路径</td><td>wgpu 自有 3D 管线；glTF、金属粗糙度 PBR、材质资产、逐实体覆盖、实时方向 / 点光、阴影、HDR/曝光、Bloom、天空/IBL、FXAA/TAA、LOD 与剔除等已有实现。</td><td>Unity 可选 Built-in、URP、HDRP 等渲染管线及其生态；X 的“有 PBR/阴影”不代表管线可互换、功能覆盖或资产效果逐项相同。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#u-render">[U10]</a></td></tr>
+        <tr><td>场景照明</td><td><code>Scene.lights</code>、<code>ambient</code> 为场景级配置；相机跟实体 Transform 走。实时功能已有，光照烘焙仍缺。</td><td>Unity 的 Light / Camera 常作为 GameObject 组件，支持更丰富的照明制作工作流；迁移光源要改对象归属。<a class="reference" href="#x-scene">[X1]</a> <a class="reference" href="#x-gap">[X11]</a> <a class="reference" href="#u-go">[U1]</a></td></tr>
+        <tr><td>物理与控制器</td><td>Rapier 3D，<code>physics</code> 描述实体物理属性，运行时维护刚体与碰撞；角色控制器与层碰撞矩阵已有。父子关系不自动形成物理关节。</td><td>Unity 用 Rigidbody / Collider / CharacterController 等组件组合；API、碰撞事件时序、形状与物理后端不同，迁移需重新校准行为。<a class="reference" href="#x-scene">[X1]</a> <a class="reference" href="#x-readme">[X8]</a></td></tr>
+        <tr><td>动画</td><td>glTF 骨骼蒙皮、剪辑/状态机/分层、过渡、根运动、morph 与动画事件已有，运行态由 AnimationDriver 推进。</td><td>Unity 的 Animator 与动画制作工具链覆盖更完整；X 已有运行时播放能力，不等于 Timeline、导入与编辑工具全部齐全。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#x-gap">[X11]</a></td></tr>
+        <tr><td>音频</td><td>基于 kira 的音源与空间化；Sfx / Bgm / Voice 固定三组总线及主音量。流式长音频和遮挡低通等仍缺。</td><td>Unity 的音源 / 监听器和 Mixer 工作流更广；不能把 X 的三总线等同于通用可编辑混音图。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#x-gap">[X11]</a></td></tr>
+        <tr><td>输入与 UI</td><td><code>input.ron</code> 动作映射；屏幕空间 UI 由实体 <code>ui</code> 字段、锚点、按钮/文本/图片等组成；鼠标和键盘/手柄按钮焦点支持。无输入框、滚动容器和完整 Canvas Scaler 等。</td><td>Unity 有 Input System / legacy Input Manager，以及 UI Toolkit、uGUI、IMGUI 三种 UI 系统；X 的锚点只是 RectTransform 思想的一部分，不能直接导入 Unity UI 层级。<a class="reference" href="#x-ui">[X12]</a> <a class="reference" href="#u-ui">[U11]</a> <a class="reference" href="#u-input">[U12]</a></td></tr>
+        <tr><td>大世界 / 2D / 网络</td><td>以小型 3D 游戏为目标；场景流式加载、地形/水体、原生网络多人、完整 2D 生产线等不在当前基础闭环。</td><td>Unity 在这些方向有不同模块或包，但具体解决方案按项目选型；X 当前优先保障 G0 交付可靠性。<a class="reference" href="#x-gap">[X11]</a></td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section id="assets">
+      <h2>09 · 资产管线、编辑器与发布</h2>
+      <h3>9.1 资产身份及序列化</h3>
+      <p>XGameEngine 的场景与预制体用 RON 文本；磁盘上的资产引用写 <code>guid://…</code>，旁侧 <code>.meta</code> 保存资产身份和部分导入设置；加载到内存后转换为项目相对路径，写回时再编码为 GUID。这个机制解决了移动资产的基本引用稳定性，但并不等于 Unity 完整的 AssetDatabase、导入器、依赖追踪与缓存行为。Unity 的 <code>.meta</code> 保存 GUID 等元数据及导入设置；两边文件语法和导入管线也不同。<a class="reference" href="#x-asset">[X15]</a> <a class="reference" href="#u-meta">[U13]</a></p>
+      <h3>9.2 编辑器及验证入口</h3>
+      <div class="scroll"><table class="wide"><thead><tr><th>主题</th><th>XGameEngine</th><th>Unity 6.2</th></tr></thead><tbody>
+        <tr><td>编辑界面</td><td>egui 编辑器：项目枢纽、Hierarchy、Scene View、Inspector、Prefabs、资产相关面板、Console/Profiler；Gizmo、撤销、自动保存、运行时 Play/Pause/Stop、项目设置与场景菜单。</td><td>成熟的多窗口编辑器、Inspector/Hierarchy/Scene/Project 等工作流和可扩展编辑工具。X 已覆盖常见动作的最小链条，但工具深度仍不同。<a class="reference" href="#x-readme">[X8]</a></td></tr>
+        <tr><td>自动化</td><td>提供 <code>--check</code>、<code>--export-schema</code>、<code>--export-script-api</code>、<code>--headless</code>、无头截图和 MCP 工具；场景 schema 与 CLI/MCP 共一份来源。</td><td>Unity 有批处理、构建和编辑器脚本生态；同为可自动化，工具协议与覆盖面不同。<a class="reference" href="#x-schema">[X16]</a></td></tr>
+        <tr><td>构建 / 包</td><td>独立游戏宿主及项目发布包；<code>build.scenes</code> 有序场景清单、发布前依赖审计、插件指纹校验等。CI 主要在 Windows 跑 check、clippy、test 和无头冒烟。</td><td>Unity 6.2 用 Build Profiles 配置目标平台和构建；X 的“有 build”不等于具备多平台导出配置或完成目标设备验证。<a class="reference" href="#x-readme">[X8]</a> <a class="reference" href="#x-gap">[X11]</a> <a class="reference" href="#u-build">[U9]</a></td></tr>
+        <tr><td>平台边界</td><td>Windows/MSVC 路径与 Windows CI 有证据；Linux、macOS、Web 尚未完成原生构建与运行验收。</td><td>Unity 有跨平台构建配置，仍须针对具体设备、图形后端与包进行测试。<a class="reference" href="#x-gap">[X11]</a> <a class="reference" href="#u-build">[U9]</a></td></tr>
+      </tbody></table></div>
+      <p><strong>成熟度不能折成一个百分比。</strong> 当前正式优先级是 G0 组合正确、保存可靠和独立发布验证，再到 G1 完整小型 3D 游戏、G2 内容生产规模、G3 平台 / 团队 / 网络和 G4 专项高端能力。此前 P0—P3 与 200 项历史矩阵不是当下优先级或完成率。<a class="reference" href="#x-gap">[X11]</a></p>
+    </section>
+
+    <section id="migration">
+      <h2>10 · 从 Unity 迁移时会真正碰到什么</h2>
+      <div class="scroll"><table class="wide"><thead><tr><th>Unity 项目中的习惯</th><th>在 XGameEngine 的落点</th><th>需要重新设计的部分</th></tr></thead><tbody>
+        <tr><td>GameObject + Transform</td><td><code>Entity</code> + 内嵌局部 <code>transform</code> + <code>parent</code> ID。</td><td>层级遍历和 API 改写；UI 锚点不走 3D Transform。</td></tr>
+        <tr><td>MeshFilter / Renderer / 材质</td><td><code>model</code>、<code>lod</code>、<code>material_asset</code>、<code>material</code> 字段及 glTF / .mat 资产。</td><td>模型导入、材质属性和 shader 效果须单独对齐。</td></tr>
+        <tr><td>Rigidbody + Collider / CharacterController</td><td><code>physics</code>、<code>controller</code> 字段及 World / Rapier 状态。</td><td>碰撞形状、接触响应、回调时机和查询代码需重测。</td></tr>
+        <tr><td>MonoBehaviour + 序列化字段</td><td>写 Rust <code>Lifecycle + Inspect</code> 并注册，或使用 Lua 生命周期与函数 API；纯数据可 <code>register_component&lt;T&gt;</code>。</td><td>字段类型和持久化路径要显式规划；C# 脚本不可原样运行。</td></tr>
+        <tr><td>Prefab overrides / Variants</td><td>预制体实体副本 + 来源 ID，显式 Apply / Revert。</td><td>资产更新传播、局部覆盖策略和嵌套结构不能直接照搬。</td></tr>
+        <tr><td>多 Scene 加载 / 流式内容</td><td>有序关卡和帧末单场景切换。</td><td>叠加载、持久常驻世界和跨场景引用需要新方案。</td></tr>
+        <tr><td>Unity UI / Input System</td><td>屏幕空间实体 UI + <code>input.ron</code> 动作。</td><td>复杂排版、输入框、设备适配与事件系统按已有功能边界重建。</td></tr>
+      </tbody></table></div>
+      <h3>如果目标是“像 Unity 一样管理组件”，先区分两种工程量</h3>
+      <ol>
+        <li><strong>统一 Inspector 表现：</strong>为内建字段、Rust 注册组件和 Lua 脚本创建同一种“已挂载项目”视图，标题栏共用折叠与移除操作；每项操作仍映射原字段并进入现有撤销链。用户获得统一交互，不需要改变场景文件格式。但必须明确 Rust / Lua 实际执行顺序不受视觉顺序支配。</li>
+        <li><strong>统一底层组件实例：</strong>设计可序列化的类型标识、实例 ID、重复组件与排序规则，决定内建数据及脚本如何接入注册表、Prefab Apply/Revert、资产 GUID、旧文件迁移和 <code>scene_schema()</code>。随后修改 World / Inspector / 导出 / 验证链。这个目标相当于数据与运行时架构迁移，而不是仅调界面。</li>
+      </ol>
+      <div class="callout caution"><strong>建议的决策门槛：</strong>如果当前痛点只是“难找、难移除、面板不一致”，先做第一类；只有项目明确需要跨类型组件重排、同类型多实例、统一查询 / 复制 / 序列化或类似 Unity 的 Prefab 属性覆盖时，第二类才有明确收益。优先级仍以仓库 <a href="#x-gap">G0—G4</a> 为准，以上是模型选择的影响分析，不替代正式路线图。</div>
+    </section>
+
+    <section id="sources">
+      <h2>11 · 资料与可复核位置</h2>
+      <p class="meta">X 链接固定到本报告所用的仓库提交，行号便于复核。Unity 链接指向 6.2 官方英文手册；若手册页面后续修订，以所见版本为准。文中关于迁移工程量、交互取舍的表述是依据这些事实作出的分析，并非 Unity 官方承诺。</p>
+      <h3>XGameEngine 源码和项目资料</h3>
+      <ol class="sources">
+        <li id="x-scene">[X1] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-core/src/scene.rs#L29-L227">scene.rs · Entity 字段</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-core/src/scene.rs#L528-L544">Scene 与灯光</a>。</li>
+        <li id="x-component">[X2] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-core/src/component.rs#L37-L151">component.rs · ComponentMap、TypeId、Clone</a>。</li>
+        <li id="x-registry">[X3] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-runtime/src/registry.rs#L20-L148">registry.rs · 纯数据组件与行为注册</a>。</li>
+        <li id="x-world">[X4] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-runtime/src/world.rs#L1140-L1227">world.rs · 帧循环</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-runtime/src/world.rs#L1230-L1413">派发及装配</a>。</li>
+        <li id="x-lua">[X5] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-script/src/lua_host.rs#L352-L443">lua_host.rs · 预加载与生命周期</a>。</li>
+        <li id="x-inspector">[X6] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-editor/src/panels/inspector.rs#L1572-L1715">inspector.rs · Scripts / Behaviors 区块及移除</a>。</li>
+        <li id="x-add">[X7] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-editor/src/panels/inspector.rs#L459-L538">inspector.rs · Add Component 菜单</a>；<a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/ROADMAP.md#L12-L17">ROADMAP · 本轮状态</a>。</li>
+        <li id="x-readme">[X8] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/README.md">README · 功能与使用限制</a>（组件、渲染、编辑器、预制体、资产、UI、构建章节）。</li>
+        <li id="x-state">[X9] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-editor/src/state.rs#L2604-L2677">state.rs · Edit / Play 组件检视</a>。</li>
+        <li id="x-flow">[X10] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/FLOW.md">FLOW · 运行与 Inspector 数据流</a>。</li>
+        <li id="x-gap">[X11] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/Docs/%E5%B7%AE%E8%B7%9D%E5%88%86%E6%9E%90.md#L898-L924">差距分析 · G0—G4 与历史口径</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/Docs/%E5%B7%AE%E8%B7%9D%E5%88%86%E6%9E%90.md#L1010-L1024">能力缺口</a>。</li>
+        <li id="x-ui">[X12] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/README.md#L662-L746">README · 屏幕空间 UI 及已知限制</a>。</li>
+        <li id="x-prefab">[X13] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-core/src/prefab.rs#L43-L79">prefab.rs · 来源与实体结构</a>。</li>
+        <li id="x-decision">[X14] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/Docs/%E5%86%B3%E7%AD%96%E8%AE%B0%E5%BD%95.md#L117-L168">决策记录 · 插件和 Inspector</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/Docs/%E5%8F%8C%E8%BD%A8%E8%AF%AD%E8%A8%80%E6%9E%B6%E6%9E%84%E8%AE%A1%E5%88%92.md#L1-L26">脚本架构档案</a>。</li>
+        <li id="x-asset">[X15] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-core/src/asset.rs#L1-L62">asset.rs · GUID 与 .meta</a>。</li>
+        <li id="x-schema">[X16] <a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/crates/xgame-core/src/schema.rs">schema.rs · 场景格式目录</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/edb243d0b13b/AGENTS.md">AGENTS · 命令与约束</a>。</li>
+      </ol>
+      <h3>Unity 6.2 官方手册</h3>
+      <ol class="sources">
+        <li id="u-go">[U1] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/GameObjects.html">Introduction to GameObjects</a>：Transform、组件与 Light 示例。</li>
+        <li id="u-components">[U2] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/Components.html">Introduction to components</a>。</li>
+        <li id="u-inspector">[U3] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/InspectorManageComponents.html">Manage components and their values</a>。</li>
+        <li id="u-order">[U4] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/execution-order.html">Event function execution order</a>、<a href="https://docs.unity3d.com/6000.2/Documentation/Manual/script-execution-order.html">Script execution order</a>。</li>
+        <li id="u-serial">[U5] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/script-serialization-rules.html">Serialization rules</a>。</li>
+        <li id="u-prefab">[U6] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/CreatingPrefabs.html">Create prefabs</a>、<a href="https://docs.unity3d.com/6000.2/Documentation/Manual/Prefabs.html">Prefabs</a>。</li>
+        <li id="u-overrides">[U7] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/PrefabInstanceOverrides.html">Prefab instance overrides</a>。</li>
+        <li id="u-multi">[U8] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/MultiSceneEditing.html">Work with multiple scenes</a>。</li>
+        <li id="u-build">[U9] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/BuildSettings.html">Create a build from the Editor / build profiles</a>。</li>
+        <li id="u-render">[U10] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/render-pipelines.html">Render pipelines</a>。</li>
+        <li id="u-ui">[U11] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/UIToolkits.html">UI systems</a>。</li>
+        <li id="u-input">[U12] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/Input.html">Input</a>。</li>
+        <li id="u-meta">[U13] <a href="https://docs.unity3d.com/6000.2/Documentation/Manual/AssetMetadata.html">Asset metadata</a>。</li>
+      </ol>
+      <a class="top" href="#top">返回顶部 ↑</a>
+    </section>
+  </main>
+</div>
+</body>
+</html>
