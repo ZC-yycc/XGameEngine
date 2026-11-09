@@ -58,8 +58,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 
 组件 v2 文件可由编辑器打开、编辑、保存及另存；撤销与自动保存保留组件 ID。
 独立游戏和无头运行能读取 v2 值，但 World 还没有持有组件 ID。v2 场景能创建
-和实例化预制体；Revert 可恢复仍有有效来源的实例，资产删除或改名
-导致来源失效时会拒绝恢复；预制体 Apply 暂不可用。迁移后用 `--check` 和
+和实例化预制体；Revert 可按来源 ID 恢复组件，资产删除或改名后仍能还原
+实例；同场景多个实例可逐个还原，全部修复后才能保存。预制体 Apply 暂不可用。
+迁移后用 `--check` 和
 `--headless` 验证项目，检查结果仍会报告 `v2_identity_pending`。
 
 ## 发布包组合验收（Windows）

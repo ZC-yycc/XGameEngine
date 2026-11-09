@@ -586,6 +586,24 @@ impl SceneV2 {
         scene: &Scene,
         prefabs: &BTreeMap<String, PrefabV2>,
     ) -> Result<(), String> {
+        self.reconcile_from_v1_inner(scene, prefabs, true)
+    }
+
+    /// 撤销快照允许保留已被外部资产删除的旧来源；不能将结果当成可保存场景。
+    pub fn reconcile_from_v1_for_history(
+        &mut self,
+        scene: &Scene,
+        prefabs: &BTreeMap<String, PrefabV2>,
+    ) -> Result<(), String> {
+        self.reconcile_from_v1_inner(scene, prefabs, false)
+    }
+
+    fn reconcile_from_v1_inner(
+        &mut self,
+        scene: &Scene,
+        prefabs: &BTreeMap<String, PrefabV2>,
+        verify_sources: bool,
+    ) -> Result<(), String> {
         if scene.format_version != 1 || !scene.duplicate_ids().is_empty() {
             return Err("编辑器场景的版本或实体 ID 无法安全合入 v2".into());
         }
@@ -707,7 +725,11 @@ impl SceneV2 {
             lights: scene.lights.clone(),
             ambient: scene.ambient,
         };
-        candidate.validate_prefab_sources(prefabs)?;
+        if verify_sources {
+            candidate.validate_prefab_sources(prefabs)?;
+        } else {
+            candidate.validate()?;
+        }
         *self = candidate;
         Ok(())
     }
@@ -725,7 +747,9 @@ impl SceneV2 {
         candidate
             .entities
             .retain(|entity| !restored_ids.contains(&entity.id));
-        candidate.reconcile_from_v1(scene, prefabs)?;
+        // 其他实例可能还指向被删掉的来源组件；逐个 Revert 完成前
+        // 仅让历史保留它们，保存时仍须验证整个场景。
+        candidate.reconcile_from_v1_for_history(scene, prefabs)?;
         for entity in &mut candidate.entities {
             if !restored_ids.contains(&entity.id) {
                 continue;
@@ -768,7 +792,12 @@ impl SceneV2 {
             }
             entity.components.next_component_id = next;
         }
-        candidate.validate_prefab_sources(prefabs)?;
+        let mut restored_only = candidate.clone();
+        restored_only
+            .entities
+            .retain(|entity| restored_ids.contains(&entity.id));
+        restored_only.validate_prefab_sources(prefabs)?;
+        candidate.validate()?;
         *self = candidate;
         Ok(())
     }

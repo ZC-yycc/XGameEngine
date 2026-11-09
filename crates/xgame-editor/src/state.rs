@@ -1757,7 +1757,7 @@ impl EditorState {
                 .expect("v2 session 存在")
                 .identity
                 .clone();
-            match self.prepare_v2_scene(&current, &self.scene) {
+            match self.prepare_v2_history(&current, &self.scene) {
                 Ok(identity) => {
                     self.v2_session.as_mut().expect("v2 session 存在").identity = identity.clone();
                     self.v2_undo.push(identity);
@@ -1783,7 +1783,7 @@ impl EditorState {
         if let Some(session) = &self.v2_session {
             let identity = session.identity.clone();
             // 拖动结束后才压快照；快照的身份必须对应拖动前的值。
-            let prepared = self.prepare_v2_scene(&identity, &snapshot);
+            let prepared = self.prepare_v2_history(&identity, &snapshot);
             match prepared {
                 Ok(previous) => {
                     self.v2_undo.push(previous);
@@ -1812,7 +1812,7 @@ impl EditorState {
         // 别人，下一次 Delete 就删错对象。按 ID 记住"选中了谁"，换完照 ID 找回来。
         let selected_id = self.selected_id();
         let identity = if let Some(session) = &self.v2_session {
-            match self.prepare_v2_scene(&session.identity, &self.scene) {
+            match self.prepare_v2_history(&session.identity, &self.scene) {
                 Ok(identity) => Some(identity),
                 Err(error) => {
                     self.log_error(format!("撤销前同步 v2 身份失败: {error}"));
@@ -1847,7 +1847,7 @@ impl EditorState {
         }
         let selected_id = self.selected_id();
         let identity = if let Some(session) = &self.v2_session {
-            match self.prepare_v2_scene(&session.identity, &self.scene) {
+            match self.prepare_v2_history(&session.identity, &self.scene) {
                 Ok(identity) => Some(identity),
                 Err(error) => {
                     self.log_error(format!("重做前同步 v2 身份失败: {error}"));
@@ -2632,7 +2632,7 @@ impl EditorState {
             .map(|&idx| draft.entities[idx].id)
             .collect();
         let session = self.v2_session.as_ref().expect("v2 会话存在");
-        let mut identity = self.prepare_v2_scene(&session.identity, &self.scene)?;
+        let mut identity = self.prepare_v2_history(&session.identity, &self.scene)?;
         let mut prefabs = BTreeMap::new();
         for entity in &draft.entities {
             if let Some(link) = &entity.prefab {
@@ -3143,6 +3143,19 @@ impl EditorState {
     }
 
     fn prepare_v2_scene(&self, identity: &SceneV2, scene: &Scene) -> Result<SceneV2, String> {
+        self.prepare_v2_scene_inner(identity, scene, true)
+    }
+
+    fn prepare_v2_history(&self, identity: &SceneV2, scene: &Scene) -> Result<SceneV2, String> {
+        self.prepare_v2_scene_inner(identity, scene, false)
+    }
+
+    fn prepare_v2_scene_inner(
+        &self,
+        identity: &SceneV2,
+        scene: &Scene,
+        verify_sources: bool,
+    ) -> Result<SceneV2, String> {
         let mut prefabs = BTreeMap::new();
         for entity in &scene.entities {
             if let Some(link) = &entity.prefab {
@@ -3155,7 +3168,11 @@ impl EditorState {
             }
         }
         let mut updated = identity.clone();
-        updated.reconcile_from_v1(scene, &prefabs)?;
+        if verify_sources {
+            updated.reconcile_from_v1(scene, &prefabs)?;
+        } else {
+            updated.reconcile_from_v1_for_history(scene, &prefabs)?;
+        }
         Ok(updated)
     }
 
@@ -4312,6 +4329,179 @@ mod tests {
         assert_eq!(camera.identity.id, old_camera);
         assert_eq!(audio.identity.id.raw(), next_id);
         assert_eq!(audio.identity.source_component_id, Some(asset_id));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_revert_removes_deleted_asset_component_and_undo_redo_remain_usable() {
+        let (state, base) = temp_state("v2_revert_deleted");
+        let project = state.project.clone();
+        let entry = project.manifest().entry_scene.clone();
+        std::fs::write(
+            project.path(&entry),
+            SceneV2::from_v1_plain(&state.scene)
+                .unwrap()
+                .to_ron()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut editor = EditorState::new(project.clone());
+        editor.selected_entity = Some(0);
+        let path = editor
+            .create_prefab_from_selection("RemovedCamera")
+            .unwrap();
+        let root = editor.instantiate_prefab_by_path(&path).unwrap();
+        let entity_id = editor.scene.entities[root].id;
+        editor.scene.remove_subtree(0);
+        let root = editor.scene.index_of(entity_id).unwrap();
+        editor.save_scene().unwrap();
+        let mut asset = project.load_prefab_v2(&path).unwrap();
+        let camera_id = asset.entities[0].components.entries[0].identity.id;
+        asset.entities[0].remove_component(camera_id).unwrap();
+        project.write_prefab_v2(&path, &asset).unwrap();
+        editor.revert_prefab(root);
+        assert!(
+            editor.scene.entities[editor.scene.index_of(entity_id).unwrap()]
+                .camera
+                .is_none()
+        );
+        editor.undo();
+        assert!(
+            editor.scene.entities[editor.scene.index_of(entity_id).unwrap()]
+                .camera
+                .is_some()
+        );
+        editor.redo();
+        assert!(
+            editor.scene.entities[editor.scene.index_of(entity_id).unwrap()]
+                .camera
+                .is_none()
+        );
+        editor.save_scene().unwrap();
+        assert!(project
+            .load_scene_v2(&entry)
+            .unwrap()
+            .entities
+            .iter()
+            .find(|e| e.id == entity_id)
+            .unwrap()
+            .components
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_revert_matches_renamed_lua_by_source_component_id() {
+        let (mut state, base) = temp_state("v2_revert_lua");
+        state.scene.entities[0]
+            .scripts
+            .push("Scripts/old.lua".into());
+        let project = state.project.clone();
+        let entry = project.manifest().entry_scene.clone();
+        std::fs::write(
+            project.path(&entry),
+            SceneV2::from_v1_plain(&state.scene)
+                .unwrap()
+                .to_ron()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut editor = EditorState::new(project.clone());
+        editor.selected_entity = Some(0);
+        let path = editor.create_prefab_from_selection("RenamedLua").unwrap();
+        let root = editor.instantiate_prefab_by_path(&path).unwrap();
+        let entity_id = editor.scene.entities[root].id;
+        editor.scene.remove_subtree(0);
+        let root = editor.scene.index_of(entity_id).unwrap();
+        editor.save_scene().unwrap();
+        let old = project.load_scene_v2(&entry).unwrap();
+        let lua_id = old.entities[0]
+            .components
+            .entries
+            .iter()
+            .find(|item| matches!(item.data, xgame_core::scene_v2::ComponentData::Lua { .. }))
+            .unwrap()
+            .identity
+            .id;
+        let mut asset = project.load_prefab_v2(&path).unwrap();
+        let lua = asset.entities[0]
+            .components
+            .entries
+            .iter_mut()
+            .find(|item| matches!(item.data, xgame_core::scene_v2::ComponentData::Lua { .. }))
+            .unwrap();
+        if let xgame_core::scene_v2::ComponentData::Lua { path } = &mut lua.data {
+            *path = "Scripts/new.lua".into();
+        }
+        project.write_prefab_v2(&path, &asset).unwrap();
+        editor.revert_prefab(root);
+        assert_eq!(editor.scene.entities[0].scripts, ["Scripts/new.lua"]);
+        editor.undo();
+        assert_eq!(editor.scene.entities[0].scripts, ["Scripts/old.lua"]);
+        assert!(
+            editor.save_scene().is_err(),
+            "失效来源只能暂存在撤销历史，不能落盘"
+        );
+        editor.redo();
+        editor.save_scene().unwrap();
+        let after = project.load_scene_v2(&entry).unwrap();
+        let lua = after.entities[0]
+            .components
+            .entries
+            .iter()
+            .find(|item| matches!(item.data, xgame_core::scene_v2::ComponentData::Lua { .. }))
+            .unwrap();
+        assert_eq!(lua.identity.id, lua_id);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_revert_can_repair_multiple_instances_before_saving() {
+        let (state, base) = temp_state("v2_revert_two_instances");
+        let project = state.project.clone();
+        let entry = project.manifest().entry_scene.clone();
+        std::fs::write(
+            project.path(&entry),
+            SceneV2::from_v1_plain(&state.scene)
+                .unwrap()
+                .to_ron()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut editor = EditorState::new(project.clone());
+        editor.selected_entity = Some(0);
+        let path = editor.create_prefab_from_selection("SharedAsset").unwrap();
+        let second = editor.instantiate_prefab_by_path(&path).unwrap();
+        let second_id = editor.scene.entities[second].id;
+        editor.save_scene().unwrap();
+        let mut asset = project.load_prefab_v2(&path).unwrap();
+        let camera_id = asset.entities[0].components.entries[0].identity.id;
+        asset.entities[0].remove_component(camera_id).unwrap();
+        project.write_prefab_v2(&path, &asset).unwrap();
+        editor.revert_prefab(second);
+        assert!(
+            editor.scene.entities[editor.scene.index_of(second_id).unwrap()]
+                .camera
+                .is_none()
+        );
+        assert!(editor.save_scene().is_err(), "其余实例尚有失效的来源组件");
+        let first_id = editor
+            .scene
+            .entities
+            .iter()
+            .find(|e| e.id != second_id)
+            .unwrap()
+            .id;
+        let first = editor.scene.index_of(first_id).unwrap();
+        editor.revert_prefab(first);
+        editor.save_scene().unwrap();
+        assert!(project
+            .load_scene_v2(&entry)
+            .unwrap()
+            .entities
+            .iter()
+            .all(|e| e.components.entries.is_empty()));
         std::fs::remove_dir_all(base).unwrap();
     }
 
