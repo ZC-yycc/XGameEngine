@@ -649,6 +649,37 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
 }
 
 #[test]
+fn v2_component_edit_refuses_stale_scene_revision() {
+    let base = std::env::temp_dir().join(format!("xgame-v2-stale-edit-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let path = "Scenes/Edit.ron";
+    let mut scene = Scene::new("Edit");
+    scene.add_entity(Entity::new("Actor"));
+    let initial = SceneV2::from_v1_plain(&scene).unwrap();
+    project.write_scene_v2(path, &initial).unwrap();
+    let original = std::fs::read(project.path(path)).unwrap();
+    let mut external = initial.clone();
+    external.name = "Externally edited".into();
+    project.write_scene_v2(path, &external).unwrap();
+    let changed = std::fs::read(project.path(path)).unwrap();
+    let mut requested = initial;
+    requested.entities[0].name = "Agent edited".into();
+    assert!(project
+        .write_scene_v2_if_unchanged(path, &requested, &original)
+        .is_err());
+    assert_eq!(std::fs::read(project.path(path)).unwrap(), changed);
+    project
+        .write_scene_v2_if_unchanged(path, &requested, &changed)
+        .unwrap();
+    assert_eq!(
+        project.load_scene_v2(path).unwrap().entities[0].name,
+        "Agent edited"
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn project_v2_write_preserves_ids_and_refuses_v1_overwrite() {
     let base = std::env::temp_dir().join(format!("xgame-v2-write-{}", std::process::id()));
     assert!(!base.exists());

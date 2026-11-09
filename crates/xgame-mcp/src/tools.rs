@@ -1,4 +1,4 @@
-//! # 十五个工具 —— 智能体操纵引擎的最小完备集
+//! # 工具集 —— 智能体操纵引擎的读、改、验入口
 //!
 //! 刻意小：**读说明 → 读清单 → 读场景 → 改（整体或单实体）→ 验证** 五步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
@@ -48,7 +48,7 @@ fn fail(message: impl Into<String>) -> CallError {
 
 /// 一次工具调用的输出：一段文本 +（可选的）随附图片。
 ///
-/// 十五个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
 /// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
 /// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
 /// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
@@ -77,7 +77,7 @@ impl ToolOutput {
     }
 }
 
-/// 15 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -148,6 +148,34 @@ pub fn schemas() -> Vec<Value> {
                     "entity_id": { "type": "string", "description": "场景内实体 ID，十进制字符串" },
                 },
                 "required": ["project", "entity_id"],
+            },
+        }),
+        json!({
+            "name": "entity_components_v2_read",
+            "description": "只读 v2 场景中指定实体的稳定组件 ID、来源 ID、强类型值与场景 revision。实体/组件 ID 均用十进制字符串；revision 用于 component_v2_edit 的前置版本检查。旧格式场景会拒绝。Transform 固有组件也有独立 ID。",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "project": project_prop, "scene": scene_prop,
+                    "entity_id": { "type": "string", "description": "场景内实体 ID（十进制 u64 字符串）" } },
+                "required": ["project", "entity_id"],
+            },
+        }),
+        json!({
+            "name": "component_v2_edit",
+            "description": format!("按场景 / 实体 ID / 组件 ID 定位并只改一条 v2 组件。必须先读 entity_components_v2_read，带回 revision；原文件有改动就拒绝覆盖。action=patch 时 field 用 JSON Pointer 指向组件值中的已有字段（如 /model），value 为该字段 JSON 值；action=replace/add 用 data_ron（schema_read 的 ComponentData 变体 RON）；action=remove 删除；action=move 用 to_index（不含 Transform 的 0 起位置）。Transform 只允许 patch。写前严格解码和场景语义体检。前置字节比较和原子替换之间尚无跨进程锁；编辑器 v2 会话仍未接通。{write_caveat}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": { "project": project_prop, "scene": scene_prop,
+                    "entity_id": { "type": "string" },
+                    "component_id": { "type": "string", "description": "已有组件 ID；add 不需要" },
+                    "expected_revision": { "type": "string", "description": "本轮 v2 只读结果里的 revision；原文件变化后必须重新读取" },
+                    "action": { "type": "string", "enum": ["patch", "replace", "add", "remove", "move"] },
+                    "field": { "type": "string", "description": "patch 的 JSON Pointer；必须指向已有字段" },
+                    "value": { "description": "patch 的新 JSON 值" },
+                    "data_ron": { "type": "string", "description": "add / replace 的完整 ComponentData 变体 RON" },
+                    "to_index": { "type": "integer", "minimum": 0, "description": "move 的目标位置，不含 Transform" },
+                },
+                "required": ["project", "entity_id", "expected_revision", "action"],
             },
         }),
         json!({
@@ -239,7 +267,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "project_check",
-            "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas / 发布清单 build_missing_scenes 列出问题，has_issues 汇总；build_scene_order 是关卡顺序，未配置为空）。入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
+            "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas / 发布清单 build_missing_scenes 列出问题，has_issues 汇总；build_scene_order 是关卡顺序，未配置为空）。v2 值可运行但 World 尚未持有组件 ID 时，v2_identity_pending 会列出文件并令 has_issues 为 true。入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop },
@@ -281,6 +309,8 @@ pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
         "scene_read" => scene_read(args).map(ToolOutput::text),
         "entity_components_read" => entity_components_read(args).map(ToolOutput::text),
         "component_upgrade_preview" => component_upgrade_preview(args).map(ToolOutput::text),
+        "entity_components_v2_read" => entity_components_v2_read(args).map(ToolOutput::text),
+        "component_v2_edit" => component_v2_edit(args).map(ToolOutput::text),
         "scene_write" => scene_write(args).map(ToolOutput::text),
         "entity_upsert" => entity_upsert(args).map(ToolOutput::text),
         "entity_remove" => entity_remove(args).map(ToolOutput::text),
@@ -435,7 +465,7 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 十五个工具
+// 工具实现
 // ---------------------------------------------------------------------------
 
 /// `component_catalog_read` 从场景 schema 筛出可挂载组件的字段说明。
@@ -723,6 +753,187 @@ fn component_upgrade_preview(args: &Value) -> Result<String, CallError> {
         "next_component_id": plan.next_component_id.next_id().to_string(),
         "components": components,
     })))
+}
+
+/// 版本令牌只用于发现意外修改；真正的写盘门禁仍在 core 里逐字节比较原文。
+fn v2_revision(bytes: &[u8]) -> String {
+    let mut hash = 0x6c62272e07bb014262b821756295c58du128;
+    for byte in bytes {
+        hash = (hash ^ u128::from(*byte)).wrapping_mul(0x0000000001000000000000000000013b);
+    }
+    format!("v2:{hash:032x}:{}", bytes.len())
+}
+
+fn v2_entity_id(args: &Value) -> Result<EntityId, CallError> {
+    let raw = require_str(args, "entity_id")?;
+    let id = raw
+        .parse::<u64>()
+        .map_err(|_| fail("entity_id 必须是十进制 u64 字符串"))?;
+    Ok(EntityId::from_raw(id))
+}
+
+fn v2_file_snapshot(project: &ProjectHandle, relative: &str) -> Result<Vec<u8>, CallError> {
+    std::fs::read(project.path(relative)).map_err(|e| fail(format!("读取 {relative} 失败: {e}")))
+}
+
+fn entity_components_v2_read(args: &Value) -> Result<String, CallError> {
+    let project = open_project(args)?;
+    let relative = scene_rel(args, &project.manifest().entry_scene)?;
+    let bytes = v2_file_snapshot(&project, &relative)?;
+    let scene = project.load_scene_v2(&relative).map_err(fail)?;
+    if bytes != v2_file_snapshot(&project, &relative)? {
+        return Err(fail("读取时场景文件发生变化，请重新读取"));
+    }
+    let entity_id = v2_entity_id(args)?;
+    let entity = scene
+        .entities
+        .iter()
+        .find(|e| e.id == entity_id)
+        .ok_or_else(|| fail(format!("场景 {relative} 找不到实体 ID {}", entity_id.raw())))?;
+    let mut components = vec![json!({
+        "component_id": entity.transform_identity.id.raw().to_string(),
+        "source_component_id": entity.transform_identity.source_component_id.map(|id| id.raw().to_string()),
+        "kind": "Transform", "data": entity.transform,
+    })];
+    for entry in &entity.components.entries {
+        components.push(json!({
+            "component_id": entry.identity.id.raw().to_string(),
+            "source_component_id": entry.identity.source_component_id.map(|id| id.raw().to_string()),
+            "data": entry.data,
+            "data_ron": ron::ser::to_string(&entry.data).map_err(|e| fail(e.to_string()))?,
+        }));
+    }
+    Ok(pretty(&json!({
+        "scene": relative, "revision": v2_revision(&bytes),
+        "entity_id": entity_id.raw().to_string(), "entity_name": entity.name,
+        "next_component_id": entity.components.next_component_id.next_id().to_string(),
+        "address_stability": "entity_local_id", "components": components,
+    })))
+}
+
+fn strict_component_json(value: Value) -> Result<xgame_core::scene_v2::ComponentData, CallError> {
+    let bytes = serde_json::to_vec(&value).map_err(|e| fail(e.to_string()))?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    let mut ignored = Vec::new();
+    let data = serde_ignored::deserialize(&mut deserializer, |path| ignored.push(path.to_string()))
+        .map_err(|e| fail(format!("组件字段不合法: {e}")))?;
+    deserializer.end().map_err(|e| fail(e.to_string()))?;
+    if !ignored.is_empty() {
+        return Err(fail(format!("不认识的组件字段: {}", ignored.join(", "))));
+    }
+    Ok(data)
+}
+
+fn patch_existing_field(value: &mut Value, args: &Value) -> Result<(), CallError> {
+    let field = require_str(args, "field")?;
+    if !field.starts_with('/') {
+        return Err(fail("field 必须是以 / 开头的 JSON Pointer（如 /model）"));
+    }
+    let replacement = args
+        .get("value")
+        .ok_or_else(|| fail("patch 必须提供 value"))?;
+    let slot = value
+        .pointer_mut(field)
+        .ok_or_else(|| fail(format!("字段 {field} 不存在")))?;
+    *slot = replacement.clone();
+    Ok(())
+}
+
+fn component_v2_edit(args: &Value) -> Result<String, CallError> {
+    let project = open_project(args)?;
+    let relative = scene_rel(args, &project.manifest().entry_scene)?;
+    let original = v2_file_snapshot(&project, &relative)?;
+    let expected = require_str(args, "expected_revision")?;
+    if v2_revision(&original) != expected {
+        return Err(fail(
+            "场景已被其他写入修改；请重新读取组件并使用新的 revision",
+        ));
+    }
+    let mut scene = project.load_scene_v2(&relative).map_err(fail)?;
+    if original != v2_file_snapshot(&project, &relative)? {
+        return Err(fail("读取时场景发生变化，请重新读取组件"));
+    }
+    let entity_id = v2_entity_id(args)?;
+    let entity = scene
+        .entities
+        .iter_mut()
+        .find(|e| e.id == entity_id)
+        .ok_or_else(|| fail(format!("场景 {relative} 找不到实体 ID {}", entity_id.raw())))?;
+    let action = require_str(args, "action")?;
+    let component_id = if action == "add" {
+        None
+    } else {
+        let raw = require_str(args, "component_id")?
+            .parse::<u64>()
+            .map_err(|_| fail("component_id 必须是十进制 u64 字符串"))?;
+        Some(xgame_core::component_id::ComponentId::from_raw(raw).map_err(fail)?)
+    };
+    let edited = match action {
+        "add" | "replace" => {
+            let data =
+                xgame_core::scene_v2::ComponentData::from_ron(require_str(args, "data_ron")?)
+                    .map_err(fail)?;
+            if action == "add" {
+                entity.add_component(data).map_err(fail)?
+            } else {
+                let id = component_id.expect("replace 提供 ID");
+                entity.replace_component(id, data).map_err(fail)?;
+                id
+            }
+        }
+        "remove" => {
+            let id = component_id.expect("remove 提供 ID");
+            entity.remove_component(id).map_err(fail)?;
+            id
+        }
+        "move" => {
+            let id = component_id.expect("move 提供 ID");
+            let to = args
+                .get("to_index")
+                .and_then(Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| fail("to_index 必须是非负整数"))?;
+            entity.move_component(id, to).map_err(fail)?;
+            id
+        }
+        "patch" => {
+            let id = component_id.expect("patch 提供 ID");
+            if id == entity.transform_identity.id {
+                let mut value =
+                    serde_json::to_value(entity.transform).map_err(|e| fail(e.to_string()))?;
+                patch_existing_field(&mut value, args)?;
+                entity.transform = serde_json::from_value(value)
+                    .map_err(|e| fail(format!("Transform 字段无效: {e}")))?;
+            } else {
+                let data = entity
+                    .component(id)
+                    .ok_or_else(|| fail(format!("找不到组件 ID {}", id.raw())))?;
+                let mut value = serde_json::to_value(data).map_err(|e| fail(e.to_string()))?;
+                let payload = value
+                    .as_object_mut()
+                    .and_then(|o| o.values_mut().next())
+                    .ok_or_else(|| fail("组件变体值不可修改"))?;
+                patch_existing_field(payload, args)?;
+                entity
+                    .replace_component(id, strict_component_json(value)?)
+                    .map_err(fail)?;
+            }
+            id
+        }
+        _ => return Err(fail("action 必须是 patch / replace / add / remove / move")),
+    };
+    let adapted = scene.clone().to_v1().map_err(fail)?;
+    if let Some(defect) = xgame_core::scene_defects(&adapted).first() {
+        return Err(fail(format!("场景语义缺陷: {}", defect.describe())));
+    }
+    project
+        .write_scene_v2_if_unchanged(&relative, &scene, &original)
+        .map_err(|e| fail(e.to_string()))?;
+    let revised = v2_file_snapshot(&project, &relative)?;
+    Ok(pretty(
+        &json!({ "scene": relative, "entity_id": entity_id.raw().to_string(),
+        "component_id": edited.raw().to_string(), "revision": v2_revision(&revised) }),
+    ))
 }
 
 /// `scene_write` —— 先解析、再体检、最后落盘：坏数据一个字节都不写。
@@ -2015,6 +2226,130 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(project.path(&relative)).unwrap(),
             v2
+        );
+        cleanup(&project);
+    }
+
+    #[test]
+    fn v2_agent_edits_one_component_by_stable_id_and_rejects_stale_revision() {
+        let project = temp_project("v2_agent_edit");
+        let path = project.manifest().entry_scene.clone();
+        let mut old = entry_scene(&project);
+        let mut actor = Entity::new("Actor");
+        actor.model = "builtin://cube".into();
+        let actor_id = actor.id.raw().to_string();
+        old.entities.push(actor);
+        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old).unwrap();
+        std::fs::write(project.path(&path), v2.to_ron().unwrap()).unwrap();
+        let args = json!({ "project": project.root(), "entity_id": actor_id });
+        let read: Value = serde_json::from_str(
+            &run(&project, "entity_components_v2_read", args.clone()).unwrap(),
+        )
+        .unwrap();
+        let id = read["components"][1]["component_id"].as_str().unwrap();
+        let revision = read["revision"].as_str().unwrap();
+        let edit = json!({ "project": project.root(), "entity_id": actor_id,
+            "component_id": id, "expected_revision": revision,
+            "action": "patch", "field": "/model", "value": "builtin://sphere" });
+        let changed: Value =
+            serde_json::from_str(&run(&project, "component_v2_edit", edit.clone()).unwrap())
+                .unwrap();
+        assert_ne!(changed["revision"], revision);
+        assert_eq!(
+            project
+                .load_scene_v2(&path)
+                .unwrap()
+                .entities
+                .last()
+                .unwrap()
+                .components
+                .entries[0]
+                .identity
+                .id
+                .raw()
+                .to_string(),
+            id
+        );
+        assert_eq!(
+            project
+                .load_scene_runtime(&path)
+                .unwrap()
+                .entities
+                .last()
+                .unwrap()
+                .model,
+            "builtin://sphere"
+        );
+        assert!(
+            run(&project, "component_v2_edit", edit).is_err(),
+            "旧 revision 必须拒绝"
+        );
+        cleanup(&project);
+    }
+
+    #[test]
+    fn v2_agent_structural_edits_keep_identity_and_reject_unknown_nested_fields() {
+        let project = temp_project("v2_agent_structure");
+        let path = project.manifest().entry_scene.clone();
+        let mut old = entry_scene(&project);
+        let actor = Entity::new("Actor").with_model("builtin://cube");
+        let actor_id = actor.id.raw().to_string();
+        old.entities.push(actor);
+        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old).unwrap();
+        std::fs::write(project.path(&path), v2.to_ron().unwrap()).unwrap();
+        let read = || -> Value {
+            serde_json::from_str(
+                &run(
+                    &project,
+                    "entity_components_v2_read",
+                    json!({ "project": project.root(), "entity_id": actor_id }),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let before = read();
+        let render_id = before["components"][1]["component_id"].as_str().unwrap();
+        let bad = json!({ "project": project.root(), "entity_id": actor_id,
+            "component_id": render_id, "expected_revision": before["revision"],
+            "action": "patch", "field": "/lod", "value": { "levels": [], "unrecognized": 42 } });
+        assert!(run(&project, "component_v2_edit", bad).is_err());
+        assert_eq!(read()["revision"], before["revision"]);
+
+        let camera = ron::ser::to_string(&xgame_core::scene_v2::ComponentData::Camera(
+            xgame_core::Camera::default(),
+        ))
+        .unwrap();
+        let add: Value = serde_json::from_str(&run(&project, "component_v2_edit", json!({
+            "project": project.root(), "entity_id": actor_id, "expected_revision": before["revision"],
+            "action": "add", "data_ron": camera })).unwrap()).unwrap();
+        let camera_id = add["component_id"].as_str().unwrap();
+        assert_ne!(camera_id, render_id);
+        let moved: Value = serde_json::from_str(
+            &run(
+                &project,
+                "component_v2_edit",
+                json!({
+            "project": project.root(), "entity_id": actor_id, "component_id": camera_id,
+            "expected_revision": add["revision"], "action": "move", "to_index": 0 }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let after_move = read();
+        assert_eq!(after_move["components"][1]["component_id"], camera_id);
+        assert_eq!(after_move["components"][2]["component_id"], render_id);
+        run(&project, "component_v2_edit", json!({ "project": project.root(), "entity_id": actor_id,
+            "component_id": camera_id, "expected_revision": moved["revision"], "action": "remove" })).unwrap();
+        let removed = read();
+        assert_eq!(removed["components"].as_array().unwrap().len(), 2);
+        assert!(
+            removed["next_component_id"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                > camera_id.parse::<u64>().unwrap()
         );
         cleanup(&project);
     }

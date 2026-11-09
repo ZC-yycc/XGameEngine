@@ -622,6 +622,9 @@ pub enum ProjectError {
 
     #[error("v2 文件数据无效 ({path}): {reason}")]
     InvalidV2 { path: PathBuf, reason: String },
+
+    #[error("文件在读取后发生变化，拒绝覆盖 ({0})")]
+    StaleFile(PathBuf),
 }
 
 /// v2 草案只能写入新文件或已验证的 v2 文件；不把 v1 覆盖当成隐式迁移。
@@ -654,6 +657,18 @@ fn guard_v2_write<T>(
             path: path.to_path_buf(),
             reason: "现有文件无法解析版本，拒绝覆盖".into(),
         }),
+    }
+}
+
+fn guard_expected_bytes(path: &Path, expected: &[u8]) -> Result<(), ProjectError> {
+    let current = std::fs::read(path).map_err(|source| ProjectError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if current == expected {
+        Ok(())
+    } else {
+        Err(ProjectError::StaleFile(path.to_path_buf()))
     }
 }
 
@@ -1483,6 +1498,26 @@ impl ProjectHandle {
         relative: &str,
         scene: &crate::scene_v2::SceneV2,
     ) -> Result<(), ProjectError> {
+        self.write_scene_v2_checked(relative, scene, None)
+    }
+
+    /// 给 Agent 的前置版本门禁：expected 必须是本次读到的磁盘原文。
+    /// 比较与原子替换之间仍有跨进程竞态；编辑器 v2 会话保护需单独完成。
+    pub fn write_scene_v2_if_unchanged(
+        &self,
+        relative: &str,
+        scene: &crate::scene_v2::SceneV2,
+        expected: &[u8],
+    ) -> Result<(), ProjectError> {
+        self.write_scene_v2_checked(relative, scene, Some(expected))
+    }
+
+    fn write_scene_v2_checked(
+        &self,
+        relative: &str,
+        scene: &crate::scene_v2::SceneV2,
+        expected: Option<&[u8]>,
+    ) -> Result<(), ProjectError> {
         let relative =
             normalize_scene_relative(relative).map_err(|reason| ProjectError::InvalidPath {
                 relative: relative.to_owned(),
@@ -1490,6 +1525,9 @@ impl ProjectHandle {
             })?;
         let path = self.path(&relative);
         guard_v2_write(&path, crate::scene_v2::SceneV2::from_ron)?;
+        if let Some(expected) = expected {
+            guard_expected_bytes(&path, expected)?;
+        }
         let mut prefabs = std::collections::BTreeMap::new();
         for entity in &scene.entities {
             if let Some(reference) = &entity.prefab {
@@ -1526,6 +1564,9 @@ impl ProjectHandle {
             path: path.clone(),
             reason,
         })?;
+        if let Some(expected) = expected {
+            guard_expected_bytes(&path, expected)?;
+        }
         if unchanged_on_disk(&path, &text) {
             return Ok(());
         }

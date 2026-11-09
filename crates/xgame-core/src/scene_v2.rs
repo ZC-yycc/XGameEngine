@@ -170,6 +170,11 @@ impl RenderData {
 }
 
 impl ComponentData {
+    /// Agent 输入的单个组件也必须走与 v2 文件相同的严格字段解码。
+    pub fn from_ron(text: &str) -> Result<Self, String> {
+        parse_v2(text)
+    }
+
     fn legacy_key(&self) -> LegacyComponentKey {
         match self {
             Self::Render(_) => LegacyComponentKey::Builtin(BuiltinComponent::Render),

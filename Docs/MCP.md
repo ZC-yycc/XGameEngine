@@ -57,7 +57,7 @@
 
 ---
 
-## 工具参考（15 个）
+## 工具参考（17 个）
 
 最小完备集，覆盖「读说明书 / 读脚本契约 → 读 → 改 → 查 → 看效果」闭环，外加资产侧
 的「看见 → 导入 → 整理」。除 `component_catalog_read` / `schema_read` / `script_api_read` 外，全部工具必填
@@ -93,8 +93,8 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
   `ProjectHandle` 的读写边界。
 - **闭环用法**：`schema_read` 拿字段契约 → `scene_read` 看现状 → `scene_write` /
   `entity_upsert` 改 → `project_check` / `run_headless` 验证。
-  这组 MCP 修改工具仍只操作 v1；v2 的根和字段目前供格式查阅，不能据此使用
-  `scene_write` 操作 v2。`project_check` 已能只读检查 v2 入口及其他场景、预制体；
+  `scene_write` / `entity_upsert` 仍只操作 v1；v2 按组件 ID 的修改使用
+  `entity_components_v2_read` / `component_v2_edit`。`project_check` 已能只读检查 v2 入口及其他场景、预制体；
   值投影可供无头运行，组件身份尚未由 World 持有时报告 `v2_identity_pending`。
 
 ### 2. `project_info`
@@ -135,7 +135,7 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 - **地址规则**：`builtin:transform` 恒存在且不可移除；Render 由旧格式中的模型、LOD、
   材质资产及形变权重组合而成。其它已挂载内建组件使用 `builtin:camera` 等种类地址。
   Rust、Lua 使用 `rust:0`、`lua:0` 等列表槽位地址，**删除或重排后地址可能指向另一项，
-  使用前重新查询**。当前尚无可跨重排引用的组件实例 ID，返回字段显式标记为 `legacy`。
+  使用前重新查询**。此 v1 工具没有跨重排稳定地址，返回字段显式标记为 `legacy`。
 - **边界**：该工具只读；添加和移除继续通过 Inspector 的 Add Component / 各组件移除
   控件完成。离线批量编辑可用 `scene_read` / `scene_write`，并遵守两端不能同时写场景
   的现有约定。
@@ -152,6 +152,22 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 - **拒绝**：场景或来源预制体有重复实体 ID、旧实体同名 Rust 行为或同路径 Lua
   脚本、没有行为对应的参数，或来源文件 / 实体无法读取。预览 ID 尚未写入文件，
   不能拿它当稳定寻址 ID 修改组件；正式转换必须单独执行显式迁移。
+
+### 3c. `entity_components_v2_read` / `component_v2_edit`
+
+v2 场景的 Agent 修改入口；先读取组件与 `revision`，再按实体 ID、组件 ID 修改。
+
+- **读取入参**：`project`、`entity_id`（十进制字符串），可选 `scene`。返回
+  `address_stability: "entity_local_id"`、`revision`、`next_component_id` 和组件列表；
+  Transform 也有独立 ID，其他项附完整 `data_ron` 和可选来源 ID。
+- **修改必填**：`project`、`entity_id`、`expected_revision`、`action`；除 `add` 外还要
+  `component_id`。`patch` 带 `field`（指向已有值的 JSON Pointer，例如 `/model`）
+  和 `value`；`replace` / `add` 带完整 `ComponentData` 变体 `data_ron`；`move`
+  带不含 Transform 的零起 `to_index`；`remove` 只要目标 ID。Transform 只能 patch。
+- **拒绝条件**：文件不是 v2、revision 过期、字段不存在或类型错误、未知嵌套字段、
+  重复 Rust/Lua 挂载、场景语义缺陷、预制体来源关联失效。拒绝时场景不落盘；
+  成功返回新 `revision`。完整原文字节在 core 写入前再次比较；比较与原子替换
+  之间仍无跨进程互斥。编辑器 v2 会话尚未接通，同一文件不要并行外部写入。
 
 ### 4. `scene_write`
 
@@ -332,7 +348,7 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 15 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 17 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |
