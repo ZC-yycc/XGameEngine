@@ -1204,7 +1204,7 @@ Build/<项目名>/
 ## MCP（AI 智能体接口）
 
 `xgame-mcp` 是本引擎的 **MCP server** —— 把"读说明书、读脚本契约、读项目、改场景、
-动实体、跑检查、无头实跑"暴露成 13 个标准 MCP 工具，Cursor / Claude 等任何 MCP
+动实体、跑检查、无头实跑"暴露成 14 个标准 MCP 工具，Cursor / Claude 等任何 MCP
 客户端接上就能**不用鼠标直接操纵引擎**做游戏开发。无窗口、无 GPU，stdio 起服务
 （按行 JSON-RPC）。
 
@@ -1214,6 +1214,7 @@ Build/<项目名>/
 
 | 工具 | 干什么 |
 |---|---|
+| `component_catalog_read` | 读内建组件目录与现有 schema 的字段契约，不依赖项目 |
 | `schema_read` | 读场景格式的机器可读说明书（41 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
 | `script_api_read` | 读脚本 API 的机器可读清单（182 个函数 / 签名 / 参数 / 返回值 / 7 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |

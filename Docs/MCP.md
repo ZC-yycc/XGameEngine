@@ -57,15 +57,23 @@
 
 ---
 
-## 工具参考（13 个）
+## 工具参考（14 个）
 
 最小完备集，覆盖「读说明书 / 读脚本契约 → 读 → 改 → 查 → 看效果」闭环，外加资产侧
-的「看见 → 导入 → 整理」。除 `schema_read` / `script_api_read` 外，全部工具必填
+的「看见 → 导入 → 整理」。除 `component_catalog_read` / `schema_read` / `script_api_read` 外，全部工具必填
 `project`（含 `project.ron` 的项目根目录，绝对或相对 server 工作目录）；除
-`schema_read` / `script_api_read` / `project_info` / `project_check` / `asset_list` /
+`component_catalog_read` / `schema_read` / `script_api_read` / `project_info` / `project_check` / `asset_list` /
 `asset_import` / `asset_move` / `run_headless` 外都可带 `scene`
 （项目内相对场景路径，如 `Scenes/scene.ron`，缺省 = 清单入口场景；**绝对路径与
 `..` 一律拒绝**）。
+
+### 0. `component_catalog_read`
+
+项目无关的内建组件目录：`builtin:*` 地址、是否可添加 / 移除 / 重复、落盘类型、
+`default_ron` 与字段表。字段来自 `schema_read` 的同一份 `scene_schema()`，Render
+只列当前旧格式的 `Entity.model` / `lod` / `material_asset` / `morph_weights`。
+Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不反射运行时全局变量。
+返回的 `address_stability` 是 `legacy`。无需 `project`，也不读写项目文件。
 
 ### 1. `schema_read`
 
@@ -308,7 +316,7 @@
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 13 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 14 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |

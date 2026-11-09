@@ -84,6 +84,31 @@ impl BuiltinComponent {
         !matches!(self, Self::Transform | Self::Render)
     }
 
+    /// 字段说明由场景 schema 负责；这里只给出该组件对应的落盘类型。
+    /// Render 是几个 `Entity` 字段组成的旧格式视图，须单独筛选字段。
+    pub const fn schema_type(self) -> &'static str {
+        match self {
+            Self::Transform => "Transform",
+            Self::Render => "Entity",
+            Self::Ui => "UiElement",
+            Self::Animator => "Animator",
+            Self::Physics => "PhysicsBody",
+            Self::Character => "CharacterController",
+            Self::Audio => "AudioSource",
+            Self::Camera => "Camera",
+            Self::Particle => "ParticleEmitter",
+            Self::MaterialOverride => "MaterialOverride",
+        }
+    }
+
+    /// Render 在 v1 中仍横跨多个字段；只返回它拥有的那几项。
+    pub const fn schema_field_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Render => &["model", "lod", "material_asset", "morph_weights"],
+            _ => &[],
+        }
+    }
+
     pub fn present(self, entity: &Entity) -> bool {
         match self {
             Self::Transform => true,
@@ -309,5 +334,18 @@ mod tests {
         assert!(
             !entity.remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Camera))
         );
+    }
+
+    #[test]
+    fn builtin_catalog_points_to_real_scene_schema_fields() {
+        let doc = crate::schema::scene_schema();
+        for kind in BuiltinComponent::ALL {
+            let schema = doc
+                .type_schema(kind.schema_type())
+                .expect("目录里的类型应存在");
+            for name in kind.schema_field_names() {
+                assert!(schema.fields.iter().any(|field| field.name == *name));
+            }
+        }
     }
 }

@@ -1,4 +1,4 @@
-//! # 十三个工具 —— 智能体操纵引擎的最小完备集
+//! # 十四个工具 —— 智能体操纵引擎的最小完备集
 //!
 //! 刻意小：**读说明 → 读清单 → 读场景 → 改（整体或单实体）→ 验证** 五步闭环，
 //! 覆盖"从零建关卡"的全部写路径。能用文本的地方用文本（场景就是 RON 原文），
@@ -48,7 +48,7 @@ fn fail(message: impl Into<String>) -> CallError {
 
 /// 一次工具调用的输出：一段文本 +（可选的）随附图片。
 ///
-/// 十三个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
+/// 十四个工具里只有 `run_headless`（`screenshot: true`）会带图：无头渲染一帧
 /// 直接把 PNG 以 MCP `image` 内容块回给客户端 —— 视觉模型看到的是画面本身，
 /// 而不是"渲染没报错"的口头保证。图片在协议层是独立 content 块（见
 /// `xgame-mcp` 库的 `call_tool`），这里只负责编好 base64。
@@ -77,7 +77,7 @@ impl ToolOutput {
     }
 }
 
-/// 13 个工具的 JSON Schema（`tools/list` 的返回内容）。
+/// 14 个工具的 JSON Schema（`tools/list` 的返回内容）。
 ///
 /// 描述是**给智能体看的说明书** —— 它没读过我们的代码，只靠这段文字决定
 /// 怎么用工具，所以语义（覆盖式、部分更新、并发写警告）都写在描述里。
@@ -93,6 +93,11 @@ pub fn schemas() -> Vec<Value> {
     let write_caveat = "注意：编辑器每秒轮询内容目录，资产 / 脚本 / `.meta` 的外部改动会自动热重载，但**场景文件不会自动重载**（防冲掉未保存的编辑）。同一时刻只应有一边在写同一个场景：编辑器里未保存的改动之后会覆盖本工具的写入。";
 
     vec![
+        json!({
+            "name": "component_catalog_read",
+            "description": "读出内建组件目录（类型地址、能否添加 / 移除 / 重复、默认值与字段表）。字段取自 schema_read 的唯一场景 schema；旧格式的 Render 仍由 Entity 的 model/lod/material_asset/morph_weights 组成。无需 project；Rust 注册组件必须由实际加载的项目插件提供字段表，Lua 脚本不作任意变量反射。地址仍标记 legacy。",
+            "inputSchema": { "type": "object", "properties": {} },
+        }),
         json!({
             "name": "schema_read",
             "description": "读出场景格式的机器可读说明书（JSON）：根文件结构、全部类型 / 字段 / 是否必填 / 省略默认值 / 可解析示例、枚举变体、资产引用的磁盘与内存形态。不需要 project 参数。写场景之前先读它 —— 比猜字段名、靠 project_check 报错反推快得多。",
@@ -257,6 +262,7 @@ pub fn schemas() -> Vec<Value> {
 /// 分发一次工具调用：`Ok` 是工具输出（文本，可能带图）；`Err` 见 [`CallError`]。
 pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
     match name {
+        "component_catalog_read" => Ok(ToolOutput::text(component_catalog_read())),
         "schema_read" => schema_read(args).map(ToolOutput::text),
         "project_info" => project_info(args).map(ToolOutput::text),
         "scene_read" => scene_read(args).map(ToolOutput::text),
@@ -415,8 +421,47 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 }
 
 // ---------------------------------------------------------------------------
-// 十三个工具
+// 十四个工具
 // ---------------------------------------------------------------------------
+
+/// `component_catalog_read` 从场景 schema 筛出可挂载组件的字段说明。
+fn component_catalog_read() -> String {
+    let doc = xgame_core::schema::scene_schema();
+    let builtins: Vec<_> = BuiltinComponent::ALL
+        .into_iter()
+        .map(|kind| {
+            let schema = doc
+                .type_schema(kind.schema_type())
+                .expect("内建类型必须在场景 schema 中");
+            let fields: Vec<_> = if kind == BuiltinComponent::Render {
+                schema
+                    .fields
+                    .iter()
+                    .filter(|field| kind.schema_field_names().contains(&field.name.as_str()))
+                    .collect()
+            } else {
+                schema.fields.iter().collect()
+            };
+            json!({
+                "address": ComponentAddress::Builtin(kind).to_string(),
+                "kind": kind.code(),
+                "name": kind.name(),
+                "schema_type": kind.schema_type(),
+                "addable": kind.addable(),
+                "removable": kind.addable(),
+                "repeatable": false,
+                "default_ron": schema.default_ron,
+                "fields": fields,
+            })
+        })
+        .collect();
+    pretty(&json!({
+        "address_stability": "legacy",
+        "builtins": builtins,
+        "rust": "已加载项目的注册组件沿用 Inspect 字段表；不执行未验证插件以生成目录",
+        "lua": "脚本路径是资产引用；Lua 全局变量不是可保存字段",
+    }))
+}
 
 /// `schema_read` —— 场景格式的机器可读说明书（项目无关）。
 ///
@@ -1390,6 +1435,31 @@ mod tests {
         ));
         assert_eq!(std::fs::read(project.entry_scene_path()).unwrap(), before);
         cleanup(&project);
+    }
+
+    /// 工具应把字段说明指向 schema 唯一源，让 Agent 不用猜内建组件的字段。
+    #[test]
+    fn component_catalog_read_uses_schema_types_and_preserves_read_only_contract() {
+        let text = call("component_catalog_read", &json!({}))
+            .expect("内建目录不依赖项目")
+            .text;
+        let catalog: Value = serde_json::from_str(&text).expect("JSON");
+        let builtins = catalog["builtins"].as_array().expect("内建组件目录");
+        let camera = builtins
+            .iter()
+            .find(|kind| kind["address"] == "builtin:camera")
+            .expect("相机类型");
+        assert_eq!(camera["schema_type"], "Camera");
+        assert_eq!(camera["addable"], true);
+        assert!(camera["fields"].as_array().is_some_and(|fields| fields
+            .iter()
+            .any(|field| { field["name"] == "fov" && field["ty"] == "f32" })));
+        assert!(builtins
+            .iter()
+            .any(|kind| kind["address"] == "builtin:transform"
+                && kind["addable"] == false
+                && kind["removable"] == false));
+        assert_eq!(catalog["address_stability"], "legacy");
     }
 
     /// 坏 RON：报错且**一个字节都不落盘**（先解析后写的契约）。

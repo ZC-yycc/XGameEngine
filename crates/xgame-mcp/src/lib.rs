@@ -14,7 +14,7 @@
 //!
 //! - `initialize` — 握手，回显双方都支持的协议版本 + `capabilities.tools`；
 //! - `ping` — 保活；
-//! - `tools/list` — 返回 13 个工具的 JSON Schema（见 [`tools`]）；
+//! - `tools/list` — 返回 14 个工具的 JSON Schema（见 [`tools`]）；
 //! - `tools/call` — 分发调用。
 //!
 //! 其余方法回 `-32601`；通知（无 `id`）不回包；坏 JSON 回 `-32700`。
@@ -214,13 +214,13 @@ mod tests {
         assert!(resp["id"].is_null());
     }
 
-    /// `tools/list` 给出 13 个工具，每个都带描述；除 `schema_read` / `script_api_read`
+    /// `tools/list` 给出 14 个工具，每个都带描述；除 `component_catalog_read` / `schema_read` / `script_api_read`
     /// 外都要求 `project`。
     #[test]
     fn tools_list_shape() {
         let resp = send(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#);
         let list = resp["result"]["tools"].as_array().expect("tools 数组");
-        assert_eq!(list.len(), 13, "最小工具集 = 13 个");
+        assert_eq!(list.len(), 14, "最小工具集 = 14 个");
         let components = list
             .iter()
             .find(|tool| tool["name"] == "entity_components_read")
@@ -245,7 +245,10 @@ mod tests {
                 .as_array()
                 .map(|a| a.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
-            if tool["name"] == "schema_read" || tool["name"] == "script_api_read" {
+            if tool["name"] == "schema_read"
+                || tool["name"] == "component_catalog_read"
+                || tool["name"] == "script_api_read"
+            {
                 // 字段 / 脚本契约是引擎的，不属于某个项目 —— 不要求 project。
                 assert!(required.is_empty(), "{} 不该要求 project", tool["name"]);
                 continue;
