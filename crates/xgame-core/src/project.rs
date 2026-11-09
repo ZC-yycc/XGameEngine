@@ -1779,6 +1779,57 @@ impl ProjectHandle {
         Ok(path)
     }
 
+    /// v2 副本保留组件身份；不能用旧 Scene 序列化器写这条路径。
+    pub fn write_autosave_v2(
+        &self,
+        scene_relative: &str,
+        scene: &crate::scene_v2::SceneV2,
+    ) -> Result<PathBuf, ProjectError> {
+        let relative = normalize_scene_relative(scene_relative).map_err(|reason| {
+            ProjectError::InvalidPath {
+                relative: scene_relative.to_owned(),
+                reason,
+            }
+        })?;
+        let path = self.autosave_path(&relative);
+        let mut copy = scene.clone();
+        crate::asset::encode_scene_v2_references(&mut copy, &self.assets());
+        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidV2 {
+            path: path.clone(),
+            reason,
+        })?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        write_atomic(&path, &text)?;
+        Ok(path)
+    }
+
+    pub fn read_autosave_v2(
+        &self,
+        scene_relative: &str,
+    ) -> Result<crate::scene_v2::SceneV2, String> {
+        let relative = normalize_scene_relative(scene_relative)?;
+        let path = self.autosave_path(&relative);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("读取自动保存 '{}': {e}", path.display()))?;
+        let mut scene = crate::scene_v2::SceneV2::from_ron(&text)?;
+        crate::asset::decode_scene_v2_references(&mut scene, &self.assets());
+        let mut prefabs = std::collections::BTreeMap::new();
+        for entity in &scene.entities {
+            if let Some(link) = &entity.prefab {
+                if !prefabs.contains_key(&link.source) {
+                    prefabs.insert(link.source.clone(), self.load_prefab_v2(&link.source)?);
+                }
+            }
+        }
+        scene.validate_prefab_sources(&prefabs)?;
+        Ok(scene)
+    }
+
     /// 读回某个场景的自动保存副本。
     pub fn read_autosave(&self, scene_relative: &str) -> Result<Scene, String> {
         let path = self.autosave_path(scene_relative);

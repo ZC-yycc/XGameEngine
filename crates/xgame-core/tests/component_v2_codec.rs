@@ -680,6 +680,56 @@ fn v2_component_edit_refuses_stale_scene_revision() {
 }
 
 #[test]
+fn v2_editor_projection_keeps_ids_and_never_recycles_removed_components() {
+    let mut scene = Scene::new("Editor");
+    let mut actor = Entity::new("Actor").with_model("builtin://cube");
+    actor.camera = Some(xgame_core::Camera::default());
+    let id = actor.id;
+    scene.entities.push(actor);
+    let mut v2 = SceneV2::from_v1_plain(&scene).unwrap();
+    let transform_id = v2.entities[0].transform_identity.id;
+    let render_id = v2.entities[0].components.entries[0].identity.id;
+    let camera_id = v2.entities[0].components.entries[1].identity.id;
+    scene.entities[0].model = "builtin://sphere".into();
+    scene.entities[0].camera.as_mut().unwrap().fov = 55.0;
+    v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
+    assert_eq!(v2.entities[0].transform_identity.id, transform_id);
+    assert_eq!(v2.entities[0].components.entries[0].identity.id, render_id);
+    assert_eq!(v2.entities[0].components.entries[1].identity.id, camera_id);
+    scene.entities[0].camera = None;
+    v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
+    scene.entities[0].camera = Some(xgame_core::Camera::default());
+    v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
+    let replaced = &v2
+        .entities
+        .iter()
+        .find(|e| e.id == id)
+        .unwrap()
+        .components
+        .entries[1];
+    assert_ne!(replaced.identity.id, camera_id);
+    assert!(replaced.identity.id.raw() > camera_id.raw());
+    assert_eq!(
+        v2.clone().to_v1().unwrap().entities[0].model,
+        "builtin://sphere"
+    );
+}
+
+#[test]
+fn v2_editor_replaces_a_single_unlinked_lua_path_without_changing_component_id() {
+    let mut scene = Scene::new("Lua edit");
+    let mut actor = Entity::new("Actor");
+    actor.scripts.push("Scripts/old.lua".into());
+    scene.entities.push(actor);
+    let mut v2 = SceneV2::from_v1_plain(&scene).unwrap();
+    let id = v2.entities[0].components.entries[0].identity.id;
+    scene.entities[0].scripts[0] = "Scripts/new.lua".into();
+    v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
+    assert_eq!(v2.entities[0].components.entries[0].identity.id, id);
+    assert_eq!(v2.to_v1().unwrap().entities[0].scripts, ["Scripts/new.lua"]);
+}
+
+#[test]
 fn project_v2_write_preserves_ids_and_refuses_v1_overwrite() {
     let base = std::env::temp_dir().join(format!("xgame-v2-write-{}", std::process::id()));
     assert!(!base.exists());

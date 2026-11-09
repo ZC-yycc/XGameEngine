@@ -564,6 +564,144 @@ impl EntityV2 {
 }
 
 impl SceneV2 {
+    /// 撤销只恢复组件内容；已经发放过的 ID 不随历史快照回退。
+    pub fn keep_allocated_ids(&mut self, later: &Self) {
+        for entity in &mut self.entities {
+            if let Some(other) = later.entities.iter().find(|e| e.id == entity.id) {
+                let next = entity
+                    .components
+                    .next_component_id
+                    .next_id()
+                    .max(other.components.next_component_id.next_id());
+                entity.components.next_component_id =
+                    ComponentIdSequence::from_next(next).expect("两份已验证场景的高水位必须合法");
+            }
+        }
+    }
+
+    /// 将编辑器的可变 Scene 视图合入组件身份。先完整构造候选再替换，
+    /// 避免一份坏草稿让会话中的已保存 ID / 高水位发生半途改变。
+    pub fn reconcile_from_v1(
+        &mut self,
+        scene: &Scene,
+        prefabs: &BTreeMap<String, PrefabV2>,
+    ) -> Result<(), String> {
+        if scene.format_version != 1 || !scene.duplicate_ids().is_empty() {
+            return Err("编辑器场景的版本或实体 ID 无法安全合入 v2".into());
+        }
+        let previous: BTreeMap<_, _> = self.entities.iter().map(|e| (e.id.raw(), e)).collect();
+        let mut entities = Vec::with_capacity(scene.entities.len());
+        for entity in &scene.entities {
+            let source = if let Some(link) = &entity.prefab {
+                Some(
+                    prefabs
+                        .get(&link.source)
+                        .ok_or_else(|| format!("找不到来源预制体 {}", link.source))?
+                        .entities
+                        .iter()
+                        .find(|e| e.id == link.source_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "来源预制体 {} 缺少实体 ID {}",
+                                link.source,
+                                link.source_id.raw()
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
+            let Some(old) = previous.get(&entity.id.raw()) else {
+                entities.push(EntityV2::from_v1(entity, source)?);
+                continue;
+            };
+            let mut updated = EntityV2::from_v1(entity, source)?;
+            if old.prefab.is_some() && updated.prefab.is_some() && old.prefab != updated.prefab {
+                return Err(format!(
+                    "实体 {:?} 的预制体来源发生变化；请先完成预制体身份同步",
+                    entity.name
+                ));
+            }
+            let newly_linked = old.prefab.is_none() && updated.prefab.is_some();
+            let detached = old.prefab.is_some() && updated.prefab.is_none();
+            let source_keys = if newly_linked {
+                source.map(EntityV2::source_keys).transpose()?
+            } else {
+                None
+            };
+            updated.transform_identity = old.transform_identity;
+            if newly_linked {
+                updated.transform_identity.source_component_id =
+                    source.map(|s| s.transform_identity.id);
+            } else if detached {
+                updated.transform_identity.source_component_id = None;
+            }
+            updated.components.next_component_id = old.components.next_component_id;
+            let mut pending = updated.components.entries;
+            let mut entries = Vec::with_capacity(pending.len());
+            let mut unmatched = Vec::new();
+            for old_entry in &old.components.entries {
+                if let Some(index) = pending
+                    .iter()
+                    .position(|new| new.data.legacy_key() == old_entry.data.legacy_key())
+                {
+                    let mut matched = pending.remove(index);
+                    matched.identity = old_entry.identity;
+                    if newly_linked {
+                        matched.identity.source_component_id = source_keys
+                            .as_ref()
+                            .and_then(|keys| keys.get(&matched.data.legacy_key()).copied());
+                    } else if detached {
+                        matched.identity.source_component_id = None;
+                    }
+                    entries.push(matched);
+                } else {
+                    unmatched.push(old_entry);
+                }
+            }
+            let mut renamed = vec![None; pending.len()];
+            for old_entry in &unmatched {
+                // Lua 路径 / Rust 注册名在 v1 视图里同时充当列表键；只有唯一的
+                // 旧项与唯一的新项时才能判定为原组件改了字段。多项时宁可分配新 ID。
+                let kind = old_entry.data.kind();
+                if old_entry.identity.source_component_id.is_some()
+                    || !matches!(old_entry.data, ComponentData::Lua { .. } | ComponentData::Rust { .. })
+                    || unmatched.iter().filter(|item| item.data.kind() == kind).count() != 1
+                {
+                    continue;
+                }
+                let mut candidates = pending.iter().enumerate().filter(|(_, entry)| entry.data.kind() == kind);
+                if let (Some((index, _)), None) = (candidates.next(), candidates.next()) {
+                    renamed[index] = Some(old_entry.identity);
+                }
+            }
+            for (index, mut entry) in pending.drain(..).enumerate() {
+                if let Some(identity) = renamed[index] {
+                    entry.identity = identity;
+                } else {
+                    entry.identity.id = updated.components.next_component_id.allocate()?;
+                    // 新实例上的本地组件不因资产恰有同名种类就认领来源。
+                    if !newly_linked {
+                        entry.identity.source_component_id = None;
+                    }
+                }
+                entries.push(entry);
+            }
+            updated.components.entries = entries;
+            entities.push(updated);
+        }
+        let candidate = Self {
+            format_version: 2,
+            name: scene.name.clone(),
+            entities,
+            lights: scene.lights.clone(),
+            ambient: scene.ambient,
+        };
+        candidate.validate_prefab_sources(prefabs)?;
+        *self = candidate;
+        Ok(())
+    }
+
     pub(crate) fn visit_asset_references(&mut self, mut visit: impl FnMut(&mut String)) {
         for entity in &mut self.entities {
             entity.visit_asset_references(&mut visit);

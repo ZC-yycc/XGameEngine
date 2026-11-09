@@ -56,9 +56,10 @@ cargo run -p xgame-mcp
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
 
-组件 v2 文件可由独立游戏和无头运行读取，但运行时仍以旧 `Scene` 值执行，组件
-ID 尚未进入 World。旧编辑器不能打开或保存 v2 场景；迁移后的项目先通过
-`--check` 和 `--headless` 验证，再等待编辑器 v2 编辑接通后用于日常制作。
+组件 v2 文件可由编辑器打开、编辑、保存及另存；撤销与自动保存保留组件 ID。
+独立游戏和无头运行能读取 v2 值，但 World 还没有持有组件 ID。v2 场景能创建
+和实例化预制体；预制体 Apply / Revert 暂不可用。迁移后用 `--check` 和
+`--headless` 验证项目，检查结果仍会报告 `v2_identity_pending`。
 
 ## 发布包组合验收（Windows）
 
