@@ -5,7 +5,27 @@
 
 use std::collections::BTreeSet;
 
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+
+/// v1 的 serde 宽容读取要保留；v2 若把未知嵌套字段吞掉再保存，会不可逆地删数据。
+fn parse_v2<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, String> {
+    let mut deserializer = ron::de::Deserializer::from_str(text).map_err(|e| format!("{e:#}"))?;
+    let mut ignored = Vec::new();
+    let parsed = serde_ignored::deserialize(&mut deserializer, |path| {
+        ignored.push(path.to_string());
+    })
+    .map_err(|e| format!("{e:#}"))?;
+    deserializer.end().map_err(|e| format!("{e:#}"))?;
+    if ignored.is_empty() {
+        Ok(parsed)
+    } else {
+        Err(format!(
+            "v2 文件含不认识的字段，拒绝丢弃: {}",
+            ignored.join(", ")
+        ))
+    }
+}
 
 use crate::component_id::{ComponentIdSequence, ComponentIdentity};
 use crate::component_upgrade::preview_component_upgrade;
@@ -75,11 +95,42 @@ pub enum ComponentData {
     Rust {
         registered_name: String,
         /// None 与 Some(空表) 在旧文件中不同；转换期保留原样，不能压成一个默认值。
-        fields: Option<crate::inspect::FieldValues>,
+        fields: Option<StrictFieldValues>,
     },
     Lua {
         path: String,
     },
+}
+
+/// v1 的 BTreeMap 遇到同名字段会保留后者；v2 拒绝这种不可逆覆盖。
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct StrictFieldValues(pub crate::inspect::FieldValues);
+
+impl<'de> Deserialize<'de> for StrictFieldValues {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct UniqueFields;
+
+        impl<'de> Visitor<'de> for UniqueFields {
+            type Value = StrictFieldValues;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("字段名不重复的 Rust 参数表")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields = crate::inspect::FieldValues::new();
+                while let Some((name, value)) = map.next_entry()? {
+                    if fields.insert(name, value).is_some() {
+                        return Err(serde::de::Error::custom("v2 Rust 参数里有重复字段名"));
+                    }
+                }
+                Ok(StrictFieldValues(fields))
+            }
+        }
+
+        deserializer.deserialize_map(UniqueFields)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +187,11 @@ impl ComponentData {
             },
             ComponentAddress::Rust(slot) => {
                 let registered_name = entity.behaviors[slot].clone();
-                let fields = entity.behavior_params.get(&registered_name).cloned();
+                let fields = entity
+                    .behavior_params
+                    .get(&registered_name)
+                    .cloned()
+                    .map(StrictFieldValues);
                 Self::Rust {
                     registered_name,
                     fields,
@@ -176,7 +231,7 @@ impl ComponentData {
                 }
                 entity.behaviors.push(registered_name.clone());
                 if let Some(fields) = fields {
-                    entity.behavior_params.insert(registered_name, fields);
+                    entity.behavior_params.insert(registered_name, fields.0);
                 }
             }
             Self::Lua { path } => {
@@ -380,7 +435,7 @@ impl SceneV2 {
     }
 
     pub fn from_ron(text: &str) -> Result<Self, String> {
-        let parsed: Self = ron::from_str(text).map_err(|e| format!("{e:#}"))?;
+        let parsed: Self = parse_v2(text)?;
         parsed.validate()?;
         Ok(parsed)
     }
@@ -441,7 +496,7 @@ impl PrefabV2 {
     }
 
     pub fn from_ron(text: &str) -> Result<Self, String> {
-        let parsed: Self = ron::from_str(text).map_err(|e| format!("{e:#}"))?;
+        let parsed: Self = parse_v2(text)?;
         parsed.validate()?;
         Ok(parsed)
     }

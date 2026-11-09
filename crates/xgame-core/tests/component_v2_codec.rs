@@ -101,6 +101,14 @@ fn scene_v2_keeps_typed_values_and_identity_across_ron_roundtrip() {
         !first.contains("behavior_params:"),
         "v2 不写旧字段: {first}"
     );
+    let extra_camera_field = first.replacen("fov:", "unrecognized_camera_field: 7, fov:", 1);
+    assert_ne!(
+        extra_camera_field, first,
+        "用真实 Camera 字段构造未知字段回归"
+    );
+    let err = SceneV2::from_ron(&extra_camera_field).unwrap_err();
+    assert!(err.contains("unrecognized_camera_field"), "{err}");
+    assert!(ron::from_str::<Camera>("(unrecognized_camera_field: 7, fov: 60.0)").is_ok());
     let loaded = SceneV2::from_ron(&first).unwrap();
     assert_eq!(loaded.to_ron().unwrap(), first);
 
@@ -143,5 +151,24 @@ fn prefab_v2_keeps_asset_entity_ids_and_refuses_bad_versions() {
     assert!(PrefabV2::from_ron(&text.replace("format_version: 2", "format_version: 3")).is_err());
     assert!(
         SceneV2::from_ron("(format_version: 2, name: \"Bad\", entities: [], unknown: 1)").is_err()
+    );
+}
+
+#[test]
+fn v2_rejects_duplicate_rust_field_keys() {
+    let mut scene = Scene::new("DuplicateFields");
+    let mut actor = Entity::new("Actor");
+    actor.behaviors.push("Health".into());
+    actor.behavior_params.insert(
+        "Health".into(),
+        [("value".into(), xgame_core::FieldValue::F32(75.0))].into(),
+    );
+    scene.add_entity(actor);
+    let text = SceneV2::from_v1_plain(&scene).unwrap().to_ron().unwrap();
+    let duplicate = text.replacen("\"value\":", "\"value\": F32(5.0), \"value\":", 1);
+    assert_ne!(text, duplicate, "必须真的复制一个字段名: {text}");
+    assert!(
+        SceneV2::from_ron(&duplicate).is_err(),
+        "v2 不能覆盖前一个字段值"
     );
 }
