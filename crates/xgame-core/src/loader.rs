@@ -64,11 +64,11 @@ pub trait SceneLoader {
 /// 真实路径：走 `ProjectHandle`（解码 GUID 引用、路径解析、错误文案都复用它）。
 impl SceneLoader for ProjectHandle {
     fn load_scene(&self, relative: &str) -> Result<Scene, String> {
-        ProjectHandle::load_scene(self, relative)
+        ProjectHandle::load_scene_runtime(self, relative)
     }
 
     fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {
-        ProjectHandle::load_prefab(self, relative)
+        ProjectHandle::load_prefab_runtime(self, relative)
     }
 }
 

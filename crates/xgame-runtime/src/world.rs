@@ -4830,6 +4830,40 @@ mod tests {
         assert_eq!(world.scene_loads(), 1);
     }
 
+    #[test]
+    fn world_can_switch_to_v2_scene_with_same_physics_and_script_values() {
+        let project = temp_scene_project("v2_switch", false);
+        let b = project.load_scene("Scenes/B.ron").unwrap();
+        let expected_ids: Vec<_> = b.entities.iter().map(|e| e.id).collect();
+        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&b).unwrap();
+        std::fs::write(project.path("Scenes/B.ron"), v2.to_ron().unwrap()).unwrap();
+        let scene = project.load_scene("Scenes/A.ron").unwrap();
+        let mut world = World::new(scene, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene("Scenes/A.ron");
+        world.load_scene("Scenes/B.ron").unwrap();
+        assert_eq!(world.current_scene(), Some("Scenes/B.ron"));
+        assert_eq!(world.physics().stats().0, 2);
+        assert_eq!(
+            world
+                .scene()
+                .entities
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert_eq!(
+            world.scene().find_by_name("marker").unwrap().scripts,
+            ["Scripts/level2.lua"]
+        );
+        assert!(
+            project.load_scene("Scenes/B.ron").is_err(),
+            "编辑器旧入口仍须拒绝 v2"
+        );
+        std::fs::remove_dir_all(project.root()).unwrap();
+    }
+
     /// 装不上的场景：旧场景原封不动，错误可读（不是"半换过去"）。
     #[test]
     fn failed_scene_load_keeps_the_current_scene() {

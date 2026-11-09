@@ -934,6 +934,7 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         // 落盘伤的字段（"删一个物体连带删别的"的成因）。
         "duplicate_ids": report.duplicate_ids,
         "invalid_scenes": report.invalid_scenes,
+        "v2_identity_pending": report.v2_identity_pending,
         // 发布清单（`project.ron` 的 `build.scenes`）：顺序即关卡索引。
         // 未配置清单时 `build_scene_order` 为空 —— 与"配了一个场景"是两回事。
         "build_scene_order": report.build_scene_order,
@@ -1994,6 +1995,27 @@ mod tests {
         let report: Value = serde_json::from_str(&out).expect("JSON");
         assert_eq!(report["has_issues"], true);
         assert_eq!(report["missing_models"].as_array().unwrap().len(), 1);
+        cleanup(&project);
+    }
+
+    #[test]
+    fn project_check_exposes_v2_identity_limit_to_agents() {
+        let project = temp_project("v2_check");
+        let relative = project.manifest().entry_scene.clone();
+        let old = entry_scene(&project);
+        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old)
+            .unwrap()
+            .to_ron()
+            .unwrap();
+        std::fs::write(project.path(&relative), &v2).unwrap();
+        let report: Value =
+            serde_json::from_str(&run(&project, "project_check", json!({})).unwrap()).unwrap();
+        assert_eq!(report["v2_identity_pending"], json!([relative]));
+        assert_eq!(report["has_issues"], true);
+        assert_eq!(
+            std::fs::read_to_string(project.path(&relative)).unwrap(),
+            v2
+        );
         cleanup(&project);
     }
 

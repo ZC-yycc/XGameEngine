@@ -610,6 +610,45 @@ fn interrupted_component_upgrade_blocks_new_upgrades_until_recovered() {
 }
 
 #[test]
+fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
+    let base = std::env::temp_dir().join(format!("xgame-v2-runtime-load-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let path = project.manifest().entry_scene.clone();
+    let mut scene = project.load_entry_scene().unwrap();
+    scene.add_entity(Entity::new("Runner").with_script("Scripts/runner.lua"));
+    let upgraded = SceneV2::from_v1_plain(&scene).unwrap();
+    project
+        .write_scene_v2("Scenes/Extra.ron", &upgraded)
+        .unwrap();
+    std::fs::write(project.path(&path), upgraded.to_ron().unwrap()).unwrap();
+    assert!(project.load_entry_scene().is_err());
+    let runtime = project.load_entry_scene_runtime().unwrap();
+    assert_eq!(
+        runtime.entities.last().unwrap().scripts,
+        ["Scripts/runner.lua"]
+    );
+    let from_switch = xgame_core::SceneLoader::load_scene(&project, "Scenes/Extra.ron").unwrap();
+    assert_eq!(
+        from_switch.entities.last().unwrap().scripts,
+        ["Scripts/runner.lua"]
+    );
+    let prefab_path = "Prefabs/Runner.prefab.ron";
+    let mut prefab = Prefab::new("Runner");
+    prefab
+        .entities
+        .push(Entity::new("Runner").with_model("builtin://cube"));
+    project
+        .write_prefab_v2(prefab_path, &PrefabV2::from_v1(&prefab).unwrap())
+        .unwrap();
+    let from_spawn = xgame_core::SceneLoader::load_prefab(&project, prefab_path).unwrap();
+    assert_eq!(from_spawn.entities[0].model, "builtin://cube");
+    assert!(project.load_prefab(prefab_path).is_err());
+    assert!(project.load_scene("Scenes/Extra.ron").is_err());
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn project_v2_write_preserves_ids_and_refuses_v1_overwrite() {
     let base = std::env::temp_dir().join(format!("xgame-v2-write-{}", std::process::id()));
     assert!(!base.exists());

@@ -705,7 +705,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
 
     let project = ProjectHandle::open(&args.project).map_err(|e| format!("打开项目失败: {e}"))?;
     let scene = project
-        .load_entry_scene()
+        .load_entry_scene_runtime()
         .map_err(|e| format!("加载入口场景失败: {e}"))?;
     let scene_name = scene.name.clone();
 
@@ -1012,6 +1012,16 @@ fn format_log(log: &ScriptLog) -> String {
 /// 场景写 RON（与 `ProjectHandle::write_scene` 同一序列化配置 —— 输出与
 /// 项目内场景读写同构，可 diff、可原样喂给 `scene_write`）。
 fn dump_scene(scene: &Scene, path: &std::path::Path) -> Result<(), String> {
+    if path.exists() {
+        let original = std::fs::read_to_string(path)
+            .map_err(|e| format!("无法核对现有场景文件 ({}): {e}", path.display()))?;
+        ron::from_str::<Scene>(&original).map_err(|e| {
+            format!(
+                "目标 {} 不是可安全覆写的 v1 场景（可能含 v2 组件身份）: {e}",
+                path.display()
+            )
+        })?;
+    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -1020,7 +1030,8 @@ fn dump_scene(scene: &Scene, path: &std::path::Path) -> Result<(), String> {
     }
     let text = ron::ser::to_string_pretty(scene, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("场景序列化失败: {e}"))?;
-    std::fs::write(path, text).map_err(|e| format!("写场景文件失败 ({}): {e}", path.display()))
+    xgame_core::fsx::write_atomic(path, text)
+        .map_err(|e| format!("写场景文件失败 ({}): {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,6 +1062,36 @@ mod tests {
 
     fn cleanup(project: &ProjectHandle) {
         let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    #[test]
+    fn headless_executes_v2_entry_scene_without_modifying_component_file() {
+        let project = temp_project("v2_entry");
+        let entry = project.manifest().entry_scene.clone();
+        let mut scene = project.load_entry_scene().unwrap();
+        scene.add_entity(Entity::new("Runner").with_model("builtin://cube"));
+        let upgraded = xgame_core::scene_v2::SceneV2::from_v1_plain(&scene).unwrap();
+        let text = upgraded.to_ron().unwrap();
+        std::fs::write(project.path(&entry), &text).unwrap();
+        let report = run(&opts(&project, 2)).expect("无头运行应能读取 v2 场景");
+        assert!(report.entities >= 2);
+        assert_eq!(std::fs::read_to_string(project.path(&entry)).unwrap(), text);
+        cleanup(&project);
+    }
+
+    #[test]
+    fn scene_dump_refuses_to_overwrite_v2_component_ids() {
+        let project = temp_project("v2_dump_guard");
+        let path = project.path(&project.manifest().entry_scene);
+        let scene = project.load_entry_scene().unwrap();
+        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&scene)
+            .unwrap()
+            .to_ron()
+            .unwrap();
+        std::fs::write(&path, &v2).unwrap();
+        assert!(dump_scene(&scene, &path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), v2);
+        cleanup(&project);
     }
 
     /// 给项目写一份"加料的"入口场景：往默认场景里追加实体。

@@ -230,7 +230,7 @@ impl GameApp {
             );
         }
         let entry_scene = project.manifest().entry_scene.clone();
-        let scene = match project.load_entry_scene() {
+        let scene = match project.load_entry_scene_runtime() {
             Ok(scene) => scene,
             Err(e) => {
                 log::error!("{e}");

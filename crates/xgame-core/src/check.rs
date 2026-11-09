@@ -57,12 +57,9 @@ fn load_prefab_for_check(
 
 fn note_v2_scene(project: &ProjectHandle, relative: &str, report: &mut CheckReport) {
     if checked_version(project, relative) == Ok(Some(2))
-        && !report
-            .unsupported_runtime_files
-            .iter()
-            .any(|p| p == relative)
+        && !report.v2_identity_pending.iter().any(|p| p == relative)
     {
-        report.unsupported_runtime_files.push(relative.to_owned());
+        report.v2_identity_pending.push(relative.to_owned());
     }
 }
 
@@ -113,8 +110,8 @@ pub struct CheckReport {
     /// 入口场景坏掉是 `Err`（启动契约断了）；其余关卡坏掉只算问题：多场景
     /// 项目里一张关卡写坏，不该让整条检查命令失去"其他关卡怎么样"的视野。
     pub invalid_scenes: Vec<String>,
-    /// 格式可检查但当前游戏 / 编辑器宿主无法加载的 v2 文件。
-    pub unsupported_runtime_files: Vec<String>,
+    /// 运行值已能读取，但组件身份尚未由 World / 编辑器持有的 v2 文件。
+    pub v2_identity_pending: Vec<String>,
     /// `.meta` 还在但资产文件没了的（孤儿）。
     pub orphan_metas: Vec<String>,
     /// 解析失败的 `.meta`。
@@ -203,7 +200,7 @@ impl CheckReport {
             || !self.invalid_prefabs.is_empty()
             || !self.dangling_guids.is_empty()
             || !self.invalid_scenes.is_empty()
-            || !self.unsupported_runtime_files.is_empty()
+            || !self.v2_identity_pending.is_empty()
             || !self.missing_metas.is_empty()
             || !self.orphan_metas.is_empty()
             || !self.invalid_metas.is_empty()
@@ -230,7 +227,7 @@ impl CheckReport {
             + self.invalid_prefabs.len()
             + self.dangling_guids.len()
             + self.invalid_scenes.len()
-            + self.unsupported_runtime_files.len()
+            + self.v2_identity_pending.len()
             + self.missing_metas.len()
             + self.orphan_metas.len()
             + self.invalid_metas.len()
@@ -338,8 +335,8 @@ impl CheckReport {
         for s in &self.invalid_scenes {
             let _ = writeln!(out, "  invalid scene:  {s}");
         }
-        for file in &self.unsupported_runtime_files {
-            let _ = writeln!(out, "  runtime unsupported: {file}");
+        for file in &self.v2_identity_pending {
+            let _ = writeln!(out, "  v2 identity pending: {file}");
         }
         for m in &self.missing_metas {
             let _ = writeln!(out, "  missing .meta:  {m}");
@@ -389,13 +386,13 @@ pub fn check_project(root: &Path) -> Result<CheckReport, String> {
 
     // 入口场景先单独加载：它是启动契约的一部分，坏掉必须让 `--check` 硬失败
     // （退出码 1），而不是混进"有问题的场景"里只算警告。
-    let entry_scene = project
-        .load_entry_scene()
+    let entry_scene = load_scene_for_check(&project, &project.manifest().entry_scene)
         .map_err(|e| format!("加载入口场景失败: {e}"))?;
     let entry = project.manifest().entry_scene.clone();
     let entry_key = entry.replace('\\', "/");
 
     let mut report = CheckReport::default();
+    note_v2_scene(&project, &entry, &mut report);
     // 清单**自己**写的内容目录也要体检：越界的写法不会在读取时报错，只会让
     // 扫描 / 打包悄悄跑到项目外，症状是"检查全绿、成品缺整棵子树"。
     report
@@ -647,7 +644,7 @@ fn check_prefab_contents(
 ) {
     let duplicate_check = match checked_version(project, relative) {
         Ok(Some(2)) => {
-            report.unsupported_runtime_files.push(relative.to_owned());
+            report.v2_identity_pending.push(relative.to_owned());
             Ok(Vec::new()) // v2 解码本身拒绝重复实体 ID。
         }
         Ok(_) => project.prefab_duplicate_ids(relative),
@@ -1005,8 +1002,11 @@ mod tests {
         assert_eq!(report.scenes, 2, "{}", report.render());
         assert!(report.invalid_scenes.is_empty(), "{}", report.render());
         assert!(report.invalid_prefabs.is_empty(), "{}", report.render());
-        assert_eq!(report.unsupported_runtime_files, [scene_path, prefab_path]);
-        assert!(report.has_issues(), "运行时尚不能加载 v2，检查不能虚报 OK");
+        assert_eq!(report.v2_identity_pending, [scene_path, prefab_path]);
+        assert!(
+            report.has_issues(),
+            "运行时尚未持有 v2 身份，检查不能虚报 OK"
+        );
         assert_eq!(
             report.missing_scripts,
             ["Scenes/Second.ron: Scripted -> Scripts/Missing.lua"]
@@ -1024,6 +1024,24 @@ mod tests {
             before_prefab
         );
         let _ = std::fs::remove_dir_all(project.root());
+    }
+
+    #[test]
+    fn v2_entry_is_checked_and_keeps_identity_pending_visible() {
+        let project = temp_project("v2_entry_check");
+        let entry = project.manifest().entry_scene.clone();
+        let scene = project.load_entry_scene().unwrap();
+        let v2 = crate::scene_v2::SceneV2::from_v1_plain(&scene)
+            .unwrap()
+            .to_ron()
+            .unwrap();
+        std::fs::write(project.path(&entry), &v2).unwrap();
+        let report = check_project(project.root()).expect("运行时已能读取 v2 入口的值");
+        assert_eq!(report.scenes, 1);
+        assert!(report.v2_identity_pending.contains(&entry));
+        assert!(report.has_issues(), "v2 身份尚未由运行时持有");
+        assert_eq!(std::fs::read_to_string(project.path(&entry)).unwrap(), v2);
+        std::fs::remove_dir_all(project.root()).unwrap();
     }
 
     #[test]
@@ -1062,9 +1080,7 @@ mod tests {
             report.render()
         );
         assert!(report.invalid_prefabs.is_empty(), "{}", report.render());
-        assert!(report
-            .unsupported_runtime_files
-            .contains(&scene_path.to_owned()));
+        assert!(report.v2_identity_pending.contains(&scene_path.to_owned()));
         assert_eq!(
             std::fs::read_to_string(project.path(scene_path)).unwrap(),
             original

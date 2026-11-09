@@ -56,8 +56,9 @@ cargo run -p xgame-mcp
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
 
-组件 v2 文件当前用于格式迁移和检查验证；编辑器与独立游戏还不能加载 v2 入口
-场景，执行组件迁移后先用备份恢复，或等待运行时和编辑器接通后再用于项目制作。
+组件 v2 文件可由独立游戏和无头运行读取，但运行时仍以旧 `Scene` 值执行，组件
+ID 尚未进入 World。旧编辑器不能打开或保存 v2 场景；迁移后的项目先通过
+`--check` 和 `--headless` 验证，再等待编辑器 v2 编辑接通后用于日常制作。
 
 ## 发布包组合验收（Windows）
 

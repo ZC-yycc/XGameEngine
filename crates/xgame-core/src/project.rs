@@ -1165,6 +1165,19 @@ impl ProjectHandle {
         Ok(prefab)
     }
 
+    /// 只供运行时的值投影；旧编辑器必须继续走 `load_prefab`，否则保存会丢失组件 ID。
+    pub fn load_prefab_runtime(&self, relative: &str) -> Result<Prefab, String> {
+        let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
+        if crate::file_format::disk_version(&self.path(&relative))
+            .map_err(|e| format!("无法读取 '{relative}': {e}"))?
+            == Some(2)
+        {
+            self.load_prefab_v2(&relative)?.to_v1()
+        } else {
+            self.load_prefab(&relative)
+        }
+    }
+
     /// 显式 v2 草案写入：旧文件必须已是合法 v2；v1→v2 要走单独的迁移器。
     pub fn write_prefab_v2(
         &self,
@@ -1451,6 +1464,19 @@ impl ProjectHandle {
         Ok(scene)
     }
 
+    /// 只供运行时的值投影；返回的 v1 Scene 不可保存回 v2 路径。
+    pub fn load_scene_runtime(&self, relative: &str) -> Result<Scene, String> {
+        let relative = normalize_scene_relative(relative)?;
+        if crate::file_format::disk_version(&self.path(&relative))
+            .map_err(|e| format!("无法读取 '{relative}': {e}"))?
+            == Some(2)
+        {
+            self.load_scene_v2(&relative)?.to_v1()
+        } else {
+            self.load_scene(&relative)
+        }
+    }
+
     /// 显式 v2 草案写入；来源资产必须已落盘并通过关联检查，不覆盖 v1。
     pub fn write_scene_v2(
         &self,
@@ -1560,6 +1586,10 @@ impl ProjectHandle {
     /// 加载清单里指定的入口场景。
     pub fn load_entry_scene(&self) -> Result<Scene, String> {
         self.load_scene(&self.manifest.entry_scene)
+    }
+
+    pub fn load_entry_scene_runtime(&self) -> Result<Scene, String> {
+        self.load_scene_runtime(&self.manifest.entry_scene)
     }
 
     /// 只读地统计某个场景文件里的重复实体 ID（**不修复、不写盘**）。

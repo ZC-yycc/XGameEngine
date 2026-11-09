@@ -310,7 +310,7 @@ fn build_with_player(
         match xgame_core::project::normalize_scene_relative(raw) {
             Err(e) => unloadable.push(format!("{raw} ({e})")),
             Ok(relative) => {
-                if let Err(e) = project.load_scene(&relative) {
+                if let Err(e) = project.load_scene_runtime(&relative) {
                     unloadable.push(format!("{relative} ({e})"));
                 }
             }
