@@ -546,3 +546,106 @@ fn project_v2_write_preserves_ids_and_refuses_v1_overwrite() {
     assert!(project.write_scene_v2("../outside.ron", &v2_scene).is_err());
     std::fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn v2_component_edits_keep_ids_and_never_recycle_deleted_ids() {
+    use xgame_core::scene_v2::ComponentData;
+    let mut scene = Scene::new("Components");
+    let mut actor = Entity::new("Actor");
+    actor.camera = Some(Camera::default());
+    actor.scripts.push("Scripts/player.lua".into());
+    scene.add_entity(actor);
+    let mut upgraded = SceneV2::from_v1_plain(&scene).unwrap();
+    let entity = &mut upgraded.entities[0];
+    let camera_id = entity.components.entries[0].identity.id;
+    let lua_id = entity.components.entries[1].identity.id;
+    assert_eq!(entity.transform_identity.id.raw(), 1);
+
+    let added = entity
+        .add_component(ComponentData::Audio(AudioSource::default()))
+        .unwrap();
+    assert_eq!(added.raw(), 4);
+    assert!(entity
+        .add_component(ComponentData::Camera(Camera::default()))
+        .is_err());
+    assert_eq!(entity.components.next_component_id.next_id(), 5);
+    assert!(entity
+        .remove_component(entity.transform_identity.id)
+        .is_err());
+    assert!(entity.remove_component(camera_id).is_ok());
+    let replacement = entity
+        .add_component(ComponentData::Camera(Camera::default()))
+        .unwrap();
+    assert_eq!(replacement.raw(), 5);
+    assert_eq!(entity.components.next_component_id.next_id(), 6);
+    assert!(entity
+        .replace_component(lua_id, ComponentData::Camera(Camera::default()))
+        .is_err());
+    assert!(entity
+        .replace_component(
+            lua_id,
+            ComponentData::Lua {
+                path: "Scripts/new.lua".into()
+            }
+        )
+        .is_ok());
+    entity.move_component(added, 0).unwrap();
+    assert_eq!(entity.components.entries[0].identity.id, added);
+    entity.move_component(lua_id, 0).unwrap();
+    assert_eq!(entity.components.entries[0].identity.id, lua_id);
+    assert_eq!(entity.components.entries[1].identity.id, added);
+    assert_eq!(entity.components.entries[2].identity.id, replacement);
+    assert_eq!(
+        SceneV2::from_ron(&upgraded.to_ron().unwrap())
+            .unwrap()
+            .to_v1()
+            .unwrap()
+            .entities[0]
+            .scripts,
+        vec!["Scripts/new.lua"]
+    );
+}
+
+#[test]
+fn v2_rejects_unrepresentable_duplicate_script_or_rust_instances() {
+    use xgame_core::scene_v2::ComponentData;
+    let mut scene = Scene::new("Duplicates");
+    scene.add_entity(Entity::new("Actor"));
+    let mut v2 = SceneV2::from_v1_plain(&scene).unwrap();
+    let entity = &mut v2.entities[0];
+    entity
+        .add_component(ComponentData::Lua {
+            path: "Scripts/a.lua".into(),
+        })
+        .unwrap();
+    assert!(entity
+        .add_component(ComponentData::Lua {
+            path: "Scripts/a.lua".into()
+        })
+        .is_err());
+    entity
+        .add_component(ComponentData::Rust {
+            registered_name: "Health".into(),
+            fields: None,
+        })
+        .unwrap();
+    assert!(entity
+        .add_component(ComponentData::Rust {
+            registered_name: "Health".into(),
+            fields: None
+        })
+        .is_err());
+    let mut invalid = v2.clone();
+    let repeated = invalid.entities[0].components.entries[0].clone();
+    invalid.entities[0].components.entries.push(repeated);
+    invalid.entities[0]
+        .components
+        .entries
+        .last_mut()
+        .unwrap()
+        .identity
+        .id = xgame_core::component_id::ComponentId::from_raw(99).unwrap();
+    invalid.entities[0].components.next_component_id =
+        xgame_core::component_id::ComponentIdSequence::from_next(100).unwrap();
+    assert!(invalid.to_ron().unwrap_err().contains("重复"));
+}

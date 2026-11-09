@@ -300,6 +300,101 @@ impl ComponentData {
 }
 
 impl EntityV2 {
+    /// 组件 ID 在本实体内稳定；Transform 是固有属性，不在可移除列表中。
+    pub fn component(&self, id: ComponentId) -> Option<&ComponentData> {
+        self.components
+            .entries
+            .iter()
+            .find(|entry| entry.identity.id == id)
+            .map(|entry| &entry.data)
+    }
+
+    pub fn add_component(&mut self, data: ComponentData) -> Result<ComponentId, String> {
+        self.validate()?;
+        if self
+            .components
+            .entries
+            .iter()
+            .any(|entry| entry.data.legacy_key() == data.legacy_key())
+        {
+            return Err(format!("实体 {:?} 已有同名组件 {}", self.name, data.kind()));
+        }
+        let id = self.components.next_component_id.allocate()?;
+        self.components.entries.push(ComponentInstance {
+            identity: ComponentIdentity {
+                id,
+                source_component_id: None,
+            },
+            data,
+        });
+        Ok(id)
+    }
+
+    pub fn remove_component(&mut self, id: ComponentId) -> Result<ComponentInstance, String> {
+        self.validate()?;
+        if id == self.transform_identity.id {
+            return Err("Transform 是固有组件，不能移除".into());
+        }
+        let index = self
+            .components
+            .entries
+            .iter()
+            .position(|entry| entry.identity.id == id)
+            .ok_or_else(|| format!("实体 {:?} 找不到组件 ID {}", self.name, id.raw()))?;
+        Ok(self.components.entries.remove(index))
+    }
+
+    /// 只替换同种类的值；本地和来源身份保持不变。
+    pub fn replace_component(
+        &mut self,
+        id: ComponentId,
+        data: ComponentData,
+    ) -> Result<(), String> {
+        self.validate()?;
+        let index = self
+            .components
+            .entries
+            .iter()
+            .position(|entry| entry.identity.id == id)
+            .ok_or_else(|| format!("实体 {:?} 找不到可替换的组件 ID {}", self.name, id.raw()))?;
+        let old = &self.components.entries[index];
+        if old.data.kind() != data.kind() {
+            return Err("组件种类不能通过替换操作改变".into());
+        }
+        if old.identity.source_component_id.is_some() && old.data.legacy_key() != data.legacy_key()
+        {
+            return Err("带预制体来源的组件不能改变关联名称或路径".into());
+        }
+        if self
+            .components
+            .entries
+            .iter()
+            .enumerate()
+            .any(|(i, entry)| i != index && entry.data.legacy_key() == data.legacy_key())
+        {
+            return Err("替换后的组件与实体已有的挂载物重复".into());
+        }
+        self.components.entries[index].data = data;
+        Ok(())
+    }
+
+    pub fn move_component(&mut self, id: ComponentId, to: usize) -> Result<(), String> {
+        self.validate()?;
+        let count = self.components.entries.len();
+        if to >= count {
+            return Err(format!("组件目标位置 {to} 超出 0..{count}"));
+        }
+        let index = self
+            .components
+            .entries
+            .iter()
+            .position(|entry| entry.identity.id == id)
+            .ok_or_else(|| format!("实体 {:?} 找不到可重排的组件 ID {}", self.name, id.raw()))?;
+        let entry = self.components.entries.remove(index);
+        self.components.entries.insert(to, entry);
+        Ok(())
+    }
+
     /// 所有磁盘资产路径仍由 ProjectHandle 在读写边界转换。
     pub(crate) fn visit_asset_references(&mut self, visit: &mut impl FnMut(&mut String)) {
         if let Some(prefab) = &mut self.prefab {
@@ -422,17 +517,12 @@ impl EntityV2 {
         )?;
         let mut kinds = BTreeSet::new();
         for entry in &self.components.entries {
-            match &entry.data {
-                ComponentData::Rust { .. } | ComponentData::Lua { .. } => {}
-                other => {
-                    if !kinds.insert(other.kind()) {
-                        return Err(format!(
-                            "实体 {:?} 的内建组件 {} 重复",
-                            self.name,
-                            other.kind()
-                        ));
-                    }
-                }
+            if !kinds.insert(entry.data.legacy_key()) {
+                return Err(format!(
+                    "实体 {:?} 的 {} 组件重复",
+                    self.name,
+                    entry.data.kind()
+                ));
             }
         }
         Ok(())
