@@ -372,3 +372,70 @@ fn project_reads_v2_with_prefab_source_checks_without_writing() {
     assert!(project.load_scene_v2("../outside.ron").is_err());
     std::fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn project_previews_v1_scene_and_prefab_upgrade_without_touching_files() {
+    let base =
+        std::env::temp_dir().join(format!("xgame-v2-upgrade-preview-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let source_path = project.prefab_path_for("Actor");
+    let mut prefab = Prefab::new("Actor");
+    let mut asset = Entity::new("Actor");
+    asset.behaviors = vec!["Health".into(), "Motion".into()];
+    prefab.entities.push(asset);
+    project.write_prefab(&source_path, &prefab).unwrap();
+    let mut instance = prefab.instantiate(&source_path).remove(0);
+    instance.behaviors.swap(0, 1);
+    let mut scene = Scene::new("Upgrade");
+    scene.add_entity(instance);
+    let path = &project.manifest().entry_scene;
+    project.write_scene(path, &scene).unwrap();
+    let scene_bytes = std::fs::read(project.path(path)).unwrap();
+    let prefab_bytes = std::fs::read(project.path(&source_path)).unwrap();
+    let preview = project.preview_scene_v2(path).unwrap();
+    assert_eq!(preview.clone().to_v1().unwrap(), scene);
+    assert_eq!(
+        preview.entities[0].components.entries[0]
+            .identity
+            .source_component_id
+            .unwrap()
+            .raw(),
+        3
+    );
+    assert_eq!(std::fs::read(project.path(path)).unwrap(), scene_bytes);
+    assert_eq!(
+        std::fs::read(project.path(&source_path)).unwrap(),
+        prefab_bytes
+    );
+
+    let mut upgraded = PrefabV2::from_v1(&prefab).unwrap();
+    upgraded.entities[0].components.entries[1].identity.id =
+        xgame_core::component_id::ComponentId::from_raw(18).unwrap();
+    upgraded.entities[0].components.next_component_id =
+        xgame_core::component_id::ComponentIdSequence::from_next(19).unwrap();
+    std::fs::write(project.path(&source_path), upgraded.to_ron().unwrap()).unwrap();
+    let mixed = project.preview_scene_v2(path).unwrap();
+    assert_eq!(
+        mixed.entities[0].components.entries[0]
+            .identity
+            .source_component_id
+            .unwrap()
+            .raw(),
+        18
+    );
+    assert_eq!(std::fs::read(project.path(path)).unwrap(), scene_bytes);
+
+    // 未知嵌套字段在 v1 的常规加载中被忽略；预览迁移必须看见并拒绝。
+    let mut bad = String::from_utf8(scene_bytes.clone()).unwrap();
+    let marker = "behaviors: [";
+    assert!(bad.contains(marker));
+    bad = bad.replacen(marker, "unexpected_data: 42, behaviors: [", 1);
+    std::fs::write(project.path(path), &bad).unwrap();
+    assert!(project
+        .preview_scene_v2(path)
+        .unwrap_err()
+        .contains("unexpected_data"));
+    assert_eq!(std::fs::read_to_string(project.path(path)).unwrap(), bad);
+    std::fs::remove_dir_all(base).unwrap();
+}

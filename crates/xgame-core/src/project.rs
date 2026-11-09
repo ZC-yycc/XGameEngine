@@ -1370,6 +1370,51 @@ impl ProjectHandle {
         Ok(scene)
     }
 
+    /// 从 v1 原始文件只读预览升级结果；已升级的来源预制体沿用其真实组件 ID。
+    /// 不走 `load_scene` 的自动修复 / 数值夹取路径，迁移前必须看见坏数据。
+    pub fn preview_scene_v2(&self, relative: &str) -> Result<crate::scene_v2::SceneV2, String> {
+        let relative = normalize_scene_relative(relative)?;
+        let text = std::fs::read_to_string(self.path(&relative))
+            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        let mut scene: Scene = parse_v1_upgrade_text(&text, &relative)?;
+        if !scene.duplicate_ids().is_empty() {
+            return Err(format!("场景 '{relative}' 存在重复实体 ID，拒绝自动迁移"));
+        }
+        decode_scene_references(&mut scene, &self.assets());
+        let mut prefabs = std::collections::BTreeMap::new();
+        for entity in &scene.entities {
+            let Some(reference) = &entity.prefab else {
+                continue;
+            };
+            if prefabs.contains_key(&reference.source) {
+                continue;
+            }
+            let source_path = normalize_project_relative(&reference.source)
+                .map_err(|e| format!("预制体来源路径不安全: {e}"))?;
+            let file = self.path(&source_path);
+            let source = match crate::file_format::disk_version(&file)
+                .map_err(|e| format!("无法读取预制体 '{source_path}': {e}"))?
+            {
+                Some(2) => self.load_prefab_v2(&source_path)?,
+                Some(1) | None => {
+                    let text = std::fs::read_to_string(&file)
+                        .map_err(|e| format!("无法读取预制体 '{source_path}': {e}"))?;
+                    let mut source: Prefab = parse_v1_upgrade_text(&text, &source_path)?;
+                    if !source.duplicate_ids().is_empty() {
+                        return Err(format!("预制体 '{source_path}' 存在重复实体 ID"));
+                    }
+                    decode_prefab_references(&mut source, &self.assets());
+                    crate::scene_v2::PrefabV2::from_v1(&source)?
+                }
+                Some(version) => {
+                    return Err(format!("预制体 '{source_path}' 版本 {version} 不支持预览"))
+                }
+            };
+            prefabs.insert(reference.source.clone(), source);
+        }
+        crate::scene_v2::SceneV2::from_v1_with_prefabs(&scene, &prefabs)
+    }
+
     /// 加载清单里指定的入口场景。
     pub fn load_entry_scene(&self) -> Result<Scene, String> {
         self.load_scene(&self.manifest.entry_scene)
@@ -1582,6 +1627,29 @@ impl ProjectHandle {
 // ---------------------------------------------------------------------------
 // 默认场景
 // ---------------------------------------------------------------------------
+
+/// v1 普通读取保持宽容；只有不可逆的格式升级必须点名被忽略的字段。
+fn parse_v1_upgrade_text<T: serde::de::DeserializeOwned>(
+    text: &str,
+    relative: &str,
+) -> Result<T, String> {
+    let mut deserializer =
+        ron::de::Deserializer::from_str(text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+    let mut ignored = Vec::new();
+    let value =
+        serde_ignored::deserialize(&mut deserializer, |path| ignored.push(path.to_string()))
+            .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+    deserializer
+        .end()
+        .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+    if !ignored.is_empty() {
+        return Err(format!(
+            "'{relative}' 存在无法自动升级的未知字段: {}",
+            ignored.join(", ")
+        ));
+    }
+    Ok(value)
+}
 
 /// 新建项目时写入的默认场景：一台主相机 + 一盏方向光。
 ///
