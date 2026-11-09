@@ -50,6 +50,7 @@ mod config;
 pub mod prefab;
 pub mod project;
 mod scene;
+pub mod scene_v2;
 mod scene_transforms;
 mod transform;
 
