@@ -712,6 +712,67 @@ impl SceneV2 {
         Ok(())
     }
 
+    /// Revert 后依来源组件 ID 认回实例局部 ID，而不是依当前值里的 Lua 路径等旧键。
+    /// 被资产删去的组件一并消失；资产新增组件从原实例高水位分配。
+    pub fn reconcile_reverted_from_v1(
+        &mut self,
+        scene: &Scene,
+        prefabs: &BTreeMap<String, PrefabV2>,
+        restored_ids: &[EntityId],
+    ) -> Result<(), String> {
+        let before = self.clone();
+        let mut candidate = before.clone();
+        candidate
+            .entities
+            .retain(|entity| !restored_ids.contains(&entity.id));
+        candidate.reconcile_from_v1(scene, prefabs)?;
+        for entity in &mut candidate.entities {
+            if !restored_ids.contains(&entity.id) {
+                continue;
+            }
+            let Some(old) = before.entities.iter().find(|old| old.id == entity.id) else {
+                continue;
+            };
+            let Some(link) = &entity.prefab else {
+                return Err(format!("还原的实体 {:?} 缺少来源关联", entity.name));
+            };
+            let source = prefabs
+                .get(&link.source)
+                .and_then(|prefab| {
+                    prefab
+                        .entities
+                        .iter()
+                        .find(|item| item.id == link.source_id)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "预制体 {} 缺少实体 ID {}",
+                        link.source,
+                        link.source_id.raw()
+                    )
+                })?;
+            entity.transform_identity.id = old.transform_identity.id;
+            entity.transform_identity.source_component_id = Some(source.transform_identity.id);
+            let mut next = old.components.next_component_id;
+            for entry in &mut entity.components.entries {
+                if let Some(previous) = old.components.entries.iter().find(|previous| {
+                    previous.identity.source_component_id.is_some()
+                        && previous.identity.source_component_id
+                            == entry.identity.source_component_id
+                        && previous.data.kind() == entry.data.kind()
+                }) {
+                    entry.identity.id = previous.identity.id;
+                } else {
+                    entry.identity.id = next.allocate()?;
+                }
+            }
+            entity.components.next_component_id = next;
+        }
+        candidate.validate_prefab_sources(prefabs)?;
+        *self = candidate;
+        Ok(())
+    }
+
     pub(crate) fn visit_asset_references(&mut self, mut visit: impl FnMut(&mut String)) {
         for entity in &mut self.entities {
             entity.visit_asset_references(&mut visit);

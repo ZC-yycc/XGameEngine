@@ -2546,7 +2546,9 @@ impl EditorState {
             return;
         }
         if self.v2_session.is_some() {
-            self.log_warning("v2 预制体 Revert 尚未接入资产与实例的组件身份同步");
+            if let Err(error) = self.revert_prefab_v2(root_idx) {
+                self.log_error(format!("还原 v2 预制体失败: {error}"));
+            }
             return;
         }
         let Some(source) = self
@@ -2595,6 +2597,64 @@ impl EditorState {
             "已从资产还原预制体 '{}' ({source})",
             prefab_display_name(&source)
         ));
+    }
+
+    fn revert_prefab_v2(&mut self, root_idx: usize) -> Result<(), String> {
+        let source = self
+            .scene
+            .entities
+            .get(root_idx)
+            .and_then(|entity| entity.prefab.as_ref())
+            .filter(|link| link.is_root)
+            .ok_or("请选择预制体实例的根实体")?
+            .source
+            .clone();
+        let asset = self.project.load_prefab_v2(&source)?;
+        let prefab = asset.clone().to_v1()?;
+        if prefab.is_empty() {
+            return Err("预制体为空，实例保持不变".into());
+        }
+        let parent_id = self
+            .scene
+            .parent_index(root_idx)
+            .map(|parent| self.scene.entities[parent].id);
+        let old_world = self.scene.world_matrix(root_idx);
+        let mut draft = self.scene.clone();
+        let new_root = draft
+            .revert_prefab(root_idx, &prefab, &source)
+            .ok_or("无法还原预制体实例")?;
+        draft.entities[new_root].transform = Transform::from_matrix(old_world);
+        let parent = parent_id.and_then(|id| draft.index_of(id));
+        draft.set_parent(new_root, parent);
+        let restored: Vec<_> = draft
+            .subtree(new_root)
+            .iter()
+            .map(|&idx| draft.entities[idx].id)
+            .collect();
+        let session = self.v2_session.as_ref().expect("v2 会话存在");
+        let mut identity = self.prepare_v2_scene(&session.identity, &self.scene)?;
+        let mut prefabs = BTreeMap::new();
+        for entity in &draft.entities {
+            if let Some(link) = &entity.prefab {
+                if !prefabs.contains_key(&link.source) {
+                    prefabs.insert(
+                        link.source.clone(),
+                        self.project.load_prefab_v2(&link.source)?,
+                    );
+                }
+            }
+        }
+        identity.reconcile_reverted_from_v1(&draft, &prefabs, &restored)?;
+        self.push_undo();
+        self.scene = draft;
+        self.v2_session.as_mut().expect("v2 会话存在").identity = identity;
+        self.selected_entity = Some(new_root);
+        self.dirty_memo = None;
+        self.log_info(format!(
+            "已从 v2 资产还原预制体 '{}' ({source})",
+            prefab_display_name(&source)
+        ));
+        Ok(())
     }
 
     /// 删除一个预制体资产文件（面板上确认后调用）。
@@ -4125,6 +4185,133 @@ mod tests {
         editor.instantiate_prefab_by_path(&path).unwrap();
         editor.save_scene().unwrap();
         assert_eq!(project.load_scene_v2(&entry).unwrap().entities.len(), 2);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_revert_restores_asset_value_without_changing_instance_component_ids() {
+        let (state, base) = temp_state("v2_revert");
+        let project = state.project.clone();
+        let entry = project.manifest().entry_scene.clone();
+        let v2 = SceneV2::from_v1_plain(&state.scene).unwrap();
+        std::fs::write(project.path(&entry), v2.to_ron().unwrap()).unwrap();
+        let mut editor = EditorState::new(project.clone());
+        editor.selected_entity = Some(0);
+        let prefab = editor.create_prefab_from_selection("CameraAsset").unwrap();
+        let instance = editor.instantiate_prefab_by_path(&prefab).unwrap();
+        editor.save_scene().unwrap();
+        let original = project.load_scene_v2(&entry).unwrap();
+        let entity_id = editor.scene.entities[instance].id;
+        let identity = original
+            .entities
+            .iter()
+            .find(|e| e.id == entity_id)
+            .unwrap();
+        let component_id = identity.components.entries[0].identity.id;
+        let source_id = identity.components.entries[0].identity.source_component_id;
+        editor.scene.entities[instance].camera.as_mut().unwrap().fov = 31.0;
+        editor.scene.entities[instance].transform.position.x = 9.0;
+        editor.revert_prefab(instance);
+        let restored = editor.scene.index_of(entity_id).unwrap();
+        assert_eq!(
+            editor.scene.entities[restored].camera.as_ref().unwrap().fov,
+            project
+                .load_prefab_v2(&prefab)
+                .unwrap()
+                .to_v1()
+                .unwrap()
+                .entities[0]
+                .camera
+                .as_ref()
+                .unwrap()
+                .fov
+        );
+        assert_eq!(editor.scene.entities[restored].transform.position.x, 9.0);
+        editor.undo();
+        assert_eq!(
+            editor.scene.entities[editor.scene.index_of(entity_id).unwrap()]
+                .camera
+                .as_ref()
+                .unwrap()
+                .fov,
+            31.0
+        );
+        editor.redo();
+        assert_eq!(
+            editor.scene.entities[editor.scene.index_of(entity_id).unwrap()]
+                .camera
+                .as_ref()
+                .unwrap()
+                .fov,
+            60.0
+        );
+        editor.save_scene().unwrap();
+        let after = project.load_scene_v2(&entry).unwrap();
+        let component = &after
+            .entities
+            .iter()
+            .find(|e| e.id == entity_id)
+            .unwrap()
+            .components
+            .entries[0];
+        assert_eq!(component.identity.id, component_id);
+        assert_eq!(component.identity.source_component_id, source_id);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_revert_assigns_fresh_local_id_for_asset_added_component() {
+        let (state, base) = temp_state("v2_revert_added");
+        let project = state.project.clone();
+        let entry = project.manifest().entry_scene.clone();
+        std::fs::write(
+            project.path(&entry),
+            SceneV2::from_v1_plain(&state.scene)
+                .unwrap()
+                .to_ron()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut editor = EditorState::new(project.clone());
+        editor.selected_entity = Some(0);
+        let path = editor.create_prefab_from_selection("AddedAudio").unwrap();
+        let root = editor.instantiate_prefab_by_path(&path).unwrap();
+        editor.save_scene().unwrap();
+        let entity_id = editor.scene.entities[root].id;
+        let before = project.load_scene_v2(&entry).unwrap();
+        let old = before.entities.iter().find(|e| e.id == entity_id).unwrap();
+        let next_id = old.components.next_component_id.next_id();
+        let old_camera = old.components.entries[0].identity.id;
+        let mut asset = project.load_prefab_v2(&path).unwrap();
+        let asset_id = asset.entities[0]
+            .add_component(xgame_core::scene_v2::ComponentData::Audio(
+                Default::default(),
+            ))
+            .unwrap();
+        project.write_prefab_v2(&path, &asset).unwrap();
+        editor.revert_prefab(root);
+        let current = editor.scene.index_of(entity_id).unwrap();
+        assert!(editor.scene.entities[current].audio.is_some());
+        editor.save_scene().unwrap();
+        let restored = project.load_scene_v2(&entry).unwrap();
+        let entries = &restored
+            .entities
+            .iter()
+            .find(|e| e.id == entity_id)
+            .unwrap()
+            .components
+            .entries;
+        let camera = entries
+            .iter()
+            .find(|entry| matches!(entry.data, xgame_core::scene_v2::ComponentData::Camera(_)))
+            .unwrap();
+        let audio = entries
+            .iter()
+            .find(|entry| matches!(entry.data, xgame_core::scene_v2::ComponentData::Audio(_)))
+            .unwrap();
+        assert_eq!(camera.identity.id, old_camera);
+        assert_eq!(audio.identity.id.raw(), next_id);
+        assert_eq!(audio.identity.source_component_id, Some(asset_id));
         std::fs::remove_dir_all(base).unwrap();
     }
 
