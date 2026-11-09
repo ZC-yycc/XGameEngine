@@ -1633,6 +1633,14 @@ fn parse_v1_upgrade_text<T: serde::de::DeserializeOwned>(
     text: &str,
     relative: &str,
 ) -> Result<T, String> {
+    // v1 Map 会保留重复键的最后一个值；类型化读取前先遍历原始 RON。
+    let mut probe =
+        ron::de::Deserializer::from_str(text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+    let _: UniqueRonMaps = Deserialize::deserialize(&mut probe)
+        .map_err(|e| format!("无法无损升级 '{relative}': {e}"))?;
+    probe
+        .end()
+        .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
     let mut deserializer =
         ron::de::Deserializer::from_str(text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
     let mut ignored = Vec::new();
@@ -1649,6 +1657,81 @@ fn parse_v1_upgrade_text<T: serde::de::DeserializeOwned>(
         ));
     }
     Ok(value)
+}
+
+/// 只读遍历每层 Map；RON 的 Value 自身会合并重复键，不能直接用它解析整份文件。
+struct UniqueRonMaps;
+
+impl<'de> Deserialize<'de> for UniqueRonMaps {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Walk;
+        impl<'de> serde::de::Visitor<'de> for Walk {
+            type Value = UniqueRonMaps;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("键不重复的 RON 值")
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_char<E: serde::de::Error>(self, _: char) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(UniqueRonMaps)
+            }
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                de: D,
+            ) -> Result<Self::Value, D::Error> {
+                UniqueRonMaps::deserialize(de)
+            }
+            fn visit_newtype_struct<D: serde::Deserializer<'de>>(
+                self,
+                de: D,
+            ) -> Result<Self::Value, D::Error> {
+                UniqueRonMaps::deserialize(de)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<UniqueRonMaps>()?.is_some() {}
+                Ok(UniqueRonMaps)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut keys = std::collections::BTreeSet::new();
+                while let Some(key) = map.next_key::<ron::Value>()? {
+                    if !keys.insert(key) {
+                        return Err(serde::de::Error::custom("RON Map 存在重复键"));
+                    }
+                    map.next_value::<UniqueRonMaps>()?;
+                }
+                Ok(UniqueRonMaps)
+            }
+        }
+        deserializer.deserialize_any(Walk)
+    }
 }
 
 /// 新建项目时写入的默认场景：一台主相机 + 一盏方向光。

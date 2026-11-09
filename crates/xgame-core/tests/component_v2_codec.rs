@@ -439,3 +439,49 @@ fn project_previews_v1_scene_and_prefab_upgrade_without_touching_files() {
     assert_eq!(std::fs::read_to_string(project.path(path)).unwrap(), bad);
     std::fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn project_upgrade_preview_rejects_repeated_v1_map_keys() {
+    let base = std::env::temp_dir().join(format!("xgame-v1-duplicate-map-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let mut scene = Scene::new("DuplicateMap");
+    let mut actor = Entity::new("Actor");
+    actor.behaviors.push("Health".into());
+    actor.behavior_params.insert(
+        "Health".into(),
+        [("hp".into(), xgame_core::FieldValue::F32(5.0))].into(),
+    );
+    scene.add_entity(actor);
+    let path = &project.manifest().entry_scene;
+    project.write_scene(path, &scene).unwrap();
+    let original = std::fs::read_to_string(project.path(path)).unwrap();
+    let duplicated = original.replacen("\"hp\":", "\"hp\": F32(2.0), \"hp\":", 1);
+    assert_ne!(duplicated, original);
+    assert!(
+        ron::from_str::<Scene>(&duplicated).is_ok(),
+        "v1 常规解码确实会吞掉重复键"
+    );
+    std::fs::write(project.path(path), &duplicated).unwrap();
+    assert!(project.preview_scene_v2(path).unwrap_err().contains("重复"));
+    assert_eq!(
+        std::fs::read_to_string(project.path(path)).unwrap(),
+        duplicated
+    );
+    scene.entities[0].animator = Some(Animator {
+        machine: Some(xgame_core::AnimMachine {
+            parameters: [("speed".into(), 1.0)].into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    project.write_scene(path, &scene).unwrap();
+    let text = std::fs::read_to_string(project.path(path)).unwrap();
+    let repeated = text.replacen("\"speed\":", "\"speed\": 0.0, \"speed\":", 1);
+    assert_ne!(repeated, text);
+    std::fs::write(project.path(path), &repeated).unwrap();
+    assert!(project.preview_scene_v2(path).unwrap_err().contains("重复"));
+    std::fs::write(project.path(path), &text).unwrap();
+    assert!(project.preview_scene_v2(path).is_ok());
+    std::fs::remove_dir_all(base).unwrap();
+}
