@@ -298,3 +298,77 @@ fn v2_prefab_instance_uses_asset_component_ids_after_local_reordering() {
     broken.get_mut(source_path).unwrap().entities[0].id = xgame_core::EntityId::new();
     assert!(SceneV2::from_v1_with_prefabs(&scene, &broken).is_err());
 }
+
+#[test]
+fn project_reads_v2_with_prefab_source_checks_without_writing() {
+    let base = std::env::temp_dir().join(format!("xgame-v2-read-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let prefab_path = project.prefab_path_for("Actor");
+    let mut prefab = Prefab::new("Actor");
+    let mut asset = Entity::new("Actor");
+    asset.camera = Some(Camera::default());
+    prefab.entities.push(asset);
+    let mut scene = Scene::new("Instance");
+    scene.entities.extend(prefab.instantiate(&prefab_path));
+    let v2_prefab = PrefabV2::from_v1(&prefab).unwrap();
+    let v2_scene = SceneV2::from_v1_with_prefabs(
+        &scene,
+        &BTreeMap::from([(prefab_path.clone(), v2_prefab.clone())]),
+    )
+    .unwrap();
+    let scene_path = project.manifest().entry_scene.clone();
+    std::fs::create_dir_all(project.path(&prefab_path).parent().unwrap()).unwrap();
+    std::fs::write(project.path(&prefab_path), v2_prefab.to_ron().unwrap()).unwrap();
+    std::fs::write(project.path(&scene_path), v2_scene.to_ron().unwrap()).unwrap();
+    let before = std::fs::read(project.path(&scene_path)).unwrap();
+    assert!(
+        project.load_scene(&scene_path).is_err(),
+        "v1 加载器必须拒绝 v2"
+    );
+    assert!(project.load_prefab(&prefab_path).is_err());
+    assert_eq!(
+        project
+            .load_scene_v2(&scene_path)
+            .unwrap()
+            .to_ron()
+            .unwrap(),
+        v2_scene.to_ron().unwrap()
+    );
+    assert_eq!(std::fs::read(project.path(&scene_path)).unwrap(), before);
+
+    let mut encoded = v2_scene.clone();
+    {
+        let mut assets = project.assets();
+        assets.refresh();
+        assets.ensure_metas().unwrap();
+        xgame_core::encode_scene_v2_references(&mut encoded, &assets);
+    }
+    assert!(encoded.to_ron().unwrap().contains("guid://"));
+    std::fs::write(project.path(&scene_path), encoded.to_ron().unwrap()).unwrap();
+    assert_eq!(
+        project.load_scene_v2(&scene_path).unwrap().entities[0]
+            .prefab
+            .as_ref()
+            .unwrap()
+            .source,
+        prefab_path
+    );
+
+    let mut broken = v2_scene.clone();
+    broken.entities[0].components.entries[0]
+        .identity
+        .source_component_id = Some(xgame_core::component_id::ComponentId::from_raw(99).unwrap());
+    let text = broken.to_ron().unwrap();
+    std::fs::write(project.path(&scene_path), &text).unwrap();
+    assert!(project
+        .load_scene_v2(&scene_path)
+        .unwrap_err()
+        .contains("来源 ID"));
+    assert_eq!(
+        std::fs::read_to_string(project.path(&scene_path)).unwrap(),
+        text
+    );
+    assert!(project.load_scene_v2("../outside.ron").is_err());
+    std::fs::remove_dir_all(base).unwrap();
+}

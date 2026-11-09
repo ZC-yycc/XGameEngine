@@ -1118,6 +1118,17 @@ impl ProjectHandle {
         Ok(prefab)
     }
 
+    /// 显式只读 v2 预制体入口；旧的 `load_prefab` 仍拒绝 v2，避免旧编辑器丢失身份。
+    pub fn load_prefab_v2(&self, relative: &str) -> Result<crate::scene_v2::PrefabV2, String> {
+        let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(self.path(&relative))
+            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        let mut prefab = crate::scene_v2::PrefabV2::from_ron(&text)
+            .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+        crate::asset::decode_prefab_v2_references(&mut prefab, &self.assets());
+        Ok(prefab)
+    }
+
     /// 把预制体写回项目内的相对路径。
     ///
     /// 写盘前把资产引用编码成 GUID（并补齐缺 `.meta` 的资产身份证）。
@@ -1334,6 +1345,29 @@ impl ProjectHandle {
         // 发布前后按诊断文本取差集；解析失败必须使用项目内路径，否则同一
         // 份坏场景复制到 staging 后会被误判成构建新引入的问题。
         self.parse_scene_text(&text, Path::new(&relative))
+    }
+
+    /// 显式只读 v2 场景入口；在项目路径边界读取每份来源资产并复核组件关联。
+    /// v2 的正式保存 / 运行时结构操作仍未开放，不能用 `to_v1` 的结果写回此文件。
+    pub fn load_scene_v2(&self, relative: &str) -> Result<crate::scene_v2::SceneV2, String> {
+        let relative = normalize_scene_relative(relative)?;
+        let text = std::fs::read_to_string(self.path(&relative))
+            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        let mut scene = crate::scene_v2::SceneV2::from_ron(&text)
+            .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+        crate::asset::decode_scene_v2_references(&mut scene, &self.assets());
+        let mut prefabs = std::collections::BTreeMap::new();
+        for entity in &scene.entities {
+            if let Some(reference) = &entity.prefab {
+                // 路径必须先经 normalize_project_relative，不能让来源引用越出项目。
+                if !prefabs.contains_key(&reference.source) {
+                    let prefab = self.load_prefab_v2(&reference.source)?;
+                    prefabs.insert(reference.source.clone(), prefab);
+                }
+            }
+        }
+        scene.validate_prefab_sources(&prefabs)?;
+        Ok(scene)
     }
 
     /// 加载清单里指定的入口场景。
