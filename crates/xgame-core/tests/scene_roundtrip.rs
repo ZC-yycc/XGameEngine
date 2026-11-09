@@ -365,6 +365,7 @@ fn random_scene(rng: &mut Rng, name: &str) -> Scene {
         });
     }
     Scene {
+        format_version: 1,
         name: name.to_string(),
         entities,
         lights,
@@ -466,6 +467,7 @@ fn random_prefabs_survive_save_load_save() {
         let mut rng = Rng::new(seed ^ 0xA5A5);
         let scene = random_scene(&mut rng, &format!("P{seed}"));
         let prefab = Prefab {
+            format_version: 1,
             name: scene.name.clone(),
             entities: scene.entities,
         };

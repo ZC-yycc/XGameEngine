@@ -616,6 +616,30 @@ pub enum ProjectError {
     /// 混在一起会让调用方以为是磁盘问题，跑去查权限。
     #[error("路径不合法 ({relative}): {reason}")]
     InvalidPath { relative: String, reason: String },
+
+    #[error("不支持文件格式版本 {version} ({path})；旧格式写入已拒绝")]
+    UnsupportedFileVersion { path: PathBuf, version: u32 },
+}
+
+/// 旧编辑会话保存时若文件已由外部升级，禁止覆盖其未知组件数据。
+fn guard_v1_write(path: &Path, requested: u32) -> Result<(), ProjectError> {
+    if requested != crate::file_format::V1 {
+        return Err(ProjectError::UnsupportedFileVersion {
+            path: path.to_path_buf(),
+            version: requested,
+        });
+    }
+    let disk = crate::file_format::disk_version(path).map_err(|source| ProjectError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let Some(version) = disk.filter(|version| *version != crate::file_format::V1) {
+        return Err(ProjectError::UnsupportedFileVersion {
+            path: path.to_path_buf(),
+            version,
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,6 +1129,7 @@ impl ProjectHandle {
                 relative: relative.to_owned(),
                 reason: defect.to_string(),
             })?;
+        guard_v1_write(&self.path(&relative), prefab.format_version)?;
         let encoded = {
             let mut assets = self.assets();
             // 与 `write_scene` 同理：编码前保证索引是最新的。
@@ -1384,6 +1409,7 @@ impl ProjectHandle {
     /// 必须是**同一种格式**，否则"从自动保存恢复"会把 GUID 变成路径，
     /// 下一次保存再把它们编回去（中间任何一步的 diff 都会显得莫名其妙）。
     fn scene_text(&self, scene: &Scene, path: &Path) -> Result<String, ProjectError> {
+        guard_v1_write(path, scene.format_version)?;
         let encoded = {
             let mut assets = self.assets();
             // 保存前重新扫一遍：用户可能在编辑器打开后往 `Resources/` 里拷了
@@ -2413,6 +2439,55 @@ mod tests {
         assert_eq!(after.entities[0].model, "Resources/Box.glb");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 旧读写器遇到新版文件必须明确报错；否则未知 components 会被 serde 丢掉。
+    #[test]
+    fn future_scene_and_prefab_versions_cannot_be_loaded_or_overwritten() {
+        let (base, handle) = temp_project("future_component_format");
+        let scene_path = "Scenes/future.ron";
+        let prefab_path = "Prefabs/future.prefab.ron";
+        let scene =
+            "(format_version: 2, name: \"Future\", entities: [(name: \"Actor\", components: [])])";
+        let prefab =
+            "(format_version: 2, name: \"Future\", entities: [(name: \"Actor\", components: [])])";
+        std::fs::create_dir_all(handle.path("Prefabs")).unwrap();
+        std::fs::write(handle.path(scene_path), scene).unwrap();
+        std::fs::write(handle.path(prefab_path), prefab).unwrap();
+
+        assert!(ron::from_str::<crate::Scene>(scene).is_err());
+        assert!(crate::Prefab::from_ron(prefab).is_err());
+        assert!(handle.load_scene(scene_path).is_err());
+        assert!(handle.load_prefab(prefab_path).is_err());
+        assert!(handle.scene_duplicate_ids(scene_path).is_err());
+        assert!(handle.prefab_duplicate_ids(prefab_path).is_err());
+        assert!(handle
+            .write_scene(scene_path, &crate::Scene::new("Old"))
+            .is_err());
+        assert!(handle
+            .write_prefab(prefab_path, &crate::Prefab::new("Old"))
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(handle.path(scene_path)).unwrap(),
+            scene
+        );
+        assert_eq!(
+            std::fs::read_to_string(handle.path(prefab_path)).unwrap(),
+            prefab
+        );
+
+        let mut invalid = crate::Scene::new("Bad");
+        invalid.format_version = 3;
+        assert!(handle.write_scene("Scenes/new.ron", &invalid).is_err());
+        assert!(!handle.path("Scenes/new.ron").exists());
+        assert_eq!(
+            ron::from_str::<crate::Scene>("(name: \"Old\", entities: [])")
+                .unwrap()
+                .format_version,
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// 预制体资产的引用同样走 GUID：改名后预制体内部的模型引用不断。

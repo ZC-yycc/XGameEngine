@@ -14,6 +14,7 @@
 - [x] core 统一列举内建、Rust 与 Lua 挂载物；Inspector 共用添加 / 移除操作。
 - [x] MCP `entity_components_read` 按实体 ID 只读查询；旧格式地址显式标注 `legacy`。
 - [x] `component_catalog_read` 共用场景 schema 的字段说明，不依赖项目文件。
+- [x] 场景 / 预制体文件级版本防护：v1 默认不落盘，遇未支持版本拒绝读取和旧格式覆写。
 - [ ] 组件实例 ID、v2 场景格式、局部字段修改与编辑器会话同步尚待后续阶段。
 
 ### 2026-11-09 Inspector 通用组件入口

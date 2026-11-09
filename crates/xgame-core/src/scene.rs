@@ -528,6 +528,13 @@ impl PartialEq for Entity {
 /// 包含实体列表的场景。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
+    /// 文件级版本；旧文件省略时是 v1。v2 尚无解码器时必须报错，避免忽略组件数据。
+    #[serde(
+        default = "crate::file_format::v1",
+        skip_serializing_if = "crate::file_format::is_v1",
+        deserialize_with = "crate::file_format::deserialize_v1"
+    )]
+    pub format_version: u32,
     /// 场景名称。
     pub name: String,
     /// 场景中的实体列表。
@@ -560,6 +567,7 @@ impl Scene {
     /// 而且会让人以为相机或渲染管线出了问题。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            format_version: crate::file_format::V1,
             name: name.into(),
             entities: Vec::new(),
             lights: default_lights(),

@@ -582,6 +582,7 @@ fn scene_types() -> Vec<TypeSchema> {
             None,
             Some(pretty(&scene_example())),
             vec![
+                def("format_version", "u32", &1u32, "文件独立版本；省略 = v1。当前仅支持 1；遇到未来版本必须拒绝，不能用旧格式保存覆盖。"),
                 req("name", "String", "场景名（显示用，不参与路径解析）。"),
                 req(
                     "entities",
@@ -870,6 +871,7 @@ fn scene_types() -> Vec<TypeSchema> {
             None,
             Some(pretty(&prefab_example())),
             vec![
+                def("format_version", "u32", &1u32, "预制体独立版本；省略 = v1。当前仅支持 1，未来版本须由对应解码器处理。"),
                 req("name", "String", "预制体名（显示用，通常取资产文件名）。"),
                 req(
                     "entities",
@@ -2558,12 +2560,17 @@ mod tests {
         let doc = scene_schema();
 
         let Scene {
+            format_version,
             name,
             entities,
             lights,
             ambient,
         } = Scene::new("x");
-        assert_fields(&doc, "Scene", &["name", "entities", "lights", "ambient"]);
+        assert_fields(
+            &doc,
+            "Scene",
+            &["format_version", "name", "entities", "lights", "ambient"],
+        );
 
         let Entity {
             name,
@@ -2674,8 +2681,12 @@ mod tests {
             &["source", "source_id", "is_root"],
         );
 
-        let Prefab { name, entities } = Prefab::new("x");
-        assert_fields(&doc, "Prefab", &["name", "entities"]);
+        let Prefab {
+            format_version,
+            name,
+            entities,
+        } = Prefab::new("x");
+        assert_fields(&doc, "Prefab", &["format_version", "name", "entities"]);
 
         let AnimState {
             name,

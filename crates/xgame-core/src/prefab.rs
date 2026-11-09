@@ -71,6 +71,13 @@ pub struct PrefabInstanceRef {
 /// 那些属于「场景」，不属于「可复用的对象」。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prefab {
+    /// 文件级版本；旧文件省略时是 v1，未支持的版本不得被旧解码器读取。
+    #[serde(
+        default = "crate::file_format::v1",
+        skip_serializing_if = "crate::file_format::is_v1",
+        deserialize_with = "crate::file_format::deserialize_v1"
+    )]
+    pub format_version: u32,
     /// 预制体名（显示用，通常取自资产文件名）。
     pub name: String,
     /// 预制体内的实体。层级由每个实体的 `parent`（按 ID）表达。
@@ -81,6 +88,7 @@ impl Prefab {
     /// 创建一个空预制体。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            format_version: crate::file_format::V1,
             name: name.into(),
             entities: Vec::new(),
         }
