@@ -230,11 +230,11 @@ impl GameApp {
             );
         }
         let entry_scene = project.manifest().entry_scene.clone();
-        let scene = match project.load_entry_scene_runtime() {
+        let scene = match project.load_entry_runtime_scene() {
             Ok(scene) => scene,
             Err(e) => {
                 log::error!("{e}");
-                Scene::new("Untitled")
+                RuntimeScene::legacy(Scene::new("Untitled"))
             }
         };
 
@@ -280,7 +280,7 @@ impl GameApp {
         // 场景装载器 = 项目句柄本身（`ProjectHandle` 是共享资产索引的轻句柄，
         // clone 不重新扫盘）：脚本 `load_scene()` 靠它把 GUID 引用解码成路径。
         // 没有这一步，运行期切场景会记一条"宿主没接入场景装载器"的错误。
-        let world = World::new(
+        let world = World::from_runtime_scene(
             scene,
             project.root(),
             WorldConfig::from_project(project.manifest()),

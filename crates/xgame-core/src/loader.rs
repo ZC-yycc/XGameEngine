@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use crate::prefab::Prefab;
 use crate::project::ProjectHandle;
+use crate::runtime_scene::RuntimeScene;
 use crate::scene::Scene;
 
 /// 资产装载来源（项目相对路径 → 内存态场景 / 预制体）。
@@ -46,6 +47,14 @@ use crate::scene::Scene;
 pub trait SceneLoader {
     /// 按项目相对路径装载场景（如 `"Scenes/Level2.ron"`）。
     fn load_scene(&self, relative: &str) -> Result<Scene, String>;
+
+    /// 带可选 v2 组件身份的运行时载荷。
+    ///
+    /// 默认把旧实现返回的 Scene 包成 v1 载荷，第三方 / 测试装载器无需立刻改代码；
+    /// 项目句柄会覆盖此方法，让 v2 场景的稳定 ID 真正进入 World。
+    fn load_runtime_scene(&self, relative: &str) -> Result<RuntimeScene, String> {
+        self.load_scene(relative).map(RuntimeScene::legacy)
+    }
 
     /// 按项目相对路径装载预制体（如 `"Prefabs/Enemy.prefab.ron"`）。
     ///
@@ -67,6 +76,10 @@ impl SceneLoader for ProjectHandle {
         ProjectHandle::load_scene_runtime(self, relative)
     }
 
+    fn load_runtime_scene(&self, relative: &str) -> Result<RuntimeScene, String> {
+        ProjectHandle::load_runtime_scene(self, relative)
+    }
+
     fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {
         ProjectHandle::load_prefab_runtime(self, relative)
     }
@@ -76,6 +89,10 @@ impl SceneLoader for ProjectHandle {
 impl<T: SceneLoader + ?Sized> SceneLoader for Arc<T> {
     fn load_scene(&self, relative: &str) -> Result<Scene, String> {
         (**self).load_scene(relative)
+    }
+
+    fn load_runtime_scene(&self, relative: &str) -> Result<RuntimeScene, String> {
+        (**self).load_runtime_scene(relative)
     }
 
     fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {

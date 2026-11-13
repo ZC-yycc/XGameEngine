@@ -83,6 +83,7 @@ pub mod particle;
 pub mod physics;
 pub mod quality;
 pub mod ray;
+mod runtime_scene;
 pub mod savegame;
 mod time;
 pub mod ui;
@@ -152,6 +153,10 @@ pub use particle::{EmissionShape, ParticleBlend, ParticleEmitter, MAX_PARTICLES_
 pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
 pub use quality::{QualityConfig, QualityPreset, QualitySettings, DEFAULT_SHADOW_RESOLUTION};
 pub use ray::{Ray, RayHit};
+pub use runtime_scene::{
+    RuntimeComponentIdentity, RuntimeComponentKind, RuntimeEntityIdentity, RuntimeScene,
+    RuntimeSceneIdentity,
+};
 pub use savegame::{
     delete_save, list_saves, read_save, save_exists, save_slot_path, save_slot_relative,
     write_save, EntityState, SaveError, SaveGame, SaveValue, SaveVars, SAVE_DIR, SAVE_EXTENSION,

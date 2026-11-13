@@ -705,9 +705,9 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
 
     let project = ProjectHandle::open(&args.project).map_err(|e| format!("打开项目失败: {e}"))?;
     let scene = project
-        .load_entry_scene_runtime()
+        .load_entry_runtime_scene()
         .map_err(|e| format!("加载入口场景失败: {e}"))?;
-    let scene_name = scene.name.clone();
+    let scene_name = scene.scene().name.clone();
 
     // 输入映射：与编辑器 Play / 独立游戏同一条读法（没有就默认映射）。
     let input_map = crate::game_runtime::load_input_map(project.root());
@@ -735,7 +735,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     // （否则"多场景流程"就没法被 CI 与智能体验证）。入口场景路径同时交给运行时，
     // 脚本 `current_scene()` 才有值。
     let entry_scene = project.manifest().entry_scene.clone();
-    let mut world = World::new(scene, project.root(), config)
+    let mut world = World::from_runtime_scene(scene, project.root(), config)
         .with_input_map(input_map)
         .with_behavior_registry(behaviors)
         .with_scene_loader(project.clone())

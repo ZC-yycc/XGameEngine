@@ -58,8 +58,8 @@ pub mod prelude {
     pub use xgame_core::project::{ProjectHandle, PROJECT_FILE_NAME};
     pub use xgame_core::{
         BloomConfig, BodyKind, Entity, EntityId, FxaaConfig, GameClock, PhysicsBody, PhysicsHandle,
-        QualityConfig, QualityPreset, QualitySettings, RenderConfig, SaveGame, SaveValue, Scene,
-        SsaoConfig, ToneMapMode, Transform,
+        QualityConfig, QualityPreset, QualitySettings, RenderConfig, RuntimeScene, SaveGame,
+        SaveValue, Scene, SsaoConfig, ToneMapMode, Transform,
     };
 
     // -- 检视（P1）：字段表 + 派生宏 --------------------------------------

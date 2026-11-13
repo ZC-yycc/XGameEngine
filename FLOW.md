@@ -130,12 +130,12 @@ main()                           crates/xgame-game/src/main.rs
              ├── wgpu Instance → Adapter → Device + Queue
              ├── Surface → SurfaceConfiguration（vsync 取自项目清单）
              ├── ScenePipeline::new()
-             ├── project.load_entry_scene()
-             └── World::new()
+             ├── project.load_entry_runtime_scene()   v1 值 / v2 值 + 组件身份侧车
+             └── World::from_runtime_scene()
                    ├── PhysicsWorld / GameClock / LuaHost / AudioEngine
                    ├── 运行态唯一 AnimationDriver
                    └── ProjectHandle 场景装载器 + GltfAnimationLoader（纯 CPU 动画）
-                         └── 与 GPU 模型共用 resolve_model_source（search_paths + 命中文件旁 .meta）
+                          └── 与 GPU 模型共用 resolve_model_source（search_paths + 命中文件旁 .meta）
 ```
 
 > ② 是「把项目做成软件」的关键：构建产物把 `<项目名>.exe` 和 `project.ron` 放在同一个

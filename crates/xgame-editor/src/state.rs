@@ -2739,12 +2739,36 @@ impl EditorState {
             }
         }
 
+        // v2 Play 不能退回裸 Scene：先把当前未保存值合进身份副本，再把“值 + 身份”
+        // 一起交给 World。失败时不带着半份身份进入运行态。
+        let runtime_scene = if let Some(session) = &self.v2_session {
+            match self.prepare_v2_scene(&session.identity, &self.scene) {
+                Ok(identity) => match xgame_core::RuntimeScene::from_v2(identity) {
+                    Ok(scene) => scene,
+                    Err(error) => {
+                        self.log_error(format!("无法建立 v2 Play 场景: {error}"));
+                        self.play_mode = PlayMode::Edit;
+                        self.pending_play = false;
+                        return;
+                    }
+                },
+                Err(error) => {
+                    self.log_error(format!("无法同步 v2 Play 身份: {error}"));
+                    self.play_mode = PlayMode::Edit;
+                    self.pending_play = false;
+                    return;
+                }
+            }
+        } else {
+            xgame_core::RuntimeScene::legacy(self.scene.clone())
+        };
+
         // 快照 + 启动都要在改 `play_mode` 之前完成：运行时的 `start` 可能失败
         // （脚本编译错误），那时状态应该还是"干净的编辑态"。
         self.play_snapshot = Some(self.scene.clone());
         let registry = self.plugins.build_registry();
         let mut runtime =
-            crate::game_runtime::GameRuntime::start(self.scene.clone(), &self.project, registry);
+            crate::game_runtime::GameRuntime::start(runtime_scene, &self.project, registry);
         // Play 跑的是**当前编辑的场景**（多场景编辑下未必是清单里的启动场景）：
         // 脚本 `current_scene()` 与"切到 B 再切回来"都靠这个起点。
         runtime.set_current_scene(&self.current_scene);
@@ -4068,6 +4092,31 @@ mod tests {
                 .fov,
             48.0
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_editor_play_passes_component_identity_into_world() {
+        let (state, base) = temp_state("v2_editor_play_identity");
+        let project = state.project.clone();
+        let entry = project.manifest().entry_scene.clone();
+        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&state.scene).unwrap();
+        let entity_id = v2.entities[0].id;
+        let transform_id = v2.entities[0].transform_identity.id;
+        std::fs::write(project.path(&entry), v2.to_ron().unwrap()).unwrap();
+
+        let mut editor = EditorState::new(project);
+        editor.enter_play_mode();
+        let runtime = editor.game_runtime.as_ref().expect("Play 运行时已建立");
+        assert!(runtime.has_component_identities());
+        assert_eq!(
+            runtime
+                .component_identity(entity_id, transform_id)
+                .expect("Transform 可按 v2 ID 查询")
+                .kind,
+            xgame_core::RuntimeComponentKind::Builtin(xgame_core::BuiltinComponent::Transform)
+        );
+        editor.exit_play_mode();
         std::fs::remove_dir_all(base).unwrap();
     }
 

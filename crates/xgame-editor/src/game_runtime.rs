@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use xgame_core::Scene;
+use xgame_core::{RuntimeScene, Scene};
 use xgame_input::InputMap;
 use xgame_physics::DebugLine;
 use xgame_runtime::{FrameReport, ScriptLog, World, WorldConfig};
@@ -44,7 +44,7 @@ impl GameRuntime {
     /// 每次 Play 都传**新**表是刻意的：组件实例可能持有上次 Play 的状态，
     /// 复用旧表会让"停止再播放"回不到初始状态（详见 `plugin_session` 模块文档）。
     pub fn start(
-        scene: Scene,
+        scene: RuntimeScene,
         project: &xgame_core::ProjectHandle,
         behaviors: xgame_runtime::BehaviorRegistry,
     ) -> Self {
@@ -61,7 +61,7 @@ impl GameRuntime {
         // 场景装载器 = 项目句柄：Play 期间脚本 `load_scene()` 也照常生效
         // （与独立游戏同一条路径）。切过去的场景在 Play 结束时被
         // `play_snapshot` 整个丢弃 —— 运行期切换不写回项目文件。
-        let world = World::new(
+        let world = World::from_runtime_scene(
             scene,
             project_root,
             WorldConfig::from_project(project.manifest()),
@@ -143,6 +143,21 @@ impl GameRuntime {
     /// 运行时当前所在的场景（Play 期间脚本 `load_scene()` 会改它）。
     pub fn current_scene(&self) -> Option<&str> {
         self.world.current_scene()
+    }
+
+    /// v2 Play 会话的稳定组件寻址是否已经进入 World。
+    #[cfg(test)]
+    pub(crate) fn has_component_identities(&self) -> bool {
+        self.world.has_component_identities()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn component_identity(
+        &self,
+        entity_id: xgame_core::EntityId,
+        component_id: xgame_core::component_id::ComponentId,
+    ) -> Option<&xgame_core::RuntimeComponentIdentity> {
+        self.world.component_identity(entity_id, component_id)
     }
 
     /// Play 态唯一动画时钟（视口 / Inspector 只读）。

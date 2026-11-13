@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use xgame_core::scene_v2::{ComponentData, PrefabV2, SceneV2};
 use xgame_core::{
     Animator, AudioSource, Camera, CharacterController, Entity, MaterialOverride, ParticleEmitter,
-    PhysicsBody, Prefab, Scene, UiElement,
+    PhysicsBody, Prefab, RuntimeComponentKind, Scene, UiElement,
 };
 
 #[test]
@@ -618,6 +618,10 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
     let mut scene = project.load_entry_scene().unwrap();
     scene.add_entity(Entity::new("Runner").with_script("Scripts/runner.lua"));
     let upgraded = SceneV2::from_v1_plain(&scene).unwrap();
+    let runner = upgraded.entities.last().unwrap();
+    let runner_id = runner.id;
+    let transform_id = runner.transform_identity.id;
+    let script_id = runner.components.entries[0].identity.id;
     project
         .write_scene_v2("Scenes/Extra.ron", &upgraded)
         .unwrap();
@@ -627,6 +631,18 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
     assert_eq!(
         runtime.entities.last().unwrap().scripts,
         ["Scripts/runner.lua"]
+    );
+    let loaded = project.load_entry_runtime_scene().unwrap();
+    let identities = loaded.identities().expect("v2 运行载荷必须保留组件身份");
+    let runner = identities.entity(runner_id).expect("Runner 身份存在");
+    assert_eq!(runner.transform().identity.id, transform_id);
+    assert_eq!(runner.next_component_id().next_id(), script_id.raw() + 1);
+    let script = runner
+        .component(script_id)
+        .expect("Lua 组件可按稳定 ID 查询");
+    assert_eq!(
+        script.kind,
+        RuntimeComponentKind::Lua("Scripts/runner.lua".into())
     );
     let from_switch = xgame_core::SceneLoader::load_scene(&project, "Scenes/Extra.ron").unwrap();
     assert_eq!(

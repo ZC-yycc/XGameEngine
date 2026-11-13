@@ -1560,17 +1560,23 @@ impl ProjectHandle {
         Ok(scene)
     }
 
-    /// 只供运行时的值投影；返回的 v1 Scene 不可保存回 v2 路径。
-    pub fn load_scene_runtime(&self, relative: &str) -> Result<Scene, String> {
+    /// 运行时完整载荷：v2 同时保留稳定组件身份，v1 保持旧值语义。
+    pub fn load_runtime_scene(&self, relative: &str) -> Result<crate::RuntimeScene, String> {
         let relative = normalize_scene_relative(relative)?;
         if crate::file_format::disk_version(&self.path(&relative))
             .map_err(|e| format!("无法读取 '{relative}': {e}"))?
             == Some(2)
         {
-            self.load_scene_v2(&relative)?.to_v1()
+            crate::RuntimeScene::from_v2(self.load_scene_v2(&relative)?)
         } else {
-            self.load_scene(&relative)
+            self.load_scene(&relative).map(crate::RuntimeScene::legacy)
         }
+    }
+
+    /// 兼容只消费值的旧调用方；返回的 v1 Scene 不可保存回 v2 路径。
+    pub fn load_scene_runtime(&self, relative: &str) -> Result<Scene, String> {
+        self.load_runtime_scene(relative)
+            .map(crate::RuntimeScene::into_scene)
     }
 
     /// 显式 v2 草案写入；来源资产必须已落盘并通过关联检查，不覆盖 v1。
@@ -1713,6 +1719,10 @@ impl ProjectHandle {
 
     pub fn load_entry_scene_runtime(&self) -> Result<Scene, String> {
         self.load_scene_runtime(&self.manifest.entry_scene)
+    }
+
+    pub fn load_entry_runtime_scene(&self) -> Result<crate::RuntimeScene, String> {
+        self.load_runtime_scene(&self.manifest.entry_scene)
     }
 
     /// 只读地统计某个场景文件里的重复实体 ID（**不修复、不写盘**）。

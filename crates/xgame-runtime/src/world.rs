@@ -54,10 +54,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use xgame_audio::AudioEngine;
+use xgame_core::component_id::ComponentId;
 use xgame_core::{
     same_scene_path, AnimationAsset, AnimationDriver, AnimationLoader, AudioPort, AudioStats,
-    EntityId, GameClock, Inspect, MotionFade, MotionSpan, PhysicsHandle, PlaySound, Scene,
-    SceneLoader, Transform,
+    EntityId, GameClock, Inspect, MotionFade, MotionSpan, PhysicsHandle, PlaySound,
+    RuntimeComponentIdentity, RuntimeScene, RuntimeSceneIdentity, Scene, SceneLoader, Transform,
 };
 use xgame_input::{Input, InputMap, MouseButton};
 use xgame_math::glam::{Vec2, Vec3};
@@ -168,6 +169,9 @@ struct UiRuntime {
 /// 游戏运行时世界。
 pub struct World {
     scene: Scene,
+    /// v2 的稳定组件寻址侧车；只含身份，不复制第二份可变组件值。
+    /// v1 / 纯内存测试场景为 None。
+    component_identities: Option<RuntimeSceneIdentity>,
     physics: PhysicsWorld,
     /// 层与碰撞矩阵（建刚体时算碰撞组用；运行中改层也走它）。
     layers: xgame_core::Layers,
@@ -281,6 +285,19 @@ impl World {
     /// 收**快照**（而不是借用编辑器的场景）是刻意的：Play 模式跑起来之后，
     /// 编辑器手里的那份必须是"进入 Play 之前的样子"，退出时才能原样恢复。
     pub fn new(scene: Scene, root: impl Into<PathBuf>, config: WorldConfig) -> Self {
+        Self::from_runtime_scene(RuntimeScene::legacy(scene), root, config)
+    }
+
+    /// 用运行时完整载荷建立世界；v2 的组件 ID 从此由 World 与场景值共同持有。
+    ///
+    /// 身份侧车只在装载边界构造，不参与每帧同步；旧 [`World::new`] 仍是 v1 / 测试
+    /// 的兼容入口。
+    pub fn from_runtime_scene(
+        runtime_scene: RuntimeScene,
+        root: impl Into<PathBuf>,
+        config: WorldConfig,
+    ) -> Self {
+        let (scene, component_identities) = runtime_scene.into_parts();
         let root = root.into();
         let physics = PhysicsWorld::new(PhysicsConfig {
             gravity: config.gravity,
@@ -301,6 +318,7 @@ impl World {
 
         let mut world = Self {
             scene,
+            component_identities,
             physics,
             layers: config.layers.clone(),
             input: Input::with_default_map(),
@@ -490,6 +508,38 @@ impl World {
 
     pub fn scene_mut(&mut self) -> &mut Scene {
         &mut self.scene
+    }
+
+    /// 当前场景是否来自持久化 v2 身份载荷。
+    pub fn has_component_identities(&self) -> bool {
+        self.component_identities.is_some()
+    }
+
+    /// 按「实体 ID + 组件 ID」查询运行时持有的稳定身份。
+    ///
+    /// 查询还会确认该种类仍挂在当前唯一值模型上；宿主直接经 `scene_mut()` 删除组件后，
+    /// 不会得到一条幽灵身份。结构写入的正式入口后续也必须同时维护这份侧车。
+    pub fn component_identity(
+        &self,
+        entity_id: EntityId,
+        component_id: ComponentId,
+    ) -> Option<&RuntimeComponentIdentity> {
+        let entity = &self.scene.entities[self.scene.find_entity(entity_id)?];
+        let component = self
+            .component_identities
+            .as_ref()?
+            .entity(entity_id)?
+            .component(component_id)?;
+        component.kind.is_present_on(entity).then_some(component)
+    }
+
+    /// 单个实体的完整稳定身份表（低频工具 / Agent 查询入口）。
+    pub fn entity_component_identities(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<&xgame_core::RuntimeEntityIdentity> {
+        self.scene.find_entity(entity_id)?;
+        self.component_identities.as_ref()?.entity(entity_id)
     }
 
     /// 运行态唯一动画驱动（渲染 / Inspector 只读）。
@@ -859,7 +909,7 @@ impl World {
                 "宿主没有接入场景装载器，无法加载 '{relative}'（游戏 / 编辑器 Play / 无头运行都需要 with_scene_loader）"
             ));
         };
-        let scene = loader.load_scene(relative)?;
+        let scene = loader.load_runtime_scene(relative)?;
         self.swap_scene(scene, relative);
         Ok(())
     }
@@ -902,7 +952,8 @@ impl World {
     /// `started` / `states`，连日志缓冲都不碰）。于是脚本的模块级全局变量跨场景
     /// 保留 —— 与 Unity 不重载 domain 的语义一致，作者该用 `state_*` 存
     /// "随实体走"的数据。
-    fn swap_scene(&mut self, scene: Scene, relative: &str) {
+    fn swap_scene(&mut self, scene: impl Into<RuntimeScene>, relative: &str) {
+        let scene = scene.into();
         let previous = self.scene.entities.len();
         self.unload_scene();
 
@@ -940,7 +991,9 @@ impl World {
         self.audio_port.stop_all();
 
         // -- 4. 换本体 --
+        let (scene, component_identities) = scene.into_parts();
         self.scene = scene;
+        self.component_identities = component_identities;
         self.unloaded = false;
         self.current_scene = Some(relative.to_owned());
         self.scene_loads += 1;
@@ -4836,12 +4889,24 @@ mod tests {
         let b = project.load_scene("Scenes/B.ron").unwrap();
         let expected_ids: Vec<_> = b.entities.iter().map(|e| e.id).collect();
         let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&b).unwrap();
+        let marker = v2
+            .entities
+            .iter()
+            .find(|entity| entity.name == "marker")
+            .unwrap();
+        let marker_id = marker.id;
+        let marker_script_id = marker.components.entries[0].identity.id;
         std::fs::write(project.path("Scenes/B.ron"), v2.to_ron().unwrap()).unwrap();
-        let scene = project.load_scene("Scenes/A.ron").unwrap();
-        let mut world = World::new(scene, project.root(), WorldConfig::default())
+        let scene = project.load_runtime_scene("Scenes/A.ron").unwrap();
+        let mut world = World::from_runtime_scene(scene, project.root(), WorldConfig::default())
             .with_scene_loader(project.clone())
             .with_current_scene("Scenes/A.ron");
-        world.load_scene("Scenes/B.ron").unwrap();
+        assert!(
+            !world.has_component_identities(),
+            "v1 起始场景没有持久组件 ID"
+        );
+        world.request_scene_load("Scenes/B.ron");
+        world.update(1.0 / 60.0);
         assert_eq!(world.current_scene(), Some("Scenes/B.ron"));
         assert_eq!(world.physics().stats().0, 2);
         assert_eq!(
@@ -4857,9 +4922,43 @@ mod tests {
             world.scene().find_by_name("marker").unwrap().scripts,
             ["Scripts/level2.lua"]
         );
+        assert!(world.has_component_identities());
+        let script = world
+            .component_identity(marker_id, marker_script_id)
+            .expect("帧末切换后 Lua 组件仍可按稳定 ID 查询");
+        assert_eq!(
+            script.kind,
+            xgame_core::RuntimeComponentKind::Lua("Scripts/level2.lua".into())
+        );
         assert!(
             project.load_scene("Scenes/B.ron").is_err(),
             "编辑器旧入口仍须拒绝 v2"
+        );
+        std::fs::remove_dir_all(project.root()).unwrap();
+    }
+
+    #[test]
+    fn world_can_start_with_v2_component_identities() {
+        let project = temp_scene_project("v2_initial_identity", false);
+        let scene = project.load_scene("Scenes/B.ron").unwrap();
+        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&scene).unwrap();
+        let ball = v2
+            .entities
+            .iter()
+            .find(|entity| entity.name == "ball")
+            .unwrap();
+        let ball_id = ball.id;
+        let physics_id = ball.components.entries[0].identity.id;
+        std::fs::write(project.path("Scenes/B.ron"), v2.to_ron().unwrap()).unwrap();
+
+        let loaded = project.load_runtime_scene("Scenes/B.ron").unwrap();
+        let world = World::from_runtime_scene(loaded, project.root(), WorldConfig::default());
+        assert_eq!(
+            world
+                .component_identity(ball_id, physics_id)
+                .expect("初始 v2 场景身份应由 World 持有")
+                .kind,
+            xgame_core::RuntimeComponentKind::Builtin(xgame_core::BuiltinComponent::Physics)
         );
         std::fs::remove_dir_all(project.root()).unwrap();
     }
