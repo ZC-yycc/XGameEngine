@@ -164,17 +164,163 @@ fn scene_v2_keeps_typed_values_and_identity_across_ron_roundtrip() {
     duplicate.entities.push(duplicate.entities[0].clone());
     assert!(duplicate.to_ron().unwrap_err().contains("重复"));
 
-    let mut missing_render = SceneV2::from_v1_plain(&legacy).unwrap();
-    if let xgame_core::scene_v2::ComponentData::Render(render) =
-        &mut missing_render.entities[0].components.entries[0].data
+    let mut missing_mesh = SceneV2::from_v1_plain(&legacy).unwrap();
+    if let xgame_core::scene_v2::ComponentData::Mesh(mesh) =
+        &mut missing_mesh.entities[0].components.entries[0].data
     {
-        render.model.clear();
-        render.material_asset = None;
-        render.morph_weights.clear();
+        mesh.model.clear();
+        mesh.morph_weights.clear();
     } else {
-        panic!("首个组件应是 Render");
+        panic!("首个组件应是 Mesh");
     }
-    assert!(missing_render.to_v1().unwrap_err().contains("空的 Render"));
+    assert!(missing_mesh.to_v1().unwrap_err().contains("空的 Mesh"));
+}
+
+#[test]
+fn v2_visual_components_have_independent_identity_and_removal_boundaries() {
+    let mut scene = Scene::new("Visual split");
+    let mut entity = Entity::new("Actor").with_model("builtin://cube");
+    entity.morph_weights = vec![0.25, 0.75];
+    entity.lod.levels = vec![
+        xgame_core::LodLevel::new("builtin://cube", 20.0),
+        xgame_core::LodLevel::new("builtin://sphere", 0.0),
+    ];
+    entity.material_asset = Some("Resources/Materials/Wood.mat".into());
+    entity.material = Some(MaterialOverride::default());
+    scene.add_entity(entity);
+
+    let upgraded = SceneV2::from_v1_plain(&scene).unwrap();
+    let visual = &upgraded.entities[0].components.entries;
+    let mesh_id = visual
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Mesh(_)))
+        .expect("Mesh 必须是独立组件")
+        .identity
+        .id;
+    let lod_id = visual
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Lod(_)))
+        .expect("LOD 必须是独立组件")
+        .identity
+        .id;
+    let material_id = visual
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Material(_)))
+        .expect("Material 必须是独立组件")
+        .identity
+        .id;
+    assert_ne!(mesh_id, lod_id);
+    assert_ne!(mesh_id, material_id);
+    assert_ne!(lod_id, material_id);
+    let text = upgraded.to_ron().unwrap();
+    assert!(text.contains("Mesh("), "{text}");
+    assert!(text.contains("Lod("), "{text}");
+    assert!(text.contains("Material("), "{text}");
+    assert!(!text.contains("Render("), "新文件不能再写复合 Render: {text}");
+
+    let mut without_mesh = upgraded.clone();
+    without_mesh.entities[0]
+        .remove_component(mesh_id)
+        .unwrap();
+    let value = without_mesh.to_v1().unwrap().entities.remove(0);
+    assert!(value.model.is_empty());
+    assert!(value.morph_weights.is_empty());
+    assert!(!value.lod.is_empty());
+    assert!(value.material_asset.is_some() && value.material.is_some());
+
+    let mut without_lod = upgraded.clone();
+    without_lod.entities[0]
+        .remove_component(lod_id)
+        .unwrap();
+    let value = without_lod.to_v1().unwrap().entities.remove(0);
+    assert_eq!(value.model, "builtin://cube");
+    assert!(value.lod.is_empty());
+    assert!(value.material_asset.is_some() && value.material.is_some());
+
+    let mut without_material = upgraded;
+    without_material.entities[0]
+        .remove_component(material_id)
+        .unwrap();
+    let value = without_material.to_v1().unwrap().entities.remove(0);
+    assert_eq!(value.model, "builtin://cube");
+    assert!(!value.lod.is_empty());
+    assert!(value.material_asset.is_none() && value.material.is_none());
+}
+
+#[test]
+fn legacy_v2_render_is_readable_and_migrates_without_reusing_its_id() {
+    let mut scene = Scene::new("Legacy Render");
+    let mut actor = Entity::new("Actor").with_model("builtin://cube");
+    actor.lod.levels = vec![xgame_core::LodLevel::new("builtin://sphere", 0.0)];
+    actor.material_asset = Some("Resources/Materials/Wood.mat".into());
+    actor.material = Some(MaterialOverride::default());
+    scene.add_entity(actor);
+
+    let mut legacy = SceneV2::from_v1_plain(&scene).unwrap();
+    let entity = &mut legacy.entities[0];
+    let legacy_id = entity.components.entries[0].identity.id;
+    let next_before = entity.components.next_component_id.next_id();
+    entity.components.entries.clear();
+    entity.components.entries.push(xgame_core::scene_v2::ComponentInstance {
+        identity: xgame_core::component_id::ComponentIdentity {
+            id: legacy_id,
+            source_component_id: None,
+        },
+        data: ComponentData::LegacyRender(xgame_core::scene_v2::RenderData {
+            model: "builtin://cube".into(),
+            lod: xgame_core::LodGroup {
+                levels: vec![xgame_core::LodLevel::new("builtin://sphere", 0.0)],
+            },
+            material_asset: Some("Resources/Materials/Wood.mat".into()),
+            morph_weights: Vec::new(),
+        }),
+    });
+    entity
+        .components
+        .entries
+        .push(xgame_core::scene_v2::ComponentInstance {
+            identity: xgame_core::component_id::ComponentIdentity {
+                id: xgame_core::component_id::ComponentId::from_raw(next_before - 1).unwrap(),
+                source_component_id: None,
+            },
+            data: ComponentData::LegacyMaterialOverride(MaterialOverride::default()),
+        });
+    let old_text = legacy.to_ron().unwrap();
+    assert!(old_text.contains("Render("), "{old_text}");
+    assert!(old_text.contains("MaterialOverride("), "{old_text}");
+
+    let mut loaded = SceneV2::from_ron(&old_text).unwrap();
+    assert_eq!(loaded.clone().to_v1().unwrap(), scene);
+    assert!(loaded.entities[0]
+        .remove_component(legacy_id)
+        .unwrap_err()
+        .contains("先经编辑器保存迁移"));
+    assert!(loaded.entities[0]
+        .add_component(ComponentData::Camera(xgame_core::Camera::default()))
+        .unwrap_err()
+        .contains("先经编辑器保存迁移"));
+    loaded
+        .reconcile_from_v1(&scene, &BTreeMap::new())
+        .unwrap();
+    let entries = &loaded.entities[0].components.entries;
+    assert!(entries
+        .iter()
+        .all(|entry| !matches!(entry.data, ComponentData::LegacyRender(_) | ComponentData::LegacyMaterialOverride(_))));
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| matches!(entry.data, ComponentData::Mesh(_)))
+            .unwrap()
+            .identity
+            .id,
+        legacy_id,
+        "旧复合身份交给首个真实视觉组件"
+    );
+    let ids: Vec<_> = entries.iter().map(|entry| entry.identity.id.raw()).collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), 3);
+    assert!(loaded.entities[0].components.next_component_id.next_id() > next_before);
+    assert!(!loaded.to_ron().unwrap().contains("Render("));
 }
 
 #[test]
@@ -697,7 +843,7 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
         .push(Entity::new("Runner").with_model("builtin://cube"));
     let prefab_v2 = PrefabV2::from_v1(&prefab).unwrap();
     let source_transform_id = prefab_v2.entities[0].transform_identity.id;
-    let source_render_id = prefab_v2.entities[0].components.entries[0].identity.id;
+    let source_mesh_id = prefab_v2.entities[0].components.entries[0].identity.id;
     project.write_prefab_v2(prefab_path, &prefab_v2).unwrap();
     let from_spawn = xgame_core::SceneLoader::load_prefab(&project, prefab_path).unwrap();
     assert_eq!(from_spawn.entities[0].model, "builtin://cube");
@@ -713,11 +859,11 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
     );
     assert_eq!(
         identity
-            .component(source_render_id)
+            .component(source_mesh_id)
             .unwrap()
             .identity
             .source_component_id,
-        Some(source_render_id)
+        Some(source_mesh_id)
     );
     assert!(project.load_prefab(prefab_path).is_err());
     assert!(project.load_scene("Scenes/Extra.ron").is_err());

@@ -70,8 +70,9 @@
 ### 0. `component_catalog_read`
 
 项目无关的内建组件目录：`builtin:*` 地址、是否可添加 / 移除 / 重复、落盘类型、
-`default_ron` 与字段表。字段来自 `schema_read` 的同一份 `scene_schema()`，Render
-只列当前旧格式的 `Entity.model` / `lod` / `material_asset` / `morph_weights`。
+`default_ron` 与字段表。字段来自 `schema_read` 的同一份 `scene_schema()`；旧值视图也把
+Mesh（`model` / `morph_weights`）、LOD（`LodGroup`）与 Material
+（`material_asset` / `material`）列为三个独立挂载物，不再返回 `builtin:render`。
 Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不反射运行时全局变量。
 返回的 `address_stability` 是 `legacy`。无需 `project`，也不读写项目文件。
 
@@ -84,7 +85,7 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
   （`xgame_core::schema::scene_schema`），含 `format_version` / `engine_version` /
   `roots`（v1/v2 场景 `.ron` 与预制体 `.prefab.ron` 各一项）/ `conventions` / `primitives` /
   `asset_references` / `types`。
-- **内容规模**：53 个落盘类型。每个类型有 `summary` / `kind` / `default_ron` /
+- **内容规模**：55 个落盘类型。每个类型有 `summary` / `kind` / `default_ron` /
   `example_ron`；字段有 `name` / `ty` / `required` / `default_ron` / `note`；
   枚举有 `variants`（unit / struct / newtype 三种形态，各带可解析示例）。
 - **确定性**：没有时间戳 / 随机 ID；同一份代码两次调用逐字节相同。
@@ -132,8 +133,9 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
   （`builtin` / `rust` / `lua`）、`type_id`、`name`、`data`。内建数据是当前字段的
   JSON 视图；Rust 数据是已保存的 `Inspect` 参数表（缺省为空对象，不含插件运行态）；
   Lua 数据只有脚本资产路径，不代表脚本的运行时变量。
-- **地址规则**：`builtin:transform` 恒存在且不可移除；Render 由旧格式中的模型、LOD、
-  材质资产及形变权重组合而成。其它已挂载内建组件使用 `builtin:camera` 等种类地址。
+- **地址规则**：`builtin:transform` 恒存在且不可移除；视觉数据分别使用
+  `builtin:mesh`（模型 + Morph 权重）、`builtin:lod` 与 `builtin:material`
+  （材质资产 + 实例覆盖）。其它已挂载内建组件使用 `builtin:camera` 等种类地址。
   Rust、Lua 使用 `rust:0`、`lua:0` 等列表槽位地址，**删除或重排后地址可能指向另一项，
   使用前重新查询**。此 v1 工具没有跨重排稳定地址，返回字段显式标记为 `legacy`。
 - **边界**：该工具只读；添加和移除继续通过 Inspector 的 Add Component / 各组件移除
@@ -159,7 +161,10 @@ v2 场景的 Agent 修改入口；先读取组件与 `revision`，再按实体 I
 
 - **读取入参**：`project`、`entity_id`（十进制字符串），可选 `scene`。返回
   `address_stability: "entity_local_id"`、`revision`、`next_component_id` 和组件列表；
-  Transform 也有独立 ID，其他项附完整 `data_ron` 和可选来源 ID。
+  Transform 也有独立 ID，其他项附完整 `data_ron` 和可选来源 ID。当前视觉变体是
+  `Mesh(MeshData)` / `Lod(LodGroup)` / `Material(MaterialData)`；旧 `Render` /
+  `MaterialOverride` 变体只兼容读取。实体仍含任一旧视觉变体时，所有结构编辑与 patch
+  都会拒绝；先用编辑器打开并保存，让它迁移为三份当前组件后再修改。
 - **修改必填**：`project`、`entity_id`、`expected_revision`、`action`；除 `add` 外还要
   `component_id`。`patch` 带 `field`（指向已有值的 JSON Pointer，例如 `/model`）
   和 `value`；`replace` / `add` 带完整 `ComponentData` 变体 `data_ron`；`move`

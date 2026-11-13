@@ -13,7 +13,9 @@ use crate::scene::Entity;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuiltinComponent {
     Transform,
-    Render,
+    Mesh,
+    Lod,
+    Material,
     Ui,
     Animator,
     Physics,
@@ -21,13 +23,14 @@ pub enum BuiltinComponent {
     Audio,
     Camera,
     Particle,
-    MaterialOverride,
 }
 
 impl BuiltinComponent {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Transform,
-        Self::Render,
+        Self::Mesh,
+        Self::Lod,
+        Self::Material,
         Self::Ui,
         Self::Animator,
         Self::Physics,
@@ -35,11 +38,13 @@ impl BuiltinComponent {
         Self::Audio,
         Self::Camera,
         Self::Particle,
-        Self::MaterialOverride,
     ];
 
-    /// Transform 是对象固有属性；Render 目前由多个现有字段共同表达。
-    pub const ADDABLE: [Self; 8] = [
+    /// Transform 是对象固有属性，其余内建数据都可独立增删。
+    pub const ADDABLE: [Self; 10] = [
+        Self::Mesh,
+        Self::Lod,
+        Self::Material,
         Self::Ui,
         Self::Animator,
         Self::Physics,
@@ -47,13 +52,14 @@ impl BuiltinComponent {
         Self::Audio,
         Self::Camera,
         Self::Particle,
-        Self::MaterialOverride,
     ];
 
     pub const fn code(self) -> &'static str {
         match self {
             Self::Transform => "transform",
-            Self::Render => "render",
+            Self::Mesh => "mesh",
+            Self::Lod => "lod",
+            Self::Material => "material",
             Self::Ui => "ui",
             Self::Animator => "animator",
             Self::Physics => "physics",
@@ -61,14 +67,15 @@ impl BuiltinComponent {
             Self::Audio => "audio",
             Self::Camera => "camera",
             Self::Particle => "particle",
-            Self::MaterialOverride => "material_override",
         }
     }
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::Transform => "Transform",
-            Self::Render => "Render",
+            Self::Mesh => "Mesh",
+            Self::Lod => "LOD",
+            Self::Material => "Material",
             Self::Ui => "UI Element",
             Self::Animator => "Animator",
             Self::Physics => "Physics",
@@ -76,20 +83,20 @@ impl BuiltinComponent {
             Self::Audio => "Audio Source",
             Self::Camera => "Camera",
             Self::Particle => "Particle Emitter",
-            Self::MaterialOverride => "Material Override",
         }
     }
 
     pub const fn addable(self) -> bool {
-        !matches!(self, Self::Transform | Self::Render)
+        !matches!(self, Self::Transform)
     }
 
     /// 字段说明由场景 schema 负责；这里只给出该组件对应的落盘类型。
-    /// Render 是几个 `Entity` 字段组成的旧格式视图，须单独筛选字段。
+    /// Mesh / Material 在 v1 中横跨 `Entity` 字段，须单独筛选字段。
     pub const fn schema_type(self) -> &'static str {
         match self {
             Self::Transform => "Transform",
-            Self::Render => "Entity",
+            Self::Mesh | Self::Material => "Entity",
+            Self::Lod => "LodGroup",
             Self::Ui => "UiElement",
             Self::Animator => "Animator",
             Self::Physics => "PhysicsBody",
@@ -97,14 +104,14 @@ impl BuiltinComponent {
             Self::Audio => "AudioSource",
             Self::Camera => "Camera",
             Self::Particle => "ParticleEmitter",
-            Self::MaterialOverride => "MaterialOverride",
         }
     }
 
-    /// Render 在 v1 中仍横跨多个字段；只返回它拥有的那几项。
+    /// v1 中横跨多个字段的组件只返回自己拥有的字段。
     pub const fn schema_field_names(self) -> &'static [&'static str] {
         match self {
-            Self::Render => &["model", "lod", "material_asset", "morph_weights"],
+            Self::Mesh => &["model", "morph_weights"],
+            Self::Material => &["material_asset", "material"],
             _ => &[],
         }
     }
@@ -112,12 +119,9 @@ impl BuiltinComponent {
     pub fn present(self, entity: &Entity) -> bool {
         match self {
             Self::Transform => true,
-            Self::Render => {
-                !entity.model.is_empty()
-                    || !entity.lod.is_empty()
-                    || entity.material_asset.is_some()
-                    || !entity.morph_weights.is_empty()
-            }
+            Self::Mesh => !entity.model.is_empty() || !entity.morph_weights.is_empty(),
+            Self::Lod => !entity.lod.is_empty(),
+            Self::Material => entity.material_asset.is_some() || entity.material.is_some(),
             Self::Ui => entity.ui.is_some(),
             Self::Animator => entity.animator.is_some(),
             Self::Physics => entity.physics.is_some(),
@@ -125,7 +129,6 @@ impl BuiltinComponent {
             Self::Audio => entity.audio.is_some(),
             Self::Camera => entity.camera.is_some(),
             Self::Particle => entity.particle.is_some(),
-            Self::MaterialOverride => entity.material.is_some(),
         }
     }
 }
@@ -194,6 +197,29 @@ impl Entity {
             return false;
         }
         match kind {
+            BuiltinComponent::Mesh => {
+                self.model = self
+                    .lod
+                    .drawable_levels()
+                    .next()
+                    .map_or_else(|| "builtin://cube".to_owned(), |(_, level)| level.model.clone());
+            }
+            BuiltinComponent::Lod => {
+                let seed = if self.model.is_empty() {
+                    "builtin://cube".to_owned()
+                } else {
+                    self.model.clone()
+                };
+                self.lod = crate::LodGroup {
+                    levels: vec![
+                        crate::LodLevel::new(seed.clone(), 20.0),
+                        crate::LodLevel::new(seed, 0.0),
+                    ],
+                };
+            }
+            BuiltinComponent::Material => {
+                self.material = Some(crate::MaterialOverride::default());
+            }
             BuiltinComponent::Ui => self.ui = Some(crate::UiElement::panel(320.0, 180.0)),
             BuiltinComponent::Animator => self.animator = Some(crate::Animator::default()),
             BuiltinComponent::Physics => self.physics = Some(crate::PhysicsBody::default()),
@@ -203,10 +229,7 @@ impl Entity {
             BuiltinComponent::Audio => self.audio = Some(crate::AudioSource::default()),
             BuiltinComponent::Camera => self.camera = Some(crate::Camera::default()),
             BuiltinComponent::Particle => self.particle = Some(crate::ParticleEmitter::default()),
-            BuiltinComponent::MaterialOverride => {
-                self.material = Some(crate::MaterialOverride::default());
-            }
-            BuiltinComponent::Transform | BuiltinComponent::Render => return false,
+            BuiltinComponent::Transform => return false,
         }
         true
     }
@@ -233,6 +256,23 @@ impl Entity {
     pub fn remove_attached_component(&mut self, address: ComponentAddress) -> bool {
         match address {
             ComponentAddress::Builtin(kind) => match kind {
+                BuiltinComponent::Mesh => {
+                    let present = kind.present(self);
+                    self.model.clear();
+                    self.morph_weights.clear();
+                    present
+                }
+                BuiltinComponent::Lod => {
+                    let present = kind.present(self);
+                    self.lod = crate::LodGroup::default();
+                    present
+                }
+                BuiltinComponent::Material => {
+                    let present = kind.present(self);
+                    self.material_asset = None;
+                    self.material = None;
+                    present
+                }
                 BuiltinComponent::Ui => self.ui.take().is_some(),
                 BuiltinComponent::Animator => self.animator.take().is_some(),
                 BuiltinComponent::Physics => self.physics.take().is_some(),
@@ -240,8 +280,7 @@ impl Entity {
                 BuiltinComponent::Audio => self.audio.take().is_some(),
                 BuiltinComponent::Camera => self.camera.take().is_some(),
                 BuiltinComponent::Particle => self.particle.take().is_some(),
-                BuiltinComponent::MaterialOverride => self.material.take().is_some(),
-                BuiltinComponent::Transform | BuiltinComponent::Render => false,
+                BuiltinComponent::Transform => false,
             },
             ComponentAddress::Rust(slot) => {
                 if slot >= self.behaviors.len() {
@@ -324,9 +363,6 @@ mod tests {
         assert!(!entity.remove_attached_component(ComponentAddress::Rust(0)));
         assert!(!entity
             .remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Transform)));
-        assert!(
-            !entity.remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Render))
-        );
         assert!(entity.add_builtin_component(BuiltinComponent::Camera));
         assert!(
             entity.remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Camera))
@@ -347,5 +383,50 @@ mod tests {
                 assert!(schema.fields.iter().any(|field| field.name == *name));
             }
         }
+    }
+
+    #[test]
+    fn visual_components_are_independently_addable_and_removable() {
+        let by_code = |code: &str| {
+            BuiltinComponent::ALL
+                .into_iter()
+                .find(|kind| kind.code() == code)
+                .unwrap_or_else(|| panic!("内建组件目录缺少 {code}"))
+        };
+        let mesh = by_code("mesh");
+        let lod = by_code("lod");
+        let material = by_code("material");
+        assert!(BuiltinComponent::ALL
+            .into_iter()
+            .all(|kind| kind.code() != "render"));
+
+        let mut entity = Entity::new("Visual");
+        assert!(entity.add_builtin_component(mesh));
+        assert!(mesh.present(&entity));
+        entity.morph_weights = vec![0.25, 0.75];
+
+        assert!(entity.add_builtin_component(lod));
+        assert!(lod.present(&entity));
+
+        assert!(entity.add_builtin_component(material));
+        assert!(material.present(&entity));
+        entity.material_asset = Some("Resources/Materials/Wood.mat".into());
+
+        assert!(entity.remove_attached_component(ComponentAddress::Builtin(mesh)));
+        assert!(!mesh.present(&entity));
+        assert!(entity.model.is_empty());
+        assert!(entity.morph_weights.is_empty());
+        assert!(lod.present(&entity), "移除 Mesh 不能顺手删除 LOD");
+        assert!(material.present(&entity), "移除 Mesh 不能顺手删除 Material");
+
+        assert!(entity.remove_attached_component(ComponentAddress::Builtin(lod)));
+        assert!(!lod.present(&entity));
+        assert!(entity.lod.is_empty());
+        assert!(material.present(&entity), "移除 LOD 不能顺手删除 Material");
+
+        assert!(entity.remove_attached_component(ComponentAddress::Builtin(material)));
+        assert!(!material.present(&entity));
+        assert!(entity.material_asset.is_none());
+        assert!(entity.material.is_none());
     }
 }

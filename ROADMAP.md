@@ -46,7 +46,10 @@
       `behaviors` / `behavior_params` 场景存盘与运行时装配；示例 `Health` 无需生命周期实现。
 - [x] Add Component 统一列出可选内建组件、插件组件与 Lua 脚本；未挂载的可选区块不显示。
 - [x] 组件标题、具体 Rust / Lua 行及 Inspector 空白处支持右键增删；全部入口共用 Undo 与
-      v2 身份合并，Play 中禁用结构修改，Transform / Render 在菜单中说明不可移除原因。
+      v2 身份合并，Play 中禁用结构修改，Transform 在菜单中说明不可移除原因。
+- [x] Mesh（含 Morph 权重）/ LOD / Material（资产 + 实例覆盖）拆为三个可独立增删、
+      持久化和寻址的 v2 组件；旧 v2 Render 首次经编辑器保存时无损迁移且不复用 ID。
+- [x] Inspector 不再显示 Parent 区块；重挂、Unparent 与移回根层统一由 Hierarchy 树完成。
 - [ ] 内建系统的复杂参数面板仍手写；自动控件的类型范围仍是标量 / 布尔 / 字符串 / 向量。
 
 ### 2026-11-08 第六轮：脚本控焦点（§一百零二）

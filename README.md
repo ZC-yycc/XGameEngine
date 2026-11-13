@@ -147,8 +147,9 @@ cargo build --workspace --release --locked -j2
 `registry.register::<T>("Name")` 并实现 `Lifecycle`，两类组件共用字段控件和存盘规则。
 
 目前自动控件支持 `f32/f64/i32/i64/u32/bool/String/Vec2/Vec3/Vec4`；运行时状态字段
-用 `#[inspect(skip)]` 排除。内建相机、物理等继续使用既有专用面板和场景字段，
-也能从 Add Component 菜单添加。
+用 `#[inspect(skip)]` 排除。内建相机、物理等继续使用专用面板，也能从 Add Component
+菜单添加。Mesh（含 Morph 权重）、LOD、Material（材质资产 + 实例覆盖）是三份独立
+组件：各自可从标题右键移除，并随场景持久化独立的 v2 组件 ID；Transform 始终存在。
 
 ## CI
 
@@ -317,7 +318,8 @@ Output Log 面板和这个文件：追加写、4 MiB 轮转（只留一份 `Edit
   （运行时 · 界面+视口）+ draw / 剔除 / 粒子读数，600 帧滚动窗口、Pause / Clear。
   只在编辑器里看，不落盘；长时段趋势仍用 `XGAME_FRAME_LOG` 探针
 - **场景层级（父子关系）**：层级面板是一棵可折叠的树，拖拽节点即重挂父节点
-  （保留世界变换），拖到空白处移回根层；Inspector 有父节点下拉框
+  （保留世界变换），拖到空白处移回根层，右键 `Unparent` 也可解除父子关系；
+  父子结构只在 Hierarchy 管理，Inspector 不再提供第二份 Parent 控件
 - **预制体（Prefab）**：把一棵子树存成可复用资产并反复实例化，支持 Apply / Revert
 - 变换 Gizmo（平移 / 旋转 / 缩放）+ **吸附**（工具栏磁铁开关；按住 **Ctrl 临时反选**）；
   **一次拖拽 = 一步撤销**，与 Inspector 的拖拽编辑一致；

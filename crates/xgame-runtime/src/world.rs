@@ -5373,7 +5373,7 @@ mod tests {
             .expect("普通脚本生成实体也应登记本地组件身份");
         assert!(identities.components().iter().any(|component| {
             component.kind
-                == xgame_core::RuntimeComponentKind::Builtin(xgame_core::BuiltinComponent::Render)
+                == xgame_core::RuntimeComponentKind::Builtin(xgame_core::BuiltinComponent::Mesh)
         }));
         assert!(world.scene().find_by_name("victim").is_none());
         assert_eq!(

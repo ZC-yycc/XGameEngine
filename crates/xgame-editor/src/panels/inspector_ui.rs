@@ -2,8 +2,8 @@
 //!
 //! # 为什么单独一个文件
 //!
-//! `inspector.rs` 已经有一千八百多行（Transform / Mesh / Animation / Scripts /
-//! Behaviors / Physics / Character / Audio / Material / Parent / Prefab）。
+//! `inspector.rs` 已经有三千多行（Transform / Mesh / LOD / Animation / Scripts /
+//! Behaviors / Physics / Character / Audio / Material / Prefab）。
 //! UI 区块有二十来行控件，再塞进去只会让那个文件更难读。这里复用
 //! `theme` 的排版件（`section_bar` / `field_row` / `drag_field_w`），
 //! 与其余区块的**视觉规则完全一致**（行高、标签列宽、数值框宽度）。

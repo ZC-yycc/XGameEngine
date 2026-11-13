@@ -19,12 +19,18 @@ pub enum RuntimeComponentKind {
     Builtin(BuiltinComponent),
     Rust(String),
     Lua(String),
+    /// 拆分前 v2 文件的复合视觉身份；新文件不会生成。
+    LegacyRender,
+    /// 拆分前 v2 文件单列的材质覆盖身份；新文件不会生成。
+    LegacyMaterialOverride,
 }
 
 impl RuntimeComponentKind {
     fn from_data(data: &ComponentData) -> Self {
         match data {
-            ComponentData::Render(_) => Self::Builtin(BuiltinComponent::Render),
+            ComponentData::Mesh(_) => Self::Builtin(BuiltinComponent::Mesh),
+            ComponentData::Lod(_) => Self::Builtin(BuiltinComponent::Lod),
+            ComponentData::Material(_) => Self::Builtin(BuiltinComponent::Material),
             ComponentData::Ui(_) => Self::Builtin(BuiltinComponent::Ui),
             ComponentData::Animator(_) => Self::Builtin(BuiltinComponent::Animator),
             ComponentData::Physics(_) => Self::Builtin(BuiltinComponent::Physics),
@@ -32,11 +38,12 @@ impl RuntimeComponentKind {
             ComponentData::Audio(_) => Self::Builtin(BuiltinComponent::Audio),
             ComponentData::Camera(_) => Self::Builtin(BuiltinComponent::Camera),
             ComponentData::Particle(_) => Self::Builtin(BuiltinComponent::Particle),
-            ComponentData::MaterialOverride(_) => Self::Builtin(BuiltinComponent::MaterialOverride),
             ComponentData::Rust {
                 registered_name, ..
             } => Self::Rust(registered_name.clone()),
             ComponentData::Lua { path } => Self::Lua(path.clone()),
+            ComponentData::LegacyRender(_) => Self::LegacyRender,
+            ComponentData::LegacyMaterialOverride(_) => Self::LegacyMaterialOverride,
         }
     }
 
@@ -55,6 +62,13 @@ impl RuntimeComponentKind {
             Self::Builtin(kind) => kind.present(entity),
             Self::Rust(name) => entity.behaviors.iter().any(|item| item == name),
             Self::Lua(path) => entity.scripts.iter().any(|item| item == path),
+            Self::LegacyRender => {
+                !entity.model.is_empty()
+                    || !entity.lod.is_empty()
+                    || entity.material_asset.is_some()
+                    || !entity.morph_weights.is_empty()
+            }
+            Self::LegacyMaterialOverride => entity.material.is_some(),
         }
     }
 }

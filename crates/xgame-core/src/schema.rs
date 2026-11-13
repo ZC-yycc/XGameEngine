@@ -51,7 +51,8 @@ use crate::physics::{BodyKind, CollisionShape, PhysicsBody};
 use crate::prefab::{Prefab, PrefabInstanceRef};
 use crate::scene::{Entity, Scene};
 use crate::scene_v2::{
-    ComponentData, PrefabV2, RenderData, SceneV2, StrictAnimator, StrictFieldValues,
+    ComponentData, MaterialData, MeshData, PrefabV2, RenderData, SceneV2, StrictAnimator,
+    StrictFieldValues,
 };
 use crate::transform::Transform;
 use crate::ui::{UiAlign, UiElement, UiImageStyle, UiKind, UiStyle, UiTextStyle, UiVAlign};
@@ -377,8 +378,10 @@ fn asset_references() -> Vec<AssetReferenceSchema> {
             "项目相对路径，例如 Resources/Textures/Wood.png",
             "空串 = 纯色（1×1 白色），不是保留模型贴图 —— 材质资产是一份完整材质。",
         ),
-        asset_ref("RenderData.model", "guid://<32 hex>", "项目相对模型路径或 builtin://", "v2 Render 模型；LOD 各级仍复用 LodGroup.levels[].model。"),
-        asset_ref("RenderData.material_asset", "guid://<32 hex>", "项目相对材质路径", "v2 Render 的可选共享材质。"),
+        asset_ref("MeshData.model", "guid://<32 hex>", "项目相对模型路径或 builtin://", "v2 Mesh 模型；morph 权重与该组件同生共灭。"),
+        asset_ref("MaterialData.asset", "guid://<32 hex>", "项目相对材质路径", "v2 Material 的可选共享材质。"),
+        asset_ref("RenderData.model", "guid://<32 hex>", "项目相对模型路径或 builtin://", "拆分前 v2 Render 的兼容读取字段；新文件不再生成。"),
+        asset_ref("RenderData.material_asset", "guid://<32 hex>", "项目相对材质路径", "拆分前 v2 Render 的兼容读取字段；新文件不再生成。"),
         asset_ref("ComponentData.Lua.path", "guid://<32 hex>", "项目相对 Lua 路径", "v2 Lua 组件的脚本资产。"),
         asset_ref("EntityV2.prefab.source", "guid://<32 hex>", "项目相对预制体路径", "v2 实例的来源资产。"),
     ]
@@ -610,7 +613,15 @@ fn component_v2_types() -> Vec<TypeSchema> {
     let entity = &scene_v2_example().entities[0];
     let identity = entity.transform_identity;
     let sample = &entity.components.entries[0];
-    let render = RenderData {
+    let mesh = MeshData {
+        model: "builtin://cube".into(),
+        morph_weights: Vec::new(),
+    };
+    let material = MaterialData {
+        asset: None,
+        overrides: Some(MaterialOverride::default()),
+    };
+    let legacy_render = RenderData {
         model: "builtin://cube".into(),
         lod: LodGroup::default(),
         material_asset: None,
@@ -624,7 +635,7 @@ fn component_v2_types() -> Vec<TypeSchema> {
                 req("entities", "Vec<EntityV2>", "实体平铺列表；parent 指向本文件内的实体 ID。"),
                 req("lights", "Vec<Light>", "场景级灯光；v2 必须显式写入。"),
                 req("ambient", "[f32; 3]", "线性 RGB 环境光；v2 必须显式写入。"),
-            ], vec!["v2 对未知嵌套字段与重复组件 ID 拒绝解析；项目检查与编辑器尚未启用 v2。"]),
+            ], vec!["v2 对未知嵌套字段与重复组件 ID 拒绝解析；项目检查、编辑器与运行宿主均按版本读取。"]),
         struct_schema("PrefabV2", "v2 预制体资产；实体与组件 ID 属于资产自身。", None,
             Some(pretty(&prefab_v2_example())), vec![
                 req("format_version", "u32", "必须写 2。"),
@@ -664,8 +675,10 @@ fn component_v2_types() -> Vec<TypeSchema> {
                 req("next_id", "u64", "大于全部本地 ID；至少为 1。"),
             ], Vec::new()),
         enum_schema("ComponentData", "v2 强类型组件值；同名 Rust/Lua 多实例暂未支持。", None,
-            Some(ron_text(&ComponentData::Render(render.clone()))), vec![
-                newtype_variant("Render", "RenderData", &ron_text(&ComponentData::Render(render.clone())), "模型 / LOD / 材质资产 / 形变权重。"),
+            Some(ron_text(&ComponentData::Mesh(mesh.clone()))), vec![
+                newtype_variant("Mesh", "MeshData", &ron_text(&ComponentData::Mesh(mesh.clone())), "模型与形变权重；可独立增删。"),
+                newtype_variant("Lod", "LodGroup", &ron_text(&ComponentData::Lod(LodGroup { levels: vec![LodLevel::new("builtin://cube", 0.0)] })), "距离分级与绘制距离；可独立增删。"),
+                newtype_variant("Material", "MaterialData", &ron_text(&ComponentData::Material(material.clone())), "共享材质资产与逐实体覆盖；可独立增删。"),
                 newtype_variant("Ui", "UiElement", &ron_text(&ComponentData::Ui(UiElement::default())), "屏幕 UI。"),
                 newtype_variant("Animator", "StrictAnimator", &ron_text(&ComponentData::Animator(StrictAnimator(Animator::default()))), "动画；v2 严格拒绝重复参数键。"),
                 newtype_variant("Physics", "PhysicsBody", &ron_text(&ComponentData::Physics(PhysicsBody::default())), "刚体。"),
@@ -673,7 +686,6 @@ fn component_v2_types() -> Vec<TypeSchema> {
                 newtype_variant("Audio", "AudioSource", &ron_text(&ComponentData::Audio(AudioSource::default())), "音源。"),
                 newtype_variant("Camera", "Camera", &ron_text(&ComponentData::Camera(Camera::default())), "相机。"),
                 newtype_variant("Particle", "ParticleEmitter", &ron_text(&ComponentData::Particle(ParticleEmitter::default())), "粒子。"),
-                newtype_variant("MaterialOverride", "MaterialOverride", &ron_text(&ComponentData::MaterialOverride(MaterialOverride::default())), "逐实体材质覆盖。"),
                 struct_variant("Rust", &ron_text(&ComponentData::Rust { registered_name: "Health".into(), fields: None }), vec![
                     req("registered_name", "String", "已注册的 Rust 行为名。"),
                     req("fields", "Option<StrictFieldValues>", "None 与 Some(空表) 的 v1 语义不同。"),
@@ -681,14 +693,26 @@ fn component_v2_types() -> Vec<TypeSchema> {
                 struct_variant("Lua", &ron_text(&ComponentData::Lua { path: "Scripts/player.lua".into() }), vec![
                     req("path", "String", "Lua 脚本的项目相对路径。"),
                 ], "当前同一路径每实体只允许一份。"),
-            ], vec!["写入 v2 时只能使用现有运行时可表达的组件数量与参数语义。"]),
-        struct_schema("RenderData", "模型、LOD、材质资产与 morph 权重。", None,
-            Some(pretty(&render)), vec![
-                req("model", "String", "模型路径或 builtin://；有 LOD 时忽略。"),
-                req("lod", "LodGroup", "各级模型与绘制距离。"),
-                req("material_asset", "Option<String>", "共享材质资产；None 表示无。"),
-                req("morph_weights", "Vec<f32>", "形变目标权重。"),
+                newtype_variant("Render", "RenderData", &ron_text(&ComponentData::LegacyRender(legacy_render.clone())), "只读兼容：拆分前的复合视觉组件；编辑器下次保存会迁移。"),
+                newtype_variant("MaterialOverride", "MaterialOverride", &ron_text(&ComponentData::LegacyMaterialOverride(MaterialOverride::default())), "只读兼容：拆分前单列的逐实体覆盖；新文件改用 Material。"),
+            ], vec!["Mesh / Lod / Material 是三个独立组件；Render 与 MaterialOverride 旧变体只允许兼容读取，所在实体须经编辑器保存迁移后才能通用编辑。"]),
+        struct_schema("MeshData", "模型与跟随该模型组件的 morph 权重。", None,
+            Some(pretty(&mesh)), vec![
+                req("model", "String", "模型路径或 builtin://；LOD 存在时运行时优先使用 LOD。"),
+                req("morph_weights", "Vec<f32>", "形变目标权重；移除 Mesh 时一并删除。"),
             ], Vec::new()),
+        struct_schema("MaterialData", "共享材质资产与逐实体参数覆盖。", None,
+            Some(pretty(&material)), vec![
+                req("asset", "Option<String>", "共享材质资产；None 表示使用模型自带材质。"),
+                req("overrides", "Option<MaterialOverride>", "逐实体字段覆盖；None 表示不覆盖。"),
+            ], vec!["asset 与 overrides 同属一个 Material 组件；两者都为 None 的空组件无法投影到 v1 值视图。"]),
+        struct_schema("RenderData", "拆分前 v2 Render 的兼容载荷。", None,
+            Some(pretty(&legacy_render)), vec![
+                req("model", "String", "旧复合组件的模型路径。"),
+                req("lod", "LodGroup", "旧复合组件的各级模型与绘制距离。"),
+                req("material_asset", "Option<String>", "旧复合组件的共享材质资产。"),
+                req("morph_weights", "Vec<f32>", "旧复合组件的形变目标权重。"),
+            ], vec!["只为读取既有 v2 文件保留；新文件使用 MeshData / LodGroup / MaterialData。"]),
         newtype_schema("StrictFieldValues", "v2 严格参数表，RON 形态与 FieldValues 一致。", None,
             ron_text(&StrictFieldValues(BTreeMap::new())), vec!["字段名重复即拒绝；字段值仍使用 FieldValue 的变体。"]),
         newtype_schema("StrictAnimator", "v2 严格 Animator 解码，RON 形态与 Animator 一致。", None,
@@ -2207,6 +2231,8 @@ mod tests {
             "ComponentId",
             "ComponentIdSequence",
             "ComponentData",
+            "MeshData",
+            "MaterialData",
             "RenderData",
             "StrictFieldValues",
             "StrictAnimator",
@@ -2275,6 +2301,8 @@ mod tests {
                 "Entity.prefab.source",
                 "UiImageStyle.path",
                 "MaterialAsset.albedo",
+                "MeshData.model",
+                "MaterialData.asset",
                 "RenderData.model",
                 "RenderData.material_asset",
                 "ComponentData.Lua.path",
@@ -2321,6 +2349,8 @@ mod tests {
             "ComponentId",
             "ComponentIdSequence",
             "ComponentData",
+            "MeshData",
+            "MaterialData",
             "RenderData",
             "StrictFieldValues",
             "StrictAnimator",
@@ -2330,7 +2360,9 @@ mod tests {
         for variant in &doc.type_schema("ComponentData").unwrap().variants {
             let data: crate::scene_v2::ComponentData = parse(&variant.example_ron);
             let name = match data {
-                ComponentData::Render(_) => "Render",
+                ComponentData::Mesh(_) => "Mesh",
+                ComponentData::Lod(_) => "Lod",
+                ComponentData::Material(_) => "Material",
                 ComponentData::Ui(_) => "Ui",
                 ComponentData::Animator(_) => "Animator",
                 ComponentData::Physics(_) => "Physics",
@@ -2338,9 +2370,10 @@ mod tests {
                 ComponentData::Audio(_) => "Audio",
                 ComponentData::Camera(_) => "Camera",
                 ComponentData::Particle(_) => "Particle",
-                ComponentData::MaterialOverride(_) => "MaterialOverride",
                 ComponentData::Rust { .. } => "Rust",
                 ComponentData::Lua { .. } => "Lua",
+                ComponentData::LegacyRender(_) => "Render",
+                ComponentData::LegacyMaterialOverride(_) => "MaterialOverride",
             };
             assert_eq!(name, variant.name);
         }
@@ -2381,6 +2414,20 @@ mod tests {
         );
         let _: crate::component_id::ComponentIdSequence = parse(
             &doc.type_schema("ComponentIdSequence")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: MeshData = parse(
+            &doc.type_schema("MeshData")
+                .unwrap()
+                .example_ron
+                .clone()
+                .unwrap(),
+        );
+        let _: MaterialData = parse(
+            &doc.type_schema("MaterialData")
                 .unwrap()
                 .example_ron
                 .clone()

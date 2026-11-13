@@ -84,7 +84,9 @@ pub struct ComponentInstance {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ComponentData {
-    Render(RenderData),
+    Mesh(MeshData),
+    Lod(LodGroup),
+    Material(MaterialData),
     Ui(UiElement),
     Animator(StrictAnimator),
     Physics(PhysicsBody),
@@ -92,7 +94,6 @@ pub enum ComponentData {
     Audio(AudioSource),
     Camera(Camera),
     Particle(ParticleEmitter),
-    MaterialOverride(MaterialOverride),
     Rust {
         registered_name: String,
         /// None 与 Some(空表) 在旧文件中不同；转换期保留原样，不能压成一个默认值。
@@ -101,6 +102,12 @@ pub enum ComponentData {
     Lua {
         path: String,
     },
+    /// 只为读取拆分前的 v2 文件保留；新建、迁移与编辑器保存都不再生成。
+    #[serde(rename = "Render")]
+    LegacyRender(RenderData),
+    /// 同上：旧 v2 曾把逐实体覆盖单列；现在它与材质资产同属 Material。
+    #[serde(rename = "MaterialOverride")]
+    LegacyMaterialOverride(MaterialOverride),
 }
 
 /// v1 的 BTreeMap 遇到同名字段会保留后者；v2 拒绝这种不可逆覆盖。
@@ -136,6 +143,21 @@ impl<'de> Deserialize<'de> for StrictFieldValues {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct MeshData {
+    pub model: String,
+    pub morph_weights: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterialData {
+    pub asset: Option<String>,
+    pub overrides: Option<MaterialOverride>,
+}
+
+/// 拆分前的 v2 Render 载荷。只用于兼容读取，不再作为当前组件模型输出。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenderData {
     pub model: String,
     pub lod: LodGroup,
@@ -148,6 +170,8 @@ enum LegacyComponentKey {
     Builtin(BuiltinComponent),
     Rust(String),
     Lua(String),
+    LegacyRender,
+    LegacyMaterialOverride,
 }
 
 impl LegacyComponentKey {
@@ -169,6 +193,18 @@ impl RenderData {
     }
 }
 
+impl MeshData {
+    fn is_legacy_absent(&self) -> bool {
+        self.model.is_empty() && self.morph_weights.is_empty()
+    }
+}
+
+impl MaterialData {
+    fn is_legacy_absent(&self) -> bool {
+        self.asset.is_none() && self.overrides.is_none()
+    }
+}
+
 impl ComponentData {
     /// Agent 输入的单个组件也必须走与 v2 文件相同的严格字段解码。
     pub fn from_ron(text: &str) -> Result<Self, String> {
@@ -177,7 +213,9 @@ impl ComponentData {
 
     fn legacy_key(&self) -> LegacyComponentKey {
         match self {
-            Self::Render(_) => LegacyComponentKey::Builtin(BuiltinComponent::Render),
+            Self::Mesh(_) => LegacyComponentKey::Builtin(BuiltinComponent::Mesh),
+            Self::Lod(_) => LegacyComponentKey::Builtin(BuiltinComponent::Lod),
+            Self::Material(_) => LegacyComponentKey::Builtin(BuiltinComponent::Material),
             Self::Ui(_) => LegacyComponentKey::Builtin(BuiltinComponent::Ui),
             Self::Animator(_) => LegacyComponentKey::Builtin(BuiltinComponent::Animator),
             Self::Physics(_) => LegacyComponentKey::Builtin(BuiltinComponent::Physics),
@@ -185,13 +223,41 @@ impl ComponentData {
             Self::Audio(_) => LegacyComponentKey::Builtin(BuiltinComponent::Audio),
             Self::Camera(_) => LegacyComponentKey::Builtin(BuiltinComponent::Camera),
             Self::Particle(_) => LegacyComponentKey::Builtin(BuiltinComponent::Particle),
-            Self::MaterialOverride(_) => {
-                LegacyComponentKey::Builtin(BuiltinComponent::MaterialOverride)
-            }
             Self::Rust {
                 registered_name, ..
             } => LegacyComponentKey::Rust(registered_name.clone()),
             Self::Lua { path } => LegacyComponentKey::Lua(path.clone()),
+            Self::LegacyRender(_) => LegacyComponentKey::LegacyRender,
+            Self::LegacyMaterialOverride(_) => LegacyComponentKey::LegacyMaterialOverride,
+        }
+    }
+
+    fn is_current_visual(&self) -> bool {
+        matches!(Self::legacy_key(self), LegacyComponentKey::Builtin(
+            BuiltinComponent::Mesh | BuiltinComponent::Lod | BuiltinComponent::Material
+        ))
+    }
+
+    fn is_legacy_visual(&self) -> bool {
+        matches!(
+            self,
+            Self::LegacyRender(_) | Self::LegacyMaterialOverride(_)
+        )
+    }
+
+    /// 拆分旧复合组件时，哪一个新组件可以继承原来的本地 ID。
+    ///
+    /// 一个旧 Render 最多把身份交给一个新组件；其余拆出来的项从高水位分配。
+    /// 这样既不伪造“一份 ID 同时属于三项”，也尽量让最靠前的存活视觉组件稳定。
+    fn can_seed_split_identity(&self, current: &Self) -> bool {
+        match (self, current) {
+            (Self::LegacyRender(old), Self::Mesh(_)) => {
+                !old.model.is_empty() || !old.morph_weights.is_empty()
+            }
+            (Self::LegacyRender(old), Self::Lod(_)) => !old.lod.is_empty(),
+            (Self::LegacyRender(old), Self::Material(_)) => old.material_asset.is_some(),
+            (Self::LegacyMaterialOverride(_), Self::Material(_)) => true,
+            _ => false,
         }
     }
 
@@ -199,11 +265,14 @@ impl ComponentData {
         match address {
             ComponentAddress::Builtin(kind) => match kind {
                 BuiltinComponent::Transform => unreachable!("Transform 留在实体元数据中"),
-                BuiltinComponent::Render => Self::Render(RenderData {
+                BuiltinComponent::Mesh => Self::Mesh(MeshData {
                     model: entity.model.clone(),
-                    lod: entity.lod.clone(),
-                    material_asset: entity.material_asset.clone(),
                     morph_weights: entity.morph_weights.clone(),
+                }),
+                BuiltinComponent::Lod => Self::Lod(entity.lod.clone()),
+                BuiltinComponent::Material => Self::Material(MaterialData {
+                    asset: entity.material_asset.clone(),
+                    overrides: entity.material,
                 }),
                 BuiltinComponent::Ui => Self::Ui(entity.ui.clone().expect("只映射已挂载组件")),
                 BuiltinComponent::Animator => Self::Animator(StrictAnimator(
@@ -223,9 +292,6 @@ impl ComponentData {
                 }
                 BuiltinComponent::Particle => {
                     Self::Particle(entity.particle.clone().expect("只映射已挂载组件"))
-                }
-                BuiltinComponent::MaterialOverride => {
-                    Self::MaterialOverride(entity.material.expect("只映射已挂载组件"))
                 }
             },
             ComponentAddress::Rust(slot) => {
@@ -248,7 +314,27 @@ impl ComponentData {
 
     fn apply_to_v1(self, entity: &mut Entity) -> Result<(), String> {
         match self {
-            Self::Render(data) => {
+            Self::Mesh(data) => {
+                if data.is_legacy_absent() {
+                    return Err("旧格式无法表达空的 Mesh 组件".into());
+                }
+                entity.model = data.model;
+                entity.morph_weights = data.morph_weights;
+            }
+            Self::Lod(data) => {
+                if data.is_empty() {
+                    return Err("旧格式无法表达空的 LOD 组件".into());
+                }
+                entity.lod = data;
+            }
+            Self::Material(data) => {
+                if data.is_legacy_absent() {
+                    return Err("旧格式无法表达空的 Material 组件".into());
+                }
+                entity.material_asset = data.asset;
+                entity.material = data.overrides;
+            }
+            Self::LegacyRender(data) => {
                 if data.is_legacy_absent() {
                     return Err("旧格式无法表达空的 Render 组件".into());
                 }
@@ -264,7 +350,7 @@ impl ComponentData {
             Self::Audio(value) => entity.audio = Some(value),
             Self::Camera(value) => entity.camera = Some(value),
             Self::Particle(value) => entity.particle = Some(value),
-            Self::MaterialOverride(value) => entity.material = Some(value),
+            Self::LegacyMaterialOverride(value) => entity.material = Some(value),
             Self::Rust {
                 registered_name,
                 fields,
@@ -289,7 +375,9 @@ impl ComponentData {
 
     fn kind(&self) -> &'static str {
         match self {
-            Self::Render(_) => "Render",
+            Self::Mesh(_) => "Mesh",
+            Self::Lod(_) => "Lod",
+            Self::Material(_) => "Material",
             Self::Ui(_) => "Ui",
             Self::Animator(_) => "Animator",
             Self::Physics(_) => "Physics",
@@ -297,14 +385,32 @@ impl ComponentData {
             Self::Audio(_) => "Audio",
             Self::Camera(_) => "Camera",
             Self::Particle(_) => "Particle",
-            Self::MaterialOverride(_) => "MaterialOverride",
             Self::Rust { .. } => "Rust",
             Self::Lua { .. } => "Lua",
+            Self::LegacyRender(_) => "Render",
+            Self::LegacyMaterialOverride(_) => "MaterialOverride",
         }
     }
 }
 
 impl EntityV2 {
+    /// 旧视觉变体只承担兼容读取；任何通用组件编辑都必须先迁移。
+    ///
+    /// Transform patch 不经过 `replace_component`，因此工具入口也要显式调用本门禁，
+    /// 否则一次无关的变换编辑就会把旧 `Render` 原样写回磁盘。
+    pub fn require_current_component_layout(&self) -> Result<(), String> {
+        if self
+            .components
+            .entries
+            .iter()
+            .any(|entry| entry.data.is_legacy_visual())
+        {
+            Err("实体仍含旧 Render / MaterialOverride；请先经编辑器保存迁移后再修改组件".into())
+        } else {
+            Ok(())
+        }
+    }
+
     /// 组件 ID 在本实体内稳定；Transform 是固有属性，不在可移除列表中。
     pub fn component(&self, id: ComponentId) -> Option<&ComponentData> {
         self.components
@@ -316,6 +422,10 @@ impl EntityV2 {
 
     pub fn add_component(&mut self, data: ComponentData) -> Result<ComponentId, String> {
         self.validate()?;
+        self.require_current_component_layout()?;
+        if data.is_legacy_visual() {
+            return Err("旧 Render / MaterialOverride 变体只允许兼容读取，不能新增".into());
+        }
         if self
             .components
             .entries
@@ -337,6 +447,7 @@ impl EntityV2 {
 
     pub fn remove_component(&mut self, id: ComponentId) -> Result<ComponentInstance, String> {
         self.validate()?;
+        self.require_current_component_layout()?;
         if id == self.transform_identity.id {
             return Err("Transform 是固有组件，不能移除".into());
         }
@@ -356,6 +467,7 @@ impl EntityV2 {
         data: ComponentData,
     ) -> Result<(), String> {
         self.validate()?;
+        self.require_current_component_layout()?;
         let index = self
             .components
             .entries
@@ -363,6 +475,9 @@ impl EntityV2 {
             .position(|entry| entry.identity.id == id)
             .ok_or_else(|| format!("实体 {:?} 找不到可替换的组件 ID {}", self.name, id.raw()))?;
         let old = &self.components.entries[index];
+        if data.is_legacy_visual() && !old.data.is_legacy_visual() {
+            return Err("不能把当前组件替换成只读兼容变体".into());
+        }
         if old.data.kind() != data.kind() {
             return Err("组件种类不能通过替换操作改变".into());
         }
@@ -385,6 +500,7 @@ impl EntityV2 {
 
     pub fn move_component(&mut self, id: ComponentId, to: usize) -> Result<(), String> {
         self.validate()?;
+        self.require_current_component_layout()?;
         let count = self.components.entries.len();
         if to >= count {
             return Err(format!("组件目标位置 {to} 超出 0..{count}"));
@@ -407,7 +523,18 @@ impl EntityV2 {
         }
         for entry in &mut self.components.entries {
             match &mut entry.data {
-                ComponentData::Render(render) => {
+                ComponentData::Mesh(mesh) => visit(&mut mesh.model),
+                ComponentData::Lod(lod) => {
+                    for level in &mut lod.levels {
+                        visit(&mut level.model);
+                    }
+                }
+                ComponentData::Material(material) => {
+                    if let Some(material) = &mut material.asset {
+                        visit(material);
+                    }
+                }
+                ComponentData::LegacyRender(render) => {
                     visit(&mut render.model);
                     for level in &mut render.lod.levels {
                         visit(&mut level.model);
@@ -428,7 +555,7 @@ impl EntityV2 {
                 | ComponentData::Character(_)
                 | ComponentData::Camera(_)
                 | ComponentData::Particle(_)
-                | ComponentData::MaterialOverride(_)
+                | ComponentData::LegacyMaterialOverride(_)
                 | ComponentData::Rust { .. } => {}
             }
         }
@@ -521,7 +648,11 @@ impl EntityV2 {
             ),
         )?;
         let mut kinds = BTreeSet::new();
+        let mut has_current_visual = false;
+        let mut has_legacy_visual = false;
         for entry in &self.components.entries {
+            has_current_visual |= entry.data.is_current_visual();
+            has_legacy_visual |= entry.data.is_legacy_visual();
             if !kinds.insert(entry.data.legacy_key()) {
                 return Err(format!(
                     "实体 {:?} 的 {} 组件重复",
@@ -529,6 +660,12 @@ impl EntityV2 {
                     entry.data.kind()
                 ));
             }
+        }
+        if has_current_visual && has_legacy_visual {
+            return Err(format!(
+                "实体 {:?} 不能混用旧 Render 与拆分后的视觉组件",
+                self.name
+            ));
         }
         Ok(())
     }
@@ -642,11 +779,7 @@ impl SceneV2 {
             }
             let newly_linked = old.prefab.is_none() && updated.prefab.is_some();
             let detached = old.prefab.is_some() && updated.prefab.is_none();
-            let source_keys = if newly_linked {
-                source.map(EntityV2::source_keys).transpose()?
-            } else {
-                None
-            };
+            let source_keys = source.map(EntityV2::source_keys).transpose()?;
             updated.transform_identity = old.transform_identity;
             if newly_linked {
                 updated.transform_identity.source_component_id =
@@ -678,6 +811,34 @@ impl SceneV2 {
                 }
             }
             let mut renamed = vec![None; pending.len()];
+            // 拆分前 v2 的 Render / MaterialOverride 仍可读。第一次经编辑器保存时，
+            // 让每个旧身份最多交给一项真实组件；额外拆出的项沿用正常高水位。
+            // 来源资产若已经拆分，就按新键重新关联；仍是旧结构则明确解除来源，
+            // 不能让一个 Render 来源 ID 冒充 Mesh / LOD / Material 三者之一。
+            for old_entry in &unmatched {
+                if !old_entry.data.is_legacy_visual() {
+                    continue;
+                }
+                let Some((index, next)) = pending
+                    .iter()
+                    .enumerate()
+                    .find(|(index, next)| {
+                        renamed[*index].is_none()
+                            && old_entry.data.can_seed_split_identity(&next.data)
+                    })
+                else {
+                    continue;
+                };
+                let mut identity = old_entry.identity;
+                identity.source_component_id = if detached {
+                    None
+                } else {
+                    source_keys
+                        .as_ref()
+                        .and_then(|keys| keys.get(&next.data.legacy_key()).copied())
+                };
+                renamed[index] = Some(identity);
+            }
             for old_entry in &unmatched {
                 // Lua 路径 / Rust 注册名在 v1 视图里同时充当列表键；只有唯一的
                 // 旧项与唯一的新项时才能判定为原组件改了字段。多项时宁可分配新 ID。
@@ -1333,6 +1494,19 @@ mod schema_contract {
             id,
             source_component_id,
         } = identity;
+        let mesh = MeshData {
+            model: String::new(),
+            morph_weights: Vec::new(),
+        };
+        let MeshData {
+            model,
+            morph_weights,
+        } = mesh;
+        let material = MaterialData {
+            asset: None,
+            overrides: None,
+        };
+        let MaterialData { asset, overrides } = material;
         let render = RenderData {
             model: String::new(),
             lod: LodGroup::default(),
@@ -1367,6 +1541,8 @@ mod schema_contract {
             ("ComponentSet", vec!["next_component_id", "entries"]),
             ("ComponentInstance", vec!["identity", "data"]),
             ("ComponentIdentity", vec!["id", "source_component_id"]),
+            ("MeshData", vec!["model", "morph_weights"]),
+            ("MaterialData", vec!["asset", "overrides"]),
             (
                 "RenderData",
                 vec!["model", "lod", "material_asset", "morph_weights"],

@@ -934,12 +934,11 @@ inspector::show_content(state, ui)
   ├── 没有选中实体 → 提示语，返回
   ├── working = scene.entities[选中索引].clone()      ← 只克隆**一个**实体
   ├── 控件全部渲染在 working 上（scene 整段不动）
-  │     ├── Name: [TextEdit]
-  │     ├── Transform:
-  │     │     ├── Position:  [x] [y] [z]
-  │     │     ├── Rotation:  [x] [y] [z]（欧拉角显示，内部四元数）
-  │     │     └── Scale:     [x] [y] [z]
-  │     └── Model: [TextEdit] + 内置图元快选
+  │     ├── Name / Transform（Transform 固有、不可移除）
+  │     ├── Mesh（model + morph_weights）/ LOD / Material（资产 + 覆盖）
+  │     │     └── 三个真实组件按挂载状态独立显示，标题右键可分别移除
+  │     ├── UI / Animator / Physics / Character / Audio / Camera / Particle
+  │     └── Add Component、标题 / 行 / 空白右键 → 同一种 ComponentAction
   ├── 撤销点（必须发生在写回**之前**，那时 scene 还是"改前"）
   │     ├── 拖拽起始  → undo_pending = scene.clone()
   │     ├── 拖拽结束  → 把 undo_pending 压进撤销栈（整次拖拽 = 一个撤销点）
@@ -1294,6 +1293,9 @@ Revert  load_prefab → remove_subtree(实例根) → instantiate_prefab
         └── 新实例根局部设为旧世界矩阵，再 set_parent 回原父节点 ⇒ 世界位置不变
 ```
 
+父子关系不经过 Inspector：Hierarchy 把拖到节点、拖到空白与右键 `Unparent` 全部收敛到
+`EditorState::reparent_entity`，统一保世界变换、防环并进入 Undo。
+
 v2 的结构性 Apply 不走上面这条单文件覆盖：
 
 ```text
@@ -1454,7 +1456,7 @@ Scene(
 | `script/ui_api.rs` | 245 | `ui_*` 的 Lua 转发壳（固定参数个数，写错当场报错） |
 | `editor/panels/inspector_ui.rs` | 383 | Inspector 的 UI 区块（类型 / 显隐 / 锚点预设 / 锚点与偏移 / 样式 / 文本 / 图片 / 运行态） |
 | `editor/panels/hierarchy.rs` | 410 | `show_content()`（树形 + 折叠 + 拖拽重挂 + 右键菜单 + 预制体标记/菜单）|
-| `editor/panels/inspector.rs` | 1695 | `show_content()`（含撤销集成、父节点下拉、预制体区块、**材质资产选择器 + 覆盖**、**Animation 区块**：剪辑下拉 / 速度 / Fade / Loop / Autoplay / 状态机 UI / 「+ Additive」叠加层（剪辑下拉 + 权重 DragValue + 摘除）/ **「+ Add Layer」层栈**（每层一行：摘除 ✕ + 名字 TextEdit + 模式 menu_button + 剪辑下拉 + 权重 DragValue；第二行遮罩 chips（点 chip 移出）+ 「+ 骨骼」下拉（来源 `bone_names()`）；增删在闭包外收集后统一应用））|
+| `editor/panels/inspector.rs` | 组件检视 | `show_content()`（统一 `ComponentAction` + Undo；Mesh / LOD / Material 独立增删，Morph 归 Mesh；无 Parent 控件；含预制体、材质资产 + 覆盖与完整 Animation 区块）|
 | `editor/panels/assets.rs` | 678 | `show_content()`（目录树 + 类型图标 + 详情 + 导入设置 + 材质新建 / 草稿编辑 / Apply·Revert / 指派 + 双击/拖拽放入场景；`join_path`/`join_dir` 保证同名文件不串）|
 | `editor/panels/prefabs.rs` | 258 | `show_content()`（资产列表 + 创建/实例化/删除弹窗）|
 | `editor/panels/toolbar.rs` | 364 | `show()`（含 ⌂ Projects / 💾 Save · Save As · Scenes / 🔨 Build / ⚙ 设置；Scenes 菜单列出磁盘场景、新建、设启动场景，播放中禁用） |

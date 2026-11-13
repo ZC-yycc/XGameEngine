@@ -107,7 +107,7 @@ enum ComponentMenuTarget {
         address: ComponentAddress,
         label: &'static str,
     },
-    /// Transform / Render 这类真实存在、但当前不能删除的组件视图。
+    /// Transform 这类真实存在、但不能删除的固有组件。
     Locked {
         label: &'static str,
         reason: &'static str,
@@ -122,8 +122,6 @@ enum ComponentMenuTarget {
 const PLAY_STRUCTURE_HINT: &str = "播放模式下不能修改组件结构";
 const TRANSFORM_REMOVE_REASON: &str =
     "Transform 是每个实体的固有组件；可以改值，但不能从实体上移除。";
-const RENDER_REMOVE_REASON: &str =
-    "Render 由 Mesh、LOD、Morph 与材质资产共同投影；当前不能把其中一个区块当成独立组件删除。";
 
 /// 执行一个统一组件请求。`editing` 是最后一道结构门禁，菜单是否置灰不能替代它。
 fn apply_component_action(
@@ -253,10 +251,7 @@ fn show_add_component_entries(
         theme::note(ui, "当前可用组件都已挂载");
     }
     ui.separator();
-    theme::note(
-        ui,
-        "Transform 始终存在；Render 由 Mesh / LOD / Morph / Material 视图共同编辑。",
-    );
+    theme::note(ui, "Transform 始终存在；Mesh / LOD / Material 可独立增删。");
     ui.separator();
     let refresh = ui.button("重新扫描 Scripts/").clicked();
     if refresh {
@@ -817,100 +812,119 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         }
 
         // ── 网格 ──
-        let mesh_header = theme::section_bar(ui, "Mesh");
-        component_context_menu(
-            &mesh_header,
-            state,
-            entity,
-            ComponentMenuTarget::Locked {
-                label: "Remove Render",
-                reason: RENDER_REMOVE_REASON,
-            },
-            &mut component_request,
-            &mut refresh_scripts,
-        );
-        ui.indent("mesh", |ui| {
-            row(ui, "Model", |ui| {
-                let mut path = entity.model.clone();
-                let resp = ui.add_sized(
-                    egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
-                    egui::TextEdit::singleline(&mut path)
-                        .hint_text("Resources/… 或 builtin://cube"),
-                );
-                if resp.changed() && path != entity.model {
-                    entity.model = path;
-                    touched = true;
-                }
-            });
+        // Morph 权重跟模型组件同生共灭：它按当前模型的目标下标解释，单独留下只会
+        // 变成一张没有目标资产可对应的孤儿数组。因此 Morph 控件收进 Mesh 区块，
+        // 不再画一个看起来像第四份独立组件的标题。
+        if BuiltinComponent::Mesh.present(entity) {
+            let mesh_header = theme::section_bar(ui, "Mesh");
+            component_context_menu(
+                &mesh_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Mesh),
+                    label: "Remove Mesh",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            ui.indent("mesh", |ui| {
+                row(ui, "Model", |ui| {
+                    let mut path = entity.model.clone();
+                    let resp = ui.add_sized(
+                        egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
+                        egui::TextEdit::singleline(&mut path)
+                            .hint_text("Resources/… 或 builtin://cube"),
+                    );
+                    if resp.changed() && path != entity.model {
+                        entity.model = path;
+                        touched = true;
+                    }
+                });
 
-            // 内置图元：下拉选择（此前是四个并排 chip，"Cylinder" 会被面板边缘裁掉）
-            row(ui, "Primitive", |ui| {
-                let current = xgame_render::mesh::BuiltinMesh::ALL
-                    .iter()
-                    .find(|kind| entity.model == kind.uri())
-                    .copied();
-                let text = current
-                    .map(|kind| kind.label().to_owned())
-                    .unwrap_or_else(|| "Custom".to_owned());
-                egui::ComboBox::from_id_salt("inspector_primitive")
-                    .selected_text(text)
-                    // 与上面 Model 那行同宽（而不是固定 140）：两行右边缘对齐，
-                    // 否则 140 的框在满宽输入框下面缩进去一截，像没画完。
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for kind in xgame_render::mesh::BuiltinMesh::ALL {
-                            let active = entity.model == kind.uri();
-                            if ui.selectable_label(active, kind.label()).clicked() {
-                                entity.model = kind.uri();
+                // 内置图元：下拉选择（此前是四个并排 chip，"Cylinder" 会被面板边缘裁掉）
+                row(ui, "Primitive", |ui| {
+                    let current = xgame_render::mesh::BuiltinMesh::ALL
+                        .iter()
+                        .find(|kind| entity.model == kind.uri())
+                        .copied();
+                    let text = current
+                        .map(|kind| kind.label().to_owned())
+                        .unwrap_or_else(|| "Custom".to_owned());
+                    egui::ComboBox::from_id_salt("inspector_primitive")
+                        .selected_text(text)
+                        // 与上面 Model 那行同宽（而不是固定 140）：两行右边缘对齐，
+                        // 否则 140 的框在满宽输入框下面缩进去一截，像没画完。
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for kind in xgame_render::mesh::BuiltinMesh::ALL {
+                                let active = entity.model == kind.uri();
+                                if ui.selectable_label(active, kind.label()).clicked() {
+                                    entity.model = kind.uri();
+                                    touched = true;
+                                }
+                            }
+                        });
+                });
+
+                let (morph_names, morph_count) = state
+                    .scene_renderer
+                    .as_ref()
+                    .map(|renderer| {
+                        entity
+                            .model_at(0)
+                            .map_or_else(Default::default, |model| renderer.morph_targets(model))
+                    })
+                    .unwrap_or_default();
+                if morph_count > 0 {
+                    ui.label(theme::dim_note("Morph Targets"));
+                    for index in 0..morph_count {
+                        let label = morph_names
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Target {index}"));
+                        let mut value = entity.morph_weights.get(index).copied().unwrap_or(0.0);
+                        theme::field_row(ui, &label, |ui| {
+                            let response = ui.add_sized(
+                                egui::vec2(ui.available_width(), theme::FIELD_HEIGHT),
+                                egui::Slider::new(&mut value, 0.0..=1.0),
+                            );
+                            if response.changed() {
+                                // 只在真的拖了才扩容；打开面板不能把场景改脏。
+                                if entity.morph_weights.len() <= index {
+                                    entity.morph_weights.resize(index + 1, 0.0);
+                                }
+                                entity.morph_weights[index] = value.clamp(0.0, 1.0);
                                 touched = true;
                             }
-                        }
-                    });
+                            response.on_hover_text(
+                                "形变目标权重（0 = 基准形状，1 = 完全变成这个目标）",
+                            );
+                        });
+                    }
+                }
             });
-        });
+        }
 
         // ── LOD（距离分级 + 绘制距离）──
         //
         // 语义（与 `xgame_core::lod` 同一份）：`levels` 非空时 `model` 被忽略，
         // 第 0 级就是最近一级；超出最后一级的 `max_distance` 直接不画
         // （写 0 = 无限远）。距离从相机量到**实体轴心**。
-        let lod_header = theme::section_bar(ui, "LOD");
-        component_context_menu(
-            &lod_header,
-            state,
-            entity,
-            ComponentMenuTarget::Locked {
-                label: "Remove Render",
-                reason: RENDER_REMOVE_REASON,
-            },
-            &mut component_request,
-            &mut refresh_scripts,
-        );
-        ui.indent("lod", |ui| {
-            if entity.lod.is_empty() {
-                let add = icons::add_row(
-                    ui,
-                    "Add LOD",
-                    "两级起：第 0 级 = 当前模型、20 米内；第 1 级先复制同一模型、无限远。\n把第 1 级的模型换成低模，把第 0 级的距离调成想换模的位置。",
-                );
-                if add.clicked() {
-                    // 用当前模型起两段**同款**的级：一按就消失是最糟的默认值，
-                    // 作者要的是"先有个结构、再逐级换低模"。
-                    let seed = if entity.model.is_empty() {
-                        "builtin://cube".to_owned()
-                    } else {
-                        entity.model.clone()
-                    };
-                    entity.lod = xgame_core::LodGroup {
-                        levels: vec![
-                            xgame_core::LodLevel::new(seed.clone(), 20.0),
-                            xgame_core::LodLevel::new(seed, 0.0),
-                        ],
-                    };
-                    touched = true;
-                }
-                theme::note(ui, "没有 LOD：任何距离都画 model 同一个网格");
-            } else {
+        if BuiltinComponent::Lod.present(entity) {
+            let lod_header = theme::section_bar(ui, "LOD");
+            component_context_menu(
+                &lod_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Lod),
+                    label: "Remove LOD",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            ui.indent("lod", |ui| {
                 let mut remove: Option<usize> = None;
                 for index in 0..entity.lod.levels.len() {
                     theme::field_row(ui, &format!("L{index}"), |ui| {
@@ -961,14 +975,9 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     entity.lod.levels.push(xgame_core::LodLevel::new(seed, 0.0));
                     touched = true;
                 }
-                if ui.button("Remove LOD").clicked() {
-                    // 只拆 LOD 结构，不动 `model` —— 作者随时能回到"一个模型"。
-                    entity.lod = xgame_core::LodGroup::default();
-                    touched = true;
-                }
                 theme::note(ui, "超出最后一级 = 不画；最后一级填 0 = 无限远");
-            }
-        });
+            });
+        }
 
         // ── 动画 ──
         //
@@ -1738,64 +1747,6 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     component_request = Some(ComponentAction::Remove(
                         ComponentAddress::Builtin(BuiltinComponent::Animator),
                     ));
-                }
-            });
-        }
-
-        // ── 形变目标（morph target / blend shape）──
-        //
-        // 只有模型**真的带**形变目标时才出现。刻意不给 "Add" 按钮：morph 是
-        // 资产属性（glTF `mesh.primitives[].targets`），不是能凭空挂上去的组件 ——
-        // 给个按钮但点了什么都不会发生，比不显示更糟。
-        //
-        // 权重按**下标**存（`morph_weights`），名字只在这里用来做标题：名字来自
-        // `mesh.extras.targetNames`，只活在渲染资产里，core 层不认识它。
-        let (morph_names, morph_count) = state
-            .scene_renderer
-            .as_ref()
-            .map(|r| {
-                entity
-                    .model_at(0)
-                    .map_or_else(Default::default, |m| r.morph_targets(m))
-            })
-            .unwrap_or_default();
-        if morph_count > 0 {
-            let morph_header = theme::section_bar(ui, "Morph");
-            component_context_menu(
-                &morph_header,
-                state,
-                entity,
-                ComponentMenuTarget::Locked {
-                    label: "Remove Render",
-                    reason: RENDER_REMOVE_REASON,
-                },
-                &mut component_request,
-                &mut refresh_scripts,
-            );
-            ui.indent("morph", |ui| {
-                for index in 0..morph_count {
-                    let label = morph_names
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_else(|| format!("Target {index}"));
-                    let mut value = entity.morph_weights.get(index).copied().unwrap_or(0.0);
-                    theme::field_row(ui, &label, |ui| {
-                        let response = ui.add_sized(
-                            egui::vec2(ui.available_width(), theme::FIELD_HEIGHT),
-                            egui::Slider::new(&mut value, 0.0..=1.0),
-                        );
-                        if response.changed() {
-                            // 只在**真的拖了**才扩容：进面板不该把场景改脏
-                            // （稀疏写过的模型会带一张短表，其余目标是 0）。
-                            if entity.morph_weights.len() <= index {
-                                entity.morph_weights.resize(index + 1, 0.0);
-                            }
-                            entity.morph_weights[index] = value.clamp(0.0, 1.0);
-                            touched = true;
-                        }
-                        response
-                            .on_hover_text("形变目标权重（0 = 基准形状，1 = 完全变成这个目标）");
-                    });
                 }
             });
         }
@@ -2921,146 +2872,137 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 负责"这个实例想怎么微调"。两层正交：资产定金属度 / 粗糙度，覆盖在
         // 其结果之上逐字段打补丁。内置图元（builtin://cube 等）没有模型材质，
         // 要么挂资产、要么用覆盖，否则永远是白模。
-        let material_header = theme::section_bar(ui, "Material");
-        let material_target = if entity.material.is_some() {
-            ComponentMenuTarget::Removable {
-                address: ComponentAddress::Builtin(BuiltinComponent::MaterialOverride),
-                label: "Remove Material Override",
-            }
-        } else {
-            ComponentMenuTarget::Locked {
-                label: "Remove Render",
-                reason: RENDER_REMOVE_REASON,
-            }
-        };
-        component_context_menu(
-            &material_header,
-            state,
-            entity,
-            material_target,
-            &mut component_request,
-            &mut refresh_scripts,
-        );
-        ui.indent("material", |ui| {
-            let materials = state.material_list();
-            row(ui, "Asset", |ui| {
-                let current = entity.material_asset.clone().unwrap_or_default();
-                let text = if current.is_empty() {
-                    "None（模型自带）".to_string()
-                } else {
-                    current
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&current)
-                        .trim_end_matches(".mat")
-                        .to_string()
-                };
-                egui::ComboBox::from_id_salt("inspector_material_asset")
-                    .selected_text(text)
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(current.is_empty(), "None（模型自带）")
-                            .clicked()
-                            && !current.is_empty()
-                        {
-                            entity.material_asset = None;
-                            touched = true;
-                        }
-                        for path in &materials {
-                            if ui.selectable_label(&current == path, path).clicked() {
-                                entity.material_asset = Some(path.clone());
+        if BuiltinComponent::Material.present(entity) {
+            let material_header = theme::section_bar(ui, "Material");
+            component_context_menu(
+                &material_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Material),
+                    label: "Remove Material",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            ui.indent("material", |ui| {
+                let materials = state.material_list();
+                row(ui, "Asset", |ui| {
+                    let current = entity.material_asset.clone().unwrap_or_default();
+                    let text = if current.is_empty() {
+                        "None（模型自带）".to_string()
+                    } else {
+                        current
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&current)
+                            .trim_end_matches(".mat")
+                            .to_string()
+                    };
+                    egui::ComboBox::from_id_salt("inspector_material_asset")
+                        .selected_text(text)
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(current.is_empty(), "None（模型自带）")
+                                .clicked()
+                                && !current.is_empty()
+                            {
+                                entity.material_asset = None;
                                 touched = true;
                             }
+                            for path in &materials {
+                                if ui.selectable_label(&current == path, path).clicked() {
+                                    entity.material_asset = Some(path.clone());
+                                    touched = true;
+                                }
+                            }
+                        });
+                });
+                if entity.material_asset.is_none() {
+                    theme::note(ui, "共享材质资产 · 在 Assets 面板新建 .mat 后可在此指派");
+                } else {
+                    theme::note(ui, entity.material_asset.as_deref().unwrap_or_default());
+                }
+
+                let mut enabled = entity.material.is_some();
+                if ui
+                    .checkbox(&mut enabled, "Override material params")
+                    .on_hover_text(
+                        "在内置白模 / glTF 材质之上逐字段覆盖 PBR 参数；\n只影响勾选的字段",
+                    )
+                    .changed()
+                {
+                    entity.material = if enabled {
+                        Some(xgame_core::MaterialOverride::default())
+                    } else {
+                        None
+                    };
+                    touched = true;
+                }
+
+                if let Some(m) = entity.material.as_mut() {
+                    // 基础色乘子（线性 RGBA；a 一并相乘 = "整体透明一点"）
+                    //
+                    // 每组都是「标签列 + 勾选框 + 编辑控件」：勾选框贴控件列起始，
+                    // 颜色块/数值紧随其后。这样三行的勾选框在同一竖线上，扫一眼
+                    // 就知道哪些字段被覆盖了。
+                    row(ui, "Tint", |ui| {
+                        let mut has = m.base_color.is_some();
+                        if ui
+                            .checkbox(&mut has, "")
+                            .on_hover_text("与模型自带基础色**相乘**：白模直接上色，\n贴图模型调整体色调；a 控制整体透明度")
+                            .changed()
+                        {
+                            m.base_color = if has { Some([1.0; 4]) } else { None };
+                            touched = true;
+                        }
+                        if let Some(c) = m.base_color.as_mut() {
+                            let resp = ui.color_edit_button_rgba_unmultiplied(c);
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
                         }
                     });
+
+                    row(ui, "Metallic", |ui| {
+                        let mut has = m.metallic.is_some();
+                        if ui
+                            .checkbox(&mut has, "")
+                            .on_hover_text("0 = 绝缘体，1 = 金属。金属没有漫反射，\n反射环境色（写覆盖值，不做相乘）")
+                            .changed()
+                        {
+                            m.metallic = if has { Some(0.0) } else { None };
+                            touched = true;
+                        }
+                        if let Some(v) = m.metallic.as_mut() {
+                            let resp = ui.add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                egui::DragValue::new(v).speed(0.01).range(0.0..=1.0),
+                            );
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        }
+                    });
+
+                    row(ui, "Rough", |ui| {
+                        let mut has = m.roughness.is_some();
+                        if ui
+                            .checkbox(&mut has, "")
+                            .on_hover_text("粗糙度：0 = 镜面，1 = 完全漫反射。\n（写覆盖值，不做相乘）")
+                            .changed()
+                        {
+                            m.roughness = if has { Some(0.5) } else { None };
+                            touched = true;
+                        }
+                        if let Some(v) = m.roughness.as_mut() {
+                            let resp = ui.add_sized(
+                                egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
+                                egui::DragValue::new(v).speed(0.01).range(0.0..=1.0),
+                            );
+                            collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
+                        }
+                    });
+                }
             });
-            if entity.material_asset.is_none() {
-                theme::note(ui, "共享材质资产 · 在 Assets 面板新建 .mat 后可在此指派");
-            } else {
-                theme::note(ui, entity.material_asset.as_deref().unwrap_or_default());
-            }
-
-            let mut enabled = entity.material.is_some();
-            if ui
-                .add_enabled(
-                    state.is_editing(),
-                    egui::Checkbox::new(&mut enabled, "Override material params"),
-                )
-                .on_hover_text("在内置白模 / glTF 材质之上逐字段覆盖 PBR 参数；\n只影响勾选的字段")
-                .on_disabled_hover_text(PLAY_STRUCTURE_HINT)
-                .changed()
-            {
-                component_request = Some(if enabled {
-                    ComponentAction::AddBuiltin(BuiltinComponent::MaterialOverride)
-                } else {
-                    ComponentAction::Remove(ComponentAddress::Builtin(
-                        BuiltinComponent::MaterialOverride,
-                    ))
-                });
-            }
-
-            if let Some(m) = entity.material.as_mut() {
-                // 基础色乘子（线性 RGBA；a 一并相乘 = "整体透明一点"）
-                //
-                // 每组都是「标签列 + 勾选框 + 编辑控件」：勾选框贴控件列起始，
-                // 颜色块/数值紧随其后。这样三行的勾选框在同一竖线上，扫一眼
-                // 就知道哪些字段被覆盖了。
-                row(ui, "Tint", |ui| {
-                    let mut has = m.base_color.is_some();
-                    if ui
-                        .checkbox(&mut has, "")
-                        .on_hover_text("与模型自带基础色**相乘**：白模直接上色，\n贴图模型调整体色调；a 控制整体透明度")
-                        .changed()
-                    {
-                        m.base_color = if has { Some([1.0; 4]) } else { None };
-                        touched = true;
-                    }
-                    if let Some(c) = m.base_color.as_mut() {
-                        let resp = ui.color_edit_button_rgba_unmultiplied(c);
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    }
-                });
-
-                row(ui, "Metallic", |ui| {
-                    let mut has = m.metallic.is_some();
-                    if ui
-                        .checkbox(&mut has, "")
-                        .on_hover_text("0 = 绝缘体，1 = 金属。金属没有漫反射，\n反射环境色（写覆盖值，不做相乘）")
-                        .changed()
-                    {
-                        m.metallic = if has { Some(0.0) } else { None };
-                        touched = true;
-                    }
-                    if let Some(v) = m.metallic.as_mut() {
-                        let resp = ui.add_sized(
-                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                            egui::DragValue::new(v).speed(0.01).range(0.0..=1.0),
-                        );
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    }
-                });
-
-                row(ui, "Rough", |ui| {
-                    let mut has = m.roughness.is_some();
-                    if ui
-                        .checkbox(&mut has, "")
-                        .on_hover_text("粗糙度：0 = 镜面，1 = 完全漫反射。\n（写覆盖值，不做相乘）")
-                        .changed()
-                    {
-                        m.roughness = if has { Some(0.5) } else { None };
-                        touched = true;
-                    }
-                    if let Some(v) = m.roughness.as_mut() {
-                        let resp = ui.add_sized(
-                            egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT),
-                            egui::DragValue::new(v).speed(0.01).range(0.0..=1.0),
-                        );
-                        collect(&resp, &mut touched, &mut drag_began, &mut drag_ended);
-                    }
-                });
-            }
-        });
+        }
     }
 
     if refresh_scripts {
@@ -3111,48 +3053,6 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 .retain(|name, _| behaviors.contains(name));
         }
     }
-
-    // ── 父节点（层级）──
-    // 刻意放在写回**之后**：`reparent_entity` 按"保留世界变换"会改写实体自己的
-    // `transform`，若先 reparent 再被 `working` 写回，那次换算就被覆盖掉了。
-    theme::section_bar(ui, "Parent");
-    ui.indent("parent", |ui| {
-        let current_parent = state.scene.parent_index(index);
-        let parent_label = match current_parent {
-            Some(p) => state.scene.entities[p].name.clone(),
-            None => "(none — scene root)".to_string(),
-        };
-        let mut chosen: Option<Option<usize>> = None;
-        ui.add_enabled_ui(state.is_editing(), |ui| {
-            row(ui, "Parent", |ui| {
-                egui::ComboBox::from_id_salt("inspector_parent")
-                    .width(ui.available_width())
-                    .selected_text(parent_label)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(current_parent.is_none(), "(none — scene root)")
-                            .clicked()
-                        {
-                            chosen = Some(None);
-                        }
-                        for i in 0..state.scene.entities.len() {
-                            // 自己、以及自己的子孙都不能当父节点（会成环）
-                            if i == index || state.scene.is_ancestor(index, i) {
-                                continue;
-                            }
-                            let selected = current_parent == Some(i);
-                            let name = state.scene.entities[i].name.clone();
-                            if ui.selectable_label(selected, name).clicked() {
-                                chosen = Some(Some(i));
-                            }
-                        }
-                    });
-            });
-        });
-        if let Some(parent) = chosen {
-            state.reparent_entity(index, parent);
-        }
-    });
 
     // ── 预制体（实例来源 / Apply / Revert）──
     // 放在最后：这几个按钮会直接改场景（Revert 会重建整棵子树、让索引位移），
@@ -3280,12 +3180,51 @@ mod tests {
             true,
             None,
         ));
-        assert!(!apply_component_action(
+        assert!(apply_component_action(
             &mut entity,
-            ComponentAction::Remove(ComponentAddress::Builtin(BuiltinComponent::Render)),
+            ComponentAction::AddBuiltin(BuiltinComponent::Mesh),
             true,
             None,
         ));
+        entity.morph_weights = vec![0.25];
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::AddBuiltin(BuiltinComponent::Lod),
+            true,
+            None,
+        ));
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::AddBuiltin(BuiltinComponent::Material),
+            true,
+            None,
+        ));
+        entity.material_asset = Some("Resources/Materials/Wood.mat".into());
+
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::Remove(ComponentAddress::Builtin(BuiltinComponent::Mesh)),
+            true,
+            None,
+        ));
+        assert!(entity.model.is_empty() && entity.morph_weights.is_empty());
+        assert!(!entity.lod.is_empty());
+        assert!(entity.material_asset.is_some() && entity.material.is_some());
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::Remove(ComponentAddress::Builtin(BuiltinComponent::Lod)),
+            true,
+            None,
+        ));
+        assert!(entity.lod.is_empty());
+        assert!(entity.material_asset.is_some() && entity.material.is_some());
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::Remove(ComponentAddress::Builtin(BuiltinComponent::Material)),
+            true,
+            None,
+        ));
+        assert!(entity.material_asset.is_none() && entity.material.is_none());
     }
 
     fn temp_editor(tag: &str) -> (EditorState, std::path::PathBuf) {
@@ -3329,6 +3268,37 @@ mod tests {
             .expect("应当保存出 Audio 组件")
     }
 
+    fn saved_visual_id(
+        state: &EditorState,
+        kind: BuiltinComponent,
+    ) -> xgame_core::component_id::ComponentId {
+        let scene = state
+            .project
+            .load_scene_v2(&state.current_scene)
+            .unwrap();
+        scene.entities[0]
+            .components
+            .entries
+            .iter()
+            .find_map(|entry| {
+                let matches = matches!(
+                    (&entry.data, kind),
+                    (
+                        xgame_core::scene_v2::ComponentData::Mesh(_),
+                        BuiltinComponent::Mesh
+                    ) | (
+                        xgame_core::scene_v2::ComponentData::Lod(_),
+                        BuiltinComponent::Lod
+                    ) | (
+                        xgame_core::scene_v2::ComponentData::Material(_),
+                        BuiltinComponent::Material
+                    )
+                );
+                matches.then_some(entry.identity.id)
+            })
+            .unwrap_or_else(|| panic!("应当保存出 {} 组件", kind.name()))
+    }
+
     #[test]
     fn selected_component_action_is_undoable_and_never_reuses_v2_ids() {
         let (mut state, base) = temp_editor("v2_identity");
@@ -3361,6 +3331,67 @@ mod tests {
             second_id.raw() > first_id.raw(),
             "删除后重新添加必须从持久高水位继续分配"
         );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn selected_visual_components_keep_independent_ids_through_undo_and_readd() {
+        let (mut state, base) = temp_editor("visual_v2_identity");
+        let visual = [
+            BuiltinComponent::Mesh,
+            BuiltinComponent::Lod,
+            BuiltinComponent::Material,
+        ];
+        for kind in visual {
+            assert!(apply_component_action_to_selected(
+                &mut state,
+                ComponentAction::AddBuiltin(kind),
+            ));
+        }
+        state.save_scene().unwrap();
+
+        for kind in visual {
+            let first_id = saved_visual_id(&state, kind);
+            assert!(apply_component_action_to_selected(
+                &mut state,
+                ComponentAction::Remove(ComponentAddress::Builtin(kind)),
+            ));
+            assert!(!kind.present(&state.scene.entities[0]));
+            for survivor in visual.into_iter().filter(|candidate| *candidate != kind) {
+                assert!(
+                    survivor.present(&state.scene.entities[0]),
+                    "移除 {} 不能连带删除 {}",
+                    kind.name(),
+                    survivor.name()
+                );
+            }
+            state.save_scene().unwrap();
+
+            state.undo();
+            assert!(kind.present(&state.scene.entities[0]));
+            state.save_scene().unwrap();
+            assert_eq!(
+                saved_visual_id(&state, kind),
+                first_id,
+                "Undo 必须找回 {} 的原身份",
+                kind.name()
+            );
+
+            state.redo();
+            assert!(!kind.present(&state.scene.entities[0]));
+            state.save_scene().unwrap();
+            assert!(apply_component_action_to_selected(
+                &mut state,
+                ComponentAction::AddBuiltin(kind),
+            ));
+            state.save_scene().unwrap();
+            assert!(
+                saved_visual_id(&state, kind).raw() > first_id.raw(),
+                "删除后重新添加 {} 必须从持久高水位继续分配",
+                kind.name()
+            );
+        }
 
         std::fs::remove_dir_all(base).unwrap();
     }

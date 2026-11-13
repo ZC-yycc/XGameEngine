@@ -95,7 +95,7 @@ pub fn schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "component_catalog_read",
-            "description": "读出内建组件目录（类型地址、能否添加 / 移除 / 重复、默认值与字段表）。字段取自 schema_read 的唯一场景 schema；旧格式的 Render 仍由 Entity 的 model/lod/material_asset/morph_weights 组成。无需 project；Rust 注册组件必须由实际加载的项目插件提供字段表，Lua 脚本不作任意变量反射。地址仍标记 legacy。",
+            "description": "读出内建组件目录（类型地址、能否添加 / 移除 / 重复、默认值与字段表）。字段取自 schema_read 的唯一场景 schema；Mesh、LOD、Material 在旧值模型中也按三个独立挂载物报告。无需 project；Rust 注册组件必须由实际加载的项目插件提供字段表，Lua 脚本不作任意变量反射。地址仍标记 legacy。",
             "inputSchema": { "type": "object", "properties": {} },
         }),
         json!({
@@ -162,7 +162,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "component_v2_edit",
-            "description": format!("按场景 / 实体 ID / 组件 ID 定位并只改一条 v2 组件。必须先读 entity_components_v2_read，带回 revision；原文件有改动就拒绝覆盖。action=patch 时 field 用 JSON Pointer 指向组件值中的已有字段（如 /model），value 为该字段 JSON 值；action=replace/add 用 data_ron（schema_read 的 ComponentData 变体 RON）；action=remove 删除；action=move 用 to_index（不含 Transform 的 0 起位置）。Transform 只允许 patch。写前严格解码和场景语义体检。同一文件的前置字节比较和原子替换由跨进程锁串行；预制体与场景之间仍无跨文件事务。{write_caveat}"),
+            "description": format!("按场景 / 实体 ID / 组件 ID 定位并只改一条 v2 组件。必须先读 entity_components_v2_read，带回 revision；原文件有改动就拒绝覆盖。action=patch 时 field 用 JSON Pointer 指向组件值中的已有字段（如 /model），value 为该字段 JSON 值；action=replace/add 用 data_ron（schema_read 的 ComponentData 变体 RON）；action=remove 删除；action=move 用 to_index（不含 Transform 的 0 起位置）。Transform 只允许 patch。仍含旧 Render / MaterialOverride 视觉变体的实体只读，须先经编辑器保存迁移。写前严格解码和场景语义体检。同一文件的前置字节比较和原子替换由跨进程锁串行；预制体与场景之间仍无跨文件事务。{write_caveat}"),
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop, "scene": scene_prop,
@@ -477,14 +477,14 @@ fn component_catalog_read() -> String {
             let schema = doc
                 .type_schema(kind.schema_type())
                 .expect("内建类型必须在场景 schema 中");
-            let fields: Vec<_> = if kind == BuiltinComponent::Render {
+            let fields: Vec<_> = if kind.schema_field_names().is_empty() {
+                schema.fields.iter().collect()
+            } else {
                 schema
                     .fields
                     .iter()
                     .filter(|field| kind.schema_field_names().contains(&field.name.as_str()))
                     .collect()
-            } else {
-                schema.fields.iter().collect()
             };
             json!({
                 "address": ComponentAddress::Builtin(kind).to_string(),
@@ -635,11 +635,14 @@ fn entity_components_read(args: &Value) -> Result<String, CallError> {
                 ComponentAddress::Builtin(builtin) => {
                     let data = match builtin {
                         BuiltinComponent::Transform => json!(&entity.transform),
-                        BuiltinComponent::Render => json!({
+                        BuiltinComponent::Mesh => json!({
                             "model": &entity.model,
-                            "lod": &entity.lod,
-                            "material_asset": &entity.material_asset,
                             "morph_weights": &entity.morph_weights,
+                        }),
+                        BuiltinComponent::Lod => json!(&entity.lod),
+                        BuiltinComponent::Material => json!({
+                            "material_asset": &entity.material_asset,
+                            "material": &entity.material,
                         }),
                         BuiltinComponent::Ui => json!(&entity.ui),
                         BuiltinComponent::Animator => json!(&entity.animator),
@@ -648,7 +651,6 @@ fn entity_components_read(args: &Value) -> Result<String, CallError> {
                         BuiltinComponent::Audio => json!(&entity.audio),
                         BuiltinComponent::Camera => json!(&entity.camera),
                         BuiltinComponent::Particle => json!(&entity.particle),
-                        BuiltinComponent::MaterialOverride => json!(&entity.material),
                     };
                     ("builtin", builtin.code(), data)
                 }
@@ -868,6 +870,7 @@ fn component_v2_edit(args: &Value) -> Result<String, CallError> {
             .map_err(|_| fail("component_id 必须是十进制 u64 字符串"))?;
         Some(xgame_core::component_id::ComponentId::from_raw(raw).map_err(fail)?)
     };
+    entity.require_current_component_layout().map_err(fail)?;
     let edited = match action {
         "add" | "replace" => {
             let data =
@@ -1684,6 +1687,11 @@ mod tests {
         let project = temp_project("components_read");
         let mut scene = entry_scene(&project);
         let mut actor = Entity::new("Player");
+        actor.model = "builtin://cube".into();
+        actor.morph_weights = vec![0.25];
+        actor.lod.levels = vec![xgame_core::LodLevel::new("builtin://sphere", 0.0)];
+        actor.material_asset = Some("Resources/Materials/Wood.mat".into());
+        actor.material = Some(xgame_core::MaterialOverride::default());
         actor.camera = Some(xgame_core::Camera::default());
         actor.behaviors.push("Health".into());
         actor.behavior_params.insert(
@@ -1711,6 +1719,17 @@ mod tests {
         assert_eq!(info["address_stability"], "legacy");
         let entries = info["components"].as_array().expect("组件列表");
         assert!(entries.iter().any(|c| c["address"] == "builtin:transform"));
+        assert!(entries.iter().any(|c| c["address"] == "builtin:mesh"
+            && c["data"]["model"] == "builtin://cube"
+            && c["data"]["morph_weights"][0] == 0.25));
+        assert!(entries.iter().any(|c| c["address"] == "builtin:lod"
+            && c["data"]["levels"][0]["model"] == "builtin://sphere"));
+        assert!(entries.iter().any(|c| c["address"] == "builtin:material"
+            && c["data"]["material_asset"] == "Resources/Materials/Wood.mat"
+            && c["data"]["material"].is_object()));
+        assert!(!entries
+            .iter()
+            .any(|c| c["address"] == "builtin:render"));
         assert!(entries.iter().any(|c| c["address"] == "builtin:camera"));
         assert!(entries.iter().any(|c| c["address"] == "rust:0"
             && c["name"] == "Health"
@@ -1760,6 +1779,33 @@ mod tests {
             .any(|kind| kind["address"] == "builtin:transform"
                 && kind["addable"] == false
                 && kind["removable"] == false));
+        for address in ["builtin:mesh", "builtin:lod", "builtin:material"] {
+            assert!(builtins.iter().any(|kind| {
+                kind["address"] == address
+                    && kind["addable"] == true
+                    && kind["removable"] == true
+            }));
+        }
+        for (address, fields) in [
+            ("builtin:mesh", &["model", "morph_weights"][..]),
+            ("builtin:lod", &["levels"][..]),
+            ("builtin:material", &["material_asset", "material"][..]),
+        ] {
+            let component = builtins
+                .iter()
+                .find(|kind| kind["address"] == address)
+                .unwrap();
+            let names: Vec<_> = component["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|field| field["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, fields);
+        }
+        assert!(!builtins
+            .iter()
+            .any(|kind| kind["address"] == "builtin:render"));
         assert_eq!(catalog["address_stability"], "legacy");
     }
 
@@ -2287,11 +2333,65 @@ mod tests {
     }
 
     #[test]
+    fn v2_agent_keeps_legacy_visual_entities_read_only_until_editor_migration() {
+        let project = temp_project("v2_legacy_visual_read_only");
+        let path = project.manifest().entry_scene.clone();
+        let mut old = entry_scene(&project);
+        let actor = Entity::new("Actor").with_model("builtin://cube");
+        let actor_id = actor.id.raw().to_string();
+        old.entities.push(actor);
+        let mut v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old).unwrap();
+        v2.entities.last_mut().unwrap().components.entries[0].data =
+            xgame_core::scene_v2::ComponentData::LegacyRender(
+                xgame_core::scene_v2::RenderData {
+                    model: "builtin://cube".into(),
+                    lod: xgame_core::LodGroup::default(),
+                    material_asset: None,
+                    morph_weights: Vec::new(),
+                },
+            );
+        std::fs::write(project.path(&path), v2.to_ron().unwrap()).unwrap();
+        let before = std::fs::read(project.path(&path)).unwrap();
+        let read: Value = serde_json::from_str(
+            &run(
+                &project,
+                "entity_components_v2_read",
+                json!({ "project": project.root(), "entity_id": actor_id }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(read["components"][1]["data"].get("Render").is_some());
+
+        let error = run(
+            &project,
+            "component_v2_edit",
+            json!({
+                "project": project.root(),
+                "entity_id": actor_id,
+                "component_id": read["components"][0]["component_id"],
+                "expected_revision": read["revision"],
+                "action": "patch",
+                "field": "/position",
+                "value": [1.0, 2.0, 3.0],
+            }),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CallError::Failed(message) if message.contains("先经编辑器保存迁移")
+        ));
+        assert_eq!(std::fs::read(project.path(&path)).unwrap(), before);
+        cleanup(&project);
+    }
+
+    #[test]
     fn v2_agent_structural_edits_keep_identity_and_reject_unknown_nested_fields() {
         let project = temp_project("v2_agent_structure");
         let path = project.manifest().entry_scene.clone();
         let mut old = entry_scene(&project);
-        let actor = Entity::new("Actor").with_model("builtin://cube");
+        let mut actor = Entity::new("Actor").with_model("builtin://cube");
+        actor.lod.levels = vec![xgame_core::LodLevel::new("builtin://cube", 0.0)];
         let actor_id = actor.id.raw().to_string();
         old.entities.push(actor);
         let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old).unwrap();
@@ -2308,10 +2408,16 @@ mod tests {
             .unwrap()
         };
         let before = read();
-        let render_id = before["components"][1]["component_id"].as_str().unwrap();
+        let before_components = before["components"].as_array().unwrap();
+        let lod_id = before_components
+            .iter()
+            .find(|component| component["data"].get("Lod").is_some())
+            .and_then(|component| component["component_id"].as_str())
+            .unwrap();
         let bad = json!({ "project": project.root(), "entity_id": actor_id,
-            "component_id": render_id, "expected_revision": before["revision"],
-            "action": "patch", "field": "/lod", "value": { "levels": [], "unrecognized": 42 } });
+            "component_id": lod_id, "expected_revision": before["revision"],
+            "action": "patch", "field": "/levels/0", "value": {
+                "model": "builtin://cube", "max_distance": 0.0, "unrecognized": 42 } });
         assert!(run(&project, "component_v2_edit", bad).is_err());
         assert_eq!(read()["revision"], before["revision"]);
 
@@ -2323,7 +2429,7 @@ mod tests {
             "project": project.root(), "entity_id": actor_id, "expected_revision": before["revision"],
             "action": "add", "data_ron": camera })).unwrap()).unwrap();
         let camera_id = add["component_id"].as_str().unwrap();
-        assert_ne!(camera_id, render_id);
+        assert_ne!(camera_id, lod_id);
         let moved: Value = serde_json::from_str(
             &run(
                 &project,
@@ -2337,11 +2443,18 @@ mod tests {
         .unwrap();
         let after_move = read();
         assert_eq!(after_move["components"][1]["component_id"], camera_id);
-        assert_eq!(after_move["components"][2]["component_id"], render_id);
+        assert!(after_move["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|component| component["component_id"] == lod_id));
         run(&project, "component_v2_edit", json!({ "project": project.root(), "entity_id": actor_id,
             "component_id": camera_id, "expected_revision": moved["revision"], "action": "remove" })).unwrap();
         let removed = read();
-        assert_eq!(removed["components"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            removed["components"].as_array().unwrap().len(),
+            before_components.len()
+        );
         assert!(
             removed["next_component_id"]
                 .as_str()

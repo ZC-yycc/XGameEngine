@@ -4235,11 +4235,11 @@ mod tests {
         editor.redo();
         assert_eq!(editor.scene.entities[0].model, "builtin://cube");
         editor.save_scene().unwrap();
-        let render_id = project.load_scene_v2(&path).unwrap().entities[0]
+        let mesh_id = project.load_scene_v2(&path).unwrap().entities[0]
             .components
             .entries
             .iter()
-            .find(|e| matches!(e.data, xgame_core::scene_v2::ComponentData::Render(_)))
+            .find(|e| matches!(e.data, xgame_core::scene_v2::ComponentData::Mesh(_)))
             .unwrap()
             .identity
             .id;
@@ -4252,11 +4252,11 @@ mod tests {
                 .components
                 .entries
                 .iter()
-                .find(|e| matches!(e.data, xgame_core::scene_v2::ComponentData::Render(_)))
+                .find(|e| matches!(e.data, xgame_core::scene_v2::ComponentData::Mesh(_)))
                 .unwrap()
                 .identity
                 .id,
-            render_id
+            mesh_id
         );
         editor.undo();
         editor.save_scene().unwrap();
@@ -4266,11 +4266,11 @@ mod tests {
             .components
             .entries
             .iter()
-            .find(|e| matches!(e.data, xgame_core::scene_v2::ComponentData::Render(_)))
+            .find(|e| matches!(e.data, xgame_core::scene_v2::ComponentData::Mesh(_)))
             .unwrap()
             .identity
             .id;
-        assert!(next.raw() > render_id.raw());
+        assert!(next.raw() > mesh_id.raw());
         std::fs::remove_dir_all(base).unwrap();
     }
 

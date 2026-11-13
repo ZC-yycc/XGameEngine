@@ -9098,3 +9098,59 @@ Add Component 弹窗；移除入口散在复选框或行尾关闭按钮，组件
   其中编辑器 311/311，通过的 ignored 项仍只有仓库约定的手动性能基准。
 - 1280×800、1440×900、1920×1200 三档 `--ui-shot --ui-select Fox` 均成功；局部裁剪
   与 1440 逐行颜色扫描确认分类条高度不变，三轴字段、动画行尾按钮和脚本行均未溢出。
+
+## 一百一十八、视觉组件拆分与 Parent 入口收敛（2026-11-13）
+
+> 本节取代上一节“Mesh / LOD / Morph 共同投影到不可移除 Render”的刻意取舍；上一节
+> 保留为当时右键菜单切片的历史记录，不再代表当前组件模型。
+
+**问题**：Inspector 已把 Mesh、LOD、Material 画成三个区块，v2 却只给它们一份
+`Render` 身份；用户无法单独移除任一项，Material 标题也只能摘掉 Override、不能清掉
+材质资产。另一方面，Parent 同时存在于 Inspector 下拉框与 Hierarchy 树，结构操作有两份
+入口和两套界面语义。
+
+**做法**：
+
+- `BuiltinComponent` 拆成 `Mesh` / `Lod` / `Material`。Mesh 拥有 `model +
+  morph_weights`，Morph 控件并入 Mesh；LOD 拥有完整 `LodGroup`；Material 同时拥有
+  `material_asset + MaterialOverride`。三者的添加、标题右键移除、空白右键入口仍只产生
+  `ComponentAction`，继续走同一条 Undo 与 v2 身份合并路径。
+- v2 `ComponentData` 新增 `Mesh(MeshData)`、`Lod(LodGroup)`、
+  `Material(MaterialData)`。旧 `Render(...)` / `MaterialOverride(...)` 只保留兼容读取；
+  首次编辑器保存时，旧 Render ID 交给按组件顺序遇到的首个存活视觉项，其余从持久
+  高水位分配，绝不复制 ID。资产引用遍历、schema、MCP 目录和运行时身份侧车同步拆分。
+- Inspector 删除独立 Morph 区块与 Parent 区块。父子结构只由 Hierarchy 管理：拖到节点
+  重挂、拖到空白移回根层、右键 `Unparent`，底层仍共用保世界变换且防环的
+  `EditorState::reparent_entity`。
+
+**测试（先红后绿）**：
+
+- `visual_components_are_independently_addable_and_removable` 先在旧目录上失败并点名
+  “内建组件目录缺少 mesh”，随后钉住逐项删除不连带以及 Mesh 删除同步清 Morph。
+- `v2_visual_components_have_independent_identity_and_removal_boundaries` 与
+  `legacy_v2_render_is_readable_and_migrates_without_reusing_its_id` 分别覆盖三份独立 ID、
+  RON 变体、旧文件读取和高水位迁移。
+- `selected_visual_components_keep_independent_ids_through_undo_and_readd` 从 Inspector 的统一
+  动作入口逐项执行删除 → Undo → Redo → 重新添加，验证存活项不受影响、Undo 找回原 ID、
+  重新添加取得更大 ID；MCP 回归同时拒绝 `builtin:render` 并返回三份新地址。
+- `v2_agent_keeps_legacy_visual_entities_read_only_until_editor_migration` 先证明旧实现仍允许
+  Transform patch 把旧 `Render` 原样写回，再把迁移门禁提升到整个实体：旧视觉变体可读，
+  但 patch / add / replace / remove / move 一律先拒绝且不落盘。
+
+**刻意的取舍**：Morph 不单列第四份组件，因为权重下标只有依附具体模型资产才有意义；
+删除 Mesh 时留下孤儿权重没有可解释语义。运行热路径仍消费 v1 `Entity` 值，拆分发生在
+组件视图和 v2 身份层，不把 GUID 或身份查找推入渲染热路径。旧 Render 只读兼容而不允许
+Agent 新增，避免新文件继续制造下一轮迁移债务。
+
+**最终验收**：
+
+- workspace 全目标串行 `check` 与严格 `clippy -D warnings` 均通过；并行 check 曾受本机
+  Windows 页面文件不足（`os error 1455`）中断，改为 `-j 1` 后无代码诊断，clippy 0 告警。
+- 全目标测试按 `xgame-render --all-targets -- --test-threads=1` 与
+  `workspace --all-targets --exclude xgame-render` 两段完成且全绿：core 429、v2 codec
+  31、editor 312、MCP 49、render 205 项通过，其余目标也全部通过；ignored 项仍
+  只有仓库约定的手动性能基准。拆分是因为默认测试线程下本机 GPU 测试进程曾停止推进，
+  单测试线程复验无失败。
+- 1280×800、1440×900、1920×1200 三档 `--ui-shot --ui-select Ground` 均成功；局部裁剪
+  与 1440 逐行颜色扫描确认窄窗口无横向溢出，三档都没有 Parent 区块，Material 在宽窗口
+  显示完整资产与覆盖字段。截图过程未修改 `projects/`。
