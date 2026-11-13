@@ -1545,7 +1545,7 @@ impl ProjectHandle {
     }
 
     /// 显式只读 v2 场景入口；在项目路径边界读取每份来源资产并复核组件关联。
-    /// v2 的正式保存 / 运行时结构操作仍未开放，不能用 `to_v1` 的结果写回此文件。
+    /// 保存必须走 v2 条件写入或预制体事务，不能用 `to_v1` 的结果写回此文件。
     pub fn load_scene_v2(&self, relative: &str) -> Result<crate::scene_v2::SceneV2, String> {
         let relative = normalize_scene_relative(relative)?;
         let text = std::fs::read_to_string(self.path(&relative))

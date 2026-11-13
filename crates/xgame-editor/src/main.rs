@@ -1629,6 +1629,30 @@ fn main() -> Result<(), eframe::Error> {
                 };
                 std::process::exit(code);
             }
+            Some("--recover-prefab-apply") => {
+                let code = if args.len() != 2 {
+                    eprintln!("usage: xgame-editor --recover-prefab-apply <project>");
+                    1
+                } else {
+                    match xgame_core::ProjectHandle::open(Path::new(&args[1])) {
+                        Ok(project) => match project.recover_pending_prefab_applies_v2() {
+                            Ok(count) => {
+                                println!("recovered {count} pending prefab Apply transaction(s)");
+                                0
+                            }
+                            Err(error) => {
+                                eprintln!("prefab Apply recovery FAILED: {error}");
+                                1
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!("prefab Apply recovery FAILED: {error}");
+                            1
+                        }
+                    }
+                };
+                std::process::exit(code);
+            }
             Some("--headless") => {
                 let rest = &args[1..];
                 // `--help` 在这里截住：`parse_args` 只认真正的选项，帮助文案

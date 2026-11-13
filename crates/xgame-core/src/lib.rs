@@ -48,6 +48,7 @@
 mod color;
 mod config;
 mod migration_v2;
+mod prefab_apply_v2;
 pub mod prefab;
 pub mod project;
 mod scene;
@@ -56,6 +57,7 @@ mod v2_animator;
 mod scene_transforms;
 mod transform;
 pub use migration_v2::ComponentMigrationReport;
+pub use prefab_apply_v2::PrefabApplyReport;
 
 // 新增模块
 mod animation;

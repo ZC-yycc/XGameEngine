@@ -41,6 +41,9 @@ cargo run -p xgame-editor -- --migrate-components projects/MyOldGame
 # 恢复上一步打印的备份目录（将末尾的示例编号换成输出的真实路径）
 cargo run -p xgame-editor -- --restore-components projects/MyOldGame projects/MyOldGame/.xgame-component-v2-1234-5678
 
+# 恢复进程强杀后仍为 Pending 的 v2 预制体结构性 Apply（--check 始终只读）
+cargo run -p xgame-editor -- --recover-prefab-apply projects/MyOldGame
+
 # 无头运行 —— 不开窗口跑 N 帧，stdout 出 JSON 统计（帧耗时 / 实体 / 脚本日志）
 # （退出码 0=干净 · 1=加载失败 · 2=跑完有问题；见 Docs/无头运行.md）
 cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
@@ -61,8 +64,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 、帧末切关和运行期生成后均可按实体 ID + 组件 ID 查询；v2 预制体实例还保留资产
 来源组件 ID。v2 场景能创建
 和实例化预制体；Revert 可按来源 ID 恢复组件，资产删除或改名后仍能还原
-实例；同场景多个实例可逐个还原，全部修复后才能保存。Apply 可写回不改变
-实体 / 组件来源结构的值；增删实体或组件等结构性 Apply 暂不可用。
+实例；同场景多个实例可逐个还原，全部修复后才能保存。Apply 既能更新值，也能发布
+实体 / 组件增删及 Lua / Rust 关联名变更：存活来源 ID 不变，新增项获得新的资产 ID；
+所有已知引用场景在一个带日志、可恢复的事务里同步来源元数据。其他实例的本地值不会
+被 Apply 覆盖；已删除或改名的来源会解除关联，等用户显式 Revert 时才取资产内容。
 迁移后用 `--check` 和 `--headless` 验证项目；干净的 v2 项目与 v1 项目使用相同的
 通过语义。
 

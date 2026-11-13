@@ -2555,13 +2555,74 @@ impl EditorState {
         let (mut asset, expected) = self.project.load_prefab_v2_snapshot(&source)?;
         let mut values = Prefab::new(prefab_display_name(&source));
         values.capture_subtree(&self.scene, root_idx);
-        asset.apply_values_from_v1(&values)?;
-        self.project
-            .write_prefab_v2_if_unchanged(&source, &asset, &expected)
-            .map_err(|error| error.to_string())?;
+        if asset.apply_values_from_v1(&values).is_ok() {
+            self.project
+                .write_prefab_v2_if_unchanged(&source, &asset, &expected)
+                .map_err(|error| error.to_string())?;
+            self.hot_reload.rebase(&self.project);
+            self.log_success(format!(
+                "已把值应用到 v2 预制体 '{}' ({source})",
+                asset.name
+            ));
+            return Ok(());
+        }
+
+        // 结构变化会改资产来源目录；先在副本里准备完整身份，事务成功前不碰编辑器状态。
+        let previous_scene = self.scene.clone();
+        let session_identity = self
+            .v2_session
+            .as_ref()
+            .expect("v2 会话存在")
+            .identity
+            .clone();
+        let previous_identity = self.prepare_v2_history(&session_identity, &self.scene)?;
+        let mut next_scene = self.scene.clone();
+        let mut next_identity = previous_identity.clone();
+        let next_asset = asset.apply_structure_from_instance(
+            &mut next_scene,
+            &mut next_identity,
+            root_idx,
+            &source,
+        )?;
+        let expected_scene = self
+            .v2_session
+            .as_ref()
+            .expect("v2 会话存在")
+            .disk_bytes
+            .clone();
+        let report = self.project.apply_prefab_v2_transaction(
+            &source,
+            &next_asset,
+            &expected,
+            Some((&self.current_scene, &expected_scene)),
+        )?;
+        let disk_identity = report
+            .guarded_scene
+            .ok_or("结构性 Apply 没有返回当前场景基准")?;
+        let disk_bytes = report
+            .guarded_scene_bytes
+            .ok_or("结构性 Apply 没有返回当前场景原文")?;
+        let disk_scene = disk_identity.to_v1()?;
+
+        // Apply 改资产本身不可由场景 Undo 回滚，但实例新绑定的来源元数据仍按既有
+        // 约定进入撤销栈；撤销到失效来源时保存会被来源验证拒绝。
+        self.v2_undo.push(previous_identity);
+        if self.v2_undo.len() > UndoStack::DEFAULT_LIMIT {
+            self.v2_undo.remove(0);
+        }
+        self.v2_redo.clear();
+        self.undo_stack.push(previous_scene);
+        self.scene = next_scene;
+        let session = self.v2_session.as_mut().expect("v2 会话存在");
+        session.identity = next_identity;
+        session.disk_bytes = disk_bytes;
+        self.saved_snapshot = disk_scene;
+        self.dirty_memo = None;
+        self.hot_reload.rebase(&self.project);
         self.log_success(format!(
-            "已把值应用到 v2 预制体 '{}' ({source})",
-            asset.name
+            "已用可恢复事务把结构应用到 v2 预制体 '{}' ({source})，同步 {} 个文件",
+            next_asset.name,
+            report.files.len()
         ));
         Ok(())
     }
@@ -4587,7 +4648,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_apply_updates_values_without_changing_asset_component_ids() {
+    fn v2_apply_updates_values_and_publishes_added_components() {
         let (state, base) = temp_state("v2_apply_values");
         let project = state.project.clone();
         let entry = project.manifest().entry_scene.clone();
@@ -4622,14 +4683,107 @@ mod tests {
             47.0
         );
 
-        let bytes = std::fs::read(project.path(&path)).unwrap();
+        let scene_disk_before_structure = std::fs::read(project.path(&entry)).unwrap();
         editor.scene.entities[0].audio = Some(Default::default());
         editor.apply_prefab(0);
         assert_eq!(
-            std::fs::read(project.path(&path)).unwrap(),
-            bytes,
-            "结构变化必须在碰盘前拒绝"
+            std::fs::read(project.path(&entry)).unwrap(),
+            scene_disk_before_structure,
+            "结构性 Apply 只能同步磁盘来源元数据，不能顺手保存当前未保存值"
         );
+        let structured = project.load_prefab_v2(&path).unwrap();
+        let asset_audio = structured.entities[0]
+            .components
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.data, xgame_core::scene_v2::ComponentData::Audio(_)))
+            .expect("结构性 Apply 应把新增组件写入资产")
+            .identity
+            .id;
+        editor.save_scene().unwrap();
+        let saved = project.load_scene_v2(&entry).unwrap();
+        let scene_audio = saved.entities[0]
+            .components
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.data, xgame_core::scene_v2::ComponentData::Audio(_)))
+            .expect("当前实例应保留新增组件");
+        assert_eq!(scene_audio.identity.source_component_id, Some(asset_audio));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_structural_apply_adds_and_removes_entities_without_saving_draft_values() {
+        let (state, base) = temp_state("v2_apply_entities");
+        let project = state.project.clone();
+        let entry = project.manifest().entry_scene.clone();
+        std::fs::write(
+            project.path(&entry),
+            SceneV2::from_v1_plain(&state.scene)
+                .unwrap()
+                .to_ron()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut editor = EditorState::new(project.clone());
+        editor.selected_entity = Some(0);
+        let source = editor
+            .create_prefab_from_selection("ApplyEntities")
+            .unwrap();
+        editor.save_scene().unwrap();
+        let root_id = editor.scene.entities[0].id;
+        let root_source_id = project.load_prefab_v2(&source).unwrap().entities[0].id;
+
+        let mut child = Entity::new("AddedChild");
+        let child_id = child.id;
+        child.parent = Some(root_id);
+        editor.scene.entities.push(child);
+        let disk_before_add = std::fs::read(project.path(&entry)).unwrap();
+        editor.apply_prefab(0);
+        let with_child = project.load_prefab_v2(&source).unwrap();
+        assert_eq!(with_child.entities.len(), 2);
+        assert_eq!(with_child.entities[0].id, root_source_id);
+        let child_source_id = editor
+            .scene
+            .entities
+            .iter()
+            .find(|entity| entity.id == child_id)
+            .unwrap()
+            .prefab
+            .as_ref()
+            .unwrap()
+            .source_id;
+        assert!(with_child
+            .entities
+            .iter()
+            .any(|entity| entity.id == child_source_id));
+        assert_eq!(
+            std::fs::read(project.path(&entry)).unwrap(),
+            disk_before_add,
+            "新增实体仍是未保存草稿，Apply 只发布资产与来源目录"
+        );
+        editor.save_scene().unwrap();
+
+        let child_index = editor.scene.index_of(child_id).unwrap();
+        editor.scene.remove_subtree(child_index);
+        editor.apply_prefab(0);
+        let without_child = project.load_prefab_v2(&source).unwrap();
+        assert_eq!(without_child.entities.len(), 1);
+        assert_eq!(without_child.entities[0].id, root_source_id);
+        let disk_after_apply = project.load_scene_v2(&entry).unwrap();
+        let detached = disk_after_apply
+            .entities
+            .iter()
+            .find(|entity| entity.id == child_id)
+            .expect("事务不能替用户删除磁盘场景里的本地值");
+        assert!(detached.prefab.is_none(), "失效来源应转成本地实体");
+        editor.save_scene().unwrap();
+        assert!(project
+            .load_scene_v2(&entry)
+            .unwrap()
+            .entities
+            .iter()
+            .all(|entity| entity.id != child_id));
         std::fs::remove_dir_all(base).unwrap();
     }
 

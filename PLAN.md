@@ -9002,3 +9002,59 @@ HUD 按钮矩形外扩 1px，`824` 个像素变化，其余画面逐像素相同
   `#[serde(skip)]`，加一个"要落盘的子集"会破掉这条干净的分界）。
 - 不做"焦点历史 / 上一层返回"（`West` 取消要的正是这个）：需要一张焦点栈，
   而现在连"焦点从哪个元素跳过来"都没记 —— 等真有面板嵌套需求再说。
+
+## 一百一十六、v2 结构性 Prefab Apply：来源目录的可恢复发布（2026-11-13）
+
+**问题**：值 Apply 已能保住资产组件 ID，但实体 / 组件一增删就只能拒绝。原因不是
+“不会序列化”，而是资产来源目录变了以后，项目里所有实例的 `source_id` /
+`source_component_id` 都可能悬空；只写预制体会让其余场景立刻变成不可加载的半套状态。
+同时，当前编辑场景还有未保存值，不能为修来源元数据顺手把整份草稿落盘。
+
+**做法**：
+
+- `PrefabV2::apply_structure_from_instance` 以旧资产为身份骨架：存活实体、Transform、
+  组件保留来源 ID，已有实体高水位不回退；新增项从资产侧分配。当前实例只回填来源
+  元数据，本地组件 ID 不变。唯一 Lua / Rust 改名按同一个来源组件处理。
+- `SceneV2::synchronize_prefab_source_metadata` 不做隐式 Revert：其他实例的字段值和
+  实体都保留；已删除来源实体转成本地实体，已删除 / 改名组件解除来源关联。新增资产
+  项也不自动注入 —— 没有逐字段 override 记录时，全量套资产值一定会吃掉用户修改。
+- `apply_prefab_v2_transaction` 预检入口、场景目录、发布清单及当前场景；v1 引用者要求
+  先迁移。目标路径按不区分大小写的键排序并一次拿齐跨进程锁，锁内复核原文字节。
+- 项目根事务目录保存 `original` / `applied` 与 `apply.ron`。状态先 Pending，全部替换后
+  Complete，失败时仍持锁恢复并记 Restored；进程强杀可用
+  `--recover-prefab-apply <project>` 恢复。恢复遇到事务后外部改动会整体拒绝。
+- 编辑器把事务返回的当前场景精确字节设为下一次条件保存版本，把事务后的磁盘值设为
+  脏检查基准；Inspector 草稿与新结构仍留在内存，用户随后 Ctrl+S 才保存它们。
+
+**测试（先红后绿）**：
+
+- 先把编辑器原测试从“新增 Audio 必须拒绝”改成“资产出现 Audio 且场景来源 ID 对位”。
+  旧实现运行时在“结构性 Apply 应把新增组件写入资产”处失败，证明回归不是假绿。
+- core 覆盖组件增删、Lua 改名、实体增删、存活 ID / 高水位、新来源回填；另一实例的
+  失效来源解除但本地值保留。
+- 两场景事务覆盖完整同步与逐字节恢复、当前场景陈旧拒绝、Pending 下次恢复；Windows
+  用拒绝替换的已打开目标制造中途写失败，验证此前已写的资产和场景全部回到原文，
+  日志落为 Restored。
+- 编辑器覆盖未保存组件 / 实体不旁路落盘、保存后来源有效，以及删除资产实体时磁盘
+  实例先安全转成本地实体、用户保存后才真正删除草稿里的实体。v2 编辑器 14 条定向回归
+  与 core v2 编解码 29 条均通过。
+
+**刻意的取舍**：这不是 Unity Prefab Overrides / Variants。结构性 Apply 发布的是资产
+来源目录，不猜哪些字段算 override；其他实例何时取资产内容仍由显式 Revert 决定。
+多文件也不宣称断电原子，只承诺排序互斥、原文门禁、日志和可恢复语义；`--check` 继续
+只读，绝不因发现 Pending 就修改项目。
+
+**最终验收**：
+
+- core v2 编解码 / 事务 29/29、编辑器 v2 会话 14/14；workspace `check --all-targets`
+  与严格 `clippy -D warnings` 通过。
+- workspace 全目标测试首次并发编译触发 Windows `os error 1455`（页面文件不足，rustc
+  无法 mmap `libtest` / rlib）；保持相同测试范围改用 `-j 1` 后完整退出 0，稳态零分配
+  门禁也通过。这是本机资源峰值，不是源码失败。
+- `cargo build --locked --release --workspace -j 1` 通过。release 发布夹具把包移离源码
+  目录后验证播放器 / 插件哈希、6 个输入边沿、两次切关和 `G0_COMPLETE`，结果 PASS，
+  证据目录为系统临时目录下的 `published-player-22ca214e77df44e984e108ca57e5619a`。
+- release `SampleScene` 检查为 1 场景 / 24 实体 / 15 资产且 OK；300 帧无头
+  `ok=true`、零 error / warn、零非有限变换。`CharacterDemo`、`MyGame`、
+  `BehaviorsDemo` 检查也全部 OK；schema（110575 bytes）与脚本 API（60413 bytes）
+  导出成功，恢复 CLI 在无 Pending 的 SampleScene 上报告 0 并退出 0。

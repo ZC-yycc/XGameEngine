@@ -1,7 +1,7 @@
-//! v2 的强类型文件模型；此阶段仅做内存转换与 RON 往返。
+//! v2 的强类型文件模型：稳定组件身份、严格 RON、编辑器合并及预制体来源同步。
 //!
-//! 正式项目加载 / 保存仍只接受 v1。待 GUID 边界、预制体关联和编辑器结构操作
-//! 接好后再开放文件级升级，避免把不能编辑的 v2 文件提前交给用户。
+//! 组件值在运行时仍投影到唯一的 v1 [`Scene`] 值模型；这里持有的是跨保存身份与
+//! 文件边界。所有 GUID 编解码和条件写盘继续由 [`crate::ProjectHandle`] 负责。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -682,7 +682,7 @@ impl SceneV2 {
                 // Lua 路径 / Rust 注册名在 v1 视图里同时充当列表键；只有唯一的
                 // 旧项与唯一的新项时才能判定为原组件改了字段。多项时宁可分配新 ID。
                 let kind = old_entry.data.kind();
-                if old_entry.identity.source_component_id.is_some()
+                if (verify_sources && old_entry.identity.source_component_id.is_some())
                     || !matches!(
                         old_entry.data,
                         ComponentData::Lua { .. } | ComponentData::Rust { .. }
@@ -909,6 +909,53 @@ impl SceneV2 {
         Ok(())
     }
 
+    /// 让一份场景适配预制体的新来源目录，只改来源元数据，不覆盖实例本地值。
+    ///
+    /// 结构性 Apply 不能用 Revert 同步其他实例：Revert 会把字段值也覆盖成资产值，
+    /// 等于静默吃掉尚未有逐字段 override 记录的本地修改。这里因此只做三件事：
+    /// 存活来源继续关联；已删除实体变成本地实体；已删除或改名的组件解除来源关联。
+    pub fn synchronize_prefab_source_metadata(
+        &mut self,
+        source: &str,
+        prefab: &PrefabV2,
+    ) -> Result<(), String> {
+        prefab.validate()?;
+        for entity in &mut self.entities {
+            let Some(reference) = entity
+                .prefab
+                .as_ref()
+                .filter(|reference| reference.source == source)
+            else {
+                continue;
+            };
+            let source_id = reference.source_id;
+            let Some(asset_entity) = prefab.entities.iter().find(|item| item.id == source_id)
+            else {
+                entity.prefab = None;
+                entity.transform_identity.source_component_id = None;
+                for entry in &mut entity.components.entries {
+                    entry.identity.source_component_id = None;
+                }
+                continue;
+            };
+            entity.transform_identity.source_component_id =
+                Some(asset_entity.transform_identity.id);
+            for entry in &mut entity.components.entries {
+                let Some(source_component_id) = entry.identity.source_component_id else {
+                    continue;
+                };
+                let still_matches = asset_entity.components.entries.iter().any(|asset_entry| {
+                    asset_entry.identity.id == source_component_id
+                        && asset_entry.data.legacy_key() == entry.data.legacy_key()
+                });
+                if !still_matches {
+                    entry.identity.source_component_id = None;
+                }
+            }
+        }
+        self.validate()
+    }
+
     pub fn to_v1(self) -> Result<Scene, String> {
         self.validate()?;
         let mut scene = Scene::new(self.name);
@@ -950,6 +997,195 @@ impl SceneV2 {
 }
 
 impl PrefabV2 {
+    /// 从一个编辑中的实例生成新的资产结构，并把该实例绑定到新来源身份。
+    ///
+    /// `identity` 必须已经由 [`SceneV2::reconcile_from_v1_for_history`] 合入当前
+    /// `scene` 的值。存活来源沿用资产 ID；新增实体 / 组件从资产侧独立分配，不能
+    /// 把实例本地 ID 误当成资产 ID。全部候选验证成功后才替换两个输入。
+    pub fn apply_structure_from_instance(
+        &self,
+        scene: &mut Scene,
+        identity: &mut SceneV2,
+        root_idx: usize,
+        source: &str,
+    ) -> Result<Self, String> {
+        self.validate()?;
+        identity.validate()?;
+        if !scene.duplicate_ids().is_empty() {
+            return Err("场景含重复实体 ID，不能安全应用预制体结构".into());
+        }
+        let root = scene.entities.get(root_idx).ok_or("预制体实例根索引越界")?;
+        if !root
+            .prefab
+            .as_ref()
+            .is_some_and(|reference| reference.source == source && reference.is_root)
+        {
+            return Err("所选实体不是目标预制体的实例根".into());
+        }
+
+        let mut scene_candidate = scene.clone();
+        let mut identity_candidate = identity.clone();
+        let indices = scene_candidate.subtree(root_idx);
+        if indices.is_empty() {
+            return Err("预制体实例为空".into());
+        }
+
+        // 先冻结实体映射，父级重写与后续组件处理都只读这一份。
+        let mut asset_ids = BTreeMap::new();
+        let mut used_asset_ids = BTreeSet::new();
+        for &index in &indices {
+            let entity = &scene_candidate.entities[index];
+            let asset_id = match entity
+                .prefab
+                .as_ref()
+                .filter(|reference| reference.source == source)
+            {
+                Some(reference) => {
+                    if !self
+                        .entities
+                        .iter()
+                        .any(|item| item.id == reference.source_id)
+                    {
+                        return Err(format!(
+                            "实例实体 {:?} 指向资产中不存在的来源实体 ID {}",
+                            entity.name,
+                            reference.source_id.raw()
+                        ));
+                    }
+                    reference.source_id
+                }
+                None => EntityId::new(),
+            };
+            if !used_asset_ids.insert(asset_id.raw()) {
+                return Err(format!("实例里重复引用来源实体 ID {}", asset_id.raw()));
+            }
+            asset_ids.insert(entity.id.raw(), asset_id);
+        }
+
+        let mut asset_entities = Vec::with_capacity(indices.len());
+        for &index in &indices {
+            let local_id = scene_candidate.entities[index].id;
+            let value_name = scene_candidate.entities[index].name.clone();
+            let value_parent = scene_candidate.entities[index].parent;
+            let old_source_id = scene_candidate.entities[index]
+                .prefab
+                .as_ref()
+                .filter(|reference| reference.source == source)
+                .map(|reference| reference.source_id);
+            let asset_id = asset_ids[&local_id.raw()];
+            let identity_index = identity_candidate
+                .entities
+                .iter()
+                .position(|item| item.id == local_id)
+                .ok_or_else(|| format!("实体 {value_name:?} 缺少 v2 组件身份"))?;
+            let mut local = identity_candidate.entities[identity_index].clone();
+            let old_asset = old_source_id
+                .and_then(|source_id| self.entities.iter().find(|item| item.id == source_id));
+
+            let mut asset_entries = Vec::with_capacity(local.components.entries.len());
+            let (asset_transform_id, mut next_component_id) = if let Some(old) = old_asset {
+                (old.transform_identity.id, old.components.next_component_id)
+            } else {
+                let mut next = ComponentIdSequence::default();
+                (next.allocate()?, next)
+            };
+            let mut local_sources = Vec::with_capacity(local.components.entries.len());
+            for entry in &local.components.entries {
+                let asset_component_id =
+                    if let Some(source_component_id) = entry.identity.source_component_id {
+                        let previous = old_asset
+                            .and_then(|old| {
+                                old.components
+                                    .entries
+                                    .iter()
+                                    .find(|item| item.identity.id == source_component_id)
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "实例实体 {:?} 的来源组件 ID {} 已不在旧资产中",
+                                    value_name,
+                                    source_component_id.raw()
+                                )
+                            })?;
+                        if previous.data.kind() != entry.data.kind() {
+                            return Err(format!(
+                                "实例实体 {:?} 的来源组件 ID {} 种类发生变化",
+                                value_name,
+                                source_component_id.raw()
+                            ));
+                        }
+                        source_component_id
+                    } else {
+                        next_component_id.allocate()?
+                    };
+                local_sources.push(asset_component_id);
+                asset_entries.push(ComponentInstance {
+                    identity: ComponentIdentity {
+                        id: asset_component_id,
+                        source_component_id: None,
+                    },
+                    data: entry.data.clone(),
+                });
+            }
+
+            let link = PrefabInstanceRef {
+                source: source.to_owned(),
+                source_id: asset_id,
+                is_root: index == root_idx,
+            };
+            scene_candidate.entities[index].prefab = Some(link.clone());
+            local.id = local_id;
+            local.parent = value_parent;
+            local.prefab = Some(link);
+            local.transform_identity.source_component_id = Some(asset_transform_id);
+            for (entry, source_component_id) in local
+                .components
+                .entries
+                .iter_mut()
+                .zip(local_sources.iter().copied())
+            {
+                entry.identity.source_component_id = Some(source_component_id);
+            }
+            identity_candidate.entities[identity_index] = local.clone();
+
+            local.id = asset_id;
+            local.parent = value_parent.and_then(|parent| asset_ids.get(&parent.raw()).copied());
+            local.prefab = None;
+            local.transform_identity = ComponentIdentity {
+                id: asset_transform_id,
+                source_component_id: None,
+            };
+            local.components = ComponentSet {
+                next_component_id,
+                entries: asset_entries,
+            };
+            asset_entities.push(local);
+        }
+
+        let candidate = Self {
+            format_version: 2,
+            name: self.name.clone(),
+            entities: asset_entities,
+        };
+        candidate.validate()?;
+        identity_candidate.synchronize_prefab_source_metadata(source, &candidate)?;
+        // 来源实体被删除时，身份侧车会把对应场景实体转成本地实体；值视图必须同步
+        // 这一个元数据字段，否则下一次 reconcile 又会把旧来源写回来。
+        for value in &mut scene_candidate.entities {
+            if let Some(stable) = identity_candidate
+                .entities
+                .iter()
+                .find(|item| item.id == value.id)
+            {
+                value.prefab.clone_from(&stable.prefab);
+            }
+        }
+        identity_candidate.validate()?;
+        *scene = scene_candidate;
+        *identity = identity_candidate;
+        Ok(candidate)
+    }
+
     /// 仅当资产和实例结构一致时合入值：来源组件 ID 与高水位逐条沿用。
     /// 结构变更需同时写回场景来源关联，不能借此入口隐式发布。
     pub fn apply_values_from_v1(&mut self, prefab: &Prefab) -> Result<(), String> {

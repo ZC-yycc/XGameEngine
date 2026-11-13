@@ -5,6 +5,47 @@ use xgame_core::{
     PhysicsBody, Prefab, RuntimeComponentKind, Scene, UiElement,
 };
 
+fn structural_apply_fixture(
+    tag: &str,
+) -> (
+    std::path::PathBuf,
+    xgame_core::ProjectHandle,
+    String,
+    PrefabV2,
+    Vec<String>,
+) {
+    let base = std::env::temp_dir().join(format!("xgame-v2-apply-{tag}-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let source = "Prefabs/Actor.prefab.ron".to_owned();
+    let mut legacy = Prefab::new("Actor");
+    let mut root = Entity::new("Actor");
+    root.camera = Some(Camera::default());
+    root.audio = Some(AudioSource::default());
+    legacy.entities.push(root);
+    let asset = PrefabV2::from_v1(&legacy).unwrap();
+    project.write_prefab_v2(&source, &asset).unwrap();
+
+    let scenes = vec![
+        project.manifest().entry_scene.clone(),
+        "Scenes/Other.ron".to_owned(),
+    ];
+    for (index, relative) in scenes.iter().enumerate() {
+        let mut scene = Scene::new(format!("Scene{index}"));
+        scene.entities = legacy.instantiate(&source);
+        let v2 = SceneV2::from_v1_with_prefabs(
+            &scene,
+            &BTreeMap::from([(source.clone(), asset.clone())]),
+        )
+        .unwrap();
+        if project.path(relative).is_file() {
+            std::fs::remove_file(project.path(relative)).unwrap();
+        }
+        project.write_scene_v2(relative, &v2).unwrap();
+    }
+    (base, project, source, asset, scenes)
+}
+
 #[test]
 fn v2_reference_walk_uses_the_existing_asset_database_rules() {
     let base = std::env::temp_dir().join(format!("xgame-v2-reference-{}", std::process::id()));
@@ -762,6 +803,416 @@ fn v2_editor_replaces_a_single_unlinked_lua_path_without_changing_component_id()
     v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
     assert_eq!(v2.entities[0].components.entries[0].identity.id, id);
     assert_eq!(v2.to_v1().unwrap().entities[0].scripts, ["Scripts/new.lua"]);
+}
+
+#[test]
+fn v2_structural_apply_preserves_survivors_and_links_new_structure() {
+    let source = "Prefabs/Actor.prefab.ron";
+    let mut legacy = Prefab::new("Actor");
+    let mut root = Entity::new("Root");
+    root.camera = Some(Camera::default());
+    root.audio = Some(AudioSource::default());
+    root.scripts.push("Scripts/old.lua".into());
+    let mut child = Entity::new("OldChild");
+    child.parent = Some(root.id);
+    legacy.entities = vec![root, child];
+    let old_asset = PrefabV2::from_v1(&legacy).unwrap();
+    let old_root = &old_asset.entities[0];
+    let old_transform = old_root.transform_identity.id;
+    let old_next = old_root.components.next_component_id.next_id();
+    let old_camera = old_root
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Camera(_)))
+        .unwrap()
+        .identity
+        .id;
+    let old_lua = old_root
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Lua { .. }))
+        .unwrap()
+        .identity
+        .id;
+    let removed_child_id = old_asset.entities[1].id;
+
+    let mut scene = Scene::new("Instances");
+    scene.entities = legacy.instantiate(source);
+    let local_root_id = scene.entities[0].id;
+    let mut identity = SceneV2::from_v1_with_prefabs(
+        &scene,
+        &BTreeMap::from([(source.to_owned(), old_asset.clone())]),
+    )
+    .unwrap();
+    scene.entities[0].audio = None;
+    scene.entities[0].particle = Some(ParticleEmitter::default());
+    scene.entities[0].scripts[0] = "Scripts/new.lua".into();
+    scene.entities.remove(1);
+    let mut added_child = Entity::new("AddedChild");
+    let local_added_id = added_child.id;
+    added_child.parent = Some(local_root_id);
+    scene.entities.push(added_child);
+    identity
+        .reconcile_from_v1_for_history(
+            &scene,
+            &BTreeMap::from([(source.to_owned(), old_asset.clone())]),
+        )
+        .unwrap();
+
+    let next_asset = old_asset
+        .apply_structure_from_instance(&mut scene, &mut identity, 0, source)
+        .unwrap();
+    let next_root = &next_asset.entities[0];
+    assert_eq!(next_root.id, old_asset.entities[0].id);
+    assert_eq!(next_root.transform_identity.id, old_transform);
+    assert!(next_asset
+        .entities
+        .iter()
+        .all(|entity| entity.id != removed_child_id));
+    assert_eq!(
+        next_root
+            .components
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.data, ComponentData::Camera(_)))
+            .unwrap()
+            .identity
+            .id,
+        old_camera
+    );
+    assert_eq!(
+        next_root
+            .components
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.data, ComponentData::Lua { .. }))
+            .unwrap()
+            .identity
+            .id,
+        old_lua,
+        "脚本路径改名仍是同一个来源组件"
+    );
+    assert!(next_root
+        .components
+        .entries
+        .iter()
+        .all(|entry| !matches!(entry.data, ComponentData::Audio(_))));
+    let asset_particle = next_root
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Particle(_)))
+        .unwrap()
+        .identity
+        .id;
+    assert!(asset_particle.raw() >= old_next);
+    assert!(next_root.components.next_component_id.next_id() > asset_particle.raw());
+    let added_source_id = scene
+        .entities
+        .iter()
+        .find(|entity| entity.id == local_added_id)
+        .unwrap()
+        .prefab
+        .as_ref()
+        .unwrap()
+        .source_id;
+    assert!(next_asset
+        .entities
+        .iter()
+        .any(|entity| entity.id == added_source_id));
+    let local_root = identity
+        .entities
+        .iter()
+        .find(|entity| entity.id == local_root_id)
+        .unwrap();
+    assert_eq!(
+        local_root
+            .components
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.data, ComponentData::Particle(_)))
+            .unwrap()
+            .identity
+            .source_component_id,
+        Some(asset_particle)
+    );
+}
+
+#[test]
+fn v2_prefab_metadata_sync_keeps_local_values_when_sources_disappear() {
+    let source = "Prefabs/Actor.prefab.ron";
+    let mut legacy = Prefab::new("Actor");
+    let mut root = Entity::new("Root");
+    root.camera = Some(Camera::default());
+    root.audio = Some(AudioSource::default());
+    root.scripts.push("Scripts/old.lua".into());
+    let mut child = Entity::new("Child");
+    child.parent = Some(root.id);
+    legacy.entities = vec![root, child];
+    let old_asset = PrefabV2::from_v1(&legacy).unwrap();
+    let mut scene = Scene::new("Other");
+    scene.entities = legacy.instantiate(source);
+    let mut identity = SceneV2::from_v1_with_prefabs(
+        &scene,
+        &BTreeMap::from([(source.to_owned(), old_asset.clone())]),
+    )
+    .unwrap();
+
+    let mut next_asset = old_asset.clone();
+    let root = &mut next_asset.entities[0];
+    root.components
+        .entries
+        .retain(|entry| !matches!(entry.data, ComponentData::Audio(_)));
+    let lua = root
+        .components
+        .entries
+        .iter_mut()
+        .find(|entry| matches!(entry.data, ComponentData::Lua { .. }))
+        .unwrap();
+    if let ComponentData::Lua { path } = &mut lua.data {
+        *path = "Scripts/new.lua".into();
+    }
+    next_asset.entities.remove(1);
+    identity
+        .synchronize_prefab_source_metadata(source, &next_asset)
+        .unwrap();
+
+    let root = &identity.entities[0];
+    assert!(root
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Camera(_)))
+        .unwrap()
+        .identity
+        .source_component_id
+        .is_some());
+    for entry in &root.components.entries {
+        if matches!(
+            entry.data,
+            ComponentData::Audio(_) | ComponentData::Lua { .. }
+        ) {
+            assert_eq!(entry.identity.source_component_id, None);
+        }
+    }
+    assert!(matches!(
+        root.components
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.data, ComponentData::Audio(_)))
+            .unwrap()
+            .data,
+        ComponentData::Audio(_)
+    ));
+    assert!(identity.entities[1].prefab.is_none());
+    assert!(identity.entities[1]
+        .components
+        .entries
+        .iter()
+        .all(|entry| entry.identity.source_component_id.is_none()));
+}
+
+#[test]
+fn v2_structural_apply_transaction_updates_all_scenes_and_can_restore_exact_bytes() {
+    let (base, project, source, asset, scenes) = structural_apply_fixture("transaction");
+    let asset_before = std::fs::read(project.path(&source)).unwrap();
+    let scene_before: Vec<_> = scenes
+        .iter()
+        .map(|relative| std::fs::read(project.path(relative)).unwrap())
+        .collect();
+    let mut next = asset.clone();
+    let audio_id = next.entities[0]
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Audio(_)))
+        .unwrap()
+        .identity
+        .id;
+    next.entities[0].remove_component(audio_id).unwrap();
+
+    let report = project
+        .apply_prefab_v2_transaction(
+            &source,
+            &next,
+            &asset_before,
+            Some((&scenes[0], &scene_before[0])),
+        )
+        .unwrap();
+    assert_eq!(report.files.len(), 3);
+    assert_eq!(
+        report.guarded_scene_bytes.as_deref(),
+        Some(std::fs::read(project.path(&scenes[0])).unwrap().as_slice())
+    );
+    for relative in &scenes {
+        let scene = project.load_scene_v2(relative).unwrap();
+        let audio = scene.entities[0]
+            .components
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.data, ComponentData::Audio(_)))
+            .expect("其他实例的本地值不能被结构性 Apply 删除");
+        assert_eq!(audio.identity.source_component_id, None);
+    }
+
+    project.restore_prefab_apply_v2(&report.backup).unwrap();
+    assert_eq!(std::fs::read(project.path(&source)).unwrap(), asset_before);
+    for (relative, before) in scenes.iter().zip(scene_before) {
+        assert_eq!(std::fs::read(project.path(relative)).unwrap(), before);
+    }
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn v2_structural_apply_rejects_a_stale_guarded_scene_before_writing_asset() {
+    let (base, project, source, mut asset, scenes) = structural_apply_fixture("stale_scene");
+    let asset_before = std::fs::read(project.path(&source)).unwrap();
+    let expected_scene = std::fs::read(project.path(&scenes[0])).unwrap();
+    let mut external = project.load_scene_v2(&scenes[0]).unwrap();
+    external.name = "External".into();
+    project.write_scene_v2(&scenes[0], &external).unwrap();
+    let external_bytes = std::fs::read(project.path(&scenes[0])).unwrap();
+    let audio_id = asset.entities[0]
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Audio(_)))
+        .unwrap()
+        .identity
+        .id;
+    asset.entities[0].remove_component(audio_id).unwrap();
+
+    let error = project
+        .apply_prefab_v2_transaction(
+            &source,
+            &asset,
+            &asset_before,
+            Some((&scenes[0], &expected_scene)),
+        )
+        .unwrap_err();
+    assert!(error.contains("外部修改"), "{error}");
+    assert_eq!(std::fs::read(project.path(&source)).unwrap(), asset_before);
+    assert_eq!(
+        std::fs::read(project.path(&scenes[0])).unwrap(),
+        external_bytes
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn v2_structural_apply_recovers_a_pending_journal_before_the_next_attempt() {
+    let (base, project, source, mut asset, scenes) = structural_apply_fixture("pending_recovery");
+    let abandoned_prepare = project.root().join(".xgame-prefab-v2-prepare-abandoned");
+    std::fs::create_dir(&abandoned_prepare).unwrap();
+    assert_eq!(
+        project.recover_pending_prefab_applies_v2().unwrap(),
+        0,
+        "尚未公布的准备目录没有改过目标文件，不属于待恢复事务"
+    );
+    let asset_before = std::fs::read(project.path(&source)).unwrap();
+    let scene_before: Vec<_> = scenes
+        .iter()
+        .map(|relative| std::fs::read(project.path(relative)).unwrap())
+        .collect();
+    let audio_id = asset.entities[0]
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Audio(_)))
+        .unwrap()
+        .identity
+        .id;
+    asset.entities[0].remove_component(audio_id).unwrap();
+    let report = project
+        .apply_prefab_v2_transaction(
+            &source,
+            &asset,
+            &asset_before,
+            Some((&scenes[0], &scene_before[0])),
+        )
+        .unwrap();
+    let applied_asset = std::fs::read(project.path(&source)).unwrap();
+    let applied_scene = std::fs::read(project.path(&scenes[0])).unwrap();
+    let journal_path = report.backup.join("apply.ron");
+    let journal = std::fs::read_to_string(&journal_path).unwrap();
+    assert!(journal.contains("Complete"));
+    std::fs::write(&journal_path, journal.replace("Complete", "Pending")).unwrap();
+
+    assert_eq!(project.recover_pending_prefab_applies_v2().unwrap(), 1);
+    let error = project
+        .apply_prefab_v2_transaction(
+            &source,
+            &asset,
+            &applied_asset,
+            Some((&scenes[0], &applied_scene)),
+        )
+        .unwrap_err();
+    assert!(error.contains("外部修改"), "{error}");
+    assert_eq!(std::fs::read(project.path(&source)).unwrap(), asset_before);
+    for (relative, before) in scenes.iter().zip(scene_before) {
+        assert_eq!(std::fs::read(project.path(relative)).unwrap(), before);
+    }
+    assert!(std::fs::read_to_string(journal_path)
+        .unwrap()
+        .contains("Restored"));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn v2_structural_apply_write_failure_restores_every_file() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let (base, project, source, mut asset, scenes) = structural_apply_fixture("rollback");
+    let asset_before = std::fs::read(project.path(&source)).unwrap();
+    let scene_before: Vec<_> = scenes
+        .iter()
+        .map(|relative| std::fs::read(project.path(relative)).unwrap())
+        .collect();
+    let audio_id = asset.entities[0]
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Audio(_)))
+        .unwrap()
+        .identity
+        .id;
+    asset.entities[0].remove_component(audio_id).unwrap();
+    // 允许读写但拒绝删除/替换；Prefabs 排在 Scenes 前，能证明前面已写的资产会回滚。
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(project.path(&scenes[1]))
+        .unwrap();
+    let error = project
+        .apply_prefab_v2_transaction(
+            &source,
+            &asset,
+            &asset_before,
+            Some((&scenes[0], &scene_before[0])),
+        )
+        .unwrap_err();
+    assert!(error.contains("自动恢复"), "{error}");
+    assert_eq!(std::fs::read(project.path(&source)).unwrap(), asset_before);
+    for (relative, before) in scenes.iter().zip(&scene_before) {
+        assert_eq!(std::fs::read(project.path(relative)).unwrap(), *before);
+    }
+    let transaction = std::fs::read_dir(project.root())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with(".xgame-prefab-v2-apply-")
+            })
+        })
+        .unwrap();
+    let journal = std::fs::read_to_string(transaction.join("apply.ron")).unwrap();
+    assert!(journal.contains("Restored"), "{journal}");
+    drop(lock);
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
