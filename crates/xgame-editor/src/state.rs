@@ -2485,7 +2485,9 @@ impl EditorState {
             return;
         }
         if self.v2_session.is_some() {
-            self.log_warning("v2 预制体 Apply 尚未接入资产与实例的组件身份同步");
+            if let Err(error) = self.apply_prefab_v2(root_idx) {
+                self.log_error(format!("应用 v2 预制体失败: {error}"));
+            }
             return;
         }
         let Some(source) = self
@@ -2532,6 +2534,36 @@ impl EditorState {
             }
         }
         self.log_success(format!("已把改动应用到预制体 '{}' ({source})", prefab.name));
+    }
+
+    fn apply_prefab_v2(&mut self, root_idx: usize) -> Result<(), String> {
+        let source = self
+            .scene
+            .entities
+            .get(root_idx)
+            .and_then(|entity| entity.prefab.as_ref())
+            .filter(|link| link.is_root)
+            .ok_or("请选择预制体实例的根实体")?
+            .source
+            .clone();
+        let session = self.v2_session.as_ref().expect("v2 会话存在");
+        let current_scene = std::fs::read(self.project.path(&self.current_scene))
+            .map_err(|error| format!("读取当前场景失败: {error}"))?;
+        if current_scene != session.disk_bytes {
+            return Err("当前场景已被外部修改；请重新打开后再 Apply".into());
+        }
+        let (mut asset, expected) = self.project.load_prefab_v2_snapshot(&source)?;
+        let mut values = Prefab::new(prefab_display_name(&source));
+        values.capture_subtree(&self.scene, root_idx);
+        asset.apply_values_from_v1(&values)?;
+        self.project
+            .write_prefab_v2_if_unchanged(&source, &asset, &expected)
+            .map_err(|error| error.to_string())?;
+        self.log_success(format!(
+            "已把值应用到 v2 预制体 '{}' ({source})",
+            asset.name
+        ));
+        Ok(())
     }
 
     /// 用资产覆盖回实例（Unity 的 Revert）。
@@ -4502,6 +4534,53 @@ mod tests {
             .entities
             .iter()
             .all(|e| e.components.entries.is_empty()));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn v2_apply_updates_values_without_changing_asset_component_ids() {
+        let (state, base) = temp_state("v2_apply_values");
+        let project = state.project.clone();
+        let entry = project.manifest().entry_scene.clone();
+        std::fs::write(
+            project.path(&entry),
+            SceneV2::from_v1_plain(&state.scene)
+                .unwrap()
+                .to_ron()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut editor = EditorState::new(project.clone());
+        editor.selected_entity = Some(0);
+        let path = editor.create_prefab_from_selection("ApplyCamera").unwrap();
+        let before = project.load_prefab_v2(&path).unwrap();
+        let transform_id = before.entities[0].transform_identity.id;
+        let camera_id = before.entities[0].components.entries[0].identity.id;
+        editor.scene.entities[0].camera.as_mut().unwrap().fov = 47.0;
+        editor.apply_prefab(0);
+        let after = project.load_prefab_v2(&path).unwrap();
+        assert_eq!(after.entities[0].transform_identity.id, transform_id);
+        assert_eq!(
+            after.entities[0].components.entries[0].identity.id,
+            camera_id
+        );
+        assert_eq!(
+            after.to_v1().unwrap().entities[0]
+                .camera
+                .as_ref()
+                .unwrap()
+                .fov,
+            47.0
+        );
+
+        let bytes = std::fs::read(project.path(&path)).unwrap();
+        editor.scene.entities[0].audio = Some(Default::default());
+        editor.apply_prefab(0);
+        assert_eq!(
+            std::fs::read(project.path(&path)).unwrap(),
+            bytes,
+            "结构变化必须在碰盘前拒绝"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 

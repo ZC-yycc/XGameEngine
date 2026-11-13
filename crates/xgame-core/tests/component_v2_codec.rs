@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use xgame_core::scene_v2::{PrefabV2, SceneV2};
+use xgame_core::scene_v2::{ComponentData, PrefabV2, SceneV2};
 use xgame_core::{
     Animator, AudioSource, Camera, CharacterController, Entity, MaterialOverride, ParticleEmitter,
     PhysicsBody, Prefab, Scene, UiElement,
@@ -727,6 +727,95 @@ fn v2_editor_replaces_a_single_unlinked_lua_path_without_changing_component_id()
     v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
     assert_eq!(v2.entities[0].components.entries[0].identity.id, id);
     assert_eq!(v2.to_v1().unwrap().entities[0].scripts, ["Scripts/new.lua"]);
+}
+
+#[test]
+fn v2_prefab_apply_values_preserves_asset_ids_and_rejects_new_components() {
+    let mut old = xgame_core::Prefab::new("Source");
+    let mut entity = Entity::new("Camera");
+    entity.camera = Some(xgame_core::Camera::default());
+    entity.audio = Some(Default::default());
+    old.entities.push(entity);
+    let mut asset = xgame_core::scene_v2::PrefabV2::from_v1(&old).unwrap();
+    let transform_id = asset.entities[0].transform_identity.id;
+    let camera_id = asset.entities[0]
+        .components
+        .entries
+        .iter()
+        .find(|entry| matches!(entry.data, ComponentData::Camera(_)))
+        .unwrap()
+        .identity
+        .id;
+    asset.entities[0].components.entries.reverse();
+    let order: Vec<_> = asset.entities[0]
+        .components
+        .entries
+        .iter()
+        .map(|entry| entry.identity.id)
+        .collect();
+    old.entities[0].camera.as_mut().unwrap().fov = 42.0;
+    asset.apply_values_from_v1(&old).unwrap();
+    assert_eq!(asset.entities[0].transform_identity.id, transform_id);
+    assert_eq!(
+        asset.entities[0]
+            .components
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.data, ComponentData::Camera(_)))
+            .unwrap()
+            .identity
+            .id,
+        camera_id
+    );
+    assert_eq!(
+        asset.entities[0]
+            .components
+            .entries
+            .iter()
+            .map(|entry| entry.identity.id)
+            .collect::<Vec<_>>(),
+        order
+    );
+    assert_eq!(
+        asset.clone().to_v1().unwrap().entities[0]
+            .camera
+            .as_ref()
+            .unwrap()
+            .fov,
+        42.0
+    );
+    old.entities[0].particle = Some(Default::default());
+    let bytes = asset.to_ron().unwrap();
+    assert!(asset.apply_values_from_v1(&old).is_err());
+    assert_eq!(asset.to_ron().unwrap(), bytes);
+}
+
+#[test]
+fn v2_prefab_conditional_write_rejects_stale_asset() {
+    let base = std::env::temp_dir().join(format!("xgame-v2-stale-prefab-{}", std::process::id()));
+    assert!(!base.exists());
+    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
+    let path = "Prefabs/Actor.prefab.ron";
+    let mut prefab = Prefab::new("Actor");
+    prefab.entities.push(Entity::new("Actor"));
+    let initial = PrefabV2::from_v1(&prefab).unwrap();
+    project.write_prefab_v2(path, &initial).unwrap();
+    let original = std::fs::read(project.path(path)).unwrap();
+    let mut external = initial.clone();
+    external.name = "External".into();
+    project.write_prefab_v2(path, &external).unwrap();
+    let changed = std::fs::read(project.path(path)).unwrap();
+    let mut requested = initial;
+    requested.name = "Requested".into();
+    assert!(project
+        .write_prefab_v2_if_unchanged(path, &requested, &original)
+        .is_err());
+    assert_eq!(std::fs::read(project.path(path)).unwrap(), changed);
+    project
+        .write_prefab_v2_if_unchanged(path, &requested, &changed)
+        .unwrap();
+    assert_eq!(project.load_prefab_v2(path).unwrap().name, "Requested");
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

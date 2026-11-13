@@ -1210,13 +1210,24 @@ impl ProjectHandle {
 
     /// 显式只读 v2 预制体入口；旧的 `load_prefab` 仍拒绝 v2，避免旧编辑器丢失身份。
     pub fn load_prefab_v2(&self, relative: &str) -> Result<crate::scene_v2::PrefabV2, String> {
+        self.load_prefab_v2_snapshot(relative)
+            .map(|(prefab, _)| prefab)
+    }
+
+    /// 同一次文件读取返回解码后的资产与原始字节，供 Apply 做条件写入。
+    pub fn load_prefab_v2_snapshot(
+        &self,
+        relative: &str,
+    ) -> Result<(crate::scene_v2::PrefabV2, Vec<u8>), String> {
         let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
-        let text = std::fs::read_to_string(self.path(&relative))
+        let bytes = std::fs::read(self.path(&relative))
             .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
-        let mut prefab = crate::scene_v2::PrefabV2::from_ron(&text)
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|e| format!("无法解析 '{relative}' 的 UTF-8 文本: {e}"))?;
+        let mut prefab = crate::scene_v2::PrefabV2::from_ron(text)
             .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
         crate::asset::decode_prefab_v2_references(&mut prefab, &self.assets());
-        Ok(prefab)
+        Ok((prefab, bytes))
     }
 
     /// 只供运行时的值投影；旧编辑器必须继续走 `load_prefab`，否则保存会丢失组件 ID。
@@ -1238,6 +1249,25 @@ impl ProjectHandle {
         relative: &str,
         prefab: &crate::scene_v2::PrefabV2,
     ) -> Result<(), ProjectError> {
+        self.write_prefab_v2_checked(relative, prefab, None)
+    }
+
+    /// Apply 的前置版本门禁：资产必须仍是本次读到的完整磁盘原文。
+    pub fn write_prefab_v2_if_unchanged(
+        &self,
+        relative: &str,
+        prefab: &crate::scene_v2::PrefabV2,
+        expected: &[u8],
+    ) -> Result<(), ProjectError> {
+        self.write_prefab_v2_checked(relative, prefab, Some(expected))
+    }
+
+    fn write_prefab_v2_checked(
+        &self,
+        relative: &str,
+        prefab: &crate::scene_v2::PrefabV2,
+        expected: Option<&[u8]>,
+    ) -> Result<(), ProjectError> {
         let relative =
             normalize_project_relative(relative).map_err(|e| ProjectError::InvalidPath {
                 relative: relative.to_owned(),
@@ -1246,6 +1276,9 @@ impl ProjectHandle {
         let path = self.path(&relative);
         let _lock = self.lock_component_file(&relative)?;
         guard_v2_write(&path, crate::scene_v2::PrefabV2::from_ron)?;
+        if let Some(expected) = expected {
+            guard_expected_bytes(&path, expected)?;
+        }
         prefab.to_ron().map_err(|reason| ProjectError::InvalidV2 {
             path: path.clone(),
             reason,
@@ -1266,6 +1299,9 @@ impl ProjectHandle {
             path: path.clone(),
             reason,
         })?;
+        if let Some(expected) = expected {
+            guard_expected_bytes(&path, expected)?;
+        }
         if unchanged_on_disk(&path, &text) {
             return Ok(());
         }
@@ -1412,7 +1448,9 @@ impl ProjectHandle {
     /// 不会误伤 `"Resources/Box.glb.bak"`（后者不包含前者的收尾引号）。
     fn rewrite_references_in_place(&self, relative: &str, is_prefab: bool) -> Result<bool, String> {
         let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
-        let _lock = self.lock_component_file(&relative).map_err(|e| e.to_string())?;
+        let _lock = self
+            .lock_component_file(&relative)
+            .map_err(|e| e.to_string())?;
         let path = self.path(&relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {e}", path.display()))?;
@@ -2772,7 +2810,10 @@ mod tests {
                 })
             })
             .collect();
-        let results: Vec<_> = handles.into_iter().map(|task| task.join().unwrap()).collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|task| task.join().unwrap())
+            .collect();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
         assert_ne!(project.load_scene_v2(relative).unwrap().name, scene.name);
@@ -2830,7 +2871,12 @@ mod tests {
         let handle = ProjectHandle::create(&base, "IgnoreMe").expect("create");
         let text = std::fs::read_to_string(handle.root().join(".gitignore"))
             .expect("新建项目应当带 .gitignore");
-        for needle in ["Build/", "Plugins/", AUTOSAVE_DIR, ".xgame-component-locks/"] {
+        for needle in [
+            "Build/",
+            "Plugins/",
+            AUTOSAVE_DIR,
+            ".xgame-component-locks/",
+        ] {
             assert!(
                 text.contains(needle),
                 ".gitignore 应当忽略 {needle}，实际：\n{text}"

@@ -950,6 +950,43 @@ impl SceneV2 {
 }
 
 impl PrefabV2 {
+    /// 仅当资产和实例结构一致时合入值：来源组件 ID 与高水位逐条沿用。
+    /// 结构变更需同时写回场景来源关联，不能借此入口隐式发布。
+    pub fn apply_values_from_v1(&mut self, prefab: &Prefab) -> Result<(), String> {
+        let incoming = Self::from_v1(prefab)?;
+        if incoming.entities.len() != self.entities.len() {
+            return Err("预制体实体结构已变化，须同步场景来源关联".into());
+        }
+        let mut candidate = self.clone();
+        candidate.name = incoming.name;
+        for entity in &mut candidate.entities {
+            let next = incoming
+                .entities
+                .iter()
+                .find(|item| item.id == entity.id)
+                .ok_or_else(|| format!("预制体实体 {:?} 的来源 ID 已变化", entity.name))?;
+            if next.components.entries.len() != entity.components.entries.len() {
+                return Err(format!("实体 {:?} 的组件结构已变化", entity.name));
+            }
+            entity.name.clone_from(&next.name);
+            entity.parent = next.parent;
+            entity.layer = next.layer;
+            entity.transform = next.transform;
+            for entry in &mut entity.components.entries {
+                let value = next
+                    .components
+                    .entries
+                    .iter()
+                    .find(|item| item.data.legacy_key() == entry.data.legacy_key())
+                    .ok_or_else(|| format!("实体 {:?} 的组件种类或关联键已变化", entity.name))?;
+                entry.data = value.data.clone();
+            }
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     pub(crate) fn visit_asset_references(&mut self, mut visit: impl FnMut(&mut String)) {
         for entity in &mut self.entities {
             entity.visit_asset_references(&mut visit);
