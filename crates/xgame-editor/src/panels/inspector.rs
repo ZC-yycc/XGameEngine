@@ -22,7 +22,7 @@
 use crate::panels::{icons, theme};
 use crate::state::EditorState;
 use xgame_core::{
-    BuiltinComponent, ComponentAddress, EntityId, FieldDesc, FieldKind, FieldValue, Inspect,
+    BuiltinComponent, ComponentAddress, Entity, EntityId, FieldDesc, FieldKind, FieldValue, Inspect,
 };
 use xgame_math::glam::{Vec2, Vec3, Vec4};
 
@@ -80,6 +80,234 @@ fn numeric_value(kind: FieldKind, v: f32) -> FieldValue {
         FieldKind::U32 => FieldValue::U32(v.max(0.0) as u32),
         _ => FieldValue::F32(v),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 组件结构操作（Add Component / 标题右键 / 空白右键共用）
+// ---------------------------------------------------------------------------
+
+/// Inspector 里所有组件结构编辑最终都收敛成这一种请求。
+///
+/// 菜单只负责产生请求，真正修改仍在 `working` 副本上发生；这样右键不会绕过
+/// `show_body` 末尾的 Undo、脏检查与 v2 身份合并。Rust / Lua 继续按当前运行时的
+/// 注册名 / 路径去重，同名多实例要等运行时状态按 `ComponentId` 隔离后才能开放。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComponentAction {
+    AddBuiltin(BuiltinComponent),
+    AddRust(String),
+    AddLua(String),
+    Remove(ComponentAddress),
+}
+
+/// 组件标题右键里的“移除”语义。
+#[derive(Clone, Copy)]
+enum ComponentMenuTarget {
+    /// 标题正好对应一个可移除组件实例。
+    Removable {
+        address: ComponentAddress,
+        label: &'static str,
+    },
+    /// Transform / Render 这类真实存在、但当前不能删除的组件视图。
+    Locked {
+        label: &'static str,
+        reason: &'static str,
+    },
+    /// Scripts / Behaviors 是实例集合，不能把分组标题冒充成一个组件。
+    Collection {
+        label: &'static str,
+        reason: &'static str,
+    },
+}
+
+const PLAY_STRUCTURE_HINT: &str = "播放模式下不能修改组件结构";
+const TRANSFORM_REMOVE_REASON: &str =
+    "Transform 是每个实体的固有组件；可以改值，但不能从实体上移除。";
+const RENDER_REMOVE_REASON: &str =
+    "Render 由 Mesh、LOD、Morph 与材质资产共同投影；当前不能把其中一个区块当成独立组件删除。";
+
+/// 执行一个统一组件请求。`editing` 是最后一道结构门禁，菜单是否置灰不能替代它。
+fn apply_component_action(
+    entity: &mut Entity,
+    action: ComponentAction,
+    editing: bool,
+    animator_clip: Option<String>,
+) -> bool {
+    if !editing {
+        return false;
+    }
+    match action {
+        ComponentAction::AddBuiltin(kind) => {
+            let changed = entity.add_builtin_component(kind);
+            if changed && kind == BuiltinComponent::Animator {
+                if let (Some(clip), Some(animator)) = (animator_clip, entity.animator.as_mut()) {
+                    animator.clip = clip;
+                }
+            }
+            changed
+        }
+        ComponentAction::AddRust(name) => entity.add_registered_component(&name),
+        ComponentAction::AddLua(path) => entity.attach_lua_script(&path),
+        ComponentAction::Remove(address) => entity.remove_attached_component(address),
+    }
+}
+
+/// Animator 新挂上去时沿用旧入口的友好默认值：模型有剪辑就先选第一段。
+fn default_animator_clip(state: &EditorState, entity: &Entity) -> Option<String> {
+    state.scene_renderer.as_ref().and_then(|renderer| {
+        entity
+            .model_at(0)
+            .and_then(|model| renderer.animation_clip_names(model).into_iter().next())
+    })
+}
+
+/// 空白右键发生在 `show_body` 返回之后，无法再借用那一帧的 `working`；这里按完全
+/// 相同的“先克隆、后入 Undo、再替换”顺序提交选中实体，仍不直接碰 v2 身份侧车。
+fn apply_component_action_to_selected(state: &mut EditorState, action: ComponentAction) -> bool {
+    let editing = state.is_editing();
+    let Some(index) = state.selected_entity else {
+        return false;
+    };
+    let Some(mut working) = state.scene.entities.get(index).cloned() else {
+        return false;
+    };
+    let animator_clip = default_animator_clip(state, &working);
+    if !apply_component_action(&mut working, action, editing, animator_clip) {
+        return false;
+    }
+
+    // 必须在替换实体之前拍快照；v2 会在这里同步当前身份与持久高水位。
+    state.push_undo();
+    state.scene.entities[index] = working;
+    true
+}
+
+/// “Add Component” 的唯一菜单内容。三个入口只决定菜单挂在哪里，不再各抄一份增删。
+fn show_add_component_entries(
+    ui: &mut egui::Ui,
+    entity: &Entity,
+    rust_names: &[String],
+    script_paths: &[String],
+    request: &mut Option<ComponentAction>,
+) -> bool {
+    ui.set_min_width(theme::COMPONENT_MENU_WIDTH);
+    let mut any = false;
+
+    let missing_builtin = BuiltinComponent::ADDABLE
+        .into_iter()
+        .filter(|kind| !kind.present(entity))
+        .collect::<Vec<_>>();
+    if !missing_builtin.is_empty() {
+        ui.label(theme::dim_note("Built-in Components"));
+        for kind in missing_builtin {
+            any = true;
+            if ui.button(kind.name()).clicked() {
+                *request = Some(ComponentAction::AddBuiltin(kind));
+                ui.close_menu();
+            }
+        }
+    }
+
+    let missing_rust = rust_names
+        .iter()
+        .filter(|name| !entity.behaviors.contains(*name))
+        .collect::<Vec<_>>();
+    if !missing_rust.is_empty() {
+        if any {
+            ui.separator();
+        }
+        ui.label(theme::dim_note("Rust Components"));
+        for name in missing_rust {
+            any = true;
+            if ui.button(name).clicked() {
+                *request = Some(ComponentAction::AddRust(name.clone()));
+                ui.close_menu();
+            }
+        }
+    } else if rust_names.is_empty() {
+        if any {
+            ui.separator();
+        }
+        theme::note(ui, "Rust 组件：构建项目插件后可选");
+        any = true;
+    }
+
+    let missing_scripts = script_paths
+        .iter()
+        .filter(|path| !entity.scripts.contains(*path))
+        .collect::<Vec<_>>();
+    if !missing_scripts.is_empty() {
+        if any {
+            ui.separator();
+        }
+        ui.label(theme::dim_note("Lua Scripts"));
+        for path in missing_scripts {
+            any = true;
+            if ui.button(path).clicked() {
+                *request = Some(ComponentAction::AddLua(path.clone()));
+                ui.close_menu();
+            }
+        }
+    }
+
+    if !any {
+        theme::note(ui, "当前可用组件都已挂载");
+    }
+    ui.separator();
+    theme::note(
+        ui,
+        "Transform 始终存在；Render 由 Mesh / LOD / Morph / Material 视图共同编辑。",
+    );
+    ui.separator();
+    let refresh = ui.button("重新扫描 Scripts/").clicked();
+    if refresh {
+        ui.close_menu();
+    }
+    refresh
+}
+
+/// 给组件标题或具体 Rust / Lua 行挂统一右键菜单。
+fn component_context_menu(
+    response: &egui::Response,
+    state: &EditorState,
+    entity: &Entity,
+    target: ComponentMenuTarget,
+    request: &mut Option<ComponentAction>,
+    refresh_scripts: &mut bool,
+) {
+    let editing = state.is_editing();
+    response.context_menu(|ui| {
+        match target {
+            ComponentMenuTarget::Removable { address, label } => {
+                let remove = ui
+                    .add_enabled(editing, egui::Button::new(label))
+                    .on_disabled_hover_text(PLAY_STRUCTURE_HINT);
+                if remove.clicked() {
+                    *request = Some(ComponentAction::Remove(address));
+                    ui.close_menu();
+                }
+            }
+            ComponentMenuTarget::Locked { label, reason }
+            | ComponentMenuTarget::Collection { label, reason } => {
+                ui.add_enabled(false, egui::Button::new(label))
+                    .on_disabled_hover_text(reason);
+                theme::note(ui, reason);
+            }
+        }
+
+        ui.separator();
+        let add = ui.add_enabled_ui(editing, |ui| {
+            ui.menu_button("Add Component", |ui| {
+                *refresh_scripts |= show_add_component_entries(
+                    ui,
+                    entity,
+                    state.behavior_names(),
+                    &state.script_list,
+                    request,
+                );
+            });
+        });
+        add.response.on_disabled_hover_text(PLAY_STRUCTURE_HINT);
+    });
 }
 
 /// 一个字段控件产生的编辑信号（与 [`collect`] 同语义，聚合成结构体往下传）。
@@ -314,7 +542,7 @@ fn show_field_widget(
 /// 材质 + 父级 + 预制体）在 660px 高的面板里放不下，没有滚动区时**下面几段点不到**，
 /// 而且看不出来是被截断还是根本没有 —— UE 的 Details 面板同样是整条滚动的。
 pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
-    ui.scope(|ui| {
+    let body = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
         // **分组内容不额外缩进**。面板里的 `ui.indent(...)` 只用来给代码分块，
         // 视觉上必须是零缩进：UE 的 Details 里分类条下的行与 Name 行共用同一条
         // 左边界，否则（indent = 10px）Name 的值在 x=64、Transform 的值在 x=74，
@@ -324,6 +552,43 @@ pub fn show_content(state: &mut EditorState, ui: &mut egui::Ui) {
             .auto_shrink([false, false])
             .show(ui, |ui| show_body(state, ui));
     });
+
+    // 子控件的感知层级高于这个 scope 背景：右键标题 / 具体组件行时由它们自己的
+    // 菜单接管，只有真正的 Inspector 空白才会落到这里。
+    let Some(index) = state.selected_entity else {
+        return;
+    };
+    let Some(entity) = state.scene.entities.get(index).cloned() else {
+        return;
+    };
+    let editing = state.is_editing();
+    let rust_names = state.behavior_names().to_vec();
+    let script_paths = state.script_list.clone();
+    let mut request = None;
+    let mut refresh_scripts = false;
+    body.response.context_menu(|ui| {
+        ui.label(theme::bold("Add Component"));
+        ui.separator();
+        let contents = ui.add_enabled_ui(editing, |ui| {
+            refresh_scripts |= show_add_component_entries(
+                ui,
+                &entity,
+                &rust_names,
+                &script_paths,
+                &mut request,
+            );
+        });
+        contents.response.on_disabled_hover_text(PLAY_STRUCTURE_HINT);
+        if !editing {
+            theme::note(ui, PLAY_STRUCTURE_HINT);
+        }
+    });
+    if refresh_scripts {
+        state.refresh_scripts();
+    }
+    if let Some(action) = request {
+        apply_component_action_to_selected(state, action);
+    }
 }
 
 fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
@@ -350,6 +615,8 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
     let mut touched = false;
     let mut drag_began = false;
     let mut drag_ended = false;
+    let mut component_request = None;
+    let mut refresh_scripts = false;
 
     {
         let entity = &mut working;
@@ -406,71 +673,30 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 &add,
                 egui::PopupCloseBehavior::CloseOnClick,
                 |ui| {
-                    ui.set_min_width(220.0);
-                    for kind in BuiltinComponent::ADDABLE {
-                        if !kind.present(entity) && ui.button(kind.name()).clicked() {
-                            // 与原来的 Add Animator 相同：有剪辑时先选模型的第一段。
-                            let default_clip = if matches!(kind, BuiltinComponent::Animator) {
-                                state.scene_renderer.as_ref().and_then(|renderer| {
-                                    entity.model_at(0).and_then(|model| {
-                                        renderer.animation_clip_names(model).into_iter().next()
-                                    })
-                                })
-                            } else {
-                                None
-                            };
-                            entity.add_builtin_component(kind);
-                            if let (Some(clip), Some(animator)) =
-                                (default_clip, entity.animator.as_mut())
-                            {
-                                animator.clip = clip;
-                            }
-                            touched = true;
-                        }
-                    }
-                    let names = state.behavior_names();
-                    let mut shown_behaviors = false;
-                    for name in names {
-                        if entity.behaviors.contains(name) {
-                            continue;
-                        }
-                        if !shown_behaviors {
-                            ui.separator();
-                            ui.label("Rust Components");
-                            shown_behaviors = true;
-                        }
-                        if ui.button(name).clicked() {
-                            touched |= entity.add_registered_component(name);
-                        }
-                    }
-                    if names.is_empty() {
-                        ui.separator();
-                        theme::note(ui, "Rust 组件：构建项目插件后可选");
-                    }
-                    let mut shown_scripts = false;
-                    for path in &state.script_list {
-                        if entity.scripts.contains(path) {
-                            continue;
-                        }
-                        if !shown_scripts {
-                            ui.separator();
-                            ui.label("Lua Scripts");
-                            shown_scripts = true;
-                        }
-                        if ui.button(path).clicked() {
-                            touched |= entity.attach_lua_script(path);
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("重新扫描 Scripts/").clicked() {
-                        state.refresh_scripts();
-                    }
+                    refresh_scripts |= show_add_component_entries(
+                        ui,
+                        entity,
+                        state.behavior_names(),
+                        &state.script_list,
+                        &mut component_request,
+                    );
                 },
             );
         });
 
         // ── 变换组件 ──
-        theme::section_bar(ui, "Transform");
+        let transform_header = theme::section_bar(ui, "Transform");
+        component_context_menu(
+            &transform_header,
+            state,
+            entity,
+            ComponentMenuTarget::Locked {
+                label: "Remove Transform",
+                reason: TRANSFORM_REMOVE_REASON,
+            },
+            &mut component_request,
+            &mut refresh_scripts,
+        );
         ui.indent("transform", |ui| {
             // 三轴输入框的宽度按面板剩余空间算：面板够宽时等于 `FIELD_WIDTH`
             // （与旧画面逐像素一致），窗口收到 1280 时自动压窄 —— 否则最后的
@@ -566,11 +792,43 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 这个实体的变换；放在面板末尾（Material 之后）时，属性多的实体
         // 要滚很久才能看到它 —— 实测截图里它整块在折叠线以下。
         if entity.ui.is_some() {
-            crate::panels::inspector_ui::show(ui, entity, &mut touched);
+            let ui_header = theme::section_bar(ui, "UI");
+            component_context_menu(
+                &ui_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Ui),
+                    label: "Remove UI Element",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            if crate::panels::inspector_ui::show(
+                ui,
+                entity,
+                &mut touched,
+                state.is_editing(),
+            ) {
+                component_request = Some(ComponentAction::Remove(ComponentAddress::Builtin(
+                    BuiltinComponent::Ui,
+                )));
+            }
         }
 
         // ── 网格 ──
-        theme::section_bar(ui, "Mesh");
+        let mesh_header = theme::section_bar(ui, "Mesh");
+        component_context_menu(
+            &mesh_header,
+            state,
+            entity,
+            ComponentMenuTarget::Locked {
+                label: "Remove Render",
+                reason: RENDER_REMOVE_REASON,
+            },
+            &mut component_request,
+            &mut refresh_scripts,
+        );
         ui.indent("mesh", |ui| {
             row(ui, "Model", |ui| {
                 let mut path = entity.model.clone();
@@ -616,7 +874,18 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 语义（与 `xgame_core::lod` 同一份）：`levels` 非空时 `model` 被忽略，
         // 第 0 级就是最近一级；超出最后一级的 `max_distance` 直接不画
         // （写 0 = 无限远）。距离从相机量到**实体轴心**。
-        theme::section_bar(ui, "LOD");
+        let lod_header = theme::section_bar(ui, "LOD");
+        component_context_menu(
+            &lod_header,
+            state,
+            entity,
+            ComponentMenuTarget::Locked {
+                label: "Remove Render",
+                reason: RENDER_REMOVE_REASON,
+            },
+            &mut component_request,
+            &mut refresh_scripts,
+        );
         ui.indent("lod", |ui| {
             if entity.lod.is_empty() {
                 let add = icons::add_row(
@@ -706,7 +975,18 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 只显示已经挂载的动画组件；模型被清空时仍要能移除它。
         // 剪辑列表来自渲染器的资产缓存，模型未加载时为空。
         if entity.animator.is_some() {
-            theme::section_bar(ui, "Animation");
+            let animation_header = theme::section_bar(ui, "Animation");
+            component_context_menu(
+                &animation_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Animator),
+                    label: "Remove Animator",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("animation", |ui| {
                 let clips = state
                     .scene_renderer
@@ -924,7 +1204,14 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                                             }
                                         }
                                     });
-                                if icons::close_button(ui, "摘掉动画组件（模型与剪辑都不动）") {
+                                let close = ui.add_enabled_ui(state.is_editing(), |ui| {
+                                    icons::close_button(
+                                        ui,
+                                        "摘掉动画组件（模型与剪辑都不动）",
+                                    )
+                                });
+                                close.response.on_disabled_hover_text(PLAY_STRUCTURE_HINT);
+                                if close.inner {
                                     remove = true;
                                 }
                             });
@@ -1448,8 +1735,8 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         touched = true;
                     }
                 if remove {
-                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
-                        BuiltinComponent::Animator,
+                    component_request = Some(ComponentAction::Remove(
+                        ComponentAddress::Builtin(BuiltinComponent::Animator),
                     ));
                 }
             });
@@ -1473,7 +1760,18 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             })
             .unwrap_or_default();
         if morph_count > 0 {
-            theme::section_bar(ui, "Morph");
+            let morph_header = theme::section_bar(ui, "Morph");
+            component_context_menu(
+                &morph_header,
+                state,
+                entity,
+                ComponentMenuTarget::Locked {
+                    label: "Remove Render",
+                    reason: RENDER_REMOVE_REASON,
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("morph", |ui| {
                 for index in 0..morph_count {
                     let label = morph_names
@@ -1507,11 +1805,22 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 这里存的是**项目相对路径**，不是脚本内容：同一份脚本可以挂在多个实体上，
         // 改一次逻辑全都生效。列表顺序就是执行顺序。
         if !entity.scripts.is_empty() {
-            theme::section_bar(ui, "Scripts");
+            let scripts_header = theme::section_bar(ui, "Scripts");
+            component_context_menu(
+                &scripts_header,
+                state,
+                entity,
+                ComponentMenuTarget::Collection {
+                    label: "Remove Scripts Group",
+                    reason: "Scripts 是多个 Lua 组件实例的分组；请右键具体脚本行移除。",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("scripts", |ui| {
                 let mut remove: Option<usize> = None;
                 for (slot, path) in entity.scripts.iter().enumerate() {
-                    ui.horizontal(|ui| {
+                    let row_response = ui.horizontal(|ui| {
                         icons::small_icon(
                             ui,
                             icons::Icon::Script,
@@ -1526,15 +1835,32 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         // 行尾右对齐：`with_layout` 把剩余宽度全吃掉，✕ 贴右边对齐，
                         // 多个脚本行之间因此不会因为路径长短而左右乱跳。
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icons::close_button(ui, "把这个脚本从实体上摘掉（脚本文件本身不动）")
-                            {
+                            let close = ui.add_enabled_ui(state.is_editing(), |ui| {
+                                icons::close_button(
+                                    ui,
+                                    "把这个脚本从实体上摘掉（脚本文件本身不动）",
+                                )
+                            });
+                            close.response.on_disabled_hover_text(PLAY_STRUCTURE_HINT);
+                            if close.inner {
                                 remove = Some(slot);
                             }
                         });
-                    });
+                    }).response.interact(egui::Sense::click());
+                    component_context_menu(
+                        &row_response,
+                        state,
+                        entity,
+                        ComponentMenuTarget::Removable {
+                            address: ComponentAddress::Lua(slot),
+                            label: "Remove Lua Script",
+                        },
+                        &mut component_request,
+                        &mut refresh_scripts,
+                    );
                 }
                 if let Some(slot) = remove {
-                    touched |= entity.remove_attached_component(ComponentAddress::Lua(slot));
+                    component_request = Some(ComponentAction::Remove(ComponentAddress::Lua(slot)));
                 }
 
                 theme::note(ui, "钩子: start / update / fixed_update / on_destroy");
@@ -1543,7 +1869,18 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // ── Behaviors（Rust 组件，双轨架构 P0.5）──
         // 场景存注册名而非代码；未注册的名字仍显示警告，方便查插件装载问题。
         if !entity.behaviors.is_empty() {
-            theme::section_bar(ui, "Behaviors");
+            let behaviors_header = theme::section_bar(ui, "Behaviors");
+            component_context_menu(
+                &behaviors_header,
+                state,
+                entity,
+                ComponentMenuTarget::Collection {
+                    label: "Remove Behaviors Group",
+                    reason: "Behaviors 是多个 Rust 组件实例的分组；请右键具体组件行移除。",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("behaviors", |ui| {
                 let names: Vec<String> = state.behavior_names().to_vec();
                 let mut remove: Option<usize> = None;
@@ -1555,7 +1892,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 let entity_id = entity.id;
                 for (slot, name) in entity.behaviors.iter().enumerate() {
                     let registered = names.iter().any(|n| n == name);
-                    ui.horizontal(|ui| {
+                    let row_response = ui.horizontal(|ui| {
                         icons::small_icon(
                             ui,
                             icons::Icon::Component,
@@ -1602,11 +1939,26 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                                 .on_hover_text("插件没编译过 / 组件名不在注册表里");
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icons::close_button(ui, "把这个组件从实体上摘掉") {
+                            let close = ui.add_enabled_ui(state.is_editing(), |ui| {
+                                icons::close_button(ui, "把这个组件从实体上摘掉")
+                            });
+                            close.response.on_disabled_hover_text(PLAY_STRUCTURE_HINT);
+                            if close.inner {
                                 remove = Some(slot);
                             }
                         });
-                    });
+                    }).response.interact(egui::Sense::click());
+                    component_context_menu(
+                        &row_response,
+                        state,
+                        entity,
+                        ComponentMenuTarget::Removable {
+                            address: ComponentAddress::Rust(slot),
+                            label: "Remove Rust Component",
+                        },
+                        &mut component_request,
+                        &mut refresh_scripts,
+                    );
 
                     // ── 可调参数（P1）──
                     //
@@ -1638,7 +1990,8 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                     touched = true;
                 }
                 if let Some(slot) = remove {
-                    touched |= entity.remove_attached_component(ComponentAddress::Rust(slot));
+                    component_request =
+                        Some(ComponentAction::Remove(ComponentAddress::Rust(slot)));
                 }
 
                 // 调参什么时候生效 —— 两种模式的差别就这一句话，说在最前面免得
@@ -1658,16 +2011,31 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 取消勾选 = 这个实体不参与物理（纯视觉）。旧场景文件没有 `physics` 字段，
         // 加载出来就是未勾选 —— 与当时"没有任何东西会掉下去"的行为一致。
         if entity.physics.is_some() {
-            theme::section_bar(ui, "Physics");
+            let physics_header = theme::section_bar(ui, "Physics");
+            component_context_menu(
+                &physics_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Physics),
+                    label: "Remove Physics",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("physics", |ui| {
                 let mut enabled = entity.physics.is_some();
                 if ui
-                    .checkbox(&mut enabled, "Participate in physics")
+                    .add_enabled(
+                        state.is_editing(),
+                        egui::Checkbox::new(&mut enabled, "Participate in physics"),
+                    )
                     .on_hover_text("不勾选 = 纯视觉实体，不会被重力拽走")
+                    .on_disabled_hover_text(PLAY_STRUCTURE_HINT)
                     .changed()
                 {
-                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
-                        BuiltinComponent::Physics,
+                    component_request = Some(ComponentAction::Remove(
+                        ComponentAddress::Builtin(BuiltinComponent::Physics),
                     ));
                 }
 
@@ -1875,16 +2243,31 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // （运动学位置 + 胶囊），`physics` 里的类型/形状会被忽略 ——
         // 见 `xgame_core::character` 的模块文档。
         if entity.controller.is_some() {
-            theme::section_bar(ui, "Character");
+            let character_header = theme::section_bar(ui, "Character");
+            component_context_menu(
+                &character_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Character),
+                    label: "Remove Character",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("character", |ui| {
                 let mut enabled = entity.controller.is_some();
                 if ui
-                    .checkbox(&mut enabled, "Character controller")
+                    .add_enabled(
+                        state.is_editing(),
+                        egui::Checkbox::new(&mut enabled, "Character controller"),
+                    )
                     .on_hover_text("由角色控制器驱动：撞墙、自动上台阶、贴地、陡坡滑落")
+                    .on_disabled_hover_text(PLAY_STRUCTURE_HINT)
                     .changed()
                 {
-                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
-                        BuiltinComponent::Character,
+                    component_request = Some(ComponentAction::Remove(
+                        ComponentAddress::Builtin(BuiltinComponent::Character),
                     ));
                 }
 
@@ -1962,18 +2345,33 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 取消勾选 = 静默实体。旧场景文件没有 `audio` 字段，加载出来就是
         // 未勾选 —— 与当时"没有任何声音"的行为一致。
         if entity.audio.is_some() {
-            theme::section_bar(ui, "Audio");
+            let audio_header = theme::section_bar(ui, "Audio");
+            component_context_menu(
+                &audio_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Audio),
+                    label: "Remove Audio Source",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("audio", |ui| {
             let mut enabled = entity.audio.is_some();
             if ui
-                .checkbox(&mut enabled, "Has audio source")
+                .add_enabled(
+                    state.is_editing(),
+                    egui::Checkbox::new(&mut enabled, "Has audio source"),
+                )
                 .on_hover_text(
                     "挂一个音频源：autoplay 进场景就响；\n非 autoplay 的剪辑由脚本 play_sound 触发",
                 )
+                .on_disabled_hover_text(PLAY_STRUCTURE_HINT)
                 .changed()
             {
-                touched |= entity.remove_attached_component(ComponentAddress::Builtin(
-                    BuiltinComponent::Audio,
+                component_request = Some(ComponentAction::Remove(
+                    ComponentAddress::Builtin(BuiltinComponent::Audio),
                 ));
             }
 
@@ -2096,19 +2494,34 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 没有"预览画面"按钮：Play 态视口直接用这台相机的机位
         // （见 `scene_view::build_view_projection`），那本身就是预览。
         if entity.camera.is_some() {
-            theme::section_bar(ui, "Camera");
+            let camera_header = theme::section_bar(ui, "Camera");
+            component_context_menu(
+                &camera_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Camera),
+                    label: "Remove Camera",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("camera", |ui| {
                 let mut enabled = entity.camera.is_some();
                 if ui
-                    .checkbox(&mut enabled, "Has camera")
+                    .add_enabled(
+                        state.is_editing(),
+                        egui::Checkbox::new(&mut enabled, "Has camera"),
+                    )
                     .on_hover_text(
                         "勾上之后这个实体就是一台相机：\n\
                      Play 态视口 / 独立游戏 / 无头截图都从它取机位",
                     )
+                    .on_disabled_hover_text(PLAY_STRUCTURE_HINT)
                     .changed()
                 {
-                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
-                        BuiltinComponent::Camera,
+                    component_request = Some(ComponentAction::Remove(
+                        ComponentAddress::Builtin(BuiltinComponent::Camera),
                     ));
                 }
 
@@ -2180,18 +2593,33 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 所以这里没有任何"预览播放"按钮，那需要另造一条编辑器内模拟回路，
         // 而 Play 就是那条回路。
         if entity.particle.is_some() {
-            theme::section_bar(ui, "Particle");
+            let particle_header = theme::section_bar(ui, "Particle");
+            component_context_menu(
+                &particle_header,
+                state,
+                entity,
+                ComponentMenuTarget::Removable {
+                    address: ComponentAddress::Builtin(BuiltinComponent::Particle),
+                    label: "Remove Particle Emitter",
+                },
+                &mut component_request,
+                &mut refresh_scripts,
+            );
             ui.indent("particle", |ui| {
                 let mut enabled = entity.particle.is_some();
                 if ui
-                    .checkbox(&mut enabled, "Has particle emitter")
+                    .add_enabled(
+                        state.is_editing(),
+                        egui::Checkbox::new(&mut enabled, "Has particle emitter"),
+                    )
                     .on_hover_text(
                         "CPU 粒子（billboard）。进 Play 开始喷，\n场景存盘只存参数、不存粒子状态",
                     )
+                    .on_disabled_hover_text(PLAY_STRUCTURE_HINT)
                     .changed()
                 {
-                    touched |= entity.remove_attached_component(ComponentAddress::Builtin(
-                        BuiltinComponent::Particle,
+                    component_request = Some(ComponentAction::Remove(
+                        ComponentAddress::Builtin(BuiltinComponent::Particle),
                     ));
                 }
 
@@ -2493,7 +2921,26 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 负责"这个实例想怎么微调"。两层正交：资产定金属度 / 粗糙度，覆盖在
         // 其结果之上逐字段打补丁。内置图元（builtin://cube 等）没有模型材质，
         // 要么挂资产、要么用覆盖，否则永远是白模。
-        theme::section_bar(ui, "Material");
+        let material_header = theme::section_bar(ui, "Material");
+        let material_target = if entity.material.is_some() {
+            ComponentMenuTarget::Removable {
+                address: ComponentAddress::Builtin(BuiltinComponent::MaterialOverride),
+                label: "Remove Material Override",
+            }
+        } else {
+            ComponentMenuTarget::Locked {
+                label: "Remove Render",
+                reason: RENDER_REMOVE_REASON,
+            }
+        };
+        component_context_menu(
+            &material_header,
+            state,
+            entity,
+            material_target,
+            &mut component_request,
+            &mut refresh_scripts,
+        );
         ui.indent("material", |ui| {
             let materials = state.material_list();
             row(ui, "Asset", |ui| {
@@ -2536,17 +2983,21 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
 
             let mut enabled = entity.material.is_some();
             if ui
-                .checkbox(&mut enabled, "Override material params")
+                .add_enabled(
+                    state.is_editing(),
+                    egui::Checkbox::new(&mut enabled, "Override material params"),
+                )
                 .on_hover_text("在内置白模 / glTF 材质之上逐字段覆盖 PBR 参数；\n只影响勾选的字段")
+                .on_disabled_hover_text(PLAY_STRUCTURE_HINT)
                 .changed()
             {
-                touched |= if enabled {
-                    entity.add_builtin_component(BuiltinComponent::MaterialOverride)
+                component_request = Some(if enabled {
+                    ComponentAction::AddBuiltin(BuiltinComponent::MaterialOverride)
                 } else {
-                    entity.remove_attached_component(ComponentAddress::Builtin(
+                    ComponentAction::Remove(ComponentAddress::Builtin(
                         BuiltinComponent::MaterialOverride,
                     ))
-                };
+                });
             }
 
             if let Some(m) = entity.material.as_mut() {
@@ -2610,6 +3061,19 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 });
             }
         });
+    }
+
+    if refresh_scripts {
+        state.refresh_scripts();
+    }
+    if let Some(action) = component_request {
+        let animator_clip = default_animator_clip(state, &working);
+        touched |= apply_component_action(
+            &mut working,
+            action,
+            state.is_editing(),
+            animator_clip,
+        );
     }
 
     // ── 记录撤销点 ──
@@ -2744,5 +3208,160 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_actions_share_addresses_defaults_and_edit_gate() {
+        let mut entity = Entity::new("Actor");
+
+        assert!(!apply_component_action(
+            &mut entity,
+            ComponentAction::AddBuiltin(BuiltinComponent::Audio),
+            false,
+            None,
+        ));
+        assert!(entity.audio.is_none(), "Play 门禁不能只靠按钮置灰");
+
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::AddBuiltin(BuiltinComponent::Animator),
+            true,
+            Some("Idle".into()),
+        ));
+        assert_eq!(entity.animator.as_ref().unwrap().clip, "Idle");
+        assert!(!apply_component_action(
+            &mut entity,
+            ComponentAction::AddBuiltin(BuiltinComponent::Animator),
+            true,
+            Some("Run".into()),
+        ));
+        assert_eq!(
+            entity.animator.as_ref().unwrap().clip,
+            "Idle",
+            "重复添加不能顺手改掉已有 Animator"
+        );
+
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::AddRust("Health".into()),
+            true,
+            None,
+        ));
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::AddLua("Scripts/player.lua".into()),
+            true,
+            None,
+        ));
+        assert_eq!(entity.behaviors, ["Health"]);
+        assert_eq!(entity.scripts, ["Scripts/player.lua"]);
+
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::Remove(ComponentAddress::Rust(0)),
+            true,
+            None,
+        ));
+        assert!(apply_component_action(
+            &mut entity,
+            ComponentAction::Remove(ComponentAddress::Lua(0)),
+            true,
+            None,
+        ));
+        assert!(entity.behaviors.is_empty() && entity.scripts.is_empty());
+        assert!(!apply_component_action(
+            &mut entity,
+            ComponentAction::Remove(ComponentAddress::Builtin(BuiltinComponent::Transform)),
+            true,
+            None,
+        ));
+        assert!(!apply_component_action(
+            &mut entity,
+            ComponentAction::Remove(ComponentAddress::Builtin(BuiltinComponent::Render)),
+            true,
+            None,
+        ));
+    }
+
+    fn temp_editor(tag: &str) -> (EditorState, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "xgame_inspector_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let project = xgame_core::ProjectHandle::create(&base, "InspectorTest").unwrap();
+        let path = project.manifest().entry_scene.clone();
+        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(
+            &project.load_entry_scene().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(project.path(&path), v2.to_ron().unwrap()).unwrap();
+        let mut state = EditorState::new(project);
+        state.selected_entity = Some(0);
+        (state, base)
+    }
+
+    fn saved_audio_id(state: &EditorState) -> xgame_core::component_id::ComponentId {
+        let scene = state
+            .project
+            .load_scene_v2(&state.current_scene)
+            .unwrap();
+        scene.entities[0]
+            .components
+            .entries
+            .iter()
+            .find_map(|entry| {
+                matches!(
+                    entry.data,
+                    xgame_core::scene_v2::ComponentData::Audio(_)
+                )
+                .then_some(entry.identity.id)
+            })
+            .expect("应当保存出 Audio 组件")
+    }
+
+    #[test]
+    fn selected_component_action_is_undoable_and_never_reuses_v2_ids() {
+        let (mut state, base) = temp_editor("v2_identity");
+
+        assert!(apply_component_action_to_selected(
+            &mut state,
+            ComponentAction::AddBuiltin(BuiltinComponent::Audio),
+        ));
+        assert!(state.scene.entities[0].audio.is_some());
+        state.save_scene().unwrap();
+        let first_id = saved_audio_id(&state);
+
+        state.undo();
+        assert!(state.scene.entities[0].audio.is_none());
+        state.save_scene().unwrap();
+        state.redo();
+        assert!(state.scene.entities[0].audio.is_some());
+        state.save_scene().unwrap();
+        assert_eq!(saved_audio_id(&state), first_id, "Redo 必须找回原组件身份");
+
+        state.undo();
+        state.save_scene().unwrap();
+        assert!(apply_component_action_to_selected(
+            &mut state,
+            ComponentAction::AddBuiltin(BuiltinComponent::Audio),
+        ));
+        state.save_scene().unwrap();
+        let second_id = saved_audio_id(&state);
+        assert!(
+            second_id.raw() > first_id.raw(),
+            "删除后重新添加必须从持久高水位继续分配"
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

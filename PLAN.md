@@ -9058,3 +9058,43 @@ HUD 按钮矩形外扩 1px，`824` 个像素变化，其余画面逐像素相同
   `ok=true`、零 error / warn、零非有限变换。`CharacterDemo`、`MyGame`、
   `BehaviorsDemo` 检查也全部 OK；schema（110575 bytes）与脚本 API（60413 bytes）
   导出成功，恢复 CLI 在无 Pending 的 SampleScene 上报告 0 并退出 0。
+
+## 一百一十七、Inspector 组件右键增删（2026-11-13）
+
+**问题**：底层 v2 已能按稳定 `ComponentId` 增删组件，但 Inspector 只有顶部
+Add Component 弹窗；移除入口散在复选框或行尾关闭按钮，组件标题和面板空白右键没有
+结构操作。更容易误解的是，Transform 与 Render 看起来也是分类标题，却不能像 Camera
+一样删除；Scripts / Behaviors 又各自是一组实例，删分组不等于删一个组件。
+
+**做法**：
+
+- `ComponentAction` 统一内建、Rust、Lua 的添加与 `ComponentAddress` 移除；原 Add 行、
+  标题右键、具体 Rust / Lua 行右键和空白右键共用同一份菜单内容与动作执行函数。
+- 标题响应改为 click sense。Animator 新增仍自动取模型第一段剪辑；所有结构动作仍在
+  `working` 副本上执行，沿用“先 Undo、后写回”的路径，不在 UI 分配 v2 身份。
+- Transform 菜单禁用移除并说明它是实体固有组件；Mesh / LOD / Morph 说明它们共同
+  投影到 Render。Material 只有挂着 MaterialOverride 时才精确移除覆盖；资产与 Render
+  字段不受影响。Scripts / Behaviors 分组要求右键具体行。
+- Play 中旧关闭按钮、复选框和新右键项都禁用；动作函数另有编辑态门禁，避免合成事件或
+  后续入口绕过 UI 状态修改场景结构。
+
+**测试（先红后绿）**：
+
+- `section_bar_accepts_secondary_clicks` 先只让分类条返回旧 `hover` Response；合成右键
+  按下 / 松开后断言失败，证明旧标题确实收不到菜单点击。改为 click sense 后通过。
+- `component_actions_share_addresses_defaults_and_edit_gate` 覆盖 Play 拒绝、Animator 默认
+  剪辑、内建去重、Rust / Lua 槽位移除，以及 Transform / Render 拒绝删除。
+- `selected_component_action_is_undoable_and_never_reuses_v2_ids` 从选中实体动作入口添加
+  Audio，验证 Undo 删除、Redo 找回原 ID、再次删除后添加取得更大的持久 ID。
+
+**刻意的取舍**：不把 Mesh、LOD、Morph 各自伪造成组件；它们仍是同一个 Render 的
+编辑视图。也不只为 UI 放开同名 Rust / Lua 多实例：当前参数与脚本状态仍按注册名 / 路径
+持有，先放开菜单会让两个实例静默共享状态。右键只是结构操作的新入口，不改变底层能表达
+的实例模型。
+
+**最终验收**：
+
+- workspace 全目标 `check`、严格 `clippy -D warnings` 均通过；单作业全目标测试退出 0，
+  其中编辑器 311/311，通过的 ignored 项仍只有仓库约定的手动性能基准。
+- 1280×800、1440×900、1920×1200 三档 `--ui-shot --ui-select Fox` 均成功；局部裁剪
+  与 1440 逐行颜色扫描确认分类条高度不变，三轴字段、动画行尾按钮和脚本行均未溢出。

@@ -45,6 +45,8 @@
 - [x] 纯数据 Rust 组件可用 `register_component::<T>` 注册，沿用 `Inspect` 字段表、
       `behaviors` / `behavior_params` 场景存盘与运行时装配；示例 `Health` 无需生命周期实现。
 - [x] Add Component 统一列出可选内建组件、插件组件与 Lua 脚本；未挂载的可选区块不显示。
+- [x] 组件标题、具体 Rust / Lua 行及 Inspector 空白处支持右键增删；全部入口共用 Undo 与
+      v2 身份合并，Play 中禁用结构修改，Transform / Render 在菜单中说明不可移除原因。
 - [ ] 内建系统的复杂参数面板仍手写；自动控件的类型范围仍是标量 / 布尔 / 字符串 / 向量。
 
 ### 2026-11-08 第六轮：脚本控焦点（§一百零二）

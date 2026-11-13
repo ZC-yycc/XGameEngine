@@ -14,9 +14,7 @@
 //! 锚点并**保持当前尺寸**（居中的预设会把偏移重算成 `±size/2`）。手填仍然
 //! 保留 —— 预设覆盖不到的组合（比如"距右边缘 20px、垂直拉伸"）还得靠数值。
 
-use xgame_core::{
-    BuiltinComponent, ComponentAddress, Entity, UiAlign, UiElement, UiKind, UiVAlign,
-};
+use xgame_core::{Entity, UiAlign, UiElement, UiKind, UiVAlign};
 
 use crate::panels::theme;
 
@@ -46,19 +44,17 @@ fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) 
     })
 }
 
-/// 画 UI 区块。`touched` 由调用方汇总成"这一帧改过东西"。
-pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
-    theme::section_bar(ui, "UI");
-
+/// 画 UI 区块内容。标题与统一右键菜单由 Inspector 主文件负责；返回 `true` 表示
+/// 用户请求移除 UI 组件，调用方再走统一的组件结构动作与 Undo。
+pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool, editing: bool) -> bool {
     let mut enabled = true;
     if ui
-        .checkbox(&mut enabled, "UI Element")
+        .add_enabled(editing, egui::Checkbox::new(&mut enabled, "UI Element"))
         .on_hover_text("取消勾选以移除 UI 组件")
+        .on_disabled_hover_text("播放模式下不能修改组件结构")
         .changed()
     {
-        *touched |=
-            entity.remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Ui));
-        return;
+        return true;
     }
 
     ui.indent("ui_section", |ui| {
@@ -340,6 +336,7 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool) {
 
         *touched |= changed;
     });
+    false
 }
 
 /// 颜色编辑。

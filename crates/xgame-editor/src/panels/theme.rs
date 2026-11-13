@@ -133,6 +133,9 @@ pub fn bold(text: impl Into<String>) -> egui::RichText {
 /// 数值输入框的标准宽度（Inspector 里三个轴向并排还能放下）。
 pub const FIELD_WIDTH: f32 = 54.0;
 
+/// Inspector 组件菜单的最小宽度。
+pub const COMPONENT_MENU_WIDTH: f32 = 220.0;
+
 /// 三轴输入框被面板宽度压窄时的下限（再窄就装不下 3 位有效数字 + 负号）。
 pub const MIN_AXIS_FIELD: f32 = 30.0;
 
@@ -141,11 +144,12 @@ pub const MIN_AXIS_FIELD: f32 = 30.0;
 pub const AXIS_TAG_WIDTH: f32 = 9.0;
 
 /// Inspect 面板的**分类条**（不可折叠版）：22px 高的横条 + 左侧 2px 强调条，
-/// 下沿一条 1px 分隔线。
+/// 下沿一条 1px 分隔线。返回可点击的响应，Inspector 可在标题上挂右键菜单；
+/// 其余面板忽略返回值时仍只是静态标题。
 ///
 /// 与 [`category`] 的区别：这个只是标题，展开状态由调用方决定（有些段落
 /// 比如 Parent / Prefab 本身只在特定条件下出现，折叠反而多一层状态）。
-pub fn section_bar(ui: &mut egui::Ui, title: &str) {
+pub fn section_bar(ui: &mut egui::Ui, title: &str) -> egui::Response {
     use colors::*;
 
     // 分组之间留一口气：条本身紧贴着上一行（比如 "World 1.57, …" 的下一像素
@@ -154,8 +158,8 @@ pub fn section_bar(ui: &mut egui::Ui, title: &str) {
     ui.add_space(SECTION_GAP);
 
     let width = ui.available_width();
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(width, CATEGORY_HEIGHT), egui::Sense::hover());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, CATEGORY_HEIGHT), egui::Sense::click());
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, PANEL_HEADER_BG);
     painter.rect_filled(
@@ -174,6 +178,7 @@ pub fn section_bar(ui: &mut egui::Ui, title: &str) {
         egui::FontId::new(12.5, bold_family()),
         TEXT_PRIMARY,
     );
+    response
 }
 
 /// 枢纽卡片的**内边距**（[`card_frame`] 用）。卡片里的内容要按
@@ -632,6 +637,51 @@ fn looks_like_font(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 分类标题是 Inspector 组件菜单的右键命中面；必须真的感知点击，不能只是 hover。
+    #[test]
+    fn section_bar_accepts_secondary_clicks() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let mut bar_rect = egui::Rect::NOTHING;
+        let mut secondary_clicked = false;
+
+        for pressed in [None, Some(true), Some(false)] {
+            let pos = if bar_rect.is_positive() {
+                bar_rect.center()
+            } else {
+                egui::pos2(100.0, 40.0)
+            };
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = pressed {
+                input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                });
+            }
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none())
+                    .show(ctx, |ui| {
+                        let response = section_bar(ui, "Transform");
+                        bar_rect = response.rect;
+                        secondary_clicked |= response.secondary_clicked();
+                    });
+            });
+        }
+
+        assert!(
+            secondary_clicked,
+            "组件分类标题没有收到右键点击，context menu 就永远打不开"
+        );
+    }
 
     /// 界面上真实出现过的中文（枢纽 + 工具栏 + 状态栏）。
     const SAMPLE: &str = "项目枢纽 新建 打开 最近 场景 资源 实体 构建 保存 关闭 位置 名称";
