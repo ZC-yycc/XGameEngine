@@ -13,13 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::asset::{
-    decode_prefab_v2_references, decode_scene_references, decode_scene_v2_references,
-    encode_prefab_v2_references, encode_scene_v2_references,
+    decode_prefab_v2_references, decode_scene_v2_references, encode_prefab_v2_references,
+    encode_scene_v2_references,
 };
 use crate::fsx;
 use crate::project::{normalize_project_relative, normalize_scene_relative, ProjectHandle};
 use crate::scene_v2::{PrefabV2, SceneV2};
-use crate::Scene;
 
 const BACKUP_PREFIX: &str = ".xgame-prefab-v2-apply-";
 const PREPARING_PREFIX: &str = ".xgame-prefab-v2-prepare-";
@@ -129,71 +128,38 @@ impl ProjectHandle {
                     ));
                 }
             }
-            let version = crate::file_format::disk_version(&self.path(&relative))
-                .map_err(|error| format!("无法识别场景 '{relative}' 的版本: {error}"))?;
-            match version {
-                Some(2) => {
-                    let text = std::str::from_utf8(&original)
-                        .map_err(|error| format!("场景 '{relative}' 不是 UTF-8: {error}"))?;
-                    let mut scene = SceneV2::from_ron(text)
-                        .map_err(|error| format!("无法解析场景 '{relative}': {error}"))?;
-                    decode_scene_v2_references(&mut scene, &self.assets());
-                    let before = scene.to_ron()?;
-                    let references_target = scene.entities.iter().any(|entity| {
-                        entity
-                            .prefab
-                            .as_ref()
-                            .is_some_and(|reference| reference.source == source)
-                    });
-                    let old_sources = prefab_sources(self, &scene, &source, &old_prefab)?;
-                    scene
-                        .validate_prefab_sources(&old_sources)
-                        .map_err(|error| {
-                            format!("场景 '{relative}' 的旧预制体来源无效: {error}")
-                        })?;
-                    if references_target {
-                        scene.synchronize_prefab_source_metadata(&source, prefab)?;
-                    }
-                    let new_sources = prefab_sources(self, &scene, &source, prefab)?;
-                    scene
-                        .validate_prefab_sources(&new_sources)
-                        .map_err(|error| {
-                            format!("场景 '{relative}' 无法同步新预制体来源: {error}")
-                        })?;
-                    let changed = scene.to_ron()? != before;
-                    if references_target || is_guarded {
-                        prepared_scenes.push(PreparedScene {
-                            relative,
-                            original,
-                            scene,
-                            changed,
-                            guarded: is_guarded,
-                        });
-                    }
-                }
-                Some(1) | None => {
-                    let text = std::str::from_utf8(&original)
-                        .map_err(|error| format!("场景 '{relative}' 不是 UTF-8: {error}"))?;
-                    let mut scene: Scene = ron::from_str(text)
-                        .map_err(|error| format!("无法解析场景 '{relative}': {error:#}"))?;
-                    decode_scene_references(&mut scene, &self.assets());
-                    if scene.entities.iter().any(|entity| {
-                        entity
-                            .prefab
-                            .as_ref()
-                            .is_some_and(|reference| reference.source == source)
-                    }) {
-                        return Err(format!(
-                            "v1 场景 '{relative}' 引用了 v2 预制体；请先迁移组件格式"
-                        ));
-                    }
-                    if is_guarded {
-                        return Err(format!("当前场景 '{relative}' 不是 v2，不能结构性 Apply"));
-                    }
-                }
-                Some(other) => {
-                    return Err(format!("场景 '{relative}' 的格式版本 {other} 不受支持"));
-                }
+            let text = std::str::from_utf8(&original)
+                .map_err(|error| format!("场景 '{relative}' 不是 UTF-8: {error}"))?;
+            let mut scene = SceneV2::from_ron(text)
+                .map_err(|error| format!("无法解析场景 '{relative}': {error}"))?;
+            decode_scene_v2_references(&mut scene, &self.assets());
+            let before = scene.to_ron()?;
+            let references_target = scene.entities.iter().any(|entity| {
+                entity
+                    .prefab
+                    .as_ref()
+                    .is_some_and(|reference| reference.source == source)
+            });
+            let old_sources = prefab_sources(self, &scene, &source, &old_prefab)?;
+            scene
+                .validate_prefab_sources(&old_sources)
+                .map_err(|error| format!("场景 '{relative}' 的旧预制体来源无效: {error}"))?;
+            if references_target {
+                scene.synchronize_prefab_source_metadata(&source, prefab)?;
+            }
+            let new_sources = prefab_sources(self, &scene, &source, prefab)?;
+            scene.validate_prefab_sources(&new_sources).map_err(|error| {
+                format!("场景 '{relative}' 无法同步新预制体来源: {error}")
+            })?;
+            let changed = scene.to_ron()? != before;
+            if references_target || is_guarded {
+                prepared_scenes.push(PreparedScene {
+                    relative,
+                    original,
+                    scene,
+                    changed,
+                    guarded: is_guarded,
+                });
             }
         }
 

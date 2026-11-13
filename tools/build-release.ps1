@@ -11,7 +11,8 @@
         dist\xgame-mcp.exe             MCP server: lets AI agents (Cursor, Claude,
                                        ...) read/write scenes, check projects and run
                                        them headless over stdio. No window, no GPU.
-        dist\projects\SampleScene\     the bundled sample project
+        dist\projects\XGame\          the bundled sample project, including its
+                                       matching Rust component plugin
         dist\README.txt                short usage note
 
     Usage:
@@ -277,9 +278,10 @@ Write-Step 'Collecting artifacts'
 $editorExe = Join-Path $RepoRoot 'target\release\xgame-editor.exe'
 $gameExe   = Join-Path $RepoRoot 'target\release\xgame-game.exe'
 $mcpExe    = Join-Path $RepoRoot 'target\release\xgame-mcp.exe'
+$sampleDll = Join-Path $RepoRoot 'target\release\xgame_project.dll'
 
-foreach ($exe in @($editorExe, $gameExe, $mcpExe)) {
-    if (-not (Test-Path $exe)) { throw "Expected build output is missing: $exe" }
+foreach ($artifact in @($editorExe, $gameExe, $mcpExe, $sampleDll)) {
+    if (-not (Test-Path $artifact)) { throw "Expected build output is missing: $artifact" }
 }
 
 # Only ever wipe the dist folder we own. Going through the .NET API rather than
@@ -298,12 +300,23 @@ Write-Ok 'xgame-game.exe'
 Write-Ok 'xgame-mcp.exe'
 
 if (-not $SkipSample) {
-    $sample = Join-Path $RepoRoot 'projects\SampleScene'
+    $sample = Join-Path $RepoRoot 'projects\XGame'
     if (Test-Path $sample) {
         $sampleRoot = Join-Path $DistDir 'projects'
-        New-Item -ItemType Directory -Path $sampleRoot -Force | Out-Null
-        Copy-Item $sample (Join-Path $sampleRoot 'SampleScene') -Recurse -Force
-        Write-Ok 'projects\SampleScene\  (sample project)'
+        $sampleDest = Join-Path $sampleRoot 'XGame'
+        New-Item -ItemType Directory -Path $sampleDest -Force | Out-Null
+
+        # Build and Plugins are local artifacts. Copying either directory as-is
+        # can bundle a stale player or a plugin built from different sources.
+        Get-ChildItem $sample -Force |
+            Where-Object { $_.Name -notin @('Build', 'Plugins') } |
+            ForEach-Object { Copy-Item $_.FullName $sampleDest -Recurse -Force }
+
+        $pluginDest = Join-Path $sampleDest 'Plugins'
+        New-Item -ItemType Directory -Path $pluginDest -Force | Out-Null
+        Copy-Item $sampleDll $pluginDest -Force
+        Write-Ok 'projects\XGame\  (sample project)'
+        Write-Ok 'projects\XGame\Plugins\xgame_project.dll'
     } else {
         Write-Warn 'Bundled sample project not found; skipped.'
     }
@@ -317,7 +330,7 @@ Running the editor
 ------------------
 Double-click xgame-editor.exe. The Project Hub opens first: choose "Open" to
 pick an existing project folder, or create a new one. The bundled
-projects\SampleScene is ready to open as-is.
+projects\XGame is ready to open as-is.
 
 Building a game from a project
 ------------------------------

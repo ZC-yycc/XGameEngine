@@ -56,7 +56,7 @@ impl ProjectHub {
         Self {
             recents,
             recent_paths,
-            new_name: "MyGame".to_string(),
+            new_name: "NewGame".to_string(),
             new_location: default_projects_dir().display().to_string(),
             open_path: String::new(),
             message: None,
@@ -123,7 +123,7 @@ impl ProjectHub {
                                     ui.add_sized(
                                         egui::vec2(ui.available_width(), theme::FIELD_HEIGHT + 2.0),
                                         egui::TextEdit::singleline(&mut new_name)
-                                            .hint_text("MyGame"),
+                                            .hint_text("NewGame"),
                                     );
                                 });
                                 theme::field_row(ui, "位置", |ui| {
@@ -260,7 +260,7 @@ impl ProjectHub {
                                                         ),
                                                         |ui| {
                                                             // 同上：不撑宽度的话名字列只有
-                                                            // 文字那么宽，"BehaviorsDemo" 会把
+                                                            // 文字那么宽，较长的项目名会把
                                                             // 路径顶到右边，整列对不齐。
                                                             ui.set_min_width(112.0);
                                                             let response = ui.add(

@@ -1,8 +1,8 @@
 [package]
-name = "behaviors-demo"
+name = "xgame-project"
 version = "0.1.0"
 edition = "2021"
-description = "双轨架构 P0.5 演示项目：Rust 插件组件 + Lua 脚本同场景共存"
+description = "XGameEngine 综合示范项目：Rust 插件组件与 Lua 脚本同场景共存"
 publish = false
 
 # cdylib 是给编辑器 / 播放器 dlopen 的产物；rlib 让单元测试能直接以 crate 身份

@@ -89,7 +89,7 @@ fn numeric_value(kind: FieldKind, v: f32) -> FieldValue {
 /// Inspector 里所有组件结构编辑最终都收敛成这一种请求。
 ///
 /// 菜单只负责产生请求，真正修改仍在 `working` 副本上发生；这样右键不会绕过
-/// `show_body` 末尾的 Undo、脏检查与 v2 身份合并。Rust / Lua 继续按当前运行时的
+/// `show_body` 末尾的 Undo、脏检查与文件身份合并。Rust / Lua 继续按当前运行时的
 /// 注册名 / 路径去重，同名多实例要等运行时状态按 `ComponentId` 隔离后才能开放。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ComponentAction {
@@ -159,7 +159,7 @@ fn default_animator_clip(state: &EditorState, entity: &Entity) -> Option<String>
 }
 
 /// 空白右键发生在 `show_body` 返回之后，无法再借用那一帧的 `working`；这里按完全
-/// 相同的“先克隆、后入 Undo、再替换”顺序提交选中实体，仍不直接碰 v2 身份侧车。
+/// 相同的“先克隆、后入 Undo、再替换”顺序提交选中实体，仍不直接碰文件身份侧车。
 fn apply_component_action_to_selected(state: &mut EditorState, action: ComponentAction) -> bool {
     let editing = state.is_editing();
     let Some(index) = state.selected_entity else {
@@ -173,7 +173,7 @@ fn apply_component_action_to_selected(state: &mut EditorState, action: Component
         return false;
     }
 
-    // 必须在替换实体之前拍快照；v2 会在这里同步当前身份与持久高水位。
+    // 必须在替换实体之前拍快照；文件模型会在这里同步当前身份与持久高水位。
     state.push_undo();
     state.scene.entities[index] = working;
     true
@@ -3239,7 +3239,7 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let project = xgame_core::ProjectHandle::create(&base, "InspectorTest").unwrap();
         let path = project.manifest().entry_scene.clone();
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(
+        let v2 = xgame_core::scene_v2::SceneV2::from_runtime(
             &project.load_entry_scene().unwrap(),
         )
         .unwrap();

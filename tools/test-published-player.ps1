@@ -1,6 +1,6 @@
 ﻿param(
     [string]$BinDir = 'dist',
-    [string]$Plugin = 'target/release/behaviors_demo.dll',
+    [string]$Plugin = 'target/release/xgame_project.dll',
     [string]$OutputRoot = 'outputs',
     [ValidateSet('window', 'headless')][string]$Mode = 'window',
     [ValidateSet('none', 'input', 'plugin')][string]$Fault = 'none',
@@ -38,12 +38,14 @@ InputMap(actions: {"Advance": [Key($key)]}, axes: {"Travel": (positive: [Key($ke
 "@
 Save-Text (Join-Path $source 'Gameplay/accept.lua') @'
 function start(ctx)
-    state_set(ctx, "initial_yaw", rot(ctx).y)
+    local rust_spinner = entity_id(ctx, "RustSpinner")
+    state_set(ctx, "initial_yaw", entity_rot(ctx, rust_spinner).y)
     log(ctx, "G0 START " .. scene_index(ctx) .. " " .. current_scene(ctx))
 end
 function update(ctx)
     local i = scene_index(ctx)
-    if not state_get_or(ctx, "plugin", false) and math.abs(rot(ctx).y - state_get(ctx, "initial_yaw")) > 5 then
+    local rust_spinner = entity_id(ctx, "RustSpinner")
+    if not state_get_or(ctx, "plugin", false) and math.abs(entity_rot(ctx, rust_spinner).y - state_get(ctx, "initial_yaw")) > 5 then
         state_set(ctx, "plugin", true)
         log(ctx, "G0 PLUGIN " .. i)
     end
@@ -65,12 +67,11 @@ function on_destroy(ctx)
     log(ctx, "G0 DESTROY " .. scene_index(ctx))
 end
 '@
-$scene = [IO.File]::ReadAllText((Join-Path $root 'projects/BehaviorsDemo/Scenes/main.ron'))
-$scene = $scene.Replace('name: "RustSpinner",', 'name: "RustSpinner", scripts: ["Gameplay/accept.lua"],')
+$scene = [IO.File]::ReadAllText((Join-Path $root 'projects/XGame/Scenes/components.ron'))
 $scene = $scene.Replace('"guid://e1ea0ec292aab394364a94e4e17cc625"', '"Gameplay/Spinner.lua"')
-foreach ($i in 0..2) { Save-Text (Join-Path $source "Scenes/$i.ron") ($scene.Replace('Behaviors Demo', "Acceptance $i")) }
-Copy-Item (Join-Path $root 'projects/BehaviorsDemo/Scripts/Spinner.lua') (Join-Path $source 'Gameplay/Spinner.lua')
-if ($Fault -ne 'plugin') { Copy-Item $dll (Join-Path $source 'Plugins/behaviors_demo.dll') }
+$scene = $scene.Replace('"Gameplay/Spinner.lua"', '"Gameplay/accept.lua"')
+foreach ($i in 0..2) { Save-Text (Join-Path $source "Scenes/$i.ron") ($scene.Replace('Rust and Lua Components', "Acceptance $i")) }
+if ($Fault -ne 'plugin') { Copy-Item $dll (Join-Path $source 'Plugins/xgame_project.dll') }
 $env:RUST_LOG = 'info'
 $build = Start-Process (Join-Path $bin 'xgame-editor.exe') -ArgumentList @('--build', ('"' + $source + '"')) -Wait -PassThru -RedirectStandardOutput (Join-Path $run 'build.log') -RedirectStandardError (Join-Path $run 'build-stderr.log')
 if ($build.ExitCode -ne 0) { throw "Build failed: $run" }
@@ -79,7 +80,7 @@ $exe = Join-Path $package 'PublishedAcceptance.exe'
 foreach ($pair in @(@((Join-Path $bin 'xgame-game.exe'), $exe), @((Join-Path $source 'input.ron'), (Join-Path $package 'input.ron')))) {
     if ((Get-FileHash $pair[0]).Hash -ne (Get-FileHash $pair[1]).Hash) { throw 'Package hash mismatch' }
 }
-if ($Fault -ne 'plugin' -and (Get-FileHash $dll).Hash -ne (Get-FileHash (Join-Path $package 'Plugins/behaviors_demo.dll')).Hash) { throw 'Plugin hash mismatch' }
+if ($Fault -ne 'plugin' -and (Get-FileHash $dll).Hash -ne (Get-FileHash (Join-Path $package 'Plugins/xgame_project.dll')).Hash) { throw 'Plugin hash mismatch' }
 # 保留源项目，但让旧路径失效，验证包不依赖源目录或当前工作目录。
 Move-Item $package (Join-Path $run 'package')
 Move-Item $source (Join-Path $run 'source-preserved')

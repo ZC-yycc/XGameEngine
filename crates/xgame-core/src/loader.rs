@@ -48,12 +48,12 @@ pub trait SceneLoader {
     /// 按项目相对路径装载场景（如 `"Scenes/Level2.ron"`）。
     fn load_scene(&self, relative: &str) -> Result<Scene, String>;
 
-    /// 带可选 v2 组件身份的运行时载荷。
+    /// 带可选持久组件身份的运行时载荷。
     ///
-    /// 默认把旧实现返回的 Scene 包成 v1 载荷，第三方 / 测试装载器无需立刻改代码；
-    /// 项目句柄会覆盖此方法，让 v2 场景的稳定 ID 真正进入 World。
+    /// 默认把纯内存 Scene 包成无持久身份载荷；项目句柄会覆盖此方法，
+    /// 让文件中的稳定 ID 真正进入 World。
     fn load_runtime_scene(&self, relative: &str) -> Result<RuntimeScene, String> {
-        self.load_scene(relative).map(RuntimeScene::legacy)
+        self.load_scene(relative).map(RuntimeScene::from_runtime_values)
     }
 
     /// 按项目相对路径装载预制体（如 `"Prefabs/Enemy.prefab.ron"`）。
@@ -69,9 +69,10 @@ pub trait SceneLoader {
         )
     }
 
-    /// 带可选 v2 资产组件身份的预制体载荷。
+    /// 带可选持久组件身份的预制体载荷。
     fn load_runtime_prefab(&self, relative: &str) -> Result<RuntimePrefab, String> {
-        self.load_prefab(relative).map(RuntimePrefab::legacy)
+        self.load_prefab(relative)
+            .map(RuntimePrefab::from_runtime_values)
     }
 }
 

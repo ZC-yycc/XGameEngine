@@ -14,14 +14,14 @@
 cargo run -p xgame-editor
 
 # 编辑器 —— 直接打开指定项目（跳过枢纽）
-cargo run -p xgame-editor -- projects/SampleScene
+cargo run -p xgame-editor -- projects/XGame
 
 # 独立游戏 —— 运行一个项目
-cargo run -p xgame-game -- projects/SampleScene
+cargo run -p xgame-game -- projects/XGame
 
 # 无头项目检查 —— 不开窗口，验证清单 / 全部场景 / 预制体及其资产引用 / 资产身份证
 # （退出码 0=干净 · 1=加载失败 · 2=有问题；给 CI / AI 智能体用）
-cargo run -p xgame-editor -- --check projects/SampleScene
+cargo run -p xgame-editor -- --check projects/XGame
 
 # 场景格式说明书 —— 导出机器可读 JSON（字段 / 默认值 / 示例 / 资产引用）
 # （无 --out 打 stdout；同一份代码两次导出逐字节相同）
@@ -35,21 +35,15 @@ cargo run -p xgame-editor -- --export-script-api --out script_api.json
 # （幂等；只替换引用字面量，不动注释与排版）
 cargo run -p xgame-editor -- --migrate-assets projects/MyOldGame
 
-# 显式将场景与预制体文件升级为 v2 组件格式；先预检全部目标，成功后打印备份目录
-cargo run -p xgame-editor -- --migrate-components projects/MyOldGame
-
-# 恢复上一步打印的备份目录（将末尾的示例编号换成输出的真实路径）
-cargo run -p xgame-editor -- --restore-components projects/MyOldGame projects/MyOldGame/.xgame-component-v2-1234-5678
-
-# 恢复进程强杀后仍为 Pending 的 v2 预制体结构性 Apply（--check 始终只读）
+# 恢复进程强杀后仍为 Pending 的预制体结构性 Apply（--check 始终只读）
 cargo run -p xgame-editor -- --recover-prefab-apply projects/MyOldGame
 
 # 无头运行 —— 不开窗口跑 N 帧，stdout 出 JSON 统计（帧耗时 / 实体 / 脚本日志）
 # （退出码 0=干净 · 1=加载失败 · 2=跑完有问题；见 Docs/无头运行.md）
-cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
+cargo run -p xgame-editor -- --headless --frames 300 projects/XGame
 
 # 确定性键盘时间线 —— 在指定帧前送进生产 InputState / InputMap（JSON 格式见无头文档）
-cargo run -p xgame-editor -- --headless --frames 60 --input-script input-events.json projects/SampleScene
+cargo run -p xgame-editor -- --headless --frames 60 --input-script input-events.json projects/XGame
 
 # MCP server —— AI 智能体接口：stdio 起服务，客户端可读写场景、动实体、跑检查、无头实跑
 # （工具参考 Docs/MCP.md）
@@ -59,17 +53,15 @@ cargo run -p xgame-mcp
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 ```
 
-组件 v2 文件可由编辑器打开、编辑、保存及另存；撤销与自动保存保留组件 ID。
-编辑器 Play、独立游戏和无头运行会把 v2 值与稳定组件身份一同交给 World，初始场景
-、帧末切关和运行期生成后均可按实体 ID + 组件 ID 查询；v2 预制体实例还保留资产
-来源组件 ID。v2 场景能创建
-和实例化预制体；Revert 可按来源 ID 恢复组件，资产删除或改名后仍能还原
+场景和预制体只有一种当前磁盘格式：实体元数据之外，每个内建、Rust 与 Lua 组件都带
+稳定 `ComponentId` 和持久高水位。编辑器、MCP、Play、独立游戏与无头运行共用这条
+身份链；运行系统内部仍只修改紧凑的 `Scene` 值模型，不直接操作文件结构。预制体实例
+另存来源组件 ID；Revert 可按来源 ID 恢复组件，资产删除或改名后仍能还原
 实例；同场景多个实例可逐个还原，全部修复后才能保存。Apply 既能更新值，也能发布
 实体 / 组件增删及 Lua / Rust 关联名变更：存活来源 ID 不变，新增项获得新的资产 ID；
 所有已知引用场景在一个带日志、可恢复的事务里同步来源元数据。其他实例的本地值不会
 被 Apply 覆盖；已删除或改名的来源会解除关联，等用户显式 Revert 时才取资产内容。
-迁移后用 `--check` 和 `--headless` 验证项目；干净的 v2 项目与 v1 项目使用相同的
-通过语义。
+用 `--check` 和 `--headless` 验证项目；旧的扁平场景 / 预制体文件不再读取或迁移。
 
 ## 发布包组合验收（Windows）
 
@@ -82,7 +74,7 @@ powershell -NoProfile -File tools/test-published-player.ps1
 
 # headless：无 GPU 的 CI 路径；debug 产物示例
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-published-player.ps1 `
-    -Mode headless -BinDir target/debug -Plugin target/debug/behaviors_demo.dll
+    -Mode headless -BinDir target/debug -Plugin target/debug/xgame_project.dll
 ```
 
 两种模式都调用真实 `--build`，核对包内播放器、`input.ron` 与 Spinner DLL 哈希，再把
@@ -132,7 +124,9 @@ $env:CARGO_INCREMENTAL = '0'
 cargo build --workspace --release --locked -j2
 ```
 
-将同批 `target/release` 的宿主程序用于运行，并将 `behaviors_demo.dll` 放到 `projects/BehaviorsDemo/Plugins/`；替换已有插件前先备份，避免混用 debug/release 或历史 DLL。遇到“构建指纹不匹配”时应统一配置并重编两侧，不要改写描述符绕过检查。
+将同批 `target/release` 的宿主程序用于运行，并将 `xgame_project.dll` 放到
+`projects/XGame/Plugins/`；替换已有插件前先备份，避免混用 debug/release 或历史 DLL。
+遇到“构建指纹不匹配”时应统一配置并重编两侧，不要改写描述符绕过检查。
 
 此检查仅比较当前 workspace 中 xgame 构建单元可见的信息，是保守拒绝门禁，**不是完整 Rust ABI 兼容证明**。下游全部 flags、依赖 feature 合并、第三方源码状态以及 OS 加载动态库时执行的初始化均不在保证范围内；也不防伪造描述符或恶意插件。详细契约见 `Docs/决策记录.md` §四。
 
@@ -141,7 +135,7 @@ cargo build --workspace --release --locked -j2
 在项目插件中定义 `Default + Inspect + Send + Sync` 的具名字段结构体，用
 `#[derive(Inspect)]` 声明可编辑字段，再在插件入口调用
 `registry.register_component::<Health>("Health")`。完整例子见
-`projects/BehaviorsDemo/src/lib.rs`：`Health.value` 会自动显示为滑块，不需要实现
+`projects/XGame/src/lib.rs`：`Health.value` 会自动显示为滑块，不需要实现
 `Lifecycle` 或修改编辑器。构建并加载插件后，在实体 Inspector 顶部的 **Add Component**
 选择 `Health`；编辑值随场景保存，重新打开和 Play 时恢复。需要每帧逻辑的组件仍用
 `registry.register::<T>("Name")` 并实现 `Lifecycle`，两类组件共用字段控件和存盘规则。
@@ -149,7 +143,7 @@ cargo build --workspace --release --locked -j2
 目前自动控件支持 `f32/f64/i32/i64/u32/bool/String/Vec2/Vec3/Vec4`；运行时状态字段
 用 `#[inspect(skip)]` 排除。内建相机、物理等继续使用专用面板，也能从 Add Component
 菜单添加。Mesh（含 Morph 权重）、LOD、Material（材质资产 + 实例覆盖）是三份独立
-组件：各自可从标题右键移除，并随场景持久化独立的 v2 组件 ID；Transform 始终存在。
+组件：各自可从标题右键移除，并随场景持久化独立的组件 ID；Transform 始终存在。
 
 ## CI
 
@@ -186,13 +180,14 @@ XGameEngine/                  # 引擎源码仓库
 │   └── xgame-mcp/            # MCP server：AI 智能体工具面（stdio JSON-RPC）
 ├── examples/spinner-plugin/  # 示例 Rust 组件插件（cdylib）
 ├── projects/                 # 默认的项目存放位置（可放在任意目录）
-│   ├── SampleScene/          # 示例项目
-│   │   ├── project.ron       # 项目清单
-│   │   ├── input.ron         # 输入映射（动作 / 轴）
-│   │   ├── Scenes/
-│   │   ├── Scripts/          # 实体脚本（.lua）
-│   │   └── Resources/
-│   └── BehaviorsDemo/        # Rust 组件插件演示项目（本身是 workspace 成员）
+│   └── XGame/                # 综合示范项目，也是 Rust cdylib workspace 成员
+│       ├── Cargo.toml         # Rust 组件插件
+│       ├── project.ron        # 项目清单（四张发布场景）
+│       ├── input.ron          # 输入映射（动作 / 轴）
+│       ├── Scenes/            # showcase / character / components / sandbox
+│       ├── Prefabs/
+│       ├── Scripts/           # 实体脚本（.lua）
+│       └── Resources/
 ```
 
 上面各 crate 的依赖方向是单向的（不许反向依赖）；逐层关系见本文末
@@ -203,13 +198,15 @@ XGameEngine/                  # 引擎源码仓库
 ```
 <项目名>/
 ├── project.ron      # 清单：项目名、入口场景、窗口设置、内容目录
-├── Scenes/          # 场景文件（.ron）
+├── Scenes/          # 当前组件格式的场景文件（.ron）
+├── Prefabs/         # 当前组件格式的预制体（.prefab.ron）
+├── Scripts/         # Lua 资产
 └── Resources/       # 模型 / 纹理 / 音频等资产
 ```
 
-场景里的 `model: "Resources/Box.glb"` 是**项目相对路径**，统一由 `ProjectHandle`
-解析成绝对路径。编辑器与游戏都不依赖进程当前工作目录，项目目录可以随便移动、
-拷贝、进版本库。
+场景文件的 `ComponentData::Mesh.model` 等资产字段在磁盘存 `guid://…`；
+`ProjectHandle` 加载时统一解码成项目相对路径，再交给运行时。编辑器与游戏都不依赖
+进程当前工作目录，项目目录可以随便移动、拷贝、进版本库。
 
 ### 编辑器界面
 
@@ -457,20 +454,12 @@ lights: [
 
 ## 动画
 
-给实体挂上 `animator`，它引用的 glTF 模型就会动起来（骨骼蒙皮）：
+给实体挂 `Mesh` 与 `Animator` 组件后，Mesh 引用的 glTF 模型就会动起来（骨骼蒙皮）。
+下面展示的是 `ComponentInstance.data` 的 Animator 值；完整实体结构以
+`--export-schema` 或 `projects/XGame/Scenes/showcase.ron` 为准：
 
 ```ron
-(
-    name: "Fox",
-    model: "Resources/Fox.gltf",
-    transform: (
-        position: (0.0, 0.0, 0.0),
-        rotation: (0.0, 0.0, 0.0, 1.0),
-        // Khronos Fox 样例按厘米建模（骨骼跨度 ~100 单位，且 glTF 里没有归一化
-        // 根节点），scale 0.01 才是真实狐狸体型（约 1 米），否则有百倍立方体大。
-        scale: (0.01, 0.01, 0.01),
-    ),
-    animator: Some((
+Animator((
         clip: "Walk",      // 单剪辑模式：glTF 里的动画剪辑名
         speed: 1.0,        // 播放倍率；0 = 冻结，1 = 原速
         looping: true,     // true 取模循环；false 播完停在最后一帧
@@ -541,9 +530,10 @@ lights: [
             (time: 0.2, name: "footstep"),
             (time: 0.55, name: "footstep"),
         ],
-    )),
-    scripts: ["Scripts/FoxLocomotion.lua"],  // 推 speed/层机器参数/权重（见 Docs/脚本API.md 4.9/4.10）
-),
+))
+
+// Fox 的另一个组件；磁盘引用使用 GUID。
+Lua((path: "guid://<FoxLocomotion.lua 的 GUID>"))
 ```
 
 **怎么工作**：
@@ -623,7 +613,7 @@ lights: [
   看到新姿势（动画配置 + 机器参数 + 叠加层 + 层栈全进了渲染指纹）；视口有剪辑在播时
   帧策略自动保持连续出帧，停播后回到"没动就不画"的静态门控。
 
-v1 的边界（ROADMAP 阶段七有完整清单）：**单剪辑 + 换剪辑淡入 + 阈值状态机 +
+当前动画边界（ROADMAP 阶段七有完整清单）：**单剪辑 + 换剪辑淡入 + 阈值状态机 +
 单层叠加混合 + 多层混合栈与骨骼遮罩 + 平移根运动 + 形变目标 + 动画事件** —— 遮罩是二值的
 （权重整体缩放，边界不羽化）；根运动不提取旋转，也不消费 additive / layers；直接层
 换剪辑是硬切（分层机器转移可逐条配时长）；
@@ -642,15 +632,12 @@ v1 的边界（ROADMAP 阶段七有完整清单）：**单剪辑 + 换剪辑淡�
 "音乐音量"滑条就是这个语义）。默认音量全 1.0（= 不改变声音）。
 
 
-给实体挂上 `audio`，引擎（`xgame-audio`，基于 [kira](https://github.com/tesselode/kira)）
+给实体挂上 `Audio` 组件，引擎（`xgame-audio`，基于 [kira](https://github.com/tesselode/kira)）
 就会解码并播放它；勾上 `spatial` 就是带距离衰减的 3D 声：
 
 ```ron
-(
-    name: "Spinner",
-    // ……
-    audio: Some((
-        clip: "Resources/Audio/Beep.wav",  // 项目相对路径（wav / ogg / mp3）
+Audio((
+        clip: "guid://<Beep.wav 的 GUID>", // 磁盘引用；加载后为项目相对路径
         volume: 0.35,       // 线性音量：1.0 = 原音量
         pitch: 1.0,         // 播放速率（同时改变音高）
         looping: true,      // 循环（环境音）；false = 播一次
@@ -658,8 +645,7 @@ v1 的边界（ROADMAP 阶段七有完整清单）：**单剪辑 + 换剪辑淡�
         spatial: true,      // 3D 定位：随实体移动 + 距离衰减
         min_distance: 2.0,  // 满音量的最近距离
         max_distance: 24.0, // 衰减到听不见的最远距离
-    )),
-)
+))
 ```
 
 **怎么工作**：
@@ -680,7 +666,7 @@ v1 的边界（ROADMAP 阶段七有完整清单）：**单剪辑 + 换剪辑淡�
 脚本侧 API（`play_sound` / `play_sound_at` / `stop_sound` / `stop_all_sounds` /
 `set_listener` / `set_master_volume`）见 [Docs/脚本API.md](Docs/脚本API.md) 4.11；
 混音总线分组与流式长音频有意延后（见 PLAN.md 二十二 的取舍清单）。
-示例：SampleScene 的 Spinner 是空间化循环蜂鸣，Jumper 起跳播一次性音效。
+示例：XGame 的 Spinner 是空间化循环蜂鸣，Jumper 起跳播一次性音效。
 
 ## 游戏 UI（屏幕空间）
 
@@ -774,12 +760,14 @@ end
 实体之间可以有父子关系，与 Unity / Godot 的场景树一致：
 
 ```ron
-Entity(
-    name: "Box2",
-    transform: (position: (3.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.5, 1.5, 1.5)),
-    model: "Resources/Box.glb",
+// EntityV2 的元数据片段；组件值在 components.entries 中。
+(
     id: (2),
+    name: "Box2",
     parent: Some((1)),      // 挂到 id 为 1 的实体下
+    prefab: None,
+    layer: 0,
+    transform: (position: (3.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.5, 1.5, 1.5)),
 )
 ```
 
@@ -797,8 +785,7 @@ Entity(
 - **重挂父节点保留世界变换**（Unity 的 "keep world transform"）：拖到新父节点下时，
   局部变换会被自动重算，物体在画面上的位置不跳。成环（把父节点拖进自己子树）
   会被拒绝并在控制台提示。
-- **旧场景文件自动兼容**：没有 `id` / `parent` 字段的老 `.ron` 直接加载，全部落
-  在根层。
+- 磁盘文件必须使用当前组件格式；没有身份字段的旧扁平 `.ron` 会在读取边界被拒绝。
 
 ## 预制体（Prefab）
 
@@ -827,14 +814,14 @@ Unity 的 Prefab、Godot 的 PackedScene。
 场景文件里的实例长这样：
 
 ```ron
-Entity(
-    name: "Pillar",
-    transform: (position: (6.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.5, 1.5, 1.5)),
-    model: "Resources/Box.glb",
+// EntityV2 的实例元数据片段；Mesh 等值仍在 components.entries 中。
+(
     id: (7),
+    name: "Pillar",
     parent: None,
+    transform: (position: (6.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.5, 1.5, 1.5)),
     prefab: Some((
-        source: "Prefabs/Pillar.prefab.ron",   // 来自哪份资产（项目相对路径）
+        source: "guid://<Pillar.prefab.ron 的 GUID>", // 磁盘使用稳定资产身份
         source_id: (1),                        // 对应资产里哪个实体
         is_root: true,                         // 是不是这个实例的根
     )),
@@ -851,8 +838,7 @@ Entity(
 - **`is_root` 把实例根和内部节点分开**：只有根接受 Apply / Revert / 整棵连坐删除。
 - **资产文件里不保留实例来源**（写盘前会清掉），否则预制体套预制体会把实例元数据
   腌进资产，一实例化就自带错误的来源路径。
-- **普通实体不写 `prefab` 字段**（`skip_serializing_if`），场景文件不会被一堆
-  `prefab: None` 灌满；旧文件缺这个字段也能照常加载。
+- 普通实体的 `prefab` 为 `None`；只有实例实体携带来源资产与来源实体 ID。
 - 构建（🔨 Build）会把 `Prefabs/` 一并打进产物。
 
 ### 运行时实例化：`spawn_prefab`
@@ -1000,15 +986,15 @@ InputMap(
 
 ## 物理
 
-物理属性是**场景数据**（`Entity::physics`），不是"凡是带模型的实体都变成盒子"：
+物理属性是**场景组件数据**，不是"凡是带模型的实体都变成盒子"：
 
 ```ron
-physics: Some((kind: Dynamic, shape: Ball(radius: 0.5), restitution: 0.55)),
+Physics((kind: Dynamic, shape: Ball(radius: 0.5), restitution: 0.55))
 ```
 
 - `kind`：`Static`（地面 / 墙）/ `Dynamic`（受重力）/ `Kinematic`（脚本驱动）
 - `shape`：`Auto`（按实体缩放生成盒子）/ `Cuboid` / `Ball` / `Capsule` / `Cylinder`
-- 不写 `physics` = **纯视觉实体**，不参与模拟（旧场景文件正是这个语义，不会被重力拽走）
+- 没有 `Physics` 组件 = **纯视觉实体**，不参与模拟
 - 提供射线检测（`PhysicsWorld::raycast`），脚本里是 `raycast(ctx, ...)`，
   自动忽略传感器并排除自身
 
@@ -1017,10 +1003,10 @@ physics: Some((kind: Dynamic, shape: Ball(radius: 0.5), restitution: 0.55)),
 
 ### 角色控制器
 
-给实体加一行 `controller` 就是 Unity 式的角色（**实体原点是脚底**）：
+给实体加 `Character` 组件就是 Unity 式的角色（**实体原点是脚底**）：
 
 ```ron
-controller: Some((radius: 0.3, height: 1.8, step_offset: 0.35, slope_limit: 45.0)),
+Character((radius: 0.3, height: 1.8, step_offset: 0.35, slope_limit: 45.0))
 ```
 
 ```lua
@@ -1077,10 +1063,10 @@ end
 
 ### 相机
 
-给实体加一行 `camera` 就是一台相机（**相机是普通实体**，能被父节点带着走）：
+给实体加 `Camera` 组件就是一台相机（**相机是普通实体**，能被父节点带着走）：
 
 ```ron
-camera: Some((fov: 60.0, near: 0.1, far: 1000.0, active: true)),
+Camera((fov: 60.0, near: 0.1, far: 1000.0, active: true))
 ```
 
 - **本地方向 +Z 是镜头朝向**（与 glTF 的模型正面、`forward()` 一致）。宽高比
@@ -1093,7 +1079,7 @@ camera: Some((fov: 60.0, near: 0.1, far: 1000.0, active: true)),
 - Inspector 有 **Camera** 区块（FOV / Near / Far / Active）；脚本侧
   `look_at` / `look_at_entity` / `active_camera` / `set_active_camera` /
   `camera_fov` / `set_camera_fov`
-- 样例：`projects/SampleScene` 的 "Main Camera" 由 `Scripts/CameraFollow.lua`
+- 样例：`projects/XGame` 的 "Main Camera" 由 `Scripts/CameraFollow.lua`
   每帧摆到狐狸前侧上方并看向它 —— 不做"绕到背后"是因为场景正中有箱塔会挡视线
 
 ```lua
@@ -1190,7 +1176,7 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 dist/
 ├── xgame-editor.exe          # 编辑器，双击即用
 ├── xgame-game.exe            # 播放器（编辑器按 Build 时会复制它，必须和编辑器放在一起）
-├── projects/SampleScene/     # 示例项目，打开枢纽后可直接选它
+├── projects/XGame/           # 综合示范项目，打开枢纽后可直接选它
 └── README.txt                # 分发时附带的使用说明
 ```
 
@@ -1238,12 +1224,12 @@ Build/<项目名>/
 | 工具 | 干什么 |
 |---|---|
 | `component_catalog_read` | 读内建组件目录与现有 schema 的字段契约，不依赖项目 |
-| `component_upgrade_preview` | 只读预览旧实体的组件 ID 及预制体来源对位 |
-| `schema_read` | 读场景格式的机器可读说明书（41 个落盘类型 / 字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
+| `schema_read` | 读当前场景 / 预制体格式的机器可读说明书（字段 / 默认值 / 示例 / 资产引用；与 `--export-schema` 同源，不需要项目） |
 | `script_api_read` | 读脚本 API 的机器可读清单（182 个函数 / 签名 / 参数 / 返回值 / 7 个钩子 / 约定；与 `--export-script-api` 同源，不需要项目） |
 | `project_info` | 读清单概要：入口场景、窗口/重力/步长、场景/脚本/预制体清单 |
 | `scene_read` | 读场景的完整 RON 文本（与文件同构，可原样写回） |
-| `entity_components_read` | 按十进制字符串实体 ID 读取内建 / Rust / Lua 挂载列表和当前数据；旧格式 Rust / Lua 槽位地址重排后须重新查询，只读 |
+| `entity_components_read` | 按十进制字符串实体 ID 读取稳定组件 ID、来源 ID、强类型值与场景 revision，只读 |
+| `component_edit` | 按实体 ID + 组件 ID 补丁、替换、增删或重排；revision 过期就拒绝覆盖 |
 | `scene_write` | 整体替换场景；**先解析后落盘**，坏数据一个字节不写 |
 | `entity_upsert` | 按名字创建/部分更新实体（变换、模型、脚本、父子） |
 | `entity_remove` | 按名字删除实体（重名歧义拒绝；子节点提升不连坐） |

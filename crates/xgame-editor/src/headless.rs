@@ -45,9 +45,9 @@
 //! 既拿退出码、也拿结构化数据。
 //!
 //! ```sh
-//! cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
-//! cargo run -p xgame-editor -- --headless --dump-scene out.ron projects/SampleScene
-//! cargo run -p xgame-editor -- --headless --frames 120 --screenshot shot.png projects/SampleScene
+//! cargo run -p xgame-editor -- --headless --frames 300 projects/XGame
+//! cargo run -p xgame-editor -- --headless --dump-scene out.ron projects/XGame
+//! cargo run -p xgame-editor -- --headless --frames 120 --screenshot shot.png projects/XGame
 //! ```
 
 use std::path::PathBuf;
@@ -81,7 +81,7 @@ pub const MAX_DT: f32 = 1.0;
 const MAX_ERROR_SAMPLES: usize = 10;
 
 /// 缺省项目（与 `--check` 同一缺省，仓库内 `cargo run` 直接可跑）。
-const DEFAULT_PROJECT: &str = "projects/SampleScene";
+const DEFAULT_PROJECT: &str = "projects/XGame";
 
 /// 截图默认尺寸（16:9，1080p 的队友）。
 pub const DEFAULT_SHOT_SIZE: (u32, u32) = (1280, 720);
@@ -808,7 +808,13 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
     // 写失败就整体报失败（exit 1），别给出一份"看起来成功"的报告。
     let scene_dump = match &args.dump_scene {
         Some(path) => {
-            dump_scene(world.scene(), path)?;
+            let current = world
+                .current_scene()
+                .ok_or("运行时没有当前场景路径，无法保留文件组件身份")?;
+            let file = project
+                .prepare_scene_file(current, world.scene())
+                .map_err(|e| format!("生成当前场景文件快照失败: {e}"))?;
+            dump_scene(&file, path)?;
             Some(path.display().to_string())
         }
         None => None,
@@ -1009,15 +1015,17 @@ fn format_log(log: &ScriptLog) -> String {
     }
 }
 
-/// 场景写 RON（与 `ProjectHandle::write_scene` 同一序列化配置 —— 输出与
-/// 项目内场景读写同构，可 diff、可原样喂给 `scene_write`）。
-fn dump_scene(scene: &Scene, path: &std::path::Path) -> Result<(), String> {
+/// 当前文件模型写 RON；输出可 diff，也可原样喂给 MCP `scene_write`。
+fn dump_scene(
+    scene: &xgame_core::scene_v2::SceneV2,
+    path: &std::path::Path,
+) -> Result<(), String> {
     if path.exists() {
         let original = std::fs::read_to_string(path)
             .map_err(|e| format!("无法核对现有场景文件 ({}): {e}", path.display()))?;
-        ron::from_str::<Scene>(&original).map_err(|e| {
+        xgame_core::scene_v2::SceneV2::from_ron(&original).map_err(|e| {
             format!(
-                "目标 {} 不是可安全覆写的 v1 场景（可能含 v2 组件身份）: {e}",
+                "目标 {} 不是可安全覆写的当前场景文件: {e}",
                 path.display()
             )
         })?;
@@ -1028,8 +1036,7 @@ fn dump_scene(scene: &Scene, path: &std::path::Path) -> Result<(), String> {
                 .map_err(|e| format!("创建场景输出目录失败 ({}): {e}", parent.display()))?;
         }
     }
-    let text = ron::ser::to_string_pretty(scene, ron::ser::PrettyConfig::default())
-        .map_err(|e| format!("场景序列化失败: {e}"))?;
+    let text = scene.to_ron().map_err(|e| format!("场景序列化失败: {e}"))?;
     xgame_core::fsx::write_atomic(path, text)
         .map_err(|e| format!("写场景文件失败 ({}): {e}", path.display()))
 }
@@ -1065,32 +1072,28 @@ mod tests {
     }
 
     #[test]
-    fn headless_executes_v2_entry_scene_without_modifying_component_file() {
-        let project = temp_project("v2_entry");
+    fn headless_executes_current_entry_scene_without_modifying_component_file() {
+        let project = temp_project("current_entry");
         let entry = project.manifest().entry_scene.clone();
         let mut scene = project.load_entry_scene().unwrap();
         scene.add_entity(Entity::new("Runner").with_model("builtin://cube"));
-        let upgraded = xgame_core::scene_v2::SceneV2::from_v1_plain(&scene).unwrap();
-        let text = upgraded.to_ron().unwrap();
-        std::fs::write(project.path(&entry), &text).unwrap();
-        let report = run(&opts(&project, 2)).expect("无头运行应能读取 v2 场景");
+        project.write_scene(&entry, &scene).unwrap();
+        let text = std::fs::read_to_string(project.path(&entry)).unwrap();
+        let report = run(&opts(&project, 2)).expect("无头运行应能读取当前场景");
         assert!(report.entities >= 2);
         assert_eq!(std::fs::read_to_string(project.path(&entry)).unwrap(), text);
         cleanup(&project);
     }
 
     #[test]
-    fn scene_dump_refuses_to_overwrite_v2_component_ids() {
-        let project = temp_project("v2_dump_guard");
+    fn scene_dump_preserves_current_component_ids() {
+        let project = temp_project("current_dump_identity");
         let path = project.path(&project.manifest().entry_scene);
-        let scene = project.load_entry_scene().unwrap();
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&scene)
-            .unwrap()
-            .to_ron()
-            .unwrap();
-        std::fs::write(&path, &v2).unwrap();
-        assert!(dump_scene(&scene, &path).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), v2);
+        let file = project.load_scene_v2(&project.manifest().entry_scene).unwrap();
+        let transform_id = file.entities[0].transform_identity.id;
+        dump_scene(&file, &path).unwrap();
+        let loaded = project.load_scene_v2(&project.manifest().entry_scene).unwrap();
+        assert_eq!(loaded.entities[0].transform_identity.id, transform_id);
         cleanup(&project);
     }
 
@@ -1124,7 +1127,7 @@ mod tests {
     fn parse_args_defaults_to_bundled_sample() {
         let args = parse_args(&[]).expect("空参数应合法");
         assert_eq!(args, HeadlessArgs::default());
-        assert_eq!(args.project, PathBuf::from("projects/SampleScene"));
+        assert_eq!(args.project, PathBuf::from("projects/XGame"));
         assert_eq!(args.frames, DEFAULT_FRAMES);
         assert!(args.dt.is_none());
     }
@@ -2000,7 +2003,7 @@ mod tests {
     #[test]
     fn bundled_sample_project_runs_clean_headless() {
         let root =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/SampleScene");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/XGame");
         if !root.join("project.ron").is_file() {
             return; // 脱离仓库单独分发时跳过
         }

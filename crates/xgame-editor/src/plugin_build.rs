@@ -492,13 +492,13 @@ mod tests {
     /// `cargo build` JSON 解析：只挑 cdylib 且扩展名匹配的文件名。
     ///
     /// 固定 JSON 是**实测形状**（`cargo build --message-format=json-render-diagnostics`
-    /// 在 BehaviorsDemo 上的真实输出）：`crate-type = ["cdylib", "rlib"]` 的目标
-    /// 一次给五个文件名，其中 `behaviors_demo.dll.lib` 的扩展名是 `lib` 而不是
+    /// 在 XGame 上的真实输出）：`crate-type = ["cdylib", "rlib"]` 的目标
+    /// 一次给五个文件名，其中 `xgame_project.dll.lib` 的扩展名是 `lib` 而不是
     /// `dll` —— 靠 `Path::extension` 取最后一段来区分，不能用 `contains("dll")`。
     #[test]
     fn parse_cdylib_artifacts() {
         let json = r#"
-{"reason":"compiler-artifact","target":{"kind":["cdylib","rlib"],"name":"behaviors_demo"},"filenames":["D:/t/debug/behaviors_demo.dll","D:/t/debug/behaviors_demo.dll.lib","D:/t/debug/behaviors_demo.dll.exp","D:/t/debug/behaviors_demo.pdb","D:/t/debug/libbehaviors_demo.rlib"]}
+{"reason":"compiler-artifact","target":{"kind":["cdylib","rlib"],"name":"xgame_project"},"filenames":["D:/t/debug/xgame_project.dll","D:/t/debug/xgame_project.dll.lib","D:/t/debug/xgame_project.dll.exp","D:/t/debug/xgame_project.pdb","D:/t/debug/libxgame_project.rlib"]}
 {"reason":"compiler-artifact","target":{"kind":["lib"],"name":"dep"},"filenames":["D:/t/debug/libdep.rlib"]}
 {"reason":"build-finished","success":true}
 not json at all
@@ -511,7 +511,7 @@ not json at all
         );
         let name = dlls[0].file_name().unwrap().to_str().unwrap();
         assert!(
-            name.eq_ignore_ascii_case("behaviors_demo.dll"),
+            name.eq_ignore_ascii_case("xgame_project.dll"),
             "实际拿到 {name}"
         );
     }

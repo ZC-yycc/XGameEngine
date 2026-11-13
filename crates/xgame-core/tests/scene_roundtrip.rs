@@ -26,7 +26,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use glam::{Quat, Vec3};
-use xgame_core::prefab::PrefabInstanceRef;
 use xgame_core::project::ProjectHandle;
 use xgame_core::{
     Animator, AudioSource, BodyKind, Camera, CharacterController, CollisionShape, Entity,
@@ -116,7 +115,6 @@ const MODELS: &[&str] = &["Resources/Models/Box.glb", "Resources/Models/Two.glb"
 const SCRIPTS: &[&str] = &["Scripts/Player.lua"];
 const AUDIO: &[&str] = &["Resources/Audio/Beep.wav"];
 const MATERIALS: &[&str] = &["Resources/Materials/Wood.mat"];
-const PREFABS: &[&str] = &["Prefabs/Enemy.prefab.ron"];
 
 fn random_transform(rng: &mut Rng) -> Transform {
     Transform {
@@ -330,13 +328,6 @@ fn random_entity(rng: &mut Rng) -> Entity {
             active: rng.chance(0.3),
         });
     }
-    if rng.chance(0.2) {
-        entity.prefab = Some(PrefabInstanceRef {
-            source: rng.pick(PREFABS).to_string(),
-            source_id: xgame_core::EntityId::new(),
-            is_root: rng.chance(0.5),
-        });
-    }
     entity
 }
 
@@ -365,7 +356,6 @@ fn random_scene(rng: &mut Rng, name: &str) -> Scene {
         });
     }
     Scene {
-        format_version: 1,
         name: name.to_string(),
         entities,
         lights,
@@ -398,7 +388,6 @@ fn temp_project(tag: &str) -> (ProjectHandle, PathBuf) {
         ("Resources/Audio/Beep.wav", b"wav".as_slice()),
         ("Scripts/Player.lua", b"-- lua".as_slice()),
         ("Resources/Materials/Wood.mat", b"(base_color:(1,1,1,1))".as_slice()),
-        ("Prefabs/Enemy.prefab.ron", b"(name:\"Enemy\",entities:[])".as_slice()),
     ] {
         let path = project.root().join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -467,7 +456,6 @@ fn random_prefabs_survive_save_load_save() {
         let mut rng = Rng::new(seed ^ 0xA5A5);
         let scene = random_scene(&mut rng, &format!("P{seed}"));
         let prefab = Prefab {
-            format_version: 1,
             name: scene.name.clone(),
             entities: scene.entities,
         };
@@ -488,80 +476,28 @@ fn random_prefabs_survive_save_load_save() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// **坏数据**也要能装进来，而且"修一次之后就稳定"。
-///
-/// 这一条盯的不是"数据对不对"（那是 `--check` 的活），而是"加载边界会不会
-/// 卡死 / 崩 / 越修越乱"：
-///
-/// - 重复实体 ID：`ensure_unique_ids` 会重分配（同文件引用，损失有界），
-///   所以 `t1 != t2` 是**允许**的；
-/// - 悬空父节点 / 自指 / 成环：只报告，不修 —— `hierarchy()` 不许因此死循环；
-/// - 越界 UI / 粒子数值：`sanitize_*` 夹一次；
-/// - 空名字、超长名字、极端浮点：原样保留。
-///
-/// 断言只有两条：**装得进来**（不 panic、不死循环），**第二轮不再变**。
+/// 重复实体 ID 无法安全建立文件身份，必须在碰盘前拒绝且保住原文。
 #[test]
-fn hostile_scenes_load_and_settle() {
+fn duplicate_entity_ids_are_rejected_without_touching_file() {
     let (project, base) = temp_project("hostile");
+    let relative = project.manifest().entry_scene.clone();
+    let original = std::fs::read(project.path(&relative)).unwrap();
     for seed in 1..=SEEDS {
         let mut rng = Rng::new(seed ^ 0xDEAD_BEEF);
         let mut scene = random_scene(&mut rng, &format!("H{seed}"));
-
-        // 重复 ID：把后面一半实体全部改成第一个的 ID。
-        if scene.entities.len() > 2 {
-            let first = scene.entities[0].id;
-            for entity in scene.entities.iter_mut().skip(1) {
-                if rng.chance(0.5) {
-                    entity.id = first;
-                }
-            }
+        if scene.entities.len() == 1 {
+            scene.entities.push(Entity::new("duplicate"));
         }
-        // 悬空父节点 / 自指 / 成环（三者都不是"能自动修好"的东西）。
-        for index in 0..scene.entities.len() {
-            match rng.below(4) {
-                0 => scene.entities[index].parent = Some(xgame_core::EntityId::new()),
-                1 => scene.entities[index].parent = Some(scene.entities[index].id),
-                2 if scene.entities.len() > 2 => {
-                    let next = (index + 1) % scene.entities.len();
-                    scene.entities[index].parent = Some(scene.entities[next].id);
-                }
-                _ => {}
-            }
-        }
-        // 越界的 UI / 粒子 / morph：加载边界夹一次，之后必须稳定。
-        for entity in scene.entities.iter_mut() {
-            if let Some(ui) = entity.ui.as_mut() {
-                ui.anchor_min = [rng.f32(-10.0, 10.0), rng.f32(-10.0, 10.0)];
-                ui.offset_max = [rng.f32(-1e6, 1e6), rng.f32(-1e6, 1e6)];
-            }
-            if let Some(particle) = entity.particle.as_mut() {
-                particle.max_particles = u32::MAX;
-                particle.spread = rng.f32(-720.0, 720.0);
-            }
-            if rng.chance(0.3) {
-                entity.morph_weights = vec![rng.f32(-4.0, 4.0), rng.f32(-4.0, 4.0)];
-            }
-        }
-
-        let first = "Scenes/hostile.ron".to_string();
-        project.write_scene(&first, &scene).expect("坏数据也要写得下去");
-        let loaded = project
-            .load_scene(&first)
-            .expect("坏数据必须装得进来（不 panic）");
-
-        project.write_scene(&first, &loaded).expect("写第二份");
-        let settled = project.load_scene(&first).expect("再读回来");
-        let second = read(&project, &first);
-        project.write_scene(&first, &settled).expect("写第三份");
-        let third = read(&project, &first);
-
+        scene.entities[1].id = scene.entities[0].id;
+        let error = project
+            .write_scene(&relative, &scene)
+            .expect_err("重复 ID 必须被拒绝");
+        assert!(error.to_string().contains("ID"), "seed={seed}: {error}");
         assert_eq!(
-            second, third,
-            "seed={seed}: 夹取之后仍在变 —— 加载边界的修正是**非幂等**的"
+            std::fs::read(project.path(&relative)).unwrap(),
+            original,
+            "seed={seed}: 被拒写入不能改动原场景"
         );
-
-        // 修完之后的数据必须能过一遍"层级遍历"而不死循环（成环时靠 visited 集兜住）。
-        let _ = settled.hierarchy();
     }
     let _ = std::fs::remove_dir_all(&base);
 }

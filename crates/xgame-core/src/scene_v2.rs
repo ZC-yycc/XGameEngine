@@ -1,6 +1,6 @@
-//! v2 的强类型文件模型：稳定组件身份、严格 RON、编辑器合并及预制体来源同步。
+//! 当前场景文件模型：稳定组件身份、严格 RON、编辑器合并及预制体来源同步。
 //!
-//! 组件值在运行时仍投影到唯一的 v1 [`Scene`] 值模型；这里持有的是跨保存身份与
+//! 组件值在运行时仍投影到唯一的 [`Scene`] 值模型；这里持有的是跨保存身份与
 //! 文件边界。所有 GUID 编解码和条件写盘继续由 [`crate::ProjectHandle`] 负责。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
-/// v1 的 serde 宽容读取要保留；v2 若把未知嵌套字段吞掉再保存，会不可逆地删数据。
+/// 当前格式若把未知嵌套字段吞掉再保存，会不可逆地删数据。
 fn parse_v2<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, String> {
     let mut deserializer = ron::de::Deserializer::from_str(text).map_err(|e| format!("{e:#}"))?;
     let mut ignored = Vec::new();
@@ -21,14 +21,14 @@ fn parse_v2<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, String> {
         Ok(parsed)
     } else {
         Err(format!(
-            "v2 文件含不认识的字段，拒绝丢弃: {}",
+            "场景文件含不认识的字段，拒绝丢弃: {}",
             ignored.join(", ")
         ))
     }
 }
 
 use crate::component_id::{ComponentId, ComponentIdSequence, ComponentIdentity};
-use crate::component_upgrade::preview_component_upgrade;
+use crate::component_identity_plan::plan_runtime_component_identities;
 pub use crate::v2_animator::StrictAnimator;
 use crate::{
     AudioSource, BuiltinComponent, Camera, CharacterController, ComponentAddress, Entity, EntityId,
@@ -96,21 +96,15 @@ pub enum ComponentData {
     Particle(ParticleEmitter),
     Rust {
         registered_name: String,
-        /// None 与 Some(空表) 在旧文件中不同；转换期保留原样，不能压成一个默认值。
+        /// None 与 Some(空表) 语义不同，投影时保留原样，不能压成一个默认值。
         fields: Option<StrictFieldValues>,
     },
     Lua {
         path: String,
     },
-    /// 只为读取拆分前的 v2 文件保留；新建、迁移与编辑器保存都不再生成。
-    #[serde(rename = "Render")]
-    LegacyRender(RenderData),
-    /// 同上：旧 v2 曾把逐实体覆盖单列；现在它与材质资产同属 Material。
-    #[serde(rename = "MaterialOverride")]
-    LegacyMaterialOverride(MaterialOverride),
 }
 
-/// v1 的 BTreeMap 遇到同名字段会保留后者；v2 拒绝这种不可逆覆盖。
+/// 普通 BTreeMap 遇到同名字段会保留后者；文件边界拒绝这种不可逆覆盖。
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
 pub struct StrictFieldValues(pub crate::inspect::FieldValues);
@@ -155,26 +149,14 @@ pub struct MaterialData {
     pub overrides: Option<MaterialOverride>,
 }
 
-/// 拆分前的 v2 Render 载荷。只用于兼容读取，不再作为当前组件模型输出。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RenderData {
-    pub model: String,
-    pub lod: LodGroup,
-    pub material_asset: Option<String>,
-    pub morph_weights: Vec<f32>,
-}
-
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum LegacyComponentKey {
+enum ComponentKey {
     Builtin(BuiltinComponent),
     Rust(String),
     Lua(String),
-    LegacyRender,
-    LegacyMaterialOverride,
 }
 
-impl LegacyComponentKey {
+impl ComponentKey {
     fn from_address(address: ComponentAddress, name: &str) -> Self {
         match address {
             ComponentAddress::Builtin(kind) => Self::Builtin(kind),
@@ -184,23 +166,14 @@ impl LegacyComponentKey {
     }
 }
 
-impl RenderData {
-    fn is_legacy_absent(&self) -> bool {
-        self.model.is_empty()
-            && self.lod.is_empty()
-            && self.material_asset.is_none()
-            && self.morph_weights.is_empty()
-    }
-}
-
 impl MeshData {
-    fn is_legacy_absent(&self) -> bool {
+    fn is_absent_in_runtime(&self) -> bool {
         self.model.is_empty() && self.morph_weights.is_empty()
     }
 }
 
 impl MaterialData {
-    fn is_legacy_absent(&self) -> bool {
+    fn is_absent_in_runtime(&self) -> bool {
         self.asset.is_none() && self.overrides.is_none()
     }
 }
@@ -211,57 +184,26 @@ impl ComponentData {
         parse_v2(text)
     }
 
-    fn legacy_key(&self) -> LegacyComponentKey {
+    fn key(&self) -> ComponentKey {
         match self {
-            Self::Mesh(_) => LegacyComponentKey::Builtin(BuiltinComponent::Mesh),
-            Self::Lod(_) => LegacyComponentKey::Builtin(BuiltinComponent::Lod),
-            Self::Material(_) => LegacyComponentKey::Builtin(BuiltinComponent::Material),
-            Self::Ui(_) => LegacyComponentKey::Builtin(BuiltinComponent::Ui),
-            Self::Animator(_) => LegacyComponentKey::Builtin(BuiltinComponent::Animator),
-            Self::Physics(_) => LegacyComponentKey::Builtin(BuiltinComponent::Physics),
-            Self::Character(_) => LegacyComponentKey::Builtin(BuiltinComponent::Character),
-            Self::Audio(_) => LegacyComponentKey::Builtin(BuiltinComponent::Audio),
-            Self::Camera(_) => LegacyComponentKey::Builtin(BuiltinComponent::Camera),
-            Self::Particle(_) => LegacyComponentKey::Builtin(BuiltinComponent::Particle),
+            Self::Mesh(_) => ComponentKey::Builtin(BuiltinComponent::Mesh),
+            Self::Lod(_) => ComponentKey::Builtin(BuiltinComponent::Lod),
+            Self::Material(_) => ComponentKey::Builtin(BuiltinComponent::Material),
+            Self::Ui(_) => ComponentKey::Builtin(BuiltinComponent::Ui),
+            Self::Animator(_) => ComponentKey::Builtin(BuiltinComponent::Animator),
+            Self::Physics(_) => ComponentKey::Builtin(BuiltinComponent::Physics),
+            Self::Character(_) => ComponentKey::Builtin(BuiltinComponent::Character),
+            Self::Audio(_) => ComponentKey::Builtin(BuiltinComponent::Audio),
+            Self::Camera(_) => ComponentKey::Builtin(BuiltinComponent::Camera),
+            Self::Particle(_) => ComponentKey::Builtin(BuiltinComponent::Particle),
             Self::Rust {
                 registered_name, ..
-            } => LegacyComponentKey::Rust(registered_name.clone()),
-            Self::Lua { path } => LegacyComponentKey::Lua(path.clone()),
-            Self::LegacyRender(_) => LegacyComponentKey::LegacyRender,
-            Self::LegacyMaterialOverride(_) => LegacyComponentKey::LegacyMaterialOverride,
+            } => ComponentKey::Rust(registered_name.clone()),
+            Self::Lua { path } => ComponentKey::Lua(path.clone()),
         }
     }
 
-    fn is_current_visual(&self) -> bool {
-        matches!(Self::legacy_key(self), LegacyComponentKey::Builtin(
-            BuiltinComponent::Mesh | BuiltinComponent::Lod | BuiltinComponent::Material
-        ))
-    }
-
-    fn is_legacy_visual(&self) -> bool {
-        matches!(
-            self,
-            Self::LegacyRender(_) | Self::LegacyMaterialOverride(_)
-        )
-    }
-
-    /// 拆分旧复合组件时，哪一个新组件可以继承原来的本地 ID。
-    ///
-    /// 一个旧 Render 最多把身份交给一个新组件；其余拆出来的项从高水位分配。
-    /// 这样既不伪造“一份 ID 同时属于三项”，也尽量让最靠前的存活视觉组件稳定。
-    fn can_seed_split_identity(&self, current: &Self) -> bool {
-        match (self, current) {
-            (Self::LegacyRender(old), Self::Mesh(_)) => {
-                !old.model.is_empty() || !old.morph_weights.is_empty()
-            }
-            (Self::LegacyRender(old), Self::Lod(_)) => !old.lod.is_empty(),
-            (Self::LegacyRender(old), Self::Material(_)) => old.material_asset.is_some(),
-            (Self::LegacyMaterialOverride(_), Self::Material(_)) => true,
-            _ => false,
-        }
-    }
-
-    fn from_v1(entity: &Entity, address: ComponentAddress) -> Self {
+    fn from_runtime(entity: &Entity, address: ComponentAddress) -> Self {
         match address {
             ComponentAddress::Builtin(kind) => match kind {
                 BuiltinComponent::Transform => unreachable!("Transform 留在实体元数据中"),
@@ -312,36 +254,27 @@ impl ComponentData {
         }
     }
 
-    fn apply_to_v1(self, entity: &mut Entity) -> Result<(), String> {
+    fn apply_to_runtime(self, entity: &mut Entity) -> Result<(), String> {
         match self {
             Self::Mesh(data) => {
-                if data.is_legacy_absent() {
-                    return Err("旧格式无法表达空的 Mesh 组件".into());
+                if data.is_absent_in_runtime() {
+                    return Err("运行时值模型无法表达空的 Mesh 组件".into());
                 }
                 entity.model = data.model;
                 entity.morph_weights = data.morph_weights;
             }
             Self::Lod(data) => {
                 if data.is_empty() {
-                    return Err("旧格式无法表达空的 LOD 组件".into());
+                    return Err("运行时值模型无法表达空的 LOD 组件".into());
                 }
                 entity.lod = data;
             }
             Self::Material(data) => {
-                if data.is_legacy_absent() {
-                    return Err("旧格式无法表达空的 Material 组件".into());
+                if data.is_absent_in_runtime() {
+                    return Err("运行时值模型无法表达空的 Material 组件".into());
                 }
                 entity.material_asset = data.asset;
                 entity.material = data.overrides;
-            }
-            Self::LegacyRender(data) => {
-                if data.is_legacy_absent() {
-                    return Err("旧格式无法表达空的 Render 组件".into());
-                }
-                entity.model = data.model;
-                entity.lod = data.lod;
-                entity.material_asset = data.material_asset;
-                entity.morph_weights = data.morph_weights;
             }
             Self::Ui(value) => entity.ui = Some(value),
             Self::Animator(value) => entity.animator = Some(value.0),
@@ -350,13 +283,14 @@ impl ComponentData {
             Self::Audio(value) => entity.audio = Some(value),
             Self::Camera(value) => entity.camera = Some(value),
             Self::Particle(value) => entity.particle = Some(value),
-            Self::LegacyMaterialOverride(value) => entity.material = Some(value),
             Self::Rust {
                 registered_name,
                 fields,
             } => {
                 if entity.behaviors.contains(&registered_name) {
-                    return Err(format!("旧格式无法表达同名 Rust 组件 {registered_name:?}"));
+                    return Err(format!(
+                        "运行时值模型无法表达同名 Rust 组件 {registered_name:?}"
+                    ));
                 }
                 entity.behaviors.push(registered_name.clone());
                 if let Some(fields) = fields {
@@ -365,7 +299,7 @@ impl ComponentData {
             }
             Self::Lua { path } => {
                 if entity.scripts.contains(&path) {
-                    return Err(format!("旧格式无法表达重复 Lua 脚本 {path:?}"));
+                    return Err(format!("运行时值模型无法表达重复 Lua 脚本 {path:?}"));
                 }
                 entity.scripts.push(path);
             }
@@ -387,30 +321,11 @@ impl ComponentData {
             Self::Particle(_) => "Particle",
             Self::Rust { .. } => "Rust",
             Self::Lua { .. } => "Lua",
-            Self::LegacyRender(_) => "Render",
-            Self::LegacyMaterialOverride(_) => "MaterialOverride",
         }
     }
 }
 
 impl EntityV2 {
-    /// 旧视觉变体只承担兼容读取；任何通用组件编辑都必须先迁移。
-    ///
-    /// Transform patch 不经过 `replace_component`，因此工具入口也要显式调用本门禁，
-    /// 否则一次无关的变换编辑就会把旧 `Render` 原样写回磁盘。
-    pub fn require_current_component_layout(&self) -> Result<(), String> {
-        if self
-            .components
-            .entries
-            .iter()
-            .any(|entry| entry.data.is_legacy_visual())
-        {
-            Err("实体仍含旧 Render / MaterialOverride；请先经编辑器保存迁移后再修改组件".into())
-        } else {
-            Ok(())
-        }
-    }
-
     /// 组件 ID 在本实体内稳定；Transform 是固有属性，不在可移除列表中。
     pub fn component(&self, id: ComponentId) -> Option<&ComponentData> {
         self.components
@@ -422,15 +337,11 @@ impl EntityV2 {
 
     pub fn add_component(&mut self, data: ComponentData) -> Result<ComponentId, String> {
         self.validate()?;
-        self.require_current_component_layout()?;
-        if data.is_legacy_visual() {
-            return Err("旧 Render / MaterialOverride 变体只允许兼容读取，不能新增".into());
-        }
         if self
             .components
             .entries
             .iter()
-            .any(|entry| entry.data.legacy_key() == data.legacy_key())
+            .any(|entry| entry.data.key() == data.key())
         {
             return Err(format!("实体 {:?} 已有同名组件 {}", self.name, data.kind()));
         }
@@ -447,7 +358,6 @@ impl EntityV2 {
 
     pub fn remove_component(&mut self, id: ComponentId) -> Result<ComponentInstance, String> {
         self.validate()?;
-        self.require_current_component_layout()?;
         if id == self.transform_identity.id {
             return Err("Transform 是固有组件，不能移除".into());
         }
@@ -467,7 +377,6 @@ impl EntityV2 {
         data: ComponentData,
     ) -> Result<(), String> {
         self.validate()?;
-        self.require_current_component_layout()?;
         let index = self
             .components
             .entries
@@ -475,14 +384,10 @@ impl EntityV2 {
             .position(|entry| entry.identity.id == id)
             .ok_or_else(|| format!("实体 {:?} 找不到可替换的组件 ID {}", self.name, id.raw()))?;
         let old = &self.components.entries[index];
-        if data.is_legacy_visual() && !old.data.is_legacy_visual() {
-            return Err("不能把当前组件替换成只读兼容变体".into());
-        }
         if old.data.kind() != data.kind() {
             return Err("组件种类不能通过替换操作改变".into());
         }
-        if old.identity.source_component_id.is_some() && old.data.legacy_key() != data.legacy_key()
-        {
+        if old.identity.source_component_id.is_some() && old.data.key() != data.key() {
             return Err("带预制体来源的组件不能改变关联名称或路径".into());
         }
         if self
@@ -490,7 +395,7 @@ impl EntityV2 {
             .entries
             .iter()
             .enumerate()
-            .any(|(i, entry)| i != index && entry.data.legacy_key() == data.legacy_key())
+            .any(|(i, entry)| i != index && entry.data.key() == data.key())
         {
             return Err("替换后的组件与实体已有的挂载物重复".into());
         }
@@ -500,7 +405,6 @@ impl EntityV2 {
 
     pub fn move_component(&mut self, id: ComponentId, to: usize) -> Result<(), String> {
         self.validate()?;
-        self.require_current_component_layout()?;
         let count = self.components.entries.len();
         if to >= count {
             return Err(format!("组件目标位置 {to} 超出 0..{count}"));
@@ -534,15 +438,6 @@ impl EntityV2 {
                         visit(material);
                     }
                 }
-                ComponentData::LegacyRender(render) => {
-                    visit(&mut render.model);
-                    for level in &mut render.lod.levels {
-                        visit(&mut level.model);
-                    }
-                    if let Some(material) = &mut render.material_asset {
-                        visit(material);
-                    }
-                }
                 ComponentData::Lua { path } => visit(path),
                 ComponentData::Audio(audio) => visit(&mut audio.clip),
                 ComponentData::Ui(ui) => {
@@ -555,17 +450,16 @@ impl EntityV2 {
                 | ComponentData::Character(_)
                 | ComponentData::Camera(_)
                 | ComponentData::Particle(_)
-                | ComponentData::LegacyMaterialOverride(_)
                 | ComponentData::Rust { .. } => {}
             }
         }
     }
 
-    fn from_v1(entity: &Entity, source: Option<&EntityV2>) -> Result<Self, String> {
+    fn from_runtime(entity: &Entity, source: Option<&EntityV2>) -> Result<Self, String> {
         if entity.prefab.is_some() != source.is_some() {
             return Err(format!("实体 {:?} 的预制体来源尚未提供", entity.name));
         }
-        let plan = preview_component_upgrade(entity, None)?;
+        let plan = plan_runtime_component_identities(entity, None)?;
         let source_ids = source
             .map(EntityV2::source_keys)
             .transpose()?
@@ -582,14 +476,14 @@ impl EntityV2 {
             .map(|component| ComponentInstance {
                 identity: ComponentIdentity {
                     source_component_id: source_ids
-                        .get(&LegacyComponentKey::from_address(
+                        .get(&ComponentKey::from_address(
                             component.address,
                             &component.name,
                         ))
                         .copied(),
                     ..component.identity
                 },
-                data: ComponentData::from_v1(entity, component.address),
+                data: ComponentData::from_runtime(entity, component.address),
             })
             .collect();
         Ok(Self {
@@ -648,12 +542,8 @@ impl EntityV2 {
             ),
         )?;
         let mut kinds = BTreeSet::new();
-        let mut has_current_visual = false;
-        let mut has_legacy_visual = false;
         for entry in &self.components.entries {
-            has_current_visual |= entry.data.is_current_visual();
-            has_legacy_visual |= entry.data.is_legacy_visual();
-            if !kinds.insert(entry.data.legacy_key()) {
+            if !kinds.insert(entry.data.key()) {
                 return Err(format!(
                     "实体 {:?} 的 {} 组件重复",
                     self.name,
@@ -661,16 +551,10 @@ impl EntityV2 {
                 ));
             }
         }
-        if has_current_visual && has_legacy_visual {
-            return Err(format!(
-                "实体 {:?} 不能混用旧 Render 与拆分后的视觉组件",
-                self.name
-            ));
-        }
         Ok(())
     }
 
-    fn into_v1(self) -> Result<Entity, String> {
+    fn into_runtime(self) -> Result<Entity, String> {
         self.validate()?;
         let mut entity = Entity::new(self.name);
         entity.id = self.id;
@@ -679,18 +563,18 @@ impl EntityV2 {
         entity.layer = self.layer;
         entity.transform = self.transform;
         for entry in self.components.entries {
-            entry.data.apply_to_v1(&mut entity)?;
+            entry.data.apply_to_runtime(&mut entity)?;
         }
         Ok(entity)
     }
 
     /// 资产实体上的组件身份是来源 ID 的真相；资产组件重排或删除后高水位不回退。
-    fn source_keys(&self) -> Result<BTreeMap<LegacyComponentKey, ComponentId>, String> {
+    fn source_keys(&self) -> Result<BTreeMap<ComponentKey, ComponentId>, String> {
         self.validate()?;
         let mut keys = BTreeMap::new();
         for entry in &self.components.entries {
             if keys
-                .insert(entry.data.legacy_key(), entry.identity.id)
+                .insert(entry.data.key(), entry.identity.id)
                 .is_some()
             {
                 return Err(format!("预制体实体 {:?} 存在无法关联的重复组件", self.name));
@@ -698,9 +582,50 @@ impl EntityV2 {
         }
         Ok(keys)
     }
+
+    fn validate_source_identity(&self, source: &EntityV2) -> Result<(), String> {
+        if self.transform_identity.source_component_id != Some(source.transform_identity.id) {
+            return Err(format!("实体 {:?} 的 Transform 来源 ID 不匹配", self.name));
+        }
+        let keys = source.source_keys()?;
+        for entry in &self.components.entries {
+            if let Some(id) = entry.identity.source_component_id {
+                if keys.get(&entry.data.key()) != Some(&id) {
+                    return Err(format!(
+                        "实体 {:?} 的组件来源 ID {} 不匹配",
+                        self.name,
+                        id.raw()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl SceneV2 {
+    /// 项目读取边界保留既有的场景自愈契约：后出现的重复实体换新 ID，父引用仍
+    /// 指向第一个同 ID 实体。直接 [`Self::from_ron`] 继续严格拒绝重复，避免工具
+    /// 或写入路径把坏文件误当成可原样保存的文件模型。
+    pub(crate) fn from_ron_repairing_duplicate_entity_ids(
+        text: &str,
+    ) -> Result<(Self, usize), String> {
+        let mut parsed: Self = parse_v2(text)?;
+        parsed.validate_format_version()?;
+        let mut ids = BTreeSet::new();
+        let mut repaired = 0;
+        for entity in &mut parsed.entities {
+            if ids.insert(entity.id.raw()) {
+                continue;
+            }
+            entity.id = EntityId::new();
+            ids.insert(entity.id.raw());
+            repaired += 1;
+        }
+        parsed.validate()?;
+        Ok((parsed, repaired))
+    }
+
     /// 撤销只恢复组件内容；已经发放过的 ID 不随历史快照回退。
     pub fn keep_allocated_ids(&mut self, later: &Self) {
         for entity in &mut self.entities {
@@ -716,33 +641,33 @@ impl SceneV2 {
         }
     }
 
-    /// 将编辑器的可变 Scene 视图合入组件身份。先完整构造候选再替换，
+    /// 将编辑器的可变 [`Scene`] 运行时视图合入组件身份。先完整构造候选再替换，
     /// 避免一份坏草稿让会话中的已保存 ID / 高水位发生半途改变。
-    pub fn reconcile_from_v1(
+    pub fn reconcile_from_runtime(
         &mut self,
         scene: &Scene,
         prefabs: &BTreeMap<String, PrefabV2>,
     ) -> Result<(), String> {
-        self.reconcile_from_v1_inner(scene, prefabs, true)
+        self.reconcile_from_runtime_inner(scene, prefabs, true)
     }
 
     /// 撤销快照允许保留已被外部资产删除的旧来源；不能将结果当成可保存场景。
-    pub fn reconcile_from_v1_for_history(
+    pub fn reconcile_from_runtime_for_history(
         &mut self,
         scene: &Scene,
         prefabs: &BTreeMap<String, PrefabV2>,
     ) -> Result<(), String> {
-        self.reconcile_from_v1_inner(scene, prefabs, false)
+        self.reconcile_from_runtime_inner(scene, prefabs, false)
     }
 
-    fn reconcile_from_v1_inner(
+    fn reconcile_from_runtime_inner(
         &mut self,
         scene: &Scene,
         prefabs: &BTreeMap<String, PrefabV2>,
         verify_sources: bool,
     ) -> Result<(), String> {
-        if scene.format_version != 1 || !scene.duplicate_ids().is_empty() {
-            return Err("编辑器场景的版本或实体 ID 无法安全合入 v2".into());
+        if !scene.duplicate_ids().is_empty() {
+            return Err("编辑器场景的实体 ID 无法安全合入文件模型".into());
         }
         let previous: BTreeMap<_, _> = self.entities.iter().map(|e| (e.id.raw(), e)).collect();
         let mut entities = Vec::with_capacity(scene.entities.len());
@@ -767,10 +692,10 @@ impl SceneV2 {
                 None
             };
             let Some(old) = previous.get(&entity.id.raw()) else {
-                entities.push(EntityV2::from_v1(entity, source)?);
+                entities.push(EntityV2::from_runtime(entity, source)?);
                 continue;
             };
-            let mut updated = EntityV2::from_v1(entity, source)?;
+            let mut updated = EntityV2::from_runtime(entity, source)?;
             if old.prefab.is_some() && updated.prefab.is_some() && old.prefab != updated.prefab {
                 return Err(format!(
                     "实体 {:?} 的预制体来源发生变化；请先完成预制体身份同步",
@@ -794,14 +719,14 @@ impl SceneV2 {
             for old_entry in &old.components.entries {
                 if let Some(index) = pending
                     .iter()
-                    .position(|new| new.data.legacy_key() == old_entry.data.legacy_key())
+                    .position(|new| new.data.key() == old_entry.data.key())
                 {
                     let mut matched = pending.remove(index);
                     matched.identity = old_entry.identity;
                     if newly_linked {
                         matched.identity.source_component_id = source_keys
                             .as_ref()
-                            .and_then(|keys| keys.get(&matched.data.legacy_key()).copied());
+                            .and_then(|keys| keys.get(&matched.data.key()).copied());
                     } else if detached {
                         matched.identity.source_component_id = None;
                     }
@@ -811,36 +736,8 @@ impl SceneV2 {
                 }
             }
             let mut renamed = vec![None; pending.len()];
-            // 拆分前 v2 的 Render / MaterialOverride 仍可读。第一次经编辑器保存时，
-            // 让每个旧身份最多交给一项真实组件；额外拆出的项沿用正常高水位。
-            // 来源资产若已经拆分，就按新键重新关联；仍是旧结构则明确解除来源，
-            // 不能让一个 Render 来源 ID 冒充 Mesh / LOD / Material 三者之一。
             for old_entry in &unmatched {
-                if !old_entry.data.is_legacy_visual() {
-                    continue;
-                }
-                let Some((index, next)) = pending
-                    .iter()
-                    .enumerate()
-                    .find(|(index, next)| {
-                        renamed[*index].is_none()
-                            && old_entry.data.can_seed_split_identity(&next.data)
-                    })
-                else {
-                    continue;
-                };
-                let mut identity = old_entry.identity;
-                identity.source_component_id = if detached {
-                    None
-                } else {
-                    source_keys
-                        .as_ref()
-                        .and_then(|keys| keys.get(&next.data.legacy_key()).copied())
-                };
-                renamed[index] = Some(identity);
-            }
-            for old_entry in &unmatched {
-                // Lua 路径 / Rust 注册名在 v1 视图里同时充当列表键；只有唯一的
+                // Lua 路径 / Rust 注册名在运行时视图里同时充当列表键；只有唯一的
                 // 旧项与唯一的新项时才能判定为原组件改了字段。多项时宁可分配新 ID。
                 let kind = old_entry.data.kind();
                 if (verify_sources && old_entry.identity.source_component_id.is_some())
@@ -897,7 +794,7 @@ impl SceneV2 {
 
     /// Revert 后依来源组件 ID 认回实例局部 ID，而不是依当前值里的 Lua 路径等旧键。
     /// 被资产删去的组件一并消失；资产新增组件从原实例高水位分配。
-    pub fn reconcile_reverted_from_v1(
+    pub fn reconcile_reverted_from_runtime(
         &mut self,
         scene: &Scene,
         prefabs: &BTreeMap<String, PrefabV2>,
@@ -910,7 +807,7 @@ impl SceneV2 {
             .retain(|entity| !restored_ids.contains(&entity.id));
         // 其他实例可能还指向被删掉的来源组件；逐个 Revert 完成前
         // 仅让历史保留它们，保存时仍须验证整个场景。
-        candidate.reconcile_from_v1_for_history(scene, prefabs)?;
+        candidate.reconcile_from_runtime_for_history(scene, prefabs)?;
         for entity in &mut candidate.entities {
             if !restored_ids.contains(&entity.id) {
                 continue;
@@ -969,17 +866,17 @@ impl SceneV2 {
         }
     }
 
-    pub fn from_v1_plain(scene: &Scene) -> Result<Self, String> {
-        Self::from_v1_with_prefabs(scene, &BTreeMap::new())
+    pub fn from_runtime(scene: &Scene) -> Result<Self, String> {
+        Self::from_runtime_with_prefabs(scene, &BTreeMap::new())
     }
 
-    /// 来源资产必须先升级并按项目相对路径提供；只做内存转换，不写项目文件。
-    pub fn from_v1_with_prefabs(
+    /// 来源资产按项目相对路径提供；只做内存投影，不写项目文件。
+    pub fn from_runtime_with_prefabs(
         scene: &Scene,
         prefabs: &BTreeMap<String, PrefabV2>,
     ) -> Result<Self, String> {
-        if scene.format_version != 1 || !scene.duplicate_ids().is_empty() {
-            return Err("场景版本或实体 ID 无法安全转换".into());
+        if !scene.duplicate_ids().is_empty() {
+            return Err("场景实体 ID 无法安全投影到文件模型".into());
         }
         let entities = scene
             .entities
@@ -988,7 +885,7 @@ impl SceneV2 {
                 let source = if let Some(reference) = &entity.prefab {
                     let prefab = prefabs.get(&reference.source).ok_or_else(|| {
                         format!(
-                            "找不到实体 {:?} 的已升级预制体 {}",
+                            "找不到实体 {:?} 的来源预制体 {}",
                             entity.name, reference.source
                         )
                     })?;
@@ -1009,7 +906,7 @@ impl SceneV2 {
                 } else {
                     None
                 };
-                EntityV2::from_v1(entity, source)
+                EntityV2::from_runtime(entity, source)
             })
             .collect::<Result<_, _>>()?;
         let result = Self {
@@ -1048,24 +945,35 @@ impl SceneV2 {
                         reference.source_id.raw()
                     )
                 })?;
-            if entity.transform_identity.source_component_id != Some(source.transform_identity.id) {
-                return Err(format!(
-                    "实体 {:?} 的 Transform 来源 ID 不匹配",
-                    entity.name
-                ));
-            }
-            let keys = source.source_keys()?;
-            for entry in &entity.components.entries {
-                if let Some(id) = entry.identity.source_component_id {
-                    if keys.get(&entry.data.legacy_key()) != Some(&id) {
-                        return Err(format!(
-                            "实体 {:?} 的组件来源 ID {} 不匹配",
-                            entity.name,
-                            id.raw()
-                        ));
-                    }
-                }
-            }
+            entity.validate_source_identity(source)?;
+        }
+        Ok(())
+    }
+
+    /// 项目检查只验证能够成功读取且仍含目标实体的来源；缺文件、坏文件和悬空
+    /// `source_id` 由各自诊断分桶。这样组件来源损坏仍是场景内容错误，同时一个坏
+    /// 预制体不会遮住整张场景里的其余问题。
+    pub(crate) fn validate_available_prefab_sources(
+        &self,
+        prefabs: &BTreeMap<String, PrefabV2>,
+    ) -> Result<(), String> {
+        self.validate()?;
+        for entity in &self.entities {
+            let Some(reference) = &entity.prefab else {
+                continue;
+            };
+            let Some(prefab) = prefabs.get(&reference.source) else {
+                continue;
+            };
+            prefab.validate()?;
+            let Some(source) = prefab
+                .entities
+                .iter()
+                .find(|source| source.id == reference.source_id)
+            else {
+                continue;
+            };
+            entity.validate_source_identity(source)?;
         }
         Ok(())
     }
@@ -1107,7 +1015,7 @@ impl SceneV2 {
                 };
                 let still_matches = asset_entity.components.entries.iter().any(|asset_entry| {
                     asset_entry.identity.id == source_component_id
-                        && asset_entry.data.legacy_key() == entry.data.legacy_key()
+                        && asset_entry.data.key() == entry.data.key()
                 });
                 if !still_matches {
                     entry.identity.source_component_id = None;
@@ -1117,13 +1025,13 @@ impl SceneV2 {
         self.validate()
     }
 
-    pub fn to_v1(self) -> Result<Scene, String> {
+    pub fn into_runtime(self) -> Result<Scene, String> {
         self.validate()?;
         let mut scene = Scene::new(self.name);
         scene.entities = self
             .entities
             .into_iter()
-            .map(EntityV2::into_v1)
+            .map(EntityV2::into_runtime)
             .collect::<Result<_, _>>()?;
         scene.lights = self.lights;
         scene.ambient = self.ambient;
@@ -1131,15 +1039,20 @@ impl SceneV2 {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.format_version != 2 {
-            return Err(format!("不支持场景格式版本 {}", self.format_version));
-        }
+        self.validate_format_version()?;
         let mut ids = BTreeSet::new();
         for entity in &self.entities {
             if !ids.insert(entity.id.raw()) {
                 return Err(format!("重复的场景实体 ID {}", entity.id.raw()));
             }
             entity.validate()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_format_version(&self) -> Result<(), String> {
+        if self.format_version != 2 {
+            return Err(format!("不支持场景格式版本 {}", self.format_version));
         }
         Ok(())
     }
@@ -1158,9 +1071,31 @@ impl SceneV2 {
 }
 
 impl PrefabV2 {
+    /// 将可变的运行时值合入已有文件身份；实体和组件删除不回退高水位。
+    pub fn reconcile_from_runtime(&mut self, prefab: &Prefab) -> Result<(), String> {
+        let mut values = Scene::new(prefab.name.clone());
+        values.entities.clone_from(&prefab.entities);
+        let mut identities = SceneV2 {
+            format_version: 2,
+            name: self.name.clone(),
+            entities: self.entities.clone(),
+            lights: values.lights.clone(),
+            ambient: values.ambient,
+        };
+        identities.reconcile_from_runtime(&values, &BTreeMap::new())?;
+        let candidate = Self {
+            format_version: 2,
+            name: identities.name,
+            entities: identities.entities,
+        };
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// 从一个编辑中的实例生成新的资产结构，并把该实例绑定到新来源身份。
     ///
-    /// `identity` 必须已经由 [`SceneV2::reconcile_from_v1_for_history`] 合入当前
+    /// `identity` 必须已经由 [`SceneV2::reconcile_from_runtime_for_history`] 合入当前
     /// `scene` 的值。存活来源沿用资产 ID；新增实体 / 组件从资产侧独立分配，不能
     /// 把实例本地 ID 误当成资产 ID。全部候选验证成功后才替换两个输入。
     pub fn apply_structure_from_instance(
@@ -1349,8 +1284,8 @@ impl PrefabV2 {
 
     /// 仅当资产和实例结构一致时合入值：来源组件 ID 与高水位逐条沿用。
     /// 结构变更需同时写回场景来源关联，不能借此入口隐式发布。
-    pub fn apply_values_from_v1(&mut self, prefab: &Prefab) -> Result<(), String> {
-        let incoming = Self::from_v1(prefab)?;
+    pub fn apply_values_from_runtime(&mut self, prefab: &Prefab) -> Result<(), String> {
+        let incoming = Self::from_runtime(prefab)?;
         if incoming.entities.len() != self.entities.len() {
             return Err("预制体实体结构已变化，须同步场景来源关联".into());
         }
@@ -1374,7 +1309,7 @@ impl PrefabV2 {
                     .components
                     .entries
                     .iter()
-                    .find(|item| item.data.legacy_key() == entry.data.legacy_key())
+                    .find(|item| item.data.key() == entry.data.key())
                     .ok_or_else(|| format!("实体 {:?} 的组件种类或关联键已变化", entity.name))?;
                 entry.data = value.data.clone();
             }
@@ -1390,14 +1325,14 @@ impl PrefabV2 {
         }
     }
 
-    pub fn from_v1(prefab: &Prefab) -> Result<Self, String> {
-        if prefab.format_version != 1 || !prefab.duplicate_ids().is_empty() {
-            return Err("预制体版本或实体 ID 无法安全转换".into());
+    pub fn from_runtime(prefab: &Prefab) -> Result<Self, String> {
+        if !prefab.duplicate_ids().is_empty() {
+            return Err("预制体实体 ID 无法安全投影到文件模型".into());
         }
         let entities = prefab
             .entities
             .iter()
-            .map(|entity| EntityV2::from_v1(entity, None))
+            .map(|entity| EntityV2::from_runtime(entity, None))
             .collect::<Result<_, _>>()?;
         Ok(Self {
             format_version: 2,
@@ -1406,21 +1341,19 @@ impl PrefabV2 {
         })
     }
 
-    pub fn to_v1(self) -> Result<Prefab, String> {
+    pub fn into_runtime(self) -> Result<Prefab, String> {
         self.validate()?;
         let mut prefab = Prefab::new(self.name);
         prefab.entities = self
             .entities
             .into_iter()
-            .map(EntityV2::into_v1)
+            .map(EntityV2::into_runtime)
             .collect::<Result<_, _>>()?;
         Ok(prefab)
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.format_version != 2 {
-            return Err(format!("不支持预制体格式版本 {}", self.format_version));
-        }
+        self.validate_format_version()?;
         let mut ids = BTreeSet::new();
         for entity in &self.entities {
             if !ids.insert(entity.id.raw()) {
@@ -1430,6 +1363,13 @@ impl PrefabV2 {
             if entity.prefab.is_some() {
                 return Err("预制体资产不能包含实例来源引用".into());
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_format_version(&self) -> Result<(), String> {
+        if self.format_version != 2 {
+            return Err(format!("不支持预制体格式版本 {}", self.format_version));
         }
         Ok(())
     }
@@ -1456,7 +1396,7 @@ mod schema_contract {
     #[test]
     fn every_v2_file_field_is_listed_in_the_shared_schema() {
         let doc = crate::schema::scene_schema();
-        let scene = SceneV2::from_v1_plain(&Scene::new("Schema")).unwrap();
+        let scene = SceneV2::from_runtime(&Scene::new("Schema")).unwrap();
         let SceneV2 {
             format_version,
             name,
@@ -1464,13 +1404,13 @@ mod schema_contract {
             lights,
             ambient,
         } = scene;
-        let prefab = PrefabV2::from_v1(&Prefab::new("Schema")).unwrap();
+        let prefab = PrefabV2::from_runtime(&Prefab::new("Schema")).unwrap();
         let PrefabV2 {
             format_version,
             name,
             entities,
         } = prefab;
-        let entity = EntityV2::from_v1(&Entity::new("Schema"), None).unwrap();
+        let entity = EntityV2::from_runtime(&Entity::new("Schema"), None).unwrap();
         let EntityV2 {
             id,
             name,
@@ -1507,18 +1447,6 @@ mod schema_contract {
             overrides: None,
         };
         let MaterialData { asset, overrides } = material;
-        let render = RenderData {
-            model: String::new(),
-            lod: LodGroup::default(),
-            material_asset: None,
-            morph_weights: Vec::new(),
-        };
-        let RenderData {
-            model,
-            lod,
-            material_asset,
-            morph_weights,
-        } = render;
         for (name, fields) in [
             (
                 "SceneV2",
@@ -1543,10 +1471,6 @@ mod schema_contract {
             ("ComponentIdentity", vec!["id", "source_component_id"]),
             ("MeshData", vec!["model", "morph_weights"]),
             ("MaterialData", vec!["asset", "overrides"]),
-            (
-                "RenderData",
-                vec!["model", "lod", "material_asset", "morph_weights"],
-            ),
         ] {
             let catalogued: Vec<_> = doc
                 .type_schema(name)

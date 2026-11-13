@@ -42,8 +42,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
 use crate::asset::{
-    decode_prefab_references, decode_scene_references, encode_prefab_references,
-    encode_scene_references, AssetDatabase, AssetGuid, AssetKind, AssetMoveReport, ImportSettings,
+    AssetDatabase, AssetGuid, AssetKind, AssetMoveReport, ImportSettings,
 };
 use crate::config::{BuildConfig, ContentConfig, RenderConfig, RuntimeConfig, WindowConfig};
 use crate::id::EntityId;
@@ -620,47 +619,30 @@ pub enum ProjectError {
     #[error("路径不合法 ({relative}): {reason}")]
     InvalidPath { relative: String, reason: String },
 
-    #[error("不支持文件格式版本 {version} ({path})；旧格式写入已拒绝")]
-    UnsupportedFileVersion { path: PathBuf, version: u32 },
-
-    #[error("v2 文件数据无效 ({path}): {reason}")]
-    InvalidV2 { path: PathBuf, reason: String },
+    #[error("场景或预制体文件数据无效 ({path}): {reason}")]
+    InvalidSceneFile { path: PathBuf, reason: String },
 
     #[error("文件在读取后发生变化，拒绝覆盖 ({0})")]
     StaleFile(PathBuf),
 }
 
-/// v2 草案只能写入新文件或已验证的 v2 文件；不把 v1 覆盖当成隐式迁移。
-fn guard_v2_write<T>(
+/// 当前格式只能写入新文件或已能按当前格式完整读取的文件。
+fn guard_current_file<T>(
     path: &Path,
     parse: fn(&str) -> Result<T, String>,
 ) -> Result<(), ProjectError> {
-    let disk = crate::file_format::disk_version(path).map_err(|source| ProjectError::Write {
+    if !path.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(path).map_err(|source| ProjectError::Write {
         path: path.to_path_buf(),
         source,
     })?;
-    match disk {
-        None if !path.exists() => Ok(()),
-        Some(2) => {
-            let text = std::fs::read_to_string(path).map_err(|source| ProjectError::Write {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            parse(&text).map_err(|reason| ProjectError::InvalidV2 {
-                path: path.to_path_buf(),
-                reason,
-            })?;
-            Ok(())
-        }
-        Some(version) => Err(ProjectError::UnsupportedFileVersion {
-            path: path.to_path_buf(),
-            version,
-        }),
-        None => Err(ProjectError::InvalidV2 {
-            path: path.to_path_buf(),
-            reason: "现有文件无法解析版本，拒绝覆盖".into(),
-        }),
-    }
+    parse(&text).map_err(|reason| ProjectError::InvalidSceneFile {
+        path: path.to_path_buf(),
+        reason,
+    })?;
+    Ok(())
 }
 
 fn guard_expected_bytes(path: &Path, expected: &[u8]) -> Result<(), ProjectError> {
@@ -673,27 +655,6 @@ fn guard_expected_bytes(path: &Path, expected: &[u8]) -> Result<(), ProjectError
     } else {
         Err(ProjectError::StaleFile(path.to_path_buf()))
     }
-}
-
-/// 旧编辑会话保存时若文件已由外部升级，禁止覆盖其未知组件数据。
-fn guard_v1_write(path: &Path, requested: u32) -> Result<(), ProjectError> {
-    if requested != crate::file_format::V1 {
-        return Err(ProjectError::UnsupportedFileVersion {
-            path: path.to_path_buf(),
-            version: requested,
-        });
-    }
-    let disk = crate::file_format::disk_version(path).map_err(|source| ProjectError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if let Some(version) = disk.filter(|version| *version != crate::file_format::V1) {
-        return Err(ProjectError::UnsupportedFileVersion {
-            path: path.to_path_buf(),
-            version,
-        });
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1187,18 +1148,7 @@ impl ProjectHandle {
     /// 磁盘上的资产引用是 GUID，这里解码成项目相对路径再交给上层 ——
     /// 调用方永远只看见能直接打开的路径。
     pub fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {
-        // 与 `load_scene` 同一条边界：预制体路径来自场景里的 `source`，
-        // 手写 RON 里一句 `../..` 就能读到项目外。
-        let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
-        let path = self.path(&relative);
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("无法读取 '{relative}': {e}"))?;
-        let mut prefab =
-            Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
-        {
-            let assets = self.assets();
-            decode_prefab_references(&mut prefab, &assets);
-        }
+        let mut prefab = self.load_prefab_v2(relative)?.into_runtime()?;
         // 坏数据（NaN / 越界）在**加载边界**夹一次：手写 RON 里的一个 `nan`
         // 不该让整棵 UI 的矩形变成 NaN 再传进 GPU。运行时 / 渲染侧还有一道
         // 非有限几何的兜底（见 `xgame_ui::layout::visit`），两处职责不同：
@@ -1208,7 +1158,7 @@ impl ProjectHandle {
         Ok(prefab)
     }
 
-    /// 显式只读 v2 预制体入口；旧的 `load_prefab` 仍拒绝 v2，避免旧编辑器丢失身份。
+    /// 读取当前预制体文件模型；需要运行时值时走 [`Self::load_prefab`]。
     pub fn load_prefab_v2(&self, relative: &str) -> Result<crate::scene_v2::PrefabV2, String> {
         self.load_prefab_v2_snapshot(relative)
             .map(|(prefab, _)| prefab)
@@ -1230,27 +1180,18 @@ impl ProjectHandle {
         Ok((prefab, bytes))
     }
 
-    /// 运行时完整预制体载荷；v2 资产身份供实例化时建立来源关联。
+    /// 运行时完整预制体载荷；文件身份供实例化时建立来源关联。
     pub fn load_runtime_prefab(&self, relative: &str) -> Result<crate::RuntimePrefab, String> {
-        let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
-        if crate::file_format::disk_version(&self.path(&relative))
-            .map_err(|e| format!("无法读取 '{relative}': {e}"))?
-            == Some(2)
-        {
-            crate::RuntimePrefab::from_v2(self.load_prefab_v2(&relative)?)
-        } else {
-            self.load_prefab(&relative)
-                .map(crate::RuntimePrefab::legacy)
-        }
+        crate::RuntimePrefab::from_file(self.load_prefab_v2(relative)?)
     }
 
-    /// 兼容只消费值的旧运行调用方；旧编辑器仍必须走 `load_prefab`。
+    /// 只消费运行时值的调用方入口。
     pub fn load_prefab_runtime(&self, relative: &str) -> Result<Prefab, String> {
         self.load_runtime_prefab(relative)
             .map(crate::RuntimePrefab::into_prefab)
     }
 
-    /// 显式 v2 草案写入：旧文件必须已是合法 v2；v1→v2 要走单独的迁移器。
+    /// 写入当前预制体文件模型。
     pub fn write_prefab_v2(
         &self,
         relative: &str,
@@ -1282,11 +1223,11 @@ impl ProjectHandle {
             })?;
         let path = self.path(&relative);
         let _lock = self.lock_component_file(&relative)?;
-        guard_v2_write(&path, crate::scene_v2::PrefabV2::from_ron)?;
+        guard_current_file(&path, crate::scene_v2::PrefabV2::from_ron)?;
         if let Some(expected) = expected {
             guard_expected_bytes(&path, expected)?;
         }
-        prefab.to_ron().map_err(|reason| ProjectError::InvalidV2 {
+        prefab.to_ron().map_err(|reason| ProjectError::InvalidSceneFile {
             path: path.clone(),
             reason,
         })?;
@@ -1296,13 +1237,13 @@ impl ProjectHandle {
             assets.refresh();
             assets
                 .ensure_metas()
-                .map_err(|reason| ProjectError::InvalidV2 {
+                .map_err(|reason| ProjectError::InvalidSceneFile {
                     path: path.clone(),
                     reason,
                 })?;
             crate::asset::encode_prefab_v2_references(&mut copy, &assets);
         }
-        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidV2 {
+        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidSceneFile {
             path: path.clone(),
             reason,
         })?;
@@ -1326,45 +1267,34 @@ impl ProjectHandle {
     /// 写盘前把资产引用编码成 GUID（并补齐缺 `.meta` 的资产身份证）。
     /// 这样"改了资产名再保存"就把新身份固化进文件，而不是继续存路径。
     pub fn write_prefab(&self, relative: &str, prefab: &Prefab) -> Result<(), ProjectError> {
-        // 路径校验放在最前面：不合法就**不该去扫资产库**（那是几百毫秒的活）。
         let relative =
             normalize_project_relative(relative).map_err(|defect| ProjectError::InvalidPath {
                 relative: relative.to_owned(),
                 reason: defect.to_string(),
             })?;
-        let _lock = self.lock_component_file(&relative)?;
-        guard_v1_write(&self.path(&relative), prefab.format_version)?;
-        let encoded = {
-            let mut assets = self.assets();
-            // 与 `write_scene` 同理：编码前保证索引是最新的。
-            assets.refresh();
-            let _ = assets.ensure_metas();
-            if assets.is_empty() {
-                None
-            } else {
-                let mut copy = prefab.clone();
-                encode_prefab_references(&mut copy, &assets);
-                Some(copy)
-            }
+        let mut file = if self.path(&relative).exists() {
+            self.load_prefab_v2(&relative)
+                .map_err(|reason| ProjectError::InvalidSceneFile {
+                    path: self.path(&relative),
+                    reason,
+                })?
+        } else {
+            crate::scene_v2::PrefabV2::from_runtime(prefab).map_err(|reason| {
+                ProjectError::InvalidSceneFile {
+                    path: self.path(&relative),
+                    reason,
+                }
+            })?
         };
-        let prefab = encoded.as_ref().unwrap_or(prefab);
-
-        let path = self.path(&relative);
-        let text = prefab.to_ron().map_err(|e| ProjectError::Write {
-            path: path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-        })?;
-        // 与 `write_scene` 同一条：内容没变就不动盘。
-        if unchanged_on_disk(&path, &text) {
-            return Ok(());
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
-                path: parent.to_path_buf(),
-                source,
+        if self.path(&relative).exists() {
+            file.reconcile_from_runtime(prefab).map_err(|reason| {
+                ProjectError::InvalidSceneFile {
+                    path: self.path(&relative),
+                    reason,
+                }
             })?;
         }
-        write_atomic(&path, &text)
+        self.write_prefab_v2(&relative, &file)
     }
 
     /// 列出项目里所有预制体资产（**项目相对路径**，按字典序）。
@@ -1393,7 +1323,7 @@ impl ProjectHandle {
         out
     }
 
-    /// 把整个项目的资产引用迁移成 GUID（老项目一次性升级）。
+    /// 把整个项目中尚为路径字面量的资产引用迁移成 GUID。
     ///
     /// 做三件事：
     /// 1. 补齐所有资产的 `.meta`（GUID 在这里生成，之后永不变）；
@@ -1462,17 +1392,17 @@ impl ProjectHandle {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {e}", path.display()))?;
 
-        // 先按正常路径解析一遍：既拿到"内存里的路径清单"，也顺手验证文件本身
+        // 先按当前格式解析一遍：既拿到路径清单，也顺手验证文件本身
         // 是可解析的（坏文件直接进 errors，而不是被文本替换掩盖过去）。
         let mut references: Vec<String> = Vec::new();
         if is_prefab {
-            let prefab = Prefab::from_ron(&text)
+            let mut prefab = crate::scene_v2::PrefabV2::from_ron(&text)
                 .map_err(|e| format!("无法解析 '{}': {e}", path.display()))?;
-            collect_entity_references(&prefab.entities, &mut references);
+            prefab.visit_asset_references(|reference| references.push(reference.clone()));
         } else {
-            let scene: Scene = ron::from_str(&text)
+            let mut scene = crate::scene_v2::SceneV2::from_ron(&text)
                 .map_err(|e| format!("无法解析 '{}': {e:#}", path.display()))?;
-            collect_entity_references(&scene.entities, &mut references);
+            scene.visit_asset_references(|reference| references.push(reference.clone()));
         }
 
         self.rewrite_literals(&relative, text, references)
@@ -1535,24 +1465,15 @@ impl ProjectHandle {
     /// `join` 遇到绝对路径会**整个替换**掉根 —— 手写 / 下载来的清单里一句
     /// `/etc/passwd` 就能让引擎去读项目外的文件。
     pub fn load_scene(&self, relative: &str) -> Result<Scene, String> {
-        let relative = normalize_scene_relative(relative)?;
-        let path = self.path(&relative);
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("无法读取 '{relative}': {e}"))?;
-        // 发布前后按诊断文本取差集；解析失败必须使用项目内路径，否则同一
-        // 份坏场景复制到 staging 后会被误判成构建新引入的问题。
-        self.parse_scene_text(&text, Path::new(&relative))
+        let mut scene = self.load_scene_v2(relative)?.into_runtime()?;
+        sanitize_ui(&mut scene.entities);
+        sanitize_particles(&mut scene.entities);
+        Ok(scene)
     }
 
-    /// 显式只读 v2 场景入口；在项目路径边界读取每份来源资产并复核组件关联。
-    /// 保存必须走 v2 条件写入或预制体事务，不能用 `to_v1` 的结果写回此文件。
+    /// 读取当前场景文件模型；在项目路径边界读取每份来源资产并复核组件关联。
     pub fn load_scene_v2(&self, relative: &str) -> Result<crate::scene_v2::SceneV2, String> {
-        let relative = normalize_scene_relative(relative)?;
-        let text = std::fs::read_to_string(self.path(&relative))
-            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
-        let mut scene = crate::scene_v2::SceneV2::from_ron(&text)
-            .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
-        crate::asset::decode_scene_v2_references(&mut scene, &self.assets());
+        let scene = self.load_scene_v2_decoded(relative)?;
         let mut prefabs = std::collections::BTreeMap::new();
         for entity in &scene.entities {
             if let Some(reference) = &entity.prefab {
@@ -1567,26 +1488,64 @@ impl ProjectHandle {
         Ok(scene)
     }
 
-    /// 运行时完整载荷：v2 同时保留稳定组件身份，v1 保持旧值语义。
-    pub fn load_runtime_scene(&self, relative: &str) -> Result<crate::RuntimeScene, String> {
+    /// 只做场景自身的严格解码与 GUID 展开，不装载来源预制体。
+    /// `--check` 需要先把场景装进来，才能把坏来源归入精确的预制体 / source_id 诊断，
+    /// 而不是让一个坏引用把整张入口场景降级成无法检查。
+    fn load_scene_v2_decoded(
+        &self,
+        relative: &str,
+    ) -> Result<crate::scene_v2::SceneV2, String> {
         let relative = normalize_scene_relative(relative)?;
-        if crate::file_format::disk_version(&self.path(&relative))
-            .map_err(|e| format!("无法读取 '{relative}': {e}"))?
-            == Some(2)
-        {
-            crate::RuntimeScene::from_v2(self.load_scene_v2(&relative)?)
-        } else {
-            self.load_scene(&relative).map(crate::RuntimeScene::legacy)
+        let text = std::fs::read_to_string(self.path(&relative))
+            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
+        let (mut scene, repaired) =
+            crate::scene_v2::SceneV2::from_ron_repairing_duplicate_entity_ids(&text)
+                .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+        if repaired > 0 {
+            eprintln!(
+                "warning: '{relative}' 含 {repaired} 个重复的实体 ID，已重新分配；\
+                 请保存一次场景把修复结果写回（层级可能需手工校正）"
+            );
         }
+        crate::asset::decode_scene_v2_references(&mut scene, &self.assets());
+        Ok(scene)
     }
 
-    /// 兼容只消费值的旧调用方；返回的 v1 Scene 不可保存回 v2 路径。
+    /// 项目检查专用：来源文件是否存在、能否解析、source_id 是否悬空由检查报告分桶，
+    /// 这里仅投影场景自身的数据。仍然只读，且复用正式读取边界的严格字段解析。
+    pub(crate) fn load_scene_for_check(&self, relative: &str) -> Result<Scene, String> {
+        let file = self.load_scene_v2_decoded(relative)?;
+        let mut prefabs = std::collections::BTreeMap::new();
+        for entity in &file.entities {
+            let Some(reference) = &entity.prefab else {
+                continue;
+            };
+            if prefabs.contains_key(&reference.source) {
+                continue;
+            }
+            if let Ok(prefab) = self.load_prefab_v2(&reference.source) {
+                prefabs.insert(reference.source.clone(), prefab);
+            }
+        }
+        file.validate_available_prefab_sources(&prefabs)?;
+        let mut scene = file.into_runtime()?;
+        sanitize_ui(&mut scene.entities);
+        sanitize_particles(&mut scene.entities);
+        Ok(scene)
+    }
+
+    /// 运行时完整载荷：值模型与稳定组件身份一同交给 World。
+    pub fn load_runtime_scene(&self, relative: &str) -> Result<crate::RuntimeScene, String> {
+        crate::RuntimeScene::from_file(self.load_scene_v2(relative)?)
+    }
+
+    /// 只消费运行时值的调用方入口。
     pub fn load_scene_runtime(&self, relative: &str) -> Result<Scene, String> {
         self.load_runtime_scene(relative)
             .map(crate::RuntimeScene::into_scene)
     }
 
-    /// 显式 v2 草案写入；来源资产必须已落盘并通过关联检查，不覆盖 v1。
+    /// 写入当前场景文件模型；来源资产必须已落盘并通过关联检查。
     pub fn write_scene_v2(
         &self,
         relative: &str,
@@ -1619,7 +1578,7 @@ impl ProjectHandle {
             })?;
         let path = self.path(&relative);
         let _lock = self.lock_component_file(&relative)?;
-        guard_v2_write(&path, crate::scene_v2::SceneV2::from_ron)?;
+        guard_current_file(&path, crate::scene_v2::SceneV2::from_ron)?;
         if let Some(expected) = expected {
             guard_expected_bytes(&path, expected)?;
         }
@@ -1628,7 +1587,7 @@ impl ProjectHandle {
             if let Some(reference) = &entity.prefab {
                 if !prefabs.contains_key(&reference.source) {
                     let prefab = self.load_prefab_v2(&reference.source).map_err(|reason| {
-                        ProjectError::InvalidV2 {
+                        ProjectError::InvalidSceneFile {
                             path: path.clone(),
                             reason,
                         }
@@ -1639,7 +1598,7 @@ impl ProjectHandle {
         }
         scene
             .validate_prefab_sources(&prefabs)
-            .map_err(|reason| ProjectError::InvalidV2 {
+            .map_err(|reason| ProjectError::InvalidSceneFile {
                 path: path.clone(),
                 reason,
             })?;
@@ -1649,13 +1608,13 @@ impl ProjectHandle {
             assets.refresh();
             assets
                 .ensure_metas()
-                .map_err(|reason| ProjectError::InvalidV2 {
+                .map_err(|reason| ProjectError::InvalidSceneFile {
                     path: path.clone(),
                     reason,
                 })?;
             crate::asset::encode_scene_v2_references(&mut copy, &assets);
         }
-        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidV2 {
+        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidSceneFile {
             path: path.clone(),
             reason,
         })?;
@@ -1674,51 +1633,6 @@ impl ProjectHandle {
         write_atomic(&path, &text)
     }
 
-    /// 从 v1 原始文件只读预览升级结果；已升级的来源预制体沿用其真实组件 ID。
-    /// 不走 `load_scene` 的自动修复 / 数值夹取路径，迁移前必须看见坏数据。
-    pub fn preview_scene_v2(&self, relative: &str) -> Result<crate::scene_v2::SceneV2, String> {
-        let relative = normalize_scene_relative(relative)?;
-        let text = std::fs::read_to_string(self.path(&relative))
-            .map_err(|e| format!("无法读取 '{relative}': {e}"))?;
-        let mut scene: Scene = parse_v1_upgrade_text(&text, &relative)?;
-        if !scene.duplicate_ids().is_empty() {
-            return Err(format!("场景 '{relative}' 存在重复实体 ID，拒绝自动迁移"));
-        }
-        decode_scene_references(&mut scene, &self.assets());
-        let mut prefabs = std::collections::BTreeMap::new();
-        for entity in &scene.entities {
-            let Some(reference) = &entity.prefab else {
-                continue;
-            };
-            if prefabs.contains_key(&reference.source) {
-                continue;
-            }
-            let source_path = normalize_project_relative(&reference.source)
-                .map_err(|e| format!("预制体来源路径不安全: {e}"))?;
-            let file = self.path(&source_path);
-            let source = match crate::file_format::disk_version(&file)
-                .map_err(|e| format!("无法读取预制体 '{source_path}': {e}"))?
-            {
-                Some(2) => self.load_prefab_v2(&source_path)?,
-                Some(1) | None => {
-                    let text = std::fs::read_to_string(&file)
-                        .map_err(|e| format!("无法读取预制体 '{source_path}': {e}"))?;
-                    let mut source: Prefab = parse_v1_upgrade_text(&text, &source_path)?;
-                    if !source.duplicate_ids().is_empty() {
-                        return Err(format!("预制体 '{source_path}' 存在重复实体 ID"));
-                    }
-                    decode_prefab_references(&mut source, &self.assets());
-                    crate::scene_v2::PrefabV2::from_v1(&source)?
-                }
-                Some(version) => {
-                    return Err(format!("预制体 '{source_path}' 版本 {version} 不支持预览"))
-                }
-            };
-            prefabs.insert(reference.source.clone(), source);
-        }
-        crate::scene_v2::SceneV2::from_v1_with_prefabs(&scene, &prefabs)
-    }
-
     /// 加载清单里指定的入口场景。
     pub fn load_entry_scene(&self) -> Result<Scene, String> {
         self.load_scene(&self.manifest.entry_scene)
@@ -1734,20 +1648,17 @@ impl ProjectHandle {
 
     /// 只读地统计某个场景文件里的重复实体 ID（**不修复、不写盘**）。
     ///
-    /// `--check` 专用。`load_scene` 会在加载边界调 `ensure_unique_ids` 把重复
-    /// ID 修掉，于是一切"加载后再检查"的路径都看不见这类落盘伤 —— 而它正是
-    /// "删一个物体连带删别的"的成因。这里回到**原始文本**再解析一遍：只报告，
-    /// 不动数据（检查必须只读，见模块文档）。
-    ///
-    /// 注意这是**第二次解析**同一个文件。检查是低频 CLI 命令，多一次解析换
-    /// "CI 能看见文件里的病"，划算。
+    /// `--check` 专用。正式场景加载会在内存中修复重复 ID；这里单独解析原文，
+    /// 让报告仍能点名具体 ID 和重复次数，而且绝不修改文件。
     pub fn scene_duplicate_ids(&self, relative: &str) -> Result<Vec<(EntityId, usize)>, String> {
-        let path = self.path(relative);
+        let relative = normalize_scene_relative(relative)?;
+        let path = self.path(&relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("无法读取 '{}': {}", path.display(), e))?;
-        let scene: Scene =
+        let scene: crate::scene_v2::SceneV2 =
             ron::from_str(&text).map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))?;
-        Ok(scene.duplicate_ids())
+        scene.validate_format_version()?;
+        Ok(duplicate_file_entity_ids(&scene.entities))
     }
 
     /// 只读地统计某个预制体文件里的重复实体 ID（**不修复、不写盘**）。
@@ -1757,12 +1668,15 @@ impl ProjectHandle {
     /// 引用，重分配会让所有既有实例的 `source_id` 失配（`Apply` 时整棵树被当成新增）。
     /// 详见 [`crate::prefab::Prefab::duplicate_ids`]。
     pub fn prefab_duplicate_ids(&self, relative: &str) -> Result<Vec<(EntityId, usize)>, String> {
-        let path = self.path(relative);
+        let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
+        let path = self.path(&relative);
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("无法读取 '{relative}': {e}"))?;
         // 检查报告要与发布包的同一文件逐字节可比较，原因里不能带项目绝对路径。
-        let prefab = Prefab::from_ron(&text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
-        Ok(prefab.duplicate_ids())
+        let prefab: crate::scene_v2::PrefabV2 =
+            ron::from_str(&text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
+        prefab.validate_format_version()?;
+        Ok(duplicate_file_entity_ids(&prefab.entities))
     }
 
     /// 把场景写回项目内的相对路径。
@@ -1780,74 +1694,53 @@ impl ProjectHandle {
                 relative: relative.to_owned(),
                 reason,
             })?;
-        let path = self.path(&relative);
-        let _lock = self.lock_component_file(&relative)?;
-        let text = self.scene_text(scene, &path)?;
-        if unchanged_on_disk(&path, &text) {
-            return Ok(());
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        write_atomic(&path, &text)
+        let file = self.prepare_scene_file(&relative, scene)?;
+        self.write_scene_v2(&relative, &file)
     }
 
-    /// 把场景序列化成落盘文本（资产引用已编码成 GUID）。
+    /// 把运行时唯一值模型合入磁盘文件身份，但不写盘。
     ///
-    /// `write_scene` 与 `write_autosave` 共用这一份实现 —— 两条路写出来的
-    /// 必须是**同一种格式**，否则"从自动保存恢复"会把 GUID 变成路径，
-    /// 下一次保存再把它们编回去（中间任何一步的 diff 都会显得莫名其妙）。
-    fn scene_text(&self, scene: &Scene, path: &Path) -> Result<String, ProjectError> {
-        guard_v1_write(path, scene.format_version)?;
-        let encoded = {
-            let mut assets = self.assets();
-            // 保存前重新扫一遍：用户可能在编辑器打开后往 `Resources/` 里拷了
-            // 新资产（或从外部改了文件名），索引过期就会漏掉新资产、把引用
-            // 继续写成路径。保存是低频操作，一次全扫（几百文件）也就毫秒级。
-            assets.refresh();
-            let _ = assets.ensure_metas();
-            if assets.is_empty() {
-                None
-            } else {
-                let mut copy = scene.clone();
-                encode_scene_references(&mut copy, &assets);
-                Some(copy)
+    /// 无头快照等项目外输出也必须走当前文件模型；直接序列化 [`Scene`] 会丢失
+    /// 组件 ID、高水位与来源关联。已有文件提供身份骨架，新文件则确定性分配身份。
+    pub fn prepare_scene_file(
+        &self,
+        relative: &str,
+        scene: &Scene,
+    ) -> Result<crate::scene_v2::SceneV2, ProjectError> {
+        let path = self.path(relative);
+        let mut prefabs = std::collections::BTreeMap::new();
+        for entity in &scene.entities {
+            let Some(reference) = &entity.prefab else {
+                continue;
+            };
+            if !prefabs.contains_key(&reference.source) {
+                let prefab = self.load_prefab_v2(&reference.source).map_err(|reason| {
+                    ProjectError::InvalidSceneFile {
+                        path: path.clone(),
+                        reason,
+                    }
+                })?;
+                prefabs.insert(reference.source.clone(), prefab);
             }
-        };
-        let scene = encoded.as_ref().unwrap_or(scene);
-        let pretty = ron::ser::PrettyConfig::default();
-        ron::ser::to_string_pretty(scene, pretty).map_err(|e| ProjectError::Write {
-            path: path.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-        })
-    }
-
-    /// 解析场景文本（`guid://` 解码成路径 + UI / 粒子数值夹取）。
-    fn parse_scene_text(&self, text: &str, path: &Path) -> Result<Scene, String> {
-        let mut scene: Scene =
-            ron::from_str(text).map_err(|e| format!("无法解析 '{}': {:#}", path.display(), e))?;
-        // 重复 ID 是旧版本计数器不对齐留下的**落盘伤**（见 `EntityId::reserve`）。
-        // 在这里修掉，否则"删一个物体连带删别的"会从文件里继续复现。
-        let repaired = scene.ensure_unique_ids();
-        if repaired > 0 {
-            eprintln!(
-                "warning: '{}' 有 {} 个重复的实体 ID，已重新分配；\
-                 请保存一次场景把修复结果写回（层级可能需手工校正）",
-                path.display(),
-                repaired
-            );
         }
-        {
-            let assets = self.assets();
-            decode_scene_references(&mut scene, &assets);
+        if path.exists() {
+            let mut file = self.load_scene_v2(relative).map_err(|reason| {
+                ProjectError::InvalidSceneFile {
+                    path: path.clone(),
+                    reason,
+                }
+            })?;
+            file.reconcile_from_runtime(scene, &prefabs)
+                .map_err(|reason| ProjectError::InvalidSceneFile {
+                    path: path.clone(),
+                    reason,
+                })?;
+            Ok(file)
+        } else {
+            crate::scene_v2::SceneV2::from_runtime_with_prefabs(scene, &prefabs).map_err(
+                |reason| ProjectError::InvalidSceneFile { path, reason },
+            )
         }
-        // 同 `load_prefab`：UI 数值在加载时夹取一次。
-        sanitize_ui(&mut scene.entities);
-        sanitize_particles(&mut scene.entities);
-        Ok(scene)
     }
 
     // -- 自动保存 ----------------------------------------------------------
@@ -1867,19 +1760,17 @@ impl ProjectHandle {
         scene_relative: &str,
         scene: &Scene,
     ) -> Result<PathBuf, ProjectError> {
-        let path = self.autosave_path(scene_relative);
-        let text = self.scene_text(scene, &path)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| ProjectError::CreateDir {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        write_atomic(&path, &text)?;
-        Ok(path)
+        let relative = normalize_scene_relative(scene_relative).map_err(|reason| {
+            ProjectError::InvalidPath {
+                relative: scene_relative.to_owned(),
+                reason,
+            }
+        })?;
+        let file = self.prepare_scene_file(&relative, scene)?;
+        self.write_autosave_v2(&relative, &file)
     }
 
-    /// v2 副本保留组件身份；不能用旧 Scene 序列化器写这条路径。
+    /// 自动保存副本保留组件身份，与正式场景使用同一种文件格式。
     pub fn write_autosave_v2(
         &self,
         scene_relative: &str,
@@ -1893,8 +1784,18 @@ impl ProjectHandle {
         })?;
         let path = self.autosave_path(&relative);
         let mut copy = scene.clone();
-        crate::asset::encode_scene_v2_references(&mut copy, &self.assets());
-        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidV2 {
+        {
+            let mut assets = self.assets();
+            assets.refresh();
+            assets
+                .ensure_metas()
+                .map_err(|reason| ProjectError::InvalidSceneFile {
+                    path: path.clone(),
+                    reason,
+                })?;
+            crate::asset::encode_scene_v2_references(&mut copy, &assets);
+        }
+        let text = copy.to_ron().map_err(|reason| ProjectError::InvalidSceneFile {
             path: path.clone(),
             reason,
         })?;
@@ -1916,7 +1817,15 @@ impl ProjectHandle {
         let path = self.autosave_path(&relative);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("读取自动保存 '{}': {e}", path.display()))?;
-        let mut scene = crate::scene_v2::SceneV2::from_ron(&text)?;
+        let (mut scene, repaired) =
+            crate::scene_v2::SceneV2::from_ron_repairing_duplicate_entity_ids(&text)?;
+        if repaired > 0 {
+            eprintln!(
+                "warning: '{}' 含 {repaired} 个重复的实体 ID，已重新分配；\
+                 请恢复后保存一次场景把修复结果写回（层级可能需手工校正）",
+                path.display()
+            );
+        }
         crate::asset::decode_scene_v2_references(&mut scene, &self.assets());
         let mut prefabs = std::collections::BTreeMap::new();
         for entity in &scene.entities {
@@ -1932,10 +1841,10 @@ impl ProjectHandle {
 
     /// 读回某个场景的自动保存副本。
     pub fn read_autosave(&self, scene_relative: &str) -> Result<Scene, String> {
-        let path = self.autosave_path(scene_relative);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("无法读取自动保存 '{}': {}", path.display(), e))?;
-        self.parse_scene_text(&text, &path)
+        let mut scene = self.read_autosave_v2(scene_relative)?.into_runtime()?;
+        sanitize_ui(&mut scene.entities);
+        sanitize_particles(&mut scene.entities);
+        Ok(scene)
     }
 
     /// 某场景是否有自动保存，返回最后一次写入时间。
@@ -1991,112 +1900,6 @@ impl ProjectHandle {
 // ---------------------------------------------------------------------------
 // 默认场景
 // ---------------------------------------------------------------------------
-
-/// v1 普通读取保持宽容；只有不可逆的格式升级必须点名被忽略的字段。
-pub(crate) fn parse_v1_upgrade_text<T: serde::de::DeserializeOwned>(
-    text: &str,
-    relative: &str,
-) -> Result<T, String> {
-    // v1 Map 会保留重复键的最后一个值；类型化读取前先遍历原始 RON。
-    let mut probe =
-        ron::de::Deserializer::from_str(text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
-    let _: UniqueRonMaps = Deserialize::deserialize(&mut probe)
-        .map_err(|e| format!("无法无损升级 '{relative}': {e}"))?;
-    probe
-        .end()
-        .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
-    let mut deserializer =
-        ron::de::Deserializer::from_str(text).map_err(|e| format!("无法解析 '{relative}': {e}"))?;
-    let mut ignored = Vec::new();
-    let value =
-        serde_ignored::deserialize(&mut deserializer, |path| ignored.push(path.to_string()))
-            .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
-    deserializer
-        .end()
-        .map_err(|e| format!("无法解析 '{relative}': {e}"))?;
-    if !ignored.is_empty() {
-        return Err(format!(
-            "'{relative}' 存在无法自动升级的未知字段: {}",
-            ignored.join(", ")
-        ));
-    }
-    Ok(value)
-}
-
-/// 只读遍历每层 Map；RON 的 Value 自身会合并重复键，不能直接用它解析整份文件。
-struct UniqueRonMaps;
-
-impl<'de> Deserialize<'de> for UniqueRonMaps {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Walk;
-        impl<'de> serde::de::Visitor<'de> for Walk {
-            type Value = UniqueRonMaps;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("键不重复的 RON 值")
-            }
-            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_char<E: serde::de::Error>(self, _: char) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(UniqueRonMaps)
-            }
-            fn visit_some<D: serde::Deserializer<'de>>(
-                self,
-                de: D,
-            ) -> Result<Self::Value, D::Error> {
-                UniqueRonMaps::deserialize(de)
-            }
-            fn visit_newtype_struct<D: serde::Deserializer<'de>>(
-                self,
-                de: D,
-            ) -> Result<Self::Value, D::Error> {
-                UniqueRonMaps::deserialize(de)
-            }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut seq: A,
-            ) -> Result<Self::Value, A::Error> {
-                while seq.next_element::<UniqueRonMaps>()?.is_some() {}
-                Ok(UniqueRonMaps)
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut keys = std::collections::BTreeSet::new();
-                while let Some(key) = map.next_key::<ron::Value>()? {
-                    if !keys.insert(key) {
-                        return Err(serde::de::Error::custom("RON Map 存在重复键"));
-                    }
-                    map.next_value::<UniqueRonMaps>()?;
-                }
-                Ok(UniqueRonMaps)
-            }
-        }
-        deserializer.deserialize_any(Walk)
-    }
-}
 
 /// 新建项目时写入的默认场景：一台主相机 + 一盏方向光。
 ///
@@ -2287,16 +2090,14 @@ fn replace_asset_literals(
                     let before = text[..start].trim_end();
                     let asset_field = [
                         "model:",
-                        "material_asset: Some(",
+                        "asset: Some(",
+                        "path:",
                         "clip:",
                         "source:",
                         "albedo:",
                     ]
                     .iter()
-                    .any(|field| before.ends_with(field))
-                        || before.rsplit_once("scripts:").is_some_and(|(_, tail)| {
-                            tail.trim_start().starts_with('[') && !tail.contains(']')
-                        });
+                    .any(|field| before.ends_with(field));
                     if asset_field {
                         if let Some(guid) = replacements.get(&value) {
                             out.push_str(&text[copied..start]);
@@ -2388,30 +2189,18 @@ fn collect_by_extension(
     }
 }
 
-/// 收集一组实体上出现的所有资产引用（内存态：项目相对路径或悬空 `guid://`）。
-///
-/// 与 `xgame_core::asset` 里的编码 / 解码 walk 是同一组字段 —— 加新的资产
-/// 引用字段时**两处都要改**（这里漏一个，迁移就会漏掉它，断链留在原地）。
-fn collect_entity_references(entities: &[crate::Entity], out: &mut Vec<String>) {
+fn duplicate_file_entity_ids(
+    entities: &[crate::scene_v2::EntityV2],
+) -> Vec<(EntityId, usize)> {
+    let mut counts = std::collections::BTreeMap::new();
     for entity in entities {
-        if !entity.model.is_empty() {
-            out.push(entity.model.clone());
-        }
-        if let Some(material) = &entity.material_asset {
-            if !material.is_empty() {
-                out.push(material.clone());
-            }
-        }
-        out.extend(entity.scripts.iter().cloned());
-        if let Some(audio) = &entity.audio {
-            if !audio.clip.is_empty() {
-                out.push(audio.clip.clone());
-            }
-        }
-        if let Some(link) = &entity.prefab {
-            out.push(link.source.clone());
-        }
+        *counts.entry(entity.id.raw()).or_insert(0usize) += 1;
     }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(raw, count)| (EntityId::from_raw(raw), count))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2516,8 +2305,7 @@ mod tests {
         std::fs::write(handle.path(asset), b"glb").unwrap();
         handle.ensure_asset_metas().unwrap();
         let scene = "Scenes/locked.ron";
-        let original =
-            format!("(name: \"Legacy\", entities: [(name: \"Box\", model: \"{asset}\")])\n");
+        let original = current_scene_with_model("Locked", "Box", asset);
         let path = handle.path(scene);
         std::fs::write(&path, &original).unwrap();
         let legacy_tmp = path.with_extension("ron.tmp");
@@ -2774,12 +2562,23 @@ mod tests {
         (base, handle)
     }
 
+    /// 资产迁移测试必须从当前磁盘模型出发；直接序列化运行时 `Scene` 会重新引入一份
+    /// 已退出生产边界的旧文件夹具，让测试测到的不是用户真正能打开的文件。
+    fn current_scene_with_model(scene_name: &str, entity_name: &str, model: &str) -> String {
+        let mut scene = crate::Scene::new(scene_name);
+        scene.add_entity(crate::Entity::new(entity_name).with_model(model));
+        crate::scene_v2::SceneV2::from_runtime(&scene)
+            .unwrap()
+            .to_ron()
+            .unwrap()
+    }
+
     #[test]
     fn v2_scene_write_respects_another_handle_lock() {
         let (base, project) = temp_project("v2_write_lock");
         let relative = "Scenes/Locked.ron";
         let scene =
-            crate::scene_v2::SceneV2::from_v1_plain(&project.load_entry_scene().unwrap()).unwrap();
+            crate::scene_v2::SceneV2::from_runtime(&project.load_entry_scene().unwrap()).unwrap();
         project.write_scene_v2(relative, &scene).unwrap();
         let expected = std::fs::read(project.path(relative)).unwrap();
         let guard = project.lock_component_file(relative).unwrap();
@@ -2812,7 +2611,7 @@ mod tests {
         let (base, project) = temp_project("v2_write_conflict");
         let relative = "Scenes/Locked.ron";
         let scene =
-            crate::scene_v2::SceneV2::from_v1_plain(&project.load_entry_scene().unwrap()).unwrap();
+            crate::scene_v2::SceneV2::from_runtime(&project.load_entry_scene().unwrap()).unwrap();
         project.write_scene_v2(relative, &scene).unwrap();
         let expected = std::fs::read(project.path(relative)).unwrap();
         let handles: Vec<_> = ["First", "Second"]
@@ -3024,56 +2823,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 旧场景（存路径）打开后不改任何东西，保存一次就迁移成 GUID；
-    /// 再读回来路径一模一样 —— 迁移不能改变任何语义。
-    #[test]
-    fn legacy_path_references_migrate_on_save() {
-        let (base, handle) = temp_project("migrate");
-        std::fs::create_dir_all(handle.path("Resources")).unwrap();
-        std::fs::write(handle.path("Resources/Box.glb"), b"glb").unwrap();
-
-        // 手写一份"老格式"场景（引用是路径）。
-        let legacy = r#"(
-            name: "Legacy",
-            entities: [
-                (
-                    name: "Box",
-                    transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
-                    model: "Resources/Box.glb",
-                ),
-            ],
-        )"#;
-        std::fs::write(handle.path("Scenes/legacy.ron"), legacy).unwrap();
-
-        let before = handle.load_scene("Scenes/legacy.ron").expect("老场景可读");
-        assert_eq!(before.entities[0].model, "Resources/Box.glb");
-
-        handle.write_scene("Scenes/legacy.ron", &before).unwrap();
-        let text = std::fs::read_to_string(handle.path("Scenes/legacy.ron")).unwrap();
-        assert!(text.contains("guid://"), "保存后必须迁移成 GUID:\n{text}");
-
-        let after = handle.load_scene("Scenes/legacy.ron").unwrap();
-        assert_eq!(after.entities[0].model, "Resources/Box.glb");
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// 旧读写器遇到新版文件必须明确报错；否则未知 components 会被 serde 丢掉。
+    /// 遇到未来版本必须明确报错；否则未知组件数据可能在保存时被丢掉。
     #[test]
     fn future_scene_and_prefab_versions_cannot_be_loaded_or_overwritten() {
         let (base, handle) = temp_project("future_component_format");
         let scene_path = "Scenes/future.ron";
         let prefab_path = "Prefabs/future.prefab.ron";
-        let scene =
-            "(format_version: 2, name: \"Future\", entities: [(name: \"Actor\", components: [])])";
-        let prefab =
-            "(format_version: 2, name: \"Future\", entities: [(name: \"Actor\", components: [])])";
+        let entry = handle.manifest().entry_scene.clone();
+        let scene = handle
+            .load_scene_v2(&entry)
+            .unwrap()
+            .to_ron()
+            .unwrap()
+            .replacen("format_version: 2", "format_version: 3", 1);
+        let prefab = crate::scene_v2::PrefabV2::from_runtime(&crate::Prefab::new("Future"))
+            .unwrap()
+            .to_ron()
+            .unwrap()
+            .replacen("format_version: 2", "format_version: 3", 1);
         std::fs::create_dir_all(handle.path("Prefabs")).unwrap();
-        std::fs::write(handle.path(scene_path), scene).unwrap();
-        std::fs::write(handle.path(prefab_path), prefab).unwrap();
+        std::fs::write(handle.path(scene_path), &scene).unwrap();
+        std::fs::write(handle.path(prefab_path), &prefab).unwrap();
 
-        assert!(ron::from_str::<crate::Scene>(scene).is_err());
-        assert!(crate::Prefab::from_ron(prefab).is_err());
         assert!(handle.load_scene(scene_path).is_err());
         assert!(handle.load_prefab(prefab_path).is_err());
         assert!(handle.scene_duplicate_ids(scene_path).is_err());
@@ -3091,17 +2862,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(handle.path(prefab_path)).unwrap(),
             prefab
-        );
-
-        let mut invalid = crate::Scene::new("Bad");
-        invalid.format_version = 3;
-        assert!(handle.write_scene("Scenes/new.ron", &invalid).is_err());
-        assert!(!handle.path("Scenes/new.ron").exists());
-        assert_eq!(
-            ron::from_str::<crate::Scene>("(name: \"Old\", entities: [])")
-                .unwrap()
-                .format_version,
-            1
         );
 
         let _ = std::fs::remove_dir_all(base);
@@ -3189,17 +2949,15 @@ mod tests {
             "(base_color: (1.0, 1.0, 1.0, 1.0), albedo: \"Resources/Texture.png\")\n",
         )
         .unwrap();
-        let legacy_scene = r#"(
-            name: "Legacy",
-            entities: [
-                (
-                    name: "Box",
-                    transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
-                    material_asset: Some("Resources/Materials/Legacy.mat"),
-                ),
-            ],
-        )"#;
-        std::fs::write(handle.path("Scenes/legacy.ron"), legacy_scene).unwrap();
+        let mut scene = crate::Scene::new("Material migration");
+        let mut entity = crate::Entity::new("Box");
+        entity.material_asset = Some("Resources/Materials/Legacy.mat".into());
+        scene.add_entity(entity);
+        let scene_text = crate::scene_v2::SceneV2::from_runtime(&scene)
+            .unwrap()
+            .to_ron()
+            .unwrap();
+        std::fs::write(handle.path("Scenes/legacy.ron"), scene_text).unwrap();
 
         let report = handle.migrate_asset_references();
         assert!(!report.has_errors(), "{:?}", report.errors);
@@ -3235,8 +2993,9 @@ mod tests {
         let (base, handle) = temp_project("migration_comments");
         let asset = "Resources/Box.glb";
         std::fs::write(handle.path(asset), b"glb").unwrap();
+        let body = current_scene_with_model(asset, "Box", asset);
         let original = format!(
-            "// model: \"{asset}\" (documentation)\n/* \"{asset}\" */\n(\n    name: \"{asset}\",\n    entities: [(name: \"Box\", model: \"{asset}\")],\n)\n"
+            "// model: \"{asset}\" (documentation)\n/* \"{asset}\" */\n{body}"
         );
         let path = handle.path("Scenes/comments.ron");
         std::fs::write(&path, &original).unwrap();
@@ -3246,12 +3005,16 @@ mod tests {
         assert_eq!(report.rewritten_scenes, 1);
         let changed = std::fs::read_to_string(&path).unwrap();
         let guid = handle.assets().guid_of(asset).unwrap().to_reference();
-        assert_eq!(
-            changed,
-            format!(
-                "// model: \"{asset}\" (documentation)\n/* \"{asset}\" */\n(\n    name: \"{asset}\",\n    entities: [(name: \"Box\", model: \"{guid}\")],\n)\n"
-            )
+        let expected_body = body.replacen(
+            &format!("model: \"{asset}\""),
+            &format!("model: \"{guid}\""),
+            1,
         );
+        assert_ne!(expected_body, body, "夹具必须含真实 Mesh.model 字段");
+        let expected = format!(
+            "// model: \"{asset}\" (documentation)\n/* \"{asset}\" */\n{expected_body}"
+        );
+        assert_eq!(changed, expected);
         assert_eq!(
             handle.load_scene("Scenes/comments.ron").unwrap().entities[0].model,
             asset
@@ -3266,7 +3029,8 @@ mod tests {
         let replacements = std::collections::BTreeMap::from([(asset.clone(), guid.clone())]);
         let text = r###"(/* outer /* model: "Resources/Box.glb" */ */
             name: "Resources/Box.glb", // model: "Resources/Box.glb"
-            scripts: ["Resources/Box.glb"],
+            data: Lua((path: "Resources/Box.glb")),
+            asset: Some("Resources/Box.glb"),
             model: "Resources/Box.glb",
             note: "escaped quote: \"Resources/Box.glb\"",
             other: r#"Resources/Box.glb"#,
@@ -3275,7 +3039,8 @@ mod tests {
         assert!(changed.contains("/* outer /* model: \"Resources/Box.glb\" */ */"));
         assert!(changed.contains("name: \"Resources/Box.glb\""));
         assert!(changed.contains("// model: \"Resources/Box.glb\""));
-        assert!(changed.contains("scripts: [\"guid://test\"]"));
+        assert!(changed.contains("data: Lua((path: \"guid://test\"))"));
+        assert!(changed.contains("asset: Some(\"guid://test\")"));
         assert!(changed.contains("model: \"guid://test\""));
         assert!(changed.contains("note: \"escaped quote: \\\"Resources/Box.glb\\\"\""));
         assert!(changed.contains("other: r#\"Resources/Box.glb\"#"));
@@ -3301,7 +3066,7 @@ mod tests {
     /// 脱离仓库单独分发 xgame-core 时找不到示例项目，直接跳过。
     #[test]
     fn bundled_sample_project_loads() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/SampleScene");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/XGame");
         if !root.join(PROJECT_FILE_NAME).is_file() {
             return;
         }
@@ -3363,7 +3128,7 @@ mod tests {
     /// 示例项目里的预制体资产必须能加载，且内部层级与引用的模型都成立。
     #[test]
     fn bundled_sample_prefabs_load() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/SampleScene");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/XGame");
         if !root.join(PROJECT_FILE_NAME).is_file() {
             return;
         }

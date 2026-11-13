@@ -23,7 +23,7 @@ fn structural_apply_fixture(
     root.camera = Some(Camera::default());
     root.audio = Some(AudioSource::default());
     legacy.entities.push(root);
-    let asset = PrefabV2::from_v1(&legacy).unwrap();
+    let asset = PrefabV2::from_runtime(&legacy).unwrap();
     project.write_prefab_v2(&source, &asset).unwrap();
 
     let scenes = vec![
@@ -33,7 +33,7 @@ fn structural_apply_fixture(
     for (index, relative) in scenes.iter().enumerate() {
         let mut scene = Scene::new(format!("Scene{index}"));
         scene.entities = legacy.instantiate(&source);
-        let v2 = SceneV2::from_v1_with_prefabs(
+        let v2 = SceneV2::from_runtime_with_prefabs(
             &scene,
             &BTreeMap::from([(source.clone(), asset.clone())]),
         )
@@ -87,29 +87,32 @@ fn v2_reference_walk_uses_the_existing_asset_database_rules() {
     actor.ui = Some(ui);
     actor.scripts.push("Scripts/actor.lua".into());
     legacy.add_entity(actor);
-    let mut v2 = SceneV2::from_v1_plain(&legacy).unwrap();
+    let mut v2 = SceneV2::from_runtime(&legacy).unwrap();
 
     let mut expected = legacy.clone();
     xgame_core::encode_scene_references(&mut expected, &assets);
     xgame_core::encode_scene_v2_references(&mut v2, &assets);
-    assert_eq!(v2.clone().to_v1().unwrap(), expected);
+    assert_eq!(v2.clone().into_runtime().unwrap(), expected);
     assert!(v2.to_ron().unwrap().contains("guid://"));
 
     let mut old_prefab = Prefab::new("References");
     old_prefab.entities = legacy.entities.clone();
-    let mut v2_prefab = PrefabV2::from_v1(&old_prefab).unwrap();
+    let mut v2_prefab = PrefabV2::from_runtime(&old_prefab).unwrap();
     let mut expected_prefab = old_prefab.clone();
     xgame_core::encode_prefab_references(&mut expected_prefab, &assets);
     xgame_core::encode_prefab_v2_references(&mut v2_prefab, &assets);
     assert_eq!(
-        v2_prefab.clone().to_v1().unwrap().entities,
+        v2_prefab.clone().into_runtime().unwrap().entities,
         expected_prefab.entities
     );
     xgame_core::decode_prefab_v2_references(&mut v2_prefab, &assets);
-    assert_eq!(v2_prefab.to_v1().unwrap().entities, old_prefab.entities);
+    assert_eq!(
+        v2_prefab.into_runtime().unwrap().entities,
+        old_prefab.entities
+    );
 
     xgame_core::decode_scene_v2_references(&mut v2, &assets);
-    assert_eq!(v2.to_v1().unwrap(), legacy);
+    assert_eq!(v2.into_runtime().unwrap(), legacy);
     drop(assets);
     std::fs::remove_dir_all(base).unwrap();
 }
@@ -136,7 +139,7 @@ fn scene_v2_keeps_typed_values_and_identity_across_ron_roundtrip() {
     actor.scripts.push("Scripts/actor.lua".into());
     legacy.add_entity(actor);
 
-    let disk = SceneV2::from_v1_plain(&legacy).unwrap();
+    let disk = SceneV2::from_runtime(&legacy).unwrap();
     let first = disk.to_ron().unwrap();
     assert!(first.contains("format_version: 2"), "{first}");
     assert!(
@@ -158,13 +161,13 @@ fn scene_v2_keeps_typed_values_and_identity_across_ron_roundtrip() {
     assert_eq!(entity.transform_identity.id.raw(), 1);
     assert_eq!(entity.components.next_component_id.next_id(), 13);
     assert_eq!(entity.components.entries.len(), 11);
-    assert_eq!(loaded.to_v1().unwrap(), legacy);
+    assert_eq!(loaded.into_runtime().unwrap(), legacy);
 
-    let mut duplicate = SceneV2::from_v1_plain(&legacy).unwrap();
+    let mut duplicate = SceneV2::from_runtime(&legacy).unwrap();
     duplicate.entities.push(duplicate.entities[0].clone());
     assert!(duplicate.to_ron().unwrap_err().contains("重复"));
 
-    let mut missing_mesh = SceneV2::from_v1_plain(&legacy).unwrap();
+    let mut missing_mesh = SceneV2::from_runtime(&legacy).unwrap();
     if let xgame_core::scene_v2::ComponentData::Mesh(mesh) =
         &mut missing_mesh.entities[0].components.entries[0].data
     {
@@ -173,7 +176,10 @@ fn scene_v2_keeps_typed_values_and_identity_across_ron_roundtrip() {
     } else {
         panic!("首个组件应是 Mesh");
     }
-    assert!(missing_mesh.to_v1().unwrap_err().contains("空的 Mesh"));
+    assert!(missing_mesh
+        .into_runtime()
+        .unwrap_err()
+        .contains("空的 Mesh"));
 }
 
 #[test]
@@ -189,7 +195,7 @@ fn v2_visual_components_have_independent_identity_and_removal_boundaries() {
     entity.material = Some(MaterialOverride::default());
     scene.add_entity(entity);
 
-    let upgraded = SceneV2::from_v1_plain(&scene).unwrap();
+    let upgraded = SceneV2::from_runtime(&scene).unwrap();
     let visual = &upgraded.entities[0].components.entries;
     let mesh_id = visual
         .iter()
@@ -222,7 +228,7 @@ fn v2_visual_components_have_independent_identity_and_removal_boundaries() {
     without_mesh.entities[0]
         .remove_component(mesh_id)
         .unwrap();
-    let value = without_mesh.to_v1().unwrap().entities.remove(0);
+    let value = without_mesh.into_runtime().unwrap().entities.remove(0);
     assert!(value.model.is_empty());
     assert!(value.morph_weights.is_empty());
     assert!(!value.lod.is_empty());
@@ -232,7 +238,7 @@ fn v2_visual_components_have_independent_identity_and_removal_boundaries() {
     without_lod.entities[0]
         .remove_component(lod_id)
         .unwrap();
-    let value = without_lod.to_v1().unwrap().entities.remove(0);
+    let value = without_lod.into_runtime().unwrap().entities.remove(0);
     assert_eq!(value.model, "builtin://cube");
     assert!(value.lod.is_empty());
     assert!(value.material_asset.is_some() && value.material.is_some());
@@ -241,86 +247,10 @@ fn v2_visual_components_have_independent_identity_and_removal_boundaries() {
     without_material.entities[0]
         .remove_component(material_id)
         .unwrap();
-    let value = without_material.to_v1().unwrap().entities.remove(0);
+    let value = without_material.into_runtime().unwrap().entities.remove(0);
     assert_eq!(value.model, "builtin://cube");
     assert!(!value.lod.is_empty());
     assert!(value.material_asset.is_none() && value.material.is_none());
-}
-
-#[test]
-fn legacy_v2_render_is_readable_and_migrates_without_reusing_its_id() {
-    let mut scene = Scene::new("Legacy Render");
-    let mut actor = Entity::new("Actor").with_model("builtin://cube");
-    actor.lod.levels = vec![xgame_core::LodLevel::new("builtin://sphere", 0.0)];
-    actor.material_asset = Some("Resources/Materials/Wood.mat".into());
-    actor.material = Some(MaterialOverride::default());
-    scene.add_entity(actor);
-
-    let mut legacy = SceneV2::from_v1_plain(&scene).unwrap();
-    let entity = &mut legacy.entities[0];
-    let legacy_id = entity.components.entries[0].identity.id;
-    let next_before = entity.components.next_component_id.next_id();
-    entity.components.entries.clear();
-    entity.components.entries.push(xgame_core::scene_v2::ComponentInstance {
-        identity: xgame_core::component_id::ComponentIdentity {
-            id: legacy_id,
-            source_component_id: None,
-        },
-        data: ComponentData::LegacyRender(xgame_core::scene_v2::RenderData {
-            model: "builtin://cube".into(),
-            lod: xgame_core::LodGroup {
-                levels: vec![xgame_core::LodLevel::new("builtin://sphere", 0.0)],
-            },
-            material_asset: Some("Resources/Materials/Wood.mat".into()),
-            morph_weights: Vec::new(),
-        }),
-    });
-    entity
-        .components
-        .entries
-        .push(xgame_core::scene_v2::ComponentInstance {
-            identity: xgame_core::component_id::ComponentIdentity {
-                id: xgame_core::component_id::ComponentId::from_raw(next_before - 1).unwrap(),
-                source_component_id: None,
-            },
-            data: ComponentData::LegacyMaterialOverride(MaterialOverride::default()),
-        });
-    let old_text = legacy.to_ron().unwrap();
-    assert!(old_text.contains("Render("), "{old_text}");
-    assert!(old_text.contains("MaterialOverride("), "{old_text}");
-
-    let mut loaded = SceneV2::from_ron(&old_text).unwrap();
-    assert_eq!(loaded.clone().to_v1().unwrap(), scene);
-    assert!(loaded.entities[0]
-        .remove_component(legacy_id)
-        .unwrap_err()
-        .contains("先经编辑器保存迁移"));
-    assert!(loaded.entities[0]
-        .add_component(ComponentData::Camera(xgame_core::Camera::default()))
-        .unwrap_err()
-        .contains("先经编辑器保存迁移"));
-    loaded
-        .reconcile_from_v1(&scene, &BTreeMap::new())
-        .unwrap();
-    let entries = &loaded.entities[0].components.entries;
-    assert!(entries
-        .iter()
-        .all(|entry| !matches!(entry.data, ComponentData::LegacyRender(_) | ComponentData::LegacyMaterialOverride(_))));
-    assert_eq!(
-        entries
-            .iter()
-            .find(|entry| matches!(entry.data, ComponentData::Mesh(_)))
-            .unwrap()
-            .identity
-            .id,
-        legacy_id,
-        "旧复合身份交给首个真实视觉组件"
-    );
-    let ids: Vec<_> = entries.iter().map(|entry| entry.identity.id.raw()).collect();
-    assert_eq!(ids.len(), 3);
-    assert_eq!(ids.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), 3);
-    assert!(loaded.entities[0].components.next_component_id.next_id() > next_before);
-    assert!(!loaded.to_ron().unwrap().contains("Render("));
 }
 
 #[test]
@@ -330,10 +260,15 @@ fn prefab_v2_keeps_asset_entity_ids_and_refuses_bad_versions() {
     entity.behaviors.push("Health".into());
     prefab.entities.push(entity);
 
-    let v2 = PrefabV2::from_v1(&prefab).unwrap();
+    let v2 = PrefabV2::from_runtime(&prefab).unwrap();
     let text = v2.to_ron().unwrap();
     assert_eq!(
-        PrefabV2::from_ron(&text).unwrap().to_v1().unwrap().entities[0].id,
+        PrefabV2::from_ron(&text)
+            .unwrap()
+            .into_runtime()
+            .unwrap()
+            .entities[0]
+            .id,
         prefab.entities[0].id
     );
     assert!(PrefabV2::from_ron(&text.replace("format_version: 2", "format_version: 3")).is_err());
@@ -352,7 +287,7 @@ fn v2_rejects_duplicate_rust_field_keys() {
         [("value".into(), xgame_core::FieldValue::F32(75.0))].into(),
     );
     scene.add_entity(actor);
-    let text = SceneV2::from_v1_plain(&scene).unwrap().to_ron().unwrap();
+    let text = SceneV2::from_runtime(&scene).unwrap().to_ron().unwrap();
     let duplicate = text.replacen("\"value\":", "\"value\": F32(5.0), \"value\":", 1);
     assert_ne!(text, duplicate, "必须真的复制一个字段名: {text}");
     assert!(
@@ -374,7 +309,7 @@ fn v2_rejects_duplicate_animation_parameter_keys() {
     };
     actor.animator = Some(animator);
     scene.add_entity(actor);
-    let text = SceneV2::from_v1_plain(&scene).unwrap().to_ron().unwrap();
+    let text = SceneV2::from_runtime(&scene).unwrap().to_ron().unwrap();
     let duplicate = text.replacen("\"speed\":", "\"speed\": 0.0, \"speed\":", 1);
     assert_ne!(text, duplicate, "必须真的复制一个动画参数键: {text}");
     assert!(
@@ -403,18 +338,27 @@ fn v2_rejects_duplicate_layer_animation_parameters_and_keeps_defaults() {
     };
     actor.animator = Some(animator);
     scene.add_entity(actor);
-    let text = SceneV2::from_v1_plain(&scene).unwrap().to_ron().unwrap();
+    let text = SceneV2::from_runtime(&scene).unwrap().to_ron().unwrap();
     let duplicate = text.replacen("\"aim\":", "\"aim\": 0.0, \"aim\":", 1);
     assert_ne!(duplicate, text, "必须真的复制分层参数键: {text}");
     assert!(SceneV2::from_ron(&duplicate)
         .unwrap_err()
         .contains("重复键"));
-    assert_eq!(SceneV2::from_ron(&text).unwrap().to_v1().unwrap(), scene);
+    assert_eq!(
+        SceneV2::from_ron(&text)
+            .unwrap()
+            .into_runtime()
+            .unwrap(),
+        scene
+    );
 
-    // 层与播放器的缺省值由 v1 类型定义；v2 的严格读法应与它保持一致。
+    // 层与播放器的缺省值由运行时值类型定义；文件模型的严格读法应与它保持一致。
     let partial = text.replacen("fade_time: 0.25,", "", 1);
     assert_ne!(partial, text, "动画默认淡入时长必须出现在样本中");
-    let decoded = SceneV2::from_ron(&partial).unwrap().to_v1().unwrap();
+    let decoded = SceneV2::from_ron(&partial)
+        .unwrap()
+        .into_runtime()
+        .unwrap();
     assert_eq!(
         decoded.entities[0].animator.as_ref().unwrap().fade_time,
         0.25
@@ -430,7 +374,7 @@ fn v2_prefab_instance_uses_asset_component_ids_after_local_reordering() {
     asset.scripts = vec!["Scripts/actor.lua".into()];
     prefab.entities.push(asset);
     let source_id = prefab.entities[0].id;
-    let mut upgraded = PrefabV2::from_v1(&prefab).unwrap();
+    let mut upgraded = PrefabV2::from_runtime(&prefab).unwrap();
     // 来源资产可能早已删除过组件；实例必须使用资产实际存盘的 ID。
     upgraded.entities[0].components.entries[1].identity.id =
         xgame_core::component_id::ComponentId::from_raw(10).unwrap();
@@ -443,7 +387,7 @@ fn v2_prefab_instance_uses_asset_component_ids_after_local_reordering() {
     scene.add_entity(instance);
     let sources = BTreeMap::from([(source_path.to_owned(), upgraded)]);
 
-    let v2 = SceneV2::from_v1_with_prefabs(&scene, &sources).unwrap();
+    let v2 = SceneV2::from_runtime_with_prefabs(&scene, &sources).unwrap();
     let entity = &v2.entities[0];
     assert_eq!(entity.prefab.as_ref().unwrap().source_id, source_id);
     assert_eq!(entity.transform_identity.id.raw(), 1);
@@ -461,7 +405,7 @@ fn v2_prefab_instance_uses_asset_component_ids_after_local_reordering() {
     assert_eq!(
         SceneV2::from_ron(&v2.to_ron().unwrap())
             .unwrap()
-            .to_v1()
+            .into_runtime()
             .unwrap(),
         scene
     );
@@ -479,15 +423,15 @@ fn v2_prefab_instance_uses_asset_component_ids_after_local_reordering() {
         .source_component_id;
     assert!(duplicated.to_ron().unwrap_err().contains("重复引用"));
 
-    assert!(SceneV2::from_v1_plain(&scene).is_err());
-    assert!(SceneV2::from_v1_with_prefabs(&scene, &BTreeMap::new()).is_err());
+    assert!(SceneV2::from_runtime(&scene).is_err());
+    assert!(SceneV2::from_runtime_with_prefabs(&scene, &BTreeMap::new()).is_err());
     let mut broken = sources.clone();
     broken.get_mut(source_path).unwrap().entities[0].id = xgame_core::EntityId::new();
-    assert!(SceneV2::from_v1_with_prefabs(&scene, &broken).is_err());
+    assert!(SceneV2::from_runtime_with_prefabs(&scene, &broken).is_err());
 }
 
 #[test]
-fn project_reads_v2_with_prefab_source_checks_without_writing() {
+fn project_reads_current_files_with_prefab_source_checks_without_writing() {
     let base = std::env::temp_dir().join(format!("xgame-v2-read-{}", std::process::id()));
     assert!(!base.exists());
     let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
@@ -498,8 +442,8 @@ fn project_reads_v2_with_prefab_source_checks_without_writing() {
     prefab.entities.push(asset);
     let mut scene = Scene::new("Instance");
     scene.entities.extend(prefab.instantiate(&prefab_path));
-    let v2_prefab = PrefabV2::from_v1(&prefab).unwrap();
-    let v2_scene = SceneV2::from_v1_with_prefabs(
+    let v2_prefab = PrefabV2::from_runtime(&prefab).unwrap();
+    let v2_scene = SceneV2::from_runtime_with_prefabs(
         &scene,
         &BTreeMap::from([(prefab_path.clone(), v2_prefab.clone())]),
     )
@@ -509,11 +453,8 @@ fn project_reads_v2_with_prefab_source_checks_without_writing() {
     std::fs::write(project.path(&prefab_path), v2_prefab.to_ron().unwrap()).unwrap();
     std::fs::write(project.path(&scene_path), v2_scene.to_ron().unwrap()).unwrap();
     let before = std::fs::read(project.path(&scene_path)).unwrap();
-    assert!(
-        project.load_scene(&scene_path).is_err(),
-        "v1 加载器必须拒绝 v2"
-    );
-    assert!(project.load_prefab(&prefab_path).is_err());
+    assert_eq!(project.load_scene(&scene_path).unwrap(), scene);
+    assert_eq!(project.load_prefab(&prefab_path).unwrap().entities, prefab.entities);
     assert_eq!(
         project
             .load_scene_v2(&scene_path)
@@ -561,250 +502,14 @@ fn project_reads_v2_with_prefab_source_checks_without_writing() {
 }
 
 #[test]
-fn project_previews_v1_scene_and_prefab_upgrade_without_touching_files() {
-    let base =
-        std::env::temp_dir().join(format!("xgame-v2-upgrade-preview-{}", std::process::id()));
-    assert!(!base.exists());
-    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
-    let source_path = project.prefab_path_for("Actor");
-    let mut prefab = Prefab::new("Actor");
-    let mut asset = Entity::new("Actor");
-    asset.behaviors = vec!["Health".into(), "Motion".into()];
-    prefab.entities.push(asset);
-    project.write_prefab(&source_path, &prefab).unwrap();
-    let mut instance = prefab.instantiate(&source_path).remove(0);
-    instance.behaviors.swap(0, 1);
-    let mut scene = Scene::new("Upgrade");
-    scene.add_entity(instance);
-    let path = &project.manifest().entry_scene;
-    project.write_scene(path, &scene).unwrap();
-    let scene_bytes = std::fs::read(project.path(path)).unwrap();
-    let prefab_bytes = std::fs::read(project.path(&source_path)).unwrap();
-    let preview = project.preview_scene_v2(path).unwrap();
-    assert_eq!(preview.clone().to_v1().unwrap(), scene);
-    assert_eq!(
-        preview.entities[0].components.entries[0]
-            .identity
-            .source_component_id
-            .unwrap()
-            .raw(),
-        3
-    );
-    assert_eq!(std::fs::read(project.path(path)).unwrap(), scene_bytes);
-    assert_eq!(
-        std::fs::read(project.path(&source_path)).unwrap(),
-        prefab_bytes
-    );
-
-    let mut upgraded = PrefabV2::from_v1(&prefab).unwrap();
-    upgraded.entities[0].components.entries[1].identity.id =
-        xgame_core::component_id::ComponentId::from_raw(18).unwrap();
-    upgraded.entities[0].components.next_component_id =
-        xgame_core::component_id::ComponentIdSequence::from_next(19).unwrap();
-    std::fs::write(project.path(&source_path), upgraded.to_ron().unwrap()).unwrap();
-    let mixed = project.preview_scene_v2(path).unwrap();
-    assert_eq!(
-        mixed.entities[0].components.entries[0]
-            .identity
-            .source_component_id
-            .unwrap()
-            .raw(),
-        18
-    );
-    assert_eq!(std::fs::read(project.path(path)).unwrap(), scene_bytes);
-
-    // 未知嵌套字段在 v1 的常规加载中被忽略；预览迁移必须看见并拒绝。
-    let mut bad = String::from_utf8(scene_bytes.clone()).unwrap();
-    let marker = "behaviors: [";
-    assert!(bad.contains(marker));
-    bad = bad.replacen(marker, "unexpected_data: 42, behaviors: [", 1);
-    std::fs::write(project.path(path), &bad).unwrap();
-    assert!(project
-        .preview_scene_v2(path)
-        .unwrap_err()
-        .contains("unexpected_data"));
-    assert_eq!(std::fs::read_to_string(project.path(path)).unwrap(), bad);
-    std::fs::remove_dir_all(base).unwrap();
-}
-
-#[test]
-fn project_upgrade_preview_rejects_repeated_v1_map_keys() {
-    let base = std::env::temp_dir().join(format!("xgame-v1-duplicate-map-{}", std::process::id()));
-    assert!(!base.exists());
-    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
-    let mut scene = Scene::new("DuplicateMap");
-    let mut actor = Entity::new("Actor");
-    actor.behaviors.push("Health".into());
-    actor.behavior_params.insert(
-        "Health".into(),
-        [("hp".into(), xgame_core::FieldValue::F32(5.0))].into(),
-    );
-    scene.add_entity(actor);
-    let path = &project.manifest().entry_scene;
-    project.write_scene(path, &scene).unwrap();
-    let original = std::fs::read_to_string(project.path(path)).unwrap();
-    let duplicated = original.replacen("\"hp\":", "\"hp\": F32(2.0), \"hp\":", 1);
-    assert_ne!(duplicated, original);
-    assert!(
-        ron::from_str::<Scene>(&duplicated).is_ok(),
-        "v1 常规解码确实会吞掉重复键"
-    );
-    std::fs::write(project.path(path), &duplicated).unwrap();
-    assert!(project.preview_scene_v2(path).unwrap_err().contains("重复"));
-    assert_eq!(
-        std::fs::read_to_string(project.path(path)).unwrap(),
-        duplicated
-    );
-    scene.entities[0].animator = Some(Animator {
-        machine: Some(xgame_core::AnimMachine {
-            parameters: [("speed".into(), 1.0)].into(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    });
-    project.write_scene(path, &scene).unwrap();
-    let text = std::fs::read_to_string(project.path(path)).unwrap();
-    let repeated = text.replacen("\"speed\":", "\"speed\": 0.0, \"speed\":", 1);
-    assert_ne!(repeated, text);
-    std::fs::write(project.path(path), &repeated).unwrap();
-    assert!(project.preview_scene_v2(path).unwrap_err().contains("重复"));
-    std::fs::write(project.path(path), &text).unwrap();
-    assert!(project.preview_scene_v2(path).is_ok());
-    std::fs::remove_dir_all(base).unwrap();
-}
-
-#[test]
-fn explicit_project_upgrade_backs_up_originals_and_can_restore_them() {
-    let base = std::env::temp_dir().join(format!("xgame-v2-migration-{}", std::process::id()));
-    assert!(!base.exists());
-    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
-    let prefab_path = project.prefab_path_for("Actor");
-    let mut prefab = Prefab::new("Actor");
-    prefab
-        .entities
-        .push(Entity::new("Actor").with_model("builtin://cube"));
-    project.write_prefab(&prefab_path, &prefab).unwrap();
-    let mut scene = project.load_entry_scene().unwrap();
-    scene.add_entity(prefab.instantiate(&prefab_path).remove(0));
-    let scene_path = project.manifest().entry_scene.clone();
-    project.write_scene(&scene_path, &scene).unwrap();
-    let old_scene = std::fs::read(project.path(&scene_path)).unwrap();
-    let old_prefab = std::fs::read(project.path(&prefab_path)).unwrap();
-
-    let result = project.migrate_components_v2().unwrap();
-    assert!(result.files.contains(&scene_path));
-    assert!(result.files.contains(&prefab_path));
-    assert_eq!(
-        std::fs::read(project.path(&scene_path)).unwrap(),
-        std::fs::read(result.backup.join("upgraded").join(&scene_path)).unwrap()
-    );
-    assert_eq!(
-        std::fs::read(result.backup.join("original").join(&scene_path)).unwrap(),
-        old_scene
-    );
-    assert_eq!(
-        std::fs::read(result.backup.join("original").join(&prefab_path)).unwrap(),
-        old_prefab
-    );
-    let upgraded = project.load_scene_v2(&scene_path).unwrap();
-    assert_eq!(upgraded.entities.len(), scene.entities.len());
-    assert!(upgraded.entities.last().unwrap().components.entries[0]
-        .identity
-        .source_component_id
-        .is_some());
-    assert!(project.load_prefab_v2(&prefab_path).is_ok());
-
-    project.restore_components_v2(&result.backup).unwrap();
-    assert_eq!(std::fs::read(project.path(&scene_path)).unwrap(), old_scene);
-    assert_eq!(
-        std::fs::read(project.path(&prefab_path)).unwrap(),
-        old_prefab
-    );
-    std::fs::remove_dir_all(base).unwrap();
-}
-
-#[test]
-fn v2_upgrade_preflight_leaves_all_files_alone_if_one_cannot_convert() {
-    let base =
-        std::env::temp_dir().join(format!("xgame-v2-migration-reject-{}", std::process::id()));
-    assert!(!base.exists());
-    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
-    let scene_path = project.manifest().entry_scene.clone();
-    let original = std::fs::read(project.path(&scene_path)).unwrap();
-    let broken_path = project.path("Scenes/Broken.ron");
-    std::fs::write(&broken_path, "(format_version: 3)").unwrap();
-    assert!(project.migrate_components_v2().is_err());
-    assert_eq!(std::fs::read(project.path(&scene_path)).unwrap(), original);
-    assert_eq!(std::fs::read(broken_path).unwrap(), b"(format_version: 3)");
-    assert_eq!(project.list_scenes().len(), 2);
-    std::fs::remove_dir_all(base).unwrap();
-}
-
-#[test]
-fn migration_recovery_checks_every_file_before_restoring_any() {
-    let base = std::env::temp_dir().join(format!(
-        "xgame-v2-migration-recovery-{}",
-        std::process::id()
-    ));
-    assert!(!base.exists());
-    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
-    let other = "Scenes/Extra.ron";
-    project.write_scene(other, &Scene::new("Extra")).unwrap();
-    let result = project.migrate_components_v2().unwrap();
-    let entry = project.manifest().entry_scene.clone();
-    let upgraded_entry = std::fs::read(project.path(&entry)).unwrap();
-    let upgraded_other = std::fs::read(project.path(other)).unwrap();
-    std::fs::write(project.path(other), b"external edit").unwrap();
-    assert!(project
-        .restore_components_v2(&result.backup)
-        .unwrap_err()
-        .contains("已被修改"));
-    assert_eq!(
-        std::fs::read(project.path(&entry)).unwrap(),
-        upgraded_entry,
-        "拒绝恢复须发生在第一份文件被写之前"
-    );
-    std::fs::write(project.path(other), upgraded_other).unwrap();
-    project.restore_components_v2(&result.backup).unwrap();
-    assert!(project.load_entry_scene().is_ok());
-    assert!(project.load_scene(other).is_ok());
-    std::fs::remove_dir_all(base).unwrap();
-}
-
-#[test]
-fn interrupted_component_upgrade_blocks_new_upgrades_until_recovered() {
-    let base =
-        std::env::temp_dir().join(format!("xgame-v2-migration-pending-{}", std::process::id()));
-    assert!(!base.exists());
-    let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
-    let other = "Scenes/Extra.ron";
-    project.write_scene(other, &Scene::new("Extra")).unwrap();
-    let result = project.migrate_components_v2().unwrap();
-    let journal = result.backup.join("migration.ron");
-    let completed = std::fs::read_to_string(&journal).unwrap();
-    assert!(completed.contains("Complete"));
-    std::fs::write(&journal, completed.replace("Complete", "Pending")).unwrap();
-    let original = std::fs::read(result.backup.join("original").join(other)).unwrap();
-    std::fs::write(project.path(other), original).unwrap();
-    assert!(project
-        .migrate_components_v2()
-        .unwrap_err()
-        .contains("未恢复"));
-    project.restore_components_v2(&result.backup).unwrap();
-    assert!(project.load_entry_scene().is_ok());
-    assert!(project.load_scene(other).is_ok());
-    std::fs::remove_dir_all(base).unwrap();
-}
-
-#[test]
-fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
+fn runtime_loader_keeps_file_values_and_component_identities() {
     let base = std::env::temp_dir().join(format!("xgame-v2-runtime-load-{}", std::process::id()));
     assert!(!base.exists());
     let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
     let path = project.manifest().entry_scene.clone();
     let mut scene = project.load_entry_scene().unwrap();
     scene.add_entity(Entity::new("Runner").with_script("Scripts/runner.lua"));
-    let upgraded = SceneV2::from_v1_plain(&scene).unwrap();
+    let upgraded = SceneV2::from_runtime(&scene).unwrap();
     let runner = upgraded.entities.last().unwrap();
     let runner_id = runner.id;
     let transform_id = runner.transform_identity.id;
@@ -813,14 +518,14 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
         .write_scene_v2("Scenes/Extra.ron", &upgraded)
         .unwrap();
     std::fs::write(project.path(&path), upgraded.to_ron().unwrap()).unwrap();
-    assert!(project.load_entry_scene().is_err());
+    assert_eq!(project.load_entry_scene().unwrap(), scene);
     let runtime = project.load_entry_scene_runtime().unwrap();
     assert_eq!(
         runtime.entities.last().unwrap().scripts,
         ["Scripts/runner.lua"]
     );
     let loaded = project.load_entry_runtime_scene().unwrap();
-    let identities = loaded.identities().expect("v2 运行载荷必须保留组件身份");
+    let identities = loaded.identities().expect("文件运行载荷必须保留组件身份");
     let runner = identities.entity(runner_id).expect("Runner 身份存在");
     assert_eq!(runner.transform().identity.id, transform_id);
     assert_eq!(runner.next_component_id().next_id(), script_id.raw() + 1);
@@ -841,7 +546,7 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
     prefab
         .entities
         .push(Entity::new("Runner").with_model("builtin://cube"));
-    let prefab_v2 = PrefabV2::from_v1(&prefab).unwrap();
+    let prefab_v2 = PrefabV2::from_runtime(&prefab).unwrap();
     let source_transform_id = prefab_v2.entities[0].transform_identity.id;
     let source_mesh_id = prefab_v2.entities[0].components.entries[0].identity.id;
     project.write_prefab_v2(prefab_path, &prefab_v2).unwrap();
@@ -852,7 +557,7 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
     let instance = loaded_prefab.instantiate(prefab_path).unwrap();
     let identity = instance.identities()[0]
         .as_ref()
-        .expect("v2 预制体实例必须携带组件身份");
+        .expect("文件预制体实例必须携带组件身份");
     assert_eq!(
         identity.transform().identity.source_component_id,
         Some(source_transform_id)
@@ -865,8 +570,8 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
             .source_component_id,
         Some(source_mesh_id)
     );
-    assert!(project.load_prefab(prefab_path).is_err());
-    assert!(project.load_scene("Scenes/Extra.ron").is_err());
+    assert_eq!(project.load_prefab(prefab_path).unwrap().entities, prefab.entities);
+    assert_eq!(project.load_scene("Scenes/Extra.ron").unwrap(), scene);
     std::fs::remove_dir_all(base).unwrap();
 }
 
@@ -878,7 +583,7 @@ fn v2_component_edit_refuses_stale_scene_revision() {
     let path = "Scenes/Edit.ron";
     let mut scene = Scene::new("Edit");
     scene.add_entity(Entity::new("Actor"));
-    let initial = SceneV2::from_v1_plain(&scene).unwrap();
+    let initial = SceneV2::from_runtime(&scene).unwrap();
     project.write_scene_v2(path, &initial).unwrap();
     let original = std::fs::read(project.path(path)).unwrap();
     let mut external = initial.clone();
@@ -908,20 +613,20 @@ fn v2_editor_projection_keeps_ids_and_never_recycles_removed_components() {
     actor.camera = Some(xgame_core::Camera::default());
     let id = actor.id;
     scene.entities.push(actor);
-    let mut v2 = SceneV2::from_v1_plain(&scene).unwrap();
+    let mut v2 = SceneV2::from_runtime(&scene).unwrap();
     let transform_id = v2.entities[0].transform_identity.id;
     let render_id = v2.entities[0].components.entries[0].identity.id;
     let camera_id = v2.entities[0].components.entries[1].identity.id;
     scene.entities[0].model = "builtin://sphere".into();
     scene.entities[0].camera.as_mut().unwrap().fov = 55.0;
-    v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
+    v2.reconcile_from_runtime(&scene, &Default::default()).unwrap();
     assert_eq!(v2.entities[0].transform_identity.id, transform_id);
     assert_eq!(v2.entities[0].components.entries[0].identity.id, render_id);
     assert_eq!(v2.entities[0].components.entries[1].identity.id, camera_id);
     scene.entities[0].camera = None;
-    v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
+    v2.reconcile_from_runtime(&scene, &Default::default()).unwrap();
     scene.entities[0].camera = Some(xgame_core::Camera::default());
-    v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
+    v2.reconcile_from_runtime(&scene, &Default::default()).unwrap();
     let replaced = &v2
         .entities
         .iter()
@@ -932,7 +637,7 @@ fn v2_editor_projection_keeps_ids_and_never_recycles_removed_components() {
     assert_ne!(replaced.identity.id, camera_id);
     assert!(replaced.identity.id.raw() > camera_id.raw());
     assert_eq!(
-        v2.clone().to_v1().unwrap().entities[0].model,
+        v2.clone().into_runtime().unwrap().entities[0].model,
         "builtin://sphere"
     );
 }
@@ -943,12 +648,15 @@ fn v2_editor_replaces_a_single_unlinked_lua_path_without_changing_component_id()
     let mut actor = Entity::new("Actor");
     actor.scripts.push("Scripts/old.lua".into());
     scene.entities.push(actor);
-    let mut v2 = SceneV2::from_v1_plain(&scene).unwrap();
+    let mut v2 = SceneV2::from_runtime(&scene).unwrap();
     let id = v2.entities[0].components.entries[0].identity.id;
     scene.entities[0].scripts[0] = "Scripts/new.lua".into();
-    v2.reconcile_from_v1(&scene, &Default::default()).unwrap();
+    v2.reconcile_from_runtime(&scene, &Default::default()).unwrap();
     assert_eq!(v2.entities[0].components.entries[0].identity.id, id);
-    assert_eq!(v2.to_v1().unwrap().entities[0].scripts, ["Scripts/new.lua"]);
+    assert_eq!(
+        v2.into_runtime().unwrap().entities[0].scripts,
+        ["Scripts/new.lua"]
+    );
 }
 
 #[test]
@@ -962,7 +670,7 @@ fn v2_structural_apply_preserves_survivors_and_links_new_structure() {
     let mut child = Entity::new("OldChild");
     child.parent = Some(root.id);
     legacy.entities = vec![root, child];
-    let old_asset = PrefabV2::from_v1(&legacy).unwrap();
+    let old_asset = PrefabV2::from_runtime(&legacy).unwrap();
     let old_root = &old_asset.entities[0];
     let old_transform = old_root.transform_identity.id;
     let old_next = old_root.components.next_component_id.next_id();
@@ -987,7 +695,7 @@ fn v2_structural_apply_preserves_survivors_and_links_new_structure() {
     let mut scene = Scene::new("Instances");
     scene.entities = legacy.instantiate(source);
     let local_root_id = scene.entities[0].id;
-    let mut identity = SceneV2::from_v1_with_prefabs(
+    let mut identity = SceneV2::from_runtime_with_prefabs(
         &scene,
         &BTreeMap::from([(source.to_owned(), old_asset.clone())]),
     )
@@ -1001,7 +709,7 @@ fn v2_structural_apply_preserves_survivors_and_links_new_structure() {
     added_child.parent = Some(local_root_id);
     scene.entities.push(added_child);
     identity
-        .reconcile_from_v1_for_history(
+        .reconcile_from_runtime_for_history(
             &scene,
             &BTreeMap::from([(source.to_owned(), old_asset.clone())]),
         )
@@ -1097,10 +805,10 @@ fn v2_prefab_metadata_sync_keeps_local_values_when_sources_disappear() {
     let mut child = Entity::new("Child");
     child.parent = Some(root.id);
     legacy.entities = vec![root, child];
-    let old_asset = PrefabV2::from_v1(&legacy).unwrap();
+    let old_asset = PrefabV2::from_runtime(&legacy).unwrap();
     let mut scene = Scene::new("Other");
     scene.entities = legacy.instantiate(source);
-    let mut identity = SceneV2::from_v1_with_prefabs(
+    let mut identity = SceneV2::from_runtime_with_prefabs(
         &scene,
         &BTreeMap::from([(source.to_owned(), old_asset.clone())]),
     )
@@ -1368,7 +1076,7 @@ fn v2_prefab_apply_values_preserves_asset_ids_and_rejects_new_components() {
     entity.camera = Some(xgame_core::Camera::default());
     entity.audio = Some(Default::default());
     old.entities.push(entity);
-    let mut asset = xgame_core::scene_v2::PrefabV2::from_v1(&old).unwrap();
+    let mut asset = xgame_core::scene_v2::PrefabV2::from_runtime(&old).unwrap();
     let transform_id = asset.entities[0].transform_identity.id;
     let camera_id = asset.entities[0]
         .components
@@ -1386,7 +1094,7 @@ fn v2_prefab_apply_values_preserves_asset_ids_and_rejects_new_components() {
         .map(|entry| entry.identity.id)
         .collect();
     old.entities[0].camera.as_mut().unwrap().fov = 42.0;
-    asset.apply_values_from_v1(&old).unwrap();
+    asset.apply_values_from_runtime(&old).unwrap();
     assert_eq!(asset.entities[0].transform_identity.id, transform_id);
     assert_eq!(
         asset.entities[0]
@@ -1409,7 +1117,7 @@ fn v2_prefab_apply_values_preserves_asset_ids_and_rejects_new_components() {
         order
     );
     assert_eq!(
-        asset.clone().to_v1().unwrap().entities[0]
+        asset.clone().into_runtime().unwrap().entities[0]
             .camera
             .as_ref()
             .unwrap()
@@ -1418,7 +1126,7 @@ fn v2_prefab_apply_values_preserves_asset_ids_and_rejects_new_components() {
     );
     old.entities[0].particle = Some(Default::default());
     let bytes = asset.to_ron().unwrap();
-    assert!(asset.apply_values_from_v1(&old).is_err());
+    assert!(asset.apply_values_from_runtime(&old).is_err());
     assert_eq!(asset.to_ron().unwrap(), bytes);
 }
 
@@ -1430,7 +1138,7 @@ fn v2_prefab_conditional_write_rejects_stale_asset() {
     let path = "Prefabs/Actor.prefab.ron";
     let mut prefab = Prefab::new("Actor");
     prefab.entities.push(Entity::new("Actor"));
-    let initial = PrefabV2::from_v1(&prefab).unwrap();
+    let initial = PrefabV2::from_runtime(&prefab).unwrap();
     project.write_prefab_v2(path, &initial).unwrap();
     let original = std::fs::read(project.path(path)).unwrap();
     let mut external = initial.clone();
@@ -1451,7 +1159,7 @@ fn v2_prefab_conditional_write_rejects_stale_asset() {
 }
 
 #[test]
-fn project_v2_write_preserves_ids_and_refuses_v1_overwrite() {
+fn project_file_write_preserves_ids_and_refuses_corrupt_overwrite() {
     let base = std::env::temp_dir().join(format!("xgame-v2-write-{}", std::process::id()));
     assert!(!base.exists());
     let project = xgame_core::ProjectHandle::create(&base, "Project").unwrap();
@@ -1462,10 +1170,10 @@ fn project_v2_write_preserves_ids_and_refuses_v1_overwrite() {
     let mut actor = Entity::new("Actor");
     actor.camera = Some(Camera::default());
     prefab.entities.push(actor);
-    let v2_prefab = PrefabV2::from_v1(&prefab).unwrap();
+    let v2_prefab = PrefabV2::from_runtime(&prefab).unwrap();
     let mut scene = Scene::new("V2");
     scene.entities.extend(prefab.instantiate(&source));
-    let v2_scene = SceneV2::from_v1_with_prefabs(
+    let v2_scene = SceneV2::from_runtime_with_prefabs(
         &scene,
         &BTreeMap::from([(source.clone(), v2_prefab.clone())]),
     )
@@ -1519,7 +1227,7 @@ fn v2_component_edits_keep_ids_and_never_recycle_deleted_ids() {
     actor.camera = Some(Camera::default());
     actor.scripts.push("Scripts/player.lua".into());
     scene.add_entity(actor);
-    let mut upgraded = SceneV2::from_v1_plain(&scene).unwrap();
+    let mut upgraded = SceneV2::from_runtime(&scene).unwrap();
     let entity = &mut upgraded.entities[0];
     let camera_id = entity.components.entries[0].identity.id;
     let lua_id = entity.components.entries[1].identity.id;
@@ -1562,7 +1270,7 @@ fn v2_component_edits_keep_ids_and_never_recycle_deleted_ids() {
     assert_eq!(
         SceneV2::from_ron(&upgraded.to_ron().unwrap())
             .unwrap()
-            .to_v1()
+            .into_runtime()
             .unwrap()
             .entities[0]
             .scripts,
@@ -1575,7 +1283,7 @@ fn v2_rejects_unrepresentable_duplicate_script_or_rust_instances() {
     use xgame_core::scene_v2::ComponentData;
     let mut scene = Scene::new("Duplicates");
     scene.add_entity(Entity::new("Actor"));
-    let mut v2 = SceneV2::from_v1_plain(&scene).unwrap();
+    let mut v2 = SceneV2::from_runtime(&scene).unwrap();
     let entity = &mut v2.entities[0];
     entity
         .add_component(ComponentData::Lua {

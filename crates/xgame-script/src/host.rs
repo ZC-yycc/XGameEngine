@@ -92,7 +92,7 @@ pub struct PreloadReport {
 pub struct CommandReport {
     /// 新生成的实体（运行时按需建物理体）。
     pub spawned: Vec<EntityId>,
-    /// 与新实体一同生成的稳定组件身份；v1 World 会忽略，v2 World 追加到身份侧车。
+    /// 与新实体一同生成的稳定组件身份；没有文件身份侧车的运行时会安全忽略。
     pub spawned_identities: Vec<xgame_core::RuntimeEntityIdentity>,
     /// 被移除的实体及其脚本清单，含整棵子树。
     pub removed: Vec<RemovedEntity>,

@@ -1727,7 +1727,7 @@ pub(crate) mod tests {
     /// 不依赖 `cargo test` 的 cwd。
     fn fox() -> (gltf::Document, Vec<gltf::buffer::Data>) {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../projects/SampleScene/Resources/Fox.gltf");
+            .join("../../projects/XGame/Resources/Fox.gltf");
         let (doc, buffers, _) = gltf::import(&path).expect("应当能解析示例 Fox.gltf");
         (doc, buffers)
     }
@@ -1780,7 +1780,7 @@ pub(crate) mod tests {
     /// runtime 的 CPU 装载器必须与 GPU 模型加载共用同一份解析与导入缩放。
     #[test]
     fn animation_loader_reads_fox_without_a_gpu() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/SampleScene");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/XGame");
         let loader = GltfAnimationLoader::new(&root, Vec::new());
         let asset = loader
             .load_animation("Resources/Fox.gltf")

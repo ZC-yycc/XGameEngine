@@ -403,7 +403,7 @@ function update(ctx)
 end
 ```
 
-示例见 `projects/SampleScene/Scripts/FoxLocomotion.lua`。
+示例见 `projects/XGame/Scripts/FoxLocomotion.lua`。
 
 ### 4.10 混合层栈
 
@@ -470,7 +470,7 @@ function update(ctx)
 end
 ```
 
-示例见 `projects/SampleScene/Scripts/FoxLocomotion.lua`（按时间分段推
+示例见 `projects/XGame/Scripts/FoxLocomotion.lua`（按时间分段推
 `"upper"` 层权重）。
 
 ### 4.11 音频
@@ -676,7 +676,7 @@ function update(ctx)
 end
 ```
 
-完整样例见 `projects/SampleScene/Scripts/CameraFollow.lua`（场景里的 "Main Camera"
+完整样例见 `projects/XGame/Scripts/CameraFollow.lua`（场景里的 "Main Camera"
 实体就是它驱动的，Play 态视口显示的正是这台相机）。
 
 > **想让相机绕到角色背后**（真正的第三人称）：把偏移换成"朝向的反方向"——

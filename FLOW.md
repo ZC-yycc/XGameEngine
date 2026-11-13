@@ -123,18 +123,18 @@ main()                           crates/xgame-game/src/main.rs
   ├── resolve_project()                  三级定位（见下）
   │     ├── ① argv[1]                    命令行参数
   │     ├── ② exe 同目录的 project.ron   ← 编辑器 Build 产出的游戏走这条
-  │     └── ③ projects/SampleScene       仓库内 cargo run 的兜底
+  │     └── ③ projects/XGame             仓库内 cargo run 的兜底
   ├── ProjectHandle::open(...)           读 project.ron
   └── EventLoop::new()
        └── GameApp::new(&window, project)  异步初始化
              ├── wgpu Instance → Adapter → Device + Queue
              ├── Surface → SurfaceConfiguration（vsync 取自项目清单）
              ├── ScenePipeline::new()
-             ├── project.load_entry_runtime_scene()   v1 值 / v2 值 + 组件身份侧车
+             ├── project.load_entry_runtime_scene()   当前文件模型 → 运行时值 + 组件身份侧车
              └── World::from_runtime_scene()
                    ├── PhysicsWorld / GameClock / LuaHost / AudioEngine
                    ├── 运行态唯一 AnimationDriver
-                   ├── v2 预制体生成：资产 ID → 实例本地 ID + 来源 ID → World 身份侧车
+                   ├── 预制体生成：资产 ID → 实例本地 ID + 来源 ID → World 身份侧车
                    │                  普通/UI 生成只分配本地 ID；销毁同步移除
                    └── ProjectHandle 场景装载器 + GltfAnimationLoader（纯 CPU 动画）
                           └── 与 GPU 模型共用 resolve_model_source（search_paths + 命中文件旁 .meta）
@@ -1016,7 +1016,7 @@ prefabs::show_content(state, ui)
 
 ```
 StatusBar
-  "v0.1.0 | Project: SampleScene | Edit Mode | Scene: Test Scene | 3 entities | FPS: 60"
+  "v0.1.0 | Project: XGame | Edit Mode | Scene: XGame Showcase | 24 entities | FPS: 60"
 
   Playing 时额外显示:
   "▶ Playing | ... | Bodies: 3 | Colliders: 3 | FPS: 60"
@@ -1129,7 +1129,7 @@ GameApp::render()
              ├── target/release/xgame-editor.exe → dist/
              ├── target/release/xgame-game.exe   → dist/   （编辑器 Build 时要复制它）
              ├── target/release/xgame-mcp.exe    → dist/   （AI 智能体的 MCP server）
-             ├── projects/SampleScene/           → dist/projects/
+             ├── projects/XGame/                 → dist/projects/
              └── 写 dist/README.txt
 ```
 
@@ -1296,10 +1296,10 @@ Revert  load_prefab → remove_subtree(实例根) → instantiate_prefab
 父子关系不经过 Inspector：Hierarchy 把拖到节点、拖到空白与右键 `Unparent` 全部收敛到
 `EditorState::reparent_entity`，统一保世界变换、防环并进入 Undo。
 
-v2 的结构性 Apply 不走上面这条单文件覆盖：
+带稳定组件来源的结构性 Apply 不走上面这条单文件覆盖：
 
 ```text
-当前实例值 + SceneV2 身份 + 旧 PrefabV2
+当前实例值 + SceneV2 身份 + 原 PrefabV2
   ├── 存活资产实体 / 组件沿用来源 ID 与高水位
   ├── 新增项从资产侧分配 ID，并回填当前实例来源 ID
   └── 生成新 PrefabV2
@@ -1329,36 +1329,52 @@ GameApp
 **持久化**：每个项目一份清单 + 若干场景
 
 ```
-projects/SampleScene/
-├── project.ron          项目清单
-├── Scenes/scene.ron     由 project.entry_scene 指向
-└── Resources/…          entity.model 指向这里
+projects/XGame/
+├── Cargo.toml                 Rust 组件插件（workspace 的 xgame-project 包）
+├── project.ron                项目清单，入口指向 showcase.ron
+├── Scenes/                    四张当前格式场景
+├── Prefabs/                   当前格式预制体
+├── Scripts/                   Lua 脚本
+└── Resources/…                模型 / 材质 / 纹理 / 音频
 ```
 
 ```ron
 // project.ron
 (
     format_version: 1,
-    name: "SampleScene",
-    entry_scene: "Scenes/scene.ron",     // 相对项目根目录
-    window: (title: "SampleScene", width: 1280, height: 720, resizable: true, vsync: true),
+    name: "XGame",
+    entry_scene: "Scenes/showcase.ron",  // 相对项目根目录
+    window: (title: "XGameEngine — XGame", width: 1280, height: 720, resizable: true, vsync: true),
     content: (scenes_dir: "Scenes", models_dir: "Resources", …),
     // 构建设置：版本号 + 有序关卡清单（顺序即关卡索引；空 = 未配置）
-    build: (version: "0.1.0", scenes: ["Scenes/scene.ron", "Scenes/Level2.ron"]),
+    build: (version: "0.1.0", scenes: [
+        "Scenes/showcase.ron", "Scenes/character.ron",
+        "Scenes/components.ron", "Scenes/sandbox.ron",
+    ]),
 )
 ```
 
 ```ron
-// Scenes/scene.ron —— model 同样是项目相对路径
-Scene(
-    name: "Test Scene",
+// Scenes/showcase.ron —— 唯一磁盘模型；资产引用落盘为 guid://…
+(
+    format_version: 2,
+    name: "XGame Showcase",
     entities: [
-        Entity(
-            name: "Box1",
-            transform: (position: (0,0,0), rotation: (0,0,0,1), scale: (1,1,1)),
-            model: "Resources/Box.glb",
+        (
+            id: (1), name: "Box1", parent: None, prefab: None, layer: 0,
+            transform: (position: (0.0,0.0,0.0), rotation: (0.0,0.0,0.0,1.0), scale: (1.0,1.0,1.0)),
+            transform_identity: (id: 1),
+            components: (
+                next_component_id: (next_id: 3),
+                entries: [(
+                    identity: (id: 2),
+                    data: Mesh((model: "guid://<32 hex>", morph_weights: [])),
+                )],
+            ),
         ),
     ],
+    lights: [],
+    ambient: (0.06, 0.06, 0.08),
 )
 ```
 
@@ -1421,7 +1437,7 @@ Scene(
 | `editor/headless.rs` | 1950 | `run()`（CLI `--headless`：固定 dt 帧循环 + 可选输入时间线 + 报告 JSON + 退出码）、`--screenshot` 分支、`json_contract_has_stable_keys`（字段名契约） |
 | `editor/schema_cli.rs` | 213 | `--export-schema` 参数解析（stdout / `--out` / `--help`）、`render_json()`（`serde_json` 美化 + 末尾换行）、`cli()`（退出码 0/1） |
 | `editor/script_api_cli.rs` | 331 | `--export-script-api` 的参数解析 / `render_json()` / `cli()`；测试含“文档 API 表函数名 == 清单”防漂移 |
-| `core/schema.rs` | 2967 | `scene_schema()`（41 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
+| `core/schema.rs` | 3403 | `scene_schema()`（54 个落盘类型的目录 / 根文件 / 约定 / 基元 / 资产引用）、确定性示例（固定 `EntityId`）、9 条防漂移测试（穷举解构 / 枚举匹配 / 默认值与示例反解 / 类型引用 / 项目往返） |
 | `core/script_api.rs` | 704 | `script_api()`（182 个函数 / 18 类 / 7 钩子 / 值类型 / 全局约定）；手写数据 + 6 条结构测试；注册名与文档名分别由 `xgame-script` / `xgame-editor` 测试钉住 |
 | `editor/frame_probe.rs` | 99 | 帧探针（`XGAME_FRAME_LOG=<path>` 才启用；输入→光子延迟 / 帧耗时） |
 | `editor/plugin_session.rs` | 287 | 插件会话：临时副本加载、常驻注册表、字段表查询（跨 DLL 的内存布局契约） |

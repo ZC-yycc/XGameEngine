@@ -28,7 +28,7 @@
 //! # 为什么同时测两个插件
 //!
 //! `spinner-plugin`（`examples/`）是引擎仓库自带的最小示例，四钩子 + 计数器；
-//! `behaviors-demo`（`projects/`）是**用户项目形态**的插件 —— 它就在游戏项目
+//! `xgame-project`（`projects/`）是**用户项目形态**的插件 —— 它就在游戏项目
 //! 里面，正是编辑器 P0.5 会探测并自动编译的那一种。两条路径的 dlopen 逻辑
 //! 相同，但"用户项目"这一侧还需要确认：workspace 成员产出的产物名、
 //! `crate-type = ["cdylib", "rlib"]` 时的文件名，都与示例不同。
@@ -53,9 +53,9 @@ fn example_plugin_dll() -> PathBuf {
     workspace_plugin_dll("spinner_plugin", "spinner-plugin")
 }
 
-/// 探测演示项目 `projects/BehaviorsDemo` 的 cdylib 路径；找不到就现场构建一次。
-fn behaviors_demo_dll() -> PathBuf {
-    workspace_plugin_dll("behaviors_demo", "behaviors-demo")
+/// 探测综合示范项目 `projects/XGame` 的 cdylib 路径；找不到就现场构建一次。
+fn xgame_project_dll() -> PathBuf {
+    workspace_plugin_dll("xgame_project", "xgame-project")
 }
 
 /// 按 cdylib 名字（下划线形式）与 cargo 包名（连字符形式）定位 workspace 成员的
@@ -360,17 +360,17 @@ fn unreadable_plugin_fails_with_readable_error() {
 }
 
 // ---------------------------------------------------------------------------
-// 演示项目（projects/BehaviorsDemo）—— P0.5 的"用户项目"这一侧
+// 综合示范项目（projects/XGame）—— P0.5 的"用户项目"这一侧
 // ---------------------------------------------------------------------------
 
 /// 演示插件跨边界加载后，组件名与它自己单元测试里断言的**完全一致**。
 ///
-/// 这条测试守着一件很容易漂移的事：`behaviors-demo` 的单测是在**同进程**里
+/// 这条测试守着一件很容易漂移的事：`xgame-project` 的单测是在**同进程**里
 /// 直接调 `register_all` 验证的，而编辑器走的是 dlopen + 握手。两边必须是
 /// 同一张表 —— 否则会出现"单测绿、场景里挂组件却纹丝不动"。
 #[test]
-fn behaviors_demo_plugin_registers_across_the_boundary() {
-    let dll = behaviors_demo_dll();
+fn xgame_project_plugin_registers_across_the_boundary() {
+    let dll = xgame_project_dll();
     let mut registry = BehaviorRegistry::new();
     let plugin = load_plugin(&dll, &mut registry).unwrap_or_else(|e| panic!("{e}"));
 
@@ -398,11 +398,11 @@ fn behaviors_demo_plugin_registers_across_the_boundary() {
 
 /// 演示插件的组件真的能驱动实体（**经真实 dlopen** 的整条链路）。
 ///
-/// 与 `behaviors-demo` 自己的单测互补：那条测的是组件逻辑，这条测的是
+/// 与 `xgame-project` 自己的单测互补：那条测的是组件逻辑，这条测的是
 /// "组件逻辑经跨边界函数指针 + `World` 分发后仍然成立"。
 #[test]
-fn behaviors_demo_plugin_drives_entities() {
-    let dll = behaviors_demo_dll();
+fn xgame_project_plugin_drives_entities() {
+    let dll = xgame_project_dll();
     let mut registry = BehaviorRegistry::new();
     let _plugin = load_plugin(&dll, &mut registry).unwrap_or_else(|e| panic!("{e}"));
 

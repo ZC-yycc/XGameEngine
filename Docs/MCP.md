@@ -57,7 +57,7 @@
 
 ---
 
-## 工具参考（17 个）
+## 工具参考（15 个）
 
 最小完备集，覆盖「读说明书 / 读脚本契约 → 读 → 改 → 查 → 看效果」闭环，外加资产侧
 的「看见 → 导入 → 整理」。除 `component_catalog_read` / `schema_read` / `script_api_read` 外，全部工具必填
@@ -69,12 +69,12 @@
 
 ### 0. `component_catalog_read`
 
-项目无关的内建组件目录：`builtin:*` 地址、是否可添加 / 移除 / 重复、落盘类型、
-`default_ron` 与字段表。字段来自 `schema_read` 的同一份 `scene_schema()`；旧值视图也把
+项目无关的内建组件目录：`builtin:*` 类型地址、是否可添加 / 移除 / 重复、落盘类型、
+`default_ron` 与字段表。字段来自 `schema_read` 的同一份 `scene_schema()`；运行时值视图把
 Mesh（`model` / `morph_weights`）、LOD（`LodGroup`）与 Material
-（`material_asset` / `material`）列为三个独立挂载物，不再返回 `builtin:render`。
+（`asset` / `overrides`）列为三个独立挂载物，不再返回 `builtin:render`。
 Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不反射运行时全局变量。
-返回的 `address_stability` 是 `legacy`。无需 `project`，也不读写项目文件。
+这些地址描述**组件种类**，不是某个实体上的持久实例 ID。无需 `project`，也不读写项目文件。
 
 ### 1. `schema_read`
 
@@ -83,9 +83,9 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 - **入参**：无（格式契约属于引擎，不属于某个项目 —— 不需要 `project`）
 - **返回**（JSON 文本）：与 `xgame-editor --export-schema` **完全同源**
   （`xgame_core::schema::scene_schema`），含 `format_version` / `engine_version` /
-  `roots`（v1/v2 场景 `.ron` 与预制体 `.prefab.ron` 各一项）/ `conventions` / `primitives` /
+  `roots`（当前场景 `.ron` 与预制体 `.prefab.ron` 各一项）/ `conventions` / `primitives` /
   `asset_references` / `types`。
-- **内容规模**：55 个落盘类型。每个类型有 `summary` / `kind` / `default_ron` /
+- **内容规模**：完整的落盘类型与运行时值投影目录。每个类型有 `summary` / `kind` / `default_ron` /
   `example_ron`；字段有 `name` / `ty` / `required` / `default_ron` / `note`；
   枚举有 `variants`（unit / struct / newtype 三种形态，各带可解析示例）。
 - **确定性**：没有时间戳 / 随机 ID；同一份代码两次调用逐字节相同。
@@ -94,9 +94,8 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
   `ProjectHandle` 的读写边界。
 - **闭环用法**：`schema_read` 拿字段契约 → `scene_read` 看现状 → `scene_write` /
   `entity_upsert` 改 → `project_check` / `run_headless` 验证。
-  `scene_write` / `entity_upsert` 仍只操作 v1；v2 按组件 ID 的修改使用
-  `entity_components_v2_read` / `component_v2_edit`。`project_check` 已能只读检查 v2 入口及其他场景、预制体；
-  编辑器 Play、独立游戏和无头运行均持有 v2 组件身份，干净 v2 项目不会产生过渡性诊断。
+  精确修改一个组件时使用 `entity_components_read` / `component_edit`。所有场景工具、
+  `project_check`、编辑器 Play、独立游戏和无头运行都只接受当前组件格式；旧扁平格式不再探测或迁移。
 
 ### 2. `project_info`
 
@@ -123,56 +122,33 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
 
 ### 3a. `entity_components_read`
 
-按场景内的实体 ID 查询当前挂载组件（只读），不按名字猜目标。先用 `scene_read`
-取得 ID，尤其在同名实体并存时。
+按场景内的实体 ID 查询当前挂载组件与稳定身份（只读），不按名字猜目标。先用
+`scene_read` 取得 ID，尤其在同名实体并存时。
 
 - **入参**：`project`、`entity_id`（**十进制字符串**，不能传 JSON 数字，否则超过
   2⁵³ 后可能丢失精度），可选 `scene`。
-- **返回**（JSON 文本）：`scene` / `entity_id`（十进制字符串） / `entity_name` /
-  `address_stability: "legacy"` / `components` 数组。每项包括 `address`、`kind`
-  （`builtin` / `rust` / `lua`）、`type_id`、`name`、`data`。内建数据是当前字段的
-  JSON 视图；Rust 数据是已保存的 `Inspect` 参数表（缺省为空对象，不含插件运行态）；
-  Lua 数据只有脚本资产路径，不代表脚本的运行时变量。
-- **地址规则**：`builtin:transform` 恒存在且不可移除；视觉数据分别使用
-  `builtin:mesh`（模型 + Morph 权重）、`builtin:lod` 与 `builtin:material`
-  （材质资产 + 实例覆盖）。其它已挂载内建组件使用 `builtin:camera` 等种类地址。
-  Rust、Lua 使用 `rust:0`、`lua:0` 等列表槽位地址，**删除或重排后地址可能指向另一项，
-  使用前重新查询**。此 v1 工具没有跨重排稳定地址，返回字段显式标记为 `legacy`。
-- **边界**：该工具只读；添加和移除继续通过 Inspector 的 Add Component / 各组件移除
-  控件完成。离线批量编辑可用 `scene_read` / `scene_write`，并遵守两端不能同时写场景
-  的现有约定。
+- **返回**（JSON 文本）：`scene` / `revision` / `entity_id` / `entity_name` /
+  `next_component_id` / `address_stability: "entity_local_id"` / `components`。Transform
+  也有独立 `component_id`；其余项附完整 `data`、`data_ron` 与可选
+  `source_component_id`。所有 ID 都是十进制字符串。
+- **身份规则**：组件 ID 在实体内唯一，删除后高水位不回退，重排后 ID 不变；
+  `source_component_id` 只用于预制体实例，指向资产组件，不等于本地 ID。
+- **边界**：该工具只读；精确修改接下面的 `component_edit`，整体结构编辑可用
+  `scene_read` / `scene_write`。
 
-### 3b. `component_upgrade_preview`
+### 3b. `component_edit`
 
-预览 v1 实体将来升级时的组件身份，不落盘；可在动预制体资产之前检查来源关联。
+当前场景的 Agent 组件修改入口；先用 `entity_components_read` 取得组件与 `revision`，
+再按实体 ID、组件 ID 修改。
 
-- **入参**：`project`、`entity_id`（十进制字符串），可选 `scene`。
-- **返回**：`status: "preview_only"`、实体 ID / 名称、可选预制体来源路径、
-  `next_component_id`，以及每个已挂载物的旧地址、名称、拟分配的 `component_id`
-  与可选 `source_component_id`（ID 全是十进制字符串）。来源 ID 由资产实体的组件
-  种类、Rust 注册名或 Lua 路径匹配；本地重排不改变对应的来源 ID。
-- **拒绝**：场景或来源预制体有重复实体 ID、旧实体同名 Rust 行为或同路径 Lua
-  脚本、没有行为对应的参数，或来源文件 / 实体无法读取。预览 ID 尚未写入文件，
-  不能拿它当稳定寻址 ID 修改组件；正式转换必须单独执行显式迁移。
-
-### 3c. `entity_components_v2_read` / `component_v2_edit`
-
-v2 场景的 Agent 修改入口；先读取组件与 `revision`，再按实体 ID、组件 ID 修改。
-
-- **读取入参**：`project`、`entity_id`（十进制字符串），可选 `scene`。返回
-  `address_stability: "entity_local_id"`、`revision`、`next_component_id` 和组件列表；
-  Transform 也有独立 ID，其他项附完整 `data_ron` 和可选来源 ID。当前视觉变体是
-  `Mesh(MeshData)` / `Lod(LodGroup)` / `Material(MaterialData)`；旧 `Render` /
-  `MaterialOverride` 变体只兼容读取。实体仍含任一旧视觉变体时，所有结构编辑与 patch
-  都会拒绝；先用编辑器打开并保存，让它迁移为三份当前组件后再修改。
 - **修改必填**：`project`、`entity_id`、`expected_revision`、`action`；除 `add` 外还要
   `component_id`。`patch` 带 `field`（指向已有值的 JSON Pointer，例如 `/model`）
   和 `value`；`replace` / `add` 带完整 `ComponentData` 变体 `data_ron`；`move`
   带不含 Transform 的零起 `to_index`；`remove` 只要目标 ID。Transform 只能 patch。
-- **拒绝条件**：文件不是 v2、revision 过期、字段不存在或类型错误、未知嵌套字段、
+- **拒绝条件**：文件不是当前格式、revision 过期、字段不存在或类型错误、未知嵌套字段、
   重复 Rust/Lua 挂载、场景语义缺陷、预制体来源关联失效。拒绝时场景不落盘；
   成功返回新 `revision`。完整原文字节在 core 写入前再次比较；比较与原子替换
-  之间由 core 的单文件跨进程锁互斥。编辑器 v2 会话保存前也会逐字节核对原文件；
+  之间由 core 的单文件跨进程锁互斥。编辑器会话保存前也会逐字节核对原文件；
   预制体资产和引用场景间尚未实现跨文件事务。
 
 ### 4. `scene_write`
@@ -193,7 +169,7 @@ v2 场景的 Agent 修改入口；先读取组件与 `revision`，再按实体 I
 - **返回**（JSON）：`action`（`created` | `updated`）/ `name` / `scene` / `entities`
 - **语义**：
   - 没传的字段保持原值；新建实体未指定的字段取默认；
-  - 变换是**局部坐标**；`rotation_euler_deg` 是**度、XYZ 顺序**；
+  - 变换是**局部坐标**；`rotation_euler_deg` 是**度、分量 `[x,y,z]`、施加顺序 YXZ**；
   - `parent` 按名字查找，空串 = 断开到根；**先挂父、再改变换**，所以你给的
     局部值就是最终值（挂父本身保世界坐标）；
   - 场景内该名字**重名多个 → 拒绝**（按名字寻址，歧义时猜一个迟早出事）。
@@ -277,7 +253,7 @@ v2 场景的 Agent 修改入口；先读取组件与 `revision`，再按实体 I
 - **返回**（JSON 文本）：与 `xgame-editor --export-script-api` **完全同源**
   （`xgame_core::script_api::script_api`），含 `format_version` /
   `engine_version` / `conventions` / `hooks` / `value_types` / `categories`。
-- **内容规模**：160 个全局函数、17 个类别、6 个生命周期钩子、7 个值类型。
+- **内容规模**：182 个全局函数、18 个类别、7 个生命周期钩子及值类型目录。
   每个函数有 `name` / `signature` / `params` / `returns` / `summary`；每个类别有
   稳定的 ASCII `id`（如 `transform` / `physics` / `ui`）与中文名。
 - **确定性**：没有时间戳 / 随机 ID；函数与类别按 [`脚本API.md`](脚本API.md) 的
@@ -330,8 +306,9 @@ v2 场景的 Agent 修改入口；先读取组件与 `revision`，再按实体 I
 ## 已知边界（写给正在用它的智能体）
 
 - **并发写**：编辑器每秒轮询内容目录，资产 / 脚本 / `.meta` 的外部改动会**自动热
-  重载**；但**场景文件不会自动重载**（防冲掉未保存的编辑），编辑器之后保存也会覆盖
-  MCP 的修改。**同一时刻只让一边写同一个场景**。资产被移动后，编辑器里已打开的
+  重载**；但**场景文件不会自动重载**（防冲掉未保存的编辑）。编辑器保存前会比较
+  打开时的原文字节，MCP 已写过就拒绝覆盖并保留草稿；仍应**同一时刻只让一边写同一个场景**。
+  资产被移动后，编辑器里已打开的
   场景内存中仍是旧路径 —— 重新打开该场景再保存。
 - **MCP 写入对其他 handle 不可见**：server 每次调用新开一个 `ProjectHandle`（独立
   内存索引）。同进程内的另一个 handle 要 `refresh_assets()` / 重新打开才看得见工具
@@ -340,7 +317,8 @@ v2 场景的 Agent 修改入口；先读取组件与 `revision`，再按实体 I
   直接编辑文件；MCP 写工具只覆盖场景与实体。
 - **构建**：`project_build`（打包 / 编译插件）在计划里，还没上；无头运行已就绪
   （工具 `run_headless` / CLI `xgame-editor --headless`）。
-- **schema 的边界**：`schema_read` 只描述**场景 / 预制体落盘格式**；脚本 API 用
+- **schema 的边界**：`schema_read` 的根只描述**当前场景 / 预制体落盘格式**；类型目录
+  还列出文件模型投影到的运行时值类型，供组件字段说明复用，但那些不是额外磁盘根。脚本 API 用
   `script_api_read`（参数 / 返回值 / 约定以清单为准，叙述与示例见
   [`脚本API.md`](脚本API.md)）。schema 也不是 JSON Schema —— 它是引擎自己的领域
   目录（默认值是可解析的 RON 示例）。
@@ -354,7 +332,7 @@ v2 场景的 Agent 修改入口；先读取组件与 `revision`，再按实体 I
 | 文件 | 职责 |
 |---|---|
 | `crates/xgame-mcp/src/lib.rs` | 协议层：`handle_line()`（喂行进、断言行出）、握手、两层错误 |
-| `crates/xgame-mcp/src/tools.rs` | 17 个工具的 Schema 与实现、路径安全、重名歧义检查 |
+| `crates/xgame-mcp/src/tools.rs` | 15 个工具的 Schema 与实现、路径安全、重名歧义检查 |
 | `crates/xgame-mcp/src/main.rs` | stdin/stdout 管道（只有这一层碰 I/O） |
 | `crates/xgame-core/src/schema.rs` | 场景格式目录 + 确定性示例 + 防漂移测试（`--export-schema` 与 `schema_read` 共用的唯一内容源） |
 | `crates/xgame-editor/src/schema_cli.rs` | `--export-schema` 的参数解析、JSON 序列化、stdout / `--out` 出口 |

@@ -19,7 +19,7 @@
 //! | `character` | 角色控制器参数 `CharacterController`（可序列化）+ 运行时状态 `CharacterState` |
 //! | `material` | 材质：共享资产 `MaterialAsset`（`.mat`）+ 逐实体覆盖 `MaterialOverride` |
 //! | `component` | `Component` trait + `ComponentMap` + 内置组件 |
-//! | `component_view` | 旧格式内建、Rust、Lua 组件的发现与添加 / 移除入口 |
+//! | `component_view` | 运行时值中内建、Rust、Lua 组件的发现与添加 / 移除入口 |
 //! | `fsx` | 原子写盘与遗留暂存回收（所有落盘入口的唯一实现） |
 //! | `inspect` | 组件字段检视契约 `Inspect` + `FieldDesc`/`FieldValue`（Inspector 与 Lua 参数的同一份真相源）|
 //! | `time` | `GameClock`, `Timer`, `Stopwatch` |
@@ -47,7 +47,7 @@
 
 mod color;
 mod config;
-mod migration_v2;
+mod component_identity_plan;
 mod prefab_apply_v2;
 pub mod prefab;
 pub mod project;
@@ -56,7 +56,6 @@ pub mod scene_v2;
 mod v2_animator;
 mod scene_transforms;
 mod transform;
-pub use migration_v2::ComponentMigrationReport;
 pub use prefab_apply_v2::PrefabApplyReport;
 
 // 新增模块
@@ -70,8 +69,6 @@ mod check;
 mod component;
 mod component_view;
 pub mod component_id;
-pub mod component_upgrade;
-pub(crate) mod file_format;
 // 原子写盘 + 遗留暂存回收：所有落盘入口共用一份实现（见模块文档的"为什么"）。
 pub mod fsx;
 mod id;
@@ -100,7 +97,7 @@ pub mod schema;
 // 脚本 API 的机器可读清单（Agent-Native ③）：--export-script-api / MCP script_api_read 的真相源。
 pub mod script_api;
 
-// -- 导出：旧有类型（保持向后兼容）
+// -- 导出：运行时值与项目基础设施
 pub use check::{check_project, CheckReport};
 pub use color::Color;
 pub use config::{

@@ -1,15 +1,27 @@
 (
-    name: "New Scene",
+    format_version: 2,
+    name: "Sandbox",
     entities: [
         (
+            id: (1),
             name: "Main Camera",
+            parent: None,
+            prefab: None,
+            layer: 0,
             transform: (
                 position: (0.0, 1.0, -5.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
-            model: "",
-            id: (1),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 2,
+                ),
+                entries: [],
+            ),
         ),
     ],
     lights: [
@@ -21,6 +33,8 @@
             color: (1.0, 0.98, 0.95),
             intensity: 3.0,
             range: 10.0,
+            casts_shadow: true,
+            shadow_resolution: 0,
         ),
     ],
     ambient: (0.06, 0.06, 0.08),

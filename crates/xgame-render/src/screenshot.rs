@@ -5236,7 +5236,7 @@ mod tests {
             return;
         };
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../projects/SampleScene/Resources/Fox.gltf");
+            .join("../../projects/XGame/Resources/Fox.gltf");
         let mut animated = GltfMesh::from_file_with(
             &shot.device,
             &shot.queue,

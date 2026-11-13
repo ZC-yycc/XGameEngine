@@ -291,7 +291,7 @@ impl GameCtx<'_> {
         entity.id = id;
         entity.ui = Some(element);
         entity.parent = parent;
-        let identity = xgame_core::RuntimeEntityIdentity::from_legacy(&entity).ok();
+        let identity = xgame_core::RuntimeEntityIdentity::from_runtime(&entity).ok();
         self.scene.entities.push(entity);
         self.commands.push(ScriptCommand::EntitySpawned {
             id,

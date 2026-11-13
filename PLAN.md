@@ -9154,3 +9154,90 @@ Agent 新增，避免新文件继续制造下一轮迁移债务。
 - 1280×800、1440×900、1920×1200 三档 `--ui-shot --ui-select Ground` 均成功；局部裁剪
   与 1440 逐行颜色扫描确认窄窗口无横向溢出，三档都没有 Parent 区块，Material 在宽窗口
   显示完整资产与覆盖字段。截图过程未修改 `projects/`。
+
+## 一百一十九、唯一组件文件格式与综合示范项目收口（2026-11-13）
+
+> 本节覆盖一百一十六至一百一十八里仍把旧扁平场景、旧 `Render` 变体或组件迁移工具
+> 当成现役兼容面的过渡结论。那些段落保留为实施历史，不再代表当前文件契约。
+
+**问题**：组件身份、结构性 Prefab Apply 与 Inspector 分拆已经完成，但仓库仍同时维护
+旧扁平 `Scene` / `Prefab` 文件探测、两套读写入口、升级预览、迁移 / 恢复命令和两组 MCP
+组件工具。四个示例项目又分别停在不同年代的格式上，CI、文档、发布脚本和真实插件门禁
+各自点名其中一个。结果是“当前格式”仍不能成为唯一真相源：修一条保存路径要同时推理
+旧文件覆盖、升级事务和旧示例是否继续可读。
+
+**做法**：
+
+- 磁盘只接受 `format_version: 2` 的 `SceneV2` / `PrefabV2`。删除 `file_format.rs`、
+  `migration_v2.rs`、`component_upgrade.rs` 及其 CLI / MCP 接线；schema 根只保留
+  `SceneV2` / `PrefabV2`，未知字段、重复 Map 键、非法版本和损坏身份继续严格拒绝。
+  内部 `*_v2` 名字暂不做机械重命名：它现在表示“文件模型”，不表示还有第二套现役格式。
+- `Scene` / `Prefab` 继续是运行时唯一可变值模型。读取用 `into_runtime`，新建文件用
+  `from_runtime`，编辑器保存用 `reconcile_from_runtime` 合回组件本地 ID、来源 ID 与高水位；
+  `RuntimeScene` 只额外带一份不重复保存组件值的身份侧车。物理、渲染、脚本和每帧更新
+  没有直接依赖文件模型。
+- 正式场景读取保留既有的重复实体 ID 自愈：原文先严格识别版本和字段，再只在内存中给
+  后出现者分配新 ID；`--check` 另读原文报告重复项，保持检查只读。预制体重复 ID 仍然
+  硬拒绝，因为场景中的 `source_id` 是跨文件引用，静默改号会让所有实例失配。检查入口
+  对可读取来源复核组件来源 ID，同时把坏预制体、悬空 `source_id` 和来源组件损坏分到
+  各自诊断，不能让一种错误遮住另外两种。
+- 自动保存与正式保存共用当前文件模型和 GUID 编码边界；自动保存前刷新资产索引并补齐
+  必要 `.meta`，避免刚导入的模型路径以字面量漏进 `.autosave/`。未来格式版本在重复 ID
+  扫描前先过版本门禁，不能被辅助诊断误吞成“无重复”。
+- MCP 收口为 15 个工具：`entity_components_read` 读取稳定身份，`component_edit` 做局部
+  修改；删掉升级预览与第二套 v2 命名工具。Material 的文件字段统一为 `asset` /
+  `overrides`，目录、工具输出、测试与文档同名。机器 schema 实测为 54 个落盘类型，脚本
+  清单仍为 182 个函数 / 18 类 / 7 钩子。
+- `projects/XGame` 取代 `SampleScene`、`CharacterDemo`、`MyGame`、`BehaviorsDemo`。
+  `showcase.ron`、`character.ron`、`components.ron`、`sandbox.ron` 四关覆盖渲染、物理、
+  角色控制、Lua、Rust 组件、UI、动画、音频、粒子、预制体、材质与输入；项目自身作为
+  workspace 的 `xgame-project` cdylib。workspace、CI、默认路径、插件集成测试、文档和
+  发布夹具统一指向这一份项目。
+- 一键发布复制示范项目时排除本地 `Build/` 与 `Plugins/`，再显式安装本轮
+  `target/release/xgame_project.dll`。否则源码目录里一次旧 Play 构建就可能把陈旧播放器
+  或 ABI 不同的 DLL 混进 `dist`。
+
+**红绿回归**：
+
+- 切到严格文件边界后，四条坏数据测试先红：它们仍想经正常写入口制造重复 ID、损坏来源
+  和坏预制体。夹具改为“先正常写合法当前文件，再模拟外部手改”，保住重复场景 ID
+  可诊断且内存自愈、重复预制体 ID 拒绝、坏来源按桶报告这三条真实契约。
+- `autosave_uses_the_same_encoding_as_a_real_save` 在旧实现下读到
+  `Resources/Box.glb` 而不是 `guid://…`；修复资产索引刷新后通过。未来版本测试也先证明
+  辅助重复扫描会吞掉版本错误，再把版本校验移到扫描前。
+- schema CLI 仍断言旧根 `Scene` / `Prefab`，Save As 仍断言通用加载器应拒绝当前格式，
+  MCP 又残留 17 工具和 `material_asset` / `material` 字段断言；这些红灯逐条改成唯一当前
+  契约后，editor 312/312、MCP 46/46 通过。
+- 旧 Rust 组件文件兼容测试已删除；运行时辅助 serde 的参数往返与 `PartialEq` 脏检查
+  仍单独保留。路径安全、原子写、严格解码、场景确定性、组件高水位、Prefab Apply
+  事务、稳态零分配及性能门禁均未删除。
+
+**刻意的取舍**：
+
+- 不把 `SceneV2` 推进运行热路径。文件身份和作者值是两个生命周期：前者只在保存、撤销、
+  Apply 与 Agent 精确寻址时需要，后者每帧都被脚本和系统修改；合成一份会让 GUID、来源
+  查找和身份合并进入热循环，也会制造第二份可变组件值。
+- 不兼容旧项目，也不保留“一次性再迁移”的隐藏开关。需要旧内容时从 Git 历史取旧引擎
+  完成转换；当前二进制对旧文件明确失败，比一条少测的兼容分支悄悄丢字段更可恢复。
+- 场景重复 ID 与预制体重复 ID 不做表面一致的处理：前者的引用局限在同文件，保留首项并
+  改后项能消除删除连坐；后者的 ID 被外部文件引用，任何自动改号都会扩大损坏范围。
+- `PLAN.md` 与决策记录里的旧项目名、v1/v2 过渡方案保留为历史证据；现行命令、能力说明
+  和代码注释统一使用 `XGame` 与“文件模型 / 运行时值模型”的称呼。
+
+**最终验收**：
+
+- `cargo check --locked --workspace --all-targets` 与
+  `cargo clippy --locked --workspace --all-targets -- -D warnings` 通过；全 workspace、全 targets
+  单作业测试为 **1367 passed / 0 failed / 21 ignored**，ignored 均为仓库约定的手动性能 /
+  GPU 基准。两个真实 DLL 的 `plugin_loading` 6/6 通过。
+- Debug `XGame --check` 为 4 场景 / 35 实体 / 18 资产且 OK；加载当前项目 DLL 的 300 帧
+  无头运行 `ok=true`、零 error / warn、零非有限变换。debug 三关发布夹具 PASS，证据目录
+  `published-player-175f87ada72b421cb530bef039c4a6b5`。
+- schema 导出 106932 bytes，根为 `SceneV2` / `PrefabV2`、54 类型；脚本 API 导出
+  60413 bytes、182 函数 / 18 类 / 7 钩子。1280×800、1440×900、1920×1200 三档
+  `--ui-shot --ui-select Fox` 均成功；Inspector 局部裁切与 1440 行扫描确认三轴、动画层和
+  脚本行无横向溢出。
+- `tools/build-release.ps1` 完成全 workspace release。`dist/projects/XGame` 不含源项目
+  `Build/`，只含一个与 `target/release` 哈希一致的 `Plugins/xgame_project.dll` 和四张场景；
+  release `--check`、300 帧无头均通过。release 三关发布夹具 PASS，证据目录
+  `published-player-f485dabd056a42f987d489df39eb8f6a`。

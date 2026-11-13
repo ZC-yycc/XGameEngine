@@ -1,9 +1,9 @@
 (
     format_version: 1,
-    name: "SampleScene",
-    entry_scene: "Scenes/scene.ron",
+    name: "XGame",
+    entry_scene: "Scenes/showcase.ron",
     window: (
-        title: "SampleScene",
+        title: "XGameEngine — XGame",
         width: 1280,
         height: 720,
         resizable: true,
@@ -33,5 +33,16 @@
             sun_size: 2.0,
             sun_intensity: 1.0,
         ),
+    ),
+    // 四张场景分别覆盖综合画面、角色控制、Rust/Lua 组件与最小沙盒。
+    // 顺序也是脚本 scene_index() / load_scene_at() 使用的关卡顺序。
+    build: (
+        version: "0.1.0",
+        scenes: [
+            "Scenes/showcase.ron",
+            "Scenes/character.ron",
+            "Scenes/components.ron",
+            "Scenes/sandbox.ron",
+        ],
     ),
 )

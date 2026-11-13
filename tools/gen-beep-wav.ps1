@@ -1,7 +1,7 @@
 # Generate a short decaying sine "beep" as 16-bit mono PCM WAV.
 # ASCII-only on purpose (repo rule: cmd/ps1 files stay ASCII).
 param(
-    [string]$OutPath = "D:\GitHubClone\XGameEngine\projects\SampleScene\Resources\Audio\Beep.wav"
+    [string]$OutPath = "D:\GitHubClone\XGameEngine\projects\XGame\Resources\Audio\Beep.wav"
 )
 $sr = 44100
 $dur = 1.0

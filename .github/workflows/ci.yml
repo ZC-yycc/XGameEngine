@@ -52,7 +52,7 @@ jobs:
       - name: Build plugins and package acceptance binaries
         run: >-
           cargo build --locked -p xgame-editor -p xgame-game
-          -p behaviors-demo -p spinner-plugin
+          -p xgame-project -p spinner-plugin
 
       - name: Test
         run: cargo test --locked --workspace --all-targets
@@ -68,15 +68,15 @@ jobs:
       - name: Packaged headless acceptance
         run: >-
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\test-published-player.ps1
-          -Mode headless -BinDir target/debug -Plugin target/debug/behaviors_demo.dll
+          -Mode headless -BinDir target/debug -Plugin target/debug/xgame_project.dll
           -OutputRoot "$env:RUNNER_TEMP"
 
       # 下面四步是二进制级冒烟：单元测试之外，确认真实 CLI 入口和示例项目仍可用。
       - name: Project check
-        run: cargo run --locked -p xgame-editor -- --check projects/SampleScene
+        run: cargo run --locked -p xgame-editor -- --check projects/XGame
 
       - name: Headless smoke
-        run: cargo run --locked -p xgame-editor -- --headless --frames 30 projects/SampleScene
+        run: cargo run --locked -p xgame-editor -- --headless --frames 30 projects/XGame
 
       - name: Export schema
         run: cargo run --locked -p xgame-editor -- --export-schema --out "$env:RUNNER_TEMP\xgame-schema.json"

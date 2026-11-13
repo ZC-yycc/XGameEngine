@@ -1,0 +1,1377 @@
+(
+    format_version: 2,
+    name: "XGame Showcase",
+    entities: [
+        (
+            id: (1),
+            name: "Ground",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (24.0, 1.0, 24.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: Some("guid://235b50780baf2866df65bddf31c31470"),
+                            overrides: Some((
+                                base_color: Some((0.55, 0.58, 0.62, 1.0)),
+                                roughness: Some(0.9),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Static,
+                            shape: Cuboid(
+                                half_extents: (12.0, 0.5, 12.0),
+                            ),
+                            mass: 0.0,
+                            friction: 0.7,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (2),
+            name: "Platform",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (-5.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: None,
+                            overrides: Some((
+                                base_color: Some((0.7, 0.6, 0.45, 1.0)),
+                                roughness: Some(0.85),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Static,
+                            shape: Auto,
+                            mass: 0.0,
+                            friction: 0.5,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (3),
+            name: "Platform.Mid",
+            parent: Some((2)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 1.05, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 0.8, 0.8),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: None,
+                            overrides: Some((
+                                base_color: Some((0.62, 0.52, 0.38, 1.0)),
+                                roughness: Some(0.85),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Static,
+                            shape: Auto,
+                            mass: 0.0,
+                            friction: 0.5,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (4),
+            name: "Platform.Top",
+            parent: Some((3)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 0.6),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: None,
+                            overrides: Some((
+                                base_color: Some((0.55, 0.45, 0.32, 1.0)),
+                                roughness: Some(0.85),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Static,
+                            shape: Auto,
+                            mass: 0.0,
+                            friction: 0.5,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (5),
+            name: "Spinner",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 7,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: Some("guid://17e23593a51c476c2f1047b0ca0c4389"),
+                            overrides: Some((
+                                base_color: Some((0.2, 0.4, 0.8, 1.0)),
+                                roughness: Some(0.35),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Kinematic,
+                            shape: Auto,
+                            mass: 0.0,
+                            friction: 0.5,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 5,
+                        ),
+                        data: Audio((
+                            clip: "guid://9b1f53440712e1c691708b1f952e9208",
+                            volume: 0.35,
+                            pitch: 1.0,
+                            looping: true,
+                            autoplay: true,
+                            spatial: true,
+                            min_distance: 2.0,
+                            max_distance: 24.0,
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 6,
+                        ),
+                        data: Lua(
+                            path: "guid://3f3d4e9022e87bbfb39cb545d47fafa5",
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (6),
+            name: "Bouncer",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (1.5652337, 0.99999976, -3.108657),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 6,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://sphere",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: Some("guid://6f023d7dbe52e6c4676e1f1646452a10"),
+                            overrides: Some((
+                                base_color: Some((0.75, 0.18, 0.16, 1.0)),
+                                roughness: Some(0.3),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Dynamic,
+                            shape: Ball(
+                                radius: 0.5,
+                            ),
+                            mass: 0.0,
+                            friction: 0.4,
+                            restitution: 0.55,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 5,
+                        ),
+                        data: Lua(
+                            path: "guid://036592f00d77acad5ddd43913b3c90d8",
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (7),
+            name: "Crate.A",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (-1.5, 7.0, 1.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: Some("guid://830acb9cfc4afd2082a44c6b99ddf80c"),
+                            overrides: Some((
+                                base_color: Some((0.52, 0.34, 0.2, 1.0)),
+                                roughness: Some(0.8),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Dynamic,
+                            shape: Auto,
+                            mass: 0.0,
+                            friction: 0.6,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (8),
+            name: "Crate.B",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (1.5, 9.0, -1.5),
+                rotation: (0.2, 0.0, 0.0, 0.98),
+                scale: (1.2, 1.2, 1.2),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: Some("guid://830acb9cfc4afd2082a44c6b99ddf80c"),
+                            overrides: Some((
+                                base_color: Some((0.58, 0.38, 0.22, 1.0)),
+                                roughness: Some(0.8),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Dynamic,
+                            shape: Auto,
+                            mass: 0.0,
+                            friction: 0.6,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (9),
+            name: "Crate.C",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 12.0, 0.0),
+                rotation: (0.0, 0.30113, 0.0, 0.95358),
+                scale: (0.8, 0.8, 0.8),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: Some("guid://830acb9cfc4afd2082a44c6b99ddf80c"),
+                            overrides: Some((
+                                base_color: Some((0.46, 0.3, 0.18, 1.0)),
+                                roughness: Some(0.8),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Dynamic,
+                            shape: Auto,
+                            mass: 0.0,
+                            friction: 0.5,
+                            restitution: 0.3,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (10),
+            name: "Pillar",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (7.0, 1.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 3.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cylinder",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Material((
+                            asset: Some("guid://315e350a8efe0e18c063dd611eba0c95"),
+                            overrides: Some((
+                                base_color: Some((0.85, 0.87, 0.9, 1.0)),
+                                metallic: Some(1.0),
+                                roughness: Some(0.35),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Physics((
+                            kind: Static,
+                            shape: Cylinder(
+                                half_height: 1.5,
+                                radius: 0.5,
+                            ),
+                            mass: 0.0,
+                            friction: 0.5,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (11),
+            name: "Pillar",
+            parent: None,
+            prefab: Some((
+                source: "guid://3444c856a89c3140a1b95ceed99f4989",
+                source_id: (1),
+                is_root: true,
+            )),
+            layer: 0,
+            transform: (
+                position: (-9.0, 0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+                source_component_id: Some(1),
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                            source_component_id: Some(2),
+                        ),
+                        data: Mesh((
+                            model: "guid://43b41a2008432f77ca7fbca93854f890",
+                            morph_weights: [],
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (12),
+            name: "Middle",
+            parent: Some((11)),
+            prefab: Some((
+                source: "guid://3444c856a89c3140a1b95ceed99f4989",
+                source_id: (2),
+                is_root: false,
+            )),
+            layer: 0,
+            transform: (
+                position: (0.0, 1.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+                source_component_id: Some(1),
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                            source_component_id: Some(2),
+                        ),
+                        data: Mesh((
+                            model: "guid://43b41a2008432f77ca7fbca93854f890",
+                            morph_weights: [],
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (13),
+            name: "Top",
+            parent: Some((12)),
+            prefab: Some((
+                source: "guid://3444c856a89c3140a1b95ceed99f4989",
+                source_id: (3),
+                is_root: false,
+            )),
+            layer: 0,
+            transform: (
+                position: (0.0, 1.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 0.6),
+            ),
+            transform_identity: (
+                id: 1,
+                source_component_id: Some(1),
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                            source_component_id: Some(2),
+                        ),
+                        data: Mesh((
+                            model: "guid://43b41a2008432f77ca7fbca93854f890",
+                            morph_weights: [],
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (14),
+            name: "Fox",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 1.8),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.01, 0.01, 0.01),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 5,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "guid://247e6655b676415d6c77cb91ceb3281b",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Animator((
+                            clip: "Walk",
+                            speed: 1.0,
+                            looping: true,
+                            autoplay: true,
+                            fade_time: 0.25,
+                            machine: Some((
+                                entry: "Idle",
+                                parameters: {
+                                    "speed": 0.0,
+                                },
+                                states: [
+                                    (
+                                        name: "Idle",
+                                        clip: "Survey",
+                                        speed: 1.0,
+                                        looping: true,
+                                    ),
+                                    (
+                                        name: "Walk",
+                                        clip: "Walk",
+                                        speed: 1.0,
+                                        looping: true,
+                                    ),
+                                    (
+                                        name: "Run",
+                                        clip: "Run",
+                                        speed: 1.0,
+                                        looping: true,
+                                    ),
+                                ],
+                                transitions: [
+                                    (
+                                        from: "Idle",
+                                        to: "Walk",
+                                        when: AtLeast(
+                                            param: "speed",
+                                            value: 0.5,
+                                        ),
+                                    ),
+                                    (
+                                        from: "Walk",
+                                        to: "Idle",
+                                        when: Below(
+                                            param: "speed",
+                                            value: 0.3,
+                                        ),
+                                    ),
+                                    (
+                                        from: "Walk",
+                                        to: "Run",
+                                        when: AtLeast(
+                                            param: "speed",
+                                            value: 2.0,
+                                        ),
+                                    ),
+                                    (
+                                        from: "Run",
+                                        to: "Walk",
+                                        when: Below(
+                                            param: "speed",
+                                            value: 1.8,
+                                        ),
+                                    ),
+                                ],
+                            )),
+                            additive: Some((
+                                clip: "Run",
+                                weight: 0.3,
+                                speed: 1.5,
+                                looping: true,
+                            )),
+                            layers: [
+                                (
+                                    name: "upper",
+                                    mode: Override,
+                                    clip: "Walk",
+                                    weight: 0.0,
+                                    speed: 1.0,
+                                    looping: true,
+                                    machine: Some((
+                                        entry: "Natural",
+                                        parameters: {
+                                            "survey": 0.0,
+                                        },
+                                        states: [
+                                            (
+                                                name: "Natural",
+                                                clip: "Walk",
+                                                speed: 1.0,
+                                                looping: true,
+                                            ),
+                                            (
+                                                name: "Survey",
+                                                clip: "Survey",
+                                                speed: 1.0,
+                                                looping: true,
+                                            ),
+                                        ],
+                                        transitions: [
+                                            (
+                                                from: "Natural",
+                                                to: "Survey",
+                                                when: AtLeast(
+                                                    param: "survey",
+                                                    value: 0.5,
+                                                ),
+                                                duration: Some(0.35),
+                                            ),
+                                            (
+                                                from: "Survey",
+                                                to: "Natural",
+                                                when: Below(
+                                                    param: "survey",
+                                                    value: 0.5,
+                                                ),
+                                                duration: Some(0.15),
+                                            ),
+                                        ],
+                                    )),
+                                    mask: [
+                                        "b_Spine01_02",
+                                    ],
+                                ),
+                            ],
+                            root_motion: Some((
+                                node: "b_Hip_01",
+                                axes: (true, false, true),
+                            )),
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 4,
+                        ),
+                        data: Lua(
+                            path: "guid://58a14f446aa341711d5d7b75806b8ecc",
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (20),
+            name: "HUD",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Ui((
+                            kind: Panel,
+                            anchor_min: (0.0, 0.0),
+                            anchor_max: (0.0, 0.0),
+                            offset_min: (24.0, 24.0),
+                            offset_max: (364.0, 200.0),
+                            style: (
+                                background: (0.007, 0.0086, 0.0116, 0.78),
+                                border_color: (0.0423, 0.0529, 0.0802, 1.0),
+                                border_width: 1.0,
+                                corner_radius: 10.0,
+                                padding: 0.0,
+                            ),
+                            visible: true,
+                            interactable: true,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (21),
+            name: "HUD.Title",
+            parent: Some((20)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Ui((
+                            kind: Text,
+                            anchor_min: (0.0, 0.0),
+                            anchor_max: (0.0, 0.0),
+                            offset_min: (16.0, 10.0),
+                            offset_max: (324.0, 40.0),
+                            text: (
+                                content: "XGameEngine · 屏幕空间 UI",
+                                size: 19.0,
+                                color: (0.8879, 0.9047, 0.9387, 1.0),
+                                align: Left,
+                                valign: Middle,
+                                wrap: true,
+                                bold: true,
+                            ),
+                            visible: true,
+                            interactable: true,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (22),
+            name: "HUD.Hint",
+            parent: Some((20)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Ui((
+                            kind: Text,
+                            anchor_min: (0.0, 0.0),
+                            anchor_max: (0.0, 0.0),
+                            offset_min: (16.0, 44.0),
+                            offset_max: (324.0, 64.0),
+                            text: (
+                                content: "Play 后点击按钮；血条由脚本每帧改写尺寸",
+                                size: 12.5,
+                                color: (0.2582, 0.2918, 0.3663, 1.0),
+                                align: Left,
+                                valign: Middle,
+                                wrap: true,
+                                bold: false,
+                            ),
+                            visible: true,
+                            interactable: true,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (23),
+            name: "Bar.Background",
+            parent: Some((20)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Ui((
+                            kind: Panel,
+                            anchor_min: (0.0, 0.0),
+                            anchor_max: (0.0, 0.0),
+                            offset_min: (16.0, 76.0),
+                            offset_max: (324.0, 94.0),
+                            style: (
+                                background: (0.0015, 0.0018, 0.003, 0.9),
+                                border_color: (0.0423, 0.0529, 0.0802, 1.0),
+                                border_width: 0.0,
+                                corner_radius: 9.0,
+                                padding: 0.0,
+                            ),
+                            visible: true,
+                            interactable: true,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (24),
+            name: "Bar.Fill",
+            parent: Some((23)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Ui((
+                            kind: Panel,
+                            anchor_min: (0.0, 0.0),
+                            anchor_max: (0.0, 0.0),
+                            offset_min: (2.0, 2.0),
+                            offset_max: (306.0, 16.0),
+                            style: (
+                                background: (0.0343, 0.5711, 0.0999, 1.0),
+                                border_color: (0.0423, 0.0529, 0.0802, 1.0),
+                                border_width: 0.0,
+                                corner_radius: 7.0,
+                                padding: 0.0,
+                            ),
+                            visible: true,
+                            interactable: true,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (25),
+            name: "HUD.Button",
+            parent: Some((20)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 4,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Ui((
+                            kind: Button,
+                            anchor_min: (0.0, 0.0),
+                            anchor_max: (0.0, 0.0),
+                            offset_min: (16.0, 112.0),
+                            offset_max: (176.0, 156.0),
+                            style: (
+                                background: (0.0194, 0.107, 0.3916, 1.0),
+                                border_color: (0.117, 0.2961, 0.6724, 1.0),
+                                border_width: 1.0,
+                                corner_radius: 6.0,
+                                padding: 6.0,
+                            ),
+                            text: (
+                                content: "点击测试",
+                                size: 15.0,
+                                color: (0.8879, 0.9047, 0.9387, 1.0),
+                                align: Center,
+                                valign: Middle,
+                                wrap: true,
+                                bold: false,
+                            ),
+                            visible: true,
+                            interactable: true,
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Lua(
+                            path: "guid://26b3edbff208b5e461decb83166b5c4d",
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (26),
+            name: "HUD.ClickCount",
+            parent: Some((20)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Ui((
+                            kind: Text,
+                            anchor_min: (0.0, 0.0),
+                            anchor_max: (0.0, 0.0),
+                            offset_min: (190.0, 124.0),
+                            offset_max: (330.0, 148.0),
+                            text: (
+                                content: "点击: 0",
+                                size: 14.0,
+                                color: (0.2582, 0.2918, 0.3663, 1.0),
+                                align: Left,
+                                valign: Middle,
+                                wrap: true,
+                                bold: false,
+                            ),
+                            visible: true,
+                            interactable: true,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (27),
+            name: "Torch",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (7.0, 3.05, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Particle((
+                            emitting: true,
+                            rate: 60.0,
+                            max_particles: 512,
+                            duration: 0.0,
+                            looping: true,
+                            lifetime: (0.6, 1.2),
+                            speed: (1.0, 2.2),
+                            direction: (0.0, 1.0, 0.0),
+                            spread: 18.0,
+                            shape: Sphere(
+                                radius: 0.15,
+                            ),
+                            gravity: (0.0, -1.2, 0.0),
+                            drag: 0.6,
+                            start_size: 0.16,
+                            end_size: 0.03,
+                            start_color: (1.0, 0.55, 0.12, 0.9),
+                            end_color: (0.35, 0.05, 0.0, 0.0),
+                            blend: Additive,
+                            seed: 7,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (28),
+            name: "Campfire.Smoke",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (-4.5, 0.35, 2.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Particle((
+                            emitting: true,
+                            rate: 24.0,
+                            max_particles: 256,
+                            duration: 0.0,
+                            looping: true,
+                            lifetime: (1.6, 2.8),
+                            speed: (0.3, 0.8),
+                            direction: (0.0, 1.0, 0.0),
+                            spread: 25.0,
+                            shape: Sphere(
+                                radius: 0.25,
+                            ),
+                            gravity: (0.0, 0.35, 0.0),
+                            drag: 1.1,
+                            start_size: 0.22,
+                            end_size: 0.75,
+                            start_color: (0.32, 0.32, 0.34, 0.55),
+                            end_color: (0.18, 0.18, 0.2, 0.0),
+                            blend: Alpha,
+                            seed: 21,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (30),
+            name: "Main Camera",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (4.2, 2.8, 5.4),
+                rotation: (0.06546, -0.8973, 0.14232, 0.4127),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 4,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Camera((
+                            fov: 60.0,
+                            near: 0.1,
+                            far: 1000.0,
+                            active: true,
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Lua(
+                            path: "guid://b7c1d4e28f3a49c6a1e5d0f7b2c84a19",
+                        ),
+                    ),
+                ],
+            ),
+        ),
+    ],
+    lights: [
+        (
+            name: "Sun",
+            kind: Directional,
+            direction: (0.45, -1.0, 0.35),
+            position: (0.0, 0.0, 0.0),
+            color: (1.0, 0.97, 0.92),
+            intensity: 1.4,
+            range: 10.0,
+            casts_shadow: true,
+            shadow_resolution: 0,
+        ),
+    ],
+    ambient: (0.09, 0.1, 0.13),
+)

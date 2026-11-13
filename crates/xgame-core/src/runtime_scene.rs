@@ -1,16 +1,16 @@
-//! 运行时场景载荷：组件值只有一份，v2 稳定身份单独随场景所有权移动。
+//! 运行时场景载荷：组件值只有一份，文件中的稳定身份单独随场景所有权移动。
 //!
 //! [`Scene`] 仍是物理、渲染和脚本共同修改的值模型。若直接把完整
 //! [`crate::scene_v2::SceneV2`] 再塞进运行时，就会出现两份组件值，脚本改了哪份、
-//! 查询读哪份会变成新的同步问题。这里因此只从 v2 提取不可变的寻址信息：本地 ID、
+//! 查询读哪份会变成新的同步问题。这里因此只从文件模型提取不可变的寻址信息：本地 ID、
 //! 来源 ID、持久高水位和组件种类；装载与切关时构造一次，每帧不重建。
 
 use crate::component_id::{ComponentId, ComponentIdSequence, ComponentIdentity};
-use crate::component_upgrade::preview_component_upgrade;
+use crate::component_identity_plan::plan_runtime_component_identities;
 use crate::scene_v2::{ComponentData, EntityV2, PrefabV2, SceneV2};
 use crate::{BuiltinComponent, ComponentAddress, Entity, EntityId, Prefab, Scene};
 
-/// 组件在 v1 值模型中的稳定种类键。
+/// 组件在运行时值模型中的稳定种类键。
 ///
 /// 内建组件按枚举定位；Rust / Lua 目前仍分别以注册名和脚本路径区分实例。
 /// 将来允许同名多实例时，这里必须与运行时参数 / 脚本状态一同改为按组件 ID 隔离。
@@ -19,10 +19,6 @@ pub enum RuntimeComponentKind {
     Builtin(BuiltinComponent),
     Rust(String),
     Lua(String),
-    /// 拆分前 v2 文件的复合视觉身份；新文件不会生成。
-    LegacyRender,
-    /// 拆分前 v2 文件单列的材质覆盖身份；新文件不会生成。
-    LegacyMaterialOverride,
 }
 
 impl RuntimeComponentKind {
@@ -42,8 +38,6 @@ impl RuntimeComponentKind {
                 registered_name, ..
             } => Self::Rust(registered_name.clone()),
             ComponentData::Lua { path } => Self::Lua(path.clone()),
-            ComponentData::LegacyRender(_) => Self::LegacyRender,
-            ComponentData::LegacyMaterialOverride(_) => Self::LegacyMaterialOverride,
         }
     }
 
@@ -62,13 +56,6 @@ impl RuntimeComponentKind {
             Self::Builtin(kind) => kind.present(entity),
             Self::Rust(name) => entity.behaviors.iter().any(|item| item == name),
             Self::Lua(path) => entity.scripts.iter().any(|item| item == path),
-            Self::LegacyRender => {
-                !entity.model.is_empty()
-                    || !entity.lod.is_empty()
-                    || entity.material_asset.is_some()
-                    || !entity.morph_weights.is_empty()
-            }
-            Self::LegacyMaterialOverride => entity.material.is_some(),
         }
     }
 }
@@ -110,10 +97,10 @@ impl RuntimeEntityIdentity {
         }
     }
 
-    /// 给运行中临时生成的 v1 实体分配本次 World 生命周期内稳定的组件 ID。
+    /// 给运行中临时生成的实体分配本次 World 生命周期内稳定的组件 ID。
     /// 这是生成事件的低频路径，不进入每帧扫描。
-    pub fn from_legacy(entity: &Entity) -> Result<Self, String> {
-        let plan = preview_component_upgrade(entity, None)?;
+    pub fn from_runtime(entity: &Entity) -> Result<Self, String> {
+        let plan = plan_runtime_component_identities(entity, None)?;
         let mut components = plan.components.into_iter();
         let transform = components
             .next()
@@ -182,7 +169,7 @@ impl RuntimeEntityIdentity {
     }
 }
 
-/// 一份场景的 v2 组件寻址侧车。
+/// 一份场景的组件寻址侧车。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSceneIdentity {
     entities: Vec<RuntimeEntityIdentity>,
@@ -224,7 +211,7 @@ impl RuntimeSceneIdentity {
     }
 }
 
-/// 交给运行时的完整场景所有权：一份可变值 + 可选 v2 身份侧车。
+/// 交给运行时的完整场景所有权：一份可变值 + 可选持久身份侧车。
 #[derive(Debug, Clone)]
 pub struct RuntimeScene {
     scene: Scene,
@@ -232,18 +219,18 @@ pub struct RuntimeScene {
 }
 
 impl RuntimeScene {
-    /// v1 / 测试兼容入口：没有持久组件 ID。
-    pub fn legacy(scene: Scene) -> Self {
+    /// 纯内存入口：没有来自文件的持久组件 ID。
+    pub fn from_runtime_values(scene: Scene) -> Self {
         Self {
             scene,
             identities: None,
         }
     }
 
-    /// v2 装载边界：先提取身份，再把强类型值投影到现有运行系统唯一读取的 Scene。
-    pub fn from_v2(scene: SceneV2) -> Result<Self, String> {
+    /// 文件装载边界：先提取身份，再投影到运行系统唯一读取的 [`Scene`]。
+    pub fn from_file(scene: SceneV2) -> Result<Self, String> {
         let identities = RuntimeSceneIdentity::from_v2(&scene);
-        let scene = scene.to_v1()?;
+        let scene = scene.into_runtime()?;
         Ok(Self {
             scene,
             identities: Some(identities),
@@ -269,11 +256,11 @@ impl RuntimeScene {
 
 impl From<Scene> for RuntimeScene {
     fn from(scene: Scene) -> Self {
-        Self::legacy(scene)
+        Self::from_runtime_values(scene)
     }
 }
 
-/// 运行时预制体载荷；v2 资产身份只在实例化时转成场景本地身份。
+/// 运行时预制体载荷；资产身份只在实例化时转成场景本地身份。
 #[derive(Debug, Clone)]
 pub struct RuntimePrefab {
     prefab: Prefab,
@@ -281,20 +268,20 @@ pub struct RuntimePrefab {
 }
 
 impl RuntimePrefab {
-    pub fn legacy(prefab: Prefab) -> Self {
+    pub fn from_runtime_values(prefab: Prefab) -> Self {
         Self {
             prefab,
             identities: None,
         }
     }
 
-    pub fn from_v2(prefab: PrefabV2) -> Result<Self, String> {
+    pub fn from_file(prefab: PrefabV2) -> Result<Self, String> {
         let identities = prefab
             .entities
             .iter()
             .map(RuntimeEntityIdentity::from_v2)
             .collect();
-        let prefab = prefab.to_v1()?;
+        let prefab = prefab.into_runtime()?;
         Ok(Self {
             prefab,
             identities: Some(identities),
@@ -323,11 +310,11 @@ impl RuntimePrefab {
                 .map(|(identity, entity)| Some(identity.instantiate_from_source(entity.id)))
                 .collect()
         } else {
-            // v1 资产没有持久来源 ID；仍尽量给 v2 World 中的临时实例分配本地 ID。
-            // 老数据有重复挂载物时预览会失败，只放弃该实体的身份，不阻断既有运行行为。
+            // 纯内存资产没有持久来源 ID；仍给 World 中的临时实例分配本地 ID。
+            // 重复挂载物无法映射时只放弃该实体的身份，不阻断既有运行行为。
             entities
                 .iter()
-                .map(|entity| RuntimeEntityIdentity::from_legacy(entity).ok())
+                .map(|entity| RuntimeEntityIdentity::from_runtime(entity).ok())
                 .collect()
         };
         Some(RuntimePrefabInstance {
@@ -340,7 +327,7 @@ impl RuntimePrefab {
 
 impl From<Prefab> for RuntimePrefab {
     fn from(prefab: Prefab) -> Self {
-        Self::legacy(prefab)
+        Self::from_runtime_values(prefab)
     }
 }
 

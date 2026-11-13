@@ -28,31 +28,15 @@ use std::path::Path;
 use crate::asset::is_guid_reference;
 use crate::project::ProjectHandle;
 
-/// 检查器按磁盘版本读文件；v2 的只读值适配不能反向用于保存，否则会丢组件身份。
-fn checked_version(project: &ProjectHandle, relative: &str) -> Result<Option<u32>, String> {
-    let relative =
-        crate::project::normalize_project_relative(relative).map_err(|e| e.to_string())?;
-    crate::file_format::disk_version(&project.path(&relative))
-        .map_err(|e| format!("无法读取 '{relative}': {e}"))
-}
-
 fn load_scene_for_check(project: &ProjectHandle, relative: &str) -> Result<crate::Scene, String> {
-    if checked_version(project, relative)? == Some(2) {
-        project.load_scene_v2(relative)?.to_v1()
-    } else {
-        project.load_scene(relative)
-    }
+    project.load_scene_for_check(relative)
 }
 
 fn load_prefab_for_check(
     project: &ProjectHandle,
     relative: &str,
 ) -> Result<crate::prefab::Prefab, String> {
-    if checked_version(project, relative)? == Some(2) {
-        project.load_prefab_v2(relative)?.to_v1()
-    } else {
-        project.load_prefab(relative)
-    }
+    project.load_prefab(relative)
 }
 
 /// 检查结果：能加载到什么程度、有哪些可疑引用。
@@ -624,12 +608,7 @@ fn check_prefab_contents(
     invalid_prefabs: &mut BTreeMap<String, String>,
     pending_prefabs: &mut BTreeSet<String>,
 ) {
-    let duplicate_check = match checked_version(project, relative) {
-        Ok(Some(2)) => Ok(Vec::new()), // v2 解码本身拒绝重复实体 ID。
-        Ok(_) => project.prefab_duplicate_ids(relative),
-        Err(e) => Err(e),
-    };
-    match duplicate_check {
+    match project.prefab_duplicate_ids(relative) {
         Ok(duplicates) => {
             for (id, count) in duplicates {
                 report
@@ -965,7 +944,7 @@ mod tests {
         scene.add_entity(crate::Entity::new("Scripted").with_script("Scripts/Missing.lua"));
         let scene_path = "Scenes/Second.ron";
         project
-            .write_scene_v2(scene_path, &SceneV2::from_v1_plain(&scene).unwrap())
+            .write_scene_v2(scene_path, &SceneV2::from_runtime(&scene).unwrap())
             .unwrap();
         let mut prefab = crate::prefab::Prefab::new("Unused");
         prefab
@@ -973,7 +952,7 @@ mod tests {
             .push(crate::Entity::new("Model").with_model("Resources/Missing.glb"));
         let prefab_path = "Prefabs/Unused.prefab.ron";
         project
-            .write_prefab_v2(prefab_path, &PrefabV2::from_v1(&prefab).unwrap())
+            .write_prefab_v2(prefab_path, &PrefabV2::from_runtime(&prefab).unwrap())
             .unwrap();
         let before_scene = std::fs::read(project.path(scene_path)).unwrap();
         let before_prefab = std::fs::read(project.path(prefab_path)).unwrap();
@@ -1006,7 +985,7 @@ mod tests {
         let project = temp_project("v2_entry_check");
         let entry = project.manifest().entry_scene.clone();
         let scene = project.load_entry_scene().unwrap();
-        let v2 = crate::scene_v2::SceneV2::from_v1_plain(&scene)
+        let v2 = crate::scene_v2::SceneV2::from_runtime(&scene)
             .unwrap()
             .to_ron()
             .unwrap();
@@ -1029,14 +1008,14 @@ mod tests {
             .push(crate::Entity::new("Actor").with_model("builtin://cube"));
         let instance = prefab.instantiate(relative).remove(0);
         project
-            .write_prefab_v2(relative, &PrefabV2::from_v1(&prefab).unwrap())
+            .write_prefab_v2(relative, &PrefabV2::from_runtime(&prefab).unwrap())
             .unwrap();
         let mut scene = crate::Scene::new("Second");
         scene.add_entity(instance);
         let scene_path = "Scenes/Second.ron";
-        let mut v2 = SceneV2::from_v1_with_prefabs(
+        let mut v2 = SceneV2::from_runtime_with_prefabs(
             &scene,
-            &[(relative.to_owned(), PrefabV2::from_v1(&prefab).unwrap())]
+            &[(relative.to_owned(), PrefabV2::from_runtime(&prefab).unwrap())]
                 .into_iter()
                 .collect(),
         )
@@ -1074,11 +1053,22 @@ mod tests {
         let project = temp_project("dup_ids");
         let entry = project.manifest().entry_scene.clone();
         let mut scene = project.load_entry_scene().expect("加载默认场景");
-        let shared = scene.add_entity(crate::Entity::new("Twin"));
-        let mut second = crate::Entity::new("Twin Twin");
-        second.id = shared;
-        scene.entities.push(second);
+        scene.add_entity(crate::Entity::new("Twin"));
         project.write_scene(&entry, &scene).expect("写回场景");
+
+        // 正常写入口会拒绝重复 ID；坏文件夹具必须模拟外部手改，并保留完整的
+        // 当前文件结构。直接 serde 只用于构造伤，不经过 `to_ron()` 的验证门禁。
+        let mut file = project.load_scene_v2(&entry).expect("读取文件模型");
+        let mut second = file
+            .entities
+            .iter()
+            .find(|entity| entity.name == "Twin")
+            .expect("刚写入的实体")
+            .clone();
+        second.name = "Twin Twin".into();
+        file.entities.push(second);
+        let raw = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default()).unwrap();
+        std::fs::write(project.path(&entry), raw).expect("模拟外部写入重复 ID");
 
         let report = check_project(project.root()).expect("检查应能跑完");
         assert!(
@@ -1100,6 +1090,10 @@ mod tests {
 
         let after = project.scene_duplicate_ids(&entry).expect("再读一次");
         assert!(!after.is_empty(), "检查必须只读，不能把重复 ID 修好写回去");
+        assert!(
+            project.load_scene(&entry).unwrap().duplicate_ids().is_empty(),
+            "正式加载边界仍须在内存中修好重复 ID"
+        );
 
         let _ = std::fs::remove_dir_all(project.root());
     }
@@ -1239,13 +1233,14 @@ mod tests {
         let project = temp_project("dup_prefab_ids");
         let mut prefab = Prefab::new("Twin");
         let first = crate::Entity::new("A");
-        let shared = first.id;
         prefab.entities.push(first);
-        let mut second = crate::Entity::new("B");
-        second.id = shared;
-        prefab.entities.push(second);
+        prefab.entities.push(crate::Entity::new("B"));
         let relative = "Prefabs/Twin.prefab.ron";
         project.write_prefab(relative, &prefab).expect("写预制体");
+        let mut file = project.load_prefab_v2(relative).expect("读取文件模型");
+        file.entities[1].id = file.entities[0].id;
+        let raw = ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default()).unwrap();
+        std::fs::write(project.path(relative), raw).expect("模拟外部写入重复 ID");
 
         let report = check_project(project.root()).expect("检查应能跑完");
         assert!(
@@ -1269,11 +1264,10 @@ mod tests {
             report.render()
         );
 
-        // 只读 + 不修：再读一次，两个实体仍然是同一个 ID。
-        let after = project.load_prefab(relative).expect("再读一次");
-        assert_eq!(
-            after.entities[0].id, after.entities[1].id,
-            "预制体的重复 ID 不许在加载边界被静默重分配（跨文件引用）"
+        // 当前严格文件边界拒绝这份资产，且绝不能为了装进去而静默重分配。
+        assert!(
+            project.load_prefab(relative).is_err(),
+            "预制体的重复 ID 必须拒绝加载（跨文件引用不许静默修）"
         );
         assert!(
             !project
@@ -1328,13 +1322,16 @@ mod tests {
     /// 自定义目录里的预制体不在默认枚举范围内，但被场景引用时仍必须查解析结果。
     #[test]
     fn invalid_referenced_prefab_outside_catalog_is_reported_once() {
-        use crate::prefab::PrefabInstanceRef;
+        use crate::prefab::{Prefab, PrefabInstanceRef};
 
         let project = temp_project("invalid_linked_prefab");
         let relative = "Shared/Broken.prefab.ron";
         let path = project.path(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "(not valid RON").unwrap();
+        let mut prefab = Prefab::new("Broken");
+        let mut source = crate::Entity::new("Source");
+        source.id = crate::EntityId::from_raw(123);
+        prefab.entities.push(source);
+        project.write_prefab(relative, &prefab).unwrap();
         let mut scene = project.load_entry_scene().unwrap();
         for name in ["First", "Second"] {
             let mut entity = crate::Entity::new(name);
@@ -1348,6 +1345,8 @@ mod tests {
         project
             .write_scene(&project.manifest().entry_scene, &scene)
             .unwrap();
+        // 场景先经正常边界写成合法引用，再模拟资产随后损坏。
+        std::fs::write(&path, "(not valid RON").unwrap();
 
         let report = check_project(project.root()).expect("检查应继续运行");
         assert_eq!(
@@ -1495,6 +1494,9 @@ mod tests {
         let alive = crate::Entity::new("Alive");
         let alive_id = alive.id;
         prefab.entities.push(alive);
+        let mut removed = crate::Entity::new("Removed");
+        removed.id = crate::EntityId::from_raw(9_999);
+        prefab.entities.push(removed);
         let prefab_relative = "Prefabs/Solo.prefab.ron";
         project
             .write_prefab(prefab_relative, &prefab)
@@ -1518,6 +1520,12 @@ mod tests {
         scene.entities.push(bad);
         let entry = project.manifest().entry_scene.clone();
         project.write_scene(&entry, &scene).expect("写场景");
+
+        // 写场景时来源仍完整；随后删除资产实体，留下真实的跨文件悬空引用。
+        prefab.entities.pop();
+        project
+            .write_prefab(prefab_relative, &prefab)
+            .expect("删除来源实体");
 
         let report = check_project(project.root()).expect("检查应能跑完");
         assert!(

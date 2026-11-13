@@ -1,7 +1,7 @@
 //! 场景与实体类型。
 //!
-//! 场景是游戏世界的顶层容器，包含实体列表。实体现在拥有稳定 ID
-//! 和可选的运行时组件集合，向后兼容旧版 RON 场景文件。
+//! 场景是游戏世界的顶层运行时值容器，包含实体列表。磁盘格式由
+//! [`crate::scene_v2::SceneV2`] 负责，运行系统只修改这里这一份组件值。
 
 use std::collections::BTreeMap;
 
@@ -13,7 +13,7 @@ use crate::id::EntityId;
 use crate::light::Light;
 use crate::transform::Transform;
 
-/// `Entity.layer` 的 `skip_serializing_if`：0 层（默认）不写进场景文件。
+/// `Entity` 的辅助 serde 表示里省略默认层；正式磁盘模型不走这条序列化路径。
 fn is_default_layer(layer: &u8) -> bool {
     *layer == crate::layers::DEFAULT_LAYER
 }
@@ -21,28 +21,21 @@ fn is_default_layer(layer: &u8) -> bool {
 /// 场景图中的单个游戏对象。
 ///
 /// 每个实体有一个稳定标识符（`id`）、名称、变换和关联模型路径。
-/// `components` 字段存储运行时组件，不会被序列化到场景文件中。
-///
-/// 旧版 .ron 文件（不含 `id` / `parent` 字段）仍可正确反序列化，因为
-/// 两者都使用 `#[serde(default)]`：`id` 会分配一个新 ID，`parent` 补成
-/// `None`（即所有实体都落在场景根层）。
+/// `components` 字段存储瞬时运行时组件，不进入文件模型。`Entity` 自身保留 serde
+/// 只为内部快照和测试；项目场景必须经 `SceneV2` 边界读写，不能把这里的 RON 当磁盘格式。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
     /// 实体的显示名称。
     pub name: String,
     /// **局部空间**变换（相对父节点；没有父节点时即世界变换）。
     ///
-    /// 缺省 = 单位变换。旧场景文件全部写满三个分量，行为不变；新文件里
-    /// **纯 UI 实体可以整段省掉** —— UI 的位置由锚点决定，`transform` 对它
-    /// 没有任何意义，强制写一段单位变换只是噪音。
+    /// 辅助 serde 缺省 = 单位变换；当前文件模型会显式持有它和独立组件身份。
     #[serde(default)]
     pub transform: Transform,
     /// 层索引（0–31）。决定它与哪些层发生碰撞 / 触发（矩阵在 `project.ron`
     /// 的 `layers` 节，见 [`crate::layers`]）。
     ///
-    /// 缺省 = 0（`Default` 层），且默认矩阵全通 —— 所以旧场景文件没有这个
-    /// 字段时行为与引入层之前**逐位一致**；`skip_serializing_if` 让 0 层的
-    /// 实体不写这一行（绝大多数实体都在 0 层）。
+    /// 缺省 = 0（`Default` 层），且默认矩阵全通。
     ///
     /// 越界值（> 31）不会被读盘时静默修正：`--check` 会把它报出来，
     /// 运行时按 [`crate::layers::sanitize_layer`] 取模 —— 报错交给工具，
@@ -62,8 +55,7 @@ pub struct Entity {
     /// 判定规则、距离口径与偏置语义见 [`crate::lod`] 的模块文档（那里是唯一
     /// 一份实现，渲染器只是调用方）。
     ///
-    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → 空组，
-    /// `skip_serializing_if` 让没有 LOD 的实体不写这一行。
+    /// 空组不生成文件模型中的 LOD 组件。
     #[serde(default, skip_serializing_if = "crate::lod::LodGroup::is_empty")]
     pub lod: crate::lod::LodGroup,
     /// 共享材质资产路径（项目相对路径，例如 `Resources/Materials/Wood.mat`）。
@@ -74,11 +66,10 @@ pub struct Entity {
     ///
     /// 与 [`Entity::material`]（逐实体临时覆盖）**正交**：资产负责"这是什么
     /// 材质"，覆盖负责"这个实例想怎么微调"，两层可以同时存在。
-    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → `None`，
-    /// 没引用材质的实体不写这一行。
+    /// `None` 且没有实例覆盖时，不生成文件模型中的 Material 组件。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material_asset: Option<String>,
-    /// 稳定唯一标识符。旧版文件反序列化时自动分配新 ID。
+    /// 稳定唯一标识符。文件模型要求显式、合法且在本文件内唯一。
     #[serde(default)]
     pub id: EntityId,
     /// 父实体的 ID。`None` = 场景根节点。
@@ -91,9 +82,7 @@ pub struct Entity {
     pub parent: Option<EntityId>,
     /// 预制体实例来源——只有「预制体实例」里的实体才带（见 [`crate::prefab`]）。
     ///
-    /// `skip_serializing_if` 让普通实体的场景文件里完全不出现这个字段，
-    /// 场景文件不会被一行行 `prefab: None` 灌满；同时 `#[serde(default)]`
-    /// 保证旧文件（没这个字段）照常加载成 `None`。
+    /// 普通实体为 `None`；文件模型仍显式记录这一元数据位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefab: Option<crate::prefab::PrefabInstanceRef>,
     /// 挂在这个实体上的脚本（项目相对路径，例如 `Scripts/Player.lua`）。
@@ -110,9 +99,7 @@ pub struct Entity {
     /// `xgame-runtime::BehaviorRegistry`）。
     ///
     /// 双轨语言架构的 Rust 轨道（UE 模式）：名字在运行时查注册表实例化成
-    /// `Lifecycle` 组件。与 `scripts` 完全同款的兼容模式 —— 旧场景文件没有
-    /// 这个字段 → 空列表（纯数据、零行为），`skip_serializing_if` 让没挂
-    /// 行为的实体不写这一行。
+    /// `Lifecycle` 组件。空列表表示纯数据、零行为。
     ///
     /// 顺序即执行顺序（同实体内多个行为按列表顺序跑），理由同 `scripts`。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -127,21 +114,17 @@ pub struct Entity {
     /// `behaviors` 不会让参数错位到别的组件上（下标错位 = 把 A 的参数写进
     /// B 的字段，两边都是 `f32`，编译器管不着）。
     ///
-    /// 兼容模式与 `behaviors` 同款：旧场景文件没有这个字段 → 空表，
-    /// `skip_serializing_if` 让没调过参的实体不写这一行。
+    /// 空表表示这些组件全部使用注册默认值。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub behavior_params: BTreeMap<String, crate::inspect::FieldValues>,
     /// 物理属性。`None` = 不参与物理（纯视觉实体）。
     ///
-    /// 旧场景文件没有这个字段，反序列化成 `None` —— 语义上正好等于
-    /// "老场景里的物体都是静态装饰"，与当时的行为一致，不会突然被重力拽走。
+    /// 文件投影时 `None` 表示没有 Physics 组件，不会参与物理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physics: Option<crate::physics::PhysicsBody>,
     /// 动画播放器。`None` = 不播动画（绑定姿态 / 静态网格）。
     ///
-    /// 与 `physics` 同样的兼容策略：旧场景文件没有这个字段 → `None`，
-    /// 老场景照旧渲染；`skip_serializing_if` 让没配动画的实体在场景文件里
-    /// 不出现这一行。
+    /// 文件投影时 `None` 表示没有 Animator 组件。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animator: Option<crate::animation::Animator>,
     /// 形变目标权重（morph target / blend shape）。**空** = 用模型自带的默认权重。
@@ -154,20 +137,16 @@ pub struct Entity {
     /// 与动画的优先级：剪辑里**有**权重轨道时以动画为准（Unity 同款语义，
     /// 被动画驱动的属性不听手动覆盖），没有轨道才用这里的值。
     ///
-    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → 空，
-    /// `skip_serializing_if` 让不带表情的实体不写这一行。
+    /// 空列表表示使用模型默认权重。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub morph_weights: Vec<f32>,
     /// 音频源。`None` = 静默实体。
     ///
-    /// 兼容策略与 `animator` 同款（旧文件 → `None`；没配音频不写这一行）。
-    /// 引擎侧封装在 `xgame-audio`（kira），这里只是纯数据声明 ——
-    /// 场景文件从不引用 kira 类型。
+    /// 引擎侧封装在 `xgame-audio`（kira），这里只是纯数据声明；文件模型不引用 kira 类型。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<crate::audio::AudioSource>,
     /// 逐实体材质覆盖（PBR 参数乘子 / 替换）。`None` = 纯用模型自带材质。
     ///
-    /// 兼容策略与 `audio` 同款（旧文件 → `None`；没配覆盖不写这一行）。
     /// 语义与理由见 [`crate::material::MaterialOverride`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<crate::material::MaterialOverride>,
@@ -179,8 +158,7 @@ pub struct Entity {
     /// 运行时接管成位置驱动的运动学胶囊，`PhysicsBody` 里声明的运动学
     /// 类型此时不再作数（理由见 [`crate::character::CharacterController`]）。
     ///
-    /// 兼容策略与 `material` 同款：旧场景文件没有这个字段 → `None`，
-    /// 老场景照常加载；没配角色的实体不写这一行。
+    /// `None` 表示没有 Character 组件。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller: Option<crate::character::CharacterController>,
     /// 屏幕空间 UI 元素。`None` = 这个实体不参与 UI。
@@ -192,8 +170,7 @@ pub struct Entity {
     /// 位置由**锚点**决定，`transform` 不参与 UI 布局 —— 理由见
     /// [`crate::ui`] 的模块文档。
     ///
-    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → `None`，
-    /// 老场景照常加载；没配 UI 的实体不写这一行。
+    /// `None` 表示没有 UI 组件。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<crate::ui::UiElement>,
     /// 粒子发射器。`None` = 这个实体不发射粒子（零成本）。
@@ -204,8 +181,7 @@ pub struct Entity {
     /// 与 `model` 正交：可以挂在有模型的物体上当火焰附着点，也可以挂空实体
     /// （只有发射器、没有网格 —— 篝火、烟雾口都是这样）。
     ///
-    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → `None` 且当帧
-    /// 零开销；没配粒子的实体不写这一行。
+    /// `None` 表示没有 Particle 组件，运行时零开销。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub particle: Option<crate::particle::ParticleEmitter>,
     /// 相机（透视投影参数 + 主相机标记）。`None` = 这个实体不是相机。
@@ -218,8 +194,7 @@ pub struct Entity {
     /// [`Scene::active_camera_index`]，宿主（独立游戏 / 编辑器 Play /
     /// 无头截图）都读那一个，别各自写一套。
     ///
-    /// 兼容策略与其他可选组件同款：旧场景文件没有这个字段 → `None`，
-    /// 老场景照常加载（宿主退回各自的旧机位）；没配相机的实体不写这一行。
+    /// `None` 表示没有 Camera 组件，宿主按统一规则退回默认机位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<crate::camera::Camera>,
     /// 运行时组件集合（反序列化时默认为空）。
@@ -528,20 +503,12 @@ impl PartialEq for Entity {
 /// 包含实体列表的场景。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
-    /// 文件级版本；旧文件省略时是 v1。v2 尚无解码器时必须报错，避免忽略组件数据。
-    #[serde(
-        default = "crate::file_format::v1",
-        skip_serializing_if = "crate::file_format::is_v1",
-        deserialize_with = "crate::file_format::deserialize_v1"
-    )]
-    pub format_version: u32,
     /// 场景名称。
     pub name: String,
     /// 场景中的实体列表。
     pub entities: Vec<Entity>,
-    /// 场景光源。旧场景文件没有这个字段，反序列化时补一盏默认方向光
-    /// （而不是空列表）——否则老工程一打开就是全黑，很容易被误判成
-    /// "渲染坏了"。
+    /// 场景光源。辅助 serde 缺省为一盏方向光（而不是空列表），保证内部快照
+    /// 缺字段时仍有可诊断的可见画面；正式文件模型会显式投影这个值。
     #[serde(default = "default_lights")]
     pub lights: Vec<Light>,
     /// 全局环境光（线性 RGB）。所有表面都能收到的最低亮度，
@@ -550,12 +517,12 @@ pub struct Scene {
     pub ambient: [f32; 3],
 }
 
-/// 旧场景（没有 `lights` 字段）的兜底：给一盏默认方向光。
+/// `Scene` 辅助 serde 没有 `lights` 字段时的兜底。
 fn default_lights() -> Vec<Light> {
     vec![Light::default()]
 }
 
-/// 旧场景（没有 `ambient` 字段）的兜底环境光。
+/// `Scene` 辅助 serde 没有 `ambient` 字段时的兜底环境光。
 fn default_ambient() -> [f32; 3] {
     [0.06, 0.06, 0.08]
 }
@@ -567,7 +534,6 @@ impl Scene {
     /// 而且会让人以为相机或渲染管线出了问题。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
-            format_version: crate::file_format::V1,
             name: name.into(),
             entities: Vec::new(),
             lights: default_lights(),
@@ -1614,8 +1580,7 @@ mod tests {
         assert_eq!(scene.ensure_unique_ids(), 0);
     }
 
-    /// ID 必须原样往返：这条同时守着自定义 `Deserialize` 的**格式兼容性**
-    /// （RON 里仍是 `id: (12)`），以及"保存一次不该把 ID 洗一遍"。
+    /// ID 必须在运行时辅助快照中原样往返；正式项目文件另由 `SceneV2` 门禁覆盖。
     #[test]
     fn scene_ids_round_trip_unchanged() {
         let mut scene = Scene::new("RT");
@@ -1664,8 +1629,8 @@ mod tests {
     }
 
     #[test]
-    fn old_scene_without_parent_field_loads() {
-        // 旧格式：没有 id / parent 字段，必须能解析且全部落在根层
+    fn runtime_snapshot_without_parent_defaults_to_root() {
+        // `Scene` 的辅助 serde 缺字段时保持数据模型默认；这不是项目文件兼容入口。
         let ron = r#"Scene(
             name: "Old",
             entities: [
@@ -1673,64 +1638,18 @@ mod tests {
                 (name: "B", transform: (position: (1.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: ""),
             ],
         )"#;
-        let scene: Scene = ron::from_str(ron).expect("旧场景应当能反序列化");
+        let scene: Scene = ron::from_str(ron).expect("运行时快照应当能反序列化");
         assert_eq!(scene.entities.len(), 2);
         assert!(scene.entities.iter().all(|e| e.parent.is_none()));
         assert_eq!(scene.roots().len(), 2);
-        // 旧文件没有 animator 字段 → 全部是 None（= 不动画，与当时行为一致）
+        // 快照没有 animator 字段 → 全部是 None。
         assert!(scene.entities.iter().all(|e| e.animator.is_none()));
     }
 
-    /// 旧场景文件（没有 behaviors 字段）必须照常加载：空行为列表 = 纯数据实体。
-    ///
-    /// 双轨计划 P0 的字段兼容回归网 —— serde 属性写错（漏 `default`）
-    /// 会让所有既有场景文件当场加载失败。
+    /// Rust 组件参数在运行时辅助快照中仍按注册名往返，并参与编辑器脏检查。
+    /// 项目文件中的组件身份与严格解码由 `SceneV2` 的集成测试负责。
     #[test]
-    fn old_scene_without_behaviors_field_loads() {
-        let ron = r#"Scene(
-            name: "Old",
-            entities: [
-                (name: "A", transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: ""),
-            ],
-        )"#;
-        let scene: Scene = ron::from_str(ron).expect("旧场景应当能反序列化");
-        assert!(scene.entities[0].behaviors.is_empty());
-
-        // 挂了行为的实体：字段落盘、顺序保持（顺序即执行顺序）。
-        let mut scene = Scene::new("New");
-        let mut entity = Entity::new("A");
-        entity.behaviors = vec!["Spinner".to_owned(), "Drift".to_owned()];
-        scene.add_entity(entity);
-        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
-        assert!(text.contains("behaviors"), "挂了行为的实体必须落盘");
-        let restored: Scene = ron::from_str(&text).unwrap();
-        assert_eq!(restored.entities[0].behaviors, vec!["Spinner", "Drift"]);
-
-        // 没挂行为的实体不写 behaviors 行（`skip_serializing_if` 的承诺）。
-        let mut plain = Scene::new("Plain");
-        plain.add_entity(Entity::new("A"));
-        let text = ron::ser::to_string_pretty(&plain, ron::ser::PrettyConfig::default()).unwrap();
-        assert!(!text.contains("behaviors"), "空列表不该污染场景文件");
-    }
-
-    /// P1.5：组件字段值必须落盘往返，且**旧场景文件**（没有 behavior_params
-    /// 字段）照常加载。
-    ///
-    /// 双重回归：serde 属性漏 `default` ⇒ 旧文件加载失败（当场红）；
-    /// 键用下标而不是注册名 ⇒ 这里的改名场景会读出错位的参数（更阴）。
-    #[test]
-    fn behavior_params_survive_ron_roundtrip_and_old_scenes_load() {
-        // ① 旧文件没有 behavior_params 字段 → 空表
-        let ron = r#"Scene(
-            name: "Old",
-            entities: [
-                (name: "A", transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), model: "", behaviors: ["Spinner"]),
-            ],
-        )"#;
-        let scene: Scene = ron::from_str(ron).expect("旧场景应当能反序列化");
-        assert!(scene.entities[0].behavior_params.is_empty());
-
-        // ② 挂了参数的实体：逐值往返
+    fn behavior_params_survive_runtime_snapshot_and_equality() {
         use crate::inspect::FieldValue;
         let mut scene = Scene::new("New");
         let mut entity = Entity::new("A");
@@ -1745,8 +1664,8 @@ mod tests {
         scene.add_entity(entity);
 
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
-        assert!(text.contains("behavior_params"), "调过参的实体必须落盘");
-        assert!(text.contains("speed"), "字段寻址名落盘");
+        assert!(text.contains("behavior_params"), "调过参的实体必须进入快照");
+        assert!(text.contains("speed"), "字段寻址名必须进入快照");
         let restored: Scene = ron::from_str(&text).unwrap();
         assert_eq!(
             restored.entities[0].behavior_params.get("Spinner"),
@@ -1754,13 +1673,13 @@ mod tests {
             "往返后逐值相等"
         );
 
-        // ③ 没调过参的实体不写这一行（skip_serializing_if 的承诺）
+        // 没调过参的实体不写这一行（skip_serializing_if 的辅助快照约定）。
         let mut plain = Scene::new("Plain");
         plain.add_entity(Entity::new("A"));
         let text = ron::ser::to_string_pretty(&plain, ron::ser::PrettyConfig::default()).unwrap();
-        assert!(!text.contains("behavior_params"), "空表不该污染场景文件");
+        assert!(!text.contains("behavior_params"), "空表不该污染辅助快照");
 
-        // ④ 参数变化必须被 PartialEq 看见（编辑器脏检查靠它）
+        // 参数变化必须被 PartialEq 看见（编辑器脏检查靠它）。
         let mut a = Entity::new("A");
         let mut b = a.clone();
         assert_eq!(a, b);

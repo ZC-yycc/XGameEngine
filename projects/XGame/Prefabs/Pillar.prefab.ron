@@ -1,0 +1,99 @@
+(
+    format_version: 2,
+    name: "Pillar",
+    entities: [
+        (
+            id: (1),
+            name: "Pillar",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "guid://43b41a2008432f77ca7fbca93854f890",
+                            morph_weights: [],
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (2),
+            name: "Middle",
+            parent: Some((1)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 1.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "guid://43b41a2008432f77ca7fbca93854f890",
+                            morph_weights: [],
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (3),
+            name: "Top",
+            parent: Some((2)),
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 1.2, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 0.6),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 3,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "guid://43b41a2008432f77ca7fbca93854f890",
+                            morph_weights: [],
+                        )),
+                    ),
+                ],
+            ),
+        ),
+    ],
+)

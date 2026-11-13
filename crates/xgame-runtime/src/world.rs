@@ -169,8 +169,8 @@ struct UiRuntime {
 /// 游戏运行时世界。
 pub struct World {
     scene: Scene,
-    /// v2 的稳定组件寻址侧车；只含身份，不复制第二份可变组件值。
-    /// v1 / 纯内存测试场景为 None。
+    /// 文件模型的稳定组件寻址侧车；只含身份，不复制第二份可变组件值。
+    /// 纯内存测试场景为 None。
     component_identities: Option<RuntimeSceneIdentity>,
     physics: PhysicsWorld,
     /// 层与碰撞矩阵（建刚体时算碰撞组用；运行中改层也走它）。
@@ -285,13 +285,12 @@ impl World {
     /// 收**快照**（而不是借用编辑器的场景）是刻意的：Play 模式跑起来之后，
     /// 编辑器手里的那份必须是"进入 Play 之前的样子"，退出时才能原样恢复。
     pub fn new(scene: Scene, root: impl Into<PathBuf>, config: WorldConfig) -> Self {
-        Self::from_runtime_scene(RuntimeScene::legacy(scene), root, config)
+        Self::from_runtime_scene(RuntimeScene::from_runtime_values(scene), root, config)
     }
 
-    /// 用运行时完整载荷建立世界；v2 的组件 ID 从此由 World 与场景值共同持有。
+    /// 用文件运行载荷建立世界；组件 ID 从此由 World 与场景值共同持有。
     ///
-    /// 身份侧车只在装载边界构造，不参与每帧同步；旧 [`World::new`] 仍是 v1 / 测试
-    /// 的兼容入口。
+    /// 身份侧车只在装载边界构造，不参与每帧同步；[`World::new`] 供纯内存场景与测试使用。
     pub fn from_runtime_scene(
         runtime_scene: RuntimeScene,
         root: impl Into<PathBuf>,
@@ -510,7 +509,7 @@ impl World {
         &mut self.scene
     }
 
-    /// 当前场景是否来自持久化 v2 身份载荷。
+    /// 当前场景是否来自带持久身份的文件载荷。
     pub fn has_component_identities(&self) -> bool {
         self.component_identities.is_some()
     }
@@ -1729,7 +1728,7 @@ impl World {
             }
         }
 
-        // 运行中生成实体的组件 ID 在命令消费时进入侧车；v1 World 没有侧车，
+        // 运行中生成实体的组件 ID 在命令消费时进入侧车；纯内存 World 没有侧车，
         // 保持旧行为。这里只处理生成事件，不在每帧扫描 Scene 重建身份。
         if let Some(identities) = self.component_identities.as_mut() {
             for identity in report.spawned_identities {
@@ -3791,7 +3790,7 @@ mod tests {
 
     /// 示例项目在仓库里的位置（相对本 crate）。
     fn repository_sample_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/SampleScene")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/XGame")
     }
 
     /// 每帧都会 `sync_bodies`，必须确认它**不会**重复建刚体。
@@ -4905,26 +4904,25 @@ mod tests {
     }
 
     #[test]
-    fn world_can_switch_to_v2_scene_with_same_physics_and_script_values() {
-        let project = temp_scene_project("v2_switch", false);
+    fn world_switch_keeps_current_file_physics_scripts_and_component_ids() {
+        let project = temp_scene_project("current_switch", false);
         let b = project.load_scene("Scenes/B.ron").unwrap();
         let expected_ids: Vec<_> = b.entities.iter().map(|e| e.id).collect();
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&b).unwrap();
-        let marker = v2
+        let file = project.load_scene_v2("Scenes/B.ron").unwrap();
+        let marker = file
             .entities
             .iter()
             .find(|entity| entity.name == "marker")
             .unwrap();
         let marker_id = marker.id;
         let marker_script_id = marker.components.entries[0].identity.id;
-        std::fs::write(project.path("Scenes/B.ron"), v2.to_ron().unwrap()).unwrap();
         let scene = project.load_runtime_scene("Scenes/A.ron").unwrap();
         let mut world = World::from_runtime_scene(scene, project.root(), WorldConfig::default())
             .with_scene_loader(project.clone())
             .with_current_scene("Scenes/A.ron");
         assert!(
-            !world.has_component_identities(),
-            "v1 起始场景没有持久组件 ID"
+            world.has_component_identities(),
+            "文件装载的起始场景必须携带持久组件 ID"
         );
         world.request_scene_load("Scenes/B.ron");
         world.update(1.0 / 60.0);
@@ -4951,33 +4949,28 @@ mod tests {
             script.kind,
             xgame_core::RuntimeComponentKind::Lua("Scripts/level2.lua".into())
         );
-        assert!(
-            project.load_scene("Scenes/B.ron").is_err(),
-            "编辑器旧入口仍须拒绝 v2"
-        );
+        assert_eq!(project.load_scene("Scenes/B.ron").unwrap(), b);
         std::fs::remove_dir_all(project.root()).unwrap();
     }
 
     #[test]
-    fn world_can_start_with_v2_component_identities() {
-        let project = temp_scene_project("v2_initial_identity", false);
-        let scene = project.load_scene("Scenes/B.ron").unwrap();
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&scene).unwrap();
-        let ball = v2
+    fn world_starts_with_current_file_component_identities() {
+        let project = temp_scene_project("current_initial_identity", false);
+        let file = project.load_scene_v2("Scenes/B.ron").unwrap();
+        let ball = file
             .entities
             .iter()
             .find(|entity| entity.name == "ball")
             .unwrap();
         let ball_id = ball.id;
         let physics_id = ball.components.entries[0].identity.id;
-        std::fs::write(project.path("Scenes/B.ron"), v2.to_ron().unwrap()).unwrap();
 
         let loaded = project.load_runtime_scene("Scenes/B.ron").unwrap();
         let world = World::from_runtime_scene(loaded, project.root(), WorldConfig::default());
         assert_eq!(
             world
                 .component_identity(ball_id, physics_id)
-                .expect("初始 v2 场景身份应由 World 持有")
+                .expect("初始文件场景身份应由 World 持有")
                 .kind,
             xgame_core::RuntimeComponentKind::Builtin(xgame_core::BuiltinComponent::Physics)
         );
@@ -5284,25 +5277,19 @@ mod tests {
     }
 
     #[test]
-    fn v2_spawn_prefab_registers_local_and_source_component_ids() {
-        let project = temp_prefab_project("v2_spawn_prefab_identity");
+    fn file_prefab_spawn_registers_local_and_source_component_ids() {
+        let project = temp_prefab_project("file_spawn_prefab_identity");
         let scene_path = "Scenes/A.ron";
-        let scene = project.load_scene(scene_path).unwrap();
-        let scene_v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&scene).unwrap();
-        std::fs::remove_file(project.path(scene_path)).unwrap();
-        project.write_scene_v2(scene_path, &scene_v2).unwrap();
+        project.load_scene_v2(scene_path).unwrap();
 
         let prefab_path = "Prefabs/Enemy.prefab.ron";
-        let prefab = project.load_prefab(prefab_path).unwrap();
-        let prefab_v2 = xgame_core::scene_v2::PrefabV2::from_v1(&prefab).unwrap();
-        let source_root = prefab_v2
+        let prefab_file = project.load_prefab_v2(prefab_path).unwrap();
+        let source_root = prefab_file
             .entities
             .iter()
             .find(|entity| entity.name == "Enemy")
             .unwrap();
         let source_physics_id = source_root.components.entries[0].identity.id;
-        std::fs::remove_file(project.path(prefab_path)).unwrap();
-        project.write_prefab_v2(prefab_path, &prefab_v2).unwrap();
 
         let loaded = project.load_runtime_scene(scene_path).unwrap();
         let mut world = World::from_runtime_scene(loaded, project.root(), WorldConfig::default())
@@ -5318,7 +5305,7 @@ mod tests {
             .unwrap();
         let identity = world
             .component_identity(root.id, source_physics_id)
-            .expect("运行时生成的 v2 预制体组件应有本地身份");
+            .expect("运行时生成的文件预制体组件应有本地身份");
         assert_eq!(identity.identity.id, source_physics_id);
         assert_eq!(
             identity.identity.source_component_id,
@@ -5328,9 +5315,9 @@ mod tests {
     }
 
     #[test]
-    fn v2_runtime_spawn_and_destroy_keep_identity_sidecar_in_sync() {
+    fn file_runtime_spawn_and_destroy_keep_identity_sidecar_in_sync() {
         let dir = std::env::temp_dir().join(format!(
-            "xgame_runtime_v2_dynamic_identity_{}_{}",
+            "xgame_runtime_file_dynamic_identity_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5352,11 +5339,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut scene = Scene::new("v2_dynamic_identity");
+        let mut scene = Scene::new("file_dynamic_identity");
         scene.add_entity(Entity::new("driver").with_script("Scripts/driver.lua"));
         scene.add_entity(Entity::new("victim"));
-        let runtime = xgame_core::RuntimeScene::from_v2(
-            xgame_core::scene_v2::SceneV2::from_v1_plain(&scene).unwrap(),
+        let runtime = xgame_core::RuntimeScene::from_file(
+            xgame_core::scene_v2::SceneV2::from_runtime(&scene).unwrap(),
         )
         .unwrap();
         let mut world = World::from_runtime_scene(runtime, &dir, WorldConfig::default());

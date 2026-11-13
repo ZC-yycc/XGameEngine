@@ -34,19 +34,19 @@
 //! cargo run -p xgame-editor
 //!
 //! # 直接打开指定项目
-//! cargo run -p xgame-editor -- projects/SampleScene
+//! cargo run -p xgame-editor -- projects/XGame
 //!
 //! # 无头工具（不开窗口，给 CI / AI 智能体用）
-//! cargo run -p xgame-editor -- --check projects/SampleScene
-//! cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene
-//! cargo run -p xgame-editor -- --build projects/SampleScene
+//! cargo run -p xgame-editor -- --check projects/XGame
+//! cargo run -p xgame-editor -- --headless --frames 300 projects/XGame
+//! cargo run -p xgame-editor -- --build projects/XGame
 //!
 //! # 界面截图（开窗口跑几帧，把上屏像素存成 PNG 后退出；调界面用）
-//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot shot.png
-//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot shot.png --ui-select Fox
-//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot play.png --ui-play
-//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot s.png --ui-size 1280x800
-//! cargo run -p xgame-editor -- projects/SampleScene --ui-shot r.png --ui-autosave-recover
+//! cargo run -p xgame-editor -- projects/XGame --ui-shot shot.png
+//! cargo run -p xgame-editor -- projects/XGame --ui-shot shot.png --ui-select Fox
+//! cargo run -p xgame-editor -- projects/XGame --ui-shot play.png --ui-play
+//! cargo run -p xgame-editor -- projects/XGame --ui-shot s.png --ui-size 1280x800
+//! cargo run -p xgame-editor -- projects/XGame --ui-shot r.png --ui-autosave-recover
 //! ```
 
 mod autosave;
@@ -1547,7 +1547,7 @@ fn main() -> Result<(), eframe::Error> {
                 let path = args
                     .get(1)
                     .map(String::as_str)
-                    .unwrap_or("projects/SampleScene");
+                    .unwrap_or("projects/XGame");
                 match xgame_core::check_project(Path::new(path)) {
                     Ok(report) => {
                         print!("{}", report.render());
@@ -1563,7 +1563,7 @@ fn main() -> Result<(), eframe::Error> {
                 let path = args
                     .get(1)
                     .map(String::as_str)
-                    .unwrap_or("projects/SampleScene");
+                    .unwrap_or("projects/XGame");
                 match xgame_core::ProjectHandle::open(Path::new(path)) {
                     Ok(project) => {
                         let report = project.migrate_asset_references();
@@ -1576,58 +1576,6 @@ fn main() -> Result<(), eframe::Error> {
                         std::process::exit(1);
                     }
                 }
-            }
-            Some("--migrate-components") => {
-                let code = if args.len() != 2 {
-                    eprintln!("usage: xgame-editor --migrate-components <project>");
-                    1
-                } else {
-                    match xgame_core::ProjectHandle::open(Path::new(&args[1])) {
-                        Ok(project) => match project.migrate_components_v2() {
-                            Ok(report) => {
-                                println!(
-                                    "migrated {} file(s); backup: {}",
-                                    report.files.len(),
-                                    report.backup.display()
-                                );
-                                0
-                            }
-                            Err(error) => {
-                                eprintln!("component migration FAILED: {error}");
-                                1
-                            }
-                        },
-                        Err(error) => {
-                            eprintln!("component migration FAILED: {error}");
-                            1
-                        }
-                    }
-                };
-                std::process::exit(code);
-            }
-            Some("--restore-components") => {
-                let code = if args.len() != 3 {
-                    eprintln!("usage: xgame-editor --restore-components <project> <backup-dir>");
-                    1
-                } else {
-                    match xgame_core::ProjectHandle::open(Path::new(&args[1])) {
-                        Ok(project) => match project.restore_components_v2(Path::new(&args[2])) {
-                            Ok(()) => {
-                                println!("component files restored from {}", args[2]);
-                                0
-                            }
-                            Err(error) => {
-                                eprintln!("component restore FAILED: {error}");
-                                1
-                            }
-                        },
-                        Err(error) => {
-                            eprintln!("component restore FAILED: {error}");
-                            1
-                        }
-                    }
-                };
-                std::process::exit(code);
             }
             Some("--recover-prefab-apply") => {
                 let code = if args.len() != 2 {
@@ -1670,7 +1618,7 @@ fn main() -> Result<(), eframe::Error> {
                 let path = args
                     .get(1)
                     .map(String::as_str)
-                    .unwrap_or("projects/SampleScene");
+                    .unwrap_or("projects/XGame");
                 let code = match xgame_core::ProjectHandle::open(Path::new(path)) {
                     Ok(project) => match crate::builder::build(&project) {
                         Ok(report) => {
@@ -1965,13 +1913,13 @@ mod tests {
             "1280x800",
             "--ui-select",
             "Fox",
-            "projects/SampleScene",
+            "projects/XGame",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         let args = parse_launch_args(&raw);
-        assert_eq!(args.project.as_deref(), Some("projects/SampleScene"));
+        assert_eq!(args.project.as_deref(), Some("projects/XGame"));
         let shot = args.ui_shot.expect("应当解析出截图请求");
         assert!(shot.play, "--ui-play 应当置位");
         assert!(shot.profiler, "--ui-profiler 应当置位");

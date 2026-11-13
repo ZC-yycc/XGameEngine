@@ -1,0 +1,186 @@
+(
+    format_version: 2,
+    name: "Rust and Lua Components",
+    entities: [
+        (
+            id: (1),
+            name: "Ground",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (24.0, 1.0, 24.0),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 4,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Physics((
+                            kind: Static,
+                            shape: Cuboid(
+                                half_extents: (12.0, 0.5, 12.0),
+                            ),
+                            mass: 0.0,
+                            friction: 0.7,
+                            restitution: 0.0,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (2),
+            name: "RustSpinner",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (-3.0, 1.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.5, 1.5, 1.5),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 4,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Rust(
+                            registered_name: "Spinner",
+                            fields: None,
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (3),
+            name: "RustBobber",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (0.0, 2.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.5, 1.5, 1.5),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 4,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://sphere",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Rust(
+                            registered_name: "Bobber",
+                            fields: None,
+                        ),
+                    ),
+                ],
+            ),
+        ),
+        (
+            id: (4),
+            name: "LuaSpinner",
+            parent: None,
+            prefab: None,
+            layer: 0,
+            transform: (
+                position: (3.0, 1.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.5, 1.5, 1.5),
+            ),
+            transform_identity: (
+                id: 1,
+            ),
+            components: (
+                next_component_id: (
+                    next_id: 4,
+                ),
+                entries: [
+                    (
+                        identity: (
+                            id: 2,
+                        ),
+                        data: Mesh((
+                            model: "builtin://cube",
+                            morph_weights: [],
+                        )),
+                    ),
+                    (
+                        identity: (
+                            id: 3,
+                        ),
+                        data: Lua(
+                            path: "guid://e1ea0ec292aab394364a94e4e17cc625",
+                        ),
+                    ),
+                ],
+            ),
+        ),
+    ],
+    lights: [
+        (
+            name: "Sun",
+            kind: Directional,
+            direction: (0.45, -1.0, 0.35),
+            position: (0.0, 0.0, 0.0),
+            color: (1.0, 0.97, 0.92),
+            intensity: 3.2,
+            range: 10.0,
+            casts_shadow: true,
+            shadow_resolution: 0,
+        ),
+    ],
+    ambient: (0.09, 0.1, 0.13),
+)

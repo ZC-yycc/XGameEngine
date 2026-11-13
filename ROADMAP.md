@@ -9,7 +9,16 @@
 
 ## 整体路线图
 
-### 2026-11-09 组件架构迁移：旧格式统一入口（首个切片）
+### 2026-11-13 唯一组件文件格式与综合示范项目收口
+
+- [x] 场景 / 预制体磁盘边界只接受当前强类型组件格式；删除旧格式探测、读写、升级预览与迁移 / 恢复命令。
+- [x] `Scene` / `Prefab` 只保留为运行时值模型；文件边界统一投影、合并稳定组件 ID、高水位与预制体来源 ID。
+- [x] MCP 统一为 `entity_components_read` / `component_edit`，schema 只暴露当前场景与预制体根。
+- [x] `projects/XGame` 取代四个分散示例，四张当前格式场景覆盖渲染、物理、角色、Lua、Rust 组件、UI、动画、音频、粒子、预制体、材质与输入。
+- [x] `XGame` 本身是 workspace 的 `xgame-project` cdylib；CI、默认路径、发布脚本和活跃回归统一使用它。
+- [x] 只移除旧组件框架测试；路径安全、原子写、确定性、严格解码、身份高水位、零分配、性能及事务回归继续保留。
+
+### 2026-11-09 组件架构迁移（历史阶段，已由上节收口）
 
 - [x] core 统一列举内建、Rust 与 Lua 挂载物；Inspector 共用添加 / 移除操作。
 - [x] MCP `entity_components_read` 按实体 ID 只读查询；旧格式地址显式标注 `legacy`。
@@ -808,14 +817,14 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 - **程序化实跑** —— `--headless`（固定 dt 逐位可复现，可选确定性键盘时间线）；
 - **程序化观察** —— `--screenshot` 离屏 PNG（同机逐字节一致），MCP 以图片块回传；
 - **程序化配置** —— 重力 / 步长 / 渲染参数都在 `project.ron`；
-- **程序化契约** —— `--export-schema` / MCP `schema_read`：41 个落盘类型、字段、默认值、
+- **程序化契约** —— `--export-schema` / MCP `schema_read`：54 个落盘类型、字段、默认值、
   示例、资产引用规则，确定性 JSON；`--export-script-api` / MCP `script_api_read`：
   182 个脚本函数、签名、参数、返回值、7 个生命周期钩子与全局约定；
 - **单一运行时** —— 三宿主复用 World；发布包的 InputMap / 插件 / 切关组合已有 hosted
   无头门禁，真实设备输入、winit / GPU、渲染历史与 listener 仍需按各自宿主分别验证；
-- **MCP 工具面** —— 15 个工具（读说明书 / 组件目录 / 升级预览 / 读脚本契约 / 读场景与组件 / 改 / 查 / 看效果 /
+- **MCP 工具面** —— 15 个工具（读说明书 / 组件目录 / 读脚本契约 / 读场景与稳定组件 / 局部或整体修改 / 查 / 看效果 /
   看资产 / 改导入参数 / 整理目录）；
-- **安全网** —— 最近一次全量记录为 1216 passed / 18 ignored；GitHub Actions 在 push / PR 自动跑。先证红仍是要求；每轮仍须以当次实跑结果为准。
+- **安全网** —— 最近一次全量记录为 1367 passed / 21 ignored；GitHub Actions 在 push / PR 自动跑。先证红仍是要求；每轮仍须以当次实跑结果为准。
 
 进度：① MCP server ✅ → ② 无头运行 + 截图 ✅ → ③ 场景 schema 导出 + 脚本 API
 清单导出 ✅（`--export-schema` + `schema_read` / `--export-script-api` +
@@ -874,7 +883,7 @@ Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨；**P3 起脚本
 | 期 | 交付（一句话） |
 |---|---|
 | **P0** | `xgame` 门面 crate + `GameCtx` 方法层 + Rust 组件（`Lifecycle` / 注册表）+ cdylib 插件边界（`export_plugin!` + 版本握手）+ 示例插件全链路 |
-| **P0.5** | 编辑器 PIE：有 `Cargo.toml` 即插件项目 → ▶ Play 后台构建 → `Plugins/` → 临时副本加载；Inspector Behaviors 区；演示项目 `projects/BehaviorsDemo` |
+| **P0.5** | 编辑器 PIE：有 `Cargo.toml` 即插件项目 → ▶ Play 后台构建 → `Plugins/` → 临时副本加载；Inspector Behaviors 区；综合演示项目 `projects/XGame` |
 | **P1** | `#[derive(Inspect)]` + Inspector 按字段表自动渲染 + Edit/Play 双态调参 |
 | **P1.5** | 组件参数落盘（`Entity::behavior_params`，注册名 → 字段 → 值）+ 撤销语义修正 |
 | **P2** | Lua 宿主（环境表沙箱 + 指令预算）+ 路径驻留表（`intern.rs`，id 永不清） |

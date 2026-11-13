@@ -20,13 +20,13 @@ cargo test --workspace --all-targets         # 测试（要求全绿；数量随
 # CI 在 GitHub Actions（windows-latest）跑 check / clippy / test + 示例项目冒烟，
 # 命令带 --locked；workflow 见 .github/workflows/ci.yml，取舍见决策记录 §三十四。
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
-cargo run -p xgame-editor -- --check projects/SampleScene       # 无头检查（退出码 0/1/2）
+cargo run -p xgame-editor -- --check projects/XGame             # 无头检查（退出码 0/1/2）
 cargo run -p xgame-editor -- --export-schema --out schema.json  # 场景格式说明书（JSON；无 --out 打 stdout）
 cargo run -p xgame-editor -- --export-script-api --out script_api.json  # 脚本 API 清单（182 函数 / 7 钩子；无 --out 打 stdout）
-cargo run -p xgame-editor -- --migrate-assets projects/SampleScene  # 老项目迁移到 GUID 引用（生成 .meta + 改写场景/预制体）
-cargo run -p xgame-editor -- --headless --frames 300 projects/SampleScene  # 无头运行（JSON 统计）
-cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/SampleScene  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
-cargo run -p xgame-game -- projects/SampleScene  # 独立游戏
+cargo run -p xgame-editor -- --migrate-assets projects/XGame  # 路径引用迁移到 GUID（生成 .meta + 改写场景/预制体）
+cargo run -p xgame-editor -- --headless --frames 300 projects/XGame  # 无头运行（JSON 统计）
+cargo run -p xgame-editor -- --headless --frames 150 --screenshot shot.png projects/XGame  # 无头截图（需 GPU；默认顺光取景，同机逐字节确定）
+cargo run -p xgame-game -- projects/XGame  # 独立游戏
 cargo test -p xgame-runtime --release --test update_throughput -- --ignored --nocapture  # 分档性能基准（默认 ignore）
 cargo test -p xgame-render --release --test culling_cost -- --ignored --nocapture  # 视锥剔除开/关 A/B 基准（默认 ignore）
 ```
@@ -38,7 +38,9 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - **crate 依赖方向**（不许反向依赖）：`core ← math ← {render, physics}`；`input`/`script` 在中层；`runtime`（World 编排）在上；`editor`/`game` 是两个宿主。
 - **编辑器 Play 与独立游戏跑同一段 `World::update`**（`xgame-runtime`）——改运行时行为两端自动一致；不要在 editor/game 里复制运行时逻辑。
 - 脚本层（`xgame-script`）：`LuaHost`（`lua_host.rs`）管编译缓存/生命周期派发，**单轨只认 `.lua`**（Rhai 已随双轨 P3 删除，见 D11）；API 真相源是 `GameCtx` 方法层（`ctx.rs`；`lua_api.rs` 只是每函数一行的转发壳）；`host.rs` 是宿主公共类型模块（`Hook` / `PreloadReport` / `CommandReport`）；`ScriptCtx` 是地址束（unsafe 有严格调用窗口约定，见 `context.rs` 模块文档，别破坏该约定）；路径驻留表 `intern.rs` 的 id **永不清**（热重载只清编译缓存，见 D10）；每脚本环境表的 `__index` 必须挂**真元表**（D10 ①）。
-- 场景格式 RON，纯文本、可 diff；新字段一律 `#[serde(default, skip_serializing_if = ...)]` 保证旧文件兼容。
+- 场景 / 预制体磁盘只认当前 `SceneV2` / `PrefabV2` RON；未知字段严格拒绝。运行系统只改
+  `Scene` / `Prefab` 值模型，文件边界负责投影与身份合并。新增落盘字段必须同步 schema，
+  并明确决定必填还是缺省；不再承诺旧扁平组件文件兼容。
 - **资产引用（P0 资产管线）**：磁盘上存 `guid://…`，**内存里存项目相对路径**。转换只在
   `ProjectHandle::load_scene` / `write_scene` / `load_prefab` / `write_prefab`（`core::asset`
   的 `encode_*` / `decode_*`）。别把 GUID 往热路径或 243 个消费点上引；也别让 `.meta` 生成
@@ -119,8 +121,8 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 ## 项目布局
 
 - `crates/` — 引擎与工具（15 个 crate，名字见 workspace Cargo.toml）
-- `projects/` — 游戏项目（`project.ron` + `Scenes/` + `Resources/` + `Scripts/` + `Prefabs/` + `input.ron`）；
-  `BehaviorsDemo` 例外——它本身是 workspace 成员（cdylib），用来演示 Rust 插件项目形态
+- `projects/XGame/` — 综合示范游戏项目（`project.ron` + `Scenes/` + `Resources/` + `Scripts/` +
+  `Prefabs/` + `input.ron`）；它本身也是 workspace 成员（cdylib），演示 Rust 插件项目形态
 - `Docs/` — 脚本 API、无头运行、MCP、差距分析、决策记录、双轨语言架构计划
 - `.github/` — GitHub Actions（CI workflow）
 - `dist/` — 发布产物（构建输出，不入库改动）

@@ -14,8 +14,8 @@
 //!
 //! 编辑器每秒轮询内容目录：脚本 / 资产 / `.meta` 的外部改动会自动热重载，
 //! 但**场景文件不会自动重载**（否则会冲掉未保存的编辑）。反过来，编辑器里
-//! v1 编辑器未保存的场景改动也不感知外部写入 —— 谁后保存谁覆盖；v2 会话
-//! 保存前会核对原文件，发现外部改动就保留草稿并拒绝覆盖。同一文件的写入
+//! 编辑器未保存的场景改动也不感知外部写入；保存前会核对原文件，发现外部
+//! 改动就保留草稿并拒绝覆盖。同一文件的写入
 //! 边界使用跨进程锁串行；资产移动后，编辑器里已打开的场景内存中仍是旧路径，
 //! 需要重新打开该场景再保存。
 //!
@@ -90,12 +90,12 @@ pub fn schemas() -> Vec<Value> {
         "type": "string",
         "description": "项目内相对场景路径（如 Scenes/scene.ron；缺 .ron 会自动补全）；缺省 = 清单里的入口场景。绝对路径与 `..` 会被拒绝",
     });
-    let write_caveat = "注意：编辑器不自动重载场景文件。v1 编辑器的未保存改动可能在此工具之后覆盖文件；v2 会话保存前会核对原文，遇外部修改会拒绝写入并保留草稿。";
+    let write_caveat = "注意：编辑器不自动重载场景文件；保存前会核对原文，遇外部修改会拒绝写入并保留草稿。";
 
     vec![
         json!({
             "name": "component_catalog_read",
-            "description": "读出内建组件目录（类型地址、能否添加 / 移除 / 重复、默认值与字段表）。字段取自 schema_read 的唯一场景 schema；Mesh、LOD、Material 在旧值模型中也按三个独立挂载物报告。无需 project；Rust 注册组件必须由实际加载的项目插件提供字段表，Lua 脚本不作任意变量反射。地址仍标记 legacy。",
+            "description": "读出内建组件目录（类型地址、能否添加 / 移除 / 重复、默认值与字段表）。字段取自 schema_read 的唯一场景 schema；Mesh、LOD、Material 是三个独立挂载物。无需 project；Rust 注册组件必须由实际加载的项目插件提供字段表，Lua 脚本不作任意变量反射。",
             "inputSchema": { "type": "object", "properties": {} },
         }),
         json!({
@@ -126,7 +126,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "entity_components_read",
-            "description": "按实体 ID 读取已挂载的内建、Rust 和 Lua 组件，返回统一列表及当前配置，不写磁盘。entity_id 是十进制字符串（防止 JSON 数字丢失 u64 精度）。当前是旧场景格式：builtin:* 地址稳定，rust:<槽位> / lua:<槽位> 仅在列表结构不变时有效；重排或删除后必须重新查询。返回 address_stability=legacy，不是 v2 稳定组件实例 ID。",
+            "description": "按实体 ID 读取稳定组件 ID、来源 ID、强类型值与场景 revision，不写磁盘。实体和组件 ID 都是十进制字符串（防止 JSON 数字丢失 u64 精度）；revision 用于 component_edit 的前置版本检查。Transform 固有组件也有独立 ID。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -138,37 +138,14 @@ pub fn schemas() -> Vec<Value> {
             },
         }),
         json!({
-            "name": "component_upgrade_preview",
-            "description": "只读预览 v1 实体将来的组件实例 ID、预制体来源组件 ID 与 next_component_id。entity_id 是十进制字符串。读取场景与来源预制体，重复实体 ID / 同名 Rust 行为 / 同路径 Lua / 孤儿参数等无法无损关联时拒绝；不写盘、不产生 v2 文件。返回的 ID 只是预览，尚未持久化，不可作为 component_patch 的目标。",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "project": project_prop,
-                    "scene": scene_prop,
-                    "entity_id": { "type": "string", "description": "场景内实体 ID，十进制字符串" },
-                },
-                "required": ["project", "entity_id"],
-            },
-        }),
-        json!({
-            "name": "entity_components_v2_read",
-            "description": "只读 v2 场景中指定实体的稳定组件 ID、来源 ID、强类型值与场景 revision。实体/组件 ID 均用十进制字符串；revision 用于 component_v2_edit 的前置版本检查。旧格式场景会拒绝。Transform 固有组件也有独立 ID。",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "project": project_prop, "scene": scene_prop,
-                    "entity_id": { "type": "string", "description": "场景内实体 ID（十进制 u64 字符串）" } },
-                "required": ["project", "entity_id"],
-            },
-        }),
-        json!({
-            "name": "component_v2_edit",
-            "description": format!("按场景 / 实体 ID / 组件 ID 定位并只改一条 v2 组件。必须先读 entity_components_v2_read，带回 revision；原文件有改动就拒绝覆盖。action=patch 时 field 用 JSON Pointer 指向组件值中的已有字段（如 /model），value 为该字段 JSON 值；action=replace/add 用 data_ron（schema_read 的 ComponentData 变体 RON）；action=remove 删除；action=move 用 to_index（不含 Transform 的 0 起位置）。Transform 只允许 patch。仍含旧 Render / MaterialOverride 视觉变体的实体只读，须先经编辑器保存迁移。写前严格解码和场景语义体检。同一文件的前置字节比较和原子替换由跨进程锁串行；预制体与场景之间仍无跨文件事务。{write_caveat}"),
+            "name": "component_edit",
+            "description": format!("按场景 / 实体 ID / 组件 ID 定位并只改一条组件。必须先读 entity_components_read，带回 revision；原文件有改动就拒绝覆盖。action=patch 时 field 用 JSON Pointer 指向组件值中的已有字段（如 /model），value 为该字段 JSON 值；action=replace/add 用 data_ron（schema_read 的 ComponentData 变体 RON）；action=remove 删除；action=move 用 to_index（不含 Transform 的 0 起位置）。Transform 只允许 patch。写前严格解码和场景语义体检。同一文件的前置字节比较和原子替换由跨进程锁串行；预制体与场景之间仍无跨文件事务。{write_caveat}"),
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop, "scene": scene_prop,
                     "entity_id": { "type": "string" },
                     "component_id": { "type": "string", "description": "已有组件 ID；add 不需要" },
-                    "expected_revision": { "type": "string", "description": "本轮 v2 只读结果里的 revision；原文件变化后必须重新读取" },
+                    "expected_revision": { "type": "string", "description": "本轮组件只读结果里的 revision；原文件变化后必须重新读取" },
                     "action": { "type": "string", "enum": ["patch", "replace", "add", "remove", "move"] },
                     "field": { "type": "string", "description": "patch 的 JSON Pointer；必须指向已有字段" },
                     "value": { "description": "patch 的新 JSON 值" },
@@ -267,7 +244,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "project_check",
-            "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas / 发布清单 build_missing_scenes 列出问题，has_issues 汇总；build_scene_order 是关卡顺序，未配置为空）。v1 / v2 场景与预制体走各自完整读取边界；入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
+            "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas / 发布清单 build_missing_scenes 列出问题，has_issues 汇总；build_scene_order 是关卡顺序，未配置为空）。场景与预制体都走当前格式的完整读取边界；入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop },
@@ -308,9 +285,7 @@ pub fn call(name: &str, args: &Value) -> Result<ToolOutput, CallError> {
         "project_info" => project_info(args).map(ToolOutput::text),
         "scene_read" => scene_read(args).map(ToolOutput::text),
         "entity_components_read" => entity_components_read(args).map(ToolOutput::text),
-        "component_upgrade_preview" => component_upgrade_preview(args).map(ToolOutput::text),
-        "entity_components_v2_read" => entity_components_v2_read(args).map(ToolOutput::text),
-        "component_v2_edit" => component_v2_edit(args).map(ToolOutput::text),
+        "component_edit" => component_edit(args).map(ToolOutput::text),
         "scene_write" => scene_write(args).map(ToolOutput::text),
         "entity_upsert" => entity_upsert(args).map(ToolOutput::text),
         "entity_remove" => entity_remove(args).map(ToolOutput::text),
@@ -415,12 +390,6 @@ fn save_scene_of(project: &ProjectHandle, rel: &str, scene: &Scene) -> Result<()
         .map_err(|e| fail(format!("写场景 {rel} 失败: {e}")))
 }
 
-/// `Scene` 真身的 RON 文本（与 `write_scene` 同一序列化配置 → 读写同构）。
-fn scene_to_ron(scene: &Scene) -> Result<String, CallError> {
-    ron::ser::to_string_pretty(scene, ron::ser::PrettyConfig::default())
-        .map_err(|e| fail(format!("场景序列化失败: {e}")))
-}
-
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).expect("手工构造的 Value 必可序列化")
 }
@@ -500,7 +469,7 @@ fn component_catalog_read() -> String {
         })
         .collect();
     pretty(&json!({
-        "address_stability": "legacy",
+        "address_kind": "component_type",
         "builtins": builtins,
         "rust": "已加载项目的注册组件沿用 Inspect 字段表；不执行未验证插件以生成目录",
         "lua": "脚本路径是资产引用；Lua 全局变量不是可保存字段",
@@ -609,164 +578,23 @@ fn list_scenes(project: &ProjectHandle) -> Vec<String> {
 fn scene_read(args: &Value) -> Result<String, CallError> {
     let project = open_project(args)?;
     let rel = scene_rel(args, &project.manifest().entry_scene)?;
-    let scene = load_scene_of(&project, &rel)?;
-    scene_to_ron(&scene)
-}
-
-/// 编辑器 Add Component 与这里共享 core 的内建组件清单；脚本与行为不去猜注册表。
-fn entity_components_read(args: &Value) -> Result<String, CallError> {
-    let project = open_project(args)?;
-    let rel = scene_rel(args, &project.manifest().entry_scene)?;
-    let scene = load_scene_of(&project, &rel)?;
-    let raw = require_str(args, "entity_id")?;
-    let raw = raw
-        .parse::<u64>()
-        .map_err(|_| fail("entity_id 必须是十进制 u64 字符串；先通过 scene_read 查看实体 ID"))?;
-    let id = EntityId::from_raw(raw);
-    let index = scene
-        .find_entity(id)
-        .ok_or_else(|| fail(format!("场景 {rel} 中找不到实体 ID {raw}")))?;
-    let entity = &scene.entities[index];
-    let components: Vec<_> = entity
-        .attached_components()
-        .into_iter()
-        .map(|component| {
-            let (kind, type_id, data) = match component.address {
-                ComponentAddress::Builtin(builtin) => {
-                    let data = match builtin {
-                        BuiltinComponent::Transform => json!(&entity.transform),
-                        BuiltinComponent::Mesh => json!({
-                            "model": &entity.model,
-                            "morph_weights": &entity.morph_weights,
-                        }),
-                        BuiltinComponent::Lod => json!(&entity.lod),
-                        BuiltinComponent::Material => json!({
-                            "material_asset": &entity.material_asset,
-                            "material": &entity.material,
-                        }),
-                        BuiltinComponent::Ui => json!(&entity.ui),
-                        BuiltinComponent::Animator => json!(&entity.animator),
-                        BuiltinComponent::Physics => json!(&entity.physics),
-                        BuiltinComponent::Character => json!(&entity.controller),
-                        BuiltinComponent::Audio => json!(&entity.audio),
-                        BuiltinComponent::Camera => json!(&entity.camera),
-                        BuiltinComponent::Particle => json!(&entity.particle),
-                    };
-                    ("builtin", builtin.code(), data)
-                }
-                ComponentAddress::Rust(_) => (
-                    "rust",
-                    component.name,
-                    component
-                        .params
-                        .map_or_else(|| json!({}), |params| json!(params)),
-                ),
-                ComponentAddress::Lua(_) => ("lua", "lua", json!({ "path": component.name })),
-            };
-            json!({
-                "address": component.address.to_string(),
-                "kind": kind,
-                "type_id": type_id,
-                "name": component.name,
-                "data": data,
-            })
-        })
-        .collect();
-    Ok(pretty(&json!({
-        "scene": rel,
-        "entity_id": raw.to_string(),
-        "entity_name": entity.name,
-        "address_stability": "legacy",
-        "components": components,
-    })))
-}
-
-/// 在资产被显式迁移前先给出无歧义的映射，不把预览 ID 冒充已持久化 ID。
-fn component_upgrade_preview(args: &Value) -> Result<String, CallError> {
-    let project = open_project(args)?;
-    let rel = scene_rel(args, &project.manifest().entry_scene)?;
-    let duplicates = project.scene_duplicate_ids(&rel).map_err(fail)?;
-    if !duplicates.is_empty() {
-        return Err(fail(format!(
-            "场景 {rel} 有重复实体 ID，预览不能使用加载时修复后的临时 ID：{duplicates:?}"
-        )));
-    }
-    let scene = load_scene_of(&project, &rel)?;
-    let raw = require_str(args, "entity_id")?;
-    let id = raw
-        .parse::<u64>()
-        .map_err(|_| fail("entity_id 必须是十进制 u64 字符串"))?;
-    let entity = scene
-        .find_entity(EntityId::from_raw(id))
-        .map(|index| &scene.entities[index])
-        .ok_or_else(|| fail(format!("场景 {rel} 中找不到实体 ID {id}")))?;
-
-    let source_prefab = if let Some(reference) = &entity.prefab {
-        let path = xgame_core::normalize_project_relative(&reference.source)
-            .map_err(|e| fail(format!("预制体路径不安全: {e}")))?;
-        let duplicates = project.prefab_duplicate_ids(&path).map_err(fail)?;
-        if !duplicates.is_empty() {
-            return Err(fail(format!(
-                "来源预制体 {path} 有重复实体 ID：{duplicates:?}"
-            )));
-        }
-        let prefab = project
-            .load_prefab(&path)
-            .map_err(|e| fail(format!("加载来源预制体 {path} 失败: {e}")))?;
-        Some(prefab)
-    } else {
-        None
-    };
-    let source = match (&source_prefab, &entity.prefab) {
-        (Some(prefab), Some(reference)) => Some(
-            prefab
-                .entities
-                .iter()
-                .find(|e| e.id == reference.source_id)
-                .ok_or_else(|| {
-                    fail(format!(
-                        "来源预制体缺少实体 ID {}",
-                        reference.source_id.raw()
-                    ))
-                })?,
-        ),
-        _ => None,
-    };
-    let plan =
-        xgame_core::component_upgrade::preview_component_upgrade(entity, source).map_err(fail)?;
-    let components: Vec<_> = plan
-        .components
-        .iter()
-        .map(|component| {
-            json!({
-                "address": component.address.to_string(),
-                "name": component.name,
-                "component_id": component.identity.id.raw().to_string(),
-                "source_component_id": component.identity.source_component_id.map(|id| id.raw().to_string()),
-            })
-        })
-        .collect();
-    Ok(pretty(&json!({
-        "status": "preview_only",
-        "scene": rel,
-        "entity_id": id.to_string(),
-        "entity_name": entity.name,
-        "prefab_source": entity.prefab.as_ref().map(|p| &p.source),
-        "next_component_id": plan.next_component_id.next_id().to_string(),
-        "components": components,
-    })))
+    project
+        .load_scene_v2(&rel)
+        .map_err(|e| fail(format!("加载场景 {rel} 失败: {e}")))?
+        .to_ron()
+        .map_err(|e| fail(format!("场景序列化失败: {e}")))
 }
 
 /// 版本令牌只用于发现意外修改；真正的写盘门禁仍在 core 里逐字节比较原文。
-fn v2_revision(bytes: &[u8]) -> String {
+fn file_revision(bytes: &[u8]) -> String {
     let mut hash = 0x6c62272e07bb014262b821756295c58du128;
     for byte in bytes {
         hash = (hash ^ u128::from(*byte)).wrapping_mul(0x0000000001000000000000000000013b);
     }
-    format!("v2:{hash:032x}:{}", bytes.len())
+    format!("scene:{hash:032x}:{}", bytes.len())
 }
 
-fn v2_entity_id(args: &Value) -> Result<EntityId, CallError> {
+fn file_entity_id(args: &Value) -> Result<EntityId, CallError> {
     let raw = require_str(args, "entity_id")?;
     let id = raw
         .parse::<u64>()
@@ -774,19 +602,19 @@ fn v2_entity_id(args: &Value) -> Result<EntityId, CallError> {
     Ok(EntityId::from_raw(id))
 }
 
-fn v2_file_snapshot(project: &ProjectHandle, relative: &str) -> Result<Vec<u8>, CallError> {
+fn file_snapshot(project: &ProjectHandle, relative: &str) -> Result<Vec<u8>, CallError> {
     std::fs::read(project.path(relative)).map_err(|e| fail(format!("读取 {relative} 失败: {e}")))
 }
 
-fn entity_components_v2_read(args: &Value) -> Result<String, CallError> {
+fn entity_components_read(args: &Value) -> Result<String, CallError> {
     let project = open_project(args)?;
     let relative = scene_rel(args, &project.manifest().entry_scene)?;
-    let bytes = v2_file_snapshot(&project, &relative)?;
+    let bytes = file_snapshot(&project, &relative)?;
     let scene = project.load_scene_v2(&relative).map_err(fail)?;
-    if bytes != v2_file_snapshot(&project, &relative)? {
+    if bytes != file_snapshot(&project, &relative)? {
         return Err(fail("读取时场景文件发生变化，请重新读取"));
     }
-    let entity_id = v2_entity_id(args)?;
+    let entity_id = file_entity_id(args)?;
     let entity = scene
         .entities
         .iter()
@@ -806,7 +634,7 @@ fn entity_components_v2_read(args: &Value) -> Result<String, CallError> {
         }));
     }
     Ok(pretty(&json!({
-        "scene": relative, "revision": v2_revision(&bytes),
+        "scene": relative, "revision": file_revision(&bytes),
         "entity_id": entity_id.raw().to_string(), "entity_name": entity.name,
         "next_component_id": entity.components.next_component_id.next_id().to_string(),
         "address_stability": "entity_local_id", "components": components,
@@ -841,21 +669,21 @@ fn patch_existing_field(value: &mut Value, args: &Value) -> Result<(), CallError
     Ok(())
 }
 
-fn component_v2_edit(args: &Value) -> Result<String, CallError> {
+fn component_edit(args: &Value) -> Result<String, CallError> {
     let project = open_project(args)?;
     let relative = scene_rel(args, &project.manifest().entry_scene)?;
-    let original = v2_file_snapshot(&project, &relative)?;
+    let original = file_snapshot(&project, &relative)?;
     let expected = require_str(args, "expected_revision")?;
-    if v2_revision(&original) != expected {
+    if file_revision(&original) != expected {
         return Err(fail(
             "场景已被其他写入修改；请重新读取组件并使用新的 revision",
         ));
     }
     let mut scene = project.load_scene_v2(&relative).map_err(fail)?;
-    if original != v2_file_snapshot(&project, &relative)? {
+    if original != file_snapshot(&project, &relative)? {
         return Err(fail("读取时场景发生变化，请重新读取组件"));
     }
-    let entity_id = v2_entity_id(args)?;
+    let entity_id = file_entity_id(args)?;
     let entity = scene
         .entities
         .iter_mut()
@@ -870,7 +698,6 @@ fn component_v2_edit(args: &Value) -> Result<String, CallError> {
             .map_err(|_| fail("component_id 必须是十进制 u64 字符串"))?;
         Some(xgame_core::component_id::ComponentId::from_raw(raw).map_err(fail)?)
     };
-    entity.require_current_component_layout().map_err(fail)?;
     let edited = match action {
         "add" | "replace" => {
             let data =
@@ -925,23 +752,23 @@ fn component_v2_edit(args: &Value) -> Result<String, CallError> {
         }
         _ => return Err(fail("action 必须是 patch / replace / add / remove / move")),
     };
-    let adapted = scene.clone().to_v1().map_err(fail)?;
+    let adapted = scene.clone().into_runtime().map_err(fail)?;
     if let Some(defect) = xgame_core::scene_defects(&adapted).first() {
         return Err(fail(format!("场景语义缺陷: {}", defect.describe())));
     }
     project
         .write_scene_v2_if_unchanged(&relative, &scene, &original)
         .map_err(|e| fail(e.to_string()))?;
-    let revised = v2_file_snapshot(&project, &relative)?;
+    let revised = file_snapshot(&project, &relative)?;
     Ok(pretty(
         &json!({ "scene": relative, "entity_id": entity_id.raw().to_string(),
-        "component_id": edited.raw().to_string(), "revision": v2_revision(&revised) }),
+        "component_id": edited.raw().to_string(), "revision": file_revision(&revised) }),
     ))
 }
 
 /// `scene_write` —— 先解析、再体检、最后落盘：坏数据一个字节都不写。
 ///
-/// 两道门的分工：`ron::from_str` 只保证**语法**，[`xgame_core::scene_defects`]
+/// 两道门的分工：严格文件解码保证**语法与字段契约**，[`xgame_core::scene_defects`]
 /// 保证**语义**（重复 ID / 悬空父节点 / 层级环 / 非有限变换 / 非单位旋转 /
 /// 层越界）。少第二道门时，"写成功"只意味着字节落了盘 —— 坏掉的部分要等有人
 /// 打开编辑器才暴露，而那时智能体手上没有任何"哪一行错了"的信息。
@@ -952,10 +779,13 @@ fn scene_write(args: &Value) -> Result<String, CallError> {
     let project = open_project(args)?;
     let rel = scene_rel(args, &project.manifest().entry_scene)?;
     let text = require_str(args, "ron")?;
-    let scene: Scene =
-        ron::from_str(text).map_err(|e| fail(format!("RON 解析失败，未写入任何文件: {e}")))?;
-    reject_if_defective(&scene)?;
-    save_scene_of(&project, &rel, &scene)?;
+    let scene = xgame_core::scene_v2::SceneV2::from_ron(text)
+        .map_err(|e| fail(format!("场景文件解析失败，未写入任何文件: {e}")))?;
+    let runtime = scene.clone().into_runtime().map_err(fail)?;
+    reject_if_defective(&runtime)?;
+    project
+        .write_scene_v2(&rel, &scene)
+        .map_err(|e| fail(format!("写场景 {rel} 失败: {e}")))?;
     Ok(pretty(&json!({
         "scene": rel,
         "path": project.path(&rel).display().to_string(),
@@ -1573,6 +1403,14 @@ mod tests {
         project.load_entry_scene().expect("入口场景应可加载")
     }
 
+    /// 测试构造的运行时值必须先投影成唯一磁盘格式，才能交给 `scene_write`。
+    fn scene_file_text(scene: &Scene) -> String {
+        xgame_core::scene_v2::SceneV2::from_runtime(scene)
+            .expect("运行时场景应可投影")
+            .to_ron()
+            .expect("当前场景文件应可序列化")
+    }
+
     /// `schema_read` 不需要项目，返回与 `--export-schema` 同一份目录。
     #[test]
     fn schema_read_returns_the_shared_catalog() {
@@ -1676,12 +1514,15 @@ mod tests {
     fn scene_read_round_trips() {
         let project = temp_project("read");
         let text = run(&project, "scene_read", json!({})).expect("scene_read 应成功");
-        let scene: Scene = ron::from_str(&text).expect("返回文本必须是合法场景 RON");
+        let scene = xgame_core::scene_v2::SceneV2::from_ron(&text)
+            .expect("返回文本必须是合法的当前场景 RON")
+            .into_runtime()
+            .unwrap();
         assert!(!scene.entities.is_empty(), "默认场景至少一个实体");
         cleanup(&project);
     }
 
-    /// 智能体必须能按稳定的实体 ID 找到完整挂载列表；v1 组件槽位只承诺临时地址。
+    /// 智能体必须能按稳定的实体 ID 找到完整挂载列表。
     #[test]
     fn entity_components_read_exposes_builtin_rust_and_lua_without_writing() {
         let project = temp_project("components_read");
@@ -1716,27 +1557,31 @@ mod tests {
         .expect("应能查询组件");
         let info: Value = serde_json::from_str(&text).expect("JSON");
         assert_eq!(info["entity_id"], id.to_string());
-        assert_eq!(info["address_stability"], "legacy");
+        assert_eq!(info["address_stability"], "entity_local_id");
         let entries = info["components"].as_array().expect("组件列表");
-        assert!(entries.iter().any(|c| c["address"] == "builtin:transform"));
-        assert!(entries.iter().any(|c| c["address"] == "builtin:mesh"
-            && c["data"]["model"] == "builtin://cube"
-            && c["data"]["morph_weights"][0] == 0.25));
-        assert!(entries.iter().any(|c| c["address"] == "builtin:lod"
-            && c["data"]["levels"][0]["model"] == "builtin://sphere"));
-        assert!(entries.iter().any(|c| c["address"] == "builtin:material"
-            && c["data"]["material_asset"] == "Resources/Materials/Wood.mat"
-            && c["data"]["material"].is_object()));
-        assert!(!entries
+        assert!(entries.iter().any(|c| c["kind"] == "Transform"));
+        assert!(entries.iter().any(|c| c["data"]["Mesh"]["model"] == "builtin://cube"
+            && c["data"]["Mesh"]["morph_weights"][0] == 0.25));
+        assert!(entries.iter().any(|c| {
+            c["data"]["Lod"]["levels"][0]["model"] == "builtin://sphere"
+        }));
+        assert!(entries.iter().any(|c| {
+            c["data"]["Material"]["asset"] == "Resources/Materials/Wood.mat"
+                && c["data"]["Material"]["overrides"].is_object()
+        }));
+        assert!(entries.iter().any(|c| c["data"].get("Camera").is_some()));
+        assert!(entries.iter().any(|c| {
+            c["data"]["Rust"]["registered_name"] == "Health"
+                && c["data"]["Rust"]["fields"]["value"]["F32"] == 75.0
+        }));
+        assert!(entries.iter().any(|c| {
+            c["data"]["Lua"]["path"] == "Scripts/player.lua"
+        }));
+        let component_ids: std::collections::BTreeSet<_> = entries
             .iter()
-            .any(|c| c["address"] == "builtin:render"));
-        assert!(entries.iter().any(|c| c["address"] == "builtin:camera"));
-        assert!(entries.iter().any(|c| c["address"] == "rust:0"
-            && c["name"] == "Health"
-            && c["data"]["value"]["F32"] == 75.0));
-        assert!(entries
-            .iter()
-            .any(|c| c["address"] == "lua:0" && c["name"] == "Scripts/player.lua"));
+            .map(|component| component["component_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(component_ids.len(), entries.len(), "组件 ID 必须逐项唯一");
         assert!(matches!(
             run(
                 &project,
@@ -1806,98 +1651,8 @@ mod tests {
         assert!(!builtins
             .iter()
             .any(|kind| kind["address"] == "builtin:render"));
-        assert_eq!(catalog["address_stability"], "legacy");
-    }
-
-    /// 预览的来源 ID 由资产组件决定，与实例里重排后的本地 ID 分开。
-    #[test]
-    fn component_upgrade_preview_matches_prefab_source_without_writing() {
-        let project = temp_project("upgrade_preview");
-        let mut prefab = xgame_core::Prefab::new("Actor");
-        let mut source = Entity::new("Actor");
-        source.behaviors = vec!["Health".into(), "Motion".into()];
-        source.scripts.push("Scripts/actor.lua".into());
-        prefab.entities.push(source);
-        let prefab_path = project.prefab_path_for("Actor");
-        project.write_prefab(&prefab_path, &prefab).unwrap();
-        let mut instance = prefab.instantiate(&prefab_path).remove(0);
-        instance.behaviors.swap(0, 1);
-        let id = instance.id.raw();
-        let mut scene = entry_scene(&project);
-        scene.add_entity(instance);
-        project
-            .write_scene(&project.manifest().entry_scene, &scene)
-            .unwrap();
-        let scene_bytes = std::fs::read(project.entry_scene_path()).unwrap();
-        let prefab_bytes = std::fs::read(project.path(&prefab_path)).unwrap();
-
-        let result = run(
-            &project,
-            "component_upgrade_preview",
-            json!({"entity_id": id.to_string()}),
-        )
-        .expect("应返回只读组件身份预览");
-        let preview: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(preview["status"], "preview_only");
-        let components = preview["components"].as_array().unwrap();
-        let motion = components.iter().find(|c| c["name"] == "Motion").unwrap();
-        let health = components.iter().find(|c| c["name"] == "Health").unwrap();
-        assert_eq!(motion["address"], "rust:0");
-        assert_eq!(health["address"], "rust:1");
-        assert_eq!(motion["component_id"], "2");
-        assert_eq!(motion["source_component_id"], "3");
-        assert_eq!(health["component_id"], "3");
-        assert_eq!(health["source_component_id"], "2");
-        assert_eq!(preview["next_component_id"], "5");
-        assert_eq!(
-            std::fs::read(project.entry_scene_path()).unwrap(),
-            scene_bytes
-        );
-        assert_eq!(
-            std::fs::read(project.path(&prefab_path)).unwrap(),
-            prefab_bytes
-        );
-        cleanup(&project);
-    }
-
-    #[test]
-    fn component_upgrade_preview_refuses_ambiguous_legacy_data() {
-        let project = temp_project("upgrade_ambiguous");
-        let mut scene = entry_scene(&project);
-        let mut actor = Entity::new("Actor");
-        actor.behaviors = vec!["Health".into(), "Health".into()];
-        let id = actor.id.raw().to_string();
-        scene.add_entity(actor);
-        let rel = &project.manifest().entry_scene;
-        project.write_scene(rel, &scene).unwrap();
-        let before = std::fs::read(project.entry_scene_path()).unwrap();
-        let err = run(
-            &project,
-            "component_upgrade_preview",
-            json!({"entity_id": id}),
-        )
-        .unwrap_err();
-        assert!(matches!(err, CallError::Failed(reason) if reason.contains("重复")));
-        assert_eq!(std::fs::read(project.entry_scene_path()).unwrap(), before);
-
-        scene.entities.last_mut().unwrap().behaviors.clear();
-        scene
-            .entities
-            .last_mut()
-            .unwrap()
-            .behavior_params
-            .insert("Orphan".into(), Default::default());
-        project.write_scene(rel, &scene).unwrap();
-        let before = std::fs::read(project.entry_scene_path()).unwrap();
-        let err = run(
-            &project,
-            "component_upgrade_preview",
-            json!({"entity_id": id}),
-        )
-        .unwrap_err();
-        assert!(matches!(err, CallError::Failed(reason) if reason.contains("丢数据")));
-        assert_eq!(std::fs::read(project.entry_scene_path()).unwrap(), before);
-        cleanup(&project);
+        assert_eq!(catalog["address_kind"], "component_type");
+        assert!(catalog.get("address_stability").is_none());
     }
 
     /// 坏 RON：报错且**一个字节都不落盘**（先解析后写的契约）。
@@ -1926,7 +1681,7 @@ mod tests {
         let project = temp_project("roundtrip");
         let mut scene = entry_scene(&project);
         scene.entities.push(Entity::new("AgentAdded"));
-        let ron_text = scene_to_ron(&scene).expect("序列化");
+        let ron_text = scene_file_text(&scene);
         let out = run(&project, "scene_write", json!({ "ron": ron_text })).expect("应写入");
         let reply: Value = serde_json::from_str(&out).expect("JSON");
         assert!(reply["entities"].as_u64().unwrap() >= 2);
@@ -1951,7 +1706,7 @@ mod tests {
         scene.entities[1].parent = Some(xgame_core::EntityId::from_raw(9999));
         scene.entities.push(Entity::new("Skewed"));
         scene.entities[2].transform.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 2.0);
-        let text = scene_to_ron(&scene).expect("序列化");
+        let text = scene_file_text(&scene);
 
         let err = run(&project, "scene_write", json!({ "ron": text })).expect_err("必须拒绝");
         match err {
@@ -1983,7 +1738,7 @@ mod tests {
         scene.set_parent(1, Some(0));
         scene.entities.push(Entity::new("Skewed"));
         scene.entities[2].transform.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 1.0);
-        let text = scene_to_ron(&scene).expect("序列化");
+        let text = scene_file_text(&scene);
 
         run(&project, "scene_write", json!({ "ron": text })).expect("修好后应写入");
         assert_eq!(entry_scene(&project).entities.len(), 3);
@@ -2255,49 +2010,42 @@ mod tests {
     }
 
     #[test]
-    fn project_check_accepts_a_clean_v2_entry_without_transitional_fields() {
-        let project = temp_project("v2_check");
+    fn project_check_accepts_a_clean_current_entry() {
+        let project = temp_project("current_check");
         let relative = project.manifest().entry_scene.clone();
-        let old = entry_scene(&project);
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old)
-            .unwrap()
-            .to_ron()
-            .unwrap();
-        std::fs::write(project.path(&relative), &v2).unwrap();
+        let original = std::fs::read_to_string(project.path(&relative)).unwrap();
         let report: Value =
             serde_json::from_str(&run(&project, "project_check", json!({})).unwrap()).unwrap();
-        assert!(report.get("v2_identity_pending").is_none());
         assert_eq!(report["has_issues"], false, "{}", report["render"]);
         assert_eq!(
             std::fs::read_to_string(project.path(&relative)).unwrap(),
-            v2
+            original
         );
         cleanup(&project);
     }
 
     #[test]
-    fn v2_agent_edits_one_component_by_stable_id_and_rejects_stale_revision() {
-        let project = temp_project("v2_agent_edit");
+    fn agent_edits_one_component_by_stable_id_and_rejects_stale_revision() {
+        let project = temp_project("agent_edit");
         let path = project.manifest().entry_scene.clone();
-        let mut old = entry_scene(&project);
+        let mut scene = entry_scene(&project);
         let mut actor = Entity::new("Actor");
         actor.model = "builtin://cube".into();
         let actor_id = actor.id.raw().to_string();
-        old.entities.push(actor);
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old).unwrap();
-        std::fs::write(project.path(&path), v2.to_ron().unwrap()).unwrap();
-        let args = json!({ "project": project.root(), "entity_id": actor_id });
+        scene.entities.push(actor);
+        project.write_scene(&path, &scene).unwrap();
+        let args = json!({ "entity_id": actor_id });
         let read: Value = serde_json::from_str(
-            &run(&project, "entity_components_v2_read", args.clone()).unwrap(),
+            &run(&project, "entity_components_read", args.clone()).unwrap(),
         )
         .unwrap();
         let id = read["components"][1]["component_id"].as_str().unwrap();
         let revision = read["revision"].as_str().unwrap();
-        let edit = json!({ "project": project.root(), "entity_id": actor_id,
+        let edit = json!({ "entity_id": actor_id,
             "component_id": id, "expected_revision": revision,
             "action": "patch", "field": "/model", "value": "builtin://sphere" });
         let changed: Value =
-            serde_json::from_str(&run(&project, "component_v2_edit", edit.clone()).unwrap())
+            serde_json::from_str(&run(&project, "component_edit", edit.clone()).unwrap())
                 .unwrap();
         assert_ne!(changed["revision"], revision);
         assert_eq!(
@@ -2326,82 +2074,28 @@ mod tests {
             "builtin://sphere"
         );
         assert!(
-            run(&project, "component_v2_edit", edit).is_err(),
+            run(&project, "component_edit", edit).is_err(),
             "旧 revision 必须拒绝"
         );
         cleanup(&project);
     }
 
     #[test]
-    fn v2_agent_keeps_legacy_visual_entities_read_only_until_editor_migration() {
-        let project = temp_project("v2_legacy_visual_read_only");
+    fn agent_structural_edits_keep_identity_and_reject_unknown_nested_fields() {
+        let project = temp_project("agent_structure");
         let path = project.manifest().entry_scene.clone();
-        let mut old = entry_scene(&project);
-        let actor = Entity::new("Actor").with_model("builtin://cube");
-        let actor_id = actor.id.raw().to_string();
-        old.entities.push(actor);
-        let mut v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old).unwrap();
-        v2.entities.last_mut().unwrap().components.entries[0].data =
-            xgame_core::scene_v2::ComponentData::LegacyRender(
-                xgame_core::scene_v2::RenderData {
-                    model: "builtin://cube".into(),
-                    lod: xgame_core::LodGroup::default(),
-                    material_asset: None,
-                    morph_weights: Vec::new(),
-                },
-            );
-        std::fs::write(project.path(&path), v2.to_ron().unwrap()).unwrap();
-        let before = std::fs::read(project.path(&path)).unwrap();
-        let read: Value = serde_json::from_str(
-            &run(
-                &project,
-                "entity_components_v2_read",
-                json!({ "project": project.root(), "entity_id": actor_id }),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(read["components"][1]["data"].get("Render").is_some());
-
-        let error = run(
-            &project,
-            "component_v2_edit",
-            json!({
-                "project": project.root(),
-                "entity_id": actor_id,
-                "component_id": read["components"][0]["component_id"],
-                "expected_revision": read["revision"],
-                "action": "patch",
-                "field": "/position",
-                "value": [1.0, 2.0, 3.0],
-            }),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            CallError::Failed(message) if message.contains("先经编辑器保存迁移")
-        ));
-        assert_eq!(std::fs::read(project.path(&path)).unwrap(), before);
-        cleanup(&project);
-    }
-
-    #[test]
-    fn v2_agent_structural_edits_keep_identity_and_reject_unknown_nested_fields() {
-        let project = temp_project("v2_agent_structure");
-        let path = project.manifest().entry_scene.clone();
-        let mut old = entry_scene(&project);
+        let mut scene = entry_scene(&project);
         let mut actor = Entity::new("Actor").with_model("builtin://cube");
         actor.lod.levels = vec![xgame_core::LodLevel::new("builtin://cube", 0.0)];
         let actor_id = actor.id.raw().to_string();
-        old.entities.push(actor);
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old).unwrap();
-        std::fs::write(project.path(&path), v2.to_ron().unwrap()).unwrap();
+        scene.entities.push(actor);
+        project.write_scene(&path, &scene).unwrap();
         let read = || -> Value {
             serde_json::from_str(
                 &run(
                     &project,
-                    "entity_components_v2_read",
-                    json!({ "project": project.root(), "entity_id": actor_id }),
+                    "entity_components_read",
+                    json!({ "entity_id": actor_id }),
                 )
                 .unwrap(),
             )
@@ -2414,28 +2108,28 @@ mod tests {
             .find(|component| component["data"].get("Lod").is_some())
             .and_then(|component| component["component_id"].as_str())
             .unwrap();
-        let bad = json!({ "project": project.root(), "entity_id": actor_id,
+        let bad = json!({ "entity_id": actor_id,
             "component_id": lod_id, "expected_revision": before["revision"],
             "action": "patch", "field": "/levels/0", "value": {
                 "model": "builtin://cube", "max_distance": 0.0, "unrecognized": 42 } });
-        assert!(run(&project, "component_v2_edit", bad).is_err());
+        assert!(run(&project, "component_edit", bad).is_err());
         assert_eq!(read()["revision"], before["revision"]);
 
         let camera = ron::ser::to_string(&xgame_core::scene_v2::ComponentData::Camera(
             xgame_core::Camera::default(),
         ))
         .unwrap();
-        let add: Value = serde_json::from_str(&run(&project, "component_v2_edit", json!({
-            "project": project.root(), "entity_id": actor_id, "expected_revision": before["revision"],
+        let add: Value = serde_json::from_str(&run(&project, "component_edit", json!({
+            "entity_id": actor_id, "expected_revision": before["revision"],
             "action": "add", "data_ron": camera })).unwrap()).unwrap();
         let camera_id = add["component_id"].as_str().unwrap();
         assert_ne!(camera_id, lod_id);
         let moved: Value = serde_json::from_str(
             &run(
                 &project,
-                "component_v2_edit",
+                "component_edit",
                 json!({
-            "project": project.root(), "entity_id": actor_id, "component_id": camera_id,
+            "entity_id": actor_id, "component_id": camera_id,
             "expected_revision": add["revision"], "action": "move", "to_index": 0 }),
             )
             .unwrap(),
@@ -2448,7 +2142,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|component| component["component_id"] == lod_id));
-        run(&project, "component_v2_edit", json!({ "project": project.root(), "entity_id": actor_id,
+        run(&project, "component_edit", json!({ "entity_id": actor_id,
             "component_id": camera_id, "expected_revision": moved["revision"], "action": "remove" })).unwrap();
         let removed = read();
         assert_eq!(
@@ -2668,7 +2362,10 @@ mod tests {
         let ron_text = envelope["scene_ron"]
             .as_str()
             .expect("include_scene=true 必须带 scene_ron");
-        let scene: Scene = ron::from_str(ron_text).expect("scene_ron 必须能读回");
+        let scene = xgame_core::scene_v2::SceneV2::from_ron(ron_text)
+            .expect("scene_ron 必须是当前场景文件")
+            .into_runtime()
+            .unwrap();
         assert!(scene.find_by_name("Main Camera").is_some());
         cleanup(&project);
     }

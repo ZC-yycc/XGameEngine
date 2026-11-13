@@ -848,9 +848,9 @@ pub struct EditorState {
     // -- Scene --
     /// 当前加载的场景（实体 + 元数据）。
     pub scene: Scene,
-    /// v2 身份和写盘原文；`scene` 是给现有面板使用的值视图。
+    /// 文件身份和写盘原文；`scene` 是给面板与运行系统使用的值视图。
     /// 只在条件保存成功后更新，外部修改不允许被视图覆盖。
-    v2_session: Option<V2EditorSession>,
+    file_session: FileEditorSession,
     v2_undo: Vec<SceneV2>,
     v2_redo: Vec<SceneV2>,
     /// 当前编辑场景的**项目相对路径**（保存目标）。
@@ -1143,16 +1143,16 @@ pub struct EditorState {
     pub profiler: crate::profiler::Profiler,
 }
 
-struct V2EditorSession {
+struct FileEditorSession {
     identity: SceneV2,
     disk_bytes: Vec<u8>,
 }
 
-fn v2_session_after_write(
+fn file_session_after_write(
     project: &ProjectHandle,
     relative: &str,
     identity: SceneV2,
-) -> Result<V2EditorSession, String> {
+) -> Result<FileEditorSession, String> {
     let path = project.path(relative);
     let disk_bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let on_disk = project.load_scene_v2(relative)?;
@@ -1161,7 +1161,7 @@ fn v2_session_after_write(
     {
         return Err("写入场景期间出现外部改动；请重新读取磁盘文件".into());
     }
-    Ok(V2EditorSession {
+    Ok(FileEditorSession {
         identity,
         disk_bytes,
     })
@@ -1170,23 +1170,21 @@ fn v2_session_after_write(
 fn editor_scene(
     project: &ProjectHandle,
     relative: &str,
-) -> Result<(Scene, Option<V2EditorSession>), String> {
+) -> Result<(Scene, FileEditorSession), String> {
     let relative = normalize_scene_relative(relative)?;
     let disk_bytes = std::fs::read(project.path(&relative)).map_err(|e| e.to_string())?;
-    if let Ok(v2) = project.load_scene_v2(&relative) {
-        // 解码与读取不是原子操作：确认身份确实来自本次保存的原文。
-        if disk_bytes != std::fs::read(project.path(&relative)).map_err(|e| e.to_string())? {
-            return Err("打开场景期间文件发生变化；请重新打开".into());
-        }
-        return Ok((
-            v2.clone().to_v1()?,
-            Some(V2EditorSession {
-                identity: v2,
-                disk_bytes,
-            }),
-        ));
+    let file = project.load_scene_v2(&relative)?;
+    // 解码与读取不是原子操作：确认身份确实来自本次保存的原文。
+    if disk_bytes != std::fs::read(project.path(&relative)).map_err(|e| e.to_string())? {
+        return Err("打开场景期间文件发生变化；请重新打开".into());
     }
-    project.load_scene(&relative).map(|scene| (scene, None))
+    Ok((
+        file.clone().into_runtime()?,
+        FileEditorSession {
+            identity: file,
+            disk_bytes,
+        },
+    ))
 }
 
 // ── Gizmo 吸附的出厂步长 ──
@@ -1235,11 +1233,15 @@ impl EditorState {
         // 入口场景 = 本次会话的起始「当前场景」。之后切换场景只改
         // `current_scene`，不会再碰清单里的启动场景（那是显式操作）。
         let current_scene = project.manifest().entry_scene.clone();
-        let (scene, v2_session) = match editor_scene(&project, &current_scene) {
+        let (scene, file_session) = match editor_scene(&project, &current_scene) {
             Ok(loaded) => loaded,
             Err(e) => {
                 eprintln!("[EditorState] {e}");
-                (xgame_core::project::default_scene(), None)
+                let scene = xgame_core::project::default_scene();
+                let identity = SceneV2::from_runtime(&scene)
+                    .expect("默认场景必须能投影到当前文件格式");
+                let disk_bytes = std::fs::read(project.path(&current_scene)).unwrap_or_default();
+                (scene, FileEditorSession { identity, disk_bytes })
             }
         };
         // ── 崩溃恢复：上一次会话没走正常退出流程，会留下 `.autosave/` 副本 ──
@@ -1273,7 +1275,7 @@ impl EditorState {
             return_to_hub: false,
             last_build_dir: None,
             scene,
-            v2_session,
+            file_session,
             v2_undo: Vec::new(),
             v2_redo: Vec::new(),
             current_scene,
@@ -1750,26 +1752,19 @@ impl EditorState {
     /// 时机很关键：如果先改了再调，记下来的就是改后的状态，Ctrl+Z 相当于
     /// "撤销到当前"，看起来像按钮没反应——这类 bug 排查起来很费劲。
     pub fn push_undo(&mut self) {
-        if self.v2_session.is_some() {
-            let current = self
-                .v2_session
-                .as_ref()
-                .expect("v2 session 存在")
-                .identity
-                .clone();
-            match self.prepare_v2_history(&current, &self.scene) {
-                Ok(identity) => {
-                    self.v2_session.as_mut().expect("v2 session 存在").identity = identity.clone();
-                    self.v2_undo.push(identity);
-                    if self.v2_undo.len() > UndoStack::DEFAULT_LIMIT {
-                        self.v2_undo.remove(0);
-                    }
-                    self.v2_redo.clear();
+        let current = self.file_session.identity.clone();
+        match self.prepare_file_history(&current, &self.scene) {
+            Ok(identity) => {
+                self.file_session.identity = identity.clone();
+                self.v2_undo.push(identity);
+                if self.v2_undo.len() > UndoStack::DEFAULT_LIMIT {
+                    self.v2_undo.remove(0);
                 }
-                Err(error) => {
-                    self.log_error(format!("记录 v2 撤销失败: {error}"));
-                    return;
-                }
+                self.v2_redo.clear();
+            }
+            Err(error) => {
+                self.log_error(format!("记录撤销身份失败: {error}"));
+                return;
             }
         }
         self.undo_stack.push(self.scene.clone());
@@ -1780,22 +1775,20 @@ impl EditorState {
     /// 拖拽交互需要的是"拖拽开始前"的状态，不能在这里现克隆，所以由调用方
     /// 在合适的时机把快照备好再交进来。
     pub fn push_undo_snapshot(&mut self, snapshot: Scene) {
-        if let Some(session) = &self.v2_session {
-            let identity = session.identity.clone();
-            // 拖动结束后才压快照；快照的身份必须对应拖动前的值。
-            let prepared = self.prepare_v2_history(&identity, &snapshot);
-            match prepared {
-                Ok(previous) => {
-                    self.v2_undo.push(previous);
-                    if self.v2_undo.len() > UndoStack::DEFAULT_LIMIT {
-                        self.v2_undo.remove(0);
-                    }
-                    self.v2_redo.clear();
+        let identity = self.file_session.identity.clone();
+        // 拖动结束后才压快照；快照的身份必须对应拖动前的值。
+        let prepared = self.prepare_file_history(&identity, &snapshot);
+        match prepared {
+            Ok(previous) => {
+                self.v2_undo.push(previous);
+                if self.v2_undo.len() > UndoStack::DEFAULT_LIMIT {
+                    self.v2_undo.remove(0);
                 }
-                Err(error) => {
-                    self.log_error(format!("记录 v2 撤销失败: {error}"));
-                    return;
-                }
+                self.v2_redo.clear();
+            }
+            Err(error) => {
+                self.log_error(format!("记录撤销身份失败: {error}"));
+                return;
             }
         }
         self.undo_stack.push(snapshot);
@@ -1811,25 +1804,19 @@ impl EditorState {
         // 实体。只做 `clamp_selection`（夹到合法范围）是不够的 —— 索引合法但指向
         // 别人，下一次 Delete 就删错对象。按 ID 记住"选中了谁"，换完照 ID 找回来。
         let selected_id = self.selected_id();
-        let identity = if let Some(session) = &self.v2_session {
-            match self.prepare_v2_history(&session.identity, &self.scene) {
-                Ok(identity) => Some(identity),
-                Err(error) => {
-                    self.log_error(format!("撤销前同步 v2 身份失败: {error}"));
-                    return;
-                }
+        let identity = match self.prepare_file_history(&self.file_session.identity, &self.scene) {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.log_error(format!("撤销前同步文件身份失败: {error}"));
+                return;
             }
-        } else {
-            None
         };
         match self.undo_stack.undo(&self.scene) {
             Some(previous) => {
-                if let Some(current) = identity {
-                    let mut prior = self.v2_undo.pop().expect("v2 身份与撤销栈同步");
-                    prior.keep_allocated_ids(&current);
-                    self.v2_redo.push(current);
-                    self.v2_session.as_mut().expect("v2 session 存在").identity = prior;
-                }
+                let mut prior = self.v2_undo.pop().expect("文件身份与撤销栈同步");
+                prior.keep_allocated_ids(&identity);
+                self.v2_redo.push(identity);
+                self.file_session.identity = prior;
                 self.scene = previous;
                 self.reselect(selected_id);
                 self.undo_pending = None;
@@ -1846,25 +1833,19 @@ impl EditorState {
             return;
         }
         let selected_id = self.selected_id();
-        let identity = if let Some(session) = &self.v2_session {
-            match self.prepare_v2_history(&session.identity, &self.scene) {
-                Ok(identity) => Some(identity),
-                Err(error) => {
-                    self.log_error(format!("重做前同步 v2 身份失败: {error}"));
-                    return;
-                }
+        let identity = match self.prepare_file_history(&self.file_session.identity, &self.scene) {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.log_error(format!("重做前同步文件身份失败: {error}"));
+                return;
             }
-        } else {
-            None
         };
         match self.undo_stack.redo(&self.scene) {
             Some(next) => {
-                if let Some(current) = identity {
-                    let mut later = self.v2_redo.pop().expect("v2 身份与重做栈同步");
-                    later.keep_allocated_ids(&current);
-                    self.v2_undo.push(current);
-                    self.v2_session.as_mut().expect("v2 session 存在").identity = later;
-                }
+                let mut later = self.v2_redo.pop().expect("文件身份与重做栈同步");
+                later.keep_allocated_ids(&identity);
+                self.v2_undo.push(identity);
+                self.file_session.identity = later;
                 self.scene = next;
                 self.reselect(selected_id);
                 self.undo_pending = None;
@@ -2341,14 +2322,13 @@ impl EditorState {
         if root >= self.scene.entities.len() {
             return None;
         }
-        if self.v2_session.is_some()
-            && self
-                .scene
-                .subtree(root)
-                .iter()
-                .any(|&index| self.scene.entities[index].prefab.is_some())
+        if self
+            .scene
+            .subtree(root)
+            .iter()
+            .any(|&index| self.scene.entities[index].prefab.is_some())
         {
-            self.log_warning("v2 预制体实例不能直接转换为另一份预制体；请先解除来源关联");
+            self.log_warning("预制体实例不能直接转换为另一份预制体；请先解除来源关联");
             return None;
         }
 
@@ -2359,39 +2339,30 @@ impl EditorState {
             trimmed.to_string()
         };
         let relative = self.project.prefab_path_for(&display);
-        if self.v2_session.is_some() && self.project.path(&relative).exists() {
+        if self.project.path(&relative).exists() {
             self.log_error(format!(
                 "创建预制体失败: {relative} 已存在，不能覆盖既有组件来源 ID"
             ));
             return None;
         }
-        if let Some(session) = &self.v2_session {
-            if std::fs::read(self.project.path(&self.current_scene))
-                .ok()
-                .as_deref()
-                != Some(session.disk_bytes.as_slice())
-            {
-                self.log_error("场景已在外部修改；请重新打开后再创建预制体");
-                return None;
-            }
+        if std::fs::read(self.project.path(&self.current_scene))
+            .ok()
+            .as_deref()
+            != Some(self.file_session.disk_bytes.as_slice())
+        {
+            self.log_error("场景已在外部修改；请重新打开后再创建预制体");
+            return None;
         }
 
         let mut prefab = Prefab::from_subtree(&self.scene, root);
         prefab.name = display.clone();
 
-        let write = if self.v2_session.is_some() {
-            xgame_core::scene_v2::PrefabV2::from_v1(&prefab)
-                .map_err(|e| e.to_string())
-                .and_then(|v2| {
-                    self.project
-                        .write_prefab_v2(&relative, &v2)
-                        .map_err(|e| e.to_string())
-                })
-        } else {
-            self.project
-                .write_prefab(&relative, &prefab)
-                .map_err(|e| e.to_string())
-        };
+        let write = xgame_core::scene_v2::PrefabV2::from_runtime(&prefab)
+            .and_then(|file| {
+                self.project
+                    .write_prefab_v2(&relative, &file)
+                    .map_err(|e| e.to_string())
+            });
         if let Err(e) = write {
             self.log_error(format!("创建预制体失败: {e}"));
             return None;
@@ -2484,59 +2455,12 @@ impl EditorState {
             self.log_warning("Cannot apply a prefab while playing");
             return;
         }
-        if self.v2_session.is_some() {
-            if let Err(error) = self.apply_prefab_v2(root_idx) {
-                self.log_error(format!("应用 v2 预制体失败: {error}"));
-            }
-            return;
+        if let Err(error) = self.apply_prefab_file(root_idx) {
+            self.log_error(format!("应用预制体失败: {error}"));
         }
-        let Some(source) = self
-            .scene
-            .entities
-            .get(root_idx)
-            .and_then(|e| e.prefab.as_ref())
-            .filter(|p| p.is_root)
-            .map(|p| p.source.clone())
-        else {
-            self.log_warning("Select the root of a prefab instance to apply");
-            return;
-        };
-
-        let mut prefab = Prefab::new(prefab_display_name(&source));
-        prefab.capture_subtree(&self.scene, root_idx);
-        if let Err(e) = self.project.write_prefab(&source, &prefab) {
-            self.log_error(format!("应用预制体失败: {e}"));
-            return;
-        }
-        let links: Vec<_> = self
-            .scene
-            .subtree(root_idx)
-            .into_iter()
-            .zip(&prefab.entities)
-            .map(|(idx, entity)| {
-                (
-                    idx,
-                    PrefabInstanceRef {
-                        source: source.clone(),
-                        source_id: entity.id,
-                        is_root: idx == root_idx,
-                    },
-                )
-            })
-            .collect();
-        if links
-            .iter()
-            .any(|(idx, link)| self.scene.entities[*idx].prefab.as_ref() != Some(link))
-        {
-            self.push_undo();
-            for (idx, link) in links {
-                self.scene.entities[idx].prefab = Some(link);
-            }
-        }
-        self.log_success(format!("已把改动应用到预制体 '{}' ({source})", prefab.name));
     }
 
-    fn apply_prefab_v2(&mut self, root_idx: usize) -> Result<(), String> {
+    fn apply_prefab_file(&mut self, root_idx: usize) -> Result<(), String> {
         let source = self
             .scene
             .entities
@@ -2546,22 +2470,21 @@ impl EditorState {
             .ok_or("请选择预制体实例的根实体")?
             .source
             .clone();
-        let session = self.v2_session.as_ref().expect("v2 会话存在");
         let current_scene = std::fs::read(self.project.path(&self.current_scene))
             .map_err(|error| format!("读取当前场景失败: {error}"))?;
-        if current_scene != session.disk_bytes {
+        if current_scene != self.file_session.disk_bytes {
             return Err("当前场景已被外部修改；请重新打开后再 Apply".into());
         }
         let (mut asset, expected) = self.project.load_prefab_v2_snapshot(&source)?;
         let mut values = Prefab::new(prefab_display_name(&source));
         values.capture_subtree(&self.scene, root_idx);
-        if asset.apply_values_from_v1(&values).is_ok() {
+        if asset.apply_values_from_runtime(&values).is_ok() {
             self.project
                 .write_prefab_v2_if_unchanged(&source, &asset, &expected)
                 .map_err(|error| error.to_string())?;
             self.hot_reload.rebase(&self.project);
             self.log_success(format!(
-                "已把值应用到 v2 预制体 '{}' ({source})",
+                "已把值应用到预制体 '{}' ({source})",
                 asset.name
             ));
             return Ok(());
@@ -2569,13 +2492,8 @@ impl EditorState {
 
         // 结构变化会改资产来源目录；先在副本里准备完整身份，事务成功前不碰编辑器状态。
         let previous_scene = self.scene.clone();
-        let session_identity = self
-            .v2_session
-            .as_ref()
-            .expect("v2 会话存在")
-            .identity
-            .clone();
-        let previous_identity = self.prepare_v2_history(&session_identity, &self.scene)?;
+        let session_identity = self.file_session.identity.clone();
+        let previous_identity = self.prepare_file_history(&session_identity, &self.scene)?;
         let mut next_scene = self.scene.clone();
         let mut next_identity = previous_identity.clone();
         let next_asset = asset.apply_structure_from_instance(
@@ -2584,12 +2502,7 @@ impl EditorState {
             root_idx,
             &source,
         )?;
-        let expected_scene = self
-            .v2_session
-            .as_ref()
-            .expect("v2 会话存在")
-            .disk_bytes
-            .clone();
+        let expected_scene = self.file_session.disk_bytes.clone();
         let report = self.project.apply_prefab_v2_transaction(
             &source,
             &next_asset,
@@ -2602,7 +2515,7 @@ impl EditorState {
         let disk_bytes = report
             .guarded_scene_bytes
             .ok_or("结构性 Apply 没有返回当前场景原文")?;
-        let disk_scene = disk_identity.to_v1()?;
+        let disk_scene = disk_identity.into_runtime()?;
 
         // Apply 改资产本身不可由场景 Undo 回滚，但实例新绑定的来源元数据仍按既有
         // 约定进入撤销栈；撤销到失效来源时保存会被来源验证拒绝。
@@ -2613,14 +2526,13 @@ impl EditorState {
         self.v2_redo.clear();
         self.undo_stack.push(previous_scene);
         self.scene = next_scene;
-        let session = self.v2_session.as_mut().expect("v2 会话存在");
-        session.identity = next_identity;
-        session.disk_bytes = disk_bytes;
+        self.file_session.identity = next_identity;
+        self.file_session.disk_bytes = disk_bytes;
         self.saved_snapshot = disk_scene;
         self.dirty_memo = None;
         self.hot_reload.rebase(&self.project);
         self.log_success(format!(
-            "已用可恢复事务把结构应用到 v2 预制体 '{}' ({source})，同步 {} 个文件",
+            "已用可恢复事务把结构应用到预制体 '{}' ({source})，同步 {} 个文件",
             next_asset.name,
             report.files.len()
         ));
@@ -2638,61 +2550,12 @@ impl EditorState {
             self.log_warning("Cannot revert a prefab while playing");
             return;
         }
-        if self.v2_session.is_some() {
-            if let Err(error) = self.revert_prefab_v2(root_idx) {
-                self.log_error(format!("还原 v2 预制体失败: {error}"));
-            }
-            return;
+        if let Err(error) = self.revert_prefab_file(root_idx) {
+            self.log_error(format!("还原预制体失败: {error}"));
         }
-        let Some(source) = self
-            .scene
-            .entities
-            .get(root_idx)
-            .and_then(|e| e.prefab.as_ref())
-            .filter(|p| p.is_root)
-            .map(|p| p.source.clone())
-        else {
-            self.log_warning("Select the root of a prefab instance to revert");
-            return;
-        };
-
-        let prefab = match self.project.load_prefab(&source) {
-            Ok(p) => p,
-            Err(e) => {
-                self.log_error(format!("还原预制体失败: {e}"));
-                return;
-            }
-        };
-
-        // 先记下"要保住什么"：根的父节点（按 ID 记——删除会让索引位移）与世界矩阵。
-        let parent_id = self
-            .scene
-            .parent_index(root_idx)
-            .map(|p| self.scene.entities[p].id);
-        let old_world = self.scene.world_matrix(root_idx);
-
-        self.push_undo();
-        let Some(new_root) = self.scene.revert_prefab(root_idx, &prefab, &source) else {
-            // 空资产：什么都不删。旧行为是"先把实例删掉再发现没东西可放"，
-            // 用户点一下还原反而丢了整棵子树。
-            self.log_warning("预制体是空的，实例保持不变");
-            return;
-        };
-
-        // 让实例根回到原来的世界位置，再挂回原来的父节点下。
-        // 此刻它还没有父，把局部设成世界即可；`set_parent` 保留世界变换。
-        self.scene.entities[new_root].transform = Transform::from_matrix(old_world);
-        let parent = parent_id.and_then(|id| self.scene.index_of(id));
-        self.scene.set_parent(new_root, parent);
-
-        self.selected_entity = Some(new_root);
-        self.log_info(format!(
-            "已从资产还原预制体 '{}' ({source})",
-            prefab_display_name(&source)
-        ));
     }
 
-    fn revert_prefab_v2(&mut self, root_idx: usize) -> Result<(), String> {
+    fn revert_prefab_file(&mut self, root_idx: usize) -> Result<(), String> {
         let source = self
             .scene
             .entities
@@ -2703,7 +2566,7 @@ impl EditorState {
             .source
             .clone();
         let asset = self.project.load_prefab_v2(&source)?;
-        let prefab = asset.clone().to_v1()?;
+        let prefab = asset.clone().into_runtime()?;
         if prefab.is_empty() {
             return Err("预制体为空，实例保持不变".into());
         }
@@ -2724,8 +2587,7 @@ impl EditorState {
             .iter()
             .map(|&idx| draft.entities[idx].id)
             .collect();
-        let session = self.v2_session.as_ref().expect("v2 会话存在");
-        let mut identity = self.prepare_v2_history(&session.identity, &self.scene)?;
+        let mut identity = self.prepare_file_history(&self.file_session.identity, &self.scene)?;
         let mut prefabs = BTreeMap::new();
         for entity in &draft.entities {
             if let Some(link) = &entity.prefab {
@@ -2737,14 +2599,14 @@ impl EditorState {
                 }
             }
         }
-        identity.reconcile_reverted_from_v1(&draft, &prefabs, &restored)?;
+        identity.reconcile_reverted_from_runtime(&draft, &prefabs, &restored)?;
         self.push_undo();
         self.scene = draft;
-        self.v2_session.as_mut().expect("v2 会话存在").identity = identity;
+        self.file_session.identity = identity;
         self.selected_entity = Some(new_root);
         self.dirty_memo = None;
         self.log_info(format!(
-            "已从 v2 资产还原预制体 '{}' ({source})",
+            "已从资产还原预制体 '{}' ({source})",
             prefab_display_name(&source)
         ));
         Ok(())
@@ -2800,29 +2662,26 @@ impl EditorState {
             }
         }
 
-        // v2 Play 不能退回裸 Scene：先把当前未保存值合进身份副本，再把“值 + 身份”
+        // Play 不能退回裸 Scene：先把当前未保存值合进身份副本，再把“值 + 身份”
         // 一起交给 World。失败时不带着半份身份进入运行态。
-        let runtime_scene = if let Some(session) = &self.v2_session {
-            match self.prepare_v2_scene(&session.identity, &self.scene) {
-                Ok(identity) => match xgame_core::RuntimeScene::from_v2(identity) {
+        let runtime_scene =
+            match self.prepare_file_scene(&self.file_session.identity, &self.scene) {
+                Ok(identity) => match xgame_core::RuntimeScene::from_file(identity) {
                     Ok(scene) => scene,
                     Err(error) => {
-                        self.log_error(format!("无法建立 v2 Play 场景: {error}"));
+                        self.log_error(format!("无法建立 Play 场景: {error}"));
                         self.play_mode = PlayMode::Edit;
                         self.pending_play = false;
                         return;
                     }
                 },
                 Err(error) => {
-                    self.log_error(format!("无法同步 v2 Play 身份: {error}"));
+                    self.log_error(format!("无法同步 Play 场景身份: {error}"));
                     self.play_mode = PlayMode::Edit;
                     self.pending_play = false;
                     return;
                 }
-            }
-        } else {
-            xgame_core::RuntimeScene::legacy(self.scene.clone())
-        };
+            };
 
         // 快照 + 启动都要在改 `play_mode` 之前完成：运行时的 `start` 可能失败
         // （脚本编译错误），那时状态应该还是"干净的编辑态"。
@@ -3224,26 +3083,21 @@ impl EditorState {
         }
         let relative = self.save_target();
         let path = self.project.path(&relative);
-        let saved_v2 = self.v2_session.as_ref().map(|session| {
-            let identity = self.prepare_v2_scene(&session.identity, &self.scene)?;
-            self.project
-                .write_scene_v2_if_unchanged(&relative, &identity, &session.disk_bytes)
-                .map_err(|e| e.to_string())?;
-            v2_session_after_write(&self.project, &relative, identity)
-        });
-        let result = match saved_v2.as_ref() {
-            Some(Ok(_)) => Ok(()),
-            Some(Err(error)) => Err(error.clone()),
-            None => self
-                .project
-                .write_scene(&relative, &self.scene)
-                .map_err(|e| e.to_string()),
-        };
-        match result {
-            Ok(()) => {
-                if let Some(Ok(session)) = saved_v2 {
-                    self.v2_session = Some(session);
-                }
+        let saved = self
+            .prepare_file_scene(&self.file_session.identity, &self.scene)
+            .and_then(|identity| {
+                self.project
+                    .write_scene_v2_if_unchanged(
+                        &relative,
+                        &identity,
+                        &self.file_session.disk_bytes,
+                    )
+                    .map_err(|e| e.to_string())?;
+                file_session_after_write(&self.project, &relative, identity)
+            });
+        match saved {
+            Ok(session) => {
+                self.file_session = session;
                 self.mark_saved();
                 // 手动保存之后，自动保存副本就没有存在价值了：磁盘与内存已经
                 // 对齐，下次启动再问"要不要恢复那一份"只会把刚存的内容覆盖回去。
@@ -3259,15 +3113,15 @@ impl EditorState {
         }
     }
 
-    fn prepare_v2_scene(&self, identity: &SceneV2, scene: &Scene) -> Result<SceneV2, String> {
-        self.prepare_v2_scene_inner(identity, scene, true)
+    fn prepare_file_scene(&self, identity: &SceneV2, scene: &Scene) -> Result<SceneV2, String> {
+        self.prepare_file_scene_inner(identity, scene, true)
     }
 
-    fn prepare_v2_history(&self, identity: &SceneV2, scene: &Scene) -> Result<SceneV2, String> {
-        self.prepare_v2_scene_inner(identity, scene, false)
+    fn prepare_file_history(&self, identity: &SceneV2, scene: &Scene) -> Result<SceneV2, String> {
+        self.prepare_file_scene_inner(identity, scene, false)
     }
 
-    fn prepare_v2_scene_inner(
+    fn prepare_file_scene_inner(
         &self,
         identity: &SceneV2,
         scene: &Scene,
@@ -3286,9 +3140,9 @@ impl EditorState {
         }
         let mut updated = identity.clone();
         if verify_sources {
-            updated.reconcile_from_v1(scene, &prefabs)?;
+            updated.reconcile_from_runtime(scene, &prefabs)?;
         } else {
-            updated.reconcile_from_v1_for_history(scene, &prefabs)?;
+            updated.reconcile_from_runtime_for_history(scene, &prefabs)?;
         }
         Ok(updated)
     }
@@ -3334,18 +3188,13 @@ impl EditorState {
         }
 
         let relative = self.save_target();
-        let write = if let Some(session) = &self.v2_session {
-            self.prepare_v2_scene(&session.identity, &self.scene)
-                .and_then(|identity| {
-                    self.project
-                        .write_autosave_v2(&relative, &identity)
-                        .map_err(|e| e.to_string())
-                })
-        } else {
-            self.project
-                .write_autosave(&relative, &self.scene)
-                .map_err(|e| e.to_string())
-        };
+        let write = self
+            .prepare_file_scene(&self.file_session.identity, &self.scene)
+            .and_then(|identity| {
+                self.project
+                    .write_autosave_v2(&relative, &identity)
+                    .map_err(|e| e.to_string())
+            });
         match write {
             Ok(_path) => {
                 self.autosave.mark_success(now);
@@ -3401,52 +3250,28 @@ impl EditorState {
         let Some(notice) = self.pending_autosave.take() else {
             return Err("没有待恢复的自动保存".to_owned());
         };
-        if let Some(session) = &self.v2_session {
-            let recovered = match self.project.read_autosave_v2(&notice.scene) {
-                Ok(recovered) => recovered,
-                Err(error) => {
-                    self.pending_autosave = Some(notice);
-                    return Err(error);
-                }
-            };
-            let scene = match recovered.clone().to_v1() {
-                Ok(scene) => scene,
-                Err(error) => {
-                    self.pending_autosave = Some(notice);
-                    return Err(error);
-                }
-            };
-            let baseline = self.scene.clone();
-            let disk_bytes = session.disk_bytes.clone();
-            self.adopt_scene(scene, notice.scene);
-            self.v2_session = Some(V2EditorSession {
-                identity: recovered,
-                disk_bytes,
-            });
-            self.saved_snapshot = baseline;
-            self.dirty_memo = None;
-            self.autosave.schedule_now(std::time::Instant::now());
-            return Ok(());
-        }
-        let recovered = match self.project.read_autosave(&notice.scene) {
-            Ok(scene) => scene,
-            Err(e) => {
-                // 读不出来就把通知放回去：用户还能选"丢弃"，也还能再试一次。
-                self.log_error(format!("恢复自动保存失败: {e}"));
+        let recovered = match self.project.read_autosave_v2(&notice.scene) {
+            Ok(recovered) => recovered,
+            Err(error) => {
                 self.pending_autosave = Some(notice);
-                return Err(e);
+                return Err(error);
             }
         };
-        // 磁盘版本作为脏检查的基准。读不出来（场景文件被删了）就退化成空场景
-        // 基准 —— 结果依然是"脏"，方向是对的。
-        let on_disk = self
-            .project
-            .load_scene(&notice.scene)
-            .unwrap_or_else(|_| xgame_core::project::default_scene());
-
-        self.adopt_scene(recovered, notice.scene.clone());
-        // `adopt_scene` 会把基准设成刚载入的场景（= 干净）；这里覆盖回来。
-        self.saved_snapshot = on_disk;
+        let scene = match recovered.clone().into_runtime() {
+            Ok(scene) => scene,
+            Err(error) => {
+                self.pending_autosave = Some(notice);
+                return Err(error);
+            }
+        };
+        let baseline = self.scene.clone();
+        let session = FileEditorSession {
+            identity: recovered,
+            disk_bytes: self.file_session.disk_bytes.clone(),
+        };
+        self.adopt_scene(scene, notice.scene.clone(), session);
+        // `adopt_scene` 会把基准设成刚载入的场景（= 干净）；这里覆盖为正式文件。
+        self.saved_snapshot = baseline;
         self.dirty_memo = None;
         // 恢复出来的内容还没进任何副本 —— 中间再崩一次就白恢复了。
         // 让下一次 tick 立刻补一份。
@@ -3691,8 +3516,7 @@ impl EditorState {
             }
         };
         let path = self.project.path(&relative);
-        self.adopt_scene(scene, relative);
-        self.v2_session = session;
+        self.adopt_scene(scene, relative, session);
         self.log_success(format!("已打开场景 → {}", path.display()));
         Ok(())
     }
@@ -3779,7 +3603,8 @@ impl EditorState {
             return Err(message);
         }
         let path = self.project.path(&relative);
-        self.adopt_scene(scene, relative);
+        let (scene, session) = editor_scene(&self.project, &relative)?;
+        self.adopt_scene(scene, relative, session);
         self.log_success(format!(
             "已新建场景 → {}（启动场景仍是 {}）",
             path.display(),
@@ -3793,9 +3618,14 @@ impl EditorState {
     /// 撤销栈、选中、折叠状态、Edit 组件副本全部属于**上一张场景**：不清掉的话
     /// 撤销会把旧场景整个贴回来，组件副本还会按 (EntityId, slot) 撞到新场景的
     /// 实体上。这些状态没有跨场景意义，重置是唯一正确的语义。
-    fn adopt_scene(&mut self, scene: Scene, relative: String) {
+    fn adopt_scene(
+        &mut self,
+        scene: Scene,
+        relative: String,
+        file_session: FileEditorSession,
+    ) {
         self.scene = scene;
-        self.v2_session = None;
+        self.file_session = file_session;
         self.v2_undo.clear();
         self.v2_redo.clear();
         self.current_scene = relative;
@@ -3878,38 +3708,22 @@ impl EditorState {
         // 不能让一次失败的「另存为」顺手把当前场景弄脏。
         let mut scene = self.scene.clone();
         scene.name = scene_label(&relative);
-        let v2_copy = self
-            .v2_session
-            .as_ref()
-            .map(|session| {
-                if session.disk_bytes
-                    != std::fs::read(self.project.path(&self.current_scene))
-                        .map_err(|e| e.to_string())?
-                {
-                    return Err("原场景已被外部修改；请重新打开后再另存为".to_owned());
-                }
-                self.prepare_v2_scene(&session.identity, &scene)
-            })
-            .transpose()?;
-        let write = if let Some(draft) = &v2_copy {
-            self.project.write_scene_v2(&relative, draft)
-        } else {
-            self.project.write_scene(&relative, &scene)
-        };
-        if let Err(e) = write {
+        if self.file_session.disk_bytes
+            != std::fs::read(self.project.path(&self.current_scene)).map_err(|e| e.to_string())?
+        {
+            return Err("原场景已被外部修改；请重新打开后再另存为".to_owned());
+        }
+        let draft = self.prepare_file_scene(&self.file_session.identity, &scene)?;
+        if let Err(e) = self.project.write_scene_v2(&relative, &draft) {
             let message = e.to_string();
             self.log_error(format!("另存为失败: {message}"));
             return Err(message);
         }
 
-        let next_session = v2_copy
-            .map(|identity| v2_session_after_write(&self.project, &relative, identity))
-            .transpose()?;
+        let next_session = file_session_after_write(&self.project, &relative, draft)?;
         self.scene = scene;
         self.current_scene = relative.clone();
-        if let Some(session) = next_session {
-            self.v2_session = Some(session);
-        }
+        self.file_session = next_session;
         self.mark_saved();
         self.log_success(format!(
             "已另存为 → {}（启动场景仍是 {}）",
@@ -4117,7 +3931,7 @@ mod tests {
         let mut actor = xgame_core::Entity::new("Actor");
         actor.camera = Some(xgame_core::Camera::default());
         old.entities.push(actor);
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&old).unwrap();
+        let v2 = xgame_core::scene_v2::SceneV2::from_runtime(&old).unwrap();
         let id = v2.entities.last().unwrap().components.entries[0]
             .identity
             .id;
@@ -4161,7 +3975,7 @@ mod tests {
         let (state, base) = temp_state("v2_editor_play_identity");
         let project = state.project.clone();
         let entry = project.manifest().entry_scene.clone();
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&state.scene).unwrap();
+        let v2 = xgame_core::scene_v2::SceneV2::from_runtime(&state.scene).unwrap();
         let entity_id = v2.entities[0].id;
         let transform_id = v2.entities[0].transform_identity.id;
         std::fs::write(project.path(&entry), v2.to_ron().unwrap()).unwrap();
@@ -4186,7 +4000,7 @@ mod tests {
         let (state, base) = temp_state("v2_editor_conflict");
         let project = state.project.clone();
         let entry = project.manifest().entry_scene.clone();
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&state.scene).unwrap();
+        let v2 = xgame_core::scene_v2::SceneV2::from_runtime(&state.scene).unwrap();
         std::fs::write(project.path(&entry), v2.to_ron().unwrap()).unwrap();
         let mut editor = EditorState::new(project.clone());
         editor.scene.name = "Unsaved".into();
@@ -4205,7 +4019,7 @@ mod tests {
         let (state, base) = temp_state("v2_save_as");
         let project = state.project.clone();
         let entry = project.manifest().entry_scene.clone();
-        let old = xgame_core::scene_v2::SceneV2::from_v1_plain(&state.scene).unwrap();
+        let old = xgame_core::scene_v2::SceneV2::from_runtime(&state.scene).unwrap();
         let id = old.entities[0].transform_identity.id;
         std::fs::write(project.path(&entry), old.to_ron().unwrap()).unwrap();
         let mut editor = EditorState::new(project.clone());
@@ -4216,7 +4030,11 @@ mod tests {
                 .id,
             id
         );
-        assert!(project.load_scene("Scenes/Copied.ron").is_err());
+        assert_eq!(
+            project.load_scene("Scenes/Copied.ron").unwrap().name,
+            "Copied",
+            "另存的当前格式场景必须能由通用项目入口直接加载"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -4225,7 +4043,7 @@ mod tests {
         let (state, base) = temp_state("v2_undo");
         let project = state.project.clone();
         let path = project.manifest().entry_scene.clone();
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&state.scene).unwrap();
+        let v2 = xgame_core::scene_v2::SceneV2::from_runtime(&state.scene).unwrap();
         std::fs::write(project.path(&path), v2.to_ron().unwrap()).unwrap();
         let mut editor = EditorState::new(project.clone());
         editor.push_undo();
@@ -4279,7 +4097,7 @@ mod tests {
         let (state, base) = temp_state("v2_autosave");
         let project = state.project.clone();
         let entry = project.manifest().entry_scene.clone();
-        let original = xgame_core::scene_v2::SceneV2::from_v1_plain(&state.scene).unwrap();
+        let original = xgame_core::scene_v2::SceneV2::from_runtime(&state.scene).unwrap();
         std::fs::write(project.path(&entry), original.to_ron().unwrap()).unwrap();
         let mut editor = EditorState::new(project.clone());
         editor.scene.name = "Recovered".into();
@@ -4303,7 +4121,7 @@ mod tests {
         let (state, base) = temp_state("v2_prefab_create");
         let project = state.project.clone();
         let entry = project.manifest().entry_scene.clone();
-        let v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&state.scene).unwrap();
+        let v2 = xgame_core::scene_v2::SceneV2::from_runtime(&state.scene).unwrap();
         let id = v2.entities[0].transform_identity.id;
         let camera_id = v2.entities[0].components.entries[0].identity.id;
         std::fs::write(project.path(&entry), v2.to_ron().unwrap()).unwrap();
@@ -4352,7 +4170,7 @@ mod tests {
         let (state, base) = temp_state("v2_revert");
         let project = state.project.clone();
         let entry = project.manifest().entry_scene.clone();
-        let v2 = SceneV2::from_v1_plain(&state.scene).unwrap();
+        let v2 = SceneV2::from_runtime(&state.scene).unwrap();
         std::fs::write(project.path(&entry), v2.to_ron().unwrap()).unwrap();
         let mut editor = EditorState::new(project.clone());
         editor.selected_entity = Some(0);
@@ -4377,7 +4195,7 @@ mod tests {
             project
                 .load_prefab_v2(&prefab)
                 .unwrap()
-                .to_v1()
+                .into_runtime()
                 .unwrap()
                 .entities[0]
                 .camera
@@ -4425,7 +4243,7 @@ mod tests {
         let entry = project.manifest().entry_scene.clone();
         std::fs::write(
             project.path(&entry),
-            SceneV2::from_v1_plain(&state.scene)
+            SceneV2::from_runtime(&state.scene)
                 .unwrap()
                 .to_ron()
                 .unwrap(),
@@ -4481,7 +4299,7 @@ mod tests {
         let entry = project.manifest().entry_scene.clone();
         std::fs::write(
             project.path(&entry),
-            SceneV2::from_v1_plain(&state.scene)
+            SceneV2::from_runtime(&state.scene)
                 .unwrap()
                 .to_ron()
                 .unwrap(),
@@ -4543,7 +4361,7 @@ mod tests {
         let entry = project.manifest().entry_scene.clone();
         std::fs::write(
             project.path(&entry),
-            SceneV2::from_v1_plain(&state.scene)
+            SceneV2::from_runtime(&state.scene)
                 .unwrap()
                 .to_ron()
                 .unwrap(),
@@ -4605,7 +4423,7 @@ mod tests {
         let entry = project.manifest().entry_scene.clone();
         std::fs::write(
             project.path(&entry),
-            SceneV2::from_v1_plain(&state.scene)
+            SceneV2::from_runtime(&state.scene)
                 .unwrap()
                 .to_ron()
                 .unwrap(),
@@ -4654,7 +4472,7 @@ mod tests {
         let entry = project.manifest().entry_scene.clone();
         std::fs::write(
             project.path(&entry),
-            SceneV2::from_v1_plain(&state.scene)
+            SceneV2::from_runtime(&state.scene)
                 .unwrap()
                 .to_ron()
                 .unwrap(),
@@ -4675,7 +4493,7 @@ mod tests {
             camera_id
         );
         assert_eq!(
-            after.to_v1().unwrap().entities[0]
+            after.into_runtime().unwrap().entities[0]
                 .camera
                 .as_ref()
                 .unwrap()
@@ -4719,7 +4537,7 @@ mod tests {
         let entry = project.manifest().entry_scene.clone();
         std::fs::write(
             project.path(&entry),
-            SceneV2::from_v1_plain(&state.scene)
+            SceneV2::from_runtime(&state.scene)
                 .unwrap()
                 .to_ron()
                 .unwrap(),

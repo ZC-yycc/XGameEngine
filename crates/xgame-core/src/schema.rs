@@ -51,8 +51,7 @@ use crate::physics::{BodyKind, CollisionShape, PhysicsBody};
 use crate::prefab::{Prefab, PrefabInstanceRef};
 use crate::scene::{Entity, Scene};
 use crate::scene_v2::{
-    ComponentData, MaterialData, MeshData, PrefabV2, RenderData, SceneV2, StrictAnimator,
-    StrictFieldValues,
+    ComponentData, MaterialData, MeshData, PrefabV2, SceneV2, StrictAnimator, StrictFieldValues,
 };
 use crate::transform::Transform;
 use crate::ui::{UiAlign, UiElement, UiImageStyle, UiKind, UiStyle, UiTextStyle, UiVAlign};
@@ -220,32 +219,13 @@ pub fn scene_schema() -> SchemaDoc {
             RootSchema {
                 kind: "scene".into(),
                 file_suffix: ".ron".into(),
-                root_type: "Scene".into(),
-                path_note:
-                    "项目内相对路径，通常放在 Scenes/ 下（清单 entry_scene 指向的也是这种路径）。"
-                        .into(),
-                summary: "一张场景：实体平铺列表 + 场景级灯光 + 环境光。".into(),
-                example_ron: pretty(&scene_example()),
-            },
-            RootSchema {
-                kind: "prefab".into(),
-                file_suffix: ".prefab.ron".into(),
-                root_type: "Prefab".into(),
-                path_note: "项目内相对路径，通常放在 Prefabs/ 下；双后缀用来和场景区分。".into(),
-                summary: "一份可复用实体子树；与场景同构，但没有 lights / ambient。".into(),
-                example_ron: pretty(&prefab_example()),
-            },
-            RootSchema {
-                kind: "scene_v2".into(),
-                file_suffix: ".ron".into(),
                 root_type: "SceneV2".into(),
                 path_note: "项目内相对路径；必须显式 format_version: 2。".into(),
-                summary: "组件带稳定局部 ID 的场景；当前编辑器仍使用 v1，v2 仅有显式项目读写入口。"
-                    .into(),
+                summary: "当前场景格式：实体组件带稳定局部 ID，未知字段会拒绝读取。".into(),
                 example_ron: pretty(&scene_v2_example()),
             },
             RootSchema {
-                kind: "prefab_v2".into(),
+                kind: "prefab".into(),
                 file_suffix: ".prefab.ron".into(),
                 root_type: "PrefabV2".into(),
                 path_note: "项目内相对路径；必须显式 format_version: 2。".into(),
@@ -263,18 +243,18 @@ pub fn scene_schema() -> SchemaDoc {
 fn conventions() -> Vec<String> {
     vec![
         "文件是 RON 文本；根结构见 roots。路径一律是项目相对路径（正斜杠），不要写绝对路径。".into(),
-        "字段缺省值见类型的 default_ron 与字段的 default_ron；required=true 表示必须写。v1 的未知字段会被忽略；v2 遇到未知字段会拒绝读取。".into(),
+        "字段缺省值见类型的 default_ron 与字段的 default_ron；required=true 表示必须写。未知字段会拒绝读取，避免保存时静默丢数据。".into(),
         "Entity.id 是场景内稳定标识；parent 与 PrefabInstanceRef.source_id 都按它引用。省略 id 会分配新的进程内 ID（不可复现），手写场景必须显式给唯一 ID。".into(),
         "Transform 是局部空间（相对 parent）；旋转是四元数 (x, y, z, w)，不是欧拉角；矩阵语义是 T * R * S。".into(),
         "可选组件字段省略 = None（实体没有这个组件）；Vec / map 省略 = 空。没有 physics 的实体不参与物理，没有 camera 的实体不是相机。".into(),
-        "v1 的 Entity.components 与 UI / 粒子运行时状态不落盘；v2 的 EntityV2.components 则是持久化组件集合。".into(),
+        "EntityV2.components 是持久化组件集合；UI 交互态、粒子运行态等瞬时状态不落盘。".into(),
         "颜色一律线性空间 RGB / RGBA，不是 sRGB；长度单位是米，角度单位是度（字段说明另有标注的除外）。".into(),
         "资产引用在磁盘文件里是 guid://<32 位十六进制>，内存 / MCP 里是项目相对路径；转换只发生在 ProjectHandle 读写边界，不要手工编 GUID。builtin:// 是程序化几何，不是资产。".into(),
         "scripts / behaviors 的列表顺序就是执行顺序；behavior_params 外层键是注册的 Rust 行为名，内层是 Inspect 字段名。".into(),
         "同一个场景内 id 必须唯一；parent 必须指向同一张场景 / 同一份预制体里存在的实体，且不能形成环。".into(),
         "预制体实例的实体带 prefab 字段，通常由引擎维护（Apply / Revert 靠它）；手写场景不要伪造，除非确实要接一个已有预制体。".into(),
-        "v2 必须显式写 format_version: 2；每个 EntityV2 的 ComponentSet 存唯一的强类型组件值和局部 ID。当前旧编辑器入口仍拒绝 v2 文件。".into(),
-        "v2 未识别字段或重复参数 Map 键会拒绝解码；v1 仍按原来的宽容方式读取。".into(),
+        "场景与预制体必须显式写 format_version: 2；每个 EntityV2 的 ComponentSet 存唯一的强类型组件值和局部 ID。".into(),
+        "未识别字段、重复参数 Map 键、重复组件 ID 或不合法来源关联都会拒绝解码。".into(),
     ]
 }
 
@@ -331,40 +311,16 @@ fn primitive(name: &str, ron_example: &str, note: &str) -> PrimitiveSchema {
 fn asset_references() -> Vec<AssetReferenceSchema> {
     vec![
         asset_ref(
-            "Entity.model",
-            "模型路径：模型资产经 .meta 登记后写成 guid://<32 hex>；builtin://… 与未登记路径保持原样",
-            "项目相对路径，例如 Resources/Box.glb；程序化几何用 builtin://cube / builtin://sphere",
-            "空串 = 没有模型（纯逻辑 / UI 实体）。同一字段在磁盘与内存里形态不同，唯一转换点是 ProjectHandle::load_scene / write_scene。",
-        ),
-        asset_ref(
             "LodGroup.levels[].model",
             "guid://<32 hex>",
             "项目相对路径，例如 Resources/Models/Hero_Low.glb",
             "每一级的模型都走同一条 GUID 管线（与 Entity.model 同款）；漏掉一级，远处那级在改名后会静默断链。",
         ),
         asset_ref(
-            "Entity.material_asset",
-            "guid://<32 hex>",
-            "项目相对路径，例如 Resources/Materials/Wood.mat",
-            "共享材质资产；None = 用模型自带材质。逐实体微调走 Entity.material（MaterialOverride），两者正交。",
-        ),
-        asset_ref(
-            "Entity.scripts",
-            "列表里每一项都是 guid://<32 hex>",
-            "项目相对路径，例如 Scripts/Player.lua",
-            "只支持 .lua；顺序即执行顺序。",
-        ),
-        asset_ref(
             "AudioSource.clip",
             "guid://<32 hex>",
             "项目相对路径，例如 Resources/Audio/Beep.wav",
             "音频解码在 xgame-audio；场景文件只存引用。",
-        ),
-        asset_ref(
-            "Entity.prefab.source",
-            "guid://<32 hex>",
-            "项目相对路径，例如 Prefabs/Enemy.prefab.ron",
-            "预制体实例来源；通常由引擎实例化 / Apply / Revert 维护，手写场景不要伪造。",
         ),
         asset_ref(
             "UiImageStyle.path",
@@ -378,12 +334,10 @@ fn asset_references() -> Vec<AssetReferenceSchema> {
             "项目相对路径，例如 Resources/Textures/Wood.png",
             "空串 = 纯色（1×1 白色），不是保留模型贴图 —— 材质资产是一份完整材质。",
         ),
-        asset_ref("MeshData.model", "guid://<32 hex>", "项目相对模型路径或 builtin://", "v2 Mesh 模型；morph 权重与该组件同生共灭。"),
-        asset_ref("MaterialData.asset", "guid://<32 hex>", "项目相对材质路径", "v2 Material 的可选共享材质。"),
-        asset_ref("RenderData.model", "guid://<32 hex>", "项目相对模型路径或 builtin://", "拆分前 v2 Render 的兼容读取字段；新文件不再生成。"),
-        asset_ref("RenderData.material_asset", "guid://<32 hex>", "项目相对材质路径", "拆分前 v2 Render 的兼容读取字段；新文件不再生成。"),
-        asset_ref("ComponentData.Lua.path", "guid://<32 hex>", "项目相对 Lua 路径", "v2 Lua 组件的脚本资产。"),
-        asset_ref("EntityV2.prefab.source", "guid://<32 hex>", "项目相对预制体路径", "v2 实例的来源资产。"),
+        asset_ref("MeshData.model", "guid://<32 hex>", "项目相对模型路径或 builtin://", "Mesh 模型；morph 权重与该组件同生共灭。"),
+        asset_ref("MaterialData.asset", "guid://<32 hex>", "项目相对材质路径", "Material 的可选共享材质。"),
+        asset_ref("ComponentData.Lua.path", "guid://<32 hex>", "项目相对 Lua 路径", "Lua 组件的脚本资产。"),
+        asset_ref("EntityV2.prefab.source", "guid://<32 hex>", "项目相对预制体路径", "实例的来源资产。"),
     ]
 }
 
@@ -601,11 +555,11 @@ fn prefab_example() -> Prefab {
 }
 
 fn scene_v2_example() -> SceneV2 {
-    SceneV2::from_v1_plain(&scene_example()).expect("schema 示例必须是可转换的普通实体")
+    SceneV2::from_runtime(&scene_example()).expect("schema 示例必须可投影到文件模型")
 }
 
 fn prefab_v2_example() -> PrefabV2 {
-    PrefabV2::from_v1(&prefab_example()).expect("schema 示例必须是可转换的预制体资产")
+    PrefabV2::from_runtime(&prefab_example()).expect("schema 示例必须可投影到文件模型")
 }
 
 fn component_v2_types() -> Vec<TypeSchema> {
@@ -621,28 +575,22 @@ fn component_v2_types() -> Vec<TypeSchema> {
         asset: None,
         overrides: Some(MaterialOverride::default()),
     };
-    let legacy_render = RenderData {
-        model: "builtin://cube".into(),
-        lod: LodGroup::default(),
-        material_asset: None,
-        morph_weights: Vec::new(),
-    };
     vec![
-        struct_schema("SceneV2", "v2 场景文件；独立版本、实体与场景光照。", None,
+        struct_schema("SceneV2", "当前场景文件；独立版本、实体与场景光照。", None,
             Some(pretty(&scene_v2_example())), vec![
                 req("format_version", "u32", "必须写 2；单文件版本，不能当作项目全局版本。"),
                 req("name", "String", "场景名。"),
                 req("entities", "Vec<EntityV2>", "实体平铺列表；parent 指向本文件内的实体 ID。"),
-                req("lights", "Vec<Light>", "场景级灯光；v2 必须显式写入。"),
-                req("ambient", "[f32; 3]", "线性 RGB 环境光；v2 必须显式写入。"),
-            ], vec!["v2 对未知嵌套字段与重复组件 ID 拒绝解析；项目检查、编辑器与运行宿主均按版本读取。"]),
-        struct_schema("PrefabV2", "v2 预制体资产；实体与组件 ID 属于资产自身。", None,
+                req("lights", "Vec<Light>", "场景级灯光；当前格式必须显式写入。"),
+                req("ambient", "[f32; 3]", "线性 RGB 环境光；当前格式必须显式写入。"),
+            ], vec!["当前格式对未知嵌套字段与重复组件 ID 拒绝解析；项目检查、编辑器与运行宿主共用这一文件边界。"]),
+        struct_schema("PrefabV2", "当前预制体资产；实体与组件 ID 属于资产自身。", None,
             Some(pretty(&prefab_v2_example())), vec![
                 req("format_version", "u32", "必须写 2。"),
                 req("name", "String", "预制体名。"),
                 req("entities", "Vec<EntityV2>", "预制体资产实体；不可携带实例来源引用。"),
             ], vec!["实例的 source_id 指向资产实体 ID，source_component_id 指向资产组件 ID。"]),
-        struct_schema("EntityV2", "v2 实体；元数据与唯一组件数据列表。", None,
+        struct_schema("EntityV2", "当前文件实体；元数据与唯一组件数据列表。", None,
             Some(pretty(entity)), vec![
                 req("id", "EntityId", "场景内实体 ID。"),
                 req("name", "String", "显示名。"),
@@ -652,7 +600,7 @@ fn component_v2_types() -> Vec<TypeSchema> {
                 req("transform", "Transform", "局部变换；存于实体元数据。"),
                 req("transform_identity", "ComponentIdentity", "不可移除的 Transform 组件身份。"),
                 req("components", "ComponentSet", "其余全部可保存组件的唯一所有者。"),
-            ], vec!["本地组件 ID 只在实体内唯一；v2 文件不再写 Entity.model、scripts、behaviors 等 v1 字段。"]),
+            ], vec!["本地组件 ID 只在实体内唯一；运行时 Entity 的 model、scripts、behaviors 等值会投影为强类型组件。"]),
         struct_schema("ComponentSet", "按列表顺序显示、同类按相对顺序运行的组件集合。", None,
             Some(pretty(&entity.components)), vec![
                 req("next_component_id", "ComponentIdSequence", "持久高水位；删除组件后不回退。"),
@@ -674,13 +622,13 @@ fn component_v2_types() -> Vec<TypeSchema> {
             Some(pretty(&ComponentIdSequence::from_next(2).unwrap())), vec![
                 req("next_id", "u64", "大于全部本地 ID；至少为 1。"),
             ], Vec::new()),
-        enum_schema("ComponentData", "v2 强类型组件值；同名 Rust/Lua 多实例暂未支持。", None,
+        enum_schema("ComponentData", "强类型组件值；同名 Rust/Lua 多实例暂未支持。", None,
             Some(ron_text(&ComponentData::Mesh(mesh.clone()))), vec![
                 newtype_variant("Mesh", "MeshData", &ron_text(&ComponentData::Mesh(mesh.clone())), "模型与形变权重；可独立增删。"),
                 newtype_variant("Lod", "LodGroup", &ron_text(&ComponentData::Lod(LodGroup { levels: vec![LodLevel::new("builtin://cube", 0.0)] })), "距离分级与绘制距离；可独立增删。"),
                 newtype_variant("Material", "MaterialData", &ron_text(&ComponentData::Material(material.clone())), "共享材质资产与逐实体覆盖；可独立增删。"),
                 newtype_variant("Ui", "UiElement", &ron_text(&ComponentData::Ui(UiElement::default())), "屏幕 UI。"),
-                newtype_variant("Animator", "StrictAnimator", &ron_text(&ComponentData::Animator(StrictAnimator(Animator::default()))), "动画；v2 严格拒绝重复参数键。"),
+                newtype_variant("Animator", "StrictAnimator", &ron_text(&ComponentData::Animator(StrictAnimator(Animator::default()))), "动画；当前文件边界严格拒绝重复参数键。"),
                 newtype_variant("Physics", "PhysicsBody", &ron_text(&ComponentData::Physics(PhysicsBody::default())), "刚体。"),
                 newtype_variant("Character", "CharacterController", &ron_text(&ComponentData::Character(CharacterController::default())), "角色控制。"),
                 newtype_variant("Audio", "AudioSource", &ron_text(&ComponentData::Audio(AudioSource::default())), "音源。"),
@@ -688,14 +636,12 @@ fn component_v2_types() -> Vec<TypeSchema> {
                 newtype_variant("Particle", "ParticleEmitter", &ron_text(&ComponentData::Particle(ParticleEmitter::default())), "粒子。"),
                 struct_variant("Rust", &ron_text(&ComponentData::Rust { registered_name: "Health".into(), fields: None }), vec![
                     req("registered_name", "String", "已注册的 Rust 行为名。"),
-                    req("fields", "Option<StrictFieldValues>", "None 与 Some(空表) 的 v1 语义不同。"),
+                    req("fields", "Option<StrictFieldValues>", "None 与 Some(空表) 语义不同。"),
                 ], "参数归本组件实例所有。"),
                 struct_variant("Lua", &ron_text(&ComponentData::Lua { path: "Scripts/player.lua".into() }), vec![
                     req("path", "String", "Lua 脚本的项目相对路径。"),
                 ], "当前同一路径每实体只允许一份。"),
-                newtype_variant("Render", "RenderData", &ron_text(&ComponentData::LegacyRender(legacy_render.clone())), "只读兼容：拆分前的复合视觉组件；编辑器下次保存会迁移。"),
-                newtype_variant("MaterialOverride", "MaterialOverride", &ron_text(&ComponentData::LegacyMaterialOverride(MaterialOverride::default())), "只读兼容：拆分前单列的逐实体覆盖；新文件改用 Material。"),
-            ], vec!["Mesh / Lod / Material 是三个独立组件；Render 与 MaterialOverride 旧变体只允许兼容读取，所在实体须经编辑器保存迁移后才能通用编辑。"]),
+            ], vec!["Mesh / Lod / Material 是三个独立组件。"]),
         struct_schema("MeshData", "模型与跟随该模型组件的 morph 权重。", None,
             Some(pretty(&mesh)), vec![
                 req("model", "String", "模型路径或 builtin://；LOD 存在时运行时优先使用 LOD。"),
@@ -705,17 +651,10 @@ fn component_v2_types() -> Vec<TypeSchema> {
             Some(pretty(&material)), vec![
                 req("asset", "Option<String>", "共享材质资产；None 表示使用模型自带材质。"),
                 req("overrides", "Option<MaterialOverride>", "逐实体字段覆盖；None 表示不覆盖。"),
-            ], vec!["asset 与 overrides 同属一个 Material 组件；两者都为 None 的空组件无法投影到 v1 值视图。"]),
-        struct_schema("RenderData", "拆分前 v2 Render 的兼容载荷。", None,
-            Some(pretty(&legacy_render)), vec![
-                req("model", "String", "旧复合组件的模型路径。"),
-                req("lod", "LodGroup", "旧复合组件的各级模型与绘制距离。"),
-                req("material_asset", "Option<String>", "旧复合组件的共享材质资产。"),
-                req("morph_weights", "Vec<f32>", "旧复合组件的形变目标权重。"),
-            ], vec!["只为读取既有 v2 文件保留；新文件使用 MeshData / LodGroup / MaterialData。"]),
-        newtype_schema("StrictFieldValues", "v2 严格参数表，RON 形态与 FieldValues 一致。", None,
+            ], vec!["asset 与 overrides 同属一个 Material 组件；两者都为 None 的空组件无法投影到运行时值模型。"]),
+        newtype_schema("StrictFieldValues", "当前文件边界的严格参数表，RON 形态与 FieldValues 一致。", None,
             ron_text(&StrictFieldValues(BTreeMap::new())), vec!["字段名重复即拒绝；字段值仍使用 FieldValue 的变体。"]),
-        newtype_schema("StrictAnimator", "v2 严格 Animator 解码，RON 形态与 Animator 一致。", None,
+        newtype_schema("StrictAnimator", "当前文件边界的严格 Animator 解码，RON 形态与 Animator 一致。", None,
             ron_text(&StrictAnimator(Animator::default())), vec!["基础与分层状态机的参数名重复即拒绝。"]),
     ]
 }
@@ -728,11 +667,10 @@ fn scene_types() -> Vec<TypeSchema> {
     vec![
         struct_schema(
             "Scene",
-            "一张场景：实体平铺列表 + 场景级灯光 + 环境光。",
+            "场景的运行时值投影；不是独立落盘根。",
             None,
             Some(pretty(&scene_example())),
             vec![
-                def("format_version", "u32", &1u32, "文件独立版本；省略 = v1。当前仅支持 1；遇到未来版本必须拒绝，不能用旧格式保存覆盖。"),
                 req("name", "String", "场景名（显示用，不参与路径解析）。"),
                 req(
                     "entities",
@@ -743,7 +681,7 @@ fn scene_types() -> Vec<TypeSchema> {
                     "lights",
                     "Vec<Light>",
                     &vec![Light::default()],
-                    "省略时补一盏默认方向光（避免旧场景打开全黑）；写 [] 才是真的没有灯。",
+                    "运行时值投影缺省为一盏方向光；当前文件根会显式写入，[] 才是真的没有灯。",
                 ),
                 def(
                     "ambient",
@@ -753,13 +691,13 @@ fn scene_types() -> Vec<TypeSchema> {
                 ),
             ],
             vec![
-                "旧场景文件缺 lights / ambient 时按默认值补齐；新字段一律走 serde default，保证向后兼容。",
-                "保存时只改 GUID 引用，不改字段结构；手写后建议跑 xgame-editor --check 验证。",
+                "文件边界通过 SceneV2 投影到此类型，物理、渲染和脚本只修改这一份值。",
+                "保存时由 SceneV2 合回稳定组件身份；不要把本类型的 RON 当场景文件。",
             ],
         ),
         struct_schema(
             "Entity",
-            "场景里的一个对象：变换 + 模型 + 可选组件。",
+            "实体的运行时值投影：变换 + 模型 + 可选组件。",
             None,
             Some(pretty(&entity_example())),
             vec![
@@ -851,7 +789,7 @@ fn scene_types() -> Vec<TypeSchema> {
             ],
             vec![
                 "components（运行时组件容器，#[serde(skip)]）不是落盘字段，刻意不在目录里。",
-                "layer 省略 = 0（Default 层）；默认碰撞矩阵全通，所以老场景不写层时物理行为与引入层之前完全一致。",
+                "运行时值的 layer 缺省 = 0（Default 层）；默认碰撞矩阵全通。当前文件实体显式写层号。",
                 "transform 是局部的；世界变换由 parent 链现算，场景文件不存世界变换。",
                 "scripts / behaviors / behavior_params 都按名字寻址：改名等于换目标，改列表顺序只影响执行顺序。",
                 "可选组件字段省略 = None；Vec / map 省略 = 空。没有 physics 的实体不会突然被重力拽走。",
@@ -1017,11 +955,10 @@ fn scene_types() -> Vec<TypeSchema> {
         ),
         struct_schema(
             "Prefab",
-            "一份可复用的实体子树模板（.prefab.ron）。",
+            "预制体的运行时值投影；不是独立落盘根。",
             None,
             Some(pretty(&prefab_example())),
             vec![
-                def("format_version", "u32", &1u32, "预制体独立版本；省略 = v1。当前仅支持 1，未来版本须由对应解码器处理。"),
                 req("name", "String", "预制体名（显示用，通常取资产文件名）。"),
                 req(
                     "entities",
@@ -1414,7 +1351,7 @@ fn physics_types() -> Vec<TypeSchema> {
                 ),
             ],
             vec![
-                "Entity.physics 省略 = 不参与物理；旧场景因此不会突然被重力拽走。",
+                "运行时值的 Entity.physics 为 None = 不参与物理；文件模型中等价于没有 Physics 组件。",
                 "挂了 controller 的实体会被运行时接管成位置驱动的运动学胶囊，kind 此时不再作数。",
                 "Auto 形状用实体缩放绝对值的一半当盒子半边长（视觉外观即碰撞形状）。",
             ],
@@ -2233,7 +2170,6 @@ mod tests {
             "ComponentData",
             "MeshData",
             "MaterialData",
-            "RenderData",
             "StrictFieldValues",
             "StrictAnimator",
         ];
@@ -2269,21 +2205,19 @@ mod tests {
     #[test]
     fn roots_and_asset_reference_contract_are_complete() {
         let doc = scene_schema();
-        assert_eq!(doc.roots.len(), 4);
+        assert_eq!(doc.roots.len(), 2);
         assert_eq!(doc.roots[0].kind, "scene");
-        assert_eq!(doc.roots[0].root_type, "Scene");
+        assert_eq!(doc.roots[0].root_type, "SceneV2");
         assert_eq!(doc.roots[0].file_suffix, ".ron");
         assert_eq!(doc.roots[1].kind, "prefab");
-        assert_eq!(doc.roots[1].root_type, "Prefab");
+        assert_eq!(doc.roots[1].root_type, "PrefabV2");
         assert_eq!(doc.roots[1].file_suffix, ".prefab.ron");
 
         // 根文件的示例也必须能直接解析成根类型（智能体复制的就是这两段）。
-        let scene: Scene = parse(&doc.roots[0].example_ron);
+        let scene = SceneV2::from_ron(&doc.roots[0].example_ron).unwrap();
         assert_eq!(scene.name, "Scene");
-        let prefab: Prefab = parse(&doc.roots[1].example_ron);
+        let prefab = PrefabV2::from_ron(&doc.roots[1].example_ron).unwrap();
         assert_eq!(prefab.name, "Prefab");
-        assert_eq!(doc.roots[2].kind, "scene_v2");
-        assert_eq!(doc.roots[3].kind, "prefab_v2");
 
         let fields: Vec<&str> = doc
             .asset_references
@@ -2293,18 +2227,12 @@ mod tests {
         assert_eq!(
             fields,
             [
-                "Entity.model",
                 "LodGroup.levels[].model",
-                "Entity.material_asset",
-                "Entity.scripts",
                 "AudioSource.clip",
-                "Entity.prefab.source",
                 "UiImageStyle.path",
                 "MaterialAsset.albedo",
                 "MeshData.model",
                 "MaterialData.asset",
-                "RenderData.model",
-                "RenderData.material_asset",
                 "ComponentData.Lua.path",
                 "EntityV2.prefab.source",
             ],
@@ -2325,13 +2253,13 @@ mod tests {
     }
 
     #[test]
-    fn v2_component_file_contract_is_discoverable_in_the_shared_schema() {
+    fn component_file_contract_is_discoverable_in_the_shared_schema() {
         let doc = scene_schema();
         let scene = doc
             .roots
             .iter()
             .find(|root| root.root_type == "SceneV2")
-            .expect("v2 场景需要在唯一 schema 中可发现");
+            .expect("当前场景需要在唯一 schema 中可发现");
         assert!(crate::scene_v2::SceneV2::from_ron(&scene.example_ron).is_ok());
         let prefab = doc
             .roots
@@ -2351,11 +2279,10 @@ mod tests {
             "ComponentData",
             "MeshData",
             "MaterialData",
-            "RenderData",
             "StrictFieldValues",
             "StrictAnimator",
         ] {
-            assert!(doc.type_schema(name).is_some(), "缺少 v2 类型 {name}");
+            assert!(doc.type_schema(name).is_some(), "缺少当前文件类型 {name}");
         }
         for variant in &doc.type_schema("ComponentData").unwrap().variants {
             let data: crate::scene_v2::ComponentData = parse(&variant.example_ron);
@@ -2372,8 +2299,6 @@ mod tests {
                 ComponentData::Particle(_) => "Particle",
                 ComponentData::Rust { .. } => "Rust",
                 ComponentData::Lua { .. } => "Lua",
-                ComponentData::LegacyRender(_) => "Render",
-                ComponentData::LegacyMaterialOverride(_) => "MaterialOverride",
             };
             assert_eq!(name, variant.name);
         }
@@ -2428,13 +2353,6 @@ mod tests {
         );
         let _: MaterialData = parse(
             &doc.type_schema("MaterialData")
-                .unwrap()
-                .example_ron
-                .clone()
-                .unwrap(),
-        );
-        let _: RenderData = parse(
-            &doc.type_schema("RenderData")
                 .unwrap()
                 .example_ron
                 .clone()
@@ -2865,7 +2783,6 @@ mod tests {
         let doc = scene_schema();
 
         let Scene {
-            format_version,
             name,
             entities,
             lights,
@@ -2874,7 +2791,7 @@ mod tests {
         assert_fields(
             &doc,
             "Scene",
-            &["format_version", "name", "entities", "lights", "ambient"],
+            &["name", "entities", "lights", "ambient"],
         );
 
         let Entity {
@@ -2987,11 +2904,10 @@ mod tests {
         );
 
         let Prefab {
-            format_version,
             name,
             entities,
         } = Prefab::new("x");
-        assert_fields(&doc, "Prefab", &["format_version", "name", "entities"]);
+        assert_fields(&doc, "Prefab", &["name", "entities"]);
 
         let AnimState {
             name,

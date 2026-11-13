@@ -1,12 +1,12 @@
-//! 双轨语言架构 P0.5 的**演示插件**：一个真正的 Rust 轨道项目。
+//! XGame 综合示范项目的 Rust 组件插件。
 //!
 //! # 这个项目在证明什么
 //!
-//! `projects/BehaviorsDemo` 本身就是一个 cdylib crate（workspace 成员）。编辑器
+//! `projects/XGame` 本身就是一个 cdylib crate（workspace 成员）。编辑器
 //! 按下 ▶ Play 时会探测到项目根的 `Cargo.toml`、后台 `cargo build`、把 DLL 同步进
 //! `Plugins/` 再加载 —— 全程 UI 不阻塞。场景里同时挂着：
 //!
-//! - `Spinner`（Rust，本文件）—— 与 `Scripts/Spinner.lua` **同款行为**
+//! - `Spinner`（Rust，本文件）—— 与 `Scripts/Components/Spinner.lua` **同款行为**
 //!   （绕 Y 轴 75°/s），用来直观对照两条轨道跑出同一份效果；
 //! - `Bobber`（Rust）—— 上下浮动，展示组件自己持有跨帧状态；
 //! - `Spinner`（Lua 脚本，另一实体）—— 证明两条轨道**共用一个运行时、互不干扰**。
@@ -22,7 +22,7 @@
 
 use xgame::prelude::*;
 
-/// 与 `Scripts/Spinner.lua` 同值：绕 Y 轴每秒转 75 度（组件的默认参数）。
+/// 与 `Scripts/Components/Spinner.lua` 同值：绕 Y 轴每秒转 75 度（组件的默认参数）。
 const SPIN_SPEED: f32 = 75.0;
 
 /// 与 Lua 版同款：绕 Y 轴匀速旋转。

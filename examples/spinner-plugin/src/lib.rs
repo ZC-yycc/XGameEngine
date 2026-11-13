@@ -1,6 +1,6 @@
 //! 示例 cdylib 插件 —— 双轨架构 P0 的 Rust 轨道演示。
 //!
-//! 与 `projects/SampleScene/Scripts/Spinner.lua` 同款行为（绕 Y 轴 75°/s），
+//! 与 `projects/XGame/Scripts/Spinner.lua` 同款行为（绕 Y 轴 75°/s），
 //! 另加一个销毁者组件证明四钩子全通：
 //!
 //! - `Spinner`：四个钩子各给导出计数器 +1，`update` 旋转让实体动起来；
@@ -30,7 +30,7 @@ const SPIN_SPEED: f32 = 75.0;
 ///
 /// 没有可调字段（`SPIN_SPEED` 是常量）—— `#[derive(Inspect)]` 生成一张空表，
 /// 编辑器里就会显示成"没有参数"。可调字段的完整示范见
-/// `projects/BehaviorsDemo`。
+/// `projects/XGame`。
 #[derive(Default, Inspect)]
 pub struct Spinner;
 

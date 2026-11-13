@@ -178,8 +178,8 @@ mod tests {
 
         let value: serde_json::Value = serde_json::from_str(&first).expect("必须是合法 JSON");
         assert_eq!(value["format_version"], 1);
-        assert_eq!(value["roots"][0]["root_type"], "Scene");
-        assert_eq!(value["roots"][1]["root_type"], "Prefab");
+        assert_eq!(value["roots"][0]["root_type"], "SceneV2");
+        assert_eq!(value["roots"][1]["root_type"], "PrefabV2");
         let types = value["types"].as_array().expect("types 数组");
         assert!(types.len() >= 30, "类型目录太小: {}", types.len());
         assert!(types.iter().any(|ty| ty["name"] == "Entity"), "缺 Entity");

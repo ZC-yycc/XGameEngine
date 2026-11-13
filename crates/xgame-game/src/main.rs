@@ -9,7 +9,7 @@
 //! # 运行
 //!
 //! ```sh
-//! cargo run -p xgame-game -- projects/SampleScene
+//! cargo run -p xgame-game -- projects/XGame
 //! ```
 //!
 //! # 项目定位顺序
@@ -35,7 +35,7 @@ use xgame::prelude::*;
 
 /// 既没传命令行参数、可执行文件旁边也没有项目时，退回的示例项目
 /// （相对进程工作目录，只在仓库内 `cargo run` 时有意义）。
-const DEFAULT_PROJECT: &str = "projects/SampleScene";
+const DEFAULT_PROJECT: &str = "projects/XGame";
 
 /// 单帧 dt 上限。
 ///
@@ -234,7 +234,7 @@ impl GameApp {
             Ok(scene) => scene,
             Err(e) => {
                 log::error!("{e}");
-                RuntimeScene::legacy(Scene::new("Untitled"))
+                RuntimeScene::from_runtime_values(Scene::new("Untitled"))
             }
         };
 

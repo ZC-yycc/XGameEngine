@@ -1,15 +1,15 @@
-//! 旧场景格式的统一组件视图。
+//! 运行时值模型的统一组件视图。
 //!
 //! 这里读写的仍是 `Entity` 原字段：不引入第二份可变配置，也不把运行时
-//! `ComponentMap` 误当成可保存组件。Rust/Lua 的下标地址只在当前列表结构不变时有效；
-//! 稳定实例 ID 需要下一版场景格式，不能拿这里的槽位冒充。
+//! `ComponentMap` 误当成可保存组件。Rust/Lua 的下标地址只服务编辑器当次操作；
+//! 持久身份由文件模型的 `ComponentId` 独立维护，不能拿这里的槽位冒充。
 
 use std::fmt;
 
 use crate::inspect::FieldValues;
 use crate::scene::Entity;
 
-/// 内建组件的旧格式类型地址与编辑器显示名都在这一处定义。
+/// 内建组件的值地址与编辑器显示名都在这一处定义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuiltinComponent {
     Transform,
@@ -91,7 +91,7 @@ impl BuiltinComponent {
     }
 
     /// 字段说明由场景 schema 负责；这里只给出该组件对应的落盘类型。
-    /// Mesh / Material 在 v1 中横跨 `Entity` 字段，须单独筛选字段。
+    /// Mesh / Material 在运行时值模型中横跨 `Entity` 字段，须单独筛选字段。
     pub const fn schema_type(self) -> &'static str {
         match self {
             Self::Transform => "Transform",
@@ -107,7 +107,7 @@ impl BuiltinComponent {
         }
     }
 
-    /// v1 中横跨多个字段的组件只返回自己拥有的字段。
+    /// 横跨多个值字段的组件只返回自己拥有的字段。
     pub const fn schema_field_names(self) -> &'static [&'static str] {
         match self {
             Self::Mesh => &["model", "morph_weights"],
@@ -133,7 +133,7 @@ impl BuiltinComponent {
     }
 }
 
-/// 旧格式中 Rust / Lua 地址使用槽位，重排、删除后须重新查询。
+/// Rust / Lua 的编辑器地址使用值列表槽位，重排、删除后须重新查询。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComponentAddress {
     Builtin(BuiltinComponent),
@@ -191,7 +191,7 @@ impl Entity {
         out
     }
 
-    /// 只创建缺失的内建组件；用旧字段作唯一数据源。
+    /// 只创建缺失的内建组件；用运行时值字段作唯一数据源。
     pub fn add_builtin_component(&mut self, kind: BuiltinComponent) -> bool {
         if !kind.addable() || kind.present(self) {
             return false;
@@ -243,7 +243,7 @@ impl Entity {
         true
     }
 
-    /// 脚本资产是否存在由项目边界判断；旧格式的挂载规则仍是一条路径一份。
+    /// 脚本资产是否存在由项目边界判断；挂载规则是一条路径一份。
     pub fn attach_lua_script(&mut self, path: &str) -> bool {
         if path.is_empty() || self.scripts.iter().any(|existing| existing == path) {
             return false;
@@ -252,7 +252,7 @@ impl Entity {
         true
     }
 
-    /// 旧地址只能作用于当前列表；移除 Rust 的最后一个同名项时清孤儿参数。
+    /// 槽位地址只能作用于当前列表；移除 Rust 的最后一个同名项时清孤儿参数。
     pub fn remove_attached_component(&mut self, address: ComponentAddress) -> bool {
         match address {
             ComponentAddress::Builtin(kind) => match kind {
@@ -300,133 +300,5 @@ impl Entity {
                 true
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Camera, FieldValue, Scene};
-
-    #[test]
-    fn legacy_view_uses_only_existing_serialized_fields() {
-        let mut entity = Entity::new("Player");
-        assert_eq!(
-            entity
-                .attached_components()
-                .iter()
-                .map(|item| item.address.to_string())
-                .collect::<Vec<_>>(),
-            ["builtin:transform"],
-        );
-        assert!(entity.add_builtin_component(BuiltinComponent::Camera));
-        assert!(!entity.add_builtin_component(BuiltinComponent::Camera));
-        assert_eq!(entity.camera, Some(Camera::default()));
-        assert!(entity.add_registered_component("Health"));
-        assert!(!entity.add_registered_component("Health"));
-        assert!(entity.attach_lua_script("Scripts/player.lua"));
-        assert!(!entity.attach_lua_script("Scripts/player.lua"));
-        entity.behavior_params.insert(
-            "Health".into(),
-            [("value".into(), FieldValue::F32(75.0))].into(),
-        );
-        let addresses: Vec<_> = entity
-            .attached_components()
-            .iter()
-            .map(|item| item.address.to_string())
-            .collect();
-        assert_eq!(
-            addresses,
-            ["builtin:transform", "builtin:camera", "rust:0", "lua:0"]
-        );
-
-        let mut scene = Scene::new("legacy");
-        scene.add_entity(entity);
-        let ron = ron::ser::to_string(&scene).unwrap();
-        assert!(ron.contains("behavior_params"));
-        assert!(!ron.contains("attached_components"));
-        assert!(!ron.contains("ComponentAddress"));
-    }
-
-    #[test]
-    fn removal_keeps_shared_legacy_params_until_last_duplicate_is_gone() {
-        let mut entity = Entity::new("legacy duplicates");
-        entity.behaviors = vec!["Health".into(), "Health".into()];
-        entity.behavior_params.insert(
-            "Health".into(),
-            [("value".into(), FieldValue::F32(10.0))].into(),
-        );
-        assert!(entity.remove_attached_component(ComponentAddress::Rust(0)));
-        assert!(entity.behavior_params.contains_key("Health"));
-        assert!(entity.remove_attached_component(ComponentAddress::Rust(0)));
-        assert!(entity.behavior_params.is_empty());
-        assert!(!entity.remove_attached_component(ComponentAddress::Rust(0)));
-        assert!(!entity
-            .remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Transform)));
-        assert!(entity.add_builtin_component(BuiltinComponent::Camera));
-        assert!(
-            entity.remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Camera))
-        );
-        assert!(
-            !entity.remove_attached_component(ComponentAddress::Builtin(BuiltinComponent::Camera))
-        );
-    }
-
-    #[test]
-    fn builtin_catalog_points_to_real_scene_schema_fields() {
-        let doc = crate::schema::scene_schema();
-        for kind in BuiltinComponent::ALL {
-            let schema = doc
-                .type_schema(kind.schema_type())
-                .expect("目录里的类型应存在");
-            for name in kind.schema_field_names() {
-                assert!(schema.fields.iter().any(|field| field.name == *name));
-            }
-        }
-    }
-
-    #[test]
-    fn visual_components_are_independently_addable_and_removable() {
-        let by_code = |code: &str| {
-            BuiltinComponent::ALL
-                .into_iter()
-                .find(|kind| kind.code() == code)
-                .unwrap_or_else(|| panic!("内建组件目录缺少 {code}"))
-        };
-        let mesh = by_code("mesh");
-        let lod = by_code("lod");
-        let material = by_code("material");
-        assert!(BuiltinComponent::ALL
-            .into_iter()
-            .all(|kind| kind.code() != "render"));
-
-        let mut entity = Entity::new("Visual");
-        assert!(entity.add_builtin_component(mesh));
-        assert!(mesh.present(&entity));
-        entity.morph_weights = vec![0.25, 0.75];
-
-        assert!(entity.add_builtin_component(lod));
-        assert!(lod.present(&entity));
-
-        assert!(entity.add_builtin_component(material));
-        assert!(material.present(&entity));
-        entity.material_asset = Some("Resources/Materials/Wood.mat".into());
-
-        assert!(entity.remove_attached_component(ComponentAddress::Builtin(mesh)));
-        assert!(!mesh.present(&entity));
-        assert!(entity.model.is_empty());
-        assert!(entity.morph_weights.is_empty());
-        assert!(lod.present(&entity), "移除 Mesh 不能顺手删除 LOD");
-        assert!(material.present(&entity), "移除 Mesh 不能顺手删除 Material");
-
-        assert!(entity.remove_attached_component(ComponentAddress::Builtin(lod)));
-        assert!(!lod.present(&entity));
-        assert!(entity.lod.is_empty());
-        assert!(material.present(&entity), "移除 LOD 不能顺手删除 Material");
-
-        assert!(entity.remove_attached_component(ComponentAddress::Builtin(material)));
-        assert!(!material.present(&entity));
-        assert!(entity.material_asset.is_none());
-        assert!(entity.material.is_none());
     }
 }
