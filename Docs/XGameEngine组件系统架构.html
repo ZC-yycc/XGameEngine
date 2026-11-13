@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="基于 XGameEngine 8bf296e 源码的完整组件系统架构分析：值模型、稳定身份、编辑器、持久化、运行时、Rust/Lua、Prefab 与 MCP。">
+  <title>XGameEngine 组件系统全景架构</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f7f4;
+      --paper: #ffffff;
+      --paper-2: #f9faf8;
+      --ink: #182425;
+      --sub: #586668;
+      --faint: #7a8788;
+      --rule: #d5ddda;
+      --rule-strong: #aab8b5;
+      --accent: #096a62;
+      --accent-2: #294d76;
+      --soft: #e6f2ef;
+      --soft-2: #e9eef5;
+      --warn: #885a18;
+      --warn-bg: #fcf2df;
+      --danger: #9a3e3e;
+      --danger-bg: #f9eaea;
+      --ok: #23623d;
+      --ok-bg: #e7f3ea;
+      --code: #edf1ef;
+      --identity: #6a4d8d;
+      --identity-bg: #f0eaf7;
+      --runtime: #2f5d83;
+      --runtime-bg: #e7eff6;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12191a;
+        --paper: #1a2425;
+        --paper-2: #202b2c;
+        --ink: #edf2ef;
+        --sub: #b5c3c1;
+        --faint: #8fa09e;
+        --rule: #394b4c;
+        --rule-strong: #607273;
+        --accent: #81d1c4;
+        --accent-2: #95bde6;
+        --soft: #1d3b38;
+        --soft-2: #223445;
+        --warn: #efc17d;
+        --warn-bg: #3b3021;
+        --danger: #ef9b9b;
+        --danger-bg: #422929;
+        --ok: #92d2a7;
+        --ok-bg: #213a2a;
+        --code: #243132;
+        --identity: #c3a4e6;
+        --identity-bg: #352943;
+        --runtime: #9bc7ed;
+        --runtime-bg: #25394a;
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 16px/1.72 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    a { color: var(--accent); text-underline-offset: 3px; }
+    a:hover { text-decoration-thickness: 2px; }
+    a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+    .shell {
+      max-width: 1560px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 255px minmax(0, 1fr);
+      gap: 38px;
+      padding: 24px 34px 96px;
+    }
+    nav {
+      position: sticky;
+      top: 18px;
+      align-self: start;
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+      padding: 17px 15px;
+      border: 1px solid var(--rule);
+      border-radius: 10px;
+      background: var(--paper);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    nav strong { display: block; margin: 0 8px 10px; letter-spacing: .08em; }
+    nav a { display: block; padding: 5px 8px; border-radius: 5px; text-decoration: none; color: var(--sub); }
+    nav a:hover, nav a.active { color: var(--ink); background: var(--soft); }
+    nav .nav-sub { padding-left: 18px; font-size: 12px; }
+    .nav-tools { margin: 0 6px 13px; }
+    .nav-tools input {
+      width: 100%;
+      border: 1px solid var(--rule);
+      border-radius: 6px;
+      background: var(--paper-2);
+      color: var(--ink);
+      padding: 7px 9px;
+      font: inherit;
+    }
+    .nav-status { min-height: 18px; margin-top: 5px; color: var(--faint); font-size: 11px; }
+    main { min-width: 0; max-width: 1160px; }
+    header { padding: 31px 0 32px; border-bottom: 2px solid var(--ink); }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 12px 0 15px; max-width: 1000px; font-size: clamp(30px, 3.4vw, 48px); line-height: 1.22; letter-spacing: -.035em; }
+    h2 { margin: 58px 0 13px; font-size: 27px; line-height: 1.35; scroll-margin-top: 22px; }
+    h3 { margin: 31px 0 9px; font-size: 19px; line-height: 1.45; scroll-margin-top: 22px; }
+    h4 { margin: 21px 0 7px; font-size: 16px; }
+    p { margin: 9px 0 16px; }
+    .lead { max-width: 980px; font-size: 18px; }
+    .meta, .caption, figcaption { color: var(--sub); font-size: 12px; }
+    .meta { margin-top: 13px; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 22px 0 4px;
+    }
+    .stat { padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--paper); }
+    .stat b { display: block; font-size: 21px; line-height: 1.2; }
+    .stat span { color: var(--sub); font-size: 12px; }
+    .callout { margin: 19px 0; padding: 13px 17px; border-left: 4px solid var(--accent); background: var(--soft); }
+    .callout.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+    .callout.danger { border-left-color: var(--danger); background: var(--danger-bg); }
+    .callout.ok { border-left-color: var(--ok); background: var(--ok-bg); }
+    .columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; margin: 18px 0; }
+    .columns.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .panel { padding: 15px 18px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); }
+    .panel h3, .panel h4 { margin-top: 0; }
+    .panel.value { border-top: 3px solid var(--accent); }
+    .panel.identity { border-top: 3px solid var(--identity); }
+    .panel.runtime { border-top: 3px solid var(--runtime); }
+    .scroll { overflow: auto; margin: 18px 0 25px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.58; }
+    th { background: var(--soft); text-align: left; font-size: 12px; letter-spacing: .02em; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: var(--paper-2); }
+    td:first-child { min-width: 118px; font-weight: 650; }
+    .wide td:nth-child(n+2) { min-width: 190px; }
+    .tag { display: inline-block; margin: 1px 2px 1px 0; padding: 1px 6px; border: 1px solid var(--rule); border-radius: 4px; white-space: nowrap; font-size: 11px; font-weight: 680; }
+    .tag.value { color: var(--accent); background: var(--soft); }
+    .tag.identity { color: var(--identity); background: var(--identity-bg); }
+    .tag.runtime { color: var(--runtime); background: var(--runtime-bg); }
+    .tag.warn { color: var(--warn); background: var(--warn-bg); }
+    .tag.no { color: var(--danger); background: var(--danger-bg); }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, "Microsoft YaHei", monospace; }
+    code { padding: .08em .32em; border-radius: 3px; background: var(--code); font-size: .9em; overflow-wrap: anywhere; }
+    pre { margin: 18px 0 24px; padding: 18px 20px; overflow: auto; border: 1px solid var(--rule); border-radius: 8px; background: var(--code); font-size: 13px; line-height: 1.62; }
+    pre code { padding: 0; background: none; }
+    ul, ol { padding-left: 1.45em; }
+    li { margin: 6px 0; }
+    li::marker { color: var(--accent); }
+    figure { margin: 23px 0; }
+    figcaption { margin-top: 7px; }
+    .diagram-scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 9px; background: var(--paper); }
+    .diagram { display: block; min-width: 1080px; width: 100%; height: auto; }
+    .diagram .band { fill: var(--paper-2); stroke: var(--rule); }
+    .diagram .box { fill: var(--paper); stroke: var(--rule-strong); stroke-width: 1.4; }
+    .diagram .box-value { fill: var(--soft); stroke: var(--accent); }
+    .diagram .box-identity { fill: var(--identity-bg); stroke: var(--identity); }
+    .diagram .box-runtime { fill: var(--runtime-bg); stroke: var(--runtime); }
+    .diagram .line { fill: none; stroke: var(--rule-strong); stroke-width: 1.6; marker-end: url(#arrow); }
+    .diagram .line-identity { stroke: var(--identity); }
+    .diagram .line-runtime { stroke: var(--runtime); }
+    .diagram text { fill: var(--ink); font: 13px system-ui, -apple-system, "Microsoft YaHei", sans-serif; }
+    .diagram .small { fill: var(--sub); font-size: 11px; }
+    .diagram .title { font-size: 14px; font-weight: 700; }
+    .diagram .band-title { fill: var(--sub); font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+    .sequence { display: grid; grid-template-columns: 145px minmax(0, 1fr); gap: 0; margin: 18px 0; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+    .sequence .who, .sequence .step { padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+    .sequence .who { color: var(--sub); background: var(--paper-2); font-size: 12px; font-weight: 700; }
+    .sequence .step { background: var(--paper); }
+    .sequence > :nth-last-child(-n+2) { border-bottom: 0; }
+    .formula { margin: 18px 0; padding: 18px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); text-align: center; font-size: 19px; }
+    .formula .identity-text { color: var(--identity); font-weight: 750; }
+    .flow-strip { display: flex; align-items: stretch; gap: 8px; overflow-x: auto; margin: 17px 0 23px; padding-bottom: 5px; }
+    .flow-step { min-width: 142px; flex: 1 0 142px; padding: 11px 12px; border: 1px solid var(--rule); border-radius: 7px; background: var(--paper); font-size: 13px; }
+    .flow-step b { display: block; margin-bottom: 3px; }
+    .flow-arrow { align-self: center; color: var(--faint); font-weight: 800; }
+    details { margin: 10px 0; padding: 9px 14px; border: 1px solid var(--rule); border-radius: 7px; background: var(--paper); }
+    summary { cursor: pointer; font-weight: 680; }
+    .evidence { font-size: 13px; }
+    .evidence li { margin: 9px 0; overflow-wrap: anywhere; }
+    .ref { white-space: nowrap; font-size: 11px; font-weight: 700; }
+    .top { display: block; margin-top: 15px; text-align: right; font-size: 12px; }
+    .searchable[hidden] { display: none !important; }
+    .search-hit { background: var(--warn-bg); }
+    @media (max-width: 1050px) {
+      .shell { display: block; padding: 18px 21px 76px; }
+      nav { position: static; max-height: none; margin-bottom: 18px; }
+      nav a { display: inline-block; margin-right: 5px; }
+      nav .nav-sub { padding-left: 8px; }
+      .nav-tools { max-width: 360px; }
+    }
+    @media (max-width: 760px) {
+      body { font-size: 15px; }
+      .columns, .columns.three, .stats { grid-template-columns: 1fr; }
+      .sequence { grid-template-columns: 105px minmax(0, 1fr); }
+      th, td { padding: 9px 10px; }
+      h2 { font-size: 24px; }
+    }
+    @media print {
+      :root { color-scheme: light; --bg: #fff; --paper: #fff; --paper-2: #f7f7f7; --ink: #111; --sub: #444; --faint: #666; --rule: #bbb; --rule-strong: #888; --accent: #075e58; --soft: #edf5f2; --soft-2: #eef2f7; --warn-bg: #fff4e2; --danger-bg: #fcecec; --ok-bg: #edf7ef; --code: #f2f4f3; --identity-bg: #f4eff9; --runtime-bg: #edf3f8; }
+      .shell { display: block; max-width: none; padding: 0; }
+      nav, .top { display: none; }
+      h2, h3 { break-after: avoid; }
+      tr, figure, .callout, .panel, details { break-inside: avoid; }
+      .diagram-scroll, .scroll { overflow: visible; }
+      a { color: var(--ink); }
+    }
+  </style>
+</head>
+<body>
+<div class="shell" id="top">
+  <nav aria-label="报告目录">
+    <strong>目录 / CONTENTS</strong>
+    <div class="nav-tools">
+      <input id="search" type="search" placeholder="筛选本报告…" aria-label="筛选报告内容">
+      <div id="search-status" class="nav-status" aria-live="polite"></div>
+    </div>
+    <a href="#summary">01 · 核心判断</a>
+    <a href="#map">02 · 全景架构图</a>
+    <a href="#meanings">03 · 三种“组件”</a>
+    <a href="#inventory">04 · 组件目录</a>
+    <a href="#identity">05 · 稳定身份</a>
+    <a href="#editor">06 · 编辑器链路</a>
+    <a href="#persistence">07 · 持久化边界</a>
+    <a href="#runtime">08 · 运行时与双轨</a>
+    <a class="nav-sub" href="#frame">8.1 · 帧序与结构改动</a>
+    <a href="#prefab">09 · Prefab</a>
+    <a href="#mcp">10 · MCP / Agent</a>
+    <a href="#invariants">11 · 红线与故障模式</a>
+    <a href="#extend">12 · 扩展指南</a>
+    <a href="#gaps">13 · 能力边界</a>
+    <a href="#evidence">14 · 源码证据</a>
+  </nav>
+
+  <main>
+    <header>
+      <div class="eyebrow">Source-based architecture review / 2026-11-13</div>
+      <h1>XGameEngine 组件系统<br>从磁盘身份到每帧调度的完整链路</h1>
+      <p class="lead">这不是一张只列类型名的类图，而是回答五个真正决定系统行为的问题：组件值存在哪里、实例身份由谁保存、编辑如何进入 Undo 与磁盘、运行时如何装配 Rust / Lua、Prefab 与 Agent 如何在并发写入下保持同一组件。</p>
+      <p class="meta">源码基线：<code>8bf296e · feat: split visual inspector components</code>；分支 <code>master</code>。报告覆盖 <code>xgame-core</code>、<code>xgame-editor</code>、<code>xgame-runtime</code>、<code>xgame-script</code>、<code>xgame-mcp</code> 与项目决策记录。单文件 HTML，CSS / SVG / 筛选脚本均内嵌，可离线阅读；源码链接固定到该提交。</p>
+      <div class="stats" aria-label="架构摘要">
+        <div class="stat"><b>1</b><span>份运行时可变组件值模型</span></div>
+        <div class="stat"><b>11</b><span>种内建组件（10 种可增删）</span></div>
+        <div class="stat"><b>2</b><span>类扩展挂载：Rust + Lua</span></div>
+        <div class="stat"><b>(E, C)</b><span>稳定地址：实体 ID + 局部组件 ID</span></div>
+      </div>
+    </header>
+
+    <section id="summary" class="searchable">
+      <h2>01 · 核心判断</h2>
+      <div class="callout"><strong>一句话：</strong>当前系统已经具备 Unity 式的<strong>可发现、可寻址、可增删、可保存</strong>组件实例，但没有把运行时改造成第二套 ECS。磁盘 v2 保存强类型组件与稳定身份；编辑器和运行时仍共同修改唯一的 <code>Scene / Entity</code> 值模型；<code>RuntimeSceneIdentity</code> 只是一张不含组件值的身份侧车。<a class="ref" href="#s6">[S6]</a></div>
+      <div class="columns three">
+        <div class="panel value"><h3>值所有权</h3><p><code>Entity</code> 的原字段仍是渲染、物理、脚本和 Inspector 共同读写的真值。v2 装载后会投影到它，而不是让每帧系统同时维护 <code>SceneV2</code>。</p><span class="tag value">唯一可变值</span></div>
+        <div class="panel identity"><h3>身份所有权</h3><p>磁盘 v2 的 <code>ComponentIdentity</code> 与 <code>next_component_id</code> 负责跨保存稳定；运行时只提取本地 ID、来源 ID、高水位和种类。</p><span class="tag identity">稳定寻址</span></div>
+        <div class="panel runtime"><h3>行为所有权</h3><p>Rust 组件实例由 <code>BehaviorRegistry</code> 构造，Lua 状态由 <code>LuaHost</code> 按实体与脚本维护；两轨共享同一 <code>GameCtx</code>。</p><span class="tag runtime">独立运行态</span></div>
+      </div>
+      <div class="scroll"><table class="wide"><thead><tr><th>问题</th><th>准确答案</th><th>常见误读</th></tr></thead><tbody>
+        <tr><td>是不是 ECS？</td><td>主场景模型不是稀疏 ECS：<code>Entity</code> 是带强类型字段的对象，World 编排各系统。</td><td>看到 <code>ComponentMap</code> 就推断所有可保存组件都在 <code>TypeId</code> Map 里。</td></tr>
+        <tr><td>v2 是否复制组件值？</td><td>磁盘 / 编辑会话保留 v2 身份；运行时 <code>RuntimeScene</code> 只有一份 <code>Scene</code> 值和可选身份侧车。</td><td>认为脚本需要同时写 <code>Scene</code> 与 <code>SceneV2</code>。</td></tr>
+        <tr><td>组件 ID 是否全局？</td><td><code>ComponentId</code> 只在实体内唯一；完整地址是 <code>(EntityId, ComponentId)</code>。</td><td>只传组件 ID 就能跨实体定位。</td></tr>
+        <tr><td>Prefab 来源 ID 是本地 ID 吗？</td><td>不是。<code>id</code> 属于实例，<code>source_component_id</code> 指向资产组件；初次实例化可恰好同值，但语义分离。</td><td>把资产 ID 直接当实例身份并在本地分配时继续共用。</td></tr>
+        <tr><td>Parent 是组件吗？</td><td>不是。父子关系唯一入口是 Hierarchy，数据是 <code>Entity.parent</code> 元数据。</td><td>在 Inspector 再造一个 Parent 组件或第二套父选择器。</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section id="map" class="searchable">
+      <h2>02 · 全景架构图</h2>
+      <figure>
+        <div class="diagram-scroll">
+          <svg class="diagram" viewBox="0 0 1180 650" role="img" aria-labelledby="map-title map-desc">
+            <title id="map-title">XGameEngine 组件值、身份、编辑、持久化与运行时关系图</title>
+            <desc id="map-desc">编辑器和 MCP 通过 ProjectHandle 操作磁盘 v2；编辑器用 Scene 值视图和 SceneV2 身份会话；运行时使用 Scene 值与身份侧车，World 再装配 Rust 行为、Lua 和各内建系统。</desc>
+            <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--rule-strong)"/></marker></defs>
+            <rect class="band" x="18" y="28" width="1144" height="112" rx="8"/><text class="band-title" x="34" y="50">AUTHORING / TOOLING</text>
+            <rect class="band" x="18" y="163" width="1144" height="183" rx="8"/><text class="band-title" x="34" y="185">PERSISTED VALUE + IDENTITY</text>
+            <rect class="band" x="18" y="369" width="1144" height="252" rx="8"/><text class="band-title" x="34" y="391">RUNTIME OWNERSHIP</text>
+
+            <rect class="box" x="62" y="70" width="160" height="48" rx="7"/><text class="title" x="142" y="91" text-anchor="middle">Inspector</text><text class="small" x="142" y="108" text-anchor="middle">ComponentAction + Undo</text>
+            <rect class="box" x="258" y="70" width="160" height="48" rx="7"/><text class="title" x="338" y="91" text-anchor="middle">MCP / Agent</text><text class="small" x="338" y="108" text-anchor="middle">revision + stable ID</text>
+            <rect class="box" x="454" y="70" width="160" height="48" rx="7"/><text class="title" x="534" y="91" text-anchor="middle">CLI / --check</text><text class="small" x="534" y="108" text-anchor="middle">schema + validation</text>
+            <rect class="box" x="650" y="70" width="180" height="48" rx="7"/><text class="title" x="740" y="91" text-anchor="middle">ProjectHandle</text><text class="small" x="740" y="108" text-anchor="middle">GUID / lock / atomic write</text>
+            <rect class="box" x="866" y="70" width="240" height="48" rx="7"/><text class="title" x="986" y="91" text-anchor="middle">SceneLoader</text><text class="small" x="986" y="108" text-anchor="middle">runtime scene + runtime prefab</text>
+
+            <rect class="box-value" x="62" y="210" width="270" height="90" rx="8"/><text class="title" x="197" y="235" text-anchor="middle">Scene / Entity 值模型</text><text class="small" x="197" y="256" text-anchor="middle">Transform · Mesh · LOD · Material · …</text><text class="small" x="197" y="274" text-anchor="middle">behaviors + params · scripts</text><text class="small" x="197" y="292" text-anchor="middle">编辑器 / 物理 / 渲染 / 脚本共同修改</text>
+            <rect class="box-identity" x="380" y="210" width="270" height="90" rx="8"/><text class="title" x="515" y="235" text-anchor="middle">SceneV2 身份模型</text><text class="small" x="515" y="256" text-anchor="middle">ComponentIdentity · ComponentSet</text><text class="small" x="515" y="274" text-anchor="middle">next_component_id · source_component_id</text><text class="small" x="515" y="292" text-anchor="middle">强类型磁盘组件 + 严格解码</text>
+            <rect class="box" x="699" y="210" width="180" height="90" rx="8"/><text class="title" x="789" y="235" text-anchor="middle">v2 RON</text><text class="small" x="789" y="256" text-anchor="middle">磁盘引用 guid://…</text><text class="small" x="789" y="274" text-anchor="middle">场景 / Prefab</text><text class="small" x="789" y="292" text-anchor="middle">文本可 diff</text>
+            <rect class="box-identity" x="928" y="210" width="178" height="90" rx="8"/><text class="title" x="1017" y="235" text-anchor="middle">PrefabV2</text><text class="small" x="1017" y="256" text-anchor="middle">资产实体 ID</text><text class="small" x="1017" y="274" text-anchor="middle">资产组件 ID</text><text class="small" x="1017" y="292" text-anchor="middle">来源身份真相</text>
+
+            <rect class="box-runtime" x="62" y="420" width="290" height="82" rx="8"/><text class="title" x="207" y="446" text-anchor="middle">RuntimeScene</text><text class="small" x="207" y="468" text-anchor="middle">Scene（唯一可变值）</text><text class="small" x="207" y="486" text-anchor="middle">+ Option&lt;RuntimeSceneIdentity&gt;（侧车）</text>
+            <rect class="box-runtime" x="416" y="420" width="220" height="82" rx="8"/><text class="title" x="526" y="446" text-anchor="middle">World</text><text class="small" x="526" y="468" text-anchor="middle">帧序 / 结构命令 / 场景切换</text><text class="small" x="526" y="486" text-anchor="middle">身份随生成 / 销毁增量维护</text>
+            <rect class="box" x="696" y="420" width="190" height="82" rx="8"/><text class="title" x="791" y="446" text-anchor="middle">BehaviorRegistry</text><text class="small" x="791" y="468" text-anchor="middle">注册名 → 构造 + Hooks</text><text class="small" x="791" y="486" text-anchor="middle">Box&lt;dyn Behavior&gt;</text>
+            <rect class="box" x="916" y="420" width="190" height="82" rx="8"/><text class="title" x="1011" y="446" text-anchor="middle">LuaHost</text><text class="small" x="1011" y="468" text-anchor="middle">脚本缓存 / state / sandbox</text><text class="small" x="1011" y="486" text-anchor="middle">路径驻留 ID 永不清</text>
+            <rect class="box" x="416" y="543" width="690" height="48" rx="7"/><text class="title" x="761" y="564" text-anchor="middle">内建系统：Render · Physics · Animation · UI · Audio · Particle · Camera</text><text class="small" x="761" y="581" text-anchor="middle">都读取同一 Scene 值；系统私有运行态不冒充可保存组件</text>
+
+            <path class="line" d="M222 94 H650"/><path class="line" d="M418 94 H650"/><path class="line" d="M614 94 H650"/>
+            <path class="line" d="M740 118 V194 H789 V210"/><path class="line" d="M866 94 H830"/>
+            <path class="line" d="M197 210 V145 H142 V118"/><path class="line line-identity" d="M515 210 V145 H197 V210"/>
+            <path class="line line-identity" d="M650 255 H699"/><path class="line line-identity" d="M879 255 H928"/>
+            <path class="line line-runtime" d="M986 118 V355 H207 V420"/>
+            <path class="line line-runtime" d="M352 461 H416"/><path class="line line-runtime" d="M636 461 H696"/><path class="line line-runtime" d="M636 477 H916"/><path class="line" d="M526 502 V543"/>
+            <text class="small" x="362" y="199">保存时 reconcile；运行时只投影值</text>
+            <text class="small" x="212" y="405">load_runtime_scene()</text>
+            <text class="small" x="661" y="447">Rust 轨</text><text class="small" x="883" y="447">Lua 轨</text>
+          </svg>
+        </div>
+        <figcaption>绿色区域是唯一可变值，紫色区域是跨保存身份，蓝色区域是运行时所有权。最重要的非箭头是：<strong>World 不保留第二份 SceneV2 组件值</strong>。<a class="ref" href="#s6">[S6]</a> <a class="ref" href="#s10">[S10]</a></figcaption>
+      </figure>
+      <div class="callout warn"><strong>读图时不要把“映射”当“复制后双写”：</strong>编辑器 v2 会话确实同时持有 <code>Scene</code> 值视图和 <code>SceneV2</code> 身份快照，但 UI 只改前者；保存、Undo、Play 前才通过 <code>reconcile_from_v1</code> 把值合回身份候选。运行时则在装载边界直接拆成值 + 侧车。<a class="ref" href="#s8">[S8]</a></div>
+    </section>
+
+    <section id="meanings" class="searchable">
+      <h2>03 · 代码里三种“组件”必须分开</h2>
+      <p>同一个词在仓库里指向三套不同生命周期。如果不先拆开，最容易得出“组件已经在 ComponentMap 里统一”或“Rust Behavior 就是磁盘组件本体”的错误结论。</p>
+      <div class="scroll"><table class="wide"><thead><tr><th>概念</th><th>真实载体</th><th>是否落盘</th><th>身份 / 生命周期</th><th>主要消费者</th></tr></thead><tbody>
+        <tr><td>可保存挂载物</td><td>v1：<code>Entity</code> 强类型字段、<code>behaviors</code>、<code>behavior_params</code>、<code>scripts</code>；v2：<code>ComponentData</code>。</td><td><span class="tag value">是</span></td><td>v1 地址可能是列表槽位；v2 用 <code>(EntityId, ComponentId)</code>。</td><td>Inspector、ProjectHandle、Prefab、MCP、World 装配。</td></tr>
+        <tr><td>Rust 行为实例</td><td><code>BehaviorInstance { component: Box&lt;dyn Behavior&gt;, hooks, started }</code>。</td><td><span class="tag no">实例不落盘</span> 只保存注册名与字段值</td><td>每次 World / Play 会话构造；启动标志按实例保存。</td><td><code>dispatch_behaviors</code>、运行态 Inspector。</td></tr>
+        <tr><td>临时类型状态</td><td><code>Entity.components: ComponentMap&lt;TypeId, Box&lt;dyn Any&gt;&gt;</code>。</td><td><span class="tag no">否</span> <code>#[serde(skip)]</code></td><td>每 Rust 类型每实体一份；克隆 Entity 时 Map 清空。</td><td>角色状态、物理句柄等系统私有运行态。</td></tr>
+      </tbody></table></div>
+      <div class="columns">
+        <div class="panel"><h3>第四类：系统私有运行态</h3><p><code>PhysicsWorld</code> 的刚体、<code>AnimationDriver</code> 的时钟、粒子桶、音频句柄、Lua <code>state_*</code> 都不是场景组件值。它们由 World 按实体 ID 同步、切场景时清理或保留。</p></div>
+        <div class="panel"><h3>为什么仍保留 ComponentMap</h3><p>它适合“每帧读写但不应保存”的强类型状态：O(1) TypeId 查询、单类型单件、命中时可零分配。把它序列化会引入跨 DLL 类型名、版本和克隆语义问题。</p></div>
+      </div>
+      <div class="callout"><strong>命名上的陷阱：</strong><code>register_component&lt;T&gt;</code> 注册的“纯数据 Rust 组件”并不进入 <code>ComponentMap</code>；它被 <code>DataComponent&lt;T&gt;</code> 包装成空钩子的 Behavior，继续复用 <code>behaviors / behavior_params</code> 持久化通道。<a class="ref" href="#s7">[S7]</a></div>
+    </section>
+
+    <section id="inventory" class="searchable">
+      <h2>04 · 当前组件目录与数据归属</h2>
+      <p><code>BuiltinComponent::ALL</code> 是编辑器和工具统一发现内建组件的清单。Transform 固有；其余 10 种都可独立增加、删除和获得 v2 身份。Mesh / LOD / Material 已在当前基线拆成三份真实组件，不再共用旧 Render 身份。<a class="ref" href="#s2">[S2]</a></p>
+      <div class="scroll"><table class="wide"><thead><tr><th>组件</th><th>唯一值所在</th><th>“存在”判据</th><th>可移除</th><th>主要运行时消费者</th></tr></thead><tbody>
+        <tr><td>Transform</td><td><code>Entity.transform</code></td><td>恒存在；v2 单列 <code>transform_identity</code></td><td><span class="tag no">否</span></td><td>层级、渲染、物理、相机、脚本。</td></tr>
+        <tr><td>Mesh</td><td><code>model + morph_weights</code></td><td>模型路径或权重非空</td><td><span class="tag value">是</span></td><td>模型装载、morph、渲染、拾取。</td></tr>
+        <tr><td>LOD</td><td><code>lod: LodGroup</code></td><td>LOD 级非空</td><td><span class="tag value">是</span></td><td>模型选择、绘制距离、拾取。</td></tr>
+        <tr><td>Material</td><td><code>material_asset + material</code></td><td>资产或逐实体覆盖存在</td><td><span class="tag value">是</span></td><td>材质解析、批次键、渲染。</td></tr>
+        <tr><td>UI Element</td><td><code>ui: Option&lt;UiElement&gt;</code></td><td><code>Some</code></td><td><span class="tag value">是</span></td><td>布局、命中、焦点、UI 绘制。</td></tr>
+        <tr><td>Animator</td><td><code>animator: Option&lt;Animator&gt;</code></td><td><code>Some</code></td><td><span class="tag value">是</span></td><td>AnimationDriver、根运动、动画事件。</td></tr>
+        <tr><td>Physics</td><td><code>physics: Option&lt;PhysicsBody&gt;</code></td><td><code>Some</code></td><td><span class="tag value">是</span></td><td>Rapier 刚体 / 碰撞体同步。</td></tr>
+        <tr><td>Character</td><td><code>controller: Option&lt;CharacterController&gt;</code></td><td><code>Some</code></td><td><span class="tag value">是</span></td><td>运动学胶囊、坡面、台阶、接触。</td></tr>
+        <tr><td>Audio Source</td><td><code>audio: Option&lt;AudioSource&gt;</code></td><td><code>Some</code></td><td><span class="tag value">是</span></td><td>autoplay、空间位置、音频总线。</td></tr>
+        <tr><td>Camera</td><td><code>camera: Option&lt;Camera&gt;</code></td><td><code>Some</code></td><td><span class="tag value">是</span></td><td>主相机解析、三宿主取景。</td></tr>
+        <tr><td>Particle Emitter</td><td><code>particle: Option&lt;ParticleEmitter&gt;</code></td><td><code>Some</code></td><td><span class="tag value">是</span></td><td>CPU 粒子模拟、billboard 绘制。</td></tr>
+        <tr><td>Rust</td><td><code>behaviors[] + behavior_params{name→fields}</code></td><td>注册名挂在列表</td><td><span class="tag value">按具体行</span></td><td>BehaviorRegistry → BehaviorInstance。</td></tr>
+        <tr><td>Lua</td><td><code>scripts[]</code></td><td>脚本路径挂在列表</td><td><span class="tag value">按具体行</span></td><td>LuaHost 编译缓存、环境与 state 表。</td></tr>
+      </tbody></table></div>
+      <div class="columns">
+        <div class="panel"><h3>是实体元数据，不是组件</h3><p><code>name</code>、<code>id</code>、<code>parent</code>、<code>prefab</code>、<code>layer</code>。其中 Parent 只由 Hierarchy 管理；Prefab 引用描述来源；Layer 影响物理分组。</p></div>
+        <div class="panel"><h3>是场景数据，不挂实体</h3><p><code>Scene.lights</code> 与 <code>ambient</code> 仍在场景级。不要因为 Camera 已是实体组件，就推断 Light 也走同一组件目录。</p></div>
+      </div>
+    </section>
+
+    <section id="identity" class="searchable">
+      <h2>05 · v2 稳定身份：地址、来源与高水位</h2>
+      <div class="formula"><span class="identity-text">StableComponentAddress</span> = (<code>EntityId</code>, <code>ComponentId</code>)</div>
+      <div class="columns three">
+        <div class="panel identity"><h3>本地 ID</h3><p><code>ComponentId</code> 非 0、非 <code>u64::MAX</code>，只在一个实体内部唯一。Transform 也有自己的本地 ID。</p></div>
+        <div class="panel identity"><h3>来源 ID</h3><p><code>source_component_id</code> 只在 Prefab 实例上出现，指向资产实体中的组件 ID；普通实体必须为 <code>None</code>。</p></div>
+        <div class="panel identity"><h3>持久高水位</h3><p><code>next_component_id</code> 随实体保存。删除最高项、Undo 回退、重排都不降低它；耗尽时拒绝，不回绕。</p></div>
+      </div>
+      <h3>5.1 v2 文件形状</h3>
+      <pre><code>SceneV2
+└─ EntityV2
+   ├─ id / name / parent / prefab / layer
+   ├─ transform: Transform
+   ├─ transform_identity: { id, source_component_id? }
+   └─ components: ComponentSet
+      ├─ next_component_id
+      └─ entries: [
+           ComponentInstance {
+             identity: { id, source_component_id? },
+             data: ComponentData::Mesh | Lod | Material | Ui | Animator |
+                   Physics | Character | Audio | Camera | Particle |
+                   Rust { registered_name, fields } | Lua { path }
+           }
+         ]</code></pre>
+      <h3>5.2 身份如何在编辑后认回</h3>
+      <div class="flow-strip" aria-label="身份合并流程">
+        <div class="flow-step"><b>旧身份快照</b>按实体 ID 找到上一版 <code>EntityV2</code></div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>当前值视图</b>从 <code>Entity</code> 枚举内建 / Rust / Lua</div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>稳定键匹配</b>内建种类、注册名或脚本路径</div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>已有项</b>保留本地与来源 ID</div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>新增项</b>从持久高水位分配</div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>候选全验证</b>成功后才替换会话身份</div>
+      </div>
+      <p>Lua 路径 / Rust 注册名在 v1 值视图里既是内容又是关联键。只有“旧同种类恰好一项、新同种类恰好一项、且旧项没有 Prefab 来源”时，改名才可视作同一实例；有歧义就分配新 ID，不猜。<a class="ref" href="#s5">[S5]</a></p>
+      <h3>5.3 旧视觉布局如何迁移</h3>
+      <p>拆分前 v2 用 <code>Render(model, lod, material_asset, morph)</code>，另有 <code>MaterialOverride</code>。当前格式将其拆为 Mesh、LOD、Material。旧文件仍可读，但新建和 Agent 修改禁止生成旧变体；首次经编辑器保存时，一个旧 ID 最多交给一个实际存在的新组件，其余从高水位分配。这样不会伪造“一份身份同时属于三项”。</p>
+      <div class="callout warn"><strong>过渡门禁：</strong>实体只要还含旧 <code>Render / MaterialOverride</code>，MCP 的通用组件编辑连 Transform patch 都拒绝；先让编辑器保存完成布局迁移。<a class="ref" href="#s5">[S5]</a> <a class="ref" href="#s12">[S12]</a></div>
+    </section>
+
+    <section id="editor" class="searchable">
+      <h2>06 · 编辑器：UI 改值，保存阶段合身份</h2>
+      <h3>6.1 Inspector 的统一结构入口</h3>
+      <div class="sequence">
+        <div class="who">菜单 / 右键</div><div class="step">只产生 <code>ComponentAction::{AddBuiltin, AddRust, AddLua, Remove}</code>。</div>
+        <div class="who">working 副本</div><div class="step">克隆选中 <code>Entity</code>，调用 <code>add_* / remove_attached_component</code> 修改原字段。</div>
+        <div class="who">动作门禁</div><div class="step">Play / Pause 不仅按钮置灰，执行层的 <code>editing</code> 也会拒绝结构变化。</div>
+        <div class="who">Undo</div><div class="step">替换实体之前 <code>push_undo()</code>；v2 会同时把当前值合入一份身份历史快照。</div>
+        <div class="who">写回</div><div class="step">用 working 替换 <code>scene.entities[index]</code>；UI 不直接分配任何 ComponentId。</div>
+      </div>
+      <p>标题右键、具体 Rust / Lua 行右键、Inspector 空白右键与底部 Add Component 共用同一个动作枚举。Scripts / Behaviors 标题只是集合，不能“一键移除整个标题”；Transform 真实存在但锁定；Mesh / LOD / Material 的移除边界互不连带。<a class="ref" href="#s9">[S9]</a></p>
+      <h3>6.2 v2 编辑会话</h3>
+      <pre><code>V2EditorSession {
+  identity: SceneV2,   // 组件 ID / 来源 / 高水位的会话快照
+  disk_bytes: Vec&lt;u8&gt; // 打开或上次写入时的完整磁盘原文
+}
+
+EditorState.scene: Scene // Inspector、Hierarchy、Gizmo 实际编辑的唯一值视图</code></pre>
+      <div class="columns">
+        <div class="panel"><h3>Undo / Redo</h3><p>值快照与 v2 身份快照成对推进。Undo 恢复旧内容时，<code>keep_allocated_ids</code> 取前后历史的较大高水位，避免撤销后复用已经发放的 ID。</p></div>
+        <div class="panel"><h3>Save</h3><p>加载所有引用 PrefabV2，克隆身份快照，<code>reconcile_from_v1</code> 构造完整候选；条件写入成功后才更新会话身份、磁盘字节和脏检查基准。</p></div>
+      </div>
+      <div class="callout ok"><strong>并发编辑的结果是“保草稿、拒覆盖”：</strong>若外部 Agent 已改过磁盘原文，<code>write_scene_v2_if_unchanged</code> 失败；内存草稿仍在，用户可重新打开或处理冲突。Play 中保存则硬拒绝，因为此时 Scene 是物理和脚本正在改的运行副本。<a class="ref" href="#s8">[S8]</a></div>
+      <h3>6.3 进入 Play</h3>
+      <p>编辑器不会把裸 <code>Scene</code> 直接交给 v2 World。它先把未保存值合回身份副本，再调用 <code>RuntimeScene::from_v2</code>；编辑器 Play、独立游戏与无头运行因此共享同一份“值 + 身份”载荷和同一段 <code>World::update</code>。</p>
+    </section>
+
+    <section id="persistence" class="searchable">
+      <h2>07 · ProjectHandle：所有磁盘语义的边界</h2>
+      <div class="scroll"><table class="wide"><thead><tr><th>阶段</th><th>ProjectHandle 的责任</th><th>为什么不能旁路</th></tr></thead><tbody>
+        <tr><td>读取 v2</td><td>项目相对路径门禁、严格 RON 解码、GUID → 路径、加载来源 Prefab、核对来源组件 ID 与种类。</td><td>单独解析 SceneV2 只能验证文件内部，无法证明来源 ID 仍指向同一种资产组件。</td></tr>
+        <tr><td>严格解码</td><td><code>serde_ignored</code> 检出嵌套未知字段；专用 MapAccess 拒绝 Rust 参数 / 动画参数重复键。</td><td>普通 serde 可能吞未知字段或让 BTreeMap 后值覆盖前值，下一次保存会不可逆丢数据。</td></tr>
+        <tr><td>资产引用</td><td>磁盘存 <code>guid://…</code>，内存存项目相对路径；v2 的 Mesh、LOD、Material、Lua、Audio、UI、Prefab 来源都走统一遍历。</td><td>GUID 进入运行热路径会污染大量消费者；直接写路径又失去移动稳定性。</td></tr>
+        <tr><td>条件写入</td><td>比较本次读取的完整原文字节，持有单文件 OS 锁，再编码 GUID、原子替换；内容相同不改 mtime。</td><td>revision 只是快速令牌；只比 hash 或写前不持锁仍有 TOCTOU 窗口。</td></tr>
+        <tr><td>版本隔离</td><td>v1 入口拒绝 v2；v2 写入口只写新文件或合法 v2；运行专用入口按版本返回完整载荷。</td><td><code>to_v1()</code> 会丢组件身份，绝不能再经旧入口覆盖 v2 文件。</td></tr>
+      </tbody></table></div>
+      <div class="callout danger"><strong>最危险的错误路径：</strong><code>load_scene_v2 → to_v1 → write_scene</code>。值看似完整，组件 ID、来源 ID 与高水位却全部消失；旧入口明确拒绝 v2 正是为了阻断这种静默降级。<a class="ref" href="#s10">[S10]</a></div>
+      <details><summary>v1 为什么仍然存在？</summary><p>一是兼容旧项目与测试；二是 <code>Scene / Entity</code> 已被渲染、物理、脚本等大量消费者验证，是当前高效值模型。v2 的目标是补齐持久实例身份和严格结构，不是强迫所有每帧系统改读一套嵌套枚举。旧磁盘 v1 的 Rust / Lua 地址仍是槽位，MCP 会明确返回 <code>address_stability: legacy</code>；只有显式迁移后才可用稳定 ID 写。</p></details>
+    </section>
+
+    <section id="runtime" class="searchable">
+      <h2>08 · 运行时：一份值、可选侧车、两条代码轨</h2>
+      <h3>8.1 RuntimeScene 与身份侧车</h3>
+      <pre><code>RuntimeScene
+├─ scene: Scene                         // 唯一可变组件值
+└─ identities: Option&lt;RuntimeSceneIdentity&gt;
+   └─ RuntimeEntityIdentity
+      ├─ entity_id
+      ├─ transform: RuntimeComponentIdentity
+      ├─ next_component_id
+      └─ components[] { identity, kind }
+
+RuntimeComponentKind = Builtin(kind) | Rust(name) | Lua(path) | legacy visual</code></pre>
+      <p><code>World::component_identity(entity, component)</code> 不只查侧车，还确认该种类仍存在于当前 Scene；宿主若直接经 <code>scene_mut()</code> 删除值，不会得到“幽灵身份”。正式的运行时结构写入口仍必须同时维护侧车。<a class="ref" href="#s6">[S6]</a></p>
+      <h3>8.2 Rust 轨：声明、注册、实例</h3>
+      <div class="flow-strip">
+        <div class="flow-step"><b>磁盘声明</b><code>behaviors[]</code> 保存注册名</div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>插件注册</b><code>register&lt;T&gt;</code> 或 <code>register_component&lt;T&gt;</code></div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>装配</b>按名构造 <code>Box&lt;dyn Behavior&gt;</code></div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>套参数</b><code>behavior_params[name]</code> 经 Inspect 写入</div><span class="flow-arrow">→</span>
+        <div class="flow-step"><b>热路径</b>调用预复制的函数指针，不再按字符串查表</div>
+      </div>
+      <p><code>Behavior = Lifecycle + Inspect</code>。字段表既服务编辑器，也让装配期能恢复持久值；生命周期包含 start、update、fixed_update、碰撞 enter / exit、动画事件与 destroy。插件 DLL 的旧句柄不会卸载，避免存活 trait object 的 vtable 悬垂。<a class="ref" href="#s7">[S7]</a></p>
+      <h3>8.3 Lua 轨：路径资产、隔离环境、每实体状态</h3>
+      <p><code>LuaHost</code> 以项目相对路径缓存编译结果；每个脚本有独立环境表，元表的 <code>__index</code> 指向宿主全局 API。<code>state_*</code> 表按 <code>(EntityId, path_intern_id)</code> 保存，路径驻留 ID 永不清；热重载只清编译缓存，因此状态不会因驻留顺序变化而错位。每次钩子还有 20 万指令预算与 128 MiB VM 内存上限。<a class="ref" href="#s11">[S11]</a></p>
+      <div class="callout warn"><strong>这也是“同路径多实例”尚不能开放的根因：</strong>Lua 状态键还没有 ComponentId；Rust 参数也仍按注册名存。仅放宽 Inspector 去重会让多个实例共享状态或字段，必须先改运行时寻址。</div>
+      <h3>8.4 两轨为什么能力一致</h3>
+      <p>Rust <code>Lifecycle</code> 的 <code>Ctx</code> 只是 <code>GameCtx</code> 别名；Lua API 也是对同一批 <code>GameCtx</code> 方法的一行转发。场景、物理、输入、音频、时钟、日志、结构命令和当前实体都在这一束里。固定顺序是<strong>同阶段 Rust 先、Lua 后</strong>：Rust 本阶段写入对 Lua 当帧可见，反向不保证。<a class="ref" href="#s10">[S10]</a> <a class="ref" href="#s11">[S11]</a></p>
+    </section>
+
+    <section id="frame" class="searchable">
+      <h2>08.1 · 每帧时序与结构改动语义</h2>
+      <figure><pre><code>World::update(dt)
+  0  UI 布局 + 命中（脚本本帧可读 ui_clicked）
+  1  Start：Rust Behavior → Lua（尚未启动的实体 / 组件）
+  2  while fixed step:
+       FixedUpdate：Rust → Lua
+       consume commands → sync bodies → physics.step
+       pull dynamic bodies → collision / character callbacks
+  3  Update：Rust → Lua
+     consume commands
+  3.1 apply_pending_scene_load（唯一换场景时机）→ sync bodies
+  3.2 animation tick → root motion → animation events
+  3.5 particles
+  4  listener / audio sync / flush
+  5  input.end_frame</code></pre><figcaption>这是当前 World 的固定编排，不是可由组件排序任意改变的 PlayerLoop。<a class="ref" href="#s10">[S10]</a></figcaption></figure>
+      <div class="scroll"><table class="wide"><thead><tr><th>操作</th><th>Scene 值何时变化</th><th>命令何时结算</th><th>组件系统后果</th></tr></thead><tbody>
+        <tr><td><code>spawn_entity</code></td><td><span class="tag value">钩子内立即</span></td><td>阶段后登记身份、补物理；新实体下轮 Start。</td><td>同一钩子可立刻按返回 ID 改位置。</td></tr>
+        <tr><td><code>spawn_prefab</code></td><td><span class="tag value">整棵子树立即</span></td><td>每个新实体一条 EntitySpawned，附可选身份。</td><td>v2 资产把资产 ID 转成“本地 ID + 来源 ID”。</td></tr>
+        <tr><td><code>destroy</code></td><td><span class="tag value">整棵子树立即移除</span></td><td>阶段后 on_destroy、刚体、状态、身份侧车清理。</td><td>Destroy 钩子触发时实体已不在 Scene，但 Lua state 尚可读到回调结束。</td></tr>
+        <tr><td><code>load_scene</code></td><td><span class="tag warn">不立即</span></td><td>帧末只认最后一次请求。</td><td>钩子剩余代码仍在旧场景；新场景 Start 下一帧运行。</td></tr>
+      </tbody></table></div>
+      <p>这套“Scene 立即、系统通知稍后”的生成 / 销毁设计，解决了最自然的 <code>spawn → set_pos</code> 连写；派发使用实体 ID 快照且不跨钩子持有 Entity 索引，因此容器变化不会造成悬垂索引。场景切换无法同样立即，因为钩子正在借用 Scene，且固定物理步还可能把旧刚体回写。</p>
+      <h3>切场景时清什么、留什么</h3>
+      <div class="columns">
+        <div class="panel"><h3>清理</h3><p>旧刚体 / 接触基线、Behavior 实例、Lua <code>started</code> 与每实体 state、动画实体时钟、粒子、UI 交互、音频 autoplay、实体存档变量、组件身份侧车。</p></div>
+        <div class="panel"><h3>保留</h3><p>Lua 编译缓存、路径驻留表、脚本模块级全局、日志缓冲、全局存档变量、可复用资产缓存。模块全局跨场景与 Unity 不重载 domain 的语义一致。</p></div>
+      </div>
+    </section>
+
+    <section id="prefab" class="searchable">
+      <h2>09 · Prefab：本地身份与资产来源的双坐标</h2>
+      <figure><pre><code>PrefabV2 资产实体 A                   SceneV2 实例实体 A'
+  Mesh.id = 4       ───────────────▶   Mesh.identity.id = 4*（实例本地）
+                                         source_component_id = 4（资产来源）
+
+  next_id = 7                           next_id = 7（实例自己的高水位）
+
+* 初次实例化允许恰好同值；后续本地新增 / 删除后，两套序列独立推进。</code></pre><figcaption>“同值”不是“同一命名空间”。Apply / Revert 必须始终分别处理实例本地 ID 与资产来源 ID。<a class="ref" href="#s6">[S6]</a></figcaption></figure>
+      <h3>9.1 运行时实例化</h3>
+      <p><code>RuntimePrefab::instantiate</code> 先让旧 Prefab 值模型分配新的场景实体 ID、重映射内部 parent、贴 <code>PrefabInstanceRef</code>；随后按同一实体顺序把资产组件身份转为实例身份。v1 资产只能在无歧义时生成临时本地身份，重复旧挂载物会放弃该实体身份但不阻断原有运行行为。</p>
+      <h3>9.2 Apply 分成两条路径</h3>
+      <div class="scroll"><table class="wide"><thead><tr><th>路径</th><th>触发条件</th><th>身份行为</th><th>写盘行为</th></tr></thead><tbody>
+        <tr><td>值 Apply</td><td>资产实体、组件种类和关联键结构完全一致。</td><td>资产 ID、来源 ID、高水位和顺序全部保留，只替换名称、父级、层、Transform 与组件值。</td><td>Prefab 单文件条件写；当前场景原文也必须仍等于会话基准。</td></tr>
+        <tr><td>结构性 Apply</td><td>实体 / 组件增删，或 Rust 注册名 / Lua 路径等关联结构变化。</td><td>存活来源沿用资产 ID；新增资产实体 / 组件从资产侧独立分配；当前实例回填来源元数据。</td><td>锁住资产与所有引用场景，使用可恢复多文件事务同步来源元数据。</td></tr>
+      </tbody></table></div>
+      <p>其他实例不会被偷偷 Revert：存活来源保持，资产删除的实体转为本地实体，失效组件只解除来源关联；不注入资产新增项，也不覆盖本地字段。没有逐字段 override 记录时，全量覆盖会吃掉用户修改，因此“取资产值”只由显式 Revert 完成。</p>
+      <h3>9.3 Revert</h3>
+      <p>Revert 在内存副本重建子树，按 <code>source_component_id</code> 认回实例已有组件的本地 ID；资产新增组件从实例原高水位分配，资产删除项消失。实体 ID、根世界变换和父节点保留；空资产不动手。准备成功后才压 Undo，不写 Prefab 资产。<a class="ref" href="#s5">[S5]</a> <a class="ref" href="#s8">[S8]</a></p>
+    </section>
+
+    <section id="mcp" class="searchable">
+      <h2>10 · MCP / Agent：从只读发现到条件局部写</h2>
+      <div class="scroll"><table class="wide"><thead><tr><th>工具</th><th>适用格式</th><th>输出 / 操作</th><th>安全边界</th></tr></thead><tbody>
+        <tr><td><code>component_catalog_read</code></td><td>格式无关</td><td>从 <code>scene_schema()</code> 筛出 11 种内建目录。</td><td>不加载插件 DLL，不复制字段定义。</td></tr>
+        <tr><td><code>entity_components_read</code></td><td>v1 值视图</td><td>内建、Rust、Lua 的统一只读列表。</td><td>明确 <code>address_stability: legacy</code>，槽位不可跨结构变化持有。</td></tr>
+        <tr><td><code>component_upgrade_preview</code></td><td>v1 → v2 预览</td><td>候选 ID、来源 ID、高水位。</td><td><code>preview_only</code>；不写盘，数字不可作为写目标。</td></tr>
+        <tr><td><code>entity_components_v2_read</code></td><td>v2</td><td>稳定 ID、来源 ID、强类型值、原文 revision。</td><td>读取前后原文字节变化即拒绝。</td></tr>
+        <tr><td><code>component_v2_edit</code></td><td>v2</td><td>patch / replace / add / remove / move。</td><td>revision、严格字段、语义体检、完整字节条件写与文件锁。</td></tr>
+      </tbody></table></div>
+      <h3>Agent 写入协议</h3>
+      <div class="sequence">
+        <div class="who">1 · Read</div><div class="step">按实体 ID 读取组件，取得 <code>revision</code> 和目标 <code>component_id</code>。</div>
+        <div class="who">2 · Intent</div><div class="step">patch 只能指向已有 JSON Pointer；replace 不准改组件种类；Transform 只允许 patch。</div>
+        <div class="who">3 · Decode</div><div class="step">add / replace 的 <code>data_ron</code> 走与 v2 文件相同的严格解码；未知或重复字段拒绝。</div>
+        <div class="who">4 · Validate</div><div class="step">组件结构约束 + 投影后的整场景语义体检 + Prefab 来源验证。</div>
+        <div class="who">5 · Commit</div><div class="step">在 OS 锁内再次比较完整原文字节，然后原子替换；返回新 revision。</div>
+      </div>
+      <div class="callout"><strong>revision 不是事务本身：</strong>它让 Agent 快速发现陈旧请求；真正防覆盖的是 core 在锁内对完整原文字节的比较与条件替换。外部绕开 ProjectHandle 直接写文件的程序不受该锁协议约束。<a class="ref" href="#s12">[S12]</a></div>
+    </section>
+
+    <section id="invariants" class="searchable">
+      <h2>11 · 架构红线与典型故障模式</h2>
+      <div class="scroll"><table class="wide"><thead><tr><th>红线</th><th>如果破坏会怎样</th><th>现有防线</th></tr></thead><tbody>
+        <tr><td>运行时只有一份组件值</td><td>脚本改 Scene、查询却读 SceneV2；两份值立刻漂移。</td><td><code>RuntimeScene::from_v2</code> 提取身份后投影到 Scene。</td></tr>
+        <tr><td>高水位永不回退</td><td>删除 / Undo 后复用 ID，旧 Agent 引用或历史来源指向另一个组件。</td><td><code>ComponentIdSequence::validate</code>、Undo 取 max。</td></tr>
+        <tr><td>来源 ID 不冒充本地 ID</td><td>实例本地新增项与资产分配冲突；Apply / Revert 对错组件。</td><td><code>ComponentIdentity</code> 两字段分存，来源校验按资产实际 ID。</td></tr>
+        <tr><td>不把 v1 槽位称作稳定 ID</td><td>Rust / Lua 重排后 Agent 改错实例。</td><td>MCP 标注 legacy；迁移预览只读。</td></tr>
+        <tr><td>v2 未知字段必须拒绝</td><td>旧程序读取后保存，悄悄删除新字段。</td><td><code>serde_ignored</code> + 严格 MapAccess。</td></tr>
+        <tr><td>GUID 转换只在项目边界</td><td>热路径和数百消费点都要理解 guid://，值模型失去可直接打开的路径。</td><td><code>visit_asset_references</code> + ProjectHandle 统一编解码。</td></tr>
+        <tr><td>结构动作不绕过 Undo</td><td>右键删除与 Add Component 行为不同，脏检查 / 身份历史断裂。</td><td>全部 UI 入口收敛为 ComponentAction + working 副本。</td></tr>
+        <tr><td>同名多实例先改运行时状态键</td><td>两个 Rust 同名项共享参数；两个同路径 Lua 共享 state。</td><td>当前 v2 验证和 Inspector 都拒绝重复。</td></tr>
+      </tbody></table></div>
+      <details><summary>为什么身份侧车不是每帧从 Scene 重建？</summary><p>Scene 没有 ComponentId；重建只能重新按种类 / 名称 / 路径猜身份，不但 O(n)，还会在删除、改名和 Prefab 来源上产生新 ID 或歧义。当前做法只在装载时构造一次，在 spawn / destroy 事件上增量维护。</p></details>
+      <details><summary>为什么 Transform 不放进 entries？</summary><p>Transform 是实体固有属性，所有现有系统都直接读取；v2 让它获得 <code>transform_identity</code> 即可满足稳定寻址，同时保持不可移除语义。MCP 把它作为组件返回，但结构操作不允许删除。</p></details>
+      <details><summary>为什么 Parent 不作为组件？</summary><p>父关系已经由 <code>Entity.parent</code> 和 Hierarchy 的保世界变换 / 防环逻辑维护。再在 Inspector 建一个 Parent 组件会形成第二个编辑入口和潜在真相源；当前决策明确由 Hierarchy 独占。</p></details>
+    </section>
+
+    <section id="extend" class="searchable">
+      <h2>12 · 扩展组件系统时该改哪里</h2>
+      <h3>12.1 新增内建可保存组件</h3>
+      <ol>
+        <li>在 <code>Entity</code> 增加兼容字段：通常需要 <code>#[serde(default, skip_serializing_if = ...)]</code>，并明确 <code>PartialEq</code> / 脏检查语义。</li>
+        <li>扩展 <code>BuiltinComponent</code> 的 ALL、ADDABLE、code/name、存在判据、schema 映射和增删行为。</li>
+        <li>给 <code>ComponentData</code> 增加严格 v2 变体，补 <code>from_v1 / apply_to_v1 / kind / legacy_key</code>，资产路径还要进入统一遍历。</li>
+        <li>同步 <code>scene_schema()</code> 的类型目录与示例；这是 CLI / MCP 唯一内容源，穷举测试会钉住遗漏。</li>
+        <li>接 Inspector 展示 / 默认值 / Play 门禁，以及真正消费它的 runtime / render / physics 系统。</li>
+        <li>补 v1 往返、v2 严格编解码、ID 增删、编辑器 Undo / 保存、MCP 读写和 Prefab Apply / Revert 回归。</li>
+      </ol>
+      <h3>12.2 新增 Rust 组件</h3>
+      <div class="columns">
+        <div class="panel"><h3>有生命周期</h3><p>实现 <code>Default + Lifecycle + Inspect</code>，插件入口调用 <code>registry.register::&lt;T&gt;("Name")</code>。场景保存注册名与 Inspect 字段值。</p></div>
+        <div class="panel"><h3>只有数据</h3><p>实现 <code>Default + Inspect</code>，调用 <code>register_component::&lt;T&gt;</code>；内部包装为空钩子 Behavior，不需要新增场景格式。</p></div>
+      </div>
+      <p>跨插件边界不要依赖 <code>TypeId</code> 匹配 trait object；完整契约已经把 Lifecycle 与 Inspect 合在 <code>Behavior</code>。注册名是持久关联键，改名会影响旧场景、Prefab 来源和 Agent 寻址。</p>
+      <h3>12.3 新增 Lua 能力或挂载</h3>
+      <p>挂载新的脚本资产只需经 Inspector / Entity 的脚本路径列表；新增宿主 API 则以 <code>GameCtx</code> 方法层为真相源，<code>lua_api.rs</code> 只写转发，并同步机器可读 <code>script_api()</code> 与 <code>Docs/脚本API.md</code>。不要在 Lua 绑定层复制业务逻辑。</p>
+      <h3>12.4 真正开放同名多实例</h3>
+      <div class="callout warn"><strong>这不是删一行去重：</strong>至少要把 Rust 参数从注册名键改成 ComponentId 键，把 BehaviorInstance 与 Lua state 按 ComponentId 隔离，让派发 / Inspector / Prefab / MCP / 存档都能区分实例，并定义同类型实例顺序与脚本 API。否则“多个实例”只有文件层，运行时仍串状态。</div>
+    </section>
+
+    <section id="gaps" class="searchable">
+      <h2>13 · 当前能力边界与下一层问题</h2>
+      <div class="scroll"><table class="wide"><thead><tr><th>边界</th><th>现状</th><th>意味着什么</th></tr></thead><tbody>
+        <tr><td>同种多实例</td><td>每内建种类一份、每 Rust 注册名一份、每 Lua 路径一份。</td><td>v2 已有实例 ID，但运行时状态键尚未全面按 ID 隔离。</td></tr>
+        <tr><td>Prefab 高阶能力</td><td>实体 / 组件结构 Apply 与 Revert 已完整；嵌套 Prefab、Variant、逐字段 override 可视化仍缺。</td><td>其他实例只同步来源元数据，不自动传播值；显式 Revert 才取资产内容。</td></tr>
+        <tr><td>自定义 Inspector</td><td>Rust 标量 / 字符串 / 向量等走 Inspect 表；复杂内建面板手写。</td><td>尚无 Unity Custom Editor / Property Drawer 级扩展；Quat / Color 等复杂 FieldKind 仍是遗留。</td></tr>
+        <tr><td>完整 ECS</td><td>没有 archetype / sparse set 调度；Entity 仍是聚合对象。</td><td>当前优化与 API 应围绕已测 World 热路径，不应假设数据导向批处理已存在。</td></tr>
+        <tr><td>运行时结构 API</td><td>脚本生成 / 销毁 / Prefab 会维护侧车；直接 <code>scene_mut()</code> 的任意结构修改不自动补身份。</td><td>宿主扩展应走正式入口或同步维护身份，查询会过滤幽灵身份但不会凭空生成新 ID。</td></tr>
+        <tr><td>Light</td><td>仍是 <code>Scene.lights</code>，不在组件目录。</td><td>“全部场景能力都已实体组件化”并不成立。</td></tr>
+      </tbody></table></div>
+      <p>这些是能力边界，不等于当前架构失败。现有设计刻意优先保持旧值模型、运行热路径和文本资产稳定，同时把跨保存寻址、Prefab 结构事务和 Agent 写入补齐。仓库当前优先级真相仍是 <code>Docs/差距分析.md</code>；组件方向的主要后续差距是嵌套 Prefab、Variant 和逐字段 override。<a class="ref" href="#s14">[S14]</a></p>
+    </section>
+
+    <section id="evidence" class="searchable">
+      <h2>14 · 源码证据与复核入口</h2>
+      <p class="meta">以下链接固定到本报告基线 <code>8bf296e</code>。行号用于快速定位；架构判断优先来自源码与决策记录，而不是旧截图或历史计划。</p>
+      <ol class="evidence">
+        <li id="s1"><strong>[S1] 唯一值模型：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-core/src/scene.rs#L20-L228">scene.rs · Entity 全字段与 ComponentMap 跳过序列化</a>。</li>
+        <li id="s2"><strong>[S2] 统一发现与旧地址：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-core/src/component_view.rs#L1-L303">component_view.rs · 11 种内建、Rust / Lua 视图、增删边界</a>。</li>
+        <li id="s3"><strong>[S3] 临时 TypeId 状态：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-core/src/component.rs#L35-L155">component.rs · ComponentMap 与空 Clone</a>。</li>
+        <li id="s4"><strong>[S4] ID 基础：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-core/src/component_id.rs#L1-L95">component_id.rs · ComponentId、来源身份与高水位</a>。</li>
+        <li id="s5"><strong>[S5] v2 强类型结构：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-core/src/scene_v2.rs#L39-L167">scene_v2.rs · SceneV2 / ComponentData</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-core/src/scene_v2.rs#L400-L963">结构操作、校验、reconcile 与 Revert 身份</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-core/src/scene_v2.rs#L1160-L1348">结构性 Prefab Apply</a>。</li>
+        <li id="s6"><strong>[S6] 运行载荷与侧车：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-core/src/runtime_scene.rs#L1-L371">runtime_scene.rs · RuntimeScene、RuntimePrefab 与来源转换</a>。</li>
+        <li id="s7"><strong>[S7] Rust 组件契约：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-runtime/src/registry.rs#L20-L189">registry.rs · DataComponent、注册表与实例</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-runtime/src/lifecycle.rs#L28-L105">lifecycle.rs · Lifecycle + Inspect = Behavior</a>。</li>
+        <li id="s8"><strong>[S8] 编辑器会话：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-editor/src/state.rs#L1146-L1180">state.rs · V2EditorSession</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-editor/src/state.rs#L1746-L1874">Undo / Redo 身份高水位</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-editor/src/state.rs#L3205-L3294">条件保存与 reconcile</a>。</li>
+        <li id="s9"><strong>[S9] Inspector 结构入口：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-editor/src/panels/inspector.rs#L85-L294">inspector.rs · ComponentAction、Play 门禁、菜单与 Undo</a>。</li>
+        <li id="s10"><strong>[S10] World 所有权与帧序：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-runtime/src/world.rs#L169-L378">world.rs · World 与完整载荷</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-runtime/src/world.rs#L906-L1031">帧末场景切换</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-runtime/src/world.rs#L1187-L1473">帧循环、双轨顺序与 Rust 装配</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-runtime/src/world.rs#L1712-L1847">结构命令与身份增量</a>。</li>
+        <li id="s11"><strong>[S11] GameCtx 与 Lua：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-script/src/ctx.rs#L55-L97">ctx.rs · 两轨共用状态束</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-script/src/ctx.rs#L962-L1205">立即生成 / 销毁与 RuntimePrefab</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-script/src/lua_host.rs#L114-L165">lua_host.rs · 状态与缓存所有权</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-script/src/lua_host.rs#L499-L615">Lua 钩子状态与调用窗口</a>。</li>
+        <li id="s12"><strong>[S12] MCP 稳定写：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-mcp/src/tools.rs#L617-L813">tools.rs · v1 / 预览 / v2 读取</a>、<a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/crates/xgame-mcp/src/tools.rs#L844-L939">component_v2_edit</a>。</li>
+        <li id="s13"><strong>[S13] 不可推翻约束：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/Docs/%E5%86%B3%E7%AD%96%E8%AE%B0%E5%BD%95.md#L163-L391">决策记录 · 组件身份、编辑器、Prefab、World 侧车与运行期生成</a>。</li>
+        <li id="s14"><strong>[S14] 当前差距与优先级：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/Docs/%E5%B7%AE%E8%B7%9D%E5%88%86%E6%9E%90.md#L1-L19">差距分析 · Unity 式组件身份与剩余 Prefab 差距</a>。</li>
+        <li id="s15"><strong>[S15] 运行流程：</strong><a href="https://github.com/ZC-yycc/XGameEngine/blob/8bf296e/FLOW.md">FLOW.md · 启动、每帧、编辑器、Prefab 与数据流</a>。</li>
+      </ol>
+      <div class="callout ok"><strong>复核结论：</strong>本报告的中心判断同时被类型结构、写入边界、编辑器会话、运行时装配与回归测试命名互相印证；没有把路线图里的目标当作源码里已存在的行为。</div>
+      <a class="top" href="#top">返回顶部 ↑</a>
+    </section>
+  </main>
+</div>
+
+<script>
+  (() => {
+    const input = document.getElementById('search');
+    const status = document.getElementById('search-status');
+    const sections = Array.from(document.querySelectorAll('.searchable'));
+    const navLinks = Array.from(document.querySelectorAll('nav a[href^="#"]'));
+
+    const normalize = (value) => value.trim().toLocaleLowerCase('zh-CN');
+    input.addEventListener('input', () => {
+      const query = normalize(input.value);
+      let visible = 0;
+      for (const section of sections) {
+        const match = !query || normalize(section.textContent || '').includes(query);
+        section.hidden = !match;
+        if (match) visible += 1;
+      }
+      status.textContent = query ? `显示 ${visible} / ${sections.length} 个章节` : '';
+    });
+
+    const observer = new IntersectionObserver((entries) => {
+      const current = entries
+        .filter((entry) => entry.isIntersecting && !entry.target.hidden)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+      if (!current) return;
+      for (const link of navLinks) {
+        link.classList.toggle('active', link.getAttribute('href') === `#${current.target.id}`);
+      }
+    }, { rootMargin: '-12% 0px -75% 0px', threshold: 0 });
+    for (const section of sections) observer.observe(section);
+  })();
+</script>
+</body>
+</html>
