@@ -267,7 +267,7 @@ pub fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "project_check",
-            "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas / 发布清单 build_missing_scenes 列出问题，has_issues 汇总；build_scene_order 是关卡顺序，未配置为空）。v2 值可运行但 World 尚未持有组件 ID 时，v2_identity_pending 会列出文件并令 has_issues 为 true。入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
+            "description": "无头验证项目：清单可解析、入口场景与 Scenes/ 下全部场景可加载、实体引用的模型/脚本/材质在盘上真实存在，并检查资产身份证（缺 .meta / 孤儿 .meta / GUID 冲突 / 悬空 GUID）。返回 JSON 报告（scenes / invalid_scenes / missing_* / dangling_guids / missing_metas / 发布清单 build_missing_scenes 列出问题，has_issues 汇总；build_scene_order 是关卡顺序，未配置为空）。v1 / v2 场景与预制体走各自完整读取边界；入口场景坏掉是工具失败（退出码语义 1），非入口场景坏掉记 invalid_scenes（退出码语义 2）。改完就跑，自证没改坏 —— 这是 Agent 闭环的验证步。",
             "inputSchema": {
                 "type": "object",
                 "properties": { "project": project_prop },
@@ -1145,7 +1145,6 @@ fn project_check(args: &Value) -> Result<String, CallError> {
         // 落盘伤的字段（"删一个物体连带删别的"的成因）。
         "duplicate_ids": report.duplicate_ids,
         "invalid_scenes": report.invalid_scenes,
-        "v2_identity_pending": report.v2_identity_pending,
         // 发布清单（`project.ron` 的 `build.scenes`）：顺序即关卡索引。
         // 未配置清单时 `build_scene_order` 为空 —— 与"配了一个场景"是两回事。
         "build_scene_order": report.build_scene_order,
@@ -2210,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn project_check_exposes_v2_identity_limit_to_agents() {
+    fn project_check_accepts_a_clean_v2_entry_without_transitional_fields() {
         let project = temp_project("v2_check");
         let relative = project.manifest().entry_scene.clone();
         let old = entry_scene(&project);
@@ -2221,8 +2220,8 @@ mod tests {
         std::fs::write(project.path(&relative), &v2).unwrap();
         let report: Value =
             serde_json::from_str(&run(&project, "project_check", json!({})).unwrap()).unwrap();
-        assert_eq!(report["v2_identity_pending"], json!([relative]));
-        assert_eq!(report["has_issues"], true);
+        assert!(report.get("v2_identity_pending").is_none());
+        assert_eq!(report["has_issues"], false, "{}", report["render"]);
         assert_eq!(
             std::fs::read_to_string(project.path(&relative)).unwrap(),
             v2

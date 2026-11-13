@@ -134,6 +134,8 @@ main()                           crates/xgame-game/src/main.rs
              └── World::from_runtime_scene()
                    ├── PhysicsWorld / GameClock / LuaHost / AudioEngine
                    ├── 运行态唯一 AnimationDriver
+                   ├── v2 预制体生成：资产 ID → 实例本地 ID + 来源 ID → World 身份侧车
+                   │                  普通/UI 生成只分配本地 ID；销毁同步移除
                    └── ProjectHandle 场景装载器 + GltfAnimationLoader（纯 CPU 动画）
                           └── 与 GPU 模型共用 resolve_model_source（search_paths + 命中文件旁 .meta）
 ```

@@ -654,11 +654,30 @@ fn runtime_loader_reads_v2_values_while_legacy_edit_loader_stays_guarded() {
     prefab
         .entities
         .push(Entity::new("Runner").with_model("builtin://cube"));
-    project
-        .write_prefab_v2(prefab_path, &PrefabV2::from_v1(&prefab).unwrap())
-        .unwrap();
+    let prefab_v2 = PrefabV2::from_v1(&prefab).unwrap();
+    let source_transform_id = prefab_v2.entities[0].transform_identity.id;
+    let source_render_id = prefab_v2.entities[0].components.entries[0].identity.id;
+    project.write_prefab_v2(prefab_path, &prefab_v2).unwrap();
     let from_spawn = xgame_core::SceneLoader::load_prefab(&project, prefab_path).unwrap();
     assert_eq!(from_spawn.entities[0].model, "builtin://cube");
+    let loaded_prefab =
+        xgame_core::SceneLoader::load_runtime_prefab(&project, prefab_path).unwrap();
+    let instance = loaded_prefab.instantiate(prefab_path).unwrap();
+    let identity = instance.identities()[0]
+        .as_ref()
+        .expect("v2 预制体实例必须携带组件身份");
+    assert_eq!(
+        identity.transform().identity.source_component_id,
+        Some(source_transform_id)
+    );
+    assert_eq!(
+        identity
+            .component(source_render_id)
+            .unwrap()
+            .identity
+            .source_component_id,
+        Some(source_render_id)
+    );
     assert!(project.load_prefab(prefab_path).is_err());
     assert!(project.load_scene("Scenes/Extra.ron").is_err());
     std::fs::remove_dir_all(base).unwrap();

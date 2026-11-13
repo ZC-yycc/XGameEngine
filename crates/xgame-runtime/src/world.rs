@@ -542,6 +542,13 @@ impl World {
         self.component_identities.as_ref()?.entity(entity_id)
     }
 
+    #[cfg(test)]
+    fn component_identity_entity_count(&self) -> Option<usize> {
+        self.component_identities
+            .as_ref()
+            .map(|identities| identities.entities().len())
+    }
+
     /// 运行态唯一动画驱动（渲染 / Inspector 只读）。
     pub fn animation(&self) -> &AnimationDriver {
         &self.animation
@@ -1722,6 +1729,17 @@ impl World {
             }
         }
 
+        // 运行中生成实体的组件 ID 在命令消费时进入侧车；v1 World 没有侧车，
+        // 保持旧行为。这里只处理生成事件，不在每帧扫描 Scene 重建身份。
+        if let Some(identities) = self.component_identities.as_mut() {
+            for identity in report.spawned_identities {
+                let id = identity.entity_id();
+                if self.scene.find_entity(id).is_some() && !identities.insert_entity(identity) {
+                    log::warn!("运行时实体 {} 的组件身份重复，保留先到的一份", id.raw());
+                }
+            }
+        }
+
         for removed in report.removed {
             // 先通知组件（on_destroy），再清刚体。
             self.destroy_behaviors(removed.id, delta, time);
@@ -1762,6 +1780,9 @@ impl World {
             // 实体变量同理：实体没了，挂它身上的玩法数据不该留在表里等下一个
             // 撞 ID 的实体来读（ID 不复用，但表会一直长）。
             self.save_context.vars.clear_entity(removed.id);
+            if let Some(identities) = self.component_identities.as_mut() {
+                identities.remove_entity(removed.id);
+            }
         }
 
         // 生成的实体：`sync_bodies` 会统一补建（它按"有 physics 但没有刚体"来扫）。
@@ -5260,6 +5281,108 @@ mod tests {
             logs.iter().all(|l| l.level != crate::LogLevel::Error),
             "成功路径不该有错误日志：{logs:?}"
         );
+    }
+
+    #[test]
+    fn v2_spawn_prefab_registers_local_and_source_component_ids() {
+        let project = temp_prefab_project("v2_spawn_prefab_identity");
+        let scene_path = "Scenes/A.ron";
+        let scene = project.load_scene(scene_path).unwrap();
+        let scene_v2 = xgame_core::scene_v2::SceneV2::from_v1_plain(&scene).unwrap();
+        std::fs::remove_file(project.path(scene_path)).unwrap();
+        project.write_scene_v2(scene_path, &scene_v2).unwrap();
+
+        let prefab_path = "Prefabs/Enemy.prefab.ron";
+        let prefab = project.load_prefab(prefab_path).unwrap();
+        let prefab_v2 = xgame_core::scene_v2::PrefabV2::from_v1(&prefab).unwrap();
+        let source_root = prefab_v2
+            .entities
+            .iter()
+            .find(|entity| entity.name == "Enemy")
+            .unwrap();
+        let source_physics_id = source_root.components.entries[0].identity.id;
+        std::fs::remove_file(project.path(prefab_path)).unwrap();
+        project.write_prefab_v2(prefab_path, &prefab_v2).unwrap();
+
+        let loaded = project.load_runtime_scene(scene_path).unwrap();
+        let mut world = World::from_runtime_scene(loaded, project.root(), WorldConfig::default())
+            .with_scene_loader(project.clone())
+            .with_current_scene(scene_path);
+        world.update(1.0 / 60.0);
+
+        let root = world
+            .scene()
+            .entities
+            .iter()
+            .find(|entity| entity.name == "Enemy")
+            .unwrap();
+        let identity = world
+            .component_identity(root.id, source_physics_id)
+            .expect("运行时生成的 v2 预制体组件应有本地身份");
+        assert_eq!(identity.identity.id, source_physics_id);
+        assert_eq!(
+            identity.identity.source_component_id,
+            Some(source_physics_id)
+        );
+        std::fs::remove_dir_all(project.root()).unwrap();
+    }
+
+    #[test]
+    fn v2_runtime_spawn_and_destroy_keep_identity_sidecar_in_sync() {
+        let dir = std::env::temp_dir().join(format!(
+            "xgame_runtime_v2_dynamic_identity_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+        std::fs::write(
+            dir.join("Scripts/driver.lua"),
+            r#"
+            function start(ctx)
+                spawn_entity(ctx, "runtime-cube", "builtin://cube")
+            end
+            function update(ctx)
+                local victim = entity_id(ctx, "victim")
+                if victim ~= 0 then destroy(ctx, victim) end
+            end
+            "#,
+        )
+        .unwrap();
+
+        let mut scene = Scene::new("v2_dynamic_identity");
+        scene.add_entity(Entity::new("driver").with_script("Scripts/driver.lua"));
+        scene.add_entity(Entity::new("victim"));
+        let runtime = xgame_core::RuntimeScene::from_v2(
+            xgame_core::scene_v2::SceneV2::from_v1_plain(&scene).unwrap(),
+        )
+        .unwrap();
+        let mut world = World::from_runtime_scene(runtime, &dir, WorldConfig::default());
+        assert_eq!(world.component_identity_entity_count(), Some(2));
+
+        world.update(1.0 / 60.0);
+
+        let spawned = world
+            .scene()
+            .find_by_name("runtime-cube")
+            .expect("普通脚本生成实体应当场进入场景");
+        let identities = world
+            .entity_component_identities(spawned.id)
+            .expect("普通脚本生成实体也应登记本地组件身份");
+        assert!(identities.components().iter().any(|component| {
+            component.kind
+                == xgame_core::RuntimeComponentKind::Builtin(xgame_core::BuiltinComponent::Render)
+        }));
+        assert!(world.scene().find_by_name("victim").is_none());
+        assert_eq!(
+            world.component_identity_entity_count(),
+            Some(world.scene().entities.len()),
+            "销毁实体须同步移除身份侧车项"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 没接装载器时：`spawn_prefab` 记一条 Error 且什么都不生成

@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use crate::prefab::Prefab;
 use crate::project::ProjectHandle;
-use crate::runtime_scene::RuntimeScene;
+use crate::runtime_scene::{RuntimePrefab, RuntimeScene};
 use crate::scene::Scene;
 
 /// 资产装载来源（项目相对路径 → 内存态场景 / 预制体）。
@@ -68,6 +68,11 @@ pub trait SceneLoader {
                 .to_string(),
         )
     }
+
+    /// 带可选 v2 资产组件身份的预制体载荷。
+    fn load_runtime_prefab(&self, relative: &str) -> Result<RuntimePrefab, String> {
+        self.load_prefab(relative).map(RuntimePrefab::legacy)
+    }
 }
 
 /// 真实路径：走 `ProjectHandle`（解码 GUID 引用、路径解析、错误文案都复用它）。
@@ -83,6 +88,10 @@ impl SceneLoader for ProjectHandle {
     fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {
         ProjectHandle::load_prefab_runtime(self, relative)
     }
+
+    fn load_runtime_prefab(&self, relative: &str) -> Result<RuntimePrefab, String> {
+        ProjectHandle::load_runtime_prefab(self, relative)
+    }
 }
 
 /// 让宿主可以直接把 `Arc<ProjectHandle>` 交给 `World`（共享同一份资产索引）。
@@ -97,6 +106,10 @@ impl<T: SceneLoader + ?Sized> SceneLoader for Arc<T> {
 
     fn load_prefab(&self, relative: &str) -> Result<Prefab, String> {
         (**self).load_prefab(relative)
+    }
+
+    fn load_runtime_prefab(&self, relative: &str) -> Result<RuntimePrefab, String> {
+        (**self).load_runtime_prefab(relative)
     }
 }
 

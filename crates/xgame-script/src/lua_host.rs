@@ -629,7 +629,12 @@ impl LuaHost {
         let mut report = CommandReport::default();
         for command in commands {
             match command {
-                ScriptCommand::EntitySpawned { id, .. } => report.spawned.push(id),
+                ScriptCommand::EntitySpawned { id, identity, .. } => {
+                    report.spawned.push(id);
+                    if let Some(identity) = identity {
+                        report.spawned_identities.push(identity);
+                    }
+                }
                 ScriptCommand::EntitiesRemoved { entities } => report.removed.extend(entities),
                 ScriptCommand::Reparented { child } => report.reparented.push(child),
                 ScriptCommand::Relayered { id, layer } => report.relayered.push((id, layer)),

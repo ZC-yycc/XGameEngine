@@ -154,8 +154,8 @@ pub use physics::{BodyKind, CollisionShape, PhysicsBody, PhysicsHandle};
 pub use quality::{QualityConfig, QualityPreset, QualitySettings, DEFAULT_SHADOW_RESOLUTION};
 pub use ray::{Ray, RayHit};
 pub use runtime_scene::{
-    RuntimeComponentIdentity, RuntimeComponentKind, RuntimeEntityIdentity, RuntimeScene,
-    RuntimeSceneIdentity,
+    RuntimeComponentIdentity, RuntimeComponentKind, RuntimeEntityIdentity, RuntimePrefab,
+    RuntimePrefabInstance, RuntimeScene, RuntimeSceneIdentity,
 };
 pub use savegame::{
     delete_save, list_saves, read_save, save_exists, save_slot_path, save_slot_relative,

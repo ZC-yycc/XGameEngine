@@ -1059,10 +1059,12 @@ impl GameCtx<'_> {
         entity.transform.scale = request.scale;
         entity.physics = request.physics;
 
+        let identity = xgame_core::RuntimeEntityIdentity::from_legacy(&entity).ok();
         self.scene.entities.push(entity);
         self.push_command(ScriptCommand::EntitySpawned {
             id,
             physics: request.physics,
+            identity,
         });
         id
     }
@@ -1139,7 +1141,7 @@ impl GameCtx<'_> {
         };
 
         // 2. 读盘：路径写错 / 资产坏了都走这里，错误文案由装载器给出（含绝对路径）。
-        let prefab = match loader.load_prefab(path) {
+        let prefab = match loader.load_runtime_prefab(path) {
             Ok(prefab) => prefab,
             Err(reason) => {
                 self.push_log(
@@ -1150,19 +1152,22 @@ impl GameCtx<'_> {
             }
         };
 
-        // 3. 实例化：`instantiate_prefab` 自己会分配新 ID、重映射内部父引用、
-        //    贴 `PrefabInstanceRef`。空预制体返回 None —— 不是故障，但作者
-        //    通常想被告知，所以记 warn。
+        // 3. 实例化：运行时载荷会分配新 ID、重映射内部父引用、贴来源标记，
+        //    并为 v2 资产把组件来源 ID 转成实例本地身份。空预制体返回 None ——
+        //    不是故障，但作者通常想被告知，所以记 warn。
         // 先记下"追加前有多少实体"：新增块就是这一段，收集新实体命令时
         //    不能反推（实例根在块内的偏移没有保证）。
         let base = self.scene.entities.len();
-        let Some(root) = self.scene.instantiate_prefab(&prefab, path) else {
+        let Some(instance) = prefab.instantiate(path) else {
             self.push_log(
                 LogLevel::Warn,
                 format!("spawn_prefab('{path}')：预制体是空的，什么都没生成"),
             );
             return None;
         };
+        let (entities, identities, root_offset) = instance.into_parts();
+        self.scene.entities.extend(entities);
+        let root = base + root_offset;
         let root_id = self.scene.entities[root].id;
         self.scene.entities[root].transform.position = position;
         if let Some(parent_index) = parent {
@@ -1180,12 +1185,21 @@ impl GameCtx<'_> {
 
         // 4. 通知运行时补刚体：每个新实体一条，与 `spawn_request` 走同一条命令
         //    路径。父引用此刻已在场景里，命令被消费时刚体建在世界正确位置。
-        let spawned: Vec<(EntityId, Option<PhysicsBody>)> = self.scene.entities[base..]
+        let spawned: Vec<(
+            EntityId,
+            Option<PhysicsBody>,
+            Option<xgame_core::RuntimeEntityIdentity>,
+        )> = self.scene.entities[base..]
             .iter()
-            .map(|e| (e.id, e.physics))
+            .zip(identities)
+            .map(|(entity, identity)| (entity.id, entity.physics, identity))
             .collect();
-        for (id, physics) in spawned {
-            self.push_command(ScriptCommand::EntitySpawned { id, physics });
+        for (id, physics, identity) in spawned {
+            self.push_command(ScriptCommand::EntitySpawned {
+                id,
+                physics,
+                identity,
+            });
         }
         Some(root_id)
     }

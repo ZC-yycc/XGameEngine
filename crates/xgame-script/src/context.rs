@@ -147,6 +147,8 @@ pub enum ScriptCommand {
     EntitySpawned {
         id: EntityId,
         physics: Option<PhysicsBody>,
+        /// v2 World 登记稳定组件 ID；v1 装载器或无法无歧义预览的旧实体可为 None。
+        identity: Option<xgame_core::RuntimeEntityIdentity>,
     },
     /// 这些实体已经离开场景（含整棵子树），运行时需要派发销毁钩子并清理物理体。
     EntitiesRemoved { entities: Vec<RemovedEntity> },

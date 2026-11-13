@@ -95,7 +95,7 @@ Rust 插件组件仍须由实际加载的项目注册表提供字段；Lua 不�
   `entity_upsert` 改 → `project_check` / `run_headless` 验证。
   `scene_write` / `entity_upsert` 仍只操作 v1；v2 按组件 ID 的修改使用
   `entity_components_v2_read` / `component_v2_edit`。`project_check` 已能只读检查 v2 入口及其他场景、预制体；
-  值投影可供无头运行，组件身份尚未由 World 持有时报告 `v2_identity_pending`。
+  编辑器 Play、独立游戏和无头运行均持有 v2 组件身份，干净 v2 项目不会产生过渡性诊断。
 
 ### 2. `project_info`
 

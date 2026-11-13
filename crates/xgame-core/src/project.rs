@@ -1230,17 +1230,24 @@ impl ProjectHandle {
         Ok((prefab, bytes))
     }
 
-    /// 只供运行时的值投影；旧编辑器必须继续走 `load_prefab`，否则保存会丢失组件 ID。
-    pub fn load_prefab_runtime(&self, relative: &str) -> Result<Prefab, String> {
+    /// 运行时完整预制体载荷；v2 资产身份供实例化时建立来源关联。
+    pub fn load_runtime_prefab(&self, relative: &str) -> Result<crate::RuntimePrefab, String> {
         let relative = normalize_project_relative(relative).map_err(|e| e.to_string())?;
         if crate::file_format::disk_version(&self.path(&relative))
             .map_err(|e| format!("无法读取 '{relative}': {e}"))?
             == Some(2)
         {
-            self.load_prefab_v2(&relative)?.to_v1()
+            crate::RuntimePrefab::from_v2(self.load_prefab_v2(&relative)?)
         } else {
             self.load_prefab(&relative)
+                .map(crate::RuntimePrefab::legacy)
         }
+    }
+
+    /// 兼容只消费值的旧运行调用方；旧编辑器仍必须走 `load_prefab`。
+    pub fn load_prefab_runtime(&self, relative: &str) -> Result<Prefab, String> {
+        self.load_runtime_prefab(relative)
+            .map(crate::RuntimePrefab::into_prefab)
     }
 
     /// 显式 v2 草案写入：旧文件必须已是合法 v2；v1→v2 要走单独的迁移器。

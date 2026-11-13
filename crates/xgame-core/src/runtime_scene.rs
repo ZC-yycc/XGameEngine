@@ -6,8 +6,9 @@
 //! 来源 ID、持久高水位和组件种类；装载与切关时构造一次，每帧不重建。
 
 use crate::component_id::{ComponentId, ComponentIdSequence, ComponentIdentity};
-use crate::scene_v2::{ComponentData, SceneV2};
-use crate::{BuiltinComponent, Entity, EntityId, Scene};
+use crate::component_upgrade::preview_component_upgrade;
+use crate::scene_v2::{ComponentData, EntityV2, PrefabV2, SceneV2};
+use crate::{BuiltinComponent, ComponentAddress, Entity, EntityId, Prefab, Scene};
 
 /// 组件在 v1 值模型中的稳定种类键。
 ///
@@ -39,6 +40,14 @@ impl RuntimeComponentKind {
         }
     }
 
+    fn from_address(address: ComponentAddress, name: String) -> Self {
+        match address {
+            ComponentAddress::Builtin(kind) => Self::Builtin(kind),
+            ComponentAddress::Rust(_) => Self::Rust(name),
+            ComponentAddress::Lua(_) => Self::Lua(name),
+        }
+    }
+
     /// 身份侧车只认仍挂在当前值实体上的组件，避免宿主经 `scene_mut()` 删除字段后
     /// 继续查询到一个已经不存在的组件。
     pub fn is_present_on(&self, entity: &Entity) -> bool {
@@ -67,6 +76,71 @@ pub struct RuntimeEntityIdentity {
 }
 
 impl RuntimeEntityIdentity {
+    fn from_v2(entity: &EntityV2) -> Self {
+        Self {
+            entity_id: entity.id,
+            transform: RuntimeComponentIdentity {
+                identity: entity.transform_identity,
+                kind: RuntimeComponentKind::Builtin(BuiltinComponent::Transform),
+            },
+            next_component_id: entity.components.next_component_id,
+            components: entity
+                .components
+                .entries
+                .iter()
+                .map(|component| RuntimeComponentIdentity {
+                    identity: component.identity,
+                    kind: RuntimeComponentKind::from_data(&component.data),
+                })
+                .collect(),
+        }
+    }
+
+    /// 给运行中临时生成的 v1 实体分配本次 World 生命周期内稳定的组件 ID。
+    /// 这是生成事件的低频路径，不进入每帧扫描。
+    pub fn from_legacy(entity: &Entity) -> Result<Self, String> {
+        let plan = preview_component_upgrade(entity, None)?;
+        let mut components = plan.components.into_iter();
+        let transform = components
+            .next()
+            .filter(|component| {
+                component.address == ComponentAddress::Builtin(BuiltinComponent::Transform)
+            })
+            .ok_or("运行时实体缺少 Transform 身份")?;
+        Ok(Self {
+            entity_id: entity.id,
+            transform: RuntimeComponentIdentity {
+                identity: transform.identity,
+                kind: RuntimeComponentKind::Builtin(BuiltinComponent::Transform),
+            },
+            next_component_id: plan.next_component_id,
+            components: components
+                .map(|component| RuntimeComponentIdentity {
+                    identity: component.identity,
+                    kind: RuntimeComponentKind::from_address(component.address, component.name),
+                })
+                .collect(),
+        })
+    }
+
+    /// 预制体资产身份 → 新实例的本地身份。初次实例化可让本地 ID 与来源 ID 同值，
+    /// 但两者仍分别存放；实例后续新增组件只推进自己的高水位。
+    fn instantiate_from_source(&self, entity_id: EntityId) -> Self {
+        let sourced = |component: &RuntimeComponentIdentity| RuntimeComponentIdentity {
+            identity: ComponentIdentity {
+                id: component.identity.id,
+                source_component_id: Some(component.identity.id),
+            },
+            kind: component.kind.clone(),
+        };
+        Self {
+            entity_id,
+            transform: sourced(&self.transform),
+            next_component_id: self.next_component_id,
+            components: self.components.iter().map(sourced).collect(),
+        }
+    }
+
     pub fn entity_id(&self) -> EntityId {
         self.entity_id
     }
@@ -105,23 +179,7 @@ impl RuntimeSceneIdentity {
         let entities = scene
             .entities
             .iter()
-            .map(|entity| RuntimeEntityIdentity {
-                entity_id: entity.id,
-                transform: RuntimeComponentIdentity {
-                    identity: entity.transform_identity,
-                    kind: RuntimeComponentKind::Builtin(BuiltinComponent::Transform),
-                },
-                next_component_id: entity.components.next_component_id,
-                components: entity
-                    .components
-                    .entries
-                    .iter()
-                    .map(|component| RuntimeComponentIdentity {
-                        identity: component.identity,
-                        kind: RuntimeComponentKind::from_data(&component.data),
-                    })
-                    .collect(),
-            })
+            .map(RuntimeEntityIdentity::from_v2)
             .collect();
         Self { entities }
     }
@@ -132,6 +190,23 @@ impl RuntimeSceneIdentity {
 
     pub fn entity(&self, id: EntityId) -> Option<&RuntimeEntityIdentity> {
         self.entities.iter().find(|entity| entity.entity_id == id)
+    }
+
+    /// 运行时生成实体时登记；实体 ID 已存在就拒绝覆盖原身份。
+    pub fn insert_entity(&mut self, entity: RuntimeEntityIdentity) -> bool {
+        if self.entity(entity.entity_id).is_some() {
+            return false;
+        }
+        self.entities.push(entity);
+        true
+    }
+
+    pub fn remove_entity(&mut self, id: EntityId) -> Option<RuntimeEntityIdentity> {
+        let index = self
+            .entities
+            .iter()
+            .position(|entity| entity.entity_id == id)?;
+        Some(self.entities.remove(index))
     }
 }
 
@@ -181,5 +256,102 @@ impl RuntimeScene {
 impl From<Scene> for RuntimeScene {
     fn from(scene: Scene) -> Self {
         Self::legacy(scene)
+    }
+}
+
+/// 运行时预制体载荷；v2 资产身份只在实例化时转成场景本地身份。
+#[derive(Debug, Clone)]
+pub struct RuntimePrefab {
+    prefab: Prefab,
+    identities: Option<Vec<RuntimeEntityIdentity>>,
+}
+
+impl RuntimePrefab {
+    pub fn legacy(prefab: Prefab) -> Self {
+        Self {
+            prefab,
+            identities: None,
+        }
+    }
+
+    pub fn from_v2(prefab: PrefabV2) -> Result<Self, String> {
+        let identities = prefab
+            .entities
+            .iter()
+            .map(RuntimeEntityIdentity::from_v2)
+            .collect();
+        let prefab = prefab.to_v1()?;
+        Ok(Self {
+            prefab,
+            identities: Some(identities),
+        })
+    }
+
+    pub fn prefab(&self) -> &Prefab {
+        &self.prefab
+    }
+
+    pub fn into_prefab(self) -> Prefab {
+        self.prefab
+    }
+
+    /// 分配场景实体 ID、重定向父级，并把资产组件 ID 写成每项的来源 ID。
+    pub fn instantiate(&self, source: &str) -> Option<RuntimePrefabInstance> {
+        let entities = self.prefab.instantiate(source);
+        let root_offset = entities
+            .iter()
+            .position(|entity| entity.prefab.as_ref().is_some_and(|link| link.is_root))?;
+        let identities = if let Some(sources) = &self.identities {
+            debug_assert_eq!(sources.len(), entities.len());
+            sources
+                .iter()
+                .zip(&entities)
+                .map(|(identity, entity)| Some(identity.instantiate_from_source(entity.id)))
+                .collect()
+        } else {
+            // v1 资产没有持久来源 ID；仍尽量给 v2 World 中的临时实例分配本地 ID。
+            // 老数据有重复挂载物时预览会失败，只放弃该实体的身份，不阻断既有运行行为。
+            entities
+                .iter()
+                .map(|entity| RuntimeEntityIdentity::from_legacy(entity).ok())
+                .collect()
+        };
+        Some(RuntimePrefabInstance {
+            entities,
+            identities,
+            root_offset,
+        })
+    }
+}
+
+impl From<Prefab> for RuntimePrefab {
+    fn from(prefab: Prefab) -> Self {
+        Self::legacy(prefab)
+    }
+}
+
+/// 一次预制体实例化的对齐结果；三组数据按同一实体顺序排列。
+#[derive(Debug)]
+pub struct RuntimePrefabInstance {
+    entities: Vec<Entity>,
+    identities: Vec<Option<RuntimeEntityIdentity>>,
+    root_offset: usize,
+}
+
+impl RuntimePrefabInstance {
+    pub fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+
+    pub fn identities(&self) -> &[Option<RuntimeEntityIdentity>] {
+        &self.identities
+    }
+
+    pub fn root_offset(&self) -> usize {
+        self.root_offset
+    }
+
+    pub fn into_parts(self) -> (Vec<Entity>, Vec<Option<RuntimeEntityIdentity>>, usize) {
+        (self.entities, self.identities, self.root_offset)
     }
 }
