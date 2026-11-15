@@ -16,6 +16,7 @@
 
 use xgame_core::{Entity, UiAlign, UiElement, UiKind, UiVAlign};
 
+use super::inspector::FieldSignals;
 use crate::panels::theme;
 
 /// 带范围与步长的数值框（`theme::drag_field_w` 没有 range 参数）。
@@ -44,9 +45,15 @@ fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) 
     })
 }
 
-/// 画 UI 区块内容。标题与统一右键菜单由 Inspector 主文件负责；返回 `true` 表示
-/// 用户请求移除 UI 组件，调用方再走统一的组件结构动作与 Undo。
-pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool, editing: bool) -> bool {
+/// 画 UI 区块内容。标题与统一右键菜单由 `inspector_reflect::show_section` 负责
+/// （本函数通过 `ReflectComponentSpec::render = Render::Custom` 挂在同一张表里）；
+/// 返回 `true` 表示用户请求移除 UI 组件，调用方再走统一的组件结构动作与 Undo。
+pub fn show(
+    ui: &mut egui::Ui,
+    entity: &mut Entity,
+    sig: &mut FieldSignals,
+    editing: bool,
+) -> bool {
     let mut enabled = true;
     if ui
         .add_enabled(editing, egui::Checkbox::new(&mut enabled, "UI Element"))
@@ -334,7 +341,7 @@ pub fn show(ui: &mut egui::Ui, entity: &mut Entity, touched: &mut bool, editing:
             state.hovered, state.pressed, state.clicked
         )));
 
-        *touched |= changed;
+        sig.collect_changed_any(changed);
     });
     false
 }

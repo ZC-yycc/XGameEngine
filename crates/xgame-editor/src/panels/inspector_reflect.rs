@@ -29,7 +29,7 @@
 
 use xgame_core::reflect::{
     FieldMeta, MetaKind, Reflect, ReflectEnum, ScalarKind, ScalarValue, TypeMeta, TypeRef,
-    ValueRef, ValueRefMut,
+    ValueRef, ValueRefMut, Widget,
 };
 use xgame_core::{BuiltinComponent, ComponentAddress, Entity};
 
@@ -91,6 +91,42 @@ pub struct ReflectComponentSpec {
     ///
     /// 它是算出来的、不落盘、也不该被编辑，所以既不是字段也不是说明文字。
     pub footer: Option<fn(&Entity) -> String>,
+    /// 一组"把若干字段填成某个值"的预设按钮（`Fire` / `Smoke` / `Sparks`）。
+    ///
+    /// 它做不到元数据里，因为**它不是字段**：点一下要改一整片字段，而且改哪些、
+    /// 改成什么只有引擎自己知道（`ParticleEmitter::fire()` 里那十几个值）。
+    /// 这与锚点预设是同一类东西 —— "操作"而不是"数据"。
+    pub presets: &'static [Preset],
+    /// 这一段怎么画。
+    pub render: Render,
+}
+
+/// 一段组件内容的画法。
+///
+/// 这是"统一"的边界，也是它唯一诚实的表述：**入口统一，画法可以不同**。
+/// 与 UE 的 `Details` 面板 + `IDetailCustomization` 是同一个安排 ——
+/// 反射负责"字段列表"这种形状（十个内置组件里有七个是），而版式本身承载
+/// 信息的段落（UI 的锚点预设、九宫格切片）交回专用渲染器。
+///
+/// 关键是两者**登记在同一张表里、走同一个入口、用同一种信号**。这样
+/// "这个组件的 Inspector 在哪"永远只有一个答案，而不是"反射里找一半、
+/// 手写函数里找一半"。
+pub enum Render {
+    /// 按 `TypeMeta` 逐字段画。
+    Fields,
+    /// 专用渲染：`(ui, 实体, 信号) -> 是否请求移除组件`。
+    ///
+    /// 参数里的 `bool` 是 `is_editing`（Play 态禁止改组件结构）。
+    Custom(fn(&mut egui::Ui, &mut Entity, &mut FieldSignals, bool) -> bool),
+}
+
+/// 一个预设按钮。
+pub struct Preset {
+    pub label: &'static str,
+    pub tooltip: &'static str,
+    /// 应用。拿整个实体是因为预设要动的是组件本身（`*p = …`），
+    /// 而不是某个字段的某个值。
+    pub apply: fn(&mut Entity),
 }
 
 /// Camera 的 spec。
@@ -115,6 +151,8 @@ pub static CAMERA: ReflectComponentSpec = ReflectComponentSpec {
     }),
     on_variant: None,
     footer: None,
+    presets: &[],
+    render: Render::Fields,
 };
 
 /// AudioSource 的 spec。
@@ -140,6 +178,8 @@ pub static AUDIO: ReflectComponentSpec = ReflectComponentSpec {
     }),
     on_variant: None,
     footer: None,
+    presets: &[],
+    render: Render::Fields,
 };
 
 /// PhysicsBody 的 spec。
@@ -170,6 +210,8 @@ pub static PHYSICS: ReflectComponentSpec = ReflectComponentSpec {
         }
     }),
     footer: None,
+    presets: &[],
+    render: Render::Fields,
 };
 
 /// CharacterController 的 spec。
@@ -196,6 +238,8 @@ pub static CHARACTER: ReflectComponentSpec = ReflectComponentSpec {
             .map(|c| format!("胶囊中心 = 脚底 + {:.2} m", c.center_height()))
             .unwrap_or_default()
     }),
+    presets: &[],
+    render: Render::Fields,
 };
 
 /// LodGroup 的 spec。
@@ -219,6 +263,79 @@ pub static LOD: ReflectComponentSpec = ReflectComponentSpec {
     }),
     on_variant: None,
     footer: None,
+    presets: &[],
+    render: Render::Fields,
+};
+
+/// 粒子发射器的预设。
+///
+/// 三个都是"一键把整块参数换成某个手感"，之后照常可改 —— 所以它们不是字段、
+/// 也不落盘（落盘的是换完之后的那份值）。
+pub static PARTICLE_PRESETS: [Preset; 3] = [
+    Preset {
+        label: "Fire",
+        tooltip: "火焰：快、短命、加色、往上飘",
+        apply: |entity| entity.particle = Some(xgame_core::ParticleEmitter::fire()),
+    },
+    Preset {
+        label: "Smoke",
+        tooltip: "烟尘：慢、长大、Alpha、继续上浮",
+        apply: |entity| entity.particle = Some(xgame_core::ParticleEmitter::smoke()),
+    },
+    Preset {
+        label: "Sparks",
+        tooltip: "火花：小、快、强重力、加色",
+        apply: |entity| entity.particle = Some(xgame_core::ParticleEmitter::sparks()),
+    },
+];
+
+/// ParticleEmitter 的 spec。
+pub static PARTICLE: ReflectComponentSpec = ReflectComponentSpec {
+    kind: BuiltinComponent::Particle,
+    title: "Particle",
+    toggle: Some((
+        "Has particle emitter",
+        "CPU 粒子（billboard）。进 Play 开始喷，\n场景存盘只存参数、不存粒子状态",
+    )),
+    remove_label: "Remove Particle Emitter",
+    access: |entity| entity.particle.as_mut().map(|p| p as &mut dyn Reflect),
+    normalize: Some(|entity| {
+        // 复用引擎自己的钳制规则：`rate` / `max_particles` / `lifetime` 的上下界
+        // 在加载与 Inspector 两处共用一份，手抄第二份就是漂移的来源。
+        if let Some(particle) = entity.particle.as_mut() {
+            particle.sanitized();
+        }
+    }),
+    on_variant: None,
+    footer: None,
+    presets: &PARTICLE_PRESETS,
+    render: Render::Fields,
+};
+
+/// UiElement 的 spec。
+///
+/// 它是 `Render::Custom` 的唯一样例，理由是**版式本身承载信息**：
+/// 锚点预设（点一下改六个字段）、`Size` 派生读数、九宫格切片四连框、
+/// "把后代裁到矩形内"这类开关都排在特定位置，靠元数据拼不出来 ——
+/// 硬拼的结果是往 `FieldMeta` 里加六七个只有这一个组件用得上的字段。
+///
+/// 但它的**入口**与其余组件完全一样：同一张表、同一个 `show_section`、
+/// 同一份 `FieldSignals`。所以"UI 的 Inspector 在哪"这个问题只有一个答案。
+pub static UI: ReflectComponentSpec = ReflectComponentSpec {
+    kind: BuiltinComponent::Ui,
+    title: "UI",
+    // 段内那个 "UI Element" 勾选框由专用渲染器自己画（它是"组件存在与否"的开关，
+    // 位置在缩进之内，而不是像其余组件那样紧跟分类条）。
+    toggle: None,
+    remove_label: "Remove UI Element",
+    access: |entity| entity.ui.as_mut().map(|ui| ui as &mut dyn Reflect),
+    normalize: None,
+    on_variant: None,
+    footer: None,
+    presets: &[],
+    render: Render::Custom(|ui, entity, sig, editing| {
+        super::inspector_ui::show(ui, entity, sig, editing)
+    }),
 };
 
 /// 画一个内置组件的整段（分类条 + "勾上才有" + 全部字段 + 末尾说明）。
@@ -249,6 +366,15 @@ pub(super) fn show_section(
         refresh_scripts,
     );
 
+    // 专用渲染器自己负责缩进（它内部已经有 `ui.indent`），这里不能再包一层 ——
+    // 两层缩进会让整段右移 15px，而段内的行距、控件宽度全都会跟着变。
+    if let Render::Custom(render) = spec.render {
+        if render(ui, entity, sig, editing) {
+            *request = Some(ComponentAction::Remove(ComponentAddress::Builtin(spec.kind)));
+        }
+        return;
+    }
+
     let mut switched: Option<(&'static str, &'static str)> = None;
     ui.indent(spec.kind.code(), |ui| {
         if let Some((label, hint)) = spec.toggle {
@@ -266,7 +392,21 @@ pub(super) fn show_section(
             }
         }
 
-        let mut changed = false;
+        // 预设按钮：改的是一整片字段，所以只能放在拿到组件借用**之前**。
+        let mut preset_changed = false;
+        if !spec.presets.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(theme::dim_note("Preset:"));
+                for preset in spec.presets {
+                    if icons::chip(ui, preset.label, preset.tooltip) {
+                        (preset.apply)(entity);
+                        preset_changed = true;
+                    }
+                }
+            });
+        }
+
+        let mut changed = preset_changed;
         {
             if let Some(component) = (spec.access)(entity) {
                 let mut ctx = RenderCtx {
@@ -365,6 +505,13 @@ fn show_field_row(
     label_override: Option<&str>,
     ctx: &mut RenderCtx,
 ) -> bool {
+    // `widget` 优先于类型推断：`[f32; 2]` 默认是两根轴，声明成区间才是 `a → b`。
+    // 这一层刻意放在最前面 —— 否则"类型 → 控件"的推断会把意图盖掉。
+    match field.widget {
+        Widget::Color => return show_color_row(ui, host, field, label_override, ctx),
+        Widget::Range => return show_range_row(ui, host, field, label_override, ctx),
+        Widget::Auto => {}
+    }
     match field.ty {
         TypeRef::Scalar(kind) => show_scalar_row(ui, host, field, kind, label_override, ctx),
         TypeRef::Named(meta) if meta().kind == MetaKind::Enum => {
@@ -581,28 +728,8 @@ fn show_axis_row(
 ) -> bool {
     let label = label_of(field, label_override);
     // 先读成一排 `f32`：`Vec3` 与 `[f32; 3]` 在反射里有两种变体，读到本地就统一了。
-    let mut axes = [0.0f32; 4];
-    let len = match host.get(field.name) {
-        Some(ValueRef::Vec2(v)) => {
-            axes[..2].copy_from_slice(&[v.x, v.y]);
-            2
-        }
-        Some(ValueRef::Vec3(v)) => {
-            axes[..3].copy_from_slice(&[v.x, v.y, v.z]);
-            3
-        }
-        Some(ValueRef::Vec4(v)) => {
-            axes.copy_from_slice(&[v.x, v.y, v.z, v.w]);
-            4
-        }
-        Some(ValueRef::List(list)) => {
-            let len = list.len().min(4);
-            for (index, slot) in axes.iter_mut().enumerate().take(len) {
-                *slot = list.get(index).and_then(|v| v.as_f32()).unwrap_or_default();
-            }
-            len
-        }
-        _ => return false,
+    let Some((mut axes, len)) = read_components(&*host, field) else {
+        return false;
     };
     if len < 2 {
         return false;
@@ -632,27 +759,161 @@ fn show_axis_row(
     if !local_changed {
         return false;
     }
+    write_components(host, field, &axes[..len]);
+    true
+}
+
+/// 把多分量字段读成 4 个槽，返回 `(槽, 实际分量数)`。
+///
+/// `Vec2/3/4` 与 `[f32; N]` 在反射里是两种变体（标量向量 / 列表），读到本地就
+/// 统一了 —— 上游于是只需要"一排数"，不用关心底层表示。
+fn read_components(host: &dyn Reflect, field: &FieldMeta) -> Option<([f32; 4], usize)> {
+    let mut slots = [0.0f32; 4];
+    let len = match host.get(field.name)? {
+        ValueRef::Vec2(v) => {
+            slots[..2].copy_from_slice(&[v.x, v.y]);
+            2
+        }
+        ValueRef::Vec3(v) => {
+            slots[..3].copy_from_slice(&[v.x, v.y, v.z]);
+            3
+        }
+        ValueRef::Vec4(v) => {
+            slots.copy_from_slice(&[v.x, v.y, v.z, v.w]);
+            4
+        }
+        ValueRef::List(list) => {
+            let len = list.len().min(4);
+            for (index, slot) in slots.iter_mut().enumerate().take(len) {
+                *slot = list.get(index).and_then(|v| v.as_f32()).unwrap_or_default();
+            }
+            len
+        }
+        _ => return None,
+    };
+    Some((slots, len))
+}
+
+/// 把一排数写回多分量字段。
+fn write_components(host: &mut dyn Reflect, field: &FieldMeta, values: &[f32]) {
+    let mut slots = [0.0f32; 4];
+    slots[..values.len()].copy_from_slice(values);
     match &field.ty {
         TypeRef::Scalar(ScalarKind::Vec2) => write(
             host,
             field.name,
-            ScalarValue::Vec2(xgame_math::glam::Vec2::new(axes[0], axes[1])),
+            ScalarValue::Vec2(xgame_math::glam::Vec2::new(slots[0], slots[1])),
         ),
         TypeRef::Scalar(ScalarKind::Vec4) => write(
             host,
             field.name,
             ScalarValue::Vec4(xgame_math::glam::Vec4::new(
-                axes[0], axes[1], axes[2], axes[3],
+                slots[0], slots[1], slots[2], slots[3],
             )),
         ),
         TypeRef::Scalar(_) => write(
             host,
             field.name,
-            ScalarValue::Vec3(xgame_math::glam::Vec3::new(axes[0], axes[1], axes[2])),
+            ScalarValue::Vec3(xgame_math::glam::Vec3::new(slots[0], slots[1], slots[2])),
         ),
         // 定长数组：逐个元素写回（`ReflectList` 没有"整体替换"的接口）。
-        _ => write_list_scalars(host, field.name, &axes[..len]),
+        _ => write_list_scalars(host, field.name, values),
     }
+}
+
+/// 取色块。
+///
+/// 直接把 `&mut [f32; 4]` 交给 egui 会让借用活到绘制结束，于是先读到局部副本、
+/// 画完再写回 —— 与数值行同一条规则（见模块文档的"写入路径"）。
+fn show_color_row(
+    ui: &mut egui::Ui,
+    host: &mut dyn Reflect,
+    field: &'static FieldMeta,
+    label_override: Option<&str>,
+    ctx: &mut RenderCtx,
+) -> bool {
+    let Some((slots, len)) = read_components(&*host, field) else {
+        return false;
+    };
+    if len < 3 {
+        // `widget = "color"` 配到短数组上：derive 已经拦了，走到这里是手写元数据。
+        log::warn!("字段 {} 声明了取色块但不是 3/4 分量", field.name);
+        return false;
+    }
+    let mut rgba = slots;
+    let label = label_of(field, label_override);
+    let response = row(ui, label, |ui| {
+        let response = ui.color_edit_button_rgba_unmultiplied(&mut rgba);
+        if let Some(note) = field.note {
+            ui.label(theme::dim_note(note));
+        }
+        response
+    });
+    let response = with_doc(response, field.doc);
+    ctx.sig.collect(&response);
+    if !response.changed() {
+        return false;
+    }
+    write_components(host, field, &rgba[..len]);
+    true
+}
+
+/// 区间对：两个数值框之间一个 `→`（`[最短, 最长]`）。
+///
+/// 与 [`show_axis_row`] 的区别是语义而不是形状 —— 但作者看到的差别很大：
+/// 轴标写 `X / Y` 会让人以为在填一个二维坐标，`→` 才读得出"从下界到上界"。
+fn show_range_row(
+    ui: &mut egui::Ui,
+    host: &mut dyn Reflect,
+    field: &'static FieldMeta,
+    label_override: Option<&str>,
+    ctx: &mut RenderCtx,
+) -> bool {
+    let Some((mut slots, len)) = read_components(&*host, field) else {
+        return false;
+    };
+    if len != 2 {
+        log::warn!("字段 {} 声明了区间但对数不是 2", field.name);
+        return false;
+    }
+    let label = label_of(field, label_override);
+    let speed = field.speed.map_or(default_speed(ScalarKind::F32), |s| s as f64);
+    let mut changed = false;
+    let mut first: Option<egui::Response> = None;
+    row(ui, label, |ui| {
+        for (index, slot) in slots[..2].iter_mut().enumerate() {
+            if index > 0 {
+                ui.label(theme::dim_note("→"));
+            }
+            let mut drag = egui::DragValue::new(slot).speed(speed);
+            if let Some((lo, hi)) = field.range {
+                // 区间两端常常要允许相等（`[0.5, 0.5]` = 固定值），
+                // `DragValue` 的闭区间正好允许。
+                drag = drag.range(lo..=hi);
+            }
+            if let Some(decimals) = field.decimals {
+                drag = drag.fixed_decimals(decimals as usize);
+            }
+            let response =
+                ui.add_sized(egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT), drag);
+            changed |= response.changed();
+            if first.is_none() {
+                first = Some(response.clone());
+            }
+        }
+        if let Some(note) = field.note {
+            ui.label(theme::dim_note(note));
+        }
+    });
+    // 悬浮说明挂在第一个数值框上：整行没有"自己的"响应，而作者悬停时
+    // 十有八九指在第一个框上。
+    if let Some(response) = first {
+        ctx.sig.collect(&with_doc(response, field.doc));
+    }
+    if !changed {
+        return false;
+    }
+    write_components(host, field, &slots[..2]);
     true
 }
 
@@ -687,10 +948,15 @@ fn show_enum_row(
             .width(ui.available_width())
             .show_ui(ui, |ui| {
                 for variant in meta.variants {
-                    if ui
-                        .selectable_label(variant.name == current, variant.display_name())
-                        .clicked()
-                    {
+                    // 变体说明挂在每一项的悬浮上：下拉框收起时显示的是短标签，
+                    // 长解释只能在展开时才有地方放 —— 而它恰恰是展开着才需要看的。
+                    let item = ui.selectable_label(variant.name == current, variant.display_name());
+                    let item = if variant.doc.is_empty() {
+                        item
+                    } else {
+                        item.on_hover_text(variant.doc)
+                    };
+                    if item.clicked() {
                         picked = Some(variant.name);
                     }
                 }
@@ -835,7 +1101,7 @@ fn show_list_row(
             changed = true;
         }
     }
-    if let Some(note) = field.note {
+    if let Some(note) = field.footnote {
         theme::note(ui, note);
     }
     changed
@@ -868,6 +1134,16 @@ fn show_list_scalar(
     .is_ok()
 }
 
+/// 同排一行里的一格。
+///
+/// 组里允许混排是 S3 才出现的需求：`Duration` 后面紧跟 `Loop` 勾选框、
+/// 出生色后面跟死亡色。"一行两个数值框"是最早的形态，不是唯一形态。
+enum Cell {
+    Number(f32),
+    Bool(bool),
+    Color([f32; 4]),
+}
+
 /// 同排的一组字段（`min` → `max` 那种成对区间）。
 ///
 /// 组内字段先读到局部副本、画完再逐个写回：同时持有两个 `ValueRefMut` 是
@@ -879,57 +1155,56 @@ fn show_group_row(
     label_override: Option<&str>,
     ctx: &mut RenderCtx,
 ) -> bool {
-    // 只有"单分量浮点"能同排：整型塞进 `f32` 会丢精度（2^24 以上），
-    // 而成对区间在引擎里全是浮点。遇到别的形状就退回逐行，宁可不合并也不画错。
-    let pairable = members.iter().all(|field| {
-        matches!(
-            field.ty,
-            TypeRef::Scalar(ScalarKind::F32 | ScalarKind::F64)
-        )
-    });
-    if members.len() < 2 || !pairable {
+    let cells = read_cells(&*host, members);
+    let Some(mut cells) = cells else {
+        // 组里有画不到一行里的类型：退回逐行。宁可不合并，也不画错 ——
+        // 合并是排版偏好，画错是信息错误。
         let mut changed = false;
         for (index, field) in members.iter().copied().enumerate() {
             let override_label = if index == 0 { label_override } else { None };
             changed |= show_field_row(ui, host, field, override_label, ctx);
         }
         return changed;
-    }
+    };
 
     let label = label_of(members[0], label_override);
-    let mut values: Vec<f32> = members
-        .iter()
-        .map(|field| {
-            host.get(field.name)
-                .and_then(|value| value.as_f32())
-                .unwrap_or_default()
-        })
-        .collect();
     let mut touched = vec![false; members.len()];
 
     row(ui, label, |ui| {
         for (index, field) in members.iter().enumerate() {
-            if index > 0 {
+            // `→` 只夹在两个可比较的量之间：`Duration → ☑ Loop` 里的箭头
+            // 会把"一个是数、一个是开关"读成一条连续刻度，那是误导。
+            if index > 0
+                && !matches!(cells[index], Cell::Bool(_))
+                && !matches!(cells[index - 1], Cell::Bool(_))
+            {
                 ui.label(theme::dim_note("→"));
             }
-            let mut drag = egui::DragValue::new(&mut values[index])
-                .speed(field.speed.map_or(default_speed(ScalarKind::F32), |s| s as f64));
-            if let Some((lo, hi)) = field.range {
-                drag = drag.range(lo..=hi);
-            }
-            if let Some(decimals) = field.decimals {
-                drag = drag.fixed_decimals(decimals as usize);
-            }
-            let response =
-                ui.add_sized(egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT), drag);
+            let response = match &mut cells[index] {
+                Cell::Number(value) => {
+                    let mut drag = egui::DragValue::new(value)
+                        .speed(field.speed.map_or(default_speed(ScalarKind::F32), |s| s as f64));
+                    if let Some((lo, hi)) = field.range {
+                        drag = drag.range(lo..=hi);
+                    }
+                    if let Some(decimals) = field.decimals {
+                        drag = drag.fixed_decimals(decimals as usize);
+                    }
+                    ui.add_sized(egui::vec2(theme::FIELD_WIDTH, theme::FIELD_HEIGHT), drag)
+                }
+                Cell::Bool(value) => ui.checkbox(value, field.display_name()),
+                Cell::Color(rgba) => ui.color_edit_button_rgba_unmultiplied(rgba),
+            };
+            let response = with_doc(response, field.doc);
             ctx.sig.collect(&response);
             touched[index] = response.changed();
+            if let Some(note) = field.note {
+                ui.label(theme::dim_note(note));
+            }
         }
     });
 
-    // 组尾的 `note` 整行画在下面而不是塞进本行：一行两个数值框再加一截中文
-    // 说明会顶出面板宽度（320px 面板下 Min/Max 加说明已经放不下）。
-    if let Some(note) = members.last().and_then(|field| field.note) {
+    if let Some(note) = members.last().and_then(|field| field.footnote) {
         theme::note(ui, note);
     }
 
@@ -938,14 +1213,50 @@ fn show_group_row(
         if !touched[index] {
             continue;
         }
-        let value = match field.ty {
-            TypeRef::Scalar(ScalarKind::F64) => ScalarValue::F64(values[index] as f64),
-            _ => ScalarValue::F32(values[index]),
-        };
-        write(host, field.name, value);
+        match &cells[index] {
+            Cell::Number(value) => {
+                let scalar = match field.ty {
+                    TypeRef::Scalar(ScalarKind::F64) => ScalarValue::F64(*value as f64),
+                    _ => ScalarValue::F32(*value),
+                };
+                write(host, field.name, scalar);
+            }
+            Cell::Bool(value) => write(host, field.name, ScalarValue::Bool(*value)),
+            Cell::Color(rgba) => write_components(host, field, rgba),
+        }
         changed = true;
     }
     changed
+}
+
+/// 把一组成员读成一排 [`Cell`]；有任何一个读不出来就返回 `None`。
+fn read_cells(host: &dyn Reflect, members: &[&'static FieldMeta]) -> Option<Vec<Cell>> {
+    if members.len() < 2 {
+        return None;
+    }
+    let mut cells = Vec::with_capacity(members.len());
+    for field in members {
+        let cell = match (field.widget, field.ty) {
+            (Widget::Color, _) => {
+                let (slots, len) = read_components(host, field)?;
+                if len < 3 {
+                    return None;
+                }
+                Cell::Color(slots)
+            }
+            (_, TypeRef::Scalar(ScalarKind::Bool)) => {
+                Cell::Bool(host.get(field.name)?.as_bool()?)
+            }
+            // 只有浮点能同排：整型塞进 `f32` 会丢精度（2^24 以上），
+            // 而成对区间在引擎里全是浮点。
+            (_, TypeRef::Scalar(ScalarKind::F32 | ScalarKind::F64)) => {
+                Cell::Number(host.get(field.name)?.as_f32()?)
+            }
+            _ => return None,
+        };
+        cells.push(cell);
+    }
+    Some(cells)
 }
 
 /// 逐个元素写回定长数值数组。
@@ -1045,7 +1356,7 @@ mod tests {
         assert!(is_visible(&on, min));
     }
 
-    /// 组标签取组内第一个字段的显示名，组尾取最后一个字段的 `note`。
+    /// 组标签取组内第一个字段的显示名，组尾取最后一个字段的 `footnote`。
     #[test]
     fn distance_group_is_a_pair_with_one_caption() {
         use xgame_core::AudioSource;
@@ -1054,8 +1365,8 @@ mod tests {
         let max = meta.field("max_distance").unwrap();
         assert_eq!(min.row_group, max.row_group);
         assert_eq!(min.display_name(), "Distance");
-        assert!(min.note.is_none(), "说明只该挂一个字，否则会画两遍");
-        assert!(max.note.is_some());
+        assert!(min.footnote.is_none(), "说明只该挂一个字，否则会画两遍");
+        assert!(max.footnote.is_some());
     }
 
     /// 切到 `Box` 时必须按实体缩放给半边长，而不是留一个零厚度碰撞体。
@@ -1100,6 +1411,68 @@ mod tests {
         entity.lod.levels[1].model = "Resources/Box.glb".into();
         (LOD.normalize.unwrap())(&mut entity);
         assert_eq!(entity.lod.levels[1].model, "Resources/Box.glb");
+    }
+
+    /// 粒子段的 spec：预设改的是整块组件、钳制走引擎自己的规则。
+    #[test]
+    fn particle_spec_applies_presets_and_clamps() {
+        let mut entity = Entity::new("probe");
+        entity.particle = Some(xgame_core::ParticleEmitter::default());
+        {
+            let view = (PARTICLE.access)(&mut entity).expect("particle 应在");
+            assert_eq!(view.type_meta().name, "ParticleEmitter");
+            write(view, "rate", ScalarValue::F32(12.0));
+        }
+        assert_eq!(entity.particle.as_ref().unwrap().rate, 12.0);
+
+        // 预设：一键换成火焰那套参数。
+        (PARTICLE.presets[0].apply)(&mut entity);
+        let fire = entity.particle.unwrap();
+        assert!(fire.speed[1] > fire.speed[0], "火焰应当比默认更快");
+        assert_eq!(fire.blend, xgame_core::particle::ParticleBlend::Additive);
+
+        // 钳制：`max_particles` 超上限、`lifetime` 反序都要被修好。
+        entity.particle = Some(xgame_core::ParticleEmitter {
+            max_particles: u32::MAX,
+            lifetime: [5.0, 1.0],
+            ..xgame_core::ParticleEmitter::default()
+        });
+        (PARTICLE.normalize.unwrap())(&mut entity);
+        let fixed = entity.particle.unwrap();
+        assert_eq!(
+            fixed.max_particles,
+            xgame_core::particle::MAX_PARTICLES_LIMIT
+        );
+        assert!(fixed.lifetime[0] <= fixed.lifetime[1], "{:?}", fixed.lifetime);
+    }
+
+    /// UI 段走专用渲染器，但仍然登记在同一张表里 —— 这条守住"入口统一"：
+    /// spec 得能拿到组件、`render` 得是 `Custom`。
+    #[test]
+    fn ui_spec_is_registered_with_a_custom_renderer() {
+        assert!(matches!(UI.render, Render::Custom(_)));
+        assert_eq!(UI.kind, BuiltinComponent::Ui);
+        assert_eq!(UI.title, "UI");
+        let mut entity = Entity::new("probe");
+        assert!((UI.access)(&mut entity).is_none());
+        entity.ui = Some(xgame_core::UiElement::default());
+        let view = (UI.access)(&mut entity).expect("ui 应在");
+        assert_eq!(view.type_meta().name, "UiElement");
+    }
+
+    /// 混合类型的行组（数值 + 勾选框）不能插 `→`：那会把"一个数、一个开关"
+    /// 读成一条连续刻度。这里用 `Duration` + `Loop` 那对守住。
+    #[test]
+    fn mixed_group_skips_the_arrow_before_a_toggle() {
+        use xgame_core::reflect::ReflectMeta;
+        let meta = <xgame_core::ParticleEmitter as ReflectMeta>::meta();
+        let duration = meta.field("duration").unwrap();
+        let looping = meta.field("looping").unwrap();
+        assert_eq!(duration.row_group, looping.row_group);
+        assert_eq!(duration.row_group, Some("duration"));
+        // 一个数值、一个布尔 —— 渲染器见到 `Cell::Bool` 就不画箭头。
+        assert!(matches!(duration.ty, TypeRef::Scalar(ScalarKind::F32)));
+        assert!(matches!(looping.ty, TypeRef::Scalar(ScalarKind::Bool)));
     }
 
     /// 无头跑一遍全部字段，抓"画的时候才炸"的问题：id 冲突、借用顺序违规、
@@ -1154,6 +1527,7 @@ mod tests {
         );
 
         assert!(count(&mut Camera::default()) > 0);
+        assert!(count(&mut xgame_core::ParticleEmitter::default()) > 0);
         assert!(count(&mut xgame_core::PhysicsBody::default()) > 0);
         assert!(count(&mut xgame_core::CharacterController::default()) > 0);
         // 列表要有内容才会走"每项一组行 + 删除按钮"那条路；空列表只画 Add。

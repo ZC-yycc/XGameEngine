@@ -144,6 +144,25 @@ impl FieldFlags {
     };
 }
 
+/// 控件形态。
+///
+/// 判据不是"数据是什么类型"，而是"作者想怎么改它"。同一个 `[f32; 4]`：
+/// 材质的 `base_color` 要取色块，而某个"四个权重"的数组要四根轴 ——
+/// 类型一样，意图不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Widget {
+    /// 按类型猜（默认）。
+    #[default]
+    Auto,
+    /// 取色块（`[f32; 4]` / `Vec4`，**线性**非预乘 RGBA）。
+    Color,
+    /// 区间对：两个数值框之间一个 `→`（`[f32; 2]`）。
+    ///
+    /// 与两根轴的区别在于语义：轴是"同一个量的三个分量"，区间是"下界与上界"。
+    /// 画成 `X / Y` 会让作者以为自己在填一个二维坐标。
+    Range,
+}
+
 /// 一个字段的静态描述。整张表是编译期常量。
 #[derive(Debug, Clone, Copy)]
 pub struct FieldMeta {
@@ -169,10 +188,20 @@ pub struct FieldMeta {
     pub decimals: Option<u8>,
     /// 控件**之后**、仍在本行内的说明文字（`"米"` / `"度（垂直）"`）。
     ///
-    /// 与 `unit` 的区别见 [`unit`](Self::unit)。行分组（[`row_group`](Self::row_group)）
-    /// 里的 `note` 例外：它整行之后单独占一行画，因为一行塞两个数值框再加一截
-    /// 中文说明会把面板顶出去。
+    /// 与 `unit` 的区别见 [`unit`](Self::unit)。
     pub note: Option<&'static str>,
+    /// 整行**之后**另起一行的说明（`"超出最后一级 = 不画"`）。
+    ///
+    /// 与 [`note`](Self::note) 分开是因为排版后果不同：`note` 挤在本行里，只放得下
+    /// 几个字；`footnote` 独占一行，可以是一句话。混用两者的结果是一个长句把面板
+    /// 顶出右边缘。
+    pub footnote: Option<&'static str>,
+    /// 控件形态。`Auto` 时按 [`ty`](Self::ty) 猜（数值框 / 勾选 / 输入框 / 轴行 …）。
+    ///
+    /// 只有"类型猜不出来的意图"才需要它：`[f32; 2]` 默认画成两根轴，
+    /// 但 `[最短, 最长]` 这样的区间要画成 `a → b`；`[f32; 4]` 默认画成四根轴，
+    /// 但颜色要画成一个取色块。
+    pub widget: Widget,
     /// 文本控件为空时的占位提示（`"Resources/Audio/Beep.wav"`）。
     pub hint: Option<&'static str>,
     /// 只在同一结构体的**另一个 `bool` 字段**为 `true` 时显示；值是那个字段名。

@@ -449,6 +449,8 @@ struct ReflectOpts {
     item_prefix: Option<String>,
     add_label: Option<String>,
     variant_note: bool,
+    widget: Option<String>,
+    footnote: Option<String>,
     doc: String,
 }
 
@@ -533,11 +535,15 @@ fn parse_reflect_opts(field: &syn::Field) -> syn::Result<ReflectOpts> {
                 }
                 "add_label" => opts.add_label = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
                 "variant_note" => opts.variant_note = true,
+                "widget" => opts.widget = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
+                "footnote" => {
+                    opts.footnote = Some(meta.value()?.parse::<syn::LitStr>()?.value())
+                }
                 other => {
                     return Err(meta.error(format!(
                         "不认识的选项 `{other}`（可用：skip / hidden / read_only / label / unit / \
                          speed / min / max / decimals / note / hint / visible_when / row_group / \
-                         item_prefix / add_label / variant_note / doc）"
+                         item_prefix / add_label / variant_note / widget / footnote / doc）"
                     )))
                 }
             }
@@ -545,6 +551,71 @@ fn parse_reflect_opts(field: &syn::Field) -> syn::Result<ReflectOpts> {
         })?;
     }
     Ok(opts)
+}
+
+/// `widget = "color"` → `Widget::Color`，并在**编译期**校验取值与本字段类型相容。
+///
+/// 校验放在这里而不是编辑器里：`widget = "color"` 挂到 `f32` 上，编辑器只能静默
+/// 退回数值框 —— 而作者会一直以为自己开了个取色器。编译期报错一次解决。
+fn widget_expr(
+    name: Option<&str>,
+    ty: &syn::Type,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let p = quote!(::xgame_core::reflect);
+    let Some(name) = name else {
+        return Ok(quote!(#p::Widget::Auto));
+    };
+    match name {
+        "color" => {
+            let ok = matches!(array_len(ty), Some(3 | 4)) || is_vector_type(ty);
+            if !ok {
+                return Err(syn::Error::new(
+                    span,
+                    r#"`widget = "color"` 需要 `[f32; 3]` / `[f32; 4]` / `Vec3` / `Vec4`"#,
+                ));
+            }
+            Ok(quote!(#p::Widget::Color))
+        }
+        "range" => {
+            if !matches!(array_len(ty), Some(2)) {
+                return Err(syn::Error::new(
+                    span,
+                    r#"`widget = "range"` 需要 `[f32; 2]`（下界, 上界）"#,
+                ));
+            }
+            Ok(quote!(#p::Widget::Range))
+        }
+        other => Err(syn::Error::new(
+            span,
+            format!("不认识的控件 `{other}`（可用：color / range）"),
+        )),
+    }
+}
+
+/// `[f32; N]` 的 `N`；不是定长数组时 `None`。
+fn array_len(ty: &syn::Type) -> Option<usize> {
+    let syn::Type::Array(array) = ty else {
+        return None;
+    };
+    let syn::Expr::Lit(lit) = &array.len else {
+        return None;
+    };
+    let syn::Lit::Int(int) = &lit.lit else {
+        return None;
+    };
+    int.base10_parse::<usize>().ok()
+}
+
+/// `Vec3` / `Vec4`（`glam` 的，路径前缀不限）。
+fn is_vector_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "Vec3" || seg.ident == "Vec4")
 }
 
 /// `#[reflect(...)]` 收集到的**变体**选项。
@@ -724,6 +795,8 @@ fn gen_fields(
     // `visible_when` 的编译期校验用：`(字段名, 是否 bool)`。
     let mut declared: Vec<(String, bool)> = Vec::new();
     let mut visibility_refs: Vec<(String, String, proc_macro2::Span)> = Vec::new();
+    // `row_group` 的「孤组」检查用：`(组名, 字段名, span)`。
+    let mut group_refs: Vec<(String, String, proc_macro2::Span)> = Vec::new();
 
     for field in fields {
         let ident = field
@@ -738,6 +811,9 @@ fn gen_fields(
         declared.push((name.clone(), is_bool_type(&field.ty)));
         if let Some(when) = &opts.visible_when {
             visibility_refs.push((name.clone(), when.clone(), ident.span()));
+        }
+        if let Some(group) = &opts.row_group {
+            group_refs.push((group.clone(), name.clone(), ident.span()));
         }
         let ty_ref = type_ref_expr(&field.ty)?;
 
@@ -782,6 +858,8 @@ fn gen_fields(
         let visible_when = opt_str(&opts.visible_when);
         let row_group = opt_str(&opts.row_group);
         let variant_note = opts.variant_note;
+        let footnote = opt_str(&opts.footnote);
+        let widget = widget_expr(opts.widget.as_deref(), &field.ty, ident.span())?;
         let item_prefix = opt_str(&opts.item_prefix);
         let add_label = opt_str(&opts.add_label);
         let field_doc = opts.doc;
@@ -800,6 +878,8 @@ fn gen_fields(
                 visible_when: #visible_when,
                 row_group: #row_group,
                 variant_note: #variant_note,
+                footnote: #footnote,
+                widget: #widget,
                 item_prefix: #item_prefix,
                 add_label: #add_label,
                 flags: #flags,
@@ -831,6 +911,21 @@ fn gen_fields(
                 ))
             }
             Some(_) => {}
+        }
+    }
+
+    // 只有一员的组永远合并不了 —— 声明它的人一定以为隔壁那个字段也在组里。
+    // 这个错在界面上完全看不出来（只是"多了一行"），所以必须在编译期拦。
+    for (group, owner, span) in &group_refs {
+        let members = group_refs.iter().filter(|(name, _, _)| name == group).count();
+        if members < 2 {
+            return Err(syn::Error::new(
+                *span,
+                format!(
+                    "`row_group = \"{group}\"` 只有 `{owner}` 一个成员 —— \
+                     至少要有两个**连续**字段用同一个组名才会合并成一行"
+                ),
+            ));
         }
     }
 

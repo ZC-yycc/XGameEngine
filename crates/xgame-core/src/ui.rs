@@ -48,6 +48,7 @@
 //! 代价是 `Entity` 多了一个字段 —— 这是刻意的取舍，见决策记录。
 
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 use crate::color::Color;
 
@@ -60,7 +61,7 @@ use crate::color::Color;
 /// 所有长度单位都是**物理像素**（视口纹理的像素），不随 DPI 缩放变化 ——
 /// 相当于 Unity Canvas 的 "Constant Pixel Size"，也是它最常见的默认档。
 /// 分辨率适配靠锚点完成；"设计分辨率缩放"（Canvas Scaler）尚未实现。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct UiElement {
     /// 控件类型。**只影响 Inspector 的默认值与语义**（按钮可交互、文本默认
@@ -103,7 +104,11 @@ pub struct UiElement {
     #[serde(default, skip_serializing_if = "is_false")]
     pub clip_children: bool,
     /// 运行时状态：不落盘，由 [`crate::ui`] 的交互步骤每帧写回。
+    ///
+    /// 反射里也跳过：它是 ebge 每帧重算的派生量（`hovered` / `pressed` / `clicked`），
+    /// 与 `PhysicsHandle` 同类 —— 不进编辑器、不落盘、不进场景 diff。
     #[serde(skip)]
+    #[reflect(skip)]
     pub state: UiState,
 }
 
@@ -111,7 +116,7 @@ pub struct UiElement {
 ///
 /// 只有 `Button` 与 `Panel` 在交互上有区别（Button 默认 `interactable`），
 /// 绘制上没有分支 —— 见 [`UiElement::kind`] 的说明。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Reflect)]
 pub enum UiKind {
     /// 纯色 / 圆角矩形块。
     #[default]
@@ -143,7 +148,7 @@ impl UiKind {
 ///
 /// 颜色是**线性空间**（与 `Color` 的全局约定一致，见 `color.rs`）；
 /// 渲染器在 sRGB 目标上由硬件编码，非 sRGB 目标手动编码。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct UiStyle {
     /// 背景色（线性 RGBA，`[r, g, b, a]`）。`a = 0` = 不画背景。
@@ -212,7 +217,7 @@ impl UiStyle {
 }
 
 /// 文本样式与内容。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct UiTextStyle {
     /// 文本内容（支持 `\n` 硬换行）。
@@ -263,7 +268,7 @@ impl UiTextStyle {
 }
 
 /// 水平对齐。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Reflect)]
 pub enum UiAlign {
     /// 左对齐。
     #[default]
@@ -286,7 +291,7 @@ impl UiAlign {
 }
 
 /// 垂直对齐。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Reflect)]
 pub enum UiVAlign {
     /// 顶部。
     Top,
@@ -309,7 +314,7 @@ impl UiVAlign {
 }
 
 /// 图片元素。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct UiImageStyle {
     /// 图片路径（**项目相对路径**，与 `Entity::model` 同款约定）。

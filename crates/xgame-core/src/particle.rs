@@ -29,17 +29,20 @@
 //! 留下悬垂条目。
 
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 /// 粒子混合方式。
 ///
 /// 默认 [`ParticleBlend::Alpha`]：直通 alpha 是"通用"的那一档，加色模式挂错
 /// 会把整个画面点成过曝（见 [`ParticleEmitter::blend`] 的说明）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Reflect)]
 pub enum ParticleBlend {
     /// 直通 alpha 混合（`src*a + dst*(1-a)`）：烟雾、尘土、落叶。
     #[default]
+    #[reflect(label = "Alpha")]
     Alpha,
     /// 加色混合（`src*a + dst`）：火焰、火花、能量 —— 亮部叠起来自然过曝。
+    #[reflect(label = "Additive")]
     Additive,
 }
 
@@ -47,7 +50,7 @@ pub enum ParticleBlend {
 ///
 /// 方向不由形状决定，见 [`ParticleEmitter::direction`] 与
 /// [`ParticleEmitter::spread`] —— 两者正交，形状只管"从哪儿冒出来"。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, Reflect)]
 pub enum EmissionShape {
     /// 一个点（实体原点）。默认值：不额外采样，最便宜的形态。
     #[default]
@@ -55,11 +58,21 @@ pub enum EmissionShape {
     /// 实心球内均匀分布（半径 = `radius`）。
     Sphere {
         /// 球半径（世界单位）。
+        #[reflect(
+            label = "Radius",
+            min = 0.0,
+            max = 1.0e4,
+            speed = 0.05,
+            unit = "m",
+            note = "m"
+        )]
         radius: f32,
     },
     /// 实心盒内均匀分布（半边长）。
+    #[reflect(label = "Box")]
     Box {
         /// 三个半边长。
+        #[reflect(label = "Half", min = 0.0, max = 1.0e4, speed = 0.05, unit = "m")]
         half_extents: [f32; 3],
     },
 }
@@ -96,61 +109,109 @@ impl EmissionShape {
 ///   当前世界变换取，所以"边飞边喷"是自然的。
 /// - **上限**：[`max_particles`](Self::max_particles) 是硬顶，满了就不再生成
 ///   （先死的先腾位置）—— 没有它，一个手滑的 `rate` 就能把帧时间吃光。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct ParticleEmitter {
     /// 是否持续发射。脚本 `particle_set_emitting(false)` 关掉之后，
     /// 已经出生的粒子照常走完寿命（不是"清屏"）。
+    #[reflect(label = "Emitting")]
     pub emitting: bool,
     /// 每秒发射数（`0` = 只有 burst 才出粒子）。
+    #[reflect(label = "Rate", min = 0.0, max = 1.0e5, speed = 1.0, decimals = 0, note = "/s")]
     pub rate: f32,
     /// 同时存在的粒子上限。
+    #[reflect(
+        label = "Max",
+        min = 0.0,
+        max = 200_000.0,
+        speed = 1.0,
+        decimals = 0,
+        note = "同时存在上限"
+    )]
     pub max_particles: u32,
     /// 发射时长（秒）。`<= 0` = 无限。
+    #[reflect(
+        label = "Duration",
+        speed = 0.1,
+        min = 0.0,
+        max = 1.0e5,
+        decimals = 1,
+        note = "s（0 = 一直喷）",
+        row_group = "duration"
+    )]
     pub duration: f32,
     /// 到时后是否重来（只在 `duration > 0` 时有意义）。
+    #[reflect(label = "Loop", row_group = "duration")]
     pub looping: bool,
 
     /// 寿命区间 `[最短, 最长]`（秒）。
+    #[reflect(label = "Lifetime", speed = 0.05, min = 0.001, max = 1.0e4, widget = "range", note = "s")]
     pub lifetime: [f32; 2],
     /// 初速度区间 `[最慢, 最快]`（世界单位/秒）。
+    #[reflect(label = "Speed", speed = 0.1, min = 0.0, max = 1.0e4, widget = "range", note = "m/s")]
     pub speed: [f32; 2],
-    /// 发射方向（**实体局部空间**，会随实体朝向转）。
-    pub direction: [f32; 3],
     /// 方向锥的半角（度）。`0` = 笔直一条线，`180` = 全向球。
+    #[reflect(
+        label = "Spread",
+        min = 0.0,
+        max = 180.0,
+        speed = 1.0,
+        decimals = 0,
+        unit = "°",
+        note = "°（0 = 直线，180 = 全向）"
+    )]
     pub spread: f32,
+    /// 发射方向（**实体局部空间**，会随实体朝向转）。
+    #[reflect(label = "Direction", speed = 0.1, min = -1.0e4, max = 1.0e4)]
+    pub direction: [f32; 3],
     /// 发射体积。
+    #[reflect(label = "Shape")]
     pub shape: EmissionShape,
 
     /// 粒子自身受到的重力（世界空间，`[0, -9.81, 0]` = 地球）。
     ///
     /// **用发射器自己的重力而不是取自物理世界**：火焰要往上飘、烟要慢慢散，
     /// 与场景全局重力无关；而且粒子是纯视觉，不该被物理世界的参数牵着走。
+    #[reflect(label = "Gravity", speed = 0.1, min = -1.0e4, max = 1.0e4)]
     pub gravity: [f32; 3],
     /// 线性阻尼（每秒衰减比例，`0` = 无阻尼）。
+    #[reflect(label = "Drag", min = 0.0, max = 1.0e3, speed = 0.05, note = "每秒衰减比例")]
     pub drag: f32,
 
     /// 出生尺寸（世界单位，四边形的半边长）。
+    #[reflect(
+        label = "Size",
+        min = 0.0,
+        max = 1.0e4,
+        speed = 0.01,
+        row_group = "size"
+    )]
     pub start_size: f32,
     /// 死亡尺寸。
+    #[reflect(min = 0.0, max = 1.0e4, speed = 0.01, row_group = "size", note = "出生 → 死亡")]
     pub end_size: f32,
     /// 出生颜色（**线性空间** RGBA；与材质 / UI 同一套颜色约定）。
     ///
     /// 分量允许 > 1：加色粒子写 2.0 就真的更亮，配 Bloom 会自然晕开。
+    #[reflect(label = "Color", widget = "color", row_group = "color")]
     pub start_color: [f32; 4],
     /// 死亡颜色。
+    #[reflect(widget = "color", row_group = "color", note = "出生 → 死亡")]
     pub end_color: [f32; 4],
     /// 混合方式。
+    #[reflect(label = "Blend")]
     pub blend: ParticleBlend,
 
     /// 随机种子。同一个种子 + 同一段 dt 序列 ⇒ 逐位相同的结果
     /// （无头截图与回归测试依赖这一条）。
+    #[reflect(label = "Seed", speed = 1.0, note = "同种子 ⇒ 逐位可复现")]
     pub seed: u64,
 
     /// **运行时**：待处理的 burst 请求（脚本"炸一下"用）。
     ///
     /// `#[serde(skip)]`：不落盘。模拟层消费后清零，所以它天然是"一次性"的。
     #[serde(skip)]
+    #[reflect(skip)]
     pub burst: u32,
 }
 

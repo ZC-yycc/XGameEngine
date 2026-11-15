@@ -311,7 +311,7 @@ pub(super) fn component_context_menu(
 /// "改动发生"与"写回场景"之间拿到 `changed` / 拖拽起点 / 拖拽终点三个时机，
 /// 而一个字段一个 `bool` 传三遍的写法在有五种字段类型的地方很快失控。
 #[derive(Default, Clone, Copy)]
-pub(super) struct FieldSignals {
+pub(crate) struct FieldSignals {
     /// 本帧有字段被改动（对应 `Response::changed`）。
     changed: bool,
     /// 本帧有控件开始拖拽（改前快照的拍摄时机）。
@@ -334,6 +334,14 @@ impl FieldSignals {
     /// 不补这一下，选完总线场景不会被标脏，Ctrl+S 不会保存它。
     pub(super) fn mark_changed(&mut self) {
         self.changed = true;
+    }
+
+    /// 专用渲染器汇总用：它自己算好了"这一帧有没有改动"，这里只做并集。
+    ///
+    /// 存在的理由是 `Render::Custom` 那一类段落的控件是手排的，
+    /// 没有逐控件的 `Response` 可收 —— 但它们仍然要参与同一套脏检查与撤销。
+    pub(super) fn collect_changed_any(&mut self, changed: bool) {
+        self.changed |= changed;
     }
 }
 
@@ -796,28 +804,21 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 这个实体的变换；放在面板末尾（Material 之后）时，属性多的实体
         // 要滚很久才能看到它 —— 实测截图里它整块在折叠线以下。
         if entity.ui.is_some() {
-            let ui_header = theme::section_bar(ui, "UI");
-            component_context_menu(
-                &ui_header,
+            // UI 段走**专用渲染器**（版式本身承载信息，见 `Render::Custom` 的说明），
+            // 但入口与其余组件一致：同一张 spec 表、同一个 `show_section`。
+            let mut reflected = FieldSignals::default();
+            super::inspector_reflect::show_section(
                 state,
+                ui,
                 entity,
-                ComponentMenuTarget::Removable {
-                    address: ComponentAddress::Builtin(BuiltinComponent::Ui),
-                    label: "Remove UI Element",
-                },
+                &super::inspector_reflect::UI,
+                &mut reflected,
                 &mut component_request,
                 &mut refresh_scripts,
             );
-            if crate::panels::inspector_ui::show(
-                ui,
-                entity,
-                &mut touched,
-                state.is_editing(),
-            ) {
-                component_request = Some(ComponentAction::Remove(ComponentAddress::Builtin(
-                    BuiltinComponent::Ui,
-                )));
-            }
+            touched |= reflected.changed;
+            drag_began |= reflected.drag_began;
+            drag_ended |= reflected.drag_ended;
         }
 
         // ── 网格 ──
@@ -951,7 +952,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             ui.indent("lod", |ui| {
                 let mut remove: Option<usize> = None;
                 for index in 0..entity.lod.levels.len() {
-                    theme::field_row(ui, &format!("L{index}"), |ui| {
+                    row(ui, &format!("L{index}"), |ui| {
                         let level = &mut entity.lod.levels[index];
                         let resp = ui.add_sized(
                             egui::vec2(ui.available_width(), theme::FIELD_HEIGHT),
@@ -962,7 +963,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                             touched = true;
                         }
                     });
-                    theme::field_row(ui, "Max Dist", |ui| {
+                    row(ui, "Max Dist", |ui| {
                         let level = &mut entity.lod.levels[index];
                         let resp = ui.add_sized(
                             egui::vec2(ui.available_width() - 26.0, theme::FIELD_HEIGHT),
@@ -2632,7 +2633,22 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 模拟住在运行时的 `ParticleSystem` 里：**编辑态看不见粒子，Play 才喷** ——
         // 所以这里没有任何"预览播放"按钮，那需要另造一条编辑器内模拟回路，
         // 而 Play 就是那条回路。
-        if entity.particle.is_some() {
+        if entity.particle.is_some() && state.use_reflect_inspector {
+            let mut reflected = FieldSignals::default();
+            super::inspector_reflect::show_section(
+                state,
+                ui,
+                entity,
+                &super::inspector_reflect::PARTICLE,
+                &mut reflected,
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            touched |= reflected.changed;
+            drag_began |= reflected.drag_began;
+            drag_ended |= reflected.drag_ended;
+        }
+        if entity.particle.is_some() && !state.use_reflect_inspector {
             let particle_header = theme::section_bar(ui, "Particle");
             component_context_menu(
                 &particle_header,
@@ -2786,7 +2802,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
 
                     // 方向是实体局部向量：三轴宽度与 Transform 同行算法一致。
                     let axis_w = theme::axis_field_width(ui);
-                    theme::field_row(ui, "Direction", |ui| {
+                    row(ui, "Direction", |ui| {
                         // zip(iter_mut) 而不是 `[&mut a[0], ...]` 数组字面量：数组索引
                         // 拿不到字段级借用拆分，会被判成同一数组的多次可变借用。
                         for (axis, value) in ["X", "Y", "Z"].into_iter().zip(p.direction.iter_mut())
@@ -2847,7 +2863,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                             });
                         }
                         xgame_core::particle::EmissionShape::Box { mut half_extents } => {
-                            theme::field_row(ui, "Half", |ui| {
+                            row(ui, "Half", |ui| {
                                 for (axis, value) in
                                     ["X", "Y", "Z"].into_iter().zip(half_extents.iter_mut())
                                 {
@@ -2861,7 +2877,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                         xgame_core::particle::EmissionShape::Point => {}
                     }
 
-                    theme::field_row(ui, "Gravity", |ui| {
+                    row(ui, "Gravity", |ui| {
                         for (axis, value) in ["X", "Y", "Z"].into_iter().zip(p.gravity.iter_mut()) {
                             theme::axis_label(ui, axis);
                             let resp = theme::drag_field_w(ui, axis_w, value, 0.1, "");

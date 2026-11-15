@@ -240,7 +240,7 @@ pub struct AudioSource {
         max = 3.4028235e38,
         unit = "m",
         speed = 0.1,
-        note = "min → max：衰减区间（米）"
+        footnote = "min → max：衰减区间（米）"
     )]
     pub max_distance: f32,
 }

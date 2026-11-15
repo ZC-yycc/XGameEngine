@@ -79,7 +79,7 @@ pub struct LodGroup {
     #[reflect(
         item_prefix = "L",
         add_label = "Add Level",
-        note = "超出最后一级 = 不画；最后一级填 0 = 无限远"
+        footnote = "超出最后一级 = 不画；最后一级填 0 = 无限远"
     )]
     pub levels: Vec<LodLevel>,
 }

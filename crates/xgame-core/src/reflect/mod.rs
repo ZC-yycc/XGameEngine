@@ -39,7 +39,7 @@ mod traits;
 mod value;
 
 pub use meta::{
-    FieldFlags, FieldMeta, MetaKind, ReflectMeta, ScalarKind, TypeMeta, TypeRef, VariantMeta,
+    FieldFlags, FieldMeta, MetaKind, ReflectMeta, ScalarKind, TypeMeta, TypeRef, VariantMeta, Widget,
 };
 pub use path::{get_display, get_path, get_path_mut, set_scalar};
 pub use traits::{Reflect, ReflectEnum, ReflectItem, ReflectList};
@@ -103,7 +103,9 @@ mod tests {
         assert_eq!(max.row_group, Some("distance"));
         assert_eq!(min.visible_when, Some("spatial"));
         assert_eq!(max.hint, None);
-        assert_eq!(max.note, Some("min → max：衰减区间（米）"));
+        // 长说明走 `footnote`（独占一行），不是挤在本行里的 `note`。
+        assert_eq!(max.footnote, Some("min → max：衰减区间（米）"));
+        assert_eq!(max.note, None);
         // 组标签取组内第一个字段的显示名。
         assert_eq!(min.display_name(), "Distance");
     }
@@ -199,6 +201,97 @@ mod tests {
                 "max_distance",
             ]
         );
+    }
+
+    /// 粒子的元数据要能撑起它那一整段手写界面：17 个可见字段、`burst` 藏掉、
+    /// `seed` 是 `u64`、两个区间配成对、两个颜色配成对。
+    ///
+    /// 这条测试盯的是**顺序**：反射按声明顺序排版，而界面上的顺序是手写段定下来的。
+    #[test]
+    fn particle_metadata_matches_the_handwritten_layout() {
+        use crate::particle::ParticleEmitter;
+        let meta = <ParticleEmitter as ReflectMeta>::meta();
+        let names: Vec<&str> = meta.fields.iter().map(|f| f.name).collect();
+        assert_eq!(
+            names,
+            [
+                "emitting",
+                "rate",
+                "max_particles",
+                "duration",
+                "looping",
+                "lifetime",
+                "speed",
+                "spread",
+                "direction",
+                "shape",
+                "gravity",
+                "drag",
+                "start_size",
+                "end_size",
+                "start_color",
+                "end_color",
+                "blend",
+                "seed",
+            ]
+        );
+
+        // `burst` 是运行态请求位（`#[serde(skip)]`），不该出现在 Inspector 上。
+        assert!(meta.field("burst").is_none());
+
+        // `seed` 是 `u64`：`inspect::FieldKind` 没有这个变体，反射有。
+        assert!(matches!(
+            meta.field("seed").unwrap().ty,
+            TypeRef::Scalar(ScalarKind::U64)
+        ));
+
+        // 区间对 vs 轴行：同样是 `[f32; 2]`，意图不同。
+        assert_eq!(meta.field("lifetime").unwrap().widget, Widget::Range);
+        assert_eq!(meta.field("speed").unwrap().widget, Widget::Range);
+        assert_eq!(meta.field("spread").unwrap().widget, Widget::Auto);
+
+        // 颜色对：`[f32; 4]` 默认会被画成四根轴。
+        assert_eq!(meta.field("start_color").unwrap().widget, Widget::Color);
+        assert_eq!(meta.field("end_color").unwrap().widget, Widget::Color);
+
+        // 同排的组必须成对声明 —— 只写一半就等于没写（derive 也会拦）。
+        let group = |name: &str| meta.field(name).unwrap().row_group;
+        assert_eq!(group("duration"), group("looping"));
+        assert!(group("duration").is_some());
+        assert_eq!(group("start_size"), group("end_size"));
+        assert!(group("start_size").is_some());
+        assert_eq!(group("start_color"), group("end_color"));
+        assert!(group("start_color").is_some());
+    }
+
+    /// 带载荷枚举 `EmissionShape`：`Box` 的半边长走轴行，`Point` 没有载荷。
+    #[test]
+    fn emission_shape_payload_is_described() {
+        use crate::particle::EmissionShape;
+        let meta = <EmissionShape as ReflectMeta>::meta();
+        let names: Vec<&str> = meta.variants.iter().map(|v| v.name).collect();
+        assert_eq!(names, ["Point", "Sphere", "Box"]);
+        assert!(meta.variant("Point").unwrap().payload.is_none());
+
+        let sphere = EmissionShape::Sphere { radius: 0.25 };
+        assert_eq!(
+            sphere.payload_meta().unwrap().field("radius").unwrap().label,
+            Some("Radius")
+        );
+        assert_eq!(sphere.variant(), "Sphere");
+    }
+
+    /// `UiElement` 也有了元数据（虽然编辑器给它用的是专用渲染器）——
+    /// 运行态 `state` 必须被跳过，否则 MCP / Lua 会看见一个每帧乱跳的字段。
+    #[test]
+    fn ui_element_metadata_skips_runtime_state() {
+        use crate::ui::UiElement;
+        let meta = <UiElement as ReflectMeta>::meta();
+        assert!(meta.field("state").is_none(), "运行态字段不该进元数据");
+        assert!(meta.field("kind").is_some());
+        assert!(meta.field("anchor_min").is_some());
+        assert!(meta.field("style").is_some());
+        assert!(meta.field("image").is_some());
     }
 
     /// 无载荷枚举（`BodyKind` / `AudioBus`）由 derive 生成：变体顺序、显示名、
