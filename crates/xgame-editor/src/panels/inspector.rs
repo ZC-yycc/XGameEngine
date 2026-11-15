@@ -43,7 +43,7 @@ fn collect(
 /// Transform 的三行是 `[标签][X][框]`，输入框从"轴标宽 + 间距"之后开始；
 /// 别的行没有轴标，不补这一截的话两类行的输入框左边缘就差一个轴标的宽度
 /// （15px），一列控件看着参差不齐。所有**非向量**行都走这个包装。
-fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub(super) fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     theme::field_row(ui, label, |ui| {
         ui.add_space(theme::AXIS_TAG_WIDTH + ui.spacing().item_spacing.x);
         add(ui)
@@ -92,7 +92,7 @@ fn numeric_value(kind: FieldKind, v: f32) -> FieldValue {
 /// `show_body` 末尾的 Undo、脏检查与文件身份合并。Rust / Lua 继续按当前运行时的
 /// 注册名 / 路径去重，同名多实例要等运行时状态按 `ComponentId` 隔离后才能开放。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ComponentAction {
+pub(super) enum ComponentAction {
     AddBuiltin(BuiltinComponent),
     AddRust(String),
     AddLua(String),
@@ -101,7 +101,7 @@ enum ComponentAction {
 
 /// 组件标题右键里的“移除”语义。
 #[derive(Clone, Copy)]
-enum ComponentMenuTarget {
+pub(super) enum ComponentMenuTarget {
     /// 标题正好对应一个可移除组件实例。
     Removable {
         address: ComponentAddress,
@@ -119,7 +119,7 @@ enum ComponentMenuTarget {
     },
 }
 
-const PLAY_STRUCTURE_HINT: &str = "播放模式下不能修改组件结构";
+pub(super) const PLAY_STRUCTURE_HINT: &str = "播放模式下不能修改组件结构";
 const TRANSFORM_REMOVE_REASON: &str =
     "Transform 是每个实体的固有组件；可以改值，但不能从实体上移除。";
 
@@ -261,7 +261,7 @@ fn show_add_component_entries(
 }
 
 /// 给组件标题或具体 Rust / Lua 行挂统一右键菜单。
-fn component_context_menu(
+pub(super) fn component_context_menu(
     response: &egui::Response,
     state: &EditorState,
     entity: &Entity,
@@ -311,7 +311,7 @@ fn component_context_menu(
 /// "改动发生"与"写回场景"之间拿到 `changed` / 拖拽起点 / 拖拽终点三个时机，
 /// 而一个字段一个 `bool` 传三遍的写法在有五种字段类型的地方很快失控。
 #[derive(Default, Clone, Copy)]
-struct FieldSignals {
+pub(super) struct FieldSignals {
     /// 本帧有字段被改动（对应 `Response::changed`）。
     changed: bool,
     /// 本帧有控件开始拖拽（改前快照的拍摄时机）。
@@ -321,10 +321,19 @@ struct FieldSignals {
 }
 
 impl FieldSignals {
-    fn collect(&mut self, resp: &egui::Response) {
+    pub(super) fn collect(&mut self, resp: &egui::Response) {
         self.changed |= resp.changed();
         self.drag_began |= resp.drag_started();
         self.drag_ended |= resp.drag_stopped();
+    }
+
+    /// 手工标一次"本帧有改动"。
+    ///
+    /// 有些控件的改动不体现在 `Response::changed` 上 —— 下拉框（`ComboBox`）
+    /// 的结果来自 `show_ui` 闭包里被点中的那一项，外层响应永远是"没变"。
+    /// 不补这一下，选完总线场景不会被标脏，Ctrl+S 不会保存它。
+    pub(super) fn mark_changed(&mut self) {
+        self.changed = true;
     }
 }
 
@@ -2291,11 +2300,30 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
                 }
             });
         }
+        // ── 音频（反射通道）──
+        //
+        // 与下面的手写段二选一，由 `--ui-reflect-inspector` 决定。两段都留着
+        // 是 S1 的验收手段：同一份数据画两遍，逐像素比对。
+        if entity.audio.is_some() && state.use_reflect_inspector {
+            let mut reflected = FieldSignals::default();
+            super::inspector_reflect::show_section(
+                state,
+                ui,
+                entity,
+                &super::inspector_reflect::AUDIO,
+                &mut reflected,
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            touched |= reflected.changed;
+            drag_began |= reflected.drag_began;
+            drag_ended |= reflected.drag_ended;
+        }
         // ── 音频 ──
         //
         // 取消勾选 = 静默实体。旧场景文件没有 `audio` 字段，加载出来就是
         // 未勾选 —— 与当时"没有任何声音"的行为一致。
-        if entity.audio.is_some() {
+        if entity.audio.is_some() && !state.use_reflect_inspector {
             let audio_header = theme::section_bar(ui, "Audio");
             component_context_menu(
                 &audio_header,
@@ -2437,6 +2465,22 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             }
         });
         }
+        // ── 相机（反射通道）──
+        if entity.camera.is_some() && state.use_reflect_inspector {
+            let mut reflected = FieldSignals::default();
+            super::inspector_reflect::show_section(
+                state,
+                ui,
+                entity,
+                &super::inspector_reflect::CAMERA,
+                &mut reflected,
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            touched |= reflected.changed;
+            drag_began |= reflected.drag_began;
+            drag_ended |= reflected.drag_ended;
+        }
         // ── 相机 ──
         //
         // 与 Audio / Particle 同一套"勾选才有"的写法。相机是**普通实体组件**
@@ -2444,7 +2488,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         //
         // 没有"预览画面"按钮：Play 态视口直接用这台相机的机位
         // （见 `scene_view::build_view_projection`），那本身就是预览。
-        if entity.camera.is_some() {
+        if entity.camera.is_some() && !state.use_reflect_inspector {
             let camera_header = theme::section_bar(ui, "Camera");
             component_context_menu(
                 &camera_header,

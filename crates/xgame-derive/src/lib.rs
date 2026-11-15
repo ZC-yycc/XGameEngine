@@ -441,6 +441,11 @@ struct ReflectOpts {
     speed: Option<f32>,
     min: Option<f32>,
     max: Option<f32>,
+    decimals: Option<u8>,
+    note: Option<String>,
+    hint: Option<String>,
+    visible_when: Option<String>,
+    row_group: Option<String>,
     doc: String,
 }
 
@@ -481,6 +486,14 @@ fn parse_f32_lit(input: syn::parse::ParseStream) -> syn::Result<f32> {
     }
 }
 
+fn parse_u8_lit(input: syn::parse::ParseStream) -> syn::Result<u8> {
+    let lit: syn::Lit = input.parse()?;
+    match lit {
+        syn::Lit::Int(i) => i.base10_parse::<u8>(),
+        other => Err(syn::Error::new_spanned(other, "这里需要 0..=255 的整数字面量")),
+    }
+}
+
 fn parse_reflect_opts(field: &syn::Field) -> syn::Result<ReflectOpts> {
     let mut opts = ReflectOpts {
         doc: collect_doc(&field.attrs),
@@ -505,10 +518,17 @@ fn parse_reflect_opts(field: &syn::Field) -> syn::Result<ReflectOpts> {
                 "speed" => opts.speed = Some(parse_f32_lit(meta.value()?)?),
                 "min" => opts.min = Some(parse_f32_lit(meta.value()?)?),
                 "max" => opts.max = Some(parse_f32_lit(meta.value()?)?),
+                "decimals" => opts.decimals = Some(parse_u8_lit(meta.value()?)?),
+                "note" => opts.note = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
+                "hint" => opts.hint = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
+                "visible_when" => {
+                    opts.visible_when = Some(meta.value()?.parse::<syn::LitStr>()?.value())
+                }
+                "row_group" => opts.row_group = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
                 other => {
                     return Err(meta.error(format!(
                         "不认识的选项 `{other}`（可用：skip / hidden / read_only / label / unit / \
-                         speed / min / max / doc）"
+                         speed / min / max / decimals / note / hint / visible_when / row_group / doc）"
                     )))
                 }
             }
@@ -548,6 +568,17 @@ fn generic_arg<'a>(seg: &'a syn::PathSegment, ty: &'a syn::Type) -> syn::Result<
         }
     }
     Err(syn::Error::new_spanned(ty, "缺少泛型参数"))
+}
+
+/// 字段类型是不是 `bool`（`visible_when` 的编译期校验用）。
+fn is_bool_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "bool" && seg.arguments.is_none())
 }
 
 /// 生成一个 `TypeRef` 的**运行期表达式**。
@@ -655,6 +686,9 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     let mut field_metas = Vec::new();
     let mut get_arms = Vec::new();
     let mut get_mut_arms = Vec::new();
+    // `visible_when` 的编译期校验用：`(字段名, 是否 bool)`。
+    let mut declared: Vec<(String, bool)> = Vec::new();
+    let mut visibility_refs: Vec<(String, String, proc_macro2::Span)> = Vec::new();
 
     for field in fields {
         let ident = field
@@ -666,6 +700,10 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             continue;
         }
         let name_lit = ident.to_string();
+        declared.push((name_lit.clone(), is_bool_type(&field.ty)));
+        if let Some(when) = &opts.visible_when {
+            visibility_refs.push((name_lit.clone(), when.clone(), ident.span()));
+        }
         let ty_ref = type_ref_expr(&field.ty)?;
 
         let label = match &opts.label {
@@ -696,6 +734,18 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             (false, true) => quote!(#p::FieldFlags::READ_ONLY),
             (false, false) => quote!(#p::FieldFlags::NONE),
         };
+        let decimals = match opts.decimals {
+            Some(d) => quote!(::std::option::Option::Some(#d)),
+            None => quote!(::std::option::Option::None),
+        };
+        let opt_str = |v: &Option<String>| match v {
+            Some(s) => quote!(::std::option::Option::Some(#s)),
+            None => quote!(::std::option::Option::None),
+        };
+        let note = opt_str(&opts.note);
+        let hint = opt_str(&opts.hint);
+        let visible_when = opt_str(&opts.visible_when);
+        let row_group = opt_str(&opts.row_group);
         let field_doc = opts.doc;
 
         field_metas.push(quote! {
@@ -706,6 +756,11 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                 range: #range,
                 speed: #speed,
                 unit: #unit,
+                decimals: #decimals,
+                note: #note,
+                hint: #hint,
+                visible_when: #visible_when,
+                row_group: #row_group,
                 flags: #flags,
                 doc: #field_doc,
             }
@@ -727,6 +782,27 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                     #p::ReflectItem::as_value_mut(&mut self.#ident)
                 ),
             });
+        }
+    }
+
+    // `visible_when` 指向的字段必须存在且是 `bool`。写错名字时给编译错误，
+    // 而不是让 `FieldMeta::visible_given` 按"显示"兜底 —— 那种错误在界面上
+    // 看不出来，只会在"为什么这个开关没用"的时候才暴露。
+    for (owner, when, span) in &visibility_refs {
+        match declared.iter().find(|(declared, _)| declared == when) {
+            None => {
+                return Err(syn::Error::new(
+                    *span,
+                    format!("`visible_when = \"{when}\"` 指向的字段不存在（`{owner}` 所在的结构体里没有 `{when}`）"),
+                ))
+            }
+            Some((_, false)) => {
+                return Err(syn::Error::new(
+                    *span,
+                    format!("`visible_when = \"{when}\"` 必须是 `bool` 字段"),
+                ))
+            }
+            Some(_) => {}
         }
     }
 

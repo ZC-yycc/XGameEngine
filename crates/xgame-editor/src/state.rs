@@ -872,6 +872,12 @@ pub struct EditorState {
     // -- Toggles --
     pub show_grid: bool,
     pub show_physics_debug: bool,
+    /// 内置组件走**反射通道**画 Inspector，而不是各自手写的 section。
+    ///
+    /// 默认关：反射通道先用 `--ui-reflect-inspector` 与手写段做逐像素对比，
+    /// 通过之后才逐个组件替换。两种通道并存是有意的 —— 一旦某天反射元数据
+    /// 与手写段出现分歧，把这个开关一翻就能确认"是元数据错了还是渲染错了"。
+    pub use_reflect_inspector: bool,
 
     // -- Console --
     pub console_messages: Vec<LogMessage>,
@@ -1286,6 +1292,8 @@ impl EditorState {
             play_mode: PlayMode::Edit,
             show_grid: true,
             show_physics_debug: false,
+            // S1 阶段默认走手写段；`--ui-reflect-inspector` 切换过去做对比。
+            use_reflect_inspector: false,
 
             console_messages: Vec::new(),
             console_filter: ConsoleFilter::default(),

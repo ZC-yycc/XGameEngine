@@ -73,10 +73,40 @@ mod tests {
     fn attributes_reach_the_metadata() {
         let fov = Camera::meta().field("fov").expect("fov 应在元数据里");
         assert_eq!(fov.unit, Some("°"));
+        // `unit`（机器可读）与 `note`（排版文案）是两件事，可以同时存在。
+        assert_eq!(fov.note, Some("度（垂直）"));
+        assert_eq!(fov.decimals, Some(1));
+        assert_eq!(fov.label, Some("FOV"));
         assert_eq!(fov.range, Some((1.0, 179.0)));
         assert_eq!(fov.speed, Some(0.5));
         // 文档注释被拼进 doc，编辑器可以直接当提示用。
         assert!(fov.doc.contains("视场角"), "实际 doc = {:?}", fov.doc);
+    }
+
+    /// 元数据与手写 Inspector 的取值必须一致 —— 这一条是"S1 逐像素一致"的
+    /// 全部前提。漂移了这里先红，不用等截图。
+    #[test]
+    fn editor_metadata_matches_the_handwritten_ranges() {
+        let cam = Camera::meta();
+        assert_eq!(cam.field("fov").unwrap().range, Some((1.0, 179.0)));
+        assert_eq!(cam.field("near").unwrap().range, Some((0.001, 10000.0)));
+        assert_eq!(cam.field("far").unwrap().range, Some((0.002, 100000.0)));
+        assert_eq!(cam.field("near").unwrap().decimals, Some(3));
+
+        let audio = AudioSource::meta();
+        assert_eq!(audio.field("volume").unwrap().range, Some((0.0, 1.0)));
+        assert_eq!(audio.field("pitch").unwrap().range, Some((0.05, 4.0)));
+        assert_eq!(audio.field("pitch").unwrap().note, Some("1.0 = 原速"));
+        // 成对的距离区间：同组 + 同一个显示开关 + 说明挂在组尾。
+        let min = audio.field("min_distance").unwrap();
+        let max = audio.field("max_distance").unwrap();
+        assert_eq!(min.row_group, Some("distance"));
+        assert_eq!(max.row_group, Some("distance"));
+        assert_eq!(min.visible_when, Some("spatial"));
+        assert_eq!(max.hint, None);
+        assert_eq!(max.note, Some("min → max：衰减区间（米）"));
+        // 组标签取组内第一个字段的显示名。
+        assert_eq!(min.display_name(), "Distance");
     }
 
     #[test]
@@ -155,18 +185,19 @@ mod tests {
     fn audio_source_fields_are_covered() {
         let meta = AudioSource::meta();
         let names: Vec<&str> = meta.fields.iter().map(|f| f.name).collect();
+        // 声明顺序 = Inspector 顺序（反射通道按声明顺序排版，没有额外的排序号）。
         assert_eq!(
             names,
             [
                 "clip",
                 "volume",
+                "bus",
                 "pitch",
                 "looping",
                 "autoplay",
                 "spatial",
                 "min_distance",
                 "max_distance",
-                "bus",
             ]
         );
     }

@@ -70,18 +70,46 @@ fn default_active() -> bool {
 pub struct Camera {
     /// 垂直视场角（**度**）。水平视角由宽高比推出来（`2·atan(tan(fov/2)·aspect)`）。
     #[serde(default = "default_fov")]
-    #[reflect(min = 1.0, max = 179.0, unit = "°", speed = 0.5)]
+    #[reflect(
+        label = "FOV",
+        min = 1.0,
+        max = 179.0,
+        unit = "°",
+        note = "度（垂直）",
+        speed = 0.5,
+        decimals = 1
+    )]
     pub fov: f32,
     /// 近裁剪面（米）。
     #[serde(default = "default_near")]
-    #[reflect(min = 0.001, max = 10.0, unit = "m")]
+    #[reflect(
+        label = "Near",
+        min = 0.001,
+        max = 10000.0,
+        unit = "m",
+        note = "米",
+        speed = 0.01,
+        decimals = 3
+    )]
     pub near: f32,
     /// 远裁剪面（米）。
     #[serde(default = "default_far")]
-    #[reflect(min = 1.0, max = 100000.0, unit = "m")]
+    #[reflect(
+        label = "Far",
+        min = 0.002,
+        max = 100000.0,
+        unit = "m",
+        note = "米",
+        speed = 1.0,
+        decimals = 1
+    )]
     pub far: f32,
     /// 是否作为主相机候选。多机位切换时脚本只翻这一个开关。
+    ///
+    /// 解析规则是「第一个 `active` 的相机」；全部取消勾选时退回场景里第一台 ——
+    /// 画面不会因为忘了勾而突然没有相机。
     #[serde(default = "default_active")]
+    #[reflect(label = "Active")]
     pub active: bool,
 }
 

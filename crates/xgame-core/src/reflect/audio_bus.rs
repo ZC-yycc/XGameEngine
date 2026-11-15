@@ -26,16 +26,21 @@ impl ReflectMeta for AudioBus {
                 vec![
                     VariantMeta {
                         name: "Sfx",
+                        // 显示名 = `AudioBus::name()`：界面上一直是小写 ASCII，
+                        // 而寻址名必须是 Rust 标识符。两套名字刻意分开。
+                        label: Some("sfx"),
                         doc: "音效（脚步、撞击、按钮）。默认组。",
                         payload: None,
                     },
                     VariantMeta {
                         name: "Bgm",
+                        label: Some("bgm"),
                         doc: "背景音乐（通常循环）。",
                         payload: None,
                     },
                     VariantMeta {
                         name: "Voice",
+                        label: Some("voice"),
                         doc: "对白 / 语音。",
                         payload: None,
                     },

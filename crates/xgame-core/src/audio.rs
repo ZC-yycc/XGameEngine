@@ -178,31 +178,66 @@ fn clamp_unit(volume: f32) -> f32 {
 #[serde(default)]
 pub struct AudioSource {
     /// 音频文件的**项目相对路径**（如 `Resources/Audio/Beep.wav`）。
+    #[reflect(label = "Clip", hint = "Resources/Audio/Beep.wav")]
     pub clip: String,
     /// 线性音量（`1.0` = 原音量，`0.0` = 静音）。
-    #[reflect(min = 0.0, max = 4.0, speed = 0.01)]
+    #[reflect(label = "Volume", min = 0.0, max = 1.0, speed = 0.01)]
     pub volume: f32,
-    /// 播放速率（`1.0` = 原速；同时改变速度与音高，与 kira 语义一致）。
-    #[reflect(min = 0.05, max = 16.0, speed = 0.01)]
-    pub pitch: f32,
-    /// 是否循环。
-    pub looping: bool,
-    /// 进场景后自动播放一次。
-    pub autoplay: bool,
-    /// 是否空间化（3D 定位，随实体移动更新发射位置）。
-    pub spatial: bool,
-    /// 空间化：满音量的最近距离。
-    #[reflect(min = 0.0, max = 1000.0, unit = "m")]
-    pub min_distance: f32,
-    /// 空间化：听不见的最远距离。
-    #[reflect(min = 0.0, max = 10000.0, unit = "m")]
-    pub max_distance: f32,
     /// 音量总线（BGM / SFX / Voice 分组）。缺省 = [`AudioBus::Sfx`]。
     ///
     /// 总线只影响**音量归组**（`set_bus_volume` 一次调一整组），不改变空间化 /
     /// 停止语义。默认 `Sfx` 且不落盘 —— 老场景文件逐字节不变。
+    ///
+    /// 声明顺序放在 `volume` 之后而不是末尾（它是最后加进来的字段）：反射通道
+    /// 按声明顺序排版，而 Inspector 一直把 Bus 排在 Volume 与 Pitch 之间 ——
+    /// 两者对齐之后，元数据不再需要额外的"排序号"字段。
     #[serde(skip_serializing_if = "AudioBus::is_default")]
+    #[reflect(label = "Bus")]
     pub bus: AudioBus,
+    /// 播放速率（`1.0` = 原速；同时改变速度与音高，与 kira 语义一致）。
+    #[reflect(
+        label = "Pitch",
+        min = 0.05,
+        max = 4.0,
+        speed = 0.01,
+        note = "1.0 = 原速"
+    )]
+    pub pitch: f32,
+    /// 是否循环。
+    ///
+    /// 循环声只能被 `stop_*` 命令停掉 —— 它永远不会自己播完。
+    #[reflect(label = "Loop")]
+    pub looping: bool,
+    /// 进场景后自动播放一次（每实体只播一次，不会每帧重播）。
+    #[reflect(label = "Autoplay")]
+    pub autoplay: bool,
+    /// 是否空间化（3D 定位，随实体移动更新发射位置）。
+    ///
+    /// 监听者 = 当前相机；关掉就是无视距离的 2D 声。
+    #[reflect(label = "Spatial (3D)")]
+    pub spatial: bool,
+    /// 空间化：满音量的最近距离。
+    #[reflect(
+        label = "Distance",
+        row_group = "distance",
+        visible_when = "spatial",
+        min = 0.001,
+        max = 3.4028235e38,
+        unit = "m",
+        speed = 0.05
+    )]
+    pub min_distance: f32,
+    /// 空间化：听不见的最远距离。
+    #[reflect(
+        row_group = "distance",
+        visible_when = "spatial",
+        min = 0.002,
+        max = 3.4028235e38,
+        unit = "m",
+        speed = 0.1,
+        note = "min → max：衰减区间（米）"
+    )]
+    pub max_distance: f32,
 }
 
 impl Default for AudioSource {

@@ -157,7 +157,35 @@ pub struct FieldMeta {
     /// 拖拽灵敏度（每像素变化量）。
     pub speed: Option<f32>,
     /// 单位后缀（`"°"` / `"m/s"`）。
+    ///
+    /// 机器可读的单位，**不是**排版文案：编辑器的内置组件语法把它放进悬浮提示，
+    /// 而控件旁边那截固定的说明文字走 [`note`](Self::note)。两者可以同时存在，
+    /// 例如 `unit = "°"` + `note = "度（垂直）"`。
     pub unit: Option<&'static str>,
+    /// 数值框固定小数位。`None` = 交给 egui 按 `speed` 与当前值决定。
+    ///
+    /// 存在的理由：`fov = 60.0` 与 `near = 0.100` 在同一列里，不固定位数时
+    /// 宽度会随值跳动，拖动时整行显示的文字在"60"和"60.0001"之间抖。
+    pub decimals: Option<u8>,
+    /// 控件**之后**、仍在本行内的说明文字（`"米"` / `"度（垂直）"`）。
+    ///
+    /// 与 `unit` 的区别见 [`unit`](Self::unit)。行分组（[`row_group`](Self::row_group)）
+    /// 里的 `note` 例外：它整行之后单独占一行画，因为一行塞两个数值框再加一截
+    /// 中文说明会把面板顶出去。
+    pub note: Option<&'static str>,
+    /// 文本控件为空时的占位提示（`"Resources/Audio/Beep.wav"`）。
+    pub hint: Option<&'static str>,
+    /// 只在同一结构体的**另一个 `bool` 字段**为 `true` 时显示；值是那个字段名。
+    ///
+    /// 同级字段不存在、或不是 `bool` 时按"显示"处理 —— 藏错一行比多显示一行
+    /// 难查得多（数据在但看不到，用户会以为字段丢了）。
+    pub visible_when: Option<&'static str>,
+    /// 与**相邻字段**同排渲染的分组标签；同一标签的连续字段画成一行，
+    /// 字段之间用 `→` 分隔，行标签取组内第一个字段的显示名。
+    ///
+    /// 典型用途是成对的区间（`min_distance` / `max_distance`）。
+    /// 只合并**连续**字段：不连续的同名分组各画一行，免得渲染顺序与声明顺序脱节。
+    pub row_group: Option<&'static str>,
     pub flags: FieldFlags,
     /// 中文说明。编辑器用它画那一行小字。
     pub doc: &'static str,
@@ -168,15 +196,40 @@ impl FieldMeta {
     pub fn display_name(&self) -> &'static str {
         self.label.unwrap_or(self.name)
     }
+
+    /// 是否应该在这一帧显示（只看 `visible_when` 声明的同级 `bool`）。
+    ///
+    /// `sibling_bool` 由调用方按字段名去取，本函数不接触数据 ——
+    /// 元数据层不认识"值"，这条边界让 `FieldMeta` 保持 `Copy` 且可跨线程共享。
+    pub fn visible_given(&self, sibling_bool: Option<bool>) -> bool {
+        match self.visible_when {
+            None => true,
+            Some(_) => sibling_bool.unwrap_or(true),
+        }
+    }
 }
 
 /// 枚举变体的静态描述。
 #[derive(Debug, Clone, Copy)]
 pub struct VariantMeta {
+    /// 寻址名（等于 Rust 变体名）。`ReflectEnum::set_variant` 认的是它。
     pub name: &'static str,
+    /// 界面显示名。`None` 时用 `name`。
+    ///
+    /// 存在的理由：寻址名是 Rust 标识符（`Sfx`），而界面上要显示的是
+    /// `AudioBus::name()` 那套小写 ASCII（`sfx`）—— 两者不能合并，否则
+    /// 改显示名就等于改寻址名，已经写进脚本的字符串会失效。
+    pub label: Option<&'static str>,
     pub doc: &'static str,
     /// 带载荷变体的载荷类型；无载荷为 `None`。
     pub payload: Option<TypeRef>,
+}
+
+impl VariantMeta {
+    /// 界面显示用的名字。
+    pub fn display_name(&self) -> &'static str {
+        self.label.unwrap_or(self.name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

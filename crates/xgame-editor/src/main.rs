@@ -197,6 +197,11 @@ struct UiShot {
     /// 状态栏的物理/音频段、Inspector 顶部的"热调参中"横幅。此前它们只能靠
     /// 人工按键后肉眼检查，改版时最容易漏。
     play: bool,
+    /// 抓图前把 Inspector 切到**反射通道**（内置组件由 `TypeMeta` 渲染）。
+    ///
+    /// 这是 S1 的验收开关：同一份场景、同一个选中实体，加不加这个标志各截
+    /// 一张，两张必须逐像素一致 —— 否则说明元数据表达不了手写段的排版。
+    reflect_inspector: bool,
     /// 抓图前切到 Profiler 页签。
     ///
     /// 它与 Output Log 同一组，默认激活的是后者 —— 没有这个开关，Profiler
@@ -335,6 +340,18 @@ impl EditorApp {
                     session.state.material_editor_open = Some(asset.clone());
                 }
                 session.state.asset_selected = Some(asset);
+            }
+        }
+
+        // `--ui-reflect-inspector`：Inspector 的内置组件改走反射通道。
+        if app
+            .ui_shot
+            .as_ref()
+            .map(|s| s.reflect_inspector)
+            .unwrap_or(false)
+        {
+            if let Some(session) = app.session.as_mut() {
+                session.state.use_reflect_inspector = true;
             }
         }
 
@@ -744,6 +761,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
     let mut open_preferences = false;
     let mut open_command = false;
     let mut ortho = false;
+    let mut reflect_inspector = false;
     let mut source: Option<(String, u32)> = None;
     let mut recover_autosave = false;
     let mut size = egui::vec2(SHOT_WIDTH, SHOT_HEIGHT);
@@ -801,6 +819,9 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
             "--ui-ortho" => {
                 ortho = true;
             }
+            "--ui-reflect-inspector" => {
+                reflect_inspector = true;
+            }
             "--ui-source" => {
                 if let Some(spec) = raw.get(i + 1) {
                     source = Some(parse_source_spec(spec));
@@ -852,6 +873,7 @@ fn parse_launch_args(raw: &[String]) -> LaunchArgs {
         open_preferences,
         open_command,
         ortho,
+        reflect_inspector,
         source,
         recover_autosave,
         size,
