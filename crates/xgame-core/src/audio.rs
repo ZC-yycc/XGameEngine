@@ -33,6 +33,7 @@ use std::fmt;
 
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 use crate::id::EntityId;
 
@@ -58,6 +59,10 @@ pub enum AudioBus {
 }
 
 impl AudioBus {
+    /// 反射元数据。手写而不是 derive：这是**无载荷枚举**，derive 只支持具名结构体。
+    /// 变体顺序与 [`AudioBus::ALL`] 一致，编辑器下拉框据此排列。
+    pub const VARIANT_NAMES: [&'static str; 3] = ["Sfx", "Bgm", "Voice"];
+
     /// 全部总线（顺序 = [`AudioBus::index`]）。
     pub const ALL: [AudioBus; 3] = [AudioBus::Sfx, AudioBus::Bgm, AudioBus::Voice];
 
@@ -169,14 +174,16 @@ fn clamp_unit(volume: f32) -> f32 {
 /// `autoplay` 默认 `true` 是刻意的：给实体挂音频源的作者意图几乎总是
 /// "进场景就响"（背景氛围、机关音）；要"等脚本触发"就把 `autoplay`
 /// 关掉、脚本里 `play_sound` 播。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct AudioSource {
     /// 音频文件的**项目相对路径**（如 `Resources/Audio/Beep.wav`）。
     pub clip: String,
     /// 线性音量（`1.0` = 原音量，`0.0` = 静音）。
+    #[reflect(min = 0.0, max = 4.0, speed = 0.01)]
     pub volume: f32,
     /// 播放速率（`1.0` = 原速；同时改变速度与音高，与 kira 语义一致）。
+    #[reflect(min = 0.05, max = 16.0, speed = 0.01)]
     pub pitch: f32,
     /// 是否循环。
     pub looping: bool,
@@ -185,8 +192,10 @@ pub struct AudioSource {
     /// 是否空间化（3D 定位，随实体移动更新发射位置）。
     pub spatial: bool,
     /// 空间化：满音量的最近距离。
+    #[reflect(min = 0.0, max = 1000.0, unit = "m")]
     pub min_distance: f32,
     /// 空间化：听不见的最远距离。
+    #[reflect(min = 0.0, max = 10000.0, unit = "m")]
     pub max_distance: f32,
     /// 音量总线（BGM / SFX / Voice 分组）。缺省 = [`AudioBus::Sfx`]。
     ///

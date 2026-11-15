@@ -11,3 +11,6 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1"
 ron = "0.8"
+# 反射元数据（`#[derive(Reflect)]`）。derive 只生成代码、不依赖本 crate，
+# 所以这里没有循环依赖。
+xgame-derive = { path = "../xgame-derive" }

@@ -425,3 +425,356 @@ fn expand_inspect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         }
     })
 }
+
+// ---------------------------------------------------------------------------
+// `#[derive(Reflect)]` —— 类型元数据 + 借用式字段访问
+// ---------------------------------------------------------------------------
+
+/// `#[reflect(...)]` 收集到的字段选项。
+#[derive(Default)]
+struct ReflectOpts {
+    skip: bool,
+    hidden: bool,
+    read_only: bool,
+    label: Option<String>,
+    unit: Option<String>,
+    speed: Option<f32>,
+    min: Option<f32>,
+    max: Option<f32>,
+    doc: String,
+}
+
+/// 把 `#[doc = "..."]` 拼成一行说明。
+fn collect_doc(attrs: &[syn::Attribute]) -> String {
+    let mut out = String::new();
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        if let syn::Meta::NameValue(nv) = &attr.meta {
+            if let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = &nv.value
+            {
+                let line = s.value();
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(line);
+            }
+        }
+    }
+    out
+}
+
+fn parse_f32_lit(input: syn::parse::ParseStream) -> syn::Result<f32> {
+    let lit: syn::Lit = input.parse()?;
+    match lit {
+        syn::Lit::Float(f) => f.base10_parse::<f32>(),
+        syn::Lit::Int(i) => i.base10_parse::<i64>().map(|v| v as f32),
+        other => Err(syn::Error::new_spanned(other, "这里需要数字字面量")),
+    }
+}
+
+fn parse_reflect_opts(field: &syn::Field) -> syn::Result<ReflectOpts> {
+    let mut opts = ReflectOpts {
+        doc: collect_doc(&field.attrs),
+        ..ReflectOpts::default()
+    };
+    for attr in &field.attrs {
+        if !attr.path().is_ident("reflect") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            let ident = match meta.path.get_ident() {
+                Some(ident) => ident.to_string(),
+                None => return Err(meta.error("`#[reflect(...)]` 只接受裸标识符选项")),
+            };
+            match ident.as_str() {
+                "skip" => opts.skip = true,
+                "hidden" => opts.hidden = true,
+                "read_only" => opts.read_only = true,
+                "label" => opts.label = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
+                "unit" => opts.unit = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
+                "doc" => opts.doc = meta.value()?.parse::<syn::LitStr>()?.value(),
+                "speed" => opts.speed = Some(parse_f32_lit(meta.value()?)?),
+                "min" => opts.min = Some(parse_f32_lit(meta.value()?)?),
+                "max" => opts.max = Some(parse_f32_lit(meta.value()?)?),
+                other => {
+                    return Err(meta.error(format!(
+                        "不认识的选项 `{other}`（可用：skip / hidden / read_only / label / unit / \
+                         speed / min / max / doc）"
+                    )))
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(opts)
+}
+
+/// 标量类型名 → `ScalarKind` 变体名。
+///
+/// 按**末段标识符**判断，因为 `glam::Vec3` 与 `Vec3` 应该映射到同一个标量。
+fn scalar_variant(ident: &str) -> Option<&'static str> {
+    Some(match ident {
+        "f32" => "F32",
+        "f64" => "F64",
+        "i32" => "I32",
+        "i64" => "I64",
+        "u32" => "U32",
+        "u64" => "U64",
+        "bool" => "Bool",
+        "String" => "String",
+        "Vec2" => "Vec2",
+        "Vec3" => "Vec3",
+        "Vec4" => "Vec4",
+        _ => return None,
+    })
+}
+
+fn generic_arg<'a>(seg: &'a syn::PathSegment, ty: &'a syn::Type) -> syn::Result<&'a syn::Type> {
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return Err(syn::Error::new_spanned(ty, "缺少泛型参数"));
+    };
+    for arg in &args.args {
+        if let syn::GenericArgument::Type(t) = arg {
+            return Ok(t);
+        }
+    }
+    Err(syn::Error::new_spanned(ty, "缺少泛型参数"))
+}
+
+/// 生成一个 `TypeRef` 的**运行期表达式**。
+///
+/// 为什么不是常量：嵌套引用要拿到 `&'static TypeRef`，而 `Box::leak` 是运行期调用，
+/// 不能出现在 `const` / `static` 初始化里。元数据整体改成惰性构建（`OnceLock`），
+/// 于是这里可以合法分配。每种类型只泄漏一次，进程内总量与类型数同阶。
+fn type_ref_expr(ty: &syn::Type) -> syn::Result<proc_macro2::TokenStream> {
+    let p = quote!(::xgame_core::reflect);
+    match ty {
+        syn::Type::Path(tp) => {
+            let last = tp
+                .path
+                .segments
+                .last()
+                .ok_or_else(|| syn::Error::new_spanned(ty, "空的类型路径"))?;
+            let ident = last.ident.to_string();
+            if let Some(variant) = scalar_variant(&ident) {
+                let variant = syn::Ident::new(variant, last.ident.span());
+                return Ok(quote!(#p::TypeRef::Scalar(#p::ScalarKind::#variant)));
+            }
+            match ident.as_str() {
+                "Option" | "Vec" => {
+                    let inner = type_ref_expr(generic_arg(last, ty)?)?;
+                    let ctor = if ident == "Option" { "Option" } else { "List" };
+                    let ctor = syn::Ident::new(ctor, last.ident.span());
+                    Ok(quote!(#p::TypeRef::#ctor(::std::boxed::Box::leak(
+                        ::std::boxed::Box::new(#inner)
+                    ))))
+                }
+                _ => Ok(quote!(#p::TypeRef::Named(
+                    <#ty as #p::ReflectMeta>::meta
+                ))),
+            }
+        }
+        syn::Type::Array(arr) => {
+            let inner = type_ref_expr(&arr.elem)?;
+            let len = &arr.len;
+            Ok(quote!(#p::TypeRef::Array(
+                ::std::boxed::Box::leak(::std::boxed::Box::new(#inner)),
+                #len
+            )))
+        }
+        other => Err(syn::Error::new_spanned(
+            other,
+            "`#[derive(Reflect)]` 不支持的字段类型（不支持引用 / 元组 / 裸指针；\
+             带载荷枚举请手写 impl）",
+        )),
+    }
+}
+
+/// 派生宏：为具名结构体生成元数据 + 字段读写。
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Reflect, Default)]
+/// struct Camera {
+///     #[reflect(range = 1.0, max = 179.0, unit = "°")]
+///     fov: f32,
+///     #[reflect(skip)]
+///     cache: Vec<u8>,
+/// }
+/// ```
+#[proc_macro_derive(Reflect, attributes(reflect))]
+pub fn reflect_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_reflect(&input) {
+        Ok(ts) => ts.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &input.ident;
+    let p = quote!(::xgame_core::reflect);
+    let doc = collect_doc(&input.attrs);
+
+    let data = match &input.data {
+        syn::Data::Struct(data) => data,
+        syn::Data::Enum(_) => {
+            return Err(syn::Error::new_spanned(
+                name,
+                "`#[derive(Reflect)]` 不支持枚举 —— 请手写 `ReflectMeta` + `ReflectEnum`\
+                 （带载荷变体的语义无法自动决定）",
+            ))
+        }
+        syn::Data::Union(_) => {
+            return Err(syn::Error::new_spanned(
+                name,
+                "`#[derive(Reflect)]` 不支持 union",
+            ))
+        }
+    };
+    let fields = match &data.fields {
+        syn::Fields::Named(fields) => &fields.named,
+        _ => {
+            return Err(syn::Error::new_spanned(
+                name,
+                "`#[derive(Reflect)]` 只支持具名字段结构体（元组结构体的字段没有名字可寻址）",
+            ))
+        }
+    };
+
+    let mut field_metas = Vec::new();
+    let mut get_arms = Vec::new();
+    let mut get_mut_arms = Vec::new();
+
+    for field in fields {
+        let ident = field
+            .ident
+            .as_ref()
+            .ok_or_else(|| syn::Error::new_spanned(field, "字段没有名字"))?;
+        let opts = parse_reflect_opts(field)?;
+        if opts.skip {
+            continue;
+        }
+        let name_lit = ident.to_string();
+        let ty_ref = type_ref_expr(&field.ty)?;
+
+        let label = match &opts.label {
+            Some(label) => quote!(::std::option::Option::Some(#label)),
+            None => quote!(::std::option::Option::None),
+        };
+        let unit = match &opts.unit {
+            Some(unit) => quote!(::std::option::Option::Some(#unit)),
+            None => quote!(::std::option::Option::None),
+        };
+        let speed = match opts.speed {
+            Some(speed) => quote!(::std::option::Option::Some(#speed)),
+            None => quote!(::std::option::Option::None),
+        };
+        let range = match (opts.min, opts.max) {
+            (Some(min), Some(max)) => quote!(::std::option::Option::Some((#min, #max))),
+            (None, None) => quote!(::std::option::Option::None),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "`min` 与 `max` 必须同时给出（只给一半的范围没有意义）",
+                ))
+            }
+        };
+        let flags = match (opts.hidden, opts.read_only) {
+            (true, true) => quote!(#p::FieldFlags { hidden: true, read_only: true }),
+            (true, false) => quote!(#p::FieldFlags::HIDDEN),
+            (false, true) => quote!(#p::FieldFlags::READ_ONLY),
+            (false, false) => quote!(#p::FieldFlags::NONE),
+        };
+        let field_doc = opts.doc;
+
+        field_metas.push(quote! {
+            #p::FieldMeta {
+                name: #name_lit,
+                label: #label,
+                ty: #ty_ref,
+                range: #range,
+                speed: #speed,
+                unit: #unit,
+                flags: #flags,
+                doc: #field_doc,
+            }
+        });
+
+        get_arms.push(quote! {
+            #name_lit => ::std::option::Option::Some(
+                #p::ReflectItem::as_value(&self.#ident)
+            ),
+        });
+
+        if opts.read_only {
+            get_mut_arms.push(quote! {
+                #name_lit => ::std::option::Option::None,
+            });
+        } else {
+            get_mut_arms.push(quote! {
+                #name_lit => ::std::option::Option::Some(
+                    #p::ReflectItem::as_value_mut(&mut self.#ident)
+                ),
+            });
+        }
+    }
+
+    let name_str = name.to_string();
+    Ok(quote! {
+        impl #p::ReflectMeta for #name {
+            fn meta() -> &'static #p::TypeMeta {
+                // 惰性构建：元数据里要放 `Box::leak` 出来的嵌套 `TypeRef`，
+                // 不能写成 `const`（常量上下文不允许分配）。每种类型只构建一次。
+                static META: ::std::sync::OnceLock<#p::TypeMeta> = ::std::sync::OnceLock::new();
+                META.get_or_init(|| #p::TypeMeta {
+                    name: #name_str,
+                    doc: #doc,
+                    kind: #p::MetaKind::Struct,
+                    fields: ::std::boxed::Box::leak(::std::vec![#(#field_metas),*]
+                        .into_boxed_slice()),
+                    variants: &[],
+                })
+            }
+        }
+
+        impl #p::Reflect for #name {
+            fn type_meta(&self) -> &'static #p::TypeMeta {
+                <Self as #p::ReflectMeta>::meta()
+            }
+
+            fn get(&self, field: &str) -> ::std::option::Option<#p::ValueRef<'_>> {
+                match field {
+                    #(#get_arms)*
+                    _ => ::std::option::Option::None,
+                }
+            }
+
+            fn get_mut(&mut self, field: &str) -> ::std::option::Option<#p::ValueRefMut<'_>> {
+                match field {
+                    #(#get_mut_arms)*
+                    _ => ::std::option::Option::None,
+                }
+            }
+        }
+
+        impl #p::ReflectItem for #name {
+            fn as_value(&self) -> #p::ValueRef<'_> {
+                #p::ValueRef::Struct(self)
+            }
+            fn as_value_mut(&mut self) -> #p::ValueRefMut<'_> {
+                #p::ValueRefMut::Struct(self)
+            }
+        }
+    })
+}

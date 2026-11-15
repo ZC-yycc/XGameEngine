@@ -45,6 +45,11 @@
 //! editor / game
 //! ```
 
+// `#[derive(Reflect)]` 展开的代码写完全限定路径 `::xgame_core::reflect::…`，
+// 这样下游 crate 与插件都不需要额外 `use`。但本 crate 自己也要用这个 derive，
+// 而 crate 内部不能按自己的名字引用自己 —— 这一行建立别名。
+extern crate self as xgame_core;
+
 mod color;
 mod config;
 mod component_identity_plan;
@@ -74,6 +79,7 @@ pub mod fsx;
 mod id;
 pub mod inspect;
 pub mod layers;
+pub mod reflect;
 mod light;
 mod loader;
 pub mod lod;

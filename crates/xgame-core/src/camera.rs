@@ -40,6 +40,7 @@
 
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 fn default_fov() -> f32 {
     60.0
@@ -65,16 +66,19 @@ fn default_active() -> bool {
 ///
 /// 刻意**不做正交投影**：等真的出现塔防 / 等距玩法再补 `projection` 枚举，
 /// 现在加只会让 Inspector 多一个永远默认的字段、视图矩阵多一个分支。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 pub struct Camera {
     /// 垂直视场角（**度**）。水平视角由宽高比推出来（`2·atan(tan(fov/2)·aspect)`）。
     #[serde(default = "default_fov")]
+    #[reflect(min = 1.0, max = 179.0, unit = "°", speed = 0.5)]
     pub fov: f32,
     /// 近裁剪面（米）。
     #[serde(default = "default_near")]
+    #[reflect(min = 0.001, max = 10.0, unit = "m")]
     pub near: f32,
     /// 远裁剪面（米）。
     #[serde(default = "default_far")]
+    #[reflect(min = 1.0, max = 100000.0, unit = "m")]
     pub far: f32,
     /// 是否作为主相机候选。多机位切换时脚本只翻这一个开关。
     #[serde(default = "default_active")]
