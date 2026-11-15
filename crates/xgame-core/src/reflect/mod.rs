@@ -32,7 +32,6 @@
 //!
 //! 两者刻意共存：删掉 `inspect` 会破坏已有场景文件里的 `behavior_params`。
 
-mod audio_bus;
 mod impls;
 mod meta;
 mod path;
@@ -200,6 +199,96 @@ mod tests {
                 "max_distance",
             ]
         );
+    }
+
+    /// 无载荷枚举（`BodyKind` / `AudioBus`）由 derive 生成：变体顺序、显示名、
+    /// 切变体、以及"没有载荷"这条边界。
+    #[test]
+    fn unit_enum_derive_covers_variants_and_labels() {
+        use crate::physics::BodyKind;
+        let meta = BodyKind::meta();
+        assert_eq!(meta.kind, MetaKind::Enum);
+        let names: Vec<&str> = meta.variants.iter().map(|v| v.name).collect();
+        assert_eq!(names, ["Static", "Dynamic", "Kinematic"]);
+        // 显示名没写 label 时退回寻址名。
+        assert_eq!(meta.variant("Dynamic").unwrap().display_name(), "Dynamic");
+        // 变体说明来自文档注释，编辑器拿它当悬浮提示。
+        assert!(meta.variant("Static").unwrap().doc.contains("地面"));
+
+        assert_eq!(BodyKind::default().variant(), "Dynamic");
+        assert_eq!(BodyKind::default().variant_names().len(), 3);
+        assert!(BodyKind::default().payload_meta().is_none());
+    }
+
+    /// 带载荷枚举：五个变体、`label` 覆盖显示名、载荷字段表按变体给。
+    #[test]
+    fn payload_enum_derive_describes_each_variant() {
+        use crate::physics::CollisionShape;
+        let meta = CollisionShape::meta();
+        let names: Vec<&str> = meta.variants.iter().map(|v| v.name).collect();
+        assert_eq!(names, ["Cuboid", "Ball", "Capsule", "Cylinder", "Auto"]);
+        // 寻址名是 Rust 变体名，界面显示的是 label。
+        assert_eq!(meta.variant("Cuboid").unwrap().display_name(), "Box");
+        assert_eq!(meta.variant("Auto").unwrap().display_name(), "Auto");
+        // 无载荷变体不给载荷类型。
+        assert!(meta.variant("Auto").unwrap().payload.is_none());
+        assert!(meta.variant("Cuboid").unwrap().payload.is_some());
+
+        let cuboid = CollisionShape::Cuboid {
+            half_extents: [1.0, 2.0, 3.0],
+        };
+        let payload = cuboid.payload_meta().expect("Cuboid 有载荷");
+        let fields: Vec<&str> = payload.fields.iter().map(|f| f.name).collect();
+        assert_eq!(fields, ["half_extents"]);
+        assert_eq!(payload.field("half_extents").unwrap().display_name(), "Extents");
+        assert!(matches!(
+            cuboid.payload_get("half_extents"),
+            Some(ValueRef::List(_))
+        ));
+        assert!(cuboid.payload_get("radius").is_none());
+        assert!(CollisionShape::Auto.payload_meta().is_none());
+    }
+
+    /// 切变体重置载荷（不同变体的载荷类型不同，保留旧值没有意义）。
+    #[test]
+    fn switching_variant_resets_the_payload() {
+        use crate::physics::CollisionShape;
+        let mut shape = CollisionShape::Cuboid {
+            half_extents: [9.0, 9.0, 9.0],
+        };
+        assert!(shape.set_variant("Ball"));
+        assert_eq!(shape, CollisionShape::Ball { radius: 0.0 });
+        assert!(!shape.set_variant("Nope"));
+        assert_eq!(shape, CollisionShape::Ball { radius: 0.0 });
+    }
+
+    /// 载荷字段在路径里**直接按名字**寻址：枚举体内没有额外层级。
+    #[test]
+    fn payload_fields_are_addressable_by_name() {
+        use crate::physics::{CollisionShape, PhysicsBody};
+        let mut body = PhysicsBody {
+            shape: CollisionShape::Ball { radius: 2.0 },
+            ..PhysicsBody::default()
+        };
+
+        assert_eq!(get_path(&body, "shape.radius").unwrap().as_f32(), Some(2.0));
+        set_scalar(&mut body, "shape.radius", &ScalarValue::F32(4.0)).unwrap();
+        assert_eq!(body.shape, CollisionShape::Ball { radius: 4.0 });
+
+        // 载荷里没有的名字 → NoSuchField，而不是 panic。
+        assert!(matches!(
+            get_path(&body, "shape.nope"),
+            Err(ReflectError::NoSuchField { .. })
+        ));
+        // 无载荷变体再往下走 → 明说"没有值"。
+        let auto = PhysicsBody {
+            shape: CollisionShape::Auto,
+            ..PhysicsBody::default()
+        };
+        assert!(matches!(
+            get_path(&auto, "shape.radius"),
+            Err(ReflectError::NoneValue(_))
+        ));
     }
 
     #[test]

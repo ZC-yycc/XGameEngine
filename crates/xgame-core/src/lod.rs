@@ -28,15 +28,17 @@
 //! 一个无限级永远只是兜底：只要有更近的有限级装得下，就不会选它。
 
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 /// 一个 LOD 级：用哪个模型、生效到多远。
 ///
 /// 字段全部 `serde(default)`：手写 RON 少写一项不会解析失败，`model` 空串的级
 /// 在解析时被跳过（它没有几何可画，留着只会让"为什么这一级是空的"变成谜）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Reflect)]
 pub struct LodLevel {
     /// 这一级用的模型（项目相对路径或 `builtin://…`）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[reflect(label = "Model", hint = "Resources/… 或 builtin://cube")]
     pub model: String,
     /// 这一级生效的最大距离（世界单位，从相机量到实体轴心）。
     ///
@@ -44,6 +46,7 @@ pub struct LodLevel {
     /// 的自然写法。负数同样按无限处理（而不是"永不生效"）：一个负数阈值多半是
     /// 手滑，让它变成"永远可见"比让它变成"永远不可见"更好救。
     #[serde(default)]
+    #[reflect(label = "Max Dist", min = 0.0, max = 3.4028235e38, speed = 0.5, unit = "m")]
     pub max_distance: f32,
 }
 
@@ -66,10 +69,18 @@ impl LodLevel {
 ///
 /// `levels` 为空（= 绝大多数实体）时它**完全不存在**：不落盘、不参与判定、
 /// 不额外加载任何模型。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Reflect)]
 pub struct LodGroup {
     /// 各级。**顺序不影响判定**（见模块文档），编辑器按 `max_distance` 排序展示。
+    ///
+    /// 列表项第一行标成 `L0` / `L1`（下标），第二行是距离。超出最后一级 = 不画；
+    /// 最后一级填 0 = 无限远。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[reflect(
+        item_prefix = "L",
+        add_label = "Add Level",
+        note = "超出最后一级 = 不画；最后一级填 0 = 无限远"
+    )]
     pub levels: Vec<LodLevel>,
 }
 

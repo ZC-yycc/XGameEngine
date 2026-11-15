@@ -8,13 +8,16 @@
 //! 三者分开而不是合成一个大 trait，是因为它们的 dyn 能力不同：
 //! `ValueRefMut` 要能装下任意一种，必须各自是独立 trait 对象。
 
-use std::any::Any;
-
 use super::meta::TypeMeta;
 use super::value::{ReflectError, ValueRef, ValueRefMut};
 
 /// 可按名字读写字段的类型。
-pub trait Reflect: Any {
+///
+/// **不加 `Any` 约束**：反射不做向下转型（类型已经由 `TypeMeta` 描述清楚了），
+/// 而 `Any` 要求 `'static`，会把"借用式的适配器"挡在门外 ——
+/// 编辑器要把"枚举变体的载荷"包装成 `Reflect` 交给同一套字段渲染器，
+/// 那个包装持有 `&mut dyn ReflectEnum`，生命周期不是 `'static`。
+pub trait Reflect {
     /// 静态元数据。实现由 `#[derive(Reflect)]` 生成，或手写。
     ///
     /// 名字刻意**不叫** `meta`：`ReflectMeta::meta()` 是关联函数，两者同名会让
@@ -87,22 +90,39 @@ pub trait ReflectList {
 /// 带载荷枚举的读写。
 ///
 /// **切变体会丢掉原载荷**（重置为默认）—— 这条语义是刻意的：不同变体的载荷
-/// 类型可能完全不同（`CollisionShape::Cuboid` 是 `Vec3`、`Ball` 是 `f32`），
+/// 类型可能完全不同（`CollisionShape::Cuboid` 是 `[f32; 3]`、`Ball` 是 `f32`），
 /// 保留旧值没有意义，静默解释成新类型会造出不可能的状态。
+///
+/// # 载荷为什么是"按字段名"而不是一个 `ValueRef`
+///
+/// 载荷不是独立的 Rust 值，它住在枚举变体里 —— 没有一块连续内存可以假装成
+/// 一个结构体借出去。所以载荷走**与 [`Reflect`] 同形**的三个方法：一张字段表
+/// 加按名字读写。编辑器因此能用同一套控件画 `PhysicsBody` 的字段和
+/// `CollisionShape::Cuboid.half_extents` 的字段。
 pub trait ReflectEnum {
-    /// 当前变体名。
+    /// 当前变体名（**寻址名**，等于 Rust 变体名）。
     fn variant(&self) -> &'static str;
 
     /// 切到另一个变体（载荷重置为默认）。变体不存在返回 `false`，状态不变。
     fn set_variant(&mut self, name: &str) -> bool;
 
-    /// 当前变体的载荷。无载荷变体返回 `None`。
-    fn payload(&self) -> Option<ValueRef<'_>>;
-
-    fn payload_mut(&mut self) -> Option<ValueRefMut<'_>>;
-
-    /// 所有可选变体名（编辑器画下拉框用）。
+    /// 所有可选变体名（编辑器画下拉框用），按声明顺序。
     fn variant_names(&self) -> &'static [&'static str];
+
+    /// 当前变体的载荷字段表；无载荷变体返回 `None`。
+    fn payload_meta(&self) -> Option<&'static TypeMeta> {
+        None
+    }
+
+    /// 读当前变体的一个载荷字段。
+    fn payload_get(&self, _field: &str) -> Option<ValueRef<'_>> {
+        None
+    }
+
+    /// 写当前变体的一个载荷字段。
+    fn payload_get_mut(&mut self, _field: &str) -> Option<ValueRefMut<'_>> {
+        None
+    }
 }
 
 /// "能变成一个反射值"的类型。

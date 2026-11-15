@@ -17,17 +17,19 @@
 //! 这种写法对 RON 更友好，也避免把 glam 的序列化格式当成文件格式的一部分。
 
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 /// 刚体的运动学类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Reflect)]
 pub enum BodyKind {
-    /// 不动，无限质量。地面、墙壁、平台。
+    /// 静态：地面 / 墙，不受力。
     Static,
-    /// 全动力学模拟：受重力、力、碰撞影响。
+    /// 动态：受重力与碰撞（物理驱动）。
     #[default]
     Dynamic,
-    /// 运动学：由脚本 / 代码直接驱动位置或速度，本身不受力，但会推动别人。
-    /// 移动平台、电梯、由脚本控制的角色。
+    /// 运动学：由脚本驱动位置（脚本驱动）。
+    ///
+    /// 本身不受力，但会推动别人 —— 移动平台、电梯、由脚本控制的角色。
     Kinematic,
 }
 
@@ -35,17 +37,40 @@ pub enum BodyKind {
 ///
 /// 引擎内部还支持三角网格与高度场（见 `xgame-physics::ColliderShape`），
 /// 但那两种形状携带大块数据、通常由导入器生成而非手写，所以不进场景文件。
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, Reflect)]
 pub enum CollisionShape {
-    /// 轴对齐盒体（半边长）。
-    Cuboid { half_extents: [f32; 3] },
+    /// 轴对齐盒体。
+    ///
+    /// 半边长 = 盒子中心到面的距离。
+    #[reflect(label = "Box")]
+    Cuboid {
+        /// 三个轴的半边长（米）。
+        #[reflect(label = "Extents", min = 0.001, max = 3.4028235e38, speed = 0.02, unit = "m")]
+        half_extents: [f32; 3],
+    },
     /// 球体。
-    Ball { radius: f32 },
+    #[reflect(label = "Ball")]
+    Ball {
+        #[reflect(label = "Radius", min = 0.001, max = 3.4028235e38, speed = 0.02, unit = "m")]
+        radius: f32,
+    },
     /// 沿 Y 轴的胶囊体。
-    Capsule { half_height: f32, radius: f32 },
+    #[reflect(label = "Capsule")]
+    Capsule {
+        #[reflect(label = "Height", min = 0.0, max = 3.4028235e38, speed = 0.02, unit = "m")]
+        half_height: f32,
+        #[reflect(label = "Radius", min = 0.001, max = 3.4028235e38, speed = 0.02, unit = "m")]
+        radius: f32,
+    },
     /// 沿 Y 轴的圆柱体。
-    Cylinder { half_height: f32, radius: f32 },
-    /// 由运行时按实体变换的缩放自动生成盒子。
+    #[reflect(label = "Cylinder")]
+    Cylinder {
+        #[reflect(label = "Height", min = 0.0, max = 3.4028235e38, speed = 0.02, unit = "m")]
+        half_height: f32,
+        #[reflect(label = "Radius", min = 0.001, max = 3.4028235e38, speed = 0.02, unit = "m")]
+        radius: f32,
+    },
+    /// 按实体缩放的绝对值生成盒子。
     ///
     /// 这是**默认值**，也是新实体的常见情形：作者摆一个 1×1×1 的方块
     /// 缩放成 4×0.2×4 当平台，`Auto` 直接读它的变换，不用再手填一遍尺寸。
@@ -59,28 +84,37 @@ pub enum CollisionShape {
 /// 挂在 [`Entity::physics`](crate::Entity) 上；为 `None` 表示这个实体
 /// **不参与物理**（纯视觉），这是与 Unity「没有 RigidBody / Collider 就没有物理」
 /// 一致的行为。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
 pub struct PhysicsBody {
     /// 运动学类型。
     #[serde(default)]
+    #[reflect(label = "Type")]
     pub kind: BodyKind,
     /// 碰撞体形状。
     #[serde(default)]
+    #[reflect(label = "Shape", variant_note)]
     pub shape: CollisionShape,
-    /// 质量（千克）。`0` 表示按碰撞体密度自动推算。
-    #[serde(default)]
-    pub mass: f32,
     /// 库仑摩擦（0 无摩擦，1 高摩擦）。
     #[serde(default = "default_friction")]
+    #[reflect(label = "Friction", min = 0.0, max = 2.0, speed = 0.01)]
     pub friction: f32,
     /// 弹性（0 完全非弹性，1 完全弹性）。
     #[serde(default)]
+    #[reflect(label = "Bounce", min = 0.0, max = 1.0, speed = 0.01)]
     pub restitution: f32,
+    /// 质量（千克）。`0` = 按碰撞体密度自动推算。
+    #[serde(default)]
+    #[reflect(label = "Mass", min = 0.0, max = 10000.0, speed = 0.1, unit = "kg")]
+    pub mass: f32,
     /// 重力缩放（1 = 正常，0 = 失重，负数 = 反重力）。
     #[serde(default = "default_gravity_scale")]
+    #[reflect(label = "Gravity", min = -5.0, max = 5.0, speed = 0.01)]
     pub gravity_scale: f32,
     /// 传感器：检测重叠但不产生接触力（触发器）。
+    ///
+    /// 射线默认会忽略它。
     #[serde(default)]
+    #[reflect(label = "Sensor (trigger)")]
     pub is_sensor: bool,
 }
 

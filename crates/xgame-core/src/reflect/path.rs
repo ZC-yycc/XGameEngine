@@ -54,9 +54,6 @@ fn parse(path: &str) -> Result<Vec<Seg>, ReflectError> {
     Ok(segs)
 }
 
-/// 枚举的载荷统一用这个字段名寻址：`"machine"` 已取到枚举后，`"machine.value"` 取载荷。
-const PAYLOAD: &str = "value";
-
 fn no_field(type_name: &'static str, field: &str, path: &str) -> ReflectError {
     // 路径里只有最后一段是"人要看"的字段名；这里简化成整条路径都带上，
     // 因为调用方（编辑器 / MCP）本来就知道自己传了什么路径。
@@ -74,13 +71,16 @@ fn walk<'a>(mut cur: ValueRef<'a>, segs: &[Seg], path: &str) -> Result<ValueRef<
                 Some(v) => v,
                 None => return Err(no_field(s.type_meta().name, name, path)),
             },
-            (ValueRef::Enum(e), Seg::Field(name)) if name == PAYLOAD => match e.payload() {
-                Some(v) => v,
-                None => return Err(ReflectError::NoneValue("payload")),
-            },
             (ValueRef::Enum(e), Seg::Field(name)) => {
-                // 变体名本身不可寻址（它是 `ReflectEnum::variant()` 的结果，不是字段）。
-                return Err(no_field(e.variant(), name, path));
+                // 载荷字段直接按名字寻址：枚举体内只有载荷，没有额外的层级。
+                // 变体名本身不可寻址 —— 它是 `ReflectEnum::variant()` 的结果。
+                match e.payload_get(name) {
+                    Some(v) => v,
+                    None if e.payload_meta().is_some() => {
+                        return Err(no_field(e.variant(), name, path))
+                    }
+                    None => return Err(ReflectError::NoneValue("payload")),
+                }
             }
             (ValueRef::List(l), Seg::Index(i)) => {
                 let len = l.len();
@@ -111,11 +111,16 @@ fn walk_mut<'a>(
     for seg in segs {
         cur = match (cur, seg) {
             (ValueRefMut::Struct(s), Seg::Field(name)) => s.get_mut_checked(name)?,
-            (ValueRefMut::Enum(e), Seg::Field(name)) if name == PAYLOAD => match e.payload_mut() {
-                Some(v) => v,
-                None => return Err(ReflectError::NoneValue("payload")),
-            },
-            (ValueRefMut::Enum(e), Seg::Field(name)) => return Err(no_field(e.variant(), name, path)),
+            (ValueRefMut::Enum(e), Seg::Field(name)) => {
+                // 先取"有没有载荷"和变体名，再要可变引用 —— 两次借用不能重叠。
+                let has_payload = e.payload_meta().is_some();
+                let variant = e.variant();
+                match e.payload_get_mut(name) {
+                    Some(v) => v,
+                    None if has_payload => return Err(no_field(variant, name, path)),
+                    None => return Err(ReflectError::NoneValue("payload")),
+                }
+            }
             (ValueRefMut::List(l), Seg::Index(i)) => {
                 let len = l.len();
                 match l.get_mut(*i) {

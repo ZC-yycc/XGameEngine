@@ -47,20 +47,25 @@ use crate::id::EntityId;
 /// （做游戏的今天就知道要"音乐 / 音效 / 对白"三组），而开放字符串会让
 /// "两个地方拼错一个字母 = 两个永远调不到一起的组"成为常态。要加第 4 组，
 /// 加变体（编译器会把所有 match 点亮）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Reflect)]
 pub enum AudioBus {
     /// 音效（脚步、撞击、按钮）。默认组。
     #[default]
+    #[reflect(label = "sfx")]
     Sfx,
     /// 背景音乐（通常循环）。
+    #[reflect(label = "bgm")]
     Bgm,
     /// 对白 / 语音。
+    #[reflect(label = "voice")]
     Voice,
 }
 
 impl AudioBus {
-    /// 反射元数据。手写而不是 derive：这是**无载荷枚举**，derive 只支持具名结构体。
     /// 变体顺序与 [`AudioBus::ALL`] 一致，编辑器下拉框据此排列。
+    ///
+    /// 反射元数据由 `#[derive(Reflect)]` 在同一份变体声明上生成 ——
+    /// 再存一份名字数组就又多了一处会漂移的副本。
     pub const VARIANT_NAMES: [&'static str; 3] = ["Sfx", "Bgm", "Voice"];
 
     /// 全部总线（顺序 = [`AudioBus::index`]）。

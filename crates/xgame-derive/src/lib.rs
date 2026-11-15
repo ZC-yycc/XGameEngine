@@ -446,6 +446,9 @@ struct ReflectOpts {
     hint: Option<String>,
     visible_when: Option<String>,
     row_group: Option<String>,
+    item_prefix: Option<String>,
+    add_label: Option<String>,
+    variant_note: bool,
     doc: String,
 }
 
@@ -525,10 +528,52 @@ fn parse_reflect_opts(field: &syn::Field) -> syn::Result<ReflectOpts> {
                     opts.visible_when = Some(meta.value()?.parse::<syn::LitStr>()?.value())
                 }
                 "row_group" => opts.row_group = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
+                "item_prefix" => {
+                    opts.item_prefix = Some(meta.value()?.parse::<syn::LitStr>()?.value())
+                }
+                "add_label" => opts.add_label = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
+                "variant_note" => opts.variant_note = true,
                 other => {
                     return Err(meta.error(format!(
                         "不认识的选项 `{other}`（可用：skip / hidden / read_only / label / unit / \
-                         speed / min / max / decimals / note / hint / visible_when / row_group / doc）"
+                         speed / min / max / decimals / note / hint / visible_when / row_group / \
+                         item_prefix / add_label / variant_note / doc）"
+                    )))
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(opts)
+}
+
+/// `#[reflect(...)]` 收集到的**变体**选项。
+#[derive(Default)]
+struct VariantOpts {
+    label: Option<String>,
+    doc: String,
+}
+
+fn parse_variant_opts(variant: &syn::Variant) -> syn::Result<VariantOpts> {
+    let mut opts = VariantOpts {
+        doc: collect_doc(&variant.attrs),
+        ..VariantOpts::default()
+    };
+    for attr in &variant.attrs {
+        if !attr.path().is_ident("reflect") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            let ident = match meta.path.get_ident() {
+                Some(ident) => ident.to_string(),
+                None => return Err(meta.error("`#[reflect(...)]` 只接受裸标识符选项")),
+            };
+            match ident.as_str() {
+                "label" => opts.label = Some(meta.value()?.parse::<syn::LitStr>()?.value()),
+                "doc" => opts.doc = meta.value()?.parse::<syn::LitStr>()?.value(),
+                other => {
+                    return Err(meta.error(format!(
+                        "不认识的变体选项 `{other}`（可用：label / doc）"
                     )))
                 }
             }
@@ -652,40 +697,30 @@ pub fn reflect_derive(input: TokenStream) -> TokenStream {
     }
 }
 
-fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    let name = &input.ident;
-    let p = quote!(::xgame_core::reflect);
-    let doc = collect_doc(&input.attrs);
+/// 一个字段在代码生成里要的信息。
+struct FieldSpec {
+    /// 寻址名（= Rust 字段名）。
+    name: String,
+    ident: syn::Ident,
+    read_only: bool,
+}
 
-    let data = match &input.data {
-        syn::Data::Struct(data) => data,
-        syn::Data::Enum(_) => {
-            return Err(syn::Error::new_spanned(
-                name,
-                "`#[derive(Reflect)]` 不支持枚举 —— 请手写 `ReflectMeta` + `ReflectEnum`\
-                 （带载荷变体的语义无法自动决定）",
-            ))
-        }
-        syn::Data::Union(_) => {
-            return Err(syn::Error::new_spanned(
-                name,
-                "`#[derive(Reflect)]` 不支持 union",
-            ))
-        }
-    };
-    let fields = match &data.fields {
-        syn::Fields::Named(fields) => &fields.named,
-        _ => {
-            return Err(syn::Error::new_spanned(
-                name,
-                "`#[derive(Reflect)]` 只支持具名字段结构体（元组结构体的字段没有名字可寻址）",
-            ))
-        }
-    };
+/// 一份字段表的生成结果。
+struct FieldCodegen {
+    /// `FieldMeta { … }` 表达式，按声明顺序，已跳过 `skip` 的字段。
+    metas: Vec<proc_macro2::TokenStream>,
+    /// 参与寻址的字段（顺序同上）。
+    specs: Vec<FieldSpec>,
+}
 
-    let mut field_metas = Vec::new();
-    let mut get_arms = Vec::new();
-    let mut get_mut_arms = Vec::new();
+/// 生成一份字段表。结构体字段与枚举载荷字段共用这一处 ——
+/// 两边唯一的差别是"怎么拿到 `&self.field`"，那由调用方拼。
+fn gen_fields(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
+    p: &proc_macro2::TokenStream,
+) -> syn::Result<FieldCodegen> {
+    let mut metas = Vec::new();
+    let mut specs = Vec::new();
     // `visible_when` 的编译期校验用：`(字段名, 是否 bool)`。
     let mut declared: Vec<(String, bool)> = Vec::new();
     let mut visibility_refs: Vec<(String, String, proc_macro2::Span)> = Vec::new();
@@ -699,10 +734,10 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         if opts.skip {
             continue;
         }
-        let name_lit = ident.to_string();
-        declared.push((name_lit.clone(), is_bool_type(&field.ty)));
+        let name = ident.to_string();
+        declared.push((name.clone(), is_bool_type(&field.ty)));
         if let Some(when) = &opts.visible_when {
-            visibility_refs.push((name_lit.clone(), when.clone(), ident.span()));
+            visibility_refs.push((name.clone(), when.clone(), ident.span()));
         }
         let ty_ref = type_ref_expr(&field.ty)?;
 
@@ -746,11 +781,14 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         let hint = opt_str(&opts.hint);
         let visible_when = opt_str(&opts.visible_when);
         let row_group = opt_str(&opts.row_group);
+        let variant_note = opts.variant_note;
+        let item_prefix = opt_str(&opts.item_prefix);
+        let add_label = opt_str(&opts.add_label);
         let field_doc = opts.doc;
 
-        field_metas.push(quote! {
+        metas.push(quote! {
             #p::FieldMeta {
-                name: #name_lit,
+                name: #name,
                 label: #label,
                 ty: #ty_ref,
                 range: #range,
@@ -761,28 +799,18 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                 hint: #hint,
                 visible_when: #visible_when,
                 row_group: #row_group,
+                variant_note: #variant_note,
+                item_prefix: #item_prefix,
+                add_label: #add_label,
                 flags: #flags,
                 doc: #field_doc,
             }
         });
-
-        get_arms.push(quote! {
-            #name_lit => ::std::option::Option::Some(
-                #p::ReflectItem::as_value(&self.#ident)
-            ),
+        specs.push(FieldSpec {
+            name,
+            ident: ident.clone(),
+            read_only: opts.read_only,
         });
-
-        if opts.read_only {
-            get_mut_arms.push(quote! {
-                #name_lit => ::std::option::Option::None,
-            });
-        } else {
-            get_mut_arms.push(quote! {
-                #name_lit => ::std::option::Option::Some(
-                    #p::ReflectItem::as_value_mut(&mut self.#ident)
-                ),
-            });
-        }
     }
 
     // `visible_when` 指向的字段必须存在且是 `bool`。写错名字时给编译错误，
@@ -805,6 +833,53 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             Some(_) => {}
         }
     }
+
+    Ok(FieldCodegen { metas, specs })
+}
+
+fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    match &input.data {
+        syn::Data::Struct(_) => expand_struct(input),
+        syn::Data::Enum(_) => expand_enum(input),
+        syn::Data::Union(_) => Err(syn::Error::new_spanned(
+            &input.ident,
+            "`#[derive(Reflect)]` 不支持 union",
+        )),
+    }
+}
+
+/// 具名字段结构体：`ReflectMeta` + `Reflect` + `ReflectItem`。
+fn expand_struct(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &input.ident;
+    let p = quote!(::xgame_core::reflect);
+    let doc = collect_doc(&input.attrs);
+
+    let syn::Data::Struct(data) = &input.data else {
+        unreachable!("expand_struct 只接结构体");
+    };
+    let syn::Fields::Named(fields) = &data.fields else {
+        return Err(syn::Error::new_spanned(
+            name,
+            "`#[derive(Reflect)]` 只支持具名字段结构体（元组结构体的字段没有名字可寻址）",
+        ));
+    };
+    let gen = gen_fields(&fields.named, &p)?;
+
+    let get_arms = gen.specs.iter().map(|spec| {
+        let (field, ident) = (&spec.name, &spec.ident);
+        quote!(#field => ::std::option::Option::Some(#p::ReflectItem::as_value(&self.#ident)),)
+    });
+    let get_mut_arms = gen.specs.iter().map(|spec| {
+        let (field, ident) = (&spec.name, &spec.ident);
+        if spec.read_only {
+            quote!(#field => ::std::option::Option::None,)
+        } else {
+            quote!(#field => ::std::option::Option::Some(
+                #p::ReflectItem::as_value_mut(&mut self.#ident)
+            ),)
+        }
+    });
+    let field_metas = &gen.metas;
 
     let name_str = name.to_string();
     Ok(quote! {
@@ -850,6 +925,299 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             }
             fn as_value_mut(&mut self) -> #p::ValueRefMut<'_> {
                 #p::ValueRefMut::Struct(self)
+            }
+        }
+    })
+}
+
+/// 一个变体在代码生成里要的信息。
+struct VariantGen {
+    /// 变体标识符（拼载荷元数据函数名用）。
+    ident: syn::Ident,
+    name: String,
+    /// `Self::Cuboid { .. }` / `Self::Auto`：不需要绑定时用的分支头。
+    pat: proc_macro2::TokenStream,
+    /// 绑定全部载荷字段的分支头（`Self::Cuboid { half_extents }`）。
+    /// 与 [`pat`](Self::pat) 分开是因为 `payload_get` 要用到绑定的名字。
+    payload_pat: proc_macro2::TokenStream,
+    /// `set_variant` 用的构造表达式。
+    ctor: proc_macro2::TokenStream,
+    /// 载荷字段表；空 = 无载荷（或全部 `skip`）。
+    fields: Option<FieldCodegen>,
+}
+
+/// 枚举：`ReflectMeta` + `ReflectEnum` + `ReflectItem`。
+///
+/// 覆盖 `CollisionShape`（带载荷）与 `BodyKind` / `AudioBus`（纯标签）两种形状。
+/// 载荷字段的元数据与结构体字段走同一套 `#[reflect(...)]`，因此 `half_extents`
+/// 也能声明范围、步长与文档。
+fn expand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &input.ident;
+    let p = quote!(::xgame_core::reflect);
+    let doc = collect_doc(&input.attrs);
+    let syn::Data::Enum(data) = &input.data else {
+        unreachable!("expand_enum 只接枚举");
+    };
+    if data.variants.is_empty() {
+        return Err(syn::Error::new_spanned(name, "枚举至少要有一个变体"));
+    }
+
+    let mut variants = Vec::new();
+    let mut variant_metas = Vec::new();
+    let mut payload_fns = Vec::new();
+    let mut names = Vec::new();
+
+    for variant in &data.variants {
+        let v_ident = &variant.ident;
+        let v_name = v_ident.to_string();
+        let opts = parse_variant_opts(variant)?;
+        names.push(v_name.clone());
+
+        let label = match &opts.label {
+            Some(label) => quote!(::std::option::Option::Some(#label)),
+            None => quote!(::std::option::Option::None),
+        };
+        let v_doc = if opts.doc.is_empty() {
+            collect_doc(&variant.attrs)
+        } else {
+            opts.doc.clone()
+        };
+
+        match &variant.fields {
+            syn::Fields::Unit => {
+                let pat = quote!(Self::#v_ident);
+                variant_metas.push(quote! {
+                    #p::VariantMeta {
+                        name: #v_name,
+                        label: #label,
+                        doc: #v_doc,
+                        payload: ::std::option::Option::None,
+                    }
+                });
+                variants.push(VariantGen {
+                    ident: v_ident.clone(),
+                    name: v_name,
+                    pat: pat.clone(),
+                    payload_pat: pat.clone(),
+                    ctor: pat,
+                    fields: None,
+                });
+            }
+            syn::Fields::Named(named) => {
+                let gen = gen_fields(&named.named, &p)?;
+
+                // 全字段被 `skip` 的变体等价于无载荷：不生成空载荷表，
+                // 否则编辑器会为它画一个"什么都没有"的载荷区。
+                if gen.metas.is_empty() {
+                    variant_metas.push(quote! {
+                        #p::VariantMeta {
+                            name: #v_name,
+                            label: #label,
+                            doc: #v_doc,
+                            payload: ::std::option::Option::None,
+                        }
+                    });
+                    variants.push(VariantGen {
+                        ident: v_ident.clone(),
+                        name: v_name,
+                        pat: quote!(Self::#v_ident { .. }),
+                        payload_pat: quote!(Self::#v_ident { .. }),
+                        ctor: quote!(Self::#v_ident {}),
+                        fields: None,
+                    });
+                    continue;
+                }
+
+                let payload_fn = syn::Ident::new(
+                    &format!("__xg_reflect_payload_{name}_{v_ident}"),
+                    v_ident.span(),
+                );
+                let metas = &gen.metas;
+                let payload_name = v_name.clone();
+                let payload_doc = v_doc.clone();
+                payload_fns.push(quote! {
+                    #[doc(hidden)]
+                    #[allow(non_snake_case)]
+                    fn #payload_fn() -> &'static #p::TypeMeta {
+                        static META: ::std::sync::OnceLock<#p::TypeMeta> =
+                            ::std::sync::OnceLock::new();
+                        META.get_or_init(|| #p::TypeMeta {
+                            name: #payload_name,
+                            doc: #payload_doc,
+                            kind: #p::MetaKind::Struct,
+                            fields: ::std::boxed::Box::leak(::std::vec![#(#metas),*]
+                                .into_boxed_slice()),
+                            variants: &[],
+                        })
+                    }
+                });
+
+                variant_metas.push(quote! {
+                    #p::VariantMeta {
+                        name: #v_name,
+                        label: #label,
+                        doc: #v_doc,
+                        payload: ::std::option::Option::Some(#p::TypeRef::Named(#payload_fn)),
+                    }
+                });
+
+                let ctor_fields = gen.specs.iter().map(|s| {
+                    let ident = &s.ident;
+                    quote!(#ident: ::std::default::Default::default())
+                });
+                let bindings: Vec<&syn::Ident> = gen.specs.iter().map(|s| &s.ident).collect();
+                variants.push(VariantGen {
+                    ident: v_ident.clone(),
+                    name: v_name,
+                    pat: quote!(Self::#v_ident { .. }),
+                    payload_pat: quote!(Self::#v_ident { #(#bindings),* }),
+                    ctor: quote!(Self::#v_ident { #(#ctor_fields),* }),
+                    fields: Some(gen),
+                });
+            }
+            syn::Fields::Unnamed(_) => {
+                return Err(syn::Error::new_spanned(
+                    variant,
+                    "`#[derive(Reflect)]` 不支持元组变体（`Variant(T)` 的载荷没有名字可寻址，\
+                     编辑器画不出一行；请改成 `Variant { name: T }`）",
+                ))
+            }
+        }
+    }
+
+    // -- ReflectEnum 的各个分支 --
+    let variant_arms = variants.iter().map(|v| {
+        let (pat, v_name) = (&v.pat, &v.name);
+        quote!(#pat => #v_name,)
+    });
+    let set_arms = variants.iter().map(|v| {
+        let (v_name, ctor) = (&v.name, &v.ctor);
+        quote!(#v_name => { *self = #ctor; true })
+    });
+    let payload_meta_arms = variants.iter().map(|v| {
+        let pat = &v.pat;
+        match &v.fields {
+            None => quote!(#pat => ::std::option::Option::None,),
+            Some(_) => {
+                let payload_fn = syn::Ident::new(
+                    &format!("__xg_reflect_payload_{name}_{}", v.ident),
+                    v.ident.span(),
+                );
+                quote!(#pat => ::std::option::Option::Some(#payload_fn()),)
+            }
+        }
+    });
+
+    let payload_get_arms = variants.iter().map(|v| {
+        let pat = &v.payload_pat;
+        match &v.fields {
+            None => quote!(#pat => ::std::option::Option::None,),
+            Some(gen) => {
+                let arms = gen.specs.iter().map(|spec| {
+                    let (field, ident) = (&spec.name, &spec.ident);
+                    quote!(#field => ::std::option::Option::Some(
+                        #p::ReflectItem::as_value(#ident)
+                    ),)
+                });
+                quote! {
+                    #pat => match field {
+                        #(#arms)*
+                        _ => ::std::option::Option::None,
+                    },
+                }
+            }
+        }
+    });
+    let payload_get_mut_arms = variants.iter().map(|v| {
+        let pat = &v.payload_pat;
+        match &v.fields {
+            None => quote!(#pat => ::std::option::Option::None,),
+            Some(gen) => {
+                let arms = gen.specs.iter().map(|spec| {
+                    let (field, ident) = (&spec.name, &spec.ident);
+                    if spec.read_only {
+                        quote!(#field => ::std::option::Option::None,)
+                    } else {
+                        quote!(#field => ::std::option::Option::Some(
+                            #p::ReflectItem::as_value_mut(#ident)
+                        ),)
+                    }
+                });
+                quote! {
+                    #pat => match field {
+                        #(#arms)*
+                        _ => ::std::option::Option::None,
+                    },
+                }
+            }
+        }
+    });
+
+    let name_str = name.to_string();
+    let variant_metas = &variant_metas;
+    Ok(quote! {
+        #(#payload_fns)*
+
+        impl #p::ReflectMeta for #name {
+            fn meta() -> &'static #p::TypeMeta {
+                static META: ::std::sync::OnceLock<#p::TypeMeta> = ::std::sync::OnceLock::new();
+                META.get_or_init(|| #p::TypeMeta {
+                    name: #name_str,
+                    doc: #doc,
+                    kind: #p::MetaKind::Enum,
+                    fields: &[],
+                    variants: ::std::boxed::Box::leak(::std::vec![#(#variant_metas),*]
+                        .into_boxed_slice()),
+                })
+            }
+        }
+
+        impl #p::ReflectEnum for #name {
+            fn variant(&self) -> &'static str {
+                match self {
+                    #(#variant_arms)*
+                }
+            }
+
+            fn set_variant(&mut self, name: &str) -> bool {
+                match name {
+                    #(#set_arms)*
+                    _ => false,
+                }
+            }
+
+            fn variant_names(&self) -> &'static [&'static str] {
+                &[#(#names),*]
+            }
+
+            fn payload_meta(&self) -> ::std::option::Option<&'static #p::TypeMeta> {
+                match self {
+                    #(#payload_meta_arms)*
+                }
+            }
+
+            fn payload_get(&self, field: &str) -> ::std::option::Option<#p::ValueRef<'_>> {
+                match self {
+                    #(#payload_get_arms)*
+                }
+            }
+
+            fn payload_get_mut(
+                &mut self,
+                field: &str,
+            ) -> ::std::option::Option<#p::ValueRefMut<'_>> {
+                match self {
+                    #(#payload_get_mut_arms)*
+                }
+            }
+        }
+
+        impl #p::ReflectItem for #name {
+            fn as_value(&self) -> #p::ValueRef<'_> {
+                #p::ValueRef::Enum(self)
+            }
+            fn as_value_mut(&mut self) -> #p::ValueRefMut<'_> {
+                #p::ValueRefMut::Enum(self)
             }
         }
     })

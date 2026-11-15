@@ -28,6 +28,7 @@
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 /// 胶囊体默认半径（米）。略小于 0.5 的半格走廊，保证能穿过 1 米宽的门。
 fn default_radius() -> f32 {
@@ -74,28 +75,36 @@ fn default_snap_to_ground() -> f32 {
 /// 经过 [`sanitized`](Self::sanitized) 钳制：运行时直接信任原始值会让
 /// `height < 2 * radius`（胶囊线段长度为负）之类的坏数据变成 NaN 变换，
 /// 而 NaN 一旦写进物理世界，整个模拟就再也回不来了。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
 pub struct CharacterController {
-    /// 胶囊体半径（米）。
-    #[serde(default = "default_radius")]
-    pub radius: f32,
-    /// 角色总高度（米，含两端半球）。
+    /// 角色总高度（米，含两端半球）。脚底 = 实体原点。
     ///
     /// 胶囊体的**半高**（线段长度的一半）由 `(height - 2·radius)/2` 推导，
     /// 不在场景文件里单独存一份 —— 存两份就意味着它们可能对不上。
     #[serde(default = "default_height")]
+    #[reflect(label = "Height", min = 0.5, max = 5.0, speed = 0.02, unit = "m")]
     pub height: f32,
-    /// 自动台阶高度（米）。0 = 不上任何台阶。
+    /// 胶囊体半径（米）。总高必须大于直径，否则会被钳成球。
+    #[serde(default = "default_radius")]
+    #[reflect(label = "Radius", min = 0.05, max = 2.0, speed = 0.01, unit = "m")]
+    pub radius: f32,
+    /// 自动上台阶的最大高度（米）。0 = 不许上台阶。
     #[serde(default = "default_step_offset")]
+    #[reflect(label = "Step", min = 0.0, max = 1.0, speed = 0.01, unit = "m")]
     pub step_offset: f32,
-    /// 可攀爬的最大坡度（度）。0 = 任何斜面都上不去。
+    /// 可站立的最大坡度（度）。超过就滑下去；0 = 任何斜面都站不住。
     #[serde(default = "default_slope_limit")]
+    #[reflect(label = "Slope", min = 0.0, max = 89.0, speed = 0.5, unit = "°")]
     pub slope_limit: f32,
     /// 皮肤宽度（米），见 [`default_skin_width`] 的说明。
+    ///
+    /// 与障碍物保持的微小间隙 —— 太小会抖，太大会看起来悬空。
     #[serde(default = "default_skin_width")]
+    #[reflect(label = "Skin", min = 0.001, max = 0.5, speed = 0.005, unit = "m")]
     pub skin_width: f32,
     /// 贴地吸附距离（米）。0 = 不吸附（走下台阶必然有一段腾空）。
     #[serde(default = "default_snap_to_ground")]
+    #[reflect(label = "Snap", min = 0.0, max = 2.0, speed = 0.01, unit = "m")]
     pub snap_to_ground: f32,
 }
 

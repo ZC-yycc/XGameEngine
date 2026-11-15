@@ -920,7 +920,22 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 语义（与 `xgame_core::lod` 同一份）：`levels` 非空时 `model` 被忽略，
         // 第 0 级就是最近一级；超出最后一级的 `max_distance` 直接不画
         // （写 0 = 无限远）。距离从相机量到**实体轴心**。
-        if BuiltinComponent::Lod.present(entity) {
+        if BuiltinComponent::Lod.present(entity) && state.use_reflect_inspector {
+            let mut reflected = FieldSignals::default();
+            super::inspector_reflect::show_section(
+                state,
+                ui,
+                entity,
+                &super::inspector_reflect::LOD,
+                &mut reflected,
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            touched |= reflected.changed;
+            drag_began |= reflected.drag_began;
+            drag_ended |= reflected.drag_ended;
+        }
+        if BuiltinComponent::Lod.present(entity) && !state.use_reflect_inspector {
             let lod_header = theme::section_bar(ui, "LOD");
             component_context_menu(
                 &lod_header,
@@ -1970,7 +1985,22 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         //
         // 取消勾选 = 这个实体不参与物理（纯视觉）。旧场景文件没有 `physics` 字段，
         // 加载出来就是未勾选 —— 与当时"没有任何东西会掉下去"的行为一致。
-        if entity.physics.is_some() {
+        if entity.physics.is_some() && state.use_reflect_inspector {
+            let mut reflected = FieldSignals::default();
+            super::inspector_reflect::show_section(
+                state,
+                ui,
+                entity,
+                &super::inspector_reflect::PHYSICS,
+                &mut reflected,
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            touched |= reflected.changed;
+            drag_began |= reflected.drag_began;
+            drag_ended |= reflected.drag_ended;
+        }
+        if entity.physics.is_some() && !state.use_reflect_inspector {
             let physics_header = theme::section_bar(ui, "Physics");
             component_context_menu(
                 &physics_header,
@@ -2202,7 +2232,22 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
         // 与 Physics 正交：勾上之后这个实体的刚体由**运行时托管**
         // （运动学位置 + 胶囊），`physics` 里的类型/形状会被忽略 ——
         // 见 `xgame_core::character` 的模块文档。
-        if entity.controller.is_some() {
+        if entity.controller.is_some() && state.use_reflect_inspector {
+            let mut reflected = FieldSignals::default();
+            super::inspector_reflect::show_section(
+                state,
+                ui,
+                entity,
+                &super::inspector_reflect::CHARACTER,
+                &mut reflected,
+                &mut component_request,
+                &mut refresh_scripts,
+            );
+            touched |= reflected.changed;
+            drag_began |= reflected.drag_began;
+            drag_ended |= reflected.drag_ended;
+        }
+        if entity.controller.is_some() && !state.use_reflect_inspector {
             let character_header = theme::section_bar(ui, "Character");
             component_context_menu(
                 &character_header,
