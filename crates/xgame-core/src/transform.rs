@@ -1,5 +1,6 @@
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 /// 欧拉角（度）→ 四元数：**全工程唯一的欧拉换算入口**，分解顺序固定 `YXZ`。
 ///
@@ -41,7 +42,7 @@ pub fn quat_to_euler_deg(q: Quat) -> Vec3 {
 /// 层级空间变换（位置、旋转、缩放）。
 ///
 /// 局部空间矩阵：`T * R * S`。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
 pub struct Transform {
     pub position: Vec3,
     pub rotation: Quat,

@@ -8,6 +8,8 @@
 //! 三者分开而不是合成一个大 trait，是因为它们的 dyn 能力不同：
 //! `ValueRefMut` 要能装下任意一种，必须各自是独立 trait 对象。
 
+use serde_json::Value;
+
 use super::meta::TypeMeta;
 use super::value::{ReflectError, ValueRef, ValueRefMut};
 
@@ -55,6 +57,15 @@ pub trait Reflect {
             }),
         }
     }
+
+    /// 用 JSON 值整体替换一个字段。
+    ///
+    /// 与 `get_mut` 的标量写入互补：它允许 `Option` / 结构体 / 枚举 / 列表整体
+    /// 被替换。实现必须在反序列化成功后才写回，避免半截值污染原数据。
+    fn set_json(&mut self, field: &str, value: Value) -> Result<(), ReflectError> {
+        let _ = (field, value);
+        Err(ReflectError::UnsupportedJson(self.type_meta().name))
+    }
 }
 
 /// 可按下标访问、且能增删元素的列表。
@@ -84,6 +95,12 @@ pub trait ReflectList {
             return false;
         }
         self.remove(index) && self.insert_default(index)
+    }
+
+    /// 用 JSON 值整体替换一个元素。
+    fn set_json(&mut self, index: usize, value: Value) -> Result<(), ReflectError> {
+        let _ = (index, value);
+        Err(ReflectError::UnsupportedJson("ReflectList"))
     }
 }
 
@@ -123,6 +140,18 @@ pub trait ReflectEnum {
     fn payload_get_mut(&mut self, _field: &str) -> Option<ValueRefMut<'_>> {
         None
     }
+
+    /// 用 JSON 值整体替换当前枚举值。
+    fn set_json(&mut self, value: Value) -> Result<(), ReflectError> {
+        let _ = value;
+        Err(ReflectError::UnsupportedJson("ReflectEnum"))
+    }
+
+    /// 用 JSON 值替换当前变体的一个载荷字段。
+    fn payload_set_json(&mut self, field: &str, value: Value) -> Result<(), ReflectError> {
+        let _ = (field, value);
+        Err(ReflectError::UnsupportedJson("ReflectEnum payload"))
+    }
 }
 
 /// "能变成一个反射值"的类型。
@@ -143,4 +172,20 @@ pub trait ReflectEnum {
 pub trait ReflectItem {
     fn as_value(&self) -> ValueRef<'_>;
     fn as_value_mut(&mut self) -> ValueRefMut<'_>;
+}
+
+/// 按字符串键访问的映射容器。
+///
+/// 覆盖两类真实数据：动画参数表（`BTreeMap<String, f32>`）与插件参数表
+/// （`FieldValues`）。键名就是路径的一段：`parameters.speed` / `fields.health`。
+pub trait ReflectMap {
+    fn get(&self, key: &str) -> Option<ValueRef<'_>>;
+
+    fn get_mut(&mut self, key: &str) -> Option<ValueRefMut<'_>>;
+
+    /// 用 JSON 值替换一个已有键的值。键不存在返回 `NoSuchField`。
+    fn set_json(&mut self, key: &str, value: Value) -> Result<(), ReflectError> {
+        let _ = (key, value);
+        Err(ReflectError::UnsupportedJson("ReflectMap"))
+    }
 }

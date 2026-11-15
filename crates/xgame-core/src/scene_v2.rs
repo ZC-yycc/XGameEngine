@@ -7,6 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use xgame_derive::Reflect;
+
+use crate::reflect::{
+    from_json_strict, Reflect, ReflectError, ReflectMeta, TypeMeta, ValueRef, ValueRefMut,
+};
 
 /// 当前格式若把未知嵌套字段吞掉再保存，会不可逆地删数据。
 fn parse_v2<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, String> {
@@ -135,14 +141,14 @@ impl<'de> Deserialize<'de> for StrictFieldValues {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Reflect)]
 #[serde(deny_unknown_fields)]
 pub struct MeshData {
     pub model: String,
     pub morph_weights: Vec<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Reflect)]
 #[serde(deny_unknown_fields)]
 pub struct MaterialData {
     pub asset: Option<String>,
@@ -333,6 +339,14 @@ impl EntityV2 {
             .iter()
             .find(|entry| entry.identity.id == id)
             .map(|entry| &entry.data)
+    }
+
+    pub fn component_mut(&mut self, id: ComponentId) -> Option<&mut ComponentData> {
+        self.components
+            .entries
+            .iter_mut()
+            .find(|entry| entry.identity.id == id)
+            .map(|entry| &mut entry.data)
     }
 
     pub fn add_component(&mut self, data: ComponentData) -> Result<ComponentId, String> {
@@ -1384,6 +1398,253 @@ impl PrefabV2 {
         self.validate()?;
         ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
             .map_err(|e| e.to_string())
+    }
+}
+
+/// `ComponentData` 的统一可变反射视图。
+///
+/// 不直接给 `ComponentData` 实现 `Reflect`：它的枚举变体名是**磁盘标签**，
+/// 而 MCP / 编辑器要改的是变体载荷里的字段（`/model`，不是 `/Mesh/model`）。
+/// 这个视图把载荷暴露成根结构，`Rust` / `Lua` 的动态字段再单独适配。
+pub enum ComponentReflectMut<'a> {
+    Builtin(&'a mut dyn Reflect),
+    Rust(RustReflectMut<'a>),
+    Lua(LuaReflectMut<'a>),
+}
+
+impl Reflect for ComponentReflectMut<'_> {
+    fn type_meta(&self) -> &'static TypeMeta {
+        match self {
+            Self::Builtin(inner) => inner.type_meta(),
+            Self::Rust(inner) => inner.type_meta(),
+            Self::Lua(inner) => inner.type_meta(),
+        }
+    }
+
+    fn get(&self, field: &str) -> Option<ValueRef<'_>> {
+        match self {
+            Self::Builtin(inner) => inner.get(field),
+            Self::Rust(inner) => inner.get(field),
+            Self::Lua(inner) => inner.get(field),
+        }
+    }
+
+    fn get_mut(&mut self, field: &str) -> Option<ValueRefMut<'_>> {
+        match self {
+            Self::Builtin(inner) => inner.get_mut(field),
+            Self::Rust(inner) => inner.get_mut(field),
+            Self::Lua(inner) => inner.get_mut(field),
+        }
+    }
+
+    fn set_json(&mut self, field: &str, value: Value) -> Result<(), ReflectError> {
+        match self {
+            Self::Builtin(inner) => inner.set_json(field, value),
+            Self::Rust(inner) => inner.set_json(field, value),
+            Self::Lua(inner) => inner.set_json(field, value),
+        }
+    }
+}
+
+/// Rust 注册组件的动态参数视图。
+pub struct RustReflectMut<'a> {
+    registered_name: &'a mut String,
+    fields: &'a mut Option<StrictFieldValues>,
+}
+
+impl Reflect for RustReflectMut<'_> {
+    fn type_meta(&self) -> &'static TypeMeta {
+        static META: std::sync::OnceLock<TypeMeta> = std::sync::OnceLock::new();
+        META.get_or_init(|| TypeMeta {
+            name: "RustComponent",
+            doc: "已注册 Rust 组件实例：注册名 + 插件参数表。",
+            kind: crate::reflect::MetaKind::Struct,
+            fields: &[],
+            variants: &[],
+        })
+    }
+
+    fn get(&self, field: &str) -> Option<ValueRef<'_>> {
+        match field {
+            "registered_name" => Some(ValueRef::Str(self.registered_name.as_str())),
+            "fields" => self.fields.as_ref().map(|fields| ValueRef::Map(&fields.0)),
+            _ => None,
+        }
+    }
+
+    fn get_mut(&mut self, field: &str) -> Option<ValueRefMut<'_>> {
+        match field {
+            "registered_name" => Some(ValueRefMut::Str(self.registered_name)),
+            "fields" => self.fields.as_mut().map(|fields| ValueRefMut::Map(&mut fields.0)),
+            _ => None,
+        }
+    }
+
+    fn set_json(&mut self, field: &str, value: Value) -> Result<(), ReflectError> {
+        match field {
+            "registered_name" => {
+                *self.registered_name = from_json_strict(value)?;
+                Ok(())
+            }
+            "fields" => {
+                *self.fields = from_json_strict(value)?;
+                Ok(())
+            }
+            _ => Err(ReflectError::NoSuchField {
+                type_name: self.type_meta().name,
+                field: field.to_string(),
+            }),
+        }
+    }
+}
+
+/// Lua 脚本实例视图。
+pub struct LuaReflectMut<'a> {
+    path: &'a mut String,
+}
+
+impl Reflect for LuaReflectMut<'_> {
+    fn type_meta(&self) -> &'static TypeMeta {
+        static META: std::sync::OnceLock<TypeMeta> = std::sync::OnceLock::new();
+        META.get_or_init(|| TypeMeta {
+            name: "LuaComponent",
+            doc: "Lua 脚本组件实例：项目相对脚本路径。",
+            kind: crate::reflect::MetaKind::Struct,
+            fields: &[],
+            variants: &[],
+        })
+    }
+
+    fn get(&self, field: &str) -> Option<ValueRef<'_>> {
+        match field {
+            "path" => Some(ValueRef::Str(self.path.as_str())),
+            _ => None,
+        }
+    }
+
+    fn get_mut(&mut self, field: &str) -> Option<ValueRefMut<'_>> {
+        match field {
+            "path" => Some(ValueRefMut::Str(self.path)),
+            _ => None,
+        }
+    }
+
+    fn set_json(&mut self, field: &str, value: Value) -> Result<(), ReflectError> {
+        match field {
+            "path" => {
+                *self.path = from_json_strict(value)?;
+                Ok(())
+            }
+            _ => Err(ReflectError::NoSuchField {
+                type_name: self.type_meta().name,
+                field: field.to_string(),
+            }),
+        }
+    }
+}
+
+impl ComponentData {
+    /// 取变体载荷的可变反射视图。路径相对**载荷**，与 MCP `component_edit` 一致。
+    pub fn reflect_mut(&mut self) -> ComponentReflectMut<'_> {
+        match self {
+            Self::Mesh(data) => ComponentReflectMut::Builtin(data),
+            Self::Lod(data) => ComponentReflectMut::Builtin(data),
+            Self::Material(data) => ComponentReflectMut::Builtin(data),
+            Self::Ui(data) => ComponentReflectMut::Builtin(data),
+            Self::Animator(data) => ComponentReflectMut::Builtin(data),
+            Self::Physics(data) => ComponentReflectMut::Builtin(data),
+            Self::Character(data) => ComponentReflectMut::Builtin(data),
+            Self::Audio(data) => ComponentReflectMut::Builtin(data),
+            Self::Camera(data) => ComponentReflectMut::Builtin(data),
+            Self::Particle(data) => ComponentReflectMut::Builtin(data),
+            Self::Rust {
+                registered_name,
+                fields,
+            } => ComponentReflectMut::Rust(RustReflectMut {
+                registered_name,
+                fields,
+            }),
+            Self::Lua { path } => ComponentReflectMut::Lua(LuaReflectMut { path }),
+        }
+    }
+
+    /// 按 JSON Pointer 替换载荷里的一个已有字段 / 列表项 / 映射项。
+    pub fn patch_json_pointer(
+        &mut self,
+        pointer: &str,
+        value: Value,
+    ) -> Result<(), ReflectError> {
+        let mut view = self.reflect_mut();
+        crate::reflect::set_json_pointer(&mut view, pointer, value)
+    }
+}
+
+/// 内建组件对应的反射元数据。
+///
+/// `Mesh` / `Material` 在 v2 文件里有自己的载荷结构（`MeshData` / `MaterialData`），
+/// 因此这里返回载荷类型的元数据，而不是 `Entity` 字段的并集。
+pub fn builtin_reflect_meta(kind: BuiltinComponent) -> &'static TypeMeta {
+    match kind {
+        BuiltinComponent::Transform => <Transform as ReflectMeta>::meta(),
+        BuiltinComponent::Mesh => <MeshData as ReflectMeta>::meta(),
+        BuiltinComponent::Lod => <LodGroup as ReflectMeta>::meta(),
+        BuiltinComponent::Material => <MaterialData as ReflectMeta>::meta(),
+        BuiltinComponent::Ui => <UiElement as ReflectMeta>::meta(),
+        BuiltinComponent::Animator => <StrictAnimator as ReflectMeta>::meta(),
+        BuiltinComponent::Physics => <PhysicsBody as ReflectMeta>::meta(),
+        BuiltinComponent::Character => <CharacterController as ReflectMeta>::meta(),
+        BuiltinComponent::Audio => <AudioSource as ReflectMeta>::meta(),
+        BuiltinComponent::Camera => <Camera as ReflectMeta>::meta(),
+        BuiltinComponent::Particle => <ParticleEmitter as ReflectMeta>::meta(),
+    }
+}
+
+#[cfg(test)]
+mod reflect_contract {
+    use super::*;
+    use crate::inspect::{FieldValue, FieldValues};
+
+    #[test]
+    fn component_payload_paths_are_reflected_not_json_pointer_trees() {
+        let mut mesh = ComponentData::Mesh(MeshData {
+            model: "builtin://cube".into(),
+            morph_weights: vec![0.0, 0.0],
+        });
+        mesh.patch_json_pointer("/model", Value::from("builtin://sphere"))
+            .unwrap();
+        mesh.patch_json_pointer("/morph_weights/1", Value::from(0.75))
+            .unwrap();
+        let ComponentData::Mesh(data) = mesh else {
+            panic!("mesh 应保持 Mesh");
+        };
+        assert_eq!(data.model, "builtin://sphere");
+        assert_eq!(data.morph_weights[1], 0.75);
+    }
+
+    #[test]
+    fn rust_component_fields_are_addressable_as_a_map() {
+        let mut fields = FieldValues::new();
+        fields.insert("speed".into(), FieldValue::F32(1.0));
+        let mut data = ComponentData::Rust {
+            registered_name: "Spinner".into(),
+            fields: Some(StrictFieldValues(fields)),
+        };
+        data.patch_json_pointer("/registered_name", Value::from("Rotator"))
+            .unwrap();
+        data.patch_json_pointer("/fields/speed", serde_json::json!({ "F32": 2.5 }))
+            .unwrap();
+        let ComponentData::Rust {
+            registered_name,
+            fields,
+        } = data
+        else {
+            panic!("data 应保持 Rust");
+        };
+        assert_eq!(registered_name, "Rotator");
+        assert_eq!(
+            fields.expect("字段表应保留").0.get("speed"),
+            Some(&FieldValue::F32(2.5))
+        );
     }
 }
 

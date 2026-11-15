@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 /// 动画交叉淡入的缺省时长（基础层与分层状态机同一口径）。
 const DEFAULT_FADE_TIME: f32 = 0.25;
@@ -38,7 +39,7 @@ fn is_default_fade_time(value: &f32) -> bool {
 ///
 /// `speed` / `looping` **覆盖** `Animator` 上的同名全局字段 —— 机器模式下
 /// 「Idle 慢速循环、Run 原速循环、Attack 播完不循环」这类差异是状态自己的事。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct AnimState {
     /// 状态名（转移表按名字引用；同一机器内唯一）。
@@ -65,13 +66,22 @@ impl Default for AnimState {
 /// **参数不存在（名字不在参数表里）时条件永不满足** —— 打错名字的转移静默
 /// 不触发，比"当作 0.0"安全：0.0 会意外命中 `Below` 类阈值，让状态机一开机
 /// 就跳走，那是个很难查的坑。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 pub enum AnimCondition {
     /// 参数 ≥ 阈值。
     AtLeast { param: String, value: f32 },
     /// 参数 < 阈值。与同阈值的 `AtLeast` 互补不重叠；进出两个状态的阈值
     /// 各配各的（比如出 0.5、回 0.3），滞回区间自己留。
     Below { param: String, value: f32 },
+}
+
+impl Default for AnimCondition {
+    fn default() -> Self {
+        Self::AtLeast {
+            param: String::new(),
+            value: 0.0,
+        }
+    }
 }
 
 impl AnimCondition {
@@ -83,7 +93,7 @@ impl AnimCondition {
 }
 
 /// 一条转移：`from` 状态下条件成立 → 切到 `to`。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect, Default)]
 pub struct AnimTransition {
     pub from: String,
     pub to: String,
@@ -104,7 +114,7 @@ pub struct AnimTransition {
 /// 表达人形角色最基本的 Idle/Walk/Run 移动组合；同一结构也可挂在 [`AnimLayer`]
 /// 上，形成每个身体部位独立的一台机器。过渡时长可以逐条配
 /// （[`AnimTransition::duration`]），没配的退回所在播放通道自己的 `fade_time`。
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct AnimMachine {
     /// 起始状态名。
@@ -187,7 +197,7 @@ impl AnimMachine {
 /// 剪辑是硬切（想平滑就把 weight 脚本拉到 0、换好剪辑再拉回）。叠加层与基础层
 /// 只共享 [`Animator::autoplay`] 总闸，各自按自己的速度推进 —— 基础层冻结不该连带
 /// 冻住仍在播放的呼吸 / 受击增量。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct AnimAdditive {
     /// 叠加层剪辑名。空串 / 模型里没有 → 叠加层不生效（基础姿势原样，不报错）。
@@ -218,7 +228,7 @@ impl Default for AnimAdditive {
 ///   基础姿势 —— 与单层快捷方式 [`AnimAdditive`] 同语义，适合呼吸 / 弹跳 / 晃动。
 /// - [`Override`](Self::Override)：向该层的姿势**整段 lerp**（覆盖）—— 配上遮罩就是
 ///   "上半身播放另一条剪辑、下半身继续走路"这类分区域重定向。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Reflect)]
 pub enum AnimLayerMode {
     #[default]
     Additive,
@@ -238,7 +248,7 @@ pub enum AnimLayerMode {
 ///
 /// v1 边界：二值遮罩（权重整体缩放，不羽化边界）；所有层仍共用
 /// [`Animator::autoplay`] 总闸门。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct AnimLayer {
     /// 层名：脚本 `set_anim_layer_weight(ctx, name, w)` 按名推权重，Inspector 也显示。
@@ -308,7 +318,7 @@ impl AnimLayer {
 ///
 /// 打开时必须显式写 glTF 节点名：同一模型常同时有场景根、骨架包装根和髋骨，
 /// 猜“第一个根节点”会把不同 DCC 导出的资产解释成不同结果。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct RootMotion {
     /// 提取平移的 glTF 节点名；空串或找不到节点时不产生位移。
@@ -340,7 +350,7 @@ impl Default for RootMotion {
 ///
 /// 引擎不解释事件名的语义，只负责在正确的时刻把它交给脚本
 /// （`on_anim_event(ctx, name)`）与 Rust 组件（`Lifecycle::on_anim_event`）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct AnimEvent {
     /// 触发时刻（秒，从剪辑 0 起算）。
@@ -361,7 +371,7 @@ pub struct AnimEvent {
 /// `#[serde(default)]` 在**结构体**级别：反序列化时缺哪个字段就从
 /// [`Default`] 补哪个字段。于是旧场景文件（没有 `animator`）反序列化成
 /// `None`（`Option` 缺省），手写的半截配置（比如只有 `clip`）也能补全。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(default)]
 pub struct Animator {
     /// 要播放的剪辑名（glTF `animations[].name`）。空串 / 找不到 = 不动画（绑定姿态）。

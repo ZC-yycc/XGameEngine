@@ -670,20 +670,33 @@ fn scalar_variant(ident: &str) -> Option<&'static str> {
         "Vec2" => "Vec2",
         "Vec3" => "Vec3",
         "Vec4" => "Vec4",
+        "Quat" => "Quat",
         _ => return None,
     })
 }
 
 fn generic_arg<'a>(seg: &'a syn::PathSegment, ty: &'a syn::Type) -> syn::Result<&'a syn::Type> {
+    generic_args(seg, ty)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| syn::Error::new_spanned(ty, "缺少泛型参数"))
+}
+
+fn generic_args<'a>(
+    seg: &'a syn::PathSegment,
+    ty: &'a syn::Type,
+) -> syn::Result<Vec<&'a syn::Type>> {
     let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
         return Err(syn::Error::new_spanned(ty, "缺少泛型参数"));
     };
-    for arg in &args.args {
-        if let syn::GenericArgument::Type(t) = arg {
-            return Ok(t);
-        }
-    }
-    Err(syn::Error::new_spanned(ty, "缺少泛型参数"))
+    Ok(args
+        .args
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .collect())
 }
 
 /// 字段类型是不是 `bool`（`visible_when` 的编译期校验用）。
@@ -722,6 +735,23 @@ fn type_ref_expr(ty: &syn::Type) -> syn::Result<proc_macro2::TokenStream> {
                     let ctor = if ident == "Option" { "Option" } else { "List" };
                     let ctor = syn::Ident::new(ctor, last.ident.span());
                     Ok(quote!(#p::TypeRef::#ctor(::std::boxed::Box::leak(
+                        ::std::boxed::Box::new(#inner)
+                    ))))
+                }
+                "BTreeMap" | "FieldValues" => {
+                    let value_ty = if ident == "BTreeMap" {
+                        generic_args(last, ty)?
+                            .into_iter()
+                            .nth(1)
+                            .ok_or_else(|| syn::Error::new_spanned(ty, "BTreeMap 缺少值类型"))?
+                    } else {
+                        // `FieldValues = BTreeMap<String, FieldValue>`：值类型是动态的。
+                        return Ok(quote!(#p::TypeRef::Map(::std::boxed::Box::leak(
+                            ::std::boxed::Box::new(#p::TypeRef::Scalar(#p::ScalarKind::Dynamic))
+                        ))));
+                    };
+                    let inner = type_ref_expr(value_ty)?;
+                    Ok(quote!(#p::TypeRef::Map(::std::boxed::Box::leak(
                         ::std::boxed::Box::new(#inner)
                     ))))
                 }
@@ -773,6 +803,7 @@ struct FieldSpec {
     /// 寻址名（= Rust 字段名）。
     name: String,
     ident: syn::Ident,
+    ty: syn::Type,
     read_only: bool,
 }
 
@@ -889,6 +920,7 @@ fn gen_fields(
         specs.push(FieldSpec {
             name,
             ident: ident.clone(),
+            ty: field.ty.clone(),
             read_only: opts.read_only,
         });
     }
@@ -974,6 +1006,26 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             ),)
         }
     });
+    let set_json_arms = gen.specs.iter().map(|spec| {
+        let (field, ident, ty) = (&spec.name, &spec.ident, &spec.ty);
+        if spec.read_only {
+            quote!(#field => ::std::result::Result::Err(#p::ReflectError::ReadOnly(
+                #field.to_string()
+            )),)
+        } else {
+            quote! {
+                #field => {
+                    let parsed = #p::from_json_strict::<#ty>(__xg_json)
+                        .map_err(|error| #p::ReflectError::InvalidValue {
+                            type_name: ::std::any::type_name::<#ty>(),
+                            message: error.to_string(),
+                        })?;
+                    self.#ident = parsed;
+                    ::std::result::Result::Ok(())
+                }
+            }
+        }
+    });
     let field_metas = &gen.metas;
 
     let name_str = name.to_string();
@@ -1010,6 +1062,20 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 match field {
                     #(#get_mut_arms)*
                     _ => ::std::option::Option::None,
+                }
+            }
+
+            fn set_json(
+                &mut self,
+                field: &str,
+                __xg_json: ::serde_json::Value,
+            ) -> ::std::result::Result<(), #p::ReflectError> {
+                match field {
+                    #(#set_json_arms)*
+                    _ => ::std::result::Result::Err(#p::ReflectError::NoSuchField {
+                        type_name: self.type_meta().name,
+                        field: field.to_string(),
+                    }),
                 }
             }
         }
@@ -1247,6 +1313,44 @@ fn expand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
     });
+    let payload_set_json_arms = variants.iter().map(|v| {
+        let pat = &v.payload_pat;
+        let v_name = &v.name;
+        match &v.fields {
+            None => quote!(#pat => ::std::result::Result::Err(#p::ReflectError::NoneValue("payload")),),
+            Some(gen) => {
+                let arms = gen.specs.iter().map(|spec| {
+                    let (field, ident, ty) = (&spec.name, &spec.ident, &spec.ty);
+                    if spec.read_only {
+                        quote!(#field => ::std::result::Result::Err(#p::ReflectError::ReadOnly(
+                            #field.to_string()
+                        )),)
+                    } else {
+                        quote! {
+                            #field => {
+                                let parsed = #p::from_json_strict::<#ty>(__xg_json)
+                                    .map_err(|error| #p::ReflectError::InvalidValue {
+                                        type_name: ::std::any::type_name::<#ty>(),
+                                        message: error.to_string(),
+                                    })?;
+                                *#ident = parsed;
+                                ::std::result::Result::Ok(())
+                            }
+                        }
+                    }
+                });
+                quote! {
+                    #pat => match field {
+                        #(#arms)*
+                        _ => ::std::result::Result::Err(#p::ReflectError::NoSuchField {
+                            type_name: #v_name,
+                            field: field.to_string(),
+                        }),
+                    },
+                }
+            }
+        }
+    });
 
     let name_str = name.to_string();
     let variant_metas = &variant_metas;
@@ -1303,6 +1407,29 @@ fn expand_enum(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             ) -> ::std::option::Option<#p::ValueRefMut<'_>> {
                 match self {
                     #(#payload_get_mut_arms)*
+                }
+            }
+
+            fn set_json(
+                &mut self,
+                __xg_json: ::serde_json::Value,
+            ) -> ::std::result::Result<(), #p::ReflectError> {
+                let parsed = #p::from_json_strict::<Self>(__xg_json)
+                    .map_err(|error| #p::ReflectError::InvalidValue {
+                        type_name: ::std::any::type_name::<Self>(),
+                        message: error.to_string(),
+                    })?;
+                *self = parsed;
+                ::std::result::Result::Ok(())
+            }
+
+            fn payload_set_json(
+                &mut self,
+                field: &str,
+                __xg_json: ::serde_json::Value,
+            ) -> ::std::result::Result<(), #p::ReflectError> {
+                match self {
+                    #(#payload_set_json_arms)*
                 }
             }
         }

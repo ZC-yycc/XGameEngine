@@ -8,6 +8,8 @@
 //! 必须走 [`ReflectEnum`](super::ReflectEnum) / [`ReflectList`](super::ReflectList)
 //! 的专用方法。
 
+use serde_json::Value;
+
 use super::traits::Reflect;
 use super::value::{ReflectError, ScalarValue, ValueRef, ValueRefMut};
 
@@ -89,6 +91,10 @@ fn walk<'a>(mut cur: ValueRef<'a>, segs: &[Seg], path: &str) -> Result<ValueRef<
                     None => return Err(ReflectError::IndexOutOfRange { index: *i, len }),
                 }
             }
+            (ValueRef::Map(m), Seg::Field(name)) => match m.get(name) {
+                Some(v) => v,
+                None => return Err(no_field("map", name, path)),
+            },
             (ValueRef::None, _) => return Err(ReflectError::NoneValue("Option")),
             (other, seg) => {
                 let what = match seg {
@@ -128,6 +134,10 @@ fn walk_mut<'a>(
                     None => return Err(ReflectError::IndexOutOfRange { index: *i, len }),
                 }
             }
+            (ValueRefMut::Map(m), Seg::Field(name)) => match m.get_mut(name) {
+                Some(v) => v,
+                None => return Err(no_field("map", name, path)),
+            },
             (ValueRefMut::None, _) => return Err(ReflectError::NoneValue("Option")),
             (_, seg) => {
                 let what = match seg {
@@ -164,6 +174,84 @@ pub fn set_scalar(
 ) -> Result<(), ReflectError> {
     let mut slot = get_path_mut(root, path)?;
     slot.set(value)
+}
+
+/// 按路径用 JSON 值整体替换字段、列表项、映射项或枚举载荷字段。
+///
+/// 与 [`set_scalar`] 的区别：它允许 `Option` / 结构体 / 枚举 / 列表整体替换。
+/// 实现按最后一段的容器形态分派到 `Reflect::set_json` / `ReflectList::set_json` /
+/// `ReflectMap::set_json` / `ReflectEnum::payload_set_json`。
+pub fn set_path_json(
+    root: &mut dyn Reflect,
+    path: &str,
+    value: Value,
+) -> Result<(), ReflectError> {
+    let segs = parse(path)?;
+    let (last, parents) = segs
+        .split_last()
+        .expect("parse 保证路径至少有一段");
+    let mut parent = walk_mut(ValueRefMut::Struct(root), parents, path)?;
+    match (&mut parent, last) {
+        (ValueRefMut::Struct(s), Seg::Field(name)) => s.set_json(name, value),
+        (ValueRefMut::Enum(e), Seg::Field(name)) => e.payload_set_json(name, value),
+        (ValueRefMut::List(l), Seg::Index(index)) => l.set_json(*index, value),
+        (ValueRefMut::Map(m), Seg::Field(key)) => m.set_json(key, value),
+        (ValueRefMut::None, _) => Err(ReflectError::NoneValue("Option")),
+        (_, seg) => Err(ReflectError::NotTraversable(match seg {
+            Seg::Field(_) => "scalar",
+            Seg::Index(_) => "non-list",
+        })),
+    }
+}
+
+/// 把 JSON Pointer（`/levels/0/model`）转成反射路径（`levels[0].model`）。
+///
+/// 只支持 MCP / `component_edit` 现有用到的子集：字段名不含 `.`、`[`、`]`，
+/// `~0` / `~1` 转义会被还原，但不把转义后的名字重新解释成路径语法。
+pub fn pointer_to_path(pointer: &str) -> Result<String, ReflectError> {
+    if !pointer.starts_with('/') {
+        return Err(ReflectError::BadPath(pointer.to_string()));
+    }
+    let mut out = String::new();
+    for (index, raw) in pointer.split('/').skip(1).enumerate() {
+        let part = raw.replace("~1", "/").replace("~0", "~");
+        if part.is_empty() {
+            return Err(ReflectError::BadPath(pointer.to_string()));
+        }
+        if index > 0 {
+            out.push('.');
+        }
+        match part.parse::<usize>() {
+            Ok(number) => {
+                if out.ends_with('.') {
+                    out.pop();
+                }
+                out.push('[');
+                out.push_str(&number.to_string());
+                out.push(']');
+            }
+            Err(_) => {
+                if part.contains(['.', '[', ']']) {
+                    return Err(ReflectError::BadPath(pointer.to_string()));
+                }
+                out.push_str(&part);
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(ReflectError::BadPath(pointer.to_string()));
+    }
+    Ok(out)
+}
+
+/// 按 JSON Pointer 写入 JSON 值。
+pub fn set_json_pointer(
+    root: &mut dyn Reflect,
+    pointer: &str,
+    value: Value,
+) -> Result<(), ReflectError> {
+    let path = pointer_to_path(pointer)?;
+    set_path_json(root, &path, value)
 }
 
 /// 按路径读成一行可读文本。路径不存在时返回 `None`（编辑器 / MCP 用来避免

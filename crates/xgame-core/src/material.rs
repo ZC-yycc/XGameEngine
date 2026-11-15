@@ -38,6 +38,7 @@
 //! 存盘数据不替用户做"聪明"的修正，读出来还是写进去的那个数。
 
 use serde::{Deserialize, Serialize};
+use xgame_derive::Reflect;
 
 /// 材质资产文件的扩展名（`Resources/Materials/Wood.mat`）。
 pub const MATERIAL_EXTENSION: &str = "mat";
@@ -141,7 +142,7 @@ impl MaterialAsset {
 }
 
 /// 逐实体材质覆盖（PBR metallic-roughness 参数，字段级）。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default, Reflect)]
 pub struct MaterialOverride {
     /// 基础色乘子（线性 RGBA），与模型自带的基础色**相乘**。
     ///

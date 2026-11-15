@@ -14,7 +14,7 @@
 //! 当前组件图**并没有**递归（`AnimLayer` 不回指 `AnimMachine`），但这条选择保留
 //! 了将来的余地，且没有实际成本。
 
-use glam::{Vec2, Vec3, Vec4};
+use glam::{Quat, Vec2, Vec3, Vec4};
 
 /// 标量类型分类。
 ///
@@ -34,6 +34,10 @@ pub enum ScalarKind {
     Vec2,
     Vec3,
     Vec4,
+    /// 四元数。与 `Vec4` 分开，因为序列化形态和语义都不同。
+    Quat,
+    /// 运行时才知道具体形状的值（例如插件参数表里的 `FieldValue`）。
+    Dynamic,
 }
 
 impl ScalarKind {
@@ -65,6 +69,8 @@ impl ScalarKind {
             Self::Vec2 => "Vec2",
             Self::Vec3 => "Vec3",
             Self::Vec4 => "Vec4",
+            Self::Quat => "Quat",
+            Self::Dynamic => "dynamic",
         }
     }
 }
@@ -89,6 +95,8 @@ pub enum TypeRef {
     Array(&'static TypeRef, usize),
     /// `Option<T>`
     Option(&'static TypeRef),
+    /// `BTreeMap<String, T>` / `FieldValues` 这类按键访问的容器。
+    Map(&'static TypeRef),
 }
 
 impl TypeRef {
@@ -108,14 +116,29 @@ impl TypeRef {
             Self::List(_) => "Vec",
             Self::Array(_, _) => "array",
             Self::Option(inner) => inner.type_name(),
+            Self::Map(inner) => inner.type_name(),
         }
     }
 
-    /// 元素类型（`List` / `Array` / `Option` 的内层）；标量与结构体返回自身。
+    /// 元素类型（`List` / `Array` / `Option` / `Map` 的内层）；标量与结构体返回自身。
     pub const fn element(&self) -> Option<&TypeRef> {
         match self {
-            Self::List(inner) | Self::Array(inner, _) | Self::Option(inner) => Some(inner),
+            Self::List(inner) | Self::Array(inner, _) | Self::Option(inner) | Self::Map(inner) => {
+                Some(inner)
+            }
             _ => None,
+        }
+    }
+
+    /// 机器可读的类型写法（`Option<Vec<f32>>` / `BTreeMap<String, f32>`）。
+    pub fn type_display(&self) -> String {
+        match self {
+            Self::Scalar(kind) => kind.name().to_string(),
+            Self::Named(meta) => meta().name.to_string(),
+            Self::List(inner) => format!("Vec<{}>", inner.type_display()),
+            Self::Array(inner, len) => format!("[{}; {}]", inner.type_display(), len),
+            Self::Option(inner) => format!("Option<{}>", inner.type_display()),
+            Self::Map(inner) => format!("BTreeMap<String, {}>", inner.type_display()),
         }
     }
 }
@@ -241,6 +264,11 @@ impl FieldMeta {
         self.label.unwrap_or(self.name)
     }
 
+    /// 机器可读的字段类型写法。
+    pub fn type_display(&self) -> String {
+        self.ty.type_display()
+    }
+
     /// 是否应该在这一帧显示（只看 `visible_when` 声明的同级 `bool`）。
     ///
     /// `sibling_bool` 由调用方按字段名去取，本函数不接触数据 ——
@@ -359,4 +387,5 @@ scalar_meta! {
     Vec2 => ScalarKind::Vec2,
     Vec3 => ScalarKind::Vec3,
     Vec4 => ScalarKind::Vec4,
+    Quat => ScalarKind::Quat,
 }

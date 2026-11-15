@@ -28,6 +28,8 @@
 use glam::Vec3;
 use serde_json::{json, Value};
 
+use xgame_core::reflect::Reflect;
+use xgame_core::scene_v2::builtin_reflect_meta;
 use xgame_core::{
     check_project, BuiltinComponent, ComponentAddress, Entity, EntityId, ProjectHandle, Scene,
 };
@@ -437,33 +439,37 @@ fn count_named(scene: &Scene, name: &str) -> Result<usize, CallError> {
 // 工具实现
 // ---------------------------------------------------------------------------
 
-/// `component_catalog_read` 从场景 schema 筛出可挂载组件的字段说明。
+/// `component_catalog_read` 从反射元数据给出可挂载组件的字段说明。
 fn component_catalog_read() -> String {
     let doc = xgame_core::schema::scene_schema();
     let builtins: Vec<_> = BuiltinComponent::ALL
         .into_iter()
         .map(|kind| {
-            let schema = doc
+            let meta = builtin_reflect_meta(kind);
+            let fields: Vec<_> = meta
+                .visible_fields()
+                .map(|field| {
+                    json!({
+                        "name": field.name,
+                        "ty": field.type_display(),
+                        "required": true,
+                        "default_ron": Value::Null,
+                        "note": field.doc,
+                    })
+                })
+                .collect();
+            let default_ron = doc
                 .type_schema(kind.schema_type())
-                .expect("内建类型必须在场景 schema 中");
-            let fields: Vec<_> = if kind.schema_field_names().is_empty() {
-                schema.fields.iter().collect()
-            } else {
-                schema
-                    .fields
-                    .iter()
-                    .filter(|field| kind.schema_field_names().contains(&field.name.as_str()))
-                    .collect()
-            };
+                .and_then(|schema| schema.default_ron.clone());
             json!({
                 "address": ComponentAddress::Builtin(kind).to_string(),
                 "kind": kind.code(),
                 "name": kind.name(),
-                "schema_type": kind.schema_type(),
+                "schema_type": meta.name,
                 "addable": kind.addable(),
                 "removable": kind.addable(),
                 "repeatable": false,
-                "default_ron": schema.default_ron,
+                "default_ron": default_ron,
                 "fields": fields,
             })
         })
@@ -641,20 +647,7 @@ fn entity_components_read(args: &Value) -> Result<String, CallError> {
     })))
 }
 
-fn strict_component_json(value: Value) -> Result<xgame_core::scene_v2::ComponentData, CallError> {
-    let bytes = serde_json::to_vec(&value).map_err(|e| fail(e.to_string()))?;
-    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
-    let mut ignored = Vec::new();
-    let data = serde_ignored::deserialize(&mut deserializer, |path| ignored.push(path.to_string()))
-        .map_err(|e| fail(format!("组件字段不合法: {e}")))?;
-    deserializer.end().map_err(|e| fail(e.to_string()))?;
-    if !ignored.is_empty() {
-        return Err(fail(format!("不认识的组件字段: {}", ignored.join(", "))));
-    }
-    Ok(data)
-}
-
-fn patch_existing_field(value: &mut Value, args: &Value) -> Result<(), CallError> {
+fn patch_reflected_field(root: &mut dyn Reflect, args: &Value) -> Result<(), CallError> {
     let field = require_str(args, "field")?;
     if !field.starts_with('/') {
         return Err(fail("field 必须是以 / 开头的 JSON Pointer（如 /model）"));
@@ -662,11 +655,8 @@ fn patch_existing_field(value: &mut Value, args: &Value) -> Result<(), CallError
     let replacement = args
         .get("value")
         .ok_or_else(|| fail("patch 必须提供 value"))?;
-    let slot = value
-        .pointer_mut(field)
-        .ok_or_else(|| fail(format!("字段 {field} 不存在")))?;
-    *slot = replacement.clone();
-    Ok(())
+    xgame_core::reflect::set_json_pointer(root, field, replacement.clone())
+        .map_err(|error| fail(format!("字段 {field} 不可写: {error}")))
 }
 
 fn component_edit(args: &Value) -> Result<String, CallError> {
@@ -729,24 +719,13 @@ fn component_edit(args: &Value) -> Result<String, CallError> {
         "patch" => {
             let id = component_id.expect("patch 提供 ID");
             if id == entity.transform_identity.id {
-                let mut value =
-                    serde_json::to_value(entity.transform).map_err(|e| fail(e.to_string()))?;
-                patch_existing_field(&mut value, args)?;
-                entity.transform = serde_json::from_value(value)
-                    .map_err(|e| fail(format!("Transform 字段无效: {e}")))?;
+                patch_reflected_field(&mut entity.transform, args)?;
             } else {
                 let data = entity
-                    .component(id)
+                    .component_mut(id)
                     .ok_or_else(|| fail(format!("找不到组件 ID {}", id.raw())))?;
-                let mut value = serde_json::to_value(data).map_err(|e| fail(e.to_string()))?;
-                let payload = value
-                    .as_object_mut()
-                    .and_then(|o| o.values_mut().next())
-                    .ok_or_else(|| fail("组件变体值不可修改"))?;
-                patch_existing_field(payload, args)?;
-                entity
-                    .replace_component(id, strict_component_json(value)?)
-                    .map_err(fail)?;
+                let mut view = data.reflect_mut();
+                patch_reflected_field(&mut view, args)?;
             }
             id
         }
@@ -1634,7 +1613,7 @@ mod tests {
         for (address, fields) in [
             ("builtin:mesh", &["model", "morph_weights"][..]),
             ("builtin:lod", &["levels"][..]),
-            ("builtin:material", &["material_asset", "material"][..]),
+            ("builtin:material", &["asset", "overrides"][..]),
         ] {
             let component = builtins
                 .iter()

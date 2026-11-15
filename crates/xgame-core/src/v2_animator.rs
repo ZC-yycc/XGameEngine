@@ -12,6 +12,7 @@ use crate::animation::{
     AnimAdditive, AnimEvent, AnimLayer, AnimLayerMode, AnimMachine, AnimState, AnimTransition,
     Animator, RootMotion,
 };
+use crate::reflect::{Reflect, ReflectError, ReflectItem, ReflectMeta, TypeMeta, ValueRef, ValueRefMut};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
@@ -161,5 +162,43 @@ impl<'de> Deserialize<'de> for StrictAnimator {
             root_motion: wire.root_motion,
             events: wire.events,
         }))
+    }
+}
+
+impl ReflectMeta for StrictAnimator {
+    fn meta() -> &'static TypeMeta {
+        <Animator as ReflectMeta>::meta()
+    }
+}
+
+impl Reflect for StrictAnimator {
+    fn type_meta(&self) -> &'static TypeMeta {
+        self.0.type_meta()
+    }
+
+    fn get(&self, field: &str) -> Option<ValueRef<'_>> {
+        self.0.get(field)
+    }
+
+    fn get_mut(&mut self, field: &str) -> Option<ValueRefMut<'_>> {
+        self.0.get_mut(field)
+    }
+
+    fn set_json(
+        &mut self,
+        field: &str,
+        value: serde_json::Value,
+    ) -> Result<(), ReflectError> {
+        self.0.set_json(field, value)
+    }
+}
+
+impl ReflectItem for StrictAnimator {
+    fn as_value(&self) -> ValueRef<'_> {
+        ValueRef::Struct(self)
+    }
+
+    fn as_value_mut(&mut self) -> ValueRefMut<'_> {
+        ValueRefMut::Struct(self)
     }
 }

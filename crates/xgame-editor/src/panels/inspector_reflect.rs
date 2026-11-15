@@ -1,11 +1,11 @@
 //! Inspector 的**反射通道**：按 `TypeMeta` 画字段行，不写死任何具体组件。
 //!
-//! # 它替代的是什么
+//! # 职责
 //!
-//! `inspector.rs` 里每个内置组件都有一段手写 section（Camera 90 行、Audio 140 行、
-//! Physics 230 行、LOD 70 行），里面重复的是同一件事：读一个字段 → 按类型挑控件
-//! → 改了就写回。这里把这件事变成一次性的：控件形态由 [`ScalarKind`] / [`TypeRef`]
-//! 决定，范围 / 步长 / 小数位 / 说明文字 / 条件显示 / 同排分组由 [`FieldMeta`] 决定。
+//! 所有组件段落都登记在本文件的 spec 表里，由同一个入口画分类条、处理菜单并
+//! 收集编辑信号。字段型段落的控件形态由 [`ScalarKind`] / [`TypeRef`] 决定，
+//! 范围 / 步长 / 小数位 / 说明文字 / 条件显示 / 同排分组由 [`FieldMeta`] 决定；
+//! 版式本身承载信息的段落则显式选择专用渲染器。
 //!
 //! # 四种字段形状
 //!
@@ -56,8 +56,8 @@ fn with_doc(response: egui::Response, doc: &str) -> egui::Response {
 /// 字段怎么画、画哪些，一概不在这里 —— 那是元数据的事。这里只有四类：
 /// 文案、怎么拿到 `&mut dyn Reflect`、以及三处**用元数据表达不了**的派生逻辑。
 ///
-/// 这就是"统一组件"的边界所在：每个新组件仍然要写一条 spec，但它是十行声明，
-/// **不含任何控件代码**。手写 section 是一百到两百行，且每行都要跟着视觉语法走。
+/// 字段型组件只需一条声明式 spec，不含控件代码；需要专用版式的组件则在
+/// `render` 里明确选择 [`Render::Custom`]。
 pub struct ReflectComponentSpec {
     /// 分类条标题（`"Audio"` 与 `BuiltinComponent::name()` 的 `"Audio Source"`
     /// 历史上就不一致，这里以 Inspector 上的文案为准）。
@@ -110,8 +110,7 @@ pub struct ReflectComponentSpec {
 /// 信息的段落（UI 的锚点预设、九宫格切片）交回专用渲染器。
 ///
 /// 关键是两者**登记在同一张表里、走同一个入口、用同一种信号**。这样
-/// "这个组件的 Inspector 在哪"永远只有一个答案，而不是"反射里找一半、
-/// 手写函数里找一半"。
+/// "这个组件的 Inspector 在哪"永远只有一个答案。
 pub enum Render {
     /// 按 `TypeMeta` 逐字段画。
     Fields,
@@ -121,10 +120,8 @@ pub enum Render {
 
 /// 专用渲染器能用的一切（除了 `ui` 与实体本身）。
 ///
-/// 这三样恰好就是 `show_body` 里每个手写段都会碰的东西 —— 把它们打个包，
-/// 专用渲染器就不必再长出一套自己的参数表，也不必各自往 `show_body` 里
-/// 回写标志位。组件结构动作统一从 [`SectionCx::request`] 走，与 `Fields`
-/// 那条路完全相同。
+/// 组件结构动作统一从 [`SectionCx::request`] 走，编辑与拖拽信号统一进入
+/// [`SectionCx::sig`]，与 `Fields` 那条路完全相同。
 pub struct SectionCx<'a> {
     pub state: &'a mut crate::state::EditorState,
     pub sig: &'a mut FieldSignals,
@@ -181,8 +178,7 @@ pub static CAMERA: ReflectComponentSpec = ReflectComponentSpec {
         None => None,
     },
     normalize: Some(|entity| {
-        // 复用引擎自己的钳制规则，不在这里手抄第二份边界 ——
-        // 手写段抄了两份（一处挡 UI、一处给 `CameraView`），那正是漂移的来源。
+        // 复用引擎自己的钳制规则，不在面板里复制第二份边界。
         if let Some(camera) = entity.camera.as_mut() {
             *camera = camera.sanitized();
         }
@@ -302,8 +298,7 @@ pub static LOD: ReflectComponentSpec = ReflectComponentSpec {
     },
     access: |entity| Some(&mut entity.lod),
     normalize: Some(|entity| {
-        // 新追加的级别沿用上一级的模型（与手写段"Add Level"的种子一致）。
-        // 只补空的，不覆盖用户填过的。
+        // 新追加的级别沿用上一级的模型；只补空的，不覆盖用户填过的。
         let levels = &mut entity.lod.levels;
         for index in 1..levels.len() {
             if levels[index].model.is_empty() {
@@ -367,7 +362,7 @@ pub static PARTICLE: ReflectComponentSpec = ReflectComponentSpec {
 
 /// UiElement 的 spec。
 ///
-/// 它是 `Render::Custom` 的唯一样例，理由是**版式本身承载信息**：
+/// 它选择 `Render::Custom`，理由是**版式本身承载信息**：},{
 /// 锚点预设（点一下改六个字段）、`Size` 派生读数、九宫格切片四连框、
 /// "把后代裁到矩形内"这类开关都排在特定位置，靠元数据拼不出来 ——
 /// 硬拼的结果是往 `FieldMeta` 里加六七个只有这一个组件用得上的字段。
@@ -531,8 +526,8 @@ pub static PREFAB: ReflectComponentSpec = ReflectComponentSpec {
 
 /// 画一个内置组件的整段（分类条 + "勾上才有" + 全部字段 + 末尾说明）。
 ///
-/// 调用方负责先判断组件是否存在（`BuiltinComponent::present`）—— 这一步与
-/// `show_body` 里其余手写段保持同一种结构，读起来不会有"这里为什么不一样"。
+/// 调用方负责先判断组件是否存在（`BuiltinComponent::present`）：分类条与右键
+/// 菜单由本函数绘制，没有组件的实体不应多出一个空标题。
 pub(super) fn show_section(
     state: &mut crate::state::EditorState,
     ui: &mut egui::Ui,
@@ -760,6 +755,7 @@ fn show_field_row(
                 }
             }
         }
+        TypeRef::Map(_) => false,
     }
 }
 
@@ -774,7 +770,7 @@ fn show_scalar_row(
 ) -> bool {
     let label = label_of(field, label_override);
     match kind {
-        // 布尔走整行勾选框（不带标签列）：与手写段的 `ui.checkbox(&mut x, "Loop")` 同款。
+        // 布尔走整行勾选框，不再重复一列字段标签。
         ScalarKind::Bool => {
             let mut value = host.get(field.name).and_then(|v| v.as_bool()).unwrap_or(false);
             let response = with_doc(ui.checkbox(&mut value, label), field.doc);
@@ -810,7 +806,7 @@ fn show_scalar_row(
             }
             false
         }
-        ScalarKind::Vec2 | ScalarKind::Vec3 | ScalarKind::Vec4 => {
+        ScalarKind::Vec2 | ScalarKind::Vec3 | ScalarKind::Vec4 | ScalarKind::Quat => {
             show_axis_row(ui, host, field, label_override, ctx)
         }
         _ => show_number_row(ui, host, field, label_override, ctx),
@@ -904,7 +900,7 @@ fn default_speed(kind: ScalarKind) -> f64 {
 fn vector_len_of(ty: &TypeRef) -> bool {
     matches!(
         ty,
-        TypeRef::Scalar(ScalarKind::Vec2 | ScalarKind::Vec3 | ScalarKind::Vec4)
+        TypeRef::Scalar(ScalarKind::Vec2 | ScalarKind::Vec3 | ScalarKind::Vec4 | ScalarKind::Quat)
             | TypeRef::Array(_, 2..=4)
     )
 }
@@ -987,6 +983,10 @@ fn read_components(host: &dyn Reflect, field: &FieldMeta) -> Option<([f32; 4], u
             slots.copy_from_slice(&[v.x, v.y, v.z, v.w]);
             4
         }
+        ValueRef::Quat(v) => {
+            slots.copy_from_slice(&[v.x, v.y, v.z, v.w]);
+            4
+        }
         ValueRef::List(list) => {
             let len = list.len().min(4);
             for (index, slot) in slots.iter_mut().enumerate().take(len) {
@@ -1013,6 +1013,13 @@ fn write_components(host: &mut dyn Reflect, field: &FieldMeta, values: &[f32]) {
             host,
             field.name,
             ScalarValue::Vec4(xgame_math::glam::Vec4::new(
+                slots[0], slots[1], slots[2], slots[3],
+            )),
+        ),
+        TypeRef::Scalar(ScalarKind::Quat) => write(
+            host,
+            field.name,
+            ScalarValue::Quat(xgame_math::glam::Quat::from_xyzw(
                 slots[0], slots[1], slots[2], slots[3],
             )),
         ),
@@ -1139,8 +1146,7 @@ fn show_enum_row(
         Some(ValueRef::Enum(v)) => v.variant(),
         _ => return false,
     };
-    // 悬浮提示用**当前变体**的说明：手写段对 `BodyKind` 就是按变体换文案的，
-    // 而变体说明本来就写在变体的文档注释里。
+    // 悬浮提示用**当前变体**的说明，文字直接来自变体的文档注释。
     let variant_doc = meta
         .variant(current)
         .map(|v| v.doc)
@@ -1281,8 +1287,7 @@ fn show_list_row(
                 changed |= show_list_scalar(ui, other, &label, item_ctx.sig);
             }
         }
-        // 删除按钮单独一行、靠右：`row()` 的标签列留空，控件区右对齐 ——
-        // 位置与手写段"Max Dist 行尾那个 ✕"在同一列，只是下移了一行。
+        // 删除按钮单独一行、靠右：`row()` 的标签列留空，控件区右对齐。
         row(ui, "", |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::close_button(ui, "删掉这一项") {
@@ -1690,7 +1695,7 @@ mod tests {
     /// 元数据与 `Reflect` 实现不匹配导致的分支走错。
     ///
     /// 断言形状数量而不是截图：这里要守的是"渲染能跑通且条件显示真的少画了东西"，
-    /// 逐像素一致由 `--ui-reflect-inspector` + `pngdiff.py` 负责（那需要 GPU）。
+    /// 这里验证渲染路径与条件显示；视觉排版由截图验收单独负责（需要 GPU）。
     #[test]
     fn renders_headlessly_and_hides_gated_rows() {
         let ctx = egui::Context::default();

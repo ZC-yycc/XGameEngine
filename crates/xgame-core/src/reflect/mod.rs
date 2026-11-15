@@ -41,9 +41,12 @@ mod value;
 pub use meta::{
     FieldFlags, FieldMeta, MetaKind, ReflectMeta, ScalarKind, TypeMeta, TypeRef, VariantMeta, Widget,
 };
-pub use path::{get_display, get_path, get_path_mut, set_scalar};
-pub use traits::{Reflect, ReflectEnum, ReflectItem, ReflectList};
-pub use value::{ReflectError, ScalarValue, ValueRef, ValueRefMut};
+pub use path::{
+    get_display, get_path, get_path_mut, pointer_to_path, set_json_pointer, set_path_json,
+    set_scalar,
+};
+pub use traits::{Reflect, ReflectEnum, ReflectItem, ReflectList, ReflectMap};
+pub use value::{from_json_strict, ReflectError, ScalarValue, ValueRef, ValueRefMut};
 
 #[cfg(test)]
 mod tests {
@@ -82,10 +85,9 @@ mod tests {
         assert!(fov.doc.contains("视场角"), "实际 doc = {:?}", fov.doc);
     }
 
-    /// 元数据与手写 Inspector 的取值必须一致 —— 这一条是"S1 逐像素一致"的
-    /// 全部前提。漂移了这里先红，不用等截图。
+    /// Inspector 的数值边界直接来自这份元数据；漂移时这里先失败。
     #[test]
-    fn editor_metadata_matches_the_handwritten_ranges() {
+    fn editor_metadata_preserves_numeric_ranges() {
         let cam = Camera::meta();
         assert_eq!(cam.field("fov").unwrap().range, Some((1.0, 179.0)));
         assert_eq!(cam.field("near").unwrap().range, Some((0.001, 10000.0)));
@@ -203,10 +205,10 @@ mod tests {
         );
     }
 
-    /// 粒子的元数据要能撑起它那一整段手写界面：17 个可见字段、`burst` 藏掉、
+    /// 粒子的元数据覆盖完整编辑界面：17 个可见字段、`burst` 藏掉、
     /// `seed` 是 `u64`、两个区间配成对、两个颜色配成对。
     ///
-    /// 这条测试盯的是**顺序**：反射按声明顺序排版，而界面上的顺序是手写段定下来的。
+    /// 声明顺序就是 Inspector 的排版顺序，这条测试把该契约钉住。
     #[test]
     fn particle_metadata_matches_the_handwritten_layout() {
         use crate::particle::ParticleEmitter;
@@ -395,5 +397,82 @@ mod tests {
             }
             other => panic!("bus 应是 Named，实际 = {other:?}"),
         }
+    }
+
+    /// JSON Pointer 能替换列表项，并拒绝未知嵌套字段。
+    #[test]
+    fn json_pointer_replaces_list_items_strictly() {
+        use crate::lod::{LodGroup, LodLevel};
+        let mut lod = LodGroup {
+            levels: vec![LodLevel::new("builtin://cube", 10.0)],
+        };
+        set_json_pointer(
+            &mut lod,
+            "/levels/0",
+            serde_json::json!({ "model": "builtin://sphere", "max_distance": 20.0 }),
+        )
+        .unwrap();
+        assert_eq!(lod.levels[0].model, "builtin://sphere");
+        assert_eq!(lod.levels[0].max_distance, 20.0);
+
+        let error = set_json_pointer(
+            &mut lod,
+            "/levels/0",
+            serde_json::json!({ "model": "builtin://cube", "unrecognized": 42 }),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ReflectError::InvalidValue { .. }), "{error:?}");
+    }
+
+    /// JSON Pointer 能写枚举载荷字段，也能整体替换枚举值。
+    #[test]
+    fn json_pointer_reaches_enum_payloads() {
+        use crate::physics::{CollisionShape, PhysicsBody};
+        let mut body = PhysicsBody {
+            shape: CollisionShape::Ball { radius: 2.0 },
+            ..PhysicsBody::default()
+        };
+        set_json_pointer(&mut body, "/shape/radius", serde_json::json!(4.0)).unwrap();
+        assert_eq!(body.shape, CollisionShape::Ball { radius: 4.0 });
+
+        set_json_pointer(
+            &mut body,
+            "/shape",
+            serde_json::json!({ "Cuboid": { "half_extents": [1.0, 2.0, 3.0] } }),
+        )
+        .unwrap();
+        assert_eq!(
+            body.shape,
+            CollisionShape::Cuboid {
+                half_extents: [1.0, 2.0, 3.0]
+            }
+        );
+    }
+
+    /// 参数表按字符串键寻址：`/parameters.speed` 这种路径来自 MCP / Lua。
+    #[test]
+    fn json_pointer_reaches_map_entries() {
+        use crate::animation::AnimMachine;
+        let mut machine = AnimMachine {
+            parameters: [("speed".to_string(), 1.0)].into_iter().collect(),
+            ..AnimMachine::default()
+        };
+        set_json_pointer(&mut machine, "/parameters/speed", serde_json::json!(3.5)).unwrap();
+        assert_eq!(machine.parameters["speed"], 3.5);
+        assert!(set_json_pointer(
+            &mut machine,
+            "/parameters/missing",
+            serde_json::json!(1.0)
+        )
+        .is_err());
+    }
+
+    /// JSON Pointer 的转义与下标语法。
+    #[test]
+    fn json_pointer_to_path_handles_indices_and_escapes() {
+        assert_eq!(pointer_to_path("/levels/0/model").unwrap(), "levels[0].model");
+        assert_eq!(pointer_to_path("/a~1b").unwrap(), "a/b");
+        assert!(pointer_to_path("model").is_err());
+        assert!(pointer_to_path("/a/[b").is_err());
     }
 }

@@ -11,10 +11,42 @@
 
 use std::fmt;
 
-use glam::{Vec2, Vec3, Vec4};
+use glam::{Quat, Vec2, Vec3, Vec4};
+use serde::de::DeserializeOwned;
 
 use super::meta::ScalarKind;
-use super::{Reflect, ReflectEnum, ReflectList};
+use super::{Reflect, ReflectEnum, ReflectList, ReflectMap};
+
+/// 严格反序列化一个 JSON 值：未知嵌套字段直接报错，不静默丢弃。
+///
+/// 普通 `serde_json::from_value` 会忽略未声明字段；组件补丁必须与文件边界同级，
+/// 否则智能体写错字段名会"看似成功、实际丢数据"。
+pub fn from_json_strict<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, ReflectError> {
+    let type_name = std::any::type_name::<T>();
+    let text = serde_json::to_string(&value).map_err(|error| ReflectError::InvalidValue {
+        type_name,
+        message: error.to_string(),
+    })?;
+    let mut deserializer = serde_json::Deserializer::from_str(&text);
+    let mut ignored = Vec::new();
+    let parsed = serde_ignored::deserialize(&mut deserializer, |path| ignored.push(path.to_string()))
+        .map_err(|error| ReflectError::InvalidValue {
+            type_name,
+            message: error.to_string(),
+        })?;
+    deserializer.end().map_err(|error| ReflectError::InvalidValue {
+        type_name,
+        message: error.to_string(),
+    })?;
+    if ignored.is_empty() {
+        Ok(parsed)
+    } else {
+        Err(ReflectError::InvalidValue {
+            type_name,
+            message: format!("不认识的字段: {}", ignored.join(", ")),
+        })
+    }
+}
 
 /// 反射操作的错误。全部是**可诊断**的，调用方（编辑器 / MCP）负责转成人话。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -41,6 +73,13 @@ pub enum ReflectError {
     ReadOnly(String),
     #[error("`{0}` 是 None，没有可读的值")]
     NoneValue(&'static str),
+    #[error("无法把 JSON 值写入 `{type_name}`：{message}")]
+    InvalidValue {
+        type_name: &'static str,
+        message: String,
+    },
+    #[error("反射容器不支持这种 JSON 写入：{0}")]
+    UnsupportedJson(&'static str),
 }
 
 /// 写入用的标量值（拥有所有权，因为调用方通常是从 UI 控件拿到的临时值）。
@@ -57,6 +96,7 @@ pub enum ScalarValue {
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
+    Quat(Quat),
 }
 
 impl ScalarValue {
@@ -73,6 +113,7 @@ impl ScalarValue {
             Self::Vec2(_) => ScalarKind::Vec2,
             Self::Vec3(_) => ScalarKind::Vec3,
             Self::Vec4(_) => ScalarKind::Vec4,
+            Self::Quat(_) => ScalarKind::Quat,
         }
     }
 
@@ -102,9 +143,11 @@ pub enum ValueRef<'a> {
     Vec2(&'a Vec2),
     Vec3(&'a Vec3),
     Vec4(&'a Vec4),
+    Quat(&'a Quat),
     Struct(&'a dyn Reflect),
     Enum(&'a dyn ReflectEnum),
     List(&'a dyn ReflectList),
+    Map(&'a dyn ReflectMap),
     /// `Option::None` —— 不是"错误"，是"这里现在是空的"。
     None,
 }
@@ -123,9 +166,11 @@ impl fmt::Debug for ValueRef<'_> {
             Self::Vec2(v) => write!(f, "Vec2({v:?})"),
             Self::Vec3(v) => write!(f, "Vec3({v:?})"),
             Self::Vec4(v) => write!(f, "Vec4({v:?})"),
+            Self::Quat(v) => write!(f, "Quat({v:?})"),
             Self::Struct(v) => write!(f, "Struct({})", v.type_meta().name),
             Self::Enum(v) => write!(f, "Enum({})", v.variant()),
             Self::List(v) => write!(f, "List(len={})", v.len()),
+            Self::Map(_) => write!(f, "Map"),
             Self::None => write!(f, "None"),
         }
     }
@@ -146,6 +191,7 @@ impl<'a> ValueRef<'a> {
             Self::Vec2(_) => ScalarKind::Vec2,
             Self::Vec3(_) => ScalarKind::Vec3,
             Self::Vec4(_) => ScalarKind::Vec4,
+            Self::Quat(_) => ScalarKind::Quat,
             _ => return None,
         })
     }
@@ -202,6 +248,7 @@ impl<'a> ValueRef<'a> {
             Self::Vec2(v) => ScalarValue::Vec2(**v),
             Self::Vec3(v) => ScalarValue::Vec3(**v),
             Self::Vec4(v) => ScalarValue::Vec4(**v),
+            Self::Quat(v) => ScalarValue::Quat(**v),
             _ => return None,
         })
     }
@@ -220,9 +267,11 @@ impl<'a> ValueRef<'a> {
             Self::Vec2(v) => format!("({}, {})", v.x, v.y),
             Self::Vec3(v) => format!("({}, {}, {})", v.x, v.y, v.z),
             Self::Vec4(v) => format!("({}, {}, {}, {})", v.x, v.y, v.z, v.w),
+            Self::Quat(v) => format!("({}, {}, {}, {})", v.x, v.y, v.z, v.w),
             Self::Struct(v) => format!("<{}>", v.type_meta().name),
             Self::Enum(v) => format!("<{}::{}>", "enum", v.variant()),
             Self::List(v) => format!("<list len={}>", v.len()),
+            Self::Map(_) => "<map>".to_string(),
             Self::None => "None".to_string(),
         }
     }
@@ -241,9 +290,11 @@ pub enum ValueRefMut<'a> {
     Vec2(&'a mut Vec2),
     Vec3(&'a mut Vec3),
     Vec4(&'a mut Vec4),
+    Quat(&'a mut Quat),
     Struct(&'a mut dyn Reflect),
     Enum(&'a mut dyn ReflectEnum),
     List(&'a mut dyn ReflectList),
+    Map(&'a mut dyn ReflectMap),
     None,
 }
 
@@ -273,6 +324,7 @@ impl<'a> ValueRefMut<'a> {
             Self::Vec2(_) => ScalarKind::Vec2,
             Self::Vec3(_) => ScalarKind::Vec3,
             Self::Vec4(_) => ScalarKind::Vec4,
+            Self::Quat(_) => ScalarKind::Quat,
             _ => return None,
         })
     }
@@ -311,6 +363,7 @@ impl<'a> ValueRefMut<'a> {
             (Self::Vec2(slot), ScalarValue::Vec2(v)) => **slot = *v,
             (Self::Vec3(slot), ScalarValue::Vec3(v)) => **slot = *v,
             (Self::Vec4(slot), ScalarValue::Vec4(v)) => **slot = *v,
+            (Self::Quat(slot), ScalarValue::Quat(v)) => **slot = *v,
             // 前面的类型检查已经覆盖了所有组合，这里只是让编译器闭嘴。
             _ => unreachable!("scalar_kind 与 set 的分支必须一一对应"),
         }
@@ -334,9 +387,11 @@ impl<'a> ValueRefMut<'a> {
             Self::Vec2(v) => ValueRef::Vec2(v),
             Self::Vec3(v) => ValueRef::Vec3(v),
             Self::Vec4(v) => ValueRef::Vec4(v),
+            Self::Quat(v) => ValueRef::Quat(v),
             Self::Struct(v) => ValueRef::Struct(&**v),
             Self::Enum(v) => ValueRef::Enum(&**v),
             Self::List(v) => ValueRef::List(&**v),
+            Self::Map(v) => ValueRef::Map(&**v),
             Self::None => ValueRef::None,
         }
     }

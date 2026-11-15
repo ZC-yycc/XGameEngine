@@ -877,10 +877,7 @@ fn show_body(state: &mut EditorState, ui: &mut egui::Ui) {
             drag_began |= reflected.drag_began;
             drag_ended |= reflected.drag_ended;
         }
-        // ── 音频（反射通道）──
-        //
-        // 与下面的手写段二选一，由 `--ui-reflect-inspector` 决定。两段都留着
-        // 是 S1 的验收手段：同一份数据画两遍，逐像素比对。
+        // ── 音频 ──
         if entity.audio.is_some() {
             let mut reflected = FieldSignals::default();
             super::inspector_reflect::show_section(
