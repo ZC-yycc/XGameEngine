@@ -11,6 +11,7 @@ pub mod hierarchy;
 pub mod icons;
 pub mod inspector;
 pub mod inspector_reflect;
+pub mod inspector_sections;
 pub mod inspector_ui;
 pub mod prefabs;
 pub mod preferences;

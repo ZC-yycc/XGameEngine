@@ -59,17 +59,18 @@ fn with_doc(response: egui::Response, doc: &str) -> egui::Response {
 /// 这就是"统一组件"的边界所在：每个新组件仍然要写一条 spec，但它是十行声明，
 /// **不含任何控件代码**。手写 section 是一百到两百行，且每行都要跟着视觉语法走。
 pub struct ReflectComponentSpec {
-    pub kind: BuiltinComponent,
     /// 分类条标题（`"Audio"` 与 `BuiltinComponent::name()` 的 `"Audio Source"`
     /// 历史上就不一致，这里以 Inspector 上的文案为准）。
     pub title: &'static str,
+    /// `ui.indent` 的 id。它只影响 egui 记住的滚动/展开状态，不影响布局。
+    pub indent: &'static str,
     /// "勾上才有"那个复选框的 `(文字, 悬浮提示)`。
     ///
     /// `None` = 这一段没有开关（`LOD` 的存不存在由 `levels` 是否为空决定，
     /// 画一个永远勾着的框只是噪声）。
     pub toggle: Option<(&'static str, &'static str)>,
-    /// 标题右键里"移除"那一项的文字。
-    pub remove_label: &'static str,
+    /// 分类条右键菜单。三选一，见 [`SectionMenu`]。
+    pub menu: SectionMenu,
     /// 取组件的可写反射视图；组件不存在时返回 `None`。
     pub access: fn(&mut Entity) -> Option<&mut dyn Reflect>,
     /// 编辑后修复**跨字段**不变式（`far > near`）。
@@ -114,10 +115,44 @@ pub struct ReflectComponentSpec {
 pub enum Render {
     /// 按 `TypeMeta` 逐字段画。
     Fields,
-    /// 专用渲染：`(ui, 实体, 信号) -> 是否请求移除组件`。
-    ///
-    /// 参数里的 `bool` 是 `is_editing`（Play 态禁止改组件结构）。
-    Custom(fn(&mut egui::Ui, &mut Entity, &mut FieldSignals, bool) -> bool),
+    /// 专用渲染：版式本身承载信息的段落（见上）。
+    Custom(fn(&mut egui::Ui, &mut Entity, &mut SectionCx<'_>)),
+}
+
+/// 专用渲染器能用的一切（除了 `ui` 与实体本身）。
+///
+/// 这三样恰好就是 `show_body` 里每个手写段都会碰的东西 —— 把它们打个包，
+/// 专用渲染器就不必再长出一套自己的参数表，也不必各自往 `show_body` 里
+/// 回写标志位。组件结构动作统一从 [`SectionCx::request`] 走，与 `Fields`
+/// 那条路完全相同。
+pub struct SectionCx<'a> {
+    pub state: &'a mut crate::state::EditorState,
+    pub sig: &'a mut FieldSignals,
+    pub request: &'a mut Option<ComponentAction>,
+    pub refresh_scripts: &'a mut bool,
+}
+
+/// 分类条右键菜单的三种形态。
+///
+/// 三者是**语义**差别，不是样式差别：能不能把整段当成一个组件实例来移除。
+pub enum SectionMenu {
+    /// 没有右键菜单（`Prefab`：这一段既不实例也不分组）。
+    None,
+    /// 标题正好对应一个可移除的组件实例（绝大多数）。
+    Removable {
+        address: ComponentAddress,
+        label: &'static str,
+    },
+    /// 固有组件：真实存在，但不能删（`Transform`）。
+    Locked {
+        label: &'static str,
+        reason: &'static str,
+    },
+    /// 实例集合：分组标题不能冒充成一个组件（`Scripts` / `Behaviors`）。
+    Collection {
+        label: &'static str,
+        reason: &'static str,
+    },
 }
 
 /// 一个预设按钮。
@@ -131,13 +166,16 @@ pub struct Preset {
 
 /// Camera 的 spec。
 pub static CAMERA: ReflectComponentSpec = ReflectComponentSpec {
-    kind: BuiltinComponent::Camera,
     title: "Camera",
+    indent: "camera",
     toggle: Some((
         "Has camera",
         "勾上之后这个实体就是一台相机：\nPlay 态视口 / 独立游戏 / 无头截图都从它取机位",
     )),
-    remove_label: "Remove Camera",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Camera),
+        label: "Remove Camera",
+    },
     access: |entity| match entity.camera.as_mut() {
         Some(camera) => Some(camera),
         None => None,
@@ -157,13 +195,16 @@ pub static CAMERA: ReflectComponentSpec = ReflectComponentSpec {
 
 /// AudioSource 的 spec。
 pub static AUDIO: ReflectComponentSpec = ReflectComponentSpec {
-    kind: BuiltinComponent::Audio,
     title: "Audio",
+    indent: "audio",
     toggle: Some((
         "Has audio source",
         "挂一个音频源：autoplay 进场景就响；\n非 autoplay 的剪辑由脚本 play_sound 触发",
     )),
-    remove_label: "Remove Audio Source",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Audio),
+        label: "Remove Audio Source",
+    },
     access: |entity| match entity.audio.as_mut() {
         Some(audio) => Some(audio),
         None => None,
@@ -184,13 +225,16 @@ pub static AUDIO: ReflectComponentSpec = ReflectComponentSpec {
 
 /// PhysicsBody 的 spec。
 pub static PHYSICS: ReflectComponentSpec = ReflectComponentSpec {
-    kind: BuiltinComponent::Physics,
     title: "Physics",
+    indent: "physics",
     toggle: Some((
         "Participate in physics",
         "不勾选 = 纯视觉实体，不会被重力拽走",
     )),
-    remove_label: "Remove Physics",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Physics),
+        label: "Remove Physics",
+    },
     access: |entity| match entity.physics.as_mut() {
         Some(body) => Some(body),
         None => None,
@@ -216,13 +260,16 @@ pub static PHYSICS: ReflectComponentSpec = ReflectComponentSpec {
 
 /// CharacterController 的 spec。
 pub static CHARACTER: ReflectComponentSpec = ReflectComponentSpec {
-    kind: BuiltinComponent::Character,
     title: "Character",
+    indent: "character",
     toggle: Some((
         "Character controller",
         "由角色控制器驱动：撞墙、自动上台阶、贴地、陡坡滑落",
     )),
-    remove_label: "Remove Character",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Character),
+        label: "Remove Character",
+    },
     access: |entity| match entity.controller.as_mut() {
         Some(controller) => Some(controller),
         None => None,
@@ -244,12 +291,15 @@ pub static CHARACTER: ReflectComponentSpec = ReflectComponentSpec {
 
 /// LodGroup 的 spec。
 pub static LOD: ReflectComponentSpec = ReflectComponentSpec {
-    kind: BuiltinComponent::Lod,
     title: "LOD",
+    indent: "lod",
     // 没有开关：LOD 的存在与否完全由 `levels` 决定（空列表 = 没有 LOD），
     // 画一个勾选框只会让"取消勾选之后又自动勾上"变成谜。
     toggle: None,
-    remove_label: "Remove LOD",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Lod),
+        label: "Remove LOD",
+    },
     access: |entity| Some(&mut entity.lod),
     normalize: Some(|entity| {
         // 新追加的级别沿用上一级的模型（与手写段"Add Level"的种子一致）。
@@ -291,13 +341,16 @@ pub static PARTICLE_PRESETS: [Preset; 3] = [
 
 /// ParticleEmitter 的 spec。
 pub static PARTICLE: ReflectComponentSpec = ReflectComponentSpec {
-    kind: BuiltinComponent::Particle,
     title: "Particle",
+    indent: "particle",
     toggle: Some((
         "Has particle emitter",
         "CPU 粒子（billboard）。进 Play 开始喷，\n场景存盘只存参数、不存粒子状态",
     )),
-    remove_label: "Remove Particle Emitter",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Particle),
+        label: "Remove Particle Emitter",
+    },
     access: |entity| entity.particle.as_mut().map(|p| p as &mut dyn Reflect),
     normalize: Some(|entity| {
         // 复用引擎自己的钳制规则：`rate` / `max_particles` / `lifetime` 的上下界
@@ -322,20 +375,158 @@ pub static PARTICLE: ReflectComponentSpec = ReflectComponentSpec {
 /// 但它的**入口**与其余组件完全一样：同一张表、同一个 `show_section`、
 /// 同一份 `FieldSignals`。所以"UI 的 Inspector 在哪"这个问题只有一个答案。
 pub static UI: ReflectComponentSpec = ReflectComponentSpec {
-    kind: BuiltinComponent::Ui,
     title: "UI",
+    indent: "ui",
     // 段内那个 "UI Element" 勾选框由专用渲染器自己画（它是"组件存在与否"的开关，
     // 位置在缩进之内，而不是像其余组件那样紧跟分类条）。
     toggle: None,
-    remove_label: "Remove UI Element",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Ui),
+        label: "Remove UI Element",
+    },
     access: |entity| entity.ui.as_mut().map(|ui| ui as &mut dyn Reflect),
     normalize: None,
     on_variant: None,
     footer: None,
     presets: &[],
-    render: Render::Custom(|ui, entity, sig, editing| {
-        super::inspector_ui::show(ui, entity, sig, editing)
+    render: Render::Custom(|ui, entity, cx| {
+        if super::inspector_ui::show(ui, entity, cx.sig, cx.state.is_editing()) {
+            *cx.request = Some(ComponentAction::Remove(ComponentAddress::Builtin(
+                BuiltinComponent::Ui,
+            )));
+        }
     }),
+};
+
+/// `Transform` 段。
+///
+/// 走专用渲染：用户改的是**欧拉角**、存的是**四元数**，双向换算做不进字段表
+/// （一个字段对应三个用户可见的输入框，而且是"改角度顺便规范化四元数"）。
+pub static TRANSFORM: ReflectComponentSpec = ReflectComponentSpec {
+    title: "Transform",
+    indent: "transform",
+    menu: SectionMenu::Locked {
+        label: "Remove Transform",
+        reason: super::inspector::TRANSFORM_REMOVE_REASON,
+    },
+    toggle: None,
+    access: |_| None,
+    normalize: None,
+    on_variant: None,
+    footer: None,
+    presets: &[],
+    render: Render::Custom(super::inspector_sections::show_transform),
+};
+
+/// `Mesh` 段。
+///
+/// 走专用渲染：`model` 与内置图元下拉要互相对照，Morph 目标的**名字来自渲染器**
+/// （模型加载之后才知道有哪些），不是编译期常量。
+pub static MESH: ReflectComponentSpec = ReflectComponentSpec {
+    title: "Mesh",
+    indent: "mesh",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Mesh),
+        label: "Remove Mesh",
+    },
+    toggle: None,
+    access: |_| None,
+    normalize: None,
+    on_variant: None,
+    footer: None,
+    presets: &[],
+    render: Render::Custom(super::inspector_sections::show_mesh),
+};
+
+/// `Animation` 段。
+///
+/// 走专用渲染：状态机是**一张图**（状态 + 转移 + 参数），不是字段树。
+pub static ANIMATION: ReflectComponentSpec = ReflectComponentSpec {
+    title: "Animation",
+    indent: "animation",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Animator),
+        label: "Remove Animation",
+    },
+    toggle: None,
+    access: |_| None,
+    normalize: None,
+    on_variant: None,
+    footer: None,
+    presets: &[],
+    render: Render::Custom(super::inspector_sections::show_animation),
+};
+
+/// `Scripts` 段（Lua 实例集合）。
+///
+/// 没有对应的 `BuiltinComponent`：它不是"一个组件"，而是 `Entity::scripts`
+/// 这个字段里的一组路径。所以菜单是 `Collection` —— 不能让分组标题冒充组件。
+pub static SCRIPTS: ReflectComponentSpec = ReflectComponentSpec {
+    title: "Scripts",
+    indent: "scripts",
+    menu: SectionMenu::Collection {
+        label: "Remove Scripts Group",
+        reason: "Scripts 是多个 Lua 组件实例的分组；请右键具体脚本行移除。",
+    },
+    toggle: None,
+    access: |_| None,
+    normalize: None,
+    on_variant: None,
+    footer: None,
+    presets: &[],
+    render: Render::Custom(super::inspector_sections::show_scripts),
+};
+
+/// `Behaviors` 段（Rust 实例集合）。理由同 [`SCRIPTS`]。
+pub static BEHAVIORS: ReflectComponentSpec = ReflectComponentSpec {
+    title: "Behaviors",
+    indent: "behaviors",
+    menu: SectionMenu::Collection {
+        label: "Remove Behaviors Group",
+        reason: "Behaviors 是多个 Rust 组件实例的分组；请右键具体组件行移除。",
+    },
+    toggle: None,
+    access: |_| None,
+    normalize: None,
+    on_variant: None,
+    footer: None,
+    presets: &[],
+    render: Render::Custom(super::inspector_sections::show_behaviors),
+};
+
+/// `Material` 段。
+///
+/// 走专用渲染：通道来自 `.mat` 资产（运行时才知道有哪些），而"资产 + 覆盖"
+/// 是两层正交的数据，字段表只装得下其中一层。
+pub static MATERIAL: ReflectComponentSpec = ReflectComponentSpec {
+    title: "Material",
+    indent: "material",
+    menu: SectionMenu::Removable {
+        address: ComponentAddress::Builtin(BuiltinComponent::Material),
+        label: "Remove Material",
+    },
+    toggle: None,
+    access: |_| None,
+    normalize: None,
+    on_variant: None,
+    footer: None,
+    presets: &[],
+    render: Render::Custom(super::inspector_sections::show_material),
+};
+
+/// `Prefab` 段。
+pub static PREFAB: ReflectComponentSpec = ReflectComponentSpec {
+    title: "Prefab",
+    indent: "prefab",
+    // 这一段既不是组件实例也不是分组，右键里没有可移除的东西。
+    menu: SectionMenu::None,
+    toggle: None,
+    access: |_| None,
+    normalize: None,
+    on_variant: None,
+    footer: None,
+    presets: &[],
+    render: Render::Custom(super::inspector_sections::show_prefab),
 };
 
 /// 画一个内置组件的整段（分类条 + "勾上才有" + 全部字段 + 末尾说明）。
@@ -343,7 +534,7 @@ pub static UI: ReflectComponentSpec = ReflectComponentSpec {
 /// 调用方负责先判断组件是否存在（`BuiltinComponent::present`）—— 这一步与
 /// `show_body` 里其余手写段保持同一种结构，读起来不会有"这里为什么不一样"。
 pub(super) fn show_section(
-    state: &crate::state::EditorState,
+    state: &mut crate::state::EditorState,
     ui: &mut egui::Ui,
     entity: &mut Entity,
     spec: &ReflectComponentSpec,
@@ -354,29 +545,43 @@ pub(super) fn show_section(
     let editing = state.is_editing();
 
     let header = theme::section_bar(ui, spec.title);
-    component_context_menu(
-        &header,
-        state,
-        entity,
-        ComponentMenuTarget::Removable {
-            address: ComponentAddress::Builtin(spec.kind),
-            label: spec.remove_label,
-        },
-        request,
-        refresh_scripts,
-    );
+    let target = match spec.menu {
+        SectionMenu::None => None,
+        SectionMenu::Removable { address, label } => {
+            Some(ComponentMenuTarget::Removable { address, label })
+        }
+        SectionMenu::Locked { label, reason } => {
+            Some(ComponentMenuTarget::Locked { label, reason })
+        }
+        SectionMenu::Collection { label, reason } => Some(ComponentMenuTarget::Collection {
+            label,
+            reason,
+        }),
+    };
+    if let Some(target) = target {
+        component_context_menu(&header, state, entity, target, request, refresh_scripts);
+    }
 
     // 专用渲染器自己负责缩进（它内部已经有 `ui.indent`），这里不能再包一层 ——
     // 两层缩进会让整段右移 15px，而段内的行距、控件宽度全都会跟着变。
     if let Render::Custom(render) = spec.render {
-        if render(ui, entity, sig, editing) {
-            *request = Some(ComponentAction::Remove(ComponentAddress::Builtin(spec.kind)));
-        }
+        let mut cx = SectionCx {
+            state,
+            sig,
+            request,
+            refresh_scripts,
+        };
+        render(ui, entity, &mut cx);
         return;
     }
 
     let mut switched: Option<(&'static str, &'static str)> = None;
-    ui.indent(spec.kind.code(), |ui| {
+    ui.indent(spec.indent, |ui| {
+        // 取消勾选 = 移除组件。地址来自 spec 的菜单（`Removable` 才有地址）。
+        let toggle_address = match spec.menu {
+            SectionMenu::Removable { address, .. } => Some(address),
+            _ => None,
+        };
         if let Some((label, hint)) = spec.toggle {
             // 取消勾选 = 移除组件。勾选框的初值恒为 `true`：能走到这里就说明组件在。
             let mut enabled = true;
@@ -386,9 +591,9 @@ pub(super) fn show_section(
                 .on_disabled_hover_text(PLAY_STRUCTURE_HINT)
                 .changed()
             {
-                *request = Some(ComponentAction::Remove(ComponentAddress::Builtin(
-                    spec.kind,
-                )));
+                if let Some(address) = toggle_address {
+                    *request = Some(ComponentAction::Remove(address));
+                }
             }
         }
 
@@ -1451,7 +1656,13 @@ mod tests {
     #[test]
     fn ui_spec_is_registered_with_a_custom_renderer() {
         assert!(matches!(UI.render, Render::Custom(_)));
-        assert_eq!(UI.kind, BuiltinComponent::Ui);
+        assert!(matches!(
+            UI.menu,
+            SectionMenu::Removable {
+                address: ComponentAddress::Builtin(BuiltinComponent::Ui),
+                ..
+            }
+        ));
         assert_eq!(UI.title, "UI");
         let mut entity = Entity::new("probe");
         assert!((UI.access)(&mut entity).is_none());
