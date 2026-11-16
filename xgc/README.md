@@ -26,6 +26,7 @@
 `HierarchySystem` /
 `AnimationClip` 平移 / 旋转 slerp / 缩放关键帧采样（边界钳制 / 循环取模）/ RON 剪辑加载 /
 `AnimationPlaybackSystem` 把采样结果叠加 `Animator.base_*` 写回 `Transform` /
+`SkeletonPoseSystem` 合成关节世界矩阵到 `animation.pose` /
 `AnimationLibrary::load_dir` 扫描目录 /
 `AnimationLibrary` 按名索引 /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/
@@ -97,8 +98,8 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（90 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同，
-24 个内建类型 30337 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
+`xgc-xtask check` 全绿（93 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同，
+27 个内建类型 31479 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
 脚本 / 动画 / 音频、渲染、编辑器；Agent 协议已覆盖能力清单，视觉验证仍缺。

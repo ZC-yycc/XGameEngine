@@ -4,10 +4,10 @@
 use xgc_reflect::Registry;
 
 use super::{
-    Animator, AudioGain, AudioListener, AudioMixer, AudioSource, Camera, CharacterController,
+    Animator, AudioGain, AudioListener, AudioMixer, AudioSource, Bone, Camera, CharacterController,
     GlobalTransform, LodGroup, Material, MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody,
-    PluginComponent, Script, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout,
-    Velocity,
+    PluginComponent, Script, Skeleton, SkeletonPose, Slope, Transform, UiElement, UiInput,
+    UiInteraction, UiLayout, Velocity,
 };
 
 pub fn builtin_registry() -> Registry {
@@ -78,6 +78,15 @@ pub fn builtin_registry() -> Registry {
     registry
         .register::<Slope>()
         .expect("内置组件注册失败：physics.slope");
+    registry
+        .register::<Skeleton>()
+        .expect("内置组件注册失败：animation.skeleton");
+    registry
+        .register::<Bone>()
+        .expect("内置组件注册失败：animation.bone");
+    registry
+        .register::<SkeletonPose>()
+        .expect("内置组件注册失败：animation.pose");
     registry
         .register::<ParticleEmitter>()
         .expect("内置组件注册失败：particle.emitter");

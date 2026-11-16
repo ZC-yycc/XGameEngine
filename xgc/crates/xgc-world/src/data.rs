@@ -12,10 +12,10 @@ use xgc_base::EntityId;
 use xgc_reflect::{Component, ComponentId, Value};
 
 use super::{
-    Animator, AudioGain, AudioListener, AudioMixer, AudioSource, Camera, CharacterController,
+    Animator, AudioGain, AudioListener, AudioMixer, AudioSource, Bone, Camera, CharacterController,
     Column, EntitySnapshot, GlobalTransform, LodGroup, Material, MeshRenderer, Name, Parent,
-    ParticleEmitter, PhysicsBody, PluginComponent, Script, Slope, Transform, UiElement, UiInput,
-    UiInteraction, UiLayout, Velocity, World,
+    ParticleEmitter, PhysicsBody, PluginComponent, Script, Skeleton, SkeletonPose, Slope,
+    Transform, UiElement, UiInput, UiInteraction, UiLayout, Velocity, World,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -144,6 +144,9 @@ impl World {
         self.register_component::<UiInteraction>();
         self.register_component::<UiInput>();
         self.register_component::<Slope>();
+        self.register_component::<Skeleton>();
+        self.register_component::<Bone>();
+        self.register_component::<SkeletonPose>();
         self.register_component::<ParticleEmitter>();
         self.register_component::<PluginComponent>();
     }

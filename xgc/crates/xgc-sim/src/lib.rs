@@ -162,6 +162,7 @@ impl Schedule {
         schedule.add(AabbCollisionSystem);
         schedule.add(AnimatorSystem);
         schedule.add(AnimationPlaybackSystem::default());
+        schedule.add(SkeletonPoseSystem);
         schedule.add(UiLayoutSystem::default());
         schedule.add(UiInteractionSystem);
         schedule.add(UiFocusSystem);
@@ -226,6 +227,7 @@ mod animation;
 mod audio;
 mod character;
 mod mixer;
+mod skeleton;
 mod systems;
 mod ui;
 
@@ -236,6 +238,7 @@ pub use animation::{
 pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
 pub use character::{CharacterBlockSystem, CharacterStepSystem};
 pub use mixer::{write_wav_mono, SoftwareMixer};
+pub use skeleton::{parse_pose, SkeletonPoseSystem};
 pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
     GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,

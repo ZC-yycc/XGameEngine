@@ -34,6 +34,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/render_components.rs` | 渲染侧组件：`render.mesh` / `render.material` / `render.camera` |
 | `crates/xgc-world/src/lod_components.rs` | LOD 组件：`render.lod` |
 | `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
+| `crates/xgc-world/src/skeleton_components.rs` | 骨架组件：`animation.skeleton` / `animation.bone` / `animation.pose` |
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source`（含 bus）/ `audio.listener` / `audio.gain` / `audio.mixer` |
 | `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / duration / time） |
 | `crates/xgc-world/src/character_components.rs` | 角色组件：`physics.character` |
@@ -52,6 +53,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `RotationKey` / `ScaleKey` / `load_clip_ron` / `AnimationLibrary`（含 `load_dir`）：平移 / 旋转 slerp / 缩放采样、循环、RON / 目录加载、`AnimationPlaybackSystem` 写 Transform |
 | `crates/xgc-sim/src/audio.rs` | `AudioMixerSystem` + WAV 解码 / `AudioLibrary`：监听者距离 + 总线音量写 `audio.gain` |
+| `crates/xgc-sim/src/skeleton.rs` | `SkeletonPoseSystem` / `parse_pose`：关节父链合成世界矩阵 |
 | `crates/xgc-sim/src/mixer.rs` | `SoftwareMixer` / `write_wav_mono`：总线增益混音与 WAV 写出 |
 | `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：布局、裁剪、可见性、命中、`ui.input` 驱动的交互 / Tab / 方向键焦点 |
 | `crates/xgc-sim/src/character.rs` | `CharacterStepSystem` / `CharacterBlockSystem`：低台阶抬升、高墙 / 球体推出 |
@@ -100,9 +102,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. UI：文本换行已接；下一步圆角 / UI 绘制批次。
-2. 音频：播放设备 / 流式缓冲。
-3. 动画：骨骼 / 蒙皮。
+1. 动画：骨架姿态已接；下一步 GLB skin（JOINTS / WEIGHTS）与蒙皮管线。
+2. UI：圆角 / UI 绘制批次。
+3. 音频：播放设备 / 流式缓冲。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 5. 现在最大文件 588 行：动它之前先拆。
 

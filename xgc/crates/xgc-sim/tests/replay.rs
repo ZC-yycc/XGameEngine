@@ -120,6 +120,7 @@ fn velocity_system_moves_transform() {
             "aabb",
             "animation",
             "animation_apply",
+            "skeleton_pose",
             "ui_layout",
             "ui_interaction",
             "ui_focus",
