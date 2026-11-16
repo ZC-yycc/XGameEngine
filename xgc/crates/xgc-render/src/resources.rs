@@ -18,6 +18,19 @@ pub enum ResourceUsage {
     Storage,
 }
 
+impl ResourceUsage {
+    pub fn readable(self) -> bool {
+        matches!(self, Self::Sampled | Self::Uniform | Self::Storage)
+    }
+
+    pub fn writable(self) -> bool {
+        matches!(
+            self,
+            Self::ColorAttachment | Self::DepthAttachment | Self::Storage
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceDesc {
     pub name: String,
@@ -66,6 +79,14 @@ impl ResourceDesc {
             size,
             usage,
         }
+    }
+
+    pub fn readable(&self) -> bool {
+        self.usage.iter().any(|usage| usage.readable())
+    }
+
+    pub fn writable(&self) -> bool {
+        self.usage.iter().any(|usage| usage.writable())
     }
 }
 

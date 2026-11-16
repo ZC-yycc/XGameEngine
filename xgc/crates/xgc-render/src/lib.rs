@@ -44,6 +44,18 @@ pub enum GraphError {
         pass: String,
         resource: String,
     },
+    UnreadableResource {
+        pass: String,
+        resource: String,
+    },
+    UnwritableResource {
+        pass: String,
+        resource: String,
+    },
+    Execute {
+        pass: String,
+        message: String,
+    },
     MultipleWriters {
         resource: String,
         first: String,
@@ -59,6 +71,15 @@ impl fmt::Display for GraphError {
             Self::DuplicateResource(name) => write!(f, "渲染资源重名：{name}"),
             Self::UnknownResource { pass, resource } => {
                 write!(f, "pass {pass} 引用了未声明资源 {resource}")
+            }
+            Self::UnreadableResource { pass, resource } => {
+                write!(f, "pass {pass} 读取 {resource}，但资源没有可读用法")
+            }
+            Self::UnwritableResource { pass, resource } => {
+                write!(f, "pass {pass} 写入 {resource}，但资源没有可写用法")
+            }
+            Self::Execute { pass, message } => {
+                write!(f, "执行 pass {pass} 失败：{message}")
             }
             Self::MultipleWriters {
                 resource,
@@ -110,9 +131,29 @@ impl RenderGraph {
 
     pub fn validate_resources(&self) -> Result<(), GraphError> {
         for pass in &self.passes {
-            for resource in pass.reads.iter().chain(pass.writes.iter()) {
-                if self.resources.get(resource).is_none() {
+            for resource in &pass.reads {
+                let Some(desc) = self.resources.get(resource) else {
                     return Err(GraphError::UnknownResource {
+                        pass: pass.name.clone(),
+                        resource: resource.clone(),
+                    });
+                };
+                if !desc.readable() {
+                    return Err(GraphError::UnreadableResource {
+                        pass: pass.name.clone(),
+                        resource: resource.clone(),
+                    });
+                }
+            }
+            for resource in &pass.writes {
+                let Some(desc) = self.resources.get(resource) else {
+                    return Err(GraphError::UnknownResource {
+                        pass: pass.name.clone(),
+                        resource: resource.clone(),
+                    });
+                };
+                if !desc.writable() {
+                    return Err(GraphError::UnwritableResource {
                         pass: pass.name.clone(),
                         resource: resource.clone(),
                     });
@@ -217,5 +258,35 @@ impl RenderGraph {
             .into_iter()
             .map(|index| self.passes[index].name.clone())
             .collect())
+    }
+
+    /// 先排序再逐 pass 执行；执行失败时带上 pass 名，调用方不用自己拼上下文。
+    pub fn execute<E: PassExecutor>(&self, executor: &mut E) -> Result<Vec<String>, GraphError> {
+        let order = self.order()?;
+        let mut executed = Vec::with_capacity(order.len());
+        for index in order {
+            let pass = &self.passes[index];
+            executor
+                .execute(pass)
+                .map_err(|message| GraphError::Execute {
+                    pass: pass.name.clone(),
+                    message,
+                })?;
+            executed.push(pass.name.clone());
+        }
+        Ok(executed)
+    }
+}
+
+pub trait PassExecutor {
+    fn execute(&mut self, pass: &Pass) -> Result<(), String>;
+}
+
+impl<F> PassExecutor for F
+where
+    F: FnMut(&Pass) -> Result<(), String>,
+{
+    fn execute(&mut self, pass: &Pass) -> Result<(), String> {
+        self(pass)
     }
 }

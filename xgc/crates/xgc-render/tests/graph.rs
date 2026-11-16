@@ -10,7 +10,7 @@ fn declare(graph: &mut RenderGraph, names: &[&str]) {
                 "rgba16float",
                 1,
                 1,
-                vec![ResourceUsage::Sampled],
+                vec![ResourceUsage::Sampled, ResourceUsage::ColorAttachment],
             ))
             .unwrap();
     }
@@ -84,11 +84,93 @@ fn unknown_and_duplicate_resources_are_rejected() {
         Err(GraphError::UnknownResource { .. })
     ));
 
-    let resource = ResourceDesc::texture2d("x", "rgba8unorm", 1, 1, vec![]);
+    let resource = ResourceDesc::texture2d(
+        "x",
+        "rgba8unorm",
+        1,
+        1,
+        vec![ResourceUsage::ColorAttachment],
+    );
     graph.add_resource(resource.clone()).unwrap();
     assert!(matches!(
         graph.add_resource(resource),
         Err(GraphError::DuplicateResource(_))
     ));
     graph.order().unwrap();
+}
+
+#[test]
+fn usage_flags_are_enforced() {
+    let mut graph = RenderGraph::new();
+    graph.add(Pass::new("read", &["x"], &[])).unwrap();
+    graph
+        .add_resource(ResourceDesc::texture2d(
+            "x",
+            "rgba8unorm",
+            1,
+            1,
+            vec![ResourceUsage::ColorAttachment],
+        ))
+        .unwrap();
+    assert!(matches!(
+        graph.order(),
+        Err(GraphError::UnreadableResource { .. })
+    ));
+
+    let mut graph = RenderGraph::new();
+    graph.add(Pass::new("write", &[], &["x"])).unwrap();
+    graph
+        .add_resource(ResourceDesc::texture2d(
+            "x",
+            "rgba8unorm",
+            1,
+            1,
+            vec![ResourceUsage::Sampled],
+        ))
+        .unwrap();
+    assert!(matches!(
+        graph.order(),
+        Err(GraphError::UnwritableResource { .. })
+    ));
+}
+
+#[test]
+fn execute_calls_passes_in_dependency_order() {
+    let mut graph = RenderGraph::new();
+    graph
+        .add(Pass::new("opaque", &["shadow"], &["color"]))
+        .unwrap();
+    graph.add(Pass::new("shadow", &[], &["shadow"])).unwrap();
+    declare(&mut graph, &["shadow", "color"]);
+
+    let mut executed = Vec::new();
+    graph
+        .execute(&mut |pass: &Pass| {
+            executed.push(pass.name.clone());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(executed, vec!["shadow", "opaque"]);
+}
+
+#[test]
+fn execute_failure_stops_and_reports_pass() {
+    let mut graph = RenderGraph::new();
+    graph.add(Pass::new("a", &[], &["x"])).unwrap();
+    graph.add(Pass::new("b", &[], &["y"])).unwrap();
+    declare(&mut graph, &["x", "y"]);
+
+    let mut executed = Vec::new();
+    let err = graph
+        .execute(&mut |pass: &Pass| {
+            executed.push(pass.name.clone());
+            if pass.name == "b" {
+                Err("boom".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert_eq!(executed, vec!["a", "b"]);
+    assert!(matches!(err, GraphError::Execute { .. }));
 }
