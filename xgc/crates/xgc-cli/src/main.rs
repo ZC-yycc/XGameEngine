@@ -16,7 +16,7 @@ fn main() -> ExitCode {
     let command = args.next();
     match command.as_deref() {
         Some("schema") => schema(),
-        Some("check") => check(),
+        Some("check") => check(args.next().as_deref()),
         Some("bench") => bench(),
         Some("export") => export(args.next().as_deref()),
         Some("import") => import(args.next().as_deref()),
@@ -25,13 +25,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check|bench|serve|export <路径>|import <路径>|run [帧数]>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check|bench|serve|export <路径>|import <路径>|run [帧数]>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]>"
             );
             ExitCode::from(2)
         }
@@ -73,7 +73,7 @@ fn schema() -> ExitCode {
     }
 }
 
-fn check() -> ExitCode {
+fn check(path: Option<&str>) -> ExitCode {
     let registry = match builtin_registry() {
         Ok(registry) => registry,
         Err(message) => {
@@ -81,9 +81,29 @@ fn check() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let diagnostics = registry.validate();
+    let mut diagnostics = registry.validate();
+    let mut world_summary = None;
+
+    if let Some(path) = path {
+        let data = match load_world(Path::new(path)) {
+            Ok(data) => data,
+            Err(err) => {
+                eprintln!("读取世界失败：{err}");
+                return ExitCode::from(1);
+            }
+        };
+        world_summary = Some((data.entities.len(), data.revision));
+        diagnostics.extend(World::validate_data(&data, &registry));
+    }
+
     if diagnostics.is_empty() {
-        println!("check: {} 个组件，schema 语义 OK", registry.len());
+        match world_summary {
+            Some((entities, revision)) => println!(
+                "check: {} 个组件，schema 语义 OK；世界 {entities} 个实体，revision {revision}",
+                registry.len()
+            ),
+            None => println!("check: {} 个组件，schema 语义 OK", registry.len()),
+        }
         ExitCode::SUCCESS
     } else {
         for diagnostic in &diagnostics {

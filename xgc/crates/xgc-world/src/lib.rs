@@ -19,6 +19,7 @@ mod hash;
 mod journal;
 mod query;
 mod snapshot;
+mod validate;
 
 pub use command::{Applied, Command, Plan};
 pub use components::{Name, Transform, Velocity};

@@ -90,6 +90,7 @@ impl Agent {
             "world.get" => self.get(params),
             "world.digest" => self.digest(),
             "world.stats" => self.stats(),
+            "world.validate" => self.validate(),
             "world.load" => self.load(params),
             "world.save" => self.save(params),
             "edit.plan" => self.plan(params),
@@ -118,6 +119,7 @@ impl Agent {
                 "world.get",
                 "world.digest",
                 "world.stats",
+                "world.validate",
                 "world.load",
                 "world.save",
                 "edit.plan",
@@ -333,6 +335,19 @@ impl Agent {
             "revision": data.revision,
             "entities": data.entities.len(),
             "components": components,
+        }))
+    }
+
+    fn validate(&self) -> Result<Json, String> {
+        let diagnostics = self.world.validate(&self.registry);
+        Ok(json!({
+            "valid": diagnostics.is_empty(),
+            "diagnostics": diagnostics.iter().map(|diagnostic| json!({
+                "code": diagnostic.code,
+                "severity": diagnostic.severity.to_string(),
+                "subject": diagnostic.subject.to_string(),
+                "message": diagnostic.message,
+            })).collect::<Vec<_>>(),
         }))
     }
 

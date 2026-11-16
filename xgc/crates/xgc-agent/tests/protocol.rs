@@ -69,6 +69,10 @@ fn describe_lists_protocol_components_and_world_state() {
         .as_array()
         .unwrap()
         .contains(&Json::from("world.get")));
+    assert!(response["methods"]
+        .as_array()
+        .unwrap()
+        .contains(&Json::from("world.validate")));
 }
 
 #[test]
@@ -101,6 +105,9 @@ fn plan_apply_query_and_revert_roundtrip() {
     assert_eq!(digest["state_hash"].as_str().unwrap().len(), 16);
     let stats = result(call(&mut agent, "world.stats", Json::Null));
     assert_eq!(stats["components"].as_array().unwrap().len(), 2);
+    let validated = result(call(&mut agent, "world.validate", Json::Null));
+    assert_eq!(validated["valid"], true);
+    assert!(validated["diagnostics"].as_array().unwrap().is_empty());
 
     let set = Command::SetField {
         entity: EntityId::from_raw(1),

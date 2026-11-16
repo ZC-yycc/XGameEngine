@@ -11,14 +11,14 @@
 `xgc-world`（archetype 列式存储、单 / 双组件可变查询、按 archetype 分片的并行
 遍历、生成回收、`Command` 事务 plan / apply / revert、结构化 `Spawn` / `Despawn` /
 `AddComponent` / `RemoveComponent` + 实体快照撤销、可序列化 `EntityData` / 组件工厂、
-实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希）、
-`xgc-store`（版本化 JSON 包络 + 原子写）、
+实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希、
+`World::validate_data` 世界体检）、`xgc-store`（版本化 JSON 包络 + 原子写）、
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `VelocitySystem` / `GravitySystem` / 逐帧 state hash /
 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get / digest / stats /
-load / save / plan / apply / revert；查询支持字段投影 + 标量过滤 + 稳定分页）、
-`xgc-cli`（`schema` / `check` / `bench` / `export` / `import` / `run` / `serve`）、
-`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
+validate / load / save / plan / apply / revert；查询支持字段投影 + 标量过滤 +
+稳定分页）、`xgc-cli`（`schema` / `check [路径]` / `bench` / `export` / `import` /
+`run` / `serve`）、`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
 
 实测（i7-10700，release，10 000 个 `(Transform, Velocity)`）：
 
@@ -37,13 +37,14 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`position += linear * dt`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 Agent 协议可完成 `describe → plan（含 before 预览）→ apply → query / get /
-digest / stats → save/load → revert` 闭环；查询 IR 支持
+digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 `select: ["core.transform:position"]` 字段投影、`filter` 的 `eq/ne/lt/le/gt/ge`
 标量比较（向量用 `axis: x/y/z/w` 取分量）与稳定分页。所有 64 位实体 ID 在 JSON
-里是十进制字符串，避免 2^53 精度丢失。
+里是十进制字符串，避免 2^53 精度丢失。`xgc check <world.json>` 会按注册表体检
+未知组件 / 字段 / 值类型 / 重复项。
 
-`cargo test --workspace` 全绿（53 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（25 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同
+`cargo test --workspace` 全绿（56 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（27 个 Rust 文件最大 594 行）；schema 两次导出逐字节相同
 （`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /

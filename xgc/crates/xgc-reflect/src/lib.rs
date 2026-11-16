@@ -87,6 +87,23 @@ impl FieldType {
             Self::Entity => "entity",
         }
     }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "bool" => Self::Bool,
+            "i64" => Self::I64,
+            "u32" => Self::U32,
+            "f32" => Self::F32,
+            "f64" => Self::F64,
+            "string" => Self::String,
+            "vec2" => Self::Vec2,
+            "vec3" => Self::Vec3,
+            "vec4" => Self::Vec4,
+            "quat" => Self::Quat,
+            "entity" => Self::Entity,
+            _ => return None,
+        })
+    }
 }
 
 /// 动态值：schema 默认值、命令参数、Agent 协议共用。
@@ -105,6 +122,39 @@ pub enum Value {
     Vec4([f64; 4]),
     Quat([f64; 4]),
     Entity(u64),
+}
+
+impl Value {
+    /// schema 声明类型与动态值是否相容；校验 / 迁移 / Agent 共用这一份判断。
+    pub fn fits(&self, ty: FieldType) -> bool {
+        match (self, ty) {
+            (Self::Bool(_), FieldType::Bool) => true,
+            (Self::I64(_), FieldType::I64) => true,
+            (Self::I64(value), FieldType::U32) => (0..=u32::MAX as i64).contains(value),
+            (Self::F64(_), FieldType::F32 | FieldType::F64) => true,
+            (Self::String(_), FieldType::String) => true,
+            (Self::Vec2(_), FieldType::Vec2) => true,
+            (Self::Vec3(_), FieldType::Vec3) => true,
+            (Self::Vec4(_), FieldType::Vec4) => true,
+            (Self::Quat(_), FieldType::Quat) => true,
+            (Self::Entity(_), FieldType::Entity) => true,
+            _ => false,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Bool(_) => "bool",
+            Self::I64(_) => "i64",
+            Self::F64(_) => "f64",
+            Self::String(_) => "string",
+            Self::Vec2(_) => "vec2",
+            Self::Vec3(_) => "vec3",
+            Self::Vec4(_) => "vec4",
+            Self::Quat(_) => "quat",
+            Self::Entity(_) => "entity",
+        }
+    }
 }
 
 impl Value {

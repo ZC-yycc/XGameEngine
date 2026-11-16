@@ -34,13 +34,14 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
 | `crates/xgc-world/src/journal.rs` | `Journal` / `TxRecord`：事务日志与重放 |
 | `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `WorldSnapshot` / 恢复 |
+| `crates/xgc-world/src/validate.rs` | `World::validate_data`：组件 / 字段 / 类型 / 重复项体检 |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
-| `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / load / save / plan / apply / revert |
+| `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check / bench / export / import / run / serve` |
+| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / serve` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
 ## 不变量（改代码前先看）
@@ -54,10 +55,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第十五刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
+1. M1 第十六刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 2. 接第三个系统（Transform 层级传播），再谈物理 / 渲染。
 3. Agent 能力清单 / 诊断码 / 视觉验证；`xgc check` 扩到项目 / 场景。
-4. `world` / `agent` lib 都在 600 行附近，先拆模块再扩。
+4. 现在最大文件 594 行：动它之前先拆。
 
 ## Token 纪律
 
