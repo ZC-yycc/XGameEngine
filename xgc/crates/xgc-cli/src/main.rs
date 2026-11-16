@@ -70,6 +70,8 @@ fn main() -> ExitCode {
             args.next().as_deref(),
             args.next().as_deref(),
             args.next().as_deref(),
+            args.next().as_deref(),
+            args.next().as_deref(),
         ),
         Some(other) => {
             eprintln!("未知命令：{other}");

@@ -21,6 +21,32 @@ fn showcase_scene_migrates_and_runs() {
     assert!(report.entities > 0);
     assert!(report.mapped_components > 0);
     assert_eq!(report.missing_parents, 0);
+    let camera = data
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.components.iter().any(|component| {
+                component.component.0 == 0x0203 && {
+                    component.fields.iter().any(|(name, value)| {
+                        name == "active" && *value == xgc_world::Value::Bool(true)
+                    })
+                }
+            })
+        })
+        .expect("showcase 应有 active 相机");
+    let global = camera
+        .components
+        .iter()
+        .find(|component| component.component.0 == 0x0105)
+        .expect("相机应有 GlobalTransform");
+    assert_eq!(global.fields.len(), 3, "GlobalTransform 必须带真实变换");
+    let position = global
+        .fields
+        .iter()
+        .find(|(name, _)| name == "position")
+        .map(|(_, value)| value.clone());
+    assert!(matches!(position, Some(xgc_world::Value::Vec3(_))));
+
     let mut world = World::new();
     world.restore_world_data(&data).unwrap();
     let mut simulation = Simulation::new(world);

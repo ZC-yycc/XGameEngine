@@ -3,7 +3,8 @@ use std::process::ExitCode;
 
 use xgc_asset::scan as scan_assets;
 use xgc_render::{
-    load_glb, GpuContext, MeshCache, Pass, RenderGraph, Renderer, ResourceDesc, ResourceUsage,
+    build_draw_list, load_glb, GpuContext, MeshCache, Pass, RenderGraph, Renderer, ResourceDesc,
+    ResourceUsage,
 };
 use xgc_store::load_world;
 use xgc_world::World;
@@ -167,6 +168,8 @@ pub(crate) fn render_frame(
     input: Option<&str>,
     output: Option<&str>,
     assets_root: Option<&str>,
+    width: Option<&str>,
+    height: Option<&str>,
 ) -> ExitCode {
     let (Some(input), Some(output)) = (input, output) else {
         eprintln!("用法：xgc render-frame <世界.json> <out.ppm> [资产根]");
@@ -191,8 +194,12 @@ pub(crate) fn render_frame(
             return ExitCode::from(1);
         }
     };
-    let width = 320u32;
-    let height = 180u32;
+    let width = width
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(320);
+    let height = height
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(180);
     let desc = ResourceDesc::texture2d(
         "frame",
         "rgba8unorm",
@@ -222,6 +229,14 @@ pub(crate) fn render_frame(
         None => MeshCache::new("."),
     };
     let mut renderer = Renderer::new(meshes);
+    if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
+        for item in build_draw_list(&world).items {
+            eprintln!(
+                "draw entity={:?} model={} color={:?} t={:?}",
+                item.entity, item.model, item.color, item.transform
+            );
+        }
+    }
     let stats = match renderer.render(&context, texture, &world) {
         Ok(stats) => stats,
         Err(err) => {

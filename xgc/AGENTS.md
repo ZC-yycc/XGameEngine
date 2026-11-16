@@ -94,6 +94,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/old_particle.rs` | 旧 `ParticleEmitter` → `particle.emitter` |
 | `crates/xgc-migrate/src/old_ui.rs` | 旧 `UiElement` → `ui.element`（kind 由内容推断） |
 | `crates/xgc-migrate/src/prefab.rs` | `instantiate_prefab` / `revert_prefab`：新 ID、Parent 重写、按 source_id 认回并保留 Transform |
+| `crates/xgc-migrate/src/transform_migrate.rs` | 旧 Transform → XGC Transform + GlobalTransform（同值，层级系统随后重算） |
 | `crates/xgc-migrate/src/compare.rs` | `compare_headless`：旧引擎 `--headless` JSON 与 XGC 世界的 entities / bodies / colliders / emitters / audio 对照 |
 | `crates/xgc-migrate/src/verify.rs` | `verify_migration`：重新迁移旧场景与目标 `WorldData` 逐实体 / 字段对比，浮点按 f32 容差 |
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
@@ -142,10 +143,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接：统计对照已通；下一步逐帧 trace / 视觉截图对照。
-2. 脚本：正式 System 调度与脚本组件生命周期完整化。
-3. 资产：密码学签名 / 跨机器增量。
-4. 动画：混合权重细调。
+1. 割接：统计对照已通；下一步逐帧 trace / 像素级视觉对照。
+2. 渲染：迁移场景已可见，但仍是平面色 / 黑背景；补材质 / 光照 / 天空。
+3. 脚本：正式 System 调度与脚本组件生命周期完整化。
+4. 资产：密码学签名 / 跨机器增量。
 5. 现在最大文件 595 行：动它之前先拆。
 
 ## Token 纪律

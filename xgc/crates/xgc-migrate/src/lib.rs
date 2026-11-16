@@ -11,12 +11,14 @@ use std::collections::HashSet;
 use serde::Deserialize;
 
 use old_scene::OldScene;
+use transform_migrate::transform_components;
 use xgc_base::EntityId;
 use xgc_world::{
     AudioGain, AudioSource, Camera, CharacterController as XgcCharacter, Component, ComponentData,
-    EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script,
-    Transform, UiInteraction, UiLayout, Value, WorldData,
+    EntityData, Material, MeshRenderer, Name, Parent, PhysicsBody, Script, UiInteraction, UiLayout,
+    Value, WorldData,
 };
+
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
 mod compare;
 mod old_animator;
@@ -27,6 +29,7 @@ mod old_scene;
 mod old_ui;
 mod prefab;
 mod report;
+mod transform_migrate;
 mod verify;
 pub use compare::{compare_headless, CompareReport, Stats};
 pub use prefab::{instantiate_prefab, revert_prefab};
@@ -317,47 +320,20 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         }
 
         let position = old.transform.position.to_array();
-        let rotation = old.transform.rotation.to_array();
+        let mut rotation = old.transform.rotation.to_array();
+        if camera.is_some() {
+            // 旧相机以 +Z 为前方；XGC 相机以 -Z 为前方。
+            rotation = [-rotation[2], rotation[3], rotation[0], -rotation[1]];
+        }
         let scale = old.transform.scale.to_array();
+        let (transform_data, global_data) = transform_components(position, rotation, scale);
         let mut components = vec![
-            ComponentData {
-                component: Transform::ID,
-                fields: vec![
-                    (
-                        "position".to_string(),
-                        Value::Vec3([
-                            f64::from(position[0]),
-                            f64::from(position[1]),
-                            f64::from(position[2]),
-                        ]),
-                    ),
-                    (
-                        "rotation".to_string(),
-                        Value::Quat([
-                            f64::from(rotation[0]),
-                            f64::from(rotation[1]),
-                            f64::from(rotation[2]),
-                            f64::from(rotation[3]),
-                        ]),
-                    ),
-                    (
-                        "scale".to_string(),
-                        Value::Vec3([
-                            f64::from(scale[0]),
-                            f64::from(scale[1]),
-                            f64::from(scale[2]),
-                        ]),
-                    ),
-                ],
-            },
+            transform_data,
             ComponentData {
                 component: Name::ID,
                 fields: vec![("value".to_string(), Value::String(old.name.clone()))],
             },
-            ComponentData {
-                component: GlobalTransform::ID,
-                fields: Vec::new(),
-            },
+            global_data,
         ];
 
         if let Some(parent) = old.parent {
