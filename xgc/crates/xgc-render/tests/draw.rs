@@ -45,3 +45,21 @@ fn empty_world_has_empty_draw_list() {
     let world = World::new();
     assert!(build_draw_list(&world).is_empty());
 }
+
+#[test]
+fn draw_item_carries_global_transform() {
+    let mut world = World::new();
+    world.spawn((
+        GlobalTransform {
+            position: [2.0, 3.0, 4.0],
+            ..GlobalTransform::default()
+        },
+        MeshRenderer {
+            model: "builtin://quad".to_string(),
+        },
+    ));
+    let list = build_draw_list(&world);
+    assert_eq!(list.items[0].transform[12], 2.0);
+    assert_eq!(list.items[0].transform[13], 3.0);
+    assert_eq!(list.items[0].transform[14], 4.0);
+}

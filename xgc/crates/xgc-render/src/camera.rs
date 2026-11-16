@@ -13,6 +13,31 @@ pub const IDENTITY: Mat4 = [
     0.0, 0.0, 0.0, 1.0,
 ];
 
+/// 局部 `GlobalTransform` → 模型矩阵（缩放 → 旋转 → 平移）。
+pub fn model_matrix(transform: &GlobalTransform) -> Mat4 {
+    let x = quat_rotate(transform.rotation, [transform.scale[0], 0.0, 0.0]);
+    let y = quat_rotate(transform.rotation, [0.0, transform.scale[1], 0.0]);
+    let z = quat_rotate(transform.rotation, [0.0, 0.0, transform.scale[2]]);
+    [
+        x[0],
+        x[1],
+        x[2],
+        0.0, //
+        y[0],
+        y[1],
+        y[2],
+        0.0, //
+        z[0],
+        z[1],
+        z[2],
+        0.0, //
+        transform.position[0],
+        transform.position[1],
+        transform.position[2],
+        1.0,
+    ]
+}
+
 /// 第一台 `active` 相机（EntityId 最小），返回 proj * view。
 pub fn camera_view_projection(world: &World, width: u32, height: u32) -> Option<Mat4> {
     let mut selected: Option<(EntityId, Mat4)> = None;

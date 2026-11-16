@@ -6,12 +6,15 @@
 use xgc_base::EntityId;
 use xgc_world::{GlobalTransform, Material, MeshRenderer, World};
 
+use super::camera::{model_matrix, Mat4};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawItem {
     pub entity: EntityId,
     pub model: String,
     pub color: [f32; 4],
     pub roughness: f32,
+    pub transform: Mat4,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -37,15 +40,16 @@ pub fn build_draw_list(world: &World) -> DrawList {
         let Some(entity) = world.entity(key) else {
             return;
         };
-        if world.get::<GlobalTransform>(key).is_none() {
+        let Some(transform) = world.get::<GlobalTransform>(key) else {
             return;
-        }
+        };
         let material = world.get::<Material>(key).copied().unwrap_or_default();
         items.push(DrawItem {
             entity,
             model: mesh.model.clone(),
             color: material.base_color,
             roughness: material.roughness,
+            transform: model_matrix(transform),
         });
     });
     items.sort_by_key(|item| item.entity);
