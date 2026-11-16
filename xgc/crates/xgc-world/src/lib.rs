@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use xgc_base::{EntityId, EntityKey};
 pub use xgc_reflect::Component;
 
+mod animation_components;
 mod command;
 mod components;
 mod data;
@@ -25,6 +26,7 @@ mod render_components;
 mod snapshot;
 mod validate;
 
+pub use animation_components::Animator;
 pub use command::{Applied, Command, Plan};
 pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
 pub use data::{ComponentData, EntityData, WorldData};

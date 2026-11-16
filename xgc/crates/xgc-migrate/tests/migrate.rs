@@ -2,8 +2,8 @@
 
 use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
-    AudioSource, Camera, Component, ComponentId, GlobalTransform, Material, MeshRenderer, Name,
-    Parent, PhysicsBody, Script, Transform, Value,
+    Animator as XgcAnimator, AudioSource, Camera, Component, ComponentId, GlobalTransform,
+    Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform, Value,
 };
 
 const SCENE: &str = r#"(
@@ -277,4 +277,63 @@ fn migrate_dir_writes_each_scene_and_reports_failures() {
     assert_eq!(migrated.entities.len(), 2);
 
     std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn maps_animator() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Anim",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Animated",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Animator((
+                                clip: "Walk",
+                                speed: 2.0,
+                                looping: false,
+                                autoplay: false,
+                                fade_time: 0.25,
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let animator = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == XgcAnimator::ID)
+        .unwrap();
+    let field = |name: &str| {
+        animator
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("clip"), Value::String("Walk".to_string()));
+    assert_eq!(field("speed"), Value::F64(2.0));
+    assert_eq!(field("looping"), Value::Bool(false));
+    assert_eq!(field("autoplay"), Value::Bool(false));
+    assert_eq!(field("fade_time"), Value::F64(0.25));
 }

@@ -11,10 +11,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
 use xgc_base::EntityId;
 use xgc_world::{
-    AudioSource, Camera, Component, ComponentData, ComponentId, EntityData, GlobalTransform,
-    Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform, Value, WorldData,
+    Animator as XgcAnimator, AudioSource, Camera, Component, ComponentData, ComponentId,
+    EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script,
+    Transform, Value, WorldData,
 };
 
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
@@ -117,6 +119,15 @@ enum OldComponentData {
     Lua {
         path: String,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct OldAnimator {
+    clip: String,
+    speed: f32,
+    looping: bool,
+    autoplay: bool,
+    fade_time: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -248,6 +259,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut script_path = None;
         let mut audio = None;
         let mut physics = None;
+        let mut animator = None;
         for entry in &old.components.entries {
             match &entry.data {
                 OldComponentData::Mesh(mesh) => {
@@ -288,6 +300,20 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                 }
                 OldComponentData::Physics(old_physics) => {
                     physics = Some(old_physics);
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Animator(old_animator) => {
+                    let old: OldAnimator = old_animator
+                        .clone()
+                        .into_rust()
+                        .map_err(|err| MigrationError::Parse(err.to_string()))?;
+                    animator = Some((
+                        old.clip,
+                        old.speed,
+                        old.looping,
+                        old.autoplay,
+                        old.fade_time,
+                    ));
                     report.mapped_components += 1;
                 }
                 _ => {}
@@ -380,6 +406,18 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     ("near".to_string(), Value::F64(f64::from(camera.near))),
                     ("far".to_string(), Value::F64(f64::from(camera.far))),
                     ("active".to_string(), Value::Bool(camera.active)),
+                ],
+            });
+        }
+        if let Some((clip, speed, looping, autoplay, fade_time)) = animator {
+            components.push(ComponentData {
+                component: XgcAnimator::ID,
+                fields: vec![
+                    ("clip".to_string(), Value::String(clip)),
+                    ("speed".to_string(), Value::F64(f64::from(speed))),
+                    ("looping".to_string(), Value::Bool(looping)),
+                    ("autoplay".to_string(), Value::Bool(autoplay)),
+                    ("fade_time".to_string(), Value::F64(f64::from(fade_time))),
                 ],
             });
         }
@@ -541,6 +579,7 @@ pub fn component_id_name(id: ComponentId) -> &'static str {
         Name::ID => "core.name",
         Parent::ID => "core.parent",
         GlobalTransform::ID => "core.global_transform",
+        XgcAnimator::ID => "animation.animator",
         _ => "unknown",
     }
 }
