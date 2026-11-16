@@ -106,6 +106,7 @@ dependencies = [
  "serde_json",
  "xgc-base",
  "xgc-reflect",
+ "xgc-store",
  "xgc-world",
 ]
 
@@ -116,6 +117,16 @@ dependencies = [
  "serde",
  "serde_json",
  "xgc-base",
+]
+
+[[package]]
+name = "xgc-store"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "xgc-base",
+ "xgc-world",
 ]
 
 [[package]]

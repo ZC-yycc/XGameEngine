@@ -16,6 +16,7 @@ use super::{Column, EntitySnapshot, Name, Transform, Velocity, World};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntityData {
     pub id: EntityId,
+    pub revision: u64,
     pub components: Vec<ComponentData>,
 }
 
@@ -23,6 +24,7 @@ impl EntityData {
     pub fn new(id: EntityId) -> Self {
         Self {
             id,
+            revision: 0,
             components: Vec::new(),
         }
     }
@@ -37,6 +39,14 @@ impl EntityData {
 pub struct ComponentData {
     pub component: ComponentId,
     pub fields: Vec<(String, Value)>,
+}
+
+/// 可序列化的整个世界：实体按 `EntityId` 排序，便于逐字节比较。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldData {
+    pub revision: u64,
+    pub next_id: u64,
+    pub entities: Vec<EntityData>,
 }
 
 type CreateFn = fn(&[(String, Value)]) -> Result<Box<dyn Any>, String>;
@@ -119,7 +129,42 @@ impl World {
             let fields = snapshot.fields(component)?;
             components.push(ComponentData { component, fields });
         }
-        Some(EntityData { id, components })
+        Some(EntityData {
+            id,
+            revision: snapshot.revision(),
+            components,
+        })
+    }
+
+    /// 整个世界转成可序列化形态；实体按 `EntityId` 排序。
+    pub fn world_data(&self) -> WorldData {
+        let mut entities: Vec<_> = self
+            .metas
+            .iter()
+            .filter(|meta| meta.alive)
+            .filter_map(|meta| self.entity_data(meta.id))
+            .collect();
+        entities.sort_by_key(|entity| entity.id.raw());
+        WorldData {
+            revision: self.revision,
+            next_id: self.next_id,
+            entities,
+        }
+    }
+
+    /// 从可序列化世界数据重建；实体 ID / revision / 组件全部保留。
+    pub fn restore_world_data(&mut self, data: &WorldData) -> Result<(), String> {
+        let keys: Vec<_> = self.by_id.values().copied().collect();
+        for key in keys {
+            let _ = self.despawn_raw(key);
+        }
+        self.revision = data.revision;
+        self.next_id = data.next_id;
+        for entity in &data.entities {
+            let snapshot = self.snapshot_from_data(entity)?;
+            self.restore_entity_raw(snapshot)?;
+        }
+        Ok(())
     }
 
     /// 把可序列化数据构造成一列一行的实体快照；组件 / 字段 / 类型都在这里校验。
@@ -149,6 +194,10 @@ impl World {
         }
 
         components.sort_by_key(|(component, _)| component.0);
-        Ok(EntitySnapshot::from_parts(data.id, 0, components))
+        Ok(EntitySnapshot::from_parts(
+            data.id,
+            data.revision,
+            components,
+        ))
     }
 }

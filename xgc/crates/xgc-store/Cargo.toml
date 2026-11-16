@@ -1,0 +1,13 @@
+[package]
+name = "xgc-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC 持久化：版本化 JSON + 原子写"
+
+[dependencies]
+xgc-base = { path = "../xgc-base" }
+xgc-world = { path = "../xgc-world" }
+serde.workspace = true
+serde_json.workspace = true

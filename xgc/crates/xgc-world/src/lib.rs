@@ -10,7 +10,7 @@ use std::any::Any;
 use std::collections::HashMap;
 
 use xgc_base::{EntityId, EntityKey};
-use xgc_reflect::{Component, ComponentId, Value};
+use xgc_reflect::Component;
 
 mod command;
 mod components;
@@ -21,9 +21,10 @@ mod snapshot;
 
 pub use command::{Applied, Command, Plan};
 pub use components::{Name, Transform, Velocity};
-pub use data::{ComponentData, EntityData};
+pub use data::{ComponentData, EntityData, WorldData};
 pub use journal::{Journal, TxRecord};
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
+pub use xgc_reflect::{ComponentId, Value};
 
 use data::ComponentFactory;
 

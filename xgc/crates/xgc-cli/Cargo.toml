@@ -14,4 +14,5 @@ path = "src/main.rs"
 xgc-base = { path = "../xgc-base" }
 xgc-reflect = { path = "../xgc-reflect" }
 xgc-world = { path = "../xgc-world" }
+xgc-store = { path = "../xgc-store" }
 serde_json.workspace = true
