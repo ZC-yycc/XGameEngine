@@ -2,12 +2,12 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, AnimatorSystem, FrameCommands, GravitySystem, Scenario, Schedule, SimError,
-    Simulation, System, SystemAccess, VelocitySystem,
+    play, verify, AnimatorSystem, FrameCommands, GravitySystem, PhysicsSystem, Scenario, Schedule,
+    SimError, Simulation, System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
-    Animator, Command, Component, ComponentId, GlobalTransform, Name, Parent, Transform, Value,
-    Velocity, World,
+    Animator, Command, Component, ComponentId, GlobalTransform, Name, Parent, PhysicsBody,
+    Transform, Value, Velocity, World,
 };
 
 fn build_scenario() -> Scenario {
@@ -108,7 +108,7 @@ fn velocity_system_moves_transform() {
     let mut simulation = Simulation::with_fixed_dt(world, 1.0);
     assert_eq!(
         simulation.schedule().names(),
-        vec!["velocity", "animation", "hierarchy"]
+        vec!["physics", "velocity", "animation", "hierarchy"]
     );
     simulation.step(Vec::new()).unwrap();
     assert_eq!(simulation.trace().frames.len(), 1);
@@ -122,7 +122,7 @@ fn velocity_system_moves_transform() {
 #[test]
 fn velocity_system_declares_access_and_parallel_hash_matches() {
     let simulation = Simulation::new(World::new());
-    let access = &simulation.schedule().accesses()[0];
+    let access = &simulation.schedule().accesses()[1];
     assert_eq!(access.reads, vec![ComponentId(0x0102)]);
     assert_eq!(access.writes, vec![ComponentId(0x0101)]);
 
@@ -332,4 +332,32 @@ fn animation_system_advances_and_loops() {
     assert!((world.get::<Animator>(entity).unwrap().time - 0.6).abs() < 1e-5);
     schedule.run(&mut world, 0.3);
     assert!((world.get::<Animator>(entity).unwrap().time - 0.2).abs() < 1e-5);
+}
+
+#[test]
+fn physics_only_dynamic_bodies_fall() {
+    let mut world = World::new();
+    let dynamic = world.spawn((
+        Velocity::default(),
+        PhysicsBody {
+            kind: "dynamic".to_string(),
+            gravity_scale: 1.0,
+            ..PhysicsBody::default()
+        },
+    ));
+    let static_body = world.spawn((
+        Velocity::default(),
+        PhysicsBody {
+            kind: "static".to_string(),
+            gravity_scale: 1.0,
+            ..PhysicsBody::default()
+        },
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(PhysicsSystem::default());
+    schedule.run(&mut world, 0.5);
+    let dynamic = world.get::<Velocity>(dynamic).unwrap();
+    let static_body = world.get::<Velocity>(static_body).unwrap();
+    assert!((dynamic.linear[1] + 4.905).abs() < 1e-4, "{dynamic:?}");
+    assert_eq!(static_body.linear, [0.0; 3]);
 }

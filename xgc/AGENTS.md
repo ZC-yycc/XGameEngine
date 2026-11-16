@@ -47,7 +47,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/validate.rs` | `World::validate_data`：组件 / 字段 / 类型 / 重复项体检 |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
-| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `VelocitySystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` / `Scenario` / `Trace` / `play` / `verify` |
+| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
+| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `VelocitySystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
@@ -85,8 +86,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画时钟已接入默认 schedule；下一步骨骼 / 剪辑采样。
-2. 物理 / UI / 粒子运行时系统。
+1. 物理：目前只有重力加速；下一步碰撞 / 角色控制器。
+2. 动画：时钟已接入，下一步骨骼 / 剪辑采样。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 599 行：动它之前先拆。
 
