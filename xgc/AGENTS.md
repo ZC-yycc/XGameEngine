@@ -100,7 +100,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读；`from_arc` 复用于编辑器视口 |
-| `crates/xgc-render/src/renderer.rs` | 帧入口：CPU / GPU 蒙皮、实例化 pass、`set_clear_color`、active camera MVP、UI 叠加、选择高亮 |
+| `crates/xgc-render/src/diff.rs` | `diff_images`：尺寸 / 差异像素比例 / 平均绝对误差 / 最大通道差 |
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
@@ -124,7 +124,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
 | `crates/xgc-cli/src/assets_cmd.rs` | `xgc assets <项目根>`：GUID 扫描 |
 | `crates/xgc-cli/src/cook_cmd.rs` | `xgc cook <项目根> <输出目录>` / `pack <世界.json> <项目根> <输出目录>` / `run-cooked <目录> [帧]` |
-| `crates/xgc-cli/src/compare_cmd.rs` | `xgc compare-headless <旧 headless.json> <世界.json>` |
+| `crates/xgc-cli/src/compare_cmd.rs` | `xgc compare-headless` / `xgc image-diff <旧图> <新图> [阈值]`；PNG / PPM 逐像素差异 |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |

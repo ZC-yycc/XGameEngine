@@ -11,6 +11,7 @@ use std::fmt;
 
 mod assets;
 mod camera;
+mod diff;
 mod draw;
 mod glb;
 mod gpu;
@@ -31,6 +32,7 @@ pub use assets::MeshCache;
 pub use camera::{
     camera_view_projection, model_matrix, mul, perspective_rh_zo, transform_point, Mat4, IDENTITY,
 };
+pub use diff::{diff_images, ImageDiff};
 pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use glb::{
     load_glb, load_glb_skeleton, load_gltf, load_model, MeshError, SkeletonGraph, SkeletonJoint,

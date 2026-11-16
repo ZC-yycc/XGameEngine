@@ -54,6 +54,11 @@ fn main() -> ExitCode {
         Some("compare-headless") => {
             compare_cmd::compare(args.next().as_deref(), args.next().as_deref())
         }
+        Some("image-diff") => compare_cmd::image(
+            args.next().as_deref(),
+            args.next().as_deref(),
+            args.next().as_deref(),
+        ),
         Some("pack") => cook_cmd::pack(
             args.next().as_deref(),
             args.next().as_deref(),
