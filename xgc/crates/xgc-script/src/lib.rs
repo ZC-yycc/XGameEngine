@@ -1,10 +1,14 @@
 //! Lua 脚本宿主：只开放安全标准库，脚本按名字加载、执行与调用。
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use mlua::{
-    FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib, Value as LuaValue,
+    FromLua, FromLuaMulti, HookTriggers, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib,
+    Value as LuaValue, VmState,
 };
 use xgc_base::EntityId;
 use xgc_world::{builtin_registry, Transform, Value, World};
@@ -12,6 +16,8 @@ use xgc_world::{builtin_registry, Transform, Value, World};
 pub struct LuaHost {
     lua: Lua,
     world: Option<Rc<RefCell<World>>>,
+    scripts: RefCell<BTreeMap<String, String>>,
+    budget: Option<(Arc<AtomicUsize>, usize)>,
 }
 
 impl LuaHost {
@@ -20,7 +26,12 @@ impl LuaHost {
         let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
         let lua = Lua::new_with(libs, LuaOptions::default())
             .map_err(|err| format!("创建 Lua 运行时失败：{err}"))?;
-        Ok(Self { lua, world: None })
+        Ok(Self {
+            lua,
+            world: None,
+            scripts: RefCell::new(BTreeMap::new()),
+            budget: None,
+        })
     }
 
     /// 绑定世界：脚本可读实体数 / 读写 Transform；World 由调用方持有以便检查结果。
@@ -30,7 +41,57 @@ impl LuaHost {
         Ok(Self {
             lua: host.lua,
             world: Some(world),
+            scripts: RefCell::new(BTreeMap::new()),
+            budget: None,
         })
+    }
+
+    /// 指令预算：每 N 条指令检查一次，超限返回 Lua 错误；每次 run / eval / call 前重置。
+    pub fn set_instruction_limit(&mut self, limit: usize) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let hook_counter = Arc::clone(&counter);
+        let budget = Arc::new(limit);
+        self.lua.set_hook(
+            HookTriggers::new().every_nth_instruction(1000),
+            move |_, _| {
+                let used = hook_counter.fetch_add(1000, Ordering::Relaxed) + 1000;
+                if used > *budget {
+                    Err(mlua::Error::RuntimeError("Lua 指令预算超限".to_string()))
+                } else {
+                    Ok(VmState::Continue)
+                }
+            },
+        );
+        self.budget = Some((counter, limit));
+    }
+
+    fn reset_budget(&self) {
+        if let Some((counter, _)) = &self.budget {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// 加载脚本：执行并登记源码，供 `reload` 使用。
+    pub fn load_script(&self, name: &str, source: &str) -> Result<(), String> {
+        self.scripts
+            .borrow_mut()
+            .insert(name.to_string(), source.to_string());
+        self.run(name, source)
+    }
+
+    /// 热重载：重新执行已登记脚本。
+    pub fn reload(&self, name: &str) -> Result<(), String> {
+        let source = self
+            .scripts
+            .borrow()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("没有登记脚本 {name}"))?;
+        self.run(name, &source)
+    }
+
+    pub fn script_names(&self) -> Vec<String> {
+        self.scripts.borrow().keys().cloned().collect()
     }
 
     fn register_world(&self, world: &Rc<RefCell<World>>) -> Result<(), String> {
@@ -145,6 +206,7 @@ impl LuaHost {
     }
 
     pub fn run(&self, name: &str, source: &str) -> Result<(), String> {
+        self.reset_budget();
         self.lua
             .load(source)
             .set_name(name)
@@ -153,6 +215,7 @@ impl LuaHost {
     }
 
     pub fn eval<T: FromLuaMulti>(&self, source: &str) -> Result<T, String> {
+        self.reset_budget();
         self.lua
             .load(source)
             .eval()
@@ -160,6 +223,7 @@ impl LuaHost {
     }
 
     pub fn call<T: FromLua>(&self, name: &str, args: impl IntoLuaMulti) -> Result<T, String> {
+        self.reset_budget();
         let function: mlua::Function = self
             .lua
             .globals()
@@ -175,6 +239,7 @@ impl LuaHost {
         name: &str,
         args: impl IntoLuaMulti,
     ) -> Result<T, String> {
+        self.reset_budget();
         let function: mlua::Function = self
             .lua
             .globals()

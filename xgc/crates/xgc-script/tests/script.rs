@@ -119,3 +119,24 @@ fn unknown_component_is_reported() {
     let error = host.run("bad", "xgc.get(1, 'nope', 'x')").unwrap_err();
     assert!(error.contains("未知组件"));
 }
+
+#[test]
+fn instruction_budget_stops_infinite_loop() {
+    let mut host = LuaHost::new().unwrap();
+    host.set_instruction_limit(20_000);
+    let error = host.run("spin", "while true do end").unwrap_err();
+    assert!(error.contains("预算"), "{error}");
+}
+
+#[test]
+fn scripts_can_be_loaded_and_reloaded() {
+    let host = LuaHost::new().unwrap();
+    host.load_script("math", "function value() return 1 end")
+        .unwrap();
+    assert_eq!(host.call::<i64>("value", ()).unwrap(), 1);
+    host.load_script("math", "function value() return 2 end")
+        .unwrap();
+    assert_eq!(host.call::<i64>("value", ()).unwrap(), 2);
+    assert_eq!(host.script_names(), vec!["math"]);
+    assert!(host.reload("missing").is_err());
+}
