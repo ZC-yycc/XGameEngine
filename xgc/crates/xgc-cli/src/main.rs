@@ -318,7 +318,20 @@ fn gpu_probe() -> ExitCode {
                     match context.read_texture_rgba8(texture, 4, 4) {
                         Ok(pixels) => {
                             println!("gpu: clear pass + readback {:?}", &pixels[..4]);
-                            ExitCode::SUCCESS
+                            if let Err(err) = context.draw_triangle(texture) {
+                                eprintln!("三角形绘制失败：{err}");
+                                return ExitCode::from(1);
+                            }
+                            match context.read_texture_rgba8(texture, 4, 4) {
+                                Ok(pixels) => {
+                                    println!("gpu: triangle pixel {:?}", &pixels[..4]);
+                                    ExitCode::SUCCESS
+                                }
+                                Err(err) => {
+                                    eprintln!("三角形回读失败：{err}");
+                                    ExitCode::from(1)
+                                }
+                            }
                         }
                         Err(err) => {
                             eprintln!("回读失败：{err}");
