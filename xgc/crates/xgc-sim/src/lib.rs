@@ -227,7 +227,8 @@ mod systems;
 mod ui;
 
 pub use animation::{
-    load_clip_ron, AnimationClip, AnimationLibrary, AnimationPlaybackSystem, TranslationKey,
+    load_clip_ron, mul_quat, AnimationClip, AnimationLibrary, AnimationPlaybackSystem, RotationKey,
+    ScaleKey, TranslationKey,
 };
 pub use character::{CharacterBlockSystem, CharacterStepSystem};
 pub use systems::{

@@ -10,50 +10,22 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
+use old_scene::OldScene;
 use xgc_base::EntityId;
 use xgc_world::{
-    Animator as XgcAnimator, AudioSource, Camera, CharacterController as XgcCharacter, Component,
-    ComponentData, EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody,
-    Script, Transform, UiInteraction, UiLayout, Value, WorldData,
+    AudioSource, Camera, CharacterController as XgcCharacter, Component, ComponentData, EntityData,
+    GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform,
+    UiInteraction, UiLayout, Value, WorldData,
 };
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
+mod old_animator;
 mod old_lod;
 mod old_particle;
 mod old_rust;
+mod old_scene;
 mod old_ui;
 mod report;
 pub use report::{component_id_name, MigrationBatch, MigrationError, MigrationReport};
-#[derive(Debug, Deserialize)]
-struct OldScene {
-    format_version: u32,
-    #[serde(default)]
-    #[allow(dead_code)]
-    name: String,
-    #[serde(default)]
-    entities: Vec<OldEntity>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OldEntity {
-    id: OldId,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    parent: Option<OldId>,
-    transform: OldTransform,
-    components: OldComponents,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-struct OldId(u64);
-
-#[derive(Debug, Deserialize)]
-struct OldTransform {
-    position: glam::Vec3,
-    rotation: glam::Quat,
-    scale: glam::Vec3,
-}
-
 #[derive(Debug, Default, Deserialize)]
 struct OldComponents {
     #[serde(default)]
@@ -427,24 +399,34 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
             });
         }
         if let Some((clip, speed, looping, autoplay, fade_time)) = animator {
-            components.push(ComponentData {
-                component: XgcAnimator::ID,
-                fields: vec![
-                    ("clip".to_string(), Value::String(clip)),
-                    ("speed".to_string(), Value::F64(f64::from(speed))),
-                    ("looping".to_string(), Value::Bool(looping)),
-                    ("autoplay".to_string(), Value::Bool(autoplay)),
-                    ("fade_time".to_string(), Value::F64(f64::from(fade_time))),
-                    (
-                        "base_position".to_string(),
-                        Value::Vec3([
-                            f64::from(old.transform.position.x),
-                            f64::from(old.transform.position.y),
-                            f64::from(old.transform.position.z),
-                        ]),
-                    ),
-                ],
-            });
+            let position = old.transform.position.to_array();
+            let rotation = old.transform.rotation.to_array();
+            let scale = old.transform.scale.to_array();
+            components.push(old_animator::animator_component(
+                old_animator::AnimatorInput {
+                    clip,
+                    speed,
+                    looping,
+                    autoplay,
+                    fade_time,
+                    position: [
+                        f64::from(position[0]),
+                        f64::from(position[1]),
+                        f64::from(position[2]),
+                    ],
+                    rotation: [
+                        f64::from(rotation[0]),
+                        f64::from(rotation[1]),
+                        f64::from(rotation[2]),
+                        f64::from(rotation[3]),
+                    ],
+                    scale: [
+                        f64::from(scale[0]),
+                        f64::from(scale[1]),
+                        f64::from(scale[2]),
+                    ],
+                },
+            ));
         }
         if let Some(character) = character {
             components.push(ComponentData {

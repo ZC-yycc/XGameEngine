@@ -12,6 +12,8 @@ pub struct Animator {
     pub duration: f32,
     pub time: f32,
     pub base_position: [f32; 3],
+    pub base_rotation: [f32; 4],
+    pub base_scale: [f32; 3],
 }
 
 impl Default for Animator {
@@ -25,6 +27,8 @@ impl Default for Animator {
             duration: 0.0,
             time: 0.0,
             base_position: [0.0; 3],
+            base_rotation: [0.0, 0.0, 0.0, 1.0],
+            base_scale: [1.0; 3],
         }
     }
 }
@@ -60,6 +64,14 @@ impl Component for Animator {
                 Value::Vec3([0.0, 0.0, 0.0]),
             )
             .doc("动画位移的基准位置；采样结果 = base + 关键帧偏移"),
+            FieldDescriptor::new(
+                "base_rotation",
+                FieldType::Vec4,
+                Value::Vec4([0.0, 0.0, 0.0, 1.0]),
+            )
+            .doc("动画旋转的基准四元数；采样结果 = base * 关键帧旋转"),
+            FieldDescriptor::new("base_scale", FieldType::Vec3, Value::Vec3([1.0; 3]))
+                .doc("动画缩放的基准；采样结果 = base * 关键帧缩放"),
         ]
     }
 
@@ -76,6 +88,17 @@ impl Component for Animator {
                 f64::from(self.base_position[0]),
                 f64::from(self.base_position[1]),
                 f64::from(self.base_position[2]),
+            ])),
+            "base_rotation" => Some(Value::Vec4([
+                f64::from(self.base_rotation[0]),
+                f64::from(self.base_rotation[1]),
+                f64::from(self.base_rotation[2]),
+                f64::from(self.base_rotation[3]),
+            ])),
+            "base_scale" => Some(Value::Vec3([
+                f64::from(self.base_scale[0]),
+                f64::from(self.base_scale[1]),
+                f64::from(self.base_scale[2]),
             ])),
             _ => None,
         }
@@ -153,6 +176,32 @@ impl Component for Animator {
                 self.base_position = value.as_vec3().ok_or_else(|| {
                     format!(
                         "animation.animator.base_position 期望 vec3，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "base_rotation" => {
+                self.base_rotation = match value {
+                    Value::Vec4(value) => [
+                        value[0] as f32,
+                        value[1] as f32,
+                        value[2] as f32,
+                        value[3] as f32,
+                    ],
+                    other => {
+                        return Err(format!(
+                            "animation.animator.base_rotation 期望 vec4，得到 {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+                Ok(())
+            }
+            "base_scale" => {
+                self.base_scale = value.as_vec3().ok_or_else(|| {
+                    format!(
+                        "animation.animator.base_scale 期望 vec3，得到 {}",
                         value.type_name()
                     )
                 })?;
