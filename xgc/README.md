@@ -27,7 +27,8 @@
 `AnimationLibrary::load_dir` 扫描目录 /
 `AnimationLibrary` 按名索引 /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/
-engine.diagnostics（诊断码目录）/ query / get / digest / stats / validate / load / save /
+engine.diagnostics（诊断码目录）/ engine.history（事务日志）/ query / get / digest / stats /
+validate / load / save /
 plan / apply / revert；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
 Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫描 `.meta`，

@@ -12,7 +12,7 @@ use std::path::Path;
 use serde_json::{json, Value as Json};
 use xgc_reflect::{ComponentId, Registry};
 use xgc_store::{load_world, save_world};
-use xgc_world::{Applied, Command, Plan, World};
+use xgc_world::{Applied, Command, Journal, Plan, World};
 
 mod query;
 
@@ -25,8 +25,8 @@ pub struct Agent {
     registry: Registry,
     plans: HashMap<u64, Plan>,
     applied: HashMap<u64, Applied>,
+    journal: Journal,
     next_plan: u64,
-    next_tx: u64,
 }
 
 impl Default for Agent {
@@ -43,8 +43,8 @@ impl Agent {
             registry,
             plans: HashMap::new(),
             applied: HashMap::new(),
+            journal: Journal::new(),
             next_plan: 0,
-            next_tx: 0,
         }
     }
 
@@ -84,6 +84,7 @@ impl Agent {
         match method {
             "engine.describe" => self.describe(),
             "engine.diagnostics" => self.diagnostics(),
+            "engine.history" => self.history(),
             "world.query" => self.query(params),
             "world.get" => self.get(params),
             "world.digest" => self.digest(),
@@ -114,6 +115,7 @@ impl Agent {
             "methods": [
                 "engine.describe",
                 "engine.diagnostics",
+                "engine.history",
                 "world.query",
                 "world.get",
                 "world.digest",
@@ -308,6 +310,14 @@ impl Agent {
         Ok(json!({"entity": entity}))
     }
 
+    fn history(&self) -> Result<Json, String> {
+        Ok(json!({
+            "records": self.journal.records(),
+            "count": self.journal.len(),
+            "next_tx": self.journal.records().last().map_or(0, |record| record.tx_id + 1),
+        }))
+    }
+
     fn diagnostics(&self) -> Result<Json, String> {
         let codes: Vec<Json> = xgc_base::diagnostic_catalog()
             .iter()
@@ -475,10 +485,13 @@ impl Agent {
             .ok_or_else(|| format!("未知 plan_id：{plan_id}"))?;
         let applied = self
             .world
-            .apply(&plan)
+            .apply_logged(&plan, &mut self.journal)
             .map_err(|diagnostics| format!("应用失败：{diagnostics:?}"))?;
-        let tx_id = self.next_tx;
-        self.next_tx += 1;
+        let tx_id = self
+            .journal
+            .records()
+            .last()
+            .map_or(0, |record| record.tx_id);
         let response = json!({
             "tx_id": tx_id,
             "revision": applied.revision,

@@ -118,6 +118,10 @@ fn plan_apply_query_and_revert_roundtrip() {
 
     let applied = result(call(&mut agent, "edit.apply", json!({"plan_id": plan_id})));
     assert_eq!(applied["revision"], 1);
+    let history = result(call(&mut agent, "engine.history", Json::Null));
+    assert_eq!(history["count"], 1);
+    assert_eq!(history["records"][0]["tx_id"], 0);
+    assert_eq!(history["records"][0]["revision"], 1);
 
     let queried = result(call(
         &mut agent,
