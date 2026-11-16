@@ -3,8 +3,17 @@
 use xgc_render::{GpuContext, GpuResource, MeshCache, Renderer, ResourceDesc, ResourceUsage};
 use xgc_world::{Camera, GlobalTransform, Material, MeshRenderer, World};
 
+use std::sync::{Mutex, MutexGuard};
+
+static GPU_LOCK: Mutex<()> = Mutex::new(());
+
+fn gpu_lock() -> MutexGuard<'static, ()> {
+    GPU_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 #[test]
 fn empty_world_clears_and_entity_emits_one_draw() {
+    let _gpu = gpu_lock();
     let Ok(context) = GpuContext::headless() else {
         eprintln!("skip: 没有可用 GPU 适配器");
         return;
@@ -110,6 +119,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
 
 #[test]
 fn ui_background_renders_over_target() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiLayout};
 
     let Ok(context) = GpuContext::headless() else {
@@ -146,6 +156,7 @@ fn ui_background_renders_over_target() {
 
 #[test]
 fn ui_focus_ring_renders_border() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiInteraction, UiLayout};
 
     let Ok(context) = GpuContext::headless() else {
@@ -196,6 +207,7 @@ fn text_mesh_has_vertices_for_known_characters() {
 
 #[test]
 fn ui_text_renders_colored_pixels() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiLayout};
 
     let Ok(context) = GpuContext::headless() else {
@@ -237,6 +249,7 @@ fn ui_text_renders_colored_pixels() {
 
 #[test]
 fn ppm_image_loads_and_renders_cells() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiLayout};
 
     let path = std::env::temp_dir().join(format!(
@@ -292,6 +305,7 @@ fn ppm_image_loads_and_renders_cells() {
 
 #[test]
 fn png_image_loads_and_renders_texture() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiLayout};
 
     let path = std::env::temp_dir().join(format!(
@@ -348,6 +362,7 @@ fn png_image_loads_and_renders_texture() {
 
 #[test]
 fn ui_image_preserve_keeps_aspect() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiLayout};
 
     let Ok(context) = GpuContext::headless() else {
@@ -416,6 +431,7 @@ fn cover_uv_crops_wide_source() {
 
 #[test]
 fn ui_image_nine_slice_draws_nine_cells() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiLayout};
 
     let Ok(context) = GpuContext::headless() else {
@@ -471,6 +487,7 @@ fn ui_image_nine_slice_draws_nine_cells() {
 
 #[test]
 fn ui_clip_scissors_background() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiLayout};
 
     let Ok(context) = GpuContext::headless() else {
@@ -526,6 +543,7 @@ fn text_wraps_when_width_is_tight() {
 
 #[test]
 fn ui_background_rounds_corners() {
+    let _gpu = gpu_lock();
     use xgc_world::{UiElement, UiLayout};
 
     let Ok(context) = GpuContext::headless() else {

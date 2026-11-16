@@ -9,6 +9,7 @@ use xgc_agent::Agent;
 use xgc_asset::scan as scan_assets;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
+use xgc_script::LuaHost;
 use xgc_sim::{play, write_wav_mono, AnimationLibrary, AudioLibrary, Scenario, SoftwareMixer};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
         Some("clips") => clips(args.next().as_deref()),
         Some("audio") => audio(args.next().as_deref()),
         Some("mix") => mix(args.next().as_deref(), args.next().as_deref()),
+        Some("lua") => lua(args.next().as_deref()),
         Some("render-frame") => render::render_frame(
             args.next().as_deref(),
             args.next().as_deref(),
@@ -245,6 +247,37 @@ fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
         output
     );
     ExitCode::SUCCESS
+}
+
+fn lua(path: Option<&str>) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("用法：xgc lua <脚本.lua>");
+        return ExitCode::from(2);
+    };
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("读取脚本失败：{err}");
+            return ExitCode::from(2);
+        }
+    };
+    let host = match LuaHost::new() {
+        Ok(host) => host,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(2);
+        }
+    };
+    match host.run(path, &source) {
+        Ok(()) => {
+            println!("lua: {path} 执行完成");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn mix(input: Option<&str>, output: Option<&str>) -> ExitCode {

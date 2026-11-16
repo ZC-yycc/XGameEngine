@@ -20,4 +20,5 @@ xgc-agent = { path = "../xgc-agent" }
 xgc-asset = { path = "../xgc-asset" }
 xgc-render = { path = "../xgc-render" }
 xgc-migrate = { path = "../xgc-migrate" }
+xgc-script = { path = "../xgc-script" }
 serde_json.workspace = true

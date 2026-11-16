@@ -1,0 +1,10 @@
+[package]
+name = "xgc-script"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC Lua 脚本宿主：安全标准库、脚本执行、函数调用"
+
+[dependencies]
+mlua = { version = "0.10", features = ["lua54", "vendored"] }

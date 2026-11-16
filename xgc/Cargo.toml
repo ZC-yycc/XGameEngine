@@ -10,6 +10,7 @@ members = [
     "crates/xgc-asset",
     "crates/xgc-render",
     "crates/xgc-migrate",
+    "crates/xgc-script",
     "crates/xgc-cli",
     "crates/xgc-xtask",
 ]
