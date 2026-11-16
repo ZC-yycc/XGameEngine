@@ -50,9 +50,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：材质 uniform、顶点 / 索引缓冲、draw |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList` |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引、builtin 网格占位 |
+| `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / serve / migrate <文件|目录> / render-graph / gpu-probe` |
+| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / serve / migrate <文件|目录> / render-graph / gpu-probe / mesh-probe <路径>` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
 ## 不变量（改代码前先看）
@@ -66,7 +67,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M2 第八刀：真实资产网格加载；builtin 只作占位，管线缓存已就位。
+1. M2 第九刀：资产路径解析 + mesh cache，把 `render.mesh.model` 真正映射到 GLB。
 2. 旧场景迁移补 UI / Animator 等剩余组件映射。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 597 行：动它之前先拆。

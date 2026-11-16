@@ -1178,6 +1178,8 @@ name = "xgc-render"
 version = "0.1.0"
 dependencies = [
  "pollster",
+ "serde",
+ "serde_json",
  "wgpu",
  "xgc-base",
  "xgc-world",

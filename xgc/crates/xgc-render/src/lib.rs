@@ -10,12 +10,14 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
 mod draw;
+mod glb;
 mod gpu;
 mod mesh;
 mod pipeline;
 mod resources;
 
 pub use draw::{build_draw_list, DrawItem, DrawList};
+pub use glb::{load_glb, MeshError};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
 pub use mesh::{builtin_mesh, Mesh};
 pub use pipeline::{RenderCache, TrianglePipeline};

@@ -8,7 +8,7 @@ use std::time::Instant;
 use xgc_agent::Agent;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
-use xgc_render::{GpuContext, Pass, RenderGraph, ResourceDesc, ResourceUsage};
+use xgc_render::{load_glb, GpuContext, Pass, RenderGraph, ResourceDesc, ResourceUsage};
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
@@ -27,16 +27,17 @@ fn main() -> ExitCode {
         Some("migrate") => migrate(args.next().as_deref(), args.next().as_deref()),
         Some("render-graph") => render_graph(),
         Some("gpu-probe") => gpu_probe(),
+        Some("mesh-probe") => mesh_probe(args.next().as_deref()),
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>>"
             );
             ExitCode::from(2)
         }
@@ -364,6 +365,27 @@ fn gpu_probe() -> ExitCode {
         }
         Err(err) => {
             eprintln!("GPU 不可用：{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn mesh_probe(path: Option<&str>) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("用法：xgc mesh-probe <glb 路径>");
+        return ExitCode::from(2);
+    };
+    match load_glb(Path::new(path)) {
+        Ok(mesh) => {
+            println!(
+                "mesh: {} 个顶点，{} 个索引",
+                mesh.positions.len(),
+                mesh.indices.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("加载网格失败：{err}");
             ExitCode::from(1)
         }
     }
