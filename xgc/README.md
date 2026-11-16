@@ -29,8 +29,8 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 `guid://` 解析、`Renderer` 帧入口（DrawList → MeshCache → RenderCache → GPU）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
-`GpuMeshCache` 顶点 / 索引缓冲跨帧复用、从 `render.mesh` + `render.material` 抽
-`DrawList` 并按实体顺序 draw、RGBA8 回读）、
+`GpuMeshCache` 顶点 / 索引缓冲跨帧复用、单 uniform 缓冲 + 动态 offset 材质批、
+从 `render.mesh` + `render.material` 抽 `DrawList` 并按实体顺序 draw、RGBA8 回读）、
 `xgc-cli`（`schema` / `check [路径]` /
 `bench` / `export` / `import` / `run` / `serve` / `migrate` / `render-graph`）、
 `xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。

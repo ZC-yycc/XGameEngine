@@ -61,8 +61,8 @@ fn fs() -> @location(0) vec4<f32> {
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                            has_dynamic_offset: true,
+                            min_binding_size: wgpu::BufferSize::new(80),
                         },
                         count: None,
                     }],
@@ -329,7 +329,7 @@ impl TrianglePipeline {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, &bind_group, &[0]);
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             if let Some(index_buffer) = &index_buffer {
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);

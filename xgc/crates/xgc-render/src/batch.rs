@@ -10,8 +10,10 @@ use super::pipeline::RenderCache;
 
 struct PreparedDraw {
     mesh_key: String,
-    bind_group: wgpu::BindGroup,
+    offset: u32,
 }
+
+const MATERIAL_STRIDE: u64 = 256;
 
 pub(crate) struct BatchRequest<'a> {
     pub(crate) texture: &'a wgpu::Texture,
@@ -40,7 +42,14 @@ impl RenderCache {
         }
         let format = texture.format();
         let pipeline = self.depth_pipeline_for(context, format);
+        let material_buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("xgc-batch-materials"),
+            size: list.items.len() as u64 * MATERIAL_STRIDE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut prepared = Vec::with_capacity(list.items.len());
+        let mut slot = 0u32;
         for item in &list.items {
             let loaded = meshes
                 .get(&item.model)
@@ -60,28 +69,31 @@ impl RenderCache {
             for value in mul(mvp, item.transform) {
                 uniform_bytes.extend_from_slice(&value.to_le_bytes());
             }
-            let uniform = context.device().create_buffer(&wgpu::BufferDescriptor {
-                label: Some("xgc-batch-material"),
-                size: 80,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            context.queue().write_buffer(&uniform, 0, &uniform_bytes);
-            let bind_group = context
-                .device()
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("xgc-batch-material-bind"),
-                    layout: pipeline.layout(),
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform.as_entire_binding(),
-                    }],
-                });
+            context.queue().write_buffer(
+                &material_buffer,
+                u64::from(slot) * MATERIAL_STRIDE,
+                &uniform_bytes,
+            );
             prepared.push(PreparedDraw {
                 mesh_key: item.model.clone(),
-                bind_group,
+                offset: slot * MATERIAL_STRIDE as u32,
             });
+            slot += 1;
         }
+        let material_bind = context
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("xgc-batch-material-bind"),
+                layout: pipeline.layout(),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &material_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(80),
+                    }),
+                }],
+            });
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
@@ -114,7 +126,7 @@ impl RenderCache {
             });
             pass.set_pipeline(pipeline.raw());
             for draw in &prepared {
-                pass.set_bind_group(0, &draw.bind_group, &[]);
+                pass.set_bind_group(0, &material_bind, &[draw.offset]);
                 let Some(mesh) = gpu_meshes.get(&draw.mesh_key) else {
                     continue;
                 };
