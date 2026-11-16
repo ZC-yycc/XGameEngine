@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use super::draw::DrawList;
+use super::mesh::{builtin_mesh, Mesh};
 use super::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 
 #[derive(Debug)]
@@ -131,11 +132,8 @@ impl GpuContext {
             return self.clear_texture(texture, wgpu::Color::BLACK);
         }
         for (index, item) in list.items.iter().enumerate() {
-            if index == 0 {
-                pipeline.draw(self, texture, item.color)?;
-            } else {
-                pipeline.draw_over(self, texture, item.color)?;
-            }
+            let mesh = builtin_mesh(&item.model).unwrap_or_else(Mesh::fullscreen_triangle);
+            pipeline.draw_mesh(self, texture, &mesh, item.color, index == 0)?;
         }
         Ok(())
     }
@@ -174,13 +172,8 @@ struct Material {
 var<uniform> material: Material;
 
 @vertex
-fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
-    var positions = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
-    return vec4<f32>(positions[index], 0.0, 1.0);
+fn vs(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(position, 1.0);
 }
 
 @fragment
@@ -225,7 +218,11 @@ fn fs() -> @location(0) vec4<f32> {
                     module: &shader,
                     entry_point: Some("vs"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &[],
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: 12,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                    }],
                 },
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
@@ -368,12 +365,7 @@ impl TrianglePipeline {
         texture: &wgpu::Texture,
         color: [f32; 4],
     ) -> Result<(), GpuError> {
-        self.draw_with(
-            context,
-            texture,
-            color,
-            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-        )
+        self.draw_mesh(context, texture, &Mesh::fullscreen_triangle(), color, true)
     }
 
     /// 在已有颜色上继续画，不 clear；用于同一次 pass 的后续 draw。
@@ -383,13 +375,31 @@ impl TrianglePipeline {
         texture: &wgpu::Texture,
         color: [f32; 4],
     ) -> Result<(), GpuError> {
-        self.draw_with(context, texture, color, wgpu::LoadOp::Load)
+        self.draw_mesh(context, texture, &Mesh::fullscreen_triangle(), color, false)
+    }
+
+    /// 用真实顶点缓冲画网格；`clear` 控制是否先清黑。
+    pub fn draw_mesh(
+        &self,
+        context: &GpuContext,
+        texture: &wgpu::Texture,
+        mesh: &Mesh,
+        color: [f32; 4],
+        clear: bool,
+    ) -> Result<(), GpuError> {
+        let load = if clear {
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        } else {
+            wgpu::LoadOp::Load
+        };
+        self.draw_with(context, texture, mesh, color, load)
     }
 
     fn draw_with(
         &self,
         context: &GpuContext,
         texture: &wgpu::Texture,
+        mesh: &Mesh,
         color: [f32; 4],
         load: wgpu::LoadOp<wgpu::Color>,
     ) -> Result<(), GpuError> {
@@ -411,6 +421,22 @@ impl TrianglePipeline {
             mapped_at_creation: false,
         });
         context.queue.write_buffer(&buffer, 0, &bytes);
+
+        if mesh.positions.is_empty() {
+            return Ok(());
+        }
+        let vertex_bytes: Vec<u8> = mesh
+            .positions
+            .iter()
+            .flat_map(|position| position.iter().flat_map(|value| value.to_le_bytes()))
+            .collect();
+        let vertex_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("xgc-vertices"),
+            size: vertex_bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
         let bind_group = context
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -445,7 +471,8 @@ impl TrianglePipeline {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.draw(0..mesh.positions.len() as u32, 0..1);
         }
         context.queue.submit(Some(encoder.finish()));
         Ok(())

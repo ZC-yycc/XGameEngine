@@ -1,7 +1,7 @@
 //! 真实 GPU 资源创建；没有适配器时测试直接跳过（不把 CI 绑在 GPU 上）。
 
 use xgc_render::{
-    build_draw_list, GpuContext, GpuResource, ResourceDesc, ResourceTable, ResourceUsage,
+    build_draw_list, GpuContext, GpuResource, Mesh, ResourceDesc, ResourceTable, ResourceUsage,
 };
 use xgc_world::{GlobalTransform, Material, MeshRenderer, World};
 
@@ -94,6 +94,24 @@ fn gpu_resources_are_created_when_adapter_available() {
     context.draw_list(texture, &list).unwrap();
     let pixels = context.read_texture_rgba8(texture, 2, 2).unwrap();
     assert_eq!(&pixels[..4], &[0, 0, 255, 255]);
+
+    let quad_texture = ResourceDesc::texture2d(
+        "quad",
+        "rgba8unorm",
+        4,
+        4,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let quad_resource = context.create_resource(&quad_texture).unwrap();
+    let quad = quad_resource.as_texture().unwrap();
+    let pipeline = context.create_triangle_pipeline(quad.format());
+    pipeline
+        .draw_mesh(&context, quad, &Mesh::quad(), [0.0, 1.0, 0.0, 1.0], true)
+        .unwrap();
+    let pixels = context.read_texture_rgba8(quad, 4, 4).unwrap();
+    assert_eq!(&pixels[..4], &[0, 0, 0, 255], "角点应在四边形外");
+    let center = 4 * (2 * 4 + 2);
+    assert_eq!(&pixels[center..center + 4], &[0, 255, 0, 255]);
 }
 
 #[test]

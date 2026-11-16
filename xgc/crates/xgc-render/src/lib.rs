@@ -11,10 +11,12 @@ use std::fmt;
 
 mod draw;
 mod gpu;
+mod mesh;
 mod resources;
 
 pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable, TrianglePipeline};
+pub use mesh::{builtin_mesh, Mesh};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
