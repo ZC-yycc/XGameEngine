@@ -227,7 +227,7 @@ pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
     GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,
 };
-pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem};
+pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem, UiNav};
 
 pub struct Simulation {
     world: World,

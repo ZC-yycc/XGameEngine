@@ -50,7 +50,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `load_clip_ron` / `AnimationLibrary`：关键帧排序、线性采样、循环、RON 加载 |
-| `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：锚点 / 偏移、父相对矩形、裁剪、可见性继承、命中、交互状态、焦点 |
+| `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：锚点 / 偏移、父相对矩形、裁剪、可见性继承、命中、交互状态、Tab / 方向键焦点 |
 | `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe（组件 / sim / render 能力清单）/ engine.diagnostics / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
@@ -89,7 +89,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. UI：布局 / 裁剪 / 命中 / 状态 / Tab 焦点已接；下一步方向键按几何选邻与真实输入层。
+1. UI：Tab / 方向键焦点已接；下一步真实输入层与焦点环样式。
 2. 动画：剪辑资产注册与骨骼采样。
 3. 物理：台阶与斜坡。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。

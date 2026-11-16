@@ -149,10 +149,63 @@ fn ui_focus_cycles_through_interactable_elements() {
     schedule.add(UiFocusSystem {
         next: true,
         confirm: false,
+        nav: None,
     });
     schedule.run(&mut world, 0.016);
     assert!(world.get::<UiInteraction>(first).unwrap().focused);
     schedule.run(&mut world, 0.016);
     assert!(world.get::<UiInteraction>(second).unwrap().focused);
     assert!(!world.get::<UiInteraction>(first).unwrap().focused);
+}
+
+#[test]
+fn ui_focus_direction_picks_geometric_neighbor() {
+    let mut world = World::new();
+    let center = world.spawn((
+        UiElement {
+            offset_min: [100.0, 100.0],
+            offset_max: [120.0, 120.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+        UiInteraction::default(),
+    ));
+    let right = world.spawn((
+        UiElement {
+            offset_min: [200.0, 100.0],
+            offset_max: [220.0, 120.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+        UiInteraction::default(),
+    ));
+    let down = world.spawn((
+        UiElement {
+            offset_min: [100.0, 200.0],
+            offset_max: [120.0, 220.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+        UiInteraction::default(),
+    ));
+    let mut layout = Schedule::new();
+    layout.add(UiLayoutSystem {
+        viewport: [400.0, 400.0],
+    });
+    layout.run(&mut world, 0.016);
+    let mut focus = Schedule::new();
+    focus.add(UiFocusSystem {
+        nav: Some(xgc_sim::UiNav::Tab),
+        ..UiFocusSystem::default()
+    });
+    focus.run(&mut world, 0.016);
+    assert!(world.get::<UiInteraction>(center).unwrap().focused);
+    let mut right_focus = Schedule::new();
+    right_focus.add(UiFocusSystem {
+        nav: Some(xgc_sim::UiNav::Right),
+        ..UiFocusSystem::default()
+    });
+    right_focus.run(&mut world, 0.016);
+    assert!(world.get::<UiInteraction>(right).unwrap().focused);
+    assert!(!world.get::<UiInteraction>(down).unwrap().focused);
 }

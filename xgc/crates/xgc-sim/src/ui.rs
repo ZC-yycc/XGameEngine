@@ -141,11 +141,21 @@ impl System for UiInteractionSystem {
     }
 }
 
-/// 焦点导航：`next` 按 EntityId 顺序切到下一个可交互元素；`confirm` 同时点击。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiNav {
+    Tab,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// 焦点导航：Tab 循环，方向键按几何选邻；`confirm` 同时点击。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UiFocusSystem {
     pub next: bool,
     pub confirm: bool,
+    pub nav: Option<UiNav>,
 }
 
 impl System for UiFocusSystem {
@@ -161,14 +171,14 @@ impl System for UiFocusSystem {
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
-        if !self.next && !self.confirm {
+        if !self.next && !self.confirm && self.nav.is_none() {
             return;
         }
         let mut interactable = HashMap::new();
         world.for_each::<UiElement>(|key, element| {
             interactable.insert(key, element.interactable);
         });
-        let mut focusable: Vec<(EntityId, xgc_base::EntityKey)> = Vec::new();
+        let mut focusable: Vec<(EntityId, xgc_base::EntityKey, [f32; 2])> = Vec::new();
         let mut current = None;
         world.for_each::<UiInteraction>(|key, state| {
             if state.focused {
@@ -186,19 +196,27 @@ impl System for UiFocusSystem {
                 return;
             }
             if let Some(entity) = world.entity(key) {
-                focusable.push((entity, key));
+                focusable.push((
+                    entity,
+                    key,
+                    [
+                        layout.rect[0] + layout.rect[2] * 0.5,
+                        layout.rect[1] + layout.rect[3] * 0.5,
+                    ],
+                ));
             }
         });
         if focusable.is_empty() {
             return;
         }
-        focusable.sort_by_key(|(entity, _)| *entity);
+        focusable.sort_by_key(|(entity, _, _)| *entity);
         let current_index =
-            current.and_then(|entity| focusable.iter().position(|(id, _)| *id == entity));
-        let target = if self.next {
-            current_index.map_or(0, |index| (index + 1) % focusable.len())
-        } else {
-            current_index.unwrap_or(0)
+            current.and_then(|entity| focusable.iter().position(|(id, _, _)| *id == entity));
+        let target = match self.nav {
+            Some(UiNav::Tab) => current_index.map_or(0, |index| (index + 1) % focusable.len()),
+            Some(direction) => neighbor(&focusable, current_index, direction),
+            None if self.next => current_index.map_or(0, |index| (index + 1) % focusable.len()),
+            None => current_index.unwrap_or(0),
         };
         let key = focusable[target].1;
         world.for_each_mut::<UiInteraction>(|_, state| {
@@ -215,6 +233,39 @@ impl System for UiFocusSystem {
             }
         }
     }
+}
+
+fn neighbor(
+    focusable: &[(EntityId, xgc_base::EntityKey, [f32; 2])],
+    current: Option<usize>,
+    nav: UiNav,
+) -> usize {
+    let Some(current) = current else {
+        return 0;
+    };
+    let from = focusable[current].2;
+    let mut best: Option<(f32, EntityId, usize)> = None;
+    for (index, (entity, _, center)) in focusable.iter().enumerate() {
+        if index == current {
+            continue;
+        }
+        let dx = center[0] - from[0];
+        let dy = center[1] - from[1];
+        let (primary, perpendicular) = match nav {
+            UiNav::Left if dx < 0.0 => (-dx, dy.abs()),
+            UiNav::Right if dx > 0.0 => (dx, dy.abs()),
+            UiNav::Up if dy < 0.0 => (-dy, dx.abs()),
+            UiNav::Down if dy > 0.0 => (dy, dx.abs()),
+            _ => continue,
+        };
+        let score = primary + perpendicular * 1.5;
+        if best.is_none_or(|(best_score, best_entity, _)| {
+            score < best_score || (score == best_score && *entity < best_entity)
+        }) {
+            best = Some((score, *entity, index));
+        }
+    }
+    best.map(|(_, _, index)| index).unwrap_or(current)
 }
 
 fn resolve(
