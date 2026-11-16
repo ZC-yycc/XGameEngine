@@ -15,6 +15,7 @@ use super::mesh::Mesh;
 use super::pipeline::RenderCache;
 use super::resources::{ResourceDesc, ResourceUsage};
 use super::text::text_mesh;
+use super::texture::TexturePipeline;
 use super::ui_draw::quad_matrix;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,6 +37,8 @@ pub struct Renderer {
     gpu_meshes: GpuMeshCache,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
+    ui_pipeline: Option<(wgpu::TextureFormat, TexturePipeline)>,
+    ui_textures: HashMap<String, Option<wgpu::Texture>>,
 }
 
 impl Renderer {
@@ -46,6 +49,8 @@ impl Renderer {
             gpu_meshes: GpuMeshCache::new(),
             depth: None,
             images: HashMap::new(),
+            ui_pipeline: None,
+            ui_textures: HashMap::new(),
         }
     }
 
@@ -167,28 +172,42 @@ impl Renderer {
                     let loaded = ImageData::load_ppm(std::path::Path::new(image_path)).ok();
                     self.images.insert(image_path.clone(), loaded);
                 }
-                if let Some(Some(image)) = self.images.get(image_path) {
-                    let colors = image.cells(8, 8);
-                    for row in 0..8 {
-                        for col in 0..8 {
-                            let cell = [
-                                rect[0] + rect[2] * col as f32 / 8.0,
-                                rect[1] + rect[3] * row as f32 / 8.0,
-                                rect[2] / 8.0,
-                                rect[3] / 8.0,
-                            ];
-                            let color = colors[row * 8 + col];
-                            pipeline.draw_mesh_with_mvp(
-                                context,
-                                target,
-                                &mesh,
-                                color,
-                                false,
-                                Some(quad_matrix(cell, viewport)),
-                            )?;
-                            draws += 1;
-                        }
-                    }
+                if !self.ui_textures.contains_key(image_path) {
+                    let texture = self
+                        .images
+                        .get(image_path)
+                        .and_then(|image| image.as_ref())
+                        .map(|image| {
+                            let mut rgba = Vec::with_capacity(image.rgba.len() * 4);
+                            for pixel in &image.rgba {
+                                rgba.extend_from_slice(pixel);
+                            }
+                            context.create_texture_rgba8(
+                                "xgc-ui-image",
+                                image.width,
+                                image.height,
+                                &rgba,
+                            )
+                        });
+                    self.ui_textures.insert(image_path.clone(), texture);
+                }
+                if self.ui_pipeline.as_ref().map(|(format, _)| *format) != Some(target.format()) {
+                    self.ui_pipeline = Some((
+                        target.format(),
+                        context.create_texture_pipeline(target.format()),
+                    ));
+                }
+                if let (Some((_, pipeline)), Some(Some(image))) =
+                    (&self.ui_pipeline, self.ui_textures.get(image_path))
+                {
+                    pipeline.draw(
+                        context,
+                        target,
+                        image,
+                        quad_matrix(*rect, viewport),
+                        [1.0; 4],
+                    )?;
+                    draws += 1;
                 }
             }
             if !text.is_empty() {

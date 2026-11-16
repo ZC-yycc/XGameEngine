@@ -70,9 +70,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读 |
-| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → 实例化 → GPU，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本叠加 |
+| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → 实例化 → GPU，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本 + 图片叠加 |
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PPM（P6）解码 / 平均色块 |
+| `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格 |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组的实例化管线 / storage 实例缓冲 |
 | `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用 |
@@ -99,8 +100,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 音频：软件混音已接；下一步播放设备 / 流式缓冲。
-2. UI：纹理管线 / PNG 解码。
+1. UI：纹理管线已接；下一步 PNG 解码 / 缩放。
+2. 音频：播放设备 / 流式缓冲。
 3. 动画：骨骼 / 蒙皮。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 5. 现在最大文件 588 行：动它之前先拆。

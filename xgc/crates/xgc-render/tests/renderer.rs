@@ -284,7 +284,7 @@ fn ppm_image_loads_and_renders_cells() {
         },
     ));
     let mut renderer = Renderer::new(MeshCache::new("."));
-    assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 64);
+    assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 1);
     let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
     assert!(pixels.chunks_exact(4).any(|pixel| pixel[0] > 0));
     std::fs::remove_file(&path).unwrap();

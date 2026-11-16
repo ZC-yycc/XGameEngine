@@ -22,6 +22,7 @@ mod pipeline;
 mod renderer;
 mod resources;
 mod text;
+mod texture;
 mod ui_draw;
 
 pub use assets::MeshCache;
@@ -39,6 +40,7 @@ pub use pipeline::{RenderCache, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 pub use text::text_mesh;
+pub use texture::TexturePipeline;
 pub use ui_draw::quad_matrix;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
