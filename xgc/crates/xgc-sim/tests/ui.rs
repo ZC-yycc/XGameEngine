@@ -1,7 +1,7 @@
 //! UI 布局 / 裁剪 / 命中 / 交互回归。
 
 use xgc_sim::{hit_test, Schedule, UiFocusSystem, UiInteractionSystem, UiLayoutSystem};
-use xgc_world::{Parent, UiElement, UiInteraction, UiLayout, World};
+use xgc_world::{Parent, UiElement, UiInput, UiInteraction, UiLayout, World};
 
 #[test]
 fn ui_layout_resolves_anchor_and_offsets() {
@@ -110,10 +110,12 @@ fn ui_interaction_marks_hover_and_click() {
     schedule.add(UiLayoutSystem {
         viewport: [100.0, 50.0],
     });
-    schedule.add(UiInteractionSystem {
-        cursor: Some([10.0, 10.0]),
+    world.spawn((UiInput {
+        cursor: [10.0, 10.0],
         click: true,
-    });
+        ..UiInput::default()
+    },));
+    schedule.add(UiInteractionSystem);
     schedule.run(&mut world, 0.016);
     let state = world.get::<UiInteraction>(entity).unwrap();
     assert!(state.hovered);
@@ -146,13 +148,12 @@ fn ui_focus_cycles_through_interactable_elements() {
     schedule.add(UiLayoutSystem {
         viewport: [100.0, 200.0],
     });
-    schedule.add(UiFocusSystem {
-        next: true,
-        confirm: false,
-        nav: None,
-    });
+    let input = world.spawn((UiInput::default(),));
+    schedule.add(UiFocusSystem);
+    world.get_mut::<UiInput>(input).unwrap().nav = "tab";
     schedule.run(&mut world, 0.016);
     assert!(world.get::<UiInteraction>(first).unwrap().focused);
+    world.get_mut::<UiInput>(input).unwrap().nav = "tab";
     schedule.run(&mut world, 0.016);
     assert!(world.get::<UiInteraction>(second).unwrap().focused);
     assert!(!world.get::<UiInteraction>(first).unwrap().focused);
@@ -193,18 +194,15 @@ fn ui_focus_direction_picks_geometric_neighbor() {
         viewport: [400.0, 400.0],
     });
     layout.run(&mut world, 0.016);
+    let input = world.spawn((UiInput::default(),));
     let mut focus = Schedule::new();
-    focus.add(UiFocusSystem {
-        nav: Some(xgc_sim::UiNav::Tab),
-        ..UiFocusSystem::default()
-    });
+    focus.add(UiFocusSystem);
+    world.get_mut::<UiInput>(input).unwrap().nav = "tab";
     focus.run(&mut world, 0.016);
     assert!(world.get::<UiInteraction>(center).unwrap().focused);
     let mut right_focus = Schedule::new();
-    right_focus.add(UiFocusSystem {
-        nav: Some(xgc_sim::UiNav::Right),
-        ..UiFocusSystem::default()
-    });
+    right_focus.add(UiFocusSystem);
+    world.get_mut::<UiInput>(input).unwrap().nav = "right";
     right_focus.run(&mut world, 0.016);
     assert!(world.get::<UiInteraction>(right).unwrap().focused);
     assert!(!world.get::<UiInteraction>(down).unwrap().focused);

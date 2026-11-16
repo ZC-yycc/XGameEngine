@@ -313,3 +313,77 @@ impl Component for UiInteraction {
         Ok(())
     }
 }
+
+/// 输入快照：由宿主 / Agent 写入，UI 系统消费。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiInput {
+    pub cursor: [f32; 2],
+    pub click: bool,
+    pub nav: &'static str,
+    pub confirm: bool,
+}
+
+impl Default for UiInput {
+    fn default() -> Self {
+        Self {
+            cursor: [-1.0, -1.0],
+            click: false,
+            nav: "none",
+            confirm: false,
+        }
+    }
+}
+
+impl Component for UiInput {
+    const ID: ComponentId = ComponentId(0x0604);
+    const NAME: &'static str = "ui.input";
+
+    fn default_value() -> Self {
+        Self::default()
+    }
+
+    fn doc() -> &'static str {
+        "UI 输入快照：cursor / click / nav / confirm；cursor = (-1,-1) 表示无指针"
+    }
+
+    fn fields() -> Vec<FieldDescriptor> {
+        vec![
+            FieldDescriptor::new("cursor", FieldType::Vec2, Value::Vec2([-1.0, -1.0])),
+            FieldDescriptor::new("click", FieldType::Bool, Value::Bool(false)),
+            FieldDescriptor::new("nav", FieldType::String, Value::String("none".into()))
+                .doc("none / tab / up / down / left / right"),
+            FieldDescriptor::new("confirm", FieldType::Bool, Value::Bool(false)),
+        ]
+    }
+
+    fn get_field(&self, field: &str) -> Option<Value> {
+        match field {
+            "cursor" => Some(Value::Vec2(vec2_f64(self.cursor))),
+            "click" => Some(Value::Bool(self.click)),
+            "nav" => Some(Value::String(self.nav.to_string())),
+            "confirm" => Some(Value::Bool(self.confirm)),
+            _ => None,
+        }
+    }
+
+    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
+        match field {
+            "cursor" => self.cursor = vec2(value, field)?,
+            "click" => self.click = boolean(value, field)?,
+            "nav" => {
+                self.nav = match string(value, field)? {
+                    "none" => "none",
+                    "tab" => "tab",
+                    "up" => "up",
+                    "down" => "down",
+                    "left" => "left",
+                    "right" => "right",
+                    other => return Err(format!("ui.input.nav 未知方向：{other}")),
+                };
+            }
+            "confirm" => self.confirm = boolean(value, field)?,
+            _ => return Err(format!("ui.input 没有字段 {field}")),
+        }
+        Ok(())
+    }
+}

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use xgc_base::EntityId;
-use xgc_world::{Component, Parent, UiElement, UiInteraction, UiLayout, World};
+use xgc_world::{Component, Parent, UiElement, UiInput, UiInteraction, UiLayout, World};
 
 use super::{System, SystemAccess};
 
@@ -101,12 +101,9 @@ impl System for UiLayoutSystem {
     }
 }
 
-/// 交互状态：按当前光标 / 点击更新 hover / press / click。
+/// 交互状态：按 `ui.input` 的光标 / 点击更新 hover / press / click。
 #[derive(Clone, Copy, Debug, Default)]
-pub struct UiInteractionSystem {
-    pub cursor: Option<[f32; 2]>,
-    pub click: bool,
-}
+pub struct UiInteractionSystem;
 
 impl System for UiInteractionSystem {
     fn name(&self) -> &'static str {
@@ -115,18 +112,21 @@ impl System for UiInteractionSystem {
 
     fn access(&self) -> SystemAccess {
         SystemAccess {
-            reads: vec![UiElement::ID, UiLayout::ID],
+            reads: vec![UiElement::ID, UiInput::ID, UiLayout::ID],
             writes: vec![UiInteraction::ID],
         }
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
+        let input = input_snapshot(world);
+        let cursor = input.and_then(|(_, input)| {
+            (input.cursor[0] >= 0.0 && input.cursor[1] >= 0.0).then_some(input.cursor)
+        });
+        let click = input.is_some_and(|(_, input)| input.click);
         let mut interactable = HashMap::new();
         world.for_each::<UiElement>(|key, element| {
             interactable.insert(key, element.interactable);
         });
-        let cursor = self.cursor;
-        let click = self.click;
         world.for_each2_mut::<UiLayout, UiInteraction>(|key, layout, state| {
             let hovered = cursor.is_some_and(|point| {
                 interactable.get(&key).copied().unwrap_or(false)
@@ -141,6 +141,27 @@ impl System for UiInteractionSystem {
     }
 }
 
+fn input_snapshot(world: &World) -> Option<(xgc_base::EntityKey, UiInput)> {
+    let mut found = None;
+    world.for_each::<UiInput>(|key, input| {
+        if found.is_none() {
+            found = Some((key, *input));
+        }
+    });
+    found
+}
+
+fn nav_from(value: &str) -> Option<UiNav> {
+    match value {
+        "tab" => Some(UiNav::Tab),
+        "up" => Some(UiNav::Up),
+        "down" => Some(UiNav::Down),
+        "left" => Some(UiNav::Left),
+        "right" => Some(UiNav::Right),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiNav {
     Tab,
@@ -152,11 +173,7 @@ pub enum UiNav {
 
 /// 焦点导航：Tab 循环，方向键按几何选邻；`confirm` 同时点击。
 #[derive(Clone, Copy, Debug, Default)]
-pub struct UiFocusSystem {
-    pub next: bool,
-    pub confirm: bool,
-    pub nav: Option<UiNav>,
-}
+pub struct UiFocusSystem;
 
 impl System for UiFocusSystem {
     fn name(&self) -> &'static str {
@@ -165,13 +182,17 @@ impl System for UiFocusSystem {
 
     fn access(&self) -> SystemAccess {
         SystemAccess {
-            reads: vec![UiElement::ID, UiLayout::ID, UiInteraction::ID],
-            writes: vec![UiInteraction::ID],
+            reads: vec![UiElement::ID, UiInput::ID, UiLayout::ID, UiInteraction::ID],
+            writes: vec![UiInput::ID, UiInteraction::ID],
         }
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
-        if !self.next && !self.confirm && self.nav.is_none() {
+        let Some((input_key, input)) = input_snapshot(world) else {
+            return;
+        };
+        let nav = nav_from(input.nav);
+        if nav.is_none() && !input.confirm {
             return;
         }
         let mut interactable = HashMap::new();
@@ -212,25 +233,28 @@ impl System for UiFocusSystem {
         focusable.sort_by_key(|(entity, _, _)| *entity);
         let current_index =
             current.and_then(|entity| focusable.iter().position(|(id, _, _)| *id == entity));
-        let target = match self.nav {
+        let target = match nav {
             Some(UiNav::Tab) => current_index.map_or(0, |index| (index + 1) % focusable.len()),
             Some(direction) => neighbor(&focusable, current_index, direction),
-            None if self.next => current_index.map_or(0, |index| (index + 1) % focusable.len()),
             None => current_index.unwrap_or(0),
         };
         let key = focusable[target].1;
         world.for_each_mut::<UiInteraction>(|_, state| {
             state.focused = false;
-            if self.confirm {
+            if input.confirm {
                 state.clicked = false;
             }
         });
         if let Some(state) = world.get_mut::<UiInteraction>(key) {
             state.focused = true;
-            if self.confirm {
+            if input.confirm {
                 state.clicked = true;
                 state.pressed = true;
             }
+        }
+        if let Some(input) = world.get_mut::<UiInput>(input_key) {
+            input.nav = "none";
+            input.confirm = false;
         }
     }
 }

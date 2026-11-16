@@ -160,8 +160,8 @@ impl Schedule {
         schedule.add(AabbCollisionSystem);
         schedule.add(AnimatorSystem);
         schedule.add(UiLayoutSystem::default());
-        schedule.add(UiInteractionSystem::default());
-        schedule.add(UiFocusSystem::default());
+        schedule.add(UiInteractionSystem);
+        schedule.add(UiFocusSystem);
         schedule.add(HierarchySystem::default());
         schedule
     }

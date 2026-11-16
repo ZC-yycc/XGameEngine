@@ -6,7 +6,7 @@ use xgc_reflect::Registry;
 use super::{
     Animator, AudioSource, Camera, CharacterController, GlobalTransform, LodGroup, Material,
     MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, Script, Transform,
-    UiElement, UiInteraction, UiLayout, Velocity,
+    UiElement, UiInput, UiInteraction, UiLayout, Velocity,
 };
 
 pub fn builtin_registry() -> Registry {
@@ -62,6 +62,9 @@ pub fn builtin_registry() -> Registry {
     registry
         .register::<UiInteraction>()
         .expect("内置组件注册失败：ui.interaction");
+    registry
+        .register::<UiInput>()
+        .expect("内置组件注册失败：ui.input");
     registry
         .register::<ParticleEmitter>()
         .expect("内置组件注册失败：particle.emitter");
