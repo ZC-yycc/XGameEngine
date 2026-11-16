@@ -49,7 +49,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` |
-| `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `load_clip_ron` / `AnimationLibrary`：关键帧排序、线性采样、循环、RON 加载 |
+| `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `load_clip_ron` / `AnimationLibrary`：关键帧排序、线性采样、循环、RON 加载、`AnimationPlaybackSystem` 写 Transform |
 | `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：布局、裁剪、可见性、命中、`ui.input` 驱动的交互 / Tab / 方向键焦点 |
 | `crates/xgc-sim/src/character.rs` | `CharacterStepSystem` / `CharacterBlockSystem`：低台阶抬升、高墙推出 |
 | `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
@@ -91,11 +91,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 物理：台阶 + 横向阻挡已接；下一步斜坡 / 球体角色碰撞。
-2. UI：文本 / 图片绘制。
-3. 动画：剪辑资产注册与骨骼采样。
+1. 动画：剪辑采样已写回 Transform；下一步骨骼 / 蒙皮或剪辑资产注册。
+2. 物理：斜坡 / 球体角色碰撞。
+3. UI：文本 / 图片绘制。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
-5. 现在最大文件 585 行：动它之前先拆。
+5. 现在最大文件 593 行：动它之前先拆。
 
 ## Token 纪律
 

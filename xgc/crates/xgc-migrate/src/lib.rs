@@ -435,6 +435,14 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     ("looping".to_string(), Value::Bool(looping)),
                     ("autoplay".to_string(), Value::Bool(autoplay)),
                     ("fade_time".to_string(), Value::F64(f64::from(fade_time))),
+                    (
+                        "base_position".to_string(),
+                        Value::Vec3([
+                            f64::from(old.transform.position.x),
+                            f64::from(old.transform.position.y),
+                            f64::from(old.transform.position.z),
+                        ]),
+                    ),
                 ],
             });
         }

@@ -76,8 +76,14 @@ fn describe_lists_protocol_components_and_world_state() {
             "velocity",
             "ground",
             "character",
+            "character_step",
+            "character_block",
             "aabb",
             "animation",
+            "animation_apply",
+            "ui_layout",
+            "ui_interaction",
+            "ui_focus",
             "hierarchy"
         ])
     );

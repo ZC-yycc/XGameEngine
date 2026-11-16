@@ -161,6 +161,7 @@ impl Schedule {
         schedule.add(CharacterBlockSystem);
         schedule.add(AabbCollisionSystem);
         schedule.add(AnimatorSystem);
+        schedule.add(AnimationPlaybackSystem::default());
         schedule.add(UiLayoutSystem::default());
         schedule.add(UiInteractionSystem);
         schedule.add(UiFocusSystem);
@@ -225,7 +226,9 @@ mod character;
 mod systems;
 mod ui;
 
-pub use animation::{load_clip_ron, AnimationClip, AnimationLibrary, TranslationKey};
+pub use animation::{
+    load_clip_ron, AnimationClip, AnimationLibrary, AnimationPlaybackSystem, TranslationKey,
+};
 pub use character::{CharacterBlockSystem, CharacterStepSystem};
 pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,

@@ -11,6 +11,7 @@ pub struct Animator {
     pub fade_time: f32,
     pub duration: f32,
     pub time: f32,
+    pub base_position: [f32; 3],
 }
 
 impl Default for Animator {
@@ -23,6 +24,7 @@ impl Default for Animator {
             fade_time: 0.0,
             duration: 0.0,
             time: 0.0,
+            base_position: [0.0; 3],
         }
     }
 }
@@ -52,6 +54,12 @@ impl Component for Animator {
             FieldDescriptor::new("duration", FieldType::F32, Value::F64(0.0))
                 .doc("剪辑时长（秒）；0 = 未知，不循环截断"),
             FieldDescriptor::new("time", FieldType::F32, Value::F64(0.0)).doc("当前播放时间（秒）"),
+            FieldDescriptor::new(
+                "base_position",
+                FieldType::Vec3,
+                Value::Vec3([0.0, 0.0, 0.0]),
+            )
+            .doc("动画位移的基准位置；采样结果 = base + 关键帧偏移"),
         ]
     }
 
@@ -64,6 +72,11 @@ impl Component for Animator {
             "fade_time" => Some(Value::F64(f64::from(self.fade_time))),
             "duration" => Some(Value::F64(f64::from(self.duration))),
             "time" => Some(Value::F64(f64::from(self.time))),
+            "base_position" => Some(Value::Vec3([
+                f64::from(self.base_position[0]),
+                f64::from(self.base_position[1]),
+                f64::from(self.base_position[2]),
+            ])),
             _ => None,
         }
     }
@@ -131,6 +144,15 @@ impl Component for Animator {
                 self.time = value.as_f32().ok_or_else(|| {
                     format!(
                         "animation.animator.time 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "base_position" => {
+                self.base_position = value.as_vec3().ok_or_else(|| {
+                    format!(
+                        "animation.animator.base_position 期望 vec3，得到 {}",
                         value.type_name()
                     )
                 })?;

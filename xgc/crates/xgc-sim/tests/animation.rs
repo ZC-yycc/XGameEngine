@@ -1,6 +1,7 @@
 //! 剪辑采样回归：插值 / 边界 / 循环。
 
-use xgc_sim::{AnimationClip, TranslationKey};
+use xgc_sim::{AnimationClip, AnimationLibrary, AnimationPlaybackSystem, Schedule, TranslationKey};
+use xgc_world::{Animator, Transform, World};
 
 fn clip() -> AnimationClip {
     AnimationClip::new(
@@ -61,4 +62,25 @@ fn sorts_keys_and_drops_non_finite() {
     );
     assert_eq!(clip.translation.len(), 2);
     assert_eq!(clip.sample_translation(0.5), [0.5, 0.0, 0.0]);
+}
+
+#[test]
+fn playback_writes_sampled_translation_onto_base() {
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        Animator {
+            clip: "Walk".to_string(),
+            time: 0.5,
+            base_position: [10.0, 0.0, 0.0],
+            ..Animator::default()
+        },
+    ));
+    let mut library = AnimationLibrary::new();
+    library.insert(clip());
+    let mut schedule = Schedule::new();
+    schedule.add(AnimationPlaybackSystem { library });
+    schedule.run(&mut world, 0.0);
+    let transform = world.get::<Transform>(entity).unwrap();
+    assert!((transform.position[0] - 11.0).abs() < 1e-5);
 }

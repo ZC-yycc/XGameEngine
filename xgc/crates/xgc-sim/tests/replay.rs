@@ -119,6 +119,7 @@ fn velocity_system_moves_transform() {
             "character_block",
             "aabb",
             "animation",
+            "animation_apply",
             "ui_layout",
             "ui_interaction",
             "ui_focus",

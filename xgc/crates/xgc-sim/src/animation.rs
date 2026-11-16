@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use xgc_world::{Animator, Component, Transform, World};
+
+use super::{System, SystemAccess};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TranslationKey {
     pub time: f32,
@@ -131,5 +135,47 @@ impl AnimationLibrary {
 
     pub fn sample_looped(&self, name: &str, time: f32) -> Option<[f32; 3]> {
         self.get(name).map(|clip| clip.sample_looped(time))
+    }
+}
+
+/// 把剪辑平移关键帧写到 Transform：位置 = base_position + 采样偏移。
+#[derive(Clone, Debug, Default)]
+pub struct AnimationPlaybackSystem {
+    pub library: AnimationLibrary,
+}
+
+impl System for AnimationPlaybackSystem {
+    fn name(&self) -> &'static str {
+        "animation_apply"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![Animator::ID],
+            writes: vec![Transform::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        let mut samples = Vec::new();
+        world.for_each::<Animator>(|key, animator| {
+            let Some(offset) = self.library.sample_looped(&animator.clip, animator.time) else {
+                return;
+            };
+            let base = animator.base_position;
+            samples.push((
+                key,
+                [
+                    base[0] + offset[0],
+                    base[1] + offset[1],
+                    base[2] + offset[2],
+                ],
+            ));
+        });
+        for (key, position) in samples {
+            if let Some(transform) = world.get_mut::<Transform>(key) {
+                transform.position = position;
+            }
+        }
     }
 }
