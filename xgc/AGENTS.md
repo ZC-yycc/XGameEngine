@@ -112,7 +112,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵与祖先骨架姿态） |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；蒙皮实体按实体键单独成组并上传变形顶点 |
-| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引 + `SkinData`（关节 / 权重 / 逆绑定）、builtin 网格占位 |
+| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData`；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
@@ -143,8 +143,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接：统计对照已通；下一步逐帧 trace / 像素级视觉对照。
-2. 渲染：迁移场景已可见，但仍是平面色 / 黑背景；补材质 / 光照 / 天空。
+1. 渲染：builtin 几何已真实；下一步方向光 / 平面着色与纯色背景。
+2. 割接：逐帧 trace / 像素级视觉对照。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 资产：密码学签名 / 跨机器增量。
 5. 现在最大文件 595 行：动它之前先拆。
