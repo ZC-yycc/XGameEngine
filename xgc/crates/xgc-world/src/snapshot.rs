@@ -10,12 +10,17 @@ use super::{Column, World};
 
 pub struct EntitySnapshot {
     id: EntityId,
+    revision: u64,
     components: Vec<(ComponentId, Box<dyn Column>)>,
 }
 
 impl EntitySnapshot {
     pub fn id(&self) -> EntityId {
         self.id
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn with_id(mut self, id: EntityId) -> Self {
@@ -39,6 +44,7 @@ impl Clone for EntitySnapshot {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
+            revision: self.revision,
             components: self
                 .components
                 .iter()
@@ -52,8 +58,26 @@ impl std::fmt::Debug for EntitySnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EntitySnapshot")
             .field("id", &self.id)
+            .field("revision", &self.revision)
             .field("components", &self.component_ids())
             .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WorldSnapshot {
+    revision: u64,
+    next_id: u64,
+    entities: Vec<EntitySnapshot>,
+}
+
+impl WorldSnapshot {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn entities(&self) -> &[EntitySnapshot] {
+        &self.entities
     }
 }
 
@@ -71,7 +95,40 @@ impl World {
             single.push_from(column.as_ref(), meta.row as usize);
             components.push((component, single));
         }
-        Some(EntitySnapshot { id, components })
+        Some(EntitySnapshot {
+            id,
+            revision: meta.revision,
+            components,
+        })
+    }
+
+    /// 捕获整个世界：实体按 `EntityId` 排序，便于逐字节比较与回放。
+    pub fn snapshot(&self) -> WorldSnapshot {
+        let mut entities: Vec<_> = self
+            .metas
+            .iter()
+            .filter(|meta| meta.alive)
+            .filter_map(|meta| self.capture_entity(meta.id))
+            .collect();
+        entities.sort_by_key(|entity| entity.id().raw());
+        WorldSnapshot {
+            revision: self.revision,
+            next_id: self.next_id,
+            entities,
+        }
+    }
+
+    /// 恢复整个世界的逻辑状态；保留 archetype 容器，清空实体后按快照重建。
+    pub fn restore_snapshot(&mut self, snapshot: &WorldSnapshot) {
+        let keys: Vec<_> = self.by_id.values().copied().collect();
+        for key in keys {
+            let _ = self.despawn_raw(key);
+        }
+        self.next_id = snapshot.next_id;
+        self.revision = snapshot.revision;
+        for entity in &snapshot.entities {
+            let _ = self.restore_entity_raw(entity.clone());
+        }
     }
 
     /// 公开恢复入口：结构变化，revision +1。
@@ -114,6 +171,7 @@ impl World {
         meta.alive = true;
         meta.archetype = archetype;
         meta.row = row;
+        meta.revision = snapshot.revision;
         self.next_id = self.next_id.max(id.raw() + 1);
         Ok(id)
     }

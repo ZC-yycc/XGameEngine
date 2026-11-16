@@ -19,7 +19,7 @@ mod snapshot;
 
 pub use command::{Applied, Command, Plan};
 pub use components::{Name, Transform, Velocity};
-pub use snapshot::EntitySnapshot;
+pub use snapshot::{EntitySnapshot, WorldSnapshot};
 
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
 ///

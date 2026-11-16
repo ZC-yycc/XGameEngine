@@ -1,4 +1,4 @@
-//! XGC 命令行 M0：输出 schema、跑 10k 实体基准。
+//! XGC 命令行 M1：schema / check / bench。
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -10,33 +10,42 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("schema") => schema(),
+        Some("check") => check(),
         Some("bench") => bench(),
         Some(other) => {
             eprintln!("未知命令：{other}");
-            eprintln!("用法：xgc <schema|bench>");
+            eprintln!("用法：xgc <schema|check|bench>");
             ExitCode::from(2)
         }
         None => {
-            eprintln!("用法：xgc <schema|bench>");
+            eprintln!("用法：xgc <schema|check|bench>");
             ExitCode::from(2)
         }
     }
 }
 
-fn schema() -> ExitCode {
+fn builtin_registry() -> Result<Registry, String> {
     let mut registry = Registry::new();
-    if let Err(err) = registry.register::<Transform>() {
-        eprintln!("注册 core.transform 失败：{err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = registry.register::<Velocity>() {
-        eprintln!("注册 core.velocity 失败：{err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = registry.register::<Name>() {
-        eprintln!("注册 core.name 失败：{err}");
-        return ExitCode::from(1);
-    }
+    registry
+        .register::<Transform>()
+        .map_err(|err| format!("注册 core.transform 失败：{err}"))?;
+    registry
+        .register::<Velocity>()
+        .map_err(|err| format!("注册 core.velocity 失败：{err}"))?;
+    registry
+        .register::<Name>()
+        .map_err(|err| format!("注册 core.name 失败：{err}"))?;
+    Ok(registry)
+}
+
+fn schema() -> ExitCode {
+    let registry = match builtin_registry() {
+        Ok(registry) => registry,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::from(1);
+        }
+    };
 
     match serde_json::to_string_pretty(&registry.schema()) {
         Ok(text) => {
@@ -47,6 +56,26 @@ fn schema() -> ExitCode {
             eprintln!("schema 序列化失败：{err}");
             ExitCode::from(1)
         }
+    }
+}
+
+fn check() -> ExitCode {
+    let registry = match builtin_registry() {
+        Ok(registry) => registry,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::from(1);
+        }
+    };
+    let diagnostics = registry.validate();
+    if diagnostics.is_empty() {
+        println!("check: {} 个组件，schema 语义 OK", registry.len());
+        ExitCode::SUCCESS
+    } else {
+        for diagnostic in &diagnostics {
+            eprintln!("{diagnostic}");
+        }
+        ExitCode::from(1)
     }
 }
 

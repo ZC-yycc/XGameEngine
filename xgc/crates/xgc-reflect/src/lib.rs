@@ -7,10 +7,11 @@
 #![deny(unsafe_code)]
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde::Serialize;
+use xgc_base::{Diagnostic, Severity, Subject};
 
 /// 组件类型的稳定编号。落盘、协议、archetype 匹配都用它，不用类型名。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -363,6 +364,69 @@ impl Registry {
             types,
         }
     }
+
+    /// 检查注册表自身的语义：字段名非空 / 不重复、默认值类型匹配。
+    pub fn validate(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for component in &self.components {
+            if component.name.is_empty() {
+                diagnostics.push(Diagnostic::new(
+                    "SCHEMA.EMPTY_NAME",
+                    Severity::Error,
+                    Subject::Field(component.id.to_string()),
+                    "组件名为空",
+                ));
+            }
+            let mut names = HashSet::new();
+            for field in &component.fields {
+                let subject = Subject::Field(format!("{}.{}", component.name, field.name));
+                if field.name.is_empty() {
+                    diagnostics.push(Diagnostic::new(
+                        "SCHEMA.EMPTY_FIELD",
+                        Severity::Error,
+                        subject,
+                        "字段名为空",
+                    ));
+                }
+                if !names.insert(field.name.as_str()) {
+                    diagnostics.push(Diagnostic::new(
+                        "SCHEMA.DUP_FIELD",
+                        Severity::Error,
+                        Subject::Field(format!("{}.{}", component.name, field.name)),
+                        "字段名重复",
+                    ));
+                }
+                if !default_matches(&field.default, &field.ty) {
+                    diagnostics.push(Diagnostic::new(
+                        "SCHEMA.DEFAULT_TYPE",
+                        Severity::Error,
+                        Subject::Field(format!("{}.{}", component.name, field.name)),
+                        format!(
+                            "默认值类型 {} 与字段类型 {} 不一致",
+                            field.default.type_name(),
+                            field.ty
+                        ),
+                    ));
+                }
+            }
+        }
+        diagnostics
+    }
+}
+
+fn default_matches(value: &Value, ty: &str) -> bool {
+    match ty {
+        "bool" => matches!(value, Value::Bool(_)),
+        "i64" | "u32" => matches!(value, Value::I64(_)),
+        "f32" | "f64" => matches!(value, Value::F64(_)),
+        "string" => matches!(value, Value::String(_)),
+        "vec2" => matches!(value, Value::Vec2(_)),
+        "vec3" => matches!(value, Value::Vec3(_)),
+        "vec4" => matches!(value, Value::Vec4(_)),
+        "quat" => matches!(value, Value::Quat(_)),
+        "entity" => matches!(value, Value::Entity(_)),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -443,5 +507,37 @@ mod tests {
         );
         assert_eq!(registry.by_name("game.health").unwrap().id, 0x0201);
         assert!(registry.by_name("nope").is_none());
+    }
+
+    #[derive(Clone, Debug)]
+    struct Broken;
+
+    impl Component for Broken {
+        const ID: ComponentId = ComponentId(0x0301);
+        const NAME: &'static str = "test.broken";
+
+        fn default_value() -> Self {
+            Self
+        }
+
+        fn fields() -> Vec<FieldDescriptor> {
+            vec![
+                FieldDescriptor::new("a", FieldType::F32, Value::String("bad".to_string())),
+                FieldDescriptor::new("a", FieldType::Bool, Value::Bool(true)),
+            ]
+        }
+    }
+
+    #[test]
+    fn validate_reports_duplicate_fields_and_bad_defaults() {
+        let mut registry = Registry::new();
+        registry.register::<Health>().unwrap();
+        assert!(registry.validate().is_empty());
+
+        registry.register::<Broken>().unwrap();
+        let diagnostics = registry.validate();
+        let codes: Vec<_> = diagnostics.iter().map(|diag| diag.code).collect();
+        assert!(codes.contains(&"SCHEMA.DUP_FIELD"));
+        assert!(codes.contains(&"SCHEMA.DEFAULT_TYPE"));
     }
 }

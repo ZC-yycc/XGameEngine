@@ -201,6 +201,10 @@ fn schema_check() -> Result<(), String> {
             return Err(format!("schema 缺少 {required}"));
         }
     }
+    let diagnostics = registry.validate();
+    if !diagnostics.is_empty() {
+        return Err(format!("schema 语义问题：{} 条", diagnostics.len()));
+    }
 
     println!(
         "schema: {} 个类型，{} 字节，两次导出逐字节相同",
