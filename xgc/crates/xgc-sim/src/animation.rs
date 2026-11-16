@@ -188,7 +188,7 @@ fn normalize_quat(mut q: [f32; 4]) -> [f32; 4] {
     q
 }
 
-fn slerp(mut a: [f32; 4], mut b: [f32; 4], t: f32) -> [f32; 4] {
+pub fn slerp(mut a: [f32; 4], mut b: [f32; 4], t: f32) -> [f32; 4] {
     a = normalize_quat(a);
     b = normalize_quat(b);
     let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];

@@ -163,6 +163,7 @@ impl Schedule {
         schedule.add(AnimationStateSystem);
         schedule.add(AnimatorSystem);
         schedule.add(AnimationPlaybackSystem::default());
+        schedule.add(AnimationLayerSystem::default());
         schedule.add(SkeletonPoseSystem);
         schedule.add(UiLayoutSystem::default());
         schedule.add(UiInteractionSystem);
@@ -225,6 +226,7 @@ impl Schedule {
 
 /// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
 mod animation;
+mod animation_layers;
 mod animation_state;
 mod audio;
 mod character;
@@ -234,9 +236,10 @@ mod systems;
 mod ui;
 
 pub use animation::{
-    load_clip_ron, mul_quat, AnimationClip, AnimationLibrary, AnimationPlaybackSystem, RotationKey,
-    ScaleKey, TranslationKey,
+    load_clip_ron, mul_quat, slerp, AnimationClip, AnimationLibrary, AnimationPlaybackSystem,
+    RotationKey, ScaleKey, TranslationKey,
 };
+pub use animation_layers::{parse_layers, AnimationLayerSystem, LayerDef};
 pub use animation_state::{
     parse_machine, parse_parameters, AnimationStateSystem, StateDef, StateMachine, TransitionDef,
 };

@@ -65,7 +65,7 @@ fn describe_lists_protocol_components_and_world_state() {
     assert_eq!(response["engine"], "xgc");
     assert_eq!(
         response["components"]["types"].as_array().unwrap().len(),
-        28
+        29
     );
     assert_eq!(response["world"]["entities"], 0);
     assert_eq!(
@@ -82,6 +82,7 @@ fn describe_lists_protocol_components_and_world_state() {
             "animation_state",
             "animation",
             "animation_apply",
+            "animation_layers",
             "skeleton_pose",
             "ui_layout",
             "ui_interaction",
