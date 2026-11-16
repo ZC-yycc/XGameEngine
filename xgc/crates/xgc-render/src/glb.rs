@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::mesh::Mesh;
+use super::mesh::{Mesh, SkinData};
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;
@@ -121,7 +121,21 @@ pub fn load_glb(path: &Path) -> Result<Mesh, MeshError> {
         Some(index) => read_indices(&root, index, bin)?,
         None => Vec::new(),
     };
-    Ok(Mesh::new(positions, indices))
+    let mut mesh = Mesh::new(positions, indices);
+    if let (Some(joints), Some(weights)) = (
+        primitive.attributes.get("JOINTS_0").copied(),
+        primitive.attributes.get("WEIGHTS_0").copied(),
+    ) {
+        let joints = read_joints(&root, joints, bin)?;
+        let weights = read_weights(&root, weights, bin)?;
+        if joints.len() != mesh.positions.len() || weights.len() != mesh.positions.len() {
+            return Err(MeshError::Glb(
+                "JOINTS_0 / WEIGHTS_0 数量与 POSITION 不一致".into(),
+            ));
+        }
+        mesh.skin = Some(SkinData { joints, weights });
+    }
+    Ok(mesh)
 }
 
 fn split_glb(bytes: &[u8]) -> Result<(&[u8], &[u8]), MeshError> {
@@ -276,4 +290,81 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, MeshError> {
 
 fn read_f32(bytes: &[u8], offset: usize) -> Result<f32, MeshError> {
     Ok(f32::from_bits(read_u32(bytes, offset)?))
+}
+
+fn read_joints(root: &Root, accessor: usize, bin: &[u8]) -> Result<Vec<[u16; 4]>, MeshError> {
+    let accessor = root
+        .accessors
+        .get(accessor)
+        .ok_or(MeshError::Missing("JOINTS_0 accessor".into()))?;
+    let size = match accessor.component_type {
+        5121 => 1,
+        5123 => 2,
+        other => {
+            return Err(MeshError::Unsupported(format!(
+                "JOINTS_0 componentType {other}"
+            )));
+        }
+    };
+    if accessor.ty != "VEC4" {
+        return Err(MeshError::Unsupported(format!(
+            "JOINTS_0 需要 VEC4，实际 {}",
+            accessor.ty
+        )));
+    }
+    let (base, stride) = accessor_layout(root, accessor, size * 4)?;
+    let needed = base
+        .checked_add(stride.saturating_mul(accessor.count.saturating_sub(1)))
+        .and_then(|offset| offset.checked_add(size * 4))
+        .ok_or_else(|| MeshError::Glb("JOINTS_0 偏移溢出".into()))?;
+    if needed > bin.len() {
+        return Err(MeshError::Glb("JOINTS_0 超出 BIN chunk".into()));
+    }
+    let mut joints = Vec::with_capacity(accessor.count);
+    for index in 0..accessor.count {
+        let offset = base + index * stride;
+        let mut value = [0u16; 4];
+        for (slot, joint) in value.iter_mut().enumerate() {
+            let at = offset + slot * size;
+            *joint = match size {
+                1 => u16::from(bin[at]),
+                2 => read_u16(bin, at)?,
+                _ => unreachable!(),
+            };
+        }
+        joints.push(value);
+    }
+    Ok(joints)
+}
+
+fn read_weights(root: &Root, accessor: usize, bin: &[u8]) -> Result<Vec<[f32; 4]>, MeshError> {
+    let accessor = root
+        .accessors
+        .get(accessor)
+        .ok_or(MeshError::Missing("WEIGHTS_0 accessor".into()))?;
+    if accessor.component_type != 5126 || accessor.ty != "VEC4" {
+        return Err(MeshError::Unsupported(format!(
+            "WEIGHTS_0 需要 float VEC4，实际 type {} component {}",
+            accessor.ty, accessor.component_type
+        )));
+    }
+    let (base, stride) = accessor_layout(root, accessor, 16)?;
+    let needed = base
+        .checked_add(stride.saturating_mul(accessor.count.saturating_sub(1)))
+        .and_then(|offset| offset.checked_add(16))
+        .ok_or_else(|| MeshError::Glb("WEIGHTS_0 偏移溢出".into()))?;
+    if needed > bin.len() {
+        return Err(MeshError::Glb("WEIGHTS_0 超出 BIN chunk".into()));
+    }
+    let mut weights = Vec::with_capacity(accessor.count);
+    for index in 0..accessor.count {
+        let offset = base + index * stride;
+        weights.push([
+            read_f32(bin, offset)?,
+            read_f32(bin, offset + 4)?,
+            read_f32(bin, offset + 8)?,
+            read_f32(bin, offset + 12)?,
+        ]);
+    }
+    Ok(weights)
 }

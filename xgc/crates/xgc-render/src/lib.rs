@@ -35,7 +35,7 @@ pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
 pub use gpu_mesh::{GpuMesh, GpuMeshCache};
 pub use image::ImageData;
 pub use instanced::InstancedPipeline;
-pub use mesh::{builtin_mesh, Mesh};
+pub use mesh::{builtin_mesh, Mesh, SkinData};
 pub use pipeline::{RenderCache, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};

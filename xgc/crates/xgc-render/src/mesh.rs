@@ -1,20 +1,32 @@
 //! 内建网格：`Mesh` 是位置 + 可选索引；真实资产加载在资产管线接上后替换 builtin。
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SkinData {
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+    pub skin: Option<SkinData>,
 }
 
 impl Mesh {
     pub fn new(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Self {
-        Self { positions, indices }
+        Self {
+            positions,
+            indices,
+            skin: None,
+        }
     }
 
     pub fn fullscreen_triangle() -> Self {
         Self {
             positions: vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
             indices: Vec::new(),
+            skin: None,
         }
     }
 
@@ -27,6 +39,7 @@ impl Mesh {
                 [-0.5, 0.5, 0.0],
             ],
             indices: vec![0, 1, 2, 0, 2, 3],
+            skin: None,
         }
     }
 }

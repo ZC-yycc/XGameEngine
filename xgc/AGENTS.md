@@ -82,8 +82,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵） |
-| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引、builtin 网格占位 |
-| `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 |
+| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引 + `SkinData`、builtin 网格占位 |
+| `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
@@ -102,7 +102,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：骨架姿态已接；下一步 GLB skin（JOINTS / WEIGHTS）与蒙皮管线。
+1. 动画：GLB skin 数据已接；下一步逆绑定矩阵 / GPU 蒙皮管线。
 2. UI：圆角 / UI 绘制批次。
 3. 音频：播放设备 / 流式缓冲。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
