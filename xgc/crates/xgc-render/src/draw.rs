@@ -4,7 +4,7 @@
 //! 验证"按实体出 draw call"的路径，网格加载在资产管线接上后替换。
 
 use xgc_base::EntityId;
-use xgc_world::{GlobalTransform, Material, MeshRenderer, World};
+use xgc_world::{GlobalTransform, Material, MeshRenderer, Parent, Skeleton, SkeletonPose, World};
 
 use super::camera::{model_matrix, Mat4};
 
@@ -15,6 +15,7 @@ pub struct DrawItem {
     pub color: [f32; 4],
     pub roughness: f32,
     pub transform: Mat4,
+    pub pose: Option<Vec<[f32; 16]>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -50,8 +51,22 @@ pub fn build_draw_list(world: &World) -> DrawList {
             color: material.base_color,
             roughness: material.roughness,
             transform: model_matrix(transform),
+            pose: skeleton_pose(world, key),
         });
     });
     items.sort_by_key(|item| item.entity);
     DrawList { items }
+}
+
+/// 蒙皮网格约定：沿 Parent 向上找到 Skeleton 根，读取该根的 `animation.pose`。
+fn skeleton_pose(world: &World, mut key: xgc_base::EntityKey) -> Option<Vec<[f32; 16]>> {
+    for _ in 0..64 {
+        if world.get::<Skeleton>(key).is_some() {
+            let pose = world.get::<SkeletonPose>(key)?;
+            return ron::from_str(&pose.matrices).ok();
+        }
+        let parent = world.get::<Parent>(key)?;
+        key = world.key(parent.entity)?;
+    }
+    None
 }

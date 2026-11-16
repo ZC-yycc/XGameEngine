@@ -80,11 +80,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/skinning.rs` | `skin_positions` / `identity` / `translation`：CPU 蒙皮 |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（按宽度换行） |
-| `crates/xgc-render/src/instanced.rs` | 按模型分组的实例化管线 / storage 实例缓冲 |
-| `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用 |
+| `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用；`upload_deformed` 覆盖蒙皮顶点 |
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
-| `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵） |
+| `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵与祖先骨架姿态） |
+| `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；蒙皮实体按实体键单独成组并上传变形顶点 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引 + `SkinData`（关节 / 权重 / 逆绑定）、builtin 网格占位 |
 | `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
@@ -105,8 +105,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
-2. 动画：CPU 蒙皮已接；下一步蒙皮 GPU 管线 / 骨骼层级导入。
+1. 动画：蒙皮已接入渲染；下一步 GPU 蒙皮管线 / 骨骼层级导入。
+2. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
 3. UI：圆角 / scissor 已接；下一步 UI 绘制批次。
 4. 音频：播放设备 / 流式缓冲。
 5. 现在最大文件 588 行：动它之前先拆。

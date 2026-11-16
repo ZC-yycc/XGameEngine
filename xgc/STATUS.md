@@ -7,8 +7,8 @@
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 98（最大 588 行；软上限 600） |
-| 测试 | 165（`cargo test --workspace --offline`） |
+| Rust 文件 | 99（最大 588 行；软上限 600） |
+| 测试 | 166（`cargo test --workspace --offline`） |
 | 内建组件 schema | 27 类 / 31479 字节，两次导出逐字节相同 |
 | 默认系统 | 16 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
@@ -25,7 +25,7 @@
 | 渲染图 | 资源表、pass 读写、确定性拓扑、环 / 多写者 / 未声明资源检测 |
 | wgpu 渲染 | 相机 MVP、深度、单 pass、顶点 / 索引缓存、按模型实例化、DrawList、RGBA8 回读 |
 | UI | 布局 / 父相对 / 裁剪 / 命中、输入桥、Tab + 方向键焦点、背景 / 焦点环、5x7 文本换行、PNG/PPM 纹理、stretch/preserve/cover/nine-slice、scissor 裁剪 |
-| 动画 | RON 剪辑、平移 / 旋转 slerp / 缩放采样、目录加载、写回 Transform、Skeleton / Bone / Pose、GLB JOINTS / WEIGHTS / 逆绑定、CPU 蒙皮 |
+| 动画 | RON 剪辑、平移 / 旋转 slerp / 缩放采样、目录加载、写回 Transform、Skeleton / Bone / Pose、GLB JOINTS / WEIGHTS / 逆绑定、CPU 蒙皮、DrawList 自动读取祖先骨架姿态并按实体变形上传 |
 | 物理 | 重力 / 速度积分 / 地面 / 跳跃、角色台阶 / 高墙 / 球体阻挡、斜坡地面、AABB 分离 |
 | 音频 | 空间化增益、总线、WAV 解码、软件混音、WAV 写出 |
 | Lua | 安全宿主：执行 / 调用 / 字段与实体 API / 指令预算 / 内存上限 / 生命周期；`ScriptRuntime` 驱动脚本实体并热重载；`Simulation::step_with` 可插脚本帧 |
@@ -39,7 +39,7 @@
 | 核心 ECS / 确定性 / 事务 / Agent | 80% | 主体可用；缺零分配门禁与跨系统并行 |
 | UI | 70% | 布局 / 交互 / 焦点 / 文本 / 图片 / 九宫格 / 圆角 / scissor 已通 |
 | 迁移工具 | 55% | 组件映射全，但端到端项目 / 资源 / 脚本未验收 |
-| 动画 | 50% | 剪辑 + 骨架 + CPU 蒙皮；缺 GPU 蒙皮、状态机、分层 |
+| 动画 | 55% | 剪辑 + 骨架 + CPU 蒙皮 + 渲染接入；缺 GPU 蒙皮、状态机、分层 |
 | 音频 | 40% | 解码 / 混音 / 空间化；缺设备输出与流式 |
 | 渲染 | 35% | 基础 wgpu + 实例化 + UI；缺 PBR / 阴影 / 后处理 / 粒子 / 蒙皮绘制 |
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |

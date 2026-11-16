@@ -80,4 +80,27 @@ impl GpuMeshCache {
         }
         self.meshes.get(key).unwrap()
     }
+
+    /// 蒙皮顶点每帧覆盖；顶点数不变时只写缓冲，不重建。
+    pub fn upload_deformed(
+        &mut self,
+        context: &GpuContext,
+        key: &str,
+        positions: &[[f32; 3]],
+        indices: &[u32],
+    ) -> &GpuMesh {
+        if let Some(mesh) = self.meshes.get(key) {
+            if mesh.vertices as usize == positions.len() {
+                let bytes: Vec<u8> = positions
+                    .iter()
+                    .flat_map(|position| position.iter().flat_map(|value| value.to_le_bytes()))
+                    .collect();
+                context.queue().write_buffer(&mesh.vertex_buffer, 0, &bytes);
+                return self.meshes.get(key).unwrap();
+            }
+        }
+        self.meshes.remove(key);
+        let mesh = Mesh::new(positions.to_vec(), indices.to_vec());
+        self.upload(context, key, &mesh)
+    }
 }

@@ -163,7 +163,9 @@ impl GpuContext {
 }
 
 struct Group {
-    model: String,
+    key: String,
+    source: String,
+    pose: Option<Vec<[f32; 16]>>,
     instances: Vec<(Mat4, [f32; 4])>,
 }
 
@@ -215,9 +217,16 @@ impl RenderCache {
         let mut groups: HashMap<String, usize> = HashMap::new();
         let mut buckets = Vec::new();
         for item in &list.items {
-            let index = *groups.entry(item.model.clone()).or_insert_with(|| {
+            let key = if item.pose.is_some() {
+                format!("skin:{}:{}", item.entity.raw(), item.model)
+            } else {
+                item.model.clone()
+            };
+            let index = *groups.entry(key.clone()).or_insert_with(|| {
                 buckets.push(Group {
-                    model: item.model.clone(),
+                    key,
+                    source: item.model.clone(),
+                    pose: item.pose.clone(),
                     instances: Vec::new(),
                 });
                 buckets.len() - 1
@@ -250,14 +259,19 @@ impl RenderCache {
         let mut prepared = Vec::with_capacity(buckets.len());
         for group in &buckets {
             let loaded = meshes
-                .get(&group.model)
+                .get(&group.source)
                 .map_err(|err| GpuError::Mesh(err.to_string()))?;
             let fallback = loaded.is_none().then(Mesh::fullscreen_triangle);
             let mesh = loaded.unwrap_or_else(|| fallback.as_ref().unwrap());
             if mesh.positions.is_empty() {
                 continue;
             }
-            gpu_meshes.upload(context, &group.model, mesh);
+            if let Some(pose) = &group.pose {
+                let positions = super::skinning::skin_positions(mesh, pose);
+                gpu_meshes.upload_deformed(context, &group.key, &positions, &mesh.indices);
+            } else {
+                gpu_meshes.upload(context, &group.key, mesh);
+            }
             let mut bytes = Vec::with_capacity(group.instances.len() * 80);
             for (model, color) in &group.instances {
                 for value in model {
@@ -285,7 +299,7 @@ impl RenderCache {
                     }],
                 });
             prepared.push(Prepared {
-                mesh_key: group.model.clone(),
+                mesh_key: group.key.clone(),
                 instance_bind,
                 count: group.instances.len() as u32,
             });
