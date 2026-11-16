@@ -125,6 +125,17 @@ fn glyph(ch: char) -> Option<[u8; 7]> {
 
 /// 生成 NDC 顶点：每个点亮像素一个四边形；返回空网格表示无可见字符。
 pub fn text_mesh(text: &str, origin: [f32; 2], pixel_size: f32, viewport: [f32; 2]) -> Mesh {
+    text_mesh_wrapped(text, origin, pixel_size, viewport, f32::MAX)
+}
+
+/// 带最大宽度的文本网格；按字符换行，空格留在行尾时跳过。
+pub fn text_mesh_wrapped(
+    text: &str,
+    origin: [f32; 2],
+    pixel_size: f32,
+    viewport: [f32; 2],
+    max_width: f32,
+) -> Mesh {
     let pixel = pixel_size.max(1.0);
     let advance = pixel * 6.0;
     let viewport_w = viewport[0].max(1.0);
@@ -137,6 +148,10 @@ pub fn text_mesh(text: &str, origin: [f32; 2], pixel_size: f32, viewport: [f32; 
             cursor = origin[0];
             line += pixel * 8.0;
             continue;
+        }
+        if ch != ' ' && cursor + advance > origin[0] + max_width && cursor > origin[0] {
+            cursor = origin[0];
+            line += pixel * 8.0;
         }
         let Some(rows) = glyph(ch) else {
             cursor += advance;

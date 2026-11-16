@@ -40,7 +40,8 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
 `GpuMeshCache` 顶点 / 索引缓冲跨帧复用、按模型分组实例化（storage instance 缓冲）、
-UI 背景矩形叠加（无深度，focused 元素带强调色外环，5x7 位图文本单 draw，PNG / PPM
+UI 背景矩形叠加（无深度，focused 元素带强调色外环，5x7 位图文本按元素宽度自动换行
+单 draw，PNG / PPM
 图片经纹理管线单 draw，`image_mode` 支持 stretch / preserve / cover / nine_slice，
 绘制按 `ui.layout.clip` 设置 scissor）、从 `render.mesh` + `render.material` 抽
 `DrawList` 并按实体顺序 draw、RGBA8 回读）、

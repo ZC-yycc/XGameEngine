@@ -39,7 +39,7 @@ pub use mesh::{builtin_mesh, Mesh};
 pub use pipeline::{RenderCache, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
-pub use text::text_mesh;
+pub use text::{text_mesh, text_mesh_wrapped};
 pub use texture::TexturePipeline;
 pub use ui_draw::{cover_uv, quad_matrix};
 

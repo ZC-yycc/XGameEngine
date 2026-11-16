@@ -14,7 +14,7 @@ use super::instanced::InstancedRequest;
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
 use super::resources::{ResourceDesc, ResourceUsage};
-use super::text::text_mesh;
+use super::text::text_mesh_wrapped;
 use super::texture::TexturePipeline;
 use super::ui_draw::{cover_uv, quad_matrix};
 
@@ -142,6 +142,10 @@ impl Renderer {
                 .get::<UiElement>(key)
                 .map(|element| element.image_slice)
                 .unwrap_or_default();
+            let wrap = world
+                .get::<UiElement>(key)
+                .map(|element| element.wrap)
+                .unwrap_or(true);
             if color[3] <= 0.0 && text.is_empty() && image_path.is_empty() {
                 return;
             }
@@ -161,10 +165,11 @@ impl Renderer {
                     image_mode,
                     image_slice,
                     layout.clip,
+                    wrap,
                 ));
             }
         });
-        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _, _)| *entity);
+        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _, _, _)| *entity);
         let mut draws = 0;
         for (
             _,
@@ -178,6 +183,7 @@ impl Renderer {
             image_mode,
             image_slice,
             clip,
+            wrap,
         ) in &items
         {
             let Some(scissor) = scissor_rect(*clip, viewport) else {
@@ -341,7 +347,18 @@ impl Renderer {
             }
             if !text.is_empty() {
                 let pixel = (*text_size / 7.0).max(1.0);
-                let text_mesh = text_mesh(text, [rect[0] + 2.0, rect[1] + 2.0], pixel, viewport);
+                let max_width = if *wrap {
+                    (rect[2] - 4.0).max(1.0)
+                } else {
+                    f32::MAX
+                };
+                let text_mesh = text_mesh_wrapped(
+                    text,
+                    [rect[0] + 2.0, rect[1] + 2.0],
+                    pixel,
+                    viewport,
+                    max_width,
+                );
                 if !text_mesh.positions.is_empty() {
                     pipeline.draw_mesh_scissored(
                         context,

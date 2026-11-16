@@ -507,3 +507,18 @@ fn ui_clip_scissors_background() {
     let outside = 4 * (12 * 16 + 12);
     assert_eq!(&pixels[outside..outside + 4], &[0, 0, 0, 0]);
 }
+
+#[test]
+fn text_wraps_when_width_is_tight() {
+    let mesh = xgc_render::text_mesh_wrapped("AB", [0.0, 0.0], 8.0, [128.0, 128.0], 20.0);
+    assert!(!mesh.positions.is_empty());
+    let min = mesh
+        .positions
+        .iter()
+        .fold(f32::MAX, |min, position| min.min(position[1]));
+    let max = mesh
+        .positions
+        .iter()
+        .fold(f32::MIN, |max, position| max.max(position[1]));
+    assert!(max - min > 0.05, "换行后应出现两行高度：{min}..{max}");
+}
