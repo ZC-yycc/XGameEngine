@@ -22,6 +22,7 @@ pub struct UiElement {
     pub bold: bool,
     pub wrap: bool,
     pub image_path: String,
+    pub clip_children: bool,
 }
 
 impl Default for UiElement {
@@ -45,6 +46,7 @@ impl Default for UiElement {
             bold: false,
             wrap: true,
             image_path: String::new(),
+            clip_children: true,
         }
     }
 }
@@ -90,6 +92,8 @@ impl Component for UiElement {
                 FieldType::String,
                 Value::String(String::new()),
             ),
+            FieldDescriptor::new("clip_children", FieldType::Bool, Value::Bool(true))
+                .doc("是否把后代裁剪到本元素矩形"),
         ]
     }
 
@@ -113,6 +117,7 @@ impl Component for UiElement {
             "bold" => Some(Value::Bool(self.bold)),
             "wrap" => Some(Value::Bool(self.wrap)),
             "image_path" => Some(Value::String(self.image_path.clone())),
+            "clip_children" => Some(Value::Bool(self.clip_children)),
             _ => None,
         }
     }
@@ -137,6 +142,7 @@ impl Component for UiElement {
             "bold" => self.bold = boolean(value, field)?,
             "wrap" => self.wrap = boolean(value, field)?,
             "image_path" => self.image_path = String::from(string(value, field)?),
+            "clip_children" => self.clip_children = boolean(value, field)?,
             _ => return Err(format!("ui.element 没有字段 {field}")),
         }
         Ok(())
@@ -192,6 +198,7 @@ fn vec4_f64(value: [f32; 4]) -> [f64; 4] {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiLayout {
     pub rect: [f32; 4],
+    pub clip: [f32; 4],
     pub visible: bool,
 }
 
@@ -199,6 +206,7 @@ impl Default for UiLayout {
     fn default() -> Self {
         Self {
             rect: [0.0, 0.0, 100.0, 40.0],
+            clip: [0.0, 0.0, 10_000.0, 10_000.0],
             visible: true,
         }
     }
@@ -224,6 +232,12 @@ impl Component for UiLayout {
                 Value::Vec4([0.0, 0.0, 100.0, 40.0]),
             )
             .doc("x / y / width / height（像素）"),
+            FieldDescriptor::new(
+                "clip",
+                FieldType::Vec4,
+                Value::Vec4([0.0, 0.0, 10_000.0, 10_000.0]),
+            )
+            .doc("生效裁剪矩形"),
             FieldDescriptor::new("visible", FieldType::Bool, Value::Bool(true)),
         ]
     }
@@ -231,6 +245,7 @@ impl Component for UiLayout {
     fn get_field(&self, field: &str) -> Option<Value> {
         match field {
             "rect" => Some(Value::Vec4(vec4_f64(self.rect))),
+            "clip" => Some(Value::Vec4(vec4_f64(self.clip))),
             "visible" => Some(Value::Bool(self.visible)),
             _ => None,
         }
@@ -239,6 +254,7 @@ impl Component for UiLayout {
     fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
         match field {
             "rect" => self.rect = vec4(value, field)?,
+            "clip" => self.clip = vec4(value, field)?,
             "visible" => self.visible = boolean(value, field)?,
             _ => return Err(format!("ui.layout 没有字段 {field}")),
         }

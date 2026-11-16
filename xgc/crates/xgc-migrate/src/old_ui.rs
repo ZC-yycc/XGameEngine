@@ -65,6 +65,7 @@ struct OldUi {
     image: Option<OldImage>,
     visible: bool,
     interactable: bool,
+    clip_children: bool,
 }
 
 impl Default for OldUi {
@@ -80,6 +81,7 @@ impl Default for OldUi {
             image: None,
             visible: true,
             interactable: true,
+            clip_children: true,
         }
     }
 }
@@ -135,6 +137,7 @@ pub fn convert(value: ron::Value) -> Result<ComponentData, String> {
             ("bold".to_string(), Value::Bool(old.text.bold)),
             ("wrap".to_string(), Value::Bool(old.text.wrap)),
             ("image_path".to_string(), Value::String(image_path)),
+            ("clip_children".to_string(), Value::Bool(old.clip_children)),
         ],
     })
 }

@@ -2,9 +2,9 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem,
-    FrameCommands, GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario, Schedule,
-    SimError, Simulation, System, SystemAccess, UiLayoutSystem, VelocitySystem,
+    hit_test, play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem,
+    CharacterSystem, FrameCommands, GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario,
+    Schedule, SimError, Simulation, System, SystemAccess, UiLayoutSystem, VelocitySystem,
 };
 use xgc_world::{
     Animator, CharacterController, Command, Component, ComponentId, GlobalTransform, Name, Parent,
@@ -563,4 +563,38 @@ fn ui_layout_is_parent_relative_and_inherits_visibility() {
     let layout = world.get::<UiLayout>(child).unwrap();
     assert_eq!(layout.rect, [110.0, 70.0, 50.0, 30.0]);
     assert!(!layout.visible, "隐藏父节点应让子节点不可见");
+}
+
+#[test]
+fn ui_clip_and_hit_test() {
+    let mut world = World::new();
+    let parent = world.spawn((
+        UiElement {
+            offset_min: [0.0, 0.0],
+            offset_max: [100.0, 100.0],
+            clip_children: true,
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    let parent_id = world.entity(parent).unwrap();
+    let child = world.spawn((
+        Parent { entity: parent_id },
+        UiElement {
+            offset_min: [50.0, 50.0],
+            offset_max: [250.0, 250.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(UiLayoutSystem {
+        viewport: [1000.0, 1000.0],
+    });
+    schedule.run(&mut world, 0.016);
+    let layout = world.get::<UiLayout>(child).unwrap();
+    assert_eq!(layout.rect, [50.0, 50.0, 200.0, 200.0]);
+    assert_eq!(layout.clip, [0.0, 0.0, 100.0, 100.0]);
+    assert_eq!(hit_test(&world, [60.0, 60.0]), Some(child));
+    assert_eq!(hit_test(&world, [500.0, 500.0]), None);
 }
