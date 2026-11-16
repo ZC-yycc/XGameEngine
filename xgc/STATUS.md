@@ -1,0 +1,63 @@
+# XGC 状态与割接验收
+
+> 这是能力的**现状快照**，不是完成声明。XGC 仍明显低于 XGameEngine 全量能力，
+> 当前不能割接。
+
+## 指标（第 100 轮）
+
+| 项 | 值 |
+|---|---|
+| Rust 文件 | 90（最大 588 行；软上限 600） |
+| 测试 | 101（`cargo test --workspace --offline`） |
+| 内建组件 schema | 24 类 / 30337 字节，两次导出逐字节相同 |
+| 默认系统 | 17 个（World 12 + UI/音频/角色等） |
+| 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
+| CLI 冒烟 | `check` 24 组件 OK；`run 60` frames=60 entities=3 revision=3 hash=`f4bc029f5f995b91` |
+
+## 已具备
+
+| 子系统 | 现状 |
+|---|---|
+| ECS / World | archetype 列式存储、持久 `EntityId` + generation 句柄、bundle spawn、快照 / 恢复、状态哈希 |
+| 事务 | `Command` plan / apply / revert、单 revision、日志 / 重放、Agent 撤销 |
+| Agent 协议 | describe（组件 / 系统 / 渲染能力）、diagnostics、query / get / digest / stats / validate、load / save、snapshot / restore、history / replay、plan / apply / revert / undo |
+| 确定性 | 固定步 schedule、trace / verify、schema 字节级确定性、状态哈希 |
+| 渲染图 | 资源表、pass 读写、确定性拓扑、环 / 多写者 / 未声明资源检测 |
+| wgpu 渲染 | 相机 MVP、深度、单 pass、顶点 / 索引缓存、按模型实例化、DrawList、RGBA8 回读 |
+| UI | 布局 / 父相对 / 裁剪 / 命中、输入桥、Tab + 方向键焦点、背景 / 焦点环、5x7 文本换行、PNG/PPM 纹理、stretch/preserve/cover/nine-slice、scissor 裁剪 |
+| 动画 | RON 剪辑、平移 / 旋转 slerp / 缩放采样、目录加载、写回 Transform |
+| 物理 | 重力 / 速度积分 / 地面 / 跳跃、角色台阶 / 高墙 / 球体阻挡、斜坡地面、AABB 分离 |
+| 音频 | 空间化增益、总线、WAV 解码、软件混音、WAV 写出 |
+| 资产 / 迁移 | `.meta` 扫描、旧 SceneV2 全组件映射（含 UI / Particle / Rust 插件）、目录批量迁移 |
+| CLI | schema / check / bench / export / import / run / serve / migrate / assets / clips / audio / mix / render-graph / gpu-probe / mesh-probe / render-frame |
+
+## 与 XGameEngine 的主要差距
+
+| 差距 | 影响 | 优先级 |
+|---|---|---|
+| 骨骼 / 蒙皮动画 | 角色只能整体 Transform 动画，无法驱动关节与蒙皮网格 | P0 |
+| Lua 脚本运行时 | `script.lua` 目前只是数据，没有脚本宿主 / API / 生命周期 | P0 |
+| 编辑器 | 无场景编辑 UI、Inspector、层级面板、撤销栈界面 | P0 |
+| 物理完整性 | 只有简化角色 / AABB；无完整刚体、关节、连续碰撞、坡面滑动 | P1 |
+| 音频设备输出 | 只有 WAV / 软件混音，没有音频设备与实时流 | P1 |
+| 跨系统并行 | `SystemAccess` 与批次计划已有，但执行仍是顺序；未做世界分片 | P1 |
+| 资产烹饪 / 打包 | 无 cooked asset、依赖清单、播放器打包 | P1 |
+| 渲染高级特性 | 无 PBR / 阴影 / 后处理 / 骨骼蒙皮 / 粒子绘制 | P1 |
+| UI 字体 | 仅 ASCII 5x7 位图；无字体资产 / 中文 | P2 |
+| 网络 / 存档 | 无多人、无游戏存档层 | P2 |
+
+## 割接验收门槛（未满足）
+
+1. 旧项目 `SceneV2` + 资源 + 脚本可端到端迁移并在 XGC 中运行。
+2. 骨骼 / 蒙皮、Lua 脚本、编辑器三项 P0 能力可用。
+3. 旧 / 新同一场景的 trace、状态哈希、视觉截图有对照验收。
+4. 性能基准达到约定预算，且热路径分配有门禁。
+5. 推送与 CI 全绿；当前本地提交因无 GitHub 凭据**未推送**。
+
+## 下一步（按顺序）
+
+1. 骨骼 / 蒙皮：Skeleton 组件、GLB skin 解析、关节矩阵、蒙皮管线。
+2. Lua 宿主：脚本生命周期、API 表、热重载、沙箱。
+3. 编辑器最小闭环：层级 / Inspector / 保存 / Play。
+4. 跨系统并行：世界分片与访问不相交批次执行。
+5. 资产烹饪与端到端迁移验收。
