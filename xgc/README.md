@@ -51,10 +51,11 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 里是十进制字符串，避免 2^53 精度丢失。`xgc check <world.json>` 会按注册表体检
 未知组件 / 字段 / 值类型 / 重复项。`xgc migrate <旧.ron> <新.json>` 已能迁移旧
 `SceneV2` 的实体身份 / 名称 / 父子 / `Transform`，并补默认 `GlobalTransform`；
-Mesh / Material / Camera 等旧组件先不搬，报告里计数。用真实 `character.ron` 跑通
-6 个实体、0 个父节点缺失，迁移结果通过 `xgc check`。
+参数也可以是一个目录：`xgc migrate <旧场景目录> <输出目录>` 会批量迁移所有
+`.ron`，单场景失败只记入报告、不中断其它场景。Mesh / Material / Camera 等旧组件
+先不搬，报告里计数。真实项目目录 4 个场景、35 个实体全部迁移成功，0 父缺失。
 
-`cargo test --workspace` 全绿（64 条），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace` 全绿（65 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（29 个 Rust 文件最大 594 行）；schema 两次导出逐字节相同，
 5 个内建类型 3529 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
@@ -75,7 +76,7 @@ cargo run -p xgc-cli -- export world.json
 cargo run -p xgc-cli -- import world.json
 cargo run -p xgc-cli -- run 60
 cargo run -p xgc-cli -- serve
-cargo run -p xgc-cli -- migrate <旧.ron> <新.json>
+cargo run -p xgc-cli -- migrate <旧.ron|旧目录> <新.json|新目录>
 ```
 
 本机 cargo 不在 PATH 时，用 `C:\Users\Administrator\.cargo\bin\cargo.exe`；

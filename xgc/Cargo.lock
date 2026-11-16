@@ -168,6 +168,7 @@ dependencies = [
  "ron",
  "serde",
  "xgc-base",
+ "xgc-store",
  "xgc-world",
 ]
 

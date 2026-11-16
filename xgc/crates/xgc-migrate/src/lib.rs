@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use xgc_base::EntityId;
@@ -23,6 +24,7 @@ pub enum MigrationError {
     Parse(String),
     UnsupportedVersion(u32),
     DuplicateId(u64),
+    Io(String),
 }
 
 impl fmt::Display for MigrationError {
@@ -36,6 +38,7 @@ impl fmt::Display for MigrationError {
                 )
             }
             Self::DuplicateId(id) => write!(f, "旧场景实体 ID 重复：{id}"),
+            Self::Io(message) => write!(f, "迁移 I/O 失败：{message}"),
         }
     }
 }
@@ -176,6 +179,64 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         },
         report,
     ))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MigrationBatch {
+    pub scenes: usize,
+    pub entities: usize,
+    pub with_old_components: usize,
+    pub missing_parents: usize,
+    pub failures: Vec<String>,
+}
+
+/// 批量迁移目录里的 `.ron`；单场景失败只记入 `failures`，不中断其它场景。
+pub fn migrate_dir(input: &Path, output: &Path) -> Result<MigrationBatch, MigrationError> {
+    let entries = std::fs::read_dir(input)
+        .map_err(|err| MigrationError::Io(format!("读取目录 {}：{err}", input.display())))?;
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "ron"))
+        .collect();
+    files.sort();
+
+    std::fs::create_dir_all(output)
+        .map_err(|err| MigrationError::Io(format!("创建目录 {}：{err}", output.display())))?;
+
+    let mut batch = MigrationBatch::default();
+    for path in files {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                batch
+                    .failures
+                    .push(format!("{}：读取失败 {err}", path.display()));
+                continue;
+            }
+        };
+        match migrate_str(&text) {
+            Ok((data, report)) => {
+                let stem = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "scene".to_string());
+                let target = output.join(format!("{stem}.json"));
+                if let Err(err) = xgc_store::save_world(&target, &data) {
+                    batch
+                        .failures
+                        .push(format!("{}：写入失败 {err}", path.display()));
+                    continue;
+                }
+                batch.scenes += 1;
+                batch.entities += report.entities;
+                batch.with_old_components += report.with_old_components;
+                batch.missing_parents += report.missing_parents;
+            }
+            Err(err) => batch.failures.push(format!("{}：{err}", path.display())),
+        }
+    }
+    Ok(batch)
 }
 
 /// 只给测试 / 诊断用：组件 ID 是稳定协议，不要在迁移层重新分配。

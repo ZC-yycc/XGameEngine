@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use xgc_agent::Agent;
-use xgc_migrate::migrate_str;
+use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
@@ -27,13 +27,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron> <新.json>>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron> <新.json>>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>>"
             );
             ExitCode::from(2)
         }
@@ -188,9 +188,36 @@ fn import(path: Option<&str>) -> ExitCode {
 
 fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
     let (Some(input), Some(output)) = (input, output) else {
-        eprintln!("用法：xgc migrate <旧.ron> <新.json>");
+        eprintln!("用法：xgc migrate <旧.ron|旧目录> <新.json|新目录>");
         return ExitCode::from(2);
     };
+    if Path::new(input).is_dir() {
+        return match migrate_dir(Path::new(input), Path::new(output)) {
+            Ok(batch) => {
+                for failure in &batch.failures {
+                    eprintln!("migrate 失败：{failure}");
+                }
+                println!(
+                    "migrate: {} 个场景，{} 个实体，{} 个带旧组件，{} 个父节点缺失，{} 个失败 -> {}",
+                    batch.scenes,
+                    batch.entities,
+                    batch.with_old_components,
+                    batch.missing_parents,
+                    batch.failures.len(),
+                    output
+                );
+                if batch.failures.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                }
+            }
+            Err(err) => {
+                eprintln!("批量迁移失败：{err}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let text = match std::fs::read_to_string(input) {
         Ok(text) => text,
         Err(err) => {

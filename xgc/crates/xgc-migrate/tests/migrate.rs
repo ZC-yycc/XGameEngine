@@ -110,3 +110,33 @@ fn missing_parent_is_counted_not_fatal() {
     let (_, report) = migrate_str(&scene).unwrap();
     assert_eq!(report.missing_parents, 1);
 }
+
+#[test]
+fn migrate_dir_writes_each_scene_and_reports_failures() {
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_migrate_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let input = dir.join("Scenes");
+    let output = dir.join("out");
+    std::fs::create_dir_all(&input).unwrap();
+    std::fs::write(input.join("good.ron"), SCENE).unwrap();
+    std::fs::write(
+        input.join("bad.ron"),
+        SCENE.replace("format_version: 2", "format_version: 1"),
+    )
+    .unwrap();
+
+    let batch = xgc_migrate::migrate_dir(&input, &output).unwrap();
+    assert_eq!(batch.scenes, 1);
+    assert_eq!(batch.entities, 2);
+    assert_eq!(batch.failures.len(), 1);
+    let migrated = xgc_store::load_world(&output.join("good.json")).unwrap();
+    assert_eq!(migrated.entities.len(), 2);
+
+    std::fs::remove_dir_all(dir).ok();
+}

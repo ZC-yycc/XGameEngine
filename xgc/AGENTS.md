@@ -40,9 +40,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
-| `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData` 第一层（身份 / 名称 / 父子 / Transform） |
+| `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData` 第一层（身份 / 名称 / 父子 / Transform，支持目录批量） |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / serve / migrate` |
+| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / serve / migrate <文件|目录>` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
 ## 不变量（改代码前先看）
@@ -56,7 +56,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第二十刀：旧场景迁移补 Mesh / Material / Camera 映射与逐组件报告。
+1. M1 第二十一刀：旧场景迁移补 Mesh / Material / Camera 映射与逐组件报告。
 2. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 3. Agent 能力清单 / 诊断码 / 视觉验证；`xgc check` 扩到项目 / 场景。
 4. 现在最大文件 594 行：动它之前先拆。
