@@ -39,8 +39,8 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
 `GpuMeshCache` 顶点 / 索引缓冲跨帧复用、按模型分组实例化（storage instance 缓冲）、
-UI 背景矩形叠加（无深度，focused 元素带强调色外环）、从 `render.mesh` +
-`render.material` 抽 `DrawList` 并按实体顺序 draw、RGBA8 回读）、
+UI 背景矩形叠加（无深度，focused 元素带强调色外环，5x7 位图文本单 draw）、
+从 `render.mesh` + `render.material` 抽 `DrawList` 并按实体顺序 draw、RGBA8 回读）、
 `xgc-cli`（`schema` / `check [路径]` /
 `bench` / `export` / `import` / `run` / `serve` / `migrate` / `render-graph`）、
 `xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
@@ -89,7 +89,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（83 个 Rust 文件最大 581 行）；schema 两次导出逐字节相同，
+`xgc-xtask check` 全绿（84 个 Rust 文件最大 581 行）；schema 两次导出逐字节相同，
 21 个内建类型 27803 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /

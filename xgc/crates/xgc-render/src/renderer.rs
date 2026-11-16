@@ -11,6 +11,7 @@ use super::instanced::InstancedRequest;
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
 use super::resources::{ResourceDesc, ResourceUsage};
+use super::text::text_mesh;
 use super::ui_draw::quad_matrix;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -103,19 +104,31 @@ impl Renderer {
                 .get::<UiElement>(key)
                 .map(|element| element.background)
                 .unwrap_or([1.0; 4]);
-            if color[3] <= 0.0 {
+            let (text, text_size, text_color) = world
+                .get::<UiElement>(key)
+                .map(|element| (element.text.clone(), element.text_size, element.text_color))
+                .unwrap_or_default();
+            if color[3] <= 0.0 && text.is_empty() {
                 return;
             }
             let focused = world
                 .get::<UiInteraction>(key)
                 .is_some_and(|state| state.focused);
             if let Some(entity) = world.entity(key) {
-                items.push((entity, layout.rect, color, focused));
+                items.push((
+                    entity,
+                    layout.rect,
+                    color,
+                    focused,
+                    text,
+                    text_size,
+                    text_color,
+                ));
             }
         });
-        items.sort_by_key(|(entity, _, _, _)| *entity);
+        items.sort_by_key(|(entity, _, _, _, _, _, _)| *entity);
         let mut draws = 0;
-        for (_, rect, color, focused) in &items {
+        for (_, rect, color, focused, text, text_size, text_color) in &items {
             if *focused {
                 let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
                 pipeline.draw_mesh_with_mvp(
@@ -128,15 +141,32 @@ impl Renderer {
                 )?;
                 draws += 1;
             }
-            pipeline.draw_mesh_with_mvp(
-                context,
-                target,
-                &mesh,
-                *color,
-                false,
-                Some(quad_matrix(*rect, viewport)),
-            )?;
-            draws += 1;
+            if color[3] > 0.0 {
+                pipeline.draw_mesh_with_mvp(
+                    context,
+                    target,
+                    &mesh,
+                    *color,
+                    false,
+                    Some(quad_matrix(*rect, viewport)),
+                )?;
+                draws += 1;
+            }
+            if !text.is_empty() {
+                let pixel = (*text_size / 7.0).max(1.0);
+                let text_mesh = text_mesh(text, [rect[0] + 2.0, rect[1] + 2.0], pixel, viewport);
+                if !text_mesh.positions.is_empty() {
+                    pipeline.draw_mesh_with_mvp(
+                        context,
+                        target,
+                        &text_mesh,
+                        *text_color,
+                        false,
+                        None,
+                    )?;
+                    draws += 1;
+                }
+            }
         }
         Ok(draws)
     }

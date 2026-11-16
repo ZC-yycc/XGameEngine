@@ -185,3 +185,52 @@ fn ui_focus_ring_renders_border() {
     let center = 4 * (4 * 8 + 4);
     assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
 }
+
+#[test]
+fn text_mesh_has_vertices_for_known_characters() {
+    let mesh = xgc_render::text_mesh("A1", [0.0, 0.0], 4.0, [128.0, 64.0]);
+    assert!(!mesh.positions.is_empty());
+    let empty = xgc_render::text_mesh("中", [0.0, 0.0], 4.0, [128.0, 64.0]);
+    assert!(empty.positions.is_empty());
+}
+
+#[test]
+fn ui_text_renders_colored_pixels() {
+    use xgc_world::{UiElement, UiLayout};
+
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let desc = ResourceDesc::texture2d(
+        "text-target",
+        "rgba8unorm",
+        64,
+        64,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let resource = context.create_resource(&desc).unwrap();
+    let GpuResource::Texture(texture) = resource else {
+        panic!("text target 不是纹理");
+    };
+    let mut world = World::new();
+    world.spawn((
+        UiElement {
+            text: "A".to_string(),
+            text_size: 56.0,
+            text_color: [1.0, 0.0, 0.0, 1.0],
+            background: [0.0; 4],
+            ..UiElement::default()
+        },
+        UiLayout {
+            rect: [0.0, 0.0, 64.0, 64.0],
+            ..UiLayout::default()
+        },
+    ));
+    let mut renderer = Renderer::new(MeshCache::new("."));
+    assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 1);
+    let pixels = context.read_texture_rgba8(&texture, 64, 64).unwrap();
+    assert!(pixels
+        .chunks_exact(4)
+        .any(|pixel| pixel[0] > 0 && pixel[1] == 0 && pixel[2] == 0));
+}
