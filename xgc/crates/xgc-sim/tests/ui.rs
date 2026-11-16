@@ -207,3 +207,31 @@ fn ui_focus_direction_picks_geometric_neighbor() {
     assert!(world.get::<UiInteraction>(right).unwrap().focused);
     assert!(!world.get::<UiInteraction>(down).unwrap().focused);
 }
+
+#[test]
+fn simulation_host_input_drives_ui() {
+    use xgc_sim::Simulation;
+    use xgc_world::UiInput;
+
+    let mut world = World::new();
+    let element = world.spawn((
+        UiElement {
+            offset_min: [0.0, 0.0],
+            offset_max: [100.0, 50.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+        UiInteraction::default(),
+    ));
+    let mut simulation = Simulation::new(world);
+    simulation.set_ui_input(UiInput {
+        cursor: [10.0, 10.0],
+        click: true,
+        ..UiInput::default()
+    });
+    simulation.step(Vec::new()).unwrap();
+    let state = simulation.world().get::<UiInteraction>(element).unwrap();
+    assert!(state.hovered);
+    assert!(state.clicked);
+    assert_eq!(simulation.ui_input().unwrap().cursor, [10.0, 10.0]);
+}

@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use xgc_base::Diagnostic;
-use xgc_world::{Command, ComponentId, World, WorldData};
+use xgc_world::{Command, ComponentId, UiInput, World, WorldData};
 
 pub const TRACE_FORMAT_VERSION: u32 = 1;
 
@@ -265,6 +265,32 @@ impl Simulation {
 
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// 宿主每帧写入 UI 输入；没有 `ui.input` 实体时自动补一个。
+    pub fn set_ui_input(&mut self, input: UiInput) {
+        let mut key = None;
+        self.world.for_each::<UiInput>(|existing, _| {
+            if key.is_none() {
+                key = Some(existing);
+            }
+        });
+        match key.and_then(|key| self.world.get_mut::<UiInput>(key)) {
+            Some(slot) => *slot = input,
+            None => {
+                self.world.spawn((input,));
+            }
+        }
+    }
+
+    pub fn ui_input(&self) -> Option<UiInput> {
+        let mut found = None;
+        self.world.for_each::<UiInput>(|_, input| {
+            if found.is_none() {
+                found = Some(*input);
+            }
+        });
+        found
     }
 
     pub fn trace(&self) -> &Trace {

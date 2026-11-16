@@ -48,7 +48,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/validate.rs` | `World::validate_data`：组件 / 字段 / 类型 / 重复项体检 |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
-| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
+| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `load_clip_ron` / `AnimationLibrary`：关键帧排序、线性采样、循环、RON 加载 |
 | `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：布局、裁剪、可见性、命中、`ui.input` 驱动的交互 / Tab / 方向键焦点 |
 | `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
@@ -89,7 +89,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. UI：`ui.input` 快照已接；下一步宿主输入采集 / 焦点环绘制。
+1. UI：`ui.input` + 宿主桥已接；下一步焦点环 / UI 绘制。
 2. 动画：剪辑资产注册与骨骼采样。
 3. 物理：台阶与斜坡。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。

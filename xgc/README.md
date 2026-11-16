@@ -63,8 +63,8 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 `AabbCollisionSystem` 两两分离动态刚体（球体按中心线精确分离）、`AnimatorSystem`
 推进动画时钟、`UiLayoutSystem` 算 UI 根 / 父相对矩形、裁剪区并继承可见性，`UiInteractionSystem`
 读 `ui.input` 写 hover / press / click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与
-方向键几何选邻，`hit_test` 取最上层可交互元素、`HierarchySystem` 合成世界变换）→
-快照 / trace。
+方向键几何选邻，`Simulation::set_ui_input` 作为宿主输入桥，`hit_test` 取最上层可交互
+元素、`HierarchySystem` 合成世界变换）→ 快照 / trace。
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
