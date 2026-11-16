@@ -31,6 +31,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 反兼容层门禁：基线只许降。新增 V2/legacy/shim/deprecated 之类残骸直接失败。
+      - name: Compatibility debt ratchet
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-no-compat.ps1 -Enforce
+
       - name: Install Rust stable + clippy
         uses: dtolnay/rust-toolchain@stable
         with:
