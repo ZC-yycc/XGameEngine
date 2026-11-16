@@ -1,7 +1,9 @@
 //! 动画叠加层：按权重累加平移。
 
-use xgc_sim::{AnimationClip, AnimationLayerSystem, AnimationLibrary, System, TranslationKey};
-use xgc_world::{AnimationLayers, Animator, Name, Transform, World};
+use xgc_sim::{
+    AnimationClip, AnimationLayerSystem, AnimationLibrary, JointTrack, System, TranslationKey,
+};
+use xgc_world::{AnimationLayers, Animator, Bone, Name, Parent, Transform, World};
 
 #[test]
 fn layer_weight_blends_translation() {
@@ -66,4 +68,46 @@ fn layer_mask_limits_to_named_entities() {
     system.run(&mut world, 0.1);
     assert_eq!(world.get::<Transform>(upper).unwrap().position[0], 2.0);
     assert_eq!(world.get::<Transform>(other).unwrap().position[0], 0.0);
+}
+
+#[test]
+fn layer_joint_mask_drives_only_bone() {
+    let mut library = AnimationLibrary::new();
+    library.insert(
+        AnimationClip::new(
+            "add",
+            1.0,
+            vec![TranslationKey {
+                time: 0.0,
+                value: [0.0, 0.0, 0.0],
+            }],
+        )
+        .with_joints(vec![JointTrack {
+            joint: 0,
+            translation: vec![TranslationKey {
+                time: 0.0,
+                value: [2.0, 0.0, 0.0],
+            }],
+            rotation: Vec::new(),
+            scale: Vec::new(),
+        }]),
+    );
+    let mut world = World::new();
+    let root = world.spawn((
+        AnimationLayers {
+            layers: "[(clip: \"add\", weight: 1.0, joints: [0])]".to_string(),
+        },
+        Animator::default(),
+        Transform::default(),
+    ));
+    let root_id = world.entity(root).unwrap();
+    let bone = world.spawn((
+        Bone { index: 0 },
+        Parent { entity: root_id },
+        Transform::default(),
+    ));
+    let mut system = AnimationLayerSystem::new(library);
+    system.run(&mut world, 0.1);
+    assert_eq!(world.get::<Transform>(bone).unwrap().position[0], 2.0);
+    assert_eq!(world.get::<Transform>(root).unwrap().position[0], 0.0);
 }

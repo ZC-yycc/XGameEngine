@@ -106,7 +106,7 @@ pub(super) fn sample_scale_keys(keys: &[ScaleKey], time: f32) -> [f32; 3] {
     ]
 }
 
-pub(super) fn descendant_of(world: &World, key: xgc_base::EntityKey, root: EntityId) -> bool {
+pub(crate) fn descendant_of(world: &World, key: xgc_base::EntityKey, root: EntityId) -> bool {
     let mut current = key;
     for _ in 0..128 {
         let Some(parent) = world.get::<Parent>(current) else {

@@ -11,7 +11,7 @@ use xgc_world::{Animator, Bone, Component, Transform, World};
 
 use super::{System, SystemAccess};
 
-mod joints;
+pub(crate) mod joints;
 use joints::descendant_of;
 pub use joints::JointTrack;
 
