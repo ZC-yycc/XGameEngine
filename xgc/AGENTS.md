@@ -100,7 +100,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读；`from_arc` 复用于编辑器视口 |
-| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList 拆分 CPU / GPU 蒙皮，实例化 + GPU 蒙皮 pass，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本 + 图片叠加；`render_selected` 选择高亮 |
+| `crates/xgc-render/src/renderer.rs` | 帧入口：CPU / GPU 蒙皮、实例化 pass、`set_clear_color`、active camera MVP、UI 叠加、选择高亮 |
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
@@ -111,7 +111,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵与祖先骨架姿态） |
-| `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；蒙皮实体按实体键单独成组并上传变形顶点 |
+| `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；顶点着色器输出世界坐标，片段用 `dpdx/dpdy` 叉积法线做方向光面着色 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData`；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
@@ -143,8 +143,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 渲染：builtin 几何已真实；下一步方向光 / 平面着色与纯色背景。
-2. 割接：逐帧 trace / 像素级视觉对照。
+1. 割接：逐帧 trace / 像素级视觉对照。
+2. 渲染：面着色 / 天空已通；下一步纹理 / 阴影 / HUD。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 资产：密码学签名 / 跨机器增量。
 5. 现在最大文件 595 行：动它之前先拆。

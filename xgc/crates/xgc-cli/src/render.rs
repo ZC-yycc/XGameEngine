@@ -229,6 +229,7 @@ pub(crate) fn render_frame(
         None => MeshCache::new("."),
     };
     let mut renderer = Renderer::new(meshes);
+    renderer.set_clear_color([0.62, 0.72, 0.84, 1.0]);
     if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
         for item in build_draw_list(&world).items {
             eprintln!(

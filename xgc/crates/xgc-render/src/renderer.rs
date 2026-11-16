@@ -42,6 +42,7 @@ pub struct Renderer {
     images: HashMap<String, Option<ImageData>>,
     ui_pipeline: Option<(wgpu::TextureFormat, TexturePipeline)>,
     ui_textures: HashMap<String, Option<wgpu::Texture>>,
+    clear_color: wgpu::Color,
 }
 
 fn scissor_rect(clip: [f32; 4], viewport: [f32; 2]) -> Option<[u32; 4]> {
@@ -68,7 +69,17 @@ impl Renderer {
             images: HashMap::new(),
             ui_pipeline: None,
             ui_textures: HashMap::new(),
+            clear_color: wgpu::Color::BLACK,
         }
+    }
+
+    pub fn set_clear_color(&mut self, color: [f64; 4]) {
+        self.clear_color = wgpu::Color {
+            r: color[0],
+            g: color[1],
+            b: color[2],
+            a: color[3],
+        };
     }
 
     pub fn meshes(&self) -> &MeshCache {
@@ -440,6 +451,7 @@ impl Renderer {
             gpu_meshes: &mut self.gpu_meshes,
             view_proj,
             depth,
+            clear_color: self.clear_color,
         };
         let mut draw_calls = self.cache.draw_list_instanced(context, &mut request)?;
         if !gpu_items.is_empty() {

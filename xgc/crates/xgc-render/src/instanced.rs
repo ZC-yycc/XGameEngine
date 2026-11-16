@@ -50,20 +50,26 @@ var<storage, read> instances: array<Instance>;
 struct VsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) world: vec3<f32>,
 };
 
 @vertex
 fn vs(@location(0) position: vec3<f32>, @builtin(instance_index) index: u32) -> VsOut {
     let instance = instances[index];
     var out: VsOut;
-    out.position = camera.view_proj * instance.model * vec4<f32>(position, 1.0);
+    let world = instance.model * vec4<f32>(position, 1.0);
+    out.position = camera.view_proj * world;
+    out.world = world.xyz;
     out.color = instance.color;
     return out;
 }
 
 @fragment
 fn fs(input: VsOut) -> @location(0) vec4<f32> {
-    return input.color;
+    let normal = normalize(cross(dpdx(input.world), dpdy(input.world)));
+    let light = normalize(vec3<f32>(0.0, 0.0, 1.0));
+    let shade = 0.55 + 0.45 * abs(dot(normal, light));
+    return vec4<f32>(input.color.rgb * shade, input.color.a);
 }
 "#;
 
@@ -182,6 +188,7 @@ pub(crate) struct InstancedRequest<'a> {
     pub(crate) gpu_meshes: &'a mut GpuMeshCache,
     pub(crate) view_proj: Mat4,
     pub(crate) depth: &'a wgpu::TextureView,
+    pub(crate) clear_color: wgpu::Color,
 }
 
 impl RenderCache {
@@ -198,7 +205,7 @@ impl RenderCache {
         let view_proj = request.view_proj;
         let depth = request.depth;
         if list.items.is_empty() {
-            context.clear_texture(texture, wgpu::Color::BLACK)?;
+            context.clear_texture(texture, request.clear_color)?;
             return Ok(0);
         }
         let format = texture.format();
@@ -319,7 +326,7 @@ impl RenderCache {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(request.clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
