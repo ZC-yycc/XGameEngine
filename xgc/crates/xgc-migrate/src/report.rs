@@ -2,7 +2,8 @@ use std::fmt;
 
 use xgc_world::{
     Animator as XgcAnimator, CharacterController as XgcCharacter, Component, ComponentId,
-    GlobalTransform, Name, Parent, ParticleEmitter as XgcParticle, PluginComponent, Transform,
+    GlobalTransform, LodGroup, Name, Parent, ParticleEmitter as XgcParticle, PluginComponent,
+    Transform,
 };
 
 use crate::OLD_SCENE_FORMAT_VERSION;
@@ -61,6 +62,7 @@ pub fn component_id_name(id: ComponentId) -> &'static str {
         XgcCharacter::ID => "physics.character",
         XgcParticle::ID => "particle.emitter",
         PluginComponent::ID => "plugin.rust",
+        LodGroup::ID => "render.lod",
         _ => "unknown",
     }
 }

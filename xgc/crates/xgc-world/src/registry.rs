@@ -4,9 +4,9 @@
 use xgc_reflect::Registry;
 
 use super::{
-    Animator, AudioSource, Camera, CharacterController, GlobalTransform, Material, MeshRenderer,
-    Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, Script, Transform, UiElement,
-    Velocity,
+    Animator, AudioSource, Camera, CharacterController, GlobalTransform, LodGroup, Material,
+    MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, Script, Transform,
+    UiElement, Velocity,
 };
 
 pub fn builtin_registry() -> Registry {
@@ -32,6 +32,9 @@ pub fn builtin_registry() -> Registry {
     registry
         .register::<Material>()
         .expect("内置组件注册失败：render.material");
+    registry
+        .register::<LodGroup>()
+        .expect("内置组件注册失败：render.lod");
     registry
         .register::<Camera>()
         .expect("内置组件注册失败：render.camera");

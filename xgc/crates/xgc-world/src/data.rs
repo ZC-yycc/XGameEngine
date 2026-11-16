@@ -13,8 +13,8 @@ use xgc_reflect::{Component, ComponentId, Value};
 
 use super::{
     Animator, AudioSource, Camera, CharacterController, Column, EntitySnapshot, GlobalTransform,
-    Material, MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, Script,
-    Transform, UiElement, Velocity, World,
+    LodGroup, Material, MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent,
+    Script, Transform, UiElement, Velocity, World,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -128,6 +128,7 @@ impl World {
         self.register_component::<GlobalTransform>();
         self.register_component::<MeshRenderer>();
         self.register_component::<Material>();
+        self.register_component::<LodGroup>();
         self.register_component::<Camera>();
         self.register_component::<Script>();
         self.register_component::<AudioSource>();

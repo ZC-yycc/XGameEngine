@@ -17,6 +17,7 @@ use xgc_world::{
     Script, Transform, Value, WorldData,
 };
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
+mod old_lod;
 mod old_particle;
 mod old_rust;
 mod old_ui;
@@ -241,11 +242,20 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut ui = None;
         let mut particle = None;
         let mut rust = None;
+        let mut lod = None;
         for entry in &old.components.entries {
             match &entry.data {
                 OldComponentData::Mesh(mesh) => {
                     mesh_model = Some(mesh.model.clone());
                     report.mapped_components += 1;
+                }
+                OldComponentData::Lod(value) => {
+                    if let Some(component) =
+                        old_lod::convert(value.clone()).map_err(MigrationError::Parse)?
+                    {
+                        lod = Some(component);
+                        report.mapped_components += 1;
+                    }
                 }
                 OldComponentData::Material(old_material) => {
                     let overrides = old_material.overrides.as_ref();
@@ -324,7 +334,6 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     ));
                     report.mapped_components += 1;
                 }
-                _ => {}
             }
         }
 
@@ -468,6 +477,9 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         }
         if let Some(rust) = rust {
             components.push(rust);
+        }
+        if let Some(lod) = lod {
+            components.push(lod);
         }
         if let Some(path) = script_path {
             components.push(ComponentData {

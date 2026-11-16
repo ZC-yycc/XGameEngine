@@ -1,0 +1,363 @@
+//! 迁移回归：各旧组件 → XGC 组件映射。
+
+use xgc_migrate::migrate_str;
+use xgc_world::{
+    Animator as XgcAnimator, CharacterController as XgcCharacter, Component, LodGroup,
+    ParticleEmitter, PluginComponent, UiElement, Value,
+};
+
+#[test]
+fn maps_animator() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Anim",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Animated",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Animator((
+                                clip: "Walk",
+                                speed: 2.0,
+                                looping: false,
+                                autoplay: false,
+                                fade_time: 0.25,
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let animator = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == XgcAnimator::ID)
+        .unwrap();
+    let field = |name: &str| {
+        animator
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("clip"), Value::String("Walk".to_string()));
+    assert_eq!(field("speed"), Value::F64(2.0));
+    assert_eq!(field("looping"), Value::Bool(false));
+    assert_eq!(field("autoplay"), Value::Bool(false));
+    assert_eq!(field("fade_time"), Value::F64(0.25));
+}
+
+#[test]
+fn maps_character() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Char",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Player",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Character((
+                                radius: 0.3,
+                                height: 1.8,
+                                step_offset: 0.35,
+                                slope_limit: 45.0,
+                                skin_width: 0.02,
+                                snap_to_ground: 0.3,
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let character = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == XgcCharacter::ID)
+        .unwrap();
+    let field = |name: &str| {
+        character
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("radius").as_f32(), Some(0.3));
+    assert_eq!(field("height").as_f32(), Some(1.8));
+    assert_eq!(field("step_offset").as_f32(), Some(0.35));
+    assert_eq!(field("snap_to_ground").as_f32(), Some(0.3));
+}
+
+#[test]
+fn maps_ui_element() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Ui",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "HUD",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Ui((
+                                kind: Panel,
+                                anchor_min: (0.0, 0.0),
+                                anchor_max: (0.0, 0.0),
+                                offset_min: (24.0, 24.0),
+                                offset_max: (364.0, 200.0),
+                                style: (
+                                    background: (0.1, 0.2, 0.3, 0.8),
+                                    border_color: (0.2, 0.2, 0.2, 1.0),
+                                    border_width: 1.0,
+                                    corner_radius: 10.0,
+                                    padding: 6.0,
+                                ),
+                                text: (
+                                    content: "",
+                                    size: 20.0,
+                                    color: (1.0, 1.0, 1.0, 1.0),
+                                ),
+                                visible: true,
+                                interactable: true,
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let ui = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == UiElement::ID)
+        .unwrap();
+    let field = |name: &str| {
+        ui.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("kind"), Value::String("panel".to_string()));
+    assert_eq!(field("offset_min").as_vec2(), Some([24.0, 24.0]));
+    assert_eq!(field("corner_radius").as_f32(), Some(10.0));
+    assert_eq!(field("visible"), Value::Bool(true));
+}
+
+#[test]
+fn maps_particle() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Fx",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Fire",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Particle((
+                                emitting: true,
+                                rate: 30.0,
+                                max_particles: 100,
+                                lifetime: (0.5, 1.0),
+                                speed: (1.0, 2.0),
+                                gravity: (0.0, -1.0, 0.0),
+                                start_color: (1.0, 0.5, 0.1, 0.9),
+                                seed: 7,
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let particle = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == ParticleEmitter::ID)
+        .unwrap();
+    let field = |name: &str| {
+        particle
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("rate").as_f32(), Some(30.0));
+    assert_eq!(field("max_particles"), Value::I64(100));
+    assert_eq!(field("lifetime").as_vec2(), Some([0.5, 1.0]));
+    assert_eq!(field("seed"), Value::I64(7));
+}
+
+#[test]
+fn maps_rust_plugin_component() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Plugin",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Spinner",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Rust(
+                                registered_name: "Spinner",
+                                fields: None,
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let plugin = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == PluginComponent::ID)
+        .unwrap();
+    let field = |name: &str| {
+        plugin
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("registered_name"), Value::String("Spinner".into()));
+    assert_eq!(field("fields"), Value::String(String::new()));
+}
+
+#[test]
+fn maps_lod() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Lod",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Tree",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Lod((
+                                levels: [
+                                    (model: "builtin://cube", max_distance: 10.0),
+                                    (model: "builtin://sphere", max_distance: 30.0),
+                                ],
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let lod = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == LodGroup::ID)
+        .unwrap();
+    let levels = lod
+        .fields
+        .iter()
+        .find(|(field, _)| field == "levels")
+        .map(|(_, value)| value.as_string().unwrap())
+        .unwrap();
+    assert!(levels.contains("builtin://cube"));
+    assert!(levels.contains("30.0"));
+}
