@@ -18,6 +18,7 @@ use xgc_world::{
     Transform, UiInteraction, UiLayout, Value, WorldData,
 };
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
+mod compare;
 mod old_animator;
 mod old_lod;
 mod old_particle;
@@ -27,6 +28,7 @@ mod old_ui;
 mod prefab;
 mod report;
 mod verify;
+pub use compare::{compare_headless, CompareReport, Stats};
 pub use prefab::{instantiate_prefab, revert_prefab};
 pub use report::{component_id_name, MigrationBatch, MigrationError, MigrationReport};
 pub use verify::verify_migration;

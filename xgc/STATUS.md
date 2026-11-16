@@ -7,8 +7,8 @@
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 148（最大 595 行；软上限 600） |
-| 测试 | 215（`cargo test --workspace --offline`） |
+| Rust 文件 | 151（最大 595 行；软上限 600） |
+| 测试 | 217（`cargo test --workspace --offline`） |
 | 内建组件 schema | 30 类 / 34668 字节，两次导出逐字节相同 |
 | 默认系统 | 18 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
@@ -46,7 +46,7 @@
 | 资产 / 打包 | 70% | 引用裁剪 + 增量烹饪（哈希未变跳过写入）+ manifest 聚合签名；JSON / XGCB / 图形播放器；缺密码学签名 / 跨机器增量 |
 | Lua 脚本 | 80% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
-| 割接验收 | 25% | showcase 迁移 / 运行 / 渲染已通；无旧新逐帧对照、性能门禁、未推送 |
+| 割接验收 | 30% | showcase 旧 headless / 新统计逐项一致（24 实体 / 10 刚体 / 10 碰撞体 / 2 发射器 / 1 监听者）；缺逐帧 trace / 视觉截图对照 |
 
 **整体能力对等约 45%，割接就绪约 25–30%**。核心运行时本身接近可用，
 差距集中在脚本正式调度、渲染高级特性与旧新逐帧验收。

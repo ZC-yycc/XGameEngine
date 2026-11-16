@@ -18,6 +18,7 @@ use xgc_world::{Name, Transform, Velocity, World};
 
 mod assets_cmd;
 mod audio;
+mod compare_cmd;
 mod cook_cmd;
 mod input_cmd;
 mod render;
@@ -50,6 +51,9 @@ fn main() -> ExitCode {
         Some("skeleton") => skeleton_glb(args.next().as_deref()),
         Some("assets") => assets_cmd::assets(args.next().as_deref()),
         Some("cook") => cook_cmd::cook(args.next().as_deref(), args.next().as_deref()),
+        Some("compare-headless") => {
+            compare_cmd::compare(args.next().as_deref(), args.next().as_deref())
+        }
         Some("pack") => cook_cmd::pack(
             args.next().as_deref(),
             args.next().as_deref(),

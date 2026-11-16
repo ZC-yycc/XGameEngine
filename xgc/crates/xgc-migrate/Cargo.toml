@@ -13,3 +13,4 @@ xgc-store = { path = "../xgc-store" }
 glam = { version = "0.29.3", features = ["serde"] }
 ron = "0.8.1"
 serde.workspace = true
+serde_json.workspace = true

@@ -2998,6 +2998,7 @@ dependencies = [
  "glam",
  "ron",
  "serde",
+ "serde_json",
  "xgc-base",
  "xgc-store",
  "xgc-world",
