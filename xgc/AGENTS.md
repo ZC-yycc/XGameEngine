@@ -57,7 +57,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-store/src/binary.rs` | `XGCB` 二进制世界：encode / decode / save / load；固定小端、值带标签 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
-| `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `RotationKey` / `ScaleKey` / `load_clip_ron` / `AnimationLibrary`（含 `load_dir`）：平移 / 旋转 slerp / 缩放采样、循环、RON / 目录加载、`AnimationPlaybackSystem` 写 Transform |
+| `crates/xgc-sim/src/animation.rs` | 根变换剪辑采样 + `AnimationPlaybackSystem`；关节轨道在 `animation/joints.rs` |
+| `crates/xgc-sim/src/animation/joints.rs` | `JointTrack`：按 joint 索引采样骨骼本地平移 / 旋转 / 缩放；播放系统按 Parent 链找骨骼并写入 |
 | `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、转场时长写 blend 字段、状态写回 Animator.clip |
 | `crates/xgc-sim/src/animation_layers.rs` | `AnimationLayerSystem` / `LayerDef`：按权重叠加平移 / 旋转 / 缩放；`mask` 是实体名白名单（clip 目前只有根变换轨道） |
 | `crates/xgc-sim/src/input.rs` | `InputMap` / `InputState` / `KeyCode` / `Binding`：解析 `input.ron` 并折叠动作与轴 |
@@ -139,7 +140,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：实体级遮罩已通；下一步骨骼级遮罩 / 轨道。
+1. 动画：关节轨道已通；下一步关节级遮罩。
 2. 脚本：正式 System 调度与脚本组件生命周期完整化。
 3. 资产：发布签名 / 增量烹饪。
 4. 旧新视觉 / trace 对照。

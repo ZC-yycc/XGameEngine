@@ -7,9 +7,13 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use xgc_world::{Animator, Component, Transform, World};
+use xgc_world::{Animator, Bone, Component, Transform, World};
 
 use super::{System, SystemAccess};
+
+mod joints;
+use joints::descendant_of;
+pub use joints::JointTrack;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TranslationKey {
@@ -36,6 +40,7 @@ pub struct AnimationClip {
     pub translation: Vec<TranslationKey>,
     pub rotation: Vec<RotationKey>,
     pub scale: Vec<ScaleKey>,
+    pub joints: Vec<JointTrack>,
 }
 
 impl AnimationClip {
@@ -52,6 +57,7 @@ impl AnimationClip {
             translation,
             rotation: Vec::new(),
             scale: Vec::new(),
+            joints: Vec::new(),
         }
     }
 
@@ -97,6 +103,11 @@ impl AnimationClip {
             .filter(|key| key.time.is_finite())
             .collect();
         self.rotation.sort_by(|a, b| a.time.total_cmp(&b.time));
+        self
+    }
+
+    pub fn with_joints(mut self, joints: Vec<JointTrack>) -> Self {
+        self.joints = joints;
         self
     }
 
@@ -238,6 +249,19 @@ struct ClipFile {
     rotation: Vec<RotationFile>,
     #[serde(default)]
     scale: Vec<ScaleFile>,
+    #[serde(default)]
+    joints: Vec<JointFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JointFile {
+    joint: u32,
+    #[serde(default)]
+    translation: Vec<KeyFile>,
+    #[serde(default)]
+    rotation: Vec<RotationFile>,
+    #[serde(default)]
+    scale: Vec<ScaleFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,9 +309,41 @@ pub fn load_clip_ron(text: &str) -> Result<AnimationClip, String> {
             value: key.value,
         })
         .collect();
+    let joints = file
+        .joints
+        .into_iter()
+        .map(|joint| JointTrack {
+            joint: joint.joint,
+            translation: joint
+                .translation
+                .into_iter()
+                .map(|key| TranslationKey {
+                    time: key.time,
+                    value: key.value,
+                })
+                .collect(),
+            rotation: joint
+                .rotation
+                .into_iter()
+                .map(|key| RotationKey {
+                    time: key.time,
+                    value: key.value,
+                })
+                .collect(),
+            scale: joint
+                .scale
+                .into_iter()
+                .map(|key| ScaleKey {
+                    time: key.time,
+                    value: key.value,
+                })
+                .collect(),
+        })
+        .collect();
     Ok(AnimationClip::new(file.name, file.duration, keys)
         .with_rotation(rotation)
-        .with_scale(scale))
+        .with_scale(scale)
+        .with_joints(joints))
 }
 
 /// 按名字索引的剪辑库；BTreeMap 保证遍历 / 导出顺序确定。
@@ -381,6 +437,7 @@ impl System for AnimationPlaybackSystem {
 
     fn run(&mut self, world: &mut World, _dt: f32) {
         let mut samples = Vec::new();
+        let mut roots = Vec::new();
         world.for_each::<Animator>(|key, animator| {
             let Some(offset) = self.library.sample_looped(&animator.clip, animator.time) else {
                 return;
@@ -423,8 +480,37 @@ impl System for AnimationPlaybackSystem {
                 }
             }
             samples.push((key, position, rotation, scale));
+            if let Some(entity) = world.entity(key) {
+                roots.push((key, entity, animator.clip.clone(), animator.time));
+            }
         });
+        let mut bones = Vec::new();
+        for (root_key, root_id, clip_name, time) in roots {
+            let Some(clip) = self.library.get(&clip_name) else {
+                continue;
+            };
+            if clip.joints.is_empty() {
+                continue;
+            }
+            world.for_each::<Bone>(|bone_key, bone| {
+                if bone_key == root_key || !descendant_of(world, bone_key, root_id) {
+                    return;
+                }
+                if let Some((position, rotation, scale)) =
+                    clip.sample_joint_looped(bone.index, time)
+                {
+                    bones.push((bone_key, position, rotation, scale));
+                }
+            });
+        }
         for (key, position, rotation, scale) in samples {
+            if let Some(transform) = world.get_mut::<Transform>(key) {
+                transform.position = position;
+                transform.rotation = rotation;
+                transform.scale = scale;
+            }
+        }
+        for (key, position, rotation, scale) in bones {
             if let Some(transform) = world.get_mut::<Transform>(key) {
                 transform.position = position;
                 transform.rotation = rotation;
