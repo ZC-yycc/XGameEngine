@@ -91,6 +91,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/old_particle.rs` | 旧 `ParticleEmitter` → `particle.emitter` |
 | `crates/xgc-migrate/src/old_ui.rs` | 旧 `UiElement` → `ui.element`（kind 由内容推断） |
 | `crates/xgc-migrate/src/prefab.rs` | `instantiate_prefab` / `revert_prefab`：新 ID、Parent 重写、按 source_id 认回并保留 Transform |
+| `crates/xgc-migrate/src/verify.rs` | `verify_migration`：重新迁移旧场景与目标 `WorldData` 逐实体 / 字段对比，浮点按 f32 容差 |
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读；`from_arc` 复用于编辑器视口 |
@@ -112,7 +113,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-world <世界.json> [帧] / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
-| `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` |
+| `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
+| `crates/xgc-cli/src/assets_cmd.rs` | `xgc assets <项目根>`：GUID 扫描 |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
@@ -131,11 +133,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 迁移：窗口键盘已接；下一步旧新视觉 / trace 对照。
-2. 动画：遮罩 / 分层混合细节。
+1. 动画：遮罩 / 分层混合细节。
+2. 资产烹饪 / 打包。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
-4. 资产烹饪 / 打包。
-5. 现在最大文件 600 行：动它之前先拆。
+4. 旧新视觉 / trace 对照。
+5. 现在最大文件 595 行：动它之前先拆。
 
 ## Token 纪律
 

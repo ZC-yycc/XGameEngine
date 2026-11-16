@@ -29,7 +29,20 @@ fn showcase_scene_migrates_and_runs() {
     }
     let world = simulation.world();
     assert_ne!(world.len(), 0);
-    assert_ne!(world.state_hash(), 0);
+    let first_hash = world.state_hash();
+    assert_ne!(first_hash, 0);
+
+    let mut replay_world = World::new();
+    replay_world.restore_world_data(&data).unwrap();
+    let mut replay = Simulation::new(replay_world);
+    for _ in 0..60 {
+        replay.step(Vec::new()).unwrap();
+    }
+    assert_eq!(
+        replay.world().state_hash(),
+        first_hash,
+        "迁移场景重放应确定"
+    );
 
     let catalog = xgc_asset::scan(root).unwrap();
     let mut models = 0;

@@ -26,8 +26,10 @@ mod old_scene;
 mod old_ui;
 mod prefab;
 mod report;
+mod verify;
 pub use prefab::{instantiate_prefab, revert_prefab};
 pub use report::{component_id_name, MigrationBatch, MigrationError, MigrationReport};
+pub use verify::verify_migration;
 #[derive(Debug, Default, Deserialize)]
 struct OldComponents {
     #[serde(default)]

@@ -16,6 +16,7 @@ use xgc_sim::{
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
 
+mod assets_cmd;
 mod audio;
 mod input_cmd;
 mod render;
@@ -32,6 +33,9 @@ fn main() -> ExitCode {
         Some("import") => import(args.next().as_deref()),
         Some("run") => run(args.next().as_deref()),
         Some("run-world") => world_cmd::run_world(args.next().as_deref(), args.next().as_deref()),
+        Some("verify-migration") => {
+            world_cmd::verify(args.next().as_deref(), args.next().as_deref())
+        }
         Some("run-scripts") => run_scripts(
             args.next().as_deref(),
             args.next().as_deref(),
@@ -43,7 +47,7 @@ fn main() -> ExitCode {
         Some("gpu-probe") => render::gpu_probe(),
         Some("mesh-probe") => render::mesh_probe(args.next().as_deref()),
         Some("skeleton") => skeleton_glb(args.next().as_deref()),
-        Some("assets") => assets(args.next().as_deref()),
+        Some("assets") => assets_cmd::assets(args.next().as_deref()),
         Some("clips") => clips(args.next().as_deref()),
         Some("audio") => audio(args.next().as_deref()),
         Some("mix") => mix(args.next().as_deref(), args.next().as_deref()),
@@ -414,30 +418,6 @@ fn clips(dir: Option<&str>) -> ExitCode {
         Err(err) => {
             eprintln!("加载剪辑失败：{err}");
             ExitCode::from(2)
-        }
-    }
-}
-
-fn assets(root: Option<&str>) -> ExitCode {
-    let Some(root) = root else {
-        eprintln!("用法：xgc assets <项目根>");
-        return ExitCode::from(2);
-    };
-    match scan_assets(Path::new(root)) {
-        Ok(catalog) => {
-            println!(
-                "assets: {} 个 GUID，{} 条问题",
-                catalog.len(),
-                catalog.issues().len()
-            );
-            for issue in catalog.issues() {
-                eprintln!("assets: {issue}");
-            }
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("扫描资产失败：{err}");
-            ExitCode::from(1)
         }
     }
 }
