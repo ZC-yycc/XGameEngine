@@ -5,6 +5,7 @@ members = [
     "crates/xgc-reflect",
     "crates/xgc-world",
     "crates/xgc-cli",
+    "crates/xgc-xtask",
 ]
 
 [workspace.package]

@@ -12,6 +12,7 @@ members，也不要在 `xgc` 里依赖根仓库的 `xgame-*` crate。旧引擎�
 cd xgc
 cargo test --workspace --offline
 cargo clippy --workspace --all-targets --offline -- -D warnings
+cargo run -q -p xgc-xtask --offline -- check
 cargo run -q --release -p xgc-cli --offline -- bench
 ```
 
@@ -25,7 +26,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-base/src/lib.rs` | `EntityId` / `EntityKey` / `Tick` / `Diagnostic` |
 | `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、`Value` |
 | `crates/xgc-world/src/lib.rs` | `World`、`Bundle`、`Archetype`、内建组件 |
+| `crates/xgc-world/tests/world.rs` | 生成 / 回收 / 查询 / 确定性回归 |
 | `crates/xgc-cli/src/main.rs` | `xgc schema` / `xgc bench` |
+| `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
 ## 不变量（改代码前先看）
 
@@ -38,10 +41,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M0 收尾：`xgc-xtask`（size-check / dep-check / schema 确定性）、10k 基准固化、
-   双线程/确定性门禁。
-2. M1：`Command` 事务（plan/apply/revert）、世界 revision、快照/回放、
-   多组件查询、`xgc check`、Agent 协议最小集。
+1. M0 已收口；M1 第一刀：`Command` 事务（plan / apply / revert）、世界 revision
+   与实体级变更、多组件查询；world 文件接近 600 行时先拆 `world/` 模块再扩。
+2. M1 第二刀：快照 / 回放、`xgc check`、Agent 协议最小集（`engine.describe` /
+   `world.query` / `edit.plan`）。
 3. 再往后的渲染 / 物理 / 脚本 / 编辑器见主文档 §14，别提前开分支。
 
 ## Token 纪律

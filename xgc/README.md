@@ -6,9 +6,10 @@
 
 ## 当前阶段
 
-**M0 地基第一版已完成**：`xgc-base`（持久 ID / 句柄 / 诊断）、
-`xgc-reflect`（组件注册表 / 确定性 schema）、`xgc-world`（archetype 列式
-存储 / 单组件查询 / 生成回收）、`xgc-cli`（`schema` / `bench`）。
+**M0 已完成**：`xgc-base`（持久 ID / 句柄 / 诊断）、`xgc-reflect`（组件注册表 /
+确定性 schema）、`xgc-world`（archetype 列式存储 / 单组件查询 / 生成回收）、
+`xgc-cli`（`schema` / `bench`）、`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性
+门禁）。
 
 实测（i7-10700，release，10 000 个 `(Transform, Velocity)`）：
 
@@ -18,8 +19,8 @@
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
-`cargo test --workspace` 全绿，`clippy -D warnings` 通过；schema 两次导出
-逐字节相同。
+`cargo test --workspace` 全绿，`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（6 个 Rust 文件最大 463 行）；schema 两次导出逐字节相同。
 
 **尚未实现**：命令事务、快照 / 回放、多组件查询、渲染、物理、脚本、编辑器、
 Agent 协议。这些按主文档 §14 的里程碑推进。
@@ -29,6 +30,8 @@ Agent 协议。这些按主文档 §14 的里程碑推进。
 ```sh
 cd xgc
 cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p xgc-xtask -- check
 cargo run -p xgc-cli -- schema
 cargo run -p xgc-cli -- bench
 ```

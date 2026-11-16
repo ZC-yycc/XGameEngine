@@ -1,0 +1,17 @@
+[package]
+name = "xgc-xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC 开发门禁：文件预算 / 依赖方向 / schema 确定性"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+xgc-base = { path = "../xgc-base" }
+xgc-reflect = { path = "../xgc-reflect" }
+xgc-world = { path = "../xgc-world" }
+serde_json.workspace = true
