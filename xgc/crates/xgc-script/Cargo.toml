@@ -10,3 +10,4 @@ description = "XGC Lua 脚本宿主：安全标准库、脚本执行、函数调
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
+xgc-asset = { path = "../xgc-asset" }

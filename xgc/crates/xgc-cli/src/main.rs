@@ -491,7 +491,10 @@ fn run_scripts(
         return ExitCode::from(2);
     }
     let mut simulation = Simulation::new(world);
-    let mut runtime = ScriptRuntime::new(script_dir);
+    let mut runtime = match scan_assets(Path::new(script_dir)) {
+        Ok(catalog) => ScriptRuntime::with_catalog(script_dir, catalog),
+        Err(_) => ScriptRuntime::new(script_dir),
+    };
     for _ in 0..frames {
         if let Err(err) = simulation.step_with(Vec::new(), |world| {
             runtime.run_frame(world, 1.0 / 60.0);
