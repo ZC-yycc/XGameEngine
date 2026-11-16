@@ -8,7 +8,7 @@ use std::time::Instant;
 use xgc_agent::Agent;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
-use xgc_render::{Pass, RenderGraph, ResourceDesc, ResourceUsage};
+use xgc_render::{GpuContext, Pass, RenderGraph, ResourceDesc, ResourceUsage};
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
@@ -26,16 +26,17 @@ fn main() -> ExitCode {
         Some("serve") => serve(),
         Some("migrate") => migrate(args.next().as_deref(), args.next().as_deref()),
         Some("render-graph") => render_graph(),
+        Some("gpu-probe") => gpu_probe(),
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe>"
             );
             ExitCode::from(2)
         }
@@ -287,6 +288,36 @@ fn render_graph() -> ExitCode {
         }
         Err(err) => {
             eprintln!("渲染图排序失败：{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn gpu_probe() -> ExitCode {
+    match GpuContext::headless() {
+        Ok(context) => {
+            let info = context.adapter_info();
+            println!("gpu: {} / {:?}", info.name, info.backend);
+            let desc = ResourceDesc::texture2d(
+                "probe",
+                "rgba8unorm",
+                4,
+                4,
+                vec![ResourceUsage::ColorAttachment, ResourceUsage::Sampled],
+            );
+            match context.create_resource(&desc) {
+                Ok(_) => {
+                    println!("gpu: texture created");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("创建 GPU 资源失败：{err}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("GPU 不可用：{err}");
             ExitCode::from(1)
         }
     }

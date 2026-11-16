@@ -22,7 +22,8 @@
 digest / stats / validate / load / save / plan / apply / revert；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
 Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-render`（资源描述 / pass / resource 渲染图，确定性拓扑排序 / 环检测 /
-单写者 / 未声明与读写用途校验 / `PassExecutor` 执行骨架）、`xgc-cli`
+单写者 / 未声明与读写用途校验 / `PassExecutor` 执行骨架；wgpu 设备与
+`GpuContext::create_resource` 真实纹理 / 缓冲创建）、`xgc-cli`
 （`schema` / `check [路径]` /
 `bench` / `export` / `import` / `run` / `serve` / `migrate` / `render-graph`）、
 `xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
@@ -61,8 +62,8 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 Audio / Physics 已映射到对应组件；UI / Animator 等仍先跳过，报告里计数。真实项目
 目录 4 个场景、35 个实体、63 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（77 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（38 个 Rust 文件最大 597 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（79 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（40 个 Rust 文件最大 597 行）；schema 两次导出逐字节相同，
 11 个内建类型 10399 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
@@ -84,6 +85,7 @@ cargo run -p xgc-cli -- run 60
 cargo run -p xgc-cli -- serve
 cargo run -p xgc-cli -- migrate <旧.ron|旧目录> <新.json|新目录>
 cargo run -p xgc-cli -- render-graph
+cargo run -p xgc-cli -- gpu-probe
 ```
 
 本机 cargo 不在 PATH 时，用 `C:\Users\Administrator\.cargo\bin\cargo.exe`；
