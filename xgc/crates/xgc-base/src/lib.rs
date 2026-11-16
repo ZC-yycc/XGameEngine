@@ -7,12 +7,15 @@
 
 use std::fmt;
 
+use serde::de::{Deserializer, Error as DeError};
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 /// 持久实体身份：项目级单调分配，永不复用。
 ///
 /// 磁盘、存档、Agent 协议、跨文件引用都用它。运行时热路径用 [`EntityKey`]。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// JSON 里固定写成十进制字符串，避免 2^53 精度丢失。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityId(u64);
 
 impl EntityId {
@@ -34,6 +37,21 @@ impl fmt::Debug for EntityId {
 impl fmt::Display for EntityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl Serialize for EntityId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse::<u64>()
+            .map(Self)
+            .map_err(|err| D::Error::custom(format!("实体 ID 不是十进制 u64：{err}")))
     }
 }
 

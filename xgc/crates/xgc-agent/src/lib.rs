@@ -10,9 +10,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{json, Value as Json};
-use xgc_reflect::Registry;
+use xgc_reflect::{ComponentId, Registry};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Applied, Command, Plan, World};
+
+mod query;
+
+use query::{axis_index, FieldRef, Filter, FilterOp};
 
 pub const PROTOCOL: &str = "xgc.agent/1";
 
@@ -138,6 +142,8 @@ impl Agent {
             ),
             None => None,
         };
+        let select = self.parse_select(params)?;
+        let filter = self.parse_filter(params)?;
 
         let data = self.world.world_data();
         let mut entities: Vec<_> = data
@@ -151,18 +157,136 @@ impl Agent {
                         .any(|component| component.component.0 == id)
                 })
             })
+            .filter(|entity| filter.as_ref().is_none_or(|filter| filter.matches(entity)))
             .collect();
         let total = entities.len();
         let start = offset.min(total);
         let end = start.saturating_add(limit).min(total);
         let page: Vec<_> = entities.drain(start..end).collect();
+        let next_offset = if end < total { Some(end) } else { None };
+
+        if let Some(fields) = select {
+            let rows: Vec<_> = page
+                .iter()
+                .map(|entity| {
+                    let mut values = serde_json::Map::new();
+                    for field in &fields {
+                        let value = entity
+                            .components
+                            .iter()
+                            .find(|component| component.component == field.component)
+                            .and_then(|component| {
+                                component
+                                    .fields
+                                    .iter()
+                                    .find(|(name, _)| name == &field.field)
+                                    .map(|(_, value)| value)
+                            });
+                        values.insert(
+                            field.label(),
+                            value
+                                .and_then(|value| serde_json::to_value(value).ok())
+                                .unwrap_or(Json::Null),
+                        );
+                    }
+                    json!({"id": entity.id.to_string(), "values": values})
+                })
+                .collect();
+            return Ok(json!({
+                "revision": data.revision,
+                "total": total,
+                "offset": start,
+                "rows": rows,
+                "next_offset": next_offset,
+            }));
+        }
+
         Ok(json!({
             "revision": data.revision,
             "total": total,
             "offset": start,
             "entities": page,
-            "next_offset": if end < total { Some(end) } else { None },
+            "next_offset": next_offset,
         }))
+    }
+
+    fn parse_select(&self, params: &Json) -> Result<Option<Vec<FieldRef>>, String> {
+        let Some(select) = params.get("select") else {
+            return Ok(None);
+        };
+        if select.is_null() {
+            return Ok(None);
+        }
+        let items = select
+            .as_array()
+            .ok_or_else(|| "select 必须是字符串数组".to_string())?;
+        let mut fields = Vec::with_capacity(items.len());
+        for item in items {
+            let path = item
+                .as_str()
+                .ok_or_else(|| "select 的条目必须是字符串".to_string())?;
+            fields.push(self.resolve_field(path)?);
+        }
+        Ok(Some(fields))
+    }
+
+    fn parse_filter(&self, params: &Json) -> Result<Option<Filter>, String> {
+        let Some(filter) = params.get("filter") else {
+            return Ok(None);
+        };
+        if filter.is_null() {
+            return Ok(None);
+        }
+        let path = filter
+            .get("path")
+            .and_then(Json::as_str)
+            .ok_or_else(|| "filter.path 必须是字符串".to_string())?;
+        let path = self.resolve_field(path)?;
+        let op = match filter
+            .get("op")
+            .and_then(Json::as_str)
+            .ok_or_else(|| "filter.op 必须是字符串".to_string())?
+        {
+            "eq" => FilterOp::Eq,
+            "ne" => FilterOp::Ne,
+            "lt" => FilterOp::Lt,
+            "le" => FilterOp::Le,
+            "gt" => FilterOp::Gt,
+            "ge" => FilterOp::Ge,
+            other => return Err(format!("未知过滤操作：{other}")),
+        };
+        let axis = match filter.get("axis").and_then(Json::as_str) {
+            Some(axis) => Some(axis_index(axis)?),
+            None => None,
+        };
+        let value = filter
+            .get("value")
+            .cloned()
+            .ok_or_else(|| "filter.value 缺失".to_string())?;
+        Ok(Some(Filter {
+            path,
+            axis,
+            op,
+            value,
+        }))
+    }
+
+    fn resolve_field(&self, path: &str) -> Result<FieldRef, String> {
+        let (component, field) = path
+            .split_once(':')
+            .ok_or_else(|| format!("字段路径必须是 组件:字段：{path}"))?;
+        let schema = self
+            .registry
+            .by_name(component)
+            .ok_or_else(|| format!("未知组件：{component}"))?;
+        if !schema.fields.iter().any(|item| item.name == field) {
+            return Err(format!("组件 {component} 没有字段 {field}"));
+        }
+        Ok(FieldRef {
+            component: ComponentId(schema.id),
+            component_name: component.to_string(),
+            field: field.to_string(),
+        })
     }
 
     fn get(&self, params: &Json) -> Result<Json, String> {
@@ -267,19 +391,19 @@ impl Agent {
                     ..
                 } => json!({
                     "kind": "set_field",
-                    "entity": entity.raw(),
+                    "entity": entity.to_string(),
                     "component": component.0,
                     "field": field,
                     "before": self.world.get_field(*entity, *component, field),
                 }),
                 Command::Spawn { data } => json!({
                     "kind": "spawn",
-                    "entity": data.id.raw(),
+                    "entity": data.id.to_string(),
                     "components": data.components.iter().map(|component| component.component.0).collect::<Vec<_>>(),
                 }),
                 Command::Despawn { entity } => json!({
                     "kind": "despawn",
-                    "entity": entity.raw(),
+                    "entity": entity.to_string(),
                     "components": self.world.entity_data(*entity)
                         .map(|data| data.components.iter().map(|component| component.component.0).collect::<Vec<_>>())
                         .unwrap_or_default(),
@@ -341,10 +465,15 @@ fn required_str<'a>(params: &'a Json, key: &str) -> Result<&'a str, String> {
 }
 
 fn required_u64(params: &Json, key: &str) -> Result<u64, String> {
-    params
-        .get(key)
-        .and_then(Json::as_u64)
-        .ok_or_else(|| format!("缺少整数参数 {key}"))
+    match params.get(key) {
+        Some(Json::Number(number)) => number
+            .as_u64()
+            .ok_or_else(|| format!("参数 {key} 必须是非负整数")),
+        Some(Json::String(text)) => text
+            .parse::<u64>()
+            .map_err(|err| format!("参数 {key} 不是十进制 u64：{err}")),
+        _ => Err(format!("缺少整数参数 {key}")),
+    }
 }
 
 fn error_response(id: Json, message: String) -> String {

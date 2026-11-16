@@ -15,9 +15,9 @@
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `VelocitySystem` / `GravitySystem` / 逐帧 state hash /
 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get / digest / stats /
-load / save / plan / apply / revert）、`xgc-cli`（`schema` / `check` / `bench` /
-`export` / `import` / `run` / `serve`）、`xgc-xtask`（文件预算 / 依赖方向 /
-schema 确定性门禁）。
+load / save / plan / apply / revert；查询支持字段投影 + 标量过滤 + 稳定分页）、
+`xgc-cli`（`schema` / `check` / `bench` / `export` / `import` / `run` / `serve`）、
+`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
 
 实测（i7-10700，release，10 000 个 `(Transform, Velocity)`）：
 
@@ -35,15 +35,17 @@ JSON 往返：`Spawn { data: EntityData }` 反序列化后由组件工厂重建�
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`position += linear * dt`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 Agent 协议可完成 `describe → plan（含 before 预览）→ apply → query / get /
-digest / stats → save/load → revert` 闭环。
+digest / stats → save/load → revert` 闭环；查询 IR 支持
+`select: ["core.transform:position"]` 字段投影、`filter` 的 `eq/ne/lt/le/gt/ge`
+标量比较（向量用 `axis: x/y/z/w` 取分量）与稳定分页。所有 64 位实体 ID 在 JSON
+里是十进制字符串，避免 2^53 精度丢失。
 
-`cargo test --workspace` 全绿（49 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（24 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同
+`cargo test --workspace` 全绿（50 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（25 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同
 （`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
-脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖字段投影 / 过滤查询 IR、
-能力清单、视觉验证。
+脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖能力清单与视觉验证。
 
 ## 命令
 

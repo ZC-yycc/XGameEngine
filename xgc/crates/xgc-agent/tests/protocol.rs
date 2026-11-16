@@ -36,6 +36,27 @@ fn spawn_command() -> Command {
     Command::Spawn { data }
 }
 
+fn spawn_at(id: u64, x: f32, name: &str) -> Command {
+    let data = EntityData {
+        id: EntityId::from_raw(id),
+        revision: 0,
+        components: vec![
+            ComponentData {
+                component: ComponentId(0x0101),
+                fields: vec![(
+                    "position".to_string(),
+                    Value::Vec3([f64::from(x), 0.0, 0.0]),
+                )],
+            },
+            ComponentData {
+                component: ComponentId(0x0103),
+                fields: vec![("value".to_string(), Value::String(name.to_string()))],
+            },
+        ],
+    };
+    Command::Spawn { data }
+}
+
 #[test]
 fn describe_lists_protocol_components_and_world_state() {
     let mut agent = Agent::new();
@@ -67,11 +88,11 @@ fn plan_apply_query_and_revert_roundtrip() {
         json!({"component": "core.transform"}),
     ));
     assert_eq!(queried["total"], 1);
-    assert_eq!(queried["entities"][0]["id"], 1);
+    assert_eq!(queried["entities"][0]["id"], "1");
     assert_eq!(queried["entities"][0]["components"][0]["component"], 257);
 
     let got = result(call(&mut agent, "world.get", json!({"id": 1})));
-    assert_eq!(got["entity"]["id"], 1);
+    assert_eq!(got["entity"]["id"], "1");
     let missing = result(call(&mut agent, "world.get", json!({"id": 999})));
     assert!(missing["entity"].is_null());
     let digest = result(call(&mut agent, "world.digest", Json::Null));
@@ -119,6 +140,80 @@ fn plan_apply_query_and_revert_roundtrip() {
         queried["entities"][0]["components"][0]["fields"][0][1]["value"][0],
         Json::from(1.0)
     );
+}
+
+#[test]
+fn query_projection_filter_and_stable_pagination() {
+    let mut agent = Agent::new();
+    let commands = serde_json::to_value(vec![
+        spawn_at(1, 1.0, "one"),
+        spawn_at(2, 10.0, "two"),
+        spawn_at(3, 4.0, "three"),
+    ])
+    .unwrap();
+    let plan = result(call(&mut agent, "edit.plan", json!({"commands": commands})));
+    result(call(
+        &mut agent,
+        "edit.apply",
+        json!({"plan_id": plan["plan_id"]}),
+    ));
+
+    let filtered = result(call(
+        &mut agent,
+        "world.query",
+        json!({
+            "select": ["core.transform:position", "core.name:value"],
+            "filter": {
+                "path": "core.transform:position",
+                "axis": "x",
+                "op": "gt",
+                "value": 5.0
+            }
+        }),
+    ));
+    assert_eq!(filtered["total"], 1);
+    assert_eq!(filtered["rows"][0]["id"], "2");
+    assert_eq!(
+        filtered["rows"][0]["values"]["core.transform:position"],
+        json!({"kind": "vec3", "value": [10.0, 0.0, 0.0]})
+    );
+    assert_eq!(
+        filtered["rows"][0]["values"]["core.name:value"],
+        json!({"kind": "string", "value": "two"})
+    );
+
+    let by_name = result(call(
+        &mut agent,
+        "world.query",
+        json!({
+            "select": ["core.name:value"],
+            "filter": {"path": "core.name:value", "op": "eq", "value": "three"}
+        }),
+    ));
+    assert_eq!(by_name["rows"][0]["id"], "3");
+
+    let page = result(call(
+        &mut agent,
+        "world.query",
+        json!({"select": ["core.name:value"], "limit": 1, "offset": 1}),
+    ));
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(page["rows"][0]["id"], "2");
+    assert_eq!(page["next_offset"], 2);
+
+    let missing = result(call(&mut agent, "world.get", json!({"id": "2"})));
+    assert_eq!(missing["entity"]["id"], "2");
+
+    let error = call(
+        &mut agent,
+        "world.query",
+        json!({"select": ["core.transform:nope"]}),
+    );
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("没有字段"));
 }
 
 #[test]
