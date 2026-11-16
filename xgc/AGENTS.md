@@ -34,7 +34,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/lod_components.rs` | LOD 组件：`render.lod` |
 | `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source` |
-| `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator` |
+| `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / duration / time） |
 | `crates/xgc-world/src/character_components.rs` | 角色组件：`physics.character` |
 | `crates/xgc-world/src/ui_components.rs` | UI 组件：`ui.element` |
 | `crates/xgc-world/src/particle_components.rs` | 粒子组件：`particle.emitter` |
@@ -47,7 +47,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/validate.rs` | `World::validate_data`：组件 / 字段 / 类型 / 重复项体检 |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
-| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
+| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `VelocitySystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` / `Scenario` / `Trace` / `play` / `verify` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
@@ -85,8 +85,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M2 实例化按模型完成（5 draw → 2 draw call）；继续做材质 / 纹理批。
-2. 动画 / 物理 / UI / 粒子运行时系统。
+1. 动画时钟已接入默认 schedule；下一步骨骼 / 剪辑采样。
+2. 物理 / UI / 粒子运行时系统。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 599 行：动它之前先拆。
 

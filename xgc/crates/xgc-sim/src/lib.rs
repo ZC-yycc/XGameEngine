@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use xgc_base::{Diagnostic, EntityId};
 use xgc_world::{
-    Command, Component, ComponentId, GlobalTransform, Parent, Transform, Value, Velocity, World,
-    WorldData,
+    Animator, Command, Component, ComponentId, GlobalTransform, Parent, Transform, Value, Velocity,
+    World, WorldData,
 };
 
 pub const TRACE_FORMAT_VERSION: u32 = 1;
@@ -197,6 +197,39 @@ impl Schedule {
         for system in &mut self.systems {
             system.run(world, dt);
         }
+    }
+}
+
+/// 动画时钟：自动播放的 Animator 按 speed 推进，duration 有效时循环 / 截断。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AnimatorSystem;
+
+impl System for AnimatorSystem {
+    fn name(&self) -> &'static str {
+        "animation"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: Vec::new(),
+            writes: vec![Animator::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, dt: f32) {
+        world.for_each_mut::<Animator>(|_, animator| {
+            if !animator.autoplay {
+                return;
+            }
+            animator.time += animator.speed * dt;
+            if animator.duration > 0.0 {
+                if animator.looping {
+                    animator.time = animator.time.rem_euclid(animator.duration);
+                } else {
+                    animator.time = animator.time.min(animator.duration);
+                }
+            }
+        });
     }
 }
 
@@ -419,6 +452,7 @@ impl Simulation {
     pub fn with_threads(world: World, fixed_dt: f32, threads: usize) -> Self {
         let mut schedule = Schedule::new();
         schedule.add(VelocitySystem::new(threads));
+        schedule.add(AnimatorSystem);
         schedule.add(HierarchySystem::default());
         Self {
             world,

@@ -2,12 +2,12 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, FrameCommands, GravitySystem, Scenario, Schedule, SimError, Simulation, System,
-    SystemAccess, VelocitySystem,
+    play, verify, AnimatorSystem, FrameCommands, GravitySystem, Scenario, Schedule, SimError,
+    Simulation, System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
-    Command, Component, ComponentId, GlobalTransform, Name, Parent, Transform, Value, Velocity,
-    World,
+    Animator, Command, Component, ComponentId, GlobalTransform, Name, Parent, Transform, Value,
+    Velocity, World,
 };
 
 fn build_scenario() -> Scenario {
@@ -106,7 +106,10 @@ fn velocity_system_moves_transform() {
         },
     ));
     let mut simulation = Simulation::with_fixed_dt(world, 1.0);
-    assert_eq!(simulation.schedule().names(), vec!["velocity", "hierarchy"]);
+    assert_eq!(
+        simulation.schedule().names(),
+        vec!["velocity", "animation", "hierarchy"]
+    );
     simulation.step(Vec::new()).unwrap();
     assert_eq!(simulation.trace().frames.len(), 1);
 
@@ -311,4 +314,22 @@ fn command_frame_outside_scenario_is_rejected() {
     scenario.frames = 1;
     let err = play(&scenario).err().expect("应当拒绝越界命令帧");
     assert!(matches!(err, SimError::InvalidScenario(_)));
+}
+
+#[test]
+fn animation_system_advances_and_loops() {
+    let mut world = World::new();
+    let entity = world.spawn((Animator {
+        autoplay: true,
+        speed: 2.0,
+        duration: 1.0,
+        looping: true,
+        ..Animator::default()
+    },));
+    let mut schedule = Schedule::new();
+    schedule.add(AnimatorSystem);
+    schedule.run(&mut world, 0.3);
+    assert!((world.get::<Animator>(entity).unwrap().time - 0.6).abs() < 1e-5);
+    schedule.run(&mut world, 0.3);
+    assert!((world.get::<Animator>(entity).unwrap().time - 0.2).abs() < 1e-5);
 }

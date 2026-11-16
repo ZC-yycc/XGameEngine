@@ -9,6 +9,8 @@ pub struct Animator {
     pub looping: bool,
     pub autoplay: bool,
     pub fade_time: f32,
+    pub duration: f32,
+    pub time: f32,
 }
 
 impl Default for Animator {
@@ -19,6 +21,8 @@ impl Default for Animator {
             looping: true,
             autoplay: true,
             fade_time: 0.0,
+            duration: 0.0,
+            time: 0.0,
         }
     }
 }
@@ -45,6 +49,9 @@ impl Component for Animator {
                 .doc("是否自动开始"),
             FieldDescriptor::new("fade_time", FieldType::F32, Value::F64(0.0))
                 .doc("切剪辑淡入时长（秒）"),
+            FieldDescriptor::new("duration", FieldType::F32, Value::F64(0.0))
+                .doc("剪辑时长（秒）；0 = 未知，不循环截断"),
+            FieldDescriptor::new("time", FieldType::F32, Value::F64(0.0)).doc("当前播放时间（秒）"),
         ]
     }
 
@@ -55,6 +62,8 @@ impl Component for Animator {
             "looping" => Some(Value::Bool(self.looping)),
             "autoplay" => Some(Value::Bool(self.autoplay)),
             "fade_time" => Some(Value::F64(f64::from(self.fade_time))),
+            "duration" => Some(Value::F64(f64::from(self.duration))),
+            "time" => Some(Value::F64(f64::from(self.time))),
             _ => None,
         }
     }
@@ -104,6 +113,24 @@ impl Component for Animator {
                 self.fade_time = value.as_f32().ok_or_else(|| {
                     format!(
                         "animation.animator.fade_time 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "duration" => {
+                self.duration = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.duration 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "time" => {
+                self.time = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.time 期望 f32，得到 {}",
                         value.type_name()
                     )
                 })?;
