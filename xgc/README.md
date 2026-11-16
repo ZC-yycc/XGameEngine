@@ -18,8 +18,9 @@
 `Schedule::batches` / `VelocitySystem` / `GravitySystem` / `HierarchySystem` /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get /
 digest / stats / validate / load / save / plan / apply / revert；查询支持字段投影 +
-标量过滤 + 稳定分页）、`xgc-cli`（`schema` / `check [路径]` / `bench` / `export` /
-`import` / `run` / `serve`）、`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
+标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData` 第一层）、
+`xgc-cli`（`schema` / `check [路径]` / `bench` / `export` / `import` / `run` /
+`serve` / `migrate`）、`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
 
 实测（i7-10700，release，10 000 个 `(Transform, Velocity)`）：
 
@@ -48,10 +49,13 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 `select: ["core.transform:position"]` 字段投影、`filter` 的 `eq/ne/lt/le/gt/ge`
 标量比较（向量用 `axis: x/y/z/w` 取分量）与稳定分页。所有 64 位实体 ID 在 JSON
 里是十进制字符串，避免 2^53 精度丢失。`xgc check <world.json>` 会按注册表体检
-未知组件 / 字段 / 值类型 / 重复项。
+未知组件 / 字段 / 值类型 / 重复项。`xgc migrate <旧.ron> <新.json>` 已能迁移旧
+`SceneV2` 的实体身份 / 名称 / 父子 / `Transform`，并补默认 `GlobalTransform`；
+Mesh / Material / Camera 等旧组件先不搬，报告里计数。用真实 `character.ron` 跑通
+6 个实体、0 个父节点缺失，迁移结果通过 `xgc check`。
 
-`cargo test --workspace` 全绿（61 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（27 个 Rust 文件最大 594 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（64 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（29 个 Rust 文件最大 594 行）；schema 两次导出逐字节相同，
 5 个内建类型 3529 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
@@ -71,6 +75,7 @@ cargo run -p xgc-cli -- export world.json
 cargo run -p xgc-cli -- import world.json
 cargo run -p xgc-cli -- run 60
 cargo run -p xgc-cli -- serve
+cargo run -p xgc-cli -- migrate <旧.ron> <新.json>
 ```
 
 本机 cargo 不在 PATH 时，用 `C:\Users\Administrator\.cargo\bin\cargo.exe`；

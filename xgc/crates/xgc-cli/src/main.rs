@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use xgc_agent::Agent;
+use xgc_migrate::migrate_str;
 use xgc_reflect::Registry;
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
@@ -22,16 +23,17 @@ fn main() -> ExitCode {
         Some("import") => import(args.next().as_deref()),
         Some("run") => run(args.next().as_deref()),
         Some("serve") => serve(),
+        Some("migrate") => migrate(args.next().as_deref(), args.next().as_deref()),
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron> <新.json>>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron> <新.json>>"
             );
             ExitCode::from(2)
         }
@@ -180,6 +182,36 @@ fn import(path: Option<&str>) -> ExitCode {
         world.len(),
         world.revision(),
         world.state_hash()
+    );
+    ExitCode::SUCCESS
+}
+
+fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
+    let (Some(input), Some(output)) = (input, output) else {
+        eprintln!("用法：xgc migrate <旧.ron> <新.json>");
+        return ExitCode::from(2);
+    };
+    let text = match std::fs::read_to_string(input) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("读取旧场景失败：{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (data, report) = match migrate_str(&text) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("迁移失败：{err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = save_world(Path::new(output), &data) {
+        eprintln!("写入迁移结果失败：{err}");
+        return ExitCode::from(1);
+    }
+    println!(
+        "migrate: {} 个实体，{} 个带旧组件，{} 个父节点缺失 -> {}",
+        report.entities, report.with_old_components, report.missing_parents, output
     );
     ExitCode::SUCCESS
 }

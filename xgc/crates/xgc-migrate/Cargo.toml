@@ -1,0 +1,14 @@
+[package]
+name = "xgc-migrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "旧 XGameEngine 场景迁移到 XGC WorldData 的第一层"
+
+[dependencies]
+xgc-base = { path = "../xgc-base" }
+xgc-world = { path = "../xgc-world" }
+glam = { version = "0.29.3", features = ["serde"] }
+ron = "0.8.1"
+serde.workspace = true
