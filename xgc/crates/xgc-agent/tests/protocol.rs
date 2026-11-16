@@ -44,6 +44,10 @@ fn describe_lists_protocol_components_and_world_state() {
     assert_eq!(response["engine"], "xgc");
     assert_eq!(response["components"]["types"].as_array().unwrap().len(), 3);
     assert_eq!(response["world"]["entities"], 0);
+    assert!(response["methods"]
+        .as_array()
+        .unwrap()
+        .contains(&Json::from("world.get")));
 }
 
 #[test]
@@ -66,6 +70,17 @@ fn plan_apply_query_and_revert_roundtrip() {
     assert_eq!(queried["entities"][0]["id"], 1);
     assert_eq!(queried["entities"][0]["components"][0]["component"], 257);
 
+    let got = result(call(&mut agent, "world.get", json!({"id": 1})));
+    assert_eq!(got["entity"]["id"], 1);
+    let missing = result(call(&mut agent, "world.get", json!({"id": 999})));
+    assert!(missing["entity"].is_null());
+    let digest = result(call(&mut agent, "world.digest", Json::Null));
+    assert_eq!(digest["entities"], 1);
+    assert_eq!(digest["revision"], 1);
+    assert_eq!(digest["state_hash"].as_str().unwrap().len(), 16);
+    let stats = result(call(&mut agent, "world.stats", Json::Null));
+    assert_eq!(stats["components"].as_array().unwrap().len(), 2);
+
     let set = Command::SetField {
         entity: EntityId::from_raw(1),
         component: ComponentId(0x0101),
@@ -74,6 +89,11 @@ fn plan_apply_query_and_revert_roundtrip() {
     };
     let commands = serde_json::to_value(vec![set]).unwrap();
     let plan = result(call(&mut agent, "edit.plan", json!({"commands": commands})));
+    assert_eq!(plan["preview"][0]["kind"], "set_field");
+    assert_eq!(
+        plan["preview"][0]["before"],
+        json!({"kind": "vec3", "value": [1.0, 2.0, 3.0]})
+    );
     let plan_id = plan["plan_id"].as_u64().unwrap();
     let applied = result(call(&mut agent, "edit.apply", json!({"plan_id": plan_id})));
     let tx_id1 = applied["tx_id"].as_u64().unwrap();

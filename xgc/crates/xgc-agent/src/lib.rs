@@ -83,6 +83,9 @@ impl Agent {
         match method {
             "engine.describe" => self.describe(),
             "world.query" => self.query(params),
+            "world.get" => self.get(params),
+            "world.digest" => self.digest(),
+            "world.stats" => self.stats(),
             "world.load" => self.load(params),
             "world.save" => self.save(params),
             "edit.plan" => self.plan(params),
@@ -99,6 +102,18 @@ impl Agent {
             "version": env!("CARGO_PKG_VERSION"),
             "components": self.registry.schema(),
             "commands": ["set_field", "spawn", "despawn"],
+            "methods": [
+                "engine.describe",
+                "world.query",
+                "world.get",
+                "world.digest",
+                "world.stats",
+                "world.load",
+                "world.save",
+                "edit.plan",
+                "edit.apply",
+                "edit.revert"
+            ],
             "world": {
                 "revision": self.world.revision(),
                 "entities": self.world.len(),
@@ -147,6 +162,47 @@ impl Agent {
             "offset": start,
             "entities": page,
             "next_offset": if end < total { Some(end) } else { None },
+        }))
+    }
+
+    fn get(&self, params: &Json) -> Result<Json, String> {
+        let id = required_u64(params, "id")?;
+        let entity = self.world.entity_data(xgc_base::EntityId::from_raw(id));
+        Ok(json!({"entity": entity}))
+    }
+
+    fn digest(&self) -> Result<Json, String> {
+        Ok(json!({
+            "revision": self.world.revision(),
+            "entities": self.world.len(),
+            "state_hash": format!("{:016x}", self.world.state_hash()),
+        }))
+    }
+
+    fn stats(&self) -> Result<Json, String> {
+        let data = self.world.world_data();
+        let mut counts: HashMap<u32, usize> = HashMap::new();
+        for entity in &data.entities {
+            for component in &entity.components {
+                *counts.entry(component.component.0).or_default() += 1;
+            }
+        }
+        let mut components: Vec<_> = counts
+            .into_iter()
+            .map(|(id, count)| {
+                let name = self
+                    .registry
+                    .get(xgc_reflect::ComponentId(id))
+                    .map(|schema| schema.name.clone())
+                    .unwrap_or_else(|| format!("unknown:{id}"));
+                json!({"id": id, "component": name, "count": count})
+            })
+            .collect();
+        components.sort_by_key(|row| row["id"].as_u64());
+        Ok(json!({
+            "revision": data.revision,
+            "entities": data.entities.len(),
+            "components": components,
         }))
     }
 
@@ -200,12 +256,43 @@ impl Agent {
                 })
             })
             .collect();
+        let preview: Vec<_> = plan
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::SetField {
+                    entity,
+                    component,
+                    field,
+                    ..
+                } => json!({
+                    "kind": "set_field",
+                    "entity": entity.raw(),
+                    "component": component.0,
+                    "field": field,
+                    "before": self.world.get_field(*entity, *component, field),
+                }),
+                Command::Spawn { data } => json!({
+                    "kind": "spawn",
+                    "entity": data.id.raw(),
+                    "components": data.components.iter().map(|component| component.component.0).collect::<Vec<_>>(),
+                }),
+                Command::Despawn { entity } => json!({
+                    "kind": "despawn",
+                    "entity": entity.raw(),
+                    "components": self.world.entity_data(*entity)
+                        .map(|data| data.components.iter().map(|component| component.component.0).collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                }),
+            })
+            .collect();
         let response = json!({
             "plan_id": plan_id,
             "base_revision": plan.base_revision,
             "valid": plan.is_valid(),
             "commands": plan.len(),
             "diagnostics": diagnostics,
+            "preview": preview,
         });
         self.plans.insert(plan_id, plan);
         Ok(response)

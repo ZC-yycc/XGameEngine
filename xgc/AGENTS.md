@@ -37,7 +37,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
-| `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / load / save / plan / apply / revert |
+| `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / load / save / plan / apply / revert |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check / bench / export / import / run / serve` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
@@ -53,10 +53,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第十二刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API），
-   先保证 1 / 2 / 8 线程 state hash 一致。
-2. 接第三个系统（Transform 层级传播 / 简单重力已落地），再谈物理 / 渲染。
-3. Agent 协议补查询 IR / 诊断 / 能力清单；`xgc check` 扩到项目 / 场景。
+1. M1 第十三刀：Agent 查询 IR——字段投影 + 标量过滤（eq/lt/gt）+ 稳定分页；
+   保持 64 位 ID 在协议里是字符串。
+2. M1 第十四刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
+3. 接第三个系统（Transform 层级传播），再谈物理 / 渲染。
 4. world lib 588 行：下次先拆 storage 再扩。
 
 ## Token 纪律
