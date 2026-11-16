@@ -2,9 +2,9 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterStepSystem,
-    CharacterSystem, FrameCommands, GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario,
-    Schedule, SimError, Simulation, System, SystemAccess, VelocitySystem,
+    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterBlockSystem, CharacterJumpSystem,
+    CharacterStepSystem, CharacterSystem, FrameCommands, GravitySystem, GroundCollisionSystem,
+    PhysicsSystem, Scenario, Schedule, SimError, Simulation, System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
     Animator, CharacterController, Command, Component, ComponentId, GlobalTransform, Name, Parent,
@@ -116,6 +116,7 @@ fn velocity_system_moves_transform() {
             "ground",
             "character",
             "character_step",
+            "character_block",
             "aabb",
             "animation",
             "ui_layout",
@@ -537,4 +538,37 @@ fn character_steps_onto_low_box() {
     schedule.run(&mut world, 0.1);
     let transform = world.get::<Transform>(character).unwrap();
     assert!((transform.position[1] - 0.2).abs() < 1e-5);
+}
+
+#[test]
+fn character_blocks_on_high_wall() {
+    let mut world = World::new();
+    let character = world.spawn((
+        Transform {
+            position: [0.3, 0.0, 0.0],
+            ..Transform::default()
+        },
+        Velocity {
+            linear: [3.0, 0.0, 0.0],
+        },
+        CharacterController::default(),
+    ));
+    world.spawn((
+        Transform {
+            position: [1.0, 0.5, 0.0],
+            ..Transform::default()
+        },
+        PhysicsBody {
+            shape: "cuboid".to_string(),
+            half_extents: [0.5, 0.5, 0.5],
+            ..PhysicsBody::default()
+        },
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(CharacterBlockSystem);
+    schedule.run(&mut world, 0.1);
+    let transform = world.get::<Transform>(character).unwrap();
+    let velocity = world.get::<Velocity>(character).unwrap();
+    assert!((transform.position[0] - 0.2).abs() < 1e-5);
+    assert_eq!(velocity.linear[0], 0.0);
 }

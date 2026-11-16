@@ -116,3 +116,104 @@ fn half_extents(body: &PhysicsBody) -> [f32; 3] {
         _ => body.half_extents,
     }
 }
+
+/// 横向阻挡：高于 step_offset 的实体把角色推出并清掉对应水平速度。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CharacterBlockSystem;
+
+impl System for CharacterBlockSystem {
+    fn name(&self) -> &'static str {
+        "character_block"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![CharacterController::ID, PhysicsBody::ID],
+            writes: vec![Transform::ID, Velocity::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        let mut solids = Vec::new();
+        world.for_each::<PhysicsBody>(|key, body| {
+            if body.is_sensor {
+                return;
+            }
+            let Some(transform) = world.get::<Transform>(key) else {
+                return;
+            };
+            let half = half_extents(body);
+            solids.push(Solid {
+                min: [
+                    transform.position[0] - half[0],
+                    transform.position[1] - half[1],
+                    transform.position[2] - half[2],
+                ],
+                max: [
+                    transform.position[0] + half[0],
+                    transform.position[1] + half[1],
+                    transform.position[2] + half[2],
+                ],
+            });
+        });
+        let mut characters = Vec::new();
+        world.for_each::<CharacterController>(|key, controller| {
+            let Some(transform) = world.get::<Transform>(key) else {
+                return;
+            };
+            let Some(velocity) = world.get::<Velocity>(key) else {
+                return;
+            };
+            characters.push(Character {
+                key,
+                position: transform.position,
+                velocity: velocity.linear,
+                radius: controller.radius,
+                height: controller.height,
+                step: controller.step_offset,
+            });
+        });
+        for character in characters {
+            let mut position = character.position;
+            let mut velocity = character.velocity;
+            for solid in &solids {
+                let feet = position[1];
+                let head = feet + character.height;
+                if head <= solid.min[1] || feet >= solid.max[1] {
+                    continue;
+                }
+                let rise = solid.max[1] - feet;
+                if rise > 0.0 && rise <= character.step {
+                    continue;
+                }
+                let overlap_x = (position[0] + character.radius).min(solid.max[0])
+                    - (position[0] - character.radius).max(solid.min[0]);
+                let overlap_z = (position[2] + character.radius).min(solid.max[2])
+                    - (position[2] - character.radius).max(solid.min[2]);
+                if overlap_x <= 0.0 || overlap_z <= 0.0 {
+                    continue;
+                }
+                if overlap_x < overlap_z {
+                    if position[0] < (solid.min[0] + solid.max[0]) * 0.5 {
+                        position[0] = solid.min[0] - character.radius;
+                    } else {
+                        position[0] = solid.max[0] + character.radius;
+                    }
+                    velocity[0] = 0.0;
+                } else if position[2] < (solid.min[2] + solid.max[2]) * 0.5 {
+                    position[2] = solid.min[2] - character.radius;
+                    velocity[2] = 0.0;
+                } else {
+                    position[2] = solid.max[2] + character.radius;
+                    velocity[2] = 0.0;
+                }
+            }
+            if let Some(transform) = world.get_mut::<Transform>(character.key) {
+                transform.position = position;
+            }
+            if let Some(slot) = world.get_mut::<Velocity>(character.key) {
+                slot.linear = velocity;
+            }
+        }
+    }
+}

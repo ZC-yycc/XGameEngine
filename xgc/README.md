@@ -19,7 +19,7 @@
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` /
 `GroundCollisionSystem` / `CharacterSystem` / `CharacterStepSystem` /
-`AabbCollisionSystem` / `AnimationSystem` /
+`CharacterBlockSystem` / `AabbCollisionSystem` / `AnimationSystem` /
 `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `GravitySystem` /
 `HierarchySystem` /
 `AnimationClip` 平移关键帧线性采样（边界钳制 / 循环取模） / RON 剪辑加载 /
@@ -62,11 +62,12 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`PhysicsSystem` 只给 dynamic 刚体加
 重力、`CharacterJumpSystem` 消费起跳请求、`VelocitySystem` 积分、
 `GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴地、`CharacterStepSystem`
-低矮台阶抬升、`AabbCollisionSystem` 两两分离动态刚体（球体按中心线精确分离）、
-`AnimatorSystem` 推进动画时钟、`UiLayoutSystem` 算 UI 根 / 父相对矩形、裁剪区并继承
-可见性，`UiInteractionSystem` 读 `ui.input` 写 hover / press / click，`UiFocusSystem`
-消费 nav / confirm 做 Tab 循环与方向键几何选邻，`Simulation::set_ui_input` 作为宿主
-输入桥，`hit_test` 取最上层可交互元素、`HierarchySystem` 合成世界变换）→ 快照 / trace。
+低矮台阶抬升、`CharacterBlockSystem` 高墙推出、`AabbCollisionSystem` 两两分离动态刚体
+（球体按中心线精确分离）、`AnimatorSystem` 推进动画时钟、`UiLayoutSystem` 算 UI 根 /
+父相对矩形、裁剪区并继承可见性，`UiInteractionSystem` 读 `ui.input` 写 hover / press /
+click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选邻，
+`Simulation::set_ui_input` 作为宿主输入桥，`hit_test` 取最上层可交互元素、
+`HierarchySystem` 合成世界变换）→ 快照 / trace。
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
