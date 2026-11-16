@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use xgc_base::Diagnostic;
-use xgc_world::{Command, Transform, Velocity, World, WorldData};
+use xgc_world::{Command, Component, ComponentId, Transform, Velocity, World, WorldData};
 
 pub const TRACE_FORMAT_VERSION: u32 = 1;
 
@@ -98,9 +98,20 @@ impl std::fmt::Display for SimError {
 
 impl std::error::Error for SimError {}
 
+/// 系统声明的读写集。M1 先做元数据与冲突判断；并行执行只发生在系统内部
+/// （按 archetype 分片），跨系统并行在下一刀。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SystemAccess {
+    pub reads: Vec<ComponentId>,
+    pub writes: Vec<ComponentId>,
+}
+
 /// 系统：M1 只有顺序执行；`name` 用于 trace / 诊断，`run` 直接改世界。
 pub trait System: Send {
     fn name(&self) -> &'static str;
+    fn access(&self) -> SystemAccess {
+        SystemAccess::default()
+    }
     fn run(&mut self, world: &mut World, dt: f32);
 }
 
@@ -130,6 +141,10 @@ impl Schedule {
         self.systems.iter().map(|system| system.name()).collect()
     }
 
+    pub fn accesses(&self) -> Vec<SystemAccess> {
+        self.systems.iter().map(|system| system.access()).collect()
+    }
+
     pub fn run(&mut self, world: &mut World, dt: f32) {
         for system in &mut self.systems {
             system.run(world, dt);
@@ -138,16 +153,39 @@ impl Schedule {
 }
 
 /// 第一个内建系统：`position += linear * dt`。
-#[derive(Default, Clone, Copy, Debug)]
-pub struct VelocitySystem;
+#[derive(Clone, Copy, Debug)]
+pub struct VelocitySystem {
+    pub threads: usize,
+}
+
+impl Default for VelocitySystem {
+    fn default() -> Self {
+        Self { threads: 1 }
+    }
+}
+
+impl VelocitySystem {
+    pub fn new(threads: usize) -> Self {
+        Self {
+            threads: threads.max(1),
+        }
+    }
+}
 
 impl System for VelocitySystem {
     fn name(&self) -> &'static str {
         "velocity"
     }
 
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![Velocity::ID],
+            writes: vec![Transform::ID],
+        }
+    }
+
     fn run(&mut self, world: &mut World, dt: f32) {
-        world.for_each2_mut::<Transform, Velocity>(|_, transform, velocity| {
+        world.par_for_each2_mut::<Transform, Velocity>(self.threads, |_, transform, velocity| {
             for axis in 0..3 {
                 transform.position[axis] += velocity.linear[axis] * dt;
             }
@@ -169,8 +207,12 @@ impl Simulation {
     }
 
     pub fn with_fixed_dt(world: World, fixed_dt: f32) -> Self {
+        Self::with_threads(world, fixed_dt, 1)
+    }
+
+    pub fn with_threads(world: World, fixed_dt: f32, threads: usize) -> Self {
         let mut schedule = Schedule::new();
-        schedule.add(VelocitySystem);
+        schedule.add(VelocitySystem::new(threads));
         Self {
             world,
             schedule,

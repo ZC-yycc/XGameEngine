@@ -111,6 +111,53 @@ fn velocity_system_moves_transform() {
 }
 
 #[test]
+fn velocity_system_declares_access_and_parallel_hash_matches() {
+    let simulation = Simulation::new(World::new());
+    let access = &simulation.schedule().accesses()[0];
+    assert_eq!(access.reads, vec![ComponentId(0x0102)]);
+    assert_eq!(access.writes, vec![ComponentId(0x0101)]);
+
+    fn run(threads: usize) -> (u64, f64) {
+        let mut world = World::new();
+        for i in 0..2_000 {
+            let transform = Transform {
+                position: [i as f32, 0.0, 0.0],
+                ..Transform::default()
+            };
+            if i % 2 == 0 {
+                world.spawn((
+                    transform,
+                    Velocity {
+                        linear: [1.0, 0.5, -1.0],
+                    },
+                ));
+            } else {
+                world.spawn((
+                    transform,
+                    Velocity {
+                        linear: [1.0, 0.5, -1.0],
+                    },
+                    Name {
+                        value: format!("e{i}"),
+                    },
+                ));
+            }
+        }
+        let mut simulation = Simulation::with_threads(world, 1.0 / 60.0, threads);
+        simulation.run(10).unwrap();
+        let mut sum = 0.0f64;
+        simulation
+            .world()
+            .for_each::<Transform>(|_, transform| sum += transform.position[0] as f64);
+        (simulation.world().state_hash(), sum)
+    }
+
+    let one = run(1);
+    assert_eq!(one, run(2));
+    assert_eq!(one, run(8));
+}
+
+#[test]
 fn command_frame_outside_scenario_is_rejected() {
     let mut scenario = build_scenario();
     scenario.frames = 1;

@@ -10,13 +10,14 @@ use std::any::Any;
 use std::collections::HashMap;
 
 use xgc_base::{EntityId, EntityKey};
-use xgc_reflect::Component;
+pub use xgc_reflect::Component;
 
 mod command;
 mod components;
 mod data;
 mod hash;
 mod journal;
+mod query;
 mod snapshot;
 
 pub use command::{Applied, Command, Plan};
@@ -140,6 +141,72 @@ impl Archetype {
             None
         }
     }
+}
+
+pub(crate) fn apply2_mut_arch<A: Component, B: Component>(
+    arch: &mut Archetype,
+    f: &mut impl FnMut(EntityKey, &mut A, &mut B),
+) {
+    if !arch.columns.contains_key(&A::ID) || !arch.columns.contains_key(&B::ID) {
+        return;
+    }
+    let Some(mut a) = arch.columns.remove(&A::ID) else {
+        return;
+    };
+    let Some(mut b) = arch.columns.remove(&B::ID) else {
+        arch.columns.insert(A::ID, a);
+        return;
+    };
+    {
+        let a_values = a.as_any_mut().downcast_mut::<Vec<A>>();
+        let b_values = b.as_any_mut().downcast_mut::<Vec<B>>();
+        if let (Some(a_values), Some(b_values)) = (a_values, b_values) {
+            for ((key, a), b) in arch
+                .entities
+                .iter()
+                .copied()
+                .zip(a_values.iter_mut())
+                .zip(b_values.iter_mut())
+            {
+                f(key, a, b);
+            }
+        }
+    }
+    arch.columns.insert(A::ID, a);
+    arch.columns.insert(B::ID, b);
+}
+
+pub(crate) fn apply2_mut_arch_sync<A: Component, B: Component>(
+    arch: &mut Archetype,
+    f: &impl Fn(EntityKey, &mut A, &mut B),
+) {
+    if !arch.columns.contains_key(&A::ID) || !arch.columns.contains_key(&B::ID) {
+        return;
+    }
+    let Some(mut a) = arch.columns.remove(&A::ID) else {
+        return;
+    };
+    let Some(mut b) = arch.columns.remove(&B::ID) else {
+        arch.columns.insert(A::ID, a);
+        return;
+    };
+    {
+        let a_values = a.as_any_mut().downcast_mut::<Vec<A>>();
+        let b_values = b.as_any_mut().downcast_mut::<Vec<B>>();
+        if let (Some(a_values), Some(b_values)) = (a_values, b_values) {
+            for ((key, a), b) in arch
+                .entities
+                .iter()
+                .copied()
+                .zip(a_values.iter_mut())
+                .zip(b_values.iter_mut())
+            {
+                f(key, a, b);
+            }
+        }
+    }
+    arch.columns.insert(A::ID, a);
+    arch.columns.insert(B::ID, b);
 }
 
 /// 一次 spawn 携带的组件集合。用元组表达，避免运行期反射开销。
@@ -404,62 +471,6 @@ impl World {
 
     pub fn archetype_count(&self) -> usize {
         self.archetypes.len()
-    }
-
-    /// 双组件不可变遍历；只访问同时含 `A`、`B` 的 archetype。
-    pub fn for_each2<A: Component, B: Component>(&self, mut f: impl FnMut(EntityKey, &A, &B)) {
-        for arch in &self.archetypes {
-            let (Some(a), Some(b)) = (arch.columns.get(&A::ID), arch.columns.get(&B::ID)) else {
-                continue;
-            };
-            let (Some(a), Some(b)) = (
-                a.as_any().downcast_ref::<Vec<A>>(),
-                b.as_any().downcast_ref::<Vec<B>>(),
-            ) else {
-                continue;
-            };
-            for ((key, a), b) in arch.entities.iter().copied().zip(a.iter()).zip(b.iter()) {
-                f(key, a, b);
-            }
-        }
-    }
-
-    /// 双组件可变遍历。实现上临时移出两列，遍历后放回；`f` 里不要让 panic
-    /// 逃逸，否则列会留在局部变量里。
-    pub fn for_each2_mut<A: Component, B: Component>(
-        &mut self,
-        mut f: impl FnMut(EntityKey, &mut A, &mut B),
-    ) {
-        assert_ne!(A::ID, B::ID, "for_each2_mut 的两个组件不能相同");
-        for arch in &mut self.archetypes {
-            if !arch.columns.contains_key(&A::ID) || !arch.columns.contains_key(&B::ID) {
-                continue;
-            }
-            let Some(mut a) = arch.columns.remove(&A::ID) else {
-                continue;
-            };
-            let Some(mut b) = arch.columns.remove(&B::ID) else {
-                arch.columns.insert(A::ID, a);
-                continue;
-            };
-            {
-                let a_values = a.as_any_mut().downcast_mut::<Vec<A>>();
-                let b_values = b.as_any_mut().downcast_mut::<Vec<B>>();
-                if let (Some(a_values), Some(b_values)) = (a_values, b_values) {
-                    for ((key, a), b) in arch
-                        .entities
-                        .iter()
-                        .copied()
-                        .zip(a_values.iter_mut())
-                        .zip(b_values.iter_mut())
-                    {
-                        f(key, a, b);
-                    }
-                }
-            }
-            arch.columns.insert(A::ID, a);
-            arch.columns.insert(B::ID, b);
-        }
     }
 
     pub fn get_field(&self, id: EntityId, component: ComponentId, field: &str) -> Option<Value> {
