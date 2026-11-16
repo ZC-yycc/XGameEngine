@@ -83,6 +83,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
+| `crates/xgc-asset/src/cook.rs` | `cook_project`：复制 glb/gltf/bin/wav/lua/ron 等，写确定性 `cook.json`（FNV 哈希），清理上次 manifest 文件 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
 | `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态） |
@@ -115,6 +116,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-world <世界.json> [帧] / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
 | `crates/xgc-cli/src/assets_cmd.rs` | `xgc assets <项目根>`：GUID 扫描 |
+| `crates/xgc-cli/src/cook_cmd.rs` | `xgc cook <项目根> <输出目录>`：资产复制 + manifest |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
@@ -133,8 +135,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：遮罩 / 分层混合细节。
-2. 资产烹饪 / 打包。
+1. 资产烹饪：`cook` 已通；下一步播放器打包 / cooked 运行时加载。
+2. 动画：遮罩 / 分层混合细节。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 旧新视觉 / trace 对照。
 5. 现在最大文件 595 行：动它之前先拆。

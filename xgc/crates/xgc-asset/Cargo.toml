@@ -9,3 +9,4 @@ description = "XGC 资产目录：扫描旧 .meta，guid:// → 项目相对路�
 [dependencies]
 ron = "0.8.1"
 serde.workspace = true
+serde_json.workspace = true

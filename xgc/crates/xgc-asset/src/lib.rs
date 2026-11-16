@@ -5,6 +5,9 @@
 
 #![deny(unsafe_code)]
 
+mod cook;
+pub use cook::{cook_project, CookManifest, CookedFile};
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
