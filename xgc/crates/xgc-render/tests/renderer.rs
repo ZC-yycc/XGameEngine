@@ -468,3 +468,42 @@ fn ui_image_nine_slice_draws_nine_cells() {
     assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn ui_clip_scissors_background() {
+    use xgc_world::{UiElement, UiLayout};
+
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let desc = ResourceDesc::texture2d(
+        "clip-target",
+        "rgba8unorm",
+        16,
+        16,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let resource = context.create_resource(&desc).unwrap();
+    let GpuResource::Texture(texture) = resource else {
+        panic!("clip target 不是纹理");
+    };
+    let mut world = World::new();
+    world.spawn((
+        UiElement {
+            background: [1.0, 0.0, 0.0, 1.0],
+            ..UiElement::default()
+        },
+        UiLayout {
+            rect: [0.0, 0.0, 16.0, 16.0],
+            clip: [0.0, 0.0, 8.0, 8.0],
+            ..UiLayout::default()
+        },
+    ));
+    let mut renderer = Renderer::new(MeshCache::new("."));
+    renderer.render_ui(&context, &texture, &world).unwrap();
+    let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
+    assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
+    let outside = 4 * (12 * 16 + 12);
+    assert_eq!(&pixels[outside..outside + 4], &[0, 0, 0, 0]);
+}

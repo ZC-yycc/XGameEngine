@@ -135,6 +135,7 @@ pub(crate) struct MeshDraw<'a> {
     pub(crate) clear: bool,
     pub(crate) mvp: Option<[f32; 16]>,
     pub(crate) depth: Option<&'a wgpu::TextureView>,
+    pub(crate) scissor: Option<[u32; 4]>,
 }
 
 impl TrianglePipeline {
@@ -189,6 +190,31 @@ impl TrianglePipeline {
                 clear,
                 mvp,
                 depth: None,
+                scissor: None,
+            },
+        )
+    }
+
+    /// 带裁剪矩形的绘制：像素坐标 `[x, y, width, height]`。
+    pub fn draw_mesh_scissored(
+        &self,
+        context: &GpuContext,
+        texture: &wgpu::Texture,
+        mesh: &Mesh,
+        color: [f32; 4],
+        mvp: Option<[f32; 16]>,
+        scissor: [u32; 4],
+    ) -> Result<(), GpuError> {
+        self.draw_mesh_request(
+            context,
+            &MeshDraw {
+                texture,
+                mesh,
+                color,
+                clear: false,
+                mvp,
+                depth: None,
+                scissor: Some(scissor),
             },
         )
     }
@@ -323,6 +349,9 @@ impl TrianglePipeline {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[0]);
+            if let Some([x, y, width, height]) = request.scissor {
+                pass.set_scissor_rect(x, y, width, height);
+            }
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             if let Some(index_buffer) = &index_buffer {
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -491,6 +520,7 @@ impl RenderCache {
                 clear: index == 0,
                 mvp: Some(mul(mvp, item.transform)),
                 depth: Some(depth),
+                scissor: None,
             };
             self.depth_pipeline_for(context, format)
                 .draw_mesh_request(context, &request)?;

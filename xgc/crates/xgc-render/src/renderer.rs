@@ -41,6 +41,18 @@ pub struct Renderer {
     ui_textures: HashMap<String, Option<wgpu::Texture>>,
 }
 
+fn scissor_rect(clip: [f32; 4], viewport: [f32; 2]) -> Option<[u32; 4]> {
+    let x = clip[0].max(0.0).min(viewport[0]) as u32;
+    let y = clip[1].max(0.0).min(viewport[1]) as u32;
+    let right = (clip[0] + clip[2]).max(0.0).min(viewport[0]) as u32;
+    let bottom = (clip[1] + clip[3]).max(0.0).min(viewport[1]) as u32;
+    if right <= x || bottom <= y {
+        None
+    } else {
+        Some([x, y, right - x, bottom - y])
+    }
+}
+
 impl Renderer {
     pub fn new(meshes: MeshCache) -> Self {
         Self {
@@ -148,10 +160,11 @@ impl Renderer {
                     image_path,
                     image_mode,
                     image_slice,
+                    layout.clip,
                 ));
             }
         });
-        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _)| *entity);
+        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _, _)| *entity);
         let mut draws = 0;
         for (
             _,
@@ -164,28 +177,32 @@ impl Renderer {
             image_path,
             image_mode,
             image_slice,
+            clip,
         ) in &items
         {
+            let Some(scissor) = scissor_rect(*clip, viewport) else {
+                continue;
+            };
             if *focused {
                 let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
-                pipeline.draw_mesh_with_mvp(
+                pipeline.draw_mesh_scissored(
                     context,
                     target,
                     &mesh,
                     [1.0, 0.8, 0.2, 1.0],
-                    false,
                     Some(quad_matrix(ring, viewport)),
+                    scissor,
                 )?;
                 draws += 1;
             }
             if color[3] > 0.0 {
-                pipeline.draw_mesh_with_mvp(
+                pipeline.draw_mesh_scissored(
                     context,
                     target,
                     &mesh,
                     *color,
-                    false,
                     Some(quad_matrix(*rect, viewport)),
+                    scissor,
                 )?;
                 draws += 1;
             }
@@ -326,13 +343,13 @@ impl Renderer {
                 let pixel = (*text_size / 7.0).max(1.0);
                 let text_mesh = text_mesh(text, [rect[0] + 2.0, rect[1] + 2.0], pixel, viewport);
                 if !text_mesh.positions.is_empty() {
-                    pipeline.draw_mesh_with_mvp(
+                    pipeline.draw_mesh_scissored(
                         context,
                         target,
                         &text_mesh,
                         *text_color,
-                        false,
                         None,
+                        scissor,
                     )?;
                     draws += 1;
                 }
