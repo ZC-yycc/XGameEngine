@@ -10,6 +10,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
 mod assets;
+mod camera;
 mod draw;
 mod glb;
 mod gpu;
@@ -19,6 +20,7 @@ mod renderer;
 mod resources;
 
 pub use assets::MeshCache;
+pub use camera::{camera_view_projection, perspective_rh_zo, transform_point, Mat4, IDENTITY};
 pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use glb::{load_glb, MeshError};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};

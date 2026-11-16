@@ -48,7 +48,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（身份 / 名称 / 父子 / Transform / Mesh / Material / Camera / Lua / Audio / Physics，支持目录批量） |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读 |
-| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → RenderCache → GPU |
+| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → RenderCache → GPU，active camera MVP |
+| `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / MVP |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：材质 uniform、顶点 / 索引缓冲、draw |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList` |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引、builtin 网格占位 |
@@ -71,7 +72,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M2 第十二刀：相机矩阵 / 深度缓冲，把 `render.camera` 接进 Renderer。
+1. M2 第十三刀：深度缓冲 / 透视排序，补齐 mvp + depth pass。
 2. 旧场景迁移补 UI / Animator 等剩余组件映射。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 597 行：动它之前先拆。

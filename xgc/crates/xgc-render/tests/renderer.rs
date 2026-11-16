@@ -1,7 +1,7 @@
 //! Renderer 帧入口回归：空世界清黑、单实体 draw list 出一次 draw。
 
 use xgc_render::{GpuContext, GpuResource, MeshCache, Renderer, ResourceDesc, ResourceUsage};
-use xgc_world::{GlobalTransform, Material, MeshRenderer, World};
+use xgc_world::{Camera, GlobalTransform, Material, MeshRenderer, World};
 
 #[test]
 fn empty_world_clears_and_entity_emits_one_draw() {
@@ -43,5 +43,17 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(stats.draws, 1);
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     let center = 4 * (2 * 4 + 2);
+    assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
+
+    world.spawn((
+        GlobalTransform {
+            position: [0.0, 0.0, 1.0],
+            ..GlobalTransform::default()
+        },
+        Camera::default(),
+    ));
+    let stats = renderer.render(&context, &texture, &world).unwrap();
+    assert_eq!(stats.draws, 1);
+    let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
 }

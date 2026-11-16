@@ -1,6 +1,7 @@
 //! 可复用三角形管线：材质 uniform、顶点 / 索引缓冲、draw。
 
 use super::assets::MeshCache;
+use super::camera::IDENTITY;
 use super::draw::DrawList;
 use super::gpu::{GpuContext, GpuError};
 use super::mesh::{builtin_mesh, Mesh};
@@ -17,6 +18,7 @@ impl GpuContext {
         const TRIANGLE_WGSL: &str = r#"
 struct Material {
     color: vec4<f32>,
+    mvp: mat4x4<f32>,
 };
 
 @group(0) @binding(0)
@@ -24,7 +26,7 @@ var<uniform> material: Material;
 
 @vertex
 fn vs(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return vec4<f32>(position, 1.0);
+    return material.mvp * vec4<f32>(position, 1.0);
 }
 
 @fragment
@@ -44,7 +46,7 @@ fn fs() -> @location(0) vec4<f32> {
                     label: Some("xgc-triangle-material"),
                     entries: &[wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -135,12 +137,25 @@ impl TrianglePipeline {
         color: [f32; 4],
         clear: bool,
     ) -> Result<(), GpuError> {
+        self.draw_mesh_with_mvp(context, texture, mesh, color, clear, None)
+    }
+
+    /// 带 view-projection 的网格绘制；`None` 等价单位矩阵（NDC 直出）。
+    pub fn draw_mesh_with_mvp(
+        &self,
+        context: &GpuContext,
+        texture: &wgpu::Texture,
+        mesh: &Mesh,
+        color: [f32; 4],
+        clear: bool,
+        mvp: Option<[f32; 16]>,
+    ) -> Result<(), GpuError> {
         let load = if clear {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         } else {
             wgpu::LoadOp::Load
         };
-        self.draw_with(context, texture, mesh, color, load)
+        self.draw_with(context, texture, mesh, color, load, mvp)
     }
 
     fn draw_with(
@@ -150,6 +165,7 @@ impl TrianglePipeline {
         mesh: &Mesh,
         color: [f32; 4],
         load: wgpu::LoadOp<wgpu::Color>,
+        mvp: Option<[f32; 16]>,
     ) -> Result<(), GpuError> {
         if texture.format() != self.format {
             return Err(GpuError::Pipeline(format!(
@@ -158,13 +174,17 @@ impl TrianglePipeline {
                 self.format
             )));
         }
-        let bytes: Vec<u8> = color
+        let matrix = mvp.unwrap_or(IDENTITY);
+        let mut bytes: Vec<u8> = color
             .iter()
             .flat_map(|component| component.to_le_bytes())
             .collect();
+        for value in matrix {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
         let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("xgc-material"),
-            size: 16,
+            size: 80,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -325,6 +345,37 @@ impl RenderCache {
                 mesh,
                 item.color,
                 index == 0,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 与 `draw_list_with_meshes` 相同，但所有网格共用一个 view-projection。
+    pub fn draw_list_with_meshes_and_camera(
+        &mut self,
+        context: &GpuContext,
+        texture: &wgpu::Texture,
+        list: &DrawList,
+        meshes: &mut MeshCache,
+        mvp: [f32; 16],
+    ) -> Result<(), GpuError> {
+        if list.items.is_empty() {
+            return context.clear_texture(texture, wgpu::Color::BLACK);
+        }
+        let format = texture.format();
+        for (index, item) in list.items.iter().enumerate() {
+            let loaded = meshes
+                .get(&item.model)
+                .map_err(|err| GpuError::Mesh(err.to_string()))?;
+            let fallback = loaded.is_none().then(Mesh::fullscreen_triangle);
+            let mesh = loaded.unwrap_or_else(|| fallback.as_ref().unwrap());
+            self.pipeline_for(context, format).draw_mesh_with_mvp(
+                context,
+                texture,
+                mesh,
+                item.color,
+                index == 0,
+                Some(mvp),
             )?;
         }
         Ok(())
