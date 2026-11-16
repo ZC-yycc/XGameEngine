@@ -6,8 +6,8 @@ use xgc_reflect::Registry;
 use super::{
     AnimationLayers, AnimationState, Animator, AudioGain, AudioListener, AudioMixer, AudioSource,
     Bone, Camera, CharacterController, GlobalTransform, LodGroup, Material, MeshRenderer, Name,
-    Parent, ParticleEmitter, PhysicsBody, PluginComponent, Script, Skeleton, SkeletonPose, Slope,
-    Transform, UiElement, UiInput, UiInteraction, UiLayout, Velocity,
+    Parent, ParticleEmitter, PhysicsBody, PluginComponent, PrefabInstance, Script, Skeleton,
+    SkeletonPose, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout, Velocity,
 };
 
 pub fn builtin_registry() -> Registry {
@@ -99,5 +99,8 @@ pub fn builtin_registry() -> Registry {
     registry
         .register::<PluginComponent>()
         .expect("内置组件注册失败：plugin.rust");
+    registry
+        .register::<PrefabInstance>()
+        .expect("内置组件注册失败：prefab.instance");
     registry
 }

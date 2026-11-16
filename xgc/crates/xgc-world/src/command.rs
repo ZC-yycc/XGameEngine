@@ -13,6 +13,8 @@ use xgc_reflect::{ComponentId, Value};
 
 use super::{ComponentData, EntityData, World};
 
+mod replace;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     SetField {
@@ -34,6 +36,9 @@ pub enum Command {
     },
     Despawn {
         entity: EntityId,
+    },
+    Replace {
+        data: EntityData,
     },
 }
 
@@ -272,6 +277,23 @@ impl World {
                         valid = false;
                     }
                 }
+                Command::Replace { data } => {
+                    if dead.contains(&data.id) || self.meta_by_id(data.id).is_none() {
+                        diagnostics.push(diag(
+                            codes::EDIT_UNKNOWN_ENTITY,
+                            Subject::Entity(data.id),
+                            format!("替换目标不存在：{}", data.id),
+                        ));
+                        valid = false;
+                    } else if let Err(message) = self.snapshot_from_data(data) {
+                        diagnostics.push(diag(
+                            codes::EDIT_INVALID_SPAWN,
+                            Subject::Entity(data.id),
+                            message,
+                        ));
+                        valid = false;
+                    }
+                }
                 Command::Despawn { entity } => {
                     if dead.contains(entity) {
                         diagnostics.push(diag(
@@ -365,6 +387,19 @@ impl World {
                         });
                         touched.push(*entity);
                     }),
+                Command::Replace { data } => {
+                    let Some(original) = self.entity_data(data.id) else {
+                        return Err(vec![diag(
+                            codes::EDIT_UNKNOWN_ENTITY,
+                            Subject::Entity(data.id),
+                            format!("替换目标不存在：{}", data.id),
+                        )]);
+                    };
+                    self.replace_entity_raw(&original, data).map(|_| {
+                        inverse.push(Command::Replace { data: original });
+                        touched.push(data.id);
+                    })
+                }
                 Command::Despawn { entity } => {
                     let (Some(key), Some(data)) = (self.key_of(*entity), self.entity_data(*entity))
                     else {
@@ -438,6 +473,18 @@ impl World {
                         touched.push(*entity);
                     })
                 }
+                Command::Replace { data } => {
+                    let Some(original) = self.entity_data(data.id) else {
+                        return Err(vec![diag(
+                            codes::EDIT_UNKNOWN_ENTITY,
+                            Subject::Entity(data.id),
+                            format!("回滚时替换目标不存在：{}", data.id),
+                        )]);
+                    };
+                    self.replace_entity_raw(&original, data).map(|_| {
+                        touched.push(data.id);
+                    })
+                }
                 Command::Despawn { entity } => {
                     let Some(key) = self.key_of(*entity) else {
                         return Err(vec![diag(
@@ -468,61 +515,6 @@ impl World {
             self.touch(id, revision);
         }
         Ok(revision)
-    }
-
-    fn rollback(&mut self, inverse: &[Command]) -> Result<(), String> {
-        for command in inverse.iter().rev() {
-            match command {
-                Command::SetField {
-                    entity,
-                    component,
-                    field,
-                    value,
-                } => {
-                    self.set_field_raw(*entity, *component, field, value)?;
-                }
-                Command::Spawn { data } => {
-                    let snapshot = self.snapshot_from_data(data)?;
-                    self.restore_entity_raw(snapshot)?;
-                }
-                Command::AddComponent { entity, component } => {
-                    self.add_component_raw(*entity, component)?;
-                }
-                Command::RemoveComponent { entity, component } => {
-                    self.remove_component_raw(*entity, *component)?;
-                }
-                Command::Despawn { entity } => {
-                    let Some(key) = self.key_of(*entity) else {
-                        return Err(format!("回滚时实体不存在：{entity}"));
-                    };
-                    if !self.despawn_raw(key) {
-                        return Err(format!("回滚 despawn 失败：{entity}"));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn replace_entity_raw(
-        &mut self,
-        original: &EntityData,
-        updated: &EntityData,
-    ) -> Result<(), String> {
-        let Some(key) = self.key_of(original.id) else {
-            return Err(format!("实体不存在：{}", original.id));
-        };
-        let snapshot = self.snapshot_from_data(updated)?;
-        if !self.despawn_raw(key) {
-            return Err(format!("移除旧实体失败：{}", original.id));
-        }
-        if let Err(message) = self.restore_entity_raw(snapshot) {
-            if let Ok(original_snapshot) = self.snapshot_from_data(original) {
-                let _ = self.restore_entity_raw(original_snapshot);
-            }
-            return Err(message);
-        }
-        Ok(())
     }
 
     fn add_component_raw(

@@ -44,9 +44,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/ui_components.rs` | UI 组件：`ui.element` / `ui.layout` / `ui.interaction` / `ui.input` |
 | `crates/xgc-world/src/particle_components.rs` | 粒子组件：`particle.emitter` |
 | `crates/xgc-world/src/plugin_components.rs` | Rust 插件组件：`plugin.rust` |
+| `crates/xgc-world/src/prefab_components.rs` | 预制体实例：`prefab.instance`（source / source_id / root） |
 | `crates/xgc-world/src/physics_components.rs` | `physics.body`：类型 / 形状 / 摩擦 / 弹性 / 质量 / 传感器 |
 | `crates/xgc-world/src/slope_components.rs` | `physics.slope`：沿 +X 线性抬升的坡面 |
-| `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删与计划内预测集合） |
+| `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert / Replace（含组件增删与计划内预测集合） |
+| `crates/xgc-world/src/command/replace.rs` | 回滚与实体整份替换内部实现 |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
 | `crates/xgc-world/src/journal.rs` | `Journal` / `TxRecord`：事务日志与重放 |
 | `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `WorldSnapshot` / 恢复 |
@@ -117,7 +119,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 ## 不变量（改代码前先看）
 
 - 一个组件一个稳定 `ComponentId`；注册表按 ID 排序输出，schema 必须确定性。
+- **新增组件要同时改两处**：`registry.rs::builtin_registry`（schema/Agent）与 `data.rs::register_builtin_components`（World 工厂），缺一不可。
 - `EntityId` 是持久身份，`EntityKey` 是运行时句柄；句柄复用必须换 generation。
+- `Replace` 会销毁并重建实体行，**旧 EntityKey 失效**，按 ID 重取句柄。
 - archetype 的每一行列长度必须相等；`despawn` 用 `swap_remove` 并修正被搬实体行号。
 - `World::spawn` 只接受元组 `Bundle`；重复组件在 debug 断言里拒绝。
 - 热路径先保证正确；性能数字必须写进 README / 基准，不许凭感觉写"更快"。
@@ -125,10 +129,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：遮罩 / 分层混合细节。
-2. 迁移：预制体已可实例化；下一步窗口键盘事件接线与视觉对照。
-3. 脚本：正式 System 调度与脚本组件生命周期完整化。
-4. 编辑器：预制体覆写 / Revert 语义。
+1. 预制体 Revert：按 source_id 保留实例实体 ID。
+2. 动画：遮罩 / 分层混合细节。
+3. 迁移：窗口键盘事件接线与视觉对照。
+4. 脚本：正式 System 调度与脚本组件生命周期完整化。
 5. 现在最大文件 600 行：动它之前先拆。
 
 ## Token 纪律

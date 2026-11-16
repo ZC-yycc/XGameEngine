@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use xgc_base::EntityId;
-use xgc_world::{Command, EntityData, Value, World, WorldData};
+use xgc_world::{
+    Command, Component, ComponentData, EntityData, PrefabInstance, Value, World, WorldData,
+};
 
 const PARENT_COMPONENT: u32 = 0x0104;
 
@@ -11,6 +13,7 @@ const PARENT_COMPONENT: u32 = 0x0104;
 pub fn instantiate_prefab(
     world: &mut World,
     prefab: &WorldData,
+    source: Option<&str>,
 ) -> Result<Vec<(EntityId, EntityId)>, String> {
     if prefab.entities.is_empty() {
         return Err("预制体为空".to_string());
@@ -27,6 +30,24 @@ pub fn instantiate_prefab(
             .get(&entity.id)
             .ok_or_else(|| format!("实体 {} 没有映射", entity.id.raw()))?;
         remap_references(&mut data, &mapping);
+        if let Some(source) = source {
+            data.components.push(ComponentData {
+                component: PrefabInstance::ID,
+                fields: vec![
+                    ("source".to_string(), Value::String(source.to_string())),
+                    ("source_id".to_string(), Value::Entity(entity.id.raw())),
+                    (
+                        "root".to_string(),
+                        Value::Bool(
+                            !entity
+                                .components
+                                .iter()
+                                .any(|component| component.component.0 == PARENT_COMPONENT),
+                        ),
+                    ),
+                ],
+            });
+        }
         commands.push(Command::Spawn { data });
     }
     let plan = world.plan(commands);

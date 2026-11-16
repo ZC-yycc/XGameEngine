@@ -408,3 +408,30 @@ fn component_structure_conflicts_are_reported() {
     assert!(!plan.is_valid());
     assert_eq!(plan.diagnostics[0].code, "EDIT.COMPONENT_MISSING");
 }
+
+#[test]
+fn replace_command_swaps_and_reverts() {
+    use xgc_world::{Command, Name};
+
+    let mut world = World::new();
+    let key = world.spawn((Name {
+        value: "before".to_string(),
+    },));
+    let id = world.entity(key).unwrap();
+    let mut data = world.entity_data(id).unwrap();
+    for component in &mut data.components {
+        for (field, value) in &mut component.fields {
+            if field == "value" {
+                *value = xgc_world::Value::String("after".to_string());
+            }
+        }
+    }
+    let plan = world.plan(vec![Command::Replace { data }]);
+    assert!(plan.is_valid(), "{:?}", plan.diagnostics);
+    let applied = world.apply(&plan).unwrap();
+    let key_after = world.key(id).unwrap();
+    assert_eq!(world.get::<Name>(key_after).unwrap().value, "after");
+    world.revert(&applied).unwrap();
+    let key_reverted = world.key(id).unwrap();
+    assert_eq!(world.get::<Name>(key_reverted).unwrap().value, "before");
+}

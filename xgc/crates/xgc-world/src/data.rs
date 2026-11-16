@@ -14,8 +14,9 @@ use xgc_reflect::{Component, ComponentId, Value};
 use super::{
     AnimationLayers, AnimationState, Animator, AudioGain, AudioListener, AudioMixer, AudioSource,
     Bone, Camera, CharacterController, Column, EntitySnapshot, GlobalTransform, LodGroup, Material,
-    MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, Script, Skeleton,
-    SkeletonPose, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout, Velocity, World,
+    MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, PrefabInstance,
+    Script, Skeleton, SkeletonPose, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout,
+    Velocity, World,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -151,6 +152,7 @@ impl World {
         self.register_component::<SkeletonPose>();
         self.register_component::<ParticleEmitter>();
         self.register_component::<PluginComponent>();
+        self.register_component::<PrefabInstance>();
     }
 
     pub fn register_component<T: Component>(&mut self) {

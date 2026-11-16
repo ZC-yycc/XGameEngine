@@ -18,7 +18,7 @@ fn pillar_prefab_instantiates_with_remapped_parents() {
     let mut world = World::new();
     world.spawn((Transform::default(),));
     let before = world.len();
-    let mapping = instantiate_prefab(&mut world, &data).unwrap();
+    let mapping = instantiate_prefab(&mut world, &data, None).unwrap();
     assert_eq!(mapping.len(), 3);
     assert_eq!(world.len(), before + 3);
     let new_ids: BTreeSet<EntityId> = mapping.iter().map(|(_, new)| *new).collect();
@@ -31,4 +31,28 @@ fn pillar_prefab_instantiates_with_remapped_parents() {
         }
     }
     assert!(parents > 0, "Pillar 预制体应有父子关系");
+}
+
+#[test]
+fn instantiated_entities_carry_source_metadata() {
+    use xgc_world::PrefabInstance;
+
+    let path = Path::new("../../../projects/XGame/Prefabs/Pillar.prefab.ron");
+    if !path.exists() {
+        eprintln!("skip: 没有旧项目 Pillar 预制体");
+        return;
+    }
+    let (data, _) = migrate_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut world = World::new();
+    let mapping = instantiate_prefab(&mut world, &data, Some("Prefabs/Pillar.prefab.ron")).unwrap();
+    let mut roots = 0;
+    for (_, new) in &mapping {
+        let key = world.key(*new).unwrap();
+        let instance = world.get::<PrefabInstance>(key).unwrap();
+        assert_eq!(instance.source, "Prefabs/Pillar.prefab.ron");
+        if instance.root {
+            roots += 1;
+        }
+    }
+    assert_eq!(roots, 1);
 }

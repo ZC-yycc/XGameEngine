@@ -485,6 +485,11 @@ impl Agent {
                     "entity": data.id.to_string(),
                     "components": data.components.iter().map(|component| component.component.0).collect::<Vec<_>>(),
                 }),
+                Command::Replace { data } => json!({
+                    "kind": "replace",
+                    "entity": data.id.to_string(),
+                    "components": data.components.iter().map(|component| component.component.0).collect::<Vec<_>>(),
+                }),
                 Command::Despawn { entity } => json!({
                     "kind": "despawn",
                     "entity": entity.to_string(),

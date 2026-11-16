@@ -39,6 +39,7 @@ fn builtin_registry_has_stable_types() {
             "ui.input",
             "particle.emitter",
             "plugin.rust",
+            "prefab.instance",
         ]
     );
     assert!(registry.validate().is_empty());

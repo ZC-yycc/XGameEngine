@@ -27,7 +27,7 @@ impl EditorState {
             .map(|entity| entity.id)
             .ok_or_else(|| "预制体没有根实体".to_string())?;
         self.checkpoint();
-        let mapping = instantiate_prefab(&mut self.world, &data)?;
+        let mapping = instantiate_prefab(&mut self.world, &data, Some(&path.to_string_lossy()))?;
         let root = mapping
             .iter()
             .find(|(old, _)| *old == root_old)
