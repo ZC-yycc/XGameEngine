@@ -3,9 +3,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mlua::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib, Value};
+use mlua::{
+    FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib, Value as LuaValue,
+};
 use xgc_base::EntityId;
-use xgc_world::{Transform, World};
+use xgc_world::{builtin_registry, Transform, Value, World};
 
 pub struct LuaHost {
     lua: Lua,
@@ -95,6 +97,43 @@ impl LuaHost {
         api.set("log", log)
             .map_err(|err| format!("注册 log 失败：{err}"))?;
 
+        let get_world = Rc::clone(world);
+        let get_field = self
+            .lua
+            .create_function(move |lua, (id, component, field): (u64, String, String)| {
+                let component = component_id(&component)?;
+                let world = get_world.borrow();
+                let value = world
+                    .get_field(EntityId::from_raw(id), component, &field)
+                    .ok_or_else(|| {
+                        mlua::Error::RuntimeError(format!(
+                            "实体 {id} 没有字段 {}.{field}",
+                            component.0
+                        ))
+                    })?;
+                value_to_lua(lua, &value)
+            })
+            .map_err(|err| format!("创建 get_field 失败：{err}"))?;
+        api.set("get", get_field)
+            .map_err(|err| format!("注册 get 失败：{err}"))?;
+
+        let set_world = Rc::clone(world);
+        let set_field = self
+            .lua
+            .create_function(
+                move |_, (id, component, field, value): (u64, String, String, mlua::Value)| {
+                    let component = component_id(&component)?;
+                    let value = lua_to_value(&value)?;
+                    let mut world = set_world.borrow_mut();
+                    world
+                        .set_field(EntityId::from_raw(id), component, &field, &value)
+                        .map_err(mlua::Error::RuntimeError)
+                },
+            )
+            .map_err(|err| format!("创建 set_field 失败：{err}"))?;
+        api.set("set", set_field)
+            .map_err(|err| format!("注册 set 失败：{err}"))?;
+
         self.lua
             .globals()
             .set("xgc", api)
@@ -154,12 +193,12 @@ impl LuaHost {
     }
 
     pub fn global_is_nil(&self, name: &str) -> Result<bool, String> {
-        let value: Value = self
+        let value: LuaValue = self
             .lua
             .globals()
             .get(name)
             .map_err(|err| format!("读取 Lua 全局 {name} 失败：{err}"))?;
-        Ok(matches!(value, Value::Nil))
+        Ok(matches!(value, LuaValue::Nil))
     }
 
     /// 只读脚本名列表：`package.loaded` 不可用，这里用宿主登记表代替。
@@ -172,5 +211,64 @@ impl LuaHost {
 impl std::fmt::Debug for LuaHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LuaHost").finish_non_exhaustive()
+    }
+}
+
+fn component_id(name: &str) -> mlua::Result<xgc_world::ComponentId> {
+    builtin_registry()
+        .by_name(name)
+        .map(|schema| xgc_world::ComponentId(schema.id))
+        .ok_or_else(|| mlua::Error::RuntimeError(format!("未知组件：{name}")))
+}
+
+fn value_to_lua(lua: &Lua, value: &Value) -> mlua::Result<mlua::Value> {
+    Ok(match value {
+        Value::Bool(value) => mlua::Value::Boolean(*value),
+        Value::I64(value) => mlua::Value::Integer(*value),
+        Value::F64(value) => mlua::Value::Number(*value),
+        Value::String(value) => mlua::Value::String(lua.create_string(value)?),
+        Value::Vec2(value) => vec_table(lua, &[value[0], value[1]], &["x", "y"])?,
+        Value::Vec3(value) => vec_table(lua, &[value[0], value[1], value[2]], &["x", "y", "z"])?,
+        Value::Vec4(value) | Value::Quat(value) => vec_table(
+            lua,
+            &[value[0], value[1], value[2], value[3]],
+            &["x", "y", "z", "w"],
+        )?,
+        Value::Entity(value) => mlua::Value::Integer(*value as i64),
+    })
+}
+
+fn vec_table(lua: &Lua, values: &[f64], names: &[&str]) -> mlua::Result<mlua::Value> {
+    let table = lua.create_table()?;
+    for (name, value) in names.iter().zip(values) {
+        table.set(*name, *value)?;
+    }
+    Ok(mlua::Value::Table(table))
+}
+
+fn lua_to_value(value: &mlua::Value) -> mlua::Result<Value> {
+    match value {
+        mlua::Value::Boolean(value) => Ok(Value::Bool(*value)),
+        mlua::Value::Integer(value) => Ok(Value::I64(*value)),
+        mlua::Value::Number(value) => Ok(Value::F64(*value)),
+        mlua::Value::String(value) => Ok(Value::String(value.to_str()?.to_string())),
+        mlua::Value::Table(table) => {
+            let x = table.get::<Option<f64>>("x")?;
+            let y = table.get::<Option<f64>>("y")?;
+            let z = table.get::<Option<f64>>("z")?;
+            let w = table.get::<Option<f64>>("w")?;
+            match (x, y, z, w) {
+                (Some(x), Some(y), Some(z), Some(w)) => Ok(Value::Vec4([x, y, z, w])),
+                (Some(x), Some(y), Some(z), None) => Ok(Value::Vec3([x, y, z])),
+                (Some(x), Some(y), None, None) => Ok(Value::Vec2([x, y])),
+                _ => Err(mlua::Error::RuntimeError(
+                    "向量表需要 x/y[/z[/w]] 字段".to_string(),
+                )),
+            }
+        }
+        other => Err(mlua::Error::RuntimeError(format!(
+            "不支持的 Lua 值：{}",
+            other.type_name()
+        ))),
     }
 }

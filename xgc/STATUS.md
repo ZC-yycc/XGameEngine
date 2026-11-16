@@ -8,7 +8,7 @@
 | 项 | 值 |
 |---|---|
 | Rust 文件 | 97（最大 588 行；软上限 600） |
-| 测试 | 154（`cargo test --workspace --offline`） |
+| 测试 | 156（`cargo test --workspace --offline`） |
 | 内建组件 schema | 27 类 / 31479 字节，两次导出逐字节相同 |
 | 默认系统 | 16 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
@@ -28,7 +28,7 @@
 | 动画 | RON 剪辑、平移 / 旋转 slerp / 缩放采样、目录加载、写回 Transform、Skeleton / Bone / Pose、GLB JOINTS / WEIGHTS / 逆绑定、CPU 蒙皮 |
 | 物理 | 重力 / 速度积分 / 地面 / 跳跃、角色台阶 / 高墙 / 球体阻挡、斜坡地面、AABB 分离 |
 | 音频 | 空间化增益、总线、WAV 解码、软件混音、WAV 写出 |
-| Lua | `xgc-script` 安全标准库宿主：执行 / 求值 / 函数调用 / 全局变量；`xgc` 表可读实体数、读写 Transform |
+| Lua | `xgc-script` 安全标准库宿主：执行 / 求值 / 调用；`xgc` 表可读实体数、读写 Transform、按组件名通用读写字段 |
 | 资产 / 迁移 | `.meta` 扫描、旧 SceneV2 全组件映射（含 UI / Particle / Rust 插件）、目录批量迁移 |
 | CLI | schema / check / bench / export / import / run / serve / migrate / assets / clips / audio / mix / render-graph / gpu-probe / mesh-probe / render-frame |
 
@@ -44,7 +44,7 @@
 | 渲染 | 35% | 基础 wgpu + 实例化 + UI；缺 PBR / 阴影 / 后处理 / 粒子 / 蒙皮绘制 |
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |
 | 资产 / 打包 | 15% | 扫描与迁移；缺 cooked asset、依赖清单、播放器打包 |
-| Lua 脚本 | 15% | 安全宿主 + `xgc` 世界 API；缺生命周期、组件通用读写、沙箱配额、热重载 |
+| Lua 脚本 | 20% | 安全宿主 + `xgc` 通用字段读写；缺生命周期、沙箱配额、热重载 |
 | 编辑器 | 5% | 只有 CLI / Agent 操作面 |
 | 割接验收 | 20% | 无旧 / 新对照、无性能门禁、未推送 |
 

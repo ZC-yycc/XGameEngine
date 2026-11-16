@@ -69,3 +69,53 @@ fn world_api_rejects_missing_entity() {
         .unwrap_err();
     assert!(error.contains("99"));
 }
+
+#[test]
+fn generic_field_api_reads_vectors_and_names() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use xgc_world::{Name, Transform, World};
+
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        Name {
+            value: "old".to_string(),
+        },
+    ));
+    let id = world.entity(entity).unwrap();
+    let world = Rc::new(RefCell::new(world));
+    let host = LuaHost::with_world(Rc::clone(&world)).unwrap();
+    host.run(
+        "fields",
+        &format!(
+            "xgc.set({}, 'core.transform', 'position', {{x=1.0, y=2.0, z=3.0}}); \
+             xgc.set({}, 'core.name', 'value', 'hero')",
+            id.raw(),
+            id.raw()
+        ),
+    )
+    .unwrap();
+    let x = host
+        .eval::<f64>(&format!(
+            "local p = xgc.get({}, 'core.transform', 'position'); return p.x",
+            id.raw()
+        ))
+        .unwrap();
+    assert_eq!(x, 1.0);
+    assert_eq!(world.borrow().get::<Name>(entity).unwrap().value, "hero");
+}
+
+#[test]
+fn unknown_component_is_reported() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use xgc_world::World;
+
+    let world = Rc::new(RefCell::new(World::new()));
+    let host = LuaHost::with_world(world).unwrap();
+    let error = host.run("bad", "xgc.get(1, 'nope', 'x')").unwrap_err();
+    assert!(error.contains("未知组件"));
+}
