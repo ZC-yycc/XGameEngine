@@ -323,6 +323,15 @@ impl Simulation {
 
     /// 一帧：应用命令 → 跑系统 → 记录。帧号从 0 开始。
     pub fn step(&mut self, commands: Vec<Command>) -> Result<FrameRecord, SimError> {
+        self.step_with(commands, |_| {})
+    }
+
+    /// 跑一帧，并在记录 trace 前执行 `after`（脚本 / 外部输入接入点）。
+    pub fn step_with(
+        &mut self,
+        commands: Vec<Command>,
+        mut after: impl FnMut(&mut World),
+    ) -> Result<FrameRecord, SimError> {
         let plan = self.world.plan(commands);
         if !plan.is_valid() {
             return Err(SimError::InvalidPlan {
@@ -337,6 +346,7 @@ impl Simulation {
                 diagnostics,
             })?;
         self.schedule.run(&mut self.world, self.fixed_dt);
+        after(&mut self.world);
 
         let record = FrameRecord {
             frame: self.frame,

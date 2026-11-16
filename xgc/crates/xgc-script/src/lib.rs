@@ -100,6 +100,13 @@ impl LuaHost {
             .map(|commands| std::mem::take(&mut *commands.borrow_mut()))
             .unwrap_or_default()
     }
+
+    /// 内存上限（字节）；返回旧上限。超限后 Lua 分配失败，不拖垮宿主。
+    pub fn set_memory_limit(&self, bytes: usize) -> Result<usize, String> {
+        self.lua
+            .set_memory_limit(bytes)
+            .map_err(|err| format!("设置 Lua 内存上限失败：{err}"))
+    }
     pub fn with_world(world: Rc<RefCell<World>>) -> Result<Self, String> {
         let host = Self::new()?;
         host.register_world(&world)?;

@@ -222,3 +222,19 @@ fn runtime_drives_script_entities_and_reloads() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn memory_limit_rejects_large_allocation() {
+    let host = LuaHost::new().unwrap();
+    let _previous = host.set_memory_limit(128 * 1024).unwrap();
+    let error = host
+        .run(
+            "big",
+            "local text = string.rep('x', 1024 * 1024); return text",
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("memory") || error.contains("内存"),
+        "{error}"
+    );
+}

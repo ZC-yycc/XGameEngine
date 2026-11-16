@@ -514,3 +514,26 @@ fn character_jump_consumes_request_when_grounded() {
     assert!(!controller.jump);
     assert!(!controller.grounded);
 }
+
+#[test]
+fn simulation_step_with_runs_external_hook_before_trace() {
+    let mut world = World::new();
+    let entity = world.spawn((Transform::default(),));
+    let mut simulation = Simulation::new(world);
+    let record = simulation
+        .step_with(Vec::new(), |world| {
+            if let Some(transform) = world.get_mut::<Transform>(entity) {
+                transform.position = [7.0, 8.0, 9.0];
+            }
+        })
+        .unwrap();
+    assert_eq!(record.state_hash, simulation.world().state_hash());
+    assert_eq!(
+        simulation
+            .world()
+            .get::<Transform>(entity)
+            .unwrap()
+            .position,
+        [7.0, 8.0, 9.0]
+    );
+}
