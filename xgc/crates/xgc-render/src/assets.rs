@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use xgc_asset::AssetCatalog;
 
-use super::glb::{load_glb, MeshError};
+use super::glb::{load_model, MeshError};
 use super::mesh::{builtin_mesh, Mesh};
 
 pub struct MeshCache {
@@ -63,7 +63,7 @@ impl MeshCache {
             let path = catalog
                 .resolve(model)
                 .ok_or_else(|| MeshError::Missing(format!("资产目录没有 {model}")))?;
-            let mesh = load_glb(path)?;
+            let mesh = load_model(path)?;
             self.meshes.insert(model.to_string(), mesh);
             return Ok(self.meshes.get(model));
         }
@@ -76,7 +76,7 @@ impl MeshCache {
         if !path.exists() {
             return Ok(None);
         }
-        let mesh = load_glb(&path)?;
+        let mesh = load_model(&path)?;
         self.meshes.insert(model.to_string(), mesh);
         Ok(self.meshes.get(model))
     }

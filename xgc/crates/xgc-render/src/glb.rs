@@ -49,9 +49,17 @@ struct Root {
     #[serde(default)]
     buffer_views: Vec<BufferView>,
     #[serde(default)]
+    buffers: Vec<BufferDef>,
+    #[serde(default)]
     nodes: Vec<NodeDef>,
     #[serde(default)]
     skins: Vec<SkinDef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BufferDef {
+    #[serde(default)]
+    uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,7 +126,63 @@ fn default_mode() -> u32 {
 
 pub fn load_glb(path: &Path) -> Result<Mesh, MeshError> {
     let bytes = std::fs::read(path).map_err(|err| MeshError::Io(err.to_string()))?;
-    let (json, bin) = split_glb(&bytes)?;
+    load_glb_bytes(&bytes)
+}
+
+/// `.gltf`：JSON + 外部 `.bin`，先拼成内存 GLB 再走同一条解析。
+pub fn load_gltf(path: &Path) -> Result<Mesh, MeshError> {
+    let text = std::fs::read_to_string(path).map_err(|err| MeshError::Io(err.to_string()))?;
+    let root: Root = serde_json::from_str(&text).map_err(|err| MeshError::Json(err.to_string()))?;
+    let uri = root
+        .buffers
+        .first()
+        .and_then(|buffer| buffer.uri.as_deref())
+        .ok_or_else(|| MeshError::Missing("buffers[0].uri".into()))?;
+    if uri.starts_with("data:") {
+        return Err(MeshError::Unsupported("data URI buffer".into()));
+    }
+    let uri = uri.strip_prefix("file://").unwrap_or(uri);
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let bin = std::fs::read(base.join(uri)).map_err(|err| MeshError::Io(err.to_string()))?;
+    let glb = encode_glb(&text, &bin);
+    load_glb_bytes(&glb)
+}
+
+/// 按扩展名分派 `.glb` / `.gltf`。
+pub fn load_model(path: &Path) -> Result<Mesh, MeshError> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension == "gltf" {
+        load_gltf(path)
+    } else {
+        load_glb(path)
+    }
+}
+
+fn encode_glb(json: &str, bin: &[u8]) -> Vec<u8> {
+    let mut json_bytes = json.as_bytes().to_vec();
+    while json_bytes.len() % 4 != 0 {
+        json_bytes.push(b' ');
+    }
+    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+    let mut glb = Vec::with_capacity(total);
+    glb.extend_from_slice(&GLB_MAGIC.to_le_bytes());
+    glb.extend_from_slice(&2u32.to_le_bytes());
+    glb.extend_from_slice(&(total as u32).to_le_bytes());
+    glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    glb.extend_from_slice(&CHUNK_JSON.to_le_bytes());
+    glb.extend_from_slice(&json_bytes);
+    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(&CHUNK_BIN.to_le_bytes());
+    glb.extend_from_slice(bin);
+    glb
+}
+
+fn load_glb_bytes(bytes: &[u8]) -> Result<Mesh, MeshError> {
+    let (json, bin) = split_glb(bytes)?;
     let root: Root =
         serde_json::from_slice(json).map_err(|err| MeshError::Json(err.to_string()))?;
     let mesh = root

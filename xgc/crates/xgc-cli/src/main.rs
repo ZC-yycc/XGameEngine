@@ -18,6 +18,7 @@ use xgc_world::{Name, Transform, Velocity, World};
 
 mod audio;
 mod render;
+mod world_cmd;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -29,6 +30,7 @@ fn main() -> ExitCode {
         Some("export") => export(args.next().as_deref()),
         Some("import") => import(args.next().as_deref()),
         Some("run") => run(args.next().as_deref()),
+        Some("run-world") => world_cmd::run_world(args.next().as_deref(), args.next().as_deref()),
         Some("run-scripts") => run_scripts(
             args.next().as_deref(),
             args.next().as_deref(),

@@ -96,11 +96,12 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵与祖先骨架姿态） |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；蒙皮实体按实体键单独成组并上传变形顶点 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引 + `SkinData`（关节 / 权重 / 逆绑定）、builtin 网格占位 |
-| `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / `load_glb_skeleton` 关节层级 |
+| `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
+| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-world <世界.json> [帧] / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
+| `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
@@ -116,11 +117,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：叠加层已接；下一步转场淡入 / 遮罩。
-2. 音频：设备输出已接；下一步流式资产 / 3D 声像。
-3. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
-4. 编辑器：Gizmo 已接；下一步旋转 / 缩放与吸附。
-5. 现在最大文件 593 行：动它之前先拆。
+1. 迁移：showcase 已端到端；下一步脚本 / 预制体整体验收。
+2. 动画：转场淡入 / 遮罩。
+3. 脚本：完整引擎 API 与正式 System 调度。
+4. 编辑器：旋转 / 缩放 Gizmo 与吸附。
+5. 现在最大文件 595 行：动它之前先拆。
 
 ## Token 纪律
 
