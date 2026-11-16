@@ -41,6 +41,8 @@ impl Agent {
         let _ = registry.register::<xgc_world::Transform>();
         let _ = registry.register::<xgc_world::Velocity>();
         let _ = registry.register::<xgc_world::Name>();
+        let _ = registry.register::<xgc_world::Parent>();
+        let _ = registry.register::<xgc_world::GlobalTransform>();
         Self {
             world: World::new(),
             registry,

@@ -29,7 +29,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、`Value`、动态字段读写 |
 | `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 |
 | `crates/xgc-world/src/query.rs` | 双组件不可变 / 可变 / archetype 分片并行查询 |
-| `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` |
+| `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` |
 | `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删） |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
 | `crates/xgc-world/src/journal.rs` | `Journal` / `TxRecord`：事务日志与重放 |
@@ -55,8 +55,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第十六刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
-2. 接第三个系统（Transform 层级传播），再谈物理 / 渲染。
+1. M1 第十七刀：层级系统去掉每帧 `WorldData` 分配（复用 scratch），再谈跨系统并行。
+2. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 3. Agent 能力清单 / 诊断码 / 视觉验证；`xgc check` 扩到项目 / 场景。
 4. 现在最大文件 594 行：动它之前先拆。
 

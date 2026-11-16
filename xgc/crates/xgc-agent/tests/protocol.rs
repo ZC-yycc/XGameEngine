@@ -63,7 +63,7 @@ fn describe_lists_protocol_components_and_world_state() {
     let response = result(call(&mut agent, "engine.describe", Json::Null));
     assert_eq!(response["protocol"], "xgc.agent/1");
     assert_eq!(response["engine"], "xgc");
-    assert_eq!(response["components"]["types"].as_array().unwrap().len(), 3);
+    assert_eq!(response["components"]["types"].as_array().unwrap().len(), 5);
     assert_eq!(response["world"]["entities"], 0);
     assert!(response["methods"]
         .as_array()

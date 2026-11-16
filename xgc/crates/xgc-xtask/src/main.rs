@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use xgc_reflect::Registry;
-use xgc_world::{Name, Transform, Velocity};
+use xgc_world::{GlobalTransform, Name, Parent, Transform, Velocity};
 
 const SOFT_FILE_LINES: usize = 600;
 const HARD_FILE_LINES: usize = 1000;
@@ -201,6 +201,8 @@ fn schema_check() -> Result<(), String> {
         registry.register::<Transform>(),
         registry.register::<Velocity>(),
         registry.register::<Name>(),
+        registry.register::<Parent>(),
+        registry.register::<GlobalTransform>(),
     ] {
         result.map_err(|err| err.to_string())?;
     }
@@ -212,7 +214,13 @@ fn schema_check() -> Result<(), String> {
     if first != second {
         return Err("schema 两次导出不一致".to_string());
     }
-    for required in ["core.transform", "core.velocity", "core.name"] {
+    for required in [
+        "core.transform",
+        "core.velocity",
+        "core.name",
+        "core.parent",
+        "core.global_transform",
+    ] {
         if !first.contains(required) {
             return Err(format!("schema 缺少 {required}"));
         }

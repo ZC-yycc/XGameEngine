@@ -22,7 +22,7 @@ mod snapshot;
 mod validate;
 
 pub use command::{Applied, Command, Plan};
-pub use components::{Name, Transform, Velocity};
+pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
 pub use data::{ComponentData, EntityData, WorldData};
 pub use journal::{Journal, TxRecord};
 pub use snapshot::{EntitySnapshot, WorldSnapshot};

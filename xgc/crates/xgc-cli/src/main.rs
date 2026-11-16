@@ -9,7 +9,7 @@ use xgc_agent::Agent;
 use xgc_reflect::Registry;
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
-use xgc_world::{Name, Transform, Velocity, World};
+use xgc_world::{GlobalTransform, Name, Parent, Transform, Velocity, World};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -49,6 +49,12 @@ fn builtin_registry() -> Result<Registry, String> {
     registry
         .register::<Name>()
         .map_err(|err| format!("注册 core.name 失败：{err}"))?;
+    registry
+        .register::<Parent>()
+        .map_err(|err| format!("注册 core.parent 失败：{err}"))?;
+    registry
+        .register::<GlobalTransform>()
+        .map_err(|err| format!("注册 core.global_transform 失败：{err}"))?;
     Ok(registry)
 }
 
