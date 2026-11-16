@@ -1,9 +1,117 @@
-//! 多组件查询：不可变、可变、按 archetype 分片的并行版本。
-
 use xgc_base::EntityKey;
 use xgc_reflect::Component;
 
-use super::{apply2_mut_arch, apply2_mut_arch_sync, World};
+use super::{Archetype, World};
+
+pub(crate) fn apply2_mut_arch<A: Component, B: Component>(
+    arch: &mut Archetype,
+    f: &mut impl FnMut(EntityKey, &mut A, &mut B),
+) {
+    if !arch.columns.contains_key(&A::ID) || !arch.columns.contains_key(&B::ID) {
+        return;
+    }
+    let Some(mut a) = arch.columns.remove(&A::ID) else {
+        return;
+    };
+    let Some(mut b) = arch.columns.remove(&B::ID) else {
+        arch.columns.insert(A::ID, a);
+        return;
+    };
+    {
+        let a_values = a.as_any_mut().downcast_mut::<Vec<A>>();
+        let b_values = b.as_any_mut().downcast_mut::<Vec<B>>();
+        if let (Some(a_values), Some(b_values)) = (a_values, b_values) {
+            for ((key, a), b) in arch
+                .entities
+                .iter()
+                .copied()
+                .zip(a_values.iter_mut())
+                .zip(b_values.iter_mut())
+            {
+                f(key, a, b);
+            }
+        }
+    }
+    arch.columns.insert(A::ID, a);
+    arch.columns.insert(B::ID, b);
+}
+
+pub(crate) fn apply2_mut_arch_sync<A: Component, B: Component>(
+    arch: &mut Archetype,
+    f: &impl Fn(EntityKey, &mut A, &mut B),
+) {
+    if !arch.columns.contains_key(&A::ID) || !arch.columns.contains_key(&B::ID) {
+        return;
+    }
+    let Some(mut a) = arch.columns.remove(&A::ID) else {
+        return;
+    };
+    let Some(mut b) = arch.columns.remove(&B::ID) else {
+        arch.columns.insert(A::ID, a);
+        return;
+    };
+    {
+        let a_values = a.as_any_mut().downcast_mut::<Vec<A>>();
+        let b_values = b.as_any_mut().downcast_mut::<Vec<B>>();
+        if let (Some(a_values), Some(b_values)) = (a_values, b_values) {
+            for ((key, a), b) in arch
+                .entities
+                .iter()
+                .copied()
+                .zip(a_values.iter_mut())
+                .zip(b_values.iter_mut())
+            {
+                f(key, a, b);
+            }
+        }
+    }
+    arch.columns.insert(A::ID, a);
+    arch.columns.insert(B::ID, b);
+}
+
+pub(crate) fn apply3_mut_arch<A: Component, B: Component, C: Component>(
+    arch: &mut Archetype,
+    f: &mut impl FnMut(EntityKey, &mut A, &mut B, &mut C),
+) {
+    if !arch.columns.contains_key(&A::ID)
+        || !arch.columns.contains_key(&B::ID)
+        || !arch.columns.contains_key(&C::ID)
+    {
+        return;
+    }
+    let Some(mut a) = arch.columns.remove(&A::ID) else {
+        return;
+    };
+    let Some(mut b) = arch.columns.remove(&B::ID) else {
+        arch.columns.insert(A::ID, a);
+        return;
+    };
+    let Some(mut c) = arch.columns.remove(&C::ID) else {
+        arch.columns.insert(A::ID, a);
+        arch.columns.insert(B::ID, b);
+        return;
+    };
+    {
+        let a_values = a.as_any_mut().downcast_mut::<Vec<A>>();
+        let b_values = b.as_any_mut().downcast_mut::<Vec<B>>();
+        let c_values = c.as_any_mut().downcast_mut::<Vec<C>>();
+        if let (Some(a_values), Some(b_values), Some(c_values)) = (a_values, b_values, c_values) {
+            for (((key, a), b), c) in arch
+                .entities
+                .iter()
+                .copied()
+                .zip(a_values.iter_mut())
+                .zip(b_values.iter_mut())
+                .zip(c_values.iter_mut())
+            {
+                f(key, a, b, c);
+            }
+        }
+    }
+    arch.columns.insert(A::ID, a);
+    arch.columns.insert(B::ID, b);
+    arch.columns.insert(C::ID, c);
+}
 
 impl World {
     /// 双组件不可变遍历；只访问同时含 `A`、`B` 的 archetype。
@@ -40,6 +148,20 @@ impl World {
     ///
     /// 每个 archetype 只由一个线程处理，实体之间互不重叠，所以线程数不改变结果；
     /// 顺序仍按 archetype / 行序，`state_hash` 与单线程逐位一致。
+    /// 三组件可变查询；三个 ComponentId 必须互不相同。
+    pub fn for_each3_mut<A: Component, B: Component, C: Component>(
+        &mut self,
+        mut f: impl FnMut(EntityKey, &mut A, &mut B, &mut C),
+    ) {
+        assert!(
+            A::ID != B::ID && A::ID != C::ID && B::ID != C::ID,
+            "for_each3_mut 的三个组件必须互不相同"
+        );
+        for arch in &mut self.archetypes {
+            apply3_mut_arch(arch, &mut f);
+        }
+    }
+
     pub fn par_for_each2_mut<A: Component, B: Component>(
         &mut self,
         threads: usize,

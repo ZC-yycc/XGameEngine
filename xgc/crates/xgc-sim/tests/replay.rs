@@ -2,8 +2,8 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, AnimatorSystem, FrameCommands, GravitySystem, PhysicsSystem, Scenario, Schedule,
-    SimError, Simulation, System, SystemAccess, VelocitySystem,
+    play, verify, AnimatorSystem, FrameCommands, GravitySystem, GroundCollisionSystem,
+    PhysicsSystem, Scenario, Schedule, SimError, Simulation, System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
     Animator, Command, Component, ComponentId, GlobalTransform, Name, Parent, PhysicsBody,
@@ -108,7 +108,7 @@ fn velocity_system_moves_transform() {
     let mut simulation = Simulation::with_fixed_dt(world, 1.0);
     assert_eq!(
         simulation.schedule().names(),
-        vec!["physics", "velocity", "animation", "hierarchy"]
+        vec!["physics", "velocity", "ground", "animation", "hierarchy"]
     );
     simulation.step(Vec::new()).unwrap();
     assert_eq!(simulation.trace().frames.len(), 1);
@@ -360,4 +360,33 @@ fn physics_only_dynamic_bodies_fall() {
     let static_body = world.get::<Velocity>(static_body).unwrap();
     assert!((dynamic.linear[1] + 4.905).abs() < 1e-4, "{dynamic:?}");
     assert_eq!(static_body.linear, [0.0; 3]);
+}
+
+#[test]
+fn ground_collision_stops_dynamic_body() {
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform {
+            position: [0.0, 5.0, 0.0],
+            ..Transform::default()
+        },
+        Velocity {
+            linear: [0.0, -10.0, 0.0],
+        },
+        PhysicsBody {
+            shape: "cuboid".to_string(),
+            half_extents: [0.5, 0.5, 0.5],
+            ..PhysicsBody::default()
+        },
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(VelocitySystem::new(1));
+    schedule.add(GroundCollisionSystem::default());
+    for _ in 0..20 {
+        schedule.run(&mut world, 0.1);
+    }
+    let transform = world.get::<Transform>(entity).unwrap();
+    let velocity = world.get::<Velocity>(entity).unwrap();
+    assert!((transform.position[1] - 0.5).abs() < 1e-4);
+    assert_eq!(velocity.linear[1], 0.0);
 }

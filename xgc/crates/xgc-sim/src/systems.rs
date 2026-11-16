@@ -45,6 +45,55 @@ impl System for PhysicsSystem {
     }
 }
 
+/// 地面碰撞：dynamic 刚体落到 ground_y 时夹住位置并清掉向下速度。
+#[derive(Clone, Copy, Debug)]
+pub struct GroundCollisionSystem {
+    pub ground_y: f32,
+}
+
+impl Default for GroundCollisionSystem {
+    fn default() -> Self {
+        Self { ground_y: 0.0 }
+    }
+}
+
+impl System for GroundCollisionSystem {
+    fn name(&self) -> &'static str {
+        "ground"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![PhysicsBody::ID],
+            writes: vec![Transform::ID, Velocity::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        let ground = self.ground_y;
+        world.for_each3_mut::<Transform, Velocity, PhysicsBody>(|_, transform, velocity, body| {
+            if body.kind != "dynamic" {
+                return;
+            }
+            let half = support_half(body);
+            if transform.position[1] - half < ground {
+                transform.position[1] = ground + half;
+                if velocity.linear[1] < 0.0 {
+                    velocity.linear[1] = 0.0;
+                }
+            }
+        });
+    }
+}
+
+fn support_half(body: &PhysicsBody) -> f32 {
+    match body.shape.as_str() {
+        "ball" => body.radius,
+        "capsule" => body.half_height + body.radius,
+        _ => body.half_extents[1],
+    }
+}
+
 /// 动画时钟：自动播放的 Animator 按 speed 推进，duration 有效时循环 / 截断。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AnimatorSystem;

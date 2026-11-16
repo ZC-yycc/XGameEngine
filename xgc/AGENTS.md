@@ -28,7 +28,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-base/src/lib.rs` | `EntityId` / `EntityKey` / `Tick` / `Diagnostic` |
 | `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、`Value`、动态字段读写 |
 | `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 |
-| `crates/xgc-world/src/query.rs` | 双组件不可变 / 可变 / archetype 分片并行查询 |
+| `crates/xgc-world/src/query.rs` | 双 / 三组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` |
 | `crates/xgc-world/src/render_components.rs` | 渲染侧组件：`render.mesh` / `render.material` / `render.camera` |
 | `crates/xgc-world/src/lod_components.rs` | LOD 组件：`render.lod` |
@@ -48,7 +48,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
-| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `VelocitySystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
+| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `VelocitySystem` / `GroundCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
@@ -86,10 +86,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 物理：目前只有重力加速；下一步碰撞 / 角色控制器。
+1. 物理：重力 + 地面夹持已接；下一步 AABB / 球体碰撞与角色控制器。
 2. 动画：时钟已接入，下一步骨骼 / 剪辑采样。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
-4. 现在最大文件 599 行：动它之前先拆。
+4. 现在最大文件 577 行：动它之前先拆。
 
 ## Token 纪律
 
