@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use xgc_base::diagnostics as codes;
 use xgc_base::{Diagnostic, EntityId, Severity, Subject};
 use xgc_reflect::{ComponentId, Value};
 
@@ -82,7 +83,7 @@ impl World {
                 } => {
                     if dead.contains(entity) {
                         diagnostics.push(diag(
-                            "EDIT.ENTITY_DEAD_IN_PLAN",
+                            codes::EDIT_ENTITY_DEAD_IN_PLAN,
                             Subject::Entity(*entity),
                             format!("实体 {entity} 在同一计划里已被销毁"),
                         ));
@@ -91,7 +92,7 @@ impl World {
                     if let Some(components) = presence.get(entity) {
                         if !components.contains(component) {
                             diagnostics.push(diag(
-                                "EDIT.UNKNOWN_COMPONENT",
+                                codes::EDIT_UNKNOWN_COMPONENT,
                                 Subject::Entity(*entity),
                                 format!("实体 {entity} 没有组件 {component}"),
                             ));
@@ -99,7 +100,7 @@ impl World {
                         }
                         let Some(factory) = self.factories.get(component) else {
                             diagnostics.push(diag(
-                                "EDIT.UNKNOWN_COMPONENT",
+                                codes::EDIT_UNKNOWN_COMPONENT,
                                 Subject::Entity(*entity),
                                 format!("组件 {component} 未注册"),
                             ));
@@ -107,7 +108,7 @@ impl World {
                         };
                         if let Err(message) = factory.validate_field(field, value) {
                             diagnostics.push(diag(
-                                "EDIT.TYPE_MISMATCH",
+                                codes::EDIT_TYPE_MISMATCH,
                                 Subject::Field(format!("{component}.{field}")),
                                 message,
                             ));
@@ -116,7 +117,7 @@ impl World {
                     } else {
                         let Some((_, meta)) = self.meta_by_id(*entity) else {
                             diagnostics.push(diag(
-                                "EDIT.UNKNOWN_ENTITY",
+                                codes::EDIT_UNKNOWN_ENTITY,
                                 Subject::Entity(*entity),
                                 format!("实体不存在：{entity}"),
                             ));
@@ -124,7 +125,7 @@ impl World {
                         };
                         let Some(arch) = self.archetypes.get(meta.archetype as usize) else {
                             diagnostics.push(diag(
-                                "EDIT.UNKNOWN_ARCHETYPE",
+                                codes::EDIT_UNKNOWN_ARCHETYPE,
                                 Subject::Entity(*entity),
                                 "实体所在的 archetype 不存在",
                             ));
@@ -132,7 +133,7 @@ impl World {
                         };
                         let Some(column) = arch.columns.get(component) else {
                             diagnostics.push(diag(
-                                "EDIT.UNKNOWN_COMPONENT",
+                                codes::EDIT_UNKNOWN_COMPONENT,
                                 Subject::Entity(*entity),
                                 format!("实体 {entity} 没有组件 {component}"),
                             ));
@@ -141,14 +142,14 @@ impl World {
                         let row = meta.row as usize;
                         if column.get_field(row, field).is_none() {
                             diagnostics.push(diag(
-                                "EDIT.UNKNOWN_FIELD",
+                                codes::EDIT_UNKNOWN_FIELD,
                                 Subject::Field(format!("{component}.{field}")),
                                 format!("组件 {component} 没有字段 {field}"),
                             ));
                             valid = false;
                         } else if let Err(message) = column.validate_field(row, field, value) {
                             diagnostics.push(diag(
-                                "EDIT.TYPE_MISMATCH",
+                                codes::EDIT_TYPE_MISMATCH,
                                 Subject::Field(format!("{component}.{field}")),
                                 message,
                             ));
@@ -160,13 +161,17 @@ impl World {
                     let id = data.id;
                     if self.by_id.contains_key(&id) || new_ids.contains(&id) || dead.contains(&id) {
                         diagnostics.push(diag(
-                            "EDIT.ID_IN_USE",
+                            codes::EDIT_ID_IN_USE,
                             Subject::Entity(id),
                             format!("实体 ID 已被占用或在同一计划里重复：{id}"),
                         ));
                         valid = false;
                     } else if let Err(message) = self.snapshot_from_data(data) {
-                        diagnostics.push(diag("EDIT.INVALID_SPAWN", Subject::Entity(id), message));
+                        diagnostics.push(diag(
+                            codes::EDIT_INVALID_SPAWN,
+                            Subject::Entity(id),
+                            message,
+                        ));
                         valid = false;
                     } else {
                         new_ids.insert(id);
@@ -182,7 +187,7 @@ impl World {
                 Command::AddComponent { entity, component } => {
                     if dead.contains(entity) {
                         diagnostics.push(diag(
-                            "EDIT.ENTITY_DEAD_IN_PLAN",
+                            codes::EDIT_ENTITY_DEAD_IN_PLAN,
                             Subject::Entity(*entity),
                             format!("实体 {entity} 在同一计划里已被销毁"),
                         ));
@@ -190,7 +195,7 @@ impl World {
                     }
                     if !new_ids.contains(entity) && self.meta_by_id(*entity).is_none() {
                         diagnostics.push(diag(
-                            "EDIT.UNKNOWN_ENTITY",
+                            codes::EDIT_UNKNOWN_ENTITY,
                             Subject::Entity(*entity),
                             format!("实体不存在：{entity}"),
                         ));
@@ -208,7 +213,7 @@ impl World {
                     });
                     if components.contains(&component.component) {
                         diagnostics.push(diag(
-                            "EDIT.COMPONENT_EXISTS",
+                            codes::EDIT_COMPONENT_EXISTS,
                             Subject::Entity(*entity),
                             format!("实体 {entity} 已有组件 {}", component.component),
                         ));
@@ -221,7 +226,7 @@ impl World {
                         };
                         if let Err(message) = self.snapshot_from_data(&probe) {
                             diagnostics.push(diag(
-                                "EDIT.INVALID_COMPONENT",
+                                codes::EDIT_INVALID_COMPONENT,
                                 Subject::Entity(*entity),
                                 message,
                             ));
@@ -234,7 +239,7 @@ impl World {
                 Command::RemoveComponent { entity, component } => {
                     if dead.contains(entity) {
                         diagnostics.push(diag(
-                            "EDIT.ENTITY_DEAD_IN_PLAN",
+                            codes::EDIT_ENTITY_DEAD_IN_PLAN,
                             Subject::Entity(*entity),
                             format!("实体 {entity} 在同一计划里已被销毁"),
                         ));
@@ -242,7 +247,7 @@ impl World {
                     }
                     if !new_ids.contains(entity) && self.meta_by_id(*entity).is_none() {
                         diagnostics.push(diag(
-                            "EDIT.UNKNOWN_ENTITY",
+                            codes::EDIT_UNKNOWN_ENTITY,
                             Subject::Entity(*entity),
                             format!("实体不存在：{entity}"),
                         ));
@@ -260,7 +265,7 @@ impl World {
                     });
                     if !components.remove(component) {
                         diagnostics.push(diag(
-                            "EDIT.COMPONENT_MISSING",
+                            codes::EDIT_COMPONENT_MISSING,
                             Subject::Entity(*entity),
                             format!("实体 {entity} 没有组件 {component}"),
                         ));
@@ -270,14 +275,14 @@ impl World {
                 Command::Despawn { entity } => {
                     if dead.contains(entity) {
                         diagnostics.push(diag(
-                            "EDIT.ENTITY_DEAD_IN_PLAN",
+                            codes::EDIT_ENTITY_DEAD_IN_PLAN,
                             Subject::Entity(*entity),
                             format!("实体 {entity} 在同一计划里已被销毁"),
                         ));
                         valid = false;
                     } else if self.meta_by_id(*entity).is_none() {
                         diagnostics.push(diag(
-                            "EDIT.UNKNOWN_ENTITY",
+                            codes::EDIT_UNKNOWN_ENTITY,
                             Subject::Entity(*entity),
                             format!("实体不存在：{entity}"),
                         ));
@@ -364,7 +369,7 @@ impl World {
                     let (Some(key), Some(data)) = (self.key_of(*entity), self.entity_data(*entity))
                     else {
                         return Err(vec![diag(
-                            "EDIT.CAPTURE_FAILED",
+                            codes::EDIT_CAPTURE_FAILED,
                             Subject::Entity(*entity),
                             format!("实体快照失败：{entity}"),
                         )]);
@@ -381,7 +386,7 @@ impl World {
             if let Err(message) = result {
                 let _ = self.rollback(&inverse);
                 return Err(vec![diag(
-                    "EDIT.APPLY_FAILED",
+                    codes::EDIT_APPLY_FAILED,
                     Subject::System("edit".to_string()),
                     message,
                 )]);
@@ -436,7 +441,7 @@ impl World {
                 Command::Despawn { entity } => {
                     let Some(key) = self.key_of(*entity) else {
                         return Err(vec![diag(
-                            "EDIT.UNKNOWN_ENTITY",
+                            codes::EDIT_UNKNOWN_ENTITY,
                             Subject::Entity(*entity),
                             format!("回滚时实体不存在：{entity}"),
                         )]);
@@ -451,7 +456,7 @@ impl World {
 
             if let Err(message) = result {
                 return Err(vec![diag(
-                    "EDIT.REVERT_FAILED",
+                    codes::EDIT_REVERT_FAILED,
                     Subject::System("edit".to_string()),
                     message,
                 )]);
@@ -569,7 +574,7 @@ fn diag(code: &'static str, subject: Subject, message: impl Into<String>) -> Dia
 
 fn conflict(current: u64) -> Diagnostic {
     diag(
-        "EDIT.REVISION_CONFLICT",
+        codes::EDIT_REVISION_CONFLICT,
         Subject::System("edit".to_string()),
         format!("计划基于旧 revision；当前已经是 {current}"),
     )

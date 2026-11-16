@@ -85,6 +85,13 @@ fn describe_lists_protocol_components_and_world_state() {
         .as_array()
         .unwrap()
         .contains(&Json::from("instancing")));
+    let diagnostics = result(call(&mut agent, "engine.diagnostics", Json::Null));
+    assert!(diagnostics["codes"].as_array().unwrap().len() >= 20);
+    assert!(diagnostics["codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|code| code["code"] == "EDIT.UNKNOWN_ENTITY"));
     assert!(response["methods"]
         .as_array()
         .unwrap()

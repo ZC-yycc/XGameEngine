@@ -5,6 +5,10 @@
 
 #![deny(unsafe_code)]
 
+pub mod diagnostics;
+
+pub use diagnostics::{catalog as diagnostic_catalog, DiagnosticCode};
+
 use std::fmt;
 
 use serde::de::{Deserializer, Error as DeError};

@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use xgc_base::diagnostics as codes;
 use xgc_base::{Diagnostic, Severity, Subject};
 use xgc_reflect::{FieldType, Registry};
 
@@ -20,7 +21,7 @@ impl World {
         for entity in &data.entities {
             if !entity_ids.insert(entity.id) {
                 diagnostics.push(diag(
-                    "WORLD.DUP_ENTITY",
+                    codes::WORLD_DUP_ENTITY,
                     entity.id,
                     format!("实体 ID 重复：{}", entity.id),
                 ));
@@ -30,7 +31,7 @@ impl World {
             for component in &entity.components {
                 if !components.insert(component.component) {
                     diagnostics.push(diag(
-                        "WORLD.DUP_COMPONENT",
+                        codes::WORLD_DUP_COMPONENT,
                         entity.id,
                         format!("实体 {} 重复携带组件 {}", entity.id, component.component),
                     ));
@@ -38,7 +39,7 @@ impl World {
 
                 let Some(schema) = registry.get(component.component) else {
                     diagnostics.push(diag(
-                        "WORLD.UNKNOWN_COMPONENT",
+                        codes::WORLD_UNKNOWN_COMPONENT,
                         entity.id,
                         format!("实体 {} 携带未注册组件 {}", entity.id, component.component),
                     ));
@@ -49,7 +50,7 @@ impl World {
                 for (name, value) in &component.fields {
                     if !fields.insert(name.as_str()) {
                         diagnostics.push(field_diag(
-                            "WORLD.DUP_FIELD",
+                            codes::WORLD_DUP_FIELD,
                             &schema.name,
                             name,
                             format!("组件 {} 重复字段 {name}", schema.name),
@@ -58,7 +59,7 @@ impl World {
                     }
                     let Some(field) = schema.fields.iter().find(|field| field.name == *name) else {
                         diagnostics.push(field_diag(
-                            "WORLD.UNKNOWN_FIELD",
+                            codes::WORLD_UNKNOWN_FIELD,
                             &schema.name,
                             name,
                             format!("组件 {} 没有字段 {name}", schema.name),
@@ -67,7 +68,7 @@ impl World {
                     };
                     let Some(ty) = FieldType::parse(&field.ty) else {
                         diagnostics.push(field_diag(
-                            "WORLD.UNKNOWN_TYPE",
+                            codes::WORLD_UNKNOWN_TYPE,
                             &schema.name,
                             name,
                             format!("字段 {}.{name} 声明了未知类型 {}", schema.name, field.ty),
@@ -76,7 +77,7 @@ impl World {
                     };
                     if !value.fits(ty) {
                         diagnostics.push(field_diag(
-                            "WORLD.TYPE_MISMATCH",
+                            codes::WORLD_TYPE_MISMATCH,
                             &schema.name,
                             name,
                             format!(
@@ -93,7 +94,7 @@ impl World {
                             || field.max.is_some_and(|max| number > max)
                         {
                             diagnostics.push(field_diag(
-                                "WORLD.RANGE",
+                                codes::WORLD_RANGE,
                                 &schema.name,
                                 name,
                                 format!(

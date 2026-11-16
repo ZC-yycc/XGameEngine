@@ -83,6 +83,7 @@ impl Agent {
     fn dispatch(&mut self, method: &str, params: &Json) -> Result<Json, String> {
         match method {
             "engine.describe" => self.describe(),
+            "engine.diagnostics" => self.diagnostics(),
             "world.query" => self.query(params),
             "world.get" => self.get(params),
             "world.digest" => self.digest(),
@@ -112,6 +113,7 @@ impl Agent {
             ],
             "methods": [
                 "engine.describe",
+                "engine.diagnostics",
                 "world.query",
                 "world.get",
                 "world.digest",
@@ -304,6 +306,14 @@ impl Agent {
         let id = required_u64(params, "id")?;
         let entity = self.world.entity_data(xgc_base::EntityId::from_raw(id));
         Ok(json!({"entity": entity}))
+    }
+
+    fn diagnostics(&self) -> Result<Json, String> {
+        let codes: Vec<Json> = xgc_base::diagnostic_catalog()
+            .iter()
+            .map(|code| json!({"code": code.code, "summary": code.summary}))
+            .collect();
+        Ok(json!({"codes": codes}))
     }
 
     fn digest(&self) -> Result<Json, String> {
