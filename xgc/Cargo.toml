@@ -29,3 +29,7 @@ serde_json = "1"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# 离线工作区：clipboard-win 5.4.1 已被 yank，但本机只有该版本缓存。
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }

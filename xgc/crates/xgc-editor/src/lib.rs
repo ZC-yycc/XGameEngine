@@ -2,6 +2,9 @@
 //!
 //! UI 层只读这里的状态并发编辑命令；这样编辑器逻辑可以脱离窗口测试。
 
+mod app;
+pub use app::run;
+
 use std::path::{Path, PathBuf};
 
 use xgc_base::EntityId;

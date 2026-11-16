@@ -15,6 +15,7 @@ cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo run -q -p xgc-xtask --offline -- check
 cargo run -q -p xgc-cli --offline -- check
 cargo run -q -p xgc-cli --offline -- run 60
+cargo run -q -p xgc-editor --offline -- [世界.json]
 cargo run -q --release -p xgc-cli --offline -- bench
 ```
 
@@ -64,6 +65,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载、生命周期 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、实体移除时 `on_destroy`、磁盘热重载 |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play 快照 |
+| `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector |
+| `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
@@ -106,7 +109,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 编辑器：无头状态已接；下一步 eframe 窗口（层级 / Inspector / Play）。
+1. 编辑器：窗口已接；下一步 Inspector 编辑控件与渲染视口。
 2. 动画：蒙皮已接入渲染；下一步 GPU 蒙皮管线 / 骨骼层级导入。
 3. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
 4. 音频：播放设备 / 流式缓冲。
