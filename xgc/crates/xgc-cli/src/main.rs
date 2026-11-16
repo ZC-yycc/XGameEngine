@@ -8,7 +8,7 @@ use std::time::Instant;
 use xgc_agent::Agent;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
-use xgc_render::{Pass, RenderGraph};
+use xgc_render::{Pass, RenderGraph, ResourceDesc, ResourceUsage};
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
 use xgc_world::{
@@ -263,6 +263,35 @@ fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
 
 fn render_graph() -> ExitCode {
     let mut graph = RenderGraph::new();
+    let resources = [
+        ResourceDesc::texture2d(
+            "shadow_map",
+            "depth32float",
+            2048,
+            2048,
+            vec![ResourceUsage::DepthAttachment, ResourceUsage::Sampled],
+        ),
+        ResourceDesc::texture2d(
+            "color",
+            "rgba16float",
+            1280,
+            720,
+            vec![ResourceUsage::ColorAttachment, ResourceUsage::Sampled],
+        ),
+        ResourceDesc::texture2d(
+            "backbuffer",
+            "bgra8unorm",
+            1280,
+            720,
+            vec![ResourceUsage::ColorAttachment],
+        ),
+    ];
+    for resource in resources {
+        if let Err(err) = graph.add_resource(resource) {
+            eprintln!("声明渲染资源失败：{err}");
+            return ExitCode::from(1);
+        }
+    }
     let passes = [
         Pass::new("shadow", &[], &["shadow_map"]),
         Pass::new("opaque", &["shadow_map"], &["color"]),

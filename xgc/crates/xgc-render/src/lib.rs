@@ -9,6 +9,10 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
+mod resources;
+
+pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pass {
     pub name: String,
@@ -35,6 +39,11 @@ impl Pass {
 #[derive(Clone, Debug)]
 pub enum GraphError {
     DuplicatePass(String),
+    DuplicateResource(String),
+    UnknownResource {
+        pass: String,
+        resource: String,
+    },
     MultipleWriters {
         resource: String,
         first: String,
@@ -47,6 +56,10 @@ impl fmt::Display for GraphError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicatePass(name) => write!(f, "渲染 pass 重名：{name}"),
+            Self::DuplicateResource(name) => write!(f, "渲染资源重名：{name}"),
+            Self::UnknownResource { pass, resource } => {
+                write!(f, "pass {pass} 引用了未声明资源 {resource}")
+            }
             Self::MultipleWriters {
                 resource,
                 first,
@@ -65,6 +78,7 @@ impl std::error::Error for GraphError {}
 #[derive(Clone, Debug, Default)]
 pub struct RenderGraph {
     passes: Vec<Pass>,
+    resources: ResourceTable,
 }
 
 impl RenderGraph {
@@ -84,6 +98,30 @@ impl RenderGraph {
         Ok(())
     }
 
+    pub fn add_resource(&mut self, resource: ResourceDesc) -> Result<(), GraphError> {
+        self.resources
+            .add(resource)
+            .map_err(GraphError::DuplicateResource)
+    }
+
+    pub fn resources(&self) -> &ResourceTable {
+        &self.resources
+    }
+
+    pub fn validate_resources(&self) -> Result<(), GraphError> {
+        for pass in &self.passes {
+            for resource in pass.reads.iter().chain(pass.writes.iter()) {
+                if self.resources.get(resource).is_none() {
+                    return Err(GraphError::UnknownResource {
+                        pass: pass.name.clone(),
+                        resource: resource.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn passes(&self) -> &[Pass] {
         &self.passes
     }
@@ -98,6 +136,8 @@ impl RenderGraph {
 
     /// 返回 pass 下标顺序。同一层可选时取注册顺序最靠前的，保证确定性。
     pub fn order(&self) -> Result<Vec<usize>, GraphError> {
+        self.validate_resources()?;
+
         let mut writers: HashMap<&str, usize> = HashMap::new();
         for (index, pass) in self.passes.iter().enumerate() {
             let mut seen = HashSet::new();

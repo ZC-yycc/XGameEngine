@@ -42,7 +42,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（身份 / 名称 / 父子 / Transform / Mesh / Material / Camera，支持目录批量） |
-| `crates/xgc-render/src/lib.rs` | 渲染图：pass 读写资源、确定性拓扑排序、环 / 多写者检测 |
+| `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源检测 |
+| `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / serve / migrate <文件|目录> / render-graph` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
@@ -58,7 +59,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M2 第一刀：渲染图接真实资源（纹理 / 缓冲）与 wgpu pass 执行骨架。
+1. M2 第二刀：渲染图接 wgpu 资源创建 / pass 执行骨架（CPU 侧资源描述已就位）。
 2. 旧场景迁移补 Physics / Lua / UI 等剩余组件映射。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 591 行：动它之前先拆。
