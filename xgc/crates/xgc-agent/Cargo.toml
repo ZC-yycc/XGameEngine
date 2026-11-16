@@ -10,5 +10,6 @@ description = "XGC Agent 协议最小集：describe / query / plan / apply / rev
 xgc-base = { path = "../xgc-base" }
 xgc-reflect = { path = "../xgc-reflect" }
 xgc-world = { path = "../xgc-world" }
+xgc-sim = { path = "../xgc-sim" }
 xgc-store = { path = "../xgc-store" }
 serde_json.workspace = true

@@ -12,6 +12,11 @@ use xgc_world::{Command, ComponentId, World, WorldData};
 
 pub const TRACE_FORMAT_VERSION: u32 = 1;
 
+/// 默认系统名；Agent 能力清单直接复用，避免手写两份。
+pub fn default_system_names() -> Vec<&'static str> {
+    Schedule::default_schedule(1).names()
+}
+
 fn default_fixed_dt() -> f32 {
     1.0 / 60.0
 }
@@ -144,6 +149,20 @@ impl Schedule {
         Self::default()
     }
 
+    /// 默认系统顺序；Agent 能力清单与 Simulation 共用同一份。
+    pub fn default_schedule(threads: usize) -> Self {
+        let mut schedule = Self::new();
+        schedule.add(PhysicsSystem::default());
+        schedule.add(CharacterJumpSystem);
+        schedule.add(VelocitySystem::new(threads));
+        schedule.add(GroundCollisionSystem::default());
+        schedule.add(CharacterSystem);
+        schedule.add(AabbCollisionSystem);
+        schedule.add(AnimatorSystem);
+        schedule.add(HierarchySystem::default());
+        schedule
+    }
+
     pub fn add<S: System + 'static>(&mut self, system: S) {
         self.systems.push(Box::new(system));
     }
@@ -223,15 +242,7 @@ impl Simulation {
     }
 
     pub fn with_threads(world: World, fixed_dt: f32, threads: usize) -> Self {
-        let mut schedule = Schedule::new();
-        schedule.add(PhysicsSystem::default());
-        schedule.add(CharacterJumpSystem);
-        schedule.add(VelocitySystem::new(threads));
-        schedule.add(GroundCollisionSystem::default());
-        schedule.add(CharacterSystem);
-        schedule.add(AabbCollisionSystem);
-        schedule.add(AnimatorSystem);
-        schedule.add(HierarchySystem::default());
+        let schedule = Schedule::default_schedule(threads);
         Self {
             world,
             schedule,

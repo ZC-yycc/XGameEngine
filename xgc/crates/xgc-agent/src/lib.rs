@@ -127,6 +127,12 @@ impl Agent {
                 "revision": self.world.revision(),
                 "entities": self.world.len(),
             },
+            "capabilities": {
+                "render": ["camera", "depth", "instancing", "glb", "lod"],
+                "sim": xgc_sim::default_system_names(),
+                "migration": ["all_old_component_types"],
+                "agent": ["query", "plan", "apply", "revert", "save_load"],
+            },
             "limits": {"query_default": 100, "query_max": 1000},
         }))
     }

@@ -68,6 +68,23 @@ fn describe_lists_protocol_components_and_world_state() {
         17
     );
     assert_eq!(response["world"]["entities"], 0);
+    assert_eq!(
+        response["capabilities"]["sim"],
+        Json::from(vec![
+            "physics",
+            "character_jump",
+            "velocity",
+            "ground",
+            "character",
+            "aabb",
+            "animation",
+            "hierarchy"
+        ])
+    );
+    assert!(response["capabilities"]["render"]
+        .as_array()
+        .unwrap()
+        .contains(&Json::from("instancing")));
     assert!(response["methods"]
         .as_array()
         .unwrap()

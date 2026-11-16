@@ -22,7 +22,7 @@
 `AnimationSystem` / `GravitySystem` / `HierarchySystem` /
 `AnimationClip` 平移关键帧线性采样（边界钳制 / 循环取模） / RON 剪辑加载 /
 `AnimationLibrary` 按名索引 /
-逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get /
+逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/ query / get /
 digest / stats / validate / load / save / plan / apply / revert；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
 Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫描 `.meta`，
@@ -65,7 +65,7 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
 跨帧复用，稳态不再取 `WorldData`。`SystemAccess` 已能判定读写冲突，
 `Schedule::batches()` 给出确定性并行批次；跨系统并行执行还差世界所有权拆分。
-Agent 协议可完成 `describe → plan（含 before 预览）→ apply → query / get /
+Agent 协议可完成 `describe（含能力清单）→ plan（含 before 预览）→ apply → query / get /
 digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 `select: ["core.transform:position"]` 字段投影、`filter` 的 `eq/ne/lt/le/gt/ge`
 标量比较（向量用 `axis: x/y/z/w` 取分量）与稳定分页。所有 64 位实体 ID 在 JSON
@@ -83,7 +83,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 17 个内建类型 22352 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
-脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖能力清单与视觉验证。
+脚本 / 动画 / 音频、渲染、编辑器；Agent 协议已覆盖能力清单，视觉验证仍缺。
 
 ## 命令
 
