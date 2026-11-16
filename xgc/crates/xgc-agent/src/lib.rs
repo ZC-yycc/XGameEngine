@@ -105,7 +105,13 @@ impl Agent {
             "protocol": PROTOCOL,
             "version": env!("CARGO_PKG_VERSION"),
             "components": self.registry.schema(),
-            "commands": ["set_field", "spawn", "despawn"],
+            "commands": [
+                "set_field",
+                "add_component",
+                "remove_component",
+                "spawn",
+                "despawn"
+            ],
             "methods": [
                 "engine.describe",
                 "world.query",
@@ -395,6 +401,17 @@ impl Agent {
                     "component": component.0,
                     "field": field,
                     "before": self.world.get_field(*entity, *component, field),
+                }),
+                Command::AddComponent { entity, component } => json!({
+                    "kind": "add_component",
+                    "entity": entity.to_string(),
+                    "component": component.component.0,
+                    "fields": component.fields,
+                }),
+                Command::RemoveComponent { entity, component } => json!({
+                    "kind": "remove_component",
+                    "entity": entity.to_string(),
+                    "component": component.0,
                 }),
                 Command::Spawn { data } => json!({
                     "kind": "spawn",

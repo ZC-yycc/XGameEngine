@@ -30,7 +30,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 |
 | `crates/xgc-world/src/query.rs` | 双组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` |
-| `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert |
+| `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删） |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
 | `crates/xgc-world/src/journal.rs` | `Journal` / `TxRecord`：事务日志与重放 |
 | `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `WorldSnapshot` / 恢复 |
@@ -54,10 +54,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第十四刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
+1. M1 第十五刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 2. 接第三个系统（Transform 层级传播），再谈物理 / 渲染。
 3. Agent 能力清单 / 诊断码 / 视觉验证；`xgc check` 扩到项目 / 场景。
-4. world lib / agent lib 都在 600 行附近：先拆模块再扩。
+4. `world` / `agent` lib 都在 600 行附近，先拆模块再扩。
 
 ## Token 纪律
 

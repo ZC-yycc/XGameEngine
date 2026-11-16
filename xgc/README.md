@@ -9,9 +9,10 @@
 **M0 已完成；M1 前十刀已落地**：`xgc-base`（持久 ID / 句柄 / 诊断）、
 `xgc-reflect`（组件注册表 / 确定性 schema / 动态字段读写 / schema 语义校验）、
 `xgc-world`（archetype 列式存储、单 / 双组件可变查询、按 archetype 分片的并行
-遍历、生成回收、`Command` 事务 plan / apply / revert、结构化 `Spawn` / `Despawn` +
-实体快照撤销、可序列化 `EntityData` / 组件工厂、实体级 revision、世界快照 / 恢复、
-事务日志 JSON 往返与重放、状态哈希）、`xgc-store`（版本化 JSON 包络 + 原子写）、
+遍历、生成回收、`Command` 事务 plan / apply / revert、结构化 `Spawn` / `Despawn` /
+`AddComponent` / `RemoveComponent` + 实体快照撤销、可序列化 `EntityData` / 组件工厂、
+实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希）、
+`xgc-store`（版本化 JSON 包络 + 原子写）、
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `VelocitySystem` / `GravitySystem` / 逐帧 state hash /
 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get / digest / stats /
@@ -30,7 +31,8 @@ load / save / plan / apply / revert；查询支持字段投影 + 标量过滤 + 
 命令事务（debug，100 条 `SetField`）：plan + apply **77.8 µs**，revert **69.6 µs**；
 apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。`Command` 可
 JSON 往返：`Spawn { data: EntityData }` 反序列化后由组件工厂重建真实组件列；
-销毁回滚恢复**原 EntityId 与全部组件**。`WorldData` 可把整个世界落盘再恢复，
+销毁回滚恢复**原 EntityId 与全部组件**；组件增删同样保留 EntityId，回滚后
+archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再恢复，
 `state_hash` / 实体 ID / revision 一致；`Journal` 可从初始快照重放并校验 revision。
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`position += linear * dt`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
@@ -40,7 +42,7 @@ digest / stats → save/load → revert` 闭环；查询 IR 支持
 标量比较（向量用 `axis: x/y/z/w` 取分量）与稳定分页。所有 64 位实体 ID 在 JSON
 里是十进制字符串，避免 2^53 精度丢失。
 
-`cargo test --workspace` 全绿（50 条），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace` 全绿（53 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（25 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同
 （`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 

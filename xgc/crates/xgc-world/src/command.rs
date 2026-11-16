@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use xgc_base::{Diagnostic, EntityId, Severity, Subject};
 use xgc_reflect::{ComponentId, Value};
 
-use super::{EntityData, World};
+use super::{ComponentData, EntityData, World};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
@@ -19,6 +19,14 @@ pub enum Command {
         component: ComponentId,
         field: String,
         value: Value,
+    },
+    AddComponent {
+        entity: EntityId,
+        component: ComponentData,
+    },
+    RemoveComponent {
+        entity: EntityId,
+        component: ComponentId,
     },
     Spawn {
         data: EntityData,
@@ -136,6 +144,61 @@ impl World {
                         new_ids.insert(id);
                     }
                 }
+                Command::AddComponent { entity, component } => {
+                    let Some(data) = self.entity_data(*entity) else {
+                        diagnostics.push(diag(
+                            "EDIT.UNKNOWN_ENTITY",
+                            Subject::Entity(*entity),
+                            format!("实体不存在：{entity}"),
+                        ));
+                        continue;
+                    };
+                    if data
+                        .components
+                        .iter()
+                        .any(|existing| existing.component == component.component)
+                    {
+                        diagnostics.push(diag(
+                            "EDIT.COMPONENT_EXISTS",
+                            Subject::Entity(*entity),
+                            format!("实体 {entity} 已有组件 {}", component.component),
+                        ));
+                        valid = false;
+                    } else {
+                        let mut probe = data;
+                        probe.components.push(component.clone());
+                        if let Err(message) = self.snapshot_from_data(&probe) {
+                            diagnostics.push(diag(
+                                "EDIT.INVALID_COMPONENT",
+                                Subject::Entity(*entity),
+                                message,
+                            ));
+                            valid = false;
+                        }
+                    }
+                }
+                Command::RemoveComponent { entity, component } => {
+                    let Some(data) = self.entity_data(*entity) else {
+                        diagnostics.push(diag(
+                            "EDIT.UNKNOWN_ENTITY",
+                            Subject::Entity(*entity),
+                            format!("实体不存在：{entity}"),
+                        ));
+                        continue;
+                    };
+                    if !data
+                        .components
+                        .iter()
+                        .any(|existing| existing.component == *component)
+                    {
+                        diagnostics.push(diag(
+                            "EDIT.COMPONENT_MISSING",
+                            Subject::Entity(*entity),
+                            format!("实体 {entity} 没有组件 {component}"),
+                        ));
+                        valid = false;
+                    }
+                }
                 Command::Despawn { entity } => {
                     if dead.contains(entity) {
                         diagnostics.push(diag(
@@ -211,6 +274,24 @@ impl World {
                     }),
                     Err(message) => Err(message),
                 },
+                Command::AddComponent { entity, component } => {
+                    self.add_component_raw(*entity, component).map(|_| {
+                        inverse.push(Command::RemoveComponent {
+                            entity: *entity,
+                            component: component.component,
+                        });
+                        touched.push(*entity);
+                    })
+                }
+                Command::RemoveComponent { entity, component } => self
+                    .remove_component_raw(*entity, *component)
+                    .map(|removed| {
+                        inverse.push(Command::AddComponent {
+                            entity: *entity,
+                            component: removed,
+                        });
+                        touched.push(*entity);
+                    }),
                 Command::Despawn { entity } => {
                     let (Some(key), Some(data)) = (self.key_of(*entity), self.entity_data(*entity))
                     else {
@@ -274,6 +355,16 @@ impl World {
                     }),
                     Err(message) => Err(message),
                 },
+                Command::AddComponent { entity, component } => {
+                    self.add_component_raw(*entity, component).map(|_| {
+                        touched.push(*entity);
+                    })
+                }
+                Command::RemoveComponent { entity, component } => {
+                    self.remove_component_raw(*entity, *component).map(|_| {
+                        touched.push(*entity);
+                    })
+                }
                 Command::Despawn { entity } => {
                     let Some(key) = self.key_of(*entity) else {
                         return Err(vec![diag(
@@ -321,6 +412,12 @@ impl World {
                     let snapshot = self.snapshot_from_data(data)?;
                     self.restore_entity_raw(snapshot)?;
                 }
+                Command::AddComponent { entity, component } => {
+                    self.add_component_raw(*entity, component)?;
+                }
+                Command::RemoveComponent { entity, component } => {
+                    self.remove_component_raw(*entity, *component)?;
+                }
                 Command::Despawn { entity } => {
                     let Some(key) = self.key_of(*entity) else {
                         return Err(format!("回滚时实体不存在：{entity}"));
@@ -332,6 +429,69 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    fn replace_entity_raw(
+        &mut self,
+        original: &EntityData,
+        updated: &EntityData,
+    ) -> Result<(), String> {
+        let Some(key) = self.key_of(original.id) else {
+            return Err(format!("实体不存在：{}", original.id));
+        };
+        let snapshot = self.snapshot_from_data(updated)?;
+        if !self.despawn_raw(key) {
+            return Err(format!("移除旧实体失败：{}", original.id));
+        }
+        if let Err(message) = self.restore_entity_raw(snapshot) {
+            if let Ok(original_snapshot) = self.snapshot_from_data(original) {
+                let _ = self.restore_entity_raw(original_snapshot);
+            }
+            return Err(message);
+        }
+        Ok(())
+    }
+
+    fn add_component_raw(
+        &mut self,
+        entity: EntityId,
+        component: &ComponentData,
+    ) -> Result<(), String> {
+        let Some(original) = self.entity_data(entity) else {
+            return Err(format!("实体不存在：{entity}"));
+        };
+        if original
+            .components
+            .iter()
+            .any(|existing| existing.component == component.component)
+        {
+            return Err(format!("实体 {entity} 已有组件 {}", component.component));
+        }
+        let mut updated = original.clone();
+        updated.components.push(component.clone());
+        self.replace_entity_raw(&original, &updated)
+    }
+
+    fn remove_component_raw(
+        &mut self,
+        entity: EntityId,
+        component: ComponentId,
+    ) -> Result<ComponentData, String> {
+        let Some(original) = self.entity_data(entity) else {
+            return Err(format!("实体不存在：{entity}"));
+        };
+        let Some(position) = original
+            .components
+            .iter()
+            .position(|existing| existing.component == component)
+        else {
+            return Err(format!("实体 {entity} 没有组件 {component}"));
+        };
+        let removed = original.components[position].clone();
+        let mut updated = original.clone();
+        updated.components.remove(position);
+        self.replace_entity_raw(&original, &updated)?;
+        Ok(removed)
     }
 }
 

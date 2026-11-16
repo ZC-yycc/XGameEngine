@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use xgc_base::EntityId;
 use xgc_reflect::{ComponentId, Value};
-use xgc_world::{Command, Transform, Velocity, World};
+use xgc_world::{Command, ComponentData, Transform, Velocity, World};
 
 fn transform() -> ComponentId {
     ComponentId(0x0101)
@@ -236,4 +236,103 @@ fn one_hundred_ops_apply_and_revert() {
     assert_eq!(world.revision(), before_revision + 2);
 
     println!("100 ops apply={apply_time:?} revert={revert_time:?}");
+}
+
+fn name_data(value: &str) -> ComponentData {
+    ComponentData {
+        component: ComponentId(0x0103),
+        fields: vec![("value".to_string(), Value::String(value.to_string()))],
+    }
+}
+
+#[test]
+fn add_and_remove_component_preserve_entity_id_and_hash() {
+    let (mut world, id) = world_with_one();
+    let before_hash = world.state_hash();
+    let before_revision = world.revision();
+
+    let plan = world.plan(vec![Command::AddComponent {
+        entity: id,
+        component: name_data("hero"),
+    }]);
+    assert!(plan.is_valid());
+    let applied = world.apply(&plan).unwrap();
+    assert_eq!(applied.revision, before_revision + 1);
+
+    let data = world.entity_data(id).unwrap();
+    assert_eq!(data.id, id);
+    assert!(data
+        .components
+        .iter()
+        .any(|component| component.component == ComponentId(0x0103)));
+    assert_eq!(
+        world.get_field(id, ComponentId(0x0103), "value"),
+        Some(Value::String("hero".to_string()))
+    );
+    assert_ne!(world.state_hash(), before_hash);
+
+    let reverted = world.revert(&applied).unwrap();
+    assert_eq!(reverted, before_revision + 2);
+    assert_eq!(world.state_hash(), before_hash);
+    assert!(!world
+        .entity_data(id)
+        .unwrap()
+        .components
+        .iter()
+        .any(|component| component.component == ComponentId(0x0103)));
+}
+
+#[test]
+fn remove_component_reverts_to_original_archetype() {
+    let (mut world, id) = world_with_one();
+    let before_hash = world.state_hash();
+    let plan = world.plan(vec![Command::RemoveComponent {
+        entity: id,
+        component: ComponentId(0x0102),
+    }]);
+    assert!(plan.is_valid());
+    let applied = world.apply(&plan).unwrap();
+
+    let data = world.entity_data(id).unwrap();
+    assert_eq!(data.id, id);
+    assert!(!data
+        .components
+        .iter()
+        .any(|component| component.component == ComponentId(0x0102)));
+
+    world.revert(&applied).unwrap();
+    assert_eq!(world.state_hash(), before_hash);
+    assert!(world
+        .entity_data(id)
+        .unwrap()
+        .components
+        .iter()
+        .any(|component| component.component == ComponentId(0x0102)));
+}
+
+#[test]
+fn component_structure_conflicts_are_reported() {
+    let (world, id) = world_with_one();
+    let existing = world.plan(vec![Command::AddComponent {
+        entity: id,
+        component: name_data("x"),
+    }]);
+    assert!(existing.is_valid());
+
+    let plan = world.plan(vec![Command::AddComponent {
+        entity: id,
+        component: ComponentData {
+            component: transform(),
+            fields: vec![("position".to_string(), Value::Vec3([0.0; 3]))],
+        },
+    }]);
+    assert!(!plan.is_valid());
+    assert_eq!(plan.diagnostics[0].code, "EDIT.COMPONENT_EXISTS");
+
+    let plan = world.plan(vec![Command::RemoveComponent {
+        entity: id,
+        component: ComponentId(0x0103),
+    }]);
+    assert!(!plan.is_valid());
+    assert_eq!(plan.diagnostics[0].code, "EDIT.COMPONENT_MISSING");
 }
