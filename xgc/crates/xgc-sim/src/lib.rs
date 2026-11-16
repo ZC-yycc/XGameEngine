@@ -6,13 +6,13 @@
 
 #![deny(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use xgc_base::{Diagnostic, EntityId};
 use xgc_world::{
-    Command, Component, ComponentData, ComponentId, EntityData, GlobalTransform, Parent, Transform,
-    Value, Velocity, World, WorldData,
+    Command, Component, ComponentId, GlobalTransform, Parent, Transform, Value, Velocity, World,
+    WorldData,
 };
 
 pub const TRACE_FORMAT_VERSION: u32 = 1;
@@ -284,12 +284,16 @@ impl System for GravitySystem {
 }
 
 /// 层级系统：按 `Parent` 链把局部 `Transform` 合成 `GlobalTransform`。
+/// 层级系统：按 `Parent` 链把局部 `Transform` 合成 `GlobalTransform`。
 ///
 /// 没有 `Parent`、或父节点不带 `GlobalTransform` 的实体按根处理；环里的实体
-/// 保持原值，不阻塞其它节点。当前实现每帧取一次 `WorldData`，分配在下一轮
-/// 优化（先保证正确）。
-#[derive(Default, Clone, Copy, Debug)]
-pub struct HierarchySystem;
+/// 保持原值，不阻塞其它节点。节点 / 存在集 / 结果表跨帧复用，稳态不再分配。
+#[derive(Default)]
+pub struct HierarchySystem {
+    nodes: Vec<HierarchyNode>,
+    present: HashSet<EntityId>,
+    globals: HashMap<EntityId, GlobalTransform>,
+}
 
 struct HierarchyNode {
     entity: EntityId,
@@ -310,43 +314,48 @@ impl System for HierarchySystem {
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
-        let data = world.world_data();
-        let nodes: Vec<HierarchyNode> = data
-            .entities
-            .iter()
-            .filter(|entity| component_of(entity, GlobalTransform::ID).is_some())
-            .map(|entity| HierarchyNode {
-                entity: entity.id,
-                parent: component_of(entity, Parent::ID).and_then(parent_of),
-                local: component_of(entity, Transform::ID)
-                    .map(transform_of)
-                    .unwrap_or_default(),
-            })
-            .collect();
-        let present: std::collections::HashSet<EntityId> =
-            nodes.iter().map(|node| node.entity).collect();
+        self.nodes.clear();
+        self.present.clear();
+        self.globals.clear();
 
-        let mut globals: HashMap<EntityId, GlobalTransform> = HashMap::new();
-        for node in &nodes {
-            if node.parent.is_none_or(|parent| !present.contains(&parent)) {
-                globals.insert(node.entity, GlobalTransform::from_local(&node.local));
+        world.for_each::<GlobalTransform>(|key, _| {
+            let Some(entity) = world.entity(key) else {
+                return;
+            };
+            self.nodes.push(HierarchyNode {
+                entity,
+                parent: world.get::<Parent>(key).map(|parent| parent.entity),
+                local: world.get::<Transform>(key).copied().unwrap_or_default(),
+            });
+        });
+
+        for node in &self.nodes {
+            self.present.insert(node.entity);
+        }
+        for node in &self.nodes {
+            if node
+                .parent
+                .is_none_or(|parent| !self.present.contains(&parent))
+            {
+                self.globals
+                    .insert(node.entity, GlobalTransform::from_local(&node.local));
             }
         }
 
         let mut changed = true;
         while changed {
             changed = false;
-            for node in &nodes {
-                if globals.contains_key(&node.entity) {
+            for node in &self.nodes {
+                if self.globals.contains_key(&node.entity) {
                     continue;
                 }
                 let Some(parent) = node.parent else {
                     continue;
                 };
-                let Some(parent_global) = globals.get(&parent) else {
+                let Some(parent_global) = self.globals.get(&parent) else {
                     continue;
                 };
-                globals.insert(
+                self.globals.insert(
                     node.entity,
                     GlobalTransform::compose(parent_global, &node.local),
                 );
@@ -354,9 +363,9 @@ impl System for HierarchySystem {
             }
         }
 
-        for (entity, global) in globals {
+        for (entity, global) in &self.globals {
             let _ = world.set_field(
-                entity,
+                *entity,
                 GlobalTransform::ID,
                 "position",
                 &Value::Vec3([
@@ -366,7 +375,7 @@ impl System for HierarchySystem {
                 ]),
             );
             let _ = world.set_field(
-                entity,
+                *entity,
                 GlobalTransform::ID,
                 "rotation",
                 &Value::Quat([
@@ -377,7 +386,7 @@ impl System for HierarchySystem {
                 ]),
             );
             let _ = world.set_field(
-                entity,
+                *entity,
                 GlobalTransform::ID,
                 "scale",
                 &Value::Vec3([
@@ -388,32 +397,6 @@ impl System for HierarchySystem {
             );
         }
     }
-}
-
-fn component_of(entity: &EntityData, component: ComponentId) -> Option<&ComponentData> {
-    entity
-        .components
-        .iter()
-        .find(|candidate| candidate.component == component)
-}
-
-fn parent_of(component: &ComponentData) -> Option<EntityId> {
-    component
-        .fields
-        .iter()
-        .find(|(name, _)| name == "entity")
-        .and_then(|(_, value)| match value {
-            Value::Entity(id) => Some(EntityId::from_raw(*id)),
-            _ => None,
-        })
-}
-
-fn transform_of(component: &ComponentData) -> Transform {
-    let mut transform = Transform::default();
-    for (name, value) in &component.fields {
-        let _ = transform.set_field(name, value);
-    }
-    transform
 }
 
 pub struct Simulation {
@@ -436,7 +419,7 @@ impl Simulation {
     pub fn with_threads(world: World, fixed_dt: f32, threads: usize) -> Self {
         let mut schedule = Schedule::new();
         schedule.add(VelocitySystem::new(threads));
-        schedule.add(HierarchySystem);
+        schedule.add(HierarchySystem::default());
         Self {
             world,
             schedule,

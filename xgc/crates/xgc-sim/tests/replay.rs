@@ -270,6 +270,42 @@ fn hierarchy_system_leaves_cycles_alone() {
 }
 
 #[test]
+fn hierarchy_scratch_reuse_is_stable_across_frames() {
+    let mut world = World::new();
+    let parent_key = world.spawn((
+        Transform {
+            position: [10.0, 0.0, 0.0],
+            ..Transform::default()
+        },
+        GlobalTransform::default(),
+    ));
+    let parent = world.entity(parent_key).unwrap();
+    let child_key = world.spawn((
+        Transform {
+            position: [1.0, 0.0, 0.0],
+            ..Transform::default()
+        },
+        Parent { entity: parent },
+        GlobalTransform::default(),
+    ));
+    let child = world.entity(child_key).unwrap();
+
+    let mut simulation = Simulation::with_fixed_dt(world, 1.0 / 60.0);
+    let mut hashes = Vec::new();
+    for _ in 0..3 {
+        simulation.step(Vec::new()).unwrap();
+        hashes.push(simulation.world().state_hash());
+    }
+    assert!(hashes.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(
+        simulation
+            .world()
+            .get_field(child, GlobalTransform::ID, "position"),
+        Some(Value::Vec3([11.0, 0.0, 0.0]))
+    );
+}
+
+#[test]
 fn command_frame_outside_scenario_is_rejected() {
     let mut scenario = build_scenario();
     scenario.frames = 1;

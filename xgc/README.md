@@ -38,8 +38,9 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`VelocitySystem` 积分、
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
-层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体。`SystemAccess` 已能判定
-读写冲突，`Schedule::batches()` 给出确定性并行批次；跨系统并行执行还差世界所有权拆分。
+层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
+跨帧复用，稳态不再取 `WorldData`。`SystemAccess` 已能判定读写冲突，
+`Schedule::batches()` 给出确定性并行批次；跨系统并行执行还差世界所有权拆分。
 Agent 协议可完成 `describe → plan（含 before 预览）→ apply → query / get /
 digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 `select: ["core.transform:position"]` 字段投影、`filter` 的 `eq/ne/lt/le/gt/ge`
@@ -47,13 +48,12 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 里是十进制字符串，避免 2^53 精度丢失。`xgc check <world.json>` 会按注册表体检
 未知组件 / 字段 / 值类型 / 重复项。
 
-`cargo test --workspace` 全绿（58 条），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace` 全绿（59 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（27 个 Rust 文件最大 594 行）；schema 两次导出逐字节相同，
 5 个内建类型 3529 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
-脚本 / 动画 / 音频、渲染、编辑器；层级系统每帧取一次 `WorldData`，分配优化待做；
-Agent 协议尚未覆盖能力清单与视觉验证。
+脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖能力清单与视觉验证。
 
 ## 命令
 
