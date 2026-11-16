@@ -1,7 +1,7 @@
 //! 角色台阶 / 阻挡回归。
 
-use xgc_sim::{CharacterBlockSystem, CharacterStepSystem, Schedule};
-use xgc_world::{CharacterController, PhysicsBody, Transform, Velocity, World};
+use xgc_sim::{CharacterBlockSystem, CharacterStepSystem, CharacterSystem, Schedule};
+use xgc_world::{CharacterController, PhysicsBody, Slope, Transform, Velocity, World};
 
 #[test]
 fn character_steps_onto_low_box() {
@@ -94,4 +94,33 @@ fn character_blocks_on_ball() {
     let transform = world.get::<Transform>(character).unwrap();
     assert!((transform.position[0] - 0.2).abs() < 1e-5);
     assert_eq!(world.get::<Velocity>(character).unwrap().linear[0], 0.0);
+}
+
+#[test]
+fn character_grounds_on_slope() {
+    let mut world = World::new();
+    let character = world.spawn((
+        Transform {
+            position: [5.0, 0.0, 0.0],
+            ..Transform::default()
+        },
+        Velocity::default(),
+        CharacterController::default(),
+    ));
+    world.spawn((Slope {
+        origin: [0.0, 0.0, 0.0],
+        size: [10.0, 10.0],
+        rise: 2.0,
+    },));
+    let mut schedule = Schedule::new();
+    schedule.add(CharacterSystem);
+    schedule.run(&mut world, 0.016);
+    let transform = world.get::<Transform>(character).unwrap();
+    assert!((transform.position[1] - 1.0).abs() < 1e-5);
+    assert!(
+        world
+            .get::<CharacterController>(character)
+            .unwrap()
+            .grounded
+    );
 }

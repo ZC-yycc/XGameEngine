@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use xgc_base::{EntityId, EntityKey};
 use xgc_world::{
-    Animator, CharacterController, Component, GlobalTransform, Parent, PhysicsBody, Transform,
-    Value, Velocity, World,
+    Animator, CharacterController, Component, GlobalTransform, Parent, PhysicsBody, Slope,
+    Transform, Value, Velocity, World,
 };
 
 use super::{System, SystemAccess};
@@ -135,21 +135,33 @@ impl System for CharacterSystem {
 
     fn access(&self) -> SystemAccess {
         SystemAccess {
-            reads: vec![CharacterController::ID],
+            reads: vec![CharacterController::ID, Slope::ID],
             writes: vec![Transform::ID, Velocity::ID],
         }
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
+        let mut slopes = Vec::new();
+        world.for_each::<Slope>(|_, slope| {
+            slopes.push(*slope);
+        });
         world.for_each3_mut::<Transform, Velocity, CharacterController>(
-            |_, transform, velocity, _controller| {
-                if transform.position[1] < 0.0 {
-                    transform.position[1] = 0.0;
+            |_, transform, velocity, controller| {
+                let mut ground = 0.0_f32;
+                for slope in &slopes {
+                    if let Some(height) =
+                        slope.height_at(transform.position[0], transform.position[2])
+                    {
+                        ground = ground.max(height);
+                    }
+                }
+                if transform.position[1] < ground {
+                    transform.position[1] = ground;
                     if velocity.linear[1] < 0.0 {
                         velocity.linear[1] = 0.0;
                     }
                 }
-                _controller.grounded = transform.position[1] <= 0.0;
+                controller.grounded = transform.position[1] <= ground + 1e-4;
             },
         );
     }

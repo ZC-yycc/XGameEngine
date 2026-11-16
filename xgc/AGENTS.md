@@ -41,6 +41,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/particle_components.rs` | 粒子组件：`particle.emitter` |
 | `crates/xgc-world/src/plugin_components.rs` | Rust 插件组件：`plugin.rust` |
 | `crates/xgc-world/src/physics_components.rs` | `physics.body`：类型 / 形状 / 摩擦 / 弹性 / 质量 / 传感器 |
+| `crates/xgc-world/src/slope_components.rs` | `physics.slope`：沿 +X 线性抬升的坡面 |
 | `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删与计划内预测集合） |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
 | `crates/xgc-world/src/journal.rs` | `Journal` / `TxRecord`：事务日志与重放 |
@@ -93,7 +94,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 物理：球体阻挡已接；下一步斜坡 / 胶囊角色。
+1. 物理：斜坡地面已接；下一步胶囊角色 / 坡面阻挡。
 2. 动画：骨骼 / 蒙皮。
 3. UI：文本 / 图片绘制。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
