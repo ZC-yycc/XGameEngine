@@ -15,6 +15,7 @@ use xgc_store::{load_world, save_world};
 use xgc_world::{Applied, Command, Journal, Plan, World, WorldSnapshot};
 
 mod query;
+mod snapshot;
 
 use query::{axis_index, FieldRef, Filter, FilterOp};
 
@@ -97,6 +98,8 @@ impl Agent {
             "world.validate" => self.validate(),
             "world.load" => self.load(params),
             "world.save" => self.save(params),
+            "world.snapshot" => self.snapshot(),
+            "world.restore" => self.restore(params),
             "edit.plan" => self.plan(params),
             "edit.apply" => self.apply(params),
             "edit.revert" => self.revert(params),
@@ -130,6 +133,8 @@ impl Agent {
                 "world.validate",
                 "world.load",
                 "world.save",
+                "world.snapshot",
+                "world.restore",
                 "edit.plan",
                 "edit.apply",
                 "edit.revert",

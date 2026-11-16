@@ -374,3 +374,29 @@ fn replay_rebuilds_world_from_journal() {
     let queried = result(call(&mut agent, "world.query", Json::Null));
     assert_eq!(queried["total"], 1);
 }
+
+#[test]
+fn snapshot_and_restore_roundtrip() {
+    let mut agent = Agent::new();
+    let commands = serde_json::to_value(vec![spawn_command()]).unwrap();
+    let plan = result(call(&mut agent, "edit.plan", json!({"commands": commands})));
+    let plan_id = plan["plan_id"].as_u64().unwrap();
+    result(call(&mut agent, "edit.apply", json!({"plan_id": plan_id})));
+    let snapshot = result(call(&mut agent, "world.snapshot", Json::Null));
+    assert_eq!(snapshot["revision"], 1);
+    result(call(&mut agent, "edit.undo", Json::Null));
+    assert_eq!(
+        result(call(&mut agent, "world.query", Json::Null))["total"],
+        0
+    );
+    let restored = result(call(
+        &mut agent,
+        "world.restore",
+        json!({"data": snapshot["data"]}),
+    ));
+    assert_eq!(restored["entities"], 1);
+    assert_eq!(
+        result(call(&mut agent, "world.query", Json::Null))["total"],
+        1
+    );
+}

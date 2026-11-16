@@ -27,8 +27,8 @@
 `AnimationLibrary::load_dir` 扫描目录 /
 `AnimationLibrary` 按名索引 /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/
-engine.diagnostics（诊断码目录）/ engine.history（事务日志）/ engine.replay（重放）/ query /
-get / digest / stats / validate / load / save /
+engine.diagnostics（诊断码目录）/ engine.history（事务日志）/ engine.replay（重放）/ world.snapshot / world.restore / query / get / digest / stats /
+validate / load / save /
 plan / apply / revert / undo；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
 Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫描 `.meta`，
@@ -90,7 +90,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（84 个 Rust 文件最大 581 行）；schema 两次导出逐字节相同，
+`xgc-xtask check` 全绿（85 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同，
 21 个内建类型 27803 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
