@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use eframe::egui;
 
 use crate::{EditorState, FieldRow};
+use xgc_reflect::Value;
 
 pub struct EditorApp {
     state: EditorState,
@@ -21,6 +22,18 @@ impl EditorApp {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if ui.button("+ Entity").clicked() {
+                self.status = Some(match self.state.spawn_entity("entity") {
+                    Ok(id) => format!("已新建实体 {}", id.raw()),
+                    Err(err) => err,
+                });
+            }
+            if ui.button("Delete").clicked() {
+                self.status = Some(match self.state.delete_selected() {
+                    Ok(()) => "已删除".to_string(),
+                    Err(err) => err,
+                });
+            }
             if ui.button("Save").clicked() {
                 self.status = Some(match self.state.save() {
                     Ok(()) => "已保存".to_string(),
@@ -97,23 +110,120 @@ impl EditorApp {
             return;
         };
         ui.label(format!("Entity {}", id.raw()));
-        for component in self.state.inspector() {
-            egui::CollapsingHeader::new(&component.name)
-                .default_open(true)
-                .show(ui, |ui| {
-                    for field in &component.fields {
-                        field_row(ui, field);
+        let names = self.state.component_names();
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("xgc-add-component")
+            .selected_text("Add Component")
+            .show_ui(ui, |ui| {
+                for name in &names {
+                    if ui.selectable_label(false, name).clicked() {
+                        chosen = Some(name.clone());
                     }
+                }
+            });
+        if let Some(name) = chosen {
+            self.status = Some(match self.state.add_component(id, &name) {
+                Ok(()) => format!("已添加 {name}"),
+                Err(err) => err,
+            });
+        }
+        let components = self.state.inspector();
+        for component in components {
+            let mut remove = false;
+            ui.horizontal(|ui| {
+                ui.strong(&component.name);
+                if ui.small_button("Remove").clicked() {
+                    remove = true;
+                }
+            });
+            if remove {
+                self.status = Some(match self.state.remove_component(id, component.id) {
+                    Ok(()) => format!("已移除 {}", component.name),
+                    Err(err) => err,
                 });
+                continue;
+            }
+            for field in &component.fields {
+                field_row(ui, &mut self.state, id, component.id, field);
+            }
+            ui.separator();
         }
     }
 }
 
-fn field_row(ui: &mut egui::Ui, field: &FieldRow) {
+fn field_row(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    entity: xgc_base::EntityId,
+    component: u32,
+    field: &FieldRow,
+) {
     ui.horizontal(|ui| {
         ui.label(format!("{} ({})", field.name, field.ty));
-        ui.label(format!("{:?}", field.value));
+        let Some(edited) = value_editor(ui, &field.value, &field.ty) else {
+            return;
+        };
+        if edited != field.value {
+            if let Err(err) = state.edit_field(entity, component, &field.name, edited) {
+                ui.colored_label(egui::Color32::RED, err);
+            }
+        }
     });
+}
+
+fn value_editor(ui: &mut egui::Ui, value: &Value, ty: &str) -> Option<Value> {
+    match value {
+        Value::Bool(current) => {
+            let mut edited = *current;
+            ui.checkbox(&mut edited, "");
+            edited.ne(current).then_some(Value::Bool(edited))
+        }
+        Value::I64(current) => {
+            let mut edited = *current;
+            ui.add(egui::DragValue::new(&mut edited).speed(1.0));
+            edited.ne(current).then_some(Value::I64(edited))
+        }
+        Value::F64(current) => {
+            let mut edited = *current;
+            ui.add(egui::DragValue::new(&mut edited).speed(0.01));
+            edited.ne(current).then_some(Value::F64(edited))
+        }
+        Value::String(current) => {
+            let mut edited = current.clone();
+            ui.text_edit_singleline(&mut edited);
+            edited.ne(current).then_some(Value::String(edited))
+        }
+        Value::Entity(current) => {
+            ui.label(format!("entity {current}"));
+            None
+        }
+        Value::Vec2(current) => {
+            let mut edited = *current;
+            for component in &mut edited {
+                ui.add(egui::DragValue::new(component).speed(0.01));
+            }
+            edited.ne(current).then_some(Value::Vec2(edited))
+        }
+        Value::Vec3(current) => {
+            let mut edited = *current;
+            for component in &mut edited {
+                ui.add(egui::DragValue::new(component).speed(0.01));
+            }
+            edited.ne(current).then_some(Value::Vec3(edited))
+        }
+        Value::Vec4(current) | Value::Quat(current) => {
+            let mut edited = *current;
+            for component in &mut edited {
+                ui.add(egui::DragValue::new(component).speed(0.01));
+            }
+            let next = if ty == "quat" {
+                Value::Quat(edited)
+            } else {
+                Value::Vec4(edited)
+            };
+            (edited != *current).then_some(next)
+        }
+    }
 }
 
 impl eframe::App for EditorApp {

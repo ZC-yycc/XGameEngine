@@ -66,3 +66,34 @@ fn play_runs_and_stop_restores_snapshot() {
     assert!(!editor.is_playing());
     assert_eq!(editor.selected(), None);
 }
+
+#[test]
+fn spawns_and_deletes_entities() {
+    let mut editor = EditorState::default();
+    let id = editor.spawn_entity("box").unwrap();
+    assert_eq!(editor.entities().len(), 1);
+    assert_eq!(editor.selected(), Some(id));
+    editor.delete_selected().unwrap();
+    assert_eq!(editor.entities().len(), 0);
+    assert_eq!(editor.selected(), None);
+}
+
+#[test]
+fn adds_and_removes_components() {
+    let mut editor = EditorState::default();
+    let id = editor.spawn_entity("box").unwrap();
+    editor.add_component(id, "core.velocity").unwrap();
+    let names: Vec<_> = editor
+        .inspector()
+        .into_iter()
+        .map(|component| component.name)
+        .collect();
+    assert!(names.contains(&"core.velocity".to_string()));
+    editor.remove_component(id, 0x0102).unwrap();
+    let names: Vec<_> = editor
+        .inspector()
+        .into_iter()
+        .map(|component| component.name)
+        .collect();
+    assert!(!names.contains(&"core.velocity".to_string()));
+}

@@ -11,7 +11,9 @@ use xgc_base::EntityId;
 use xgc_reflect::{Registry, Value};
 use xgc_sim::{FrameRecord, Simulation};
 use xgc_store::{load_world, save_world};
-use xgc_world::{builtin_registry, World, WorldData};
+use xgc_world::{
+    builtin_registry, Command, ComponentData, ComponentId, Name, Transform, World, WorldData,
+};
 
 pub struct EntityRow {
     pub id: EntityId,
@@ -114,6 +116,96 @@ impl EditorState {
 
     pub fn select(&mut self, id: Option<EntityId>) {
         self.selected = id;
+    }
+
+    pub fn component_names(&self) -> Vec<String> {
+        self.registry
+            .schema()
+            .types
+            .iter()
+            .map(|ty| ty.name.clone())
+            .collect()
+    }
+
+    /// 新建实体（Name + Transform），返回持久 ID。
+    pub fn spawn_entity(&mut self, name: &str) -> Result<EntityId, String> {
+        if self.play.is_some() {
+            return Err("Play 期间不能新建实体".to_string());
+        }
+        let key = self.world.spawn((
+            Name {
+                value: name.to_string(),
+            },
+            Transform::default(),
+        ));
+        let id = self
+            .world
+            .entity(key)
+            .ok_or_else(|| "新建实体失败".to_string())?;
+        self.selected = Some(id);
+        self.dirty = true;
+        Ok(id)
+    }
+
+    pub fn delete_selected(&mut self) -> Result<(), String> {
+        if self.play.is_some() {
+            return Err("Play 期间不能删除实体".to_string());
+        }
+        let Some(id) = self.selected else {
+            return Err("未选择实体".to_string());
+        };
+        let key = self
+            .world
+            .key(id)
+            .ok_or_else(|| format!("实体 {} 不存在", id.raw()))?;
+        self.world.despawn(key);
+        self.selected = None;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn add_component(&mut self, entity: EntityId, name: &str) -> Result<(), String> {
+        if self.play.is_some() {
+            return Err("Play 期间不能加组件".to_string());
+        }
+        let schema = self
+            .registry
+            .by_name(name)
+            .ok_or_else(|| format!("未知组件：{name}"))?;
+        let component = ComponentData {
+            component: ComponentId(schema.id),
+            fields: schema
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.default.clone()))
+                .collect(),
+        };
+        self.apply_command(Command::AddComponent { entity, component })?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn remove_component(&mut self, entity: EntityId, component: u32) -> Result<(), String> {
+        if self.play.is_some() {
+            return Err("Play 期间不能删组件".to_string());
+        }
+        self.apply_command(Command::RemoveComponent {
+            entity,
+            component: ComponentId(component),
+        })?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn apply_command(&mut self, command: Command) -> Result<(), String> {
+        let plan = self.world.plan(vec![command]);
+        if !plan.is_valid() {
+            return Err(format!("命令计划无效：{:?}", plan.diagnostics));
+        }
+        self.world
+            .apply(&plan)
+            .map_err(|diagnostics| format!("命令应用失败：{diagnostics:?}"))?;
+        Ok(())
     }
 
     pub fn entities(&self) -> Vec<EntityRow> {
