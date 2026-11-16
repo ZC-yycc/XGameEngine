@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use xgc_base::EntityId;
 use xgc_reflect::{ComponentId, Value};
-use xgc_world::{Command, ComponentData, Transform, Velocity, World};
+use xgc_world::{Command, ComponentData, EntityData, Transform, Velocity, World};
 
 fn transform() -> ComponentId {
     ComponentId(0x0101)
@@ -308,6 +308,78 @@ fn remove_component_reverts_to_original_archetype() {
         .components
         .iter()
         .any(|component| component.component == ComponentId(0x0102)));
+}
+
+#[test]
+fn add_then_set_and_spawn_then_add_are_valid_in_one_plan() {
+    let (mut world, id) = world_with_one();
+    let before_hash = world.state_hash();
+    let plan = world.plan(vec![
+        Command::AddComponent {
+            entity: id,
+            component: name_data("old"),
+        },
+        Command::SetField {
+            entity: id,
+            component: ComponentId(0x0103),
+            field: "value".to_string(),
+            value: Value::String("new".to_string()),
+        },
+    ]);
+    assert!(plan.is_valid(), "{:?}", plan.diagnostics);
+    let applied = world.apply(&plan).unwrap();
+    assert_eq!(
+        world.get_field(id, ComponentId(0x0103), "value"),
+        Some(Value::String("new".to_string()))
+    );
+    world.revert(&applied).unwrap();
+    assert_eq!(world.state_hash(), before_hash);
+
+    let mut world = World::new();
+    let plan = world.plan(vec![
+        Command::Spawn {
+            data: EntityData {
+                id: EntityId::from_raw(50),
+                revision: 0,
+                components: Vec::new(),
+            },
+        },
+        Command::AddComponent {
+            entity: EntityId::from_raw(50),
+            component: name_data("spawned"),
+        },
+        Command::SetField {
+            entity: EntityId::from_raw(50),
+            component: ComponentId(0x0103),
+            field: "value".to_string(),
+            value: Value::String("updated".to_string()),
+        },
+    ]);
+    assert!(plan.is_valid(), "{:?}", plan.diagnostics);
+    world.apply(&plan).unwrap();
+    assert_eq!(
+        world.get_field(EntityId::from_raw(50), ComponentId(0x0103), "value"),
+        Some(Value::String("updated".to_string()))
+    );
+}
+
+#[test]
+fn set_after_remove_in_same_plan_is_rejected() {
+    let (world, id) = world_with_one();
+    let plan = world.plan(vec![
+        Command::RemoveComponent {
+            entity: id,
+            component: ComponentId(0x0102),
+        },
+        Command::SetField {
+            entity: id,
+            component: ComponentId(0x0102),
+            field: "linear".to_string(),
+            value: Value::Vec3([1.0, 0.0, 0.0]),
+        },
+    ]);
+    assert!(!plan.is_valid());
+    assert_eq!(plan.diagnostics[0].code, "EDIT.UNKNOWN_COMPONENT");
 }
 
 #[test]

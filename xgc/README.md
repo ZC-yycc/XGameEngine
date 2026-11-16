@@ -30,8 +30,10 @@ digest / stats / validate / load / save / plan / apply / revert；查询支持�
 | despawn 10 000 | 334 µs |
 
 命令事务（debug，100 条 `SetField`）：plan + apply **77.8 µs**，revert **69.6 µs**；
-apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。`Command` 可
-JSON 往返：`Spawn { data: EntityData }` 反序列化后由组件工厂重建真实组件列；
+apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。同一计划可组合
+`Spawn → AddComponent → SetField`、`AddComponent → SetField`、`RemoveComponent → AddComponent`；
+计划内维护预测组件集合，`SetField` 能写到刚添加的组件上，删除后的字段写入会被拒绝。
+`Command` 可 JSON 往返：`Spawn { data: EntityData }` 反序列化后由组件工厂重建真实组件列；
 销毁回滚恢复**原 EntityId 与全部组件**；组件增删同样保留 EntityId，回滚后
 archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再恢复，
 `state_hash` / 实体 ID / revision 一致；`Journal` 可从初始快照重放并校验 revision。
@@ -48,7 +50,7 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 里是十进制字符串，避免 2^53 精度丢失。`xgc check <world.json>` 会按注册表体检
 未知组件 / 字段 / 值类型 / 重复项。
 
-`cargo test --workspace` 全绿（59 条），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace` 全绿（61 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（27 个 Rust 文件最大 594 行）；schema 两次导出逐字节相同，
 5 个内建类型 3529 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 

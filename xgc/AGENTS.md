@@ -30,7 +30,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 |
 | `crates/xgc-world/src/query.rs` | 双组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` |
-| `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删） |
+| `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删与计划内预测集合） |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
 | `crates/xgc-world/src/journal.rs` | `Journal` / `TxRecord`：事务日志与重放 |
 | `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `WorldSnapshot` / 恢复 |
@@ -55,7 +55,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第十八刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
+1. M1 第十九刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 2. Agent 能力清单 / 诊断码 / 视觉验证；`xgc check` 扩到项目 / 场景。
 3. 物理 / 脚本 / 动画 / 音频的第一个垂直切片；渲染另开 crate。
 4. 现在最大文件 594 行：动它之前先拆。

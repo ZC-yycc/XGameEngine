@@ -4,7 +4,7 @@
 //! before-image 是 [`EntityData`]（可序列化）；回滚按逆命令**逆序**执行，
 //! 交易只推进一个 revision。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use xgc_base::{Diagnostic, EntityId, Severity, Subject};
@@ -69,6 +69,7 @@ impl World {
         let mut diagnostics = Vec::new();
         let mut new_ids = HashSet::new();
         let mut dead = HashSet::new();
+        let mut presence: HashMap<EntityId, HashSet<ComponentId>> = HashMap::new();
 
         for command in commands {
             let mut valid = true;
@@ -87,45 +88,72 @@ impl World {
                         ));
                         continue;
                     }
-                    let Some((_, meta)) = self.meta_by_id(*entity) else {
-                        diagnostics.push(diag(
-                            "EDIT.UNKNOWN_ENTITY",
-                            Subject::Entity(*entity),
-                            format!("实体不存在：{entity}"),
-                        ));
-                        continue;
-                    };
-                    let Some(arch) = self.archetypes.get(meta.archetype as usize) else {
-                        diagnostics.push(diag(
-                            "EDIT.UNKNOWN_ARCHETYPE",
-                            Subject::Entity(*entity),
-                            "实体所在的 archetype 不存在",
-                        ));
-                        continue;
-                    };
-                    let Some(column) = arch.columns.get(component) else {
-                        diagnostics.push(diag(
-                            "EDIT.UNKNOWN_COMPONENT",
-                            Subject::Entity(*entity),
-                            format!("实体 {entity} 没有组件 {component}"),
-                        ));
-                        continue;
-                    };
-                    let row = meta.row as usize;
-                    if column.get_field(row, field).is_none() {
-                        diagnostics.push(diag(
-                            "EDIT.UNKNOWN_FIELD",
-                            Subject::Field(format!("{component}.{field}")),
-                            format!("组件 {component} 没有字段 {field}"),
-                        ));
-                        valid = false;
-                    } else if let Err(message) = column.validate_field(row, field, value) {
-                        diagnostics.push(diag(
-                            "EDIT.TYPE_MISMATCH",
-                            Subject::Field(format!("{component}.{field}")),
-                            message,
-                        ));
-                        valid = false;
+                    if let Some(components) = presence.get(entity) {
+                        if !components.contains(component) {
+                            diagnostics.push(diag(
+                                "EDIT.UNKNOWN_COMPONENT",
+                                Subject::Entity(*entity),
+                                format!("实体 {entity} 没有组件 {component}"),
+                            ));
+                            continue;
+                        }
+                        let Some(factory) = self.factories.get(component) else {
+                            diagnostics.push(diag(
+                                "EDIT.UNKNOWN_COMPONENT",
+                                Subject::Entity(*entity),
+                                format!("组件 {component} 未注册"),
+                            ));
+                            continue;
+                        };
+                        if let Err(message) = factory.validate_field(field, value) {
+                            diagnostics.push(diag(
+                                "EDIT.TYPE_MISMATCH",
+                                Subject::Field(format!("{component}.{field}")),
+                                message,
+                            ));
+                            valid = false;
+                        }
+                    } else {
+                        let Some((_, meta)) = self.meta_by_id(*entity) else {
+                            diagnostics.push(diag(
+                                "EDIT.UNKNOWN_ENTITY",
+                                Subject::Entity(*entity),
+                                format!("实体不存在：{entity}"),
+                            ));
+                            continue;
+                        };
+                        let Some(arch) = self.archetypes.get(meta.archetype as usize) else {
+                            diagnostics.push(diag(
+                                "EDIT.UNKNOWN_ARCHETYPE",
+                                Subject::Entity(*entity),
+                                "实体所在的 archetype 不存在",
+                            ));
+                            continue;
+                        };
+                        let Some(column) = arch.columns.get(component) else {
+                            diagnostics.push(diag(
+                                "EDIT.UNKNOWN_COMPONENT",
+                                Subject::Entity(*entity),
+                                format!("实体 {entity} 没有组件 {component}"),
+                            ));
+                            continue;
+                        };
+                        let row = meta.row as usize;
+                        if column.get_field(row, field).is_none() {
+                            diagnostics.push(diag(
+                                "EDIT.UNKNOWN_FIELD",
+                                Subject::Field(format!("{component}.{field}")),
+                                format!("组件 {component} 没有字段 {field}"),
+                            ));
+                            valid = false;
+                        } else if let Err(message) = column.validate_field(row, field, value) {
+                            diagnostics.push(diag(
+                                "EDIT.TYPE_MISMATCH",
+                                Subject::Field(format!("{component}.{field}")),
+                                message,
+                            ));
+                            valid = false;
+                        }
                     }
                 }
                 Command::Spawn { data } => {
@@ -142,22 +170,43 @@ impl World {
                         valid = false;
                     } else {
                         new_ids.insert(id);
+                        presence.insert(
+                            id,
+                            data.components
+                                .iter()
+                                .map(|component| component.component)
+                                .collect(),
+                        );
                     }
                 }
                 Command::AddComponent { entity, component } => {
-                    let Some(data) = self.entity_data(*entity) else {
+                    if dead.contains(entity) {
+                        diagnostics.push(diag(
+                            "EDIT.ENTITY_DEAD_IN_PLAN",
+                            Subject::Entity(*entity),
+                            format!("实体 {entity} 在同一计划里已被销毁"),
+                        ));
+                        continue;
+                    }
+                    if !new_ids.contains(entity) && self.meta_by_id(*entity).is_none() {
                         diagnostics.push(diag(
                             "EDIT.UNKNOWN_ENTITY",
                             Subject::Entity(*entity),
                             format!("实体不存在：{entity}"),
                         ));
                         continue;
-                    };
-                    if data
-                        .components
-                        .iter()
-                        .any(|existing| existing.component == component.component)
-                    {
+                    }
+                    let components = presence.entry(*entity).or_insert_with(|| {
+                        self.entity_data(*entity)
+                            .map(|data| {
+                                data.components
+                                    .into_iter()
+                                    .map(|component| component.component)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    });
+                    if components.contains(&component.component) {
                         diagnostics.push(diag(
                             "EDIT.COMPONENT_EXISTS",
                             Subject::Entity(*entity),
@@ -165,8 +214,11 @@ impl World {
                         ));
                         valid = false;
                     } else {
-                        let mut probe = data;
-                        probe.components.push(component.clone());
+                        let probe = EntityData {
+                            id: *entity,
+                            revision: 0,
+                            components: vec![component.clone()],
+                        };
                         if let Err(message) = self.snapshot_from_data(&probe) {
                             diagnostics.push(diag(
                                 "EDIT.INVALID_COMPONENT",
@@ -174,23 +226,39 @@ impl World {
                                 message,
                             ));
                             valid = false;
+                        } else {
+                            components.insert(component.component);
                         }
                     }
                 }
                 Command::RemoveComponent { entity, component } => {
-                    let Some(data) = self.entity_data(*entity) else {
+                    if dead.contains(entity) {
+                        diagnostics.push(diag(
+                            "EDIT.ENTITY_DEAD_IN_PLAN",
+                            Subject::Entity(*entity),
+                            format!("实体 {entity} 在同一计划里已被销毁"),
+                        ));
+                        continue;
+                    }
+                    if !new_ids.contains(entity) && self.meta_by_id(*entity).is_none() {
                         diagnostics.push(diag(
                             "EDIT.UNKNOWN_ENTITY",
                             Subject::Entity(*entity),
                             format!("实体不存在：{entity}"),
                         ));
                         continue;
-                    };
-                    if !data
-                        .components
-                        .iter()
-                        .any(|existing| existing.component == *component)
-                    {
+                    }
+                    let components = presence.entry(*entity).or_insert_with(|| {
+                        self.entity_data(*entity)
+                            .map(|data| {
+                                data.components
+                                    .into_iter()
+                                    .map(|component| component.component)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    });
+                    if !components.remove(component) {
                         diagnostics.push(diag(
                             "EDIT.COMPONENT_MISSING",
                             Subject::Entity(*entity),

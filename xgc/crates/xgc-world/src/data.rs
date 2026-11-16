@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use xgc_base::EntityId;
 use xgc_reflect::{Component, ComponentId, Value};
 
-use super::{Column, EntitySnapshot, Name, Transform, Velocity, World};
+use super::{Column, EntitySnapshot, GlobalTransform, Name, Parent, Transform, Velocity, World};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntityData {
@@ -72,6 +72,11 @@ impl ComponentFactory {
         (self.create)(fields)
     }
 
+    pub(crate) fn validate_field(&self, field: &str, value: &Value) -> Result<(), String> {
+        self.create(&[(field.to_string(), value.clone())])
+            .map(|_| ())
+    }
+
     fn empty_column(&self) -> Box<dyn Column> {
         (self.empty_column)()
     }
@@ -115,6 +120,8 @@ impl World {
         self.register_component::<Transform>();
         self.register_component::<Velocity>();
         self.register_component::<Name>();
+        self.register_component::<Parent>();
+        self.register_component::<GlobalTransform>();
     }
 
     pub fn register_component<T: Component>(&mut self) {
