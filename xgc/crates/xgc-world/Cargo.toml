@@ -10,6 +10,4 @@ description = "XGame Core 的 archetype 列式世界"
 xgc-base = { path = "../xgc-base" }
 xgc-reflect = { path = "../xgc-reflect" }
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

@@ -16,11 +16,13 @@ mod command;
 mod components;
 mod data;
 mod hash;
+mod journal;
 mod snapshot;
 
 pub use command::{Applied, Command, Plan};
 pub use components::{Name, Transform, Velocity};
 pub use data::{ComponentData, EntityData};
+pub use journal::{Journal, TxRecord};
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
 
 use data::ComponentFactory;

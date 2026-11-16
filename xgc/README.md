@@ -6,13 +6,13 @@
 
 ## 当前阶段
 
-**M0 已完成；M1 前四刀已落地**：`xgc-base`（持久 ID / 句柄 / 诊断）、
+**M0 已完成；M1 前五刀已落地**：`xgc-base`（持久 ID / 句柄 / 诊断）、
 `xgc-reflect`（组件注册表 / 确定性 schema / 动态字段读写 / schema 语义校验）、
 `xgc-world`（archetype 列式存储、单 / 双组件查询、生成回收、`Command` 事务
 plan / apply / revert、结构化 `Spawn` / `Despawn` + 实体快照撤销、可序列化
-`EntityData` / 组件工厂、实体级 revision、世界快照 / 恢复、状态哈希）、
-`xgc-cli`（`schema` / `check` / `bench`）、`xgc-xtask`（文件预算 / 依赖方向 /
-schema 确定性门禁）。
+`EntityData` / 组件工厂、实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与
+重放、状态哈希）、`xgc-cli`（`schema` / `check` / `bench`）、`xgc-xtask`
+（文件预算 / 依赖方向 / schema 确定性门禁）。
 
 实测（i7-10700，release，10 000 个 `(Transform, Velocity)`）：
 
@@ -26,14 +26,16 @@ schema 确定性门禁）。
 apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。`Command` 可
 JSON 往返：`Spawn { data: EntityData }` 反序列化后由组件工厂重建真实组件列；
 销毁回滚恢复**原 EntityId 与全部组件**。`WorldSnapshot` 可把整个世界恢复到一个
-空世界，`state_hash` 与实体 ID 保持一致。
+空世界，`state_hash` 与实体 ID 保持一致。`Journal` 记录每条事务的
+base / revision / commands / inverse，JSON 往返后可从初始快照重放，逐条校验
+revision 漂移。
 
-`cargo test --workspace` 全绿（29 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（14 个 Rust 文件最大 544 行）；schema 两次导出逐字节相同
+`cargo test --workspace` 全绿（31 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（16 个 Rust 文件最大 544 行）；schema 两次导出逐字节相同
 （`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**尚未实现**：事务日志 / 命令持久化、快照落盘、帧循环 / 回放、渲染、物理、脚本、
-编辑器、Agent 协议。这些按主文档 §14 的里程碑推进。
+**尚未实现**：日志 / 快照落盘、帧循环 / 回放、渲染、物理、脚本、编辑器、
+Agent 协议。这些按主文档 §14 的里程碑推进。
 
 ## 命令
 
