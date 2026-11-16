@@ -28,6 +28,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 双组件查询 |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` |
 | `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert |
+| `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `capture_entity` / `restore_entity` |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-world/tests/` | world / commands / query 回归 |
 | `crates/xgc-cli/src/main.rs` | `xgc schema` / `xgc bench` |
@@ -44,12 +45,12 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第二刀：结构化 `Spawn` / `Despawn` 命令与撤销（before-image 存实体快照）、
-   命令序列化（serde）、`xgc check`、快照 / 回放；world 文件仍接近 600 行，先拆
-   `world/` 模块再扩。
-2. M1 第三刀：Agent 协议最小集（`engine.describe` / `world.query` / `edit.plan`），
+1. M1 第三刀：`Command` 序列化（serde / 稳定 JSON 形态）、`xgc check` 最小版、
+   快照 / 回放（`Snapshot` + 输入帧 + state hash 对比）。
+2. M1 第四刀：Agent 协议最小集（`engine.describe` / `world.query` / `edit.plan`），
    `xgc serve --transport stdio`。
-3. 再往后的渲染 / 物理 / 脚本 / 编辑器见主文档 §14，别提前开分支。
+3. world 文件接近 600 行：先拆 `world/` 的 storage 与 service，再扩。
+4. 再往后的渲染 / 物理 / 脚本 / 编辑器见主文档 §14，别提前开分支。
 
 ## Token 纪律
 

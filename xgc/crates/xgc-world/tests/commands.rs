@@ -112,6 +112,92 @@ fn stale_plan_conflicts_instead_of_overwriting() {
 }
 
 #[test]
+fn despawn_revert_restores_entity_and_state_hash() {
+    let (mut world, id) = world_with_one();
+    let before_hash = world.state_hash();
+    let before_revision = world.revision();
+
+    let plan = world.plan(vec![Command::Despawn { entity: id }]);
+    assert!(plan.is_valid());
+    let applied = world.apply(&plan).unwrap();
+    assert!(world.key(id).is_none());
+    assert_eq!(world.len(), 0);
+    assert_ne!(world.state_hash(), before_hash);
+
+    let revision = world.revert(&applied).unwrap();
+    assert_eq!(revision, before_revision + 2);
+    assert!(world.key(id).is_some());
+    assert_eq!(world.len(), 1);
+    assert_eq!(world.state_hash(), before_hash);
+    assert_eq!(
+        world.get_field(id, transform(), "position"),
+        Some(Value::Vec3([0.0, 0.0, 0.0]))
+    );
+}
+
+#[test]
+fn spawn_from_snapshot_and_revert() {
+    let (mut world, source) = world_with_one();
+    let new_id = EntityId::from_raw(1_000);
+    let snapshot = world.capture_entity(source).unwrap().with_id(new_id);
+    let before_hash = world.state_hash();
+    let before_revision = world.revision();
+
+    let plan = world.plan(vec![Command::Spawn { snapshot }]);
+    assert!(plan.is_valid());
+    let applied = world.apply(&plan).unwrap();
+    assert!(world.key(new_id).is_some());
+    assert_eq!(world.len(), 2);
+    assert_ne!(world.state_hash(), before_hash);
+
+    world.revert(&applied).unwrap();
+    assert!(world.key(new_id).is_none());
+    assert_eq!(world.len(), 1);
+    assert_eq!(world.state_hash(), before_hash);
+    assert_eq!(world.revision(), before_revision + 2);
+}
+
+#[test]
+fn spawn_id_collision_is_rejected_before_writing() {
+    let (mut world, source) = world_with_one();
+    let snapshot = world.capture_entity(source).unwrap();
+    let before_hash = world.state_hash();
+    let before_revision = world.revision();
+
+    let plan = world.plan(vec![Command::Spawn { snapshot }]);
+    assert!(!plan.is_valid());
+    assert_eq!(plan.diagnostics[0].code, "EDIT.ID_IN_USE");
+    assert!(world.apply(&plan).is_err());
+    assert_eq!(world.state_hash(), before_hash);
+    assert_eq!(world.revision(), before_revision);
+}
+
+#[test]
+fn duplicate_spawn_ids_in_one_plan_are_rejected() {
+    let (world, source) = world_with_one();
+    let snapshot = world
+        .capture_entity(source)
+        .unwrap()
+        .with_id(EntityId::from_raw(500));
+    let plan = world.plan(vec![
+        Command::Spawn {
+            snapshot: snapshot.clone(),
+        },
+        Command::Spawn { snapshot },
+    ]);
+    assert!(!plan.is_valid());
+    assert_eq!(plan.diagnostics[0].code, "EDIT.ID_IN_USE");
+}
+
+#[test]
+fn set_field_after_despawn_in_same_plan_is_rejected() {
+    let (world, id) = world_with_one();
+    let plan = world.plan(vec![Command::Despawn { entity: id }, set_position(id, 1.0)]);
+    assert!(!plan.is_valid());
+    assert_eq!(plan.diagnostics[0].code, "EDIT.ENTITY_DEAD_IN_PLAN");
+}
+
+#[test]
 fn one_hundred_ops_apply_and_revert() {
     let (mut world, id) = world_with_one();
     let before_hash = world.state_hash();

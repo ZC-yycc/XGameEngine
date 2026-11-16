@@ -15,9 +15,11 @@ use xgc_reflect::{Component, ComponentId, Value};
 mod command;
 mod components;
 mod hash;
+mod snapshot;
 
 pub use command::{Applied, Command, Plan};
 pub use components::{Name, Transform, Velocity};
+pub use snapshot::EntitySnapshot;
 
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
 ///
@@ -35,6 +37,9 @@ pub trait Column: Any + Send + Sync {
     fn set_field(&mut self, row: usize, field: &str, value: &Value) -> Result<(), String>;
     fn validate_field(&self, row: usize, field: &str, value: &Value) -> Result<(), String>;
     fn field_names(&self) -> Vec<&'static str>;
+    fn clone_box(&self) -> Box<dyn Column>;
+    fn empty_like(&self) -> Box<dyn Column>;
+    fn push_from(&mut self, source: &dyn Column, row: usize);
 }
 
 impl<T: Component> Column for Vec<T> {
@@ -82,6 +87,23 @@ impl<T: Component> Column for Vec<T> {
 
     fn field_names(&self) -> Vec<&'static str> {
         T::fields().into_iter().map(|field| field.name).collect()
+    }
+
+    fn clone_box(&self) -> Box<dyn Column> {
+        Box::new(self.clone())
+    }
+
+    fn empty_like(&self) -> Box<dyn Column> {
+        Box::new(Vec::<T>::new())
+    }
+
+    fn push_from(&mut self, source: &dyn Column, row: usize) {
+        let values = source
+            .as_any()
+            .downcast_ref::<Vec<T>>()
+            .expect("组件快照的列类型不一致");
+        let value = values.get(row).expect("组件快照行号越界").clone();
+        self.push(value);
     }
 }
 
@@ -256,6 +278,15 @@ impl World {
     }
 
     pub fn despawn(&mut self, key: EntityKey) -> bool {
+        if self.despawn_raw(key) {
+            self.bump_revision();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn despawn_raw(&mut self, key: EntityKey) -> bool {
         let index = key.index() as usize;
         let Some(meta) = self.metas.get(index).copied() else {
             return false;
@@ -272,7 +303,6 @@ impl World {
         self.metas[index].alive = false;
         self.by_id.remove(&meta.id);
         self.free.push(index as u32);
-        self.revision += 1;
         true
     }
 

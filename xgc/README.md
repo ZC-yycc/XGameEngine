@@ -6,11 +6,12 @@
 
 ## 当前阶段
 
-**M0 已完成；M1 第一刀已落地**：`xgc-base`（持久 ID / 句柄 / 诊断）、
+**M0 已完成；M1 前两刀已落地**：`xgc-base`（持久 ID / 句柄 / 诊断）、
 `xgc-reflect`（组件注册表 / 确定性 schema / 动态字段读写）、`xgc-world`
 （archetype 列式存储、单 / 双组件查询、生成回收、`Command` 事务
-plan / apply / revert、实体级 revision、状态哈希）、`xgc-cli`（`schema` /
-`bench`）、`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
+plan / apply / revert、结构化 `Spawn` / `Despawn` + 实体快照撤销、实体级
+revision、状态哈希）、`xgc-cli`（`schema` / `bench`）、`xgc-xtask`
+（文件预算 / 依赖方向 / schema 确定性门禁）。
 
 实测（i7-10700，release，10 000 个 `(Transform, Velocity)`）：
 
@@ -21,13 +22,14 @@ plan / apply / revert、实体级 revision、状态哈希）、`xgc-cli`（`sche
 | despawn 10 000 | 334 µs |
 
 命令事务（debug，100 条 `SetField`）：plan + apply **77.8 µs**，revert **69.6 µs**；
-apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。
+apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。`Spawn` / `Despawn`
+的 before-image 是 `EntitySnapshot`，销毁后回滚会恢复**原 EntityId 与全部组件**。
 
-`cargo test --workspace` 全绿，`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（11 个 Rust 文件最大 498 行）；schema 两次导出逐字节相同。
+`cargo test --workspace` 全绿（25 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（12 个 Rust 文件最大 528 行）；schema 两次导出逐字节相同。
 
-**尚未实现**：结构化 spawn / despawn 命令与撤销、快照 / 回放、`xgc check`、
-序列化命令、渲染、物理、脚本、编辑器、Agent 协议。这些按主文档 §14 的里程碑推进。
+**尚未实现**：命令序列化（serde）、`xgc check`、快照 / 回放、渲染、物理、脚本、
+编辑器、Agent 协议。这些按主文档 §14 的里程碑推进。
 
 ## 命令
 
