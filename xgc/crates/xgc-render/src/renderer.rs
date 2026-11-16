@@ -1,5 +1,7 @@
 //! 帧渲染入口：DrawList → MeshCache → RenderCache → GPU。
 
+use std::collections::HashMap;
+
 use xgc_world::{UiElement, UiInteraction, UiLayout, World};
 
 use super::assets::MeshCache;
@@ -7,6 +9,7 @@ use super::camera::{camera_view_projection, IDENTITY};
 use super::draw::build_draw_list;
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
+use super::image::ImageData;
 use super::instanced::InstancedRequest;
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
@@ -32,6 +35,7 @@ pub struct Renderer {
     meshes: MeshCache,
     gpu_meshes: GpuMeshCache,
     depth: Option<DepthTarget>,
+    images: HashMap<String, Option<ImageData>>,
 }
 
 impl Renderer {
@@ -41,6 +45,7 @@ impl Renderer {
             meshes,
             gpu_meshes: GpuMeshCache::new(),
             depth: None,
+            images: HashMap::new(),
         }
     }
 
@@ -108,7 +113,11 @@ impl Renderer {
                 .get::<UiElement>(key)
                 .map(|element| (element.text.clone(), element.text_size, element.text_color))
                 .unwrap_or_default();
-            if color[3] <= 0.0 && text.is_empty() {
+            let image_path = world
+                .get::<UiElement>(key)
+                .map(|element| element.image_path.clone())
+                .unwrap_or_default();
+            if color[3] <= 0.0 && text.is_empty() && image_path.is_empty() {
                 return;
             }
             let focused = world
@@ -123,12 +132,13 @@ impl Renderer {
                     text,
                     text_size,
                     text_color,
+                    image_path,
                 ));
             }
         });
-        items.sort_by_key(|(entity, _, _, _, _, _, _)| *entity);
+        items.sort_by_key(|(entity, _, _, _, _, _, _, _)| *entity);
         let mut draws = 0;
-        for (_, rect, color, focused, text, text_size, text_color) in &items {
+        for (_, rect, color, focused, text, text_size, text_color, image_path) in &items {
             if *focused {
                 let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
                 pipeline.draw_mesh_with_mvp(
@@ -151,6 +161,35 @@ impl Renderer {
                     Some(quad_matrix(*rect, viewport)),
                 )?;
                 draws += 1;
+            }
+            if !image_path.is_empty() {
+                if !self.images.contains_key(image_path) {
+                    let loaded = ImageData::load_ppm(std::path::Path::new(image_path)).ok();
+                    self.images.insert(image_path.clone(), loaded);
+                }
+                if let Some(Some(image)) = self.images.get(image_path) {
+                    let colors = image.cells(8, 8);
+                    for row in 0..8 {
+                        for col in 0..8 {
+                            let cell = [
+                                rect[0] + rect[2] * col as f32 / 8.0,
+                                rect[1] + rect[3] * row as f32 / 8.0,
+                                rect[2] / 8.0,
+                                rect[3] / 8.0,
+                            ];
+                            let color = colors[row * 8 + col];
+                            pipeline.draw_mesh_with_mvp(
+                                context,
+                                target,
+                                &mesh,
+                                color,
+                                false,
+                                Some(quad_matrix(cell, viewport)),
+                            )?;
+                            draws += 1;
+                        }
+                    }
+                }
             }
             if !text.is_empty() {
                 let pixel = (*text_size / 7.0).max(1.0);

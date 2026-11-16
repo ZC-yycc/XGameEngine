@@ -234,3 +234,58 @@ fn ui_text_renders_colored_pixels() {
         .chunks_exact(4)
         .any(|pixel| pixel[0] > 0 && pixel[1] == 0 && pixel[2] == 0));
 }
+
+#[test]
+fn ppm_image_loads_and_renders_cells() {
+    use xgc_world::{UiElement, UiLayout};
+
+    let path = std::env::temp_dir().join(format!(
+        "xgc_image_{}_{}.ppm",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut data = b"P6\n2 2\n255\n".to_vec();
+    data.extend_from_slice(&[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]);
+    std::fs::write(&path, &data).unwrap();
+    let image = xgc_render::ImageData::load_ppm(&path).unwrap();
+    assert_eq!(image.width, 2);
+    assert_eq!(image.height, 2);
+    assert_eq!(image.cells(1, 1)[0], [0.5, 0.5, 0.5, 1.0]);
+
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        std::fs::remove_file(&path).unwrap();
+        return;
+    };
+    let desc = ResourceDesc::texture2d(
+        "image-target",
+        "rgba8unorm",
+        16,
+        16,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let resource = context.create_resource(&desc).unwrap();
+    let GpuResource::Texture(texture) = resource else {
+        panic!("image target 不是纹理");
+    };
+    let mut world = World::new();
+    world.spawn((
+        UiElement {
+            image_path: path.to_string_lossy().into_owned(),
+            background: [0.0; 4],
+            ..UiElement::default()
+        },
+        UiLayout {
+            rect: [0.0, 0.0, 16.0, 16.0],
+            ..UiLayout::default()
+        },
+    ));
+    let mut renderer = Renderer::new(MeshCache::new("."));
+    assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 64);
+    let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
+    assert!(pixels.chunks_exact(4).any(|pixel| pixel[0] > 0));
+    std::fs::remove_file(&path).unwrap();
+}
