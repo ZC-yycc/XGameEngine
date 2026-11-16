@@ -3,8 +3,8 @@
 use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
     Animator as XgcAnimator, AudioSource, Camera, CharacterController as XgcCharacter, Component,
-    ComponentId, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script,
-    Transform, UiElement, Value,
+    ComponentId, GlobalTransform, Material, MeshRenderer, Name, Parent, ParticleEmitter,
+    PhysicsBody, Script, Transform, UiElement, Value,
 };
 
 const SCENE: &str = r#"(
@@ -467,4 +467,65 @@ fn maps_ui_element() {
     assert_eq!(field("offset_min").as_vec2(), Some([24.0, 24.0]));
     assert_eq!(field("corner_radius").as_f32(), Some(10.0));
     assert_eq!(field("visible"), Value::Bool(true));
+}
+
+#[test]
+fn maps_particle() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Fx",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Fire",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Particle((
+                                emitting: true,
+                                rate: 30.0,
+                                max_particles: 100,
+                                lifetime: (0.5, 1.0),
+                                speed: (1.0, 2.0),
+                                gravity: (0.0, -1.0, 0.0),
+                                start_color: (1.0, 0.5, 0.1, 0.9),
+                                seed: 7,
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let particle = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == ParticleEmitter::ID)
+        .unwrap();
+    let field = |name: &str| {
+        particle
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("rate").as_f32(), Some(30.0));
+    assert_eq!(field("max_particles"), Value::I64(100));
+    assert_eq!(field("lifetime").as_vec2(), Some([0.5, 1.0]));
+    assert_eq!(field("seed"), Value::I64(7));
 }

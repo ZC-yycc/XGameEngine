@@ -67,12 +67,13 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 `SceneV2` 的实体身份 / 名称 / 父子 / `Transform`，并补默认 `GlobalTransform`；
 参数也可以是一个目录：`xgc migrate <旧场景目录> <输出目录>` 会批量迁移所有
 `.ron`，单场景失败只记入报告、不中断其它场景。Mesh / Material / Camera / Lua /
-Audio / Physics / Animator / Character / UI 已映射到对应组件；Particle 等仍先跳过，
-报告里计数。真实项目目录 4 个场景、35 个实体、72 个旧组件映射成功，0 父缺失。
+Audio / Physics / Animator / Character / UI / Particle 已映射到对应组件；Lod / Rust
+插件组件等仍先跳过，
+报告里计数。真实项目目录 4 个场景、35 个实体、74 个旧组件映射成功，0 父缺失。
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（63 个 Rust 文件最大 600 行）；schema 两次导出逐字节相同，
-14 个内建类型 17925 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
+`xgc-xtask check` 全绿（65 个 Rust 文件最大 600 行）；schema 两次导出逐字节相同，
+15 个内建类型 20059 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
 脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖能力清单与视觉验证。

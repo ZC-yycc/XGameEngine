@@ -14,13 +14,14 @@ use serde::Deserialize;
 use xgc_base::EntityId;
 use xgc_world::{
     Animator as XgcAnimator, AudioSource, Camera, CharacterController as XgcCharacter, Component,
-    ComponentData, ComponentId, EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent,
-    PhysicsBody, Script, Transform, Value, WorldData,
+    ComponentData, EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody,
+    Script, Transform, Value, WorldData,
 };
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
+mod old_particle;
 mod old_ui;
 mod report;
-pub use report::{MigrationBatch, MigrationError, MigrationReport};
+pub use report::{component_id_name, MigrationBatch, MigrationError, MigrationReport};
 #[derive(Debug, Deserialize)]
 struct OldScene {
     format_version: u32,
@@ -238,6 +239,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut animator = None;
         let mut character = None;
         let mut ui = None;
+        let mut particle = None;
         for entry in &old.components.entries {
             match &entry.data {
                 OldComponentData::Mesh(mesh) => {
@@ -290,6 +292,11 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                 }
                 OldComponentData::Ui(value) => {
                     ui = Some(old_ui::convert(value.clone()).map_err(MigrationError::Parse)?);
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Particle(value) => {
+                    particle =
+                        Some(old_particle::convert(value.clone()).map_err(MigrationError::Parse)?);
                     report.mapped_components += 1;
                 }
                 OldComponentData::Animator(old_animator) => {
@@ -445,6 +452,9 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         if let Some(ui) = ui {
             components.push(ui);
         }
+        if let Some(particle) = particle {
+            components.push(particle);
+        }
         if let Some(path) = script_path {
             components.push(ComponentData {
                 component: Script::ID,
@@ -584,17 +594,4 @@ pub fn migrate_dir(input: &Path, output: &Path) -> Result<MigrationBatch, Migrat
         }
     }
     Ok(batch)
-}
-
-/// 只给测试 / 诊断用：组件 ID 是稳定协议，不要在迁移层重新分配。
-pub fn component_id_name(id: ComponentId) -> &'static str {
-    match id {
-        Transform::ID => "core.transform",
-        Name::ID => "core.name",
-        Parent::ID => "core.parent",
-        GlobalTransform::ID => "core.global_transform",
-        XgcAnimator::ID => "animation.animator",
-        XgcCharacter::ID => "physics.character",
-        _ => "unknown",
-    }
 }

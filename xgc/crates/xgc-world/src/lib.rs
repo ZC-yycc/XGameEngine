@@ -5,13 +5,11 @@
 //! 查询只走包含该组件的 archetype。M1 再把列索引静态化、加命令缓冲与变更位图。
 
 #![deny(unsafe_code)]
-
 use std::any::Any;
 use std::collections::HashMap;
 
 use xgc_base::{EntityId, EntityKey};
 pub use xgc_reflect::Component;
-
 mod animation_components;
 mod character_components;
 mod command;
@@ -20,6 +18,7 @@ mod data;
 mod gameplay_components;
 mod hash;
 mod journal;
+mod particle_components;
 mod physics_components;
 mod query;
 mod registry;
@@ -35,6 +34,7 @@ use data::ComponentFactory;
 pub use data::{ComponentData, EntityData, WorldData};
 pub use gameplay_components::{AudioSource, Script};
 pub use journal::{Journal, TxRecord};
+pub use particle_components::ParticleEmitter;
 pub use physics_components::PhysicsBody;
 pub use registry::builtin_registry;
 pub use render_components::{Camera, Material, MeshRenderer};
