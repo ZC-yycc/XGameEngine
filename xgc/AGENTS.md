@@ -36,6 +36,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/lod_components.rs` | LOD 组件：`render.lod` |
 | `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
 | `crates/xgc-world/src/skeleton_components.rs` | 骨架组件：`animation.skeleton` / `animation.bone` / `animation.pose` |
+| `crates/xgc-world/src/state_machine_components.rs` | 动画状态机组件：`animation.state`（machine / state / time / parameters） |
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source`（含 bus）/ `audio.listener` / `audio.gain` / `audio.mixer` |
 | `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / duration / time） |
 | `crates/xgc-world/src/character_components.rs` | 角色组件：`physics.character` |
@@ -53,6 +54,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `RotationKey` / `ScaleKey` / `load_clip_ron` / `AnimationLibrary`（含 `load_dir`）：平移 / 旋转 slerp / 缩放采样、循环、RON / 目录加载、`AnimationPlaybackSystem` 写 Transform |
+| `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、状态写回 Animator.clip / speed / looping |
 | `crates/xgc-sim/src/audio.rs` | `AudioMixerSystem` + WAV 解码 / `AudioLibrary`：监听者距离 + 总线音量写 `audio.gain` |
 | `crates/xgc-sim/src/skeleton.rs` | `SkeletonPoseSystem` / `parse_pose`：关节父链合成世界矩阵 |
 | `crates/xgc-sim/src/mixer.rs` | `SoftwareMixer` / `write_wav_mono`：总线增益混音与 WAV 写出 |
@@ -110,7 +112,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：GPU 蒙皮已接入主帧；下一步状态机 / 分层。
+1. 动画：状态机已接；下一步分层 / 混合。
 2. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
 3. 编辑器：Gizmo 已接；下一步旋转 / 缩放与吸附。
 4. 音频：播放设备 / 流式缓冲。

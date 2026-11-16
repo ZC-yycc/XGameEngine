@@ -31,6 +31,7 @@ fn builtin_registry_has_stable_types() {
             "animation.skeleton",
             "animation.bone",
             "animation.pose",
+            "animation.state",
             "ui.element",
             "ui.layout",
             "ui.interaction",

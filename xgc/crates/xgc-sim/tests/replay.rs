@@ -118,6 +118,7 @@ fn velocity_system_moves_transform() {
             "character_step",
             "character_block",
             "aabb",
+            "animation_state",
             "animation",
             "animation_apply",
             "skeleton_pose",

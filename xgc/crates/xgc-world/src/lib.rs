@@ -23,6 +23,7 @@ mod render_components;
 mod skeleton_components;
 mod slope_components;
 mod snapshot;
+mod state_machine_components;
 mod ui_components;
 mod validate;
 pub use animation_components::Animator;
@@ -42,6 +43,7 @@ pub use render_components::{Camera, Material, MeshRenderer};
 pub use skeleton_components::{Bone, Skeleton, SkeletonPose};
 pub use slope_components::Slope;
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
+pub use state_machine_components::AnimationState;
 pub use ui_components::{UiElement, UiInput, UiInteraction, UiLayout};
 pub use xgc_reflect::{ComponentId, Value};
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
