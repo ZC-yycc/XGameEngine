@@ -1,7 +1,8 @@
 //! 真实 GPU 资源创建；没有适配器时测试直接跳过（不把 CI 绑在 GPU 上）。
 
 use xgc_render::{
-    build_draw_list, GpuContext, GpuResource, Mesh, ResourceDesc, ResourceTable, ResourceUsage,
+    build_draw_list, GpuContext, GpuResource, Mesh, RenderCache, ResourceDesc, ResourceTable,
+    ResourceUsage,
 };
 use xgc_world::{GlobalTransform, Material, MeshRenderer, World};
 
@@ -92,6 +93,14 @@ fn gpu_resources_are_created_when_adapter_available() {
     ));
     let list = build_draw_list(&world);
     context.draw_list(texture, &list).unwrap();
+    let pixels = context.read_texture_rgba8(texture, 2, 2).unwrap();
+    assert_eq!(&pixels[..4], &[0, 0, 255, 255]);
+
+    let mut cache = RenderCache::new();
+    cache.draw_list(&context, texture, &list).unwrap();
+    let pixels = context.read_texture_rgba8(texture, 2, 2).unwrap();
+    assert_eq!(&pixels[..4], &[0, 0, 255, 255]);
+    cache.draw_list(&context, texture, &list).unwrap();
     let pixels = context.read_texture_rgba8(texture, 2, 2).unwrap();
     assert_eq!(&pixels[..4], &[0, 0, 255, 255]);
 
