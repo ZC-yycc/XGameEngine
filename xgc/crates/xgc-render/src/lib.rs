@@ -12,7 +12,7 @@ use std::fmt;
 mod gpu;
 mod resources;
 
-pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
+pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable, TrianglePipeline};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

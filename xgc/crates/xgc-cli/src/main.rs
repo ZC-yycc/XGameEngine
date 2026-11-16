@@ -325,7 +325,24 @@ fn gpu_probe() -> ExitCode {
                             match context.read_texture_rgba8(texture, 4, 4) {
                                 Ok(pixels) => {
                                     println!("gpu: triangle pixel {:?}", &pixels[..4]);
-                                    ExitCode::SUCCESS
+                                    let pipeline =
+                                        context.create_triangle_pipeline(texture.format());
+                                    if let Err(err) =
+                                        pipeline.draw(&context, texture, [0.2, 0.4, 0.6, 1.0])
+                                    {
+                                        eprintln!("材质三角形绘制失败：{err}");
+                                        return ExitCode::from(1);
+                                    }
+                                    match context.read_texture_rgba8(texture, 4, 4) {
+                                        Ok(pixels) => {
+                                            println!("gpu: material pixel {:?}", &pixels[..4]);
+                                            ExitCode::SUCCESS
+                                        }
+                                        Err(err) => {
+                                            eprintln!("材质回读失败：{err}");
+                                            ExitCode::from(1)
+                                        }
+                                    }
                                 }
                                 Err(err) => {
                                     eprintln!("三角形回读失败：{err}");

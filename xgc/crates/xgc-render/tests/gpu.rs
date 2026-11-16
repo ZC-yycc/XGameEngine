@@ -55,6 +55,16 @@ fn gpu_resources_are_created_when_adapter_available() {
     assert!((pixels[1] as i32 - 204).abs() <= 1, "实际 {pixels:?}");
     assert!((pixels[2] as i32 - 51).abs() <= 1, "实际 {pixels:?}");
     assert_eq!(pixels[3], 255);
+
+    let pipeline = context.create_triangle_pipeline(texture.format());
+    pipeline
+        .draw(&context, texture, [0.2, 0.4, 0.6, 1.0])
+        .unwrap();
+    let pixels = context.read_texture_rgba8(texture, 2, 2).unwrap();
+    assert!((pixels[0] as i32 - 51).abs() <= 1, "实际 {pixels:?}");
+    assert!((pixels[1] as i32 - 102).abs() <= 1, "实际 {pixels:?}");
+    assert!((pixels[2] as i32 - 153).abs() <= 1, "实际 {pixels:?}");
+    assert_eq!(pixels[3], 255);
 }
 
 #[test]
