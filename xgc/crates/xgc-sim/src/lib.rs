@@ -232,7 +232,7 @@ pub use animation::{
     load_clip_ron, mul_quat, AnimationClip, AnimationLibrary, AnimationPlaybackSystem, RotationKey,
     ScaleKey, TranslationKey,
 };
-pub use audio::AudioMixerSystem;
+pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
 pub use character::{CharacterBlockSystem, CharacterStepSystem};
 pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
