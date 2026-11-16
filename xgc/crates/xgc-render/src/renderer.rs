@@ -122,6 +122,10 @@ impl Renderer {
                 .get::<UiElement>(key)
                 .map(|element| element.image_path.clone())
                 .unwrap_or_default();
+            let image_mode = world
+                .get::<UiElement>(key)
+                .map(|element| element.image_mode.clone())
+                .unwrap_or_default();
             if color[3] <= 0.0 && text.is_empty() && image_path.is_empty() {
                 return;
             }
@@ -138,12 +142,14 @@ impl Renderer {
                     text_size,
                     text_color,
                     image_path,
+                    image_mode,
                 ));
             }
         });
-        items.sort_by_key(|(entity, _, _, _, _, _, _, _)| *entity);
+        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _)| *entity);
         let mut draws = 0;
-        for (_, rect, color, focused, text, text_size, text_color, image_path) in &items {
+        for (_, rect, color, focused, text, text_size, text_color, image_path, image_mode) in &items
+        {
             if *focused {
                 let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
                 pipeline.draw_mesh_with_mvp(
@@ -200,11 +206,35 @@ impl Renderer {
                 if let (Some((_, pipeline)), Some(Some(image))) =
                     (&self.ui_pipeline, self.ui_textures.get(image_path))
                 {
+                    let mut draw_rect = *rect;
+                    if image_mode == "preserve" {
+                        if let Some(source) =
+                            self.images.get(image_path).and_then(|image| image.as_ref())
+                        {
+                            if source.width > 0
+                                && source.height > 0
+                                && rect[2] > 0.0
+                                && rect[3] > 0.0
+                            {
+                                let source_aspect = source.width as f32 / source.height as f32;
+                                let target_aspect = rect[2] / rect[3];
+                                if source_aspect > target_aspect {
+                                    let height = rect[2] / source_aspect;
+                                    draw_rect[1] += (rect[3] - height) * 0.5;
+                                    draw_rect[3] = height;
+                                } else {
+                                    let width = rect[3] * source_aspect;
+                                    draw_rect[0] += (rect[2] - width) * 0.5;
+                                    draw_rect[2] = width;
+                                }
+                            }
+                        }
+                    }
                     pipeline.draw(
                         context,
                         target,
                         image,
-                        quad_matrix(*rect, viewport),
+                        quad_matrix(draw_rect, viewport),
                         [1.0; 4],
                     )?;
                     draws += 1;

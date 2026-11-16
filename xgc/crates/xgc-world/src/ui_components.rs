@@ -22,6 +22,7 @@ pub struct UiElement {
     pub bold: bool,
     pub wrap: bool,
     pub image_path: String,
+    pub image_mode: String,
     pub clip_children: bool,
 }
 
@@ -46,6 +47,7 @@ impl Default for UiElement {
             bold: false,
             wrap: true,
             image_path: String::new(),
+            image_mode: "stretch".to_string(),
             clip_children: true,
         }
     }
@@ -94,6 +96,12 @@ impl Component for UiElement {
             ),
             FieldDescriptor::new("clip_children", FieldType::Bool, Value::Bool(true))
                 .doc("是否把后代裁剪到本元素矩形"),
+            FieldDescriptor::new(
+                "image_mode",
+                FieldType::String,
+                Value::String("stretch".into()),
+            )
+            .doc("stretch / preserve（保持宽高比）"),
         ]
     }
 
@@ -117,6 +125,7 @@ impl Component for UiElement {
             "bold" => Some(Value::Bool(self.bold)),
             "wrap" => Some(Value::Bool(self.wrap)),
             "image_path" => Some(Value::String(self.image_path.clone())),
+            "image_mode" => Some(Value::String(self.image_mode.clone())),
             "clip_children" => Some(Value::Bool(self.clip_children)),
             _ => None,
         }
@@ -143,6 +152,13 @@ impl Component for UiElement {
             "wrap" => self.wrap = boolean(value, field)?,
             "image_path" => self.image_path = String::from(string(value, field)?),
             "clip_children" => self.clip_children = boolean(value, field)?,
+            "image_mode" => {
+                let mode = string(value, field)?;
+                if !matches!(mode, "stretch" | "preserve") {
+                    return Err(format!("ui.element.image_mode 未知模式：{mode}"));
+                }
+                self.image_mode = mode.to_string();
+            }
             _ => return Err(format!("ui.element 没有字段 {field}")),
         }
         Ok(())

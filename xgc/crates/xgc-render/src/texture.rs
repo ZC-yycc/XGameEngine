@@ -182,8 +182,16 @@ impl TexturePipeline {
                 ],
             });
         let mesh = Mesh::quad();
-        let mut vertex_bytes = Vec::with_capacity(mesh.positions.len() * 12);
-        for position in &mesh.positions {
+        let positions: Vec<[f32; 3]> = if mesh.indices.is_empty() {
+            mesh.positions.clone()
+        } else {
+            mesh.indices
+                .iter()
+                .filter_map(|index| mesh.positions.get(*index as usize).copied())
+                .collect()
+        };
+        let mut vertex_bytes = Vec::with_capacity(positions.len() * 12);
+        for position in &positions {
             for value in position {
                 vertex_bytes.extend_from_slice(&value.to_le_bytes());
             }
@@ -220,7 +228,7 @@ impl TexturePipeline {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, vertices.slice(..));
-            pass.draw(0..mesh.positions.len() as u32, 0..1);
+            pass.draw(0..positions.len() as u32, 0..1);
         }
         context.queue().submit(Some(encoder.finish()));
         Ok(())

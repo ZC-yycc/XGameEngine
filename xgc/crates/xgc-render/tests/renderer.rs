@@ -345,3 +345,61 @@ fn png_image_loads_and_renders_texture() {
     }
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn ui_image_preserve_keeps_aspect() {
+    use xgc_world::{UiElement, UiLayout};
+
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let path = std::env::temp_dir().join(format!(
+        "xgc_preserve_{}_{}.ppm",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut data = b"P6\n2 1\n255\n".to_vec();
+    data.extend_from_slice(&[255, 0, 0, 0, 255, 0]);
+    std::fs::write(&path, &data).unwrap();
+    let desc = ResourceDesc::texture2d(
+        "preserve-target",
+        "rgba8unorm",
+        16,
+        16,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let resource = context.create_resource(&desc).unwrap();
+    let GpuResource::Texture(texture) = resource else {
+        panic!("preserve target 不是纹理");
+    };
+    let mut world = World::new();
+    world.spawn((
+        UiElement {
+            image_path: path.to_string_lossy().into_owned(),
+            image_mode: "preserve".to_string(),
+            background: [0.0; 4],
+            ..UiElement::default()
+        },
+        UiLayout {
+            rect: [0.0, 0.0, 16.0, 16.0],
+            ..UiLayout::default()
+        },
+    ));
+    let mut renderer = Renderer::new(MeshCache::new("."));
+    assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 1);
+    let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
+    assert_eq!(&pixels[..4], &[0, 0, 0, 0], "上下应留黑边");
+    let center = 4 * (8 * 16 + 8);
+    eprintln!(
+        "pixels center {:?} top {:?} y4 {:?}",
+        &pixels[center..center + 4],
+        &pixels[..4],
+        &pixels[4 * (4 * 16 + 8)..4 * (4 * 16 + 8) + 4]
+    );
+    assert!(pixels[center] > 0 || pixels[center + 1] > 0);
+    std::fs::remove_file(&path).unwrap();
+}

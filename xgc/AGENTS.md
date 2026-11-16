@@ -100,7 +100,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. UI：PNG 已接；下一步缩放 / 九宫格。
+1. UI：图片 preserve 已接；下一步九宫格 / cover。
 2. 音频：播放设备 / 流式缓冲。
 3. 动画：骨骼 / 蒙皮。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
