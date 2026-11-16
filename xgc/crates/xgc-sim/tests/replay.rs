@@ -123,6 +123,7 @@ fn velocity_system_moves_transform() {
             "ui_layout",
             "ui_interaction",
             "ui_focus",
+            "audio_mixer",
             "hierarchy"
         ]
     );

@@ -13,9 +13,9 @@ use serde::Deserialize;
 use old_scene::OldScene;
 use xgc_base::EntityId;
 use xgc_world::{
-    AudioSource, Camera, CharacterController as XgcCharacter, Component, ComponentData, EntityData,
-    GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform,
-    UiInteraction, UiLayout, Value, WorldData,
+    AudioGain, AudioSource, Camera, CharacterController as XgcCharacter, Component, ComponentData,
+    EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script,
+    Transform, UiInteraction, UiLayout, Value, WorldData,
 };
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
 mod old_animator;
@@ -496,6 +496,10 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     ("autoplay".to_string(), Value::Bool(audio.autoplay)),
                     ("spatial".to_string(), Value::Bool(audio.spatial)),
                 ],
+            });
+            components.push(ComponentData {
+                component: AudioGain::ID,
+                fields: Vec::new(),
             });
         }
         if let Some(physics) = physics {

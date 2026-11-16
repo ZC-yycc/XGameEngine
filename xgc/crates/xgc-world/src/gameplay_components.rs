@@ -161,3 +161,100 @@ impl Component for AudioSource {
         }
     }
 }
+
+/// 音频监听者：`active` 时按 Transform 位置计算距离衰减。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioListener {
+    pub active: bool,
+}
+
+impl Default for AudioListener {
+    fn default() -> Self {
+        Self { active: true }
+    }
+}
+
+impl Component for AudioListener {
+    const ID: ComponentId = ComponentId(0x0303);
+    const NAME: &'static str = "audio.listener";
+
+    fn default_value() -> Self {
+        Self::default()
+    }
+
+    fn doc() -> &'static str {
+        "音频监听者：active 时按 Transform 位置计算距离衰减"
+    }
+
+    fn fields() -> Vec<FieldDescriptor> {
+        vec![FieldDescriptor::new(
+            "active",
+            FieldType::Bool,
+            Value::Bool(true),
+        )]
+    }
+
+    fn get_field(&self, field: &str) -> Option<Value> {
+        (field == "active").then_some(Value::Bool(self.active))
+    }
+
+    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
+        if field != "active" {
+            return Err(format!("audio.listener 没有字段 {field}"));
+        }
+        self.active = value.as_bool().ok_or_else(|| {
+            format!(
+                "audio.listener.active 期望 bool，得到 {}",
+                value.type_name()
+            )
+        })?;
+        Ok(())
+    }
+}
+
+/// 运行时音频增益：由 AudioMixerSystem 写入。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioGain {
+    pub gain: f32,
+}
+
+impl Default for AudioGain {
+    fn default() -> Self {
+        Self { gain: 1.0 }
+    }
+}
+
+impl Component for AudioGain {
+    const ID: ComponentId = ComponentId(0x0304);
+    const NAME: &'static str = "audio.gain";
+
+    fn default_value() -> Self {
+        Self::default()
+    }
+
+    fn doc() -> &'static str {
+        "运行时音频增益：AudioMixerSystem 写入，0..4"
+    }
+
+    fn fields() -> Vec<FieldDescriptor> {
+        vec![FieldDescriptor::new(
+            "gain",
+            FieldType::F32,
+            Value::F64(1.0),
+        )]
+    }
+
+    fn get_field(&self, field: &str) -> Option<Value> {
+        (field == "gain").then_some(Value::F64(f64::from(self.gain)))
+    }
+
+    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
+        if field != "gain" {
+            return Err(format!("audio.gain 没有字段 {field}"));
+        }
+        self.gain = value
+            .as_f32()
+            .ok_or_else(|| format!("audio.gain.gain 期望 f32，得到 {}", value.type_name()))?;
+        Ok(())
+    }
+}
