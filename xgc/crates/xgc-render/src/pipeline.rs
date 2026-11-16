@@ -4,6 +4,7 @@ use super::assets::MeshCache;
 use super::camera::{mul, IDENTITY};
 use super::draw::DrawList;
 use super::gpu::{GpuContext, GpuError};
+use super::instanced::InstancedPipeline;
 use super::mesh::{builtin_mesh, Mesh};
 
 impl GpuContext {
@@ -192,14 +193,6 @@ impl TrianglePipeline {
         )
     }
 
-    pub(crate) fn layout(&self) -> &wgpu::BindGroupLayout {
-        &self.bind_group_layout
-    }
-
-    pub(crate) fn raw(&self) -> &wgpu::RenderPipeline {
-        &self.pipeline
-    }
-
     pub(crate) fn draw_mesh_request(
         &self,
         context: &GpuContext,
@@ -348,6 +341,7 @@ impl TrianglePipeline {
 pub struct RenderCache {
     pipeline: Option<(wgpu::TextureFormat, TrianglePipeline)>,
     depth_pipeline: Option<(wgpu::TextureFormat, TrianglePipeline)>,
+    pub(crate) instanced: Option<(wgpu::TextureFormat, InstancedPipeline)>,
 }
 
 impl RenderCache {

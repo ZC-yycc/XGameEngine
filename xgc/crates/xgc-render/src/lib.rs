@@ -10,13 +10,12 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
 mod assets;
-mod batch;
 mod camera;
 mod draw;
 mod glb;
 mod gpu;
-mod gpu_material;
 mod gpu_mesh;
+mod instanced;
 mod mesh;
 mod pipeline;
 mod renderer;
@@ -29,8 +28,8 @@ pub use camera::{
 pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use glb::{load_glb, MeshError};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
-pub use gpu_material::GpuMaterialBatch;
 pub use gpu_mesh::{GpuMesh, GpuMeshCache};
+pub use instanced::InstancedPipeline;
 pub use mesh::{builtin_mesh, Mesh};
 pub use pipeline::{RenderCache, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};

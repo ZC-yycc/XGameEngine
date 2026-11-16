@@ -3,18 +3,18 @@
 use xgc_world::World;
 
 use super::assets::MeshCache;
-use super::batch::BatchRequest;
 use super::camera::{camera_view_projection, IDENTITY};
 use super::draw::build_draw_list;
 use super::gpu::{GpuContext, GpuError};
-use super::gpu_material::GpuMaterialBatch;
 use super::gpu_mesh::GpuMeshCache;
+use super::instanced::InstancedRequest;
 use super::pipeline::RenderCache;
 use super::resources::{ResourceDesc, ResourceUsage};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderStats {
     pub draws: usize,
+    pub draw_calls: usize,
     pub passes: usize,
 }
 
@@ -28,7 +28,6 @@ pub struct Renderer {
     cache: RenderCache,
     meshes: MeshCache,
     gpu_meshes: GpuMeshCache,
-    materials: GpuMaterialBatch,
     depth: Option<DepthTarget>,
 }
 
@@ -38,7 +37,6 @@ impl Renderer {
             cache: RenderCache::new(),
             meshes,
             gpu_meshes: GpuMeshCache::new(),
-            materials: GpuMaterialBatch::new(),
             depth: None,
         }
     }
@@ -49,10 +47,6 @@ impl Renderer {
 
     pub fn gpu_mesh_count(&self) -> usize {
         self.gpu_meshes.len()
-    }
-
-    pub fn material_capacity(&self) -> u64 {
-        self.materials.capacity()
     }
 
     fn ensure_depth(
@@ -99,20 +93,20 @@ impl Renderer {
         let height = target.height();
         self.ensure_depth(context, width, height)?;
         let list = build_draw_list(world);
-        let mvp = camera_view_projection(world, width, height).unwrap_or(IDENTITY);
+        let view_proj = camera_view_projection(world, width, height).unwrap_or(IDENTITY);
         let depth = &self.depth.as_ref().unwrap().view;
-        let mut request = BatchRequest {
+        let mut request = InstancedRequest {
             texture: target,
             list: &list,
             meshes: &mut self.meshes,
             gpu_meshes: &mut self.gpu_meshes,
-            materials: &mut self.materials,
-            mvp,
+            view_proj,
             depth,
         };
-        self.cache.draw_list_batched(context, &mut request)?;
+        let draw_calls = self.cache.draw_list_instanced(context, &mut request)?;
         Ok(RenderStats {
             draws: list.len(),
+            draw_calls,
             passes: usize::from(!list.is_empty()),
         })
     }

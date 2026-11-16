@@ -246,8 +246,8 @@ pub(crate) fn render_frame(
         return ExitCode::from(1);
     }
     println!(
-        "render-frame: {} 个 draw，{}x{} -> {}",
-        stats.draws, width, height, output
+        "render-frame: {} 个 draw / {} 次 draw call，{}x{} -> {}",
+        stats.draws, stats.draw_calls, width, height, output
     );
     ExitCode::SUCCESS
 }

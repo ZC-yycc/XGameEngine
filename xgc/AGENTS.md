@@ -59,12 +59,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读 |
-| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → RenderCache → GPU，active camera MVP + 深度附件 |
-| `crates/xgc-render/src/batch.rs` | 单 render pass 批量 draw：一次 encoder / pass、单 uniform 缓冲 + 动态 offset |
-| `crates/xgc-render/src/gpu_material.rs` | `GpuMaterialBatch`：材质 uniform 缓冲 / bind group 跨帧复用 |
+| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → 实例化 → GPU，active camera MVP + 深度附件 |
+| `crates/xgc-render/src/instanced.rs` | 按模型分组的实例化管线 / storage 实例缓冲 |
 | `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用 |
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP |
-| `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：材质 uniform（动态 offset）、顶点 / 索引缓冲、颜色 / 深度管线、draw |
+| `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵） |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引、builtin 网格占位 |
 | `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 |
@@ -86,7 +85,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M2 渲染实例化 / 合批，减少 draw call；迁移层已覆盖全部旧组件类型。
+1. M2 实例化按模型完成（5 draw → 2 draw call）；继续做材质 / 纹理批。
 2. 动画 / 物理 / UI / 粒子运行时系统。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 599 行：动它之前先拆。
