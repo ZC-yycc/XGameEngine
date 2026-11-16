@@ -17,6 +17,7 @@ use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
 
 mod audio;
+mod input_cmd;
 mod render;
 mod world_cmd;
 
@@ -47,6 +48,7 @@ fn main() -> ExitCode {
         Some("audio") => audio(args.next().as_deref()),
         Some("mix") => mix(args.next().as_deref(), args.next().as_deref()),
         Some("play") => audio::play_wav(args.next().as_deref()),
+        Some("input") => input_cmd::inspect(args.next().as_deref()),
         Some("lua") => lua(args.next().as_deref()),
         Some("render-frame") => render::render_frame(
             args.next().as_deref(),

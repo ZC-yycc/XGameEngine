@@ -230,6 +230,7 @@ mod animation_layers;
 mod animation_state;
 mod audio;
 mod character;
+mod input;
 mod mixer;
 mod skeleton;
 mod systems;
@@ -245,6 +246,7 @@ pub use animation_state::{
 };
 pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
 pub use character::{CharacterBlockSystem, CharacterStepSystem};
+pub use input::{Axis, Binding, Combo, InputMap, InputState, KeyCode, MouseButton};
 pub use mixer::{write_wav_mono, SoftwareMixer};
 pub use skeleton::{parse_pose, SkeletonPoseSystem};
 pub use systems::{

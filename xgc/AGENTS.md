@@ -57,6 +57,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `RotationKey` / `ScaleKey` / `load_clip_ron` / `AnimationLibrary`（含 `load_dir`）：平移 / 旋转 slerp / 缩放采样、循环、RON / 目录加载、`AnimationPlaybackSystem` 写 Transform |
 | `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、状态写回 Animator.clip / speed / looping |
 | `crates/xgc-sim/src/animation_layers.rs` | `AnimationLayerSystem` / `LayerDef`：按权重叠加平移 / 旋转 / 缩放 |
+| `crates/xgc-sim/src/input.rs` | `InputMap` / `InputState` / `KeyCode` / `Binding`：解析 `input.ron` 并折叠动作与轴 |
 | `crates/xgc-sim/src/audio.rs` | `AudioMixerSystem` + WAV 解码 / `AudioLibrary`：监听者距离 + 总线音量写 `audio.gain` |
 | `crates/xgc-sim/src/skeleton.rs` | `SkeletonPoseSystem` / `parse_pose`：关节父链合成世界矩阵 |
 | `crates/xgc-sim/src/mixer.rs` | `SoftwareMixer` / `write_wav_mono`：总线增益混音与 WAV 写出 |
@@ -105,6 +106,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-world <世界.json> [帧] / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
+| `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
@@ -119,11 +121,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 迁移：动作输入已接；下一步真实键盘映射与视觉对照。
+1. 迁移：input.ron 已解析；下一步窗口键盘事件接线与视觉对照。
 2. 动画：转场淡入 / 遮罩。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 编辑器：旋转 / 缩放 Gizmo 与吸附。
-5. 现在最大文件 598 行：动它之前先拆。
+5. 现在最大文件 600 行：动它之前先拆。
 
 ## Token 纪律
 
