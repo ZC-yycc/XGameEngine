@@ -12,7 +12,8 @@ use xgc_reflect::{Registry, Value};
 use xgc_sim::{FrameRecord, Simulation};
 use xgc_store::{load_world, save_world};
 use xgc_world::{
-    builtin_registry, Command, ComponentData, ComponentId, Name, Transform, World, WorldData,
+    builtin_registry, Camera, Command, ComponentData, ComponentId, GlobalTransform, Material,
+    MeshRenderer, Name, Transform, World, WorldData,
 };
 
 pub struct EntityRow {
@@ -67,6 +68,38 @@ impl EditorState {
             undo: Vec::new(),
             redo: Vec::new(),
         }
+    }
+
+    /// 最小可见场景：一台相机 + 一个 quad，便于空编辑器直接看到视口内容。
+    pub fn demo() -> Self {
+        let mut world = World::new();
+        let camera_transform = GlobalTransform {
+            position: [0.0, 0.0, 5.0],
+            ..Default::default()
+        };
+        world.spawn((
+            Name {
+                value: "camera".to_string(),
+            },
+            Camera::default(),
+            camera_transform,
+        ));
+        let transform = Transform {
+            scale: [2.0, 2.0, 2.0],
+            ..Default::default()
+        };
+        world.spawn((
+            transform,
+            GlobalTransform::default(),
+            MeshRenderer {
+                model: "builtin://quad".to_string(),
+            },
+            Material {
+                base_color: [0.3, 0.7, 1.0, 1.0],
+                roughness: 0.5,
+            },
+        ));
+        Self::new(world)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {

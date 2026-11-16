@@ -84,11 +84,12 @@ impl EditorApp {
         let Some(viewport) = &mut self.viewport else {
             return;
         };
-        if let Err(err) =
-            viewport
-                .renderer
-                .render(&viewport.context, &viewport.texture, self.state.world())
-        {
+        if let Err(err) = viewport.renderer.render_selected(
+            &viewport.context,
+            &viewport.texture,
+            self.state.world(),
+            self.state.selected(),
+        ) {
             self.status = Some(format!("视口渲染失败：{err}"));
         }
     }
@@ -369,7 +370,7 @@ pub fn run(path: Option<PathBuf>) -> eframe::Result {
                 return Ok(());
             }
         },
-        None => EditorState::default(),
+        None => EditorState::demo(),
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),

@@ -392,10 +392,28 @@ impl Renderer {
         target: &wgpu::Texture,
         world: &World,
     ) -> Result<RenderStats, GpuError> {
+        self.render_selected(context, target, world, None)
+    }
+
+    /// 带选择高亮：选中实体的颜色替换为强调色，用于编辑器视口。
+    pub fn render_selected(
+        &mut self,
+        context: &GpuContext,
+        target: &wgpu::Texture,
+        world: &World,
+        selected: Option<xgc_base::EntityId>,
+    ) -> Result<RenderStats, GpuError> {
         let width = target.width();
         let height = target.height();
         self.ensure_depth(context, width, height)?;
-        let list = build_draw_list(world);
+        let mut list = build_draw_list(world);
+        if let Some(selected) = selected {
+            for item in &mut list.items {
+                if item.entity == selected {
+                    item.color = [1.0, 0.82, 0.2, 1.0];
+                }
+            }
+        }
         let view_proj = camera_view_projection(world, width, height).unwrap_or(IDENTITY);
         let depth = &self.depth.as_ref().unwrap().view;
         let mut request = InstancedRequest {

@@ -64,8 +64,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载、生命周期 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、实体移除时 `on_destroy`、磁盘热重载 |
-| `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play 快照 / Undo/Redo |
-| `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / Ctrl+Z、Ctrl+Y |
+| `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo 场景 |
+| `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / Ctrl+Z、Ctrl+Y |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
@@ -78,7 +78,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读；`from_arc` 复用于编辑器视口 |
-| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → 实例化 → GPU，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本 + 图片叠加 |
+| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → 实例化 → GPU，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本 + 图片叠加；`render_selected` 选择高亮 |
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | `skin_positions` / `identity` / `translation`：CPU 蒙皮 |
@@ -109,7 +109,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 编辑器：Undo/Redo 已接；下一步选择框与 Gizmo。
+1. 编辑器：选中高亮已接；下一步 Gizmo 与相机控制。
 2. 动画：蒙皮已接入渲染；下一步 GPU 蒙皮管线 / 骨骼层级导入。
 3. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
 4. 音频：播放设备 / 流式缓冲。

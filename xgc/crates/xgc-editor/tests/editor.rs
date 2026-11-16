@@ -141,3 +141,13 @@ fn undo_is_rejected_during_play() {
     assert!(editor.undo().is_err());
     assert!(editor.redo().is_err());
 }
+
+#[test]
+fn demo_scene_has_camera_and_drawable() {
+    let editor = EditorState::demo();
+    assert_eq!(editor.entities().len(), 2);
+    assert!(xgc_render::camera_view_projection(editor.world(), 800, 450).is_some());
+    let list = xgc_render::build_draw_list(editor.world());
+    assert_eq!(list.items.len(), 1);
+    assert_eq!(list.items[0].model, "builtin://quad");
+}
