@@ -81,9 +81,11 @@ fn describe_lists_protocol_components_and_world_state() {
             "aabb",
             "animation",
             "animation_apply",
+            "skeleton_pose",
             "ui_layout",
             "ui_interaction",
             "ui_focus",
+            "audio_mixer",
             "hierarchy"
         ])
     );

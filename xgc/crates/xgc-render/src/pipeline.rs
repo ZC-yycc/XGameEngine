@@ -32,6 +32,8 @@ impl GpuContext {
 struct Material {
     color: vec4<f32>,
     mvp: mat4x4<f32>,
+    rect: vec4<f32>,
+    radius: f32,
 };
 
 @group(0) @binding(0)
@@ -43,7 +45,17 @@ fn vs(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
 }
 
 @fragment
-fn fs() -> @location(0) vec4<f32> {
+fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    if (material.radius > 0.0) {
+        let local = position.xy - material.rect.xy;
+        let half = material.rect.zw * 0.5;
+        let inner = max(half - vec2<f32>(material.radius, material.radius), vec2<f32>(0.0, 0.0));
+        let p = abs(local - half) - inner;
+        let distance = length(max(p, vec2<f32>(0.0, 0.0))) + min(max(p.x, p.y), 0.0) - material.radius;
+        if (distance > 0.0) {
+            discard;
+        }
+    }
     return material.color;
 }
 "#;
@@ -63,7 +75,7 @@ fn fs() -> @location(0) vec4<f32> {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: true,
-                            min_binding_size: wgpu::BufferSize::new(80),
+                            min_binding_size: wgpu::BufferSize::new(112),
                         },
                         count: None,
                     }],
@@ -136,6 +148,8 @@ pub(crate) struct MeshDraw<'a> {
     pub(crate) mvp: Option<[f32; 16]>,
     pub(crate) depth: Option<&'a wgpu::TextureView>,
     pub(crate) scissor: Option<[u32; 4]>,
+    pub(crate) rect: [f32; 4],
+    pub(crate) radius: f32,
 }
 
 impl TrianglePipeline {
@@ -191,6 +205,8 @@ impl TrianglePipeline {
                 mvp,
                 depth: None,
                 scissor: None,
+                rect: [0.0; 4],
+                radius: 0.0,
             },
         )
     }
@@ -215,6 +231,39 @@ impl TrianglePipeline {
                 mvp,
                 depth: None,
                 scissor: Some(scissor),
+                rect: [0.0; 4],
+                radius: 0.0,
+            },
+        )
+    }
+}
+
+pub struct RoundedMeshDraw<'a> {
+    pub context: &'a GpuContext,
+    pub texture: &'a wgpu::Texture,
+    pub mesh: &'a Mesh,
+    pub color: [f32; 4],
+    pub mvp: Option<[f32; 16]>,
+    pub scissor: [u32; 4],
+    pub rect: [f32; 4],
+    pub radius: f32,
+}
+
+impl TrianglePipeline {
+    /// 圆角矩形：`rect` 为屏幕像素矩形，`radius` 为像素半径。
+    pub fn draw_mesh_rounded(&self, request: &RoundedMeshDraw<'_>) -> Result<(), GpuError> {
+        self.draw_mesh_request(
+            request.context,
+            &MeshDraw {
+                texture: request.texture,
+                mesh: request.mesh,
+                color: request.color,
+                clear: false,
+                mvp: request.mvp,
+                depth: None,
+                scissor: Some(request.scissor),
+                rect: request.rect,
+                radius: request.radius,
             },
         )
     }
@@ -258,9 +307,14 @@ impl TrianglePipeline {
         for value in matrix {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+        for value in request.rect {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&request.radius.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 12]);
         let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("xgc-material"),
-            size: 80,
+            size: 112,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -521,6 +575,8 @@ impl RenderCache {
                 mvp: Some(mul(mvp, item.transform)),
                 depth: Some(depth),
                 scissor: None,
+                rect: [0.0; 4],
+                radius: 0.0,
             };
             self.depth_pipeline_for(context, format)
                 .draw_mesh_request(context, &request)?;

@@ -407,11 +407,11 @@ fn ui_image_preserve_keeps_aspect() {
 #[test]
 fn cover_uv_crops_wide_source() {
     let uv = xgc_render::cover_uv([4.0, 1.0], [16.0, 16.0]);
-    assert!((uv[0] - 0.25).abs() < 1e-6);
-    assert!((uv[2] - 0.5).abs() < 1e-6);
+    assert!((uv[0] - 0.375).abs() < 1e-6);
+    assert!((uv[2] - 0.25).abs() < 1e-6);
     let tall = xgc_render::cover_uv([1.0, 4.0], [16.0, 16.0]);
-    assert!((tall[1] - 0.25).abs() < 1e-6);
-    assert!((tall[3] - 0.5).abs() < 1e-6);
+    assert!((tall[1] - 0.375).abs() < 1e-6);
+    assert!((tall[3] - 0.25).abs() < 1e-6);
 }
 
 #[test]
@@ -492,6 +492,7 @@ fn ui_clip_scissors_background() {
     world.spawn((
         UiElement {
             background: [1.0, 0.0, 0.0, 1.0],
+            corner_radius: 0.0,
             ..UiElement::default()
         },
         UiLayout {
@@ -521,4 +522,43 @@ fn text_wraps_when_width_is_tight() {
         .iter()
         .fold(f32::MIN, |max, position| max.max(position[1]));
     assert!(max - min > 0.05, "换行后应出现两行高度：{min}..{max}");
+}
+
+#[test]
+fn ui_background_rounds_corners() {
+    use xgc_world::{UiElement, UiLayout};
+
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let desc = ResourceDesc::texture2d(
+        "round-target",
+        "rgba8unorm",
+        16,
+        16,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let resource = context.create_resource(&desc).unwrap();
+    let GpuResource::Texture(texture) = resource else {
+        panic!("round target 不是纹理");
+    };
+    let mut world = World::new();
+    world.spawn((
+        UiElement {
+            background: [1.0, 0.0, 0.0, 1.0],
+            corner_radius: 8.0,
+            ..UiElement::default()
+        },
+        UiLayout {
+            rect: [0.0, 0.0, 16.0, 16.0],
+            ..UiLayout::default()
+        },
+    ));
+    let mut renderer = Renderer::new(MeshCache::new("."));
+    renderer.render_ui(&context, &texture, &world).unwrap();
+    let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
+    assert_eq!(&pixels[..4], &[0, 0, 0, 0], "圆角外应透明");
+    let center = 4 * (8 * 16 + 8);
+    assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
 }

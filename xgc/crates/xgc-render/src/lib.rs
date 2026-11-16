@@ -37,7 +37,7 @@ pub use gpu_mesh::{GpuMesh, GpuMeshCache};
 pub use image::ImageData;
 pub use instanced::InstancedPipeline;
 pub use mesh::{builtin_mesh, Mesh, SkinData};
-pub use pipeline::{RenderCache, TrianglePipeline};
+pub use pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 pub use skinning::{identity, skin_positions, translation};

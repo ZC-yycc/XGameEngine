@@ -12,7 +12,7 @@ use super::gpu_mesh::GpuMeshCache;
 use super::image::ImageData;
 use super::instanced::InstancedRequest;
 use super::mesh::Mesh;
-use super::pipeline::RenderCache;
+use super::pipeline::{RenderCache, RoundedMeshDraw};
 use super::resources::{ResourceDesc, ResourceUsage};
 use super::text::text_mesh_wrapped;
 use super::texture::TexturePipeline;
@@ -146,6 +146,10 @@ impl Renderer {
                 .get::<UiElement>(key)
                 .map(|element| element.wrap)
                 .unwrap_or(true);
+            let corner_radius = world
+                .get::<UiElement>(key)
+                .map(|element| element.corner_radius)
+                .unwrap_or(0.0);
             if color[3] <= 0.0 && text.is_empty() && image_path.is_empty() {
                 return;
             }
@@ -166,10 +170,11 @@ impl Renderer {
                     image_slice,
                     layout.clip,
                     wrap,
+                    corner_radius,
                 ));
             }
         });
-        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _, _, _)| *entity);
+        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _, _, _, _)| *entity);
         let mut draws = 0;
         for (
             _,
@@ -184,6 +189,7 @@ impl Renderer {
             image_slice,
             clip,
             wrap,
+            corner_radius,
         ) in &items
         {
             let Some(scissor) = scissor_rect(*clip, viewport) else {
@@ -191,25 +197,29 @@ impl Renderer {
             };
             if *focused {
                 let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
-                pipeline.draw_mesh_scissored(
+                pipeline.draw_mesh_rounded(&RoundedMeshDraw {
                     context,
-                    target,
-                    &mesh,
-                    [1.0, 0.8, 0.2, 1.0],
-                    Some(quad_matrix(ring, viewport)),
+                    texture: target,
+                    mesh: &mesh,
+                    color: [1.0, 0.8, 0.2, 1.0],
+                    mvp: Some(quad_matrix(ring, viewport)),
                     scissor,
-                )?;
+                    rect: ring,
+                    radius: *corner_radius + 2.0,
+                })?;
                 draws += 1;
             }
             if color[3] > 0.0 {
-                pipeline.draw_mesh_scissored(
+                pipeline.draw_mesh_rounded(&RoundedMeshDraw {
                     context,
-                    target,
-                    &mesh,
-                    *color,
-                    Some(quad_matrix(*rect, viewport)),
+                    texture: target,
+                    mesh: &mesh,
+                    color: *color,
+                    mvp: Some(quad_matrix(*rect, viewport)),
                     scissor,
-                )?;
+                    rect: *rect,
+                    radius: *corner_radius,
+                })?;
                 draws += 1;
             }
             if !image_path.is_empty() {

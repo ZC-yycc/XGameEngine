@@ -81,7 +81,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/instanced.rs` | 按模型分组的实例化管线 / storage 实例缓冲 |
 | `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用 |
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP |
-| `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor 裁剪、实例化缓存 |
+| `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵） |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引 + `SkinData`（关节 / 权重 / 逆绑定）、builtin 网格占位 |
 | `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 |
@@ -104,7 +104,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 ## 当前下一步（按顺序）
 
 1. 动画：CPU 蒙皮已接；下一步蒙皮 GPU 管线 / 骨骼层级导入。
-2. UI：圆角 / UI 绘制批次。
+2. UI：圆角 / scissor 已接；下一步 UI 绘制批次。
 3. 音频：播放设备 / 流式缓冲。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 5. 现在最大文件 588 行：动它之前先拆。
