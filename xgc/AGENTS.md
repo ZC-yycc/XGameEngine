@@ -81,7 +81,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → 实例化 → GPU，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本 + 图片叠加；`render_selected` 选择高亮 |
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
-| `crates/xgc-render/src/skinning.rs` | `skin_positions` / `identity` / `translation`：CPU 蒙皮 |
+| `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
+| `crates/xgc-render/src/skinned.rs` | GPU 蒙皮：关节索引 / 权重顶点属性、64 关节 uniform、`GpuSkinMeshCache`、单网格 `SkinnedPipeline` |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（按宽度换行） |
 | `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用；`upload_deformed` 覆盖蒙皮顶点 |
@@ -109,7 +110,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：GLB 骨骼层级已接；下一步 GPU 蒙皮管线。
+1. 动画：GPU 蒙皮独立管线已通；下一步接入主帧（深度 / 实例化 pass）。
 2. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
 3. 编辑器：Gizmo 已接；下一步旋转 / 缩放与吸附。
 4. 音频：播放设备 / 流式缓冲。
