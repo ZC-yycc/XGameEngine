@@ -48,6 +48,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
+| `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey`：关键帧排序、线性采样、循环 |
 | `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
@@ -86,8 +87,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 物理：重力 / 地面 / AABB / 球体 / 角色贴地 / 起跳已接；下一步台阶与斜坡。
-2. 动画：时钟已接入，下一步骨骼 / 剪辑采样。
+1. 动画：时钟 + 平移采样已接；下一步剪辑资产加载与骨骼采样。
+2. 物理：台阶与斜坡。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 577 行：动它之前先拆。
 
