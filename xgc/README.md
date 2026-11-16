@@ -60,7 +60,7 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 重力、`CharacterJumpSystem` 消费起跳请求、`VelocitySystem` 积分、
 `GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴地、
 `AabbCollisionSystem` 两两分离动态刚体（球体按中心线精确分离）、`AnimatorSystem`
-推进动画时钟、`UiLayoutSystem` 算 UI 根矩形、`HierarchySystem` 合成世界变换）→
+推进动画时钟、`UiLayoutSystem` 算 UI 根 / 父相对矩形并继承可见性、`HierarchySystem` 合成世界变换）→
 快照 / trace。
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
@@ -81,7 +81,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（75 个 Rust 文件最大 581 行）；schema 两次导出逐字节相同，
+`xgc-xtask check` 全绿（76 个 Rust 文件最大 581 行）；schema 两次导出逐字节相同，
 18 个内建类型 23070 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /

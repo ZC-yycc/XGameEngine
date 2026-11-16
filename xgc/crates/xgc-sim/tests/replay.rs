@@ -531,3 +531,36 @@ fn ui_layout_resolves_anchor_and_offsets() {
     assert_eq!(layout.rect, [110.0, 20.0, 100.0, 40.0]);
     assert!(layout.visible);
 }
+
+#[test]
+fn ui_layout_is_parent_relative_and_inherits_visibility() {
+    let mut world = World::new();
+    let parent = world.spawn((
+        UiElement {
+            offset_min: [100.0, 50.0],
+            offset_max: [300.0, 150.0],
+            visible: false,
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    let parent_id = world.entity(parent).unwrap();
+    let child = world.spawn((
+        Parent { entity: parent_id },
+        UiElement {
+            offset_min: [10.0, 20.0],
+            offset_max: [60.0, 50.0],
+            visible: true,
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(UiLayoutSystem {
+        viewport: [1000.0, 1000.0],
+    });
+    schedule.run(&mut world, 0.016);
+    let layout = world.get::<UiLayout>(child).unwrap();
+    assert_eq!(layout.rect, [110.0, 70.0, 50.0, 30.0]);
+    assert!(!layout.visible, "隐藏父节点应让子节点不可见");
+}

@@ -50,7 +50,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `load_clip_ron` / `AnimationLibrary`：关键帧排序、线性采样、循环、RON 加载 |
-| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `UiLayoutSystem` / `GravitySystem` / `HierarchySystem` |
+| `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem`：锚点 / 偏移、父相对矩形、可见性继承 |
+| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe（组件 / sim / render 能力清单）/ engine.diagnostics / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
@@ -88,7 +89,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. UI：根布局已接；下一步父节点相对布局、裁剪与命中测试。
+1. UI：父相对布局已接；下一步裁剪与命中测试。
 2. 动画：剪辑资产注册与骨骼采样。
 3. 物理：台阶与斜坡。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。

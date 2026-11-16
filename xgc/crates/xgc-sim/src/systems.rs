@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use xgc_base::{EntityId, EntityKey};
 use xgc_world::{
     Animator, CharacterController, Component, GlobalTransform, Parent, PhysicsBody, Transform,
-    UiElement, UiLayout, Value, Velocity, World,
+    Value, Velocity, World,
 };
 
 use super::{System, SystemAccess};
@@ -303,49 +303,6 @@ fn overlap(a: &BodyBox, b: &BodyBox) -> Option<(usize, f32)> {
         }
     }
     Some((best, penetration[best]))
-}
-
-/// UI 根布局：锚点 + 偏移 → 屏幕矩形；父节点相对布局留给后续。
-#[derive(Clone, Copy, Debug)]
-pub struct UiLayoutSystem {
-    pub viewport: [f32; 2],
-}
-
-impl Default for UiLayoutSystem {
-    fn default() -> Self {
-        Self {
-            viewport: [1280.0, 720.0],
-        }
-    }
-}
-
-impl System for UiLayoutSystem {
-    fn name(&self) -> &'static str {
-        "ui_layout"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess {
-            reads: vec![UiElement::ID],
-            writes: vec![UiLayout::ID],
-        }
-    }
-
-    fn run(&mut self, world: &mut World, _dt: f32) {
-        let viewport = self.viewport;
-        world.for_each2_mut::<UiElement, UiLayout>(|_, element, layout| {
-            let x = element.anchor_min[0] * viewport[0] + element.offset_min[0];
-            let y = element.anchor_min[1] * viewport[1] + element.offset_min[1];
-            let width = (element.anchor_max[0] - element.anchor_min[0]) * viewport[0]
-                + element.offset_max[0]
-                - element.offset_min[0];
-            let height = (element.anchor_max[1] - element.anchor_min[1]) * viewport[1]
-                + element.offset_max[1]
-                - element.offset_min[1];
-            layout.rect = [x, y, width, height];
-            layout.visible = element.visible;
-        });
-    }
 }
 
 /// 动画时钟：自动播放的 Animator 按 speed 推进，duration 有效时循环 / 截断。

@@ -218,12 +218,14 @@ impl Schedule {
 /// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
 mod animation;
 mod systems;
+mod ui;
 
 pub use animation::{load_clip_ron, AnimationClip, AnimationLibrary, TranslationKey};
 pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
-    GroundCollisionSystem, HierarchySystem, PhysicsSystem, UiLayoutSystem, VelocitySystem,
+    GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,
 };
+pub use ui::UiLayoutSystem;
 
 pub struct Simulation {
     world: World,
