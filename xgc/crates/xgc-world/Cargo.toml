@@ -1,0 +1,11 @@
+[package]
+name = "xgc-world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGame Core 的 archetype 列式世界"
+
+[dependencies]
+xgc-base = { path = "../xgc-base" }
+xgc-reflect = { path = "../xgc-reflect" }

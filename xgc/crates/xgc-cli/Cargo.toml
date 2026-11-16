@@ -1,0 +1,17 @@
+[package]
+name = "xgc-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGame Core 命令行：schema / bench"
+
+[[bin]]
+name = "xgc"
+path = "src/main.rs"
+
+[dependencies]
+xgc-base = { path = "../xgc-base" }
+xgc-reflect = { path = "../xgc-reflect" }
+xgc-world = { path = "../xgc-world" }
+serde_json.workspace = true
