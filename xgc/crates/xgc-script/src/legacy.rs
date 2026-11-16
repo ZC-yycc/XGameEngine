@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use mlua::{Lua, Table};
 use xgc_base::EntityId;
-use xgc_world::{AnimationState, Command, Component, Transform, Value as FieldValue, Velocity};
+use xgc_world::{
+    AnimationState, Command, Component, Transform, UiElement, Value as FieldValue, Velocity,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct EntityView {
@@ -18,8 +20,10 @@ pub struct EntityView {
     pub rotation: [f32; 4],
     pub velocity: [f32; 3],
     pub anim_parameters: String,
+    pub clicked: bool,
+    pub hovered: bool,
+    pub pressed: bool,
 }
-
 #[derive(Clone, Debug, Default)]
 pub struct ScriptView {
     pub delta: f32,
@@ -260,10 +264,6 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
 
     // 旧脚本里出现但当前无实现的调用：静默 no-op，避免迁移脚本直接报错。
     for name in [
-        "ui_set_text",
-        "ui_set_size",
-        "ui_set_bg_color",
-        "ui_set_visible",
         "set_anim_additive_weight",
         "set_anim_layer_param",
         "set_anim_layer_weight",
@@ -274,11 +274,89 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
             .map_err(|err| err.to_string())?;
         globals.set(name, function).map_err(|err| err.to_string())?;
     }
+    let ui_text_commands = Rc::clone(commands);
+    globals
+        .set(
+            "ui_set_text",
+            lua.create_function(move |_, (_ctx, id, text): (mlua::Value, u64, String)| {
+                push_set(
+                    &ui_text_commands,
+                    id,
+                    UiElement::ID,
+                    "text",
+                    FieldValue::String(text),
+                );
+                Ok(())
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+    let ui_size_commands = Rc::clone(commands);
+    globals
+        .set(
+            "ui_set_size",
+            lua.create_function(
+                move |_, (_ctx, id, width, height): (mlua::Value, u64, f32, f32)| {
+                    push_set(
+                        &ui_size_commands,
+                        id,
+                        UiElement::ID,
+                        "offset_max",
+                        FieldValue::Vec2([f64::from(width), f64::from(height)]),
+                    );
+                    Ok(())
+                },
+            )
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+    let ui_color_commands = Rc::clone(commands);
+    globals
+        .set(
+            "ui_set_bg_color",
+            lua.create_function(
+                move |_, (_ctx, id, r, g, b, a): (mlua::Value, u64, f32, f32, f32, f32)| {
+                    push_set(
+                        &ui_color_commands,
+                        id,
+                        UiElement::ID,
+                        "background",
+                        FieldValue::Vec4([f64::from(r), f64::from(g), f64::from(b), f64::from(a)]),
+                    );
+                    Ok(())
+                },
+            )
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+    let ui_visible_commands = Rc::clone(commands);
+    globals
+        .set(
+            "ui_set_visible",
+            lua.create_function(move |_, (_ctx, id, visible): (mlua::Value, u64, bool)| {
+                push_set(
+                    &ui_visible_commands,
+                    id,
+                    UiElement::ID,
+                    "visible",
+                    FieldValue::Bool(visible),
+                );
+                Ok(())
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+    let click_view = Rc::clone(view);
     globals
         .set(
             "ui_clicked",
-            lua.create_function(|_, _: mlua::MultiValue| Ok(false))
-                .map_err(|err| err.to_string())?,
+            lua.create_function(move |_, (_ctx, id): (mlua::Value, u64)| {
+                Ok(click_view
+                    .borrow()
+                    .entity(id)
+                    .is_some_and(|entity| entity.clicked))
+            })
+            .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
     globals

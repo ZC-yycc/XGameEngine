@@ -183,6 +183,18 @@ impl ScriptRuntime {
                             }
                         }
                     }
+                    0x0603 => {
+                        for (field, value) in &component.fields {
+                            if let Value::Bool(value) = value {
+                                match field.as_str() {
+                                    "clicked" => row.clicked = *value,
+                                    "hovered" => row.hovered = *value,
+                                    "pressed" => row.pressed = *value,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }

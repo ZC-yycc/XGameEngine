@@ -394,3 +394,42 @@ fn legacy_entity_lookup_and_set_pos() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn legacy_ui_api_writes_element_fields() {
+    use xgc_world::{Script, UiElement, UiInteraction, World};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_legacy_ui_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("hud.lua"),
+        "function update(ctx)\n  if ui_clicked(ctx, self_id(ctx)) then\n    ui_set_text(ctx, self_id(ctx), 'hit')\n    ui_set_size(ctx, self_id(ctx), 42.0, 14.0)\n    ui_set_bg_color(ctx, self_id(ctx), 1.0, 0.0, 0.0, 1.0)\n  end\nend\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    let entity = world.spawn((
+        UiElement::default(),
+        UiInteraction {
+            clicked: true,
+            ..Default::default()
+        },
+        Script {
+            path: "hud.lua".to_string(),
+        },
+    ));
+    let id = world.entity(entity).unwrap();
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    let element = world.get::<UiElement>(world.key(id).unwrap()).unwrap();
+    assert_eq!(element.text, "hit");
+    assert_eq!(element.offset_max, [42.0, 14.0]);
+    assert_eq!(element.background, [1.0, 0.0, 0.0, 1.0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
