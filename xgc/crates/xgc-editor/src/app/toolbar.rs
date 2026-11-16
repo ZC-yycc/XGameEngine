@@ -81,6 +81,18 @@ impl EditorApp {
                     },
                 );
             }
+            ui.add(egui::TextEdit::singleline(&mut self.script_root).hint_text("脚本根目录"));
+            if ui.button("Play Scripts").clicked() && !self.script_root.is_empty() {
+                self.status = Some(
+                    match self
+                        .state
+                        .play_with_scripts(std::path::Path::new(&self.script_root))
+                    {
+                        Ok(()) => "Play Scripts".to_string(),
+                        Err(err) => err,
+                    },
+                );
+            }
             if ui.button("Play").clicked() {
                 self.status = Some(match self.state.play() {
                     Ok(()) => "Play".to_string(),

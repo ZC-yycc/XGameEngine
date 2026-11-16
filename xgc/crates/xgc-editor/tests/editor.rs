@@ -257,3 +257,51 @@ fn reverts_prefab_preserving_root_id_and_transform() {
     assert!(editor.entities().iter().any(|entity| entity.id == root));
     assert_eq!(editor.entity_position(root), Some([7.0, 8.0, 9.0]));
 }
+
+#[test]
+fn editor_play_runs_scripts_and_reads_input() {
+    use xgc_sim::{InputState, KeyCode};
+    use xgc_world::{Script, Transform};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_editor_scripts_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("input.ron"),
+        "InputMap(actions: { \"Jump\": [Key(Space)] }, axes: {})",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("move.lua"),
+        "function update(ctx)\n  if action_pressed(ctx, 'Jump') then\n    local p = entity_pos(ctx, self_id(ctx))\n    set_pos(ctx, p.x + 1.0, p.y, p.z)\n  end\nend\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        Script {
+            path: "move.lua".to_string(),
+        },
+    ));
+    let id = world.entity(entity).unwrap();
+    let mut editor = EditorState::new(world);
+    editor.play_with_scripts(&dir).unwrap();
+    assert!(editor.input_map().is_some(), "input.ron 应被解析");
+    let mut input = InputState::default();
+    input.keys.insert(KeyCode::Space);
+    editor.apply_input(&input);
+    for _ in 0..3 {
+        editor.step().unwrap();
+    }
+    assert_eq!(editor.script_entity_count(), 1, "脚本应已装载");
+    assert_eq!(editor.entity_position(id), Some([3.0, 0.0, 0.0]));
+    editor.stop().unwrap();
+    assert_eq!(editor.entity_position(id), Some([0.0, 0.0, 0.0]));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

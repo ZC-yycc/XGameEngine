@@ -2979,10 +2979,12 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "pxfm",
+ "xgc-asset",
  "xgc-base",
  "xgc-migrate",
  "xgc-reflect",
  "xgc-render",
+ "xgc-script",
  "xgc-sim",
  "xgc-store",
  "xgc-world",

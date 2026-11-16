@@ -7,6 +7,7 @@ mod toolbar;
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
+use xgc_sim::{InputState, KeyCode, MouseButton};
 
 use xgc_render::{GpuContext, MeshCache, Renderer};
 
@@ -58,6 +59,7 @@ pub struct EditorApp {
     scale_step: f32,
     prefab_path: String,
     prefab_position: [f32; 3],
+    script_root: String,
 }
 
 impl EditorApp {
@@ -77,6 +79,7 @@ impl EditorApp {
             scale_step: 0.1,
             prefab_path: String::new(),
             prefab_position: [0.0; 3],
+            script_root: String::new(),
         }
     }
 
@@ -416,6 +419,7 @@ fn value_editor(ui: &mut egui::Ui, value: &Value, ty: &str) -> Option<Value> {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.state.apply_input(&input_state(ctx));
         let (undo, redo) = ctx.input(|input| {
             let command = input.modifiers.command;
             (
@@ -485,6 +489,42 @@ impl eframe::App for EditorApp {
     }
 }
 
+fn input_state(ctx: &egui::Context) -> InputState {
+    let mut state = InputState::default();
+    ctx.input(|input| {
+        let mut key = |code: egui::Key, mapped: KeyCode| {
+            if input.key_down(code) {
+                state.keys.insert(mapped);
+            }
+        };
+        key(egui::Key::Space, KeyCode::Space);
+        key(egui::Key::W, KeyCode::KeyW);
+        key(egui::Key::A, KeyCode::KeyA);
+        key(egui::Key::S, KeyCode::KeyS);
+        key(egui::Key::D, KeyCode::KeyD);
+        key(egui::Key::E, KeyCode::KeyE);
+        key(egui::Key::Q, KeyCode::KeyQ);
+        key(egui::Key::R, KeyCode::KeyR);
+        key(egui::Key::P, KeyCode::KeyP);
+        key(egui::Key::ArrowUp, KeyCode::ArrowUp);
+        key(egui::Key::ArrowDown, KeyCode::ArrowDown);
+        key(egui::Key::ArrowLeft, KeyCode::ArrowLeft);
+        key(egui::Key::ArrowRight, KeyCode::ArrowRight);
+        if input.modifiers.shift {
+            state.keys.insert(KeyCode::ShiftLeft);
+        }
+        if input.pointer.primary_down() {
+            state.mouse.insert(MouseButton::Left);
+        }
+        if input.pointer.secondary_down() {
+            state.mouse.insert(MouseButton::Right);
+        }
+        if input.pointer.middle_down() {
+            state.mouse.insert(MouseButton::Middle);
+        }
+    });
+    state
+}
 pub fn run(path: Option<PathBuf>) -> eframe::Result {
     let state = match path {
         Some(path) => match EditorState::open(&path) {

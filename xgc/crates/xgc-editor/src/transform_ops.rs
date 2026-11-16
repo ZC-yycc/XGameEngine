@@ -7,11 +7,12 @@ use crate::EditorState;
 
 impl EditorState {
     pub fn entity_position(&self, id: EntityId) -> Option<[f32; 3]> {
-        let key = self.world.key(id)?;
-        if let Some(transform) = self.world.get::<GlobalTransform>(key) {
+        let world = self.world();
+        let key = world.key(id)?;
+        if let Some(transform) = world.get::<GlobalTransform>(key) {
             return Some(transform.position);
         }
-        self.world
+        world
             .get::<Transform>(key)
             .map(|transform| transform.position)
     }
@@ -25,10 +26,9 @@ impl EditorState {
     }
 
     pub fn entity_scale(&self, id: EntityId) -> Option<[f32; 3]> {
-        let key = self.world.key(id)?;
-        self.world
-            .get::<Transform>(key)
-            .map(|transform| transform.scale)
+        let world = self.world();
+        let key = world.key(id)?;
+        world.get::<Transform>(key).map(|transform| transform.scale)
     }
 
     pub fn set_entity_scale(&mut self, id: EntityId, scale: [f32; 3]) -> Result<(), String> {
@@ -40,8 +40,9 @@ impl EditorState {
     }
 
     pub fn entity_rotation(&self, id: EntityId) -> Option<[f32; 4]> {
-        let key = self.world.key(id)?;
-        self.world
+        let world = self.world();
+        let key = world.key(id)?;
+        world
             .get::<Transform>(key)
             .map(|transform| transform.rotation)
     }

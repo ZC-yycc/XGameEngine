@@ -4,6 +4,7 @@
 
 mod app;
 mod gizmo;
+mod play;
 mod prefab_ops;
 mod transform_ops;
 pub use app::run;
@@ -13,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use xgc_base::EntityId;
 use xgc_reflect::{Registry, Value};
-use xgc_sim::{FrameRecord, Simulation};
+use xgc_script::ScriptRuntime;
+use xgc_sim::{InputMap, Simulation};
 use xgc_store::{load_world, save_world};
 use xgc_world::{
     builtin_registry, Camera, Command, ComponentData, ComponentId, GlobalTransform, Material,
@@ -41,6 +43,8 @@ pub struct ComponentRow {
 struct PlaySession {
     before: WorldData,
     simulation: Simulation,
+    runtime: Option<ScriptRuntime>,
+    input: Option<InputMap>,
 }
 
 pub struct EditorState {
@@ -496,47 +500,6 @@ impl EditorState {
         let path = path.as_ref().to_path_buf();
         save_world(&path, &self.world.world_data()).map_err(|err| format!("保存失败：{err}"))?;
         self.path = Some(path);
-        self.dirty = false;
-        Ok(())
-    }
-
-    pub fn play(&mut self) -> Result<(), String> {
-        if self.play.is_some() {
-            return Ok(());
-        }
-        let before = self.world.world_data();
-        let mut world = World::new();
-        world
-            .restore_world_data(&before)
-            .map_err(|err| format!("进入 Play 失败：{err}"))?;
-        self.play = Some(PlaySession {
-            before,
-            simulation: Simulation::new(world),
-        });
-        Ok(())
-    }
-
-    pub fn step(&mut self) -> Result<Option<FrameRecord>, String> {
-        let Some(session) = &mut self.play else {
-            return Ok(None);
-        };
-        session
-            .simulation
-            .step(Vec::new())
-            .map(Some)
-            .map_err(|err| format!("Play 帧失败：{err:?}"))
-    }
-
-    pub fn stop(&mut self) -> Result<(), String> {
-        let Some(session) = self.play.take() else {
-            return Ok(());
-        };
-        let mut world = World::new();
-        world
-            .restore_world_data(&session.before)
-            .map_err(|err| format!("退出 Play 失败：{err}"))?;
-        self.world = world;
-        self.selected = None;
         self.dirty = false;
         Ok(())
     }
