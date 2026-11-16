@@ -4,28 +4,37 @@ use super::assets::MeshCache;
 use super::camera::mul;
 use super::draw::DrawList;
 use super::gpu::{GpuContext, GpuError};
+use super::gpu_mesh::GpuMeshCache;
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
 
 struct PreparedDraw {
+    mesh_key: String,
     bind_group: wgpu::BindGroup,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: Option<wgpu::Buffer>,
-    vertices: u32,
-    indices: u32,
+}
+
+pub(crate) struct BatchRequest<'a> {
+    pub(crate) texture: &'a wgpu::Texture,
+    pub(crate) list: &'a DrawList,
+    pub(crate) meshes: &'a mut MeshCache,
+    pub(crate) gpu_meshes: &'a mut GpuMeshCache,
+    pub(crate) mvp: [f32; 16],
+    pub(crate) depth: &'a wgpu::TextureView,
 }
 
 impl RenderCache {
     /// 所有 draw 录进同一个 render pass；颜色 / 深度只 clear 一次。
-    pub fn draw_list_batched(
+    pub(crate) fn draw_list_batched(
         &mut self,
         context: &GpuContext,
-        texture: &wgpu::Texture,
-        list: &DrawList,
-        meshes: &mut MeshCache,
-        mvp: [f32; 16],
-        depth: &wgpu::TextureView,
+        request: &mut BatchRequest<'_>,
     ) -> Result<(), GpuError> {
+        let texture = request.texture;
+        let list = request.list;
+        let meshes = &mut *request.meshes;
+        let gpu_meshes = &mut *request.gpu_meshes;
+        let mvp = request.mvp;
+        let depth = request.depth;
         if list.items.is_empty() {
             return context.clear_texture(texture, wgpu::Color::BLACK);
         }
@@ -41,37 +50,7 @@ impl RenderCache {
             if mesh.positions.is_empty() {
                 continue;
             }
-            let vertex_bytes: Vec<u8> = mesh
-                .positions
-                .iter()
-                .flat_map(|position| position.iter().flat_map(|value| value.to_le_bytes()))
-                .collect();
-            let vertex_buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
-                label: Some("xgc-batch-vertices"),
-                size: vertex_bytes.len() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            context
-                .queue()
-                .write_buffer(&vertex_buffer, 0, &vertex_bytes);
-            let index_buffer = if mesh.indices.is_empty() {
-                None
-            } else {
-                let index_bytes: Vec<u8> = mesh
-                    .indices
-                    .iter()
-                    .flat_map(|index| index.to_le_bytes())
-                    .collect();
-                let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("xgc-batch-indices"),
-                    size: index_bytes.len() as u64,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                context.queue().write_buffer(&buffer, 0, &index_bytes);
-                Some(buffer)
-            };
+            gpu_meshes.upload(context, &item.model, mesh);
 
             let mut uniform_bytes: Vec<u8> = item
                 .color
@@ -99,11 +78,8 @@ impl RenderCache {
                     }],
                 });
             prepared.push(PreparedDraw {
+                mesh_key: item.model.clone(),
                 bind_group,
-                vertex_buffer,
-                index_buffer,
-                vertices: mesh.positions.len() as u32,
-                indices: mesh.indices.len() as u32,
             });
         }
 
@@ -139,12 +115,15 @@ impl RenderCache {
             pass.set_pipeline(pipeline.raw());
             for draw in &prepared {
                 pass.set_bind_group(0, &draw.bind_group, &[]);
-                pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
-                if let Some(indices) = &draw.index_buffer {
+                let Some(mesh) = gpu_meshes.get(&draw.mesh_key) else {
+                    continue;
+                };
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                if let Some(indices) = &mesh.index_buffer {
                     pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..draw.indices, 0, 0..1);
+                    pass.draw_indexed(0..mesh.indices, 0, 0..1);
                 } else {
-                    pass.draw(0..draw.vertices, 0..1);
+                    pass.draw(0..mesh.vertices, 0..1);
                 }
             }
         }

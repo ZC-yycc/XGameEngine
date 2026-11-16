@@ -3,9 +3,11 @@
 use xgc_world::World;
 
 use super::assets::MeshCache;
+use super::batch::BatchRequest;
 use super::camera::{camera_view_projection, IDENTITY};
 use super::draw::build_draw_list;
 use super::gpu::{GpuContext, GpuError};
+use super::gpu_mesh::GpuMeshCache;
 use super::pipeline::RenderCache;
 use super::resources::{ResourceDesc, ResourceUsage};
 
@@ -24,6 +26,7 @@ struct DepthTarget {
 pub struct Renderer {
     cache: RenderCache,
     meshes: MeshCache,
+    gpu_meshes: GpuMeshCache,
     depth: Option<DepthTarget>,
 }
 
@@ -32,12 +35,17 @@ impl Renderer {
         Self {
             cache: RenderCache::new(),
             meshes,
+            gpu_meshes: GpuMeshCache::new(),
             depth: None,
         }
     }
 
     pub fn meshes(&self) -> &MeshCache {
         &self.meshes
+    }
+
+    pub fn gpu_mesh_count(&self) -> usize {
+        self.gpu_meshes.len()
     }
 
     fn ensure_depth(
@@ -86,8 +94,15 @@ impl Renderer {
         let list = build_draw_list(world);
         let mvp = camera_view_projection(world, width, height).unwrap_or(IDENTITY);
         let depth = &self.depth.as_ref().unwrap().view;
-        self.cache
-            .draw_list_batched(context, target, &list, &mut self.meshes, mvp, depth)?;
+        let mut request = BatchRequest {
+            texture: target,
+            list: &list,
+            meshes: &mut self.meshes,
+            gpu_meshes: &mut self.gpu_meshes,
+            mvp,
+            depth,
+        };
+        self.cache.draw_list_batched(context, &mut request)?;
         Ok(RenderStats {
             draws: list.len(),
             passes: usize::from(!list.is_empty()),

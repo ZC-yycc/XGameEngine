@@ -15,6 +15,7 @@ mod camera;
 mod draw;
 mod glb;
 mod gpu;
+mod gpu_mesh;
 mod mesh;
 mod pipeline;
 mod renderer;
@@ -27,6 +28,7 @@ pub use camera::{
 pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use glb::{load_glb, MeshError};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
+pub use gpu_mesh::{GpuMesh, GpuMeshCache};
 pub use mesh::{builtin_mesh, Mesh};
 pub use pipeline::{RenderCache, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
