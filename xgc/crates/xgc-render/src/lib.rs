@@ -15,6 +15,7 @@ mod glb;
 mod gpu;
 mod mesh;
 mod pipeline;
+mod renderer;
 mod resources;
 
 pub use assets::MeshCache;
@@ -23,6 +24,7 @@ pub use glb::{load_glb, MeshError};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
 pub use mesh::{builtin_mesh, Mesh};
 pub use pipeline::{RenderCache, TrianglePipeline};
+pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

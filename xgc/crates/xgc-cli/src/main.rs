@@ -9,10 +9,11 @@ use xgc_agent::Agent;
 use xgc_asset::scan as scan_assets;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
-use xgc_render::{load_glb, GpuContext, Pass, RenderGraph, ResourceDesc, ResourceUsage};
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
+
+mod render;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -26,20 +27,25 @@ fn main() -> ExitCode {
         Some("run") => run(args.next().as_deref()),
         Some("serve") => serve(),
         Some("migrate") => migrate(args.next().as_deref(), args.next().as_deref()),
-        Some("render-graph") => render_graph(),
-        Some("gpu-probe") => gpu_probe(),
-        Some("mesh-probe") => mesh_probe(args.next().as_deref()),
+        Some("render-graph") => render::render_graph(),
+        Some("gpu-probe") => render::gpu_probe(),
+        Some("mesh-probe") => render::mesh_probe(args.next().as_deref()),
         Some("assets") => assets(args.next().as_deref()),
+        Some("render-frame") => render::render_frame(
+            args.next().as_deref(),
+            args.next().as_deref(),
+            args.next().as_deref(),
+        ),
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根]>"
             );
             ExitCode::from(2)
         }
@@ -236,161 +242,6 @@ fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
         output
     );
     ExitCode::SUCCESS
-}
-
-fn render_graph() -> ExitCode {
-    let mut graph = RenderGraph::new();
-    let resources = [
-        ResourceDesc::texture2d(
-            "shadow_map",
-            "depth32float",
-            2048,
-            2048,
-            vec![ResourceUsage::DepthAttachment, ResourceUsage::Sampled],
-        ),
-        ResourceDesc::texture2d(
-            "color",
-            "rgba16float",
-            1280,
-            720,
-            vec![ResourceUsage::ColorAttachment, ResourceUsage::Sampled],
-        ),
-        ResourceDesc::texture2d(
-            "backbuffer",
-            "bgra8unorm",
-            1280,
-            720,
-            vec![ResourceUsage::ColorAttachment],
-        ),
-    ];
-    for resource in resources {
-        if let Err(err) = graph.add_resource(resource) {
-            eprintln!("声明渲染资源失败：{err}");
-            return ExitCode::from(1);
-        }
-    }
-    let passes = [
-        Pass::new("shadow", &[], &["shadow_map"]),
-        Pass::new("opaque", &["shadow_map"], &["color"]),
-        Pass::new("post", &["color"], &["backbuffer"]),
-    ];
-    for pass in passes {
-        if let Err(err) = graph.add(pass) {
-            eprintln!("构建渲染图失败：{err}");
-            return ExitCode::from(1);
-        }
-    }
-    match graph.order_names() {
-        Ok(order) => {
-            println!(
-                "render-graph: {} 个 pass -> {}",
-                order.len(),
-                order.join(" -> ")
-            );
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("渲染图排序失败：{err}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-fn gpu_probe() -> ExitCode {
-    match GpuContext::headless() {
-        Ok(context) => {
-            let info = context.adapter_info();
-            println!("gpu: {} / {:?}", info.name, info.backend);
-            let desc = ResourceDesc::texture2d(
-                "probe",
-                "rgba8unorm",
-                4,
-                4,
-                vec![ResourceUsage::ColorAttachment, ResourceUsage::Sampled],
-            );
-            match context.create_resource(&desc) {
-                Ok(resource) => {
-                    let Some(texture) = resource.as_texture() else {
-                        eprintln!("GPU 资源不是纹理");
-                        return ExitCode::from(1);
-                    };
-                    if let Err(err) = context.clear_texture_rgba(texture, [1.0, 0.0, 0.0, 1.0]) {
-                        eprintln!("清屏失败：{err}");
-                        return ExitCode::from(1);
-                    }
-                    match context.read_texture_rgba8(texture, 4, 4) {
-                        Ok(pixels) => {
-                            println!("gpu: clear pass + readback {:?}", &pixels[..4]);
-                            if let Err(err) = context.draw_triangle(texture) {
-                                eprintln!("三角形绘制失败：{err}");
-                                return ExitCode::from(1);
-                            }
-                            match context.read_texture_rgba8(texture, 4, 4) {
-                                Ok(pixels) => {
-                                    println!("gpu: triangle pixel {:?}", &pixels[..4]);
-                                    let pipeline =
-                                        context.create_triangle_pipeline(texture.format());
-                                    if let Err(err) =
-                                        pipeline.draw(&context, texture, [0.2, 0.4, 0.6, 1.0])
-                                    {
-                                        eprintln!("材质三角形绘制失败：{err}");
-                                        return ExitCode::from(1);
-                                    }
-                                    match context.read_texture_rgba8(texture, 4, 4) {
-                                        Ok(pixels) => {
-                                            println!("gpu: material pixel {:?}", &pixels[..4]);
-                                            ExitCode::SUCCESS
-                                        }
-                                        Err(err) => {
-                                            eprintln!("材质回读失败：{err}");
-                                            ExitCode::from(1)
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    eprintln!("三角形回读失败：{err}");
-                                    ExitCode::from(1)
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            eprintln!("回读失败：{err}");
-                            ExitCode::from(1)
-                        }
-                    }
-                }
-                Err(err) => {
-                    eprintln!("创建 GPU 资源失败：{err}");
-                    ExitCode::from(1)
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!("GPU 不可用：{err}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-fn mesh_probe(path: Option<&str>) -> ExitCode {
-    let Some(path) = path else {
-        eprintln!("用法：xgc mesh-probe <glb 路径>");
-        return ExitCode::from(2);
-    };
-    match load_glb(Path::new(path)) {
-        Ok(mesh) => {
-            println!(
-                "mesh: {} 个顶点，{} 个索引",
-                mesh.positions.len(),
-                mesh.indices.len()
-            );
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("加载网格失败：{err}");
-            ExitCode::from(1)
-        }
-    }
 }
 
 fn assets(root: Option<&str>) -> ExitCode {
