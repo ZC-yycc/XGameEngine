@@ -97,3 +97,47 @@ fn adds_and_removes_components() {
         .collect();
     assert!(!names.contains(&"core.velocity".to_string()));
 }
+
+#[test]
+fn undo_redo_restores_field_edits() {
+    let (mut editor, id) = demo();
+    editor
+        .edit_field(id, 0x0101, "position", Value::Vec3([5.0, 6.0, 7.0]))
+        .unwrap();
+    assert!(editor.undo().unwrap());
+    assert_eq!(
+        editor
+            .world()
+            .get::<Transform>(editor.world().key(id).unwrap())
+            .unwrap()
+            .position,
+        [0.0, 0.0, 0.0]
+    );
+    assert!(editor.redo().unwrap());
+    assert_eq!(
+        editor
+            .world()
+            .get::<Transform>(editor.world().key(id).unwrap())
+            .unwrap()
+            .position,
+        [5.0, 6.0, 7.0]
+    );
+}
+
+#[test]
+fn undo_restores_spawned_entities() {
+    let mut editor = EditorState::default();
+    let id = editor.spawn_entity("box").unwrap();
+    assert!(editor.undo().unwrap());
+    assert!(editor.world().key(id).is_none());
+    assert!(editor.redo().unwrap());
+    assert!(editor.world().key(id).is_some());
+}
+
+#[test]
+fn undo_is_rejected_during_play() {
+    let (mut editor, _) = demo();
+    editor.play().unwrap();
+    assert!(editor.undo().is_err());
+    assert!(editor.redo().is_err());
+}

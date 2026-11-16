@@ -45,6 +45,8 @@ pub struct EditorState {
     selected: Option<EntityId>,
     dirty: bool,
     play: Option<PlaySession>,
+    undo: Vec<WorldData>,
+    redo: Vec<WorldData>,
 }
 
 impl Default for EditorState {
@@ -62,6 +64,8 @@ impl EditorState {
             selected: None,
             dirty: false,
             play: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -79,6 +83,8 @@ impl EditorState {
             selected: None,
             dirty: false,
             play: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
         })
     }
 
@@ -127,11 +133,69 @@ impl EditorState {
             .collect()
     }
 
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    fn push_undo(&mut self) {
+        let snapshot = self.world.world_data();
+        if self.undo.last() == Some(&snapshot) {
+            return;
+        }
+        self.undo.push(snapshot);
+        if self.undo.len() > 64 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    fn restore_snapshot(&mut self, snapshot: WorldData) -> Result<(), String> {
+        let mut world = World::new();
+        world
+            .restore_world_data(&snapshot)
+            .map_err(|err| format!("恢复历史失败：{err}"))?;
+        self.world = world;
+        if self.selected.is_some_and(|id| self.world.key(id).is_none()) {
+            self.selected = None;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn undo(&mut self) -> Result<bool, String> {
+        if self.play.is_some() {
+            return Err("Play 期间不能撤销".to_string());
+        }
+        let Some(snapshot) = self.undo.pop() else {
+            return Ok(false);
+        };
+        self.redo.push(self.world.world_data());
+        self.restore_snapshot(snapshot)?;
+        Ok(true)
+    }
+
+    pub fn redo(&mut self) -> Result<bool, String> {
+        if self.play.is_some() {
+            return Err("Play 期间不能重做".to_string());
+        }
+        let Some(snapshot) = self.redo.pop() else {
+            return Ok(false);
+        };
+        self.undo.push(self.world.world_data());
+        self.restore_snapshot(snapshot)?;
+        Ok(true)
+    }
+
     /// 新建实体（Name + Transform），返回持久 ID。
     pub fn spawn_entity(&mut self, name: &str) -> Result<EntityId, String> {
         if self.play.is_some() {
             return Err("Play 期间不能新建实体".to_string());
         }
+        self.push_undo();
         let key = self.world.spawn((
             Name {
                 value: name.to_string(),
@@ -158,6 +222,7 @@ impl EditorState {
             .world
             .key(id)
             .ok_or_else(|| format!("实体 {} 不存在", id.raw()))?;
+        self.push_undo();
         self.world.despawn(key);
         self.selected = None;
         self.dirty = true;
@@ -168,6 +233,7 @@ impl EditorState {
         if self.play.is_some() {
             return Err("Play 期间不能加组件".to_string());
         }
+        self.push_undo();
         let schema = self
             .registry
             .by_name(name)
@@ -189,6 +255,7 @@ impl EditorState {
         if self.play.is_some() {
             return Err("Play 期间不能删组件".to_string());
         }
+        self.push_undo();
         self.apply_command(Command::RemoveComponent {
             entity,
             component: ComponentId(component),
@@ -309,6 +376,7 @@ impl EditorState {
         if self.play.is_some() {
             return Err("Play 期间不能编辑".to_string());
         }
+        self.push_undo();
         self.world
             .set_field(entity, xgc_world::ComponentId(component), field, &value)?;
         self.dirty = true;

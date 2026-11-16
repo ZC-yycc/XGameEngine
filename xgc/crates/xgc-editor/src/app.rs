@@ -107,6 +107,20 @@ impl EditorApp {
                     Err(err) => err,
                 });
             }
+            if ui.button("Undo").clicked() {
+                self.status = Some(match self.state.undo() {
+                    Ok(true) => "已撤销".to_string(),
+                    Ok(false) => "没有可撤销操作".to_string(),
+                    Err(err) => err,
+                });
+            }
+            if ui.button("Redo").clicked() {
+                self.status = Some(match self.state.redo() {
+                    Ok(true) => "已重做".to_string(),
+                    Ok(false) => "没有可重做操作".to_string(),
+                    Err(err) => err,
+                });
+            }
             if ui.button("Save").clicked() {
                 self.status = Some(match self.state.save() {
                     Ok(()) => "已保存".to_string(),
@@ -301,6 +315,29 @@ fn value_editor(ui: &mut egui::Ui, value: &Value, ty: &str) -> Option<Value> {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let (undo, redo) = ctx.input(|input| {
+            let command = input.modifiers.command;
+            (
+                command && input.key_pressed(egui::Key::Z) && !input.modifiers.shift,
+                command
+                    && (input.key_pressed(egui::Key::Y)
+                        || (input.modifiers.shift && input.key_pressed(egui::Key::Z))),
+            )
+        });
+        if undo {
+            self.status = Some(match self.state.undo() {
+                Ok(true) => "已撤销".to_string(),
+                Ok(false) => "没有可撤销操作".to_string(),
+                Err(err) => err,
+            });
+        }
+        if redo {
+            self.status = Some(match self.state.redo() {
+                Ok(true) => "已重做".to_string(),
+                Ok(false) => "没有可重做操作".to_string(),
+                Err(err) => err,
+            });
+        }
         if let Some(render_state) = frame.wgpu_render_state() {
             self.ensure_viewport(render_state);
             self.render_viewport();
