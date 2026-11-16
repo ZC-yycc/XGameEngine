@@ -338,3 +338,23 @@ fn query_unknown_component_is_rejected() {
         .unwrap()
         .contains("未知组件"));
 }
+
+#[test]
+fn undo_reverts_last_applied_plan() {
+    let mut agent = Agent::new();
+    let commands = serde_json::to_value(vec![spawn_command()]).unwrap();
+    let plan = result(call(&mut agent, "edit.plan", json!({"commands": commands})));
+    let plan_id = plan["plan_id"].as_u64().unwrap();
+    let applied = result(call(&mut agent, "edit.apply", json!({"plan_id": plan_id})));
+    assert_eq!(applied["revision"], 1);
+    let undone = result(call(&mut agent, "edit.undo", Json::Null));
+    assert_eq!(undone["tx_id"], 0);
+    assert_eq!(undone["revision"], 2);
+    let queried = result(call(&mut agent, "world.query", Json::Null));
+    assert_eq!(queried["total"], 0);
+    let empty = call(&mut agent, "edit.undo", Json::Null);
+    assert!(empty["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("没有可撤销"));
+}

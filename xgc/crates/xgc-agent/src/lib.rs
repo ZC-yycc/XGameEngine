@@ -95,6 +95,7 @@ impl Agent {
             "edit.plan" => self.plan(params),
             "edit.apply" => self.apply(params),
             "edit.revert" => self.revert(params),
+            "edit.undo" => self.undo(),
             other => Err(format!("未知方法：{other}")),
         }
     }
@@ -125,7 +126,8 @@ impl Agent {
                 "world.save",
                 "edit.plan",
                 "edit.apply",
-                "edit.revert"
+                "edit.revert",
+                "edit.undo"
             ],
             "world": {
                 "revision": self.world.revision(),
@@ -499,6 +501,21 @@ impl Agent {
         });
         self.applied.insert(tx_id, applied);
         Ok(response)
+    }
+
+    fn undo(&mut self) -> Result<Json, String> {
+        let tx_id = self
+            .applied
+            .keys()
+            .copied()
+            .max()
+            .ok_or_else(|| "没有可撤销的事务".to_string())?;
+        let applied = self.applied.remove(&tx_id).expect("刚查到的事务");
+        let revision = self
+            .world
+            .revert(&applied)
+            .map_err(|diagnostics| format!("撤销失败：{diagnostics:?}"))?;
+        Ok(json!({"tx_id": tx_id, "revision": revision}))
     }
 
     fn revert(&mut self, params: &Json) -> Result<Json, String> {
