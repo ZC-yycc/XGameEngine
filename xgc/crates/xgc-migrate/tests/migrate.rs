@@ -1,7 +1,10 @@
 //! 迁移回归：旧 SceneV2 RON 的实体 / 父子 / 变换映射。
 
 use xgc_migrate::{migrate_str, MigrationError};
-use xgc_world::{Component, ComponentId, GlobalTransform, Name, Parent, Transform, Value};
+use xgc_world::{
+    Camera, Component, ComponentId, GlobalTransform, Material, MeshRenderer, Name, Parent,
+    Transform, Value,
+};
 
 const SCENE: &str = r#"(
     format_version: 2,
@@ -48,7 +51,8 @@ const SCENE: &str = r#"(
 fn migrates_identity_transform_and_parent() {
     let (world, report) = migrate_str(SCENE).unwrap();
     assert_eq!(report.entities, 2);
-    assert_eq!(report.with_old_components, 2);
+    assert_eq!(report.with_old_components, 0);
+    assert_eq!(report.mapped_components, 0);
     assert_eq!(report.missing_parents, 0);
     assert_eq!(world.next_id, 3);
     assert_eq!(world.entities.len(), 2);
@@ -87,6 +91,59 @@ fn migrates_identity_transform_and_parent() {
         xgc_migrate::component_id_name(ComponentId(0x0101)),
         "core.transform"
     );
+}
+
+#[test]
+fn maps_mesh_material_and_camera() {
+    let entries = r#"entries: [
+                    (
+                        identity: (id: 2),
+                        data: Mesh((model: "builtin://cube", morph_weights: [])),
+                    ),
+                    (
+                        identity: (id: 3),
+                        data: Material((asset: None, overrides: Some((base_color: Some((0.5, 0.6, 0.7, 1.0)), roughness: Some(0.9))))),
+                    ),
+                    (
+                        identity: (id: 4),
+                        data: Camera((fov: 75.0, near: 0.05, far: 500.0, active: true)),
+                    ),
+                ],"#;
+    let scene = SCENE.replacen("entries: [],", entries, 1);
+    let (world, report) = migrate_str(&scene).unwrap();
+    assert_eq!(report.mapped_components, 3);
+    let root = &world.entities[0];
+    let mesh = root
+        .components
+        .iter()
+        .find(|component| component.component == MeshRenderer::ID)
+        .unwrap();
+    assert_eq!(
+        mesh.fields[0].1,
+        Value::String("builtin://cube".to_string())
+    );
+    let material = root
+        .components
+        .iter()
+        .find(|component| component.component == Material::ID)
+        .unwrap();
+    let Value::Vec4(color) = material.fields[0].1 else {
+        panic!("material base_color 不是 vec4");
+    };
+    assert!((color[0] - 0.5).abs() < 1e-6);
+    assert!((color[1] - 0.6).abs() < 1e-6);
+    assert!((color[2] - 0.7).abs() < 1e-6);
+    let Value::F64(roughness) = material.fields[1].1 else {
+        panic!("material roughness 不是 f64");
+    };
+    assert!((roughness - 0.9).abs() < 1e-6);
+    let camera = root
+        .components
+        .iter()
+        .find(|component| component.component == Camera::ID)
+        .unwrap();
+    assert_eq!(camera.fields[0].1, Value::F64(75.0));
+    assert_eq!(camera.fields[3].1, Value::Bool(true));
 }
 
 #[test]

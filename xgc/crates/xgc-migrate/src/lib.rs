@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use xgc_base::EntityId;
 use xgc_world::{
-    Component, ComponentData, ComponentId, EntityData, GlobalTransform, Name, Parent, Transform,
-    Value, WorldData,
+    Camera, Component, ComponentData, ComponentId, EntityData, GlobalTransform, Material,
+    MeshRenderer, Name, Parent, Transform, Value, WorldData,
 };
 
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
@@ -49,6 +49,7 @@ impl std::error::Error for MigrationError {}
 pub struct MigrationReport {
     pub entities: usize,
     pub with_old_components: usize,
+    pub mapped_components: usize,
     pub missing_parents: usize,
 }
 
@@ -70,8 +71,7 @@ struct OldEntity {
     #[serde(default)]
     parent: Option<OldId>,
     transform: OldTransform,
-    #[allow(dead_code)]
-    components: ron::Value,
+    components: OldComponents,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -82,6 +82,68 @@ struct OldTransform {
     position: glam::Vec3,
     rotation: glam::Quat,
     scale: glam::Vec3,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OldComponents {
+    #[serde(default)]
+    entries: Vec<OldEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OldEntry {
+    data: OldComponentData,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+enum OldComponentData {
+    Mesh(OldMesh),
+    Lod(ron::Value),
+    Material(OldMaterial),
+    Ui(ron::Value),
+    Animator(ron::Value),
+    Physics(ron::Value),
+    Character(ron::Value),
+    Audio(ron::Value),
+    Camera(OldCamera),
+    Particle(ron::Value),
+    Rust {
+        #[allow(dead_code)]
+        registered_name: String,
+        #[allow(dead_code)]
+        fields: Option<ron::Value>,
+    },
+    Lua {
+        #[allow(dead_code)]
+        path: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct OldMesh {
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OldMaterial {
+    #[allow(dead_code)]
+    asset: Option<String>,
+    overrides: Option<OldMaterialOverrides>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OldMaterialOverrides {
+    base_color: Option<glam::Vec4>,
+    roughness: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OldCamera {
+    fov: f32,
+    near: f32,
+    far: f32,
+    active: bool,
 }
 
 pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), MigrationError> {
@@ -107,7 +169,39 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
 
     for old in &scene.entities {
         max_id = max_id.max(old.id.0);
-        report.with_old_components += 1;
+        if !old.components.entries.is_empty() {
+            report.with_old_components += 1;
+        }
+
+        let mut mesh_model = None;
+        let mut material = None;
+        let mut camera = None;
+        for entry in &old.components.entries {
+            match &entry.data {
+                OldComponentData::Mesh(mesh) => {
+                    mesh_model = Some(mesh.model.clone());
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Material(old_material) => {
+                    let overrides = old_material.overrides.as_ref();
+                    material = Some((
+                        overrides
+                            .and_then(|overrides| overrides.base_color)
+                            .map(|color| color.to_array())
+                            .unwrap_or([1.0; 4]),
+                        overrides
+                            .and_then(|overrides| overrides.roughness)
+                            .unwrap_or(0.5),
+                    ));
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Camera(old_camera) => {
+                    camera = Some(old_camera);
+                    report.mapped_components += 1;
+                }
+                _ => {}
+            }
+        }
 
         let position = old.transform.position.to_array();
         let rotation = old.transform.rotation.to_array();
@@ -164,6 +258,41 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
             }
         }
 
+        if let Some(model) = mesh_model {
+            components.push(ComponentData {
+                component: MeshRenderer::ID,
+                fields: vec![("model".to_string(), Value::String(model))],
+            });
+        }
+        if let Some((base_color, roughness)) = material {
+            components.push(ComponentData {
+                component: Material::ID,
+                fields: vec![
+                    (
+                        "base_color".to_string(),
+                        Value::Vec4([
+                            f64::from(base_color[0]),
+                            f64::from(base_color[1]),
+                            f64::from(base_color[2]),
+                            f64::from(base_color[3]),
+                        ]),
+                    ),
+                    ("roughness".to_string(), Value::F64(f64::from(roughness))),
+                ],
+            });
+        }
+        if let Some(camera) = camera {
+            components.push(ComponentData {
+                component: Camera::ID,
+                fields: vec![
+                    ("fov_y_deg".to_string(), Value::F64(f64::from(camera.fov))),
+                    ("near".to_string(), Value::F64(f64::from(camera.near))),
+                    ("far".to_string(), Value::F64(f64::from(camera.far))),
+                    ("active".to_string(), Value::Bool(camera.active)),
+                ],
+            });
+        }
+
         entities.push(EntityData {
             id: EntityId::from_raw(old.id.0),
             revision: 0,
@@ -186,6 +315,7 @@ pub struct MigrationBatch {
     pub scenes: usize,
     pub entities: usize,
     pub with_old_components: usize,
+    pub mapped_components: usize,
     pub missing_parents: usize,
     pub failures: Vec<String>,
 }
@@ -231,6 +361,7 @@ pub fn migrate_dir(input: &Path, output: &Path) -> Result<MigrationBatch, Migrat
                 batch.scenes += 1;
                 batch.entities += report.entities;
                 batch.with_old_components += report.with_old_components;
+                batch.mapped_components += report.mapped_components;
                 batch.missing_parents += report.missing_parents;
             }
             Err(err) => batch.failures.push(format!("{}：{err}", path.display())),

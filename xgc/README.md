@@ -11,14 +11,16 @@
 `xgc-world`（archetype 列式存储、单 / 双组件可变查询、按 archetype 分片的并行
 遍历、生成回收、`Command` 事务 plan / apply / revert、结构化 `Spawn` / `Despawn` /
 `AddComponent` / `RemoveComponent` + 实体快照撤销、可序列化 `EntityData` / 组件工厂、
-`Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` 五个内建组件、
+`Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` +
+`render.mesh` / `render.material` / `render.camera` 八个内建组件、
 实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希、
 `World::validate_data` 世界体检）、`xgc-store`（版本化 JSON 包络 + 原子写）、
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `VelocitySystem` / `GravitySystem` / `HierarchySystem` /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get /
 digest / stats / validate / load / save / plan / apply / revert；查询支持字段投影 +
-标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData` 第一层）、
+标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
+Mesh / Material / Camera 第一层映射）、
 `xgc-cli`（`schema` / `check [路径]` / `bench` / `export` / `import` / `run` /
 `serve` / `migrate`）、`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
 
@@ -52,12 +54,13 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 未知组件 / 字段 / 值类型 / 重复项。`xgc migrate <旧.ron> <新.json>` 已能迁移旧
 `SceneV2` 的实体身份 / 名称 / 父子 / `Transform`，并补默认 `GlobalTransform`；
 参数也可以是一个目录：`xgc migrate <旧场景目录> <输出目录>` 会批量迁移所有
-`.ron`，单场景失败只记入报告、不中断其它场景。Mesh / Material / Camera 等旧组件
-先不搬，报告里计数。真实项目目录 4 个场景、35 个实体全部迁移成功，0 父缺失。
+`.ron`，单场景失败只记入报告、不中断其它场景。Mesh / Material / Camera 已映射到
+`render.mesh` / `render.material` / `render.camera`；Physics / Lua / UI 等仍先跳过，
+报告里计数。真实项目目录 4 个场景、35 个实体、39 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（65 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（29 个 Rust 文件最大 594 行）；schema 两次导出逐字节相同，
-5 个内建类型 3529 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
+`cargo test --workspace` 全绿（66 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（31 个 Rust 文件最大 591 行）；schema 两次导出逐字节相同，
+8 个内建类型 5778 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
 脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖能力清单与视觉验证。

@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use xgc_base::EntityId;
 use xgc_reflect::{Component, ComponentId, Value};
 
-use super::{Column, EntitySnapshot, GlobalTransform, Name, Parent, Transform, Velocity, World};
+use super::{
+    Camera, Column, EntitySnapshot, GlobalTransform, Material, MeshRenderer, Name, Parent,
+    Transform, Velocity, World,
+};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntityData {
@@ -122,6 +125,9 @@ impl World {
         self.register_component::<Name>();
         self.register_component::<Parent>();
         self.register_component::<GlobalTransform>();
+        self.register_component::<MeshRenderer>();
+        self.register_component::<Material>();
+        self.register_component::<Camera>();
     }
 
     pub fn register_component<T: Component>(&mut self) {

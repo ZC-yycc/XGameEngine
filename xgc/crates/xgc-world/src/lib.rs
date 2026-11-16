@@ -18,6 +18,7 @@ mod data;
 mod hash;
 mod journal;
 mod query;
+mod render_components;
 mod snapshot;
 mod validate;
 
@@ -25,6 +26,7 @@ pub use command::{Applied, Command, Plan};
 pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
 pub use data::{ComponentData, EntityData, WorldData};
 pub use journal::{Journal, TxRecord};
+pub use render_components::{Camera, Material, MeshRenderer};
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
 pub use xgc_reflect::{ComponentId, Value};
 

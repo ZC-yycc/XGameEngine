@@ -10,7 +10,9 @@ use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
-use xgc_world::{GlobalTransform, Name, Parent, Transform, Velocity, World};
+use xgc_world::{
+    Camera, GlobalTransform, Material, MeshRenderer, Name, Parent, Transform, Velocity, World,
+};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -57,6 +59,15 @@ fn builtin_registry() -> Result<Registry, String> {
     registry
         .register::<GlobalTransform>()
         .map_err(|err| format!("注册 core.global_transform 失败：{err}"))?;
+    registry
+        .register::<MeshRenderer>()
+        .map_err(|err| format!("注册 render.mesh 失败：{err}"))?;
+    registry
+        .register::<Material>()
+        .map_err(|err| format!("注册 render.material 失败：{err}"))?;
+    registry
+        .register::<Camera>()
+        .map_err(|err| format!("注册 render.camera 失败：{err}"))?;
     Ok(registry)
 }
 
@@ -198,10 +209,11 @@ fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
                     eprintln!("migrate 失败：{failure}");
                 }
                 println!(
-                    "migrate: {} 个场景，{} 个实体，{} 个带旧组件，{} 个父节点缺失，{} 个失败 -> {}",
+                    "migrate: {} 个场景，{} 个实体，{} 个带旧组件，{} 个组件已映射，{} 个父节点缺失，{} 个失败 -> {}",
                     batch.scenes,
                     batch.entities,
                     batch.with_old_components,
+                    batch.mapped_components,
                     batch.missing_parents,
                     batch.failures.len(),
                     output
@@ -237,8 +249,12 @@ fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
         return ExitCode::from(1);
     }
     println!(
-        "migrate: {} 个实体，{} 个带旧组件，{} 个父节点缺失 -> {}",
-        report.entities, report.with_old_components, report.missing_parents, output
+        "migrate: {} 个实体，{} 个带旧组件，{} 个组件已映射，{} 个父节点缺失 -> {}",
+        report.entities,
+        report.with_old_components,
+        report.mapped_components,
+        report.missing_parents,
+        output
     );
     ExitCode::SUCCESS
 }
