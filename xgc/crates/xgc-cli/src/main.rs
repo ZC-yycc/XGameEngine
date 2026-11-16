@@ -1,9 +1,11 @@
 //! XGC 命令行 M1：schema / check / bench / export / import。
 
+use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use xgc_agent::Agent;
 use xgc_reflect::Registry;
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
@@ -19,13 +21,18 @@ fn main() -> ExitCode {
         Some("export") => export(args.next().as_deref()),
         Some("import") => import(args.next().as_deref()),
         Some("run") => run(args.next().as_deref()),
+        Some("serve") => serve(),
         Some(other) => {
             eprintln!("未知命令：{other}");
-            eprintln!("用法：xgc <schema|check|bench|export <路径>|import <路径>|run [帧数]>");
+            eprintln!(
+                "用法：xgc <schema|check|bench|serve|export <路径>|import <路径>|run [帧数]>"
+            );
             ExitCode::from(2)
         }
         None => {
-            eprintln!("用法：xgc <schema|check|bench|export <路径>|import <路径>|run [帧数]>");
+            eprintln!(
+                "用法：xgc <schema|check|bench|serve|export <路径>|import <路径>|run [帧数]>"
+            );
             ExitCode::from(2)
         }
     }
@@ -148,6 +155,28 @@ fn import(path: Option<&str>) -> ExitCode {
         world.revision(),
         world.state_hash()
     );
+    ExitCode::SUCCESS
+}
+
+fn serve() -> ExitCode {
+    let mut agent = Agent::new();
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(err) => {
+                eprintln!("读取 stdin 失败：{err}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Some(response) = agent.handle_line(&line) {
+            if writeln!(stdout, "{response}").is_err() || stdout.flush().is_err() {
+                eprintln!("写入 stdout 失败");
+                return ExitCode::from(1);
+            }
+        }
+    }
     ExitCode::SUCCESS
 }
 

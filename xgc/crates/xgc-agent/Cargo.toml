@@ -1,0 +1,14 @@
+[package]
+name = "xgc-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC Agent 协议最小集：describe / query / plan / apply / revert"
+
+[dependencies]
+xgc-base = { path = "../xgc-base" }
+xgc-reflect = { path = "../xgc-reflect" }
+xgc-world = { path = "../xgc-world" }
+xgc-store = { path = "../xgc-store" }
+serde_json.workspace = true

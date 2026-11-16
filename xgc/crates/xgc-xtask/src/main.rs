@@ -130,6 +130,10 @@ fn deps(root: &Path) -> Result<(), String> {
         ("xgc-store", &["xgc-base", "xgc-world"]),
         ("xgc-sim", &["xgc-base", "xgc-world"]),
         (
+            "xgc-agent",
+            &["xgc-base", "xgc-reflect", "xgc-world", "xgc-store"],
+        ),
+        (
             "xgc-cli",
             &[
                 "xgc-base",
@@ -137,6 +141,7 @@ fn deps(root: &Path) -> Result<(), String> {
                 "xgc-world",
                 "xgc-store",
                 "xgc-sim",
+                "xgc-agent",
             ],
         ),
         ("xgc-xtask", &["xgc-base", "xgc-reflect", "xgc-world"]),

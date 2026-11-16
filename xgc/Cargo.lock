@@ -93,6 +93,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "xgc-agent"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "xgc-base",
+ "xgc-reflect",
+ "xgc-store",
+ "xgc-world",
+]
+
+[[package]]
 name = "xgc-base"
 version = "0.1.0"
 dependencies = [
@@ -104,6 +115,7 @@ name = "xgc-cli"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "xgc-agent",
  "xgc-base",
  "xgc-reflect",
  "xgc-sim",
