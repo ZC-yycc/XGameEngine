@@ -37,6 +37,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/character_components.rs` | 角色组件：`physics.character` |
 | `crates/xgc-world/src/ui_components.rs` | UI 组件：`ui.element` |
 | `crates/xgc-world/src/particle_components.rs` | 粒子组件：`particle.emitter` |
+| `crates/xgc-world/src/plugin_components.rs` | Rust 插件组件：`plugin.rust` |
 | `crates/xgc-world/src/physics_components.rs` | `physics.body`：类型 / 形状 / 摩擦 / 弹性 / 质量 / 传感器 |
 | `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删与计划内预测集合） |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
@@ -49,7 +50,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
-| `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（身份 / 名称 / 父子 / Transform / Mesh / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle，支持目录批量） |
+| `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（身份 / 名称 / 父子 / Transform / Mesh / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
+| `crates/xgc-migrate/src/old_rust.rs` | 旧 Rust 插件组件 → `plugin.rust` |
 | `crates/xgc-migrate/src/old_particle.rs` | 旧 `ParticleEmitter` → `particle.emitter` |
 | `crates/xgc-migrate/src/old_ui.rs` | 旧 `UiElement` → `ui.element`（kind 由内容推断） |
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
@@ -82,7 +84,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M3 迁移补 Lod / Rust 插件组件；Particle 已进 schema。
+1. M3 迁移补 Lod；Rust 插件组件已进 schema。
 2. 渲染实例化 / 合批，减少 draw call。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 600 行：动它之前先拆。

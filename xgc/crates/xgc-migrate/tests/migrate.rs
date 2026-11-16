@@ -4,7 +4,7 @@ use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
     Animator as XgcAnimator, AudioSource, Camera, CharacterController as XgcCharacter, Component,
     ComponentId, GlobalTransform, Material, MeshRenderer, Name, Parent, ParticleEmitter,
-    PhysicsBody, Script, Transform, UiElement, Value,
+    PhysicsBody, PluginComponent, Script, Transform, UiElement, Value,
 };
 
 const SCENE: &str = r#"(
@@ -528,4 +528,57 @@ fn maps_particle() {
     assert_eq!(field("max_particles"), Value::I64(100));
     assert_eq!(field("lifetime").as_vec2(), Some([0.5, 1.0]));
     assert_eq!(field("seed"), Value::I64(7));
+}
+
+#[test]
+fn maps_rust_plugin_component() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Plugin",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Spinner",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Rust(
+                                registered_name: "Spinner",
+                                fields: None,
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let plugin = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == PluginComponent::ID)
+        .unwrap();
+    let field = |name: &str| {
+        plugin
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("registered_name"), Value::String("Spinner".into()));
+    assert_eq!(field("fields"), Value::String(String::new()));
 }
