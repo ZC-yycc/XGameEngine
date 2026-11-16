@@ -1,6 +1,6 @@
 //! Lua 脚本宿主：只开放安全标准库，脚本按名字加载、执行与调用。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,6 +18,7 @@ pub struct LuaHost {
     world: Option<Rc<RefCell<World>>>,
     scripts: RefCell<BTreeMap<String, String>>,
     budget: Option<(Arc<AtomicUsize>, usize)>,
+    started: Cell<bool>,
 }
 
 impl LuaHost {
@@ -31,6 +32,7 @@ impl LuaHost {
             world: None,
             scripts: RefCell::new(BTreeMap::new()),
             budget: None,
+            started: Cell::new(false),
         })
     }
 
@@ -43,6 +45,7 @@ impl LuaHost {
             world: Some(world),
             scripts: RefCell::new(BTreeMap::new()),
             budget: None,
+            started: Cell::new(false),
         })
     }
 
@@ -92,6 +95,45 @@ impl LuaHost {
 
     pub fn script_names(&self) -> Vec<String> {
         self.scripts.borrow().keys().cloned().collect()
+    }
+
+    /// 调用生命周期钩子；脚本没有该函数时返回 false。
+    pub fn call_hook(&self, name: &str, dt: f32) -> Result<bool, String> {
+        let value: LuaValue = self
+            .lua
+            .globals()
+            .get(name)
+            .map_err(|err| format!("读取钩子 {name} 失败：{err}"))?;
+        let LuaValue::Function(function) = value else {
+            return Ok(false);
+        };
+        self.reset_budget();
+        if name == "on_update" {
+            function
+                .call::<()>(dt)
+                .map_err(|err| format!("Lua 钩子 {name} 失败：{err}"))?;
+        } else {
+            function
+                .call::<()>(())
+                .map_err(|err| format!("Lua 钩子 {name} 失败：{err}"))?;
+        }
+        Ok(true)
+    }
+
+    /// 首次调用触发 `on_start`；重复调用返回 false。
+    pub fn start(&self) -> Result<bool, String> {
+        if self.started.replace(true) {
+            return Ok(false);
+        }
+        self.call_hook("on_start", 0.0)
+    }
+
+    pub fn update(&self, dt: f32) -> Result<bool, String> {
+        self.call_hook("on_update", dt)
+    }
+
+    pub fn destroy(&self) -> Result<bool, String> {
+        self.call_hook("on_destroy", 0.0)
     }
 
     fn register_world(&self, world: &Rc<RefCell<World>>) -> Result<(), String> {
@@ -194,6 +236,39 @@ impl LuaHost {
             .map_err(|err| format!("创建 set_field 失败：{err}"))?;
         api.set("set", set_field)
             .map_err(|err| format!("注册 set 失败：{err}"))?;
+
+        let spawn_world = Rc::clone(world);
+        let spawn = self
+            .lua
+            .create_function(move |_, ()| {
+                let mut world = spawn_world.borrow_mut();
+                let key = world.spawn((Transform::default(),));
+                world
+                    .entity(key)
+                    .map(|id| id.raw())
+                    .ok_or_else(|| mlua::Error::RuntimeError("spawn 失败".to_string()))
+            })
+            .map_err(|err| format!("创建 spawn 失败：{err}"))?;
+        api.set("spawn", spawn)
+            .map_err(|err| format!("注册 spawn 失败：{err}"))?;
+
+        let despawn_world = Rc::clone(world);
+        let despawn = self
+            .lua
+            .create_function(move |_, id: u64| {
+                let mut world = despawn_world.borrow_mut();
+                let key = world
+                    .key(EntityId::from_raw(id))
+                    .ok_or_else(|| mlua::Error::RuntimeError(format!("实体 {id} 不存在")))?;
+                if world.despawn(key) {
+                    Ok(true)
+                } else {
+                    Err(mlua::Error::RuntimeError(format!("实体 {id} 删除失败")))
+                }
+            })
+            .map_err(|err| format!("创建 despawn 失败：{err}"))?;
+        api.set("despawn", despawn)
+            .map_err(|err| format!("注册 despawn 失败：{err}"))?;
 
         self.lua
             .globals()

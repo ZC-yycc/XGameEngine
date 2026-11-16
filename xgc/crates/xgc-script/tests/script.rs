@@ -140,3 +140,37 @@ fn scripts_can_be_loaded_and_reloaded() {
     assert_eq!(host.script_names(), vec!["math"]);
     assert!(host.reload("missing").is_err());
 }
+
+#[test]
+fn lifecycle_hooks_run_once_and_update() {
+    let host = LuaHost::new().unwrap();
+    host.run(
+        "life",
+        "value = 0
+         function on_start() value = 1 end
+         function on_update(dt) value = value + dt end
+         function on_destroy() value = -1 end",
+    )
+    .unwrap();
+    assert!(host.start().unwrap());
+    assert!(!host.start().unwrap(), "on_start 只触发一次");
+    assert!(host.update(0.5).unwrap());
+    assert_eq!(host.eval::<f64>("return value").unwrap(), 1.5);
+    assert!(host.destroy().unwrap());
+    assert_eq!(host.eval::<f64>("return value").unwrap(), -1.0);
+}
+
+#[test]
+fn scripts_can_spawn_and_despawn_entities() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use xgc_world::World;
+
+    let world = Rc::new(RefCell::new(World::new()));
+    let host = LuaHost::with_world(Rc::clone(&world)).unwrap();
+    let _id = host
+        .eval::<u64>("local id = xgc.spawn(); xgc.despawn(id); return id")
+        .unwrap();
+    assert_eq!(world.borrow().len(), 0);
+}
