@@ -9,7 +9,7 @@ use xgc_agent::Agent;
 use xgc_asset::scan as scan_assets;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
-use xgc_sim::{play, Scenario};
+use xgc_sim::{play, AnimationLibrary, Scenario};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
 
@@ -31,6 +31,7 @@ fn main() -> ExitCode {
         Some("gpu-probe") => render::gpu_probe(),
         Some("mesh-probe") => render::mesh_probe(args.next().as_deref()),
         Some("assets") => assets(args.next().as_deref()),
+        Some("clips") => clips(args.next().as_deref()),
         Some("render-frame") => render::render_frame(
             args.next().as_deref(),
             args.next().as_deref(),
@@ -242,6 +243,39 @@ fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
         output
     );
     ExitCode::SUCCESS
+}
+
+fn clips(dir: Option<&str>) -> ExitCode {
+    let Some(dir) = dir else {
+        eprintln!("用法：xgc clips <剪辑目录>");
+        return ExitCode::from(2);
+    };
+    match AnimationLibrary::load_dir(Path::new(dir)) {
+        Ok((library, issues)) => {
+            for name in library.names() {
+                if let Some(clip) = library.get(name) {
+                    println!(
+                        "clips: {name} duration={:.3} keys={}",
+                        clip.duration,
+                        clip.translation.len()
+                    );
+                }
+            }
+            for issue in &issues {
+                eprintln!("clips: {issue}");
+            }
+            println!("clips: {} 个剪辑，{} 条问题", library.len(), issues.len());
+            if issues.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(err) => {
+            eprintln!("加载剪辑失败：{err}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn assets(root: Option<&str>) -> ExitCode {

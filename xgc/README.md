@@ -24,6 +24,7 @@
 `HierarchySystem` /
 `AnimationClip` 平移关键帧线性采样（边界钳制 / 循环取模） / RON 剪辑加载 /
 `AnimationPlaybackSystem` 把采样偏移叠加 `Animator.base_position` 写回 `Transform` /
+`AnimationLibrary::load_dir` 扫描目录 /
 `AnimationLibrary` 按名索引 /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/
 engine.diagnostics（诊断码目录）/ query / get / digest / stats / validate / load / save /
@@ -113,6 +114,7 @@ cargo run -p xgc-cli -- render-graph
 cargo run -p xgc-cli -- gpu-probe
 cargo run -p xgc-cli -- mesh-probe <glb>
 cargo run -p xgc-cli -- assets <项目根>
+cargo run -p xgc-cli -- clips <剪辑目录>
 cargo run -p xgc-cli -- render-frame <世界.json> <out.ppm> [资产根]
 ```
 

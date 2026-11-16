@@ -32,3 +32,17 @@ fn library_indexes_by_name() {
 fn malformed_clip_is_reported() {
     assert!(load_clip_ron("(name:").is_err());
 }
+
+#[test]
+fn loads_clip_directory_and_reports_bad_files() {
+    let dir = std::env::temp_dir().join(format!("xgc-clips-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("walk.ron"), CLIP).unwrap();
+    std::fs::write(dir.join("bad.ron"), "(name:").unwrap();
+    let (library, issues) = AnimationLibrary::load_dir(&dir).unwrap();
+    assert_eq!(library.len(), 1);
+    assert_eq!(issues.len(), 1);
+    assert_eq!(library.names().collect::<Vec<_>>(), vec!["Walk"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -136,6 +136,44 @@ impl AnimationLibrary {
     pub fn sample_looped(&self, name: &str, time: f32) -> Option<[f32; 3]> {
         self.get(name).map(|clip| clip.sample_looped(time))
     }
+
+    /// 扫描目录下的 `.ron` 剪辑文件；按路径排序保证确定性，坏文件只记录不中止。
+    pub fn load_dir(dir: &std::path::Path) -> Result<(Self, Vec<String>), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|err| format!("读取剪辑目录 {} 失败：{err}", dir.display()))?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|err| format!("读取剪辑目录项失败：{err}"))?
+                .path();
+            if path.extension().is_some_and(|ext| ext == "ron") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        let mut library = Self::new();
+        let mut issues = Vec::new();
+        for path in paths {
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(err) => {
+                    issues.push(format!("{}: 读取失败：{err}", path.display()));
+                    continue;
+                }
+            };
+            match load_clip_ron(&text) {
+                Ok(clip) => {
+                    library.insert(clip);
+                }
+                Err(err) => issues.push(format!("{}: {err}", path.display())),
+            }
+        }
+        Ok((library, issues))
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.clips.keys().map(String::as_str)
+    }
 }
 
 /// 把剪辑平移关键帧写到 Transform：位置 = base_position + 采样偏移。
