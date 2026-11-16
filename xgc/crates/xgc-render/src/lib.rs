@@ -10,6 +10,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
 mod assets;
+mod batch;
 mod camera;
 mod draw;
 mod glb;

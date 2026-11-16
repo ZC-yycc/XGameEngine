@@ -192,6 +192,14 @@ impl TrianglePipeline {
         )
     }
 
+    pub(crate) fn layout(&self) -> &wgpu::BindGroupLayout {
+        &self.bind_group_layout
+    }
+
+    pub(crate) fn raw(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
+    }
+
     pub(crate) fn draw_mesh_request(
         &self,
         context: &GpuContext,

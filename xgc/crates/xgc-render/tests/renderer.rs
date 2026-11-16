@@ -25,6 +25,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     let empty = World::new();
     let stats = renderer.render(&context, &texture, &empty).unwrap();
     assert_eq!(stats.draws, 0);
+    assert_eq!(stats.passes, 0);
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     assert_eq!(&pixels[..4], &[0, 0, 0, 255]);
 
@@ -93,6 +94,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     ));
     let stats = renderer.render(&context, &texture, &depth_world).unwrap();
     assert_eq!(stats.draws, 2);
+    assert_eq!(stats.passes, 1, "两个实体应在同一个 render pass");
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     assert_eq!(
         &pixels[center..center + 4],

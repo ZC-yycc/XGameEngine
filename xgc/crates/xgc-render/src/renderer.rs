@@ -12,6 +12,7 @@ use super::resources::{ResourceDesc, ResourceUsage};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderStats {
     pub draws: usize,
+    pub passes: usize,
 }
 
 struct DepthTarget {
@@ -85,14 +86,11 @@ impl Renderer {
         let list = build_draw_list(world);
         let mvp = camera_view_projection(world, width, height).unwrap_or(IDENTITY);
         let depth = &self.depth.as_ref().unwrap().view;
-        self.cache.draw_list_with_meshes_and_camera_depth(
-            context,
-            target,
-            &list,
-            &mut self.meshes,
-            mvp,
-            depth,
-        )?;
-        Ok(RenderStats { draws: list.len() })
+        self.cache
+            .draw_list_batched(context, target, &list, &mut self.meshes, mvp, depth)?;
+        Ok(RenderStats {
+            draws: list.len(),
+            passes: usize::from(!list.is_empty()),
+        })
     }
 }
