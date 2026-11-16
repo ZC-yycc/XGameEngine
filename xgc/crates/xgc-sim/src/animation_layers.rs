@@ -1,7 +1,7 @@
 //! 动画叠加层：按权重把多个 clip 的偏移 / 旋转 / 缩放混到当前 Transform。
 
 use serde::Deserialize;
-use xgc_world::{AnimationLayers, Animator, Component, Transform, World};
+use xgc_world::{AnimationLayers, Animator, Component, Name, Transform, World};
 
 use super::animation::{slerp, AnimationLibrary};
 use super::{System, SystemAccess};
@@ -11,6 +11,9 @@ pub struct LayerDef {
     pub clip: String,
     #[serde(default = "default_weight")]
     pub weight: f32,
+    /// 实体名白名单；空 = 全部实体。当前 clip 只有根变换轨道，所以遮罩停在实体级。
+    #[serde(default)]
+    pub mask: Vec<String>,
 }
 
 fn default_weight() -> f32 {
@@ -60,10 +63,16 @@ impl System for AnimationLayerSystem {
             let Some(mut transform) = world.get::<Transform>(key).copied() else {
                 return;
             };
+            let name = world.get::<Name>(key).map(|name| name.value.as_str());
             let mut changed = false;
             for layer in parsed {
                 let weight = layer.weight.clamp(0.0, 1.0);
                 if weight <= 0.0 {
+                    continue;
+                }
+                if !layer.mask.is_empty()
+                    && !name.is_some_and(|name| layer.mask.iter().any(|mask| mask == name))
+                {
                     continue;
                 }
                 let Some(clip) = self.library.get(&layer.clip) else {

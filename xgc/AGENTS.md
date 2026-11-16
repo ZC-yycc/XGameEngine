@@ -59,7 +59,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `RotationKey` / `ScaleKey` / `load_clip_ron` / `AnimationLibrary`（含 `load_dir`）：平移 / 旋转 slerp / 缩放采样、循环、RON / 目录加载、`AnimationPlaybackSystem` 写 Transform |
 | `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、转场时长写 blend 字段、状态写回 Animator.clip |
-| `crates/xgc-sim/src/animation_layers.rs` | `AnimationLayerSystem` / `LayerDef`：按权重叠加平移 / 旋转 / 缩放 |
+| `crates/xgc-sim/src/animation_layers.rs` | `AnimationLayerSystem` / `LayerDef`：按权重叠加平移 / 旋转 / 缩放；`mask` 是实体名白名单（clip 目前只有根变换轨道） |
 | `crates/xgc-sim/src/input.rs` | `InputMap` / `InputState` / `KeyCode` / `Binding`：解析 `input.ron` 并折叠动作与轴 |
 | `crates/xgc-sim/src/audio.rs` | `AudioMixerSystem` + WAV 解码 / `AudioLibrary`：监听者距离 + 总线音量写 `audio.gain` |
 | `crates/xgc-sim/src/skeleton.rs` | `SkeletonPoseSystem` / `parse_pose`：关节父链合成世界矩阵 |
@@ -139,9 +139,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 资产烹饪：引用裁剪已通；下一步发布签名 / 增量烹饪。
-2. 动画：遮罩 / 分层混合细节。
-3. 脚本：正式 System 调度与脚本组件生命周期完整化。
+1. 动画：实体级遮罩已通；下一步骨骼级遮罩 / 轨道。
+2. 脚本：正式 System 调度与脚本组件生命周期完整化。
+3. 资产：发布签名 / 增量烹饪。
 4. 旧新视觉 / trace 对照。
 5. 现在最大文件 595 行：动它之前先拆。
 
