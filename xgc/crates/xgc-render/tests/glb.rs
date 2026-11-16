@@ -45,20 +45,27 @@ fn loads_skinned_glb_joints_and_weights() {
             bin.extend_from_slice(&weight.to_le_bytes());
         }
     }
+    for value in xgc_render::identity() {
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
     let json = json!({
         "meshes": [{"primitives": [{
             "attributes": {"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2},
             "mode": 4
         }]}],
+        "nodes": [{"mesh": 0, "skin": 0}],
+        "skins": [{"joints": [0], "inverseBindMatrices": 3}],
         "accessors": [
             {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
             {"bufferView": 1, "componentType": 5123, "count": 3, "type": "VEC4"},
-            {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4"}
+            {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4"},
+            {"bufferView": 3, "componentType": 5126, "count": 1, "type": "MAT4"}
         ],
         "bufferViews": [
             {"buffer": 0, "byteOffset": 0, "byteLength": 36},
             {"buffer": 0, "byteOffset": 36, "byteLength": 24},
-            {"buffer": 0, "byteOffset": 60, "byteLength": 48}
+            {"buffer": 0, "byteOffset": 60, "byteLength": 48},
+            {"buffer": 0, "byteOffset": 108, "byteLength": 64}
         ]
     });
     let mut json_bytes = serde_json::to_vec(&json).unwrap();
@@ -95,5 +102,8 @@ fn loads_skinned_glb_joints_and_weights() {
     assert_eq!(skin.joints.len(), 3);
     assert_eq!(skin.joints[1], [1, 0, 0, 0]);
     assert!((skin.weights[2][1] - 0.75).abs() < 1e-6);
+    assert_eq!(skin.joint_nodes, vec![0]);
+    assert_eq!(skin.inverse_bind.len(), 1);
+    assert!((skin.inverse_bind[0][12]).abs() < 1e-6);
     std::fs::remove_file(&path).unwrap();
 }

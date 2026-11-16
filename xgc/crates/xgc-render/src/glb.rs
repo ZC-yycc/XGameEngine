@@ -48,6 +48,26 @@ struct Root {
     accessors: Vec<Accessor>,
     #[serde(default)]
     buffer_views: Vec<BufferView>,
+    #[serde(default)]
+    nodes: Vec<NodeDef>,
+    #[serde(default)]
+    skins: Vec<SkinDef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeDef {
+    #[serde(default)]
+    mesh: Option<usize>,
+    #[serde(default)]
+    skin: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkinDef {
+    #[serde(default)]
+    joints: Vec<usize>,
+    inverse_bind_matrices: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +153,28 @@ pub fn load_glb(path: &Path) -> Result<Mesh, MeshError> {
                 "JOINTS_0 / WEIGHTS_0 数量与 POSITION 不一致".into(),
             ));
         }
-        mesh.skin = Some(SkinData { joints, weights });
+        mesh.skin = Some(SkinData {
+            joints,
+            weights,
+            joint_nodes: Vec::new(),
+            inverse_bind: Vec::new(),
+        });
+        if let Some(skin_index) = root
+            .nodes
+            .iter()
+            .find(|node| node.mesh == Some(0))
+            .and_then(|node| node.skin)
+        {
+            if let Some(skin) = root.skins.get(skin_index) {
+                if let Some(mut data) = mesh.skin.take() {
+                    data.joint_nodes = skin.joints.clone();
+                    if let Some(accessor) = skin.inverse_bind_matrices {
+                        data.inverse_bind = read_mat4(&root, accessor, bin)?;
+                    }
+                    mesh.skin = Some(data);
+                }
+            }
+        }
     }
     Ok(mesh)
 }
@@ -367,4 +408,35 @@ fn read_weights(root: &Root, accessor: usize, bin: &[u8]) -> Result<Vec<[f32; 4]
         ]);
     }
     Ok(weights)
+}
+
+fn read_mat4(root: &Root, accessor: usize, bin: &[u8]) -> Result<Vec<[f32; 16]>, MeshError> {
+    let accessor = root
+        .accessors
+        .get(accessor)
+        .ok_or(MeshError::Missing("inverseBindMatrices accessor".into()))?;
+    if accessor.component_type != 5126 || accessor.ty != "MAT4" {
+        return Err(MeshError::Unsupported(format!(
+            "inverseBindMatrices 需要 float MAT4，实际 type {} component {}",
+            accessor.ty, accessor.component_type
+        )));
+    }
+    let (base, stride) = accessor_layout(root, accessor, 64)?;
+    let needed = base
+        .checked_add(stride.saturating_mul(accessor.count.saturating_sub(1)))
+        .and_then(|offset| offset.checked_add(64))
+        .ok_or_else(|| MeshError::Glb("inverseBindMatrices 偏移溢出".into()))?;
+    if needed > bin.len() {
+        return Err(MeshError::Glb("inverseBindMatrices 超出 BIN chunk".into()));
+    }
+    let mut matrices = Vec::with_capacity(accessor.count);
+    for index in 0..accessor.count {
+        let offset = base + index * stride;
+        let mut matrix = [0.0f32; 16];
+        for (slot, value) in matrix.iter_mut().enumerate() {
+            *value = read_f32(bin, offset + slot * 4)?;
+        }
+        matrices.push(matrix);
+    }
+    Ok(matrices)
 }

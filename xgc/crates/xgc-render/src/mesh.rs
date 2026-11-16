@@ -4,6 +4,8 @@
 pub struct SkinData {
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
+    pub joint_nodes: Vec<usize>,
+    pub inverse_bind: Vec<[f32; 16]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

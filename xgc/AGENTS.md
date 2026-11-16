@@ -75,6 +75,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → 实例化 → GPU，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本 + 图片叠加 |
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
+| `crates/xgc-render/src/skinning.rs` | `skin_positions` / `identity` / `translation`：CPU 蒙皮 |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（按宽度换行） |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组的实例化管线 / storage 实例缓冲 |
@@ -82,7 +83,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵） |
-| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引 + `SkinData`、builtin 网格占位 |
+| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引 + `SkinData`（关节 / 权重 / 逆绑定）、builtin 网格占位 |
 | `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
@@ -102,7 +103,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：GLB skin 数据已接；下一步逆绑定矩阵 / GPU 蒙皮管线。
+1. 动画：CPU 蒙皮已接；下一步蒙皮 GPU 管线 / 骨骼层级导入。
 2. UI：圆角 / UI 绘制批次。
 3. 音频：播放设备 / 流式缓冲。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
