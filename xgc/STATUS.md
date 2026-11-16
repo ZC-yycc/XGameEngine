@@ -53,11 +53,11 @@
 
 ## 迁移 / 运行证据
 
-- projects/XGame/Scenes/showcase.ron → 24 实体 / 51 组件 / 0 缺失父节点。
-- 恢复后 un-world 60 帧通过；ender-frame 320×180 输出 14 draw / 5 draw call。
+- `projects/XGame/Scenes/showcase.ron` → 24 实体 / 51 组件 / 0 缺失父节点。
+- 恢复后 `run-world` 60 帧通过；`render-frame` 320×180 输出 14 draw / 5 draw call。
 - GUID 资产（Box.glb、Fox.gltf + Fox.bin）经资产目录解析并成功解析网格。
-- 自动化测试：crates/xgc-cli/tests/migrate_showcase.rs。
-
+- character 场景 GUID 脚本经资产目录装载；Pillar.prefab.ron 直接迁移为 3 实体。
+- 自动化测试：`crates/xgc-cli/tests/migrate_showcase.rs`、`migrate_scripts.rs`。
 ## 与 XGameEngine 的主要差距
 
 | 差距 | 影响 | 优先级 |
