@@ -15,6 +15,18 @@ impl GpuContext {
 
     /// 创建可复用的三角形管线；颜色由 uniform 缓冲提供。
     pub fn create_triangle_pipeline(&self, format: wgpu::TextureFormat) -> TrianglePipeline {
+        self.create_triangle_pipeline_impl(format, None)
+    }
+
+    pub fn create_depth_pipeline(&self, format: wgpu::TextureFormat) -> TrianglePipeline {
+        self.create_triangle_pipeline_impl(format, Some(wgpu::TextureFormat::Depth32Float))
+    }
+
+    fn create_triangle_pipeline_impl(
+        &self,
+        format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+    ) -> TrianglePipeline {
         const TRIANGLE_WGSL: &str = r#"
 struct Material {
     color: vec4<f32>,
@@ -78,7 +90,13 @@ fn fs() -> @location(0) vec4<f32> {
                     }],
                 },
                 primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
+                depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -97,6 +115,7 @@ fn fs() -> @location(0) vec4<f32> {
             pipeline,
             bind_group_layout,
             format,
+            depth_format,
         }
     }
 }
@@ -105,6 +124,16 @@ pub struct TrianglePipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
+}
+
+pub(crate) struct MeshDraw<'a> {
+    pub(crate) texture: &'a wgpu::Texture,
+    pub(crate) mesh: &'a Mesh,
+    pub(crate) color: [f32; 4],
+    pub(crate) clear: bool,
+    pub(crate) mvp: Option<[f32; 16]>,
+    pub(crate) depth: Option<&'a wgpu::TextureView>,
 }
 
 impl TrianglePipeline {
@@ -150,29 +179,49 @@ impl TrianglePipeline {
         clear: bool,
         mvp: Option<[f32; 16]>,
     ) -> Result<(), GpuError> {
-        let load = if clear {
+        self.draw_mesh_request(
+            context,
+            &MeshDraw {
+                texture,
+                mesh,
+                color,
+                clear,
+                mvp,
+                depth: None,
+            },
+        )
+    }
+
+    pub(crate) fn draw_mesh_request(
+        &self,
+        context: &GpuContext,
+        request: &MeshDraw<'_>,
+    ) -> Result<(), GpuError> {
+        self.draw_with(context, request)
+    }
+
+    fn draw_with(&self, context: &GpuContext, request: &MeshDraw<'_>) -> Result<(), GpuError> {
+        let texture = request.texture;
+        let mesh = request.mesh;
+        let color = request.color;
+        let mvp = request.mvp;
+        let depth = request.depth;
+        let load = if request.clear {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         } else {
             wgpu::LoadOp::Load
         };
-        self.draw_with(context, texture, mesh, color, load, mvp)
-    }
-
-    fn draw_with(
-        &self,
-        context: &GpuContext,
-        texture: &wgpu::Texture,
-        mesh: &Mesh,
-        color: [f32; 4],
-        load: wgpu::LoadOp<wgpu::Color>,
-        mvp: Option<[f32; 16]>,
-    ) -> Result<(), GpuError> {
         if texture.format() != self.format {
             return Err(GpuError::Pipeline(format!(
                 "纹理格式 {:?} 与管线 {:?} 不一致",
                 texture.format(),
                 self.format
             )));
+        }
+        if self.depth_format.is_some() != depth.is_some() {
+            return Err(GpuError::Pipeline(
+                "深度管线与 depth attachment 不匹配".to_string(),
+            ));
         }
         let matrix = mvp.unwrap_or(IDENTITY);
         let mut bytes: Vec<u8> = color
@@ -253,7 +302,21 @@ impl TrianglePipeline {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: depth.map(|view| {
+                    let depth_load = if matches!(load, wgpu::LoadOp::Clear(_)) {
+                        wgpu::LoadOp::Clear(1.0)
+                    } else {
+                        wgpu::LoadOp::Load
+                    };
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: depth_load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
@@ -276,6 +339,7 @@ impl TrianglePipeline {
 #[derive(Default)]
 pub struct RenderCache {
     pipeline: Option<(wgpu::TextureFormat, TrianglePipeline)>,
+    depth_pipeline: Option<(wgpu::TextureFormat, TrianglePipeline)>,
 }
 
 impl RenderCache {
@@ -296,6 +360,21 @@ impl RenderCache {
             self.pipeline = Some((format, context.create_triangle_pipeline(format)));
         }
         &self.pipeline.as_ref().unwrap().1
+    }
+
+    pub fn depth_pipeline_for(
+        &mut self,
+        context: &GpuContext,
+        format: wgpu::TextureFormat,
+    ) -> &TrianglePipeline {
+        let needs_rebuild = self
+            .depth_pipeline
+            .as_ref()
+            .is_none_or(|(current, _)| *current != format);
+        if needs_rebuild {
+            self.depth_pipeline = Some((format, context.create_depth_pipeline(format)));
+        }
+        &self.depth_pipeline.as_ref().unwrap().1
     }
 
     pub fn draw_list(
@@ -379,6 +458,40 @@ impl RenderCache {
                 index == 0,
                 Some(mul(mvp, item.transform)),
             )?;
+        }
+        Ok(())
+    }
+
+    /// 带深度附件的相机绘制；按实体 model × view-projection 出 MVP。
+    pub fn draw_list_with_meshes_and_camera_depth(
+        &mut self,
+        context: &GpuContext,
+        texture: &wgpu::Texture,
+        list: &DrawList,
+        meshes: &mut MeshCache,
+        mvp: [f32; 16],
+        depth: &wgpu::TextureView,
+    ) -> Result<(), GpuError> {
+        if list.items.is_empty() {
+            return context.clear_texture(texture, wgpu::Color::BLACK);
+        }
+        let format = texture.format();
+        for (index, item) in list.items.iter().enumerate() {
+            let loaded = meshes
+                .get(&item.model)
+                .map_err(|err| GpuError::Mesh(err.to_string()))?;
+            let fallback = loaded.is_none().then(Mesh::fullscreen_triangle);
+            let mesh = loaded.unwrap_or_else(|| fallback.as_ref().unwrap());
+            let request = MeshDraw {
+                texture,
+                mesh,
+                color: item.color,
+                clear: index == 0,
+                mvp: Some(mul(mvp, item.transform)),
+                depth: Some(depth),
+            };
+            self.depth_pipeline_for(context, format)
+                .draw_mesh_request(context, &request)?;
         }
         Ok(())
     }

@@ -7,15 +7,23 @@ use super::camera::{camera_view_projection, IDENTITY};
 use super::draw::build_draw_list;
 use super::gpu::{GpuContext, GpuError};
 use super::pipeline::RenderCache;
+use super::resources::{ResourceDesc, ResourceUsage};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderStats {
     pub draws: usize,
 }
 
+struct DepthTarget {
+    width: u32,
+    height: u32,
+    view: wgpu::TextureView,
+}
+
 pub struct Renderer {
     cache: RenderCache,
     meshes: MeshCache,
+    depth: Option<DepthTarget>,
 }
 
 impl Renderer {
@@ -23,11 +31,45 @@ impl Renderer {
         Self {
             cache: RenderCache::new(),
             meshes,
+            depth: None,
         }
     }
 
     pub fn meshes(&self) -> &MeshCache {
         &self.meshes
+    }
+
+    fn ensure_depth(
+        &mut self,
+        context: &GpuContext,
+        width: u32,
+        height: u32,
+    ) -> Result<(), GpuError> {
+        if self
+            .depth
+            .as_ref()
+            .is_some_and(|depth| depth.width == width && depth.height == height)
+        {
+            return Ok(());
+        }
+        let desc = ResourceDesc::texture2d(
+            "xgc-depth",
+            "depth32float",
+            width.max(1),
+            height.max(1),
+            vec![ResourceUsage::DepthAttachment],
+        );
+        let resource = context.create_resource(&desc)?;
+        let texture = resource
+            .into_texture()
+            .ok_or_else(|| GpuError::Pipeline("depth 资源不是纹理".to_string()))?;
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.depth = Some(DepthTarget {
+            width,
+            height,
+            view,
+        });
+        Ok(())
     }
 
     /// 渲染一帧：抽 DrawList、解析模型、按实体顺序 draw 到目标纹理。
@@ -37,15 +79,19 @@ impl Renderer {
         target: &wgpu::Texture,
         world: &World,
     ) -> Result<RenderStats, GpuError> {
+        let width = target.width();
+        let height = target.height();
+        self.ensure_depth(context, width, height)?;
         let list = build_draw_list(world);
-        let mvp =
-            camera_view_projection(world, target.width(), target.height()).unwrap_or(IDENTITY);
-        self.cache.draw_list_with_meshes_and_camera(
+        let mvp = camera_view_projection(world, width, height).unwrap_or(IDENTITY);
+        let depth = &self.depth.as_ref().unwrap().view;
+        self.cache.draw_list_with_meshes_and_camera_depth(
             context,
             target,
             &list,
             &mut self.meshes,
             mvp,
+            depth,
         )?;
         Ok(RenderStats { draws: list.len() })
     }

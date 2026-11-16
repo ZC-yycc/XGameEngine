@@ -273,6 +273,13 @@ impl GpuResource {
             Self::Buffer(_) => None,
         }
     }
+
+    pub fn into_texture(self) -> Option<wgpu::Texture> {
+        match self {
+            Self::Texture(texture) => Some(texture),
+            Self::Buffer(_) => None,
+        }
+    }
 }
 
 pub struct GpuResourceTable {
