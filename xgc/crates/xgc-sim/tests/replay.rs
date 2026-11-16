@@ -119,6 +119,7 @@ fn velocity_system_moves_transform() {
             "animation",
             "ui_layout",
             "ui_interaction",
+            "ui_focus",
             "hierarchy"
         ]
     );

@@ -19,7 +19,8 @@
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` /
 `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimationSystem` /
-`UiLayoutSystem` / `UiInteractionSystem` / `GravitySystem` / `HierarchySystem` /
+`UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `GravitySystem` /
+`HierarchySystem` /
 `AnimationClip` 平移关键帧线性采样（边界钳制 / 循环取模） / RON 剪辑加载 /
 `AnimationLibrary` 按名索引 /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/
@@ -61,8 +62,8 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 `GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴地、
 `AabbCollisionSystem` 两两分离动态刚体（球体按中心线精确分离）、`AnimatorSystem`
 推进动画时钟、`UiLayoutSystem` 算 UI 根 / 父相对矩形、裁剪区并继承可见性，`UiInteractionSystem`
-写 hover / press / click，`hit_test` 取最上层可交互元素、`HierarchySystem` 合成世界
-变换）→ 快照 / trace。
+写 hover / press / click，`UiFocusSystem` 按 EntityId 顺序切换焦点，`hit_test` 取最上层
+可交互元素、`HierarchySystem` 合成世界变换）→ 快照 / trace。
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
@@ -83,7 +84,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（77 个 Rust 文件最大 585 行）；schema 两次导出逐字节相同，
-19 个内建类型 24468 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
+19 个内建类型 24681 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
 脚本 / 动画 / 音频、渲染、编辑器；Agent 协议已覆盖能力清单，视觉验证仍缺。

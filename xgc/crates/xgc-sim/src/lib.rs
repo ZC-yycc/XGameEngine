@@ -161,6 +161,7 @@ impl Schedule {
         schedule.add(AnimatorSystem);
         schedule.add(UiLayoutSystem::default());
         schedule.add(UiInteractionSystem::default());
+        schedule.add(UiFocusSystem::default());
         schedule.add(HierarchySystem::default());
         schedule
     }
@@ -226,7 +227,7 @@ pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
     GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,
 };
-pub use ui::{hit_test, UiInteractionSystem, UiLayoutSystem};
+pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem};
 
 pub struct Simulation {
     world: World,

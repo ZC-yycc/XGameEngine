@@ -268,6 +268,7 @@ pub struct UiInteraction {
     pub hovered: bool,
     pub pressed: bool,
     pub clicked: bool,
+    pub focused: bool,
 }
 
 impl Component for UiInteraction {
@@ -287,6 +288,7 @@ impl Component for UiInteraction {
             FieldDescriptor::new("hovered", FieldType::Bool, Value::Bool(false)),
             FieldDescriptor::new("pressed", FieldType::Bool, Value::Bool(false)),
             FieldDescriptor::new("clicked", FieldType::Bool, Value::Bool(false)),
+            FieldDescriptor::new("focused", FieldType::Bool, Value::Bool(false)),
         ]
     }
 
@@ -295,6 +297,7 @@ impl Component for UiInteraction {
             "hovered" => Some(Value::Bool(self.hovered)),
             "pressed" => Some(Value::Bool(self.pressed)),
             "clicked" => Some(Value::Bool(self.clicked)),
+            "focused" => Some(Value::Bool(self.focused)),
             _ => None,
         }
     }
@@ -304,6 +307,7 @@ impl Component for UiInteraction {
             "hovered" => self.hovered = boolean(value, field)?,
             "pressed" => self.pressed = boolean(value, field)?,
             "clicked" => self.clicked = boolean(value, field)?,
+            "focused" => self.focused = boolean(value, field)?,
             _ => return Err(format!("ui.interaction 没有字段 {field}")),
         }
         Ok(())

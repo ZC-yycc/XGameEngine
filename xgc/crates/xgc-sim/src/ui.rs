@@ -141,6 +141,82 @@ impl System for UiInteractionSystem {
     }
 }
 
+/// 焦点导航：`next` 按 EntityId 顺序切到下一个可交互元素；`confirm` 同时点击。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UiFocusSystem {
+    pub next: bool,
+    pub confirm: bool,
+}
+
+impl System for UiFocusSystem {
+    fn name(&self) -> &'static str {
+        "ui_focus"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![UiElement::ID, UiLayout::ID, UiInteraction::ID],
+            writes: vec![UiInteraction::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        if !self.next && !self.confirm {
+            return;
+        }
+        let mut interactable = HashMap::new();
+        world.for_each::<UiElement>(|key, element| {
+            interactable.insert(key, element.interactable);
+        });
+        let mut focusable: Vec<(EntityId, xgc_base::EntityKey)> = Vec::new();
+        let mut current = None;
+        world.for_each::<UiInteraction>(|key, state| {
+            if state.focused {
+                if let Some(entity) = world.entity(key) {
+                    current = Some(entity);
+                }
+            }
+            if !interactable.get(&key).copied().unwrap_or(false) {
+                return;
+            }
+            let Some(layout) = world.get::<UiLayout>(key) else {
+                return;
+            };
+            if !layout.visible {
+                return;
+            }
+            if let Some(entity) = world.entity(key) {
+                focusable.push((entity, key));
+            }
+        });
+        if focusable.is_empty() {
+            return;
+        }
+        focusable.sort_by_key(|(entity, _)| *entity);
+        let current_index =
+            current.and_then(|entity| focusable.iter().position(|(id, _)| *id == entity));
+        let target = if self.next {
+            current_index.map_or(0, |index| (index + 1) % focusable.len())
+        } else {
+            current_index.unwrap_or(0)
+        };
+        let key = focusable[target].1;
+        world.for_each_mut::<UiInteraction>(|_, state| {
+            state.focused = false;
+            if self.confirm {
+                state.clicked = false;
+            }
+        });
+        if let Some(state) = world.get_mut::<UiInteraction>(key) {
+            state.focused = true;
+            if self.confirm {
+                state.clicked = true;
+                state.pressed = true;
+            }
+        }
+    }
+}
+
 fn resolve(
     id: EntityId,
     nodes: &HashMap<EntityId, Node>,

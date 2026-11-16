@@ -1,6 +1,6 @@
 //! UI 布局 / 裁剪 / 命中 / 交互回归。
 
-use xgc_sim::{hit_test, Schedule, UiInteractionSystem, UiLayoutSystem};
+use xgc_sim::{hit_test, Schedule, UiFocusSystem, UiInteractionSystem, UiLayoutSystem};
 use xgc_world::{Parent, UiElement, UiInteraction, UiLayout, World};
 
 #[test]
@@ -119,4 +119,40 @@ fn ui_interaction_marks_hover_and_click() {
     assert!(state.hovered);
     assert!(state.pressed);
     assert!(state.clicked);
+}
+
+#[test]
+fn ui_focus_cycles_through_interactable_elements() {
+    let mut world = World::new();
+    let first = world.spawn((
+        UiElement {
+            offset_min: [0.0, 0.0],
+            offset_max: [100.0, 50.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+        UiInteraction::default(),
+    ));
+    let second = world.spawn((
+        UiElement {
+            offset_min: [0.0, 60.0],
+            offset_max: [100.0, 110.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+        UiInteraction::default(),
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(UiLayoutSystem {
+        viewport: [100.0, 200.0],
+    });
+    schedule.add(UiFocusSystem {
+        next: true,
+        confirm: false,
+    });
+    schedule.run(&mut world, 0.016);
+    assert!(world.get::<UiInteraction>(first).unwrap().focused);
+    schedule.run(&mut world, 0.016);
+    assert!(world.get::<UiInteraction>(second).unwrap().focused);
+    assert!(!world.get::<UiInteraction>(first).unwrap().focused);
 }
