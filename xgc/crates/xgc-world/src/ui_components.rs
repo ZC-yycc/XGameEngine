@@ -261,3 +261,51 @@ impl Component for UiLayout {
         Ok(())
     }
 }
+
+/// 运行时交互状态：由 UiInteractionSystem 每帧写入。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiInteraction {
+    pub hovered: bool,
+    pub pressed: bool,
+    pub clicked: bool,
+}
+
+impl Component for UiInteraction {
+    const ID: ComponentId = ComponentId(0x0603);
+    const NAME: &'static str = "ui.interaction";
+
+    fn default_value() -> Self {
+        Self::default()
+    }
+
+    fn doc() -> &'static str {
+        "UI 交互状态：hover / press / click，由 UiInteractionSystem 写入"
+    }
+
+    fn fields() -> Vec<FieldDescriptor> {
+        vec![
+            FieldDescriptor::new("hovered", FieldType::Bool, Value::Bool(false)),
+            FieldDescriptor::new("pressed", FieldType::Bool, Value::Bool(false)),
+            FieldDescriptor::new("clicked", FieldType::Bool, Value::Bool(false)),
+        ]
+    }
+
+    fn get_field(&self, field: &str) -> Option<Value> {
+        match field {
+            "hovered" => Some(Value::Bool(self.hovered)),
+            "pressed" => Some(Value::Bool(self.pressed)),
+            "clicked" => Some(Value::Bool(self.clicked)),
+            _ => None,
+        }
+    }
+
+    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
+        match field {
+            "hovered" => self.hovered = boolean(value, field)?,
+            "pressed" => self.pressed = boolean(value, field)?,
+            "clicked" => self.clicked = boolean(value, field)?,
+            _ => return Err(format!("ui.interaction 没有字段 {field}")),
+        }
+        Ok(())
+    }
+}

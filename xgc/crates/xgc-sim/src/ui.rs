@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use xgc_base::EntityId;
-use xgc_world::{Component, Parent, UiElement, UiLayout, World};
+use xgc_world::{Component, Parent, UiElement, UiInteraction, UiLayout, World};
 
 use super::{System, SystemAccess};
 
@@ -98,6 +98,46 @@ impl System for UiLayoutSystem {
                 }
             }
         }
+    }
+}
+
+/// 交互状态：按当前光标 / 点击更新 hover / press / click。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UiInteractionSystem {
+    pub cursor: Option<[f32; 2]>,
+    pub click: bool,
+}
+
+impl System for UiInteractionSystem {
+    fn name(&self) -> &'static str {
+        "ui_interaction"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![UiElement::ID, UiLayout::ID],
+            writes: vec![UiInteraction::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        let mut interactable = HashMap::new();
+        world.for_each::<UiElement>(|key, element| {
+            interactable.insert(key, element.interactable);
+        });
+        let cursor = self.cursor;
+        let click = self.click;
+        world.for_each2_mut::<UiLayout, UiInteraction>(|key, layout, state| {
+            let hovered = cursor.is_some_and(|point| {
+                interactable.get(&key).copied().unwrap_or(false)
+                    && layout.visible
+                    && contains(layout.rect, point)
+                    && contains(layout.clip, point)
+            });
+            state.hovered = hovered;
+            state.pressed = hovered && click;
+            state.clicked = hovered && click;
+        });
     }
 }
 
