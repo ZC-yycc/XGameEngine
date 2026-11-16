@@ -18,6 +18,8 @@ pub struct PlayerStats {
 
 /// 固定 60Hz 跑 `frames` 帧；`world.json`、脚本与资产都从 `dir` 读取。
 pub fn run_cooked(dir: &Path, frames: u64) -> Result<PlayerStats, String> {
+    xgc_asset::verify_manifest(dir)
+        .map_err(|differences| format!("cooked 文件校验失败：{}", differences.join("；")))?;
     let data = load_world(&dir.join("world.json"))
         .map_err(|err| format!("读取 cooked world 失败：{err}"))?;
     let mut world = World::new();

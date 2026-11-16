@@ -45,7 +45,7 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
             return ExitCode::from(2);
         }
     };
-    let manifest = match xgc_asset::cook_project(Path::new(root), Path::new(out)) {
+    let mut manifest = match xgc_asset::cook_project(Path::new(root), Path::new(out)) {
         Ok(manifest) => manifest,
         Err(err) => {
             eprintln!("烹饪失败：{err}");
@@ -56,8 +56,22 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
         eprintln!("写入 cooked world 失败：{err}");
         return ExitCode::from(1);
     }
+    match xgc_asset::file_entry(Path::new(out), "world.json") {
+        Ok(entry) => {
+            manifest.files.push(entry);
+            manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
+            if let Err(err) = xgc_asset::write_manifest(Path::new(out), &manifest) {
+                eprintln!("写入 manifest 失败：{err}");
+                return ExitCode::from(1);
+            }
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    }
     println!(
-        "pack: {} 个资产 + world.json -> {}",
+        "pack: {} 个文件（含 world.json） -> {}",
         manifest.files.len(),
         out
     );
@@ -71,6 +85,12 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
         return ExitCode::from(2);
     };
     let dir = Path::new(dir);
+    if let Err(differences) = xgc_asset::verify_manifest(dir) {
+        for line in &differences {
+            eprintln!("{line}");
+        }
+        return ExitCode::from(1);
+    }
     let frames: u64 = match frames.map(str::parse::<u64>).transpose() {
         Ok(frames) => frames.unwrap_or(60),
         Err(_) => {

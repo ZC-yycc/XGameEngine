@@ -137,7 +137,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 资产烹饪：独立播放器已通；下一步二进制 cooked 格式 / 图形播放器。
+1. 资产烹饪：manifest 校验已通；下一步二进制 cooked 格式 / 图形窗口。
 2. 动画：遮罩 / 分层混合细节。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 旧新视觉 / trace 对照。

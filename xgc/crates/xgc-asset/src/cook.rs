@@ -115,6 +115,48 @@ fn clean_previous(out: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub fn file_entry(out: &Path, relative: &str) -> Result<CookedFile, String> {
+    let path = out.join(relative);
+    let bytes = fs::read(&path).map_err(|err| format!("读取 {} 失败：{err}", path.display()))?;
+    Ok(CookedFile {
+        path: relative.replace('\\', "/"),
+        size: bytes.len() as u64,
+        hash: fnv_hex(&bytes),
+    })
+}
+
+pub fn write_manifest(out: &Path, manifest: &CookManifest) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(manifest)
+        .map_err(|err| format!("manifest 序列化失败：{err}"))?;
+    fs::write(out.join(MANIFEST), text).map_err(|err| format!("写入 manifest 失败：{err}"))
+}
+
+/// 校验 manifest 中每个文件存在且大小 / 哈希一致；没有 manifest 时视为无约束。
+pub fn verify_manifest(out: &Path) -> Result<(), Vec<String>> {
+    let path = out.join(MANIFEST);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let manifest: CookManifest = match serde_json::from_str(&text) {
+        Ok(manifest) => manifest,
+        Err(err) => return Err(vec![format!("cook.json 解析失败：{err}")]),
+    };
+    let mut differences = Vec::new();
+    for file in manifest.files {
+        let path = out.join(&file.path);
+        match fs::read(&path) {
+            Ok(bytes) if bytes.len() as u64 == file.size && fnv_hex(&bytes) == file.hash => {}
+            Ok(_) => differences.push(format!("文件内容变化：{}", file.path)),
+            Err(_) => differences.push(format!("缺少文件：{}", file.path)),
+        }
+    }
+    if differences.is_empty() {
+        Ok(())
+    } else {
+        Err(differences)
+    }
+}
+
 fn fnv_hex(bytes: &[u8]) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in bytes {

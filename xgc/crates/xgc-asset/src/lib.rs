@@ -6,7 +6,9 @@
 #![deny(unsafe_code)]
 
 mod cook;
-pub use cook::{cook_project, CookManifest, CookedFile};
+pub use cook::{
+    cook_project, file_entry, verify_manifest, write_manifest, CookManifest, CookedFile,
+};
 
 use std::collections::BTreeMap;
 use std::fmt;
