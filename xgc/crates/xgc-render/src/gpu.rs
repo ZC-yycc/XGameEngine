@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use super::draw::DrawList;
 use super::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 
 #[derive(Debug)]
@@ -121,6 +122,22 @@ impl GpuContext {
             resources.insert(desc.name.clone(), self.create_resource(desc)?);
         }
         Ok(GpuResourceTable { resources })
+    }
+
+    /// 按 draw list 的实体顺序出 draw call；空列表清黑，首项 clear，后续 load。
+    pub fn draw_list(&self, texture: &wgpu::Texture, list: &DrawList) -> Result<(), GpuError> {
+        let pipeline = self.create_triangle_pipeline(texture.format());
+        if list.items.is_empty() {
+            return self.clear_texture(texture, wgpu::Color::BLACK);
+        }
+        for (index, item) in list.items.iter().enumerate() {
+            if index == 0 {
+                pipeline.draw(self, texture, item.color)?;
+            } else {
+                pipeline.draw_over(self, texture, item.color)?;
+            }
+        }
+        Ok(())
     }
 
     /// 录制并提交一个只做 clear 的 render pass；用于资源 / 通道验证。
@@ -351,6 +368,31 @@ impl TrianglePipeline {
         texture: &wgpu::Texture,
         color: [f32; 4],
     ) -> Result<(), GpuError> {
+        self.draw_with(
+            context,
+            texture,
+            color,
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+        )
+    }
+
+    /// 在已有颜色上继续画，不 clear；用于同一次 pass 的后续 draw。
+    pub fn draw_over(
+        &self,
+        context: &GpuContext,
+        texture: &wgpu::Texture,
+        color: [f32; 4],
+    ) -> Result<(), GpuError> {
+        self.draw_with(context, texture, color, wgpu::LoadOp::Load)
+    }
+
+    fn draw_with(
+        &self,
+        context: &GpuContext,
+        texture: &wgpu::Texture,
+        color: [f32; 4],
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) -> Result<(), GpuError> {
         if texture.format() != self.format {
             return Err(GpuError::Pipeline(format!(
                 "纹理格式 {:?} 与管线 {:?} 不一致",
@@ -393,7 +435,7 @@ impl TrianglePipeline {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

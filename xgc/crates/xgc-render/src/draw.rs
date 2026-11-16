@@ -1,0 +1,53 @@
+//! 从世界抽取渲染 draw list：`render.mesh` + `render.material` + `GlobalTransform`。
+//!
+//! 当前还没有真实网格资产，`model` 只作为 key 记录；GPU 执行层先用内建三角形
+//! 验证"按实体出 draw call"的路径，网格加载在资产管线接上后替换。
+
+use xgc_base::EntityId;
+use xgc_world::{GlobalTransform, Material, MeshRenderer, World};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawItem {
+    pub entity: EntityId,
+    pub model: String,
+    pub color: [f32; 4],
+    pub roughness: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DrawList {
+    pub items: Vec<DrawItem>,
+}
+
+impl DrawList {
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+/// 只收同时有 `GlobalTransform` 与 `render.mesh` 的实体；结果按 EntityId 排序，
+/// 与 archetype / 行序无关。
+pub fn build_draw_list(world: &World) -> DrawList {
+    let mut items = Vec::new();
+    world.for_each::<MeshRenderer>(|key, mesh| {
+        let Some(entity) = world.entity(key) else {
+            return;
+        };
+        if world.get::<GlobalTransform>(key).is_none() {
+            return;
+        }
+        let material = world.get::<Material>(key).copied().unwrap_or_default();
+        items.push(DrawItem {
+            entity,
+            model: mesh.model.clone(),
+            color: material.base_color,
+            roughness: material.roughness,
+        });
+    });
+    items.sort_by_key(|item| item.entity);
+    DrawList { items }
+}

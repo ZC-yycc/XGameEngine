@@ -1,6 +1,9 @@
 //! 真实 GPU 资源创建；没有适配器时测试直接跳过（不把 CI 绑在 GPU 上）。
 
-use xgc_render::{GpuContext, GpuResource, ResourceDesc, ResourceTable, ResourceUsage};
+use xgc_render::{
+    build_draw_list, GpuContext, GpuResource, ResourceDesc, ResourceTable, ResourceUsage,
+};
+use xgc_world::{GlobalTransform, Material, MeshRenderer, World};
 
 #[test]
 fn gpu_resources_are_created_when_adapter_available() {
@@ -65,6 +68,32 @@ fn gpu_resources_are_created_when_adapter_available() {
     assert!((pixels[1] as i32 - 102).abs() <= 1, "实际 {pixels:?}");
     assert!((pixels[2] as i32 - 153).abs() <= 1, "实际 {pixels:?}");
     assert_eq!(pixels[3], 255);
+
+    let mut world = World::new();
+    world.spawn((
+        GlobalTransform::default(),
+        MeshRenderer {
+            model: "builtin://cube".to_string(),
+        },
+        Material {
+            base_color: [0.0, 1.0, 0.0, 1.0],
+            roughness: 0.5,
+        },
+    ));
+    world.spawn((
+        GlobalTransform::default(),
+        MeshRenderer {
+            model: "builtin://cube".to_string(),
+        },
+        Material {
+            base_color: [0.0, 0.0, 1.0, 1.0],
+            roughness: 0.5,
+        },
+    ));
+    let list = build_draw_list(&world);
+    context.draw_list(texture, &list).unwrap();
+    let pixels = context.read_texture_rgba8(texture, 2, 2).unwrap();
+    assert_eq!(&pixels[..4], &[0, 0, 255, 255]);
 }
 
 #[test]

@@ -9,9 +9,11 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
+mod draw;
 mod gpu;
 mod resources;
 
+pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable, TrianglePipeline};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 
