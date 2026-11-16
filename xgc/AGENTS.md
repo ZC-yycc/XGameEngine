@@ -83,7 +83,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
-| `crates/xgc-asset/src/cook.rs` | `cook_project`：复制 glb/gltf/bin/wav/lua/ron 等，写确定性 `cook.json`（FNV 哈希），清理上次 manifest 文件 |
+| `crates/xgc-asset/src/cook.rs` | `cook_project` / `file_entry` / `verify_manifest`：复制资产、写确定性 `cook.json`、校验大小与哈希 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
 | `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态） |
@@ -113,7 +113,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-player/src/lib.rs` | `run_cooked`：从 cooked 目录加载 world.json / 脚本并固定 60Hz 跑帧 |
+| `crates/xgc-player/src/lib.rs` | `run_cooked`：先校验 cooked manifest，再加载 world.json / 脚本并固定 60Hz 跑帧 |
 | `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录> [帧数]` |
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-world <世界.json> [帧] / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
