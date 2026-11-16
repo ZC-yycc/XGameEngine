@@ -10,7 +10,14 @@ use std::any::Any;
 use std::collections::HashMap;
 
 use xgc_base::{EntityId, EntityKey};
-use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
+use xgc_reflect::{Component, ComponentId, Value};
+
+mod command;
+mod components;
+mod hash;
+
+pub use command::{Applied, Command, Plan};
+pub use components::{Name, Transform, Velocity};
 
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
 ///
@@ -24,6 +31,10 @@ pub trait Column: Any + Send + Sync {
         self.len() == 0
     }
     fn swap_remove(&mut self, index: usize);
+    fn get_field(&self, row: usize, field: &str) -> Option<Value>;
+    fn set_field(&mut self, row: usize, field: &str, value: &Value) -> Result<(), String>;
+    fn validate_field(&self, row: usize, field: &str, value: &Value) -> Result<(), String>;
+    fn field_names(&self) -> Vec<&'static str>;
 }
 
 impl<T: Component> Column for Vec<T> {
@@ -41,6 +52,36 @@ impl<T: Component> Column for Vec<T> {
 
     fn swap_remove(&mut self, index: usize) {
         Vec::swap_remove(self, index);
+    }
+
+    fn get_field(&self, row: usize, field: &str) -> Option<Value> {
+        self.get(row)?.get_field(field)
+    }
+
+    fn set_field(&mut self, row: usize, field: &str, value: &Value) -> Result<(), String> {
+        let values = self
+            .as_any_mut()
+            .downcast_mut::<Vec<T>>()
+            .ok_or_else(|| format!("{} 列类型不一致", T::NAME))?;
+        let item = values
+            .get_mut(row)
+            .ok_or_else(|| format!("{} 行号越界：{row}", T::NAME))?;
+        item.set_field(field, value)
+    }
+
+    fn validate_field(&self, row: usize, field: &str, value: &Value) -> Result<(), String> {
+        let values = self
+            .as_any()
+            .downcast_ref::<Vec<T>>()
+            .ok_or_else(|| format!("{} 列类型不一致", T::NAME))?;
+        let item = values
+            .get(row)
+            .ok_or_else(|| format!("{} 行号越界：{row}", T::NAME))?;
+        item.validate_field(field, value)
+    }
+
+    fn field_names(&self) -> Vec<&'static str> {
+        T::fields().into_iter().map(|field| field.name).collect()
     }
 }
 
@@ -144,12 +185,13 @@ impl<A: Component, B: Component, C: Component, D: Component> Bundle for (A, B, C
 }
 
 #[derive(Clone, Copy)]
-struct EntityMeta {
+pub(crate) struct EntityMeta {
     id: EntityId,
     generation: u32,
     alive: bool,
     archetype: u32,
     row: u32,
+    revision: u64,
 }
 
 /// 世界：唯一写者，实体 / archetype / 列都在这里。
@@ -209,6 +251,7 @@ impl World {
         meta.archetype = archetype;
         meta.row = row;
         self.revision += 1;
+        meta.revision = self.revision;
         key
     }
 
@@ -322,6 +365,98 @@ impl World {
         self.archetypes.len()
     }
 
+    /// 双组件不可变遍历；只访问同时含 `A`、`B` 的 archetype。
+    pub fn for_each2<A: Component, B: Component>(&self, mut f: impl FnMut(EntityKey, &A, &B)) {
+        for arch in &self.archetypes {
+            let (Some(a), Some(b)) = (arch.columns.get(&A::ID), arch.columns.get(&B::ID)) else {
+                continue;
+            };
+            let (Some(a), Some(b)) = (
+                a.as_any().downcast_ref::<Vec<A>>(),
+                b.as_any().downcast_ref::<Vec<B>>(),
+            ) else {
+                continue;
+            };
+            for ((key, a), b) in arch.entities.iter().copied().zip(a.iter()).zip(b.iter()) {
+                f(key, a, b);
+            }
+        }
+    }
+
+    pub fn get_field(&self, id: EntityId, component: ComponentId, field: &str) -> Option<Value> {
+        let (_, meta) = self.meta_by_id(id)?;
+        let arch = self.archetypes.get(meta.archetype as usize)?;
+        arch.columns
+            .get(&component)?
+            .get_field(meta.row as usize, field)
+    }
+
+    /// 单字段写入：结构不变，revision +1，实体 revision 跟着更新。
+    pub fn set_field(
+        &mut self,
+        id: EntityId,
+        component: ComponentId,
+        field: &str,
+        value: &Value,
+    ) -> Result<(), String> {
+        self.set_field_raw(id, component, field, value)?;
+        let revision = self.bump_revision();
+        self.touch(id, revision);
+        Ok(())
+    }
+
+    pub fn entity_revision(&self, id: EntityId) -> Option<u64> {
+        self.meta_by_id(id).map(|(_, meta)| meta.revision)
+    }
+
+    pub(crate) fn set_field_raw(
+        &mut self,
+        id: EntityId,
+        component: ComponentId,
+        field: &str,
+        value: &Value,
+    ) -> Result<Value, String> {
+        let (_, meta) = self
+            .meta_by_id(id)
+            .ok_or_else(|| format!("实体不存在：{id}"))?;
+        let arch = self
+            .archetypes
+            .get_mut(meta.archetype as usize)
+            .ok_or_else(|| "archetype 不存在".to_string())?;
+        let column = arch
+            .columns
+            .get_mut(&component)
+            .ok_or_else(|| format!("实体 {id} 没有组件 {component}"))?;
+        let row = meta.row as usize;
+        let before = column
+            .get_field(row, field)
+            .ok_or_else(|| format!("组件 {component} 没有字段 {field}"))?;
+        column.set_field(row, field, value)?;
+        Ok(before)
+    }
+
+    pub(crate) fn meta_by_id(&self, id: EntityId) -> Option<(usize, EntityMeta)> {
+        let key = *self.by_id.get(&id)?;
+        let index = key.index() as usize;
+        let meta = *self.metas.get(index)?;
+        if meta.alive && meta.generation == key.generation() {
+            Some((index, meta))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn bump_revision(&mut self) -> u64 {
+        self.revision += 1;
+        self.revision
+    }
+
+    pub(crate) fn touch(&mut self, id: EntityId, revision: u64) {
+        if let Some((index, _)) = self.meta_by_id(id) {
+            self.metas[index].revision = revision;
+        }
+    }
+
     fn meta(&self, key: EntityKey) -> Option<EntityMeta> {
         let meta = self.metas.get(key.index() as usize).copied()?;
         if meta.alive && meta.generation == key.generation() {
@@ -345,6 +480,7 @@ impl World {
                 alive: true,
                 archetype: 0,
                 row: 0,
+                revision: 0,
             });
             EntityKey::new(index, 0)
         }
@@ -358,106 +494,5 @@ impl World {
         self.archetypes.push(Archetype::new(ids.to_vec()));
         self.archetype_index.insert(ids.to_vec(), index);
         index
-    }
-}
-
-/// 内建：局部变换。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Transform {
-    pub position: [f32; 3],
-    pub rotation: [f32; 4],
-    pub scale: [f32; 3],
-}
-
-impl Default for Transform {
-    fn default() -> Self {
-        Self {
-            position: [0.0; 3],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0; 3],
-        }
-    }
-}
-
-impl Component for Transform {
-    const ID: ComponentId = ComponentId(0x0101);
-    const NAME: &'static str = "core.transform";
-
-    fn default_value() -> Self {
-        Self::default()
-    }
-
-    fn doc() -> &'static str {
-        "局部变换：相对父节点的平移 / 旋转 / 缩放"
-    }
-
-    fn fields() -> Vec<FieldDescriptor> {
-        vec![
-            FieldDescriptor::new("position", FieldType::Vec3, Value::Vec3([0.0; 3]))
-                .unit("m")
-                .doc("相对父节点的平移"),
-            FieldDescriptor::new(
-                "rotation",
-                FieldType::Quat,
-                Value::Quat([0.0, 0.0, 0.0, 1.0]),
-            )
-            .doc("单位四元数"),
-            FieldDescriptor::new("scale", FieldType::Vec3, Value::Vec3([1.0; 3]))
-                .unit("x")
-                .doc("逐轴缩放"),
-        ]
-    }
-}
-
-/// 内建：速度（M0 测试与后续系统共用）。
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub struct Velocity {
-    pub linear: [f32; 3],
-}
-
-impl Component for Velocity {
-    const ID: ComponentId = ComponentId(0x0102);
-    const NAME: &'static str = "core.velocity";
-
-    fn default_value() -> Self {
-        Self::default()
-    }
-
-    fn doc() -> &'static str {
-        "线速度"
-    }
-
-    fn fields() -> Vec<FieldDescriptor> {
-        vec![
-            FieldDescriptor::new("linear", FieldType::Vec3, Value::Vec3([0.0; 3]))
-                .unit("m/s")
-                .doc("世界空间线速度"),
-        ]
-    }
-}
-
-/// 内建：名字（验证 String 组件的 clone / drop 与 schema）。
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct Name {
-    pub value: String,
-}
-
-impl Component for Name {
-    const ID: ComponentId = ComponentId(0x0103);
-    const NAME: &'static str = "core.name";
-
-    fn default_value() -> Self {
-        Self::default()
-    }
-
-    fn doc() -> &'static str {
-        "显示名；不是身份，身份只认 EntityId"
-    }
-
-    fn fields() -> Vec<FieldDescriptor> {
-        vec![
-            FieldDescriptor::new("value", FieldType::String, Value::String(String::new()))
-                .doc("显示名"),
-        ]
     }
 }

@@ -24,9 +24,12 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | 文件 | 职责 |
 |---|---|
 | `crates/xgc-base/src/lib.rs` | `EntityId` / `EntityKey` / `Tick` / `Diagnostic` |
-| `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、`Value` |
-| `crates/xgc-world/src/lib.rs` | `World`、`Bundle`、`Archetype`、内建组件 |
-| `crates/xgc-world/tests/world.rs` | 生成 / 回收 / 查询 / 确定性回归 |
+| `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、`Value`、动态字段读写 |
+| `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 双组件查询 |
+| `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` |
+| `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert |
+| `crates/xgc-world/src/hash.rs` | `World::state_hash` |
+| `crates/xgc-world/tests/` | world / commands / query 回归 |
 | `crates/xgc-cli/src/main.rs` | `xgc schema` / `xgc bench` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
@@ -41,10 +44,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M0 已收口；M1 第一刀：`Command` 事务（plan / apply / revert）、世界 revision
-   与实体级变更、多组件查询；world 文件接近 600 行时先拆 `world/` 模块再扩。
-2. M1 第二刀：快照 / 回放、`xgc check`、Agent 协议最小集（`engine.describe` /
-   `world.query` / `edit.plan`）。
+1. M1 第二刀：结构化 `Spawn` / `Despawn` 命令与撤销（before-image 存实体快照）、
+   命令序列化（serde）、`xgc check`、快照 / 回放；world 文件仍接近 600 行，先拆
+   `world/` 模块再扩。
+2. M1 第三刀：Agent 协议最小集（`engine.describe` / `world.query` / `edit.plan`），
+   `xgc serve --transport stdio`。
 3. 再往后的渲染 / 物理 / 脚本 / 编辑器见主文档 §14，别提前开分支。
 
 ## Token 纪律

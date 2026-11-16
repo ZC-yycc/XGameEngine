@@ -36,6 +36,22 @@ pub trait Component: Any + Clone + Send + Sync {
     fn doc() -> &'static str {
         ""
     }
+
+    /// 动态读字段；M1 的命令 / Agent 协议用。
+    fn get_field(&self, _field: &str) -> Option<Value> {
+        None
+    }
+
+    /// 动态写字段；实现方负责类型校验，错误必须是给人看的原因。
+    fn set_field(&mut self, _field: &str, _value: &Value) -> Result<(), String> {
+        Err(format!("{} 不支持字段写入", Self::NAME))
+    }
+
+    /// 计划阶段用：克隆一份试写，不碰真实世界。
+    fn validate_field(&self, field: &str, value: &Value) -> Result<(), String> {
+        let mut copy = self.clone();
+        copy.set_field(field, value)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
@@ -87,6 +103,97 @@ pub enum Value {
     Vec4([f64; 4]),
     Quat([f64; 4]),
     Entity(u64),
+}
+
+impl Value {
+    pub const fn type_name(&self) -> &'static str {
+        match self {
+            Self::Bool(_) => "bool",
+            Self::I64(_) => "i64",
+            Self::F64(_) => "f64",
+            Self::String(_) => "string",
+            Self::Vec2(_) => "vec2",
+            Self::Vec3(_) => "vec3",
+            Self::Vec4(_) => "vec4",
+            Self::Quat(_) => "quat",
+            Self::Entity(_) => "entity",
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            Self::F64(value) => Some(*value as f32),
+            _ => None,
+        }
+    }
+
+    pub fn as_vec3(&self) -> Option<[f32; 3]> {
+        match self {
+            Self::Vec3(value) => Some([value[0] as f32, value[1] as f32, value[2] as f32]),
+            _ => None,
+        }
+    }
+
+    pub fn as_quat(&self) -> Option<[f32; 4]> {
+        match self {
+            Self::Quat(value) => Some([
+                value[0] as f32,
+                value[1] as f32,
+                value[2] as f32,
+                value[3] as f32,
+            ]),
+            _ => None,
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// 状态哈希用的稳定混合；只求同输入同输出，不做密码学。
+    pub fn hash_into(&self, hash: &mut u64) {
+        fn mix(hash: &mut u64, value: u64) {
+            *hash ^= value;
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+
+        match self {
+            Self::Bool(value) => mix(hash, u64::from(*value)),
+            Self::I64(value) => mix(hash, *value as u64),
+            Self::F64(value) => mix(hash, value.to_bits()),
+            Self::String(value) => {
+                for byte in value.bytes() {
+                    mix(hash, u64::from(byte));
+                }
+            }
+            Self::Vec2(value) => {
+                mix(hash, value[0].to_bits());
+                mix(hash, value[1].to_bits());
+            }
+            Self::Vec3(value) => {
+                mix(hash, value[0].to_bits());
+                mix(hash, value[1].to_bits());
+                mix(hash, value[2].to_bits());
+            }
+            Self::Vec4(value) | Self::Quat(value) => {
+                mix(hash, value[0].to_bits());
+                mix(hash, value[1].to_bits());
+                mix(hash, value[2].to_bits());
+                mix(hash, value[3].to_bits());
+            }
+            Self::Entity(value) => mix(hash, *value),
+        }
+    }
 }
 
 /// 字段描述：字段名、类型、默认值、单位、范围、文档。
