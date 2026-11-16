@@ -14,7 +14,7 @@ use serde::Deserialize;
 use xgc_base::EntityId;
 use xgc_world::{
     AudioSource, Camera, Component, ComponentData, ComponentId, EntityData, GlobalTransform,
-    Material, MeshRenderer, Name, Parent, Script, Transform, Value, WorldData,
+    Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform, Value, WorldData,
 };
 
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
@@ -103,11 +103,11 @@ enum OldComponentData {
     Material(OldMaterial),
     Ui(ron::Value),
     Animator(ron::Value),
-    Physics(ron::Value),
     Character(ron::Value),
     Audio(OldAudio),
     Camera(OldCamera),
     Particle(ron::Value),
+    Physics(OldPhysics),
     Rust {
         #[allow(dead_code)]
         registered_name: String,
@@ -141,6 +141,52 @@ fn one() -> f32 {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize)]
+enum OldBodyKind {
+    Static,
+    Dynamic,
+    Kinematic,
+}
+
+#[derive(Debug, Deserialize)]
+enum OldShape {
+    Cuboid { half_extents: glam::Vec3 },
+    Ball { radius: f32 },
+    Capsule { half_height: f32, radius: f32 },
+    Cylinder { half_height: f32, radius: f32 },
+    Auto,
+}
+
+#[derive(Debug, Deserialize)]
+struct OldPhysics {
+    #[serde(default = "default_body_kind")]
+    kind: OldBodyKind,
+    #[serde(default = "default_shape")]
+    shape: OldShape,
+    #[serde(default = "default_friction")]
+    friction: f32,
+    #[serde(default)]
+    restitution: f32,
+    #[serde(default)]
+    mass: f32,
+    #[serde(default = "one")]
+    gravity_scale: f32,
+    #[serde(default)]
+    is_sensor: bool,
+}
+
+fn default_body_kind() -> OldBodyKind {
+    OldBodyKind::Dynamic
+}
+
+fn default_shape() -> OldShape {
+    OldShape::Auto
+}
+
+fn default_friction() -> f32 {
+    0.5
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,6 +247,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut camera = None;
         let mut script_path = None;
         let mut audio = None;
+        let mut physics = None;
         for entry in &old.components.entries {
             match &entry.data {
                 OldComponentData::Mesh(mesh) => {
@@ -237,6 +284,10 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                         autoplay: old_audio.autoplay,
                         spatial: old_audio.spatial,
                     });
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Physics(old_physics) => {
+                    physics = Some(old_physics);
                     report.mapped_components += 1;
                 }
                 _ => {}
@@ -348,6 +399,60 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     ("looping".to_string(), Value::Bool(audio.looping)),
                     ("autoplay".to_string(), Value::Bool(audio.autoplay)),
                     ("spatial".to_string(), Value::Bool(audio.spatial)),
+                ],
+            });
+        }
+        if let Some(physics) = physics {
+            let kind = match physics.kind {
+                OldBodyKind::Static => "static",
+                OldBodyKind::Dynamic => "dynamic",
+                OldBodyKind::Kinematic => "kinematic",
+            };
+            let (shape, half_extents, radius, half_height) = match physics.shape {
+                OldShape::Cuboid { half_extents } => ("cuboid", half_extents.to_array(), 0.5, 0.5),
+                OldShape::Ball { radius } => ("ball", [0.5; 3], radius, 0.5),
+                OldShape::Capsule {
+                    half_height,
+                    radius,
+                } => ("capsule", [0.5; 3], radius, half_height),
+                OldShape::Cylinder {
+                    half_height,
+                    radius,
+                } => ("cylinder", [0.5; 3], radius, half_height),
+                OldShape::Auto => ("auto", [0.5; 3], 0.5, 0.5),
+            };
+            components.push(ComponentData {
+                component: PhysicsBody::ID,
+                fields: vec![
+                    ("kind".to_string(), Value::String(kind.to_string())),
+                    ("shape".to_string(), Value::String(shape.to_string())),
+                    (
+                        "half_extents".to_string(),
+                        Value::Vec3([
+                            f64::from(half_extents[0]),
+                            f64::from(half_extents[1]),
+                            f64::from(half_extents[2]),
+                        ]),
+                    ),
+                    ("radius".to_string(), Value::F64(f64::from(radius))),
+                    (
+                        "half_height".to_string(),
+                        Value::F64(f64::from(half_height)),
+                    ),
+                    (
+                        "friction".to_string(),
+                        Value::F64(f64::from(physics.friction)),
+                    ),
+                    (
+                        "restitution".to_string(),
+                        Value::F64(f64::from(physics.restitution)),
+                    ),
+                    ("mass".to_string(), Value::F64(f64::from(physics.mass))),
+                    (
+                        "gravity_scale".to_string(),
+                        Value::F64(f64::from(physics.gravity_scale)),
+                    ),
+                    ("is_sensor".to_string(), Value::Bool(physics.is_sensor)),
                 ],
             });
         }

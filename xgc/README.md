@@ -12,16 +12,16 @@
 遍历、生成回收、`Command` 事务 plan / apply / revert、结构化 `Spawn` / `Despawn` /
 `AddComponent` / `RemoveComponent` + 实体快照撤销、可序列化 `EntityData` / 组件工厂、
 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` +
-`render.mesh` / `render.material` / `render.camera` + `script.lua` / `audio.source`
-十个内建组件（`xgc_world::builtin_registry` 是 CLI / Agent / xtask 的唯一清单）、
-实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希、
+`render.mesh` / `render.material` / `render.camera` + `script.lua` / `audio.source` +
+`physics.body` 十一个内建组件（`xgc_world::builtin_registry` 是 CLI / Agent / xtask
+的唯一清单）、实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希、
 `World::validate_data` 世界体检）、`xgc-store`（版本化 JSON 包络 + 原子写）、
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `VelocitySystem` / `GravitySystem` / `HierarchySystem` /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get /
 digest / stats / validate / load / save / plan / apply / revert；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
-Mesh / Material / Camera / Lua / Audio 映射）、`xgc-render`（资源描述 / pass / resource 渲染图，确定性拓扑排序 / 环检测 /
+Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-render`（资源描述 / pass / resource 渲染图，确定性拓扑排序 / 环检测 /
 单写者 / 未声明与读写用途校验 / `PassExecutor` 执行骨架）、`xgc-cli`
 （`schema` / `check [路径]` /
 `bench` / `export` / `import` / `run` / `serve` / `migrate` / `render-graph`）、
@@ -58,12 +58,12 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 `SceneV2` 的实体身份 / 名称 / 父子 / `Transform`，并补默认 `GlobalTransform`；
 参数也可以是一个目录：`xgc migrate <旧场景目录> <输出目录>` 会批量迁移所有
 `.ron`，单场景失败只记入报告、不中断其它场景。Mesh / Material / Camera / Lua /
-Audio 已映射到对应组件；Physics / UI 等仍先跳过，报告里计数。真实项目目录 4 个场景、
-35 个实体、48 个旧组件映射成功，0 父缺失。
+Audio / Physics 已映射到对应组件；UI / Animator 等仍先跳过，报告里计数。真实项目
+目录 4 个场景、35 个实体、63 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（76 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（37 个 Rust 文件最大 595 行）；schema 两次导出逐字节相同，
-10 个内建类型 7688 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
+`cargo test --workspace` 全绿（77 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（38 个 Rust 文件最大 597 行）；schema 两次导出逐字节相同，
+11 个内建类型 10399 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
 脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖能力清单与视觉验证。

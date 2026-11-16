@@ -20,6 +20,7 @@ fn builtin_registry_has_stable_types() {
             "render.camera",
             "script.lua",
             "audio.source",
+            "physics.body",
         ]
     );
     assert!(registry.validate().is_empty());

@@ -4,8 +4,8 @@
 use xgc_reflect::Registry;
 
 use super::{
-    AudioSource, Camera, GlobalTransform, Material, MeshRenderer, Name, Parent, Script, Transform,
-    Velocity,
+    AudioSource, Camera, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody,
+    Script, Transform, Velocity,
 };
 
 pub fn builtin_registry() -> Registry {
@@ -40,5 +40,8 @@ pub fn builtin_registry() -> Registry {
     registry
         .register::<AudioSource>()
         .expect("内置组件注册失败：audio.source");
+    registry
+        .register::<PhysicsBody>()
+        .expect("内置组件注册失败：physics.body");
     registry
 }

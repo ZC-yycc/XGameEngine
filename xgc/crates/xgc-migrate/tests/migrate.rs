@@ -3,7 +3,7 @@
 use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
     AudioSource, Camera, Component, ComponentId, GlobalTransform, Material, MeshRenderer, Name,
-    Parent, Script, Transform, Value,
+    Parent, PhysicsBody, Script, Transform, Value,
 };
 
 const SCENE: &str = r#"(
@@ -193,6 +193,38 @@ fn maps_script_and_audio() {
     assert_eq!(audio.fields[3].1, Value::Bool(true));
     assert_eq!(audio.fields[4].1, Value::Bool(true));
     assert_eq!(audio.fields[5].1, Value::Bool(false));
+}
+
+#[test]
+fn maps_physics_shape_and_body() {
+    let entries = r#"entries: [
+                    (
+                        identity: (id: 2),
+                        data: Physics((
+                            kind: Static,
+                            shape: Cuboid(
+                                half_extents: (12.0, 0.5, 12.0),
+                            ),
+                            mass: 0.0,
+                            friction: 0.8,
+                            restitution: 0.1,
+                            gravity_scale: 1.0,
+                            is_sensor: false,
+                        )),
+                    ),
+                ],"#;
+    let scene = SCENE.replacen("entries: [],", entries, 1);
+    let (world, report) = migrate_str(&scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let physics = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == PhysicsBody::ID)
+        .unwrap();
+    assert_eq!(physics.fields[0].1, Value::String("static".to_string()));
+    assert_eq!(physics.fields[1].1, Value::String("cuboid".to_string()));
+    assert_eq!(physics.fields[2].1, Value::Vec3([12.0, 0.5, 12.0]));
+    assert_eq!(physics.fields[5].1, Value::F64(f64::from(0.8f32)));
 }
 
 #[test]
