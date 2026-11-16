@@ -20,6 +20,7 @@ mod mesh;
 mod pipeline;
 mod renderer;
 mod resources;
+mod ui_draw;
 
 pub use assets::MeshCache;
 pub use camera::{
@@ -34,6 +35,7 @@ pub use mesh::{builtin_mesh, Mesh};
 pub use pipeline::{RenderCache, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
+pub use ui_draw::quad_matrix;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pass {

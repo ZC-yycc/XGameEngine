@@ -1,6 +1,6 @@
 //! 帧渲染入口：DrawList → MeshCache → RenderCache → GPU。
 
-use xgc_world::World;
+use xgc_world::{UiElement, UiLayout, World};
 
 use super::assets::MeshCache;
 use super::camera::{camera_view_projection, IDENTITY};
@@ -8,8 +8,10 @@ use super::draw::build_draw_list;
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::instanced::InstancedRequest;
+use super::mesh::Mesh;
 use super::pipeline::RenderCache;
 use super::resources::{ResourceDesc, ResourceUsage};
+use super::ui_draw::quad_matrix;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderStats {
@@ -80,6 +82,46 @@ impl Renderer {
             view,
         });
         Ok(())
+    }
+
+    /// 渲染 UI 背景矩形：在已渲染画面上叠加，不写深度；返回 draw 数。
+    pub fn render_ui(
+        &mut self,
+        context: &GpuContext,
+        target: &wgpu::Texture,
+        world: &World,
+    ) -> Result<usize, GpuError> {
+        let viewport = [target.width() as f32, target.height() as f32];
+        let pipeline = context.create_triangle_pipeline(target.format());
+        let mesh = Mesh::quad();
+        let mut items = Vec::new();
+        world.for_each::<UiLayout>(|key, layout| {
+            if !layout.visible {
+                return;
+            }
+            let color = world
+                .get::<UiElement>(key)
+                .map(|element| element.background)
+                .unwrap_or([1.0; 4]);
+            if color[3] <= 0.0 {
+                return;
+            }
+            if let Some(entity) = world.entity(key) {
+                items.push((entity, layout.rect, color));
+            }
+        });
+        items.sort_by_key(|(entity, _, _)| *entity);
+        for (_, rect, color) in &items {
+            pipeline.draw_mesh_with_mvp(
+                context,
+                target,
+                &mesh,
+                *color,
+                false,
+                Some(quad_matrix(*rect, viewport)),
+            )?;
+        }
+        Ok(items.len())
     }
 
     /// 渲染一帧：抽 DrawList、解析模型、按实体顺序 draw 到目标纹理。

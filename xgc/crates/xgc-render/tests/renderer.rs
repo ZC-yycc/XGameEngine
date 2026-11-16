@@ -107,3 +107,39 @@ fn empty_world_clears_and_entity_emits_one_draw() {
         "近处绿色应挡住后画的远处红色"
     );
 }
+
+#[test]
+fn ui_background_renders_over_target() {
+    use xgc_world::{UiElement, UiLayout};
+
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let desc = ResourceDesc::texture2d(
+        "ui-target",
+        "rgba8unorm",
+        4,
+        4,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let resource = context.create_resource(&desc).unwrap();
+    let GpuResource::Texture(texture) = resource else {
+        panic!("UI target 不是纹理");
+    };
+    let mut world = World::new();
+    world.spawn((
+        UiElement {
+            background: [1.0, 0.0, 0.0, 1.0],
+            ..UiElement::default()
+        },
+        UiLayout {
+            rect: [0.0, 0.0, 4.0, 4.0],
+            ..UiLayout::default()
+        },
+    ));
+    let mut renderer = Renderer::new(MeshCache::new("."));
+    assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 1);
+    let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
+    assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
+}
