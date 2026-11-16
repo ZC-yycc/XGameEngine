@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use super::draw::DrawList;
 use super::mesh::{builtin_mesh, Mesh};
@@ -40,8 +41,8 @@ impl fmt::Display for GpuError {
 impl std::error::Error for GpuError {}
 
 pub struct GpuContext {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     adapter_info: wgpu::AdapterInfo,
 }
 
@@ -64,14 +65,27 @@ impl GpuContext {
         ))
         .map_err(|err| GpuError::RequestDevice(err.to_string()))?;
         Ok(Self {
-            device,
-            queue,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
             adapter_info,
         })
     }
 
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter_info
+    }
+
+    /// 复用外部 wgpu 设备（编辑器视口）；Arc 句柄共享同一设备。
+    pub fn from_arc(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        adapter_info: wgpu::AdapterInfo,
+    ) -> Self {
+        Self {
+            device,
+            queue,
+            adapter_info,
+        }
     }
 
     pub fn device(&self) -> &wgpu::Device {

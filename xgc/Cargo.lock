@@ -2695,6 +2695,7 @@ dependencies = [
  "pxfm",
  "xgc-base",
  "xgc-reflect",
+ "xgc-render",
  "xgc-sim",
  "xgc-store",
  "xgc-world",

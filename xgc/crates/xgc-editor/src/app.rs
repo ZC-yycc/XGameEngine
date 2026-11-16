@@ -3,13 +3,26 @@
 use std::path::PathBuf;
 
 use eframe::egui;
+use eframe::egui_wgpu::RenderState;
+use eframe::wgpu;
+
+use xgc_render::{GpuContext, MeshCache, Renderer};
 
 use crate::{EditorState, FieldRow};
 use xgc_reflect::Value;
 
+struct Viewport {
+    size: [u32; 2],
+    texture: wgpu::Texture,
+    id: egui::TextureId,
+    renderer: Renderer,
+    context: GpuContext,
+}
+
 pub struct EditorApp {
     state: EditorState,
     status: Option<String>,
+    viewport: Option<Viewport>,
 }
 
 impl EditorApp {
@@ -17,6 +30,66 @@ impl EditorApp {
         Self {
             state,
             status: None,
+            viewport: None,
+        }
+    }
+
+    fn ensure_viewport(&mut self, render_state: &RenderState) {
+        let size = [800, 450];
+        if self
+            .viewport
+            .as_ref()
+            .is_some_and(|viewport| viewport.size == size)
+        {
+            return;
+        }
+        if let Some(old) = self.viewport.take() {
+            render_state.renderer.write().free_texture(&old.id);
+        }
+        let context = GpuContext::from_arc(
+            render_state.device.clone(),
+            render_state.queue.clone(),
+            render_state.adapter.get_info(),
+        );
+        let texture = context.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("xgc-editor-viewport"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let id = render_state.renderer.write().register_native_texture(
+            context.device(),
+            &view,
+            wgpu::FilterMode::Linear,
+        );
+        self.viewport = Some(Viewport {
+            size,
+            texture,
+            id,
+            renderer: Renderer::new(MeshCache::new(".")),
+            context,
+        });
+    }
+
+    fn render_viewport(&mut self) {
+        let Some(viewport) = &mut self.viewport else {
+            return;
+        };
+        if let Err(err) =
+            viewport
+                .renderer
+                .render(&viewport.context, &viewport.texture, self.state.world())
+        {
+            self.status = Some(format!("视口渲染失败：{err}"));
         }
     }
 
@@ -227,12 +300,26 @@ fn value_editor(ui: &mut egui::Ui, value: &Value, ty: &str) -> Option<Value> {
 }
 
 impl eframe::App for EditorApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(render_state) = frame.wgpu_render_state() {
+            self.ensure_viewport(render_state);
+            self.render_viewport();
+        }
         egui::TopBottomPanel::top("xgc-toolbar").show(ctx, |ui| self.toolbar(ui));
         egui::SidePanel::left("xgc-hierarchy")
             .default_width(260.0)
             .show(ctx, |ui| self.hierarchy(ui));
-        egui::CentralPanel::default().show(ctx, |ui| self.inspector(ui));
+        egui::SidePanel::right("xgc-inspector")
+            .default_width(380.0)
+            .show(ctx, |ui| self.inspector(ui));
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(viewport) = &self.viewport {
+                let size = egui::vec2(viewport.size[0] as f32, viewport.size[1] as f32);
+                ui.image(egui::load::SizedTexture::new(viewport.id, size));
+            } else {
+                ui.label("没有 wgpu 渲染后端，视口不可用");
+            }
+        });
     }
 }
 

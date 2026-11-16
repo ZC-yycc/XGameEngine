@@ -12,6 +12,7 @@ xgc-reflect = { path = "../xgc-reflect" }
 xgc-world = { path = "../xgc-world" }
 xgc-store = { path = "../xgc-store" }
 xgc-sim = { path = "../xgc-sim" }
+xgc-render = { path = "../xgc-render" }
 eframe = { version = "0.30", default-features = false, features = ["wgpu", "default_fonts"] }
 # 离线缓存只有 0.1.29 源码；moxcms 的 ^0.1.1 允许它。
 pxfm = "=0.1.29"
