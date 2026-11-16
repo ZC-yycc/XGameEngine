@@ -14,6 +14,7 @@ pub enum GpuError {
     RequestDevice(String),
     UnsupportedFormat(String),
     UnsupportedUsage(String),
+    Readback(String),
 }
 
 impl fmt::Display for GpuError {
@@ -25,6 +26,7 @@ impl fmt::Display for GpuError {
             Self::UnsupportedUsage(resource) => {
                 write!(f, "资源 {resource} 的用途无法映射到 wgpu")
             }
+            Self::Readback(message) => write!(f, "GPU 回读失败：{message}"),
         }
     }
 }
@@ -118,11 +120,140 @@ impl GpuContext {
         }
         Ok(GpuResourceTable { resources })
     }
+
+    /// 录制并提交一个只做 clear 的 render pass；用于资源 / 通道验证。
+    pub fn clear_texture_rgba(
+        &self,
+        texture: &wgpu::Texture,
+        rgba: [f64; 4],
+    ) -> Result<(), GpuError> {
+        self.clear_texture(
+            texture,
+            wgpu::Color {
+                r: rgba[0],
+                g: rgba[1],
+                b: rgba[2],
+                a: rgba[3],
+            },
+        )
+    }
+
+    /// 录制并提交一个只做 clear 的 render pass；用于资源 / 通道验证。
+    pub fn clear_texture(
+        &self,
+        texture: &wgpu::Texture,
+        color: wgpu::Color,
+    ) -> Result<(), GpuError> {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("xgc-clear"),
+            });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("xgc-clear-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        self.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    /// 回读 `rgba8unorm` 纹理为紧凑 RGBA 字节；行对齐在内部处理。
+    pub fn read_texture_rgba8(
+        &self,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, GpuError> {
+        if texture.format() != wgpu::TextureFormat::Rgba8Unorm {
+            return Err(GpuError::Readback(format!(
+                "只支持 rgba8unorm 回读，实际 {:?}",
+                texture.format()
+            )));
+        }
+        let bytes_per_row = width * 4;
+        let padded_row = bytes_per_row.div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("xgc-readback"),
+            size: u64::from(padded_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("xgc-readback-encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .map_err(|err| GpuError::Readback(err.to_string()))?
+            .map_err(|err| GpuError::Readback(err.to_string()))?;
+
+        let data = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((bytes_per_row * height) as usize);
+        for row in 0..height {
+            let start = (row * padded_row) as usize;
+            pixels.extend_from_slice(&data[start..start + bytes_per_row as usize]);
+        }
+        drop(data);
+        buffer.unmap();
+        Ok(pixels)
+    }
 }
 
 pub enum GpuResource {
     Texture(wgpu::Texture),
     Buffer(wgpu::Buffer),
+}
+
+impl GpuResource {
+    pub fn as_texture(&self) -> Option<&wgpu::Texture> {
+        match self {
+            Self::Texture(texture) => Some(texture),
+            Self::Buffer(_) => None,
+        }
+    }
 }
 
 pub struct GpuResourceTable {
@@ -158,7 +289,7 @@ fn parse_format(text: &str) -> Result<wgpu::TextureFormat, GpuError> {
 }
 
 fn texture_usage(desc: &ResourceDesc) -> Result<wgpu::TextureUsages, GpuError> {
-    let mut usage = wgpu::TextureUsages::COPY_DST;
+    let mut usage = wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC;
     let mut mapped = false;
     for usage_flag in &desc.usage {
         match usage_flag {

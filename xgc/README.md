@@ -22,8 +22,8 @@
 digest / stats / validate / load / save / plan / apply / revert；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
 Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-render`（资源描述 / pass / resource 渲染图，确定性拓扑排序 / 环检测 /
-单写者 / 未声明与读写用途校验 / `PassExecutor` 执行骨架；wgpu 设备与
-`GpuContext::create_resource` 真实纹理 / 缓冲创建）、`xgc-cli`
+单写者 / 未声明与读写用途校验 / `PassExecutor` 执行骨架；wgpu 设备、真实纹理 /
+缓冲创建、clear render pass 与 RGBA8 回读）、`xgc-cli`
 （`schema` / `check [路径]` /
 `bench` / `export` / `import` / `run` / `serve` / `migrate` / `render-graph`）、
 `xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。

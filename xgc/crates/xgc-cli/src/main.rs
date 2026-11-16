@@ -306,9 +306,25 @@ fn gpu_probe() -> ExitCode {
                 vec![ResourceUsage::ColorAttachment, ResourceUsage::Sampled],
             );
             match context.create_resource(&desc) {
-                Ok(_) => {
-                    println!("gpu: texture created");
-                    ExitCode::SUCCESS
+                Ok(resource) => {
+                    let Some(texture) = resource.as_texture() else {
+                        eprintln!("GPU 资源不是纹理");
+                        return ExitCode::from(1);
+                    };
+                    if let Err(err) = context.clear_texture_rgba(texture, [1.0, 0.0, 0.0, 1.0]) {
+                        eprintln!("清屏失败：{err}");
+                        return ExitCode::from(1);
+                    }
+                    match context.read_texture_rgba8(texture, 4, 4) {
+                        Ok(pixels) => {
+                            println!("gpu: clear pass + readback {:?}", &pixels[..4]);
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            eprintln!("回读失败：{err}");
+                            ExitCode::from(1)
+                        }
+                    }
                 }
                 Err(err) => {
                     eprintln!("创建 GPU 资源失败：{err}");

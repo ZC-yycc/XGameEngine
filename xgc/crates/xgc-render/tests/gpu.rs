@@ -31,6 +31,23 @@ fn gpu_resources_are_created_when_adapter_available() {
     table.add(buffer).unwrap();
     let created = context.create_resources(&table).unwrap();
     assert_eq!(created.len(), 2);
+
+    let readback = ResourceDesc::texture2d(
+        "readback",
+        "rgba8unorm",
+        2,
+        2,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let resource = context.create_resource(&readback).unwrap();
+    let texture = resource.as_texture().unwrap();
+    context
+        .clear_texture_rgba(texture, [1.0, 0.0, 0.0, 1.0])
+        .unwrap();
+    let pixels = context.read_texture_rgba8(texture, 2, 2).unwrap();
+    assert_eq!(pixels.len(), 16);
+    assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
+    assert_eq!(&pixels[12..16], &[255, 0, 0, 255]);
 }
 
 #[test]
