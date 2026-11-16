@@ -62,6 +62,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/snapshot.rs` | `world.snapshot` / `world.restore`：WorldData 快照与恢复 |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表、指令预算、脚本登记 / 热重载、生命周期钩子 |
+| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、磁盘热重载 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
@@ -104,7 +105,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 脚本：生命周期已接；下一步脚本实体系统（按 Script 组件驱动）与内存上限。
+1. 脚本：实体运行时已接；下一步内存上限与调度接入。
 2. 动画：CPU 蒙皮已接；下一步蒙皮 GPU 管线 / 骨骼层级导入。
 3. UI：圆角 / scissor 已接；下一步 UI 绘制批次。
 4. 音频：播放设备 / 流式缓冲。

@@ -11,7 +11,10 @@ use mlua::{
     Value as LuaValue, VmState,
 };
 use xgc_base::EntityId;
-use xgc_world::{builtin_registry, Transform, Value, World};
+use xgc_world::{builtin_registry, Command, Transform, Value, World};
+
+mod runtime;
+pub use runtime::ScriptRuntime;
 
 pub struct LuaHost {
     lua: Lua,
@@ -19,6 +22,7 @@ pub struct LuaHost {
     scripts: RefCell<BTreeMap<String, String>>,
     budget: Option<(Arc<AtomicUsize>, usize)>,
     started: Cell<bool>,
+    commands: Option<Rc<RefCell<Vec<Command>>>>,
 }
 
 impl LuaHost {
@@ -33,10 +37,69 @@ impl LuaHost {
             scripts: RefCell::new(BTreeMap::new()),
             budget: None,
             started: Cell::new(false),
+            commands: None,
         })
     }
 
-    /// 绑定世界：脚本可读实体数 / 读写 Transform；World 由调用方持有以便检查结果。
+    /// 脚本只产生命令；由调用方在帧末 plan / apply，保证事务边界。
+    pub fn with_commands(commands: Rc<RefCell<Vec<Command>>>) -> Result<Self, String> {
+        let host = Self::new()?;
+        host.register_commands(&commands)?;
+        Ok(Self {
+            lua: host.lua,
+            world: None,
+            scripts: RefCell::new(BTreeMap::new()),
+            budget: None,
+            started: Cell::new(false),
+            commands: Some(commands),
+        })
+    }
+
+    fn register_commands(&self, commands: &Rc<RefCell<Vec<Command>>>) -> Result<(), String> {
+        let api = self
+            .lua
+            .create_table()
+            .map_err(|err| format!("创建 xgc 表失败：{err}"))?;
+        let set_commands = Rc::clone(commands);
+        let set_field = self
+            .lua
+            .create_function(
+                move |_, (id, component, field, value): (u64, String, String, mlua::Value)| {
+                    let component = component_id(&component)?;
+                    let value = lua_to_value(&value)?;
+                    set_commands.borrow_mut().push(Command::SetField {
+                        entity: EntityId::from_raw(id),
+                        component,
+                        field,
+                        value,
+                    });
+                    Ok(())
+                },
+            )
+            .map_err(|err| format!("创建 set 失败：{err}"))?;
+        api.set("set", set_field)
+            .map_err(|err| format!("注册 set 失败：{err}"))?;
+        let log = self
+            .lua
+            .create_function(|_, message: String| {
+                println!("[lua] {message}");
+                Ok(())
+            })
+            .map_err(|err| format!("创建 log 失败：{err}"))?;
+        api.set("log", log)
+            .map_err(|err| format!("注册 log 失败：{err}"))?;
+        self.lua
+            .globals()
+            .set("xgc", api)
+            .map_err(|err| format!("注册 xgc 表失败：{err}"))
+    }
+
+    pub fn take_commands(&self) -> Vec<Command> {
+        self.commands
+            .as_ref()
+            .map(|commands| std::mem::take(&mut *commands.borrow_mut()))
+            .unwrap_or_default()
+    }
     pub fn with_world(world: Rc<RefCell<World>>) -> Result<Self, String> {
         let host = Self::new()?;
         host.register_world(&world)?;
@@ -46,6 +109,7 @@ impl LuaHost {
             scripts: RefCell::new(BTreeMap::new()),
             budget: None,
             started: Cell::new(false),
+            commands: None,
         })
     }
 

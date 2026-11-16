@@ -174,3 +174,51 @@ fn scripts_can_spawn_and_despawn_entities() {
         .unwrap();
     assert_eq!(world.borrow().len(), 0);
 }
+
+#[test]
+fn runtime_drives_script_entities_and_reloads() {
+    use xgc_world::{Script, Transform, World};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_lua_runtime_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("move.lua");
+    std::fs::write(
+        &path,
+        "function on_update(dt)\n  xgc.set(0, 'core.transform', 'position', {x=2.0, y=3.0, z=4.0})\nend\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        Script {
+            path: "move.lua".to_string(),
+        },
+    ));
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    assert_eq!(
+        world.get::<Transform>(entity).unwrap().position,
+        [2.0, 3.0, 4.0]
+    );
+    assert_eq!(runtime.entity_count(), 1);
+
+    std::fs::write(
+        &path,
+        "function on_update(dt)\n  xgc.set(0, 'core.transform', 'position', {x=9.0, y=0.0, z=0.0})\nend\n",
+    )
+    .unwrap();
+    runtime.reload_all().unwrap();
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    assert_eq!(
+        world.get::<Transform>(entity).unwrap().position,
+        [9.0, 0.0, 0.0]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
