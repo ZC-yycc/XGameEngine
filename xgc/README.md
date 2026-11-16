@@ -21,12 +21,13 @@
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get /
 digest / stats / validate / load / save / plan / apply / revert；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
-Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-render`（资源描述 / pass / resource 渲染图，确定性拓扑排序 / 环检测 /
+Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫描 `.meta`，
+`guid://` → 路径的只读资产目录）、`xgc-render`（资源描述 / pass / resource 渲染图，确定性拓扑排序 / 环检测 /
 单写者 / 未声明与读写用途校验 / `PassExecutor` 执行骨架；wgpu 设备、真实纹理 /
 缓冲创建、clear pass、可复用 `TrianglePipeline` + `RenderCache` 管线缓存 + uniform
-材质色、`Mesh` 顶点 / 索引缓冲、builtin 网格、最小 GLB 解析、`MeshCache` 模型路径
-解析、从 `render.mesh` + `render.material` 抽 `DrawList` 并按实体顺序 draw、
-RGBA8 回读）、
+材质色、`Mesh` 顶点 / 索引缓冲、builtin 网格、最小 GLB 解析、`MeshCache` 模型路径 /
+`guid://` 解析、从 `render.mesh` + `render.material` 抽 `DrawList` 并按实体顺序
+draw、RGBA8 回读）、
 `xgc-cli`（`schema` / `check [路径]` /
 `bench` / `export` / `import` / `run` / `serve` / `migrate` / `render-graph`）、
 `xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
@@ -65,8 +66,8 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 Audio / Physics 已映射到对应组件；UI / Animator 等仍先跳过，报告里计数。真实项目
 目录 4 个场景、35 个实体、63 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（84 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（48 个 Rust 文件最大 597 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（87 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（50 个 Rust 文件最大 597 行）；schema 两次导出逐字节相同，
 11 个内建类型 10399 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
@@ -89,6 +90,8 @@ cargo run -p xgc-cli -- serve
 cargo run -p xgc-cli -- migrate <旧.ron|旧目录> <新.json|新目录>
 cargo run -p xgc-cli -- render-graph
 cargo run -p xgc-cli -- gpu-probe
+cargo run -p xgc-cli -- mesh-probe <glb>
+cargo run -p xgc-cli -- assets <项目根>
 ```
 
 本机 cargo 不在 PATH 时，用 `C:\Users\Administrator\.cargo\bin\cargo.exe`；

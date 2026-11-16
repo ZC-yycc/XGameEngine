@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use xgc_agent::Agent;
+use xgc_asset::scan as scan_assets;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
 use xgc_render::{load_glb, GpuContext, Pass, RenderGraph, ResourceDesc, ResourceUsage};
@@ -28,16 +29,17 @@ fn main() -> ExitCode {
         Some("render-graph") => render_graph(),
         Some("gpu-probe") => gpu_probe(),
         Some("mesh-probe") => mesh_probe(args.next().as_deref()),
+        Some("assets") => assets(args.next().as_deref()),
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>>"
             );
             ExitCode::from(2)
         }
@@ -386,6 +388,30 @@ fn mesh_probe(path: Option<&str>) -> ExitCode {
         }
         Err(err) => {
             eprintln!("加载网格失败：{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn assets(root: Option<&str>) -> ExitCode {
+    let Some(root) = root else {
+        eprintln!("用法：xgc assets <项目根>");
+        return ExitCode::from(2);
+    };
+    match scan_assets(Path::new(root)) {
+        Ok(catalog) => {
+            println!(
+                "assets: {} 个 GUID，{} 条问题",
+                catalog.len(),
+                catalog.issues().len()
+            );
+            for issue in catalog.issues() {
+                eprintln!("assets: {issue}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("扫描资产失败：{err}");
             ExitCode::from(1)
         }
     }

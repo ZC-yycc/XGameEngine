@@ -1131,6 +1131,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xgc-asset"
+version = "0.1.0"
+dependencies = [
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "xgc-base"
 version = "0.1.0"
 dependencies = [
@@ -1143,6 +1151,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "xgc-agent",
+ "xgc-asset",
  "xgc-base",
  "xgc-migrate",
  "xgc-reflect",
@@ -1181,6 +1190,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wgpu",
+ "xgc-asset",
  "xgc-base",
  "xgc-world",
 ]

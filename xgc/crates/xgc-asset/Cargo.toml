@@ -1,0 +1,11 @@
+[package]
+name = "xgc-asset"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC 资产目录：扫描旧 .meta，guid:// → 项目相对路径"
+
+[dependencies]
+ron = "0.8.1"
+serde.workspace = true

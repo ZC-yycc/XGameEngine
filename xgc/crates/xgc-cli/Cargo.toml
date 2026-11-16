@@ -17,6 +17,7 @@ xgc-world = { path = "../xgc-world" }
 xgc-store = { path = "../xgc-store" }
 xgc-sim = { path = "../xgc-sim" }
 xgc-agent = { path = "../xgc-agent" }
+xgc-asset = { path = "../xgc-asset" }
 xgc-render = { path = "../xgc-render" }
 xgc-migrate = { path = "../xgc-migrate" }
 serde_json.workspace = true

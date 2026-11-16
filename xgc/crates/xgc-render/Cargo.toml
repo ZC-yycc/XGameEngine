@@ -7,6 +7,7 @@ license.workspace = true
 description = "XGC 渲染图骨架：pass / resource 依赖与确定性拓扑排序"
 
 [dependencies]
+xgc-asset = { path = "../xgc-asset" }
 xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
 pollster = "0.4"

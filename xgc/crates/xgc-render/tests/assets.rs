@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use xgc_asset::scan;
 use xgc_render::MeshCache;
 
 #[test]
@@ -28,4 +29,21 @@ fn loads_and_caches_box_glb_when_available() {
     let cached = cache.get("Box.glb").unwrap().unwrap();
     assert_eq!(cached.positions.len(), 24);
     assert_eq!(cache.len(), 1);
+}
+
+#[test]
+fn resolves_guid_through_asset_catalog() {
+    let root = Path::new("../../../projects/XGame");
+    if !root.exists() {
+        eprintln!("skip: 没有 projects/XGame");
+        return;
+    }
+    let catalog = scan(root).unwrap();
+    let mut cache = MeshCache::with_catalog(".", catalog);
+    let mesh = cache
+        .get("guid://43b41a2008432f77ca7fbca93854f890")
+        .unwrap()
+        .unwrap();
+    assert_eq!(mesh.positions.len(), 24);
+    assert_eq!(mesh.indices.len(), 36);
 }

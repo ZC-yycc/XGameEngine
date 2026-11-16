@@ -4,11 +4,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use xgc_asset::AssetCatalog;
+
 use super::glb::{load_glb, MeshError};
 use super::mesh::{builtin_mesh, Mesh};
 
 pub struct MeshCache {
     root: PathBuf,
+    catalog: Option<AssetCatalog>,
     meshes: HashMap<String, Mesh>,
 }
 
@@ -16,6 +19,15 @@ impl MeshCache {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            catalog: None,
+            meshes: HashMap::new(),
+        }
+    }
+
+    pub fn with_catalog(root: impl Into<PathBuf>, catalog: AssetCatalog) -> Self {
+        Self {
+            root: root.into(),
+            catalog: Some(catalog),
             meshes: HashMap::new(),
         }
     }
@@ -45,9 +57,15 @@ impl MeshCache {
             return Ok(self.meshes.get(model));
         }
         if model.starts_with("guid://") {
-            return Err(MeshError::Unsupported(
-                "guid:// 需要资产目录解析".to_string(),
-            ));
+            let Some(catalog) = &self.catalog else {
+                return Err(MeshError::Unsupported("guid:// 需要资产目录".to_string()));
+            };
+            let path = catalog
+                .resolve(model)
+                .ok_or_else(|| MeshError::Missing(format!("资产目录没有 {model}")))?;
+            let mesh = load_glb(path)?;
+            self.meshes.insert(model.to_string(), mesh);
+            return Ok(self.meshes.get(model));
         }
         if model.split(['/', '\\']).any(|part| part == "..") {
             return Err(MeshError::Unsupported(
