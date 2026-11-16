@@ -16,7 +16,7 @@ use super::pipeline::RenderCache;
 use super::resources::{ResourceDesc, ResourceUsage};
 use super::text::text_mesh;
 use super::texture::TexturePipeline;
-use super::ui_draw::quad_matrix;
+use super::ui_draw::{cover_uv, quad_matrix};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderStats {
@@ -207,6 +207,7 @@ impl Renderer {
                     (&self.ui_pipeline, self.ui_textures.get(image_path))
                 {
                     let mut draw_rect = *rect;
+                    let mut uv = [0.0, 0.0, 1.0, 1.0];
                     if image_mode == "preserve" {
                         if let Some(source) =
                             self.images.get(image_path).and_then(|image| image.as_ref())
@@ -229,6 +230,15 @@ impl Renderer {
                                 }
                             }
                         }
+                    } else if image_mode == "cover" {
+                        if let Some(source) =
+                            self.images.get(image_path).and_then(|image| image.as_ref())
+                        {
+                            uv = cover_uv(
+                                [source.width as f32, source.height as f32],
+                                [rect[2], rect[3]],
+                            );
+                        }
                     }
                     pipeline.draw(
                         context,
@@ -236,6 +246,7 @@ impl Renderer {
                         image,
                         quad_matrix(draw_rect, viewport),
                         [1.0; 4],
+                        uv,
                     )?;
                     draws += 1;
                 }

@@ -2,6 +2,22 @@
 
 use super::camera::Mat4;
 
+/// cover 模式的 UV 裁剪：返回 `[offset_x, offset_y, scale_x, scale_y]`。
+pub fn cover_uv(source: [f32; 2], target: [f32; 2]) -> [f32; 4] {
+    if source[0] <= 0.0 || source[1] <= 0.0 || target[0] <= 0.0 || target[1] <= 0.0 {
+        return [0.0, 0.0, 1.0, 1.0];
+    }
+    let source_aspect = source[0] / source[1];
+    let target_aspect = target[0] / target[1];
+    if source_aspect > target_aspect {
+        let scale = target_aspect / source_aspect;
+        [(1.0 - scale) * 0.5, 0.0, scale, 1.0]
+    } else {
+        let scale = source_aspect / target_aspect;
+        [0.0, (1.0 - scale) * 0.5, 1.0, scale]
+    }
+}
+
 /// 输入是像素矩形 `[x, y, width, height]`，输出 [-1,1] NDC 的缩放 + 平移。
 pub fn quad_matrix(rect: [f32; 4], viewport: [f32; 2]) -> Mat4 {
     let viewport_w = viewport[0].max(1.0);

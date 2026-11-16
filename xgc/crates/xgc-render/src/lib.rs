@@ -41,7 +41,7 @@ pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 pub use text::text_mesh;
 pub use texture::TexturePipeline;
-pub use ui_draw::quad_matrix;
+pub use ui_draw::{cover_uv, quad_matrix};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pass {

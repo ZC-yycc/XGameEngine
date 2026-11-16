@@ -101,7 +101,7 @@ impl Component for UiElement {
                 FieldType::String,
                 Value::String("stretch".into()),
             )
-            .doc("stretch / preserve（保持宽高比）"),
+            .doc("stretch / preserve（保持宽高比）/ cover（裁剪填满）"),
         ]
     }
 
@@ -154,7 +154,7 @@ impl Component for UiElement {
             "clip_children" => self.clip_children = boolean(value, field)?,
             "image_mode" => {
                 let mode = string(value, field)?;
-                if !matches!(mode, "stretch" | "preserve") {
+                if !matches!(mode, "stretch" | "preserve" | "cover") {
                     return Err(format!("ui.element.image_mode 未知模式：{mode}"));
                 }
                 self.image_mode = mode.to_string();

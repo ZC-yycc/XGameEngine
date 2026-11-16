@@ -403,3 +403,13 @@ fn ui_image_preserve_keeps_aspect() {
     assert!(pixels[center] > 0 || pixels[center + 1] > 0);
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn cover_uv_crops_wide_source() {
+    let uv = xgc_render::cover_uv([4.0, 1.0], [16.0, 16.0]);
+    assert!((uv[0] - 0.25).abs() < 1e-6);
+    assert!((uv[2] - 0.5).abs() < 1e-6);
+    let tall = xgc_render::cover_uv([1.0, 4.0], [16.0, 16.0]);
+    assert!((tall[1] - 0.25).abs() < 1e-6);
+    assert!((tall[3] - 0.5).abs() < 1e-6);
+}

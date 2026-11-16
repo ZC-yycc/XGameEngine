@@ -13,6 +13,7 @@ const TEXTURE_WGSL: &str = r#"
 struct Camera {
     mvp: mat4x4<f32>,
     tint: vec4<f32>,
+    uv: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -31,7 +32,7 @@ struct VsOut {
 fn vs(@location(0) position: vec3<f32>) -> VsOut {
     var out: VsOut;
     out.pos = camera.mvp * vec4<f32>(position, 1.0);
-    out.uv = vec2<f32>(position.x + 0.5, 0.5 - position.y);
+    out.uv = camera.uv.xy + vec2<f32>(position.x + 0.5, 0.5 - position.y) * camera.uv.zw;
     return out;
 }
 
@@ -60,7 +61,7 @@ impl GpuContext {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(80),
+                            min_binding_size: wgpu::BufferSize::new(96),
                         },
                         count: None,
                     },
@@ -144,17 +145,21 @@ impl TexturePipeline {
         texture: &wgpu::Texture,
         mvp: [f32; 16],
         tint: [f32; 4],
+        uv: [f32; 4],
     ) -> Result<(), GpuError> {
-        let mut bytes = Vec::with_capacity(80);
+        let mut bytes = Vec::with_capacity(96);
         for value in mvp {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         for value in tint {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+        for value in uv {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
         let uniform = context.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("xgc-texture-camera"),
-            size: 80,
+            size: 96,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
