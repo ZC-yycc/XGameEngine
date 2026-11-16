@@ -2,7 +2,7 @@
 //!
 //! Lua 宿主实现在 [`crate::LuaHost`]（`lua_host.rs`）。Rhai 宿主已于双轨
 //! P3 删除 —— P2.5 闸门判定 Lua 三负载全占优（规则见计划文档 §六，数据见
-//! PLAN.md 二十），本模块只留下两轨共用过的类型，API 面不变。
+//! Docs/历史/PLAN.md 二十），本模块只留下两轨共用过的类型，API 面不变。
 
 use std::path::PathBuf;
 

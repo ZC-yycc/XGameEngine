@@ -45,7 +45,7 @@
 //! # 历史
 //!
 //! 双轨计划 P0–P2 曾并存 Rhai 宿主；P2.5 三负载闸门判定 Lua 全胜
-//! （规则见 `Docs/双轨语言架构计划.md` §六，数据见 PLAN.md 二十），
+//! （规则见 `Docs/历史/双轨语言架构计划.md` §六，数据见 Docs/历史/PLAN.md 二十），
 //! P3 删除 Rhai，本 crate 收敛为单一 Lua 轨。
 
 mod context;

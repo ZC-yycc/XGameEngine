@@ -8,9 +8,10 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 2. `Docs/差距分析.md` — 与 Unity/UE/Godot 的能力差距 + **优先级排序**（唯一优先级真相源）
 3. `Docs/决策记录.md` — **改任何子系统之前先查这里**：不可推翻的约束、踩过的坑、实测数据
 4. `Docs/架构收敛约定.md` — **迁移 / 重构的硬规则**：不做兼容层，旧实现同 PR 拆除
-5. `PLAN.md` — 历史各轮的实施记录（含每个决策的完整推理与取舍；要查"当时为什么"看它）
-6. `Docs/双轨语言架构计划.md` — 脚本层决策记录 D1–D11 的**原文**（P0–P3 已完成，仅作决策档案）
-7. `FLOW.md` — 运行流程（启动 / 每帧 / 构建 / 数据流 / 关键文件速查）
+5. `FLOW.md` — 运行流程（启动 / 每帧 / 构建 / 数据流 / 关键文件速查）
+
+需要查“当时为什么这样选”时再看历史档案（冻结，不描述现状）：
+[`Docs/历史/README.md`](Docs/历史/README.md)。
 
 ## 反兼容层约定（硬规则）
 
@@ -34,6 +35,8 @@ Rust 实现的类 Unity 游戏引擎（wgpu 渲染 + egui 编辑器 + rapier 物
 cargo check --workspace --all-targets        # 检查（先跑这个）
 cargo clippy --workspace --all-targets       # lint（要求 0 警告）
 cargo test --workspace --all-targets         # 测试（要求全绿；数量随项目增长，以实跑输出为准）
+powershell -File tools/check-docs.ps1 -Enforce  # 文档门禁（根目录 / 链接 / 归档横幅）
+powershell -File tools/check-no-compat.ps1 -Enforce  # 兼容残骸基线（只许降）
 # CI 在 GitHub Actions（windows-latest）跑 check / clippy / test + 示例项目冒烟，
 # 命令带 --locked；workflow 见 .github/workflows/ci.yml，取舍见决策记录 §三十四。
 cargo run -p xgame-editor                    # 编辑器（先弹项目枢纽）
@@ -103,8 +106,8 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 
 ## 代码风格约定
 
-- **注释与文档写中文**，且遵循本仓库的风格：解释"为什么"而不是"是什么"；重要的取舍、别推翻的决策要写明理由（参考 `PLAN.md` 各轮的「刻意的取舍」小节）。
-- 回归测试必须先证明它在旧实现下会红（仓库惯例，见 PLAN.md 第十节）。
+- **注释与文档写中文**，且遵循本仓库的风格：解释"为什么"而不是"是什么"；重要的取舍、别推翻的决策要写明理由（参考 `Docs/历史/PLAN.md` 各轮的「刻意的取舍」小节）。
+- 回归测试必须先证明它在旧实现下会红（仓库惯例，见 `Docs/历史/PLAN.md` 第十节）。
 - 性能改动"先量后改"，量数据写进记录。
 - clippy 0 警告是硬要求。
 - `一键构建.cmd` 保持 ASCII-only（cmd.exe GBK 解码问题）。
@@ -140,7 +143,7 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - `crates/` — 引擎与工具（15 个 crate，名字见 workspace Cargo.toml）
 - `projects/XGame/` — 综合示范游戏项目（`project.ron` + `Scenes/` + `Resources/` + `Scripts/` +
   `Prefabs/` + `input.ron`）；它本身也是 workspace 成员（cdylib），演示 Rust 插件项目形态
-- `Docs/` — 脚本 API、无头运行、MCP、差距分析、决策记录、双轨语言架构计划
+- `Docs/` — 活跃文档（索引、规范、决策、差距、脚本 API、无头运行、MCP）+ `Docs/历史/` 冻结档案
 - `.github/` — GitHub Actions（CI workflow）
 - `dist/` — 发布产物（构建输出，不入库改动）
 - `tools/` — 构建脚本（build-release.ps1 等）
@@ -150,8 +153,9 @@ cargo test -p xgame-render --release --test culling_cost -- --ignored --nocaptur
 - **能力状态** → `ROADMAP.md`（只写阶段 / 勾选 + 链接，不写理由）
 - **不可推翻的约束 / 踩过的坑 / 实测数据** → `Docs/决策记录.md`
 - **差距与优先级** → `Docs/差距分析.md`（唯一排序真相源）
-- **"当时为什么这样做"** → `PLAN.md`（历史记录，允许过时）
+- **"当时为什么这样做"** → `Docs/历史/PLAN.md`（冻结，允许过时）
 - **用户怎么用** → `README.md`；**运行流程** → `FLOW.md`；**脚本 API** → `Docs/脚本API.md`
+- **文档怎么放 / 怎么改** → `Docs/文档规范.md`；**文档总索引** → `Docs/README.md`
 
 发现同一件事在两处出现，删掉旧的那处并留链接，别让两份一起漂移。
 

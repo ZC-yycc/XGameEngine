@@ -35,6 +35,10 @@ jobs:
       - name: Compatibility debt ratchet
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-no-compat.ps1 -Enforce
 
+      # 文档门禁：根目录白名单 / 活跃文档相对链接 / 归档横幅；警告也失败。
+      - name: Documentation gate
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-docs.ps1 -Enforce
+
       - name: Install Rust stable + clippy
         uses: dtolnay/rust-toolchain@stable
         with:

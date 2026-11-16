@@ -534,7 +534,7 @@ impl LuaHost {
             return;
         };
         // 钩子函数句柄是编译期缓存的（`detect_funcs` 留下的），热路径不再
-        // 查 env 表 —— 每钩子 ~194 ns ×1000 实体 ≈192 µs/帧，量证见 PLAN.md 二十。
+        // 查 env 表 —— 每钩子 ~194 ns ×1000 实体 ≈192 µs/帧，量证见 Docs/历史/PLAN.md 二十。
         let Some(func) = script.funcs.get(hook) else {
             return;
         };
@@ -572,7 +572,7 @@ impl LuaHost {
         };
         let ctx = ScriptCtx::new(&mut game, Some(state));
         // 写进常驻槽、传槽的轻量指针（见 `LuaCtx` 类型文档）——现造 userdata
-        // 实测 ~284 ns/次，1000 实体 ×2 钩子 ≈568 µs/帧，方案对比见 PLAN.md 二十。
+        // 实测 ~284 ns/次，1000 实体 ×2 钩子 ≈568 µs/帧，方案对比见 Docs/历史/PLAN.md 二十。
         let light = LuaCtx::as_light(self.ctx_slot.write(LuaCtx::from_script_ctx(ctx)));
 
         // 调用钩子。错误（含沙箱超限）记成日志，不 panic、不中断这一帧。

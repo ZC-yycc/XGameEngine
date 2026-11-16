@@ -5,7 +5,9 @@
 **文档导航**：想跑起来看本文「快速开始」；想查某个功能怎么用，看本文对应小节；
 想知道**还差什么、先做哪个**看 [`Docs/差距分析.md`](Docs/差距分析.md)；阶段状态看
 [`ROADMAP.md`](ROADMAP.md)；改引擎代码前先查 [`Docs/决策记录.md`](Docs/决策记录.md)
-的约束表；历史决策与实测数据在 `PLAN.md` 与 `FLOW.md`。
+的约束表；运行流程看 [`FLOW.md`](FLOW.md)；全部文档的分工与索引见
+[`Docs/README.md`](Docs/README.md)。历史决策与实测数据在
+[`Docs/历史/PLAN.md`](Docs/历史/PLAN.md)（冻结档案）。
 
 ## 快速开始
 
@@ -152,7 +154,7 @@ cargo build --workspace --release --locked -j2
 debug 编辑器 / 播放器 / 示例插件并跑上述发布包 `headless` 组合门禁，再跑示例项目的
 `--check` / `--headless` 与 `--export-schema` / `--export-script-api` 二进制冒烟。所有
 cargo 命令带 `--locked`；没有 GPU 的 runner 上渲染测试会自动 skip，真实播放器窗口和
-`--screenshot` 留给带显卡的本地或自托管 runner。完整取舍见 `PLAN.md` 五十二与
+`--screenshot` 留给带显卡的本地或自托管 runner。完整取舍见 `Docs/历史/PLAN.md` 五十二与
 `Docs/决策记录.md` §三十四。
 
 ## 引擎与游戏项目是分开的
@@ -665,7 +667,7 @@ Audio((
 
 脚本侧 API（`play_sound` / `play_sound_at` / `stop_sound` / `stop_all_sounds` /
 `set_listener` / `set_master_volume`）见 [Docs/脚本API.md](Docs/脚本API.md) 4.11；
-混音总线分组与流式长音频有意延后（见 PLAN.md 二十二 的取舍清单）。
+混音总线分组与流式长音频有意延后（见 Docs/历史/PLAN.md 二十二 的取舍清单）。
 示例：XGame 的 Spinner 是空间化循环蜂鸣，Jumper 起跳播一次性音效。
 
 ## 游戏 UI（屏幕空间）
@@ -1133,7 +1135,7 @@ clock.tick(dt)
 | 游戏 UI | 布局 + 文本排版 + 合批是**每帧恒定**成本（不像 3D 有指纹门控可跳过）：900 元素 / 3190 字形 **753 µs/帧**（60fps 预算 4.5%）。矩形与字形共用一条管线 + 同一张图集，**整屏 1 次 draw call**；没有 UI 实体时一次 `any` 扫描就整段跳过 |
 
 > 渲染侧的两条纪律：剔除**开 / 关画面逐字节一致**（宁可白画不能黑屏），合批的批次
-> 顺序 = 首次遇到顺序（同机截图逐字节确定的前提）。细节见 `PLAN.md` 二十八 / 三十。
+> 顺序 = 首次遇到顺序（同机截图逐字节确定的前提）。细节见 `Docs/历史/PLAN.md` 二十八 / 三十。
 
 可复现的微基准（2000 实体）：
 
@@ -1160,7 +1162,7 @@ cargo test -p xgame-runtime --release --test update_throughput -- --ignored --no
 | 稀疏动态 ×64 | 815.2 µs/帧 | **518.5 µs/帧** | **-36%** |
 | 密集接触 ×1000 | 14704.5 µs/帧 | **13753.0 µs/帧** | **-6.5%** |
 
-三组数据是**全部 3 次都更低**（不是靠一次好运），判据见 `PLAN.md` 八十七。
+三组数据是**全部 3 次都更低**（不是靠一次好运），判据见 `Docs/历史/PLAN.md` 八十七。
 代价：浮点求值顺序变了 → 物理轨迹与旧版本有微小数值差异；**逐位确定性门禁不受影响**
 （它比的是同一个二进制跑两遍）。
 

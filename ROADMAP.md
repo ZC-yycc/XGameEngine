@@ -1,9 +1,15 @@
-# XGameEngine 开发计划
+# XGameEngine 阶段状态（ROADMAP）
 
-> Rust 实现的类 Unity 游戏引擎。**本文只记阶段与状态** —— 为什么这样做看 `PLAN.md`，
-> 能力差距与优先级看 [`Docs/差距分析.md`](Docs/差距分析.md)，不可推翻的约束看
-> [`Docs/决策记录.md`](Docs/决策记录.md)。项目结构、运行命令、各功能怎么用统一在
-> [`README.md`](README.md)，本文不再复制。
+> **体裁：已完成 / 进行中的状态台账（按日期倒序）。** 它不是提案，也不是优先级排序。
+> `- [x]` = 已合并并有记录；`- [ ]` = 未完成；`🟨` = 部分完成。
+>
+> 为什么这样做看 [`Docs/历史/PLAN.md`](Docs/历史/PLAN.md)（冻结档案）；
+> **开放差距与优先级只看** [`Docs/差距分析.md`](Docs/差距分析.md)（唯一排序真相源）；
+> 不可推翻的约束看 [`Docs/决策记录.md`](Docs/决策记录.md)；项目结构、运行命令、
+> 各功能怎么用统一在 [`README.md`](README.md)，本文不再复制。
+>
+> 顶部「整体路线图」是现行记录；末尾「第一阶段…第九阶段 + 额外里程碑」是骨架期清单，
+> 保留作历史，不再更新。
 
 ---
 
@@ -652,7 +658,7 @@
 | 独立发布包 | 真实窗口启动、退出通过；完整输入/切关/插件 CI 门禁仍待补 |
 | R01/R02 旧实现红灯 | 已补跑最小旧行为失败，Edit 恢复后两个定向测试均通过；证据见 PLAN 第五十六节 |
 
-BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已实跑，其余验证引用本轮既有结果，未重新运行。实施记录见 [PLAN 第五十六节](PLAN.md#五十六g0-首轮修复与正式优先级采纳2026-10-26)。
+BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已实跑，其余验证引用本轮既有结果，未重新运行。实施记录见 [PLAN 第五十六节](Docs/历史/PLAN.md#五十六g0-首轮修复与正式优先级采纳2026-10-26)。
 
 | 阶段 | 状态 | 内容 |
 |---|---|---|
@@ -665,35 +671,39 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 | **六·五** | ✅ 完成 | 玩法层：输入系统 + 脚本系统（Lua）+ 统一运行时 |
 | **六·六** | ✅ 完成 | 稳定性 / 流畅度 / 性能硬化（无新功能：运行时热路径、渲染批上传、崩溃面与无界增长治理，附分档微基准） |
 | **六·七** | ✅ 完成 | 编辑器产品化第一波：项目设置、未保存保护、无头检查 `--check`、差距分析入库 |
-| **P0 资产管线** | ✅ 完成 | 资产 GUID + `.meta` + 资产库诊断 + `--migrate-assets` + 资源浏览器（浏览 / 拖入场景）+ MCP `asset_list`；导入参数消费见「材质资产」；见 PLAN.md 三十二、决策记录 §十四 |
-| **双轨 P0–P3** | ✅ 完成 | Rust 组件（UE 插件模式）+ Lua 脚本（Unity 模式 + 热更）双轨；P2.5 基准判定后 P3 删 Rhai，脚本层收敛单一 Lua 轨。决策 D1–D11 见[计划文档](Docs/双轨语言架构计划.md)，实施记录见 PLAN.md 十五–二十一 |
+| **P0 资产管线** | ✅ 完成 | 资产 GUID + `.meta` + 资产库诊断 + `--migrate-assets` + 资源浏览器（浏览 / 拖入场景）+ MCP `asset_list`；导入参数消费见「材质资产」；见 Docs/历史/PLAN.md 三十二、决策记录 §十四 |
+| **双轨 P0–P3** | ✅ 完成 | Rust 组件（UE 插件模式）+ Lua 脚本（Unity 模式 + 热更）双轨；P2.5 基准判定后 P3 删 Rhai，脚本层收敛单一 Lua 轨。决策 D1–D11 见[计划文档](Docs/历史/双轨语言架构计划.md)，实施记录见 Docs/历史/PLAN.md 十五–二十一 |
 | **七** | ✅ 完成（v1） | 动画系统：骨骼蒙皮 + 单剪辑 + 交叉淡入 + 阈值状态机 + 叠加 + 多层混合栈与骨骼遮罩 + **分层状态机** + **逐条转移时长** + **根运动** + **形变目标 morph target**；后续 IK / 重定向 / 动画事件等进新阶段 |
-| **八** | ✅ 完成 | 音频系统（kira：`AudioSource` + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，见 PLAN.md 二十二） |
-| **Agent-Native ①②③** | ✅ 完成 | MCP 工具面（12 工具，含 `asset_list` / `asset_import` / `asset_move` / `schema_read` / `script_api_read`）+ 无头运行 `--headless` / `--screenshot` + 场景格式说明书 `--export-schema` + 脚本 API 清单 `--export-script-api`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) / PLAN.md 五十、五十一 |
-| **CI / 自动化** | ✅ 完成 | GitHub Actions（Windows + stable + clippy + rust-cache）：`check` / `clippy` / `test` + **发布包 InputMap / 插件 / 三关无头组合门禁** + 示例项目 `--check` / `--headless` + 两份 JSON 导出；无 GPU runner 不冒充真实播放器 / 截图验收；见 PLAN.md 五十二 / 一百、决策记录 §三十四 |
-| **渲染 PBR** | ✅ 完成 | Cook-Torrance + 逐实体材质覆盖 + 无头截图（PLAN.md 二十四） |
+| **八** | ✅ 完成 | 音频系统（kira：`AudioSource` + 3D 空间音频 + 监听者跟随 + 静音降级 + 脚本 API，见 Docs/历史/PLAN.md 二十二） |
+| **Agent-Native ①②③** | ✅ 完成 | MCP 工具面（12 工具，含 `asset_list` / `asset_import` / `asset_move` / `schema_read` / `script_api_read`）+ 无头运行 `--headless` / `--screenshot` + 场景格式说明书 `--export-schema` + 脚本 API 清单 `--export-script-api`；见 [MCP.md](Docs/MCP.md) / [无头运行.md](Docs/无头运行.md) / Docs/历史/PLAN.md 五十、五十一 |
+| **CI / 自动化** | ✅ 完成 | GitHub Actions（Windows + stable + clippy + rust-cache）：`check` / `clippy` / `test` + **发布包 InputMap / 插件 / 三关无头组合门禁** + 示例项目 `--check` / `--headless` + 两份 JSON 导出；无 GPU runner 不冒充真实播放器 / 截图验收；见 Docs/历史/PLAN.md 五十二 / 一百、决策记录 §三十四 |
+| **渲染 PBR** | ✅ 完成 | Cook-Torrance + 逐实体材质覆盖 + 无头截图（Docs/历史/PLAN.md 二十四） |
 | **渲染 HDR** | ✅ 完成 | HDR 中间标 + ACES + 曝光（二十五）、Bloom（二十六） |
 | **渲染天空** | ✅ 完成 | 程序化天空盒 + 球谐漫反射 + 预过滤镜面 + BRDF LUT（二十七） |
 | **渲染批处理** | ✅ 完成 | GPU 实例化合批（二十八）+ 视锥剔除与阴影补投（三十）+ FXAA（三十一） |
-| **渲染 CSM** | ✅ 完成 | 4 级级联阴影：视线方向线性深度切分 + 每级紧致正交拟合 + 纹素吸附；4 层深度数组逐层 pass（PLAN.md 四十一、决策记录 §二十三） |
-| **渲染 TAA** | ✅ 完成 | 时域抗锯齿：Halton 亚像素抖动（只叠在相机上）+ 重投影历史 + 3×3 邻域钳制；两张 HDR 历史乒乓、默认关（PLAN.md 四十七、决策记录 §二十九） |
-| **材质资产** | ✅ 完成 | `.mat` 共享材质（颜色 / 金属度 / 粗糙度 / albedo）+ 项目材质库 + 资产/覆盖两层 + 编辑/指派 + 4 个脚本 API + 导入参数接线（PLAN.md 三十五、决策记录 §十七） |
+| **渲染 CSM** | ✅ 完成 | 4 级级联阴影：视线方向线性深度切分 + 每级紧致正交拟合 + 纹素吸附；4 层深度数组逐层 pass（Docs/历史/PLAN.md 四十一、决策记录 §二十三） |
+| **渲染 TAA** | ✅ 完成 | 时域抗锯齿：Halton 亚像素抖动（只叠在相机上）+ 重投影历史 + 3×3 邻域钳制；两张 HDR 历史乒乓、默认关（Docs/历史/PLAN.md 四十七、决策记录 §二十九） |
+| **材质资产** | ✅ 完成 | `.mat` 共享材质（颜色 / 金属度 / 粗糙度 / albedo）+ 项目材质库 + 资产/覆盖两层 + 编辑/指派 + 4 个脚本 API + 导入参数接线（Docs/历史/PLAN.md 三十五、决策记录 §十七） |
 | **九** | ✅ 完成（v1） | 后处理 + 阴影：**TAA** + **SSAO** + **点光立方体阴影（含逐面剔除）** + **软阴影（PCSS）/ 级间混合** 已落地；多盏点光投影、G-buffer 法线与 RenderGraph 属后续增强 |
-| **游戏 UI** | ✅ 完成（最小集） | 屏幕空间 UI：锚点布局 + 文本（中文 / 粗体 / 换行 / 对齐）+ 圆角面板 / 图片 / 按钮 + 指针交互（悬停 / 按下 / 点击）+ 23 个 `ui_*` 脚本 API + Inspector 区块；见 PLAN.md 三十四、决策记录 §十六 |
+| **游戏 UI** | ✅ 完成（最小集） | 屏幕空间 UI：锚点布局 + 文本（中文 / 粗体 / 换行 / 对齐）+ 圆角面板 / 图片 / 按钮 + 指针交互（悬停 / 按下 / 点击）+ 23 个 `ui_*` 脚本 API + Inspector 区块；见 Docs/历史/PLAN.md 三十四、决策记录 §十六 |
 | ~~**十**~~ | ✅ 完成 | 脚本系统 + 热重载（已并入六·五与双轨 P0–P3） |
-| **粒子系统** | ✅ 完成（CPU 版） | `ParticleEmitter` 组件 + `xgame-particle` 确定性 CPU 模拟 + billboard 实例化 pass（Alpha / Additive）+ Inspector 区块 + 4 个脚本 API；万级以上需上 GPU 模拟（分层已留好）；见 PLAN.md 三十六 |
-| **编辑器 Profiler** | ✅ 完成 | 帧时间滚动窗口（600 帧 / 60fps 下 10 秒）+ 主循环分段耗时 + 绘制 / 剔除 / 粒子读数；与 Output Log 同页签组；见 PLAN.md 三十七 |
-| **相机实体** | ✅ 完成 | `Entity::camera`（FOV / near / far / active）+ 单机位解析单入口 + 独立游戏 / 编辑器 Play / 无头截图三宿主同源 + 6 个脚本 API（`look_at` 等）；见 PLAN.md 三十八、决策记录 §二十 |
-| **编辑器偏好** | ✅ 完成 | 相机速度 / 鼠标灵敏度 / 网格开关 + 完整停靠布局存进 `editor.ron`；磁盘布局校验不过回退出厂布局；见 PLAN.md 三十九、决策记录 §二十一 |
-| **自动保存 / 崩溃恢复** | ✅ 完成 | 每 60 秒（可调 / 可关）把脏场景写进 `.autosave/` 副本（原子写、不改未保存状态）；崩溃后重开项目弹「恢复 / 丢弃 / 稍后」；见 PLAN.md 四十二、决策记录 §二十四 |
-| **运行期场景切换** | ✅ 完成 | `load_scene` / `current_scene` 两个脚本 API：切换在**帧末**唯一时机应用（先装载、成功才换）；物理 / 粒子 / 音频 autoplay / UI 交互 / `state_*` 一并重置，脚本全局变量保留；编辑器 Play / 独立游戏 / 无头运行三宿主同源；见 PLAN.md 四十三、决策记录 §二十五 |
-| **构建设置（关卡顺序）** | ✅ 完成 | `project.ron` 加 `build` 节：版本号 + **有序关卡清单**（顺序即关卡索引）；脚本 `scene_count` / `scene_index` / `load_scene_at` 让"进下一关"不再硬编码路径；`--check` 校验清单、构建器打包前逐关试装、新增 `--build` CLI；见 PLAN.md 四十四、决策记录 §二十六 |
-| **运行时预制体实例化** | ✅ 完成 | 脚本 `spawn_prefab` / `spawn_prefab_under`：整棵子树进场景（层级 / 变换 / 物理 / 粒子 / 音频 / 相机 / UI 全带上）、每个新实体贴实例来源、刚体由运行时补建；位置语义"设置不叠加"（世界位置 / 局部偏移两种）；失败三种各自一条日志并返回 `nil`；见 PLAN.md 四十五、决策记录 §二十七 |
-| **时间缩放 / 暂停** | ✅ 完成 | `set_time_scale` / `time_scale` 两个脚本 API（Unity `Time.timeScale` 语义）：`0` = 暂停模拟、`0.3` = 慢动作、`2.0` = 二倍速。缩放**只在 `GameClock::tick` 一处消费**，所以物理固定步 / 脚本 `delta`+`time` / 粒子 / 动画钟同帧同源；音频与 UI 不受影响（暂停菜单必须还能点）；编辑器 Play 的预览动画同步跟手；无头报告加 `time_scale` 让 CI 能断言"真的暂停了"；见 PLAN.md 四十六、决策记录 §二十八 |
-| **资产 / 脚本热重载** | ✅ 完成 | 1 Hz 轮询内容目录（只看 metadata）：Play 中改 `.lua` 自动重编译、编辑态刷新清单；资产 / `.meta` 变更刷新资产库并丢渲染缓存；预制体刷新清单。**场景不自动覆盖**、脏材质草稿保留、`project.ron` / 已实例化预制体 / 已解码音频不重载；只读会话不启用。见 PLAN.md 四十九、决策记录 §三十一 |
-| **层与碰撞矩阵** | ✅ 完成 | 32 层进 `project.ron` 的 `layers` 节（只存覆盖，默认全通 = 老工程逐位一致）；`Entity.layer` + Inspector 层下拉 + 设置面板 32×32 矩阵（对称写、两侧相与）；rapier `InteractionGroups` 建体 / 运行时可改组，角色控制器认自己的层；射线掩码只看成员位（Unity `layerMask` 语义）；脚本 `layer` / `set_layer` / `raycast_masked`；`--check` / MCP 报 `invalid_layers`。见 PLAN.md 五十四、决策记录 §三十六 |
+| **粒子系统** | ✅ 完成（CPU 版） | `ParticleEmitter` 组件 + `xgame-particle` 确定性 CPU 模拟 + billboard 实例化 pass（Alpha / Additive）+ Inspector 区块 + 4 个脚本 API；万级以上需上 GPU 模拟（分层已留好）；见 Docs/历史/PLAN.md 三十六 |
+| **编辑器 Profiler** | ✅ 完成 | 帧时间滚动窗口（600 帧 / 60fps 下 10 秒）+ 主循环分段耗时 + 绘制 / 剔除 / 粒子读数；与 Output Log 同页签组；见 Docs/历史/PLAN.md 三十七 |
+| **相机实体** | ✅ 完成 | `Entity::camera`（FOV / near / far / active）+ 单机位解析单入口 + 独立游戏 / 编辑器 Play / 无头截图三宿主同源 + 6 个脚本 API（`look_at` 等）；见 Docs/历史/PLAN.md 三十八、决策记录 §二十 |
+| **编辑器偏好** | ✅ 完成 | 相机速度 / 鼠标灵敏度 / 网格开关 + 完整停靠布局存进 `editor.ron`；磁盘布局校验不过回退出厂布局；见 Docs/历史/PLAN.md 三十九、决策记录 §二十一 |
+| **自动保存 / 崩溃恢复** | ✅ 完成 | 每 60 秒（可调 / 可关）把脏场景写进 `.autosave/` 副本（原子写、不改未保存状态）；崩溃后重开项目弹「恢复 / 丢弃 / 稍后」；见 Docs/历史/PLAN.md 四十二、决策记录 §二十四 |
+| **运行期场景切换** | ✅ 完成 | `load_scene` / `current_scene` 两个脚本 API：切换在**帧末**唯一时机应用（先装载、成功才换）；物理 / 粒子 / 音频 autoplay / UI 交互 / `state_*` 一并重置，脚本全局变量保留；编辑器 Play / 独立游戏 / 无头运行三宿主同源；见 Docs/历史/PLAN.md 四十三、决策记录 §二十五 |
+| **构建设置（关卡顺序）** | ✅ 完成 | `project.ron` 加 `build` 节：版本号 + **有序关卡清单**（顺序即关卡索引）；脚本 `scene_count` / `scene_index` / `load_scene_at` 让"进下一关"不再硬编码路径；`--check` 校验清单、构建器打包前逐关试装、新增 `--build` CLI；见 Docs/历史/PLAN.md 四十四、决策记录 §二十六 |
+| **运行时预制体实例化** | ✅ 完成 | 脚本 `spawn_prefab` / `spawn_prefab_under`：整棵子树进场景（层级 / 变换 / 物理 / 粒子 / 音频 / 相机 / UI 全带上）、每个新实体贴实例来源、刚体由运行时补建；位置语义"设置不叠加"（世界位置 / 局部偏移两种）；失败三种各自一条日志并返回 `nil`；见 Docs/历史/PLAN.md 四十五、决策记录 §二十七 |
+| **时间缩放 / 暂停** | ✅ 完成 | `set_time_scale` / `time_scale` 两个脚本 API（Unity `Time.timeScale` 语义）：`0` = 暂停模拟、`0.3` = 慢动作、`2.0` = 二倍速。缩放**只在 `GameClock::tick` 一处消费**，所以物理固定步 / 脚本 `delta`+`time` / 粒子 / 动画钟同帧同源；音频与 UI 不受影响（暂停菜单必须还能点）；编辑器 Play 的预览动画同步跟手；无头报告加 `time_scale` 让 CI 能断言"真的暂停了"；见 Docs/历史/PLAN.md 四十六、决策记录 §二十八 |
+| **资产 / 脚本热重载** | ✅ 完成 | 1 Hz 轮询内容目录（只看 metadata）：Play 中改 `.lua` 自动重编译、编辑态刷新清单；资产 / `.meta` 变更刷新资产库并丢渲染缓存；预制体刷新清单。**场景不自动覆盖**、脏材质草稿保留、`project.ron` / 已实例化预制体 / 已解码音频不重载；只读会话不启用。见 Docs/历史/PLAN.md 四十九、决策记录 §三十一 |
+| **层与碰撞矩阵** | ✅ 完成 | 32 层进 `project.ron` 的 `layers` 节（只存覆盖，默认全通 = 老工程逐位一致）；`Entity.layer` + Inspector 层下拉 + 设置面板 32×32 矩阵（对称写、两侧相与）；rapier `InteractionGroups` 建体 / 运行时可改组，角色控制器认自己的层；射线掩码只看成员位（Unity `layerMask` 语义）；脚本 `layer` / `set_layer` / `raycast_masked`；`--check` / MCP 报 `invalid_layers`。见 Docs/历史/PLAN.md 五十四、决策记录 §三十六 |
 
 ---
+
+> **以下为早期阶段记录（冻结）。** 第一~九阶段 + 额外里程碑是项目骨架期的清单，
+> 完成标记与数量保留原样；现行状态只看上方「整体路线图」与
+> [`Docs/差距分析.md`](Docs/差距分析.md) 的开放差距表。
 
 ## 第一阶段：骨架 ✅
 
@@ -746,12 +756,12 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 - [x] 资源浏览器（Assets 面板：`Resources/` 等目录树、类型图标、搜索、详情、GUID、
       导入设置、材质新建 / 编辑 / 指派；双击 / 拖入视口放入场景 —— P0 资产管线）
 - [x] Profiler 面板（帧时间滚动窗口 + 主循环分段 + 绘制读数；`--ui-profiler`
-      截图开关 —— 编辑器产品化第一件，见 PLAN.md 三十七）
+      截图开关 —— 编辑器产品化第一件，见 Docs/历史/PLAN.md 三十七）
 - [x] 自动保存 + 崩溃恢复（`.autosave/` 副本，间隔可调可关；恢复框三选一 ——
-      见 PLAN.md 四十二）
+      见 Docs/历史/PLAN.md 四十二）
 - [x] Preferences + 面板布局持久化（`editor.ron`：相机速度 / 灵敏度 / 网格 +
       完整停靠布局；磁盘布局先校验，坏布局回退出厂；`--ui-preferences` /
-      `--ui-restore-prefs` 截图开关 —— 见 PLAN.md 三十九）
+      `--ui-restore-prefs` 截图开关 —— 见 Docs/历史/PLAN.md 三十九）
 
 ## 额外里程碑
 
@@ -766,8 +776,9 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 
 ## 商业引擎对齐（状态速览）
 
-下表保留历史功能切片状态；完整能力边界与当前 G0—G4 排序见
-[`Docs/差距分析.md`](Docs/差距分析.md)，这里只留状态。
+下表保留历史功能切片状态；**当前开放差距与排序**见
+[`Docs/差距分析.md`](Docs/差距分析.md)，旧 G0—G4 快照在
+[`Docs/历史/差距关闭记录.md`](Docs/历史/差距关闭记录.md)，这里只留状态。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -795,9 +806,9 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 | 实例化 / 剔除 | 🟨 大半对齐 | GPU 实例化 + 视锥剔除 + 阴影补投 + 距离 LOD / 绘制距离 + 保守时域遮挡剔除已落地；仍无 HLOD / portal / GPU-driven 全链路 |
 | Gizmo 吸附 / Rect 工具 | 🟨 吸附完成 | 平移 / 旋转 / 缩放三档步长 + 工具栏磁铁开关 + 按住 Ctrl 临时反选 + Preferences 调步长（2026-11-08）；Rect 工具仍无实现 |
 | 编辑器交互稳定性 | ✅ 完成 | 射线 × 世界 AABB 拾取；轴拖拽参考线锚定；选中索引每帧收敛 |
-| 编辑器 Profiler | ✅ 完成 | 帧间隔 / 1% low / 主循环分段（运行时 · 界面+视口）+ draw / 剔除 / 粒子读数；600 帧滚动窗口，Pause / Clear；见 PLAN.md 三十七 |
-| 编辑器偏好 / 布局 | ✅ 完成 | 相机速度 / 灵敏度 / 网格 + 停靠布局持久化（`editor.ron`）；坏布局校验回退出厂；见 PLAN.md 三十九、决策记录 §二十一 |
-| 自动保存 / 崩溃恢复 | ✅ 完成 | 间隔可调（默认 60 秒，`0` = 关）的 `.autosave/` 副本 + 原子写；崩溃后重开项目三选一（恢复 / 丢弃 / 稍后）；恢复后仍是未保存状态；见 PLAN.md 四十二、决策记录 §二十四 |
+| 编辑器 Profiler | ✅ 完成 | 帧间隔 / 1% low / 主循环分段（运行时 · 界面+视口）+ draw / 剔除 / 粒子读数；600 帧滚动窗口，Pause / Clear；见 Docs/历史/PLAN.md 三十七 |
+| 编辑器偏好 / 布局 | ✅ 完成 | 相机速度 / 灵敏度 / 网格 + 停靠布局持久化（`editor.ron`）；坏布局校验回退出厂；见 Docs/历史/PLAN.md 三十九、决策记录 §二十一 |
+| 自动保存 / 崩溃恢复 | ✅ 完成 | 间隔可调（默认 60 秒，`0` = 关）的 `.autosave/` 副本 + 原子写；崩溃后重开项目三选一（恢复 / 丢弃 / 稍后）；恢复后仍是未保存状态；见 Docs/历史/PLAN.md 四十二、决策记录 §二十四 |
 | 每帧开销 / 可扩展性 | ✅ 完成 | 2000 实体纯视觉 13 µs/帧；渲染 2225 → 344 µs（实例化）、3295 → 1146 µs（剔除）。剩余瓶颈是 rapier 求解器 |
 | 崩溃面 / 无界增长 | ✅ 完成 | 未知 body 只警告；控制台上限 1000 条；撤销栈 100 步；缓存有界 |
 | 窗口 / 交互延迟 | ✅ 完成 | 空闲不重绘；1 Hz 内容扫描只查 metadata（不读文件内容、不触发视口重画）；拖边框节流重建（43 → 1 次） |
@@ -877,8 +888,8 @@ BehaviorsDemo 旧插件刷新复验与追加的 R01/R02 红绿定向测试均已
 ## 双轨语言架构：P0 ✅ P0.5 ✅ P1 ✅ P1.5 ✅ P2 ✅ P2.5 ✅ P3 ✅
 
 Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨；**P3 起脚本层收敛为单一 Lua 轨**
-（Rhai 已删）。计划与决策记录：[`Docs/双轨语言架构计划.md`](Docs/双轨语言架构计划.md)；
-实施记录：PLAN.md 十五–二十一。
+（Rhai 已删）。计划与决策记录：[`Docs/历史/双轨语言架构计划.md`](Docs/历史/双轨语言架构计划.md)；
+实施记录：Docs/历史/PLAN.md 十五–二十一。
 
 | 期 | 交付（一句话） |
 |---|---|
@@ -893,14 +904,14 @@ Rust（UE 插件模式）+ Lua（Unity 模式 + 热更）双轨；**P3 起脚本
 **有意延后的遗留**：P0.5 的 Play 中途热换插件、组件徽章、release profile 插件出货、
 cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5 的 prefab 组件
 字段、Play 中热调参写回；P2 的 `dispatch_destroy` / `forget_entity` 接线、编辑器"新建
-脚本"。这些都是**明确决定不做**，不是遗漏（理由见计划文档与 PLAN.md 各期）。
+脚本"。这些都是**明确决定不做**，不是遗漏（理由见计划文档与 Docs/历史/PLAN.md 各期）。
 
 ## 第七阶段：动画系统 🟨
 
 前五片已落地：
 
 - [x] 骨骼蒙皮（GPU skinning；阴影 pass 同步蒙皮；每实体一个 256 骨槽位）
-- [x] 动画片段加载（glTF → `AnimClip` / `Track`；LINEAR / STEP / **CUBICSPLINE Hermite 样条**运行时插值 —— 切线完整保留、按每秒乘段长、旋转归一化，见 PLAN.md 七十一 / 决策记录 §五十一）
+- [x] 动画片段加载（glTF → `AnimClip` / `Track`；LINEAR / STEP / **CUBICSPLINE Hermite 样条**运行时插值 —— 切线完整保留、按每秒乘段长、旋转归一化，见 Docs/历史/PLAN.md 七十一 / 决策记录 §五十一）
 - [x] 关键帧插值（线性 / 阶梯 / 三次样条三档；旋转 slerp、样条结果归一化；循环取模、非循环钳位）
 - [x] `Animator` 组件（clip / speed / looping / autoplay / fade_time，随场景落盘）
 - [x] 播放时钟 `AnimationDriver`（编辑器墙钟、游戏按帧 dt；换剪辑归零）
@@ -909,17 +920,17 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
 - [x] 阈值状态机（参数表 + 转移表（AtLeast ≥ / Below <）+ 滞回；坏配置安全退回单剪辑；脚本 `set_anim_param`）
 - [x] 叠加（additive）混合 v1（增量 = 叠加剪辑当前帧 − 第 0 帧；独立时钟；权重 0 逐位一致）
 - [x] 多层混合栈与骨骼遮罩 v1（每层 name / mode / clip / weight / speed / looping / mask；按数组顺序合成；遮罩 = 骨骼子树根名单；`compute_bones_composed` 唯一路径）
-- [x] 分层状态机（每个 `AnimLayer` 独立参数 / 状态 / 时钟 / 淡入；脚本 `set_anim_layer_param`；Inspector 观察与调参；见 PLAN.md 九十七 / 决策记录 §八十五）
-- [x] 逐条转移时长（`AnimTransition.duration` 覆盖所在机器的缺省淡入；`0` = 硬切；见 PLAN.md 九十四 / 决策记录 §八十一）
-- [x] 脚本直接控制：基础剪辑 / 速度 / 循环 / 淡入 + 叠加层与层栈剪辑（6 个 API；状态机优先，见 PLAN.md 四十八）
+- [x] 分层状态机（每个 `AnimLayer` 独立参数 / 状态 / 时钟 / 淡入；脚本 `set_anim_layer_param`；Inspector 观察与调参；见 Docs/历史/PLAN.md 九十七 / 决策记录 §八十五）
+- [x] 逐条转移时长（`AnimTransition.duration` 覆盖所在机器的缺省淡入；`0` = 硬切；见 Docs/历史/PLAN.md 九十四 / 决策记录 §八十一）
+- [x] 脚本直接控制：基础剪辑 / 速度 / 循环 / 淡入 + 叠加层与层栈剪辑（6 个 API；状态机优先，见 Docs/历史/PLAN.md 四十八）
 - [x] 形变目标（morph target / blend shape）：glTF `targets[]` + `targetNames` 解析、
       增量按导入缩放烘焙、权重来源"剪辑权重轨道 > 实体 `morph_weights` > 模型默认"、
       CPU 变形 + 顶点缓冲按需重写、Inspector Morph 滑条、脚本 `morph` / `set_morph`
-      （见 PLAN.md 五十五、决策记录 §三十七）
-- [x] 根运动（显式节点 + 逐轴平移；runtime 唯一落地；角色 / 运动学体 / 普通实体闭环；普通无头生效；见 PLAN.md 九十八、决策记录 §八十六）
+      （见 Docs/历史/PLAN.md 五十五、决策记录 §三十七）
+- [x] 根运动（显式节点 + 逐轴平移；runtime 唯一落地；角色 / 运动学体 / 普通实体闭环；普通无头生效；见 Docs/历史/PLAN.md 九十八、决策记录 §八十六）
 - [x] 动画事件（`Animator.events`：基础通道时间轴上的命名时刻；脚本 `on_anim_event` +
       组件 `Lifecycle::on_anim_event`；循环跨界 / 一圈多次 / 起步帧 / 越界不猜；
-      见 PLAN.md 一百一十、决策记录 §九十七）
+      见 Docs/历史/PLAN.md 一百一十、决策记录 §九十七）
 
 > 明确不含：真倒放（负速 = 停在第 0 帧）、根旋转 / additive 与 layers 的根运动、遮罩羽化
 > （二值权重）。每个模型取第一张蒙皮，超过 256 骨的骨架解析时告警截断。
@@ -938,9 +949,9 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
 
 - [x] 方向光阴影贴图（单盏、正交视锥拟合、3×3 PCF）
 - [x] 级联阴影贴图（CSM，4 级；视线方向线性深度切分 + 每级紧致拟合 + 纹素吸附；
-      4 层深度数组逐层 pass —— PLAN.md 四十一、决策记录 §二十三）
-- [x] 点光阴影（6 面立方体贴图 + 逐面剔除；PLAN.md 九十四 / 九十五、决策记录 §八十 / §八十三）
-- [x] 软阴影（PCSS）+ 级联级间混合（`render.shadow` 节，默认关逐位一致；PLAN.md 九十六、决策记录 §八十四）
+      4 层深度数组逐层 pass —— Docs/历史/PLAN.md 四十一、决策记录 §二十三）
+- [x] 点光阴影（6 面立方体贴图 + 逐面剔除；Docs/历史/PLAN.md 九十四 / 九十五、决策记录 §八十 / §八十三）
+- [x] 软阴影（PCSS）+ 级联级间混合（`render.shadow` 节，默认关逐位一致；Docs/历史/PLAN.md 九十六、决策记录 §八十四）
 - [x] ToneMapping（ACES）+ HDR 渲染路径 + 曝光（场景 pass → `Rgba16Float` → 曝光 + ACES → LDR；`project.ron` 的 `render` 节三宿主同源；`Off` = 旧管线出口）
 - [x] Bloom 泛光（软膝 + 三级 mip + 可分离高斯；阈值在曝光后；**默认关**，整段跳过）
 - [x] 程序化天空盒 + 环境光照（IBL）（解析天空一个真相源 + 球谐漫反射 + GGX 预过滤 + BRDF LUT；**默认关**）
@@ -949,11 +960,11 @@ cargo 构建超时；P1 的 `Quat` / `Color` 进 `FieldKind`、`trybuild`；P1.5
 - [x] FXAA 抗锯齿（3.11 质量路径、显示空间 luma、合成后第二趟 pass、惰性 LDR scratch、**默认关**；1× MSAA 硬台阶 -44%）
 - [x] TAA 时域抗锯齿（Halton(2,3) 亚像素抖动只叠相机、重投影补上一帧抖动、3×3 邻域钳制、
       两张 HDR 历史乒乓、**默认关**且开着时 FXAA 让位；1× MSAA 12 帧硬台阶 672 → 541、
-      中间调 0 → 675 —— PLAN.md 四十七、决策记录 §二十九。**逐物体运动向量仍未做**，
+      中间调 0 → 675 —— Docs/历史/PLAN.md 四十七、决策记录 §二十九。**逐物体运动向量仍未做**，
       快速横向移动靠邻域钳制兜）
 - [x] SSAO（半分辨率深度重建 + 可分离模糊 + 确定性噪声；默认关）
 - [x] LOD（距离分级 / 网格切替 / 绘制距离）+ 保守时域遮挡剔除
-- [ ] RenderGraph（等出现带依赖分叉的 pass 再抽，见 PLAN.md 二十五）
+- [ ] RenderGraph（等出现带依赖分叉的 pass 再抽，见 Docs/历史/PLAN.md 二十五）
 
 ---
 

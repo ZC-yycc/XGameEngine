@@ -19,7 +19,7 @@
 //!
 //! 每一段都通过 `ReflectComponentSpec::render = Render::Custom` 登记，
 //! 入口、分类条、右键菜单、脏标记、撤销时机与 `Fields` 那条路完全一致。
-//! 换句话说：**统一的是入口，不是画法**（详见 `Docs/反射系统设计.md` §15.6）。
+//! 换句话说：**统一的是入口，不是画法**（详见 `Docs/历史/反射系统设计.md` §15.6）。
 
 use xgame_core::{BuiltinComponent, Entity};
 

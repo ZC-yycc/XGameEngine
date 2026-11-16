@@ -100,6 +100,6 @@ pub trait Lifecycle: Any + Send + Sync {
 /// `xgame_core::impl_no_inspect!` 或 `#[inspect(skip)]` 把成本压到一行。
 ///
 /// 这个绑定也是 P2 的伏笔：Lua 宿主要把组件字段暴露成脚本参数，用的正是
-/// 同一张表（`Docs/双轨语言架构计划.md`：一份元数据，两个消费者）。
+/// 同一张表（`Docs/历史/双轨语言架构计划.md`：一份元数据，两个消费者）。
 pub trait Behavior: Lifecycle + Inspect {}
 impl<T: Lifecycle + Inspect + ?Sized> Behavior for T {}
