@@ -12,7 +12,7 @@ use std::path::Path;
 use serde_json::{json, Value as Json};
 use xgc_reflect::{ComponentId, Registry};
 use xgc_store::{load_world, save_world};
-use xgc_world::{Applied, Command, Journal, Plan, World};
+use xgc_world::{Applied, Command, Journal, Plan, World, WorldSnapshot};
 
 mod query;
 
@@ -26,6 +26,7 @@ pub struct Agent {
     plans: HashMap<u64, Plan>,
     applied: HashMap<u64, Applied>,
     journal: Journal,
+    base: WorldSnapshot,
     next_plan: u64,
 }
 
@@ -38,12 +39,15 @@ impl Default for Agent {
 impl Agent {
     pub fn new() -> Self {
         let registry = xgc_world::builtin_registry();
+        let world = World::new();
+        let base = world.snapshot();
         Self {
-            world: World::new(),
+            world,
             registry,
             plans: HashMap::new(),
             applied: HashMap::new(),
             journal: Journal::new(),
+            base,
             next_plan: 0,
         }
     }
@@ -85,6 +89,7 @@ impl Agent {
             "engine.describe" => self.describe(),
             "engine.diagnostics" => self.diagnostics(),
             "engine.history" => self.history(),
+            "engine.replay" => self.replay(),
             "world.query" => self.query(params),
             "world.get" => self.get(params),
             "world.digest" => self.digest(),
@@ -117,6 +122,7 @@ impl Agent {
                 "engine.describe",
                 "engine.diagnostics",
                 "engine.history",
+                "engine.replay",
                 "world.query",
                 "world.get",
                 "world.digest",
@@ -312,6 +318,20 @@ impl Agent {
         Ok(json!({"entity": entity}))
     }
 
+    fn replay(&mut self) -> Result<Json, String> {
+        let hash = self
+            .journal
+            .replay(&mut self.world, &self.base)
+            .map_err(|err| format!("重放失败：{err}"))?;
+        self.applied.clear();
+        Ok(json!({
+            "revision": self.world.revision(),
+            "hash": hash,
+            "records": self.journal.len(),
+            "entities": self.world.len(),
+        }))
+    }
+
     fn history(&self) -> Result<Json, String> {
         Ok(json!({
             "records": self.journal.records(),
@@ -386,6 +406,8 @@ impl Agent {
         self.world = world;
         self.plans.clear();
         self.applied.clear();
+        self.journal = Journal::new();
+        self.base = self.world.snapshot();
         Ok(json!({
             "revision": self.world.revision(),
             "entities": self.world.len(),

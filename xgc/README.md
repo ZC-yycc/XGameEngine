@@ -27,8 +27,8 @@
 `AnimationLibrary::load_dir` 扫描目录 /
 `AnimationLibrary` 按名索引 /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/
-engine.diagnostics（诊断码目录）/ engine.history（事务日志）/ query / get / digest / stats /
-validate / load / save /
+engine.diagnostics（诊断码目录）/ engine.history（事务日志）/ engine.replay（重放）/ query /
+get / digest / stats / validate / load / save /
 plan / apply / revert / undo；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
 Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫描 `.meta`，
@@ -77,7 +77,7 @@ click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选
 跨帧复用，稳态不再取 `WorldData`。`SystemAccess` 已能判定读写冲突，
 `Schedule::batches()` 给出确定性并行批次；跨系统并行执行还差世界所有权拆分。
 Agent 协议可完成 `describe（含能力清单）→ plan（含 before 预览）→ apply → history →
-query / get / digest / stats / validate → save/load → revert / undo` 闭环；查询 IR 支持
+replay → query / get / digest / stats / validate → save/load → revert / undo` 闭环；查询 IR 支持
 `select: ["core.transform:position"]` 字段投影、`filter` 的 `eq/ne/lt/le/gt/ge`
 标量比较（向量用 `axis: x/y/z/w` 取分量）与稳定分页。所有 64 位实体 ID 在 JSON
 里是十进制字符串，避免 2^53 精度丢失。`xgc check <world.json>` 会按注册表体检

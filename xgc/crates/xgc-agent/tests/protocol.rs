@@ -358,3 +358,19 @@ fn undo_reverts_last_applied_plan() {
         .unwrap()
         .contains("没有可撤销"));
 }
+
+#[test]
+fn replay_rebuilds_world_from_journal() {
+    let mut agent = Agent::new();
+    let commands = serde_json::to_value(vec![spawn_command()]).unwrap();
+    let plan = result(call(&mut agent, "edit.plan", json!({"commands": commands})));
+    let plan_id = plan["plan_id"].as_u64().unwrap();
+    result(call(&mut agent, "edit.apply", json!({"plan_id": plan_id})));
+    let replay = result(call(&mut agent, "engine.replay", Json::Null));
+    assert_eq!(replay["revision"], 1);
+    assert_eq!(replay["records"], 1);
+    assert!(replay["hash"].as_u64().is_some());
+    assert_eq!(replay["entities"], 1);
+    let queried = result(call(&mut agent, "world.query", Json::Null));
+    assert_eq!(queried["total"], 1);
+}
