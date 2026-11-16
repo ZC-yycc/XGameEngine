@@ -1,0 +1,14 @@
+[package]
+name = "xgc-player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC 独立播放器：从 cooked 目录加载世界并驱动脚本"
+
+[dependencies]
+xgc-asset = { path = "../xgc-asset" }
+xgc-script = { path = "../xgc-script" }
+xgc-sim = { path = "../xgc-sim" }
+xgc-store = { path = "../xgc-store" }
+xgc-world = { path = "../xgc-world" }

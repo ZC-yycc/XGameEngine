@@ -3004,6 +3004,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xgc-player"
+version = "0.1.0"
+dependencies = [
+ "xgc-asset",
+ "xgc-script",
+ "xgc-sim",
+ "xgc-store",
+ "xgc-world",
+]
+
+[[package]]
 name = "xgc-reflect"
 version = "0.1.0"
 dependencies = [
