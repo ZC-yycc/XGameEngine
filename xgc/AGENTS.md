@@ -72,8 +72,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-script/src/legacy.rs` | 旧脚本 API：`update(ctx)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at` / `velocity` / `set_anim_param` / `ui_*` / `action_pressed`；音频等暂无实现为 no-op |
 | `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` 生命周期分派与回退 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载 |
-| `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 / Gizmo 平移 |
-| `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / 三轴 Gizmo / Ctrl+Z、Ctrl+Y |
+| `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 |
+| `crates/xgc-editor/src/transform_ops.rs` | 位置 / 缩放 / 旋转 setter 与 Gizmo 旋转；无父节点同步 GlobalTransform |
+| `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / Ctrl+Z、Ctrl+Y |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
@@ -121,10 +122,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：转场淡入已接；下一步遮罩 / 分层混合细节。
-2. 迁移：input.ron 已解析；下一步窗口键盘事件接线与视觉对照。
-3. 脚本：正式 System 调度与脚本组件生命周期完整化。
-4. 编辑器：旋转 / 缩放 Gizmo 与吸附。
+1. 编辑器：平移 / 旋转 / 缩放 Gizmo 已接；下一步吸附与预制体。
+2. 动画：遮罩 / 分层混合细节。
+3. 迁移：input.ron 已解析；下一步窗口键盘事件接线与视觉对照。
+4. 脚本：正式 System 调度与脚本组件生命周期完整化。
 5. 现在最大文件 600 行：动它之前先拆。
 
 ## Token 纪律

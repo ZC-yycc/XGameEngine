@@ -195,3 +195,24 @@ fn gizmo_moves_transform_and_global() {
         [1.0, 2.0, 3.0]
     );
 }
+
+#[test]
+fn scale_and_rotation_sync_global_transform() {
+    let mut editor = EditorState::demo();
+    let id = editor.entities()[1].id;
+    editor.set_entity_scale(id, [2.0, 3.0, 4.0]).unwrap();
+    editor.rotate_entity(id, [0.0, 1.0, 0.0], 90.0).unwrap();
+    let world = editor.world();
+    let key = world.key(id).unwrap();
+    assert_eq!(world.get::<Transform>(key).unwrap().scale, [2.0, 3.0, 4.0]);
+    assert_eq!(
+        world.get::<GlobalTransform>(key).unwrap().scale,
+        [2.0, 3.0, 4.0]
+    );
+    let rotation = world.get::<Transform>(key).unwrap().rotation;
+    assert!((rotation[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+    assert_eq!(
+        rotation,
+        world.get::<GlobalTransform>(key).unwrap().rotation
+    );
+}

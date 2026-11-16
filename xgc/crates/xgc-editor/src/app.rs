@@ -21,12 +21,22 @@ struct Viewport {
     context: GpuContext,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GizmoMode {
+    Translate,
+    Rotate,
+    Scale,
+}
+
 struct GizmoDrag {
     entity: EntityId,
     axis: [f32; 3],
     start: [f32; 3],
+    start_scale: [f32; 3],
     direction: egui::Vec2,
     pixels_per_unit: f32,
+    mode: GizmoMode,
+    last_amount: f32,
 }
 
 pub struct EditorApp {
@@ -37,6 +47,7 @@ pub struct EditorApp {
     pitch: f32,
     distance: f32,
     gizmo: Option<GizmoDrag>,
+    gizmo_mode: GizmoMode,
 }
 
 impl EditorApp {
@@ -49,6 +60,7 @@ impl EditorApp {
             pitch: 0.0,
             distance: 5.0,
             gizmo: None,
+            gizmo_mode: GizmoMode::Translate,
         }
     }
 
@@ -177,23 +189,50 @@ impl EditorApp {
                         entity,
                         axis,
                         start: position,
+                        start_scale: self.state.entity_scale(entity).unwrap_or([1.0; 3]),
                         direction,
                         pixels_per_unit,
+                        mode: self.gizmo_mode,
+                        last_amount: 0.0,
                     });
                 }
             }
         }
         if response.dragged() {
-            if let Some(drag) = &self.gizmo {
+            if let Some(drag) = &mut self.gizmo {
                 let delta = response.drag_delta();
                 let amount = delta.dot(drag.direction) / drag.pixels_per_unit;
-                let next = [
-                    drag.start[0] + drag.axis[0] * amount,
-                    drag.start[1] + drag.axis[1] * amount,
-                    drag.start[2] + drag.axis[2] * amount,
-                ];
-                if let Err(err) = self.state.set_entity_position(drag.entity, next) {
-                    self.status = Some(err);
+                match drag.mode {
+                    GizmoMode::Translate => {
+                        let next = [
+                            drag.start[0] + drag.axis[0] * amount,
+                            drag.start[1] + drag.axis[1] * amount,
+                            drag.start[2] + drag.axis[2] * amount,
+                        ];
+                        if let Err(err) = self.state.set_entity_position(drag.entity, next) {
+                            self.status = Some(err);
+                        }
+                    }
+                    GizmoMode::Scale => {
+                        let axis = drag
+                            .axis
+                            .iter()
+                            .position(|value| value.abs() > 0.5)
+                            .unwrap_or(0);
+                        let mut scale = drag.start_scale;
+                        scale[axis] = (scale[axis] + amount).max(0.01);
+                        if let Err(err) = self.state.set_entity_scale(drag.entity, scale) {
+                            self.status = Some(err);
+                        }
+                    }
+                    GizmoMode::Rotate => {
+                        let degrees = (amount - drag.last_amount) * 90.0;
+                        drag.last_amount = amount;
+                        if let Err(err) = self.state.rotate_entity(drag.entity, drag.axis, degrees)
+                        {
+                            self.status = Some(err);
+                        }
+                    }
                 }
             }
         }
@@ -230,6 +269,10 @@ impl EditorApp {
                     Err(err) => err,
                 });
             }
+            ui.separator();
+            ui.selectable_value(&mut self.gizmo_mode, GizmoMode::Translate, "Move");
+            ui.selectable_value(&mut self.gizmo_mode, GizmoMode::Rotate, "Rotate");
+            ui.selectable_value(&mut self.gizmo_mode, GizmoMode::Scale, "Scale");
             if ui.button("Save").clicked() {
                 self.status = Some(match self.state.save() {
                     Ok(()) => "已保存".to_string(),
