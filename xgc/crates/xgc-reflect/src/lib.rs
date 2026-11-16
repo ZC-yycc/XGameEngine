@@ -10,11 +10,11 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use xgc_base::{Diagnostic, Severity, Subject};
 
 /// 组件类型的稳定编号。落盘、协议、archetype 匹配都用它，不用类型名。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ComponentId(pub u32);
 
 impl fmt::Display for ComponentId {
@@ -91,9 +91,10 @@ impl FieldType {
 
 /// 动态值：schema 默认值、命令参数、Agent 协议共用。
 ///
+/// 带 `kind` 标签的 JSON，避免 `quat` / `vec4` 同为 4 元数组而无法反序列化。
 /// `Entity` 用 u64 原始值；JSON 协议层负责把 64 位 ID 写成十进制字符串。
-#[derive(Clone, PartialEq, Debug, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Value {
     Bool(bool),
     I64(i64),

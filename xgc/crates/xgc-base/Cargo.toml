@@ -7,3 +7,4 @@ license.workspace = true
 description = "XGame Core 基础类型：持久 ID、句柄、诊断"
 
 [dependencies]
+serde.workspace = true

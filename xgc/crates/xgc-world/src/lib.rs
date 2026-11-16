@@ -14,12 +14,16 @@ use xgc_reflect::{Component, ComponentId, Value};
 
 mod command;
 mod components;
+mod data;
 mod hash;
 mod snapshot;
 
 pub use command::{Applied, Command, Plan};
 pub use components::{Name, Transform, Velocity};
+pub use data::{ComponentData, EntityData};
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
+
+use data::ComponentFactory;
 
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
 ///
@@ -223,6 +227,7 @@ pub struct World {
     by_id: HashMap<EntityId, EntityKey>,
     archetypes: Vec<Archetype>,
     archetype_index: HashMap<Vec<ComponentId>, u32>,
+    factories: HashMap<ComponentId, ComponentFactory>,
     next_id: u64,
     revision: u64,
 }
@@ -235,15 +240,18 @@ impl Default for World {
 
 impl World {
     pub fn new() -> Self {
-        Self {
+        let mut world = Self {
             metas: Vec::new(),
             free: Vec::new(),
             by_id: HashMap::new(),
             archetypes: Vec::new(),
             archetype_index: HashMap::new(),
+            factories: HashMap::new(),
             next_id: 0,
             revision: 0,
-        }
+        };
+        world.register_builtin_components();
+        world
     }
 
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> EntityKey {

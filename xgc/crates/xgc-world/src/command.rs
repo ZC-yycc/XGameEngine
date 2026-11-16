@@ -1,17 +1,18 @@
 //! M1 命令事务：plan → apply → revert。
 //!
-//! 已支持三类命令：字段写入、按快照生成、销毁。`Spawn` / `Despawn` 的
-//! before-image 是 [`EntitySnapshot`]；回滚按逆命令**逆序**执行，交易只推进
-//! 一个 revision。
+//! 已支持三类命令：字段写入、按实体数据生成、销毁。`Spawn` / `Despawn` 的
+//! before-image 是 [`EntityData`]（可序列化）；回滚按逆命令**逆序**执行，
+//! 交易只推进一个 revision。
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
 use xgc_base::{Diagnostic, EntityId, Severity, Subject};
 use xgc_reflect::{ComponentId, Value};
 
-use super::{EntitySnapshot, World};
+use super::{EntityData, World};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     SetField {
         entity: EntityId,
@@ -20,7 +21,7 @@ pub enum Command {
         value: Value,
     },
     Spawn {
-        snapshot: EntitySnapshot,
+        data: EntityData,
     },
     Despawn {
         entity: EntityId,
@@ -119,14 +120,17 @@ impl World {
                         valid = false;
                     }
                 }
-                Command::Spawn { snapshot } => {
-                    let id = snapshot.id();
+                Command::Spawn { data } => {
+                    let id = data.id;
                     if self.by_id.contains_key(&id) || new_ids.contains(&id) || dead.contains(&id) {
                         diagnostics.push(diag(
                             "EDIT.ID_IN_USE",
                             Subject::Entity(id),
                             format!("实体 ID 已被占用或在同一计划里重复：{id}"),
                         ));
+                        valid = false;
+                    } else if let Err(message) = self.snapshot_from_data(data) {
+                        diagnostics.push(diag("EDIT.INVALID_SPAWN", Subject::Entity(id), message));
                         valid = false;
                     } else {
                         new_ids.insert(id);
@@ -200,15 +204,15 @@ impl World {
                         });
                         touched.push(*entity);
                     }),
-                Command::Spawn { snapshot } => {
-                    self.restore_entity_raw(snapshot.clone()).map(|id| {
+                Command::Spawn { data } => match self.snapshot_from_data(data) {
+                    Ok(snapshot) => self.restore_entity_raw(snapshot).map(|id| {
                         inverse.push(Command::Despawn { entity: id });
                         touched.push(id);
-                    })
-                }
+                    }),
+                    Err(message) => Err(message),
+                },
                 Command::Despawn { entity } => {
-                    let (Some(key), Some(snapshot)) =
-                        (self.key_of(*entity), self.capture_entity(*entity))
+                    let (Some(key), Some(data)) = (self.key_of(*entity), self.entity_data(*entity))
                     else {
                         return Err(vec![diag(
                             "EDIT.CAPTURE_FAILED",
@@ -217,7 +221,7 @@ impl World {
                         )]);
                     };
                     if self.despawn_raw(key) {
-                        inverse.push(Command::Spawn { snapshot });
+                        inverse.push(Command::Spawn { data });
                         Ok(())
                     } else {
                         Err("despawn 失败".to_string())
@@ -264,11 +268,12 @@ impl World {
                     .map(|_| {
                         touched.push(*entity);
                     }),
-                Command::Spawn { snapshot } => {
-                    self.restore_entity_raw(snapshot.clone()).map(|id| {
+                Command::Spawn { data } => match self.snapshot_from_data(data) {
+                    Ok(snapshot) => self.restore_entity_raw(snapshot).map(|id| {
                         touched.push(id);
-                    })
-                }
+                    }),
+                    Err(message) => Err(message),
+                },
                 Command::Despawn { entity } => {
                     let Some(key) = self.key_of(*entity) else {
                         return Err(vec![diag(
@@ -312,8 +317,9 @@ impl World {
                 } => {
                     self.set_field_raw(*entity, *component, field, value)?;
                 }
-                Command::Spawn { snapshot } => {
-                    self.restore_entity_raw(snapshot.clone())?;
+                Command::Spawn { data } => {
+                    let snapshot = self.snapshot_from_data(data)?;
+                    self.restore_entity_raw(snapshot)?;
                 }
                 Command::Despawn { entity } => {
                     let Some(key) = self.key_of(*entity) else {

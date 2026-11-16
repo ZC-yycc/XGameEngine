@@ -136,14 +136,14 @@ fn despawn_revert_restores_entity_and_state_hash() {
 }
 
 #[test]
-fn spawn_from_snapshot_and_revert() {
+fn spawn_from_data_and_revert() {
     let (mut world, source) = world_with_one();
     let new_id = EntityId::from_raw(1_000);
-    let snapshot = world.capture_entity(source).unwrap().with_id(new_id);
+    let data = world.entity_data(source).unwrap().with_id(new_id);
     let before_hash = world.state_hash();
     let before_revision = world.revision();
 
-    let plan = world.plan(vec![Command::Spawn { snapshot }]);
+    let plan = world.plan(vec![Command::Spawn { data }]);
     assert!(plan.is_valid());
     let applied = world.apply(&plan).unwrap();
     assert!(world.key(new_id).is_some());
@@ -160,11 +160,11 @@ fn spawn_from_snapshot_and_revert() {
 #[test]
 fn spawn_id_collision_is_rejected_before_writing() {
     let (mut world, source) = world_with_one();
-    let snapshot = world.capture_entity(source).unwrap();
+    let data = world.entity_data(source).unwrap();
     let before_hash = world.state_hash();
     let before_revision = world.revision();
 
-    let plan = world.plan(vec![Command::Spawn { snapshot }]);
+    let plan = world.plan(vec![Command::Spawn { data }]);
     assert!(!plan.is_valid());
     assert_eq!(plan.diagnostics[0].code, "EDIT.ID_IN_USE");
     assert!(world.apply(&plan).is_err());
@@ -175,18 +175,36 @@ fn spawn_id_collision_is_rejected_before_writing() {
 #[test]
 fn duplicate_spawn_ids_in_one_plan_are_rejected() {
     let (world, source) = world_with_one();
-    let snapshot = world
-        .capture_entity(source)
+    let data = world
+        .entity_data(source)
         .unwrap()
         .with_id(EntityId::from_raw(500));
     let plan = world.plan(vec![
-        Command::Spawn {
-            snapshot: snapshot.clone(),
-        },
-        Command::Spawn { snapshot },
+        Command::Spawn { data: data.clone() },
+        Command::Spawn { data },
     ]);
     assert!(!plan.is_valid());
     assert_eq!(plan.diagnostics[0].code, "EDIT.ID_IN_USE");
+}
+
+#[test]
+fn command_json_roundtrip_preserves_spawn_data() {
+    let (world, source) = world_with_one();
+    let data = world
+        .entity_data(source)
+        .unwrap()
+        .with_id(EntityId::from_raw(1_000));
+    let command = Command::Spawn { data };
+
+    let json = serde_json::to_string(&command).unwrap();
+    let decoded: Command = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, command);
+
+    let mut other = World::new();
+    let plan = other.plan(vec![decoded]);
+    assert!(plan.is_valid());
+    other.apply(&plan).unwrap();
+    assert!(other.key(EntityId::from_raw(1_000)).is_some());
 }
 
 #[test]

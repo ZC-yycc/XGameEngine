@@ -7,10 +7,12 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// 持久实体身份：项目级单调分配，永不复用。
 ///
 /// 磁盘、存档、Agent 协议、跨文件引用都用它。运行时热路径用 [`EntityKey`]。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EntityId(u64);
 
 impl EntityId {

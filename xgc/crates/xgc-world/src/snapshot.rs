@@ -38,6 +38,33 @@ impl EntitySnapshot {
             .find(|(id, _)| *id == component)
             .and_then(|(_, column)| column.get_field(0, field))
     }
+
+    pub fn fields(&self, component: ComponentId) -> Option<Vec<(String, Value)>> {
+        let (_, column) = self.components.iter().find(|(id, _)| *id == component)?;
+        Some(
+            column
+                .field_names()
+                .into_iter()
+                .filter_map(|name| {
+                    column
+                        .get_field(0, name)
+                        .map(|value| (name.to_string(), value))
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn from_parts(
+        id: EntityId,
+        revision: u64,
+        components: Vec<(ComponentId, Box<dyn Column>)>,
+    ) -> Self {
+        Self {
+            id,
+            revision,
+            components,
+        }
+    }
 }
 
 impl Clone for EntitySnapshot {

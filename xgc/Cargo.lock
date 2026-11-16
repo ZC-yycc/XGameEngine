@@ -95,6 +95,9 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 [[package]]
 name = "xgc-base"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "xgc-cli"
@@ -119,6 +122,8 @@ dependencies = [
 name = "xgc-world"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "xgc-base",
  "xgc-reflect",
 ]
