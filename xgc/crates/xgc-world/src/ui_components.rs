@@ -23,6 +23,7 @@ pub struct UiElement {
     pub wrap: bool,
     pub image_path: String,
     pub image_mode: String,
+    pub image_slice: f32,
     pub clip_children: bool,
 }
 
@@ -48,6 +49,7 @@ impl Default for UiElement {
             wrap: true,
             image_path: String::new(),
             image_mode: "stretch".to_string(),
+            image_slice: 0.0,
             clip_children: true,
         }
     }
@@ -101,7 +103,9 @@ impl Component for UiElement {
                 FieldType::String,
                 Value::String("stretch".into()),
             )
-            .doc("stretch / preserve（保持宽高比）/ cover（裁剪填满）"),
+            .doc("stretch / preserve（保持宽高比）/ cover（裁剪填满）/ nine_slice"),
+            FieldDescriptor::new("image_slice", FieldType::F32, Value::F64(0.0))
+                .doc("九宫格边宽（源图像素）；0 = 关闭"),
         ]
     }
 
@@ -126,6 +130,7 @@ impl Component for UiElement {
             "wrap" => Some(Value::Bool(self.wrap)),
             "image_path" => Some(Value::String(self.image_path.clone())),
             "image_mode" => Some(Value::String(self.image_mode.clone())),
+            "image_slice" => Some(Value::F64(f64::from(self.image_slice))),
             "clip_children" => Some(Value::Bool(self.clip_children)),
             _ => None,
         }
@@ -154,10 +159,18 @@ impl Component for UiElement {
             "clip_children" => self.clip_children = boolean(value, field)?,
             "image_mode" => {
                 let mode = string(value, field)?;
-                if !matches!(mode, "stretch" | "preserve" | "cover") {
+                if !matches!(mode, "stretch" | "preserve" | "cover" | "nine_slice") {
                     return Err(format!("ui.element.image_mode 未知模式：{mode}"));
                 }
                 self.image_mode = mode.to_string();
+            }
+            "image_slice" => {
+                self.image_slice = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "ui.element.image_slice 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
             }
             _ => return Err(format!("ui.element 没有字段 {field}")),
         }

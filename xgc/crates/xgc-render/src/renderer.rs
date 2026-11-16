@@ -126,6 +126,10 @@ impl Renderer {
                 .get::<UiElement>(key)
                 .map(|element| element.image_mode.clone())
                 .unwrap_or_default();
+            let image_slice = world
+                .get::<UiElement>(key)
+                .map(|element| element.image_slice)
+                .unwrap_or_default();
             if color[3] <= 0.0 && text.is_empty() && image_path.is_empty() {
                 return;
             }
@@ -143,12 +147,24 @@ impl Renderer {
                     text_color,
                     image_path,
                     image_mode,
+                    image_slice,
                 ));
             }
         });
-        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _)| *entity);
+        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _)| *entity);
         let mut draws = 0;
-        for (_, rect, color, focused, text, text_size, text_color, image_path, image_mode) in &items
+        for (
+            _,
+            rect,
+            color,
+            focused,
+            text,
+            text_size,
+            text_color,
+            image_path,
+            image_mode,
+            image_slice,
+        ) in &items
         {
             if *focused {
                 let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
@@ -208,7 +224,62 @@ impl Renderer {
                 {
                     let mut draw_rect = *rect;
                     let mut uv = [0.0, 0.0, 1.0, 1.0];
-                    if image_mode == "preserve" {
+                    let source = self.images.get(image_path).and_then(|image| image.as_ref());
+                    if *image_mode == "nine_slice" && *image_slice > 0.0 {
+                        if let Some(source) = source {
+                            if source.width > 0
+                                && source.height > 0
+                                && rect[2] > 0.0
+                                && rect[3] > 0.0
+                            {
+                                let slice_x = (*image_slice / source.width as f32).min(0.5);
+                                let slice_y = (*image_slice / source.height as f32).min(0.5);
+                                let px = (*image_slice).min(rect[2] * 0.5).max(0.0);
+                                let py = (*image_slice).min(rect[3] * 0.5).max(0.0);
+                                let u = [0.0, slice_x, 1.0 - slice_x, 1.0];
+                                let v = [0.0, slice_y, 1.0 - slice_y, 1.0];
+                                let xs = [
+                                    rect[0],
+                                    rect[0] + px,
+                                    rect[0] + rect[2] - px,
+                                    rect[0] + rect[2],
+                                ];
+                                let ys = [
+                                    rect[1],
+                                    rect[1] + py,
+                                    rect[1] + rect[3] - py,
+                                    rect[1] + rect[3],
+                                ];
+                                for row in 0..3 {
+                                    for col in 0..3 {
+                                        let width = xs[col + 1] - xs[col];
+                                        let height = ys[row + 1] - ys[row];
+                                        if width <= 0.0 || height <= 0.0 {
+                                            continue;
+                                        }
+                                        let cell = [xs[col], ys[row], width, height];
+                                        let cell_uv = [
+                                            u[col],
+                                            v[row],
+                                            u[col + 1] - u[col],
+                                            v[row + 1] - v[row],
+                                        ];
+                                        pipeline.draw(
+                                            context,
+                                            target,
+                                            image,
+                                            quad_matrix(cell, viewport),
+                                            [1.0; 4],
+                                            cell_uv,
+                                        )?;
+                                        draws += 1;
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    if *image_mode == "preserve" {
                         if let Some(source) =
                             self.images.get(image_path).and_then(|image| image.as_ref())
                         {
