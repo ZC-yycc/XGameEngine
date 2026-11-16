@@ -35,7 +35,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `WorldSnapshot` / 恢复 |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
-| `crates/xgc-sim/src/lib.rs` | `Scenario` / `Trace` / `play` / `verify`：最小帧循环 |
+| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `System` / `Scenario` / `Trace` / `play` / `verify` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / load / save / plan / apply / revert |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check / bench / export / import / run / serve` |
@@ -52,11 +52,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第九刀：系统调度骨架（阶段 / 访问声明 / 确定性合并），先接一个
-   `Velocity → Transform` 的固定步系统，再把 trace 接到 `Simulation`。
-2. 查询 IR / 诊断 / 能力清单补进 Agent 协议；`xgc check` 扩到项目 / 场景。
-3. world 文件接近 600 行：先拆 `world/` 的 storage 与 service，再扩。
-4. 再往后的渲染 / 物理 / 脚本 / 编辑器见主文档 §14，别提前开分支。
+1. M1 第十刀：系统访问声明（读 / 写组件集）+ 确定性并行调度骨架；
+   先保证 1 / 2 / 8 线程 state hash 一致。
+2. Agent 协议补查询 IR / 诊断 / 能力清单；`xgc check` 扩到项目 / 场景。
+3. 接第二个系统（例如 `Transform` 层级传播）再谈物理 / 渲染。
+4. world 文件 577 行，接近软阈值：先拆 `world/` 的 storage 与 service。
 
 ## Token 纪律
 

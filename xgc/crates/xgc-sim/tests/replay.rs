@@ -1,8 +1,8 @@
 //! 帧循环回归：同场景两跑 trace 一致、篡改 trace 能被发现、场景 JSON 往返。
 
 use xgc_base::EntityId;
-use xgc_sim::{play, verify, FrameCommands, Scenario, SimError};
-use xgc_world::{Command, ComponentId, Name, Transform, Value, World};
+use xgc_sim::{play, verify, FrameCommands, Scenario, SimError, Simulation};
+use xgc_world::{Command, ComponentId, Name, Transform, Value, Velocity, World};
 
 fn build_scenario() -> Scenario {
     let mut world = World::new();
@@ -47,6 +47,7 @@ fn build_scenario() -> Scenario {
     Scenario {
         initial,
         frames: 3,
+        fixed_dt: 1.0 / 60.0,
         commands,
     }
 }
@@ -87,6 +88,26 @@ fn scenario_json_roundtrip() {
     let (world, trace) = play(&decoded).unwrap();
     assert_eq!(trace.frames.len(), 3);
     assert_eq!(world.len(), 3);
+}
+
+#[test]
+fn velocity_system_moves_transform() {
+    let mut world = World::new();
+    world.spawn((
+        Transform::default(),
+        Velocity {
+            linear: [1.0, 0.0, 0.0],
+        },
+    ));
+    let mut simulation = Simulation::with_fixed_dt(world, 1.0);
+    assert_eq!(simulation.schedule().names(), vec!["velocity"]);
+    simulation.step(Vec::new()).unwrap();
+    assert_eq!(simulation.trace().frames.len(), 1);
+
+    let world = simulation.into_world();
+    let mut found = None;
+    world.for_each::<Transform>(|_, transform| found = Some(transform.position[0]));
+    assert_eq!(found, Some(1.0));
 }
 
 #[test]

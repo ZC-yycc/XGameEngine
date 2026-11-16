@@ -195,6 +195,7 @@ fn run(frames: Option<&str>) -> ExitCode {
     let scenario = Scenario {
         initial: world.world_data(),
         frames,
+        fixed_dt: 1.0 / 60.0,
         commands: Vec::new(),
     };
     match play(&scenario) {

@@ -424,6 +424,44 @@ impl World {
         }
     }
 
+    /// 双组件可变遍历。实现上临时移出两列，遍历后放回；`f` 里不要让 panic
+    /// 逃逸，否则列会留在局部变量里。
+    pub fn for_each2_mut<A: Component, B: Component>(
+        &mut self,
+        mut f: impl FnMut(EntityKey, &mut A, &mut B),
+    ) {
+        assert_ne!(A::ID, B::ID, "for_each2_mut 的两个组件不能相同");
+        for arch in &mut self.archetypes {
+            if !arch.columns.contains_key(&A::ID) || !arch.columns.contains_key(&B::ID) {
+                continue;
+            }
+            let Some(mut a) = arch.columns.remove(&A::ID) else {
+                continue;
+            };
+            let Some(mut b) = arch.columns.remove(&B::ID) else {
+                arch.columns.insert(A::ID, a);
+                continue;
+            };
+            {
+                let a_values = a.as_any_mut().downcast_mut::<Vec<A>>();
+                let b_values = b.as_any_mut().downcast_mut::<Vec<B>>();
+                if let (Some(a_values), Some(b_values)) = (a_values, b_values) {
+                    for ((key, a), b) in arch
+                        .entities
+                        .iter()
+                        .copied()
+                        .zip(a_values.iter_mut())
+                        .zip(b_values.iter_mut())
+                    {
+                        f(key, a, b);
+                    }
+                }
+            }
+            arch.columns.insert(A::ID, a);
+            arch.columns.insert(B::ID, b);
+        }
+    }
+
     pub fn get_field(&self, id: EntityId, component: ComponentId, field: &str) -> Option<Value> {
         let (_, meta) = self.meta_by_id(id)?;
         let arch = self.archetypes.get(meta.archetype as usize)?;
