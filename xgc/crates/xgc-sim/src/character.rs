@@ -11,6 +11,7 @@ pub struct CharacterStepSystem;
 struct Solid {
     min: [f32; 3],
     max: [f32; 3],
+    ball: Option<([f32; 3], f32)>,
 }
 
 struct Character {
@@ -55,6 +56,7 @@ impl System for CharacterStepSystem {
                     transform.position[1] + half[1],
                     transform.position[2] + half[2],
                 ],
+                ball: (body.shape == "ball").then_some((transform.position, body.radius)),
             });
         });
         let mut characters = Vec::new();
@@ -154,6 +156,7 @@ impl System for CharacterBlockSystem {
                     transform.position[1] + half[1],
                     transform.position[2] + half[2],
                 ],
+                ball: (body.shape == "ball").then_some((transform.position, body.radius)),
             });
         });
         let mut characters = Vec::new();
@@ -184,6 +187,27 @@ impl System for CharacterBlockSystem {
                 }
                 let rise = solid.max[1] - feet;
                 if rise > 0.0 && rise <= character.step {
+                    continue;
+                }
+                if let Some((center, radius)) = solid.ball {
+                    if head <= center[1] - radius || feet >= center[1] + radius {
+                        continue;
+                    }
+                    let dx = position[0] - center[0];
+                    let dz = position[2] - center[2];
+                    let distance = (dx * dx + dz * dz).sqrt();
+                    let minimum = character.radius + radius;
+                    if distance >= minimum {
+                        continue;
+                    }
+                    if distance > f32::EPSILON {
+                        position[0] = center[0] + dx / distance * minimum;
+                        position[2] = center[2] + dz / distance * minimum;
+                    } else {
+                        position[0] = center[0] + minimum;
+                    }
+                    velocity[0] = 0.0;
+                    velocity[2] = 0.0;
                     continue;
                 }
                 let overlap_x = (position[0] + character.radius).min(solid.max[0])

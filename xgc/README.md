@@ -64,7 +64,7 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`PhysicsSystem` 只给 dynamic 刚体加
 重力、`CharacterJumpSystem` 消费起跳请求、`VelocitySystem` 积分、
 `GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴地、`CharacterStepSystem`
-低矮台阶抬升、`CharacterBlockSystem` 高墙推出、`AabbCollisionSystem` 两两分离动态刚体
+低矮台阶抬升、`CharacterBlockSystem` 高墙 / 球体推出、`AabbCollisionSystem` 两两分离动态刚体
 （球体按中心线精确分离）、`AnimatorSystem` 推进动画时钟、`UiLayoutSystem` 算 UI 根 /
 父相对矩形、裁剪区并继承可见性，`UiInteractionSystem` 读 `ui.input` 写 hover / press /
 click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选邻，
@@ -89,7 +89,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（81 个 Rust 文件最大 581 行）；schema 两次导出逐字节相同，
+`xgc-xtask check` 全绿（82 个 Rust 文件最大 581 行）；schema 两次导出逐字节相同，
 20 个内建类型 26872 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
