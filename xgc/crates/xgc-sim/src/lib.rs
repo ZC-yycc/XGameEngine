@@ -106,6 +106,25 @@ pub struct SystemAccess {
     pub writes: Vec<ComponentId>,
 }
 
+impl SystemAccess {
+    /// 保守冲突判定：任一方写集合与另一方读 / 写集合相交即冲突；
+    /// 访问集为空的系统按“什么都能碰”处理。
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        if (self.reads.is_empty() && self.writes.is_empty())
+            || (other.reads.is_empty() && other.writes.is_empty())
+        {
+            return true;
+        }
+        self.writes
+            .iter()
+            .any(|id| other.reads.contains(id) || other.writes.contains(id))
+            || other
+                .writes
+                .iter()
+                .any(|id| self.reads.contains(id) || self.writes.contains(id))
+    }
+}
+
 /// 系统：M1 只有顺序执行；`name` 用于 trace / 诊断，`run` 直接改世界。
 pub trait System: Send {
     fn name(&self) -> &'static str;
@@ -143,6 +162,30 @@ impl Schedule {
 
     pub fn accesses(&self) -> Vec<SystemAccess> {
         self.systems.iter().map(|system| system.access()).collect()
+    }
+
+    /// 按注册顺序贪心分批：同批系统两两无访问冲突。执行仍按注册顺序，
+    /// 这个计划是给下一步跨系统并行用的确定性输入。
+    pub fn batches(&self) -> Vec<Vec<usize>> {
+        let mut batches: Vec<Vec<usize>> = Vec::new();
+        for (index, system) in self.systems.iter().enumerate() {
+            let access = system.access();
+            let mut placed = false;
+            for batch in &mut batches {
+                let compatible = batch
+                    .iter()
+                    .all(|&other| !access.conflicts_with(&self.systems[other].access()));
+                if compatible {
+                    batch.push(index);
+                    placed = true;
+                    break;
+                }
+            }
+            if !placed {
+                batches.push(vec![index]);
+            }
+        }
+        batches
     }
 
     pub fn run(&mut self, world: &mut World, dt: f32) {
@@ -188,6 +231,48 @@ impl System for VelocitySystem {
         world.par_for_each2_mut::<Transform, Velocity>(self.threads, |_, transform, velocity| {
             for axis in 0..3 {
                 transform.position[axis] += velocity.linear[axis] * dt;
+            }
+        });
+    }
+}
+
+/// 第二个内建系统：给速度加固定重力；只写 Velocity，不读其它组件。
+#[derive(Clone, Copy, Debug)]
+pub struct GravitySystem {
+    pub gravity: [f32; 3],
+}
+
+impl Default for GravitySystem {
+    fn default() -> Self {
+        Self {
+            gravity: [0.0, -9.81, 0.0],
+        }
+    }
+}
+
+impl GravitySystem {
+    pub fn new(gravity: [f32; 3]) -> Self {
+        Self { gravity }
+    }
+}
+
+impl System for GravitySystem {
+    fn name(&self) -> &'static str {
+        "gravity"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: Vec::new(),
+            writes: vec![Velocity::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, dt: f32) {
+        let gravity = self.gravity;
+        world.for_each_mut::<Velocity>(|_, velocity| {
+            for (axis, value) in gravity.iter().enumerate() {
+                velocity.linear[axis] += *value * dt;
             }
         });
     }

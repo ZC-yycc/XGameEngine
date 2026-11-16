@@ -53,9 +53,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第十一刀：系统级冲突检测 + 并行批次（同批系统互不冲突才并行），
-   先保证 1 / 2 / 8 线程 state hash 一致；`Schedule::accesses` 已有元数据。
-2. 接第二个系统（Transform 层级传播 / 简单重力），再谈物理 / 渲染。
+1. M1 第十二刀：跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API），
+   先保证 1 / 2 / 8 线程 state hash 一致。
+2. 接第三个系统（Transform 层级传播 / 简单重力已落地），再谈物理 / 渲染。
 3. Agent 协议补查询 IR / 诊断 / 能力清单；`xgc check` 扩到项目 / 场景。
 4. world lib 588 行：下次先拆 storage 再扩。
 

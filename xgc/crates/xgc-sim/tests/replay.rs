@@ -1,8 +1,11 @@
 //! 帧循环回归：同场景两跑 trace 一致、篡改 trace 能被发现、场景 JSON 往返。
 
 use xgc_base::EntityId;
-use xgc_sim::{play, verify, FrameCommands, Scenario, SimError, Simulation};
-use xgc_world::{Command, ComponentId, Name, Transform, Value, Velocity, World};
+use xgc_sim::{
+    play, verify, FrameCommands, GravitySystem, Scenario, Schedule, SimError, Simulation, System,
+    SystemAccess, VelocitySystem,
+};
+use xgc_world::{Command, Component, ComponentId, Name, Transform, Value, Velocity, World};
 
 fn build_scenario() -> Scenario {
     let mut world = World::new();
@@ -155,6 +158,50 @@ fn velocity_system_declares_access_and_parallel_hash_matches() {
     let one = run(1);
     assert_eq!(one, run(2));
     assert_eq!(one, run(8));
+}
+
+#[test]
+fn batch_plan_groups_only_non_conflicting_systems() {
+    struct NameSystem;
+
+    impl System for NameSystem {
+        fn name(&self) -> &'static str {
+            "name"
+        }
+
+        fn access(&self) -> SystemAccess {
+            SystemAccess {
+                reads: Vec::new(),
+                writes: vec![Name::ID],
+            }
+        }
+
+        fn run(&mut self, world: &mut World, _dt: f32) {
+            world.for_each_mut::<Name>(|_, name| name.value.push('!'));
+        }
+    }
+
+    let mut schedule = Schedule::new();
+    schedule.add(VelocitySystem::default());
+    schedule.add(NameSystem);
+    schedule.add(GravitySystem::new([0.0, -9.81, 0.0]));
+
+    assert_eq!(schedule.batches(), vec![vec![0, 1], vec![2]]);
+    assert!(schedule.accesses()[0].conflicts_with(&schedule.accesses()[2]));
+    assert!(!schedule.accesses()[0].conflicts_with(&schedule.accesses()[1]));
+}
+
+#[test]
+fn gravity_system_writes_velocity() {
+    let mut world = World::new();
+    world.spawn((Velocity::default(),));
+    let mut schedule = Schedule::new();
+    schedule.add(GravitySystem::new([0.0, -2.0, 0.0]));
+    schedule.run(&mut world, 1.0);
+
+    let mut found = None;
+    world.for_each::<Velocity>(|_, velocity| found = Some(velocity.linear[1]));
+    assert_eq!(found, Some(-2.0));
 }
 
 #[test]

@@ -12,11 +12,11 @@
 遍历、生成回收、`Command` 事务 plan / apply / revert、结构化 `Spawn` / `Despawn` +
 实体快照撤销、可序列化 `EntityData` / 组件工厂、实体级 revision、世界快照 / 恢复、
 事务日志 JSON 往返与重放、状态哈希）、`xgc-store`（版本化 JSON 包络 + 原子写）、
-`xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` /
-`VelocitySystem` / 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe /
-query / load / save / plan / apply / revert）、`xgc-cli`（`schema` / `check` /
-`bench` / `export` / `import` / `run` / `serve`）、`xgc-xtask`（文件预算 /
-依赖方向 / schema 确定性门禁）。
+`xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
+`Schedule::batches` / `VelocitySystem` / `GravitySystem` / 逐帧 state hash /
+回放校验）、`xgc-agent`（JSON-RPC：describe / query / load / save / plan / apply /
+revert）、`xgc-cli`（`schema` / `check` / `bench` / `export` / `import` / `run` /
+`serve`）、`xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
 
 实测（i7-10700，release，10 000 个 `(Transform, Velocity)`）：
 
@@ -33,15 +33,17 @@ JSON 往返：`Spawn { data: EntityData }` 反序列化后由组件工厂重建�
 `state_hash` / 实体 ID / revision 一致；`Journal` 可从初始快照重放并校验 revision。
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`position += linear * dt`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
-Agent 协议可完成 `describe → plan → apply → query → save/load → revert` 闭环。
+`SystemAccess` 已能判定读写冲突，`Schedule::batches()` 给出确定性并行批次；
+跨系统并行执行还差世界所有权拆分。Agent 协议可完成
+`describe → plan → apply → query → save/load → revert` 闭环。
 
-`cargo test --workspace` 全绿（47 条），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace` 全绿（49 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（24 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同
 （`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**尚未实现**：跨系统并行批次（当前系统内 archetype 分片，系统之间仍按注册顺序）、
-物理 / 脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖查询 IR、诊断、
-能力清单、视觉验证。
+**尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
+脚本 / 动画 / 音频、渲染、编辑器；Agent 协议尚未覆盖查询 IR、诊断、能力清单、
+视觉验证。
 
 ## 命令
 
