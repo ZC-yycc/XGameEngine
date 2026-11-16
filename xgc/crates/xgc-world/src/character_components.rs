@@ -10,6 +10,9 @@ pub struct CharacterController {
     pub slope_limit: f32,
     pub skin_width: f32,
     pub snap_to_ground: f32,
+    pub jump_velocity: f32,
+    pub jump: bool,
+    pub grounded: bool,
 }
 
 impl Default for CharacterController {
@@ -21,6 +24,9 @@ impl Default for CharacterController {
             slope_limit: 45.0,
             skin_width: 0.01,
             snap_to_ground: 0.2,
+            jump_velocity: 5.0,
+            jump: false,
+            grounded: false,
         }
     }
 }
@@ -49,6 +55,12 @@ impl Component for CharacterController {
                 .doc("与障碍物保持的皮肤宽度（米）"),
             FieldDescriptor::new("snap_to_ground", FieldType::F32, Value::F64(0.2))
                 .doc("贴地吸附距离（米）"),
+            FieldDescriptor::new("jump_velocity", FieldType::F32, Value::F64(5.0))
+                .doc("起跳竖直速度（米/秒）"),
+            FieldDescriptor::new("jump", FieldType::Bool, Value::Bool(false))
+                .doc("起跳请求；系统消费后清零"),
+            FieldDescriptor::new("grounded", FieldType::Bool, Value::Bool(false))
+                .doc("运行时是否踩地"),
         ]
     }
 
@@ -60,6 +72,9 @@ impl Component for CharacterController {
             "slope_limit" => Some(Value::F64(f64::from(self.slope_limit))),
             "skin_width" => Some(Value::F64(f64::from(self.skin_width))),
             "snap_to_ground" => Some(Value::F64(f64::from(self.snap_to_ground))),
+            "jump_velocity" => Some(Value::F64(f64::from(self.jump_velocity))),
+            "jump" => Some(Value::Bool(self.jump)),
+            "grounded" => Some(Value::Bool(self.grounded)),
             _ => None,
         }
     }
@@ -81,6 +96,25 @@ impl Component for CharacterController {
             "slope_limit" => assign(&mut self.slope_limit),
             "skin_width" => assign(&mut self.skin_width),
             "snap_to_ground" => assign(&mut self.snap_to_ground),
+            "jump_velocity" => assign(&mut self.jump_velocity),
+            "jump" => {
+                self.jump = value.as_bool().ok_or_else(|| {
+                    format!(
+                        "physics.character.jump 期望 bool，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "grounded" => {
+                self.grounded = value.as_bool().ok_or_else(|| {
+                    format!(
+                        "physics.character.grounded 期望 bool，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
             _ => Err(format!("physics.character 没有字段 {field}")),
         }
     }

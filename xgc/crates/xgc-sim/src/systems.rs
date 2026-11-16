@@ -95,6 +95,35 @@ fn support_half(body: &PhysicsBody) -> f32 {
     }
 }
 
+/// 角色起跳：消费 `jump` 请求，踩地时写入竖直速度。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CharacterJumpSystem;
+
+impl System for CharacterJumpSystem {
+    fn name(&self) -> &'static str {
+        "character_jump"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![CharacterController::ID],
+            writes: vec![Velocity::ID, CharacterController::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        world.for_each2_mut::<Velocity, CharacterController>(|_, velocity, controller| {
+            if controller.jump {
+                if controller.grounded {
+                    velocity.linear[1] = controller.jump_velocity;
+                    controller.grounded = false;
+                }
+                controller.jump = false;
+            }
+        });
+    }
+}
+
 /// 角色贴地：角色原点在脚底，落到 y=0 时夹住并清掉向下速度。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CharacterSystem;
@@ -120,6 +149,7 @@ impl System for CharacterSystem {
                         velocity.linear[1] = 0.0;
                     }
                 }
+                _controller.grounded = transform.position[1] <= 0.0;
             },
         );
     }

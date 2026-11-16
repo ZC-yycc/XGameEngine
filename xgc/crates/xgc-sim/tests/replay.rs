@@ -2,9 +2,9 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterSystem, FrameCommands,
-    GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario, Schedule, SimError, Simulation,
-    System, SystemAccess, VelocitySystem,
+    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem,
+    FrameCommands, GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario, Schedule,
+    SimError, Simulation, System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
     Animator, CharacterController, Command, Component, ComponentId, GlobalTransform, Name, Parent,
@@ -111,6 +111,7 @@ fn velocity_system_moves_transform() {
         simulation.schedule().names(),
         vec![
             "physics",
+            "character_jump",
             "velocity",
             "ground",
             "character",
@@ -131,7 +132,7 @@ fn velocity_system_moves_transform() {
 #[test]
 fn velocity_system_declares_access_and_parallel_hash_matches() {
     let simulation = Simulation::new(World::new());
-    let access = &simulation.schedule().accesses()[1];
+    let access = &simulation.schedule().accesses()[2];
     assert_eq!(access.reads, vec![ComponentId(0x0102)]);
     assert_eq!(access.writes, vec![ComponentId(0x0101)]);
 
@@ -481,4 +482,27 @@ fn spheres_separate_along_center_line() {
     let b = world.get::<Transform>(b).unwrap();
     assert!(((a.position[0] - b.position[0]).abs() - 1.0).abs() < 1e-5);
     assert!((a.position[0] + b.position[0] - 0.5).abs() < 1e-5);
+}
+
+#[test]
+fn character_jump_consumes_request_when_grounded() {
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        Velocity::default(),
+        CharacterController {
+            jump: true,
+            grounded: true,
+            jump_velocity: 6.0,
+            ..CharacterController::default()
+        },
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(CharacterJumpSystem);
+    schedule.run(&mut world, 0.016);
+    let velocity = world.get::<Velocity>(entity).unwrap();
+    let controller = world.get::<CharacterController>(entity).unwrap();
+    assert_eq!(velocity.linear[1], 6.0);
+    assert!(!controller.jump);
+    assert!(!controller.grounded);
 }
