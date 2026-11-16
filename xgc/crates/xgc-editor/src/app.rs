@@ -8,6 +8,8 @@ use eframe::wgpu;
 
 use xgc_render::{GpuContext, MeshCache, Renderer};
 
+use crate::gizmo::{distance_to_segment, project};
+use crate::transform_ops::snap;
 use crate::{EditorState, FieldRow};
 use xgc_base::EntityId;
 use xgc_reflect::Value;
@@ -48,6 +50,10 @@ pub struct EditorApp {
     distance: f32,
     gizmo: Option<GizmoDrag>,
     gizmo_mode: GizmoMode,
+    snap: bool,
+    grid: f32,
+    angle_step: f32,
+    scale_step: f32,
 }
 
 impl EditorApp {
@@ -61,6 +67,10 @@ impl EditorApp {
             distance: 5.0,
             gizmo: None,
             gizmo_mode: GizmoMode::Translate,
+            snap: true,
+            grid: 0.5,
+            angle_step: 15.0,
+            scale_step: 0.1,
         }
     }
 
@@ -204,11 +214,16 @@ impl EditorApp {
                 let amount = delta.dot(drag.direction) / drag.pixels_per_unit;
                 match drag.mode {
                     GizmoMode::Translate => {
-                        let next = [
+                        let mut next = [
                             drag.start[0] + drag.axis[0] * amount,
                             drag.start[1] + drag.axis[1] * amount,
                             drag.start[2] + drag.axis[2] * amount,
                         ];
+                        if self.snap {
+                            for value in &mut next {
+                                *value = snap(*value, self.grid);
+                            }
+                        }
                         if let Err(err) = self.state.set_entity_position(drag.entity, next) {
                             self.status = Some(err);
                         }
@@ -221,12 +236,18 @@ impl EditorApp {
                             .unwrap_or(0);
                         let mut scale = drag.start_scale;
                         scale[axis] = (scale[axis] + amount).max(0.01);
+                        if self.snap {
+                            scale[axis] = snap(scale[axis], self.scale_step).max(0.01);
+                        }
                         if let Err(err) = self.state.set_entity_scale(drag.entity, scale) {
                             self.status = Some(err);
                         }
                     }
                     GizmoMode::Rotate => {
-                        let degrees = (amount - drag.last_amount) * 90.0;
+                        let mut degrees = (amount - drag.last_amount) * 90.0;
+                        if self.snap {
+                            degrees = snap(degrees, self.angle_step);
+                        }
                         drag.last_amount = amount;
                         if let Err(err) = self.state.rotate_entity(drag.entity, drag.axis, degrees)
                         {
@@ -273,6 +294,13 @@ impl EditorApp {
             ui.selectable_value(&mut self.gizmo_mode, GizmoMode::Translate, "Move");
             ui.selectable_value(&mut self.gizmo_mode, GizmoMode::Rotate, "Rotate");
             ui.selectable_value(&mut self.gizmo_mode, GizmoMode::Scale, "Scale");
+            ui.checkbox(&mut self.snap, "Snap");
+            ui.add_enabled(
+                self.snap,
+                egui::DragValue::new(&mut self.grid)
+                    .speed(0.05)
+                    .range(0.01..=10.0),
+            );
             if ui.button("Save").clicked() {
                 self.status = Some(match self.state.save() {
                     Ok(()) => "已保存".to_string(),
@@ -556,28 +584,4 @@ pub fn run(path: Option<PathBuf>) -> eframe::Result {
         options,
         Box::new(|_cc| Ok(Box::new(EditorApp::new(state)))),
     )
-}
-
-fn project(mvp: [f32; 16], point: [f32; 3], size: [f32; 2]) -> Option<egui::Pos2> {
-    let x = mvp[0] * point[0] + mvp[4] * point[1] + mvp[8] * point[2] + mvp[12];
-    let y = mvp[1] * point[0] + mvp[5] * point[1] + mvp[9] * point[2] + mvp[13];
-    let z = mvp[2] * point[0] + mvp[6] * point[1] + mvp[10] * point[2] + mvp[14];
-    let w = mvp[3] * point[0] + mvp[7] * point[1] + mvp[11] * point[2] + mvp[15];
-    if w <= 1e-6 || z < 0.0 || z > w {
-        return None;
-    }
-    Some(egui::pos2(
-        (x / w * 0.5 + 0.5) * size[0],
-        (1.0 - (y / w * 0.5 + 0.5)) * size[1],
-    ))
-}
-
-fn distance_to_segment(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) -> f32 {
-    let segment = end - start;
-    let length_sq = segment.length_sq();
-    if length_sq <= f32::EPSILON {
-        return (point - start).length();
-    }
-    let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
-    (point - (start + segment * t)).length()
 }

@@ -216,3 +216,11 @@ fn scale_and_rotation_sync_global_transform() {
         world.get::<GlobalTransform>(key).unwrap().rotation
     );
 }
+
+#[test]
+fn snapping_quantizes_to_step() {
+    assert_eq!(xgc_editor::snap(1.24, 0.5), 1.0);
+    assert_eq!(xgc_editor::snap(1.26, 0.5), 1.5);
+    assert_eq!(xgc_editor::snap(7.0, 15.0), 0.0);
+    assert_eq!(xgc_editor::snap(1.234, 0.0), 1.234);
+}

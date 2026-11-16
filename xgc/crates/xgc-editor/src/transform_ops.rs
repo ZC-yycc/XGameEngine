@@ -111,3 +111,11 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
         a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
     ]
 }
+
+/// 吸附到最近的 step 倍数；step <= 0 时原样返回。
+pub fn snap(value: f32, step: f32) -> f32 {
+    if !step.is_finite() || step <= 0.0 {
+        return value;
+    }
+    (value / step).round() * step
+}
