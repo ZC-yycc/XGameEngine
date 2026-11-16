@@ -71,8 +71,8 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 父相对矩形、裁剪区并继承可见性，`UiInteractionSystem` 读 `ui.input` 写 hover / press /
 click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选邻，
 `Simulation::set_ui_input` 作为宿主输入桥，`hit_test` 取最上层可交互元素、
-`AudioMixerSystem` 按监听者距离写 `audio.gain`、`HierarchySystem` 合成世界变换）→
-快照 / trace。
+`AudioMixerSystem` 按监听者距离 + `audio.mixer` 总线写 `audio.gain`、`HierarchySystem`
+合成世界变换）→ 快照 / trace。
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
@@ -93,7 +93,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（88 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同，
-23 个内建类型 28552 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
+24 个内建类型 29778 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
 脚本 / 动画 / 音频、渲染、编辑器；Agent 协议已覆盖能力清单，视觉验证仍缺。

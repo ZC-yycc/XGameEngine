@@ -34,7 +34,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/render_components.rs` | 渲染侧组件：`render.mesh` / `render.material` / `render.camera` |
 | `crates/xgc-world/src/lod_components.rs` | LOD 组件：`render.lod` |
 | `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
-| `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source` / `audio.listener` / `audio.gain` |
+| `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source`（含 bus）/ `audio.listener` / `audio.gain` / `audio.mixer` |
 | `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / duration / time） |
 | `crates/xgc-world/src/character_components.rs` | 角色组件：`physics.character` |
 | `crates/xgc-world/src/ui_components.rs` | UI 组件：`ui.element` / `ui.layout` / `ui.interaction` / `ui.input` |
@@ -51,7 +51,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `RotationKey` / `ScaleKey` / `load_clip_ron` / `AnimationLibrary`（含 `load_dir`）：平移 / 旋转 slerp / 缩放采样、循环、RON / 目录加载、`AnimationPlaybackSystem` 写 Transform |
-| `crates/xgc-sim/src/audio.rs` | `AudioMixerSystem`：监听者距离衰减写 `audio.gain` |
+| `crates/xgc-sim/src/audio.rs` | `AudioMixerSystem`：监听者距离 + 总线音量写 `audio.gain` |
 | `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：布局、裁剪、可见性、命中、`ui.input` 驱动的交互 / Tab / 方向键焦点 |
 | `crates/xgc-sim/src/character.rs` | `CharacterStepSystem` / `CharacterBlockSystem`：低台阶抬升、高墙 / 球体推出 |
 | `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
@@ -98,7 +98,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 音频：空间化增益已接；下一步实际播放后端 / 总线。
+1. 音频：总线已接；下一步实际播放后端。
 2. UI：纹理管线 / PNG 解码。
 3. 动画：骨骼 / 蒙皮。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。

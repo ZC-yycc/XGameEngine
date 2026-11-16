@@ -30,7 +30,7 @@ pub use command::{Applied, Command, Plan};
 pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
 use data::ComponentFactory;
 pub use data::{ComponentData, EntityData, WorldData};
-pub use gameplay_components::{AudioGain, AudioListener, AudioSource, Script};
+pub use gameplay_components::{AudioGain, AudioListener, AudioMixer, AudioSource, Script};
 pub use journal::{Journal, TxRecord};
 pub use lod_components::LodGroup;
 pub use particle_components::ParticleEmitter;

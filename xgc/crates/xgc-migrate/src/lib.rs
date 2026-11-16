@@ -258,6 +258,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                         looping: old_audio.looping,
                         autoplay: old_audio.autoplay,
                         spatial: old_audio.spatial,
+                        bus: "sfx".to_string(),
                     });
                     report.mapped_components += 1;
                 }
@@ -495,6 +496,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     ("looping".to_string(), Value::Bool(audio.looping)),
                     ("autoplay".to_string(), Value::Bool(audio.autoplay)),
                     ("spatial".to_string(), Value::Bool(audio.spatial)),
+                    ("bus".to_string(), Value::String("sfx".to_string())),
                 ],
             });
             components.push(ComponentData {
