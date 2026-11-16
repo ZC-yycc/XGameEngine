@@ -199,7 +199,7 @@ impl Schedule {
 mod animation;
 mod systems;
 
-pub use animation::{AnimationClip, TranslationKey};
+pub use animation::{load_clip_ron, AnimationClip, AnimationLibrary, TranslationKey};
 pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
     GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,

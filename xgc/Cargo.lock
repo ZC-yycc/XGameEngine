@@ -1199,6 +1199,7 @@ dependencies = [
 name = "xgc-sim"
 version = "0.1.0"
 dependencies = [
+ "ron",
  "serde",
  "serde_json",
  "xgc-base",

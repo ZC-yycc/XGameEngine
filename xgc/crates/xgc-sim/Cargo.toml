@@ -9,6 +9,7 @@ description = "XGC 最小帧循环：场景回放、逐帧 state hash、trace �
 [dependencies]
 xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
+ron = "0.8.1"
 serde.workspace = true
 
 [dev-dependencies]
