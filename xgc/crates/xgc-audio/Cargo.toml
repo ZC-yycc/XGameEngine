@@ -1,0 +1,11 @@
+[package]
+name = "xgc-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC 音频设备输出：cpal 默认输出设备播放 PCM"
+
+[dependencies]
+cpal = "0.18"
+xgc-sim = { path = "../xgc-sim" }

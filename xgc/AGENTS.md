@@ -66,6 +66,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe（组件 / sim / render 能力清单）/ engine.diagnostics / engine.history / engine.replay / query / get / digest / stats / validate / load / save / plan / apply / revert / undo |
 | `crates/xgc-agent/src/snapshot.rs` | `world.snapshot` / `world.restore`：WorldData 快照与恢复 |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
+| `crates/xgc-audio/src/lib.rs` | cpal 音频设备输出：设备枚举、PCM 重采样、F32 / I16 输出队列、`play_clip` |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载、生命周期 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、实体移除时 `on_destroy`、磁盘热重载 |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 / Gizmo 平移 |
@@ -99,7 +100,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb>` |
+| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
+| `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
@@ -115,10 +117,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 ## 当前下一步（按顺序）
 
 1. 动画：叠加层已接；下一步转场淡入 / 遮罩。
-2. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
-3. 编辑器：Gizmo 已接；下一步旋转 / 缩放与吸附。
-4. 音频：播放设备 / 流式缓冲。
-5. 现在最大文件 591 行：动它之前先拆。
+2. 音频：设备输出已接；下一步流式资产 / 3D 声像。
+3. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
+4. 编辑器：Gizmo 已接；下一步旋转 / 缩放与吸附。
+5. 现在最大文件 593 行：动它之前先拆。
 
 ## Token 纪律
 
