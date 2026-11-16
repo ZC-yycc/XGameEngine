@@ -3,7 +3,7 @@
 use xgc_base::EntityId;
 use xgc_editor::EditorState;
 use xgc_reflect::Value;
-use xgc_world::{Name, Transform, World};
+use xgc_world::{GlobalTransform, Name, Transform, World};
 
 fn demo() -> (EditorState, EntityId) {
     let mut world = World::new();
@@ -150,4 +150,30 @@ fn demo_scene_has_camera_and_drawable() {
     let list = xgc_render::build_draw_list(editor.world());
     assert_eq!(list.items.len(), 1);
     assert_eq!(list.items[0].model, "builtin://quad");
+}
+
+#[test]
+fn orbit_camera_places_and_faces_origin() {
+    let mut editor = EditorState::demo();
+    let camera = editor.camera_entity().expect("demo 应有相机");
+    editor.set_camera_orbit(0.0, 0.0, 5.0).unwrap();
+    let position = editor
+        .world()
+        .get::<GlobalTransform>(editor.world().key(camera).unwrap())
+        .unwrap()
+        .position;
+    assert!((position[0]).abs() < 1e-5);
+    assert!((position[2] - 5.0).abs() < 1e-5);
+
+    editor
+        .set_camera_orbit(std::f32::consts::FRAC_PI_2, 0.0, 5.0)
+        .unwrap();
+    let position = editor
+        .world()
+        .get::<GlobalTransform>(editor.world().key(camera).unwrap())
+        .unwrap()
+        .position;
+    assert!((position[0] - 5.0).abs() < 1e-4);
+    assert!((position[2]).abs() < 1e-4);
+    assert!(xgc_render::camera_view_projection(editor.world(), 800, 450).is_some());
 }

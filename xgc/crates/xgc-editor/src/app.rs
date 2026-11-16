@@ -23,6 +23,9 @@ pub struct EditorApp {
     state: EditorState,
     status: Option<String>,
     viewport: Option<Viewport>,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
 }
 
 impl EditorApp {
@@ -31,6 +34,9 @@ impl EditorApp {
             state,
             status: None,
             viewport: None,
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 5.0,
         }
     }
 
@@ -353,7 +359,31 @@ impl eframe::App for EditorApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(viewport) = &self.viewport {
                 let size = egui::vec2(viewport.size[0] as f32, viewport.size[1] as f32);
-                ui.image(egui::load::SizedTexture::new(viewport.id, size));
+                let image = egui::Image::new(egui::load::SizedTexture::new(viewport.id, size));
+                let response = ui.add(image.sense(egui::Sense::click_and_drag()));
+                if response.dragged() {
+                    let delta = response.drag_delta();
+                    self.yaw -= delta.x * 0.01;
+                    self.pitch = (self.pitch + delta.y * 0.01).clamp(-1.4, 1.4);
+                    if let Err(err) =
+                        self.state
+                            .set_camera_orbit(self.yaw, self.pitch, self.distance)
+                    {
+                        self.status = Some(err);
+                    }
+                }
+                if response.hovered() {
+                    let scroll = ui.input(|input| input.raw_scroll_delta.y);
+                    if scroll != 0.0 {
+                        self.distance = (self.distance * (1.0 - scroll * 0.001)).clamp(0.5, 50.0);
+                        if let Err(err) =
+                            self.state
+                                .set_camera_orbit(self.yaw, self.pitch, self.distance)
+                        {
+                            self.status = Some(err);
+                        }
+                    }
+                }
             } else {
                 ui.label("没有 wgpu 渲染后端，视口不可用");
             }

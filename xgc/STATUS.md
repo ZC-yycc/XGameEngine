@@ -8,7 +8,7 @@
 | 项 | 值 |
 |---|---|
 | Rust 文件 | 104（最大 588 行；软上限 600） |
-| 测试 | 176（`cargo test --workspace --offline`） |
+| 测试 | 177（`cargo test --workspace --offline`） |
 | 内建组件 schema | 27 类 / 31479 字节，两次导出逐字节相同 |
 | 默认系统 | 16 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
@@ -45,7 +45,7 @@
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |
 | 资产 / 打包 | 15% | 扫描与迁移；缺 cooked asset、依赖清单、播放器打包 |
 | Lua 脚本 | 50% | 宿主 + 字段 / 实体 / 组件增删 + 命令结算 + 预算 / 内存 / 热重载 + `run-scripts`；缺完整引擎 API 与正式 System 调度 |
-| 编辑器 | 60% | eframe 窗口 + 层级 / Inspector 编辑 + 增删 + Play + wgpu 视口 + Undo/Redo + demo 场景 + 选中高亮；缺 Gizmo 与相机控制 |
+| 编辑器 | 65% | eframe 窗口 + 层级 / Inspector 编辑 + 增删 + Play + wgpu 视口 + Undo/Redo + demo 场景 + 选中高亮 + 轨道相机；缺 Gizmo |
 | 割接验收 | 20% | 无旧 / 新对照、无性能门禁、未推送 |
 
 **整体能力对等约 40%，割接就绪约 20–25%**。核心运行时本身接近可用，

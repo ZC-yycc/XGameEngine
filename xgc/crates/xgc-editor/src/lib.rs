@@ -157,6 +157,55 @@ impl EditorState {
         self.selected = id;
     }
 
+    pub fn camera_entity(&self) -> Option<EntityId> {
+        let mut selected: Option<EntityId> = None;
+        self.world.for_each::<Camera>(|key, camera| {
+            if !camera.active {
+                return;
+            }
+            let Some(entity) = self.world.entity(key) else {
+                return;
+            };
+            if selected.is_none_or(|existing| entity < existing) {
+                selected = Some(entity);
+            }
+        });
+        selected
+    }
+
+    /// 轨道相机：yaw 绕 Y、pitch 抬升、distance 为半径；写 Transform 与 GlobalTransform。
+    pub fn set_camera_orbit(&mut self, yaw: f32, pitch: f32, distance: f32) -> Result<(), String> {
+        let id = self
+            .camera_entity()
+            .ok_or_else(|| "场景没有 active 相机".to_string())?;
+        let key = self
+            .world
+            .key(id)
+            .ok_or_else(|| format!("相机实体 {} 不存在", id.raw()))?;
+        let distance = distance.max(0.1);
+        let (sin_yaw, cos_yaw) = yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = pitch.sin_cos();
+        let position = [
+            distance * sin_yaw * cos_pitch,
+            -distance * sin_pitch,
+            distance * cos_yaw * cos_pitch,
+        ];
+        let rotation = quat_mul(
+            [0.0, sin_yaw * 0.5, 0.0, cos_yaw * 0.5],
+            [sin_pitch * 0.5, 0.0, 0.0, cos_pitch * 0.5],
+        );
+        if let Some(transform) = self.world.get_mut::<Transform>(key) {
+            transform.position = position;
+            transform.rotation = rotation;
+        }
+        if let Some(transform) = self.world.get_mut::<GlobalTransform>(key) {
+            transform.position = position;
+            transform.rotation = rotation;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     pub fn component_names(&self) -> Vec<String> {
         self.registry
             .schema()
@@ -487,4 +536,13 @@ fn value_as_string(value: &Value) -> String {
         Value::String(value) => value.clone(),
         other => format!("{other:?}"),
     }
+}
+
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
 }
