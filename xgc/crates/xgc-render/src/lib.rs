@@ -9,6 +9,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
+mod assets;
 mod draw;
 mod glb;
 mod gpu;
@@ -16,6 +17,7 @@ mod mesh;
 mod pipeline;
 mod resources;
 
+pub use assets::MeshCache;
 pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use glb::{load_glb, MeshError};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};

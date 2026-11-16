@@ -1,5 +1,6 @@
 //! 可复用三角形管线：材质 uniform、顶点 / 索引缓冲、draw。
 
+use super::assets::MeshCache;
 use super::draw::DrawList;
 use super::gpu::{GpuContext, GpuError};
 use super::mesh::{builtin_mesh, Mesh};
@@ -293,6 +294,35 @@ impl RenderCache {
                 context,
                 texture,
                 &mesh,
+                item.color,
+                index == 0,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 与 `draw_list` 相同，但模型先经过 `MeshCache`（builtin / 相对路径 GLB）。
+    pub fn draw_list_with_meshes(
+        &mut self,
+        context: &GpuContext,
+        texture: &wgpu::Texture,
+        list: &DrawList,
+        meshes: &mut MeshCache,
+    ) -> Result<(), GpuError> {
+        if list.items.is_empty() {
+            return context.clear_texture(texture, wgpu::Color::BLACK);
+        }
+        let format = texture.format();
+        for (index, item) in list.items.iter().enumerate() {
+            let loaded = meshes
+                .get(&item.model)
+                .map_err(|err| GpuError::Mesh(err.to_string()))?;
+            let fallback = loaded.is_none().then(Mesh::fullscreen_triangle);
+            let mesh = loaded.unwrap_or_else(|| fallback.as_ref().unwrap());
+            self.pipeline_for(context, format).draw_mesh(
+                context,
+                texture,
+                mesh,
                 item.color,
                 index == 0,
             )?;

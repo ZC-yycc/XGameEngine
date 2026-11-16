@@ -18,6 +18,7 @@ pub enum GpuError {
     UnsupportedUsage(String),
     Readback(String),
     Pipeline(String),
+    Mesh(String),
 }
 
 impl fmt::Display for GpuError {
@@ -31,6 +32,7 @@ impl fmt::Display for GpuError {
             }
             Self::Readback(message) => write!(f, "GPU 回读失败：{message}"),
             Self::Pipeline(message) => write!(f, "GPU 管线错误：{message}"),
+            Self::Mesh(message) => write!(f, "网格加载失败：{message}"),
         }
     }
 }

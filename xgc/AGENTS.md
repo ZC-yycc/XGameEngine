@@ -51,6 +51,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList` |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引、builtin 网格占位 |
 | `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 |
+| `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / 越界与 GUID 拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / serve / migrate <文件|目录> / render-graph / gpu-probe / mesh-probe <路径>` |
@@ -67,7 +68,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M2 第九刀：资产路径解析 + mesh cache，把 `render.mesh.model` 真正映射到 GLB。
+1. M2 第十刀：资产目录解析 `guid://` → 路径，接 MeshCache。
 2. 旧场景迁移补 UI / Animator 等剩余组件映射。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 597 行：动它之前先拆。
