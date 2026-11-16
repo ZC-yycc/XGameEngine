@@ -54,6 +54,7 @@ pub struct EditorApp {
     grid: f32,
     angle_step: f32,
     scale_step: f32,
+    prefab_path: String,
 }
 
 impl EditorApp {
@@ -71,6 +72,7 @@ impl EditorApp {
             grid: 0.5,
             angle_step: 15.0,
             scale_step: 0.1,
+            prefab_path: String::new(),
         }
     }
 
@@ -306,6 +308,16 @@ impl EditorApp {
                     Ok(()) => "已保存".to_string(),
                     Err(err) => err,
                 });
+            }
+            ui.add(egui::TextEdit::singleline(&mut self.prefab_path).hint_text("预制体路径"));
+            if ui.button("Prefab").clicked() && !self.prefab_path.is_empty() {
+                match self
+                    .state
+                    .instantiate_prefab_file(std::path::Path::new(&self.prefab_path))
+                {
+                    Ok(id) => self.status = Some(format!("已实例化 {}", id.raw())),
+                    Err(err) => self.status = Some(err),
+                }
             }
             if ui.button("Play").clicked() {
                 self.status = Some(match self.state.play() {

@@ -2980,6 +2980,7 @@ dependencies = [
  "eframe",
  "pxfm",
  "xgc-base",
+ "xgc-migrate",
  "xgc-reflect",
  "xgc-render",
  "xgc-sim",

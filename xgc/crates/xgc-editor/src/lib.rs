@@ -4,6 +4,7 @@
 
 mod app;
 mod gizmo;
+mod prefab_ops;
 mod transform_ops;
 pub use app::run;
 pub use transform_ops::snap;

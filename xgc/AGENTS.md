@@ -29,7 +29,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-base/src/lib.rs` | `EntityId` / `EntityKey` / `Tick` / `Diagnostic` |
 | `crates/xgc-base/src/diagnostics.rs` | 诊断码常量 + `engine.diagnostics` 目录 |
 | `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、`Value`、动态字段读写 |
-| `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 |
+| `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 / `reserve_entity_ids` |
 | `crates/xgc-world/src/query.rs` | 双 / 三组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` |
 | `crates/xgc-world/src/render_components.rs` | 渲染侧组件：`render.mesh` / `render.material` / `render.camera` |
@@ -74,6 +74,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载 |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 |
 | `crates/xgc-editor/src/transform_ops.rs` | 位置 / 缩放 / 旋转 setter 与 Gizmo 旋转；无父节点同步 GlobalTransform；`snap` |
+| `crates/xgc-editor/src/prefab_ops.rs` | `instantiate_prefab_file`：旧 PrefabV2 → 新 ID 实例并选中根 |
 | `crates/xgc-editor/src/gizmo.rs` | 视口 MVP 投影与线段命中距离 |
 | `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
@@ -85,6 +86,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/old_rust.rs` | 旧 Rust 插件组件 → `plugin.rust` |
 | `crates/xgc-migrate/src/old_particle.rs` | 旧 `ParticleEmitter` → `particle.emitter` |
 | `crates/xgc-migrate/src/old_ui.rs` | 旧 `UiElement` → `ui.element`（kind 由内容推断） |
+| `crates/xgc-migrate/src/prefab.rs` | `instantiate_prefab`：预制体分配新 ID、重写 Parent、一次性 Spawn |
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读；`from_arc` 复用于编辑器视口 |
@@ -123,10 +125,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 编辑器：吸附已接；下一步预制体实例化。
-2. 动画：遮罩 / 分层混合细节。
-3. 迁移：input.ron 已解析；下一步窗口键盘事件接线与视觉对照。
-4. 脚本：正式 System 调度与脚本组件生命周期完整化。
+1. 动画：遮罩 / 分层混合细节。
+2. 迁移：预制体已可实例化；下一步窗口键盘事件接线与视觉对照。
+3. 脚本：正式 System 调度与脚本组件生命周期完整化。
+4. 编辑器：预制体覆写 / Revert 语义。
 5. 现在最大文件 600 行：动它之前先拆。
 
 ## Token 纪律

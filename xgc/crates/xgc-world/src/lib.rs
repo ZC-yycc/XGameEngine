@@ -402,6 +402,13 @@ impl World {
         self.by_id.len()
     }
 
+    /// 预留一段连续实体 ID（预制体实例化用），返回起始值。
+    pub fn reserve_entity_ids(&mut self, count: u64) -> u64 {
+        let start = self.next_id;
+        self.next_id = self.next_id.saturating_add(count);
+        start
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }

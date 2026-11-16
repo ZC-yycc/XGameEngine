@@ -224,3 +224,18 @@ fn snapping_quantizes_to_step() {
     assert_eq!(xgc_editor::snap(7.0, 15.0), 0.0);
     assert_eq!(xgc_editor::snap(1.234, 0.0), 1.234);
 }
+
+#[test]
+fn instantiates_real_prefab_and_selects_root() {
+    let path = std::path::Path::new("../../../projects/XGame/Prefabs/Pillar.prefab.ron");
+    if !path.exists() {
+        eprintln!("skip: 没有旧项目 Pillar 预制体");
+        return;
+    }
+    let mut editor = EditorState::demo();
+    let before = editor.entities().len();
+    let root = editor.instantiate_prefab_file(path).unwrap();
+    assert_eq!(editor.entities().len(), before + 3);
+    assert_eq!(editor.selected(), Some(root));
+    assert!(editor.is_dirty());
+}
