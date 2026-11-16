@@ -14,6 +14,7 @@ use super::instanced::InstancedRequest;
 use super::mesh::Mesh;
 use super::pipeline::{RenderCache, RoundedMeshDraw};
 use super::resources::{ResourceDesc, ResourceUsage};
+use super::skinned::{GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
 use super::text::text_mesh_wrapped;
 use super::texture::TexturePipeline;
 use super::ui_draw::{cover_uv, quad_matrix};
@@ -35,6 +36,8 @@ pub struct Renderer {
     cache: RenderCache,
     meshes: MeshCache,
     gpu_meshes: GpuMeshCache,
+    skin_meshes: GpuSkinMeshCache,
+    skinned: Option<(wgpu::TextureFormat, SkinnedPipeline)>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_pipeline: Option<(wgpu::TextureFormat, TexturePipeline)>,
@@ -59,6 +62,8 @@ impl Renderer {
             cache: RenderCache::new(),
             meshes,
             gpu_meshes: GpuMeshCache::new(),
+            skin_meshes: GpuSkinMeshCache::new(),
+            skinned: None,
             depth: None,
             images: HashMap::new(),
             ui_pipeline: None,
@@ -416,19 +421,76 @@ impl Renderer {
         }
         let view_proj = camera_view_projection(world, width, height).unwrap_or(IDENTITY);
         let depth = &self.depth.as_ref().unwrap().view;
+        let draws = list.len();
+        let mut cpu_items = Vec::with_capacity(list.items.len());
+        let mut gpu_items = Vec::new();
+        for item in list.items {
+            if item.pose.as_ref().is_some_and(|pose| pose.len() <= 64) {
+                gpu_items.push(item);
+            } else {
+                cpu_items.push(item);
+            }
+        }
+        let cpu_list = super::draw::DrawList { items: cpu_items };
+        let cpu_empty = cpu_list.items.is_empty();
         let mut request = InstancedRequest {
             texture: target,
-            list: &list,
+            list: &cpu_list,
             meshes: &mut self.meshes,
             gpu_meshes: &mut self.gpu_meshes,
             view_proj,
             depth,
         };
-        let draw_calls = self.cache.draw_list_instanced(context, &mut request)?;
+        let mut draw_calls = self.cache.draw_list_instanced(context, &mut request)?;
+        if !gpu_items.is_empty() {
+            let format = target.format();
+            if self
+                .skinned
+                .as_ref()
+                .is_none_or(|(current, _)| *current != format)
+            {
+                self.skinned = Some((format, context.create_skinned_pipeline(format, true)));
+            }
+            let pipeline = &self.skinned.as_ref().unwrap().1;
+            for (index, item) in gpu_items.iter().enumerate() {
+                let Some(mesh) = self
+                    .meshes
+                    .get(&item.model)
+                    .map_err(|err| GpuError::Mesh(err.to_string()))?
+                else {
+                    continue;
+                };
+                if mesh.positions.is_empty() {
+                    continue;
+                }
+                let pose = item.pose.as_deref().unwrap_or(&[]);
+                let inverse_bind = mesh
+                    .skin
+                    .as_ref()
+                    .map(|skin| skin.inverse_bind.as_slice())
+                    .unwrap_or(&[]);
+                let gpu_mesh = self.skin_meshes.upload(context, &item.model, mesh);
+                pipeline.draw(
+                    context,
+                    &SkinnedRequest {
+                        texture: target,
+                        depth: Some(depth),
+                        clear: cpu_empty && index == 0,
+                        mesh: gpu_mesh,
+                        pose,
+                        inverse_bind,
+                        model: item.transform,
+                        color: item.color,
+                        view_proj,
+                    },
+                )?;
+                draw_calls += 1;
+            }
+        }
         Ok(RenderStats {
-            draws: list.len(),
+            draws,
             draw_calls,
-            passes: usize::from(!list.is_empty()),
+            passes: usize::from(draws > 0),
         })
     }
 }

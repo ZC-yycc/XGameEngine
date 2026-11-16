@@ -78,7 +78,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读；`from_arc` 复用于编辑器视口 |
-| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → 实例化 → GPU，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本 + 图片叠加；`render_selected` 选择高亮 |
+| `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList 拆分 CPU / GPU 蒙皮，实例化 + GPU 蒙皮 pass，active camera MVP + 深度附件；UI 背景 + 焦点环 + 文本 + 图片叠加；`render_selected` 选择高亮 |
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
@@ -110,7 +110,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：GPU 蒙皮独立管线已通；下一步接入主帧（深度 / 实例化 pass）。
+1. 动画：GPU 蒙皮已接入主帧；下一步状态机 / 分层。
 2. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
 3. 编辑器：Gizmo 已接；下一步旋转 / 缩放与吸附。
 4. 音频：播放设备 / 流式缓冲。

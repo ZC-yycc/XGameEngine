@@ -171,7 +171,11 @@ pub struct SkinnedPipeline {
 }
 
 impl GpuContext {
-    pub fn create_skinned_pipeline(&self, format: wgpu::TextureFormat) -> SkinnedPipeline {
+    pub fn create_skinned_pipeline(
+        &self,
+        format: wgpu::TextureFormat,
+        depth: bool,
+    ) -> SkinnedPipeline {
         let shader = self
             .device()
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -244,7 +248,13 @@ impl GpuContext {
                     ],
                 },
                 primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
+                depth_stencil: depth.then_some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -270,6 +280,8 @@ impl GpuContext {
 
 pub struct SkinnedRequest<'a> {
     pub texture: &'a wgpu::Texture,
+    pub depth: Option<&'a wgpu::TextureView>,
+    pub clear: bool,
     pub mesh: &'a GpuSkinMesh,
     pub pose: &'a [[f32; 16]],
     pub inverse_bind: &'a [[f32; 16]],
@@ -347,11 +359,28 @@ impl SkinnedPipeline {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: if request.clear {
+                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: request.depth.map(|depth| {
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view: depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: if request.clear {
+                                wgpu::LoadOp::Clear(1.0)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
