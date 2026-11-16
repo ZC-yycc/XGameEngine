@@ -61,7 +61,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe（组件 / sim / render 能力清单）/ engine.diagnostics / engine.history / engine.replay / query / get / digest / stats / validate / load / save / plan / apply / revert / undo |
 | `crates/xgc-agent/src/snapshot.rs` | `world.snapshot` / `world.restore`：WorldData 快照与恢复 |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
-| `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表、指令预算、内存上限、脚本登记 / 热重载、生命周期钩子 |
+| `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载、生命周期 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、实体移除时 `on_destroy`、磁盘热重载 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
@@ -105,7 +105,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 脚本：`run-scripts` 已接；下一步完整引擎 API 与正式 System 调度。
+1. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
 2. 动画：CPU 蒙皮已接；下一步蒙皮 GPU 管线 / 骨骼层级导入。
 3. UI：圆角 / scissor 已接；下一步 UI 绘制批次。
 4. 音频：播放设备 / 流式缓冲。

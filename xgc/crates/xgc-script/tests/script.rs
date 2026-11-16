@@ -274,3 +274,45 @@ fn runtime_destroys_scripts_when_entity_is_removed() {
     assert_eq!(runtime.entity_count(), 0);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn runtime_adds_and_removes_components_via_commands() {
+    use xgc_world::{Script, Transform, Velocity, World};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_lua_components_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("components.lua");
+    std::fs::write(
+        &path,
+        "function on_update(dt) xgc.add(0, 'core.velocity') end\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        Script {
+            path: "components.lua".to_string(),
+        },
+    ));
+    let id = world.entity(entity).unwrap();
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    assert!(world.get::<Velocity>(world.key(id).unwrap()).is_some());
+
+    std::fs::write(
+        &path,
+        "function on_update(dt) xgc.remove(0, 'core.velocity') end\n",
+    )
+    .unwrap();
+    runtime.reload_all().unwrap();
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    assert!(world.get::<Velocity>(world.key(id).unwrap()).is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

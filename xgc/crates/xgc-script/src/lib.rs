@@ -11,7 +11,7 @@ use mlua::{
     Value as LuaValue, VmState,
 };
 use xgc_base::EntityId;
-use xgc_world::{builtin_registry, Command, Transform, Value, World};
+use xgc_world::{builtin_registry, Command, ComponentData, Transform, Value, World};
 
 mod runtime;
 pub use runtime::ScriptRuntime;
@@ -79,6 +79,32 @@ impl LuaHost {
             .map_err(|err| format!("创建 set 失败：{err}"))?;
         api.set("set", set_field)
             .map_err(|err| format!("注册 set 失败：{err}"))?;
+        let add_commands = Rc::clone(commands);
+        let add = self
+            .lua
+            .create_function(move |_, (id, component): (u64, String)| {
+                add_commands.borrow_mut().push(Command::AddComponent {
+                    entity: EntityId::from_raw(id),
+                    component: default_component(&component)?,
+                });
+                Ok(())
+            })
+            .map_err(|err| format!("创建 add 失败：{err}"))?;
+        api.set("add", add)
+            .map_err(|err| format!("注册 add 失败：{err}"))?;
+        let remove_commands = Rc::clone(commands);
+        let remove = self
+            .lua
+            .create_function(move |_, (id, component): (u64, String)| {
+                remove_commands.borrow_mut().push(Command::RemoveComponent {
+                    entity: EntityId::from_raw(id),
+                    component: component_id(&component)?,
+                });
+                Ok(())
+            })
+            .map_err(|err| format!("创建 remove 失败：{err}"))?;
+        api.set("remove", remove)
+            .map_err(|err| format!("注册 remove 失败：{err}"))?;
         let log = self
             .lua
             .create_function(|_, message: String| {
@@ -341,6 +367,56 @@ impl LuaHost {
         api.set("despawn", despawn)
             .map_err(|err| format!("注册 despawn 失败：{err}"))?;
 
+        let add_world = Rc::clone(world);
+        let add = self
+            .lua
+            .create_function(move |_, (id, component): (u64, String)| {
+                let component = default_component(&component)?;
+                let mut world = add_world.borrow_mut();
+                let plan = world.plan(vec![Command::AddComponent {
+                    entity: EntityId::from_raw(id),
+                    component,
+                }]);
+                if !plan.is_valid() {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "add 计划无效：{:?}",
+                        plan.diagnostics
+                    )));
+                }
+                let _ = world
+                    .apply(&plan)
+                    .map_err(|diagnostics| mlua::Error::RuntimeError(format!("{diagnostics:?}")))?;
+                Ok(())
+            })
+            .map_err(|err| format!("创建 add 失败：{err}"))?;
+        api.set("add", add)
+            .map_err(|err| format!("注册 add 失败：{err}"))?;
+
+        let remove_world = Rc::clone(world);
+        let remove = self
+            .lua
+            .create_function(move |_, (id, component): (u64, String)| {
+                let component = component_id(&component)?;
+                let mut world = remove_world.borrow_mut();
+                let plan = world.plan(vec![Command::RemoveComponent {
+                    entity: EntityId::from_raw(id),
+                    component,
+                }]);
+                if !plan.is_valid() {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "remove 计划无效：{:?}",
+                        plan.diagnostics
+                    )));
+                }
+                let _ = world
+                    .apply(&plan)
+                    .map_err(|diagnostics| mlua::Error::RuntimeError(format!("{diagnostics:?}")))?;
+                Ok(())
+            })
+            .map_err(|err| format!("创建 remove 失败：{err}"))?;
+        api.set("remove", remove)
+            .map_err(|err| format!("注册 remove 失败：{err}"))?;
+
         self.lua
             .globals()
             .set("xgc", api)
@@ -482,4 +558,19 @@ fn lua_to_value(value: &mlua::Value) -> mlua::Result<Value> {
             other.type_name()
         ))),
     }
+}
+
+fn default_component(name: &str) -> mlua::Result<ComponentData> {
+    let registry = builtin_registry();
+    let schema = registry
+        .by_name(name)
+        .ok_or_else(|| mlua::Error::RuntimeError(format!("未知组件：{name}")))?;
+    Ok(ComponentData {
+        component: xgc_world::ComponentId(schema.id),
+        fields: schema
+            .fields
+            .iter()
+            .map(|field| (field.name.clone(), field.default.clone()))
+            .collect(),
+    })
 }
