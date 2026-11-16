@@ -177,3 +177,21 @@ fn orbit_camera_places_and_faces_origin() {
     assert!((position[2]).abs() < 1e-4);
     assert!(xgc_render::camera_view_projection(editor.world(), 800, 450).is_some());
 }
+
+#[test]
+fn gizmo_moves_transform_and_global() {
+    let mut editor = EditorState::demo();
+    let id = editor.entities()[1].id;
+    assert_eq!(editor.entity_position(id), Some([0.0, 0.0, 0.0]));
+    editor.set_entity_position(id, [1.0, 2.0, 3.0]).unwrap();
+    let world = editor.world();
+    let key = world.key(id).unwrap();
+    assert_eq!(
+        world.get::<Transform>(key).unwrap().position,
+        [1.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        world.get::<GlobalTransform>(key).unwrap().position,
+        [1.0, 2.0, 3.0]
+    );
+}

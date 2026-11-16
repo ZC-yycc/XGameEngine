@@ -9,7 +9,9 @@ use eframe::wgpu;
 use xgc_render::{GpuContext, MeshCache, Renderer};
 
 use crate::{EditorState, FieldRow};
+use xgc_base::EntityId;
 use xgc_reflect::Value;
+use xgc_render::camera_view_projection;
 
 struct Viewport {
     size: [u32; 2],
@@ -19,6 +21,14 @@ struct Viewport {
     context: GpuContext,
 }
 
+struct GizmoDrag {
+    entity: EntityId,
+    axis: [f32; 3],
+    start: [f32; 3],
+    direction: egui::Vec2,
+    pixels_per_unit: f32,
+}
+
 pub struct EditorApp {
     state: EditorState,
     status: Option<String>,
@@ -26,6 +36,7 @@ pub struct EditorApp {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    gizmo: Option<GizmoDrag>,
 }
 
 impl EditorApp {
@@ -37,6 +48,7 @@ impl EditorApp {
             yaw: 0.0,
             pitch: 0.0,
             distance: 5.0,
+            gizmo: None,
         }
     }
 
@@ -97,6 +109,96 @@ impl EditorApp {
             self.state.selected(),
         ) {
             self.status = Some(format!("视口渲染失败：{err}"));
+        }
+    }
+
+    fn paint_gizmo(
+        &mut self,
+        _ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        image_rect: egui::Rect,
+        response: &egui::Response,
+    ) {
+        let Some(entity) = self.state.selected() else {
+            return;
+        };
+        let Some(position) = self.state.entity_position(entity) else {
+            return;
+        };
+        let size = [image_rect.width(), image_rect.height()];
+        let Some(mvp) = camera_view_projection(self.state.world(), 800, 450) else {
+            return;
+        };
+        let Some(origin) =
+            project(mvp, position, size).map(|point| point + image_rect.min.to_vec2())
+        else {
+            return;
+        };
+        let axes = [
+            ([1.0, 0.0, 0.0], egui::Color32::from_rgb(230, 80, 80)),
+            ([0.0, 1.0, 0.0], egui::Color32::from_rgb(80, 210, 90)),
+            ([0.0, 0.0, 1.0], egui::Color32::from_rgb(80, 130, 230)),
+        ];
+        let mut handles = Vec::new();
+        for (axis, color) in axes {
+            let target = [
+                position[0] + axis[0],
+                position[1] + axis[1],
+                position[2] + axis[2],
+            ];
+            let Some(end) =
+                project(mvp, target, size).map(|point| point + image_rect.min.to_vec2())
+            else {
+                continue;
+            };
+            painter.line_segment([origin, end], egui::Stroke::new(2.0_f32, color));
+            painter.circle_filled(end, 3.0, color);
+            handles.push((axis, end));
+        }
+
+        if response.drag_started() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                let mut best: Option<([f32; 3], egui::Pos2, f32)> = None;
+                for (axis, end) in &handles {
+                    let distance = distance_to_segment(pointer, origin, *end);
+                    if distance <= 12.0
+                        && best
+                            .as_ref()
+                            .is_none_or(|(_, _, current)| distance < *current)
+                    {
+                        best = Some((*axis, *end, distance));
+                    }
+                }
+                if let Some((axis, end, _)) = best {
+                    let direction = (end - origin).normalized();
+                    let pixels_per_unit = (end - origin).length().max(1.0);
+                    self.state.checkpoint();
+                    self.gizmo = Some(GizmoDrag {
+                        entity,
+                        axis,
+                        start: position,
+                        direction,
+                        pixels_per_unit,
+                    });
+                }
+            }
+        }
+        if response.dragged() {
+            if let Some(drag) = &self.gizmo {
+                let delta = response.drag_delta();
+                let amount = delta.dot(drag.direction) / drag.pixels_per_unit;
+                let next = [
+                    drag.start[0] + drag.axis[0] * amount,
+                    drag.start[1] + drag.axis[1] * amount,
+                    drag.start[2] + drag.axis[2] * amount,
+                ];
+                if let Err(err) = self.state.set_entity_position(drag.entity, next) {
+                    self.status = Some(err);
+                }
+            }
+        }
+        if response.drag_stopped() {
+            self.gizmo = None;
         }
     }
 
@@ -357,14 +459,28 @@ impl eframe::App for EditorApp {
             .default_width(380.0)
             .show(ctx, |ui| self.inspector(ui));
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(viewport) = &self.viewport {
-                let size = egui::vec2(viewport.size[0] as f32, viewport.size[1] as f32);
-                let image = egui::Image::new(egui::load::SizedTexture::new(viewport.id, size));
-                let response = ui.add(image.sense(egui::Sense::click_and_drag()));
-                if response.dragged() {
-                    let delta = response.drag_delta();
-                    self.yaw -= delta.x * 0.01;
-                    self.pitch = (self.pitch + delta.y * 0.01).clamp(-1.4, 1.4);
+            let Some(viewport) = &self.viewport else {
+                ui.label("没有 wgpu 渲染后端，视口不可用");
+                return;
+            };
+            let rect = ui.available_rect_before_wrap();
+            let image_rect = egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(viewport.size[0] as f32, viewport.size[1] as f32),
+            );
+            let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+            let painter = ui.painter_at(rect);
+            painter.image(
+                viewport.id,
+                image_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            self.paint_gizmo(ui, &painter, image_rect, &response);
+            if response.hovered() {
+                let scroll = ui.input(|input| input.raw_scroll_delta.y);
+                if scroll != 0.0 {
+                    self.distance = (self.distance * (1.0 - scroll * 0.001)).clamp(0.5, 50.0);
                     if let Err(err) =
                         self.state
                             .set_camera_orbit(self.yaw, self.pitch, self.distance)
@@ -372,20 +488,6 @@ impl eframe::App for EditorApp {
                         self.status = Some(err);
                     }
                 }
-                if response.hovered() {
-                    let scroll = ui.input(|input| input.raw_scroll_delta.y);
-                    if scroll != 0.0 {
-                        self.distance = (self.distance * (1.0 - scroll * 0.001)).clamp(0.5, 50.0);
-                        if let Err(err) =
-                            self.state
-                                .set_camera_orbit(self.yaw, self.pitch, self.distance)
-                        {
-                            self.status = Some(err);
-                        }
-                    }
-                }
-            } else {
-                ui.label("没有 wgpu 渲染后端，视口不可用");
             }
         });
     }
@@ -411,4 +513,28 @@ pub fn run(path: Option<PathBuf>) -> eframe::Result {
         options,
         Box::new(|_cc| Ok(Box::new(EditorApp::new(state)))),
     )
+}
+
+fn project(mvp: [f32; 16], point: [f32; 3], size: [f32; 2]) -> Option<egui::Pos2> {
+    let x = mvp[0] * point[0] + mvp[4] * point[1] + mvp[8] * point[2] + mvp[12];
+    let y = mvp[1] * point[0] + mvp[5] * point[1] + mvp[9] * point[2] + mvp[13];
+    let z = mvp[2] * point[0] + mvp[6] * point[1] + mvp[10] * point[2] + mvp[14];
+    let w = mvp[3] * point[0] + mvp[7] * point[1] + mvp[11] * point[2] + mvp[15];
+    if w <= 1e-6 || z < 0.0 || z > w {
+        return None;
+    }
+    Some(egui::pos2(
+        (x / w * 0.5 + 0.5) * size[0],
+        (1.0 - (y / w * 0.5 + 0.5)) * size[1],
+    ))
+}
+
+fn distance_to_segment(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) -> f32 {
+    let segment = end - start;
+    let length_sq = segment.length_sq();
+    if length_sq <= f32::EPSILON {
+        return (point - start).length();
+    }
+    let t = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
+    (point - (start + segment * t)).length()
 }

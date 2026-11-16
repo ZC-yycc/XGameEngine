@@ -64,8 +64,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载、生命周期 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、实体移除时 `on_destroy`、磁盘热重载 |
-| `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo 场景 |
-| `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / Ctrl+Z、Ctrl+Y |
+| `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 / Gizmo 平移 |
+| `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / 三轴 Gizmo / Ctrl+Z、Ctrl+Y |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
@@ -109,9 +109,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 编辑器：轨道相机已接；下一步 Gizmo。
-2. 动画：蒙皮已接入渲染；下一步 GPU 蒙皮管线 / 骨骼层级导入。
-3. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
+1. 动画：蒙皮已接入渲染；下一步 GPU 蒙皮管线 / 骨骼层级导入。
+2. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
+3. 编辑器：Gizmo 已接；下一步旋转 / 缩放与吸附。
 4. 音频：播放设备 / 流式缓冲。
 5. 现在最大文件 588 行：动它之前先拆。
 

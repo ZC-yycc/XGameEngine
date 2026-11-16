@@ -219,6 +219,45 @@ impl EditorState {
         !self.undo.is_empty()
     }
 
+    /// 手动记录一个撤销点（Gizmo 拖拽开始时调用一次）。
+    pub fn checkpoint(&mut self) {
+        if self.play.is_none() {
+            self.push_undo();
+        }
+    }
+
+    pub fn entity_position(&self, id: EntityId) -> Option<[f32; 3]> {
+        let key = self.world.key(id)?;
+        if let Some(transform) = self.world.get::<GlobalTransform>(key) {
+            return Some(transform.position);
+        }
+        self.world
+            .get::<Transform>(key)
+            .map(|transform| transform.position)
+    }
+
+    /// Gizmo 平移；无父节点时同步 GlobalTransform，父节点下只改局部 Transform。
+    pub fn set_entity_position(&mut self, id: EntityId, position: [f32; 3]) -> Result<(), String> {
+        if self.play.is_some() {
+            return Err("Play 期间不能移动实体".to_string());
+        }
+        let key = self
+            .world
+            .key(id)
+            .ok_or_else(|| format!("实体 {} 不存在", id.raw()))?;
+        let Some(transform) = self.world.get_mut::<Transform>(key) else {
+            return Err(format!("实体 {} 没有 Transform", id.raw()));
+        };
+        transform.position = position;
+        if self.world.get::<xgc_world::Parent>(key).is_none() {
+            if let Some(global) = self.world.get_mut::<GlobalTransform>(key) {
+                global.position = position;
+            }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
