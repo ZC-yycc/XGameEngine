@@ -1436,6 +1436,8 @@ name = "xgc-script"
 version = "0.1.0"
 dependencies = [
  "mlua",
+ "xgc-base",
+ "xgc-world",
 ]
 
 [[package]]

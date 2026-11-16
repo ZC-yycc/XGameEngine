@@ -1,9 +1,15 @@
 //! Lua 脚本宿主：只开放安全标准库，脚本按名字加载、执行与调用。
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use mlua::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib, Value};
+use xgc_base::EntityId;
+use xgc_world::{Transform, World};
 
 pub struct LuaHost {
     lua: Lua,
+    world: Option<Rc<RefCell<World>>>,
 }
 
 impl LuaHost {
@@ -12,7 +18,91 @@ impl LuaHost {
         let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
         let lua = Lua::new_with(libs, LuaOptions::default())
             .map_err(|err| format!("创建 Lua 运行时失败：{err}"))?;
-        Ok(Self { lua })
+        Ok(Self { lua, world: None })
+    }
+
+    /// 绑定世界：脚本可读实体数 / 读写 Transform；World 由调用方持有以便检查结果。
+    pub fn with_world(world: Rc<RefCell<World>>) -> Result<Self, String> {
+        let host = Self::new()?;
+        host.register_world(&world)?;
+        Ok(Self {
+            lua: host.lua,
+            world: Some(world),
+        })
+    }
+
+    fn register_world(&self, world: &Rc<RefCell<World>>) -> Result<(), String> {
+        let api = self
+            .lua
+            .create_table()
+            .map_err(|err| format!("创建 xgc 表失败：{err}"))?;
+        let count_world = Rc::clone(world);
+        let count = self
+            .lua
+            .create_function(move |_, ()| Ok(count_world.borrow().len() as i64))
+            .map_err(|err| format!("创建 entity_count 失败：{err}"))?;
+        api.set("entity_count", count)
+            .map_err(|err| format!("注册 entity_count 失败：{err}"))?;
+
+        let get_world = Rc::clone(world);
+        let get_position = self
+            .lua
+            .create_function(move |lua, id: u64| {
+                let world = get_world.borrow();
+                let entity = EntityId::from_raw(id);
+                let key = world
+                    .key(entity)
+                    .ok_or_else(|| mlua::Error::RuntimeError(format!("实体 {id} 不存在")))?;
+                let transform = world.get::<Transform>(key).ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!("实体 {id} 没有 Transform"))
+                })?;
+                let table = lua.create_table()?;
+                table.set("x", transform.position[0])?;
+                table.set("y", transform.position[1])?;
+                table.set("z", transform.position[2])?;
+                Ok(table)
+            })
+            .map_err(|err| format!("创建 get_position 失败：{err}"))?;
+        api.set("get_position", get_position)
+            .map_err(|err| format!("注册 get_position 失败：{err}"))?;
+
+        let set_world = Rc::clone(world);
+        let set_position = self
+            .lua
+            .create_function(move |_, (id, x, y, z): (u64, f32, f32, f32)| {
+                let mut world = set_world.borrow_mut();
+                let entity = EntityId::from_raw(id);
+                let key = world
+                    .key(entity)
+                    .ok_or_else(|| mlua::Error::RuntimeError(format!("实体 {id} 不存在")))?;
+                let transform = world.get_mut::<Transform>(key).ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!("实体 {id} 没有 Transform"))
+                })?;
+                transform.position = [x, y, z];
+                Ok(())
+            })
+            .map_err(|err| format!("创建 set_position 失败：{err}"))?;
+        api.set("set_position", set_position)
+            .map_err(|err| format!("注册 set_position 失败：{err}"))?;
+
+        let log = self
+            .lua
+            .create_function(|_, message: String| {
+                println!("[lua] {message}");
+                Ok(())
+            })
+            .map_err(|err| format!("创建 log 失败：{err}"))?;
+        api.set("log", log)
+            .map_err(|err| format!("注册 log 失败：{err}"))?;
+
+        self.lua
+            .globals()
+            .set("xgc", api)
+            .map_err(|err| format!("注册 xgc 表失败：{err}"))
+    }
+
+    pub fn world(&self) -> Option<&Rc<RefCell<World>>> {
+        self.world.as_ref()
     }
 
     pub fn run(&self, name: &str, source: &str) -> Result<(), String> {
@@ -23,7 +113,7 @@ impl LuaHost {
             .map_err(|err| format!("脚本 {name} 执行失败：{err}"))
     }
 
-    pub fn eval<T: FromLua>(&self, source: &str) -> Result<T, String> {
+    pub fn eval<T: FromLuaMulti>(&self, source: &str) -> Result<T, String> {
         self.lua
             .load(source)
             .eval()
