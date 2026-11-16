@@ -2,8 +2,9 @@
 
 use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
-    Animator as XgcAnimator, AudioSource, Camera, Component, ComponentId, GlobalTransform,
-    Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform, Value,
+    Animator as XgcAnimator, AudioSource, Camera, CharacterController as XgcCharacter, Component,
+    ComponentId, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script,
+    Transform, Value,
 };
 
 const SCENE: &str = r#"(
@@ -336,4 +337,63 @@ fn maps_animator() {
     assert_eq!(field("looping"), Value::Bool(false));
     assert_eq!(field("autoplay"), Value::Bool(false));
     assert_eq!(field("fade_time"), Value::F64(0.25));
+}
+
+#[test]
+fn maps_character() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Char",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Player",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Character((
+                                radius: 0.3,
+                                height: 1.8,
+                                step_offset: 0.35,
+                                slope_limit: 45.0,
+                                skin_width: 0.02,
+                                snap_to_ground: 0.3,
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let character = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == XgcCharacter::ID)
+        .unwrap();
+    let field = |name: &str| {
+        character
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("radius").as_f32(), Some(0.3));
+    assert_eq!(field("height").as_f32(), Some(1.8));
+    assert_eq!(field("step_offset").as_f32(), Some(0.35));
+    assert_eq!(field("snap_to_ground").as_f32(), Some(0.3));
 }

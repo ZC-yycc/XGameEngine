@@ -7,53 +7,20 @@
 #![deny(unsafe_code)]
 
 use std::collections::HashSet;
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use xgc_base::EntityId;
 use xgc_world::{
-    Animator as XgcAnimator, AudioSource, Camera, Component, ComponentData, ComponentId,
-    EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script,
-    Transform, Value, WorldData,
+    Animator as XgcAnimator, AudioSource, Camera, CharacterController as XgcCharacter, Component,
+    ComponentData, ComponentId, EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent,
+    PhysicsBody, Script, Transform, Value, WorldData,
 };
 
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
-
-#[derive(Debug)]
-pub enum MigrationError {
-    Parse(String),
-    UnsupportedVersion(u32),
-    DuplicateId(u64),
-    Io(String),
-}
-
-impl fmt::Display for MigrationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Parse(message) => write!(f, "场景解析失败：{message}"),
-            Self::UnsupportedVersion(version) => {
-                write!(
-                    f,
-                    "不支持的旧场景版本：{version}（只认 {OLD_SCENE_FORMAT_VERSION}）"
-                )
-            }
-            Self::DuplicateId(id) => write!(f, "旧场景实体 ID 重复：{id}"),
-            Self::Io(message) => write!(f, "迁移 I/O 失败：{message}"),
-        }
-    }
-}
-
-impl std::error::Error for MigrationError {}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MigrationReport {
-    pub entities: usize,
-    pub with_old_components: usize,
-    pub mapped_components: usize,
-    pub missing_parents: usize,
-}
+mod report;
+pub use report::{MigrationBatch, MigrationError, MigrationReport};
 
 #[derive(Debug, Deserialize)]
 struct OldScene {
@@ -128,6 +95,16 @@ struct OldAnimator {
     looping: bool,
     autoplay: bool,
     fade_time: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct OldCharacter {
+    height: f32,
+    radius: f32,
+    step_offset: f32,
+    slope_limit: f32,
+    skin_width: f32,
+    snap_to_ground: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +237,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut audio = None;
         let mut physics = None;
         let mut animator = None;
+        let mut character = None;
         for entry in &old.components.entries {
             match &entry.data {
                 OldComponentData::Mesh(mesh) => {
@@ -300,6 +278,14 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                 }
                 OldComponentData::Physics(old_physics) => {
                     physics = Some(old_physics);
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Character(old_character) => {
+                    let old: OldCharacter = old_character
+                        .clone()
+                        .into_rust()
+                        .map_err(|err| MigrationError::Parse(err.to_string()))?;
+                    character = Some(old);
                     report.mapped_components += 1;
                 }
                 OldComponentData::Animator(old_animator) => {
@@ -421,6 +407,37 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                 ],
             });
         }
+        if let Some(character) = character {
+            components.push(ComponentData {
+                component: XgcCharacter::ID,
+                fields: vec![
+                    (
+                        "height".to_string(),
+                        Value::F64(f64::from(character.height)),
+                    ),
+                    (
+                        "radius".to_string(),
+                        Value::F64(f64::from(character.radius)),
+                    ),
+                    (
+                        "step_offset".to_string(),
+                        Value::F64(f64::from(character.step_offset)),
+                    ),
+                    (
+                        "slope_limit".to_string(),
+                        Value::F64(f64::from(character.slope_limit)),
+                    ),
+                    (
+                        "skin_width".to_string(),
+                        Value::F64(f64::from(character.skin_width)),
+                    ),
+                    (
+                        "snap_to_ground".to_string(),
+                        Value::F64(f64::from(character.snap_to_ground)),
+                    ),
+                ],
+            });
+        }
         if let Some(path) = script_path {
             components.push(ComponentData {
                 component: Script::ID,
@@ -512,16 +529,6 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
     ))
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MigrationBatch {
-    pub scenes: usize,
-    pub entities: usize,
-    pub with_old_components: usize,
-    pub mapped_components: usize,
-    pub missing_parents: usize,
-    pub failures: Vec<String>,
-}
-
 /// 批量迁移目录里的 `.ron`；单场景失败只记入 `failures`，不中断其它场景。
 pub fn migrate_dir(input: &Path, output: &Path) -> Result<MigrationBatch, MigrationError> {
     let entries = std::fs::read_dir(input)
@@ -580,6 +587,7 @@ pub fn component_id_name(id: ComponentId) -> &'static str {
         Parent::ID => "core.parent",
         GlobalTransform::ID => "core.global_transform",
         XgcAnimator::ID => "animation.animator",
+        XgcCharacter::ID => "physics.character",
         _ => "unknown",
     }
 }

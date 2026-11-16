@@ -12,8 +12,8 @@ use xgc_base::EntityId;
 use xgc_reflect::{Component, ComponentId, Value};
 
 use super::{
-    Animator, AudioSource, Camera, Column, EntitySnapshot, GlobalTransform, Material, MeshRenderer,
-    Name, Parent, PhysicsBody, Script, Transform, Velocity, World,
+    Animator, AudioSource, Camera, CharacterController, Column, EntitySnapshot, GlobalTransform,
+    Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform, Velocity, World,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -132,6 +132,7 @@ impl World {
         self.register_component::<AudioSource>();
         self.register_component::<PhysicsBody>();
         self.register_component::<Animator>();
+        self.register_component::<CharacterController>();
     }
 
     pub fn register_component<T: Component>(&mut self) {

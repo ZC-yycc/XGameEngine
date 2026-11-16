@@ -13,6 +13,7 @@ use xgc_base::{EntityId, EntityKey};
 pub use xgc_reflect::Component;
 
 mod animation_components;
+mod character_components;
 mod command;
 mod components;
 mod data;
@@ -27,8 +28,10 @@ mod snapshot;
 mod validate;
 
 pub use animation_components::Animator;
+pub use character_components::CharacterController;
 pub use command::{Applied, Command, Plan};
 pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
+use data::ComponentFactory;
 pub use data::{ComponentData, EntityData, WorldData};
 pub use gameplay_components::{AudioSource, Script};
 pub use journal::{Journal, TxRecord};
@@ -37,8 +40,6 @@ pub use registry::builtin_registry;
 pub use render_components::{Camera, Material, MeshRenderer};
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
 pub use xgc_reflect::{ComponentId, Value};
-
-use data::ComponentFactory;
 
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
 ///
