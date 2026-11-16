@@ -4,7 +4,7 @@
 `xgame-*` crate 不互相依赖，也不被根 workspace 收录。旧引擎仍是唯一
 产品路径；XGC 在 M0–M6 完成并通过割接门禁之前不替换它。
 
-> 现状、差距与割接门槛见 [`STATUS.md`](STATUS.md)。当前**不能割接**。
+> 现状、差距与割接门槛见 [`STATUS.md`](STATUS.md) 与 [`CUTOVER.md`](CUTOVER.md)。当前**不能割接**。
 
 ## 当前阶段
 

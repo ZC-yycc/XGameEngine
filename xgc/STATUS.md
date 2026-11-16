@@ -48,44 +48,46 @@
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
 | 割接验收 | 40% | 统计对照一致；视觉可渲染并有 `image-diff` 指标，但 showcase 旧/新 1280×720 仍 100% 像素不同（mean_abs 64.6）；缺 trace 对照 / 并行调度 / 推送 |
 
-**整体能力对等约 45%，割接就绪约 25–30%**。核心运行时本身接近可用，
-差距集中在脚本正式调度、渲染高级特性与旧新逐帧验收。
+**整体能力对等约 55%，割接就绪约 40%**。核心运行时、迁移、动画、编辑器和
+cooked 播放器已可用；差距集中在渲染高级特性、正式调度、逐帧验收与推送。
 
 ## 迁移 / 运行证据
 
 - `projects/XGame/Scenes/showcase.ron` → 24 实体 / 51 组件 / 0 缺失父节点。
-- 恢复后 `run-world` 60 帧通过；`render-frame` 320×180 输出 14 draw / 5 draw call。
-- GUID 资产（Box.glb、Fox.gltf + Fox.bin）经资产目录解析并成功解析网格。
-- character 场景 GUID 脚本经资产目录装载；Pillar.prefab.ron 直接迁移为 3 实体。
-- 旧 `update(ctx)` 脚本可执行：`rot/set_rot/delta/entity_id/entity_pos/set_pos/look_at` 已接。
-- 自动化测试：`crates/xgc-cli/tests/migrate_showcase.rs`、`migrate_scripts.rs`。
+- `run-world` 60 帧通过；`render-frame` 1280×720 输出 14 draw / 5 draw call。
+- 旧 / 新 headless 统计逐项一致：24 实体 / 10 刚体 / 10 碰撞体 / 2 发射器 / 1 监听者。
+- 视觉已可渲染：天空 + 面着色 + 真实 builtin 几何；但旧新 1280×720 仍 100% 像素不同（mean_abs 64.6，见 `xgc image-diff`）。
+- GUID 资产（Box.glb、Fox.gltf + Fox.bin）可解析；character 脚本 / Pillar 预制体可迁移。
+- cooked 包：引用裁剪 7 文件、XGCB 二进制、manifest 哈希 / 签名校验、`xgc-player` headless 60 帧。
+- 自动化测试：220 条；`migrate_showcase.rs`、`migrate_scripts.rs`、`compare.rs`、`verify.rs`。
+
 ## 与 XGameEngine 的主要差距
 
 | 差距 | 影响 | 优先级 |
 |---|---|---|
-| 骨骼 / 蒙皮动画 | CPU / GPU 蒙皮、GLB skin / 逆绑定 / 骨骼层级已通；缺导入到 ECS 的一键流程与转场遮罩 | P1 |
-| Lua 脚本运行时 | 宿主 / API / 生命周期 / 热重载已通；缺完整引擎 API 与正式 System 调度 | P0 |
-| 编辑器 | 窗口 / 层级 / Inspector / 视口 / Undo / Gizmo 已通；缺旋转缩放 / 预制体 / 保存快捷键 | P0 |
-| 物理完整性 | 只有简化角色 / AABB；无完整刚体、关节、连续碰撞、坡面滑动 | P1 |
-| 音频设备输出 | cpal 默认设备播放已通；缺流式资产 / 3D 声像 | P1 |
-| 跨系统并行 | `SystemAccess` 与批次计划已有，但执行仍是顺序；未做世界分片 | P1 |
-| 资产烹饪 / 打包 | 无 cooked asset、依赖清单、播放器打包 | P1 |
-| 渲染高级特性 | GPU 蒙皮已通；缺 PBR / 阴影 / 后处理 / 粒子绘制 | P1 |
-| UI 字体 | 仅 ASCII 5x7 位图；无字体资产 / 中文 | P2 |
-| 网络 / 存档 | 无多人、无游戏存档层 | P2 |
+| 渲染高级特性 | 只有基础几何 / 面着色 / 天空；缺 PBR、纹理、阴影、后处理、粒子、HUD | P0 |
+| 正式 System 调度 | `SystemAccess` / `batches()` 已有，执行仍顺序；脚本尚未成为正式 System | P0 |
+| 视觉 / trace 验收 | 旧新统计一致，但无逐帧 trace，截图 100% 不同 | P0 |
+| 物理完整性 | 简化角色 / AABB；无完整刚体、关节、连续碰撞、坡面滑动 | P1 |
+| 跨系统并行 | 未做世界分片 / 并行执行 | P1 |
+| 资产签名 | FNV 聚合校验，非密码学签名；无跨机器增量 | P1 |
+| 编辑器细节 | 预制体 / Gizmo / Play Scripts 已通；缺旋转缩放快捷键细化、Prefab Apply | P1 |
+| 音频 | 设备输出 / 混音已通；缺流式资产 / 3D 声像 | P1 |
+| 图形播放器验收 | 窗口代码已编译，未实际开窗截图 | P1 |
+| UI 字体 / 网络 | ASCII 5x7；无字体资产 / 中文；无多人 / 存档 | P2 |
 
-## 割接验收门槛（未满足）
+## 割接验收门槛
 
-1. 旧项目 `SceneV2` + 资源 + 脚本可端到端迁移并在 XGC 中运行。
-2. 骨骼 / 蒙皮、Lua 脚本、编辑器三项 P0 能力可用。
-3. 旧 / 新同一场景的 trace、状态哈希、视觉截图有对照验收。
-4. 性能基准达到约定预算，且热路径分配有门禁。
-5. 推送与 CI 全绿；当前本地提交因无 GitHub 凭据**未推送**。
+1. **通过**：旧项目场景 + 资源 + 脚本 + 预制体端到端迁移并运行。
+2. **通过（基础）**：骨骼 / 蒙皮、Lua、编辑器三项 P0 能力可用。
+3. **未通过**：旧 / 新同一场景的 trace、状态哈希、视觉截图逐帧对照。
+4. **未通过**：性能基准与热路径分配门禁。
+5. **未通过**：推送与 CI；当前所有 commit 因无 GitHub 凭据**未推送**。
 
 ## 下一步（按顺序）
 
-1. 迁移：场景 / 资源已通；下一步脚本与预制体整体验收 + 旧新对照。
-2. 动画：叠加层已通；下一步转场淡入 / 遮罩。
-3. Lua：宿主 / 组件 API 已通；下一步完整引擎 API 与正式 System 调度。
-4. 编辑器：层级 / Inspector / 视口 / Gizmo 已通；下一步旋转缩放与预制体。
-5. 跨系统并行 / 资产烹饪 / 性能门禁。
+1. 渲染：材质颜色 / PBR / 阴影 / HUD，先把 `image-diff` 比例降下来。
+2. 正式调度：把脚本与默认系统纳入 `Schedule` 的访问声明批次。
+3. 逐帧 trace / 截图对照与性能门禁。
+4. 密码学签名、跨机器增量烹饪。
+5. 推送与 CI 全绿。
