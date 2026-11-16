@@ -448,3 +448,37 @@ fn character_stays_on_ground() {
     assert_eq!(velocity.linear[1], 0.0);
     assert_eq!(velocity.linear[0], 1.0);
 }
+
+#[test]
+fn spheres_separate_along_center_line() {
+    let mut world = World::new();
+    let a = world.spawn((
+        Transform {
+            position: [0.0, 1.0, 0.0],
+            ..Transform::default()
+        },
+        PhysicsBody {
+            shape: "ball".to_string(),
+            radius: 0.5,
+            ..PhysicsBody::default()
+        },
+    ));
+    let b = world.spawn((
+        Transform {
+            position: [0.5, 1.0, 0.0],
+            ..Transform::default()
+        },
+        PhysicsBody {
+            shape: "ball".to_string(),
+            radius: 0.5,
+            ..PhysicsBody::default()
+        },
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(AabbCollisionSystem);
+    schedule.run(&mut world, 0.016);
+    let a = world.get::<Transform>(a).unwrap();
+    let b = world.get::<Transform>(b).unwrap();
+    assert!(((a.position[0] - b.position[0]).abs() - 1.0).abs() < 1e-5);
+    assert!((a.position[0] + b.position[0] - 0.5).abs() < 1e-5);
+}

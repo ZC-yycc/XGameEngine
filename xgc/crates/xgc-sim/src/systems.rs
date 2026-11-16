@@ -134,6 +134,7 @@ struct BodyBox {
     id: EntityId,
     position: [f32; 3],
     half: [f32; 3],
+    sphere: Option<f32>,
     dynamic: bool,
 }
 
@@ -160,6 +161,7 @@ impl System for AabbCollisionSystem {
                 id: entity,
                 position: transform.position,
                 half: box_half(body),
+                sphere: (body.shape == "ball").then_some(body.radius),
                 dynamic: body.kind == "dynamic",
             });
         });
@@ -167,6 +169,11 @@ impl System for AabbCollisionSystem {
         for i in 0..bodies.len() {
             for j in (i + 1)..bodies.len() {
                 if !bodies[i].dynamic && !bodies[j].dynamic {
+                    continue;
+                }
+                if let (Some(ra), Some(rb)) = (bodies[i].sphere, bodies[j].sphere) {
+                    let (left, right) = bodies.split_at_mut(j);
+                    resolve_spheres(&mut left[i], &mut right[0], ra, rb);
                     continue;
                 }
                 let Some((axis, penetration)) = overlap(&bodies[i], &bodies[j]) else {
@@ -198,6 +205,48 @@ impl System for AabbCollisionSystem {
                 transform.position = body.position;
             }
         }
+    }
+}
+
+fn resolve_spheres(a: &mut BodyBox, b: &mut BodyBox, ra: f32, rb: f32) {
+    let delta = [
+        a.position[0] - b.position[0],
+        a.position[1] - b.position[1],
+        a.position[2] - b.position[2],
+    ];
+    let distance = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+    let minimum = ra + rb;
+    if distance >= minimum {
+        return;
+    }
+    let normal = if distance > f32::EPSILON {
+        [
+            delta[0] / distance,
+            delta[1] / distance,
+            delta[2] / distance,
+        ]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let penetration = minimum - distance;
+    match (a.dynamic, b.dynamic) {
+        (true, true) => {
+            for (axis, normal) in normal.iter().enumerate() {
+                a.position[axis] += normal * penetration * 0.5;
+                b.position[axis] -= normal * penetration * 0.5;
+            }
+        }
+        (true, false) => {
+            for (axis, normal) in normal.iter().enumerate() {
+                a.position[axis] += normal * penetration;
+            }
+        }
+        (false, true) => {
+            for (axis, normal) in normal.iter().enumerate() {
+                b.position[axis] -= normal * penetration;
+            }
+        }
+        (false, false) => {}
     }
 }
 

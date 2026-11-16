@@ -55,8 +55,8 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 `state_hash` / 实体 ID / revision 一致；`Journal` 可从初始快照重放并校验 revision。
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`PhysicsSystem` 只给 dynamic 刚体加
 重力、`VelocitySystem` 积分、`GroundCollisionSystem` 地面夹持、`CharacterSystem`
-角色脚底贴地、`AabbCollisionSystem` 两两分离动态刚体、`AnimatorSystem` 推进动画时钟、
-`HierarchySystem` 合成世界变换）→ 快照 / trace。
+角色脚底贴地、`AabbCollisionSystem` 两两分离动态刚体（球体按中心线精确分离）、
+`AnimatorSystem` 推进动画时钟、`HierarchySystem` 合成世界变换）→ 快照 / trace。
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
