@@ -29,6 +29,7 @@ pub struct ScriptView {
     pub delta: f32,
     pub time: f32,
     pub entities: Vec<EntityView>,
+    pub actions: BTreeMap<String, bool>,
 }
 
 impl ScriptView {
@@ -359,11 +360,19 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
             .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
+    let action_view = Rc::clone(view);
     globals
         .set(
             "action_pressed",
-            lua.create_function(|_, _: mlua::MultiValue| Ok(false))
-                .map_err(|err| err.to_string())?,
+            lua.create_function(move |_, (_ctx, name): (mlua::Value, String)| {
+                Ok(action_view
+                    .borrow()
+                    .actions
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(false))
+            })
+            .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
     Ok(())

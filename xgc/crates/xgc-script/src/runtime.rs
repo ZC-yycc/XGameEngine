@@ -236,4 +236,16 @@ impl ScriptRuntime {
     pub fn entity_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// 外部输入桥：设置动作按住状态，脚本 `action_pressed` 下一帧可见。
+    pub fn set_action(&mut self, action: &str, pressed: bool) {
+        self.view
+            .borrow_mut()
+            .actions
+            .insert(action.to_string(), pressed);
+    }
+
+    pub fn clear_actions(&mut self) {
+        self.view.borrow_mut().actions.clear();
+    }
 }

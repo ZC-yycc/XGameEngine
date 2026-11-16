@@ -433,3 +433,42 @@ fn legacy_ui_api_writes_element_fields() {
     assert_eq!(element.background, [1.0, 0.0, 0.0, 1.0]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn legacy_input_action_sets_velocity() {
+    use xgc_world::{Script, Transform, Velocity, World};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_legacy_action_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("jump.lua"),
+        "function update(ctx)\n  if action_pressed(ctx, 'Jump') then\n    local me = self_id(ctx)\n    local v = velocity(ctx, me)\n    set_velocity(ctx, me, v.x, 6.5, v.z)\n  end\nend\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        Velocity::default(),
+        Script {
+            path: "jump.lua".to_string(),
+        },
+    ));
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    runtime.set_action("Jump", true);
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    assert_eq!(
+        world
+            .get::<Velocity>(world.key(world.entity(entity).unwrap()).unwrap())
+            .unwrap()
+            .linear,
+        [0.0, 6.5, 0.0]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
