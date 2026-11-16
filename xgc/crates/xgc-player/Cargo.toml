@@ -12,3 +12,5 @@ xgc-script = { path = "../xgc-script" }
 xgc-sim = { path = "../xgc-sim" }
 xgc-store = { path = "../xgc-store" }
 xgc-world = { path = "../xgc-world" }
+xgc-render = { path = "../xgc-render" }
+eframe = { version = "0.30", default-features = false, features = ["wgpu", "default_fonts"] }

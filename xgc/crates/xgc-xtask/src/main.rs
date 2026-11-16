@@ -159,6 +159,7 @@ fn deps(root: &Path) -> Result<(), String> {
             "xgc-player",
             &[
                 "xgc-asset",
+                "xgc-render",
                 "xgc-script",
                 "xgc-sim",
                 "xgc-store",

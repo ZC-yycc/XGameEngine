@@ -9,13 +9,21 @@ fn main() -> ExitCode {
         eprintln!("用法：xgc-player <cooked 目录> [帧数]");
         return ExitCode::from(2);
     };
-    let frames: u64 = match args.next().map(|value| value.parse::<u64>()) {
-        Some(Ok(frames)) => frames,
-        Some(Err(_)) => {
-            eprintln!("帧数不是整数");
-            return ExitCode::from(2);
+    let frames = match args.next() {
+        None => {
+            if let Err(err) = xgc_player::window::run(Path::new(&dir)) {
+                eprintln!("播放器窗口失败：{err}");
+                return ExitCode::from(1);
+            }
+            return ExitCode::SUCCESS;
         }
-        None => 300,
+        Some(value) => match value.parse::<u64>() {
+            Ok(frames) => frames,
+            Err(_) => {
+                eprintln!("帧数不是整数");
+                return ExitCode::from(2);
+            }
+        },
     };
     match xgc_player::run_cooked(Path::new(&dir), frames) {
         Ok(stats) => {

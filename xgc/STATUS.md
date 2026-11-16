@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 145（最大 595 行；软上限 600） |
+| Rust 文件 | 146（最大 595 行；软上限 600） |
 | 测试 | 210（`cargo test --workspace --offline`） |
 | 内建组件 schema | 30 类 / 34668 字节，两次导出逐字节相同 |
 | 默认系统 | 18 个 |
@@ -43,7 +43,7 @@
 | 音频 | 60% | 空间化增益、总线、WAV 解码、软件混音、WAV 写出、cpal 默认输出设备播放（重采样 / 队列）、`xgc play`；缺流式资产 / 3D 声像 |
 | 渲染 | 35% | 基础 wgpu + 实例化 + UI；缺 PBR / 阴影 / 后处理 / 粒子 / 蒙皮绘制 |
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |
-| 资产 / 打包 | 55% | JSON + `XGCB` 二进制 cooked 世界（character 2.9KB vs JSON 21.7KB）；播放器优先二进制并校验 manifest；缺图形窗口 |
+| 资产 / 打包 | 60% | JSON + XGCB；播放器支持图形窗口（仿真 + 脚本 + wgpu 视口）与 headless 帧数；缺按引用裁剪 / 发布产物签名 |
 | Lua 脚本 | 80% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
 | 割接验收 | 25% | showcase 迁移 / 运行 / 渲染已通；无旧新逐帧对照、性能门禁、未推送 |

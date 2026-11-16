@@ -3007,7 +3007,9 @@ dependencies = [
 name = "xgc-player"
 version = "0.1.0"
 dependencies = [
+ "eframe",
  "xgc-asset",
+ "xgc-render",
  "xgc-script",
  "xgc-sim",
  "xgc-store",
