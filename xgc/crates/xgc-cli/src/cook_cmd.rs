@@ -1,5 +1,6 @@
 //! `xgc cook <项目根> <输出目录>`：复制运行时资产并写 cook.json。
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -7,7 +8,7 @@ use xgc_asset::scan;
 use xgc_script::ScriptRuntime;
 use xgc_sim::Simulation;
 use xgc_store::{load_world, save_world, save_world_binary};
-use xgc_world::World;
+use xgc_world::{Value, World, WorldData};
 
 pub fn cook(root: Option<&str>, out: Option<&str>) -> ExitCode {
     let (Some(root), Some(out)) = (root, out) else {
@@ -45,13 +46,15 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
             return ExitCode::from(2);
         }
     };
-    let mut manifest = match xgc_asset::cook_project(Path::new(root), Path::new(out)) {
-        Ok(manifest) => manifest,
-        Err(err) => {
-            eprintln!("烹饪失败：{err}");
-            return ExitCode::from(1);
-        }
-    };
+    let keep = guid_paths(Path::new(root), &data);
+    let mut manifest =
+        match xgc_asset::cook_project_filtered(Path::new(root), Path::new(out), keep.as_ref()) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                eprintln!("烹饪失败：{err}");
+                return ExitCode::from(1);
+            }
+        };
     if let Err(err) = save_world(&Path::new(out).join("world.json"), &data) {
         eprintln!("写入 cooked world 失败：{err}");
         return ExitCode::from(1);
@@ -139,4 +142,29 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
         world.state_hash()
     );
     ExitCode::SUCCESS
+}
+
+fn guid_paths(root: &Path, data: &WorldData) -> Option<BTreeSet<String>> {
+    let catalog = scan(root).ok()?;
+    let mut keep = BTreeSet::new();
+    for entity in &data.entities {
+        for component in &entity.components {
+            for (_, value) in &component.fields {
+                let Value::String(value) = value else {
+                    continue;
+                };
+                if !value.starts_with("guid://") {
+                    continue;
+                }
+                let Some(path) = catalog.resolve(value) else {
+                    continue;
+                };
+                let Ok(relative) = path.strip_prefix(root) else {
+                    continue;
+                };
+                keep.insert(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    Some(keep)
 }

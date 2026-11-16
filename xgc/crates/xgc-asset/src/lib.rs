@@ -7,7 +7,8 @@
 
 mod cook;
 pub use cook::{
-    cook_project, file_entry, verify_manifest, write_manifest, CookManifest, CookedFile,
+    cook_project, cook_project_filtered, file_entry, verify_manifest, write_manifest, CookManifest,
+    CookedFile,
 };
 
 use std::collections::BTreeMap;

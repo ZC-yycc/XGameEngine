@@ -1,5 +1,6 @@
 //! 资产烹饪：把运行时需要的源资产复制到输出目录，并写确定性 manifest。
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,15 @@ pub struct CookManifest {
 
 /// 复制资产并返回按路径排序的 manifest；输出目录里上一次 manifest 的文件先清理。
 pub fn cook_project(root: &Path, out: &Path) -> Result<CookManifest, String> {
+    cook_project_filtered(root, out, None)
+}
+
+/// `keep = None` 复制全部支持的源；`Some` 时只复制引用资产及其 `.meta` / `.bin`。
+pub fn cook_project_filtered(
+    root: &Path,
+    out: &Path,
+    keep: Option<&BTreeSet<String>>,
+) -> Result<CookManifest, String> {
     if !root.is_dir() {
         return Err(format!("项目根不是目录：{}", root.display()));
     }
@@ -33,6 +43,23 @@ pub fn cook_project(root: &Path, out: &Path) -> Result<CookManifest, String> {
     clean_previous(out)?;
     let mut files = Vec::new();
     collect(root, root, out, &mut files)?;
+    if let Some(keep) = keep {
+        let mut expanded = keep.clone();
+        for path in keep {
+            if path.ends_with(".gltf") {
+                expanded.insert(path.trim_end_matches(".gltf").to_string() + ".bin");
+            }
+        }
+        let metas: Vec<String> = expanded.iter().map(|path| format!("{path}.meta")).collect();
+        expanded.extend(metas);
+        files.retain(|(_, relative)| {
+            relative == "input.ron"
+                || expanded.contains(relative)
+                || (relative.ends_with(".meta")
+                    && expanded.contains(relative.trim_end_matches(".meta")))
+        });
+        let _ = &expanded;
+    }
     files.sort_by(|a, b| a.1.cmp(&b.1));
     let mut manifest = CookManifest {
         version: COOK_VERSION,

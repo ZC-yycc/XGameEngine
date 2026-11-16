@@ -69,3 +69,46 @@ fn cooks_referenced_sources_and_stale_files() {
     );
     std::fs::remove_dir_all(Path::new(&root)).unwrap();
 }
+
+#[test]
+fn cooks_only_referenced_assets_and_sidecars() {
+    let root = std::env::temp_dir().join(format!(
+        "xgc_prune_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let out = root.join("cooked");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    std::fs::write(root.join("a.lua"), b"a").unwrap();
+    std::fs::write(root.join("a.lua.meta"), b"meta").unwrap();
+    std::fs::write(root.join("b.lua"), b"b").unwrap();
+    std::fs::write(root.join("models/a.gltf"), b"gltf").unwrap();
+    std::fs::write(root.join("models/a.bin"), b"bin").unwrap();
+    std::fs::write(root.join("models/b.glb"), b"glb").unwrap();
+    std::fs::write(root.join("input.ron"), b"InputMap()").unwrap();
+    let keep = ["a.lua".to_string(), "models/a.gltf".to_string()]
+        .into_iter()
+        .collect();
+    let manifest = xgc_asset::cook_project_filtered(&root, &out, Some(&keep)).unwrap();
+    let paths: Vec<_> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "a.lua",
+            "a.lua.meta",
+            "input.ron",
+            "models/a.bin",
+            "models/a.gltf"
+        ]
+    );
+    assert!(!out.join("b.lua").exists());
+    assert!(!out.join("models/b.glb").exists());
+    std::fs::remove_dir_all(&root).unwrap();
+}

@@ -84,7 +84,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
-| `crates/xgc-asset/src/cook.rs` | `cook_project` / `file_entry` / `verify_manifest`：复制资产、写确定性 `cook.json`、校验大小与哈希 |
+| `crates/xgc-asset/src/cook.rs` | `cook_project` / `cook_project_filtered` / `file_entry` / `verify_manifest`：按 GUID 引用裁剪、`.meta` / `.bin` 伴生、确定性 manifest、哈希校验 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
 | `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态） |
@@ -139,7 +139,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 资产烹饪：图形播放器已通；下一步按引用裁剪与发布产物。
+1. 资产烹饪：引用裁剪已通；下一步发布签名 / 增量烹饪。
 2. 动画：遮罩 / 分层混合细节。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 旧新视觉 / trace 对照。
