@@ -17,6 +17,9 @@ use xgc_world::{Journal, WorldData};
 
 const FORMAT_VERSION: u32 = 1;
 
+mod binary;
+pub use binary::{decode_world, encode_world, load_world_binary, save_world_binary};
+
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),

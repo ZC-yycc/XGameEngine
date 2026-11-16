@@ -20,8 +20,13 @@ pub struct PlayerStats {
 pub fn run_cooked(dir: &Path, frames: u64) -> Result<PlayerStats, String> {
     xgc_asset::verify_manifest(dir)
         .map_err(|differences| format!("cooked 文件校验失败：{}", differences.join("；")))?;
-    let data = load_world(&dir.join("world.json"))
-        .map_err(|err| format!("读取 cooked world 失败：{err}"))?;
+    let binary = dir.join("world.xgcb");
+    let data = if binary.exists() {
+        xgc_store::load_world_binary(&binary)
+    } else {
+        load_world(&dir.join("world.json"))
+    }
+    .map_err(|err| format!("读取 cooked world 失败：{err}"))?;
     let mut world = World::new();
     world
         .restore_world_data(&data)

@@ -55,6 +55,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/validate.rs` | `World::validate_data`：组件 / 字段 / 类型 / 重复项体检 |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
+| `crates/xgc-store/src/binary.rs` | `XGCB` 二进制世界：encode / decode / save / load；固定小端、值带标签 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `RotationKey` / `ScaleKey` / `load_clip_ron` / `AnimationLibrary`（含 `load_dir`）：平移 / 旋转 slerp / 缩放采样、循环、RON / 目录加载、`AnimationPlaybackSystem` 写 Transform |
 | `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、转场时长写 blend 字段、状态写回 Animator.clip |
@@ -113,7 +114,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-player/src/lib.rs` | `run_cooked`：先校验 cooked manifest，再加载 world.json / 脚本并固定 60Hz 跑帧 |
+| `crates/xgc-player/src/lib.rs` | `run_cooked`：校验 manifest，优先读 `world.xgcb`，回退 world.json，再驱动脚本 |
 | `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录> [帧数]` |
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-world <世界.json> [帧] / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
@@ -137,7 +138,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 资产烹饪：manifest 校验已通；下一步二进制 cooked 格式 / 图形窗口。
+1. 资产烹饪：二进制已通；下一步图形播放器窗口。
 2. 动画：遮罩 / 分层混合细节。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 旧新视觉 / trace 对照。

@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use xgc_asset::scan;
 use xgc_script::ScriptRuntime;
 use xgc_sim::Simulation;
-use xgc_store::{load_world, save_world};
+use xgc_store::{load_world, save_world, save_world_binary};
 use xgc_world::World;
 
 pub fn cook(root: Option<&str>, out: Option<&str>) -> ExitCode {
@@ -56,19 +56,23 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
         eprintln!("写入 cooked world 失败：{err}");
         return ExitCode::from(1);
     }
-    match xgc_asset::file_entry(Path::new(out), "world.json") {
-        Ok(entry) => {
-            manifest.files.push(entry);
-            manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
-            if let Err(err) = xgc_asset::write_manifest(Path::new(out), &manifest) {
-                eprintln!("写入 manifest 失败：{err}");
+    if let Err(err) = save_world_binary(&Path::new(out).join("world.xgcb"), &data) {
+        eprintln!("写入二进制 cooked world 失败：{err}");
+        return ExitCode::from(1);
+    }
+    for name in ["world.json", "world.xgcb"] {
+        match xgc_asset::file_entry(Path::new(out), name) {
+            Ok(entry) => manifest.files.push(entry),
+            Err(err) => {
+                eprintln!("{err}");
                 return ExitCode::from(1);
             }
         }
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
+    }
+    manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
+    if let Err(err) = xgc_asset::write_manifest(Path::new(out), &manifest) {
+        eprintln!("写入 manifest 失败：{err}");
+        return ExitCode::from(1);
     }
     println!(
         "pack: {} 个文件（含 world.json） -> {}",
@@ -98,7 +102,11 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let data = match load_world(&dir.join("world.json")) {
+    let data = match if dir.join("world.xgcb").exists() {
+        xgc_store::load_world_binary(&dir.join("world.xgcb"))
+    } else {
+        load_world(&dir.join("world.json"))
+    } {
         Ok(data) => data,
         Err(err) => {
             eprintln!("读取 cooked world 失败：{err}");
