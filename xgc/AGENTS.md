@@ -90,11 +90,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵与祖先骨架姿态） |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；蒙皮实体按实体键单独成组并上传变形顶点 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 可选索引 + `SkinData`（关节 / 权重 / 逆绑定）、builtin 网格占位 |
-| `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 |
+| `crates/xgc-render/src/glb.rs` | 最小 GLB 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / `load_glb_skeleton` 关节层级 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本>` |
+| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb>` |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
@@ -109,11 +109,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：蒙皮已接入渲染；下一步 GPU 蒙皮管线 / 骨骼层级导入。
+1. 动画：GLB 骨骼层级已接；下一步 GPU 蒙皮管线。
 2. 脚本：组件增删已接；下一步完整引擎 API 与正式 System 调度。
 3. 编辑器：Gizmo 已接；下一步旋转 / 缩放与吸附。
 4. 音频：播放设备 / 流式缓冲。
-5. 现在最大文件 588 行：动它之前先拆。
+5. 现在最大文件 591 行：动它之前先拆。
 
 ## Token 纪律
 

@@ -31,7 +31,7 @@ pub use camera::{
     camera_view_projection, model_matrix, mul, perspective_rh_zo, transform_point, Mat4, IDENTITY,
 };
 pub use draw::{build_draw_list, DrawItem, DrawList};
-pub use glb::{load_glb, MeshError};
+pub use glb::{load_glb, load_glb_skeleton, MeshError, SkeletonGraph, SkeletonJoint};
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
 pub use gpu_mesh::{GpuMesh, GpuMeshCache};
 pub use image::ImageData;

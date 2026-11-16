@@ -57,6 +57,10 @@ struct Root {
 #[derive(Debug, Deserialize)]
 struct NodeDef {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    children: Vec<usize>,
+    #[serde(default)]
     mesh: Option<usize>,
     #[serde(default)]
     skin: Option<usize>,
@@ -439,4 +443,61 @@ fn read_mat4(root: &Root, accessor: usize, bin: &[u8]) -> Result<Vec<[f32; 16]>,
         matrices.push(matrix);
     }
     Ok(matrices)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkeletonJoint {
+    pub name: String,
+    pub parent: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SkeletonGraph {
+    pub joints: Vec<SkeletonJoint>,
+}
+
+/// 读取 GLB 第一个 skin 的关节层级；名字缺失时回退 `joint_<node>`。
+pub fn load_glb_skeleton(path: &Path) -> Result<SkeletonGraph, MeshError> {
+    let bytes = std::fs::read(path).map_err(|err| MeshError::Io(err.to_string()))?;
+    let (json, _bin) = split_glb(&bytes)?;
+    let root: Root =
+        serde_json::from_slice(json).map_err(|err| MeshError::Json(err.to_string()))?;
+    let skin = root
+        .skins
+        .first()
+        .ok_or(MeshError::Missing("skins".into()))?;
+    if skin.joints.is_empty() {
+        return Err(MeshError::Missing("skin.joints".into()));
+    }
+    let mut parents = vec![None; root.nodes.len()];
+    for (index, node) in root.nodes.iter().enumerate() {
+        for child in &node.children {
+            if let Some(slot) = parents.get_mut(*child) {
+                *slot = Some(index);
+            }
+        }
+    }
+    let position: HashMap<usize, usize> = skin
+        .joints
+        .iter()
+        .enumerate()
+        .map(|(slot, node)| (*node, slot))
+        .collect();
+    let joints = skin
+        .joints
+        .iter()
+        .map(|node| {
+            let name = root
+                .nodes
+                .get(*node)
+                .and_then(|node| node.name.clone())
+                .unwrap_or_else(|| format!("joint_{node}"));
+            let parent = parents
+                .get(*node)
+                .and_then(|parent| *parent)
+                .and_then(|parent| position.get(&parent).copied());
+            SkeletonJoint { name, parent }
+        })
+        .collect();
+    Ok(SkeletonGraph { joints })
 }

@@ -38,6 +38,7 @@ fn main() -> ExitCode {
         Some("render-graph") => render::render_graph(),
         Some("gpu-probe") => render::gpu_probe(),
         Some("mesh-probe") => render::mesh_probe(args.next().as_deref()),
+        Some("skeleton") => skeleton_glb(args.next().as_deref()),
         Some("assets") => assets(args.next().as_deref()),
         Some("clips") => clips(args.next().as_deref()),
         Some("audio") => audio(args.next().as_deref()),
@@ -282,6 +283,29 @@ fn lua(path: Option<&str>) -> ExitCode {
         }
         Err(err) => {
             eprintln!("{err}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn skeleton_glb(path: Option<&str>) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("用法：xgc skeleton <模型.glb>");
+        return ExitCode::from(2);
+    };
+    match xgc_render::load_glb_skeleton(Path::new(path)) {
+        Ok(graph) => {
+            println!("skeleton: {} joints", graph.joints.len());
+            for (index, joint) in graph.joints.iter().enumerate() {
+                match joint.parent {
+                    Some(parent) => println!("{index} {} parent={parent}", joint.name),
+                    None => println!("{index} {} parent=-", joint.name),
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("骨骼读取失败：{err}");
             ExitCode::from(2)
         }
     }
