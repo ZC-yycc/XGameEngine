@@ -9,7 +9,7 @@ use xgc_agent::Agent;
 use xgc_asset::scan as scan_assets;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
-use xgc_sim::{play, AnimationLibrary, AudioLibrary, Scenario};
+use xgc_sim::{play, write_wav_mono, AnimationLibrary, AudioLibrary, Scenario, SoftwareMixer};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
 
@@ -33,6 +33,7 @@ fn main() -> ExitCode {
         Some("assets") => assets(args.next().as_deref()),
         Some("clips") => clips(args.next().as_deref()),
         Some("audio") => audio(args.next().as_deref()),
+        Some("mix") => mix(args.next().as_deref(), args.next().as_deref()),
         Some("render-frame") => render::render_frame(
             args.next().as_deref(),
             args.next().as_deref(),
@@ -242,6 +243,39 @@ fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
         report.mapped_components,
         report.missing_parents,
         output
+    );
+    ExitCode::SUCCESS
+}
+
+fn mix(input: Option<&str>, output: Option<&str>) -> ExitCode {
+    let (Some(input), Some(output)) = (input, output) else {
+        eprintln!("用法：xgc mix <输入.wav> <输出.wav>");
+        return ExitCode::from(2);
+    };
+    let clip = match xgc_sim::load_wav(Path::new(input)) {
+        Ok(clip) => clip,
+        Err(err) => {
+            eprintln!("加载音频失败：{err}");
+            return ExitCode::from(2);
+        }
+    };
+    let frames = clip.frames();
+    let mut mixer = SoftwareMixer::new(clip.sample_rate);
+    mixer.play(&clip, 1.0, "sfx", false);
+    let samples = mixer.mix(frames);
+    if let Err(err) = write_wav_mono(Path::new(output), clip.sample_rate, &samples) {
+        eprintln!("写出混音失败：{err}");
+        return ExitCode::from(2);
+    }
+    let peak = samples
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    println!(
+        "mix: {} 帧 @ {} Hz -> {}，peak={:.3}",
+        samples.len(),
+        clip.sample_rate,
+        output,
+        peak
     );
     ExitCode::SUCCESS
 }

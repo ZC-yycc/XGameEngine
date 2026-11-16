@@ -225,6 +225,7 @@ impl Schedule {
 mod animation;
 mod audio;
 mod character;
+mod mixer;
 mod systems;
 mod ui;
 
@@ -234,6 +235,7 @@ pub use animation::{
 };
 pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
 pub use character::{CharacterBlockSystem, CharacterStepSystem};
+pub use mixer::{write_wav_mono, SoftwareMixer};
 pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
     GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,

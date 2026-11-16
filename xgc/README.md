@@ -72,7 +72,8 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选邻，
 `Simulation::set_ui_input` 作为宿主输入桥，`hit_test` 取最上层可交互元素、
 `AudioMixerSystem` 按监听者距离 + `audio.mixer` 总线写 `audio.gain`、WAV（PCM16 /
-Float32）解码 + 目录素材库、`HierarchySystem` 合成世界变换）→ 快照 / trace。
+Float32）解码 + 目录素材库、`SoftwareMixer` 软件混音 + WAV 写出、`HierarchySystem`
+合成世界变换）→ 快照 / trace。
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
@@ -92,7 +93,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
 `cargo test --workspace` 全绿（101 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（88 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同，
+`xgc-xtask check` 全绿（89 个 Rust 文件最大 588 行）；schema 两次导出逐字节相同，
 24 个内建类型 29778 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
@@ -119,6 +120,7 @@ cargo run -p xgc-cli -- mesh-probe <glb>
 cargo run -p xgc-cli -- assets <项目根>
 cargo run -p xgc-cli -- clips <剪辑目录>
 cargo run -p xgc-cli -- audio <WAV目录>
+cargo run -p xgc-cli -- mix <输入.wav> <输出.wav>
 cargo run -p xgc-cli -- render-frame <世界.json> <out.ppm> [资产根]
 ```
 

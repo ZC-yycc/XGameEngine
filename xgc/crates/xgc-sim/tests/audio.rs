@@ -109,3 +109,39 @@ fn wav_decoder_reads_pcm16_and_library() {
     assert!(issues.is_empty());
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn software_mixer_applies_bus_and_master() {
+    let clip = xgc_sim::AudioClip {
+        name: "tone".to_string(),
+        sample_rate: 8000,
+        channels: 1,
+        samples: vec![0.5; 4],
+    };
+    let mut mixer = xgc_sim::SoftwareMixer::new(8000);
+    mixer.set_bus("sfx", 0.5);
+    mixer.master = 0.5;
+    mixer.play(&clip, 1.0, "sfx", false);
+    let samples = mixer.mix(4);
+    assert_eq!(samples.len(), 4);
+    for sample in &samples {
+        assert!((sample - 0.125).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn mixer_output_writes_readable_wav() {
+    let path = std::env::temp_dir().join(format!(
+        "xgc_mix_{}_{}.wav",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    xgc_sim::write_wav_mono(&path, 8000, &[0.5, -0.5, 0.0, 0.25]).unwrap();
+    let decoded = xgc_sim::load_wav(&path).unwrap();
+    assert_eq!(decoded.frames(), 4);
+    assert!((decoded.peak() - 0.5).abs() < 0.01);
+    std::fs::remove_file(&path).unwrap();
+}
