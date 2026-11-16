@@ -169,7 +169,7 @@ impl Renderer {
             }
             if !image_path.is_empty() {
                 if !self.images.contains_key(image_path) {
-                    let loaded = ImageData::load_ppm(std::path::Path::new(image_path)).ok();
+                    let loaded = ImageData::load(std::path::Path::new(image_path)).ok();
                     self.images.insert(image_path.clone(), loaded);
                 }
                 if !self.ui_textures.contains_key(image_path) {

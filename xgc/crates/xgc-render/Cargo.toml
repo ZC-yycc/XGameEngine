@@ -11,6 +11,7 @@ xgc-asset = { path = "../xgc-asset" }
 xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
 pollster = "0.4"
+png = "0.17"
 serde.workspace = true
 serde_json.workspace = true
 wgpu = "23.0.1"

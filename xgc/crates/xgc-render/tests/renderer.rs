@@ -289,3 +289,59 @@ fn ppm_image_loads_and_renders_cells() {
     assert!(pixels.chunks_exact(4).any(|pixel| pixel[0] > 0));
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn png_image_loads_and_renders_texture() {
+    use xgc_world::{UiElement, UiLayout};
+
+    let path = std::env::temp_dir().join(format!(
+        "xgc_png_{}_{}.png",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let file = std::fs::File::create(&path).unwrap();
+    let mut encoder = png::Encoder::new(file, 2, 2);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer
+        .write_image_data(&[
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ])
+        .unwrap();
+    writer.finish().unwrap();
+    let image = xgc_render::ImageData::load(&path).unwrap();
+    assert_eq!(image.width, 2);
+    assert_eq!((image.cells(1, 1)[0][0] * 255.0) as u8, 127);
+    if let Ok(context) = GpuContext::headless() {
+        let desc = ResourceDesc::texture2d(
+            "png-target",
+            "rgba8unorm",
+            16,
+            16,
+            vec![ResourceUsage::ColorAttachment],
+        );
+        let resource = context.create_resource(&desc).unwrap();
+        let GpuResource::Texture(texture) = resource else {
+            panic!("png target 不是纹理");
+        };
+        let mut world = World::new();
+        world.spawn((
+            UiElement {
+                image_path: path.to_string_lossy().into_owned(),
+                background: [0.0; 4],
+                ..UiElement::default()
+            },
+            UiLayout {
+                rect: [0.0, 0.0, 16.0, 16.0],
+                ..UiLayout::default()
+            },
+        ));
+        let mut renderer = Renderer::new(MeshCache::new("."));
+        assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 1);
+    }
+    std::fs::remove_file(&path).unwrap();
+}
