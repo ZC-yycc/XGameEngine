@@ -1,6 +1,6 @@
 //! 帧渲染入口：DrawList → MeshCache → RenderCache → GPU。
 
-use xgc_world::{UiElement, UiLayout, World};
+use xgc_world::{UiElement, UiInteraction, UiLayout, World};
 
 use super::assets::MeshCache;
 use super::camera::{camera_view_projection, IDENTITY};
@@ -106,12 +106,28 @@ impl Renderer {
             if color[3] <= 0.0 {
                 return;
             }
+            let focused = world
+                .get::<UiInteraction>(key)
+                .is_some_and(|state| state.focused);
             if let Some(entity) = world.entity(key) {
-                items.push((entity, layout.rect, color));
+                items.push((entity, layout.rect, color, focused));
             }
         });
-        items.sort_by_key(|(entity, _, _)| *entity);
-        for (_, rect, color) in &items {
+        items.sort_by_key(|(entity, _, _, _)| *entity);
+        let mut draws = 0;
+        for (_, rect, color, focused) in &items {
+            if *focused {
+                let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
+                pipeline.draw_mesh_with_mvp(
+                    context,
+                    target,
+                    &mesh,
+                    [1.0, 0.8, 0.2, 1.0],
+                    false,
+                    Some(quad_matrix(ring, viewport)),
+                )?;
+                draws += 1;
+            }
             pipeline.draw_mesh_with_mvp(
                 context,
                 target,
@@ -120,8 +136,9 @@ impl Renderer {
                 false,
                 Some(quad_matrix(*rect, viewport)),
             )?;
+            draws += 1;
         }
-        Ok(items.len())
+        Ok(draws)
     }
 
     /// 渲染一帧：抽 DrawList、解析模型、按实体顺序 draw 到目标纹理。
