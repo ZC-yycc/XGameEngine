@@ -157,6 +157,7 @@ impl Schedule {
         schedule.add(VelocitySystem::new(threads));
         schedule.add(GroundCollisionSystem::default());
         schedule.add(CharacterSystem);
+        schedule.add(CharacterStepSystem);
         schedule.add(AabbCollisionSystem);
         schedule.add(AnimatorSystem);
         schedule.add(UiLayoutSystem::default());
@@ -219,10 +220,12 @@ impl Schedule {
 
 /// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
 mod animation;
+mod character;
 mod systems;
 mod ui;
 
 pub use animation::{load_clip_ron, AnimationClip, AnimationLibrary, TranslationKey};
+pub use character::CharacterStepSystem;
 pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
     GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,

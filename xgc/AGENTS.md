@@ -51,6 +51,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `load_clip_ron` / `AnimationLibrary`：关键帧排序、线性采样、循环、RON 加载 |
 | `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：布局、裁剪、可见性、命中、`ui.input` 驱动的交互 / Tab / 方向键焦点 |
+| `crates/xgc-sim/src/character.rs` | `CharacterStepSystem`：低矮实体台阶抬升 |
 | `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe（组件 / sim / render 能力清单）/ engine.diagnostics / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
@@ -90,9 +91,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. UI：背景 + 焦点环已接；下一步文本 / 图片绘制。
-2. 动画：剪辑资产注册与骨骼采样。
-3. 物理：台阶与斜坡。
+1. 物理：角色台阶已接；下一步斜坡与横向阻挡。
+2. UI：文本 / 图片绘制。
+3. 动画：剪辑资产注册与骨骼采样。
 4. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 5. 现在最大文件 585 行：动它之前先拆。
 

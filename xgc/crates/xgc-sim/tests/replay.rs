@@ -2,9 +2,9 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem,
-    FrameCommands, GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario, Schedule,
-    SimError, Simulation, System, SystemAccess, VelocitySystem,
+    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterStepSystem,
+    CharacterSystem, FrameCommands, GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario,
+    Schedule, SimError, Simulation, System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
     Animator, CharacterController, Command, Component, ComponentId, GlobalTransform, Name, Parent,
@@ -115,6 +115,7 @@ fn velocity_system_moves_transform() {
             "velocity",
             "ground",
             "character",
+            "character_step",
             "aabb",
             "animation",
             "ui_layout",
@@ -508,4 +509,32 @@ fn character_jump_consumes_request_when_grounded() {
     assert_eq!(velocity.linear[1], 6.0);
     assert!(!controller.jump);
     assert!(!controller.grounded);
+}
+
+#[test]
+fn character_steps_onto_low_box() {
+    let mut world = World::new();
+    let character = world.spawn((
+        Transform::default(),
+        Velocity {
+            linear: [3.0, 0.0, 0.0],
+        },
+        CharacterController::default(),
+    ));
+    world.spawn((
+        Transform {
+            position: [0.8, 0.1, 0.0],
+            ..Transform::default()
+        },
+        PhysicsBody {
+            shape: "cuboid".to_string(),
+            half_extents: [0.5, 0.1, 0.5],
+            ..PhysicsBody::default()
+        },
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(CharacterStepSystem);
+    schedule.run(&mut world, 0.1);
+    let transform = world.get::<Transform>(character).unwrap();
+    assert!((transform.position[1] - 0.2).abs() < 1e-5);
 }
