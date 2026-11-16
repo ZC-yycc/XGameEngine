@@ -1,15 +1,20 @@
-//! 内建网格：真实顶点数据。资产管线接上之前，`builtin://*` 用全屏三角形占位，
-//! 保证从 draw list 到 vertex buffer / draw call 的链路是真实的。
+//! 内建网格：`Mesh` 是位置 + 可选索引；真实资产加载在资产管线接上后替换 builtin。
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
 }
 
 impl Mesh {
+    pub fn new(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Self {
+        Self { positions, indices }
+    }
+
     pub fn fullscreen_triangle() -> Self {
         Self {
             positions: vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+            indices: Vec::new(),
         }
     }
 
@@ -19,10 +24,9 @@ impl Mesh {
                 [-0.5, -0.5, 0.0],
                 [0.5, -0.5, 0.0],
                 [0.5, 0.5, 0.0],
-                [-0.5, -0.5, 0.0],
-                [0.5, 0.5, 0.0],
                 [-0.5, 0.5, 0.0],
             ],
+            indices: vec![0, 1, 2, 0, 2, 3],
         }
     }
 }

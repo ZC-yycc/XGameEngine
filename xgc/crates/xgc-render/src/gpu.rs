@@ -437,6 +437,23 @@ impl TrianglePipeline {
             mapped_at_creation: false,
         });
         context.queue.write_buffer(&vertex_buffer, 0, &vertex_bytes);
+        let index_buffer = if mesh.indices.is_empty() {
+            None
+        } else {
+            let index_bytes: Vec<u8> = mesh
+                .indices
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect();
+            let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("xgc-indices"),
+                size: index_bytes.len() as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            context.queue.write_buffer(&buffer, 0, &index_bytes);
+            Some(buffer)
+        };
         let bind_group = context
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -472,7 +489,12 @@ impl TrianglePipeline {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.draw(0..mesh.positions.len() as u32, 0..1);
+            if let Some(index_buffer) = &index_buffer {
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+            } else {
+                pass.draw(0..mesh.positions.len() as u32, 0..1);
+            }
         }
         context.queue.submit(Some(encoder.finish()));
         Ok(())
