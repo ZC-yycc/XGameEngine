@@ -7,8 +7,8 @@
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 119（最大 598 行；软上限 600） |
-| 测试 | 187（`cargo test --workspace --offline`） |
+| Rust 文件 | 121（最大 598 行；软上限 600） |
+| 测试 | 189（`cargo test --workspace --offline`） |
 | 内建组件 schema | 29 类 / 33094 字节，两次导出逐字节相同 |
 | 默认系统 | 18 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
@@ -44,7 +44,7 @@
 | 渲染 | 35% | 基础 wgpu + 实例化 + UI；缺 PBR / 阴影 / 后处理 / 粒子 / 蒙皮绘制 |
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |
 | 资产 / 打包 | 15% | 扫描与迁移；缺 cooked asset、依赖清单、播放器打包 |
-| Lua 脚本 | 50% | 宿主 + 字段 / 实体 / 组件增删 + 命令结算 + 预算 / 内存 / 热重载 + `run-scripts`；缺完整引擎 API 与正式 System 调度 |
+| Lua 脚本 | 65% | 宿主 + 字段 / 实体 / 组件增删 + 命令结算 + 预算 / 内存 / 热重载 + 旧 `update(ctx)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at` / `velocity`；缺 UI / 输入完整 API |
 | 编辑器 | 70% | eframe 窗口 + 层级 / Inspector 编辑 + 增删 + Play + wgpu 视口 + Undo/Redo + demo + 选中高亮 + 轨道相机 + 三轴 Gizmo 平移 |
 | 割接验收 | 25% | showcase 迁移 / 运行 / 渲染已通；无旧新逐帧对照、性能门禁、未推送 |
 
@@ -57,6 +57,7 @@
 - 恢复后 `run-world` 60 帧通过；`render-frame` 320×180 输出 14 draw / 5 draw call。
 - GUID 资产（Box.glb、Fox.gltf + Fox.bin）经资产目录解析并成功解析网格。
 - character 场景 GUID 脚本经资产目录装载；Pillar.prefab.ron 直接迁移为 3 实体。
+- 旧 `update(ctx)` 脚本可执行：`rot/set_rot/delta/entity_id/entity_pos/set_pos/look_at` 已接。
 - 自动化测试：`crates/xgc-cli/tests/migrate_showcase.rs`、`migrate_scripts.rs`。
 ## 与 XGameEngine 的主要差距
 

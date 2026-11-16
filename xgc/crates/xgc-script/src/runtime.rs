@@ -7,8 +7,9 @@ use std::rc::Rc;
 
 use xgc_asset::AssetCatalog;
 use xgc_base::EntityId;
-use xgc_world::{Command, Script, World};
+use xgc_world::{Command, Script, Value, World};
 
+use crate::legacy::{EntityView, ScriptView};
 use crate::LuaHost;
 
 struct Entry {
@@ -22,6 +23,8 @@ pub struct ScriptRuntime {
     catalog: Option<AssetCatalog>,
     entries: HashMap<EntityId, Entry>,
     started: HashSet<EntityId>,
+    view: Rc<RefCell<ScriptView>>,
+    time: f32,
 }
 
 impl ScriptRuntime {
@@ -31,6 +34,8 @@ impl ScriptRuntime {
             catalog: None,
             entries: HashMap::new(),
             started: HashSet::new(),
+            view: Rc::new(RefCell::new(ScriptView::default())),
+            time: 0.0,
         }
     }
 
@@ -41,11 +46,15 @@ impl ScriptRuntime {
             catalog: Some(catalog),
             entries: HashMap::new(),
             started: HashSet::new(),
+            view: Rc::new(RefCell::new(ScriptView::default())),
+            time: 0.0,
         }
     }
 
     /// 执行一帧脚本；脚本写入的命令在帧末统一 plan / apply。
     pub fn run_frame(&mut self, world: &mut World, dt: f32) {
+        self.time += dt;
+        self.refresh_view(world, dt);
         let mut scripts = Vec::new();
         world.for_each::<Script>(|key, script| {
             if let Some(entity) = world.entity(key) {
@@ -83,11 +92,11 @@ impl ScriptRuntime {
             }
             let entry = self.entries.get_mut(&entity).expect("刚插入");
             if self.started.insert(entity) {
-                if let Err(err) = entry.host.start() {
+                if let Err(err) = entry.host.start_legacy() {
                     eprintln!("script: {err}");
                 }
             }
-            if let Err(err) = entry.host.update(dt) {
+            if let Err(err) = entry.host.update_legacy(dt) {
                 eprintln!("script: {err}");
             }
             pending.extend(entry.host.take_commands());
@@ -110,14 +119,79 @@ impl ScriptRuntime {
         let source = std::fs::read_to_string(&resolved)
             .map_err(|err| format!("读取 {} 失败：{err}", resolved.display()))?;
         let commands = Rc::new(RefCell::new(Vec::new()));
-        let host = LuaHost::with_commands(Rc::clone(&commands))?;
+        let host = LuaHost::with_commands_and_view(
+            Rc::clone(&commands),
+            Rc::clone(&self.view),
+            entity.raw(),
+        )?;
         host.load_script(path, &source)?;
-        let _ = entity;
         Ok(Entry {
             host,
             commands,
             source: resolved,
         })
+    }
+
+    fn refresh_view(&self, world: &World, dt: f32) {
+        let data = world.world_data();
+        let mut entities = Vec::with_capacity(data.entities.len());
+        for entity in &data.entities {
+            let mut row = EntityView {
+                id: entity.id.raw(),
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                ..Default::default()
+            };
+            for component in &entity.components {
+                match component.component.0 {
+                    0x0101 => {
+                        for (field, value) in &component.fields {
+                            match (field.as_str(), value) {
+                                ("position", Value::Vec3(value)) => {
+                                    row.position =
+                                        [value[0] as f32, value[1] as f32, value[2] as f32];
+                                }
+                                ("rotation", Value::Quat(value)) => {
+                                    row.rotation = [
+                                        value[0] as f32,
+                                        value[1] as f32,
+                                        value[2] as f32,
+                                        value[3] as f32,
+                                    ];
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    0x0102 => {
+                        for (field, value) in &component.fields {
+                            if let ("linear", Value::Vec3(value)) = (field.as_str(), value) {
+                                row.velocity = [value[0] as f32, value[1] as f32, value[2] as f32];
+                            }
+                        }
+                    }
+                    0x0103 => {
+                        for (field, value) in &component.fields {
+                            if let ("value", Value::String(value)) = (field.as_str(), value) {
+                                row.name = value.clone();
+                            }
+                        }
+                    }
+                    0x0505 => {
+                        for (field, value) in &component.fields {
+                            if let ("parameters", Value::String(value)) = (field.as_str(), value) {
+                                row.anim_parameters = value.clone();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            entities.push(row);
+        }
+        let mut view = self.view.borrow_mut();
+        view.delta = dt;
+        view.time = self.time;
+        view.entities = entities;
     }
 
     fn resolve(&self, path: &str) -> Result<PathBuf, String> {

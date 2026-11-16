@@ -13,7 +13,10 @@ use mlua::{
 use xgc_base::EntityId;
 use xgc_world::{builtin_registry, Command, ComponentData, Transform, Value, World};
 
+mod legacy;
+mod lifecycle;
 mod runtime;
+pub use legacy::{euler_to_quat, EntityView, ScriptView};
 pub use runtime::ScriptRuntime;
 
 pub struct LuaHost {
@@ -23,6 +26,7 @@ pub struct LuaHost {
     budget: Option<(Arc<AtomicUsize>, usize)>,
     started: Cell<bool>,
     commands: Option<Rc<RefCell<Vec<Command>>>>,
+    self_id: u64,
 }
 
 impl LuaHost {
@@ -38,6 +42,7 @@ impl LuaHost {
             budget: None,
             started: Cell::new(false),
             commands: None,
+            self_id: 0,
         })
     }
 
@@ -52,6 +57,26 @@ impl LuaHost {
             budget: None,
             started: Cell::new(false),
             commands: Some(commands),
+            self_id: 0,
+        })
+    }
+
+    pub fn with_commands_and_view(
+        commands: Rc<RefCell<Vec<Command>>>,
+        view: Rc<RefCell<legacy::ScriptView>>,
+        self_id: u64,
+    ) -> Result<Self, String> {
+        let host = Self::new()?;
+        host.register_commands(&commands)?;
+        legacy::register(&host.lua, &commands, &view, self_id)?;
+        Ok(Self {
+            lua: host.lua,
+            world: None,
+            scripts: RefCell::new(BTreeMap::new()),
+            budget: None,
+            started: Cell::new(false),
+            commands: Some(commands),
+            self_id,
         })
     }
 
@@ -143,6 +168,7 @@ impl LuaHost {
             budget: None,
             started: Cell::new(false),
             commands: None,
+            self_id: 0,
         })
     }
 
@@ -491,13 +517,6 @@ impl LuaHost {
     /// 只读脚本名列表：`package.loaded` 不可用，这里用宿主登记表代替。
     pub fn lua(&self) -> &Lua {
         &self.lua
-    }
-}
-
-/// `LuaHost` 不是 `Send`，显式声明以便调用方知道不能跨线程共享。
-impl std::fmt::Debug for LuaHost {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LuaHost").finish_non_exhaustive()
     }
 }
 

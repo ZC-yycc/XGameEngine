@@ -316,3 +316,81 @@ fn runtime_adds_and_removes_components_via_commands() {
     assert!(world.get::<Velocity>(world.key(id).unwrap()).is_none());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn legacy_update_rotates_with_delta() {
+    use xgc_world::{Script, Transform, World};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_legacy_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("spin.lua");
+    std::fs::write(
+        &path,
+        "function update(ctx)\n  local r = rot(ctx)\n  set_rot(ctx, r.x, r.y + 90.0 * delta(ctx), r.z)\nend\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    let key = world.spawn((
+        Transform::default(),
+        Script {
+            path: "spin.lua".to_string(),
+        },
+    ));
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    runtime.run_frame(&mut world, 0.1);
+    let rotation = world.get::<Transform>(key).unwrap().rotation;
+    let yaw = 2.0 * rotation[1].atan2(rotation[3]).to_degrees();
+    assert!((yaw - 9.0).abs() < 0.01, "yaw={yaw}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn legacy_entity_lookup_and_set_pos() {
+    use xgc_world::{Name, Script, Transform, World};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_legacy_pos_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("follow.lua"),
+        "function update(ctx)\n  local target = entity_id(ctx, 'target')\n  local p = entity_pos(ctx, target)\n  set_pos(ctx, p.x + 1.0, p.y, p.z)\nend\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    let target_transform = Transform {
+        position: [3.0, 0.0, 0.0],
+        ..Default::default()
+    };
+    world.spawn((
+        Name {
+            value: "target".to_string(),
+        },
+        target_transform,
+    ));
+    let mover = world.spawn((
+        Transform::default(),
+        Script {
+            path: "follow.lua".to_string(),
+        },
+    ));
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    assert_eq!(
+        world.get::<Transform>(mover).unwrap().position,
+        [4.0, 0.0, 0.0]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

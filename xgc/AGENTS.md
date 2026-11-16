@@ -67,8 +67,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/snapshot.rs` | `world.snapshot` / `world.restore`：WorldData 快照与恢复 |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-audio/src/lib.rs` | cpal 音频设备输出：设备枚举、PCM 重采样、F32 / I16 输出队列、`play_clip` |
-| `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载、生命周期 |
-| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除时 `on_destroy`、磁盘热重载 |
+| `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载 |
+| `crates/xgc-script/src/legacy.rs` | 旧脚本 API：`update(ctx)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at` / `velocity` / `set_anim_param`；UI 等暂无实现为 no-op |
+| `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` 生命周期分派与回退 |
+| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载 |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 / Gizmo 平移 |
 | `crates/xgc-editor/src/app.rs` | eframe 窗口：工具栏 / 层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / 三轴 Gizmo / Ctrl+Z、Ctrl+Y |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
@@ -117,9 +119,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 迁移：场景 / 脚本 / 预制体已通；下一步旧新视觉与 trace 对照。
+1. 迁移：旧 `update(ctx)` 已可执行；下一步 UI / 输入脚本 API 与视觉对照。
 2. 动画：转场淡入 / 遮罩。
-3. 脚本：完整引擎 API 与正式 System 调度。
+3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 编辑器：旋转 / 缩放 Gizmo 与吸附。
 5. 现在最大文件 598 行：动它之前先拆。
 
