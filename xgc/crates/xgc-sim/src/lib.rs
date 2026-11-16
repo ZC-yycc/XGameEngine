@@ -198,8 +198,8 @@ impl Schedule {
 /// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
 mod systems;
 pub use systems::{
-    AabbCollisionSystem, AnimatorSystem, GravitySystem, GroundCollisionSystem, HierarchySystem,
-    PhysicsSystem, VelocitySystem,
+    AabbCollisionSystem, AnimatorSystem, CharacterSystem, GravitySystem, GroundCollisionSystem,
+    HierarchySystem, PhysicsSystem, VelocitySystem,
 };
 
 pub struct Simulation {
@@ -224,6 +224,7 @@ impl Simulation {
         schedule.add(PhysicsSystem::default());
         schedule.add(VelocitySystem::new(threads));
         schedule.add(GroundCollisionSystem::default());
+        schedule.add(CharacterSystem);
         schedule.add(AabbCollisionSystem);
         schedule.add(AnimatorSystem);
         schedule.add(HierarchySystem::default());

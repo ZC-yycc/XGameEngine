@@ -18,7 +18,8 @@
 `World::validate_data` 世界体检）、`xgc-store`（版本化 JSON 包络 + 原子写）、
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `PhysicsSystem` / `VelocitySystem` / `GroundCollisionSystem` /
-`AabbCollisionSystem` / `AnimationSystem` / `GravitySystem` / `HierarchySystem` /
+`CharacterSystem` / `AabbCollisionSystem` / `AnimationSystem` / `GravitySystem` /
+`HierarchySystem` /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe / query / get /
 digest / stats / validate / load / save / plan / apply / revert；查询支持字段投影 +
 标量过滤 + 稳定分页）、`xgc-migrate`（旧 `SceneV2` RON → `WorldData`：身份 / 名称 / 父子 / Transform +
@@ -53,9 +54,9 @@ apply / revert 各只推进一个 revision，回滚后状态哈希回到原值�
 archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再恢复，
 `state_hash` / 实体 ID / revision 一致；`Journal` 可从初始快照重放并校验 revision。
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`PhysicsSystem` 只给 dynamic 刚体加
-重力、`VelocitySystem` 积分、`GroundCollisionSystem` 地面夹持、`AabbCollisionSystem`
-两两分离动态刚体、`AnimatorSystem` 推进动画时钟、`HierarchySystem` 合成世界变换）→
-快照 / trace。
+重力、`VelocitySystem` 积分、`GroundCollisionSystem` 地面夹持、`CharacterSystem`
+角色脚底贴地、`AabbCollisionSystem` 两两分离动态刚体、`AnimatorSystem` 推进动画时钟、
+`HierarchySystem` 合成世界变换）→ 快照 / trace。
 `HierarchySystem` 按 `Parent` 链合成 `GlobalTransform`）→ trace；
 `VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表

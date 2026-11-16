@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use xgc_base::{EntityId, EntityKey};
 use xgc_world::{
-    Animator, Component, GlobalTransform, Parent, PhysicsBody, Transform, Value, Velocity, World,
+    Animator, CharacterController, Component, GlobalTransform, Parent, PhysicsBody, Transform,
+    Value, Velocity, World,
 };
 
 use super::{System, SystemAccess};
@@ -91,6 +92,36 @@ fn support_half(body: &PhysicsBody) -> f32 {
         "ball" => body.radius,
         "capsule" => body.half_height + body.radius,
         _ => body.half_extents[1],
+    }
+}
+
+/// 角色贴地：角色原点在脚底，落到 y=0 时夹住并清掉向下速度。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CharacterSystem;
+
+impl System for CharacterSystem {
+    fn name(&self) -> &'static str {
+        "character"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![CharacterController::ID],
+            writes: vec![Transform::ID, Velocity::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        world.for_each3_mut::<Transform, Velocity, CharacterController>(
+            |_, transform, velocity, _controller| {
+                if transform.position[1] < 0.0 {
+                    transform.position[1] = 0.0;
+                    if velocity.linear[1] < 0.0 {
+                        velocity.linear[1] = 0.0;
+                    }
+                }
+            },
+        );
     }
 }
 
