@@ -2,8 +2,9 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, AnimatorSystem, FrameCommands, GravitySystem, GroundCollisionSystem,
-    PhysicsSystem, Scenario, Schedule, SimError, Simulation, System, SystemAccess, VelocitySystem,
+    play, verify, AabbCollisionSystem, AnimatorSystem, FrameCommands, GravitySystem,
+    GroundCollisionSystem, PhysicsSystem, Scenario, Schedule, SimError, Simulation, System,
+    SystemAccess, VelocitySystem,
 };
 use xgc_world::{
     Animator, Command, Component, ComponentId, GlobalTransform, Name, Parent, PhysicsBody,
@@ -108,7 +109,14 @@ fn velocity_system_moves_transform() {
     let mut simulation = Simulation::with_fixed_dt(world, 1.0);
     assert_eq!(
         simulation.schedule().names(),
-        vec!["physics", "velocity", "ground", "animation", "hierarchy"]
+        vec![
+            "physics",
+            "velocity",
+            "ground",
+            "aabb",
+            "animation",
+            "hierarchy"
+        ]
     );
     simulation.step(Vec::new()).unwrap();
     assert_eq!(simulation.trace().frames.len(), 1);
@@ -389,4 +397,30 @@ fn ground_collision_stops_dynamic_body() {
     let velocity = world.get::<Velocity>(entity).unwrap();
     assert!((transform.position[1] - 0.5).abs() < 1e-4);
     assert_eq!(velocity.linear[1], 0.0);
+}
+
+#[test]
+fn aabb_separates_overlapping_dynamic_boxes() {
+    let mut world = World::new();
+    let a = world.spawn((
+        Transform {
+            position: [0.0, 0.5, 0.0],
+            ..Transform::default()
+        },
+        PhysicsBody::default(),
+    ));
+    let b = world.spawn((
+        Transform {
+            position: [0.2, 0.5, 0.0],
+            ..Transform::default()
+        },
+        PhysicsBody::default(),
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(AabbCollisionSystem);
+    schedule.run(&mut world, 0.016);
+    let a = world.get::<Transform>(a).unwrap();
+    let b = world.get::<Transform>(b).unwrap();
+    assert!((a.position[0] - b.position[0]).abs() >= 1.0 - 1e-5);
+    assert!((a.position[0] + b.position[0] - 0.2).abs() < 1e-5);
 }

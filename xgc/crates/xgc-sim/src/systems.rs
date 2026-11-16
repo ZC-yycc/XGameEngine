@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use xgc_base::EntityId;
+use xgc_base::{EntityId, EntityKey};
 use xgc_world::{
     Animator, Component, GlobalTransform, Parent, PhysicsBody, Transform, Value, Velocity, World,
 };
@@ -92,6 +92,107 @@ fn support_half(body: &PhysicsBody) -> f32 {
         "capsule" => body.half_height + body.radius,
         _ => body.half_extents[1],
     }
+}
+
+/// AABB 碰撞：动态刚体两两分离，最小穿透轴推出；static 不动。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AabbCollisionSystem;
+
+struct BodyBox {
+    key: EntityKey,
+    id: EntityId,
+    position: [f32; 3],
+    half: [f32; 3],
+    dynamic: bool,
+}
+
+impl System for AabbCollisionSystem {
+    fn name(&self) -> &'static str {
+        "aabb"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            reads: vec![PhysicsBody::ID],
+            writes: vec![Transform::ID],
+        }
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        let mut bodies = Vec::new();
+        world.for_each2::<Transform, PhysicsBody>(|key, transform, body| {
+            let Some(entity) = world.entity(key) else {
+                return;
+            };
+            bodies.push(BodyBox {
+                key,
+                id: entity,
+                position: transform.position,
+                half: box_half(body),
+                dynamic: body.kind == "dynamic",
+            });
+        });
+        bodies.sort_by_key(|body| body.id.raw());
+        for i in 0..bodies.len() {
+            for j in (i + 1)..bodies.len() {
+                if !bodies[i].dynamic && !bodies[j].dynamic {
+                    continue;
+                }
+                let Some((axis, penetration)) = overlap(&bodies[i], &bodies[j]) else {
+                    continue;
+                };
+                let direction =
+                    if (bodies[i].position[axis] - bodies[j].position[axis]).abs() < f32::EPSILON {
+                        1.0
+                    } else {
+                        (bodies[i].position[axis] - bodies[j].position[axis]).signum()
+                    };
+                match (bodies[i].dynamic, bodies[j].dynamic) {
+                    (true, true) => {
+                        bodies[i].position[axis] += direction * penetration * 0.5;
+                        bodies[j].position[axis] -= direction * penetration * 0.5;
+                    }
+                    (true, false) => {
+                        bodies[i].position[axis] += direction * penetration;
+                    }
+                    (false, true) => {
+                        bodies[j].position[axis] -= direction * penetration;
+                    }
+                    (false, false) => {}
+                }
+            }
+        }
+        for body in &bodies {
+            if let Some(transform) = world.get_mut::<Transform>(body.key) {
+                transform.position = body.position;
+            }
+        }
+    }
+}
+
+fn box_half(body: &PhysicsBody) -> [f32; 3] {
+    match body.shape.as_str() {
+        "ball" => [body.radius; 3],
+        "capsule" => [body.radius, body.half_height + body.radius, body.radius],
+        _ => body.half_extents,
+    }
+}
+
+fn overlap(a: &BodyBox, b: &BodyBox) -> Option<(usize, f32)> {
+    let mut penetration = [0.0f32; 3];
+    for (axis, penetration) in penetration.iter_mut().enumerate() {
+        *penetration = a.half[axis] + b.half[axis] - (a.position[axis] - b.position[axis]).abs();
+        if *penetration <= 0.0 {
+            return None;
+        }
+    }
+    let mut best = 0;
+    for axis in 1..3 {
+        if penetration[axis] < penetration[best] {
+            best = axis;
+        }
+    }
+    Some((best, penetration[best]))
 }
 
 /// 动画时钟：自动播放的 Animator 按 speed 推进，duration 有效时循环 / 截断。
