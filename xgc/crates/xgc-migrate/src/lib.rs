@@ -26,7 +26,7 @@ mod old_scene;
 mod old_ui;
 mod prefab;
 mod report;
-pub use prefab::instantiate_prefab;
+pub use prefab::{instantiate_prefab, revert_prefab};
 pub use report::{component_id_name, MigrationBatch, MigrationError, MigrationReport};
 #[derive(Debug, Default, Deserialize)]
 struct OldComponents {

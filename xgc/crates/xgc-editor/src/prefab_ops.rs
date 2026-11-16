@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use xgc_base::EntityId;
-use xgc_migrate::{instantiate_prefab, migrate_str};
+use xgc_migrate::{instantiate_prefab, migrate_str, revert_prefab};
 
 use crate::EditorState;
 
@@ -36,5 +36,21 @@ impl EditorState {
         self.selected = Some(root);
         self.dirty = true;
         Ok(root)
+    }
+    pub fn revert_prefab_file(&mut self, path: &Path) -> Result<usize, String> {
+        if self.play.is_some() {
+            return Err("Play 期间不能 Revert 预制体".to_string());
+        }
+        let text = std::fs::read_to_string(path).map_err(|err| format!("读取预制体失败：{err}"))?;
+        let (data, _report) =
+            migrate_str(&text).map_err(|err| format!("预制体迁移失败：{err:?}"))?;
+        let source = path.to_string_lossy().to_string();
+        self.checkpoint();
+        let mapping = revert_prefab(&mut self.world, &data, &source)?;
+        if let Some((_, root)) = mapping.first() {
+            self.selected = Some(*root);
+        }
+        self.dirty = true;
+        Ok(mapping.len())
     }
 }

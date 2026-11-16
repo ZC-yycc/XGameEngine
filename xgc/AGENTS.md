@@ -129,7 +129,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 预制体 Revert：按 source_id 保留实例实体 ID。
+1. 预制体：Revert 已通；下一步 Revert 按钮 / 位置覆写 UI。
 2. 动画：遮罩 / 分层混合细节。
 3. 迁移：窗口键盘事件接线与视觉对照。
 4. 脚本：正式 System 调度与脚本组件生命周期完整化。

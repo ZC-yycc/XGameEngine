@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use xgc_base::EntityId;
-use xgc_migrate::{instantiate_prefab, migrate_str};
+use xgc_migrate::{instantiate_prefab, migrate_str, revert_prefab};
 use xgc_world::{Parent, Transform, World};
 
 #[test]
@@ -55,4 +55,84 @@ fn instantiated_entities_carry_source_metadata() {
         }
     }
     assert_eq!(roots, 1);
+}
+
+#[test]
+fn revert_preserves_instance_ids_and_transforms() {
+    let path = Path::new("../../../projects/XGame/Prefabs/Pillar.prefab.ron");
+    if !path.exists() {
+        eprintln!("skip: 没有旧项目 Pillar 预制体");
+        return;
+    }
+    let (data, _) = migrate_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let root_old = data
+        .entities
+        .iter()
+        .find(|entity| {
+            !entity
+                .components
+                .iter()
+                .any(|component| component.component.0 == 0x0104)
+        })
+        .unwrap()
+        .id;
+    let mut world = World::new();
+    let mapping = instantiate_prefab(&mut world, &data, Some("Pillar")).unwrap();
+    let root = mapping
+        .iter()
+        .find(|(old, _)| *old == root_old)
+        .map(|(_, new)| *new)
+        .unwrap();
+    let key = world.key(root).unwrap();
+    world.get_mut::<Transform>(key).unwrap().position = [9.0, 9.0, 9.0];
+    let mut modified = data.clone();
+    modified.entities.pop();
+    let before = world.len();
+    let reverted = revert_prefab(&mut world, &modified, "Pillar").unwrap();
+    assert_eq!(reverted.len(), 2);
+    assert_eq!(world.len(), before - 1);
+    assert_eq!(
+        world
+            .get::<Transform>(world.key(root).unwrap())
+            .unwrap()
+            .position,
+        [9.0, 9.0, 9.0]
+    );
+}
+
+#[test]
+fn revert_spawns_entities_added_to_asset() {
+    let path = Path::new("../../../projects/XGame/Prefabs/Pillar.prefab.ron");
+    if !path.exists() {
+        eprintln!("skip: 没有旧项目 Pillar 预制体");
+        return;
+    }
+    let (data, _) = migrate_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let root = data
+        .entities
+        .iter()
+        .find(|entity| {
+            !entity
+                .components
+                .iter()
+                .any(|component| component.component.0 == 0x0104)
+        })
+        .unwrap()
+        .clone();
+    let mut world = World::new();
+    instantiate_prefab(&mut world, &data, Some("Pillar")).unwrap();
+    let before = world.len();
+    let mut modified = data.clone();
+    modified.entities.push(root.with_id(EntityId::from_raw(99)));
+    let reverted = revert_prefab(&mut world, &modified, "Pillar").unwrap();
+    assert_eq!(reverted.len(), 4);
+    assert_eq!(world.len(), before + 1);
+    assert!(world.world_data().entities.iter().any(|entity| {
+        entity.components.iter().any(|component| {
+            component.component.0 == 0x0802
+                && component.fields.iter().any(|(field, value)| {
+                    field == "source_id" && *value == xgc_world::Value::Entity(99)
+                })
+        })
+    }));
 }
