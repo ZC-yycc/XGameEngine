@@ -43,7 +43,7 @@
 | 音频 | 60% | 空间化增益、总线、WAV 解码、软件混音、WAV 写出、cpal 默认输出设备播放（重采样 / 队列）、`xgc play`；缺流式资产 / 3D 声像 |
 | 渲染 | 35% | 基础 wgpu + 实例化 + UI；缺 PBR / 阴影 / 后处理 / 粒子 / 蒙皮绘制 |
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |
-| 资产 / 打包 | 30% | 扫描 / 迁移 + `xgc cook` 复制源资产与确定性 manifest；缺 cooked 二进制格式 / 播放器打包 |
+| 资产 / 打包 | 40% | `xgc cook` 复制资产 + `pack` cooked world + `run-cooked` 从 cooked 目录加载脚本；缺二进制 cooked 格式 / 独立播放器 |
 | Lua 脚本 | 80% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
 | 割接验收 | 25% | showcase 迁移 / 运行 / 渲染已通；无旧新逐帧对照、性能门禁、未推送 |

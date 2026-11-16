@@ -50,6 +50,12 @@ fn main() -> ExitCode {
         Some("skeleton") => skeleton_glb(args.next().as_deref()),
         Some("assets") => assets_cmd::assets(args.next().as_deref()),
         Some("cook") => cook_cmd::cook(args.next().as_deref(), args.next().as_deref()),
+        Some("pack") => cook_cmd::pack(
+            args.next().as_deref(),
+            args.next().as_deref(),
+            args.next().as_deref(),
+        ),
+        Some("run-cooked") => cook_cmd::run_cooked(args.next().as_deref(), args.next().as_deref()),
         Some("clips") => clips(args.next().as_deref()),
         Some("audio") => audio(args.next().as_deref()),
         Some("mix") => mix(args.next().as_deref(), args.next().as_deref()),

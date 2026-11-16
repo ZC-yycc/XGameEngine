@@ -116,7 +116,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-world <世界.json> [帧] / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
 | `crates/xgc-cli/src/assets_cmd.rs` | `xgc assets <项目根>`：GUID 扫描 |
-| `crates/xgc-cli/src/cook_cmd.rs` | `xgc cook <项目根> <输出目录>`：资产复制 + manifest |
+| `crates/xgc-cli/src/cook_cmd.rs` | `xgc cook <项目根> <输出目录>` / `pack <世界.json> <项目根> <输出目录>` / `run-cooked <目录> [帧]` |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
@@ -135,7 +135,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 资产烹饪：`cook` 已通；下一步播放器打包 / cooked 运行时加载。
+1. 资产烹饪：`pack` / `run-cooked` 已通；下一步独立播放器与二进制 cooked 格式。
 2. 动画：遮罩 / 分层混合细节。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 旧新视觉 / trace 对照。
