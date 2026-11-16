@@ -31,6 +31,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/query.rs` | 双组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` |
 | `crates/xgc-world/src/render_components.rs` | 渲染侧组件：`render.mesh` / `render.material` / `render.camera` |
+| `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source` |
 | `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删与计划内预测集合） |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
 | `crates/xgc-world/src/journal.rs` | `Journal` / `TxRecord`：事务日志与重放 |
@@ -41,7 +42,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe / query / get / digest / stats / validate / load / save / plan / apply / revert |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
-| `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（身份 / 名称 / 父子 / Transform / Mesh / Material / Camera，支持目录批量） |
+| `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（身份 / 名称 / 父子 / Transform / Mesh / Material / Camera / Lua / Audio，支持目录批量） |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
@@ -59,10 +60,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M2 第二刀：`PassExecutor` 接 wgpu 资源创建 / 录制，CPU 侧资源与排序已就位。
-2. 旧场景迁移补 Physics / Lua / UI 等剩余组件映射。
+1. M2 第二刀：`PassExecutor` 接 wgpu 资源创建 / 录制。
+2. 旧场景迁移补 Physics / UI 等剩余组件映射。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
-4. 现在最大文件 591 行：动它之前先拆。
+4. 现在最大文件 593 行：动它之前先拆。
 
 ## Token 纪律
 

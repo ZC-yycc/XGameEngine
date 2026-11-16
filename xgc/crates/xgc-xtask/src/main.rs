@@ -9,7 +9,8 @@ use std::process::ExitCode;
 
 use xgc_reflect::Registry;
 use xgc_world::{
-    Camera, GlobalTransform, Material, MeshRenderer, Name, Parent, Transform, Velocity,
+    AudioSource, Camera, GlobalTransform, Material, MeshRenderer, Name, Parent, Script, Transform,
+    Velocity,
 };
 
 const SOFT_FILE_LINES: usize = 600;
@@ -212,6 +213,8 @@ fn schema_check() -> Result<(), String> {
         registry.register::<MeshRenderer>(),
         registry.register::<Material>(),
         registry.register::<Camera>(),
+        registry.register::<Script>(),
+        registry.register::<AudioSource>(),
     ] {
         result.map_err(|err| err.to_string())?;
     }
@@ -232,6 +235,8 @@ fn schema_check() -> Result<(), String> {
         "render.mesh",
         "render.material",
         "render.camera",
+        "script.lua",
+        "audio.source",
     ] {
         if !first.contains(required) {
             return Err(format!("schema 缺少 {required}"));

@@ -46,6 +46,8 @@ impl Agent {
         let _ = registry.register::<xgc_world::MeshRenderer>();
         let _ = registry.register::<xgc_world::Material>();
         let _ = registry.register::<xgc_world::Camera>();
+        let _ = registry.register::<xgc_world::Script>();
+        let _ = registry.register::<xgc_world::AudioSource>();
         Self {
             world: World::new(),
             registry,

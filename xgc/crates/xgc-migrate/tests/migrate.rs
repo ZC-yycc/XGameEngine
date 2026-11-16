@@ -2,8 +2,8 @@
 
 use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
-    Camera, Component, ComponentId, GlobalTransform, Material, MeshRenderer, Name, Parent,
-    Transform, Value,
+    AudioSource, Camera, Component, ComponentId, GlobalTransform, Material, MeshRenderer, Name,
+    Parent, Script, Transform, Value,
 };
 
 const SCENE: &str = r#"(
@@ -144,6 +144,55 @@ fn maps_mesh_material_and_camera() {
         .unwrap();
     assert_eq!(camera.fields[0].1, Value::F64(75.0));
     assert_eq!(camera.fields[3].1, Value::Bool(true));
+}
+
+#[test]
+fn maps_script_and_audio() {
+    let entries = r#"entries: [
+                    (
+                        identity: (id: 2),
+                        data: Lua(path: "Scripts/player.lua"),
+                    ),
+                    (
+                        identity: (id: 3),
+                        data: Audio((
+                            clip: "Resources/Audio/Beep.wav",
+                            volume: 0.5,
+                            bus: Sfx,
+                            pitch: 1.25,
+                            looping: true,
+                            autoplay: true,
+                            spatial: false,
+                        )),
+                    ),
+                ],"#;
+    let scene = SCENE.replacen("entries: [],", entries, 1);
+    let (world, report) = migrate_str(&scene).unwrap();
+    assert_eq!(report.mapped_components, 2);
+    let root = &world.entities[0];
+    let script = root
+        .components
+        .iter()
+        .find(|component| component.component == Script::ID)
+        .unwrap();
+    assert_eq!(
+        script.fields[0].1,
+        Value::String("Scripts/player.lua".to_string())
+    );
+    let audio = root
+        .components
+        .iter()
+        .find(|component| component.component == AudioSource::ID)
+        .unwrap();
+    assert_eq!(
+        audio.fields[0].1,
+        Value::String("Resources/Audio/Beep.wav".to_string())
+    );
+    assert_eq!(audio.fields[1].1, Value::F64(0.5));
+    assert_eq!(audio.fields[2].1, Value::F64(1.25));
+    assert_eq!(audio.fields[3].1, Value::Bool(true));
+    assert_eq!(audio.fields[4].1, Value::Bool(true));
+    assert_eq!(audio.fields[5].1, Value::Bool(false));
 }
 
 #[test]

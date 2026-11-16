@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use xgc_base::EntityId;
 use xgc_world::{
-    Camera, Component, ComponentData, ComponentId, EntityData, GlobalTransform, Material,
-    MeshRenderer, Name, Parent, Transform, Value, WorldData,
+    AudioSource, Camera, Component, ComponentData, ComponentId, EntityData, GlobalTransform,
+    Material, MeshRenderer, Name, Parent, Script, Transform, Value, WorldData,
 };
 
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
@@ -105,7 +105,7 @@ enum OldComponentData {
     Animator(ron::Value),
     Physics(ron::Value),
     Character(ron::Value),
-    Audio(ron::Value),
+    Audio(OldAudio),
     Camera(OldCamera),
     Particle(ron::Value),
     Rust {
@@ -115,9 +115,32 @@ enum OldComponentData {
         fields: Option<ron::Value>,
     },
     Lua {
-        #[allow(dead_code)]
         path: String,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct OldAudio {
+    #[serde(default)]
+    clip: String,
+    #[serde(default = "one")]
+    volume: f32,
+    #[serde(default = "one")]
+    pitch: f32,
+    #[serde(default)]
+    looping: bool,
+    #[serde(default)]
+    autoplay: bool,
+    #[serde(default = "default_true")]
+    spatial: bool,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +199,8 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut mesh_model = None;
         let mut material = None;
         let mut camera = None;
+        let mut script_path = None;
+        let mut audio = None;
         for entry in &old.components.entries {
             match &entry.data {
                 OldComponentData::Mesh(mesh) => {
@@ -197,6 +222,21 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                 }
                 OldComponentData::Camera(old_camera) => {
                     camera = Some(old_camera);
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Lua { path } => {
+                    script_path = Some(path.clone());
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Audio(old_audio) => {
+                    audio = Some(AudioSource {
+                        clip: old_audio.clip.clone(),
+                        volume: old_audio.volume,
+                        pitch: old_audio.pitch,
+                        looping: old_audio.looping,
+                        autoplay: old_audio.autoplay,
+                        spatial: old_audio.spatial,
+                    });
                     report.mapped_components += 1;
                 }
                 _ => {}
@@ -289,6 +329,25 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     ("near".to_string(), Value::F64(f64::from(camera.near))),
                     ("far".to_string(), Value::F64(f64::from(camera.far))),
                     ("active".to_string(), Value::Bool(camera.active)),
+                ],
+            });
+        }
+        if let Some(path) = script_path {
+            components.push(ComponentData {
+                component: Script::ID,
+                fields: vec![("path".to_string(), Value::String(path))],
+            });
+        }
+        if let Some(audio) = audio {
+            components.push(ComponentData {
+                component: AudioSource::ID,
+                fields: vec![
+                    ("clip".to_string(), Value::String(audio.clip)),
+                    ("volume".to_string(), Value::F64(f64::from(audio.volume))),
+                    ("pitch".to_string(), Value::F64(f64::from(audio.pitch))),
+                    ("looping".to_string(), Value::Bool(audio.looping)),
+                    ("autoplay".to_string(), Value::Bool(audio.autoplay)),
+                    ("spatial".to_string(), Value::Bool(audio.spatial)),
                 ],
             });
         }
