@@ -4,6 +4,7 @@ use super::assets::MeshCache;
 use super::camera::mul;
 use super::draw::DrawList;
 use super::gpu::{GpuContext, GpuError};
+use super::gpu_material::GpuMaterialBatch;
 use super::gpu_mesh::GpuMeshCache;
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
@@ -20,6 +21,7 @@ pub(crate) struct BatchRequest<'a> {
     pub(crate) list: &'a DrawList,
     pub(crate) meshes: &'a mut MeshCache,
     pub(crate) gpu_meshes: &'a mut GpuMeshCache,
+    pub(crate) materials: &'a mut GpuMaterialBatch,
     pub(crate) mvp: [f32; 16],
     pub(crate) depth: &'a wgpu::TextureView,
 }
@@ -35,6 +37,7 @@ impl RenderCache {
         let list = request.list;
         let meshes = &mut *request.meshes;
         let gpu_meshes = &mut *request.gpu_meshes;
+        let materials = &mut *request.materials;
         let mvp = request.mvp;
         let depth = request.depth;
         if list.items.is_empty() {
@@ -42,12 +45,8 @@ impl RenderCache {
         }
         let format = texture.format();
         let pipeline = self.depth_pipeline_for(context, format);
-        let material_buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("xgc-batch-materials"),
-            size: list.items.len() as u64 * MATERIAL_STRIDE,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let (material_buffer, material_bind) =
+            materials.ensure(context, format, pipeline.layout(), list.items.len());
         let mut prepared = Vec::with_capacity(list.items.len());
         let mut slot = 0u32;
         for item in &list.items {
@@ -70,7 +69,7 @@ impl RenderCache {
                 uniform_bytes.extend_from_slice(&value.to_le_bytes());
             }
             context.queue().write_buffer(
-                &material_buffer,
+                material_buffer,
                 u64::from(slot) * MATERIAL_STRIDE,
                 &uniform_bytes,
             );
@@ -80,20 +79,6 @@ impl RenderCache {
             });
             slot += 1;
         }
-        let material_bind = context
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("xgc-batch-material-bind"),
-                layout: pipeline.layout(),
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &material_buffer,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(80),
-                    }),
-                }],
-            });
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
@@ -126,7 +111,7 @@ impl RenderCache {
             });
             pass.set_pipeline(pipeline.raw());
             for draw in &prepared {
-                pass.set_bind_group(0, &material_bind, &[draw.offset]);
+                pass.set_bind_group(0, material_bind, &[draw.offset]);
                 let Some(mesh) = gpu_meshes.get(&draw.mesh_key) else {
                     continue;
                 };

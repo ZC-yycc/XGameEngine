@@ -96,6 +96,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(stats.draws, 2);
     assert_eq!(stats.passes, 1, "两个实体应在同一个 render pass");
     assert_eq!(renderer.gpu_mesh_count(), 1, "同一模型只上传一次");
+    assert!(renderer.material_capacity() >= 512, "两个材质槽");
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     assert_eq!(
         &pixels[center..center + 4],

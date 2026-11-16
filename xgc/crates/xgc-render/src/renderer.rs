@@ -7,6 +7,7 @@ use super::batch::BatchRequest;
 use super::camera::{camera_view_projection, IDENTITY};
 use super::draw::build_draw_list;
 use super::gpu::{GpuContext, GpuError};
+use super::gpu_material::GpuMaterialBatch;
 use super::gpu_mesh::GpuMeshCache;
 use super::pipeline::RenderCache;
 use super::resources::{ResourceDesc, ResourceUsage};
@@ -27,6 +28,7 @@ pub struct Renderer {
     cache: RenderCache,
     meshes: MeshCache,
     gpu_meshes: GpuMeshCache,
+    materials: GpuMaterialBatch,
     depth: Option<DepthTarget>,
 }
 
@@ -36,6 +38,7 @@ impl Renderer {
             cache: RenderCache::new(),
             meshes,
             gpu_meshes: GpuMeshCache::new(),
+            materials: GpuMaterialBatch::new(),
             depth: None,
         }
     }
@@ -46,6 +49,10 @@ impl Renderer {
 
     pub fn gpu_mesh_count(&self) -> usize {
         self.gpu_meshes.len()
+    }
+
+    pub fn material_capacity(&self) -> u64 {
+        self.materials.capacity()
     }
 
     fn ensure_depth(
@@ -99,6 +106,7 @@ impl Renderer {
             list: &list,
             meshes: &mut self.meshes,
             gpu_meshes: &mut self.gpu_meshes,
+            materials: &mut self.materials,
             mvp,
             depth,
         };

@@ -50,6 +50,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读 |
 | `crates/xgc-render/src/renderer.rs` | `Renderer` 帧入口：DrawList → MeshCache → RenderCache → GPU，active camera MVP + 深度附件 |
 | `crates/xgc-render/src/batch.rs` | 单 render pass 批量 draw：一次 encoder / pass、单 uniform 缓冲 + 动态 offset |
+| `crates/xgc-render/src/gpu_material.rs` | `GpuMaterialBatch`：材质 uniform 缓冲 / bind group 跨帧复用 |
 | `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用 |
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：材质 uniform（动态 offset）、顶点 / 索引缓冲、颜色 / 深度管线、draw |
@@ -74,7 +75,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M2 第十七刀：材质 uniform 缓冲跨帧复用（当前每帧重分配一次）+ 实例化 / 合批。
+1. M2 第十八刀：实例化 / 按网格 + 材质合批，减少 draw call。
 2. 旧场景迁移补 UI / Animator 等剩余组件映射。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
 4. 现在最大文件 597 行：动它之前先拆。
