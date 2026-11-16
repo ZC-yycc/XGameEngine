@@ -339,6 +339,14 @@ impl System for AnimatorSystem {
                 return;
             }
             animator.time += animator.speed * dt;
+            if animator.blend_duration > 0.0 {
+                animator.blend_elapsed += dt;
+                if animator.blend_elapsed >= animator.blend_duration {
+                    animator.blend_duration = 0.0;
+                    animator.blend_elapsed = 0.0;
+                    animator.blend_from.clear();
+                }
+            }
             if animator.duration > 0.0 {
                 if animator.looping {
                     animator.time = animator.time.rem_euclid(animator.duration);

@@ -34,6 +34,8 @@ pub struct TransitionDef {
     pub parameter: String,
     #[serde(default)]
     pub at_least: f32,
+    #[serde(default)]
+    pub duration: f32,
 }
 
 fn default_looping() -> bool {
@@ -80,23 +82,30 @@ impl System for AnimationStateSystem {
             }
             let parameters = parse_parameters(&state.parameters);
             let current = state.state.clone();
-            let next = machine
-                .transitions
-                .iter()
-                .find(|transition| {
-                    transition
-                        .from
-                        .as_deref()
-                        .is_none_or(|from| from == current)
-                        && parameters
-                            .get(&transition.parameter)
-                            .copied()
-                            .unwrap_or(0.0)
-                            >= transition.at_least
-                })
-                .map(|transition| transition.to.clone());
-            if let Some(next) = next {
+            let transition = machine.transitions.iter().find(|transition| {
+                transition
+                    .from
+                    .as_deref()
+                    .is_none_or(|from| from == current)
+                    && parameters
+                        .get(&transition.parameter)
+                        .copied()
+                        .unwrap_or(0.0)
+                        >= transition.at_least
+            });
+            if let Some(transition) = transition {
+                let next = transition.to.clone();
                 if next != current {
+                    if transition.duration > 0.0 {
+                        animator.blend_from = machine
+                            .states
+                            .iter()
+                            .find(|definition| definition.name == current)
+                            .map(|definition| definition.clip.clone())
+                            .unwrap_or_else(|| animator.clip.clone());
+                        animator.blend_elapsed = 0.0;
+                        animator.blend_duration = transition.duration;
+                    }
                     state.state = next;
                     state.time = 0.0;
                 }

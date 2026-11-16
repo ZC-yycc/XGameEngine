@@ -14,6 +14,9 @@ pub struct Animator {
     pub base_position: [f32; 3],
     pub base_rotation: [f32; 4],
     pub base_scale: [f32; 3],
+    pub blend_from: String,
+    pub blend_elapsed: f32,
+    pub blend_duration: f32,
 }
 
 impl Default for Animator {
@@ -29,6 +32,9 @@ impl Default for Animator {
             base_position: [0.0; 3],
             base_rotation: [0.0, 0.0, 0.0, 1.0],
             base_scale: [1.0; 3],
+            blend_from: String::new(),
+            blend_elapsed: 0.0,
+            blend_duration: 0.0,
         }
     }
 }
@@ -72,6 +78,16 @@ impl Component for Animator {
             .doc("动画旋转的基准四元数；采样结果 = base * 关键帧旋转"),
             FieldDescriptor::new("base_scale", FieldType::Vec3, Value::Vec3([1.0; 3]))
                 .doc("动画缩放的基准；采样结果 = base * 关键帧缩放"),
+            FieldDescriptor::new(
+                "blend_from",
+                FieldType::String,
+                Value::String(String::new()),
+            )
+            .doc("转场来源剪辑；空 = 无转场"),
+            FieldDescriptor::new("blend_elapsed", FieldType::F32, Value::F64(0.0))
+                .doc("转场已进行时间（秒）"),
+            FieldDescriptor::new("blend_duration", FieldType::F32, Value::F64(0.0))
+                .doc("转场总时长（秒）；0 = 硬切"),
         ]
     }
 
@@ -95,6 +111,9 @@ impl Component for Animator {
                 f64::from(self.base_rotation[2]),
                 f64::from(self.base_rotation[3]),
             ])),
+            "blend_from" => Some(Value::String(self.blend_from.clone())),
+            "blend_elapsed" => Some(Value::F64(f64::from(self.blend_elapsed))),
+            "blend_duration" => Some(Value::F64(f64::from(self.blend_duration))),
             "base_scale" => Some(Value::Vec3([
                 f64::from(self.base_scale[0]),
                 f64::from(self.base_scale[1]),
@@ -196,6 +215,36 @@ impl Component for Animator {
                         ));
                     }
                 };
+                Ok(())
+            }
+            "blend_from" => {
+                self.blend_from = match value {
+                    Value::String(value) => value.clone(),
+                    other => {
+                        return Err(format!(
+                            "animation.animator.blend_from 期望 string，得到 {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+                Ok(())
+            }
+            "blend_elapsed" => {
+                self.blend_elapsed = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.blend_elapsed 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "blend_duration" => {
+                self.blend_duration = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.blend_duration 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
                 Ok(())
             }
             "base_scale" => {

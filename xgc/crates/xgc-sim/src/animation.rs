@@ -390,25 +390,39 @@ impl System for AnimationPlaybackSystem {
             };
             let sample_scale = clip.sample_looped_scale(animator.time);
             let base = animator.base_position;
-            let rotation = mul_quat(
+            let mut position = [
+                base[0] + offset[0],
+                base[1] + offset[1],
+                base[2] + offset[2],
+            ];
+            let mut rotation = mul_quat(
                 animator.base_rotation,
                 clip.sample_looped_rotation(animator.time),
             );
-            let scale = [
+            let mut scale = [
                 animator.base_scale[0] * sample_scale[0],
                 animator.base_scale[1] * sample_scale[1],
                 animator.base_scale[2] * sample_scale[2],
             ];
-            samples.push((
-                key,
-                [
-                    base[0] + offset[0],
-                    base[1] + offset[1],
-                    base[2] + offset[2],
-                ],
-                rotation,
-                scale,
-            ));
+            if animator.blend_duration > 0.0 && !animator.blend_from.is_empty() {
+                if let Some(previous) = self.library.get(&animator.blend_from) {
+                    let old_offset = previous.sample_looped(animator.time);
+                    let old_rotation = mul_quat(
+                        animator.base_rotation,
+                        previous.sample_looped_rotation(animator.time),
+                    );
+                    let old_scale = previous.sample_looped_scale(animator.time);
+                    let t = (animator.blend_elapsed / animator.blend_duration).clamp(0.0, 1.0);
+                    for axis in 0..3 {
+                        let old = base[axis] + old_offset[axis];
+                        position[axis] = old + (position[axis] - old) * t;
+                        let old = animator.base_scale[axis] * old_scale[axis];
+                        scale[axis] = old + (scale[axis] - old) * t;
+                    }
+                    rotation = slerp(old_rotation, rotation, t);
+                }
+            }
+            samples.push((key, position, rotation, scale));
         });
         for (key, position, rotation, scale) in samples {
             if let Some(transform) = world.get_mut::<Transform>(key) {

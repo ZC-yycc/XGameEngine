@@ -39,7 +39,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/state_machine_components.rs` | 动画状态机组件：`animation.state`（machine / state / time / parameters） |
 | `crates/xgc-world/src/layer_components.rs` | 动画叠加层组件：`animation.layers`（RON `[(clip, weight)]`） |
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source`（含 bus）/ `audio.listener` / `audio.gain` / `audio.mixer` |
-| `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / duration / time） |
+| `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / time / blend_from / blend_elapsed / blend_duration） |
 | `crates/xgc-world/src/character_components.rs` | 角色组件：`physics.character` |
 | `crates/xgc-world/src/ui_components.rs` | UI 组件：`ui.element` / `ui.layout` / `ui.interaction` / `ui.input` |
 | `crates/xgc-world/src/particle_components.rs` | 粒子组件：`particle.emitter` |
@@ -55,7 +55,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
 | `crates/xgc-sim/src/animation.rs` | `AnimationClip` / `TranslationKey` / `RotationKey` / `ScaleKey` / `load_clip_ron` / `AnimationLibrary`（含 `load_dir`）：平移 / 旋转 slerp / 缩放采样、循环、RON / 目录加载、`AnimationPlaybackSystem` 写 Transform |
-| `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、状态写回 Animator.clip / speed / looping |
+| `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、转场时长写 blend 字段、状态写回 Animator.clip |
 | `crates/xgc-sim/src/animation_layers.rs` | `AnimationLayerSystem` / `LayerDef`：按权重叠加平移 / 旋转 / 缩放 |
 | `crates/xgc-sim/src/input.rs` | `InputMap` / `InputState` / `KeyCode` / `Binding`：解析 `input.ron` 并折叠动作与轴 |
 | `crates/xgc-sim/src/audio.rs` | `AudioMixerSystem` + WAV 解码 / `AudioLibrary`：监听者距离 + 总线音量写 `audio.gain` |
@@ -121,8 +121,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 迁移：input.ron 已解析；下一步窗口键盘事件接线与视觉对照。
-2. 动画：转场淡入 / 遮罩。
+1. 动画：转场淡入已接；下一步遮罩 / 分层混合细节。
+2. 迁移：input.ron 已解析；下一步窗口键盘事件接线与视觉对照。
 3. 脚本：正式 System 调度与脚本组件生命周期完整化。
 4. 编辑器：旋转 / 缩放 Gizmo 与吸附。
 5. 现在最大文件 600 行：动它之前先拆。
