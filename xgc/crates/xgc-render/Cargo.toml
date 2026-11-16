@@ -1,0 +1,7 @@
+[package]
+name = "xgc-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC 渲染图骨架：pass / resource 依赖与确定性拓扑排序"

@@ -1,0 +1,181 @@
+//! XGC 渲染图骨架：pass 声明读 / 写资源，按数据依赖做确定性拓扑排序。
+//!
+//! 这一层不碰 wgpu：先把 pass 顺序、临时候选和环检测做成可测试的纯逻辑。
+//! 资源名是稳定的字符串 key；同一资源先写后读、读后写、写后写都会形成边。
+
+#![deny(unsafe_code)]
+
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::fmt;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pass {
+    pub name: String,
+    pub reads: Vec<String>,
+    pub writes: Vec<String>,
+}
+
+impl Pass {
+    pub fn new(name: impl Into<String>, reads: &[&str], writes: &[&str]) -> Self {
+        Self {
+            name: name.into(),
+            reads: reads
+                .iter()
+                .map(|resource| (*resource).to_string())
+                .collect(),
+            writes: writes
+                .iter()
+                .map(|resource| (*resource).to_string())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum GraphError {
+    DuplicatePass(String),
+    MultipleWriters {
+        resource: String,
+        first: String,
+        second: String,
+    },
+    Cycle(Vec<String>),
+}
+
+impl fmt::Display for GraphError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicatePass(name) => write!(f, "渲染 pass 重名：{name}"),
+            Self::MultipleWriters {
+                resource,
+                first,
+                second,
+            } => write!(
+                f,
+                "资源 {resource} 有多个写者：{first} / {second}（当前骨架要求单写者）"
+            ),
+            Self::Cycle(names) => write!(f, "渲染图有环：{}", names.join(" -> ")),
+        }
+    }
+}
+
+impl std::error::Error for GraphError {}
+
+#[derive(Clone, Debug, Default)]
+pub struct RenderGraph {
+    passes: Vec<Pass>,
+}
+
+impl RenderGraph {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(&mut self, pass: Pass) -> Result<(), GraphError> {
+        if self
+            .passes
+            .iter()
+            .any(|existing| existing.name == pass.name)
+        {
+            return Err(GraphError::DuplicatePass(pass.name));
+        }
+        self.passes.push(pass);
+        Ok(())
+    }
+
+    pub fn passes(&self) -> &[Pass] {
+        &self.passes
+    }
+
+    pub fn len(&self) -> usize {
+        self.passes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.passes.is_empty()
+    }
+
+    /// 返回 pass 下标顺序。同一层可选时取注册顺序最靠前的，保证确定性。
+    pub fn order(&self) -> Result<Vec<usize>, GraphError> {
+        let mut writers: HashMap<&str, usize> = HashMap::new();
+        for (index, pass) in self.passes.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for resource in &pass.writes {
+                if !seen.insert(resource.as_str()) {
+                    continue;
+                }
+                if let Some(first) = writers.insert(resource.as_str(), index) {
+                    return Err(GraphError::MultipleWriters {
+                        resource: resource.clone(),
+                        first: self.passes[first].name.clone(),
+                        second: pass.name.clone(),
+                    });
+                }
+            }
+        }
+
+        let mut edges = HashSet::new();
+        for (index, pass) in self.passes.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for resource in &pass.reads {
+                if !seen.insert(resource.as_str()) {
+                    continue;
+                }
+                if let Some(writer) = writers.get(resource.as_str()) {
+                    if *writer != index {
+                        edges.insert((*writer, index));
+                    }
+                }
+            }
+        }
+
+        let mut indegree = vec![0usize; self.passes.len()];
+        let mut outgoing: Vec<Vec<usize>> = vec![Vec::new(); self.passes.len()];
+        for (from, to) in edges {
+            outgoing[from].push(to);
+            indegree[to] += 1;
+        }
+        for targets in &mut outgoing {
+            targets.sort_unstable();
+        }
+
+        let mut ready = BinaryHeap::new();
+        for (index, degree) in indegree.iter().enumerate() {
+            if *degree == 0 {
+                ready.push(Reverse(index));
+            }
+        }
+
+        let mut order = Vec::with_capacity(self.passes.len());
+        while let Some(Reverse(index)) = ready.pop() {
+            order.push(index);
+            for target in &outgoing[index] {
+                indegree[*target] -= 1;
+                if indegree[*target] == 0 {
+                    ready.push(Reverse(*target));
+                }
+            }
+        }
+
+        if order.len() != self.passes.len() {
+            let mut cycle: Vec<String> = indegree
+                .iter()
+                .enumerate()
+                .filter(|(_, degree)| **degree > 0)
+                .map(|(index, _)| self.passes[index].name.clone())
+                .collect();
+            cycle.sort();
+            return Err(GraphError::Cycle(cycle));
+        }
+        Ok(order)
+    }
+
+    pub fn order_names(&self) -> Result<Vec<String>, GraphError> {
+        Ok(self
+            .order()?
+            .into_iter()
+            .map(|index| self.passes[index].name.clone())
+            .collect())
+    }
+}

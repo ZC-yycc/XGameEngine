@@ -155,6 +155,7 @@ dependencies = [
  "xgc-base",
  "xgc-migrate",
  "xgc-reflect",
+ "xgc-render",
  "xgc-sim",
  "xgc-store",
  "xgc-world",
@@ -180,6 +181,10 @@ dependencies = [
  "serde_json",
  "xgc-base",
 ]
+
+[[package]]
+name = "xgc-render"
+version = "0.1.0"
 
 [[package]]
 name = "xgc-sim"

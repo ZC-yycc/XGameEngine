@@ -8,6 +8,7 @@ use std::time::Instant;
 use xgc_agent::Agent;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
+use xgc_render::{Pass, RenderGraph};
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
 use xgc_world::{
@@ -26,16 +27,17 @@ fn main() -> ExitCode {
         Some("run") => run(args.next().as_deref()),
         Some("serve") => serve(),
         Some("migrate") => migrate(args.next().as_deref(), args.next().as_deref()),
+        Some("render-graph") => render_graph(),
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph>"
             );
             ExitCode::from(2)
         }
@@ -257,6 +259,35 @@ fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
         output
     );
     ExitCode::SUCCESS
+}
+
+fn render_graph() -> ExitCode {
+    let mut graph = RenderGraph::new();
+    let passes = [
+        Pass::new("shadow", &[], &["shadow_map"]),
+        Pass::new("opaque", &["shadow_map"], &["color"]),
+        Pass::new("post", &["color"], &["backbuffer"]),
+    ];
+    for pass in passes {
+        if let Err(err) = graph.add(pass) {
+            eprintln!("构建渲染图失败：{err}");
+            return ExitCode::from(1);
+        }
+    }
+    match graph.order_names() {
+        Ok(order) => {
+            println!(
+                "render-graph: {} 个 pass -> {}",
+                order.len(),
+                order.join(" -> ")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("渲染图排序失败：{err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn serve() -> ExitCode {
