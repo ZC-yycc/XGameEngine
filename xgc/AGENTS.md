@@ -31,6 +31,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/query.rs` | 双组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` |
 | `crates/xgc-world/src/render_components.rs` | 渲染侧组件：`render.mesh` / `render.material` / `render.camera` |
+| `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source` |
 | `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert（含组件增删与计划内预测集合） |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
@@ -63,7 +64,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 1. M2 第二刀：`PassExecutor` 接 wgpu 资源创建 / 录制。
 2. 旧场景迁移补 Physics / UI 等剩余组件映射。
 3. 跨系统并行执行（批次计划已有；需要世界所有权 / 访问分片 API）。
-4. 现在最大文件 593 行：动它之前先拆。
+4. 现在最大文件 595 行：动它之前先拆。
 
 ## Token 纪律
 

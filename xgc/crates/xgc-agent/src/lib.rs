@@ -37,17 +37,7 @@ impl Default for Agent {
 
 impl Agent {
     pub fn new() -> Self {
-        let mut registry = Registry::new();
-        let _ = registry.register::<xgc_world::Transform>();
-        let _ = registry.register::<xgc_world::Velocity>();
-        let _ = registry.register::<xgc_world::Name>();
-        let _ = registry.register::<xgc_world::Parent>();
-        let _ = registry.register::<xgc_world::GlobalTransform>();
-        let _ = registry.register::<xgc_world::MeshRenderer>();
-        let _ = registry.register::<xgc_world::Material>();
-        let _ = registry.register::<xgc_world::Camera>();
-        let _ = registry.register::<xgc_world::Script>();
-        let _ = registry.register::<xgc_world::AudioSource>();
+        let registry = xgc_world::builtin_registry();
         Self {
             world: World::new(),
             registry,

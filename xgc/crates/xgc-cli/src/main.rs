@@ -11,10 +11,7 @@ use xgc_reflect::Registry;
 use xgc_render::{Pass, RenderGraph, ResourceDesc, ResourceUsage};
 use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
-use xgc_world::{
-    AudioSource, Camera, GlobalTransform, Material, MeshRenderer, Name, Parent, Script, Transform,
-    Velocity, World,
-};
+use xgc_world::{Name, Transform, Velocity, World};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -46,38 +43,7 @@ fn main() -> ExitCode {
 }
 
 fn builtin_registry() -> Result<Registry, String> {
-    let mut registry = Registry::new();
-    registry
-        .register::<Transform>()
-        .map_err(|err| format!("注册 core.transform 失败：{err}"))?;
-    registry
-        .register::<Velocity>()
-        .map_err(|err| format!("注册 core.velocity 失败：{err}"))?;
-    registry
-        .register::<Name>()
-        .map_err(|err| format!("注册 core.name 失败：{err}"))?;
-    registry
-        .register::<Parent>()
-        .map_err(|err| format!("注册 core.parent 失败：{err}"))?;
-    registry
-        .register::<GlobalTransform>()
-        .map_err(|err| format!("注册 core.global_transform 失败：{err}"))?;
-    registry
-        .register::<MeshRenderer>()
-        .map_err(|err| format!("注册 render.mesh 失败：{err}"))?;
-    registry
-        .register::<Material>()
-        .map_err(|err| format!("注册 render.material 失败：{err}"))?;
-    registry
-        .register::<Camera>()
-        .map_err(|err| format!("注册 render.camera 失败：{err}"))?;
-    registry
-        .register::<Script>()
-        .map_err(|err| format!("注册 script.lua 失败：{err}"))?;
-    registry
-        .register::<AudioSource>()
-        .map_err(|err| format!("注册 audio.source 失败：{err}"))?;
-    Ok(registry)
+    Ok(xgc_world::builtin_registry())
 }
 
 fn schema() -> ExitCode {

@@ -13,7 +13,8 @@
 `AddComponent` / `RemoveComponent` + 实体快照撤销、可序列化 `EntityData` / 组件工厂、
 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` +
 `render.mesh` / `render.material` / `render.camera` + `script.lua` / `audio.source`
-十个内建组件、实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希、
+十个内建组件（`xgc_world::builtin_registry` 是 CLI / Agent / xtask 的唯一清单）、
+实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希、
 `World::validate_data` 世界体检）、`xgc-store`（版本化 JSON 包络 + 原子写）、
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `VelocitySystem` / `GravitySystem` / `HierarchySystem` /
@@ -60,8 +61,8 @@ digest / stats / validate → save/load → revert` 闭环；查询 IR 支持
 Audio 已映射到对应组件；Physics / UI 等仍先跳过，报告里计数。真实项目目录 4 个场景、
 35 个实体、48 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（75 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（35 个 Rust 文件最大 593 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（76 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（37 个 Rust 文件最大 595 行）；schema 两次导出逐字节相同，
 10 个内建类型 7688 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /

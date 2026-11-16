@@ -7,12 +7,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use xgc_reflect::Registry;
-use xgc_world::{
-    AudioSource, Camera, GlobalTransform, Material, MeshRenderer, Name, Parent, Script, Transform,
-    Velocity,
-};
-
 const SOFT_FILE_LINES: usize = 600;
 const HARD_FILE_LINES: usize = 1000;
 
@@ -203,21 +197,7 @@ fn manifest_deps(text: &str) -> Vec<String> {
 }
 
 fn schema_check() -> Result<(), String> {
-    let mut registry = Registry::new();
-    for result in [
-        registry.register::<Transform>(),
-        registry.register::<Velocity>(),
-        registry.register::<Name>(),
-        registry.register::<Parent>(),
-        registry.register::<GlobalTransform>(),
-        registry.register::<MeshRenderer>(),
-        registry.register::<Material>(),
-        registry.register::<Camera>(),
-        registry.register::<Script>(),
-        registry.register::<AudioSource>(),
-    ] {
-        result.map_err(|err| err.to_string())?;
-    }
+    let registry = xgc_world::builtin_registry();
 
     let first = serde_json::to_string_pretty(&registry.schema())
         .map_err(|err| format!("schema 序列化失败：{err}"))?;
@@ -225,22 +205,6 @@ fn schema_check() -> Result<(), String> {
         .map_err(|err| format!("schema 序列化失败：{err}"))?;
     if first != second {
         return Err("schema 两次导出不一致".to_string());
-    }
-    for required in [
-        "core.transform",
-        "core.velocity",
-        "core.name",
-        "core.parent",
-        "core.global_transform",
-        "render.mesh",
-        "render.material",
-        "render.camera",
-        "script.lua",
-        "audio.source",
-    ] {
-        if !first.contains(required) {
-            return Err(format!("schema 缺少 {required}"));
-        }
     }
     let diagnostics = registry.validate();
     if !diagnostics.is_empty() {
