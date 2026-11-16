@@ -1,0 +1,10 @@
+# Compatibility-debt ratchet for tools/check-no-compat.ps1.
+# Lower these numbers as the convergence work lands. NEVER raise them.
+# Format: pattern<TAB>count
+v2-suffix	460
+compat-naming	0
+deprecated-attr	0
+serde-alias	0
+dead-code-allow	11
+compat-module	0
+migration-todo	0
