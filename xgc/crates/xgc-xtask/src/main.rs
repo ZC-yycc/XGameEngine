@@ -137,6 +137,16 @@ fn deps(root: &Path) -> Result<(), String> {
             ],
         ),
         ("xgc-script", &["xgc-base", "xgc-world"]),
+        (
+            "xgc-editor",
+            &[
+                "xgc-base",
+                "xgc-reflect",
+                "xgc-sim",
+                "xgc-store",
+                "xgc-world",
+            ],
+        ),
         ("xgc-render", &["xgc-asset", "xgc-base", "xgc-world"]),
         ("xgc-asset", &[]),
         ("xgc-migrate", &["xgc-base", "xgc-world", "xgc-store"]),

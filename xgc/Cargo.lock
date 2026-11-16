@@ -1397,6 +1397,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xgc-editor"
+version = "0.1.0"
+dependencies = [
+ "xgc-base",
+ "xgc-reflect",
+ "xgc-sim",
+ "xgc-store",
+ "xgc-world",
+]
+
+[[package]]
 name = "xgc-migrate"
 version = "0.1.0"
 dependencies = [
