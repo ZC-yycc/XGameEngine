@@ -159,6 +159,7 @@ impl Schedule {
         schedule.add(CharacterSystem);
         schedule.add(AabbCollisionSystem);
         schedule.add(AnimatorSystem);
+        schedule.add(UiLayoutSystem::default());
         schedule.add(HierarchySystem::default());
         schedule
     }
@@ -221,7 +222,7 @@ mod systems;
 pub use animation::{load_clip_ron, AnimationClip, AnimationLibrary, TranslationKey};
 pub use systems::{
     AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
-    GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,
+    GroundCollisionSystem, HierarchySystem, PhysicsSystem, UiLayoutSystem, VelocitySystem,
 };
 
 pub struct Simulation {

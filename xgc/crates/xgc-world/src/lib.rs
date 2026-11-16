@@ -38,7 +38,7 @@ pub use plugin_components::PluginComponent;
 pub use registry::builtin_registry;
 pub use render_components::{Camera, Material, MeshRenderer};
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
-pub use ui_components::UiElement;
+pub use ui_components::{UiElement, UiLayout};
 pub use xgc_reflect::{ComponentId, Value};
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
 ///

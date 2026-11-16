@@ -4,11 +4,11 @@ use xgc_base::EntityId;
 use xgc_sim::{
     play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem,
     FrameCommands, GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario, Schedule,
-    SimError, Simulation, System, SystemAccess, VelocitySystem,
+    SimError, Simulation, System, SystemAccess, UiLayoutSystem, VelocitySystem,
 };
 use xgc_world::{
     Animator, CharacterController, Command, Component, ComponentId, GlobalTransform, Name, Parent,
-    PhysicsBody, Transform, Value, Velocity, World,
+    PhysicsBody, Transform, UiElement, UiLayout, Value, Velocity, World,
 };
 
 fn build_scenario() -> Scenario {
@@ -117,6 +117,7 @@ fn velocity_system_moves_transform() {
             "character",
             "aabb",
             "animation",
+            "ui_layout",
             "hierarchy"
         ]
     );
@@ -505,4 +506,28 @@ fn character_jump_consumes_request_when_grounded() {
     assert_eq!(velocity.linear[1], 6.0);
     assert!(!controller.jump);
     assert!(!controller.grounded);
+}
+
+#[test]
+fn ui_layout_resolves_anchor_and_offsets() {
+    let mut world = World::new();
+    let entity = world.spawn((
+        UiElement {
+            anchor_min: [0.5, 0.0],
+            anchor_max: [0.5, 0.0],
+            offset_min: [10.0, 20.0],
+            offset_max: [110.0, 60.0],
+            visible: true,
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    let mut schedule = Schedule::new();
+    schedule.add(UiLayoutSystem {
+        viewport: [200.0, 100.0],
+    });
+    schedule.run(&mut world, 0.016);
+    let layout = world.get::<UiLayout>(entity).unwrap();
+    assert_eq!(layout.rect, [110.0, 20.0, 100.0, 40.0]);
+    assert!(layout.visible);
 }

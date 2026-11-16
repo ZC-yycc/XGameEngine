@@ -193,6 +193,10 @@ fn maps_ui_element() {
     assert_eq!(field("offset_min").as_vec2(), Some([24.0, 24.0]));
     assert_eq!(field("corner_radius").as_f32(), Some(10.0));
     assert_eq!(field("visible"), Value::Bool(true));
+    assert!(world.entities[0]
+        .components
+        .iter()
+        .any(|component| component.component == xgc_world::UiLayout::ID));
 }
 
 #[test]

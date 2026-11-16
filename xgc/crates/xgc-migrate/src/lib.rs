@@ -14,7 +14,7 @@ use xgc_base::EntityId;
 use xgc_world::{
     Animator as XgcAnimator, AudioSource, Camera, CharacterController as XgcCharacter, Component,
     ComponentData, EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody,
-    Script, Transform, Value, WorldData,
+    Script, Transform, UiLayout, Value, WorldData,
 };
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
 mod old_lod;
@@ -471,6 +471,10 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         }
         if let Some(ui) = ui {
             components.push(ui);
+            components.push(ComponentData {
+                component: UiLayout::ID,
+                fields: Vec::new(),
+            });
         }
         if let Some(particle) = particle {
             components.push(particle);

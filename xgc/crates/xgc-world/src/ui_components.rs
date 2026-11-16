@@ -187,3 +187,61 @@ fn vec4_f64(value: [f32; 4]) -> [f64; 4] {
         f64::from(value[3]),
     ]
 }
+
+/// 运行时布局结果：屏幕空间矩形（x / y / width / height）与可见性。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiLayout {
+    pub rect: [f32; 4],
+    pub visible: bool,
+}
+
+impl Default for UiLayout {
+    fn default() -> Self {
+        Self {
+            rect: [0.0, 0.0, 100.0, 40.0],
+            visible: true,
+        }
+    }
+}
+
+impl Component for UiLayout {
+    const ID: ComponentId = ComponentId(0x0602);
+    const NAME: &'static str = "ui.layout";
+
+    fn default_value() -> Self {
+        Self::default()
+    }
+
+    fn doc() -> &'static str {
+        "UI 布局结果：屏幕矩形 + 可见性，由 UiLayoutSystem 写入"
+    }
+
+    fn fields() -> Vec<FieldDescriptor> {
+        vec![
+            FieldDescriptor::new(
+                "rect",
+                FieldType::Vec4,
+                Value::Vec4([0.0, 0.0, 100.0, 40.0]),
+            )
+            .doc("x / y / width / height（像素）"),
+            FieldDescriptor::new("visible", FieldType::Bool, Value::Bool(true)),
+        ]
+    }
+
+    fn get_field(&self, field: &str) -> Option<Value> {
+        match field {
+            "rect" => Some(Value::Vec4(vec4_f64(self.rect))),
+            "visible" => Some(Value::Bool(self.visible)),
+            _ => None,
+        }
+    }
+
+    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
+        match field {
+            "rect" => self.rect = vec4(value, field)?,
+            "visible" => self.visible = boolean(value, field)?,
+            _ => return Err(format!("ui.layout 没有字段 {field}")),
+        }
+        Ok(())
+    }
+}
