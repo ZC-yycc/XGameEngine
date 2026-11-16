@@ -85,7 +85,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
-| `crates/xgc-asset/src/cook.rs` | `cook_project` / `cook_project_filtered` / `file_entry` / `verify_manifest`：按 GUID 引用裁剪、`.meta` / `.bin` 伴生、确定性 manifest、哈希校验 |
+| `crates/xgc-asset/src/cook.rs` | `cook_project` / `cook_project_filtered`：按 GUID 裁剪、`.meta` / `.bin` 伴生、哈希未变跳过写入、清陈旧文件、manifest 聚合签名与校验 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
 | `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态） |
@@ -140,10 +140,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 动画：关节遮罩已通；下一步混合权重细调。
+1. 资产：增量 + 签名已通；下一步跨机器增量 / 密码学签名。
 2. 脚本：正式 System 调度与脚本组件生命周期完整化。
-3. 资产：发布签名 / 增量烹饪。
-4. 旧新视觉 / trace 对照。
+3. 旧新视觉 / trace 对照。
+4. 动画：混合权重细调。
 5. 现在最大文件 595 行：动它之前先拆。
 
 ## Token 纪律

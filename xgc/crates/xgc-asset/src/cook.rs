@@ -1,6 +1,6 @@
 //! 资产烹饪：把运行时需要的源资产复制到输出目录，并写确定性 manifest。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +23,8 @@ pub struct CookedFile {
 pub struct CookManifest {
     pub version: u32,
     pub files: Vec<CookedFile>,
+    #[serde(default)]
+    pub signature: String,
 }
 
 /// 复制资产并返回按路径排序的 manifest；输出目录里上一次 manifest 的文件先清理。
@@ -40,7 +42,15 @@ pub fn cook_project_filtered(
         return Err(format!("项目根不是目录：{}", root.display()));
     }
     fs::create_dir_all(out).map_err(|err| format!("创建输出目录失败：{err}"))?;
-    clean_previous(out)?;
+    let previous = read_manifest(out)
+        .map(|manifest| {
+            manifest
+                .files
+                .into_iter()
+                .map(|file| (file.path, file.hash))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     let mut files = Vec::new();
     collect(root, root, out, &mut files)?;
     if let Some(keep) = keep {
@@ -64,6 +74,7 @@ pub fn cook_project_filtered(
     let mut manifest = CookManifest {
         version: COOK_VERSION,
         files: Vec::with_capacity(files.len()),
+        signature: String::new(),
     };
     for (source, relative) in files {
         let destination = out.join(&relative);
@@ -72,17 +83,24 @@ pub fn cook_project_filtered(
         }
         let bytes =
             fs::read(&source).map_err(|err| format!("读取 {} 失败：{err}", source.display()))?;
-        fs::write(&destination, &bytes)
-            .map_err(|err| format!("写入 {} 失败：{err}", destination.display()))?;
+        let hash = fnv_hex(&bytes);
+        let reusable = previous.get(&relative) == Some(&hash) && destination.is_file();
+        if !reusable {
+            fs::write(&destination, &bytes)
+                .map_err(|err| format!("写入 {} 失败：{err}", destination.display()))?;
+        }
         manifest.files.push(CookedFile {
             path: relative,
             size: bytes.len() as u64,
-            hash: fnv_hex(&bytes),
+            hash,
         });
     }
-    let text = serde_json::to_string_pretty(&manifest)
-        .map_err(|err| format!("manifest 序列化失败：{err}"))?;
-    fs::write(out.join(MANIFEST), text).map_err(|err| format!("写入 manifest 失败：{err}"))?;
+    for stale in previous.keys() {
+        if !manifest.files.iter().any(|file| file.path == *stale) {
+            let _ = fs::remove_file(out.join(stale));
+        }
+    }
+    write_manifest(out, &manifest)?;
     Ok(manifest)
 }
 
@@ -125,21 +143,20 @@ fn collect(
     Ok(())
 }
 
-fn clean_previous(out: &Path) -> Result<(), String> {
-    let path = out.join(MANIFEST);
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(());
-    };
-    let Ok(manifest) = serde_json::from_str::<CookManifest>(&text) else {
-        return Ok(());
-    };
-    for file in manifest.files {
-        let target = out.join(&file.path);
-        if target.starts_with(out) {
-            let _ = fs::remove_file(target);
+fn read_manifest(out: &Path) -> Option<CookManifest> {
+    let text = fs::read_to_string(out.join(MANIFEST)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn signature(files: &[CookedFile]) -> String {
+    let mut state = 0xcbf2_9ce4_8422_2325u64;
+    for file in files {
+        for byte in file.path.as_bytes().iter().chain(file.hash.as_bytes()) {
+            state ^= u64::from(*byte);
+            state = state.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
-    Ok(())
+    format!("{state:016x}")
 }
 
 pub fn file_entry(out: &Path, relative: &str) -> Result<CookedFile, String> {
@@ -153,7 +170,9 @@ pub fn file_entry(out: &Path, relative: &str) -> Result<CookedFile, String> {
 }
 
 pub fn write_manifest(out: &Path, manifest: &CookManifest) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(manifest)
+    let mut manifest = manifest.clone();
+    manifest.signature = signature(&manifest.files);
+    let text = serde_json::to_string_pretty(&manifest)
         .map_err(|err| format!("manifest 序列化失败：{err}"))?;
     fs::write(out.join(MANIFEST), text).map_err(|err| format!("写入 manifest 失败：{err}"))
 }
@@ -169,6 +188,9 @@ pub fn verify_manifest(out: &Path) -> Result<(), Vec<String>> {
         Err(err) => return Err(vec![format!("cook.json 解析失败：{err}")]),
     };
     let mut differences = Vec::new();
+    if !manifest.signature.is_empty() && manifest.signature != signature(&manifest.files) {
+        differences.push("manifest 签名不匹配".to_string());
+    }
     for file in manifest.files {
         let path = out.join(&file.path);
         match fs::read(&path) {
