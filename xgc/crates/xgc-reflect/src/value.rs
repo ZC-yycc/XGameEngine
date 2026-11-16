@@ -31,6 +31,13 @@ impl Value {
         }
     }
 
+    pub fn as_vec2(&self) -> Option<[f32; 2]> {
+        match self {
+            Self::Vec2(value) => Some([value[0] as f32, value[1] as f32]),
+            _ => None,
+        }
+    }
+
     pub fn as_vec3(&self) -> Option<[f32; 3]> {
         match self {
             Self::Vec3(value) => Some([value[0] as f32, value[1] as f32, value[2] as f32]),

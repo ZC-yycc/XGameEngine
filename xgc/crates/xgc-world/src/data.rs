@@ -13,7 +13,8 @@ use xgc_reflect::{Component, ComponentId, Value};
 
 use super::{
     Animator, AudioSource, Camera, CharacterController, Column, EntitySnapshot, GlobalTransform,
-    Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform, Velocity, World,
+    Material, MeshRenderer, Name, Parent, PhysicsBody, Script, Transform, UiElement, Velocity,
+    World,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -133,6 +134,7 @@ impl World {
         self.register_component::<PhysicsBody>();
         self.register_component::<Animator>();
         self.register_component::<CharacterController>();
+        self.register_component::<UiElement>();
     }
 
     pub fn register_component<T: Component>(&mut self) {

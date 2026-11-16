@@ -25,8 +25,8 @@ mod query;
 mod registry;
 mod render_components;
 mod snapshot;
+mod ui_components;
 mod validate;
-
 pub use animation_components::Animator;
 pub use character_components::CharacterController;
 pub use command::{Applied, Command, Plan};
@@ -39,8 +39,8 @@ pub use physics_components::PhysicsBody;
 pub use registry::builtin_registry;
 pub use render_components::{Camera, Material, MeshRenderer};
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
+pub use ui_components::UiElement;
 pub use xgc_reflect::{ComponentId, Value};
-
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
 ///
 /// 这是 crate 内部接口；`Bundle` 的签名需要它，所以公开但不对使用方承诺稳定性。

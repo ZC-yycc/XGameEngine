@@ -4,7 +4,7 @@ use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
     Animator as XgcAnimator, AudioSource, Camera, CharacterController as XgcCharacter, Component,
     ComponentId, GlobalTransform, Material, MeshRenderer, Name, Parent, PhysicsBody, Script,
-    Transform, Value,
+    Transform, UiElement, Value,
 };
 
 const SCENE: &str = r#"(
@@ -396,4 +396,75 @@ fn maps_character() {
     assert_eq!(field("height").as_f32(), Some(1.8));
     assert_eq!(field("step_offset").as_f32(), Some(0.35));
     assert_eq!(field("snap_to_ground").as_f32(), Some(0.3));
+}
+
+#[test]
+fn maps_ui_element() {
+    let scene = r#"(
+        format_version: 2,
+        name: "Ui",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "HUD",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Ui((
+                                kind: Panel,
+                                anchor_min: (0.0, 0.0),
+                                anchor_max: (0.0, 0.0),
+                                offset_min: (24.0, 24.0),
+                                offset_max: (364.0, 200.0),
+                                style: (
+                                    background: (0.1, 0.2, 0.3, 0.8),
+                                    border_color: (0.2, 0.2, 0.2, 1.0),
+                                    border_width: 1.0,
+                                    corner_radius: 10.0,
+                                    padding: 6.0,
+                                ),
+                                text: (
+                                    content: "",
+                                    size: 20.0,
+                                    color: (1.0, 1.0, 1.0, 1.0),
+                                ),
+                                visible: true,
+                                interactable: true,
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let ui = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == UiElement::ID)
+        .unwrap();
+    let field = |name: &str| {
+        ui.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    assert_eq!(field("kind"), Value::String("panel".to_string()));
+    assert_eq!(field("offset_min").as_vec2(), Some([24.0, 24.0]));
+    assert_eq!(field("corner_radius").as_f32(), Some(10.0));
+    assert_eq!(field("visible"), Value::Bool(true));
 }

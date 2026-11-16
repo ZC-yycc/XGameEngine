@@ -17,11 +17,10 @@ use xgc_world::{
     ComponentData, ComponentId, EntityData, GlobalTransform, Material, MeshRenderer, Name, Parent,
     PhysicsBody, Script, Transform, Value, WorldData,
 };
-
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
+mod old_ui;
 mod report;
 pub use report::{MigrationBatch, MigrationError, MigrationReport};
-
 #[derive(Debug, Deserialize)]
 struct OldScene {
     format_version: u32,
@@ -238,6 +237,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut physics = None;
         let mut animator = None;
         let mut character = None;
+        let mut ui = None;
         for entry in &old.components.entries {
             match &entry.data {
                 OldComponentData::Mesh(mesh) => {
@@ -286,6 +286,10 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                         .into_rust()
                         .map_err(|err| MigrationError::Parse(err.to_string()))?;
                     character = Some(old);
+                    report.mapped_components += 1;
+                }
+                OldComponentData::Ui(value) => {
+                    ui = Some(old_ui::convert(value.clone()).map_err(MigrationError::Parse)?);
                     report.mapped_components += 1;
                 }
                 OldComponentData::Animator(old_animator) => {
@@ -437,6 +441,9 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     ),
                 ],
             });
+        }
+        if let Some(ui) = ui {
+            components.push(ui);
         }
         if let Some(path) = script_path {
             components.push(ComponentData {

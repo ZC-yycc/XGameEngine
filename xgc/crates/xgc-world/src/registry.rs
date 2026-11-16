@@ -5,7 +5,7 @@ use xgc_reflect::Registry;
 
 use super::{
     Animator, AudioSource, Camera, CharacterController, GlobalTransform, Material, MeshRenderer,
-    Name, Parent, PhysicsBody, Script, Transform, Velocity,
+    Name, Parent, PhysicsBody, Script, Transform, UiElement, Velocity,
 };
 
 pub fn builtin_registry() -> Registry {
@@ -49,5 +49,8 @@ pub fn builtin_registry() -> Registry {
     registry
         .register::<CharacterController>()
         .expect("内置组件注册失败：physics.character");
+    registry
+        .register::<UiElement>()
+        .expect("内置组件注册失败：ui.element");
     registry
 }
