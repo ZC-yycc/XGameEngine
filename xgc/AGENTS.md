@@ -14,6 +14,7 @@ cargo test --workspace --offline
 cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo run -q -p xgc-xtask --offline -- check
 cargo run -q -p xgc-cli --offline -- check
+cargo run -q -p xgc-cli --offline -- run 60
 cargo run -q --release -p xgc-cli --offline -- bench
 ```
 
@@ -34,8 +35,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `WorldSnapshot` / 恢复 |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
+| `crates/xgc-sim/src/lib.rs` | `Scenario` / `Trace` / `play` / `verify`：最小帧循环 |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check / bench / export / import` |
+| `crates/xgc-cli/src/main.rs` | `xgc schema / check / bench / export / import / run` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
 ## 不变量（改代码前先看）
@@ -49,10 +51,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. M1 第七刀：帧循环 / 回放（`Simulation` + 输入帧 + 逐帧 state hash），
-   `xgc run --frames`。
-2. M1 第八刀：Agent 协议最小集（`engine.describe` / `world.query` / `edit.plan`），
+1. M1 第八刀：Agent 协议最小集（`engine.describe` / `world.query` / `edit.plan`），
    `xgc serve --transport stdio`；`xgc check` 从 schema 检查扩到项目 / 场景。
+2. M1 第九刀：系统调度骨架（阶段 / 访问声明 / 确定性合并），再逐个接系统。
 3. world 文件接近 600 行：先拆 `world/` 的 storage 与 service，再扩。
 4. 再往后的渲染 / 物理 / 脚本 / 编辑器见主文档 §14，别提前开分支。
 

@@ -5,6 +5,7 @@ members = [
     "crates/xgc-reflect",
     "crates/xgc-world",
     "crates/xgc-store",
+    "crates/xgc-sim",
     "crates/xgc-cli",
     "crates/xgc-xtask",
 ]

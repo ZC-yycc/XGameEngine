@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use xgc_reflect::Registry;
+use xgc_sim::{play, Scenario};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
 
@@ -17,13 +18,14 @@ fn main() -> ExitCode {
         Some("bench") => bench(),
         Some("export") => export(args.next().as_deref()),
         Some("import") => import(args.next().as_deref()),
+        Some("run") => run(args.next().as_deref()),
         Some(other) => {
             eprintln!("未知命令：{other}");
-            eprintln!("用法：xgc <schema|check|bench|export <路径>|import <路径>>");
+            eprintln!("用法：xgc <schema|check|bench|export <路径>|import <路径>|run [帧数]>");
             ExitCode::from(2)
         }
         None => {
-            eprintln!("用法：xgc <schema|check|bench|export <路径>|import <路径>>");
+            eprintln!("用法：xgc <schema|check|bench|export <路径>|import <路径>|run [帧数]>");
             ExitCode::from(2)
         }
     }
@@ -147,6 +149,42 @@ fn import(path: Option<&str>) -> ExitCode {
         world.state_hash()
     );
     ExitCode::SUCCESS
+}
+
+fn run(frames: Option<&str>) -> ExitCode {
+    let frames: u64 = match frames {
+        Some(text) => match text.parse() {
+            Ok(frames) => frames,
+            Err(_) => {
+                eprintln!("帧数不是整数：{text}");
+                return ExitCode::from(2);
+            }
+        },
+        None => 60,
+    };
+    let world = demo_world();
+    let scenario = Scenario {
+        initial: world.world_data(),
+        frames,
+        commands: Vec::new(),
+    };
+    match play(&scenario) {
+        Ok((_world, trace)) => {
+            if let Some(last) = trace.frames.last() {
+                println!(
+                    "run: frames={frames} entities={} revision={} hash={:016x}",
+                    last.entities, last.revision, last.state_hash
+                );
+            } else {
+                println!("run: frames=0");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("运行失败：{err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn bench() -> ExitCode {
