@@ -9,8 +9,10 @@ use xgc_agent::Agent;
 use xgc_asset::scan as scan_assets;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
-use xgc_script::LuaHost;
-use xgc_sim::{play, write_wav_mono, AnimationLibrary, AudioLibrary, Scenario, SoftwareMixer};
+use xgc_script::{LuaHost, ScriptRuntime};
+use xgc_sim::{
+    play, write_wav_mono, AnimationLibrary, AudioLibrary, Scenario, Simulation, SoftwareMixer,
+};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
 
@@ -26,6 +28,11 @@ fn main() -> ExitCode {
         Some("export") => export(args.next().as_deref()),
         Some("import") => import(args.next().as_deref()),
         Some("run") => run(args.next().as_deref()),
+        Some("run-scripts") => run_scripts(
+            args.next().as_deref(),
+            args.next().as_deref(),
+            args.next().as_deref(),
+        ),
         Some("serve") => serve(),
         Some("migrate") => migrate(args.next().as_deref(), args.next().as_deref()),
         Some("render-graph") => render::render_graph(),
@@ -424,6 +431,54 @@ fn serve() -> ExitCode {
             }
         }
     }
+    ExitCode::SUCCESS
+}
+
+fn run_scripts(
+    world_path: Option<&str>,
+    script_dir: Option<&str>,
+    frames: Option<&str>,
+) -> ExitCode {
+    let (Some(world_path), Some(script_dir)) = (world_path, script_dir) else {
+        eprintln!("用法：xgc run-scripts <世界.json> <脚本目录> [帧数]");
+        return ExitCode::from(2);
+    };
+    let frames: u64 = match frames.map(str::parse::<u64>).transpose() {
+        Ok(frames) => frames.unwrap_or(60),
+        Err(_) => {
+            eprintln!("帧数不是整数");
+            return ExitCode::from(2);
+        }
+    };
+    let data = match load_world(Path::new(world_path)) {
+        Ok(data) => data,
+        Err(err) => {
+            eprintln!("加载世界失败：{err}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut world = World::new();
+    if let Err(err) = world.restore_world_data(&data) {
+        eprintln!("恢复世界失败：{err}");
+        return ExitCode::from(2);
+    }
+    let mut simulation = Simulation::new(world);
+    let mut runtime = ScriptRuntime::new(script_dir);
+    for _ in 0..frames {
+        if let Err(err) = simulation.step_with(Vec::new(), |world| {
+            runtime.run_frame(world, 1.0 / 60.0);
+        }) {
+            eprintln!("运行失败：{err:?}");
+            return ExitCode::from(2);
+        }
+    }
+    let record = simulation.world().world_data();
+    println!(
+        "run-scripts: frames={frames} entities={} revision={} hash={:016x}",
+        record.entities.len(),
+        record.revision,
+        simulation.world().state_hash()
+    );
     ExitCode::SUCCESS
 }
 

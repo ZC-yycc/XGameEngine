@@ -40,6 +40,21 @@ impl ScriptRuntime {
             }
         });
         scripts.sort_by_key(|(entity, _)| *entity);
+        let live: HashSet<EntityId> = scripts.iter().map(|(entity, _)| *entity).collect();
+        let stale: Vec<EntityId> = self
+            .entries
+            .keys()
+            .filter(|entity| !live.contains(entity))
+            .copied()
+            .collect();
+        for entity in stale {
+            if let Some(entry) = self.entries.remove(&entity) {
+                if let Err(err) = entry.host.destroy() {
+                    eprintln!("script: {err}");
+                }
+            }
+            self.started.remove(&entity);
+        }
         let mut pending = Vec::new();
         for (entity, path) in scripts {
             if !self.entries.contains_key(&entity) {

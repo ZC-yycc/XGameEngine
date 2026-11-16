@@ -62,7 +62,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/snapshot.rs` | `world.snapshot` / `world.restore`：WorldData 快照与恢复 |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表、指令预算、内存上限、脚本登记 / 热重载、生命周期钩子 |
-| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、磁盘热重载 |
+| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、命令结算、实体移除时 `on_destroy`、磁盘热重载 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
@@ -90,7 +90,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav>` |
+| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本>` |
 | `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
@@ -105,7 +105,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 脚本：内存上限 / 帧接入点已接；下一步完整引擎 API 与正式调度集成。
+1. 脚本：`run-scripts` 已接；下一步完整引擎 API 与正式 System 调度。
 2. 动画：CPU 蒙皮已接；下一步蒙皮 GPU 管线 / 骨骼层级导入。
 3. UI：圆角 / scissor 已接；下一步 UI 绘制批次。
 4. 音频：播放设备 / 流式缓冲。
