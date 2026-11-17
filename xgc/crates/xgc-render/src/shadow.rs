@@ -2,11 +2,8 @@
 //!
 //! CPU 侧的级联拟合在 `shadow_csm`（纯函数、可单测）；这里只负责资源与绘制。
 
-use super::assets::MeshCache;
 use super::draw::DrawItem;
 use super::gpu::GpuContext;
-use super::gpu_mesh::GpuMeshCache;
-use super::texture_bind::TextureBinding;
 
 pub use super::shadow_csm::{
     cascade_shadow_matrices, fit_directional_shadow, ShadowCascades, SHADOW_CASCADES,
@@ -35,6 +32,14 @@ fn vs(@location(0) position: vec3<f32>, @builtin(instance_index) index: u32) -> 
 }
 "#;
 
+/// 阴影 pass 与旧引擎同款：constant 2 / slope_scale 2 抵消自阴影条纹。
+/// 静态与 GPU 蒙皮投射体共用这一份，否则同一表面的条纹会分成两套。
+pub(super) const CASTER_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: 2,
+    slope_scale: 2.0,
+    clamp: 0.0,
+};
+
 /// 阴影图 + 比较采样器 + 深度 pass 管线（设备生命周期内复用）。
 pub(crate) struct ShadowTarget {
     map_view: wgpu::TextureView,
@@ -44,6 +49,8 @@ pub(crate) struct ShadowTarget {
     fallback_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
+    /// GPU palette 变形的投射体（与静态那支共用同一批级联 pass）。
+    skin: super::shadow_skin::SkinnedShadow,
     frame_layout: wgpu::BindGroupLayout,
     instance_layout: wgpu::BindGroupLayout,
 }
@@ -145,12 +152,7 @@ impl ShadowTarget {
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
-                // 与旧引擎阴影 pass 同款：constant 2 / slope_scale 2 抵消自阴影条纹。
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
-                },
+                bias: CASTER_DEPTH_BIAS,
             }),
             multisample: wgpu::MultisampleState::default(),
             fragment: None,
@@ -183,6 +185,7 @@ impl ShadowTarget {
         }
         let layer_views: [wgpu::TextureView; SHADOW_CASCADES] =
             layer_views.try_into().expect("层数固定");
+        let skin = super::shadow_skin::SkinnedShadow::new(context, &frame_layout);
         Self {
             map_view,
             layer_views,
@@ -198,6 +201,7 @@ impl ShadowTarget {
             }),
             sampler,
             pipeline,
+            skin,
             frame_layout,
             instance_layout,
         }
@@ -213,23 +217,28 @@ impl ShadowTarget {
         (view, &self.sampler)
     }
 
-    /// 把**静态** draw 画进深度数组：每级一个 pass（每层各自清一次、各用一份
-    /// 光视图投影）。蒙皮投射后续再补（GPU 蒙皮路径这里跳过）。
+    /// 把 draw list 画进深度数组：每级一个 pass（每层各自清一次、各用一份光视图投影）。
+    /// 静态网格与蒙皮网格都要投射；蒙皮那支走 `shadow_skin` 的 palette 管线。
     pub(crate) fn render(
         &self,
         context: &GpuContext,
         cascades: &ShadowCascades,
         items: &[DrawItem],
-        gpu_meshes: &mut GpuMeshCache,
-        meshes: &mut MeshCache,
-        textures: &TextureBinding,
+        sources: &mut super::shadow_skin::CasterSources<'_>,
     ) -> Result<(), String> {
         if items.is_empty() || cascades.count == 0 {
             return Ok(());
         }
-        let mut bytes = Vec::with_capacity(items.len() * 64);
-        for item in items {
-            for value in item.transform {
+        let casters = super::shadow_skin::prepare(context, items, sources)?;
+        if casters.is_empty() {
+            return Ok(());
+        }
+        // 蒙皮绑定每帧只建一次（4 级级联复用），不在 pass 里逐级重建。
+        let skin_bindings = self.skin.bindings(context, &casters);
+        let skin_meshes = &*sources.skin_meshes;
+        let mut bytes = Vec::with_capacity(casters.len() * 64);
+        for caster in &casters {
+            for value in caster.model {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
         }
@@ -290,15 +299,12 @@ impl ShadowTarget {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &frame_bind, &[]);
             pass.set_bind_group(1, &instance_bind, &[]);
-            for (index, item) in items.iter().enumerate() {
-                let Some(mesh) = meshes.get(&item.model).map_err(|err| err.to_string())? else {
-                    continue;
-                };
-                if mesh.positions.is_empty() {
+            for (index, caster) in casters.iter().enumerate() {
+                // GPU 蒙皮投射体由 `shadow_skin` 用 palette 管线画，这里跳过。
+                if caster.skins_here() {
                     continue;
                 }
-                gpu_meshes.upload(context, &item.model, mesh, textures);
-                let Some(gpu) = gpu_meshes.get(&item.model) else {
+                let Some(gpu) = sources.gpu_meshes.get(&caster.mesh_key) else {
                     continue;
                 };
                 let slot = index as u32;
@@ -310,6 +316,8 @@ impl ShadowTarget {
                     pass.draw(0..gpu.vertices, slot..slot + 1);
                 }
             }
+            self.skin
+                .draw(&mut pass, &frame_bind, &skin_bindings, skin_meshes);
         }
         context.queue().submit(Some(encoder.finish()));
         Ok(())

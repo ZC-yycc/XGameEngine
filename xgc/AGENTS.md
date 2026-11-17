@@ -109,7 +109,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
-| `crates/xgc-render/src/skinned.rs` | GPU 蒙皮顶点入口：64 关节 uniform、权重归一、palette 可表示性路由；UV / 基色贴图绑定后与静态实例共享主场景 PBR；>64 或不完整 palette 回退 CPU |
+| `crates/xgc-render/src/skinned.rs` | GPU 蒙皮顶点入口：64 关节 uniform、权重归一、palette 可表示性路由；UV / 基色贴图绑定后与静态实例共享主场景 PBR；>64 或不完整 palette 回退 CPU；`palette_bytes` 是 `pose × inverse_bind` 的唯一 CPU 计算处（主场景与阴影共用） |
+| `crates/xgc-render/src/skin_vertex.wgsl` | GPU 蒙皮顶点变形唯一真相源：palette 绑定 + `Σwₖ·palette·pos` 与权重归一；主场景与阴影入口都 include 这一份 |
+| `crates/xgc-render/src/shadow_skin.rs` | 阴影 pass 的蒙皮投射体：把 draw 解析成 caster（GPU palette / CPU 回退已变形顶点 / 静态），每帧每 caster 建一次 palette+model 绑定供 4 级级联复用 |
+| `crates/xgc-render/src/shadow_skin.wgsl` | 蒙皮阴影顶点入口：只复用 `skin_vertex.wgsl` 的变形公式与光视图投影，纯深度 pass 不着色 |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（保留给纯位图调试文本；UI 文本已走 `font.rs`） |
 | `crates/xgc-render/src/font.rs` | 真字体文本：`ab_glyph` + 与旧端同一套系统字体候选（msyh / **msyhbd 粗体** / Deng / simhei…）、shelf 字形图集（RGBA8，rgb=255 / alpha=覆盖率）、换行 / 对齐 / 字体原生 kerning；粗体缺失时静默退回常规字重，字体缺失时静默跳过 |
@@ -121,7 +124,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/material.rs` | `.mat` 材质资产解析（基色乘子 + metallic / roughness，加载边界清洗） |
 | `crates/xgc-render/src/tone.rs` | ACES 曲线 CPU 镜像与 8 位对表辅助；另含着色器平光口径的 CPU 镜像（`ambient_light` / `fresnel_schlick` / `sky_kd_env`），平光测试期望值由它现算 |
 | `crates/xgc-render/src/shadow_csm.rs` | 方向光阴影 CPU 侧：单级拟合 `fit_directional_shadow`（关 CSM 的等价退路）+ **4 级 CSM** `cascade_splits`（λ=0.7）/ `cascade_shadow_matrices`（逐级紧致正交拟合、纹素吸附防抖），与旧端逐行同式 |
-| `crates/xgc-render/src/shadow.rs` | 方向光阴影 GPU 侧：2048² 深度**数组**（每层一级）+ 逐级深度 pass；接收端按视线深度选层 + 3×3 PCF、偏置随 N·L 放大；不做 PCSS / 点光 |
+| `crates/xgc-render/src/shadow.rs` | 方向光阴影 GPU 侧：2048² 深度**数组**（每层一级）+ 逐级深度 pass；静态与蒙皮投射体共用同一支 pass 与同一套 depth bias；接收端按视线深度选层 + 3×3 PCF、偏置随 N·L 放大；不做 PCSS / 点光 |
 | `crates/xgc-render/src/sky_draw.rs` | 天空盒 pass：全屏三角形 + 解析天空逐像素求值（远平面 / `LessEqual` / 不写深度），`inv_view_proj` 反推视线方向 |
 | `crates/xgc-render/src/renderer/hdr.rs` | HDR 中间目标与呈现：按尺寸缓存 `Rgba16Float` 场景纹理，按输出格式缓存全屏 tone-map pipeline |
 | `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 真字体文本 / 图片在 tone-map 后画到显示目标（从 `renderer.rs` 按行数预算拆出；字形先排版后上传图集） |
@@ -134,7 +137,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/scene_shading.wgsl` | 静态 / GPU 蒙皮唯一主场景片元真相源：Frame / 贴图 binding、环境光菲涅尔、Cook-Torrance、天空 SH / 环境反射、CSM PCF，输出线性 HDR |
 | `crates/xgc-render/src/tone_map.wgsl` | GPU 唯一 ACES 真相源：从 HDR 逐像素 `textureLoad`，全屏三角形写显示目标并固定 alpha=1 |
 | `crates/xgc-render/src/instanced.wgsl` | 静态实例顶点入口：读取 group(1) 实例 model / color / material，输出共享 `SceneVsOut` |
-| `crates/xgc-render/src/skinned.wgsl` | GPU 蒙皮顶点入口：group(1) 64 关节 palette + group(3) model / material，权重归一后输出共享 `SceneVsOut` |
+| `crates/xgc-render/src/skinned.wgsl` | GPU 蒙皮主场景顶点入口：group(3) model / material + share 的变形函数，输出共享 `SceneVsOut` |
 | `crates/xgc-render/src/shot.rs` | 截图取景：`Bounds` 拟合、顺光视轴（由场景主方向光推）、近远裁剪；`render_shot` 优先场景相机 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData` + `base_color_factor` + `uvs` + 基色贴图（`Arc<TextureData>`）；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / 首图元材质 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
@@ -170,7 +173,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES 与 tone 后 UI 已贯通（frame-150 对旧端 mean_abs 0.61）。下一刀补蒙皮网格投射阴影 / 256 关节 palette，再回物理角色控制器 / 关节。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、tone 后 UI、蒙皮网格投射 CSM 阴影已贯通（frame-150 对旧端 mean_abs 0.61）。下一刀补 256 关节 GPU palette 与"按当前姿态求 CSM bounds"（现在 `scene_bounds` 仍按绑定姿态，大位移关节点可能落在级联拟合外），再回物理角色控制器 / 关节。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

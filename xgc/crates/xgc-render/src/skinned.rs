@@ -9,8 +9,11 @@ use super::mesh::Mesh;
 use super::texture_bind::TextureBinding;
 
 const MAX_JOINTS: usize = 64;
+/// 64 × mat4x4<f32>：palette uniform 的字节数（主场景与阴影 pass 共用）。
+pub(crate) const MAX_JOINTS_BYTES: usize = MAX_JOINTS * 64;
 const SKINNED_WGSL: &str = concat!(
     include_str!("scene_shading.wgsl"),
+    include_str!("skin_vertex.wgsl"),
     include_str!("skinned.wgsl")
 );
 
@@ -25,6 +28,25 @@ pub(crate) struct GpuSkinMesh {
     indices: u32,
 }
 
+impl GpuSkinMesh {
+    /// 阴影 pass 需要的三个顶点流：位置 / 关节下标 / 权重（UV 与贴图不参与深度）。
+    pub(crate) fn shadow_buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer) {
+        (&self.position, &self.joints, &self.weights)
+    }
+
+    pub(crate) fn shadow_index_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.index_buffer.as_ref()
+    }
+
+    pub(crate) fn shadow_vertices(&self) -> u32 {
+        self.vertices
+    }
+
+    pub(crate) fn shadow_indices(&self) -> u32 {
+        self.indices
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct GpuSkinMeshCache {
     meshes: HashMap<String, GpuSkinMesh>,
@@ -37,6 +59,11 @@ impl GpuSkinMeshCache {
 
     pub(crate) fn len(&self) -> usize {
         self.meshes.len()
+    }
+
+    /// 阴影 pass 只借用已上传的缓冲（顶点属性由主场景的 `upload` 负责）。
+    pub(crate) fn get(&self, key: &str) -> Option<&GpuSkinMesh> {
+        self.meshes.get(key)
     }
 
     /// 蒙皮顶点属性、UV 与贴图只上传一次；同一模型键跨实体 / 帧复用。
@@ -184,10 +211,7 @@ impl GpuContext {
             self.device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("xgc-skin-joints"),
-                    entries: &[uniform(
-                        (MAX_JOINTS * 64) as u64,
-                        wgpu::ShaderStages::VERTEX,
-                    )],
+                    entries: &[uniform(MAX_JOINTS_BYTES as u64, wgpu::ShaderStages::VERTEX)],
                 });
         let model_layout =
             self.device()
@@ -371,18 +395,11 @@ impl SkinnedPipeline {
         pose: &[[f32; 16]],
         inverse_bind: &[[f32; 16]],
     ) -> wgpu::Buffer {
-        let mut bytes = vec![0u8; MAX_JOINTS * 64];
-        for index in 0..MAX_JOINTS {
-            let matrix = match (pose.get(index), inverse_bind.get(index)) {
-                (Some(pose), Some(inverse)) => mul(*pose, *inverse),
-                _ => IDENTITY,
-            };
-            for (slot, value) in matrix.iter().enumerate() {
-                let offset = index * 64 + slot * 4;
-                bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-            }
-        }
-        create_uniform_buffer(context, "xgc-skin-joints-buffer", &bytes)
+        create_uniform_buffer(
+            context,
+            "xgc-skin-joints-buffer",
+            &palette_bytes(pose, inverse_bind),
+        )
     }
 }
 
@@ -398,6 +415,23 @@ fn model_buffer(context: &GpuContext, request: &SkinnedRequest<'_>) -> wgpu::Buf
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     create_uniform_buffer(context, "xgc-skin-model-buffer", &bytes)
+}
+
+/// 64 槽 palette 的唯一计算处：主场景与阴影 pass 都读这一份，`pose × inverse_bind`
+/// 逐槽；缺失的槽用单位矩阵（与 shader 里"没有权重就保持原位"同一口径）。
+pub(crate) fn palette_bytes(pose: &[[f32; 16]], inverse_bind: &[[f32; 16]]) -> Vec<u8> {
+    let mut bytes = vec![0u8; MAX_JOINTS_BYTES];
+    for index in 0..MAX_JOINTS {
+        let matrix = match (pose.get(index), inverse_bind.get(index)) {
+            (Some(pose), Some(inverse)) => mul(*pose, *inverse),
+            _ => IDENTITY,
+        };
+        for (slot, value) in matrix.iter().enumerate() {
+            let offset = index * 64 + slot * 4;
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
 }
 
 fn create_uniform_buffer(context: &GpuContext, label: &str, bytes: &[u8]) -> wgpu::Buffer {

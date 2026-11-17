@@ -290,15 +290,14 @@ impl Renderer {
             self.textures = Some(super::texture_bind::TextureBinding::new(context));
         }
         if let Some(target) = self.shadow.as_ref() {
+            let mut sources = super::shadow_skin::CasterSources {
+                meshes: &mut self.meshes,
+                gpu_meshes: &mut self.gpu_meshes,
+                skin_meshes: &mut self.skin_meshes,
+                textures: self.textures.as_ref().unwrap(),
+            };
             target
-                .render(
-                    context,
-                    &cascades,
-                    items,
-                    &mut self.gpu_meshes,
-                    &mut self.meshes,
-                    self.textures.as_ref().unwrap(),
-                )
+                .render(context, &cascades, items, &mut sources)
                 .map_err(GpuError::Pipeline)?;
         }
         Ok(Some(cascades))
@@ -432,15 +431,9 @@ impl Renderer {
         if self.textures.is_none() {
             self.textures = Some(super::texture_bind::TextureBinding::new(context));
         }
-        // 阴影只投静态网格：GPU 蒙皮投射是后续切片。
-        let static_items: Vec<super::draw::DrawItem> = list
-            .items
-            .iter()
-            .filter(|item| item.pose.is_none())
-            .cloned()
-            .collect();
+        // 阴影投射体 = 全部 draw：旧端蒙皮网格与静态网格一样进阴影批次。
         let shadow_matrix =
-            self.prepare_shadow(context, world, &static_items, view_proj, lighting.eye)?;
+            self.prepare_shadow(context, world, &list.items, view_proj, lighting.eye)?;
         let textures = self.textures.as_ref().unwrap();
         lighting = lighting.with_shadow(shadow_matrix);
         let (shadow_view, shadow_sampler) = self

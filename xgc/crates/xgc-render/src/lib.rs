@@ -28,6 +28,7 @@ mod renderer;
 mod resources;
 mod shadow;
 mod shadow_csm;
+mod shadow_skin;
 mod shot;
 mod skinned;
 mod skinning;
