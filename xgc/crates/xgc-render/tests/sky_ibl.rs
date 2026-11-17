@@ -75,8 +75,11 @@ fn sky_irradiance_lights_the_object() {
     }
     let sky = project_sky();
     let coefficients = sky_irradiance(&sky, None).expect("天空开着就要有 SH");
-    // 四边形正面法线朝相机（+Z），着色器把面法线朝向相机作为受光方向。
-    let expected_linear = sh_eval(&coefficients, [0.0, 0.0, 1.0]);
+    // 四边形正面法线朝相机（+Z），着色器把面法线朝向相机作为受光方向；
+    // 入射视线 = -Z，反射方向 = +Z，N·V = 1。
+    let env = sh_eval(&coefficients, [0.0, 0.0, 1.0]);
+    let specular = xgc_render::env_specular(env, 1.0);
+    let expected_linear = std::array::from_fn(|channel| env[channel] + specular[channel]);
     let expected = aces_u8(expected_linear);
     assert!(
         expected[0] > 0,

@@ -54,6 +54,25 @@ pub fn srgb_encode(linear: [f32; 3]) -> [f32; 3] {
     })
 }
 
+/// 环境反射的 split-sum 第二项 `f0·A + B`（Lazarov 2013 解析拟合）。
+///
+/// 与 WGSL `env_brdf_approx` 逐式一致；XGC 这一刀还没有逐材质 metallic / roughness，
+/// 因此调用方统一按"介电体 + 0.5 粗糙度"传参。
+pub fn env_brdf_approx(f0: [f32; 3], roughness: f32, n_dot_v: f32) -> [f32; 3] {
+    let c0 = [-1.0f32, -0.0275, -0.572, 0.022];
+    let c1 = [1.0f32, 0.0425, 1.04, -0.04];
+    let r: [f32; 4] = std::array::from_fn(|index| roughness * c0[index] + c1[index]);
+    let a004 = (r[0] * r[0]).min((-9.28 * n_dot_v).exp2()) * r[0] + r[1];
+    let ab = [-1.04 * a004 + r[2], 1.04 * a004 + r[3]];
+    std::array::from_fn(|channel| f0[channel] * ab[0] + ab[1])
+}
+
+/// 各向同性环境反射：`env × brdf(f0=0.04, roughness=0.5)`（与着色器同参）。
+pub fn env_specular(env: [f32; 3], n_dot_v: f32) -> [f32; 3] {
+    let brdf = env_brdf_approx([0.04; 3], 0.5, n_dot_v);
+    std::array::from_fn(|channel| env[channel] * brdf[channel])
+}
+
 /// 曲线 + sRGB 编码后的 8 位通道值，供 sRGB 目标 / 证据脚本对表。
 pub fn display_u8(linear: [f32; 3]) -> [u8; 3] {
     srgb_encode(aces(linear)).map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8)

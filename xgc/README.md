@@ -44,8 +44,8 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 静态 / GPU 蒙皮同路）、场景光与环境光（`WorldData.environment`，`环境光 + 主方向光 × N·L`）、
 ACES 色调映射（片元与清屏色同曲线）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
 深度测试，几何照常遮挡）、天空漫反射 IBL（解析天空 → L2 球谐 E/π，参数取项目级 `project.ron`
-的 `render.sky`）、方向光阴影（单级正交拟合 + 2048² 深度图 + 3×3 PCF）、截图相机优先级
-（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
+的 `render.sky`）、方向光阴影（单级正交拟合 + 2048² 深度图 + 3×3 PCF）、环境反射（天空 SH 反射方向 × Lazarov
+解析 BRDF，介电体近似）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
 `guid://` 解析、`Renderer` 帧入口（DrawList → MeshCache → RenderCache → GPU）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
@@ -110,7 +110,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 30 个内建类型 34950 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-刚体求解器（旋转 / 静-动碰撞 / 堆叠）、CSM / 软阴影 / 镜面 IBL / metallic-roughness BRDF / 网格纹理 / 粒子、
+刚体求解器（旋转 / 静-动碰撞 / 堆叠）、逐材质 metallic-roughness split-sum、CSM / 软阴影 / 网格纹理 / 粒子、
 脚本正式 System 调度，
 以及旧新逐帧 trace / 性能验收。
 

@@ -120,7 +120,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/sky_draw.rs` | 天空盒 pass：全屏三角形 + 解析天空逐像素求值（远平面 / `LessEqual` / 不写深度），`inv_view_proj` 反推视线方向 |
 | `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 文本 / 图片画在场景之上（从 `renderer.rs` 按行数预算拆出） |
 | `crates/xgc-render/src/sky.rs` | 解析天空（天顶/地平线/地面 + 太阳盘 + 光晕）与漫反射 IBL：1024 点斐波那契球投影成 L2 球谐（E/π，无随机数）；参数来自 `project.ron` 的 `render.sky` |
-| `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 带相机位置 + 环境光 + 主方向光 + 天空球谐 + 光视图投影/阴影参数（368B），片元按 `环境光 + 天空 IBL + 光色 × 强度 × N·L × 阴影` 着色再过 ACES |
+| `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 带相机位置 + 环境光 + 主方向光 + 天空球谐 + 光视图投影/阴影参数（368B）；片元按 `环境光 + 天空 IBL + 环境反射 + 光色 × 强度 × N·L × 阴影` 着色再过 ACES |
+| `crates/xgc-render/src/instanced.wgsl` | 主场景片元着色器：天空 SH、环境反射（Lazarov BRDF）、阴影 PCF、ACES；`include_str!` 进 `instanced.rs`（守 600 行预算） |
 | `crates/xgc-render/src/shot.rs` | 截图取景：`Bounds` 拟合、顺光视轴（由场景主方向光推）、近远裁剪；`render_shot` 优先场景相机 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData` + `base_color_factor`（`tint` 与实体材质相乘）；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / 首图元材质 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
@@ -155,7 +156,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 仿真：动态刚体已能下落（迁移为动态 `physics.body` 补零速度；旧引擎速度由物理后端持有）；下一步补刚体求解器（旋转 / 静-动碰撞 / 堆叠稳定），让第 150 帧落点对齐（像素差距主因），之后回到 CSM / 软阴影 / 镜面 IBL / metallic-roughness BRDF / 网格纹理。
+1. 仿真与 PBR：动态刚体已能下落；环境反射已补（近似）。下一步补刚体求解器（旋转 / 静-动碰撞 / 堆叠稳定，像素差距主因），再把 metallic / roughness 搬进实例数据做真实 split-sum 与 GGX，之后 CSM / 软阴影 / 网格纹理。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

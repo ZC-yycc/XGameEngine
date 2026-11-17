@@ -64,7 +64,7 @@ pub use skinning::{identity, skin_positions, translation};
 pub use sky::{sh_eval, sky_color, sky_irradiance, SkySettings, SH_COEFFS};
 pub use text::{text_mesh, text_mesh_wrapped};
 pub use texture::TexturePipeline;
-pub use tone::{aces, aces_u8, display_u8, srgb_encode};
+pub use tone::{aces, aces_u8, display_u8, env_brdf_approx, env_specular, srgb_encode};
 pub use ui_draw::{cover_uv, quad_matrix};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
