@@ -144,6 +144,61 @@ pub(crate) fn palette_fits_device(max_uniform_binding: u64) -> bool {
     max_uniform_binding >= MAX_JOINTS_BYTES as u64
 }
 
+/// 当前姿态的保守局部包围盒（尚未乘实体 model）。
+///
+/// 两桶求并：
+/// 1. **会动的顶点**：按顶点扫出"真的有 palette 项"的关节下标，再对每根关节把整网格
+///    绑定 AABB 变换一次。逐顶点蒙皮结果是这些变换点的凸组合，而并集的 AABB 覆盖整条
+///    凸包，所以盒子一定盖住它们；同一关节的盒对整张网格是常量，因此只需
+///    O(顶点 + 关节) 次变换。旧端在加载期按关节预计算**顶点范围**盒，这里用整网格
+///    AABB 近似，更松（骨架场景的自动取景会比旧端略远），但实现代价更低。
+/// 2. **不动的顶点**：缺 JOINTS_0 / WEIGHTS_0、权重全零、或关节下标超出 pose /
+///    逆绑定的顶点，`skin_positions` 与 shader 都让它们留在绑定姿态，这里按顶点
+///    并进盒子——漏掉这一桶会让自动取景把这类顶点裁出画面。
+///
+/// 没有蒙皮数据 / 姿态为空时退回绑定姿态盒子；`None` 只表示网格没有顶点。
+pub(crate) fn posed_bounds(mesh: &Mesh, pose: &[[f32; 16]]) -> Option<super::shot::Bounds> {
+    let local = super::shot::Bounds::from_mesh(mesh)?;
+    let Some(skin) = &mesh.skin else {
+        return Some(local);
+    };
+    if pose.is_empty() || skin.inverse_bind.is_empty() {
+        return Some(local);
+    }
+    let slots = pose.len().min(skin.inverse_bind.len());
+    let mut used = vec![false; slots];
+    let mut kept = super::shot::Bounds::EMPTY;
+    for (index, position) in mesh.positions.iter().enumerate() {
+        let (Some(joints), Some(weights)) = (skin.joints.get(index), skin.weights.get(index))
+        else {
+            kept.union_point(*position);
+            continue;
+        };
+        let mut skinned = false;
+        for slot in 0..4 {
+            if weights[slot] <= 0.0 {
+                continue;
+            }
+            let joint = usize::from(joints[slot]);
+            if joint < slots {
+                used[joint] = true;
+                skinned = true;
+            }
+        }
+        if !skinned {
+            kept.union_point(*position);
+        }
+    }
+    let mut out = kept;
+    for (joint, flag) in used.iter().enumerate() {
+        if !flag {
+            continue;
+        }
+        out.union(&local.transformed(mul(pose[joint], skin.inverse_bind[joint])));
+    }
+    Some(if out.is_empty() { local } else { out })
+}
+
 /// 只有 GPU palette 能完整表达 CPU 蒙皮语义时才走快路径；否则保留确定性的 CPU 回退。
 pub(crate) fn supports_gpu_skin(mesh: &Mesh, pose: &[[f32; 16]]) -> bool {
     let Some(skin) = &mesh.skin else {
@@ -478,55 +533,4 @@ fn uniform_bind(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        palette_bytes, palette_fits_device, supports_gpu_skin, MAX_JOINTS, MAX_JOINTS_BYTES,
-    };
-    use crate::{identity, Mesh, SkinData};
-
-    fn mesh(joint: u16) -> Mesh {
-        let mut mesh = Mesh::new(vec![[0.0; 3]], Vec::new());
-        mesh.skin = Some(SkinData {
-            joints: vec![[joint, 0, 0, 0]],
-            weights: vec![[1.0, 0.0, 0.0, 0.0]],
-            joint_nodes: vec![0],
-            inverse_bind: vec![identity()],
-        });
-        mesh
-    }
-
-    #[test]
-    fn gpu_skin_requires_a_fully_representable_palette() {
-        assert!(supports_gpu_skin(&mesh(0), &[identity()]));
-        let mut empty = mesh(0);
-        empty.positions.clear();
-        empty.skin.as_mut().unwrap().joints.clear();
-        empty.skin.as_mut().unwrap().weights.clear();
-        assert!(!supports_gpu_skin(&empty, &[identity()]));
-        assert!(!supports_gpu_skin(&mesh(1), &[identity()]));
-        // 256 槽（旧端 BONES_PER_SLOT 同容量）以内仍走 GPU；257 才回退。
-        assert!(supports_gpu_skin(&mesh(0), &vec![identity(); MAX_JOINTS]));
-        assert!(!supports_gpu_skin(
-            &mesh(0),
-            &vec![identity(); MAX_JOINTS + 1]
-        ));
-        let mut missing_inverse = mesh(0);
-        missing_inverse.skin.as_mut().unwrap().inverse_bind.clear();
-        assert!(!supports_gpu_skin(&missing_inverse, &[identity()]));
-    }
-
-    #[test]
-    fn palette_uses_the_256_slot_capacity() {
-        assert_eq!(MAX_JOINTS_BYTES, 256 * 64, "palette uniform 必须是 16 KiB");
-        let bytes = palette_bytes(&[identity(); 256], &[identity(); 256]);
-        assert_eq!(bytes.len(), MAX_JOINTS_BYTES);
-    }
-
-    #[test]
-    fn palette_fits_only_when_the_device_binding_allows_16k() {
-        // downlevel GL 的上限正好 16 KiB：等于上限仍然合法。
-        assert!(palette_fits_device(MAX_JOINTS_BYTES as u64));
-        assert!(palette_fits_device(64 * 1024));
-        assert!(!palette_fits_device(MAX_JOINTS_BYTES as u64 - 1));
-    }
-}
+mod tests;

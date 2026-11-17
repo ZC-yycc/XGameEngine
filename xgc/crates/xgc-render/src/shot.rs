@@ -210,6 +210,9 @@ pub fn clip_planes(camera: &ShotCamera, scene_radius: f32) -> (f32, f32) {
 }
 
 /// 整场景包围盒：按 draw list 的模型矩阵把各网格顶点 AABB 并起来。
+///
+/// 蒙皮实体必须用**当前姿态**的包围盒：绑定姿态的盒子会把被关节移出去的顶点漏在
+/// 取景 / 级联拟合之外（旧端同样把 posed bounds 与保守盒求并后使用）。
 pub fn scene_bounds(world: &World, meshes: &mut MeshCache) -> Result<Option<Bounds>, MeshError> {
     let mut bounds = Bounds::EMPTY;
     for item in build_draw_list(world).items {
@@ -220,7 +223,12 @@ pub fn scene_bounds(world: &World, meshes: &mut MeshCache) -> Result<Option<Boun
         let Some(local) = Bounds::from_mesh(mesh) else {
             continue;
         };
-        bounds.union(&local.transformed(item.transform));
+        let posed = item
+            .pose
+            .as_deref()
+            .and_then(|pose| super::skinned::posed_bounds(mesh, pose))
+            .unwrap_or(local);
+        bounds.union(&posed.transformed(item.transform));
     }
     Ok((!bounds.is_empty()).then_some(bounds))
 }

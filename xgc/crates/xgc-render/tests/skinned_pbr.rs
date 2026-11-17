@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use xgc_render::{
-    identity, translation, GpuContext, MeshCache, Renderer, ResourceDesc, ResourceUsage,
+    identity, scene_bounds, translation, GpuContext, MeshCache, Renderer, ResourceDesc,
+    ResourceUsage,
 };
 use xgc_world::{
     Camera, GlobalTransform, LightKind, Material, MeshRenderer, Parent, SceneEnvironment,
@@ -142,6 +143,101 @@ fn gpu_skinned_surface_receives_a_static_caster_shadow() {
         darkened > 30,
         "GPU 蒙皮表面必须接收静态投射体阴影，实际仅 {darkened} 个像素变暗"
     );
+}
+
+#[test]
+fn scene_bounds_follow_the_current_pose() {
+    let root = write_textured_skin_gltf();
+    let world = world_with_skinned_quad(Some(vec![translation(4.0, 0.0, 0.0)]));
+    let mut meshes = MeshCache::new(&root);
+    let bounds = scene_bounds(&world, &mut meshes)
+        .unwrap()
+        .expect("场景里有网格");
+    std::fs::remove_dir_all(&root).unwrap();
+
+    // 绑定姿态盒子的中心在 0；姿态把四边形推到 +4，包围盒必须跟着走。
+    assert!(
+        bounds.center()[0] > 3.5,
+        "场景包围盒必须用当前姿态，实际 {bounds:?}"
+    );
+}
+
+#[test]
+fn auto_framing_keeps_a_posed_mesh_in_frame() {
+    let _gpu = gpu_lock();
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let root = write_textured_skin_gltf();
+    let world = world_with_skinned_quad(Some(vec![translation(4.0, 0.0, 0.0)]));
+    let target = context
+        .create_resource(&ResourceDesc::texture2d(
+            "posed-framing",
+            "rgba8unorm",
+            96,
+            96,
+            vec![ResourceUsage::ColorAttachment],
+        ))
+        .unwrap();
+    let texture = target.as_texture().unwrap();
+    let mut renderer = Renderer::new(MeshCache::new(&root));
+    renderer.render_shot(&context, texture, &world).unwrap();
+    let pixels = context.read_texture_rgba8(texture, 96, 96).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let lit = pixels
+        .chunks_exact(4)
+        .filter(|pixel| u32::from(pixel[0]) + u32::from(pixel[1]) + u32::from(pixel[2]) > 30)
+        .count();
+    assert!(
+        lit > 50,
+        "被姿态移开的网格必须仍在自动取景画面内，实际只有 {lit} 个可见像素"
+    );
+}
+
+/// 只有一块蒙皮四边形 + 一盏强方向光的场景；**没有相机**，取景只能靠自动包围盒。
+fn world_with_skinned_quad(pose: Option<Vec<[f32; 16]>>) -> World {
+    let mut world = World::new();
+    world.set_environment(SceneEnvironment {
+        lights: vec![SceneLight {
+            name: "Sun".to_string(),
+            kind: LightKind::Directional,
+            direction: [0.2, -0.3, -1.0],
+            position: [0.0; 3],
+            color: [1.0; 3],
+            intensity: 3.0,
+            range: 10.0,
+            casts_shadow: false,
+            shadow_resolution: 0,
+        }],
+        ambient: [0.4; 3],
+    });
+    let quad = (
+        GlobalTransform::default(),
+        MeshRenderer {
+            model: "skin.gltf".to_string(),
+        },
+        Material::default(),
+    );
+    match pose {
+        Some(pose) => {
+            let skeleton = world.spawn((
+                Skeleton {
+                    joint_count: pose.len() as u32,
+                },
+                SkeletonPose {
+                    matrices: ron::to_string(&pose).unwrap(),
+                },
+            ));
+            let parent = world.entity(skeleton).unwrap();
+            world.spawn((quad.0, quad.1, quad.2, Parent { entity: parent }));
+        }
+        None => {
+            world.spawn(quad);
+        }
+    }
+    world
 }
 
 fn render(context: &GpuContext, root: &Path, pose: Option<Vec<[f32; 16]>>) -> Frame {
