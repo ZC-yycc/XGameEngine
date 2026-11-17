@@ -76,7 +76,8 @@ apply / revert 各只推进一个 revision，回滚后状态哈希回到原值�
 销毁回滚恢复**原 EntityId 与全部组件**；组件增删同样保留 EntityId，回滚后
 archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再恢复，
 `state_hash` / 实体 ID / revision 一致；`Journal` 可从初始快照重放并校验 revision。
-`xgc run 60` 已跑通固定步帧循环：命令 → 系统（`PhysicsSystem` 只给 dynamic 刚体加
+`xgc run 60` 已跑通固定步帧循环：命令 → 系统（`RapierPhysicsSystem` 用与旧引擎同版本的
+rapier3d 0.22 驱动 `physics.body` 实体，`PhysicsSystem` 只给非刚体实体的 dynamic 加
 重力、`CharacterJumpSystem` 消费起跳请求、`VelocitySystem` 积分、
 `GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴合地面 / `physics.slope`、
 `CharacterStepSystem` 低矮台阶抬升、`CharacterBlockSystem` 高墙 / 球体推出、`AabbCollisionSystem` 两两分离动态刚体
@@ -107,12 +108,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（278 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（184 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（282 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（186 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
 30 个内建类型 34950 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-UI 字体 / 面板、刚体旋转 / 多接触求解、直射光 GGX 高光、CSM / 软阴影 / 粒子、GPU 蒙皮快路径的光照 / 贴图、
+UI 字体 / 面板、直射光 GGX 高光、CSM / 软阴影 / 粒子、GPU 蒙皮快路径的光照 / 贴图、物理的角色控制器 / 关节 / 坡面滑动、
 脚本正式 System 调度，
 以及旧新逐帧 trace / 性能验收。
 

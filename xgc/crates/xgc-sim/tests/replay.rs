@@ -118,6 +118,7 @@ fn velocity_system_moves_transform() {
             "character_step",
             "character_block",
             "aabb",
+            "rapier",
             "animation_state",
             "animation",
             "animation_apply",

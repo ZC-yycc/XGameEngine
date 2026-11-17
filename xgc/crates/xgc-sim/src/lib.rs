@@ -160,6 +160,10 @@ impl Schedule {
         schedule.add(CharacterStepSystem);
         schedule.add(CharacterBlockSystem);
         schedule.add(AabbCollisionSystem);
+        // 刚体走与旧引擎相同的 rapier 求解器（角动量 / 接触力矩 / 堆叠才与旧图可比）。
+        // 放在最后：上面的简化系统只服务角色 / 斜坡，对 rapier 接管的 `physics.body`
+        // 实体的 Transform 改动会被这一步整帧覆盖回物理结果。
+        schedule.add(RapierPhysicsSystem::default());
         schedule.add(AnimationStateSystem);
         schedule.add(AnimatorSystem);
         schedule.add(AnimationPlaybackSystem::default());
@@ -224,7 +228,6 @@ impl Schedule {
     }
 }
 
-/// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
 mod aabb;
 mod animation;
 mod animation_layers;
@@ -233,6 +236,8 @@ mod audio;
 mod character;
 mod input;
 mod mixer;
+/// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
+mod rapier_world;
 mod skeleton;
 mod systems;
 mod ui;
@@ -250,6 +255,7 @@ pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
 pub use character::{CharacterBlockSystem, CharacterStepSystem};
 pub use input::{Axis, Binding, Combo, InputMap, InputState, KeyCode, MouseButton};
 pub use mixer::{write_wav_mono, SoftwareMixer};
+pub use rapier_world::{RapierPhysicsSystem, RapierWorld};
 pub use skeleton::{parse_pose, SkeletonPoseSystem};
 pub use systems::{
     AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem, GroundCollisionSystem,

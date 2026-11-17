@@ -70,6 +70,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/character.rs` | `CharacterStepSystem` / `CharacterBlockSystem`：低台阶抬升、高墙 / 球体推出 |
 | `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
 | `crates/xgc-sim/src/aabb.rs` | `AabbCollisionSystem`：动态刚体两两分离 / 动态 vs 静态推出，接触时清掉沿分离轴的接近速度（落地 / 堆叠稳定） |
+| `crates/xgc-sim/src/rapier_world.rs` | `RapierWorld` + `RapierPhysicsSystem`：与旧引擎同版本同参数的 rapier3d 0.22 刚体后端（`physics.body` 实体），建体规则按旧端 `body_from_scene`（Auto 形状取缩放绝对值 ×0.5、mass 换密度、角阻尼 0.05）；动态体回写 Transform / Velocity，运动学体每步推送位姿 |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe（组件 / sim / render 能力清单）/ engine.diagnostics / engine.history / engine.replay / query / get / digest / stats / validate / load / save / plan / apply / revert / undo |
 | `crates/xgc-agent/src/snapshot.rs` | `world.snapshot` / `world.restore`：WorldData 快照与恢复 |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
@@ -160,7 +161,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：基色贴图已通（狐狸有纹理），整帧差异 98.07% → 64.62%（mean_abs 2.88）。下一步补 UI 字体 / 面板、刚体旋转 / 多接触求解（落点与影子），再做直射光 GGX 高光 / CSM / 软阴影与 GPU 蒙皮快路径（现在带贴图蒙皮走 CPU 蒙皮 + 实例化）。
+1. 割接视觉：rapier 物理后端已通（翻滚 / 落点与旧图基本一致，mean_abs 2.88 → 1.81）。下一步补 UI 字体 / 面板（最大剩余差异），再做直射光 GGX 高光 / CSM / 软阴影与 GPU 蒙皮快路径（现在带贴图蒙皮走 CPU 蒙皮 + 实例化）。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

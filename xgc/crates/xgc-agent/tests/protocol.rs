@@ -79,6 +79,7 @@ fn describe_lists_protocol_components_and_world_state() {
             "character_step",
             "character_block",
             "aabb",
+            "rapier",
             "animation_state",
             "animation",
             "animation_apply",

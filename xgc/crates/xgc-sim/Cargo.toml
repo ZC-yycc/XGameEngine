@@ -9,6 +9,8 @@ description = "XGC 最小帧循环：场景回放、逐帧 state hash、trace �
 [dependencies]
 xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
+# 与旧引擎同一条物理求解路径（版本 / 特性都对齐，帧状态才可比）
+rapier3d = { version = "0.22", features = ["simd-stable"] }
 ron = "0.8.1"
 serde.workspace = true
 
