@@ -225,6 +225,7 @@ impl Schedule {
 }
 
 /// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
+mod aabb;
 mod animation;
 mod animation_layers;
 mod animation_state;
@@ -236,6 +237,7 @@ mod skeleton;
 mod systems;
 mod ui;
 
+pub use aabb::AabbCollisionSystem;
 pub use animation::{
     load_clip_ron, mul_quat, slerp, AnimationClip, AnimationLibrary, AnimationPlaybackSystem,
     JointTrack, RotationKey, ScaleKey, TranslationKey,
@@ -250,8 +252,8 @@ pub use input::{Axis, Binding, Combo, InputMap, InputState, KeyCode, MouseButton
 pub use mixer::{write_wav_mono, SoftwareMixer};
 pub use skeleton::{parse_pose, SkeletonPoseSystem};
 pub use systems::{
-    AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem,
-    GroundCollisionSystem, HierarchySystem, PhysicsSystem, VelocitySystem,
+    AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem, GroundCollisionSystem,
+    HierarchySystem, PhysicsSystem, VelocitySystem,
 };
 pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem, UiNav};
 

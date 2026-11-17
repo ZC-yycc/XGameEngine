@@ -68,7 +68,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/mixer.rs` | `SoftwareMixer` / `write_wav_mono`：总线增益混音与 WAV 写出 |
 | `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：布局、裁剪、可见性、命中、`ui.input` 驱动的交互 / Tab / 方向键焦点 |
 | `crates/xgc-sim/src/character.rs` | `CharacterStepSystem` / `CharacterBlockSystem`：低台阶抬升、高墙 / 球体推出 |
-| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AabbCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
+| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
+| `crates/xgc-sim/src/aabb.rs` | `AabbCollisionSystem`：动态刚体两两分离 / 动态 vs 静态推出，接触时清掉沿分离轴的接近速度（落地 / 堆叠稳定） |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe（组件 / sim / render 能力清单）/ engine.diagnostics / engine.history / engine.replay / query / get / digest / stats / validate / load / save / plan / apply / revert / undo |
 | `crates/xgc-agent/src/snapshot.rs` | `world.snapshot` / `world.restore`：WorldData 快照与恢复 |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
@@ -156,7 +157,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 仿真与 PBR：逐材质环境反射已就位（颜色通道已对上旧图）。下一步补刚体求解器（旋转 / 静-动碰撞 / 堆叠稳定，像素差距主因），再做直射光 GGX 高光 / CSM / 软阴影 / 网格纹理。
+1. 仿真与 PBR：接触清速度已就位。下一步补刚体旋转 / 力矩与多接触求解（落点与堆叠姿态仍与 rapier 不同，像素差距主因），再做直射光 GGX 高光 / CSM / 软阴影 / 网格纹理。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

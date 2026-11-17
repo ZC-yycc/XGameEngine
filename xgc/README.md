@@ -79,6 +79,7 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 重力、`CharacterJumpSystem` 消费起跳请求、`VelocitySystem` 积分、
 `GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴合地面 / `physics.slope`、
 `CharacterStepSystem` 低矮台阶抬升、`CharacterBlockSystem` 高墙 / 球体推出、`AabbCollisionSystem` 两两分离动态刚体
+（接触时清掉沿分离轴的接近速度，落地 / 堆叠不再抖动）
 （球体按中心线精确分离）、`AnimatorSystem` 推进动画时钟、`UiLayoutSystem` 算 UI 根 /
 父相对矩形、裁剪区并继承可见性，`UiInteractionSystem` 读 `ui.input` 写 hover / press /
 click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选邻，
@@ -105,12 +106,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（270 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（177 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（273 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（179 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
 30 个内建类型 34950 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-刚体求解器（旋转 / 静-动碰撞 / 堆叠）、直射光 GGX 高光、CSM / 软阴影 / 网格纹理 / 粒子、
+刚体旋转 / 力矩与多接触求解、直射光 GGX 高光、CSM / 软阴影 / 网格纹理 / 粒子、
 脚本正式 System 调度，
 以及旧新逐帧 trace / 性能验收。
 
