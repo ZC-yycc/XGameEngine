@@ -28,6 +28,7 @@ mod shot;
 mod skinned;
 mod skinning;
 mod sky;
+mod sky_draw;
 mod text;
 mod texture;
 mod tone;
@@ -35,7 +36,8 @@ mod ui_draw;
 
 pub use assets::MeshCache;
 pub use camera::{
-    camera_view_projection, model_matrix, mul, perspective_rh_zo, transform_point, Mat4, IDENTITY,
+    camera_view_projection, invert, look_at_rh, model_matrix, mul, perspective_rh_zo,
+    transform_point, Mat4, IDENTITY,
 };
 pub use diff::{diff_images, ImageDiff};
 pub use draw::{build_draw_list, DrawItem, DrawList};
@@ -57,7 +59,7 @@ pub use shot::{
 };
 pub use skinned::{GpuSkinMesh, GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
 pub use skinning::{identity, skin_positions, translation};
-pub use sky::{sh_eval, sky_irradiance, SkySettings, SH_COEFFS};
+pub use sky::{sh_eval, sky_color, sky_irradiance, SkySettings, SH_COEFFS};
 pub use text::{text_mesh, text_mesh_wrapped};
 pub use texture::TexturePipeline;
 pub use tone::{aces, aces_u8, display_u8, srgb_encode};

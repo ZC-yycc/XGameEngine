@@ -140,6 +140,23 @@ impl SkyUniform {
     }
 }
 
+impl SkyUniform {
+    /// 按 WGSL 字段顺序（5 个 vec4）打包，供天空盒 uniform 使用。
+    pub(crate) fn write(&self, bytes: &mut Vec<u8>) {
+        for value in [
+            self.sun_dir,
+            self.sun_color,
+            self.zenith,
+            self.horizon,
+            self.ground,
+        ] {
+            for channel in value {
+                bytes.extend_from_slice(&channel.to_le_bytes());
+            }
+        }
+    }
+}
+
 /// 天空辐射亮度（线性 HDR）；与 WGSL `sky_radiance` 逐式对应。
 pub(crate) fn sky_radiance(uniform: &SkyUniform, direction: [f32; 3]) -> [f32; 3] {
     let t = direction[1].clamp(-1.0, 1.0);
@@ -229,6 +246,18 @@ pub fn sh_eval(coeffs: &[[f32; 4]; SH_COEFFS], n: [f32; 3]) -> [f32; 3] {
             .map(|index| coeffs[index][channel] * basis[index])
             .sum()
     })
+}
+
+/// 某个方向上的天空辐射亮度（线性 HDR）：测试与证据脚本对表用。
+///
+/// 与 GPU 天空盒片元走同一条 `sky_radiance`；`sun = (指向太阳, 光色)`。
+pub fn sky_color(
+    settings: &SkySettings,
+    sun: Option<([f32; 3], [f32; 3])>,
+    direction: [f32; 3],
+) -> [f32; 3] {
+    let uniform = SkyUniform::build(settings, sun);
+    sky_radiance(&uniform, normalize_or_zero(direction))
 }
 
 /// 天空环境照明：把设置投成 SH，供渲染器一次性装进帧 uniform。

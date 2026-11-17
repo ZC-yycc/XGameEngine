@@ -3,12 +3,12 @@
 > 这是能力的**现状快照**，不是完成声明。XGC 仍明显低于 XGameEngine 全量能力，
 > 当前不能割接。
 
-## 指标（第 136 轮）
+## 指标（第 137 轮）
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 170（最大 599 行；软上限 600） |
-| 测试 | 257（`cargo test --workspace --offline`） |
+| Rust 文件 | 173（最大 596 行；软上限 600） |
+| 测试 | 261（`cargo test --workspace --offline`） |
 | 内建组件 schema | 30 类 / 34950 字节，两次导出逐字节相同 |
 | 默认系统 | 18 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
@@ -23,7 +23,7 @@
 | Agent 协议 | describe（组件 / 系统 / 渲染能力）、diagnostics、query / get / digest / stats / validate、load / save、snapshot / restore、history / replay、plan / apply / revert / undo |
 | 确定性 | 固定步 schedule、trace / verify、schema 字节级确定性、状态哈希 |
 | 渲染图 | 资源表、pass 读写、确定性拓扑、环 / 多写者 / 未声明资源检测 |
-| wgpu 渲染 | 相机 MVP、深度、单 pass、顶点 / 索引缓存、按模型实例化、DrawList、颜色合成顺序 `模型基色因子 → .mat 资产 → 实体覆盖 → 选择高亮`（静态 / GPU 蒙皮同路）、场景光（环境光 + 主方向光，面法线朝向相机）、ACES 色调映射（含清屏色）、天空漫反射 IBL（解析天空 → L2 球谐 E/π）、截图相机优先级（场景相机 → 顺光自动取景）、线性 / sRGB RGBA8 回读 |
+| wgpu 渲染 | 相机 MVP、深度、单 pass、顶点 / 索引缓存、按模型实例化、DrawList、颜色合成顺序 `模型基色因子 → .mat 资产 → 实体覆盖 → 选择高亮`（静态 / GPU 蒙皮同路）、场景光（环境光 + 主方向光，面法线朝向相机）、ACES 色调映射（含清屏色）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual` 深度测试）、天空漫反射 IBL（解析天空 → L2 球谐 E/π）、截图相机优先级（场景相机 → 顺光自动取景）、线性 / sRGB RGBA8 回读 |
 | UI | 布局 / 父相对 / 裁剪 / 命中、输入桥、Tab + 方向键焦点、背景 / 焦点环、5x7 文本换行、PNG/PPM 纹理、stretch/preserve/cover/nine-slice、scissor 裁剪、正式帧末 sRGB alpha 合成 |
 | 动画 | RON 剪辑、平移 / 旋转 slerp / 缩放采样、目录加载、写回 Transform、Skeleton / Bone / Pose、GLB JOINTS / WEIGHTS / 逆绑定、CPU 蒙皮、DrawList 自动读取祖先骨架姿态并按实体变形上传 |
 | 物理 | 重力 / 速度积分 / 地面 / 跳跃、角色台阶 / 高墙 / 球体阻挡、斜坡地面、AABB 分离 |
@@ -41,14 +41,14 @@
 | 迁移工具 | 90% | 场景 / 脚本 / 预制体 / 统计对照全通；修复 GlobalTransform 空字段与旧相机 +Z 约定，真实 showcase 1280×720 可渲染出场景；缺旧新逐帧视觉对照 |
 | 动画 | 97% | 根 / 关节轨道 + 骨架 + CPU / GPU 蒙皮 + 状态机 + 叠加层（实体 / 关节遮罩）+ 转场淡入；缺根关节混合权重细调 |
 | 音频 | 60% | 空间化增益、总线、WAV 解码、软件混音、WAV 写出、cpal 默认输出设备播放（重采样 / 队列）、`xgc play`；缺流式资产 / 3D 声像 |
-| 渲染 | 62% | 真实 builtin 几何 + glTF 基色因子 + `.mat` 资产乘子 + 场景光 + 天空漫反射 IBL（`project.ron` sky 节）+ ACES + 实例化 + sRGB HUD 合成 + 截图取景优先级；缺天空盒画面 / 镜面 IBL / metallic-roughness BRDF / 网格纹理 / 阴影 / 后处理 / 粒子绘制 |
+| 渲染 | 65% | 真实 builtin 几何 + glTF 基色因子 + `.mat` 资产乘子 + 场景光 + 天空盒画面 + 天空漫反射 IBL + ACES + 实例化 + sRGB HUD 合成 + 截图取景优先级；缺镜面 IBL / metallic-roughness BRDF / 网格纹理 / 阴影 / 后处理 / 粒子绘制 |
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |
 | 资产 / 打包 | 70% | 引用裁剪 + 增量烹饪（哈希未变跳过写入）+ manifest 聚合签名；JSON / XGCB / 图形播放器；缺密码学签名 / 跨机器增量 |
 | Lua 脚本 | 80% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
-| 割接验收 | 53% | 统计对照一致；旧 / 新截图同用场景相机、同一第 150 帧；天空 IBL 后 mean_abs 由 21.24 降到 15.97（地面 / 正面暗部与旧图基本对齐）；仍缺阴影 / 天空盒画面 / 纹理、逐帧 trace、并行调度与推送 |
+| 割接验收 | 55% | 统计对照一致；旧 / 新截图同用场景相机、同一第 150 帧；天空盒画面 + IBL 后 mean_abs 由 21.24 降到 15.27（地面 / 背景 / 正面暗部与旧图基本对齐）；仍缺阴影 / 纹理 / 镜面 IBL、逐帧 trace、并行调度与推送 |
 
-**整体能力对等约 62%，割接就绪约 53%**。核心运行时、迁移、动画、编辑器和
+**整体能力对等约 63%，割接就绪约 55%**。核心运行时、迁移、动画、编辑器和
 cooked 播放器已可用；差距集中在渲染高级特性、正式调度、逐帧验收与推送。
 
 ## 迁移 / 运行证据
@@ -58,7 +58,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 - 旧 / 新 headless 统计逐项一致：24 实体 / 10 刚体 / 10 碰撞体 / 2 发射器 / 1 监听者。
 - **旧端截图相机已确认为 `mode: "scene"`**（重跑旧 `xgame-editor` 读到的报告），两次旧运行图像逐像素相同（0/921600）；XGC 的 `render-frame` 现在按同一优先级取景：有场景相机就用场景相机，只有缺相机时才退到顺光自动取景。
 - 场景级光源与环境光已迁移进 `WorldData.environment`（showcase：`Sun` 方向 (0.45,-1,0.35)、强度 1.4、色 (1.0,0.97,0.92)，`ambient` (0.09,0.1,0.13)）；`verify-migration` 逐光源字段对照，缺省环境不落盘。
-- `render-frame` 缺省 0 帧；显式帧数复用 `Simulation::step_with` + `ScriptRuntime::run_frame`，最后重算层级与目标尺寸 UI。天空 IBL 接入后第 150 帧旧 / 新差异 914841/921600（99.27%）、mean_abs **15.97**、max 215（上一切片 21.24）：地面像素 (195,203,215) 对旧图 (197,204,216)，红箱正面 R 通道 164 对 164。
+- `render-frame` 缺省 0 帧；显式帧数复用 `Simulation::step_with` + `ScriptRuntime::run_frame`，最后重算层级与目标尺寸 UI。天空盒画面接入后第 150 帧旧 / 新差异 915151/921600（99.30%）、mean_abs **15.27**、max 215（上一切片 15.97）：背景现在按视线方向求解析天空（天顶 168,189,212 → 地平线 181,196,214，旧图同款渐变），几何照常遮挡；地面像素 (195,203,215) 对旧图 (197,204,216)。
 - 天空参数按项目级读取：`project.ron` 的 `render.sky`（`enabled/intensity/zenith/horizon/ground/sun_size/sun_intensity`），缺省 = 天空关（画面与接入前一致）；CPU 侧用 1024 点斐波那契球把解析天空投影成 L2 球谐（E/π 口径），与常量 `ambient` 同标定直接相加。
 - 无 `animation.state` 时 `set_anim_param` 现在安全 no-op，不再让同帧其它脚本命令整批失败；状态机迁移仍是独立差距。
 - GUID 资产（Box.glb、Fox.gltf + Fox.bin）可解析；glTF 首图元 `baseColorFactor` 在静态实例与 GPU 蒙皮路径均参与最终颜色，且选择高亮仍能替换最终颜色；character 脚本 / Pillar 预制体可迁移。
@@ -90,7 +90,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 
 ## 下一步（按顺序）
 
-1. 渲染：glTF 基色因子、`.mat` 资产乘子、场景光、ACES、天空漫反射 IBL 已贯通；下一步补天空盒画面（同一份解析天空，背景不再用清屏色）与镜面 IBL，再做 metallic-roughness BRDF / 网格纹理 / 阴影。
+1. 渲染：glTF 基色因子、`.mat` 资产乘子、场景光、ACES、天空盒画面 + 漫反射 IBL 已贯通；下一步补镜面 IBL 与阴影，再做 metallic-roughness BRDF / 网格纹理。
 2. 正式调度：把脚本与默认系统纳入 `Schedule` 的访问声明批次。
 3. 逐帧 trace / 截图对照与性能门禁。
 4. 密码学签名、跨机器增量烹饪。

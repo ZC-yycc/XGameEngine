@@ -2,24 +2,22 @@
 
 use std::collections::HashMap;
 
-use xgc_world::{UiElement, UiInteraction, UiLayout, World};
-
 use super::assets::MeshCache;
-use super::camera::{camera_view_projection_with_eye, Mat4, IDENTITY};
+use super::camera::{camera_view_projection_with_eye, invert, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
 use super::frame_color::compose_colors;
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::image::ImageData;
 use super::instanced::{FrameLighting, InstancedRequest};
-use super::mesh::Mesh;
-use super::pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
+use super::pipeline::{RenderCache, TrianglePipeline};
+use super::texture::TexturePipeline;
+use xgc_world::World;
+
 use super::resources::{ResourceDesc, ResourceUsage};
 use super::skinned::{GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
 use super::sky::{sky_irradiance, SkySettings};
-use super::text::text_mesh_wrapped;
-use super::texture::TexturePipeline;
-use super::ui_draw::{cover_uv, quad_matrix};
+mod ui;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderStats {
@@ -42,6 +40,7 @@ pub struct Renderer {
     gpu_meshes: GpuMeshCache,
     skin_meshes: GpuSkinMeshCache,
     skinned: Option<(wgpu::TextureFormat, SkinnedPipeline)>,
+    sky_pipeline: Option<(wgpu::TextureFormat, super::sky_draw::SkyPipeline)>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
@@ -72,6 +71,7 @@ impl Renderer {
             gpu_meshes: GpuMeshCache::new(),
             skin_meshes: GpuSkinMeshCache::new(),
             skinned: None,
+            sky_pipeline: None,
             depth: None,
             images: HashMap::new(),
             ui_overlay: None,
@@ -137,300 +137,6 @@ impl Renderer {
             view,
         });
         Ok(())
-    }
-
-    fn overlay_pipeline(
-        &mut self,
-        context: &GpuContext,
-        format: wgpu::TextureFormat,
-    ) -> &TrianglePipeline {
-        if self.ui_overlay.as_ref().map(|(current, _)| *current) != Some(format) {
-            self.ui_overlay = Some((format, context.create_overlay_pipeline(format)));
-        }
-        &self.ui_overlay.as_ref().unwrap().1
-    }
-
-    /// 渲染 UI 背景矩形：在已渲染画面上叠加，不写深度；返回 draw 数。
-    pub fn render_ui(
-        &mut self,
-        context: &GpuContext,
-        target: &wgpu::Texture,
-        world: &World,
-    ) -> Result<usize, GpuError> {
-        let viewport = [target.width() as f32, target.height() as f32];
-        let mut items = Vec::new();
-        world.for_each::<UiLayout>(|key, layout| {
-            if !layout.visible {
-                return;
-            }
-            let color = world
-                .get::<UiElement>(key)
-                .map(|element| element.background)
-                .unwrap_or([1.0; 4]);
-            let (text, text_size, text_color) = world
-                .get::<UiElement>(key)
-                .map(|element| (element.text.clone(), element.text_size, element.text_color))
-                .unwrap_or_default();
-            let image_path = world
-                .get::<UiElement>(key)
-                .map(|element| element.image_path.clone())
-                .unwrap_or_default();
-            let image_mode = world
-                .get::<UiElement>(key)
-                .map(|element| element.image_mode.clone())
-                .unwrap_or_default();
-            let image_slice = world
-                .get::<UiElement>(key)
-                .map(|element| element.image_slice)
-                .unwrap_or_default();
-            let wrap = world
-                .get::<UiElement>(key)
-                .map(|element| element.wrap)
-                .unwrap_or(true);
-            let corner_radius = world
-                .get::<UiElement>(key)
-                .map(|element| element.corner_radius)
-                .unwrap_or(0.0);
-            if color[3] <= 0.0 && text.is_empty() && image_path.is_empty() {
-                return;
-            }
-            let focused = world
-                .get::<UiInteraction>(key)
-                .is_some_and(|state| state.focused);
-            if let Some(entity) = world.entity(key) {
-                items.push((
-                    entity,
-                    layout.rect,
-                    color,
-                    focused,
-                    text,
-                    text_size,
-                    text_color,
-                    image_path,
-                    image_mode,
-                    image_slice,
-                    layout.clip,
-                    wrap,
-                    corner_radius,
-                ));
-            }
-        });
-        items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _, _, _, _)| *entity);
-        if items.is_empty() {
-            return Ok(0);
-        }
-        let mesh = Mesh::quad();
-        let mut draws = 0;
-        for (
-            _,
-            rect,
-            color,
-            focused,
-            text,
-            text_size,
-            text_color,
-            image_path,
-            image_mode,
-            image_slice,
-            clip,
-            wrap,
-            corner_radius,
-        ) in &items
-        {
-            let Some(scissor) = scissor_rect(*clip, viewport) else {
-                continue;
-            };
-            if *focused {
-                let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
-                self.overlay_pipeline(context, target.format())
-                    .draw_mesh_rounded(&RoundedMeshDraw {
-                        context,
-                        texture: target,
-                        mesh: &mesh,
-                        color: [1.0, 0.8, 0.2, 1.0],
-                        mvp: Some(quad_matrix(ring, viewport)),
-                        scissor,
-                        rect: ring,
-                        radius: *corner_radius + 2.0,
-                    })?;
-                draws += 1;
-            }
-            if color[3] > 0.0 {
-                self.overlay_pipeline(context, target.format())
-                    .draw_mesh_rounded(&RoundedMeshDraw {
-                        context,
-                        texture: target,
-                        mesh: &mesh,
-                        color: *color,
-                        mvp: Some(quad_matrix(*rect, viewport)),
-                        scissor,
-                        rect: *rect,
-                        radius: *corner_radius,
-                    })?;
-                draws += 1;
-            }
-            if !image_path.is_empty() {
-                if !self.images.contains_key(image_path) {
-                    let loaded = ImageData::load(std::path::Path::new(image_path)).ok();
-                    self.images.insert(image_path.clone(), loaded);
-                }
-                if !self.ui_textures.contains_key(image_path) {
-                    let texture = self
-                        .images
-                        .get(image_path)
-                        .and_then(|image| image.as_ref())
-                        .map(|image| {
-                            let mut rgba = Vec::with_capacity(image.rgba.len() * 4);
-                            for pixel in &image.rgba {
-                                rgba.extend_from_slice(pixel);
-                            }
-                            context.create_texture_rgba8(
-                                "xgc-ui-image",
-                                image.width,
-                                image.height,
-                                &rgba,
-                            )
-                        });
-                    self.ui_textures.insert(image_path.clone(), texture);
-                }
-                if self.ui_pipeline.as_ref().map(|(format, _)| *format) != Some(target.format()) {
-                    self.ui_pipeline = Some((
-                        target.format(),
-                        context.create_texture_pipeline(target.format()),
-                    ));
-                }
-                if let (Some((_, pipeline)), Some(Some(image))) =
-                    (&self.ui_pipeline, self.ui_textures.get(image_path))
-                {
-                    let mut draw_rect = *rect;
-                    let mut uv = [0.0, 0.0, 1.0, 1.0];
-                    let source = self.images.get(image_path).and_then(|image| image.as_ref());
-                    if *image_mode == "nine_slice" && *image_slice > 0.0 {
-                        if let Some(source) = source {
-                            if source.width > 0
-                                && source.height > 0
-                                && rect[2] > 0.0
-                                && rect[3] > 0.0
-                            {
-                                let slice_x = (*image_slice / source.width as f32).min(0.5);
-                                let slice_y = (*image_slice / source.height as f32).min(0.5);
-                                let px = (*image_slice).min(rect[2] * 0.5).max(0.0);
-                                let py = (*image_slice).min(rect[3] * 0.5).max(0.0);
-                                let u = [0.0, slice_x, 1.0 - slice_x, 1.0];
-                                let v = [0.0, slice_y, 1.0 - slice_y, 1.0];
-                                let xs = [
-                                    rect[0],
-                                    rect[0] + px,
-                                    rect[0] + rect[2] - px,
-                                    rect[0] + rect[2],
-                                ];
-                                let ys = [
-                                    rect[1],
-                                    rect[1] + py,
-                                    rect[1] + rect[3] - py,
-                                    rect[1] + rect[3],
-                                ];
-                                for row in 0..3 {
-                                    for col in 0..3 {
-                                        let width = xs[col + 1] - xs[col];
-                                        let height = ys[row + 1] - ys[row];
-                                        if width <= 0.0 || height <= 0.0 {
-                                            continue;
-                                        }
-                                        let cell = [xs[col], ys[row], width, height];
-                                        let cell_uv = [
-                                            u[col],
-                                            v[row],
-                                            u[col + 1] - u[col],
-                                            v[row + 1] - v[row],
-                                        ];
-                                        pipeline.draw(
-                                            context,
-                                            target,
-                                            image,
-                                            quad_matrix(cell, viewport),
-                                            [1.0; 4],
-                                            cell_uv,
-                                        )?;
-                                        draws += 1;
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    if *image_mode == "preserve" {
-                        if let Some(source) =
-                            self.images.get(image_path).and_then(|image| image.as_ref())
-                        {
-                            if source.width > 0
-                                && source.height > 0
-                                && rect[2] > 0.0
-                                && rect[3] > 0.0
-                            {
-                                let source_aspect = source.width as f32 / source.height as f32;
-                                let target_aspect = rect[2] / rect[3];
-                                if source_aspect > target_aspect {
-                                    let height = rect[2] / source_aspect;
-                                    draw_rect[1] += (rect[3] - height) * 0.5;
-                                    draw_rect[3] = height;
-                                } else {
-                                    let width = rect[3] * source_aspect;
-                                    draw_rect[0] += (rect[2] - width) * 0.5;
-                                    draw_rect[2] = width;
-                                }
-                            }
-                        }
-                    } else if image_mode == "cover" {
-                        if let Some(source) =
-                            self.images.get(image_path).and_then(|image| image.as_ref())
-                        {
-                            uv = cover_uv(
-                                [source.width as f32, source.height as f32],
-                                [rect[2], rect[3]],
-                            );
-                        }
-                    }
-                    pipeline.draw(
-                        context,
-                        target,
-                        image,
-                        quad_matrix(draw_rect, viewport),
-                        [1.0; 4],
-                        uv,
-                    )?;
-                    draws += 1;
-                }
-            }
-            if !text.is_empty() {
-                let pixel = (*text_size / 7.0).max(1.0);
-                let max_width = if *wrap {
-                    (rect[2] - 4.0).max(1.0)
-                } else {
-                    f32::MAX
-                };
-                let text_mesh = text_mesh_wrapped(
-                    text,
-                    [rect[0] + 2.0, rect[1] + 2.0],
-                    pixel,
-                    viewport,
-                    max_width,
-                );
-                if !text_mesh.positions.is_empty() {
-                    self.overlay_pipeline(context, target.format())
-                        .draw_mesh_scissored(
-                            context,
-                            target,
-                            &text_mesh,
-                            *text_color,
-                            None,
-                            scissor,
-                        )?;
-                    draws += 1;
-                }
-            }
-        }
-        Ok(draws)
     }
 
     /// 渲染一帧：抽 DrawList、解析模型、按实体顺序 draw 到目标纹理。
@@ -511,6 +217,71 @@ impl Renderer {
     }
 
     /// 按给定 view-projection 出 draw：静态实例一批，GPU 蒙皮逐网格。
+    /// 天空盒：整屏一张三角形，深度 `LessEqual` + 不写深度，被几何挡住的像素不画。
+    ///
+    /// 单独一个 pass（`LoadOp::Load`）而不是塞进实例化 pass：实例化 pass 自己负责
+    /// 清屏与深度清除，天空必须排在所有不透明几何之后。
+    fn draw_sky(
+        &self,
+        context: &GpuContext,
+        target: &wgpu::Texture,
+        view_proj: Mat4,
+        lighting: &FrameLighting,
+        clear_depth: bool,
+    ) {
+        let Some((_, sky_pipeline)) = self.sky_pipeline.as_ref() else {
+            return;
+        };
+        let depth = &self.depth.as_ref().unwrap().view;
+        let sun = (lighting.sun_intensity > 0.0).then(|| {
+            let [x, y, z] = lighting.sun_direction;
+            ([-x, -y, -z], lighting.sun_color)
+        });
+        let uniform = super::sky::SkyUniform::build(&self.sky, sun);
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("xgc-sky-encoder"),
+                });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("xgc-sky-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: if clear_depth {
+                            wgpu::LoadOp::Clear(1.0)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            sky_pipeline.draw(
+                context,
+                &mut pass,
+                invert(view_proj).unwrap_or(IDENTITY),
+                lighting.eye,
+                &uniform,
+            );
+        }
+        context.queue().submit(Some(encoder.finish()));
+    }
+
     fn render_list(
         &mut self,
         context: &GpuContext,
@@ -520,6 +291,13 @@ impl Renderer {
         lighting: FrameLighting,
     ) -> Result<RenderStats, GpuError> {
         self.ensure_depth(context, target.width(), target.height())?;
+        // 天空管线要在拿 `self.depth` 的不可变借用之前建好（之后只剩读）。
+        if self.sky.enabled {
+            let format = target.format();
+            if self.sky_pipeline.as_ref().map(|(current, _)| *current) != Some(format) {
+                self.sky_pipeline = Some((format, context.create_sky_pipeline(format)));
+            }
+        }
         let depth = &self.depth.as_ref().unwrap().view;
         let draws = list.len();
         let mut cpu_items = Vec::with_capacity(list.items.len());
@@ -588,6 +366,11 @@ impl Renderer {
                 )?;
                 draw_calls += 1;
             }
+        }
+        if self.sky.enabled {
+            // 一个场景 draw 都没有时，实例化 pass 不会清深度（它提前返回了）——
+            // 天空 pass 自己把深度清成 1.0；有几何时深度已被清好，只能 Load。
+            self.draw_sky(context, target, view_proj, &lighting, draws == 0);
         }
         Ok(RenderStats {
             draws,

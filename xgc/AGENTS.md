@@ -109,12 +109,14 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（按宽度换行） |
 | `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用；`upload_deformed` 覆盖蒙皮顶点 |
-| `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP |
+| `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP；列主序 4x4 求逆（天空盒反推方向） |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵、材质资产引用与祖先骨架姿态） |
 | `crates/xgc-render/src/frame_color.rs` | 逐 draw 颜色合成：`模型基色因子 → .mat 资产 → 实体覆盖 → 选择高亮`（分流前一次做完） |
 | `crates/xgc-render/src/material.rs` | `.mat` 材质资产解析（基色乘子 + metallic / roughness，加载边界清洗） |
 | `crates/xgc-render/src/tone.rs` | ACES 曲线 CPU 镜像与 8 位对表辅助；WGSL 侧逐式对应 |
+| `crates/xgc-render/src/sky_draw.rs` | 天空盒 pass：全屏三角形 + 解析天空逐像素求值（远平面 / `LessEqual` / 不写深度），`inv_view_proj` 反推视线方向 |
+| `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 文本 / 图片画在场景之上（从 `renderer.rs` 按行数预算拆出） |
 | `crates/xgc-render/src/sky.rs` | 解析天空（天顶/地平线/地面 + 太阳盘 + 光晕）与漫反射 IBL：1024 点斐波那契球投影成 L2 球谐（E/π，无随机数）；参数来自 `project.ron` 的 `render.sky` |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 带相机位置 + 环境光 + 主方向光 + 天空球谐（288B），片元按 `环境光 + 天空 IBL + 光色 × 强度 × N·L` 着色再过 ACES |
 | `crates/xgc-render/src/shot.rs` | 截图取景：`Bounds` 拟合、顺光视轴（由场景主方向光推）、近远裁剪；`render_shot` 优先场景相机 |
@@ -151,11 +153,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 渲染：glTF 基色因子 / `.mat` 资产乘子 / 场景光 + 环境光 / ACES / 天空漫反射 IBL / 截图相机优先级已通；下一步补天空盒画面与镜面 IBL，再做 metallic-roughness BRDF / 网格纹理 / 阴影。
+1. 渲染：glTF 基色因子 / `.mat` 资产乘子 / 场景光 + 环境光 / ACES / 天空盒画面 + 漫反射 IBL / 截图相机优先级已通；下一步补镜面 IBL 与阴影，再做 metallic-roughness BRDF / 网格纹理。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。
-5. 推送与 CI；当前最大 Rust 文件 599 行，继续守住 600 行软上限。
+5. 推送与 CI；当前最大 Rust 文件 596 行，继续守住 600 行软上限。
 
 ## Token 纪律
 
