@@ -26,6 +26,7 @@ mod pipeline;
 mod renderer;
 mod resources;
 mod shadow;
+mod shadow_csm;
 mod shot;
 mod skinned;
 mod skinning;

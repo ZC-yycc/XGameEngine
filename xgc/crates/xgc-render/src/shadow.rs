@@ -1,67 +1,17 @@
-//! 方向光阴影：单级正交拟合 + 深度图 + 接收端 3×3 PCF。
+//! 方向光阴影的 GPU 侧：2048² 深度数组（每层一个级联）+ 深度 pass 管线。
 //!
-//! 与旧引擎同一条基线（单级 [`fit_directional_shadow`] 就是"关掉级联"的等价退路）：
-//! 取**第一盏** active 且 `casts_shadow` 的方向光，按场景包围盒拟合正交视锥，
-//! 深度图 2048²（`DEFAULT_SHADOW_RESOLUTION`），阴影 pass 只画深度，接收端用
-//! `textureSampleCompareLevel` 做 3×3 PCF，偏置随 `N·L` 变小而放大。
-//!
-//! 这一刀**不做**：级联（CSM）、PCSS 软阴影、点光立方体阴影、蒙皮投射。
+//! CPU 侧的级联拟合在 `shadow_csm`（纯函数、可单测）；这里只负责资源与绘制。
 
 use super::assets::MeshCache;
-use super::camera::{look_at_rh, mul, orthographic_rh, Mat4};
 use super::draw::DrawItem;
 use super::gpu::GpuContext;
 use super::gpu_mesh::GpuMeshCache;
-use super::shot::Bounds;
 use super::texture_bind::TextureBinding;
 
-/// 阴影图边长：与旧引擎 `DEFAULT_SHADOW_RESOLUTION` 一致。
-pub const SHADOW_RESOLUTION: u32 = 2048;
-/// 接收端深度偏置（NDC 深度单位），旧引擎同名常量。
-pub const SHADOW_DEPTH_BIAS: f32 = 0.0022;
-/// 拟合半径上限：防止"有物体飞出视野"把深度精度吃光。
-const MAX_SHADOW_DISTANCE: f32 = 120.0;
-
-/// 由光线传播方向 + 场景包围盒拟合正交光视图投影；空场景返回 `None`。
-///
-/// 与旧引擎逐行同式：光源在场景中心**逆着光**退开 `2r+1`，正交半宽 `r × 1.02`，
-/// near / far 罩住整球。
-pub fn fit_directional_shadow(direction: [f32; 3], bounds: &Bounds) -> Option<Mat4> {
-    if bounds.is_empty() {
-        return None;
-    }
-    let length =
-        (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2])
-            .sqrt();
-    let dir = if length > 1e-6 {
-        [
-            direction[0] / length,
-            direction[1] / length,
-            direction[2] / length,
-        ]
-    } else {
-        [0.0, -1.0, 0.0]
-    };
-    let center = bounds.center();
-    let radius = bounds.radius().clamp(0.5, MAX_SHADOW_DISTANCE);
-    let up = if dir[1].abs() > 0.99 {
-        [0.0, 0.0, 1.0]
-    } else {
-        [0.0, 1.0, 0.0]
-    };
-    let distance = radius * 2.0 + 1.0;
-    let eye = [
-        center[0] - dir[0] * distance,
-        center[1] - dir[1] * distance,
-        center[2] - dir[2] * distance,
-    ];
-    let view = look_at_rh(eye, center, up);
-    let extent = radius * 1.02;
-    let near = (distance - radius - 1.0).max(0.01);
-    let far = distance + radius + 1.0;
-    let projection = orthographic_rh(-extent, extent, -extent, extent, near, far);
-    Some(mul(projection, view))
-}
+pub use super::shadow_csm::{
+    cascade_shadow_matrices, fit_directional_shadow, ShadowCascades, SHADOW_CASCADES,
+    SHADOW_DEPTH_BIAS, SHADOW_RESOLUTION,
+};
 
 const SHADOW_WGSL: &str = r#"
 struct ShadowFrame {
@@ -88,6 +38,8 @@ fn vs(@location(0) position: vec3<f32>, @builtin(instance_index) index: u32) -> 
 /// 阴影图 + 比较采样器 + 深度 pass 管线（设备生命周期内复用）。
 pub(crate) struct ShadowTarget {
     map_view: wgpu::TextureView,
+    /// 每级一个 layer 视图：深度数组的每一层单独开一次 pass。
+    layer_views: [wgpu::TextureView; SHADOW_CASCADES],
     /// 没有阴影时绑定的 1×1 假图：主 pass 的绑定组布局是固定的，不能"这次不绑"。
     fallback_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
@@ -104,7 +56,7 @@ impl ShadowTarget {
             size: wgpu::Extent3d {
                 width: SHADOW_RESOLUTION,
                 height: SHADOW_RESOLUTION,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: SHADOW_CASCADES as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -205,9 +157,45 @@ impl ShadowTarget {
             multiview: None,
             cache: None,
         });
+        let array_desc = wgpu::TextureViewDescriptor {
+            label: Some("xgc-shadow-array"),
+            format: Some(wgpu::TextureFormat::Depth32Float),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            aspect: wgpu::TextureAspect::DepthOnly,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(SHADOW_CASCADES as u32),
+        };
+        let map_view = map.create_view(&array_desc);
+        let mut layer_views = Vec::with_capacity(SHADOW_CASCADES);
+        for layer in 0..SHADOW_CASCADES as u32 {
+            layer_views.push(map.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("xgc-shadow-layer"),
+                format: Some(wgpu::TextureFormat::Depth32Float),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                aspect: wgpu::TextureAspect::DepthOnly,
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+            }));
+        }
+        let layer_views: [wgpu::TextureView; SHADOW_CASCADES] =
+            layer_views.try_into().expect("层数固定");
         Self {
-            map_view: map.create_view(&wgpu::TextureViewDescriptor::default()),
-            fallback_view: fallback.create_view(&wgpu::TextureViewDescriptor::default()),
+            map_view,
+            layer_views,
+            fallback_view: fallback.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("xgc-shadow-fallback-array"),
+                format: Some(wgpu::TextureFormat::Depth32Float),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                aspect: wgpu::TextureAspect::DepthOnly,
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                base_array_layer: 0,
+                array_layer_count: Some(1),
+            }),
             sampler,
             pipeline,
             frame_layout,
@@ -225,17 +213,18 @@ impl ShadowTarget {
         (view, &self.sampler)
     }
 
-    /// 把**静态** draw 画进深度图（蒙皮投射后续再补；GPU 蒙皮路径这里跳过）。
+    /// 把**静态** draw 画进深度数组：每级一个 pass（每层各自清一次、各用一份
+    /// 光视图投影）。蒙皮投射后续再补（GPU 蒙皮路径这里跳过）。
     pub(crate) fn render(
         &self,
         context: &GpuContext,
-        light_view_proj: Mat4,
+        cascades: &ShadowCascades,
         items: &[DrawItem],
         gpu_meshes: &mut GpuMeshCache,
         meshes: &mut MeshCache,
         textures: &TextureBinding,
     ) -> Result<(), String> {
-        if items.is_empty() {
+        if items.is_empty() || cascades.count == 0 {
             return Ok(());
         }
         let mut bytes = Vec::with_capacity(items.len() * 64);
@@ -260,35 +249,35 @@ impl ShadowTarget {
                 resource: instances.as_entire_binding(),
             }],
         });
-        let mut frame_bytes = Vec::with_capacity(64);
-        for value in light_view_proj {
-            frame_bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        let frame = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("xgc-shadow-frame-buffer"),
-            size: 64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        context.queue().write_buffer(&frame, 0, &frame_bytes);
-        let frame_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("xgc-shadow-frame-bind"),
-            layout: &self.frame_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame.as_entire_binding(),
-            }],
-        });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("xgc-shadow-encoder"),
         });
-        {
+        for cascade in 0..cascades.count.min(SHADOW_CASCADES) {
+            let mut frame_bytes = Vec::with_capacity(64);
+            for value in cascades.view_proj[cascade] {
+                frame_bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            let frame = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("xgc-shadow-frame-buffer"),
+                size: 64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            context.queue().write_buffer(&frame, 0, &frame_bytes);
+            let frame_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("xgc-shadow-frame-bind"),
+                layout: &self.frame_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame.as_entire_binding(),
+                }],
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("xgc-shadow-pass"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.map_view,
+                    view: &self.layer_views[cascade],
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,

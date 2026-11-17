@@ -9,12 +9,13 @@ use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
+use super::shadow::{ShadowCascades, SHADOW_CASCADES};
 use super::texture_bind::TextureBinding;
 use xgc_world::SceneEnvironment;
 
 /// 帧 uniform：view-proj 64B + 四个 vec4（相机/强度、ambient、sun_dir、sun_color）
-/// + 9 个 vec4 的天空球谐 + 天空开关 vec4 + 光视图投影 64B + 阴影参数 vec4 = 368B。
-const FRAME_UNIFORM_BYTES: u64 = 368;
+/// + 9 个 vec4 的天空球谐 + 天空开关 vec4 + 4 级光视图投影 256B + 切分 / 视线 / 参数 3 个 vec4 = 592B。
+const FRAME_UNIFORM_BYTES: u64 = 592;
 
 /// 帧级光照参数：环境光 + 场景第一盏可用方向光；没有方向光时强度为 0（只剩环境光）。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,8 +27,8 @@ pub(crate) struct FrameLighting {
     pub(crate) sun_color: [f32; 3],
     /// 天空漫反射环境（E/π 口径的 L2 球谐）；`None` = 天空关，只剩 `ambient`。
     pub(crate) sky_irradiance: Option<[[f32; 4]; 9]>,
-    /// 方向光阴影的光视图投影；`None` = 这一帧没有可用阴影。
-    pub(crate) shadow_view_proj: Option<Mat4>,
+    /// 4 级方向光级联；`None` = 这一帧没有可用阴影。
+    pub(crate) shadow_cascades: Option<ShadowCascades>,
 }
 
 impl FrameLighting {
@@ -42,13 +43,13 @@ impl FrameLighting {
             sun_intensity: sun.map(|light| light.intensity).unwrap_or(0.0),
             sun_color: sun.map(|light| light.color).unwrap_or([1.0; 3]),
             sky_irradiance: None,
-            shadow_view_proj: None,
+            shadow_cascades: None,
         }
     }
 
-    /// 挂上方向光阴影的光视图投影（`None` = 不采样阴影）。
-    pub(crate) fn with_shadow(mut self, shadow_view_proj: Option<Mat4>) -> Self {
-        self.shadow_view_proj = shadow_view_proj;
+    /// 挂上 4 级方向光级联（`None` = 不采样阴影）。
+    pub(crate) fn with_shadow(mut self, cascades: Option<ShadowCascades>) -> Self {
+        self.shadow_cascades = cascades;
         self
     }
 
@@ -94,19 +95,34 @@ impl FrameLighting {
         for value in [enabled, 0.0, 0.0, 0.0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        let light_view_proj = self.shadow_view_proj.unwrap_or(super::camera::IDENTITY);
-        for value in light_view_proj {
+        let cascades = self.shadow_cascades;
+        for cascade in 0..SHADOW_CASCADES {
+            let matrix = cascades
+                .map(|c| c.view_proj[cascade])
+                .unwrap_or(super::camera::IDENTITY);
+            for value in matrix {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let mut splits = [0.0f32; SHADOW_CASCADES];
+        let mut forward = [0.0f32; 3];
+        let mut count = 0.0f32;
+        if let Some(cascades) = cascades {
+            splits = cascades.splits;
+            forward = cascades.forward;
+            count = cascades.count as f32;
+        }
+        for value in splits {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        let (shadow_enabled, shadow_texel, shadow_bias) = match self.shadow_view_proj {
-            Some(_) => (
-                1.0,
-                1.0 / super::shadow::SHADOW_RESOLUTION as f32,
-                super::shadow::SHADOW_DEPTH_BIAS,
-            ),
-            None => (0.0, 0.0, 0.0),
+        for value in [forward[0], forward[1], forward[2], 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let (shadow_enabled, shadow_bias) = match cascades {
+            Some(_) => (1.0, super::shadow::SHADOW_DEPTH_BIAS),
+            None => (0.0, 0.0),
         };
-        for value in [shadow_enabled, shadow_texel, shadow_bias, 0.0] {
+        for value in [shadow_enabled, shadow_bias, 0.0, count] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
@@ -169,7 +185,7 @@ impl GpuContext {
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Texture {
                                 sample_type: wgpu::TextureSampleType::Depth,
-                                view_dimension: wgpu::TextureViewDimension::D2,
+                                view_dimension: wgpu::TextureViewDimension::D2Array,
                                 multisampled: false,
                             },
                             count: None,

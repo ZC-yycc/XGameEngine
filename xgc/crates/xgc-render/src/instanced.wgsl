@@ -11,8 +11,13 @@ struct Frame {
     sky_sh: array<vec4<f32>, 9>,
     // x = 天空是否开启（1 / 0）
     sky_params: vec4<f32>,
-    light_view_proj: mat4x4<f32>,
-    // x = 阴影是否开启，y = 1/图宽，z = 深度偏置
+    // 4 级级联的光视图投影（级联按视线方向切段）
+    light_view_proj: array<mat4x4<f32>, 4>,
+    // 每级的远切分距离（世界单位，沿相机视线方向）
+    shadow_splits: vec4<f32>,
+    // xyz = 相机视线方向（单位向量），片元用它算视线深度选层
+    shadow_forward: vec4<f32>,
+    // x = 阴影是否开启，y = 深度偏置，w = 级联层数
     shadow_params: vec4<f32>,
 };
 
@@ -92,23 +97,40 @@ fn sky_sh_eval(n: vec3<f32>) -> vec3<f32> {
 
 // 3×3 PCF（与旧引擎"硬阴影"分支同式）：图外 / 关闭时一律返回 1（全亮）。
 fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
-    if (frame.shadow_params.x < 0.5) {
+    // 选层：级联按**相机视线方向的线性深度**切，splits 是世界单位。
+    let count = u32(max(frame.shadow_params.w, 0.0));
+    if (count == 0u || frame.shadow_params.x < 0.5) {
         return 1.0;
     }
-    let clip = frame.light_view_proj * vec4<f32>(world_pos, 1.0);
-    let ndc = clip.xyz / clip.w;
+    let view_depth = dot(world_pos - frame.eye_intensity.xyz, frame.shadow_forward.xyz);
+    var cascade = count - 1u;
+    for (var i = 0u; i + 1u < count; i = i + 1u) {
+        if (view_depth <= frame.shadow_splits[i]) {
+            cascade = i;
+            break;
+        }
+    }
+    let light_clip = frame.light_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
+    let ndc = light_clip.xyz / light_clip.w;
+    // NDC y 朝上、纹理 v 朝下。
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
         return 1.0;
     }
-    // 掠射角下采样跨度大、自遮挡更重，偏置随 N·L 变小而放大。
-    let bias = frame.shadow_params.z * (1.0 + 2.0 * (1.0 - ndotl));
-    let depth = ndc.z;
+    // 掠射角下自遮挡更严重：偏置随 N·L 变小而放大。
+    let bias = frame.shadow_params.y * (1.0 + 2.0 * (1.0 - ndotl));
+    let texel = 1.0 / f32(textureDimensions(shadow_tex).x);
     var sum = 0.0;
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let offset = vec2<f32>(f32(dx), f32(dy)) * frame.shadow_params.y;
-            sum = sum + textureSampleCompareLevel(shadow_tex, shadow_smp, uv + offset, depth - bias);
+            let offset = vec2<f32>(f32(dx) * texel, f32(dy) * texel);
+            sum = sum + textureSampleCompareLevel(
+                shadow_tex,
+                shadow_smp,
+                uv + offset,
+                i32(cascade),
+                ndc.z - bias,
+            );
         }
     }
     return sum / 9.0;
@@ -130,7 +152,7 @@ struct Instance {
 };
 
 @group(0) @binding(1)
-var shadow_tex: texture_depth_2d;
+var shadow_tex: texture_depth_2d_array;
 
 @group(0) @binding(2)
 var shadow_smp: sampler_comparison;

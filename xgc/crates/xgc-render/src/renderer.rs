@@ -235,7 +235,9 @@ impl Renderer {
         context: &GpuContext,
         world: &World,
         items: &[super::draw::DrawItem],
-    ) -> Result<Option<Mat4>, GpuError> {
+        view_proj: Mat4,
+        camera_pos: [f32; 3],
+    ) -> Result<Option<super::shadow::ShadowCascades>, GpuError> {
         let Some(light) = world.environment().lights.iter().find(|light| {
             light.kind == xgc_world::LightKind::Directional
                 && light.is_active()
@@ -248,9 +250,17 @@ impl Renderer {
         let Some(bounds) = bounds else {
             return Ok(None);
         };
-        let Some(matrix) =
-            super::shadow::fit_directional_shadow(light.normalized_direction(), &bounds)
-        else {
+        let Some(inverse) = super::camera::invert(view_proj) else {
+            return Ok(None);
+        };
+        let Some(cascades) = super::shadow::cascade_shadow_matrices(
+            inverse,
+            camera_pos,
+            light.normalized_direction(),
+            &bounds,
+            super::shadow::SHADOW_RESOLUTION,
+            super::shadow::SHADOW_CASCADES,
+        ) else {
             return Ok(None);
         };
         if self.textures.is_none() {
@@ -260,7 +270,7 @@ impl Renderer {
             target
                 .render(
                     context,
-                    matrix,
+                    &cascades,
                     items,
                     &mut self.gpu_meshes,
                     &mut self.meshes,
@@ -268,7 +278,7 @@ impl Renderer {
                 )
                 .map_err(GpuError::Pipeline)?;
         }
-        Ok(Some(matrix))
+        Ok(Some(cascades))
     }
 
     /// 天空盒：整屏一张三角形，深度 `LessEqual` + 不写深度，被几何挡住的像素不画。
@@ -366,7 +376,8 @@ impl Renderer {
             .filter(|item| item.pose.is_none())
             .cloned()
             .collect();
-        let shadow_matrix = self.prepare_shadow(context, world, &static_items)?;
+        let shadow_matrix =
+            self.prepare_shadow(context, world, &static_items, view_proj, lighting.eye)?;
         let textures = self.textures.as_ref().unwrap();
         lighting = lighting.with_shadow(shadow_matrix);
         let (shadow_view, shadow_sampler) = self
