@@ -47,8 +47,8 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 UI 背景矩形叠加（无深度，focused 元素带强调色外环，5x7 位图文本按元素宽度自动换行
 单 draw，PNG / PPM 图片经纹理管线单 draw，`image_mode` 支持 stretch / preserve /
 cover / nine_slice，`corner_radius` 圆角由片元 SDF 裁剪，绘制按 `ui.layout.clip` 设置
-scissor）、从 `render.mesh` + `render.material` 抽 `DrawList` 并按实体顺序 draw、
-RGBA8 回读）、
+scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、从 `render.mesh` + `render.material` 抽
+`DrawList` 并按实体顺序 draw、线性 / sRGB RGBA8 回读）、
 `xgc-cli`（`schema` / `check [路径]` /
 `bench` / `export` / `import` / `run` / `serve` / `migrate` / `render-graph`）、
 `xgc-xtask`（文件预算 / 依赖方向 / schema 确定性门禁）。
@@ -98,12 +98,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（220 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（155 个 Rust 文件最大 599 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（221 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（156 个 Rust 文件最大 599 行）；schema 两次导出逐字节相同，
 30 个内建类型 34668 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**尚未实现**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、物理 /
-脚本 / 动画 / 音频、渲染、编辑器；Agent 协议已覆盖能力清单，视觉验证仍缺。
+**主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
+PBR / 网格纹理 / 阴影 / 粒子、脚本正式 System 调度，以及旧新逐帧 trace / 性能验收。
 
 ## 命令
 

@@ -3,12 +3,12 @@
 > 这是能力的**现状快照**，不是完成声明。XGC 仍明显低于 XGameEngine 全量能力，
 > 当前不能割接。
 
-## 指标（第 129 轮）
+## 指标（第 130 轮）
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 155（最大 599 行；软上限 600） |
-| 测试 | 220（`cargo test --workspace --offline`） |
+| Rust 文件 | 156（最大 599 行；软上限 600） |
+| 测试 | 221（`cargo test --workspace --offline`） |
 | 内建组件 schema | 30 类 / 34668 字节，两次导出逐字节相同 |
 | 默认系统 | 18 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
@@ -23,8 +23,8 @@
 | Agent 协议 | describe（组件 / 系统 / 渲染能力）、diagnostics、query / get / digest / stats / validate、load / save、snapshot / restore、history / replay、plan / apply / revert / undo |
 | 确定性 | 固定步 schedule、trace / verify、schema 字节级确定性、状态哈希 |
 | 渲染图 | 资源表、pass 读写、确定性拓扑、环 / 多写者 / 未声明资源检测 |
-| wgpu 渲染 | 相机 MVP、深度、单 pass、顶点 / 索引缓存、按模型实例化、DrawList、RGBA8 回读 |
-| UI | 布局 / 父相对 / 裁剪 / 命中、输入桥、Tab + 方向键焦点、背景 / 焦点环、5x7 文本换行、PNG/PPM 纹理、stretch/preserve/cover/nine-slice、scissor 裁剪 |
+| wgpu 渲染 | 相机 MVP、深度、单 pass、顶点 / 索引缓存、按模型实例化、DrawList、线性 / sRGB RGBA8 回读 |
+| UI | 布局 / 父相对 / 裁剪 / 命中、输入桥、Tab + 方向键焦点、背景 / 焦点环、5x7 文本换行、PNG/PPM 纹理、stretch/preserve/cover/nine-slice、scissor 裁剪、正式帧末 sRGB alpha 合成 |
 | 动画 | RON 剪辑、平移 / 旋转 slerp / 缩放采样、目录加载、写回 Transform、Skeleton / Bone / Pose、GLB JOINTS / WEIGHTS / 逆绑定、CPU 蒙皮、DrawList 自动读取祖先骨架姿态并按实体变形上传 |
 | 物理 | 重力 / 速度积分 / 地面 / 跳跃、角色台阶 / 高墙 / 球体阻挡、斜坡地面、AABB 分离 |
 | 音频 | 空间化增益、总线、WAV 解码、软件混音、WAV 写出 |
@@ -37,37 +37,37 @@
 | 子系统 | 估计完成度 | 依据 |
 |---|---:|---|
 | 核心 ECS / 确定性 / 事务 / Agent | 80% | 主体可用；缺零分配门禁与跨系统并行 |
-| UI | 70% | 布局 / 交互 / 焦点 / 文本 / 图片 / 九宫格 / 圆角 / scissor 已通 |
+| UI | 72% | 布局 / 交互 / 焦点 / 文本 / 图片 / 九宫格 / 圆角 / scissor + 正式帧背景 / 文本 alpha 合成已通 |
 | 迁移工具 | 90% | 场景 / 脚本 / 预制体 / 统计对照全通；修复 GlobalTransform 空字段与旧相机 +Z 约定，真实 showcase 1280×720 可渲染出场景；缺旧新逐帧视觉对照 |
 | 动画 | 97% | 根 / 关节轨道 + 骨架 + CPU / GPU 蒙皮 + 状态机 + 叠加层（实体 / 关节遮罩）+ 转场淡入；缺根关节混合权重细调 |
 | 音频 | 60% | 空间化增益、总线、WAV 解码、软件混音、WAV 写出、cpal 默认输出设备播放（重采样 / 队列）、`xgc play`；缺流式资产 / 3D 声像 |
-| 渲染 | 45% | 真实 builtin 几何 + 法线派生方向光面着色 + 天空清屏色 + 实例化；缺 PBR / 纹理 / 阴影 / 后处理 / 粒子绘制 |
+| 渲染 | 48% | 真实 builtin 几何 + 法线派生方向光面着色 + 天空清屏色 + 实例化 + sRGB HUD 合成；缺 PBR / 网格纹理 / 阴影 / 后处理 / 粒子绘制 |
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |
 | 资产 / 打包 | 70% | 引用裁剪 + 增量烹饪（哈希未变跳过写入）+ manifest 聚合签名；JSON / XGCB / 图形播放器；缺密码学签名 / 跨机器增量 |
 | Lua 脚本 | 80% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
-| 割接验收 | 40% | 统计对照一致；视觉可渲染并有 `image-diff` 指标，但 showcase 旧/新 1280×720 仍 100% 像素不同（mean_abs 64.6）；缺 trace 对照 / 并行调度 / 推送 |
+| 割接验收 | 42% | 统计对照一致；正式帧已合成 7 个 HUD draw，showcase 旧/新 1280×720 差异降到 99.30%（mean_abs 31.23）；缺 trace 对照 / 并行调度 / 推送 |
 
-**整体能力对等约 55%，割接就绪约 40%**。核心运行时、迁移、动画、编辑器和
+**整体能力对等约 56%，割接就绪约 42%**。核心运行时、迁移、动画、编辑器和
 cooked 播放器已可用；差距集中在渲染高级特性、正式调度、逐帧验收与推送。
 
 ## 迁移 / 运行证据
 
 - `projects/XGame/Scenes/showcase.ron` → 24 实体 / 51 组件 / 0 缺失父节点。
-- `run-world` 60 帧通过；`render-frame` 1280×720 输出 14 draw / 5 draw call。
+- `run-world` 60 帧通过；`render-frame` 1280×720 输出 14 个场景 draw / 5 个场景 draw call / 7 个 UI draw。
 - 旧 / 新 headless 统计逐项一致：24 实体 / 10 刚体 / 10 碰撞体 / 2 发射器 / 1 监听者。
-- 视觉已可渲染：天空 + 面着色 + 真实 builtin 几何；但旧新 1280×720 仍 100% 像素不同（mean_abs 64.6，见 `xgc image-diff`）。
+- 正式帧按目标尺寸运行唯一 `UiLayoutSystem`，在三维场景后以 sRGB alpha 合成 HUD 背景 / 文本；固定参考图 A/B 的 1280×720 差异为 99.30%，mean_abs 从 62.97 降到 31.23。该 A/B 尚非同 tick，且新截图未执行 `HierarchySystem`。
 - GUID 资产（Box.glb、Fox.gltf + Fox.bin）可解析；character 脚本 / Pillar 预制体可迁移。
 - cooked 包：引用裁剪 7 文件、XGCB 二进制、manifest 哈希 / 签名校验、`xgc-player` headless 60 帧。
-- 自动化测试：220 条；`migrate_showcase.rs`、`migrate_scripts.rs`、`compare.rs`、`verify.rs`。
+- 自动化测试：221 条；新增 `frame_ui.rs` 固定正式帧的 sRGB alpha HUD 合成；迁移与对照测试继续覆盖 showcase。
 
 ## 与 XGameEngine 的主要差距
 
 | 差距 | 影响 | 优先级 |
 |---|---|---|
-| 渲染高级特性 | 只有基础几何 / 面着色 / 天空；缺 PBR、纹理、阴影、后处理、粒子、HUD | P0 |
+| 渲染高级特性 | 基础几何 / 面着色 / 天空 / HUD 已通；缺 PBR、网格纹理、阴影、后处理、粒子 | P0 |
 | 正式 System 调度 | `SystemAccess` / `batches()` 已有，执行仍顺序；脚本尚未成为正式 System | P0 |
-| 视觉 / trace 验收 | 旧新统计一致，但无逐帧 trace，截图 100% 不同 | P0 |
+| 视觉 / trace 验收 | 旧新统计一致，但无逐帧 trace / 同 tick 截图；`render-frame` 尚未执行层级世界变换 | P0 |
 | 物理完整性 | 简化角色 / AABB；无完整刚体、关节、连续碰撞、坡面滑动 | P1 |
 | 跨系统并行 | 未做世界分片 / 并行执行 | P1 |
 | 资产签名 | FNV 聚合校验，非密码学签名；无跨机器增量 | P1 |
@@ -86,7 +86,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 
 ## 下一步（按顺序）
 
-1. 渲染：材质颜色 / PBR / 阴影 / HUD，先把 `image-diff` 比例降下来。
+1. 渲染：HUD 正式帧已通；先统一同 tick / 层级世界变换，再做 PBR / 网格纹理 / 阴影。
 2. 正式调度：把脚本与默认系统纳入 `Schedule` 的访问声明批次。
 3. 逐帧 trace / 截图对照与性能门禁。
 4. 密码学签名、跨机器增量烹饪。

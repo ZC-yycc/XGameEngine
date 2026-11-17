@@ -16,17 +16,27 @@ impl GpuContext {
 
     /// 创建可复用的三角形管线；颜色由 uniform 缓冲提供。
     pub fn create_triangle_pipeline(&self, format: wgpu::TextureFormat) -> TrianglePipeline {
-        self.create_triangle_pipeline_impl(format, None)
+        self.create_triangle_pipeline_impl(format, None, wgpu::BlendState::REPLACE)
+    }
+
+    /// 屏幕叠加层使用直通 alpha，保留已经渲染好的三维画面。
+    pub fn create_overlay_pipeline(&self, format: wgpu::TextureFormat) -> TrianglePipeline {
+        self.create_triangle_pipeline_impl(format, None, wgpu::BlendState::ALPHA_BLENDING)
     }
 
     pub fn create_depth_pipeline(&self, format: wgpu::TextureFormat) -> TrianglePipeline {
-        self.create_triangle_pipeline_impl(format, Some(wgpu::TextureFormat::Depth32Float))
+        self.create_triangle_pipeline_impl(
+            format,
+            Some(wgpu::TextureFormat::Depth32Float),
+            wgpu::BlendState::REPLACE,
+        )
     }
 
     fn create_triangle_pipeline_impl(
         &self,
         format: wgpu::TextureFormat,
         depth_format: Option<wgpu::TextureFormat>,
+        blend: wgpu::BlendState,
     ) -> TrianglePipeline {
         const TRIANGLE_WGSL: &str = r#"
 struct Material {
@@ -117,7 +127,7 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),

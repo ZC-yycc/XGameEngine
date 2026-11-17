@@ -6,6 +6,7 @@ use xgc_render::{
     build_draw_list, load_glb, GpuContext, MeshCache, Pass, RenderGraph, Renderer, ResourceDesc,
     ResourceUsage,
 };
+use xgc_sim::{System, UiLayoutSystem};
 use xgc_store::load_world;
 use xgc_world::World;
 
@@ -200,9 +201,13 @@ pub(crate) fn render_frame(
     let height = height
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(180);
+    UiLayoutSystem {
+        viewport: [width as f32, height as f32],
+    }
+    .run(&mut world, 0.0);
     let desc = ResourceDesc::texture2d(
         "frame",
-        "rgba8unorm",
+        "rgba8unorm-srgb",
         width,
         height,
         vec![ResourceUsage::ColorAttachment],
@@ -262,8 +267,8 @@ pub(crate) fn render_frame(
         return ExitCode::from(1);
     }
     println!(
-        "render-frame: {} 个 draw / {} 次 draw call，{}x{} -> {}",
-        stats.draws, stats.draw_calls, width, height, output
+        "render-frame: {} 个场景 draw / {} 次 draw call / {} 个 UI draw，{}x{} -> {}",
+        stats.draws, stats.draw_calls, stats.ui_draws, width, height, output
     );
     ExitCode::SUCCESS
 }

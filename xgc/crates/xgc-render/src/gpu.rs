@@ -248,16 +248,19 @@ impl GpuContext {
         Ok(())
     }
 
-    /// 回读 `rgba8unorm` 纹理为紧凑 RGBA 字节；行对齐在内部处理。
+    /// 回读 RGBA8 线性 / sRGB 纹理为紧凑字节；行对齐在内部处理。
     pub fn read_texture_rgba8(
         &self,
         texture: &wgpu::Texture,
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>, GpuError> {
-        if texture.format() != wgpu::TextureFormat::Rgba8Unorm {
+        if !matches!(
+            texture.format(),
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb
+        ) {
             return Err(GpuError::Readback(format!(
-                "只支持 rgba8unorm 回读，实际 {:?}",
+                "只支持 rgba8unorm / rgba8unorm-srgb 回读，实际 {:?}",
                 texture.format()
             )));
         }

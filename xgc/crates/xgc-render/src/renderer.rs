@@ -12,7 +12,7 @@ use super::gpu_mesh::GpuMeshCache;
 use super::image::ImageData;
 use super::instanced::InstancedRequest;
 use super::mesh::Mesh;
-use super::pipeline::{RenderCache, RoundedMeshDraw};
+use super::pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
 use super::resources::{ResourceDesc, ResourceUsage};
 use super::skinned::{GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
 use super::text::text_mesh_wrapped;
@@ -23,6 +23,8 @@ use super::ui_draw::{cover_uv, quad_matrix};
 pub struct RenderStats {
     pub draws: usize,
     pub draw_calls: usize,
+    pub ui_draws: usize,
+    /// 逻辑渲染阶段数；不等于底层 wgpu RenderPass 个数。
     pub passes: usize,
 }
 
@@ -40,6 +42,7 @@ pub struct Renderer {
     skinned: Option<(wgpu::TextureFormat, SkinnedPipeline)>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
+    ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
     ui_pipeline: Option<(wgpu::TextureFormat, TexturePipeline)>,
     ui_textures: HashMap<String, Option<wgpu::Texture>>,
     clear_color: wgpu::Color,
@@ -67,6 +70,7 @@ impl Renderer {
             skinned: None,
             depth: None,
             images: HashMap::new(),
+            ui_overlay: None,
             ui_pipeline: None,
             ui_textures: HashMap::new(),
             clear_color: wgpu::Color::BLACK,
@@ -123,6 +127,17 @@ impl Renderer {
         Ok(())
     }
 
+    fn overlay_pipeline(
+        &mut self,
+        context: &GpuContext,
+        format: wgpu::TextureFormat,
+    ) -> &TrianglePipeline {
+        if self.ui_overlay.as_ref().map(|(current, _)| *current) != Some(format) {
+            self.ui_overlay = Some((format, context.create_overlay_pipeline(format)));
+        }
+        &self.ui_overlay.as_ref().unwrap().1
+    }
+
     /// 渲染 UI 背景矩形：在已渲染画面上叠加，不写深度；返回 draw 数。
     pub fn render_ui(
         &mut self,
@@ -131,8 +146,6 @@ impl Renderer {
         world: &World,
     ) -> Result<usize, GpuError> {
         let viewport = [target.width() as f32, target.height() as f32];
-        let pipeline = context.create_triangle_pipeline(target.format());
-        let mesh = Mesh::quad();
         let mut items = Vec::new();
         world.for_each::<UiLayout>(|key, layout| {
             if !layout.visible {
@@ -191,6 +204,10 @@ impl Renderer {
             }
         });
         items.sort_by_key(|(entity, _, _, _, _, _, _, _, _, _, _, _, _)| *entity);
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let mesh = Mesh::quad();
         let mut draws = 0;
         for (
             _,
@@ -213,29 +230,31 @@ impl Renderer {
             };
             if *focused {
                 let ring = [rect[0] - 2.0, rect[1] - 2.0, rect[2] + 4.0, rect[3] + 4.0];
-                pipeline.draw_mesh_rounded(&RoundedMeshDraw {
-                    context,
-                    texture: target,
-                    mesh: &mesh,
-                    color: [1.0, 0.8, 0.2, 1.0],
-                    mvp: Some(quad_matrix(ring, viewport)),
-                    scissor,
-                    rect: ring,
-                    radius: *corner_radius + 2.0,
-                })?;
+                self.overlay_pipeline(context, target.format())
+                    .draw_mesh_rounded(&RoundedMeshDraw {
+                        context,
+                        texture: target,
+                        mesh: &mesh,
+                        color: [1.0, 0.8, 0.2, 1.0],
+                        mvp: Some(quad_matrix(ring, viewport)),
+                        scissor,
+                        rect: ring,
+                        radius: *corner_radius + 2.0,
+                    })?;
                 draws += 1;
             }
             if color[3] > 0.0 {
-                pipeline.draw_mesh_rounded(&RoundedMeshDraw {
-                    context,
-                    texture: target,
-                    mesh: &mesh,
-                    color: *color,
-                    mvp: Some(quad_matrix(*rect, viewport)),
-                    scissor,
-                    rect: *rect,
-                    radius: *corner_radius,
-                })?;
+                self.overlay_pipeline(context, target.format())
+                    .draw_mesh_rounded(&RoundedMeshDraw {
+                        context,
+                        texture: target,
+                        mesh: &mesh,
+                        color: *color,
+                        mvp: Some(quad_matrix(*rect, viewport)),
+                        scissor,
+                        rect: *rect,
+                        radius: *corner_radius,
+                    })?;
                 draws += 1;
             }
             if !image_path.is_empty() {
@@ -386,14 +405,15 @@ impl Renderer {
                     max_width,
                 );
                 if !text_mesh.positions.is_empty() {
-                    pipeline.draw_mesh_scissored(
-                        context,
-                        target,
-                        &text_mesh,
-                        *text_color,
-                        None,
-                        scissor,
-                    )?;
+                    self.overlay_pipeline(context, target.format())
+                        .draw_mesh_scissored(
+                            context,
+                            target,
+                            &text_mesh,
+                            *text_color,
+                            None,
+                            scissor,
+                        )?;
                     draws += 1;
                 }
             }
@@ -408,7 +428,10 @@ impl Renderer {
         target: &wgpu::Texture,
         world: &World,
     ) -> Result<RenderStats, GpuError> {
-        self.render_selected(context, target, world, None)
+        let mut stats = self.render_selected(context, target, world, None)?;
+        stats.ui_draws = self.render_ui(context, target, world)?;
+        stats.passes += usize::from(stats.ui_draws > 0);
+        Ok(stats)
     }
 
     /// 带选择高亮：选中实体的颜色替换为强调色，用于编辑器视口。
@@ -502,6 +525,7 @@ impl Renderer {
         Ok(RenderStats {
             draws,
             draw_calls,
+            ui_draws: 0,
             passes: usize::from(draws > 0),
         })
     }
