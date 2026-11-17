@@ -44,9 +44,8 @@ fn aces_rrt(c: vec3<f32>) -> vec3<f32> {
 }
 
 // E/π 的球谐求值（系数里已折好余弦卷积）；基函数与 sky.rs 的 sh_basis 逐项一致。
-// 这一刀没有逐材质 metallic / roughness（实例数据仍是 80B），环境反射统一按
-// "介电体 + 中等粗糙" 估算；完整 PBR 切片会把这两个值搬进实例数据。
-const ENV_ROUGHNESS: f32 = 0.5;
+// 与旧引擎同一条下限：粗糙度太低时 GGX 的解析拟合会出 NaN / 过亮高光。
+const MIN_ROUGHNESS: f32 = 0.04;
 
 // Lazarov 2013 的 `EnvBRDFApprox`：split-sum 第二项（f0·A + B）的解析拟合。
 fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
@@ -105,6 +104,8 @@ fn aces(linear: vec3<f32>) -> vec3<f32> {
 struct Instance {
     model: mat4x4<f32>,
     color: vec4<f32>,
+    // x = metallic，y = roughness
+    material: vec4<f32>,
 };
 
 @group(0) @binding(1)
@@ -120,6 +121,7 @@ struct VsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) world: vec3<f32>,
+    @location(2) @interpolate(flat) material: vec4<f32>,
 };
 
 @vertex
@@ -130,6 +132,7 @@ fn vs(@location(0) position: vec3<f32>, @builtin(instance_index) index: u32) -> 
     out.position = frame.view_proj * world;
     out.world = world.xyz;
     out.color = instance.color;
+    out.material = instance.material;
     return out;
 }
 
@@ -145,21 +148,25 @@ fn fs(input: VsOut) -> @location(0) vec4<f32> {
     let to_light = -normalize(frame.sun_dir.xyz);
     let diffuse = max(dot(normal, to_light), 0.0);
     // 环境光 + 天空 IBL（两者同标定，直接相加）+ 场景主方向光。
-    var light = frame.ambient.rgb;
+    let metallic = clamp(input.material.x, 0.0, 1.0);
+    let roughness = clamp(input.material.y, MIN_ROUGHNESS, 1.0);
+    // 金属没有漫反射：环境与直射的漫反射项都乘 (1 - metallic)。
+    let diffuse_color = input.color.rgb * (1.0 - metallic);
+    // 介电体 F0 = 0.04，金属 F0 = 基色（旧引擎同样的 mix）。
+    let f0 = mix(vec3<f32>(0.04), input.color.rgb, metallic);
+    var light = frame.ambient.rgb * diffuse_color;
     if (frame.sky_params.x > 0.5) {
-        // 漫反射环境（E/π 的 L2 球谐）+ 介电体环境反射。
-        // 反射项与旧引擎 split-sum 同形：`env(R) × (f0·A + B)`；这里 env 用同一份
-        // SH 在反射方向上求值（预过滤立方体贴图的近似），A/B 用 Lazarov 的解析拟合。
-        light = light + sky_sh_eval(normal);
+        // 漫反射环境（E/π 的 L2 球谐）+ 环境反射。
+        // 反射项与旧引擎 split-sum 同形：`env(R) × (f0·A + B)`；env 用同一份 SH 在
+        // 反射方向上求值（预过滤立方体的近似），A/B 用逐材质粗糙度的 Lazarov 拟合。
+        light = light + sky_sh_eval(normal) * diffuse_color;
         let n_dot_v = clamp(dot(normal, to_camera), 0.0, 1.0);
         let reflected = reflect(-to_camera, normal);
         let env_spec = sky_sh_eval(reflected);
-        let f0 = vec3<f32>(0.04);
-        let ab = env_brdf_approx(f0, ENV_ROUGHNESS, n_dot_v);
-        light = light + env_spec * ab;
+        light = light + env_spec * env_brdf_approx(f0, roughness, n_dot_v);
     }
     let sun_shadow = shadow_factor(input.world, diffuse);
-    light = light + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse * sun_shadow);
-    let lit = input.color.rgb * light;
+    light = light + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse * sun_shadow) * diffuse_color;
+    let lit = light;
     return vec4<f32>(aces(lit), input.color.a);
 }

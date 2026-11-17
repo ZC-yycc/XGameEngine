@@ -44,8 +44,8 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 静态 / GPU 蒙皮同路）、场景光与环境光（`WorldData.environment`，`环境光 + 主方向光 × N·L`）、
 ACES 色调映射（片元与清屏色同曲线）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
 深度测试，几何照常遮挡）、天空漫反射 IBL（解析天空 → L2 球谐 E/π，参数取项目级 `project.ron`
-的 `render.sky`）、方向光阴影（单级正交拟合 + 2048² 深度图 + 3×3 PCF）、环境反射（天空 SH 反射方向 × Lazarov
-解析 BRDF，介电体近似）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
+的 `render.sky`）、方向光阴影（单级正交拟合 + 2048² 深度图 + 3×3 PCF）、环境反射（天空 SH 反射方向 × Lazarov 解析 BRDF，逐材质 `f0 = mix(0.04, 基色, metallic)`、
+`(1-metallic)` 漫反射、粗糙度夹 0.04）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
 `guid://` 解析、`Renderer` 帧入口（DrawList → MeshCache → RenderCache → GPU）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
@@ -105,12 +105,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（267 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（176 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（270 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（177 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
 30 个内建类型 34950 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-刚体求解器（旋转 / 静-动碰撞 / 堆叠）、逐材质 metallic-roughness split-sum、CSM / 软阴影 / 网格纹理 / 粒子、
+刚体求解器（旋转 / 静-动碰撞 / 堆叠）、直射光 GGX 高光、CSM / 软阴影 / 网格纹理 / 粒子、
 脚本正式 System 调度，
 以及旧新逐帧 trace / 性能验收。
 

@@ -16,15 +16,16 @@ pub(crate) fn compose_colors(
     selected: Option<EntityId>,
 ) -> Result<(), MeshError> {
     for item in &mut list.items {
-        let asset_tint = if item.material_asset.is_empty() {
+        // 基色是乘子；metallic / roughness 是替换值（旧引擎同语义）：
+        // 资产给出 metallic / roughness，实体覆盖的 roughness 已由迁移写进组件。
+        let asset = if item.material_asset.is_empty() {
             None
         } else {
-            meshes
-                .material(&item.material_asset)?
-                .map(|asset| asset.base_color)
+            meshes.material(&item.material_asset)?.cloned()
         };
-        if let Some(tint) = asset_tint {
-            item.color = std::array::from_fn(|index| item.color[index] * tint[index]);
+        if let Some(asset) = asset {
+            item.color = std::array::from_fn(|index| item.color[index] * asset.base_color[index]);
+            item.metallic = asset.metallic;
         }
         if let Some(mesh) = meshes.get(&item.model)? {
             item.color = mesh.tint(item.color);

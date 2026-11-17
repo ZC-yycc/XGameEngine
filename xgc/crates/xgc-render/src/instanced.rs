@@ -190,7 +190,8 @@ impl GpuContext {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(80),
+                            // 模型矩阵 64B + 颜色 16B + 材质（metallic / roughness）16B。
+                            min_binding_size: wgpu::BufferSize::new(96),
                         },
                         count: None,
                     }],
@@ -252,7 +253,8 @@ struct Group {
     key: String,
     source: String,
     pose: Option<Vec<[f32; 16]>>,
-    instances: Vec<(Mat4, [f32; 4])>,
+    /// (模型矩阵, 颜色, 材质参数 [metallic, roughness])。
+    instances: Vec<(Mat4, [f32; 4], [f32; 2])>,
 }
 
 struct Prepared {
@@ -321,7 +323,11 @@ impl RenderCache {
                 });
                 buckets.len() - 1
             });
-            buckets[index].instances.push((item.transform, item.color));
+            buckets[index].instances.push((
+                item.transform,
+                item.color,
+                [item.metallic, item.roughness],
+            ));
         }
 
         let mut camera_bytes = Vec::with_capacity(FRAME_UNIFORM_BYTES as usize);
@@ -370,12 +376,15 @@ impl RenderCache {
             } else {
                 gpu_meshes.upload(context, &group.key, mesh);
             }
-            let mut bytes = Vec::with_capacity(group.instances.len() * 80);
-            for (model, color) in &group.instances {
+            let mut bytes = Vec::with_capacity(group.instances.len() * 96);
+            for (model, color, material) in &group.instances {
                 for value in model {
                     bytes.extend_from_slice(&value.to_le_bytes());
                 }
                 for value in color {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                for value in [material[0], material[1], 0.0, 0.0] {
                     bytes.extend_from_slice(&value.to_le_bytes());
                 }
             }

@@ -14,6 +14,9 @@ pub struct DrawItem {
     pub model: String,
     pub color: [f32; 4],
     pub roughness: f32,
+    /// 金属度：来自 `.mat`（旧引擎里 metallic 由资产替换、覆盖可再替换）；
+    /// 没有资产引用时按 0（绝缘体）处理。
+    pub metallic: f32,
     /// `.mat` 资产引用（空串 = 不用资产）；渲染时与模型材质因子一起乘进 `color`。
     pub material_asset: String,
     pub transform: Mat4,
@@ -52,6 +55,7 @@ pub fn build_draw_list(world: &World) -> DrawList {
             model: mesh.model.clone(),
             color: material.base_color,
             roughness: material.roughness,
+            metallic: 0.0,
             material_asset: material.asset.clone(),
             transform: model_matrix(transform),
             pose: skeleton_pose(world, key),
