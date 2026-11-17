@@ -6,9 +6,18 @@ use xgc_render::{
     build_draw_list, load_glb, GpuContext, MeshCache, Pass, RenderGraph, Renderer, ResourceDesc,
     ResourceUsage,
 };
-use xgc_sim::{System, UiLayoutSystem};
+use xgc_sim::{HierarchySystem, System, UiLayoutSystem};
 use xgc_store::load_world;
 use xgc_world::World;
+
+fn prepare_frame_world(world: &mut World, width: u32, height: u32) {
+    let mut hierarchy = HierarchySystem::default();
+    hierarchy.run(world, 0.0);
+    UiLayoutSystem {
+        viewport: [width as f32, height as f32],
+    }
+    .run(world, 0.0);
+}
 
 pub(crate) fn render_graph() -> ExitCode {
     let mut graph = RenderGraph::new();
@@ -173,7 +182,7 @@ pub(crate) fn render_frame(
     height: Option<&str>,
 ) -> ExitCode {
     let (Some(input), Some(output)) = (input, output) else {
-        eprintln!("用法：xgc render-frame <世界.json> <out.ppm> [资产根]");
+        eprintln!("用法：xgc render-frame <世界.json> <out.ppm> [资产根] [宽] [高]");
         return ExitCode::from(2);
     };
     let data = match load_world(Path::new(input)) {
@@ -201,10 +210,7 @@ pub(crate) fn render_frame(
     let height = height
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(180);
-    UiLayoutSystem {
-        viewport: [width as f32, height as f32],
-    }
-    .run(&mut world, 0.0);
+    prepare_frame_world(&mut world, width, height);
     let desc = ResourceDesc::texture2d(
         "frame",
         "rgba8unorm-srgb",
@@ -271,4 +277,38 @@ pub(crate) fn render_frame(
         stats.draws, stats.draw_calls, stats.ui_draws, width, height, output
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_frame_world;
+    use xgc_world::{GlobalTransform, Parent, Transform, World};
+
+    #[test]
+    fn frame_preparation_composes_parent_chain() {
+        let mut world = World::new();
+        let root = world.spawn((
+            Transform {
+                position: [-5.0, 1.0, 0.0],
+                ..Transform::default()
+            },
+            GlobalTransform::default(),
+        ));
+        let root_id = world.entity(root).unwrap();
+        let child = world.spawn((
+            Transform {
+                position: [0.0, 2.0, 0.0],
+                ..Transform::default()
+            },
+            GlobalTransform::default(),
+            Parent { entity: root_id },
+        ));
+
+        prepare_frame_world(&mut world, 1280, 720);
+
+        assert_eq!(
+            world.get::<GlobalTransform>(child).unwrap().position,
+            [-5.0, 3.0, 0.0]
+        );
+    }
 }

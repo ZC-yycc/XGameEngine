@@ -3,16 +3,16 @@
 > 这是能力的**现状快照**，不是完成声明。XGC 仍明显低于 XGameEngine 全量能力，
 > 当前不能割接。
 
-## 指标（第 130 轮）
+## 指标（第 131 轮）
 
 | 项 | 值 |
 |---|---|
 | Rust 文件 | 156（最大 599 行；软上限 600） |
-| 测试 | 221（`cargo test --workspace --offline`） |
+| 测试 | 222（`cargo test --workspace --offline`） |
 | 内建组件 schema | 30 类 / 34668 字节，两次导出逐字节相同 |
 | 默认系统 | 18 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
-| CLI 冒烟 | `check` 29 组件 OK；`run 60` frames=60 entities=3 revision=3 hash=`f4bc029f5f995b91` |
+| CLI 冒烟 | `check` 30 组件 OK；`run 60` frames=60 entities=3 revision=3 hash=`f4bc029f5f995b91` |
 
 ## 已具备
 
@@ -46,9 +46,9 @@
 | 资产 / 打包 | 70% | 引用裁剪 + 增量烹饪（哈希未变跳过写入）+ manifest 聚合签名；JSON / XGCB / 图形播放器；缺密码学签名 / 跨机器增量 |
 | Lua 脚本 | 80% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
-| 割接验收 | 42% | 统计对照一致；正式帧已合成 7 个 HUD draw，showcase 旧/新 1280×720 差异降到 99.30%（mean_abs 31.23）；缺 trace 对照 / 并行调度 / 推送 |
+| 割接验收 | 43% | 统计对照一致；正式帧已合成 HUD 并重算层级世界变换，固定参考图 mean_abs 降到 30.50；缺同 tick / trace 对照、并行调度与推送 |
 
-**整体能力对等约 56%，割接就绪约 42%**。核心运行时、迁移、动画、编辑器和
+**整体能力对等约 56%，割接就绪约 43%**。核心运行时、迁移、动画、编辑器和
 cooked 播放器已可用；差距集中在渲染高级特性、正式调度、逐帧验收与推送。
 
 ## 迁移 / 运行证据
@@ -56,10 +56,10 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 - `projects/XGame/Scenes/showcase.ron` → 24 实体 / 51 组件 / 0 缺失父节点。
 - `run-world` 60 帧通过；`render-frame` 1280×720 输出 14 个场景 draw / 5 个场景 draw call / 7 个 UI draw。
 - 旧 / 新 headless 统计逐项一致：24 实体 / 10 刚体 / 10 碰撞体 / 2 发射器 / 1 监听者。
-- 正式帧按目标尺寸运行唯一 `UiLayoutSystem`，在三维场景后以 sRGB alpha 合成 HUD 背景 / 文本；固定参考图 A/B 的 1280×720 差异为 99.30%，mean_abs 从 62.97 降到 31.23。该 A/B 尚非同 tick，且新截图未执行 `HierarchySystem`。
+- `render-frame` 先运行唯一 `HierarchySystem` 重算父子世界变换，再按目标尺寸运行 `UiLayoutSystem`；层级修正改变 20712/921600 像素（2.25%），固定参考图 mean_abs 从 31.23 降到 30.50、max 为 255。该 A/B 仍尚非同 tick。
 - GUID 资产（Box.glb、Fox.gltf + Fox.bin）可解析；character 脚本 / Pillar 预制体可迁移。
 - cooked 包：引用裁剪 7 文件、XGCB 二进制、manifest 哈希 / 签名校验、`xgc-player` headless 60 帧。
-- 自动化测试：221 条；新增 `frame_ui.rs` 固定正式帧的 sRGB alpha HUD 合成；迁移与对照测试继续覆盖 showcase。
+- 自动化测试：222 条；正式帧回归覆盖 sRGB alpha HUD，并钉住渲染前父子 `GlobalTransform` 合成。
 
 ## 与 XGameEngine 的主要差距
 
@@ -67,7 +67,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 |---|---|---|
 | 渲染高级特性 | 基础几何 / 面着色 / 天空 / HUD 已通；缺 PBR、网格纹理、阴影、后处理、粒子 | P0 |
 | 正式 System 调度 | `SystemAccess` / `batches()` 已有，执行仍顺序；脚本尚未成为正式 System | P0 |
-| 视觉 / trace 验收 | 旧新统计一致，但无逐帧 trace / 同 tick 截图；`render-frame` 尚未执行层级世界变换 | P0 |
+| 视觉 / trace 验收 | 旧新统计一致，`render-frame` 已重算层级世界变换；仍无逐帧 trace / 同 tick 截图 | P0 |
 | 物理完整性 | 简化角色 / AABB；无完整刚体、关节、连续碰撞、坡面滑动 | P1 |
 | 跨系统并行 | 未做世界分片 / 并行执行 | P1 |
 | 资产签名 | FNV 聚合校验，非密码学签名；无跨机器增量 | P1 |
@@ -86,7 +86,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 
 ## 下一步（按顺序）
 
-1. 渲染：HUD 正式帧已通；先统一同 tick / 层级世界变换，再做 PBR / 网格纹理 / 阴影。
+1. 渲染：HUD / 层级世界变换已进入正式帧；下一步统一同 tick，再做 PBR / 网格纹理 / 阴影。
 2. 正式调度：把脚本与默认系统纳入 `Schedule` 的访问声明批次。
 3. 逐帧 trace / 截图对照与性能门禁。
 4. 密码学签名、跨机器增量烹饪。

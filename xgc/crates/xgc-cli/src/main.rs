@@ -81,13 +81,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根]>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根]>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高]>"
             );
             ExitCode::from(2)
         }
