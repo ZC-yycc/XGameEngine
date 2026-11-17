@@ -28,6 +28,10 @@ pub struct RenderStats {
     pub ui_draws: usize,
     /// 逻辑渲染阶段数；不等于底层 wgpu RenderPass 个数。
     pub passes: usize,
+    /// 本帧为蒙皮 uniform 竞技场（palette / model）新建的 GPU 缓冲数：同尺寸下恒 0。
+    ///
+    /// 只统主场景那两张竞技场；阴影 pass 的蒙皮 palette 仍逐投射体建缓冲，不计在内。
+    pub skin_uniform_buffers: usize,
 }
 
 struct DepthTarget {
@@ -490,6 +494,7 @@ impl Renderer {
             textures,
         };
         let mut draw_calls = self.cache.draw_list_instanced(context, &mut request)?;
+        let mut skin_uniform_buffers = 0usize;
         if !gpu_items.is_empty() {
             let format = target.format();
             if self
@@ -502,7 +507,7 @@ impl Renderer {
                     context.create_skinned_pipeline(format, true, textures.layout()),
                 ));
             }
-            let pipeline = &self.skinned.as_ref().unwrap().1;
+            let pipeline = &mut self.skinned.as_mut().unwrap().1;
             // 第一遍：上传本条需要的蒙皮网格并算好 palette（上传会可变借用缓存）。
             let mut resolved: Vec<(usize, Vec<u8>)> = Vec::with_capacity(gpu_items.len());
             for (index, item) in gpu_items.iter().enumerate() {
@@ -554,7 +559,7 @@ impl Renderer {
                     shadow_view,
                     shadow_sampler,
                 );
-                draw_calls += pipeline.draw_batch(
+                let skinned = pipeline.draw_batch(
                     context,
                     &super::skinned::SkinnedBatchRequest {
                         texture: target,
@@ -565,11 +570,12 @@ impl Renderer {
                         draws: &batch,
                     },
                 )?;
+                draw_calls += skinned.draws;
+                skin_uniform_buffers += skinned.uniform_buffers;
             }
         }
         if self.sky.enabled {
-            // 一个场景 draw 都没有时，实例化 pass 不会清深度（它提前返回了）——
-            // 天空 pass 自己把深度清成 1.0；有几何时深度已被清好，只能 Load。
+            // 没有场景 draw 时实例化 pass 提前返回、没清深度：天空 pass 自己清成 1.0，否则只能 Load。
             self.draw_sky(context, target, view_proj, &lighting, draws == 0);
         }
         // 粒子画在几何 / 天空之后、UI 之前：要被几何遮住，又要参与色调映射。
@@ -586,6 +592,7 @@ impl Renderer {
             ui_draws: 0,
             // HDR 场景即使没有 draw 也会清色；随后帧入口再计一次 tone-map。
             passes: 1,
+            skin_uniform_buffers,
         })
     }
 }

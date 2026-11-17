@@ -8,6 +8,8 @@ use super::instanced::create_frame_layout;
 use super::mesh::Mesh;
 use super::texture_bind::TextureBinding;
 
+mod arena;
+
 /// palette 槽数：与旧引擎 `BONES_PER_SLOT = 256` 对齐，超出才回退 CPU。
 ///
 /// 256 × 64B = 16 KiB 的 uniform 仍在 wgpu 默认 `max_uniform_buffer_binding_size`
@@ -16,6 +18,11 @@ use super::texture_bind::TextureBinding;
 const MAX_JOINTS: usize = 256;
 /// MAX_JOINTS × mat4x4<f32>：palette uniform 的字节数（主场景与阴影 pass 共用）。
 pub(crate) const MAX_JOINTS_BYTES: usize = MAX_JOINTS * 64;
+/// 逐 draw 的 model uniform 字节数（模型矩阵 64 B + 颜色 16 B + 材质 16 B）。
+///
+/// layout 的 `min_binding_size`、竞技场槽距、打包容量三处共用这一份，避免加字段时
+/// 只改 layout 而竞技场仍按旧字节数收、在 `upload` 的断言处才炸。
+const MODEL_UNIFORM_BYTES: u64 = 96;
 const SKINNED_WGSL: &str = concat!(
     include_str!("scene_shading.wgsl"),
     include_str!("skin_vertex.wgsl"),
@@ -250,6 +257,11 @@ pub(crate) struct SkinnedPipeline {
     frame_layout: wgpu::BindGroupLayout,
     joints_layout: wgpu::BindGroupLayout,
     model_layout: wgpu::BindGroupLayout,
+    /// 逐角色 palette 并进同一张缓冲，靠 dynamic offset 分槽。
+    palette: arena::UniformArena,
+    model: arena::UniformArena,
+    /// 逐 draw model uniform 的打包暂存：跨帧复用，稳态下不再每个角色一次分配。
+    model_scratch: Vec<Vec<u8>>,
 }
 
 impl GpuContext {
@@ -270,7 +282,8 @@ impl GpuContext {
             visibility,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
+                // 竞技场按槽偏移，layout 必须声明 dynamic offset。
+                has_dynamic_offset: true,
                 min_binding_size: wgpu::BufferSize::new(size),
             },
             count: None,
@@ -286,7 +299,10 @@ impl GpuContext {
             self.device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("xgc-skin-model"),
-                    entries: &[uniform(96, wgpu::ShaderStages::VERTEX_FRAGMENT)],
+                    entries: &[uniform(
+                        MODEL_UNIFORM_BYTES,
+                        wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    )],
                 });
         let layout = self
             .device()
@@ -354,6 +370,13 @@ impl GpuContext {
             frame_layout,
             joints_layout,
             model_layout,
+            palette: arena::UniformArena::new(
+                self,
+                "xgc-skin-joints-arena",
+                MAX_JOINTS_BYTES as u64,
+            ),
+            model: arena::UniformArena::new(self, "xgc-skin-model-arena", MODEL_UNIFORM_BYTES),
+            model_scratch: Vec::new(),
         }
     }
 }
@@ -379,6 +402,16 @@ pub(crate) struct SkinnedBatchRequest<'a> {
     pub(crate) draws: &'a [SkinnedDraw<'a>],
 }
 
+/// 一批蒙皮 draw 的产物：画了几条、这一帧为 uniform 竞技场新建了几张 GPU 缓冲。
+///
+/// `uniform_buffers` 只在"palette / model 竞技场扩过容量"时非零；它是"逐角色建
+/// 缓冲"这个旧代价是否真的消失的可观测口径（渲染统计里的 `skin_uniform_buffers`）。
+#[derive(Default)]
+pub(crate) struct SkinnedBatchOutcome {
+    pub(crate) draws: usize,
+    pub(crate) uniform_buffers: usize,
+}
+
 impl SkinnedPipeline {
     /// 一批蒙皮 draw 共用**一个** frame binding、**一个** pass、**一次** submit。
     ///
@@ -388,29 +421,36 @@ impl SkinnedPipeline {
     /// `clear` 只有"本帧还没有任何 draw 写进这张目标"时才为真（与实例化 pass 同款），
     /// 否则用 `LoadOp::Load` 接在前面写好的颜色 / 深度上。
     pub(crate) fn draw_batch(
-        &self,
+        &mut self,
         context: &GpuContext,
         request: &SkinnedBatchRequest<'_>,
-    ) -> Result<usize, GpuError> {
+    ) -> Result<SkinnedBatchOutcome, GpuError> {
         let draws = request.draws;
         if draws.is_empty() {
-            return Ok(0);
+            return Ok(SkinnedBatchOutcome::default());
         }
-        // palette / model 逐条建绑定，但都在进 pass 之前建好（pass 只借用）。
-        let mut bindings = Vec::with_capacity(draws.len());
-        for draw in draws {
-            let palette = create_uniform_buffer(context, "xgc-skin-joints-buffer", draw.palette);
-            let palette_bind = uniform_bind(
-                context,
-                &self.joints_layout,
-                &palette,
-                "xgc-skin-joints-bind",
-            );
-            let model = model_buffer(context, draw);
-            let model_bind =
-                uniform_bind(context, &self.model_layout, &model, "xgc-skin-model-bind");
-            bindings.push((palette_bind, model_bind));
+        // 逐角色 palette / model 并进两张常驻缓冲：整批只写两次、绑定组只在扩容时建，
+        // 进 pass 之后每条 draw 只换 dynamic offset（旧实现是逐条建缓冲 + 建绑定组）。
+        let palettes: Vec<&[u8]> = draws.iter().map(|draw| draw.palette).collect();
+        let mut uniform_buffers = self.palette.upload(context, &self.joints_layout, &palettes);
+        // 打包暂存跨帧复用（只增不减，和竞技场同一条取舍）：稳态下这里不分配。
+        let mut models = std::mem::take(&mut self.model_scratch);
+        while models.len() < draws.len() {
+            models.push(Vec::new());
         }
+        for (bytes, draw) in models.iter_mut().take(draws.len()).zip(draws.iter()) {
+            model_bytes_into(bytes, draw);
+        }
+        let model_slices: Vec<&[u8]> = models
+            .iter()
+            .take(draws.len())
+            .map(|bytes| bytes.as_slice())
+            .collect();
+        uniform_buffers += self
+            .model
+            .upload(context, &self.model_layout, &model_slices);
+        drop(model_slices);
+        self.model_scratch = models;
         let view = request
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -452,10 +492,10 @@ impl SkinnedPipeline {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, request.frame_bind, &[]);
-            for (draw, (palette_bind, model_bind)) in draws.iter().zip(&bindings) {
-                pass.set_bind_group(1, palette_bind, &[]);
+            for (slot, draw) in draws.iter().enumerate() {
+                pass.set_bind_group(1, self.palette.bind(), &[self.palette.offset(slot)]);
                 pass.set_bind_group(2, &draw.mesh.texture_group, &[]);
-                pass.set_bind_group(3, model_bind, &[]);
+                pass.set_bind_group(3, self.model.bind(), &[self.model.offset(slot)]);
                 pass.set_vertex_buffer(0, draw.mesh.position.slice(..));
                 pass.set_vertex_buffer(1, draw.mesh.uv.slice(..));
                 pass.set_vertex_buffer(2, draw.mesh.joints.slice(..));
@@ -469,7 +509,10 @@ impl SkinnedPipeline {
             }
         }
         context.queue().submit(Some(encoder.finish()));
-        Ok(draws.len())
+        Ok(SkinnedBatchOutcome {
+            draws: draws.len(),
+            uniform_buffers,
+        })
     }
 
     pub(crate) fn frame_layout(&self) -> &wgpu::BindGroupLayout {
@@ -477,8 +520,10 @@ impl SkinnedPipeline {
     }
 }
 
-fn model_buffer(context: &GpuContext, draw: &SkinnedDraw<'_>) -> wgpu::Buffer {
-    let mut bytes = Vec::with_capacity(96);
+/// 一条 draw 的模型 / 材质 uniform 字节（模型矩阵 64 B + 颜色 16 B + 材质 16 B）。
+fn model_bytes_into(bytes: &mut Vec<u8>, draw: &SkinnedDraw<'_>) {
+    bytes.clear();
+    bytes.reserve(MODEL_UNIFORM_BYTES as usize);
     for value in draw.model {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -488,7 +533,6 @@ fn model_buffer(context: &GpuContext, draw: &SkinnedDraw<'_>) -> wgpu::Buffer {
     for value in [draw.metallic, draw.roughness, 0.0, 0.0] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    create_uniform_buffer(context, "xgc-skin-model-buffer", &bytes)
 }
 
 /// 256 槽 palette 的唯一计算处：主场景与阴影 pass 都读这一份，`pose × inverse_bind`
@@ -506,35 +550,6 @@ pub(crate) fn palette_bytes(pose: &[[f32; 16]], inverse_bind: &[[f32; 16]]) -> V
         }
     }
     bytes
-}
-
-fn create_uniform_buffer(context: &GpuContext, label: &str, bytes: &[u8]) -> wgpu::Buffer {
-    let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size: bytes.len() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    context.queue().write_buffer(&buffer, 0, bytes);
-    buffer
-}
-
-fn uniform_bind(
-    context: &GpuContext,
-    layout: &wgpu::BindGroupLayout,
-    buffer: &wgpu::Buffer,
-    label: &str,
-) -> wgpu::BindGroup {
-    context
-        .device()
-        .create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        })
 }
 
 #[cfg(test)]

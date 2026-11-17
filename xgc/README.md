@@ -77,7 +77,9 @@ HDR 统一 tone-map 切片沿用同一命令同机背靠背冷启动：改前 `8
 
 HDR 光晕切片默认关闭，因此不改变任何既有画面的性能与像素：证据世界第 150 帧 PPM 与上一版 SHA-256 相同（`4A47275D…48A0927`、自比 0/921600），关闭态只多读一次 uniform、tone-map 绑定组按场景纹理缓存（不随帧重建）。开启时多 6 张 ½ / ¼ / ⅛ 的 `Rgba16Float` 中间目标（每级 a / b 两块乒乓）与 9 个全屏 pass，每帧只重建亮部提取与 tone-map 各一个绑定组（链内 8 个在建链时一次建好），**未做稳态计时**（当前没有常驻 profiler 门禁，冷启动把 shader 编译与进程启动抖到一起，不能归因），代价量级需按 GPU timestamp 另测。
 
-蒙皮 draw 单次提交切片让一帧所有 GPU 蒙皮 draw 共用**一个** frame binding、**一个** pass、**一次** submit（palette 仍逐角色）。新回归 `batched_skinned_draws_keep_their_own_palettes` 用左右两个角色做差分：右侧换姿态时左侧按列切出的像素必须逐字节不变。**未做稳态计时**：证据场景没有蒙皮 draw，本机当时的冷启动四跑（818–998 ms，有并发构建）不能归因于本刀，提交次数 N→1 属于结构性收益，真正的稳态测量仍要常驻进程 profiler。
+蒙皮 draw 单次提交切片让一帧所有 GPU 蒙皮 draw 共用**一个** frame binding、**一个** pass、**一次** submit（palette 仍逐角色；下一轮竞技场已把逐角色缓冲并进常驻缓冲）。新回归 `batched_skinned_draws_keep_their_own_palettes` 用左右两个角色做差分：右侧换姿态时左侧按列切出的像素必须逐字节不变。**未做稳态计时**：证据场景没有蒙皮 draw，本机当时的冷启动四跑（818–998 ms，有并发构建）不能归因于本刀，提交次数 N→1 属于结构性收益，真正的稳态测量仍要常驻进程 profiler。
+
+蒙皮 uniform 竞技场切片把逐角色的 palette（16 KiB）与 model（96 B）并进常驻缓冲：`crates/xgc-render/src/skinned/arena.rs` 的 `UniformArena` 按设备 `min_uniform_buffer_offset_alignment` 算槽距（16 KiB palette 仍是 16 KiB，96 B model 补到 256 B），layout 声明 `has_dynamic_offset: true` 后每条 draw 只换偏移，容量按 2 的幂扩容（只增不减，封顶在历史峰值槽数）、暂存区跨帧复用。`RenderStats::skin_uniform_buffers` 给出可观测口径（只统主场景，不含阴影 pass）：首批 2 张缓冲，同尺寸第二帧 **0**（旧实现每帧每个角色 2 张）。两条单元回归钉住槽距对齐与跨帧复用，集成回归 `repeated_frames_reuse_the_skin_uniform_arenas` 断言 2 → 0（把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红）。证据画面没有骨架实体、竞技场根本不建缓冲，所以第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`）。**未做稳态计时**：冷启动单帧含 pipeline 编译，不能归因于本刀；“每帧缓冲数 2N → 0”是结构性收益，真正的稳态测量仍要常驻进程 profiler。
 
 **姿态感知的场景包围盒**切片用"两个可执行文件交错跑"的同机 A/B（每轮 before / after 各一次，抵消热漂移）：改前 `778.8 / 748.7 / 720.4 / 756.6 ms`（中位数 **752.62 ms**），改后 `795.9 / 721.4 / 734.3 / 826.0 ms`（中位数 **765.10 ms**，+1.7%）。两组区间 720–779 / 721–826 重叠，且证据场景没有任何 `pose` item —— 新分支对每个 draw 只多一次 `Option` 判空，因此判定未见可归因回归；带骨架的场景每帧会多一次 O(顶点 + 关节) 的边界计算（整网格 AABB 按关节变换，比旧端加载期预计算的每关节顶点盒松，后续上骨架截图门禁时要收紧）。真正的收益是"被姿态移出去的几何仍被取景 / 级联远距离覆盖"（5 条新回归负责）。
 
@@ -123,12 +125,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（328 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（204 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
+`cargo test --workspace --offline` 全绿（331 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（205 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-PCSS / 点光阴影、TAA / SSAO / FXAA 等其余后处理、逐角色 palette 合并（每角色 16 KiB palette 仍各自一份；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
+PCSS / 点光阴影、TAA / SSAO / FXAA 等其余后处理、阴影 pass 的蒙皮 palette 仍逐投射体建缓冲（主场景的 palette / model 已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色控制器 / 关节 / 坡面滑动、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。

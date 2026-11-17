@@ -446,6 +446,53 @@ fn batched_skinned_draws_keep_their_own_palettes() {
     );
 }
 
+/// 竞技场是常驻资源：同尺寸的第二帧不该再建蒙皮 uniform 缓冲。
+///
+/// 旧实现逐 draw 各建一张 palette（16 KiB）+ 一张 model（96 B）缓冲，这个数会
+/// 随角色数线性涨；并进竞技场后只在扩容那一帧建（palette / model 各至多一张）。
+#[test]
+fn repeated_frames_reuse_the_skin_uniform_arenas() {
+    let _gpu = gpu_lock();
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let root = write_textured_skin_gltf();
+    let world = two_character_world(identity());
+    let target = context
+        .create_resource(&ResourceDesc::texture2d(
+            "skin-arena-reuse",
+            "rgba8unorm",
+            TWO_CHARACTER_SIZE,
+            TWO_CHARACTER_SIZE,
+            vec![ResourceUsage::ColorAttachment],
+        ))
+        .unwrap();
+    let texture = target.as_texture().unwrap();
+    let mut renderer = Renderer::new(MeshCache::new(&root));
+    let first = renderer.render(&context, texture, &world).unwrap();
+    let second = renderer.render(&context, texture, &world).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+
+    // 这两条 draw 至少得真的走 GPU 蒙皮：两条都掉回 CPU 时竞技场根本不建缓冲，
+    // 下一条断言（首批 2 张）会兜住，所以这里的 >= 2 只保证场景里确实有两条。
+    assert!(
+        first.draws >= 2,
+        "两条蒙皮 draw 必须都进场景：{}",
+        first.draws
+    );
+    assert!(
+        first.skin_uniform_buffers == 2,
+        "首批要建 palette / model 各一张缓冲：{}",
+        first.skin_uniform_buffers
+    );
+    assert!(
+        second.skin_uniform_buffers == 0,
+        "同尺寸第二帧必须复用竞技场、不再建缓冲：{}",
+        second.skin_uniform_buffers
+    );
+}
+
 /// 按**列**切成左右两半（每行各取前 / 后一半像素），不是把字节流对半砍。
 fn column_halves(pixels: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let width = TWO_CHARACTER_SIZE as usize;
@@ -468,6 +515,29 @@ fn lit(pixels: &[u8]) -> usize {
 
 /// 两台骨架 / 两个蒙皮四边形（左 x=-2 固定，右 x=+2 用 `right_pose`）+ 固定相机。
 fn render_two_characters(context: &GpuContext, root: &Path, right_pose: [f32; 16]) -> Frame {
+    let world = two_character_world(right_pose);
+    let target = context
+        .create_resource(&ResourceDesc::texture2d(
+            "two-skinned-characters",
+            "rgba8unorm",
+            TWO_CHARACTER_SIZE,
+            TWO_CHARACTER_SIZE,
+            vec![ResourceUsage::ColorAttachment],
+        ))
+        .unwrap();
+    let texture = target.as_texture().unwrap();
+    let mut renderer = Renderer::new(MeshCache::new(root));
+    renderer.render(context, texture, &world).unwrap();
+    Frame {
+        pixels: context
+            .read_texture_rgba8(texture, TWO_CHARACTER_SIZE, TWO_CHARACTER_SIZE)
+            .unwrap(),
+        gpu_skin_meshes: renderer.gpu_skin_mesh_count(),
+    }
+}
+
+/// 两个角色 + 固定相机：给"像素"与"竞技场复用"两类用例共用同一份场景。
+fn two_character_world(right_pose: [f32; 16]) -> World {
     let mut world = World::new();
     world.set_environment(SceneEnvironment {
         lights: vec![SceneLight {
@@ -510,24 +580,7 @@ fn render_two_characters(context: &GpuContext, root: &Path, right_pose: [f32; 16
         },
         Camera::default(),
     ));
-    let target = context
-        .create_resource(&ResourceDesc::texture2d(
-            "two-skinned-characters",
-            "rgba8unorm",
-            TWO_CHARACTER_SIZE,
-            TWO_CHARACTER_SIZE,
-            vec![ResourceUsage::ColorAttachment],
-        ))
-        .unwrap();
-    let texture = target.as_texture().unwrap();
-    let mut renderer = Renderer::new(MeshCache::new(root));
-    renderer.render(context, texture, &world).unwrap();
-    Frame {
-        pixels: context
-            .read_texture_rgba8(texture, TWO_CHARACTER_SIZE, TWO_CHARACTER_SIZE)
-            .unwrap(),
-        gpu_skin_meshes: renderer.gpu_skin_mesh_count(),
-    }
+    world
 }
 
 fn colored_centroid_x(pixels: &[u8]) -> f32 {
