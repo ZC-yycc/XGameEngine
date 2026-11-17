@@ -77,7 +77,10 @@ pub(super) fn prepare(
             continue;
         }
         let (mesh_key, palette) = match item.pose.as_deref() {
-            Some(pose) if skinned::supports_gpu_skin(mesh, pose) => {
+            Some(pose)
+                if context.supports_full_skin_palette()
+                    && skinned::supports_gpu_skin(mesh, pose) =>
+            {
                 // 顶点属性走主场景同一份缓存；阴影只借用它的缓冲，不改写。
                 sources
                     .skin_meshes
@@ -93,7 +96,7 @@ pub(super) fn prepare(
                 )
             }
             Some(pose) => {
-                // >64 关节 / palette 不完整：退回 CPU 变形，与主 pass 同一套函数。
+                // >256 关节 / palette 不完整：退回 CPU 变形，与主 pass 同一套函数。
                 // key 与主通道（`instanced.rs` 的 `skin:实体:模型`）相同：同一份变形
                 // 顶点只占一份缓存；代价是这一帧多算一次 `skin_positions`（阴影排在
                 // 主 pass 之前，不能等主 pass 上传）。

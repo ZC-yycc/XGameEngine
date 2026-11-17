@@ -109,7 +109,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
-| `crates/xgc-render/src/skinned.rs` | GPU 蒙皮顶点入口：64 关节 uniform、权重归一、palette 可表示性路由；UV / 基色贴图绑定后与静态实例共享主场景 PBR；>64 或不完整 palette 回退 CPU；`palette_bytes` 是 `pose × inverse_bind` 的唯一 CPU 计算处（主场景与阴影共用） |
+| `crates/xgc-render/src/skinned.rs` | GPU 蒙皮顶点入口：256 关节 uniform（16 KiB，对齐旧端 `BONES_PER_SLOT`）、权重归一、palette 可表示性路由；UV / 基色贴图绑定后与静态实例共享主场景 PBR；>256 或不完整 palette 回退 CPU；`palette_bytes` 是 `pose × inverse_bind` 的唯一 CPU 计算处（主场景与阴影共用） |
 | `crates/xgc-render/src/skin_vertex.wgsl` | GPU 蒙皮顶点变形唯一真相源：palette 绑定 + `Σwₖ·palette·pos` 与权重归一；主场景与阴影入口都 include 这一份 |
 | `crates/xgc-render/src/shadow_skin.rs` | 阴影 pass 的蒙皮投射体：把 draw 解析成 caster（GPU palette / CPU 回退已变形顶点 / 静态），每帧每 caster 建一次 palette+model 绑定供 4 级级联复用 |
 | `crates/xgc-render/src/shadow_skin.wgsl` | 蒙皮阴影顶点入口：只复用 `skin_vertex.wgsl` 的变形公式与光视图投影，纯深度 pass 不着色 |
@@ -173,7 +173,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、tone 后 UI、蒙皮网格投射 CSM 阴影已贯通（frame-150 对旧端 mean_abs 0.61）。下一刀补 256 关节 GPU palette 与"按当前姿态求 CSM bounds"（现在 `scene_bounds` 仍按绑定姿态，大位移关节点可能落在级联拟合外），再回物理角色控制器 / 关节。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette 已贯通（frame-150 对旧端 mean_abs 0.61）。下一刀做"按当前姿态求 CSM / 取景包围"（现在 `scene_bounds` 仍按绑定姿态，大位移关节点可能落在级联拟合外）与多角色批量提交，再回物理角色控制器 / 关节。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

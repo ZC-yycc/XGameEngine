@@ -4,7 +4,8 @@
 // 这里只放 palette 绑定与变形函数：光 / 相机矩阵由各自的入口声明，因为主场景的
 // group(0) 是 Frame、阴影 pass 的 group(0) 是光视图投影，两者不能共用。
 
-const MAX_JOINTS: u32 = 64u;
+// 与 skinned.rs 的 MAX_JOINTS 同值：256 槽对齐旧引擎 BONES_PER_SLOT。
+const MAX_JOINTS: u32 = 256u;
 
 struct SkinPalette {
     matrices: array<mat4x4<f32>, MAX_JOINTS>,

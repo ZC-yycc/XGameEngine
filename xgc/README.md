@@ -27,7 +27,7 @@
 `AnimationClip` 平移 / 旋转 slerp / 缩放关键帧采样（边界钳制 / 循环取模）/ RON 剪辑加载 /
 `AnimationPlaybackSystem` 把采样结果叠加 `Animator.base_*` 写回 `Transform` /
 `SkeletonPoseSystem` 合成关节世界矩阵到 `animation.pose` / GLB `JOINTS_0` + `WEIGHTS_0`
-+ 逆绑定矩阵解析 / ≤64 关节 GPU 蒙皮 `pose × inverse_bind`（超限 / 不完整 palette 确定性回退 CPU）/
++ 逆绑定矩阵解析 / ≤256 关节 GPU 蒙皮 `pose × inverse_bind`（超限 / 不完整 palette 确定性回退 CPU）/
 `AnimationLibrary::load_dir` 扫描目录 /
 `AnimationLibrary` 按名索引 /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/
@@ -75,6 +75,8 @@ HDR 统一 tone-map 切片沿用同一命令同机背靠背冷启动：改前 `8
 
 蒙皮投射阴影切片同样同机背靠背：改前 `807.94 / 742.62 / 764.36 / 749.68 ms`（中位数 **757.02 ms**），改后 `789.24 / 729.28 / 733.15 / 735.72 ms`（中位数 **734.43 ms**，-3.0%）。门禁画面（`showcase-particles.json`）里**没有骨架实体**，所以这一刀只多一条 depth-only pipeline 的编译与每帧一次 caster 解析，冷启动未见回归；蒙皮投射的正确性由 4 条 GPU 像素回归负责（旧实现 0 像素变暗 → 现在 176/9216），不代表多角色稳态开销。
 
+256 槽 palette 切片沿用同一命令：改前 `789.24 / 729.28 / 733.15 / 735.72 ms`（中位数 **734.43 ms**），改后 `792.03 / 747.12 / 717.08 / 739.18 ms`（中位数 **743.15 ms**，+1.2%）。改前区间 729–789 ms、改后 717–792 ms，两者重叠，且该场景**没有任何蒙皮 draw**，本刀不可能影响它，因此只能判定"未观察到可归因回归"。真实代价是可分析的常量项：palette uniform 4 KiB → 16 KiB，每个蒙皮 draw 每帧多传 12 KiB（以 24 关节狐狸为例），相对一帧约 15.8 MiB 的 HDR 目标可忽略。downlevel GL 窗口路径的 `max_uniform_buffer_binding_size` 正好是 16 KiB，所以在路由阶段按设备上限判定是否走 GPU（更小的设备退回 CPU），不靠"应该没事"。
+
 命令事务（debug，100 条 `SetField`）：plan + apply **77.8 µs**，revert **69.6 µs**；
 apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。同一计划可组合
 `Spawn → AddComponent → SetField`、`AddComponent → SetField`、`RemoveComponent → AddComponent`；
@@ -115,12 +117,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（309 条），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（312 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（198 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-PCSS / 点光阴影 / Bloom、TAA、SSAO、FXAA 等后处理，GPU 蒙皮多角色批量提交 / 256 关节 GPU palette /
+PCSS / 点光阴影 / Bloom、TAA、SSAO、FXAA 等后处理，GPU 蒙皮多角色批量提交 /
 按当前姿态求 CSM 拟合包围（现在仍按绑定姿态，大位移关节可能落在级联外）、
 物理的角色控制器 / 关节 / 坡面滑动、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，

@@ -447,10 +447,13 @@ impl Renderer {
         let mut gpu_items = Vec::new();
         for item in list.items {
             let gpu_skin = if let Some(pose) = item.pose.as_deref() {
-                self.meshes
-                    .get(&item.model)
-                    .map_err(|err| GpuError::Mesh(err.to_string()))?
-                    .is_some_and(|mesh| supports_gpu_skin(mesh, pose))
+                // 设备 binding 上限装不下 16 KiB palette 时也必须退回 CPU。
+                context.supports_full_skin_palette()
+                    && self
+                        .meshes
+                        .get(&item.model)
+                        .map_err(|err| GpuError::Mesh(err.to_string()))?
+                        .is_some_and(|mesh| supports_gpu_skin(mesh, pose))
             } else {
                 false
             };

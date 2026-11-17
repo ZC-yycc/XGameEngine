@@ -8,8 +8,13 @@ use super::instanced::{create_frame_bind, create_frame_layout, FrameLighting};
 use super::mesh::Mesh;
 use super::texture_bind::TextureBinding;
 
-const MAX_JOINTS: usize = 64;
-/// 64 × mat4x4<f32>：palette uniform 的字节数（主场景与阴影 pass 共用）。
+/// palette 槽数：与旧引擎 `BONES_PER_SLOT = 256` 对齐，超出才回退 CPU。
+///
+/// 256 × 64B = 16 KiB 的 uniform 仍在 wgpu 默认 `max_uniform_buffer_binding_size`
+/// （64 KiB）之内；代价是每个蒙皮 draw 每帧要传 16 KiB palette，换来的是
+/// "65~256 关节不再静默掉到 CPU 慢路径"（旧端同容量）。
+const MAX_JOINTS: usize = 256;
+/// MAX_JOINTS × mat4x4<f32>：palette uniform 的字节数（主场景与阴影 pass 共用）。
 pub(crate) const MAX_JOINTS_BYTES: usize = MAX_JOINTS * 64;
 const SKINNED_WGSL: &str = concat!(
     include_str!("scene_shading.wgsl"),
@@ -128,6 +133,15 @@ impl GpuSkinMeshCache {
         }
         self.meshes.get(key).unwrap()
     }
+}
+
+/// 设备能否绑定 256 槽 palette（16 KiB）。
+///
+/// downlevel GL 路径（egui 窗口在 GL 后端下发的是 `downlevel_webgl2_defaults`）的
+/// `max_uniform_buffer_binding_size` **正好是 16 KiB**：等于上限仍然合法，但零余量。
+/// 上限更小的设备必须在路由阶段就退回 CPU，而不是等 pipeline 创建校验失败。
+pub(crate) fn palette_fits_device(max_uniform_binding: u64) -> bool {
+    max_uniform_binding >= MAX_JOINTS_BYTES as u64
 }
 
 /// 只有 GPU palette 能完整表达 CPU 蒙皮语义时才走快路径；否则保留确定性的 CPU 回退。
@@ -417,7 +431,7 @@ fn model_buffer(context: &GpuContext, request: &SkinnedRequest<'_>) -> wgpu::Buf
     create_uniform_buffer(context, "xgc-skin-model-buffer", &bytes)
 }
 
-/// 64 槽 palette 的唯一计算处：主场景与阴影 pass 都读这一份，`pose × inverse_bind`
+/// 256 槽 palette 的唯一计算处：主场景与阴影 pass 都读这一份，`pose × inverse_bind`
 /// 逐槽；缺失的槽用单位矩阵（与 shader 里"没有权重就保持原位"同一口径）。
 pub(crate) fn palette_bytes(pose: &[[f32; 16]], inverse_bind: &[[f32; 16]]) -> Vec<u8> {
     let mut bytes = vec![0u8; MAX_JOINTS_BYTES];
@@ -465,7 +479,9 @@ fn uniform_bind(
 
 #[cfg(test)]
 mod tests {
-    use super::supports_gpu_skin;
+    use super::{
+        palette_bytes, palette_fits_device, supports_gpu_skin, MAX_JOINTS, MAX_JOINTS_BYTES,
+    };
     use crate::{identity, Mesh, SkinData};
 
     fn mesh(joint: u16) -> Mesh {
@@ -488,9 +504,29 @@ mod tests {
         empty.skin.as_mut().unwrap().weights.clear();
         assert!(!supports_gpu_skin(&empty, &[identity()]));
         assert!(!supports_gpu_skin(&mesh(1), &[identity()]));
-        assert!(!supports_gpu_skin(&mesh(0), &vec![identity(); 65]));
+        // 256 槽（旧端 BONES_PER_SLOT 同容量）以内仍走 GPU；257 才回退。
+        assert!(supports_gpu_skin(&mesh(0), &vec![identity(); MAX_JOINTS]));
+        assert!(!supports_gpu_skin(
+            &mesh(0),
+            &vec![identity(); MAX_JOINTS + 1]
+        ));
         let mut missing_inverse = mesh(0);
         missing_inverse.skin.as_mut().unwrap().inverse_bind.clear();
         assert!(!supports_gpu_skin(&missing_inverse, &[identity()]));
+    }
+
+    #[test]
+    fn palette_uses_the_256_slot_capacity() {
+        assert_eq!(MAX_JOINTS_BYTES, 256 * 64, "palette uniform 必须是 16 KiB");
+        let bytes = palette_bytes(&[identity(); 256], &[identity(); 256]);
+        assert_eq!(bytes.len(), MAX_JOINTS_BYTES);
+    }
+
+    #[test]
+    fn palette_fits_only_when_the_device_binding_allows_16k() {
+        // downlevel GL 的上限正好 16 KiB：等于上限仍然合法。
+        assert!(palette_fits_device(MAX_JOINTS_BYTES as u64));
+        assert!(palette_fits_device(64 * 1024));
+        assert!(!palette_fits_device(MAX_JOINTS_BYTES as u64 - 1));
     }
 }

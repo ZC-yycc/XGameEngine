@@ -75,6 +75,17 @@ impl GpuContext {
         &self.adapter_info
     }
 
+    /// 这台设备能不能绑 256 槽蒙皮 palette（16 KiB）。
+    ///
+    /// 编辑器的 egui 窗口可能跑在 `downlevel_webgl2_defaults` 的 GL 后端上，那里的
+    /// `max_uniform_buffer_binding_size` 正好是 16 KiB（等于上限、零余量）；再小就必须
+    /// 在路由阶段退回 CPU，否则建 bind group 时才会失败。
+    pub(crate) fn supports_full_skin_palette(&self) -> bool {
+        super::skinned::palette_fits_device(
+            self.device.limits().max_uniform_buffer_binding_size as u64,
+        )
+    }
+
     /// 复用外部 wgpu 设备（编辑器视口）；Arc 句柄共享同一设备。
     pub fn from_arc(
         device: Arc<wgpu::Device>,

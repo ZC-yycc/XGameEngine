@@ -60,12 +60,12 @@ fn cpu_fallback_skinned_mesh_also_casts_a_shadow() {
         return;
     };
     let root = write_skinned_cube_gltf();
-    // 65 关节超出 palette 容量 → 主 pass 回退 CPU 蒙皮；阴影也必须跟着投。
-    let shadowed = render(&context, &root, Some(vec![identity(); 65]), true);
-    let unshadowed = render(&context, &root, Some(vec![identity(); 65]), false);
+    // 257 关节超出 palette 容量 → 主 pass 回退 CPU 蒙皮；阴影也必须跟着投。
+    let shadowed = render(&context, &root, Some(vec![identity(); 257]), true);
+    let unshadowed = render(&context, &root, Some(vec![identity(); 257]), false);
     std::fs::remove_dir_all(&root).unwrap();
 
-    assert_eq!(shadowed.gpu_skin_meshes, 0, "65 关节必须走 CPU 回退");
+    assert_eq!(shadowed.gpu_skin_meshes, 0, "257 关节必须走 CPU 回退");
     let darkened = darkened_pixels(&shadowed.pixels, &unshadowed.pixels);
     assert!(
         darkened > 30,

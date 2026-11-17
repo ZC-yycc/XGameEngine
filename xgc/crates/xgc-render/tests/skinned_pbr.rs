@@ -79,11 +79,40 @@ fn oversized_pose_cpu_fallback_preserves_uv_and_texture() {
     };
     let root = write_textured_skin_gltf();
     let static_frame = render(&context, &root, None);
-    let fallback = render(&context, &root, Some(vec![identity(); 65]));
+    // 257 > 256 槽（旧引擎 BONES_PER_SLOT 同容量）才该掉回 CPU。
+    let fallback = render(&context, &root, Some(vec![identity(); 257]));
     std::fs::remove_dir_all(&root).unwrap();
 
-    assert_eq!(fallback.gpu_skin_meshes, 0, "65 关节姿态必须走 CPU 回退");
+    assert_eq!(fallback.gpu_skin_meshes, 0, "257 关节姿态必须走 CPU 回退");
     assert_eq!(fallback.pixels, static_frame.pixels);
+}
+
+#[test]
+fn palette_slots_past_64_stay_on_the_gpu_path() {
+    let _gpu = gpu_lock();
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    // 权重全落在 90 号槽：只有 palette 真的索引到 >64 才会跟着动。
+    let root = write_textured_skin_gltf_with_joint(90, 96);
+    let base = render(&context, &root, Some(vec![identity(); 96]));
+    let mut pose = vec![identity(); 96];
+    pose[90] = translation(0.6, 0.0, 0.0);
+    let moved = render(&context, &root, Some(pose));
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert_eq!(
+        moved.gpu_skin_meshes, 1,
+        "96 关节必须留在 GPU 快路径（旧上限 64 会掉到 CPU）"
+    );
+    assert_eq!(base.gpu_skin_meshes, 1);
+    let base_x = colored_centroid_x(&base.pixels);
+    let moved_x = colored_centroid_x(&moved.pixels);
+    assert!(
+        moved_x > base_x + 5.0,
+        "90 号槽的平移必须带着表面一起右移：{base_x:.2} -> {moved_x:.2}"
+    );
 }
 
 #[test]
@@ -288,6 +317,12 @@ fn colored_centroid_x(pixels: &[u8]) -> f32 {
 }
 
 fn write_textured_skin_gltf() -> PathBuf {
+    write_textured_skin_gltf_with_joint(0, 1)
+}
+
+/// 四个顶点的权重等分到 `joint` 槽；骨架声明 `joint_count` 根骨头（各一份单位逆绑定）。
+/// 槽位上限（旧端 256）就是靠"骨架比槽位多一根"来钉的。
+fn write_textured_skin_gltf_with_joint(joint: u16, joint_count: u16) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "xgc_skinned_pbr_{}_{}",
         std::process::id(),
@@ -315,7 +350,7 @@ fn write_textured_skin_gltf() -> PathBuf {
         }
     }
     for _ in 0..4 {
-        for value in [0u16; 4] {
+        for value in [joint; 4] {
             bin.extend_from_slice(&value.to_le_bytes());
         }
     }
@@ -325,55 +360,68 @@ fn write_textured_skin_gltf() -> PathBuf {
             bin.extend_from_slice(&value.to_le_bytes());
         }
     }
-    for value in identity() {
-        bin.extend_from_slice(&value.to_le_bytes());
+    // 每根骨头一份逆绑定（全单位阵）：palette 只认 `joint < inverse_bind.len()`。
+    for _ in 0..joint_count {
+        for value in identity() {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
     }
     for index in [0u16, 1, 2, 0, 2, 3] {
         bin.extend_from_slice(&index.to_le_bytes());
     }
     std::fs::write(root.join("skin.bin"), &bin).unwrap();
 
-    let json = serde_json::json!({
-        "asset": {"version": "2.0"},
-        "buffers": [{"uri": "skin.bin", "byteLength": bin.len()}],
-        "bufferViews": [
-            {"buffer": 0, "byteOffset": 0, "byteLength": 48},
-            {"buffer": 0, "byteOffset": 48, "byteLength": 32},
-            {"buffer": 0, "byteOffset": 80, "byteLength": 32},
-            {"buffer": 0, "byteOffset": 112, "byteLength": 64},
-            {"buffer": 0, "byteOffset": 176, "byteLength": 64},
-            {"buffer": 0, "byteOffset": 240, "byteLength": 12}
-        ],
-        "accessors": [
-            {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3"},
-            {"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC2"},
-            {"bufferView": 2, "componentType": 5123, "count": 4, "type": "VEC4"},
-            {"bufferView": 3, "componentType": 5126, "count": 4, "type": "VEC4"},
-            {"bufferView": 4, "componentType": 5126, "count": 1, "type": "MAT4"},
-            {"bufferView": 5, "componentType": 5123, "count": 6, "type": "SCALAR"}
-        ],
-        "images": [{"uri": "albedo.png"}],
-        "textures": [{"source": 0}],
-        "materials": [{"pbrMetallicRoughness": {
-            "baseColorFactor": [0.9, 0.8, 0.7, 1.0],
-            "baseColorTexture": {"index": 0}
-        }}],
-        "meshes": [{"primitives": [{
-            "attributes": {"POSITION": 0, "TEXCOORD_0": 1, "JOINTS_0": 2, "WEIGHTS_0": 3},
-            "indices": 5,
-            "material": 0,
-            "mode": 4
-        }]}],
-        "nodes": [{"mesh": 0, "skin": 0}, {"name": "joint"}],
-        "skins": [{"joints": [1], "inverseBindMatrices": 4}],
-        "scenes": [{"nodes": [0]}],
-        "scene": 0
-    });
-    std::fs::write(
-        root.join("skin.gltf"),
-        serde_json::to_vec_pretty(&json).unwrap(),
-    )
-    .unwrap();
+    let joints: Vec<String> = (1..=joint_count)
+        .map(|index| format!("{{\"name\": \"joint-{index}\"}}"))
+        .collect();
+    let nodes = format!("{{\"mesh\": 0, \"skin\": 0}}, {}", joints.join(", "));
+    let joint_slots: Vec<String> = (1..=joint_count).map(|index| index.to_string()).collect();
+    let skins = format!(
+        "{{\"joints\": [{}], \"inverseBindMatrices\": 4}}",
+        joint_slots.join(", ")
+    );
+    let indices_offset = 240 + (joint_count as usize - 1) * 64;
+    let json = format!(
+        r#"{{
+  "asset": {{"version": "2.0"}},
+  "buffers": [{{"uri": "skin.bin", "byteLength": {buffer_len}}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0, "byteLength": 48}},
+    {{"buffer": 0, "byteOffset": 48, "byteLength": 32}},
+    {{"buffer": 0, "byteOffset": 80, "byteLength": 32}},
+    {{"buffer": 0, "byteOffset": 112, "byteLength": 64}},
+    {{"buffer": 0, "byteOffset": 176, "byteLength": {ibm_len}}},
+    {{"buffer": 0, "byteOffset": {indices_offset}, "byteLength": 12}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3"}},
+    {{"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC2"}},
+    {{"bufferView": 2, "componentType": 5123, "count": 4, "type": "VEC4"}},
+    {{"bufferView": 3, "componentType": 5126, "count": 4, "type": "VEC4"}},
+    {{"bufferView": 4, "componentType": 5126, "count": {joint_count}, "type": "MAT4"}},
+    {{"bufferView": 5, "componentType": 5123, "count": 6, "type": "SCALAR"}}
+  ],
+  "images": [{{"uri": "albedo.png"}}],
+  "textures": [{{"source": 0}}],
+  "materials": [{{"pbrMetallicRoughness": {{
+    "baseColorFactor": [0.9, 0.8, 0.7, 1.0],
+    "baseColorTexture": {{"index": 0}}
+  }}}}],
+  "meshes": [{{"primitives": [{{
+    "attributes": {{"POSITION": 0, "TEXCOORD_0": 1, "JOINTS_0": 2, "WEIGHTS_0": 3}},
+    "indices": 5,
+    "material": 0,
+    "mode": 4
+  }}]}}],
+  "nodes": [{nodes}],
+  "skins": [{skins}],
+  "scenes": [{{"nodes": [0]}}],
+  "scene": 0
+}}"#,
+        buffer_len = bin.len(),
+        ibm_len = joint_count as usize * 64,
+    );
+    std::fs::write(root.join("skin.gltf"), json).unwrap();
     write_test_png(&root.join("albedo.png"));
     root
 }
