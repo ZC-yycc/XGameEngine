@@ -36,30 +36,6 @@ var albedo_texture: texture_2d<f32>;
 @group(2) @binding(1)
 var albedo_sampler: sampler;
 
-// 色调映射：与 tone.rs 的 Rust 镜像逐式对应（ACES RRT+ODT 拟合，1/0.6 亮度基准确认）。
-// 旧引擎在合成 pass 里过这条曲线；这里在片元输出前套同一条，随后由 sRGB 目标编码。
-fn aces_input_mat(c: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        0.59719 * c.x + 0.35458 * c.y + 0.04823 * c.z,
-        0.07600 * c.x + 0.90834 * c.y + 0.01566 * c.z,
-        0.02840 * c.x + 0.13383 * c.y + 0.83777 * c.z,
-    );
-}
-
-fn aces_output_mat(c: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        1.60475 * c.x - 0.53108 * c.y - 0.07367 * c.z,
-        -0.10208 * c.x + 1.10813 * c.y - 0.00605 * c.z,
-        -0.00327 * c.x - 0.07276 * c.y + 1.07602 * c.z,
-    );
-}
-
-fn aces_rrt(c: vec3<f32>) -> vec3<f32> {
-    let a = c * (c + vec3<f32>(0.0245786)) - vec3<f32>(0.000090537);
-    let b = c * (vec3<f32>(0.983729) * c + vec3<f32>(0.432951)) + vec3<f32>(0.238081);
-    return a / b;
-}
-
 // E/π 的球谐求值（系数里已折好余弦卷积）；基函数与 sky.rs 的 sh_basis 逐项一致。
 // 与旧引擎同一条下限：粗糙度太低时 GGX 的解析拟合会出 NaN / 过亮高光。
 const MIN_ROUGHNESS: f32 = 0.04;
@@ -148,14 +124,6 @@ fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
     return sum / 9.0;
 }
 
-fn aces(linear: vec3<f32>) -> vec3<f32> {
-    var c = max(linear, vec3<f32>(0.0)) / 0.6;
-    c = aces_input_mat(c);
-    c = aces_rrt(c);
-    c = aces_output_mat(c);
-    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
 struct SceneVsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
@@ -211,6 +179,6 @@ fn fs(input: SceneVsOut) -> @location(0) vec4<f32> {
     let kd = (vec3<f32>(1.0) - f_term) * (1.0 - metallic);
     let diffuse = kd * albedo / PI;
     light = light + (diffuse + specular) * radiance * n_dot_l * sun_shadow;
-    let lit = light;
-    return vec4<f32>(aces(lit), input.color.a);
+    // 保留线性 HDR；整帧只在 tone_map.wgsl 里做一次 ACES。
+    return vec4<f32>(light, input.color.a);
 }

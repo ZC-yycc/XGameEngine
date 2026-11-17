@@ -42,13 +42,13 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 材质色、`Mesh` 顶点 / 索引缓冲、builtin 网格、最小 GLB 几何 / 蒙皮 / 首图元
 `baseColorFactor` 解析、`.mat` 材质资产解析与乘子（`模型因子 → 资产 → 覆盖 → 选择高亮`，
 静态 / GPU 蒙皮同路）、场景光与环境光（`WorldData.environment`，`环境光 + 主方向光 × N·L`）、
-ACES 色调映射（片元与清屏色同曲线）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
+`Rgba16Float` 线性场景中间目标（几何 / 天空 / 粒子先合成，帧末全屏 pass 只做一次 ACES，UI 后叠加）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
 深度测试，几何照常遮挡）、天空漫反射 IBL（解析天空 → L2 球谐 E/π，参数取项目级 `project.ron`
 的 `render.sky`）、方向光阴影（4 级 CSM：λ=0.7 practical split + 逐级紧致正交拟合 + 纹素吸附，2048² 深度数组按视线深度选层 + 3×3 PCF）、环境反射（天空 SH 反射方向 × Lazarov 解析 BRDF，逐材质 `f0 = mix(0.04, 基色, metallic)`、
 `(1-metallic)` 漫反射、粗糙度夹 0.04）、网格基色贴图（glTF `TEXCOORD_0` + `baseColorTexture`，
 外部 uri / GLB 内嵌 PNG → sRGB 采样）、直接光 Cook-Torrance PBR（GGX + Smith + Schlick、
-`(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、GPU 蒙皮与静态实例共享唯一的基色贴图 / PBR / CSM 阴影接收 / ACES 片元实现、确定性粒子 billboard（CPU SplitMix64 模拟，软圆覆盖，Alpha / Additive，Alpha 后向前排序，深测开 / 深写关）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
-`guid://` 解析、`Renderer` 帧入口（DrawList → MeshCache → RenderCache → 粒子 → UI）、
+`(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、GPU 蒙皮与静态实例共享唯一的基色贴图 / PBR / CSM 阴影接收片元实现、确定性粒子 billboard（CPU SplitMix64 模拟，软圆覆盖，Alpha / Additive，Alpha 后向前排序，深测开 / 深写关，并在线性 HDR 中混合）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
+`guid://` 解析、`Renderer` 帧入口（DrawList → HDR 几何 / 天空 / 粒子 → ACES → UI）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
 `GpuMeshCache` 顶点 / 索引缓冲跨帧复用、按模型分组实例化（storage instance 缓冲）、
@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | despawn 10 000 | 334 µs |
 
 GPU 蒙皮主场景着色切片用同一 showcase 第 150 帧做了 release 冷启动 A/B：每次启动新 `xgc render-frame` 进程并只渲一帧，切片前四跑 `783.02 / 719.85 / 726.80 / 734.09 ms`（中位数 **730.44 ms**），切片后 `822.76 / 790.08 / 934.70 / 766.49 ms`（中位数 **806.42 ms**，+10.4%）。这个数包含新增共享场景 shader 的第二条 pipeline 编译，且当前 GPU 蒙皮仍按实体创建 uniform / bind group / encoder 并单独提交，**不是稳态 GPU 帧耗时**；像素合同与 frame-150 逐字节确定性负责正确性验收，后续必须另设 pipeline 缓存、多角色批量提交与稳态 profiler 门禁。
+
+HDR 统一 tone-map 切片沿用同一命令同机背靠背冷启动：改前 `809.34 / 832.12 / 827.80 / 744.47 ms`（中位数 **818.57 ms**），改后 `743.46 / 719.81 / 739.85 / 756.30 ms`（中位数 **741.66 ms**，-9.4%）。新增 1080p 约 15.8 MiB 的 `Rgba16Float` 场景目标和一次全屏 pass 后未见冷启动回归；但进程启动、shader/pipeline 编译和驱动抖动远大于该 pass 的稳态成本，**不能据此声称 HDR 更快**，仍需 GPU timestamp / 常驻进程 profiler 门禁。
 
 命令事务（debug，100 条 `SetField`）：plan + apply **77.8 µs**，revert **69.6 µs**；
 apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。同一计划可组合
@@ -111,12 +113,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（302 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（194 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
+`cargo test --workspace --offline` 全绿（305 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（196 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-PCSS / 点光阴影 / HDR 中间目标与后处理、GPU 蒙皮多角色批量提交 / 蒙皮网格投射阴影 / 256 关节 GPU palette、
+PCSS / 点光阴影 / Bloom、TAA、SSAO、FXAA 等后处理，GPU 蒙皮多角色批量提交 / 蒙皮网格投射阴影 / 256 关节 GPU palette、
 物理的角色控制器 / 关节 / 坡面滑动、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。

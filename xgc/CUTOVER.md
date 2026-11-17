@@ -10,8 +10,8 @@
 | 场景 + 资源 + 脚本 + 预制体端到端迁移 | 通过 | showcase 24 实体；character 2 脚本；Pillar 3 实体；`verify-migration` 一致 |
 | 迁移世界可运行 | 通过 | `run-world` / `run-cooked` / `xgc-player` 60 帧同哈希 |
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
-| 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `bb3fdc99df20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / 粒子 / GPU 蒙皮共享主场景着色 / UI 已贯通 |
-| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 309707/921600 像素不同（33.61%），mean_abs **0.63**、max 194；GPU 蒙皮切到共享 PBR / 贴图路径后与上一版逐字节相同，余差主要是狐狸动画 / 几何边缘、UI 与 HDR 合成 / tone-map 架构差异 |
+| 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `bb3fdc99df20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / RGBA16F 场景 / 线性粒子合成 / 唯一全局 ACES / tone 后 UI 已贯通 |
+| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 296950/921600 像素不同（32.22%），mean_abs **0.61**、max 194；HDR + 全局 tone-map 相对上一版 XGC 只改 6.19% 像素、mean_abs 0.04、max 13，余差主要是狐狸动画 / 几何边缘与 UI |
 | 逐帧 trace / 状态哈希对照 | **未通过** | XGC 重放自身确定；无旧引擎逐帧 trace |
 | 正式 System 调度 / 并行 | **未通过** | `batches()` 计划已有，执行顺序 |
 | 性能基准 + 热路径分配门禁 | **未通过** | 无 release CI 门禁 |
@@ -48,6 +48,9 @@ cargo test -p xgc-render --test particles --offline
 # GPU 蒙皮：静态 PBR/贴图逐像素同值、关节带贴图移动、>64 CPU 回退、阴影接收
 cargo test -p xgc-render --test skinned_pbr --offline
 
+# HDR：resize / 输出格式 / alpha，粒子线性合成，tone 后 UI
+cargo test -p xgc-render --test hdr --test particles --test frame_ui --offline
+
 # 天空盒画面：解析天空逐像素对表 + 几何遮挡（GPU）
 cargo test -p xgc-render --test sky_box --offline
 
@@ -74,11 +77,12 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 天空按项目级配置读取（`project.ron` 的 `render.sky`），CPU 把解析天空投影成 L2 球谐
 > （E/π，1024 点斐波那契球，无随机数）后与 `ambient` 相加，片元侧逐项对表。
 > 场景级光源 / 环境光已迁移进 `WorldData.environment`；颜色合成顺序对齐旧引擎
-> `模型基色因子 → .mat 资产 → 实体覆盖`（全是乘子），片元与清屏色都过同一条 ACES 曲线。
-> GPU 蒙皮现在只保留顶点变形入口，片元合同与静态实例共同拼接唯一的 `scene_shading.wgsl`：基色因子 / metallic / roughness、sRGB 基色贴图、ambient / 天空 SH、Cook-Torrance、4 级 CSM 阴影接收和 ACES 全部同源。四条 GPU 回归分别钉住 identity 与静态逐字节相同、关节平移带着非均匀贴图移动、65 关节 CPU 回退不丢 UV / 贴图、静态投射体能让 GPU 蒙皮表面变暗。第 150 帧 PPM 与上一版 SHA-256 相同；release `render-frame` 新进程冷启动中位数由 730.44 ms 变为 806.42 ms（+10.4%，含新增 shader / pipeline 编译；当前 GPU 蒙皮还按实体单独建 uniform / bind / encoder 并提交，不代表稳态帧耗时）。
+> `模型基色因子 → .mat 资产 → 实体覆盖`（全是乘子），线性片元与清屏色先进入 HDR 场景，帧末统一过 ACES。
+> GPU 蒙皮现在只保留顶点变形入口，片元合同与静态实例共同拼接唯一的 `scene_shading.wgsl`：基色因子 / metallic / roughness、sRGB 基色贴图、ambient / 天空 SH、Cook-Torrance 与 4 级 CSM 阴影接收全部同源；ACES 只有 `tone_map.wgsl` 一份。四条 GPU 回归分别钉住 identity 与静态逐字节相同、关节平移带着非均匀贴图移动、65 关节 CPU 回退不丢 UV / 贴图、静态投射体能让 GPU 蒙皮表面变暗。该切片第 150 帧 PPM 与上一版 SHA-256 相同；release `render-frame` 新进程冷启动中位数由 730.44 ms 变为 806.42 ms（+10.4%，含新增 shader / pipeline 编译；当前 GPU 蒙皮还按实体单独建 uniform / bind / encoder 并提交，不代表稳态帧耗时）。
+> HDR 切片让几何 / 天空 / 粒子写线性 `Rgba16Float`，Alpha / Additive 先合成、全屏三角形再执行一次 ACES，UI 最后叠加；第 150 帧 PPM SHA-256 `4A47275DD54A4AA2780353B6B37E6BD2999F9D16BEDA20197973BA6DB48A0927`，世界 hash 与 14/7/8 draw 统计不变。相对上一版 XGC 的差异是 6.19% / mean_abs 0.04 / max 13，相对旧端改善为 32.22% / **0.61** / 194。冷启动 release 四跑中位数 818.57 → 741.66 ms（-9.4%），只判定未见回归；该测量包含启动 / 设备 / pipeline 编译，不代表稳态帧耗时。
 > 旧 / 新整帧 mean_abs 依次为 28.65 → 23.79 → 21.24 → 15.97 → 15.27 → 16.34 → 19.65 → 19.27 → 18.78 →
-> 0.85 → **0.63**（差异像素 33.61%）。最后一步是**确定性粒子模拟 + billboard**：按旧端 SplitMix64 / 发射 / 生命周期合同推进，
-> Alpha 后向前排序并以预乘方式混合，Additive 单独批次；Campfire.Smoke 的位置 / 尺寸 / 透明度已对齐。前一步是
+> 0.85 → 0.63 → **0.61**（差异像素 32.22%）。前一步是**确定性粒子模拟 + billboard**：按旧端 SplitMix64 / 发射 / 生命周期合同推进，
+> Alpha 后向前排序并以预乘方式混合，Additive 单独批次；Campfire.Smoke 的位置 / 尺寸 / 透明度已对齐。再前一轮是
 > **4 级 CSM**（λ=0.7 practical split、逐级紧致拟合 + 纹素吸附、深度数组按视线深度选层）。再往前是**UI 粗体字面 + 原生 kerning**（面板区 3.14 → 1.41）
 > 与**直接光 Cook-Torrance PBR**：GGX + Smith + Schlick、
 > `(1-F)` 漫反射扣减与 π 校准逐式照搬旧端，蓝箱 / 棕箱区域平均差降到 1.45 / 2.12。
@@ -88,14 +92,14 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 然后**网格基色贴图**让狐狸从白模变回橙狐；最后把刚体换成与旧引擎**同版本同参数**的 rapier3d 0.22，
 > 右侧棕箱区域平均差 18.56 → 4.44（翻滚姿态第一次对上）。
 > 中间两步（阴影、动态刚体补零速度）让均值反向，但都是旧引擎本来就有的行为：影子位置取决于各自
-> 的仿真位置，而简化的 AABB 求解器没有旋转 / 静-动碰撞，落点与堆叠仍不同。最后一步
+> 的仿真位置，而简化的 AABB 求解器没有旋转 / 静-动碰撞，落点与堆叠仍不同。更早的
 > **环境反射**（天空 SH 反射方向 × Lazarov 解析 BRDF）把物体表面抬亮，随后把 **metallic / roughness
 > 搬进实例数据**（96B）做逐材质反射：棕色 / 红色表面与旧图的通道差已缩小到个位数，差异像素 98.07%。
 > 随后补 **接触清速度**：贴地 / 堆叠的盒子不再每帧带着累积速度抖动（3 条物理回归钉住稳定度）；
 > 第 150 帧像素与上一步逐像素相同（物体早已落定），世界哈希因速度归零而变化。
 > 第 150 帧世界哈希变为
 > `bb3fdc99df20aa31`：`particle.emitter.config` 的完整旧配置参与状态哈希，粒子运行态不落盘（`verify-migration` 一致）。
-> 仍缺：PCSS / 点光阴影、HDR 中间目标上的统一 tone-map、
+> 仍缺：PCSS / 点光阴影、Bloom / TAA / SSAO / FXAA 等后处理、
 > 蒙皮网格投射阴影 / 256 关节 GPU palette、物理的角色控制器 / 关节 / 连续碰撞 / 坡面滑动、
 > UI 面板底色微差（align/valign 只能按 kind 推断）。旧端本机仍报告项目 Rust 插件构建指纹不匹配并跳过，XGC 也尚未迁移旧 Animator
 > 状态机与完整动画素材。
@@ -103,7 +107,7 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 
 ## 建议顺序
 
-1. 割接视觉：GPU 蒙皮已共享静态 PBR / 贴图 / 阴影接收 / ACES；下一步评估 HDR 中间目标统一 tone-map，再补蒙皮投射阴影 / 256 关节 palette，最后回物理角色控制器 / 关节。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES 与 tone 后 UI 已贯通；下一步补蒙皮网格投射阴影 / 256 关节 palette，再回物理角色控制器 / 关节。
 2. 正式调度：脚本与系统统一访问声明。
 3. 旧新逐帧 trace + 截图像素门禁。
 4. 密码学签名 / 跨机器增量。

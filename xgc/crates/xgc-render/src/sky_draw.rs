@@ -52,25 +52,6 @@ fn sky_radiance(dir: vec3<f32>) -> vec3<f32> {
     return c * frame.zenith.a;
 }
 
-// 与 tone.rs 的 aces 逐式对应。
-fn aces(linear: vec3<f32>) -> vec3<f32> {
-    var c = max(linear, vec3<f32>(0.0)) / 0.6;
-    c = vec3<f32>(
-        0.59719 * c.x + 0.35458 * c.y + 0.04823 * c.z,
-        0.07600 * c.x + 0.90834 * c.y + 0.01566 * c.z,
-        0.02840 * c.x + 0.13383 * c.y + 0.83777 * c.z,
-    );
-    let a = c * (c + vec3<f32>(0.0245786)) - vec3<f32>(0.000090537);
-    let b = c * (vec3<f32>(0.983729) * c + vec3<f32>(0.432951)) + vec3<f32>(0.238081);
-    c = a / b;
-    c = vec3<f32>(
-        1.60475 * c.x - 0.53108 * c.y - 0.07367 * c.z,
-        -0.10208 * c.x + 1.10813 * c.y - 0.00605 * c.z,
-        -0.00327 * c.x - 0.07276 * c.y + 1.07602 * c.z,
-    );
-    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
 struct VsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) ndc: vec2<f32>,
@@ -95,7 +76,7 @@ fn vs(@builtin(vertex_index) index: u32) -> VsOut {
 fn fs(input: VsOut) -> @location(0) vec4<f32> {
     let far = frame.inv_view_proj * vec4<f32>(input.ndc, 1.0, 1.0);
     let dir = normalize(far.xyz / far.w - frame.eye.xyz);
-    return vec4<f32>(aces(sky_radiance(dir)), 1.0);
+    return vec4<f32>(sky_radiance(dir), 1.0);
 }
 "#;
 

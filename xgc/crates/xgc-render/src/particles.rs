@@ -52,27 +52,6 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     return out;
 }
 
-// XGC 直接写显示目标（主场景着色器也在片元末做 ACES），所以这里镜像同一条曲线。
-// 旧端是在 HDR 场景合成后统一过曲线；XGC 尚无 HDR 中间目标，这个顺序差异会留到
-// 后处理切片收敛，但不能把线性粒子原样混进已 tone-map 的场景。
-fn aces(linear: vec3<f32>) -> vec3<f32> {
-    var c = max(linear, vec3<f32>(0.0)) / 0.6;
-    c = vec3<f32>(
-        0.59719 * c.x + 0.35458 * c.y + 0.04823 * c.z,
-        0.07600 * c.x + 0.90834 * c.y + 0.01566 * c.z,
-        0.02840 * c.x + 0.13383 * c.y + 0.83777 * c.z,
-    );
-    let a = c * (c + vec3<f32>(0.0245786)) - vec3<f32>(0.000090537);
-    let b = c * (vec3<f32>(0.983729) * c + vec3<f32>(0.432951)) + vec3<f32>(0.238081);
-    c = a / b;
-    c = vec3<f32>(
-        1.60475 * c.x - 0.53108 * c.y - 0.07367 * c.z,
-        -0.10208 * c.x + 1.10813 * c.y - 0.00605 * c.z,
-        -0.00327 * c.x - 0.07276 * c.y + 1.07602 * c.z,
-    );
-    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let d = length(in.local);
@@ -81,9 +60,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     // 软边：内圈 0.35 之外开始淡出；全程线性淡出会让火苗像雾，硬边会露锯齿。
     let coverage = 1.0 - smoothstep(0.35, 1.0, d);
-    // 预乘输出：rgb 先乘 alpha。
+    // 在线性 HDR 中预乘；重叠能量合成完后整帧才过 ACES。
     let alpha = in.color.a * coverage;
-    return vec4<f32>(aces(in.color.rgb) * alpha, alpha);
+    return vec4<f32>(in.color.rgb * alpha, alpha);
 }
 "#;
 

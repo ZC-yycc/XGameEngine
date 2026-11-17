@@ -35,7 +35,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     let stats = renderer.render(&context, &texture, &empty).unwrap();
     assert_eq!(stats.draws, 0);
     assert_eq!(stats.draw_calls, 0);
-    assert_eq!(stats.passes, 0);
+    assert_eq!(stats.passes, 2, "空 HDR 场景清屏后也要执行最终 tone-map");
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     assert_eq!(&pixels[..4], &[0, 0, 0, 255]);
 
@@ -133,7 +133,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     let stats = renderer.render(&context, &texture, &depth_world).unwrap();
     assert_eq!(stats.draws, 2);
     assert_eq!(stats.draw_calls, 1, "同模型两个实体合并成一次实例化 draw");
-    assert_eq!(stats.passes, 1, "两个实体应在同一个 render pass");
+    assert_eq!(stats.passes, 2, "场景实例化 + 最终 tone-map 各一个阶段");
     assert_eq!(renderer.gpu_mesh_count(), 1, "同一模型只上传一次");
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     let expected = xgc_render::aces_u8(xgc_render::ambient_light(

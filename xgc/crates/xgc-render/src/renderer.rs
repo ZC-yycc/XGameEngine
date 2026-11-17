@@ -1,4 +1,4 @@
-//! 帧渲染入口：DrawList → MeshCache → RenderCache → GPU。
+//! 帧渲染入口：DrawList → 线性 HDR 场景 → 统一 tone-map → 显示空间 UI。
 
 use std::collections::HashMap;
 
@@ -17,6 +17,7 @@ use xgc_world::World;
 use super::resources::{ResourceDesc, ResourceUsage};
 use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
 use super::sky::{sky_irradiance, SkySettings};
+mod hdr;
 mod ui;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,6 +52,7 @@ pub struct Renderer {
     /// 本帧要画的粒子（模拟层在帧循环里算好，渲染只消费四边形）。
     particles: Vec<xgc_world::ParticleQuad>,
     particle_pipeline: Option<(wgpu::TextureFormat, super::particles::ParticlePipeline)>,
+    hdr: Option<hdr::HdrStage>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
@@ -89,6 +91,7 @@ impl Renderer {
             text_pipeline: None,
             particles: Vec::new(),
             particle_pipeline: None,
+            hdr: None,
             depth: None,
             images: HashMap::new(),
             ui_overlay: None,
@@ -104,14 +107,12 @@ impl Renderer {
         self.sky = sky.sanitized();
     }
 
-    /// 清屏色也过同一条 ACES 曲线——旧引擎整帧（含天空）都在合成 pass 里过曲线。
+    /// 清屏色以线性值写入 HDR 场景，和几何 / 天空 / 粒子一起在帧末 tone-map。
     pub fn set_clear_color(&mut self, color: [f64; 4]) {
-        let linear = [color[0] as f32, color[1] as f32, color[2] as f32];
-        let mapped = super::tone::aces(linear);
         self.clear_color = wgpu::Color {
-            r: f64::from(mapped[0]),
-            g: f64::from(mapped[1]),
-            b: f64::from(mapped[2]),
+            r: color[0],
+            g: color[1],
+            b: color[2],
             a: color[3],
         };
     }
@@ -198,7 +199,10 @@ impl Renderer {
         };
         let lighting = self.frame_lighting(world, eye);
         let list = self.prepared_list(world, None)?;
-        let mut stats = self.render_list(context, target, world, list, view_proj, lighting)?;
+        let scene = self.hdr_scene_texture(context, width, height);
+        let mut stats = self.render_list(context, &scene, world, list, view_proj, lighting)?;
+        self.present_hdr(context, target);
+        stats.passes += 1;
         stats.ui_draws = self.render_ui(context, target, world)?;
         stats.passes += usize::from(stats.ui_draws > 0);
         Ok(stats)
@@ -218,7 +222,11 @@ impl Renderer {
         let (view_proj, eye) =
             camera_view_projection_with_eye(world, width, height).unwrap_or((IDENTITY, [0.0; 3]));
         let lighting = self.frame_lighting(world, eye);
-        self.render_list(context, target, world, list, view_proj, lighting)
+        let scene = self.hdr_scene_texture(context, width, height);
+        let mut stats = self.render_list(context, &scene, world, list, view_proj, lighting)?;
+        self.present_hdr(context, target);
+        stats.passes += 1;
+        Ok(stats)
     }
 
     /// 帧光照 = 场景灯 + 天空漫反射 IBL（开着才算，太阳取场景主方向光）。
@@ -547,7 +555,8 @@ impl Renderer {
             draws,
             draw_calls,
             ui_draws: 0,
-            passes: usize::from(draws > 0),
+            // HDR 场景即使没有 draw 也会清色；随后帧入口再计一次 tone-map。
+            passes: 1,
         })
     }
 }
