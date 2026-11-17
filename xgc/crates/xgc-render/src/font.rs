@@ -22,6 +22,16 @@ const FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ];
 
+/// 粗体候选（缺省时退回常规字重，不报错 —— 与旧端同一条约定）。
+const BOLD_FONT_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\Dengb.ttf",
+    r"C:\Windows\Fonts\simhei.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+];
+
 const ATLAS_MAX: u32 = 2048;
 const ATLAS_MIN: u32 = 1024;
 const GLYPH_PAD: u32 = 1;
@@ -50,38 +60,29 @@ struct GlyphSlot {
 /// 字体 + 字形图集。
 pub struct FontAtlas {
     font: FontVec,
+    bold: Option<FontVec>,
     size: u32,
     pixels: Vec<u8>,
     cursor_x: u32,
     cursor_y: u32,
     row_height: u32,
-    cache: HashMap<(char, u32), GlyphSlot>,
+    cache: HashMap<(char, u32, bool), GlyphSlot>,
     version: u64,
 }
 
 impl FontAtlas {
     /// 按旧端同一套候选加载系统字体；都找不到时返回 `None`（调用方跳过文本）。
     pub fn load() -> Option<Self> {
-        for path in FONT_CANDIDATES {
-            let path = Path::new(path);
-            if !path.is_file() {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(path) else {
-                continue;
-            };
-            // `.ttc` 是字体集合，取第 0 面（微软雅黑 / 苹方都是集合）。
-            if let Ok(font) = FontVec::try_from_vec_and_index(bytes, 0) {
-                return Some(Self::with_font(font));
-            }
-        }
-        None
+        let font = load_face(FONT_CANDIDATES)?;
+        let bold = load_face(BOLD_FONT_CANDIDATES);
+        Some(Self::with_font(font, bold))
     }
 
-    fn with_font(font: FontVec) -> Self {
+    fn with_font(font: FontVec, bold: Option<FontVec>) -> Self {
         let size = ATLAS_MIN;
         Self {
             font,
+            bold,
             size,
             pixels: vec![255; (size * size * 4) as usize],
             cursor_x: 0,
@@ -107,7 +108,7 @@ impl FontAtlas {
 
     /// 行高（像素）：与旧端同为 ascent - descent + line_gap。
     pub fn line_height(&self, size_px: f32) -> f32 {
-        let scaled = self.font.as_scaled(PxScale::from(size_px));
+        let scaled = self.face(false).as_scaled(PxScale::from(size_px));
         (scaled.ascent() - scaled.descent() + scaled.line_gap()).max(1.0)
     }
 
@@ -125,11 +126,14 @@ impl FontAtlas {
         wrap_width: Option<f32>,
         align: &str,
         valign: &str,
+        bold: bool,
     ) -> Vec<GlyphQuad> {
         let mut lines: Vec<Vec<char>> = Vec::new();
         for hard in text.split('\n') {
             if let Some(width) = wrap_width {
-                lines.extend(wrap_line(hard, width, &|ch| self.advance(ch, size_px)));
+                lines.extend(wrap_line(hard, width, &|ch| {
+                    self.advance(ch, size_px, bold)
+                }));
             } else {
                 lines.push(hard.chars().collect());
             }
@@ -138,7 +142,7 @@ impl FontAtlas {
             return Vec::new();
         }
         let line_height = self.line_height(size_px);
-        let ascent = self.font.as_scaled(PxScale::from(size_px)).ascent();
+        let ascent = self.face(bold).as_scaled(PxScale::from(size_px)).ascent();
         let total_height = line_height * lines.len() as f32;
         let block_top = match valign {
             "bottom" => rect_size[1] - total_height,
@@ -151,7 +155,7 @@ impl FontAtlas {
         for (row, line) in lines.iter().enumerate() {
             let line_width: f32 = line
                 .iter()
-                .map(|ch| self.advance(*ch, size_px))
+                .map(|ch| self.advance(*ch, size_px, bold))
                 .sum::<f32>();
             let mut pen_x = match align {
                 "center" => (rect_size[0] - line_width) * 0.5,
@@ -163,12 +167,13 @@ impl FontAtlas {
             let mut previous: Option<ab_glyph::GlyphId> = None;
             for ch in line {
                 if let Some(prev) = previous {
-                    pen_x += self.kern(prev, self.glyph_id(*ch), size_px).max(0.0);
+                    // 负字距也要应用（旧端直接用字体 kerning），否则拉丁字母偏宽。
+                    pen_x += self.kern(prev, self.face(bold).glyph_id(*ch), size_px, bold);
                 }
-                let slot = match self.glyph(*ch, size_px) {
+                let slot = match self.glyph(*ch, size_px, bold) {
                     Some(slot) => slot,
                     None => {
-                        pen_x += self.advance(*ch, size_px);
+                        pen_x += self.advance(*ch, size_px, bold);
                         previous = None;
                         continue;
                     }
@@ -185,33 +190,46 @@ impl FontAtlas {
                     });
                 }
                 pen_x += slot.advance;
-                previous = Some(self.glyph_id(*ch));
+                previous = Some(self.face(bold).glyph_id(*ch));
             }
         }
         quads
     }
 
-    fn glyph_id(&self, ch: char) -> ab_glyph::GlyphId {
-        use ab_glyph::Font;
-        self.font.glyph_id(ch)
+    /// 粗体字面是否可用（不可用时静默退回常规字重，与旧端一致）。
+    pub fn has_bold(&self) -> bool {
+        self.bold.is_some()
     }
 
-    fn kern(&self, previous: ab_glyph::GlyphId, next: ab_glyph::GlyphId, size_px: f32) -> f32 {
+    fn face(&self, bold: bool) -> &FontVec {
+        match (bold, self.bold.as_ref()) {
+            (true, Some(face)) => face,
+            _ => &self.font,
+        }
+    }
+
+    fn kern(
+        &self,
+        previous: ab_glyph::GlyphId,
+        next: ab_glyph::GlyphId,
+        size_px: f32,
+        bold: bool,
+    ) -> f32 {
         use ab_glyph::ScaleFont;
-        self.font
+        self.face(bold)
             .as_scaled(PxScale::from(size_px))
             .kern(previous, next)
     }
 
-    fn advance(&self, ch: char, size_px: f32) -> f32 {
-        let id = self.glyph_id(ch);
-        let scaled = self.font.as_scaled(PxScale::from(size_px));
+    fn advance(&self, ch: char, size_px: f32, bold: bool) -> f32 {
+        let id = self.face(bold).glyph_id(ch);
+        let scaled = self.face(bold).as_scaled(PxScale::from(size_px));
         use ab_glyph::ScaleFont;
         scaled.h_advance(id)
     }
 
     /// 取（必要时光栅化并打包）一个字形。
-    fn glyph(&mut self, ch: char, size_px: f32) -> Option<GlyphSlot> {
+    fn glyph(&mut self, ch: char, size_px: f32, bold: bool) -> Option<GlyphSlot> {
         if ch.is_whitespace() {
             return Some(GlyphSlot {
                 uv: [0.0, 0.0, 0.0, 0.0],
@@ -219,18 +237,19 @@ impl FontAtlas {
                 height: 0.0,
                 left: 0.0,
                 top: 0.0,
-                advance: self.advance(ch, size_px),
+                advance: self.advance(ch, size_px, bold),
             });
         }
-        let key = (ch, size_px.round().max(1.0) as u32);
+        let key = (ch, size_px.round().max(1.0) as u32, bold);
         if let Some(slot) = self.cache.get(&key) {
             return Some(*slot);
         }
-        let advance = self.advance(ch, size_px);
-        let glyph = self
+        let advance = self.advance(ch, size_px, bold);
+        let face = self.face(bold);
+        let glyph = face
             .glyph_id(ch)
             .with_scale_and_position(PxScale::from(size_px), ab_glyph::point(0.0, 0.0));
-        let outlined = self.font.outline_glyph(glyph)?;
+        let outlined = face.outline_glyph(glyph)?;
         let bounds = outlined.px_bounds();
         let width = bounds.width().ceil().max(0.0) as u32;
         let height = bounds.height().ceil().max(0.0) as u32;
@@ -314,6 +333,23 @@ impl FontAtlas {
     }
 }
 
+fn load_face(candidates: &[&str]) -> Option<FontVec> {
+    for path in candidates {
+        let path = Path::new(path);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        // `.ttc` 是字体集合，取第 0 面（微软雅黑 / 苹方都是集合）。
+        if let Ok(font) = FontVec::try_from_vec_and_index(bytes, 0) {
+            return Some(font);
+        }
+    }
+    None
+}
+
 /// 贪心换行：CJK 按字断行，ASCII 尽量在空格处断（不追求旧端的全部细节）。
 fn wrap_line(text: &str, width: f32, advance: &impl Fn(char) -> f32) -> Vec<Vec<char>> {
     let mut lines = Vec::new();
@@ -346,17 +382,6 @@ fn wrap_line(text: &str, width: f32, advance: &impl Fn(char) -> f32) -> Vec<Vec<
     lines
 }
 
-/// 合成粗体：把每个四边形再画一遍、右移半个像素（系统粗体缺失时的近似）。
-pub fn embolden(quads: &[GlyphQuad], shift: f32) -> Vec<GlyphQuad> {
-    quads
-        .iter()
-        .map(|quad| GlyphQuad {
-            x: quad.x + shift,
-            ..*quad
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +404,7 @@ mod tests {
             None,
             "left",
             "middle",
+            false,
         );
         assert_eq!(quads.len(), 3);
         assert!(quads[1].x > quads[0].x + quads[0].width - 1.0);
@@ -390,8 +416,26 @@ mod tests {
         let Some(mut atlas) = atlas() else {
             return;
         };
-        let left = atlas.layout("Hi", 20.0, [0.0, 0.0], [200.0, 40.0], None, "left", "top");
-        let center = atlas.layout("Hi", 20.0, [0.0, 0.0], [200.0, 40.0], None, "center", "top");
+        let left = atlas.layout(
+            "Hi",
+            20.0,
+            [0.0, 0.0],
+            [200.0, 40.0],
+            None,
+            "left",
+            "top",
+            false,
+        );
+        let center = atlas.layout(
+            "Hi",
+            20.0,
+            [0.0, 0.0],
+            [200.0, 40.0],
+            None,
+            "center",
+            "top",
+            false,
+        );
         let center_end = center.last().unwrap().x + center.last().unwrap().width;
         assert!(center[0].x - left[0].x > 20.0, "居中对齐应把整行右移");
         assert!(center_end < 200.0, "居中后不能超出内容框");
@@ -403,7 +447,16 @@ mod tests {
         let Some(mut atlas) = atlas() else {
             return;
         };
-        let quads = atlas.layout("点击", 15.0, [0.0, 0.0], [80.0, 30.0], None, "left", "top");
+        let quads = atlas.layout(
+            "点击",
+            15.0,
+            [0.0, 0.0],
+            [80.0, 30.0],
+            None,
+            "left",
+            "top",
+            false,
+        );
         assert_eq!(quads.len(), 2);
         assert!(quads[0].width > 5.0 && quads[0].height > 5.0);
         // 图集里确实有非全白像素（覆盖率写进了 alpha）。
@@ -411,6 +464,43 @@ mod tests {
             .pixels()
             .chunks_exact(4)
             .any(|pixel| pixel[3] > 0 && pixel[3] < 255));
+    }
+
+    #[test]
+    fn bold_face_uses_the_bold_font_when_available() {
+        let Some(mut atlas) = atlas() else {
+            return;
+        };
+        if !atlas.has_bold() {
+            eprintln!("skip: 没有系统粗体字面");
+            return;
+        }
+        let regular = atlas.layout(
+            "Bold",
+            20.0,
+            [0.0, 0.0],
+            [200.0, 40.0],
+            None,
+            "left",
+            "top",
+            false,
+        );
+        let bold = atlas.layout(
+            "Bold",
+            20.0,
+            [0.0, 0.0],
+            [200.0, 40.0],
+            None,
+            "left",
+            "top",
+            true,
+        );
+        assert_eq!(regular.len(), bold.len());
+        // 粗体字面通常更宽（advance 更大）或至少不同位置，不能与常规完全一致。
+        assert!(
+            regular != bold,
+            "粗体字面必须与常规字面产生不同的字形四边形"
+        );
     }
 
     #[test]
@@ -426,6 +516,7 @@ mod tests {
             Some(40.0),
             "left",
             "top",
+            false,
         );
         let rows: std::collections::BTreeSet<u32> = quads.iter().map(|q| q.y as u32).collect();
         assert!(rows.len() > 1, "换行后应出现多行");

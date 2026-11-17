@@ -111,7 +111,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/skinned.rs` | GPU 蒙皮：关节索引 / 权重顶点属性、64 关节 uniform、`GpuSkinMeshCache`、单网格 `SkinnedPipeline` |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（保留给纯位图调试文本；UI 文本已走 `font.rs`） |
-| `crates/xgc-render/src/font.rs` | 真字体文本：`ab_glyph` + 与旧端同一套系统字体候选（msyh/Deng/simhei…）、shelf 字形图集（RGBA8，rgb=255 / alpha=覆盖率）、换行 / 对齐 / 合成粗体；找不到字体时静默跳过 |
+| `crates/xgc-render/src/font.rs` | 真字体文本：`ab_glyph` + 与旧端同一套系统字体候选（msyh / **msyhbd 粗体** / Deng / simhei…）、shelf 字形图集（RGBA8，rgb=255 / alpha=覆盖率）、换行 / 对齐 / 字体原生 kerning；粗体缺失时静默退回常规字重，字体缺失时静默跳过 |
 | `crates/xgc-render/src/text_draw.rs` | 文本绘制管线：一次 draw 画一批字形四边形（alpha 混合、不写深度），图集变动才重传 |
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP；列主序 4x4 求逆与正交投影（天空盒 / 阴影视锥） |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
@@ -163,7 +163,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：直接光 PBR 已通（mean_abs 1.65 → 0.96、差异像素 33.89%）；剩余以 UI 面板与狐狸蒙皮网格光照为主。下一步补 CSM / 软阴影 / 点光阴影与 GPU 蒙皮快路径的光照（现在带贴图蒙皮走 CPU 蒙皮 + 实例化），再回物理角色控制器 / 关节。
+1. 割接视觉：UI 字体已对齐（mean_abs 0.96 → 0.87、面板区 3.14 → 1.41）。下一步补 **4 级 CSM**（旧端同式：λ=0.7、MAX_SHADOW_DISTANCE=120）与 GPU 蒙皮快路径的光照（现在带贴图蒙皮走 CPU 蒙皮 + 实例化），再回物理角色控制器 / 关节。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

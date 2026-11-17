@@ -4,7 +4,7 @@
 //! `ab_glyph` 真字体（与旧端同一套系统字体候选），对齐方式来自 `ui.element` 的
 //! `text_align` / `text_valign`，字形覆盖率走 alpha 混合的独立管线。
 
-use crate::font::{embolden, FontAtlas, GlyphQuad};
+use crate::font::{FontAtlas, GlyphQuad};
 use crate::gpu::{GpuContext, GpuError};
 use crate::image::ImageData;
 use crate::mesh::Mesh;
@@ -356,6 +356,7 @@ impl Renderer {
             wrap_width,
             &item.text_align,
             &item.text_valign,
+            item.bold,
         );
         // 先排版（会往图集里写新字形），再同步 GPU 贴图，最后才画 —— 顺序反了
         // 会拿旧图集去采样新字形，整段文字变成一片糊。
@@ -366,7 +367,7 @@ impl Renderer {
         let Some((_, pipeline)) = self.text_pipeline.as_ref() else {
             return Ok(0);
         };
-        let mut draws = draw_text_quads(
+        let draws = draw_text_quads(
             pipeline,
             context,
             &TextDraw {
@@ -378,21 +379,6 @@ impl Renderer {
                 scissor,
             },
         )?;
-        if item.bold {
-            let bold = embolden(&quads, 0.6);
-            draws += draw_text_quads(
-                pipeline,
-                context,
-                &TextDraw {
-                    target,
-                    atlas,
-                    viewport,
-                    quads: &bold,
-                    color: item.text_color,
-                    scissor,
-                },
-            )?;
-        }
         Ok(draws)
     }
 }
