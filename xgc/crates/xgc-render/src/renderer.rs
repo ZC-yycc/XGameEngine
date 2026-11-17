@@ -44,6 +44,10 @@ pub struct Renderer {
     shadow: Option<super::shadow::ShadowTarget>,
     /// 基色贴图绑定：1×1 白纹理兜底，随第一次渲染惰性创建。
     textures: Option<super::texture_bind::TextureBinding>,
+    /// 真字体图集（CPU）与它的 GPU 贴图 / 绘制管线（UI 文本用）。
+    font: Option<super::font::FontAtlas>,
+    font_texture: Option<(u64, wgpu::Texture)>,
+    text_pipeline: Option<(wgpu::TextureFormat, super::text_draw::TextPipeline)>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
@@ -77,6 +81,9 @@ impl Renderer {
             sky_pipeline: None,
             shadow: None,
             textures: None,
+            font: None,
+            font_texture: None,
+            text_pipeline: None,
             depth: None,
             images: HashMap::new(),
             ui_overlay: None,

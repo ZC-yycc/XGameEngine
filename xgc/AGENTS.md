@@ -110,7 +110,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
 | `crates/xgc-render/src/skinned.rs` | GPU 蒙皮：关节索引 / 权重顶点属性、64 关节 uniform、`GpuSkinMeshCache`、单网格 `SkinnedPipeline` |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
-| `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（按宽度换行） |
+| `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（保留给纯位图调试文本；UI 文本已走 `font.rs`） |
+| `crates/xgc-render/src/font.rs` | 真字体文本：`ab_glyph` + 与旧端同一套系统字体候选（msyh/Deng/simhei…）、shelf 字形图集（RGBA8，rgb=255 / alpha=覆盖率）、换行 / 对齐 / 合成粗体；找不到字体时静默跳过 |
+| `crates/xgc-render/src/text_draw.rs` | 文本绘制管线：一次 draw 画一批字形四边形（alpha 混合、不写深度），图集变动才重传 |
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP；列主序 4x4 求逆与正交投影（天空盒 / 阴影视锥） |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵、材质资产引用与祖先骨架姿态） |
@@ -119,7 +121,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/tone.rs` | ACES 曲线 CPU 镜像与 8 位对表辅助；WGSL 侧逐式对应 |
 | `crates/xgc-render/src/shadow.rs` | 方向光阴影：单级正交拟合（`fit_directional_shadow`，与旧端同式）+ 2048² 深度图 + 深度 pass 管线；接收端 3×3 PCF、偏置随 N·L 放大；不做 CSM / PCSS / 点光 |
 | `crates/xgc-render/src/sky_draw.rs` | 天空盒 pass：全屏三角形 + 解析天空逐像素求值（远平面 / `LessEqual` / 不写深度），`inv_view_proj` 反推视线方向 |
-| `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 文本 / 图片画在场景之上（从 `renderer.rs` 按行数预算拆出） |
+| `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 真字体文本 / 图片画在场景之上（从 `renderer.rs` 按行数预算拆出；字形先排版后上传图集） |
 | `crates/xgc-render/src/sky.rs` | 解析天空（天顶/地平线/地面 + 太阳盘 + 光晕）与漫反射 IBL：1024 点斐波那契球投影成 L2 球谐（E/π，无随机数）；参数来自 `project.ron` 的 `render.sky` |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 368B（相机位置 + 环境光 + 主方向光 + 天空球谐 + 光视图投影/阴影参数），逐实例 96B（模型 + 颜色 + metallic/roughness）；片元按 `环境光 + 天空 IBL + 环境反射 + 光色 × 强度 × N·L × 阴影` 着色再过 ACES |
 | `crates/xgc-render/src/texture_data.rs` | 基色贴图 RGBA8：PNG 字节解码（8-bit）+ 1×1 白纹理兜底 |
@@ -161,7 +163,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：rapier 物理后端已通（翻滚 / 落点与旧图基本一致，mean_abs 2.88 → 1.81）。下一步补 UI 字体 / 面板（最大剩余差异），再做直射光 GGX 高光 / CSM / 软阴影与 GPU 蒙皮快路径（现在带贴图蒙皮走 CPU 蒙皮 + 实例化）。
+1. 割接视觉：真字体 UI 已通（mean_abs 1.81 → 1.65）。下一步补直射光 GGX 高光 / CSM / 软阴影与 GPU 蒙皮快路径（现在带贴图蒙皮走 CPU 蒙皮 + 实例化），再回到物理的角色控制器 / 关节。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

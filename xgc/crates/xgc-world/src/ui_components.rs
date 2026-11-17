@@ -21,6 +21,10 @@ pub struct UiElement {
     pub text_color: [f32; 4],
     pub bold: bool,
     pub wrap: bool,
+    /// 水平对齐：left / center / right（旧端 `UiTextStyle.align`）。
+    pub text_align: String,
+    /// 垂直对齐：top / middle / bottom（旧端 `UiTextStyle.valign`，缺省 middle）。
+    pub text_valign: String,
     pub image_path: String,
     pub image_mode: String,
     pub image_slice: f32,
@@ -47,6 +51,8 @@ impl Default for UiElement {
             text_color: [1.0; 4],
             bold: false,
             wrap: true,
+            text_align: "left".to_string(),
+            text_valign: "middle".to_string(),
             image_path: String::new(),
             image_mode: "stretch".to_string(),
             image_slice: 0.0,
@@ -92,6 +98,18 @@ impl Component for UiElement {
             FieldDescriptor::new("bold", FieldType::Bool, Value::Bool(false)),
             FieldDescriptor::new("wrap", FieldType::Bool, Value::Bool(true)),
             FieldDescriptor::new(
+                "text_align",
+                FieldType::String,
+                Value::String("left".into()),
+            )
+            .doc("left / center / right"),
+            FieldDescriptor::new(
+                "text_valign",
+                FieldType::String,
+                Value::String("middle".into()),
+            )
+            .doc("top / middle / bottom"),
+            FieldDescriptor::new(
                 "image_path",
                 FieldType::String,
                 Value::String(String::new()),
@@ -128,6 +146,8 @@ impl Component for UiElement {
             "text_color" => Some(Value::Vec4(vec4_f64(self.text_color))),
             "bold" => Some(Value::Bool(self.bold)),
             "wrap" => Some(Value::Bool(self.wrap)),
+            "text_align" => Some(Value::String(self.text_align.clone())),
+            "text_valign" => Some(Value::String(self.text_valign.clone())),
             "image_path" => Some(Value::String(self.image_path.clone())),
             "image_mode" => Some(Value::String(self.image_mode.clone())),
             "image_slice" => Some(Value::F64(f64::from(self.image_slice))),
@@ -155,6 +175,8 @@ impl Component for UiElement {
             "text_color" => self.text_color = vec4(value, field)?,
             "bold" => self.bold = boolean(value, field)?,
             "wrap" => self.wrap = boolean(value, field)?,
+            "text_align" => self.text_align = String::from(string(value, field)?),
+            "text_valign" => self.text_valign = String::from(string(value, field)?),
             "image_path" => self.image_path = String::from(string(value, field)?),
             "clip_children" => self.clip_children = boolean(value, field)?,
             "image_mode" => {

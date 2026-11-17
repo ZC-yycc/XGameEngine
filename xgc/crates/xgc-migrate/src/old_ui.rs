@@ -98,6 +98,10 @@ pub fn convert(value: ron::Value) -> Result<ComponentData, String> {
             _ => None,
         })
         .unwrap_or_else(|| infer_kind(&image_path, &old.text.content, old.style.background[3]));
+    // 旧端的 align / valign 是 RON 单元枚举，`ron::Value` 转换会把变体名丢成
+    // unit（`into_rust` 无法还原）；只能按 kind 推断：按钮文案居中，其余左对齐，
+    // 垂直一律居中（= 旧端 `UiVAlign::Middle` 缺省）。
+    let text_align = if kind == "button" { "center" } else { "left" };
     Ok(ComponentData {
         component: UiElement::ID,
         fields: vec![
@@ -136,6 +140,17 @@ pub fn convert(value: ron::Value) -> Result<ComponentData, String> {
             ("text_color".to_string(), Value::Vec4(vec4(old.text.color))),
             ("bold".to_string(), Value::Bool(old.text.bold)),
             ("wrap".to_string(), Value::Bool(old.text.wrap)),
+            // 旧端的 align / valign 是 RON 单元枚举，`ron::Value` 转换会把变体名
+            // 丢成 unit（`into_rust` 无法还原）；只能按 kind 推断：按钮文案居中，
+            // 其余左对齐，垂直一律居中（= 旧端 `UiVAlign::Middle` 缺省）。
+            (
+                "text_align".to_string(),
+                Value::String(text_align.to_string()),
+            ),
+            (
+                "text_valign".to_string(),
+                Value::String("middle".to_string()),
+            ),
             ("image_path".to_string(), Value::String(image_path)),
             ("clip_children".to_string(), Value::Bool(old.clip_children)),
         ],

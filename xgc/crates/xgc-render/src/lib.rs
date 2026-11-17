@@ -13,6 +13,7 @@ mod assets;
 mod camera;
 mod diff;
 mod draw;
+mod font;
 mod frame_color;
 mod glb;
 mod gpu;
@@ -31,6 +32,7 @@ mod skinning;
 mod sky;
 mod sky_draw;
 mod text;
+mod text_draw;
 mod texture;
 mod texture_bind;
 mod texture_data;
@@ -44,6 +46,7 @@ pub use camera::{
 };
 pub use diff::{diff_images, ImageDiff};
 pub use draw::{build_draw_list, DrawItem, DrawList};
+pub use font::{FontAtlas, GlyphQuad};
 pub use glb::{
     load_glb, load_glb_skeleton, load_gltf, load_model, MeshError, SkeletonGraph, SkeletonJoint,
 };
@@ -65,6 +68,7 @@ pub use skinned::{GpuSkinMesh, GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest
 pub use skinning::{identity, skin_positions, translation};
 pub use sky::{sh_eval, sky_color, sky_irradiance, SkySettings, SH_COEFFS};
 pub use text::{text_mesh, text_mesh_wrapped};
+pub use text_draw::TextPipeline;
 pub use texture::TexturePipeline;
 pub use texture_data::TextureData;
 pub use tone::{aces, aces_u8, display_u8, env_brdf_approx, env_specular, srgb_encode};

@@ -12,6 +12,8 @@ xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
 pollster = "0.4"
 png = "0.17"
+# 真字体光栅化：旧端 UI 文本用的也是 ab_glyph（epaint 依赖树里），版本对齐缓存
+ab_glyph = "=0.2.32"
 ron = "0.8.1"
 serde.workspace = true
 serde_json.workspace = true

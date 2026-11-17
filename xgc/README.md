@@ -51,7 +51,7 @@ ACES 色调映射（片元与清屏色同曲线）、天空盒 pass（解析天�
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
 `GpuMeshCache` 顶点 / 索引缓冲跨帧复用、按模型分组实例化（storage instance 缓冲）、
-UI 背景矩形叠加（无深度，focused 元素带强调色外环，5x7 位图文本按元素宽度自动换行
+UI 背景矩形叠加（无深度，focused 元素带强调色外环，真字体文本按元素宽度自动换行 / 对齐
 单 draw，PNG / PPM 图片经纹理管线单 draw，`image_mode` 支持 stretch / preserve /
 cover / nine_slice，`corner_radius` 圆角由片元 SDF 裁剪，绘制按 `ui.layout.clip` 设置
 scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、从 `render.mesh` + `render.material` 抽
@@ -108,12 +108,13 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（282 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（186 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（288 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（189 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同（35437 字节），
 30 个内建类型 34950 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-UI 字体 / 面板、直射光 GGX 高光、CSM / 软阴影 / 粒子、GPU 蒙皮快路径的光照 / 贴图、物理的角色控制器 / 关节 / 坡面滑动、
+直射光 GGX 高光、CSM / 软阴影 / 粒子、GPU 蒙皮快路径的光照 / 贴图、狐狸等蒙皮网格的光照、
+物理的角色控制器 / 关节 / 坡面滑动、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度，
 以及旧新逐帧 trace / 性能验收。
 
