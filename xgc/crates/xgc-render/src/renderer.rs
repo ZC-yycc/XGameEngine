@@ -48,6 +48,9 @@ pub struct Renderer {
     font: Option<super::font::FontAtlas>,
     font_texture: Option<(u64, wgpu::Texture)>,
     text_pipeline: Option<(wgpu::TextureFormat, super::text_draw::TextPipeline)>,
+    /// 本帧要画的粒子（模拟层在帧循环里算好，渲染只消费四边形）。
+    particles: Vec<xgc_world::ParticleQuad>,
+    particle_pipeline: Option<(wgpu::TextureFormat, super::particles::ParticlePipeline)>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
@@ -84,6 +87,8 @@ impl Renderer {
             font: None,
             font_texture: None,
             text_pipeline: None,
+            particles: Vec::new(),
+            particle_pipeline: None,
             depth: None,
             images: HashMap::new(),
             ui_overlay: None,
@@ -149,6 +154,11 @@ impl Renderer {
             view,
         });
         Ok(())
+    }
+
+    /// 挂上本帧的粒子四边形（由模拟层每帧产出；空表示不画）。
+    pub fn set_particles(&mut self, quads: Vec<xgc_world::ParticleQuad>) {
+        self.particles = quads;
     }
 
     /// 渲染一帧：抽 DrawList、解析模型、按实体顺序 draw 到目标纹理。
@@ -279,6 +289,46 @@ impl Renderer {
                 .map_err(GpuError::Pipeline)?;
         }
         Ok(Some(cascades))
+    }
+
+    /// 粒子：Alpha 一批 + 加色一批；深度测试但不写深度。
+    fn draw_particles(
+        &mut self,
+        context: &GpuContext,
+        target: &wgpu::Texture,
+        view_proj: Mat4,
+        camera_pos: [f32; 3],
+        clear_target: bool,
+    ) -> Result<usize, GpuError> {
+        if self.particles.is_empty() {
+            return Ok(0);
+        }
+        self.ensure_depth(context, target.width(), target.height())?;
+        let format = target.format();
+        if self.particle_pipeline.as_ref().map(|(current, _)| *current) != Some(format) {
+            self.particle_pipeline = Some((
+                format,
+                super::particles::ParticlePipeline::new(context, format),
+            ));
+        }
+        let depth = &self.depth.as_ref().unwrap().view;
+        let Some((_, pipeline)) = self.particle_pipeline.as_ref() else {
+            return Ok(0);
+        };
+        let quads = std::mem::take(&mut self.particles);
+        let clear = clear_target.then_some(self.clear_color);
+        let request = super::particles::ParticleDrawRequest {
+            target,
+            depth,
+            view_proj,
+            camera_pos,
+            quads: &quads,
+            clear,
+        };
+        let drawn = pipeline
+            .draw(context, &request)
+            .map_err(GpuError::Pipeline)?;
+        Ok(drawn)
     }
 
     /// 天空盒：整屏一张三角形，深度 `LessEqual` + 不写深度，被几何挡住的像素不画。
@@ -471,6 +521,14 @@ impl Renderer {
             // 天空 pass 自己把深度清成 1.0；有几何时深度已被清好，只能 Load。
             self.draw_sky(context, target, view_proj, &lighting, draws == 0);
         }
+        // 粒子画在几何 / 天空之后、UI 之前：要被几何遮住，又要参与色调映射。
+        draw_calls += self.draw_particles(
+            context,
+            target,
+            view_proj,
+            lighting.eye,
+            draws == 0 && !self.sky.enabled,
+        )?;
         Ok(RenderStats {
             draws,
             draw_calls,

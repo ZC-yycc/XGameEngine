@@ -2,8 +2,8 @@
 
 use xgc_migrate::migrate_str;
 use xgc_world::{
-    Animator as XgcAnimator, CharacterController as XgcCharacter, Component, LodGroup,
-    ParticleEmitter, PluginComponent, UiElement, Value,
+    Animator as XgcAnimator, CharacterController as XgcCharacter, Component, EmissionShape,
+    LodGroup, ParticleBlend, ParticleConfig, ParticleEmitter, PluginComponent, UiElement, Value,
 };
 
 #[test]
@@ -227,10 +227,20 @@ fn maps_particle() {
                                 emitting: true,
                                 rate: 30.0,
                                 max_particles: 100,
+                                duration: 2.5,
+                                looping: false,
                                 lifetime: (0.5, 1.0),
                                 speed: (1.0, 2.0),
+                                direction: (1.0, 0.0, 0.0),
+                                spread: 12.0,
+                                shape: Sphere(radius: 0.25),
                                 gravity: (0.0, -1.0, 0.0),
+                                drag: 0.75,
+                                start_size: 0.4,
+                                end_size: 0.9,
                                 start_color: (1.0, 0.5, 0.1, 0.9),
+                                end_color: (0.2, 0.3, 0.4, 0.0),
+                                blend: Additive,
                                 seed: 7,
                             )),
                         ),
@@ -258,6 +268,19 @@ fn maps_particle() {
     assert_eq!(field("max_particles"), Value::I64(100));
     assert_eq!(field("lifetime").as_vec2(), Some([0.5, 1.0]));
     assert_eq!(field("seed"), Value::I64(7));
+    let Value::String(config) = field("config") else {
+        panic!("完整粒子配置必须写入 config");
+    };
+    let config: ParticleConfig = ron::from_str(&config).unwrap();
+    assert_eq!(config.duration, 2.5);
+    assert!(!config.looping);
+    assert_eq!(config.direction, [1.0, 0.0, 0.0]);
+    assert_eq!(config.shape, EmissionShape::Sphere { radius: 0.25 });
+    assert_eq!(config.drag, 0.75);
+    assert_eq!(config.start_size, 0.4);
+    assert_eq!(config.end_size, 0.9);
+    assert_eq!(config.end_color, [0.2, 0.3, 0.4, 0.0]);
+    assert_eq!(config.blend, ParticleBlend::Additive);
 }
 
 #[test]

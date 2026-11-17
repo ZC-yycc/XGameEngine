@@ -11,7 +11,7 @@ use xgc_sim::{HierarchySystem, System, UiLayoutSystem};
 use xgc_store::load_world;
 use xgc_world::World;
 
-use crate::runtime_cmd::advance_world;
+use crate::runtime_cmd::advance_world_with_particles;
 
 fn parse_frame_count(value: Option<&str>) -> Result<u64, &'static str> {
     value
@@ -109,6 +109,7 @@ fn load_sky(project_root: &Path) -> Option<SkySettings> {
     )
 }
 
+#[cfg(test)]
 fn prepare_frame_world(
     world: World,
     assets_root: &Path,
@@ -116,14 +117,25 @@ fn prepare_frame_world(
     width: u32,
     height: u32,
 ) -> Result<World, String> {
-    let mut world = advance_world(world, assets_root, frames)?;
+    prepare_frame_world_with_particles(world, assets_root, frames, width, height)
+        .map(|(world, _)| world)
+}
+
+fn prepare_frame_world_with_particles(
+    world: World,
+    assets_root: &Path,
+    frames: u64,
+    width: u32,
+    height: u32,
+) -> Result<(World, Vec<xgc_world::ParticleQuad>), String> {
+    let (mut world, particles) = advance_world_with_particles(world, assets_root, frames)?;
     let mut hierarchy = HierarchySystem::default();
     hierarchy.run(&mut world, 0.0);
     UiLayoutSystem {
         viewport: [width as f32, height as f32],
     }
     .run(&mut world, 0.0);
-    Ok(world)
+    Ok((world, particles))
 }
 
 pub(crate) fn render_graph() -> ExitCode {
@@ -318,14 +330,14 @@ pub(crate) fn render_frame(
             return ExitCode::from(2);
         }
     };
-    let world = match prepare_frame_world(
+    let (world, particles) = match prepare_frame_world_with_particles(
         world,
         Path::new(assets_root.unwrap_or(".")),
         frames,
         width,
         height,
     ) {
-        Ok(world) => world,
+        Ok(prepared) => prepared,
         Err(err) => {
             eprintln!("推进世界失败：{err}");
             return ExitCode::from(1);
@@ -367,6 +379,7 @@ pub(crate) fn render_frame(
         None => MeshCache::new("."),
     };
     let mut renderer = Renderer::new(meshes);
+    renderer.set_particles(particles);
     renderer.set_clear_color([0.62, 0.72, 0.84, 1.0]);
     // 天空开着的项目：背景取地平线色（旧端天空盒在地平线附近就是它），
     // 环境照明由渲染器从同一份解析天空投影出来。

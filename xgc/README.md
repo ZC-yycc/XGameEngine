@@ -47,8 +47,8 @@ ACES 色调映射（片元与清屏色同曲线）、天空盒 pass（解析天�
 的 `render.sky`）、方向光阴影（4 级 CSM：λ=0.7 practical split + 逐级紧致正交拟合 + 纹素吸附，2048² 深度数组按视线深度选层 + 3×3 PCF）、环境反射（天空 SH 反射方向 × Lazarov 解析 BRDF，逐材质 `f0 = mix(0.04, 基色, metallic)`、
 `(1-metallic)` 漫反射、粗糙度夹 0.04）、网格基色贴图（glTF `TEXCOORD_0` + `baseColorTexture`，
 外部 uri / GLB 内嵌 PNG → sRGB 采样）、直接光 Cook-Torrance PBR（GGX + Smith + Schlick、
-`(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
-`guid://` 解析、`Renderer` 帧入口（DrawList → MeshCache → RenderCache → GPU）、
+`(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、确定性粒子 billboard（CPU SplitMix64 模拟，软圆覆盖，Alpha / Additive，Alpha 后向前排序，深测开 / 深写关）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
+`guid://` 解析、`Renderer` 帧入口（DrawList → MeshCache → RenderCache → 粒子 → UI）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
 `GpuMeshCache` 顶点 / 索引缓冲跨帧复用、按模型分组实例化（storage instance 缓冲）、
@@ -90,8 +90,8 @@ click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选
 `AudioMixerSystem` 按监听者距离 + `audio.mixer` 总线写 `audio.gain`、WAV（PCM16 /
 Float32）解码 + 目录素材库、`SoftwareMixer` 软件混音 + WAV 写出、`HierarchySystem`
 合成世界变换）→ 快照 / trace。`render-frame` 的可选帧数缺省为 0；显式传入时复用
-`Simulation::step_with` + `ScriptRuntime::run_frame` 推进固定 60 Hz 正式帧，再按截图尺寸
-重算 `GlobalTransform` 与 UI 布局。`VelocitySystem` 按 archetype 分片并行，1 / 2 / 8
+`Simulation::step_with` + `ScriptRuntime::run_frame` 推进固定 60 Hz 正式帧，每步随后推进同一份
+`ParticleSystem`，再按截图尺寸重算 `GlobalTransform` 与 UI 布局；编辑器 Play 与图形播放器复用同一粒子系统并把当帧四边形交给 `Renderer`。`VelocitySystem` 按 archetype 分片并行，1 / 2 / 8
 线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
 跨帧复用，稳态不再取 `WorldData`。`SystemAccess` 已能判定读写冲突，
@@ -109,14 +109,14 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（293 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（191 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同（35437 字节），
-30 个内建类型 34950 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
+`cargo test --workspace --offline` 全绿（299 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（194 个 Rust 文件，最大 596 行）；30 个内建类型的 schema 为 35709 字节，
+两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-PCSS / 点光阴影 / 粒子渲染、GPU 蒙皮快路径的光照 / 贴图、狐狸等蒙皮网格的光照、
+PCSS / 点光阴影 / HDR 中间目标与后处理、GPU 蒙皮快路径的光照 / 贴图、狐狸等蒙皮网格的光照、
 物理的角色控制器 / 关节 / 坡面滑动、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
-脚本正式 System 调度，
+脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。
 
 ## 命令

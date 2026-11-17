@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use xgc_script::ScriptRuntime;
-use xgc_sim::{FrameRecord, InputMap, InputState, Simulation};
+use xgc_sim::{FrameRecord, InputMap, InputState, ParticleSystem, Simulation};
 use xgc_world::World;
 
 use crate::{EditorState, PlaySession};
@@ -21,6 +21,7 @@ impl EditorState {
         self.play = Some(PlaySession {
             before,
             simulation: Simulation::new(world),
+            particles: ParticleSystem::new(),
             runtime: None,
             input: None,
         });
@@ -47,6 +48,7 @@ impl EditorState {
         self.play = Some(PlaySession {
             before,
             simulation: Simulation::new(world),
+            particles: ParticleSystem::new(),
             runtime: Some(runtime),
             input,
         });
@@ -84,19 +86,18 @@ impl EditorState {
         let Some(session) = &mut self.play else {
             return Ok(None);
         };
-        if let Some(runtime) = &mut session.runtime {
+        let record = if let Some(runtime) = &mut session.runtime {
             session
                 .simulation
                 .step_with(Vec::new(), |world| runtime.run_frame(world, 1.0 / 60.0))
-                .map(Some)
-                .map_err(|err| format!("Play 帧失败：{err:?}"))
         } else {
-            session
-                .simulation
-                .step(Vec::new())
-                .map(Some)
-                .map_err(|err| format!("Play 帧失败：{err:?}"))
+            session.simulation.step(Vec::new())
         }
+        .map_err(|err| format!("Play 帧失败：{err:?}"))?;
+        session
+            .particles
+            .update(1.0 / 60.0, session.simulation.world());
+        Ok(Some(record))
     }
 
     pub fn stop(&mut self) -> Result<(), String> {

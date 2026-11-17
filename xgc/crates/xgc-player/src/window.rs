@@ -7,7 +7,7 @@ use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use xgc_render::{GpuContext, MeshCache, Renderer};
 use xgc_script::ScriptRuntime;
-use xgc_sim::Simulation;
+use xgc_sim::{ParticleSystem, Simulation};
 use xgc_world::World;
 
 struct Viewport {
@@ -20,6 +20,7 @@ struct Viewport {
 struct PlayerApp {
     dir: PathBuf,
     simulation: Option<Simulation>,
+    particles: ParticleSystem,
     runtime: Option<ScriptRuntime>,
     error: Option<String>,
     viewport: Option<Viewport>,
@@ -31,6 +32,7 @@ impl PlayerApp {
         let mut app = Self {
             dir: dir.to_path_buf(),
             simulation: None,
+            particles: ParticleSystem::new(),
             runtime: None,
             error: None,
             viewport: None,
@@ -98,14 +100,17 @@ impl PlayerApp {
         {
             self.error = Some(format!("运行失败：{err:?}"));
         } else {
+            self.particles.update(1.0 / 60.0, simulation.world());
             self.frames += 1;
         }
     }
 
     fn render_viewport(&mut self) {
+        let particles = self.particles.quads().to_vec();
         let (Some(simulation), Some(viewport)) = (&self.simulation, &mut self.viewport) else {
             return;
         };
+        viewport.renderer.set_particles(particles);
         if let Err(err) =
             viewport
                 .renderer

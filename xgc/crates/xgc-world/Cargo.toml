@@ -11,3 +11,5 @@ xgc-base = { path = "../xgc-base" }
 xgc-reflect = { path = "../xgc-reflect" }
 serde.workspace = true
 serde_json.workspace = true
+# 粒子完整配置以 RON 快照存在组件里（解析 / 序列化都要它）
+ron = "0.8.1"

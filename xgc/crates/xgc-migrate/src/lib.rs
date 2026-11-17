@@ -59,7 +59,7 @@ enum OldComponentData {
     Character(ron::Value),
     Audio(OldAudio),
     Camera(OldCamera),
-    Particle(ron::Value),
+    Particle(old_particle::OldParticle),
     Physics(OldPhysics),
     Rust {
         #[allow(dead_code)]
@@ -291,8 +291,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     report.mapped_components += 1;
                 }
                 OldComponentData::Particle(value) => {
-                    particle =
-                        Some(old_particle::convert(value.clone()).map_err(MigrationError::Parse)?);
+                    particle = Some(old_particle::convert(value));
                     report.mapped_components += 1;
                 }
                 OldComponentData::Rust {

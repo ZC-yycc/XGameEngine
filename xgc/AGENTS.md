@@ -58,6 +58,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-store/src/binary.rs` | `XGCB` 二进制世界：encode / decode / save / load；固定小端、值带标签 |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
+| `crates/xgc-sim/src/particles.rs` | `ParticleSystem`：SplitMix64 确定性发射 / 生命周期 / 形状采样 / 重力阻力，产出当帧 `ParticleQuad` |
 | `crates/xgc-sim/src/animation.rs` | 根变换剪辑采样 + `AnimationPlaybackSystem`；关节轨道在 `animation/joints.rs` |
 | `crates/xgc-sim/src/animation/joints.rs` | `JointTrack`：按 joint 索引采样骨骼本地平移 / 旋转 / 缩放；播放系统按 Parent 链找骨骼并写入 |
 | `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、转场时长写 blend 字段、状态写回 Animator.clip |
@@ -125,6 +126,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 真字体文本 / 图片画在场景之上（从 `renderer.rs` 按行数预算拆出；字形先排版后上传图集） |
 | `crates/xgc-render/src/sky.rs` | 解析天空（天顶/地平线/地面 + 太阳盘 + 光晕）与漫反射 IBL：1024 点斐波那契球投影成 L2 球谐（E/π，无随机数）；参数来自 `project.ron` 的 `render.sky` |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 592B（相机位置 + 环境光 + 主方向光 + 天空球谐 + 4 级光视图投影/切分/视线/阴影参数），逐实例 96B（模型 + 颜色 + metallic/roughness）；片元按 `环境光 + 天空 IBL + 环境反射 + 光色 × 强度 × N·L × 阴影` 着色再过 ACES |
+| `crates/xgc-render/src/particles.rs` | 实例化 billboard 粒子：相机朝向软圆、Alpha / Additive、后向前排序、深测开 / 深写关 |
 | `crates/xgc-render/src/texture_data.rs` | 基色贴图 RGBA8：PNG 字节解码（8-bit）+ 1×1 白纹理兜底 |
 | `crates/xgc-render/src/texture_bind.rs` | 贴图 GPU 绑定：group(2) 布局 + 线性 Repeat 采样器 + 白纹理兜底绑定组 |
 | `crates/xgc-render/src/gpu_mesh.rs` | 模型 → 位置缓冲 / UV 缓冲 / 索引缓冲 + 贴图绑定组，跨帧复用 |
@@ -138,10 +140,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
 | `crates/xgc-player/src/lib.rs` | `load_world_dir` / `runtime_for` / `run_cooked`：manifest 校验、优先 XGCB、脚本驱动 |
-| `crates/xgc-player/src/window.rs` | eframe + wgpu 视口：每帧仿真 / 脚本并贴图到窗口 |
+| `crates/xgc-player/src/window.rs` | eframe + wgpu 视口：每帧仿真 / 脚本 / 粒子并贴图到窗口 |
 | `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录> [帧数]`：无帧数打开窗口，有帧数 headless |
 | `crates/xgc-cli/src/main.rs` | CLI 参数分派；文件预算拆分后的轻量入口 |
-| `crates/xgc-cli/src/runtime_cmd.rs` | `run-scripts` 与截图共用的 `Simulation::step_with` + `ScriptRuntime::run_frame` 固定帧桥 |
+| `crates/xgc-cli/src/runtime_cmd.rs` | `run-scripts` 与截图共用的 `Simulation::step_with` + `ScriptRuntime::run_frame` 固定帧桥；截图路径同步产出粒子四边形 |
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
 | `crates/xgc-cli/src/assets_cmd.rs` | `xgc assets <项目根>`：GUID 扫描 |
 | `crates/xgc-cli/src/cook_cmd.rs` | `xgc cook <项目根> <输出目录>` / `pack <世界.json> <项目根> <输出目录>` / `run-cooked <目录> [帧]` |
@@ -164,7 +166,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：4 级 CSM 已通（mean_abs 0.87 → 0.85）。剩余最大差异是**篝火烟雾粒子**（旧端 billboard 粒子渲染，XGC 只有 `particle.emitter` 组件，约占差异 30%）。下一刀补粒子渲染，再把 GPU 蒙皮快路径补齐光照（现在带贴图蒙皮走 CPU 蒙皮 + 实例化），最后回物理角色控制器 / 关节。
+1. 割接视觉：确定性粒子模拟 + billboard 已通（mean_abs 0.85 → 0.63）。下一刀补 GPU 蒙皮快路径的 PBR / 贴图（现在带贴图蒙皮走 CPU 蒙皮 + 实例化），并评估 HDR 中间目标统一 tone-map，最后回物理角色控制器 / 关节。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

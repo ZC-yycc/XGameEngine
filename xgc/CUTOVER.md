@@ -10,8 +10,8 @@
 | 场景 + 资源 + 脚本 + 预制体端到端迁移 | 通过 | showcase 24 实体；character 2 脚本；Pillar 3 实体；`verify-migration` 一致 |
 | 迁移世界可运行 | 通过 | `run-world` / `run-cooked` / `xgc-player` 60 帧同哈希 |
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
-| 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `94f44ec6bd500707`，1280×720，14 个场景 draw / 5 call / 7 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / 环境光 / `.mat` 资产乘子 / ACES / 天空漫反射 IBL 已贯通 |
-| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 309856/921600 像素不同（33.62%），mean_abs **0.85**、max 194；天空 / 地面 / 材质 / 直接光 PBR / 物理落点 / UI 文本 / 4 级 CSM 阴影已基本一致，剩余最大差异是**篝火烟雾粒子**（旧端有 billboard 粒子渲染，XGC 尚无）与狐狸蒙皮网格光照 |
+| 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `bb3fdc99df20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / 粒子 / UI 已贯通 |
+| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 309707/921600 像素不同（33.61%），mean_abs **0.63**、max 194；篝火烟雾的确定性模拟、billboard 位置 / 尺寸 / 透明度已对齐，余差主要是狐狸蒙皮网格快路径、UI / 几何边缘与 HDR 合成 / tone-map 架构差异 |
 | 逐帧 trace / 状态哈希对照 | **未通过** | XGC 重放自身确定；无旧引擎逐帧 trace |
 | 正式 System 调度 / 并行 | **未通过** | `batches()` 计划已有，执行顺序 |
 | 性能基准 + 热路径分配门禁 | **未通过** | 无 release CI 门禁 |
@@ -41,6 +41,10 @@ cargo test -p xgc-render --test material_factor --offline
 # 方向光阴影：开关两帧对比（暗像素数量 + 只会变暗）（GPU）
 cargo test -p xgc-render --test shadows --offline
 
+# 粒子：确定性 / 发射率 / 清洗与硬上限（CPU）+ Alpha / Additive billboard（GPU）
+cargo test -p xgc-sim particles --offline
+cargo test -p xgc-render --test particles --offline
+
 # 天空盒画面：解析天空逐像素对表 + 几何遮挡（GPU）
 cargo test -p xgc-render --test sky_box --offline
 
@@ -69,8 +73,9 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 场景级光源 / 环境光已迁移进 `WorldData.environment`；颜色合成顺序对齐旧引擎
 > `模型基色因子 → .mat 资产 → 实体覆盖`（全是乘子），片元与清屏色都过同一条 ACES 曲线。
 > 旧 / 新整帧 mean_abs 依次为 28.65 → 23.79 → 21.24 → 15.97 → 15.27 → 16.34 → 19.65 → 19.27 → 18.78 →
-> 0.85（差异像素 33.62%）。最后一步是**4 级 CSM**（λ=0.7 practical split、逐级紧致拟合 + 纹素吸附、
-> 深度数组按视线深度选层）。再往前是**UI 粗体字面 + 原生 kerning**（面板区 3.14 → 1.41）
+> 0.85 → **0.63**（差异像素 33.61%）。最后一步是**确定性粒子模拟 + billboard**：按旧端 SplitMix64 / 发射 / 生命周期合同推进，
+> Alpha 后向前排序并以预乘方式混合，Additive 单独批次；Campfire.Smoke 的位置 / 尺寸 / 透明度已对齐。前一步是
+> **4 级 CSM**（λ=0.7 practical split、逐级紧致拟合 + 纹素吸附、深度数组按视线深度选层）。再往前是**UI 粗体字面 + 原生 kerning**（面板区 3.14 → 1.41）
 > 与**直接光 Cook-Torrance PBR**：GGX + Smith + Schlick、
 > `(1-F)` 漫反射扣减与 π 校准逐式照搬旧端，蓝箱 / 棕箱区域平均差降到 1.45 / 2.12。
 > 再往前是**真字体 UI**（`ab_glyph` + 与旧端同一套系统字体 + 字形图集，面板区域 5.19 → 3.14）
@@ -85,16 +90,16 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 随后补 **接触清速度**：贴地 / 堆叠的盒子不再每帧带着累积速度抖动（3 条物理回归钉住稳定度）；
 > 第 150 帧像素与上一步逐像素相同（物体早已落定），世界哈希因速度归零而变化。
 > 第 150 帧世界哈希变为
-> `94f44ec6bd500707`：`render.material` 新增 `asset` 字段参与状态哈希，不是仿真变化（`verify-migration` 一致）。
-> 仍缺：**粒子渲染**（旧端篝火烟雾 billboard 粒子，占剩余差异约 30%）、PCSS / 点光阴影、
+> `bb3fdc99df20aa31`：`particle.emitter.config` 的完整旧配置参与状态哈希，粒子运行态不落盘（`verify-migration` 一致）。
+> 仍缺：PCSS / 点光阴影、HDR 中间目标上的统一 tone-map、
 > GPU 蒙皮快路径的光照 / 贴图、狐狸等蒙皮网格的完整光照、物理的角色控制器 / 关节 / 连续碰撞 / 坡面滑动、
 > UI 面板底色微差（align/valign 只能按 kind 推断）。旧端本机仍报告项目 Rust 插件构建指纹不匹配并跳过，XGC 也尚未迁移旧 Animator
 > 状态机与完整动画素材。
-> 当前 `ScriptRuntime::run_frame` 不返回错误，脚本诊断仍只写 stderr；正式调度切片需要把失败传播纳入宿主契约。
+> 当前 `ScriptRuntime::run_frame` 不返回错误，脚本诊断仍只写 stderr；正式调度切片需要把失败传播纳入宿主契约。旧端 `particle.burst` 是 `serde(skip)` 的一次性脚本运行时请求（不是场景迁移字段），XGC 的脚本请求桥尚未接入。
 
 ## 建议顺序
 
-1. 割接视觉：4 级 CSM 已通（mean_abs 0.85）；下一步补粒子渲染（旧端篝火烟雾，剩余最大差异）与 GPU 蒙皮快路径的光照，再回物理角色控制器 / 关节。
+1. 割接视觉：确定性粒子模拟 + billboard 已通（mean_abs 0.85 → 0.63）；下一步补 GPU 蒙皮快路径的 PBR / 贴图并评估 HDR 中间目标，再回物理角色控制器 / 关节。
 2. 正式调度：脚本与系统统一访问声明。
 3. 旧新逐帧 trace + 截图像素门禁。
 4. 密码学签名 / 跨机器增量。

@@ -22,6 +22,7 @@ mod image;
 mod instanced;
 mod material;
 mod mesh;
+mod particles;
 mod pipeline;
 mod renderer;
 mod resources;

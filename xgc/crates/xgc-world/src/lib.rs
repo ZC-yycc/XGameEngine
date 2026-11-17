@@ -40,7 +40,10 @@ pub use gameplay_components::{AudioGain, AudioListener, AudioMixer, AudioSource,
 pub use journal::{Journal, TxRecord};
 pub use layer_components::AnimationLayers;
 pub use lod_components::LodGroup;
-pub use particle_components::ParticleEmitter;
+pub use particle_components::{
+    EmissionShape, ParticleBlend, ParticleConfig, ParticleEmitter, ParticleQuad,
+    MAX_PARTICLES_LIMIT,
+};
 pub use physics_components::PhysicsBody;
 pub use plugin_components::PluginComponent;
 pub use prefab_components::PrefabInstance;

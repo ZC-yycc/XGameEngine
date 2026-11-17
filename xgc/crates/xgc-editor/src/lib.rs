@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use xgc_base::EntityId;
 use xgc_reflect::{Registry, Value};
 use xgc_script::ScriptRuntime;
-use xgc_sim::{InputMap, Simulation};
+use xgc_sim::{InputMap, ParticleSystem, Simulation};
 use xgc_store::{load_world, save_world};
 use xgc_world::{
     builtin_registry, Camera, Command, ComponentData, ComponentId, GlobalTransform, Material,
@@ -43,6 +43,7 @@ pub struct ComponentRow {
 struct PlaySession {
     before: WorldData,
     simulation: Simulation,
+    particles: ParticleSystem,
     runtime: Option<ScriptRuntime>,
     input: Option<InputMap>,
 }
@@ -147,6 +148,13 @@ impl EditorState {
             Some(session) => session.simulation.world(),
             None => &self.world,
         }
+    }
+
+    /// Play 帧的粒子四边形；编辑态没有运行时时钟，因此为空。
+    pub fn particle_quads(&self) -> &[xgc_world::ParticleQuad] {
+        self.play
+            .as_ref()
+            .map_or(&[], |session| session.particles.quads())
     }
 
     /// Play 期间禁止直接编辑；Inspector 只读。

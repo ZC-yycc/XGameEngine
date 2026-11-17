@@ -130,9 +130,11 @@ impl EditorApp {
     }
 
     fn render_viewport(&mut self) {
+        let particles = self.state.particle_quads().to_vec();
         let Some(viewport) = &mut self.viewport else {
             return;
         };
+        viewport.renderer.set_particles(particles);
         if let Err(err) = viewport.renderer.render_selected(
             &viewport.context,
             &viewport.texture,

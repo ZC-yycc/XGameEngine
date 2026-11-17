@@ -236,6 +236,7 @@ mod audio;
 mod character;
 mod input;
 mod mixer;
+mod particles;
 /// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
 mod rapier_world;
 mod skeleton;
@@ -255,6 +256,7 @@ pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
 pub use character::{CharacterBlockSystem, CharacterStepSystem};
 pub use input::{Axis, Binding, Combo, InputMap, InputState, KeyCode, MouseButton};
 pub use mixer::{write_wav_mono, SoftwareMixer};
+pub use particles::{ParticleStats, ParticleSystem};
 pub use rapier_world::{RapierPhysicsSystem, RapierWorld};
 pub use skeleton::{parse_pose, SkeletonPoseSystem};
 pub use systems::{
