@@ -89,6 +89,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-asset/src/cook.rs` | `cook_project` / `cook_project_filtered`：按 GUID 裁剪、`.meta` / `.bin` 伴生、哈希未变跳过写入、清陈旧文件、manifest 聚合签名与校验 |
 | `crates/xgc-migrate/src/lib.rs` | 旧 `SceneV2` RON → `WorldData`（全部旧组件类型：身份 / 名称 / 父子 / Transform / Mesh / Lod / Material / Camera / Lua / Audio / Physics / Animator / Character / UI / Particle / Rust 插件，支持目录批量） |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
+| `crates/xgc-migrate/src/environment.rs` | 场景级光 / 环境光 → `SceneEnvironment` 映射 |
 | `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态） |
 | `crates/xgc-migrate/src/old_lod.rs` | 旧 `LodGroup` → `render.lod`（RON 快照） |
 | `crates/xgc-migrate/src/old_rust.rs` | 旧 Rust 插件组件 → `plugin.rust` |
@@ -154,7 +155,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 渲染与仿真对齐：glTF 基色因子 / `.mat` 资产乘子 / 场景光 + 环境光 / ACES / 天空盒画面 + 漫反射 IBL / 单级方向光阴影 / 截图相机优先级已通；下一步补 CSM / 软阴影并把第 150 帧仿真状态对齐（像素差距主因），之后是镜面 IBL / metallic-roughness BRDF / 网格纹理。
+1. 仿真：动态刚体已能下落（迁移为动态 `physics.body` 补零速度；旧引擎速度由物理后端持有）；下一步补刚体求解器（旋转 / 静-动碰撞 / 堆叠稳定），让第 150 帧落点对齐（像素差距主因），之后回到 CSM / 软阴影 / 镜面 IBL / metallic-roughness BRDF / 网格纹理。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

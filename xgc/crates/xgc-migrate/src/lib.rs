@@ -10,17 +10,19 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use old_scene::{OldLight, OldLightKind, OldScene};
+use environment::scene_environment;
+use old_scene::OldScene;
 use transform_migrate::transform_components;
 use xgc_base::EntityId;
 use xgc_world::{
     AudioGain, AudioSource, Camera, CharacterController as XgcCharacter, Component, ComponentData,
-    EntityData, LightKind, Material, MeshRenderer, Name, Parent, PhysicsBody, SceneEnvironment,
-    SceneLight, Script, UiInteraction, UiLayout, Value, WorldData,
+    EntityData, Material, MeshRenderer, Name, Parent, PhysicsBody, Script, UiInteraction, UiLayout,
+    Value, Velocity, WorldData,
 };
 
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
 mod compare;
+mod environment;
 mod old_animator;
 mod old_lod;
 mod old_particle;
@@ -488,10 +490,14 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                 fields: Vec::new(),
             });
         }
+        let mut dynamic_body = false;
         if let Some(physics) = physics {
             let kind = match physics.kind {
                 OldBodyKind::Static => "static",
-                OldBodyKind::Dynamic => "dynamic",
+                OldBodyKind::Dynamic => {
+                    dynamic_body = true;
+                    "dynamic"
+                }
                 OldBodyKind::Kinematic => "kinematic",
             };
             let (shape, half_extents, radius, half_height) = match physics.shape {
@@ -543,6 +549,19 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
             });
         }
 
+        // 旧引擎的动态刚体速度由物理后端持有、场景文件不存（加载即静止）；
+        // XGC 的物理系统按 `(Transform, Velocity, PhysicsBody)` 查询，缺速度列的
+        // 动态刚体**永远不动**。迁移时补一个零速度，让"落体 / 堆积"两边一致。
+        if dynamic_body
+            && !components
+                .iter()
+                .any(|component| component.component == Velocity::ID)
+        {
+            components.push(ComponentData {
+                component: Velocity::ID,
+                fields: vec![("linear".to_string(), Value::Vec3([0.0; 3]))],
+            });
+        }
         entities.push(EntityData {
             id: EntityId::from_raw(old.id.0),
             revision: 0,
@@ -559,32 +578,6 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         },
         report,
     ))
-}
-
-/// 场景级光 / 环境光：旧引擎把它们放在场景顶层（不是实体），这里原样搬到
-/// `WorldData.environment`，字段与缺省值都不改写。
-fn scene_environment(scene: &OldScene) -> SceneEnvironment {
-    SceneEnvironment {
-        lights: scene.lights.iter().map(scene_light).collect(),
-        ambient: scene.ambient,
-    }
-}
-
-fn scene_light(light: &OldLight) -> SceneLight {
-    SceneLight {
-        name: light.name.clone(),
-        kind: match light.kind {
-            OldLightKind::Directional => LightKind::Directional,
-            OldLightKind::Point => LightKind::Point,
-        },
-        direction: light.direction,
-        position: light.position,
-        color: light.color,
-        intensity: light.intensity,
-        range: light.range,
-        casts_shadow: light.casts_shadow,
-        shadow_resolution: light.shadow_resolution,
-    }
 }
 
 /// 批量迁移目录里的 `.ron`；单场景失败只记入 `failures`，不中断其它场景。

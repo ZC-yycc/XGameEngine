@@ -377,3 +377,57 @@ fn migrates_scene_lights_and_ambient() {
     assert_eq!(lamp.direction, [0.5, -1.0, 0.5]);
     assert_eq!(lamp.shadow_resolution, 0);
 }
+
+/// 旧场景不存刚体速度（由物理后端持有）。动态刚体迁移时必须补零速度 ——
+/// XGC 的物理系统按 `(Transform, Velocity, PhysicsBody)` 查询，缺列就永远不动。
+#[test]
+fn dynamic_bodies_get_zero_velocity_but_static_ones_do_not() {
+    use xgc_world::Velocity;
+
+    let scene = r#"(
+        format_version: 2,
+        name: "Bodies",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (id: (1), parent: None, layer: 0,
+             transform: (position: (0.0, 5.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+             transform_identity: (id: 1),
+             components: (next_component_id: (next_id: 2), entries: [
+                (identity: (id: 1), data: Physics((
+                    kind: Dynamic,
+                    shape: Auto,
+                    mass: 1.0, friction: 0.5, restitution: 0.0, gravity_scale: 1.0, is_sensor: false,
+                ))),
+             ])),
+            (id: (2), parent: None, layer: 0,
+             transform: (position: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+             transform_identity: (id: 2),
+             components: (next_component_id: (next_id: 2), entries: [
+                (identity: (id: 1), data: Physics((
+                    kind: Static,
+                    shape: Auto,
+                    mass: 0.0, friction: 0.5, restitution: 0.0, gravity_scale: 1.0, is_sensor: false,
+                ))),
+             ])),
+        ],
+    )"#;
+    let (world, _) = migrate_str(scene).unwrap();
+    let velocity_of = |id: u64| {
+        world
+            .entities
+            .iter()
+            .find(|entity| entity.id.raw() == id)
+            .unwrap()
+            .components
+            .iter()
+            .find(|component| component.component == Velocity::ID)
+            .cloned()
+    };
+    let dynamic = velocity_of(1).expect("动态刚体必须带零速度");
+    assert!(dynamic
+        .fields
+        .iter()
+        .any(|(name, value)| name == "linear" && *value == Value::Vec3([0.0; 3])));
+    assert!(velocity_of(2).is_none(), "静态刚体不应被塞速度列");
+}
