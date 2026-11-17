@@ -32,6 +32,34 @@ impl Slope {
         }
         Some(self.origin[1] + self.rise * (local_x / self.size[0]))
     }
+
+    /// 坡面倾角（度）：沿 +X 每行进 `size[0]` 抬升 `rise`，所以倾角就是 `atan(rise / size[0])`。
+    ///
+    /// 角色控制器拿它和 `physics.character.slope_limit` 比：超过上限的上升坡按墙处理，
+    /// 而不是可站立地面——旧引擎同一档位语义（`KinematicCharacterController.max_slope_climb_angle`），
+    /// 但旧端在坡面上会沿坡面下滑，本系统只做到"挡在立面之前"，见 STATUS 的未闭环。
+    pub fn degrees(&self) -> f32 {
+        if self.size[0] <= 0.0 {
+            return 0.0;
+        }
+        (self.rise.abs() / self.size[0]).atan().to_degrees()
+    }
+
+    /// 坡面高度正好等于 `height` 处的 X 坐标（立面落点），用于把角色挡在坡面之前。
+    ///
+    /// 只有上升坡（`rise > 0`）有能卡住人的立面；下坡一律当地面，返回 `None`。
+    /// 结果夹进坡面自己的 X 跨度：不夹的话 `origin[1]` 被抬高时（比如坡面架在 5 m
+    /// 高的平台上）外推出来的"墙"会落在坡面之外好几米，把站在平地上的角色也推走。
+    /// 夹取只限制墙的位置，**不**取消墙本身：坡架高台时角色即使在坡体下方（垂直
+    /// 不相交），只要 X 落在跨度内仍会被挡——这是刻意保留的简化（没有真碰撞体）。
+    /// 上界夹取目前不可达（调用点先按 `feet >= height` 早退），留着纯防御。
+    pub fn base_x_at(&self, height: f32) -> Option<f32> {
+        if self.rise <= 0.0 || self.size[0] <= 0.0 {
+            return None;
+        }
+        let raw = self.origin[0] + (height - self.origin[1]) * self.size[0] / self.rise;
+        Some(raw.clamp(self.origin[0], self.origin[0] + self.size[0]))
+    }
 }
 
 impl Component for Slope {

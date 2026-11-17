@@ -3,14 +3,14 @@
 > 这是能力的**现状快照**，不是完成声明。XGC 仍明显低于 XGameEngine 全量能力，
 > 当前不能割接。
 
-## 指标（第 161 轮）
+## 指标（第 163 轮）
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 206（最大 599 行；软上限 600） |
-| 测试 | 333（`cargo test --workspace --offline`） |
+| Rust 文件 | 207（最大 599 行；软上限 600） |
+| 测试 | 346（`cargo test --workspace --offline`） |
 | 内建组件 schema | 30 类 / 35709 字节，两次导出逐字节相同 |
-| 默认系统 | 18 个 |
+| 默认系统 | 19 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
 | CLI 冒烟 | `check` 30 组件 OK；`run 60` frames=60 entities=3 revision=3 hash=`f4bc029f5f995b91` |
 
@@ -42,7 +42,7 @@
 | 动画 | 97% | 根 / 关节轨道 + 骨架 + CPU / GPU 蒙皮 + 状态机 + 叠加层（实体 / 关节遮罩）+ 转场淡入；缺根关节混合权重细调 |
 | 音频 | 60% | 空间化增益、总线、WAV 解码、软件混音、WAV 写出、cpal 默认输出设备播放（重采样 / 队列）、`xgc play`；缺流式资产 / 3D 声像 |
 | 渲染 | 90% | 真实 builtin 几何 + glTF 基色因子 / UV / 基色贴图 + `.mat` 资产乘子 + Cook-Torrance 直接光 + 天空盒 / 漫反射 IBL / 环境反射 + 4 级 CSM（**静态与蒙皮网格都投射**）+ **确定性 CPU 粒子模拟与实例化 billboard**（软圆、Alpha / Additive、后向前排序）+ **GPU 蒙皮共享静态 PBR / 贴图 / 阴影接收**（256 槽 palette）+ **RGBA16F 线性场景 / 粒子混合 / 单次全局 ACES / tone 后 UI** + **曝光后曲线前的三级 HDR Bloom**（默认关）+ **蒙皮 palette / model 竞技场（dynamic offset 合并，主场景与阴影 pass 各一套）** + 真字体 UI + sRGB HUD + 截图取景；缺 PCSS / 点光阴影 / TAA·SSAO·FXAA 等其余后处理（级联正交盒与旧端同为视锥切片拟合 + 逐级剔除，不算缺口） |
-| 物理 | 55% | rapier3d 0.22 与旧引擎同一条求解路径（角动量 / 接触力矩 / 堆叠），动态刚体帧状态与旧图可比；缺角色控制器接 rapier、关节 / 连续碰撞 / 坡面滑动、增量增删刚体（当前按数量变化整表重建） |
+| 物理 | 55% | rapier3d 0.22 与旧引擎同一条求解路径（角动量 / 接触力矩 / 堆叠），动态刚体帧状态与旧图可比；角色坡面按 `slope_limit` 当墙、下行按 `snap_to_ground` 贴地；缺角色控制器接 rapier（关节 / 连续碰撞 / 墙面滑动 / 陡坡沿坡面下滑）、增量增删刚体（当前按数量变化整表重建） |
 | 资产 / 打包 | 70% | 引用裁剪 + 增量烹饪（哈希未变跳过写入）+ manifest 聚合签名；JSON / XGCB / 图形播放器；缺密码学签名 / 跨机器增量 |
 | Lua 脚本 | 84% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`look_at` 按 Y-up 对准且无滚转（有回归）；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
@@ -59,6 +59,10 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 - **旧端截图相机已确认为 `mode: "scene"`**（重跑旧 `xgame-editor` 读到的报告），两次旧运行图像逐像素相同（0/921600）；XGC 的 `render-frame` 现在按同一优先级取景：有场景相机就用场景相机，只有缺相机时才退到顺光自动取景。
 - 场景级光源与环境光已迁移进 `WorldData.environment`（showcase：`Sun` 方向 (0.45,-1,0.35)、强度 1.4、色 (1.0,0.97,0.92)，`ambient` (0.09,0.1,0.13)）；`verify-migration` 逐光源字段对照，缺省环境不落盘。
 - `render-frame` 缺省 0 帧；显式帧数复用 `Simulation::step_with` + `ScriptRuntime::run_frame`，最后重算层级与目标尺寸 UI。**接触清速度**接入后第 150 帧旧 / 新差异 903854/921600（98.07%）、mean_abs **18.78**、max 207 与上一步**逐像素相同**——150 帧时物体早已落定；此前的问题是「贴地后每帧仍带着累积速度抖动」，单帧看不出来但播放会抖。世界哈希变为 `0b6d186abfc5ca5b`：位置不变、存的**速度**从漂移值变成 0，符合预期。
+
+**角色坡限与贴地吸附**接入后，`physics.character` 里两个原本没人读的字段真正生效：`CharacterSystem` 逐角色取 `slope_limit`（非有限值落回旧端 `sanitized()` 的缺省 45°，再夹 0..89）与 `snap_to_ground`；上升坡的倾角（`Slope::degrees`）超过上限时不再当可站立地面，而是按墙处理 —— 用 `Slope::base_x_at` 算出该高度处的坡面落点，把角色推到**离自己更近的一侧**（以坡底 `base - radius` 与坡背 `origin.x + size.x + radius` 的中点为界选边，并清掉朝墙的水平速度）；`base_x_at` 的结果夹进坡面自己的 X 跨度，避免坡面架在高台上时外推出落在坡面之外几米的"隐形墙"（夹取只限制墙的位置，坡架高台时角色即便在坡体下方、只要 X 落在跨度内仍会被挡——没有真碰撞体，这是刻意保留的简化）。y=0 仍是兜底地面（与坡面高度取大值，旧实现就是 `0.0.max(height)`），下坡（`rise <= 0`）没有能卡人的立面、一律当地面；下行离地不超过 `snap_to_ground` 时贴回地面，且只在 `vy <= 0` 时吸，起跳不受影响（否则 `grounded` 会抖、跳跃看运气）。旧实现把任何坡面都当地面、这两个字段是死字段。回归先证会红：还原系统与 `Slope` 改动后，`character_refuses_to_climb_a_slope_above_its_limit`（停在 `x=1` 而不是被挡在 -0.3）与 `character_snaps_down_to_the_ground_it_is_walking_over`（`y` 停在 2.9867516 不下落）实跑变红；本轮修的两处推法缺陷也单独验红 —— 把推法改回"只按坡底推 + 不夹跨度"后，`character_stays_outside_the_high_end_of_a_steep_slope` 报 `x=-0.3`（本该 10.3，即一帧被传送过 10 m 坡面）、`a_raised_slope_does_not_push_from_outside_its_own_span` 报 `x=-3.186836`（本该 -0.3）。另两条本轮补齐的用例同样先证会红：把选边判据改回坡面几何中点时，`a_character_inside_a_steep_slope_goes_to_the_nearer_side` 报 `x=10.3`（本该 3.741571，横移到远侧）；把 `<=` 改成 `<` 时，`a_slope_at_the_configured_limit_is_walkable`（上限直接取坡面自己的倾角）报 `y=0`；把 `snap` 临时置 0 时，`character_walks_down_a_walkable_slope_over_several_frames` 报 `y=4.618803`（坡面高度没用吸附跟住）。其余用例是守卫：30° 坡多帧积分后 x / y 跟着坡面、`snap_to_ground = 0` 不吸附、下坡任意角度当地面、`slope_limit = NaN` 落回缺省。第 150 帧画面逐字节不变：`hash=bb3fdc99df20aa31`、14 个场景 draw / 7 次 draw call / 8 个 UI draw、PPM SHA-256 `4A47275D…48A0927` —— 证据世界（`showcase-particles.json`）里**没有** `physics.character` 也没有 `physics.slope` 实体，这条路径对第 150 帧本来就不会被调用。
+
+**未闭环**：角色仍不走 rapier 的 `KinematicCharacterController`——没有胶囊扫掠、没有关节、没有墙面滑动；陡坡这里是"挡在立面之前"，旧端是**沿坡面下滑**（把期望位移投影到坡面，并带 `(slope_limit + 10°).min(89°)` 的迟滞带），语义仍有差距。另外 `GravitySystem` 不在默认调度里，而 `PhysicsSystem` / `GroundCollisionSystem` 只处理带 `physics.body` 的实体，所以纯角色没有重力：落差不超过 `snap_to_ground` 的坡面 / 台阶能靠贴地分支跟住（`vy == 0` 也走这支），**落差更大时角色不会下落**。`ground` 也只由坡面与 y=0 组成、不含台阶顶面（台阶由 `CharacterStepSystem` 在本系统之后抬升）。下一刀把角色换成 rapier 的角色控制器。
 
 **阴影 pass 的蒙皮竞技场**接入后，逐投射体的 palette（16 KiB）与 model（64 B）不再各建缓冲：`shadow_skin.rs` 的 `SkinnedShadow` 也持有两张 `UniformArena`，layout 声明 `has_dynamic_offset: true` 后每级级联只换偏移；`SkinnedBinding` 只记槽号，不再持有绑定组。为此把逐帧阴影准备从 `renderer.rs` 拆到 `crates/xgc-render/src/renderer/shadow_prep.rs`（行数预算），`ShadowTarget::render` 改成 `&mut self` 并返回本帧新建的缓冲数，落到 `RenderStats::shadow_skin_uniform_buffers`（`skin_uniform_buffers` 仍只统主场景）。回归 `repeated_frames_reuse_the_shadow_skin_arenas` 在同一渲染器上连渲两帧断言 2 → 0；把 `upload` 开头临时插 `self.slots = 0;` 时该用例实跑变红（「同尺寸第二帧必须复用阴影蒙皮竞技场、不再建缓冲」）。既有 4 条阴影回归（GPU palette 投影、257 关节 CPU 回退、阴影随姿态平移、单位 palette 与静态网格逐像素相同）仍全绿；另加一条两投射体用例 `two_skinned_casters_keep_their_own_shadow_palettes`：两个投射体沿屏幕纵轴分开（z=∓2.4）、姿态反向平移，断言两侧阴影行重心相距超过两个窗口宽、且同屏时各自留在原位（把每级 draw 的偏移强制成槽 0 时实跑变红：「窗口内阴影像素太少，无法定位：0」），钉住"每个 caster 用自己那格 palette"。第 150 帧与上一版**逐字节相同**（证据世界无骨架）：hash `bb3fdc99df20aa31`、14 draw / 7 call / 8 UI draw、PPM SHA-256 `4A47275DD54A4AA2780353B6B37E6BD2999F9D16BEDA20197973BA6DB48A0927`，对旧端仍 32.22% / 0.61 / 194。**未做稳态计时**：证据场景没有蒙皮 draw，冷启动单帧含 pipeline 编译，不能归因于本刀。
 
@@ -99,7 +103,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 - 无 `animation.state` 时 `set_anim_param` 现在安全 no-op，不再让同帧其它脚本命令整批失败；状态机迁移仍是独立差距。
 - GUID 资产（Box.glb、Fox.gltf + Fox.bin）可解析；glTF 首图元 `baseColorFactor` 在静态实例与 GPU 蒙皮路径均参与最终颜色，且选择高亮仍能替换最终颜色；character 脚本 / Pillar 预制体可迁移。
 - cooked 包：引用裁剪 7 文件、XGCB 二进制（v2 带场景环境）、manifest 哈希 / 签名校验、`xgc-player` headless 60 帧。
-- 自动化测试：333 条；正式帧回归覆盖 sRGB alpha HUD、帧数契约、固定步推进与最终父子 `GlobalTransform` 合成；基色因子、场景光、`.mat` 乘子、HDR 粒子合成、唯一 ACES、三级 Bloom、tone 后 UI、蒙皮网格投射阴影与输出格式 / resize 均有 GPU 像素门禁（期望值由 CPU 镜像现算），256 槽 palette 的路由与字节数、蒙皮 uniform 竞技场（主场景与阴影 pass 两套）的槽距对齐与跨帧复用另有单元 / 集成回归，环境往返 / 迁移 / 验收 / 取景拟合均有 CPU 回归。
+- 自动化测试：346 条（新增 13 条角色坡限 / 贴地回归）；正式帧回归覆盖 sRGB alpha HUD、帧数契约、固定步推进与最终父子 `GlobalTransform` 合成；基色因子、场景光、`.mat` 乘子、HDR 粒子合成、唯一 ACES、三级 Bloom、tone 后 UI、蒙皮网格投射阴影与输出格式 / resize 均有 GPU 像素门禁（期望值由 CPU 镜像现算），256 槽 palette 的路由与字节数、蒙皮 uniform 竞技场（主场景与阴影 pass 两套）的槽距对齐与跨帧复用另有单元 / 集成回归，环境往返 / 迁移 / 验收 / 取景拟合均有 CPU 回归。
 
 ## 与 XGameEngine 的主要差距
 
@@ -108,7 +112,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 | 渲染高级特性 | 几何 / 材质 / PBR / 基色纹理 / 天空盒 + 漫反射 IBL / 环境反射 / 4 级 CSM（静态 + 蒙皮投射）/ RGBA16F 场景 + 全局 ACES / tone 后 HUD / CPU 粒子 + billboard / GPU 蒙皮主场景着色（256 槽 palette）+ 曝光后曲线前三级 Bloom 已通；缺 PCSS / 点光阴影 / TAA·SSAO·FXAA 等其余后处理（级联正交盒与旧端同为视锥切片拟合 + 逐级剔除，不算缺口） | P0 |
 | 正式 System 调度 | `SystemAccess` / `batches()` 已有，执行仍顺序；脚本尚未成为正式 System | P0 |
 | 视觉 / trace 验收 | 第 150 帧同 tick 截图可复现，mean_abs 0.61；仍缺旧端逐帧 trace / 状态哈希对照与截图阈值门禁 | P0 |
-| 物理完整性 | 简化角色 / AABB；无完整刚体、关节、连续碰撞、坡面滑动 | P1 |
+| 物理完整性 | 简化角色：`slope_limit` / `snap_to_ground` 已生效，但仍不走 rapier 的角色控制器（无关节、无连续碰撞、无墙面滑动）；陡坡只挡不滑，也没有 `slope_limit + 10°` 的迟滞带 | P1 |
 | 跨系统并行 | 未做世界分片 / 并行执行 | P1 |
 | 资产签名 | FNV 聚合校验，非密码学签名；无跨机器增量 | P1 |
 | 编辑器细节 | 预制体 / Gizmo / Play Scripts 已通；缺旋转缩放快捷键细化、Prefab Apply | P1 |
@@ -126,7 +130,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 
 ## 下一步（按顺序）
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知的场景包围盒、蒙皮 draw 单次提交、曝光后、ACES 前的三级 HDR Bloom 已贯通；阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场，下一刀回物理角色控制器 / 关节。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知的场景包围盒、蒙皮 draw 单次提交、曝光后、ACES 前的三级 HDR Bloom 已贯通；阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场，角色坡面 `slope_limit` 与贴地 `snap_to_ground` 也已生效（陡坡仍是挡住而非沿坡面下滑）；下一刀把角色移动换成 rapier 的 `KinematicCharacterController`（关节 / 连续碰撞 / 墙面滑动 / 迟滞带）。
 2. 正式调度：把脚本与默认系统纳入 `Schedule` 的访问声明批次。
 3. 逐帧 trace / 截图对照与性能门禁。
 4. 密码学签名、跨机器增量烹饪。

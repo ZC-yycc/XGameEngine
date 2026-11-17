@@ -83,6 +83,8 @@ HDR 光晕切片默认关闭，因此不改变任何既有画面的性能与像�
 
 阴影 pass 那半边同样并进了竞技场：`shadow_skin.rs` 的 `SkinnedShadow` 持有两张 `UniformArena`，`SkinnedBinding` 只记槽号；`RenderStats::shadow_skin_uniform_buffers` 首批 2 张、同尺寸第二帧 **0**（回归 `repeated_frames_reuse_the_shadow_skin_arenas`，把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红）。两条单元回归钉住槽距对齐与跨帧复用，另加一条两投射体用例 `two_skinned_casters_keep_their_own_shadow_palettes`：两个投射体沿屏幕纵轴分开（z=∓2.4）、姿态反向平移，断言两侧阴影行重心相距超过两个窗口宽、且同屏时各自留在原位（把每级 draw 的偏移强制成槽 0 时实跑变红：「窗口内阴影像素太少，无法定位：0」），钉住"每个 caster 用自己那格 palette"。证据画面没有骨架实体、竞技场根本不建缓冲，所以第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`）。**未做稳态计时**：冷启动单帧含 pipeline 编译，不能归因于本刀；“每帧缓冲数 2N → 0”是结构性收益，真正的稳态测量仍要常驻进程 profiler。
 
+角色坡限 / 贴地切片让 `physics.character` 的两个死字段生效：`CharacterSystem` 把坡度超过 `slope_limit` 的上升 `physics.slope` 按墙挡住——`Slope::base_x_at` 算出该高度处的坡面落点，把角色推到离自己更近的一侧（以坡底 `base - radius` 与坡背 `origin.x + size.x + radius` 的中点为界，并清掉朝墙的水平速度）；落点夹进坡面自己的 X 跨度，否则坡面架在高台上时会外推出坡面之外几米的"隐形墙"（夹取只限制墙位置，坡架高台时角色即使在坡体下方、只要 X 在跨度内仍会被挡——没有真碰撞体，刻意简化）。y=0 仍是兜底地面（与坡面高度取大值），下坡一律当地面；下行离地不超过 `snap_to_ground` 时贴回，且只在 `vy <= 0` 时吸，起跳不受影响。回归先证会红 —— 还原旧实现后「60° 坡挡住角色」（`x=1`）与「下行吸附」（`y=2.9867516`）实跑变红；本轮修的两处推法缺陷也单独验红（只按坡底推 + 不夹跨度时 `x=-0.3` / `x=-3.186836`，本该 10.3 / -0.3）。另补守卫与新用例：多帧积分真的走上 / 走下 30° 坡、上限取坡面自身倾角时正好可走（把 `<=` 改成 `<` 即红）、陷在坡体高处时去最近一侧（改回按坡面中点选边即红 `x=10.3`）、`snap_to_ground = 0` 不吸附、下坡任意角度当地面、`slope_limit = NaN` 落回缺省。第 150 帧 PPM SHA-256 不变 —— 证据世界里**没有** `physics.character` / `physics.slope` 实体，这条路径对第 150 帧本来就不会被调用。**未闭环**：仍不走 rapier 的 `KinematicCharacterController`（无胶囊扫掠 / 关节 / 墙面滑动）；陡坡这里是挡住而不是像旧端那样沿坡面下滑（旧端还带 `slope_limit + 10°` 的迟滞带）；`GravitySystem` 不在默认调度里、`PhysicsSystem` / `GroundCollisionSystem` 只处理 `physics.body`，所以纯角色没有重力：≤ `snap_to_ground` 的落差能靠贴地跟住（`vy == 0` 也走这支），更大的落差不会下落；`ground` 也只由坡面与 y=0 组成、不含台阶顶面。
+
 **姿态感知的场景包围盒**切片用"两个可执行文件交错跑"的同机 A/B（每轮 before / after 各一次，抵消热漂移）：改前 `778.8 / 748.7 / 720.4 / 756.6 ms`（中位数 **752.62 ms**），改后 `795.9 / 721.4 / 734.3 / 826.0 ms`（中位数 **765.10 ms**，+1.7%）。两组区间 720–779 / 721–826 重叠，且证据场景没有任何 `pose` item —— 新分支对每个 draw 只多一次 `Option` 判空，因此判定未见可归因回归；带骨架的场景每帧会多一次 O(顶点 + 关节) 的边界计算（整网格 AABB 按关节变换，比旧端加载期预计算的每关节顶点盒松，后续上骨架截图门禁时要收紧）。真正的收益是"被姿态移出去的几何仍被取景 / 级联远距离覆盖"（5 条新回归负责）。
 
 256 槽 palette 切片沿用同一命令：改前 `789.24 / 729.28 / 733.15 / 735.72 ms`（中位数 **734.43 ms**），改后 `792.03 / 747.12 / 717.08 / 739.18 ms`（中位数 **743.15 ms**，+1.2%）。改前区间 729–789 ms、改后 717–792 ms，两者重叠，且该场景**没有任何蒙皮 draw**，本刀不可能影响它，因此只能判定"未观察到可归因回归"。真实代价是可分析的常量项：palette uniform 4 KiB → 16 KiB，每个蒙皮 draw 每帧多传 12 KiB（以 24 关节狐狸为例），相对一帧约 15.8 MiB 的 HDR 目标可忽略。downlevel GL 窗口路径的 `max_uniform_buffer_binding_size` 正好是 16 KiB，所以在路由阶段按设备上限判定是否走 GPU（更小的设备退回 CPU），不靠"应该没事"。
@@ -98,7 +100,7 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 `xgc run 60` 已跑通固定步帧循环：命令 → 系统（`RapierPhysicsSystem` 用与旧引擎同版本的
 rapier3d 0.22 驱动 `physics.body` 实体，`PhysicsSystem` 只给非刚体实体的 dynamic 加
 重力、`CharacterJumpSystem` 消费起跳请求、`VelocitySystem` 积分、
-`GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴合地面 / `physics.slope`、
+`GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴合地面 / `physics.slope`（坡度超过 `slope_limit` 的上升坡按墙挡住并推到最近一侧、下行离地不超过 `snap_to_ground` 贴回）、
 `CharacterStepSystem` 低矮台阶抬升、`CharacterBlockSystem` 高墙 / 球体推出、`AabbCollisionSystem` 两两分离动态刚体
 （接触时清掉沿分离轴的接近速度，落地 / 堆叠不再抖动）
 （球体按中心线精确分离）、`AnimatorSystem` 推进动画时钟、`UiLayoutSystem` 算 UI 根 /
@@ -127,13 +129,13 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（333 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（206 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
+`cargo test --workspace --offline` 全绿（346 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（207 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
 PCSS / 点光阴影、TAA / SSAO / FXAA 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
-物理的角色控制器 / 关节 / 坡面滑动、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
+物理的角色控制器 / 关节 / 连续碰撞 / 墙面滑动、陡坡沿坡面下滑与 `slope_limit + 10°` 迟滞带（`slope_limit` / `snap_to_ground` 已生效）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。
 

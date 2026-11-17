@@ -124,7 +124,8 @@ impl System for CharacterJumpSystem {
     }
 }
 
-/// 角色贴地：角色原点在脚底，落到 y=0 时夹住并清掉向下速度。
+/// 角色贴地：角色原点在脚底，落到可行走坡面 / y=0 地面时夹住并清掉向下速度；
+/// 超过 `slope_limit` 的上升坡当墙挡在立面之前；下行离地不超过 `snap_to_ground` 时贴回地面。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CharacterSystem;
 
@@ -136,7 +137,7 @@ impl System for CharacterSystem {
     fn access(&self) -> SystemAccess {
         SystemAccess {
             reads: vec![CharacterController::ID, Slope::ID],
-            writes: vec![Transform::ID, Velocity::ID],
+            writes: vec![Transform::ID, Velocity::ID, CharacterController::ID],
         }
     }
 
@@ -147,12 +148,62 @@ impl System for CharacterSystem {
         });
         world.for_each3_mut::<Transform, Velocity, CharacterController>(
             |_, transform, velocity, controller| {
+                // NaN 上限会让 `degrees() <= limit` 恒假、连平地都被当墙；
+                // 落回旧端 `CharacterController::sanitized()` 的缺省 45°。
+                let limit = if controller.slope_limit.is_finite() {
+                    controller.slope_limit.clamp(0.0, 89.0)
+                } else {
+                    45.0
+                };
+                let radius = controller.radius.max(0.0);
+                let snap = controller.snap_to_ground.max(0.0);
+                // 继续把 y=0 当兜底地面参与取大值（旧实现如此）：坡面低于 0 时不该把角色带下去。
+                // 注意 `ground` 只由坡面与 y=0 组成，**不含**台阶 / 箱子的顶面：那些由
+                // `CharacterStepSystem` 在本系统之后抬上去，本系统不该替它算。
                 let mut ground = 0.0_f32;
+                // 爬不上去的陡坡当墙：脚底低于坡面就是"陷进斜面里"，把角色推到最近的一侧。
+                //
+                // 旧实现把任何坡面都当可站立地面，`physics.character.slope_limit` 因此是
+                // 个死字段——45° 上限的角色能一路走上 60° 的斜坡。这里按旧引擎同一档位语义
+                // （超过上限就不可攀爬）把它分成"能站的地面"和"要挡的墙"。
+                // 推的时候必须两侧都算：只按坡底（−X 侧）推，会把从高端（+X）走进去的角色
+                // 一帧传送过整个斜坡（`CharacterBlockSystem` 也是按最近出口推的）。
                 for slope in &slopes {
-                    if let Some(height) =
-                        slope.height_at(transform.position[0], transform.position[2])
-                    {
+                    // 每根坡都用推进后的位置重新取值：重叠坡时不能拿已经离开的位置算。
+                    let x = transform.position[0];
+                    let feet = transform.position[1];
+                    let Some(height) = slope.height_at(x, transform.position[2]) else {
+                        continue;
+                    };
+                    // 下坡（rise <= 0，含平地坡）没有能"卡住"人的立面，一律当地面；只有上升坡才可能是墙。
+                    if slope.rise <= 0.0 || slope.degrees() <= limit {
                         ground = ground.max(height);
+                        continue;
+                    }
+                    // 已站在坡面之上（例如从侧面沿平台走上坡顶）就不推。
+                    if feet >= height {
+                        continue;
+                    }
+                    let Some(base) = slope.base_x_at(feet) else {
+                        continue;
+                    };
+                    let front = base - radius;
+                    let back = slope.origin[0] + slope.size[0] + radius;
+                    // 最近出口按两侧墙的中点为界：`front` 会随 `feet` 沿坡面右移，
+                    // 用坡面几何中点选边会在角色陷在坡体高处（`feet > origin[1]`，
+                    // 正常行走到不了、但 spawn / 脚本改位置能到）时推到远的那侧。
+                    if x < (front + back) * 0.5 {
+                        if x > front {
+                            transform.position[0] = front;
+                            if velocity.linear[0] > 0.0 {
+                                velocity.linear[0] = 0.0;
+                            }
+                        }
+                    } else if x < back {
+                        transform.position[0] = back;
+                        if velocity.linear[0] < 0.0 {
+                            velocity.linear[0] = 0.0;
+                        }
                     }
                 }
                 if transform.position[1] < ground {
@@ -160,6 +211,13 @@ impl System for CharacterSystem {
                     if velocity.linear[1] < 0.0 {
                         velocity.linear[1] = 0.0;
                     }
+                } else if velocity.linear[1] <= 0.0 && transform.position[1] - ground <= snap {
+                    // 下行贴地：坡面 / 下一级台阶在吸附距离内时按回地面。
+                    // 不吸附的话每帧都"先离地再落地"，`grounded` 跟着抖，跳跃判定
+                    // 变成看运气——旧引擎的 `snap_to_ground` 就是干这件事。
+                    // 只在向下运动时吸：起跳当帧速度为正，不能被拉回地面。
+                    transform.position[1] = ground;
+                    velocity.linear[1] = 0.0;
                 }
                 controller.grounded = transform.position[1] <= ground + 1e-4;
             },
