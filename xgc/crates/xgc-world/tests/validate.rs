@@ -54,6 +54,7 @@ fn invalid_data_reports_structural_codes() {
                 components: Vec::new(),
             },
         ],
+        ..WorldData::default()
     };
 
     let diagnostics = World::validate_data(&data, &registry());
@@ -86,6 +87,7 @@ fn duplicate_component_and_field_are_reported() {
                 },
             ],
         }],
+        ..WorldData::default()
     };
 
     let diagnostics = World::validate_data(&data, &registry());

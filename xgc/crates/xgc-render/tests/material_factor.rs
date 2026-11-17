@@ -4,9 +4,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use xgc_render::{GpuContext, MeshCache, Renderer, ResourceDesc, ResourceUsage};
-use xgc_world::{Camera, GlobalTransform, Material, MeshRenderer, Skeleton, SkeletonPose, World};
+use xgc_world::{
+    Camera, GlobalTransform, Material, MeshRenderer, SceneEnvironment, Skeleton, SkeletonPose,
+    World,
+};
 
 static GPU_LOCK: Mutex<()> = Mutex::new(());
+
+/// 只看材质因子：环境光拉满、不放方向光，着色输出就等于颜色本身。
+fn flat_light() -> SceneEnvironment {
+    SceneEnvironment {
+        lights: Vec::new(),
+        ambient: [1.0; 3],
+    }
+}
 
 #[test]
 fn gltf_base_color_factor_tints_rendered_mesh() {
@@ -31,6 +42,7 @@ fn gltf_base_color_factor_tints_rendered_mesh() {
         .unwrap();
     let texture = target.as_texture().unwrap();
     let mut world = World::new();
+    world.set_environment(flat_light());
     let mesh = world.spawn((
         GlobalTransform::default(),
         MeshRenderer {
@@ -89,6 +101,7 @@ fn gltf_base_color_factor_tints_skinned_mesh() {
         .unwrap();
     let texture = target.as_texture().unwrap();
     let mut world = World::new();
+    world.set_environment(flat_light());
     world.spawn((
         GlobalTransform::default(),
         MeshRenderer {
@@ -165,6 +178,7 @@ fn box_center(context: &GpuContext, assets: &Path, material: Material) -> [u8; 4
         .unwrap();
     let texture = target.as_texture().unwrap();
     let mut world = World::new();
+    world.set_environment(flat_light());
     world.spawn((
         GlobalTransform::default(),
         MeshRenderer {

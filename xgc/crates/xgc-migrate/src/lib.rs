@@ -10,13 +10,13 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use old_scene::OldScene;
+use old_scene::{OldLight, OldLightKind, OldScene};
 use transform_migrate::transform_components;
 use xgc_base::EntityId;
 use xgc_world::{
     AudioGain, AudioSource, Camera, CharacterController as XgcCharacter, Component, ComponentData,
-    EntityData, Material, MeshRenderer, Name, Parent, PhysicsBody, Script, UiInteraction, UiLayout,
-    Value, WorldData,
+    EntityData, LightKind, Material, MeshRenderer, Name, Parent, PhysicsBody, SceneEnvironment,
+    SceneLight, Script, UiInteraction, UiLayout, Value, WorldData,
 };
 
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
@@ -553,9 +553,36 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
             revision: 0,
             next_id: max_id.saturating_add(1),
             entities,
+            environment: scene_environment(&scene),
         },
         report,
     ))
+}
+
+/// 场景级光 / 环境光：旧引擎把它们放在场景顶层（不是实体），这里原样搬到
+/// `WorldData.environment`，字段与缺省值都不改写。
+fn scene_environment(scene: &OldScene) -> SceneEnvironment {
+    SceneEnvironment {
+        lights: scene.lights.iter().map(scene_light).collect(),
+        ambient: scene.ambient,
+    }
+}
+
+fn scene_light(light: &OldLight) -> SceneLight {
+    SceneLight {
+        name: light.name.clone(),
+        kind: match light.kind {
+            OldLightKind::Directional => LightKind::Directional,
+            OldLightKind::Point => LightKind::Point,
+        },
+        direction: light.direction,
+        position: light.position,
+        color: light.color,
+        intensity: light.intensity,
+        range: light.range,
+        casts_shadow: light.casts_shadow,
+        shadow_resolution: light.shadow_resolution,
+    }
 }
 
 /// 批量迁移目录里的 `.ron`；单场景失败只记入 `failures`，不中断其它场景。

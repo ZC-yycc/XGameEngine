@@ -287,7 +287,8 @@ pub(crate) fn render_frame(
             );
         }
     }
-    let stats = match renderer.render(&context, texture, &world) {
+    // 截图走旧的"顺光自动取景"，不用场景相机：否则与旧端截图连构图都不同。
+    let stats = match renderer.render_shot(&context, texture, &world) {
         Ok(stats) => stats,
         Err(err) => {
             eprintln!("渲染失败：{err}");

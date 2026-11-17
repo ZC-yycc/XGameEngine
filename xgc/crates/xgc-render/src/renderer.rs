@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use xgc_world::{UiElement, UiInteraction, UiLayout, World};
 
 use super::assets::MeshCache;
-use super::camera::{camera_view_projection, IDENTITY};
-use super::draw::build_draw_list;
+use super::camera::{camera_view_projection_with_eye, Mat4, IDENTITY};
+use super::draw::{build_draw_list, DrawList};
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::image::ImageData;
-use super::instanced::InstancedRequest;
+use super::instanced::{FrameLighting, InstancedRequest};
 use super::mesh::Mesh;
 use super::pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
 use super::resources::{ResourceDesc, ResourceUsage};
@@ -434,6 +434,31 @@ impl Renderer {
         Ok(stats)
     }
 
+    /// 截图取景：与旧引擎 `--screenshot` 相同的相机优先级——**有场景相机就用场景
+    /// 相机**，缺相机时才退到顺光自动取景（整场景包围盒 + 场景主方向光推视轴）。
+    pub fn render_shot(
+        &mut self,
+        context: &GpuContext,
+        target: &wgpu::Texture,
+        world: &World,
+    ) -> Result<RenderStats, GpuError> {
+        let (width, height) = (target.width(), target.height());
+        let (view_proj, eye) = match camera_view_projection_with_eye(world, width, height) {
+            Some(camera) => camera,
+            None => {
+                let frame = super::shot::frame_scene(world, &mut self.meshes, width, height)
+                    .map_err(|err| GpuError::Mesh(err.to_string()))?;
+                (frame.view_projection(width, height), frame.camera.eye)
+            }
+        };
+        let lighting = FrameLighting::from_environment(world.environment(), eye);
+        let list = self.prepared_list(world, None)?;
+        let mut stats = self.render_list(context, target, list, view_proj, lighting)?;
+        stats.ui_draws = self.render_ui(context, target, world)?;
+        stats.passes += usize::from(stats.ui_draws > 0);
+        Ok(stats)
+    }
+
     /// 带选择高亮：选中实体的颜色替换为强调色，用于编辑器视口。
     pub fn render_selected(
         &mut self,
@@ -444,7 +469,19 @@ impl Renderer {
     ) -> Result<RenderStats, GpuError> {
         let width = target.width();
         let height = target.height();
-        self.ensure_depth(context, width, height)?;
+        let list = self.prepared_list(world, selected)?;
+        let (view_proj, eye) =
+            camera_view_projection_with_eye(world, width, height).unwrap_or((IDENTITY, [0.0; 3]));
+        let lighting = FrameLighting::from_environment(world.environment(), eye);
+        self.render_list(context, target, list, view_proj, lighting)
+    }
+
+    /// 抽 DrawList 并合成最终颜色：模型材质因子 × 实体材质在前，选择高亮在后。
+    fn prepared_list(
+        &mut self,
+        world: &World,
+        selected: Option<xgc_base::EntityId>,
+    ) -> Result<DrawList, GpuError> {
         let mut list = build_draw_list(world);
         // 模型材质因子与实体覆盖先在分流前合成，静态 / 蒙皮共享同一份逐 draw 颜色；
         // 选择高亮随后替换最终颜色，不会再被资产里的零通道吞掉。
@@ -464,7 +501,19 @@ impl Renderer {
                 }
             }
         }
-        let view_proj = camera_view_projection(world, width, height).unwrap_or(IDENTITY);
+        Ok(list)
+    }
+
+    /// 按给定 view-projection 出 draw：静态实例一批，GPU 蒙皮逐网格。
+    fn render_list(
+        &mut self,
+        context: &GpuContext,
+        target: &wgpu::Texture,
+        list: DrawList,
+        view_proj: Mat4,
+        lighting: FrameLighting,
+    ) -> Result<RenderStats, GpuError> {
+        self.ensure_depth(context, target.width(), target.height())?;
         let depth = &self.depth.as_ref().unwrap().view;
         let draws = list.len();
         let mut cpu_items = Vec::with_capacity(list.items.len());
@@ -484,6 +533,7 @@ impl Renderer {
             meshes: &mut self.meshes,
             gpu_meshes: &mut self.gpu_meshes,
             view_proj,
+            lighting,
             depth,
             clear_color: self.clear_color,
         };

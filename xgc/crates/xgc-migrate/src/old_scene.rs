@@ -10,6 +10,79 @@ pub(crate) struct OldScene {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) entities: Vec<OldEntity>,
+    /// 旧场景级光源表；缺字段时与旧 `Scene` 同款兜底（一盏默认方向光）。
+    #[serde(default = "old_default_lights")]
+    pub(crate) lights: Vec<OldLight>,
+    #[serde(default = "old_default_ambient")]
+    pub(crate) ambient: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub(crate) enum OldLightKind {
+    #[default]
+    Directional,
+    Point,
+}
+
+/// 旧 `Light`：字段与缺省值必须逐项保持，迁移才只是搬运。
+#[derive(Debug, Deserialize)]
+pub(crate) struct OldLight {
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) kind: OldLightKind,
+    #[serde(default = "old_default_direction")]
+    pub(crate) direction: [f32; 3],
+    #[serde(default)]
+    pub(crate) position: [f32; 3],
+    #[serde(default = "old_default_color")]
+    pub(crate) color: [f32; 3],
+    #[serde(default = "old_default_intensity")]
+    pub(crate) intensity: f32,
+    #[serde(default = "old_default_range")]
+    pub(crate) range: f32,
+    #[serde(default = "old_default_casts_shadow")]
+    pub(crate) casts_shadow: bool,
+    #[serde(default)]
+    pub(crate) shadow_resolution: u32,
+}
+
+fn old_default_lights() -> Vec<OldLight> {
+    vec![OldLight {
+        name: "Directional Light".to_string(),
+        kind: OldLightKind::Directional,
+        direction: old_default_direction(),
+        position: [0.0; 3],
+        color: old_default_color(),
+        intensity: old_default_intensity(),
+        range: old_default_range(),
+        casts_shadow: old_default_casts_shadow(),
+        shadow_resolution: 0,
+    }]
+}
+
+fn old_default_ambient() -> [f32; 3] {
+    [0.06, 0.06, 0.08]
+}
+
+fn old_default_direction() -> [f32; 3] {
+    [0.5, -1.0, 0.5]
+}
+
+fn old_default_color() -> [f32; 3] {
+    [1.0, 0.98, 0.95]
+}
+
+fn old_default_intensity() -> f32 {
+    3.0
+}
+
+fn old_default_range() -> f32 {
+    10.0
+}
+
+fn old_default_casts_shadow() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]

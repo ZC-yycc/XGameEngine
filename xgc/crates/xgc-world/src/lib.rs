@@ -10,6 +10,7 @@ mod character_components;
 mod command;
 mod components;
 mod data;
+mod environment;
 mod gameplay_components;
 mod hash;
 mod journal;
@@ -34,6 +35,7 @@ pub use command::{Applied, Command, Plan};
 pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
 use data::ComponentFactory;
 pub use data::{ComponentData, EntityData, WorldData};
+pub use environment::{LightKind, SceneEnvironment, SceneLight};
 pub use gameplay_components::{AudioGain, AudioListener, AudioMixer, AudioSource, Script};
 pub use journal::{Journal, TxRecord};
 pub use layer_components::AnimationLayers;
@@ -255,6 +257,8 @@ pub struct World {
     factories: HashMap<ComponentId, ComponentFactory>,
     next_id: u64,
     revision: u64,
+    /// 场景级环境（光 / 环境光）：不是实体，跟着世界一起存取。
+    environment: SceneEnvironment,
 }
 
 impl Default for World {
@@ -274,9 +278,19 @@ impl World {
             factories: HashMap::new(),
             next_id: 0,
             revision: 0,
+            environment: SceneEnvironment::default(),
         };
         world.register_builtin_components();
         world
+    }
+
+    pub fn environment(&self) -> &SceneEnvironment {
+        &self.environment
+    }
+
+    /// 换环境不推进 revision：它是场景配置，不是实体状态，`state_hash` 也不含它。
+    pub fn set_environment(&mut self, environment: SceneEnvironment) {
+        self.environment = environment;
     }
 
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> EntityKey {

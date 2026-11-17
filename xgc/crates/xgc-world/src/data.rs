@@ -15,8 +15,8 @@ use super::{
     AnimationLayers, AnimationState, Animator, AudioGain, AudioListener, AudioMixer, AudioSource,
     Bone, Camera, CharacterController, Column, EntitySnapshot, GlobalTransform, LodGroup, Material,
     MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, PrefabInstance,
-    Script, Skeleton, SkeletonPose, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout,
-    Velocity, World,
+    SceneEnvironment, Script, Skeleton, SkeletonPose, Slope, Transform, UiElement, UiInput,
+    UiInteraction, UiLayout, Velocity, World,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,11 +48,16 @@ pub struct ComponentData {
 }
 
 /// 可序列化的整个世界：实体按 `EntityId` 排序，便于逐字节比较。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `environment` 是场景级环境（光 / 环境光）；缺省环境不落盘，因此没有光源的
+/// 世界文件与接入环境之前逐字节相同。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorldData {
     pub revision: u64,
     pub next_id: u64,
     pub entities: Vec<EntityData>,
+    #[serde(default, skip_serializing_if = "SceneEnvironment::is_default")]
+    pub environment: SceneEnvironment,
 }
 
 type CreateFn = fn(&[(String, Value)]) -> Result<Box<dyn Any>, String>;
@@ -187,6 +192,7 @@ impl World {
             revision: self.revision,
             next_id: self.next_id,
             entities,
+            environment: self.environment.clone(),
         }
     }
 
@@ -198,6 +204,7 @@ impl World {
         }
         self.revision = data.revision;
         self.next_id = data.next_id;
+        self.environment = data.environment.clone();
         for entity in &data.entities {
             let snapshot = self.snapshot_from_data(entity)?;
             self.restore_entity_raw(snapshot)?;

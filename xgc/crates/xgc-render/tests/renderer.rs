@@ -40,6 +40,11 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(&pixels[..4], &[0, 0, 0, 255]);
 
     let mut world = World::new();
+    // 环境光拉满、不放方向光：本用例只看"一个实体是否出一次 draw"，不看光照。
+    world.set_environment(xgc_world::SceneEnvironment {
+        lights: Vec::new(),
+        ambient: [1.0; 3],
+    });
     world.spawn((
         GlobalTransform::default(),
         MeshRenderer {
@@ -71,6 +76,10 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
 
     let mut depth_world = World::new();
+    depth_world.set_environment(xgc_world::SceneEnvironment {
+        lights: Vec::new(),
+        ambient: [1.0; 3],
+    });
     depth_world.spawn((
         GlobalTransform {
             position: [0.0, 0.0, 0.5],

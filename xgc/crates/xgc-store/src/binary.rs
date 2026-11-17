@@ -3,12 +3,16 @@
 use std::path::Path;
 
 use xgc_base::EntityId;
-use xgc_world::{ComponentData, ComponentId, EntityData, Value, WorldData};
+use xgc_world::{
+    ComponentData, ComponentId, EntityData, LightKind, SceneEnvironment, SceneLight, Value,
+    WorldData,
+};
 
 use crate::{write_atomic, Result, StoreError};
 
 const MAGIC: &[u8; 4] = b"XGCB";
-const VERSION: u32 = 1;
+/// 2：`next_id` 之后追加场景环境（光 / 环境光）。
+const VERSION: u32 = 2;
 
 pub fn encode_world(data: &WorldData) -> Vec<u8> {
     let mut writer = Writer::default();
@@ -16,6 +20,7 @@ pub fn encode_world(data: &WorldData) -> Vec<u8> {
     writer.u32(VERSION);
     writer.u64(data.revision);
     writer.u64(data.next_id);
+    write_environment(&mut writer, &data.environment);
     writer.u32(data.entities.len() as u32);
     for entity in &data.entities {
         writer.u64(entity.id.raw());
@@ -44,6 +49,7 @@ pub fn decode_world(bytes: &[u8]) -> std::result::Result<WorldData, String> {
     }
     let revision = reader.u64()?;
     let next_id = reader.u64()?;
+    let environment = read_environment(&mut reader)?;
     let entity_count = reader.u32()? as usize;
     let mut entities = Vec::with_capacity(entity_count);
     for _ in 0..entity_count {
@@ -77,7 +83,84 @@ pub fn decode_world(bytes: &[u8]) -> std::result::Result<WorldData, String> {
         revision,
         next_id,
         entities,
+        environment,
     })
+}
+
+fn write_environment(writer: &mut Writer, environment: &SceneEnvironment) {
+    for value in environment.ambient {
+        writer.f64(f64::from(value));
+    }
+    writer.u32(environment.lights.len() as u32);
+    for light in &environment.lights {
+        writer.string(&light.name);
+        writer.u8(match light.kind {
+            LightKind::Directional => 0,
+            LightKind::Point => 1,
+        });
+        for value in light.direction {
+            writer.f64(f64::from(value));
+        }
+        for value in light.position {
+            writer.f64(f64::from(value));
+        }
+        for value in light.color {
+            writer.f64(f64::from(value));
+        }
+        writer.f64(f64::from(light.intensity));
+        writer.f64(f64::from(light.range));
+        writer.u8(u8::from(light.casts_shadow));
+        writer.u32(light.shadow_resolution);
+    }
+}
+
+fn read_environment(reader: &mut Reader<'_>) -> std::result::Result<SceneEnvironment, String> {
+    let ambient = [
+        reader.f64()? as f32,
+        reader.f64()? as f32,
+        reader.f64()? as f32,
+    ];
+    let light_count = reader.u32()? as usize;
+    let mut lights = Vec::with_capacity(light_count);
+    for _ in 0..light_count {
+        let name = reader.string()?;
+        let kind = match reader.u8()? {
+            0 => LightKind::Directional,
+            1 => LightKind::Point,
+            other => return Err(format!("XGCB 未知光源类型：{other}")),
+        };
+        let direction = [
+            reader.f64()? as f32,
+            reader.f64()? as f32,
+            reader.f64()? as f32,
+        ];
+        let position = [
+            reader.f64()? as f32,
+            reader.f64()? as f32,
+            reader.f64()? as f32,
+        ];
+        let color = [
+            reader.f64()? as f32,
+            reader.f64()? as f32,
+            reader.f64()? as f32,
+        ];
+        let intensity = reader.f64()? as f32;
+        let range = reader.f64()? as f32;
+        let casts_shadow = reader.u8()? != 0;
+        let shadow_resolution = reader.u32()?;
+        lights.push(SceneLight {
+            name,
+            kind,
+            direction,
+            position,
+            color,
+            intensity,
+            range,
+            casts_shadow,
+            shadow_resolution,
+        });
+    }
+    Ok(SceneEnvironment { lights, ambient })
 }
 
 pub fn save_world_binary(path: &Path, data: &WorldData) -> Result<()> {

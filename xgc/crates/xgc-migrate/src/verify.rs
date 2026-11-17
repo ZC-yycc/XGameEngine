@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use xgc_base::EntityId;
-use xgc_world::{ComponentData, EntityData, WorldData};
+use xgc_world::{ComponentData, EntityData, SceneEnvironment, WorldData};
 
 use crate::migrate_str;
 
@@ -18,6 +18,7 @@ pub fn verify_migration(scene: &str, actual: &WorldData) -> Result<(), Vec<Strin
             expected.next_id, actual.next_id
         ));
     }
+    compare_environment(&expected.environment, &actual.environment, &mut differences);
     let expected_entities = by_id(&expected.entities);
     let actual_entities = by_id(&actual.entities);
     for (id, expected) in &expected_entities {
@@ -40,6 +41,63 @@ pub fn verify_migration(scene: &str, actual: &WorldData) -> Result<(), Vec<Strin
 
 fn by_id(entities: &[EntityData]) -> BTreeMap<EntityId, &EntityData> {
     entities.iter().map(|entity| (entity.id, entity)).collect()
+}
+
+/// 环境是场景级数据，不挂在实体上，必须单独对照——否则光源丢失不会被发现。
+fn compare_environment(
+    expected: &SceneEnvironment,
+    actual: &SceneEnvironment,
+    differences: &mut Vec<String>,
+) {
+    if !expected
+        .ambient
+        .iter()
+        .zip(&actual.ambient)
+        .all(|(expected, actual)| close(*expected, *actual))
+    {
+        differences.push(format!(
+            "ambient 期望 {:?}，实际 {:?}",
+            expected.ambient, actual.ambient
+        ));
+    }
+    if expected.lights.len() != actual.lights.len() {
+        differences.push(format!(
+            "光源数量期望 {}，实际 {}",
+            expected.lights.len(),
+            actual.lights.len()
+        ));
+    }
+    for (index, (expected, actual)) in expected.lights.iter().zip(&actual.lights).enumerate() {
+        let mismatched = [
+            ("name", expected.name != actual.name),
+            ("kind", expected.kind != actual.kind),
+            ("casts_shadow", expected.casts_shadow != actual.casts_shadow),
+            (
+                "shadow_resolution",
+                expected.shadow_resolution != actual.shadow_resolution,
+            ),
+            (
+                "direction",
+                !close_vec3(expected.direction, actual.direction),
+            ),
+            ("position", !close_vec3(expected.position, actual.position)),
+            ("color", !close_vec3(expected.color, actual.color)),
+            ("intensity", !close(expected.intensity, actual.intensity)),
+            ("range", !close(expected.range, actual.range)),
+        ]
+        .into_iter()
+        .find(|(_, mismatch)| *mismatch);
+        if let Some((field, _)) = mismatched {
+            differences.push(format!("光源 {index} 字段 {field} 与旧场景不一致"));
+        }
+    }
+}
+
+fn close_vec3(expected: [f32; 3], actual: [f32; 3]) -> bool {
+    expected
+        .iter()
+        .zip(&actual)
+        .all(|(expected, actual)| close(*expected, *actual))
 }
 
 fn compare_entity(

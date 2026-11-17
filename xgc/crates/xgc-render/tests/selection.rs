@@ -30,6 +30,11 @@ fn selected_entity_is_tinted_in_viewport() {
         panic!("select target 不是纹理");
     };
     let mut world = World::new();
+    // 环境光拉满、不放方向光：高亮色就是最终像素期望值。
+    world.set_environment(xgc_world::SceneEnvironment {
+        lights: Vec::new(),
+        ambient: [1.0; 3],
+    });
     let entity = world.spawn((
         GlobalTransform::default(),
         MeshRenderer {

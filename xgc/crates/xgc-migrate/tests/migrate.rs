@@ -278,3 +278,63 @@ fn migrate_dir_writes_each_scene_and_reports_failures() {
 
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// 旧场景把光源与环境光放在场景顶层（不是实体）；迁移必须原样搬到
+/// `WorldData.environment`，缺省字段回落到旧 `Light` 的缺省值。
+const LIT_SCENE: &str = r#"(
+    format_version: 2,
+    name: "Lit",
+    lights: [
+        (
+            name: "Sun",
+            kind: Directional,
+            direction: (0.45, -1.0, 0.35),
+            position: (0.0, 0.0, 0.0),
+            color: (1.0, 0.97, 0.92),
+            intensity: 1.4,
+            range: 10.0,
+            casts_shadow: true,
+            shadow_resolution: 0,
+        ),
+        (
+            name: "Lamp",
+            kind: Point,
+            position: (1.0, 2.0, 3.0),
+            color: (1.0, 0.5, 0.2),
+            intensity: 2.5,
+            range: 6.0,
+        ),
+    ],
+    ambient: (0.09, 0.1, 0.13),
+    entities: [],
+)"#;
+
+#[test]
+fn migrates_scene_lights_and_ambient() {
+    use xgc_world::LightKind;
+
+    let (world, _) = migrate_str(LIT_SCENE).unwrap();
+    let environment = &world.environment;
+    assert_eq!(environment.ambient, [0.09, 0.1, 0.13]);
+    assert_eq!(environment.lights.len(), 2);
+
+    let sun = &environment.lights[0];
+    assert_eq!(sun.name, "Sun");
+    assert_eq!(sun.kind, LightKind::Directional);
+    assert_eq!(sun.direction, [0.45, -1.0, 0.35]);
+    assert_eq!(sun.color, [1.0, 0.97, 0.92]);
+    assert_eq!(sun.intensity, 1.4);
+    assert!(sun.casts_shadow);
+    assert_eq!(
+        environment.sun().map(|light| light.name.as_str()),
+        Some("Sun")
+    );
+
+    let lamp = &environment.lights[1];
+    assert_eq!(lamp.kind, LightKind::Point);
+    assert_eq!(lamp.position, [1.0, 2.0, 3.0]);
+    assert_eq!(lamp.range, 6.0);
+    // 省略的字段按旧 `Light` 的 serde 缺省补齐，不留在零值上。
+    assert_eq!(lamp.direction, [0.5, -1.0, 0.5]);
+    assert_eq!(lamp.shadow_resolution, 0);
+}

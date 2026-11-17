@@ -40,7 +40,16 @@ pub fn model_matrix(transform: &GlobalTransform) -> Mat4 {
 
 /// 第一台 `active` 相机（EntityId 最小），返回 proj * view。
 pub fn camera_view_projection(world: &World, width: u32, height: u32) -> Option<Mat4> {
-    let mut selected: Option<(EntityId, Mat4)> = None;
+    camera_view_projection_with_eye(world, width, height).map(|(matrix, _)| matrix)
+}
+
+/// 同上，另外给出相机世界坐标：片元着色需要它把面法线朝向相机一侧。
+pub fn camera_view_projection_with_eye(
+    world: &World,
+    width: u32,
+    height: u32,
+) -> Option<(Mat4, [f32; 3])> {
+    let mut selected: Option<(EntityId, Mat4, [f32; 3])> = None;
     world.for_each::<Camera>(|key, camera| {
         if !camera.active {
             return;
@@ -50,7 +59,7 @@ pub fn camera_view_projection(world: &World, width: u32, height: u32) -> Option<
         };
         if selected
             .as_ref()
-            .is_some_and(|(existing, _)| *existing <= entity)
+            .is_some_and(|(existing, _, _)| *existing <= entity)
         {
             return;
         }
@@ -72,9 +81,9 @@ pub fn camera_view_projection(world: &World, width: u32, height: u32) -> Option<
             camera.near.max(0.0001),
             camera.far,
         );
-        selected = Some((entity, mul(projection, view)));
+        selected = Some((entity, mul(projection, view), eye));
     });
-    selected.map(|(_, matrix)| matrix)
+    selected.map(|(_, matrix, eye)| (matrix, eye))
 }
 
 pub fn perspective_rh_zo(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
@@ -169,11 +178,11 @@ fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -181,15 +190,16 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(crate) fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn length(v: [f32; 3]) -> f32 {
+pub(crate) fn length(v: [f32; 3]) -> f32 {
     dot(v, v).sqrt()
 }
 
-fn normalize(v: [f32; 3]) -> [f32; 3] {
+/// 零向量返回零向量（调用方各自决定退化兜底），不做 NaN。
+pub(crate) fn normalize(v: [f32; 3]) -> [f32; 3] {
     let len = length(v);
     if len <= f32::EPSILON {
         [0.0, 0.0, 0.0]

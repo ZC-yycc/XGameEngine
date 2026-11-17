@@ -9,6 +9,59 @@ use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
+use xgc_world::SceneEnvironment;
+
+/// 帧 uniform：view-proj 64B + 相机位置/强度 + ambient + sun_dir + sun_color，各 16B。
+const FRAME_UNIFORM_BYTES: u64 = 128;
+
+/// 帧级光照参数：环境光 + 场景第一盏可用方向光；没有方向光时强度为 0（只剩环境光）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FrameLighting {
+    pub(crate) eye: [f32; 3],
+    pub(crate) ambient: [f32; 3],
+    pub(crate) sun_direction: [f32; 3],
+    pub(crate) sun_intensity: f32,
+    pub(crate) sun_color: [f32; 3],
+}
+
+impl FrameLighting {
+    pub(crate) fn from_environment(environment: &SceneEnvironment, eye: [f32; 3]) -> Self {
+        let sun = environment.sun();
+        Self {
+            eye,
+            ambient: environment.ambient,
+            sun_direction: sun
+                .map(|light| light.normalized_direction())
+                .unwrap_or([0.0, -1.0, 0.0]),
+            sun_intensity: sun.map(|light| light.intensity).unwrap_or(0.0),
+            sun_color: sun.map(|light| light.color).unwrap_or([1.0; 3]),
+        }
+    }
+
+    /// 按 WGSL `Frame` 的字段顺序打包；不足 16 字节的部分用 0 补齐。
+    fn write(&self, view_proj: Mat4, bytes: &mut Vec<u8>) {
+        for value in view_proj {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [self.eye[0], self.eye[1], self.eye[2], self.sun_intensity] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [self.ambient[0], self.ambient[1], self.ambient[2], 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [
+            self.sun_direction[0],
+            self.sun_direction[1],
+            self.sun_direction[2],
+            0.0,
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [self.sun_color[0], self.sun_color[1], self.sun_color[2], 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
 
 pub struct InstancedPipeline {
     pipeline: wgpu::RenderPipeline,
@@ -32,12 +85,18 @@ impl InstancedPipeline {
 }
 
 const INSTANCED_WGSL: &str = r#"
-struct Camera {
+struct Frame {
     view_proj: mat4x4<f32>,
+    // xyz = 相机世界坐标（用来把面法线朝向相机），w = 方向光强度
+    eye_intensity: vec4<f32>,
+    ambient: vec4<f32>,
+    // xyz = 光线传播方向（归一化）
+    sun_dir: vec4<f32>,
+    sun_color: vec4<f32>,
 };
 
 @group(0) @binding(0)
-var<uniform> camera: Camera;
+var<uniform> frame: Frame;
 
 struct Instance {
     model: mat4x4<f32>,
@@ -58,7 +117,7 @@ fn vs(@location(0) position: vec3<f32>, @builtin(instance_index) index: u32) -> 
     let instance = instances[index];
     var out: VsOut;
     let world = instance.model * vec4<f32>(position, 1.0);
-    out.position = camera.view_proj * world;
+    out.position = frame.view_proj * world;
     out.world = world.xyz;
     out.color = instance.color;
     return out;
@@ -66,10 +125,18 @@ fn vs(@location(0) position: vec3<f32>, @builtin(instance_index) index: u32) -> 
 
 @fragment
 fn fs(input: VsOut) -> @location(0) vec4<f32> {
-    let normal = normalize(cross(dpdx(input.world), dpdy(input.world)));
-    let light = normalize(vec3<f32>(0.0, 0.0, 1.0));
-    let shade = 0.55 + 0.45 * abs(dot(normal, light));
-    return vec4<f32>(input.color.rgb * shade, input.color.a);
+    // 面法线从屏幕导数叉积得到，符号按"朝向相机"归一，闭合网格可见面才受光。
+    let raw = cross(dpdx(input.world), dpdy(input.world));
+    var normal = normalize(raw + vec3<f32>(0.0, 0.0, 1e-9));
+    let to_camera = normalize(frame.eye_intensity.xyz - input.world);
+    if (dot(normal, to_camera) < 0.0) {
+        normal = -normal;
+    }
+    let to_light = -normalize(frame.sun_dir.xyz);
+    let diffuse = max(dot(normal, to_light), 0.0);
+    // 环境光 + 场景主方向光；没有方向光时 eye_intensity.w = 0，只剩环境光。
+    let light = frame.ambient.rgb + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse);
+    return vec4<f32>(input.color.rgb * light, input.color.a);
 }
 "#;
 
@@ -91,11 +158,11 @@ impl GpuContext {
                     label: Some("xgc-instanced-camera"),
                     entries: &[wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(64),
+                            min_binding_size: wgpu::BufferSize::new(FRAME_UNIFORM_BYTES),
                         },
                         count: None,
                     }],
@@ -187,6 +254,7 @@ pub(crate) struct InstancedRequest<'a> {
     pub(crate) meshes: &'a mut MeshCache,
     pub(crate) gpu_meshes: &'a mut GpuMeshCache,
     pub(crate) view_proj: Mat4,
+    pub(crate) lighting: FrameLighting,
     pub(crate) depth: &'a wgpu::TextureView,
     pub(crate) clear_color: wgpu::Color,
 }
@@ -241,13 +309,11 @@ impl RenderCache {
             buckets[index].instances.push((item.transform, item.color));
         }
 
-        let mut camera_bytes = Vec::with_capacity(64);
-        for value in view_proj {
-            camera_bytes.extend_from_slice(&value.to_le_bytes());
-        }
+        let mut camera_bytes = Vec::with_capacity(FRAME_UNIFORM_BYTES as usize);
+        request.lighting.write(view_proj, &mut camera_bytes);
         let camera = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("xgc-instanced-camera-buffer"),
-            size: 64,
+            label: Some("xgc-instanced-frame-buffer"),
+            size: FRAME_UNIFORM_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
