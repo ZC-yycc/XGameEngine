@@ -110,9 +110,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
 | `crates/xgc-render/src/skinned.rs` | GPU 蒙皮顶点入口：256 关节 uniform（16 KiB，对齐旧端 `BONES_PER_SLOT`）、权重归一、palette 可表示性路由 + 设备 binding 上限判定；UV / 基色贴图绑定后与静态实例共享主场景 PBR；>256 或不完整 palette 回退 CPU；`palette_bytes` 是 `pose × inverse_bind` 的唯一 CPU 计算处，`posed_bounds` 给取景 / 级联提供当前姿态包围盒（单元回归在 `skinned/tests.rs`）；`draw_batch` 的 palette / model 走竞技场（`&mut self`，返回 `SkinnedBatchOutcome`） |
-| `crates/xgc-render/src/skinned/arena.rs` | 蒙皮 uniform 竞技场：palette / model 并进常驻缓冲按 dynamic offset 分槽，槽距按设备 `min_uniform_buffer_offset_alignment` 向上取整、容量按 2 的幂扩容，同尺寸跨帧不建缓冲（`RenderStats::skin_uniform_buffers` 是口径：首批 2 张、之后 0） |
+| `crates/xgc-render/src/skinned/arena.rs` | 蒙皮 uniform 竞技场：palette / model 并进常驻缓冲按 dynamic offset 分槽，槽距按设备 `min_uniform_buffer_offset_alignment` 向上取整、容量按 2 的幂扩容，同尺寸跨帧不建缓冲（`RenderStats::skin_uniform_buffers` / `shadow_skin_uniform_buffers` 是口径：各首批 2 张、之后 0） |
 | `crates/xgc-render/src/skin_vertex.wgsl` | GPU 蒙皮顶点变形唯一真相源：palette 绑定 + `Σwₖ·palette·pos` 与权重归一；主场景与阴影入口都 include 这一份 |
-| `crates/xgc-render/src/shadow_skin.rs` | 阴影 pass 的蒙皮投射体：把 draw 解析成 caster（GPU palette / CPU 回退已变形顶点 / 静态），每帧每 caster 建一次 palette+model 绑定供 4 级级联复用 |
+| `crates/xgc-render/src/shadow_skin.rs` | 阴影 pass 的蒙皮投射体：把 draw 解析成 caster（GPU palette / CPU 回退已变形顶点 / 静态），每帧把 palette+model 传进阴影自己的两张 `UniformArena`、`SkinnedBinding` 只记槽号，4 级级联只换 dynamic offset（`SkinnedShadow::bindings` 返回本帧新建缓冲数） |
 | `crates/xgc-render/src/shadow_skin.wgsl` | 蒙皮阴影顶点入口：只复用 `skin_vertex.wgsl` 的变形公式与光视图投影，纯深度 pass 不着色 |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（保留给纯位图调试文本；UI 文本已走 `font.rs`） |
@@ -130,6 +130,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/renderer/hdr.rs` | HDR 中间目标与呈现：按尺寸缓存 `Rgba16Float` 场景纹理，按输出格式缓存全屏 tone-map pipeline；tone pass 的 6 个绑定里带三级光晕输入（关闭时绑场景纹理占位） |
 | `crates/xgc-render/src/bloom.rs` | 三级 HDR 光晕链（旧端 `postfx.rs` 同口径）：`BloomSettings`（intensity / threshold / knee，`intensity <= 0` 即关闭）+ 亮部提取 / 逐级降采样 / 横纵二项核共 9 个 pass，`Rgba16Float` 乒乓中间目标按尺寸缓存 |
 | `crates/xgc-render/src/bloom.wgsl` | 光晕三个片元入口：`fs_bright`（软膝式取亮部）/ `fs_down`（一次双线性降采样）/ `fs_blur`（9 抽头二项核，方向由参数给横或纵） |
+| `crates/xgc-render/src/renderer/shadow_prep.rs` | 方向光阴影的每帧准备：按场景包围盒 + 相机矩阵拟合级联、把 draw 画进深度数组，并返回阴影蒙皮竞技场本帧新建的缓冲数（从 `renderer.rs` 按行数预算拆出） |
 | `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 真字体文本 / 图片在 tone-map 后画到显示目标（从 `renderer.rs` 按行数预算拆出；字形先排版后上传图集） |
 | `crates/xgc-render/src/sky.rs` | 解析天空（天顶/地平线/地面 + 太阳盘 + 光晕）与漫反射 IBL：1024 点斐波那契球投影成 L2 球谐（E/π，无随机数）；参数来自 `project.ron` 的 `render.sky` |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 592B（相机位置 + 环境光 + 主方向光 + 天空球谐 + 4 级光视图投影/切分/视线/阴影参数），逐实例 96B（模型 + 颜色 + metallic/roughness）；片元按 `环境光 + 天空 IBL + 环境反射 + 光色 × 强度 × N·L × 阴影` 输出线性 HDR |
@@ -177,7 +178,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 0.61）。下一刀把阴影 pass 的蒙皮 palette 也并进同一竞技场（`ShadowTarget::render` 要改成 `&mut self`），再回物理角色控制器 / 关节。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 0.61）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），下一刀回物理角色控制器 / 关节。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

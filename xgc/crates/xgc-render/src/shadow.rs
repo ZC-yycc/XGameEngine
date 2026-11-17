@@ -218,23 +218,26 @@ impl ShadowTarget {
     }
 
     /// 把 draw list 画进深度数组：每级一个 pass（每层各自清一次、各用一份光视图投影）。
-    /// 静态网格与蒙皮网格都要投射；蒙皮那支走 `shadow_skin` 的 palette 管线。
+    ///
+    /// 静态网格与蒙皮网格都要投射；蒙皮那支走 `shadow_skin` 的 palette 管线，palette /
+    /// model 并进常驻竞技场（每级只换 dynamic offset）。返回值是本帧为那两张竞技场新建
+    /// 的缓冲数：同尺寸下恒 0。
     pub(crate) fn render(
-        &self,
+        &mut self,
         context: &GpuContext,
         cascades: &ShadowCascades,
         items: &[DrawItem],
         sources: &mut super::shadow_skin::CasterSources<'_>,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         if items.is_empty() || cascades.count == 0 {
-            return Ok(());
+            return Ok(0);
         }
         let casters = super::shadow_skin::prepare(context, items, sources)?;
         if casters.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
-        // 蒙皮绑定每帧只建一次（4 级级联复用），不在 pass 里逐级重建。
-        let skin_bindings = self.skin.bindings(context, &casters);
+        // 蒙皮绑定每帧只传一次、只建一次（4 级级联复用），不在 pass 里逐级重建。
+        let (skin_bindings, skin_uniform_buffers) = self.skin.bindings(context, &casters);
         let skin_meshes = &*sources.skin_meshes;
         let mut bytes = Vec::with_capacity(casters.len() * 64);
         for caster in &casters {
@@ -320,7 +323,7 @@ impl ShadowTarget {
                 .draw(&mut pass, &frame_bind, &skin_bindings, skin_meshes);
         }
         context.queue().submit(Some(encoder.finish()));
-        Ok(())
+        Ok(skin_uniform_buffers)
     }
 }
 

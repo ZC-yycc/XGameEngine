@@ -8,7 +8,7 @@ use super::instanced::create_frame_layout;
 use super::mesh::Mesh;
 use super::texture_bind::TextureBinding;
 
-mod arena;
+pub(crate) mod arena;
 
 /// palette 槽数：与旧引擎 `BONES_PER_SLOT = 256` 对齐，超出才回退 CPU。
 ///

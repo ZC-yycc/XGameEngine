@@ -91,6 +91,7 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 256 槽 palette 切片把 `MAX_JOINTS` 从 64 抬到 **256**（旧端 `BONES_PER_SLOT` 同容量），palette uniform 4 KiB → 16 KiB（仍在 wgpu 默认 64 KiB 绑定上限内）；65~256 关节的网格不再静默掉到 CPU。新回归把权重压在 90 号槽并平移它：上限临时改回 64 时该网格 `gpu_skin_meshes` 0 ≠ 1 变红，现在留在 GPU 且表面随 90 号槽移动；257 关节仍确定性回退（原 65 关节用例改口径）。证据世界没有骨架，第 150 帧仍逐字节相同（32.22% / 0.61 / 194），冷启动 734.43 → 743.15 ms（+1.2%，与改前区间重叠且该场景无蒙皮 draw，未观察到可归因回归）；另按设备 `max_uniform_buffer_binding_size` 判定是否走 GPU（downlevel GL 恰好 16 KiB）。
 > 蒙皮 draw 单次提交切片把一帧里所有 GPU 蒙皮 draw 收进同一批：一个 frame binding、一个 pass、一次 submit（palette 仍逐角色；下一轮竞技场已并进常驻缓冲），此前每条 draw 各建 frame bind / encoder / submit。左右双角色差分回归钉住批处理不串 palette（右侧换姿态时左侧按列像素逐字节不变）；第 150 帧仍逐字节相同，冷启动数因并发构建不可比，未做稳态计时。
 > 蒙皮 uniform 竞技场切片把逐角色的 palette（16 KiB）与 model（96 B）并进常驻缓冲：`crates/xgc-render/src/skinned/arena.rs` 的 `UniformArena` 按设备 `min_uniform_buffer_offset_alignment` 算槽距（palette 16 KiB 仍是 16 KiB、model 96 B 补到 256 B），layout 声明 `has_dynamic_offset: true` 后每条 draw 只换偏移，容量按 2 的幂扩容（只增不减）、暂存区跨帧复用；`queue.write_buffer` 与提交同队列有序，所以重写本帧缓冲一定排在上一帧提交之后。`RenderStats::skin_uniform_buffers` 是可观测口径（只统主场景，不含阴影 pass）：首批 2 张缓冲，同尺寸第二帧 **0**（旧实现每帧每角色 2 张，随角色数线性涨）。两条单元回归钉住槽距对齐与跨帧复用，集成回归 `repeated_frames_reuse_the_skin_uniform_arenas` 断言 2 → 0（把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红：“同尺寸第二帧必须复用竞技场、不再建缓冲：2”）；既有左右角色差分用例仍逐字节通过（串 palette 会立刻红）。证据画面没有骨架实体、竞技场不建缓冲，第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`，对旧端仍 32.22% / 0.61 / 194）。**未做稳态计时**（冷启动单帧含 pipeline 编译，不能归因），真正的稳态测量仍要常驻 profiler。**未闭环**：阴影 pass 的蒙皮 palette / model 仍逐投射体建缓冲，需要把 `ShadowTarget::render` 从 `&self` 改 `&mut self`。
+> 阴影 pass 的蒙皮竞技场切片把逐投射体的 palette（16 KiB）与 model（64 B）也并进常驻缓冲：`crates/xgc-render/src/shadow_skin.rs` 的 `SkinnedShadow` 持有两张 `UniformArena`，`SkinnedBinding` 只记槽号，4 级级联只换 dynamic offset；`ShadowTarget::render` 改成 `&mut self` 并返回本帧新建缓冲数，逐帧准备拆到 `crates/xgc-render/src/renderer/shadow_prep.rs`（行数预算）。`RenderStats::shadow_skin_uniform_buffers` 是口径：首批 2 张、同尺寸第二帧 **0**（回归 `repeated_frames_reuse_the_shadow_skin_arenas`；把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红）。既有 4 条阴影回归仍全绿，另加一条两投射体用例 `two_skinned_casters_keep_their_own_shadow_palettes`：两个投射体沿屏幕纵轴分开（z=∓2.4）、姿态反向平移，断言两侧阴影行重心相距超过两个窗口宽、且同屏时各自留在原位（把每级 draw 的偏移强制成槽 0 时实跑变红：「窗口内阴影像素太少，无法定位：0」），钉住"每个 caster 用自己那格 palette"。第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`，证据世界无骨架）。**未做稳态计时**（证据场景没有蒙皮 draw，冷启动单帧含 pipeline 编译）。
 > 姿态感知包围盒切片让 `scene_bounds` 改用 `posed_bounds`（会动的顶点：按每根真有 palette 项的关节变换整网格 AABB 后求并，覆盖变形顶点凸包且只需 O(顶点 + 关节) 次变换；不动的顶点：缺蒙皮属性 / 权重全零 / 关节越界时按顶点并进盒子，因为它们在 CPU 与 shader 里都留在绑定姿态），自动取景与级联远距离拟合都跟着当前姿态；集成回归在旧实现下停在绑定盒 `[-0.8..0.8]`、自动取景 **0** 个可见像素，现在盒子跟到 +4、画面里能看到网格。已知近似：整网格 AABB 比旧端加载期按关节预计算的顶点范围盒更松，骨架场景的自动取景会略远。第 150 帧仍逐字节相同（证据世界无骨架），对旧端 32.22% / 0.61 / 194；交错 A/B 中位数 752.62 → 765.10 ms（+1.7%，区间重叠且该场景无 pose item，未观察到可归因回归）。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体本来就走同一拟合框，不需要另做扩展覆盖。
 > 旧 / 新整帧 mean_abs 依次为 28.65 → 23.79 → 21.24 → 15.97 → 15.27 → 16.34 → 19.65 → 19.27 → 18.78 →
 > 0.85 → 0.63 → **0.61**（差异像素 32.22%）。前一步是**确定性粒子模拟 + billboard**：按旧端 SplitMix64 / 发射 / 生命周期合同推进，
@@ -111,15 +112,15 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 第 150 帧像素与上一步逐像素相同（物体早已落定），世界哈希因速度归零而变化。
 > 第 150 帧世界哈希变为
 > `bb3fdc99df20aa31`：`particle.emitter.config` 的完整旧配置参与状态哈希，粒子运行态不落盘（`verify-migration` 一致）。
-> 仍缺：PCSS / 点光阴影、TAA / SSAO / FXAA 等其余后处理、
-> 阴影 pass 的蒙皮 palette 仍逐投射体建缓冲（主场景的 palette / model 已并进 dynamic offset 竞技场）、物理的角色控制器 / 关节 / 连续碰撞 / 坡面滑动、
+> 仍缺：PCSS / 点光阴影、TAA / SSAO / FXAA 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场）、
+> 物理的角色控制器 / 关节 / 连续碰撞 / 坡面滑动、
 > UI 面板底色微差（align/valign 只能按 kind 推断）。旧端本机仍报告项目 Rust 插件构建指纹不匹配并跳过，XGC 也尚未迁移旧 Animator
 > 状态机与完整动画素材。
 > 当前 `ScriptRuntime::run_frame` 不返回错误，脚本诊断仍只写 stderr；正式调度切片需要把失败传播纳入宿主契约。旧端 `particle.burst` 是 `serde(skip)` 的一次性脚本运行时请求（不是场景迁移字段），XGC 的脚本请求桥尚未接入。
 
 ## 建议顺序
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒、蒙皮 draw 单次提交、蒙皮 palette / model 竞技场已贯通；下一步把阴影 pass 的蒙皮 palette 也并进同一竞技场，再回物理角色控制器 / 关节。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒、蒙皮 draw 单次提交、蒙皮 palette / model 竞技场已贯通；阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场，下一步回物理角色控制器 / 关节。
 2. 正式调度：脚本与系统统一访问声明。
 3. 旧新逐帧 trace + 截图像素门禁。
 4. 密码学签名 / 跨机器增量。

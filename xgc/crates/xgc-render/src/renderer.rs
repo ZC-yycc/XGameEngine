@@ -19,6 +19,7 @@ use super::resources::{ResourceDesc, ResourceUsage};
 use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline};
 use super::sky::{sky_irradiance, SkySettings};
 mod hdr;
+mod shadow_prep;
 mod ui;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,8 +31,10 @@ pub struct RenderStats {
     pub passes: usize,
     /// 本帧为蒙皮 uniform 竞技场（palette / model）新建的 GPU 缓冲数：同尺寸下恒 0。
     ///
-    /// 只统主场景那两张竞技场；阴影 pass 的蒙皮 palette 仍逐投射体建缓冲，不计在内。
+    /// 只统主场景那两张竞技场；阴影 pass 侧另见 [`Self::shadow_skin_uniform_buffers`]。
     pub skin_uniform_buffers: usize,
+    /// 本帧为阴影 pass 的蒙皮竞技场（palette / model）新建的 GPU 缓冲数：同尺寸下恒 0。
+    pub shadow_skin_uniform_buffers: usize,
 }
 
 struct DepthTarget {
@@ -267,59 +270,6 @@ impl Renderer {
         Ok(list)
     }
 
-    /// 按给定 view-projection 出 draw：静态实例一批，GPU 蒙皮逐网格。
-    /// 拟合并渲染方向光阴影；没有可用光源 / 场景时返回 `None`（不采样阴影）。
-    fn prepare_shadow(
-        &mut self,
-        context: &GpuContext,
-        world: &World,
-        items: &[super::draw::DrawItem],
-        view_proj: Mat4,
-        camera_pos: [f32; 3],
-    ) -> Result<Option<super::shadow::ShadowCascades>, GpuError> {
-        let Some(light) = world.environment().lights.iter().find(|light| {
-            light.kind == xgc_world::LightKind::Directional
-                && light.is_active()
-                && light.casts_shadow
-        }) else {
-            return Ok(None);
-        };
-        let bounds = super::shot::scene_bounds(world, &mut self.meshes)
-            .map_err(|err| GpuError::Mesh(err.to_string()))?;
-        let Some(bounds) = bounds else {
-            return Ok(None);
-        };
-        let Some(inverse) = super::camera::invert(view_proj) else {
-            return Ok(None);
-        };
-        let Some(cascades) = super::shadow::cascade_shadow_matrices(
-            inverse,
-            camera_pos,
-            light.normalized_direction(),
-            &bounds,
-            super::shadow::SHADOW_RESOLUTION,
-            super::shadow::SHADOW_CASCADES,
-        ) else {
-            return Ok(None);
-        };
-        if self.textures.is_none() {
-            self.textures = Some(super::texture_bind::TextureBinding::new(context));
-        }
-        if let Some(target) = self.shadow.as_ref() {
-            let mut sources = super::shadow_skin::CasterSources {
-                meshes: &mut self.meshes,
-                gpu_meshes: &mut self.gpu_meshes,
-                skin_meshes: &mut self.skin_meshes,
-                textures: self.textures.as_ref().unwrap(),
-            };
-            target
-                .render(context, &cascades, items, &mut sources)
-                .map_err(GpuError::Pipeline)?;
-        }
-        Ok(Some(cascades))
-    }
-
-    /// 粒子：Alpha 一批 + 加色一批；深度测试但不写深度。
     fn draw_particles(
         &mut self,
         context: &GpuContext,
@@ -448,7 +398,7 @@ impl Renderer {
             self.textures = Some(super::texture_bind::TextureBinding::new(context));
         }
         // 阴影投射体 = 全部 draw：旧端蒙皮网格与静态网格一样进阴影批次。
-        let shadow_matrix =
+        let (shadow_matrix, shadow_skin_uniform_buffers) =
             self.prepare_shadow(context, world, &list.items, view_proj, lighting.eye)?;
         let textures = self.textures.as_ref().unwrap();
         lighting = lighting.with_shadow(shadow_matrix);
@@ -593,6 +543,7 @@ impl Renderer {
             // HDR 场景即使没有 draw 也会清色；随后帧入口再计一次 tone-map。
             passes: 1,
             skin_uniform_buffers,
+            shadow_skin_uniform_buffers,
         })
     }
 }

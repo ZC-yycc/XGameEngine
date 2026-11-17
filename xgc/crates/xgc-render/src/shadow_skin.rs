@@ -10,13 +10,16 @@ use super::camera::Mat4;
 use super::draw::DrawItem;
 use super::gpu::GpuContext;
 use super::gpu_mesh::GpuMeshCache;
-use super::skinned::{self, GpuSkinMeshCache, MAX_JOINTS_BYTES};
+use super::skinned::{self, arena::UniformArena, GpuSkinMeshCache, MAX_JOINTS_BYTES};
 use super::texture_bind::TextureBinding;
 
 const SHADOW_SKIN_WGSL: &str = concat!(
     include_str!("skin_vertex.wgsl"),
     include_str!("shadow_skin.wgsl")
 );
+
+/// 阴影投射体只需要模型矩阵，比主场景的实例 uniform（96 B）小。
+const SHADOW_MODEL_UNIFORM_BYTES: u64 = 64;
 
 /// 一个阴影投射体：`gpu_meshes` 里已就绪的网格键 + 模型矩阵。
 ///
@@ -35,17 +38,23 @@ impl Caster {
     }
 }
 
-/// 每帧每个蒙皮投射体一份绑定（4 级级联共用，不再逐级重建）。
+/// 每帧每个蒙皮投射体一个槽位（4 级级联共用同一批绑定，不再逐级重建）。
+///
+/// 只记槽号不记绑定组：palette / model 都并进常驻竞技场，绑定组每帧只有一个，
+/// 逐投射体变的只是 dynamic offset（与主场景 `SkinnedPipeline` 同一套做法）。
 pub(super) struct SkinnedBinding {
     mesh_key: String,
-    palette: wgpu::BindGroup,
-    model: wgpu::BindGroup,
+    slot: usize,
 }
 
 pub(super) struct SkinnedShadow {
     pipeline: wgpu::RenderPipeline,
     palette_layout: wgpu::BindGroupLayout,
     model_layout: wgpu::BindGroupLayout,
+    palette: UniformArena,
+    model: UniformArena,
+    /// 逐 caster 的 model 字节打包暂存：跨帧复用，避免每帧 N 个小 `Vec` 分配。
+    model_scratch: Vec<Vec<u8>>,
 }
 
 /// 阴影 pass 要用的网格来源：三份缓存 + 贴图绑定。打成一个结构避免 `render`
@@ -139,7 +148,8 @@ impl SkinnedShadow {
             visibility: wgpu::ShaderStages::VERTEX,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
+                // 竞技场按槽偏移，layout 必须声明 dynamic offset。
+                has_dynamic_offset: true,
                 min_binding_size: wgpu::BufferSize::new(size),
             },
             count: None,
@@ -150,7 +160,7 @@ impl SkinnedShadow {
         });
         let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("xgc-shadow-skin-model-layout"),
-            entries: &[uniform(64)],
+            entries: &[uniform(SHADOW_MODEL_UNIFORM_BYTES)],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("xgc-shadow-skin-layout"),
@@ -201,37 +211,77 @@ impl SkinnedShadow {
             pipeline,
             palette_layout,
             model_layout,
+            palette: UniformArena::new(
+                context,
+                "xgc-shadow-skin-palette-arena",
+                MAX_JOINTS_BYTES as u64,
+            ),
+            model: UniformArena::new(
+                context,
+                "xgc-shadow-skin-model-arena",
+                SHADOW_MODEL_UNIFORM_BYTES,
+            ),
+            model_scratch: Vec::new(),
         }
     }
 
-    /// 进 pass 之前把每帧的 palette / model 绑定建好：4 级级联复用同一批。
-    pub(super) fn bindings(&self, context: &GpuContext, casters: &[Caster]) -> Vec<SkinnedBinding> {
-        let mut bindings = Vec::new();
-        for caster in casters {
-            let Some(palette) = &caster.palette else {
-                continue;
-            };
-            let mut model_bytes = Vec::with_capacity(64);
-            for value in caster.model {
-                model_bytes.extend_from_slice(&value.to_le_bytes());
-            }
-            bindings.push(SkinnedBinding {
-                mesh_key: caster.mesh_key.clone(),
-                palette: uniform_bind(
-                    context,
-                    &self.palette_layout,
-                    "xgc-shadow-skin-palette",
-                    palette,
-                ),
-                model: uniform_bind(
-                    context,
-                    &self.model_layout,
-                    "xgc-shadow-skin-model",
-                    &model_bytes,
-                ),
-            });
+    /// 进 pass 之前把本帧的 palette / model 传进竞技场，返回每个投射体的槽位与本帧
+    /// 新建的缓冲数（同尺寸下恒 0，便于回归钉住"没有退化成逐投射体建缓冲"）。
+    pub(super) fn bindings(
+        &mut self,
+        context: &GpuContext,
+        casters: &[Caster],
+    ) -> (Vec<SkinnedBinding>, usize) {
+        let skinned: Vec<&Caster> = casters
+            .iter()
+            .filter(|caster| caster.skins_here())
+            .collect();
+        if skinned.is_empty() {
+            return (Vec::new(), 0);
         }
-        bindings
+        let palettes: Vec<&[u8]> = skinned
+            .iter()
+            .filter_map(|caster| caster.palette.as_deref())
+            .collect();
+        // `skins_here` 与 `palette.is_some()` 必须同义：两者一旦漂移，槽号就会整体错位，
+        // 而竞技场只校验"非空"，不会替我们发现条数不符。
+        debug_assert_eq!(
+            palettes.len(),
+            skinned.len(),
+            "蒙皮投射体与 palette 条数必须一致"
+        );
+        let mut models = std::mem::take(&mut self.model_scratch);
+        while models.len() < skinned.len() {
+            models.push(Vec::with_capacity(SHADOW_MODEL_UNIFORM_BYTES as usize));
+        }
+        for (bytes, caster) in models.iter_mut().take(skinned.len()).zip(&skinned) {
+            bytes.clear();
+            for value in caster.model {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let model_slices: Vec<&[u8]> = models
+            .iter()
+            .take(skinned.len())
+            .map(|bytes| bytes.as_slice())
+            .collect();
+        let mut uniform_buffers = self
+            .palette
+            .upload(context, &self.palette_layout, &palettes);
+        uniform_buffers += self
+            .model
+            .upload(context, &self.model_layout, &model_slices);
+        drop(model_slices);
+        self.model_scratch = models;
+        let bindings = skinned
+            .iter()
+            .enumerate()
+            .map(|(slot, caster)| SkinnedBinding {
+                mesh_key: caster.mesh_key.clone(),
+                slot,
+            })
+            .collect();
+        (bindings, uniform_buffers)
     }
 
     /// 在当前级联的 pass 里画出所有 GPU 蒙皮投射体。
@@ -251,8 +301,8 @@ impl SkinnedShadow {
             let Some(mesh) = skin_meshes.get(&binding.mesh_key) else {
                 continue;
             };
-            pass.set_bind_group(1, &binding.palette, &[]);
-            pass.set_bind_group(2, &binding.model, &[]);
+            pass.set_bind_group(1, self.palette.bind(), &[self.palette.offset(binding.slot)]);
+            pass.set_bind_group(2, self.model.bind(), &[self.model.offset(binding.slot)]);
             let (position, joints, weights) = mesh.shadow_buffers();
             pass.set_vertex_buffer(0, position.slice(..));
             pass.set_vertex_buffer(1, joints.slice(..));
@@ -265,29 +315,4 @@ impl SkinnedShadow {
             }
         }
     }
-}
-
-fn uniform_bind(
-    context: &GpuContext,
-    layout: &wgpu::BindGroupLayout,
-    label: &str,
-    bytes: &[u8],
-) -> wgpu::BindGroup {
-    let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size: bytes.len() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    context.queue().write_buffer(&buffer, 0, bytes);
-    context
-        .device()
-        .create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        })
 }
