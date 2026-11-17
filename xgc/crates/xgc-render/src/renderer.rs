@@ -446,6 +446,17 @@ impl Renderer {
         let height = target.height();
         self.ensure_depth(context, width, height)?;
         let mut list = build_draw_list(world);
+        // 模型材质因子与实体覆盖先在分流前合成，静态 / 蒙皮共享同一份逐 draw 颜色；
+        // 选择高亮随后替换最终颜色，不会再被资产里的零通道吞掉。
+        for item in &mut list.items {
+            if let Some(mesh) = self
+                .meshes
+                .get(&item.model)
+                .map_err(|err| GpuError::Mesh(err.to_string()))?
+            {
+                item.color = mesh.tint(item.color);
+            }
+        }
         if let Some(selected) = selected {
             for item in &mut list.items {
                 if item.entity == selected {

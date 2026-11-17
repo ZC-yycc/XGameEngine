@@ -1,4 +1,4 @@
-//! 内建网格：`Mesh` 是位置 + 可选索引；真实资产加载在资产管线接上后替换 builtin。
+//! 内建网格：`Mesh` 保存首个图元的几何与 PBR 基色因子；纹理通道后续接入。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SkinData {
     pub joints: Vec<[u16; 4]>,
@@ -11,6 +11,8 @@ pub struct SkinData {
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+    /// glTF `baseColorFactor`；逐实体颜色在提交 draw 时与它相乘。
+    pub base_color_factor: [f32; 4],
     pub skin: Option<SkinData>,
 }
 
@@ -19,29 +21,33 @@ impl Mesh {
         Self {
             positions,
             indices,
+            base_color_factor: [1.0; 4],
             skin: None,
         }
     }
 
     pub fn fullscreen_triangle() -> Self {
-        Self {
-            positions: vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
-            indices: Vec::new(),
-            skin: None,
-        }
+        Self::new(
+            vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+            Vec::new(),
+        )
     }
 
     pub fn quad() -> Self {
-        Self {
-            positions: vec![
+        Self::new(
+            vec![
                 [-0.5, -0.5, 0.0],
                 [0.5, -0.5, 0.0],
                 [0.5, 0.5, 0.0],
                 [-0.5, 0.5, 0.0],
             ],
-            indices: vec![0, 1, 2, 0, 2, 3],
-            skin: None,
-        }
+            vec![0, 1, 2, 0, 2, 3],
+        )
+    }
+
+    /// 模型材质因子与实体材质都是乘法因子，顺序不改变结果。
+    pub fn tint(&self, entity_color: [f32; 4]) -> [f32; 4] {
+        std::array::from_fn(|index| self.base_color_factor[index] * entity_color[index])
     }
 
     pub fn cube() -> Self {

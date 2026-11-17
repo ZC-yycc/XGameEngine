@@ -1,7 +1,7 @@
-//! 最小 GLB 解析：取第一个 mesh/primitive 的 POSITION 与可选索引。
+//! 最小 GLB 解析：取第一个 mesh/primitive 的几何、蒙皮与 PBR 基色因子。
 //!
-//! 只支持 `.glb` 的 JSON + BIN chunk、单个 buffer、triangles；不做材质 / 贴图 /
-//! 多 primitive 合并，够 M2 的真实顶点数据验证。
+//! 只支持 `.glb` 的 JSON + BIN chunk、单个 buffer、triangles；贴图与多 primitive
+//! 合并仍由后续切片接入。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -9,7 +9,10 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use self::material::MaterialDef;
 use super::mesh::{Mesh, SkinData};
+
+mod material;
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;
@@ -54,6 +57,8 @@ struct Root {
     nodes: Vec<NodeDef>,
     #[serde(default)]
     skins: Vec<SkinDef>,
+    #[serde(default)]
+    materials: Vec<MaterialDef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +99,7 @@ struct Primitive {
     #[serde(default)]
     attributes: HashMap<String, usize>,
     indices: Option<usize>,
+    material: Option<usize>,
     #[serde(default = "default_mode")]
     mode: u32,
 }
@@ -210,6 +216,14 @@ fn load_glb_bytes(bytes: &[u8]) -> Result<Mesh, MeshError> {
         None => Vec::new(),
     };
     let mut mesh = Mesh::new(positions, indices);
+    if let Some(material) = primitive.material {
+        mesh.base_color_factor = root
+            .materials
+            .get(material)
+            .ok_or_else(|| MeshError::Missing(format!("material {material}")))?
+            .pbr_metallic_roughness
+            .base_color_factor;
+    }
     if let (Some(joints), Some(weights)) = (
         primitive.attributes.get("JOINTS_0").copied(),
         primitive.attributes.get("WEIGHTS_0").copied(),

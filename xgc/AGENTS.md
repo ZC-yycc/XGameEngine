@@ -112,8 +112,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵与祖先骨架姿态） |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；顶点着色器输出世界坐标，片段用 `dpdx/dpdy` 叉积法线做方向光面着色 |
-| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData`；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
-| `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
+| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData` + `base_color_factor`（`tint` 与实体材质相乘）；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
+| `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / 首图元材质 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
+| `crates/xgc-render/src/glb/material.rs` | glTF 材质 JSON 最小投影：`pbrMetallicRoughness.baseColorFactor`（缺省白）；纹理字段接入时在此扩展 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
@@ -144,7 +145,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 渲染：面着色 / 天空 / HUD / 层级 / 第 150 帧同 tick 已通；下一步 PBR / 网格纹理 / 阴影。
+1. 渲染：面着色 / 天空 / HUD / 层级 / 第 150 帧同 tick / glTF 基色因子已通；下一步补 `.mat` 基色乘子与场景光，再做 metallic-roughness BRDF / 网格纹理 / 阴影。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。
