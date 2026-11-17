@@ -79,7 +79,8 @@ fn sky_irradiance_lights_the_object() {
     // 入射视线 = -Z，反射方向 = +Z，N·V = 1。
     let env = sh_eval(&coefficients, [0.0, 0.0, 1.0]);
     let specular = xgc_render::env_specular(env, 1.0);
-    let expected_linear = std::array::from_fn(|channel| env[channel] + specular[channel]);
+    let kd = xgc_render::sky_kd_env(0.5, 0.0, 1.0);
+    let expected_linear = std::array::from_fn(|channel| env[channel] * kd + specular[channel]);
     let expected = aces_u8(expected_linear);
     assert!(
         expected[0] > 0,

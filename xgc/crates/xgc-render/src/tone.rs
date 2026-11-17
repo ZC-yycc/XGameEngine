@@ -54,6 +54,32 @@ pub fn srgb_encode(linear: [f32; 3]) -> [f32; 3] {
     })
 }
 
+/// Schlick 菲涅尔（与 `instanced.wgsl` 的 `fresnel_schlick` 逐式一致）。
+pub fn fresnel_schlick(cos_theta: f32, f0: [f32; 3]) -> [f32; 3] {
+    let base = 1.0 - cos_theta.clamp(0.0, 1.0);
+    std::array::from_fn(|channel| f0[channel] + (1.0 - f0[channel]) * base.powi(5))
+}
+
+/// 环境光项（与着色器 ambient 分支一致）：`ambient × (albedo·(1-metallic) + F_env)`。
+///
+/// 旧端把菲涅尔反射也算进 ambient（均匀环境的镜面分量），这是平底测试里
+/// 蓝色通道不为 0 的原因。
+pub fn ambient_light(albedo: [f32; 3], metallic: f32, ambient: [f32; 3], n_dot_v: f32) -> [f32; 3] {
+    let f0: [f32; 3] =
+        std::array::from_fn(|channel| 0.04 * (1.0 - metallic) + albedo[channel] * metallic);
+    let f_env = fresnel_schlick(n_dot_v, f0);
+    std::array::from_fn(|channel| {
+        ambient[channel] * (albedo[channel] * (1.0 - metallic) + f_env[channel])
+    })
+}
+
+/// 天空漫反射的 kD 折法（与着色器 `kd_env` 一致）。
+pub fn sky_kd_env(roughness: f32, metallic: f32, n_dot_v: f32) -> f32 {
+    let f0 = 0.04;
+    let f_rough = f0 + ((1.0 - roughness).max(f0) - f0) * (1.0 - n_dot_v).powi(5);
+    (1.0 - f_rough) * (1.0 - metallic)
+}
+
 /// 环境反射的 split-sum 第二项 `f0·A + B`（Lazarov 2013 解析拟合）。
 ///
 /// 与 WGSL `env_brdf_approx` 逐式一致；XGC 这一刀还没有逐材质 metallic / roughness，

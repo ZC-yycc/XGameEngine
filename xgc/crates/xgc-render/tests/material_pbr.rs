@@ -128,8 +128,9 @@ fn dielectric_surface_keeps_diffuse_and_neutral_f0() {
     let color = [0.2f32, 0.4, 0.8];
     let env = sh_eval(&coefficients, [0.0, 0.0, 1.0]);
     let brdf = env_brdf_approx([0.04; 3], 0.5, 1.0);
+    let kd = xgc_render::sky_kd_env(0.5, 0.0, 1.0);
     let expected = aces_u8(std::array::from_fn(|channel| {
-        env[channel] * color[channel] + env[channel] * brdf[channel]
+        env[channel] * color[channel] * kd + env[channel] * brdf[channel]
     }));
     let pixel = render_asset("guid://17e23593a51c476c2f1047b0ca0c4389");
     assert_close("介电体（漫反射 + 中性 F0）", pixel, expected);

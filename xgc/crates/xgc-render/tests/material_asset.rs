@@ -77,7 +77,12 @@ fn real_material_asset_multiplies_base_color() {
         "guid://235b50780baf2866df65bddf31c31470",
         [0.5, 0.5, 0.5, 1.0],
     );
-    let expected = aces_u8([0.275, 0.29, 0.31]);
+    let expected = aces_u8(xgc_render::ambient_light(
+        [0.275, 0.29, 0.31],
+        0.0,
+        [1.0; 3],
+        1.0,
+    ));
     for (axis, want) in expected.into_iter().enumerate() {
         let got = pixel[axis];
         assert!(
@@ -95,7 +100,7 @@ fn missing_material_asset_falls_back_to_model_material() {
         return;
     }
     let pixel = render_asset("guid://0000000000000000000000000000dead", [0.5; 4]);
-    let expected = aces_u8([0.5, 0.5, 0.5]);
+    let expected = aces_u8(xgc_render::ambient_light([0.5; 3], 0.0, [1.0; 3], 1.0));
     for (axis, want) in expected.into_iter().enumerate() {
         assert_eq!(pixel[axis], want, "读不到资产应退回模型材质：{pixel:?}");
     }

@@ -158,10 +158,21 @@ fn gltf_base_color_factor_multiplies_entity_color_once() {
         },
     );
     let ratio = f32::from(halved[0]) / f32::from(white[0]);
-    // 曲线之后的像素仍要逐通道对表：白 = 曲线(0.8,0,0)，灰 = 曲线(0.4,0,0)。
+    // 曲线之后的像素仍要逐通道对表：白 = 曲线(0.8+0.04,0.04,0.04)，灰 = 曲线(0.4+0.04,0.04,0.04)；
+    // ambient 的菲涅尔项与环境色无关（恒 +0.04），所以比值不是 0.5 而是约 0.62。
     // 重复相乘会得到曲线(0.32,0,0) 的红通道 ≈ 103，与 120 明显不同。
-    let expected_white = xgc_render::aces_u8([0.8, 0.0, 0.0]);
-    let expected_halved = xgc_render::aces_u8([0.4, 0.0, 0.0]);
+    let expected_white = xgc_render::aces_u8(xgc_render::ambient_light(
+        [0.8, 0.0, 0.0],
+        0.0,
+        [1.0; 3],
+        1.0,
+    ));
+    let expected_halved = xgc_render::aces_u8(xgc_render::ambient_light(
+        [0.4, 0.0, 0.0],
+        0.0,
+        [1.0; 3],
+        1.0,
+    ));
     for (label, pixel, expected) in [
         ("白模", white, expected_white),
         ("0.5 灰", halved, expected_halved),
@@ -175,7 +186,7 @@ fn gltf_base_color_factor_multiplies_entity_color_once() {
         }
     }
     assert!(
-        white[0] > 150 && (0.43..=0.57).contains(&ratio),
+        white[0] > 150 && (0.58..=0.68).contains(&ratio),
         "模型因子与实体材质只许乘一次：白 {white:?} → 灰 0.5 {halved:?}，ratio={ratio}"
     );
 }

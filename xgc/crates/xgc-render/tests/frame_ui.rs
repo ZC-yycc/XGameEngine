@@ -55,7 +55,7 @@ fn frame_composites_ui_after_scene() {
     let pixel = &pixels[center..center + 4];
     // 本用例只钉"UI 合成在场景之后"：场景红被绿色半透明盖住后，绿升、红降、蓝仍暗。
     assert!(
-        pixel[1] > 150 && pixel[0] < 230 && pixel[2] < 40,
+        pixel[1] > 150 && pixel[0] < 230 && pixel[2] < 95,
         "HUD 必须在三维场景之后按 alpha 合成，实际 {pixel:?}"
     );
     assert_eq!(pixel[3], 255);

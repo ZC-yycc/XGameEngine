@@ -57,6 +57,27 @@ fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
     return f0 * ab.x + ab.y;
 }
 
+// --- Cook-Torrance 直接光三维项（与旧端 scene_pipeline 逐式一致）-------------
+const PI: f32 = 3.141592653589793;
+
+fn distribution_ggx(n_dot_h: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * d * d, 1e-6);
+}
+
+// Schlick-GGX（直接光的 k = alpha/2 形式）拆成两条可见性函数相乘。
+fn smith_visibility(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
+    let k = alpha * 0.5;
+    let gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
+    let gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
+    return gv * gl;
+}
+
+fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - clamp(cos_theta, 0.0, 1.0), 5.0);
+}
+
 fn sky_sh_eval(n: vec3<f32>) -> vec3<f32> {
     return frame.sky_sh[0].rgb * 0.282095
          + frame.sky_sh[1].rgb * (0.488603 * n.y)
@@ -157,30 +178,44 @@ fn fs(input: VsOut) -> @location(0) vec4<f32> {
     if (dot(normal, to_camera) < 0.0) {
         normal = -normal;
     }
-    let to_light = -normalize(frame.sun_dir.xyz);
-    let diffuse = max(dot(normal, to_light), 0.0);
-    // 环境光 + 天空 IBL（两者同标定，直接相加）+ 场景主方向光。
-    // 旧引擎 PBR：albedo = 基色因子 × 实体颜色 × 贴图（没贴图时采样 1×1 白纹理）。
+    // 反照率 = 基色因子 × 实体颜色 × 贴图（没贴图时采样 1×1 白纹理）。
     let albedo = input.color.rgb * textureSample(albedo_texture, albedo_sampler, input.uv).rgb;
     let metallic = clamp(input.material.x, 0.0, 1.0);
     let roughness = clamp(input.material.y, MIN_ROUGHNESS, 1.0);
-    // 金属没有漫反射：环境与直射的漫反射项都乘 (1 - metallic)。
-    let diffuse_color = albedo * (1.0 - metallic);
-    // 介电体 F0 = 0.04，金属 F0 = 基色（旧引擎同样的 mix）。
+    let n_dot_v = max(dot(normal, to_camera), 1e-4);
+    // 绝缘体的基础反射率 4%；金属的 F0 = 自身反照率（有色镜面反射）。
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
-    var light = frame.ambient.rgb * diffuse_color;
+    let alpha_g = roughness * roughness;
+    // 环境项①：全局 ambient 当作均匀环境辐射，镜面按菲涅尔加权（旧端同式）。
+    let f_env = fresnel_schlick(n_dot_v, f0);
+    var light = frame.ambient.rgb * (albedo * (1.0 - metallic) + f_env);
     if (frame.sky_params.x > 0.5) {
-        // 漫反射环境（E/π 的 L2 球谐）+ 环境反射。
-        // 反射项与旧引擎 split-sum 同形：`env(R) × (f0·A + B)`；env 用同一份 SH 在
-        // 反射方向上求值（预过滤立方体的近似），A/B 用逐材质粗糙度的 Lazarov 拟合。
-        light = light + sky_sh_eval(normal) * diffuse_color;
-        let n_dot_v = clamp(dot(normal, to_camera), 0.0, 1.0);
+        // 环境项②：天空 IBL。漫反射用同一份 L2 球谐；镜面仍是 SH 近似，
+        // 但菲涅尔与 kD 折法与旧端 split-sum 一致。
+        let f_rough = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * pow(1.0 - n_dot_v, 5.0);
+        let kd_env = (vec3<f32>(1.0) - f_rough) * (1.0 - metallic);
+        light = light + sky_sh_eval(normal) * albedo * kd_env;
         let reflected = reflect(-to_camera, normal);
         let env_spec = sky_sh_eval(reflected);
         light = light + env_spec * env_brdf_approx(f0, roughness, n_dot_v);
     }
-    let sun_shadow = shadow_factor(input.world, diffuse);
-    light = light + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse * sun_shadow) * diffuse_color;
+    // 场景主方向光：GGX 分布 + Smith 可见性 + Schlick 菲涅尔，漫反射按 (1-F) 扣减。
+    let to_light = -normalize(frame.sun_dir.xyz);
+    let n_dot_l = max(dot(normal, to_light), 0.0);
+    let sun_shadow = shadow_factor(input.world, n_dot_l);
+    // π 校准（与旧端同一条）：场景 intensity 是按 Lambert 直乘手调的，
+    // 把 π 并进 radiance，漫反射回到「intensity × 白面 ≈ 1.0」的观感。
+    let radiance = frame.sun_color.rgb * frame.eye_intensity.w * PI;
+    let half_dir = normalize(to_light + to_camera);
+    let n_dot_h = max(dot(normal, half_dir), 0.0);
+    let v_dot_h = max(dot(to_camera, half_dir), 0.0);
+    let d_term = distribution_ggx(n_dot_h, alpha_g);
+    let g_term = smith_visibility(n_dot_v, n_dot_l, alpha_g);
+    let f_term = fresnel_schlick(v_dot_h, f0);
+    let specular = d_term * g_term * f_term / max(4.0 * n_dot_v * n_dot_l, 1e-4);
+    let kd = (vec3<f32>(1.0) - f_term) * (1.0 - metallic);
+    let diffuse = kd * albedo / PI;
+    light = light + (diffuse + specular) * radiance * n_dot_l * sun_shadow;
     let lit = light;
     return vec4<f32>(aces(lit), input.color.a);
 }

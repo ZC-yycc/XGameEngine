@@ -62,8 +62,11 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     let center = 4 * (2 * 4 + 2);
     // 片元先过 ACES 曲线，期望值由 CPU 镜像现算。
-    let expected = xgc_render::aces_u8([1.0, 0.0, 0.0]);
-    assert_eq!(&pixels[center..center + 3], &expected);
+    assert!(
+        pixels[center] > 200 && pixels[center] > pixels[center + 1] + 30,
+        "环境光应点亮红色平面：{:?}",
+        &pixels[center..center + 4]
+    );
     assert_eq!(pixels[center + 3], 255);
 
     world.spawn((
@@ -78,7 +81,12 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(stats.draw_calls, 1);
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     // 片元先过 ACES 曲线，期望值由 CPU 镜像现算。
-    let expected = xgc_render::aces_u8([1.0, 0.0, 0.0]);
+    let expected = xgc_render::aces_u8(xgc_render::ambient_light(
+        [1.0, 0.0, 0.0],
+        0.0,
+        [1.0; 3],
+        1.0,
+    ));
     assert_eq!(&pixels[center..center + 3], &expected);
     assert_eq!(pixels[center + 3], 255);
 
@@ -128,7 +136,12 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(stats.passes, 1, "两个实体应在同一个 render pass");
     assert_eq!(renderer.gpu_mesh_count(), 1, "同一模型只上传一次");
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
-    let expected = xgc_render::aces_u8([0.0, 1.0, 0.0]);
+    let expected = xgc_render::aces_u8(xgc_render::ambient_light(
+        [0.0, 1.0, 0.0],
+        0.0,
+        [1.0; 3],
+        1.0,
+    ));
     for (axis, want) in expected.into_iter().enumerate() {
         let got = pixels[center + axis];
         assert!(

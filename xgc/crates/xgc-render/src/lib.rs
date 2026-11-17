@@ -71,7 +71,10 @@ pub use text::{text_mesh, text_mesh_wrapped};
 pub use text_draw::TextPipeline;
 pub use texture::TexturePipeline;
 pub use texture_data::TextureData;
-pub use tone::{aces, aces_u8, display_u8, env_brdf_approx, env_specular, srgb_encode};
+pub use tone::{
+    aces, aces_u8, ambient_light, display_u8, env_brdf_approx, env_specular, fresnel_schlick,
+    sky_kd_env, srgb_encode,
+};
 pub use ui_draw::{cover_uv, quad_matrix};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -118,7 +118,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵、材质资产引用与祖先骨架姿态） |
 | `crates/xgc-render/src/frame_color.rs` | 逐 draw 颜色合成：`模型基色因子 → .mat 资产 → 实体覆盖 → 选择高亮`（分流前一次做完） |
 | `crates/xgc-render/src/material.rs` | `.mat` 材质资产解析（基色乘子 + metallic / roughness，加载边界清洗） |
-| `crates/xgc-render/src/tone.rs` | ACES 曲线 CPU 镜像与 8 位对表辅助；WGSL 侧逐式对应 |
+| `crates/xgc-render/src/tone.rs` | ACES 曲线 CPU 镜像与 8 位对表辅助；另含着色器平光口径的 CPU 镜像（`ambient_light` / `fresnel_schlick` / `sky_kd_env`），平光测试期望值由它现算 |
 | `crates/xgc-render/src/shadow.rs` | 方向光阴影：单级正交拟合（`fit_directional_shadow`，与旧端同式）+ 2048² 深度图 + 深度 pass 管线；接收端 3×3 PCF、偏置随 N·L 放大；不做 CSM / PCSS / 点光 |
 | `crates/xgc-render/src/sky_draw.rs` | 天空盒 pass：全屏三角形 + 解析天空逐像素求值（远平面 / `LessEqual` / 不写深度），`inv_view_proj` 反推视线方向 |
 | `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 真字体文本 / 图片画在场景之上（从 `renderer.rs` 按行数预算拆出；字形先排版后上传图集） |
@@ -127,7 +127,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/texture_data.rs` | 基色贴图 RGBA8：PNG 字节解码（8-bit）+ 1×1 白纹理兜底 |
 | `crates/xgc-render/src/texture_bind.rs` | 贴图 GPU 绑定：group(2) 布局 + 线性 Repeat 采样器 + 白纹理兜底绑定组 |
 | `crates/xgc-render/src/gpu_mesh.rs` | 模型 → 位置缓冲 / UV 缓冲 / 索引缓冲 + 贴图绑定组，跨帧复用 |
-| `crates/xgc-render/src/instanced.wgsl` | 主场景片元着色器：天空 SH、逐材质环境反射（`f0 = mix(0.04, 基色, metallic)` + Lazarov BRDF、`MIN_ROUGHNESS=0.04`）、`基色因子 × 实体颜色 × 基色贴图` 的 albedo、阴影 PCF、ACES；`include_str!` 进 `instanced.rs`（守 600 行预算） |
+| `crates/xgc-render/src/instanced.wgsl` | 主场景片元着色器：环境光含菲涅尔项、直接光 Cook-Torrance（GGX + Smith + Schlick、`(1-F)` 漫反射扣减、π 校准）、天空 SH、逐材质环境反射（`f0 = mix(0.04, 基色, metallic)` + Lazarov BRDF、`MIN_ROUGHNESS=0.04`）、`基色因子 × 实体颜色 × 基色贴图` 的 albedo、阴影 PCF、ACES；`include_str!` 进 `instanced.rs`（守 600 行预算） |
 | `crates/xgc-render/src/shot.rs` | 截图取景：`Bounds` 拟合、顺光视轴（由场景主方向光推）、近远裁剪；`render_shot` 优先场景相机 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData` + `base_color_factor` + `uvs` + 基色贴图（`Arc<TextureData>`）；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / 首图元材质 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
@@ -163,7 +163,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：真字体 UI 已通（mean_abs 1.81 → 1.65）。下一步补直射光 GGX 高光 / CSM / 软阴影与 GPU 蒙皮快路径（现在带贴图蒙皮走 CPU 蒙皮 + 实例化），再回到物理的角色控制器 / 关节。
+1. 割接视觉：直接光 PBR 已通（mean_abs 1.65 → 0.96、差异像素 33.89%）；剩余以 UI 面板与狐狸蒙皮网格光照为主。下一步补 CSM / 软阴影 / 点光阴影与 GPU 蒙皮快路径的光照（现在带贴图蒙皮走 CPU 蒙皮 + 实例化），再回物理角色控制器 / 关节。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。
