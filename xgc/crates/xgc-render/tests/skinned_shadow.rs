@@ -3,9 +3,12 @@
 //! 判据全部用"开 / 关阴影两帧逐像素比较"，不手算投影：旧实现（蒙皮不进阴影批次）
 //! 会让每一条都红。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+mod skinned_support;
+
+use skinned_support::write_skinned_cube_gltf;
 use xgc_render::{
     identity, translation, GpuContext, MeshCache, Renderer, ResourceDesc, ResourceUsage,
 };
@@ -250,98 +253,4 @@ fn render(
         pixels: context.read_texture_rgba8(texture, WIDTH, HEIGHT).unwrap(),
         gpu_skin_meshes: renderer.gpu_skin_mesh_count(),
     }
-}
-
-/// 闭口立方体 + 单关节蒙皮：任何光照方向都有朝光的三角形，不会因背面剔除而整块
-/// 从阴影图里消失（平面四边形会，那样测出来的"没有阴影"是假绿）。
-fn write_skinned_cube_gltf() -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "xgc_skinned_shadow_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&root).unwrap();
-
-    let corners = [
-        [-0.5f32, -0.5, -0.5],
-        [0.5, -0.5, -0.5],
-        [0.5, 0.5, -0.5],
-        [-0.5, 0.5, -0.5],
-        [-0.5, -0.5, 0.5],
-        [0.5, -0.5, 0.5],
-        [0.5, 0.5, 0.5],
-        [-0.5, 0.5, 0.5],
-    ];
-    let faces = [
-        [4u16, 5, 6, 4, 6, 7],
-        [1, 0, 3, 1, 3, 2],
-        [0, 4, 7, 0, 7, 3],
-        [5, 1, 2, 5, 2, 6],
-        [3, 7, 6, 3, 6, 2],
-        [0, 1, 5, 0, 5, 4],
-    ];
-    let mut bin = Vec::new();
-    for corner in corners {
-        for value in corner {
-            bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    for _ in 0..8 {
-        for value in [0u16; 4] {
-            bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    for _ in 0..8 {
-        for value in [1.0f32, 0.0, 0.0, 0.0] {
-            bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    for value in identity() {
-        bin.extend_from_slice(&value.to_le_bytes());
-    }
-    for index in faces.iter().flatten() {
-        bin.extend_from_slice(&index.to_le_bytes());
-    }
-    std::fs::write(root.join("skin.bin"), &bin).unwrap();
-
-    let json = serde_json::json!({
-        "asset": {"version": "2.0"},
-        "buffers": [{"uri": "skin.bin", "byteLength": bin.len()}],
-        "bufferViews": [
-            {"buffer": 0, "byteOffset": 0, "byteLength": 96},
-            {"buffer": 0, "byteOffset": 96, "byteLength": 64},
-            {"buffer": 0, "byteOffset": 160, "byteLength": 128},
-            {"buffer": 0, "byteOffset": 288, "byteLength": 64},
-            {"buffer": 0, "byteOffset": 352, "byteLength": 72}
-        ],
-        "accessors": [
-            {"bufferView": 0, "componentType": 5126, "count": 8, "type": "VEC3"},
-            {"bufferView": 1, "componentType": 5123, "count": 8, "type": "VEC4"},
-            {"bufferView": 2, "componentType": 5126, "count": 8, "type": "VEC4"},
-            {"bufferView": 3, "componentType": 5126, "count": 1, "type": "MAT4"},
-            {"bufferView": 4, "componentType": 5123, "count": 36, "type": "SCALAR"}
-        ],
-        "materials": [{"pbrMetallicRoughness": {
-            "baseColorFactor": [0.9, 0.85, 0.8, 1.0]
-        }}],
-        "meshes": [{"primitives": [{
-            "attributes": {"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2},
-            "indices": 4,
-            "material": 0,
-            "mode": 4
-        }]}],
-        "nodes": [{"mesh": 0, "skin": 0}, {"name": "joint"}],
-        "skins": [{"joints": [1], "inverseBindMatrices": 3}],
-        "scenes": [{"nodes": [0]}],
-        "scene": 0
-    });
-    std::fs::write(
-        root.join("skin.gltf"),
-        serde_json::to_vec_pretty(&json).unwrap(),
-    )
-    .unwrap();
-    root
 }

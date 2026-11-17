@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::camera::{mul, Mat4, IDENTITY};
 use super::gpu::{GpuContext, GpuError};
-use super::instanced::{create_frame_bind, create_frame_layout, FrameLighting};
+use super::instanced::create_frame_layout;
 use super::mesh::Mesh;
 use super::texture_bind::TextureBinding;
 
@@ -358,47 +358,59 @@ impl GpuContext {
     }
 }
 
-pub(crate) struct SkinnedRequest<'a> {
-    pub(crate) texture: &'a wgpu::Texture,
-    pub(crate) depth: &'a wgpu::TextureView,
-    pub(crate) clear: bool,
-    pub(crate) clear_color: wgpu::Color,
+/// 一批蒙皮 draw 里的一条：网格、palette 字节、模型矩阵与材质参数。
+pub(crate) struct SkinnedDraw<'a> {
     pub(crate) mesh: &'a GpuSkinMesh,
-    pub(crate) pose: &'a [[f32; 16]],
-    pub(crate) inverse_bind: &'a [[f32; 16]],
+    /// `palette_bytes` 的结果（256 槽 × mat4）；每帧每角色只算一次。
+    pub(crate) palette: &'a [u8],
     pub(crate) model: Mat4,
     pub(crate) color: [f32; 4],
     pub(crate) metallic: f32,
     pub(crate) roughness: f32,
-    pub(crate) view_proj: Mat4,
-    pub(crate) lighting: &'a FrameLighting,
-    pub(crate) shadow_view: &'a wgpu::TextureView,
-    pub(crate) shadow_sampler: &'a wgpu::Sampler,
+}
+
+/// 一批蒙皮 draw 的公共参数：目标、深度、清屏与否、本帧共用的一次 frame binding。
+pub(crate) struct SkinnedBatchRequest<'a> {
+    pub(crate) texture: &'a wgpu::Texture,
+    pub(crate) depth: &'a wgpu::TextureView,
+    pub(crate) clear: bool,
+    pub(crate) clear_color: wgpu::Color,
+    pub(crate) frame_bind: &'a wgpu::BindGroup,
+    pub(crate) draws: &'a [SkinnedDraw<'a>],
 }
 
 impl SkinnedPipeline {
-    pub(crate) fn draw(
+    /// 一批蒙皮 draw 共用**一个** frame binding、**一个** pass、**一次** submit。
+    ///
+    /// 旧端也是这样：palette 逐角色，提交不逐角色。此前 XGC 每条蒙皮 draw 各建
+    /// 一次 frame bind / encoder / submit，多角色场景下提交次数随角色数线性增长。
+    ///
+    /// `clear` 只有"本帧还没有任何 draw 写进这张目标"时才为真（与实例化 pass 同款），
+    /// 否则用 `LoadOp::Load` 接在前面写好的颜色 / 深度上。
+    pub(crate) fn draw_batch(
         &self,
         context: &GpuContext,
-        request: &SkinnedRequest<'_>,
-    ) -> Result<(), GpuError> {
-        let frame_bind = create_frame_bind(
-            context,
-            &self.frame_layout,
-            request.view_proj,
-            request.lighting,
-            request.shadow_view,
-            request.shadow_sampler,
-        );
-        let joints = self.joints_buffer(context, request.pose, request.inverse_bind);
-        let joints_bind = uniform_bind(
-            context,
-            &self.joints_layout,
-            &joints,
-            "xgc-skin-joints-bind",
-        );
-        let model = model_buffer(context, request);
-        let model_bind = uniform_bind(context, &self.model_layout, &model, "xgc-skin-model-bind");
+        request: &SkinnedBatchRequest<'_>,
+    ) -> Result<usize, GpuError> {
+        let draws = request.draws;
+        if draws.is_empty() {
+            return Ok(0);
+        }
+        // palette / model 逐条建绑定，但都在进 pass 之前建好（pass 只借用）。
+        let mut bindings = Vec::with_capacity(draws.len());
+        for draw in draws {
+            let palette = create_uniform_buffer(context, "xgc-skin-joints-buffer", draw.palette);
+            let palette_bind = uniform_bind(
+                context,
+                &self.joints_layout,
+                &palette,
+                "xgc-skin-joints-bind",
+            );
+            let model = model_buffer(context, draw);
+            let model_bind =
+                uniform_bind(context, &self.model_layout, &model, "xgc-skin-model-bind");
+            bindings.push((palette_bind, model_bind));
+        }
         let view = request
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -439,48 +451,41 @@ impl SkinnedPipeline {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &frame_bind, &[]);
-            pass.set_bind_group(1, &joints_bind, &[]);
-            pass.set_bind_group(2, &request.mesh.texture_group, &[]);
-            pass.set_bind_group(3, &model_bind, &[]);
-            pass.set_vertex_buffer(0, request.mesh.position.slice(..));
-            pass.set_vertex_buffer(1, request.mesh.uv.slice(..));
-            pass.set_vertex_buffer(2, request.mesh.joints.slice(..));
-            pass.set_vertex_buffer(3, request.mesh.weights.slice(..));
-            if let Some(indices) = &request.mesh.index_buffer {
-                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..request.mesh.indices, 0, 0..1);
-            } else {
-                pass.draw(0..request.mesh.vertices, 0..1);
+            pass.set_bind_group(0, request.frame_bind, &[]);
+            for (draw, (palette_bind, model_bind)) in draws.iter().zip(&bindings) {
+                pass.set_bind_group(1, palette_bind, &[]);
+                pass.set_bind_group(2, &draw.mesh.texture_group, &[]);
+                pass.set_bind_group(3, model_bind, &[]);
+                pass.set_vertex_buffer(0, draw.mesh.position.slice(..));
+                pass.set_vertex_buffer(1, draw.mesh.uv.slice(..));
+                pass.set_vertex_buffer(2, draw.mesh.joints.slice(..));
+                pass.set_vertex_buffer(3, draw.mesh.weights.slice(..));
+                if let Some(indices) = &draw.mesh.index_buffer {
+                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..draw.mesh.indices, 0, 0..1);
+                } else {
+                    pass.draw(0..draw.mesh.vertices, 0..1);
+                }
             }
         }
         context.queue().submit(Some(encoder.finish()));
-        Ok(())
+        Ok(draws.len())
     }
 
-    fn joints_buffer(
-        &self,
-        context: &GpuContext,
-        pose: &[[f32; 16]],
-        inverse_bind: &[[f32; 16]],
-    ) -> wgpu::Buffer {
-        create_uniform_buffer(
-            context,
-            "xgc-skin-joints-buffer",
-            &palette_bytes(pose, inverse_bind),
-        )
+    pub(crate) fn frame_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.frame_layout
     }
 }
 
-fn model_buffer(context: &GpuContext, request: &SkinnedRequest<'_>) -> wgpu::Buffer {
+fn model_buffer(context: &GpuContext, draw: &SkinnedDraw<'_>) -> wgpu::Buffer {
     let mut bytes = Vec::with_capacity(96);
-    for value in request.model {
+    for value in draw.model {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    for value in request.color {
+    for value in draw.color {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    for value in [request.metallic, request.roughness, 0.0, 0.0] {
+    for value in [draw.metallic, draw.roughness, 0.0, 0.0] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     create_uniform_buffer(context, "xgc-skin-model-buffer", &bytes)

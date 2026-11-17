@@ -1,8 +1,11 @@
 //! GPU 蒙皮必须与静态主场景共享 PBR / ACES / 基色贴图；超限姿态的 CPU 回退也不能丢 UV。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+mod skinned_support;
+
+use skinned_support::{write_textured_skin_gltf, write_textured_skin_gltf_with_joint};
 use xgc_render::{
     identity, scene_bounds, translation, GpuContext, MeshCache, Renderer, ResourceDesc,
     ResourceUsage,
@@ -13,6 +16,9 @@ use xgc_world::{
 };
 
 static GPU_LOCK: Mutex<()> = Mutex::new(());
+
+/// 双角色差分用的画布边长。
+const TWO_CHARACTER_SIZE: u32 = 96;
 const SIZE: u32 = 64;
 
 fn gpu_lock() -> MutexGuard<'static, ()> {
@@ -183,7 +189,9 @@ fn auto_framing_keeps_a_posed_mesh_in_frame() {
     let texture = target.as_texture().unwrap();
     let mut renderer = Renderer::new(MeshCache::new(&root));
     renderer.render_shot(&context, texture, &world).unwrap();
-    let pixels = context.read_texture_rgba8(texture, 96, 96).unwrap();
+    let pixels = context
+        .read_texture_rgba8(texture, TWO_CHARACTER_SIZE, TWO_CHARACTER_SIZE)
+        .unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 
     let lit = pixels
@@ -399,6 +407,129 @@ fn render_shadow_receiver(context: &GpuContext, root: &Path, casts_shadow: bool)
     }
 }
 
+#[test]
+fn batched_skinned_draws_keep_their_own_palettes() {
+    let _gpu = gpu_lock();
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let root = write_textured_skin_gltf();
+    // 左侧角色固定，右侧角色换姿态：一批提交里两条 draw 必须各用各的 palette。
+    let still = render_two_characters(&context, &root, identity());
+    let moved = render_two_characters(&context, &root, translation(1.0, 0.0, 0.0));
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let (still_left, still_right) = column_halves(&still.pixels);
+    let (moved_left, moved_right) = column_halves(&moved.pixels);
+    // 没有这两条断言时，路由退回 CPU 蒙皮也能让像素全绿——那就测不到 draw_batch。
+    // 两个角色共用同一个模型，所以蒙皮网格缓存只有 1 条（palette 才是逐角色的）。
+    assert_eq!(still.gpu_skin_meshes, 1, "两个角色都必须走 GPU 蒙皮");
+    assert_eq!(moved.gpu_skin_meshes, 1);
+    assert!(
+        lit(&still_left) > 50,
+        "左侧角色必须可见：{}",
+        lit(&still_left)
+    );
+    assert!(
+        lit(&moved_right) > 50,
+        "右侧角色必须可见：{}",
+        lit(&moved_right)
+    );
+    assert!(
+        still_left == moved_left,
+        "右侧角色换姿态不能影响左侧角色（说明 palette 串了）"
+    );
+    assert!(
+        still_right != moved_right,
+        "右侧角色换了姿态，它的像素必须跟着变"
+    );
+}
+
+/// 按**列**切成左右两半（每行各取前 / 后一半像素），不是把字节流对半砍。
+fn column_halves(pixels: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let width = TWO_CHARACTER_SIZE as usize;
+    let half = width / 2;
+    let mut left = Vec::with_capacity(pixels.len() / 2);
+    let mut right = Vec::with_capacity(pixels.len() / 2);
+    for row in pixels.chunks_exact(width * 4) {
+        left.extend_from_slice(&row[..half * 4]);
+        right.extend_from_slice(&row[half * 4..]);
+    }
+    (left, right)
+}
+
+fn lit(pixels: &[u8]) -> usize {
+    pixels
+        .chunks_exact(4)
+        .filter(|pixel| u32::from(pixel[0]) + u32::from(pixel[1]) + u32::from(pixel[2]) > 30)
+        .count()
+}
+
+/// 两台骨架 / 两个蒙皮四边形（左 x=-2 固定，右 x=+2 用 `right_pose`）+ 固定相机。
+fn render_two_characters(context: &GpuContext, root: &Path, right_pose: [f32; 16]) -> Frame {
+    let mut world = World::new();
+    world.set_environment(SceneEnvironment {
+        lights: vec![SceneLight {
+            name: "Sun".to_string(),
+            kind: LightKind::Directional,
+            direction: [0.2, -0.3, -1.0],
+            position: [0.0; 3],
+            color: [1.0; 3],
+            intensity: 3.0,
+            range: 10.0,
+            casts_shadow: false,
+            shadow_resolution: 0,
+        }],
+        ambient: [0.4; 3],
+    });
+    for (x, pose) in [(-2.0_f32, identity()), (2.0, right_pose)] {
+        let skeleton = world.spawn((
+            Skeleton { joint_count: 1 },
+            SkeletonPose {
+                matrices: ron::to_string(&vec![pose]).unwrap(),
+            },
+        ));
+        let parent = world.entity(skeleton).unwrap();
+        world.spawn((
+            GlobalTransform {
+                position: [x, 0.0, 0.0],
+                ..GlobalTransform::default()
+            },
+            MeshRenderer {
+                model: "skin.gltf".to_string(),
+            },
+            Material::default(),
+            Parent { entity: parent },
+        ));
+    }
+    world.spawn((
+        GlobalTransform {
+            position: [0.0, 0.0, 6.0],
+            ..GlobalTransform::default()
+        },
+        Camera::default(),
+    ));
+    let target = context
+        .create_resource(&ResourceDesc::texture2d(
+            "two-skinned-characters",
+            "rgba8unorm",
+            TWO_CHARACTER_SIZE,
+            TWO_CHARACTER_SIZE,
+            vec![ResourceUsage::ColorAttachment],
+        ))
+        .unwrap();
+    let texture = target.as_texture().unwrap();
+    let mut renderer = Renderer::new(MeshCache::new(root));
+    renderer.render(context, texture, &world).unwrap();
+    Frame {
+        pixels: context
+            .read_texture_rgba8(texture, TWO_CHARACTER_SIZE, TWO_CHARACTER_SIZE)
+            .unwrap(),
+        gpu_skin_meshes: renderer.gpu_skin_mesh_count(),
+    }
+}
+
 fn colored_centroid_x(pixels: &[u8]) -> f32 {
     let mut total = 0.0;
     let mut count = 0.0;
@@ -410,127 +541,4 @@ fn colored_centroid_x(pixels: &[u8]) -> f32 {
     }
     assert!(count > 100.0, "测试网格必须覆盖足够像素，实际 {count}");
     total / count
-}
-
-fn write_textured_skin_gltf() -> PathBuf {
-    write_textured_skin_gltf_with_joint(0, 1)
-}
-
-/// 四个顶点的权重等分到 `joint` 槽；骨架声明 `joint_count` 根骨头（各一份单位逆绑定）。
-/// 槽位上限（旧端 256）就是靠"骨架比槽位多一根"来钉的。
-fn write_textured_skin_gltf_with_joint(joint: u16, joint_count: u16) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "xgc_skinned_pbr_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&root).unwrap();
-
-    let mut bin = Vec::new();
-    for position in [
-        [-0.8f32, -0.8, 0.0],
-        [0.8, -0.8, 0.0],
-        [0.8, 0.8, 0.0],
-        [-0.8, 0.8, 0.0],
-    ] {
-        for value in position {
-            bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    for uv in [[0.0f32, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]] {
-        for value in uv {
-            bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    for _ in 0..4 {
-        for value in [joint; 4] {
-            bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    // 总权重刻意不是 1；静态 / GPU 逐像素同值会钉住 shader 的正权重归一。
-    for _ in 0..4 {
-        for value in [0.25f32, 0.25, 0.0, 0.0] {
-            bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    // 每根骨头一份逆绑定（全单位阵）：palette 只认 `joint < inverse_bind.len()`。
-    for _ in 0..joint_count {
-        for value in identity() {
-            bin.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    for index in [0u16, 1, 2, 0, 2, 3] {
-        bin.extend_from_slice(&index.to_le_bytes());
-    }
-    std::fs::write(root.join("skin.bin"), &bin).unwrap();
-
-    let joints: Vec<String> = (1..=joint_count)
-        .map(|index| format!("{{\"name\": \"joint-{index}\"}}"))
-        .collect();
-    let nodes = format!("{{\"mesh\": 0, \"skin\": 0}}, {}", joints.join(", "));
-    let joint_slots: Vec<String> = (1..=joint_count).map(|index| index.to_string()).collect();
-    let skins = format!(
-        "{{\"joints\": [{}], \"inverseBindMatrices\": 4}}",
-        joint_slots.join(", ")
-    );
-    let indices_offset = 240 + (joint_count as usize - 1) * 64;
-    let json = format!(
-        r#"{{
-  "asset": {{"version": "2.0"}},
-  "buffers": [{{"uri": "skin.bin", "byteLength": {buffer_len}}}],
-  "bufferViews": [
-    {{"buffer": 0, "byteOffset": 0, "byteLength": 48}},
-    {{"buffer": 0, "byteOffset": 48, "byteLength": 32}},
-    {{"buffer": 0, "byteOffset": 80, "byteLength": 32}},
-    {{"buffer": 0, "byteOffset": 112, "byteLength": 64}},
-    {{"buffer": 0, "byteOffset": 176, "byteLength": {ibm_len}}},
-    {{"buffer": 0, "byteOffset": {indices_offset}, "byteLength": 12}}
-  ],
-  "accessors": [
-    {{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3"}},
-    {{"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC2"}},
-    {{"bufferView": 2, "componentType": 5123, "count": 4, "type": "VEC4"}},
-    {{"bufferView": 3, "componentType": 5126, "count": 4, "type": "VEC4"}},
-    {{"bufferView": 4, "componentType": 5126, "count": {joint_count}, "type": "MAT4"}},
-    {{"bufferView": 5, "componentType": 5123, "count": 6, "type": "SCALAR"}}
-  ],
-  "images": [{{"uri": "albedo.png"}}],
-  "textures": [{{"source": 0}}],
-  "materials": [{{"pbrMetallicRoughness": {{
-    "baseColorFactor": [0.9, 0.8, 0.7, 1.0],
-    "baseColorTexture": {{"index": 0}}
-  }}}}],
-  "meshes": [{{"primitives": [{{
-    "attributes": {{"POSITION": 0, "TEXCOORD_0": 1, "JOINTS_0": 2, "WEIGHTS_0": 3}},
-    "indices": 5,
-    "material": 0,
-    "mode": 4
-  }}]}}],
-  "nodes": [{nodes}],
-  "skins": [{skins}],
-  "scenes": [{{"nodes": [0]}}],
-  "scene": 0
-}}"#,
-        buffer_len = bin.len(),
-        ibm_len = joint_count as usize * 64,
-    );
-    std::fs::write(root.join("skin.gltf"), json).unwrap();
-    write_test_png(&root.join("albedo.png"));
-    root
-}
-
-fn write_test_png(path: &Path) {
-    let file = std::fs::File::create(path).unwrap();
-    let mut encoder = png::Encoder::new(file, 2, 2);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().unwrap();
-    writer
-        .write_image_data(&[
-            240, 40, 20, 255, 20, 220, 40, 255, 30, 60, 240, 255, 230, 190, 20, 255,
-        ])
-        .unwrap();
 }

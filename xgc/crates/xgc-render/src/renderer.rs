@@ -15,7 +15,7 @@ use super::texture::TexturePipeline;
 use xgc_world::World;
 
 use super::resources::{ResourceDesc, ResourceUsage};
-use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
+use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline};
 use super::sky::{sky_irradiance, SkySettings};
 mod hdr;
 mod ui;
@@ -491,6 +491,8 @@ impl Renderer {
                 ));
             }
             let pipeline = &self.skinned.as_ref().unwrap().1;
+            // 第一遍：上传本条需要的蒙皮网格并算好 palette（上传会可变借用缓存）。
+            let mut resolved: Vec<(usize, Vec<u8>)> = Vec::with_capacity(gpu_items.len());
             for (index, item) in gpu_items.iter().enumerate() {
                 let Some(mesh) = self
                     .meshes
@@ -502,36 +504,55 @@ impl Renderer {
                 if mesh.positions.is_empty() {
                     continue;
                 }
-                let pose = item.pose.as_deref().unwrap_or(&[]);
+                self.skin_meshes
+                    .upload(context, &item.model, mesh, textures);
                 let inverse_bind = mesh
                     .skin
                     .as_ref()
                     .map(|skin| skin.inverse_bind.as_slice())
                     .unwrap_or(&[]);
-                let gpu_mesh = self
-                    .skin_meshes
-                    .upload(context, &item.model, mesh, textures);
-                pipeline.draw(
+                let palette = super::skinned::palette_bytes(
+                    item.pose.as_deref().unwrap_or(&[]),
+                    inverse_bind,
+                );
+                resolved.push((index, palette));
+            }
+            // 第二遍：只读缓存组出整批 draw，一批共用一个 frame binding / 一次提交。
+            let mut batch = Vec::with_capacity(resolved.len());
+            for (index, palette) in &resolved {
+                let item = &gpu_items[*index];
+                let Some(gpu_mesh) = self.skin_meshes.get(&item.model) else {
+                    continue;
+                };
+                batch.push(super::skinned::SkinnedDraw {
+                    mesh: gpu_mesh,
+                    palette,
+                    model: item.transform,
+                    color: item.color,
+                    metallic: item.metallic,
+                    roughness: item.roughness,
+                });
+            }
+            if !batch.is_empty() {
+                let frame_bind = super::instanced::create_frame_bind(
                     context,
-                    &SkinnedRequest {
+                    pipeline.frame_layout(),
+                    view_proj,
+                    &lighting,
+                    shadow_view,
+                    shadow_sampler,
+                );
+                draw_calls += pipeline.draw_batch(
+                    context,
+                    &super::skinned::SkinnedBatchRequest {
                         texture: target,
                         depth,
-                        clear: draw_calls == 0 && index == 0,
+                        clear: draw_calls == 0,
                         clear_color: self.clear_color,
-                        mesh: gpu_mesh,
-                        pose,
-                        inverse_bind,
-                        model: item.transform,
-                        color: item.color,
-                        metallic: item.metallic,
-                        roughness: item.roughness,
-                        view_proj,
-                        lighting: &lighting,
-                        shadow_view,
-                        shadow_sampler,
+                        frame_bind: &frame_bind,
+                        draws: &batch,
                     },
                 )?;
-                draw_calls += 1;
             }
         }
         if self.sky.enabled {
