@@ -224,6 +224,63 @@ fn runtime_drives_script_entities_and_reloads() {
 }
 
 #[test]
+fn missing_animation_state_does_not_block_other_scripts() {
+    use std::collections::BTreeMap;
+
+    use xgc_world::{AnimationState, Script, Transform, World};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_lua_optional_anim_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("anim.lua"),
+        "function update(ctx) set_anim_param(ctx, 'speed', 1.0) end\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("move.lua"),
+        "function update(ctx) set_pos(ctx, 7.0, 0.0, 0.0) end\n",
+    )
+    .unwrap();
+
+    let mut world = World::new();
+    world.spawn((
+        Transform::default(),
+        Script {
+            path: "anim.lua".to_string(),
+        },
+    ));
+    let animated = world.spawn((
+        Transform::default(),
+        AnimationState::default(),
+        Script {
+            path: "anim.lua".to_string(),
+        },
+    ));
+    let mover = world.spawn((
+        Transform::default(),
+        Script {
+            path: "move.lua".to_string(),
+        },
+    ));
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+
+    assert_eq!(world.get::<Transform>(mover).unwrap().position[0], 7.0);
+    let parameters: BTreeMap<String, f32> =
+        ron::from_str(&world.get::<AnimationState>(animated).unwrap().parameters).unwrap();
+    assert_eq!(parameters.get("speed"), Some(&1.0));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn memory_limit_rejects_large_allocation() {
     let host = LuaHost::new().unwrap();
     let _previous = host.set_memory_limit(128 * 1024).unwrap();

@@ -179,7 +179,7 @@ impl ScriptRuntime {
                     0x0505 => {
                         for (field, value) in &component.fields {
                             if let ("parameters", Value::String(value)) = (field.as_str(), value) {
-                                row.anim_parameters = value.clone();
+                                row.anim_parameters = Some(value.clone());
                             }
                         }
                     }

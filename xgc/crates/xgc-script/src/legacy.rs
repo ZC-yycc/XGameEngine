@@ -19,7 +19,7 @@ pub struct EntityView {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub velocity: [f32; 3],
-    pub anim_parameters: String,
+    pub anim_parameters: Option<String>,
     pub clicked: bool,
     pub hovered: bool,
     pub pressed: bool,
@@ -241,11 +241,16 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
         .set(
             "set_anim_param",
             lua.create_function(move |_, (_ctx, name, value): (mlua::Value, String, f32)| {
-                let current = anim_view
-                    .borrow()
-                    .entity(self_id)
-                    .map(|entity| entity.anim_parameters.clone())
-                    .unwrap_or_else(|| "{}".to_string());
+                let current = {
+                    let view = anim_view.borrow();
+                    let Some(entity) = view.entity(self_id) else {
+                        return Ok(());
+                    };
+                    let Some(parameters) = &entity.anim_parameters else {
+                        return Ok(());
+                    };
+                    parameters.clone()
+                };
                 let mut parameters: BTreeMap<String, f32> =
                     ron::from_str(&current).unwrap_or_default();
                 parameters.insert(name, value);

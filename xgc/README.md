@@ -79,9 +79,10 @@ click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选
 `Simulation::set_ui_input` 作为宿主输入桥，`hit_test` 取最上层可交互元素、
 `AudioMixerSystem` 按监听者距离 + `audio.mixer` 总线写 `audio.gain`、WAV（PCM16 /
 Float32）解码 + 目录素材库、`SoftwareMixer` 软件混音 + WAV 写出、`HierarchySystem`
-合成世界变换）→ 快照 / trace。`render-frame` 也复用同一个 `HierarchySystem`，在截图前
-重算 `GlobalTransform`；`VelocitySystem` 按 archetype 分片并行，1 / 2 / 8 线程 state hash
-逐位一致。
+合成世界变换）→ 快照 / trace。`render-frame` 的可选帧数缺省为 0；显式传入时复用
+`Simulation::step_with` + `ScriptRuntime::run_frame` 推进固定 60 Hz 正式帧，再按截图尺寸
+重算 `GlobalTransform` 与 UI 布局。`VelocitySystem` 按 archetype 分片并行，1 / 2 / 8
+线程 state hash 逐位一致。
 层级系统会跳过环里的节点，不让一个坏父链阻塞其它实体；节点 / 存在集 / 结果表
 跨帧复用，稳态不再取 `WorldData`。`SystemAccess` 已能判定读写冲突，
 `Schedule::batches()` 给出确定性并行批次；跨系统并行执行还差世界所有权拆分。
@@ -98,8 +99,8 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（222 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（156 个 Rust 文件最大 599 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（225 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（157 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
 30 个内建类型 34668 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
@@ -127,7 +128,7 @@ cargo run -p xgc-cli -- assets <项目根>
 cargo run -p xgc-cli -- clips <剪辑目录>
 cargo run -p xgc-cli -- audio <WAV目录>
 cargo run -p xgc-cli -- mix <输入.wav> <输出.wav>
-cargo run -p xgc-cli -- render-frame <世界.json> <out.ppm> [资产根] [宽] [高]
+cargo run -p xgc-cli -- render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]
 ```
 
 本机 cargo 不在 PATH 时，用 `C:\Users\Administrator\.cargo\bin\cargo.exe`；

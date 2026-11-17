@@ -9,10 +9,8 @@ use xgc_agent::Agent;
 use xgc_asset::scan as scan_assets;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
-use xgc_script::{LuaHost, ScriptRuntime};
-use xgc_sim::{
-    play, write_wav_mono, AnimationLibrary, AudioLibrary, Scenario, Simulation, SoftwareMixer,
-};
+use xgc_script::LuaHost;
+use xgc_sim::{play, write_wav_mono, AnimationLibrary, AudioLibrary, Scenario, SoftwareMixer};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
 
@@ -22,6 +20,7 @@ mod compare_cmd;
 mod cook_cmd;
 mod input_cmd;
 mod render;
+mod runtime_cmd;
 mod world_cmd;
 
 fn main() -> ExitCode {
@@ -38,7 +37,7 @@ fn main() -> ExitCode {
         Some("verify-migration") => {
             world_cmd::verify(args.next().as_deref(), args.next().as_deref())
         }
-        Some("run-scripts") => run_scripts(
+        Some("run-scripts") => runtime_cmd::run_scripts(
             args.next().as_deref(),
             args.next().as_deref(),
             args.next().as_deref(),
@@ -77,17 +76,18 @@ fn main() -> ExitCode {
             args.next().as_deref(),
             args.next().as_deref(),
             args.next().as_deref(),
+            args.next().as_deref(),
         ),
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高]>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高]>"
+                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]>"
             );
             ExitCode::from(2)
         }
@@ -460,57 +460,6 @@ fn serve() -> ExitCode {
             }
         }
     }
-    ExitCode::SUCCESS
-}
-
-fn run_scripts(
-    world_path: Option<&str>,
-    script_dir: Option<&str>,
-    frames: Option<&str>,
-) -> ExitCode {
-    let (Some(world_path), Some(script_dir)) = (world_path, script_dir) else {
-        eprintln!("用法：xgc run-scripts <世界.json> <脚本目录> [帧数]");
-        return ExitCode::from(2);
-    };
-    let frames: u64 = match frames.map(str::parse::<u64>).transpose() {
-        Ok(frames) => frames.unwrap_or(60),
-        Err(_) => {
-            eprintln!("帧数不是整数");
-            return ExitCode::from(2);
-        }
-    };
-    let data = match load_world(Path::new(world_path)) {
-        Ok(data) => data,
-        Err(err) => {
-            eprintln!("加载世界失败：{err}");
-            return ExitCode::from(2);
-        }
-    };
-    let mut world = World::new();
-    if let Err(err) = world.restore_world_data(&data) {
-        eprintln!("恢复世界失败：{err}");
-        return ExitCode::from(2);
-    }
-    let mut simulation = Simulation::new(world);
-    let mut runtime = match scan_assets(Path::new(script_dir)) {
-        Ok(catalog) => ScriptRuntime::with_catalog(script_dir, catalog),
-        Err(_) => ScriptRuntime::new(script_dir),
-    };
-    for _ in 0..frames {
-        if let Err(err) = simulation.step_with(Vec::new(), |world| {
-            runtime.run_frame(world, 1.0 / 60.0);
-        }) {
-            eprintln!("运行失败：{err:?}");
-            return ExitCode::from(2);
-        }
-    }
-    let record = simulation.world().world_data();
-    println!(
-        "run-scripts: frames={frames} entities={} revision={} hash={:016x}",
-        record.entities.len(),
-        record.revision,
-        simulation.world().state_hash()
-    );
     ExitCode::SUCCESS
 }
 

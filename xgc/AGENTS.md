@@ -120,14 +120,15 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-player/src/lib.rs` | `load_world_dir` / `runtime_for` / `run_cooked`：manifest 校验、优先 XGCB、脚本驱动 |
 | `crates/xgc-player/src/window.rs` | eframe + wgpu 视口：每帧仿真 / 脚本并贴图到窗口 |
 | `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录> [帧数]`：无帧数打开窗口，有帧数 headless |
-| `crates/xgc-cli/src/main.rs` | `xgc schema / check [路径] / bench / export / import / run / run-world <世界.json> [帧] / run-scripts <世界.json> <脚本目录> [帧] / serve / migrate <文件|目录> / assets <项目根> / clips <目录> / audio <WAV目录> / mix <in.wav> <out.wav> / lua <脚本> / skeleton <glb> / play <wav>` |
+| `crates/xgc-cli/src/main.rs` | CLI 参数分派；文件预算拆分后的轻量入口 |
+| `crates/xgc-cli/src/runtime_cmd.rs` | `run-scripts` 与截图共用的 `Simulation::step_with` + `ScriptRuntime::run_frame` 固定帧桥 |
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
 | `crates/xgc-cli/src/assets_cmd.rs` | `xgc assets <项目根>`：GUID 扫描 |
 | `crates/xgc-cli/src/cook_cmd.rs` | `xgc cook <项目根> <输出目录>` / `pack <世界.json> <项目根> <输出目录>` / `run-cooked <目录> [帧]` |
 | `crates/xgc-cli/src/compare_cmd.rs` | `xgc compare-headless` / `xgc image-diff <旧图> <新图> [阈值]`；PNG / PPM 逐像素差异 |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
-| `crates/xgc-cli/src/render.rs` | `xgc render-graph / gpu-probe / mesh-probe / render-frame` |
+| `crates/xgc-cli/src/render.rs` | `render-frame <世界> <PPM> [资产根] [宽] [高] [帧数]`；缺省 0 帧，最终重算层级 / UI |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
 ## 不变量（改代码前先看）
@@ -143,11 +144,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接：逐帧 trace / 像素级视觉对照。
-2. 渲染：面着色 / 天空 / HUD / 层级正式帧已通；下一步同 tick 对照，再做 PBR / 网格纹理 / 阴影。
-3. 脚本：正式 System 调度与脚本组件生命周期完整化。
+1. 渲染：面着色 / 天空 / HUD / 层级 / 第 150 帧同 tick 已通；下一步 PBR / 网格纹理 / 阴影。
+2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
+3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。
-5. 现在最大文件 599 行：动它之前先拆。
+5. 推送与 CI；当前最大 Rust 文件 596 行，继续守住 600 行软上限。
 
 ## Token 纪律
 
