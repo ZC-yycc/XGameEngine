@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use serde::Deserialize;
 use xgc_asset::scan as scan_assets;
 use xgc_render::{
     build_draw_list, load_glb, GpuContext, MeshCache, Pass, RenderGraph, Renderer, ResourceDesc,
-    ResourceUsage,
+    ResourceUsage, SkySettings,
 };
 use xgc_sim::{HierarchySystem, System, UiLayoutSystem};
 use xgc_store::load_world;
@@ -18,6 +19,94 @@ fn parse_frame_count(value: Option<&str>) -> Result<u64, &'static str> {
         .transpose()
         .map(|frames| frames.unwrap_or(0))
         .map_err(|_| "帧数不是整数")
+}
+
+/// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分（天空）。
+///
+/// 旧引擎把画面设置放在项目级而不是场景级；XGC 也按项目级读，缺省（没有
+/// `project.ron` / 没有 `sky` 节）= 天空关，画面与这一刀之前逐位相同。
+#[derive(Debug, Default, Deserialize)]
+struct OldProjectFile {
+    #[serde(default)]
+    render: OldProjectRender,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OldProjectRender {
+    #[serde(default)]
+    sky: OldSkyConfig,
+}
+
+/// 缺省值必须逐项等于旧 `SkyConfig::default`（天空默认关）。
+#[derive(Debug, Deserialize)]
+struct OldSkyConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "sky_default_intensity")]
+    intensity: f32,
+    #[serde(default = "sky_default_zenith")]
+    zenith: [f32; 3],
+    #[serde(default = "sky_default_horizon")]
+    horizon: [f32; 3],
+    #[serde(default = "sky_default_ground")]
+    ground: [f32; 3],
+    #[serde(default = "sky_default_sun_size")]
+    sun_size: f32,
+    #[serde(default = "sky_default_intensity")]
+    sun_intensity: f32,
+}
+
+fn sky_default_intensity() -> f32 {
+    1.0
+}
+
+fn sky_default_zenith() -> [f32; 3] {
+    [0.12, 0.28, 0.58]
+}
+
+fn sky_default_horizon() -> [f32; 3] {
+    [0.58, 0.68, 0.82]
+}
+
+fn sky_default_ground() -> [f32; 3] {
+    [0.16, 0.15, 0.14]
+}
+
+fn sky_default_sun_size() -> f32 {
+    1.5
+}
+
+impl Default for OldSkyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: sky_default_intensity(),
+            zenith: sky_default_zenith(),
+            horizon: sky_default_horizon(),
+            ground: sky_default_ground(),
+            sun_size: sky_default_sun_size(),
+            sun_intensity: sky_default_intensity(),
+        }
+    }
+}
+
+/// 读 `project.ron` 的天空节；缺文件 / 缺节返回 `None`。
+fn load_sky(project_root: &Path) -> Option<SkySettings> {
+    let text = std::fs::read_to_string(project_root.join("project.ron")).ok()?;
+    let project: OldProjectFile = ron::from_str(&text).ok()?;
+    let sky = project.render.sky;
+    Some(
+        SkySettings {
+            enabled: sky.enabled,
+            intensity: sky.intensity,
+            zenith: sky.zenith,
+            horizon: sky.horizon,
+            ground: sky.ground,
+            sun_size: sky.sun_size,
+            sun_intensity: sky.sun_intensity,
+        }
+        .sanitized(),
+    )
 }
 
 fn prepare_frame_world(
@@ -279,6 +368,15 @@ pub(crate) fn render_frame(
     };
     let mut renderer = Renderer::new(meshes);
     renderer.set_clear_color([0.62, 0.72, 0.84, 1.0]);
+    // 天空开着的项目：背景取地平线色（旧端天空盒在地平线附近就是它），
+    // 环境照明由渲染器从同一份解析天空投影出来。
+    if let Some(sky) = load_sky(Path::new(assets_root.unwrap_or("."))) {
+        if sky.enabled {
+            let [r, g, b] = sky.horizon.map(|channel| channel * sky.intensity);
+            renderer.set_clear_color([f64::from(r), f64::from(g), f64::from(b), 1.0]);
+        }
+        renderer.set_sky(sky);
+    }
     if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
         for item in build_draw_list(&world).items {
             eprintln!(
@@ -332,6 +430,26 @@ mod tests {
     use xgc_world::{
         GlobalTransform, Name, Parent, Script, Transform, UiElement, UiLayout, Velocity, World,
     };
+
+    /// `project.ron` 的天空节必须按旧 `SkyConfig` 的字段与缺省值读出来。
+    #[test]
+    fn reads_sky_section_from_project_ron() {
+        let root = std::path::Path::new("../../../projects/XGame");
+        if !root.join("project.ron").exists() {
+            eprintln!("skip: 没有旧项目 project.ron");
+            return;
+        }
+        let sky = super::load_sky(root).expect("showcase 项目应带 sky 节");
+        assert!(sky.enabled, "项目里天空是开着的");
+        assert_eq!(sky.intensity, 1.0);
+        assert_eq!(sky.zenith, [0.09, 0.26, 0.60]);
+        assert_eq!(sky.horizon, [0.62, 0.72, 0.88]);
+        assert_eq!(sky.ground, [0.15, 0.14, 0.13]);
+        assert_eq!(sky.sun_size, 2.0);
+        assert_eq!(sky.sun_intensity, 1.0);
+        // 没有 project.ron 的资产根：天空关（画面与接入前一致）。
+        assert!(super::load_sky(std::path::Path::new("does-not-exist")).is_none());
+    }
 
     #[test]
     fn frame_count_defaults_to_zero_and_rejects_invalid_values() {

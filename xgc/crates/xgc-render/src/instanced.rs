@@ -11,8 +11,9 @@ use super::mesh::Mesh;
 use super::pipeline::RenderCache;
 use xgc_world::SceneEnvironment;
 
-/// 帧 uniform：view-proj 64B + 相机位置/强度 + ambient + sun_dir + sun_color，各 16B。
-const FRAME_UNIFORM_BYTES: u64 = 128;
+/// 帧 uniform：view-proj 64B + 四个 vec4（相机/强度、ambient、sun_dir、sun_color）
+/// + 9 个 vec4 的天空球谐 + 一个天空开关 vec4 = 288B。
+const FRAME_UNIFORM_BYTES: u64 = 288;
 
 /// 帧级光照参数：环境光 + 场景第一盏可用方向光；没有方向光时强度为 0（只剩环境光）。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -22,6 +23,8 @@ pub(crate) struct FrameLighting {
     pub(crate) sun_direction: [f32; 3],
     pub(crate) sun_intensity: f32,
     pub(crate) sun_color: [f32; 3],
+    /// 天空漫反射环境（E/π 口径的 L2 球谐）；`None` = 天空关，只剩 `ambient`。
+    pub(crate) sky_irradiance: Option<[[f32; 4]; 9]>,
 }
 
 impl FrameLighting {
@@ -35,7 +38,14 @@ impl FrameLighting {
                 .unwrap_or([0.0, -1.0, 0.0]),
             sun_intensity: sun.map(|light| light.intensity).unwrap_or(0.0),
             sun_color: sun.map(|light| light.color).unwrap_or([1.0; 3]),
+            sky_irradiance: None,
         }
+    }
+
+    /// 挂上天空环境照明：`None` = 天空关（片元整段跳过 SH 求值）。
+    pub(crate) fn with_sky(mut self, sky_irradiance: Option<[[f32; 4]; 9]>) -> Self {
+        self.sky_irradiance = sky_irradiance;
+        self
     }
 
     /// 按 WGSL `Frame` 的字段顺序打包；不足 16 字节的部分用 0 补齐。
@@ -58,6 +68,20 @@ impl FrameLighting {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         for value in [self.sun_color[0], self.sun_color[1], self.sun_color[2], 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let sky = self.sky_irradiance.unwrap_or([[0.0; 4]; 9]);
+        for coefficient in sky {
+            for value in coefficient {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let enabled: f32 = if self.sky_irradiance.is_some() {
+            1.0
+        } else {
+            0.0
+        };
+        for value in [enabled, 0.0, 0.0, 0.0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
@@ -93,6 +117,10 @@ struct Frame {
     // xyz = 光线传播方向（归一化）
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
+    // 天空漫反射环境（E/π 口径的 L2 球谐），与 sky.rs 的 sh_project 逐项一致
+    sky_sh: array<vec4<f32>, 9>,
+    // x = 天空是否开启（1 / 0）
+    sky_params: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -120,6 +148,19 @@ fn aces_rrt(c: vec3<f32>) -> vec3<f32> {
     let a = c * (c + vec3<f32>(0.0245786)) - vec3<f32>(0.000090537);
     let b = c * (vec3<f32>(0.983729) * c + vec3<f32>(0.432951)) + vec3<f32>(0.238081);
     return a / b;
+}
+
+// E/π 的球谐求值（系数里已折好余弦卷积）；基函数与 sky.rs 的 sh_basis 逐项一致。
+fn sky_sh_eval(n: vec3<f32>) -> vec3<f32> {
+    return frame.sky_sh[0].rgb * 0.282095
+         + frame.sky_sh[1].rgb * (0.488603 * n.y)
+         + frame.sky_sh[2].rgb * (0.488603 * n.z)
+         + frame.sky_sh[3].rgb * (0.488603 * n.x)
+         + frame.sky_sh[4].rgb * (1.092548 * n.x * n.y)
+         + frame.sky_sh[5].rgb * (1.092548 * n.y * n.z)
+         + frame.sky_sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0))
+         + frame.sky_sh[7].rgb * (1.092548 * n.x * n.z)
+         + frame.sky_sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
 }
 
 fn aces(linear: vec3<f32>) -> vec3<f32> {
@@ -166,8 +207,12 @@ fn fs(input: VsOut) -> @location(0) vec4<f32> {
     }
     let to_light = -normalize(frame.sun_dir.xyz);
     let diffuse = max(dot(normal, to_light), 0.0);
-    // 环境光 + 场景主方向光；没有方向光时 eye_intensity.w = 0，只剩环境光。
-    let light = frame.ambient.rgb + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse);
+    // 环境光 + 天空 IBL（两者同标定，直接相加）+ 场景主方向光。
+    var light = frame.ambient.rgb;
+    if (frame.sky_params.x > 0.5) {
+        light = light + sky_sh_eval(normal);
+    }
+    light = light + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse);
     let lit = input.color.rgb * light;
     return vec4<f32>(aces(lit), input.color.a);
 }

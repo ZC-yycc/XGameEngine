@@ -2960,6 +2960,8 @@ dependencies = [
 name = "xgc-cli"
 version = "0.1.0"
 dependencies = [
+ "ron",
+ "serde",
  "serde_json",
  "xgc-agent",
  "xgc-asset",

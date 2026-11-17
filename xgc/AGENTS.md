@@ -115,7 +115,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/frame_color.rs` | 逐 draw 颜色合成：`模型基色因子 → .mat 资产 → 实体覆盖 → 选择高亮`（分流前一次做完） |
 | `crates/xgc-render/src/material.rs` | `.mat` 材质资产解析（基色乘子 + metallic / roughness，加载边界清洗） |
 | `crates/xgc-render/src/tone.rs` | ACES 曲线 CPU 镜像与 8 位对表辅助；WGSL 侧逐式对应 |
-| `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 带相机位置 + 环境光 + 主方向光，片元按 `环境光 + 光色 × 强度 × N·L` 着色 |
+| `crates/xgc-render/src/sky.rs` | 解析天空（天顶/地平线/地面 + 太阳盘 + 光晕）与漫反射 IBL：1024 点斐波那契球投影成 L2 球谐（E/π，无随机数）；参数来自 `project.ron` 的 `render.sky` |
+| `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 带相机位置 + 环境光 + 主方向光 + 天空球谐（288B），片元按 `环境光 + 天空 IBL + 光色 × 强度 × N·L` 着色再过 ACES |
 | `crates/xgc-render/src/shot.rs` | 截图取景：`Bounds` 拟合、顺光视轴（由场景主方向光推）、近远裁剪；`render_shot` 优先场景相机 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData` + `base_color_factor`（`tint` 与实体材质相乘）；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / 首图元材质 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
@@ -134,7 +135,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/src/compare_cmd.rs` | `xgc compare-headless` / `xgc image-diff <旧图> <新图> [阈值]`；PNG / PPM 逐像素差异 |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
-| `crates/xgc-cli/src/render.rs` | `render-frame <世界> <PPM> [资产根] [宽] [高] [帧数]`；缺省 0 帧，最终重算层级 / UI |
+| `crates/xgc-cli/src/render.rs` | `render-frame <世界> <PPM> [资产根] [宽] [高] [帧数]`；缺省 0 帧，最终重算层级 / UI；按项目级 `project.ron` 的 `render.sky` 装天空与背景色 |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
 ## 不变量（改代码前先看）
@@ -150,11 +151,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 渲染：glTF 基色因子 / `.mat` 资产乘子 / 场景光 + 环境光 / ACES / 截图相机优先级已通；下一步补天空 IBL（`project.ron` 的 sky 节），再做 metallic-roughness BRDF / 网格纹理 / 阴影。
+1. 渲染：glTF 基色因子 / `.mat` 资产乘子 / 场景光 + 环境光 / ACES / 天空漫反射 IBL / 截图相机优先级已通；下一步补天空盒画面与镜面 IBL，再做 metallic-roughness BRDF / 网格纹理 / 阴影。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。
-5. 推送与 CI；当前最大 Rust 文件 596 行，继续守住 600 行软上限。
+5. 推送与 CI；当前最大 Rust 文件 599 行，继续守住 600 行软上限。
 
 ## Token 纪律
 

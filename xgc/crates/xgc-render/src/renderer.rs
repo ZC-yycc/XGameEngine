@@ -16,6 +16,7 @@ use super::mesh::Mesh;
 use super::pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
 use super::resources::{ResourceDesc, ResourceUsage};
 use super::skinned::{GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
+use super::sky::{sky_irradiance, SkySettings};
 use super::text::text_mesh_wrapped;
 use super::texture::TexturePipeline;
 use super::ui_draw::{cover_uv, quad_matrix};
@@ -47,6 +48,8 @@ pub struct Renderer {
     ui_pipeline: Option<(wgpu::TextureFormat, TexturePipeline)>,
     ui_textures: HashMap<String, Option<wgpu::Texture>>,
     clear_color: wgpu::Color,
+    /// 画面设置里的天空节：开着时环境照明多一份天空漫反射 IBL。
+    sky: SkySettings,
 }
 
 fn scissor_rect(clip: [f32; 4], viewport: [f32; 2]) -> Option<[u32; 4]> {
@@ -75,7 +78,13 @@ impl Renderer {
             ui_pipeline: None,
             ui_textures: HashMap::new(),
             clear_color: wgpu::Color::BLACK,
+            sky: SkySettings::default(),
         }
+    }
+
+    /// 设置天空（等价于旧 `project.ron` 的 `render.sky`）。
+    pub fn set_sky(&mut self, sky: SkySettings) {
+        self.sky = sky.sanitized();
     }
 
     /// 清屏色也过同一条 ACES 曲线——旧引擎整帧（含天空）都在合成 pass 里过曲线。
@@ -454,7 +463,7 @@ impl Renderer {
                 (frame.view_projection(width, height), frame.camera.eye)
             }
         };
-        let lighting = FrameLighting::from_environment(world.environment(), eye);
+        let lighting = self.frame_lighting(world, eye);
         let list = self.prepared_list(world, None)?;
         let mut stats = self.render_list(context, target, list, view_proj, lighting)?;
         stats.ui_draws = self.render_ui(context, target, world)?;
@@ -475,8 +484,18 @@ impl Renderer {
         let list = self.prepared_list(world, selected)?;
         let (view_proj, eye) =
             camera_view_projection_with_eye(world, width, height).unwrap_or((IDENTITY, [0.0; 3]));
-        let lighting = FrameLighting::from_environment(world.environment(), eye);
+        let lighting = self.frame_lighting(world, eye);
         self.render_list(context, target, list, view_proj, lighting)
+    }
+
+    /// 帧光照 = 场景灯 + 天空漫反射 IBL（开着才算，太阳取场景主方向光）。
+    fn frame_lighting(&self, world: &World, eye: [f32; 3]) -> FrameLighting {
+        let environment = world.environment();
+        let sun = environment.sun().map(|light| {
+            let [x, y, z] = light.normalized_direction();
+            ([-x, -y, -z], light.color)
+        });
+        FrameLighting::from_environment(environment, eye).with_sky(sky_irradiance(&self.sky, sun))
     }
 
     /// 抽 DrawList 并合成最终颜色：模型材质因子 × 实体材质在前，选择高亮在后。

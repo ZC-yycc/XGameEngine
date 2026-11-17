@@ -10,8 +10,8 @@
 | 场景 + 资源 + 脚本 + 预制体端到端迁移 | 通过 | showcase 24 实体；character 2 脚本；Pillar 3 实体；`verify-migration` 一致 |
 | 迁移世界可运行 | 通过 | `run-world` / `run-cooked` / `xgc-player` 60 帧同哈希 |
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
-| 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `94f44ec6bd500707`，1280×720，14 个场景 draw / 5 call / 7 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / 环境光 / `.mat` 资产乘子 / ACES 已贯通 |
-| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 915191/921600 像素不同（99.30%），mean_abs **21.24**、max 218（上一切片 23.79）；仍缺天空 IBL / 阴影 / 纹理与仿真状态对齐 |
+| 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `94f44ec6bd500707`，1280×720，14 个场景 draw / 5 call / 7 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / 环境光 / `.mat` 资产乘子 / ACES / 天空漫反射 IBL 已贯通 |
+| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 914841/921600 像素不同（99.27%），mean_abs **15.97**、max 215（上一切片 21.24）；仍缺阴影 / 天空盒画面 / 纹理与仿真状态对齐 |
 | 逐帧 trace / 状态哈希对照 | **未通过** | XGC 重放自身确定；无旧引擎逐帧 trace |
 | 正式 System 调度 / 并行 | **未通过** | `batches()` 计划已有，执行顺序 |
 | 性能基准 + 热路径分配门禁 | **未通过** | 无 release CI 门禁 |
@@ -38,6 +38,9 @@ cargo run -q -p xgc-cli --offline -- image-diff ..\tmp\old-150.png ..\tmp\new-15
 # 材质垂直切片：真实 Box + 合成蒙皮 GLB 都必须消费 baseColorFactor
 cargo test -p xgc-render --test material_factor --offline
 
+# 天空漫反射 IBL：SH 镜像对表 + 天空开关（GPU）
+cargo test -p xgc-render --test sky_ibl --offline
+
 # 材质资产：解析 + 乘子语义 + 悬空引用降级（GPU）
 cargo test -p xgc-render --test material_asset --offline
 
@@ -55,11 +58,13 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 旧端截图相机已实测为 `mode: "scene"`（重跑旧 `xgame-editor` 读报告，两次运行图像逐像素相同），
 > 因此 XGC `render-frame` 的优先级是"有场景相机就用场景相机，缺相机才顺光自动取景"；
 > 顺光自动取景（包围盒拟合 + 场景主方向光推视轴）保留为兜底，参数与旧端逐项一致。
+> 天空按项目级配置读取（`project.ron` 的 `render.sky`），CPU 把解析天空投影成 L2 球谐
+> （E/π，1024 点斐波那契球，无随机数）后与 `ambient` 相加，片元侧逐项对表。
 > 场景级光源 / 环境光已迁移进 `WorldData.environment`；颜色合成顺序对齐旧引擎
 > `模型基色因子 → .mat 资产 → 实体覆盖`（全是乘子），片元与清屏色都过同一条 ACES 曲线。
-> 旧 / 新整帧 mean_abs 依次为 28.65 → 23.79 → **21.24**（max 218）。第 150 帧世界哈希变为
+> 旧 / 新整帧 mean_abs 依次为 28.65 → 23.79 → 21.24 → **15.97**（max 215）。第 150 帧世界哈希变为
 > `94f44ec6bd500707`：`render.material` 新增 `asset` 字段参与状态哈希，不是仿真变化（`verify-migration` 一致）。
-> 仍缺：天空 IBL（`project.ron` 的 sky 节是开着的，旧图正面暗部比 XGC 亮就来自它）、
+> 仍缺：天空盒**画面**（背景现在仍是清屏色，旧图顶部有渐变与太阳盘）、镜面 IBL、
 > metallic-roughness BRDF、网格纹理、阴影，以及第 150 帧的仿真状态对齐（旧图里落地的立方体在 XGC 仍在空中，
 > 属物理差距，不是渲染问题）。旧端本机仍报告项目 Rust 插件构建指纹不匹配并跳过，XGC 也尚未迁移旧 Animator
 > 状态机与完整动画素材。
@@ -67,7 +72,7 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 
 ## 建议顺序
 
-1. 渲染：glTF 基色因子、`.mat` 资产乘子、场景光 + 环境光、ACES、截图相机优先级已贯通；下一步补天空 IBL，再做 metallic-roughness BRDF / 网格纹理 / 阴影。
+1. 渲染：glTF 基色因子、`.mat` 资产乘子、场景光 + 环境光、ACES、天空漫反射 IBL、截图相机优先级已贯通；下一步补天空盒画面与镜面 IBL，再做 metallic-roughness BRDF / 网格纹理 / 阴影。
 2. 正式调度：脚本与系统统一访问声明。
 3. 旧新逐帧 trace + 截图像素门禁。
 4. 密码学签名 / 跨机器增量。

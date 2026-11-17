@@ -27,6 +27,7 @@ mod resources;
 mod shot;
 mod skinned;
 mod skinning;
+mod sky;
 mod text;
 mod texture;
 mod tone;
@@ -56,6 +57,7 @@ pub use shot::{
 };
 pub use skinned::{GpuSkinMesh, GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
 pub use skinning::{identity, skin_positions, translation};
+pub use sky::{sh_eval, sky_irradiance, SkySettings, SH_COEFFS};
 pub use text::{text_mesh, text_mesh_wrapped};
 pub use texture::TexturePipeline;
 pub use tone::{aces, aces_u8, display_u8, srgb_encode};
