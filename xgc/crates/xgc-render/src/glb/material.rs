@@ -14,12 +14,21 @@ pub(super) struct MaterialDef {
 pub(super) struct PbrMetallicRoughness {
     #[serde(default = "white_base_color")]
     pub(super) base_color_factor: [f32; 4],
+    /// 基色贴图索引；旧引擎 PBR 的 albedo 贴图。
+    #[serde(default)]
+    pub(super) base_color_texture: Option<TextureRef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct TextureRef {
+    pub(super) index: usize,
 }
 
 impl Default for PbrMetallicRoughness {
     fn default() -> Self {
         Self {
             base_color_factor: white_base_color(),
+            base_color_texture: None,
         }
     }
 }

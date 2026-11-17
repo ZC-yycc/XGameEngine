@@ -110,7 +110,6 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/skinned.rs` | GPU 蒙皮：关节索引 / 权重顶点属性、64 关节 uniform、`GpuSkinMeshCache`、单网格 `SkinnedPipeline` |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（按宽度换行） |
-| `crates/xgc-render/src/gpu_mesh.rs` | `GpuMeshCache`：模型 → 顶点 / 索引缓冲，跨帧复用；`upload_deformed` 覆盖蒙皮顶点 |
 | `crates/xgc-render/src/camera.rs` | `render.camera` + `GlobalTransform` → view-projection / 模型矩阵 / MVP；列主序 4x4 求逆与正交投影（天空盒 / 阴影视锥） |
 | `crates/xgc-render/src/pipeline.rs` | `TrianglePipeline` / `RenderCache`：单 draw 路径、颜色 / 深度管线、scissor / 圆角 SDF 裁剪、实例化缓存 |
 | `crates/xgc-render/src/draw.rs` | 从 `render.mesh` + `render.material` + `GlobalTransform` 抽 `DrawList`（含模型矩阵、材质资产引用与祖先骨架姿态） |
@@ -122,11 +121,15 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 文本 / 图片画在场景之上（从 `renderer.rs` 按行数预算拆出） |
 | `crates/xgc-render/src/sky.rs` | 解析天空（天顶/地平线/地面 + 太阳盘 + 光晕）与漫反射 IBL：1024 点斐波那契球投影成 L2 球谐（E/π，无随机数）；参数来自 `project.ron` 的 `render.sky` |
 | `crates/xgc-render/src/instanced.rs` | 按模型分组实例化；帧 uniform 368B（相机位置 + 环境光 + 主方向光 + 天空球谐 + 光视图投影/阴影参数），逐实例 96B（模型 + 颜色 + metallic/roughness）；片元按 `环境光 + 天空 IBL + 环境反射 + 光色 × 强度 × N·L × 阴影` 着色再过 ACES |
-| `crates/xgc-render/src/instanced.wgsl` | 主场景片元着色器：天空 SH、逐材质环境反射（`f0 = mix(0.04, 基色, metallic)` + Lazarov BRDF、`MIN_ROUGHNESS=0.04`）、阴影 PCF、ACES；`include_str!` 进 `instanced.rs`（守 600 行预算） |
+| `crates/xgc-render/src/texture_data.rs` | 基色贴图 RGBA8：PNG 字节解码（8-bit）+ 1×1 白纹理兜底 |
+| `crates/xgc-render/src/texture_bind.rs` | 贴图 GPU 绑定：group(2) 布局 + 线性 Repeat 采样器 + 白纹理兜底绑定组 |
+| `crates/xgc-render/src/gpu_mesh.rs` | 模型 → 位置缓冲 / UV 缓冲 / 索引缓冲 + 贴图绑定组，跨帧复用 |
+| `crates/xgc-render/src/instanced.wgsl` | 主场景片元着色器：天空 SH、逐材质环境反射（`f0 = mix(0.04, 基色, metallic)` + Lazarov BRDF、`MIN_ROUGHNESS=0.04`）、`基色因子 × 实体颜色 × 基色贴图` 的 albedo、阴影 PCF、ACES；`include_str!` 进 `instanced.rs`（守 600 行预算） |
 | `crates/xgc-render/src/shot.rs` | 截图取景：`Bounds` 拟合、顺光视轴（由场景主方向光推）、近远裁剪；`render_shot` 优先场景相机 |
-| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData` + `base_color_factor`（`tint` 与实体材质相乘）；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
+| `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData` + `base_color_factor` + `uvs` + 基色贴图（`Arc<TextureData>`）；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / 首图元材质 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
-| `crates/xgc-render/src/glb/material.rs` | glTF 材质 JSON 最小投影：`pbrMetallicRoughness.baseColorFactor`（缺省白）；纹理字段接入时在此扩展 |
+| `crates/xgc-render/src/glb/texture.rs` | `TEXCOORD_0` 与 `baseColorTexture`：外部 uri（相对模型目录）/ GLB 内嵌 bufferView 解码 PNG；data URI 直接报不支持 |
+| `crates/xgc-render/src/glb/material.rs` | glTF 材质 JSON 最小投影：`baseColorFactor`（缺省白）+ `baseColorTexture` 索引 |
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝；`.mat` 材质按引用缓存，读不到退回模型材质 |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
@@ -157,7 +160,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：脚本 `look_at` 朝向修正后整帧差异 98.07% → 64.62%（mean_abs 3.04）。下一步补网格纹理（狐狸白模）、UI 字体 / 面板、刚体旋转 / 多接触求解（落点与影子），再做直射光 GGX 高光 / CSM / 软阴影。
+1. 割接视觉：基色贴图已通（狐狸有纹理），整帧差异 98.07% → 64.62%（mean_abs 2.88）。下一步补 UI 字体 / 面板、刚体旋转 / 多接触求解（落点与影子），再做直射光 GGX 高光 / CSM / 软阴影与 GPU 蒙皮快路径（现在带贴图蒙皮走 CPU 蒙皮 + 实例化）。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

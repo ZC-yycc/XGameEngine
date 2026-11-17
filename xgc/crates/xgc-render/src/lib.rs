@@ -32,6 +32,8 @@ mod sky;
 mod sky_draw;
 mod text;
 mod texture;
+mod texture_bind;
+mod texture_data;
 mod tone;
 mod ui_draw;
 
@@ -64,6 +66,7 @@ pub use skinning::{identity, skin_positions, translation};
 pub use sky::{sh_eval, sky_color, sky_irradiance, SkySettings, SH_COEFFS};
 pub use text::{text_mesh, text_mesh_wrapped};
 pub use texture::TexturePipeline;
+pub use texture_data::TextureData;
 pub use tone::{aces, aces_u8, display_u8, env_brdf_approx, env_specular, srgb_encode};
 pub use ui_draw::{cover_uv, quad_matrix};
 

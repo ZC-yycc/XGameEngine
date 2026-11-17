@@ -10,9 +10,11 @@ use std::path::Path;
 use serde::Deserialize;
 
 use self::material::MaterialDef;
+use self::texture::{ImageDef, TextureDef};
 use super::mesh::{Mesh, SkinData};
 
 mod material;
+mod texture;
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;
@@ -59,6 +61,10 @@ struct Root {
     skins: Vec<SkinDef>,
     #[serde(default)]
     materials: Vec<MaterialDef>,
+    #[serde(default)]
+    textures: Vec<TextureDef>,
+    #[serde(default)]
+    images: Vec<ImageDef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,7 +138,7 @@ fn default_mode() -> u32 {
 
 pub fn load_glb(path: &Path) -> Result<Mesh, MeshError> {
     let bytes = std::fs::read(path).map_err(|err| MeshError::Io(err.to_string()))?;
-    load_glb_bytes(&bytes)
+    load_glb_bytes(&bytes, None)
 }
 
 /// `.gltf`：JSON + 外部 `.bin`，先拼成内存 GLB 再走同一条解析。
@@ -151,7 +157,8 @@ pub fn load_gltf(path: &Path) -> Result<Mesh, MeshError> {
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     let bin = std::fs::read(base.join(uri)).map_err(|err| MeshError::Io(err.to_string()))?;
     let glb = encode_glb(&text, &bin);
-    load_glb_bytes(&glb)
+    // 贴图 uri 相对模型目录解析（Fox 的 Texture.png 与 .gltf 同目录）。
+    load_glb_bytes(&glb, Some(base))
 }
 
 /// 按扩展名分派 `.glb` / `.gltf`。
@@ -187,7 +194,7 @@ fn encode_glb(json: &str, bin: &[u8]) -> Vec<u8> {
     glb
 }
 
-fn load_glb_bytes(bytes: &[u8]) -> Result<Mesh, MeshError> {
+fn load_glb_bytes(bytes: &[u8], base_dir: Option<&Path>) -> Result<Mesh, MeshError> {
     let (json, bin) = split_glb(bytes)?;
     let root: Root =
         serde_json::from_slice(json).map_err(|err| MeshError::Json(err.to_string()))?;
@@ -216,6 +223,12 @@ fn load_glb_bytes(bytes: &[u8]) -> Result<Mesh, MeshError> {
         None => Vec::new(),
     };
     let mut mesh = Mesh::new(positions, indices);
+    if let Some(accessor) = primitive.attributes.get("TEXCOORD_0").copied() {
+        mesh.uvs = texture::read_uvs(&root, accessor, bin)?;
+        if mesh.uvs.len() != mesh.positions.len() {
+            return Err(MeshError::Glb("TEXCOORD_0 数量与 POSITION 不一致".into()));
+        }
+    }
     if let Some(material) = primitive.material {
         mesh.base_color_factor = root
             .materials
@@ -224,6 +237,7 @@ fn load_glb_bytes(bytes: &[u8]) -> Result<Mesh, MeshError> {
             .pbr_metallic_roughness
             .base_color_factor;
     }
+    mesh.texture = texture::base_color(&root, primitive, bin, base_dir)?;
     if let (Some(joints), Some(weights)) = (
         primitive.attributes.get("JOINTS_0").copied(),
         primitive.attributes.get("WEIGHTS_0").copied(),

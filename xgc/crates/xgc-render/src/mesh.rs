@@ -1,4 +1,7 @@
-//! 内建网格：`Mesh` 保存首个图元的几何与 PBR 基色因子；纹理通道后续接入。
+//! 内建网格：`Mesh` 保存首个图元的几何、PBR 基色因子、UV 与基色贴图。
+
+use super::texture_data::TextureData;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SkinData {
     pub joints: Vec<[u16; 4]>,
@@ -14,6 +17,10 @@ pub struct Mesh {
     /// glTF `baseColorFactor`；逐实体颜色在提交 draw 时与它相乘。
     pub base_color_factor: [f32; 4],
     pub skin: Option<SkinData>,
+    /// 每个顶点的 UV（`TEXCOORD_0`）；空 = 没有 UV，采样坐标为 (0,0)。
+    pub uvs: Vec<[f32; 2]>,
+    /// glTF 基色贴图（旧引擎 PBR 的 albedo 贴图）；`None` = 纯色。
+    pub texture: Option<std::sync::Arc<TextureData>>,
 }
 
 impl Mesh {
@@ -23,6 +30,8 @@ impl Mesh {
             indices,
             base_color_factor: [1.0; 4],
             skin: None,
+            uvs: Vec::new(),
+            texture: None,
         }
     }
 

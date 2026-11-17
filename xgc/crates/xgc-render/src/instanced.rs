@@ -9,6 +9,7 @@ use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
+use super::texture_bind::TextureBinding;
 use xgc_world::SceneEnvironment;
 
 /// 帧 uniform：view-proj 64B + 四个 vec4（相机/强度、ambient、sun_dir、sun_color）
@@ -139,6 +140,7 @@ impl GpuContext {
         &self,
         format: wgpu::TextureFormat,
         depth: bool,
+        texture_layout: &wgpu::BindGroupLayout,
     ) -> InstancedPipeline {
         let shader = self
             .device()
@@ -200,7 +202,7 @@ impl GpuContext {
             self.device()
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("xgc-instanced-layout"),
-                    bind_group_layouts: &[&camera_layout, &instance_layout],
+                    bind_group_layouts: &[&camera_layout, &instance_layout, texture_layout],
                     push_constant_ranges: &[],
                 });
         let pipeline = self
@@ -212,11 +214,18 @@ impl GpuContext {
                     module: &shader,
                     entry_point: Some("vs"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: 12,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-                    }],
+                    buffers: &[
+                        wgpu::VertexBufferLayout {
+                            array_stride: 12,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                        },
+                        wgpu::VertexBufferLayout {
+                            array_stride: 8,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![1 => Float32x2],
+                        },
+                    ],
                 },
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: depth.then_some(wgpu::DepthStencilState {
@@ -274,6 +283,7 @@ pub(crate) struct InstancedRequest<'a> {
     pub(crate) shadow_sampler: &'a wgpu::Sampler,
     pub(crate) depth: &'a wgpu::TextureView,
     pub(crate) clear_color: wgpu::Color,
+    pub(crate) textures: &'a TextureBinding,
 }
 
 impl RenderCache {
@@ -289,6 +299,7 @@ impl RenderCache {
         let gpu_meshes = &mut *request.gpu_meshes;
         let view_proj = request.view_proj;
         let depth = request.depth;
+        let textures = request.textures;
         if list.items.is_empty() {
             context.clear_texture(texture, request.clear_color)?;
             return Ok(0);
@@ -299,7 +310,10 @@ impl RenderCache {
             .as_ref()
             .is_none_or(|(current, _)| *current != format)
         {
-            self.instanced = Some((format, context.create_instanced_pipeline(format, true)));
+            self.instanced = Some((
+                format,
+                context.create_instanced_pipeline(format, true, textures.layout()),
+            ));
         }
         let pipeline = &self.instanced.as_ref().unwrap().1;
         if pipeline.format != format {
@@ -372,9 +386,15 @@ impl RenderCache {
             }
             if let Some(pose) = &group.pose {
                 let positions = super::skinning::skin_positions(mesh, pose);
-                gpu_meshes.upload_deformed(context, &group.key, &positions, &mesh.indices);
+                gpu_meshes.upload_deformed(
+                    context,
+                    &group.key,
+                    &positions,
+                    &mesh.indices,
+                    textures,
+                );
             } else {
-                gpu_meshes.upload(context, &group.key, mesh);
+                gpu_meshes.upload(context, &group.key, mesh, request.textures);
             }
             let mut bytes = Vec::with_capacity(group.instances.len() * 96);
             for (model, color, material) in &group.instances {
@@ -449,6 +469,8 @@ impl RenderCache {
                     continue;
                 };
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_vertex_buffer(1, mesh.uv_buffer.slice(..));
+                pass.set_bind_group(2, &mesh.texture_group, &[]);
                 if let Some(indices) = &mesh.index_buffer {
                     pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.indices, 0, 0..draw.count);

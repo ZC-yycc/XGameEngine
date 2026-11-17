@@ -177,3 +177,24 @@ fn write_triangle_glb(tag: &str, materials: Option<Value>, material: Option<usiz
     }
     write_glb(tag, &json, bin)
 }
+
+/// Fox.gltf：TEXCOORD_0 与 baseColorTexture 都要真的解析出来（旧引擎 PBR 的 albedo 贴图）。
+#[test]
+fn fox_gltf_carries_uv_and_base_color_texture() {
+    let path = std::path::Path::new("../../../projects/XGame/Resources/Fox.gltf");
+    if !path.exists() {
+        eprintln!("skip: 没有样例模型");
+        return;
+    }
+    let mesh = xgc_render::load_gltf(path).unwrap();
+    assert_eq!(mesh.uvs.len(), mesh.positions.len(), "每个顶点都要有 UV");
+    assert!(mesh.uvs.iter().any(|uv| uv[0] != 0.0 || uv[1] != 0.0));
+    let texture = mesh.texture.as_ref().expect("Fox 有基色贴图");
+    assert_eq!((texture.width, texture.height), (1024, 1024));
+    assert_eq!(texture.rgba.len(), 1024 * 1024 * 4);
+    // 贴图不是纯白：否则"加载成功"没有意义。
+    assert!(texture
+        .rgba
+        .chunks_exact(4)
+        .any(|pixel| pixel[0] > pixel[2] + 40));
+}

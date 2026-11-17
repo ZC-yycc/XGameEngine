@@ -42,6 +42,8 @@ pub struct Renderer {
     skinned: Option<(wgpu::TextureFormat, SkinnedPipeline)>,
     sky_pipeline: Option<(wgpu::TextureFormat, super::sky_draw::SkyPipeline)>,
     shadow: Option<super::shadow::ShadowTarget>,
+    /// 基色贴图绑定：1×1 白纹理兜底，随第一次渲染惰性创建。
+    textures: Option<super::texture_bind::TextureBinding>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
@@ -74,6 +76,7 @@ impl Renderer {
             skinned: None,
             sky_pipeline: None,
             shadow: None,
+            textures: None,
             depth: None,
             images: HashMap::new(),
             ui_overlay: None,
@@ -243,6 +246,9 @@ impl Renderer {
         else {
             return Ok(None);
         };
+        if self.textures.is_none() {
+            self.textures = Some(super::texture_bind::TextureBinding::new(context));
+        }
         if let Some(target) = self.shadow.as_ref() {
             target
                 .render(
@@ -251,6 +257,7 @@ impl Renderer {
                     items,
                     &mut self.gpu_meshes,
                     &mut self.meshes,
+                    self.textures.as_ref().unwrap(),
                 )
                 .map_err(GpuError::Pipeline)?;
         }
@@ -342,6 +349,9 @@ impl Renderer {
         if self.shadow.is_none() {
             self.shadow = Some(super::shadow::ShadowTarget::new(context));
         }
+        if self.textures.is_none() {
+            self.textures = Some(super::texture_bind::TextureBinding::new(context));
+        }
         // 阴影只投静态网格：GPU 蒙皮投射是后续切片。
         let static_items: Vec<super::draw::DrawItem> = list
             .items
@@ -350,6 +360,7 @@ impl Renderer {
             .cloned()
             .collect();
         let shadow_matrix = self.prepare_shadow(context, world, &static_items)?;
+        let textures = self.textures.as_ref().unwrap();
         lighting = lighting.with_shadow(shadow_matrix);
         let (shadow_view, shadow_sampler) = self
             .shadow
@@ -361,7 +372,16 @@ impl Renderer {
         let mut cpu_items = Vec::with_capacity(list.items.len());
         let mut gpu_items = Vec::new();
         for item in list.items {
-            if item.pose.as_ref().is_some_and(|pose| pose.len() <= 64) {
+            let skinned = item.pose.as_ref().is_some_and(|pose| pose.len() <= 64);
+            // GPU 蒙皮着色器还没有光照与贴图：带贴图的蒙皮网格先走 CPU 蒙皮 + 实例化，
+            // 保证和不蒙皮物体同一套 PBR（等 GPU 蒙皮补齐光照再切回快路径）。
+            let textured = skinned
+                && self
+                    .meshes
+                    .get(&item.model)
+                    .map_err(|err| GpuError::Mesh(err.to_string()))?
+                    .is_some_and(|mesh| mesh.texture.is_some());
+            if skinned && !textured {
                 gpu_items.push(item);
             } else {
                 cpu_items.push(item);
@@ -380,6 +400,7 @@ impl Renderer {
             shadow_sampler,
             depth,
             clear_color: self.clear_color,
+            textures,
         };
         let mut draw_calls = self.cache.draw_list_instanced(context, &mut request)?;
         if !gpu_items.is_empty() {

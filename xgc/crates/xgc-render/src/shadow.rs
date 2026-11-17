@@ -13,6 +13,7 @@ use super::draw::DrawItem;
 use super::gpu::GpuContext;
 use super::gpu_mesh::GpuMeshCache;
 use super::shot::Bounds;
+use super::texture_bind::TextureBinding;
 
 /// 阴影图边长：与旧引擎 `DEFAULT_SHADOW_RESOLUTION` 一致。
 pub const SHADOW_RESOLUTION: u32 = 2048;
@@ -232,6 +233,7 @@ impl ShadowTarget {
         items: &[DrawItem],
         gpu_meshes: &mut GpuMeshCache,
         meshes: &mut MeshCache,
+        textures: &TextureBinding,
     ) -> Result<(), String> {
         if items.is_empty() {
             return Ok(());
@@ -306,7 +308,7 @@ impl ShadowTarget {
                 if mesh.positions.is_empty() {
                     continue;
                 }
-                gpu_meshes.upload(context, &item.model, mesh);
+                gpu_meshes.upload(context, &item.model, mesh, textures);
                 let Some(gpu) = gpu_meshes.get(&item.model) else {
                     continue;
                 };

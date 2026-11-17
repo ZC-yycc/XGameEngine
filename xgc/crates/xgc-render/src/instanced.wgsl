@@ -117,15 +117,26 @@ var shadow_smp: sampler_comparison;
 @group(1) @binding(0)
 var<storage, read> instances: array<Instance>;
 
+@group(2) @binding(0)
+var albedo_texture: texture_2d<f32>;
+
+@group(2) @binding(1)
+var albedo_sampler: sampler;
+
 struct VsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) world: vec3<f32>,
     @location(2) @interpolate(flat) material: vec4<f32>,
+    @location(3) uv: vec2<f32>,
 };
 
 @vertex
-fn vs(@location(0) position: vec3<f32>, @builtin(instance_index) index: u32) -> VsOut {
+fn vs(
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @builtin(instance_index) index: u32,
+) -> VsOut {
     let instance = instances[index];
     var out: VsOut;
     let world = instance.model * vec4<f32>(position, 1.0);
@@ -133,6 +144,7 @@ fn vs(@location(0) position: vec3<f32>, @builtin(instance_index) index: u32) -> 
     out.world = world.xyz;
     out.color = instance.color;
     out.material = instance.material;
+    out.uv = uv;
     return out;
 }
 
@@ -148,12 +160,14 @@ fn fs(input: VsOut) -> @location(0) vec4<f32> {
     let to_light = -normalize(frame.sun_dir.xyz);
     let diffuse = max(dot(normal, to_light), 0.0);
     // 环境光 + 天空 IBL（两者同标定，直接相加）+ 场景主方向光。
+    // 旧引擎 PBR：albedo = 基色因子 × 实体颜色 × 贴图（没贴图时采样 1×1 白纹理）。
+    let albedo = input.color.rgb * textureSample(albedo_texture, albedo_sampler, input.uv).rgb;
     let metallic = clamp(input.material.x, 0.0, 1.0);
     let roughness = clamp(input.material.y, MIN_ROUGHNESS, 1.0);
     // 金属没有漫反射：环境与直射的漫反射项都乘 (1 - metallic)。
-    let diffuse_color = input.color.rgb * (1.0 - metallic);
+    let diffuse_color = albedo * (1.0 - metallic);
     // 介电体 F0 = 0.04，金属 F0 = 基色（旧引擎同样的 mix）。
-    let f0 = mix(vec3<f32>(0.04), input.color.rgb, metallic);
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
     var light = frame.ambient.rgb * diffuse_color;
     if (frame.sky_params.x > 0.5) {
         // 漫反射环境（E/π 的 L2 球谐）+ 环境反射。
