@@ -50,11 +50,17 @@ impl Component for MeshRenderer {
     }
 }
 
-/// 内建：最小材质参数；完整 PBR 资产后续按需扩展。
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// 内建：材质参数 = 共享材质资产引用（可空）+ 逐实体覆盖。
+///
+/// 渲染侧的叠加顺序与旧引擎一致：`模型材质 → .mat 资产 → 本组件覆盖`，
+/// 基色都是乘子。`asset` 为空串表示"不引用资产"，与 `render.mesh.model`、
+/// `script.lua.path` 用空串表示"没配"是同一套约定。
+#[derive(Clone, Debug, PartialEq)]
 pub struct Material {
     pub base_color: [f32; 4],
     pub roughness: f32,
+    /// `.mat` 材质资产的 `guid://` 引用或项目相对路径；空串 = 不用资产。
+    pub asset: String,
 }
 
 impl Default for Material {
@@ -62,6 +68,7 @@ impl Default for Material {
         Self {
             base_color: [1.0; 4],
             roughness: 0.5,
+            asset: String::new(),
         }
     }
 }
@@ -75,14 +82,16 @@ impl Component for Material {
     }
 
     fn doc() -> &'static str {
-        "最小材质：基色 + 粗糙度；完整 PBR 资产后续扩展"
+        "材质：基色 / 粗糙度覆盖 + 可选 .mat 资产引用"
     }
 
     fn fields() -> Vec<FieldDescriptor> {
         vec![
             FieldDescriptor::new("base_color", FieldType::Vec4, Value::Vec4([1.0; 4]))
-                .doc("线性基色 RGBA"),
+                .doc("线性基色 RGBA 乘子"),
             FieldDescriptor::new("roughness", FieldType::F32, Value::F64(0.5)).doc("粗糙度 0..1"),
+            FieldDescriptor::new("asset", FieldType::String, Value::String(String::new()))
+                .doc("材质资产引用（guid:// 或项目相对路径；空 = 不用）"),
         ]
     }
 
@@ -95,6 +104,7 @@ impl Component for Material {
                 f64::from(self.base_color[3]),
             ])),
             "roughness" => Some(Value::F64(f64::from(self.roughness))),
+            "asset" => Some(Value::String(self.asset.clone())),
             _ => None,
         }
     }
@@ -117,6 +127,18 @@ impl Component for Material {
                         value.type_name()
                     )
                 })?;
+                Ok(())
+            }
+            "asset" => {
+                self.asset = value
+                    .as_string()
+                    .ok_or_else(|| {
+                        format!(
+                            "render.material.asset 期望 string，得到 {}",
+                            value.type_name()
+                        )
+                    })?
+                    .to_string();
                 Ok(())
             }
             _ => Err(format!("render.material 没有字段 {field}")),

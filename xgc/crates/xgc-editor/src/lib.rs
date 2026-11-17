@@ -105,6 +105,7 @@ impl EditorState {
             Material {
                 base_color: [0.3, 0.7, 1.0, 1.0],
                 roughness: 0.5,
+                ..Material::default()
             },
         ));
         Self::new(world)

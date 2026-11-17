@@ -14,6 +14,8 @@ pub struct DrawItem {
     pub model: String,
     pub color: [f32; 4],
     pub roughness: f32,
+    /// `.mat` 资产引用（空串 = 不用资产）；渲染时与模型材质因子一起乘进 `color`。
+    pub material_asset: String,
     pub transform: Mat4,
     pub pose: Option<Vec<[f32; 16]>>,
 }
@@ -44,12 +46,13 @@ pub fn build_draw_list(world: &World) -> DrawList {
         let Some(transform) = world.get::<GlobalTransform>(key) else {
             return;
         };
-        let material = world.get::<Material>(key).copied().unwrap_or_default();
+        let material = world.get::<Material>(key).cloned().unwrap_or_default();
         items.push(DrawItem {
             entity,
             model: mesh.model.clone(),
             color: material.base_color,
             roughness: material.roughness,
+            material_asset: material.asset.clone(),
             transform: model_matrix(transform),
             pose: skeleton_pose(world, key),
         });

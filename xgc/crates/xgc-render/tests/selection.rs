@@ -43,6 +43,7 @@ fn selected_entity_is_tinted_in_viewport() {
         Material {
             base_color: [1.0, 0.0, 0.0, 1.0],
             roughness: 0.5,
+            ..Material::default()
         },
     ));
     let id = world.entity(entity).unwrap();
@@ -52,5 +53,8 @@ fn selected_entity_is_tinted_in_viewport() {
         .unwrap();
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     let center = 4 * (2 * 4 + 2);
-    assert_eq!(&pixels[center..center + 4], &[255, 209, 51, 255]);
+    // 高亮色同样过 ACES 曲线：期望值由 CPU 镜像现算。
+    let expected = xgc_render::aces_u8([1.0, 0.82, 0.2]);
+    assert_eq!(&pixels[center..center + 3], &expected);
+    assert_eq!(pixels[center + 3], 255);
 }

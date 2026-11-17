@@ -13,11 +13,13 @@ mod assets;
 mod camera;
 mod diff;
 mod draw;
+mod frame_color;
 mod glb;
 mod gpu;
 mod gpu_mesh;
 mod image;
 mod instanced;
+mod material;
 mod mesh;
 mod pipeline;
 mod renderer;
@@ -27,6 +29,7 @@ mod skinned;
 mod skinning;
 mod text;
 mod texture;
+mod tone;
 mod ui_draw;
 
 pub use assets::MeshCache;
@@ -42,6 +45,7 @@ pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
 pub use gpu_mesh::{GpuMesh, GpuMeshCache};
 pub use image::ImageData;
 pub use instanced::InstancedPipeline;
+pub use material::MaterialAsset;
 pub use mesh::{builtin_mesh, Mesh, SkinData};
 pub use pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
@@ -54,6 +58,7 @@ pub use skinned::{GpuSkinMesh, GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest
 pub use skinning::{identity, skin_positions, translation};
 pub use text::{text_mesh, text_mesh_wrapped};
 pub use texture::TexturePipeline;
+pub use tone::{aces, aces_u8, display_u8, srgb_encode};
 pub use ui_draw::{cover_uv, quad_matrix};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

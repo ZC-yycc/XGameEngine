@@ -166,7 +166,7 @@ struct OldMesh {
 
 #[derive(Debug, Deserialize)]
 struct OldMaterial {
-    #[allow(dead_code)]
+    /// 材质资产引用（迁移后进 `render.material.asset`）。
     asset: Option<String>,
     overrides: Option<OldMaterialOverrides>,
 }
@@ -248,6 +248,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                         overrides
                             .and_then(|overrides| overrides.roughness)
                             .unwrap_or(0.5),
+                        old_material.asset.clone().unwrap_or_default(),
                     ));
                     report.mapped_components += 1;
                 }
@@ -353,7 +354,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                 fields: vec![("model".to_string(), Value::String(model))],
             });
         }
-        if let Some((base_color, roughness)) = material {
+        if let Some((base_color, roughness, asset)) = material {
             components.push(ComponentData {
                 component: Material::ID,
                 fields: vec![
@@ -367,6 +368,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                         ]),
                     ),
                     ("roughness".to_string(), Value::F64(f64::from(roughness))),
+                    ("asset".to_string(), Value::String(asset)),
                 ],
             });
         }

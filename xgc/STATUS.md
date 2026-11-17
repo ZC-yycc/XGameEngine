@@ -3,13 +3,13 @@
 > 这是能力的**现状快照**，不是完成声明。XGC 仍明显低于 XGameEngine 全量能力，
 > 当前不能割接。
 
-## 指标（第 134 轮）
+## 指标（第 135 轮）
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 163（最大 596 行；软上限 600） |
-| 测试 | 243（`cargo test --workspace --offline`） |
-| 内建组件 schema | 30 类 / 34668 字节，两次导出逐字节相同 |
+| Rust 文件 | 168（最大 596 行；软上限 600） |
+| 测试 | 251（`cargo test --workspace --offline`） |
+| 内建组件 schema | 30 类 / 34950 字节，两次导出逐字节相同 |
 | 默认系统 | 18 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
 | CLI 冒烟 | `check` 30 组件 OK；`run 60` frames=60 entities=3 revision=3 hash=`f4bc029f5f995b91` |
@@ -23,13 +23,13 @@
 | Agent 协议 | describe（组件 / 系统 / 渲染能力）、diagnostics、query / get / digest / stats / validate、load / save、snapshot / restore、history / replay、plan / apply / revert / undo |
 | 确定性 | 固定步 schedule、trace / verify、schema 字节级确定性、状态哈希 |
 | 渲染图 | 资源表、pass 读写、确定性拓扑、环 / 多写者 / 未声明资源检测 |
-| wgpu 渲染 | 相机 MVP、深度、单 pass、顶点 / 索引缓存、按模型实例化、DrawList、glTF 首图元 `baseColorFactor × render.material.base_color`（静态 / GPU 蒙皮同路）、场景光（环境光 + 主方向光，面法线朝向相机）、截图相机优先级（场景相机 → 顺光自动取景）、线性 / sRGB RGBA8 回读 |
+| wgpu 渲染 | 相机 MVP、深度、单 pass、顶点 / 索引缓存、按模型实例化、DrawList、颜色合成顺序 `模型基色因子 → .mat 资产 → 实体覆盖 → 选择高亮`（静态 / GPU 蒙皮同路）、场景光（环境光 + 主方向光，面法线朝向相机）、ACES 色调映射（含清屏色）、截图相机优先级（场景相机 → 顺光自动取景）、线性 / sRGB RGBA8 回读 |
 | UI | 布局 / 父相对 / 裁剪 / 命中、输入桥、Tab + 方向键焦点、背景 / 焦点环、5x7 文本换行、PNG/PPM 纹理、stretch/preserve/cover/nine-slice、scissor 裁剪、正式帧末 sRGB alpha 合成 |
 | 动画 | RON 剪辑、平移 / 旋转 slerp / 缩放采样、目录加载、写回 Transform、Skeleton / Bone / Pose、GLB JOINTS / WEIGHTS / 逆绑定、CPU 蒙皮、DrawList 自动读取祖先骨架姿态并按实体变形上传 |
 | 物理 | 重力 / 速度积分 / 地面 / 跳跃、角色台阶 / 高墙 / 球体阻挡、斜坡地面、AABB 分离 |
 | 音频 | 空间化增益、总线、WAV 解码、软件混音、WAV 写出 |
 | Lua | 安全宿主：执行 / 调用 / 字段与实体 API / 指令预算 / 内存上限 / 生命周期；`ScriptRuntime` 驱动脚本实体并热重载；`Simulation::step_with` 可插脚本帧 |
-| 资产 / 迁移 | `.meta` 扫描、旧 SceneV2 全组件映射（含 UI / Particle / Rust 插件）、场景级光源 / 环境光迁移与验收、目录批量迁移 |
+| 资产 / 迁移 | `.meta` 扫描、旧 SceneV2 全组件映射（含 UI / Particle / Rust 插件）、场景级光源 / 环境光迁移与验收、`.mat` 材质资产引用迁移与渲染期解析、目录批量迁移 |
 | CLI | schema / check / bench / export / import / run / serve / migrate / assets / clips / audio / mix / render-graph / gpu-probe / mesh-probe / render-frame |
 
 ## 进度评估（主观加权，非指标）
@@ -41,34 +41,34 @@
 | 迁移工具 | 90% | 场景 / 脚本 / 预制体 / 统计对照全通；修复 GlobalTransform 空字段与旧相机 +Z 约定，真实 showcase 1280×720 可渲染出场景；缺旧新逐帧视觉对照 |
 | 动画 | 97% | 根 / 关节轨道 + 骨架 + CPU / GPU 蒙皮 + 状态机 + 叠加层（实体 / 关节遮罩）+ 转场淡入；缺根关节混合权重细调 |
 | 音频 | 60% | 空间化增益、总线、WAV 解码、软件混音、WAV 写出、cpal 默认输出设备播放（重采样 / 队列）、`xgc play`；缺流式资产 / 3D 声像 |
-| 渲染 | 52% | 真实 builtin 几何 + glTF PBR 基色因子 + 场景光（环境光 + 方向光 N·L）+ 天空清屏色 + 实例化 + sRGB HUD 合成 + 截图取景优先级；缺材质资产乘子 / 色调映射 / metallic-roughness BRDF / 网格纹理 / 阴影 / 后处理 / 粒子绘制 |
+| 渲染 | 56% | 真实 builtin 几何 + glTF 基色因子 + `.mat` 资产乘子 + 场景光（环境光 + 方向光 N·L）+ ACES 色调映射 + 实例化 + sRGB HUD 合成 + 截图取景优先级；缺天空 IBL / metallic-roughness BRDF / 网格纹理 / 阴影 / 后处理 / 粒子绘制 |
 | 物理 | 25% | 自研简化碰撞；缺完整刚体、关节、连续碰撞、坡面滑动 |
 | 资产 / 打包 | 70% | 引用裁剪 + 增量烹饪（哈希未变跳过写入）+ manifest 聚合签名；JSON / XGCB / 图形播放器；缺密码学签名 / 跨机器增量 |
 | Lua 脚本 | 80% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
 | 编辑器 | 88% | 层级 / Inspector / Play / 视口 / Undo / Gizmo / 吸附 + 预制体实例化 / Revert / 位置覆写 + Play Scripts（脚本 + input.ron 动作） |
-| 割接验收 | 47% | 统计对照一致；旧 / 新截图同用场景相机、同一第 150 帧；场景光贯通后 mean_abs 由 28.65 降到 23.79；仍缺材质乘子 / 色调映射 / 阴影、逐帧 trace、并行调度与推送 |
+| 割接验收 | 49% | 统计对照一致；旧 / 新截图同用场景相机、同一第 150 帧；材质资产 + ACES 后 mean_abs 由 23.79 降到 21.24；仍缺天空 IBL / 阴影、逐帧 trace、并行调度与推送 |
 
-**整体能力对等约 58%，割接就绪约 47%**。核心运行时、迁移、动画、编辑器和
+**整体能力对等约 60%，割接就绪约 49%**。核心运行时、迁移、动画、编辑器和
 cooked 播放器已可用；差距集中在渲染高级特性、正式调度、逐帧验收与推送。
 
 ## 迁移 / 运行证据
 
 - `projects/XGame/Scenes/showcase.ron` → 24 实体 / 51 组件 / 0 缺失父节点。
-- `run-world` 60 帧通过；`render-frame` 第 150 帧 hash `3e0b371b20aef59b`，1280×720 输出 14 个场景 draw / 5 个场景 draw call / 7 个 UI draw。
+- `run-world` 60 帧通过；`render-frame` 第 150 帧 hash `94f44ec6bd500707`（`render.material` 新增 `asset` 字段参与状态哈希，迁移逐字段仍然一致），1280×720 输出 14 个场景 draw / 5 个场景 draw call / 7 个 UI draw。
 - 旧 / 新 headless 统计逐项一致：24 实体 / 10 刚体 / 10 碰撞体 / 2 发射器 / 1 监听者。
 - **旧端截图相机已确认为 `mode: "scene"`**（重跑旧 `xgame-editor` 读到的报告），两次旧运行图像逐像素相同（0/921600）；XGC 的 `render-frame` 现在按同一优先级取景：有场景相机就用场景相机，只有缺相机时才退到顺光自动取景。
 - 场景级光源与环境光已迁移进 `WorldData.environment`（showcase：`Sun` 方向 (0.45,-1,0.35)、强度 1.4、色 (1.0,0.97,0.92)，`ambient` (0.09,0.1,0.13)）；`verify-migration` 逐光源字段对照，缺省环境不落盘。
-- `render-frame` 缺省 0 帧；显式帧数复用 `Simulation::step_with` + `ScriptRuntime::run_frame`，最后重算层级与目标尺寸 UI。第 150 帧旧 / 新差异 915191/921600（99.30%）、mean_abs **23.79**、max 221（上一切片 28.65）——场景光贯通后首次出现整帧均值收敛。
+- `render-frame` 缺省 0 帧；显式帧数复用 `Simulation::step_with` + `ScriptRuntime::run_frame`，最后重算层级与目标尺寸 UI。第 150 帧旧 / 新差异 915191/921600（99.30%）、mean_abs **21.24**、max 218（上一切片 23.79）——材质资产乘子与 ACES 曲线让地面 / 背景色第一次贴近旧图。
 - 无 `animation.state` 时 `set_anim_param` 现在安全 no-op，不再让同帧其它脚本命令整批失败；状态机迁移仍是独立差距。
 - GUID 资产（Box.glb、Fox.gltf + Fox.bin）可解析；glTF 首图元 `baseColorFactor` 在静态实例与 GPU 蒙皮路径均参与最终颜色，且选择高亮仍能替换最终颜色；character 脚本 / Pillar 预制体可迁移。
 - cooked 包：引用裁剪 7 文件、XGCB 二进制（v2 带场景环境）、manifest 哈希 / 签名校验、`xgc-player` headless 60 帧。
-- 自动化测试：243 条；正式帧回归覆盖 sRGB alpha HUD、帧数契约、固定步推进与最终父子 `GlobalTransform` 合成；基色因子与场景光均有 GPU 像素门禁，环境往返 / 迁移 / 验收 / 取景拟合均有 CPU 回归。
+- 自动化测试：251 条；正式帧回归覆盖 sRGB alpha HUD、帧数契约、固定步推进与最终父子 `GlobalTransform` 合成；基色因子、场景光、`.mat` 乘子与 ACES 均有 GPU 像素门禁（期望值由 CPU 镜像现算），环境往返 / 迁移 / 验收 / 取景拟合均有 CPU 回归。
 
 ## 与 XGameEngine 的主要差距
 
 | 差距 | 影响 | 优先级 |
 |---|---|---|
-| 渲染高级特性 | 基础几何 / glTF 基色因子 / 场景光 + 环境光 / 面着色 / 天空 / HUD 已通；缺材质资产乘子、色调映射、metallic-roughness BRDF、网格纹理、阴影、后处理、粒子 | P0 |
+| 渲染高级特性 | 基础几何 / glTF 基色因子 / `.mat` 资产乘子 / 场景光 + 环境光 / ACES / 面着色 / 天空 / HUD 已通；缺天空 IBL（`project.ron` 的天空是开着的，正面暗部差距主要来自它）、metallic-roughness BRDF、网格纹理、阴影、后处理、粒子 | P0 |
 | 正式 System 调度 | `SystemAccess` / `batches()` 已有，执行仍顺序；脚本尚未成为正式 System | P0 |
 | 视觉 / trace 验收 | 第 150 帧同 tick 截图已可复现；仍无逐帧 trace / 状态哈希对照，像素差距仍大 | P0 |
 | 物理完整性 | 简化角色 / AABB；无完整刚体、关节、连续碰撞、坡面滑动 | P1 |
@@ -89,7 +89,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 
 ## 下一步（按顺序）
 
-1. 渲染：glTF `baseColorFactor` 与场景光（含环境光）已贯通、截图相机优先级已对齐；下一步补 `.mat` 基色乘子与色调映射，再做 metallic-roughness BRDF / 网格纹理 / 阴影。
+1. 渲染：glTF 基色因子、`.mat` 资产乘子、场景光 + 环境光、ACES 已贯通；下一步补天空 IBL 环境照明（`project.ron` 的 sky 节），再做 metallic-roughness BRDF / 网格纹理 / 阴影。
 2. 正式调度：把脚本与默认系统纳入 `Schedule` 的访问声明批次。
 3. 逐帧 trace / 截图对照与性能门禁。
 4. 密码学签名、跨机器增量烹饪。

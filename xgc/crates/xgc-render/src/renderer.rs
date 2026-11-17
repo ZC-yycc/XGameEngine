@@ -7,6 +7,7 @@ use xgc_world::{UiElement, UiInteraction, UiLayout, World};
 use super::assets::MeshCache;
 use super::camera::{camera_view_projection_with_eye, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
+use super::frame_color::compose_colors;
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::image::ImageData;
@@ -77,11 +78,14 @@ impl Renderer {
         }
     }
 
+    /// 清屏色也过同一条 ACES 曲线——旧引擎整帧（含天空）都在合成 pass 里过曲线。
     pub fn set_clear_color(&mut self, color: [f64; 4]) {
+        let linear = [color[0] as f32, color[1] as f32, color[2] as f32];
+        let mapped = super::tone::aces(linear);
         self.clear_color = wgpu::Color {
-            r: color[0],
-            g: color[1],
-            b: color[2],
+            r: f64::from(mapped[0]),
+            g: f64::from(mapped[1]),
+            b: f64::from(mapped[2]),
             a: color[3],
         };
     }
@@ -89,7 +93,6 @@ impl Renderer {
     pub fn meshes(&self) -> &MeshCache {
         &self.meshes
     }
-
     pub fn gpu_mesh_count(&self) -> usize {
         self.gpu_meshes.len()
     }
@@ -434,8 +437,8 @@ impl Renderer {
         Ok(stats)
     }
 
-    /// 截图取景：与旧引擎 `--screenshot` 相同的相机优先级——**有场景相机就用场景
-    /// 相机**，缺相机时才退到顺光自动取景（整场景包围盒 + 场景主方向光推视轴）。
+    /// 截图取景：与旧引擎 `--screenshot` 同一条相机优先级——有场景相机就用场景相机，
+    /// 缺相机才退到顺光自动取景（包围盒 + 场景主方向光推视轴）。
     pub fn render_shot(
         &mut self,
         context: &GpuContext,
@@ -483,24 +486,8 @@ impl Renderer {
         selected: Option<xgc_base::EntityId>,
     ) -> Result<DrawList, GpuError> {
         let mut list = build_draw_list(world);
-        // 模型材质因子与实体覆盖先在分流前合成，静态 / 蒙皮共享同一份逐 draw 颜色；
-        // 选择高亮随后替换最终颜色，不会再被资产里的零通道吞掉。
-        for item in &mut list.items {
-            if let Some(mesh) = self
-                .meshes
-                .get(&item.model)
-                .map_err(|err| GpuError::Mesh(err.to_string()))?
-            {
-                item.color = mesh.tint(item.color);
-            }
-        }
-        if let Some(selected) = selected {
-            for item in &mut list.items {
-                if item.entity == selected {
-                    item.color = [1.0, 0.82, 0.2, 1.0];
-                }
-            }
-        }
+        compose_colors(&mut self.meshes, &mut list, selected)
+            .map_err(|err| GpuError::Mesh(err.to_string()))?;
         Ok(list)
     }
 

@@ -109,6 +109,7 @@ fn renderer_uses_gpu_skinning_for_pose_items() {
         xgc_world::Material {
             base_color: [1.0, 0.0, 0.0, 1.0],
             roughness: 0.5,
+            ..xgc_world::Material::default()
         },
     ));
     let mut renderer = Renderer::new(MeshCache::new("."));

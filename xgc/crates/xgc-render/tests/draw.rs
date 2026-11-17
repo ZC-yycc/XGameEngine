@@ -15,6 +15,7 @@ fn draw_list_extracts_mesh_material_and_skips_missing_global() {
         Material {
             base_color: [1.0, 0.0, 0.0, 1.0],
             roughness: 0.2,
+            ..Material::default()
         },
     ));
     let second = world.spawn((
@@ -25,6 +26,7 @@ fn draw_list_extracts_mesh_material_and_skips_missing_global() {
         Material {
             base_color: [0.0, 0.0, 1.0, 1.0],
             roughness: 0.8,
+            ..Material::default()
         },
     ));
     world.spawn((MeshRenderer {

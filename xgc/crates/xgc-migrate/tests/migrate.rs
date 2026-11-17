@@ -309,6 +309,45 @@ const LIT_SCENE: &str = r#"(
     entities: [],
 )"#;
 
+/// 旧 `Material.asset` 必须进 `render.material.asset`：材质资产是共享乘子，
+/// 迁移丢掉它等于把资产基色从画面里抹掉。
+#[test]
+fn migrates_material_asset_reference() {
+    use xgc_world::Material;
+
+    let path = std::path::Path::new("../../../projects/XGame/Scenes/showcase.ron");
+    if !path.exists() {
+        eprintln!("skip: 没有旧项目 showcase.ron");
+        return;
+    }
+    let text = std::fs::read_to_string(path).unwrap();
+    let (world, _) = migrate_str(&text).unwrap();
+    let fields = world
+        .entities
+        .iter()
+        .flat_map(|entity| &entity.components)
+        .filter(|component| component.component == Material::ID)
+        .map(|component| {
+            component
+                .fields
+                .iter()
+                .find(|(name, _)| name == "asset")
+                .and_then(|(_, value)| value.clone().as_string().map(str::to_string))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        fields
+            .iter()
+            .any(|asset| asset == "guid://235b50780baf2866df65bddf31c31470"),
+        "Concrete 材质引用必须保留：{fields:?}"
+    );
+    assert!(
+        fields.iter().any(|asset| asset.is_empty()),
+        "没有材质资产的实体不应凭空得到引用：{fields:?}"
+    );
+}
+
 #[test]
 fn migrates_scene_lights_and_ambient() {
     use xgc_world::LightKind;

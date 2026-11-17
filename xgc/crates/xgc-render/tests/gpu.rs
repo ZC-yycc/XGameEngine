@@ -79,6 +79,7 @@ fn gpu_resources_are_created_when_adapter_available() {
         Material {
             base_color: [0.0, 1.0, 0.0, 1.0],
             roughness: 0.5,
+            ..Material::default()
         },
     ));
     world.spawn((
@@ -89,6 +90,7 @@ fn gpu_resources_are_created_when_adapter_available() {
         Material {
             base_color: [0.0, 0.0, 1.0, 1.0],
             roughness: 0.5,
+            ..Material::default()
         },
     ));
     let list = build_draw_list(&world);

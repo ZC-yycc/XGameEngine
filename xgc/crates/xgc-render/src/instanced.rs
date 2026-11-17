@@ -98,6 +98,38 @@ struct Frame {
 @group(0) @binding(0)
 var<uniform> frame: Frame;
 
+// 色调映射：与 tone.rs 的 Rust 镜像逐式对应（ACES RRT+ODT 拟合，1/0.6 亮度基准确认）。
+// 旧引擎在合成 pass 里过这条曲线；这里在片元输出前套同一条，随后由 sRGB 目标编码。
+fn aces_input_mat(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        0.59719 * c.x + 0.35458 * c.y + 0.04823 * c.z,
+        0.07600 * c.x + 0.90834 * c.y + 0.01566 * c.z,
+        0.02840 * c.x + 0.13383 * c.y + 0.83777 * c.z,
+    );
+}
+
+fn aces_output_mat(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        1.60475 * c.x - 0.53108 * c.y - 0.07367 * c.z,
+        -0.10208 * c.x + 1.10813 * c.y - 0.00605 * c.z,
+        -0.00327 * c.x - 0.07276 * c.y + 1.07602 * c.z,
+    );
+}
+
+fn aces_rrt(c: vec3<f32>) -> vec3<f32> {
+    let a = c * (c + vec3<f32>(0.0245786)) - vec3<f32>(0.000090537);
+    let b = c * (vec3<f32>(0.983729) * c + vec3<f32>(0.432951)) + vec3<f32>(0.238081);
+    return a / b;
+}
+
+fn aces(linear: vec3<f32>) -> vec3<f32> {
+    var c = max(linear, vec3<f32>(0.0)) / 0.6;
+    c = aces_input_mat(c);
+    c = aces_rrt(c);
+    c = aces_output_mat(c);
+    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 struct Instance {
     model: mat4x4<f32>,
     color: vec4<f32>,
@@ -136,7 +168,8 @@ fn fs(input: VsOut) -> @location(0) vec4<f32> {
     let diffuse = max(dot(normal, to_light), 0.0);
     // 环境光 + 场景主方向光；没有方向光时 eye_intensity.w = 0，只剩环境光。
     let light = frame.ambient.rgb + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse);
-    return vec4<f32>(input.color.rgb * light, input.color.a);
+    let lit = input.color.rgb * light;
+    return vec4<f32>(aces(lit), input.color.a);
 }
 "#;
 

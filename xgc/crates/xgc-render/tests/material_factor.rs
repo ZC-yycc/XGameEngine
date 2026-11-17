@@ -158,7 +158,22 @@ fn gltf_base_color_factor_multiplies_entity_color_once() {
         },
     );
     let ratio = f32::from(halved[0]) / f32::from(white[0]);
-    // 重复相乘会得到 0.8² × 0.5 ≈ 0.32 的红通道比，落在 0.43~0.57 之外。
+    // 曲线之后的像素仍要逐通道对表：白 = 曲线(0.8,0,0)，灰 = 曲线(0.4,0,0)。
+    // 重复相乘会得到曲线(0.32,0,0) 的红通道 ≈ 103，与 120 明显不同。
+    let expected_white = xgc_render::aces_u8([0.8, 0.0, 0.0]);
+    let expected_halved = xgc_render::aces_u8([0.4, 0.0, 0.0]);
+    for (label, pixel, expected) in [
+        ("白模", white, expected_white),
+        ("0.5 灰", halved, expected_halved),
+    ] {
+        for (axis, want) in expected.into_iter().enumerate() {
+            let got = pixel[axis];
+            assert!(
+                (i16::from(got) - i16::from(want)).abs() <= 1,
+                "{label} 通道 {axis} 必须等于曲线与 CPU 镜像的对表值：实际 {got}，期望 {want}"
+            );
+        }
+    }
     assert!(
         white[0] > 150 && (0.43..=0.57).contains(&ratio),
         "模型因子与实体材质只许乘一次：白 {white:?} → 灰 0.5 {halved:?}，ratio={ratio}"

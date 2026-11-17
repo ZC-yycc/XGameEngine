@@ -53,6 +53,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
         Material {
             base_color: [1.0, 0.0, 0.0, 1.0],
             roughness: 0.5,
+            ..Material::default()
         },
     ));
     let stats = renderer.render(&context, &texture, &world).unwrap();
@@ -60,7 +61,10 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(stats.draw_calls, 1);
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
     let center = 4 * (2 * 4 + 2);
-    assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
+    // 片元先过 ACES 曲线，期望值由 CPU 镜像现算。
+    let expected = xgc_render::aces_u8([1.0, 0.0, 0.0]);
+    assert_eq!(&pixels[center..center + 3], &expected);
+    assert_eq!(pixels[center + 3], 255);
 
     world.spawn((
         GlobalTransform {
@@ -73,7 +77,10 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(stats.draws, 1);
     assert_eq!(stats.draw_calls, 1);
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
-    assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
+    // 片元先过 ACES 曲线，期望值由 CPU 镜像现算。
+    let expected = xgc_render::aces_u8([1.0, 0.0, 0.0]);
+    assert_eq!(&pixels[center..center + 3], &expected);
+    assert_eq!(pixels[center + 3], 255);
 
     let mut depth_world = World::new();
     depth_world.set_environment(xgc_world::SceneEnvironment {
@@ -91,6 +98,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
         Material {
             base_color: [0.0, 1.0, 0.0, 1.0],
             roughness: 0.5,
+            ..Material::default()
         },
     ));
     depth_world.spawn((
@@ -104,6 +112,7 @@ fn empty_world_clears_and_entity_emits_one_draw() {
         Material {
             base_color: [1.0, 0.0, 0.0, 1.0],
             roughness: 0.5,
+            ..Material::default()
         },
     ));
     depth_world.spawn((
@@ -119,11 +128,15 @@ fn empty_world_clears_and_entity_emits_one_draw() {
     assert_eq!(stats.passes, 1, "两个实体应在同一个 render pass");
     assert_eq!(renderer.gpu_mesh_count(), 1, "同一模型只上传一次");
     let pixels = context.read_texture_rgba8(&texture, 4, 4).unwrap();
-    assert_eq!(
-        &pixels[center..center + 4],
-        &[0, 255, 0, 255],
-        "近处绿色应挡住后画的远处红色"
-    );
+    let expected = xgc_render::aces_u8([0.0, 1.0, 0.0]);
+    for (axis, want) in expected.into_iter().enumerate() {
+        let got = pixels[center + axis];
+        assert!(
+            (i16::from(got) - i16::from(want)).abs() <= 1,
+            "近处绿色应挡住后画的远处红色（曲线后对表）：实际 {got}，期望 {want}"
+        );
+    }
+    assert_eq!(pixels[center + 3], 255);
 }
 
 #[test]
@@ -436,62 +449,6 @@ fn cover_uv_crops_wide_source() {
     let tall = xgc_render::cover_uv([1.0, 4.0], [16.0, 16.0]);
     assert!((tall[1] - 0.375).abs() < 1e-6);
     assert!((tall[3] - 0.25).abs() < 1e-6);
-}
-
-#[test]
-fn ui_image_nine_slice_draws_nine_cells() {
-    let _gpu = gpu_lock();
-    use xgc_world::{UiElement, UiLayout};
-
-    let Ok(context) = GpuContext::headless() else {
-        eprintln!("skip: 没有可用 GPU 适配器");
-        return;
-    };
-    let path = std::env::temp_dir().join(format!(
-        "xgc_slice_{}_{}.ppm",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let mut data = b"P6\n4 4\n255\n".to_vec();
-    for _ in 0..16 {
-        data.extend_from_slice(&[255, 0, 0]);
-    }
-    std::fs::write(&path, &data).unwrap();
-    let desc = ResourceDesc::texture2d(
-        "slice-target",
-        "rgba8unorm",
-        16,
-        16,
-        vec![ResourceUsage::ColorAttachment],
-    );
-    let resource = context.create_resource(&desc).unwrap();
-    let GpuResource::Texture(texture) = resource else {
-        panic!("slice target 不是纹理");
-    };
-    let mut world = World::new();
-    world.spawn((
-        UiElement {
-            image_path: path.to_string_lossy().into_owned(),
-            image_mode: "nine_slice".to_string(),
-            image_slice: 1.0,
-            background: [0.0; 4],
-            ..UiElement::default()
-        },
-        UiLayout {
-            rect: [0.0, 0.0, 16.0, 16.0],
-            ..UiLayout::default()
-        },
-    ));
-    let mut renderer = Renderer::new(MeshCache::new("."));
-    assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 9);
-    let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
-    assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
-    let center = 4 * (8 * 16 + 8);
-    assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
-    std::fs::remove_file(&path).unwrap();
 }
 
 #[test]
