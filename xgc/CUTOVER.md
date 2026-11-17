@@ -11,7 +11,7 @@
 | 迁移世界可运行 | 通过 | `run-world` / `run-cooked` / `xgc-player` 60 帧同哈希 |
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
 | 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `94f44ec6bd500707`，1280×720，14 个场景 draw / 5 call / 7 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / 环境光 / `.mat` 资产乘子 / ACES / 天空漫反射 IBL 已贯通 |
-| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 915151/921600 像素不同（99.30%），mean_abs **15.27**、max 215（上一切片 15.97）；仍缺阴影 / 纹理 / 镜面 IBL 与仿真状态对齐 |
+| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 915151/921600 像素不同（99.30%），mean_abs **16.34**、max 215；阴影接入后反向 1.07 —— 影子跟着各自的仿真位置落，而两边的物体位置仍不一致（仿真状态对齐现在是主因） |
 | 逐帧 trace / 状态哈希对照 | **未通过** | XGC 重放自身确定；无旧引擎逐帧 trace |
 | 正式 System 调度 / 并行 | **未通过** | `batches()` 计划已有，执行顺序 |
 | 性能基准 + 热路径分配门禁 | **未通过** | 无 release CI 门禁 |
@@ -37,6 +37,9 @@ cargo run -q -p xgc-cli --offline -- image-diff ..\tmp\old-150.png ..\tmp\new-15
 
 # 材质垂直切片：真实 Box + 合成蒙皮 GLB 都必须消费 baseColorFactor
 cargo test -p xgc-render --test material_factor --offline
+
+# 方向光阴影：开关两帧对比（暗像素数量 + 只会变暗）（GPU）
+cargo test -p xgc-render --test shadows --offline
 
 # 天空盒画面：解析天空逐像素对表 + 几何遮挡（GPU）
 cargo test -p xgc-render --test sky_box --offline
@@ -65,17 +68,18 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > （E/π，1024 点斐波那契球，无随机数）后与 `ambient` 相加，片元侧逐项对表。
 > 场景级光源 / 环境光已迁移进 `WorldData.environment`；颜色合成顺序对齐旧引擎
 > `模型基色因子 → .mat 资产 → 实体覆盖`（全是乘子），片元与清屏色都过同一条 ACES 曲线。
-> 旧 / 新整帧 mean_abs 依次为 28.65 → 23.79 → 21.24 → 15.97 → **15.27**（max 215）。第 150 帧世界哈希变为
+> 旧 / 新整帧 mean_abs 依次为 28.65 → 23.79 → 21.24 → 15.97 → 15.27 → **16.34**（阴影接入后反向 1.07，
+> 原因是影子位置取决于各自的仿真位置，详见 STATUS）。第 150 帧世界哈希变为
 > `94f44ec6bd500707`：`render.material` 新增 `asset` 字段参与状态哈希，不是仿真变化（`verify-migration` 一致）。
-> 仍缺：镜面 IBL（金属 / 高光反射）、metallic-roughness BRDF、网格纹理、阴影，
-> 以及第 150 帧的仿真状态对齐（旧图里落地的立方体在 XGC 仍在空中，
+> 仍缺：CSM / PCSS / 点光阴影、镜面 IBL（金属 / 高光反射）、metallic-roughness BRDF、网格纹理，
+> 以及第 150 帧的仿真状态对齐（现在是像素差距的主因）（旧图里落地的立方体在 XGC 仍在空中，
 > 属物理差距，不是渲染问题）。旧端本机仍报告项目 Rust 插件构建指纹不匹配并跳过，XGC 也尚未迁移旧 Animator
 > 状态机与完整动画素材。
 > 当前 `ScriptRuntime::run_frame` 不返回错误，脚本诊断仍只写 stderr；正式调度切片需要把失败传播纳入宿主契约。
 
 ## 建议顺序
 
-1. 渲染：glTF 基色因子、`.mat` 资产乘子、场景光 + 环境光、ACES、天空盒画面 + 漫反射 IBL、截图相机优先级已贯通；下一步补镜面 IBL 与阴影，再做 metallic-roughness BRDF / 网格纹理。
+1. 渲染与仿真对齐：单级方向光阴影已贯通；下一步补 CSM / 软阴影，并把第 150 帧的仿真状态对齐（主因），之后是镜面 IBL / metallic-roughness BRDF / 网格纹理。
 2. 正式调度：脚本与系统统一访问声明。
 3. 旧新逐帧 trace + 截图像素门禁。
 4. 密码学签名 / 跨机器增量。

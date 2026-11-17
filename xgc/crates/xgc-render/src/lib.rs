@@ -24,6 +24,7 @@ mod mesh;
 mod pipeline;
 mod renderer;
 mod resources;
+mod shadow;
 mod shot;
 mod skinned;
 mod skinning;
@@ -36,8 +37,8 @@ mod ui_draw;
 
 pub use assets::MeshCache;
 pub use camera::{
-    camera_view_projection, invert, look_at_rh, model_matrix, mul, perspective_rh_zo,
-    transform_point, Mat4, IDENTITY,
+    camera_view_projection, invert, look_at_rh, model_matrix, mul, orthographic_rh,
+    perspective_rh_zo, transform_point, Mat4, IDENTITY,
 };
 pub use diff::{diff_images, ImageDiff};
 pub use draw::{build_draw_list, DrawItem, DrawList};
@@ -53,6 +54,7 @@ pub use mesh::{builtin_mesh, Mesh, SkinData};
 pub use pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
+pub use shadow::{fit_directional_shadow, SHADOW_DEPTH_BIAS, SHADOW_RESOLUTION};
 pub use shot::{
     clip_planes, default_shot_direction, frame_bounds, frame_scene, scene_bounds, shot_direction,
     Bounds, ShotCamera, ShotFrame, DEFAULT_FOV_Y,

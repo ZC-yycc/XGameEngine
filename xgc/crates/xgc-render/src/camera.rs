@@ -108,6 +108,30 @@ pub fn perspective_rh_zo(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
     ]
 }
 
+/// 正交投影（右手，深度 [0,1]）；用于方向光阴影拟合。
+pub fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4 {
+    let width = (right - left).max(1e-6);
+    let height = (top - bottom).max(1e-6);
+    [
+        2.0 / width,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0 / height,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0 / (near - far),
+        0.0,
+        -(right + left) / width,
+        -(top + bottom) / height,
+        near / (near - far),
+        1.0,
+    ]
+}
+
 pub fn look_at_rh(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> Mat4 {
     let forward = normalize(sub(target, eye));
     let mut right = normalize(cross(forward, up));

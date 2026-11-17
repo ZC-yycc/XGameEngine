@@ -41,6 +41,7 @@ pub struct Renderer {
     skin_meshes: GpuSkinMeshCache,
     skinned: Option<(wgpu::TextureFormat, SkinnedPipeline)>,
     sky_pipeline: Option<(wgpu::TextureFormat, super::sky_draw::SkyPipeline)>,
+    shadow: Option<super::shadow::ShadowTarget>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
@@ -72,6 +73,7 @@ impl Renderer {
             skin_meshes: GpuSkinMeshCache::new(),
             skinned: None,
             sky_pipeline: None,
+            shadow: None,
             depth: None,
             images: HashMap::new(),
             ui_overlay: None,
@@ -171,7 +173,7 @@ impl Renderer {
         };
         let lighting = self.frame_lighting(world, eye);
         let list = self.prepared_list(world, None)?;
-        let mut stats = self.render_list(context, target, list, view_proj, lighting)?;
+        let mut stats = self.render_list(context, target, world, list, view_proj, lighting)?;
         stats.ui_draws = self.render_ui(context, target, world)?;
         stats.passes += usize::from(stats.ui_draws > 0);
         Ok(stats)
@@ -191,7 +193,7 @@ impl Renderer {
         let (view_proj, eye) =
             camera_view_projection_with_eye(world, width, height).unwrap_or((IDENTITY, [0.0; 3]));
         let lighting = self.frame_lighting(world, eye);
-        self.render_list(context, target, list, view_proj, lighting)
+        self.render_list(context, target, world, list, view_proj, lighting)
     }
 
     /// 帧光照 = 场景灯 + 天空漫反射 IBL（开着才算，太阳取场景主方向光）。
@@ -217,6 +219,44 @@ impl Renderer {
     }
 
     /// 按给定 view-projection 出 draw：静态实例一批，GPU 蒙皮逐网格。
+    /// 拟合并渲染方向光阴影；没有可用光源 / 场景时返回 `None`（不采样阴影）。
+    fn prepare_shadow(
+        &mut self,
+        context: &GpuContext,
+        world: &World,
+        items: &[super::draw::DrawItem],
+    ) -> Result<Option<Mat4>, GpuError> {
+        let Some(light) = world.environment().lights.iter().find(|light| {
+            light.kind == xgc_world::LightKind::Directional
+                && light.is_active()
+                && light.casts_shadow
+        }) else {
+            return Ok(None);
+        };
+        let bounds = super::shot::scene_bounds(world, &mut self.meshes)
+            .map_err(|err| GpuError::Mesh(err.to_string()))?;
+        let Some(bounds) = bounds else {
+            return Ok(None);
+        };
+        let Some(matrix) =
+            super::shadow::fit_directional_shadow(light.normalized_direction(), &bounds)
+        else {
+            return Ok(None);
+        };
+        if let Some(target) = self.shadow.as_ref() {
+            target
+                .render(
+                    context,
+                    matrix,
+                    items,
+                    &mut self.gpu_meshes,
+                    &mut self.meshes,
+                )
+                .map_err(GpuError::Pipeline)?;
+        }
+        Ok(Some(matrix))
+    }
+
     /// 天空盒：整屏一张三角形，深度 `LessEqual` + 不写深度，被几何挡住的像素不画。
     ///
     /// 单独一个 pass（`LoadOp::Load`）而不是塞进实例化 pass：实例化 pass 自己负责
@@ -286,9 +326,10 @@ impl Renderer {
         &mut self,
         context: &GpuContext,
         target: &wgpu::Texture,
+        world: &World,
         list: DrawList,
         view_proj: Mat4,
-        lighting: FrameLighting,
+        mut lighting: FrameLighting,
     ) -> Result<RenderStats, GpuError> {
         self.ensure_depth(context, target.width(), target.height())?;
         // 天空管线要在拿 `self.depth` 的不可变借用之前建好（之后只剩读）。
@@ -298,6 +339,23 @@ impl Renderer {
                 self.sky_pipeline = Some((format, context.create_sky_pipeline(format)));
             }
         }
+        if self.shadow.is_none() {
+            self.shadow = Some(super::shadow::ShadowTarget::new(context));
+        }
+        // 阴影只投静态网格：GPU 蒙皮投射是后续切片。
+        let static_items: Vec<super::draw::DrawItem> = list
+            .items
+            .iter()
+            .filter(|item| item.pose.is_none())
+            .cloned()
+            .collect();
+        let shadow_matrix = self.prepare_shadow(context, world, &static_items)?;
+        lighting = lighting.with_shadow(shadow_matrix);
+        let (shadow_view, shadow_sampler) = self
+            .shadow
+            .as_ref()
+            .map(|target| target.sample_source(shadow_matrix.is_some()))
+            .unwrap();
         let depth = &self.depth.as_ref().unwrap().view;
         let draws = list.len();
         let mut cpu_items = Vec::with_capacity(list.items.len());
@@ -318,6 +376,8 @@ impl Renderer {
             gpu_meshes: &mut self.gpu_meshes,
             view_proj,
             lighting,
+            shadow_view,
+            shadow_sampler,
             depth,
             clear_color: self.clear_color,
         };

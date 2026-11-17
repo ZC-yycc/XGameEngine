@@ -12,8 +12,8 @@ use super::pipeline::RenderCache;
 use xgc_world::SceneEnvironment;
 
 /// 帧 uniform：view-proj 64B + 四个 vec4（相机/强度、ambient、sun_dir、sun_color）
-/// + 9 个 vec4 的天空球谐 + 一个天空开关 vec4 = 288B。
-const FRAME_UNIFORM_BYTES: u64 = 288;
+/// + 9 个 vec4 的天空球谐 + 天空开关 vec4 + 光视图投影 64B + 阴影参数 vec4 = 368B。
+const FRAME_UNIFORM_BYTES: u64 = 368;
 
 /// 帧级光照参数：环境光 + 场景第一盏可用方向光；没有方向光时强度为 0（只剩环境光）。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,6 +25,8 @@ pub(crate) struct FrameLighting {
     pub(crate) sun_color: [f32; 3],
     /// 天空漫反射环境（E/π 口径的 L2 球谐）；`None` = 天空关，只剩 `ambient`。
     pub(crate) sky_irradiance: Option<[[f32; 4]; 9]>,
+    /// 方向光阴影的光视图投影；`None` = 这一帧没有可用阴影。
+    pub(crate) shadow_view_proj: Option<Mat4>,
 }
 
 impl FrameLighting {
@@ -39,7 +41,14 @@ impl FrameLighting {
             sun_intensity: sun.map(|light| light.intensity).unwrap_or(0.0),
             sun_color: sun.map(|light| light.color).unwrap_or([1.0; 3]),
             sky_irradiance: None,
+            shadow_view_proj: None,
         }
+    }
+
+    /// 挂上方向光阴影的光视图投影（`None` = 不采样阴影）。
+    pub(crate) fn with_shadow(mut self, shadow_view_proj: Option<Mat4>) -> Self {
+        self.shadow_view_proj = shadow_view_proj;
+        self
     }
 
     /// 挂上天空环境照明：`None` = 天空关（片元整段跳过 SH 求值）。
@@ -84,6 +93,21 @@ impl FrameLighting {
         for value in [enabled, 0.0, 0.0, 0.0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+        let light_view_proj = self.shadow_view_proj.unwrap_or(super::camera::IDENTITY);
+        for value in light_view_proj {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let (shadow_enabled, shadow_texel, shadow_bias) = match self.shadow_view_proj {
+            Some(_) => (
+                1.0,
+                1.0 / super::shadow::SHADOW_RESOLUTION as f32,
+                super::shadow::SHADOW_DEPTH_BIAS,
+            ),
+            None => (0.0, 0.0, 0.0),
+        };
+        for value in [shadow_enabled, shadow_texel, shadow_bias, 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
     }
 }
 
@@ -121,6 +145,9 @@ struct Frame {
     sky_sh: array<vec4<f32>, 9>,
     // x = 天空是否开启（1 / 0）
     sky_params: vec4<f32>,
+    light_view_proj: mat4x4<f32>,
+    // x = 阴影是否开启，y = 1/图宽，z = 深度偏置
+    shadow_params: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -163,6 +190,30 @@ fn sky_sh_eval(n: vec3<f32>) -> vec3<f32> {
          + frame.sky_sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
 }
 
+// 3×3 PCF（与旧引擎"硬阴影"分支同式）：图外 / 关闭时一律返回 1（全亮）。
+fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
+    if (frame.shadow_params.x < 0.5) {
+        return 1.0;
+    }
+    let clip = frame.light_view_proj * vec4<f32>(world_pos, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    // 掠射角下采样跨度大、自遮挡更重，偏置随 N·L 变小而放大。
+    let bias = frame.shadow_params.z * (1.0 + 2.0 * (1.0 - ndotl));
+    let depth = ndc.z;
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let offset = vec2<f32>(f32(dx), f32(dy)) * frame.shadow_params.y;
+            sum = sum + textureSampleCompareLevel(shadow_tex, shadow_smp, uv + offset, depth - bias);
+        }
+    }
+    return sum / 9.0;
+}
+
 fn aces(linear: vec3<f32>) -> vec3<f32> {
     var c = max(linear, vec3<f32>(0.0)) / 0.6;
     c = aces_input_mat(c);
@@ -175,6 +226,12 @@ struct Instance {
     model: mat4x4<f32>,
     color: vec4<f32>,
 };
+
+@group(0) @binding(1)
+var shadow_tex: texture_depth_2d;
+
+@group(0) @binding(2)
+var shadow_smp: sampler_comparison;
 
 @group(1) @binding(0)
 var<storage, read> instances: array<Instance>;
@@ -212,7 +269,8 @@ fn fs(input: VsOut) -> @location(0) vec4<f32> {
     if (frame.sky_params.x > 0.5) {
         light = light + sky_sh_eval(normal);
     }
-    light = light + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse);
+    let sun_shadow = shadow_factor(input.world, diffuse);
+    light = light + frame.sun_color.rgb * (frame.eye_intensity.w * diffuse * sun_shadow);
     let lit = input.color.rgb * light;
     return vec4<f32>(aces(lit), input.color.a);
 }
@@ -234,16 +292,35 @@ impl GpuContext {
             self.device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("xgc-instanced-camera"),
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(FRAME_UNIFORM_BYTES),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: wgpu::BufferSize::new(FRAME_UNIFORM_BYTES),
+                            },
+                            count: None,
                         },
-                        count: None,
-                    }],
+                        // 阴影深度图：硬件比较采样（比较采样器配 textureSampleCompareLevel）。
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Depth,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                            count: None,
+                        },
+                    ],
                 });
         let instance_layout =
             self.device()
@@ -333,6 +410,8 @@ pub(crate) struct InstancedRequest<'a> {
     pub(crate) gpu_meshes: &'a mut GpuMeshCache,
     pub(crate) view_proj: Mat4,
     pub(crate) lighting: FrameLighting,
+    pub(crate) shadow_view: &'a wgpu::TextureView,
+    pub(crate) shadow_sampler: &'a wgpu::Sampler,
     pub(crate) depth: &'a wgpu::TextureView,
     pub(crate) clear_color: wgpu::Color,
 }
@@ -401,10 +480,20 @@ impl RenderCache {
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("xgc-instanced-camera-bind"),
                 layout: pipeline.camera_layout(),
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(request.shadow_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(request.shadow_sampler),
+                    },
+                ],
             });
 
         let mut prepared = Vec::with_capacity(buckets.len());
