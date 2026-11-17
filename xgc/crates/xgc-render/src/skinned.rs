@@ -1,120 +1,80 @@
-//! GPU 蒙皮：逐顶点关节索引 / 权重进入顶点着色器，关节矩阵走 uniform。
-//!
-//! 单 draw 独立管线；深度附件可选，先把数据通路与着色器跑通，再接入实例化帧。
+//! GPU 蒙皮：关节矩阵只负责顶点变形，材质 / 贴图 / PBR / ACES 与静态主场景共用。
 
 use std::collections::HashMap;
 
 use super::camera::{mul, Mat4, IDENTITY};
 use super::gpu::{GpuContext, GpuError};
+use super::instanced::{create_frame_bind, create_frame_layout, FrameLighting};
 use super::mesh::Mesh;
+use super::texture_bind::TextureBinding;
 
 const MAX_JOINTS: usize = 64;
+const SKINNED_WGSL: &str = concat!(
+    include_str!("scene_shading.wgsl"),
+    include_str!("skinned.wgsl")
+);
 
-const SKINNED_WGSL: &str = r#"
-struct Camera {
-    view_proj: mat4x4<f32>,
-};
-
-struct Joints {
-    matrices: array<mat4x4<f32>, 64>,
-};
-
-struct Model {
-    model: mat4x4<f32>,
-    color: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var<uniform> camera: Camera;
-@group(1) @binding(0)
-var<uniform> joints: Joints;
-@group(2) @binding(0)
-var<uniform> model: Model;
-
-struct VsOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs(
-    @location(0) position: vec3<f32>,
-    @location(1) joints_idx: vec4<u32>,
-    @location(2) weights: vec4<f32>,
-) -> VsOut {
-    var skinned = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    for (var i = 0u; i < 4u; i = i + 1u) {
-        let matrix = joints.matrices[joints_idx[i]];
-        skinned = skinned + (matrix * vec4<f32>(position, 1.0)) * weights[i];
-    }
-    var out: VsOut;
-    out.position = camera.view_proj * model.model * skinned;
-    out.color = model.color;
-    return out;
-}
-
-@fragment
-fn fs(input: VsOut) -> @location(0) vec4<f32> {
-    return input.color;
-}
-"#;
-
-pub struct GpuSkinMesh {
-    pub position: wgpu::Buffer,
-    pub joints: wgpu::Buffer,
-    pub weights: wgpu::Buffer,
-    pub index_buffer: Option<wgpu::Buffer>,
-    pub vertices: u32,
-    pub indices: u32,
+pub(crate) struct GpuSkinMesh {
+    position: wgpu::Buffer,
+    uv: wgpu::Buffer,
+    joints: wgpu::Buffer,
+    weights: wgpu::Buffer,
+    texture_group: wgpu::BindGroup,
+    index_buffer: Option<wgpu::Buffer>,
+    vertices: u32,
+    indices: u32,
 }
 
 #[derive(Default)]
-pub struct GpuSkinMeshCache {
+pub(crate) struct GpuSkinMeshCache {
     meshes: HashMap<String, GpuSkinMesh>,
 }
 
 impl GpuSkinMeshCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.meshes.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.meshes.is_empty()
-    }
-
-    /// 蒙皮顶点属性只上传一次；同一模型键复用。
-    pub fn upload(&mut self, context: &GpuContext, key: &str, mesh: &Mesh) -> &GpuSkinMesh {
+    /// 蒙皮顶点属性、UV 与贴图只上传一次；同一模型键跨实体 / 帧复用。
+    pub(crate) fn upload(
+        &mut self,
+        context: &GpuContext,
+        key: &str,
+        mesh: &Mesh,
+        textures: &TextureBinding,
+    ) -> &GpuSkinMesh {
         if !self.meshes.contains_key(key) {
             let skin = mesh.skin.as_ref();
             let mut positions = Vec::with_capacity(mesh.positions.len() * 12);
+            let mut uvs = Vec::with_capacity(mesh.positions.len() * 8);
             let mut joints = Vec::with_capacity(mesh.positions.len() * 8);
             let mut weights = Vec::with_capacity(mesh.positions.len() * 16);
             for (index, position) in mesh.positions.iter().enumerate() {
                 for value in position {
                     positions.extend_from_slice(&value.to_le_bytes());
                 }
-                let joint = skin
+                for value in mesh.uvs.get(index).copied().unwrap_or([0.0; 2]) {
+                    uvs.extend_from_slice(&value.to_le_bytes());
+                }
+                for value in skin
                     .and_then(|skin| skin.joints.get(index))
                     .copied()
-                    .unwrap_or([0; 4]);
-                for value in joint {
+                    .unwrap_or([0; 4])
+                {
                     joints.extend_from_slice(&value.to_le_bytes());
                 }
-                let weight = skin
+                for value in skin
                     .and_then(|skin| skin.weights.get(index))
                     .copied()
-                    .unwrap_or([1.0, 0.0, 0.0, 0.0]);
-                for value in weight {
+                    .unwrap_or([1.0, 0.0, 0.0, 0.0])
+                {
                     weights.extend_from_slice(&value.to_le_bytes());
                 }
             }
-            let position = create_buffer(context, "xgc-skin-positions", &positions, false);
-            let joints = create_buffer(context, "xgc-skin-joints", &joints, false);
-            let weights = create_buffer(context, "xgc-skin-weights", &weights, false);
             let index_buffer = if mesh.indices.is_empty() {
                 None
             } else {
@@ -128,9 +88,11 @@ impl GpuSkinMeshCache {
             self.meshes.insert(
                 key.to_string(),
                 GpuSkinMesh {
-                    position,
-                    joints,
-                    weights,
+                    position: create_buffer(context, "xgc-skin-positions", &positions, false),
+                    uv: create_buffer(context, "xgc-skin-uvs", &uvs, false),
+                    joints: create_buffer(context, "xgc-skin-joints", &joints, false),
+                    weights: create_buffer(context, "xgc-skin-weights", &weights, false),
+                    texture_group: textures.group(context, mesh.texture.as_deref()),
                     index_buffer,
                     vertices: mesh.positions.len() as u32,
                     indices: mesh.indices.len() as u32,
@@ -139,10 +101,34 @@ impl GpuSkinMeshCache {
         }
         self.meshes.get(key).unwrap()
     }
+}
 
-    pub fn get(&self, key: &str) -> Option<&GpuSkinMesh> {
-        self.meshes.get(key)
+/// 只有 GPU palette 能完整表达 CPU 蒙皮语义时才走快路径；否则保留确定性的 CPU 回退。
+pub(crate) fn supports_gpu_skin(mesh: &Mesh, pose: &[[f32; 16]]) -> bool {
+    let Some(skin) = &mesh.skin else {
+        return false;
+    };
+    if mesh.positions.is_empty()
+        || pose.is_empty()
+        || pose.len() > MAX_JOINTS
+        || skin.joints.len() != mesh.positions.len()
+        || skin.weights.len() != mesh.positions.len()
+        || skin.inverse_bind.is_empty()
+    {
+        return false;
     }
+    skin.joints
+        .iter()
+        .zip(&skin.weights)
+        .all(|(joints, weights)| {
+            weights.iter().enumerate().all(|(slot, weight)| {
+                weight.is_finite()
+                    && (*weight <= 0.0
+                        || usize::from(joints[slot]) < pose.len()
+                            && usize::from(joints[slot]) < skin.inverse_bind.len()
+                            && usize::from(joints[slot]) < MAX_JOINTS)
+            })
+        })
 }
 
 fn create_buffer(context: &GpuContext, label: &str, bytes: &[u8], index: bool) -> wgpu::Buffer {
@@ -163,18 +149,19 @@ fn create_buffer(context: &GpuContext, label: &str, bytes: &[u8], index: bool) -
     buffer
 }
 
-pub struct SkinnedPipeline {
+pub(crate) struct SkinnedPipeline {
     pipeline: wgpu::RenderPipeline,
-    camera_layout: wgpu::BindGroupLayout,
+    frame_layout: wgpu::BindGroupLayout,
     joints_layout: wgpu::BindGroupLayout,
     model_layout: wgpu::BindGroupLayout,
 }
 
 impl GpuContext {
-    pub fn create_skinned_pipeline(
+    pub(crate) fn create_skinned_pipeline(
         &self,
         format: wgpu::TextureFormat,
         depth: bool,
+        texture_layout: &wgpu::BindGroupLayout,
     ) -> SkinnedPipeline {
         let shader = self
             .device()
@@ -192,12 +179,7 @@ impl GpuContext {
             },
             count: None,
         };
-        let camera_layout =
-            self.device()
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("xgc-skin-camera"),
-                    entries: &[uniform(64, wgpu::ShaderStages::VERTEX)],
-                });
+        let frame_layout = create_frame_layout(self, "xgc-skin-frame");
         let joints_layout =
             self.device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -211,13 +193,13 @@ impl GpuContext {
             self.device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("xgc-skin-model"),
-                    entries: &[uniform(80, wgpu::ShaderStages::VERTEX_FRAGMENT)],
+                    entries: &[uniform(96, wgpu::ShaderStages::VERTEX_FRAGMENT)],
                 });
         let layout = self
             .device()
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("xgc-skin-layout"),
-                bind_group_layouts: &[&camera_layout, &joints_layout, &model_layout],
+                bind_group_layouts: &[&frame_layout, &joints_layout, texture_layout, &model_layout],
                 push_constant_ranges: &[],
             });
         let pipeline = self
@@ -238,12 +220,17 @@ impl GpuContext {
                         wgpu::VertexBufferLayout {
                             array_stride: 8,
                             step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![1 => Uint16x4],
+                            attributes: &wgpu::vertex_attr_array![1 => Float32x2],
+                        },
+                        wgpu::VertexBufferLayout {
+                            array_stride: 8,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![2 => Uint16x4],
                         },
                         wgpu::VertexBufferLayout {
                             array_stride: 16,
                             step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![2 => Float32x4],
+                            attributes: &wgpu::vertex_attr_array![3 => Float32x4],
                         },
                     ],
                 },
@@ -271,78 +258,54 @@ impl GpuContext {
             });
         SkinnedPipeline {
             pipeline,
-            camera_layout,
+            frame_layout,
             joints_layout,
             model_layout,
         }
     }
 }
 
-pub struct SkinnedRequest<'a> {
-    pub texture: &'a wgpu::Texture,
-    pub depth: Option<&'a wgpu::TextureView>,
-    pub clear: bool,
-    pub mesh: &'a GpuSkinMesh,
-    pub pose: &'a [[f32; 16]],
-    pub inverse_bind: &'a [[f32; 16]],
-    pub model: Mat4,
-    pub color: [f32; 4],
-    pub view_proj: Mat4,
+pub(crate) struct SkinnedRequest<'a> {
+    pub(crate) texture: &'a wgpu::Texture,
+    pub(crate) depth: &'a wgpu::TextureView,
+    pub(crate) clear: bool,
+    pub(crate) clear_color: wgpu::Color,
+    pub(crate) mesh: &'a GpuSkinMesh,
+    pub(crate) pose: &'a [[f32; 16]],
+    pub(crate) inverse_bind: &'a [[f32; 16]],
+    pub(crate) model: Mat4,
+    pub(crate) color: [f32; 4],
+    pub(crate) metallic: f32,
+    pub(crate) roughness: f32,
+    pub(crate) view_proj: Mat4,
+    pub(crate) lighting: &'a FrameLighting,
+    pub(crate) shadow_view: &'a wgpu::TextureView,
+    pub(crate) shadow_sampler: &'a wgpu::Sampler,
 }
 
 impl SkinnedPipeline {
-    /// 画一个蒙皮网格；关节数超过 64 时只取前 64。
-    pub fn draw(&self, context: &GpuContext, request: &SkinnedRequest<'_>) -> Result<(), GpuError> {
-        let mut camera_bytes = Vec::with_capacity(64);
-        for value in request.view_proj {
-            camera_bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        let camera = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("xgc-skin-camera-buffer"),
-            size: 64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        context.queue().write_buffer(&camera, 0, &camera_bytes);
-
-        let mut joints_bytes = vec![0u8; MAX_JOINTS * 64];
-        for index in 0..MAX_JOINTS {
-            let matrix = match (request.pose.get(index), request.inverse_bind.get(index)) {
-                (Some(pose), Some(inverse)) => mul(*pose, *inverse),
-                (Some(pose), None) => *pose,
-                _ => IDENTITY,
-            };
-            for (slot, value) in matrix.iter().enumerate() {
-                let offset = index * 64 + slot * 4;
-                joints_bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-            }
-        }
-        let joints = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("xgc-skin-joints-buffer"),
-            size: (MAX_JOINTS * 64) as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        context.queue().write_buffer(&joints, 0, &joints_bytes);
-
-        let mut model_bytes = Vec::with_capacity(80);
-        for value in request.model {
-            model_bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in request.color {
-            model_bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        let model = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("xgc-skin-model-buffer"),
-            size: 80,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        context.queue().write_buffer(&model, 0, &model_bytes);
-
-        let camera_bind = self.camera_bind(context, &camera);
-        let joints_bind = self.joints_bind(context, &joints);
-        let model_bind = self.model_bind(context, &model);
+    pub(crate) fn draw(
+        &self,
+        context: &GpuContext,
+        request: &SkinnedRequest<'_>,
+    ) -> Result<(), GpuError> {
+        let frame_bind = create_frame_bind(
+            context,
+            &self.frame_layout,
+            request.view_proj,
+            request.lighting,
+            request.shadow_view,
+            request.shadow_sampler,
+        );
+        let joints = self.joints_buffer(context, request.pose, request.inverse_bind);
+        let joints_bind = uniform_bind(
+            context,
+            &self.joints_layout,
+            &joints,
+            "xgc-skin-joints-bind",
+        );
+        let model = model_buffer(context, request);
+        let model_bind = uniform_bind(context, &self.model_layout, &model, "xgc-skin-model-bind");
         let view = request
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -360,37 +323,37 @@ impl SkinnedPipeline {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: if request.clear {
-                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                            wgpu::LoadOp::Clear(request.clear_color)
                         } else {
                             wgpu::LoadOp::Load
                         },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: request.depth.map(|depth| {
-                    wgpu::RenderPassDepthStencilAttachment {
-                        view: depth,
-                        depth_ops: Some(wgpu::Operations {
-                            load: if request.clear {
-                                wgpu::LoadOp::Clear(1.0)
-                            } else {
-                                wgpu::LoadOp::Load
-                            },
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: request.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: if request.clear {
+                            wgpu::LoadOp::Clear(1.0)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &camera_bind, &[]);
+            pass.set_bind_group(0, &frame_bind, &[]);
             pass.set_bind_group(1, &joints_bind, &[]);
-            pass.set_bind_group(2, &model_bind, &[]);
+            pass.set_bind_group(2, &request.mesh.texture_group, &[]);
+            pass.set_bind_group(3, &model_bind, &[]);
             pass.set_vertex_buffer(0, request.mesh.position.slice(..));
-            pass.set_vertex_buffer(1, request.mesh.joints.slice(..));
-            pass.set_vertex_buffer(2, request.mesh.weights.slice(..));
+            pass.set_vertex_buffer(1, request.mesh.uv.slice(..));
+            pass.set_vertex_buffer(2, request.mesh.joints.slice(..));
+            pass.set_vertex_buffer(3, request.mesh.weights.slice(..));
             if let Some(indices) = &request.mesh.index_buffer {
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..request.mesh.indices, 0, 0..1);
@@ -402,42 +365,98 @@ impl SkinnedPipeline {
         Ok(())
     }
 
-    fn camera_bind(&self, context: &GpuContext, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
-        context
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("xgc-skin-camera-bind"),
-                layout: &self.camera_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            })
+    fn joints_buffer(
+        &self,
+        context: &GpuContext,
+        pose: &[[f32; 16]],
+        inverse_bind: &[[f32; 16]],
+    ) -> wgpu::Buffer {
+        let mut bytes = vec![0u8; MAX_JOINTS * 64];
+        for index in 0..MAX_JOINTS {
+            let matrix = match (pose.get(index), inverse_bind.get(index)) {
+                (Some(pose), Some(inverse)) => mul(*pose, *inverse),
+                _ => IDENTITY,
+            };
+            for (slot, value) in matrix.iter().enumerate() {
+                let offset = index * 64 + slot * 4;
+                bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        create_uniform_buffer(context, "xgc-skin-joints-buffer", &bytes)
+    }
+}
+
+fn model_buffer(context: &GpuContext, request: &SkinnedRequest<'_>) -> wgpu::Buffer {
+    let mut bytes = Vec::with_capacity(96);
+    for value in request.model {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in request.color {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [request.metallic, request.roughness, 0.0, 0.0] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    create_uniform_buffer(context, "xgc-skin-model-buffer", &bytes)
+}
+
+fn create_uniform_buffer(context: &GpuContext, label: &str, bytes: &[u8]) -> wgpu::Buffer {
+    let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: bytes.len() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    context.queue().write_buffer(&buffer, 0, bytes);
+    buffer
+}
+
+fn uniform_bind(
+    context: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+    label: &str,
+) -> wgpu::BindGroup {
+    context
+        .device()
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supports_gpu_skin;
+    use crate::{identity, Mesh, SkinData};
+
+    fn mesh(joint: u16) -> Mesh {
+        let mut mesh = Mesh::new(vec![[0.0; 3]], Vec::new());
+        mesh.skin = Some(SkinData {
+            joints: vec![[joint, 0, 0, 0]],
+            weights: vec![[1.0, 0.0, 0.0, 0.0]],
+            joint_nodes: vec![0],
+            inverse_bind: vec![identity()],
+        });
+        mesh
     }
 
-    fn joints_bind(&self, context: &GpuContext, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
-        context
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("xgc-skin-joints-bind"),
-                layout: &self.joints_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            })
-    }
-
-    fn model_bind(&self, context: &GpuContext, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
-        context
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("xgc-skin-model-bind"),
-                layout: &self.model_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            })
+    #[test]
+    fn gpu_skin_requires_a_fully_representable_palette() {
+        assert!(supports_gpu_skin(&mesh(0), &[identity()]));
+        let mut empty = mesh(0);
+        empty.positions.clear();
+        empty.skin.as_mut().unwrap().joints.clear();
+        empty.skin.as_mut().unwrap().weights.clear();
+        assert!(!supports_gpu_skin(&empty, &[identity()]));
+        assert!(!supports_gpu_skin(&mesh(1), &[identity()]));
+        assert!(!supports_gpu_skin(&mesh(0), &vec![identity(); 65]));
+        let mut missing_inverse = mesh(0);
+        missing_inverse.skin.as_mut().unwrap().inverse_bind.clear();
+        assert!(!supports_gpu_skin(&missing_inverse, &[identity()]));
     }
 }

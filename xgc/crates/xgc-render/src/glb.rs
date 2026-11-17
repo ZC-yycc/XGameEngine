@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use self::material::MaterialDef;
 use self::texture::{ImageDef, TextureDef};
+use super::camera::IDENTITY;
 use super::mesh::{Mesh, SkinData};
 
 mod material;
@@ -266,6 +267,9 @@ fn load_glb_bytes(bytes: &[u8], base_dir: Option<&Path>) -> Result<Mesh, MeshErr
                     data.joint_nodes = skin.joints.clone();
                     if let Some(accessor) = skin.inverse_bind_matrices {
                         data.inverse_bind = read_mat4(&root, accessor, bin)?;
+                    } else {
+                        // glTF 2.0：未提供 inverseBindMatrices 时每个关节都按单位矩阵。
+                        data.inverse_bind = vec![IDENTITY; data.joint_nodes.len()];
                     }
                     mesh.skin = Some(data);
                 }

@@ -15,7 +15,7 @@ use xgc_world::SceneEnvironment;
 
 /// 帧 uniform：view-proj 64B + 四个 vec4（相机/强度、ambient、sun_dir、sun_color）
 /// + 9 个 vec4 的天空球谐 + 天空开关 vec4 + 4 级光视图投影 256B + 切分 / 视线 / 参数 3 个 vec4 = 592B。
-const FRAME_UNIFORM_BYTES: u64 = 592;
+pub(crate) const FRAME_UNIFORM_BYTES: u64 = 592;
 
 /// 帧级光照参数：环境光 + 场景第一盏可用方向光；没有方向光时强度为 0（只剩环境光）。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -128,6 +128,83 @@ impl FrameLighting {
     }
 }
 
+pub(crate) fn create_frame_layout(context: &GpuContext, label: &str) -> wgpu::BindGroupLayout {
+    context
+        .device()
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(label),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(FRAME_UNIFORM_BYTES),
+                    },
+                    count: None,
+                },
+                // 阴影深度图：硬件比较采样（比较采样器配 textureSampleCompareLevel）。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        })
+}
+
+pub(crate) fn create_frame_bind(
+    context: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    view_proj: Mat4,
+    lighting: &FrameLighting,
+    shadow_view: &wgpu::TextureView,
+    shadow_sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let mut bytes = Vec::with_capacity(FRAME_UNIFORM_BYTES as usize);
+    lighting.write(view_proj, &mut bytes);
+    debug_assert_eq!(bytes.len(), FRAME_UNIFORM_BYTES as usize);
+    let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("xgc-scene-frame-buffer"),
+        size: FRAME_UNIFORM_BYTES,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    context.queue().write_buffer(&buffer, 0, &bytes);
+    context
+        .device()
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("xgc-scene-frame-bind"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                },
+            ],
+        })
+}
+
 pub struct InstancedPipeline {
     pipeline: wgpu::RenderPipeline,
     camera_layout: wgpu::BindGroupLayout,
@@ -149,7 +226,10 @@ impl InstancedPipeline {
     }
 }
 
-const INSTANCED_WGSL: &str = include_str!("instanced.wgsl");
+const INSTANCED_WGSL: &str = concat!(
+    include_str!("scene_shading.wgsl"),
+    include_str!("instanced.wgsl")
+);
 
 impl GpuContext {
     pub fn create_instanced_pipeline(
@@ -164,40 +244,7 @@ impl GpuContext {
                 label: Some("xgc-instanced"),
                 source: wgpu::ShaderSource::Wgsl(INSTANCED_WGSL.into()),
             });
-        let camera_layout =
-            self.device()
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("xgc-instanced-camera"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(FRAME_UNIFORM_BYTES),
-                            },
-                            count: None,
-                        },
-                        // 阴影深度图：硬件比较采样（比较采样器配 textureSampleCompareLevel）。
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Depth,
-                                view_dimension: wgpu::TextureViewDimension::D2Array,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                            count: None,
-                        },
-                    ],
-                });
+        let camera_layout = create_frame_layout(self, "xgc-instanced-camera");
         let instance_layout =
             self.device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -360,35 +407,14 @@ impl RenderCache {
             ));
         }
 
-        let mut camera_bytes = Vec::with_capacity(FRAME_UNIFORM_BYTES as usize);
-        request.lighting.write(view_proj, &mut camera_bytes);
-        let camera = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("xgc-instanced-frame-buffer"),
-            size: FRAME_UNIFORM_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        context.queue().write_buffer(&camera, 0, &camera_bytes);
-        let camera_bind = context
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("xgc-instanced-camera-bind"),
-                layout: pipeline.camera_layout(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: camera.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(request.shadow_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(request.shadow_sampler),
-                    },
-                ],
-            });
+        let camera_bind = create_frame_bind(
+            context,
+            pipeline.camera_layout(),
+            view_proj,
+            &request.lighting,
+            request.shadow_view,
+            request.shadow_sampler,
+        );
 
         let mut prepared = Vec::with_capacity(buckets.len());
         for group in &buckets {
@@ -402,13 +428,7 @@ impl RenderCache {
             }
             if let Some(pose) = &group.pose {
                 let positions = super::skinning::skin_positions(mesh, pose);
-                gpu_meshes.upload_deformed(
-                    context,
-                    &group.key,
-                    &positions,
-                    &mesh.indices,
-                    textures,
-                );
+                gpu_meshes.upload_deformed(context, &group.key, mesh, &positions, textures);
             } else {
                 gpu_meshes.upload(context, &group.key, mesh, request.textures);
             }

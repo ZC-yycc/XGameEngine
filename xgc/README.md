@@ -27,7 +27,7 @@
 `AnimationClip` 平移 / 旋转 slerp / 缩放关键帧采样（边界钳制 / 循环取模）/ RON 剪辑加载 /
 `AnimationPlaybackSystem` 把采样结果叠加 `Animator.base_*` 写回 `Transform` /
 `SkeletonPoseSystem` 合成关节世界矩阵到 `animation.pose` / GLB `JOINTS_0` + `WEIGHTS_0`
-+ 逆绑定矩阵解析 / CPU 蒙皮 `pose × inverse_bind` /
++ 逆绑定矩阵解析 / ≤64 关节 GPU 蒙皮 `pose × inverse_bind`（超限 / 不完整 palette 确定性回退 CPU）/
 `AnimationLibrary::load_dir` 扫描目录 /
 `AnimationLibrary` 按名索引 /
 逐帧 state hash / 回放校验）、`xgc-agent`（JSON-RPC：describe（含 components / sim systems / render 能力清单）/
@@ -47,7 +47,7 @@ ACES 色调映射（片元与清屏色同曲线）、天空盒 pass（解析天�
 的 `render.sky`）、方向光阴影（4 级 CSM：λ=0.7 practical split + 逐级紧致正交拟合 + 纹素吸附，2048² 深度数组按视线深度选层 + 3×3 PCF）、环境反射（天空 SH 反射方向 × Lazarov 解析 BRDF，逐材质 `f0 = mix(0.04, 基色, metallic)`、
 `(1-metallic)` 漫反射、粗糙度夹 0.04）、网格基色贴图（glTF `TEXCOORD_0` + `baseColorTexture`，
 外部 uri / GLB 内嵌 PNG → sRGB 采样）、直接光 Cook-Torrance PBR（GGX + Smith + Schlick、
-`(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、确定性粒子 billboard（CPU SplitMix64 模拟，软圆覆盖，Alpha / Additive，Alpha 后向前排序，深测开 / 深写关）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
+`(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、GPU 蒙皮与静态实例共享唯一的基色贴图 / PBR / CSM 阴影接收 / ACES 片元实现、确定性粒子 billboard（CPU SplitMix64 模拟，软圆覆盖，Alpha / Additive，Alpha 后向前排序，深测开 / 深写关）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
 `guid://` 解析、`Renderer` 帧入口（DrawList → MeshCache → RenderCache → 粒子 → UI）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
@@ -68,6 +68,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | spawn 10 000 | 1.89 ms（189 ns/实体） |
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
+
+GPU 蒙皮主场景着色切片用同一 showcase 第 150 帧做了 release 冷启动 A/B：每次启动新 `xgc render-frame` 进程并只渲一帧，切片前四跑 `783.02 / 719.85 / 726.80 / 734.09 ms`（中位数 **730.44 ms**），切片后 `822.76 / 790.08 / 934.70 / 766.49 ms`（中位数 **806.42 ms**，+10.4%）。这个数包含新增共享场景 shader 的第二条 pipeline 编译，且当前 GPU 蒙皮仍按实体创建 uniform / bind group / encoder 并单独提交，**不是稳态 GPU 帧耗时**；像素合同与 frame-150 逐字节确定性负责正确性验收，后续必须另设 pipeline 缓存、多角色批量提交与稳态 profiler 门禁。
 
 命令事务（debug，100 条 `SetField`）：plan + apply **77.8 µs**，revert **69.6 µs**；
 apply / revert 各只推进一个 revision，回滚后状态哈希回到原值。同一计划可组合
@@ -109,12 +111,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（299 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（194 个 Rust 文件，最大 596 行）；30 个内建类型的 schema 为 35709 字节，
+`cargo test --workspace --offline` 全绿（302 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（194 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-PCSS / 点光阴影 / HDR 中间目标与后处理、GPU 蒙皮快路径的光照 / 贴图、狐狸等蒙皮网格的光照、
+PCSS / 点光阴影 / HDR 中间目标与后处理、GPU 蒙皮多角色批量提交 / 蒙皮网格投射阴影 / 256 关节 GPU palette、
 物理的角色控制器 / 关节 / 坡面滑动、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。

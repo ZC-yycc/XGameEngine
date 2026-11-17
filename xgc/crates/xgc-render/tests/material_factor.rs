@@ -129,11 +129,19 @@ fn gltf_base_color_factor_tints_skinned_mesh() {
     let pixels = context.read_texture_rgba8(texture, 64, 64).unwrap();
     let center = 4 * (32 * 64 + 32);
     let pixel = &pixels[center..center + 4];
-    let [red, green, blue] = [pixel[0], pixel[1], pixel[2]].map(u16::from);
-    assert!(
-        green > 100 && green > red * 4 && green > blue * 4,
-        "GPU 蒙皮路径必须消费 baseColorFactor=[0,0.7,0,1]，实际 {pixel:?}"
-    );
+    let expected = xgc_render::aces_u8(xgc_render::ambient_light(
+        [0.0, 0.7, 0.0],
+        0.0,
+        [1.0; 3],
+        1.0,
+    ));
+    for (axis, want) in expected.into_iter().enumerate() {
+        assert!(
+            (i16::from(pixel[axis]) - i16::from(want)).abs() <= 1,
+            "GPU 蒙皮必须复用静态 PBR/ACES：通道 {axis} 实际 {}，期望 {want}",
+            pixel[axis]
+        );
+    }
 }
 
 #[test]

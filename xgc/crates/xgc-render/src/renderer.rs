@@ -15,7 +15,7 @@ use super::texture::TexturePipeline;
 use xgc_world::World;
 
 use super::resources::{ResourceDesc, ResourceUsage};
-use super::skinned::{GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
+use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
 use super::sky::{sky_irradiance, SkySettings};
 mod ui;
 
@@ -121,6 +121,11 @@ impl Renderer {
     }
     pub fn gpu_mesh_count(&self) -> usize {
         self.gpu_meshes.len()
+    }
+
+    /// 已上传的 GPU 蒙皮网格数；测试 / 诊断用来确认没有静默退回 CPU 形变。
+    pub fn gpu_skin_mesh_count(&self) -> usize {
+        self.skin_meshes.len()
     }
 
     fn ensure_depth(
@@ -440,23 +445,21 @@ impl Renderer {
         let mut cpu_items = Vec::with_capacity(list.items.len());
         let mut gpu_items = Vec::new();
         for item in list.items {
-            let skinned = item.pose.as_ref().is_some_and(|pose| pose.len() <= 64);
-            // GPU 蒙皮着色器还没有光照与贴图：带贴图的蒙皮网格先走 CPU 蒙皮 + 实例化，
-            // 保证和不蒙皮物体同一套 PBR（等 GPU 蒙皮补齐光照再切回快路径）。
-            let textured = skinned
-                && self
-                    .meshes
+            let gpu_skin = if let Some(pose) = item.pose.as_deref() {
+                self.meshes
                     .get(&item.model)
                     .map_err(|err| GpuError::Mesh(err.to_string()))?
-                    .is_some_and(|mesh| mesh.texture.is_some());
-            if skinned && !textured {
+                    .is_some_and(|mesh| supports_gpu_skin(mesh, pose))
+            } else {
+                false
+            };
+            if gpu_skin {
                 gpu_items.push(item);
             } else {
                 cpu_items.push(item);
             }
         }
         let cpu_list = super::draw::DrawList { items: cpu_items };
-        let cpu_empty = cpu_list.items.is_empty();
         let mut request = InstancedRequest {
             texture: target,
             list: &cpu_list,
@@ -478,7 +481,10 @@ impl Renderer {
                 .as_ref()
                 .is_none_or(|(current, _)| *current != format)
             {
-                self.skinned = Some((format, context.create_skinned_pipeline(format, true)));
+                self.skinned = Some((
+                    format,
+                    context.create_skinned_pipeline(format, true, textures.layout()),
+                ));
             }
             let pipeline = &self.skinned.as_ref().unwrap().1;
             for (index, item) in gpu_items.iter().enumerate() {
@@ -498,19 +504,27 @@ impl Renderer {
                     .as_ref()
                     .map(|skin| skin.inverse_bind.as_slice())
                     .unwrap_or(&[]);
-                let gpu_mesh = self.skin_meshes.upload(context, &item.model, mesh);
+                let gpu_mesh = self
+                    .skin_meshes
+                    .upload(context, &item.model, mesh, textures);
                 pipeline.draw(
                     context,
                     &SkinnedRequest {
                         texture: target,
-                        depth: Some(depth),
-                        clear: cpu_empty && index == 0,
+                        depth,
+                        clear: draw_calls == 0 && index == 0,
+                        clear_color: self.clear_color,
                         mesh: gpu_mesh,
                         pose,
                         inverse_bind,
                         model: item.transform,
                         color: item.color,
+                        metallic: item.metallic,
+                        roughness: item.roughness,
                         view_proj,
+                        lighting: &lighting,
+                        shadow_view,
+                        shadow_sampler,
                     },
                 )?;
                 draw_calls += 1;

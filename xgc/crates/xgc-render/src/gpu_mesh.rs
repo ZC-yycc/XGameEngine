@@ -89,8 +89,8 @@ impl GpuMeshCache {
         &mut self,
         context: &GpuContext,
         key: &str,
+        source: &Mesh,
         positions: &[[f32; 3]],
-        indices: &[u32],
         textures: &TextureBinding,
     ) -> &GpuMesh {
         if let Some(mesh) = self.meshes.get(key) {
@@ -102,9 +102,9 @@ impl GpuMeshCache {
             }
         }
         self.meshes.remove(key);
-        let mut mesh = Mesh::new(positions.to_vec(), indices.to_vec());
-        mesh.uvs = Vec::new();
-        self.upload(context, key, &mesh, textures)
+        let mut deformed = source.clone();
+        deformed.positions = positions.to_vec();
+        self.upload(context, key, &deformed, textures)
     }
 }
 

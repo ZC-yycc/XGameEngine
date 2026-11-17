@@ -66,7 +66,6 @@ pub use shot::{
     clip_planes, default_shot_direction, frame_bounds, frame_scene, scene_bounds, shot_direction,
     Bounds, ShotCamera, ShotFrame, DEFAULT_FOV_Y,
 };
-pub use skinned::{GpuSkinMesh, GpuSkinMeshCache, SkinnedPipeline, SkinnedRequest};
 pub use skinning::{identity, skin_positions, translation};
 pub use sky::{sh_eval, sky_color, sky_irradiance, SkySettings, SH_COEFFS};
 pub use text::{text_mesh, text_mesh_wrapped};

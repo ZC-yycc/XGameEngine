@@ -109,7 +109,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
-| `crates/xgc-render/src/skinned.rs` | GPU 蒙皮：关节索引 / 权重顶点属性、64 关节 uniform、`GpuSkinMeshCache`、单网格 `SkinnedPipeline` |
+| `crates/xgc-render/src/skinned.rs` | GPU 蒙皮顶点入口：64 关节 uniform、权重归一、palette 可表示性路由；UV / 基色贴图绑定后与静态实例共享主场景 PBR；>64 或不完整 palette 回退 CPU |
 | `crates/xgc-render/src/texture.rs` | RGBA8 纹理四边形管线（UI 图片） |
 | `crates/xgc-render/src/text.rs` | 5x7 位图字体 → NDC 文本网格（保留给纯位图调试文本；UI 文本已走 `font.rs`） |
 | `crates/xgc-render/src/font.rs` | 真字体文本：`ab_glyph` + 与旧端同一套系统字体候选（msyh / **msyhbd 粗体** / Deng / simhei…）、shelf 字形图集（RGBA8，rgb=255 / alpha=覆盖率）、换行 / 对齐 / 字体原生 kerning；粗体缺失时静默退回常规字重，字体缺失时静默跳过 |
@@ -130,7 +130,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/texture_data.rs` | 基色贴图 RGBA8：PNG 字节解码（8-bit）+ 1×1 白纹理兜底 |
 | `crates/xgc-render/src/texture_bind.rs` | 贴图 GPU 绑定：group(2) 布局 + 线性 Repeat 采样器 + 白纹理兜底绑定组 |
 | `crates/xgc-render/src/gpu_mesh.rs` | 模型 → 位置缓冲 / UV 缓冲 / 索引缓冲 + 贴图绑定组，跨帧复用 |
-| `crates/xgc-render/src/instanced.wgsl` | 主场景片元着色器：环境光含菲涅尔项、直接光 Cook-Torrance（GGX + Smith + Schlick、`(1-F)` 漫反射扣减、π 校准）、天空 SH、逐材质环境反射（`f0 = mix(0.04, 基色, metallic)` + Lazarov BRDF、`MIN_ROUGHNESS=0.04`）、`基色因子 × 实体颜色 × 基色贴图` 的 albedo、阴影 PCF、ACES；`include_str!` 进 `instanced.rs`（守 600 行预算） |
+| `crates/xgc-render/src/scene_shading.wgsl` | 静态 / GPU 蒙皮唯一主场景片元真相源：Frame / 贴图 binding、环境光菲涅尔、Cook-Torrance、天空 SH / 环境反射、CSM PCF、ACES |
+| `crates/xgc-render/src/instanced.wgsl` | 静态实例顶点入口：读取 group(1) 实例 model / color / material，输出共享 `SceneVsOut` |
+| `crates/xgc-render/src/skinned.wgsl` | GPU 蒙皮顶点入口：group(1) 64 关节 palette + group(3) model / material，权重归一后输出共享 `SceneVsOut` |
 | `crates/xgc-render/src/shot.rs` | 截图取景：`Bounds` 拟合、顺光视轴（由场景主方向光推）、近远裁剪；`render_shot` 优先场景相机 |
 | `crates/xgc-render/src/mesh.rs` | `Mesh` 位置 + 索引 + `SkinData` + `base_color_factor` + `uvs` + 基色贴图（`Arc<TextureData>`）；builtin quad / cube / sphere / plane / cylinder 为真实几何 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / JOINTS_0 / WEIGHTS_0 / 首图元材质 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并 |
@@ -166,11 +168,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：确定性粒子模拟 + billboard 已通（mean_abs 0.85 → 0.63）。下一刀补 GPU 蒙皮快路径的 PBR / 贴图（现在带贴图蒙皮走 CPU 蒙皮 + 实例化），并评估 HDR 中间目标统一 tone-map，最后回物理角色控制器 / 关节。
+1. 割接视觉：GPU 蒙皮已共享静态 PBR / 贴图 / 阴影接收 / ACES（frame-150 与上一版逐字节相同）。下一刀评估 HDR 中间目标统一 tone-map，再补蒙皮投射阴影 / 256 关节 palette，最后回物理角色控制器 / 关节。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。
-5. 推送与 CI；当前最大 Rust 文件 596 行（`instanced.rs` 已贴顶），继续守住 600 行软上限。
+5. 推送与 CI；当前最大 Rust 文件 599 行（`glb.rs`），继续守住 600 行软上限。
 
 ## Token 纪律
 
