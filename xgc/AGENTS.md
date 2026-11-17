@@ -75,7 +75,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-audio/src/lib.rs` | cpal 音频设备输出：设备枚举、PCM 重采样、F32 / I16 输出队列、`play_clip` |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载 |
-| `crates/xgc-script/src/legacy.rs` | 旧脚本 API：`update(ctx)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at` / `velocity` / `set_anim_param` / `ui_*` / `action_pressed`；音频等暂无实现为 no-op |
+| `crates/xgc-script/src/legacy.rs` | 旧脚本 API：`update(ctx)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at`（俯仰必须放欧拉角 X 分量，放 Z 会变滚转）/ `velocity` / `set_anim_param` / `ui_*` / `action_pressed`；音频等暂无实现为 no-op |
 | `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` 生命周期分派与回退 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载 |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 |
@@ -157,7 +157,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 仿真与 PBR：接触清速度已就位。下一步补刚体旋转 / 力矩与多接触求解（落点与堆叠姿态仍与 rapier 不同，像素差距主因），再做直射光 GGX 高光 / CSM / 软阴影 / 网格纹理。
+1. 割接视觉：脚本 `look_at` 朝向修正后整帧差异 98.07% → 64.62%（mean_abs 3.04）。下一步补网格纹理（狐狸白模）、UI 字体 / 面板、刚体旋转 / 多接触求解（落点与影子），再做直射光 GGX 高光 / CSM / 软阴影。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

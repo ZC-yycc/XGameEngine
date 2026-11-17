@@ -106,12 +106,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace` 全绿（273 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（179 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
+`cargo test --workspace` 全绿（274 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（180 个 Rust 文件最大 596 行）；schema 两次导出逐字节相同，
 30 个内建类型 34950 字节（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-刚体旋转 / 力矩与多接触求解、直射光 GGX 高光、CSM / 软阴影 / 网格纹理 / 粒子、
+网格纹理（狐狸白模）、UI 字体 / 面板、刚体旋转 / 多接触求解、直射光 GGX 高光、CSM / 软阴影 / 粒子、
 脚本正式 System 调度，
 以及旧新逐帧 trace / 性能验收。
 

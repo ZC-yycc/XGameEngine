@@ -181,7 +181,10 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
                 }
                 let pitch = (direction[1] / length).asin().to_degrees();
                 let yaw = (-direction[0]).atan2(-direction[2]).to_degrees();
-                let rotation = euler_to_quat([0.0, yaw, pitch]);
+                // `euler_to_quat` 的分量序是 [绕 X, 绕 Y, 绕 Z]，欧拉顺序 YXZ。
+                // 俯仰必须放第一个分量：放第三个会变成绕自身视轴的**滚转**
+                // （相机会「歪头」而不是低头，朝向也不指向目标）。
+                let rotation = euler_to_quat([pitch, yaw, 0.0]);
                 push_set(
                     &look_commands,
                     self_id,
