@@ -3,12 +3,12 @@
 > 这是能力的**现状快照**，不是完成声明。XGC 仍明显低于 XGameEngine 全量能力，
 > 当前不能割接。
 
-## 指标（第 158 轮）
+## 指标（第 159 轮）
 
 | 项 | 值 |
 |---|---|
-| Rust 文件 | 200（最大 599 行；软上限 600） |
-| 测试 | 318（`cargo test --workspace --offline`） |
+| Rust 文件 | 204（最大 599 行；软上限 600） |
+| 测试 | 328（`cargo test --workspace --offline`） |
 | 内建组件 schema | 30 类 / 35709 字节，两次导出逐字节相同 |
 | 默认系统 | 18 个 |
 | 门禁 | fmt / clippy `-D warnings` / xtask check 全绿 |
@@ -41,7 +41,7 @@
 | 迁移工具 | 90% | 场景 / 脚本 / 预制体 / 统计对照全通；修复 GlobalTransform 空字段与旧相机 +Z 约定，真实 showcase 1280×720 可渲染出场景；缺旧新逐帧视觉对照 |
 | 动画 | 97% | 根 / 关节轨道 + 骨架 + CPU / GPU 蒙皮 + 状态机 + 叠加层（实体 / 关节遮罩）+ 转场淡入；缺根关节混合权重细调 |
 | 音频 | 60% | 空间化增益、总线、WAV 解码、软件混音、WAV 写出、cpal 默认输出设备播放（重采样 / 队列）、`xgc play`；缺流式资产 / 3D 声像 |
-| 渲染 | 89% | 真实 builtin 几何 + glTF 基色因子 / UV / 基色贴图 + `.mat` 资产乘子 + Cook-Torrance 直接光 + 天空盒 / 漫反射 IBL / 环境反射 + 4 级 CSM（**静态与蒙皮网格都投射**）+ **确定性 CPU 粒子模拟与实例化 billboard**（软圆、Alpha / Additive、后向前排序）+ **GPU 蒙皮共享静态 PBR / 贴图 / 阴影接收**（256 槽 palette）+ **RGBA16F 线性场景 / 粒子混合 / 单次全局 ACES / tone 后 UI** + 真字体 UI + sRGB HUD + 截图取景；缺 PCSS / 点光阴影 / Bloom 等后处理 / 视锥外投射体的级联覆盖 / 逐角色 palette 合并 |
+| 渲染 | 90% | 真实 builtin 几何 + glTF 基色因子 / UV / 基色贴图 + `.mat` 资产乘子 + Cook-Torrance 直接光 + 天空盒 / 漫反射 IBL / 环境反射 + 4 级 CSM（**静态与蒙皮网格都投射**）+ **确定性 CPU 粒子模拟与实例化 billboard**（软圆、Alpha / Additive、后向前排序）+ **GPU 蒙皮共享静态 PBR / 贴图 / 阴影接收**（256 槽 palette）+ **RGBA16F 线性场景 / 粒子混合 / 单次全局 ACES / tone 后 UI** + **曝光后曲线前的三级 HDR Bloom**（默认关）+ 真字体 UI + sRGB HUD + 截图取景；缺 PCSS / 点光阴影 / TAA·SSAO·FXAA 等其余后处理 / 逐角色 palette 合并（级联正交盒与旧端同为视锥切片拟合 + 逐级剔除，不算缺口） |
 | 物理 | 55% | rapier3d 0.22 与旧引擎同一条求解路径（角动量 / 接触力矩 / 堆叠），动态刚体帧状态与旧图可比；缺角色控制器接 rapier、关节 / 连续碰撞 / 坡面滑动、增量增删刚体（当前按数量变化整表重建） |
 | 资产 / 打包 | 70% | 引用裁剪 + 增量烹饪（哈希未变跳过写入）+ manifest 聚合签名；JSON / XGCB / 图形播放器；缺密码学签名 / 跨机器增量 |
 | Lua 脚本 | 84% | 旧 `update(ctx)` + 移动 / 旋转 / 查询 / UI / `action_pressed`；`look_at` 按 Y-up 对准且无滚转（有回归）；`InputMap` 解析 input.ron 动作与轴；缺窗口键盘事件接线与音频脚本 API |
@@ -60,9 +60,11 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 - 场景级光源与环境光已迁移进 `WorldData.environment`（showcase：`Sun` 方向 (0.45,-1,0.35)、强度 1.4、色 (1.0,0.97,0.92)，`ambient` (0.09,0.1,0.13)）；`verify-migration` 逐光源字段对照，缺省环境不落盘。
 - `render-frame` 缺省 0 帧；显式帧数复用 `Simulation::step_with` + `ScriptRuntime::run_frame`，最后重算层级与目标尺寸 UI。**接触清速度**接入后第 150 帧旧 / 新差异 903854/921600（98.07%）、mean_abs **18.78**、max 207 与上一步**逐像素相同**——150 帧时物体早已落定；此前的问题是「贴地后每帧仍带着累积速度抖动」，单帧看不出来但播放会抖。世界哈希变为 `0b6d186abfc5ca5b`：位置不变、存的**速度**从漂移值变成 0，符合预期。
 
+**画面设置里的三级 HDR Bloom**（旧端 `render.bloom` / `BloomConfig` 同口径）接入后，线性场景在**曝光后、唯一 ACES 前**叠一层亮部光晕：`bloom.wgsl` 逐行照旧端 `postfx.rs` 的软膝式（按最大通道取亮度，`soft = clamp(b - threshold + knee, 0, 2*knee)`、`contribution = max(soft²/(4*knee + ε), b - threshold)`、`weight = contribution / b`），三级 `BLOOM_LEVELS = 3` 先降到 ½ / ¼ / ⅛ 再横纵各一次 9 抽头二项核（70/56/28/8/1 除以 256），每级 2 个 pass 加首轮亮部提取共 9 个 pass；权重 0.5 / 0.3 / 0.2 在 `tone_map.wgsl` 里乘 `intensity` 叠回线性场景**然后才过 ACES** —— 过完曲线的高光已经没有余量，所以光晕必须在曲线前，这也是它必须和 tone-map 同一个 pass 合成的原因（多一趟显示空间 pass 就会把已映射过的值再映射一次）。默认 `intensity = 0` 是关闭态：整条链不跑、`passes` 不增、第 150 帧 PPM 与上一版**逐字节相同**（hash `bb3fdc99df20aa31`、14/7/8、SHA-256 `4A47275DD54A4AA2780353B6B37E6BD2999F9D16BEDA20197973BA6DB48A0927`、自比 0/921600），对旧端仍 32.22% / 0.61 / 194。七条 GPU 回归 + `bloom/tests.rs` 两条单元回归 + `renderer::hdr` 一条释放回归（`sanitized` 容错逐字段、源尺寸变了链确实重建、关掉后 `views()` 回 `None`）钉住：关闭态与不调 `set_bloom` 逐字节等价且 `passes` 不变、开态抬亮量与旧端公式对表（差 ≤2）、低于阈值的暗场景即使 `intensity = 4` 也逐字节不变（软膝式在该亮度贡献恰为 0）、尺寸变化重建链且同尺寸两次逐字节确定（8×8 → 16×16 → 5×3）、亮几何的光晕向外扩散而角落不同步抬亮（中心抬升 ≥ 2× 角落）、开过再关必须回到"从没开过"的逐字节画面且不再跑链。把合成行的 `* bloom.intensity` 临时改成 `* 0.0` 时后三条实跑变红（"开着 218，关着 218"、"实际 218，期望 229"、"中心 0"），证明回归真的走到合成而不是只在测关闭态。`project.ron` 的天空 / 光晕解析从 `xgc-cli/src/render.rs` 搬到 `xgc-cli/src/project_render.rs`（缺节 = 关、缺省逐项等于旧端 `SkyConfig` / `BloomConfig` 的 `default`），顺手守住 600 行软上限。**仍未闭环**：没有暴露 `render.exposure` 旋钮（旧端默认 1.0，光晕提取前先乘曝光；XGC 里曝光恒为 1，两者在默认设置下等价，一旦要支持调曝光就得同时接进 `instanced.rs` 的帧 uniform 与光晕提取）；光晕链的 6 张中间目标（三级 × a / b 乒乓）按尺寸缓存，尺寸不变时不再分配；开启时每帧跑 9 个 pass 并重建亮部提取与 tone-map 各**一个**绑定组（链内 8 个绑定组在建链时一次建好），关闭态还会把 tone-map 绑定组按场景纹理缓存（不随帧重建）；关掉（`intensity = 0`）时按旧端合同把链整份释放、只留管线与采样器。
+
 **蒙皮 draw 单次提交**接入后，一帧里所有 GPU 蒙皮 draw 共用**一个** frame binding、**一个** pass、**一次** submit（旧端也是 palette 逐角色、提交不逐角色）：`SkinnedPipeline::draw_batch` 先把每条 draw 的 palette / model 绑定建好，再一次 encoder + 一次 render pass 画完；此前每条蒙皮 draw 各建一次 frame bind / encoder / submit，多角色场景的提交次数随角色数线性增长。palette 仍逐角色（角色姿态本来就不同），逐角色的 16 KiB palette 上传没有合并。新回归 `batched_skinned_draws_keep_their_own_palettes` 用左右两个角色做差分：右侧角色换姿态时左侧按列切出的像素必须**逐字节不变**、右侧必须变化——串 palette 的批处理会立刻红。第 150 帧仍逐字节相同（证据世界没有骨架实体）：hash `bb3fdc99df20aa31`、14/7/8、PPM SHA-256 `4A47275D…`，对旧端仍 32.22% / 0.61 / 194。**未做稳态计时**：证据场景没有蒙皮 draw，冷启动四跑（本机当时有并发构建，818–998 ms）不能归因于本刀；提交次数 N→1 是结构性收益，真正的稳态测量仍要常驻进程 profiler。为守住 600 行软上限，测试夹具（两个 GLTF 构造器）从 `skinned_pbr` / `skinned_shadow` 提到 `tests/skinned_support/` 共用。**仍未闭环**：级联正交盒仍按相机视锥切片拟合（视锥外投射体不保证进深度图）；palette / model uniform 仍逐角色分配。
 
-**姿态感知的场景包围盒**接入后，`scene_bounds` 不再用绑定姿态的网格盒子：蒙皮实体改用 `posed_bounds`，两桶求并 —— **会动的顶点**按"真的有 palette 项"的关节各变换一次整网格 AABB（逐顶点结果是这些变换点的凸组合，并集 AABB 必然覆盖凸包；同一关节的盒对整张网格是常量，因此只需 O(顶点 + 关节) 次变换），**不动的顶点**（缺 JOINTS_0 / WEIGHTS_0、权重全零、关节下标越界）按顶点并进盒子——`skin_positions` 与 shader 都让它们留在绑定姿态，漏掉这一桶就会把这类顶点裁出画面（补回归前实跑确认：盒只剩 `[4.5..7.0]`，绑定顶点在 -0.5 之外）。它同时喂给自动取景（`frame_scene`）与级联远距离拟合（`prepare_shadow` 的 `far_d`）。五条新回归：三条单元（混合权重顶点都在盒内、平移 palette 时盒整体跟随、零权重顶点不被漏掉）与两条集成（场景包围盒跟着 +4 的姿态走，旧实现停在 `[-0.8..0.8]`；被姿态移开的网格仍在自动取景画面内，旧实现 **0** 个可见像素）。**已知近似**：这里用"整网格 AABB 按关节变换"，比旧端加载期预计算的"每关节顶点范围盒"更松，带骨架场景的自动取景会比旧端略远；等旧新逐帧截图像素门禁上骨架场景时需要按旧端口径收紧。第 150 帧与上一版逐字节不变（证据世界没有骨架实体）：hash `bb3fdc99df20aa31`、14/7/8、PPM SHA-256 `4A47275D…`，对旧端仍 32.22% / 0.61 / 194。性能用"两个可执行文件交错跑"的同机 A/B（每轮 before / after 各一次，抵消热漂移）：中位数 752.62 → 765.10 ms（+1.7%，区间 720–779 / 721–826 重叠）；该场景没有任何 pose item，新分支对每个 draw 只多一次 `Option` 判空（带骨架时则每帧多一次上面那笔边界计算），判定未见可归因回归。**仍未闭环**：级联正交盒本身还是按相机视锥切片拟合的，视锥外的投射体不保证进深度图（旧端也是 frustum 拟合 + 逐级剔除，但会为相机外投射体留 shadow-only 尾段）；多角色批量提交也还没做。
+**姿态感知的场景包围盒**接入后，`scene_bounds` 不再用绑定姿态的网格盒子：蒙皮实体改用 `posed_bounds`，两桶求并 —— **会动的顶点**按"真的有 palette 项"的关节各变换一次整网格 AABB（逐顶点结果是这些变换点的凸组合，并集 AABB 必然覆盖凸包；同一关节的盒对整张网格是常量，因此只需 O(顶点 + 关节) 次变换），**不动的顶点**（缺 JOINTS_0 / WEIGHTS_0、权重全零、关节下标越界）按顶点并进盒子——`skin_positions` 与 shader 都让它们留在绑定姿态，漏掉这一桶就会把这类顶点裁出画面（补回归前实跑确认：盒只剩 `[4.5..7.0]`，绑定顶点在 -0.5 之外）。它同时喂给自动取景（`frame_scene`）与级联远距离拟合（`prepare_shadow` 的 `far_d`）。五条新回归：三条单元（混合权重顶点都在盒内、平移 palette 时盒整体跟随、零权重顶点不被漏掉）与两条集成（场景包围盒跟着 +4 的姿态走，旧实现停在 `[-0.8..0.8]`；被姿态移开的网格仍在自动取景画面内，旧实现 **0** 个可见像素）。**已知近似**：这里用"整网格 AABB 按关节变换"，比旧端加载期预计算的"每关节顶点范围盒"更松，带骨架场景的自动取景会比旧端略远；等旧新逐帧截图像素门禁上骨架场景时需要按旧端口径收紧。第 150 帧与上一版逐字节不变（证据世界没有骨架实体）：hash `bb3fdc99df20aa31`、14/7/8、PPM SHA-256 `4A47275D…`，对旧端仍 32.22% / 0.61 / 194。性能用"两个可执行文件交错跑"的同机 A/B（每轮 before / after 各一次，抵消热漂移）：中位数 752.62 → 765.10 ms（+1.7%，区间 720–779 / 721–826 重叠）；该场景没有任何 pose item，新分支对每个 draw 只多一次 `Option` 判空（带骨架时则每帧多一次上面那笔边界计算），判定未见可归因回归。**仍未闭环**：级联正交盒本身还是按相机视锥切片拟合的，视锥外的投射体不保证进深度图（旧端也是 frustum 拟合 + 逐级剔除，但会为相机外投射体留 shadow-only 尾段）；多角色批量提交当时还没做（第 27 轮已补：同一模型的多条蒙皮 draw 合成一次提交）。
 
 **256 关节 GPU palette** 接入后，65~256 关节的蒙皮网格不再静默掉到 CPU 慢路径：`MAX_JOINTS` 64 → 256（与旧引擎 `BONES_PER_SLOT = 256` 同容量），palette uniform 4 KiB → **16 KiB**（仍在 wgpu 默认 `max_uniform_buffer_binding_size` 64 KiB 之内），`skin_vertex.wgsl` 的数组长度与 Rust 侧 `MAX_JOINTS_BYTES` 同步。路由判据仍是"palette 可完整表达"（每根有权重的关节都要有 pose 与逆绑定），257 关节或 palette 不完整照旧确定性回退 CPU，阴影两支路都跟着同一条判据走。新 GPU 回归把权重全压在 90 号槽并平移它：把上限临时改回 64（等价旧 routing）时该网格掉回 CPU（实跑 `gpu_skin_meshes` 0 ≠ 1 变红），现在留在 GPU 且表面随 90 号槽右移；单元测试钉住"256 接受 / 257 拒绝"与 16 KiB palette 字节数，原 65 关节回退用例改为 257 关节、回退像素合同不变。第 150 帧与上一版**逐字节相同**（证据世界没有骨架实体）：hash `bb3fdc99df20aa31`、14 draw / 7 call / 8 UI draw、PPM SHA-256 `4A47275DD54A4AA2780353B6B37E6BD2999F9D16BEDA20197973BA6DB48A0927`，自比 0/921600，对旧端仍为 296950/921600（32.22%）、mean_abs **0.61**、max 194。release 冷启动四跑中位数 734.43 → 743.15 ms（+1.2%，四跑 717–792 ms 与改前 729–789 ms 区间重叠；该场景不含蒙皮 draw，本刀不可能影响它）。另加设备上限判定：downlevel GL 路径的 `max_uniform_buffer_binding_size` 正好等于 16 KiB，更小的设备在路由阶段就退回 CPU，不会等到建 bind group 才失败。代价：每个蒙皮 draw 每帧多传 12 KiB palette（以 24 关节狐狸为例），相对一帧约 15.8 MiB 的 HDR 目标可忽略；多角色批量提交仍是缺口。
 
@@ -93,13 +95,13 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 - 无 `animation.state` 时 `set_anim_param` 现在安全 no-op，不再让同帧其它脚本命令整批失败；状态机迁移仍是独立差距。
 - GUID 资产（Box.glb、Fox.gltf + Fox.bin）可解析；glTF 首图元 `baseColorFactor` 在静态实例与 GPU 蒙皮路径均参与最终颜色，且选择高亮仍能替换最终颜色；character 脚本 / Pillar 预制体可迁移。
 - cooked 包：引用裁剪 7 文件、XGCB 二进制（v2 带场景环境）、manifest 哈希 / 签名校验、`xgc-player` headless 60 帧。
-- 自动化测试：318 条；正式帧回归覆盖 sRGB alpha HUD、帧数契约、固定步推进与最终父子 `GlobalTransform` 合成；基色因子、场景光、`.mat` 乘子、HDR 粒子合成、唯一 ACES、tone 后 UI、蒙皮网格投射阴影与输出格式 / resize 均有 GPU 像素门禁（期望值由 CPU 镜像现算），256 槽 palette 的路由与字节数另有单元 / GPU 回归，环境往返 / 迁移 / 验收 / 取景拟合均有 CPU 回归。
+- 自动化测试：328 条；正式帧回归覆盖 sRGB alpha HUD、帧数契约、固定步推进与最终父子 `GlobalTransform` 合成；基色因子、场景光、`.mat` 乘子、HDR 粒子合成、唯一 ACES、三级 Bloom、tone 后 UI、蒙皮网格投射阴影与输出格式 / resize 均有 GPU 像素门禁（期望值由 CPU 镜像现算），256 槽 palette 的路由与字节数另有单元 / GPU 回归，环境往返 / 迁移 / 验收 / 取景拟合均有 CPU 回归。
 
 ## 与 XGameEngine 的主要差距
 
 | 差距 | 影响 | 优先级 |
 |---|---|---|
-| 渲染高级特性 | 几何 / 材质 / PBR / 基色纹理 / 天空盒 + 漫反射 IBL / 环境反射 / 4 级 CSM（静态 + 蒙皮投射）/ RGBA16F 场景 + 全局 ACES / tone 后 HUD / CPU 粒子 + billboard / GPU 蒙皮主场景着色（256 槽 palette）已通；缺 PCSS / 点光阴影 / Bloom 等后处理 / 视锥外投射体的级联覆盖 / 逐角色 palette 合并 | P0 |
+| 渲染高级特性 | 几何 / 材质 / PBR / 基色纹理 / 天空盒 + 漫反射 IBL / 环境反射 / 4 级 CSM（静态 + 蒙皮投射）/ RGBA16F 场景 + 全局 ACES / tone 后 HUD / CPU 粒子 + billboard / GPU 蒙皮主场景着色（256 槽 palette）+ 曝光后曲线前三级 Bloom 已通；缺 PCSS / 点光阴影 / TAA·SSAO·FXAA 等其余后处理 / 逐角色 palette 合并（级联正交盒与旧端同为视锥切片拟合 + 逐级剔除，不算缺口） | P0 |
 | 正式 System 调度 | `SystemAccess` / `batches()` 已有，执行仍顺序；脚本尚未成为正式 System | P0 |
 | 视觉 / trace 验收 | 第 150 帧同 tick 截图可复现，mean_abs 0.61；仍缺旧端逐帧 trace / 状态哈希对照与截图阈值门禁 | P0 |
 | 物理完整性 | 简化角色 / AABB；无完整刚体、关节、连续碰撞、坡面滑动 | P1 |
@@ -120,7 +122,7 @@ cooked 播放器已可用；差距集中在渲染高级特性、正式调度、�
 
 ## 下一步（按顺序）
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知的场景包围盒、蒙皮 draw 单次提交已贯通；下一刀做视锥外投射体的级联覆盖与逐角色 palette 合并，再回物理角色控制器 / 关节。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知的场景包围盒、蒙皮 draw 单次提交、曝光后、ACES 前的三级 HDR Bloom 已贯通；下一刀做逐角色 palette 合并（每角色 16 KiB palette 走 dynamic offset 并进一次绑定），再回物理角色控制器 / 关节。
 2. 正式调度：把脚本与默认系统纳入 `Schedule` 的访问声明批次。
 3. 逐帧 trace / 截图对照与性能门禁。
 4. 密码学签名、跨机器增量烹饪。

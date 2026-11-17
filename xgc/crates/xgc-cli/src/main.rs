@@ -19,6 +19,7 @@ mod audio;
 mod compare_cmd;
 mod cook_cmd;
 mod input_cmd;
+mod project_render;
 mod render;
 mod runtime_cmd;
 mod world_cmd;

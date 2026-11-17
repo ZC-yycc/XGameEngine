@@ -42,13 +42,13 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 材质色、`Mesh` 顶点 / 索引缓冲、builtin 网格、最小 GLB 几何 / 蒙皮 / 首图元
 `baseColorFactor` 解析、`.mat` 材质资产解析与乘子（`模型因子 → 资产 → 覆盖 → 选择高亮`，
 静态 / GPU 蒙皮同路）、场景光与环境光（`WorldData.environment`，`环境光 + 主方向光 × N·L`）、
-`Rgba16Float` 线性场景中间目标（几何 / 天空 / 粒子先合成，帧末全屏 pass 只做一次 ACES，UI 后叠加）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
+`Rgba16Float` 线性场景中间目标（几何 / 天空 / 粒子先合成，帧末全屏 pass 里先叠可选的三级光晕再做唯一一次 ACES，UI 后叠加）、三级 HDR 光晕链（`render.bloom` 的 `intensity` / `threshold` / `knee`，旧端 `postfx.rs` 同口径：亮部提取 + ½ / ¼ / ⅛ 逐级降采样 + 每级横纵 9 抽头二项核共 9 个 pass，`Rgba16Float` 乒乓，默认 `intensity = 0` 整条链不跑且画面逐位不变）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
 深度测试，几何照常遮挡）、天空漫反射 IBL（解析天空 → L2 球谐 E/π，参数取项目级 `project.ron`
 的 `render.sky`）、方向光阴影（4 级 CSM：λ=0.7 practical split + 逐级紧致正交拟合 + 纹素吸附，2048² 深度数组按视线深度选层 + 3×3 PCF；静态网格与**蒙皮网格**都投射：蒙皮那支在深度 pass 里用同一份 `skin_vertex.wgsl` 变形，palette 与主场景同一份 `palette_bytes`）、环境反射（天空 SH 反射方向 × Lazarov 解析 BRDF，逐材质 `f0 = mix(0.04, 基色, metallic)`、
 `(1-metallic)` 漫反射、粗糙度夹 0.04）、网格基色贴图（glTF `TEXCOORD_0` + `baseColorTexture`，
 外部 uri / GLB 内嵌 PNG → sRGB 采样）、直接光 Cook-Torrance PBR（GGX + Smith + Schlick、
 `(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、GPU 蒙皮与静态实例共享唯一的基色贴图 / PBR / CSM 阴影接收片元实现、确定性粒子 billboard（CPU SplitMix64 模拟，软圆覆盖，Alpha / Additive，Alpha 后向前排序，深测开 / 深写关，并在线性 HDR 中混合）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
-`guid://` 解析、`Renderer` 帧入口（DrawList → HDR 几何 / 天空 / 粒子 → ACES → UI）、
+`guid://` 解析、`Renderer` 帧入口（DrawList → HDR 几何 / 天空 / 粒子 → 可选三级光晕 → ACES → UI）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
 `GpuMeshCache` 顶点 / 索引缓冲跨帧复用、按模型分组实例化（storage instance 缓冲）、
@@ -74,6 +74,8 @@ GPU 蒙皮主场景着色切片用同一 showcase 第 150 帧做了 release 冷�
 HDR 统一 tone-map 切片沿用同一命令同机背靠背冷启动：改前 `809.34 / 832.12 / 827.80 / 744.47 ms`（中位数 **818.57 ms**），改后 `743.46 / 719.81 / 739.85 / 756.30 ms`（中位数 **741.66 ms**，-9.4%）。新增 1080p 约 15.8 MiB 的 `Rgba16Float` 场景目标和一次全屏 pass 后未见冷启动回归；但进程启动、shader/pipeline 编译和驱动抖动远大于该 pass 的稳态成本，**不能据此声称 HDR 更快**，仍需 GPU timestamp / 常驻进程 profiler 门禁。
 
 蒙皮投射阴影切片同样同机背靠背：改前 `807.94 / 742.62 / 764.36 / 749.68 ms`（中位数 **757.02 ms**），改后 `789.24 / 729.28 / 733.15 / 735.72 ms`（中位数 **734.43 ms**，-3.0%）。门禁画面（`showcase-particles.json`）里**没有骨架实体**，所以这一刀只多一条 depth-only pipeline 的编译与每帧一次 caster 解析，冷启动未见回归；蒙皮投射的正确性由 4 条 GPU 像素回归负责（旧实现 0 像素变暗 → 现在 176/9216），不代表多角色稳态开销。
+
+HDR 光晕切片默认关闭，因此不改变任何既有画面的性能与像素：证据世界第 150 帧 PPM 与上一版 SHA-256 相同（`4A47275D…48A0927`、自比 0/921600），关闭态只多读一次 uniform、tone-map 绑定组按场景纹理缓存（不随帧重建）。开启时多 6 张 ½ / ¼ / ⅛ 的 `Rgba16Float` 中间目标（每级 a / b 两块乒乓）与 9 个全屏 pass，每帧只重建亮部提取与 tone-map 各一个绑定组（链内 8 个在建链时一次建好），**未做稳态计时**（当前没有常驻 profiler 门禁，冷启动把 shader 编译与进程启动抖到一起，不能归因），代价量级需按 GPU timestamp 另测。
 
 蒙皮 draw 单次提交切片让一帧所有 GPU 蒙皮 draw 共用**一个** frame binding、**一个** pass、**一次** submit（palette 仍逐角色）。新回归 `batched_skinned_draws_keep_their_own_palettes` 用左右两个角色做差分：右侧换姿态时左侧按列切出的像素必须逐字节不变。**未做稳态计时**：证据场景没有蒙皮 draw，本机当时的冷启动四跑（818–998 ms，有并发构建）不能归因于本刀，提交次数 N→1 属于结构性收益，真正的稳态测量仍要常驻进程 profiler。
 
@@ -121,12 +123,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（318 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（200 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
+`cargo test --workspace --offline` 全绿（328 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（204 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-PCSS / 点光阴影 / Bloom、TAA、SSAO、FXAA 等后处理，视锥外投射体的级联覆盖 / 逐角色 palette 合并（现在级联正交盒仍按相机视锥切片拟合，`scene_bounds` 已按当前姿态）、
+PCSS / 点光阴影、TAA / SSAO / FXAA 等其余后处理、逐角色 palette 合并（每角色 16 KiB palette 仍各自一份；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色控制器 / 关节 / 坡面滑动、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。

@@ -10,6 +10,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
 mod assets;
+mod bloom;
 mod camera;
 mod diff;
 mod draw;
@@ -43,6 +44,7 @@ mod tone;
 mod ui_draw;
 
 pub use assets::MeshCache;
+pub use bloom::{BloomSettings, BLOOM_LEVELS, BLOOM_WEIGHTS};
 pub use camera::{
     camera_view_projection, invert, look_at_rh, model_matrix, mul, orthographic_rh,
     perspective_rh_zo, transform_point, Mat4, IDENTITY,

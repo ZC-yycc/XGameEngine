@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use super::assets::MeshCache;
+use super::bloom::{BloomSettings, BloomStage};
 use super::camera::{camera_view_projection_with_eye, invert, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
 use super::frame_color::compose_colors;
@@ -53,6 +54,9 @@ pub struct Renderer {
     particles: Vec<xgc_world::ParticleQuad>,
     particle_pipeline: Option<(wgpu::TextureFormat, super::particles::ParticlePipeline)>,
     hdr: Option<hdr::HdrStage>,
+    /// 画面设置里的光晕节：开着时场景在 tone-map 前多跑一遍三级光晕链。
+    bloom: BloomSettings,
+    bloom_stage: Option<BloomStage>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
@@ -92,6 +96,8 @@ impl Renderer {
             particles: Vec::new(),
             particle_pipeline: None,
             hdr: None,
+            bloom: BloomSettings::default(),
+            bloom_stage: None,
             depth: None,
             images: HashMap::new(),
             ui_overlay: None,
@@ -105,6 +111,14 @@ impl Renderer {
     /// 设置天空（等价于旧 `project.ron` 的 `render.sky`）。
     pub fn set_sky(&mut self, sky: SkySettings) {
         self.sky = sky.sanitized();
+    }
+
+    /// 设置光晕（等价于旧 `project.ron` 的 `render.bloom`）。
+    ///
+    /// 旧端把光晕放在曝光后、ACES 前：过完曲线的高光没有余量，显示端再叠加
+    /// 只会被裁成硬边。`intensity <= 0` 是关闭态，此时整条链不跑也不会被采样。
+    pub fn set_bloom(&mut self, bloom: BloomSettings) {
+        self.bloom = bloom.sanitized();
     }
 
     /// 清屏色以线性值写入 HDR 场景，和几何 / 天空 / 粒子一起在帧末 tone-map。
@@ -201,8 +215,7 @@ impl Renderer {
         let list = self.prepared_list(world, None)?;
         let scene = self.hdr_scene_texture(context, width, height);
         let mut stats = self.render_list(context, &scene, world, list, view_proj, lighting)?;
-        self.present_hdr(context, target);
-        stats.passes += 1;
+        self.present_scene(context, target, &scene, &mut stats);
         stats.ui_draws = self.render_ui(context, target, world)?;
         stats.passes += usize::from(stats.ui_draws > 0);
         Ok(stats)
@@ -224,8 +237,7 @@ impl Renderer {
         let lighting = self.frame_lighting(world, eye);
         let scene = self.hdr_scene_texture(context, width, height);
         let mut stats = self.render_list(context, &scene, world, list, view_proj, lighting)?;
-        self.present_hdr(context, target);
-        stats.passes += 1;
+        self.present_scene(context, target, &scene, &mut stats);
         Ok(stats)
     }
 
