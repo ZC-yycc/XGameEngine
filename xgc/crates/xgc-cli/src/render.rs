@@ -310,6 +310,8 @@ pub(crate) fn render_frame(
         renderer.set_fxaa(settings.fxaa);
         // 软阴影 / 级间混合默认关：关着时着色器走老路径，帧输出逐字节不变。
         renderer.set_shadow_settings(settings.shadow);
+        // TAA 默认关：关着时不建历史、相机不抖动，帧输出逐字节不变。
+        renderer.set_taa(settings.taa);
     }
     if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
         for item in build_draw_list(&world).items {

@@ -20,8 +20,13 @@ struct HdrTarget {
     width: u32,
     height: u32,
     texture: Arc<wgpu::Texture>,
-    /// 场景视图：既是 tone-map 的输入，也是光晕关闭时三级光晕的占位绑定。
-    view: wgpu::TextureView,
+}
+
+/// tone-map 的画面旋钮：曝光与光晕一起传（打包后 `present` 的参数表才不过长）。
+#[derive(Clone, Copy)]
+pub(super) struct Look {
+    pub(super) bloom: BloomSettings,
+    pub(super) exposure: f32,
 }
 
 pub(super) struct HdrStage {
@@ -31,9 +36,6 @@ pub(super) struct HdrStage {
     /// 上次写进 `tone_params` 的五个字段（按位比较，避免每帧都写缓冲）。
     tone_params_written: Option<[u32; 5]>,
     target: Option<HdrTarget>,
-    /// 光晕关闭时的绑定组：三级输入全指向场景纹理占位、强度恒 0，
-    /// 只有场景纹理重建才需要换，跨帧缓存即可（旧实现就是缓存的）。
-    closed_bind: Option<wgpu::BindGroup>,
     pipeline: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
 }
 
@@ -124,7 +126,6 @@ impl HdrStage {
             tone_params,
             tone_params_written: None,
             target: None,
-            closed_bind: None,
             pipeline: None,
         }
     }
@@ -158,15 +159,11 @@ impl HdrStage {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             }));
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.target = Some(HdrTarget {
                 width,
                 height,
                 texture,
-                view,
             });
-            // 占位绑定指向旧纹理的视图，随目标一起作废。
-            self.closed_bind = None;
         }
         Arc::clone(&self.target.as_ref().unwrap().texture)
     }
@@ -178,11 +175,12 @@ impl HdrStage {
         &mut self,
         context: &GpuContext,
         destination: &wgpu::TextureView,
+        scene: &wgpu::TextureView,
         format: wgpu::TextureFormat,
-        bloom: BloomSettings,
-        exposure: f32,
+        look: Look,
         glow: Option<[&wgpu::TextureView; BLOOM_LEVELS]>,
     ) {
+        let Look { bloom, exposure } = look;
         if self
             .pipeline
             .as_ref()
@@ -207,42 +205,20 @@ impl HdrStage {
             context.queue().write_buffer(&self.tone_params, 0, &bytes);
             self.tone_params_written = Some(bits);
         }
-        // 关闭态：三级输入全指向场景纹理占位、强度恒 0，绑定组跨帧缓存（场景纹理
-        // 重建时清掉）。开启态每帧重建 —— 场景纹理与光晕链各有独立的重建判据，
-        // 跨帧缓存要维护多重失效条件，收益抵不上一次绑定创建。
-        let fresh: Option<wgpu::BindGroup>;
-        let bind: &wgpu::BindGroup = match glow {
-            Some(glow) => {
-                let target = self.target.as_ref().expect("present 前必须创建 HDR 目标");
-                fresh = Some(create_bind(
-                    context,
-                    &self.texture_layout,
-                    &self.sampler,
-                    &self.tone_params,
-                    &target.view,
-                    glow,
-                ));
-                fresh.as_ref().expect("刚建过绑定组")
-            }
-            None => {
-                if self.closed_bind.is_none() {
-                    let cached = {
-                        let target = self.target.as_ref().expect("present 前必须创建 HDR 目标");
-                        let placeholder = [&target.view; BLOOM_LEVELS];
-                        create_bind(
-                            context,
-                            &self.texture_layout,
-                            &self.sampler,
-                            &self.tone_params,
-                            &target.view,
-                            placeholder,
-                        )
-                    };
-                    self.closed_bind = Some(cached);
-                }
-                self.closed_bind.as_ref().expect("刚建过绑定组")
-            }
-        };
+        // tone-map 的输入可能是 HDR 场景，也可能是 TAA 解析后的纹理：调用方传入视图，
+        // 本阶段不再自己持有场景视图。绑定组每帧重建 —— 输入视图与光晕链各有独立的
+        // 重建判据，跨帧缓存要维护多重失效条件，收益抵不上一次绑定创建。
+        // 光晕关闭时三级输入全指向场景占位、强度恒 0，着色器整段分支跳过。
+        let placeholder = [scene; BLOOM_LEVELS];
+        let glow = glow.unwrap_or(placeholder);
+        let bind = create_bind(
+            context,
+            &self.texture_layout,
+            &self.sampler,
+            &self.tone_params,
+            scene,
+            glow,
+        );
         let mut encoder =
             context
                 .device()
@@ -265,7 +241,7 @@ impl HdrStage {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind, &[]);
+            pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
         context.queue().submit(Some(encoder.finish()));
@@ -398,8 +374,14 @@ impl super::Renderer {
         // 关着时链已被释放（`views()` 回 `None`），这里退化成绑场景纹理占位：
         // 强度写 0，着色器整段分支跳过，绑什么都不会被采样。
         let glow = self.bloom_stage.as_ref().and_then(|stage| stage.views());
+        let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
         let format = output.format();
-        let fxaa = self.fxaa;
+        // 旧端纪律：开着 TAA 时 FXAA 让位（显示空间只保留一种抗锯齿）。
+        let fxaa = if self.taa.enabled {
+            crate::fxaa::FxaaSettings::default()
+        } else {
+            self.fxaa
+        };
         // FXAA 开着：tone-map 写 LDR scratch，再由 FXAA 平滑到显示目标。
         // 关着：tone-map 直接写显示目标，scratch 整份丢掉（不养显存）。
         let (tone_view, tone_source) = if fxaa.is_enabled() {
@@ -423,7 +405,14 @@ impl super::Renderer {
         self.hdr
             .as_mut()
             .expect("HDR 目标必须先完成场景渲染")
-            .present(context, &tone_view, format, bloom, exposure, glow);
+            .present(
+                context,
+                &tone_view,
+                &scene_view,
+                format,
+                Look { bloom, exposure },
+                glow,
+            );
         stats.passes += 1;
         if let Some(source) = tone_source {
             let target = output.create_view(&wgpu::TextureViewDescriptor::default());

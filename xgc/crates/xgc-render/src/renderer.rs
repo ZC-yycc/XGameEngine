@@ -6,7 +6,7 @@ use super::assets::MeshCache;
 use super::bloom::{BloomSettings, BloomStage};
 use super::camera::{camera_view_projection_with_eye, invert, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
-use super::exposure::{sanitize_exposure, EXPOSURE_DEFAULT};
+use super::exposure::EXPOSURE_DEFAULT;
 use super::frame_color::compose_colors;
 use super::frame_uniform::{create_frame_bind, FrameLighting};
 use super::fxaa::{FxaaSettings, FxaaStage};
@@ -22,8 +22,12 @@ use super::resources::{ResourceDesc, ResourceUsage};
 use super::shadow_settings::ShadowSettings;
 use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline};
 use super::sky::{sky_irradiance, SkySettings};
+use super::taa::TaaSettings;
 mod hdr;
+mod settings;
 mod shadow_prep;
+mod taa_pass;
+use taa_pass::CameraMatrices;
 mod ui;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -85,6 +89,9 @@ pub struct Renderer {
     sky: SkySettings,
     /// 画面设置里的阴影画质（软阴影 / 级间混合）：默认全 0，走老路径逐位不变。
     shadow_settings: ShadowSettings,
+    /// 画面设置里的时间抗锯齿：默认关，关着时不建历史、相机不抖动。
+    taa: TaaSettings,
+    taa_stage: Option<crate::taa::TaaStage>,
 }
 
 fn scissor_rect(clip: [f32; 4], viewport: [f32; 2]) -> Option<[u32; 4]> {
@@ -129,46 +136,9 @@ impl Renderer {
             clear_color: wgpu::Color::BLACK,
             sky: SkySettings::default(),
             shadow_settings: ShadowSettings::default(),
+            taa: TaaSettings::default(),
+            taa_stage: None,
         }
-    }
-
-    /// 设置天空（等价于旧 `project.ron` 的 `render.sky`）。
-    pub fn set_sky(&mut self, sky: SkySettings) {
-        self.sky = sky.sanitized();
-    }
-
-    /// 设置曝光（等价于旧 `project.ron` 的 `render.exposure`）。
-    ///
-    /// 曝光是曲线之前的线性光乘子，必须与光晕亮部提取用同一个值：0 是
-    /// "全黑画面"而不是关闭态，非正 / 非有限值由 [`sanitize_exposure`] 落回
-    /// 1.0。缺省 1.0 时帧输出逐字节不变。
-    pub fn set_exposure(&mut self, exposure: f32) {
-        self.exposure = sanitize_exposure(exposure);
-    }
-
-    /// 设置光晕（等价于旧 `project.ron` 的 `render.bloom`）。
-    ///
-    /// 旧端把光晕放在曝光后、ACES 前：过完曲线的高光没有余量，显示端再叠加
-    /// 只会被裁成硬边。`intensity <= 0` 是关闭态，此时整条链不跑也不会被采样。
-    pub fn set_bloom(&mut self, bloom: BloomSettings) {
-        self.bloom = bloom.sanitized();
-    }
-
-    /// 设置 FXAA（等价于旧 `project.ron` 的 `render.fxaa`）。
-    ///
-    /// 位置与旧端一致：tone-map 之后、UI 之前 —— 抗锯齿只收拾场景边缘，
-    /// HUD 文字保持锐利。默认关，关着时整段跳过、帧输出逐字节不变。
-    pub fn set_fxaa(&mut self, fxaa: FxaaSettings) {
-        self.fxaa = fxaa;
-    }
-
-    /// 设置方向光阴影的画质（等价于旧 `project.ron` 的 `render.shadow`）。
-    ///
-    /// 软阴影（PCSS）与级间混合都是可选增强：两个 0 时着色器走 3×3 PCF + 硬级间
-    /// 切换的老路径，帧输出逐字节不变；非有限 / 负值由 [`ShadowSettings::sanitized`]
-    /// 落回 0。
-    pub fn set_shadow_settings(&mut self, settings: ShadowSettings) {
-        self.shadow_settings = settings.sanitized();
     }
 
     /// 清屏色以线性值写入 HDR 场景，和几何 / 天空 / 粒子一起在帧末 tone-map。
@@ -211,7 +181,8 @@ impl Renderer {
             "depth32float",
             width.max(1),
             height.max(1),
-            vec![ResourceUsage::DepthAttachment],
+            // 采样位是给 TAA 的深度反投影用的：历史重投影要读上一帧的世界坐标。
+            vec![ResourceUsage::DepthAttachment, ResourceUsage::Sampled],
         );
         let resource = context.create_resource(&desc)?;
         let texture = resource
@@ -263,9 +234,21 @@ impl Renderer {
         };
         let lighting = self.frame_lighting(world, eye);
         let list = self.prepared_list(world, None)?;
+        let scene_view_proj = self.taa_begin(context, width, height, view_proj);
         let scene = self.hdr_scene_texture(context, width, height);
-        let mut stats = self.render_list(context, &scene, world, list, view_proj, lighting)?;
-        self.present_scene(context, target, &scene, &mut stats);
+        let mut stats = self.render_list(
+            context,
+            &scene,
+            world,
+            list,
+            CameraMatrices {
+                scene: scene_view_proj,
+                shadow: view_proj,
+            },
+            lighting,
+        )?;
+        let resolved = self.taa_resolve(context, &scene, view_proj, eye, &mut stats);
+        self.present_scene(context, target, &resolved, &mut stats);
         stats.ui_draws = self.render_ui(context, target, world)?;
         stats.passes += usize::from(stats.ui_draws > 0);
         Ok(stats)
@@ -285,9 +268,21 @@ impl Renderer {
         let (view_proj, eye) =
             camera_view_projection_with_eye(world, width, height).unwrap_or((IDENTITY, [0.0; 3]));
         let lighting = self.frame_lighting(world, eye);
+        let scene_view_proj = self.taa_begin(context, width, height, view_proj);
         let scene = self.hdr_scene_texture(context, width, height);
-        let mut stats = self.render_list(context, &scene, world, list, view_proj, lighting)?;
-        self.present_scene(context, target, &scene, &mut stats);
+        let mut stats = self.render_list(
+            context,
+            &scene,
+            world,
+            list,
+            CameraMatrices {
+                scene: scene_view_proj,
+                shadow: view_proj,
+            },
+            lighting,
+        )?;
+        let resolved = self.taa_resolve(context, &scene, view_proj, eye, &mut stats);
+        self.present_scene(context, target, &resolved, &mut stats);
         Ok(stats)
     }
 
@@ -423,16 +418,21 @@ impl Renderer {
         target: &wgpu::Texture,
         world: &World,
         list: DrawList,
-        view_proj: Mat4,
+        cameras: CameraMatrices,
         mut lighting: FrameLighting,
     ) -> Result<RenderStats, GpuError> {
+        let CameraMatrices {
+            scene: view_proj,
+            shadow: shadow_view_proj,
+        } = cameras;
         self.ensure_frame_targets(context, target)?;
         // 阴影投射体 = 全部 draw：旧端蒙皮网格与静态网格一样进阴影批次。
+        // 拟合用**未抖动**矩阵（TAA 的抖动只叠在相机上，见 `taa_pass.rs`）。
         let prepared = self.prepare_shadow(
             context,
             world,
             &list.items,
-            view_proj,
+            shadow_view_proj,
             lighting.eye,
             self.shadow_settings.cascade_blend,
         )?;

@@ -1,17 +1,19 @@
-//! `project.ron` 的画面设置读取：曝光、天空、光晕、FXAA 与阴影画质。
+//! `project.ron` 的画面设置读取：曝光、天空、光晕、FXAA、阴影画质与 TAA。
 //!
 //! 旧引擎把画面设置放在项目级而不是场景级，XGC 也按项目级读；缺省值必须逐项
 //! 等于旧端 `RenderConfig::default` 的曝光 1.0 与 `SkyConfig` / `BloomConfig` /
-//! `FxaaConfig` / `ShadowConfig` 的 `default`，
+//! `FxaaConfig` / `ShadowConfig` / `TaaConfig` 的 `default`，
 //! 缺文件 / 缺节时画面才与接入前逐位相同。
 
 use std::path::Path;
 
 use serde::Deserialize;
-use xgc_render::{sanitize_exposure, BloomSettings, FxaaSettings, ShadowSettings, SkySettings};
+use xgc_render::{
+    sanitize_exposure, BloomSettings, FxaaSettings, ShadowSettings, SkySettings, TaaSettings,
+};
 
 /// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分
-/// （曝光 + 天空 + 光晕 + FXAA + 阴影画质）。
+/// （曝光 + 天空 + 光晕 + FXAA + 阴影画质 + TAA）。
 #[derive(Debug, Default, Deserialize)]
 struct OldProjectFile {
     #[serde(default)]
@@ -30,6 +32,8 @@ struct OldProjectRender {
     fxaa: OldFxaaConfig,
     #[serde(default)]
     shadow: OldShadowConfig,
+    #[serde(default)]
+    taa: OldTaaConfig,
 }
 
 /// 缺 `render` 节时的缺省：曝光必须是旧端缺省 1.0，不能靠 `derive(Default)` 给出
@@ -42,6 +46,7 @@ impl Default for OldProjectRender {
             bloom: OldBloomConfig::default(),
             fxaa: OldFxaaConfig::default(),
             shadow: OldShadowConfig::default(),
+            taa: OldTaaConfig::default(),
         }
     }
 }
@@ -66,6 +71,28 @@ struct OldBloomConfig {
     threshold: f32,
     #[serde(default = "bloom_default_knee")]
     knee: f32,
+}
+
+/// 缺省值必须逐项等于旧 `TaaConfig::default`（TAA 默认关，历史权重 0.9）。
+#[derive(Debug, Deserialize)]
+struct OldTaaConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "taa_default_history_weight")]
+    history_weight: f32,
+}
+
+fn taa_default_history_weight() -> f32 {
+    xgc_render::DEFAULT_HISTORY_WEIGHT
+}
+
+impl Default for OldTaaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            history_weight: taa_default_history_weight(),
+        }
+    }
 }
 
 /// 缺省值必须逐项等于旧 `ShadowConfig::default`（软阴影 / 级间混合都关）。
@@ -157,9 +184,10 @@ pub(crate) struct ProjectRenderSettings {
     pub(crate) fxaa: FxaaSettings,
     pub(crate) exposure: f32,
     pub(crate) shadow: ShadowSettings,
+    pub(crate) taa: TaaSettings,
 }
 
-/// 读 `project.ron` 的画面设置（曝光 + 天空 + 光晕 + FXAA + 阴影画质）。
+/// 读 `project.ron` 的画面设置（曝光 + 天空 + 光晕 + FXAA + 阴影画质 + TAA）。
 ///
 /// 没有 `project.ron` 时返回 `None`；文件在但缺节则按旧端缺省读出来
 /// （曝光 1.0、其余都是"关"），与缺节等于关 / 不增不减的语义一致。
@@ -174,7 +202,7 @@ pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> 
             // 文件在但读不懂：契约仍是"缺省即关"，但静默把天空和光晕一起关掉
             // 会让画面差异无从归因，所以留一条能查的日志。
             eprintln!(
-                "warning: {} 解析失败，画面设置回落到缺省（曝光 1.0、天空 / 光晕 / FXAA / 阴影画质都关）：{error}",
+                "warning: {} 解析失败，画面设置回落到缺省（曝光 1.0、天空 / 光晕 / FXAA / 阴影画质 / TAA 都关）：{error}",
                 path.display()
             );
             return None;
@@ -185,6 +213,7 @@ pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> 
     let bloom = project.render.bloom;
     let fxaa = project.render.fxaa;
     let shadow = project.render.shadow;
+    let taa = project.render.taa;
     Some(ProjectRenderSettings {
         sky: SkySettings {
             enabled: sky.enabled,
@@ -210,6 +239,12 @@ pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> 
         shadow: ShadowSettings {
             softness: shadow.softness,
             cascade_blend: shadow.cascade_blend,
+        }
+        .sanitized(),
+        // TAA 默认关；历史权重在这里夹进 [0, 0.98]，非有限值落回 0.9。
+        taa: TaaSettings {
+            enabled: taa.enabled,
+            history_weight: taa.history_weight,
         }
         .sanitized(),
     })
@@ -246,6 +281,9 @@ mod tests {
         // 项目里没有 `render.shadow` 节：软阴影 / 级间混合关（画面逐位不变）。
         assert_eq!(settings.shadow, xgc_render::ShadowSettings::default());
         assert!(!settings.shadow.is_enabled());
+        // 项目里没有 `render.taa` 节：TAA 关（相机不抖动，帧输出逐位不变）。
+        assert_eq!(settings.taa, xgc_render::TaaSettings::default());
+        assert!(!settings.taa.is_enabled());
         // 没有 project.ron 的资产根：天空关、光晕关。
         assert!(super::load_render(std::path::Path::new("does-not-exist")).is_none());
     }
@@ -297,6 +335,7 @@ mod tests {
         // 没写的节保持缺省：曝光 1.0（x*1.0 与老逐字节一致），其余全关。
         assert_eq!(settings.exposure, xgc_render::EXPOSURE_DEFAULT);
         assert!(!settings.bloom.is_enabled());
+        assert!(!settings.taa.is_enabled());
         assert!(!settings.fxaa.is_enabled());
 
         // 负数在入口消毒成 0；`cascade_blend: 2.0` 是合法值（旧端不夹上界），保留。
@@ -310,6 +349,16 @@ mod tests {
         let settings = super::load_render(&root).expect("空 render 节应走缺省");
         assert_eq!(settings.shadow, xgc_render::ShadowSettings::default());
         assert!(!settings.shadow.is_enabled());
+        assert!(!settings.taa.is_enabled());
+
+        // 显式开 TAA：历史权重真的被读出来并夹进 [0, 0.98]。
+        write("(render: (taa: (enabled: true, history_weight: 0.95)))");
+        let settings = super::load_render(&root).expect("显式 TAA 应能解析");
+        assert!(settings.taa.is_enabled());
+        assert_eq!(settings.taa.history_weight, 0.95);
+        write("(render: (taa: (enabled: true, history_weight: 3.0)))");
+        let settings = super::load_render(&root).expect("非法权重不该让解析失败");
+        assert_eq!(settings.taa.history_weight, xgc_render::MAX_HISTORY_WEIGHT);
 
         let _ = std::fs::remove_dir_all(&root);
     }
