@@ -2,9 +2,9 @@
 
 use xgc_base::EntityId;
 use xgc_sim::{
-    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, CharacterSystem,
-    FrameCommands, GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario, Schedule,
-    SimError, Simulation, System, SystemAccess, VelocitySystem,
+    play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, FrameCommands,
+    GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario, Schedule, SimError, Simulation,
+    System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
     Animator, CharacterController, Command, Component, ComponentId, GlobalTransform, Name, Parent,
@@ -116,8 +116,6 @@ fn velocity_system_moves_transform() {
             "ground",
             "aabb",
             "rapier",
-            "character",
-            "character_step",
             "animation_state",
             "animation",
             "animation_apply",
@@ -436,29 +434,6 @@ fn aabb_separates_overlapping_dynamic_boxes() {
     let b = world.get::<Transform>(b).unwrap();
     assert!((a.position[0] - b.position[0]).abs() >= 1.0 - 1e-5);
     assert!((a.position[0] + b.position[0] - 0.2).abs() < 1e-5);
-}
-
-#[test]
-fn character_stays_on_ground() {
-    let mut world = World::new();
-    let entity = world.spawn((
-        Transform {
-            position: [0.0, -0.2, 0.0],
-            ..Transform::default()
-        },
-        Velocity {
-            linear: [1.0, -2.0, 0.0],
-        },
-        CharacterController::default(),
-    ));
-    let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem::default());
-    schedule.run(&mut world, 0.016);
-    let transform = world.get::<Transform>(entity).unwrap();
-    let velocity = world.get::<Velocity>(entity).unwrap();
-    assert_eq!(transform.position[1], 0.0);
-    assert_eq!(velocity.linear[1], 0.0);
-    assert_eq!(velocity.linear[0], 1.0);
 }
 
 #[test]

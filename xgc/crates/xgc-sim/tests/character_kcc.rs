@@ -1,8 +1,9 @@
 //! 角色横向移动接入 rapier `KinematicCharacterController` 的回归。
 //!
 //! 这些用例大多显式搭一条最小调度（`VelocitySystem` + `RapierPhysicsSystem`），不跑默认
-//! 18 个系统：本刀只改"水平位移归谁"，竖直 / 坡面仍由既有系统负责，混进来会让断言
-//! 分不清是哪一层的错。例外是三条默认调度用例（陡坡挤入 / 低台阶抬升 / 带刚体的角色不被 ECS 角色系统写）——它们专门钉系统**顺序**与归属。
+//! 16 个系统：本文件关心的是"角色三轴位移各归谁"，混进动画 / 音频 / UI 会让断言分不清是
+//! 哪一层的错。例外是三条默认调度用例（陡坡挤入 / 低台阶抬升 / 带刚体的角色不被角色阶段写）
+//! ——它们专门钉系统**顺序**与归属。
 
 use xgc_sim::{RapierPhysicsSystem, Schedule, VelocitySystem, FIXED_DT};
 use xgc_world::{CharacterController, Command, PhysicsBody, Slope, Transform, Velocity, World};
@@ -115,10 +116,10 @@ fn character_slides_along_a_rotated_wall() {
     );
 }
 
-/// `VelocitySystem` 必须**整份跳过**角色：水平归 KCC、竖直归 `CharacterSystem`。
+/// `VelocitySystem` 必须**整份跳过**角色：角色的三轴位移全归 KCC 的角色阶段。
 ///
-/// 以前它给角色积分竖直（水平已交给 KCC），`CharacterSystem` 也开始积分竖直之后同一帧
-/// 会算两遍（落下 2× `vy·dt`、跳起高度翻倍）。这里用一个非角色实体当对照，确保它仍然
+/// 以前它给角色积分竖直（水平已交给 KCC），竖直搬进 KCC 之后同一帧会算两遍
+/// （落下 2× `vy·dt`、跳起高度翻倍）。这里用一个非角色实体当对照，确保它仍然
 /// 正常三轴积分 —— 判据是"挂了 `physics.character`"，不是"有 `Velocity`"。
 #[test]
 fn velocity_system_leaves_characters_alone() {
@@ -179,11 +180,10 @@ fn a_character_with_a_rigid_body_is_owned_by_the_body() {
 }
 
 /// 同时挂 `physics.body` 与 `physics.character` 的实体由刚体表全权托管：
-/// 角色 ECS 系统（`CharacterSystem` / `CharacterStepSystem`）不许再写它的 `Transform`。
+/// KCC 不给它建胶囊，`VelocitySystem` 也不碰它，位置只能由刚体表 / 脚本写。
 ///
-/// 新调度里 rapier 跑在这两个系统**之前**：如果它们还写这个实体，写会落在刚体回写之后、
-/// 下一帧又被覆盖 —— 脚下每帧抖一次（旧调度 rapier 最后跑，这些写当帧就被覆盖，问题只在
-/// 调序后显形，必须用默认调度跑才抓得到）。
+/// 以前角色 ECS 系统（已删除的 `CharacterSystem` / `CharacterStepSystem`）会写这种组合的
+/// `Transform`，新调度里 rapier 先跑，写落在刚体回写之后、下一帧又被覆盖 —— 脚下每帧抖一次。
 #[test]
 fn a_character_with_a_rigid_body_is_left_alone_by_the_character_systems() {
     let mut world = World::new();
@@ -241,7 +241,13 @@ fn a_character_at_rest_does_not_drift() {
     world.spawn((wall_transform, wall_body));
     step_times(&mut world, 30);
     let transform = world.get::<Transform>(character).unwrap();
-    assert_eq!(transform.position, [0.0, 0.0, 0.0]);
+    // 竖直现在由胶囊中心反算回脚底（`y - center_height - rest_gap`），f32 往返会留
+    // 一个最小可分辨量级的残差（实测 1.5e-8），不是漂移。
+    assert!(
+        transform.position.iter().all(|value| value.abs() < 1e-6),
+        "静止角色不该漂移：{:?}",
+        transform.position
+    );
 }
 
 #[test]
@@ -309,12 +315,11 @@ fn character_is_blocked_by_a_ball_collider() {
     assert_eq!(world.get::<Velocity>(character).unwrap().linear[0], 0.0);
 }
 
-/// 默认调度下角色也不能一点点挤进陡坡：`CharacterSystem` 必须排在水平位移**之后**。
+/// 默认调度下角色也不能一点点挤进陡坡：坡面现在有真碰撞体，KCC 直接挡住。
 ///
-/// 坡面没有 rapier 碰撞体，KCC 只会按 `v·dt` 一直往前推；如果陡坡推出跑在 KCC 之前，
-/// 每帧终点就是 `front + v·dt`，下一帧再被拉回 `front` —— 脚本若每帧重设速度（旧
-/// `set_velocity` 就是这么写的），脚下就是 30 Hz 的 5 cm 来回跳，且 x 会周期性越界。
-/// 这条用例每帧重新写一次速度来模拟那种脚本，并逐帧断言脚底没有越过立面。
+/// 这条用例每帧重新写一次速度来模拟"脚本每帧 `set_velocity`"的写法：撞墙那一帧
+/// 速度会被回写成 0，脚本下一帧又写回去。逐帧断言脚底没有越过立面 —— 没有碰撞体时
+/// KCC 只会按 `v·dt` 一直往前推，实测会一路穿到坡顶。
 #[test]
 fn a_character_does_not_creep_into_a_steep_slope_under_the_default_schedule() {
     let mut world = World::new();
@@ -341,16 +346,18 @@ fn a_character_does_not_creep_into_a_steep_slope_under_the_default_schedule() {
         }
         schedule.run(&mut world, FIXED_DT);
         let x = world.get::<Transform>(character).unwrap().position[0];
-        assert!(x <= -0.299, "第 {frame} 帧脚底越过了陡坡立面：x={x}");
+        assert!(x <= -0.1, "第 {frame} 帧脚底越过了陡坡立面：x={x}");
     }
     let transform = world.get::<Transform>(character).unwrap();
+    // 坡面现在有真碰撞体：胶囊（半径 0.3、底面离地 rest_gap）先碰到 60° 斜面就停住，
+    // 停位由"球心到斜面的距离 = 半径"决定，落在 x ≈ -0.16，而不是解析墙的 `-radius`。
     assert!(
-        (transform.position[0] + 0.3).abs() < 1e-3,
-        "角色没走到陡坡立面：x={}",
+        transform.position[0] > -0.4 && transform.position[0] < -0.1,
+        "角色没停在陡坡斜面前：x={}",
         transform.position[0]
     );
-    // 竖直仍由 ECS 负责：站在 y=0 的坡底，没被抬上坡面。
-    assert!(transform.position[1].abs() < 1e-5);
+    // 站在 y=0 的坡底，没被抬上坡面。
+    assert!(transform.position[1].abs() < 1e-3);
 }
 
 /// 实体键换代（`Replace` / 组件增删 / 快照恢复）后角色必须继续被 KCC 驱动。
@@ -486,6 +493,78 @@ fn a_small_capsule_still_steps_onto_a_low_box() {
     assert!(
         (transform.position[1] - 0.2).abs() < 1e-3,
         "小半径角色必须站在 0.2 m 台阶上：y={}",
+        transform.position[1]
+    );
+}
+
+/// 顶着墙起跳：接触法线是**普通竖直墙**（`n.y ≈ 0` 也小于 `cos(slope_limit)`），陡坡当墙规则
+/// 必须只在"起点着地且没有向上意图"时生效，否则起跳帧的竖直位移会被清零、`grounded` 又写回
+/// true —— 角色原地空跳、松开墙才突然弹起。
+#[test]
+fn a_character_jumps_while_pressed_against_a_wall() {
+    let mut world = World::new();
+    let character = world.spawn((
+        Transform::default(),
+        Velocity {
+            linear: [3.0, 5.0, 0.0],
+        },
+        CharacterController::default(),
+    ));
+    // 墙在 x = 0.5 处（半宽 0.5、中心 x = 1.0），角色贴上去后仍要继续朝墙推。
+    let (wall_transform, wall_body) = static_box([1.0, 1.0, 0.0], [0.5, 1.0, 2.0], yaw(0.0));
+    world.spawn((wall_transform, wall_body));
+
+    let mut peak = 0.0_f32;
+    // 起跳后约 61 帧（vy=5、g=9.81）才落回地面，留到 90 帧确认真的落地。
+    for _ in 0..90 {
+        if let Some(velocity) = world.get_mut::<Velocity>(character) {
+            velocity.linear[0] = 3.0;
+        }
+        step_times(&mut world, 1);
+        let y = world.get::<Transform>(character).unwrap().position[1];
+        peak = peak.max(y);
+    }
+    let transform = *world.get::<Transform>(character).unwrap();
+    assert!(
+        peak > 0.5,
+        "顶着墙也必须正常起跳（竖直位移不该被陡坡当墙规则清零）：峰值 y={peak}"
+    );
+    assert!(
+        transform.position[1].abs() < 1e-2,
+        "起跳后必须落回地面：y={}",
+        transform.position[1]
+    );
+}
+
+/// 贴着墙下落：起点不在地面，陡坡当墙规则不得接管竖直位移，否则角色挂在墙上、
+/// `vy` 每帧累加，松手时整段位移一次性放行。
+#[test]
+fn a_falling_character_keeps_falling_while_pressed_against_a_wall() {
+    let mut world = World::new();
+    let character = world.spawn((
+        Transform {
+            position: [0.0, 3.0, 0.0],
+            ..Transform::default()
+        },
+        Velocity {
+            linear: [3.0, 0.0, 0.0],
+        },
+        CharacterController::default(),
+    ));
+    // 墙要高到能盖住起点（y = 3），否则"挂在墙上"根本不会发生。
+    let (wall_transform, wall_body) = static_box([1.0, 3.0, 0.0], [0.5, 3.0, 2.0], yaw(0.0));
+    world.spawn((wall_transform, wall_body));
+
+    for _ in 0..180 {
+        if let Some(velocity) = world.get_mut::<Velocity>(character) {
+            velocity.linear[0] = 3.0;
+        }
+        step_times(&mut world, 1);
+    }
+    let transform = *world.get::<Transform>(character).unwrap();
+    assert!(
+        transform.position[1].abs() < 1e-2,
+        "贴着墙也必须正常落地（不该挂在墙上）：y={}",
         transform.position[1]
     );
 }

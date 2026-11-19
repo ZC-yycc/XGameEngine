@@ -70,6 +70,8 @@ pub struct RapierWorld {
     character_probe: Vec<(u64, EntityKey, [u32; 4])>,
     /// 角色收集阶段的临时表，跨帧复用（同样是为了热路径零分配）。
     character_entries: Vec<(u64, EntityKey, CharacterController)>,
+    /// 角色阶段每帧复用的接触法线缓冲：`move_shape` 的事件回调往里写，判"陡坡当墙"用。
+    wall_normals: Vec<Vector3<f32>>,
     slopes: Vec<SlopeLink>,
     /// 坡面集合的签名：变了才重建坡面碰撞体（同样必须带 `EntityKey` 代际）。
     slope_signature: Option<SlopeSignature>,
@@ -106,6 +108,7 @@ impl RapierWorld {
             character_signature: None,
             character_probe: Vec::new(),
             character_entries: Vec::new(),
+            wall_normals: Vec::new(),
             slopes: Vec::new(),
             slope_signature: None,
             slope_probe: Vec::new(),

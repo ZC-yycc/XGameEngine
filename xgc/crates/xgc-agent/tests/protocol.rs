@@ -77,8 +77,6 @@ fn describe_lists_protocol_components_and_world_state() {
             "ground",
             "aabb",
             "rapier",
-            "character",
-            "character_step",
             "animation_state",
             "animation",
             "animation_apply",

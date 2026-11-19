@@ -2,12 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use xgc_base::{EntityId, EntityKey};
 use xgc_world::{
-    Animator, CharacterController, Component, GlobalTransform, Parent, PhysicsBody, Slope,
-    Transform, Value, Velocity, World,
+    Animator, CharacterController, Component, GlobalTransform, Parent, PhysicsBody, Transform,
+    Value, Velocity, World,
 };
 
 use super::{System, SystemAccess};
-use crate::character_kcc;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PhysicsSystem {
@@ -125,157 +124,6 @@ impl System for CharacterJumpSystem {
     }
 }
 
-/// 角色贴地 / 重力：角色原点在脚底，落到可行走坡面 / y=0 地面时夹住并清掉向下速度；
-/// 超过 `slope_limit` 的上升坡当墙挡在立面之前；下行离地不超过 `snap_to_ground` 时贴回地面；
-/// 腾空时按 `gravity` 累加竖直速度（纯角色没有刚体，默认调度里也没有 `GravitySystem`）。
-#[derive(Clone, Debug)]
-pub struct CharacterSystem {
-    /// 刚体托管实体的复用缓冲：每帧都要回答"这个角色是否同时挂了 `physics.body`"，
-    /// 每帧新分配一个 `Vec` 会进热路径；排序后二分查询，顺便让判断与实体插入顺序无关。
-    body_owned: Vec<EntityKey>,
-    /// 角色重力（只有 `y` 分量会被消费，水平位移归 KCC）。
-    pub gravity: [f32; 3],
-}
-
-impl Default for CharacterSystem {
-    fn default() -> Self {
-        Self {
-            body_owned: Vec::new(),
-            // 与 `PhysicsSystem` / `GravitySystem` 同缺省：地球重力。
-            gravity: [0.0, -9.81, 0.0],
-        }
-    }
-}
-
-impl System for CharacterSystem {
-    fn name(&self) -> &'static str {
-        "character"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess {
-            reads: vec![CharacterController::ID, Slope::ID, PhysicsBody::ID],
-            writes: vec![Transform::ID, Velocity::ID, CharacterController::ID],
-        }
-    }
-
-    fn run(&mut self, world: &mut World, dt: f32) {
-        let gravity = self.gravity;
-        let mut slopes = Vec::new();
-        world.for_each::<Slope>(|_, slope| {
-            slopes.push(*slope);
-        });
-        // 同时挂 `physics.body` 与 `physics.character` 的实体由刚体表全权托管（见
-        // `character_kcc::owned_by_kcc`）：这里不能再写它的 `Transform`，否则新调度下
-        // （rapier 先跑）这些写落在刚体回写之后、下一帧又被覆盖，脚下每帧抖一次。
-        let mut body_owned = std::mem::take(&mut self.body_owned);
-        body_owned.clear();
-        world.for_each::<PhysicsBody>(|key, _| body_owned.push(key));
-        body_owned.sort_unstable();
-        world.for_each3_mut::<Transform, Velocity, CharacterController>(
-            |key, transform, velocity, controller| {
-                if body_owned.binary_search(&key).is_ok() {
-                    return;
-                }
-                // 与 KCC 共用同一份消毒（NaN 上限会让 `degrees() <= limit` 恒假、
-                // 连平地都被当墙）：两边口径不一致时，KCC 按 45° 爬、这里按 NaN 挡。
-                let limit = character_kcc::slope_limit(controller);
-                let radius = character_kcc::radius(controller);
-                let snap = controller.sanitized().snap_to_ground;
-                // 继续把 y=0 当兜底地面参与取大值（旧实现如此）：坡面低于 0 时不该把角色带下去。
-                // 注意 `ground` 只由坡面与 y=0 组成，**不含**台阶 / 箱子的顶面：那些由
-                // `CharacterStepSystem` 在本系统之后抬上去，本系统不该替它算。
-                let mut ground = 0.0_f32;
-                // 爬不上去的陡坡当墙：脚底低于坡面就是"陷进斜面里"，把角色推到最近的一侧。
-                //
-                // 旧实现把任何坡面都当可站立地面，`physics.character.slope_limit` 因此是
-                // 个死字段——45° 上限的角色能一路走上 60° 的斜坡。这里按旧引擎同一档位语义
-                // （超过上限就不可攀爬）把它分成"能站的地面"和"要挡的墙"。
-                // 推的时候必须两侧都算：只按坡底（−X 侧）推，会把从高端（+X）走进去的角色
-                // 一帧传送过整个斜坡（`CharacterBlockSystem` 也是按最近出口推的）。
-                for slope in &slopes {
-                    // 每根坡都用推进后的位置重新取值：重叠坡时不能拿已经离开的位置算。
-                    let x = transform.position[0];
-                    let feet = transform.position[1];
-                    // 胶囊是**有半径**的：角色中心还在坡面 X 跨度外时，胶囊可能已经压在坡上。
-                    // 所以前沿/后沿都按 `x ± radius` 取坡面高度，否则角色会先把中心挤进坡体
-                    // （最多一个半径），下一帧再被推回来——默认调度下就是脚下每帧一个 `v·dt`
-                    // 的来回跳。
-                    let low = slope.origin[0];
-                    let high = slope.origin[0] + slope.size[0];
-                    let reachable = x + radius > low && x - radius < high;
-                    // 下坡（rise <= 0，含平地坡）没有能"卡住"人的立面，一律当地面；只有上升坡才可能是墙。
-                    if !reachable || slope.rise <= 0.0 || slope.degrees() <= limit {
-                        if let Some(height) = slope.height_at(x, transform.position[2]) {
-                            ground = ground.max(height);
-                        }
-                        continue;
-                    }
-                    let Some(base) = slope.base_x_at(feet) else {
-                        continue;
-                    };
-                    let front = base - radius;
-                    let back = high + radius;
-                    // 最近出口按两侧墙的中点为界：`front` 会随 `feet` 沿坡面右移，
-                    // 用坡面几何中点选边会在角色陷在坡体高处（`feet > origin[1]`，
-                    // 正常行走到不了、但 spawn / 脚本改位置能到）时推到远的那侧。
-                    let midpoint = (front + back) * 0.5;
-                    let near_front = x < midpoint;
-                    let probe = if near_front { x + radius } else { x - radius };
-                    let Some(contact) =
-                        slope.height_at(probe.clamp(low, high), transform.position[2])
-                    else {
-                        continue;
-                    };
-                    // 脚底高于胶囊接触处的坡面高度 = 没陷进去（例如从平台走上坡顶）。
-                    if feet >= contact {
-                        continue;
-                    }
-                    if near_front {
-                        if x > front {
-                            transform.position[0] = front;
-                            if velocity.linear[0] > 0.0 {
-                                velocity.linear[0] = 0.0;
-                            }
-                        }
-                    } else if x < back {
-                        transform.position[0] = back;
-                        if velocity.linear[0] < 0.0 {
-                            velocity.linear[0] = 0.0;
-                        }
-                    }
-                }
-                // 竖直：纯角色没有刚体、默认调度里也没有 `GravitySystem`，不在这里积分就永远
-                // 不会下落（落差一旦大于 `snap_to_ground`，角色就悬在半空）。口径与旧端脚本层
-                // `character_simple_move` 一致：着地时清掉向下速度，腾空累加 `gravity * dt`，
-                // 无终端速度。水平速度不在这里积分（由 KCC 回写，见 `VelocitySystem` 文档）。
-                if transform.position[1] > ground + 1e-4 {
-                    velocity.linear[1] += gravity[1] * dt;
-                } else if velocity.linear[1] < 0.0 {
-                    // 站在地上还带着向下速度（脚本 / 上一帧遗留）时清零，否则下一帧会沉下去。
-                    velocity.linear[1] = 0.0;
-                }
-                transform.position[1] += velocity.linear[1] * dt;
-                if transform.position[1] < ground {
-                    transform.position[1] = ground;
-                    if velocity.linear[1] < 0.0 {
-                        velocity.linear[1] = 0.0;
-                    }
-                } else if velocity.linear[1] <= 0.0 && transform.position[1] - ground <= snap {
-                    // 下行贴地：坡面 / 下一级台阶在吸附距离内时按回地面。
-                    // 不吸附的话每帧都"先离地再落地"，`grounded` 跟着抖，跳跃判定
-                    // 变成看运气——旧引擎的 `snap_to_ground` 就是干这件事。
-                    // 只在向下运动时吸：起跳当帧速度为正，不能被拉回地面。
-                    transform.position[1] = ground;
-                    velocity.linear[1] = 0.0;
-                }
-                controller.grounded = transform.position[1] <= ground + 1e-4;
-            },
-        );
-        self.body_owned = body_owned;
-    }
-}
-
 /// 动画时钟：自动播放的 Animator 按 speed 推进，duration 有效时循环 / 截断。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AnimatorSystem;
@@ -319,12 +167,10 @@ impl System for AnimatorSystem {
 
 /// 第一个内建系统：`position += linear * dt`，**但带 `physics.character` 的实体整份跳过**。
 ///
-/// 角色三轴位移各有专属写者：水平归 `RapierPhysicsSystem` 的角色阶段（rapier
-/// `KinematicCharacterController` 的 collide-and-slide），竖直归 `CharacterSystem`
-/// （它要先按地面 / 坡面判定腾空才决定累加重力，位移必须与判定放在一处）。也就是说
-/// **默认调度里必须有 `RapierPhysicsSystem` 与 `CharacterSystem`**，否则角色的相应分量
-/// 会静默不动（自定义调度只用本系统时得自己推进，参考 `tests/character_slope.rs` 的
-/// `advance_horizontally`）。
+/// 角色三轴位移现在都由 `RapierPhysicsSystem` 的角色阶段写（`character_kcc`：
+/// 水平 collide-and-slide、竖直重力、地面探测 / 贴地 / 台阶一并自实现）。也就是说
+/// **默认调度里必须有 `RapierPhysicsSystem`**，否则角色的位置会静默不动
+/// （自定义调度只用本系统时得自己推进，参考 `tests/character_kcc.rs` 的 `step_times`）。
 ///
 /// 同时挂 `physics.body` 与 `physics.character` 的实体也按角色处理（位置完全由刚体表 /
 /// 脚本负责）：在这里积分任何分量都只会和刚体回写打架。
@@ -367,9 +213,9 @@ impl System for VelocitySystem {
     }
 
     fn run(&mut self, world: &mut World, dt: f32) {
-        // 角色一个分量都不在这里积分：水平归 KCC、竖直归 `CharacterSystem`（它要先判腾空
-        // 才决定累加重力）。此前"角色只积分竖直"的写法在 `CharacterSystem` 也开始积分 y
-        // 之后会把竖直位移算两遍 —— 一帧落下 2× `vy·dt`、跳起高度翻倍。
+        // 角色一个分量都不在这里积分：位置全归 `RapierPhysicsSystem` 的角色阶段。
+        // 此前"角色只积分竖直"的写法在竖直也搬进 KCC 之后会把竖直位移算两遍 ——
+        // 一帧落下 2× `vy·dt`、跳起高度翻倍。
         let mut characters = std::mem::take(&mut self.characters);
         characters.clear();
         // 判据是"挂了 `physics.character`"，不管有没有 `physics.body`：带刚体的组合位置完全

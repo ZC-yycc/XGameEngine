@@ -136,27 +136,78 @@ impl RapierWorld {
         }
     }
 
-    /// 角色水平移动：`move_shape` 只读刚体 / 碰撞体 / 查询结构，放在 `pipeline.step`
-    /// 之后做，本帧其它刚体的位置已经落定，扫掠看到的是同一帧的世界。
+    /// 角色每帧移动：探地 → 竖直重力 → collide-and-slide → 台阶试探 → 贴地吸附 → 写回。
+    ///
+    /// 顺序照着旧端 `move_character`（`xgame-physics/src/world.rs`）：KCC 只给
+    /// `EffectiveCharacterMovement.translation`，`grounded` / `autostep` / `snap_to_ground`
+    /// 全部自实现，因为 rapier 0.22 在胶囊角色上这几项都不可用（见 `character_kcc` 模块文档）。
     pub(super) fn move_characters(&mut self, world: &mut World) {
         let dt = self.integration.dt;
+        if dt <= 0.0 {
+            return;
+        }
         for link in &self.characters {
-            if world.get::<Transform>(link.key).is_none() {
-                continue;
-            }
-            let Some(velocity) = world.get::<Velocity>(link.key).copied() else {
+            let Some(mut transform) = world.get::<Transform>(link.key).copied() else {
                 continue;
             };
-            // 竖直不参与：本刀由 ECS 决定脚底高度（见 `character_kcc` 模块文档）。
-            let desired = Vector3::new(velocity.linear[0] * dt, 0.0, velocity.linear[2] * dt);
-            if desired == Vector3::zeros() {
+            let Some(def) = world.get::<CharacterController>(link.key).copied() else {
                 continue;
-            }
-            let start = match self.bodies.get(link.body) {
-                Some(body) => *body.position(),
-                None => continue,
             };
-            let moved = character_kcc::move_horizontal(
+            let Some(start) = self.bodies.get(link.body).map(|body| *body.position()) else {
+                continue;
+            };
+            let mut velocity = world.get::<Velocity>(link.key).copied().unwrap_or_default();
+            let core = link.center_height;
+            let rest = link.rest_gap;
+            let prediction = rest * character_kcc::GROUND_PREDICTION_FACTOR;
+            let skin = character_kcc::skin_width(&def);
+            let snap = def.sanitized().snap_to_ground;
+            let step_offset = def.sanitized().step_offset;
+            let radius = character_kcc::radius(&def);
+            let limit_cos = character_kcc::slope_limit(&def).to_radians().cos();
+
+            // ① 脚下探测：起始就站着才允许累加重力之外的竖直逻辑。
+            let before = character_kcc::probe_ground(
+                &self.bodies,
+                &self.colliders,
+                &self.query,
+                &link.capsule,
+                core,
+                &start,
+                link.body,
+                snap + prediction,
+            );
+            let grounded_at_start = before.as_ref().is_some_and(|hit| {
+                hit.normal.y >= character_kcc::GROUND_NORMAL_MIN_DOT && hit.gap <= prediction + 1e-5
+            });
+            let steep = before.as_ref().is_some_and(|hit| hit.normal.y < limit_cos);
+
+            // ② 竖直速度：着地清掉向下分量，腾空按重力累加（旧端脚本层同口径、无终端速度）。
+            if grounded_at_start && velocity.linear[1] < 0.0 {
+                velocity.linear[1] = 0.0;
+            }
+            if !grounded_at_start {
+                velocity.linear[1] += character_kcc::GRAVITY_Y * dt;
+            }
+
+            // ③ 期望位移：陡坡沿切向滑、陷进地面先抬到静息高度。
+            let mut desired = Vector3::new(
+                velocity.linear[0] * dt,
+                velocity.linear[1] * dt,
+                velocity.linear[2] * dt,
+            );
+            if let Some(hit) = before.as_ref() {
+                if steep && desired.y < 0.0 {
+                    desired -= hit.normal * desired.dot(&hit.normal);
+                } else if hit.gap < rest {
+                    // 抬离地面：间隙小于静息值（含贴面）时先抬回去，否则 `move_shape` 会
+                    // 把"起始间隙 ≤ offset"当成可以放行的穿透（穿墙 / 沉地）。
+                    desired.y = desired.y.max(rest - hit.gap);
+                }
+            }
+
+            self.wall_normals.clear();
+            let moved = character_kcc::move_character(
                 &self.bodies,
                 &self.colliders,
                 &self.query,
@@ -166,30 +217,168 @@ impl RapierWorld {
                 desired,
                 link.body,
                 dt,
+                &mut self.wall_normals,
             );
-            let next = Isometry3::from_parts(
-                Translation3::new(
-                    start.translation.x + moved.translation.x,
-                    start.translation.y + moved.translation.y,
-                    start.translation.z + moved.translation.z,
-                ),
-                start.rotation,
+            let mut next = translate(&start, moved.translation);
+
+            // ④ 陡坡当墙：水平顶陡坡时 KCC 会把接触切向当成"想爬坡"而放行，这里按旧 XGC 合同
+            // 降级成竖直墙 —— 去掉抬升、消掉朝墙里的水平分量，角色沿墙横向滑。可行走坡的
+            // 法线余弦高于 `slope_limit`，不会走到这里。
+            //
+            // 两个门禁缺一不可：接触列表里也混着**普通竖直墙**（`n.y ≈ 0`）与天花板。
+            // 一旦无条件清竖直位移，跳跃会被吞掉（起跳帧位移被清零、`grounded` 又写成 true，
+            // 速度却留着，松开墙才突然弹起），下落会被挂在墙上（`vy` 每帧累加却在释放时
+            // 一次性放行）。旧端同样只在 `grounded_at_start && is_steep && desired.y < 0`
+            // 时才做坡面投影（`crates/xgame-physics/src/world.rs:571-582`）。
+            let steep_contact = grounded_at_start
+                && desired.y <= 0.0
+                && self.wall_normals.iter().any(|normal| normal.y < limit_cos);
+            if steep_contact {
+                for normal in &self.wall_normals {
+                    if normal.y >= limit_cos {
+                        continue;
+                    }
+                    let mut delta = next.translation.vector - start.translation.vector;
+                    delta.y = 0.0;
+                    let flat = Vector3::new(normal.x, 0.0, normal.z);
+                    let length = flat.norm();
+                    if length > 1e-6 {
+                        let unit = flat / length;
+                        let inward = -delta.dot(&unit);
+                        if inward > 0.0 {
+                            delta += unit * inward;
+                        }
+                    }
+                    next = translate(&start, delta);
+                }
+            }
+
+            // ④ 台阶：起始着地、没有向上意图、这一帧确实撞到东西了才做三段试探。
+            // 判据不用"水平位移被吃掉多少"：小半径胶囊撞立面时 `move_shape` 仍能挤出七八成
+            // 位移（沿接触切向滑），按比例判会漏掉台阶；改用"本帧有接触"当门禁。
+            let wanted = Vector3::new(desired.x, 0.0, desired.z);
+            let got = Vector3::new(moved.translation.x, 0.0, moved.translation.z);
+            let want_len = wanted.norm();
+            if grounded_at_start
+                && step_offset > 1e-4
+                && desired.y <= 1e-5
+                && want_len > 1e-4
+                && !self.wall_normals.is_empty()
+            {
+                let dir = wanted / want_len;
+                // 扫掠距离是 `want_len + radius + 0.02`（旧端同式）：必须越过台阶前沿多一个
+                // 半径，落点才在台面上而不是立面里；因此采纳后这一帧会拿到比请求更大的水平
+                // 位移（最多 `radius + 0.02`），这是上台阶的固有代价，不是滑动速度失控。
+                if let Some(stepped) = character_kcc::try_step_up(
+                    &self.bodies,
+                    &self.colliders,
+                    &self.query,
+                    &link.controller,
+                    &link.capsule,
+                    &start,
+                    dir,
+                    want_len,
+                    step_offset + rest,
+                    radius,
+                    rest,
+                    link.body,
+                    dt,
+                ) {
+                    let climbed = Vector3::new(
+                        stepped.translation.x - start.translation.x,
+                        0.0,
+                        stepped.translation.z - start.translation.z,
+                    )
+                    .dot(&dir);
+                    // 落点必须是**能站**的面：陡坡沿坡面往上也能"抬 + 前进"成功，
+                    // 但那是爬坡不是上台阶，交回 ③ 的陡坡当墙规则处理。
+                    let land = character_kcc::probe_ground(
+                        &self.bodies,
+                        &self.colliders,
+                        &self.query,
+                        &link.capsule,
+                        core,
+                        &stepped,
+                        link.body,
+                        prediction,
+                    );
+                    let walkable = land.as_ref().is_none_or(|hit| hit.normal.y >= limit_cos);
+                    if walkable && climbed > got.dot(&dir) + 1e-4 {
+                        next = stepped;
+                    }
+                }
+            }
+
+            // ⑤ 贴地吸附：下坡走快时 KCC 会短暂离地，把间隙拉回静息值。
+            if grounded_at_start && !steep_contact && snap > 1e-4 && desired.y <= 1e-5 {
+                if let Some(hit) = character_kcc::probe_ground(
+                    &self.bodies,
+                    &self.colliders,
+                    &self.query,
+                    &link.capsule,
+                    core,
+                    &next,
+                    link.body,
+                    snap + skin,
+                ) {
+                    if hit.gap > rest + 1e-4 && hit.gap <= snap {
+                        next.translation.y -= hit.gap - rest;
+                    }
+                }
+            }
+
+            // ⑥ `y = 0` 是 XGC 的隐式地面（没有碰撞体）：胶囊中心不许低于它。
+            let floor = core + rest;
+            if next.translation.y < floor {
+                next.translation.y = floor;
+            }
+
+            // ⑦ 终局地面判定：写回 `grounded`，落地帧顺手清掉向下速度。
+            let after = character_kcc::probe_ground(
+                &self.bodies,
+                &self.colliders,
+                &self.query,
+                &link.capsule,
+                core,
+                &next,
+                link.body,
+                prediction,
             );
+            let grounded = after.as_ref().is_some_and(|hit| {
+                hit.normal.y >= character_kcc::GROUND_NORMAL_MIN_DOT && hit.gap <= prediction + 1e-5
+            });
+            if grounded && velocity.linear[1] < 0.0 {
+                velocity.linear[1] = 0.0;
+            }
+
+            // ⑧ 写回：实体原点是脚底，刚体原点是胶囊中心（再抬 `rest_gap`）。
+            transform.position[0] = next.translation.x;
+            transform.position[1] = next.translation.y - core - rest;
+            transform.position[2] = next.translation.z;
+            velocity.linear[0] = (next.translation.x - start.translation.x) / dt;
+            velocity.linear[2] = (next.translation.z - start.translation.z) / dt;
             if let Some(body) = self.bodies.get_mut(link.body) {
                 body.set_position(next, true);
             }
-            if let Some(transform) = world.get_mut::<Transform>(link.key) {
-                // 只写水平：竖直与朝向仍归 ECS（角色只支持直立）。
-                transform.position[0] += moved.translation.x;
-                transform.position[2] += moved.translation.z;
+            if let Some(slot) = world.get_mut::<Transform>(link.key) {
+                *slot = transform;
             }
             if let Some(slot) = world.get_mut::<Velocity>(link.key) {
-                // 与旧端同口径：水平速度回写成"实际位移 / dt"，撞墙归零、沿墙滑动被压短。
-                slot.linear[0] = moved.translation.x / dt;
-                slot.linear[2] = moved.translation.z / dt;
+                slot.linear = velocity.linear;
+            }
+            if let Some(slot) = world.get_mut::<CharacterController>(link.key) {
+                slot.grounded = grounded;
             }
         }
     }
+}
+
+/// 平移一个位姿（旋转不动：角色只支持直立）。
+fn translate(position: &Isometry3<f32>, translation: Vector3<f32>) -> Isometry3<f32> {
+    Isometry3::from_parts(
+        Translation3::from(position.translation.vector + translation),
+        position.rotation,
+    )
 }
 
 /// 角色胶囊刚体的位姿：实体原点是脚底，刚体原点是胶囊中心（再抬 `rest_gap`）。

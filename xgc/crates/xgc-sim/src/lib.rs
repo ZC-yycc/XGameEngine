@@ -161,15 +161,6 @@ impl Schedule {
         // 放在最后：上面的简化系统只服务角色 / 斜坡，对 rapier 接管的 `physics.body`
         // 实体的 Transform 改动会被这一步整帧覆盖回物理结果。
         schedule.add(RapierPhysicsSystem::default());
-        // 角色修正必须排在水平位移之后：`CharacterSystem` 的陡坡推出与贴地吸附要看
-        // 本帧**最终**的水平位置。排在前面的话它推完、KCC 又把角色推进坡面 `v·dt`，
-        // 下一帧再被推回，脚下一帧一个 5 cm 的来回跳（坡面没有 rapier 碰撞体，KCC 拦不住）。
-        schedule.add(CharacterSystem::default());
-        // 台阶抬升必须排在贴地吸附之后：`CharacterSystem` 的 `snap_to_ground` 会把
-        // `y - ground <= snap` 的离地高度吸回地面，而 `ground` 只含坡面与 y=0。
-        // 0.05~0.2 m 的低台阶恰好落在这个窗口里，排在前面的话每帧抬起又被吸回 0，
-        // 默认调度下角色就再也上不了低台阶（`character_steps_onto_a_low_box_under_the_default_schedule` 钉住）。
-        schedule.add(CharacterStepSystem);
         schedule.add(AnimationStateSystem);
         schedule.add(AnimatorSystem);
         schedule.add(AnimationPlaybackSystem::default());
@@ -239,7 +230,6 @@ mod animation;
 mod animation_layers;
 mod animation_state;
 mod audio;
-mod character;
 mod character_kcc;
 mod input;
 mod mixer;
@@ -260,10 +250,9 @@ pub use animation_state::{
     parse_machine, parse_parameters, AnimationStateSystem, StateDef, StateMachine, TransitionDef,
 };
 pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
-pub use character::CharacterStepSystem;
 pub use character_kcc::{
     build_character_controller, center_height, character_capsule, half_height, radius, rest_gap,
-    REST_GAP_FACTOR,
+    GRAVITY_Y, GROUND_NORMAL_MIN_DOT, GROUND_PREDICTION_FACTOR, REST_GAP_FACTOR,
 };
 pub use input::{Axis, Binding, Combo, InputMap, InputState, KeyCode, MouseButton};
 pub use mixer::{write_wav_mono, SoftwareMixer};
@@ -271,8 +260,8 @@ pub use particles::{ParticleStats, ParticleSystem};
 pub use rapier_world::{RapierPhysicsSystem, RapierWorld, FIXED_DT};
 pub use skeleton::{parse_pose, SkeletonPoseSystem};
 pub use systems::{
-    AnimatorSystem, CharacterJumpSystem, CharacterSystem, GravitySystem, GroundCollisionSystem,
-    HierarchySystem, PhysicsSystem, VelocitySystem,
+    AnimatorSystem, CharacterJumpSystem, GravitySystem, GroundCollisionSystem, HierarchySystem,
+    PhysicsSystem, VelocitySystem,
 };
 pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem, UiNav};
 
