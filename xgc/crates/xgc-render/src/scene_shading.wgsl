@@ -60,6 +60,18 @@ var shadow_smp: sampler_comparison;
 @group(0) @binding(3)
 var point_shadow_tex: texture_depth_cube;
 
+// 预过滤环境立方体（GGX 5 级）：环境镜面项的 split-sum 第一项。
+@group(0) @binding(4)
+var env_cube: texture_cube<f32>;
+
+// BRDF 积分表（x = N·V、y = roughness）：split-sum 第二项。
+@group(0) @binding(5)
+var brdf_lut: texture_2d<f32>;
+
+// 环境立方体与 BRDF 表共用的线性 + Clamp 采样器。
+@group(0) @binding(6)
+var env_smp: sampler;
+
 @group(2) @binding(0)
 var albedo_texture: texture_2d<f32>;
 
@@ -67,18 +79,9 @@ var albedo_texture: texture_2d<f32>;
 var albedo_sampler: sampler;
 
 // E/π 的球谐求值（系数里已折好余弦卷积）；基函数与 sky.rs 的 sh_basis 逐项一致。
+// 实现本体在 `sky_common.wgsl`（`sky_sh`），这里只保留调用点，避免公式两份。
 // 与旧引擎同一条下限：粗糙度太低时 GGX 的解析拟合会出 NaN / 过亮高光。
 const MIN_ROUGHNESS: f32 = 0.04;
-
-// Lazarov 2013 的 `EnvBRDFApprox`：split-sum 第二项（f0·A + B）的解析拟合。
-fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
-    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
-    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
-    let r = roughness * c0 + c1;
-    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
-    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
-    return f0 * ab.x + ab.y;
-}
 
 // --- Cook-Torrance 直接光三维项（与旧端 scene_pipeline 逐式一致）-------------
 const PI: f32 = 3.141592653589793;
@@ -99,18 +102,6 @@ fn smith_visibility(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
 
 fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - clamp(cos_theta, 0.0, 1.0), 5.0);
-}
-
-fn sky_sh_eval(n: vec3<f32>) -> vec3<f32> {
-    return frame.sky_sh[0].rgb * 0.282095
-         + frame.sky_sh[1].rgb * (0.488603 * n.y)
-         + frame.sky_sh[2].rgb * (0.488603 * n.z)
-         + frame.sky_sh[3].rgb * (0.488603 * n.x)
-         + frame.sky_sh[4].rgb * (1.092548 * n.x * n.y)
-         + frame.sky_sh[5].rgb * (1.092548 * n.y * n.z)
-         + frame.sky_sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0))
-         + frame.sky_sh[7].rgb * (1.092548 * n.x * n.z)
-         + frame.sky_sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
 }
 
 // --- 方向光阴影 ---
@@ -374,14 +365,18 @@ fn fs(input: SceneVsOut) -> @location(0) vec4<f32> {
     let f_env = fresnel_schlick(n_dot_v, f0);
     var light = frame.ambient.rgb * (albedo * (1.0 - metallic) + f_env);
     if (frame.sky_params.x > 0.5) {
-        // 环境项②：天空 IBL。漫反射用同一份 L2 球谐；镜面仍是 SH 近似，
-        // 但菲涅尔与 kD 折法与旧端 split-sum 一致。
+        // 环境项②：天空 IBL。漫反射用 L2 球谐（E/π 口径）；镜面走旧端同款 split-sum
+        // —— 预过滤立方体（GGX 5 级，按粗糙度选 mip）+ BRDF 积分表。
+        //
+        // 为什么不用 SH 求反射：L2 球谐只有 9 个系数，高光会被抹成一大片钝光，
+        // 彩色介质面上会浮出偏蓝的假高光（帧 150 像素对照实测过）。
         let f_rough = f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * pow(1.0 - n_dot_v, 5.0);
         let kd_env = (vec3<f32>(1.0) - f_rough) * (1.0 - metallic);
-        light = light + sky_sh_eval(normal) * albedo * kd_env;
+        light = light + sky_sh(SkySH(frame.sky_sh), normal) * albedo * kd_env;
         let reflected = reflect(-to_camera, normal);
-        let env_spec = sky_sh_eval(reflected);
-        light = light + env_spec * env_brdf_approx(f0, roughness, n_dot_v);
+        let env_spec = textureSampleLevel(env_cube, env_smp, reflected, roughness * ENV_MAX_LOD).rgb;
+        let brdf = textureSampleLevel(brdf_lut, env_smp, vec2<f32>(n_dot_v, roughness), 0.0).rg;
+        light = light + env_spec * (f0 * brdf.x + brdf.y);
     }
     // 场景光源：方向光 / 点光混排，按盏累加（GGX + Smith + Schlick，漫反射扣 (1-F)）。
     //

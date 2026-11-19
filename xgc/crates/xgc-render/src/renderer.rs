@@ -8,7 +8,7 @@ use super::camera::{camera_view_projection_with_eye, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
 use super::exposure::EXPOSURE_DEFAULT;
 use super::frame_color::compose_colors;
-use super::frame_uniform::{create_frame_bind, FrameLighting};
+use super::frame_uniform::{create_frame_bind, FrameLighting, FrameTextures};
 use super::fxaa::{FxaaSettings, FxaaStage};
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
@@ -48,6 +48,8 @@ pub struct RenderStats {
     pub shadow_skin_uniform_buffers: usize,
     /// 点光立方体阴影本帧画了多少次（六面 × 投射体）：0 = 这一帧没做点光阴影。
     pub point_shadow_draw_calls: usize,
+    /// 预过滤环境立方体本帧跑的 pass 数：天空设置没变恒 0，首次建 30 级面 + 1 张 BRDF 表。
+    pub env_map_passes: usize,
 }
 
 struct DepthTarget {
@@ -98,6 +100,8 @@ pub struct Renderer {
     /// 画面设置里的 SSAO 节：开着时场景色在光晕之前先乘一遍遮蔽。
     ssao: SsaoSettings,
     ssao_stage: Option<crate::ssao::SsaoStage>,
+    /// 解析天空的 GPU 预过滤（环境镜面 split-sum 的第一项）与 BRDF 表（第二项）。
+    env_map: Option<crate::env_map::EnvMapStage>,
 }
 
 fn scissor_rect(clip: [f32; 4], viewport: [f32; 2]) -> Option<[u32; 4]> {
@@ -146,6 +150,7 @@ impl Renderer {
             taa_stage: None,
             ssao: SsaoSettings::default(),
             ssao_stage: None,
+            env_map: None,
         }
     }
 
@@ -394,6 +399,23 @@ impl Renderer {
         let shadow_target = self.shadow.as_ref().unwrap();
         let (shadow_view, shadow_sampler) = shadow_target.sample_source(shadow_matrix.is_some());
         let point_shadow_view = shadow_target.point_shadow_source(point_shadow.is_some());
+        // 环境镜面项：解析天空 → GGX 5 级预过滤立方体 + BRDF 积分表（设置不变时零 pass）。
+        //
+        // 天空关着也建一次（约 1 MiB 纹理 + 两条管线）：帧绑定组的 4 / 5 / 6 槽必须始终
+        // 有合法视图；着色端有 `sky_params.x > 0.5` 守卫，关着不采样，所以画面逐字节不变。
+        if self.env_map.is_none() {
+            self.env_map = Some(crate::env_map::EnvMapStage::new(context));
+        }
+        let sun = world.environment().sun().map(|light| {
+            let [x, y, z] = light.normalized_direction();
+            ([-x, -y, -z], light.color)
+        });
+        let env_map_passes = self
+            .env_map
+            .as_mut()
+            .map(|stage| stage.prepare(context, &self.sky, sun))
+            .unwrap_or(0);
+        let (env_cube, brdf_lut, env_sampler) = self.env_map.as_ref().unwrap().views();
         let depth = &self.depth.as_ref().unwrap().view;
         let draws = list.len();
         let mut cpu_items = Vec::with_capacity(list.items.len());
@@ -427,6 +449,9 @@ impl Renderer {
             shadow_view,
             shadow_sampler,
             point_shadow_view,
+            env_cube,
+            brdf_lut,
+            env_sampler,
             depth,
             clear_color: self.clear_color,
             textures,
@@ -494,9 +519,14 @@ impl Renderer {
                     pipeline.frame_layout(),
                     view_proj,
                     &lighting,
-                    shadow_view,
-                    shadow_sampler,
-                    point_shadow_view,
+                    FrameTextures {
+                        shadow: shadow_view,
+                        shadow_sampler,
+                        point_shadow: point_shadow_view,
+                        env_cube,
+                        brdf_lut,
+                        env_sampler,
+                    },
                 );
                 let skinned = pipeline.draw_batch(
                     context,
@@ -534,6 +564,7 @@ impl Renderer {
             skin_uniform_buffers,
             shadow_skin_uniform_buffers: prepared.skin_uniform_buffers,
             point_shadow_draw_calls: prepared.point_draw_calls,
+            env_map_passes,
         })
     }
 }

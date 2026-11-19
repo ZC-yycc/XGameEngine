@@ -14,6 +14,7 @@ mod bloom;
 mod camera;
 mod diff;
 mod draw;
+mod env_map;
 mod exposure;
 mod font;
 mod frame_color;
@@ -89,8 +90,7 @@ pub use text_draw::TextPipeline;
 pub use texture::TexturePipeline;
 pub use texture_data::TextureData;
 pub use tone::{
-    aces, aces_u8, ambient_light, display_u8, env_brdf_approx, env_specular, fresnel_schlick,
-    sky_kd_env, srgb_encode,
+    aces, aces_u8, ambient_light, display_u8, fresnel_schlick, sky_kd_env, srgb_encode,
 };
 pub use ui_draw::{cover_uv, quad_matrix};
 

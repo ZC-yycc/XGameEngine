@@ -74,26 +74,32 @@ fn sky_irradiance_lights_the_object() {
         return;
     }
     let sky = project_sky();
-    let coefficients = sky_irradiance(&sky, None).expect("天空开着就要有 SH");
-    // 四边形正面法线朝相机（+Z），着色器把面法线朝向相机作为受光方向；
-    // 入射视线 = -Z，反射方向 = +Z，N·V = 1。
+    let coefficients = sky_irradiance(&sky, None).expect("天空开启就要有 SH");
+    // 立方体法线朝向 +Z（相机沿 -Z 看，视线反向 = +Z，N·V = 1）。
     let env = sh_eval(&coefficients, [0.0, 0.0, 1.0]);
-    let specular = xgc_render::env_specular(env, 1.0);
     let kd = xgc_render::sky_kd_env(0.5, 0.0, 1.0);
-    let expected_linear = std::array::from_fn(|channel| env[channel] * kd + specular[channel]);
-    let expected = aces_u8(expected_linear);
+    // 漫反射项仍由 SH 镜像现算；环境镜面项现在来自预过滤立方体 + BRDF 积分表
+    // （CPU 侧没有同口径镜像，而且只会**叠加**在漫反射之上），所以判据是"不低于纯漫反射、
+    // 且镜面增益有界"，再钉一条"蓝天照亮的中性面偏蓝"。
+    let diffuse = aces_u8(std::array::from_fn(|channel| env[channel] * kd));
     assert!(
-        expected[0] > 0,
-        "天空环境光必须非零（否则这个门禁什么也没测到）：{expected:?}"
+        diffuse[0] > 0,
+        "天空开启必须照亮物体（否则说明什么都没测到）：{diffuse:?}"
     );
     let pixel = render(sky);
-    for (axis, want) in expected.into_iter().enumerate() {
-        let got = pixel[axis];
+    for (axis, want) in diffuse.into_iter().enumerate() {
+        let got = i16::from(pixel[axis]);
+        let floor = i16::from(want);
         assert!(
-            (i16::from(got) - i16::from(want)).abs() <= 1,
-            "天空 IBL 必须按 SH 镜像照亮正面：实际 {pixel:?}，期望 {expected:?}"
+            got + 2 >= floor,
+            "天空 IBL 的漫反射不得低于 SH 期望：实际 {pixel:?}，纯漫反射 {diffuse:?}"
+        );
+        assert!(
+            got <= floor + 40,
+            "环境镜面项必须有界（预过滤反射不该把漫反射面抬爆）：实际 {pixel:?}，纯漫反射 {diffuse:?}"
         );
     }
+    assert!(pixel[2] > pixel[0], "蓝天照亮的中性面应当偏蓝：{pixel:?}");
     assert_eq!(pixel[3], 255);
 }
 

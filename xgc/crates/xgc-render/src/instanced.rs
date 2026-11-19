@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use super::assets::MeshCache;
 use super::camera::Mat4;
 use super::draw::DrawList;
-use super::frame_uniform::{create_frame_bind, create_frame_layout, FrameLighting};
+use super::frame_uniform::{create_frame_bind, create_frame_layout, FrameLighting, FrameTextures};
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::mesh::Mesh;
@@ -34,6 +34,7 @@ impl InstancedPipeline {
 }
 
 const INSTANCED_WGSL: &str = concat!(
+    include_str!("sky_common.wgsl"),
     include_str!("scene_shading.wgsl"),
     include_str!("instanced.wgsl")
 );
@@ -158,6 +159,10 @@ pub(crate) struct InstancedRequest<'a> {
     pub(crate) shadow_view: &'a wgpu::TextureView,
     pub(crate) shadow_sampler: &'a wgpu::Sampler,
     pub(crate) point_shadow_view: &'a wgpu::TextureView,
+    /// 预过滤环境立方体 / BRDF 表 / 线性采样器（天空关时也绑着，着色端按开关跳过）。
+    pub(crate) env_cube: &'a wgpu::TextureView,
+    pub(crate) brdf_lut: &'a wgpu::TextureView,
+    pub(crate) env_sampler: &'a wgpu::Sampler,
     pub(crate) depth: &'a wgpu::TextureView,
     pub(crate) clear_color: wgpu::Color,
     pub(crate) textures: &'a TextureBinding,
@@ -226,9 +231,14 @@ impl RenderCache {
             pipeline.camera_layout(),
             view_proj,
             &request.lighting,
-            request.shadow_view,
-            request.shadow_sampler,
-            request.point_shadow_view,
+            FrameTextures {
+                shadow: request.shadow_view,
+                shadow_sampler: request.shadow_sampler,
+                point_shadow: request.point_shadow_view,
+                env_cube: request.env_cube,
+                brdf_lut: request.brdf_lut,
+                env_sampler: request.env_sampler,
+            },
         );
 
         let mut prepared = Vec::with_capacity(buckets.len());

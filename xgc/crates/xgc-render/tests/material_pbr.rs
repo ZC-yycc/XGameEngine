@@ -1,18 +1,22 @@
-//! 逐材质 metallic / roughness：金属的 F0 = 基色、漫反射归零；介电体 F0 = 0.04。
+//! 金属 / 电介质在**预过滤环境 IBL** 下的口径：金属把基色当 F0（环境反射被染色、没有
+//! 漫反射），电介质保留漫反射。
 //!
-//! 期望值由 CPU 镜像（`env_brdf_approx` / `sh_eval`）现算，不手抄魔数。
+//! 期望值不再由 CPU 镜像现算：环境镜面项现在是 GPU 上烘焙的预过滤立方体 + BRDF 积分表，
+//! CPU 侧没有同口径镜像（旧的 Lazarov 解析近似已随切片删除，留着就是"镜像不再镜像"）。
+//! 这里改成**相对判据**：同一片天空下只换 F0 / metallic，比较通道关系与亮度差——钉住的
+//! 正是"金属反射被 F0 染色""电介质还有漫反射"这两条行为，而不是某次烘焙的数值。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use xgc_render::{
-    aces_u8, env_brdf_approx, sh_eval, sky_irradiance, GpuContext, MeshCache, Renderer,
-    ResourceDesc, ResourceUsage, SkySettings,
-};
+use xgc_render::{GpuContext, MeshCache, Renderer, ResourceDesc, ResourceUsage, SkySettings};
 use xgc_world::{Camera, GlobalTransform, Material, MeshRenderer, SceneEnvironment, World};
 
 static GPU_LOCK: Mutex<()> = Mutex::new(());
 
+const SIZE: u32 = 32;
+
+/// 项目 `project.ron` 里的那片天空（太阳盘关掉，只看天空本身的辐射）。
 fn project_sky() -> SkySettings {
     SkySettings {
         enabled: true,
@@ -25,17 +29,37 @@ fn project_sky() -> SkySettings {
     }
 }
 
-/// 渲染一块面向相机（+Z）的四边形，返回中心像素。
-fn render_asset(asset: &str) -> [u8; 4] {
-    let root = Path::new("../../../projects/XGame");
+/// 临时项目目录 + 若干 `.mat`：`MeshCache` 解析资产用相对路径，所以资产必须落在
+/// 项目根下（与迁移出来的项目同一路径规则）。
+fn material_project(tag: &str, materials: &[(&str, &str)]) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "xgc_material_{tag}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    for (name, body) in materials {
+        std::fs::write(root.join(name), body).unwrap();
+    }
+    root
+}
+
+fn cleanup(root: &Path) {
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// 渲染一个正对 +Z 的 quad（无光源、环境光 0），返回中心像素。
+fn render_quad(root: &Path, asset: &str) -> [u8; 4] {
     let context = GpuContext::headless().expect("需要 GPU 适配器");
-    let catalog = xgc_asset::scan(root).unwrap();
     let target = context
         .create_resource(&ResourceDesc::texture2d(
             "material-pbr",
             "rgba8unorm",
-            32,
-            32,
+            SIZE,
+            SIZE,
             vec![ResourceUsage::ColorAttachment],
         ))
         .unwrap();
@@ -62,11 +86,11 @@ fn render_asset(asset: &str) -> [u8; 4] {
         },
         Camera::default(),
     ));
-    let mut renderer = Renderer::new(MeshCache::with_catalog(root, catalog));
+    let mut renderer = Renderer::new(MeshCache::new(root));
     renderer.set_sky(project_sky());
     renderer.render(&context, texture, &world).unwrap();
-    let pixels = context.read_texture_rgba8(texture, 32, 32).unwrap();
-    let center = 4 * (16 * 32 + 16);
+    let pixels = context.read_texture_rgba8(texture, SIZE, SIZE).unwrap();
+    let center = 4 * ((SIZE / 2) * SIZE + SIZE / 2) as usize;
     [
         pixels[center],
         pixels[center + 1],
@@ -75,82 +99,79 @@ fn render_asset(asset: &str) -> [u8; 4] {
     ]
 }
 
-fn assert_close(label: &str, pixel: [u8; 4], expected: [u8; 3]) {
-    for (axis, want) in expected.into_iter().enumerate() {
-        let got = pixel[axis];
-        assert!(
-            (i16::from(got) - i16::from(want)).abs() <= 2,
-            "{label} 通道 {axis}：实际 {pixel:?}，期望 {expected:?}"
-        );
-    }
-    assert_eq!(pixel[3], 255);
-}
-
-#[test]
-fn metallic_surface_uses_tinted_f0_and_no_diffuse() {
-    let _guard = GPU_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+fn skip() -> bool {
     if GpuContext::headless().is_err() {
         eprintln!("skip: 没有可用 GPU 适配器");
-        return;
+        return true;
     }
-    let root = Path::new("../../../projects/XGame");
-    if !root.join("Resources/Materials/PolishedMetal.mat").exists() {
-        eprintln!("skip: 没有真实材质资产");
-        return;
-    }
-    let sky = project_sky();
-    let coefficients = sky_irradiance(&sky, None).expect("天空开着就有 SH");
-    // PolishedMetal: base_color (0.85, 0.87, 0.9)、metallic 1、roughness 0.35；
-    // 实体覆盖的 roughness 缺省 0.5 —— 旧引擎语义是"覆盖替换资产"，这里同理。
-    let f0 = [0.85f32, 0.87, 0.9];
-    let brdf = env_brdf_approx(f0, 0.5, 1.0);
-    let env = sh_eval(&coefficients, [0.0, 0.0, 1.0]);
-    let expected = aces_u8(std::array::from_fn(|channel| env[channel] * brdf[channel]));
-    let pixel = render_asset("guid://315e350a8efe0e18c063dd611eba0c95");
-    assert_close("金属（漫反射归零 + 彩色 F0）", pixel, expected);
+    false
 }
 
 #[test]
-fn dielectric_surface_keeps_diffuse_and_neutral_f0() {
+fn metallic_reflection_takes_its_color_from_f0() {
     let _guard = GPU_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-    if GpuContext::headless().is_err() {
-        eprintln!("skip: 没有可用 GPU 适配器");
+    if skip() {
         return;
     }
-    let root = Path::new("../../../projects/XGame");
-    if !root.join("Resources/Materials/BlueGloss.mat").exists() {
-        eprintln!("skip: 没有真实材质资产");
-        return;
-    }
-    let sky = project_sky();
-    let coefficients = sky_irradiance(&sky, None).expect("天空开着就有 SH");
-    // BlueGloss: base_color (0.2, 0.4, 0.8)、metallic 0；漫反射 + F0 = 0.04 的环境反射。
-    let color = [0.2f32, 0.4, 0.8];
-    let env = sh_eval(&coefficients, [0.0, 0.0, 1.0]);
-    let brdf = env_brdf_approx([0.04; 3], 0.5, 1.0);
-    let kd = xgc_render::sky_kd_env(0.5, 0.0, 1.0);
-    let expected = aces_u8(std::array::from_fn(|channel| {
-        env[channel] * color[channel] * kd + env[channel] * brdf[channel]
-    }));
-    let pixel = render_asset("guid://17e23593a51c476c2f1047b0ca0c4389");
-    assert_close("介电体（漫反射 + 中性 F0）", pixel, expected);
+    // 两片金属只差基色：F0 就是基色，所以反射应当被染色。
+    let root = material_project(
+        "tint",
+        &[
+            (
+                "white.mat",
+                "(base_color: (1.0, 1.0, 1.0, 1.0), metallic: 1.0, roughness: 0.15)",
+            ),
+            (
+                "red.mat",
+                "(base_color: (0.9, 0.05, 0.05, 1.0), metallic: 1.0, roughness: 0.15)",
+            ),
+        ],
+    );
+    let white = render_quad(&root, "white.mat");
+    let red = render_quad(&root, "red.mat");
+    // 天空偏蓝：中性 F0 的白金属反射出来就是蓝的（B 明显大于 R）。
+    assert!(
+        i16::from(white[2]) - i16::from(white[0]) > 8,
+        "白金属反射的是蓝天：{white:?}"
+    );
+    // 红金属的 F0 把反射压成红的（R 明显大于 B）。
+    assert!(
+        i16::from(red[0]) - i16::from(red[2]) > 20,
+        "金属反射必须被基色（F0）染色：红 {red:?} / 白 {white:?}"
+    );
+    assert_eq!(white[3], 255);
+    assert_eq!(red[3], 255);
+    cleanup(&root);
 }
 
 #[test]
-fn env_brdf_scales_with_f0_and_stays_bounded() {
-    // 解析拟合的两条硬性质：F0 越大反射越强；任何参数下都落在 [0,1] 里。
-    for roughness in [0.05f32, 0.5, 1.0] {
-        let dielectric = env_brdf_approx([0.04; 3], roughness, 0.5)[0];
-        let metal = env_brdf_approx([0.9; 3], roughness, 0.5)[0];
-        assert!(
-            metal > dielectric,
-            "F0 越大反射越强：{metal} vs {dielectric}"
-        );
-        for value in [dielectric, metal] {
-            assert!(
-                (0.0..=1.0).contains(&value),
-                "环境反射必须落在 [0,1]：{value}"
-            );
-        }
+fn dielectric_diffuse_scales_with_albedo() {
+    let _guard = GPU_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    if skip() {
+        return;
     }
+    // 两片电介质只差基色：漫反射项 ∝ 基色，环境镜面项（F0 = 0.04）与基色无关，
+    // 所以白片必须明显亮于黑片——这正是"电介质保留漫反射"的判据。
+    let root = material_project(
+        "albedo",
+        &[
+            (
+                "chalk.mat",
+                "(base_color: (1.0, 1.0, 1.0, 1.0), metallic: 0.0, roughness: 0.6)",
+            ),
+            (
+                "soot.mat",
+                "(base_color: (0.0, 0.0, 0.0, 1.0), metallic: 0.0, roughness: 0.6)",
+            ),
+        ],
+    );
+    let chalk = render_quad(&root, "chalk.mat");
+    let soot = render_quad(&root, "soot.mat");
+    for axis in 0..3 {
+        assert!(
+            i16::from(chalk[axis]) - i16::from(soot[axis]) >= 20,
+            "电介质的漫反射必须随基色变亮：白 {chalk:?} / 黑 {soot:?}（通道 {axis}）"
+        );
+    }
+    cleanup(&root);
 }

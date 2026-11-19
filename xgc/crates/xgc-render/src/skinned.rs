@@ -24,6 +24,7 @@ pub(crate) const MAX_JOINTS_BYTES: usize = MAX_JOINTS * 64;
 /// 只改 layout 而竞技场仍按旧字节数收、在 `upload` 的断言处才炸。
 const MODEL_UNIFORM_BYTES: u64 = 96;
 const SKINNED_WGSL: &str = concat!(
+    include_str!("sky_common.wgsl"),
     include_str!("scene_shading.wgsl"),
     include_str!("skin_vertex.wgsl"),
     include_str!("skinned.wgsl")

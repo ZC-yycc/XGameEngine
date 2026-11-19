@@ -15,42 +15,19 @@ use super::sky::SkyUniform;
 /// 统一 uniform：inv_view_proj 64B + 相机位置 16B + 天空 5×16B = 160B。
 const SKY_UNIFORM_BYTES: u64 = 160;
 
-const SKY_WGSL: &str = r#"
+const SKY_WGSL: &str = concat!(
+    include_str!("sky_common.wgsl"),
+    r#"
 struct SkyFrame {
     inv_view_proj: mat4x4<f32>,
     eye: vec4<f32>,
-    // 与 sky.rs 的 SkyUniform 字段顺序一致
-    sun_dir: vec4<f32>,
-    sun_color: vec4<f32>,
-    zenith: vec4<f32>,
-    horizon: vec4<f32>,
-    ground: vec4<f32>,
+    // 与 sky.rs 的 SkyUniform 逐字段对应（嵌套结构的内存布局与平铺一致：
+    // mat4 64B + vec4 16B 之后正好是 16 字节对齐的 80B）。
+    sky: SkyUniform,
 };
 
 @group(0) @binding(0)
 var<uniform> frame: SkyFrame;
-
-const SKY_PI: f32 = 3.141592653589793;
-const SUN_DISK_RADIANCE: f32 = 40.0;
-const SUN_GLOW: f32 = 0.35;
-
-// 与 sky.rs 的 sky_radiance 逐式对应。
-fn sky_radiance(dir: vec3<f32>) -> vec3<f32> {
-    let t = clamp(dir.y, -1.0, 1.0);
-    let up_t = pow(max(t, 0.0), 0.5);
-    let down_t = pow(max(-t, 0.0), 0.5);
-    let sky_c = mix(frame.horizon.rgb, frame.zenith.rgb, up_t);
-    let gnd_c = mix(frame.horizon.rgb, frame.ground.rgb, down_t);
-    var c = select(gnd_c, sky_c, t > 0.0);
-
-    let cos_ang = clamp(dot(dir, frame.sun_dir.xyz), -1.0, 1.0);
-    let ang = acos(cos_ang);
-    let sun_rad = max(SKY_PI / 180.0 * frame.horizon.w, 1e-4);
-    let disk = 1.0 - smoothstep(sun_rad * 0.6, sun_rad, ang);
-    let glow = SUN_GLOW * pow(max(cos_ang, 0.0), 16.0);
-    c = c + frame.sun_color.rgb * frame.sun_color.a * (SUN_DISK_RADIANCE * disk + glow);
-    return c * frame.zenith.a;
-}
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -76,9 +53,10 @@ fn vs(@builtin(vertex_index) index: u32) -> VsOut {
 fn fs(input: VsOut) -> @location(0) vec4<f32> {
     let far = frame.inv_view_proj * vec4<f32>(input.ndc, 1.0, 1.0);
     let dir = normalize(far.xyz / far.w - frame.eye.xyz);
-    return vec4<f32>(sky_radiance(dir), 1.0);
+    return vec4<f32>(sky_radiance(frame.sky, dir), 1.0);
 }
-"#;
+"#
+);
 
 /// 天空盒管线（按目标格式缓存；与实例化管线同寿）。
 pub(crate) struct SkyPipeline {

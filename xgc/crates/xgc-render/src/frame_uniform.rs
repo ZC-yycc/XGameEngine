@@ -215,8 +215,50 @@ pub(crate) fn create_frame_layout(context: &GpuContext, label: &str) -> wgpu::Bi
                     },
                     count: None,
                 },
+                // 预过滤环境立方体（GGX 5 级）：环境镜面项的 split-sum 第一项。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // BRDF 积分表（x = N·V、y = roughness）：split-sum 第二项。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 线性 + Clamp：环境立方体与 BRDF 表共用的过滤采样器。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         })
+}
+
+/// 帧绑定的纹理部分：阴影两张 + 环境两张 + 采样器。
+///
+/// 收成一个结构是因为参数已经到 7 个（clippy 的 `too_many_arguments` 阈值），
+/// 再加三张纹理必然超；同时两个调用点（实例化 / 蒙皮）能逐字段核对，不会错位。
+pub(crate) struct FrameTextures<'a> {
+    pub(crate) shadow: &'a wgpu::TextureView,
+    pub(crate) shadow_sampler: &'a wgpu::Sampler,
+    pub(crate) point_shadow: &'a wgpu::TextureView,
+    pub(crate) env_cube: &'a wgpu::TextureView,
+    pub(crate) brdf_lut: &'a wgpu::TextureView,
+    pub(crate) env_sampler: &'a wgpu::Sampler,
 }
 
 pub(crate) fn create_frame_bind(
@@ -224,9 +266,7 @@ pub(crate) fn create_frame_bind(
     layout: &wgpu::BindGroupLayout,
     view_proj: Mat4,
     lighting: &FrameLighting,
-    shadow_view: &wgpu::TextureView,
-    shadow_sampler: &wgpu::Sampler,
-    point_shadow_view: &wgpu::TextureView,
+    textures: FrameTextures<'_>,
 ) -> wgpu::BindGroup {
     let mut bytes = Vec::with_capacity(FRAME_UNIFORM_BYTES as usize);
     lighting.write(view_proj, &mut bytes);
@@ -250,15 +290,27 @@ pub(crate) fn create_frame_bind(
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(shadow_view),
+                    resource: wgpu::BindingResource::TextureView(textures.shadow),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                    resource: wgpu::BindingResource::Sampler(textures.shadow_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(point_shadow_view),
+                    resource: wgpu::BindingResource::TextureView(textures.point_shadow),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(textures.env_cube),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(textures.brdf_lut),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(textures.env_sampler),
                 },
             ],
         })
