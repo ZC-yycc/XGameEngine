@@ -3,7 +3,7 @@
 //! 单独一个集成测试二进制：拆分前 `character.rs` 已贴着 600 行软上限，且这些用例要的
 //! 世界构造（坡 + 角色，无刚体）与台阶 / 阻挡那组不同。
 
-use xgc_sim::{CharacterSystem, Schedule, VelocitySystem};
+use xgc_sim::{CharacterSystem, Schedule};
 use xgc_world::{CharacterController, Slope, Transform, Velocity, World};
 /// 60° 斜坡（rise 17.32 / size.x 10）对 45° 上限的角色是墙，不是地面。
 ///
@@ -27,7 +27,7 @@ fn character_refuses_to_climb_a_slope_above_its_limit() {
         rise: 17.32,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     // 坡底在 x=0，角色半径 0.3 → 停在 -0.3；y 保持 0（没被抬上坡面）。
@@ -62,7 +62,7 @@ fn character_walks_up_a_slope_within_its_limit() {
         rise: 5.773_503,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     assert!(
@@ -99,7 +99,7 @@ fn character_snaps_down_to_the_ground_it_is_walking_over() {
         rise: 5.773_503,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     assert!(
@@ -137,7 +137,7 @@ fn snapping_does_not_cancel_a_jump() {
         rise: 5.773_503,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     assert!(
@@ -175,7 +175,7 @@ fn character_stays_outside_the_high_end_of_a_steep_slope() {
         rise: 17.32,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     // 坡面在 x=10 收口，背面墙在 x=10+半径 0.3。
@@ -209,7 +209,7 @@ fn a_raised_slope_does_not_push_from_outside_its_own_span() {
         rise: 17.32,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     assert!(
@@ -244,7 +244,7 @@ fn a_slope_at_the_configured_limit_is_walkable() {
     ));
     world.spawn((slope,));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     assert!(
@@ -273,7 +273,7 @@ fn zero_snap_distance_leaves_an_airborne_character_alone() {
         controller,
     ));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     assert!(
@@ -307,7 +307,7 @@ fn descending_slopes_stay_walkable_whatever_their_angle() {
         rise: -17.32,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     // 坡面在 x=2 处高 10 - 17.32 * 0.2 = 6.536。
@@ -324,7 +324,10 @@ fn descending_slopes_stay_walkable_whatever_their_angle() {
     );
 }
 
-/// 真的走上去：`VelocitySystem` 推进 x、`CharacterSystem` 跟着坡面抬 y，连续多帧成立。
+/// 真的走上去：水平位移给定、`CharacterSystem` 跟着坡面抬 y，连续多帧成立。
+///
+/// 水平位移这里手动推进：角色的水平移动已交给 KCC（`character_kcc`），
+/// 坡面回归只关心"给定 x 之后 y 跟不跟得上"。
 #[test]
 fn character_keeps_climbing_a_walkable_slope_over_several_frames() {
     let mut world = World::new();
@@ -344,9 +347,9 @@ fn character_keeps_climbing_a_walkable_slope_over_several_frames() {
         rise: 5.773_503,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(VelocitySystem::default());
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     for _ in 0..6 {
+        advance_horizontally(&mut world, character, 0.1);
         schedule.run(&mut world, 0.1);
     }
     let transform = world.get::<Transform>(character).unwrap();
@@ -391,7 +394,7 @@ fn a_nan_slope_limit_falls_back_to_the_default_limit() {
         rise: 5.773_503,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     assert!(
@@ -421,7 +424,7 @@ fn a_character_inside_a_steep_slope_goes_to_the_nearer_side() {
         rise: 17.32,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     // base = 7 * 10 / 17.32 = 4.041571，减半径 0.3 = 3.741571。
@@ -452,9 +455,9 @@ fn character_walks_down_a_walkable_slope_over_several_frames() {
         rise: 5.773_503,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(VelocitySystem::default());
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     for _ in 0..6 {
+        advance_horizontally(&mut world, character, 0.1);
         schedule.run(&mut world, 0.1);
     }
     let transform = world.get::<Transform>(character).unwrap();
@@ -475,4 +478,12 @@ fn character_walks_down_a_walkable_slope_over_several_frames() {
             .unwrap()
             .grounded
     );
+}
+
+/// 手动推进水平位移（角色的水平移动归 KCC，这些用例只想看坡面语义）。
+fn advance_horizontally(world: &mut World, key: xgc_base::EntityKey, dt: f32) {
+    let linear = world.get::<Velocity>(key).unwrap().linear;
+    let transform = world.get_mut::<Transform>(key).unwrap();
+    transform.position[0] += linear[0] * dt;
+    transform.position[2] += linear[2] * dt;
 }

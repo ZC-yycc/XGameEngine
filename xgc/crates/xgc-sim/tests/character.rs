@@ -1,6 +1,6 @@
-//! 角色台阶 / 阻挡回归。
+//! 角色台阶回归（横向阻挡已改由 rapier 角色控制器负责，见 `character_kcc`）。
 
-use xgc_sim::{CharacterBlockSystem, CharacterStepSystem, CharacterSystem, Schedule};
+use xgc_sim::{CharacterStepSystem, CharacterSystem, Schedule};
 use xgc_world::{CharacterController, PhysicsBody, Slope, Transform, Velocity, World};
 
 #[test]
@@ -32,71 +32,6 @@ fn character_steps_onto_low_box() {
 }
 
 #[test]
-fn character_blocks_on_high_wall() {
-    let mut world = World::new();
-    let character = world.spawn((
-        Transform {
-            position: [0.3, 0.0, 0.0],
-            ..Transform::default()
-        },
-        Velocity {
-            linear: [3.0, 0.0, 0.0],
-        },
-        CharacterController::default(),
-    ));
-    world.spawn((
-        Transform {
-            position: [1.0, 0.5, 0.0],
-            ..Transform::default()
-        },
-        PhysicsBody {
-            shape: "cuboid".to_string(),
-            half_extents: [0.5, 0.5, 0.5],
-            ..PhysicsBody::default()
-        },
-    ));
-    let mut schedule = Schedule::new();
-    schedule.add(CharacterBlockSystem);
-    schedule.run(&mut world, 0.1);
-    let transform = world.get::<Transform>(character).unwrap();
-    let velocity = world.get::<Velocity>(character).unwrap();
-    assert!((transform.position[0] - 0.2).abs() < 1e-5);
-    assert_eq!(velocity.linear[0], 0.0);
-}
-
-#[test]
-fn character_blocks_on_ball() {
-    let mut world = World::new();
-    let character = world.spawn((
-        Transform {
-            position: [0.3, 0.0, 0.0],
-            ..Transform::default()
-        },
-        Velocity {
-            linear: [3.0, 0.0, 0.0],
-        },
-        CharacterController::default(),
-    ));
-    world.spawn((
-        Transform {
-            position: [1.0, 0.5, 0.0],
-            ..Transform::default()
-        },
-        PhysicsBody {
-            shape: "ball".to_string(),
-            radius: 0.5,
-            ..PhysicsBody::default()
-        },
-    ));
-    let mut schedule = Schedule::new();
-    schedule.add(CharacterBlockSystem);
-    schedule.run(&mut world, 0.1);
-    let transform = world.get::<Transform>(character).unwrap();
-    assert!((transform.position[0] - 0.2).abs() < 1e-5);
-    assert_eq!(world.get::<Velocity>(character).unwrap().linear[0], 0.0);
-}
-
-#[test]
 fn character_grounds_on_slope() {
     let mut world = World::new();
     let character = world.spawn((
@@ -113,7 +48,7 @@ fn character_grounds_on_slope() {
         rise: 2.0,
     },));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
     assert!((transform.position[1] - 1.0).abs() < 1e-5);

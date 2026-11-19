@@ -68,10 +68,12 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/skeleton.rs` | `SkeletonPoseSystem` / `parse_pose`：关节父链合成世界矩阵 |
 | `crates/xgc-sim/src/mixer.rs` | `SoftwareMixer` / `write_wav_mono`：总线增益混音与 WAV 写出 |
 | `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：布局、裁剪、可见性、命中、`ui.input` 驱动的交互 / Tab / 方向键焦点 |
-| `crates/xgc-sim/src/character.rs` | `CharacterStepSystem` / `CharacterBlockSystem`：低台阶抬升、高墙 / 球体推出 |
-| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` / `GroundCollisionSystem` / `CharacterSystem`（角色贴地 + `slope_limit` 陡坡当墙、推到最近一侧 + `snap_to_ground` 下行吸附；`slope_limit` 非有限值落回 45°、y=0 仍是兜底地面）/ `AnimatorSystem` / `GravitySystem` / `HierarchySystem` |
+| `crates/xgc-sim/src/character.rs` | `CharacterStepSystem`：低台阶 AABB 抬升（横向阻挡已由 `character_kcc` 的 rapier KCC 取代，`CharacterBlockSystem` 同片删除）；半径 / 高度走 `character_kcc` 的消毒函数，越界值不会让台阶静默失效；台阶判据的横向外扩量 = `rest_gap + 1 mm`（KCC 停在距立面 `offset = skin_width` 处，不外扩的话胶囊永远够不到台阶面，撞住后速度被回写成 0、一次都抬不起来）；带 `physics.body` 的实体直接跳过（位置归刚体表） |
+| `crates/xgc-sim/src/character_kcc.rs` | 角色胶囊与 rapier `KinematicCharacterController` 的唯一真相源：`radius` / `height` / `half_height` / `center_height` / `rest_gap = skin_width × 1.1` / `character_capsule` / `build_character_controller`（`offset = Absolute(skin)`、`autostep: None`、两个坡角、`snap_to_ground: None`、nudge 1e-4）/ `move_horizontal`；只做**水平** collide-and-slide（竖直仍 ECS），NaN / 越界值在边界消毒；`HorizontalMove.y` **不保证为 0**（rapier 坡面分支会给竖直切向分量，调用方不要假设）；`owned_by_kcc` 是「有 `CharacterController`、无 `PhysicsBody`、有 `Transform`」的唯一判据 |
+| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem`（对带 `CharacterController` 的实体只积分 y —— 水平位移归 KCC，一帧只能有一处积分）/ `GroundCollisionSystem` / `CharacterSystem`（角色贴地 + `slope_limit` 陡坡当墙、推到最近一侧 + `snap_to_ground` 下行吸附；`slope_limit` 非有限值落回 45°、y=0 仍是兜底地面）/ `AnimatorSystem` / `GravitySystem` / `HierarchySystem`；默认调度里 `CharacterSystem` 排在 `RapierPhysicsSystem` **之后**（陡坡推出 / 贴地吸附是移动后修正，排在 KCC 前会让角色每帧先挤进 `v·dt` 再被拉回）；带 `physics.body` 的实体跳过（位置归刚体表） |
 | `crates/xgc-sim/src/aabb.rs` | `AabbCollisionSystem`：动态刚体两两分离 / 动态 vs 静态推出，接触时清掉沿分离轴的接近速度（落地 / 堆叠稳定） |
-| `crates/xgc-sim/src/rapier_world.rs` | `RapierWorld` + `RapierPhysicsSystem`：与旧引擎同版本同参数的 rapier3d 0.22 刚体后端（`physics.body` 实体），建体规则按旧端 `body_from_scene`（Auto 形状取缩放绝对值 ×0.5、mass 换密度、角阻尼 0.05）；动态体回写 Transform / Velocity，运动学体每步推送位姿 |
+| `crates/xgc-sim/src/rapier_world.rs` | `RapierWorld` + `RapierPhysicsSystem`：与旧引擎同版本同参数的 rapier3d 0.22 刚体后端（`physics.body` 实体），建体规则按旧端 `body_from_scene`（Auto 形状取缩放绝对值 ×0.5、mass 换密度、角阻尼 0.05）；动态体回写 Transform / Velocity，运动学体每步推送位姿；建体签名 = 按 ID 排序的 `(EntityId, EntityKey)`（只比数量会漏掉 `Replace` / 快照恢复的换代，动态体回写会静默冻结，探针缓冲跨帧复用）；`physics.character` 实体额外托管 kinematic-position-based 胶囊（比脚底高 `rest_gap`，避开 0.22 空实现的 penetration 修复），角色托管见 `rapier_world/characters.rs`（本文件只留刚体表与 `step` 编排） |
+| `crates/xgc-sim/src/rapier_world/characters.rs` | `RapierWorld` 的角色子模块：按 `EntityId.raw()` 建 / 删 kinematic-position-based 胶囊，签名 = ID + `EntityKey`（index + generation）+ radius / half_height / skin_width / slope_limit 位模式（只见 ID 会漏掉 `Replace` / 快照恢复的换代，角色水平位移会静默冻结且旧胶囊变幽灵碰撞体），每帧 `sync_character_poses` + `move_characters`（`move_shape` 后只回写 x / z 与水平 `Velocity`）；签名探针与收集表跨帧复用（热路径零分配），没有 `Transform` 的角色不进签名（否则补上 `Transform` 后签名不变、永远不建胶囊） |
 | `crates/xgc-agent/src/lib.rs` | JSON-RPC 会话：describe（组件 / sim / render 能力清单）/ engine.diagnostics / engine.history / engine.replay / query / get / digest / stats / validate / load / save / plan / apply / revert / undo |
 | `crates/xgc-agent/src/snapshot.rs` | `world.snapshot` / `world.restore`：WorldData 快照与恢复 |
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
@@ -178,14 +180,15 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 0.61）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），角色坡面 `slope_limit` / 贴地 `snap_to_ground` 也已生效（陡坡当墙 + 下行贴地；挡住而非沿坡面下滑，无 `slope_limit + 10°` 迟滞带），下一刀把角色移动换成 rapier 的 `KinematicCharacterController`，再回关节。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 0.61）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），角色坡面 `slope_limit` / 贴地 `snap_to_ground` 也已生效（陡坡当墙 + 下行贴地），角色的**水平**位移已走 rapier `KinematicCharacterController`（`character_kcc.rs`，签名带实体代际、`CharacterSystem` 排在 rapier 之后；`CharacterBlockSystem` 已删、默认调度 18 个系统），下一刀把竖直 / 地面 / 台阶也搬进 KCC（`probe_ground` / `try_step_up` / `snap_to_ground`），再给 `physics.slope` 建真碰撞体、最后回关节。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。
 5. 推送与 CI；当前最大 Rust 文件 599 行（`glb.rs`），继续守住 600 行软上限。
-   角色坡限 / 吸附回归单独放在 `crates/xgc-sim/tests/character_slope.rs`（拆分前 `character.rs` 已贴到
-   600 行上限；`character.rs` 里仍留着浅坡贴地那条旧用例）：两组用例的世界构造也不同
-   （坡 + 无刚体 vs 台阶 / 阻挡），别再把坡面语义用例塞回 `character.rs`。
+   角色回归按语义分三个文件：`crates/xgc-sim/tests/character_slope.rs`（坡限 / 吸附，拆分前
+   `character.rs` 已贴到 600 行上限）、`crates/xgc-sim/tests/character.rs`（浅坡贴地与台阶抬升）、
+   `crates/xgc-sim/tests/character_kcc.rs`（水平 KCC：撞墙 / 斜墙滑 / 球体阻挡 / 刚体优先 / `Replace` 换代后仍移动 / 默认调度陡坡不挤入 / 确定性）。
+   三组世界构造不同（坡 + 无刚体 vs 台阶 vs 静态盒 + 刚体），别把语义混着塞回一个文件。
 
 ## Token 纪律
 

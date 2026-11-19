@@ -20,8 +20,10 @@
 `World::validate_data` 世界体检）、`xgc-store`（版本化 JSON 包络 + 原子写）、
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
 `Schedule::batches` / `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` /
-`GroundCollisionSystem` / `CharacterSystem` / `CharacterStepSystem` /
-`CharacterBlockSystem` / `AabbCollisionSystem` / `AnimationSystem` /
+`GroundCollisionSystem` / `CharacterStepSystem`（默认调度里 `CharacterSystem` 排在
+`RapierPhysicsSystem` 之后：陡坡推出 / 贴地吸附是移动后修正；台阶抬升又排在 `CharacterSystem`
+之后，否则抬起的 y 会被它的 `snap_to_ground` 每帧吸回地面、低台阶彻底上不去） /
+`AabbCollisionSystem` / `AnimationSystem` /
 `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `GravitySystem` /
 `HierarchySystem` /
 `AnimationClip` 平移 / 旋转 slerp / 缩放关键帧采样（边界钳制 / 循环取模）/ RON 剪辑加载 /
@@ -83,7 +85,11 @@ HDR 光晕切片默认关闭，因此不改变任何既有画面的性能与像�
 
 阴影 pass 那半边同样并进了竞技场：`shadow_skin.rs` 的 `SkinnedShadow` 持有两张 `UniformArena`，`SkinnedBinding` 只记槽号；`RenderStats::shadow_skin_uniform_buffers` 首批 2 张、同尺寸第二帧 **0**（回归 `repeated_frames_reuse_the_shadow_skin_arenas`，把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红）。两条单元回归钉住槽距对齐与跨帧复用，另加一条两投射体用例 `two_skinned_casters_keep_their_own_shadow_palettes`：两个投射体沿屏幕纵轴分开（z=∓2.4）、姿态反向平移，断言两侧阴影行重心相距超过两个窗口宽、且同屏时各自留在原位（把每级 draw 的偏移强制成槽 0 时实跑变红：「窗口内阴影像素太少，无法定位：0」），钉住"每个 caster 用自己那格 palette"。证据画面没有骨架实体、竞技场根本不建缓冲，所以第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`）。**未做稳态计时**：冷启动单帧含 pipeline 编译，不能归因于本刀；“每帧缓冲数 2N → 0”是结构性收益，真正的稳态测量仍要常驻进程 profiler。
 
-角色坡限 / 贴地切片让 `physics.character` 的两个死字段生效：`CharacterSystem` 把坡度超过 `slope_limit` 的上升 `physics.slope` 按墙挡住——`Slope::base_x_at` 算出该高度处的坡面落点，把角色推到离自己更近的一侧（以坡底 `base - radius` 与坡背 `origin.x + size.x + radius` 的中点为界，并清掉朝墙的水平速度）；落点夹进坡面自己的 X 跨度，否则坡面架在高台上时会外推出坡面之外几米的"隐形墙"（夹取只限制墙位置，坡架高台时角色即使在坡体下方、只要 X 在跨度内仍会被挡——没有真碰撞体，刻意简化）。y=0 仍是兜底地面（与坡面高度取大值），下坡一律当地面；下行离地不超过 `snap_to_ground` 时贴回，且只在 `vy <= 0` 时吸，起跳不受影响。回归先证会红 —— 还原旧实现后「60° 坡挡住角色」（`x=1`）与「下行吸附」（`y=2.9867516`）实跑变红；本轮修的两处推法缺陷也单独验红（只按坡底推 + 不夹跨度时 `x=-0.3` / `x=-3.186836`，本该 10.3 / -0.3）。另补守卫与新用例：多帧积分真的走上 / 走下 30° 坡、上限取坡面自身倾角时正好可走（把 `<=` 改成 `<` 即红）、陷在坡体高处时去最近一侧（改回按坡面中点选边即红 `x=10.3`）、`snap_to_ground = 0` 不吸附、下坡任意角度当地面、`slope_limit = NaN` 落回缺省。第 150 帧 PPM SHA-256 不变 —— 证据世界里**没有** `physics.character` / `physics.slope` 实体，这条路径对第 150 帧本来就不会被调用。**未闭环**：仍不走 rapier 的 `KinematicCharacterController`（无胶囊扫掠 / 关节 / 墙面滑动）；陡坡这里是挡住而不是像旧端那样沿坡面下滑（旧端还带 `slope_limit + 10°` 的迟滞带）；`GravitySystem` 不在默认调度里、`PhysicsSystem` / `GroundCollisionSystem` 只处理 `physics.body`，所以纯角色没有重力：≤ `snap_to_ground` 的落差能靠贴地跟住（`vy == 0` 也走这支），更大的落差不会下落；`ground` 也只由坡面与 y=0 组成、不含台阶顶面。
+角色水平 KCC 切片把 `physics.character` 的水平位移交给 rapier：`crates/xgc-sim/src/character_kcc.rs` 是胶囊 / 参数 / 消毒的唯一真相源（`half_height`、`center_height`、`rest_gap = skin_width × 1.1`、`character_capsule`、`build_character_controller`），`RapierWorld` 为角色建运行时托管的 kinematic-position-based 胶囊刚体并按 `EntityId.raw()` 排序（确定性），每帧在 `pipeline.step` 之后跑一次 `move_shape`，只回写 `Transform.position` 的 x / z 与水平 `Velocity`（y 与朝向仍归 ECS）。胶囊比脚底高 `rest_gap` 是刻意的：rapier 0.22 的 `check_and_fix_penetrations` 是空函数，起始间隙 ≤ `offset` 会放行整段位移（穿墙），而 ECS 把脚底压在地面高度、间隙为 0。竖直仍走 ECS 的原因同样来自上游：KCC 在胶囊上 `grounded` / `snap_to_ground` / `autostep` / `is_sliding_down_slope` 全不可用（旧端同记录）。参数逐项对齐旧端（`offset = Absolute(skin_width)`、`autostep: None`、`max_slope_climb_angle = clamp(slope_limit, 0, 89)°`、`min_slope_slide_angle = (slope_limit + 10).min(89)°`、`snap_to_ground: None`、`normal_nudge_factor = 1e-4`）。同片删掉 `CharacterBlockSystem`（AABB 最近轴推出：斜墙顶住、高速穿薄墙），默认调度 19 → 18；`VelocitySystem` 对角色只积分 y。回归先证会红：`VelocitySystem` 改回三轴积分 → 三条变红（只积竖直 / 刚体优先 / 撞墙停住）；`move_horizontal` 返回零向量 → 撞墙与斜墙滑动两条变红。斜墙用例用 20°：45° 时从 +X 撞到的是盒角不是面。证据世界没有 `physics.character` 实体，第 150 帧 PPM SHA-256 不变。审查揪出并修掉两处：①角色托管的签名带上 `EntityKey` 的 index + generation（以及 `skin_width` / `slope_limit` 的位模式）—— `Replace` / 组件增删 / 快照恢复只换代不换 ID，只看 ID 时签名不变就提前返回，角色水平位移静默冻结、旧胶囊还作为幽灵碰撞体留着（用例 `a_character_keeps_moving_after_its_entity_key_changes`，签名退回只看 ID 时实跑变红）；②默认调度把 `CharacterSystem` 挪到 `RapierPhysicsSystem` 之后，它是移动后修正，跑在 KCC 之前时坡面没有 rapier 碰撞体、每帧先挤进 `v·dt` 再被拉回（用例 `a_character_does_not_creep_into_a_steep_slope_under_the_default_schedule`，顺序挪回去时实跑变红）。为守住 600 行软上限，角色托管拆到 `crates/xgc-sim/src/rapier_world/characters.rs`；球体碰撞体也补了 `character_is_blocked_by_a_ball_collider`。复审又揪出两处并已修掉：③台阶抬升原先排在 `CharacterSystem` 之前，抬起的 y 被贴地吸附吸回地面，0.05~0.2 m 的低台阶在默认调度下根本站不上去 —— 现在它排在 `CharacterSystem` 之后、抬起的 y 留到帧末（`character_steps_onto_a_low_box_under_the_default_schedule`，把顺序挪回去时报 `y=0`）；④刚体表 `ensure_built` 原来只按 `physics.body` 数量判是否重建，`Replace` / 组件增删 / 快照恢复换代后 `BodyLink.key` 过期、动态体的 Transform / Velocity 回写静默冻结 —— 签名改成按 ID 排序的 `(EntityId, EntityKey)`（探针缓冲跨帧复用），`a_dynamic_body_keeps_moving_after_its_entity_key_changes` 钉住（退回数量判据时报 `y=5.8603435` 两帧不动）。
+
+第三轮复审又补一处：台阶判据要按 KCC 的停位间隙外扩 —— KCC 会停在距立面 `offset = skin_width` 处（penetration 修复是空实现），胶囊因此永远碰不到台阶面，撞住那一帧速度已被回写成 0、预测位移也归零，小半径（0.05 m）或低速度（1 m/s）下角色卡在 `offset` 外面一次都抬不起来（`a_small_capsule_still_steps_onto_a_low_box`，不外扩时报 `x=-1.0601`、y=0）；现在判据按 `rest_gap + 1 mm` 外扩，代价是贴着低矮实体也会被抬上去，这正是「压住台阶就上」的语义。同一轮还收了角色表的每帧分配（签名探针与收集表跨帧复用，与刚体表探针同口径），以及「没有 `Transform` 的角色不进签名」（否则之后补上 `Transform` 时签名不变、永远不建胶囊）。
+
+角色坡限 / 贴地切片让 `physics.character` 的两个死字段生效：`CharacterSystem` 把坡度超过 `slope_limit` 的上升 `physics.slope` 按墙挡住——`Slope::base_x_at` 算出该高度处的坡面落点，把角色推到离自己更近的一侧（以坡底 `base - radius` 与坡背 `origin.x + size.x + radius` 的中点为界，并清掉朝墙的水平速度）；陡坡判据按胶囊半径取前进方向的前沿 / 后沿高度（用角色中心点的话，胶囊中心还在坡外时前缘已经压在坡上，角色会先挤进一个半径再被推回）。落点夹进坡面自己的 X 跨度，否则坡面架在高台上时会外推出坡面之外几米的"隐形墙"（夹取只限制墙位置，坡架高台时角色即使在坡体下方、只要 X 在跨度内仍会被挡——没有真碰撞体，刻意简化）。y=0 仍是兜底地面（与坡面高度取大值），下坡一律当地面；下行离地不超过 `snap_to_ground` 时贴回，且只在 `vy <= 0` 时吸，起跳不受影响。回归先证会红 —— 还原旧实现后「60° 坡挡住角色」（`x=1`）与「下行吸附」（`y=2.9867516`）实跑变红；本轮修的两处推法缺陷也单独验红（只按坡底推 + 不夹跨度时 `x=-0.3` / `x=-3.186836`，本该 10.3 / -0.3）。另补守卫与新用例：多帧积分真的走上 / 走下 30° 坡、上限取坡面自身倾角时正好可走（把 `<=` 改成 `<` 即红）、陷在坡体高处时去最近一侧（改回按坡面中点选边即红 `x=10.3`）、`snap_to_ground = 0` 不吸附、下坡任意角度当地面、`slope_limit = NaN` 落回缺省。第四轮复审又补一处：`physics.body` 与 `physics.character` 同时挂的实体只归刚体表 / 脚本负责——`character_kcc::owned_by_kcc` 是唯一判据（有 `CharacterController`、没有 `PhysicsBody`、有 `Transform` 才算 KCC 托管），`CharacterSystem` 与 `CharacterStepSystem` 都先按 `PhysicsBody` 跳过。不跳过的话，新顺序里 rapier 先回写同实体的 `Transform`、这两个 ECS 系统再写一遍，下一帧又被刚体覆盖，站在台阶边 / 坡边时脚下就是逐帧抖动；`a_character_with_a_rigid_body_is_left_alone_by_the_character_systems` 钉住（去掉跳过时实跑报「带刚体的角色不该被台阶系统抬起来：y=0.19999999」与「带刚体的角色不该被坡面系统推走：x=9.7」）。`VelocitySystem` 仍按「凡有 `CharacterController` 就只积分 y」处理：给这种实体积分水平只会和刚体回写打架，位置完全由刚体表 / 脚本负责。第 150 帧 PPM SHA-256 不变 —— 证据世界里**没有** `physics.character` / `physics.slope` 实体，这条路径对第 150 帧本来就不会被调用。**未闭环**：水平位移已走 rapier 的 `KinematicCharacterController`（见上），但竖直 / 地面 / 台阶仍由 ECS 解析；没有关节、没有 CCD；陡坡这里是挡住而不是像旧端那样沿坡面下滑（旧端还带 `slope_limit + 10°` 的迟滞带）；`GravitySystem` 不在默认调度里、`PhysicsSystem` / `GroundCollisionSystem` 只处理 `physics.body`，所以纯角色没有重力：≤ `snap_to_ground` 的落差能靠贴地跟住（`vy == 0` 也走这支），更大的落差不会下落；`ground` 也只由坡面与 y=0 组成、不含台阶顶面。
 
 **姿态感知的场景包围盒**切片用"两个可执行文件交错跑"的同机 A/B（每轮 before / after 各一次，抵消热漂移）：改前 `778.8 / 748.7 / 720.4 / 756.6 ms`（中位数 **752.62 ms**），改后 `795.9 / 721.4 / 734.3 / 826.0 ms`（中位数 **765.10 ms**，+1.7%）。两组区间 720–779 / 721–826 重叠，且证据场景没有任何 `pose` item —— 新分支对每个 draw 只多一次 `Option` 判空，因此判定未见可归因回归；带骨架的场景每帧会多一次 O(顶点 + 关节) 的边界计算（整网格 AABB 按关节变换，比旧端加载期预计算的每关节顶点盒松，后续上骨架截图门禁时要收紧）。真正的收益是"被姿态移出去的几何仍被取景 / 级联远距离覆盖"（5 条新回归负责）。
 
@@ -101,7 +107,7 @@ archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再�
 rapier3d 0.22 驱动 `physics.body` 实体，`PhysicsSystem` 只给非刚体实体的 dynamic 加
 重力、`CharacterJumpSystem` 消费起跳请求、`VelocitySystem` 积分、
 `GroundCollisionSystem` 地面夹持、`CharacterSystem` 角色脚底贴合地面 / `physics.slope`（坡度超过 `slope_limit` 的上升坡按墙挡住并推到最近一侧、下行离地不超过 `snap_to_ground` 贴回）、
-`CharacterStepSystem` 低矮台阶抬升、`CharacterBlockSystem` 高墙 / 球体推出、`AabbCollisionSystem` 两两分离动态刚体
+`CharacterStepSystem` 低矮台阶抬升、角色水平位移由 `RapierPhysicsSystem` 里的 rapier `KinematicCharacterController` 做 collide-and-slide（沿墙滑动、薄墙不穿）、`AabbCollisionSystem` 两两分离动态刚体
 （接触时清掉沿分离轴的接近速度，落地 / 堆叠不再抖动）
 （球体按中心线精确分离）、`AnimatorSystem` 推进动画时钟、`UiLayoutSystem` 算 UI 根 /
 父相对矩形、裁剪区并继承可见性，`UiInteractionSystem` 读 `ui.input` 写 hover / press /
@@ -129,13 +135,13 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（346 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（207 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
+`cargo test --workspace --offline` 全绿（357 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（210 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
 PCSS / 点光阴影、TAA / SSAO / FXAA 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
-物理的角色控制器 / 关节 / 连续碰撞 / 墙面滑动、陡坡沿坡面下滑与 `slope_limit + 10°` 迟滞带（`slope_limit` / `snap_to_ground` 已生效）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
+物理的角色竖直 / 地面 / 台阶仍由 ECS 解析（水平已走 rapier KCC）、关节、连续碰撞（CCD）、陡坡沿坡面下滑与 `slope_limit + 10°` 迟滞带、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。
 

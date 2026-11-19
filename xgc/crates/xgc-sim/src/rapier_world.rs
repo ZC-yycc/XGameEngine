@@ -5,16 +5,22 @@
 //! 一次；这里逐项照搬，落点与翻滚姿态才有机会和旧图对上（简化 AABB 求解器
 //! 没有角动量，盒子永远不会翻滚）。
 //!
-//! 这一刀的范围：只接管 `physics.body` 实体（静态 / 动态 / 运动学）。
-//! 角色控制器、斜坡与脚本驱动的通用速度仍走 `xgc-sim` 的既有系统。
+//! 这一刀的范围：`physics.body` 实体（静态 / 动态 / 运动学）+ `physics.character`
+//! 实体的**水平** collide-and-slide（`character_kcc`）。角色的竖直 / 坡面 / 贴地 /
+//! 台阶仍走 `xgc-sim` 的既有系统，理由见 `character_kcc` 模块文档。
 
 use rapier3d::na::{Isometry3, Translation3, UnitQuaternion, Vector3};
 use rapier3d::prelude::*;
 
 use xgc_base::EntityKey;
-use xgc_world::{Component, GlobalTransform, PhysicsBody, Transform, Velocity, World};
+use xgc_world::{
+    CharacterController, Component, GlobalTransform, PhysicsBody, Transform, Velocity, World,
+};
 
 use crate::{System, SystemAccess};
+
+mod characters;
+use characters::CharacterLink;
 
 /// 旧引擎 `PhysicsConfig::default()` 的重力。
 pub const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
@@ -42,8 +48,26 @@ pub struct RapierWorld {
     impulse_joints: ImpulseJointSet,
     multibody_joints: MultibodyJointSet,
     links: Vec<BodyLink>,
-    /// 已建体的 `physics.body` 数量；与当前世界不一致时整表重建。
-    built_count: Option<usize>,
+    /// 建体时的实体签名（按 ID 排序的 `(EntityId, EntityKey)`）；与当前世界不一致时整表重建。
+    ///
+    /// 必须带 `EntityKey` 而不是只比数量：`Replace` / 组件增删 / 快照恢复只换代不换 ID，
+    /// 数量判据不会触发重建，`BodyLink.key` 就停在过期代际——`World::get` 拒绝过期句柄，
+    /// 动态体的 Transform / Velocity 回写会静默冻结（角色表 `character_signature` 同款）。
+    built_signature: Option<Vec<(u64, EntityKey)>>,
+    /// `ensure_built` 的每帧探针，跨帧复用避免热路径分配。
+    body_probe: Vec<(u64, EntityKey)>,
+    characters: Vec<CharacterLink>,
+    /// 角色集合的签名：变了才重建角色刚体。
+    ///
+    /// 必须带 `EntityKey`（index + generation）：`Replace` / 组件增删 / 快照恢复都会
+    /// 让 `EntityKey` 换代而实体 ID 不变（`xgc-world` 的 `alloc_key`）。只看 ID 的话
+    /// 签名不变 → 提前返回 → 角色仍指向过期句柄：`World::get` 拒绝过期代际，水平位移
+    /// 会静默冻结，而旧胶囊作为幽灵碰撞体留在 rapier 里挡住别人。
+    character_signature: Option<Vec<(u64, EntityKey, [u32; 4])>>,
+    /// `ensure_characters` 的每帧探针，跨帧复用避免热路径分配（与 `body_probe` 同口径）。
+    character_probe: Vec<(u64, EntityKey, [u32; 4])>,
+    /// 角色收集阶段的临时表，跨帧复用（同样是为了热路径零分配）。
+    character_entries: Vec<(u64, EntityKey, CharacterController)>,
 }
 
 impl Default for RapierWorld {
@@ -67,25 +91,42 @@ impl RapierWorld {
             impulse_joints: ImpulseJointSet::new(),
             multibody_joints: MultibodyJointSet::new(),
             links: Vec::new(),
-            built_count: None,
+            built_signature: None,
+            body_probe: Vec::new(),
+            characters: Vec::new(),
+            character_signature: None,
+            character_probe: Vec::new(),
+            character_entries: Vec::new(),
         }
     }
 
-    /// 本帧实体集合若与建体时不同就整表重建（演示场景够用；增量增删留给后续切片）。
+    /// 本帧实体集合若与建体时不同（增删或 `EntityKey` 换代）就整表重建。
+    ///
+    /// 演示场景够用；增量增删与"改了 `PhysicsBody` 字段不重建"留给后续切片。
     pub fn ensure_built(&mut self, world: &World) {
-        let mut count = 0usize;
-        world.for_each::<PhysicsBody>(|_, _| count += 1);
-        if self.built_count == Some(count) {
+        let mut probe = std::mem::take(&mut self.body_probe);
+        probe.clear();
+        world.for_each::<PhysicsBody>(|key, _| {
+            if let Some(id) = world.entity(key) {
+                probe.push((id.raw(), key));
+            }
+        });
+        probe.sort_unstable_by_key(|(id, _)| *id);
+        if self.built_signature.as_ref() == Some(&probe) {
+            self.body_probe = probe;
             return;
         }
-        self.rebuild(world, count);
+        self.rebuild(world, probe);
     }
 
-    fn rebuild(&mut self, world: &World, count: usize) {
+    fn rebuild(&mut self, world: &World, signature: Vec<(u64, EntityKey)>) {
         self.bodies = RigidBodySet::new();
         self.colliders = ColliderSet::new();
         self.links.clear();
-        self.built_count = Some(count);
+        self.built_signature = Some(signature);
+        // 刚体表整份换新，角色刚体也随之消失，签名清掉让 `ensure_characters` 重建。
+        self.characters.clear();
+        self.character_signature = None;
         // 按实体 ID 排序建体：rapier 的岛屿构建顺序与插入顺序有关，固定顺序
         // 才能保证同一份场景两次运行逐位一致。
         let mut entries = Vec::new();
@@ -123,6 +164,8 @@ impl RapierWorld {
     /// 推进一个固定步，并把动态体结果写回世界。
     pub fn step(&mut self, world: &mut World, dt: f32) {
         self.ensure_built(world);
+        self.ensure_characters(world);
+        self.sync_character_poses(world);
         // 运动学体：脚本摆好的位置每步推给物理（与旧端 `push_kinematic_bodies` 同义）。
         for link in &self.links {
             if !link.kinematic {
@@ -180,6 +223,8 @@ impl RapierWorld {
                 velocity.linear = [linear.x, linear.y, linear.z];
             }
         }
+
+        self.move_characters(world);
     }
 }
 
@@ -232,16 +277,19 @@ fn build_body(
     (body, collider)
 }
 
-fn isometry(transform: &Transform) -> Isometry3<f32> {
+fn rotation(transform: &Transform) -> UnitQuaternion<f32> {
     let [x, y, z, w] = transform.rotation;
-    let rotation = UnitQuaternion::from_quaternion(rapier3d::na::Quaternion::new(w, x, y, z));
+    UnitQuaternion::from_quaternion(rapier3d::na::Quaternion::new(w, x, y, z))
+}
+
+fn isometry(transform: &Transform) -> Isometry3<f32> {
     Isometry3::from_parts(
         Translation3::new(
             transform.position[0],
             transform.position[1],
             transform.position[2],
         ),
-        rotation,
+        rotation(transform),
     )
 }
 
@@ -295,7 +343,11 @@ impl System for RapierPhysicsSystem {
 
     fn access(&self) -> SystemAccess {
         SystemAccess {
-            reads: vec![PhysicsBody::ID, GlobalTransform::ID],
+            reads: vec![
+                PhysicsBody::ID,
+                GlobalTransform::ID,
+                CharacterController::ID,
+            ],
             writes: vec![Transform::ID, Velocity::ID],
         }
     }

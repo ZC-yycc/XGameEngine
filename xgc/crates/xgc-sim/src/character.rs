@@ -1,9 +1,19 @@
 //! 角色台阶：横向移动撞到低矮实体时抬到其顶面。
+//!
+//! 横向阻挡（`CharacterBlockSystem`）已由 rapier 的角色控制器 collide-and-slide
+//! 取代（`character_kcc` / `RapierWorld::ensure_characters`），旧实现同片拆除。
 
 use xgc_base::EntityKey;
 use xgc_world::{CharacterController, Component, PhysicsBody, Transform, Velocity, World};
 
 use super::{System, SystemAccess};
+use crate::character_kcc;
+
+/// 台阶判据比 KCC 停位间隙再多要的一圈余量（米）。
+///
+/// `rest_gap = skin_width × 1.1` 已经大于 KCC 的停位间隙（`skin_width` + nudge），
+/// 这 1 mm 只是保证浮点比较留出严格大于的余量。
+const PROBE_MARGIN: f32 = 1e-3;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CharacterStepSystem;
@@ -11,7 +21,6 @@ pub struct CharacterStepSystem;
 struct Solid {
     min: [f32; 3],
     max: [f32; 3],
-    ball: Option<([f32; 3], f32)>,
 }
 
 struct Character {
@@ -21,6 +30,14 @@ struct Character {
     radius: f32,
     height: f32,
     step: f32,
+    /// 台阶判据的横向外扩量：KCC 停位留的间隙 + 一圈余量。
+    ///
+    /// rapier 0.22 的 `check_and_fix_penetrations` 是空实现，所以 KCC 会停在距立面
+    /// `offset = skin_width` 处（再被 `normal_nudge_factor` 顶回一点），胶囊永远碰不到
+    /// 台阶面：判据不外扩的话，撞住那一帧速度已被回写成 0、预测位移也归零，角色就卡在
+    /// `offset` 外面一动不动（0.3 半径能靠"胶囊肚皮比台阶顶宽"的巧合多吃进一点，小半径
+    /// 或低速度就立刻暴露）。外扩的代价是贴着低矮实体也会被抬上去，这正是"压住台阶就上"。
+    probe: f32,
 }
 
 impl System for CharacterStepSystem {
@@ -56,11 +73,15 @@ impl System for CharacterStepSystem {
                     transform.position[1] + half[1],
                     transform.position[2] + half[2],
                 ],
-                ball: (body.shape == "ball").then_some((transform.position, body.radius)),
             });
         });
         let mut characters = Vec::new();
         world.for_each::<CharacterController>(|key, controller| {
+            // 与 `character_kcc::owned_by_kcc` 同口径：带 `physics.body` 的实体由刚体表托管，
+            // 台阶抬升不能再写它的 `Transform`（新调度里 rapier 先跑，写会落在刚体回写之后）。
+            if world.get::<PhysicsBody>(key).is_some() {
+                return;
+            }
             let Some(transform) = world.get::<Transform>(key) else {
                 return;
             };
@@ -71,9 +92,12 @@ impl System for CharacterStepSystem {
                 key,
                 position: transform.position,
                 velocity: velocity.linear,
-                radius: controller.radius,
-                height: controller.height,
-                step: controller.step_offset,
+                // 与 KCC 共用同一套边界消毒：组件里的 NaN / 越界值在 `character_kcc`
+                // 收口，否则这里会拿 NaN 去算重叠（`overlaps_y` 恒假 → 台阶静默失效）。
+                radius: character_kcc::radius(controller),
+                height: character_kcc::height(controller),
+                step: controller.step_offset.max(0.0),
+                probe: character_kcc::rest_gap(controller) + PROBE_MARGIN,
             });
         });
         for character in characters {
@@ -86,10 +110,11 @@ impl System for CharacterStepSystem {
             let head = feet + character.height;
             let mut top = None;
             for solid in &solids {
-                let overlaps_x = predicted[0] + character.radius > solid.min[0]
-                    && predicted[0] - character.radius < solid.max[0];
-                let overlaps_z = predicted[2] + character.radius > solid.min[2]
-                    && predicted[2] - character.radius < solid.max[2];
+                let reach = character.radius + character.probe;
+                let overlaps_x =
+                    predicted[0] + reach > solid.min[0] && predicted[0] - reach < solid.max[0];
+                let overlaps_z =
+                    predicted[2] + reach > solid.min[2] && predicted[2] - reach < solid.max[2];
                 let overlaps_y = head > solid.min[1] && feet < solid.max[1];
                 if !(overlaps_x && overlaps_z && overlaps_y) {
                     continue;
@@ -116,128 +141,5 @@ fn half_extents(body: &PhysicsBody) -> [f32; 3] {
         "ball" => [body.radius; 3],
         "capsule" => [body.radius, body.half_height + body.radius, body.radius],
         _ => body.half_extents,
-    }
-}
-
-/// 横向阻挡：高于 step_offset 的实体把角色推出并清掉对应水平速度。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CharacterBlockSystem;
-
-impl System for CharacterBlockSystem {
-    fn name(&self) -> &'static str {
-        "character_block"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess {
-            reads: vec![CharacterController::ID, PhysicsBody::ID],
-            writes: vec![Transform::ID, Velocity::ID],
-        }
-    }
-
-    fn run(&mut self, world: &mut World, _dt: f32) {
-        let mut solids = Vec::new();
-        world.for_each::<PhysicsBody>(|key, body| {
-            if body.is_sensor {
-                return;
-            }
-            let Some(transform) = world.get::<Transform>(key) else {
-                return;
-            };
-            let half = half_extents(body);
-            solids.push(Solid {
-                min: [
-                    transform.position[0] - half[0],
-                    transform.position[1] - half[1],
-                    transform.position[2] - half[2],
-                ],
-                max: [
-                    transform.position[0] + half[0],
-                    transform.position[1] + half[1],
-                    transform.position[2] + half[2],
-                ],
-                ball: (body.shape == "ball").then_some((transform.position, body.radius)),
-            });
-        });
-        let mut characters = Vec::new();
-        world.for_each::<CharacterController>(|key, controller| {
-            let Some(transform) = world.get::<Transform>(key) else {
-                return;
-            };
-            let Some(velocity) = world.get::<Velocity>(key) else {
-                return;
-            };
-            characters.push(Character {
-                key,
-                position: transform.position,
-                velocity: velocity.linear,
-                radius: controller.radius,
-                height: controller.height,
-                step: controller.step_offset,
-            });
-        });
-        for character in characters {
-            let mut position = character.position;
-            let mut velocity = character.velocity;
-            for solid in &solids {
-                let feet = position[1];
-                let head = feet + character.height;
-                if head <= solid.min[1] || feet >= solid.max[1] {
-                    continue;
-                }
-                let rise = solid.max[1] - feet;
-                if rise > 0.0 && rise <= character.step {
-                    continue;
-                }
-                if let Some((center, radius)) = solid.ball {
-                    if head <= center[1] - radius || feet >= center[1] + radius {
-                        continue;
-                    }
-                    let dx = position[0] - center[0];
-                    let dz = position[2] - center[2];
-                    let distance = (dx * dx + dz * dz).sqrt();
-                    let minimum = character.radius + radius;
-                    if distance >= minimum {
-                        continue;
-                    }
-                    if distance > f32::EPSILON {
-                        position[0] = center[0] + dx / distance * minimum;
-                        position[2] = center[2] + dz / distance * minimum;
-                    } else {
-                        position[0] = center[0] + minimum;
-                    }
-                    velocity[0] = 0.0;
-                    velocity[2] = 0.0;
-                    continue;
-                }
-                let overlap_x = (position[0] + character.radius).min(solid.max[0])
-                    - (position[0] - character.radius).max(solid.min[0]);
-                let overlap_z = (position[2] + character.radius).min(solid.max[2])
-                    - (position[2] - character.radius).max(solid.min[2]);
-                if overlap_x <= 0.0 || overlap_z <= 0.0 {
-                    continue;
-                }
-                if overlap_x < overlap_z {
-                    if position[0] < (solid.min[0] + solid.max[0]) * 0.5 {
-                        position[0] = solid.min[0] - character.radius;
-                    } else {
-                        position[0] = solid.max[0] + character.radius;
-                    }
-                    velocity[0] = 0.0;
-                } else if position[2] < (solid.min[2] + solid.max[2]) * 0.5 {
-                    position[2] = solid.min[2] - character.radius;
-                    velocity[2] = 0.0;
-                } else {
-                    position[2] = solid.max[2] + character.radius;
-                    velocity[2] = 0.0;
-                }
-            }
-            if let Some(transform) = world.get_mut::<Transform>(character.key) {
-                transform.position = position;
-            }
-            if let Some(slot) = world.get_mut::<Velocity>(character.key) {
-                slot.linear = velocity;
-            }
-        }
     }
 }

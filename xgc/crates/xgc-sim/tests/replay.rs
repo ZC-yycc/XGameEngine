@@ -114,11 +114,10 @@ fn velocity_system_moves_transform() {
             "character_jump",
             "velocity",
             "ground",
-            "character",
-            "character_step",
-            "character_block",
             "aabb",
             "rapier",
+            "character",
+            "character_step",
             "animation_state",
             "animation",
             "animation_apply",
@@ -144,7 +143,8 @@ fn velocity_system_moves_transform() {
 fn velocity_system_declares_access_and_parallel_hash_matches() {
     let simulation = Simulation::new(World::new());
     let access = &simulation.schedule().accesses()[2];
-    assert_eq!(access.reads, vec![ComponentId(0x0102)]);
+    // 读 `Velocity` + 读 `CharacterController`（角色水平位移归 KCC，这里要跳过它）。
+    assert_eq!(access.reads, vec![ComponentId(0x0102), ComponentId(0x0402)]);
     assert_eq!(access.writes, vec![ComponentId(0x0101)]);
 
     fn run(threads: usize) -> (u64, f64) {
@@ -452,7 +452,7 @@ fn character_stays_on_ground() {
         CharacterController::default(),
     ));
     let mut schedule = Schedule::new();
-    schedule.add(CharacterSystem);
+    schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(entity).unwrap();
     let velocity = world.get::<Velocity>(entity).unwrap();
