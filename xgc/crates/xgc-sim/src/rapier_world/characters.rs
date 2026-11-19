@@ -10,7 +10,8 @@ use rapier3d::na::{Isometry3, Translation3, Vector3};
 use xgc_base::EntityKey;
 use xgc_world::{CharacterController, Transform, Velocity, World};
 
-use super::{rotation, RapierWorld};
+use super::bodies::rotation;
+use super::RapierWorld;
 use crate::character_kcc;
 
 /// 一个角色实体的运行时托管：刚体 + 胶囊 + 本帧要用的控制器。
