@@ -12,7 +12,7 @@
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
 | 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `bb3fdc99df20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / RGBA16F 场景 / 线性粒子合成 / 唯一全局 ACES / 曝光旋钮（`render.exposure`，缺省 1.0）/ 曝光后曲线前三级光晕（默认关） / 多光源照明（方向光 / 点光最多 8 盏 + 点光衰减） / 点光立方体阴影（6 面深度图） / 可选 PCSS 软阴影 + 级间混合（`render.shadow`，默认关）/ tone 后可选 FXAA（默认关）/ tone 后 UI 已贯通 |
 | 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 296950/921600 像素不同（32.22%），mean_abs **0.61**、max 194；HDR + 全局 tone-map 相对上一版 XGC 只改 6.19% 像素、mean_abs 0.04、max 13，余差主要是狐狸动画 / 几何边缘与 UI；归因（`image-diff … report`）：244107 个像素（26.5%）只差 1 LSB、结构性差异（单通道 ≥8）16801 = 1.82%，推断集中在第 4 行阴影边界块 |
-| 逐帧 trace / 状态哈希对照 | **未通过（XGC 侧逐帧 trace 已建）** | `xgc trace <世界.json> [帧]` 逐帧打印 `frame / entities / revision / hash`（与 `run-world` 同一条无脚本步进路径，第 0 帧是装载后状态）；集成回归 `crates/xgc-cli/tests/trace.rs`：与进程内重放逐步对表、两次运行逐字节相同、不同世界第 0 帧即不同；旧引擎 `--headless` 没有逐帧 trace 输出，跨端对照仍缺 |
+| 逐帧 trace / 状态哈希对照 | **未通过（XGC 侧逐帧 trace 已建）** | `xgc trace <世界.json> [帧数] [资产根]` 逐帧打印 `frame / entities / revision / hash`（无资产根时与 `run-world` 同一条无脚本步进路径，带资产根时走 `ScriptedRunner`、与 `run-scripts` 同一条路径；第 0 帧是装载后状态；坏脚本 / 语法错 / 不可用资产根都会打印「第 N 帧运行失败」并退出码 2）；集成回归 `crates/xgc-cli/tests/trace.rs`：与进程内重放逐步对表、两次运行逐字节相同、不同世界第 0 帧即不同、带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致；旧引擎 `--headless` 没有逐帧 trace 输出，跨端对照仍缺 |
 | 正式 System 调度 / 并行 | **未通过** | `batches()` 计划已有，执行顺序 |
 | 性能基准 + 热路径分配门禁 | **未通过（XGC 侧门禁已建）** | `crates/xgc-sim/tests/steady_state.rs`：稳态帧分配 13818 次 / 预算 16440（每帧 1697 → 230），数值型组件 `state_hash` 零分配；release 吞吐 0.057 ms/帧（210 实体）；仍无 CI release 基线 |
 | 推送 / CI | **未通过** | 无 GitHub 凭据，全部 commit 仅本地 |
@@ -30,8 +30,10 @@ cargo run -q -p xgc-cli --offline -- compare-headless old.json ..\tmp\showcase.j
 
 # 逐帧 trace（XGC 侧）：每帧状态哈希，可直接 diff 两次运行；
 # 口径是「已推进 N 步」的原始世界，不含 render-frame 收尾的层级 / UI 重算
-# （showcase 150 步末行 hash 883b6a7bdf20aa31 ≠ render-frame 的 bb3fdc99df20aa31）
+# （showcase 150 步末行 hash 883b6a7bdf20aa31 ≠ render-frame 的 bb3fdc99df20aa31：render-frame 收尾会再跑层级 / UI 重算）
 cargo run -q -p xgc-cli --offline -- trace ..\tmp\showcase.json 150
+# 带资产根时走脚本路径（与 run-scripts 同一条逐帧路径，脚本帧也逐帧打印）
+cargo run -q -p xgc-cli --offline -- trace ..\tmp\showcase.json 150 ..\projects\XGame
 
 # 视觉指标：先在根 workspace 生成旧引擎第 150 帧，再回 xgc 生成同帧
 cd ..
@@ -183,6 +185,6 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 
 1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒、蒙皮 draw 单次提交、蒙皮 palette / model 竞技场已贯通；阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场，角色坡面 `slope_limit` 与贴地 `snap_to_ground` 也已生效；角色已有运行时托管的运动学胶囊、水平位移走 rapier `KinematicCharacterController` 的 collide-and-slide、tone-map 后可选的显示空间 FXAA（默认关）也已贯通；角色的竖直 / 地面 / 台阶已搬进 KCC、`physics.slope` 也有静态楔形碰撞体、陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效；画面曝光（`render.exposure`）也已接上（缺省 1.0 逐字节不变），阴影画质（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关）也已接通；多光源照明（方向光 / 点光最多 8 盏 + 点光距离衰减，帧 uniform 扩到 976 字节）也已接通；点光立方体阴影（六面 1024² 深度图、帧 uniform 扩到 1008 字节、`point_shadow_draw_calls` 诊断口径）也已接通；TAA（`render.taa`）也已接通（默认关、关着逐字节不变），SSAO（`render.ssao`，默认关；半分辨率 16 抽样 + 可分离模糊 + 线性上采样乘算）也已接通（关着不建 AO 纹理、帧逐字节不变）。
 2. 正式调度：脚本与系统统一访问声明。
-3. 旧新逐帧 trace（XGC 侧 `xgc trace` 已建，缺旧端输出）+ 截图像素门禁；视觉余差归因工具 `image-diff … report` 已建（26.5% 像素只差 1 LSB、结构性 1.82%），余差收窄仍待旧端逐帧截图；性能门禁的 XGC 侧热路径分配门禁已建立，还缺 CI release 基线。
+3. 旧新逐帧 trace（XGC 侧 `xgc trace` 已建、脚本帧也已纳入，缺旧端输出）+ 截图像素门禁；视觉余差归因工具 `image-diff … report` 已建（26.5% 像素只差 1 LSB、结构性 1.82%），余差收窄仍待旧端逐帧截图；性能门禁的 XGC 侧热路径分配门禁已建立，还缺 CI release 基线。
 4. 密码学签名 / 跨机器增量。
 5. 推送 + CI。

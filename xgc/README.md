@@ -104,7 +104,7 @@ PCSS 软阴影与级间混合切片把阴影接收端对齐到旧端同一份合
 
 视觉余差归因切片给 `xgc image-diff` 加了第四个参数 `report`：除了原有总览，还打印「余差归因」——按最大 RGB 通道差把像素分成 相同 / ±1 / 2-3 / 4-7 / ≥8 五桶、三通道平均绝对差、以及 16×9 块里差异最大的 5 块（`crates/xgc-render/src/diff.rs` 的 `diff_breakdown`；`spans` 把宽度 / 高度切成首尾相接的段，除不尽时余数平均分给前几段，保证不丢像素）。对第 150 帧旧 `tmp/old-150.png` vs 新 PPM 实跑：**624650 像素逐字节相同、244107 像素（26.5%）只差 1 LSB、2-3 差 22541、4-7 差 13501、结构性（≥8）16801 = 1.82%**；通道平均绝对差 R 0.72 / G 0.84 / B 0.86（注意总览的 mean_abs 是 RGBA 四通道均值、这里的 R/G/B 是三通道均值，口径不同（四通道 vs 三通道），不能当作同一指标直接比较）；最差块集中在第 4 行（row=4 col=12 99.94%、col=9 97.84%、row=5 col=13 93.06%），推断集中在地面上的阴影边界带。⇒ 32.22% 的差异里绝大多数是 8 位编码舍入（推断是同一线性值经不同的 tone-map / sRGB 往返路径差 1 个 LSB），真正的结构性差异只有 1.82%（推断集中在阴影边界与 UI）。七条纯函数回归（分桶边界（含差值 3 / 7 / 8 的桶上下边界）、平手按行列升序、最多 5 块上限、块网格与最差块排序、窄轴切段不丢像素、尺寸不同报错、只改 alpha 不算差异）+ 三条 CLI 集成回归（真实 PPM 的分桶与通道均值 / 不加 `report` 时输出不变 / 未知第四参数退出码 2）；把 ±1 桶临时算进结构性桶时 `buckets_split_rounding_from_structural_differences` 实跑红（`left: 0 right: 1`）；把 `2..=3` 收紧成 `2..=2`、`4..=7` 收紧成 `4..=6` 各自让桶用例红；把最差块上限从 5 放宽到 6 让 `worst_blocks_cap_at_five` 红；把 alpha 也计入差异让 `alpha_only_differences_are_not_counted` 红（另三条连坐）；把切段余数丢掉时 `spans_keep_every_pixel_when_the_axis_does_not_divide_evenly` 实跑红。**未闭环**：工具只归因不修改，余差本身尚未收窄；旧端仍没有逐帧截图序列，单帧归因不能定位动画差异。
 
-逐帧 trace 切片补上 CUTOVER 第 3 行门槛的 XGC 一侧：`xgc trace <世界.json> [帧数]` 逐帧打印 `frame / entities / revision / hash`，末行 `trace: frames=... entities=... revision=... hash=...` 与 `run-world` 同口径（`crates/xgc-cli/src/trace_cmd.rs`）；步进路径与 `run-world` 相同（`Simulation::step`，无脚本），第 0 帧是装载后的原始状态，先比输入世界、再比同一轨迹；集成回归 `crates/xgc-cli/tests/trace.rs` 与进程内重放逐步对表、两次运行逐字节相同、不同世界第 0 帧即不同、参数错误退出码 2、汇总行与 `run-world` 末行逐字一致（钉住两条命令共用同一条步进路径）。证据世界前 3 帧 `f05512271f20aa31` / `690787d45f20aa31` / `0ea3b5f6df20aa31`，`run 60` 末态仍 `f4bc029f5f995b91`；跳过第 0 帧与不推进仿真两种变异各自实跑红。**未闭环**：旧引擎没有逐帧 trace 输出，跨端逐帧对照仍缺；脚本帧尚未纳入 trace。
+逐帧 trace 切片补上 CUTOVER 第 3 行门槛的 XGC 一侧：`xgc trace <世界.json> [帧数]` 逐帧打印 `frame / entities / revision / hash`，末行 `trace: frames=... entities=... revision=... hash=...` 与 `run-world` 同口径（`crates/xgc-cli/src/trace_cmd.rs`）；步进路径与 `run-world` 相同（`Simulation::step`，无脚本），第 0 帧是装载后的原始状态，先比输入世界、再比同一轨迹；集成回归 `crates/xgc-cli/tests/trace.rs` 与进程内重放逐步对表、两次运行逐字节相同、不同世界第 0 帧即不同、参数错误退出码 2、汇总行与 `run-world` 末行逐字一致（钉住两条命令共用同一条步进路径）。证据世界前 3 帧 `f05512271f20aa31` / `690787d45f20aa31` / `0ea3b5f6df20aa31`，`run 60` 末态仍 `f4bc029f5f995b91`；跳过第 0 帧与不推进仿真两种变异各自实跑红。带资产根时改走 `ScriptedRunner`（系统 → 脚本 → 粒子，与 `run-scripts` 同一条路径），脚本帧也逐帧可比；回归另加三条（带资产根时第 1 帧起必须与无脚本路径分叉 / 同一世界两次脚本 trace 逐字节相同且汇总行与 `run-scripts` 末行逐字一致 / 坏脚本退出码 2 且点名出错帧）。脚本错误不再静默：`ScriptRuntime::take_error()` 收本帧第一处错误，`ScriptedRunner::step` 转成 `Err`，`xgc trace` / `run-scripts` 打印「第 N 帧运行失败」并退出 2；资产根扫描失败先警告再退回项目相对路径。**未闭环**：旧引擎没有逐帧 trace 输出，跨端逐帧对照仍缺。
 
 热路径分配门禁切片把稳态帧的分配从每帧 1697 次降到 230 次（`crates/xgc-sim/tests/steady_state.rs` 用线程本地计数分配器：200 walker + 10 动态刚体、8 帧预热后连跑 60 帧，101838 → 13818 次；数值型组件世界的 `World::state_hash()` 60 次调用零分配，预算门禁 60 × (实体数 + 64)）：`crates/xgc-world/src/hash.rs` 每帧现建的实体行号 `Vec` / 逐实体组件 ID 排序 / 逐字段 `field_names()` 都改成 `Archetype::hash_layout`（`OnceLock`，按 archetype 只算一次）与 `thread_local` scratch，哈希输出逐位不变（`run 60` 仍 `f4bc029f5f995b91`，第 150 帧 PPM SHA-256 与上一版相同）；变异回每实体现建时两条分配回归实跑红（72000 次 / 114018 次；变异值比改前基线更大，因为每实体现建比旧路径还多一条布局 `Vec`）；release 下吞吐 0.057 ms/帧（210 实体，600 帧 33.98 ms）。**未闭环**：字符串字段经 `Value` 反射读取时每实体仍克隆一次；门禁目前只统计调用线程的分配（默认调度是单线程），并行 System 执行落地时要汇总各 worker 线程的计数；没有 CI 上的 release 基线。
 
@@ -166,7 +166,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（470 条），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（474 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（238 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
@@ -174,7 +174,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
-以及旧新逐帧 trace（XGC 侧 `xgc trace` 已建，旧端没有输出）；性能验收的 XGC 侧热路径分配门禁已建（还缺 CI release 基线）。
+以及旧新逐帧 trace（XGC 侧 `xgc trace` 已建、脚本帧也已纳入，旧端没有输出）；性能验收的 XGC 侧热路径分配门禁已建（还缺 CI release 基线）。
 
 ## 命令
 
@@ -189,7 +189,7 @@ cargo run -p xgc-cli -- bench
 cargo run -p xgc-cli -- export world.json
 cargo run -p xgc-cli -- import world.json
 cargo run -p xgc-cli -- run 60
-cargo run -p xgc-cli -- trace <世界.json> [帧数]
+cargo run -p xgc-cli -- trace <世界.json> [帧数] [资产根]
 cargo run -p xgc-cli -- image-diff <旧图> <新图> [阈值] [report]
 cargo run -p xgc-cli -- serve
 cargo run -p xgc-cli -- migrate <旧.ron|旧目录> <新.json|新目录>

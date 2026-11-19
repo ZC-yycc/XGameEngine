@@ -25,6 +25,9 @@ pub struct ScriptRuntime {
     started: HashSet<EntityId>,
     view: Rc<RefCell<ScriptView>>,
     time: f32,
+    /// 本帧第一处脚本错误。只打 stderr 不够：宿主（`run-scripts` / `trace`）要看得到
+    /// 失败并退出 2，否则坏脚本会静默退化成"什么都没发生"。
+    frame_error: Option<String>,
 }
 
 impl ScriptRuntime {
@@ -36,6 +39,7 @@ impl ScriptRuntime {
             started: HashSet::new(),
             view: Rc::new(RefCell::new(ScriptView::default())),
             time: 0.0,
+            frame_error: None,
         }
     }
 
@@ -48,11 +52,16 @@ impl ScriptRuntime {
             started: HashSet::new(),
             view: Rc::new(RefCell::new(ScriptView::default())),
             time: 0.0,
+            frame_error: None,
         }
     }
 
     /// 执行一帧脚本；脚本写入的命令在帧末统一 plan / apply。
+    ///
+    /// 单帧内第一处错误记在 `frame_error` 里，由 [`Self::take_error`] 取走：命令行的
+    /// trace / run-scripts 需要据此退出 2，不能只靠 stderr。
     pub fn run_frame(&mut self, world: &mut World, dt: f32) {
+        self.frame_error = None;
         self.time += dt;
         self.refresh_view(world, dt);
         let mut scripts = Vec::new();
@@ -72,7 +81,7 @@ impl ScriptRuntime {
         for entity in stale {
             if let Some(entry) = self.entries.remove(&entity) {
                 if let Err(err) = entry.host.destroy() {
-                    eprintln!("script: {err}");
+                    self.note_error(&err);
                 }
             }
             self.started.remove(&entity);
@@ -85,21 +94,26 @@ impl ScriptRuntime {
                         self.entries.insert(entity, entry);
                     }
                     Err(err) => {
-                        eprintln!("script: {err}");
+                        self.note_error(&err);
                         continue;
                     }
                 }
             }
+            let started = self.started.insert(entity);
             let entry = self.entries.get_mut(&entity).expect("刚插入");
-            if self.started.insert(entity) {
-                if let Err(err) = entry.host.start_legacy() {
-                    eprintln!("script: {err}");
-                }
-            }
-            if let Err(err) = entry.host.update_legacy(dt) {
-                eprintln!("script: {err}");
-            }
+            let start_error = if started {
+                entry.host.start_legacy().err()
+            } else {
+                None
+            };
+            let update_error = entry.host.update_legacy(dt).err();
             pending.extend(entry.host.take_commands());
+            if let Some(err) = start_error {
+                self.note_error(&err);
+            }
+            if let Some(err) = update_error {
+                self.note_error(&err);
+            }
         }
         if pending.is_empty() {
             return;
@@ -107,10 +121,22 @@ impl ScriptRuntime {
         let plan = world.plan(pending);
         if plan.is_valid() {
             if let Err(diagnostics) = world.apply(&plan) {
-                eprintln!("script: 命令应用失败：{diagnostics:?}");
+                self.note_error(&format!("命令应用失败：{diagnostics:?}"));
             }
         } else {
-            eprintln!("script: 命令计划无效：{:?}", plan.diagnostics);
+            self.note_error(&format!("命令计划无效：{:?}", plan.diagnostics));
+        }
+    }
+
+    /// 取走本帧第一处脚本错误（没有则 `None`）。
+    pub fn take_error(&mut self) -> Option<String> {
+        self.frame_error.take()
+    }
+
+    fn note_error(&mut self, err: &str) {
+        eprintln!("script: {err}");
+        if self.frame_error.is_none() {
+            self.frame_error = Some(err.to_string());
         }
     }
 

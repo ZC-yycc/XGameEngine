@@ -23,8 +23,11 @@ pub(crate) fn parse_frames(frames: Option<&str>) -> Result<u64, ExitCode> {
     }
 }
 
-/// 读世界文件并装成可步进的 `Simulation`（load_world → restore_world_data → Simulation::new）。
-pub(crate) fn load_simulation(path: &str) -> Result<Simulation, ExitCode> {
+/// 读世界文件并恢复成 `World`（load_world → restore_world_data）。
+///
+/// 无脚本命令要 `Simulation`、脚本命令要「先拿 World 再交给 `ScriptedRunner`」，
+/// 两条路径共用这一处装载，别让它们各自读盘。
+pub(crate) fn load_world_state(path: &str) -> Result<World, ExitCode> {
     let data = match load_world(Path::new(path)) {
         Ok(data) => data,
         Err(err) => {
@@ -37,7 +40,12 @@ pub(crate) fn load_simulation(path: &str) -> Result<Simulation, ExitCode> {
         eprintln!("恢复世界失败：{err}");
         return Err(ExitCode::from(2));
     }
-    Ok(Simulation::new(world))
+    Ok(world)
+}
+
+/// 读世界文件并装成可步进的 `Simulation`（`load_world_state` → `Simulation::new`）。
+pub(crate) fn load_simulation(path: &str) -> Result<Simulation, ExitCode> {
+    Ok(Simulation::new(load_world_state(path)?))
 }
 
 pub fn run_world(path: Option<&str>, frames: Option<&str>) -> ExitCode {

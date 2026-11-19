@@ -46,6 +46,44 @@ fn trace(path: &Path, frames: &str) -> Output {
         .unwrap()
 }
 
+/// 带脚本的资产根 + 世界：`move.lua` 每帧把实体 x 设成 5，
+/// 用来区分"跑了脚本"与"只跑系统"两条 trace 路径。
+const MOVE_LUA: &str = "function update(ctx)\n  set_pos(ctx, 5.0, 0.0, 0.0)\nend\n";
+
+fn scripted_world(label: &str) -> (PathBuf, PathBuf) {
+    scripted_world_with(label, MOVE_LUA)
+}
+
+/// 同 [`scripted_world`]，但脚本内容由调用方给（坏脚本用例要能造语法错）。
+fn scripted_world_with(label: &str, lua: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("xgc-trace-script-{}-{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let assets = dir.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("move.lua"), lua).unwrap();
+    let path = dir.join("world.json");
+    let mut world = World::new();
+    world.spawn((
+        Transform::default(),
+        xgc_world::Script {
+            path: "move.lua".to_string(),
+        },
+    ));
+    save_world(&path, &world.world_data()).unwrap();
+    (path, assets)
+}
+
+/// 带资产根的 trace：第 3 个参数走脚本路径。
+fn trace_with_assets(path: &Path, frames: &str, assets: &Path) -> Output {
+    Command::new(binary())
+        .arg("trace")
+        .arg(path)
+        .arg(frames)
+        .arg(assets)
+        .output()
+        .unwrap()
+}
+
 fn stdout_lines(output: &Output) -> Vec<&str> {
     let text = std::str::from_utf8(&output.stdout).unwrap();
     text.lines().collect()
@@ -182,5 +220,107 @@ fn trace_summary_matches_run_world_output() {
         ),
         "trace 汇总行必须与 run-world 末行逐字一致（同一条步进路径）"
     );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn trace_with_assets_root_runs_the_scripts() {
+    let (path, assets) = scripted_world("runs");
+    let plain = trace(&path, "3");
+    let scripted = trace_with_assets(&path, "3", &assets);
+    assert!(
+        plain.status.success(),
+        "无脚本 trace 必须成功：{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    assert!(
+        scripted.status.success(),
+        "脚本 trace 必须成功：{}",
+        String::from_utf8_lossy(&scripted.stderr)
+    );
+    let plain = stdout_lines(&plain);
+    let scripted = stdout_lines(&scripted);
+    // 第 0 帧还没跑脚本，两条路径必须相同；从第 1 帧起脚本把 x 设成 5。
+    assert_eq!(plain[0], scripted[0], "第 0 帧是装载态，两条路径必须一致");
+    assert_ne!(
+        plain[1], scripted[1],
+        "带资产根时脚本必须在第 1 帧前跑过（否则两条路径没有区别）"
+    );
+    assert_eq!(scripted.len(), 5, "3 帧应有 4 行帧状态 + 1 行汇总");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn scripted_trace_is_byte_identical_and_matches_run_scripts() {
+    let (path, assets) = scripted_world("matches");
+    let first = trace_with_assets(&path, "4", &assets);
+    let second = trace_with_assets(&path, "4", &assets);
+    assert!(first.status.success() && second.status.success());
+    assert_eq!(
+        first.stdout, second.stdout,
+        "同一世界 + 同一脚本的两次逐帧 trace 必须逐字节相同"
+    );
+
+    // 汇总行必须与 `run-scripts` 同口径（同一条 ScriptedRunner 路径）。
+    let run = Command::new(binary())
+        .arg("run-scripts")
+        .arg(&path)
+        .arg(&assets)
+        .arg("4")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "run-scripts 必须成功：{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_text = String::from_utf8(run.stdout).unwrap();
+    let run_last = run_text.lines().last().unwrap();
+    let run_summary = run_last.replacen("run-scripts: ", "trace: ", 1);
+    let trace_text = String::from_utf8(first.stdout).unwrap();
+    let trace_last = trace_text.lines().last().unwrap();
+    assert_eq!(
+        trace_last, run_summary,
+        "脚本 trace 的汇总行必须与 run-scripts 末行逐字一致（同一条步进路径）"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn trace_reports_script_errors_as_exit_code_two() {
+    // 坏脚本不能"静默跑完退出 0"：trace 的用途就是拿它和真实运行对表，
+    // 脚本没生效却报成功会让对表结论整体失真。
+    let (path, assets) =
+        scripted_world_with("broken", "function update(ctx)\n  this is not lua\nend\n");
+    let output = trace_with_assets(&path, "3", &assets);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "脚本语法错误必须退出码 2：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("第 1 帧运行失败"), "错误必须点名帧号：{text}");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn update_errors_are_reported_like_load_errors() {
+    // `run_frame` 里的错误是分阶段记的（load / start / update / plan / apply），
+    // 只测 load 期错误的话，update 分支的 `note_error` 重构改坏了也看不见。
+    let (path, assets) = scripted_world_with(
+        "update-error",
+        "function update(ctx)\n  error(\"boom\")\nend\n",
+    );
+    let output = trace_with_assets(&path, "3", &assets);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "update 里抛错必须退出码 2：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("第 1 帧运行失败"), "错误必须点名帧号：{text}");
+    assert!(text.contains("boom"), "错误必须带上脚本原文：{text}");
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
