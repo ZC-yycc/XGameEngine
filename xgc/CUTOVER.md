@@ -10,7 +10,7 @@
 | 场景 + 资源 + 脚本 + 预制体端到端迁移 | 通过 | showcase 24 实体；character 2 脚本；Pillar 3 实体；`verify-migration` 一致 |
 | 迁移世界可运行 | 通过 | `run-world` / `run-cooked` / `xgc-player` 60 帧同哈希 |
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
-| 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `bb3fdc99df20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / RGBA16F 场景 / 线性粒子合成 / 唯一全局 ACES / 曝光旋钮（`render.exposure`，缺省 1.0）/ 曝光后曲线前三级光晕（默认关）/ 可选 PCSS 软阴影 + 级间混合（`render.shadow`，默认关）/ tone 后可选 FXAA（默认关）/ tone 后 UI 已贯通 |
+| 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `bb3fdc99df20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / RGBA16F 场景 / 线性粒子合成 / 唯一全局 ACES / 曝光旋钮（`render.exposure`，缺省 1.0）/ 曝光后曲线前三级光晕（默认关） / 多光源照明（方向光 / 点光最多 8 盏 + 点光衰减） / 可选 PCSS 软阴影 + 级间混合（`render.shadow`，默认关）/ tone 后可选 FXAA（默认关）/ tone 后 UI 已贯通 |
 | 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 296950/921600 像素不同（32.22%），mean_abs **0.61**、max 194；HDR + 全局 tone-map 相对上一版 XGC 只改 6.19% 像素、mean_abs 0.04、max 13，余差主要是狐狸动画 / 几何边缘与 UI |
 | 逐帧 trace / 状态哈希对照 | **未通过** | XGC 重放自身确定；无旧引擎逐帧 trace |
 | 正式 System 调度 / 并行 | **未通过** | `batches()` 计划已有，执行顺序 |
@@ -77,6 +77,8 @@ cargo test -p xgc-render --test bloom --offline
 cargo test -p xgc-render --test exposure --offline
 # 软阴影：缺省逐字节不变且不多跑 pass / 非法值落回硬阴影 / softness 加宽过渡带 / cascade_blend 经 CPU 重叠拟合改动阴影采样相位（本机机位下 GPU 混合分支不执行）
 cargo test -p xgc-render --test shadow_soft --offline
+# 多光源照明：方向光 / 点光叠加、点光衰减与 8 槽上限
+cargo test -p xgc-render --test lights --offline
 
 # 显示空间 FXAA：关闭态逐字节不变 / 硬边缘被柔化且只动边缘 ±2 内 / 纯色清屏不变 / 尺寸与输出格式重建 / sRGB 目标混合在显示空间 / 光晕叠加 12 趟（GPU）
 cargo test -p xgc-render --test fxaa --offline
@@ -111,6 +113,7 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > GPU 蒙皮现在只保留顶点变形入口，片元合同与静态实例共同拼接唯一的 `scene_shading.wgsl`：基色因子 / metallic / roughness、sRGB 基色贴图、ambient / 天空 SH、Cook-Torrance 与 4 级 CSM 阴影接收全部同源；ACES 只有 `tone_map.wgsl` 一份。四条 GPU 回归分别钉住 identity 与静态逐字节相同、关节平移带着非均匀贴图移动、超出 palette 容量的 CPU 回退不丢 UV / 贴图（本刀起门槛 257 关节）、静态投射体能让 GPU 蒙皮表面变暗。该切片第 150 帧 PPM 与上一版 SHA-256 相同；release `render-frame` 新进程冷启动中位数由 730.44 ms 变为 806.42 ms（+10.4%，含新增 shader / pipeline 编译；当前 GPU 蒙皮还按实体单独建 uniform / bind / encoder 并提交，不代表稳态帧耗时）。
 > HDR 切片让几何 / 天空 / 粒子写线性 `Rgba16Float`，Alpha / Additive 先合成、全屏三角形再执行一次 ACES，UI 最后叠加；第 150 帧 PPM SHA-256 `4A47275DD54A4AA2780353B6B37E6BD2999F9D16BEDA20197973BA6DB48A0927`，世界 hash 与 14/7/8 draw 统计不变。相对上一版 XGC 的差异是 6.19% / mean_abs 0.04 / max 13，相对旧端改善为 32.22% / **0.61** / 194。冷启动 release 四跑中位数 818.57 → 741.66 ms（-9.4%），只判定未见回归；该测量包含启动 / 设备 / pipeline 编译，不代表稳态帧耗时。
 > 阴影画质切片按旧端 `ShadowConfig` / `scene_pipeline.rs` 合同接上**可选 PCSS 软阴影 + 级间混合**（`render.shadow` 的 `softness` / `cascade_blend`，默认全 0 = 关、关着走 3×3 PCF + 硬级间切换且逐位不变）：`softness > 0` 时 8 抽头固定泊松盘找遮挡物平均深度、`penumbra = clamp((depth - blocker) * softness * 12, texel, 24 * texel)`、再 12 抽头 `textureSampleCompareLevel`；`cascade_blend > 0` 时切分带里按 `t` 混下一级，同一个旋钮让 `cascade_shadow_matrices` 把非 0 级拟合框近端多铺 `overlap × 本级跨度`（否则带内片元落在下一级图外、被「图外不混」守卫退回硬切换）。帧 uniform 592 → 608 字节；第 150 帧 PPM SHA-256 不变（`4A47275D…`、14/7/8、hash `bb3fdc99df20aa31`）、`run 60` 哈希不变。4 条 GPU 回归 + 3 条消毒单测 + 2 条级联重叠回归 + 1 条经 `load_render` 入口的阴影解析回归钉住缺省逐字节等价且 `passes` 不增、非法值落回硬阴影、`softness = 6` 的中间灰阶 24 → 20086 个像素、`cascade_blend = 0.05` 经 CPU 重叠拟合改动阴影采样相位、多铺后 `view_range` 近端严格更靠近相机；红证据：着色器 `frame.shadow_soft.x > 0.0` 改 `> 999.0`（「软阴影必须真的改变画面」）、旋钮的 `cascade_blend` 恒 0（「级间混合必须接进 CPU 重叠拟合，否则分带仍是硬切换」）、重叠量改 0（「第 1 级的近端必须更靠近相机」）。**未闭环**：本机机位下混合分支本身改不动像素，GPU 回归钉的是旋钮接线与重叠拟合；点光阴影仍未做；没做稳态计时。
+> 多光源照明切片把主场景从单方向光换成旧端同款的 8 槽光源表：`crates/xgc-render/src/lights.rs` 按原顺序打包 `is_active()` 的方向光与点光（方向光存传播方向 `w = 0`、点光存世界坐标 `w = 1`、`shadow_params.y` 是点光半径），`intensity <= 0` 与第 9 盏起一律丢弃，只有第一盏投射阴影的方向光打 CSM 标记（阴影图只有一份，标记错了别的方向光会采样到不属于自己的图；主阴影光与打包表走同一个 `take(MAX_LIGHTS)` 判据，排在第 9 槽之后就不拟合 CSM）。`scene_shading.wgsl` 的片元按盏循环：方向光 `normalize(-dir)` 无衰减；点光 `fade = 1 - smoothstep(0.8, 1.0, dist/range)`、`atten = fade / (1 + 0.09d + 0.032d²)`、范围外 / 半径非有限整盏跳过，`radiance = 光色 × 强度 × 衰减 × π` 后进同一套 Cook-Torrance。帧 uniform 608 → 976 字节（+16 B 盏数 vec4、+8×48 B 灯表、−32 B 两个与 `lights[0]` 重复的 `sun_dir` / `sun_color`）。证据世界只有一盏方向光：第 150 帧 PPM SHA-256 不变（`4A47275D…`、14/7/8、hash `bb3fdc99df20aa31`）、`run 60` 哈希不变。6 条 GPU 回归（点光照亮 / 范围外与非有限半径整盏跳过且逐字节不变 / 距离衰减 / 两盏同位置强度 1 等于一盏强度 2 / 8 盏上限丢弃第 9 盏 / 方向光与点光叠加）+ 7 条打包单测；红证据：衰减行改 `atten = fade`（「点光必须随距离衰减：近 [239,…] / 远 [240,…]」）、盏数夹 1（「逐盏累加必须等于同能量的单盏」与「方向光与点光必须叠加」）、`pos_type.w < 0.5` 改 `< 1.5`（点光被当方向光）、第 9 盏绕回槽位 0（「第 9 盏灯必须被丢掉：8 盏 [235,…] / 9 盏 [243,…]」）。**未闭环**：点光只照明不投影（立方体阴影下一刀）、没有光照剔除（每片元 8 盏都循环）、窗口宿主仍不读 `project.ron`、没做稳态计时。
 > 曝光切片把 `render.exposure` 接上（旧端 `RenderConfig::sanitized` 同式消毒：非有限 / 非正落回 1.0，合法值夹进 0.05..20.0；曝光 0 是"全黑画面"不是关闭态），项目级配置经 `xgc-cli/src/project_render.rs` 读进 `Renderer::set_exposure`。乘子在 tone-map（`tone_map.wgsl` 的 `ToneParams` 扩到 32 字节，ACES 之前）与光晕亮部提取（`bloom.wgsl` 的 `fs_bright`，阈值按曝光后的亮度判）两处且必须一致。缺省 1.0 时第 150 帧 PPM SHA-256 不变（`4A47275D…`、14/7/8、hash `bb3fdc99df20aa31`）、`run 60` 哈希不变。5 条 GPU 回归 + 3 条单元回归钉住缺省逐字节等价、加倍变亮并对表 ACES、非法值落回缺省、光晕阈值读曝光后的值、改曝光重建光晕链；红证据：tone-map 的 `* tone.exposure` 改成 `* 1.0`（「曝光加倍必须变亮：62 -> 62」）、亮部提取的 `* params.exposure` 改成 `* 1.0`（「曝光把亮度抬过阈值后必须有光晕：205 -> 205」）、`chain.exposure` 移出链缓存键（「改曝光后光晕链必须按新曝光重建」）。**未闭环**：光照 / 粒子仍在曝光前的线性域里算；没做稳态计时。
 > 光晕切片按旧端 `postfx.rs` 合同接上**曝光后、唯一 ACES 前**的三级 Bloom（`render.bloom` 的 `intensity` / `threshold` / `knee`，软膝式按最大通道取亮度，½ / ¼ / ⅛ 逐级降采样后每级横纵各一次 9 抽头二项核，共 9 个 pass，权重 0.5 / 0.3 / 0.2 在 tone-map 同一趟 pass 里叠回线性场景**再**过 ACES —— 过完曲线的高光没有余量）。默认 `intensity = 0` 是关闭态：整条链不跑、`passes` 不增，第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…`、自比 0/921600），对旧端仍 32.22% / 0.61 / 194。七条 GPU 回归 + 三条单元回归（参数容错、链随源尺寸重建并释放、关闭态换尺寸重建占位绑定）钉住关闭态逐字节等价、开态抬亮量与旧端公式对表（差 ≤2）、低于阈值的暗场景即使 `intensity = 4` 也不发光、resize 重建链且同尺寸两次逐字节确定、亮几何的光晕向外扩散；把合成行乘 `intensity` 临时改成乘 `0.0` 时后三条实跑变红，证明回归真的走到合成。曝光已在本轮接上（`render.exposure` 同时进 tone-map 与光晕亮部提取，见上）。以下代价仍成立：开启时每帧仍跑 9 个 pass 并重建亮部提取 / tone-map 各一个绑定组（链内 8 个建链时一次建好）；关闭态 tone-map 绑定组按场景纹理缓存、链在关掉时整份释放；没做稳态计时。
 > 蒙皮投射切片让**蒙皮网格进阴影批次**（旧端同一个 `vs_shadow` 按 skin slot 分支，XGC 用 `shadow_skin` 的 palette 管线 + 同一份 `skin_vertex.wgsl` 变形公式）：≤256 关节走 GPU palette，>256 / palette 不完整走 CPU 变形后的顶点，四级级联复用每帧一次的绑定，depth bias 与静态投射体共用 constant 2 / slope 2。四条 GPU 回归在旧实现下全红（变暗 0 像素），现在各 176/9216 像素变暗、阴影质心随姿态平移、单位 palette 与静态网格阴影逐像素相同。证据世界 `showcase-particles.json` 不含骨架组件，所以第 150 帧与 HDR 切片逐字节相同（SHA-256 不变、自比 0 像素），对旧端仍 32.22% / 0.61 / 194；冷启动 757.02 → 734.43 ms（-3.0%，只判定未见回归）。**未闭环**：CSM 拟合仍按绑定姿态包围盒，大位移关节可能落到级联外；CPU 回退多算一次变形；palette 在主 / 阴影 pass 各建一次。
@@ -154,7 +157,7 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 第 150 帧像素与上一步逐像素相同（物体早已落定），世界哈希因速度归零而变化。
 > 第 150 帧世界哈希变为
 > `bb3fdc99df20aa31`：`particle.emitter.config` 的完整旧配置参与状态哈希，粒子运行态不落盘（`verify-migration` 一致）。
-> 仍缺：点光阴影、TAA / SSAO 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场）、
+> 仍缺：点光阴影（点光已参与照明，但暂不投影）、TAA / SSAO 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场）、
 > 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、
 > UI 面板底色微差（align/valign 只能按 kind 推断）。旧端本机仍报告项目 Rust 插件构建指纹不匹配并跳过，XGC 也尚未迁移旧 Animator
 > 状态机与完整动画素材。
@@ -162,7 +165,7 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 
 ## 建议顺序
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒、蒙皮 draw 单次提交、蒙皮 palette / model 竞技场已贯通；阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场，角色坡面 `slope_limit` 与贴地 `snap_to_ground` 也已生效；角色已有运行时托管的运动学胶囊、水平位移走 rapier `KinematicCharacterController` 的 collide-and-slide、tone-map 后可选的显示空间 FXAA（默认关）也已贯通；角色的竖直 / 地面 / 台阶已搬进 KCC、`physics.slope` 也有静态楔形碰撞体、陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效；画面曝光（`render.exposure`）也已接上（缺省 1.0 逐字节不变），阴影画质（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关）也已接通（关节 / 连续碰撞随后）。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒、蒙皮 draw 单次提交、蒙皮 palette / model 竞技场已贯通；阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场，角色坡面 `slope_limit` 与贴地 `snap_to_ground` 也已生效；角色已有运行时托管的运动学胶囊、水平位移走 rapier `KinematicCharacterController` 的 collide-and-slide、tone-map 后可选的显示空间 FXAA（默认关）也已贯通；角色的竖直 / 地面 / 台阶已搬进 KCC、`physics.slope` 也有静态楔形碰撞体、陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效；画面曝光（`render.exposure`）也已接上（缺省 1.0 逐字节不变），阴影画质（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关）也已接通；多光源照明（方向光 / 点光最多 8 盏 + 点光距离衰减，帧 uniform 扩到 976 字节）也已接通（关节 / 连续碰撞随后）。
 2. 正式调度：脚本与系统统一访问声明。
 3. 旧新逐帧 trace + 截图像素门禁。
 4. 密码学签名 / 跨机器增量。

@@ -23,6 +23,7 @@ mod gpu;
 mod gpu_mesh;
 mod image;
 mod instanced;
+mod lights;
 mod material;
 mod mesh;
 mod particles;

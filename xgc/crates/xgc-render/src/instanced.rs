@@ -7,18 +7,26 @@ use super::camera::Mat4;
 use super::draw::DrawList;
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
+use super::lights::{self, GpuLight, MAX_LIGHTS};
 use super::mesh::Mesh;
 use super::pipeline::RenderCache;
 use super::shadow::{ShadowCascades, SHADOW_CASCADES};
 use super::texture_bind::TextureBinding;
 use xgc_world::SceneEnvironment;
 
-/// 帧 uniform：view-proj 64B + 四个 vec4（相机/强度、ambient、sun_dir、sun_color）
-/// + 9 个 vec4 的天空球谐 + 天空开关 vec4 + 4 级光视图投影 256B
-/// + 切分 / 视线 / 参数 / 阴影画质 4 个 vec4 = 608B。
-pub(crate) const FRAME_UNIFORM_BYTES: u64 = 608;
+/// 帧 uniform：view-proj 64B + 相机 / ambient 2 个 vec4 + 9 个 vec4 的天空球谐
+/// + 天空开关 vec4 + 4 级光视图投影 256B + 切分 / 视线 / 参数 / 阴影画质 4 个 vec4
+/// + 光源盏数 vec4 + 8 盏灯各 48B = 976B。
+///
+/// 光源本身只在 `lights[]` 里出现一次：以前另有 sun_dir / sun_color 两个 vec4，
+/// 多光源之后它们会与 `lights[0]` 重复且可能不一致，已删。
+pub(crate) const FRAME_UNIFORM_BYTES: u64 =
+    576 + 16 + (MAX_LIGHTS as u64) * lights::LIGHT_UNIFORM_BYTES;
 
-/// 帧级光照参数：环境光 + 场景第一盏可用方向光；没有方向光时强度为 0（只剩环境光）。
+/// 帧级光照参数：环境光 + 全部可用光源（`lights` / `light_count` 进 uniform）。
+///
+/// `sun_*` 三个字段不进 uniform，只给 CPU 侧消费：天空太阳盘与自动取景的顺光需要
+/// "主方向光"这一个标量摘要。着色永远走 `lights[]`，所以两者不会各自漂移。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FrameLighting {
     pub(crate) eye: [f32; 3],
@@ -34,11 +42,16 @@ pub(crate) struct FrameLighting {
     pub(crate) shadow_softness: f32,
     /// 级间混合带宽占该级跨度的比例；0 = 两级硬接。
     pub(crate) shadow_cascade_blend: f32,
+    /// 本帧参与着色的光源（与旧端 `LightsUniform` 同布局），空位留 0。
+    pub(crate) lights: [GpuLight; MAX_LIGHTS],
+    /// 有效光源数；着色器按它提前退出循环。
+    pub(crate) light_count: u32,
 }
 
 impl FrameLighting {
     pub(crate) fn from_environment(environment: &SceneEnvironment, eye: [f32; 3]) -> Self {
         let sun = environment.sun();
+        let packed = lights::pack(environment);
         Self {
             eye,
             ambient: environment.ambient,
@@ -51,6 +64,8 @@ impl FrameLighting {
             shadow_cascades: None,
             shadow_softness: 0.0,
             shadow_cascade_blend: 0.0,
+            lights: packed.lights,
+            light_count: packed.count,
         }
     }
 
@@ -78,21 +93,10 @@ impl FrameLighting {
         for value in view_proj {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        for value in [self.eye[0], self.eye[1], self.eye[2], self.sun_intensity] {
+        for value in [self.eye[0], self.eye[1], self.eye[2], 0.0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         for value in [self.ambient[0], self.ambient[1], self.ambient[2], 0.0] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [
-            self.sun_direction[0],
-            self.sun_direction[1],
-            self.sun_direction[2],
-            0.0,
-        ] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [self.sun_color[0], self.sun_color[1], self.sun_color[2], 0.0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         let sky = self.sky_irradiance.unwrap_or([[0.0; 4]; 9]);
@@ -142,6 +146,13 @@ impl FrameLighting {
         // x = 软阴影尺寸，y = 级间混合带宽；z / w 留给以后（显式写 0 而不是留空洞）。
         for value in [self.shadow_softness, self.shadow_cascade_blend, 0.0, 0.0] {
             bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        // x = 有效光源数；y / z / w 预留（显式写 0，保持 16 字节对齐）。
+        for value in [self.light_count as f32, 0.0, 0.0, 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for light in &self.lights {
+            light.write(bytes);
         }
     }
 }

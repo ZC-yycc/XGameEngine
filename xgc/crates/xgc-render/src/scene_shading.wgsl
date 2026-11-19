@@ -1,12 +1,22 @@
 
+// 单帧最多参与着色的光源数；与 CPU 侧 `lights::MAX_LIGHTS` 一致。
+const MAX_LIGHTS: u32 = 8u;
+
+// 一盏灯：与旧端 `GpuLight` 逐字段对应，也与 `lights.rs` 的打包顺序一致。
+struct GpuLight {
+    // 方向光：xyz = 光线传播方向（归一化）、w = 0；点光：xyz = 世界坐标、w = 1
+    pos_type: vec4<f32>,
+    // rgb = 光色，a = 强度
+    color_intensity: vec4<f32>,
+    // x = 这盏灯是否用方向光阴影图（1 / 0），y = 点光影响半径
+    shadow_params: vec4<f32>,
+};
+
 struct Frame {
     view_proj: mat4x4<f32>,
-    // xyz = 相机世界坐标（用来把面法线朝向相机），w = 方向光强度
-    eye_intensity: vec4<f32>,
+    // xyz = 相机世界坐标（用来把面法线朝向相机），w 预留（光源强度在 lights[] 里）
+    eye: vec4<f32>,
     ambient: vec4<f32>,
-    // xyz = 光线传播方向（归一化）
-    sun_dir: vec4<f32>,
-    sun_color: vec4<f32>,
     // 天空漫反射环境（E/π 口径的 L2 球谐），与 sky.rs 的 sh_project 逐项一致
     sky_sh: array<vec4<f32>, 9>,
     // x = 天空是否开启（1 / 0）
@@ -21,6 +31,9 @@ struct Frame {
     shadow_params: vec4<f32>,
     // x = 软阴影（PCSS）的灯光尺寸，y = 级间混合带宽；两个 0 = 与引入画质参数前逐位一致
     shadow_soft: vec4<f32>,
+    // x = 有效光源数；y / z / w 预留
+    light_count: vec4<f32>,
+    lights: array<GpuLight, 8>,
 };
 
 @group(0) @binding(0)
@@ -218,7 +231,7 @@ fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
     if (count == 0u || frame.shadow_params.x < 0.5) {
         return 1.0;
     }
-    let view_depth = dot(world_pos - frame.eye_intensity.xyz, frame.shadow_forward.xyz);
+    let view_depth = dot(world_pos - frame.eye.xyz, frame.shadow_forward.xyz);
     var cascade = count - 1u;
     for (var i = 0u; i + 1u < count; i = i + 1u) {
         if (view_depth <= frame.shadow_splits[i]) {
@@ -263,7 +276,7 @@ fn fs(input: SceneVsOut) -> @location(0) vec4<f32> {
     // 面法线从屏幕导数叉积得到，符号按"朝向相机"归一，闭合网格可见面才受光。
     let raw = cross(dpdx(input.world), dpdy(input.world));
     var normal = normalize(raw + vec3<f32>(0.0, 0.0, 1e-9));
-    let to_camera = normalize(frame.eye_intensity.xyz - input.world);
+    let to_camera = normalize(frame.eye.xyz - input.world);
     if (dot(normal, to_camera) < 0.0) {
         normal = -normal;
     }
@@ -288,23 +301,57 @@ fn fs(input: SceneVsOut) -> @location(0) vec4<f32> {
         let env_spec = sky_sh_eval(reflected);
         light = light + env_spec * env_brdf_approx(f0, roughness, n_dot_v);
     }
-    // 场景主方向光：GGX 分布 + Smith 可见性 + Schlick 菲涅尔，漫反射按 (1-F) 扣减。
-    let to_light = -normalize(frame.sun_dir.xyz);
-    let n_dot_l = max(dot(normal, to_light), 0.0);
-    let sun_shadow = shadow_factor(input.world, n_dot_l);
-    // π 校准（与旧端同一条）：场景 intensity 是按 Lambert 直乘手调的，
-    // 把 π 并进 radiance，漫反射回到「intensity × 白面 ≈ 1.0」的观感。
-    let radiance = frame.sun_color.rgb * frame.eye_intensity.w * PI;
-    let half_dir = normalize(to_light + to_camera);
-    let n_dot_h = max(dot(normal, half_dir), 0.0);
-    let v_dot_h = max(dot(to_camera, half_dir), 0.0);
-    let d_term = distribution_ggx(n_dot_h, alpha_g);
-    let g_term = smith_visibility(n_dot_v, n_dot_l, alpha_g);
-    let f_term = fresnel_schlick(v_dot_h, f0);
-    let specular = d_term * g_term * f_term / max(4.0 * n_dot_v * n_dot_l, 1e-4);
-    let kd = (vec3<f32>(1.0) - f_term) * (1.0 - metallic);
-    let diffuse = kd * albedo / PI;
-    light = light + (diffuse + specular) * radiance * n_dot_l * sun_shadow;
+    // 场景光源：方向光 / 点光混排，按盏累加（GGX + Smith + Schlick，漫反射扣 (1-F)）。
+    //
+    // 只有一盏方向光时这就是老路径：`to_light = normalize(-dir)`、`atten = 1`、
+    // radiance 的乘子与阴影采样都和单光源版本逐位一致（证据帧因此逐字节不变）。
+    let light_count = u32(max(frame.light_count.x, 0.0));
+    for (var i = 0u; i < MAX_LIGHTS; i = i + 1u) {
+        if (i >= light_count) {
+            break;
+        }
+        let source = frame.lights[i];
+        var to_light: vec3<f32>;
+        var atten = 1.0;
+        if (source.pos_type.w < 0.5) {
+            // 方向光：pos_type.xyz 存的是**传播方向**，表面指向光源要取反。
+            to_light = normalize(-source.pos_type.xyz);
+        } else {
+            // 点光：范围外整盏跳过；范围末段用 smoothstep 收边，别切一刀硬边。
+            let to_point = source.pos_type.xyz - input.world;
+            let distance = length(to_point);
+            let range = source.shadow_params.y;
+            if (range <= 0.0 || distance >= range) {
+                continue;
+            }
+            to_light = to_point / max(distance, 1e-4);
+            let fade = 1.0 - smoothstep(0.8, 1.0, distance / range);
+            atten = fade / (1.0 + 0.09 * distance + 0.032 * distance * distance);
+        }
+        let n_dot_l = max(dot(normal, to_light), 0.0);
+        if (n_dot_l <= 0.0) {
+            // 背光面既没有贡献，也没法算半程向量（to_light + to_camera 可能抵消成零向量）。
+            continue;
+        }
+        // 只有打了阴影标记的那盏方向光查 CSM；点光阴影还没做（标记恒 0）。
+        var shade = 1.0;
+        if (source.shadow_params.x > 0.5) {
+            shade = shadow_factor(input.world, n_dot_l);
+        }
+        // π 校准（与旧端同一条）：场景 intensity 是按 Lambert 直乘手调的，
+        // 把 π 并进 radiance，漫反射回到「intensity × 白面 ≈ 1.0」的观感。
+        let radiance = source.color_intensity.rgb * source.color_intensity.a * atten * PI;
+        let half_dir = normalize(to_light + to_camera);
+        let n_dot_h = max(dot(normal, half_dir), 0.0);
+        let v_dot_h = max(dot(to_camera, half_dir), 0.0);
+        let d_term = distribution_ggx(n_dot_h, alpha_g);
+        let g_term = smith_visibility(n_dot_v, n_dot_l, alpha_g);
+        let f_term = fresnel_schlick(v_dot_h, f0);
+        let specular = d_term * g_term * f_term / max(4.0 * n_dot_v * n_dot_l, 1e-4);
+        let kd = (vec3<f32>(1.0) - f_term) * (1.0 - metallic);
+        let diffuse = kd * albedo / PI;
+        light = light + (diffuse + specular) * radiance * n_dot_l * shade;
+    }
     // 保留线性 HDR；整帧只在 tone_map.wgsl 里做一次 ACES。
     return vec4<f32>(light, input.color.a);
 }

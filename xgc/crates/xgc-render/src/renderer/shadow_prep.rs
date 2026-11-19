@@ -21,11 +21,9 @@ impl super::Renderer {
         camera_pos: [f32; 3],
         cascade_blend: f32,
     ) -> Result<(Option<ShadowCascades>, usize), GpuError> {
-        let Some(light) = world.environment().lights.iter().find(|light| {
-            light.kind == xgc_world::LightKind::Directional
-                && light.is_active()
-                && light.casts_shadow
-        }) else {
+        // 主阴影光与 `lights::pack` 用同一判据：只有它会在着色里带 `shadow_params.x = 1`。
+        // 分别扫环境表会漏掉"主阴影光排在第 9 盏之后"的情形，白跑一次级联深度 pass。
+        let Some(light) = crate::lights::primary_shadow_light(world.environment()) else {
             return Ok((None, 0));
         };
         let bounds = crate::shot::scene_bounds(world, &mut self.meshes)
