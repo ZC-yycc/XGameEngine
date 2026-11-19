@@ -30,7 +30,11 @@ mod state_machine_components;
 mod ui_components;
 mod validate;
 pub use animation_components::Animator;
-pub use character_components::CharacterController;
+pub use character_components::{
+    CharacterController, HEIGHT_DEFAULT, HEIGHT_MAX, RADIUS_DEFAULT, RADIUS_MAX, RADIUS_MIN,
+    SKIN_WIDTH_DEFAULT, SKIN_WIDTH_MAX, SKIN_WIDTH_MIN, SLOPE_LIMIT_DEFAULT, SLOPE_LIMIT_MAX,
+    SNAP_TO_GROUND_DEFAULT, SNAP_TO_GROUND_MAX, STEP_OFFSET_DEFAULT,
+};
 pub use command::{Applied, Command, Plan};
 pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
 use data::ComponentFactory;

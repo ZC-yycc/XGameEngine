@@ -124,6 +124,65 @@ fn maps_character() {
     assert_eq!(field("snap_to_ground").as_f32(), Some(0.3));
 }
 
+/// 旧端 `Character` 的每个字段都有 serde 缺省，作者手写的场景可以只写关心的
+/// 字段；迁移必须按同一批缺省（1.8 / 0.3 / 0.35 / 45 / 0.02 / 0.3）把没写的补出来，
+/// 而不是拿 "missing field" 把这类场景挡在迁移入口。（RON 里整份省略只能写成
+/// `Character()`，那是非法语法；现实场景是省略其中几个字段。）
+#[test]
+fn maps_character_with_old_defaults_when_fields_are_omitted() {
+    let scene = r#"(
+        format_version: 2,
+        name: "CharDefaults",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Player",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Character((height: 2.0, radius: 0.4)),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let character = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == xgc_world::CharacterController::ID)
+        .expect("角色组件必须迁出");
+    let field = |name: &str| {
+        character
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    // 写了的字段按原值迁出，没写的按旧端缺省补齐。
+    assert_eq!(field("height").as_f32(), Some(2.0));
+    assert_eq!(field("radius").as_f32(), Some(0.4));
+    assert_eq!(field("step_offset").as_f32(), Some(0.35));
+    assert_eq!(field("slope_limit").as_f32(), Some(45.0));
+    assert_eq!(field("skin_width").as_f32(), Some(0.02));
+    assert_eq!(field("snap_to_ground").as_f32(), Some(0.3));
+}
+
 #[test]
 fn maps_ui_element() {
     let scene = r#"(

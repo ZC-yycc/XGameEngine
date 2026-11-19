@@ -24,54 +24,32 @@ use xgc_world::{CharacterController, PhysicsBody, Transform, World};
 /// 胶囊底面与脚底之间保留的间隙系数：旧端 `REST_GAP_FACTOR`，`rest_gap = skin * 1.1`。
 pub const REST_GAP_FACTOR: f32 = 1.1;
 
-/// `skin_width` 的消毒区间与缺省值（旧端 `CharacterController::sanitized` 同口径）。
-const SKIN_WIDTH_RANGE: (f32, f32) = (1.0e-3, 0.5);
-const SKIN_WIDTH_DEFAULT: f32 = 0.02;
-/// 胶囊半径 / 高度的消毒区间与缺省值（同上）。
-const RADIUS_RANGE: (f32, f32) = (0.05, 2.0);
-const RADIUS_DEFAULT: f32 = 0.3;
-const HEIGHT_MAX: f32 = 5.0;
-/// 坡限缺省值与上限（旧端 `sanitized` 把越界值夹进 `0..=89`，NaN 落缺省）。
-const SLOPE_LIMIT_DEFAULT: f32 = 45.0;
-const SLOPE_LIMIT_MAX: f32 = 89.0;
-
-fn sanitize(value: f32, default: f32, min: f32, max: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(min, max)
-    } else {
-        default
-    }
-}
-
 /// 角色半径（消毒后）：胶囊与水平扫掠都用它。
+///
+/// 消毒规则只在 `CharacterController::sanitized` 一处（旧端同款）。这里不再抄一份
+/// —— schema 缺省值、KCC 参数、台阶判据一旦各写一份，漂移后就会互相打架。
 pub fn radius(def: &CharacterController) -> f32 {
-    sanitize(def.radius, RADIUS_DEFAULT, RADIUS_RANGE.0, RADIUS_RANGE.1)
+    def.sanitized().radius
 }
 
 /// 角色总高（消毒后）：保证至少容得下两个半球。
 pub fn height(def: &CharacterController) -> f32 {
-    let floor = 2.0 * radius(def) + 1.0e-3;
-    sanitize(def.height, 1.8_f32.max(floor), floor, HEIGHT_MAX)
+    def.sanitized().height
 }
 
 /// 胶囊轴线半长：`(height - 2r) / 2`，负值夹 0（半径大于半高时退化成球）。
 pub fn half_height(def: &CharacterController) -> f32 {
-    ((height(def) - 2.0 * radius(def)) * 0.5).max(0.0)
+    def.sanitized().half_height()
 }
 
 /// 实体原点是**脚底**，刚体原点是胶囊中心，相差 `half_height + radius`。
 pub fn center_height(def: &CharacterController) -> f32 {
-    half_height(def) + radius(def)
+    def.sanitized().center_height()
 }
 
 /// 角色皮肤厚度（消毒后）：既是 KCC 的 `offset`，也是 `rest_gap` 的基准。
 pub fn skin_width(def: &CharacterController) -> f32 {
-    sanitize(
-        def.skin_width,
-        SKIN_WIDTH_DEFAULT,
-        SKIN_WIDTH_RANGE.0,
-        SKIN_WIDTH_RANGE.1,
-    )
+    def.sanitized().skin_width
 }
 
 /// 胶囊底面与脚底的间隙：`skin_width * REST_GAP_FACTOR`。
@@ -104,7 +82,7 @@ pub fn character_capsule(def: &CharacterController) -> Capsule {
 
 /// 可攀爬坡度上限（度）：旧端 `max_slope_climb_angle` 与 `min_slope_slide_angle` 的基准。
 pub fn slope_limit(def: &CharacterController) -> f32 {
-    sanitize(def.slope_limit, SLOPE_LIMIT_DEFAULT, 0.0, SLOPE_LIMIT_MAX)
+    def.sanitized().slope_limit
 }
 
 /// 旧端 `build_rapier_controller` 的参数投影。
@@ -121,7 +99,7 @@ pub fn build_character_controller(def: &CharacterController) -> KinematicCharact
         autostep: None,
         max_slope_climb_angle: limit.to_radians(),
         // 与旧端同式：比可爬角再宽 10° 才判定"往下滑"，防临界坡上爬 / 下滑横跳。
-        min_slope_slide_angle: (limit + 10.0).min(SLOPE_LIMIT_MAX).to_radians(),
+        min_slope_slide_angle: (limit + 10.0).min(xgc_world::SLOPE_LIMIT_MAX).to_radians(),
         snap_to_ground: None,
         normal_nudge_factor: 1.0e-4,
     }

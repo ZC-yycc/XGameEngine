@@ -181,7 +181,7 @@ impl System for CharacterSystem {
                 // 连平地都被当墙）：两边口径不一致时，KCC 按 45° 爬、这里按 NaN 挡。
                 let limit = character_kcc::slope_limit(controller);
                 let radius = character_kcc::radius(controller);
-                let snap = controller.snap_to_ground.max(0.0);
+                let snap = controller.sanitized().snap_to_ground;
                 // 继续把 y=0 当兜底地面参与取大值（旧实现如此）：坡面低于 0 时不该把角色带下去。
                 // 注意 `ground` 只由坡面与 y=0 组成，**不含**台阶 / 箱子的顶面：那些由
                 // `CharacterStepSystem` 在本系统之后抬上去，本系统不该替它算。

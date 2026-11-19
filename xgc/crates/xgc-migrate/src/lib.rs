@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 
 use environment::scene_environment;
+use old_character::OldCharacter;
 use old_scene::OldScene;
 use transform_migrate::transform_components;
 use xgc_base::EntityId;
@@ -24,6 +25,7 @@ pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
 mod compare;
 mod environment;
 mod old_animator;
+mod old_character;
 mod old_lod;
 mod old_particle;
 mod old_rust;
@@ -79,16 +81,6 @@ struct OldAnimator {
     looping: bool,
     autoplay: bool,
     fade_time: f32,
-}
-
-#[derive(Debug, Deserialize)]
-struct OldCharacter {
-    height: f32,
-    radius: f32,
-    step_offset: f32,
-    slope_limit: f32,
-    skin_width: f32,
-    snap_to_ground: f32,
 }
 
 #[derive(Debug, Deserialize)]

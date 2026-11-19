@@ -96,7 +96,7 @@ impl System for CharacterStepSystem {
                 // 收口，否则这里会拿 NaN 去算重叠（`overlaps_y` 恒假 → 台阶静默失效）。
                 radius: character_kcc::radius(controller),
                 height: character_kcc::height(controller),
-                step: controller.step_offset.max(0.0),
+                step: controller.sanitized().step_offset,
                 probe: character_kcc::rest_gap(controller) + PROBE_MARGIN,
             });
         });

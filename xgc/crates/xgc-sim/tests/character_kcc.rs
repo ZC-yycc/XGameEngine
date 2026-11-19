@@ -60,7 +60,9 @@ fn character_stops_at_a_wall_instead_of_passing_through() {
     ));
     let (wall_transform, wall_body) = static_box([2.0, 1.0, 0.0], [0.05, 1.0, 2.0], yaw(0.0));
     world.spawn((wall_transform, wall_body));
-    step_times(&mut world, 60);
+    step_times(&mut world, 30);
+    let settled = world.get::<Transform>(character).unwrap().position[0];
+    step_times(&mut world, 30);
     let transform = world.get::<Transform>(character).unwrap();
     // 墙在 x=2，墙面向内 0.05 → 角色半径 0.3 的胶囊中心停在 1.95 之前。
     assert!(
@@ -73,8 +75,19 @@ fn character_stops_at_a_wall_instead_of_passing_through() {
         "角色根本没走到墙边：x={}",
         transform.position[0]
     );
-    // 撞墙后水平速度回写成"实际位移 / dt"，与旧端口径一致。
-    assert_eq!(world.get::<Velocity>(character).unwrap().linear[0], 0.0);
+    // 撞墙后水平速度回写成"实际位移 / dt"，与旧端口径一致。KCC 的
+    // `normal_nudge_factor` 每帧把角色沿墙法线推离一点点，反向分量在
+    // "实际位移 / dt" 里会留成极小的负值（缺省 skin 0.02 时约 -0.002），
+    // 所以这里钉"不再前进"而不是"精确等于 0"。
+    let vx = world.get::<Velocity>(character).unwrap().linear[0];
+    assert!(vx.abs() < 0.05, "撞墙后水平速度必须被压回接近 0：vx={vx}");
+    // 贴墙站住之后不许再有任何漂移（朝墙继续推进、或沿法线慢慢退开都算回归）。
+    assert!(
+        (transform.position[0] - settled).abs() < 0.02,
+        "贴墙后位置漂移了：30 帧时 {settled}，60 帧时 {}",
+        transform.position[0]
+    );
+    assert!(vx <= 1e-3, "撞墙后不许再保留朝墙的推进分量：vx={vx}");
 }
 
 /// 斜放（20°）的墙必须让角色**沿墙面滑开**，不能像旧 AABB 推出那样顶死在最近轴上。
