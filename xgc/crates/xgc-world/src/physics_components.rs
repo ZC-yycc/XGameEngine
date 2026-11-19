@@ -34,6 +34,39 @@ impl Default for PhysicsBody {
     }
 }
 
+/// `PhysicsBody.kind` 的解析结果。
+///
+/// 建体、回写、地面夹持、AABB 分离都必须走这一处判据：此前各处分别用
+/// `match kind { "static" ... _ => Dynamic }` 和 `kind == "dynamic"` 两种写法，
+/// 拼错的字符串（比如 `"Dynamic"`）会一边建出动态体、另一边不回写，实体静默冻住。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyKind {
+    Static,
+    Kinematic,
+    Dynamic,
+}
+
+impl BodyKind {
+    /// 未知字符串一律按 `Dynamic` 处理（与旧端 `body_from_scene` 的兜底一致）。
+    pub fn parse(kind: &str) -> Self {
+        match kind {
+            "static" => BodyKind::Static,
+            "kinematic" => BodyKind::Kinematic,
+            _ => BodyKind::Dynamic,
+        }
+    }
+}
+
+impl PhysicsBody {
+    pub fn kind(&self) -> BodyKind {
+        BodyKind::parse(&self.kind)
+    }
+
+    pub fn is_dynamic(&self) -> bool {
+        self.kind() == BodyKind::Dynamic
+    }
+}
+
 impl Component for PhysicsBody {
     const ID: ComponentId = ComponentId(0x0401);
     const NAME: &'static str = "physics.body";
@@ -185,5 +218,30 @@ impl Component for PhysicsBody {
             }
             _ => Err(format!("physics.body 没有字段 {field}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_kind_parsing_follows_the_old_engine_fallback() {
+        assert_eq!(BodyKind::parse("static"), BodyKind::Static);
+        assert_eq!(BodyKind::parse("kinematic"), BodyKind::Kinematic);
+        assert_eq!(BodyKind::parse("dynamic"), BodyKind::Dynamic);
+        // 旧端 `body_from_scene` 的兜底：不认识的一律当动态体，别让拼错的字符串
+        // 变成「建了刚体但不回写」的半托管状态。
+        assert_eq!(BodyKind::parse("Dynamic"), BodyKind::Dynamic);
+        assert_eq!(BodyKind::parse(""), BodyKind::Dynamic);
+    }
+
+    #[test]
+    fn physics_body_exposes_the_shared_kind_judgement() {
+        let mut body = PhysicsBody::default();
+        assert!(body.is_dynamic());
+        body.kind = "static".to_string();
+        assert!(!body.is_dynamic());
+        assert_eq!(body.kind(), BodyKind::Static);
     }
 }

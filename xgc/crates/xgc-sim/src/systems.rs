@@ -36,7 +36,7 @@ impl System for PhysicsSystem {
     fn run(&mut self, world: &mut World, dt: f32) {
         let gravity = self.gravity;
         world.for_each2_mut::<Velocity, PhysicsBody>(|_, velocity, body| {
-            if body.kind != "dynamic" {
+            if !body.is_dynamic() {
                 return;
             }
             for (axis, value) in gravity.iter().enumerate() {
@@ -73,7 +73,7 @@ impl System for GroundCollisionSystem {
     fn run(&mut self, world: &mut World, _dt: f32) {
         let ground = self.ground_y;
         world.for_each3_mut::<Transform, Velocity, PhysicsBody>(|_, transform, velocity, body| {
-            if body.kind != "dynamic" {
+            if !body.is_dynamic() {
                 return;
             }
             let half = support_half(body);

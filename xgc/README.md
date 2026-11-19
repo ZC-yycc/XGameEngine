@@ -84,6 +84,8 @@ HDR 光晕切片默认关闭，因此不改变任何既有画面的性能与像�
 
 阴影 pass 那半边同样并进了竞技场：`shadow_skin.rs` 的 `SkinnedShadow` 持有两张 `UniformArena`，`SkinnedBinding` 只记槽号；`RenderStats::shadow_skin_uniform_buffers` 首批 2 张、同尺寸第二帧 **0**（回归 `repeated_frames_reuse_the_shadow_skin_arenas`，把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红）。两条单元回归钉住槽距对齐与跨帧复用，另加一条两投射体用例 `two_skinned_casters_keep_their_own_shadow_palettes`：两个投射体沿屏幕纵轴分开（z=∓2.4）、姿态反向平移，断言两侧阴影行重心相距超过两个窗口宽、且同屏时各自留在原位（把每级 draw 的偏移强制成槽 0 时实跑变红：「窗口内阴影像素太少，无法定位：0」），钉住"每个 caster 用自己那格 palette"。证据画面没有骨架实体、竞技场根本不建缓冲，所以第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`）。**未做稳态计时**：冷启动单帧含 pipeline 编译，不能归因于本刀；“每帧缓冲数 2N → 0”是结构性收益，真正的稳态测量仍要常驻进程 profiler。
 
+刚体建体签名切片让运行期改 `physics.body` 字段不再被静默忽略：`rapier_world.rs` 的建体签名从「按 ID 排序的 `(EntityId, EntityKey)`」扩成 `BodySignature`（`kind` / `shape` 的 FNV-1a + `half_extents` / `radius` / `half_height` / `friction` / `restitution` / `mass` / `gravity_scale` / `is_sensor` 的位模式）；位置 / 旋转 / 缩放都不进签名 —— 前两者动态体每帧都在动，缩放沿用旧端「建体时读一次」的取舍、且脚本常拿缩放做脉冲动画（算进签名会变成动画期间每帧重建并清速度：第一版实测就把 frame-150 世界哈希与 PPM 改掉了，去掉后恢复并补了 `animated_scale_does_not_rebuild_the_body_table`）。`RapierWorld::rebuild_count()` 给出整表重建的累计次数（稳态恒为 1）。回归 `rapier_schedule` 五条：把动态立方体改成 `static` 后必须停止下落、动态体连跑 20 帧不许重建但改 `friction` 恰好重建一次、缩放动画 19 帧内不许重建；表驱动逐个改 10 个构建参数、每个都恰好重建一次；`kind` 拼成 `"Dynamic"` 时按统一判据仍当动态体回写（判据已提到 `xgc-world::physics_components` 的 `BodyKind` / `PhysicsBody::kind()`，`rapier_world`、`GravitySystem`、`GroundCollisionSystem`、`AabbCollisionSystem` 共用；此前建体把未知值当 Dynamic、回写按精确字符串匹配，拼错会静默冻在半空）；把 `BodySignature` 的 16 个槽全填 0（含 `kind` / `shape` 两个哈希槽；只清 12 个数值槽只有摩擦那条会红）时实跑红「改成 static 后必须停止下落（参数改了要重建）：y 4.8313904 -> 4.3919845」与「改摩擦必须重建一次：left: 1, right: 2」。第 150 帧 PPM 与 `run 60` 哈希都不变（证据世界的刚体参数逐帧稳定），**未闭环**：增删仍整表重建、`Transform` 平移 / 旋转不进签名（运行期传送静态刚体不会跟着动，与旧端同取舍）。
+
 陡坡沿坡面下滑切片补上物理侧最后一条“陡坡只当墙”的差距：`character_kcc` 新增 `SLIDE_BAND_DEGREES = 10.0` 与 `slip_limit(def) = (slope_limit + 10).min(89)`（旧端 `min_slope_slide_angle` 同式：`slope_limit` 以内能爬、`slope_limit..+10°` 是迟滞带、再陡才滑），角色阶段因此分三档 —— 坡度超过 `slip_limit` 且起点着地时**不清竖直速度**（清了就永远“站”在坡面上，重力进不来），累加的 `vy` 经坡面投影变成沿坡切向的下滑，终局也不清下滑速度；“陡坡当竖直墙”的分支加了 `!slipping` 门禁（正在下滑时把竖直位移清零等于又站住了）。迟滞带内的坡（45°..55°）爬不上去也不主动下滑，避免临界角上每帧抖；顶着坡面走（`grounded_at_start` 在 y=0 平面上）仍走“当墙”分支，上一轮的 creep 用例不变。回归 `cargo test -p xgc-sim --test character_ground` 新增 2 条：60° 坡上无输入时 30 帧内已经开始下滑、150 帧后脚底回到 y=0 附近；50° 坡 120 帧内 `x` / `y` 变化都 < 2 cm。红的证据：把 `slipping` 恒为 `false`（等价于“着地就清 `vy`”）时「30 帧后必须已经开始沿坡下滑：x 1 -> 1」；把 `slip_cos` 换成 `limit_cos`（忽略迟滞带）时「迟滞带内的坡不该下滑：x 2 -> -7.541752」。第 150 帧 PPM SHA-256 不变（`4A47275D…48A0927`、14/7/8、hash 不变，证据世界没有角色与坡面实体），`run 60` 哈希仍 `f4bc029f5f995b91`。**未闭环**：滑到平地后水平速度会保留（角色没有摩擦 / 阻尼，位置由脚本每帧重设速度兜底，与旧端同一取舍）；y=0 仍是解析平面；下滑没有终端速度；没有关节、没有 CCD、同帧角色互见旧位姿；未做稳态计时。
 
 坡面碰撞体切片让 `physics.slope` 在 rapier 里也有一份几何（此前它只是 ECS 的解析高度函数）：`crates/xgc-sim/src/rapier_world/slopes.rs` 按 origin / size / rise 建**静态楔形薄壳**——cuboid 半长 `hypot(size.x, rise) / 2`、厚 `SLOPE_THICKNESS = 0.1`、半深 `size.y / 2`，刚体绕 Z 轴转 `atan2(rise, size.x)`，中心沿法线从坡面中点下移半厚，于是**上表面与 `Slope::height_at` 重合**；另挂 `physics.body` 的实体让位（显式刚体优先），参数非有限的坡不建体。建体签名带 `EntityKey` 代际与全部几何位模式，变了才重建，探针 / 收集表跨帧复用。新增只读 `RapierWorld::ground_under(x, z, from_y)` 向下射线探地，既是回归的对表工具，也是下一刀自实现 `probe_ground` 的底子。回归 `cargo test -p xgc-sim --test slope_collider` 六条：60° 陡坡挡住了 KCC 角色（没有碰撞体时角色穿到 x≈5，实跑 `x=4.9999976`）、四个采样点的高度与解析坡面差 < 1e-3、改组件 `rise` 后碰撞体重建（不重建时高度停在旧值）、带 `physics.body` 的坡面不再自动建体、尺寸为 0 与 `rise=NaN` 的坡被跳过、下坡方向同样对齐；把 `step` 里的 `ensure_slopes` 注释掉时基础三条全红，三条守卫用例各自也有变异红（去跳过 / 放宽尺寸判据 / 给 `atan2` 的 `rise` 取绝对值）。独立审查还指出 `RapierPhysicsSystem` 的访问声明漏了 `Slope::ID`、`valid()` 没挡 `half_length` 溢出成 `inf`，两处已在本切片内修掉。第 150 帧逐字节不变（`hash=bb3fdc99df20aa31`、14/7/8、PPM SHA-256 `4A47275D…48A0927`）：证据世界没有 `physics.slope` 实体。**未闭环**：角色竖直当时仍由 ECS 解析、陡坡当时仍"挡住"而非沿坡面下滑（已由随后的竖直 / 陡坡下滑两刀补齐，见上）；薄壳法线朝上、坡下不与其它几何互剪；坡面不进 `AabbCollisionSystem`，动态刚体与坡面的接触只走 rapier。
@@ -146,13 +148,13 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（373 条），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（380 条），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（213 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
 PCSS / 点光阴影、TAA / SSAO 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
-物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
+物理的角色仍缺关节、连续碰撞（CCD）、增删刚体仍是整表重建、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。
 

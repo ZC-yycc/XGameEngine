@@ -49,7 +49,7 @@ impl System for AabbCollisionSystem {
                 velocity,
                 half: box_half(body),
                 sphere: (body.shape == "ball").then_some(body.radius),
-                dynamic: body.kind == "dynamic",
+                dynamic: body.is_dynamic(),
             });
         });
         bodies.sort_by_key(|body| body.id.raw());

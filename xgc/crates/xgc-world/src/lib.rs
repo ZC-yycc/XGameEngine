@@ -48,7 +48,7 @@ pub use particle_components::{
     EmissionShape, ParticleBlend, ParticleConfig, ParticleEmitter, ParticleQuad,
     MAX_PARTICLES_LIMIT,
 };
-pub use physics_components::PhysicsBody;
+pub use physics_components::{BodyKind, PhysicsBody};
 pub use plugin_components::PluginComponent;
 pub use prefab_components::PrefabInstance;
 pub use registry::builtin_registry;
