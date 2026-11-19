@@ -57,7 +57,7 @@ pub use camera::{
     camera_view_projection, invert, look_at_rh, model_matrix, mul, orthographic_rh,
     perspective_rh_zo, transform_point, Mat4, IDENTITY,
 };
-pub use diff::{diff_images, ImageDiff};
+pub use diff::{diff_breakdown, diff_images, BlockDiff, DiffBuckets, ImageDiff, ImageDiffReport};
 pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use exposure::{sanitize_exposure, EXPOSURE_DEFAULT, MAX_EXPOSURE, MIN_EXPOSURE};
 pub use font::{FontAtlas, GlyphQuad};

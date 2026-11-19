@@ -55,6 +55,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `WorldSnapshot` / 恢复 |
 | `crates/xgc-world/src/validate.rs` | `World::validate_data`：组件 / 字段 / 类型 / 重复项体检 |
 | `crates/xgc-world/src/hash.rs` | `World::state_hash`：实体按 ID、组件按 ID、字段按声明序混入；实体行号走 `thread_local` scratch、组件 / 字段布局缓存在 `Archetype::hash_layout`（数值型组件世界 60 次调用零分配） |
+| `crates/xgc-cli/tests/image_diff.rs` | `image-diff … report` 集成回归：真实 PPM 的分桶与通道均值 / 不写 report 时保持旧输出 / 未知第四参数退出码 2 |
 | `crates/xgc-cli/tests/trace.rs` | 逐帧 trace 集成回归：与进程内重放逐步对表 / 两次运行逐字节相同 / 不同世界第 0 帧即不同 / 参数错误退出码 2 / 汇总行与 `run-world` 末行逐字一致 |
 | `crates/xgc-sim/tests/steady_state.rs` | 热路径分配门禁：线程本地计数分配器（每个测试线程只看自己的分配）+ 稳态帧预算（60 × (实体数 + 64)），数值型组件世界 `state_hash` 60 次零分配；另有一条 release 吞吐用例默认 `#[ignore]` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
@@ -111,7 +112,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/report.rs` | 迁移错误 / 报告 / 批量结果 |
 | `crates/xgc-render/src/lib.rs` | 渲染图：资源表 / pass 读写、确定性拓扑排序、环 / 多写者 / 未声明资源 / 读写用途检测、`PassExecutor` |
 | `crates/xgc-render/src/gpu.rs` | wgpu 设备、资源创建、clear pass、draw list 执行、RGBA8 回读；`from_arc` 复用于编辑器视口 |
-| `crates/xgc-render/src/diff.rs` | `diff_images`：尺寸 / 差异像素比例 / 平均绝对误差 / 最大通道差 |
+| `crates/xgc-render/src/diff.rs` | `diff_images`：尺寸 / 差异像素比例 / 平均绝对误差 / 最大通道差；`diff_breakdown`：余差归因（相同 / ±1 / 2-3 / 4-7 / ≥8 五桶、三通道均值、16×9 块里最差的 5 块） |
+| `crates/xgc-render/src/diff/tests.rs` | 余差归因纯函数回归（7 条）：分桶边界（含差值 3 / 7 / 8）/ 平手按行列升序 / 最多 5 块上限 / 块网格与最差块排序 / 窄轴切段不丢像素 / 尺寸不同报错 / 只改 alpha 不算差异 |
 | `crates/xgc-render/src/ui_draw.rs` | UI 像素矩形 → NDC 四边形矩阵 |
 | `crates/xgc-render/src/image.rs` | PNG / PPM（P6）解码 / 平均色块 |
 | `crates/xgc-render/src/skinning.rs` | CPU 蒙皮：`skin_positions` / `identity` / `translation` |
@@ -180,7 +182,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧]` / `verify-migration <旧.ron> <世界.json>` |
 | `crates/xgc-cli/src/assets_cmd.rs` | `xgc assets <项目根>`：GUID 扫描 |
 | `crates/xgc-cli/src/cook_cmd.rs` | `xgc cook <项目根> <输出目录>` / `pack <世界.json> <项目根> <输出目录>` / `run-cooked <目录> [帧]` |
-| `crates/xgc-cli/src/compare_cmd.rs` | `xgc compare-headless` / `xgc image-diff <旧图> <新图> [阈值]`；PNG / PPM 逐像素差异 |
+| `crates/xgc-cli/src/compare_cmd.rs` | `xgc compare-headless` / `xgc image-diff <旧图> <新图> [阈值] [report]`；PNG / PPM 逐像素差异，`report` 追加余差归因 |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
 | `crates/xgc-cli/src/render.rs` | `render-frame <世界> <PPM> [资产根] [宽] [高] [帧数]`；缺省 0 帧，最终重算层级 / UI；曝光、天空、光晕、阴影画质与 FXAA 设置由 `project_render.rs` 从项目级 `project.ron` 读出后灌进 `Renderer` |
@@ -200,9 +202,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 0.61）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），角色坡面 `slope_limit` / 贴地 `snap_to_ground` 也已生效（陡坡当墙 + 下行贴地）、tone-map 后可选的显示空间 FXAA（`render.fxaa`，默认关；平坦区逐字节不变）也已贯通，角色的**水平**位移已走 rapier `KinematicCharacterController`（`character_kcc.rs`，签名带实体代际；`CharacterBlockSystem` 已删、默认调度 16 个系统），纯角色重力（`character_kcc::GRAVITY_Y` 在角色阶段积分，腾空自由下落、落地清速度）也已生效，`physics.slope` 的静态楔形碰撞体也已补上（`rapier_world/slopes.rs`，上表面与解析坡面重合、`ground_under` 提供向下射线探地），角色控制器缺省值也与旧端逐项对齐（`0.35 / 0.02 / 0.3`、消毒收口到 `CharacterController::sanitized()`），角色的竖直 / 地面 / 台阶也已搬进同一个 KCC（`probe_ground` / `try_step_up` / 竖直积分在 `rapier_world/characters.rs`，`CharacterSystem` / `CharacterStepSystem` 已删除、默认调度 16 个系统）；陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效（`character_kcc::slip_limit`，下滑时不清竖直速度），刚体建体签名也已覆盖全部构建参数（改 `PhysicsBody` 字段会重建、稳态帧不重建），刚体表也已改为按 ID 差量修补（增删 / 改参数只动受影响的刚体），画面曝光也已接上（`render.exposure` 同时进 tone-map 与光晕亮部提取，缺省 1.0 时逐字节不变），阴影画质也已接上（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关、关着走 3×3 PCF + 硬切换且逐位不变），多光源照明也已接上（方向光 / 点光最多 8 盏 + 点光距离衰减，帧 uniform 扩到 976 字节，单盏方向光时逐字节不变）；点光立方体阴影也已接上（`point_shadow.rs` + `frame_uniform.rs`，六面 1024² 复用同一支深度管线、帧 uniform 扩到 1008 字节，证据世界没有点光所以逐字节不变）；TAA 也已接上（`render.taa` 的 `enabled` / `history_weight`，默认关、关着不建历史且相机不抖动、逐字节不变，开着时抖动只叠相机、历史重投影 + 邻域钳制、FXAA 让位）；SSAO 也已接上（`render.ssao` 的 `enabled` / `strength` / `radius` / `bias`，默认关、关着不建 AO 纹理且 `passes` 不增、逐字节不变，开着时半分辨率 16 抽样 + 可分离模糊 + 线性上采样乘算，排在 TAA 之后、光晕之前）；热路径分配门禁也已建立（`crates/xgc-sim/tests/steady_state.rs`：稳态帧从 1697 次/帧降到 230 次/帧、预算门禁；数值型组件 `state_hash` 零分配；release 下 0.057 ms/帧）；逐帧 trace 的 XGC 侧工具也已建立（`xgc trace`，逐帧打印实体数 / revision / `state_hash`，与 `run-world` 同一条无脚本步进路径），下一刀做关节 / 连续碰撞（CCD）/ 正式 System 调度。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 0.61）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），角色坡面 `slope_limit` / 贴地 `snap_to_ground` 也已生效（陡坡当墙 + 下行贴地）、tone-map 后可选的显示空间 FXAA（`render.fxaa`，默认关；平坦区逐字节不变）也已贯通，角色的**水平**位移已走 rapier `KinematicCharacterController`（`character_kcc.rs`，签名带实体代际；`CharacterBlockSystem` 已删、默认调度 16 个系统），纯角色重力（`character_kcc::GRAVITY_Y` 在角色阶段积分，腾空自由下落、落地清速度）也已生效，`physics.slope` 的静态楔形碰撞体也已补上（`rapier_world/slopes.rs`，上表面与解析坡面重合、`ground_under` 提供向下射线探地），角色控制器缺省值也与旧端逐项对齐（`0.35 / 0.02 / 0.3`、消毒收口到 `CharacterController::sanitized()`），角色的竖直 / 地面 / 台阶也已搬进同一个 KCC（`probe_ground` / `try_step_up` / 竖直积分在 `rapier_world/characters.rs`，`CharacterSystem` / `CharacterStepSystem` 已删除、默认调度 16 个系统）；陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效（`character_kcc::slip_limit`，下滑时不清竖直速度），刚体建体签名也已覆盖全部构建参数（改 `PhysicsBody` 字段会重建、稳态帧不重建），刚体表也已改为按 ID 差量修补（增删 / 改参数只动受影响的刚体），画面曝光也已接上（`render.exposure` 同时进 tone-map 与光晕亮部提取，缺省 1.0 时逐字节不变），阴影画质也已接上（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关、关着走 3×3 PCF + 硬切换且逐位不变），多光源照明也已接上（方向光 / 点光最多 8 盏 + 点光距离衰减，帧 uniform 扩到 976 字节，单盏方向光时逐字节不变）；点光立方体阴影也已接上（`point_shadow.rs` + `frame_uniform.rs`，六面 1024² 复用同一支深度管线、帧 uniform 扩到 1008 字节，证据世界没有点光所以逐字节不变）；TAA 也已接上（`render.taa` 的 `enabled` / `history_weight`，默认关、关着不建历史且相机不抖动、逐字节不变，开着时抖动只叠相机、历史重投影 + 邻域钳制、FXAA 让位）；SSAO 也已接上（`render.ssao` 的 `enabled` / `strength` / `radius` / `bias`，默认关、关着不建 AO 纹理且 `passes` 不增、逐字节不变，开着时半分辨率 16 抽样 + 可分离模糊 + 线性上采样乘算，排在 TAA 之后、光晕之前）；热路径分配门禁也已建立（`crates/xgc-sim/tests/steady_state.rs`：稳态帧从 1697 次/帧降到 230 次/帧、预算门禁；数值型组件 `state_hash` 零分配；release 下 0.057 ms/帧）；逐帧 trace 的 XGC 侧工具也已建立（`xgc trace`，逐帧打印实体数 / revision / `state_hash`，与 `run-world` 同一条无脚本步进路径），视觉余差也已能按「舍入 vs 结构性」归因（`image-diff … report`：26.5% 像素只差 1 LSB、结构性 1.82%），下一刀做关节 / 连续碰撞（CCD）/ 正式 System 调度。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
-3. 割接：旧新逐帧 trace（XGC 侧 `xgc trace` 已建，缺旧端输出）/ 截图；性能门禁的 XGC 侧热路径分配门禁已建（还缺 CI release 基线）。
+3. 割接：旧新逐帧 trace（XGC 侧 `xgc trace` 已建，缺旧端输出）/ 截图；视觉余差归因工具 `image-diff … report` 已建（26.5% 像素只差 1 LSB、结构性 1.82%），收窄仍待旧端逐帧截图；性能门禁的 XGC 侧热路径分配门禁已建（还缺 CI release 基线）。
 4. 资产：密码学签名 / 跨机器增量。
 5. 推送与 CI；当前最大 Rust 文件 599 行（`glb.rs`），继续守住 600 行软上限。
    角色回归按语义分三个文件：`crates/xgc-sim/tests/character_kcc.rs`（水平 KCC + 台阶 + 陡坡挤入 + 顶着墙起跳 / 贴墙下落：撞墙 / 斜墙滑 / 球体阻挡 / 刚体优先 / `Replace` 换代后仍移动 / 默认调度陡坡不挤入 / 小半径胶囊上台阶 / 低台阶抬升 / 带刚体不被角色系统写 / 确定性）、

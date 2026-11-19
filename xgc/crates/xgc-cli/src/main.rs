@@ -60,6 +60,7 @@ fn main() -> ExitCode {
             args.next().as_deref(),
             args.next().as_deref(),
             args.next().as_deref(),
+            args.next().as_deref(),
         ),
         Some("pack") => cook_cmd::pack(
             args.next().as_deref(),
