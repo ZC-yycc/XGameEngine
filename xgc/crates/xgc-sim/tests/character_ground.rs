@@ -332,3 +332,101 @@ fn a_character_walking_down_a_slope_stays_on_the_ground() {
     let p = position(&world, character);
     assert!(p[0] > 2.0, "下坡没前进：x={}", p[0]);
 }
+
+/// 陡坡站不住：坡度超过 `slope_limit + 10°` 时角色沿坡面滑下去，而不是钉在坡面上。
+///
+/// 这对应旧端的 `min_slope_slide_angle = (slope_limit + 10).min(89)`：`slope_limit` 以内能爬，
+/// `slope_limit..+10°` 是迟滞带（爬不上去也不主动下滑），再陡才滑。修之前这里着地就把竖直
+/// 速度清零，重力进不来，角色会永远"站"在 60° 坡面上。
+#[test]
+fn a_character_standing_on_a_steep_slope_slides_down() {
+    let mut world = World::new();
+    let def = slope([0.0, 0.0, 0.0], [10.0, 10.0], 17.320_508);
+    world.spawn((def,));
+    let start_x = 1.0;
+    let hover = 0.322_f32 * (1.0 / (60.0_f32).to_radians().cos() - 1.0);
+    let character = world.spawn((
+        Transform {
+            position: [start_x, def.height_at(start_x, 5.0).unwrap() + hover, 5.0],
+            ..Transform::default()
+        },
+        Velocity::default(),
+        CharacterController::default(),
+    ));
+    let mut schedule = Schedule::default_schedule(1);
+    for _ in 0..30 {
+        schedule.run(&mut world, FIXED_DT);
+    }
+    let early = position(&world, character);
+    assert!(
+        early[0] < start_x - 1e-2,
+        "30 帧后必须已经开始沿坡下滑：x {} -> {}",
+        start_x,
+        early[0]
+    );
+    // 下滑过程中必须**一直贴着坡面**：把这帧的竖直位移清零（也就是不跳过"陡坡当墙"分支）
+    // 会让角色退化成"水平挪一步 → 悬空 → 掉回坡面"的阶梯式下滑，横向位移与最终落地都
+    // 仍然成立，只有逐帧贴着坡面这一条能抓出来（`steep_contact` 的 `!slipping` 门禁）。
+    for _ in 0..150 {
+        schedule.run(&mut world, FIXED_DT);
+        let p = position(&world, character);
+        if p[0] > 0.0 {
+            let surface = def.height_at(p[0], 5.0).unwrap();
+            let clearance = p[1] - surface;
+            assert!(
+                (-0.05..0.45).contains(&clearance),
+                "下滑途中必须贴着坡面：x={} y={} 离坡面 {}",
+                p[0],
+                p[1],
+                clearance
+            );
+            assert!(
+                world
+                    .get::<CharacterController>(character)
+                    .unwrap()
+                    .grounded,
+                "下滑途中必须始终踩在坡面上：x={} y={}",
+                p[0],
+                p[1]
+            );
+        }
+    }
+    let p = position(&world, character);
+    assert!(p[1].abs() < 1e-2, "滑到坡底后脚底必须落回地面：y={}", p[1]);
+}
+
+/// 迟滞带：45° + 10° 以内（这里 50°）的坡爬不上去，但也不会自己滑下来。
+///
+/// 没有 `+10°` 迟滞带的话，站在 46° 坡上的角色每帧都在"滑一点 / 被探地拉回"之间抖，
+/// 或者直接滑走；这条用例钉住"迟滞带内站得住"。
+#[test]
+fn a_slope_within_the_slide_band_holds_the_character() {
+    let mut world = World::new();
+    let def = slope([0.0, 0.0, 0.0], [10.0, 10.0], 11.917_536);
+    world.spawn((def,));
+    let start_x = 2.0;
+    let hover = 0.322_f32 * (1.0 / (50.0_f32).to_radians().cos() - 1.0);
+    let character = world.spawn((
+        Transform {
+            position: [start_x, def.height_at(start_x, 5.0).unwrap() + hover, 5.0],
+            ..Transform::default()
+        },
+        Velocity::default(),
+        CharacterController::default(),
+    ));
+    let start = position(&world, character);
+    run_default(&mut world, 120);
+    let p = position(&world, character);
+    assert!(
+        (p[0] - start[0]).abs() < 2e-2,
+        "迟滞带内的坡不该下滑：x {} -> {}",
+        start[0],
+        p[0]
+    );
+    assert!(
+        (p[1] - start[1]).abs() < 2e-2,
+        "迟滞带内的坡不该下沉：y {} -> {}",
+        start[1],
+        p[1]
+    );
+}

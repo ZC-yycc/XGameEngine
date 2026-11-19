@@ -181,12 +181,22 @@ impl RapierWorld {
                 hit.normal.y >= character_kcc::GROUND_NORMAL_MIN_DOT && hit.gap <= prediction + 1e-5
             });
             let steep = before.as_ref().is_some_and(|hit| hit.normal.y < limit_cos);
+            // 迟滞带：坡度超过 `slope_limit + 10°` 的坡站不住，角色会沿坡面滑下去；
+            // `slope_limit..+10°` 之内只"爬不上去"，不主动下滑（旧端 `min_slope_slide_angle` 同式）。
+            let slip_cos = character_kcc::slip_limit(&def).to_radians().cos();
+            let slipping =
+                grounded_at_start && before.as_ref().is_some_and(|hit| hit.normal.y < slip_cos);
 
             // ② 竖直速度：着地清掉向下分量，腾空按重力累加（旧端脚本层同口径、无终端速度）。
-            if grounded_at_start && velocity.linear[1] < 0.0 {
-                velocity.linear[1] = 0.0;
-            }
-            if !grounded_at_start {
+            if grounded_at_start {
+                // 站不住的陡坡别清速度：清了就永远"站"在坡面上，重力再也进不来。
+                // 让它继续累加，③ 的坡面投影会把它变成沿坡切向的下滑。
+                if slipping {
+                    velocity.linear[1] += character_kcc::GRAVITY_Y * dt;
+                } else if velocity.linear[1] < 0.0 {
+                    velocity.linear[1] = 0.0;
+                }
+            } else {
                 velocity.linear[1] += character_kcc::GRAVITY_Y * dt;
             }
 
@@ -230,7 +240,9 @@ impl RapierWorld {
             // 速度却留着，松开墙才突然弹起），下落会被挂在墙上（`vy` 每帧累加却在释放时
             // 一次性放行）。旧端同样只在 `grounded_at_start && is_steep && desired.y < 0`
             // 时才做坡面投影（`crates/xgame-physics/src/world.rs:571-582`）。
+            // 正在沿陡坡下滑时不能走这条分支：把竖直位移清零等于又"站住"了。
             let steep_contact = grounded_at_start
+                && !slipping
                 && desired.y <= 0.0
                 && self.wall_normals.iter().any(|normal| normal.y < limit_cos);
             if steep_contact {
@@ -347,7 +359,9 @@ impl RapierWorld {
             let grounded = after.as_ref().is_some_and(|hit| {
                 hit.normal.y >= character_kcc::GROUND_NORMAL_MIN_DOT && hit.gap <= prediction + 1e-5
             });
-            if grounded && velocity.linear[1] < 0.0 {
+            // 沿陡坡下滑时不能清：清了下滑速度永远只剩一帧的重力增量，角色变成
+            // 每帧挪一两毫米的"慢性蠕动"（实测 180 帧只滑 0.28 m）。
+            if grounded && !slipping && velocity.linear[1] < 0.0 {
                 velocity.linear[1] = 0.0;
             }
 

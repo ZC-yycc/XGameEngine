@@ -101,6 +101,21 @@ pub fn slope_limit(def: &CharacterController) -> f32 {
     def.sanitized().slope_limit
 }
 
+/// 陡坡下滑的迟滞带（度）：超过 `slope_limit + SLIDE_BAND_DEGREES` 的坡才是"站不住"的。
+///
+/// 旧端 `build_rapier_controller` 里 `min_slope_slide_angle = (slope_limit + 10).min(89)`：
+/// `slope_limit` 以内可以爬，`slope_limit..+10` 是迟滞带（爬不上去但也不主动下滑，
+/// 免得在临界角上每帧抖一次），超过 +10 才沿坡面滑下去。
+pub const SLIDE_BAND_DEGREES: f32 = 10.0;
+
+/// 自动下滑的临界坡角（度）：`(slope_limit + 10).min(89)`，与旧端 `min_slope_slide_angle` 同式。
+///
+/// 上限 89° 与 `slope_limit` 相同：90° 的余弦在 f32 是 ~-6e-8，`normal.y < cos(90°)`
+/// 会把竖直面也算成"可滑坡"，分不清墙与坡。
+pub fn slip_limit(def: &CharacterController) -> f32 {
+    (slope_limit(def) + SLIDE_BAND_DEGREES).min(xgc_world::SLOPE_LIMIT_MAX)
+}
+
 /// 旧端 `build_rapier_controller` 的参数投影。
 ///
 /// `autostep` / `snap_to_ground` 显式关掉：两者都依赖上面说的坏掉的 grounded 判定，
@@ -115,7 +130,8 @@ pub fn build_character_controller(def: &CharacterController) -> KinematicCharact
         autostep: None,
         max_slope_climb_angle: limit.to_radians(),
         // 与旧端同式：比可爬角再宽 10° 才判定"往下滑"，防临界坡上爬 / 下滑横跳。
-        min_slope_slide_angle: (limit + 10.0).min(xgc_world::SLOPE_LIMIT_MAX).to_radians(),
+        // 走 `slip_limit` 而不是再抄一遍式子：迟滞带的定义只留一处。
+        min_slope_slide_angle: slip_limit(def).to_radians(),
         snap_to_ground: None,
         normal_nudge_factor: 1.0e-4,
     }
