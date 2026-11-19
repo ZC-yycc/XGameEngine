@@ -42,7 +42,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source`（含 bus）/ `audio.listener` / `audio.gain` / `audio.mixer` |
 | `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / time / blend_from / blend_elapsed / blend_duration） |
 | `crates/xgc-world/src/character_components.rs` | 角色组件：`physics.character`；缺省值（1.8 / 0.3 / 0.35 / 45 / 0.02 / 0.3）与旧端 `xgame_core` 逐项对齐，`sanitized()` / `half_height()` / `center_height()` 是唯一消毒与几何派生真相源（`character_kcc` 全部委托）；改常量记得同步 `fields()` 的 schema 缺省值（有 `schema_defaults_match_the_component_defaults` 守着），区间常量之间的咬合由编译期 `const _: ()` 断言守着 |
-| `crates/xgc-world/src/ui_components.rs` | UI 组件：`ui.element` / `ui.layout` / `ui.interaction` / `ui.input` |
+| `crates/xgc-world/src/ui_components.rs` | UI 组件：`ui.element` / `ui.layout` / `ui.interaction` / `ui.input`；`background` / `border_color` / `text_color` 存**线性** RGB（旧脚本 UI 颜色 setter 的 sRGB 在入口换算；通用字段写入按线性原值落库；渲染端写 sRGB 目标由硬件编码） |
 | `crates/xgc-world/src/particle_components.rs` | 粒子组件：`particle.emitter` |
 | `crates/xgc-world/src/plugin_components.rs` | Rust 插件组件：`plugin.rust` |
 | `crates/xgc-world/src/prefab_components.rs` | 预制体实例：`prefab.instance`（source / source_id / root） |
@@ -83,7 +83,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-audio/src/lib.rs` | cpal 音频设备输出：设备枚举、PCM 重采样、F32 / I16 输出队列、`play_clip` |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载 |
-| `crates/xgc-script/src/legacy.rs` | 旧脚本 API：`update(ctx)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at`（俯仰必须放欧拉角 X 分量，放 Z 会变滚转）/ `velocity` / `set_anim_param` / `ui_*` / `action_pressed`；音频等暂无实现为 no-op |
+| `crates/xgc-script/src/legacy.rs` | 旧脚本 API：`update(ctx)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at`（俯仰必须放欧拉角 X 分量，放 Z 会变滚转）/ `velocity` / `set_anim_param` / `ui_*` / `action_pressed`；UI 颜色 setter 的 sRGB 参数经唯一的 `srgb_to_linear()`（同旧端 0.04045 分段，alpha 不转）换算后写入组件，少这一步会在 sRGB 目标上二次编码；音频等暂无实现为 no-op |
 | `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` 生命周期分派与回退 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载；`take_error()` 把本帧第一处脚本错误交给宿主（只打 stderr 时宿主看不到失败） |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 |

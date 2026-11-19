@@ -11,13 +11,22 @@ pub struct UiElement {
     pub offset_max: [f32; 2],
     pub visible: bool,
     pub interactable: bool,
+    /// 背景色，**线性** RGB。旧脚本 UI 颜色 setter（`ui_set_bg_color`）收的是 sRGB、
+    /// 在入口转成线性；通用字段写入（`xgc` 表的组件字段 set）按线性原值落库；场景文件也存线性值。
+    /// 渲染端把它写进 sRGB 目标，由硬件做最后一次编码（别在这里再手写 sRGB）。
     pub background: [f32; 4],
+    /// 边框色，线性 RGB，口径同 `background`。
+    ///
+    /// 已知偏差：缺省值仍是旧端 sRGB 数值（70/74/84 的编码值）而没换算成线性 ——
+    /// `border_width` 缺省 0 所以当前不可见；改缺省值会动迁移出来的世界哈希，
+    /// 留到专门对齐旧端 UI 缺省值的一刀。
     pub border_color: [f32; 4],
     pub border_width: f32,
     pub corner_radius: f32,
     pub padding: f32,
     pub text: String,
     pub text_size: f32,
+    /// 文字色，线性 RGB，口径同 `background`。
     pub text_color: [f32; 4],
     pub bold: bool,
     pub wrap: bool,

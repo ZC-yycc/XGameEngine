@@ -492,6 +492,46 @@ fn legacy_ui_api_writes_element_fields() {
 }
 
 #[test]
+fn legacy_ui_color_arguments_are_srgb() {
+    use xgc_world::{Script, UiElement, World};
+
+    // 脚本给的是 sRGB（美术直觉）：组件里必须存线性值，渲染端才不会被编码两次。
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_legacy_ui_color_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("color.lua"),
+        "function update(ctx)\n  ui_set_bg_color(ctx, self_id(ctx), 0.5, 0.25, 0.04045, 0.6)\nend\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    let entity = world.spawn((
+        UiElement::default(),
+        Script {
+            path: "color.lua".to_string(),
+        },
+    ));
+    let id = world.entity(entity).unwrap();
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    let element = world.get::<UiElement>(world.key(id).unwrap()).unwrap();
+    let expected = [0.214_041_14, 0.050_876_09, 0.003_130_80, 0.6];
+    for (actual, expected) in element.background.iter().zip(expected.iter()) {
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "脚本给的 sRGB 必须在线性空间落地：实际 {actual} 期望 {expected}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn legacy_input_action_sets_velocity() {
     use xgc_world::{Script, Transform, Velocity, World};
 

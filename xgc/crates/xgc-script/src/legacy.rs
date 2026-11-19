@@ -12,6 +12,20 @@ use xgc_world::{
     AnimationState, Command, Component, Transform, UiElement, Value as FieldValue, Velocity,
 };
 
+/// 脚本 API 的颜色参数是 **sRGB 0..1**（美术 / CSS 的直觉：`0.5` 就是中灰），
+/// UI 组件里存的是**线性**值。这一处是唯一入口转换点，与旧引擎
+/// `xgame-script/src/ui_ctx.rs` 的 `color_srgb` 同一套公式与阈值。
+///
+/// 少了这一步，脚本给的颜色会被当成线性值再经 sRGB 目标编码一次：
+/// HUD 血条 `(0.86, 0.33, 0.28)` 会从旧端的 `#DC5347` 变成 `#EF9A90`。
+fn srgb_to_linear(channel: f32) -> f32 {
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct EntityView {
     pub id: u64,
@@ -325,12 +339,14 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
             "ui_set_bg_color",
             lua.create_function(
                 move |_, (_ctx, id, r, g, b, a): (mlua::Value, u64, f32, f32, f32, f32)| {
+                    // 脚本给的是 sRGB，组件存线性：与旧端同口径，见 `srgb_to_linear`。
+                    let linear = |channel: f32| f64::from(srgb_to_linear(channel));
                     push_set(
                         &ui_color_commands,
                         id,
                         UiElement::ID,
                         "background",
-                        FieldValue::Vec4([f64::from(r), f64::from(g), f64::from(b), f64::from(a)]),
+                        FieldValue::Vec4([linear(r), linear(g), linear(b), f64::from(a)]),
                     );
                     Ok(())
                 },
