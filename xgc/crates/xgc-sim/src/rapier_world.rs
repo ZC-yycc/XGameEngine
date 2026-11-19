@@ -14,13 +14,15 @@ use rapier3d::prelude::*;
 
 use xgc_base::EntityKey;
 use xgc_world::{
-    CharacterController, Component, GlobalTransform, PhysicsBody, Transform, Velocity, World,
+    CharacterController, Component, GlobalTransform, PhysicsBody, Slope, Transform, Velocity, World,
 };
 
 use crate::{System, SystemAccess};
 
 mod characters;
+mod slopes;
 use characters::CharacterLink;
+use slopes::{SlopeEntry, SlopeLink, SlopeSignature};
 
 /// 旧引擎 `PhysicsConfig::default()` 的重力。
 pub const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
@@ -68,6 +70,13 @@ pub struct RapierWorld {
     character_probe: Vec<(u64, EntityKey, [u32; 4])>,
     /// 角色收集阶段的临时表，跨帧复用（同样是为了热路径零分配）。
     character_entries: Vec<(u64, EntityKey, CharacterController)>,
+    slopes: Vec<SlopeLink>,
+    /// 坡面集合的签名：变了才重建坡面碰撞体（同样必须带 `EntityKey` 代际）。
+    slope_signature: Option<SlopeSignature>,
+    /// `ensure_slopes` 的每帧探针，跨帧复用。
+    slope_probe: SlopeSignature,
+    /// 坡面收集阶段的临时表，跨帧复用。
+    slope_entries: Vec<SlopeEntry>,
 }
 
 impl Default for RapierWorld {
@@ -97,6 +106,10 @@ impl RapierWorld {
             character_signature: None,
             character_probe: Vec::new(),
             character_entries: Vec::new(),
+            slopes: Vec::new(),
+            slope_signature: None,
+            slope_probe: Vec::new(),
+            slope_entries: Vec::new(),
         }
     }
 
@@ -127,6 +140,9 @@ impl RapierWorld {
         // 刚体表整份换新，角色刚体也随之消失，签名清掉让 `ensure_characters` 重建。
         self.characters.clear();
         self.character_signature = None;
+        // 坡面碰撞体与角色同理：刚体表换新后它们一起没了。
+        self.slopes.clear();
+        self.slope_signature = None;
         // 按实体 ID 排序建体：rapier 的岛屿构建顺序与插入顺序有关，固定顺序
         // 才能保证同一份场景两次运行逐位一致。
         let mut entries = Vec::new();
@@ -164,6 +180,8 @@ impl RapierWorld {
     /// 推进一个固定步，并把动态体结果写回世界。
     pub fn step(&mut self, world: &mut World, dt: f32) {
         self.ensure_built(world);
+        // 坡面几何要先于角色推进：`sync_character_poses` 与 `move_shape` 都要能看到坡。
+        self.ensure_slopes(world);
         self.ensure_characters(world);
         self.sync_character_poses(world);
         // 运动学体：脚本摆好的位置每步推给物理（与旧端 `push_kinematic_bodies` 同义）。
@@ -347,6 +365,9 @@ impl System for RapierPhysicsSystem {
                 PhysicsBody::ID,
                 GlobalTransform::ID,
                 CharacterController::ID,
+                // `step` 会在 `ensure_slopes` 里读坡面组件建静态碰撞体；漏声明会让
+                // 访问契约与实际读写不符，等 `Schedule` 按声明分批时就会和写者撞车。
+                Slope::ID,
             ],
             writes: vec![Transform::ID, Velocity::ID],
         }

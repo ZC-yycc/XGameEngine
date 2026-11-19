@@ -56,6 +56,9 @@ cargo test -p xgc-sim --test character_kcc --offline
 # 默认调度下竖直只积分一次（`VelocitySystem` 对角色整份跳过）
 cargo test -p xgc-sim --test character_gravity --offline
 
+# 坡面碰撞体（纯 CPU）：60° 陡坡挡住角色 / 上表面与解析坡面逐点对齐 / 改坡面参数后重建 / 带 physics.body 的坡让位 / 尺寸退化与非有限参数被跳过 / 下坡同样对齐
+cargo test -p xgc-sim --test slope_collider --offline
+
 # 粒子：确定性 / 发射率 / 清洗与硬上限（CPU）+ Alpha / Additive billboard（GPU）
 cargo test -p xgc-sim particles --offline
 cargo test -p xgc-render --test particles --offline
@@ -114,6 +117,7 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 > 姿态感知包围盒切片让 `scene_bounds` 改用 `posed_bounds`（会动的顶点：按每根真有 palette 项的关节变换整网格 AABB 后求并，覆盖变形顶点凸包且只需 O(顶点 + 关节) 次变换；不动的顶点：缺蒙皮属性 / 权重全零 / 关节越界时按顶点并进盒子，因为它们在 CPU 与 shader 里都留在绑定姿态），自动取景与级联远距离拟合都跟着当前姿态；集成回归在旧实现下停在绑定盒 `[-0.8..0.8]`、自动取景 **0** 个可见像素，现在盒子跟到 +4、画面里能看到网格。已知近似：整网格 AABB 比旧端加载期按关节预计算的顶点范围盒更松，骨架场景的自动取景会略远。第 150 帧仍逐字节相同（证据世界无骨架），对旧端 32.22% / 0.61 / 194；交错 A/B 中位数 752.62 → 765.10 ms（+1.7%，区间重叠且该场景无 pose item，未观察到可归因回归）。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体本来就走同一拟合框，不需要另做扩展覆盖。
 >
 > 角色重力切片给 `CharacterSystem` 加 `pub gravity: [f32; 3]`（缺省 -9.81，只有 `y` 被消费）：腾空时`vy += gravity.y * dt` 并积分 `y`，落地时清掉向下速度；`GravitySystem` 不在默认调度、`PhysicsSystem` /`GroundCollisionSystem` 只处理 `physics.body`，所以纯角色此前根本没有重力（落差大于 `snap_to_ground` 就悬空）。回归 `cargo test -p xgc-sim --test character_gravity`：悬空 3 m 落地、跳跃弧线落回、站在地面不被拉下、走出坡面跨度后掉回 y=0、站在坡面上不被拽下、默认调度下竖直只积分一次；把积分行改成 `+= 0.0` 时后三条里的三条实跑变红（「落地后 y=3」「落地后 y=16.666647」「掉下来后 y=5.773503」）。竖直积分由 `CharacterSystem` 独占：`VelocitySystem` 原先对角色只积分竖直（水平已交给 KCC），两边同时积分会让默认调度一帧写两遍 `y`，自由落体看起来重力翻倍、跳跃高度翻倍；现在它按 `physics.character` 整份跳过角色，`a_character_falls_once_per_frame_under_the_default_schedule` 按解析解 `y = y0 - g·dt²·n(n+1)/2` 钉住单次积分（改回双写时实跑红：「默认调度把竖直积分了两遍：y=2.7275007，单次积分应为 2.850125」）。第 150 帧 PPM 与上一版逐字节相同（证据世界没有 `physics.character` 实体），`run 60` 哈希仍 `f4bc029f5f995b91`。未闭环：没有终端速度、只积分 y、地面仍是解析坡面 + y=0（不是 rapier 射线），台阶顶面不在 `ground` 里。
+> 坡面碰撞体切片让 `physics.slope` 在 rapier 里也有一份几何：`crates/xgc-sim/src/rapier_world/slopes.rs` 按 origin / size / rise 建静态楔形薄壳（cuboid 半长 `hypot(size.x, rise) / 2`、厚 `SLOPE_THICKNESS = 0.1`、半深 `size.y / 2`，绕 Z 轴转 `atan2(rise, size.x)`，中心沿法线从坡面中点下移半厚），所以**上表面与解析 `Slope::height_at` 重合**；另挂 `physics.body` 的实体让位（显式刚体优先），参数非有限的坡不建体。建体签名 = ID + `EntityKey`（index + generation）+ origin / size / rise 位模式，变了才重建（先删旧刚体连带碰撞体、再 `query.update`），探针 / 收集表跨帧复用。新增只读 `RapierWorld::ground_under(x, z, from_y)` 向下射线探地，既是回归的对表工具，也是下一刀自实现 `probe_ground` 的底子。回归 `cargo test -p xgc-sim --test slope_collider` 六条：60° 陡坡把 KCC 角色挡在坡脚（没有碰撞体时穿到 x≈5，实跑 `x=4.9999976`）、四个采样点高度与解析坡面差 < 1e-3、改组件 `rise` 后碰撞体重建、带 `physics.body` 的坡不再自动建体（去跳过即红）、`size` 为 0 与 `rise=NaN` 被跳过（放宽尺寸判据即红）、下坡方向同样对齐（`atan2` 取 `rise` 绝对值即红）。把 `step` 里的 `ensure_slopes` 注释掉时基础三条全红（「x=1 处射线没打到坡面碰撞体」等）。第 150 帧 PPM SHA-256 不变（`4A47275D…48A0927`、证据世界没有 `physics.slope` 实体），`run 60` 哈希仍 `f4bc029f5f995b91`。**未闭环**：角色竖直仍在 ECS，陡坡仍挡住而非沿坡面下滑；薄壳法线朝上、坡下不与其它几何互剪；坡面不进 `AabbCollisionSystem`，动态刚体与坡面的接触只走 rapier。
 > 旧 / 新整帧 mean_abs 依次为 28.65 → 23.79 → 21.24 → 15.97 → 15.27 → 16.34 → 19.65 → 19.27 → 18.78 →
 > 0.85 → 0.63 → **0.61**（差异像素 32.22%）。前一步是**确定性粒子模拟 + billboard**：按旧端 SplitMix64 / 发射 / 生命周期合同推进，
 > Alpha 后向前排序并以预乘方式混合，Additive 单独批次；Campfire.Smoke 的位置 / 尺寸 / 透明度已对齐。再前一轮是
