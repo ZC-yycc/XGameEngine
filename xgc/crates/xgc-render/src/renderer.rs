@@ -18,6 +18,7 @@ use super::texture::TexturePipeline;
 use xgc_world::World;
 
 use super::resources::{ResourceDesc, ResourceUsage};
+use super::shadow_settings::ShadowSettings;
 use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline};
 use super::sky::{sky_irradiance, SkySettings};
 mod hdr;
@@ -79,6 +80,8 @@ pub struct Renderer {
     clear_color: wgpu::Color,
     /// 画面设置里的天空节：开着时环境照明多一份天空漫反射 IBL。
     sky: SkySettings,
+    /// 画面设置里的阴影画质（软阴影 / 级间混合）：默认全 0，走老路径逐位不变。
+    shadow_settings: ShadowSettings,
 }
 
 fn scissor_rect(clip: [f32; 4], viewport: [f32; 2]) -> Option<[u32; 4]> {
@@ -122,6 +125,7 @@ impl Renderer {
             ui_textures: HashMap::new(),
             clear_color: wgpu::Color::BLACK,
             sky: SkySettings::default(),
+            shadow_settings: ShadowSettings::default(),
         }
     }
 
@@ -153,6 +157,15 @@ impl Renderer {
     /// HUD 文字保持锐利。默认关，关着时整段跳过、帧输出逐字节不变。
     pub fn set_fxaa(&mut self, fxaa: FxaaSettings) {
         self.fxaa = fxaa;
+    }
+
+    /// 设置方向光阴影的画质（等价于旧 `project.ron` 的 `render.shadow`）。
+    ///
+    /// 软阴影（PCSS）与级间混合都是可选增强：两个 0 时着色器走 3×3 PCF + 硬级间
+    /// 切换的老路径，帧输出逐字节不变；非有限 / 负值由 [`ShadowSettings::sanitized`]
+    /// 落回 0。
+    pub fn set_shadow_settings(&mut self, settings: ShadowSettings) {
+        self.shadow_settings = settings.sanitized();
     }
 
     /// 清屏色以线性值写入 HDR 场景，和几何 / 天空 / 粒子一起在帧末 tone-map。
@@ -425,10 +438,19 @@ impl Renderer {
             self.textures = Some(super::texture_bind::TextureBinding::new(context));
         }
         // 阴影投射体 = 全部 draw：旧端蒙皮网格与静态网格一样进阴影批次。
-        let (shadow_matrix, shadow_skin_uniform_buffers) =
-            self.prepare_shadow(context, world, &list.items, view_proj, lighting.eye)?;
+        let (shadow_matrix, shadow_skin_uniform_buffers) = self.prepare_shadow(
+            context,
+            world,
+            &list.items,
+            view_proj,
+            lighting.eye,
+            self.shadow_settings.cascade_blend,
+        )?;
         let textures = self.textures.as_ref().unwrap();
-        lighting = lighting.with_shadow(shadow_matrix);
+        lighting = lighting.with_shadow(shadow_matrix).with_shadow_quality(
+            self.shadow_settings.softness,
+            self.shadow_settings.cascade_blend,
+        );
         let (shadow_view, shadow_sampler) = self
             .shadow
             .as_ref()

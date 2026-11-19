@@ -43,7 +43,7 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 材质色、`Mesh` 顶点 / 索引缓冲、builtin 网格、最小 GLB 几何 / 蒙皮 / 首图元
 `baseColorFactor` 解析、`.mat` 材质资产解析与乘子（`模型因子 → 资产 → 覆盖 → 选择高亮`，
 静态 / GPU 蒙皮同路）、场景光与环境光（`WorldData.environment`，`环境光 + 主方向光 × N·L`）、
-`Rgba16Float` 线性场景中间目标（几何 / 天空 / 粒子先合成，帧末全屏 pass 里先把线性场景乘上曝光（`render.exposure`，缺省 1.0）、叠可选的三级光晕再做唯一一次 ACES，之后可选一趟显示空间 FXAA，UI 最后叠加）、画面曝光（`render.exposure` 的 `exposure`：ACES 之前的线性光乘子，缺省 1.0，非有限 / 非正落回缺省、夹进 0.05..20.0；光晕阈值也按曝光后判定）、三级 HDR 光晕链（`render.bloom` 的 `intensity` / `threshold` / `knee`，旧端 `postfx.rs` 同口径：亮部提取 + ½ / ¼ / ⅛ 逐级降采样 + 每级横纵 9 抽头二项核共 9 个 pass，`Rgba16Float` 乒乓，默认 `intensity = 0` 整条链不跑且画面逐位不变）、显示空间 FXAA（`render.fxaa` 的 `enabled`，默认关；tone-map 之后、UI 之前一趟，平坦区逐字节不变，硬边缘按 FXAA 3.11 质量路径柔化）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
+`Rgba16Float` 线性场景中间目标（几何 / 天空 / 粒子先合成，帧末全屏 pass 里先把线性场景乘上曝光（`render.exposure`，缺省 1.0）、叠可选的三级光晕再做唯一一次 ACES，之后可选一趟显示空间 FXAA，UI 最后叠加）、画面曝光（`render.exposure` 的 `exposure`：ACES 之前的线性光乘子，缺省 1.0，非有限 / 非正落回缺省、夹进 0.05..20.0；光晕阈值也按曝光后判定）、三级 HDR 光晕链（`render.bloom` 的 `intensity` / `threshold` / `knee`，旧端 `postfx.rs` 同口径：亮部提取 + ½ / ¼ / ⅛ 逐级降采样 + 每级横纵 9 抽头二项核共 9 个 pass，`Rgba16Float` 乒乓，默认 `intensity = 0` 整条链不跑且画面逐位不变）、可选 PCSS 软阴影与级间混合（`render.shadow` 的 `softness` / `cascade_blend`，默认全 0 = 关；关着走 3×3 PCF + 硬级间切换）、显示空间 FXAA（`render.fxaa` 的 `enabled`，默认关；tone-map 之后、UI 之前一趟，平坦区逐字节不变，硬边缘按 FXAA 3.11 质量路径柔化）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
 深度测试，几何照常遮挡）、天空漫反射 IBL（解析天空 → L2 球谐 E/π，参数取项目级 `project.ron`
 的 `render.sky`）、方向光阴影（4 级 CSM：λ=0.7 practical split + 逐级紧致正交拟合 + 纹素吸附，2048² 深度数组按视线深度选层 + 3×3 PCF；静态网格与**蒙皮网格**都投射：蒙皮那支在深度 pass 里用同一份 `skin_vertex.wgsl` 变形，palette 与主场景同一份 `palette_bytes`）、环境反射（天空 SH 反射方向 × Lazarov 解析 BRDF，逐材质 `f0 = mix(0.04, 基色, metallic)`、
 `(1-metallic)` 漫反射、粗糙度夹 0.04）、网格基色贴图（glTF `TEXCOORD_0` + `baseColorTexture`，
@@ -83,6 +83,8 @@ HDR 光晕切片默认关闭，因此不改变任何既有画面的性能与像�
 蒙皮 uniform 竞技场切片把逐角色的 palette（16 KiB）与 model（96 B）并进常驻缓冲：`crates/xgc-render/src/skinned/arena.rs` 的 `UniformArena` 按设备 `min_uniform_buffer_offset_alignment` 算槽距（16 KiB palette 仍是 16 KiB，96 B model 补到 256 B），layout 声明 `has_dynamic_offset: true` 后每条 draw 只换偏移，容量按 2 的幂扩容（只增不减，封顶在历史峰值槽数）、暂存区跨帧复用。`RenderStats::skin_uniform_buffers` 给出可观测口径（只统主场景，阴影侧见下）：首批 2 张缓冲，同尺寸第二帧 **0**（旧实现每帧每个角色 2 张；回归 `repeated_frames_reuse_the_skin_uniform_arenas`，把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红）。
 
 阴影 pass 那半边同样并进了竞技场：`shadow_skin.rs` 的 `SkinnedShadow` 持有两张 `UniformArena`，`SkinnedBinding` 只记槽号；`RenderStats::shadow_skin_uniform_buffers` 首批 2 张、同尺寸第二帧 **0**（回归 `repeated_frames_reuse_the_shadow_skin_arenas`，把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红）。两条单元回归钉住槽距对齐与跨帧复用，另加一条两投射体用例 `two_skinned_casters_keep_their_own_shadow_palettes`：两个投射体沿屏幕纵轴分开（z=∓2.4）、姿态反向平移，断言两侧阴影行重心相距超过两个窗口宽、且同屏时各自留在原位（把每级 draw 的偏移强制成槽 0 时实跑变红：「窗口内阴影像素太少，无法定位：0」），钉住"每个 caster 用自己那格 palette"。证据画面没有骨架实体、竞技场根本不建缓冲，所以第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`）。**未做稳态计时**：冷启动单帧含 pipeline 编译，不能归因于本刀；“每帧缓冲数 2N → 0”是结构性收益，真正的稳态测量仍要常驻进程 profiler。
+
+PCSS 软阴影与级间混合切片把阴影接收端对齐到旧端同一份合同：`render.shadow` 的 `softness > 0` 时走 PCSS（8 抽头固定泊松盘求遮挡物平均深度，`penumbra = clamp((depth - blocker) * softness * 12, texel, 24 * texel)`，再 12 抽头 `textureSampleCompareLevel`），`cascade_blend > 0` 时在切分带里把下一级按 `t` 混进来；同一个旋钮还驱动 CPU 侧 `cascade_shadow_matrices` 的 `overlap`（把非 0 级拟合框近端多铺 `overlap × 本级跨度`，否则混合带里的片元会落在下一级图外，被「图外不混」守卫退回硬切换）。采样盘是固定常量表（截图逐字节确定），深度数组的 `textureLoad` 用 4 参且下标夹进图内。帧 uniform 592 → 608 字节（多一个 `shadow_soft` vec4）。默认全 0 = 关：走原 3×3 PCF + 硬级间切换，第 150 帧 PPM 与 `run 60` 哈希都不变。回归 4 条 GPU + 3 条消毒单测 + 2 条级联重叠 + 1 条经 `load_render` 入口的阴影解析：缺省逐字节等价且 `passes` 不增、非法值落回硬阴影、`softness = 6` 的中间灰阶从 24 个像素涨到 20086 个、`cascade_blend = 0.05` 经 CPU 重叠拟合改动阴影采样相位、改动面远小于整帧、多铺后每级 `view_range` 近端严格更靠近相机、负数 / NaN / 无穷的重叠量与 0 逐位一致。红证据：着色器 `frame.shadow_soft.x > 0.0` 改成 `> 999.0`（「软阴影必须真的改变画面」）、`set_shadow_settings` 的 `cascade_blend` 恒 0（「级间混合必须接进 CPU 重叠拟合，否则分带仍是硬切换」）、重叠量改成 0（「第 1 级的近端必须更靠近相机」）。**未闭环**：本机这组机位下混合分支改不动像素（两级影子在带内几乎同值），GPU 回归钉的是旋钮接线与重叠拟合，混合比例靠与旧端逐行同式的移植；没做稳态计时。
 
 曝光切片把画面亮度从常量变成项目级旋钮：`crates/xgc-render/src/exposure.rs` 是唯一的消毒口径（旧端 `RenderConfig` 同式：非有限 / 非正落回 1.0，合法值夹进 0.05..20.0），`project.ron` 的 `render.exposure` 由 `xgc-cli/src/project_render.rs` 读出后灌进 `Renderer::set_exposure`。乘子出现在两处且必须一致：tone-map 在 ACES 之前乘曝光（`tone_map.wgsl` 的 `ToneParams` 从 16 字节扩到 32 字节，带 3 个对齐填充），光晕的亮部提取也乘同一个值（`bloom.wgsl` 的 `fs_bright`；光晕阈值是按曝光后的亮度定义的）—— 只给一处乘，"多亮算亮"就与实际画面分叉。缺省 1.0 时第 150 帧 PPM 与 `run 60` 哈希都不变（证据项目显式写 `exposure: 1.0`，与缺省走同一条乘法，逐位相同）。回归 5 条 GPU + 3 条单元：显式 1.0 与不设曝光逐字节相同、曝光 2.0 的中心像素对上 CPU ACES 镜像（差 ≤1）、0 / 负 / NaN 落回缺省、清屏 0.4 在曝光 1.0 时不过阈值不发光而曝光 3.0 时抬亮、改曝光后光晕链按新曝光重建并与新建渲染器逐字节相同；红证据是临时把 tone-map 的 `* tone.exposure` 改成 `* 1.0`（「曝光加倍必须变亮：62 -> 62」）、把亮部提取的 `* params.exposure` 改成 `* 1.0`（「曝光把亮度抬过阈值后必须有光晕：205 -> 205」）、把 `chain.exposure` 从链缓存键里删掉（「改曝光后光晕链必须按新曝光重建」）。**未闭环**：光照 / 粒子仍在曝光前的线性域里算（与旧端同序）；没做稳态计时。
 
@@ -151,12 +153,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（392 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（216 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35710 字节，
+`cargo test --workspace --offline` 全绿（402 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（218 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-PCSS / 点光阴影、TAA / SSAO 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
+点光阴影、TAA / SSAO 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。

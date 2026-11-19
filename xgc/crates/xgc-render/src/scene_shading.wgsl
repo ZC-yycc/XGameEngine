@@ -19,6 +19,8 @@ struct Frame {
     shadow_forward: vec4<f32>,
     // x = 阴影是否开启，y = 深度偏置，w = 级联层数
     shadow_params: vec4<f32>,
+    // x = 软阴影（PCSS）的灯光尺寸，y = 级间混合带宽；两个 0 = 与引入画质参数前逐位一致
+    shadow_soft: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -83,7 +85,133 @@ fn sky_sh_eval(n: vec3<f32>) -> vec3<f32> {
          + frame.sky_sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
 }
 
-// 3×3 PCF（与旧引擎"硬阴影"分支同式）：图外 / 关闭时一律返回 1（全亮）。
+// --- 方向光阴影 ---
+//
+// 3×3 PCF：把 9 个比较结果平均一下，边缘不那么硬。
+//
+// 用 `textureSampleCompareLevel` 而不是 `textureSampleCompare`：后者要走隐式导数，
+// 而它在片元主路径里，深度图没有 mip，本来也只需要 level 0。
+//
+// 软阴影（PCSS，`shadow_soft.x > 0`）与级间混合（`shadow_soft.y > 0`）都是**默认关**：
+// 关着时走下面这条 3×3 PCF + 硬级间切换的老路径，逐位一致。
+//
+// 半影估计与软化 PCF 用固定采样盘（poisson）。常量表 ⇒ 跨帧逐位确定 —— 截图
+// 确定性是硬要求（无头截图要能逐字节复现），所以这里不用任何随机数。
+const BLOCKER_TAPS: i32 = 8;
+const BLOCKER_OFFSETS: array<vec2<f32>, 8> = array<vec2<f32>, 8>(
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(0.5278, 0.7826),
+    vec2<f32>(-0.9231, 0.2345),
+    vec2<f32>(0.2341, -0.9214),
+    vec2<f32>(-0.4832, -0.7621),
+    vec2<f32>(0.8732, -0.3412),
+    vec2<f32>(-0.7823, 0.4832),
+    vec2<f32>(0.1234, 0.3421),
+);
+const SOFT_PCF_TAPS: i32 = 12;
+const SOFT_PCF_OFFSETS: array<vec2<f32>, 12> = array<vec2<f32>, 12>(
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(0.5278, 0.7826),
+    vec2<f32>(-0.9231, 0.2345),
+    vec2<f32>(0.2341, -0.9214),
+    vec2<f32>(-0.4832, -0.7621),
+    vec2<f32>(0.8732, -0.3412),
+    vec2<f32>(-0.7823, 0.4832),
+    vec2<f32>(0.1234, 0.3421),
+    vec2<f32>(-0.2341, 0.9214),
+    vec2<f32>(0.7621, -0.4832),
+    vec2<f32>(-0.9214, -0.2341),
+    vec2<f32>(0.3421, -0.8732),
+);
+
+// 一层级联里的阴影值。y = 1 表示片元落在这一层的图里（0 = 图外，按"全亮"处理，
+// 否则边缘会被裁出一条黑带）。图外 / 关闭时 x 一律 1。
+fn cascade_shadow_at(world_pos: vec3<f32>, cascade: u32, ndotl: f32) -> vec2<f32> {
+    let light_clip = frame.light_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
+    let ndc = light_clip.xyz / light_clip.w;
+    // NDC y 朝上、纹理 v 朝下。
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return vec2<f32>(1.0, 0.0);
+    }
+    // 掠射角下自遮挡更严重：偏置随 N·L 变小而放大。
+    let bias = frame.shadow_params.y * (1.0 + 2.0 * (1.0 - ndotl));
+    let depth = ndc.z;
+    let texel = 1.0 / f32(textureDimensions(shadow_tex).x);
+
+    if (frame.shadow_soft.x > 0.0) {
+        // --- PCSS：先找遮挡物，再按半影宽度做 PCF ---
+        //
+        // 三步：① 在一个盘里找"比片元更近"的遮挡物，求它们的平均深度；
+        // ② 遮挡物离接收面越远，半影越宽（penumbra ∝ receiver - blocker）；
+        // ③ 用这个宽度做 PCF。所以贴着墙根的影子硬、离墙远的影子糊 —— 这正是
+        // 单一固定核做不到的。
+        let search_uv = texel * (2.0 + 8.0 * frame.shadow_soft.x);
+        var blocker_sum = 0.0;
+        var blocker_count = 0.0;
+        for (var i = 0; i < BLOCKER_TAPS; i = i + 1) {
+            let coord = uv + BLOCKER_OFFSETS[i] * search_uv;
+            if (coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0) {
+                continue;
+            }
+            // `textureLoad` 取**原始深度**（比较采样器只能给 0/1，估不了距离）。
+            // 深度数组纹理的 `textureLoad` 要 4 个参数（含 level）：没有 mip，level 恒 0。
+            // 下标夹进图内 —— uv 恰好 1.0 时乘出来的下标等于宽度，越界读在 WebGPU 里
+            // 返回 0，会被当成"深度 0 的遮挡物"。
+            let dims = vec2<i32>(textureDimensions(shadow_tex));
+            let pix = clamp(
+                vec2<i32>(coord * vec2<f32>(dims)),
+                vec2<i32>(i32(0)),
+                dims - vec2<i32>(i32(1)),
+            );
+            let d = textureLoad(shadow_tex, pix, i32(cascade), 0);
+            if (d < depth) {
+                blocker_sum = blocker_sum + d;
+                blocker_count = blocker_count + 1.0;
+            }
+        }
+        if (blocker_count < 0.5) {
+            return vec2<f32>(1.0, 1.0);
+        }
+        let blocker = blocker_sum / blocker_count;
+        // 正交光下"遮挡物到接收面的距离"就用深度差近似（光沿 -forward 看，
+        // 深度差与沿光距离差只差一个常数倍，收进 light size 里）。
+        let penumbra = clamp(
+            (depth - blocker) * frame.shadow_soft.x * 12.0,
+            texel,
+            texel * 24.0,
+        );
+        var sum = 0.0;
+        for (var i = 0; i < SOFT_PCF_TAPS; i = i + 1) {
+            let offset = SOFT_PCF_OFFSETS[i] * penumbra;
+            sum = sum + textureSampleCompareLevel(
+                shadow_tex,
+                shadow_smp,
+                uv + offset,
+                i32(cascade),
+                depth - bias,
+            );
+        }
+        return vec2<f32>(sum / f32(SOFT_PCF_TAPS), 1.0);
+    }
+
+    // --- 硬阴影：3×3 PCF（与引入画质参数前逐位一致）---
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let offset = vec2<f32>(f32(dx), f32(dy)) * texel;
+            sum = sum + textureSampleCompareLevel(
+                shadow_tex,
+                shadow_smp,
+                uv + offset,
+                i32(cascade),
+                depth - bias,
+            );
+        }
+    }
+    return vec2<f32>(sum / 9.0, 1.0);
+}
+
 fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
     // 选层：级联按**相机视线方向的线性深度**切，splits 是世界单位。
     let count = u32(max(frame.shadow_params.w, 0.0));
@@ -98,30 +226,28 @@ fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
             break;
         }
     }
-    let light_clip = frame.light_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
-    let ndc = light_clip.xyz / light_clip.w;
-    // NDC y 朝上、纹理 v 朝下。
-    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        return 1.0;
-    }
-    // 掠射角下自遮挡更严重：偏置随 N·L 变小而放大。
-    let bias = frame.shadow_params.y * (1.0 + 2.0 * (1.0 - ndotl));
-    let texel = 1.0 / f32(textureDimensions(shadow_tex).x);
-    var sum = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let offset = vec2<f32>(f32(dx) * texel, f32(dy) * texel);
-            sum = sum + textureSampleCompareLevel(
-                shadow_tex,
-                shadow_smp,
-                uv + offset,
-                i32(cascade),
-                ndc.z - bias,
-            );
+
+    let a = cascade_shadow_at(world_pos, cascade, ndotl);
+    // --- 级间混合 ---
+    //
+    // 切分处两级的纹素密度差一截，硬接就是一条看得见的缝。在切分前一条薄带里
+    // 把两级混起来（`shadow_soft.y` = 带宽占本级跨度的比例），缝就抹平了。
+    //
+    // 下一级必须**重叠**着拟合：不重叠的话带里的片元落在下一级的图外，
+    // `cascade_shadow_at` 返回"全亮"，混进去等于把缝抹成一圈淡影子。重叠量由
+    // CPU 侧 `cascade_shadow_matrices(overlap = cascade_blend)` 给（0 时逐位一致）。
+    if (frame.shadow_soft.y > 0.0 && cascade + 1u < count) {
+        let split = frame.shadow_splits[cascade];
+        let band = split * frame.shadow_soft.y;
+        if (view_depth > split - band) {
+            let b = cascade_shadow_at(world_pos, cascade + 1u, ndotl);
+            if (b.y > 0.5) {
+                let t = clamp((view_depth - (split - band)) / max(band, 1e-5), 0.0, 1.0);
+                return mix(a.x, b.x, t);
+            }
         }
     }
-    return sum / 9.0;
+    return a.x;
 }
 
 struct SceneVsOut {

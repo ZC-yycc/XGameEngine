@@ -31,6 +31,7 @@ mod renderer;
 mod resources;
 mod shadow;
 mod shadow_csm;
+mod shadow_settings;
 mod shadow_skin;
 mod shot;
 mod skinned;
@@ -69,6 +70,7 @@ pub use pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 pub use shadow::{fit_directional_shadow, SHADOW_DEPTH_BIAS, SHADOW_RESOLUTION};
+pub use shadow_settings::ShadowSettings;
 pub use shot::{
     clip_planes, default_shot_direction, frame_bounds, frame_scene, scene_bounds, shot_direction,
     Bounds, ShotCamera, ShotFrame, DEFAULT_FOV_Y,

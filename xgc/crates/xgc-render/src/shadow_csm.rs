@@ -67,6 +67,12 @@ pub struct ShadowCascades {
     pub splits: [f32; SHADOW_CASCADES],
     /// 相机视线方向（单位向量）：片元用它算视线深度来选层。
     pub forward: [f32; 3],
+    /// 每级拟合框沿视线方向的深度区间（世界单位，相机为原点）。
+    ///
+    /// 它是**级间混合的回归判据**：`overlap > 0` 时非第 0 级的近端必须往前铺
+    /// （区间下界变小），否则切分前的混合带在下一级里落在图外、混成一片全亮。
+    /// 也是将来做逐级剔除时的剪枝依据。
+    pub view_range: [(f32, f32); SHADOW_CASCADES],
 }
 
 /// practical split scheme：对数与均匀插值混合（λ = 0.7），单调、末级 = far。
@@ -147,6 +153,11 @@ fn frustum_corners(inv_view_proj: Mat4) -> Option<FrustumQuads> {
 }
 
 /// 按旧端同式算 4 级级联：相机视锥沿视线切 4 段，逐段拟合紧致正交光视锥。
+///
+/// `overlap`（0.0~1.0）是**级间混合**的重叠量：非零时每一级（第 0 级除外）的
+/// 近端往前多铺 `overlap × 本级跨度`，于是切分前那条混合带里的片元在两级里都
+/// 采得到（不铺的话下一级的图在切分处根本没覆盖，混进去等于混一团"全亮"）。
+/// `0.0` 时拟合结果与引入混合前逐位一致。
 #[allow(clippy::too_many_arguments)]
 pub fn cascade_shadow_matrices(
     inv_view_proj: Mat4,
@@ -155,6 +166,7 @@ pub fn cascade_shadow_matrices(
     scene: &Bounds,
     resolution: u32,
     count: usize,
+    overlap: f32,
 ) -> Option<ShadowCascades> {
     if count == 0 || count > SHADOW_CASCADES || scene.is_empty() {
         return None;
@@ -202,11 +214,19 @@ pub fn cascade_shadow_matrices(
         view_proj: [super::camera::IDENTITY; SHADOW_CASCADES],
         splits: [0.0; SHADOW_CASCADES],
         forward,
+        view_range: [(0.0, 0.0); SHADOW_CASCADES],
     };
     for c in 0..count {
         let d0 = if c == 0 { near_d } else { splits[c - 1] };
         let d1 = splits[c];
-        let (t0, t1) = (at(d0), at(d1));
+        // 级间混合的重叠：本级（非第 0 级）的近端往前多铺一点，让切分前的
+        // 混合带在两级里都采得到（`overlap = 0` 时也是 0，逐位一致）。
+        let overlap_d = if c > 0 && overlap.is_finite() && overlap > 0.0 {
+            (d1 - d0) * overlap
+        } else {
+            0.0
+        };
+        let (t0, t1) = (at(d0 - overlap_d), at(d1));
         let mut corners = [[0.0f32; 3]; 8];
         for k in 0..4 {
             corners[k] = lerp(near_q[k], far_q[k], t0);
@@ -256,6 +276,31 @@ pub fn cascade_shadow_matrices(
         let projection = orthographic_rh(cx - half, cx + half, cy - half, cy + half, near_z, far_z);
         out.view_proj[c] = mul(projection, view);
         out.splits[c] = d1;
+        // 拟合框沿视线方向的跨度：反推 8 个角点再投影到 `forward`。斜射光下框沿
+        // 光线方向被拉长，能装下视线深度之外的投影物，所以这个区间只用来做
+        // 剪枝与回归，不当作"框内"的判据。
+        let inverse = super::camera::invert(out.view_proj[c])?;
+        let mut dmin = f32::INFINITY;
+        let mut dmax = f32::NEG_INFINITY;
+        for i in 0..8 {
+            let ndc = [
+                if i & 1 == 0 { -1.0 } else { 1.0 },
+                if i & 2 == 0 { -1.0 } else { 1.0 },
+                if i & 4 == 0 { 0.0 } else { 1.0 },
+                1.0,
+            ];
+            let point = super::camera::transform_point(inverse, ndc);
+            if !point[0].is_finite() || !point[1].is_finite() || !point[2].is_finite() {
+                return None;
+            }
+            let d = dot(sub([point[0], point[1], point[2]], camera_pos), forward);
+            dmin = dmin.min(d);
+            dmax = dmax.max(d);
+        }
+        if !dmin.is_finite() || !dmax.is_finite() {
+            return None;
+        }
+        out.view_range[c] = (dmin, dmax);
     }
     Some(out)
 }
@@ -298,6 +343,100 @@ mod tests {
         }
     }
 
+    /// **级间混合的重叠拟合**：`overlap > 0` 时每个非第 0 级的拟合框必须往
+    /// 相机方向多铺 `overlap × 本级跨度`，让切分前的混合带在下一级的图里也采得到。
+    /// `overlap = 0`（老路径）时近端不动 —— 这条严格不等式在恒 0 的实现下是红的。
+    #[test]
+    fn cascade_overlap_extends_the_fit_toward_the_camera() {
+        // 相机在场景外俯视（与旧端同名用例同一组探针）：视线深度全为正，
+        // 拟合框近端的变化才不会被"框伸到相机背后"的角点盖住。
+        let eye = [0.0, 6.0, 24.0];
+        let view = super::super::camera::look_at_rh(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let projection =
+            super::super::camera::perspective_rh_zo(60.0f32.to_radians(), 16.0 / 9.0, 0.1, 200.0);
+        let inverse = super::super::camera::invert(mul(projection, view)).expect("可逆");
+        let bounds = Bounds {
+            min: [-10.0, -0.5, -10.0],
+            max: [10.0, 6.0, 10.0],
+        };
+        let fits = |overlap: f32| {
+            cascade_shadow_matrices(
+                inverse,
+                eye,
+                [0.4, -1.0, 0.3],
+                &bounds,
+                SHADOW_RESOLUTION,
+                SHADOW_CASCADES,
+                overlap,
+            )
+            .expect("级联拟合成功")
+        };
+        let plain = fits(0.0);
+        let blended = fits(0.25);
+        // 切分点不能动：重叠改的是拟合框，不是层级划分。
+        assert_eq!(plain.splits, blended.splits);
+        // 第 0 级没有"上一级"，重叠对它无效 —— 矩阵与深度区间都逐位一致。
+        assert_eq!(plain.view_proj[0], blended.view_proj[0]);
+        assert_eq!(plain.view_range[0], blended.view_range[0]);
+        for c in 1..SHADOW_CASCADES {
+            // 拟合框的近端往相机方向铺了：沿视线的最小覆盖深度**严格变小**。
+            // 只比"严格变小"而不比具体幅度的原因：拟合框还被纹素吸附与半径余量
+            // 撑开，框角点往相机背后的投影会让近端变化远小于 `overlap × 跨度`。
+            assert!(
+                blended.view_range[c].0 < plain.view_range[c].0,
+                "第 {c} 级的近端必须更靠近相机：{:?} vs {:?}",
+                blended.view_range[c],
+                plain.view_range[c]
+            );
+        }
+    }
+
+    /// **重叠量的垃圾值当 0**：负数 / NaN / 无穷与 `0.0` 逐位一致（旧端
+    /// `cascade_overlap_garbage_is_treated_as_zero` 同口径）。少了 `is_finite` 这半个守卫，
+    /// `+inf` 会把近端推到 0（NaN 要整层守卫都缺了才会漏进来），画面出现整条假阴影。
+    #[test]
+    fn cascade_overlap_garbage_is_treated_as_zero() {
+        let eye = [0.0, 6.0, 24.0];
+        let view = super::super::camera::look_at_rh(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        let projection =
+            super::super::camera::perspective_rh_zo(60.0f32.to_radians(), 16.0 / 9.0, 0.1, 200.0);
+        let inverse = super::super::camera::invert(mul(projection, view)).expect("相机求逆");
+        let bounds = Bounds {
+            min: [-10.0, -0.5, -10.0],
+            max: [10.0, 6.0, 10.0],
+        };
+        let fits = |overlap: f32| {
+            cascade_shadow_matrices(
+                inverse,
+                eye,
+                [0.4, -1.0, 0.3],
+                &bounds,
+                SHADOW_RESOLUTION,
+                SHADOW_CASCADES,
+                overlap,
+            )
+            .expect("级联拟合成功")
+        };
+        let plain = fits(0.0);
+        for overlap in [-0.5f32, f32::NAN, f32::INFINITY] {
+            let garbage = fits(overlap);
+            assert!(
+                plain.splits == garbage.splits,
+                "垃圾重叠量不该改分界点：{overlap}"
+            );
+            for c in 0..SHADOW_CASCADES {
+                assert!(
+                    plain.view_proj[c] == garbage.view_proj[c],
+                    "垃圾重叠量不该改第 {c} 级投影：{overlap}"
+                );
+                assert!(
+                    plain.view_range[c] == garbage.view_range[c],
+                    "垃圾重叠量不该改第 {c} 级深度范围：{overlap}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn cascades_cover_the_camera_frustum() {
         let view =
@@ -316,6 +455,7 @@ mod tests {
             &bounds,
             SHADOW_RESOLUTION,
             SHADOW_CASCADES,
+            0.0,
         )
         .expect("级联拟合成功");
         assert_eq!(cascades.count, SHADOW_CASCADES);

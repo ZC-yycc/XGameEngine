@@ -1,16 +1,17 @@
-//! `project.ron` 的画面设置读取：曝光、天空、光晕与 FXAA。
+//! `project.ron` 的画面设置读取：曝光、天空、光晕、FXAA 与阴影画质。
 //!
 //! 旧引擎把画面设置放在项目级而不是场景级，XGC 也按项目级读；缺省值必须逐项
 //! 等于旧端 `RenderConfig::default` 的曝光 1.0 与 `SkyConfig` / `BloomConfig` /
-//! `FxaaConfig` 的 `default`，
+//! `FxaaConfig` / `ShadowConfig` 的 `default`，
 //! 缺文件 / 缺节时画面才与接入前逐位相同。
 
 use std::path::Path;
 
 use serde::Deserialize;
-use xgc_render::{sanitize_exposure, BloomSettings, FxaaSettings, SkySettings};
+use xgc_render::{sanitize_exposure, BloomSettings, FxaaSettings, ShadowSettings, SkySettings};
 
-/// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分（曝光 + 天空 + 光晕 + FXAA）。
+/// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分
+/// （曝光 + 天空 + 光晕 + FXAA + 阴影画质）。
 #[derive(Debug, Default, Deserialize)]
 struct OldProjectFile {
     #[serde(default)]
@@ -27,6 +28,8 @@ struct OldProjectRender {
     bloom: OldBloomConfig,
     #[serde(default)]
     fxaa: OldFxaaConfig,
+    #[serde(default)]
+    shadow: OldShadowConfig,
 }
 
 /// 缺 `render` 节时的缺省：曝光必须是旧端缺省 1.0，不能靠 `derive(Default)` 给出
@@ -38,6 +41,7 @@ impl Default for OldProjectRender {
             sky: OldSkyConfig::default(),
             bloom: OldBloomConfig::default(),
             fxaa: OldFxaaConfig::default(),
+            shadow: OldShadowConfig::default(),
         }
     }
 }
@@ -62,6 +66,15 @@ struct OldBloomConfig {
     threshold: f32,
     #[serde(default = "bloom_default_knee")]
     knee: f32,
+}
+
+/// 缺省值必须逐项等于旧 `ShadowConfig::default`（软阴影 / 级间混合都关）。
+#[derive(Debug, Default, Deserialize)]
+struct OldShadowConfig {
+    #[serde(default)]
+    softness: f32,
+    #[serde(default)]
+    cascade_blend: f32,
 }
 
 fn bloom_default_threshold() -> f32 {
@@ -135,13 +148,22 @@ impl Default for OldSkyConfig {
     }
 }
 
-/// 读 `project.ron` 的画面设置（曝光 + 天空 + 光晕 + FXAA）。
+/// `project.ron` 投影出来的画面设置：三个宿主（CLI / 编辑器 / 游戏）都消费这一份，
+/// 新增节只改这里，不再往元组末尾追加字段。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ProjectRenderSettings {
+    pub(crate) sky: SkySettings,
+    pub(crate) bloom: BloomSettings,
+    pub(crate) fxaa: FxaaSettings,
+    pub(crate) exposure: f32,
+    pub(crate) shadow: ShadowSettings,
+}
+
+/// 读 `project.ron` 的画面设置（曝光 + 天空 + 光晕 + FXAA + 阴影画质）。
 ///
 /// 没有 `project.ron` 时返回 `None`；文件在但缺节则按旧端缺省读出来
 /// （曝光 1.0、其余都是"关"），与缺节等于关 / 不增不减的语义一致。
-pub(crate) fn load_render(
-    project_root: &Path,
-) -> Option<(SkySettings, BloomSettings, FxaaSettings, f32)> {
+pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> {
     let path = project_root.join("project.ron");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return None;
@@ -152,7 +174,7 @@ pub(crate) fn load_render(
             // 文件在但读不懂：契约仍是"缺省即关"，但静默把天空和光晕一起关掉
             // 会让画面差异无从归因，所以留一条能查的日志。
             eprintln!(
-                "warning: {} 解析失败，画面设置回落到缺省（曝光 1.0、天空 / 光晕 / FXAA 都关）：{error}",
+                "warning: {} 解析失败，画面设置回落到缺省（曝光 1.0、天空 / 光晕 / FXAA / 阴影画质都关）：{error}",
                 path.display()
             );
             return None;
@@ -162,8 +184,9 @@ pub(crate) fn load_render(
     let sky = project.render.sky;
     let bloom = project.render.bloom;
     let fxaa = project.render.fxaa;
-    Some((
-        SkySettings {
+    let shadow = project.render.shadow;
+    Some(ProjectRenderSettings {
+        sky: SkySettings {
             enabled: sky.enabled,
             intensity: sky.intensity,
             zenith: sky.zenith,
@@ -173,17 +196,23 @@ pub(crate) fn load_render(
             sun_intensity: sky.sun_intensity,
         }
         .sanitized(),
-        BloomSettings {
+        bloom: BloomSettings {
             intensity: bloom.intensity,
             threshold: bloom.threshold,
             knee: bloom.knee,
         }
         .sanitized(),
-        FxaaSettings {
+        fxaa: FxaaSettings {
             enabled: fxaa.enabled,
         },
         exposure,
-    ))
+        // 软阴影 / 级间混合都默认关；非有限 / 负值在消费边界落回关。
+        shadow: ShadowSettings {
+            softness: shadow.softness,
+            cascade_blend: shadow.cascade_blend,
+        }
+        .sanitized(),
+    })
 }
 
 #[cfg(test)]
@@ -195,8 +224,9 @@ mod tests {
             eprintln!("skip: 没有旧项目 project.ron");
             return;
         }
-        let (sky, bloom, fxaa, exposure) =
-            super::load_render(root).expect("showcase 项目应带 sky 节");
+        let settings = super::load_render(root).expect("showcase 项目应带 sky 节");
+        let (sky, bloom, fxaa) = (settings.sky, settings.bloom, settings.fxaa);
+        let exposure = settings.exposure;
         assert!(sky.enabled, "项目里天空是开着的");
         assert_eq!(sky.intensity, 1.0);
         assert_eq!(sky.zenith, [0.09, 0.26, 0.60]);
@@ -213,6 +243,9 @@ mod tests {
         // 项目里显式写 `exposure: 1.0`（旧端该字段没有 skip_serializing_if，老项目
         // 总会落盘它）：1.0 走 x*1.0 的同一条乘法，帧输出逐字节不变。
         assert_eq!(exposure, xgc_render::EXPOSURE_DEFAULT);
+        // 项目里没有 `render.shadow` 节：软阴影 / 级间混合关（画面逐位不变）。
+        assert_eq!(settings.shadow, xgc_render::ShadowSettings::default());
+        assert!(!settings.shadow.is_enabled());
         // 没有 project.ron 的资产根：天空关、光晕关。
         assert!(super::load_render(std::path::Path::new("does-not-exist")).is_none());
     }
@@ -242,5 +275,42 @@ mod tests {
             super::OldProjectFile::default().render.exposure,
             xgc_render::EXPOSURE_DEFAULT
         );
+    }
+
+    /// 阴影节走真实入口 `load_render`（而不是「先反序列化、再本地消毒」）：将来漏接
+    /// `shadow` 字段时这条会红；「缺节 = 关」也由同一入口给出判据。
+    #[test]
+    fn reads_the_shadow_sections_through_the_project_entry() {
+        let root =
+            std::env::temp_dir().join(format!("xgc-project-render-shadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("建临时项目目录");
+        let write = |text: &str| {
+            std::fs::write(root.join("project.ron"), text).expect("写临时 project.ron")
+        };
+
+        write("(render: (shadow: (softness: 0.5, cascade_blend: 0.05)))");
+        let settings = super::load_render(&root).expect("临时项目应能读出画面设置");
+        assert_eq!(settings.shadow.softness, 0.5);
+        assert_eq!(settings.shadow.cascade_blend, 0.05);
+        assert!(settings.shadow.is_enabled());
+        // 没写的节保持缺省：曝光 1.0（x*1.0 与老逐字节一致），其余全关。
+        assert_eq!(settings.exposure, xgc_render::EXPOSURE_DEFAULT);
+        assert!(!settings.bloom.is_enabled());
+        assert!(!settings.fxaa.is_enabled());
+
+        // 负数在入口消毒成 0；`cascade_blend: 2.0` 是合法值（旧端不夹上界），保留。
+        write("(render: (shadow: (softness: -0.5, cascade_blend: 2.0)))");
+        let settings = super::load_render(&root).expect("垃圾值不该让解析失败");
+        assert_eq!(settings.shadow.softness, 0.0);
+        assert_eq!(settings.shadow.cascade_blend, 2.0);
+
+        // 缺 `render.shadow` 节 = 关。
+        write("(render: ())");
+        let settings = super::load_render(&root).expect("空 render 节应走缺省");
+        assert_eq!(settings.shadow, xgc_render::ShadowSettings::default());
+        assert!(!settings.shadow.is_enabled());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

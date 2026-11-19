@@ -19,6 +19,7 @@ impl super::Renderer {
         items: &[DrawItem],
         view_proj: Mat4,
         camera_pos: [f32; 3],
+        cascade_blend: f32,
     ) -> Result<(Option<ShadowCascades>, usize), GpuError> {
         let Some(light) = world.environment().lights.iter().find(|light| {
             light.kind == xgc_world::LightKind::Directional
@@ -42,6 +43,9 @@ impl super::Renderer {
             &bounds,
             crate::shadow::SHADOW_RESOLUTION,
             crate::shadow::SHADOW_CASCADES,
+            // 级间混合开着时每级（非第 0 级）近端要多铺一段，切分前的混合带
+            // 才在两级里都采得到；0 = 老拟合，逐位一致。
+            cascade_blend,
         ) else {
             return Ok((None, 0));
         };

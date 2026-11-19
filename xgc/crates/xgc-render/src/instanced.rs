@@ -14,8 +14,9 @@ use super::texture_bind::TextureBinding;
 use xgc_world::SceneEnvironment;
 
 /// 帧 uniform：view-proj 64B + 四个 vec4（相机/强度、ambient、sun_dir、sun_color）
-/// + 9 个 vec4 的天空球谐 + 天空开关 vec4 + 4 级光视图投影 256B + 切分 / 视线 / 参数 3 个 vec4 = 592B。
-pub(crate) const FRAME_UNIFORM_BYTES: u64 = 592;
+/// + 9 个 vec4 的天空球谐 + 天空开关 vec4 + 4 级光视图投影 256B
+/// + 切分 / 视线 / 参数 / 阴影画质 4 个 vec4 = 608B。
+pub(crate) const FRAME_UNIFORM_BYTES: u64 = 608;
 
 /// 帧级光照参数：环境光 + 场景第一盏可用方向光；没有方向光时强度为 0（只剩环境光）。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,6 +30,10 @@ pub(crate) struct FrameLighting {
     pub(crate) sky_irradiance: Option<[[f32; 4]; 9]>,
     /// 4 级方向光级联；`None` = 这一帧没有可用阴影。
     pub(crate) shadow_cascades: Option<ShadowCascades>,
+    /// 软阴影（PCSS）的灯光尺寸；0 = 硬阴影（与引入 PCSS 之前逐位一致）。
+    pub(crate) shadow_softness: f32,
+    /// 级间混合带宽占该级跨度的比例；0 = 两级硬接。
+    pub(crate) shadow_cascade_blend: f32,
 }
 
 impl FrameLighting {
@@ -44,12 +49,21 @@ impl FrameLighting {
             sun_color: sun.map(|light| light.color).unwrap_or([1.0; 3]),
             sky_irradiance: None,
             shadow_cascades: None,
+            shadow_softness: 0.0,
+            shadow_cascade_blend: 0.0,
         }
     }
 
     /// 挂上 4 级方向光级联（`None` = 不采样阴影）。
     pub(crate) fn with_shadow(mut self, cascades: Option<ShadowCascades>) -> Self {
         self.shadow_cascades = cascades;
+        self
+    }
+
+    /// 挂上阴影画质参数（软阴影尺寸 + 级间混合带宽）：0 / 0 就是老路径。
+    pub(crate) fn with_shadow_quality(mut self, softness: f32, cascade_blend: f32) -> Self {
+        self.shadow_softness = softness;
+        self.shadow_cascade_blend = cascade_blend;
         self
     }
 
@@ -123,6 +137,10 @@ impl FrameLighting {
             None => (0.0, 0.0),
         };
         for value in [shadow_enabled, shadow_bias, 0.0, count] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        // x = 软阴影尺寸，y = 级间混合带宽；z / w 留给以后（显式写 0 而不是留空洞）。
+        for value in [self.shadow_softness, self.shadow_cascade_blend, 0.0, 0.0] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
