@@ -8,11 +8,12 @@ use super::camera::{camera_view_projection_with_eye, invert, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
 use super::exposure::{sanitize_exposure, EXPOSURE_DEFAULT};
 use super::frame_color::compose_colors;
+use super::frame_uniform::{create_frame_bind, FrameLighting};
 use super::fxaa::{FxaaSettings, FxaaStage};
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::image::ImageData;
-use super::instanced::{FrameLighting, InstancedRequest};
+use super::instanced::InstancedRequest;
 use super::pipeline::{RenderCache, TrianglePipeline};
 use super::texture::TexturePipeline;
 use xgc_world::World;
@@ -38,6 +39,8 @@ pub struct RenderStats {
     pub skin_uniform_buffers: usize,
     /// 本帧为阴影 pass 的蒙皮竞技场（palette / model）新建的 GPU 缓冲数：同尺寸下恒 0。
     pub shadow_skin_uniform_buffers: usize,
+    /// 点光立方体阴影本帧画了多少次（六面 × 投射体）：0 = 这一帧没做点光阴影。
+    pub point_shadow_draw_calls: usize,
 }
 
 struct DepthTarget {
@@ -423,22 +426,9 @@ impl Renderer {
         view_proj: Mat4,
         mut lighting: FrameLighting,
     ) -> Result<RenderStats, GpuError> {
-        self.ensure_depth(context, target.width(), target.height())?;
-        // 天空管线要在拿 `self.depth` 的不可变借用之前建好（之后只剩读）。
-        if self.sky.enabled {
-            let format = target.format();
-            if self.sky_pipeline.as_ref().map(|(current, _)| *current) != Some(format) {
-                self.sky_pipeline = Some((format, context.create_sky_pipeline(format)));
-            }
-        }
-        if self.shadow.is_none() {
-            self.shadow = Some(super::shadow::ShadowTarget::new(context));
-        }
-        if self.textures.is_none() {
-            self.textures = Some(super::texture_bind::TextureBinding::new(context));
-        }
+        self.ensure_frame_targets(context, target)?;
         // 阴影投射体 = 全部 draw：旧端蒙皮网格与静态网格一样进阴影批次。
-        let (shadow_matrix, shadow_skin_uniform_buffers) = self.prepare_shadow(
+        let prepared = self.prepare_shadow(
             context,
             world,
             &list.items,
@@ -447,15 +437,18 @@ impl Renderer {
             self.shadow_settings.cascade_blend,
         )?;
         let textures = self.textures.as_ref().unwrap();
-        lighting = lighting.with_shadow(shadow_matrix).with_shadow_quality(
-            self.shadow_settings.softness,
-            self.shadow_settings.cascade_blend,
-        );
-        let (shadow_view, shadow_sampler) = self
-            .shadow
-            .as_ref()
-            .map(|target| target.sample_source(shadow_matrix.is_some()))
-            .unwrap();
+        let shadow_matrix = prepared.cascades;
+        let point_shadow = prepared.point;
+        lighting = lighting
+            .with_shadow(shadow_matrix)
+            .with_shadow_quality(
+                self.shadow_settings.softness,
+                self.shadow_settings.cascade_blend,
+            )
+            .with_point_shadow(point_shadow);
+        let shadow_target = self.shadow.as_ref().unwrap();
+        let (shadow_view, shadow_sampler) = shadow_target.sample_source(shadow_matrix.is_some());
+        let point_shadow_view = shadow_target.point_shadow_source(point_shadow.is_some());
         let depth = &self.depth.as_ref().unwrap().view;
         let draws = list.len();
         let mut cpu_items = Vec::with_capacity(list.items.len());
@@ -488,6 +481,7 @@ impl Renderer {
             lighting,
             shadow_view,
             shadow_sampler,
+            point_shadow_view,
             depth,
             clear_color: self.clear_color,
             textures,
@@ -550,13 +544,14 @@ impl Renderer {
                 });
             }
             if !batch.is_empty() {
-                let frame_bind = super::instanced::create_frame_bind(
+                let frame_bind = create_frame_bind(
                     context,
                     pipeline.frame_layout(),
                     view_proj,
                     &lighting,
                     shadow_view,
                     shadow_sampler,
+                    point_shadow_view,
                 );
                 let skinned = pipeline.draw_batch(
                     context,
@@ -592,7 +587,8 @@ impl Renderer {
             // HDR 场景即使没有 draw 也会清色；随后帧入口再计一次 tone-map。
             passes: 1,
             skin_uniform_buffers,
-            shadow_skin_uniform_buffers,
+            shadow_skin_uniform_buffers: prepared.skin_uniform_buffers,
+            point_shadow_draw_calls: prepared.point_draw_calls,
         })
     }
 }

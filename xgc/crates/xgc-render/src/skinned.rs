@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use super::camera::{mul, Mat4, IDENTITY};
+use super::frame_uniform::create_frame_layout;
 use super::gpu::{GpuContext, GpuError};
-use super::instanced::create_frame_layout;
 use super::mesh::Mesh;
 use super::texture_bind::TextureBinding;
 

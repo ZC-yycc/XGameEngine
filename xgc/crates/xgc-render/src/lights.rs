@@ -22,7 +22,8 @@ pub(crate) struct GpuLight {
     pub(crate) pos_type: [f32; 4],
     /// rgb = 光色，a = 强度。
     pub(crate) color_intensity: [f32; 4],
-    /// x = 这盏灯是否用方向光阴影图（1 / 0），y = 点光影响半径；z / w 预留。
+    /// x = 这盏灯是否用方向光阴影图（1 / 0），y = 点光影响半径，
+    /// z = 这盏灯是否用点光立方体阴影图（1 / 0），w 预留。
     pub(crate) shadow_params: [f32; 4],
 }
 
@@ -55,12 +56,17 @@ pub(crate) struct PackedLights {
 ///   标记打错会让别的方向光去采样一张不属于自己的阴影图）。
 ///
 /// 点光的 `range` 非有限时打包成 0：着色器见到 0 就把这盏灯整个跳过（旧端同口径）。
+///
+/// 点光一侧只有**第一盏 `casts_shadow` 且 `range > 0` 的点光**带 `shadow_params.z = 1`，
+/// 与 [`crate::point_shadow::pick_light`] 同判据：两处分别扫环境表一旦漂移，就会出现
+/// "六面深度图跑了一遍，却没有一盏灯去采样它"（或反过来每帧全部点亮阴影路径）。
 pub(crate) fn pack(environment: &SceneEnvironment) -> PackedLights {
     let mut packed = PackedLights {
         lights: [GpuLight::default(); MAX_LIGHTS],
         count: 0,
     };
     let mut shadow_marked = false;
+    let mut point_shadow_marked = false;
     for light in environment.lights.iter().filter(|light| light.is_active()) {
         if packed.count as usize >= MAX_LIGHTS {
             break;
@@ -90,6 +96,14 @@ pub(crate) fn pack(environment: &SceneEnvironment) -> PackedLights {
                 } else {
                     0.0
                 };
+                if light.casts_shadow
+                    && !point_shadow_marked
+                    && light.range.is_finite()
+                    && light.range > 0.0
+                {
+                    gpu.shadow_params[2] = 1.0;
+                    point_shadow_marked = true;
+                }
             }
         }
         packed.lights[packed.count as usize] = gpu;
@@ -145,11 +159,12 @@ mod tests {
         assert_eq!(sun.shadow_params[0], 1.0);
         assert_eq!(sun.shadow_params[1], 0.0);
         assert_eq!(sun.color_intensity[3], environment.lights[0].intensity);
-        // 点光：位置进 xyz、w = 1；半径进 shadow_params.y。
+        // 点光：位置进 xyz、w = 1；半径进 shadow_params.y，它是唯一投射阴影的点光，
+        // 所以 z = 1（方向光标记仍留在太阳那一行）。
         let lamp = packed.lights[1];
         assert_eq!(lamp.pos_type, [1.0, 2.0, 3.0, 1.0]);
         assert_eq!(lamp.color_intensity, [1.0, 0.98, 0.95, 2.5]);
-        assert_eq!(lamp.shadow_params, [0.0, 7.0, 0.0, 0.0]);
+        assert_eq!(lamp.shadow_params, [0.0, 7.0, 1.0, 0.0]);
     }
 
     #[test]

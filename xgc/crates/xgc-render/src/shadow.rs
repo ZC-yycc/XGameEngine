@@ -4,6 +4,8 @@
 
 use super::draw::DrawItem;
 use super::gpu::GpuContext;
+use super::gpu_mesh::GpuMeshCache;
+use super::point_shadow::{PointShadow, PointShadowTarget, POINT_SHADOW_FACES};
 
 pub use super::shadow_csm::{
     cascade_shadow_matrices, fit_directional_shadow, ShadowCascades, SHADOW_CASCADES,
@@ -49,8 +51,10 @@ pub(crate) struct ShadowTarget {
     fallback_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
-    /// GPU palette 变形的投射体（与静态那支共用同一批级联 pass）。
+    /// GPU palette 变形的投射体（与静态那支共用同一批级联 / 立方体 pass）。
     skin: super::shadow_skin::SkinnedShadow,
+    /// 点光立方体阴影的六面深度图与面视图。
+    point: PointShadowTarget,
     frame_layout: wgpu::BindGroupLayout,
     instance_layout: wgpu::BindGroupLayout,
 }
@@ -202,6 +206,7 @@ impl ShadowTarget {
             sampler,
             pipeline,
             skin,
+            point: PointShadowTarget::new(context),
             frame_layout,
             instance_layout,
         }
@@ -217,28 +222,40 @@ impl ShadowTarget {
         (view, &self.sampler)
     }
 
-    /// 把 draw list 画进深度数组：每级一个 pass（每层各自清一次、各用一份光视图投影）。
+    /// 点光立方体阴影的采样源；关着时给 1×1 假图（着色器按 `params.z` 整段跳过）。
+    pub(crate) fn point_shadow_source(&self, enabled: bool) -> &wgpu::TextureView {
+        self.point.source(enabled)
+    }
+
+    /// 把 draw list 画进阴影图：方向光每级一个 pass，点光六面各一个 pass。
     ///
     /// 静态网格与蒙皮网格都要投射；蒙皮那支走 `shadow_skin` 的 palette 管线，palette /
-    /// model 并进常驻竞技场（每级只换 dynamic offset）。返回值是本帧为那两张竞技场新建
-    /// 的缓冲数：同尺寸下恒 0。
+    /// model 并进常驻竞技场（每个 pass 只换 dynamic offset）。两种阴影共用同一份
+    /// casters 与同一张实例缓冲：旧端也是「同一支 shadow pipeline，按光视图投影换
+    /// 段」，分开统计会让同一投射体上传两遍。
     pub(crate) fn render(
         &mut self,
         context: &GpuContext,
-        cascades: &ShadowCascades,
+        cascades: Option<&ShadowCascades>,
+        point: Option<&PointShadow>,
         items: &[DrawItem],
         sources: &mut super::shadow_skin::CasterSources<'_>,
-    ) -> Result<usize, String> {
-        if items.is_empty() || cascades.count == 0 {
-            return Ok(0);
+    ) -> Result<ShadowStats, String> {
+        let directional_passes = cascades
+            .filter(|cascades| cascades.count > 0)
+            .map(|cascades| cascades.count.min(SHADOW_CASCADES))
+            .unwrap_or(0);
+        if items.is_empty() || (directional_passes == 0 && point.is_none()) {
+            return Ok(ShadowStats::default());
         }
         let casters = super::shadow_skin::prepare(context, items, sources)?;
         if casters.is_empty() {
-            return Ok(0);
+            return Ok(ShadowStats::default());
         }
-        // 蒙皮绑定每帧只传一次、只建一次（4 级级联复用），不在 pass 里逐级重建。
+        // 蒙皮绑定每帧只传一次、只建一次（全部级联与六个面复用），不在 pass 里重建。
         let (skin_bindings, skin_uniform_buffers) = self.skin.bindings(context, &casters);
         let skin_meshes = &*sources.skin_meshes;
+        let gpu_meshes = &*sources.gpu_meshes;
         let mut bytes = Vec::with_capacity(casters.len() * 64);
         for caster in &casters {
             for value in caster.model {
@@ -265,26 +282,12 @@ impl ShadowTarget {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("xgc-shadow-encoder"),
         });
-        for cascade in 0..cascades.count.min(SHADOW_CASCADES) {
-            let mut frame_bytes = Vec::with_capacity(64);
-            for value in cascades.view_proj[cascade] {
-                frame_bytes.extend_from_slice(&value.to_le_bytes());
-            }
-            let frame = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("xgc-shadow-frame-buffer"),
-                size: 64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            context.queue().write_buffer(&frame, 0, &frame_bytes);
-            let frame_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("xgc-shadow-frame-bind"),
-                layout: &self.frame_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: frame.as_entire_binding(),
-                }],
-            });
+        for cascade in 0..directional_passes {
+            let frame_bind = shadow_frame_bind(
+                context,
+                &self.frame_layout,
+                cascades.unwrap().view_proj[cascade],
+            );
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("xgc-shadow-pass"),
                 color_attachments: &[],
@@ -299,31 +302,121 @@ impl ShadowTarget {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &frame_bind, &[]);
-            pass.set_bind_group(1, &instance_bind, &[]);
-            for (index, caster) in casters.iter().enumerate() {
-                // GPU 蒙皮投射体由 `shadow_skin` 用 palette 管线画，这里跳过。
-                if caster.skins_here() {
-                    continue;
-                }
-                let Some(gpu) = sources.gpu_meshes.get(&caster.mesh_key) else {
-                    continue;
-                };
-                let slot = index as u32;
-                pass.set_vertex_buffer(0, gpu.vertex_buffer.slice(..));
-                if let Some(indices) = &gpu.index_buffer {
-                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..gpu.indices, 0, slot..slot + 1);
-                } else {
-                    pass.draw(0..gpu.vertices, slot..slot + 1);
-                }
-            }
+            draw_casters(
+                &mut pass,
+                &self.pipeline,
+                &frame_bind,
+                &instance_bind,
+                &casters,
+                gpu_meshes,
+            );
             self.skin
                 .draw(&mut pass, &frame_bind, &skin_bindings, skin_meshes);
         }
+        let mut point_draw_calls = 0usize;
+        if let Some(point) = point {
+            for face in 0..POINT_SHADOW_FACES {
+                let frame_bind =
+                    shadow_frame_bind(context, &self.frame_layout, point.matrices()[face]);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("xgc-point-shadow-pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: self.point.face(face),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                draw_casters(
+                    &mut pass,
+                    &self.pipeline,
+                    &frame_bind,
+                    &instance_bind,
+                    &casters,
+                    gpu_meshes,
+                );
+                self.skin
+                    .draw(&mut pass, &frame_bind, &skin_bindings, skin_meshes);
+                // 每个面都画一遍全部投射体：这就是"逐面剔除还没做"的可观测口径。
+                point_draw_calls += casters.len();
+            }
+        }
         context.queue().submit(Some(encoder.finish()));
-        Ok(skin_uniform_buffers)
+        Ok(ShadowStats {
+            skin_uniform_buffers,
+            point_draw_calls,
+        })
+    }
+}
+
+/// 一次阴影绘制的结果：蒙皮竞技场新建的缓冲数（同尺寸恒 0）+ 点光六面画了多少次。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ShadowStats {
+    pub(crate) skin_uniform_buffers: usize,
+    pub(crate) point_draw_calls: usize,
+}
+
+/// 一帧的阴影 pass 用的小 uniform：只有一个光视图投影。
+fn shadow_frame_bind(
+    context: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    matrix: super::camera::Mat4,
+) -> wgpu::BindGroup {
+    let mut bytes = Vec::with_capacity(64);
+    for value in matrix {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("xgc-shadow-frame-buffer"),
+        size: 64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    context.queue().write_buffer(&buffer, 0, &bytes);
+    context
+        .device()
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("xgc-shadow-frame-bind"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        })
+}
+
+/// 画静态 / CPU 回退的投射体；GPU 蒙皮那支留给 `SkinnedShadow::draw`。
+fn draw_casters(
+    pass: &mut wgpu::RenderPass<'_>,
+    pipeline: &wgpu::RenderPipeline,
+    frame_bind: &wgpu::BindGroup,
+    instance_bind: &wgpu::BindGroup,
+    casters: &[super::shadow_skin::Caster],
+    gpu_meshes: &GpuMeshCache,
+) {
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, frame_bind, &[]);
+    pass.set_bind_group(1, instance_bind, &[]);
+    for (index, caster) in casters.iter().enumerate() {
+        if caster.skins_here() {
+            continue;
+        }
+        let Some(gpu) = gpu_meshes.get(&caster.mesh_key) else {
+            continue;
+        };
+        let slot = index as u32;
+        pass.set_vertex_buffer(0, gpu.vertex_buffer.slice(..));
+        if let Some(indices) = &gpu.index_buffer {
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..gpu.indices, 0, slot..slot + 1);
+        } else {
+            pass.draw(0..gpu.vertices, slot..slot + 1);
+        }
     }
 }
 

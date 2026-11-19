@@ -8,8 +8,19 @@ struct GpuLight {
     pos_type: vec4<f32>,
     // rgb = 光色，a = 强度
     color_intensity: vec4<f32>,
-    // x = 这盏灯是否用方向光阴影图（1 / 0），y = 点光影响半径
+    // x = 这盏灯是否用方向光阴影图（1 / 0），y = 点光影响半径，
+    // z = 这盏灯是否用点光立方体阴影图（1 / 0）
     shadow_params: vec4<f32>,
+};
+
+// 点光立方体阴影：灯位置（w = 远平面）+ 采样参数。
+// 与 `point_shadow.rs` 的 `PointShadow::uniform_bytes` 逐字节对应（32B）。
+// 六面视图投影不在这里：接收端只按方向选面，矩阵只属于阴影 pass 的每面帧缓冲。
+struct PointShadow {
+    // xyz = 点光世界坐标，w = 远平面（= 灯的影响半径）
+    light_pos: vec4<f32>,
+    // x = 近平面，y = 2 / 分辨率（3×3 采样的步长），z = 是否开启（1 / 0），w = 深度偏置
+    params: vec4<f32>,
 };
 
 struct Frame {
@@ -34,6 +45,7 @@ struct Frame {
     // x = 有效光源数；y / z / w 预留
     light_count: vec4<f32>,
     lights: array<GpuLight, 8>,
+    point_shadow: PointShadow,
 };
 
 @group(0) @binding(0)
@@ -44,6 +56,9 @@ var shadow_tex: texture_depth_2d_array;
 
 @group(0) @binding(2)
 var shadow_smp: sampler_comparison;
+
+@group(0) @binding(3)
+var point_shadow_tex: texture_depth_cube;
 
 @group(2) @binding(0)
 var albedo_texture: texture_2d<f32>;
@@ -225,6 +240,46 @@ fn cascade_shadow_at(world_pos: vec3<f32>, cascade: u32, ndotl: f32) -> vec2<f32
     return vec2<f32>(sum / 9.0, 1.0);
 }
 
+// 点光立方体阴影：与旧端 `point_shadow_factor` 逐行同式。
+//
+// 参考深度必须按**主轴分量**（max(|dx|,|dy|,|dz|)）算，不能直接用欧氏距离：
+// 立方体深度图存的是 perspective 的 z/w，离开主轴越远同一个距离就越浅，
+// 用欧氏距离会把整面墙判成"比记录还深"而越来越黑。
+fn point_shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
+    // 立方体阴影参数挂在帧 uniform 的 `point_shadow` 字段上（不是独立 uniform 变量）。
+    if (frame.point_shadow.params.z < 0.5) {
+        return 1.0;
+    }
+    let near = frame.point_shadow.params.x;
+    let far = frame.point_shadow.light_pos.w;
+    let to_frag = world_pos - frame.point_shadow.light_pos.xyz;
+    let axis = max(abs(to_frag.x), max(abs(to_frag.y), abs(to_frag.z)));
+    if (axis >= far || axis <= near) {
+        return 1.0;
+    }
+    let bias = frame.point_shadow.params.w * (1.0 + 2.0 * (1.0 - ndotl));
+    let ref_depth = (far / (far - near)) * (1.0 - near / axis) - bias;
+    // 采样方向就是"从灯指向片元"的方向；步长按像素在立方体面上的世界尺度给。
+    let dir = to_frag / max(length(to_frag), 1e-4);
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.9);
+    let tangent = normalize(cross(up, dir));
+    let bitangent = cross(dir, tangent);
+    let step = frame.point_shadow.params.y;
+    var sum = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let offset = tangent * (f32(x) * step) + bitangent * (f32(y) * step);
+            sum = sum + textureSampleCompareLevel(
+                point_shadow_tex,
+                shadow_smp,
+                dir + offset,
+                ref_depth,
+            );
+        }
+    }
+    return sum / 9.0;
+}
+
 fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
     // 选层：级联按**相机视线方向的线性深度**切，splits 是世界单位。
     let count = u32(max(frame.shadow_params.w, 0.0));
@@ -333,10 +388,13 @@ fn fs(input: SceneVsOut) -> @location(0) vec4<f32> {
             // 背光面既没有贡献，也没法算半程向量（to_light + to_camera 可能抵消成零向量）。
             continue;
         }
-        // 只有打了阴影标记的那盏方向光查 CSM；点光阴影还没做（标记恒 0）。
+        // 方向光阴影与点光阴影是两个独立标记：同一帧里最多一盏方向光查 CSM、
+        // 最多一盏点光查立方体图（旧端同口径）。
         var shade = 1.0;
         if (source.shadow_params.x > 0.5) {
             shade = shadow_factor(input.world, n_dot_l);
+        } else if (source.shadow_params.z > 0.5) {
+            shade = point_shadow_factor(input.world, n_dot_l);
         }
         // π 校准（与旧端同一条）：场景 intensity 是按 Lambert 直乘手调的，
         // 把 π 并进 radiance，漫反射回到「intensity × 白面 ≈ 1.0」的观感。
