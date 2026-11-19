@@ -295,7 +295,7 @@ pub(crate) fn render_frame(
     renderer.set_clear_color([0.62, 0.72, 0.84, 1.0]);
     // 天空开着的项目：背景取地平线色（旧端天空盒在地平线附近就是它），
     // 环境照明由渲染器从同一份解析天空投影出来。
-    if let Some((sky, bloom)) = load_render(Path::new(assets_root.unwrap_or("."))) {
+    if let Some((sky, bloom, fxaa)) = load_render(Path::new(assets_root.unwrap_or("."))) {
         if sky.enabled {
             let [r, g, b] = sky.horizon.map(|channel| channel * sky.intensity);
             renderer.set_clear_color([f64::from(r), f64::from(g), f64::from(b), 1.0]);
@@ -303,6 +303,7 @@ pub(crate) fn render_frame(
         renderer.set_sky(sky);
         // 光晕默认关（旧端 `render.bloom` 省略时 intensity = 0），此时整条链不跑。
         renderer.set_bloom(bloom);
+        renderer.set_fxaa(fxaa);
     }
     if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
         for item in build_draw_list(&world).items {

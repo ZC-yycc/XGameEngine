@@ -1,4 +1,4 @@
-//! 帧渲染入口：DrawList → 线性 HDR 场景 → 统一 tone-map → 显示空间 UI。
+//! 帧渲染入口：DrawList → 线性 HDR 场景 → 可选光晕 → 统一 tone-map → 可选 FXAA → 显示空间 UI。
 
 use std::collections::HashMap;
 
@@ -7,6 +7,7 @@ use super::bloom::{BloomSettings, BloomStage};
 use super::camera::{camera_view_projection_with_eye, invert, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
 use super::frame_color::compose_colors;
+use super::fxaa::{FxaaSettings, FxaaStage};
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::image::ImageData;
@@ -64,6 +65,9 @@ pub struct Renderer {
     /// 画面设置里的光晕节：开着时场景在 tone-map 前多跑一遍三级光晕链。
     bloom: BloomSettings,
     bloom_stage: Option<BloomStage>,
+    /// 画面设置里的 FXAA 节：开着时 tone-map 先写 LDR scratch，再由 FXAA 平滑到显示目标。
+    fxaa: FxaaSettings,
+    fxaa_stage: Option<FxaaStage>,
     depth: Option<DepthTarget>,
     images: HashMap<String, Option<ImageData>>,
     ui_overlay: Option<(wgpu::TextureFormat, TrianglePipeline)>,
@@ -105,6 +109,8 @@ impl Renderer {
             hdr: None,
             bloom: BloomSettings::default(),
             bloom_stage: None,
+            fxaa: FxaaSettings::default(),
+            fxaa_stage: None,
             depth: None,
             images: HashMap::new(),
             ui_overlay: None,
@@ -126,6 +132,14 @@ impl Renderer {
     /// 只会被裁成硬边。`intensity <= 0` 是关闭态，此时整条链不跑也不会被采样。
     pub fn set_bloom(&mut self, bloom: BloomSettings) {
         self.bloom = bloom.sanitized();
+    }
+
+    /// 设置 FXAA（等价于旧 `project.ron` 的 `render.fxaa`）。
+    ///
+    /// 位置与旧端一致：tone-map 之后、UI 之前 —— 抗锯齿只收拾场景边缘，
+    /// HUD 文字保持锐利。默认关，关着时整段跳过、帧输出逐字节不变。
+    pub fn set_fxaa(&mut self, fxaa: FxaaSettings) {
+        self.fxaa = fxaa;
     }
 
     /// 清屏色以线性值写入 HDR 场景，和几何 / 天空 / 粒子一起在帧末 tone-map。

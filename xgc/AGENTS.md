@@ -129,9 +129,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/shadow_csm.rs` | 方向光阴影 CPU 侧：单级拟合 `fit_directional_shadow`（关 CSM 的等价退路）+ **4 级 CSM** `cascade_splits`（λ=0.7）/ `cascade_shadow_matrices`（逐级紧致正交拟合、纹素吸附防抖），与旧端逐行同式 |
 | `crates/xgc-render/src/shadow.rs` | 方向光阴影 GPU 侧：2048² 深度**数组**（每层一级）+ 逐级深度 pass；静态与蒙皮投射体共用同一支 pass 与同一套 depth bias；接收端按视线深度选层 + 3×3 PCF、偏置随 N·L 放大；不做 PCSS / 点光 |
 | `crates/xgc-render/src/sky_draw.rs` | 天空盒 pass：全屏三角形 + 解析天空逐像素求值（远平面 / `LessEqual` / 不写深度），`inv_view_proj` 反推视线方向 |
-| `crates/xgc-render/src/renderer/hdr.rs` | HDR 中间目标与呈现：按尺寸缓存 `Rgba16Float` 场景纹理，按输出格式缓存全屏 tone-map pipeline；tone pass 的 6 个绑定里带三级光晕输入（关闭时绑场景纹理占位） |
+| `crates/xgc-render/src/renderer/hdr.rs` | HDR 中间目标与呈现：按尺寸缓存 `Rgba16Float` 场景纹理，按输出格式缓存全屏 tone-map pipeline；tone pass 的 6 个绑定里带三级光晕输入（关闭时绑场景纹理占位）；tone-map 之后可选跑一趟 FXAA（`crates/xgc-render/src/fxaa.rs`，落点由调用方给的视图决定：关闭时是显示目标，开启时是 FXAA 暂存纹理） |
 | `crates/xgc-render/src/bloom.rs` | 三级 HDR 光晕链（旧端 `postfx.rs` 同口径）：`BloomSettings`（intensity / threshold / knee，`intensity <= 0` 即关闭）+ 亮部提取 / 逐级降采样 / 横纵二项核共 9 个 pass，`Rgba16Float` 乒乓中间目标按尺寸缓存 |
 | `crates/xgc-render/src/bloom.wgsl` | 光晕三个片元入口：`fs_bright`（软膝式取亮部）/ `fs_down`（一次双线性降采样）/ `fs_blur`（9 抽头二项核，方向由参数给横或纵） |
+| `crates/xgc-render/src/fxaa.rs` | 显示空间 FXAA（旧端 `postfx.rs` 同口径）：`FxaaSettings`（`enabled`，默认关）+ 与输出同格式的 LDR 暂存（按尺寸 / 格式缓存，关闭时释放）+ tone-map 之后、UI 之前一趟全屏 pass；`present` 返回本帧跑的 pass 数 |
+| `crates/xgc-render/src/fxaa.wgsl` | FXAA 3.11 质量路径（5 抽头、亚像素 0.75、方向收缩 1/8、跨度上限 8 texel、阈值 1/12 与 1/6、Rec.601 luma、sRGB 手动 encode / decode）；平坦区直接返回中心采样，保证关掉边缘时逐字节不变 |
 | `crates/xgc-render/src/renderer/shadow_prep.rs` | 方向光阴影的每帧准备：按场景包围盒 + 相机矩阵拟合级联、把 draw 画进深度数组，并返回阴影蒙皮竞技场本帧新建的缓冲数（从 `renderer.rs` 按行数预算拆出） |
 | `crates/xgc-render/src/renderer/ui.rs` | UI 覆盖层：背景 / 焦点环 / 真字体文本 / 图片在 tone-map 后画到显示目标（从 `renderer.rs` 按行数预算拆出；字形先排版后上传图集） |
 | `crates/xgc-render/src/sky.rs` | 解析天空（天顶/地平线/地面 + 太阳盘 + 光晕）与漫反射 IBL：1024 点斐波那契球投影成 L2 球谐（E/π，无随机数）；参数来自 `project.ron` 的 `render.sky` |
@@ -141,7 +143,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/texture_bind.rs` | 贴图 GPU 绑定：group(2) 布局 + 线性 Repeat 采样器 + 白纹理兜底绑定组 |
 | `crates/xgc-render/src/gpu_mesh.rs` | 模型 → 位置缓冲 / UV 缓冲 / 索引缓冲 + 贴图绑定组，跨帧复用 |
 | `crates/xgc-render/src/scene_shading.wgsl` | 静态 / GPU 蒙皮唯一主场景片元真相源：Frame / 贴图 binding、环境光菲涅尔、Cook-Torrance、天空 SH / 环境反射、CSM PCF，输出线性 HDR |
-| `crates/xgc-render/src/tone_map.wgsl` | GPU 唯一 ACES 真相源：从 HDR 逐像素 `textureLoad`（关闭光晕时逐位不变），`intensity > 0` 时先按 `uv` 双线性采样三级光晕叠回线性场景**再**过 ACES，全屏三角形写显示目标并固定 alpha=1 |
+| `crates/xgc-render/src/tone_map.wgsl` | GPU 唯一 ACES 真相源：从 HDR 逐像素 `textureLoad`（关闭光晕时逐位不变），`intensity > 0` 时先按 `uv` 双线性采样三级光晕叠回线性场景**再**过 ACES，全屏三角形写调用方给的视图并固定 alpha=1（关闭 FXAA 时就是显示目标） |
 | `crates/xgc-render/src/instanced.wgsl` | 静态实例顶点入口：读取 group(1) 实例 model / color / material，输出共享 `SceneVsOut` |
 | `crates/xgc-render/src/skinned.wgsl` | GPU 蒙皮主场景顶点入口：group(3) model / material + share 的变形函数，输出共享 `SceneVsOut` |
 | `crates/xgc-render/src/shot.rs` | 截图取景：`Bounds` 拟合、顺光视轴（由场景主方向光推）、近远裁剪；`render_shot` 优先场景相机 |
@@ -163,8 +165,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/src/compare_cmd.rs` | `xgc compare-headless` / `xgc image-diff <旧图> <新图> [阈值]`；PNG / PPM 逐像素差异 |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
-| `crates/xgc-cli/src/render.rs` | `render-frame <世界> <PPM> [资产根] [宽] [高] [帧数]`；缺省 0 帧，最终重算层级 / UI；天空与光晕设置由 `project_render.rs` 从项目级 `project.ron` 读出后灌进 `Renderer` |
-| `crates/xgc-cli/src/project_render.rs` | `project.ron` 画面设置投影：`render.sky` / `render.bloom`；缺文件 / 缺节一律落回关闭态，缺省值必须逐项等于旧端 `SkyConfig` / `BloomConfig` 的 `default` |
+| `crates/xgc-cli/src/render.rs` | `render-frame <世界> <PPM> [资产根] [宽] [高] [帧数]`；缺省 0 帧，最终重算层级 / UI；天空、光晕与 FXAA 设置由 `project_render.rs` 从项目级 `project.ron` 读出后灌进 `Renderer` |
+| `crates/xgc-cli/src/project_render.rs` | `project.ron` 画面设置投影：`render.sky` / `render.bloom` / `render.fxaa`；缺文件 / 缺节一律落回关闭态，缺省值必须逐项等于旧端 `SkyConfig` / `BloomConfig` / `FxaaConfig` 的 `default` |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 
 ## 不变量（改代码前先看）
@@ -180,7 +182,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 0.61）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），角色坡面 `slope_limit` / 贴地 `snap_to_ground` 也已生效（陡坡当墙 + 下行贴地），角色的**水平**位移已走 rapier `KinematicCharacterController`（`character_kcc.rs`，签名带实体代际、`CharacterSystem` 排在 rapier 之后；`CharacterBlockSystem` 已删、默认调度 18 个系统），下一刀把竖直 / 地面 / 台阶也搬进 KCC（`probe_ground` / `try_step_up` / `snap_to_ground`），再给 `physics.slope` 建真碰撞体、最后回关节。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
+1. 割接视觉：RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 0.61）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），角色坡面 `slope_limit` / 贴地 `snap_to_ground` 也已生效（陡坡当墙 + 下行贴地）、tone-map 后可选的显示空间 FXAA（`render.fxaa`，默认关；平坦区逐字节不变）也已贯通，角色的**水平**位移已走 rapier `KinematicCharacterController`（`character_kcc.rs`，签名带实体代际、`CharacterSystem` 排在 rapier 之后；`CharacterBlockSystem` 已删、默认调度 18 个系统），下一刀把竖直 / 地面 / 台阶也搬进 KCC（`probe_ground` / `try_step_up` / `snap_to_ground`），再给 `physics.slope` 建真碰撞体、最后回关节。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
 2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
 3. 割接：旧新逐帧 trace / 截图 / 性能门禁。
 4. 资产：密码学签名 / 跨机器增量。

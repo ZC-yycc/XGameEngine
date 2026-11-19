@@ -16,6 +16,7 @@ mod diff;
 mod draw;
 mod font;
 mod frame_color;
+mod fxaa;
 mod glb;
 mod gpu;
 mod gpu_mesh;
@@ -52,6 +53,7 @@ pub use camera::{
 pub use diff::{diff_images, ImageDiff};
 pub use draw::{build_draw_list, DrawItem, DrawList};
 pub use font::{FontAtlas, GlyphQuad};
+pub use fxaa::FxaaSettings;
 pub use glb::{
     load_glb, load_glb_skeleton, load_gltf, load_model, MeshError, SkeletonGraph, SkeletonJoint,
 };

@@ -44,13 +44,13 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 材质色、`Mesh` 顶点 / 索引缓冲、builtin 网格、最小 GLB 几何 / 蒙皮 / 首图元
 `baseColorFactor` 解析、`.mat` 材质资产解析与乘子（`模型因子 → 资产 → 覆盖 → 选择高亮`，
 静态 / GPU 蒙皮同路）、场景光与环境光（`WorldData.environment`，`环境光 + 主方向光 × N·L`）、
-`Rgba16Float` 线性场景中间目标（几何 / 天空 / 粒子先合成，帧末全屏 pass 里先叠可选的三级光晕再做唯一一次 ACES，UI 后叠加）、三级 HDR 光晕链（`render.bloom` 的 `intensity` / `threshold` / `knee`，旧端 `postfx.rs` 同口径：亮部提取 + ½ / ¼ / ⅛ 逐级降采样 + 每级横纵 9 抽头二项核共 9 个 pass，`Rgba16Float` 乒乓，默认 `intensity = 0` 整条链不跑且画面逐位不变）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
+`Rgba16Float` 线性场景中间目标（几何 / 天空 / 粒子先合成，帧末全屏 pass 里先叠可选的三级光晕再做唯一一次 ACES，之后可选一趟显示空间 FXAA，UI 最后叠加）、三级 HDR 光晕链（`render.bloom` 的 `intensity` / `threshold` / `knee`，旧端 `postfx.rs` 同口径：亮部提取 + ½ / ¼ / ⅛ 逐级降采样 + 每级横纵 9 抽头二项核共 9 个 pass，`Rgba16Float` 乒乓，默认 `intensity = 0` 整条链不跑且画面逐位不变）、显示空间 FXAA（`render.fxaa` 的 `enabled`，默认关；tone-map 之后、UI 之前一趟，平坦区逐字节不变，硬边缘按 FXAA 3.11 质量路径柔化）、天空盒 pass（解析天空渐变 + 太阳盘，远平面 + `LessEqual`
 深度测试，几何照常遮挡）、天空漫反射 IBL（解析天空 → L2 球谐 E/π，参数取项目级 `project.ron`
 的 `render.sky`）、方向光阴影（4 级 CSM：λ=0.7 practical split + 逐级紧致正交拟合 + 纹素吸附，2048² 深度数组按视线深度选层 + 3×3 PCF；静态网格与**蒙皮网格**都投射：蒙皮那支在深度 pass 里用同一份 `skin_vertex.wgsl` 变形，palette 与主场景同一份 `palette_bytes`）、环境反射（天空 SH 反射方向 × Lazarov 解析 BRDF，逐材质 `f0 = mix(0.04, 基色, metallic)`、
 `(1-metallic)` 漫反射、粗糙度夹 0.04）、网格基色贴图（glTF `TEXCOORD_0` + `baseColorTexture`，
 外部 uri / GLB 内嵌 PNG → sRGB 采样）、直接光 Cook-Torrance PBR（GGX + Smith + Schlick、
 `(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、GPU 蒙皮与静态实例共享唯一的基色贴图 / PBR / CSM 阴影接收片元实现、确定性粒子 billboard（CPU SplitMix64 模拟，软圆覆盖，Alpha / Additive，Alpha 后向前排序，深测开 / 深写关，并在线性 HDR 中混合）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
-`guid://` 解析、`Renderer` 帧入口（DrawList → HDR 几何 / 天空 / 粒子 → 可选三级光晕 → ACES → UI）、
+`guid://` 解析、`Renderer` 帧入口（DrawList → HDR 几何 / 天空 / 粒子 → 可选三级光晕 → ACES → 可选 FXAA → UI）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
 `GpuMeshCache` 顶点 / 索引缓冲跨帧复用、按模型分组实例化（storage instance 缓冲）、
@@ -85,6 +85,7 @@ HDR 光晕切片默认关闭，因此不改变任何既有画面的性能与像�
 
 阴影 pass 那半边同样并进了竞技场：`shadow_skin.rs` 的 `SkinnedShadow` 持有两张 `UniformArena`，`SkinnedBinding` 只记槽号；`RenderStats::shadow_skin_uniform_buffers` 首批 2 张、同尺寸第二帧 **0**（回归 `repeated_frames_reuse_the_shadow_skin_arenas`，把 `upload` 开头临时插 `self.slots = 0;` 时实跑变红）。两条单元回归钉住槽距对齐与跨帧复用，另加一条两投射体用例 `two_skinned_casters_keep_their_own_shadow_palettes`：两个投射体沿屏幕纵轴分开（z=∓2.4）、姿态反向平移，断言两侧阴影行重心相距超过两个窗口宽、且同屏时各自留在原位（把每级 draw 的偏移强制成槽 0 时实跑变红：「窗口内阴影像素太少，无法定位：0」），钉住"每个 caster 用自己那格 palette"。证据画面没有骨架实体、竞技场根本不建缓冲，所以第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`）。**未做稳态计时**：冷启动单帧含 pipeline 编译，不能归因于本刀；“每帧缓冲数 2N → 0”是结构性收益，真正的稳态测量仍要常驻进程 profiler。
 
+显示空间 FXAA 切片在 tone-map 之后、UI 之前加一趟可选抗锯齿（`render.fxaa` 的 `enabled`，默认关）：`crates/xgc-render/src/fxaa.rs` 按输出**同格式**缓存一张 LDR 暂存纹理，`fxaa.wgsl` 逐行照旧端 `postfx.rs` 的 `FXAA_WGSL` —— FXAA 3.11「质量」路径 5 抽头、亚像素混合 0.75、方向收缩 1/8（下界 1/128）、跨度上限 8 texel、边缘阈值 1/12 与 1/6（沿用旧端取值，比 stock 严一档）、Rec.601 luma、全部 `textureSampleLevel(..., 0.0)`、sRGB 目标手动 encode / decode 往返；平坦区（对比度低于阈值且亚像素项为 0）直接返回中心采样，所以没有边缘的地方逐字节不变。UI 画在 FXAA 之后，HUD 的锐利边不会被当走样柔化（旧端顺序相同）。默认关闭：不建暂存、不跑 pass、`passes` 不增，第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`），对旧端仍 32.22% / 0.61 / 194。六条 GPU 回归钉住关闭态逐字节等价、硬边缘被柔化且只动边缘 ±2 内（平坦角点逐字节不变）、纯色清屏不变、尺寸 / 输出格式变化重建暂存且同尺寸两次确定、换尺寸 / 格式后与新建渲染器逐字节相同、sRGB 目标的混合发生在显示空间（最亮值 ≤208，线性空间会到 215）、光晕与 FXAA 叠加时 12 趟 pass；红的证据两条 —— 合成改成原样回传时「开着 FXAA 必须至少改变一个边缘像素（否则着色器没跑）」，把平坦区早退改成 `raw_m + 0.01` 时「FXAA 只许动边缘附近，却有 3836 个远离边缘的像素被改了」；把 scratch 复用判据改成只看「有没有」时「换尺寸 / 格式后必须与新建渲染器逐字节相同」；把 sRGB 分支改成永假时「sRGB 目标的边缘混合必须发生在显示空间（线性空间会亮到 215）：215」。**未闭环**：没有 TAA 让位（旧端 TAA 开启时 `effective_fxaa()` 会自动关 FXAA，XGC 还没有 TAA）；开启时每帧多一趟全屏 pass、一个绑定组与多一次 submit（tone-map 与 FXAA 分两次提交），视图每次现建；未做稳态计时（证据场景是关闭态）。
 角色水平 KCC 切片把 `physics.character` 的水平位移交给 rapier：`crates/xgc-sim/src/character_kcc.rs` 是胶囊 / 参数 / 消毒的唯一真相源（`half_height`、`center_height`、`rest_gap = skin_width × 1.1`、`character_capsule`、`build_character_controller`），`RapierWorld` 为角色建运行时托管的 kinematic-position-based 胶囊刚体并按 `EntityId.raw()` 排序（确定性），每帧在 `pipeline.step` 之后跑一次 `move_shape`，只回写 `Transform.position` 的 x / z 与水平 `Velocity`（y 与朝向仍归 ECS）。胶囊比脚底高 `rest_gap` 是刻意的：rapier 0.22 的 `check_and_fix_penetrations` 是空函数，起始间隙 ≤ `offset` 会放行整段位移（穿墙），而 ECS 把脚底压在地面高度、间隙为 0。竖直仍走 ECS 的原因同样来自上游：KCC 在胶囊上 `grounded` / `snap_to_ground` / `autostep` / `is_sliding_down_slope` 全不可用（旧端同记录）。参数逐项对齐旧端（`offset = Absolute(skin_width)`、`autostep: None`、`max_slope_climb_angle = clamp(slope_limit, 0, 89)°`、`min_slope_slide_angle = (slope_limit + 10).min(89)°`、`snap_to_ground: None`、`normal_nudge_factor = 1e-4`）。同片删掉 `CharacterBlockSystem`（AABB 最近轴推出：斜墙顶住、高速穿薄墙），默认调度 19 → 18；`VelocitySystem` 对角色只积分 y。回归先证会红：`VelocitySystem` 改回三轴积分 → 三条变红（只积竖直 / 刚体优先 / 撞墙停住）；`move_horizontal` 返回零向量 → 撞墙与斜墙滑动两条变红。斜墙用例用 20°：45° 时从 +X 撞到的是盒角不是面。证据世界没有 `physics.character` 实体，第 150 帧 PPM SHA-256 不变。审查揪出并修掉两处：①角色托管的签名带上 `EntityKey` 的 index + generation（以及 `skin_width` / `slope_limit` 的位模式）—— `Replace` / 组件增删 / 快照恢复只换代不换 ID，只看 ID 时签名不变就提前返回，角色水平位移静默冻结、旧胶囊还作为幽灵碰撞体留着（用例 `a_character_keeps_moving_after_its_entity_key_changes`，签名退回只看 ID 时实跑变红）；②默认调度把 `CharacterSystem` 挪到 `RapierPhysicsSystem` 之后，它是移动后修正，跑在 KCC 之前时坡面没有 rapier 碰撞体、每帧先挤进 `v·dt` 再被拉回（用例 `a_character_does_not_creep_into_a_steep_slope_under_the_default_schedule`，顺序挪回去时实跑变红）。为守住 600 行软上限，角色托管拆到 `crates/xgc-sim/src/rapier_world/characters.rs`；球体碰撞体也补了 `character_is_blocked_by_a_ball_collider`。复审又揪出两处并已修掉：③台阶抬升原先排在 `CharacterSystem` 之前，抬起的 y 被贴地吸附吸回地面，0.05~0.2 m 的低台阶在默认调度下根本站不上去 —— 现在它排在 `CharacterSystem` 之后、抬起的 y 留到帧末（`character_steps_onto_a_low_box_under_the_default_schedule`，把顺序挪回去时报 `y=0`）；④刚体表 `ensure_built` 原来只按 `physics.body` 数量判是否重建，`Replace` / 组件增删 / 快照恢复换代后 `BodyLink.key` 过期、动态体的 Transform / Velocity 回写静默冻结 —— 签名改成按 ID 排序的 `(EntityId, EntityKey)`（探针缓冲跨帧复用），`a_dynamic_body_keeps_moving_after_its_entity_key_changes` 钉住（退回数量判据时报 `y=5.8603435` 两帧不动）。
 
 第三轮复审又补一处：台阶判据要按 KCC 的停位间隙外扩 —— KCC 会停在距立面 `offset = skin_width` 处（penetration 修复是空实现），胶囊因此永远碰不到台阶面，撞住那一帧速度已被回写成 0、预测位移也归零，小半径（0.05 m）或低速度（1 m/s）下角色卡在 `offset` 外面一次都抬不起来（`a_small_capsule_still_steps_onto_a_low_box`，不外扩时报 `x=-1.0601`、y=0）；现在判据按 `rest_gap + 1 mm` 外扩，代价是贴着低矮实体也会被抬上去，这正是「压住台阶就上」的语义。同一轮还收了角色表的每帧分配（签名探针与收集表跨帧复用，与刚体表探针同口径），以及「没有 `Transform` 的角色不进签名」（否则之后补上 `Transform` 时签名不变、永远不建胶囊）。
@@ -135,12 +136,12 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（357 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（210 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
+`cargo test --workspace --offline` 全绿（363 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（212 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35709 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
-PCSS / 点光阴影、TAA / SSAO / FXAA 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
+PCSS / 点光阴影、TAA / SSAO 等其余后处理（主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色竖直 / 地面 / 台阶仍由 ECS 解析（水平已走 rapier KCC）、关节、连续碰撞（CCD）、陡坡沿坡面下滑与 `slope_limit + 10°` 迟滞带、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
 以及旧新逐帧 trace / 性能验收。

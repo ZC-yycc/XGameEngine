@@ -1,15 +1,15 @@
-//! `project.ron` 的画面设置读取：天空与光晕。
+//! `project.ron` 的画面设置读取：天空、光晕与 FXAA。
 //!
 //! 旧引擎把画面设置放在项目级而不是场景级，XGC 也按项目级读；缺省值必须逐项
-//! 等于旧端 `SkyConfig::default` / `BloomConfig::default`，缺文件 / 缺节时
-//! 画面才与接入前逐位相同。
+//! 等于旧端 `SkyConfig::default` / `BloomConfig::default` / `FxaaConfig::default`，
+//! 缺文件 / 缺节时画面才与接入前逐位相同。
 
 use std::path::Path;
 
 use serde::Deserialize;
-use xgc_render::{BloomSettings, SkySettings};
+use xgc_render::{BloomSettings, FxaaSettings, SkySettings};
 
-/// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分（天空 + 光晕）。
+/// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分（天空 + 光晕 + FXAA）。
 #[derive(Debug, Default, Deserialize)]
 struct OldProjectFile {
     #[serde(default)]
@@ -22,6 +22,15 @@ struct OldProjectRender {
     sky: OldSkyConfig,
     #[serde(default)]
     bloom: OldBloomConfig,
+    #[serde(default)]
+    fxaa: OldFxaaConfig,
+}
+
+/// 缺省值必须逐项等于旧 `FxaaConfig::default`（抗锯齿默认关）。
+#[derive(Debug, Default, Deserialize)]
+struct OldFxaaConfig {
+    #[serde(default)]
+    enabled: bool,
 }
 
 /// 缺省值必须逐项等于旧 `BloomConfig::default`（光晕默认关）。
@@ -106,11 +115,13 @@ impl Default for OldSkyConfig {
     }
 }
 
-/// 读 `project.ron` 的画面设置（天空 + 光晕）。
+/// 读 `project.ron` 的画面设置（天空 + 光晕 + FXAA）。
 ///
-/// 没有 `project.ron` 时返回 `None`；文件在但缺 `sky` / `bloom` 节则按缺省值
-/// （都是"关"）读出来，与缺节等于关的语义一致。
-pub(crate) fn load_render(project_root: &Path) -> Option<(SkySettings, BloomSettings)> {
+/// 没有 `project.ron` 时返回 `None`；文件在但缺 `sky` / `bloom` / `fxaa` 节则按
+/// 缺省值（都是"关"）读出来，与缺节等于关的语义一致。
+pub(crate) fn load_render(
+    project_root: &Path,
+) -> Option<(SkySettings, BloomSettings, FxaaSettings)> {
     let path = project_root.join("project.ron");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return None;
@@ -121,7 +132,7 @@ pub(crate) fn load_render(project_root: &Path) -> Option<(SkySettings, BloomSett
             // 文件在但读不懂：契约仍是"缺省即关"，但静默把天空和光晕一起关掉
             // 会让画面差异无从归因，所以留一条能查的日志。
             eprintln!(
-                "warning: {} 解析失败，画面设置回落到缺省（天空与光晕都关）：{error}",
+                "warning: {} 解析失败，画面设置回落到缺省（天空、光晕与 FXAA 都关）：{error}",
                 path.display()
             );
             return None;
@@ -129,6 +140,7 @@ pub(crate) fn load_render(project_root: &Path) -> Option<(SkySettings, BloomSett
     };
     let sky = project.render.sky;
     let bloom = project.render.bloom;
+    let fxaa = project.render.fxaa;
     Some((
         SkySettings {
             enabled: sky.enabled,
@@ -146,19 +158,22 @@ pub(crate) fn load_render(project_root: &Path) -> Option<(SkySettings, BloomSett
             knee: bloom.knee,
         }
         .sanitized(),
+        FxaaSettings {
+            enabled: fxaa.enabled,
+        },
     ))
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn reads_sky_and_bloom_sections_from_project_ron() {
+    fn reads_sky_bloom_and_fxaa_sections_from_project_ron() {
         let root = std::path::Path::new("../../../projects/XGame");
         if !root.join("project.ron").exists() {
             eprintln!("skip: 没有旧项目 project.ron");
             return;
         }
-        let (sky, bloom) = super::load_render(root).expect("showcase 项目应带 sky 节");
+        let (sky, bloom, fxaa) = super::load_render(root).expect("showcase 项目应带 sky 节");
         assert!(sky.enabled, "项目里天空是开着的");
         assert_eq!(sky.intensity, 1.0);
         assert_eq!(sky.zenith, [0.09, 0.26, 0.60]);
@@ -169,6 +184,9 @@ mod tests {
         // 项目里没有 `render.bloom` 节：光晕关（画面与接入前逐位相同）。
         assert_eq!(bloom, xgc_render::BloomSettings::default());
         assert!(!bloom.is_enabled());
+        // 同样没有 `render.fxaa` 节：抗锯齿关，帧输出逐字节不变。
+        assert_eq!(fxaa, xgc_render::FxaaSettings::default());
+        assert!(!fxaa.is_enabled());
         // 没有 project.ron 的资产根：天空关、光晕关。
         assert!(super::load_render(std::path::Path::new("does-not-exist")).is_none());
     }

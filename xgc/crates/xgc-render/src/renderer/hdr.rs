@@ -1,8 +1,9 @@
 //! HDR 场景中间目标、光晕合成与最终全屏 tone-map。
 //!
 //! 几何、天空与粒子先在线性 `Rgba16Float` 中合成；场景结束时按需跑一遍光晕链，
-//! 再由唯一一趟 ACES pass 把「场景 + 光晕」写进显示目标。UI 由调用方随后直接
-//! 画到显示目标，因此不会被场景曝光或曲线改变。
+//! 再由唯一一趟 ACES pass 把「场景 + 光晕」写进显示目标（开着 FXAA 时先写 LDR
+//! scratch，见 `fxaa.rs`）。UI 由调用方随后直接画到显示目标，因此不会被场景曝光、
+//! 曲线或抗锯齿改变。
 
 use std::sync::Arc;
 
@@ -169,16 +170,17 @@ impl HdrStage {
         Arc::clone(&self.target.as_ref().unwrap().texture)
     }
 
-    /// 把线性 HDR 场景（可选叠加光晕）一次性映射到显示目标；目标的 sRGB 格式负责
-    /// 最终传输编码。
+    /// 把线性 HDR 场景（可选叠加光晕）一次性映射到 `destination`；目标的 sRGB
+    /// 格式负责最终传输编码。FXAA 开着时 `destination` 是 LDR scratch 的视图，
+    /// 关着时就是显示目标 —— 两边的 `format` 必须一致（`fxaa.rs` 按它分支）。
     pub(super) fn present(
         &mut self,
         context: &GpuContext,
-        output: &wgpu::Texture,
+        destination: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
         bloom: BloomSettings,
         glow: Option<[&wgpu::TextureView; BLOOM_LEVELS]>,
     ) {
-        let format = output.format();
         if self
             .pipeline
             .as_ref()
@@ -238,7 +240,6 @@ impl HdrStage {
                 self.closed_bind.as_ref().expect("刚建过绑定组")
             }
         };
-        let view = output.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
             context
                 .device()
@@ -249,7 +250,7 @@ impl HdrStage {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("xgc-tone-map-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: destination,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -370,7 +371,8 @@ impl super::Renderer {
             .scene_texture(context, width, height)
     }
 
-    /// 场景收尾：按需跑光晕链，再把「场景 + 光晕」tone-map 到显示目标。
+    /// 场景收尾：按需跑光晕链，再把「场景 + 光晕」tone-map 到显示目标；
+    /// 开着 FXAA 时 tone-map 先落 LDR scratch，再由 FXAA 平滑到显示目标。
     pub(super) fn present_scene(
         &mut self,
         context: &GpuContext,
@@ -392,11 +394,38 @@ impl super::Renderer {
         // 关着时链已被释放（`views()` 回 `None`），这里退化成绑场景纹理占位：
         // 强度写 0，着色器整段分支跳过，绑什么都不会被采样。
         let glow = self.bloom_stage.as_ref().and_then(|stage| stage.views());
+        let format = output.format();
+        let fxaa = self.fxaa;
+        // FXAA 开着：tone-map 写 LDR scratch，再由 FXAA 平滑到显示目标。
+        // 关着：tone-map 直接写显示目标，scratch 整份丢掉（不养显存）。
+        let (tone_view, tone_source) = if fxaa.is_enabled() {
+            let stage = self
+                .fxaa_stage
+                .get_or_insert_with(|| crate::fxaa::FxaaStage::new(context));
+            // 暂存按**显示目标**的尺寸与格式建：FXAA 是显示空间的后处理，
+            // 场景纹理尺寸只是当前实现里恰好等于输出尺寸，别把两者绑死。
+            let texture = stage.scratch(context, output.width(), output.height(), format);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (view, Some(texture))
+        } else {
+            if let Some(stage) = self.fxaa_stage.as_mut() {
+                stage.release();
+            }
+            (
+                output.create_view(&wgpu::TextureViewDescriptor::default()),
+                None,
+            )
+        };
         self.hdr
             .as_mut()
             .expect("HDR 目标必须先完成场景渲染")
-            .present(context, output, bloom, glow);
+            .present(context, &tone_view, format, bloom, glow);
         stats.passes += 1;
+        if let Some(source) = tone_source {
+            let target = output.create_view(&wgpu::TextureViewDescriptor::default());
+            let stage = self.fxaa_stage.as_mut().expect("刚建过 FXAA 阶段");
+            stats.passes += stage.present(context, &source, &target, format);
+        }
     }
 }
 
