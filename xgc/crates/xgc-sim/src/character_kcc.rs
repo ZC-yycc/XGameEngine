@@ -84,8 +84,8 @@ pub fn rest_gap(def: &CharacterController) -> f32 {
 /// `physics.body` 是显式的动力学声明：两者同时挂时由刚体表全权托管 —— KCC 不建胶囊，
 /// 角色 ECS 系统（`CharacterSystem` / `CharacterStepSystem`）也不碰它，否则两套移动逻辑
 /// 会抢同一个 `Transform`（新调度里 rapier 先跑，ECS 的写落在刚体回写之后、下一帧又被
-/// 覆盖，脚下就是每帧抖一次）。`VelocitySystem` 的"角色只积分竖直"特例仍按
-/// `physics.character` 判，这类组合的水平速度不被积分（位置归刚体表 / 脚本）。
+/// 覆盖，脚下就是每帧抖一次）。`VelocitySystem` 也按 `physics.character` 整份跳过
+/// 角色（水平归 KCC、竖直归 `CharacterSystem`），这类组合同样一个分量都不被它积分。
 pub(crate) fn owned_by_kcc(world: &World, key: EntityKey) -> bool {
     world.get::<CharacterController>(key).is_some()
         && world.get::<PhysicsBody>(key).is_none()

@@ -140,10 +140,13 @@ fn snapping_does_not_cancel_a_jump() {
     schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
+    // 起跳帧本来就该离地：重力与竖直位移都发生，但吸附不能把它按回地面。
+    let expected = 2.936_751_5 + (5.0 - 9.81 * 0.016) * 0.016;
     assert!(
-        (transform.position[1] - 2.936_751_5).abs() < 1e-5,
-        "y={}",
-        transform.position[1]
+        (transform.position[1] - expected).abs() < 1e-5,
+        "y={} 期望 {}",
+        transform.position[1],
+        expected
     );
     assert!(
         !world
@@ -254,7 +257,7 @@ fn a_slope_at_the_configured_limit_is_walkable() {
     );
 }
 
-/// `snap_to_ground = 0` 表示不吸附：悬空 0.1 m 的角色不能被按回地面。
+/// `snap_to_ground = 0` 表示不吸附：悬空 0.1 m 的角色不能被按回地面，只能自由下落。
 #[test]
 fn zero_snap_distance_leaves_an_airborne_character_alone() {
     let mut world = World::new();
@@ -276,11 +279,15 @@ fn zero_snap_distance_leaves_an_airborne_character_alone() {
     schedule.add(CharacterSystem::default());
     schedule.run(&mut world, 0.016);
     let transform = world.get::<Transform>(character).unwrap();
+    // 不吸附 ≠ 悬停：重力照常积分，只是不会被按回地面（不贴到 0）。
+    let expected = 0.1 + (-1.0 - 9.81 * 0.016) * 0.016;
     assert!(
-        (transform.position[1] - 0.1).abs() < 1e-5,
-        "y={}",
-        transform.position[1]
+        (transform.position[1] - expected).abs() < 1e-5,
+        "y={} 期望 {}",
+        transform.position[1],
+        expected
     );
+    assert!(transform.position[1] > 0.0, "y={}", transform.position[1]);
     assert!(
         !world
             .get::<CharacterController>(character)

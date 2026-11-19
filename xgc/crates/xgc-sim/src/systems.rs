@@ -125,13 +125,26 @@ impl System for CharacterJumpSystem {
     }
 }
 
-/// 角色贴地：角色原点在脚底，落到可行走坡面 / y=0 地面时夹住并清掉向下速度；
-/// 超过 `slope_limit` 的上升坡当墙挡在立面之前；下行离地不超过 `snap_to_ground` 时贴回地面。
-#[derive(Clone, Debug, Default)]
+/// 角色贴地 / 重力：角色原点在脚底，落到可行走坡面 / y=0 地面时夹住并清掉向下速度；
+/// 超过 `slope_limit` 的上升坡当墙挡在立面之前；下行离地不超过 `snap_to_ground` 时贴回地面；
+/// 腾空时按 `gravity` 累加竖直速度（纯角色没有刚体，默认调度里也没有 `GravitySystem`）。
+#[derive(Clone, Debug)]
 pub struct CharacterSystem {
     /// 刚体托管实体的复用缓冲：每帧都要回答"这个角色是否同时挂了 `physics.body`"，
     /// 每帧新分配一个 `Vec` 会进热路径；排序后二分查询，顺便让判断与实体插入顺序无关。
     body_owned: Vec<EntityKey>,
+    /// 角色重力（只有 `y` 分量会被消费，水平位移归 KCC）。
+    pub gravity: [f32; 3],
+}
+
+impl Default for CharacterSystem {
+    fn default() -> Self {
+        Self {
+            body_owned: Vec::new(),
+            // 与 `PhysicsSystem` / `GravitySystem` 同缺省：地球重力。
+            gravity: [0.0, -9.81, 0.0],
+        }
+    }
 }
 
 impl System for CharacterSystem {
@@ -141,12 +154,13 @@ impl System for CharacterSystem {
 
     fn access(&self) -> SystemAccess {
         SystemAccess {
-            reads: vec![CharacterController::ID, Slope::ID],
+            reads: vec![CharacterController::ID, Slope::ID, PhysicsBody::ID],
             writes: vec![Transform::ID, Velocity::ID, CharacterController::ID],
         }
     }
 
-    fn run(&mut self, world: &mut World, _dt: f32) {
+    fn run(&mut self, world: &mut World, dt: f32) {
+        let gravity = self.gravity;
         let mut slopes = Vec::new();
         world.for_each::<Slope>(|_, slope| {
             slopes.push(*slope);
@@ -231,6 +245,17 @@ impl System for CharacterSystem {
                         }
                     }
                 }
+                // 竖直：纯角色没有刚体、默认调度里也没有 `GravitySystem`，不在这里积分就永远
+                // 不会下落（落差一旦大于 `snap_to_ground`，角色就悬在半空）。口径与旧端脚本层
+                // `character_simple_move` 一致：着地时清掉向下速度，腾空累加 `gravity * dt`，
+                // 无终端速度。水平速度不在这里积分（由 KCC 回写，见 `VelocitySystem` 文档）。
+                if transform.position[1] > ground + 1e-4 {
+                    velocity.linear[1] += gravity[1] * dt;
+                } else if velocity.linear[1] < 0.0 {
+                    // 站在地上还带着向下速度（脚本 / 上一帧遗留）时清零，否则下一帧会沉下去。
+                    velocity.linear[1] = 0.0;
+                }
+                transform.position[1] += velocity.linear[1] * dt;
                 if transform.position[1] < ground {
                     transform.position[1] = ground;
                     if velocity.linear[1] < 0.0 {
@@ -292,15 +317,17 @@ impl System for AnimatorSystem {
     }
 }
 
-/// 第一个内建系统：`position += linear * dt`（带 `physics.character` 的实体只积分竖直）。
+/// 第一个内建系统：`position += linear * dt`，**但带 `physics.character` 的实体整份跳过**。
 ///
-/// 角色的水平位移不在这里积分，而是由 `RapierPhysicsSystem` 的角色阶段做
-/// collide-and-slide 后回写 —— 也就是说**默认调度里必须有 `RapierPhysicsSystem`**，
-/// 否则角色的 x / z 会静默不动（自定义调度只用本系统时得自己推进水平位移，
-/// 参考 `tests/character_slope.rs` 的 `advance_horizontally`）。
+/// 角色三轴位移各有专属写者：水平归 `RapierPhysicsSystem` 的角色阶段（rapier
+/// `KinematicCharacterController` 的 collide-and-slide），竖直归 `CharacterSystem`
+/// （它要先按地面 / 坡面判定腾空才决定累加重力，位移必须与判定放在一处）。也就是说
+/// **默认调度里必须有 `RapierPhysicsSystem` 与 `CharacterSystem`**，否则角色的相应分量
+/// 会静默不动（自定义调度只用本系统时得自己推进，参考 `tests/character_slope.rs` 的
+/// `advance_horizontally`）。
 ///
-/// 同时挂 `physics.body` 与 `physics.character` 的实体也按角色处理（只积分竖直）：
-/// 它的位置由刚体表 / 脚本全权负责，这里的水平积分只会和刚体回写打架。
+/// 同时挂 `physics.body` 与 `physics.character` 的实体也按角色处理（位置完全由刚体表 /
+/// 脚本负责）：在这里积分任何分量都只会和刚体回写打架。
 #[derive(Clone, Debug)]
 pub struct VelocitySystem {
     pub threads: usize,
@@ -340,8 +367,9 @@ impl System for VelocitySystem {
     }
 
     fn run(&mut self, world: &mut World, dt: f32) {
-        // 角色的**水平**位移归 rapier 的角色控制器（`character_kcc`），一帧只能有一处
-        // 积分它；竖直仍留在这里（坡面 / 贴地 / 跳跃仍是 ECS 口径）。
+        // 角色一个分量都不在这里积分：水平归 KCC、竖直归 `CharacterSystem`（它要先判腾空
+        // 才决定累加重力）。此前"角色只积分竖直"的写法在 `CharacterSystem` 也开始积分 y
+        // 之后会把竖直位移算两遍 —— 一帧落下 2× `vy·dt`、跳起高度翻倍。
         let mut characters = std::mem::take(&mut self.characters);
         characters.clear();
         // 判据是"挂了 `physics.character`"，不管有没有 `physics.body`：带刚体的组合位置完全
@@ -351,7 +379,6 @@ impl System for VelocitySystem {
         characters.sort_unstable();
         world.par_for_each2_mut::<Transform, Velocity>(self.threads, |key, transform, velocity| {
             if characters.binary_search(&key).is_ok() {
-                transform.position[1] += velocity.linear[1] * dt;
                 return;
             }
             for axis in 0..3 {

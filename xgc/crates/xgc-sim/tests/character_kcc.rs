@@ -102,8 +102,13 @@ fn character_slides_along_a_rotated_wall() {
     );
 }
 
+/// `VelocitySystem` 必须**整份跳过**角色：水平归 KCC、竖直归 `CharacterSystem`。
+///
+/// 以前它给角色积分竖直（水平已交给 KCC），`CharacterSystem` 也开始积分竖直之后同一帧
+/// 会算两遍（落下 2× `vy·dt`、跳起高度翻倍）。这里用一个非角色实体当对照，确保它仍然
+/// 正常三轴积分 —— 判据是"挂了 `physics.character`"，不是"有 `Velocity`"。
 #[test]
-fn velocity_system_only_integrates_the_character_vertically() {
+fn velocity_system_leaves_characters_alone() {
     let mut world = World::new();
     let character = world.spawn((
         Transform::default(),
@@ -112,16 +117,28 @@ fn velocity_system_only_integrates_the_character_vertically() {
         },
         CharacterController::default(),
     ));
+    let plain = world.spawn((
+        Transform::default(),
+        Velocity {
+            linear: [2.0, 3.0, 4.0],
+        },
+    ));
     let mut schedule = Schedule::new();
     schedule.add(VelocitySystem::default());
     schedule.run(&mut world, 0.5);
     let transform = world.get::<Transform>(character).unwrap();
-    assert_eq!(transform.position[0], 0.0);
-    assert_eq!(transform.position[2], 0.0);
+    assert_eq!(
+        transform.position,
+        [0.0, 0.0, 0.0],
+        "角色一个分量都不该被积分"
+    );
+    let plain_transform = world.get::<Transform>(plain).unwrap();
     assert!(
-        (transform.position[1] - 1.5).abs() < 1e-6,
-        "y={}",
-        transform.position[1]
+        (plain_transform.position[0] - 1.0).abs() < 1e-6
+            && (plain_transform.position[1] - 1.5).abs() < 1e-6
+            && (plain_transform.position[2] - 2.0).abs() < 1e-6,
+        "非角色实体仍要三轴积分：{:?}",
+        plain_transform.position
     );
 }
 
