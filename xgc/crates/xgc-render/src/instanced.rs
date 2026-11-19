@@ -95,6 +95,12 @@ impl GpuContext {
                             step_mode: wgpu::VertexStepMode::Vertex,
                             attributes: &wgpu::vertex_attr_array![1 => Float32x2],
                         },
+                        // 法线流：模型没导法线时缓冲里是全零（片元退回导数叉积）。
+                        wgpu::VertexBufferLayout {
+                            array_stride: 12,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![2 => Float32x3],
+                        },
                     ],
                 },
                 primitive: wgpu::PrimitiveState::default(),
@@ -315,6 +321,7 @@ impl RenderCache {
                 };
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 pass.set_vertex_buffer(1, mesh.uv_buffer.slice(..));
+                pass.set_vertex_buffer(2, mesh.normal_buffer.slice(..));
                 pass.set_bind_group(2, &mesh.texture_group, &[]);
                 if let Some(indices) = &mesh.index_buffer {
                     pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);

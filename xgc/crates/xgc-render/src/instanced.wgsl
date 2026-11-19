@@ -13,6 +13,8 @@ var<storage, read> instances: array<Instance>;
 fn vs(
     @location(0) position: vec3<f32>,
     @location(1) uv: vec2<f32>,
+    // 模型空间法线；全零 = 模型没导法线（片元退回屏幕导数）。
+    @location(2) normal: vec3<f32>,
     @builtin(instance_index) index: u32,
 ) -> SceneVsOut {
     let instance = instances[index];
@@ -23,5 +25,6 @@ fn vs(
     out.color = instance.color;
     out.material = instance.material;
     out.uv = uv;
+    out.normal = normal_matrix(instance.model) * normal;
     return out;
 }

@@ -318,22 +318,49 @@ fn shadow_factor(world_pos: vec3<f32>, ndotl: f32) -> f32 {
     return a.x;
 }
 
+// 法线变换矩阵：逆转置。非均匀缩放（证据世界的展示盒会被脚本改缩放）下直接乘
+// model 会把法线拉歪、光照方向全错；旧端 scene_pipeline.rs 的
+// `normal_mat = transpose(mat3_inverse(model))` 同式，口径必须一字不差。
+fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
+    let a = m[0][0]; let b = m[0][1]; let c = m[0][2];
+    let d = m[1][0]; let e = m[1][1]; let f = m[1][2];
+    let g = m[2][0]; let h = m[2][1]; let i = m[2][2];
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    let inv_det = 1.0 / det;
+    return mat3x3<f32>(
+        (e * i - f * h) * inv_det, (c * h - b * i) * inv_det, (b * f - c * e) * inv_det,
+        (f * g - d * i) * inv_det, (a * i - c * g) * inv_det, (c * d - a * f) * inv_det,
+        (d * h - e * g) * inv_det, (b * g - a * h) * inv_det, (a * e - b * d) * inv_det,
+    );
+}
+
+fn normal_matrix(model: mat4x4<f32>) -> mat3x3<f32> {
+    return transpose(mat3_inverse(mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz)));
+}
+
 struct SceneVsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) world: vec3<f32>,
     @location(2) @interpolate(flat) material: vec4<f32>,
     @location(3) uv: vec2<f32>,
+    // 世界空间法线（模型导了 NORMAL 时有值）；全零 = 模型没导法线，片元退回导数叉积。
+    @location(4) normal: vec3<f32>,
 };
 
 @fragment
 fn fs(input: SceneVsOut) -> @location(0) vec4<f32> {
-    // 面法线从屏幕导数叉积得到，符号按"朝向相机"归一，闭合网格可见面才受光。
-    let raw = cross(dpdx(input.world), dpdy(input.world));
-    var normal = normalize(raw + vec3<f32>(0.0, 0.0, 1e-9));
+    // 法线：模型导了 NORMAL 就用插值后的顶点法线（旧端同路径、不按视线翻号）；
+    // 没导则退回屏幕导数叉积，它的符号是任意的，按"朝向相机"归一才让闭合网格的
+    // 可见面受光。两支都先把候选值算出来再选，避免在非一致控制流里求导数。
     let to_camera = normalize(frame.eye.xyz - input.world);
+    var normal = cross(dpdx(input.world), dpdy(input.world));
+    normal = normalize(normal + vec3<f32>(0.0, 0.0, 1e-9));
     if (dot(normal, to_camera) < 0.0) {
         normal = -normal;
+    }
+    if (dot(input.normal, input.normal) > 1e-12) {
+        normal = normalize(input.normal);
     }
     // 反照率 = 基色因子 × 实体颜色 × 贴图（没贴图时采样 1×1 白纹理）。
     let albedo = input.color.rgb * textureSample(albedo_texture, albedo_sampler, input.uv).rgb;

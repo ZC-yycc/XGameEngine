@@ -32,3 +32,26 @@ fn skin_deformed(position: vec3<f32>, joint_index: vec4<u32>, weights: vec4<f32>
     }
     return position;
 }
+
+// 法线走同一套 palette（旧端 `nrm = (skin * vec4(input.normal, 0.0)).xyz` 同式）：
+// 方向只吃矩阵的旋转部分，权重归一后不额外归一 —— 归一化留到片元，避免在顶点
+// 之间插值时又被拉长 / 缩短。
+fn skin_deformed_normal(
+    normal: vec3<f32>,
+    joint_index: vec4<u32>,
+    weights: vec4<f32>,
+) -> vec3<f32> {
+    var skinned = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        if (weights[i] > 0.0) {
+            skinned = skinned
+                + (skin_palette.matrices[joint_index[i]] * vec4<f32>(normal, 0.0)).xyz * weights[i];
+            weight_sum = weight_sum + weights[i];
+        }
+    }
+    if (weight_sum > 0.0) {
+        return skinned / weight_sum;
+    }
+    return normal;
+}

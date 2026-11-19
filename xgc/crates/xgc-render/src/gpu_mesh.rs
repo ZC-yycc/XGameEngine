@@ -9,6 +9,8 @@ use super::texture_bind::TextureBinding;
 pub struct GpuMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub uv_buffer: wgpu::Buffer,
+    /// 每顶点法线（模型空间）；模型没导法线时灌全零，片元着色据此退回屏幕导数。
+    pub normal_buffer: wgpu::Buffer,
     pub index_buffer: Option<wgpu::Buffer>,
     /// 按模型上传时建好的贴图绑定组（没贴图时指向白纹理）。
     pub texture_group: wgpu::BindGroup,
@@ -51,6 +53,8 @@ impl GpuMeshCache {
             let uv_bytes = uvs_bytes(&mesh.positions, &mesh.uvs);
             let vertex_buffer = create_vertex_buffer(context, "xgc-mesh-vertices", &vertex_bytes);
             let uv_buffer = create_vertex_buffer(context, "xgc-mesh-uvs", &uv_bytes);
+            let normal_bytes = normals_bytes(&mesh.positions, &mesh.normals);
+            let normal_buffer = create_vertex_buffer(context, "xgc-mesh-normals", &normal_bytes);
             let index_buffer = if mesh.indices.is_empty() {
                 None
             } else {
@@ -74,6 +78,7 @@ impl GpuMeshCache {
                 GpuMesh {
                     vertex_buffer,
                     uv_buffer,
+                    normal_buffer,
                     index_buffer,
                     texture_group,
                     vertices: mesh.positions.len() as u32,
@@ -84,7 +89,7 @@ impl GpuMeshCache {
         self.meshes.get(key).unwrap()
     }
 
-    /// 蒙皮顶点每帧覆盖；顶点数不变时只写位置缓冲（UV 不变）。
+    /// 蒙皮顶点每帧覆盖；顶点数不变时只写位置与法线两条流（UV 不变）。
     pub fn upload_deformed(
         &mut self,
         context: &GpuContext,
@@ -98,12 +103,20 @@ impl GpuMeshCache {
                 context
                     .queue()
                     .write_buffer(&mesh.vertex_buffer, 0, &positions_bytes(positions));
+                // CPU 蒙皮只重算位置、没有重算法线：把法线流清零，片元就会走屏幕导数
+                // 叉积（对变形后的位置来说这才是几何法线）。不清零的话绑定姿态的法线
+                // 会盖住导数路径，模型一转就着错光。
+                let zeros = vec![0u8; positions.len() * 12];
+                context.queue().write_buffer(&mesh.normal_buffer, 0, &zeros);
                 return self.meshes.get(key).unwrap();
             }
         }
         self.meshes.remove(key);
         let mut deformed = source.clone();
         deformed.positions = positions.to_vec();
+        // 首帧也必须是"没有法线"：这条路径只重算位置，绑定姿态的法线给了片元就会
+        // 着一帧错光（后面每帧清零则是同一个理由）。空向量让上传时灌全零哨兵。
+        deformed.normals = Vec::new();
         self.upload(context, key, &deformed, textures)
     }
 }
@@ -121,6 +134,24 @@ fn uvs_bytes(positions: &[[f32; 3]], uvs: &[[f32; 2]]) -> Vec<u8> {
     }
     uvs.iter()
         .flat_map(|uv| uv.iter().flat_map(|value| value.to_le_bytes()))
+        .collect()
+}
+
+/// 全零法线是"没有法线"的哨兵：顶点着色器原样传世界空间方向，片元发现长度退化
+/// 就退回屏幕导数叉积。不能省略这条缓冲——wgpu 的顶点步进按已绑定的流取数据，
+/// 少绑一条会让 draw 直接校验失败。
+fn normals_bytes(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<u8> {
+    if normals.is_empty() {
+        return vec![0; positions.len() * 12];
+    }
+    debug_assert_eq!(
+        normals.len(),
+        positions.len(),
+        "有 NORMAL 时条数必须与位置一致：缓冲区长度对不上会让顶点流整体错位"
+    );
+    normals
+        .iter()
+        .flat_map(|normal| normal.iter().flat_map(|value| value.to_le_bytes()))
         .collect()
 }
 

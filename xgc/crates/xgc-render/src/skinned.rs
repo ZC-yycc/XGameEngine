@@ -32,6 +32,8 @@ const SKINNED_WGSL: &str = concat!(
 pub(crate) struct GpuSkinMesh {
     position: wgpu::Buffer,
     uv: wgpu::Buffer,
+    /// 每顶点法线（模型空间）；模型没导法线时全零，片元据此退回屏幕导数。
+    normal: wgpu::Buffer,
     joints: wgpu::Buffer,
     weights: wgpu::Buffer,
     texture_group: wgpu::BindGroup,
@@ -92,12 +94,16 @@ impl GpuSkinMeshCache {
             let mut uvs = Vec::with_capacity(mesh.positions.len() * 8);
             let mut joints = Vec::with_capacity(mesh.positions.len() * 8);
             let mut weights = Vec::with_capacity(mesh.positions.len() * 16);
+            let mut normals = Vec::with_capacity(mesh.positions.len() * 12);
             for (index, position) in mesh.positions.iter().enumerate() {
                 for value in position {
                     positions.extend_from_slice(&value.to_le_bytes());
                 }
                 for value in mesh.uvs.get(index).copied().unwrap_or([0.0; 2]) {
                     uvs.extend_from_slice(&value.to_le_bytes());
+                }
+                for value in mesh.normals.get(index).copied().unwrap_or([0.0; 3]) {
+                    normals.extend_from_slice(&value.to_le_bytes());
                 }
                 for value in skin
                     .and_then(|skin| skin.joints.get(index))
@@ -129,6 +135,7 @@ impl GpuSkinMeshCache {
                 GpuSkinMesh {
                     position: create_buffer(context, "xgc-skin-positions", &positions, false),
                     uv: create_buffer(context, "xgc-skin-uvs", &uvs, false),
+                    normal: create_buffer(context, "xgc-skin-normals", &normals, false),
                     joints: create_buffer(context, "xgc-skin-joints", &joints, false),
                     weights: create_buffer(context, "xgc-skin-weights", &weights, false),
                     texture_group: textures.group(context, mesh.texture.as_deref()),
@@ -341,6 +348,12 @@ impl GpuContext {
                             step_mode: wgpu::VertexStepMode::Vertex,
                             attributes: &wgpu::vertex_attr_array![3 => Float32x4],
                         },
+                        // 法线流：模型没导法线时缓冲里是全零（片元退回导数叉积）。
+                        wgpu::VertexBufferLayout {
+                            array_stride: 12,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![4 => Float32x3],
+                        },
                     ],
                 },
                 primitive: wgpu::PrimitiveState::default(),
@@ -498,6 +511,7 @@ impl SkinnedPipeline {
                 pass.set_bind_group(3, self.model.bind(), &[self.model.offset(slot)]);
                 pass.set_vertex_buffer(0, draw.mesh.position.slice(..));
                 pass.set_vertex_buffer(1, draw.mesh.uv.slice(..));
+                pass.set_vertex_buffer(4, draw.mesh.normal.slice(..));
                 pass.set_vertex_buffer(2, draw.mesh.joints.slice(..));
                 pass.set_vertex_buffer(3, draw.mesh.weights.slice(..));
                 if let Some(indices) = &draw.mesh.index_buffer {

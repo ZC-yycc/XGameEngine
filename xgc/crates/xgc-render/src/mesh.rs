@@ -19,6 +19,12 @@ pub struct Mesh {
     pub skin: Option<SkinData>,
     /// 每个顶点的 UV（`TEXCOORD_0`）；空 = 没有 UV，采样坐标为 (0,0)。
     pub uvs: Vec<[f32; 2]>,
+    /// 每个顶点的法线（glTF `NORMAL`，模型空间、不保证归一）；空 = 模型没导法线，
+    /// 片元着色退回屏幕导数叉积（内建图元与少数老模型走这条）。
+    ///
+    /// 有法线时必须用逆转置矩阵变换（非均匀缩放会把法线拉歪），旧端
+    /// `scene_pipeline.rs` 的 `normal_mat = transpose(mat3_inverse(model))` 同式。
+    pub normals: Vec<[f32; 3]>,
     /// glTF 基色贴图（旧引擎 PBR 的 albedo 贴图）；`None` = 纯色。
     pub texture: Option<std::sync::Arc<TextureData>>,
 }
@@ -31,6 +37,7 @@ impl Mesh {
             base_color_factor: [1.0; 4],
             skin: None,
             uvs: Vec::new(),
+            normals: Vec::new(),
             texture: None,
         }
     }
