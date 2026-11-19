@@ -12,8 +12,9 @@ use crate::gpu::GpuContext;
 
 const TONE_MAP_WGSL: &str = include_str!("../tone_map.wgsl");
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// `[intensity, w0, w1, w2]`，与 `tone_map.wgsl` 的 `BloomParams` 逐字段对齐。
-const BLOOM_PARAMS_BYTES: usize = 16;
+/// `[exposure, intensity, w0, w1, w2, _pad…]`，与 `tone_map.wgsl` 的
+/// `ToneParams` 逐字段对齐（整块 32 字节：末尾 3 个填充）。
+const TONE_PARAMS_BYTES: usize = 32;
 
 struct HdrTarget {
     width: u32,
@@ -26,9 +27,9 @@ struct HdrTarget {
 pub(super) struct HdrStage {
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    bloom_params: wgpu::Buffer,
-    /// 上次写进 `bloom_params` 的四元组（按位比较，避免每帧都写缓冲）。
-    bloom_params_written: Option<[u32; BLOOM_PARAMS_BYTES / 4]>,
+    tone_params: wgpu::Buffer,
+    /// 上次写进 `tone_params` 的五个字段（按位比较，避免每帧都写缓冲）。
+    tone_params_written: Option<[u32; 5]>,
     target: Option<HdrTarget>,
     /// 光晕关闭时的绑定组：三级输入全指向场景纹理占位、强度恒 0，
     /// 只有场景纹理重建才需要换，跨帧缓存即可（旧实现就是缓存的）。
@@ -111,17 +112,17 @@ impl HdrStage {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let bloom_params = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("xgc-tone-map-bloom-params"),
-            size: BLOOM_PARAMS_BYTES as u64,
+        let tone_params = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("xgc-tone-map-tone-params"),
+            size: TONE_PARAMS_BYTES as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         Self {
             texture_layout,
             sampler,
-            bloom_params,
-            bloom_params_written: None,
+            tone_params,
+            tone_params_written: None,
             target: None,
             closed_bind: None,
             pipeline: None,
@@ -179,6 +180,7 @@ impl HdrStage {
         destination: &wgpu::TextureView,
         format: wgpu::TextureFormat,
         bloom: BloomSettings,
+        exposure: f32,
         glow: Option<[&wgpu::TextureView; BLOOM_LEVELS]>,
     ) {
         if self
@@ -189,20 +191,21 @@ impl HdrStage {
             self.pipeline = Some((format, self.create_pipeline(context, format)));
         }
         let pipeline = &self.pipeline.as_ref().unwrap().1;
-        let weights = [
+        let values = [
+            exposure,
             bloom.intensity,
             BLOOM_WEIGHTS[0],
             BLOOM_WEIGHTS[1],
             BLOOM_WEIGHTS[2],
         ];
-        let bits = weights.map(f32::to_bits);
-        if self.bloom_params_written != Some(bits) {
-            let mut bytes = [0u8; BLOOM_PARAMS_BYTES];
-            for (slot, value) in weights.iter().enumerate() {
+        let bits = values.map(f32::to_bits);
+        if self.tone_params_written != Some(bits) {
+            let mut bytes = [0u8; TONE_PARAMS_BYTES];
+            for (slot, value) in values.iter().enumerate() {
                 bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
             }
-            context.queue().write_buffer(&self.bloom_params, 0, &bytes);
-            self.bloom_params_written = Some(bits);
+            context.queue().write_buffer(&self.tone_params, 0, &bytes);
+            self.tone_params_written = Some(bits);
         }
         // 关闭态：三级输入全指向场景纹理占位、强度恒 0，绑定组跨帧缓存（场景纹理
         // 重建时清掉）。开启态每帧重建 —— 场景纹理与光晕链各有独立的重建判据，
@@ -215,7 +218,7 @@ impl HdrStage {
                     context,
                     &self.texture_layout,
                     &self.sampler,
-                    &self.bloom_params,
+                    &self.tone_params,
                     &target.view,
                     glow,
                 ));
@@ -230,7 +233,7 @@ impl HdrStage {
                             context,
                             &self.texture_layout,
                             &self.sampler,
-                            &self.bloom_params,
+                            &self.tone_params,
                             &target.view,
                             placeholder,
                         )
@@ -381,11 +384,12 @@ impl super::Renderer {
         stats: &mut super::RenderStats,
     ) {
         let bloom = self.bloom;
+        let exposure = self.exposure;
         if bloom.is_enabled() {
             let stage = self
                 .bloom_stage
                 .get_or_insert_with(|| crate::bloom::BloomStage::new(context));
-            stats.passes += stage.render(context, scene, bloom);
+            stats.passes += stage.render(context, scene, bloom, exposure);
         } else if let Some(stage) = self.bloom_stage.as_mut() {
             // 旧端在 `intensity == 0` 时把链整份丢掉：留着就白占显存，
             // 关闭态还会把上一轮的残留视图绑进 tone-map。
@@ -419,7 +423,7 @@ impl super::Renderer {
         self.hdr
             .as_mut()
             .expect("HDR 目标必须先完成场景渲染")
-            .present(context, &tone_view, format, bloom, glow);
+            .present(context, &tone_view, format, bloom, exposure, glow);
         stats.passes += 1;
         if let Some(source) = tone_source {
             let target = output.create_view(&wgpu::TextureViewDescriptor::default());

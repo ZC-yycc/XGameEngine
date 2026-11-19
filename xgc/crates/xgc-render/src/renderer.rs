@@ -6,6 +6,7 @@ use super::assets::MeshCache;
 use super::bloom::{BloomSettings, BloomStage};
 use super::camera::{camera_view_projection_with_eye, invert, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
+use super::exposure::{sanitize_exposure, EXPOSURE_DEFAULT};
 use super::frame_color::compose_colors;
 use super::fxaa::{FxaaSettings, FxaaStage};
 use super::gpu::{GpuContext, GpuError};
@@ -62,6 +63,8 @@ pub struct Renderer {
     particles: Vec<xgc_world::ParticleQuad>,
     particle_pipeline: Option<(wgpu::TextureFormat, super::particles::ParticlePipeline)>,
     hdr: Option<hdr::HdrStage>,
+    /// 画面设置里的曝光（`render.exposure`，缺省 1.0）：曲线前的线性光乘子。
+    exposure: f32,
     /// 画面设置里的光晕节：开着时场景在 tone-map 前多跑一遍三级光晕链。
     bloom: BloomSettings,
     bloom_stage: Option<BloomStage>,
@@ -107,6 +110,7 @@ impl Renderer {
             particles: Vec::new(),
             particle_pipeline: None,
             hdr: None,
+            exposure: EXPOSURE_DEFAULT,
             bloom: BloomSettings::default(),
             bloom_stage: None,
             fxaa: FxaaSettings::default(),
@@ -124,6 +128,15 @@ impl Renderer {
     /// 设置天空（等价于旧 `project.ron` 的 `render.sky`）。
     pub fn set_sky(&mut self, sky: SkySettings) {
         self.sky = sky.sanitized();
+    }
+
+    /// 设置曝光（等价于旧 `project.ron` 的 `render.exposure`）。
+    ///
+    /// 曝光是曲线之前的线性光乘子，必须与光晕亮部提取用同一个值：0 是
+    /// "全黑画面"而不是关闭态，非正 / 非有限值由 [`sanitize_exposure`] 落回
+    /// 1.0。缺省 1.0 时帧输出逐字节不变。
+    pub fn set_exposure(&mut self, exposure: f32) {
+        self.exposure = sanitize_exposure(exposure);
     }
 
     /// 设置光晕（等价于旧 `project.ron` 的 `render.bloom`）。

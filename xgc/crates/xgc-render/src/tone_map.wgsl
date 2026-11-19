@@ -5,16 +5,23 @@
 // 整段采样被跳过（条件是 uniform，整趟 pass 走同一分支，采样处在一致性
 // 控制流里），采样器与三级纹理仍绑着占位资源。
 
-struct BloomParams {
+// 曝光 + 光晕强度 + 三级权重。曝光与亮部提取（`bloom.wgsl` 的 `fs_bright`）
+// 必须用同一个乘子：光晕阈值是按曝光后的亮度定义的。末尾三个 0 是
+// uniform 结构的 16 字节对齐填充（整块 32 字节）。
+struct ToneParams {
+    exposure: f32,   // 曲线之前的线性光乘子（缺省 1.0）
     intensity: f32,  // 0 = 不加光晕（分支跳过，不去采样各级纹理）
     w0: f32,         // 三级光晕的合成权重
     w1: f32,
     w2: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var hdr_scene: texture_2d<f32>;
 @group(0) @binding(1) var glow_sampler: sampler;
-@group(0) @binding(2) var<uniform> bloom: BloomParams;
+@group(0) @binding(2) var<uniform> tone: ToneParams;
 // 三级光晕（½ / ¼ / ⅛）。Bloom 关闭时绑定场景纹理占位 —— 分支不进就不采样。
 @group(0) @binding(3) var glow_0: texture_2d<f32>;
 @group(0) @binding(4) var glow_1: texture_2d<f32>;
@@ -67,13 +74,13 @@ fn fs(input: VsOut) -> @location(0) vec4<f32> {
     // position.xy 是像素中心；转整数后与同尺寸 HDR texel 一一对应，不做滤波
     // （场景纹理逐位取原值，光晕才走采样器做双线性放大）。
     let color = textureLoad(hdr_scene, vec2<i32>(input.position.xy), 0);
-    var scene = max(color.rgb, vec3<f32>(0.0));
-    if (bloom.intensity > 0.0) {
+    var scene = max(color.rgb, vec3<f32>(0.0)) * tone.exposure;
+    if (tone.intensity > 0.0) {
         let uv = input.position.xy / vec2<f32>(textureDimensions(hdr_scene));
-        let glow = textureSample(glow_0, glow_sampler, uv).rgb * bloom.w0
-            + textureSample(glow_1, glow_sampler, uv).rgb * bloom.w1
-            + textureSample(glow_2, glow_sampler, uv).rgb * bloom.w2;
-        scene += glow * bloom.intensity;
+        let glow = textureSample(glow_0, glow_sampler, uv).rgb * tone.w0
+            + textureSample(glow_1, glow_sampler, uv).rgb * tone.w1
+            + textureSample(glow_2, glow_sampler, uv).rgb * tone.w2;
+        scene += glow * tone.intensity;
     }
     // 显示目标是最终不透明帧；材质/粒子/光晕的中间 alpha 不得泄漏到视口。
     return vec4<f32>(aces(scene), 1.0);

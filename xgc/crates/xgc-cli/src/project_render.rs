@@ -1,29 +1,49 @@
-//! `project.ron` 的画面设置读取：天空、光晕与 FXAA。
+//! `project.ron` 的画面设置读取：曝光、天空、光晕与 FXAA。
 //!
 //! 旧引擎把画面设置放在项目级而不是场景级，XGC 也按项目级读；缺省值必须逐项
-//! 等于旧端 `SkyConfig::default` / `BloomConfig::default` / `FxaaConfig::default`，
+//! 等于旧端 `RenderConfig::default` 的曝光 1.0 与 `SkyConfig` / `BloomConfig` /
+//! `FxaaConfig` 的 `default`，
 //! 缺文件 / 缺节时画面才与接入前逐位相同。
 
 use std::path::Path;
 
 use serde::Deserialize;
-use xgc_render::{BloomSettings, FxaaSettings, SkySettings};
+use xgc_render::{sanitize_exposure, BloomSettings, FxaaSettings, SkySettings};
 
-/// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分（天空 + 光晕 + FXAA）。
+/// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分（曝光 + 天空 + 光晕 + FXAA）。
 #[derive(Debug, Default, Deserialize)]
 struct OldProjectFile {
     #[serde(default)]
     render: OldProjectRender,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct OldProjectRender {
+    #[serde(default = "exposure_default")]
+    exposure: f32,
     #[serde(default)]
     sky: OldSkyConfig,
     #[serde(default)]
     bloom: OldBloomConfig,
     #[serde(default)]
     fxaa: OldFxaaConfig,
+}
+
+/// 缺 `render` 节时的缺省：曝光必须是旧端缺省 1.0，不能靠 `derive(Default)` 给出
+/// 的 0.0（那是"全黑画面"，绕开 `load_render` 直接读结构的人会踩到）。
+impl Default for OldProjectRender {
+    fn default() -> Self {
+        Self {
+            exposure: exposure_default(),
+            sky: OldSkyConfig::default(),
+            bloom: OldBloomConfig::default(),
+            fxaa: OldFxaaConfig::default(),
+        }
+    }
+}
+
+fn exposure_default() -> f32 {
+    xgc_render::EXPOSURE_DEFAULT
 }
 
 /// 缺省值必须逐项等于旧 `FxaaConfig::default`（抗锯齿默认关）。
@@ -115,13 +135,13 @@ impl Default for OldSkyConfig {
     }
 }
 
-/// 读 `project.ron` 的画面设置（天空 + 光晕 + FXAA）。
+/// 读 `project.ron` 的画面设置（曝光 + 天空 + 光晕 + FXAA）。
 ///
-/// 没有 `project.ron` 时返回 `None`；文件在但缺 `sky` / `bloom` / `fxaa` 节则按
-/// 缺省值（都是"关"）读出来，与缺节等于关的语义一致。
+/// 没有 `project.ron` 时返回 `None`；文件在但缺节则按旧端缺省读出来
+/// （曝光 1.0、其余都是"关"），与缺节等于关 / 不增不减的语义一致。
 pub(crate) fn load_render(
     project_root: &Path,
-) -> Option<(SkySettings, BloomSettings, FxaaSettings)> {
+) -> Option<(SkySettings, BloomSettings, FxaaSettings, f32)> {
     let path = project_root.join("project.ron");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return None;
@@ -132,12 +152,13 @@ pub(crate) fn load_render(
             // 文件在但读不懂：契约仍是"缺省即关"，但静默把天空和光晕一起关掉
             // 会让画面差异无从归因，所以留一条能查的日志。
             eprintln!(
-                "warning: {} 解析失败，画面设置回落到缺省（天空、光晕与 FXAA 都关）：{error}",
+                "warning: {} 解析失败，画面设置回落到缺省（曝光 1.0、天空 / 光晕 / FXAA 都关）：{error}",
                 path.display()
             );
             return None;
         }
     };
+    let exposure = sanitize_exposure(project.render.exposure);
     let sky = project.render.sky;
     let bloom = project.render.bloom;
     let fxaa = project.render.fxaa;
@@ -161,6 +182,7 @@ pub(crate) fn load_render(
         FxaaSettings {
             enabled: fxaa.enabled,
         },
+        exposure,
     ))
 }
 
@@ -173,7 +195,8 @@ mod tests {
             eprintln!("skip: 没有旧项目 project.ron");
             return;
         }
-        let (sky, bloom, fxaa) = super::load_render(root).expect("showcase 项目应带 sky 节");
+        let (sky, bloom, fxaa, exposure) =
+            super::load_render(root).expect("showcase 项目应带 sky 节");
         assert!(sky.enabled, "项目里天空是开着的");
         assert_eq!(sky.intensity, 1.0);
         assert_eq!(sky.zenith, [0.09, 0.26, 0.60]);
@@ -187,7 +210,37 @@ mod tests {
         // 同样没有 `render.fxaa` 节：抗锯齿关，帧输出逐字节不变。
         assert_eq!(fxaa, xgc_render::FxaaSettings::default());
         assert!(!fxaa.is_enabled());
+        // 项目里显式写 `exposure: 1.0`（旧端该字段没有 skip_serializing_if，老项目
+        // 总会落盘它）：1.0 走 x*1.0 的同一条乘法，帧输出逐字节不变。
+        assert_eq!(exposure, xgc_render::EXPOSURE_DEFAULT);
         // 没有 project.ron 的资产根：天空关、光晕关。
         assert!(super::load_render(std::path::Path::new("does-not-exist")).is_none());
+    }
+
+    #[test]
+    fn parses_an_explicit_exposure_and_sanitizes_illegal_ones() {
+        // 显式非 1.0 必须真的被解析出来：缺省值同样是 1.0，只断言"等于 1.0"
+        // 分不清"解析接线"与"兜底"。
+        let explicit: super::OldProjectRender =
+            ron::from_str("(exposure: 2.5)").expect("显式曝光应能解析");
+        assert_eq!(explicit.exposure, 2.5);
+
+        // 0 / 负 / 非有限在旧端都是"非法曝光"，消费边界按 sanitize_exposure 回缺省。
+        let zero: super::OldProjectRender =
+            ron::from_str("(exposure: 0.0)").expect("解析不该拒绝非法值");
+        assert_eq!(
+            xgc_render::sanitize_exposure(zero.exposure),
+            xgc_render::EXPOSURE_DEFAULT
+        );
+
+        // 缺 `render` 节时的缺省必须就是 1.0（derive(Default) 会给 0.0 = 全黑帧）。
+        assert_eq!(
+            super::OldProjectRender::default().exposure,
+            xgc_render::EXPOSURE_DEFAULT
+        );
+        assert_eq!(
+            super::OldProjectFile::default().render.exposure,
+            xgc_render::EXPOSURE_DEFAULT
+        );
     }
 }

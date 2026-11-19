@@ -73,14 +73,24 @@ fn chain_follows_the_source_size_and_releases() {
     };
 
     let small = source(&context, 8, 8);
-    assert_eq!(stage.render(&context, &small, settings), BLOOM_PASSES);
+    assert_eq!(stage.render(&context, &small, settings, 1.0), BLOOM_PASSES);
     assert_eq!(stage.chain_size(), Some((8, 8)));
+    assert_eq!(stage.chain_builds(), 1, "首次渲染必须建链");
     assert!(stage.views().is_some(), "跑完链必须交出三级视图");
+
+    // 同尺寸同参数的第二帧：链必须复用（每帧重建在像素上看不出来，只能靠计数拦）。
+    assert_eq!(stage.render(&context, &small, settings, 1.0), BLOOM_PASSES);
+    assert_eq!(stage.chain_builds(), 1, "同尺寸同参数的第二帧不该重建链");
+
+    // 只换曝光：亮部提取的乘子变了，链里的参数缓冲与缓存键都得跟着变。
+    assert_eq!(stage.render(&context, &small, settings, 2.0), BLOOM_PASSES);
+    assert_eq!(stage.chain_builds(), 2, "曝光变了链必须重建");
 
     // 只换源尺寸：链必须按新尺寸重建，否则模糊半径会按旧分辨率算。
     let large = source(&context, 16, 16);
-    assert_eq!(stage.render(&context, &large, settings), BLOOM_PASSES);
+    assert_eq!(stage.render(&context, &large, settings, 2.0), BLOOM_PASSES);
     assert_eq!(stage.chain_size(), Some((16, 16)), "源尺寸变了链必须重建");
+    assert_eq!(stage.chain_builds(), 3);
 
     stage.release();
     assert_eq!(stage.chain_size(), None);

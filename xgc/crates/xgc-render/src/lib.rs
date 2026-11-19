@@ -14,6 +14,7 @@ mod bloom;
 mod camera;
 mod diff;
 mod draw;
+mod exposure;
 mod font;
 mod frame_color;
 mod fxaa;
@@ -52,6 +53,7 @@ pub use camera::{
 };
 pub use diff::{diff_images, ImageDiff};
 pub use draw::{build_draw_list, DrawItem, DrawList};
+pub use exposure::{sanitize_exposure, EXPOSURE_DEFAULT, MAX_EXPOSURE, MIN_EXPOSURE};
 pub use font::{FontAtlas, GlyphQuad};
 pub use fxaa::FxaaSettings;
 pub use glb::{

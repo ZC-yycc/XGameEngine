@@ -9,8 +9,9 @@
 //!  tone-map 的合成 pass 读这三级，乘权重与强度后加进**曲线前**的线性颜色。
 //! ```
 //!
-//! 口径与旧端 `postfx` 的 Bloom 链相同：阈值判在曝光后（XGC 没有曝光旋钮，
-//! 等价于曝光恒为 1.0）、软膝避免亮斑边缘的硬边、按最大通道判亮度（彩灯的
+//! 口径与旧端 `postfx` 的 Bloom 链相同：阈值判在曝光后（亮部提取乘
+//! [`BloomStage::render`] 收到的 exposure，与 tone-map 用的是同一个乘子；曝光
+//! 恒为 1.0 时等价于旧行为）、软膝避免亮斑边缘的硬边、按最大通道判亮度（彩灯的
 //! 光晕是彩色的）、三级权重 `[0.5, 0.3, 0.2]`。
 //!
 //! **默认关闭（`intensity == 0`）**：Bloom 是风格参数而不是正确性参数（对比：
@@ -95,10 +96,16 @@ fn level_size(width: u32, height: u32, level: usize) -> (u32, u32) {
     )
 }
 
-fn params_bytes(threshold: f32, knee: f32, texel: [f32; 2], direction: [f32; 2]) -> Vec<u8> {
-    // 曝光恒为 1.0：XGC 的画面临界值都按"白面 ≈ 1.0"标定，没有曝光旋钮。
+fn params_bytes(
+    exposure: f32,
+    threshold: f32,
+    knee: f32,
+    texel: [f32; 2],
+    direction: [f32; 2],
+) -> Vec<u8> {
+    // 曝光必须与 tone-map 合成用同一个乘子：阈值按**曝光后**的亮度判。
     let fields = [
-        1.0,
+        exposure,
         threshold,
         knee,
         0.0,
@@ -303,6 +310,7 @@ fn level_view(context: &GpuContext, label: &str, (width, height): (u32, u32)) ->
 struct Chain {
     width: u32,
     height: u32,
+    exposure: f32,
     threshold: f32,
     knee: f32,
     /// 模糊结果（tone-map 合成读这三张）。
@@ -323,6 +331,7 @@ impl Chain {
         width: u32,
         height: u32,
         settings: BloomSettings,
+        exposure: f32,
     ) -> Self {
         let size = (width.max(1), height.max(1));
         let a: [wgpu::TextureView; BLOOM_LEVELS] = std::array::from_fn(|level| {
@@ -342,7 +351,13 @@ impl Chain {
         let bright_params = uniform_buffer(
             context,
             "xgc-bloom-bright-params",
-            &params_bytes(settings.threshold, settings.knee, [0.0; 2], [0.0; 2]),
+            &params_bytes(
+                exposure,
+                settings.threshold,
+                settings.knee,
+                [0.0; 2],
+                [0.0; 2],
+            ),
         );
         // 降采样不读 uniform，但三个 pass 共用一条布局 —— 绑一条全中性缓冲，
         // 比自己再维护一套布局 + 一个 WGSL 结构便宜。
@@ -355,6 +370,7 @@ impl Chain {
                     context,
                     "xgc-bloom-blur-params",
                     &params_bytes(
+                        0.0,
                         0.0,
                         0.0,
                         [1.0 / level_width as f32, 1.0 / level_height as f32],
@@ -398,6 +414,7 @@ impl Chain {
         Self {
             width: size.0,
             height: size.1,
+            exposure,
             threshold: settings.threshold,
             knee: settings.knee,
             a,
@@ -415,6 +432,8 @@ pub(crate) struct BloomStage {
     sampler: wgpu::Sampler,
     pipelines: Option<Pipelines>,
     chain: Option<Chain>,
+    /// 链的累计重建次数：只作诊断（同尺寸同参数的第二帧必须复用）。
+    builds: u64,
 }
 
 impl BloomStage {
@@ -433,6 +452,7 @@ impl BloomStage {
             sampler,
             pipelines: None,
             chain: None,
+            builds: 0,
         }
     }
 
@@ -442,6 +462,7 @@ impl BloomStage {
         context: &GpuContext,
         source: &wgpu::Texture,
         settings: BloomSettings,
+        exposure: f32,
     ) -> usize {
         let (width, height) = (source.width().max(1), source.height().max(1));
         if self.pipelines.is_none() {
@@ -450,12 +471,22 @@ impl BloomStage {
         let stale = self.chain.as_ref().is_none_or(|chain| {
             chain.width != width
                 || chain.height != height
+                || chain.exposure.to_bits() != exposure.to_bits()
                 || chain.threshold.to_bits() != settings.threshold.to_bits()
                 || chain.knee.to_bits() != settings.knee.to_bits()
         });
         if stale {
+            self.builds += 1;
             let pipelines = self.pipelines.as_ref().expect("上一行刚建过管线");
-            let chain = Chain::new(context, pipelines, &self.sampler, width, height, settings);
+            let chain = Chain::new(
+                context,
+                pipelines,
+                &self.sampler,
+                width,
+                height,
+                settings,
+                exposure,
+            );
             self.chain = Some(chain);
         }
         let pipelines = self.pipelines.as_ref().expect("刚建过管线");
@@ -533,6 +564,12 @@ impl BloomStage {
     #[cfg(test)]
     pub(crate) fn chain_size(&self) -> Option<(u32, u32)> {
         self.chain.as_ref().map(|chain| (chain.width, chain.height))
+    }
+
+    /// 链的累计重建次数；只给测试断言"同参数的第二帧复用、变了才重建"。
+    #[cfg(test)]
+    pub(crate) fn chain_builds(&self) -> u64 {
+        self.builds
     }
 }
 
