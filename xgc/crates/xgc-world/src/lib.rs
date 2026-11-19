@@ -148,6 +148,10 @@ impl<T: Component> Column for Vec<T> {
 struct Archetype {
     entities: Vec<EntityKey>,
     columns: HashMap<ComponentId, Box<dyn Column>>,
+    /// 哈希用的字段布局缓存：`columns` 是 `HashMap`（迭代序不定），而 `state_hash`
+    /// 必须按组件 ID 升序、字段声明序逐项混入才能保证同输入同输出。每帧为每个实体
+    /// 重排一次会让稳态帧分配爆炸（实测 60 帧 10 万次），所以按 archetype 只算一次。
+    hash_layout: std::sync::OnceLock<Vec<(ComponentId, Vec<&'static str>)>>,
 }
 
 impl Archetype {
@@ -155,6 +159,7 @@ impl Archetype {
         Self {
             entities: Vec::new(),
             columns: HashMap::with_capacity(ids.len()),
+            hash_layout: std::sync::OnceLock::new(),
         }
     }
 

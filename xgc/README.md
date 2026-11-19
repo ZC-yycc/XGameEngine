@@ -102,6 +102,8 @@ PCSS 软阴影与级间混合切片把阴影接收端对齐到旧端同一份合
 
 角色重力切片给 `CharacterSystem` 加 `pub gravity: [f32; 3]`（缺省 -9.81）：脚底高于地面时按`vy += gravity.y * dt` 累加、`y += vy * dt`，落地时把向下速度清零。此前纯角色没有重力（`GravitySystem` 不在默认调度里，`PhysicsSystem` / `GroundCollisionSystem` 只处理带 `physics.body` 的实体），落差大于 `snap_to_ground` 的角色会悬在半空；现在悬空 3 m 会落到 y=0、跳跃会走完整条抛物线、走出坡面跨度会掉回地面。竖直积分由 `CharacterSystem` 独占：`VelocitySystem` 对挂了 `physics.character` 的实体整份跳过（原先它给角色积分竖直，加上这里就会一帧写两遍 `y`，落下 2× 速度、跳起高度翻倍），`a_character_falls_once_per_frame_under_the_default_schedule` 按半隐式欧拉解析解钉住单次积分（改回双写时实跑红：`y=2.7275007` 对单次积分的 `2.850125`）。只积分 `y`（水平仍归 KCC），落地仍走 ECS 的解析地面 / 坡面。回归 `cargo test -p xgc-sim --test character_gravity` 6 条（含默认调度下竖直只积分一次）；把积分行改成 `+= 0.0` 时实跑三条变红（「落地后 y=3」「落地后 y=16.666647」「掉下来后 y=5.773503」）。第 150 帧逐字节不变（`hash=bb3fdc99df20aa31`、14/7/8、PPM SHA-256 `4A47275D…48A0927`）：证据世界没有 `physics.character` 实体。
 
+热路径分配门禁切片把稳态帧的分配从每帧 1697 次降到 230 次（`crates/xgc-sim/tests/steady_state.rs` 用线程本地计数分配器：200 walker + 10 动态刚体、8 帧预热后连跑 60 帧，101838 → 13818 次；数值型组件世界的 `World::state_hash()` 60 次调用零分配，预算门禁 60 × (实体数 + 64)）：`crates/xgc-world/src/hash.rs` 每帧现建的实体行号 `Vec` / 逐实体组件 ID 排序 / 逐字段 `field_names()` 都改成 `Archetype::hash_layout`（`OnceLock`，按 archetype 只算一次）与 `thread_local` scratch，哈希输出逐位不变（`run 60` 仍 `f4bc029f5f995b91`，第 150 帧 PPM SHA-256 与上一版相同）；变异回每实体现建时两条分配回归实跑红（72000 次 / 114018 次；变异值比改前基线更大，因为每实体现建比旧路径还多一条布局 `Vec`）；release 下吞吐 0.057 ms/帧（210 实体，600 帧 33.98 ms）。**未闭环**：字符串字段经 `Value` 反射读取时每实体仍克隆一次；门禁目前只统计调用线程的分配（默认调度是单线程），并行 System 执行落地时要汇总各 worker 线程的计数；没有 CI 上的 release 基线。
+
 可选 SSAO 环境光遮蔽切片在 TAA 之后、光晕之前乘一层遮蔽（`render.ssao` 的 `enabled` / `strength` / `radius` / `bias`，默认关）：`crates/xgc-render/src/ssao.rs` 照旧端 `ssao.rs` 的合同，用固定种子 LCG 生成 16 抽头半球核（纯函数、无随机数 ⇒ 截图逐帧可复现），在**半分辨率** `R8Unorm` 上按深度反投影求世界点、深度梯度取法线、像素哈希旋转采样盘、`smoothstep` 累计遮蔽，再做 [1,4,6,4,1]/16 可分离模糊并线性上采样乘回源色（四趟 pass 一次提交）；`SsaoParams` 448 字节，矩阵退化（含非有限元素，旧端 `determinant().is_finite()` 守卫同式）时强度写 0 ⇒ AO 全 1、画面逐位不变；`view_proj` 用未抖动矩阵。默认关闭（或 `strength = 0`）：不建 AO 纹理、不跑 pass、`passes` 不增，第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`），`run 60` 哈希不变；7 条 GPU 回归 + 4 条纯函数单测钉住（含「接触区必须局部变暗」「强度 0 等价关掉」「换尺寸重建 / 关掉释放 / 释放后重开」「448 字节布局」「消毒口径」「非有限矩阵必须判退化」等变异实跑红）。**未闭环**：半分辨率 AO 在薄几何边缘会留一圈淡边（旧端同款）；只有遮蔽没有间接光；窗口宿主仍不读 `project.ron`；未做稳态计时（证据场景是关闭态）。
 
 可选 TAA 时间抗锯齿切片在 tone-map 之前插入一趟时间重投影（`render.taa` 的 `enabled` / `history_weight`，默认关）：`crates/xgc-render/src/taa.rs` 照旧端 `taa.rs` 的合同做 8 相 Halton(2,3) 抖动（纯函数、无随机数 ⇒ 截图逐帧可复现）、像素→裁剪与像素→纹理两套换算（后者 y 取反）、`jitter_projection` 只平移裁剪空间 x/y；`taa.wgsl` 用当前深度反投世界、用上一帧未抖动视图投影重投影到上一帧屏幕并补上一帧抖动，采样历史后按 3×3 邻域 `lo/hi` 钳制再 `mix`（缺省历史权重 0.9 ⇒ 当前帧只进 10%）；天空按视线方向推到 1e4 再重投影（只保留旋转视差）；首帧 / 相机背后 / 越界直通当前帧。历史是两张 `Rgba16Float` 乒乓，尺寸变化重建、关掉即释放；抖动只叠场景矩阵，阴影拟合仍用未抖动矩阵。深度纹理补了 `Sampled` 用途（否则绑定时报 usage 校验错），TAA 开着时 FXAA 自动让位。默认关闭：不建历史、不跑 pass、相机不抖动，第 150 帧 PPM SHA-256 与上一版相同（`4A47275D…48A0927`），`run 60` 哈希不变；8 条 GPU 回归 + 7 条抖动与布局单测 + 1 条接线单测钉住（含「历史权重 0 与 0.9 的第二帧必须不同」「重置历史后首帧直通」「换尺寸必须重建历史」「开着 TAA 时 FXAA 必须让位」「开启 TAA 必须多一趟解析」等变异实跑红）；`reset_taa_history()` 供相机瞬移 / 切场景帧调用。**未闭环**：历史只有颜色、没有深度 / 速度缓冲（旧端同款），快速平移的高光仍可能拖影；解析与 tone-map 两次提交；窗口宿主仍不读 `project.ron`；未做稳态计时（证据场景是关闭态）。
@@ -160,15 +162,15 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（454 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（233 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35710 字节，
+`cargo test --workspace --offline` 全绿（456 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（234 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本正式 System 调度与粒子 burst 请求桥，
-以及旧新逐帧 trace / 性能验收。
+以及旧新逐帧 trace；性能验收的 XGC 侧热路径分配门禁已建（还缺 CI release 基线）。
 
 ## 命令
 
