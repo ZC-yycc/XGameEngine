@@ -57,4 +57,9 @@ impl super::Renderer {
     pub fn set_taa(&mut self, settings: TaaSettings) {
         self.taa = settings.sanitized();
     }
+
+    /// SSAO 只看 `enabled` 与 `strength > 0`：强度 0 与关掉等价（省四趟 pass）。
+    pub fn set_ssao(&mut self, settings: crate::ssao::SsaoSettings) {
+        self.ssao = settings.sanitized();
+    }
 }

@@ -312,6 +312,8 @@ pub(crate) fn render_frame(
         renderer.set_shadow_settings(settings.shadow);
         // TAA 默认关：关着时不建历史、相机不抖动，帧输出逐字节不变。
         renderer.set_taa(settings.taa);
+        // SSAO 默认关：关着时不建 AO 纹理、不跑 pass，帧输出逐字节不变。
+        renderer.set_ssao(settings.ssao);
     }
     if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
         for item in build_draw_list(&world).items {

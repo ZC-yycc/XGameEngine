@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::assets::MeshCache;
 use super::bloom::{BloomSettings, BloomStage};
-use super::camera::{camera_view_projection_with_eye, invert, Mat4, IDENTITY};
+use super::camera::{camera_view_projection_with_eye, Mat4, IDENTITY};
 use super::draw::{build_draw_list, DrawList};
 use super::exposure::EXPOSURE_DEFAULT;
 use super::frame_color::compose_colors;
@@ -22,10 +22,13 @@ use super::resources::{ResourceDesc, ResourceUsage};
 use super::shadow_settings::ShadowSettings;
 use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline};
 use super::sky::{sky_irradiance, SkySettings};
+use super::ssao::SsaoSettings;
 use super::taa::TaaSettings;
 mod hdr;
 mod settings;
 mod shadow_prep;
+mod sky_pass;
+mod ssao_pass;
 mod taa_pass;
 use taa_pass::CameraMatrices;
 mod ui;
@@ -92,6 +95,9 @@ pub struct Renderer {
     /// 画面设置里的时间抗锯齿：默认关，关着时不建历史、相机不抖动。
     taa: TaaSettings,
     taa_stage: Option<crate::taa::TaaStage>,
+    /// 画面设置里的 SSAO 节：开着时场景色在光晕之前先乘一遍遮蔽。
+    ssao: SsaoSettings,
+    ssao_stage: Option<crate::ssao::SsaoStage>,
 }
 
 fn scissor_rect(clip: [f32; 4], viewport: [f32; 2]) -> Option<[u32; 4]> {
@@ -138,6 +144,8 @@ impl Renderer {
             shadow_settings: ShadowSettings::default(),
             taa: TaaSettings::default(),
             taa_stage: None,
+            ssao: SsaoSettings::default(),
+            ssao_stage: None,
         }
     }
 
@@ -248,7 +256,8 @@ impl Renderer {
             lighting,
         )?;
         let resolved = self.taa_resolve(context, &scene, view_proj, eye, &mut stats);
-        self.present_scene(context, target, &resolved, &mut stats);
+        let shaded = self.ssao_apply(context, &resolved, view_proj, eye, &mut stats);
+        self.present_scene(context, target, &shaded, &mut stats);
         stats.ui_draws = self.render_ui(context, target, world)?;
         stats.passes += usize::from(stats.ui_draws > 0);
         Ok(stats)
@@ -282,7 +291,8 @@ impl Renderer {
             lighting,
         )?;
         let resolved = self.taa_resolve(context, &scene, view_proj, eye, &mut stats);
-        self.present_scene(context, target, &resolved, &mut stats);
+        let shaded = self.ssao_apply(context, &resolved, view_proj, eye, &mut stats);
+        self.present_scene(context, target, &shaded, &mut stats);
         Ok(stats)
     }
 
@@ -345,71 +355,6 @@ impl Renderer {
             .draw(context, &request)
             .map_err(GpuError::Pipeline)?;
         Ok(drawn)
-    }
-
-    /// 天空盒：整屏一张三角形，深度 `LessEqual` + 不写深度，被几何挡住的像素不画。
-    ///
-    /// 单独一个 pass（`LoadOp::Load`）而不是塞进实例化 pass：实例化 pass 自己负责
-    /// 清屏与深度清除，天空必须排在所有不透明几何之后。
-    fn draw_sky(
-        &self,
-        context: &GpuContext,
-        target: &wgpu::Texture,
-        view_proj: Mat4,
-        lighting: &FrameLighting,
-        clear_depth: bool,
-    ) {
-        let Some((_, sky_pipeline)) = self.sky_pipeline.as_ref() else {
-            return;
-        };
-        let depth = &self.depth.as_ref().unwrap().view;
-        let sun = (lighting.sun_intensity > 0.0).then(|| {
-            let [x, y, z] = lighting.sun_direction;
-            ([-x, -y, -z], lighting.sun_color)
-        });
-        let uniform = super::sky::SkyUniform::build(&self.sky, sun);
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            context
-                .device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("xgc-sky-encoder"),
-                });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("xgc-sky-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: if clear_depth {
-                            wgpu::LoadOp::Clear(1.0)
-                        } else {
-                            wgpu::LoadOp::Load
-                        },
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            sky_pipeline.draw(
-                context,
-                &mut pass,
-                invert(view_proj).unwrap_or(IDENTITY),
-                lighting.eye,
-                &uniform,
-            );
-        }
-        context.queue().submit(Some(encoder.finish()));
     }
 
     fn render_list(

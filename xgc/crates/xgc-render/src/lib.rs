@@ -41,6 +41,7 @@ mod skinned;
 mod skinning;
 mod sky;
 mod sky_draw;
+mod ssao;
 mod taa;
 mod text;
 mod text_draw;
@@ -81,6 +82,7 @@ pub use shot::{
 };
 pub use skinning::{identity, skin_positions, translation};
 pub use sky::{sh_eval, sky_color, sky_irradiance, SkySettings, SH_COEFFS};
+pub use ssao::SsaoSettings;
 pub use taa::{TaaSettings, DEFAULT_HISTORY_WEIGHT, JITTER_SAMPLES, MAX_HISTORY_WEIGHT};
 pub use text::{text_mesh, text_mesh_wrapped};
 pub use text_draw::TextPipeline;

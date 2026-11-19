@@ -9,7 +9,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 use xgc_render::{
-    sanitize_exposure, BloomSettings, FxaaSettings, ShadowSettings, SkySettings, TaaSettings,
+    sanitize_exposure, BloomSettings, FxaaSettings, ShadowSettings, SkySettings, SsaoSettings,
+    TaaSettings,
 };
 
 /// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分
@@ -34,6 +35,8 @@ struct OldProjectRender {
     shadow: OldShadowConfig,
     #[serde(default)]
     taa: OldTaaConfig,
+    #[serde(default)]
+    ssao: OldSsaoConfig,
 }
 
 /// 缺 `render` 节时的缺省：曝光必须是旧端缺省 1.0，不能靠 `derive(Default)` 给出
@@ -47,6 +50,7 @@ impl Default for OldProjectRender {
             fxaa: OldFxaaConfig::default(),
             shadow: OldShadowConfig::default(),
             taa: OldTaaConfig::default(),
+            ssao: OldSsaoConfig::default(),
         }
     }
 }
@@ -84,6 +88,42 @@ struct OldTaaConfig {
 
 fn taa_default_history_weight() -> f32 {
     xgc_render::DEFAULT_HISTORY_WEIGHT
+}
+
+/// 缺省值必须逐项等于旧 `SsaoConfig::default`（SSAO 默认关，强度 1 / 半径 0.5 / 偏置 0.025）。
+#[derive(Debug, Deserialize)]
+struct OldSsaoConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "ssao_default_strength")]
+    strength: f32,
+    #[serde(default = "ssao_default_radius")]
+    radius: f32,
+    #[serde(default = "ssao_default_bias")]
+    bias: f32,
+}
+
+fn ssao_default_strength() -> f32 {
+    xgc_render::SsaoSettings::default().strength
+}
+
+fn ssao_default_radius() -> f32 {
+    xgc_render::SsaoSettings::default().radius
+}
+
+fn ssao_default_bias() -> f32 {
+    xgc_render::SsaoSettings::default().bias
+}
+
+impl Default for OldSsaoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strength: ssao_default_strength(),
+            radius: ssao_default_radius(),
+            bias: ssao_default_bias(),
+        }
+    }
 }
 
 impl Default for OldTaaConfig {
@@ -185,9 +225,10 @@ pub(crate) struct ProjectRenderSettings {
     pub(crate) exposure: f32,
     pub(crate) shadow: ShadowSettings,
     pub(crate) taa: TaaSettings,
+    pub(crate) ssao: SsaoSettings,
 }
 
-/// 读 `project.ron` 的画面设置（曝光 + 天空 + 光晕 + FXAA + 阴影画质 + TAA）。
+/// 读 `project.ron` 的画面设置（曝光 + 天空 + 光晕 + FXAA + 阴影画质 + TAA + SSAO）。
 ///
 /// 没有 `project.ron` 时返回 `None`；文件在但缺节则按旧端缺省读出来
 /// （曝光 1.0、其余都是"关"），与缺节等于关 / 不增不减的语义一致。
@@ -202,7 +243,7 @@ pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> 
             // 文件在但读不懂：契约仍是"缺省即关"，但静默把天空和光晕一起关掉
             // 会让画面差异无从归因，所以留一条能查的日志。
             eprintln!(
-                "warning: {} 解析失败，画面设置回落到缺省（曝光 1.0、天空 / 光晕 / FXAA / 阴影画质 / TAA 都关）：{error}",
+                "warning: {} 解析失败，画面设置回落到缺省（曝光 1.0、天空 / 光晕 / FXAA / 阴影画质 / TAA / SSAO 都关）：{error}",
                 path.display()
             );
             return None;
@@ -214,6 +255,7 @@ pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> 
     let fxaa = project.render.fxaa;
     let shadow = project.render.shadow;
     let taa = project.render.taa;
+    let ssao = project.render.ssao;
     Some(ProjectRenderSettings {
         sky: SkySettings {
             enabled: sky.enabled,
@@ -245,6 +287,14 @@ pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> 
         taa: TaaSettings {
             enabled: taa.enabled,
             history_weight: taa.history_weight,
+        }
+        .sanitized(),
+        // SSAO 默认关；非有限值落回该字段默认、有限值夹到旧端上限。
+        ssao: SsaoSettings {
+            enabled: ssao.enabled,
+            strength: ssao.strength,
+            radius: ssao.radius,
+            bias: ssao.bias,
         }
         .sanitized(),
     })
@@ -284,6 +334,9 @@ mod tests {
         // 项目里没有 `render.taa` 节：TAA 关（相机不抖动，帧输出逐位不变）。
         assert_eq!(settings.taa, xgc_render::TaaSettings::default());
         assert!(!settings.taa.is_enabled());
+        // 项目里没有 `render.ssao` 节：环境光遮蔽关（画面逐位不变）。
+        assert_eq!(settings.ssao, xgc_render::SsaoSettings::default());
+        assert!(!settings.ssao.is_enabled());
         // 没有 project.ron 的资产根：天空关、光晕关。
         assert!(super::load_render(std::path::Path::new("does-not-exist")).is_none());
     }
@@ -359,6 +412,26 @@ mod tests {
         write("(render: (taa: (enabled: true, history_weight: 3.0)))");
         let settings = super::load_render(&root).expect("非法权重不该让解析失败");
         assert_eq!(settings.taa.history_weight, xgc_render::MAX_HISTORY_WEIGHT);
+
+        // 显式开 SSAO：三个画质旋钮都从入口读出来，非法值在消费边界消毒。
+        write("(render: (ssao: (enabled: true, strength: 2.0, radius: 3.0, bias: 0.1)))");
+        let settings = super::load_render(&root).expect("显式 SSAO 应能解析");
+        assert!(settings.ssao.is_enabled());
+        assert_eq!(settings.ssao.strength, 2.0);
+        assert_eq!(settings.ssao.radius, 3.0);
+        assert_eq!(settings.ssao.bias, 0.1);
+        write("(render: (ssao: (enabled: true, strength: 9.0, radius: 99.0, bias: 9.0)))");
+        let settings = super::load_render(&root).expect("超上限不该让解析失败");
+        assert_eq!(
+            settings.ssao.strength,
+            xgc_render::SsaoSettings::MAX_STRENGTH
+        );
+        assert_eq!(settings.ssao.radius, xgc_render::SsaoSettings::MAX_RADIUS);
+        assert_eq!(settings.ssao.bias, xgc_render::SsaoSettings::MAX_BIAS);
+        // 缺节 = 关（强度仍保留旧端默认值）。
+        write("(render: ())");
+        let settings = super::load_render(&root).expect("空 render 节应走缺省");
+        assert_eq!(settings.ssao, xgc_render::SsaoSettings::default());
 
         let _ = std::fs::remove_dir_all(&root);
     }
