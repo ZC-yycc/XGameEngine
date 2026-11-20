@@ -1,0 +1,1119 @@
+warning: struct `DummyStorage` is never constructed
+   --> vendor\eframe\src\epi.rs:818:19
+    |
+818 | pub(crate) struct DummyStorage {}
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `eframe` (lib) generated 1 warning
+   Compiling xgc-cli v0.1.0 (E:\GitHubClone\XGameEngine\xgc\crates\xgc-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.45s
+     Running unittests src\lib.rs (target\debug\deps\xgc_agent-18b4380d24330f9a.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\protocol.rs (target\debug\deps\protocol-ab321ecc6d7db6a7.exe)
+
+running 9 tests
+test query_unknown_component_is_rejected ... ok
+test invalid_plan_and_missing_plan_are_reported ... ok
+test replay_rebuilds_world_from_journal ... ok
+test undo_reverts_last_applied_plan ... ok
+test snapshot_and_restore_roundtrip ... ok
+test query_projection_filter_and_stable_pagination ... ok
+test plan_apply_query_and_revert_roundtrip ... ok
+test save_load_and_unknown_method ... ok
+test describe_lists_protocol_components_and_world_state ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_asset-46b4005d39d44fe8.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\catalog.rs (target\debug\deps\catalog-cfc86e4bd7010e50.exe)
+
+running 2 tests
+test scans_meta_and_resolves_guid ... ok
+test scans_real_project_when_available ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cook.rs (target\debug\deps\cook-86c8203501fd3968.exe)
+
+running 2 tests
+test cooks_only_referenced_assets_and_sidecars ... ok
+test cooks_referenced_sources_and_stale_files ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_audio-0154025d3d176d79.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\device.rs (target\debug\deps\device-42a8ccc576b32162.exe)
+
+running 1 test
+test enumerates_output_devices_without_panicking ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_base-b8ba26570c85d0ca.exe)
+
+running 3 tests
+test tests::diagnostic_display_includes_code_and_subject ... ok
+test tests::entity_id_is_stable_and_readable ... ok
+test tests::tick_wraps_without_panicking ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\xgc-3daa937901964e7d.exe)
+
+running 6 tests
+test project_render::tests::parses_an_explicit_exposure_and_sanitizes_illegal_ones ... ok
+test render::tests::frame_count_defaults_to_zero_and_rejects_invalid_values ... ok
+test project_render::tests::reads_sky_bloom_and_fxaa_sections_from_project_ron ... ok
+test render::tests::frame_preparation_advances_tick_and_composes_parent_chain ... ok
+test project_render::tests::reads_the_shadow_sections_through_the_project_entry ... ok
+test render::tests::zero_frames_skip_scripts_and_last_script_writes_refresh_derived_data ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\migrate_scripts.rs (target\debug\deps\migrate_scripts-33894dcf77b20c45.exe)
+
+running 2 tests
+test prefab_migrates_as_world_data ... ok
+test character_scene_scripts_resolve_and_load ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\migrate_showcase.rs (target\debug\deps\migrate_showcase-4a442e7def6f85c9.exe)
+
+running 1 test
+test showcase_scene_migrates_and_runs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_editor-42c15978510e219c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\xgc_editor-1a4df6d9f837c479.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\editor.rs (target\debug\deps\editor-d4299a7dd80c9e37.exe)
+
+running 16 tests
+test snapping_quantizes_to_step ... ok
+test lists_names_and_inspects_components ... ok
+test scale_and_rotation_sync_global_transform ... ok
+test gizmo_moves_transform_and_global ... ok
+test undo_restores_spawned_entities ... ok
+test spawns_and_deletes_entities ... ok
+test demo_scene_has_camera_and_drawable ... ok
+test orbit_camera_places_and_faces_origin ... ok
+test undo_redo_restores_field_edits ... ok
+test adds_and_removes_components ... ok
+test undo_is_rejected_during_play ... ok
+test play_runs_and_stop_restores_snapshot ... ok
+test instantiates_real_prefab_and_selects_root ... ok
+test reverts_prefab_preserving_root_id_and_transform ... ok
+test editor_play_runs_scripts_and_reads_input ... ok
+test edits_fields_and_saves_roundtrip ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_migrate-98f8ef844efc64f0.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compare.rs (target\debug\deps\compare-5957395f2257f324.exe)
+
+running 2 tests
+test showcase_stats_match_old_headless ... ok
+test reports_entity_count_difference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\components.rs (target\debug\deps\components-ee2a34801b5d5d14.exe)
+
+running 7 tests
+test maps_rust_plugin_component ... ok
+test maps_character_with_old_defaults_when_fields_are_omitted ... ok
+test maps_character ... ok
+test maps_animator ... ok
+test maps_lod ... ok
+test maps_particle ... ok
+test maps_ui_element ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\migrate.rs (target\debug\deps\migrate-a37eb134d4ae50c3.exe)
+
+running 10 tests
+test migrates_identity_transform_and_parent ... ok
+test maps_physics_shape_and_body ... ok
+test maps_script_and_audio ... ok
+test migrates_scene_lights_and_ambient ... ok
+test unsupported_version_and_duplicate_ids_are_rejected ... ok
+test maps_mesh_material_and_camera ... ok
+test dynamic_bodies_get_zero_velocity_but_static_ones_do_not ... ok
+test missing_parent_is_counted_not_fatal ... ok
+test migrate_dir_writes_each_scene_and_reports_failures ... ok
+test migrates_material_asset_reference ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\prefab.rs (target\debug\deps\prefab-7de0533df20600d8.exe)
+
+running 4 tests
+test instantiated_entities_carry_source_metadata ... ok
+test pillar_prefab_instantiates_with_remapped_parents ... ok
+test revert_preserves_instance_ids_and_transforms ... ok
+test revert_spawns_entities_added_to_asset ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\verify.rs (target\debug\deps\verify-1a5a85f1ccd8997a.exe)
+
+running 3 tests
+test verify_reports_changed_light_and_ambient ... ok
+test verify_reports_changed_field ... ok
+test showcase_migration_matches_json_roundtrip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_player-573de8338c46daaa.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\xgc_player-82da1c99339c20ea.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\player.rs (target\debug\deps\player-cdf21febd9a5e160.exe)
+
+running 1 test
+test runs_cooked_world_and_scripts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_reflect-e4ca405e113322ad.exe)
+
+running 4 tests
+test tests::duplicate_id_is_rejected ... ok
+test tests::lookup_by_id_and_name ... ok
+test tests::validate_reports_duplicate_fields_and_bad_defaults ... ok
+test tests::schema_is_sorted_and_deterministic ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_render-9eb182945a2ab0b9.exe)
+
+running 66 tests
+test bloom::tests::sanitized_matches_the_old_engine_contract ... ok
+test exposure::tests::legal_values_are_clamped_into_the_safe_range ... ok
+test camera::tests::singular_matrix_has_no_inverse ... ok
+test exposure::tests::default_leaves_the_image_untouched ... ok
+test camera::tests::inverse_of_view_projection_is_identity_product ... ok
+test exposure::tests::non_finite_and_non_positive_values_fall_back_to_the_default ... ok
+test lights::tests::a_non_finite_point_range_is_packed_as_zero ... ok
+test lights::tests::a_shadow_caster_past_the_eighth_slot_is_not_a_primary_shadow_light ... ok
+test lights::tests::inactive_lights_do_not_take_a_slot ... ok
+test lights::tests::only_the_first_shadow_caster_is_marked ... ok
+test lights::tests::the_default_environment_packs_one_sun ... ok
+test lights::tests::the_eighth_light_is_the_last_one_kept ... ok
+test lights::tests::packs_directional_and_point_lights_in_order ... ok
+test point_shadow::tests::cube_lookup_orientation_matches_the_transform ... ok
+test point_shadow::tests::depth_matches_the_projection_and_uses_the_major_axis ... ok
+test point_shadow::tests::each_face_looks_down_its_own_axis ... ok
+test point_shadow::tests::illegal_near_and_far_are_sanitized ... ok
+test point_shadow::tests::reference_depth_follows_the_perspective_scale ... ok
+test point_shadow::tests::the_first_shadow_casting_point_light_is_picked ... ok
+test point_shadow::tests::the_u_axis_is_mirrored_so_shadows_do_not_swap_sides ... ok
+test shadow::tests::empty_bounds_have_no_shadow_fit ... ok
+test shadow::tests::fit_covers_the_whole_scene ... ok
+test shadow::tests::shadow_depth_orders_by_distance_to_the_light ... ok
+test shadow::tests::zero_direction_degrades_to_straight_down ... ok
+test shadow_csm::tests::cascade_overlap_extends_the_fit_toward_the_camera ... ok
+test shadow_csm::tests::single_level_fit_covers_all_scene_corners ... ok
+test shadow_csm::tests::cascade_overlap_garbage_is_treated_as_zero ... ok
+test shadow_csm::tests::cascades_cover_the_camera_frustum ... ok
+test shadow_csm::tests::splits_are_monotonic_and_end_at_far ... ok
+test shadow_settings::tests::illegal_values_fall_back_to_off ... ok
+test shadow_settings::tests::defaults_are_off ... ok
+test shadow_settings::tests::legal_values_pass_through_without_an_upper_clamp ... ok
+test skinned::tests::palette_fits_only_when_the_device_binding_allows_16k ... ok
+test skinned::tests::gpu_skin_requires_a_fully_representable_palette ... ok
+test skinned::tests::posed_bounds_contain_every_deformed_vertex ... ok
+test skinned::tests::posed_bounds_follow_a_translated_palette ... ok
+test skinned::tests::posed_bounds_keep_vertices_that_stay_at_bind_pose ... ok
+test sky::tests::horizon_is_continuous_across_the_sky_ground_seam ... ok
+test sky::tests::sun_only_appears_when_a_directional_light_exists ... ok
+test ssao::tests::kernel_is_deterministic_and_stays_in_the_hemisphere ... ok
+test skinned::tests::palette_uses_the_256_slot_capacity ... ok
+test ssao::tests::only_finite_invertible_matrices_allow_occlusion ... ok
+test ssao::tests::sanitize_matches_the_old_engine_contract ... ok
+test ssao::tests::params_match_the_wgsl_layout ... ok
+test taa::tests::halton_sequence_matches_known_values ... ok
+test taa::tests::jitter_is_a_pure_function_of_the_frame ... ok
+test taa::tests::jitter_projection_shifts_the_clip_space ... ok
+test taa::tests::jitter_units_follow_the_ndc_and_texture_conventions ... ok
+test taa::tests::settings_follow_the_old_engine_contract ... ok
+test taa::tests::taa_params_matches_the_wgsl_layout ... ok
+test taa::tests::zero_jitter_keeps_the_projection_bitwise ... ok
+test tone::tests::aces_is_monotonic ... ok
+test tone::tests::aces_keeps_mid_tone_calibration ... ok
+test tone::tests::aces_maps_black_to_black_and_compresses_white ... ok
+test sky::tests::sh_projection_of_a_constant_sky_reproduces_the_constant ... ok
+test tone::tests::srgb_encode_round_trips_known_values ... ok
+test font::tests::bold_face_uses_the_bold_font_when_available ... ok
+test font::tests::layout_advances_without_overlap ... ok
+test font::tests::cjk_glyphs_rasterize_into_the_atlas ... ok
+test font::tests::wrap_splits_long_lines ... ok
+test font::tests::center_alignment_centers_the_line ... ok
+test skinned::arena::tests::upload_reuses_the_buffer_until_capacity_grows ... ok
+test skinned::arena::tests::stride_follows_the_device_alignment ... ok
+test renderer::taa_pass::tests::begin_returns_a_jittered_projection_only_when_enabled ... ok
+test bloom::tests::chain_follows_the_source_size_and_releases ... ok
+test renderer::hdr::tests::turning_bloom_off_releases_the_chain ... ok
+
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+
+     Running tests\assets.rs (target\debug\deps\assets-734cda8b834fbea6.exe)
+
+running 3 tests
+test builtin_missing_and_guid_are_distinguished ... ok
+test loads_and_caches_box_glb_when_available ... ok
+test resolves_guid_through_asset_catalog ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\bloom.rs (target\debug\deps\bloom-0ee833c4113a1c1e.exe)
+
+running 7 tests
+test bloom_brightens_a_scene_above_threshold ... ok
+test bloom_chain_rebuilds_on_resize_and_stays_deterministic ... ok
+test disabled_bloom_is_a_no_op ... ok
+test bloom_spreads_from_bright_geometry_without_lifting_the_corner ... ok
+test closed_state_rebuilds_its_cached_bind_group_after_resize ... ok
+test bloom_ignores_a_scene_below_threshold ... ok
+test turning_bloom_off_restores_the_disabled_frame ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.18s
+
+     Running tests\camera.rs (target\debug\deps\camera-1df892d9f8a97ae5.exe)
+
+running 2 tests
+test active_camera_projects_origin_to_center ... ok
+test inactive_or_camera_without_global_is_ignored ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\diff.rs (target\debug\deps\diff-b46d78a9bf98d24f.exe)
+
+running 2 tests
+test rejects_different_sizes ... ok
+test reports_pixel_ratio_and_error ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\draw.rs (target\debug\deps\draw-03d73d96e55ccab1.exe)
+
+running 3 tests
+test empty_world_has_empty_draw_list ... ok
+test draw_item_carries_global_transform ... ok
+test draw_list_extracts_mesh_material_and_skips_missing_global ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\draw_pose.rs (target\debug\deps\draw_pose-f6ca205e7e3da58e.exe)
+
+running 1 test
+test draw_item_finds_ancestor_skeleton_pose ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\exposure.rs (target\debug\deps\exposure-0b2034cbd9078b31.exe)
+
+running 5 tests
+test bloom_threshold_reads_the_exposed_value ... ok
+test default_exposure_is_a_byte_identical_no_op ... ok
+test illegal_exposures_fall_back_to_the_default_frame ... ok
+test changing_exposure_rebuilds_the_bloom_chain ... ok
+test doubling_exposure_brightens_the_linear_scene ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.97s
+
+     Running tests\frame_ui.rs (target\debug\deps\frame_ui-80777c1c8dfcc7f1.exe)
+
+running 2 tests
+test opaque_ui_stays_outside_scene_tone_map ... ok
+test frame_composites_ui_after_scene ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+     Running tests\fxaa.rs (target\debug\deps\fxaa-10e74f258ca47df5.exe)
+
+running 6 tests
+test bloom_and_fxaa_both_on_count_twelve_passes ... ok
+test disabled_fxaa_is_a_no_op ... ok
+test fxaa_leaves_a_flat_frame_byte_identical ... ok
+test fxaa_rebuilds_on_resize_and_stays_deterministic ... ok
+test fxaa_smooths_a_hard_edge_on_an_srgb_target ... ok
+test fxaa_smooths_a_hard_edge_without_touching_flat_areas ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.29s
+
+     Running tests\glb.rs (target\debug\deps\glb-1573257c8ff5ee10.exe)
+
+running 5 tests
+test loads_box_glb_when_available ... ok
+test out_of_range_material_index_is_rejected ... ok
+test loads_skinned_glb_joints_and_weights ... ok
+test missing_material_or_base_color_factor_is_white ... ok
+test fox_gltf_carries_uv_and_base_color_texture ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests\gpu.rs (target\debug\deps\gpu-a443ad9501e08ed8.exe)
+
+running 2 tests
+test unsupported_format_is_reported ... ok
+test gpu_resources_are_created_when_adapter_available ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests\graph.rs (target\debug\deps\graph-4cd54cb419e38c84.exe)
+
+running 8 tests
+test duplicate_pass_and_multiple_writers_are_rejected ... ok
+test cycle_is_reported ... ok
+test execute_failure_stops_and_reports_pass ... ok
+test producer_orders_before_consumer_even_if_registered_later ... ok
+test unknown_and_duplicate_resources_are_rejected ... ok
+test usage_flags_are_enforced ... ok
+test independent_passes_keep_registration_order ... ok
+test execute_calls_passes_in_dependency_order ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\hdr.rs (target\debug\deps\hdr-100fc5ba7121c9c3.exe)
+
+running 1 test
+test hdr_target_resizes_and_tone_pipeline_tracks_output_format ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests\lights.rs (target\debug\deps\lights-aa832008e00d14dd.exe)
+
+running 6 tests
+test directional_and_point_lights_add_up ... ok
+test point_light_illuminates_a_surface ... ok
+test point_light_fades_with_distance ... ok
+test only_the_first_eight_lights_take_part ... ok
+test point_light_outside_its_range_is_ignored ... ok
+test stacking_two_lights_equals_one_brighter_light ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.24s
+
+     Running tests\material_asset.rs (target\debug\deps\material_asset-4d88c514e7920690.exe)
+
+running 3 tests
+test parses_real_material_files_and_sanitizes ... ok
+test real_material_asset_multiplies_base_color ... ok
+test missing_material_asset_falls_back_to_model_material ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+     Running tests\material_factor.rs (target\debug\deps\material_factor-445b3eeae8a53759.exe)
+
+running 3 tests
+test gltf_base_color_factor_tints_rendered_mesh ... ok
+test gltf_base_color_factor_tints_skinned_mesh ... ok
+test gltf_base_color_factor_multiplies_entity_color_once ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.73s
+
+     Running tests\material_pbr.rs (target\debug\deps\material_pbr-fb657008c481ea8b.exe)
+
+running 3 tests
+test env_brdf_scales_with_f0_and_stays_bounded ... ok
+test dielectric_surface_keeps_diffuse_and_neutral_f0 ... ok
+test metallic_surface_uses_tinted_f0_and_no_diffuse ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s
+
+     Running tests\mesh.rs (target\debug\deps\mesh-0866aed508344759.exe)
+
+running 1 test
+test builtin_models_have_real_geometry ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\particles.rs (target\debug\deps\particles-ae38f0317bed4c03.exe)
+
+running 3 tests
+test particle_billboard_draws_a_soft_premultiplied_circle ... ok
+test alpha_particle_blends_with_linear_scene_before_tone_map ... ok
+test additive_particles_accumulate_in_hdr_before_tone_map ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests\pbr_direct.rs (target\debug\deps\pbr_direct-29102a204e8c5971.exe)
+
+running 1 test
+test smooth_surface_shows_ggx_highlight_that_rough_lacks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+
+     Running tests\point_shadows.rs (target\debug\deps\point_shadows-074d8fe3059cccc8.exe)
+
+running 5 tests
+test a_point_light_casts_a_visible_shadow ... ok
+test a_skinned_caster_is_drawn_into_all_six_cube_faces ... ok
+test a_point_light_without_a_usable_range_does_not_cast ... ok
+test a_point_light_that_is_out_of_budget_does_not_cast ... ok
+test the_same_scene_renders_deterministically ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.32s
+
+     Running tests\renderer.rs (target\debug\deps\renderer-0d23b5d4c96c07dc.exe)
+
+running 12 tests
+test cover_uv_crops_wide_source ... ok
+test text_mesh_has_vertices_for_known_characters ... ok
+test text_wraps_when_width_is_tight ... ok
+test empty_world_clears_and_entity_emits_one_draw ... ok
+test png_image_loads_and_renders_texture ... ok
+test ppm_image_loads_and_renders_cells ... ok
+test ui_background_renders_over_target ... ok
+test ui_background_rounds_corners ... ok
+test ui_clip_scissors_background ... ok
+test ui_focus_ring_renders_border ... ok
+test ui_image_preserve_keeps_aspect ... ok
+test ui_text_renders_colored_pixels ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.14s
+
+     Running tests\selection.rs (target\debug\deps\selection-894afcd319dbb7bd.exe)
+
+running 1 test
+test selected_entity_is_tinted_in_viewport ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+     Running tests\shadow_soft.rs (target\debug\deps\shadow_soft-33edce2a021e9024.exe)
+
+running 4 tests
+test cascade_blend_wires_the_overlap_fit ... ok
+test illegal_shadow_values_fall_back_to_hard_shadows ... ok
+test default_shadow_quality_is_a_byte_identical_no_op ... ok
+test softness_widens_the_penumbra ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.35s
+
+     Running tests\shadows.rs (target\debug\deps\shadows-9490f5220e59c933.exe)
+
+running 1 test
+test caster_darkens_receiver_only_when_shadows_enabled ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+
+     Running tests\shot.rs (target\debug\deps\shot-b7dc2b140bb7cd0d.exe)
+
+running 7 tests
+test clip_planes_stay_positive_and_cover_the_scene ... ok
+test frame_bounds_fits_every_corner_across_aspects ... ok
+test frame_bounds_keeps_direction_and_empty_scene_still_frames ... ok
+test shot_direction_follows_the_sun_and_is_lit_from_the_front ... ok
+test frame_scene_uses_scene_lighting_direction ... ok
+test scene_bounds_cover_scaled_cube ... ok
+test render_shot_prefers_scene_camera_then_frames_the_scene ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+     Running tests\skeleton.rs (target\debug\deps\skeleton-3bcb572d8192b9d2.exe)
+
+running 1 test
+test reads_joint_names_and_parents ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\skinned_pbr.rs (target\debug\deps\skinned_pbr-7ae41445c66e34b6.exe)
+
+running 9 tests
+test scene_bounds_follow_the_current_pose ... ok
+test auto_framing_keeps_a_posed_mesh_in_frame ... ok
+test gpu_skin_moves_the_textured_surface_with_the_joint ... ok
+test gpu_skinned_surface_receives_a_static_caster_shadow ... ok
+test identity_gpu_skin_matches_static_pbr_texture_pixel_for_pixel ... ok
+test oversized_pose_cpu_fallback_preserves_uv_and_texture ... ok
+test repeated_frames_reuse_the_skin_uniform_arenas ... ok
+test batched_skinned_draws_keep_their_own_palettes ... ok
+test palette_slots_past_64_stay_on_the_gpu_path ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.17s
+
+     Running tests\skinned_shadow.rs (target\debug\deps\skinned_shadow-f1bdc670780ab4f7.exe)
+
+running 6 tests
+test cpu_fallback_skinned_mesh_also_casts_a_shadow ... ok
+test gpu_skinned_mesh_casts_a_shadow_onto_the_floor ... ok
+test identity_palette_casts_the_same_shadow_as_the_static_mesh ... ok
+test repeated_frames_reuse_the_shadow_skin_arenas ... ok
+test skinned_shadow_follows_the_current_pose ... ok
+test two_skinned_casters_keep_their_own_shadow_palettes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.31s
+
+     Running tests\skinning.rs (target\debug\deps\skinning-c0955e3f62f63c89.exe)
+
+running 2 tests
+test skin_positions_applies_pose_and_inverse_bind ... ok
+test skin_positions_falls_back_without_skin ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\sky_box.rs (target\debug\deps\sky_box-8ff9881207b4d138.exe)
+
+running 2 tests
+test sky_box_paints_the_analytic_sky ... ok
+test geometry_still_occludes_the_sky ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+
+     Running tests\sky_ibl.rs (target\debug\deps\sky_ibl-d2bb207f4452b955.exe)
+
+running 2 tests
+test sky_off_leaves_only_ambient ... ok
+test sky_irradiance_lights_the_object ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+     Running tests\ssao.rs (target\debug\deps\ssao-417f8c3cd24995c8.exe)
+
+running 7 tests
+test default_ssao_is_a_byte_identical_no_op ... ok
+test occlusion_darkens_contact_areas ... ok
+test re_enabling_after_release_matches_a_fresh_renderer ... ok
+test resizing_rebuilds_and_disabling_releases ... ok
+test enabling_ssao_adds_four_passes_and_allocates_targets ... ok
+test strength_zero_is_a_byte_identical_no_op ... ok
+test ssao_sequence_is_deterministic ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.11s
+
+     Running tests\taa.rs (target\debug\deps\taa-28670b0c8fef0ec5.exe)
+
+running 8 tests
+test default_taa_is_a_byte_identical_no_op ... ok
+test enabling_taa_adds_a_resolve_pass_and_allocates_history ... ok
+test history_weight_pulls_the_frame_toward_the_previous_one ... ok
+test taa_sequence_is_deterministic_across_frames ... ok
+test resizing_rebuilds_the_history_and_disabling_releases_it ... ok
+test taa_counts_every_pass_in_the_chain ... ok
+test taa_makes_fxaa_yield ... ok
+test resetting_the_history_skips_blending_for_one_frame ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.29s
+
+     Running tests\texture.rs (target\debug\deps\texture-99c471d4c2bacb93.exe)
+
+running 3 tests
+test white_fallback_is_one_pixel ... ok
+test png_decode_keeps_size_and_channels ... ok
+test fox_renders_with_albedo_texture ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
+
+     Running tests\ui_nine_slice.rs (target\debug\deps\ui_nine_slice-c0381c7d10d090f0.exe)
+
+running 1 test
+test ui_image_nine_slice_draws_nine_cells ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests\ui_text.rs (target\debug\deps\ui_text-db1e05ffe14aa01c.exe)
+
+running 2 tests
+test ui_text_draws_anti_aliased_glyphs ... ok
+test center_aligned_text_is_horizontally_centered ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_script-c40ed5c7439264e3.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\legacy_look_at.rs (target\debug\deps\legacy_look_at-6881b989220cca52.exe)
+
+running 1 test
+test legacy_look_at_aims_forward_without_roll ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\script.rs (target\debug\deps\script-10f17cb3bffba0db.exe)
+
+running 20 tests
+test instruction_budget_stops_infinite_loop ... ok
+test evaluates_arithmetic_and_functions ... ok
+test lifecycle_hooks_run_once_and_update ... ok
+test memory_limit_rejects_large_allocation ... ok
+test sandbox_does_not_expose_io_or_os ... ok
+test scripts_can_be_loaded_and_reloaded ... ok
+test scripts_can_spawn_and_despawn_entities ... ok
+test syntax_errors_are_reported ... ok
+test world_api_reads_and_writes_transform ... ok
+test world_api_rejects_missing_entity ... ok
+test unknown_component_is_reported ... ok
+test generic_field_api_reads_vectors_and_names ... ok
+test legacy_entity_lookup_and_set_pos ... ok
+test legacy_update_rotates_with_delta ... ok
+test legacy_ui_api_writes_element_fields ... ok
+test runtime_destroys_scripts_when_entity_is_removed ... ok
+test legacy_input_action_sets_velocity ... ok
+test runtime_drives_script_entities_and_reloads ... ok
+test missing_animation_state_does_not_block_other_scripts ... ok
+test runtime_adds_and_removes_components_via_commands ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_sim-ca36cdfbd9dcb506.exe)
+
+running 6 tests
+test particles::tests::max_particles_is_a_hard_cap ... ok
+test particles::tests::rate_controls_spawn_count ... ok
+test particles::tests::same_seed_is_bit_identical ... ok
+test rapier_world::tests::dynamic_cube_lands_on_static_ground ... ok
+test rapier_world::tests::tilted_cube_tumbles_on_landing ... ok
+test rapier_world::tests::stepping_is_deterministic ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests\animation.rs (target\debug\deps\animation-7c93c8ff119f25f5.exe)
+
+running 5 tests
+test loops_with_duration_and_handles_empty ... ok
+test samples_rotation_and_scale_and_applies_base ... ok
+test playback_writes_sampled_translation_onto_base ... ok
+test sorts_keys_and_drops_non_finite ... ok
+test samples_linear_and_clamps ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\animation_blend.rs (target\debug\deps\animation_blend-ddac1d07c135597c.exe)
+
+running 2 tests
+test transition_defaults_are_backwards_compatible ... ok
+test state_transition_records_blend_and_playback_mixes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\animation_layers.rs (target\debug\deps\animation_layers-03fc769746e8f141.exe)
+
+running 3 tests
+test layer_weight_blends_translation ... ok
+test layer_mask_limits_to_named_entities ... ok
+test layer_joint_mask_drives_only_bone ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\animation_state.rs (target\debug\deps\animation_state-5a84a370fefe7920.exe)
+
+running 1 test
+test transitions_on_parameter_and_writes_clip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\audio.rs (target\debug\deps\audio-b274af8a4f6ea2fd.exe)
+
+running 6 tests
+test software_mixer_applies_bus_and_master ... ok
+test non_spatial_source_keeps_volume ... ok
+test mixer_bus_scales_spatial_gain ... ok
+test spatial_source_attenuates_with_listener_distance ... ok
+test mixer_output_writes_readable_wav ... ok
+test wav_decoder_reads_pcm16_and_library ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\character_ground.rs (target\debug\deps\character_ground-fd89122e047ac306.exe)
+
+running 11 tests
+test a_grounded_character_is_not_pulled_down ... ok
+test a_character_standing_on_a_slope_does_not_slide_down ... ok
+test a_character_in_the_air_falls_to_the_ground ... ok
+test a_character_walking_down_a_slope_stays_on_the_ground ... ok
+test a_slope_within_the_slide_band_holds_the_character ... ok
+test a_character_falls_onto_a_box_top ... ok
+test a_jump_arc_comes_back_down_to_the_ground ... ok
+test a_character_standing_on_a_steep_slope_slides_down ... ok
+test a_character_walking_off_a_slope_falls_to_the_floor ... ok
+test a_character_walks_up_a_walkable_slope ... ok
+test character_vertical_motion_is_deterministic ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\character_kcc.rs (target\debug\deps\character_kcc-6f2b127388ad758f.exe)
+
+running 14 tests
+test velocity_system_leaves_characters_alone ... ok
+test a_character_with_a_rigid_body_is_owned_by_the_body ... ok
+test a_character_keeps_moving_after_its_entity_key_changes ... ok
+test a_character_with_a_rigid_body_is_left_alone_by_the_character_systems ... ok
+test a_character_at_rest_does_not_drift ... ok
+test character_is_blocked_by_a_ball_collider ... ok
+test character_stops_at_a_wall_instead_of_passing_through ... ok
+test character_steps_onto_a_low_box_under_the_default_schedule ... ok
+test character_motion_is_deterministic ... ok
+test a_small_capsule_still_steps_onto_a_low_box ... ok
+test character_slides_along_a_rotated_wall ... ok
+test a_character_does_not_creep_into_a_steep_slope_under_the_default_schedule ... ok
+test a_character_jumps_while_pressed_against_a_wall ... ok
+test a_falling_character_keeps_falling_while_pressed_against_a_wall ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests\clip_loader.rs (target\debug\deps\clip_loader-a6589299b4709100.exe)
+
+running 4 tests
+test malformed_clip_is_reported ... ok
+test library_indexes_by_name ... ok
+test loads_clip_from_ron ... ok
+test loads_clip_directory_and_reports_bad_files ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\contacts.rs (target\debug\deps\contacts-8badc5e00dfbb089.exe)
+
+running 3 tests
+test resting_box_stops_accumulating_fall_speed ... ok
+test falling_box_rests_on_a_static_box ... ok
+test two_dynamic_boxes_stack_without_drifting_apart ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\input.rs (target\debug\deps\input-2408012058557719.exe)
+
+running 1 test
+test parses_project_input_ron_and_folds_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\joints.rs (target\debug\deps\joints-fc786b6c0f6107b1.exe)
+
+running 2 tests
+test parses_joint_tracks_from_ron ... ok
+test joint_track_drives_bone_transform ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rapier_schedule.rs (target\debug\deps\rapier_schedule-0aa5c9b390e87e41.exe)
+
+running 10 tests
+test changing_a_body_parameter_rebuilds_it ... ok
+test animated_scale_does_not_rebuild_the_body_table ... ok
+test a_dynamic_body_keeps_moving_after_its_entity_key_changes ... ok
+test removing_a_body_patches_the_table_without_a_full_rebuild ... ok
+test adding_a_body_patches_the_table_without_a_full_rebuild ... ok
+test an_unknown_body_kind_still_writes_back_like_a_dynamic_body ... ok
+test steady_frames_do_not_rebuild_the_body_table ... ok
+test patching_does_not_disturb_existing_bodies ... ok
+test every_build_parameter_is_part_of_the_signature ... ok
+test default_schedule_lands_a_dynamic_cube_with_rapier ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests\replay.rs (target\debug\deps\replay-b5a4fdac3459d955.exe)
+
+running 18 tests
+test batch_plan_groups_only_non_conflicting_systems ... ok
+test animation_system_advances_and_loops ... ok
+test aabb_separates_overlapping_dynamic_boxes ... ok
+test spheres_separate_along_center_line ... ok
+test gravity_system_writes_velocity ... ok
+test character_jump_consumes_request_when_grounded ... ok
+test command_frame_outside_scenario_is_rejected ... ok
+test hierarchy_system_composes_parent_transforms ... ok
+test physics_only_dynamic_bodies_fall ... ok
+test hierarchy_system_leaves_cycles_alone ... ok
+test hierarchy_scratch_reuse_is_stable_across_frames ... ok
+test ground_collision_stops_dynamic_body ... ok
+test simulation_step_with_runs_external_hook_before_trace ... ok
+test velocity_system_moves_transform ... ok
+test scenario_json_roundtrip ... ok
+test tampered_trace_is_rejected ... ok
+test same_scenario_replays_to_the_same_trace ... ok
+test velocity_system_declares_access_and_parallel_hash_matches ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests\skeleton.rs (target\debug\deps\skeleton-dd43b409c4eb334d.exe)
+
+running 1 test
+test skeleton_pose_composes_parent_chain ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\slope_collider.rs (target\debug\deps\slope_collider-a1e34269940a532d.exe)
+
+running 6 tests
+test a_slope_with_an_explicit_body_gets_no_automatic_collider ... ok
+test degenerate_slopes_are_skipped ... ok
+test a_downhill_slope_collider_matches_the_analytic_surface ... ok
+test slope_collider_matches_the_analytic_surface ... ok
+test a_slope_collider_rebuilds_when_the_slope_changes ... ok
+test a_character_is_stopped_by_a_slope_collider ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\ui.rs (target\debug\deps\ui-e878155a3fa02a75.exe)
+
+running 7 tests
+test ui_layout_is_parent_relative_and_inherits_visibility ... ok
+test ui_clip_and_hit_test ... ok
+test ui_focus_cycles_through_interactable_elements ... ok
+test ui_layout_resolves_anchor_and_offsets ... ok
+test ui_focus_direction_picks_geometric_neighbor ... ok
+test ui_interaction_marks_hover_and_click ... ok
+test simulation_host_input_drives_ui ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_store-74adbf8ba4de4ab4.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\binary.rs (target\debug\deps\binary-bc46baeffaebc6c8.exe)
+
+running 2 tests
+test binary_world_rejects_corruption ... ok
+test binary_world_roundtrips_and_is_deterministic ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\store.rs (target\debug\deps\store-0d20dab68d3fb24b.exe)
+
+running 3 tests
+test unsupported_version_is_rejected ... ok
+test journal_roundtrip_and_replay ... ok
+test world_data_roundtrip_and_no_rewrite ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src\lib.rs (target\debug\deps\xgc_world-51400d3194b1941d.exe)
+
+running 9 tests
+test character_components::tests::derived_quantities_follow_the_sanitized_definition ... ok
+test character_components::tests::sanitized_falls_back_for_non_finite_values ... ok
+test character_components::tests::sanitized_clamps_out_of_range_values ... ok
+test character_components::tests::sanitized_is_idempotent ... ok
+test physics_components::tests::body_kind_parsing_follows_the_old_engine_fallback ... ok
+test physics_components::tests::physics_body_exposes_the_shared_kind_judgement ... ok
+test particle_components::tests::resolved_sanitizes_untrusted_config ... ok
+test character_components::tests::schema_defaults_match_the_component_defaults ... ok
+test character_components::tests::defaults_match_the_old_engine ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\commands.rs (target\debug\deps\commands-12a9b5fb4b052c16.exe)
+
+running 17 tests
+test set_after_remove_in_same_plan_is_rejected ... ok
+test spawn_from_data_and_revert ... ok
+test duplicate_spawn_ids_in_one_plan_are_rejected ... ok
+test component_structure_conflicts_are_reported ... ok
+test replace_command_swaps_and_reverts ... ok
+test despawn_revert_restores_entity_and_state_hash ... ok
+test set_field_after_despawn_in_same_plan_is_rejected ... ok
+test spawn_id_collision_is_rejected_before_writing ... ok
+test command_json_roundtrip_preserves_spawn_data ... ok
+test add_then_set_and_spawn_then_add_are_valid_in_one_plan ... ok
+test add_and_remove_component_preserve_entity_id_and_hash ... ok
+test plan_apply_revert_roundtrip ... ok
+test invalid_plan_is_rejected_without_writing ... ok
+test stale_plan_conflicts_instead_of_overwriting ... ok
+test one_hundred_ops_apply_and_revert ... ok
+test remove_component_reverts_to_original_archetype ... ok
+test unknown_field_and_type_mismatch_are_reported ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\environment.rs (target\debug\deps\environment-b9d46843d8a6b044.exe)
+
+running 4 tests
+test zero_direction_degrades_to_straight_down ... ok
+test sun_skips_inactive_and_point_lights ... ok
+test default_environment_is_not_serialized ... ok
+test custom_environment_survives_world_data_roundtrip ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\journal.rs (target\debug\deps\journal-06586b15600234f3.exe)
+
+running 2 tests
+test replay_rejects_revision_drift ... ok
+test journal_json_roundtrip_and_replay ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\query.rs (target\debug\deps\query-32b88480a496892a.exe)
+
+running 2 tests
+test for_each2_only_visits_archetypes_with_both_components ... ok
+test state_hash_is_deterministic_and_tracks_field_changes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\schema.rs (target\debug\deps\schema-3fba83262c501189.exe)
+
+running 1 test
+test builtin_registry_has_stable_types ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\snapshot.rs (target\debug\deps\snapshot-cad54e006846793f.exe)
+
+running 2 tests
+test snapshot_restores_into_an_empty_world ... ok
+test world_snapshot_restore_roundtrip ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\validate.rs (target\debug\deps\validate-c779d8bb711d5723.exe)
+
+running 3 tests
+test duplicate_component_and_field_are_reported ... ok
+test invalid_data_reports_structural_codes ... ok
+test valid_world_has_no_diagnostics ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\world.rs (target\debug\deps\world-84ac826caf3e9614.exe)
+
+running 7 tests
+test revision_advances_on_structural_change ... ok
+test archetypes_split_by_component_set ... ok
+test stale_handle_is_rejected_after_slot_reuse ... ok
+test despawn_middle_keeps_others_and_updates_moved_row ... ok
+test non_copy_component_roundtrip ... ok
+test ids_and_iteration_order_are_deterministic ... ok
+test spawn_query_and_despawn_10k ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\world_data.rs (target\debug\deps\world_data-be0ffab650bac687.exe)
+
+running 2 tests
+test world_data_json_roundtrip ... ok
+test world_data_roundtrip_preserves_ids_revisions_and_hash ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\xtask-d291272e272d4d93.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_agent
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_asset
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_audio
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_base
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_editor
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_migrate
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_player
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_reflect
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_render
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_script
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_sim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xgc_world
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

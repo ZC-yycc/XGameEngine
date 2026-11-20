@@ -49,7 +49,7 @@ Mesh / Material / Camera / Lua / Audio / Physics 映射）、`xgc-asset`（扫�
 `(1-metallic)` 漫反射、粗糙度夹 0.04）、网格基色贴图（glTF `TEXCOORD_0` + `baseColorTexture`，
 外部 uri / GLB 内嵌 PNG → sRGB 采样）、直接光 Cook-Torrance PBR（GGX + Smith + Schlick、
 `(1-F)` 漫反射扣减与 π 校准，与旧端逐式一致）、GPU 蒙皮与静态实例共享唯一的基色贴图 / PBR / CSM 阴影接收片元实现、确定性粒子 billboard（CPU SplitMix64 模拟，软圆覆盖，Alpha / Additive，Alpha 后向前排序，深测开 / 深写关，并在线性 HDR 中混合）、截图相机优先级（场景相机 → 顺光自动取景）、`MeshCache` 模型路径 /
-`guid://` 解析、`Renderer` 帧入口（DrawList → 环境图烘焙（天空开时，设置变了才跑）→ HDR 几何 / 天空 / 粒子 → 可选 TAA 解析 → 可选 SSAO → 可选三级光晕 → ACES → 可选 FXAA → UI）、
+`guid://` 解析、`Renderer` 帧入口（DrawList → 环境图烘焙（天空开时，设置变了才跑）→ HDR 几何 / 天空 / 粒子（4× MSAA 多采样附件）→ 收尾一次 resolve → 可选 TAA 解析 → 可选 SSAO → 可选三级光晕 → ACES → 可选 FXAA → UI）、
 `render.camera` → view-projection + MVP uniform、每个 `GlobalTransform` → 模型矩阵并
 乘进 MVP、`depth32float` 深度缓冲 / Less 深度测试、单 render pass 批量 draw、
 `GpuMeshCache` 顶点 / 索引缓冲跨帧复用、按模型分组实例化（storage instance 缓冲）、
@@ -104,6 +104,8 @@ PCSS 软阴影与级间混合切片把阴影接收端对齐到旧端同一份合
 
 **glTF 缺 `NORMAL` 时按几何生成顶点法线**：加载期走旧端 `compute_face_normals` 同式 —— 逐三角形求叉积（长度即两倍面积）累加到三个顶点再归一；共享顶点因此拿到面积加权的平滑法线，而不是片元导数那种「每像素取所在三角面」。非索引图元按 `POSITION` 顺序展开、退化三角形贡献零向量、越界索引跳过。`Mesh.normals` 为空只剩「不是 glTF 来源」（内建图元 / 手工构造）。回归 4 条纯函数单测 + 1 条「生成结果写回成显式 `NORMAL` 后逐字节复现同一帧」；红证据：删掉生成分支后两条实跑红（法线条数 0 vs 4）。证据世界只改 2 个像素（`Fox.gltf` 是非索引几何，生成结果与导数同值），第 150 帧 PPM SHA-256 变 `d1cefdde4ab8ffe8c07b3f7c9d246ddb0fb144e85bb84ff46a3b087bcb363fef`，与旧端仍是 3.48% / 0.46 / max 198 / 结构性 1.78%；另各验一次红：把面积权重改成「每面先归一化再累加」后共享边顶点从 `(0, 0.8944, 0.4472)` 变 `(0, 0.7071, 0.7071)`；去掉非索引展开后水平面期望 `(0, -1, 0)` 实得 `(0, 0, 1)`。收益在带索引且缺 `NORMAL` 的模型上。
 **预过滤环境 IBL 切片**把环境镜面从"SH 近似 + Lazarov 解析 BRDF"换成旧端同式的 split-sum：天空按 GGX 重要性采样烘成 5 级预过滤立方体（`ENV_MIPS = 5`、基级 128²、每级 96 / 48 / 24 / 16 / 12 样本、固定 Hammersley 序列 ⇒ 无随机数、截图确定），再加一张 256 样本 BRDF 积分表（Karis `A / B`）；片元按 `env_spec(reflect) × (f0 × A + B)` 叠加。烘焙只在天空设置变化时跑（天空 uniform 的 FNV-1a 哈希做键）：首次 30 个级面 + 1 张 BRDF 表 = 31 趟，之后同设置 0 趟（`RenderStats::env_map_passes` 口径）；关天空的项目不跑 pass 也不采样、帧逐字节不变。公式与天空盒共用 `crates/xgc-render/src/sky_common.wgsl` 一份（无绑定，布局各自声明）。红证据：片元里把 `env_spec` 乘 0 → 金属球换天空色不变；缓存判据恒 false → 同设置重烘；删掉 `!settings.enabled` 判据 → 关天空也跑 31 趟。审查复核抓到 BRDF LUT 的 Schlick-GGX 用错 `k`（用了直接光的 `(r+1)²/8`，LUT 必须用 IBL 的 `r²/2`，错版把掠射平滑金属的 `A` 压低约 57%），按旧端改正后与旧端的整帧差异从 18.17% 收到 **3.48%**。第 150 帧世界哈希仍 `d050bd357f20aa31`，PPM SHA-256 `6bc10cedf798a1f696d80c614d1db0d8972e86ab08ec09d9f5ea92a8329be582`；与旧端差异 **3.48% / mean_abs 0.46 / max 198**（只差 1 LSB 的像素 10319 = 1.1%，结构性 16412 = 1.78%，集中在几何边缘 / 阴影边界 / 狐狸轮廓），相对上一版 XGC（`xgc/target/evidence/same-tick/normals4-150.ppm`）改 31.46% 像素、mean_abs 0.18、max 27。旧的 `env_brdf_approx` / `env_specular` CPU 镜像随实现删除，两条依赖它的用例改成相对判据（换基色看反射是否被 F0 染色 / 换基色看漫反射是否变亮）。未闭环：设置一变就整份重建 31 趟（无分级失效）；天空关着时仍惰性建一次约 1 MiB 纹理与两条管线（绑定组布局固定，不跑 pass）。
+
+**场景 pass 4× MSAA** 接入后，几何轮廓不再走硬边：颜色（`Rgba16Float`）与深度（`Depth32Float`）都是 4 采样（适配器不支持 `MULTISAMPLE_X4` 时退回 1×，等同关闭），各场景 pass 直接画进多采样附件、收尾统一一次 `resolve`（不再每个 pass 各拷一次，`passes` 只数场景 1 趟）；`Renderer::set_sample_count` 是给回归与将来质量档位用的覆盖入口，换档会丢 HDR 多采样目标 / 深度 / 管线缓存，TAA 与 SSAO 的深度绑定与着色器声明（`texture_depth_multisampled_2d`）同时切换。红证据：把 `scene_sample_count` 恒设为 1 → `4× MSAA 的斜边必须出现过渡像素：0`；跳过收尾 resolve → 中心与背景都成清屏色；去掉 TAA 的 `set_sample_count` → wgpu 校验 `Texture binding 1 expects multisampled = true, but given a view with samples = 1`。第 150 帧世界哈希仍 `d050bd357f20aa31`，PPM SHA-256 为 `8c114a807813adb4e06324a4d8fbd94f9f21a227c43182d607535f4018478cda`；与旧端 **3.31%（30485 像素）/ mean_abs 0.42 / max 198**，其中只差 1 LSB 的 10374 个像素占 1.13%，结构性（单通道 ≥8）15310 = **1.66%**；相对上一版 XGC（`xgc/target/evidence/same-tick/generated-normals-150.ppm`）只改 0.59% 像素、mean_abs 0.08、max 184（都落在边缘上）。FXAA 的用例改成显式钉 1×：它的判据建立在硬边上，MSAA 会先把边混掉；两者同开的路径由 `tests/msaa.rs` 覆盖。未闭环：4× 下每帧多一张约 14 MiB 的 HDR 多采样纹理；收尾一次全屏 resolve；质量档位旋钮还没接 `project.ron`（`set_sample_count` 目前只给测试用）。
 
 **glTF 顶点法线切片**让导了 `NORMAL` 的模型按逆转置矩阵着色（蒙皮时先按 palette 变形再乘逆转置），缺 `NORMAL` 的模型与内建图元退回屏幕导数叉积；顶点法线路径不按视线翻号（与旧端一致）。解析拆在 `crates/xgc-render/src/glb/{attributes.rs,normals.rs}`，`crates/xgc-render/src/glb.rs` 因此从 599 行降到 456 行。红证据：去掉 NORMAL 装配 / 把片元分支阈值改成 `1e30` / 把 `normal_matrix` 换成直接截取 / 在解析处提前归一化，各有实跑红；另有 4 条回归（含坏资产：非 float VEC3 与条数不一致都必须报错）。CPU 蒙皮回退只重算位置，所以每帧把法线流清零、退回屏幕导数（与切片前一致）。第 150 帧基线：世界哈希仍 `d050bd357f20aa31`，PPM SHA-256 `872c3aab…`（该 SHA 已被后续切片覆盖，最新是 `d1cefdde…`；证据世界只有平面立方体带 NORMAL，整帧仅 2 个像素差 1 LSB），与旧端差异不变。
 
@@ -173,8 +175,8 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（489 条），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（243 个 Rust 文件，最大 599 行）；30 个内建类型的 schema 为 35710 字节，
+`cargo test --workspace --offline` 全绿（493 条），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（247 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（批次计划已就绪，世界所有权拆分未做）、完整刚体、

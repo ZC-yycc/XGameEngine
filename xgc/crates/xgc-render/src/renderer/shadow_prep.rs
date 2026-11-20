@@ -45,8 +45,17 @@ impl super::Renderer {
         // 天空管线要在拿 `self.depth` 的不可变借用之前建好（之后只剩读）。
         if self.sky.enabled {
             let format = target.format();
-            if self.sky_pipeline.as_ref().map(|(current, _)| *current) != Some(format) {
-                self.sky_pipeline = Some((format, context.create_sky_pipeline(format)));
+            let sample_count = self.scene_sample_count(context);
+            if self
+                .sky_pipeline
+                .as_ref()
+                .is_none_or(|(current, count, _)| *current != format || *count != sample_count)
+            {
+                self.sky_pipeline = Some((
+                    format,
+                    sample_count,
+                    context.create_sky_pipeline(format, sample_count),
+                ));
             }
         }
         if self.shadow.is_none() {

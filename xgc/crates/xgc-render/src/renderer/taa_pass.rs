@@ -39,7 +39,9 @@ impl super::Renderer {
             }
             return view_proj;
         }
+        let sample_count = self.scene_sample_count(context);
         let stage = self.taa_stage.get_or_insert_with(|| TaaStage::new(context));
+        stage.set_sample_count(context, sample_count);
         let jitter = stage.begin_frame((width, height));
         jitter_projection(view_proj, jitter_to_ndc(jitter, (width, height)))
     }

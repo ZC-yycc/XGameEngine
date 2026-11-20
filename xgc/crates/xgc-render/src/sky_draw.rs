@@ -65,7 +65,11 @@ pub(crate) struct SkyPipeline {
 }
 
 impl GpuContext {
-    pub(crate) fn create_sky_pipeline(&self, format: wgpu::TextureFormat) -> SkyPipeline {
+    pub(crate) fn create_sky_pipeline(
+        &self,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> SkyPipeline {
         let shader = self
             .device()
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -114,7 +118,10 @@ impl GpuContext {
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    ..Default::default()
+                },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs"),

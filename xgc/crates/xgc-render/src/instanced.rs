@@ -17,6 +17,7 @@ pub struct InstancedPipeline {
     camera_layout: wgpu::BindGroupLayout,
     instance_layout: wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    sample_count: u32,
 }
 
 impl InstancedPipeline {
@@ -45,6 +46,7 @@ impl GpuContext {
         format: wgpu::TextureFormat,
         depth: bool,
         texture_layout: &wgpu::BindGroupLayout,
+        sample_count: u32,
     ) -> InstancedPipeline {
         let shader = self
             .device()
@@ -112,7 +114,10 @@ impl GpuContext {
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    ..Default::default()
+                },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs"),
@@ -131,6 +136,7 @@ impl GpuContext {
             camera_layout,
             instance_layout,
             format,
+            sample_count,
         }
     }
 }
@@ -150,7 +156,10 @@ struct Prepared {
 }
 
 pub(crate) struct InstancedRequest<'a> {
-    pub(crate) texture: &'a wgpu::Texture,
+    /// 场景 pass 的颜色附件；多采样时是 MSAA 视图，收尾由渲染器统一 resolve。
+    pub(crate) view: &'a wgpu::TextureView,
+    pub(crate) sample_count: u32,
+    pub(crate) format: wgpu::TextureFormat,
     pub(crate) list: &'a DrawList,
     pub(crate) meshes: &'a mut MeshCache,
     pub(crate) gpu_meshes: &'a mut GpuMeshCache,
@@ -175,7 +184,9 @@ impl RenderCache {
         context: &GpuContext,
         request: &mut InstancedRequest<'_>,
     ) -> Result<usize, GpuError> {
-        let texture = request.texture;
+        let view = request.view;
+        let sample_count = request.sample_count;
+        let format = request.format;
         let list = request.list;
         let meshes = &mut *request.meshes;
         let gpu_meshes = &mut *request.gpu_meshes;
@@ -183,23 +194,25 @@ impl RenderCache {
         let depth = request.depth;
         let textures = request.textures;
         if list.items.is_empty() {
-            context.clear_texture(texture, request.clear_color)?;
+            context.clear_scene_view(view, request.clear_color)?;
             return Ok(0);
         }
-        let format = texture.format();
         if self
             .instanced
             .as_ref()
-            .is_none_or(|(current, _)| *current != format)
+            .is_none_or(|(current, count, _)| *current != format || *count != sample_count)
         {
             self.instanced = Some((
                 format,
-                context.create_instanced_pipeline(format, true, textures.layout()),
+                sample_count,
+                context.create_instanced_pipeline(format, true, textures.layout(), sample_count),
             ));
         }
-        let pipeline = &self.instanced.as_ref().unwrap().1;
-        if pipeline.format != format {
-            return Err(GpuError::Pipeline("实例化管线格式不一致".to_string()));
+        let pipeline = &self.instanced.as_ref().unwrap().2;
+        if pipeline.format != format || pipeline.sample_count != sample_count {
+            return Err(GpuError::Pipeline(
+                "实例化管线格式 / 采样数不一致".to_string(),
+            ));
         }
 
         let mut groups: HashMap<String, usize> = HashMap::new();
@@ -293,7 +306,6 @@ impl RenderCache {
             });
         }
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
             context
                 .device()
@@ -304,7 +316,7 @@ impl RenderCache {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("xgc-instanced-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(request.clear_color),

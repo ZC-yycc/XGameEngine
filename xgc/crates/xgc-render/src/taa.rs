@@ -195,6 +195,8 @@ struct History {
 /// 重新开 TAA 时复用已建好的管线 / 采样器，只重建历史纹理。
 pub(crate) struct TaaStage {
     pipeline: TaaPipeline,
+    /// 深度附件的采样数（场景 pass 的 MSAA 档）：换档要重建管线与绑定布局。
+    sample_count: u32,
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     history: Option<History>,
@@ -208,7 +210,8 @@ pub(crate) struct TaaStage {
 
 impl TaaStage {
     pub(crate) fn new(context: &GpuContext) -> Self {
-        let pipeline = create_pipeline(context);
+        let sample_count = context.scene_sample_count();
+        let pipeline = create_pipeline(context, sample_count);
         let sampler = context.device().create_sampler(&wgpu::SamplerDescriptor {
             label: Some("xgc-taa-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -226,6 +229,7 @@ impl TaaStage {
         });
         Self {
             pipeline,
+            sample_count,
             sampler,
             uniform,
             history: None,
@@ -235,6 +239,17 @@ impl TaaStage {
             prev_jitter: [0.0; 2],
             prev_view_proj: None,
         }
+    }
+
+    /// 场景采样数变了（`Renderer::set_sample_count`）：深度绑定与着色器里的声明
+    /// 要跟着换；历史也一并丢掉——它是按另一套采样数解析出来的，混用会拖影。
+    pub(crate) fn set_sample_count(&mut self, context: &GpuContext, sample_count: u32) {
+        if self.sample_count == sample_count {
+            return;
+        }
+        self.sample_count = sample_count;
+        self.pipeline = create_pipeline(context, sample_count);
+        self.history = None;
     }
 
     /// 每帧开头调用：换尺寸时丢弃历史（首帧直通），返回本帧抖动（像素）。
@@ -424,12 +439,19 @@ impl TaaStage {
 #[cfg(test)]
 mod tests;
 
-fn create_pipeline(context: &GpuContext) -> TaaPipeline {
+fn create_pipeline(context: &GpuContext, depth_sample_count: u32) -> TaaPipeline {
+    // 场景 pass 开 MSAA 时深度附件是多采样纹理：声明换 `texture_depth_multisampled_2d`，
+    // 绑定的 `textureLoad(depth, pixel, 0)` 第三参在多采样下就是 sample index。
+    let source = if depth_sample_count > 1 {
+        TAA_WGSL.replace("texture_depth_2d", "texture_depth_multisampled_2d")
+    } else {
+        TAA_WGSL.to_string()
+    };
     let shader = context
         .device()
         .create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("xgc-taa"),
-            source: wgpu::ShaderSource::Wgsl(TAA_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
     let layout = context
         .device()
@@ -452,7 +474,7 @@ fn create_pipeline(context: &GpuContext) -> TaaPipeline {
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                        multisampled: depth_sample_count > 1,
                     },
                     count: None,
                 },

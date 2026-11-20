@@ -74,7 +74,8 @@ pub(crate) struct ParticlePipeline {
 }
 
 pub(crate) struct ParticleDrawRequest<'a> {
-    pub target: &'a wgpu::Texture,
+    /// 场景 pass 的颜色附件；多采样时是 MSAA 视图，收尾由渲染器统一 resolve。
+    pub view: &'a wgpu::TextureView,
     pub depth: &'a wgpu::TextureView,
     pub view_proj: Mat4,
     pub camera_pos: [f32; 3],
@@ -119,7 +120,11 @@ fn billboard(inverse: Mat4) -> Billboard {
 }
 
 impl ParticlePipeline {
-    pub(crate) fn new(context: &GpuContext, format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(
+        context: &GpuContext,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
         let device = context.device();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("xgc-particle-shader"),
@@ -179,7 +184,10 @@ impl ParticlePipeline {
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    ..Default::default()
+                },
                 multiview: None,
                 cache: None,
             })
@@ -227,7 +235,7 @@ impl ParticlePipeline {
         context: &GpuContext,
         request: &ParticleDrawRequest<'_>,
     ) -> Result<usize, String> {
-        let target = request.target;
+        let view = request.view;
         let depth = request.depth;
         let view_proj = request.view_proj;
         let camera_pos = request.camera_pos;
@@ -292,7 +300,6 @@ impl ParticlePipeline {
                 resource: uniform.as_entire_binding(),
             }],
         });
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("xgc-particle-encoder"),
         });
@@ -300,7 +307,7 @@ impl ParticlePipeline {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("xgc-particle-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: clear.map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear),

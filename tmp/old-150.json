@@ -1,0 +1,139 @@
+xgame: 无法写入日志文件 C:\Users\Administrator\AppData\Roaming\XGameEngine\logs\Editor.log（只保留控制台输出）
+[2026-11-19T21:44:43Z INFO  xgame_editor::logging] 日志写入 C:\Users\Administrator\AppData\Roaming\XGameEngine\logs\Editor.log（上限 4 MiB，超了轮转为 Editor.log.1；本次 pid 26988）
+[2026-11-19T21:44:43Z ERROR xgame::plugin] 插件加载失败，已跳过：插件 E:\GitHubClone\XGameEngine\projects/XGame\Plugins\xgame_project.dll 构建指纹不匹配（宿主 xgame-build-v1:425c81caff455e2105468ebc518ade48），请与宿主使用相同源码、工具链和构建配置重新编译
+[2026-11-19T21:44:43Z INFO  wgpu_hal::vulkan::instance] Debug utils not enabled: debug_utils_user_data not passed to Instance::from_raw
+[2026-11-19T21:44:43Z INFO  wgpu_core::instance] Adapter AdapterInfo { name: "NVIDIA GeForce RTX 2060", vendor: 4318, device: 7944, device_type: DiscreteGpu, driver: "NVIDIA", driver_info: "610.88", backend: Vulkan }
+[2026-11-19T21:44:43Z INFO  xgame_render::screenshot] 截图渲染：NVIDIA GeForce RTX 2060（MSAA x4）1280x720
+[2026-11-19T21:44:43Z INFO  naga::back::spv::writer] Skip function Some("to_display")
+[2026-11-19T21:44:43Z INFO  naga::back::spv::writer] Skip function Some("from_display")
+[2026-11-19T21:44:43Z INFO  naga::back::spv::writer] Skip function Some("world_from_depth")
+[2026-11-19T21:44:43Z INFO  naga::back::spv::writer] Skip function Some("blur")
+[2026-11-19T21:44:43Z INFO  naga::back::spv::writer] Skip function Some("blur")
+[2026-11-19T21:44:43Z INFO  xgame_ui::text] UI 文本字体: C:\Windows\Fonts\msyh.ttc, C:\Windows\Fonts\msyhbd.ttc
+[2026-11-19T21:44:43Z INFO  xgame_render::gltf_loader] No NORMAL — computing flat normals
+{
+  "audio": {
+    "active": 1,
+    "available": false,
+    "cached_clips": 1,
+    "failed_clips": 0
+  },
+  "bodies": 10,
+  "colliders": 10,
+  "dt": 0.01666666753590107,
+  "engine_version": "0.1.0",
+  "entities": 24,
+  "error_samples": [],
+  "fixed_dt": 0.01666666753590107,
+  "fixed_steps": 150,
+  "frame_us": {
+    "max": 7433.099999999999,
+    "mean": 89.59866666666672,
+    "min": 31.2,
+    "p50": 39.9,
+    "p95": 51.6,
+    "p99": 63.0
+  },
+  "frames": 150,
+  "input_events": 0,
+  "logs": {
+    "error": 0,
+    "info": 0,
+    "warn": 0
+  },
+  "non_finite_transforms": 0,
+  "ok": true,
+  "particles": {
+    "alive": 109,
+    "capacity": 768,
+    "emitters": 2
+  },
+  "project": "XGame",
+  "render": {
+    "bloom": {
+      "intensity": 0.0,
+      "knee": 0.6000000238418579,
+      "threshold": 1.0
+    },
+    "exposure": 1.0,
+    "fxaa": {
+      "enabled": false
+    },
+    "sky": {
+      "enabled": true,
+      "ground": [
+        0.15000000596046448,
+        0.14000000059604645,
+        0.12999999523162842
+      ],
+      "horizon": [
+        0.6200000047683716,
+        0.7200000286102295,
+        0.8799999952316284
+      ],
+      "intensity": 1.0,
+      "sun_intensity": 1.0,
+      "sun_size": 2.0,
+      "zenith": [
+        0.09000000357627869,
+        0.25999999046325684,
+        0.6000000238418579
+      ]
+    },
+    "ssao": {
+      "bias": 0.02500000037252903,
+      "enabled": false,
+      "radius": 0.5,
+      "strength": 1.0
+    },
+    "taa": {
+      "enabled": false,
+      "history_weight": 0.8999999761581421
+    },
+    "tone_map": "Aces"
+  },
+  "root": "E:\\GitHubClone\\XGameEngine\\projects/XGame",
+  "run_ms": 13.4573,
+  "scene": "Scenes/showcase.ron",
+  "scene_current": "Scenes/showcase.ron",
+  "scene_dump": null,
+  "scene_loads": 0,
+  "scene_name": "XGame Showcase",
+  "screenshot": {
+    "camera": {
+      "eye": [
+        4.199999809265137,
+        2.799999952316284,
+        5.4013352394104
+      ],
+      "mode": "scene",
+      "target": [
+        3.4780049324035645,
+        2.4905736446380615,
+        4.782482147216797
+      ]
+    },
+    "height": 720,
+    "path": "tmp/old-150.png",
+    "render_stats": {
+      "blended_draws": 0,
+      "cull_ratio": 0.0,
+      "culled_entities": 0,
+      "culled_instances": 0,
+      "draw_calls": 7,
+      "opaque_batches": 7,
+      "opaque_instances": 13,
+      "shadow_only_instances": 1,
+      "ui": {
+        "draws": 1,
+        "elements": 7,
+        "quads": 4,
+        "sprites": 47
+      }
+    },
+    "width": 1280
+  },
+  "setup_ms": 3.7291,
+  "time_scale": 1.0,
+  "total_time": 2.4999983310699463
+}

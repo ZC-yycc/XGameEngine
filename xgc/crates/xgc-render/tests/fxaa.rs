@@ -87,6 +87,9 @@ fn render_with(
 ) -> Option<Frame> {
     let context = GpuContext::headless().ok()?;
     let mut renderer = Renderer::new(MeshCache::new("."));
+    // 这些用例的判据都建立在"场景本身是硬边"上：把场景采样数钉成 1×，
+    // 让 FXAA 单独受测。场景 4× MSAA 与 FXAA 同时开的情况由 tests/msaa.rs 覆盖。
+    renderer.set_sample_count(1);
     if let Some(fxaa) = fxaa {
         renderer.set_fxaa(fxaa);
     }
@@ -335,6 +338,8 @@ fn fxaa_rebuilds_on_resize_and_stays_deterministic() {
         return;
     };
     let mut renderer = Renderer::new(MeshCache::new("."));
+    // 与 `render_with` 对齐：FXAA 用例都钉 1× 场景，别把 MSAA 的舍入混进判据。
+    renderer.set_sample_count(1);
     renderer.set_fxaa(enabled());
     renderer.set_clear_color(clear);
     let mut previous: Option<(FrameKey<'_>, Vec<u8>)> = None;

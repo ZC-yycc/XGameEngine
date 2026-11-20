@@ -20,6 +20,17 @@ struct HdrTarget {
     width: u32,
     height: u32,
     texture: Arc<wgpu::Texture>,
+    /// 多采样附件：采样数 > 1 时场景各 pass 画进它，收尾再 resolve 到 `texture`。
+    /// 采样数为 1 时不建（`None`），走的还是切片前那条单采样路径。
+    msaa: Option<Arc<wgpu::Texture>>,
+}
+
+/// 场景 pass 的颜色附件：多采样时 `view` 是 MSAA 纹理、`resolve` 指向单采样
+/// 的 HDR 纹理；采样数为 1 时 `view` 就是 HDR 纹理本身、`resolve` 为 `None`。
+pub(super) struct SceneViews {
+    pub(super) view: wgpu::TextureView,
+    pub(super) resolve: Option<wgpu::TextureView>,
+    pub(super) sample_count: u32,
 }
 
 /// tone-map 的画面旋钮：曝光与光晕一起传（打包后 `present` 的参数表才不过长）。
@@ -163,9 +174,71 @@ impl HdrStage {
                 width,
                 height,
                 texture,
+                msaa: None,
             });
         }
         Arc::clone(&self.target.as_ref().unwrap().texture)
+    }
+
+    /// 场景 pass 的颜色附件。尺寸 / 采样数不变时 MSAA 纹理跨帧复用；视图每帧
+    /// 现建（视图只是轻量句柄，纹理才是重资源）。
+    pub(super) fn scene_views(&mut self, context: &GpuContext, sample_count: u32) -> SceneViews {
+        let target = self.target.as_ref().expect("场景纹理必须先按尺寸建好");
+        let (width, height) = (target.width, target.height);
+        let needs_msaa = sample_count > 1;
+        if needs_msaa
+            && self.target.as_ref().is_some_and(|target| {
+                target
+                    .msaa
+                    .as_ref()
+                    .is_none_or(|msaa| msaa.sample_count() != sample_count)
+            })
+        {
+            let msaa = context.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some("xgc-hdr-scene-msaa"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.target.as_mut().unwrap().msaa = Some(Arc::new(msaa));
+        }
+        // 换回 1× 时必须把多采样目标丢掉：留着它会让场景 pass 绑上 4× 的颜色附件，
+        // 而深度已经按 1× 重建——两边采样数不一致，wgpu 会直接拒绝这一趟。
+        if sample_count <= 1 {
+            if let Some(target) = self.target.as_mut() {
+                target.msaa = None;
+            }
+        }
+        let target = self.target.as_ref().unwrap();
+        let (view, resolve) = match &target.msaa {
+            Some(msaa) => (
+                msaa.create_view(&wgpu::TextureViewDescriptor::default()),
+                Some(
+                    target
+                        .texture
+                        .create_view(&wgpu::TextureViewDescriptor::default()),
+                ),
+            ),
+            None => (
+                target
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
+                None,
+            ),
+        };
+        SceneViews {
+            view,
+            resolve,
+            sample_count,
+        }
     }
 
     /// 把线性 HDR 场景（可选叠加光晕）一次性映射到 `destination`；目标的 sRGB
@@ -348,6 +421,17 @@ impl super::Renderer {
         self.hdr
             .get_or_insert_with(|| HdrStage::new(context))
             .scene_texture(context, width, height)
+    }
+
+    /// 场景各 pass 的颜色附件（多采样时为 MSAA 纹理 + resolve 目标）。
+    pub(super) fn hdr_scene_views(
+        &mut self,
+        context: &GpuContext,
+        sample_count: u32,
+    ) -> SceneViews {
+        self.hdr
+            .get_or_insert_with(|| HdrStage::new(context))
+            .scene_views(context, sample_count)
     }
 
     /// 场景收尾：按需跑光晕链，再把「场景 + 光晕」tone-map 到显示目标；

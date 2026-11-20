@@ -278,6 +278,7 @@ impl GpuContext {
         format: wgpu::TextureFormat,
         depth: bool,
         texture_layout: &wgpu::BindGroupLayout,
+        sample_count: u32,
     ) -> SkinnedPipeline {
         let shader = self
             .device()
@@ -365,7 +366,10 @@ impl GpuContext {
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    ..Default::default()
+                },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs"),
@@ -408,7 +412,8 @@ pub(crate) struct SkinnedDraw<'a> {
 
 /// 一批蒙皮 draw 的公共参数：目标、深度、清屏与否、本帧共用的一次 frame binding。
 pub(crate) struct SkinnedBatchRequest<'a> {
-    pub(crate) texture: &'a wgpu::Texture,
+    /// 场景 pass 的颜色附件；多采样时是 MSAA 视图，收尾由渲染器统一 resolve。
+    pub(crate) view: &'a wgpu::TextureView,
     pub(crate) depth: &'a wgpu::TextureView,
     pub(crate) clear: bool,
     pub(crate) clear_color: wgpu::Color,
@@ -465,9 +470,7 @@ impl SkinnedPipeline {
             .upload(context, &self.model_layout, &model_slices);
         drop(model_slices);
         self.model_scratch = models;
-        let view = request
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = request.view;
         let mut encoder =
             context
                 .device()
@@ -478,7 +481,7 @@ impl SkinnedPipeline {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("xgc-skin-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: if request.clear {

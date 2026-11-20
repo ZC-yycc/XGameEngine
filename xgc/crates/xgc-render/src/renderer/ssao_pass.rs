@@ -26,6 +26,10 @@ impl super::Renderer {
             }
             return source.clone();
         }
+        let sample_count = self.scene_sample_count(context);
+        if let Some(stage) = self.ssao_stage.as_mut() {
+            stage.set_sample_count(sample_count);
+        }
         if self.ssao_stage.is_none() {
             self.ssao_stage = Some(crate::ssao::SsaoStage::new(context));
         }

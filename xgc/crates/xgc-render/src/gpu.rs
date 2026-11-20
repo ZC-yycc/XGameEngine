@@ -44,6 +44,9 @@ pub struct GpuContext {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     adapter_info: wgpu::AdapterInfo,
+    /// 场景 pass 的 MSAA 采样数（见 `msaa::preferred_sample_count`）。适配器在
+    /// `headless` 时能直接问，编辑器 / 播放器复用外部设备时由调用方算好传进来。
+    scene_sample_count: u32,
 }
 
 impl GpuContext {
@@ -64,10 +67,12 @@ impl GpuContext {
             None,
         ))
         .map_err(|err| GpuError::RequestDevice(err.to_string()))?;
+        let scene_sample_count = super::msaa::preferred_sample_count(&adapter);
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
             adapter_info,
+            scene_sample_count,
         })
     }
 
@@ -91,12 +96,19 @@ impl GpuContext {
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         adapter_info: wgpu::AdapterInfo,
+        scene_sample_count: u32,
     ) -> Self {
         Self {
             device,
             queue,
             adapter_info,
+            scene_sample_count,
         }
+    }
+
+    /// 场景 pass 的 MSAA 采样数：1 = 关闭（逐字节等同切片前）。
+    pub fn scene_sample_count(&self) -> u32 {
+        self.scene_sample_count
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -225,6 +237,67 @@ impl GpuContext {
                 a: rgba[3],
             },
         )
+    }
+
+    /// 把多采样场景附件 resolve 到单采样目标。场景各 pass 都不带 resolve：
+    /// 收尾统一做一次，否则每个 pass 都多一次全屏拷贝。
+    pub(crate) fn resolve_scene_view(&self, view: &wgpu::TextureView, resolve: &wgpu::TextureView) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("xgc-msaa-resolve"),
+            });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("xgc-msaa-resolve-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: Some(resolve),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        // resolve 是最后一次读 MSAA 内容，存了也没人再采样它。
+                        store: wgpu::StoreOp::Discard,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    /// 清一张场景颜色附件：单采样直接 clear；多采样时 `clear_texture` 会被
+    /// wgpu 拒绝（它只接受单采样纹理），改跑一个空 pass 清屏。这里不 resolve ——
+    /// 场景各 pass 都不带 resolve，收尾由 `resolve_scene_view` 统一做一次。
+    pub(crate) fn clear_scene_view(
+        &self,
+        view: &wgpu::TextureView,
+        color: wgpu::Color,
+    ) -> Result<(), GpuError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("xgc-clear-scene"),
+            });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("xgc-clear-scene-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        self.queue.submit(Some(encoder.finish()));
+        Ok(())
     }
 
     /// 录制并提交一个只做 clear 的 render pass；用于资源 / 通道验证。

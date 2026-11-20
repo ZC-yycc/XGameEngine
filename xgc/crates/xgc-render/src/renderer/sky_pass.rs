@@ -12,12 +12,14 @@ impl super::Renderer {
     pub(super) fn draw_sky(
         &self,
         context: &GpuContext,
-        target: &wgpu::Texture,
+        view: &wgpu::TextureView,
+        target: super::SceneTarget,
         view_proj: Mat4,
         lighting: &FrameLighting,
         clear_depth: bool,
     ) {
-        let Some((_, sky_pipeline)) = self.sky_pipeline.as_ref() else {
+        let _ = target;
+        let Some((_, _, sky_pipeline)) = self.sky_pipeline.as_ref() else {
             return;
         };
         let depth = &self.depth.as_ref().unwrap().view;
@@ -26,7 +28,6 @@ impl super::Renderer {
             ([-x, -y, -z], lighting.sun_color)
         });
         let uniform = crate::sky::SkyUniform::build(&self.sky, sun);
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
             context
                 .device()
@@ -37,7 +38,7 @@ impl super::Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("xgc-sky-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,

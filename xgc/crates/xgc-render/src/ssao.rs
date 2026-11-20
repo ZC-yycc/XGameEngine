@@ -44,74 +44,15 @@ pub(crate) const PARAMS_BYTES: usize = 448;
 const SSAO_WGSL: &str = include_str!("ssao.wgsl");
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// 画面设置里的 SSAO 节：默认关，与 Bloom / TAA / FXAA 同一条纪律。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SsaoSettings {
-    /// 是否启用。关着时渲染器整段跳过，画面逐位不变。
-    pub enabled: bool,
-    /// 遮蔽强度（0 = 无遮蔽效果；上限见 [`Self::MAX_STRENGTH`]）。
-    pub strength: f32,
-    /// 采样半径（世界单位）。太大 = 远处物体也遮蔽近处；太小 = 看不出。
-    pub radius: f32,
-    /// 深度比较偏置（世界单位）：挡掉"表面遮蔽自己"的 acne。
-    pub bias: f32,
-}
+mod settings;
 
-impl Default for SsaoSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            strength: 1.0,
-            radius: 0.5,
-            bias: 0.025,
-        }
-    }
-}
-
-impl SsaoSettings {
-    /// 遮蔽强度上限：再大只是把接触阴影压成死黑，画面信息全丢。
-    pub const MAX_STRENGTH: f32 = 4.0;
-    /// 采样半径上限（世界单位）：10 米的遮蔽半径已经不是"接触阴影"了。
-    pub const MAX_RADIUS: f32 = 10.0;
-    /// 偏置上限：偏置比半径还大时遮蔽整体失效，但那也是合法的"关"法。
-    pub const MAX_BIAS: f32 = 1.0;
-
-    /// 开着且强度为正才算数：强度 0 与关掉等价（省下四趟全屏 pass）。
-    pub fn is_enabled(&self) -> bool {
-        self.enabled && self.strength > 0.0
-    }
-
-    /// 与默认值完全一致（供回归与将来落盘用的 `skip_serializing_if` 口径比较；
-    /// 目前 CLI 只读不写画面设置）。
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
-    /// 容错读取：非有限字段落回默认，合法但离谱的量级夹进安全范围（旧端
-    /// `SsaoConfig::sanitized` 同式）。
-    pub fn sanitized(self) -> Self {
-        let clean = |value: f32, default: f32, max: f32| {
-            if value.is_finite() {
-                value.clamp(0.0, max)
-            } else {
-                default
-            }
-        };
-        let default = Self::default();
-        Self {
-            enabled: self.enabled,
-            strength: clean(self.strength, default.strength, Self::MAX_STRENGTH),
-            radius: clean(self.radius, default.radius, Self::MAX_RADIUS),
-            bias: clean(self.bias, default.bias, Self::MAX_BIAS),
-        }
-    }
-}
+pub use settings::SsaoSettings;
 
 /// 固定种子 LCG 生成半球 kernel（同一构建在任何机器上都是同一组向量）。
 ///
 /// 与旧端 `hemisphere_kernel` 逐运算相同：种子 / 乘加常量写死，向 +z 半球
 /// 取点，再按二次分布向原点聚拢（近处样本密，遮蔽边缘的渐变更稳）。
-pub(crate) fn hemisphere_kernel() -> [[f32; 4]; KERNEL_SAMPLES] {
+fn hemisphere_kernel() -> [[f32; 4]; KERNEL_SAMPLES] {
     let mut state: u32 = 0x2545_F491;
     let mut next = || {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -141,7 +82,7 @@ pub(crate) fn hemisphere_kernel() -> [[f32; 4]; KERNEL_SAMPLES] {
 /// 只挡奇异矩阵（NaN / Inf 的行列式比较为假），旧端 `determinant().is_finite()`
 /// 这道守卫不能省，否则 `fs_ao` 的遮蔽值可能变成 NaN 再乘到源色上。退化时
 /// 强度按 0 写进 uniform：AO 全 1，乘算等于抄源色，画面逐位不变。
-pub(crate) fn invertible_view_projection(view_projection: Mat4) -> bool {
+fn invertible_view_projection(view_projection: Mat4) -> bool {
     view_projection.iter().all(|value| value.is_finite())
         && invert(view_projection)
             .is_some_and(|inverse| inverse.iter().all(|value| value.is_finite()))
@@ -214,6 +155,8 @@ struct Targets {
 
 /// SSAO 的 GPU 状态。与 TAA / 光晕同款：AO 依赖各自的深度与目标，三宿主各持一份。
 pub(crate) struct SsaoStage {
+    /// 场景 pass 的采样数：深度附件跟着它决定是否多采样（绑定类型与着色器声明都得换）。
+    depth_sample_count: u32,
     pipelines: Option<Pipelines>,
     uniform: wgpu::Buffer,
     sampler: wgpu::Sampler,
@@ -239,6 +182,7 @@ impl SsaoStage {
             mapped_at_creation: false,
         });
         Self {
+            depth_sample_count: context.scene_sample_count(),
             pipelines: None,
             uniform,
             sampler,
@@ -425,14 +369,33 @@ impl SsaoStage {
         (targets.scratch.clone(), 4)
     }
 
+    /// 场景采样数变了（`Renderer::set_sample_count`）：深度绑定与着色器声明要换，
+    /// 已有的管线整份作废，下次 `ensure_pipelines` 按新采样数重建。
+    pub(crate) fn set_sample_count(&mut self, sample_count: u32) {
+        if self.depth_sample_count == sample_count {
+            return;
+        }
+        self.depth_sample_count = sample_count;
+        self.pipelines = None;
+    }
+
     fn ensure_pipelines(&mut self, context: &GpuContext) {
         if self.pipelines.is_some() {
             return;
         }
         let device = context.device();
+        // 场景 pass 开 MSAA 时深度附件是多采样纹理：声明换
+        // `texture_depth_multisampled_2d`，`textureLoad(depth, pixel, 0)` 第三参
+        // 在多采样下就是 sample index（旧端同样在源码里替换这一行）。
+        let depth_sample_count = self.depth_sample_count;
+        let source = if depth_sample_count > 1 {
+            SSAO_WGSL.replace("texture_depth_2d", "texture_depth_multisampled_2d")
+        } else {
+            SSAO_WGSL.to_string()
+        };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("xgc-ssao"),
-            source: wgpu::ShaderSource::Wgsl(SSAO_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let texture = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
@@ -460,7 +423,7 @@ impl SsaoStage {
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Depth,
                 view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
+                multisampled: depth_sample_count > 1,
             },
             count: None,
         };

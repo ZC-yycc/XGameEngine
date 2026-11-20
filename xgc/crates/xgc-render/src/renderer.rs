@@ -18,13 +18,14 @@ use super::pipeline::{RenderCache, TrianglePipeline};
 use super::texture::TexturePipeline;
 use xgc_world::World;
 
-use super::resources::{ResourceDesc, ResourceUsage};
 use super::shadow_settings::ShadowSettings;
 use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline};
 use super::sky::{sky_irradiance, SkySettings};
 use super::ssao::SsaoSettings;
 use super::taa::TaaSettings;
+use scene_target::{DepthTarget, SceneTarget};
 mod hdr;
+mod scene_target;
 mod settings;
 mod shadow_prep;
 mod sky_pass;
@@ -52,19 +53,13 @@ pub struct RenderStats {
     pub env_map_passes: usize,
 }
 
-struct DepthTarget {
-    width: u32,
-    height: u32,
-    view: wgpu::TextureView,
-}
-
 pub struct Renderer {
     cache: RenderCache,
     meshes: MeshCache,
     gpu_meshes: GpuMeshCache,
     skin_meshes: GpuSkinMeshCache,
-    skinned: Option<(wgpu::TextureFormat, SkinnedPipeline)>,
-    sky_pipeline: Option<(wgpu::TextureFormat, super::sky_draw::SkyPipeline)>,
+    skinned: Option<(wgpu::TextureFormat, u32, SkinnedPipeline)>,
+    sky_pipeline: Option<(wgpu::TextureFormat, u32, super::sky_draw::SkyPipeline)>,
     shadow: Option<super::shadow::ShadowTarget>,
     /// 基色贴图绑定：1×1 白纹理兜底，随第一次渲染惰性创建。
     textures: Option<super::texture_bind::TextureBinding>,
@@ -74,8 +69,10 @@ pub struct Renderer {
     text_pipeline: Option<(wgpu::TextureFormat, super::text_draw::TextPipeline)>,
     /// 本帧要画的粒子（模拟层在帧循环里算好，渲染只消费四边形）。
     particles: Vec<xgc_world::ParticleQuad>,
-    particle_pipeline: Option<(wgpu::TextureFormat, super::particles::ParticlePipeline)>,
+    particle_pipeline: Option<(wgpu::TextureFormat, u32, super::particles::ParticlePipeline)>,
     hdr: Option<hdr::HdrStage>,
+    /// 显式指定的场景采样数；`None` 跟适配器（`GpuContext::scene_sample_count`）。
+    sample_count: Option<u32>,
     /// 画面设置里的曝光（`render.exposure`，缺省 1.0）：曲线前的线性光乘子。
     exposure: f32,
     /// 画面设置里的光晕节：开着时场景在 tone-map 前多跑一遍三级光晕链。
@@ -133,6 +130,7 @@ impl Renderer {
             particles: Vec::new(),
             particle_pipeline: None,
             hdr: None,
+            sample_count: None,
             exposure: EXPOSURE_DEFAULT,
             bloom: BloomSettings::default(),
             bloom_stage: None,
@@ -176,43 +174,24 @@ impl Renderer {
         self.skin_meshes.len()
     }
 
-    fn ensure_depth(
-        &mut self,
-        context: &GpuContext,
-        width: u32,
-        height: u32,
-    ) -> Result<(), GpuError> {
-        if self
-            .depth
-            .as_ref()
-            .is_some_and(|depth| depth.width == width && depth.height == height)
-        {
-            return Ok(());
-        }
-        let desc = ResourceDesc::texture2d(
-            "xgc-depth",
-            "depth32float",
-            width.max(1),
-            height.max(1),
-            // 采样位是给 TAA 的深度反投影用的：历史重投影要读上一帧的世界坐标。
-            vec![ResourceUsage::DepthAttachment, ResourceUsage::Sampled],
-        );
-        let resource = context.create_resource(&desc)?;
-        let texture = resource
-            .into_texture()
-            .ok_or_else(|| GpuError::Pipeline("depth 资源不是纹理".to_string()))?;
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.depth = Some(DepthTarget {
-            width,
-            height,
-            view,
-        });
-        Ok(())
-    }
-
-    /// 挂上本帧的粒子四边形（由模拟层每帧产出；空表示不画）。
+    /// 场景 pass 的采样数：`None` 跟适配器判定（常见 4×），`Some(1)` 是显式关掉
+    /// （测试里的"硬边"前提、以及将来质量档位都要它）。
     pub fn set_particles(&mut self, quads: Vec<xgc_world::ParticleQuad>) {
         self.particles = quads;
+    }
+
+    /// 场景 pass 的采样数：`1` = 关 MSAA，其它值取适配器支持的最高档（4×）。
+    /// 改档会丢掉深度缓存，管线 / HDR 多采样目标按采样数缓存的键自动重建。
+    pub fn set_sample_count(&mut self, count: u32) {
+        let count = if count > 1 {
+            crate::msaa::PREFERRED_SAMPLE_COUNT
+        } else {
+            1
+        };
+        if self.sample_count != Some(count) {
+            self.sample_count = Some(count);
+            self.depth = None;
+        }
     }
 
     /// 渲染一帧：抽 DrawList、解析模型、按实体顺序 draw 到目标纹理。
@@ -326,7 +305,8 @@ impl Renderer {
     fn draw_particles(
         &mut self,
         context: &GpuContext,
-        target: &wgpu::Texture,
+        view: &wgpu::TextureView,
+        target: SceneTarget,
         view_proj: Mat4,
         camera_pos: [f32; 3],
         clear_target: bool,
@@ -334,22 +314,31 @@ impl Renderer {
         if self.particles.is_empty() {
             return Ok(0);
         }
-        self.ensure_depth(context, target.width(), target.height())?;
-        let format = target.format();
-        if self.particle_pipeline.as_ref().map(|(current, _)| *current) != Some(format) {
+        if self
+            .particle_pipeline
+            .as_ref()
+            .is_none_or(|(current, count, _)| {
+                *current != target.format || *count != target.sample_count
+            })
+        {
             self.particle_pipeline = Some((
-                format,
-                super::particles::ParticlePipeline::new(context, format),
+                target.format,
+                target.sample_count,
+                super::particles::ParticlePipeline::new(
+                    context,
+                    target.format,
+                    target.sample_count,
+                ),
             ));
         }
         let depth = &self.depth.as_ref().unwrap().view;
-        let Some((_, pipeline)) = self.particle_pipeline.as_ref() else {
+        let Some((_, _, pipeline)) = self.particle_pipeline.as_ref() else {
             return Ok(0);
         };
         let quads = std::mem::take(&mut self.particles);
         let clear = clear_target.then_some(self.clear_color);
         let request = super::particles::ParticleDrawRequest {
-            target,
+            view,
             depth,
             view_proj,
             camera_pos,
@@ -376,6 +365,11 @@ impl Renderer {
             shadow: shadow_view_proj,
         } = cameras;
         self.ensure_frame_targets(context, target)?;
+        let views = self.hdr_scene_views(context, self.scene_sample_count(context));
+        let format = target.format();
+        let sample_count = views.sample_count;
+        let scene_view = &views.view;
+        let resolve_view = views.resolve.as_ref();
         // 阴影投射体 = 全部 draw：旧端蒙皮网格与静态网格一样进阴影批次。
         // 拟合用**未抖动**矩阵（TAA 的抖动只叠在相机上，见 `taa_pass.rs`）。
         let prepared = self.prepare_shadow(
@@ -440,7 +434,9 @@ impl Renderer {
         }
         let cpu_list = super::draw::DrawList { items: cpu_items };
         let mut request = InstancedRequest {
-            texture: target,
+            view: scene_view,
+            sample_count,
+            format,
             list: &cpu_list,
             meshes: &mut self.meshes,
             gpu_meshes: &mut self.gpu_meshes,
@@ -459,18 +455,18 @@ impl Renderer {
         let mut draw_calls = self.cache.draw_list_instanced(context, &mut request)?;
         let mut skin_uniform_buffers = 0usize;
         if !gpu_items.is_empty() {
-            let format = target.format();
             if self
                 .skinned
                 .as_ref()
-                .is_none_or(|(current, _)| *current != format)
+                .is_none_or(|(current, count, _)| *current != format || *count != sample_count)
             {
                 self.skinned = Some((
                     format,
-                    context.create_skinned_pipeline(format, true, textures.layout()),
+                    sample_count,
+                    context.create_skinned_pipeline(format, true, textures.layout(), sample_count),
                 ));
             }
-            let pipeline = &mut self.skinned.as_mut().unwrap().1;
+            let pipeline = &mut self.skinned.as_mut().unwrap().2;
             // 第一遍：上传本条需要的蒙皮网格并算好 palette（上传会可变借用缓存）。
             let mut resolved: Vec<(usize, Vec<u8>)> = Vec::with_capacity(gpu_items.len());
             for (index, item) in gpu_items.iter().enumerate() {
@@ -531,7 +527,7 @@ impl Renderer {
                 let skinned = pipeline.draw_batch(
                     context,
                     &super::skinned::SkinnedBatchRequest {
-                        texture: target,
+                        view: scene_view,
                         depth,
                         clear: draw_calls == 0,
                         clear_color: self.clear_color,
@@ -545,16 +541,34 @@ impl Renderer {
         }
         if self.sky.enabled {
             // 没有场景 draw 时实例化 pass 提前返回、没清深度：天空 pass 自己清成 1.0，否则只能 Load。
-            self.draw_sky(context, target, view_proj, &lighting, draws == 0);
+            self.draw_sky(
+                context,
+                scene_view,
+                SceneTarget {
+                    format,
+                    sample_count,
+                },
+                view_proj,
+                &lighting,
+                draws == 0,
+            );
         }
         // 粒子画在几何 / 天空之后、UI 之前：要被几何遮住，又要参与色调映射。
         draw_calls += self.draw_particles(
             context,
-            target,
+            scene_view,
+            SceneTarget {
+                format,
+                sample_count,
+            },
             view_proj,
             lighting.eye,
             draws == 0 && !self.sky.enabled,
         )?;
+        // 场景各 pass 都不带 resolve（否则每个 pass 都多一次全屏拷贝），收尾做一次。
+        if let Some(resolve) = resolve_view {
+            context.resolve_scene_view(scene_view, resolve);
+        }
         Ok(RenderStats {
             draws,
             draw_calls,

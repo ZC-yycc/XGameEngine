@@ -1,0 +1,10 @@
+warning: struct `DummyStorage` is never constructed
+   --> vendor\eframe\src\epi.rs:818:19
+    |
+818 | pub(crate) struct DummyStorage {}
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `eframe` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s

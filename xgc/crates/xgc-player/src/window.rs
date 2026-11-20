@@ -62,6 +62,7 @@ impl PlayerApp {
             render_state.device.clone(),
             render_state.queue.clone(),
             render_state.adapter.get_info(),
+            xgc_render::preferred_sample_count(&render_state.adapter),
         );
         let texture = context.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("xgc-player-viewport"),

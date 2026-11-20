@@ -1,0 +1,38 @@
+feat: prefilter the sky into an environment cube
+
+旧端环境镜面是 split-sum：天空按 GGX 重要性采样烘成 5 级预过滤立方体
+（ENV_MIPS = 5、基级 128²、每级 96/48/24/16/12 样本、固定 Hammersley 序列），
+再加一张 256 样本 BRDF 积分表（Karis 的 A/B 两通道），片元按
+`env_spec(reflect(-v, n), roughness × ENV_MAX_LOD) × (f0 × A + B)` 叠加。XGC 此前
+是 L2 球谐近似反射 + Lazarov 解析 BRDF 近似，这是与旧端余差的主要来源。
+
+- `sky_common.wgsl`：天空公式唯一一份（`sky_radiance` / `sky_sh` / 常量），不声明
+  绑定（天空盒与烘焙布局各异），三处 include 共用。
+- `env_prefilter.wgsl` + `env_map.rs`：两个烘焙入口（GGX 预过滤 / BRDF 积分）与
+  5 级 128² 立方体 + 128² BRDF 表、30 个级面视图、动态偏移参数槽；缓存键 =
+  80B 天空 uniform 的 FNV-1a 哈希，首帧 31 趟 pass、同设置 0 趟，
+  `RenderStats::env_map_passes` 是诊断口径。
+- `frame_uniform.rs` 的 group 0 扩到七绑定（环境立方体 / BRDF 表 / 环境采样器），
+  参数收口到 `FrameTextures`；`scene_shading.wgsl` 的环境镜面换成旧端同式两次
+  `textureSampleLevel`，漫反射改吃 `sky_sh`。
+- 旧的 `env_brdf_approx` / `env_specular` CPU 镜像随实现删除（镜像必须镜像着色器，
+  留着就是死代码），`material_pbr` / `sky_ibl` 两条依赖它的用例改成相对判据。
+
+证据（第 150 帧）：世界哈希 `d050bd357f20aa31` 不变，PPM SHA-256
+`6bc10cedf798a1f696d80c614d1db0d8972e86ab08ec09d9f5ea92a8329be582`（两次渲染逐字节
+相同）。与旧端截图比 **3.48%（32113 像素）/ mean_abs 0.46 / max 198**，只差 1 LSB 的
+像素 10319 = 1.1%（此前 244107 = 26.5%），结构性（单通道 ≥8）16412 = 1.78%；
+相对上一版 XGC（`xgc/target/evidence/same-tick/normals4-150.ppm`）改 31.46% 像素。
+
+红证据：片元里 `env_spec` 项乘 0 → 金属球换天空色不变；缓存判据改恒 false →
+同设置重烘；删掉 `!settings.enabled` 判据 → 关天空也跑 31 趟。审查复核另抓到一个
+真 bug：BRDF LUT 的 Schlick-GGX 要用 IBL 的 k = r²/2（错版用了直接光的 (r+1)²/8，
+把掠射平滑金属的 A 压低约 57%），按旧端改正后与旧端差异从 18.17% 收到 3.48%。
+
+门禁：484 passed / 0 failed / 1 ignored；clippy -D warnings 0；xtask 243 个 Rust
+文件 / 最大 599 行 / deps 15 / schema 30 类 35710 字节；CLI check 30 组件；
+`run 60` 哈希 `f4bc029f5f995b91`。
+
+未闭环：天空设置一变就整份重烘 31 趟（没有分级失效）；天空关着时仍会惰性建一次
+约 1 MiB 环境图纹理与两条管线（只为固定绑定组布局，不跑 pass 也不采样）；与旧端
+残余 3.48% 集中在几何边缘 / 彩色高光 / 狐狸轮廓。

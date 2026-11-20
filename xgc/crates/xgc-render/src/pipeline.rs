@@ -434,7 +434,7 @@ impl TrianglePipeline {
 pub struct RenderCache {
     pipeline: Option<(wgpu::TextureFormat, TrianglePipeline)>,
     depth_pipeline: Option<(wgpu::TextureFormat, TrianglePipeline)>,
-    pub(crate) instanced: Option<(wgpu::TextureFormat, InstancedPipeline)>,
+    pub(crate) instanced: Option<(wgpu::TextureFormat, u32, InstancedPipeline)>,
 }
 
 impl RenderCache {
