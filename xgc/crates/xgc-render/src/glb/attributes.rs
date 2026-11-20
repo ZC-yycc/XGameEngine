@@ -3,10 +3,12 @@
 //! 从 `glb.rs` 拆出：`glb.rs` 已贴着 600 行软上限，而"怎么把属性挂到 `Mesh` 上"
 //! 与"怎么从 GLB 字节里读出几何"是两件事，分开以后两边都还能长。
 //!
-//! 缺 `NORMAL` 不算错：片元着色会退回屏幕导数叉积。但**有** `NORMAL` 就必须条数
-//! 与 `POSITION` 一致——少一条会让顶点缓冲错位，比没有法线难查得多。
+//! 缺 `NORMAL` 不算错：按几何生成面积加权的顶点法线（与旧端 `compute_face_normals`
+//! 同式，见 `normals::face_normals`；旧端在 `gltf_loader.rs` 里就是这条路径）。
+//! 但**有** `NORMAL` 就必须条数与 `POSITION` 一致——少一条会让顶点缓冲错位，
+//! 比没有法线难查得多。
 
-use super::normals::read_normals;
+use super::normals::{face_normals, read_normals};
 use super::{accessor_layout, read_f32, read_u16, MeshError, Primitive, Root};
 use crate::camera::IDENTITY;
 use crate::mesh::{Mesh, SkinData};
@@ -23,6 +25,17 @@ pub(super) fn attach(
         if mesh.normals.len() != mesh.positions.len() {
             return Err(MeshError::Glb("NORMAL 数量与 POSITION 不一致".into()));
         }
+    } else {
+        // 旧端同款兜底：没导法线的模型按几何生成面积加权顶点法线。放在加载期而不是
+        // 片元的导数叉积，是因为两者结果不同 —— 导数只看当前像素所在的三角面，
+        // 共享边处是两个硬面；旧端是插值顶点法线，折角是平滑过渡。
+        // 没有索引的图元按 POSITION 顺序当三角形序列（旧端也是这么展开的）。
+        let indices = if mesh.indices.is_empty() {
+            (0..mesh.positions.len() as u32).collect::<Vec<_>>()
+        } else {
+            mesh.indices.clone()
+        };
+        mesh.normals = face_normals(&mesh.positions, &indices);
     }
     if let (Some(joints), Some(weights)) = (
         primitive.attributes.get("JOINTS_0").copied(),

@@ -19,8 +19,13 @@ pub struct Mesh {
     pub skin: Option<SkinData>,
     /// 每个顶点的 UV（`TEXCOORD_0`）；空 = 没有 UV，采样坐标为 (0,0)。
     pub uvs: Vec<[f32; 2]>,
-    /// 每个顶点的法线（glTF `NORMAL`，模型空间、不保证归一）；空 = 模型没导法线，
-    /// 片元着色退回屏幕导数叉积（内建图元与少数老模型走这条）。
+    /// 每个顶点的法线（glTF `NORMAL`，模型空间、不保证归一）。
+    ///
+    /// glTF 模型没导 `NORMAL` 时，加载期按几何生成面积加权的顶点法线
+    /// （`glb/normals.rs::face_normals`，与旧端 `compute_face_normals` 同式）；
+    /// 空只出现在不是 glTF 的来源上（内建图元 / 手工构造），片元着色退回屏幕
+    /// 导数叉积 —— 两者在折角处观感不同：导数只看当前像素所在三角面（硬边），
+    /// 顶点法线是插值的（旧端就是这么平滑的）。
     ///
     /// 有法线时必须用逆转置矩阵变换（非均匀缩放会把法线拉歪），旧端
     /// `scene_pipeline.rs` 的 `normal_mat = transpose(mat3_inverse(model))` 同式。

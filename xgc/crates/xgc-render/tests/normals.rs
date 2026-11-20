@@ -1,4 +1,5 @@
-//! glTF 顶点法线：`NORMAL` 必须参与着色，模型没导法线时退回屏幕导数叉积。
+//! glTF 顶点法线：`NORMAL` 必须参与着色；模型没导法线时按几何生成面积加权的
+//! 顶点法线（与旧端 `compute_face_normals` 同式）。
 //!
 //! 背景：XGC 早先完全丢弃 `NORMAL`，片元法线一律取屏幕导数叉积 —— 平面没问题，
 //! 平滑网格（狐狸、球）会被渲染成"每个三角形一个面"的硬边，与旧端
@@ -6,6 +7,9 @@
 //!
 //! 这里用一块平面 + 一盏正对它的方向光做判别：把 `NORMAL` 故意写成 +X（侧向），
 //! 若解析生效，法线与光向几乎垂直、整块变暗；若不生效，三块画面逐字节相同。
+//! 另外用一块"折翼"几何把生成法线也钉住：共享边的两个面在加载期求面积加权和，
+//! 生成结果写回成显式 `NORMAL` 后必须逐字节复现同一帧 —— 这正是旧端
+//! "缺 NORMAL 时算平滑法线"而不是"片元取面法线"的分界。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -85,6 +89,50 @@ fn write_quad_gltf(tag: &str, normals: Option<[[f32; 3]; 4]>) -> PathBuf {
     );
     std::fs::write(root.join("quad.gltf"), json).unwrap();
     root.join("quad.gltf")
+}
+
+/// 非索引、无 NORMAL 的平面：`face_normals` 的「按 `POSITION` 顺序展开」分支只在这类
+/// 资产上执行（证据世界的 `Fox.gltf` 就是非索引的），必须单独钉住。
+fn write_unindexed_quad_gltf(tag: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "xgc_normals_{tag}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let mut bin = Vec::new();
+    // 水平面（y = 0）：生成的法线是 -Y，与"零向量兜底 +Z"不同值，
+    // 所以「展开分支真的按三角形覆盖了每个顶点」是可观察的。
+    for position in [
+        [-0.5f32, 0.0, -0.5],
+        [0.5, 0.0, -0.5],
+        [0.5, 0.0, 0.5],
+        [-0.5, 0.0, -0.5],
+        [0.5, 0.0, 0.5],
+        [-0.5, 0.0, 0.5],
+    ] {
+        for value in position {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    std::fs::write(root.join("flat.bin"), &bin).unwrap();
+    let json = format!(
+        r#"{{
+  "asset": {{"version": "2.0"}},
+  "buffers": [{{"uri": "flat.bin", "byteLength": {bin_len}}}],
+  "bufferViews": [{{"buffer": 0, "byteOffset": 0, "byteLength": 72}}],
+  "accessors": [{{"bufferView": 0, "componentType": 5126, "count": 6, "type": "VEC3"}}],
+  "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}}}]}}],
+  "nodes": [{{"mesh": 0}}],
+  "scenes": [{{"nodes": [0]}}]
+}}"#,
+        bin_len = bin.len(),
+    );
+    std::fs::write(root.join("flat.gltf"), json).unwrap();
+    root.join("flat.gltf")
 }
 
 fn scene(model: &Path, scale: [f32; 3], light_dir: [f32; 3], intensity: f32) -> World {
@@ -173,7 +221,7 @@ fn rewrite_gltf(path: &Path, old: &str, new: &str) {
 }
 
 #[test]
-fn gltf_normals_are_parsed_and_optional() {
+fn gltf_normals_are_parsed_or_generated() {
     // 用长度 2 的法线而不是单位向量：解析阶段若偷偷归一化，这里必须变红
     // （归一只在片元里做，提前归一会让非均匀缩放的逆转置结果被带偏）。
     let with = write_quad_gltf("parsed", Some([[2.0, 0.0, 0.0]; 4]));
@@ -191,13 +239,39 @@ fn gltf_normals_are_parsed_and_optional() {
         mesh.normals[0]
     );
 
+    // 没导 NORMAL：加载期按几何生成。平面（z=0）生成的必然全是 +Z，
+    // 与旧端 `compute_face_normals` 同结果。
     let without = write_quad_gltf("absent", None);
     let mesh = xgc_render::load_model(&without).unwrap();
-    assert!(
-        mesh.normals.is_empty(),
-        "模型没导 NORMAL 时保持空，交给片元回退"
+    assert_eq!(
+        mesh.normals.len(),
+        mesh.positions.len(),
+        "没导 NORMAL 时加载期必须补齐每顶点法线（否则折角会走硬边导数路径）"
     );
-    cleanup(&[&with, &without]);
+    assert!(
+        mesh.normals.iter().all(|normal| *normal == [0.0, 0.0, 1.0]),
+        "平面生成的顶点法线必须全部是 +Z：{:?}",
+        mesh.normals
+    );
+
+    // 非索引资产没有 `indices`：生成前必须按 `POSITION` 顺序展开成三角形列表，
+    // 否则每个顶点都拿不到任何面、全落 (0,0,1) 之前的零向量兜底（也是 +Z，
+    // 但那是巧合而不是展开对了）——这里要的是「每个顶点被自己的三角形覆盖」。
+    let unindexed = write_unindexed_quad_gltf("unindexed");
+    let flat = xgc_render::load_model(&unindexed).unwrap();
+    assert_eq!(
+        flat.normals.len(),
+        flat.positions.len(),
+        "非索引几何没导 NORMAL 时也必须逐顶点生成法线"
+    );
+    assert!(
+        flat.normals
+            .iter()
+            .all(|normal| *normal == [0.0, -1.0, 0.0]),
+        "非索引水平面生成的顶点法线必须全部是 -Y（展开分支真的跑了）：{:?}",
+        flat.normals
+    );
+    cleanup(&[&with, &without, &unindexed]);
 }
 
 #[test]
@@ -231,7 +305,7 @@ fn malformed_normals_are_rejected() {
 }
 
 #[test]
-fn vertex_normals_drive_shading_and_fall_back_to_derivatives() {
+fn vertex_normals_drive_shading() {
     let _guard = GPU_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     if GpuContext::headless().is_err() {
         eprintln!("skip: 没有可用 GPU 适配器");
@@ -241,21 +315,23 @@ fn vertex_normals_drive_shading_and_fall_back_to_derivatives() {
     let light = [0.0, 0.0, -1.0];
     let sideways_model = write_quad_gltf("sideways", Some([[1.0, 0.0, 0.0]; 4]));
     let forward_model = write_quad_gltf("forward", Some([[0.0, 0.0, 1.0]; 4]));
-    let fallback_model = write_quad_gltf("fallback", None);
+    // 没导 NORMAL 的平面现在由加载期生成 +Z（见上面两条用例），这里用它当
+    // 「生成值与显式 +Z 同值」的佐证；屏幕导数回退只剩内建图元 / 手工 `Mesh`。
+    let generated_model = write_quad_gltf("generated-forward", None);
     let sideways = center(&sideways_model, scale, light, 3.0);
     let forward = center(&forward_model, scale, light, 3.0);
-    let fallback = center(&fallback_model, scale, light, 3.0);
+    let generated = center(&generated_model, scale, light, 3.0);
 
     assert!(
         luma(sideways) * 4 < luma(forward),
         "侧向法线必须让平面几乎不受光（NORMAL 真的进了着色）：侧向 {sideways:?} / 正向 {forward:?}"
     );
-    let difference = luma(forward).abs_diff(luma(fallback));
+    let difference = luma(forward).abs_diff(luma(generated));
     assert!(
         difference <= 3,
-        "正向法线与导数叉积应得到同一面法线：正向 {forward:?} / 回退 {fallback:?}"
+        "生成法线必须与显式 +Z 同值：正向 {forward:?} / 生成 {generated:?}"
     );
-    cleanup(&[&sideways_model, &forward_model, &fallback_model]);
+    cleanup(&[&sideways_model, &forward_model, &generated_model]);
 }
 
 #[test]
@@ -292,4 +368,156 @@ fn non_uniform_scale_uses_the_inverse_transpose() {
         "非均匀缩放下法线必须走逆转置：缩放 {scale_x} 倍后 {skewed:?} / 预变形参考 {reference:?}"
     );
     cleanup(&[&skewed_model, &reference_model]);
+}
+
+/// 折翼几何：共享边 A..B，两块翼分别朝 ±Y 折向 -Z；可选的每顶点法线。
+///
+/// 顶点序：A=(-1,0,0)、B=(1,0,0)、C1=(0,-1,-1)、C2=(0,1,-1)；三角形
+/// `[A,B,C1]` 与 `[B,A,C2]`（第二个反绕序，两面法线都朝 -Z 一侧）。
+fn write_fold_gltf(tag: &str, normals: Option<[[f32; 3]; 4]>) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "xgc_fold_{tag}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let mut bin = Vec::new();
+    for position in [
+        [-1.0f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, -1.0, -1.0],
+        [0.0, 1.0, -1.0],
+    ] {
+        for value in position {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    let normals_offset = bin.len();
+    if let Some(normals) = normals {
+        for normal in normals {
+            for value in normal {
+                bin.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    let indices_offset = bin.len();
+    for index in [0u16, 1, 2, 1, 0, 3] {
+        bin.extend_from_slice(&index.to_le_bytes());
+    }
+    std::fs::write(root.join("fold.bin"), &bin).unwrap();
+
+    let normal_view = normals.is_some();
+    let normal_accessor = if normal_view {
+        ",\n    {\"bufferView\": 1, \"componentType\": 5126, \"count\": 4, \"type\": \"VEC3\"}"
+    } else {
+        ""
+    };
+    let normal_attribute = if normal_view { r#", "NORMAL": 2"# } else { "" };
+    let json = format!(
+        r#"{{
+  "asset": {{"version": "2.0"}},
+  "buffers": [{{"uri": "fold.bin", "byteLength": {bin_len}}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0, "byteLength": 48}},
+    {{"buffer": 0, "byteOffset": {normals_offset}, "byteLength": 48}},
+    {{"buffer": 0, "byteOffset": {indices_offset}, "byteLength": 12}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3"}},
+    {{"bufferView": {index_view}, "componentType": 5123, "count": 6, "type": "SCALAR"}}{normal_accessor}
+  ],
+  "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0{normal_attribute}}}, "indices": 1}}]}}],
+  "nodes": [{{"mesh": 0}}],
+  "scenes": [{{"nodes": [0]}}]
+}}"#,
+        bin_len = bin.len(),
+        normals_offset = normals_offset,
+        indices_offset = indices_offset,
+        index_view = if normal_view { 2 } else { 1 },
+    );
+    std::fs::write(root.join("fold.gltf"), json).unwrap();
+    root.join("fold.gltf")
+}
+
+/// 整帧 RGBA8 像素（逐字节对照用）。
+fn frame(model: &Path, scale: [f32; 3], light_dir: [f32; 3], intensity: f32) -> Vec<u8> {
+    let context = GpuContext::headless().expect("需要 GPU 适配器");
+    let target = context
+        .create_resource(&ResourceDesc::texture2d(
+            "normals-frame",
+            "rgba8unorm-srgb",
+            SIZE,
+            SIZE,
+            vec![ResourceUsage::ColorAttachment],
+        ))
+        .unwrap();
+    let texture = target.as_texture().unwrap();
+    let root = model.parent().unwrap().to_path_buf();
+    let mut renderer = Renderer::new(MeshCache::new(&root));
+    renderer
+        .render(
+            &context,
+            texture,
+            &scene(model, scale, light_dir, intensity),
+        )
+        .unwrap();
+    context.read_texture_rgba8(texture, SIZE, SIZE).unwrap()
+}
+
+#[test]
+fn missing_normals_are_generated_from_the_geometry() {
+    let _guard = GPU_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    if GpuContext::headless().is_err() {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    }
+    let without = write_fold_gltf("generated", None);
+    let mesh = xgc_render::load_model(&without).unwrap();
+    assert_eq!(
+        mesh.normals.len(),
+        mesh.positions.len(),
+        "折翼几何没导 NORMAL 时也必须逐顶点生成法线"
+    );
+    // 共享边的两个顶点吃两面的和：两个面法线的叉积和是 (0,0,-4) → (0,0,-1)。
+    assert_eq!(
+        mesh.normals[0],
+        [0.0, 0.0, -1.0],
+        "共享边顶点必须拿到相邻两面的面积加权和：{:?}",
+        mesh.normals[0]
+    );
+    assert_eq!(
+        mesh.normals[1],
+        [0.0, 0.0, -1.0],
+        "共享边顶点必须拿到相邻两面的面积加权和：{:?}",
+        mesh.normals[1]
+    );
+
+    let tip = 0.5f32.sqrt();
+    assert!(
+        (mesh.normals[2][1] - tip).abs() < 1e-6 && (mesh.normals[2][2] + tip).abs() < 1e-6,
+        "翼尖只应拿到自己那一面的法线：{:?}",
+        mesh.normals[2]
+    );
+    assert!(
+        (mesh.normals[3][1] + tip).abs() < 1e-6 && (mesh.normals[3][2] + tip).abs() < 1e-6,
+        "翼尖只应拿到自己那一面的法线：{:?}",
+        mesh.normals[3]
+    );
+
+    // 把生成结果原样写回成显式 NORMAL：同一批数值经「读取访问器」与「几何生成」两条
+    // 加载路径必须导出同一帧（证明两条路径的数值与字节都一致；生成逻辑整体失效时
+    // 上面的条数断言会先红，这里兜的是「数值对但路径写错」）。
+    let mut round_trip = [[0.0f32; 3]; 4];
+    round_trip.copy_from_slice(&mesh.normals);
+    let explicit = write_fold_gltf("explicit", Some(round_trip));
+    let generated_frame = frame(&without, [1.5, 1.5, 1.5], [0.0, -0.4, -0.9], 2.0);
+    let explicit_frame = frame(&explicit, [1.5, 1.5, 1.5], [0.0, -0.4, -0.9], 2.0);
+    assert!(
+        generated_frame == explicit_frame,
+        "生成法线必须与显式写回同一批数值时逐字节相同（否则片元又退回了导数路径）"
+    );
+    cleanup(&[&without, &explicit]);
 }
