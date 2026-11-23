@@ -20,3 +20,21 @@ fn builtin_models_have_real_geometry() {
     assert_eq!(triangle.positions.len(), 3);
     assert!(builtin_mesh("builtin://unknown").is_none());
 }
+
+/// 内建图元的模型材质 = 旧端 `MaterialParams::default()`（metallic 0.0 / roughness 0.45）；
+/// 改了会让"没有 `render.material` 的实体"画面漂移。
+#[test]
+fn builtin_meshes_use_old_engine_default_material_params() {
+    for model in [
+        "builtin://cube",
+        "builtin://sphere",
+        "builtin://cylinder",
+        "builtin://plane",
+        "builtin://quad",
+        "builtin://triangle",
+    ] {
+        let mesh = builtin_mesh(model).unwrap();
+        assert_eq!(mesh.metallic, 0.0, "{model}");
+        assert_eq!(mesh.roughness, 0.45, "{model}");
+    }
+}

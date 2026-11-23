@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**glTF 模型材质因子切片**补齐「实体没有 `render.material` 时用模型自带材质」：`crates/xgc-render/src/glb/material.rs` 解析 `metallicFactor` / `roughnessFactor`（spec 缺省 1.0），`Mesh` 带 `metallic` / `roughness`（内建图元 = 旧端 `MaterialParams::default` 的 0.0 / 0.45），`DrawItem.has_material` 记录实体是否真的带 `render.material`，`compose_colors` 按旧端顺序合成：模型因子 → `.mat` 资产 → 实体覆盖 → 选择高亮。红证据：「Box.glb 无 Material 组件时期望 roughness 1.0」实跑 FAILED（0.5 vs 1.0）。效果：第 150 帧与旧端从 3.25% / mean_abs 0.42 / 结构性 1.66% 收到 **2.39% / 0.36 / 0.97%**，红方块 / 地面 / 天空 / 内建 cube 面逐字节一致，世界哈希仍 `d050bd357f20aa31`；回归 5 条（另把合成蒙皮 GLB 的材质因子显式钉住）。**未闭环**：内建 `builtin://sphere` 仍是 8×16 低模 + 导数分面（旧端 24×32 平滑法线 + UV），Fox.gltf 部分三角面仍偏暗，迁移丢失旧 `MaterialOverride.metallic` 与「未覆盖」存在性；另外旧端参考图必须在本机重新生成（仓库检入的 `tmp/old-150.png` 来自另一 GPU 环境，直接用会得到 18.43% 的假差异）。
+
 执行计划切片让调度从「注册顺序 + 旁路批次计划」变成「计划即执行顺序」：`crates/xgc-sim/src/lib.rs` 的 `Schedule::plan()` 按注册顺序**连续**贪心分批（同批两两无访问冲突），末尾恒为宿主帧末阶段（脚本），`Plan` / `PlanStage` 是唯一执行顺序来源，`run` / `Simulation::step_with` 都只走 `run_plan`（`step_with` 的 `after` = 宿主阶段，仍在记录 trace 之前）；`Simulation` 构造时固化计划，稳态帧不因此多分配。`xgc plan` 输出确定性 JSON：`systems` 每项带 `index` / `name` / `reads` / `writes`（组件名来自内建注册表），`stages` 是 `batch` 列表 + 末尾唯一 `host`；默认调度 16 系统 / 12 批 + 宿主阶段，两次运行逐字节相同。语义保持：`run 60` 仍 `f4bc029f5f995b91`、showcase 150 步无脚本 trace 仍 `883b6a7bdf20aa31`、带脚本 trace 与 `run-scripts` 同为 `432bee801f20aa31`。回归 12 条（`crates/xgc-sim/tests/schedule_plan.rs` 8 条 + `crates/xgc-cli/tests/plan.rs` 4 条）。**未闭环**：同批仍按注册顺序串行（跨系统并行要世界所有权拆分），脚本仍是宿主阶段而不是 `impl System`（mlua 的 `Rc` / `RefCell` + 无 send feature ⇒ `!Send`，且依赖门禁禁止 `xgc-script → xgc-sim`）。
 
 GPU 蒙皮主场景着色切片用同一 showcase 第 150 帧做了 release 冷启动 A/B：每次启动新 `xgc render-frame` 进程并只渲一帧，切片前四跑 `783.02 / 719.85 / 726.80 / 734.09 ms`（中位数 **730.44 ms**），切片后 `822.76 / 790.08 / 934.70 / 766.49 ms`（中位数 **806.42 ms**，+10.4%）。这个数包含新增共享场景 shader 的第二条 pipeline 编译，且**当时**的 GPU 蒙皮仍按实体创建 uniform / bind group / encoder 并单独提交（此后的单次提交切片已把 encoder / submit 收到一帧一次），**不是稳态 GPU 帧耗时**；像素合同与 frame-150 逐字节确定性负责正确性验收，后续必须另设 pipeline 缓存、多角色批量提交与稳态 profiler 门禁。
@@ -178,11 +180,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（505 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（510 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（250 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、完整刚体、
+**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、内建图元与旧端逐顶点对齐（`sphere` 8×16 低模 + 导数法线 vs 旧端 24×32 平滑法线）、Fox.gltf 蒙皮 / 贴图残差、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），

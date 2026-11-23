@@ -19,6 +19,10 @@ fn loads_box_glb_when_available() {
     }
     assert!(!mesh.indices.is_empty());
     assert_eq!(mesh.base_color_factor, [0.8, 0.0, 0.0, 1.0]);
+    // 材质 JSON 只写了 metallicFactor（其余吃 glTF spec 缺省）：
+    // roughnessFactor 缺省 1.0、metallicFactor 显式 0.0 —— 与旧端 `read_material` 同口径。
+    assert_eq!(mesh.metallic, 0.0);
+    assert_eq!(mesh.roughness, 1.0);
     let max_index = mesh.indices.iter().copied().max().unwrap_or(0) as usize;
     assert!(max_index < mesh.positions.len());
 }
@@ -107,6 +111,9 @@ fn loads_skinned_glb_joints_and_weights() {
     let mesh = load_glb(&path).unwrap();
     assert_eq!(mesh.positions.len(), 3);
     assert_eq!(mesh.base_color_factor, [0.25, 0.5, 0.75, 0.8]);
+    // 只写了 baseColorFactor：metallicFactor / roughnessFactor 吃 glTF spec 缺省 1.0。
+    assert_eq!(mesh.metallic, 1.0);
+    assert_eq!(mesh.roughness, 1.0);
     assert_eq!(mesh.tint([0.8, 0.4, 0.2, 0.5]), [0.2, 0.2, 0.15, 0.4]);
     let skin = mesh.skin.as_ref().unwrap();
     assert_eq!(skin.joints.len(), 3);
@@ -197,4 +204,23 @@ fn fox_gltf_carries_uv_and_base_color_texture() {
         .rgba
         .chunks_exact(4)
         .any(|pixel| pixel[0] > pixel[2] + 40));
+}
+
+/// 真实 Fox.gltf 的模型材质：`metallicFactor: 0` / `roughnessFactor: 0.58`。
+/// 实体没有 `render.material` 时这两个值就是有效材质（旧端 `read_material` 同口径）。
+#[test]
+fn fox_gltf_carries_model_metallic_and_roughness() {
+    let root = Path::new("../../../projects/XGame/Resources");
+    if !root.join("Fox.gltf").exists() {
+        eprintln!("skip: 没有 Fox.gltf");
+        return;
+    }
+    let mut cache = xgc_render::MeshCache::new(root);
+    let mesh = cache.get("Fox.gltf").unwrap().unwrap();
+    assert_eq!(mesh.metallic, 0.0);
+    assert!(
+        (mesh.roughness - 0.58).abs() < 1e-6,
+        "roughness = {}",
+        mesh.roughness
+    );
 }

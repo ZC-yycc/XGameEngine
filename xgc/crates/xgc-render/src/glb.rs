@@ -232,12 +232,15 @@ fn load_glb_bytes(bytes: &[u8], base_dir: Option<&Path>) -> Result<Mesh, MeshErr
         }
     }
     if let Some(material) = primitive.material {
-        mesh.base_color_factor = root
+        let def = root
             .materials
             .get(material)
-            .ok_or_else(|| MeshError::Missing(format!("material {material}")))?
-            .pbr_metallic_roughness
-            .base_color_factor;
+            .ok_or_else(|| MeshError::Missing(format!("material {material}")))?;
+        // glTF 省略因子时 spec 缺省 1.0（旧端 `read_material` 同口径）；
+        // 没有 material 的图元保持 `Mesh::new` 的 `MaterialParams::default()`。
+        mesh.base_color_factor = def.pbr_metallic_roughness.base_color_factor;
+        mesh.metallic = def.pbr_metallic_roughness.metallic_factor;
+        mesh.roughness = def.pbr_metallic_roughness.roughness_factor;
     }
     mesh.texture = texture::base_color(&root, primitive, bin, base_dir)?;
     attributes::attach(&root, primitive, bin, &mut mesh)?;

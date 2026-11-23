@@ -16,6 +16,16 @@ pub struct Mesh {
     pub indices: Vec<u32>,
     /// glTF `baseColorFactor`；逐实体颜色在提交 draw 时与它相乘。
     pub base_color_factor: [f32; 4],
+    /// 模型材质的金属度；实体没有 `render.material` 时它就是有效值。
+    ///
+    /// glTF 规范缺省 1.0（旧端 `read_material` 照 glTF spec 取），内建图元与
+    /// 手工构造的网格用旧端 `MaterialParams::default()` 的 0.0。
+    pub metallic: f32,
+    /// 模型材质的粗糙度；实体没有 `render.material` 时它就是有效值。
+    ///
+    /// glTF 规范缺省 1.0，内建图元用旧端 `MaterialParams::default()` 的 0.45
+    /// （旧端内建图元的 `material` 字段就是那个 default）。
+    pub roughness: f32,
     pub skin: Option<SkinData>,
     /// 每个顶点的 UV（`TEXCOORD_0`）；空 = 没有 UV，采样坐标为 (0,0)。
     pub uvs: Vec<[f32; 2]>,
@@ -40,6 +50,9 @@ impl Mesh {
             positions,
             indices,
             base_color_factor: [1.0; 4],
+            // 旧端内建图元 / 手工构网格的材质参数都取 `MaterialParams::default()`。
+            metallic: 0.0,
+            roughness: 0.45,
             skin: None,
             uvs: Vec::new(),
             normals: Vec::new(),

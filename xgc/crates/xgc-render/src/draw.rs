@@ -12,13 +12,20 @@ use super::camera::{model_matrix, Mat4};
 pub struct DrawItem {
     pub entity: EntityId,
     pub model: String,
+    /// 实体覆盖的基色乘子（`render.material` 缺省 = 白）。
     pub color: [f32; 4],
+    /// 有效粗糙度。`compose_colors` 之前的值只在**实体带 `render.material`**
+    /// 时有意义（那是覆盖值）；没有组件时由模型材质决定。
     pub roughness: f32,
-    /// 金属度：来自 `.mat`（旧引擎里 metallic 由资产替换、覆盖可再替换）；
-    /// 没有资产引用时按 0（绝缘体）处理。
+    /// 有效金属度，由 `compose_colors` 从模型材质 / `.mat` 资产解析。
     pub metallic: f32,
     /// `.mat` 资产引用（空串 = 不用资产）；渲染时与模型材质因子一起乘进 `color`。
     pub material_asset: String,
+    /// 实体是否带 `render.material` 组件。
+    ///
+    /// 旧端叠加顺序是 `模型材质 → .mat 资产 → 实体覆盖`：没有组件时模型材质的
+    /// metallic / roughness 必须保留，不能被 `Material::default()` 顶掉。
+    pub has_material: bool,
     pub transform: Mat4,
     pub pose: Option<Vec<[f32; 16]>>,
 }
@@ -49,14 +56,24 @@ pub fn build_draw_list(world: &World) -> DrawList {
         let Some(transform) = world.get::<GlobalTransform>(key) else {
             return;
         };
-        let material = world.get::<Material>(key).cloned().unwrap_or_default();
+        let material = world.get::<Material>(key).cloned();
         items.push(DrawItem {
             entity,
             model: mesh.model.clone(),
-            color: material.base_color,
-            roughness: material.roughness,
+            color: material
+                .as_ref()
+                .map(|material| material.base_color)
+                .unwrap_or([1.0; 4]),
+            roughness: material
+                .as_ref()
+                .map(|material| material.roughness)
+                .unwrap_or(0.0),
             metallic: 0.0,
-            material_asset: material.asset.clone(),
+            material_asset: material
+                .as_ref()
+                .map(|material| material.asset.clone())
+                .unwrap_or_default(),
+            has_material: material.is_some(),
             transform: model_matrix(transform),
             pose: skeleton_pose(world, key),
         });

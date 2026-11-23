@@ -272,7 +272,11 @@ fn write_skinned_glb() -> PathBuf {
             "mode": 4
         }]}],
         "materials": [{"pbrMetallicRoughness": {
-            "baseColorFactor": [0.0, 0.7, 0.0, 1.0]
+            "baseColorFactor": [0.0, 0.7, 0.0, 1.0],
+            // 显式钉住模型材质：glTF 省略因子时 spec 缺省是 metallic 1.0 / roughness 1.0，
+            // 这条用例只看"蒙皮也走同一套 PBR/ACES"，不希望被缺省值变化牵动。
+            "metallicFactor": 0.0,
+            "roughnessFactor": 1.0
         }}],
         "nodes": [{"mesh": 0, "skin": 0}],
         "skins": [{"joints": [0]}],

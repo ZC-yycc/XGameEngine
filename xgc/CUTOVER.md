@@ -11,7 +11,7 @@
 | 迁移世界可运行 | 通过 | `run-world` / `run-cooked` / `xgc-player` 60 帧同哈希 |
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
 | 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `d050bd357f20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / 场景 pass 4× MSAA（颜色与深度同采样、1× 等同关闭、收尾统一 resolve）/ RGBA16F 场景 / 线性粒子合成 / 唯一全局 ACES / 曝光旋钮（`render.exposure`，缺省 1.0）/ 曝光后曲线前三级光晕（默认关） / 多光源照明（方向光 / 点光最多 8 盏 + 点光衰减） / 点光立方体阴影（6 面深度图） / 可选 PCSS 软阴影 + 级间混合（`render.shadow`，默认关）/ tone 后可选 FXAA（默认关）/ 预过滤环境 IBL（GGX 5 级立方体 + 256 样本 BRDF 积分表，split-sum）/ tone 后 UI 已贯通 |
-| 视觉对等 | **未通过** | 旧 / 新同为第 150 帧、同用场景相机，仍有 30485/921600 像素不同（3.31%），mean_abs **0.42**、max 198（场景 4× MSAA 相对上一版 XGC 只改 0.59% 像素、mean_abs 0.08、max 184，都落在边缘上）；预过滤环境 IBL 相对上一版 XGC（`xgc/target/evidence/same-tick/normals4-150.ppm`）改 31.46% 像素、mean_abs 0.18、max 27，余差主要是几何边缘 / 彩色表面高光与狐狸轮廓（脚本 UI 颜色已按 sRGB→线性对齐，血条**填充色**与旧端一致（圆角边缘仍差约 2 px））；归因（`image-diff … report`）：10319 个像素（1.1%）只差 1 LSB、结构性差异（单通道 ≥8）16412 = 1.78%，推断集中在第 4 行阴影边界块；跨帧对照（N = 1 / 50 / 100 / 150）确认差异第 1 帧就存在、不随时间漂移 | |
+| 视觉对等 | **未通过** | 本机重新生成旧端参考后仍有 22034/921600 像素不同（**2.39%**），mean_abs **0.36**、max 198；归因（`image-diff … report`）：只差 1 LSB 的 10226 个像素（1.11%）、结构性差异（单通道 ≥8）8952 = **0.97%**。glTF 模型材质因子切片把「实体没有 `render.material` 时用模型材质」补齐（Box.glb 的 `roughnessFactor` 按 spec 缺省 1.0、Fox.gltf 0.58；内建图元用旧端 `MaterialParams::default` 的 metallic 0.0 / roughness 0.45）后，红方块与地面 / 天空 / 内建立方体面**逐字节一致**，整帧从 3.25% / mean_abs 0.42 / 结构性 1.66% 收到 2.39% / 0.36 / 0.97%；世界哈希仍 `d050bd357f20aa31`（材质不进状态哈希），两次渲染 PPM SHA-256 同为 `d7bb4ffc6fa1cb3a375474c8c2a3fd8adc68ab3626730b793ad3391e2b5cd6bf`。剩余余差集中在 ① `builtin://sphere`（XGC rings=8 / segments=16 且无顶点法线，旧端 `sphere(0.5, 24, 32)` 平滑法线 + UV）② Fox.gltf 蒙皮 / 贴图路径的部分三角面（蓝通道偏低，未定位）③ 几何边缘的 ±1 LSB。**旧端参考必须在验收机重生成**（见命令；仓库检入的 `tmp/old-150.png` 来自另一 GPU / 驱动环境，直接对比会得到 18.43% 的假差异）。 |
 | 逐帧 trace / 状态哈希对照 | **未通过（XGC 侧逐帧 trace 已建）** | `xgc trace <世界.json> [帧数] [资产根]` 逐帧打印 `frame / entities / revision / hash`（无资产根时与 `run-world` 同一条无脚本步进路径，带资产根时走 `ScriptedRunner`、与 `run-scripts` 同一条路径；第 0 帧是装载后状态；坏脚本 / 语法错 / 不可用资产根都会打印「第 N 帧运行失败」并退出码 2）；集成回归 `crates/xgc-cli/tests/trace.rs`：与进程内重放逐步对表、两次运行逐字节相同、不同世界第 0 帧即不同、带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致；旧引擎 `--headless` 没有逐帧 trace 输出，跨端对照仍缺 |
 | 正式 System 调度（计划即执行顺序） | **通过** | `Schedule::plan()` 取代全批贪心的 `batches()`：按注册顺序**连续**分批（同批两两无访问冲突）+ 宿主帧末阶段，`run` / `step_with` 都只走计划，摊平顺序 == 注册顺序；`Simulation` 构造时固化计划（稳态分配不回归）；`xgc plan` 输出确定性 JSON（16 系统 / 12 批 + 宿主阶段，两次输出逐字节相同）。语义保持证据：`run 60` 仍 `f4bc029f5f995b91`、showcase 150 步无脚本 trace 仍 `883b6a7bdf20aa31`、带资产根 trace 与 `run-scripts` 末行同为 `432bee801f20aa31`；回归 `crates/xgc-sim/tests/schedule_plan.rs`（8 条）+ `crates/xgc-cli/tests/plan.rs`（4 条） |
 | 跨系统并行执行 | **未通过** | 计划与访问声明已就绪（连续批次，同批两两无冲突），缺世界所有权拆分成不相交 `&mut` 视图；同批系统仍按注册顺序串行。脚本不进 `System`：`ScriptRuntime` 用 mlua 的 `Rc` / `RefCell`、mlua 0.10 无 send feature ⇒ `!Send`，且 xtask 依赖门禁不允许 `xgc-script → xgc-sim` |
@@ -40,14 +40,20 @@ cargo run -q -p xgc-cli --offline -- trace ..\tmp\showcase.json 150 ..\projects\
 cargo run -q -p xgc-cli --offline -- plan
 
 # 视觉指标：先在根 workspace 生成旧引擎第 150 帧，再回 xgc 生成同帧
+# 注意：旧端参考截图必须在验收机重新生成。仓库里检入的 `tmp/old-150.png` 来自另一台
+# GPU / 驱动环境（±1 舍入整体偏移，15.8% 像素不同），直接对比会得到 18.43% 的假差异；
+# 本机重渲染的 `tmp/old-150-now.png` 才是正确基线（glTF 模型材质因子切片后 2.39%）。
 cd ..
-cargo run -q -p xgame-editor --offline -- --headless --frames 150 --screenshot tmp\old-150.png projects\XGame
+cargo run -q -p xgame-editor --offline -- --headless --frames 150 --screenshot tmp\old-150-now.png projects\XGame
 cd xgc
 cargo run -q -p xgc-cli --offline -- render-frame ..\tmp\showcase.json ..\tmp\new-150.ppm ..\projects\XGame 1280 720 150
-cargo run -q -p xgc-cli --offline -- image-diff ..\tmp\old-150.png ..\tmp\new-150.ppm 0 report
+cargo run -q -p xgc-cli --offline -- image-diff ..\tmp\old-150-now.png ..\tmp\new-150.ppm 0 report
 
 # 材质垂直切片：真实 Box + 合成蒙皮 GLB 都必须消费 baseColorFactor
 cargo test -p xgc-render --test material_factor --offline
+
+# 模型材质因子：实体没有 render.material 时用 glTF 自带 metallic / roughness（spec 缺省 1.0）
+cargo test -p xgc-render --test glb --test mesh --offline
 
 # 方向光阴影：开关两帧对比（暗像素数量 + 只会变暗）（GPU）
 cargo test -p xgc-render --test shadows --offline
@@ -200,8 +206,8 @@ cargo run -q -p xgc-player --offline -- ..\tmp\cooked 60
 
 ## 建议顺序
 
-1. 割接视觉：预过滤环境 IBL（GGX 5 级立方体 + 256 样本 BRDF 积分表，split-sum 取代 SH 近似反射）已接入、天空设置变化才重烘 31 趟、与旧端差异从 32.16% 收到 3.31%（mean_abs 0.58 → 0.42，其中场景 4× MSAA 相对上一版只改 0.59% 像素）；RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒、蒙皮 draw 单次提交、蒙皮 palette / model 竞技场已贯通；阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场，角色坡面 `slope_limit` 与贴地 `snap_to_ground` 也已生效；角色已有运行时托管的运动学胶囊、水平位移走 rapier `KinematicCharacterController` 的 collide-and-slide、tone-map 后可选的显示空间 FXAA（默认关）、glTF `NORMAL` 顶点法线着色（缺 NORMAL 退回屏幕导数）也已贯通；角色的竖直 / 地面 / 台阶已搬进 KCC、`physics.slope` 也有静态楔形碰撞体、陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效；画面曝光（`render.exposure`）也已接上（缺省 1.0 逐字节不变），阴影画质（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关）也已接通；多光源照明（方向光 / 点光最多 8 盏 + 点光距离衰减，帧 uniform 扩到 976 字节）也已接通；点光立方体阴影（六面 1024² 深度图、帧 uniform 扩到 1008 字节、`point_shadow_draw_calls` 诊断口径）也已接通；TAA（`render.taa`）也已接通（默认关、关着逐字节不变），SSAO（`render.ssao`，默认关；半分辨率 16 抽样 + 可分离模糊 + 线性上采样乘算）也已接通（关着不建 AO 纹理、帧逐字节不变）。
+1. 割接视觉：预过滤环境 IBL（GGX 5 级立方体 + 256 样本 BRDF 积分表，split-sum 取代 SH 近似反射）已接入、天空设置变化才重烘 31 趟、与旧端差异从 32.16% 收到 3.31%（mean_abs 0.58 → 0.42，其中场景 4× MSAA 相对上一版只改 0.59% 像素），再经 glTF 模型材质因子到 2.39%（本机重生成旧端参考，mean_abs 0.36）；RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒、蒙皮 draw 单次提交、蒙皮 palette / model 竞技场已贯通；阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场，角色坡面 `slope_limit` 与贴地 `snap_to_ground` 也已生效；角色已有运行时托管的运动学胶囊、水平位移走 rapier `KinematicCharacterController` 的 collide-and-slide、tone-map 后可选的显示空间 FXAA（默认关）、glTF `NORMAL` 顶点法线着色（缺 NORMAL 退回屏幕导数）也已贯通；角色的竖直 / 地面 / 台阶已搬进 KCC、`physics.slope` 也有静态楔形碰撞体、陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效；画面曝光（`render.exposure`）也已接上（缺省 1.0 逐字节不变），阴影画质（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关）也已接通；多光源照明（方向光 / 点光最多 8 盏 + 点光距离衰减，帧 uniform 扩到 976 字节）也已接通；点光立方体阴影（六面 1024² 深度图、帧 uniform 扩到 1008 字节、`point_shadow_draw_calls` 诊断口径）也已接通；TAA（`render.taa`）也已接通（默认关、关着逐字节不变），SSAO（`render.ssao`，默认关；半分辨率 16 抽样 + 可分离模糊 + 线性上采样乘算）也已接通（关着不建 AO 纹理、帧逐字节不变）。
 2. 正式调度：脚本与系统统一访问声明。
-3. 旧新逐帧 trace（XGC 侧 `xgc trace` 已建、脚本帧也已纳入，缺旧端输出；视觉方面导了 `NORMAL` 的模型已按旧端口径着色）+ 截图像素门禁；视觉余差归因工具 `image-diff … report` 已建（1.13% 像素只差 1 LSB、结构性 1.66%、与旧端总差异 3.31%），跨帧对照已确认余差是静态的、脚本 UI 颜色口径已对齐（血条填充色一致，圆角边缘仍差约 2 px），余差收窄还剩彩色表面高光与狐狸轮廓；性能门禁的 XGC 侧热路径分配门禁已建立，还缺 CI release 基线。
+3. 旧新逐帧 trace（XGC 侧 `xgc trace` 已建、脚本帧也已纳入，缺旧端输出；视觉方面导了 `NORMAL` 的模型已按旧端口径着色）+ 截图像素门禁；视觉余差归因工具 `image-diff … report` 已建（只差 1 LSB 的 1.11% 像素、结构性 0.97%、与旧端总差异 2.39%），跨帧对照已确认余差是静态的、脚本 UI 颜色口径已对齐（血条填充色一致，圆角边缘仍差约 2 px），余差收窄还剩彩色表面高光与狐狸轮廓；性能门禁的 XGC 侧热路径分配门禁已建立，还缺 CI release 基线。
 4. 密码学签名 / 跨机器增量。
 5. 推送 + CI。
