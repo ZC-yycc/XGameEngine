@@ -16,9 +16,11 @@ use xgc_world::{builtin_registry, Command, ComponentData, Transform, Value, Worl
 mod legacy;
 mod lifecycle;
 mod runtime;
+mod ui_api;
 mod view;
 pub use legacy::{euler_to_quat, EntityView, ScriptView};
 pub use runtime::ScriptRuntime;
+pub use view::UiElementView;
 
 pub struct LuaHost {
     lua: Lua,

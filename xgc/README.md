@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**UI 脚本布局 / 文本 / 样式 setter 对齐**切片修复 `ui_set_size` 的尺寸语义（旧端 `offset_max = offset_min + size`，原实现丢掉左上角偏移 ⇒ 血条宽高各小 2 px），并把旧端 UI 脚本函数补到 19 个（布局 / 文本 / 样式 / 读取 / 交互；颜色 sRGB→线性、同帧多次写合并、getter 同帧可见）：血条行边界与旧端一致（圆角仅差 1 px AA），第 150 帧 1.63% / 0.08 / 结构性 0.35%，第 200 帧 2.26% → **2.20% / 0.11 / 0.48%**，第 300 帧 2.19% / 0.14 / 0.58%。图像 tint / fill 与 `ui_spawn_*` / focus 三函数仍未接（要新命令面）。
+
 **layers 分层状态机 / 关节遮罩**切片把旧端 Fox 的 `upper` 层接上：`animation.layers` RON 层栈 + `AnimationLayerSystem` 层机器 / 参数 / 时钟 / 淡入 + `glb/layers.rs` 按关节名遮罩在模型局部姿势上做 Override / Additive；脚本 `set_anim_layer_weight` / `set_anim_layer_param` 真写组件（同帧多次改层栈在命令队列合并）。第 200 帧 2.55% / 0.27 / 0.77% → **2.26% / 0.15 / 结构性 0.54%**（狐狸 bbox 结构性 2542 → 478），第 150 / 300 帧逐字节不变。
 
 **根运动迁移与落地**切片把旧端 `root_motion`（显式节点名 + 轴开关）补齐：`Animator` 加 `root_motion` RON 字段，`xgc-world/src/root_motion.rs` 提供轨道采样 / 循环展开轨迹 / fade 混合纯函数，`xgc-sim/src/root_motion.rs` 的 `apply_root_motion` 由宿主在 `step_with` 返回后推进实体位置（不进默认调度，轨道表来自模型资产），渲染侧 `glb/root_motion.rs` 在 crossfade 后、additive 前把开关轴平移换回绑定值（否则蒙皮与实体双倍前进）；CLI 宿主已接、editor / player 尚未接。消融实验证明帧 150 的狐狸余差几乎全部来自根运动（旧端 full vs 去掉 root_motion = 2053 结构性像素）。效果：第 150 帧 2.08% / 0.16 / 0.58% → **1.64% / mean_abs 0.09 / 结构性 0.36%**，狐狸 bbox 结构性 2227 → 479；第 200 / 300 帧 2.82% / 2.94% → **2.55% / 2.19%**；Fox 第 150 帧位置与旧端差 4e-7。世界哈希 150/200/300 帧变为 `a47439aa0470ee2e` / `4c46ab46a4b2d401` / `7506cfe9a4d4e7ca`；**未闭环**：旧端 `layers` 仍未迁移、editor / player 根运动未接线。
@@ -196,11 +198,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（564 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（272 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 38222 字节，
+`cargo test --workspace --offline` 全绿（568 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（274 个 Rust 文件，最大 598 行）；30 个内建类型的 schema 为 38222 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）（旧端 `upper` 层未迁移）、UI 文本字距 / 红球高光 / 阴影边缘（根运动已接，第 150 / 200 / 300 帧 1.64% / 2.55% / 2.19%）、完整刚体、
+**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、UI 文本 AA / 红球高光 / 阴影边缘（根运动、layers、UI 脚本 setter 已接；第 150 / 200 / 300 帧 1.63% / 2.20% / 2.19%）、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），

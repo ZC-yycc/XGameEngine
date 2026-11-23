@@ -9,8 +9,8 @@ use std::rc::Rc;
 use mlua::{Lua, Table};
 use xgc_base::EntityId;
 use xgc_world::{
-    AnimationLayers, AnimationState, Animator, Command, Component, Transform, UiElement,
-    Value as FieldValue, Velocity,
+    AnimationLayers, AnimationState, Animator, Command, Component, Transform, Value as FieldValue,
+    Velocity,
 };
 
 /// 脚本 API 的颜色参数是 **sRGB 0..1**（美术 / CSS 的直觉：`0.5` 就是中灰），
@@ -19,7 +19,7 @@ use xgc_world::{
 ///
 /// 少了这一步，脚本给的颜色会被当成线性值再经 sRGB 目标编码一次：
 /// HUD 血条 `(0.86, 0.33, 0.28)` 会从旧端的 `#DC5347` 变成 `#EF9A90`。
-fn srgb_to_linear(channel: f32) -> f32 {
+pub(crate) fn srgb_to_linear(channel: f32) -> f32 {
     if channel <= 0.04045 {
         channel / 12.92
     } else {
@@ -29,8 +29,8 @@ fn srgb_to_linear(channel: f32) -> f32 {
 
 pub use crate::view::{EntityView, ScriptView};
 
-type Commands = Rc<RefCell<Vec<Command>>>;
-type View = Rc<RefCell<ScriptView>>;
+pub(crate) type Commands = Rc<RefCell<Vec<Command>>>;
+pub(crate) type View = Rc<RefCell<ScriptView>>;
 
 pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Result<(), String> {
     let globals = lua.globals();
@@ -371,93 +371,7 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
             .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
-    let ui_text_commands = Rc::clone(commands);
-    globals
-        .set(
-            "ui_set_text",
-            lua.create_function(move |_, (_ctx, id, text): (mlua::Value, u64, String)| {
-                push_set(
-                    &ui_text_commands,
-                    id,
-                    UiElement::ID,
-                    "text",
-                    FieldValue::String(text),
-                );
-                Ok(())
-            })
-            .map_err(|err| err.to_string())?,
-        )
-        .map_err(|err| err.to_string())?;
-    let ui_size_commands = Rc::clone(commands);
-    globals
-        .set(
-            "ui_set_size",
-            lua.create_function(
-                move |_, (_ctx, id, width, height): (mlua::Value, u64, f32, f32)| {
-                    push_set(
-                        &ui_size_commands,
-                        id,
-                        UiElement::ID,
-                        "offset_max",
-                        FieldValue::Vec2([f64::from(width), f64::from(height)]),
-                    );
-                    Ok(())
-                },
-            )
-            .map_err(|err| err.to_string())?,
-        )
-        .map_err(|err| err.to_string())?;
-    let ui_color_commands = Rc::clone(commands);
-    globals
-        .set(
-            "ui_set_bg_color",
-            lua.create_function(
-                move |_, (_ctx, id, r, g, b, a): (mlua::Value, u64, f32, f32, f32, f32)| {
-                    // 脚本给的是 sRGB，组件存线性：与旧端同口径，见 `srgb_to_linear`。
-                    let linear = |channel: f32| f64::from(srgb_to_linear(channel));
-                    push_set(
-                        &ui_color_commands,
-                        id,
-                        UiElement::ID,
-                        "background",
-                        FieldValue::Vec4([linear(r), linear(g), linear(b), f64::from(a)]),
-                    );
-                    Ok(())
-                },
-            )
-            .map_err(|err| err.to_string())?,
-        )
-        .map_err(|err| err.to_string())?;
-    let ui_visible_commands = Rc::clone(commands);
-    globals
-        .set(
-            "ui_set_visible",
-            lua.create_function(move |_, (_ctx, id, visible): (mlua::Value, u64, bool)| {
-                push_set(
-                    &ui_visible_commands,
-                    id,
-                    UiElement::ID,
-                    "visible",
-                    FieldValue::Bool(visible),
-                );
-                Ok(())
-            })
-            .map_err(|err| err.to_string())?,
-        )
-        .map_err(|err| err.to_string())?;
-    let click_view = Rc::clone(view);
-    globals
-        .set(
-            "ui_clicked",
-            lua.create_function(move |_, (_ctx, id): (mlua::Value, u64)| {
-                Ok(click_view
-                    .borrow()
-                    .entity(id)
-                    .is_some_and(|entity| entity.clicked))
-            })
-            .map_err(|err| err.to_string())?,
-        )
-        .map_err(|err| err.to_string())?;
+    crate::ui_api::register(lua, commands, view)?;
     let action_view = Rc::clone(view);
     globals
         .set(

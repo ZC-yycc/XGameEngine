@@ -6,6 +6,19 @@
 
 use std::collections::BTreeMap;
 
+/// `ui.element`（comp `0x0601`）的只读快照：布局 setter 需要「当前尺寸 / 位置」
+/// 做增量修改，getter 需要文本 / 可见 / 可交互。
+#[derive(Clone, Debug, Default)]
+pub struct UiElementView {
+    pub anchor_min: [f32; 2],
+    pub anchor_max: [f32; 2],
+    pub offset_min: [f32; 2],
+    pub offset_max: [f32; 2],
+    pub text: String,
+    pub visible: bool,
+    pub interactable: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct EntityView {
     pub id: u64,
@@ -16,6 +29,8 @@ pub struct EntityView {
     pub anim_parameters: Option<String>,
     /// `animation.layers` 的 RON 层栈（脚本按层名改权重 / 参数）。
     pub anim_layers: Option<String>,
+    /// `ui.element` 快照（非 UI 实体为 `None`）。
+    pub ui: Option<UiElementView>,
     pub clicked: bool,
     pub hovered: bool,
     pub pressed: bool,

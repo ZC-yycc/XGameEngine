@@ -10,6 +10,7 @@ use xgc_base::EntityId;
 use xgc_world::{Command, Script, Value, World};
 
 use crate::legacy::{EntityView, ScriptView};
+use crate::view::UiElementView;
 use crate::LuaHost;
 
 struct Entry {
@@ -215,6 +216,34 @@ impl ScriptRuntime {
                                 row.anim_parameters = Some(value.clone());
                             }
                         }
+                    }
+                    0x0601 => {
+                        let mut ui = UiElementView {
+                            visible: true,
+                            interactable: true,
+                            ..Default::default()
+                        };
+                        for (field, value) in &component.fields {
+                            match (field.as_str(), value) {
+                                ("anchor_min", Value::Vec2(value)) => {
+                                    ui.anchor_min = [value[0] as f32, value[1] as f32];
+                                }
+                                ("anchor_max", Value::Vec2(value)) => {
+                                    ui.anchor_max = [value[0] as f32, value[1] as f32];
+                                }
+                                ("offset_min", Value::Vec2(value)) => {
+                                    ui.offset_min = [value[0] as f32, value[1] as f32];
+                                }
+                                ("offset_max", Value::Vec2(value)) => {
+                                    ui.offset_max = [value[0] as f32, value[1] as f32];
+                                }
+                                ("text", Value::String(value)) => ui.text = value.clone(),
+                                ("visible", Value::Bool(value)) => ui.visible = *value,
+                                ("interactable", Value::Bool(value)) => ui.interactable = *value,
+                                _ => {}
+                            }
+                        }
+                        row.ui = Some(ui);
                     }
                     0x0603 => {
                         for (field, value) in &component.fields {
