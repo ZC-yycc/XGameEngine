@@ -204,6 +204,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut audio = None;
         let mut physics = None;
         let mut animator = None;
+        let mut animator_additive = None;
         let mut character = None;
         let mut ui = None;
         let mut particle = None;
@@ -295,6 +296,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                         ),
                         None => None,
                     };
+                    animator_additive = old.additive.clone();
                     animator = Some((
                         old.clip.clone(),
                         old.speed,
@@ -372,6 +374,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
             });
         }
         if let Some((clip, speed, looping, autoplay, fade_time, machine)) = animator {
+            let additive = animator_additive.unwrap_or_default();
             let position = old.transform.position.to_array();
             let rotation = old.transform.rotation.to_array();
             let scale = old.transform.scale.to_array();
@@ -383,6 +386,10 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     autoplay,
                     fade_time,
                     machine,
+                    additive_clip: additive.clip,
+                    additive_weight: additive.weight,
+                    additive_speed: additive.speed,
+                    additive_looping: additive.looping,
                     position: [
                         f64::from(position[0]),
                         f64::from(position[1]),

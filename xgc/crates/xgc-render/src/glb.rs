@@ -13,13 +13,17 @@ use self::material::MaterialDef;
 use self::texture::{ImageDef, TextureDef};
 use super::mesh::Mesh;
 
+mod additive;
 mod animation;
 mod attributes;
 mod material;
 mod normals;
 mod texture;
 
-pub use animation::{AnimationClip, AnimationNode, AnimationPath, AnimationSet, Interpolation};
+pub use additive::AdditiveLayer;
+pub use animation::{
+    AnimationClip, AnimationNode, AnimationPath, AnimationSet, Interpolation, LocalPose,
+};
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;

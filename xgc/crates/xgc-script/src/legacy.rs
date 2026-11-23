@@ -9,7 +9,8 @@ use std::rc::Rc;
 use mlua::{Lua, Table};
 use xgc_base::EntityId;
 use xgc_world::{
-    AnimationState, Command, Component, Transform, UiElement, Value as FieldValue, Velocity,
+    AnimationState, Animator, Command, Component, Transform, UiElement, Value as FieldValue,
+    Velocity,
 };
 
 /// 脚本 API 的颜色参数是 **sRGB 0..1**（美术 / CSS 的直觉：`0.5` 就是中灰），
@@ -285,9 +286,32 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
         )
         .map_err(|err| err.to_string())?;
 
+    let additive_commands = Rc::clone(commands);
+    globals
+        .set(
+            "set_anim_additive_weight",
+            lua.create_function(move |_, (_ctx, weight): (mlua::Value, f32)| {
+                // 旧端把权重钳在 [0,1]；NaN / ±inf 直接忽略，不许一次坏值污染姿势。
+                let weight = if weight.is_finite() {
+                    weight.clamp(0.0, 1.0)
+                } else {
+                    return Ok(());
+                };
+                push_set(
+                    &additive_commands,
+                    self_id,
+                    Animator::ID,
+                    "additive_weight",
+                    FieldValue::F64(f64::from(weight)),
+                );
+                Ok(())
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
     // 旧脚本里出现但当前无实现的调用：静默 no-op，避免迁移脚本直接报错。
     for name in [
-        "set_anim_additive_weight",
         "set_anim_layer_param",
         "set_anim_layer_weight",
         "play_sound",

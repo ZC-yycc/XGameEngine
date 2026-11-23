@@ -10,6 +10,7 @@
 
 use super::assets::MeshCache;
 use super::draw::DrawList;
+use super::glb::AdditiveLayer;
 use super::gpu::GpuError;
 
 pub(crate) fn resolve(meshes: &mut MeshCache, list: &mut DrawList) -> Result<(), GpuError> {
@@ -29,9 +30,21 @@ pub(crate) fn resolve(meshes: &mut MeshCache, list: &mut DrawList) -> Result<(),
         let (Some(skin), Some(animations)) = (&mesh.skin, &mesh.animations) else {
             continue;
         };
-        let Some(pose) =
-            animations.joint_pose(&sample.clip, sample.time, sample.looping, &skin.joint_nodes)
-        else {
+        // 叠加层：权重 0 / 空剪辑时不付采样代价（与旧端零权重逐位一致）。
+        let additive = (!sample.additive_clip.is_empty() && sample.additive_weight > 0.0)
+            .then_some(AdditiveLayer {
+                clip: sample.additive_clip.as_str(),
+                time: sample.additive_time,
+                looping: sample.additive_looping,
+                weight: sample.additive_weight,
+            });
+        let Some(pose) = animations.joint_pose_with_additive(
+            &sample.clip,
+            sample.time,
+            sample.looping,
+            additive,
+            &skin.joint_nodes,
+        ) else {
             continue;
         };
         // 坏数据（NaN/Inf）不进 palette：一次数值事故不该把整个角色画成无面片。

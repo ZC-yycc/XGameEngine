@@ -1,7 +1,9 @@
 //! 旧 Animator 状态机 → `animation.state` 组件迁移。
 
 use xgc_migrate::migrate_str;
-use xgc_world::{parse_machine, parse_parameters, AnimationState, Component, StateMachine};
+use xgc_world::{
+    parse_machine, parse_parameters, AnimationState, Animator, Component, StateMachine,
+};
 
 const SCENE: &str = r#"(
     format_version: 2,
@@ -31,6 +33,12 @@ const SCENE: &str = r#"(
                             looping: true,
                             autoplay: true,
                             fade_time: 0.25,
+                            additive: Some((
+                                clip: "Run",
+                                weight: 0.3,
+                                speed: 1.5,
+                                looping: true,
+                            )),
                             machine: Some((
                                 entry: "Idle",
                                 parameters: {
@@ -100,4 +108,33 @@ fn animator_machine_becomes_animation_state_component() {
     };
     let parameters = parse_parameters(parameters);
     assert_eq!(parameters.get("speed"), Some(&0.0));
+
+    // 叠加层配置一并搬进 Animator 组件；运行时相位（additive_time）不落盘。
+    let animator = entity
+        .components
+        .iter()
+        .find(|component| component.component == Animator::ID)
+        .expect("Fox 迁移后应有 animation.animator 组件");
+    let field = |name: &str| {
+        animator
+            .fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("缺 {name} 字段"))
+    };
+    assert_eq!(
+        field("additive_clip"),
+        &xgc_world::Value::String("Run".to_string())
+    );
+    // 旧场景是 f32；组件字段存 f64，必须按 f32→f64 的精确值比较。
+    assert_eq!(
+        field("additive_weight"),
+        &xgc_world::Value::F64(f64::from(0.3_f32))
+    );
+    assert_eq!(
+        field("additive_speed"),
+        &xgc_world::Value::F64(f64::from(1.5_f32))
+    );
+    assert_eq!(field("additive_looping"), &xgc_world::Value::Bool(true));
 }

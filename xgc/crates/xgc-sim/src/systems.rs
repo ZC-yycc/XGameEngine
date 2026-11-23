@@ -146,6 +146,11 @@ impl System for AnimatorSystem {
                 return;
             }
             animator.time += animator.speed * dt;
+            // 叠加层有自己的时钟：基础层速度被冻住时呼吸 / 弹跳仍按自己的速度走，
+            // 与旧端 `AnimatorSystem` 的 additive 通道一致。
+            if !animator.additive_clip.is_empty() && animator.additive_speed > 0.0 {
+                animator.additive_time += animator.additive_speed * dt;
+            }
             if animator.blend_duration > 0.0 {
                 animator.blend_elapsed += dt;
                 if animator.blend_elapsed >= animator.blend_duration {

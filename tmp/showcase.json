@@ -2880,6 +2880,34 @@
                     0.009999999776482582
                   ]
                 }
+              ],
+              [
+                "additive_clip",
+                {
+                  "kind": "string",
+                  "value": "Run"
+                }
+              ],
+              [
+                "additive_weight",
+                {
+                  "kind": "f64",
+                  "value": 0.30000001192092896
+                }
+              ],
+              [
+                "additive_speed",
+                {
+                  "kind": "f64",
+                  "value": 1.5
+                }
+              ],
+              [
+                "additive_looping",
+                {
+                  "kind": "bool",
+                  "value": true
+                }
               ]
             ]
           },

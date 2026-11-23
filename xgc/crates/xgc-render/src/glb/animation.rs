@@ -199,6 +199,14 @@ pub struct AnimationClip {
     pub channels: Vec<AnimationChannel>,
 }
 
+/// 一个节点的局部 TRS。叠加层在**局部空间**混合后再统一算全局矩阵。
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalPose {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+}
+
 /// 模型自带的全部 glTF 动画：节点层级 + 剪辑。`None` = 没有 animations。
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnimationSet {
@@ -209,6 +217,56 @@ pub struct AnimationSet {
 impl AnimationSet {
     pub fn clip(&self, name: &str) -> Option<&AnimationClip> {
         self.clips.iter().find(|clip| clip.name == name)
+    }
+
+    /// 采样剪辑得到**节点局部** TRS（未做层级合成）。
+    ///
+    /// 叠加层要在局部空间做混合（旋转增量必须乘在父空间里），所以这里把采样
+    /// 与「算全局矩阵」拆开；`joint_pose` 只是两步的薄封装。
+    pub fn local_pose(&self, clip_name: &str, time: f32, looping: bool) -> Option<Vec<LocalPose>> {
+        if !time.is_finite() {
+            return None;
+        }
+        let clip = self.clip(clip_name)?;
+        self.sample_locals(clip, time, looping)
+    }
+
+    /// 采样一条剪辑到节点局部 TRS；时间按 `looping` 取模 / 钳制。
+    fn sample_locals(
+        &self,
+        clip: &AnimationClip,
+        time: f32,
+        looping: bool,
+    ) -> Option<Vec<LocalPose>> {
+        if clip.duration <= 0.0 {
+            return None;
+        }
+        let time = if looping {
+            time.rem_euclid(clip.duration)
+        } else {
+            time.clamp(0.0, clip.duration)
+        };
+        let mut locals: Vec<LocalPose> = self
+            .nodes
+            .iter()
+            .map(|node| LocalPose {
+                translation: node.translation,
+                rotation: node.rotation,
+                scale: node.scale,
+            })
+            .collect();
+        for channel in &clip.channels {
+            let Some(node) = locals.get_mut(channel.node) else {
+                continue;
+            };
+            let value = channel.sample(time);
+            match channel.path {
+                AnimationPath::Translation => node.translation = [value[0], value[1], value[2]],
+                AnimationPath::Rotation => node.rotation = [value[0], value[1], value[2], value[3]],
+                AnimationPath::Scale => node.scale = [value[0], value[1], value[2]],
+            }
+        }
+        Some(locals)
     }
 
     /// 采样剪辑得到关节**全局**矩阵，顺序与 `joint_nodes` 一致。
@@ -222,35 +280,19 @@ impl AnimationSet {
         looping: bool,
         joint_nodes: &[usize],
     ) -> Option<Vec<Mat4>> {
-        if joint_nodes.is_empty() || !time.is_finite() {
+        if joint_nodes.is_empty() {
             return None;
         }
-        let clip = self.clip(clip_name)?;
-        if clip.duration <= 0.0 {
-            return None;
-        }
-        let time = if looping {
-            time.rem_euclid(clip.duration)
-        } else {
-            time.clamp(0.0, clip.duration)
-        };
-        let mut locals: Vec<([f32; 3], [f32; 4], [f32; 3])> = self
-            .nodes
-            .iter()
-            .map(|node| (node.translation, node.rotation, node.scale))
-            .collect();
-        for channel in &clip.channels {
-            let Some(node) = locals.get_mut(channel.node) else {
-                continue;
-            };
-            let value = channel.sample(time);
-            match channel.path {
-                AnimationPath::Translation => node.0 = [value[0], value[1], value[2]],
-                AnimationPath::Rotation => node.1 = [value[0], value[1], value[2], value[3]],
-                AnimationPath::Scale => node.2 = [value[0], value[1], value[2]],
-            }
-        }
-        let globals = self.global_transforms(&locals)?;
+        let locals = self.local_pose(clip_name, time, looping)?;
+        self.joint_matrices(&locals, joint_nodes)
+    }
+
+    pub(crate) fn joint_matrices(
+        &self,
+        locals: &[LocalPose],
+        joint_nodes: &[usize],
+    ) -> Option<Vec<Mat4>> {
+        let globals = self.global_transforms(locals)?;
         let mut pose = Vec::with_capacity(joint_nodes.len());
         for node in joint_nodes {
             pose.push(*globals.get(*node)?);
@@ -258,7 +300,7 @@ impl AnimationSet {
         Some(pose)
     }
 
-    fn global_transforms(&self, locals: &[([f32; 3], [f32; 4], [f32; 3])]) -> Option<Vec<Mat4>> {
+    fn global_transforms(&self, locals: &[LocalPose]) -> Option<Vec<Mat4>> {
         let count = self.nodes.len();
         let mut globals: Vec<Option<Mat4>> = vec![None; count];
         for start in 0..count {
@@ -278,8 +320,8 @@ impl AnimationSet {
                 cursor = self.nodes.get(index).and_then(|node| node.parent);
             }
             while let Some(index) = chain.pop() {
-                let (translation, rotation, scale) = *locals.get(index)?;
-                let local = compose(translation, rotation, scale);
+                let pose = locals.get(index)?;
+                let local = compose(pose.translation, pose.rotation, pose.scale);
                 let global = match self.nodes.get(index).and_then(|node| node.parent) {
                     Some(parent) => mul(globals.get(parent).copied().flatten()?, local),
                     None => local,
@@ -475,7 +517,7 @@ fn normalize_quat(value: [f32; 4]) -> [f32; 4] {
 }
 
 /// 四元数球面插值；`dot` 为负时先翻号走短弧（与旧端 `q0.slerp(q1, u)` 同语义）。
-fn slerp(a: [f32; 4], b: [f32; 4], u: f32) -> [f32; 4] {
+pub(crate) fn slerp(a: [f32; 4], b: [f32; 4], u: f32) -> [f32; 4] {
     let mut b = b;
     let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
     if dot < 0.0 {

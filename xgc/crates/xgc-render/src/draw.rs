@@ -19,6 +19,13 @@ pub struct AnimatorSample {
     pub clip: String,
     pub time: f32,
     pub looping: bool,
+    /// 叠加层剪辑名（空 = 没有叠加层）。
+    pub additive_clip: String,
+    /// 叠加层权重；0 时渲染侧直接跳过采样（与旧端零权重逐位一致）。
+    pub additive_weight: f32,
+    /// 叠加层自己的时钟（由 `AnimatorSystem` 按 `additive_speed` 推进）。
+    pub additive_time: f32,
+    pub additive_looping: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -84,6 +91,10 @@ pub fn build_draw_list(world: &World) -> DrawList {
                     clip: animator.clip.clone(),
                     time: animator.time,
                     looping: animator.looping,
+                    additive_clip: animator.additive_clip.clone(),
+                    additive_weight: animator.additive_weight,
+                    additive_time: animator.additive_time,
+                    additive_looping: animator.additive_looping,
                 })
         };
         items.push(DrawItem {

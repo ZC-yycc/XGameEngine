@@ -17,6 +17,16 @@ pub struct Animator {
     pub blend_from: String,
     pub blend_elapsed: f32,
     pub blend_duration: f32,
+    /// 叠加层剪辑名（glTF 剪辑）；空 = 没有叠加层。
+    pub additive_clip: String,
+    /// 叠加层权重 ∈ [0,1]：脚本 `set_anim_additive_weight` 每帧写。
+    pub additive_weight: f32,
+    /// 叠加层播放速度倍率（与基础层时钟相互独立）。
+    pub additive_speed: f32,
+    /// 叠加层是否循环。
+    pub additive_looping: bool,
+    /// 叠加层播放时间（秒）；由 `AnimatorSystem` 按 `additive_speed` 推进。
+    pub additive_time: f32,
 }
 
 impl Default for Animator {
@@ -35,6 +45,11 @@ impl Default for Animator {
             blend_from: String::new(),
             blend_elapsed: 0.0,
             blend_duration: 0.0,
+            additive_clip: String::new(),
+            additive_weight: 0.0,
+            additive_speed: 1.0,
+            additive_looping: true,
+            additive_time: 0.0,
         }
     }
 }
@@ -48,7 +63,7 @@ impl Component for Animator {
     }
 
     fn doc() -> &'static str {
-        "最小动画状态：剪辑 / 速度 / 循环 / 自动播放 / 淡入时长"
+        "最小动画状态：剪辑 / 速度 / 循环 / 自动播放 / 淡入时长 / 叠加层"
     }
 
     fn fields() -> Vec<FieldDescriptor> {
@@ -88,6 +103,20 @@ impl Component for Animator {
                 .doc("转场已进行时间（秒）"),
             FieldDescriptor::new("blend_duration", FieldType::F32, Value::F64(0.0))
                 .doc("转场总时长（秒）；0 = 硬切"),
+            FieldDescriptor::new(
+                "additive_clip",
+                FieldType::String,
+                Value::String(String::new()),
+            )
+            .doc("叠加层剪辑名；增量 = 当前帧 − 该剪辑第 0 帧参考姿势"),
+            FieldDescriptor::new("additive_weight", FieldType::F32, Value::F64(0.0))
+                .doc("叠加层权重 ∈ [0,1]；0 = 不叠加"),
+            FieldDescriptor::new("additive_speed", FieldType::F32, Value::F64(1.0))
+                .doc("叠加层播放速度倍率（独立时钟）"),
+            FieldDescriptor::new("additive_looping", FieldType::Bool, Value::Bool(true))
+                .doc("叠加层是否循环"),
+            FieldDescriptor::new("additive_time", FieldType::F32, Value::F64(0.0))
+                .doc("叠加层播放时间（秒），由 AnimatorSystem 推进"),
         ]
     }
 
@@ -111,6 +140,11 @@ impl Component for Animator {
                 f64::from(self.base_rotation[2]),
                 f64::from(self.base_rotation[3]),
             ])),
+            "additive_clip" => Some(Value::String(self.additive_clip.clone())),
+            "additive_weight" => Some(Value::F64(f64::from(self.additive_weight))),
+            "additive_speed" => Some(Value::F64(f64::from(self.additive_speed))),
+            "additive_looping" => Some(Value::Bool(self.additive_looping)),
+            "additive_time" => Some(Value::F64(f64::from(self.additive_time))),
             "blend_from" => Some(Value::String(self.blend_from.clone())),
             "blend_elapsed" => Some(Value::F64(f64::from(self.blend_elapsed))),
             "blend_duration" => Some(Value::F64(f64::from(self.blend_duration))),
@@ -215,6 +249,54 @@ impl Component for Animator {
                         ));
                     }
                 };
+                Ok(())
+            }
+            "additive_clip" => {
+                self.additive_clip = value
+                    .as_string()
+                    .ok_or_else(|| {
+                        format!(
+                            "animation.animator.additive_clip 期望 string，得到 {}",
+                            value.type_name()
+                        )
+                    })?
+                    .to_string();
+                Ok(())
+            }
+            "additive_weight" => {
+                self.additive_weight = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.additive_weight 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "additive_speed" => {
+                self.additive_speed = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.additive_speed 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "additive_looping" => {
+                self.additive_looping = value.as_bool().ok_or_else(|| {
+                    format!(
+                        "animation.animator.additive_looping 期望 bool，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "additive_time" => {
+                self.additive_time = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.additive_time 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
                 Ok(())
             }
             "blend_from" => {

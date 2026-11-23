@@ -26,6 +26,20 @@ pub struct OldAnimator {
     pub fade_time: f32,
     #[serde(default)]
     pub machine: Option<OldMachine>,
+    #[serde(default)]
+    pub additive: Option<OldAdditive>,
+}
+
+/// 旧 `Animator.additive`（单层叠加快捷方式）：增量 = 剪辑当前帧 − 第 0 帧。
+///
+/// 只搬配置；`additive_t` / 权重脚本写值都是运行时状态，不落盘。
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct OldAdditive {
+    pub clip: String,
+    pub weight: f32,
+    pub speed: f32,
+    pub looping: bool,
 }
 
 /// 旧 Animator 的状态机（`Scenes/*.ron` 里的 `machine:` 节）。
@@ -128,6 +142,10 @@ pub struct AnimatorInput {
     pub rotation: [f64; 4],
     pub scale: [f64; 3],
     pub machine: Option<MigratedMachine>,
+    pub additive_clip: String,
+    pub additive_weight: f32,
+    pub additive_speed: f32,
+    pub additive_looping: bool,
 }
 
 /// 生成 `animation.animator`（+ 有机器时再生成 `animation.state`）。
@@ -146,6 +164,22 @@ pub fn animator_components(input: AnimatorInput) -> Vec<ComponentData> {
             ("base_position".to_string(), Value::Vec3(input.position)),
             ("base_rotation".to_string(), Value::Vec4(input.rotation)),
             ("base_scale".to_string(), Value::Vec3(input.scale)),
+            (
+                "additive_clip".to_string(),
+                Value::String(input.additive_clip),
+            ),
+            (
+                "additive_weight".to_string(),
+                Value::F64(f64::from(input.additive_weight)),
+            ),
+            (
+                "additive_speed".to_string(),
+                Value::F64(f64::from(input.additive_speed)),
+            ),
+            (
+                "additive_looping".to_string(),
+                Value::Bool(input.additive_looping),
+            ),
         ],
     }];
     if let Some(machine) = input.machine {

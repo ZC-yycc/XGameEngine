@@ -80,6 +80,80 @@ fn missing_clip_or_bad_time_returns_none() {
 }
 
 #[test]
+fn additive_layer_adds_delta_on_top_of_the_base_pose() {
+    use xgc_render::AdditiveLayer;
+
+    let root = Path::new(RESOURCES);
+    if !root.join("Fox.gltf").exists() {
+        eprintln!("skip: 没有 Fox.gltf");
+        return;
+    }
+    let mut cache = MeshCache::new(root);
+    let mesh = cache.get("Fox.gltf").unwrap().unwrap();
+    let animations = mesh.animations.as_ref().unwrap();
+    let joints = &mesh.skin.as_ref().unwrap().joint_nodes;
+
+    let base = animations
+        .joint_pose("Walk", 0.4, true, joints)
+        .expect("Walk 可采样");
+    // 权重 0：增量被完全乘掉，必须与纯基础姿势逐位一致（旧端 blend_additive 同式）。
+    let zero = animations
+        .joint_pose_with_additive(
+            "Walk",
+            0.4,
+            true,
+            Some(AdditiveLayer {
+                clip: "Run",
+                time: 0.5,
+                looping: true,
+                weight: 0.0,
+            }),
+            joints,
+        )
+        .expect("叠加层可采样");
+    assert_eq!(zero, base, "weight=0 的叠加层不能改动基础姿势");
+
+    // 权重 1：Run 相对它第 0 帧的增量要真的加上去。
+    let full = animations
+        .joint_pose_with_additive(
+            "Walk",
+            0.4,
+            true,
+            Some(AdditiveLayer {
+                clip: "Run",
+                time: 0.5,
+                looping: true,
+                weight: 1.0,
+            }),
+            joints,
+        )
+        .expect("叠加层可采样");
+    assert!(
+        full.iter()
+            .zip(&base)
+            .any(|(a, b)| a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-4)),
+        "weight=1 的叠加层应改变关节矩阵"
+    );
+
+    // 叠加剪辑不存在：退回基础姿势，不报错、不把角色画没。
+    let missing = animations
+        .joint_pose_with_additive(
+            "Walk",
+            0.4,
+            true,
+            Some(AdditiveLayer {
+                clip: "NoSuchClip",
+                time: 0.5,
+                looping: true,
+                weight: 1.0,
+            }),
+            joints,
+        )
+        .expect("叠加剪辑缺失时仍应返回基础姿势");
+    assert_eq!(missing, base);
+}
+
+#[test]
 fn box_glb_has_no_animations() {
     let root = Path::new(RESOURCES);
     if !root.join("Box.glb").exists() {
