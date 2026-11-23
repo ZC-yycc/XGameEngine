@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**视觉对等判定口径**切片把「视觉对等」从一句主观描述变成可复现的门禁：`parity_report` 把结构性差异拆成「轮廓 1 px 带内的 MSAA 覆盖差」与「内部着色 / 结构差」（轮廓判据 = 与 8 邻域任一分量差 > 40，与结构性 ≥8 是两个独立口径），`xgc parity` 按缺省 0.1% / 0.01% 门槛判定；状态对齐帧第 1 / 150 帧内部仅 9 / 30 像素、逐帧通过，CUTOVER 矩阵 10 / 10 行通过。
+
 **分区并行批**切片把批内执行从「整批串行 / 整批全支持才并行」改成**分区执行**：`supports_parted` 的系统并行、其余按注册顺序串行，`skeleton_pose` 与 `audio_mixer` 入批（`audio_mixer` 顺带补 `core.transform` 读声明），CLI `run-world` / `trace` 可传线程数；1 / 2 / 8 线程与默认 `state_hash` 逐位一致，门禁 617 条通过。
 
 **批内并行执行接线**切片把同批系统真正并行：`System::supports_parted` / `run_parted`、`Schedule::set_parallel_threads`（默认 1 = 串行）、批内全支持才并行、panic 先还原写集；先转 `animation_apply` 与 `animation_layers`，串行 / 并行 `state_hash` 与 `revision` 逐位一致，门禁 612 条通过。
@@ -221,11 +223,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（617 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
-`xgc-xtask check` 全绿（291 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 38848 字节，
+`cargo test --workspace --offline` 全绿（626 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
+`xgc-xtask check` 全绿（293 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 38848 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（已收口：分区执行 + `skeleton_pose` / `audio_mixer` 入批 + CLI 线程数；默认串行守零分配门禁）、狐狸位姿残差 / 红球高光 / 木箱与阴影轮廓（根运动及其三宿主接线、layers、UI 脚本 setter 与运行时创建（旧端 29 个全齐）、UI 覆盖层 SDF、刚体世界变换、截图裁剪面已接；第 150 / 200 / 300 帧结构性 0.08% / 0.13% / 0.26%，总差异 1.01% / 1.30% / 1.50%）、完整刚体、
+**主要缺口**：跨系统并行执行（已收口：分区执行 + `skeleton_pose` / `audio_mixer` 入批 + CLI 线程数；默认串行守零分配门禁）、狐狸位姿残差 / 红球高光 / 木箱与阴影轮廓（根运动及其三宿主接线、layers、UI 脚本 setter 与运行时创建（旧端 29 个全齐）、UI 覆盖层 SDF、刚体世界变换、截图裁剪面已接；第 150 / 200 / 300 帧结构性 0.08% / 0.13% / 0.26%，总差异 1.01% / 1.30% / 1.50%）、视觉对等判定已工具化（`xgc parity`：结构性拆轮廓 / 内部，门槛内部 ≤ 0.01% 且总 ≤ 0.1%，第 1 / 150 帧内部仅 9 / 30 像素，状态对齐帧逐帧通过；第 200 / 300 帧内部差异集中在动态物软阴影边缘，由 `xgc gate` 端到端口径守））、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），
@@ -247,6 +249,7 @@ cargo run -p xgc-cli -- import world.json
 cargo run -p xgc-cli -- run 60
 cargo run -p xgc-cli -- trace <世界.json> [帧数] [资产根]
 cargo run -p xgc-cli -- gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]
+cargo run -p xgc-cli -- parity <旧图> <新图> [结构性%] [内部%]
 cargo run -p xgc-cli -- image-diff <旧图> <新图> [阈值] [report]
 cargo run -p xgc-cli -- serve
 cargo run -p xgc-cli -- migrate <旧.ron|旧目录> <新.json|新目录>

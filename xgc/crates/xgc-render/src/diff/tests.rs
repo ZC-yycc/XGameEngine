@@ -154,3 +154,63 @@ fn alpha_only_differences_are_not_counted() {
     assert!(report.worst_blocks.is_empty());
     assert_eq!(report.channel_mean_abs, [0.0, 0.0, 0.0]);
 }
+
+#[test]
+fn parity_classifies_a_one_pixel_edge_shift_as_edge() {
+    // 黑底白条：把白条整体右移 1 列，差异像素都贴着轮廓。
+    let base = image(8, 8, |x, _| {
+        if x == 4 {
+            [255, 255, 255, 255]
+        } else {
+            [0, 0, 0, 255]
+        }
+    });
+    let shifted = image(8, 8, |x, _| {
+        if x == 5 {
+            [255, 255, 255, 255]
+        } else {
+            [0, 0, 0, 255]
+        }
+    });
+    let report = parity_report(&base, &shifted).expect("同尺寸");
+    // 每行 x=4 / x=5 两个像素不一致，都在轮廓 1px 带内。
+    assert_eq!(report.structural, 16);
+    assert_eq!(report.edge_structural, 16);
+    assert_eq!(report.interior_structural, 0);
+    assert_eq!(report.interior_ratio, 0.0);
+}
+
+#[test]
+fn parity_keeps_an_interior_blot_interior() {
+    // 纯色底上一个 +20 的孤立像素：邻域色差都只有 20（<40），不算轮廓。
+    let base = image(8, 8, |_, _| [100, 100, 100, 255]);
+    let mut blot = base.clone();
+    blot.rgba[3 * 8 + 3] = [130, 100, 100, 255];
+    let report = parity_report(&base, &blot).expect("同尺寸");
+    assert_eq!(report.structural, 1);
+    assert_eq!(report.edge_structural, 0);
+    assert_eq!(report.interior_structural, 1);
+    assert!((report.interior_ratio - 1.0 / 64.0).abs() < 1e-6);
+}
+
+#[test]
+fn parity_ignores_one_lsb_noise_but_keeps_the_mean() {
+    let base = image(8, 8, |_, _| [100, 100, 100, 255]);
+    let mut noise = base.clone();
+    for pixel in noise.rgba.iter_mut() {
+        pixel[0] += 1;
+    }
+    let report = parity_report(&base, &noise).expect("同尺寸");
+    assert_eq!(report.structural, 0);
+    assert_eq!(report.edge_structural, 0);
+    assert_eq!(report.interior_structural, 0);
+    assert_eq!(report.max_delta, 1);
+    assert!((report.mean_abs - 0.25).abs() < 1e-6);
+}
+
+#[test]
+fn parity_rejects_mismatched_sizes() {
+    let left = image(4, 4, |_, _| [0, 0, 0, 255]);
+    let right = image(5, 4, |_, _| [0, 0, 0, 255]);
+    assert!(parity_report(&left, &right).is_err());
+}

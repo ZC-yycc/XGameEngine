@@ -199,6 +199,128 @@ pub fn diff_breakdown(a: &ImageData, b: &ImageData) -> Result<ImageDiffReport, S
     })
 }
 
+/// 轮廓带判定的邻域色差阈值：中心像素与 8 邻域任一分量差超过它就当轮廓像素。
+///
+/// 与「结构性差异」的 8 不是同一个口径：前者回答"这里是不是几何轮廓"（AA 覆盖差
+/// 只会落在轮廓两侧 1px），后者回答"差得够不够多"。两个常量分开写，改一个不会
+/// 悄悄改另一个。
+pub const PARITY_EDGE_THRESHOLD: u8 = 40;
+
+/// 视觉对等判定报告：把结构性差异拆成「轮廓 1px 带的 AA 覆盖差」与「内部差」。
+///
+/// 两个独立渲染器在同一台机器上也做不到逐字节一致：±1 LSB 是浮点 → 8 位编码的
+/// 舍入，轮廓附近的 ≥8 差是 MSAA 覆盖差（三角边落在采样点两侧）。真正该追问的是
+/// **内部**（不在任一图轮廓 1px 带内）的结构性差异——那是着色 / 几何 / 阴影的语义差。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParityReport {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: u32,
+    /// 所有通道绝对差均值（0..255，RGBA 四通道，与 [`ImageDiff::mean_abs`] 同口径）。
+    pub mean_abs: f32,
+    pub max_delta: u8,
+    /// 最大 RGB 通道差 >= 8 的像素数。
+    pub structural: u32,
+    /// 结构性像素占比（0..1）。
+    pub structural_ratio: f32,
+    /// 落在任一图像自身轮廓 1px 带内的结构性像素。
+    pub edge_structural: u32,
+    /// 不在轮廓带内的结构性像素——视觉对等真正要审的那部分。
+    pub interior_structural: u32,
+    /// 内部结构性像素占全部像素的比例（0..1）。
+    pub interior_ratio: f32,
+}
+
+/// 逐像素判断「是否在轮廓 1px 带内」；轮廓在两张图里各判一次，取并集。
+fn edge_mask(image: &ImageData) -> Vec<bool> {
+    let width = image.width as usize;
+    let height = image.height as usize;
+    let mut mask = vec![false; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let center = image.rgba[index];
+            'neighbor: for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                        continue;
+                    }
+                    let other = image.rgba[ny as usize * width + nx as usize];
+                    for channel in 0..3 {
+                        if center[channel].abs_diff(other[channel]) > PARITY_EDGE_THRESHOLD {
+                            mask[index] = true;
+                            break 'neighbor;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    mask
+}
+
+/// 视觉对等判定：把结构性差异拆成轮廓带与内部两部分。
+///
+/// 判定门槛由调用方决定（CLI `xgc parity` / 割接文档）；这里只负责分类与计数，
+/// 保证同一份图像永远得到同一组数字。
+pub fn parity_report(a: &ImageData, b: &ImageData) -> Result<ParityReport, String> {
+    if a.width != b.width || a.height != b.height {
+        return Err(format!(
+            "尺寸不同：{}x{} vs {}x{}",
+            a.width, a.height, b.width, b.height
+        ));
+    }
+    let pixels = a.width * a.height;
+    let edges_a = edge_mask(a);
+    let edges_b = edge_mask(b);
+    let mut sum = 0u64;
+    let mut max_delta = 0u8;
+    let mut structural = 0u32;
+    let mut edge_structural = 0u32;
+    for (index, (left, right)) in a.rgba.iter().zip(&b.rgba).enumerate() {
+        let mut max_rgb = 0u8;
+        for channel in 0..3 {
+            let delta = left[channel].abs_diff(right[channel]);
+            max_delta = max_delta.max(delta);
+            max_rgb = max_rgb.max(delta);
+        }
+        // 均值与 `diff_images` 同口径：alpha 也计入（画面最终 alpha 恒为 1，
+        // 但这里不假设调用方）。
+        for channel in 3..4 {
+            sum += u64::from(left[channel].abs_diff(right[channel]));
+            max_delta = max_delta.max(left[channel].abs_diff(right[channel]));
+        }
+        sum += u64::from(left[0].abs_diff(right[0]))
+            + u64::from(left[1].abs_diff(right[1]))
+            + u64::from(left[2].abs_diff(right[2]));
+        if max_rgb >= 8 {
+            structural += 1;
+            if edges_a[index] || edges_b[index] {
+                edge_structural += 1;
+            }
+        }
+    }
+    let interior_structural = structural - edge_structural;
+    let channels = u64::from(pixels.max(1)) * 4;
+    Ok(ParityReport {
+        width: a.width,
+        height: a.height,
+        pixels,
+        mean_abs: sum as f32 / channels as f32,
+        max_delta,
+        structural,
+        structural_ratio: structural as f32 / pixels.max(1) as f32,
+        edge_structural,
+        interior_structural,
+        interior_ratio: interior_structural as f32 / pixels.max(1) as f32,
+    })
+}
+
 /// 把一条轴按 `count` 段切分；除不尽的余数平均分给前面的段（不丢像素）。
 fn spans(length: usize, count: usize) -> Vec<(usize, usize)> {
     let mut spans = Vec::with_capacity(count);

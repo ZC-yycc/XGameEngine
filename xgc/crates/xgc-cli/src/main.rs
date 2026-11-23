@@ -21,6 +21,7 @@ mod compare_cmd;
 mod cook_cmd;
 mod gate_cmd;
 mod input_cmd;
+mod parity_cmd;
 mod plan_cmd;
 mod project_render;
 mod render;
@@ -83,6 +84,12 @@ fn main() -> ExitCode {
             args.next().as_deref(),
             args.next().as_deref(),
         ),
+        Some("parity") => parity_cmd::parity(
+            args.next().as_deref(),
+            args.next().as_deref(),
+            args.next().as_deref(),
+            args.next().as_deref(),
+        ),
         Some("pack") => cook_cmd::pack(
             args.next().as_deref(),
             args.next().as_deref(),
@@ -106,13 +113,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
