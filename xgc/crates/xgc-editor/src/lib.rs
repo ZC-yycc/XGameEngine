@@ -19,7 +19,7 @@ use xgc_sim::{InputMap, ParticleSystem, Simulation};
 use xgc_store::{load_world, save_world};
 use xgc_world::{
     builtin_registry, Camera, Command, ComponentData, ComponentId, GlobalTransform, Material,
-    MeshRenderer, Name, Transform, World, WorldData,
+    MeshRenderer, Name, RootMotionLibrary, Transform, World, WorldData,
 };
 
 pub struct EntityRow {
@@ -46,6 +46,8 @@ struct PlaySession {
     particles: ParticleSystem,
     runtime: Option<ScriptRuntime>,
     input: Option<InputMap>,
+    /// 根运动轨道表：进入 Play 时从播放世界的模型资产建一次（与 CLI 宿主同源）。
+    root_motion: RootMotionLibrary,
 }
 
 pub struct EditorState {

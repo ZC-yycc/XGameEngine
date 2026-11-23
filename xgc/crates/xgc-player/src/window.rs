@@ -7,8 +7,8 @@ use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use xgc_render::{GpuContext, MeshCache, Renderer};
 use xgc_script::ScriptRuntime;
-use xgc_sim::{ParticleSystem, Simulation};
-use xgc_world::World;
+use xgc_sim::{apply_root_motion, ParticleSystem, Simulation};
+use xgc_world::{RootMotionLibrary, World};
 
 struct Viewport {
     texture: wgpu::Texture,
@@ -22,6 +22,8 @@ struct PlayerApp {
     simulation: Option<Simulation>,
     particles: ParticleSystem,
     runtime: Option<ScriptRuntime>,
+    /// 根运动轨道表：进入播放时建一次，每帧在系统 / 脚本之后应用（与 CLI 同序）。
+    root_motion: RootMotionLibrary,
     error: Option<String>,
     viewport: Option<Viewport>,
     frames: u64,
@@ -34,6 +36,7 @@ impl PlayerApp {
             simulation: None,
             particles: ParticleSystem::new(),
             runtime: None,
+            root_motion: RootMotionLibrary::new(),
             error: None,
             viewport: None,
             frames: 0,
@@ -45,6 +48,10 @@ impl PlayerApp {
                     app.error = Some(format!("恢复世界失败：{err}"));
                     return app;
                 }
+                app.root_motion = {
+                    let mut meshes = MeshCache::new(dir);
+                    meshes.root_motion_library(&world)
+                };
                 app.simulation = Some(Simulation::new(world));
                 app.runtime = Some(crate::runtime_for(dir));
             }
@@ -101,6 +108,7 @@ impl PlayerApp {
         {
             self.error = Some(format!("运行失败：{err:?}"));
         } else {
+            apply_root_motion(simulation.world_mut(), 1.0 / 60.0, &self.root_motion);
             self.particles.update(1.0 / 60.0, simulation.world());
             self.frames += 1;
         }

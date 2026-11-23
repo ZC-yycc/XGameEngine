@@ -4,12 +4,11 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use xgc_asset::scan as scan_assets;
-use xgc_asset::AssetCatalog;
 use xgc_render::MeshCache;
 use xgc_script::ScriptRuntime;
 use xgc_sim::{apply_root_motion, ParticleSystem, Simulation};
 use xgc_store::save_world;
-use xgc_world::{Animator, MeshRenderer, RootMotion, RootMotionLibrary, World};
+use xgc_world::{RootMotionLibrary, World};
 
 use crate::world_cmd::{load_world_state, parse_frames};
 
@@ -53,7 +52,11 @@ impl ScriptedRunner {
                 (ScriptRuntime::new(assets_root), None)
             }
         };
-        let root_motion = root_motion_library(&world, assets_root, catalog.as_ref());
+        let mut meshes = match catalog.as_ref() {
+            Some(catalog) => MeshCache::with_catalog(assets_root, catalog.clone()),
+            None => MeshCache::new(assets_root),
+        };
+        let root_motion = meshes.root_motion_library(&world);
         let simulation = Simulation::new(world);
         let fixed_dt = simulation.fixed_dt();
         Self {
@@ -100,58 +103,6 @@ impl ScriptedRunner {
     }
 }
 
-/// 收集世界里需要根运动的模型，把 GLTF 平移通道抽成轨道表。
-///
-/// 只给「Animator 里显式写了 root_motion」的实体取模型：根运动是配置项，
-/// 不缺省对所有模型扫描（那会把每次启动都拖成整包 GLTF 解析）。
-fn root_motion_library(
-    world: &World,
-    assets_root: &Path,
-    catalog: Option<&AssetCatalog>,
-) -> RootMotionLibrary {
-    let mut wanted = std::collections::HashSet::new();
-    world.for_each::<Animator>(|key, animator| {
-        if RootMotion::parse(&animator.root_motion).is_some() {
-            if let Some(id) = world.entity(key) {
-                wanted.insert(id);
-            }
-        }
-    });
-    let mut models = std::collections::BTreeSet::new();
-    if !wanted.is_empty() {
-        world.for_each::<MeshRenderer>(|key, renderer| {
-            if let Some(id) = world.entity(key) {
-                if wanted.contains(&id) {
-                    models.insert(renderer.model.clone());
-                }
-            }
-        });
-    }
-    let mut library = RootMotionLibrary::new();
-    if models.is_empty() {
-        return library;
-    }
-    let mut meshes = match catalog {
-        Some(catalog) => MeshCache::with_catalog(assets_root, catalog.clone()),
-        None => MeshCache::new(assets_root),
-    };
-    for model in models {
-        let Ok(Some(mesh)) = meshes.get(&model) else {
-            continue;
-        };
-        let Some(animations) = mesh.animations.as_ref() else {
-            continue;
-        };
-        let set = animations.root_motion_set();
-        if !set.is_empty() {
-            library.insert(model, set);
-        }
-    }
-    library
-}
-
-/// 固定帧推进，并在每帧系统 / 脚本之后同步推进粒子。
-///
 /// 粒子运行态不落进 `WorldData`；截图宿主要拿最终四边形，而普通 headless 宿主只丢掉它。
 pub(crate) fn advance_world_with_particles(
     world: World,

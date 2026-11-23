@@ -305,3 +305,59 @@ fn editor_play_runs_scripts_and_reads_input() {
     assert_eq!(editor.entity_position(id), Some([0.0, 0.0, 0.0]));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn editor_play_applies_root_motion_like_the_cli() {
+    use xgc_world::{Animator, MeshRenderer, Transform};
+
+    let resources = std::path::Path::new("../../../projects/XGame/Resources");
+    if !resources.join("Fox.gltf").exists() {
+        eprintln!("skip: 没有 Fox.gltf");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_editor_root_motion_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    // 编辑器宿主只认项目根下的资产；开箱即用的 Fox 直接拷过来（约 180 KiB）。
+    for name in ["Fox.gltf", "Fox.bin", "Texture.png"] {
+        std::fs::copy(resources.join(name), dir.join(name)).unwrap();
+    }
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        GlobalTransform::default(),
+        MeshRenderer {
+            model: "Fox.gltf".to_string(),
+        },
+        Animator {
+            clip: "Walk".to_string(),
+            autoplay: true,
+            root_motion: "(node:\"b_Hip_01\",axes:(true,false,true))".to_string(),
+            ..Animator::default()
+        },
+    ));
+    let id = world.entity(entity).unwrap();
+    let mut editor = EditorState::new(world);
+    editor.play_with_scripts(&dir).unwrap();
+    for _ in 0..60 {
+        editor.step().unwrap();
+    }
+    let position = editor.entity_position(id).expect("Fox 应有 Transform");
+    assert!(
+        position[0].abs() + position[2].abs() > 1e-4,
+        "编辑器宿主必须像 CLI 一样应用根运动（位置不该一直停在原点），实际 {position:?}"
+    );
+    // 横向位移必须是根运动给的，纵向（y）不该被根运动改写。
+    assert!(
+        position[1].abs() < 1e-6,
+        "根运动不改 y 轴，实际 {position:?}"
+    );
+    editor.stop().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

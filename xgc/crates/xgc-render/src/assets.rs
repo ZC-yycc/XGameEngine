@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use xgc_asset::AssetCatalog;
+use xgc_world::{Animator, MeshRenderer, RootMotion, RootMotionLibrary, World};
 
 use super::glb::{load_model, MeshError};
 use super::material::MaterialAsset;
@@ -96,6 +97,46 @@ impl MeshCache {
                 .insert(reference.to_string(), asset.sanitized());
         }
         Ok(self.materials.get(reference))
+    }
+
+    /// 按世界里的 `Animator.root_motion` 配置收集各模型的基础剪辑平移轨道。
+    ///
+    /// 只扫描显式写了根运动的实体：根运动是配置项，不缺省对所有模型扫描
+    /// （那会把每次启动都拖成整包 GLTF 解析）。三个宿主（CLI / editor / player）
+    /// 共用这一份，避免某个宿主漏接而让同一份世界在不同宿主里跑出两种位置。
+    pub fn root_motion_library(&mut self, world: &World) -> RootMotionLibrary {
+        let mut wanted = std::collections::HashSet::new();
+        world.for_each::<Animator>(|key, animator| {
+            if RootMotion::parse(&animator.root_motion).is_some() {
+                if let Some(id) = world.entity(key) {
+                    wanted.insert(id);
+                }
+            }
+        });
+        let mut models = std::collections::BTreeSet::new();
+        if !wanted.is_empty() {
+            world.for_each::<MeshRenderer>(|key, renderer| {
+                if let Some(id) = world.entity(key) {
+                    if wanted.contains(&id) {
+                        models.insert(renderer.model.clone());
+                    }
+                }
+            });
+        }
+        let mut library = RootMotionLibrary::new();
+        for model in models {
+            let Ok(Some(mesh)) = self.get(&model) else {
+                continue;
+            };
+            let Some(animations) = mesh.animations.as_ref() else {
+                continue;
+            };
+            let set = animations.root_motion_set();
+            if !set.is_empty() {
+                library.insert(model, set);
+            }
+        }
+        library
     }
 
     /// `guid://` 或相对 asset root 的路径；`subject` 只用于错误文案。

@@ -37,3 +37,67 @@ fn runs_cooked_world_and_scripts() {
     assert!(check.entity_data(id).is_some());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn player_applies_root_motion_in_the_same_order_as_the_cli() {
+    use xgc_render::MeshCache;
+    use xgc_sim::{apply_root_motion, Simulation};
+    use xgc_world::{Animator, GlobalTransform, MeshRenderer};
+
+    let resources = std::path::Path::new("../../../projects/XGame/Resources");
+    if !resources.join("Fox.gltf").exists() {
+        eprintln!("skip: 没有 Fox.gltf");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_player_root_motion_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["Fox.gltf", "Fox.bin", "Texture.png"] {
+        std::fs::copy(resources.join(name), dir.join(name)).unwrap();
+    }
+    let mut world = World::new();
+    world.spawn((
+        Transform::default(),
+        GlobalTransform::default(),
+        MeshRenderer {
+            model: "Fox.gltf".to_string(),
+        },
+        Animator {
+            clip: "Walk".to_string(),
+            autoplay: true,
+            root_motion: "(node:\"b_Hip_01\",axes:(true,false,true))".to_string(),
+            ..Animator::default()
+        },
+    ));
+    xgc_store::save_world(&dir.join("world.json"), &world.world_data()).unwrap();
+
+    // 宿主（`run_cooked`）跑 10 帧。
+    let stats = xgc_player::run_cooked(&dir, 10).unwrap();
+
+    // 同一份世界用「显式建表 + 每帧 apply_root_motion」跑同样帧数，应当逐位同哈希。
+    let data = xgc_store::load_world(&dir.join("world.json")).unwrap();
+    let mut expected = World::new();
+    expected.restore_world_data(&data).unwrap();
+    let root_motion = {
+        let mut meshes = MeshCache::new(&dir);
+        meshes.root_motion_library(&expected)
+    };
+    assert_eq!(root_motion.len(), 1);
+    let mut simulation = Simulation::new(expected);
+    for _ in 0..10 {
+        simulation.step(Vec::new()).unwrap();
+        apply_root_motion(simulation.world_mut(), 1.0 / 60.0, &root_motion);
+    }
+    assert_eq!(
+        stats.state_hash,
+        simulation.world().state_hash(),
+        "player 宿主必须和显式流程逐位一致（漏接根运动时这里会分叉）"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

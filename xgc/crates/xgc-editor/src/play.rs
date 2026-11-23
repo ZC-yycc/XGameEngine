@@ -2,9 +2,10 @@
 
 use std::path::Path;
 
+use xgc_render::MeshCache;
 use xgc_script::ScriptRuntime;
-use xgc_sim::{FrameRecord, InputMap, InputState, ParticleSystem, Simulation};
-use xgc_world::World;
+use xgc_sim::{apply_root_motion, FrameRecord, InputMap, InputState, ParticleSystem, Simulation};
+use xgc_world::{RootMotionLibrary, World};
 
 use crate::{EditorState, PlaySession};
 
@@ -24,6 +25,7 @@ impl EditorState {
             particles: ParticleSystem::new(),
             runtime: None,
             input: None,
+            root_motion: RootMotionLibrary::new(),
         });
         Ok(())
     }
@@ -45,12 +47,19 @@ impl EditorState {
         let input = std::fs::read_to_string(root.join("input.ron"))
             .ok()
             .and_then(|text| InputMap::parse_ron(&text).ok());
+        // 根运动表在进入 Play 时建一次：Editor 与 CLI / player 必须同源，
+        // 否则同一份 Fox 在编辑器里会比命令行少走一段路。
+        let root_motion = {
+            let mut meshes = MeshCache::new(root);
+            meshes.root_motion_library(&world)
+        };
         self.play = Some(PlaySession {
             before,
             simulation: Simulation::new(world),
             particles: ParticleSystem::new(),
             runtime: Some(runtime),
             input,
+            root_motion,
         });
         Ok(())
     }
@@ -94,6 +103,11 @@ impl EditorState {
             session.simulation.step(Vec::new())
         }
         .map_err(|err| format!("Play 帧失败：{err:?}"))?;
+        apply_root_motion(
+            session.simulation.world_mut(),
+            1.0 / 60.0,
+            &session.root_motion,
+        );
         session
             .particles
             .update(1.0 / 60.0, session.simulation.world());

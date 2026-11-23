@@ -2880,6 +2880,86 @@
                     0.009999999776482582
                   ]
                 }
+              ],
+              [
+                "additive_clip",
+                {
+                  "kind": "string",
+                  "value": "Run"
+                }
+              ],
+              [
+                "additive_weight",
+                {
+                  "kind": "f64",
+                  "value": 0.13679534196853638
+                }
+              ],
+              [
+                "additive_speed",
+                {
+                  "kind": "f64",
+                  "value": 1.5
+                }
+              ],
+              [
+                "additive_looping",
+                {
+                  "kind": "bool",
+                  "value": true
+                }
+              ],
+              [
+                "root_motion",
+                {
+                  "kind": "string",
+                  "value": "(node:\"b_Hip_01\",axes:(true,false,true))"
+                }
+              ]
+            ]
+          },
+          {
+            "component": 1286,
+            "fields": [
+              [
+                "layers",
+                {
+                  "kind": "string",
+                  "value": "[(name:\"upper\",mode:Override,clip:\"Walk\",weight:0.0,speed:1.0,looping:true,fade_time:0.25,mask:[\"b_Spine01_02\"],machine:Some((initial:\"Natural\",states:[(name:\"Natural\",clip:\"Walk\",looping:true,speed:1.0),(name:\"Survey\",clip:\"Survey\",looping:true,speed:1.0)],transitions:[(from:Some(\"Natural\"),to:\"Survey\",when:Some(AtLeast(parameter:\"survey\",value:0.5)),duration:0.35),(from:Some(\"Survey\"),to:\"Natural\",when:Some(Below(parameter:\"survey\",value:0.5)),duration:0.15)])),state:\"\",time:0.0,parameters:\"{\\\"survey\\\":0.0}\",fade_from:\"\",fade_from_time:0.0,fade_from_speed:1.0,fade_from_looping:true,fade_elapsed:0.0,fade_duration:0.0)]"
+                }
+              ]
+            ]
+          },
+          {
+            "component": 1285,
+            "fields": [
+              [
+                "machine",
+                {
+                  "kind": "string",
+                  "value": "(initial:\"Idle\",states:[(name:\"Idle\",clip:\"Survey\",looping:true,speed:1.0),(name:\"Walk\",clip:\"Walk\",looping:true,speed:1.0),(name:\"Run\",clip:\"Run\",looping:true,speed:1.0)],transitions:[(from:Some(\"Idle\"),to:\"Walk\",when:Some(AtLeast(parameter:\"speed\",value:0.5)),duration:0.0),(from:Some(\"Walk\"),to:\"Idle\",when:Some(Below(parameter:\"speed\",value:0.3)),duration:0.0),(from:Some(\"Walk\"),to:\"Run\",when:Some(AtLeast(parameter:\"speed\",value:2.0)),duration:0.0),(from:Some(\"Run\"),to:\"Walk\",when:Some(Below(parameter:\"speed\",value:1.8)),duration:0.0)])"
+                }
+              ],
+              [
+                "state",
+                {
+                  "kind": "string",
+                  "value": ""
+                }
+              ],
+              [
+                "time",
+                {
+                  "kind": "f64",
+                  "value": 0.0
+                }
+              ],
+              [
+                "parameters",
+                {
+                  "kind": "string",
+                  "value": "{\"speed\":0.0}"
+                }
               ]
             ]
           },
