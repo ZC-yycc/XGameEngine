@@ -207,8 +207,9 @@ impl Renderer {
         Ok(stats)
     }
 
-    /// 截图取景：与旧引擎 `--screenshot` 同一条相机优先级——有场景相机就用场景相机，
-    /// 缺相机才退到顺光自动取景（包围盒 + 场景主方向光推视轴）。
+    /// 截图取景：与旧引擎 `--screenshot` 同一条相机优先级与裁剪面口径——有场景相机就
+    /// 用场景相机，缺相机才退到顺光自动取景；近 / 远裁剪面一律由 `shot::clip_planes`
+    /// 按场景包围球重算（不读相机组件自己的 near / far）。
     pub fn render_shot(
         &mut self,
         context: &GpuContext,
@@ -216,14 +217,10 @@ impl Renderer {
         world: &World,
     ) -> Result<RenderStats, GpuError> {
         let (width, height) = (target.width(), target.height());
-        let (view_proj, eye) = match camera_view_projection_with_eye(world, width, height) {
-            Some(camera) => camera,
-            None => {
-                let frame = super::shot::frame_scene(world, &mut self.meshes, width, height)
-                    .map_err(|err| GpuError::Mesh(err.to_string()))?;
-                (frame.view_projection(width, height), frame.camera.eye)
-            }
-        };
+        let frame = super::shot::shot_frame(world, &mut self.meshes, width, height)
+            .map_err(|err| GpuError::Mesh(err.to_string()))?;
+        let view_proj = frame.view_projection(width, height);
+        let eye = frame.camera.eye;
         let lighting = self.frame_lighting(world, eye);
         let list = self.prepared_list(world, None)?;
         let scene_view_proj = self.taa_begin(context, width, height, view_proj);

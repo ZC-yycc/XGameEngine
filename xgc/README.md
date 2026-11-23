@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**截图相机裁剪面按场景包围球重算**切片补上第 1 帧缺失的高处投射体阴影：旧端 `--headless --screenshot` 无论用显式机位还是场景相机，近 / 远裁剪面都由 `clip_planes` 按场景包围球重算（showcase near = 0.02），XGC 原来命中场景相机就直接用组件里的 `near = 0.1` / `far = 1000`；CSM 级联拟合虽逐行同式，`near_d` 差 0.08 让悬在 y=7 的 Crate.A 落在第 1 级光空间近平面外（z = -0.2637）→ 深度图没有它 → 地面少整块三角阴影。`shot.rs` 新增 `scene_camera` / `shot_frame` 后第 1 帧 0.96% / 0.29 / 结构性 0.60% → **0.48% / 0.01 / 0.03%**，第 150 / 200 / 300 帧结构性收到 **0.08% / 0.13% / 0.26%**（±1 舍入像素变多属预期）。
+
 **刚体建体改用父链世界变换（非单位四元数归一化）**切片修掉动态体落地后的接触分叉：旧端 `body_from_scene` 的位置 / 旋转 / Auto 尺寸都取 `scene.world_transform()`（父链矩阵相乘再 `Transform::from_matrix` 分解，非单位四元数在这里被归一化），XGC 原来把局部 `Transform` 的原始四元数直接交给 rapier、子实体刚体还建在局部坐标上。`rapier_world/bodies.rs` 新增 `world_transform` / `decompose` 后：动态体状态差 Crate.B `5.3e-3 → 2.7e-5`、Bouncer `2.2e-3 → 1.4e-6`；第 150 帧 1.46% / 0.03 / 0.19% → **0.72% / 0.02 / 0.13%**，第 200 / 300 帧 2.03% / 2.02% → **1.49% / 1.57%**（结构性 0.21% / 0.31%）；第 1 帧不变（高处投射体阴影另案）。
 **UI 覆盖层 SDF（圆角抗锯齿 + 边框）**切片把 UI 矩形绘制换成旧端 `smoothstep` 公式并补上 1px 边框（`border_color` / `border_width` 进 128 字节 uniform；焦点环按旧端外扩 1px + 2px 描边、画在背景之后；`TRIANGLE_WGSL` 抽到 `triangle.wgsl`）：第 150 帧 1.63% / 0.08 / 结构性 0.35% → **1.46% / 0.03 / 0.19%**，第 200 帧 2.20% / 0.11 / 0.48% → **2.03% / 0.07 / 0.31%**，第 300 帧 2.19% / 0.14 / 0.58% → **2.02% / 0.09 / 0.42%**；UI 区域结构性归零，余差重心转到狐狸位姿残差、木箱与阴影轮廓、红球高光。
 
@@ -201,11 +203,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（574 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（575 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（276 个 Rust 文件，最大 598 行）；30 个内建类型的 schema 为 38222 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、狐狸位姿残差 / 第 1 帧高处投射体阴影（根运动、layers、UI 脚本 setter、UI 覆盖层 SDF、刚体世界变换已接；第 150 / 200 / 300 帧 0.72% / 1.49% / 1.57%）、完整刚体、
+**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、狐狸位姿残差 / 红球高光 / 木箱与阴影轮廓（根运动、layers、UI 脚本 setter、UI 覆盖层 SDF、刚体世界变换、截图裁剪面已接；第 150 / 200 / 300 帧结构性 0.08% / 0.13% / 0.26%，总差异 1.01% / 1.30% / 1.50%）、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），

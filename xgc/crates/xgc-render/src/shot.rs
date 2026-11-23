@@ -1,16 +1,21 @@
-//! 截图取景：复刻旧引擎 `--screenshot` 的**顺光自动取景**。
+//! 截图取景：复刻旧引擎 `--screenshot` 的相机优先级与裁剪面口径。
 //!
-//! 旧端截图不使用场景相机：它把整场景包围盒拟合进 45° 视场，视轴由场景主方向光
-//! 推出来，保证画面以受光面为主。XGC 的 `render-frame` 必须走同一套判据，否则两张
-//! 图连构图都不同，逐像素对照没有意义。
+//! 旧端截图的相机优先级 = 显式机位 > **场景相机实体** > 顺光自动取景（整场景包围盒
+//! 拟合进 45° 视场，视轴由场景主方向光推出来）。无论走哪一条，**近 / 远裁剪面都由
+//! [`clip_planes`] 按场景包围球重算**——不是场景相机组件里的 near / far。这一条不能
+//! 省：CSM 的级联拟合吃 `inv_view_proj` 反推的近平面角点，近平面差 0.08（0.1 → 0.02）
+//! 就足以把高处投射体裁出第 0/1 级的深度图，画面上就是「盒子还悬在半空、地上却没有
+//! 影子」。XGC 的 `render-frame` 必须逐项同口径，否则两张图连构图 / 阴影覆盖都对不上。
 //!
 //! 参数与旧实现逐项一致（45° 视场、6% 余量、方位角偏 35°、仰角 0.45 rad、
 //! 空场景半径 5）。改这些常数等于改验收基线，必须连带更新 CUTOVER 的截图证据。
 
-use xgc_world::{SceneEnvironment, World};
+use xgc_world::{Camera, GlobalTransform, SceneEnvironment, World};
 
 use super::assets::MeshCache;
-use super::camera::{length, look_at_rh, mul, perspective_rh_zo, sub, transform_point, Mat4};
+use super::camera::{
+    length, look_at_rh, mul, perspective_rh_zo, quat_rotate, sub, transform_point, Mat4,
+};
 use super::draw::build_draw_list;
 use super::glb::MeshError;
 use super::mesh::Mesh;
@@ -233,7 +238,80 @@ pub fn scene_bounds(world: &World, meshes: &mut MeshCache) -> Result<Option<Boun
     Ok((!bounds.is_empty()).then_some(bounds))
 }
 
-/// 截图取景入口：包围盒 + 场景光的顺光视轴。
+/// 场景相机实体 → 截图相机（第一台 `active` 的，按 `EntityId` 升序取）。
+///
+/// `target = eye + forward`、`up` 用实体自己的上方向 —— 与旧端 `headless.rs`
+/// 把 `camera_view()` 转成 `ShotCamera` 的写法逐项一致（带滚转的机位照原样截）。
+fn scene_camera(world: &World) -> Option<ShotCamera> {
+    let mut selected: Option<(u64, ShotCamera)> = None;
+    world.for_each::<Camera>(|key, camera| {
+        if !camera.active {
+            return;
+        }
+        let Some(entity) = world.entity(key) else {
+            return;
+        };
+        if selected
+            .as_ref()
+            .is_some_and(|(existing, _)| *existing <= entity.raw())
+        {
+            return;
+        }
+        let Some(transform) = world.get::<GlobalTransform>(key) else {
+            return;
+        };
+        let forward = quat_rotate(transform.rotation, [0.0, 0.0, -1.0]);
+        let eye = transform.position;
+        let target = [
+            eye[0] + forward[0],
+            eye[1] + forward[1],
+            eye[2] + forward[2],
+        ];
+        let up = quat_rotate(transform.rotation, [0.0, 1.0, 0.0]);
+        selected = Some((
+            entity.raw(),
+            ShotCamera {
+                eye,
+                target,
+                up,
+                fov_y: camera.fov_y_deg.to_radians(),
+            },
+        ));
+    });
+    selected.map(|(_, camera)| camera)
+}
+
+/// 截图取景入口（相机优先级 + 统一裁剪面）：`render-frame` 与回归测试的唯一口径。
+///
+/// 有场景相机 → 用它（`scene_radius` 仍来自场景包围盒）；没有 → 顺光自动取景。
+/// 两种情况的近 / 远裁剪面都由 [`ShotFrame::view_projection`] 走 [`clip_planes`]。
+pub fn shot_frame(
+    world: &World,
+    meshes: &mut MeshCache,
+    width: u32,
+    height: u32,
+) -> Result<ShotFrame, MeshError> {
+    let bounds = scene_bounds(world, meshes)?;
+    if let Some(camera) = scene_camera(world) {
+        let scene_radius = bounds
+            .as_ref()
+            .map(|bounds| bounds.radius())
+            .unwrap_or(EMPTY_SCENE_FALLBACK_RADIUS);
+        return Ok(ShotFrame {
+            camera,
+            scene_radius,
+        });
+    }
+    let direction = shot_direction(world.environment());
+    Ok(frame_bounds(
+        bounds.as_ref(),
+        aspect(width, height),
+        DEFAULT_FOV_Y,
+        direction,
+    ))
+}
+
+/// 截图取景入口（强制顺光自动取景）：只给"没有场景相机"的调用方 / 测试用。
 pub fn frame_scene(
     world: &World,
     meshes: &mut MeshCache,

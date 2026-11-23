@@ -1,7 +1,7 @@
 //! 截图取景：顺光视轴、包围盒拟合与"不用场景相机"三条判据。
 
 use xgc_render::{
-    default_shot_direction, frame_bounds, frame_scene, scene_bounds, shot_direction,
+    default_shot_direction, frame_bounds, frame_scene, scene_bounds, shot_direction, shot_frame,
     transform_point, Bounds, GpuContext, MeshCache, Renderer, ResourceDesc, ResourceUsage,
     DEFAULT_FOV_Y,
 };
@@ -256,5 +256,56 @@ fn render_shot_prefers_scene_camera_then_frames_the_scene() {
         &behind[center..center + 4],
         &[0, 0, 0, 255],
         "有场景相机时不得改用自动取景"
+    );
+}
+
+/// 场景相机的近 / 远裁剪面必须按场景包围球重算（旧端 `clip_planes` 口径），
+/// 而不是相机组件里的 near / far —— 差的这 0.08 会把高处投射体裁出级联深度图，
+/// 画面上就是「盒子悬在半空、地上却没有影子」（帧 1 三角阴影缺失的根因）。
+#[test]
+fn scene_camera_shot_frame_derives_clip_planes_from_the_bounds() {
+    let mut world = World::new();
+    world.spawn((
+        GlobalTransform {
+            position: [0.0, 0.0, 10.0],
+            ..GlobalTransform::default()
+        },
+        Camera {
+            fov_y_deg: 60.0,
+            near: 0.1,
+            far: 1000.0,
+            active: true,
+        },
+    ));
+    world.spawn((
+        GlobalTransform {
+            position: [0.0, -0.5, 0.0],
+            scale: [24.0, 1.0, 24.0],
+            ..GlobalTransform::default()
+        },
+        MeshRenderer {
+            model: "builtin://cube".to_string(),
+        },
+    ));
+    let mut meshes = MeshCache::new(".");
+    let frame = shot_frame(&world, &mut meshes, 1280, 720).unwrap();
+    // 相机优先级：有场景相机就用它（eye/target 与旧端 headless 的转换同式）。
+    assert_eq!(frame.camera.eye, [0.0, 0.0, 10.0]);
+    assert_eq!(frame.camera.target, [0.0, 0.0, 9.0]);
+    // 半径来自场景包围盒（24³ 立方体 → 半对角线 ≈ 17.0）。
+    assert!(
+        (frame.scene_radius - 17.0).abs() < 0.2,
+        "scene_radius {}",
+        frame.scene_radius
+    );
+    let (near, far) = xgc_render::clip_planes(&frame.camera, frame.scene_radius);
+    assert!(
+        (near - 0.02).abs() < 1e-6,
+        "近平面必须按包围球重算成 0.02（相机距离=1），实际 {near}"
+    );
+    assert!(far > 80.0, "远平面 {far}");
+    assert!(
+        (near - 0.1).abs() > 0.05,
+        "不能沿用相机组件里的 near=0.1：级联近端会差出 0.08"
     );
 }

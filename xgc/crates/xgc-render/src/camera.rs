@@ -183,7 +183,7 @@ pub fn transform_point(matrix: Mat4, point: [f32; 4]) -> [f32; 4] {
     out
 }
 
-fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
     let [qx, qy, qz, qw] = q;
     let uv = [
         qy * v[2] - qz * v[1],
