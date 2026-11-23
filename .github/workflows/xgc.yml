@@ -41,12 +41,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable + clippy + rustfmt
+      - name: Install Rust 1.95.0 + clippy + rustfmt
         # 钉住与开发机一致的 clippy（stable 漂移会让新 lint 把无关改动变红；升级前先本地跑同一版本）。
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
-        with:
           components: clippy, rustfmt
 
       - name: Cache cargo + target
@@ -87,7 +86,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Install Rust 1.95.0
         # 钉住与开发机一致的 clippy（stable 漂移会让新 lint 把无关改动变红；升级前先本地跑同一版本）。
         uses: dtolnay/rust-toolchain@stable
         with:
