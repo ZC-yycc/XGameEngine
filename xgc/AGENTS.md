@@ -65,7 +65,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/tests/steady_state.rs` | 热路径分配门禁：线程本地计数分配器（每个测试线程只看自己的分配）+ 稳态帧预算（60 × (实体数 + 64)），数值型组件世界 `state_hash` 60 次零分配；另有一条 release 吞吐用例默认 `#[ignore]` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-store/src/binary.rs` | `XGCB` 二进制世界：encode / decode / save / load；固定小端、值带标签 |
-| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `Plan` / `PlanStage` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
+| `crates/xgc-sim/src/schedule.rs` | 执行计划与调度器：连续分批、宿主阶段、`run_plan_threaded` / 批内并行（默认串行）；回归 `crates/xgc-sim/tests/parallel_batch.rs` |
+| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with`（调度器拆到 `schedule.rs`、场景与 trace 类型拆到 `scenario.rs`、错误拆到 `error.rs`） |
 | `crates/xgc-sim/tests/schedule_plan.rs` | 执行计划回归：连续批次、同批两两无冲突、摊平 == 注册顺序、宿主阶段位置（插在首个 `runs_after_host` 系统之前）、构造时固化计划 |
 | `crates/xgc-sim/tests/host_order.rs` | 宿主阶段位置回归：默认计划宿主在动画之前 / 宿主闭包在固定步与动画之间执行 / 脚本本帧写的状态机参数当帧生效 |
 | `crates/xgc-sim/tests/parent_body.rs` | 刚体建体世界变换回归：父节点在 `(-5,0.5,0)`、子节点局部 `(0,1.05,0)`，箱子必须停在世界顶面而不是父刚体顶面（局部建体会停在 1.4988） |
@@ -242,8 +243,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 - `World::spawn` 只接受元组 `Bundle`；重复组件在 debug 断言里拒绝。
 - **模型材质因子**：实体不带 `render.material` 时用模型自带的 `metallic` / `roughness`（glTF spec 缺省 1.0；内建图元 = 旧端 `MaterialParams::default` 的 metallic 0.0 / roughness 0.45）；只有 `DrawItem.has_material` 为真才用组件覆盖 roughness。`Material::default().roughness = 0.5` 不是模型缺省。
 - **内建图元**：生成器必须与旧端逐顶点一致（cube 24 顶点带面法线 / UV、`sphere(0.5, 24, 32)` 平滑法线、cylinder 32 段、plane +Y 法线）；内建图元没有法线时会退回屏幕导数（分面），球面高光与条带会重新出现。
-- **并行写视图**：同批系统并行前先 `World::extract_writes` 取成 `WriteSet`（不 bump revision、不动实体表）；提取期间世界读不到该列、窗口内不许增删实体（`restore_writes` 断言兜底）。
-- **帧首准备**：`System::prepare(&World)` 是命令结算之后、执行计划之前的**只读**阶段（按注册顺序调用，只重建派生缓存，不能改语义）；刚体表等派生状态必须在这里建，别挪进 `run`——会吃到本帧 `VelocitySystem` 的积分，整条物理轨迹多出 g·dt²（旧端 `sync_bodies()` 也是先建体再推进）。
+- **并行写视图**：同批系统并行前先 `World::extract_writes` 取成 `WriteSet`（不 bump revision、不动实体表）；提取期间世界读不到该列、窗口内不许增删实体（`restore_writes` 断言兜底）。批内并行由 `System::supports_parted` / `run_parted` 声明，`Schedule::set_parallel_threads(n)` 显式打开（默认串行），整批支持才并行、panic 先还原再 unwind。
+- **帧首准备**：`System::prepare(&World)` 是命令结算之后、执行计划之前的**只读**阶段（按注册顺序调用，只重建派生缓存，不能改语义）；刚体表等派生状态必须在这里建，别挪进 `run`——会吃到本帧 `VelocitySystem` 的积分，整条物理轨迹多出 g·dt²。
 - **宿主阶段位置**：`Schedule::plan()` 把 `PlanStage::Host` 插在第一个 `System::runs_after_host()` 系统之前（没有这种系统才落最后）；动画系统（`animation_state` / `animation` / `animation_apply` / `animation_layers` / `skeleton_pose`）都声明 `runs_after_host`，UI 系统排在宿主之前（旧端 `update_ui()` 先于 `Update` 钩子）。不要再假设宿主阶段恒在最后。
 - **glTF 动画**：剪辑挂在 `Mesh.animations`（模型内部节点层级），渲染侧 `animated_pose::resolve` 按 `Animator.clip` / `time` 采样成 pose 喂现有蒙皮路径，不要为迁移世界伪造骨骼实体。旧 Animator 状态机在迁移时一次性写成 `animation.state`（类型在 `xgc-world`，sim / migrate 共用同一套 `StateMachine`），`AnimationStateSystem` 支持 `AtLeast` / `Below` + 迟滞、转场时长缺省取 `fade_time`。旧端 `additive` 叠加层已迁移（组件 additive_* 字段 + `glb/additive.rs` 局部空间混合 + 脚本 `set_anim_additive_weight` 写权重；参考姿势 = 叠加剪辑第 0 帧，权重 0 逐位等于基础姿势）；`layers`（分层状态机 / 关节遮罩）已迁移（`animation.layers` RON 层栈 + `animation_layers` 推进层机器 / 参数 / 时钟 / 淡入、只写组件；`glb/layers.rs` 在基础 + crossfade + additive 之后按 mask（沿 parent 链匹配节点名）做 Override / Additive；脚本 `set_anim_layer_weight` / `set_anim_layer_param` 真写组件，同帧多次改层栈在命令队列里合并）。宿主阶段现在夹在固定步与动画之间（旧端 `Update` 钩子先于动画 tick），脚本本帧写的动画参数当帧生效；渲染侧交叉淡入已接（`Animator.blend_from` / `blend_from_time` / `blend_from_speed` / `blend_from_looping` 在切换时刻定格旧剪辑时钟，`glb/crossfade.rs` 在模型局部 TRS 上按 alpha 混合后再叠 additive）；旧端 `root_motion`（显式节点名 + 轴开关）已迁移（`Animator.root_motion` RON + `xgc-world` 轨道纯函数 + 宿主在 `step_with` 后调 `apply_root_motion` + 渲染侧在 crossfade 后 additive 前剥离根轴；CLI / editor / player 三宿主均已接）。
 - **根运动**：`Animator.root_motion` 是 RON 快照（`(node:"b_Hip_01", axes:(true,false,true))`，空 = 关；节点名必须显式写，不能猜根节点）；world 侧 `root_motion.rs` 是纯函数（循环剪辑用展开轨迹算跨度增量、fade 按 alpha 混两段增量、轴过滤）；实体位移由宿主在 `step_with` 之后调 `apply_root_motion`（不进默认调度：轨道表来自模型资产，默认调度保持零资产依赖）；轨道表统一由 `MeshCache::root_motion_library` 建一次、CLI / editor / player 同源（去掉任一宿主的应用行都会让该宿主的哈希 / 位移回归变红）；渲染侧在基础 + crossfade 之后、additive/layers 之前把开关轴平移换回绑定值（否则蒙皮与实体双倍前进）；local→world 用 TRS 线性部分（无剪切项）近似，父级非均匀缩放 + 子级旋转与旧端完整矩阵有细微差。
@@ -257,20 +258,20 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 - **刚体建体取世界变换**：位置 / 旋转 / `Auto` 尺寸一律走 `rapier_world/bodies.rs::world_transform`（父链 `local_matrix` 相乘 → `decompose`），与旧端 `body_from_scene(def, scene.world_transform())` 同口径；非单位四元数在这里被矩阵分解归一化 —— 直接把它塞给 `UnitQuaternion::from_quaternion` 会得到非正交旋转矩阵（落地接触分叉，2026-11 修过一次）。子实体刚体因此建在世界位置；运动学体每帧推送也用世界变换。分解来源是 glam 语义，XGC 用 nalgebra 实现（残差 ~1e-5 级）。
 - **截图裁剪面**：相机优先级 = 显式机位 > 场景相机实体 > 顺光自动取景；**近 / 远裁剪面一律由 `shot::clip_planes` 按场景包围球重算**（旧端 `screenshot.rs` 同口径），不要读相机组件 `near` / `far`——差 0.08 就能把高处投射体裁出 CSM 第 0 / 1 级深度图。回归 `crates/xgc-render/tests/shot.rs`。
-- **割接门禁**：逐帧 trace 对表与截图阈值判定统一走 `xgc gate <世界.json> <资产根> <参考目录>`；参考在 `xgc/acceptance/`（`trace.txt` 逐帧 `frame / entities / hash`，忽略内部计数器 `revision`；`frame-<N>.png` 是旧端截图，**必须在验收机同 GPU 环境重生成**）。判定线缺省总差异 ≤ 2%、结构性（单通道 ≥8）≤ 0.5%；退出码 0 全过 / 1 有未通过项 / 2 用法·IO·GPU·空目录错误。门禁与 `render-frame` 共用 `render_world_rgba`，改渲染路径必须同步看门禁。回归 `crates/xgc-cli/tests/gate.rs`。
+- **割接门禁**：逐帧 trace 对表与截图阈值判定统一走 `xgc gate <世界.json> <资产根> <参考目录>`；参考在 `xgc/acceptance/`（`trace.txt` 逐帧 `frame / entities / hash`，忽略内部计数器 `revision`；`frame-<N>.png` 是旧端截图，**必须在验收机同 GPU 环境重生成**）。判定线缺省总差异 ≤ 2%、结构性（单通道 ≥8）≤ 0.5%；退出码 0/1/2；门禁与 `render-frame` 共用 `render_world_rgba`。回归 `crates/xgc-cli/tests/gate.rs`。
 
 ## 当前下一步（按顺序）
 
 1. 割接视觉：已接项（环境 IBL / MSAA / glTF 动画 / UI setter + SDF / 阴影 / 后处理 / KCC / 刚体建体 / 截图裁剪面等）均已接上；逐帧 trace（`xgc trace`）与割接门禁（`xgc gate`）已建。视觉第 150 帧 **1.01% / mean_abs 0.02 / 结构性 0.08%**（第 1 帧 0.48%、第 200 / 300 帧结构性 0.13% / 0.26%）；动态体状态差 1e-5 级、Fox 位置差 4e-7。下一刀收狐狸位姿残差（第 150 帧 244 / 第 300 帧 664）；图像 tint·fill 与运行时创建已接（第 206 / 207 轮，UI 脚本 API 29 个与旧端对齐）；关节 / CCD / 跨系统并行排后面。逐刀数字见 STATUS.md / CUTOVER.md。
-2. 跨系统并行与脚本生命周期：执行计划已落地（`Schedule::plan` 连续批次 + 宿主阶段 + `xgc plan`，`run` / `step_with` 都走计划），世界所有权拆分已落地（`World::extract_writes` / `WriteSet`，第 208 轮），下一刀接批内执行（同批系统各拿一份 WriteSet，1 / 2 / 8 线程同场景 `state_hash` 一致；`HierarchySystem` 的 `set_field` revision 语义要单独处理）；脚本仍走宿主帧末阶段——`ScriptRuntime` 因 mlua 无 send feature 且用 `Rc` / `RefCell` 是 `!Send`，依赖门禁也不允许 `xgc-script → xgc-sim`，强行塞进 `System` 只会扭曲接口；脚本组件生命周期完整化另排。
-3. 割接：旧新逐帧 trace 的 XGC 侧（`xgc trace`）已建、脚本帧也已纳入；旧端虽无逐帧流，但 `--headless --dump-scene` 导出任意帧数终态 + `xgc run-scripts … <输出.json>` 写同形世界，逐 checkpoint 状态对表已打通（Spinner 旋转全等、物理恒差 g·dt²≈2.7 mm 落地收敛、相机 4e-6、Fox 根运动差 4e-7），截图阈值门禁已建（`xgc gate`：逐帧 trace 151 个 checkpoint + 4 张截图全过，参考在 `xgc/acceptance/`；退出码 0/1/2）；视觉余差归因工具 `image-diff … report` 已建（只差 1 LSB 的 0.72% 像素、结构性 0.08%、与旧端总差异 1.01%），收窄仍待旧端逐帧截图；性能门禁的 XGC 侧热路径分配门禁已建；CI release 基线已建（`.github/workflows/xgc.yml` 的 `test` job 跑 `steady_state --ignored`，只记数字）。
+2. 跨系统并行与脚本生命周期：执行计划 / 所有权拆分 / 批内接线已落地（第 208–209 轮，默认串行），下一刀接常驻线程池并把 `skeleton_pose` / `audio_mixer` / `hierarchy` 入批（1/2/8 线程 parity 进门禁；`HierarchySystem` 的 `set_field` revision 语义单独处理）；脚本仍走宿主阶段（`ScriptRuntime` 是 `!Send`，依赖门禁也不许 `xgc-script → xgc-sim`）；脚本组件生命周期完整化另排。
+3. 割接：旧新逐帧 trace 的 XGC 侧（`xgc trace`）已建、脚本帧也已纳入；旧端用 `--headless --dump-scene` + `xgc run-scripts … <输出.json>` 做逐 checkpoint 状态对表（Spinner 全等、物理差 g·dt²≈2.7 mm 落地收敛、相机 4e-6），截图阈值门禁已建（`xgc gate`：逐帧 trace 151 个 checkpoint + 4 张截图全过，参考在 `xgc/acceptance/`；退出码 0/1/2）；视觉余差归因工具 `image-diff … report` 已建（0.72% 只差 1 LSB、结构性 0.08%、总差异 1.01%），收窄待旧端逐帧截图；性能门禁的 XGC 侧热路径分配门禁已建；CI release 基线已建（`.github/workflows/xgc.yml` 的 `test` job 跑 `steady_state --ignored`，只记数字）。
 4. 资产：密码学签名 / 跨机器增量。
-5. 推送与 CI（已建 `.github/workflows/xgc.yml`，首次运行 45245793893 成功）；当前最大 Rust 文件 597 行（`crates/xgc-render/tests/skinned_pbr.rs`），继续守住 600 行软上限。
-   角色回归按语义分三个文件：`crates/xgc-sim/tests/character_kcc.rs`（水平 KCC + 台阶 + 陡坡挤入 + 顶着墙起跳 / 贴墙下落：撞墙 / 斜墙滑 / 球体阻挡 / 刚体优先 / `Replace` 换代后仍移动 / 默认调度陡坡不挤入 / 小半径胶囊上台阶 / 低台阶抬升 / 带刚体不被角色系统写 / 确定性）、
+5. 推送与 CI 已建（`.github/workflows/xgc.yml`）；最大 Rust 文件 597 行。
+   角色回归分三个文件：`crates/xgc-sim/tests/character_kcc.rs`（水平 KCC + 台阶 + 陡坡挤入 + 顶着墙起跳 / 贴墙下落：撞墙 / 斜墙滑 / 球体阻挡 / 刚体优先 / `Replace` 换代后仍移动 / 默认调度陡坡不挤入 / 小半径胶囊上台阶 / 低台阶抬升 / 带刚体不被角色系统写 / 确定性）、
    `crates/xgc-sim/tests/character_ground.rs`（竖直 / 地面 / 坡：自由落体 / 跳跃弧线 / 站地不沉 / 站坡不滑 / 走上 30° 坡 / 走下 30° 坡贴地吸附 / 走出坡沿落地 / 落到箱顶 / 60° 坡上会滑下去 / 50° 迟滞带内站得住 / 确定性）、
    `crates/xgc-sim/tests/rapier_schedule.rs`（刚体表：默认调度动态体落地 / `Replace` 换代后仍移动 / 改 `PhysicsBody` 参数会重建 / 稳态帧不重建 / 缩放动画不重建 / 逐字段表驱动（`half_extents` 三个分量各一条）/ `kind` 拼错仍按动态体回写 / 运行期增删只增量修补 / 增量修补不扰动已有刚体）、
    `crates/xgc-sim/tests/slope_collider.rs`（坡面碰撞体：陡坡挡住角色 / 上表面与解析坡面逐点对齐 / 改坡面参数后重建 / 带 `physics.body` 的坡让位 / 尺寸退化与非有限参数被跳过 / 下坡同样对齐）。
-   各文件世界构造不同（坡 + 无刚体 / 台阶 / 静态盒 + 刚体 / 只有坡没有角色），别把语义混着塞回一个文件。
+   各文件世界构造不同，别把语义混着塞回一个文件。
 
 ## Token 纪律
 

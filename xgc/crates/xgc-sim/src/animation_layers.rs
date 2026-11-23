@@ -8,7 +8,7 @@
 
 use xgc_world::{
     find_layer, layer_parameters, layers_to_ron, parse_layers, AnimLayer, AnimationLayers,
-    Animator, Component, World,
+    Animator, Component, World, WriteSet,
 };
 
 use super::{System, SystemAccess};
@@ -32,23 +32,43 @@ impl System for AnimationLayerSystem {
         }
     }
 
-    fn run(&mut self, world: &mut World, dt: f32) {
-        world.for_each2_mut::<AnimationLayers, Animator>(|_, layers, animator| {
-            if layers.layers.trim().is_empty() {
-                return;
-            }
-            let Ok(mut parsed) = parse_layers(&layers.layers) else {
-                return;
-            };
-            let autoplay = animator.autoplay;
-            for layer in &mut parsed {
-                advance_layer(layer, autoplay, dt);
-            }
-            let updated = layers_to_ron(&parsed);
-            if updated != layers.layers {
-                layers.layers = updated;
+    fn supports_parted(&self) -> bool {
+        true
+    }
+
+    fn run_parted(&mut self, world: &World, writes: &mut WriteSet, dt: f32) {
+        let mut autoplay = std::collections::BTreeMap::new();
+        world.for_each::<Animator>(|key, animator| {
+            autoplay.insert(key, animator.autoplay);
+        });
+        writes.for_each_mut::<AnimationLayers>(|key, layers| {
+            if let Some(&autoplay) = autoplay.get(&key) {
+                advance_layers(layers, autoplay, dt);
             }
         });
+    }
+
+    fn run(&mut self, world: &mut World, dt: f32) {
+        world.for_each2_mut::<AnimationLayers, Animator>(|_, layers, animator| {
+            advance_layers(layers, animator.autoplay, dt);
+        });
+    }
+}
+
+/// 推进一个实体的层栈：状态转移 → 时钟 → 淡入，写回 RON 快照。
+fn advance_layers(layers: &mut AnimationLayers, autoplay: bool, dt: f32) {
+    if layers.layers.trim().is_empty() {
+        return;
+    }
+    let Ok(mut parsed) = parse_layers(&layers.layers) else {
+        return;
+    };
+    for layer in &mut parsed {
+        advance_layer(layer, autoplay, dt);
+    }
+    let updated = layers_to_ron(&parsed);
+    if updated != layers.layers {
+        layers.layers = updated;
     }
 }
 

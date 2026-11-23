@@ -1,339 +1,27 @@
 //! XGC 最小帧循环：按帧应用命令、跑系统、逐帧记录 revision / state hash。
 //!
 //! 执行顺序只认 [`Schedule::plan`]：系统按注册顺序连续分批（同批两两无访问
-//! 冲突），最后一段是宿主帧末阶段（脚本等 `!Send` 状态）。跨系统并行还差世界
-//! 所有权拆分，同批系统当前仍串行。计划之前还有一段**帧首准备**
+//! 冲突），最后一段是宿主帧末阶段（脚本等 `!Send` 状态）。批内并行要先把写集合
+//! 从世界取出（`World::extract_writes`），由 `Schedule::set_parallel_threads` 显式
+//! 打开，默认仍串行。计划之前还有一段**帧首准备**
 //! （[`Schedule::prepare`]）：只读世界、不改语义，用来把派生的运行时缓存
 //! （刚体表等）建到与当前场景一致。确定性契约先钉住：同一份 Scenario（初始
 //! WorldData + 每帧命令 + fixed_dt）跑两遍，trace 必须逐帧一致。
 
 #![deny(unsafe_code)]
 
-use serde::{Deserialize, Serialize};
-use xgc_base::Diagnostic;
-use xgc_world::{Command, ComponentId, UiInput, World, WorldData};
+mod error;
+mod scenario;
 
-pub const TRACE_FORMAT_VERSION: u32 = 1;
+pub use error::SimError;
+pub use scenario::{FrameCommands, FrameRecord, Scenario, Trace, TRACE_FORMAT_VERSION};
 
-/// 默认系统名；Agent 能力清单直接复用，避免手写两份。
-pub fn default_system_names() -> Vec<&'static str> {
-    Schedule::default_schedule(1).names()
-}
+use scenario::default_fixed_dt;
+use xgc_world::{Command, UiInput, World, WorldData};
 
-fn default_fixed_dt() -> f32 {
-    1.0 / 60.0
-}
+mod schedule;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FrameCommands {
-    pub frame: u64,
-    pub commands: Vec<Command>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Scenario {
-    pub initial: WorldData,
-    pub frames: u64,
-    #[serde(default = "default_fixed_dt")]
-    pub fixed_dt: f32,
-    pub commands: Vec<FrameCommands>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FrameRecord {
-    pub frame: u64,
-    pub revision: u64,
-    pub state_hash: u64,
-    pub entities: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Trace {
-    pub format_version: u32,
-    pub frames: Vec<FrameRecord>,
-}
-
-impl Trace {
-    fn new() -> Self {
-        Self {
-            format_version: TRACE_FORMAT_VERSION,
-            frames: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum SimError {
-    Restore(String),
-    InvalidPlan {
-        frame: u64,
-        diagnostics: Vec<Diagnostic>,
-    },
-    Apply {
-        frame: u64,
-        diagnostics: Vec<Diagnostic>,
-    },
-    InvalidScenario(String),
-    TraceMismatch {
-        frame: u64,
-        expected_hash: u64,
-        actual_hash: u64,
-    },
-}
-
-impl std::fmt::Display for SimError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Restore(message) => write!(f, "初始世界恢复失败：{message}"),
-            Self::InvalidPlan { frame, diagnostics } => {
-                write!(f, "第 {frame} 帧计划无效：{diagnostics:?}")
-            }
-            Self::Apply { frame, diagnostics } => {
-                write!(f, "第 {frame} 帧应用失败：{diagnostics:?}")
-            }
-            Self::InvalidScenario(message) => write!(f, "场景无效：{message}"),
-            Self::TraceMismatch {
-                frame,
-                expected_hash,
-                actual_hash,
-            } => write!(
-                f,
-                "第 {frame} 帧 state hash 不一致：期望 {expected_hash:016x}，实际 {actual_hash:016x}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SimError {}
-
-/// 系统声明的读写集。计划分批用它判冲突；跨系统并行还差世界所有权拆分，
-/// 同批系统当前仍按注册顺序串行执行——批是将来并行的确定性输入。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SystemAccess {
-    pub reads: Vec<ComponentId>,
-    pub writes: Vec<ComponentId>,
-}
-
-impl SystemAccess {
-    /// 保守冲突判定：任一方写集合与另一方读 / 写集合相交即冲突；
-    /// 访问集为空的系统按“什么都能碰”处理。
-    pub fn conflicts_with(&self, other: &Self) -> bool {
-        if (self.reads.is_empty() && self.writes.is_empty())
-            || (other.reads.is_empty() && other.writes.is_empty())
-        {
-            return true;
-        }
-        self.writes
-            .iter()
-            .any(|id| other.reads.contains(id) || other.writes.contains(id))
-            || other
-                .writes
-                .iter()
-                .any(|id| self.reads.contains(id) || self.writes.contains(id))
-    }
-}
-
-/// 系统：执行顺序由 [`Schedule::plan`] 决定；`name` 用于 trace / 诊断，
-/// `run` 直接改世界。
-pub trait System: Send {
-    fn name(&self) -> &'static str;
-    fn access(&self) -> SystemAccess {
-        SystemAccess::default()
-    }
-    /// 帧首准备：命令结算之后、执行计划之前，按注册顺序调用一次。
-    ///
-    /// 只拿到只读世界：这里只允许重建派生缓存（刚体表 / 骨架表等），不能改
-    /// 世界语义。刚体表必须在本帧速度积分之前建好——旧端 `sync_bodies()` 也是
-    /// 先建体再推进物理；挪进 `run` 会让新刚体吃到本帧 `VelocitySystem` 的积分，
-    /// 整条轨迹多出 g·dt²。
-    fn prepare(&mut self, _world: &World) {}
-
-    /// 是否必须排在**宿主阶段之后**执行。
-    ///
-    /// 旧端帧序是「固定步 → `Update` 钩子 → 动画 tick」：脚本本帧写的动画参数，
-    /// 状态机同帧就要看到。执行计划把宿主阶段插在第一个 `runs_after_host()`
-    /// 系统之前，默认调度里就是动画系统之前；不参与宿主阶段的系统保持注册顺序。
-    fn runs_after_host(&self) -> bool {
-        false
-    }
-
-    fn run(&mut self, world: &mut World, dt: f32);
-}
-
-/// 执行计划的一段：系统批，或宿主帧末阶段。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PlanStage {
-    /// 同一段内连续的一段系统：两两无访问冲突，批内按注册顺序执行。
-    Batch(Vec<usize>),
-    /// 宿主阶段（脚本等 `!Send` 状态）。独占，插在第一个声明
-    /// [`System::runs_after_host`] 的系统之前（默认调度里是动画系统之前）；
-    /// 没有系统声明时落在最后。与所有系统冲突。
-    Host,
-}
-
-/// 执行计划：一段一段按顺序执行，是帧内系统顺序的唯一来源。
-///
-/// 只能由 [`Schedule::plan`] 构造（字段私有），避免外部拼出与调度器不一致的
-/// 顺序；执行走 [`Schedule::run_plan`]。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Plan {
-    stages: Vec<PlanStage>,
-}
-
-impl Plan {
-    pub fn stages(&self) -> &[PlanStage] {
-        &self.stages
-    }
-
-    /// 摊平所有系统下标（不含宿主阶段）。合法计划应恰好是 `0..len` 的排列，
-    /// 也就是与注册顺序一致。
-    pub fn system_order(&self) -> Vec<usize> {
-        let mut order = Vec::new();
-        for stage in &self.stages {
-            if let PlanStage::Batch(indices) = stage {
-                order.extend_from_slice(indices);
-            }
-        }
-        order
-    }
-}
-
-#[derive(Default)]
-pub struct Schedule {
-    systems: Vec<Box<dyn System>>,
-}
-
-impl Schedule {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 默认系统顺序；Agent 能力清单与 Simulation 共用同一份。
-    pub fn default_schedule(threads: usize) -> Self {
-        let mut schedule = Self::new();
-        schedule.add(PhysicsSystem::default());
-        schedule.add(CharacterJumpSystem);
-        schedule.add(VelocitySystem::new(threads));
-        schedule.add(GroundCollisionSystem::default());
-        schedule.add(AabbCollisionSystem);
-        // 刚体走与旧引擎相同的 rapier 求解器（角动量 / 接触力矩 / 堆叠才与旧图可比）。
-        // 放在这里：上面的简化系统先跑，对 rapier 接管的 `physics.body` 实体的
-        // Transform 改动会被这一步整帧覆盖回物理结果。刚体表由 `prepare` 在本帧
-        // 任何系统之前建好（旧端 `sync_bodies()` 同序）；别把建体挪进 `run`——
-        // 那会吃到 `VelocitySystem` 本帧的积分，整条轨迹多出 g·dt²。
-        schedule.add(RapierPhysicsSystem::default());
-        // UI 布局 / 命中在宿主阶段之前（旧端 `update_ui()` 排在 Update 钩子之前）。
-        schedule.add(UiLayoutSystem::default());
-        schedule.add(UiInteractionSystem);
-        schedule.add(UiFocusSystem);
-        // 宿主阶段在这里：脚本本帧写的动画参数，状态机同帧就要看到（旧端
-        // `Update` 钩子先于动画 tick）。下面这些系统都声明 runs_after_host()。
-        schedule.add(AnimationStateSystem);
-        schedule.add(AnimatorSystem);
-        schedule.add(AnimationPlaybackSystem::default());
-        schedule.add(AnimationLayerSystem);
-        schedule.add(SkeletonPoseSystem);
-        schedule.add(AudioMixerSystem);
-        schedule.add(HierarchySystem::default());
-        schedule
-    }
-
-    pub fn add<S: System + 'static>(&mut self, system: S) {
-        self.systems.push(Box::new(system));
-    }
-
-    pub fn len(&self) -> usize {
-        self.systems.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.systems.is_empty()
-    }
-
-    pub fn names(&self) -> Vec<&'static str> {
-        self.systems.iter().map(|system| system.name()).collect()
-    }
-
-    pub fn accesses(&self) -> Vec<SystemAccess> {
-        self.systems.iter().map(|system| system.access()).collect()
-    }
-
-    /// 生成执行计划：按注册顺序做**连续**贪心分批（同批两两无访问冲突），
-    /// 宿主阶段插在第一个 `runs_after_host()` 系统之前；没有这种系统时落在最后。
-    ///
-    /// 连续性让「计划摊平后 == 注册顺序」：计划即执行顺序，分批怎么合并不改变
-    /// 语义，只是给将来同批并行留的确定性切分。宿主阶段的位置是语义的一部分：
-    /// 旧端「固定步 → Update 钩子 → 动画 tick」，脚本写的动画参数要当帧生效。
-    pub fn plan(&self) -> Plan {
-        let mut stages = Vec::new();
-        let mut batch: Vec<usize> = Vec::new();
-        let mut host_placed = false;
-        for (index, system) in self.systems.iter().enumerate() {
-            if !host_placed && system.runs_after_host() {
-                if !batch.is_empty() {
-                    stages.push(PlanStage::Batch(std::mem::take(&mut batch)));
-                }
-                stages.push(PlanStage::Host);
-                host_placed = true;
-            }
-            let access = system.access();
-            let compatible = batch
-                .iter()
-                .all(|&other| !access.conflicts_with(&self.systems[other].access()));
-            if !compatible {
-                stages.push(PlanStage::Batch(std::mem::take(&mut batch)));
-            }
-            batch.push(index);
-        }
-        if !batch.is_empty() {
-            stages.push(PlanStage::Batch(batch));
-        }
-        if !host_placed {
-            stages.push(PlanStage::Host);
-        }
-        Plan { stages }
-    }
-
-    /// 按计划执行一帧；`host` 在计划的宿主阶段执行一次。
-    ///
-    /// `plan` 必须来自同一个 `Schedule`（只可能由 [`Self::plan`] 产生）。
-    pub fn run_plan(
-        &mut self,
-        plan: &Plan,
-        world: &mut World,
-        dt: f32,
-        mut host: impl FnMut(&mut World),
-    ) {
-        for stage in plan.stages() {
-            match stage {
-                PlanStage::Batch(indices) => {
-                    for &index in indices {
-                        self.systems[index].run(world, dt);
-                    }
-                }
-                PlanStage::Host => host(world),
-            }
-        }
-    }
-
-    /// 帧首准备：命令结算之后、执行计划之前，按注册顺序给每个系统一次只读
-    /// 世界的机会（重建刚体表等派生缓存）。
-    ///
-    /// 只读而不是 `&mut World`：准备阶段不允许改世界语义，否则「计划即唯一
-    /// 执行顺序」就被绕开了。
-    pub fn prepare(&mut self, world: &World) {
-        for system in &mut self.systems {
-            system.prepare(world);
-        }
-    }
-
-    /// 按注册顺序执行所有系统，不带宿主阶段（测试 / 独立用法）。
-    pub fn run(&mut self, world: &mut World, dt: f32) {
-        self.prepare(world);
-        let plan = self.plan();
-        self.run_plan(&plan, world, dt, |_| {});
-    }
-}
+pub use schedule::{default_system_names, Plan, PlanStage, Schedule, System, SystemAccess};
 
 mod aabb;
 mod animation;
@@ -458,6 +146,16 @@ impl Simulation {
 
     pub fn schedule(&self) -> &Schedule {
         &self.schedule
+    }
+
+    /// 打开批内并行执行（默认 1 = 串行）。同批系统需实现 `System::run_parted`；
+    /// 打开后每帧按批新建线程，热路径分配门禁下不要把默认值调成 >1。
+    pub fn set_parallel_threads(&mut self, threads: usize) {
+        self.schedule.set_parallel_threads(threads);
+    }
+
+    pub fn parallel_threads(&self) -> usize {
+        self.schedule.parallel_threads()
     }
 
     /// 当前执行计划（构造时按 `schedule` 固定；`schedule` 只读，不会漂移）。

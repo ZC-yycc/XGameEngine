@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use xgc_world::{Animator, Bone, Component, Transform, World};
+use xgc_base::EntityKey;
+use xgc_world::{Animator, Bone, Component, Transform, World, WriteSet};
 
 use super::{System, SystemAccess};
 
@@ -423,23 +424,9 @@ pub struct AnimationPlaybackSystem {
     pub library: AnimationLibrary,
 }
 
-impl System for AnimationPlaybackSystem {
-    fn runs_after_host(&self) -> bool {
-        true
-    }
-
-    fn name(&self) -> &'static str {
-        "animation_apply"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess {
-            reads: vec![Animator::ID],
-            writes: vec![Transform::ID],
-        }
-    }
-
-    fn run(&mut self, world: &mut World, _dt: f32) {
+impl AnimationPlaybackSystem {
+    /// 采样本帧要写的根 / 关节变换；只读世界，串行与并行路径共用。
+    fn collect(&self, world: &World) -> (Vec<PoseWrite>, Vec<PoseWrite>) {
         let mut samples = Vec::new();
         let mut roots = Vec::new();
         world.for_each::<Animator>(|key, animator| {
@@ -484,8 +471,8 @@ impl System for AnimationPlaybackSystem {
                 }
             }
             samples.push((key, position, rotation, scale));
-            if let Some(entity) = world.entity(key) {
-                roots.push((key, entity, animator.clip.clone(), animator.time));
+            if let Some(id) = world.entity(key) {
+                roots.push((key, id, animator.clip.clone(), animator.time));
             }
         });
         let mut bones = Vec::new();
@@ -507,14 +494,47 @@ impl System for AnimationPlaybackSystem {
                 }
             });
         }
-        for (key, position, rotation, scale) in samples {
-            if let Some(transform) = world.get_mut::<Transform>(key) {
+        (samples, bones)
+    }
+}
+
+type PoseWrite = (EntityKey, [f32; 3], [f32; 4], [f32; 3]);
+
+impl System for AnimationPlaybackSystem {
+    fn runs_after_host(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "animation_apply"
+    }
+
+    fn access(&self) -> SystemAccess {
+        SystemAccess {
+            // 采样根变换要沿 Parent 链判断后代（读 Bone / Parent），关节钟走 Bone。
+            reads: vec![Animator::ID, Bone::ID, xgc_world::Parent::ID],
+            writes: vec![Transform::ID],
+        }
+    }
+
+    fn supports_parted(&self) -> bool {
+        true
+    }
+
+    fn run_parted(&mut self, world: &World, writes: &mut WriteSet, _dt: f32) {
+        let (samples, bones) = self.collect(world);
+        for (key, position, rotation, scale) in samples.into_iter().chain(bones) {
+            if let Some(transform) = writes.get_mut::<Transform>(key) {
                 transform.position = position;
                 transform.rotation = rotation;
                 transform.scale = scale;
             }
         }
-        for (key, position, rotation, scale) in bones {
+    }
+
+    fn run(&mut self, world: &mut World, _dt: f32) {
+        let (samples, bones) = self.collect(world);
+        for (key, position, rotation, scale) in samples.into_iter().chain(bones) {
             if let Some(transform) = world.get_mut::<Transform>(key) {
                 transform.position = position;
                 transform.rotation = rotation;
