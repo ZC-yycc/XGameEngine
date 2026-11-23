@@ -1,0 +1,120 @@
+name: XGC
+
+# XGC 是 `xgc/` 下的独立 cargo workspace（不是根 workspace 的 member，也不依赖
+# 根仓库的 `xgame-*` crate）：两套产品路径各自验证，根 CI 只跑旧引擎，这里只跑
+# XGC 的 15 个 crate。割接前两边都要绿，但相互不阻塞对方的构建缓存。
+on:
+  push:
+    branches: [master]
+    paths:
+      - "xgc/**"
+      - ".github/workflows/xgc.yml"
+  pull_request:
+    paths:
+      - "xgc/**"
+      - ".github/workflows/xgc.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xgc-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # CI 的 target 缓存只服务一次构建，关掉增量可显著缩小缓存体积。
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: Windows / check + lint
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: xgc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + clippy + rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 根 CI 缓存的是根 workspace 的 target，两个 workspace 互不通用。
+          workspaces: xgc -> target
+          key: xgc
+
+      # 一个概念一个类型、600 行软上限、组件注册两处同步等硬规则都在 xtask 里，
+      # 进 CI 之后本地忘了跑也能被挡住。
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Workspace gates
+        run: cargo run -q --locked -p xgc-xtask -- check
+
+      # 二进制级冒烟：真实 CLI 入口可用、默认调度仍是确定的 60 帧哈希口径下的
+      # 那条无脚本路径。plan 的 JSON 确定性由 `crates/xgc-cli/tests/plan.rs` 钉住。
+      - name: CLI smoke
+        run: |
+          cargo run -q --locked -p xgc-cli -- check
+          cargo run -q --locked -p xgc-cli -- run 60
+          cargo run -q --locked -p xgc-cli -- plan
+
+  test:
+    name: Windows / cpu tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: xgc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: xgc -> target
+          key: xgc-tests
+
+      # hosted runner 没有 GPU，`xgc-render` / `xgc-editor` 里创建 wgpu 设备的
+      # 用例只能靠带显卡的机器；这里跑的是不碰设备的包，外加 render 的
+      # CPU-only 测试目标（资源解析 / 余差归因 / 绘制列表 / 取景 / 动画采样）。
+      - name: CPU test crates
+        run: >-
+          cargo test --locked
+          -p xgc-base -p xgc-reflect -p xgc-world -p xgc-store
+          -p xgc-sim -p xgc-agent -p xgc-asset -p xgc-migrate
+          -p xgc-script -p xgc-cli -p xgc-editor -p xgc-player
+
+      - name: Render cpu-only test targets
+        run: >-
+          cargo test --locked -p xgc-render
+          --test animations --test assets --test camera --test crossfade
+          --test diff --test draw --test draw_pose --test glb --test graph
+          --test layers --test mesh --test root_motion_library
+          --test skeleton --test skinning
+
+      # release 吞吐只打印不设阈值（见 `crates/xgc-sim/tests/steady_state.rs` 的
+      # 模块文档：CI 机器与开发机差异太大，写死阈值等于给机器调验收线）。
+      # 这一步的价值是把「CI 上跑得动、数字留在日志里」变成一条可追溯基线。
+      - name: Release baseline (informational)
+        run: >-
+          cargo test --release --locked -p xgc-sim
+          --test steady_state -- --ignored --nocapture
