@@ -19,6 +19,14 @@ pub struct AnimatorSample {
     pub clip: String,
     pub time: f32,
     pub looping: bool,
+    /// 转场来源剪辑（空 = 没有交叉淡入）。
+    pub blend_from: String,
+    /// 旧剪辑自己的时钟 / 循环方式（切换时刻定格，按旧状态速度推进）。
+    pub blend_from_time: f32,
+    pub blend_from_looping: bool,
+    /// 转场已进行时间 / 总时长；渲染侧算 `alpha = min(elapsed / duration, 1)`。
+    pub blend_elapsed: f32,
+    pub blend_duration: f32,
     /// 叠加层剪辑名（空 = 没有叠加层）。
     pub additive_clip: String,
     /// 叠加层权重；0 时渲染侧直接跳过采样（与旧端零权重逐位一致）。
@@ -91,6 +99,11 @@ pub fn build_draw_list(world: &World) -> DrawList {
                     clip: animator.clip.clone(),
                     time: animator.time,
                     looping: animator.looping,
+                    blend_from: animator.blend_from.clone(),
+                    blend_from_time: animator.blend_from_time,
+                    blend_from_looping: animator.blend_from_looping,
+                    blend_elapsed: animator.blend_elapsed,
+                    blend_duration: animator.blend_duration,
                     additive_clip: animator.additive_clip.clone(),
                     additive_weight: animator.additive_weight,
                     additive_time: animator.additive_time,

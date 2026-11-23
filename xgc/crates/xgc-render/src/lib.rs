@@ -67,8 +67,8 @@ pub use font::{FontAtlas, GlyphQuad};
 pub use fxaa::FxaaSettings;
 pub use glb::{
     load_glb, load_glb_skeleton, load_gltf, load_model, AdditiveLayer, AnimationClip,
-    AnimationNode, AnimationPath, AnimationSet, Interpolation, LocalPose, MeshError, SkeletonGraph,
-    SkeletonJoint,
+    AnimationNode, AnimationPath, AnimationSet, CrossfadeLayer, Interpolation, LocalPose,
+    MeshError, SkeletonGraph, SkeletonJoint,
 };
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
 pub use gpu_mesh::{GpuMesh, GpuMeshCache};

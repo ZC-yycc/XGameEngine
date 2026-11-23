@@ -10,7 +10,7 @@
 
 use super::assets::MeshCache;
 use super::draw::DrawList;
-use super::glb::AdditiveLayer;
+use super::glb::{AdditiveLayer, CrossfadeLayer};
 use super::gpu::GpuError;
 
 pub(crate) fn resolve(meshes: &mut MeshCache, list: &mut DrawList) -> Result<(), GpuError> {
@@ -38,10 +38,21 @@ pub(crate) fn resolve(meshes: &mut MeshCache, list: &mut DrawList) -> Result<(),
                 looping: sample.additive_looping,
                 weight: sample.additive_weight,
             });
-        let Some(pose) = animations.joint_pose_with_additive(
+        // 交叉淡入：状态机切换后 `alpha = min(已淡秒数 / 总时长, 1)`；alpha=0 时
+        // 完全等于旧剪辑（旧端「切换当帧 = 纯旧剪辑」）。
+        let crossfade = (!sample.blend_from.is_empty() && sample.blend_duration > 0.0).then(|| {
+            CrossfadeLayer {
+                clip: sample.blend_from.as_str(),
+                time: sample.blend_from_time,
+                looping: sample.blend_from_looping,
+                alpha: (sample.blend_elapsed / sample.blend_duration).clamp(0.0, 1.0),
+            }
+        });
+        let Some(pose) = animations.joint_pose_played(
             &sample.clip,
             sample.time,
             sample.looping,
+            crossfade,
             additive,
             &skin.joint_nodes,
         ) else {

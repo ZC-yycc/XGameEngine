@@ -17,6 +17,12 @@ pub struct Animator {
     pub blend_from: String,
     pub blend_elapsed: f32,
     pub blend_duration: f32,
+    /// 转场来源剪辑的播放时间（秒）；淡出那半边按旧剪辑自己的时钟走。
+    pub blend_from_time: f32,
+    /// 转场来源剪辑的播放速度（切换时刻定格，不跟随新状态调速）。
+    pub blend_from_speed: f32,
+    /// 转场来源剪辑的循环方式（切换时刻定格）。
+    pub blend_from_looping: bool,
     /// 叠加层剪辑名（glTF 剪辑）；空 = 没有叠加层。
     pub additive_clip: String,
     /// 叠加层权重 ∈ [0,1]：脚本 `set_anim_additive_weight` 每帧写。
@@ -45,6 +51,9 @@ impl Default for Animator {
             blend_from: String::new(),
             blend_elapsed: 0.0,
             blend_duration: 0.0,
+            blend_from_time: 0.0,
+            blend_from_speed: 1.0,
+            blend_from_looping: true,
             additive_clip: String::new(),
             additive_weight: 0.0,
             additive_speed: 1.0,
@@ -103,6 +112,12 @@ impl Component for Animator {
                 .doc("转场已进行时间（秒）"),
             FieldDescriptor::new("blend_duration", FieldType::F32, Value::F64(0.0))
                 .doc("转场总时长（秒）；0 = 硬切"),
+            FieldDescriptor::new("blend_from_time", FieldType::F32, Value::F64(0.0))
+                .doc("转场来源剪辑的播放时间（秒），按旧剪辑自己的时钟推进"),
+            FieldDescriptor::new("blend_from_speed", FieldType::F32, Value::F64(1.0))
+                .doc("转场来源剪辑的播放速度（切换时刻定格）"),
+            FieldDescriptor::new("blend_from_looping", FieldType::Bool, Value::Bool(true))
+                .doc("转场来源剪辑是否循环（切换时刻定格）"),
             FieldDescriptor::new(
                 "additive_clip",
                 FieldType::String,
@@ -148,6 +163,9 @@ impl Component for Animator {
             "blend_from" => Some(Value::String(self.blend_from.clone())),
             "blend_elapsed" => Some(Value::F64(f64::from(self.blend_elapsed))),
             "blend_duration" => Some(Value::F64(f64::from(self.blend_duration))),
+            "blend_from_time" => Some(Value::F64(f64::from(self.blend_from_time))),
+            "blend_from_speed" => Some(Value::F64(f64::from(self.blend_from_speed))),
+            "blend_from_looping" => Some(Value::Bool(self.blend_from_looping)),
             "base_scale" => Some(Value::Vec3([
                 f64::from(self.base_scale[0]),
                 f64::from(self.base_scale[1]),
@@ -324,6 +342,33 @@ impl Component for Animator {
                 self.blend_duration = value.as_f32().ok_or_else(|| {
                     format!(
                         "animation.animator.blend_duration 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "blend_from_time" => {
+                self.blend_from_time = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.blend_from_time 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "blend_from_speed" => {
+                self.blend_from_speed = value.as_f32().ok_or_else(|| {
+                    format!(
+                        "animation.animator.blend_from_speed 期望 f32，得到 {}",
+                        value.type_name()
+                    )
+                })?;
+                Ok(())
+            }
+            "blend_from_looping" => {
+                self.blend_from_looping = value.as_bool().ok_or_else(|| {
+                    format!(
+                        "animation.animator.blend_from_looping 期望 bool，得到 {}",
                         value.type_name()
                     )
                 })?;

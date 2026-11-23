@@ -157,10 +157,16 @@ impl System for AnimatorSystem {
             }
             if animator.blend_duration > 0.0 {
                 animator.blend_elapsed += dt;
+                // 淡出的那半边也继续走自己的时钟（旧端 `prev.t += dt * prev.speed`）：
+                // 定格会让混合姿势在过渡中「粘住」一下。
+                animator.blend_from_time += dt * animator.blend_from_speed;
                 if animator.blend_elapsed >= animator.blend_duration {
                     animator.blend_duration = 0.0;
                     animator.blend_elapsed = 0.0;
                     animator.blend_from.clear();
+                    animator.blend_from_time = 0.0;
+                    animator.blend_from_speed = 1.0;
+                    animator.blend_from_looping = true;
                 }
             }
             if animator.duration > 0.0 {

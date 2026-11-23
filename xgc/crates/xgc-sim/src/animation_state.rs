@@ -56,15 +56,29 @@ impl System for AnimationStateSystem {
                     } else {
                         animator.fade_time
                     };
+                    // 旧端 `Prev` 把旧剪辑的时钟 / 速度 / 循环方式一起定格：淡出的
+                    // 那半边按旧状态自己的节奏走，不跟新状态事后调速。
+                    let from = machine
+                        .states
+                        .iter()
+                        .find(|definition| definition.name == current)
+                        .map(|definition| definition.clip.clone())
+                        .unwrap_or_else(|| animator.clip.clone());
                     if duration > 0.0 {
-                        animator.blend_from = machine
-                            .states
-                            .iter()
-                            .find(|definition| definition.name == current)
-                            .map(|definition| definition.clip.clone())
-                            .unwrap_or_else(|| animator.clip.clone());
+                        animator.blend_from = from;
+                        animator.blend_from_time = animator.time;
+                        animator.blend_from_speed = animator.speed;
+                        animator.blend_from_looping = animator.looping;
                         animator.blend_elapsed = 0.0;
                         animator.blend_duration = duration;
+                    } else {
+                        // 硬切：旧侧直接消失，别留着上一条过渡的残影。
+                        animator.blend_from.clear();
+                        animator.blend_from_time = 0.0;
+                        animator.blend_from_speed = 1.0;
+                        animator.blend_from_looping = true;
+                        animator.blend_elapsed = 0.0;
+                        animator.blend_duration = 0.0;
                     }
                     state.state = next;
                     state.time = 0.0;

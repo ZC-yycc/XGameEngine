@@ -39,21 +39,35 @@ impl AnimationSet {
             return None;
         }
         let mut locals = self.local_pose(clip_name, time, looping)?;
-        if let Some(layer) = additive {
-            let weight = layer.weight.clamp(0.0, 1.0);
-            if weight > 0.0 && layer.time.is_finite() {
-                if let Some(current) = self.local_pose(layer.clip, layer.time, layer.looping) {
-                    if let Some(reference) = self.local_pose(layer.clip, 0.0, false) {
-                        for (base, (current, reference)) in
-                            locals.iter_mut().zip(current.iter().zip(&reference))
-                        {
-                            blend_additive(base, current, reference, weight);
-                        }
-                    }
-                }
-            }
-        }
+        self.apply_additive_into(&mut locals, additive);
         self.joint_matrices(&locals, joint_nodes)
+    }
+
+    /// 把叠加层增量加进**已采样**的局部姿态。
+    ///
+    /// 单独拆出来是给交叉淡入用：基础层先把旧 / 新剪辑混成一份局部姿态，再加
+    /// 叠加层。叠加层数学只此一份，别在别处再抄一遍。
+    pub(crate) fn apply_additive_into(
+        &self,
+        locals: &mut [LocalPose],
+        additive: Option<AdditiveLayer<'_>>,
+    ) {
+        let Some(layer) = additive else {
+            return;
+        };
+        let weight = layer.weight.clamp(0.0, 1.0);
+        if weight <= 0.0 || !layer.time.is_finite() {
+            return;
+        }
+        let (Some(current), Some(reference)) = (
+            self.local_pose(layer.clip, layer.time, layer.looping),
+            self.local_pose(layer.clip, 0.0, false),
+        ) else {
+            return;
+        };
+        for (base, (current, reference)) in locals.iter_mut().zip(current.iter().zip(&reference)) {
+            blend_additive(base, current, reference, weight);
+        }
     }
 }
 
