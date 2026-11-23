@@ -37,6 +37,12 @@ pub struct UiElement {
     pub image_path: String,
     pub image_mode: String,
     pub image_slice: f32,
+    /// 图片着色乘子（**线性** RGBA，白 = 原图）。旧脚本 `ui_set_image_tint`
+    /// 收 sRGB、入口转线性；通用字段写入按线性原值落库。
+    pub image_tint: [f32; 4],
+    /// 图片填充比例 `0..=1`：从左往右裁剪，做血条 / 进度条用。
+    /// 与九宫格边距互斥：`image_fill < 1` 时退回普通拉伸再裁剪（旧端同语义）。
+    pub image_fill: f32,
     pub clip_children: bool,
 }
 
@@ -65,6 +71,8 @@ impl Default for UiElement {
             image_path: String::new(),
             image_mode: "stretch".to_string(),
             image_slice: 0.0,
+            image_tint: [1.0; 4],
+            image_fill: 1.0,
             clip_children: true,
         }
     }
@@ -133,6 +141,10 @@ impl Component for UiElement {
             .doc("stretch / preserve（保持宽高比）/ cover（裁剪填满）/ nine_slice"),
             FieldDescriptor::new("image_slice", FieldType::F32, Value::F64(0.0))
                 .doc("九宫格边宽（源图像素）；0 = 关闭"),
+            FieldDescriptor::new("image_tint", FieldType::Vec4, Value::Vec4([1.0; 4]))
+                .doc("图片着色乘子（线性 RGBA）；白 = 原图"),
+            FieldDescriptor::new("image_fill", FieldType::F32, Value::F64(1.0))
+                .doc("填充比例 0..=1：从左往右裁剪（与九宫格互斥）"),
         ]
     }
 
@@ -160,6 +172,8 @@ impl Component for UiElement {
             "image_path" => Some(Value::String(self.image_path.clone())),
             "image_mode" => Some(Value::String(self.image_mode.clone())),
             "image_slice" => Some(Value::F64(f64::from(self.image_slice))),
+            "image_tint" => Some(Value::Vec4(vec4_f64(self.image_tint))),
+            "image_fill" => Some(Value::F64(f64::from(self.image_fill))),
             "clip_children" => Some(Value::Bool(self.clip_children)),
             _ => None,
         }
@@ -203,6 +217,8 @@ impl Component for UiElement {
                     )
                 })?;
             }
+            "image_tint" => self.image_tint = vec4(value, field)?,
+            "image_fill" => self.image_fill = number(value, field)?.clamp(0.0, 1.0),
             _ => return Err(format!("ui.element 没有字段 {field}")),
         }
         Ok(())

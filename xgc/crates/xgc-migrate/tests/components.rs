@@ -259,6 +259,71 @@ fn maps_ui_element() {
 }
 
 #[test]
+fn maps_ui_image_tint_fill_and_keep_aspect() {
+    let scene = r#"(
+        format_version: 2,
+        name: "UiImage",
+        lights: [],
+        ambient: (0.0, 0.0, 0.0),
+        entities: [
+            (
+                id: (1),
+                name: "Bar",
+                parent: None,
+                layer: 0,
+                transform: (
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                transform_identity: (id: 1),
+                components: (
+                    next_component_id: (next_id: 2),
+                    entries: [
+                        (
+                            identity: (id: 2),
+                            data: Ui((
+                                offset_min: (0.0, 0.0),
+                                offset_max: (200.0, 24.0),
+                                image: Some((
+                                    path: "Resources/Textures/bar.png",
+                                    tint: (0.5, 0.25, 0.0, 1.0),
+                                    fill: 0.5,
+                                    keep_aspect: true,
+                                )),
+                            )),
+                        ),
+                    ],
+                ),
+            ),
+        ],
+    )"#;
+    let (world, report) = migrate_str(scene).unwrap();
+    assert_eq!(report.mapped_components, 1);
+    let ui = world.entities[0]
+        .components
+        .iter()
+        .find(|component| component.component == UiElement::ID)
+        .unwrap();
+    let field = |name: &str| {
+        ui.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    // 旧端 tint 也是线性 RGBA ⇒ 原值搬运；fill 原样；keep_aspect 映射成 preserve。
+    assert_eq!(
+        field("image_path"),
+        Value::String("Resources/Textures/bar.png".to_string())
+    );
+    assert_eq!(field("image_tint").as_vec4(), Some([0.5, 0.25, 0.0, 1.0]));
+    assert_eq!(field("image_fill").as_f32(), Some(0.5));
+    assert_eq!(field("image_mode"), Value::String("preserve".to_string()));
+    assert_eq!(field("kind"), Value::String("image".to_string()));
+}
+
+#[test]
 fn maps_particle() {
     let scene = r#"(
         format_version: 2,

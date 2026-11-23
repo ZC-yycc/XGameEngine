@@ -17,8 +17,9 @@
 //!
 //! 焦点三件套（`ui_focused` / `ui_set_focus` / `ui_clear_focus`）在
 //! `ui_focus_api`：写 `ui.interaction.focused`，不需要新组件字段。
-//! 图片 `ui_set_image` / `ui_set_image_tint` / `ui_set_fill`、`ui_spawn_*` 仍需要
-//! 新的组件字段或命令面，未注册。
+//! 图片 `ui_set_image` / `ui_set_image_tint` / `ui_set_fill` 写 `image_path` /
+//! `image_tint`（sRGB→线性）/ `image_fill`（clamp 0..=1）；`ui_spawn_*` 仍需要
+//! 新的命令面，未注册。
 
 use mlua::Lua;
 use std::rc::Rc;
@@ -497,6 +498,72 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View) -> Result<(), Strin
                     .borrow()
                     .entity(id)
                     .is_some_and(|entity| entity.hovered))
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+    let image_path_commands = Rc::clone(commands);
+    let image_path_view = Rc::clone(view);
+    globals
+        .set(
+            "ui_set_image",
+            lua.create_function(move |_, (_ctx, id, path): (mlua::Value, u64, String)| {
+                if !has_element(&image_path_view.borrow(), id) {
+                    return Ok(());
+                }
+                push(
+                    &image_path_commands,
+                    id,
+                    "image_path",
+                    FieldValue::String(path),
+                );
+                Ok(())
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+    let image_tint_commands = Rc::clone(commands);
+    let image_tint_view = Rc::clone(view);
+    globals
+        .set(
+            "ui_set_image_tint",
+            lua.create_function(
+                move |_, (_ctx, id, r, g, b, a): (mlua::Value, u64, f32, f32, f32, f32)| {
+                    if !has_element(&image_tint_view.borrow(), id) {
+                        return Ok(());
+                    }
+                    let linear = |channel: f32| f64::from(srgb_to_linear(channel));
+                    push(
+                        &image_tint_commands,
+                        id,
+                        "image_tint",
+                        FieldValue::Vec4([linear(r), linear(g), linear(b), f64::from(a)]),
+                    );
+                    Ok(())
+                },
+            )
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+    let fill_commands = Rc::clone(commands);
+    let fill_view = Rc::clone(view);
+    globals
+        .set(
+            "ui_set_fill",
+            lua.create_function(move |_, (_ctx, id, fill): (mlua::Value, u64, f32)| {
+                if !has_element(&fill_view.borrow(), id) {
+                    return Ok(());
+                }
+                push(
+                    &fill_commands,
+                    id,
+                    "image_fill",
+                    FieldValue::F64(f64::from(fill.clamp(0.0, 1.0))),
+                );
+                Ok(())
             })
             .map_err(|err| err.to_string())?,
         )

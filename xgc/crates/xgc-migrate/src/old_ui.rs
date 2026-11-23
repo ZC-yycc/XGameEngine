@@ -47,9 +47,27 @@ impl Default for OldText {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(default)]
 struct OldImage {
     path: String,
+    /// 线性 RGBA 着色乘子（旧端 `UiImageStyle.tint`，缺省白）。
+    tint: [f32; 4],
+    /// 填充比例 `0..=1`（旧端 `UiImageStyle.fill`）。
+    fill: f32,
+    /// 保持宽高比（旧端 `UiImageStyle.keep_aspect`）。
+    keep_aspect: bool,
+}
+
+impl Default for OldImage {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            tint: [1.0; 4],
+            fill: 1.0,
+            keep_aspect: false,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,7 +108,17 @@ pub fn convert(value: ron::Value) -> Result<ComponentData, String> {
     let old: OldUi = value
         .into_rust()
         .map_err(|err| format!("ui.element 解析失败：{err}"))?;
-    let image_path = old.image.map(|image| image.path).unwrap_or_default();
+    let (image_path, image_tint, image_fill, image_keep_aspect) = old
+        .image
+        .map(|image| (image.path, image.tint, image.fill, image.keep_aspect))
+        .unwrap_or_else(|| (String::new(), [1.0; 4], 1.0, false));
+    // 旧端 hold aspect 在 XGC 里就是 `image_mode = "preserve"`；九宫格边距
+    // 仍是单值（既有简化，本切片不扩成每边 4 值）。
+    let image_mode = if image_keep_aspect {
+        "preserve"
+    } else {
+        "stretch"
+    };
     let kind = old
         .kind
         .and_then(|kind| match kind {
@@ -152,6 +180,15 @@ pub fn convert(value: ron::Value) -> Result<ComponentData, String> {
                 Value::String("middle".to_string()),
             ),
             ("image_path".to_string(), Value::String(image_path)),
+            ("image_tint".to_string(), Value::Vec4(vec4(image_tint))),
+            (
+                "image_fill".to_string(),
+                Value::F64(f64::from(image_fill.clamp(0.0, 1.0))),
+            ),
+            (
+                "image_mode".to_string(),
+                Value::String(image_mode.to_string()),
+            ),
             ("clip_children".to_string(), Value::Bool(old.clip_children)),
         ],
     })

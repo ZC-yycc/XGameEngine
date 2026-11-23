@@ -3242,6 +3242,32 @@
                 }
               ],
               [
+                "image_tint",
+                {
+                  "kind": "vec4",
+                  "value": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              [
+                "image_fill",
+                {
+                  "kind": "f64",
+                  "value": 1.0
+                }
+              ],
+              [
+                "image_mode",
+                {
+                  "kind": "string",
+                  "value": "stretch"
+                }
+              ],
+              [
                 "clip_children",
                 {
                   "kind": "bool",
@@ -3534,6 +3560,32 @@
                 {
                   "kind": "string",
                   "value": ""
+                }
+              ],
+              [
+                "image_tint",
+                {
+                  "kind": "vec4",
+                  "value": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              [
+                "image_fill",
+                {
+                  "kind": "f64",
+                  "value": 1.0
+                }
+              ],
+              [
+                "image_mode",
+                {
+                  "kind": "string",
+                  "value": "stretch"
                 }
               ],
               [
@@ -3832,6 +3884,32 @@
                 }
               ],
               [
+                "image_tint",
+                {
+                  "kind": "vec4",
+                  "value": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              [
+                "image_fill",
+                {
+                  "kind": "f64",
+                  "value": 1.0
+                }
+              ],
+              [
+                "image_mode",
+                {
+                  "kind": "string",
+                  "value": "stretch"
+                }
+              ],
+              [
                 "clip_children",
                 {
                   "kind": "bool",
@@ -4124,6 +4202,32 @@
                 {
                   "kind": "string",
                   "value": ""
+                }
+              ],
+              [
+                "image_tint",
+                {
+                  "kind": "vec4",
+                  "value": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              [
+                "image_fill",
+                {
+                  "kind": "f64",
+                  "value": 1.0
+                }
+              ],
+              [
+                "image_mode",
+                {
+                  "kind": "string",
+                  "value": "stretch"
                 }
               ],
               [
@@ -4422,6 +4526,32 @@
                 }
               ],
               [
+                "image_tint",
+                {
+                  "kind": "vec4",
+                  "value": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              [
+                "image_fill",
+                {
+                  "kind": "f64",
+                  "value": 1.0
+                }
+              ],
+              [
+                "image_mode",
+                {
+                  "kind": "string",
+                  "value": "stretch"
+                }
+              ],
+              [
                 "clip_children",
                 {
                   "kind": "bool",
@@ -4714,6 +4844,32 @@
                 {
                   "kind": "string",
                   "value": ""
+                }
+              ],
+              [
+                "image_tint",
+                {
+                  "kind": "vec4",
+                  "value": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              [
+                "image_fill",
+                {
+                  "kind": "f64",
+                  "value": 1.0
+                }
+              ],
+              [
+                "image_mode",
+                {
+                  "kind": "string",
+                  "value": "stretch"
                 }
               ],
               [
@@ -5021,6 +5177,32 @@
                 {
                   "kind": "string",
                   "value": ""
+                }
+              ],
+              [
+                "image_tint",
+                {
+                  "kind": "vec4",
+                  "value": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              [
+                "image_fill",
+                {
+                  "kind": "f64",
+                  "value": 1.0
+                }
+              ],
+              [
+                "image_mode",
+                {
+                  "kind": "string",
+                  "value": "stretch"
                 }
               ],
               [

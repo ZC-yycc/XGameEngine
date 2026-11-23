@@ -32,6 +32,8 @@ struct UiItem {
     image_path: String,
     image_mode: String,
     image_slice: f32,
+    image_tint: [f32; 4],
+    image_fill: f32,
     corner_radius: f32,
     border_color: [f32; 4],
     border_width: f32,
@@ -107,16 +109,18 @@ impl Renderer {
                 .as_ref()
                 .map(|element| (element.border_color, element.border_width))
                 .unwrap_or(([0.0; 4], 0.0));
-            let (image_path, image_mode, image_slice) = element
+            let (image_path, image_mode, image_slice, image_tint, image_fill) = element
                 .as_ref()
                 .map(|element| {
                     (
                         element.image_path.clone(),
                         element.image_mode.clone(),
                         element.image_slice,
+                        element.image_tint,
+                        element.image_fill,
                     )
                 })
-                .unwrap_or_default();
+                .unwrap_or((String::new(), String::new(), 0.0, [1.0; 4], 1.0));
             if color[3] <= 0.0 && border_width <= 0.0 && text.is_empty() && image_path.is_empty() {
                 return;
             }
@@ -150,6 +154,8 @@ impl Renderer {
                 image_path,
                 image_mode,
                 image_slice,
+                image_tint,
+                image_fill,
                 corner_radius,
                 border_color,
                 border_width,
@@ -203,7 +209,7 @@ impl Renderer {
                     })?;
                 draws += 1;
             }
-            if !item.image_path.is_empty() {
+            if !item.image_path.is_empty() && item.image_fill > 0.0 {
                 draws += self.draw_ui_image(context, target, viewport, item, scissor)?;
             }
             if !item.text.is_empty() {
@@ -302,7 +308,7 @@ impl Renderer {
                                 target,
                                 image,
                                 quad_matrix(cell, viewport),
-                                [1.0; 4],
+                                item.image_tint,
                                 cell_uv,
                             )?;
                             draws += 1;
@@ -336,12 +342,18 @@ impl Renderer {
                 );
             }
         }
+        // 填充比例：从左往右裁剪，矩形与 UV 同步收窄，图案保持比例。
+        // 九宫格与 fill 互斥（九宫格分支已提前 return），这里只剩普通拉伸 / 保持宽高比。
+        if item.image_fill < 1.0 {
+            draw_rect[2] *= item.image_fill;
+            uv[2] *= item.image_fill;
+        }
         pipeline.draw(
             context,
             target,
             image,
             quad_matrix(draw_rect, viewport),
-            [1.0; 4],
+            item.image_tint,
             uv,
         )?;
         Ok(1)
