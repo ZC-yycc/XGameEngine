@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**割接门禁命令 `xgc gate`** 切片把逐帧 trace 对表与截图阈值判定合成一条可复现命令：`xgc gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]`，参考目录里 `trace.txt` 逐帧对 `frame / entities / hash`（忽略内部计数器 `revision`，帧号必须从 0 连续），`frame-<N>.png|ppm` 按总差异（缺省 ≤ 2%）与结构性（单通道 ≥8，缺省 ≤ 0.5%）判定；退出码 0 = 全过、1 = 有未通过项、2 = 用法 / IO / GPU / 空参考目录错误。仓库新增 `xgc/acceptance/` 参考集（showcase 150 帧的逐帧 trace + 4 张旧端截图；换机器 / GPU 必须重生成截图参考）。本机实跑全过：0.48% / 1.01% / 1.30% / 1.50%，结构性 0.03% / 0.08% / 0.13% / 0.26%；`render-frame` 与门禁共用同一条渲染路径（渲染配置抽成 `render_world_rgba`，抽取后第 150 帧 PPM 逐字节不变）。
+
 **XGC CI** 切片给 workspace 建了第一份云端门禁（`.github/workflows/xgc.yml`）：`check` job 跑 fmt / clippy / xtask / CLI 冒烟三连，`test` job 跑 12 个不碰 GPU 的包 + 14 个 CPU-only render 目标 + release 吞吐基线（只记数不设阈值）；本机等价 dry run 全绿，运行 45245793893 结论 **成功**；CI toolchain 钉 1.95.0（与开发机同版本，stable 漂移会把新 lint 变成无关的红）。GPU 集成测试留在带显卡机器上跑。
 
 **根运动宿主接线**切片把根运动轨道表提到 `MeshCache::root_motion_library` 并让 CLI / editor / player 三宿主共用（每帧 `step_with` 之后、粒子之前应用）：此前只有 CLI 宿主接了，真实项目在编辑器 Play 或独立游戏里跑 Fox 会少走根运动。红证据：去掉应用行时 player 宿主的哈希对表与 editor 的位移断言都红。新增回归 4 条（render 建表 2 / editor 1 / player 1）；CLI 的第 150 帧哈希与 `run 60` 哈希都不变（纯重构）。
@@ -207,15 +209,15 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（579 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
-`xgc-xtask check` 全绿（277 个 Rust 文件，最大 598 行）；30 个内建类型的 schema 为 38222 字节，
+`cargo test --workspace --offline` 全绿（586 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
+`xgc-xtask check` 全绿（279 个 Rust 文件，最大 598 行）；30 个内建类型的 schema 为 38222 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
 **主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、狐狸位姿残差 / 红球高光 / 木箱与阴影轮廓（根运动及其三宿主接线、layers、UI 脚本 setter、UI 覆盖层 SDF、刚体世界变换、截图裁剪面已接；第 150 / 200 / 300 帧结构性 0.08% / 0.13% / 0.26%，总差异 1.01% / 1.30% / 1.50%）、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），
-以及旧新逐帧 trace（XGC 侧 `xgc trace` 已建、脚本帧也已纳入，旧端没有输出）；性能验收的 XGC 侧热路径分配门禁已建（还缺 CI release 基线）。
+以及旧新逐帧 trace 的旧端侧（XGC 侧 `xgc trace` 与割接门禁命令 `xgc gate` 已建：151 个逐帧 checkpoint + 4 张截图参考在 `xgc/acceptance/`，退出码 0/1/2；旧端没有逐帧输出）；性能验收的 XGC 侧热路径分配门禁已建；CI release 基线已建（`.github/workflows/xgc.yml` 的 `test` job 跑 `steady_state --ignored`，只记数字）。
 
 ## 命令
 
@@ -232,6 +234,7 @@ cargo run -p xgc-cli -- export world.json
 cargo run -p xgc-cli -- import world.json
 cargo run -p xgc-cli -- run 60
 cargo run -p xgc-cli -- trace <世界.json> [帧数] [资产根]
+cargo run -p xgc-cli -- gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]
 cargo run -p xgc-cli -- image-diff <旧图> <新图> [阈值] [report]
 cargo run -p xgc-cli -- serve
 cargo run -p xgc-cli -- migrate <旧.ron|旧目录> <新.json|新目录>

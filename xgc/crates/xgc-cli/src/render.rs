@@ -50,6 +50,80 @@ fn prepare_frame_world_with_particles(
     Ok((world, particles))
 }
 
+/// 渲染一帧并回读 RGBA8；`render-frame` 与 `gate` 共用这一份渲染配置。
+///
+/// 天空 / 曝光 / 后处理的开关都从项目的 render 配置读：两个命令如果各写一遍，
+/// 割接门禁就会在一条「和交付不一样」的渲染路径上判定通过。相机优先级由
+/// `Renderer::render_shot` 决定（显式机位 > 场景相机 > 顺光取景）。
+pub(crate) fn render_world_rgba(
+    assets_root: Option<&str>,
+    world: &World,
+    particles: Vec<xgc_world::ParticleQuad>,
+    width: u32,
+    height: u32,
+) -> Result<(Vec<u8>, xgc_render::RenderStats), String> {
+    let context = GpuContext::headless().map_err(|err| format!("GPU 不可用：{err}"))?;
+    let desc = ResourceDesc::texture2d(
+        "frame",
+        "rgba8unorm-srgb",
+        width,
+        height,
+        vec![ResourceUsage::ColorAttachment],
+    );
+    let resource = context
+        .create_resource(&desc)
+        .map_err(|err| format!("创建渲染目标失败：{err}"))?;
+    let texture = match resource.as_texture() {
+        Some(texture) => texture,
+        None => return Err("渲染目标不是纹理".to_string()),
+    };
+    let root = assets_root.unwrap_or(".");
+    let meshes = match scan_assets(Path::new(root)) {
+        Ok(catalog) => MeshCache::with_catalog(root, catalog),
+        Err(err) => return Err(format!("扫描资产失败：{err}")),
+    };
+    let mut renderer = Renderer::new(meshes);
+    renderer.set_particles(particles);
+    renderer.set_clear_color([0.62, 0.72, 0.84, 1.0]);
+    // 天空开着的项目：背景取地平线色（旧端天空盒在地平线附近就是它），
+    // 环境照明由渲染器从同一份解析天空投影出来。
+    if let Some(settings) = load_render(Path::new(root)) {
+        if settings.sky.enabled {
+            let [r, g, b] = settings
+                .sky
+                .horizon
+                .map(|channel| channel * settings.sky.intensity);
+            renderer.set_clear_color([f64::from(r), f64::from(g), f64::from(b), 1.0]);
+        }
+        renderer.set_sky(settings.sky);
+        // 曝光缺省 1.0；光晕默认关（旧端 `render.bloom` 省略时 intensity = 0）。
+        renderer.set_exposure(settings.exposure);
+        renderer.set_bloom(settings.bloom);
+        renderer.set_fxaa(settings.fxaa);
+        // 软阴影 / 级间混合默认关：关着时着色器走老路径，帧输出逐字节不变。
+        renderer.set_shadow_settings(settings.shadow);
+        // TAA 默认关：关着时不建历史、相机不抖动，帧输出逐字节不变。
+        renderer.set_taa(settings.taa);
+        // SSAO 默认关：关着时不建 AO 纹理、不跑 pass，帧输出逐字节不变。
+        renderer.set_ssao(settings.ssao);
+    }
+    if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
+        for item in build_draw_list(world).items {
+            eprintln!(
+                "draw entity={:?} model={} color={:?} t={:?}",
+                item.entity, item.model, item.color, item.transform
+            );
+        }
+    }
+    let stats = renderer
+        .render_shot(&context, texture, world)
+        .map_err(|err| format!("渲染失败：{err}"))?;
+    let pixels = context
+        .read_texture_rgba8(texture, width, height)
+        .map_err(|err| format!("回读失败：{err}"))?;
+    Ok((pixels, stats))
+}
+
 pub(crate) fn render_graph() -> ExitCode {
     let mut graph = RenderGraph::new();
     let resources = [
@@ -255,86 +329,10 @@ pub(crate) fn render_frame(
             return ExitCode::from(1);
         }
     };
-    let context = match GpuContext::headless() {
-        Ok(context) => context,
+    let (pixels, stats) = match render_world_rgba(assets_root, &world, particles, width, height) {
+        Ok(rendered) => rendered,
         Err(err) => {
-            eprintln!("GPU 不可用：{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let desc = ResourceDesc::texture2d(
-        "frame",
-        "rgba8unorm-srgb",
-        width,
-        height,
-        vec![ResourceUsage::ColorAttachment],
-    );
-    let resource = match context.create_resource(&desc) {
-        Ok(resource) => resource,
-        Err(err) => {
-            eprintln!("创建渲染目标失败：{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let Some(texture) = resource.as_texture() else {
-        eprintln!("渲染目标不是纹理");
-        return ExitCode::from(1);
-    };
-    let meshes = match assets_root {
-        Some(root) => match scan_assets(Path::new(root)) {
-            Ok(catalog) => MeshCache::with_catalog(root, catalog),
-            Err(err) => {
-                eprintln!("扫描资产失败：{err}");
-                return ExitCode::from(1);
-            }
-        },
-        None => MeshCache::new("."),
-    };
-    let mut renderer = Renderer::new(meshes);
-    renderer.set_particles(particles);
-    renderer.set_clear_color([0.62, 0.72, 0.84, 1.0]);
-    // 天空开着的项目：背景取地平线色（旧端天空盒在地平线附近就是它），
-    // 环境照明由渲染器从同一份解析天空投影出来。
-    if let Some(settings) = load_render(Path::new(assets_root.unwrap_or("."))) {
-        if settings.sky.enabled {
-            let [r, g, b] = settings
-                .sky
-                .horizon
-                .map(|channel| channel * settings.sky.intensity);
-            renderer.set_clear_color([f64::from(r), f64::from(g), f64::from(b), 1.0]);
-        }
-        renderer.set_sky(settings.sky);
-        // 曝光缺省 1.0；光晕默认关（旧端 `render.bloom` 省略时 intensity = 0）。
-        renderer.set_exposure(settings.exposure);
-        renderer.set_bloom(settings.bloom);
-        renderer.set_fxaa(settings.fxaa);
-        // 软阴影 / 级间混合默认关：关着时着色器走老路径，帧输出逐字节不变。
-        renderer.set_shadow_settings(settings.shadow);
-        // TAA 默认关：关着时不建历史、相机不抖动，帧输出逐字节不变。
-        renderer.set_taa(settings.taa);
-        // SSAO 默认关：关着时不建 AO 纹理、不跑 pass，帧输出逐字节不变。
-        renderer.set_ssao(settings.ssao);
-    }
-    if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
-        for item in build_draw_list(&world).items {
-            eprintln!(
-                "draw entity={:?} model={} color={:?} t={:?}",
-                item.entity, item.model, item.color, item.transform
-            );
-        }
-    }
-    // 截图走旧的"顺光自动取景"，不用场景相机：否则与旧端截图连构图都不同。
-    let stats = match renderer.render_shot(&context, texture, &world) {
-        Ok(stats) => stats,
-        Err(err) => {
-            eprintln!("渲染失败：{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let pixels = match context.read_texture_rgba8(texture, width, height) {
-        Ok(pixels) => pixels,
-        Err(err) => {
-            eprintln!("回读失败：{err}");
+            eprintln!("{err}");
             return ExitCode::from(1);
         }
     };
