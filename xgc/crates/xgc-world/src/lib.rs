@@ -23,6 +23,7 @@ mod prefab_components;
 mod query;
 mod registry;
 mod render_components;
+mod root_motion;
 mod skeleton_components;
 mod slope_components;
 mod snapshot;
@@ -53,6 +54,11 @@ pub use plugin_components::PluginComponent;
 pub use prefab_components::PrefabInstance;
 pub use registry::builtin_registry;
 pub use render_components::{Camera, Material, MeshRenderer};
+pub use root_motion::{
+    filter_axes, root_motion_delta, to_local_position, to_world_delta, MotionFade, MotionSpan,
+    RootMotion, RootMotionClip, RootMotionLibrary, RootMotionNodeTrack, RootMotionSet,
+    RootMotionTrack, ROOT_MOTION_AXES_DEFAULT,
+};
 pub use skeleton_components::{Bone, Skeleton, SkeletonPose};
 pub use slope_components::Slope;
 pub use snapshot::{EntitySnapshot, WorldSnapshot};

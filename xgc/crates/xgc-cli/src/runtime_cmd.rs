@@ -4,10 +4,12 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use xgc_asset::scan as scan_assets;
+use xgc_asset::AssetCatalog;
+use xgc_render::MeshCache;
 use xgc_script::ScriptRuntime;
-use xgc_sim::{ParticleSystem, Simulation};
+use xgc_sim::{apply_root_motion, ParticleSystem, Simulation};
 use xgc_store::save_world;
-use xgc_world::World;
+use xgc_world::{Animator, MeshRenderer, RootMotion, RootMotionLibrary, World};
 
 use crate::world_cmd::{load_world_state, parse_frames};
 
@@ -29,12 +31,18 @@ pub(crate) struct ScriptedRunner {
     simulation: Simulation,
     particles: ParticleSystem,
     fixed_dt: f32,
+    /// 根运动轨道表：来自模型资产（GLTF 解析后的平移通道），不属于世界数据；
+    /// 每帧在系统 / 脚本之后由宿主应用一次（旧端同一序：动画 tick → 根运动）。
+    root_motion: RootMotionLibrary,
 }
 
 impl ScriptedRunner {
     pub(crate) fn new(world: World, assets_root: &Path) -> Self {
-        let runtime = match scan_assets(assets_root) {
-            Ok(catalog) => ScriptRuntime::with_catalog(assets_root, catalog),
+        let (runtime, catalog) = match scan_assets(assets_root) {
+            Ok(catalog) => (
+                ScriptRuntime::with_catalog(assets_root, catalog.clone()),
+                Some(catalog),
+            ),
             Err(err) => {
                 // 退化成项目相对路径解析是既有行为；但传错资产根时不能静默——
                 // 不然 `xgc trace … <资产根>` 会看起来「脚本没生效」而不是「根传错了」。
@@ -42,9 +50,10 @@ impl ScriptedRunner {
                     "warning: 资产根 {} 扫描失败（{err}），脚本按项目相对路径解析",
                     assets_root.display()
                 );
-                ScriptRuntime::new(assets_root)
+                (ScriptRuntime::new(assets_root), None)
             }
         };
+        let root_motion = root_motion_library(&world, assets_root, catalog.as_ref());
         let simulation = Simulation::new(world);
         let fixed_dt = simulation.fixed_dt();
         Self {
@@ -52,6 +61,7 @@ impl ScriptedRunner {
             simulation,
             particles: ParticleSystem::new(),
             fixed_dt,
+            root_motion,
         }
     }
 
@@ -65,6 +75,7 @@ impl ScriptedRunner {
             simulation,
             particles,
             fixed_dt,
+            root_motion,
         } = self;
         simulation
             .step_with(Vec::new(), |world| runtime.run_frame(world, *fixed_dt))
@@ -72,6 +83,7 @@ impl ScriptedRunner {
         if let Some(err) = runtime.take_error() {
             return Err(err);
         }
+        apply_root_motion(simulation.world_mut(), *fixed_dt, root_motion);
         particles.update(*fixed_dt, simulation.world());
         Ok(())
     }
@@ -86,6 +98,56 @@ impl ScriptedRunner {
             self.particles.quads().to_vec(),
         )
     }
+}
+
+/// 收集世界里需要根运动的模型，把 GLTF 平移通道抽成轨道表。
+///
+/// 只给「Animator 里显式写了 root_motion」的实体取模型：根运动是配置项，
+/// 不缺省对所有模型扫描（那会把每次启动都拖成整包 GLTF 解析）。
+fn root_motion_library(
+    world: &World,
+    assets_root: &Path,
+    catalog: Option<&AssetCatalog>,
+) -> RootMotionLibrary {
+    let mut wanted = std::collections::HashSet::new();
+    world.for_each::<Animator>(|key, animator| {
+        if RootMotion::parse(&animator.root_motion).is_some() {
+            if let Some(id) = world.entity(key) {
+                wanted.insert(id);
+            }
+        }
+    });
+    let mut models = std::collections::BTreeSet::new();
+    if !wanted.is_empty() {
+        world.for_each::<MeshRenderer>(|key, renderer| {
+            if let Some(id) = world.entity(key) {
+                if wanted.contains(&id) {
+                    models.insert(renderer.model.clone());
+                }
+            }
+        });
+    }
+    let mut library = RootMotionLibrary::new();
+    if models.is_empty() {
+        return library;
+    }
+    let mut meshes = match catalog {
+        Some(catalog) => MeshCache::with_catalog(assets_root, catalog.clone()),
+        None => MeshCache::new(assets_root),
+    };
+    for model in models {
+        let Ok(Some(mesh)) = meshes.get(&model) else {
+            continue;
+        };
+        let Some(animations) = mesh.animations.as_ref() else {
+            continue;
+        };
+        let set = animations.root_motion_set();
+        if !set.is_empty() {
+            library.insert(model, set);
+        }
+    }
+    library
 }
 
 /// 固定帧推进，并在每帧系统 / 脚本之后同步推进粒子。

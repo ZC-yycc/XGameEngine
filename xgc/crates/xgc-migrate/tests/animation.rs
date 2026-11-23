@@ -39,6 +39,10 @@ const SCENE: &str = r#"(
                                 speed: 1.5,
                                 looping: true,
                             )),
+                            root_motion: Some((
+                                node: "b_Hip_01",
+                                axes: (true, false, true),
+                            )),
                             machine: Some((
                                 entry: "Idle",
                                 parameters: {
@@ -137,4 +141,13 @@ fn animator_machine_becomes_animation_state_component() {
         &xgc_world::Value::F64(f64::from(1.5_f32))
     );
     assert_eq!(field("additive_looping"), &xgc_world::Value::Bool(true));
+
+    // 根运动只存 RON 字符串，解析必须回到 world 侧唯一类型。
+    let root_motion = match field("root_motion") {
+        xgc_world::Value::String(text) => text.as_str(),
+        other => panic!("root_motion 应是字符串，得到 {other:?}"),
+    };
+    let root_motion = xgc_world::RootMotion::parse(root_motion).expect("root_motion 必须能再解析");
+    assert_eq!(root_motion.node, "b_Hip_01");
+    assert_eq!(root_motion.axes, [true, false, true]);
 }

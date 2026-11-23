@@ -10,6 +10,16 @@ use super::additive::AdditiveLayer;
 use super::animation::{slerp, AnimationSet, LocalPose};
 use crate::camera::Mat4;
 
+/// 基础层一次采样的全部参数（剪辑 + 时钟 + 循环 + 可选根运动剥离配置）。
+///
+/// 根运动：实体已经在世界空间前进，蒙皮里的该节点平移要回到绑定姿态；`None` = 不剥离。
+pub struct PlayedClip<'a> {
+    pub clip: &'a str,
+    pub time: f32,
+    pub looping: bool,
+    pub root_motion: Option<(&'a str, [bool; 3])>,
+}
+
 /// 一次进行中的交叉淡入：旧剪辑 + 它的时钟 / 循环方式 + 当前混合权重。
 pub struct CrossfadeLayer<'a> {
     pub clip: &'a str,
@@ -25,9 +35,7 @@ impl AnimationSet {
     /// 旧剪辑缺失 / 采样失败时静默退回新剪辑（旧端缺剪辑同样是跳过旧侧）。
     pub fn joint_pose_played(
         &self,
-        clip_name: &str,
-        time: f32,
-        looping: bool,
+        played: PlayedClip<'_>,
         crossfade: Option<CrossfadeLayer<'_>>,
         additive: Option<AdditiveLayer<'_>>,
         joint_nodes: &[usize],
@@ -35,7 +43,7 @@ impl AnimationSet {
         if joint_nodes.is_empty() {
             return None;
         }
-        let mut locals = self.local_pose(clip_name, time, looping)?;
+        let mut locals = self.local_pose(played.clip, played.time, played.looping)?;
         if let Some(fade) = crossfade {
             let alpha = fade.alpha.clamp(0.0, 1.0);
             if alpha < 1.0 {
@@ -44,6 +52,11 @@ impl AnimationSet {
                     locals = old;
                 }
             }
+        }
+        // 根运动：实体已经在世界空间前进，蒙皮里的根节点平移要回到绑定姿态，
+        // 顺序与旧端一致（基础 + 淡入之后、叠加层之前）。
+        if let Some((node, axes)) = played.root_motion {
+            super::root_motion::strip(&mut locals, &self.nodes, node, axes);
         }
         self.apply_additive_into(&mut locals, additive);
         self.joint_matrices(&locals, joint_nodes)

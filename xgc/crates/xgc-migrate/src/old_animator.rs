@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use xgc_world::{
-    AnimationState, Animator, Component, ComponentData, StateDef, StateMachine,
+    AnimationState, Animator, Component, ComponentData, RootMotion, StateDef, StateMachine,
     TransitionCondition, TransitionDef, Value,
 };
 
@@ -28,6 +28,35 @@ pub struct OldAnimator {
     pub machine: Option<OldMachine>,
     #[serde(default)]
     pub additive: Option<OldAdditive>,
+    /// 根运动：节点名 + 参与轴；旧端缺省不写，写了才迁。
+    #[serde(default)]
+    pub root_motion: Option<OldRootMotion>,
+}
+
+/// 旧 `Animator.root_motion`：显式节点名 + 参与根运动的轴。
+///
+/// `axes` 缺省与旧端一致（X/Z 平移交给实体）；节点名不猜——不同 DCC 导出的
+/// 资产生成的根节点层级不同，猜错会把骨架整体平移当成根运动。
+#[derive(Clone, Debug, Deserialize)]
+pub struct OldRootMotion {
+    pub node: String,
+    #[serde(default = "default_root_motion_axes")]
+    pub axes: [bool; 3],
+}
+
+fn default_root_motion_axes() -> [bool; 3] {
+    xgc_world::ROOT_MOTION_AXES_DEFAULT
+}
+
+impl OldRootMotion {
+    /// 新组件只存 RON 字符串；解析 / 序列化都走 world 侧唯一类型。
+    pub fn to_component_field(&self) -> Result<String, String> {
+        RootMotion {
+            node: self.node.clone(),
+            axes: self.axes,
+        }
+        .to_ron()
+    }
 }
 
 /// 旧 `Animator.additive`（单层叠加快捷方式）：增量 = 剪辑当前帧 − 第 0 帧。
@@ -146,6 +175,7 @@ pub struct AnimatorInput {
     pub additive_weight: f32,
     pub additive_speed: f32,
     pub additive_looping: bool,
+    pub root_motion: String,
 }
 
 /// 生成 `animation.animator`（+ 有机器时再生成 `animation.state`）。
@@ -180,6 +210,7 @@ pub fn animator_components(input: AnimatorInput) -> Vec<ComponentData> {
                 "additive_looping".to_string(),
                 Value::Bool(input.additive_looping),
             ),
+            ("root_motion".to_string(), Value::String(input.root_motion)),
         ],
     }];
     if let Some(machine) = input.machine {

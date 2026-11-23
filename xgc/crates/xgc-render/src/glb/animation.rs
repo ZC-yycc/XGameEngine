@@ -15,6 +15,7 @@
 //! 组件覆盖，不从这里驱动），未知 path 也跳过而不是让整个模型加载失败。
 
 use serde::Deserialize;
+use xgc_world::{RootMotionClip, RootMotionNodeTrack, RootMotionSet, RootMotionTrack};
 
 use crate::camera::{mul, Mat4};
 
@@ -122,6 +123,8 @@ impl Interpolation {
 /// 一个节点的静态 TRS（动画没写到的通道用它）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnimationNode {
+    /// glTF 节点名（匿名节点为空串）；根运动与 layers 的关节名匹配都靠它。
+    pub name: String,
     pub parent: Option<usize>,
     pub translation: [f32; 3],
     pub rotation: [f32; 4],
@@ -217,6 +220,49 @@ pub struct AnimationSet {
 impl AnimationSet {
     pub fn clip(&self, name: &str) -> Option<&AnimationClip> {
         self.clips.iter().find(|clip| clip.name == name)
+    }
+
+    /// 抽出模型的根运动轨道（按节点名索引，给 `xgc_sim::apply_root_motion` 用）。
+    ///
+    /// 只取平移通道；匿名节点进不了表（旧端同样按名字找节点）。CUBICSPLINE 在
+    /// 解析阶段就被拒，所以这里只剩 LINEAR / STEP 两种采样方式。
+    pub fn root_motion_set(&self) -> RootMotionSet {
+        let mut clips = Vec::new();
+        for clip in &self.clips {
+            let mut tracks = Vec::new();
+            for channel in &clip.channels {
+                if !matches!(channel.path, AnimationPath::Translation) {
+                    continue;
+                }
+                let Some(node) = self.nodes.get(channel.node) else {
+                    continue;
+                };
+                if node.name.is_empty() {
+                    continue;
+                }
+                let values: Vec<[f32; 3]> = channel
+                    .values
+                    .chunks_exact(3)
+                    .map(|value| [value[0], value[1], value[2]])
+                    .collect();
+                let step = matches!(channel.interpolation, Interpolation::Step);
+                let Some(track) = RootMotionTrack::new(channel.times.clone(), values, step) else {
+                    continue;
+                };
+                tracks.push(RootMotionNodeTrack {
+                    node: node.name.clone(),
+                    track,
+                });
+            }
+            if !tracks.is_empty() {
+                clips.push(RootMotionClip {
+                    name: clip.name.clone(),
+                    duration: clip.duration,
+                    tracks,
+                });
+            }
+        }
+        RootMotionSet { clips }
     }
 
     /// 采样剪辑得到**节点局部** TRS（未做层级合成）。
@@ -409,6 +455,7 @@ fn node_hierarchy(root: &Root) -> Vec<AnimationNode> {
         .iter()
         .enumerate()
         .map(|(index, node)| AnimationNode {
+            name: node.name.clone().unwrap_or_default(),
             parent: parents[index],
             translation: node.translation.unwrap_or([0.0; 3]),
             rotation: normalize_quat(node.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0])),

@@ -70,6 +70,7 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**根运动迁移与落地**切片把旧端 `root_motion`（显式节点名 + 轴开关）补齐：`Animator` 加 `root_motion` RON 字段，`xgc-world/src/root_motion.rs` 提供轨道采样 / 循环展开轨迹 / fade 混合纯函数，`xgc-sim/src/root_motion.rs` 的 `apply_root_motion` 由宿主在 `step_with` 返回后推进实体位置（不进默认调度，轨道表来自模型资产），渲染侧 `glb/root_motion.rs` 在 crossfade 后、additive 前把开关轴平移换回绑定值（否则蒙皮与实体双倍前进）；CLI 宿主已接、editor / player 尚未接。消融实验证明帧 150 的狐狸余差几乎全部来自根运动（旧端 full vs 去掉 root_motion = 2053 结构性像素）。效果：第 150 帧 2.08% / 0.16 / 0.58% → **1.64% / mean_abs 0.09 / 结构性 0.36%**，狐狸 bbox 结构性 2227 → 479；第 200 / 300 帧 2.82% / 2.94% → **2.55% / 2.19%**；Fox 第 150 帧位置与旧端差 4e-7。世界哈希 150/200/300 帧变为 `a47439aa0470ee2e` / `4c46ab46a4b2d401` / `7506cfe9a4d4e7ca`；**未闭环**：旧端 `layers` 仍未迁移、editor / player 根运动未接线。
 **渲染侧交叉淡入**切片把旧端「状态切换当帧就从旧剪辑的独立时钟取景、按 alpha 混合」补齐：`Animator` 加 `blend_from_time` / `blend_from_speed` / `blend_from_looping`（切换时刻定格旧剪辑时钟，`AnimationStateSystem` 写、`AnimatorSystem` 每帧推进并在时长结束清空），`glb/crossfade.rs` 的 `joint_pose_played` 在模型局部 TRS 上按 `alpha = (blend_elapsed / blend_duration).clamp(0,1)` 混旧 / 新剪辑（平移 / 缩放 lerp、旋转 slerp），再叠 additive 后转关节矩阵（`animated_pose` 只算 alpha）。红证据：把交叉淡入分支短路后 `crates/xgc-render/tests/crossfade.rs` 的 `crossfade_moves_from_the_old_clip_to_the_new_clip` 失败（alpha=0 与旧剪辑差 22.7）。新增 `crates/xgc-sim/tests/animator_crossfade.rs` 3 条（旧剪辑时钟定格 / 淡入结束清空 / 硬切清遗留淡入）+ `crates/xgc-render/tests/crossfade.rs` 2 条。效果：第 300 帧（Walk→Run 切换帧）从 3.17% 收到 **2.94% / mean_abs 0.29 / 结构性 1.07%**，第 150 / 200 帧逐字节不变（PPM SHA 仍 `2ee5c071…` / `16d2f691…`）；世界哈希因 Animator 多三字段变为 `3d530c8b85365a14`（150）/ `fa72ca252dcf566b`（200）/ `62a05995997a1a48`（300），无脚本 trace `3e2f014bc5365a14`、带资产 trace `9a738b1325365a14`。结构性余差重心已移到狐狸块（r5c7 / r5c8 等，layers 未迁移 + 未解释的基础姿态差）与红球；**未闭环**：旧端 `layers`（upper 分层状态机 + `b_Spine01_02` 关节遮罩，脚本 `set_anim_layer_*` 仍 no-op）下一刀补；layer 未激活帧（第 1 / 149 帧）狐狸仍有 5–8% 结构性差，需后续「冻结动画 A/B」隔离。
 
 **宿主阶段插到固定步与动画之间**切片把「脚本先于动画」的帧序修好：`Schedule::plan()` 把宿主阶段插在第一个声明 `System::runs_after_host()` 的系统之前（不再恒最后），默认调度把 UI 系统放到宿主之前、5 个动画系统声明 `runs_after_host`，脚本本帧写的状态机参数当帧生效。计划快照变为 `[0] [1] [2] [3] [4] [5,6] [7] [8] Host [9] [10] [11] [12] [13,14,15]`；`xgc plan` 输出合同同步更新。红证据：`crates/xgc-sim/tests/host_order.rs` 3 条先全红（宿主在最后 / 顺序 `["sim","animation","host"]` / 状态机仍 Survey），实现后全绿；`replay.rs` / `schedule_plan.rs` / `plan.rs` / `agent protocol.rs` 的旧顺序断言同步更新。视觉：第 150 帧不变（2.08% / 0.16 / 0.58%）、第 200 帧 2.82%、第 300 帧是状态切换帧（旧端仍在淡入、XGC 无渲染侧交叉淡入）暂升到 3.17%。无脚本 trace 仍 `bf9696c7e547973b`、带资产根 trace 变 `0d5ce14b4547973b`。未闭环：渲染侧交叉淡入、旧端 `layers`、第 1 帧高处投射体阴影。
@@ -193,11 +194,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（537 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
-`xgc-xtask check` 全绿（250 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 35710 字节，
+`cargo test --workspace --offline` 全绿（554 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
+`xgc-xtask check` 全绿（268 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 38175 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、Fox 的 `layers` 分层状态机与关节遮罩（旧端 `upper` 层未迁移；第 200/300 帧差异 2.82% / 2.95%）与渲染侧高光 / UI 字距（交叉淡入已接，第 300 帧 3.17% → 2.94%）、完整刚体、
+**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、Fox 的 `layers` 分层状态机与关节遮罩（旧端 `upper` 层未迁移）、UI 文本字距 / 红球高光 / 阴影边缘（根运动已接，第 150 / 200 / 300 帧 1.64% / 2.55% / 2.19%）、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），

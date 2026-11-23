@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use xgc_render::{CrossfadeLayer, MeshCache};
+use xgc_render::{CrossfadeLayer, MeshCache, PlayedClip};
 
 const RESOURCES: &str = "../../../projects/XGame/Resources";
 
@@ -39,9 +39,12 @@ fn crossfade_moves_from_the_old_clip_to_the_new_clip() {
     let faded = |alpha: f32| {
         animations
             .joint_pose_played(
-                "Walk",
-                0.4,
-                true,
+                PlayedClip {
+                    clip: "Walk",
+                    time: 0.4,
+                    looping: true,
+                    root_motion: None,
+                },
                 Some(CrossfadeLayer {
                     clip: "Survey",
                     time: 0.7,
@@ -96,9 +99,12 @@ fn missing_old_clip_falls_back_to_the_new_one() {
     let new_pose = animations.joint_pose("Walk", 0.4, true, joints).unwrap();
     let pose = animations
         .joint_pose_played(
-            "Walk",
-            0.4,
-            true,
+            PlayedClip {
+                clip: "Walk",
+                time: 0.4,
+                looping: true,
+                root_motion: None,
+            },
             Some(CrossfadeLayer {
                 clip: "Nope",
                 time: 0.1,
@@ -110,4 +116,66 @@ fn missing_old_clip_falls_back_to_the_new_one() {
         )
         .expect("旧剪辑缺失时退回新剪辑");
     assert!(pose_delta(&pose, &new_pose) < 1e-6);
+}
+
+#[test]
+fn root_motion_axis_strip_restores_the_bind_translation() {
+    let root = Path::new(RESOURCES);
+    if !root.join("Fox.gltf").exists() {
+        eprintln!("skip: 没有 Fox.gltf");
+        return;
+    }
+    let mut cache = MeshCache::new(root);
+    let mesh = cache.get("Fox.gltf").unwrap().unwrap();
+    let animations = mesh.animations.as_ref().unwrap();
+    let joints = &mesh.skin.as_ref().expect("Fox.gltf 带蒙皮").joint_nodes;
+    let plain = animations.joint_pose("Walk", 0.6, true, joints).unwrap();
+    let stripped = animations
+        .joint_pose_played(
+            PlayedClip {
+                clip: "Walk",
+                time: 0.6,
+                looping: true,
+                root_motion: Some(("b_Hip_01", [true, false, true])),
+            },
+            None,
+            None,
+            joints,
+        )
+        .expect("根运动剥离可采样");
+    // 髋骨在 Walk 里有水平位移：剥掉 X / Z 后必须真的不同。
+    assert!(
+        pose_delta(&stripped, &plain) > 1e-4,
+        "剥离根运动轴后姿势应变化（差 {}）",
+        pose_delta(&stripped, &plain)
+    );
+    // 三轴全关 = 不动；未知节点名同样逐位不变。
+    let untouched = animations
+        .joint_pose_played(
+            PlayedClip {
+                clip: "Walk",
+                time: 0.6,
+                looping: true,
+                root_motion: Some(("b_Hip_01", [false, false, false])),
+            },
+            None,
+            None,
+            joints,
+        )
+        .unwrap();
+    assert!(pose_delta(&untouched, &plain) < 1e-6);
+    let unknown = animations
+        .joint_pose_played(
+            PlayedClip {
+                clip: "Walk",
+                time: 0.6,
+                looping: true,
+                root_motion: Some(("missing_node", [true, true, true])),
+            },
+            None,
+            None,
+            joints,
+        )
+        .unwrap();
+    assert!(pose_delta(&unknown, &plain) < 1e-6);
 }

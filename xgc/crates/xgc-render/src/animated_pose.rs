@@ -10,7 +10,7 @@
 
 use super::assets::MeshCache;
 use super::draw::DrawList;
-use super::glb::{AdditiveLayer, CrossfadeLayer};
+use super::glb::{AdditiveLayer, CrossfadeLayer, PlayedClip};
 use super::gpu::GpuError;
 
 pub(crate) fn resolve(meshes: &mut MeshCache, list: &mut DrawList) -> Result<(), GpuError> {
@@ -48,10 +48,15 @@ pub(crate) fn resolve(meshes: &mut MeshCache, list: &mut DrawList) -> Result<(),
                 alpha: (sample.blend_elapsed / sample.blend_duration).clamp(0.0, 1.0),
             }
         });
+        let root_motion = (!sample.root_motion_node.is_empty())
+            .then_some((sample.root_motion_node.as_str(), sample.root_motion_axes));
         let Some(pose) = animations.joint_pose_played(
-            &sample.clip,
-            sample.time,
-            sample.looping,
+            PlayedClip {
+                clip: &sample.clip,
+                time: sample.time,
+                looping: sample.looping,
+                root_motion,
+            },
             crossfade,
             additive,
             &skin.joint_nodes,

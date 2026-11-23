@@ -2908,6 +2908,13 @@
                   "kind": "bool",
                   "value": true
                 }
+              ],
+              [
+                "root_motion",
+                {
+                  "kind": "string",
+                  "value": "(node:\"b_Hip_01\",axes:(true,false,true))"
+                }
               ]
             ]
           },

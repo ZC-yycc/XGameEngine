@@ -34,6 +34,8 @@ pub struct AnimatorSample {
     /// 叠加层自己的时钟（由 `AnimatorSystem` 按 `additive_speed` 推进）。
     pub additive_time: f32,
     pub additive_looping: bool,
+    pub root_motion_node: String,
+    pub root_motion_axes: [bool; 3],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -95,19 +97,30 @@ pub fn build_draw_list(world: &World) -> DrawList {
             world
                 .get::<Animator>(key)
                 .filter(|animator| !animator.clip.is_empty())
-                .map(|animator| AnimatorSample {
-                    clip: animator.clip.clone(),
-                    time: animator.time,
-                    looping: animator.looping,
-                    blend_from: animator.blend_from.clone(),
-                    blend_from_time: animator.blend_from_time,
-                    blend_from_looping: animator.blend_from_looping,
-                    blend_elapsed: animator.blend_elapsed,
-                    blend_duration: animator.blend_duration,
-                    additive_clip: animator.additive_clip.clone(),
-                    additive_weight: animator.additive_weight,
-                    additive_time: animator.additive_time,
-                    additive_looping: animator.additive_looping,
+                .map(|animator| {
+                    // 根运动配置只在迁入时写一次；这里解析一次，热路径不重复读 RON。
+                    let root_motion = xgc_world::RootMotion::parse(&animator.root_motion);
+                    AnimatorSample {
+                        clip: animator.clip.clone(),
+                        time: animator.time,
+                        looping: animator.looping,
+                        blend_from: animator.blend_from.clone(),
+                        blend_from_time: animator.blend_from_time,
+                        blend_from_looping: animator.blend_from_looping,
+                        blend_elapsed: animator.blend_elapsed,
+                        blend_duration: animator.blend_duration,
+                        additive_clip: animator.additive_clip.clone(),
+                        additive_weight: animator.additive_weight,
+                        additive_time: animator.additive_time,
+                        additive_looping: animator.additive_looping,
+                        root_motion_node: root_motion
+                            .as_ref()
+                            .map(|motion| motion.node.clone())
+                            .unwrap_or_default(),
+                        root_motion_axes: root_motion
+                            .map(|motion| motion.axes)
+                            .unwrap_or(xgc_world::ROOT_MOTION_AXES_DEFAULT),
+                    }
                 })
         };
         items.push(DrawItem {

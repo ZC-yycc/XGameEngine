@@ -346,6 +346,7 @@ mod mixer;
 mod particles;
 /// 物理重力：只对 dynamic 刚体按 gravity_scale 加速，static / kinematic 不动。
 mod rapier_world;
+mod root_motion;
 mod skeleton;
 mod systems;
 mod ui;
@@ -367,6 +368,7 @@ pub use input::{Axis, Binding, Combo, InputMap, InputState, KeyCode, MouseButton
 pub use mixer::{write_wav_mono, SoftwareMixer};
 pub use particles::{ParticleStats, ParticleSystem};
 pub use rapier_world::{RapierPhysicsSystem, RapierWorld, FIXED_DT};
+pub use root_motion::apply_root_motion;
 pub use skeleton::{parse_pose, SkeletonPoseSystem};
 pub use systems::{
     AnimatorSystem, CharacterJumpSystem, GravitySystem, GroundCollisionSystem, HierarchySystem,
@@ -416,6 +418,12 @@ impl Simulation {
 
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// 帧末、资产相关的派生修正用的可变入口（例如根运动：轨道表来自模型资产，
+    /// 不属于默认调度的零资产依赖契约，由宿主在 `step_with` 返回后应用）。
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
     }
 
     /// 宿主每帧写入 UI 输入；没有 `ui.input` 实体时自动补一个。

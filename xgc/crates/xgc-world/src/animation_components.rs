@@ -33,6 +33,11 @@ pub struct Animator {
     pub additive_looping: bool,
     /// 叠加层播放时间（秒）；由 `AnimatorSystem` 按 `additive_speed` 推进。
     pub additive_time: f32,
+    /// 根运动配置 RON：`(node: "b_Hip_01", axes: (true, false, true))`；空 = 不做根运动。
+    ///
+    /// 解析 / 语义在 `xgc_world::root_motion`；放字符串是因为它只在迁入时写一次，
+    /// 运行时读出来做位移，没有逐帧改字段的需求。
+    pub root_motion: String,
 }
 
 impl Default for Animator {
@@ -59,6 +64,7 @@ impl Default for Animator {
             additive_speed: 1.0,
             additive_looping: true,
             additive_time: 0.0,
+            root_motion: String::new(),
         }
     }
 }
@@ -132,6 +138,12 @@ impl Component for Animator {
                 .doc("叠加层是否循环"),
             FieldDescriptor::new("additive_time", FieldType::F32, Value::F64(0.0))
                 .doc("叠加层播放时间（秒），由 AnimatorSystem 推进"),
+            FieldDescriptor::new(
+                "root_motion",
+                FieldType::String,
+                Value::String(String::new()),
+            )
+            .doc("根运动配置 RON（node + axes）；空 = 不做根运动"),
         ]
     }
 
@@ -160,6 +172,7 @@ impl Component for Animator {
             "additive_speed" => Some(Value::F64(f64::from(self.additive_speed))),
             "additive_looping" => Some(Value::Bool(self.additive_looping)),
             "additive_time" => Some(Value::F64(f64::from(self.additive_time))),
+            "root_motion" => Some(Value::String(self.root_motion.clone())),
             "blend_from" => Some(Value::String(self.blend_from.clone())),
             "blend_elapsed" => Some(Value::F64(f64::from(self.blend_elapsed))),
             "blend_duration" => Some(Value::F64(f64::from(self.blend_duration))),
@@ -372,6 +385,18 @@ impl Component for Animator {
                         value.type_name()
                     )
                 })?;
+                Ok(())
+            }
+            "root_motion" => {
+                self.root_motion = match value {
+                    Value::String(value) => value.clone(),
+                    other => {
+                        return Err(format!(
+                            "animation.animator.root_motion 期望 string，得到 {}",
+                            other.type_name()
+                        ));
+                    }
+                };
                 Ok(())
             }
             "base_scale" => {

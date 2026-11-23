@@ -405,7 +405,7 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
     let [qx, qy, qz, qw] = q;
     let uv = [
         qy * v[2] - qz * v[1],
