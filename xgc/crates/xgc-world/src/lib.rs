@@ -17,6 +17,7 @@ mod journal;
 mod layer_components;
 mod lod_components;
 mod particle_components;
+mod parts;
 mod physics_components;
 mod plugin_components;
 mod prefab_components;
@@ -52,6 +53,7 @@ pub use particle_components::{
     EmissionShape, ParticleBlend, ParticleConfig, ParticleEmitter, ParticleQuad,
     MAX_PARTICLES_LIMIT,
 };
+pub use parts::WriteSet;
 pub use physics_components::{BodyKind, PhysicsBody};
 pub use plugin_components::PluginComponent;
 pub use prefab_components::PrefabInstance;

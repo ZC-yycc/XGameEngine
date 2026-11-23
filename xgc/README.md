@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**世界所有权拆分（跨系统并行前置）**切片给 `crates/xgc-world` 加了 `WriteSet` 与 `World::extract_writes` / `restore_writes`：按组件把列所有权搬出 archetype 交给并行系统，写完塞回；提取期间世界读不到该列、不推进 revision、不许增删实体（还原时断言兜底），两个线程写不相交组件与串行 `state_hash` 逐位一致。门禁 607 条通过。
+
 **UI 运行时创建四函数**切片把旧端 `ui_spawn_label` / `ui_spawn_button` / `ui_spawn_panel` / `ui_spawn_image` 接上（`Command::Spawn` 生成六件套组件、默认值照旧端构造器、`ScriptView::pending_spawns` 保同帧可见、`ui_spawn_*` 不带父节点）；不改组件 schema，世界哈希与 `xgc/acceptance/` 参考全部不变。UI 脚本 API 至此 29 个函数，与旧端一致。
 
 **UI 图像 tint / fill / 三个 setter** 切片给 `UiElement` 加 `image_tint`（线性 RGBA，缺省白）与 `image_fill`（0..=1，缺省 1）：渲染在 `renderer/ui.rs` 把 tint 传给 pipeline，`fill < 1` 时同步收窄矩形与 UV（与九宫格互斥），脚本补 `ui_set_image` / `ui_set_image_tint` / `ui_set_fill`（sRGB→线性、fill clamp 0..=1），迁移从旧 `UiImageStyle` 搬 tint / fill / keep_aspect（`keep_aspect` → `image_mode="preserve"`；旧 `slice` 四值仍是既有单值简化，不伪造语义）。红证据：渲染 2 条、脚本 3 条、迁移 1 条（`left: Some([1.0, 1.0, 1.0, 1.0]) right: Some([0.5, 0.25, 0.0, 1.0])`）。实测：schema 38222 → **38848 字节**、283 个 Rust 文件、597 passed；`render-frame` 第 150 帧世界哈希 `2f74ac05a331a972` → **`6f8c32afeba3b59a`**（PPM SHA 不变，showcase 没有 UI 图片元素）、无脚本 trace → **`53e20cd08ba3b59a`**、带资产 trace 末帧 → **`88baddd00ba3b59a`**、`run 60` 仍 `f4bc029f5f995b91`；重生成 `acceptance/trace.txt` 后 `xgc gate` 151 checkpoint + 四帧 0.48% / 1.01% / 1.30% / 1.50% 全过。未闭环：`ui_spawn_*` 四函数（生成 + 逻辑身份要新命令面）。
@@ -215,11 +217,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（602 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
-`xgc-xtask check` 全绿（283 个 Rust 文件，最大 598 行）；30 个内建类型的 schema 为 38848 字节，
+`cargo test --workspace --offline` 全绿（607 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
+`xgc-xtask check` 全绿（287 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 38848 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、狐狸位姿残差 / 红球高光 / 木箱与阴影轮廓（根运动及其三宿主接线、layers、UI 脚本 setter 与运行时创建（旧端 29 个全齐）、UI 覆盖层 SDF、刚体世界变换、截图裁剪面已接；第 150 / 200 / 300 帧结构性 0.08% / 0.13% / 0.26%，总差异 1.01% / 1.30% / 1.50%）、完整刚体、
+**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段；世界所有权拆分 `WriteSet` 已落地，批内执行接线未做）、狐狸位姿残差 / 红球高光 / 木箱与阴影轮廓（根运动及其三宿主接线、layers、UI 脚本 setter 与运行时创建（旧端 29 个全齐）、UI 覆盖层 SDF、刚体世界变换、截图裁剪面已接；第 150 / 200 / 300 帧结构性 0.08% / 0.13% / 0.26%，总差异 1.01% / 1.30% / 1.50%）、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），
