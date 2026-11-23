@@ -22,7 +22,7 @@ use crate::{System, SystemAccess};
 mod bodies;
 mod characters;
 mod slopes;
-use bodies::{isometry, BodyLink, BodySignature};
+use bodies::{isometry, world_transform, BodyLink, BodySignature};
 use characters::CharacterLink;
 use slopes::{SlopeEntry, SlopeLink, SlopeSignature};
 
@@ -131,7 +131,9 @@ impl RapierWorld {
             if !link.kinematic {
                 continue;
             }
-            let Some(transform) = world.get::<Transform>(link.key).copied() else {
+            // 旧端 `push_kinematic_bodies` 用的是世界矩阵；子实体的运动学体只有按世界
+            // 变换推才算对位置（局部推等于把子物体瞬移回父节点坐标系）。
+            let Some(transform) = world_transform(world, link.key) else {
                 continue;
             };
             if let Some(body) = self.bodies.get_mut(link.body) {
