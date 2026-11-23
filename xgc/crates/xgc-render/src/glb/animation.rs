@@ -15,7 +15,6 @@
 //! 组件覆盖，不从这里驱动），未知 path 也跳过而不是让整个模型加载失败。
 
 use serde::Deserialize;
-use xgc_world::{RootMotionClip, RootMotionNodeTrack, RootMotionSet, RootMotionTrack};
 
 use crate::camera::{mul, Mat4};
 
@@ -222,49 +221,6 @@ impl AnimationSet {
         self.clips.iter().find(|clip| clip.name == name)
     }
 
-    /// 抽出模型的根运动轨道（按节点名索引，给 `xgc_sim::apply_root_motion` 用）。
-    ///
-    /// 只取平移通道；匿名节点进不了表（旧端同样按名字找节点）。CUBICSPLINE 在
-    /// 解析阶段就被拒，所以这里只剩 LINEAR / STEP 两种采样方式。
-    pub fn root_motion_set(&self) -> RootMotionSet {
-        let mut clips = Vec::new();
-        for clip in &self.clips {
-            let mut tracks = Vec::new();
-            for channel in &clip.channels {
-                if !matches!(channel.path, AnimationPath::Translation) {
-                    continue;
-                }
-                let Some(node) = self.nodes.get(channel.node) else {
-                    continue;
-                };
-                if node.name.is_empty() {
-                    continue;
-                }
-                let values: Vec<[f32; 3]> = channel
-                    .values
-                    .chunks_exact(3)
-                    .map(|value| [value[0], value[1], value[2]])
-                    .collect();
-                let step = matches!(channel.interpolation, Interpolation::Step);
-                let Some(track) = RootMotionTrack::new(channel.times.clone(), values, step) else {
-                    continue;
-                };
-                tracks.push(RootMotionNodeTrack {
-                    node: node.name.clone(),
-                    track,
-                });
-            }
-            if !tracks.is_empty() {
-                clips.push(RootMotionClip {
-                    name: clip.name.clone(),
-                    duration: clip.duration,
-                    tracks,
-                });
-            }
-        }
-        RootMotionSet { clips }
-    }
-
     /// 采样剪辑得到**节点局部** TRS（未做层级合成）。
     ///
     /// 叠加层要在局部空间做混合（旋转增量必须乘在父空间里），所以这里把采样
@@ -275,6 +231,21 @@ impl AnimationSet {
         }
         let clip = self.clip(clip_name)?;
         self.sample_locals(clip, time, looping)
+    }
+
+    /// 每个节点的绑定（默认）局部 TRS：不含任何剪辑。
+    ///
+    /// 只有混合层、没有基础剪辑的实体（层权重 > 0 但 Animator.clip 为空）用这份
+    /// 姿态当基底；旧端同样从 `nodes` 的默认 TRS 起算。
+    pub fn bind_locals(&self) -> Vec<LocalPose> {
+        self.nodes
+            .iter()
+            .map(|node| LocalPose {
+                translation: node.translation,
+                rotation: node.rotation,
+                scale: node.scale,
+            })
+            .collect()
     }
 
     /// 采样一条剪辑到节点局部 TRS；时间按 `looping` 取模 / 钳制。

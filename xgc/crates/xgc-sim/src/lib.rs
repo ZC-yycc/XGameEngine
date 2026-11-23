@@ -231,7 +231,7 @@ impl Schedule {
         schedule.add(AnimationStateSystem);
         schedule.add(AnimatorSystem);
         schedule.add(AnimationPlaybackSystem::default());
-        schedule.add(AnimationLayerSystem::default());
+        schedule.add(AnimationLayerSystem);
         schedule.add(SkeletonPoseSystem);
         schedule.add(AudioMixerSystem);
         schedule.add(HierarchySystem::default());
@@ -356,7 +356,7 @@ pub use animation::{
     load_clip_ron, mul_quat, slerp, AnimationClip, AnimationLibrary, AnimationPlaybackSystem,
     JointTrack, RotationKey, ScaleKey, TranslationKey,
 };
-pub use animation_layers::{parse_layers, AnimationLayerSystem, LayerDef};
+pub use animation_layers::{set_layer_weight, AnimationLayerSystem};
 pub use animation_state::AnimationStateSystem;
 pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
 pub use character_kcc::{

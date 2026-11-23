@@ -2919,6 +2919,18 @@
             ]
           },
           {
+            "component": 1286,
+            "fields": [
+              [
+                "layers",
+                {
+                  "kind": "string",
+                  "value": "[(name:\"upper\",mode:Override,clip:\"Walk\",weight:0.0,speed:1.0,looping:true,fade_time:0.25,mask:[\"b_Spine01_02\"],machine:Some((initial:\"Natural\",states:[(name:\"Natural\",clip:\"Walk\",looping:true,speed:1.0),(name:\"Survey\",clip:\"Survey\",looping:true,speed:1.0)],transitions:[(from:Some(\"Natural\"),to:\"Survey\",when:Some(AtLeast(parameter:\"survey\",value:0.5)),duration:0.35),(from:Some(\"Survey\"),to:\"Natural\",when:Some(Below(parameter:\"survey\",value:0.5)),duration:0.15)])),state:\"\",time:0.0,parameters:\"{\\\"survey\\\":0.0}\",fade_from:\"\",fade_from_time:0.0,fade_from_speed:1.0,fade_from_looping:true,fade_elapsed:0.0,fade_duration:0.0)]"
+                }
+              ]
+            ]
+          },
+          {
             "component": 1285,
             "fields": [
               [

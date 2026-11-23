@@ -4,8 +4,8 @@
 //! 平移 / 缩放做线性差，旋转算 `reference⁻¹ · current` 的局部增量再向单位四元数
 //! slerp；权重 0 时逐位等于基础姿势。参考姿势是叠加剪辑**自己的第 0 帧**。
 //!
-//! 与场景骨骼的 `animation.layers`（`AnimationLayerSystem`，组件里的 RON 层）不是
-//! 同一回事：那条路改实体 `Transform` / `Bone`，这里只服务模型内部节点层级。
+//! RON 层栈（`animation.layers`）里的 Additive 层复用这里的 `blend_additive`：
+//! 同一份局部空间增量数学只写一次（见 `glb/layers.rs`）。
 
 use super::animation::{slerp, AnimationSet, LocalPose};
 use crate::camera::Mat4;
@@ -90,7 +90,12 @@ fn quat_inverse(q: [f32; 4]) -> [f32; 4] {
 ///
 /// w=0 时平移 / 缩放逐位不变、旋转 slerp 回原值；中间权重走最短弧，
 /// 直接对四元数分量 lerp 会走反向长弧。
-fn blend_additive(base: &mut LocalPose, additive: &LocalPose, reference: &LocalPose, weight: f32) {
+pub(crate) fn blend_additive(
+    base: &mut LocalPose,
+    additive: &LocalPose,
+    reference: &LocalPose,
+    weight: f32,
+) {
     for axis in 0..3 {
         base.translation[axis] +=
             (additive.translation[axis] - reference.translation[axis]) * weight;

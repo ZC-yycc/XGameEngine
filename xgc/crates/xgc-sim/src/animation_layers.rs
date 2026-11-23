@@ -1,49 +1,20 @@
-//! 动画叠加层：按权重把多个 clip 的偏移 / 旋转 / 缩放混到当前 Transform。
+//! 动画混合层：推进每层自己的状态机 / 时钟 / 淡入，把结果写回组件。
+//!
+//! 旧端层栈在 `Animator.layers` 里由 `AnimationDriver` 逐层 tick：独立状态机、
+//! 独立时钟、转移淡入按本层 `fade_time` 兜底；脚本按层名写权重与参数。XGC 的
+//! 组件（`animation.layers` 的 RON 快照）同时存配置与运行时状态，本系统只负责
+//! **推进**（状态转移、时钟、淡入），姿势合成在渲染侧按模型关节遮罩完成——
+//! 这里绝不改实体 `Transform`（旧端层栈也只作用于骨架姿势）。
 
-use serde::Deserialize;
-use xgc_world::{AnimationLayers, Animator, Bone, Component, Name, Transform, World};
+use xgc_world::{
+    find_layer, layer_parameters, layers_to_ron, parse_layers, AnimLayer, AnimationLayers,
+    Animator, Component, World,
+};
 
-use super::animation::{slerp, AnimationLibrary};
 use super::{System, SystemAccess};
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct LayerDef {
-    pub clip: String,
-    #[serde(default = "default_weight")]
-    pub weight: f32,
-    /// 实体名白名单；空 = 全部实体。
-    #[serde(default)]
-    pub mask: Vec<String>,
-    /// 关节白名单；非空时这一层只驱动这些关节，不动根变换。
-    #[serde(default)]
-    pub joints: Vec<u32>,
-}
-
-fn default_weight() -> f32 {
-    1.0
-}
-
-pub fn parse_layers(text: &str) -> Result<Vec<LayerDef>, String> {
-    ron::from_str(text).map_err(|err| format!("动画层解析失败：{err}"))
-}
-
-pub struct AnimationLayerSystem {
-    pub library: AnimationLibrary,
-}
-
-impl Default for AnimationLayerSystem {
-    fn default() -> Self {
-        Self {
-            library: AnimationLibrary::new(),
-        }
-    }
-}
-
-impl AnimationLayerSystem {
-    pub fn new(library: AnimationLibrary) -> Self {
-        Self { library }
-    }
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AnimationLayerSystem;
 
 impl System for AnimationLayerSystem {
     fn runs_after_host(&self) -> bool {
@@ -56,92 +27,101 @@ impl System for AnimationLayerSystem {
 
     fn access(&self) -> SystemAccess {
         SystemAccess {
-            reads: vec![AnimationLayers::ID, Animator::ID],
-            writes: vec![Transform::ID],
+            reads: vec![Animator::ID],
+            writes: vec![AnimationLayers::ID],
         }
     }
 
-    fn run(&mut self, world: &mut World, _dt: f32) {
-        let mut updates = Vec::new();
-        let mut joint_requests = Vec::new();
-        world.for_each2::<AnimationLayers, Animator>(|key, layers, animator| {
-            let Ok(parsed) = parse_layers(&layers.layers) else {
+    fn run(&mut self, world: &mut World, dt: f32) {
+        world.for_each2_mut::<AnimationLayers, Animator>(|_, layers, animator| {
+            if layers.layers.trim().is_empty() {
                 return;
-            };
-            let Some(mut transform) = world.get::<Transform>(key).copied() else {
-                return;
-            };
-            let name = world.get::<Name>(key).map(|name| name.value.as_str());
-            let mut changed = false;
-            for layer in parsed {
-                let weight = layer.weight.clamp(0.0, 1.0);
-                if weight <= 0.0 {
-                    continue;
-                }
-                if !layer.mask.is_empty()
-                    && !name.is_some_and(|name| layer.mask.iter().any(|mask| mask == name))
-                {
-                    continue;
-                }
-                let Some(clip) = self.library.get(&layer.clip) else {
-                    continue;
-                };
-                if !layer.joints.is_empty() {
-                    if let Some(root) = world.entity(key) {
-                        for joint in &layer.joints {
-                            joint_requests.push((
-                                root,
-                                *joint,
-                                layer.clip.clone(),
-                                animator.time,
-                                weight,
-                            ));
-                        }
-                    }
-                    continue;
-                }
-                let offset = clip.sample_looped(animator.time);
-                let rotation = clip.sample_looped_rotation(animator.time);
-                let scale = clip.sample_looped_scale(animator.time);
-                for axis in 0..3 {
-                    transform.position[axis] += offset[axis] * weight;
-                    transform.scale[axis] *= 1.0 - weight + scale[axis] * weight;
-                }
-                transform.rotation = slerp(transform.rotation, rotation, weight);
-                changed = true;
             }
-            if changed {
-                updates.push((key, transform));
+            let Ok(mut parsed) = parse_layers(&layers.layers) else {
+                return;
+            };
+            let autoplay = animator.autoplay;
+            for layer in &mut parsed {
+                advance_layer(layer, autoplay, dt);
+            }
+            let updated = layers_to_ron(&parsed);
+            if updated != layers.layers {
+                layers.layers = updated;
             }
         });
-        for (key, transform) in updates {
-            if let Some(target) = world.get_mut::<Transform>(key) {
-                *target = transform;
-            }
+    }
+}
+
+/// 推进一层：状态转移（旧端命中即切、当帧就开始走新状态时钟）→ 时钟 → 淡入。
+///
+/// 顺序与旧端 `AnimationDriver::tick` 一致：先 sync 状态机 / 建 `Prev`，再推进
+/// 时钟与淡入；转移当帧 `alpha = dt/duration`（旧端同款，切换帧已淡出一小步）。
+fn advance_layer(layer: &mut AnimLayer, autoplay: bool, dt: f32) {
+    if layer.name.is_empty() && layer.clip.is_empty() && layer.machine.is_none() {
+        return;
+    }
+    let machine = layer.usable_machine().cloned();
+    let Some(machine) = machine else {
+        if autoplay {
+            layer.time += dt * layer.speed.max(0.0);
         }
-        let mut joint_updates = Vec::new();
-        for (root, joint, clip_name, time, weight) in joint_requests {
-            let Some(clip) = self.library.get(&clip_name) else {
-                continue;
+        return;
+    };
+    if layer.state.is_empty() {
+        layer.state = machine.initial.clone();
+    }
+    if !autoplay {
+        return;
+    }
+    let current = layer.state.clone();
+    let parameters = layer_parameters(layer);
+    if let Some(transition) = machine.transition_for(&current, &parameters) {
+        let next = transition.to.clone();
+        if next != current {
+            // 旧端：转移没写 duration 时用本层 `fade_time` 兜底；旧侧时钟 / 速度 /
+            // 循环方式在切换那一刻定格（淡出的那半边按旧状态节奏走）。
+            let duration = if transition.duration > 0.0 {
+                transition.duration
+            } else {
+                layer.fade_time
             };
-            world.for_each::<Bone>(|key, bone| {
-                if bone.index != joint || !super::animation::joints::descendant_of(world, key, root)
-                {
-                    return;
-                }
-                if let Some((position, rotation, scale)) = clip.sample_joint_looped(joint, time) {
-                    joint_updates.push((key, position, rotation, scale, weight));
-                }
-            });
-        }
-        for (key, position, rotation, scale, weight) in joint_updates {
-            if let Some(target) = world.get_mut::<Transform>(key) {
-                for axis in 0..3 {
-                    target.position[axis] += position[axis] * weight;
-                    target.scale[axis] *= 1.0 - weight + scale[axis] * weight;
-                }
-                target.rotation = slerp(target.rotation, rotation, weight);
+            let old = machine.state_def(&current);
+            if duration > 0.0 {
+                layer.fade_from = old
+                    .map(|state| state.clip.clone())
+                    .unwrap_or_else(|| layer.clip.clone());
+                layer.fade_from_time = layer.time;
+                layer.fade_from_speed = old.map(|state| state.speed).unwrap_or(layer.speed);
+                layer.fade_from_looping = old.map(|state| state.looping).unwrap_or(layer.looping);
+                layer.fade_elapsed = 0.0;
+                layer.fade_duration = duration;
+            } else {
+                layer.clear_fade();
             }
+            layer.state = next;
+            layer.time = 0.0;
         }
     }
+    layer.time += dt * layer.effective_speed();
+    if layer.fade_duration > 0.0 {
+        layer.fade_from_time += dt * layer.fade_from_speed;
+        layer.fade_elapsed += dt;
+        if layer.fade_elapsed >= layer.fade_duration {
+            layer.clear_fade();
+        }
+    }
+}
+
+/// 按层名改权重（脚本 `set_anim_layer_weight` 的唯一实现处）。
+///
+/// 返回是否真的改到：层名不存在 / 非有限值 → false（脚本侧静默 no-op）。
+pub fn set_layer_weight(layers: &mut [AnimLayer], name: &str, weight: f32) -> bool {
+    if !weight.is_finite() {
+        return false;
+    }
+    let Some(layer) = find_layer(layers, name) else {
+        return false;
+    };
+    layer.weight = weight.clamp(0.0, 1.0);
+    true
 }

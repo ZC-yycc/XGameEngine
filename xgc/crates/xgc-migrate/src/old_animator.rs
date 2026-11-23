@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use xgc_world::{
-    AnimationState, Animator, Component, ComponentData, RootMotion, StateDef, StateMachine,
-    TransitionCondition, TransitionDef, Value,
+    layers_to_ron, AnimLayer, AnimationLayers, AnimationState, Animator, Component, ComponentData,
+    LayerMode, RootMotion, StateDef, StateMachine, TransitionCondition, TransitionDef, Value,
 };
 
 /// 旧 Animator 本体（`components.entries[].data: Animator(...)`）。
@@ -31,6 +31,9 @@ pub struct OldAnimator {
     /// 根运动：节点名 + 参与轴；旧端缺省不写，写了才迁。
     #[serde(default)]
     pub root_motion: Option<OldRootMotion>,
+    /// 混合层栈；旧端缺省不写（空 = 没有层）。
+    #[serde(default)]
+    pub layers: Vec<OldLayer>,
 }
 
 /// 旧 `Animator.root_motion`：显式节点名 + 参与根运动的轴。
@@ -71,11 +74,99 @@ pub struct OldAdditive {
     pub looping: bool,
 }
 
+/// 旧 `Animator.layers` 里的一层。
+///
+/// 旧层有自己的剪辑 / 权重 / 时钟 / 可选状态机 / 骨骼遮罩；迁移只搬配置，
+/// 运行时状态（当前状态、状态时间、淡入进度）由 XGC 侧从零推进。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct OldLayer {
+    pub name: String,
+    pub mode: OldLayerMode,
+    pub clip: String,
+    pub weight: f32,
+    pub speed: f32,
+    pub looping: bool,
+    /// 本层转移缺省淡入时长；旧端不写时退回 0.25（旧 `AnimLayer::default`）。
+    pub fade_time: Option<f32>,
+    pub machine: Option<OldMachine>,
+    /// 骨骼遮罩（子树根名单）。
+    pub mask: Vec<String>,
+}
+
+impl Default for OldLayer {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            mode: OldLayerMode::default(),
+            clip: String::new(),
+            weight: 1.0,
+            speed: 1.0,
+            looping: true,
+            fade_time: None,
+            machine: None,
+            mask: Vec::new(),
+        }
+    }
+}
+
+/// 旧层混合模式；缺省与旧端一致（Additive）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+pub enum OldLayerMode {
+    #[default]
+    Additive,
+    Override,
+}
+
+impl OldLayer {
+    /// 旧层 → 新层：机器翻成同一份 `StateMachine`，运行时状态从零起。
+    pub fn to_anim_layer(&self) -> Result<AnimLayer, String> {
+        let machine = match &self.machine {
+            Some(machine) => Some(machine.to_state_machine()?),
+            None => None,
+        };
+        let mut layer = AnimLayer {
+            name: self.name.clone(),
+            mode: match self.mode {
+                OldLayerMode::Additive => LayerMode::Additive,
+                OldLayerMode::Override => LayerMode::Override,
+            },
+            clip: self.clip.clone(),
+            weight: self.weight,
+            speed: self.speed,
+            looping: self.looping,
+            fade_time: self.fade_time.unwrap_or(0.25),
+            mask: self.mask.clone(),
+            machine,
+            ..AnimLayer::default()
+        };
+        // 入口参数：旧机器自带的 parameters 一次性写进本层参数字符串；
+        // 状态名沿用机器 entry（运行时初始化时回填，这里写空更贴近「还没跑过」）。
+        if let Some(machine) = &self.machine {
+            layer.parameters = ron::ser::to_string(&machine.parameters)
+                .map_err(|err| format!("层参数序列化失败：{err}"))?;
+        }
+        Ok(layer)
+    }
+}
+
+/// 旧层栈 → 组件字符串（空栈返回空串 = 组件不生成）。
+pub fn layers_to_component_field(layers: &[OldLayer]) -> Result<String, String> {
+    if layers.is_empty() {
+        return Ok(String::new());
+    }
+    let mut migrated = Vec::with_capacity(layers.len());
+    for layer in layers {
+        migrated.push(layer.to_anim_layer()?);
+    }
+    Ok(layers_to_ron(&migrated))
+}
+
 /// 旧 Animator 的状态机（`Scenes/*.ron` 里的 `machine:` 节）。
 ///
 /// 旧字段名与新类型差一个字母的地方（`entry` / `param`）在这里一次翻译完，
 /// 运行时只认 `xgc_world::StateMachine`。
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct OldMachine {
     entry: String,
     #[serde(default)]
@@ -86,7 +177,7 @@ pub struct OldMachine {
     transitions: Vec<OldTransition>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct OldState {
     name: String,
     clip: String,
@@ -94,7 +185,7 @@ struct OldState {
     looping: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct OldTransition {
     from: String,
     to: String,
@@ -103,7 +194,7 @@ struct OldTransition {
     duration: Option<f32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 enum OldWhen {
     AtLeast { param: String, value: f32 },
     Below { param: String, value: f32 },
@@ -116,11 +207,12 @@ pub struct MigratedMachine {
     pub parameters: String,
 }
 
-impl MigratedMachine {
-    pub fn new(old: &OldMachine) -> Result<Self, String> {
-        let machine = StateMachine {
-            initial: old.entry.clone(),
-            states: old
+impl OldMachine {
+    /// 旧机器 → `xgc_world::StateMachine`（基础机器与混合层的机器共用这一处）。
+    pub fn to_state_machine(&self) -> Result<StateMachine, String> {
+        Ok(StateMachine {
+            initial: self.entry.clone(),
+            states: self
                 .states
                 .iter()
                 .map(|state| StateDef {
@@ -130,7 +222,7 @@ impl MigratedMachine {
                     speed: state.speed,
                 })
                 .collect(),
-            transitions: old
+            transitions: self
                 .transitions
                 .iter()
                 .map(|transition| TransitionDef {
@@ -149,9 +241,14 @@ impl MigratedMachine {
                     duration: transition.duration.unwrap_or(0.0),
                 })
                 .collect(),
-        };
-        let machine =
-            ron::ser::to_string(&machine).map_err(|err| format!("状态机序列化失败：{err}"))?;
+        })
+    }
+}
+
+impl MigratedMachine {
+    pub fn new(old: &OldMachine) -> Result<Self, String> {
+        let machine = ron::ser::to_string(&old.to_state_machine()?)
+            .map_err(|err| format!("状态机序列化失败：{err}"))?;
         let parameters = ron::ser::to_string(&old.parameters)
             .map_err(|err| format!("状态机参数序列化失败：{err}"))?;
         Ok(Self {
@@ -176,6 +273,8 @@ pub struct AnimatorInput {
     pub additive_speed: f32,
     pub additive_looping: bool,
     pub root_motion: String,
+    /// 混合层栈 RON；空 = 不生成 `animation.layers`。
+    pub layers: String,
 }
 
 /// 生成 `animation.animator`（+ 有机器时再生成 `animation.state`）。
@@ -213,6 +312,12 @@ pub fn animator_components(input: AnimatorInput) -> Vec<ComponentData> {
             ("root_motion".to_string(), Value::String(input.root_motion)),
         ],
     }];
+    if !input.layers.is_empty() {
+        components.push(ComponentData {
+            component: AnimationLayers::ID,
+            fields: vec![("layers".to_string(), Value::String(input.layers))],
+        });
+    }
     if let Some(machine) = input.machine {
         components.push(ComponentData {
             component: AnimationState::ID,

@@ -43,7 +43,10 @@ pub use data::{ComponentData, EntityData, WorldData};
 pub use environment::{LightKind, SceneEnvironment, SceneLight};
 pub use gameplay_components::{AudioGain, AudioListener, AudioMixer, AudioSource, Script};
 pub use journal::{Journal, TxRecord};
-pub use layer_components::AnimationLayers;
+pub use layer_components::{
+    find_layer, layer_parameters, layers_to_ron, parse_layers, set_layer_parameter, AnimLayer,
+    AnimationLayers, LayerMode,
+};
 pub use lod_components::LodGroup;
 pub use particle_components::{
     EmissionShape, ParticleBlend, ParticleConfig, ParticleEmitter, ParticleQuad,

@@ -9,8 +9,8 @@ use std::rc::Rc;
 use mlua::{Lua, Table};
 use xgc_base::EntityId;
 use xgc_world::{
-    AnimationState, Animator, Command, Component, Transform, UiElement, Value as FieldValue,
-    Velocity,
+    AnimationLayers, AnimationState, Animator, Command, Component, Transform, UiElement,
+    Value as FieldValue, Velocity,
 };
 
 /// 脚本 API 的颜色参数是 **sRGB 0..1**（美术 / CSS 的直觉：`0.5` 就是中灰），
@@ -27,35 +27,7 @@ fn srgb_to_linear(channel: f32) -> f32 {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct EntityView {
-    pub id: u64,
-    pub name: String,
-    pub position: [f32; 3],
-    pub rotation: [f32; 4],
-    pub velocity: [f32; 3],
-    pub anim_parameters: Option<String>,
-    pub clicked: bool,
-    pub hovered: bool,
-    pub pressed: bool,
-}
-#[derive(Clone, Debug, Default)]
-pub struct ScriptView {
-    pub delta: f32,
-    pub time: f32,
-    pub entities: Vec<EntityView>,
-    pub actions: BTreeMap<String, bool>,
-}
-
-impl ScriptView {
-    pub fn entity(&self, id: u64) -> Option<&EntityView> {
-        self.entities.iter().find(|entity| entity.id == id)
-    }
-
-    pub fn by_name(&self, name: &str) -> Option<&EntityView> {
-        self.entities.iter().find(|entity| entity.name == name)
-    }
-}
+pub use crate::view::{EntityView, ScriptView};
 
 type Commands = Rc<RefCell<Vec<Command>>>;
 type View = Rc<RefCell<ScriptView>>;
@@ -311,16 +283,94 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
         .map_err(|err| err.to_string())?;
 
     // 旧脚本里出现但当前无实现的调用：静默 no-op，避免迁移脚本直接报错。
-    for name in [
-        "set_anim_layer_param",
-        "set_anim_layer_weight",
-        "play_sound",
-    ] {
-        let function = lua
-            .create_function(|_, _: mlua::MultiValue| Ok(()))
-            .map_err(|err| err.to_string())?;
-        globals.set(name, function).map_err(|err| err.to_string())?;
-    }
+    let function = lua
+        .create_function(|_, _: mlua::MultiValue| Ok(()))
+        .map_err(|err| err.to_string())?;
+    globals
+        .set("play_sound", function)
+        .map_err(|err| err.to_string())?;
+
+    // 混合层：脚本读当前层栈 → 改权重 / 参数 → 写回组件。命令在宿主阶段结算，
+    // `animation_layers` 系统排在宿主之后，所以本帧写的权重当帧生效。
+    let layer_weight_commands = Rc::clone(commands);
+    let layer_weight_view = Rc::clone(view);
+    globals
+        .set(
+            "set_anim_layer_weight",
+            lua.create_function(
+                move |_, (_ctx, layer, weight): (mlua::Value, String, f32)| {
+                    if !weight.is_finite() {
+                        return Ok(());
+                    }
+                    // 同帧先 py 一次「读 → 改 → 写」：`current_layers_text` 会看到
+                    // 本帧已排队但未结算的写入，权重与参数依次累积。
+                    let current = current_layers_text(
+                        &layer_weight_commands,
+                        &layer_weight_view.borrow(),
+                        self_id,
+                    );
+                    let Some(current) = current else {
+                        return Ok(());
+                    };
+                    let Ok(mut parsed) = xgc_world::parse_layers(&current) else {
+                        return Ok(());
+                    };
+                    let Some(target) = xgc_world::find_layer(&mut parsed, &layer) else {
+                        return Ok(());
+                    };
+                    target.weight = weight.clamp(0.0, 1.0);
+                    push_layers_text(
+                        &layer_weight_commands,
+                        self_id,
+                        xgc_world::layers_to_ron(&parsed),
+                    );
+                    Ok(())
+                },
+            )
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+    let layer_param_commands = Rc::clone(commands);
+    let layer_param_view = Rc::clone(view);
+    globals
+        .set(
+            "set_anim_layer_param",
+            lua.create_function(
+                move |_, (_ctx, layer, name, value): (mlua::Value, String, String, f32)| {
+                    if !value.is_finite() {
+                        return Ok(());
+                    }
+                    let current = current_layers_text(
+                        &layer_param_commands,
+                        &layer_param_view.borrow(),
+                        self_id,
+                    );
+                    let Some(current) = current else {
+                        return Ok(());
+                    };
+                    let Ok(mut parsed) = xgc_world::parse_layers(&current) else {
+                        return Ok(());
+                    };
+                    let Some(target) = xgc_world::find_layer(&mut parsed, &layer) else {
+                        return Ok(());
+                    };
+                    // 旧端只对带机器的层写参数（层机器的转移条件读它）。
+                    if target.machine.is_none() {
+                        return Ok(());
+                    }
+                    xgc_world::set_layer_parameter(target, &name, value);
+                    push_layers_text(
+                        &layer_param_commands,
+                        self_id,
+                        xgc_world::layers_to_ron(&parsed),
+                    );
+                    Ok(())
+                },
+            )
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
     let ui_text_commands = Rc::clone(commands);
     globals
         .set(
@@ -432,6 +482,59 @@ fn vector_table(lua: &Lua, value: [f32; 3]) -> mlua::Result<Table> {
     table.set("y", value[1])?;
     table.set("z", value[2])?;
     Ok(table)
+}
+
+/// 读当前层栈文本：先看命令队列里同实体 / 同字段尚未结算的写入（同帧多次改层
+/// 必须依次累积），没有才退回帧首视图快照。
+///
+/// 少了这一步，`FoxLocomotion.lua` 同一帧里的 `set_anim_layer_param` +
+/// `set_anim_layer_weight` 会各自从帧首快照构造整份 RON，后结算的那条把前一条
+/// 覆盖掉（层权重永远回到 0）。旧端两个 setter 直接改运行时层结构，不存在这问题。
+fn current_layers_text(commands: &Commands, view: &ScriptView, id: u64) -> Option<String> {
+    let entity = EntityId::from_raw(id);
+    let queued = commands
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|command| match command {
+            Command::SetField {
+                entity: target,
+                component,
+                field,
+                value: FieldValue::String(text),
+            } if *target == entity && *component == AnimationLayers::ID && field == "layers" => {
+                Some(text.clone())
+            }
+            _ => None,
+        });
+    queued.or_else(|| view.entity(id).and_then(|row| row.anim_layers.clone()))
+}
+
+/// 写层栈文本：命令队列里已有同实体 / 同字段的写入就替换它的值（保持一条命令），
+/// 否则追加。与 `current_layers_text` 配对，保证同帧多次修改只落一份最终文本。
+fn push_layers_text(commands: &Commands, id: u64, text: String) {
+    let entity = EntityId::from_raw(id);
+    let mut queue = commands.borrow_mut();
+    for command in queue.iter_mut().rev() {
+        if let Command::SetField {
+            entity: target,
+            component,
+            field,
+            value,
+        } = command
+        {
+            if *target == entity && *component == AnimationLayers::ID && field == "layers" {
+                *value = FieldValue::String(text);
+                return;
+            }
+        }
+    }
+    queue.push(Command::SetField {
+        entity,
+        component: AnimationLayers::ID,
+        field: "layers".to_string(),
+        value: FieldValue::String(text),
+    });
 }
 
 fn push_set(

@@ -202,6 +202,13 @@ impl ScriptRuntime {
                             }
                         }
                     }
+                    0x0506 => {
+                        for (field, value) in &component.fields {
+                            if let ("layers", Value::String(value)) = (field.as_str(), value) {
+                                row.anim_layers = Some(value.clone());
+                            }
+                        }
+                    }
                     0x0505 => {
                         for (field, value) in &component.fields {
                             if let ("parameters", Value::String(value)) = (field.as_str(), value) {

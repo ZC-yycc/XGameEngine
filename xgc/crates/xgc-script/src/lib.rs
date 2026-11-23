@@ -16,6 +16,7 @@ use xgc_world::{builtin_registry, Command, ComponentData, Transform, Value, Worl
 mod legacy;
 mod lifecycle;
 mod runtime;
+mod view;
 pub use legacy::{euler_to_quat, EntityView, ScriptView};
 pub use runtime::ScriptRuntime;
 

@@ -101,8 +101,9 @@ fn default_plan_snapshot() {
         PlanStage::Host,
         PlanStage::Batch(vec![9]),
         PlanStage::Batch(vec![10]),
-        PlanStage::Batch(vec![11]),
-        PlanStage::Batch(vec![12]),
+        // `animation_apply` 写 Transform、`animation_layers` 只写 AnimationLayers，
+        // 两者无写冲突 ⇒ 从本轮起合并进同一批（层时钟推进不依赖基础姿势）。
+        PlanStage::Batch(vec![11, 12]),
         PlanStage::Batch(vec![13, 14, 15]),
     ];
     assert_eq!(Schedule::default_schedule(1).plan().stages(), expected);

@@ -52,6 +52,7 @@ fn crossfade_moves_from_the_old_clip_to_the_new_clip() {
                     alpha,
                 }),
                 None,
+                &[],
                 joints,
             )
             .expect("交叉淡入可采样")
@@ -112,6 +113,7 @@ fn missing_old_clip_falls_back_to_the_new_one() {
                 alpha: 0.0,
             }),
             None,
+            &[],
             joints,
         )
         .expect("旧剪辑缺失时退回新剪辑");
@@ -140,6 +142,7 @@ fn root_motion_axis_strip_restores_the_bind_translation() {
             },
             None,
             None,
+            &[],
             joints,
         )
         .expect("根运动剥离可采样");
@@ -160,6 +163,7 @@ fn root_motion_axis_strip_restores_the_bind_translation() {
             },
             None,
             None,
+            &[],
             joints,
         )
         .unwrap();
@@ -174,6 +178,7 @@ fn root_motion_axis_strip_restores_the_bind_translation() {
             },
             None,
             None,
+            &[],
             joints,
         )
         .unwrap();

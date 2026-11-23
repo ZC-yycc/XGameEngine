@@ -8,6 +8,7 @@
 
 use super::additive::AdditiveLayer;
 use super::animation::{slerp, AnimationSet, LocalPose};
+use super::layers::LayerSample;
 use crate::camera::Mat4;
 
 /// 基础层一次采样的全部参数（剪辑 + 时钟 + 循环 + 可选根运动剥离配置）。
@@ -38,12 +39,19 @@ impl AnimationSet {
         played: PlayedClip<'_>,
         crossfade: Option<CrossfadeLayer<'_>>,
         additive: Option<AdditiveLayer<'_>>,
+        layers: &[LayerSample],
         joint_nodes: &[usize],
     ) -> Option<Vec<Mat4>> {
         if joint_nodes.is_empty() {
             return None;
         }
-        let mut locals = self.local_pose(played.clip, played.time, played.looping)?;
+        // 层栈可以单独生效（基础剪辑为空时从绑定姿态起算），旧的「层改根
+        // Transform」语义已删除：层只作用于模型内部节点姿势。
+        let mut locals = if played.clip.is_empty() {
+            self.bind_locals()
+        } else {
+            self.local_pose(played.clip, played.time, played.looping)?
+        };
         if let Some(fade) = crossfade {
             let alpha = fade.alpha.clamp(0.0, 1.0);
             if alpha < 1.0 {
@@ -59,12 +67,14 @@ impl AnimationSet {
             super::root_motion::strip(&mut locals, &self.nodes, node, axes);
         }
         self.apply_additive_into(&mut locals, additive);
+        // 层栈在 additive 之后按顺序叠加（后层盖前层，旧端同序）。
+        self.apply_layers_into(&mut locals, layers);
         self.joint_matrices(&locals, joint_nodes)
     }
 }
 
 /// 把 `new_pose` 按 `alpha` 混进 `pose`（就地）—— 与旧端 `blend_into` 逐行同式。
-fn blend_into(pose: &mut [LocalPose], new_pose: &[LocalPose], alpha: f32) {
+pub(crate) fn blend_into(pose: &mut [LocalPose], new_pose: &[LocalPose], alpha: f32) {
     for (base, target) in pose.iter_mut().zip(new_pose) {
         for axis in 0..3 {
             base.translation[axis] += (target.translation[axis] - base.translation[axis]) * alpha;

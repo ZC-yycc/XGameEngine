@@ -17,6 +17,7 @@ mod additive;
 mod animation;
 mod attributes;
 mod crossfade;
+mod layers;
 mod material;
 mod normals;
 mod root_motion;
@@ -27,6 +28,7 @@ pub use animation::{
     AnimationClip, AnimationNode, AnimationPath, AnimationSet, Interpolation, LocalPose,
 };
 pub use crossfade::{CrossfadeLayer, PlayedClip};
+pub use layers::LayerSample;
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;

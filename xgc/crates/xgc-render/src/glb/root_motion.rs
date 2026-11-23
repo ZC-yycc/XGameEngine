@@ -9,7 +9,9 @@
 //!
 //! 节点名不命中时逐位不变——坏配置只该不生效，不该把角色画歪。
 
-use super::animation::{AnimationNode, LocalPose};
+use xgc_world::{RootMotionClip, RootMotionNodeTrack, RootMotionSet, RootMotionTrack};
+
+use super::animation::{AnimationNode, AnimationPath, AnimationSet, Interpolation, LocalPose};
 
 /// 把 `locals` 里根节点的开关轴平移改回绑定姿态。
 pub(crate) fn strip(
@@ -35,6 +37,51 @@ pub(crate) fn strip(
         if *enabled {
             local.translation[axis] = node.translation[axis];
         }
+    }
+}
+
+impl AnimationSet {
+    /// 抽出模型的根运动轨道（按节点名索引，给 `xgc_sim::apply_root_motion` 用）。
+    ///
+    /// 只取平移通道；匿名节点进不了表（旧端同样按名字找节点）。CUBICSPLINE 在
+    /// 解析阶段就被拒，所以这里只剩 LINEAR / STEP 两种采样方式。
+    pub fn root_motion_set(&self) -> RootMotionSet {
+        let mut clips = Vec::new();
+        for clip in &self.clips {
+            let mut tracks = Vec::new();
+            for channel in &clip.channels {
+                if !matches!(channel.path, AnimationPath::Translation) {
+                    continue;
+                }
+                let Some(node) = self.nodes.get(channel.node) else {
+                    continue;
+                };
+                if node.name.is_empty() {
+                    continue;
+                }
+                let values: Vec<[f32; 3]> = channel
+                    .values
+                    .chunks_exact(3)
+                    .map(|value| [value[0], value[1], value[2]])
+                    .collect();
+                let step = matches!(channel.interpolation, Interpolation::Step);
+                let Some(track) = RootMotionTrack::new(channel.times.clone(), values, step) else {
+                    continue;
+                };
+                tracks.push(RootMotionNodeTrack {
+                    node: node.name.clone(),
+                    track,
+                });
+            }
+            if !tracks.is_empty() {
+                clips.push(RootMotionClip {
+                    name: clip.name.clone(),
+                    duration: clip.duration,
+                    tracks,
+                });
+            }
+        }
+        RootMotionSet { clips }
     }
 }
 

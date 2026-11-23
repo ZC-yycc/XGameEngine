@@ -5,10 +5,12 @@
 
 use xgc_base::EntityId;
 use xgc_world::{
-    Animator, GlobalTransform, Material, MeshRenderer, Parent, Skeleton, SkeletonPose, World,
+    AnimationLayers, Animator, GlobalTransform, Material, MeshRenderer, Parent, Skeleton,
+    SkeletonPose, World,
 };
 
 use super::camera::{model_matrix, Mat4};
+use super::glb::LayerSample;
 
 /// 实体要播的 glTF 剪辑（`animation.animator` 的渲染侧投影）。
 ///
@@ -60,6 +62,8 @@ pub struct DrawItem {
     pub pose: Option<Vec<[f32; 16]>>,
     /// 要采样的 glTF 剪辑；渲染侧据此把 `pose` 补成动画后的关节矩阵。
     pub animation: Option<AnimatorSample>,
+    /// 混合层（`animation.layers` 的渲染侧投影）；空 = 不叠层。
+    pub layers: Vec<LayerSample>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -91,6 +95,13 @@ pub fn build_draw_list(world: &World) -> DrawList {
         let material = world.get::<Material>(key).cloned();
         let pose = skeleton_pose(world, key);
         // 场景骨骼姿态优先：迁移过来的 glTF 角色没有 Skeleton 实体，走模型自带动画。
+        // 混合层：状态机 / 时钟已由 `AnimationLayerSystem` 推进，这里只把组件
+        // 投影成渲染侧参数；场景骨骼姿态（SkeletonPose）路径不消费模型层栈。
+        let layers = if pose.is_some() {
+            Vec::new()
+        } else {
+            build_layers(world, key)
+        };
         let animation = if pose.is_some() {
             None
         } else {
@@ -143,6 +154,7 @@ pub fn build_draw_list(world: &World) -> DrawList {
             transform: model_matrix(transform),
             pose,
             animation,
+            layers,
         });
     });
     items.sort_by_key(|item| item.entity);
@@ -160,4 +172,31 @@ fn skeleton_pose(world: &World, mut key: xgc_base::EntityKey) -> Option<Vec<[f32
         key = world.key(parent.entity)?;
     }
     None
+}
+
+/// 把 `animation.layers` 的 RON 快照投影成渲染侧层参数。
+///
+/// 权重在这里只剩「是否生效」的判断，真正的混合在 `glb::layers`；层状态机 /
+/// 时钟 / 淡入进度由模拟侧 `AnimationLayerSystem` 推进，渲染不重复算。
+fn build_layers(world: &World, key: xgc_base::EntityKey) -> Vec<LayerSample> {
+    let Some(component) = world.get::<AnimationLayers>(key) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = xgc_world::parse_layers(&component.layers) else {
+        return Vec::new();
+    };
+    parsed
+        .iter()
+        .map(|layer| LayerSample {
+            mode: layer.mode,
+            clip: layer.effective_clip().to_string(),
+            time: layer.time,
+            looping: layer.effective_looping(),
+            weight: layer.weight.clamp(0.0, 1.0),
+            fade: layer
+                .fade_sample()
+                .map(|(clip, time, looping, alpha)| (clip.to_string(), time, looping, alpha)),
+            mask: layer.mask.clone(),
+        })
+        .collect()
 }

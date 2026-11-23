@@ -36,16 +36,7 @@ impl System for AnimationStateSystem {
             }
             let parameters = parse_parameters(&state.parameters);
             let current = state.state.clone();
-            let transition = machine.transitions.iter().find(|transition| {
-                transition
-                    .from
-                    .as_deref()
-                    .is_none_or(|from| from == current)
-                    && transition
-                        .when
-                        .as_ref()
-                        .is_none_or(|when| when.matches(&parameters))
-            });
+            let transition = machine.transition_for(&current, &parameters);
             if let Some(transition) = transition {
                 let next = transition.to.clone();
                 if next != current {
@@ -59,9 +50,7 @@ impl System for AnimationStateSystem {
                     // 旧端 `Prev` 把旧剪辑的时钟 / 速度 / 循环方式一起定格：淡出的
                     // 那半边按旧状态自己的节奏走，不跟新状态事后调速。
                     let from = machine
-                        .states
-                        .iter()
-                        .find(|definition| definition.name == current)
+                        .state_def(&current)
                         .map(|definition| definition.clip.clone())
                         .unwrap_or_else(|| animator.clip.clone());
                     if duration > 0.0 {
@@ -88,11 +77,7 @@ impl System for AnimationStateSystem {
                 }
             }
             state.time += dt;
-            if let Some(definition) = machine
-                .states
-                .iter()
-                .find(|definition| definition.name == state.state)
-            {
+            if let Some(definition) = machine.state_def(&state.state) {
                 animator.clip = definition.clip.clone();
                 animator.looping = definition.looping;
                 animator.speed = definition.speed;

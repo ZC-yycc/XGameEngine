@@ -159,6 +159,39 @@ impl TransitionCondition {
     }
 }
 
+impl StateMachine {
+    /// 机器是否有最少一份可用的状态定义（空机器 = 不启用）。
+    pub fn is_usable(&self) -> bool {
+        !self.initial.is_empty() && self.state_def(&self.initial).is_some()
+    }
+
+    /// 按名字找状态定义。
+    pub fn state_def(&self, name: &str) -> Option<&StateDef> {
+        self.states.iter().find(|state| state.name == name)
+    }
+
+    /// 当前状态下第一条命中的转移（`from` 缺省 = 任意状态；`when` 缺省 = 无条件）。
+    ///
+    /// 基础机器与混合层的机器共用这一份判据：两边若各写一遍，`from` 缺省与
+    /// 参数缺省值的口径迟早漂开。
+    pub fn transition_for<'a>(
+        &'a self,
+        current: &str,
+        parameters: &BTreeMap<String, f32>,
+    ) -> Option<&'a TransitionDef> {
+        self.transitions.iter().find(|transition| {
+            transition
+                .from
+                .as_deref()
+                .is_none_or(|from| from == current)
+                && transition
+                    .when
+                    .as_ref()
+                    .is_none_or(|when| when.matches(parameters))
+        })
+    }
+}
+
 pub fn parse_machine(text: &str) -> Result<StateMachine, String> {
     ron::from_str(text).map_err(|err| format!("状态机解析失败：{err}"))
 }

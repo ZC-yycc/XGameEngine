@@ -2,7 +2,8 @@
 
 use xgc_migrate::migrate_str;
 use xgc_world::{
-    parse_machine, parse_parameters, AnimationState, Animator, Component, StateMachine,
+    parse_layers, parse_machine, parse_parameters, AnimationLayers, AnimationState, Animator,
+    Component, LayerMode, StateMachine,
 };
 
 const SCENE: &str = r#"(
@@ -43,6 +44,35 @@ const SCENE: &str = r#"(
                                 node: "b_Hip_01",
                                 axes: (true, false, true),
                             )),
+                            layers: [
+                                (
+                                    name: "upper",
+                                    mode: Override,
+                                    clip: "Walk",
+                                    weight: 0.0,
+                                    speed: 1.0,
+                                    looping: true,
+                                    machine: Some((
+                                        entry: "Natural",
+                                        parameters: {
+                                            "survey": 0.0,
+                                        },
+                                        states: [
+                                            (name: "Natural", clip: "Walk", speed: 1.0, looping: true),
+                                            (name: "Survey", clip: "Survey", speed: 1.0, looping: true),
+                                        ],
+                                        transitions: [
+                                            (
+                                                from: "Natural",
+                                                to: "Survey",
+                                                when: AtLeast(param: "survey", value: 0.5),
+                                                duration: Some(0.35),
+                                            ),
+                                        ],
+                                    )),
+                                    mask: ["b_Spine01_02"],
+                                ),
+                            ],
                             machine: Some((
                                 entry: "Idle",
                                 parameters: {
@@ -150,4 +180,34 @@ fn animator_machine_becomes_animation_state_component() {
     let root_motion = xgc_world::RootMotion::parse(root_motion).expect("root_motion 必须能再解析");
     assert_eq!(root_motion.node, "b_Hip_01");
     assert_eq!(root_motion.axes, [true, false, true]);
+
+    // 层栈一次性搬成独立组件：配置 / 遮罩 / 分层机器都在，运行时字段从零起。
+    let layers = entity
+        .components
+        .iter()
+        .find(|component| component.component == AnimationLayers::ID)
+        .expect("Fox 迁移后应有 animation.layers 组件");
+    let text = layers
+        .fields
+        .iter()
+        .find(|(name, _)| name == "layers")
+        .map(|(_, value)| value)
+        .expect("缺 layers 字段");
+    let text = match text {
+        xgc_world::Value::String(text) => text,
+        other => panic!("layers 应是字符串，得到 {other:?}"),
+    };
+    let parsed = parse_layers(text).expect("迁移出的层栈必须能再解析");
+    assert_eq!(parsed.len(), 1);
+    let layer = &parsed[0];
+    assert_eq!(layer.name, "upper");
+    assert_eq!(layer.mode, LayerMode::Override);
+    assert_eq!(layer.clip, "Walk");
+    assert_eq!(layer.weight, 0.0);
+    assert_eq!(layer.mask, vec!["b_Spine01_02".to_string()]);
+    let layer_machine = layer.machine.as_ref().expect("层机器必须一并迁移");
+    assert_eq!(layer_machine.initial, "Natural");
+    assert_eq!(layer_machine.states.len(), 2);
+    assert_eq!(layer.state, "", "运行时状态不落盘，从零起");
+    assert_eq!(layer.time, 0.0);
 }
