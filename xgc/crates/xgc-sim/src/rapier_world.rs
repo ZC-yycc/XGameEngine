@@ -199,6 +199,13 @@ impl System for RapierPhysicsSystem {
         "rapier"
     }
 
+    fn prepare(&mut self, world: &World) {
+        // 建体必须发生在本帧速度积分之前：旧端 `sync_bodies()` 在固定步内先建
+        // 刚体，再把本步结果写回；这里换成帧首只读准备，避免新刚体把
+        // `VelocitySystem` 本帧的位移当成场景位姿（整条轨迹会多出 g·dt²）。
+        self.world.ensure_built(world);
+    }
+
     fn access(&self) -> SystemAccess {
         SystemAccess {
             reads: vec![

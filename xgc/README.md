@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**帧首建体**切片把物理首帧口径对齐旧端：旧端 `sync_bodies()` 在固定步里**先建刚体再推进物理**，XGC 原先只在 `RapierPhysicsSystem::run` 里 `ensure_built`，此时 `VelocitySystem` 已经把 Transform 积分过一帧，新刚体把「积分后」的位姿当场景位姿，整条轨迹多出 g·dt²（实测 showcase 第 1 帧 Crate.A y 差 2.725 mm = 9.81/3600，之后恒定、落地收敛；Bouncer 是带 Lua 的弹跳球，这点偏差被接触时序放大成 7 cm 横向漂移与 6° 姿态差，正好是第 150 帧球区域 16.9% 结构性的来源）。做法：`System` trait 加 `prepare(&mut self, world: &World)`（默认空、只读世界，命令结算之后 / 执行计划之前按注册顺序调用，只允许重建派生缓存、不能改语义），`Schedule::prepare` + `Schedule::run` / `Simulation::step_with` 在计划前调用，`RapierPhysicsSystem::prepare` 调 `ensure_built`；`RapierWorld::step` 里的 `ensure_built` 保留（直接调用 `RapierWorld::step` 的测试仍要自建表，重复扫描幂等且稳态零分配）。红证据：先写 `crates/xgc-sim/tests/rapier_first_frame.rs` 的 `first_fixed_step_starts_from_the_scene_pose`（默认调度跑 6 帧，断言 `y = 7 - g·dt²·f(4f+1)/8` 与 `v = -g·dt·f`），修复前 FAILED「第 1 帧 y 应为 6.9982967，实际 6.9955716」。效果：showcase 第 0–6 帧 Crate.A y 与旧端**逐位相同**；第 150 帧 Bouncer 位置差 0.0739 → 0.00204、旋转 6° → 0.00139；渲染 2.38% / mean_abs 0.36 / 结构性 0.96% → **2.16%（19947）/ 0.23 / 0.65%（5955）**，世界哈希变为 `61eea79d1f20aa31`、两次渲染 PPM SHA-256 同为 `b648f9db8916df128c1569d6b4a8a236e57518ca490cfa5ef616b3f82ea75399`；回归 1 条，全 workspace 516 通过 / 1 ignored。**未闭环**：① 第 1 帧差异仍有 1.63% / mean_abs 0.51 / 结构性 1.14%，热点是高处落下木箱的投影三角（XGC 没画出来）与 Fox 静止；② 余差最大块转到狐狸（row5col7/8 约 31%），仍要 glTF 动画剪辑加载；③ 无脚本 trace 与带脚本 trace 的哈希因物理轨迹改变而更新（`800245315f20aa31` / `9b0757cf7f20aa31`），`run 60` 不受影响。
+
 **终态世界落盘与跨端状态对表切片**给 `xgc run-scripts` 加了第 4 个参数（`run-scripts <世界.json> <资产根> [帧数] [输出.json]`）：跑完 N 帧把终态世界写成世界 JSON 包络；配合旧端 `--headless --dump-scene`（任意帧数终态 RON）+ `xgc migrate`，就能做跨引擎 checkpoint 状态对表。实测 N=1/2/5/10/30/60/100/150：Spinner 旋转逐帧全等、自由落体落地前恒差 g·dt²≈2.725 mm 且落地收敛、相机 4e-6 ⇒ 动态状态对齐；剩余最大视觉差是 Fox 的 glTF 动画（XGC 尚未加载剪辑，`animation.animator.base_position` 不随帧变）。**未闭环**：恒定 2.725 mm 偏移成因、`run-scripts` 落盘缺收尾层级 / UI 派生计算、旧端仍无逐帧哈希流。
 **内建图元与旧端逐顶点一致切片**把 `crates/xgc-render/src/mesh.rs` 的四个 builtin 生成器按旧端 `crates/xgame-render/src/mesh.rs` 逐顶点重写：`cube` 24 顶点 / 36 索引（6 面 × 4 角、每面共享轴对齐面法线、逐角 UV），`sphere` 换成 `sphere(0.5, 24, 32)`（825 顶点 / 4608 索引、法线 = 归一化位置、经纬 UV），`plane` 补 +Y 法线与 UV，`cylinder` 换成 32 段（134 顶点 / 384 索引、侧面径向法线、±Y 三角扇盖）。新增私有 `Mesh::textured` 承接位置 / 法线 / UV 三属性；顶点色与关节列不搬（XGC 由实体 / 材质与 glTF 蒙皮负责）。红证据：条数断言改成旧端口径后实跑 1 passed / 5 failed（`positions.len()` 8 vs 24、`normals` 长度 0、`uvs` 为空）。效果：第 150 帧从 2.39% / mean_abs 0.36 / 结构性 0.97% 收到 **2.38% / 0.36 / 0.96%**，球面横向条带消失，世界哈希仍 `d050bd357f20aa31`、两次渲染 PPM SHA-256 同为 `3673a6a9…`；回归 4 条。**未闭环**：第 150 帧 Bouncer 球轮廓仍相对旧端偏约 2 px（脚本 / 物理逐帧状态分叉，不是渲染差异），Fox.gltf 部分三角面仍偏暗，动态物体逐帧对表待做。
 
@@ -183,11 +185,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（515 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（516 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（250 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、Fox.gltf 蒙皮 / 贴图残差、动态物体逐帧状态分叉（第 150 帧 Bouncer 球轮廓相对旧端偏约 2 px）、完整刚体、
+**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、Fox.gltf 动画剪辑加载（XGC 尚未加载 glTF 剪辑，最大剩余视觉差）、渲染侧高光与 UI 字距、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），

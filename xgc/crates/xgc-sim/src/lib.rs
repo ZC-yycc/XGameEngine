@@ -2,7 +2,9 @@
 //!
 //! 执行顺序只认 [`Schedule::plan`]：系统按注册顺序连续分批（同批两两无访问
 //! 冲突），最后一段是宿主帧末阶段（脚本等 `!Send` 状态）。跨系统并行还差世界
-//! 所有权拆分，同批系统当前仍串行。确定性契约先钉住：同一份 Scenario（初始
+//! 所有权拆分，同批系统当前仍串行。计划之前还有一段**帧首准备**
+//! （[`Schedule::prepare`]）：只读世界、不改语义，用来把派生的运行时缓存
+//! （刚体表等）建到与当前场景一致。确定性契约先钉住：同一份 Scenario（初始
 //! WorldData + 每帧命令 + fixed_dt）跑两遍，trace 必须逐帧一致。
 
 #![deny(unsafe_code)]
@@ -138,6 +140,13 @@ pub trait System: Send {
     fn access(&self) -> SystemAccess {
         SystemAccess::default()
     }
+    /// 帧首准备：命令结算之后、执行计划之前，按注册顺序调用一次。
+    ///
+    /// 只拿到只读世界：这里只允许重建派生缓存（刚体表 / 骨架表等），不能改
+    /// 世界语义。刚体表必须在本帧速度积分之前建好——旧端 `sync_bodies()` 也是
+    /// 先建体再推进物理；挪进 `run` 会让新刚体吃到本帧 `VelocitySystem` 的积分，
+    /// 整条轨迹多出 g·dt²。
+    fn prepare(&mut self, _world: &World) {}
     fn run(&mut self, world: &mut World, dt: f32);
 }
 
@@ -196,8 +205,10 @@ impl Schedule {
         schedule.add(GroundCollisionSystem::default());
         schedule.add(AabbCollisionSystem);
         // 刚体走与旧引擎相同的 rapier 求解器（角动量 / 接触力矩 / 堆叠才与旧图可比）。
-        // 放在最后：上面的简化系统只服务角色 / 斜坡，对 rapier 接管的 `physics.body`
-        // 实体的 Transform 改动会被这一步整帧覆盖回物理结果。
+        // 放在这里：上面的简化系统先跑，对 rapier 接管的 `physics.body` 实体的
+        // Transform 改动会被这一步整帧覆盖回物理结果。刚体表由 `prepare` 在本帧
+        // 任何系统之前建好（旧端 `sync_bodies()` 同序）；别把建体挪进 `run`——
+        // 那会吃到 `VelocitySystem` 本帧的积分，整条轨迹多出 g·dt²。
         schedule.add(RapierPhysicsSystem::default());
         schedule.add(AnimationStateSystem);
         schedule.add(AnimatorSystem);
@@ -279,8 +290,20 @@ impl Schedule {
         }
     }
 
+    /// 帧首准备：命令结算之后、执行计划之前，按注册顺序给每个系统一次只读
+    /// 世界的机会（重建刚体表等派生缓存）。
+    ///
+    /// 只读而不是 `&mut World`：准备阶段不允许改世界语义，否则「计划即唯一
+    /// 执行顺序」就被绕开了。
+    pub fn prepare(&mut self, world: &World) {
+        for system in &mut self.systems {
+            system.prepare(world);
+        }
+    }
+
     /// 按注册顺序执行所有系统，不带宿主阶段（测试 / 独立用法）。
     pub fn run(&mut self, world: &mut World, dt: f32) {
+        self.prepare(world);
         let plan = self.plan();
         self.run_plan(&plan, world, dt, |_| {});
     }
@@ -437,6 +460,8 @@ impl Simulation {
                 frame: self.frame,
                 diagnostics,
             })?;
+        // 帧首准备必须在执行计划之前：刚体表要用**本帧积分前**的位姿建体。
+        self.schedule.prepare(&self.world);
         self.schedule
             .run_plan(&self.plan, &mut self.world, self.fixed_dt, after);
 
