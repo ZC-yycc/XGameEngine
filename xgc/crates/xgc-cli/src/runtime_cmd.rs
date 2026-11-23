@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use xgc_asset::scan as scan_assets;
 use xgc_script::ScriptRuntime;
 use xgc_sim::{ParticleSystem, Simulation};
+use xgc_store::save_world;
 use xgc_world::World;
 
 use crate::world_cmd::{load_world_state, parse_frames};
@@ -111,9 +112,10 @@ pub(crate) fn run_scripts(
     world_path: Option<&str>,
     assets_root: Option<&str>,
     frames: Option<&str>,
+    output: Option<&str>,
 ) -> ExitCode {
     let (Some(world_path), Some(assets_root)) = (world_path, assets_root) else {
-        eprintln!("用法：xgc run-scripts <世界.json> <资产根> [帧数]");
+        eprintln!("用法：xgc run-scripts <世界.json> <资产根> [帧数] [输出.json]");
         return ExitCode::from(2);
     };
     let frames: u64 = match parse_frames(frames) {
@@ -139,5 +141,12 @@ pub(crate) fn run_scripts(
         record.revision,
         world.state_hash()
     );
+    if let Some(output) = output {
+        if let Err(err) = save_world(Path::new(output), &record) {
+            eprintln!("写出世界失败：{err}");
+            return ExitCode::from(2);
+        }
+        println!("已写出世界：{output}");
+    }
     ExitCode::SUCCESS
 }

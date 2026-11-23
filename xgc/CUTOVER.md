@@ -11,8 +11,8 @@
 | 迁移世界可运行 | 通过 | `run-world` / `run-cooked` / `xgc-player` 60 帧同哈希 |
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
 | 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `d050bd357f20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / 场景 pass 4× MSAA（颜色与深度同采样、1× 等同关闭、收尾统一 resolve）/ RGBA16F 场景 / 线性粒子合成 / 唯一全局 ACES / 曝光旋钮（`render.exposure`，缺省 1.0）/ 曝光后曲线前三级光晕（默认关） / 多光源照明（方向光 / 点光最多 8 盏 + 点光衰减） / 点光立方体阴影（6 面深度图） / 可选 PCSS 软阴影 + 级间混合（`render.shadow`，默认关）/ tone 后可选 FXAA（默认关）/ 预过滤环境 IBL（GGX 5 级立方体 + 256 样本 BRDF 积分表，split-sum）/ tone 后 UI 已贯通 |
-| 视觉对等 | **未通过** | 本机重新生成旧端参考后仍有 21920/921600 像素不同（**2.38%**），mean_abs **0.36**、max 198；归因（`image-diff … report`）：只差 1 LSB 的 10275 个像素（1.11%）、结构性差异（单通道 ≥8）8809 = **0.96%**。glTF 模型材质因子切片把「实体没有 `render.material` 时用模型材质」补齐（Box.glb 的 `roughnessFactor` 按 spec 缺省 1.0、Fox.gltf 0.58；内建图元用旧端 `MaterialParams::default` 的 metallic 0.0 / roughness 0.45）后，红方块与地面 / 天空 / 内建立方体面**逐字节一致**，整帧从 3.25% / mean_abs 0.42 / 结构性 1.66% 收到 2.39% / 0.36 / 0.97%，再经内建图元与旧端逐顶点一致收到 **2.38% / 0.36 / 0.96%**；世界哈希仍 `d050bd357f20aa31`（材质不进状态哈希），同一份世界两次渲染 PPM SHA-256 同为 `3673a6a914b39bf6fc8eee3cfe7c5965718be7953e7b3a5f38454d85500e8e60`。内建图元生成器已与旧端逐顶点一致（cube 24 顶点带面法线 / UV、`sphere(0.5, 24, 32)` 平滑法线、cylinder 32 段、plane +Y 法线）；剩余余差集中在 ① Fox.gltf 蒙皮 / 贴图路径的部分三角面（蓝通道偏低，未定位）② 动态物体逐帧状态分叉（第 150 帧 Bouncer 球轮廓相对旧端整体偏约 2 px）③ 几何边缘的 ±1 LSB。**旧端参考必须在验收机重生成**（见命令；仓库检入的 `tmp/old-150.png` 来自另一 GPU / 驱动环境，直接对比会得到 18.43% 的假差异）。 |
-| 逐帧 trace / 状态哈希对照 | **未通过（XGC 侧逐帧 trace 已建）** | `xgc trace <世界.json> [帧数] [资产根]` 逐帧打印 `frame / entities / revision / hash`（无资产根时与 `run-world` 同一条无脚本步进路径，带资产根时走 `ScriptedRunner`、与 `run-scripts` 同一条路径；第 0 帧是装载后状态；坏脚本 / 语法错 / 不可用资产根都会打印「第 N 帧运行失败」并退出码 2）；集成回归 `crates/xgc-cli/tests/trace.rs`：与进程内重放逐步对表、两次运行逐字节相同、不同世界第 0 帧即不同、带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致；旧引擎 `--headless` 没有逐帧 trace 输出，跨端对照仍缺 |
+| 视觉对等 | **未通过** | 本机重新生成旧端参考后仍有 21920/921600 像素不同（**2.38%**），mean_abs **0.36**、max 198；归因（`image-diff … report`）：只差 1 LSB 的 10275 个像素（1.11%）、结构性差异（单通道 ≥8）8809 = **0.96%**。glTF 模型材质因子切片把「实体没有 `render.material` 时用模型材质」补齐（Box.glb 的 `roughnessFactor` 按 spec 缺省 1.0、Fox.gltf 0.58；内建图元用旧端 `MaterialParams::default` 的 metallic 0.0 / roughness 0.45）后，红方块与地面 / 天空 / 内建立方体面**逐字节一致**，整帧从 3.25% / mean_abs 0.42 / 结构性 1.66% 收到 2.39% / 0.36 / 0.97%，再经内建图元与旧端逐顶点一致收到 **2.38% / 0.36 / 0.96%**；世界哈希仍 `d050bd357f20aa31`（材质不进状态哈希），同一份世界两次渲染 PPM SHA-256 同为 `3673a6a914b39bf6fc8eee3cfe7c5965718be7953e7b3a5f38454d85500e8e60`。内建图元生成器已与旧端逐顶点一致（cube 24 顶点带面法线 / UV、`sphere(0.5, 24, 32)` 平滑法线、cylinder 32 段、plane +Y 法线）；跨端终态状态对表（旧端 `--dump-scene` + `xgc run-scripts … <输出.json>`，N=1/2/5/10/30/60/100/150）已确认动态物体状态对齐（Spinner 旋转逐帧全等、自由落体恒差 g·dt²≈2.725 mm 且落地收敛、相机 4e-6），剩余余差集中在 ① Fox.gltf 动画（XGC 尚未加载 glTF 剪辑，旧端 `animation.animator.base_position` 逐帧变化 / XGC 恒定）② 渲染侧高光与 UI 字距 ③ 几何边缘的 ±1 LSB。**旧端参考必须在验收机重生成**（见命令；仓库检入的 `tmp/old-150.png` 来自另一 GPU / 驱动环境，直接对比会得到 18.43% 的假差异）。 |
+| 逐帧 trace / 状态哈希对照 | **未通过（XGC 侧逐帧 trace 已建）** | `xgc trace <世界.json> [帧数] [资产根]` 逐帧打印 `frame / entities / revision / hash`（无资产根时与 `run-world` 同一条无脚本步进路径，带资产根时走 `ScriptedRunner`、与 `run-scripts` 同一条路径；第 0 帧是装载后状态；坏脚本 / 语法错 / 不可用资产根都会打印「第 N 帧运行失败」并退出码 2）；集成回归 `crates/xgc-cli/tests/trace.rs`：与进程内重放逐步对表、两次运行逐字节相同、不同世界第 0 帧即不同、带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致；旧引擎没有逐帧 trace 流，但 `--headless --dump-scene` 可导出任意帧数终态 RON，`xgc run-scripts <世界> <资产根> <帧数> <输出.json>` 写同形世界 JSON（第 4 参数），`xgc migrate` 把旧 dump 转世界 JSON 后逐实体 / 组件对表（showcase 1/2/5/10/30/60/100/150 帧）：Spinner 旋转全等、物理恒差 g·dt²≈2.725 mm 且落地收敛、相机差 4e-6，Fox `animation.animator.base_position` 不随帧变化（glTF 剪辑未加载） |
 | 正式 System 调度（计划即执行顺序） | **通过** | `Schedule::plan()` 取代全批贪心的 `batches()`：按注册顺序**连续**分批（同批两两无访问冲突）+ 宿主帧末阶段，`run` / `step_with` 都只走计划，摊平顺序 == 注册顺序；`Simulation` 构造时固化计划（稳态分配不回归）；`xgc plan` 输出确定性 JSON（16 系统 / 12 批 + 宿主阶段，两次输出逐字节相同）。语义保持证据：`run 60` 仍 `f4bc029f5f995b91`、showcase 150 步无脚本 trace 仍 `883b6a7bdf20aa31`、带资产根 trace 与 `run-scripts` 末行同为 `432bee801f20aa31`；回归 `crates/xgc-sim/tests/schedule_plan.rs`（8 条）+ `crates/xgc-cli/tests/plan.rs`（4 条） |
 | 跨系统并行执行 | **未通过** | 计划与访问声明已就绪（连续批次，同批两两无冲突），缺世界所有权拆分成不相交 `&mut` 视图；同批系统仍按注册顺序串行。脚本不进 `System`：`ScriptRuntime` 用 mlua 的 `Rc` / `RefCell`、mlua 0.10 无 send feature ⇒ `!Send`，且 xtask 依赖门禁不允许 `xgc-script → xgc-sim` |
 | 性能基准 + 热路径分配门禁 | **未通过（XGC 侧门禁已建）** | `crates/xgc-sim/tests/steady_state.rs`：稳态帧分配 13818 次 / 预算 16440（每帧 1697 → 230），数值型组件 `state_hash` 零分配；release 吞吐 0.057 ms/帧（210 实体）；仍无 CI release 基线 |
@@ -38,6 +38,15 @@ cargo run -q -p xgc-cli --offline -- trace ..\tmp\showcase.json 150 ..\projects\
 
 # 执行计划（确定性 JSON：系统访问声明 + 连续批次 + 宿主阶段）
 cargo run -q -p xgc-cli --offline -- plan
+
+# 跨端终态对表：旧端没有逐帧 trace 流，用固定帧数 checkpoint 逼近；
+# 旧端 --dump-scene 出任意帧数终态 RON，XGC run-scripts 第 4 参数出同形世界 JSON，再 migrate 后逐字段对比
+cd ..
+cargo run -q -p xgame-editor --offline -- --headless --frames 150 --dump-scene ..\tmp\old-150.ron projects\XGame
+cd xgc
+cargo run -q -p xgc-cli --offline -- run-scripts ..\tmp\showcase.json ..\projects\XGame 150 ..\tmp\xgc-150.json
+cargo run -q -p xgc-cli --offline -- migrate ..\tmp\old-150.ron ..\tmp\old-150.migrated.json
+python ..\tmp\compare_states.py ..\tmp\old-150.migrated.json ..\tmp\xgc-150.json
 
 # 视觉指标：先在根 workspace 生成旧引擎第 150 帧，再回 xgc 生成同帧
 # 注意：旧端参考截图必须在验收机重新生成。仓库里检入的 `tmp/old-150.png` 来自另一台

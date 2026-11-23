@@ -70,6 +70,7 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**终态世界落盘与跨端状态对表切片**给 `xgc run-scripts` 加了第 4 个参数（`run-scripts <世界.json> <资产根> [帧数] [输出.json]`）：跑完 N 帧把终态世界写成世界 JSON 包络；配合旧端 `--headless --dump-scene`（任意帧数终态 RON）+ `xgc migrate`，就能做跨引擎 checkpoint 状态对表。实测 N=1/2/5/10/30/60/100/150：Spinner 旋转逐帧全等、自由落体落地前恒差 g·dt²≈2.725 mm 且落地收敛、相机 4e-6 ⇒ 动态状态对齐；剩余最大视觉差是 Fox 的 glTF 动画（XGC 尚未加载剪辑，`animation.animator.base_position` 不随帧变）。**未闭环**：恒定 2.725 mm 偏移成因、`run-scripts` 落盘缺收尾层级 / UI 派生计算、旧端仍无逐帧哈希流。
 **内建图元与旧端逐顶点一致切片**把 `crates/xgc-render/src/mesh.rs` 的四个 builtin 生成器按旧端 `crates/xgame-render/src/mesh.rs` 逐顶点重写：`cube` 24 顶点 / 36 索引（6 面 × 4 角、每面共享轴对齐面法线、逐角 UV），`sphere` 换成 `sphere(0.5, 24, 32)`（825 顶点 / 4608 索引、法线 = 归一化位置、经纬 UV），`plane` 补 +Y 法线与 UV，`cylinder` 换成 32 段（134 顶点 / 384 索引、侧面径向法线、±Y 三角扇盖）。新增私有 `Mesh::textured` 承接位置 / 法线 / UV 三属性；顶点色与关节列不搬（XGC 由实体 / 材质与 glTF 蒙皮负责）。红证据：条数断言改成旧端口径后实跑 1 passed / 5 failed（`positions.len()` 8 vs 24、`normals` 长度 0、`uvs` 为空）。效果：第 150 帧从 2.39% / mean_abs 0.36 / 结构性 0.97% 收到 **2.38% / 0.36 / 0.96%**，球面横向条带消失，世界哈希仍 `d050bd357f20aa31`、两次渲染 PPM SHA-256 同为 `3673a6a9…`；回归 4 条。**未闭环**：第 150 帧 Bouncer 球轮廓仍相对旧端偏约 2 px（脚本 / 物理逐帧状态分叉，不是渲染差异），Fox.gltf 部分三角面仍偏暗，动态物体逐帧对表待做。
 
 **glTF 模型材质因子切片**补齐「实体没有 `render.material` 时用模型自带材质」：`crates/xgc-render/src/glb/material.rs` 解析 `metallicFactor` / `roughnessFactor`（spec 缺省 1.0），`Mesh` 带 `metallic` / `roughness`（内建图元 = 旧端 `MaterialParams::default` 的 0.0 / 0.45），`DrawItem.has_material` 记录实体是否真的带 `render.material`，`compose_colors` 按旧端顺序合成：模型因子 → `.mat` 资产 → 实体覆盖 → 选择高亮。红证据：「Box.glb 无 Material 组件时期望 roughness 1.0」实跑 FAILED（0.5 vs 1.0）。效果：第 150 帧与旧端从 3.25% / mean_abs 0.42 / 结构性 1.66% 收到 **2.39% / 0.36 / 0.97%**，红方块 / 地面 / 天空 / 内建 cube 面逐字节一致，世界哈希仍 `d050bd357f20aa31`；回归 5 条（另把合成蒙皮 GLB 的材质因子显式钉住）。**未闭环**：内建 `builtin://sphere` 仍是 8×16 低模 + 导数分面（旧端 24×32 平滑法线 + UV），Fox.gltf 部分三角面仍偏暗，迁移丢失旧 `MaterialOverride.metallic` 与「未覆盖」存在性；另外旧端参考图必须在本机重新生成（仓库检入的 `tmp/old-150.png` 来自另一 GPU 环境，直接用会得到 18.43% 的假差异）。
@@ -182,7 +183,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（514 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（515 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（250 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 

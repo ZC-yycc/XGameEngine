@@ -50,6 +50,7 @@ fn main() -> ExitCode {
             args.next().as_deref(),
             args.next().as_deref(),
             args.next().as_deref(),
+            args.next().as_deref(),
         ),
         Some("serve") => serve(),
         Some("migrate") => migrate(args.next().as_deref(), args.next().as_deref()),

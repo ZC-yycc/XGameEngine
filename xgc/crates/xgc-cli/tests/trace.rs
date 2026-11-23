@@ -324,3 +324,51 @@ fn update_errors_are_reported_like_load_errors() {
     assert!(text.contains("boom"), "错误必须带上脚本原文：{text}");
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+#[test]
+fn run_scripts_can_write_the_final_world() {
+    // 割接对表的入口：旧端用 `--dump-scene` 落终态，XGC 侧必须能在同一条
+    // 「系统 → 脚本 → 粒子」路径跑完后把世界原样落盘，否则只能比截图。
+    let (path, assets) = scripted_world("dump");
+    let dir = path.parent().unwrap();
+    let first_out = dir.join("final-a.json");
+    let second_out = dir.join("final-b.json");
+
+    let run = |out: &Path| {
+        Command::new(binary())
+            .arg("run-scripts")
+            .arg(&path)
+            .arg(&assets)
+            .arg("3")
+            .arg(out)
+            .output()
+            .unwrap()
+    };
+
+    let first = run(&first_out);
+    assert!(
+        first.status.success(),
+        "run-scripts 落盘必须成功：{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let text = String::from_utf8(first.stdout).unwrap();
+    assert!(text.contains("已写出世界"), "必须报告落盘路径：{text}");
+    assert!(first_out.is_file(), "输出世界必须真的写出来");
+
+    let data = load_world(&first_out).unwrap();
+    let mut world = World::new();
+    world.restore_world_data(&data).unwrap();
+    let mut positions = Vec::new();
+    world.for_each::<Transform>(|_, transform| positions.push(transform.position));
+    assert_eq!(positions.len(), 1, "落盘世界必须保住原实体数");
+    assert_eq!(positions[0][0], 5.0, "落盘的是脚本跑完后的终态，不是初始态");
+
+    let second = run(&second_out);
+    assert!(second.status.success());
+    assert_eq!(
+        std::fs::read(&first_out).unwrap(),
+        std::fs::read(&second_out).unwrap(),
+        "同一世界 + 同一帧数的两次落盘必须逐字节相同"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
