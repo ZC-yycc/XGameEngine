@@ -51,8 +51,8 @@ impl EditorApp {
                 });
             }
             ui.add(egui::TextEdit::singleline(&mut self.prefab_path).hint_text("预制体路径"));
-            for axis in 0..3 {
-                ui.add(egui::DragValue::new(&mut self.prefab_position[axis]).speed(0.1));
+            for value in &mut self.prefab_position {
+                ui.add(egui::DragValue::new(value).speed(0.1));
             }
             if ui.button("Prefab").clicked() && !self.prefab_path.is_empty() {
                 match self
