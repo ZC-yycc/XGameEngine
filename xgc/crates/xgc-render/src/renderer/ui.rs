@@ -33,6 +33,8 @@ struct UiItem {
     image_mode: String,
     image_slice: f32,
     corner_radius: f32,
+    border_color: [f32; 4],
+    border_width: f32,
 }
 
 impl Renderer {
@@ -101,6 +103,10 @@ impl Renderer {
                     )
                 })
                 .unwrap_or(([1.0; 4], String::new(), 20.0, [1.0; 4], true, 0.0, 0.0));
+            let (border_color, border_width) = element
+                .as_ref()
+                .map(|element| (element.border_color, element.border_width))
+                .unwrap_or(([0.0; 4], 0.0));
             let (image_path, image_mode, image_slice) = element
                 .as_ref()
                 .map(|element| {
@@ -111,7 +117,7 @@ impl Renderer {
                     )
                 })
                 .unwrap_or_default();
-            if color[3] <= 0.0 && text.is_empty() && image_path.is_empty() {
+            if color[3] <= 0.0 && border_width <= 0.0 && text.is_empty() && image_path.is_empty() {
                 return;
             }
             let focused = world
@@ -145,6 +151,8 @@ impl Renderer {
                 image_mode,
                 image_slice,
                 corner_radius,
+                border_color,
+                border_width,
             });
         });
         items.sort_by_key(|item| item.entity);
@@ -157,37 +165,41 @@ impl Renderer {
             let Some(scissor) = scissor_rect(item.clip, viewport) else {
                 continue;
             };
-            if item.focused {
-                let ring = [
-                    item.rect[0] - 2.0,
-                    item.rect[1] - 2.0,
-                    item.rect[2] + 4.0,
-                    item.rect[3] + 4.0,
-                ];
-                self.overlay_pipeline(context, target.format())
-                    .draw_mesh_rounded(&RoundedMeshDraw {
-                        context,
-                        texture: target,
-                        mesh: &mesh,
-                        color: [1.0, 0.8, 0.2, 1.0],
-                        mvp: Some(quad_matrix(ring, viewport)),
-                        scissor,
-                        rect: ring,
-                        radius: item.corner_radius + 2.0,
-                    })?;
-                draws += 1;
-            }
-            if item.color[3] > 0.0 {
+            if item.color[3] > 0.0 || item.border_width > 0.0 {
                 self.overlay_pipeline(context, target.format())
                     .draw_mesh_rounded(&RoundedMeshDraw {
                         context,
                         texture: target,
                         mesh: &mesh,
                         color: item.color,
+                        border_color: item.border_color,
+                        border_width: item.border_width,
                         mvp: Some(quad_matrix(item.rect, viewport)),
                         scissor,
                         rect: item.rect,
                         radius: item.corner_radius,
+                    })?;
+                draws += 1;
+            }
+            if item.focused {
+                let ring = [
+                    item.rect[0] - 1.0,
+                    item.rect[1] - 1.0,
+                    item.rect[2] + 2.0,
+                    item.rect[3] + 2.0,
+                ];
+                self.overlay_pipeline(context, target.format())
+                    .draw_mesh_rounded(&RoundedMeshDraw {
+                        context,
+                        texture: target,
+                        mesh: &mesh,
+                        color: [0.0; 4],
+                        border_color: [1.0, 0.8, 0.2, 1.0],
+                        border_width: 2.0,
+                        mvp: Some(quad_matrix(ring, viewport)),
+                        scissor,
+                        rect: ring,
+                        radius: item.corner_radius + 1.0,
                     })?;
                 draws += 1;
             }
@@ -243,9 +255,16 @@ impl Renderer {
             .images
             .get(&item.image_path)
             .and_then(|image| image.as_ref());
-        let mut draw_rect = item.rect;
+        let inset = item.padding.max(0.0) + item.border_width.max(0.0);
+        let content = [
+            item.rect[0] + inset,
+            item.rect[1] + inset,
+            (item.rect[2] - inset * 2.0).max(1.0),
+            (item.rect[3] - inset * 2.0).max(1.0),
+        ];
+        let mut draw_rect = content;
         let mut uv = [0.0, 0.0, 1.0, 1.0];
-        let rect = item.rect;
+        let rect = content;
         if item.image_mode == "nine_slice" && item.image_slice > 0.0 {
             if let Some(source) = source {
                 if source.width > 0 && source.height > 0 && rect[2] > 0.0 && rect[3] > 0.0 {
@@ -342,16 +361,17 @@ impl Renderer {
         let Some(font) = self.font.as_mut() else {
             return Ok(0);
         };
-        let padding = item.padding.max(0.0);
+        // 与旧端一致：内容区扣掉 padding **和**边框。
+        let inset = item.padding.max(0.0) + item.border_width.max(0.0);
         let content = [
-            (item.rect[2] - padding * 2.0).max(1.0),
-            (item.rect[3] - padding * 2.0).max(1.0),
+            (item.rect[2] - inset * 2.0).max(1.0),
+            (item.rect[3] - inset * 2.0).max(1.0),
         ];
         let wrap_width = item.wrap.then_some(content[0]);
         let quads: Vec<GlyphQuad> = font.layout(
             &item.text,
             item.text_size.max(1.0),
-            [item.rect[0] + padding, item.rect[1] + padding],
+            [item.rect[0] + inset, item.rect[1] + inset],
             content,
             wrap_width,
             &item.text_align,

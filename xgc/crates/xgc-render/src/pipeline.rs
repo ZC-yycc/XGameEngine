@@ -38,37 +38,7 @@ impl GpuContext {
         depth_format: Option<wgpu::TextureFormat>,
         blend: wgpu::BlendState,
     ) -> TrianglePipeline {
-        const TRIANGLE_WGSL: &str = r#"
-struct Material {
-    color: vec4<f32>,
-    mvp: mat4x4<f32>,
-    rect: vec4<f32>,
-    radius: f32,
-};
-
-@group(0) @binding(0)
-var<uniform> material: Material;
-
-@vertex
-fn vs(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return material.mvp * vec4<f32>(position, 1.0);
-}
-
-@fragment
-fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    if (material.radius > 0.0) {
-        let local = position.xy - material.rect.xy;
-        let half = material.rect.zw * 0.5;
-        let inner = max(half - vec2<f32>(material.radius, material.radius), vec2<f32>(0.0, 0.0));
-        let p = abs(local - half) - inner;
-        let distance = length(max(p, vec2<f32>(0.0, 0.0))) + min(max(p.x, p.y), 0.0) - material.radius;
-        if (distance > 0.0) {
-            discard;
-        }
-    }
-    return material.color;
-}
-"#;
+        const TRIANGLE_WGSL: &str = include_str!("triangle.wgsl");
         let shader = self
             .device()
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -85,7 +55,7 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: true,
-                            min_binding_size: wgpu::BufferSize::new(112),
+                            min_binding_size: wgpu::BufferSize::new(128),
                         },
                         count: None,
                     }],
@@ -160,6 +130,8 @@ pub(crate) struct MeshDraw<'a> {
     pub(crate) scissor: Option<[u32; 4]>,
     pub(crate) rect: [f32; 4],
     pub(crate) radius: f32,
+    pub(crate) border_color: [f32; 4],
+    pub(crate) border_width: f32,
 }
 
 impl TrianglePipeline {
@@ -217,6 +189,8 @@ impl TrianglePipeline {
                 scissor: None,
                 rect: [0.0; 4],
                 radius: 0.0,
+                border_color: [0.0; 4],
+                border_width: 0.0,
             },
         )
     }
@@ -243,6 +217,8 @@ impl TrianglePipeline {
                 scissor: Some(scissor),
                 rect: [0.0; 4],
                 radius: 0.0,
+                border_color: [0.0; 4],
+                border_width: 0.0,
             },
         )
     }
@@ -257,6 +233,8 @@ pub struct RoundedMeshDraw<'a> {
     pub scissor: [u32; 4],
     pub rect: [f32; 4],
     pub radius: f32,
+    pub border_color: [f32; 4],
+    pub border_width: f32,
 }
 
 impl TrianglePipeline {
@@ -274,6 +252,8 @@ impl TrianglePipeline {
                 scissor: Some(request.scissor),
                 rect: request.rect,
                 radius: request.radius,
+                border_color: request.border_color,
+                border_width: request.border_width,
             },
         )
     }
@@ -320,11 +300,15 @@ impl TrianglePipeline {
         for value in request.rect {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+        for value in request.border_color {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
         bytes.extend_from_slice(&request.radius.to_le_bytes());
-        bytes.extend_from_slice(&[0u8; 12]);
+        bytes.extend_from_slice(&request.border_width.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
         let buffer = context.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("xgc-material"),
-            size: 112,
+            size: 128,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -587,6 +571,8 @@ impl RenderCache {
                 scissor: None,
                 rect: [0.0; 4],
                 radius: 0.0,
+                border_color: [0.0; 4],
+                border_width: 0.0,
             };
             self.depth_pipeline_for(context, format)
                 .draw_mesh_request(context, &request)?;

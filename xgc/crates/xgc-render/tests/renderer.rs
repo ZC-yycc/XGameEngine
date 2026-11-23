@@ -176,6 +176,9 @@ fn ui_background_renders_over_target() {
     world.spawn((
         UiElement {
             background: [1.0, 0.0, 0.0, 1.0],
+            // 圆角 0 才保证整块 4x4 都是实心：`UiElement::default()` 的圆角是 4，
+            // 在 4x4 里会被 SDF 裁成圆（旧端同样如此，见 tests/ui_border.rs 的 AA 用例）。
+            corner_radius: 0.0,
             ..UiElement::default()
         },
         UiLayout {
@@ -227,9 +230,18 @@ fn ui_focus_ring_renders_border() {
     let mut renderer = Renderer::new(MeshCache::new("."));
     assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 2);
     let pixels = context.read_texture_rgba8(&texture, 8, 8).unwrap();
-    assert_eq!(&pixels[..4], &[255, 204, 51, 255]);
+    // 旧端焦点环：`rect.inset(-1)` 外扩 1px、圆角 +1、2px 描边、画在背景之后。
+    // 描边带外沿在 x=1..3，取自 (2, 4) —— 不要取 (0, 0)：那里在圆角外，本来就该空。
+    let ring = 4 * (4 * 8 + 2);
+    assert_eq!(&pixels[ring..ring + 4], &[255, 204, 51, 255]);
     let center = 4 * (4 * 8 + 4);
-    assert_eq!(&pixels[center..center + 4], &[255, 0, 0, 255]);
+    // 环的内沿就在中心像素附近（外扩 1 + 描边 2 = 内圈只剩 2x2），所以中心会被
+    // 描边按覆盖率混一点边框色（旧端同一套 SDF 也是这个值）；只钉"仍是红色"。
+    let center_pixel = &pixels[center..center + 4];
+    assert!(
+        center_pixel[0] > 200 && center_pixel[1] < 20 && center_pixel[2] < 20,
+        "焦点环中心应仍是背景红，实际 {center_pixel:?}"
+    );
 }
 
 #[test]
