@@ -129,6 +129,10 @@ impl System for CharacterJumpSystem {
 pub struct AnimatorSystem;
 
 impl System for AnimatorSystem {
+    fn runs_after_host(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "animation"
     }

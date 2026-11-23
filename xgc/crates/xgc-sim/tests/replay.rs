@@ -116,14 +116,14 @@ fn velocity_system_moves_transform() {
             "ground",
             "aabb",
             "rapier",
+            "ui_layout",
+            "ui_interaction",
+            "ui_focus",
             "animation_state",
             "animation",
             "animation_apply",
             "animation_layers",
             "skeleton_pose",
-            "ui_layout",
-            "ui_interaction",
-            "ui_focus",
             "audio_mixer",
             "hierarchy"
         ]

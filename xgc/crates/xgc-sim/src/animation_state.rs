@@ -8,6 +8,10 @@ use super::{System, SystemAccess};
 pub struct AnimationStateSystem;
 
 impl System for AnimationStateSystem {
+    fn runs_after_host(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "animation_state"
     }

@@ -424,6 +424,10 @@ pub struct AnimationPlaybackSystem {
 }
 
 impl System for AnimationPlaybackSystem {
+    fn runs_after_host(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "animation_apply"
     }

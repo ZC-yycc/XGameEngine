@@ -52,7 +52,7 @@ fn default_plan_is_contiguous_and_covers_registration_order() {
     let plan = schedule.plan();
     let stages = plan.stages();
 
-    assert_eq!(stages.last(), Some(&PlanStage::Host));
+    // 宿主阶段恰好一次；默认调度里它夹在固定步与动画之间。
     assert_eq!(
         stages
             .iter()
@@ -60,6 +60,7 @@ fn default_plan_is_contiguous_and_covers_registration_order() {
             .count(),
         1
     );
+    assert!(!matches!(stages.last(), Some(&PlanStage::Host)));
     assert_eq!(plan.system_order(), (0..schedule.len()).collect::<Vec<_>>());
 
     let accesses = schedule.accesses();
@@ -86,6 +87,8 @@ fn default_plan_is_contiguous_and_covers_registration_order() {
 fn default_plan_snapshot() {
     // 连续贪心按注册顺序切批：能续就续、冲突就封批。这份快照同时是 `xgc plan`
     // 的输出契约，改动系统注册顺序或访问声明必须同步这里。
+    // 宿主阶段夹在 ui_focus（8）与 animation_state（9）之间：脚本本帧写的动画
+    // 参数，状态机同帧就要看到。
     let expected = vec![
         PlanStage::Batch(vec![0]),
         PlanStage::Batch(vec![1]),
@@ -95,11 +98,12 @@ fn default_plan_snapshot() {
         PlanStage::Batch(vec![5, 6]),
         PlanStage::Batch(vec![7]),
         PlanStage::Batch(vec![8]),
+        PlanStage::Host,
         PlanStage::Batch(vec![9]),
-        PlanStage::Batch(vec![10, 11]),
+        PlanStage::Batch(vec![10]),
+        PlanStage::Batch(vec![11]),
         PlanStage::Batch(vec![12]),
         PlanStage::Batch(vec![13, 14, 15]),
-        PlanStage::Host,
     ];
     assert_eq!(Schedule::default_schedule(1).plan().stages(), expected);
 }

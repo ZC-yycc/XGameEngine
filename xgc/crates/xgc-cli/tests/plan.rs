@@ -1,7 +1,8 @@
 //! `xgc plan`：默认调度执行计划的确定性输出。
 //!
-//! 钉住合同：两次运行逐字节相同；批次连续且摊平 == 注册顺序；宿主阶段恒最后；
-//! 系统名与 `default_system_names` 同源、组件名都来自内建注册表。
+//! 钉住合同：两次运行逐字节相同；批次连续且摊平 == 注册顺序；宿主阶段恰好一次、
+//! 默认调度里夹在固定步与动画之间；系统名与 `default_system_names` 同源、
+//! 组件名都来自内建注册表。
 
 use std::process::Command;
 
@@ -40,7 +41,19 @@ fn plan_matches_default_schedule() {
     assert_eq!(names, xgc_sim::default_system_names());
 
     let stages = doc["stages"].as_array().expect("缺 stages");
-    assert_eq!(stages.last().expect("stages 为空")["kind"], "host");
+    assert_eq!(
+        stages
+            .iter()
+            .filter(|stage| stage["kind"] == "host")
+            .count(),
+        1,
+        "宿主阶段必须恰好一次"
+    );
+    assert_ne!(
+        stages.last().expect("stages 为空")["kind"],
+        "host",
+        "默认调度的宿主阶段不在最后（动画系统在其后）"
+    );
 
     let mut order = Vec::new();
     for stage in stages {
@@ -63,6 +76,18 @@ fn plan_matches_default_schedule() {
         }
     }
     assert_eq!(order, (0..systems.len()).collect::<Vec<_>>());
+
+    // 宿主阶段之后的第一个系统必须是 animation_state（旧端 Update 钩子先于动画 tick）。
+    let mut seen = 0usize;
+    for stage in stages {
+        if stage["kind"] == "host" {
+            break;
+        }
+        seen += stage["indices"]
+            .as_array()
+            .map_or(0, |indices| indices.len());
+    }
+    assert_eq!(names[order[seen]], "animation_state");
 }
 
 #[test]

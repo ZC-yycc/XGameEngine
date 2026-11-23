@@ -17,6 +17,10 @@ struct Node {
 pub struct SkeletonPoseSystem;
 
 impl System for SkeletonPoseSystem {
+    fn runs_after_host(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "skeleton_pose"
     }

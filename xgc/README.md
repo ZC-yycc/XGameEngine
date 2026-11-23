@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**宿主阶段插到固定步与动画之间**切片把「脚本先于动画」的帧序修好：`Schedule::plan()` 把宿主阶段插在第一个声明 `System::runs_after_host()` 的系统之前（不再恒最后），默认调度把 UI 系统放到宿主之前、5 个动画系统声明 `runs_after_host`，脚本本帧写的状态机参数当帧生效。计划快照变为 `[0] [1] [2] [3] [4] [5,6] [7] [8] Host [9] [10] [11] [12] [13,14,15]`；`xgc plan` 输出合同同步更新。红证据：`crates/xgc-sim/tests/host_order.rs` 3 条先全红（宿主在最后 / 顺序 `["sim","animation","host"]` / 状态机仍 Survey），实现后全绿；`replay.rs` / `schedule_plan.rs` / `plan.rs` / `agent protocol.rs` 的旧顺序断言同步更新。视觉：第 150 帧不变（2.08% / 0.16 / 0.58%）、第 200 帧 2.82%、第 300 帧是状态切换帧（旧端仍在淡入、XGC 无渲染侧交叉淡入）暂升到 3.17%。无脚本 trace 仍 `bf9696c7e547973b`、带资产根 trace 变 `0d5ce14b4547973b`。未闭环：渲染侧交叉淡入、旧端 `layers`、第 1 帧高处投射体阴影。
+
 **additive 叠加层与独立时钟**切片把 Fox 的 `additive: (clip:"Run", weight:0.3, speed:1.5)` 接上：`Animator` 新增 `additive_clip` / `additive_weight` / `additive_speed` / `additive_looping` / `additive_time`，`AnimatorSystem` 让叠加层按自己的速度走独立时钟（基础层冻住时仍推进），迁移器一次性搬旧 `additive` 配置，脚本 `set_anim_additive_weight` 真正写组件（clamp [0,1]、NaN 忽略），渲染侧 `glb/additive.rs` 按旧端 `blend_additive` 在模型节点局部空间混合（参考 = 叠加剪辑第 0 帧，旋转算局部增量后 slerp）。效果：第 150 帧 19782 → **19143（2.08%）**、mean_abs 0.23 → **0.16**、结构性 5975 → **5338（0.58%）**；第 200 / 300 帧 2.93% / 3.20% → **2.82% / 2.95%**。世界哈希 `07a9d2ef6547973b`、两次渲染 PPM SHA-256 同为 `2ee5c071…`。剩余缺口是旧端 `layers`（upper 分层状态机 + 关节遮罩）与「脚本先于动画」帧序。
 
 **glTF 动画剪辑与状态机迁移**切片把模型自带动画接进渲染：`crates/xgc-render/src/glb/animation.rs` 解析 node 层级与 TRS 通道（LINEAR / STEP，CUBICSPLINE 明确 Unsupported），`Mesh.animations` 挂模型；`animated_pose::resolve` 按 `Animator.clip` / `time` 在模型内部节点层级采样、`node_global × inverse_bind` 写成 palette 复用现有 GPU 蒙皮（不伪造骨骼实体）；迁移器把旧 `Animator.machine` 翻成 `animation.state`（`xgc_world::StateMachine` 唯一类型），`AnimationStateSystem` 支持 `AtLeast` / `Below` 与迟滞、转场时长缺省取 `fade_time`。对旧端参考第 150 帧 19947 → **19782（2.15%）**、mean_abs **0.23**、结构性 5955 → **5975（0.65%）**（Fox 在 t<2.5 停在 Idle/Survey，第 1 帧 15030 → **13847（1.50%）**），PPM SHA `fedcd008…`；`xgc clips <模型>` 可列剪辑。未闭环：旧端 `additive` / `layers` 叠加层与「脚本先于动画」帧序（第 200/300 帧 2.93% / 3.20%）。
@@ -189,11 +191,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（529 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（532 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
 `xgc-xtask check` 全绿（250 个 Rust 文件，最大 597 行）；30 个内建类型的 schema 为 35710 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、Fox 的 `layers` 分层状态机与关节遮罩（旧端 `upper` 层未迁移；第 200/300 帧差异 2.82% / 2.95%）与「脚本先于动画」的帧序、渲染侧高光与 UI 字距、完整刚体、
+**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、Fox 的 `layers` 分层状态机与关节遮罩（旧端 `upper` 层未迁移；第 200/300 帧差异 2.82% / 2.95%）与渲染侧交叉淡入（状态切换帧）、高光与 UI 字距、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），

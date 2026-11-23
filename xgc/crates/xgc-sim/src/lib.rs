@@ -147,6 +147,16 @@ pub trait System: Send {
     /// 先建体再推进物理；挪进 `run` 会让新刚体吃到本帧 `VelocitySystem` 的积分，
     /// 整条轨迹多出 g·dt²。
     fn prepare(&mut self, _world: &World) {}
+
+    /// 是否必须排在**宿主阶段之后**执行。
+    ///
+    /// 旧端帧序是「固定步 → `Update` 钩子 → 动画 tick」：脚本本帧写的动画参数，
+    /// 状态机同帧就要看到。执行计划把宿主阶段插在第一个 `runs_after_host()`
+    /// 系统之前，默认调度里就是动画系统之前；不参与宿主阶段的系统保持注册顺序。
+    fn runs_after_host(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, world: &mut World, dt: f32);
 }
 
@@ -155,7 +165,9 @@ pub trait System: Send {
 pub enum PlanStage {
     /// 同一段内连续的一段系统：两两无访问冲突，批内按注册顺序执行。
     Batch(Vec<usize>),
-    /// 宿主帧末阶段（脚本等 `!Send` 状态）。独占、恒在最后，与所有系统冲突。
+    /// 宿主阶段（脚本等 `!Send` 状态）。独占，插在第一个声明
+    /// [`System::runs_after_host`] 的系统之前（默认调度里是动画系统之前）；
+    /// 没有系统声明时落在最后。与所有系统冲突。
     Host,
 }
 
@@ -210,14 +222,17 @@ impl Schedule {
         // 任何系统之前建好（旧端 `sync_bodies()` 同序）；别把建体挪进 `run`——
         // 那会吃到 `VelocitySystem` 本帧的积分，整条轨迹多出 g·dt²。
         schedule.add(RapierPhysicsSystem::default());
+        // UI 布局 / 命中在宿主阶段之前（旧端 `update_ui()` 排在 Update 钩子之前）。
+        schedule.add(UiLayoutSystem::default());
+        schedule.add(UiInteractionSystem);
+        schedule.add(UiFocusSystem);
+        // 宿主阶段在这里：脚本本帧写的动画参数，状态机同帧就要看到（旧端
+        // `Update` 钩子先于动画 tick）。下面这些系统都声明 runs_after_host()。
         schedule.add(AnimationStateSystem);
         schedule.add(AnimatorSystem);
         schedule.add(AnimationPlaybackSystem::default());
         schedule.add(AnimationLayerSystem::default());
         schedule.add(SkeletonPoseSystem);
-        schedule.add(UiLayoutSystem::default());
-        schedule.add(UiInteractionSystem);
-        schedule.add(UiFocusSystem);
         schedule.add(AudioMixerSystem);
         schedule.add(HierarchySystem::default());
         schedule
@@ -244,14 +259,23 @@ impl Schedule {
     }
 
     /// 生成执行计划：按注册顺序做**连续**贪心分批（同批两两无访问冲突），
-    /// 最后恒追加宿主阶段。
+    /// 宿主阶段插在第一个 `runs_after_host()` 系统之前；没有这种系统时落在最后。
     ///
     /// 连续性让「计划摊平后 == 注册顺序」：计划即执行顺序，分批怎么合并不改变
-    /// 语义，只是给将来同批并行留的确定性切分。
+    /// 语义，只是给将来同批并行留的确定性切分。宿主阶段的位置是语义的一部分：
+    /// 旧端「固定步 → Update 钩子 → 动画 tick」，脚本写的动画参数要当帧生效。
     pub fn plan(&self) -> Plan {
         let mut stages = Vec::new();
         let mut batch: Vec<usize> = Vec::new();
+        let mut host_placed = false;
         for (index, system) in self.systems.iter().enumerate() {
+            if !host_placed && system.runs_after_host() {
+                if !batch.is_empty() {
+                    stages.push(PlanStage::Batch(std::mem::take(&mut batch)));
+                }
+                stages.push(PlanStage::Host);
+                host_placed = true;
+            }
             let access = system.access();
             let compatible = batch
                 .iter()
@@ -264,11 +288,13 @@ impl Schedule {
         if !batch.is_empty() {
             stages.push(PlanStage::Batch(batch));
         }
-        stages.push(PlanStage::Host);
+        if !host_placed {
+            stages.push(PlanStage::Host);
+        }
         Plan { stages }
     }
 
-    /// 按计划执行一帧；`host` 在宿主阶段（恒最后）执行一次。
+    /// 按计划执行一帧；`host` 在计划的宿主阶段执行一次。
     ///
     /// `plan` 必须来自同一个 `Schedule`（只可能由 [`Self::plan`] 产生）。
     pub fn run_plan(
