@@ -10,12 +10,13 @@ use xgc_asset::scan as scan_assets;
 use xgc_migrate::{migrate_dir, migrate_str};
 use xgc_reflect::Registry;
 use xgc_script::LuaHost;
-use xgc_sim::{play, write_wav_mono, AnimationLibrary, AudioLibrary, Scenario, SoftwareMixer};
+use xgc_sim::{play, write_wav_mono, AudioLibrary, Scenario, SoftwareMixer};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Name, Transform, Velocity, World};
 
 mod assets_cmd;
 mod audio;
+mod clips_cmd;
 mod compare_cmd;
 mod cook_cmd;
 mod input_cmd;
@@ -75,7 +76,7 @@ fn main() -> ExitCode {
             args.next().as_deref(),
         ),
         Some("run-cooked") => cook_cmd::run_cooked(args.next().as_deref(), args.next().as_deref()),
-        Some("clips") => clips(args.next().as_deref()),
+        Some("clips") => clips_cmd::clips(args.next().as_deref()),
         Some("audio") => audio(args.next().as_deref()),
         Some("mix") => mix(args.next().as_deref(), args.next().as_deref()),
         Some("play") => audio::play_wav(args.next().as_deref()),
@@ -414,39 +415,6 @@ fn audio(dir: Option<&str>) -> ExitCode {
         }
         Err(err) => {
             eprintln!("加载音频失败：{err}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-fn clips(dir: Option<&str>) -> ExitCode {
-    let Some(dir) = dir else {
-        eprintln!("用法：xgc clips <剪辑目录>");
-        return ExitCode::from(2);
-    };
-    match AnimationLibrary::load_dir(Path::new(dir)) {
-        Ok((library, issues)) => {
-            for name in library.names() {
-                if let Some(clip) = library.get(name) {
-                    println!(
-                        "clips: {name} duration={:.3} keys={}",
-                        clip.duration,
-                        clip.translation.len()
-                    );
-                }
-            }
-            for issue in &issues {
-                eprintln!("clips: {issue}");
-            }
-            println!("clips: {} 个剪辑，{} 条问题", library.len(), issues.len());
-            if issues.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
-        }
-        Err(err) => {
-            eprintln!("加载剪辑失败：{err}");
             ExitCode::from(2)
         }
     }

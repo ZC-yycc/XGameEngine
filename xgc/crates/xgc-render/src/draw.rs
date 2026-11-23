@@ -4,9 +4,22 @@
 //! 验证"按实体出 draw call"的路径，网格加载在资产管线接上后替换。
 
 use xgc_base::EntityId;
-use xgc_world::{GlobalTransform, Material, MeshRenderer, Parent, Skeleton, SkeletonPose, World};
+use xgc_world::{
+    Animator, GlobalTransform, Material, MeshRenderer, Parent, Skeleton, SkeletonPose, World,
+};
 
 use super::camera::{model_matrix, Mat4};
+
+/// 实体要播的 glTF 剪辑（`animation.animator` 的渲染侧投影）。
+///
+/// 只有实体**没有**场景骨骼姿态（`SkeletonPose`）时才带上它：场景里自己搭的
+/// 骨骼走原生 `.ron` 剪辑路径，模型自带动画只服务迁移过来的 glTF 角色。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimatorSample {
+    pub clip: String,
+    pub time: f32,
+    pub looping: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawItem {
@@ -28,6 +41,8 @@ pub struct DrawItem {
     pub has_material: bool,
     pub transform: Mat4,
     pub pose: Option<Vec<[f32; 16]>>,
+    /// 要采样的 glTF 剪辑；渲染侧据此把 `pose` 补成动画后的关节矩阵。
+    pub animation: Option<AnimatorSample>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -57,6 +72,20 @@ pub fn build_draw_list(world: &World) -> DrawList {
             return;
         };
         let material = world.get::<Material>(key).cloned();
+        let pose = skeleton_pose(world, key);
+        // 场景骨骼姿态优先：迁移过来的 glTF 角色没有 Skeleton 实体，走模型自带动画。
+        let animation = if pose.is_some() {
+            None
+        } else {
+            world
+                .get::<Animator>(key)
+                .filter(|animator| !animator.clip.is_empty())
+                .map(|animator| AnimatorSample {
+                    clip: animator.clip.clone(),
+                    time: animator.time,
+                    looping: animator.looping,
+                })
+        };
         items.push(DrawItem {
             entity,
             model: mesh.model.clone(),
@@ -75,7 +104,8 @@ pub fn build_draw_list(world: &World) -> DrawList {
                 .unwrap_or_default(),
             has_material: material.is_some(),
             transform: model_matrix(transform),
-            pose: skeleton_pose(world, key),
+            pose,
+            animation,
         });
     });
     items.sort_by_key(|item| item.entity);

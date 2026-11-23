@@ -26,7 +26,7 @@ fn state_transition_records_blend_and_playback_mixes() {
             (name: "run", clip: "run"),
         ],
         transitions: [
-            (from: Some("idle"), to: "run", parameter: "speed", at_least: 0.5, duration: 1.0),
+            (from: Some("idle"), to: "run", when: Some(AtLeast(parameter: "speed", value: 0.5)), duration: 1.0),
         ],
     )"#;
     let mut world = World::new();
@@ -55,8 +55,14 @@ fn state_transition_records_blend_and_playback_mixes() {
 }
 
 #[test]
-fn transition_defaults_are_backwards_compatible() {
-    let transition: TransitionDef =
-        ron::from_str(r#"(from: None, to: "run", parameter: "speed", at_least: 0.5)"#).unwrap();
+fn transition_fields_are_optional() {
+    let transition: TransitionDef = ron::from_str(
+        r#"(from: None, to: "run", when: Some(AtLeast(parameter: "speed", value: 0.5)))"#,
+    )
+    .unwrap();
     assert_eq!(transition.duration, 0.0);
+    assert!(transition.from.is_none());
+    let bare: TransitionDef = ron::from_str(r#"(to: "run")"#).unwrap();
+    assert!(bare.when.is_none());
+    assert!(bare.from.is_none());
 }

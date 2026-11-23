@@ -330,9 +330,7 @@ pub use animation::{
     JointTrack, RotationKey, ScaleKey, TranslationKey,
 };
 pub use animation_layers::{parse_layers, AnimationLayerSystem, LayerDef};
-pub use animation_state::{
-    parse_machine, parse_parameters, AnimationStateSystem, StateDef, StateMachine, TransitionDef,
-};
+pub use animation_state::AnimationStateSystem;
 pub use audio::{load_wav, AudioClip, AudioLibrary, AudioMixerSystem};
 pub use character_kcc::{
     build_character_controller, center_height, character_capsule, half_height, radius, rest_gap,
@@ -349,6 +347,9 @@ pub use systems::{
     PhysicsSystem, VelocitySystem,
 };
 pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem, UiNav};
+pub use xgc_world::{
+    parse_machine, parse_parameters, StateDef, StateMachine, TransitionCondition, TransitionDef,
+};
 
 pub struct Simulation {
     world: World,

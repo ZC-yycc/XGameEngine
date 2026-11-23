@@ -1,5 +1,6 @@
 //! 内建网格：`Mesh` 保存首个图元的几何、PBR 基色因子、UV 与基色贴图。
 
+use super::glb::AnimationSet;
 use super::texture_data::TextureData;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,6 +43,12 @@ pub struct Mesh {
     pub normals: Vec<[f32; 3]>,
     /// glTF 基色贴图（旧引擎 PBR 的 albedo 贴图）；`None` = 纯色。
     pub texture: Option<std::sync::Arc<TextureData>>,
+    /// 模型自带的 glTF 动画（节点层级 + 剪辑）；`None` = 没有 animations。
+    ///
+    /// 旧引擎把 glTF 动画放在渲染内部的节点层级上，场景里没有骨骼实体；XGC 的迁移
+    /// 世界同样只有 `animation.animator`。所以剪辑挂在模型上，由渲染侧按
+    /// `Animator.clip` / `Animator.time` 采样成关节矩阵，喂现有蒙皮 palette 路径。
+    pub animations: Option<AnimationSet>,
 }
 
 impl Mesh {
@@ -57,6 +64,7 @@ impl Mesh {
             uvs: Vec::new(),
             normals: Vec::new(),
             texture: None,
+            animations: None,
         }
     }
 

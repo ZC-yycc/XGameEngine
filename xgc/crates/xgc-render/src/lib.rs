@@ -9,6 +9,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 
+mod animated_pose;
 mod assets;
 mod bloom;
 mod camera;
@@ -60,12 +61,13 @@ pub use camera::{
     perspective_rh_zo, transform_point, Mat4, IDENTITY,
 };
 pub use diff::{diff_breakdown, diff_images, BlockDiff, DiffBuckets, ImageDiff, ImageDiffReport};
-pub use draw::{build_draw_list, DrawItem, DrawList};
+pub use draw::{build_draw_list, AnimatorSample, DrawItem, DrawList};
 pub use exposure::{sanitize_exposure, EXPOSURE_DEFAULT, MAX_EXPOSURE, MIN_EXPOSURE};
 pub use font::{FontAtlas, GlyphQuad};
 pub use fxaa::FxaaSettings;
 pub use glb::{
-    load_glb, load_glb_skeleton, load_gltf, load_model, MeshError, SkeletonGraph, SkeletonJoint,
+    load_glb, load_glb_skeleton, load_gltf, load_model, AnimationClip, AnimationNode,
+    AnimationPath, AnimationSet, Interpolation, MeshError, SkeletonGraph, SkeletonJoint,
 };
 pub use gpu::{GpuContext, GpuError, GpuResource, GpuResourceTable};
 pub use gpu_mesh::{GpuMesh, GpuMeshCache};

@@ -1,0 +1,50 @@
+feat: play glTF animation clips and migrate the animator state machine
+
+XGC 之前只认 `.ron` 剪辑库与场景 `Skeleton` 实体，迁移世界两者都没有，
+`Fox.gltf` 永远停在绑定位姿。旧端把 glTF 动画放在渲染内部的节点层级上播，
+迁移动画不能靠伪造骨骼实体追平。
+
+解析（`crates/xgc-render/src/glb/animation.rs`，509 行）：glTF nodes 默认
+TRS + parent 链、animation channels（translation / rotation / scale）、
+LINEAR / STEP 采样（平移缩放 lerp、旋转 slerp；CUBICSPLINE 明确
+Unsupported 而不是静默错播）；clip 随 `Mesh.animations` 挂在模型上。
+渲染侧（`crates/xgc-render/src/animated_pose.rs`）在准备阶段按
+`Animator.clip` / `time` / `looping` 采样节点全局矩阵，乘 `inverse_bind`
+写成 palette 喂现有 GPU 蒙皮路径——与场景骨架 pose 二选一，不重复计算。
+
+迁移（`crates/xgc-migrate/src/old_animator.rs`）：旧 `Animator.machine`
+（entry / parameters / states / transitions / duration）一次性翻成
+`animation.state` 组件的 machine RON + parameters；机器类型下沉到
+`xgc-world`（`StateMachine` / `StateDef` / `TransitionDef` /
+`TransitionCondition` / `parse_machine` / `parse_parameters`），sim 与
+migrate 共用一套，不再有两个副本。`AnimationStateSystem` 支持
+`AtLeast` / `Below` + 迟滞、转场时长缺省取 `fade_time`、换剪辑相位归零。
+
+`xgc clips` 扩展成两路输入：目录仍走 `.ron` 剪辑库，`.glb` / `.gltf`
+走模型自带剪辑列表（按名字排序、确定性输出）。CLI 拆到
+`crates/xgc-cli/src/clips_cmd.rs` 守 600 行软上限（`main.rs` 605 → 527）。
+
+红/绿证据：动画解析回归 `crates/xgc-render/tests/animations.rs`（4 条：
+Fox 的 Survey/Walk/Run 各 21 channels、Walk 两个时间点姿态不同、缺失剪辑
+返回 None、Box.glb 无动画）；迁移回归 `crates/xgc-migrate/tests/animation.rs`
+（machine 可回读、状态 / 转移齐全）；CLI 回归 `crates/xgc-cli/tests/clips.rs`
+（Fox 列出三个剪辑且逐字节确定、Box 报「没有 glTF 动画」）；迟滞带 +
+fade_time 兜底转场回归在 `crates/xgc-sim/tests/animation_state.rs`。
+
+第 150 帧对旧端：19947 → 19782（2.16% → 2.15%）、mean_abs 0.23、结构性
+5955 → 5975（0.65%）；第 1 帧 15030 → 13847（1.50%）。状态机在 t<2.5
+停在 Idle/Survey，与把 clip 强改 Survey 的定向实验逐数字相同。同一世界
+两次渲染 PPM SHA-256 同为
+fedcd008d29c09bf7c12d3d6f7c71617ff60eaca2c37c2b4a51f710cf12bc3bd。
+世界哈希：render-frame 150 = cfce1746f5f33383、trace 无脚本 =
+69188393f5f33383、带资产根 = adfe898315f33383（= run-scripts 150），
+`run 60` 仍 f4bc029f5f995b91。
+
+未闭环：① 旧端 `additive`（Run 叠加层）与 `layers`（upper 分层状态机 +
+关节遮罩）尚未迁移，脚本用 set_anim_additive_weight(0.3+0.3·sin4t) 驱动
+权重，第 200 / 300 帧差异回升到 2.93% / 3.20%；② 帧序——旧端 Update 钩子
+先于动画 tick，XGC 宿主脚本在系统之后，状态机切换晚一帧；③ CUBICSPLINE
+未接入（Fox 剪辑全 LINEAR）。
+
+全量 524 passed / 1 ignored、clippy 0、fmt 干净、xtask check OK
+（257 文件、最大 597 行、30 类型 35710 字节）。

@@ -13,10 +13,13 @@ use self::material::MaterialDef;
 use self::texture::{ImageDef, TextureDef};
 use super::mesh::Mesh;
 
+mod animation;
 mod attributes;
 mod material;
 mod normals;
 mod texture;
+
+pub use animation::{AnimationClip, AnimationNode, AnimationPath, AnimationSet, Interpolation};
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;
@@ -67,6 +70,8 @@ struct Root {
     textures: Vec<TextureDef>,
     #[serde(default)]
     images: Vec<ImageDef>,
+    #[serde(default)]
+    animations: Vec<animation::AnimationDef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +90,12 @@ struct NodeDef {
     mesh: Option<usize>,
     #[serde(default)]
     skin: Option<usize>,
+    #[serde(default)]
+    translation: Option<[f32; 3]>,
+    #[serde(default)]
+    rotation: Option<[f32; 4]>,
+    #[serde(default)]
+    scale: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,6 +255,7 @@ fn load_glb_bytes(bytes: &[u8], base_dir: Option<&Path>) -> Result<Mesh, MeshErr
     }
     mesh.texture = texture::base_color(&root, primitive, bin, base_dir)?;
     attributes::attach(&root, primitive, bin, &mut mesh)?;
+    mesh.animations = animation::parse(&root, bin)?;
     Ok(mesh)
 }
 

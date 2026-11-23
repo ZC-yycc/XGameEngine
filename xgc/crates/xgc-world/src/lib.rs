@@ -56,7 +56,10 @@ pub use render_components::{Camera, Material, MeshRenderer};
 pub use skeleton_components::{Bone, Skeleton, SkeletonPose};
 pub use slope_components::Slope;
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
-pub use state_machine_components::AnimationState;
+pub use state_machine_components::{
+    parse_machine, parse_parameters, AnimationState, StateDef, StateMachine, TransitionCondition,
+    TransitionDef,
+};
 pub use ui_components::{UiElement, UiInput, UiInteraction, UiLayout};
 pub use xgc_reflect::{ComponentId, Value};
 /// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。

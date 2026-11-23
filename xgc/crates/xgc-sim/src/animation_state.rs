@@ -1,58 +1,8 @@
 //! 动画状态机：按数值参数选择转换，把状态对应的 clip 写回 Animator。
 
-use std::collections::BTreeMap;
-
-use serde::Deserialize;
-use xgc_world::{AnimationState, Animator, Component, World};
+use xgc_world::{parse_machine, parse_parameters, AnimationState, Animator, Component, World};
 
 use super::{System, SystemAccess};
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct StateMachine {
-    pub initial: String,
-    #[serde(default)]
-    pub states: Vec<StateDef>,
-    #[serde(default)]
-    pub transitions: Vec<TransitionDef>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct StateDef {
-    pub name: String,
-    pub clip: String,
-    #[serde(default = "default_looping")]
-    pub looping: bool,
-    #[serde(default = "default_speed")]
-    pub speed: f32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct TransitionDef {
-    #[serde(default)]
-    pub from: Option<String>,
-    pub to: String,
-    pub parameter: String,
-    #[serde(default)]
-    pub at_least: f32,
-    #[serde(default)]
-    pub duration: f32,
-}
-
-fn default_looping() -> bool {
-    true
-}
-
-fn default_speed() -> f32 {
-    1.0
-}
-
-pub fn parse_machine(text: &str) -> Result<StateMachine, String> {
-    ron::from_str(text).map_err(|err| format!("状态机解析失败：{err}"))
-}
-
-pub fn parse_parameters(text: &str) -> BTreeMap<String, f32> {
-    ron::from_str(text).unwrap_or_default()
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AnimationStateSystem;
@@ -87,16 +37,22 @@ impl System for AnimationStateSystem {
                     .from
                     .as_deref()
                     .is_none_or(|from| from == current)
-                    && parameters
-                        .get(&transition.parameter)
-                        .copied()
-                        .unwrap_or(0.0)
-                        >= transition.at_least
+                    && transition
+                        .when
+                        .as_ref()
+                        .is_none_or(|when| when.matches(&parameters))
             });
             if let Some(transition) = transition {
                 let next = transition.to.clone();
                 if next != current {
-                    if transition.duration > 0.0 {
+                    // 旧端：转移没写 duration 时用 Animator.fade_time 兜底——两者都是
+                    // "这一刀换剪辑的淡入时长"，只是作用域不同。
+                    let duration = if transition.duration > 0.0 {
+                        transition.duration
+                    } else {
+                        animator.fade_time
+                    };
+                    if duration > 0.0 {
                         animator.blend_from = machine
                             .states
                             .iter()
@@ -104,10 +60,13 @@ impl System for AnimationStateSystem {
                             .map(|definition| definition.clip.clone())
                             .unwrap_or_else(|| animator.clip.clone());
                         animator.blend_elapsed = 0.0;
-                        animator.blend_duration = transition.duration;
+                        animator.blend_duration = duration;
                     }
                     state.state = next;
                     state.time = 0.0;
+                    // 新剪辑从第 0 帧起播：旧端换状态后播放相位重置，否则同一个
+                    // Walk 循环会从旧剪辑的相位中途接上。
+                    animator.time = 0.0;
                 }
             }
             state.time += dt;

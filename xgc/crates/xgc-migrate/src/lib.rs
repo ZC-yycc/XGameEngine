@@ -57,7 +57,7 @@ enum OldComponentData {
     Lod(ron::Value),
     Material(OldMaterial),
     Ui(ron::Value),
-    Animator(ron::Value),
+    Animator(old_animator::OldAnimator),
     Character(ron::Value),
     Audio(OldAudio),
     Camera(OldCamera),
@@ -72,15 +72,6 @@ enum OldComponentData {
     Lua {
         path: String,
     },
-}
-
-#[derive(Debug, Deserialize)]
-struct OldAnimator {
-    clip: String,
-    speed: f32,
-    looping: bool,
-    autoplay: bool,
-    fade_time: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -296,17 +287,21 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     );
                     report.mapped_components += 1;
                 }
-                OldComponentData::Animator(old_animator) => {
-                    let old: OldAnimator = old_animator
-                        .clone()
-                        .into_rust()
-                        .map_err(|err| MigrationError::Parse(err.to_string()))?;
+                OldComponentData::Animator(old) => {
+                    let machine = match &old.machine {
+                        Some(machine) => Some(
+                            old_animator::MigratedMachine::new(machine)
+                                .map_err(MigrationError::Parse)?,
+                        ),
+                        None => None,
+                    };
                     animator = Some((
-                        old.clip,
+                        old.clip.clone(),
                         old.speed,
                         old.looping,
                         old.autoplay,
                         old.fade_time,
+                        machine,
                     ));
                     report.mapped_components += 1;
                 }
@@ -376,17 +371,18 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                 ],
             });
         }
-        if let Some((clip, speed, looping, autoplay, fade_time)) = animator {
+        if let Some((clip, speed, looping, autoplay, fade_time, machine)) = animator {
             let position = old.transform.position.to_array();
             let rotation = old.transform.rotation.to_array();
             let scale = old.transform.scale.to_array();
-            components.push(old_animator::animator_component(
+            components.extend(old_animator::animator_components(
                 old_animator::AnimatorInput {
                     clip,
                     speed,
                     looping,
                     autoplay,
                     fade_time,
+                    machine,
                     position: [
                         f64::from(position[0]),
                         f64::from(position[1]),

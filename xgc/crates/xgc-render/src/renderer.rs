@@ -299,6 +299,7 @@ impl Renderer {
         let mut list = build_draw_list(world);
         compose_colors(&mut self.meshes, &mut list, selected)
             .map_err(|err| GpuError::Mesh(err.to_string()))?;
+        super::animated_pose::resolve(&mut self.meshes, &mut list)?;
         Ok(list)
     }
 

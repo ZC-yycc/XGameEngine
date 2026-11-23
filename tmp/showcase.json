@@ -2884,6 +2884,39 @@
             ]
           },
           {
+            "component": 1285,
+            "fields": [
+              [
+                "machine",
+                {
+                  "kind": "string",
+                  "value": "(initial:\"Idle\",states:[(name:\"Idle\",clip:\"Survey\",looping:true,speed:1.0),(name:\"Walk\",clip:\"Walk\",looping:true,speed:1.0),(name:\"Run\",clip:\"Run\",looping:true,speed:1.0)],transitions:[(from:Some(\"Idle\"),to:\"Walk\",when:Some(AtLeast(parameter:\"speed\",value:0.5)),duration:0.0),(from:Some(\"Walk\"),to:\"Idle\",when:Some(Below(parameter:\"speed\",value:0.3)),duration:0.0),(from:Some(\"Walk\"),to:\"Run\",when:Some(AtLeast(parameter:\"speed\",value:2.0)),duration:0.0),(from:Some(\"Run\"),to:\"Walk\",when:Some(Below(parameter:\"speed\",value:1.8)),duration:0.0)])"
+                }
+              ],
+              [
+                "state",
+                {
+                  "kind": "string",
+                  "value": ""
+                }
+              ],
+              [
+                "time",
+                {
+                  "kind": "f64",
+                  "value": 0.0
+                }
+              ],
+              [
+                "parameters",
+                {
+                  "kind": "string",
+                  "value": "{\"speed\":0.0}"
+                }
+              ]
+            ]
+          },
+          {
             "component": 769,
             "fields": [
               [
