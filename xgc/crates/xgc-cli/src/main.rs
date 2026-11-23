@@ -19,6 +19,7 @@ mod audio;
 mod compare_cmd;
 mod cook_cmd;
 mod input_cmd;
+mod plan_cmd;
 mod project_render;
 mod render;
 mod runtime_cmd;
@@ -32,6 +33,7 @@ fn main() -> ExitCode {
         Some("schema") => schema(),
         Some("check") => check(args.next().as_deref()),
         Some("bench") => bench(),
+        Some("plan") => plan_cmd::plan(),
         Some("export") => export(args.next().as_deref()),
         Some("import") => import(args.next().as_deref()),
         Some("run") => run(args.next().as_deref()),
@@ -89,13 +91,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|trace <世界.json> [帧数] [资产根]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|trace <世界.json> [帧数] [资产根]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|trace <世界.json> [帧数] [资产根]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|trace <世界.json> [帧数] [资产根]>"
             );
             ExitCode::from(2)
         }

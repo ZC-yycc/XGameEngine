@@ -1,8 +1,9 @@
 //! XGC 最小帧循环：按帧应用命令、跑系统、逐帧记录 revision / state hash。
 //!
-//! 调度目前是**固定顺序**（注册顺序）；访问声明与并行合并在下一刀。确定性契约
-//! 先钉住：同一份 Scenario（初始 WorldData + 每帧命令 + fixed_dt）跑两遍，
-//! trace 必须逐帧一致。
+//! 执行顺序只认 [`Schedule::plan`]：系统按注册顺序连续分批（同批两两无访问
+//! 冲突），最后一段是宿主帧末阶段（脚本等 `!Send` 状态）。跨系统并行还差世界
+//! 所有权拆分，同批系统当前仍串行。确定性契约先钉住：同一份 Scenario（初始
+//! WorldData + 每帧命令 + fixed_dt）跑两遍，trace 必须逐帧一致。
 
 #![deny(unsafe_code)]
 
@@ -103,8 +104,8 @@ impl std::fmt::Display for SimError {
 
 impl std::error::Error for SimError {}
 
-/// 系统声明的读写集。M1 先做元数据与冲突判断；并行执行只发生在系统内部
-/// （按 archetype 分片），跨系统并行在下一刀。
+/// 系统声明的读写集。计划分批用它判冲突；跨系统并行还差世界所有权拆分，
+/// 同批系统当前仍按注册顺序串行执行——批是将来并行的确定性输入。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SystemAccess {
     pub reads: Vec<ComponentId>,
@@ -130,13 +131,50 @@ impl SystemAccess {
     }
 }
 
-/// 系统：M1 只有顺序执行；`name` 用于 trace / 诊断，`run` 直接改世界。
+/// 系统：执行顺序由 [`Schedule::plan`] 决定；`name` 用于 trace / 诊断，
+/// `run` 直接改世界。
 pub trait System: Send {
     fn name(&self) -> &'static str;
     fn access(&self) -> SystemAccess {
         SystemAccess::default()
     }
     fn run(&mut self, world: &mut World, dt: f32);
+}
+
+/// 执行计划的一段：系统批，或宿主帧末阶段。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanStage {
+    /// 同一段内连续的一段系统：两两无访问冲突，批内按注册顺序执行。
+    Batch(Vec<usize>),
+    /// 宿主帧末阶段（脚本等 `!Send` 状态）。独占、恒在最后，与所有系统冲突。
+    Host,
+}
+
+/// 执行计划：一段一段按顺序执行，是帧内系统顺序的唯一来源。
+///
+/// 只能由 [`Schedule::plan`] 构造（字段私有），避免外部拼出与调度器不一致的
+/// 顺序；执行走 [`Schedule::run_plan`]。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Plan {
+    stages: Vec<PlanStage>,
+}
+
+impl Plan {
+    pub fn stages(&self) -> &[PlanStage] {
+        &self.stages
+    }
+
+    /// 摊平所有系统下标（不含宿主阶段）。合法计划应恰好是 `0..len` 的排列，
+    /// 也就是与注册顺序一致。
+    pub fn system_order(&self) -> Vec<usize> {
+        let mut order = Vec::new();
+        for stage in &self.stages {
+            if let PlanStage::Batch(indices) = stage {
+                order.extend_from_slice(indices);
+            }
+        }
+        order
+    }
 }
 
 #[derive(Default)]
@@ -194,34 +232,57 @@ impl Schedule {
         self.systems.iter().map(|system| system.access()).collect()
     }
 
-    /// 按注册顺序贪心分批：同批系统两两无访问冲突。执行仍按注册顺序，
-    /// 这个计划是给下一步跨系统并行用的确定性输入。
-    pub fn batches(&self) -> Vec<Vec<usize>> {
-        let mut batches: Vec<Vec<usize>> = Vec::new();
+    /// 生成执行计划：按注册顺序做**连续**贪心分批（同批两两无访问冲突），
+    /// 最后恒追加宿主阶段。
+    ///
+    /// 连续性让「计划摊平后 == 注册顺序」：计划即执行顺序，分批怎么合并不改变
+    /// 语义，只是给将来同批并行留的确定性切分。
+    pub fn plan(&self) -> Plan {
+        let mut stages = Vec::new();
+        let mut batch: Vec<usize> = Vec::new();
         for (index, system) in self.systems.iter().enumerate() {
             let access = system.access();
-            let mut placed = false;
-            for batch in &mut batches {
-                let compatible = batch
-                    .iter()
-                    .all(|&other| !access.conflicts_with(&self.systems[other].access()));
-                if compatible {
-                    batch.push(index);
-                    placed = true;
-                    break;
-                }
+            let compatible = batch
+                .iter()
+                .all(|&other| !access.conflicts_with(&self.systems[other].access()));
+            if !compatible {
+                stages.push(PlanStage::Batch(std::mem::take(&mut batch)));
             }
-            if !placed {
-                batches.push(vec![index]);
-            }
+            batch.push(index);
         }
-        batches
+        if !batch.is_empty() {
+            stages.push(PlanStage::Batch(batch));
+        }
+        stages.push(PlanStage::Host);
+        Plan { stages }
     }
 
-    pub fn run(&mut self, world: &mut World, dt: f32) {
-        for system in &mut self.systems {
-            system.run(world, dt);
+    /// 按计划执行一帧；`host` 在宿主阶段（恒最后）执行一次。
+    ///
+    /// `plan` 必须来自同一个 `Schedule`（只可能由 [`Self::plan`] 产生）。
+    pub fn run_plan(
+        &mut self,
+        plan: &Plan,
+        world: &mut World,
+        dt: f32,
+        mut host: impl FnMut(&mut World),
+    ) {
+        for stage in plan.stages() {
+            match stage {
+                PlanStage::Batch(indices) => {
+                    for &index in indices {
+                        self.systems[index].run(world, dt);
+                    }
+                }
+                PlanStage::Host => host(world),
+            }
         }
+    }
+
+    /// 按注册顺序执行所有系统，不带宿主阶段（测试 / 独立用法）。
+    pub fn run(&mut self, world: &mut World, dt: f32) {
+        let plan = self.plan();
+        self.run_plan(&plan, world, dt, |_| {});
     }
 }
 
@@ -269,6 +330,7 @@ pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem, UiNav
 pub struct Simulation {
     world: World,
     schedule: Schedule,
+    plan: Plan,
     fixed_dt: f32,
     frame: u64,
     trace: Trace,
@@ -285,9 +347,11 @@ impl Simulation {
 
     pub fn with_threads(world: World, fixed_dt: f32, threads: usize) -> Self {
         let schedule = Schedule::default_schedule(threads);
+        let plan = schedule.plan();
         Self {
             world,
             schedule,
+            plan,
             fixed_dt,
             frame: 0,
             trace: Trace::new(),
@@ -338,6 +402,11 @@ impl Simulation {
         &self.schedule
     }
 
+    /// 当前执行计划（构造时按 `schedule` 固定；`schedule` 只读，不会漂移）。
+    pub fn plan(&self) -> &Plan {
+        &self.plan
+    }
+
     pub fn fixed_dt(&self) -> f32 {
         self.fixed_dt
     }
@@ -348,26 +417,28 @@ impl Simulation {
     }
 
     /// 跑一帧，并在记录 trace 前执行 `after`（脚本 / 外部输入接入点）。
+    ///
+    /// `after` 是计划里的宿主阶段：紧跟在所有系统之后、记录帧号之前。
     pub fn step_with(
         &mut self,
         commands: Vec<Command>,
-        mut after: impl FnMut(&mut World),
+        after: impl FnMut(&mut World),
     ) -> Result<FrameRecord, SimError> {
-        let plan = self.world.plan(commands);
-        if !plan.is_valid() {
+        let world_plan = self.world.plan(commands);
+        if !world_plan.is_valid() {
             return Err(SimError::InvalidPlan {
                 frame: self.frame,
-                diagnostics: plan.diagnostics,
+                diagnostics: world_plan.diagnostics,
             });
         }
         self.world
-            .apply(&plan)
+            .apply(&world_plan)
             .map_err(|diagnostics| SimError::Apply {
                 frame: self.frame,
                 diagnostics,
             })?;
-        self.schedule.run(&mut self.world, self.fixed_dt);
-        after(&mut self.world);
+        self.schedule
+            .run_plan(&self.plan, &mut self.world, self.fixed_dt, after);
 
         let record = FrameRecord {
             frame: self.frame,

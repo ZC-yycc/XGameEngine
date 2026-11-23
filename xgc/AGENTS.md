@@ -15,11 +15,13 @@ cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo run -q -p xgc-xtask --offline -- check
 cargo run -q -p xgc-cli --offline -- check
 cargo run -q -p xgc-cli --offline -- run 60
+cargo run -q -p xgc-cli --offline -- plan
 cargo run -q -p xgc-editor --offline -- [世界.json]
 cargo run -q --release -p xgc-cli --offline -- bench
 ```
 
 本机 cargo 在 `C:\Users\Administrator\.cargo\bin\cargo.exe`，不在 PATH 时用全路径。
+本机 GPU 集成测试须 `RUST_TEST_THREADS=1`（并行建两个 headless GPU 设备会死锁）。
 网络不可用时一律加 `--offline`（serde / serde_json 已缓存）。
 
 ## 入口文件
@@ -60,7 +62,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/tests/steady_state.rs` | 热路径分配门禁：线程本地计数分配器（每个测试线程只看自己的分配）+ 稳态帧预算（60 × (实体数 + 64)），数值型组件世界 `state_hash` 60 次零分配；另有一条 release 吞吐用例默认 `#[ignore]` |
 | `crates/xgc-store/src/lib.rs` | 版本化 JSON 包络、原子写、WorldData / Journal 存取 |
 | `crates/xgc-store/src/binary.rs` | `XGCB` 二进制世界：encode / decode / save / load；固定小端、值带标签 |
-| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
+| `crates/xgc-sim/src/lib.rs` | `Simulation` / `Schedule` / `Plan` / `PlanStage` / `SystemAccess` / `Scenario` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with` |
+| `crates/xgc-sim/tests/schedule_plan.rs` | 执行计划回归：连续批次、同批两两无冲突、摊平 == 注册顺序、宿主阶段恒最后、构造时固化计划 |
 | `crates/xgc-sim/src/particles.rs` | `ParticleSystem`：SplitMix64 确定性发射 / 生命周期 / 形状采样 / 重力阻力，产出当帧 `ParticleQuad` |
 | `crates/xgc-sim/src/animation.rs` | 根变换剪辑采样 + `AnimationPlaybackSystem`；关节轨道在 `animation/joints.rs` |
 | `crates/xgc-sim/src/animation/joints.rs` | `JointTrack`：按 joint 索引采样骨骼本地平移 / 旋转 / 缩放；播放系统按 Parent 链找骨骼并写入 |
@@ -183,6 +186,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-player/src/window.rs` | eframe + wgpu 视口：每帧仿真 / 脚本 / 粒子并贴图到窗口 |
 | `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录> [帧数]`：无帧数打开窗口，有帧数 headless |
 | `crates/xgc-cli/src/main.rs` | CLI 参数分派；文件预算拆分后的轻量入口 |
+| `crates/xgc-cli/src/plan_cmd.rs` | `xgc plan`：默认调度的确定性 JSON 执行计划（系统访问声明 + 连续批次 + 宿主阶段） |
+| `crates/xgc-cli/tests/plan.rs` | 执行计划 CLI 回归：两次输出逐字节相同、系统名与 `default_system_names` 同源、组件名全部来自内建注册表、多余参数忽略 |
 | `crates/xgc-cli/src/runtime_cmd.rs` | `run-scripts` / 截图 / `xgc trace <世界.json> [帧数] [资产根]` 共用的 `ScriptedRunner`（系统 → 脚本 → 粒子，逐帧可读世界）：`Simulation::step_with` + `ScriptRuntime::run_frame` 固定帧桥；截图路径同步产出粒子四边形 |
 | `crates/xgc-cli/src/trace_cmd.rs` | `xgc trace <世界.json> [帧数] [资产根]`：逐帧打印 `frame / entities / revision / hash`（无资产根时与 `run-world` 同一条无脚本步进路径，带资产根时走 `ScriptedRunner`、与 `run-scripts` 同一路径；第 0 帧是装载后状态），末行汇总与 `run-world` / `run-scripts` 同口径 |
 | `crates/xgc-cli/src/world_cmd.rs` | `xgc run-world <世界.json> [帧数]` / `verify-migration <旧.ron> <世界.json>` |
@@ -208,8 +213,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 ## 当前下一步（按顺序）
 
-1. 割接视觉：预过滤环境 IBL（GGX 5 级立方体 + 256 样本 BRDF 积分表，split-sum 取代 SH 近似反射）已接入，天空设置变化才重烘 31 趟、关天空零副作用，与旧端差异 32.16% → **3.48%**（环境 IBL）→ **3.31%**（场景 4× MSAA）、mean_abs 0.58 → **0.42**；场景 pass 4× MSAA 也已接上（颜色与深度同采样、适配器不支持退回 1× 等同关闭、收尾统一一次 resolve、TAA / SSAO 深度绑定随采样数切换）；glTF `NORMAL` 顶点法线着色已接入（缺 `NORMAL` 时加载期按几何生成面积加权顶点法线，与旧端 `compute_face_normals` 同式；内建图元仍走屏幕导数）；RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 已到 0.46）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），角色坡面 `slope_limit` / 贴地 `snap_to_ground` 也已生效（陡坡当墙 + 下行贴地）、tone-map 后可选的显示空间 FXAA（`render.fxaa`，默认关；平坦区逐字节不变）也已贯通，角色的**水平**位移已走 rapier `KinematicCharacterController`（`character_kcc.rs`，签名带实体代际；`CharacterBlockSystem` 已删、默认调度 16 个系统），纯角色重力（`character_kcc::GRAVITY_Y` 在角色阶段积分，腾空自由下落、落地清速度）也已生效，`physics.slope` 的静态楔形碰撞体也已补上（`rapier_world/slopes.rs`，上表面与解析坡面重合、`ground_under` 提供向下射线探地），角色控制器缺省值也与旧端逐项对齐（`0.35 / 0.02 / 0.3`、消毒收口到 `CharacterController::sanitized()`），角色的竖直 / 地面 / 台阶也已搬进同一个 KCC（`probe_ground` / `try_step_up` / 竖直积分在 `rapier_world/characters.rs`，`CharacterSystem` / `CharacterStepSystem` 已删除、默认调度 16 个系统）；陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效（`character_kcc::slip_limit`，下滑时不清竖直速度），刚体建体签名也已覆盖全部构建参数（改 `PhysicsBody` 字段会重建、稳态帧不重建），刚体表也已改为按 ID 差量修补（增删 / 改参数只动受影响的刚体），画面曝光也已接上（`render.exposure` 同时进 tone-map 与光晕亮部提取，缺省 1.0 时逐字节不变），阴影画质也已接上（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关、关着走 3×3 PCF + 硬切换且逐位不变），多光源照明也已接上（方向光 / 点光最多 8 盏 + 点光距离衰减，帧 uniform 扩到 976 字节，单盏方向光时逐字节不变）；点光立方体阴影也已接上（`point_shadow.rs` + `frame_uniform.rs`，六面 1024² 复用同一支深度管线、帧 uniform 扩到 1008 字节，证据世界没有点光所以逐字节不变）；TAA 也已接上（`render.taa` 的 `enabled` / `history_weight`，默认关、关着不建历史且相机不抖动、逐字节不变，开着时抖动只叠相机、历史重投影 + 邻域钳制、FXAA 让位）；SSAO 也已接上（`render.ssao` 的 `enabled` / `strength` / `radius` / `bias`，默认关、关着不建 AO 纹理且 `passes` 不增、逐字节不变，开着时半分辨率 16 抽样 + 可分离模糊 + 线性上采样乘算，排在 TAA 之后、光晕之前）；热路径分配门禁也已建立（`crates/xgc-sim/tests/steady_state.rs`：稳态帧从 1697 次/帧降到 230 次/帧、预算门禁；数值型组件 `state_hash` 零分配；release 下 0.057 ms/帧）；逐帧 trace 的 XGC 侧工具也已建立（`xgc trace`，逐帧打印实体数 / revision / `state_hash`；带资产根时走 `ScriptedRunner`、与 `run-scripts` 同一条路径，脚本帧也纳入），视觉余差也已能按「舍入 vs 结构性」归因（`image-diff … report`：1.13% 像素只差 1 LSB、结构性 1.66%、与旧端总差异 3.31%），下一刀做关节 / 连续碰撞（CCD）/ 正式 System 调度。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
-2. 脚本：正式 System 调度、并行执行与脚本组件生命周期完整化。
+1. 割接视觉：预过滤环境 IBL（GGX 5 级立方体 + 256 样本 BRDF 积分表，split-sum 取代 SH 近似反射）已接入，天空设置变化才重烘 31 趟、关天空零副作用，与旧端差异 32.16% → **3.48%**（环境 IBL）→ **3.31%**（场景 4× MSAA）、mean_abs 0.58 → **0.42**；场景 pass 4× MSAA 也已接上（颜色与深度同采样、适配器不支持退回 1× 等同关闭、收尾统一一次 resolve、TAA / SSAO 深度绑定随采样数切换）；glTF `NORMAL` 顶点法线着色已接入（缺 `NORMAL` 时加载期按几何生成面积加权顶点法线，与旧端 `compute_face_normals` 同式；内建图元仍走屏幕导数）；RGBA16F 场景、线性粒子合成、唯一全局 ACES、曝光后曲线前三级光晕（`render.bloom`，默认关）、tone 后 UI、蒙皮网格投射 CSM 阴影、256 槽 GPU palette、姿态感知包围盒（`scene_bounds` 走 `posed_bounds`）、蒙皮 draw 单次提交（`SkinnedPipeline::draw_batch`）、蒙皮 palette / model 竞技场（`skinned/arena.rs` 的 dynamic offset 合并）已贯通（frame-150 对旧端 mean_abs 已到 0.46）。阴影 pass 的蒙皮 palette / model 也已并进同一套竞技场（`renderer/shadow_prep.rs`），角色坡面 `slope_limit` / 贴地 `snap_to_ground` 也已生效（陡坡当墙 + 下行贴地）、tone-map 后可选的显示空间 FXAA（`render.fxaa`，默认关；平坦区逐字节不变）也已贯通，角色的**水平**位移已走 rapier `KinematicCharacterController`（`character_kcc.rs`，签名带实体代际；`CharacterBlockSystem` 已删、默认调度 16 个系统），纯角色重力（`character_kcc::GRAVITY_Y` 在角色阶段积分，腾空自由下落、落地清速度）也已生效，`physics.slope` 的静态楔形碰撞体也已补上（`rapier_world/slopes.rs`，上表面与解析坡面重合、`ground_under` 提供向下射线探地），角色控制器缺省值也与旧端逐项对齐（`0.35 / 0.02 / 0.3`、消毒收口到 `CharacterController::sanitized()`），角色的竖直 / 地面 / 台阶也已搬进同一个 KCC（`probe_ground` / `try_step_up` / 竖直积分在 `rapier_world/characters.rs`，`CharacterSystem` / `CharacterStepSystem` 已删除、默认调度 16 个系统）；陡坡沿坡面下滑与 `(slope_limit + 10°)` 迟滞带也已生效（`character_kcc::slip_limit`，下滑时不清竖直速度），刚体建体签名也已覆盖全部构建参数（改 `PhysicsBody` 字段会重建、稳态帧不重建），刚体表也已改为按 ID 差量修补（增删 / 改参数只动受影响的刚体），画面曝光也已接上（`render.exposure` 同时进 tone-map 与光晕亮部提取，缺省 1.0 时逐字节不变），阴影画质也已接上（`render.shadow` 的 `softness` / `cascade_blend`，可选 PCSS 软阴影 + 级间混合、默认全 0 = 关、关着走 3×3 PCF + 硬切换且逐位不变），多光源照明也已接上（方向光 / 点光最多 8 盏 + 点光距离衰减，帧 uniform 扩到 976 字节，单盏方向光时逐字节不变）；点光立方体阴影也已接上（`point_shadow.rs` + `frame_uniform.rs`，六面 1024² 复用同一支深度管线、帧 uniform 扩到 1008 字节，证据世界没有点光所以逐字节不变）；TAA 也已接上（`render.taa` 的 `enabled` / `history_weight`，默认关、关着不建历史且相机不抖动、逐字节不变，开着时抖动只叠相机、历史重投影 + 邻域钳制、FXAA 让位）；SSAO 也已接上（`render.ssao` 的 `enabled` / `strength` / `radius` / `bias`，默认关、关着不建 AO 纹理且 `passes` 不增、逐字节不变，开着时半分辨率 16 抽样 + 可分离模糊 + 线性上采样乘算，排在 TAA 之后、光晕之前）；热路径分配门禁也已建立（`crates/xgc-sim/tests/steady_state.rs`：稳态帧从 1697 次/帧降到 230 次/帧、预算门禁；数值型组件 `state_hash` 零分配；release 下 0.057 ms/帧）；逐帧 trace 的 XGC 侧工具也已建立（`xgc trace`，逐帧打印实体数 / revision / `state_hash`；带资产根时走 `ScriptedRunner`、与 `run-scripts` 同一条路径，脚本帧也纳入），视觉余差也已能按「舍入 vs 结构性」归因（`image-diff … report`：1.13% 像素只差 1 LSB、结构性 1.66%、与旧端总差异 3.31%），下一刀做关节 / 连续碰撞（CCD）/ 跨系统并行。级联正交盒与旧端同为“按相机视锥切片拟合 + 逐级剔除”，视锥外投射体不需要单独扩展覆盖。
+2. 跨系统并行与脚本生命周期：执行计划已落地（`Schedule::plan` 连续批次 + 宿主阶段 + `xgc plan`，`run` / `step_with` 都走计划），下一刀让同批系统真正并行（世界所有权拆分成不相交 `&mut` 视图，1 / 2 / 8 线程同场景 `state_hash` 一致）；脚本仍走宿主帧末阶段——`ScriptRuntime` 因 mlua 无 send feature 且用 `Rc` / `RefCell` 是 `!Send`，依赖门禁也不允许 `xgc-script → xgc-sim`，强行塞进 `System` 只会扭曲接口；脚本组件生命周期完整化另排。
 3. 割接：旧新逐帧 trace（XGC 侧 `xgc trace` 已建、脚本帧也已纳入，缺旧端输出）/ 截图；视觉余差归因工具 `image-diff … report` 已建（1.13% 像素只差 1 LSB、结构性 1.66%、与旧端总差异 3.31%），收窄仍待旧端逐帧截图；性能门禁的 XGC 侧热路径分配门禁已建（还缺 CI release 基线）。
 4. 资产：密码学签名 / 跨机器增量。
 5. 推送与 CI；当前最大 Rust 文件 597 行（`crates/xgc-render/tests/skinned_pbr.rs`），继续守住 600 行软上限。

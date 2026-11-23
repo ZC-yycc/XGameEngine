@@ -3,8 +3,8 @@
 use xgc_base::EntityId;
 use xgc_sim::{
     play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, FrameCommands,
-    GravitySystem, GroundCollisionSystem, PhysicsSystem, Scenario, Schedule, SimError, Simulation,
-    System, SystemAccess, VelocitySystem,
+    GravitySystem, GroundCollisionSystem, PhysicsSystem, PlanStage, Scenario, Schedule, SimError,
+    Simulation, System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
     Animator, CharacterController, Command, Component, ComponentId, GlobalTransform, Name, Parent,
@@ -186,7 +186,7 @@ fn velocity_system_declares_access_and_parallel_hash_matches() {
 }
 
 #[test]
-fn batch_plan_groups_only_non_conflicting_systems() {
+fn plan_groups_only_non_conflicting_consecutive_systems() {
     struct NameSystem;
 
     impl System for NameSystem {
@@ -211,7 +211,16 @@ fn batch_plan_groups_only_non_conflicting_systems() {
     schedule.add(NameSystem);
     schedule.add(GravitySystem::new([0.0, -9.81, 0.0]));
 
-    assert_eq!(schedule.batches(), vec![vec![0, 1], vec![2]]);
+    let plan = schedule.plan();
+    assert_eq!(
+        plan.stages(),
+        &[
+            PlanStage::Batch(vec![0, 1]),
+            PlanStage::Batch(vec![2]),
+            PlanStage::Host,
+        ]
+    );
+    assert_eq!(plan.system_order(), vec![0, 1, 2]);
     assert!(schedule.accesses()[0].conflicts_with(&schedule.accesses()[2]));
     assert!(!schedule.accesses()[0].conflicts_with(&schedule.accesses()[1]));
 }
