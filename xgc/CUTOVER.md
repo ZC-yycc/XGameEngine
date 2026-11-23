@@ -11,7 +11,7 @@
 | 迁移世界可运行 | 通过 | `run-world` / `run-cooked` / `xgc-player` 60 帧同哈希 |
 | 旧 / 新 headless 统计一致 | 通过 | 24 / 10 / 10 / 2 / 1（`compare-headless`） |
 | 视觉可渲染 | 通过（基础） | `render-frame` 第 150 帧 hash `d050bd357f20aa31`，1280×720，14 个场景 draw / 7 call（场景 5 + 两种粒子混合）/ 8 个 UI draw；截图相机优先级与旧端一致（`mode: "scene"`）；场景光 / PBR / 4 级 CSM / 场景 pass 4× MSAA（颜色与深度同采样、1× 等同关闭、收尾统一 resolve）/ RGBA16F 场景 / 线性粒子合成 / 唯一全局 ACES / 曝光旋钮（`render.exposure`，缺省 1.0）/ 曝光后曲线前三级光晕（默认关） / 多光源照明（方向光 / 点光最多 8 盏 + 点光衰减） / 点光立方体阴影（6 面深度图） / 可选 PCSS 软阴影 + 级间混合（`render.shadow`，默认关）/ tone 后可选 FXAA（默认关）/ 预过滤环境 IBL（GGX 5 级立方体 + 256 样本 BRDF 积分表，split-sum）/ tone 后 UI 已贯通 |
-| 视觉对等 | **未通过** | 本机重新生成旧端参考后仍有 22034/921600 像素不同（**2.39%**），mean_abs **0.36**、max 198；归因（`image-diff … report`）：只差 1 LSB 的 10226 个像素（1.11%）、结构性差异（单通道 ≥8）8952 = **0.97%**。glTF 模型材质因子切片把「实体没有 `render.material` 时用模型材质」补齐（Box.glb 的 `roughnessFactor` 按 spec 缺省 1.0、Fox.gltf 0.58；内建图元用旧端 `MaterialParams::default` 的 metallic 0.0 / roughness 0.45）后，红方块与地面 / 天空 / 内建立方体面**逐字节一致**，整帧从 3.25% / mean_abs 0.42 / 结构性 1.66% 收到 2.39% / 0.36 / 0.97%；世界哈希仍 `d050bd357f20aa31`（材质不进状态哈希），两次渲染 PPM SHA-256 同为 `d7bb4ffc6fa1cb3a375474c8c2a3fd8adc68ab3626730b793ad3391e2b5cd6bf`。剩余余差集中在 ① `builtin://sphere`（XGC rings=8 / segments=16 且无顶点法线，旧端 `sphere(0.5, 24, 32)` 平滑法线 + UV）② Fox.gltf 蒙皮 / 贴图路径的部分三角面（蓝通道偏低，未定位）③ 几何边缘的 ±1 LSB。**旧端参考必须在验收机重生成**（见命令；仓库检入的 `tmp/old-150.png` 来自另一 GPU / 驱动环境，直接对比会得到 18.43% 的假差异）。 |
+| 视觉对等 | **未通过** | 本机重新生成旧端参考后仍有 21920/921600 像素不同（**2.38%**），mean_abs **0.36**、max 198；归因（`image-diff … report`）：只差 1 LSB 的 10275 个像素（1.11%）、结构性差异（单通道 ≥8）8809 = **0.96%**。glTF 模型材质因子切片把「实体没有 `render.material` 时用模型材质」补齐（Box.glb 的 `roughnessFactor` 按 spec 缺省 1.0、Fox.gltf 0.58；内建图元用旧端 `MaterialParams::default` 的 metallic 0.0 / roughness 0.45）后，红方块与地面 / 天空 / 内建立方体面**逐字节一致**，整帧从 3.25% / mean_abs 0.42 / 结构性 1.66% 收到 2.39% / 0.36 / 0.97%，再经内建图元与旧端逐顶点一致收到 **2.38% / 0.36 / 0.96%**；世界哈希仍 `d050bd357f20aa31`（材质不进状态哈希），同一份世界两次渲染 PPM SHA-256 同为 `3673a6a914b39bf6fc8eee3cfe7c5965718be7953e7b3a5f38454d85500e8e60`。内建图元生成器已与旧端逐顶点一致（cube 24 顶点带面法线 / UV、`sphere(0.5, 24, 32)` 平滑法线、cylinder 32 段、plane +Y 法线）；剩余余差集中在 ① Fox.gltf 蒙皮 / 贴图路径的部分三角面（蓝通道偏低，未定位）② 动态物体逐帧状态分叉（第 150 帧 Bouncer 球轮廓相对旧端整体偏约 2 px）③ 几何边缘的 ±1 LSB。**旧端参考必须在验收机重生成**（见命令；仓库检入的 `tmp/old-150.png` 来自另一 GPU / 驱动环境，直接对比会得到 18.43% 的假差异）。 |
 | 逐帧 trace / 状态哈希对照 | **未通过（XGC 侧逐帧 trace 已建）** | `xgc trace <世界.json> [帧数] [资产根]` 逐帧打印 `frame / entities / revision / hash`（无资产根时与 `run-world` 同一条无脚本步进路径，带资产根时走 `ScriptedRunner`、与 `run-scripts` 同一条路径；第 0 帧是装载后状态；坏脚本 / 语法错 / 不可用资产根都会打印「第 N 帧运行失败」并退出码 2）；集成回归 `crates/xgc-cli/tests/trace.rs`：与进程内重放逐步对表、两次运行逐字节相同、不同世界第 0 帧即不同、带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致；旧引擎 `--headless` 没有逐帧 trace 输出，跨端对照仍缺 |
 | 正式 System 调度（计划即执行顺序） | **通过** | `Schedule::plan()` 取代全批贪心的 `batches()`：按注册顺序**连续**分批（同批两两无访问冲突）+ 宿主帧末阶段，`run` / `step_with` 都只走计划，摊平顺序 == 注册顺序；`Simulation` 构造时固化计划（稳态分配不回归）；`xgc plan` 输出确定性 JSON（16 系统 / 12 批 + 宿主阶段，两次输出逐字节相同）。语义保持证据：`run 60` 仍 `f4bc029f5f995b91`、showcase 150 步无脚本 trace 仍 `883b6a7bdf20aa31`、带资产根 trace 与 `run-scripts` 末行同为 `432bee801f20aa31`；回归 `crates/xgc-sim/tests/schedule_plan.rs`（8 条）+ `crates/xgc-cli/tests/plan.rs`（4 条） |
 | 跨系统并行执行 | **未通过** | 计划与访问声明已就绪（连续批次，同批两两无冲突），缺世界所有权拆分成不相交 `&mut` 视图；同批系统仍按注册顺序串行。脚本不进 `System`：`ScriptRuntime` 用 mlua 的 `Rc` / `RefCell`、mlua 0.10 无 send feature ⇒ `!Send`，且 xtask 依赖门禁不允许 `xgc-script → xgc-sim` |
@@ -42,7 +42,7 @@ cargo run -q -p xgc-cli --offline -- plan
 # 视觉指标：先在根 workspace 生成旧引擎第 150 帧，再回 xgc 生成同帧
 # 注意：旧端参考截图必须在验收机重新生成。仓库里检入的 `tmp/old-150.png` 来自另一台
 # GPU / 驱动环境（±1 舍入整体偏移，15.8% 像素不同），直接对比会得到 18.43% 的假差异；
-# 本机重渲染的 `tmp/old-150-now.png` 才是正确基线（glTF 模型材质因子切片后 2.39%）。
+# 本机重渲染的 `tmp/old-150-now.png` 才是正确基线（glTF 模型材质因子切片后 2.39%、内建图元逐顶点一致后 2.38%）。
 cd ..
 cargo run -q -p xgame-editor --offline -- --headless --frames 150 --screenshot tmp\old-150-now.png projects\XGame
 cd xgc
@@ -54,6 +54,9 @@ cargo test -p xgc-render --test material_factor --offline
 
 # 模型材质因子：实体没有 render.material 时用 glTF 自带 metallic / roughness（spec 缺省 1.0）
 cargo test -p xgc-render --test glb --test mesh --offline
+
+# 内建图元与旧端逐顶点一致：cube 24 顶点带面法线 / UV、sphere(0.5, 24, 32) 平滑法线、cylinder 32 段、plane +Y 法线
+cargo test -p xgc-render --test mesh --offline
 
 # 方向光阴影：开关两帧对比（暗像素数量 + 只会变暗）（GPU）
 cargo test -p xgc-render --test shadows --offline

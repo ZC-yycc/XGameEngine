@@ -84,87 +84,172 @@ impl Mesh {
         std::array::from_fn(|index| self.base_color_factor[index] * entity_color[index])
     }
 
+    /// 内建图元的位置 / 法线 / UV 三流一次构造。
+    ///
+    /// 旧端 `BuiltinMesh::vertex` 还会填顶点色白与关节占位；XGC 的 `Mesh` 没有
+    /// 这两列（颜色由实体 / 材质给，蒙皮只属于 glTF 模型），所以只搬几何属性。
+    fn textured(
+        positions: Vec<[f32; 3]>,
+        indices: Vec<u32>,
+        normals: Vec<[f32; 3]>,
+        uvs: Vec<[f32; 2]>,
+    ) -> Self {
+        Self {
+            normals,
+            uvs,
+            ..Self::new(positions, indices)
+        }
+    }
+
+    /// 与旧端 `BuiltinMesh::cube(1.0)` 逐顶点一致：每面 4 个角、共享面法线、带 UV。
+    ///
+    /// 24 顶点而不是 8 个复用角点：法线 / UV 在棱角上不连续，旧端就是靠重复顶点
+    /// 才能同时得到硬边法线与正确的 UV；片元着色优先用顶点法线，棱角才不糊。
     pub fn cube() -> Self {
-        let positions = vec![
-            [-0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [-0.5, 0.5, -0.5],
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [0.5, 0.5, 0.5],
-            [-0.5, 0.5, 0.5],
+        const HALF: f32 = 0.5;
+        // (面法线, 面内 u 轴, 面内 v 轴)，顺序与旧端 `cube()` 一致。
+        const FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
+            ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+            ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
+            ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
         ];
-        let indices = vec![
-            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 1, 2, 6, 1, 6,
-            5, 0, 4, 7, 0, 7, 3,
+        // (u 方向, v 方向, UV)，顺序与旧端 `cube()` 的四角一致。
+        const CORNERS: [([f32; 2], [f32; 2]); 4] = [
+            ([-1.0, -1.0], [0.0, 0.0]),
+            ([1.0, -1.0], [1.0, 0.0]),
+            ([1.0, 1.0], [1.0, 1.0]),
+            ([-1.0, 1.0], [0.0, 1.0]),
         ];
-        Self::new(positions, indices)
-    }
-
-    pub fn plane() -> Self {
-        Self::new(
-            vec![
-                [-0.5, 0.0, -0.5],
-                [0.5, 0.0, -0.5],
-                [0.5, 0.0, 0.5],
-                [-0.5, 0.0, 0.5],
-            ],
-            vec![0, 2, 1, 0, 3, 2],
-        )
-    }
-
-    pub fn sphere() -> Self {
-        let rings = 8usize;
-        let segments = 16usize;
-        let mut positions = Vec::with_capacity((rings + 1) * (segments + 1));
-        let mut indices = Vec::new();
-        for ring in 0..=rings {
-            let phi = ring as f32 / rings as f32 * std::f32::consts::PI;
-            for segment in 0..=segments {
-                let theta = segment as f32 / segments as f32 * std::f32::consts::TAU;
+        let mut positions = Vec::with_capacity(24);
+        let mut normals = Vec::with_capacity(24);
+        let mut uvs = Vec::with_capacity(24);
+        let mut indices = Vec::with_capacity(36);
+        for (normal, axis_u, axis_v) in FACES {
+            let base = positions.len() as u32;
+            for (corner, uv) in CORNERS {
                 positions.push([
-                    0.5 * phi.sin() * theta.cos(),
-                    0.5 * phi.cos(),
-                    0.5 * phi.sin() * theta.sin(),
+                    normal[0] * HALF + axis_u[0] * HALF * corner[0] + axis_v[0] * HALF * corner[1],
+                    normal[1] * HALF + axis_u[1] * HALF * corner[0] + axis_v[1] * HALF * corner[1],
+                    normal[2] * HALF + axis_u[2] * HALF * corner[0] + axis_v[2] * HALF * corner[1],
                 ]);
+                normals.push(normal);
+                uvs.push(uv);
             }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
-        for ring in 0..rings {
-            for segment in 0..segments {
-                let a = (ring * (segments + 1) + segment) as u32;
-                let b = a + segments as u32 + 1;
-                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
-            }
-        }
-        Self::new(positions, indices)
+        Self::textured(positions, indices, normals, uvs)
     }
 
+    /// 与旧端 `BuiltinMesh::plane(1.0)` 逐顶点一致：+Y 法线、UV 铺满四角。
+    pub fn plane() -> Self {
+        const HALF: f32 = 0.5;
+        let positions = vec![
+            [-HALF, 0.0, HALF],
+            [HALF, 0.0, HALF],
+            [HALF, 0.0, -HALF],
+            [-HALF, 0.0, -HALF],
+        ];
+        let normals = vec![[0.0, 1.0, 0.0]; 4];
+        let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        Self::textured(positions, vec![0, 1, 2, 0, 2, 3], normals, uvs)
+    }
+
+    /// 与旧端 `BuiltinMesh::sphere(0.5, 24, 32)` 逐顶点一致：24 圈 × 32 段，
+    /// 顶点法线就是归一化位置（平滑着色），UV 按经纬度铺满 0..1。
+    ///
+    /// 环数 / 段数与旧端相同才有相同的轮廓与高光形状；少一圈就重新出现分面感。
+    pub fn sphere() -> Self {
+        const RADIUS: f32 = 0.5;
+        const RINGS: usize = 24;
+        const SECTORS: usize = 32;
+        let stride = SECTORS + 1;
+        let mut positions = Vec::with_capacity((RINGS + 1) * stride);
+        let mut normals = Vec::with_capacity((RINGS + 1) * stride);
+        let mut uvs = Vec::with_capacity((RINGS + 1) * stride);
+        for ring in 0..=RINGS {
+            let phi = std::f32::consts::PI * ring as f32 / RINGS as f32;
+            for sector in 0..=SECTORS {
+                let theta = std::f32::consts::TAU * sector as f32 / SECTORS as f32;
+                let normal = [phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()];
+                positions.push([normal[0] * RADIUS, normal[1] * RADIUS, normal[2] * RADIUS]);
+                normals.push(normal);
+                uvs.push([sector as f32 / SECTORS as f32, ring as f32 / RINGS as f32]);
+            }
+        }
+        let mut indices = Vec::with_capacity(RINGS * SECTORS * 6);
+        for ring in 0..RINGS {
+            for sector in 0..SECTORS {
+                let a = (ring * stride + sector) as u32;
+                let b = a + stride as u32;
+                indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
+            }
+        }
+        Self::textured(positions, indices, normals, uvs)
+    }
+
+    /// 与旧端 `BuiltinMesh::cylinder(0.5, 1.0, 32)` 逐顶点一致：32 段侧面（径向
+    /// 平滑法线）+ 顶 / 底两个三角扇盖（平面 ±Y 法线），全部带 UV。
     pub fn cylinder() -> Self {
-        let segments = 16usize;
+        const RADIUS: f32 = 0.5;
+        const HEIGHT: f32 = 1.0;
+        const SEGMENTS: usize = 32;
+        let half_h = HEIGHT * 0.5;
         let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut uvs = Vec::new();
         let mut indices = Vec::new();
-        for segment in 0..=segments {
-            let theta = segment as f32 / segments as f32 * std::f32::consts::TAU;
-            let x = 0.5 * theta.cos();
-            let z = 0.5 * theta.sin();
-            positions.push([x, -0.5, z]);
-            positions.push([x, 0.5, z]);
+        for segment in 0..=SEGMENTS {
+            let theta = std::f32::consts::TAU * segment as f32 / SEGMENTS as f32;
+            let normal = [theta.cos(), 0.0, theta.sin()];
+            let u = segment as f32 / SEGMENTS as f32;
+            positions.push([normal[0] * RADIUS, half_h, normal[2] * RADIUS]);
+            normals.push(normal);
+            uvs.push([u, 0.0]);
+            positions.push([normal[0] * RADIUS, -half_h, normal[2] * RADIUS]);
+            normals.push(normal);
+            uvs.push([u, 1.0]);
         }
-        for segment in 0..segments {
-            let base = (segment * 2) as u32;
-            indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
+        for segment in 0..SEGMENTS {
+            let top0 = (segment * 2) as u32;
+            let bot0 = top0 + 1;
+            let top1 = top0 + 2;
+            let bot1 = top0 + 3;
+            indices.extend_from_slice(&[top0, top1, bot0, top1, bot1, bot0]);
         }
-        let top = positions.len() as u32;
-        positions.push([0.0, 0.5, 0.0]);
-        let bottom = positions.len() as u32;
-        positions.push([0.0, -0.5, 0.0]);
-        for segment in 0..segments {
-            let a = (segment * 2) as u32;
-            let b = (((segment + 1) % segments) * 2) as u32;
-            indices.extend_from_slice(&[top, a + 1, b + 1, bottom, b, a]);
+        let top_center = positions.len() as u32;
+        positions.push([0.0, half_h, 0.0]);
+        normals.push([0.0, 1.0, 0.0]);
+        uvs.push([0.5, 0.5]);
+        for segment in 0..=SEGMENTS {
+            let theta = std::f32::consts::TAU * segment as f32 / SEGMENTS as f32;
+            positions.push([theta.cos() * RADIUS, half_h, theta.sin() * RADIUS]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([theta.cos() * 0.5 + 0.5, theta.sin() * 0.5 + 0.5]);
         }
-        Self::new(positions, indices)
+        for segment in 0..SEGMENTS {
+            let a = top_center + 1 + segment as u32;
+            let b = a + 1;
+            indices.extend_from_slice(&[top_center, b, a]);
+        }
+        let bottom_center = positions.len() as u32;
+        positions.push([0.0, -half_h, 0.0]);
+        normals.push([0.0, -1.0, 0.0]);
+        uvs.push([0.5, 0.5]);
+        for segment in 0..=SEGMENTS {
+            let theta = std::f32::consts::TAU * segment as f32 / SEGMENTS as f32;
+            positions.push([theta.cos() * RADIUS, -half_h, theta.sin() * RADIUS]);
+            normals.push([0.0, -1.0, 0.0]);
+            uvs.push([theta.cos() * 0.5 + 0.5, 1.0 - (theta.sin() * 0.5 + 0.5)]);
+        }
+        for segment in 0..SEGMENTS {
+            let a = bottom_center + 1 + segment as u32;
+            let b = a + 1;
+            indices.extend_from_slice(&[bottom_center, a, b]);
+        }
+        Self::textured(positions, indices, normals, uvs)
     }
 }
 
