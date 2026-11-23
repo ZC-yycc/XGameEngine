@@ -48,19 +48,39 @@ pub(crate) fn load_simulation(path: &str) -> Result<Simulation, ExitCode> {
     Ok(Simulation::new(load_world_state(path)?))
 }
 
-pub fn run_world(path: Option<&str>, frames: Option<&str>) -> ExitCode {
+pub(crate) fn parse_threads(threads: Option<&str>) -> Result<usize, ExitCode> {
+    match threads.map(str::parse::<usize>).transpose() {
+        Ok(Some(0)) => {
+            eprintln!("线程数必须大于 0");
+            Err(ExitCode::from(2))
+        }
+        Ok(Some(threads)) => Ok(threads),
+        Ok(None) => Ok(1),
+        Err(_) => {
+            eprintln!("线程数不是整数");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+pub fn run_world(path: Option<&str>, frames: Option<&str>, threads: Option<&str>) -> ExitCode {
     let Some(path) = path else {
-        eprintln!("用法：xgc run-world <世界.json> [帧数]");
+        eprintln!("用法：xgc run-world <世界.json> [帧数] [线程数]");
         return ExitCode::from(2);
     };
     let frames = match parse_frames(frames) {
         Ok(frames) => frames,
         Err(code) => return code,
     };
+    let threads = match parse_threads(threads) {
+        Ok(threads) => threads,
+        Err(code) => return code,
+    };
     let mut simulation = match load_simulation(path) {
         Ok(simulation) => simulation,
         Err(code) => return code,
     };
+    simulation.set_parallel_threads(threads);
     for _ in 0..frames {
         if let Err(err) = simulation.step(Vec::new()) {
             eprintln!("运行失败：{err:?}");

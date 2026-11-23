@@ -264,26 +264,38 @@ impl Schedule {
         }
     }
 
-    /// 执行一段系统批：串行按注册顺序；并行时把各自写的列取成 `WriteSet`，
-    /// 共享只读世界、每个系统一个线程，join 后统一还原列。
+    /// 执行一段系统批：批内声明了 `supports_parted` 的系统走并行，其余按注册
+    /// 顺序串行；并行时把各自写的列取成 `WriteSet`，共享只读世界、每个系统一个
+    /// 线程，join 后统一还原列。
+    ///
+    /// 批内两两无访问冲突，所以「先串后并」与纯串行的读写结果等价；`revision`
+    /// 只数 bump 次数、与先后无关，`state_hash` 也不含它。
     ///
     /// 线程 panic 时先还原已 join 的列再原样传播；未 join 的线程由
     /// `std::thread::scope` 负责收尾（此时世界可能缺列，调用方应放弃本帧）。
     fn run_batch(&mut self, indices: &[usize], world: &mut World, dt: f32, threads: usize) {
-        let parallel = threads > 1
-            && indices.len() > 1
-            && indices
-                .iter()
-                .all(|&index| self.systems[index].supports_parted());
+        let mut serial: Vec<usize> = Vec::new();
+        let mut parted: Vec<usize> = Vec::new();
+        for &index in indices {
+            if self.systems[index].supports_parted() {
+                parted.push(index);
+            } else {
+                serial.push(index);
+            }
+        }
+        for &index in &serial {
+            self.systems[index].run(world, dt);
+        }
+        let parallel = threads > 1 && parted.len() > 1;
         if !parallel {
-            for &index in indices {
+            for &index in &parted {
                 self.systems[index].run(world, dt);
             }
             return;
         }
 
-        let mut sets: Vec<(usize, WriteSet)> = Vec::with_capacity(indices.len());
-        for &index in indices {
+        let mut sets: Vec<(usize, WriteSet)> = Vec::with_capacity(parted.len());
+        for &index in &parted {
             let writes = self.systems[index].access().writes;
             sets.push((index, world.extract_writes(&writes)));
         }

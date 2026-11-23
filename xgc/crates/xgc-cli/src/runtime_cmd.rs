@@ -91,6 +91,11 @@ impl ScriptedRunner {
         Ok(())
     }
 
+    /// 打开批内并行（默认 1 = 串行）。同一份世界在同线程数下哈希必须不变。
+    pub(crate) fn set_parallel_threads(&mut self, threads: usize) {
+        self.simulation.set_parallel_threads(threads);
+    }
+
     pub(crate) fn world(&self) -> &World {
         self.simulation.world()
     }

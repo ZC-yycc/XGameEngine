@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use xgc_base::EntityId;
-use xgc_world::{Bone, Component, Parent, Skeleton, SkeletonPose, Transform, World};
+use xgc_base::{EntityId, EntityKey};
+use xgc_world::{Bone, Component, Parent, Skeleton, SkeletonPose, Transform, World, WriteSet};
 
 use super::{System, SystemAccess};
 
@@ -32,15 +32,39 @@ impl System for SkeletonPoseSystem {
         }
     }
 
+    fn supports_parted(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, world: &mut World, _dt: f32) {
-        let mut roots: HashMap<EntityId, xgc_base::EntityKey> = HashMap::new();
+        let updates = self.compute(world);
+        for (key, text) in updates {
+            if let Some(pose) = world.get_mut::<SkeletonPose>(key) {
+                pose.matrices = text;
+            }
+        }
+    }
+
+    fn run_parted(&mut self, world: &World, writes: &mut WriteSet, _dt: f32) {
+        for (key, text) in self.compute(world) {
+            if let Some(pose) = writes.get_mut::<SkeletonPose>(key) {
+                pose.matrices = text;
+            }
+        }
+    }
+}
+
+impl SkeletonPoseSystem {
+    /// 只读世界算出「根实体 → 关节矩阵 RON 文本」。两个执行入口共用同一份计算。
+    fn compute(&self, world: &World) -> Vec<(EntityKey, String)> {
+        let mut roots: HashMap<EntityId, EntityKey> = HashMap::new();
         world.for_each::<Skeleton>(|key, _| {
             if let Some(entity) = world.entity(key) {
                 roots.insert(entity, key);
             }
         });
         if roots.is_empty() {
-            return;
+            return Vec::new();
         }
         let mut bones: HashMap<EntityId, u32> = HashMap::new();
         world.for_each::<Bone>(|key, bone| {
@@ -92,6 +116,7 @@ impl System for SkeletonPoseSystem {
                 ));
             }
         });
+        let mut updates = Vec::new();
         for (root, mut nodes) in groups {
             nodes.sort_by_key(|(index, _)| *index);
             let mut by_index = BTreeMap::new();
@@ -105,13 +130,11 @@ impl System for SkeletonPoseSystem {
                 matrices.push(matrix);
             }
             let text = ron::ser::to_string(&matrices).unwrap_or_default();
-            if let Some(pose) = roots
-                .get(&root)
-                .and_then(|key| world.get_mut::<SkeletonPose>(*key))
-            {
-                pose.matrices = text;
+            if let Some(key) = roots.get(&root) {
+                updates.push((*key, text));
             }
         }
+        updates
     }
 }
 

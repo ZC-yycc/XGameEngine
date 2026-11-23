@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use xgc_world::{AudioGain, AudioListener, AudioMixer, AudioSource, Component, Transform, World};
+use xgc_base::EntityKey;
+use xgc_world::{
+    AudioGain, AudioListener, AudioMixer, AudioSource, Component, Transform, World, WriteSet,
+};
 
 use super::{System, SystemAccess};
 
@@ -16,12 +19,41 @@ impl System for AudioMixerSystem {
 
     fn access(&self) -> SystemAccess {
         SystemAccess {
-            reads: vec![AudioListener::ID, AudioMixer::ID, AudioSource::ID],
+            reads: vec![
+                AudioListener::ID,
+                AudioMixer::ID,
+                AudioSource::ID,
+                Transform::ID,
+            ],
             writes: vec![AudioGain::ID],
         }
     }
 
+    fn supports_parted(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, world: &mut World, _dt: f32) {
+        let updates = self.compute(world);
+        for (key, gain) in updates {
+            if let Some(output) = world.get_mut::<AudioGain>(key) {
+                output.gain = gain;
+            }
+        }
+    }
+
+    fn run_parted(&mut self, world: &World, writes: &mut WriteSet, _dt: f32) {
+        for (key, gain) in self.compute(world) {
+            if let Some(output) = writes.get_mut::<AudioGain>(key) {
+                output.gain = gain;
+            }
+        }
+    }
+}
+
+impl AudioMixerSystem {
+    /// 只读世界算出每条声源的新增益。两个执行入口共用同一份计算。
+    fn compute(&self, world: &World) -> Vec<(EntityKey, f32)> {
         let mut mixer = AudioMixer::default();
         world.for_each::<AudioMixer>(|_, config| {
             mixer = *config;
@@ -35,10 +67,9 @@ impl System for AudioMixerSystem {
             }
         });
         let mut updates = Vec::new();
+        // 不在这里检查 `AudioGain` 是否存在：并行入口里写集合已从世界取出，
+        // 读不到自己写的列。写回阶段 `get_mut` 对没有该组件的实体自然返回 None。
         world.for_each::<AudioSource>(|key, source| {
-            if world.get::<AudioGain>(key).is_none() {
-                return;
-            }
             let Some(transform) = world.get::<Transform>(key) else {
                 return;
             };
@@ -55,11 +86,7 @@ impl System for AudioMixerSystem {
             let bus = mixer.bus(&source.bus) * mixer.master;
             updates.push((key, (gain * bus).clamp(0.0, 4.0)));
         });
-        for (key, gain) in updates {
-            if let Some(output) = world.get_mut::<AudioGain>(key) {
-                output.gain = gain;
-            }
-        }
+        updates
     }
 }
 

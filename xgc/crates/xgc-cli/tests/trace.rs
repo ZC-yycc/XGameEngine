@@ -46,6 +46,18 @@ fn trace(path: &Path, frames: &str) -> Output {
         .unwrap()
 }
 
+/// 无资产根、显式线程数的 trace：第三个位置用 `-` 占位，第四个位置是线程数。
+fn trace_threads(path: &Path, frames: &str, threads: &str) -> Output {
+    Command::new(binary())
+        .arg("trace")
+        .arg(path)
+        .arg(frames)
+        .arg("-")
+        .arg(threads)
+        .output()
+        .unwrap()
+}
+
 /// 带脚本的资产根 + 世界：`move.lua` 每帧把实体 x 设成 5，
 /// 用来区分"跑了脚本"与"只跑系统"两条 trace 路径。
 const MOVE_LUA: &str = "function update(ctx)\n  set_pos(ctx, 5.0, 0.0, 0.0)\nend\n";
@@ -371,4 +383,53 @@ fn run_scripts_can_write_the_final_world() {
         "同一世界 + 同一帧数的两次落盘必须逐字节相同"
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn parallel_threads_do_not_change_the_trace() {
+    let path = world_file("parallel", 0.0);
+    let serial = trace(&path, "10");
+    let parallel = trace_threads(&path, "10", "4");
+    assert!(serial.status.success());
+    assert!(
+        parallel.status.success(),
+        "带线程数的 trace 必须成功：{}",
+        String::from_utf8_lossy(&parallel.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(serial.stdout).unwrap(),
+        String::from_utf8(parallel.stdout).unwrap(),
+        "线程数只影响执行方式，逐帧哈希必须逐字节一致"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn parallel_threads_do_not_change_run_world() {
+    let path = world_file("parallel-run", 0.0);
+    let serial = Command::new(binary())
+        .arg("run-world")
+        .arg(&path)
+        .arg("6")
+        .output()
+        .unwrap();
+    let parallel = Command::new(binary())
+        .arg("run-world")
+        .arg(&path)
+        .arg("6")
+        .arg("4")
+        .output()
+        .unwrap();
+    assert!(serial.status.success());
+    assert!(
+        parallel.status.success(),
+        "run-world 带线程数必须成功：{}",
+        String::from_utf8_lossy(&parallel.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(serial.stdout).unwrap(),
+        String::from_utf8(parallel.stdout).unwrap(),
+        "线程数不能改变最终哈希"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
