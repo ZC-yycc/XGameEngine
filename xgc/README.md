@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**XGC CI** 切片给 workspace 建了第一份云端门禁（`.github/workflows/xgc.yml`）：`check` job 跑 fmt / clippy / xtask / CLI 冒烟三连，`test` job 跑 12 个不碰 GPU 的包 + 14 个 CPU-only render 目标 + release 吞吐基线（只记数不设阈值）；本机等价 dry run 全绿，运行 45245793893 结论 **成功**；CI toolchain 钉 1.95.0（与开发机同版本，stable 漂移会把新 lint 变成无关的红）。GPU 集成测试留在带显卡机器上跑。
+
 **根运动宿主接线**切片把根运动轨道表提到 `MeshCache::root_motion_library` 并让 CLI / editor / player 三宿主共用（每帧 `step_with` 之后、粒子之前应用）：此前只有 CLI 宿主接了，真实项目在编辑器 Play 或独立游戏里跑 Fox 会少走根运动。红证据：去掉应用行时 player 宿主的哈希对表与 editor 的位移断言都红。新增回归 4 条（render 建表 2 / editor 1 / player 1）；CLI 的第 150 帧哈希与 `run 60` 哈希都不变（纯重构）。
 
 **截图相机裁剪面按场景包围球重算**切片补上第 1 帧缺失的高处投射体阴影：旧端 `--headless --screenshot` 无论用显式机位还是场景相机，近 / 远裁剪面都由 `clip_planes` 按场景包围球重算（showcase near = 0.02），XGC 原来命中场景相机就直接用组件里的 `near = 0.1` / `far = 1000`；CSM 级联拟合虽逐行同式，`near_d` 差 0.08 让悬在 y=7 的 Crate.A 落在第 1 级光空间近平面外（z = -0.2637）→ 深度图没有它 → 地面少整块三角阴影。`shot.rs` 新增 `scene_camera` / `shot_frame` 后第 1 帧 0.96% / 0.29 / 结构性 0.60% → **0.48% / 0.01 / 0.03%**，第 150 / 200 / 300 帧结构性收到 **0.08% / 0.13% / 0.26%**（±1 舍入像素变多属预期）。
@@ -205,7 +207,7 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（579 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；
+`cargo test --workspace --offline` 全绿（579 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
 `xgc-xtask check` 全绿（277 个 Rust 文件，最大 598 行）；30 个内建类型的 schema 为 38222 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
