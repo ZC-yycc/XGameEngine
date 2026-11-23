@@ -18,8 +18,11 @@
 //! 焦点三件套（`ui_focused` / `ui_set_focus` / `ui_clear_focus`）在
 //! `ui_focus_api`：写 `ui.interaction.focused`，不需要新组件字段。
 //! 图片 `ui_set_image` / `ui_set_image_tint` / `ui_set_fill` 写 `image_path` /
-//! `image_tint`（sRGB→线性）/ `image_fill`（clamp 0..=1）；`ui_spawn_*` 仍需要
-//! 新的命令面，未注册。
+//! `image_tint`（sRGB→线性）/ `image_fill`（clamp 0..=1）。
+//!
+//! 运行时创建四函数（`ui_spawn_label` / `ui_spawn_button` / `ui_spawn_panel` /
+//! `ui_spawn_image`）在 `ui_spawn_api`：走 `Command::Spawn` 生成六件套组件，
+//! 同帧就能对新 id 调 setter / 焦点（旧端同样是「先建元素再改」）。
 
 use mlua::Lua;
 use std::rc::Rc;
@@ -570,6 +573,7 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View) -> Result<(), Strin
         .map_err(|err| err.to_string())?;
 
     crate::ui_focus_api::register(lua, commands, view)?;
+    crate::ui_spawn_api::register(lua, commands, view)?;
 
     Ok(())
 }

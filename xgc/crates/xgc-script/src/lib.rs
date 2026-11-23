@@ -11,13 +11,15 @@ use mlua::{
     Value as LuaValue, VmState,
 };
 use xgc_base::EntityId;
-use xgc_world::{builtin_registry, Command, ComponentData, Transform, Value, World};
+use xgc_world::{builtin_registry, Command, Transform, Value, World};
 
+mod component_data;
 mod legacy;
 mod lifecycle;
 mod runtime;
 mod ui_api;
 mod ui_focus_api;
+mod ui_spawn_api;
 mod view;
 pub use legacy::{euler_to_quat, EntityView, ScriptView};
 pub use runtime::ScriptRuntime;
@@ -114,7 +116,7 @@ impl LuaHost {
             .create_function(move |_, (id, component): (u64, String)| {
                 add_commands.borrow_mut().push(Command::AddComponent {
                     entity: EntityId::from_raw(id),
-                    component: default_component(&component)?,
+                    component: crate::component_data::default_component(&component)?,
                 });
                 Ok(())
             })
@@ -401,7 +403,7 @@ impl LuaHost {
         let add = self
             .lua
             .create_function(move |_, (id, component): (u64, String)| {
-                let component = default_component(&component)?;
+                let component = crate::component_data::default_component(&component)?;
                 let mut world = add_world.borrow_mut();
                 let plan = world.plan(vec![Command::AddComponent {
                     entity: EntityId::from_raw(id),
@@ -581,19 +583,4 @@ fn lua_to_value(value: &mlua::Value) -> mlua::Result<Value> {
             other.type_name()
         ))),
     }
-}
-
-fn default_component(name: &str) -> mlua::Result<ComponentData> {
-    let registry = builtin_registry();
-    let schema = registry
-        .by_name(name)
-        .ok_or_else(|| mlua::Error::RuntimeError(format!("未知组件：{name}")))?;
-    Ok(ComponentData {
-        component: xgc_world::ComponentId(schema.id),
-        fields: schema
-            .fields
-            .iter()
-            .map(|field| (field.name.clone(), field.default.clone()))
-            .collect(),
-    })
 }

@@ -48,14 +48,35 @@ pub struct ScriptView {
     pub time: f32,
     pub entities: Vec<EntityView>,
     pub actions: BTreeMap<String, bool>,
+    /// 下一帧可用的实体 ID（每帧从 `WorldData::next_id` 重置）。
+    ///
+    /// 旧端 `ui_spawn` 用 `EntityId::new()` 单调分配；这里用世界计数器派生，
+    /// 保证同一帧多次 spawn 与已有的待结算实体不撞号。
+    pub spawn_cursor: u64,
+    /// 本帧 `ui_spawn_*` 生成、命令还没结算的实体。
+    ///
+    /// 同帧要能对新 id 接着调 `ui_has` / setter / `ui_set_focus`（旧端 spawn 后
+    /// 直接改运行时元素，天然可见）。命令在帧末才 apply，所以这里补一份快照，
+    /// 结算后下一帧由 `refresh_view` 从世界重建、清空。
+    pub pending_spawns: BTreeMap<u64, EntityView>,
 }
 
 impl ScriptView {
     pub fn entity(&self, id: u64) -> Option<&EntityView> {
-        self.entities.iter().find(|entity| entity.id == id)
+        self.entities
+            .iter()
+            .find(|entity| entity.id == id)
+            .or_else(|| self.pending_spawns.get(&id))
     }
 
     pub fn by_name(&self, name: &str) -> Option<&EntityView> {
-        self.entities.iter().find(|entity| entity.name == name)
+        self.entities
+            .iter()
+            .find(|entity| entity.name == name)
+            .or_else(|| {
+                self.pending_spawns
+                    .values()
+                    .find(|entity| entity.name == name)
+            })
     }
 }

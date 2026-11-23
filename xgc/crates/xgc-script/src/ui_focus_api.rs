@@ -96,11 +96,17 @@ fn focusable(commands: &Commands, view: &crate::view::ScriptView, id: u64) -> bo
 
 /// 快照里所有 UI 实体的 id（焦点是排他的：置新焦点要清掉其它元素）。
 fn ui_entities(view: &crate::view::ScriptView) -> Vec<u64> {
-    view.entities
+    // 同帧 `ui_spawn_*` 生成、命令还没结算的实体也参与排他清焦点：否则
+    // 「spawn 一个按钮再给它设焦点」会漏掉目标本身（旧端两者都直接改运行时）。
+    let mut entities: Vec<u64> = view
+        .entities
         .iter()
+        .chain(view.pending_spawns.values())
         .filter(|entity| entity.ui.is_some() && entity.has_interaction)
         .map(|entity| entity.id)
-        .collect()
+        .collect();
+    entities.sort_unstable();
+    entities
 }
 
 /// 注册焦点三件套。`ui_api::register` 末尾一行调用。

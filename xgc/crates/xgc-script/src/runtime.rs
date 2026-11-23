@@ -269,6 +269,8 @@ impl ScriptRuntime {
         view.delta = dt;
         view.time = self.time;
         view.entities = entities;
+        view.spawn_cursor = data.next_id;
+        view.pending_spawns.clear();
     }
 
     fn resolve(&self, path: &str) -> Result<PathBuf, String> {
