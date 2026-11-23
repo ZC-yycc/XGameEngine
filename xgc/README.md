@@ -70,6 +70,8 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 | 单组件查询 10 000 | 22.5 µs（2.25 ns/实体） |
 | despawn 10 000 | 334 µs |
 
+**UI 焦点三件套**切片把旧端 UI 脚本 API 补到 22 个：`ui_focused` / `ui_set_focus` / `ui_clear_focus` 只写 `ui.interaction.focused`（帧末 `SetField` 结算，不动 schema、世界哈希与 `xgc/acceptance/` 参考），目标必须 Button + visible + interactable，否则彻底 no-op；命中时同帧给其它 UI 实体写 false 保证排他，Lua 同帧可读回。门禁 590 条通过。
+
 **割接门禁命令 `xgc gate`** 切片把逐帧 trace 对表与截图阈值判定合成一条可复现命令：`xgc gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]`，参考目录里 `trace.txt` 逐帧对 `frame / entities / hash`（忽略内部计数器 `revision`，帧号必须从 0 连续），`frame-<N>.png|ppm` 按总差异（缺省 ≤ 2%）与结构性（单通道 ≥8，缺省 ≤ 0.5%）判定；退出码 0 = 全过、1 = 有未通过项、2 = 用法 / IO / GPU / 空参考目录错误。仓库新增 `xgc/acceptance/` 参考集（showcase 150 帧的逐帧 trace + 4 张旧端截图；换机器 / GPU 必须重生成截图参考）。本机实跑全过：0.48% / 1.01% / 1.30% / 1.50%，结构性 0.03% / 0.08% / 0.13% / 0.26%；`render-frame` 与门禁共用同一条渲染路径（渲染配置抽成 `render_world_rgba`，抽取后第 150 帧 PPM 逐字节不变）。
 
 **XGC CI** 切片给 workspace 建了第一份云端门禁（`.github/workflows/xgc.yml`）：`check` job 跑 fmt / clippy / xtask / CLI 冒烟三连，`test` job 跑 12 个不碰 GPU 的包 + 14 个 CPU-only render 目标 + release 吞吐基线（只记数不设阈值）；本机等价 dry run 全绿，运行 45245793893 结论 **成功**；CI toolchain 钉 1.95.0（与开发机同版本，stable 漂移会把新 lint 变成无关的红）。GPU 集成测试留在带显卡机器上跑。
@@ -81,7 +83,7 @@ scissor，正式帧末对背景 / 焦点环 / 文本做 sRGB alpha 合成）、�
 **刚体建体改用父链世界变换（非单位四元数归一化）**切片修掉动态体落地后的接触分叉：旧端 `body_from_scene` 的位置 / 旋转 / Auto 尺寸都取 `scene.world_transform()`（父链矩阵相乘再 `Transform::from_matrix` 分解，非单位四元数在这里被归一化），XGC 原来把局部 `Transform` 的原始四元数直接交给 rapier、子实体刚体还建在局部坐标上。`rapier_world/bodies.rs` 新增 `world_transform` / `decompose` 后：动态体状态差 Crate.B `5.3e-3 → 2.7e-5`、Bouncer `2.2e-3 → 1.4e-6`；第 150 帧 1.46% / 0.03 / 0.19% → **0.72% / 0.02 / 0.13%**，第 200 / 300 帧 2.03% / 2.02% → **1.49% / 1.57%**（结构性 0.21% / 0.31%）；第 1 帧不变（高处投射体阴影另案）。
 **UI 覆盖层 SDF（圆角抗锯齿 + 边框）**切片把 UI 矩形绘制换成旧端 `smoothstep` 公式并补上 1px 边框（`border_color` / `border_width` 进 128 字节 uniform；焦点环按旧端外扩 1px + 2px 描边、画在背景之后；`TRIANGLE_WGSL` 抽到 `triangle.wgsl`）：第 150 帧 1.63% / 0.08 / 结构性 0.35% → **1.46% / 0.03 / 0.19%**，第 200 帧 2.20% / 0.11 / 0.48% → **2.03% / 0.07 / 0.31%**，第 300 帧 2.19% / 0.14 / 0.58% → **2.02% / 0.09 / 0.42%**；UI 区域结构性归零，余差重心转到狐狸位姿残差、木箱与阴影轮廓、红球高光。
 
-**UI 脚本布局 / 文本 / 样式 setter 对齐**切片修复 `ui_set_size` 的尺寸语义（旧端 `offset_max = offset_min + size`，原实现丢掉左上角偏移 ⇒ 血条宽高各小 2 px），并把旧端 UI 脚本函数补到 19 个（布局 / 文本 / 样式 / 读取 / 交互；颜色 sRGB→线性、同帧多次写合并、getter 同帧可见）：血条行边界与旧端一致（圆角仅差 1 px AA），第 150 帧 1.63% / 0.08 / 结构性 0.35%，第 200 帧 2.26% → **2.20% / 0.11 / 0.48%**，第 300 帧 2.19% / 0.14 / 0.58%。图像 tint / fill 与 `ui_spawn_*` / focus 三函数仍未接（要新命令面）。
+**UI 脚本布局 / 文本 / 样式 setter 对齐**切片修复 `ui_set_size` 的尺寸语义（旧端 `offset_max = offset_min + size`，原实现丢掉左上角偏移 ⇒ 血条宽高各小 2 px），并把旧端 UI 脚本函数补到 19 个（布局 / 文本 / 样式 / 读取 / 交互；颜色 sRGB→线性、同帧多次写合并、getter 同帧可见）：血条行边界与旧端一致（圆角仅差 1 px AA），第 150 帧 1.63% / 0.08 / 结构性 0.35%，第 200 帧 2.26% → **2.20% / 0.11 / 0.48%**，第 300 帧 2.19% / 0.14 / 0.58%。图像 tint / fill 与 `ui_spawn_*` 仍未接（要新命令面）；焦点三件套已接。
 
 **layers 分层状态机 / 关节遮罩**切片把旧端 Fox 的 `upper` 层接上：`animation.layers` RON 层栈 + `AnimationLayerSystem` 层机器 / 参数 / 时钟 / 淡入 + `glb/layers.rs` 按关节名遮罩在模型局部姿势上做 Override / Additive；脚本 `set_anim_layer_weight` / `set_anim_layer_param` 真写组件（同帧多次改层栈在命令队列合并）。第 200 帧 2.55% / 0.27 / 0.77% → **2.26% / 0.15 / 结构性 0.54%**（狐狸 bbox 结构性 2542 → 478），第 150 / 300 帧逐字节不变。
 
@@ -209,11 +211,11 @@ Audio / Physics / Animator / Character / UI / Particle / Rust 插件 / Lod 已�
 组件；空 LOD 组按旧语义跳过，
 报告里计数。真实项目目录 4 个场景、35 个实体、76 个旧组件映射成功，0 父缺失。
 
-`cargo test --workspace --offline` 全绿（586 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
-`xgc-xtask check` 全绿（279 个 Rust 文件，最大 598 行）；30 个内建类型的 schema 为 38222 字节，
+`cargo test --workspace --offline` 全绿（590 条通过 / 1 ignored；本机 GPU 集成测试须 `RUST_TEST_THREADS=1`），`clippy -D warnings` / `fmt --check` 通过；CI（`.github/workflows/xgc.yml`）在 push / PR 上跑同样门禁 + CPU 测试 + release 吞吐基线（运行 45245793893 结论 成功）；
+`xgc-xtask check` 全绿（281 个 Rust 文件，最大 598 行）；30 个内建类型的 schema 为 38222 字节，
 两次导出逐字节相同（`Value` 带 `kind` 标签，`quat` / `vec4` 不再歧义）。
 
-**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、狐狸位姿残差 / 红球高光 / 木箱与阴影轮廓（根运动及其三宿主接线、layers、UI 脚本 setter、UI 覆盖层 SDF、刚体世界变换、截图裁剪面已接；第 150 / 200 / 300 帧结构性 0.08% / 0.13% / 0.26%，总差异 1.01% / 1.30% / 1.50%）、完整刚体、
+**主要缺口**：跨系统并行执行（执行计划已就绪：连续批次 + 宿主阶段，世界所有权拆分未做）、狐狸位姿残差 / 红球高光 / 木箱与阴影轮廓（根运动及其三宿主接线、layers、UI 脚本 setter（含焦点三件套）、UI 覆盖层 SDF、刚体世界变换、截图裁剪面已接；第 150 / 200 / 300 帧结构性 0.08% / 0.13% / 0.26%，总差异 1.01% / 1.30% / 1.50%）、完整刚体、
 后处理之外的画质项（PCSS / 点光立方体阴影 / TAA / SSAO / FXAA 都已可选；主场景与阴影 pass 的 palette / model 都已并进 dynamic offset 竞技场；级联正交盒按相机视锥切片拟合与旧端同式，视锥外投射体本就按同一拟合框处理，不算缺口）、
 物理的角色仍缺关节、连续碰撞（CCD）、同一帧内多角色互见旧位姿（`move_shape` 读的 `query` 只在 `pipeline.step` 时刷新，角色间阻挡与遍历顺序有关）、UI 的旧字体对齐（align/valign 只能按 kind 推断）、
 脚本侧粒子 burst 请求桥（正式 System 调度已改为计划即执行顺序，见上），

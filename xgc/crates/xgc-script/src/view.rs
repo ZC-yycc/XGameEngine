@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 /// 做增量修改，getter 需要文本 / 可见 / 可交互。
 #[derive(Clone, Debug, Default)]
 pub struct UiElementView {
+    /// `panel` / `text` / `image` / `button`。焦点 setter 只认 `button`（旧端同）。
+    pub kind: String,
     pub anchor_min: [f32; 2],
     pub anchor_max: [f32; 2],
     pub offset_min: [f32; 2],
@@ -34,6 +36,10 @@ pub struct EntityView {
     pub clicked: bool,
     pub hovered: bool,
     pub pressed: bool,
+    /// 只有带 `ui.interaction` 的实体才有意义；焦点 setter / getter 读它。
+    pub focused: bool,
+    /// 实体是否带 `ui.interaction`（焦点命令只能写给有该组件的实体）。
+    pub has_interaction: bool,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -15,9 +15,10 @@
 //! 所以读「当前值」先看队列里同实体 / 同字段尚未结算的 `SetField`，没有才退回帧首
 //! 快照。少了这一步，后一次调用会拿帧首的旧矩形覆盖前一次的结果。
 //!
-//! 图片 `ui_set_image` / `ui_set_image_tint` / `ui_set_fill`、`ui_spawn_*` 与焦点
-//! 三件套（`ui_set_focus` / `ui_clear_focus` / `ui_focused`）需要新的组件字段或
-//! 命令面，未在本文件里注册。
+//! 焦点三件套（`ui_focused` / `ui_set_focus` / `ui_clear_focus`）在
+//! `ui_focus_api`：写 `ui.interaction.focused`，不需要新组件字段。
+//! 图片 `ui_set_image` / `ui_set_image_tint` / `ui_set_fill`、`ui_spawn_*` 仍需要
+//! 新的组件字段或命令面，未注册。
 
 use mlua::Lua;
 use std::rc::Rc;
@@ -28,7 +29,7 @@ use xgc_world::{Command, Component, UiElement, Value as FieldValue};
 use crate::legacy::{srgb_to_linear, Commands, View};
 use crate::view::{ScriptView, UiElementView};
 
-fn has_element(view: &ScriptView, id: u64) -> bool {
+pub(crate) fn has_element(view: &ScriptView, id: u64) -> bool {
     view.entity(id).is_some_and(|entity| entity.ui.is_some())
 }
 
@@ -92,7 +93,12 @@ fn current_vec2(commands: &Commands, view: &ScriptView, id: u64, field: &str) ->
     })
 }
 
-fn current_bool(commands: &Commands, view: &ScriptView, id: u64, field: &str) -> Option<bool> {
+pub(crate) fn current_bool(
+    commands: &Commands,
+    view: &ScriptView,
+    id: u64,
+    field: &str,
+) -> Option<bool> {
     if let Some(FieldValue::Bool(value)) = queued(commands, id, field) {
         return Some(value);
     }
@@ -111,7 +117,7 @@ fn current_text(commands: &Commands, view: &ScriptView, id: u64) -> Option<Strin
     Some(element(view, id)?.text.clone())
 }
 
-fn element(view: &ScriptView, id: u64) -> Option<&UiElementView> {
+pub(crate) fn element(view: &ScriptView, id: u64) -> Option<&UiElementView> {
     view.entity(id)?.ui.as_ref()
 }
 
@@ -495,6 +501,8 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View) -> Result<(), Strin
             .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
+
+    crate::ui_focus_api::register(lua, commands, view)?;
 
     Ok(())
 }

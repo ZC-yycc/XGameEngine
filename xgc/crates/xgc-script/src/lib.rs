@@ -17,6 +17,7 @@ mod legacy;
 mod lifecycle;
 mod runtime;
 mod ui_api;
+mod ui_focus_api;
 mod view;
 pub use legacy::{euler_to_quat, EntityView, ScriptView};
 pub use runtime::ScriptRuntime;

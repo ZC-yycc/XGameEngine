@@ -238,6 +238,7 @@ impl ScriptRuntime {
                                     ui.offset_max = [value[0] as f32, value[1] as f32];
                                 }
                                 ("text", Value::String(value)) => ui.text = value.clone(),
+                                ("kind", Value::String(value)) => ui.kind = value.clone(),
                                 ("visible", Value::Bool(value)) => ui.visible = *value,
                                 ("interactable", Value::Bool(value)) => ui.interactable = *value,
                                 _ => {}
@@ -246,12 +247,14 @@ impl ScriptRuntime {
                         row.ui = Some(ui);
                     }
                     0x0603 => {
+                        row.has_interaction = true;
                         for (field, value) in &component.fields {
                             if let Value::Bool(value) = value {
                                 match field.as_str() {
                                     "clicked" => row.clicked = *value,
                                     "hovered" => row.hovered = *value,
                                     "pressed" => row.pressed = *value,
+                                    "focused" => row.focused = *value,
                                     _ => {}
                                 }
                             }
