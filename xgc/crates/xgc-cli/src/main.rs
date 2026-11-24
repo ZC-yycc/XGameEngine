@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use xgc_agent::Agent;
 use xgc_asset::scan as scan_assets;
-use xgc_migrate::{check_old_project, migrate_dir, migrate_str};
+use xgc_migrate::check_old_project;
 use xgc_reflect::Registry;
 use xgc_script::LuaHost;
 use xgc_sim::{play, write_wav_mono, AudioLibrary, Scenario, SoftwareMixer};
@@ -22,6 +22,7 @@ mod cook_cmd;
 mod gate_cmd;
 mod input_cmd;
 mod parity_cmd;
+mod migrate_cmd;
 mod plan_cmd;
 mod project_render;
 mod render;
@@ -68,7 +69,11 @@ fn main() -> ExitCode {
             args.next().as_deref(),
         ),
         Some("serve") => serve(),
-        Some("migrate") => migrate(args.next().as_deref(), args.next().as_deref()),
+        Some("migrate") => migrate_cmd::migrate(
+            args.next().as_deref(),
+            args.next().as_deref(),
+            args.next().as_deref(),
+        ),
         Some("render-graph") => render::render_graph(),
         Some("gpu-probe") => render::gpu_probe(),
         Some("mesh-probe") => render::mesh_probe(args.next().as_deref()),
@@ -113,13 +118,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]|parity <旧图> <新图> [结构性%] [内部%]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录>|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]|parity <旧图> <新图> [结构性%] [内部%]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
@@ -278,68 +283,6 @@ fn import(path: Option<&str>) -> ExitCode {
         world.len(),
         world.revision(),
         world.state_hash()
-    );
-    ExitCode::SUCCESS
-}
-
-fn migrate(input: Option<&str>, output: Option<&str>) -> ExitCode {
-    let (Some(input), Some(output)) = (input, output) else {
-        eprintln!("用法：xgc migrate <旧.ron|旧目录> <新.json|新目录>");
-        return ExitCode::from(2);
-    };
-    if Path::new(input).is_dir() {
-        return match migrate_dir(Path::new(input), Path::new(output)) {
-            Ok(batch) => {
-                for failure in &batch.failures {
-                    eprintln!("migrate 失败：{failure}");
-                }
-                println!(
-                    "migrate: {} 个场景，{} 个实体，{} 个带旧组件，{} 个组件已映射，{} 个父节点缺失，{} 个失败 -> {}",
-                    batch.scenes,
-                    batch.entities,
-                    batch.with_old_components,
-                    batch.mapped_components,
-                    batch.missing_parents,
-                    batch.failures.len(),
-                    output
-                );
-                if batch.failures.is_empty() {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::from(1)
-                }
-            }
-            Err(err) => {
-                eprintln!("批量迁移失败：{err}");
-                ExitCode::from(1)
-            }
-        };
-    }
-    let text = match std::fs::read_to_string(input) {
-        Ok(text) => text,
-        Err(err) => {
-            eprintln!("读取旧场景失败：{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (data, report) = match migrate_str(&text) {
-        Ok(result) => result,
-        Err(err) => {
-            eprintln!("迁移失败：{err}");
-            return ExitCode::from(1);
-        }
-    };
-    if let Err(err) = save_world(Path::new(output), &data) {
-        eprintln!("写入迁移结果失败：{err}");
-        return ExitCode::from(1);
-    }
-    println!(
-        "migrate: {} 个实体，{} 个带旧组件，{} 个组件已映射，{} 个父节点缺失 -> {}",
-        report.entities,
-        report.with_old_components,
-        report.mapped_components,
-        report.missing_parents,
-        output
     );
     ExitCode::SUCCESS
 }

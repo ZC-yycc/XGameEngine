@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "XGC 持久化：版本化 JSON + 原子写"
+description = "XGC 持久化：版本化 JSON 包络、项目清单与原子写"
 
 [dependencies]
 xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
 serde.workspace = true
+ron = "0.8.1"
 serde_json.workspace = true

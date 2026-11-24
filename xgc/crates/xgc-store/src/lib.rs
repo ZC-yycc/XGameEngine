@@ -20,6 +20,11 @@ const FORMAT_VERSION: u32 = 1;
 mod binary;
 pub use binary::{decode_world, encode_world, load_world_binary, save_world_binary};
 
+mod project;
+pub use project::{
+    load_project, save_project, ProjectContent, ProjectManifest, PROJECT_FORMAT_VERSION,
+};
+
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),
@@ -111,7 +116,7 @@ fn load<T: DeserializeOwned>(path: &Path, expected_kind: &str) -> Result<T> {
     Ok(envelope.payload)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Ok(existing) = fs::read(path) {
         if existing == bytes {
             return Ok(());

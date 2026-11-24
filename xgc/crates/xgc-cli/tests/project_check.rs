@@ -58,6 +58,25 @@ fn missing_scene_exits_2() {
 }
 
 #[test]
+fn project_migrate_dry_run_does_not_write() {
+    let out = std::env::temp_dir().join(format!("xgc-cli-migrate-out-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&out);
+    let output = xgc()
+        .arg("migrate")
+        .arg(real_project())
+        .arg(&out)
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "stdout={stdout}");
+    assert!(stdout.contains("scenes=4"), "{stdout}");
+    assert!(stdout.contains("dry-run"), "{stdout}");
+    assert!(!out.exists(), "dry-run 不应写盘：{}", out.display());
+    let _ = fs::remove_dir_all(&out);
+}
+
+#[test]
 fn missing_project_ron_exits_1() {
     let root = fixture("no-project", None);
     let output = xgc().arg("check").arg(&root).output().unwrap();

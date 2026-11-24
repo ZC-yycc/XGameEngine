@@ -121,37 +121,37 @@ impl ProjectCheckReport {
 }
 
 #[derive(Debug, Deserialize)]
-struct OldProject {
+pub(crate) struct OldProject {
     #[serde(default)]
-    format_version: u32,
+    pub(crate) format_version: u32,
     #[serde(default)]
-    name: String,
+    pub(crate) name: String,
     #[serde(default)]
-    entry_scene: String,
+    pub(crate) entry_scene: String,
     #[serde(default)]
-    content: OldContent,
+    pub(crate) content: OldContent,
     #[serde(default)]
-    build: OldBuild,
+    pub(crate) build: OldBuild,
 }
 
 #[derive(Debug, Deserialize)]
-struct OldContent {
+pub(crate) struct OldContent {
     #[serde(default = "default_scenes_dir")]
-    scenes_dir: String,
+    pub(crate) scenes_dir: String,
     #[serde(default = "default_models_dir")]
-    models_dir: String,
+    pub(crate) models_dir: String,
     #[serde(default = "default_textures_dir")]
-    textures_dir: String,
+    pub(crate) textures_dir: String,
     #[serde(default = "default_audio_dir")]
-    audio_dir: String,
+    pub(crate) audio_dir: String,
     #[serde(default = "default_shaders_dir")]
-    shaders_dir: String,
+    pub(crate) shaders_dir: String,
     #[serde(default = "default_prefabs_dir")]
-    prefabs_dir: String,
+    pub(crate) prefabs_dir: String,
     #[serde(default = "default_scripts_dir")]
-    scripts_dir: String,
+    pub(crate) scripts_dir: String,
     #[serde(default)]
-    search_paths: Vec<String>,
+    pub(crate) search_paths: Vec<String>,
 }
 
 impl Default for OldContent {
@@ -198,13 +198,13 @@ fn default_scripts_dir() -> String {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct OldBuild {
+pub(crate) struct OldBuild {
     #[serde(default)]
-    scenes: Vec<String>,
+    pub(crate) scenes: Vec<String>,
 }
 
-/// 检查一个旧工程目录。只读；不创建 / 不修改任何文件。
-pub fn check_old_project(root: &Path) -> Result<ProjectCheckReport, ProjectCheckError> {
+/// 只读 `project.ron`。`check_old_project` 与迁移共用同一份解析。
+pub(crate) fn read_old_project(root: &Path) -> Result<OldProject, ProjectCheckError> {
     if !root.is_dir() {
         return Err(ProjectCheckError::NotADirectory(root.to_path_buf()));
     }
@@ -213,8 +213,12 @@ pub fn check_old_project(root: &Path) -> Result<ProjectCheckReport, ProjectCheck
         path: project_path.clone(),
         message: err.to_string(),
     })?;
-    let project: OldProject =
-        ron::from_str(&text).map_err(|err| ProjectCheckError::ProjectParse(err.to_string()))?;
+    ron::from_str(&text).map_err(|err| ProjectCheckError::ProjectParse(err.to_string()))
+}
+
+/// 检查一个旧工程目录。只读；不创建 / 不修改任何文件。
+pub fn check_old_project(root: &Path) -> Result<ProjectCheckReport, ProjectCheckError> {
+    let project = read_old_project(root)?;
 
     let mut report = ProjectCheckReport {
         name: project.name.clone(),

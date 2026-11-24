@@ -1,0 +1,115 @@
+//! 项目清单 `project.xgc`：迁移产物与三个宿主的共同入口。
+//!
+//! 这里只放**项目级**信息：入口场景、关卡顺序、内容目录、输入映射。单个场景
+//! 仍是 `scenes/*.json` 的 `WorldData`，两者各自版本化；清单不重复场景内容。
+//!
+//! 路径一律是项目相对路径（正斜杠），读写边界都走
+//! `xgc_base::path::normalize_project_relative`，不在这里另写一套。
+
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+use xgc_base::path::normalize_project_relative;
+
+use crate::{write_atomic, Result, StoreError};
+
+/// 清单格式版本；新增必填字段必须同时上调。
+pub const PROJECT_FORMAT_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectManifest {
+    pub format_version: u32,
+    pub name: String,
+    /// 启动场景；必须出现在 `scenes` 里。
+    pub entry_scene: String,
+    /// 关卡顺序（下标 0 起），也是构建清单。
+    pub scenes: Vec<String>,
+    pub content: ProjectContent,
+    #[serde(default)]
+    pub search_paths: Vec<String>,
+    /// 旧 `input.ron` 原样复制后的位置；没有输入映射时为 None。
+    #[serde(default)]
+    pub input: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectContent {
+    pub models: String,
+    pub textures: String,
+    pub audio: String,
+    /// 没有着色器目录时为空。
+    #[serde(default)]
+    pub shaders: Option<String>,
+    pub prefabs: String,
+    pub scripts: String,
+}
+
+impl ProjectManifest {
+    /// 读盘后 / 写盘前的唯一校验点。清单不自洽时宁可拒载，也不让宿主
+    /// 带着半份路径去猜。
+    pub fn validate(&self) -> Result<()> {
+        if self.format_version != PROJECT_FORMAT_VERSION {
+            return Err(StoreError::Format(format!(
+                "project.xgc 版本 {} 不受支持（当前 {PROJECT_FORMAT_VERSION}）",
+                self.format_version
+            )));
+        }
+        if self.name.trim().is_empty() {
+            return Err(StoreError::Format("project.xgc 的 name 不能为空".into()));
+        }
+        let entry = self.normalized("entry_scene", &self.entry_scene)?;
+        if self.scenes.is_empty() {
+            return Err(StoreError::Format("project.xgc 的 scenes 不能为空".into()));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for scene in &self.scenes {
+            let scene = self.normalized("scenes", scene)?;
+            if !seen.insert(scene.clone()) {
+                return Err(StoreError::Format(format!("project.xgc 重复登记场景：{scene}")));
+            }
+        }
+        if !seen.contains(&entry) {
+            return Err(StoreError::Format(format!(
+                "project.xgc 的 entry_scene 不在 scenes 里：{entry}"
+            )));
+        }
+        self.normalized("content.models", &self.content.models)?;
+        self.normalized("content.textures", &self.content.textures)?;
+        self.normalized("content.audio", &self.content.audio)?;
+        self.normalized("content.prefabs", &self.content.prefabs)?;
+        self.normalized("content.scripts", &self.content.scripts)?;
+        if let Some(shaders) = &self.content.shaders {
+            if !shaders.trim().is_empty() {
+                self.normalized("content.shaders", shaders)?;
+            }
+        }
+        for search in &self.search_paths {
+            self.normalized("search_paths", search)?;
+        }
+        if let Some(input) = &self.input {
+            self.normalized("input", input)?;
+        }
+        Ok(())
+    }
+
+    fn normalized(&self, field: &str, raw: &str) -> Result<String> {
+        normalize_project_relative(raw).map_err(|defect| {
+            StoreError::Format(format!("project.xgc 的 {field} 不合法（{raw}）：{defect}"))
+        })
+    }
+}
+
+pub fn save_project(path: &Path, manifest: &ProjectManifest) -> Result<()> {
+    manifest.validate()?;
+    let text = ron::ser::to_string_pretty(manifest, ron::ser::PrettyConfig::default())
+        .map_err(|err| StoreError::Format(format!("project.xgc 序列化失败：{err}")))?;
+    write_atomic(path, text.as_bytes())
+}
+
+pub fn load_project(path: &Path) -> Result<ProjectManifest> {
+    let text = std::fs::read_to_string(path)?;
+    let manifest: ProjectManifest = ron::from_str(&text)
+        .map_err(|err| StoreError::Format(format!("project.xgc 解析失败：{err}")))?;
+    manifest.validate()?;
+    Ok(manifest)
+}

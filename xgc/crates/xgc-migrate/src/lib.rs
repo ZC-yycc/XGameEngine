@@ -33,6 +33,7 @@ mod old_scene;
 mod old_ui;
 mod prefab;
 mod project_check;
+mod project_migrate;
 mod report;
 mod transform_migrate;
 mod verify;
@@ -40,6 +41,9 @@ pub use compare::{compare_headless, CompareReport, Stats};
 pub use prefab::{instantiate_prefab, revert_prefab};
 pub use project_check::{
     check_old_project, ProjectCheckError, ProjectCheckReport, OLD_PROJECT_FORMAT_VERSION,
+};
+pub use project_migrate::{
+    migrate_old_project, ProjectMigrationError, ProjectMigrationReport,
 };
 pub use report::{component_id_name, MigrationBatch, MigrationError, MigrationReport};
 pub use verify::verify_migration;
