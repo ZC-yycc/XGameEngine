@@ -6,6 +6,7 @@
 #![deny(unsafe_code)]
 
 pub mod diagnostics;
+pub mod path;
 
 pub use diagnostics::{catalog as diagnostic_catalog, DiagnosticCode};
 

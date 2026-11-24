@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use xgc_agent::Agent;
 use xgc_asset::scan as scan_assets;
-use xgc_migrate::{migrate_dir, migrate_str};
+use xgc_migrate::{check_old_project, migrate_dir, migrate_str};
 use xgc_reflect::Registry;
 use xgc_script::LuaHost;
 use xgc_sim::{play, write_wav_mono, AudioLibrary, Scenario, SoftwareMixer};
@@ -159,35 +159,61 @@ fn check(path: Option<&str>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mut diagnostics = registry.validate();
-    let mut world_summary = None;
-
-    if let Some(path) = path {
-        let data = match load_world(Path::new(path)) {
-            Ok(data) => data,
-            Err(err) => {
-                eprintln!("读取世界失败：{err}");
-                return ExitCode::from(1);
-            }
-        };
-        world_summary = Some((data.entities.len(), data.revision));
-        diagnostics.extend(World::validate_data(&data, &registry));
+    let schema_diagnostics = registry.validate();
+    if !schema_diagnostics.is_empty() {
+        for diagnostic in &schema_diagnostics {
+            eprintln!("{diagnostic}");
+        }
+        return ExitCode::from(1);
     }
 
-    if diagnostics.is_empty() {
-        match world_summary {
-            Some((entities, revision)) => println!(
-                "check: {} 个组件，schema 语义 OK；世界 {entities} 个实体，revision {revision}",
-                registry.len()
-            ),
-            None => println!("check: {} 个组件，schema 语义 OK", registry.len()),
+    let Some(path) = path else {
+        println!("check: {} 个组件，schema 语义 OK", registry.len());
+        return ExitCode::SUCCESS;
+    };
+    let target = Path::new(path);
+
+    // 目录 = 旧工程的项目级检查。把目录当世界 JSON 读只会得到「拒绝访问」，
+    // 这条分支也是 M6 门禁「迁移后 check 0 问题」的入口。
+    if target.is_dir() {
+        return match check_old_project(target) {
+            Ok(report) => {
+                println!("{}", report.render());
+                if report.has_problems() {
+                    ExitCode::from(2)
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(err) => {
+                eprintln!("项目检查失败：{err}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    let data = match load_world(target) {
+        Ok(data) => data,
+        Err(err) => {
+            eprintln!("读取世界失败：{err}");
+            return ExitCode::from(1);
         }
+    };
+    let diagnostics = World::validate_data(&data, &registry);
+    if diagnostics.is_empty() {
+        println!(
+            "check: {} 个组件，schema 语义 OK；世界 {} 个实体，revision {}",
+            registry.len(),
+            data.entities.len(),
+            data.revision
+        );
         ExitCode::SUCCESS
     } else {
         for diagnostic in &diagnostics {
             eprintln!("{diagnostic}");
         }
-        ExitCode::from(1)
+        // 0 = 通过，1 = 读不了 / 坏数据，2 = 世界能读但语义有问题。
+        ExitCode::from(2)
     }
 }
 

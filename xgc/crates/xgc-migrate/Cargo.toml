@@ -7,6 +7,7 @@ license.workspace = true
 description = "旧 XGameEngine 场景迁移到 XGC WorldData 的第一层"
 
 [dependencies]
+xgc-asset = { path = "../xgc-asset" }
 xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
 xgc-store = { path = "../xgc-store" }
