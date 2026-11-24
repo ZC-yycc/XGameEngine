@@ -14,9 +14,11 @@ use xgc_reflect::{ComponentId, Registry};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Applied, Command, Journal, Plan, World, WorldSnapshot};
 
+mod mcp;
 mod query;
 mod snapshot;
 
+pub use mcp::Mcp;
 use query::{axis_index, FieldRef, Filter, FilterOp};
 
 pub const PROTOCOL: &str = "xgc.agent/1";
@@ -55,6 +57,11 @@ impl Agent {
 
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// 直接调用一个协议方法。MCP 适配器用它复用同一套实现。
+    pub(crate) fn call(&mut self, method: &str, params: &Json) -> Result<Json, String> {
+        self.dispatch(method, params)
     }
 
     /// 处理一行；通知（无 id）返回 None。

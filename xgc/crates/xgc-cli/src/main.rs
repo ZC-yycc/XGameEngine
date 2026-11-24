@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use xgc_agent::Agent;
+use xgc_agent::{Agent, Mcp};
 use xgc_asset::scan as scan_assets;
 use xgc_migrate::check_old_project;
 use xgc_reflect::Registry;
@@ -95,6 +95,7 @@ fn main() -> ExitCode {
             args.next().as_deref(),
         ),
         Some("serve") => serve(),
+        Some("mcp") => serve_mcp(),
         Some("migrate") => migrate_cmd::migrate(
             args.next().as_deref(),
             args.next().as_deref(),
@@ -144,13 +145,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|mcp|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|mcp|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
@@ -448,6 +449,28 @@ fn serve() -> ExitCode {
             }
         };
         if let Some(response) = agent.handle_line(&line) {
+            if writeln!(stdout, "{response}").is_err() || stdout.flush().is_err() {
+                eprintln!("写入 stdout 失败");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn serve_mcp() -> ExitCode {
+    let mut mcp = Mcp::new();
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(err) => {
+                eprintln!("读取 stdin 失败：{err}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Some(response) = mcp.handle_line(&line) {
             if writeln!(stdout, "{response}").is_err() || stdout.flush().is_err() {
                 eprintln!("写入 stdout 失败");
                 return ExitCode::from(1);
