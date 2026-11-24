@@ -107,12 +107,13 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` / `fixed_update(ctx)` / `on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)` 生命周期分派与回退；每次调用前 `reset_budget()`，`fixed_update` 每个固定步一次且不传 dt（dt 走 `delta(ctx)`），碰撞钩子多传对方 `EntityId` |
 | `crates/xgc-script/src/character_api.rs` | 角色脚本 API：`axis`（读 `ScriptView.axes`，编辑器按 `input.ron` 的轴桥）、`character_is_grounded` / `character_velocity`（读快照）、`character_simple_move`（写 `Velocity.linear` 水平两轴，缺组件先 `AddComponent`，同帧查队列去重）、`character_jump`（仅 grounded 时写 `jump_velocity` + `jump`）；写操作全部走帧末命令队列 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载；`run_frame` 在 update/fixed_update 之后消费 `World::collision_events()` 派发 `on_collision_enter/exit`，命令并进同一帧结算；`take_error()` 把本帧第一处脚本错误交给宿主（只打 stderr 时宿主看不到失败） |
-| `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 |
+| `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 / 项目场景切换（脏场景与 Play 期间拒绝） |
+| `crates/xgc-editor/src/scene_ops.rs` | 项目场景切换：清单登记名 → 场景世界；脏场景与 Play 期间拒绝，切换后清空选择 / 撤销 / 重做 |
 | `crates/xgc-editor/src/play.rs` | Play / Play Scripts / input.ron 动作桥 / step / stop |
 | `crates/xgc-editor/src/transform_ops.rs` | 位置 / 缩放 / 旋转 setter 与 Gizmo 旋转；无父节点同步 GlobalTransform；`snap` |
 | `crates/xgc-editor/src/prefab_ops.rs` | `instantiate_prefab_file` / `revert_prefab_file`：旧 PrefabV2 → 新 ID 实例并选中根 |
 | `crates/xgc-editor/src/gizmo.rs` | 视口 MVP 投影与线段命中距离 |
-| `crates/xgc-editor/src/app.rs` | eframe 窗口：层级 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y |
+| `crates/xgc-editor/src/app.rs` | eframe 窗口：层级 / 场景列表 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y / 底部状态栏 |
 | `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |

@@ -423,3 +423,87 @@ fn opens_a_migrated_project_through_its_manifest() {
     assert_eq!(reloaded.entities().len(), 1);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn switches_scenes_through_the_project_manifest() {
+    use xgc_store::{save_project, ProjectContent, ProjectManifest};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_editor_switch_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join("scenes")).unwrap();
+    let mut main = World::new();
+    main.spawn((
+        Name {
+            value: "main".to_string(),
+        },
+        Transform::default(),
+    ));
+    xgc_store::save_world(&dir.join("scenes/main.json"), &main.world_data()).unwrap();
+    let mut extra = World::new();
+    for name in ["a", "b"] {
+        extra.spawn((
+            Name {
+                value: name.to_string(),
+            },
+            Transform::default(),
+        ));
+    }
+    xgc_store::save_world(&dir.join("scenes/extra.json"), &extra.world_data()).unwrap();
+    save_project(
+        &dir.join("project.xgc"),
+        &ProjectManifest {
+            format_version: xgc_store::PROJECT_FORMAT_VERSION,
+            name: "demo".to_string(),
+            entry_scene: "scenes/main.json".to_string(),
+            scenes: vec![
+                "scenes/main.json".to_string(),
+                "scenes/extra.json".to_string(),
+            ],
+            content: ProjectContent {
+                models: "Resources".to_string(),
+                textures: "Resources".to_string(),
+                audio: "Resources".to_string(),
+                shaders: None,
+                prefabs: "Prefabs".to_string(),
+                scripts: "Scripts".to_string(),
+            },
+            search_paths: Vec::new(),
+            input: None,
+        },
+    )
+    .unwrap();
+
+    let mut editor = EditorState::open(&dir).unwrap();
+    assert_eq!(editor.current_scene(), Some("scenes/main.json"));
+    assert_eq!(editor.scenes().len(), 2);
+    editor.open_scene("scenes/extra.json").unwrap();
+    assert_eq!(editor.entities().len(), 2);
+    assert_eq!(editor.current_scene(), Some("scenes/extra.json"));
+    assert!(editor.path().unwrap().ends_with("scenes/extra.json"));
+
+    editor
+        .edit_field(
+            editor.entities()[0].id,
+            0x0101,
+            "position",
+            Value::Vec3([1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+    assert!(
+        editor.open_scene("scenes/main.json").is_err(),
+        "脏场景拒绝切换"
+    );
+    editor.save().unwrap();
+    editor.open_scene("scenes/main.json").unwrap();
+    assert_eq!(editor.entities().len(), 1);
+    assert!(editor.open_scene("scenes/missing.json").is_err());
+    assert!(EditorState::demo().open_scene("scenes/main.json").is_err());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

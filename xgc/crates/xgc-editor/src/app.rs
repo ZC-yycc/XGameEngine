@@ -280,6 +280,23 @@ impl EditorApp {
 
     fn hierarchy(&mut self, ui: &mut egui::Ui) {
         ui.heading("Hierarchy");
+        let scenes = self.state.scenes().to_vec();
+        if !scenes.is_empty() {
+            ui.label("Scenes");
+            let current = self.state.current_scene().map(str::to_owned);
+            for scene in &scenes {
+                if ui
+                    .selectable_label(current.as_deref() == Some(scene.as_str()), scene)
+                    .clicked()
+                {
+                    match self.state.open_scene(scene) {
+                        Ok(()) => self.status = Some(format!("已打开场景 {scene}")),
+                        Err(err) => self.status = Some(err),
+                    }
+                }
+            }
+            ui.separator();
+        }
         let selected = self.state.selected();
         let rows = self.state.entities();
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -455,6 +472,18 @@ impl eframe::App for EditorApp {
             self.render_viewport();
         }
         egui::TopBottomPanel::top("xgc-toolbar").show(ctx, |ui| self.toolbar(ui));
+        egui::TopBottomPanel::bottom("xgc-status").show(ctx, |ui| {
+            let mut text = self.status.clone().unwrap_or_else(|| {
+                self.state
+                    .path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "未打开场景".to_string())
+            });
+            if self.state.is_dirty() {
+                text.push_str("  *");
+            }
+            ui.label(text);
+        });
         egui::SidePanel::left("xgc-hierarchy")
             .default_width(260.0)
             .show(ctx, |ui| self.hierarchy(ui));

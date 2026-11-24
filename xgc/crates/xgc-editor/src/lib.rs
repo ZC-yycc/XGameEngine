@@ -6,6 +6,7 @@ mod app;
 mod gizmo;
 mod play;
 mod prefab_ops;
+mod scene_ops;
 mod transform_ops;
 pub use app::run;
 pub use transform_ops::snap;
@@ -56,6 +57,8 @@ pub struct EditorState {
     path: Option<PathBuf>,
     /// 从项目打开时才有；`path` 此时是入口场景路径，保存仍写场景本身。
     project: Option<ProjectSession>,
+    /// 当前场景在 `project.xgc` 里的登记名；单场景打开时为 None。
+    scene: Option<String>,
     selected: Option<EntityId>,
     dirty: bool,
     play: Option<PlaySession>,
@@ -76,6 +79,7 @@ impl EditorState {
             registry: builtin_registry(),
             path: None,
             project: None,
+            scene: None,
             selected: None,
             dirty: false,
             play: None,
@@ -123,19 +127,20 @@ impl EditorState {
             || path
                 .file_name()
                 .is_some_and(|name| name == std::ffi::OsStr::new("project.xgc"));
-        let (data, scene_path, project) = if is_project {
+        let (data, scene_path, project, scene) = if is_project {
             let session =
                 ProjectSession::open(path).map_err(|err| format!("读取项目失败：{err}"))?;
+            let scene = session.entry_scene().to_string();
             let scene_path = session
-                .scene_path(session.entry_scene())
+                .scene_path(&scene)
                 .map_err(|err| format!("入口场景路径不合法：{err}"))?;
             let data = session
                 .load_entry()
                 .map_err(|err| format!("读取入口场景失败：{err}"))?;
-            (data, scene_path, Some(session))
+            (data, scene_path, Some(session), Some(scene))
         } else {
             let data = load_world(path).map_err(|err| format!("读取世界失败：{err}"))?;
-            (data, path.to_path_buf(), None)
+            (data, path.to_path_buf(), None, None)
         };
         let mut world = World::new();
         world
@@ -146,6 +151,7 @@ impl EditorState {
             registry: builtin_registry(),
             path: Some(scene_path),
             project,
+            scene,
             selected: None,
             dirty: false,
             play: None,
