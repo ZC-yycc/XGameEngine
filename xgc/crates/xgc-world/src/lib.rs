@@ -146,7 +146,10 @@ impl<T: Component> Column for Vec<T> {
     }
 
     fn state_field_names(&self) -> Vec<&'static str> {
-        T::state_fields().into_iter().map(|field| field.name).collect()
+        T::state_fields()
+            .into_iter()
+            .map(|field| field.name)
+            .collect()
     }
 
     fn clone_box(&self) -> Box<dyn Column> {
@@ -332,12 +335,9 @@ impl World {
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> EntityKey {
         let mut ids = B::component_ids();
         ids.sort_by_key(|id| id.0);
-        let unique = {
-            let mut copy = ids.clone();
-            copy.dedup();
-            copy.len()
-        };
-        assert_eq!(unique, ids.len(), "bundle 含重复组件");
+        let mut unique = ids.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "bundle 含重复组件");
 
         let archetype = self.archetype_for(&ids);
         let key = self.alloc_key();
