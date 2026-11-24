@@ -27,13 +27,14 @@ struct PlayerApp {
     /// 根运动轨道表：进入播放时建一次，每帧在系统 / 脚本之后应用（与 CLI 同序）。
     root_motion: RootMotionLibrary,
     input: PlayerInput,
+    scene: Option<String>,
     error: Option<String>,
     viewport: Option<Viewport>,
     frames: u64,
 }
 
 impl PlayerApp {
-    fn new(dir: &Path) -> Self {
+    fn new(dir: &Path, scene: Option<&str>) -> Self {
         let mut app = Self {
             dir: dir.to_path_buf(),
             simulation: None,
@@ -41,11 +42,12 @@ impl PlayerApp {
             runtime: None,
             root_motion: RootMotionLibrary::new(),
             input: PlayerInput::load(dir),
+            scene: scene.map(str::to_string),
             error: None,
             viewport: None,
             frames: 0,
         };
-        match crate::load_world_dir(dir) {
+        match crate::load_world_dir_scene(dir, scene) {
             Ok(data) => {
                 let mut world = World::new();
                 if let Err(err) = world.restore_world_data(&data) {
@@ -146,9 +148,14 @@ impl eframe::App for PlayerApp {
         }
         egui::TopBottomPanel::top("xgc-player-status").show(ctx, |ui| {
             let entities = self.simulation.as_ref().map_or(0, |sim| sim.world().len());
+            let scene = self
+                .scene
+                .as_deref()
+                .map_or("入口场景".to_string(), |scene| format!("场景 {scene}"));
             ui.label(format!(
-                "XGC Player · {} · {} 帧 · {} 实体",
+                "XGC Player · {} · {} · {} 帧 · {} 实体",
                 self.dir.display(),
+                scene,
                 self.frames,
                 entities
             ));
@@ -168,13 +175,20 @@ impl eframe::App for PlayerApp {
 }
 
 pub fn run(dir: &Path) -> eframe::Result {
+    run_scene(dir, None)
+}
+
+/// 打开窗口并加载指定场景；`None` 走项目入口。
+pub fn run_scene(dir: &Path, scene: Option<&str>) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),
         ..Default::default()
     };
+    let dir = dir.to_path_buf();
+    let scene = scene.map(str::to_string);
     eframe::run_native(
         "XGC Player",
         options,
-        Box::new(move |_cc| Ok(Box::new(PlayerApp::new(dir)))),
+        Box::new(move |_cc| Ok(Box::new(PlayerApp::new(&dir, scene.as_deref())))),
     )
 }

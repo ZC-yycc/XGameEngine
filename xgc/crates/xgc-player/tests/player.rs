@@ -103,7 +103,7 @@ fn player_applies_root_motion_in_the_same_order_as_the_cli() {
 }
 
 #[test]
-fn runs_project_entry_scene_from_manifest() {
+fn selects_a_named_scene_from_the_project_manifest() {
     use xgc_store::{save_project, ProjectContent, ProjectManifest};
 
     let dir = std::env::temp_dir().join(format!(
@@ -128,13 +128,20 @@ fn runs_project_entry_scene_from_manifest() {
         },
     ));
     xgc_store::save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();
+    let mut extra = World::new();
+    extra.spawn((Transform::default(),));
+    extra.spawn((Transform::default(),));
+    xgc_store::save_world(&dir.join("scenes/extra.json"), &extra.world_data()).unwrap();
     save_project(
         &dir.join("project.xgc"),
         &ProjectManifest {
             format_version: xgc_store::PROJECT_FORMAT_VERSION,
             name: "demo".to_string(),
             entry_scene: "scenes/main.json".to_string(),
-            scenes: vec!["scenes/main.json".to_string()],
+            scenes: vec![
+                "scenes/main.json".to_string(),
+                "scenes/extra.json".to_string(),
+            ],
             content: ProjectContent {
                 models: "Resources".to_string(),
                 textures: "Resources".to_string(),
@@ -153,5 +160,30 @@ fn runs_project_entry_scene_from_manifest() {
     assert_eq!(stats.frames, 3);
     assert_eq!(stats.entities, 1);
     assert_eq!(stats.scripts, 1);
+
+    let selected =
+        xgc_player::run_cooked_scene(&dir, 3, Some("extra")).expect("按文件名主干选场景");
+    assert_eq!(selected.entities, 2);
+    assert_eq!(selected.scripts, 0);
+
+    let exact = xgc_player::run_cooked_scene(&dir, 3, Some("scenes/extra.json")).unwrap();
+    assert_eq!(exact.entities, 2);
+
+    let missing = xgc_player::run_cooked_scene(&dir, 3, Some("nope")).unwrap_err();
+    assert!(missing.contains("没有场景"), "{missing}");
+
+    let cooked = std::env::temp_dir().join(format!(
+        "xgc_player_cooked_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&cooked).unwrap();
+    xgc_store::save_world(&cooked.join("world.json"), &world.world_data()).unwrap();
+    let cooked_scene = xgc_player::run_cooked_scene(&cooked, 1, Some("extra")).unwrap_err();
+    assert!(cooked_scene.contains("没有场景清单"), "{cooked_scene}");
+    std::fs::remove_dir_all(&cooked).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
