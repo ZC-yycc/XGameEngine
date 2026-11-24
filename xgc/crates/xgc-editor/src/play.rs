@@ -75,6 +75,9 @@ impl EditorState {
         for name in map.action_names() {
             runtime.set_action(&name, map.action_pressed(&name, state));
         }
+        for name in map.axis_names() {
+            runtime.set_axis(&name, map.axis_value(&name, state));
+        }
     }
 
     pub fn input_map(&self) -> Option<&InputMap> {

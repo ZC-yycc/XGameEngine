@@ -387,10 +387,92 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
             .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
+
+    register_script_state(lua, view, self_id)?;
+    crate::character_api::register(lua, commands, view, self_id)?;
     Ok(())
 }
 
-fn vector_table(lua: &Lua, value: [f32; 3]) -> mlua::Result<Table> {
+/// 脚本私有状态表：`state_get` / `state_set` / `state_get_or`。
+///
+/// 状态挂在每个脚本各自的 Lua 环境里（旧端也是每脚本一份），重载脚本会重置。
+fn register_script_state(lua: &Lua, view: &View, self_id: u64) -> Result<(), String> {
+    let globals = lua.globals();
+    let state = lua.create_table().map_err(|err| err.to_string())?;
+
+    let get_state = state.clone();
+    globals
+        .set(
+            "state_get",
+            lua.create_function(move |_, (_ctx, key): (mlua::Value, String)| {
+                get_state.get::<mlua::Value>(key)
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+    let get_or_state = state.clone();
+    globals
+        .set(
+            "state_get_or",
+            lua.create_function(
+                move |_, (_ctx, key, default): (mlua::Value, String, mlua::Value)| {
+                    let value = get_or_state.get::<mlua::Value>(key)?;
+                    Ok(match value {
+                        mlua::Value::Nil => default,
+                        value => value,
+                    })
+                },
+            )
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+    let set_state = state;
+    globals
+        .set(
+            "state_set",
+            lua.create_function(
+                move |_, (_ctx, key, value): (mlua::Value, String, mlua::Value)| {
+                    set_state.set(key, value)
+                },
+            )
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+    // `pos(ctx)` 与 `log(ctx, msg)` 是旧脚本最常用的两个全局函数；`xgc.pos`
+    // 不存在，别把新 API 的命名习惯带进来。
+    let pos_view = Rc::clone(view);
+    globals
+        .set(
+            "pos",
+            lua.create_function(move |lua, _ctx: mlua::Value| {
+                let view = pos_view.borrow();
+                let position = view
+                    .entity(self_id)
+                    .map(|entity| entity.position)
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                vector_table(lua, position)
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+    globals
+        .set(
+            "log",
+            lua.create_function(|_, (_ctx, message): (mlua::Value, String)| {
+                println!("[lua] {message}");
+                Ok(())
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn vector_table(lua: &Lua, value: [f32; 3]) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("x", value[0])?;
     table.set("y", value[1])?;
@@ -451,7 +533,7 @@ fn push_layers_text(commands: &Commands, id: u64, text: String) {
     });
 }
 
-fn push_set(
+pub(crate) fn push_set(
     commands: &Commands,
     id: u64,
     component: xgc_world::ComponentId,

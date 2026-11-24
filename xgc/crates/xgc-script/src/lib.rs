@@ -13,6 +13,7 @@ use mlua::{
 use xgc_base::EntityId;
 use xgc_world::{builtin_registry, Command, Transform, Value, World};
 
+mod character_api;
 mod component_data;
 mod legacy;
 mod lifecycle;

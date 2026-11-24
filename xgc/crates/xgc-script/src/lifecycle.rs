@@ -54,6 +54,26 @@ impl LuaHost {
         }
         self.call_hook("on_update", dt)
     }
+    /// 旧生命周期：`fixed_update(ctx)`，每个物理固定步调用一次。
+    ///
+    /// 与 `update` 分开是因为两个回调的频率语义不同：`update` 对应渲染帧，
+    /// `fixed_update` 对应固定步长。脚本只定义其中一个时另一个保持 no-op。
+    pub fn fixed_legacy(&self) -> Result<bool, String> {
+        let value: LuaValue = self
+            .lua
+            .globals()
+            .get("fixed_update")
+            .map_err(|err| format!("读取 fixed_update 失败：{err}"))?;
+        let LuaValue::Function(function) = value else {
+            return Ok(false);
+        };
+        self.reset_budget();
+        let ctx = self.legacy_context()?;
+        function
+            .call::<()>(ctx)
+            .map_err(|err| format!("Lua 钩子 fixed_update 失败：{err}"))?;
+        Ok(true)
+    }
 }
 
 impl std::fmt::Debug for LuaHost {

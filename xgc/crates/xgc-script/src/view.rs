@@ -28,6 +28,10 @@ pub struct EntityView {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub velocity: [f32; 3],
+    /// 是否有 `core.velocity`；角色脚本第一次移动时可能要先补这个组件。
+    pub has_velocity: bool,
+    /// 角色控制器是否贴地（没有 `physics.character` 的实体恒为 false）。
+    pub grounded: bool,
     pub anim_parameters: Option<String>,
     /// `animation.layers` 的 RON 层栈（脚本按层名改权重 / 参数）。
     pub anim_layers: Option<String>,
@@ -48,6 +52,8 @@ pub struct ScriptView {
     pub time: f32,
     pub entities: Vec<EntityView>,
     pub actions: BTreeMap<String, bool>,
+    /// 模拟量轴：`axis(ctx, "MoveX")` 读这里。与动作一样由宿主每帧写入。
+    pub axes: BTreeMap<String, f32>,
     /// 下一帧可用的实体 ID（每帧从 `WorldData::next_id` 重置）。
     ///
     /// 旧端 `ui_spawn` 用 `EntityId::new()` 单调分配；这里用世界计数器派生，

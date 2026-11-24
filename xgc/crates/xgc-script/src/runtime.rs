@@ -108,11 +108,15 @@ impl ScriptRuntime {
                 None
             };
             let update_error = entry.host.update_legacy(dt).err();
+            let fixed_error = entry.host.fixed_legacy().err();
             pending.extend(entry.host.take_commands());
             if let Some(err) = start_error {
                 self.note_error(&err);
             }
             if let Some(err) = update_error {
+                self.note_error(&err);
+            }
+            if let Some(err) = fixed_error {
                 self.note_error(&err);
             }
         }
@@ -190,6 +194,7 @@ impl ScriptRuntime {
                         }
                     }
                     0x0102 => {
+                        row.has_velocity = true;
                         for (field, value) in &component.fields {
                             if let ("linear", Value::Vec3(value)) = (field.as_str(), value) {
                                 row.velocity = [value[0] as f32, value[1] as f32, value[2] as f32];
@@ -200,6 +205,13 @@ impl ScriptRuntime {
                         for (field, value) in &component.fields {
                             if let ("value", Value::String(value)) = (field.as_str(), value) {
                                 row.name = value.clone();
+                            }
+                        }
+                    }
+                    0x0402 => {
+                        for (field, value) in &component.fields {
+                            if let ("grounded", Value::Bool(value)) = (field.as_str(), value) {
+                                row.grounded = *value;
                             }
                         }
                     }
@@ -314,5 +326,14 @@ impl ScriptRuntime {
 
     pub fn clear_actions(&mut self) {
         self.view.borrow_mut().actions.clear();
+    }
+
+    /// 外部输入桥：设置模拟量轴，脚本 `axis` 下一帧可见。
+    pub fn set_axis(&mut self, axis: &str, value: f32) {
+        self.view.borrow_mut().axes.insert(axis.to_string(), value);
+    }
+
+    pub fn clear_axes(&mut self) {
+        self.view.borrow_mut().axes.clear();
     }
 }

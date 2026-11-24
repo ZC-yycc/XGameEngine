@@ -94,7 +94,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-audio/src/lib.rs` | cpal 音频设备输出：设备枚举、PCM 重采样、F32 / I16 输出队列、`play_clip` |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载 |
-| `crates/xgc-script/src/legacy.rs` | 旧脚本 API：`update(ctx)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at`（俯仰必须放欧拉角 X 分量，放 Z 会变滚转）/ `velocity` / `set_anim_param` / `ui_*` / `action_pressed`；UI 颜色 setter 的 sRGB 参数经唯一的 `srgb_to_linear()`（同旧端 0.04045 分段，alpha 不转）换算后写入组件，少这一步会在 sRGB 目标上二次编码；层栈 setter（`set_anim_layer_weight` / `set_anim_layer_param`）真写 `animation.layers`，同帧多次改层栈在命令队列里合并；UI 布局 / 文本 / 样式绑定已拆到 `ui_api.rs`（见下）；音频等暂无实现为 no-op |
+| `crates/xgc-script/src/legacy.rs` | 旧脚本钩子与 API：`update(ctx)` / `fixed_update(ctx)`（每个固定步一次，dt 仍走 `delta(ctx)`）/ `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at`（俯仰必须放欧拉角 X 分量，放 Z 会变滚转）/ `velocity` / `set_anim_param` / `ui_*` / `action_pressed` / `axis` / `character_*` / `state_*` / `pos` / `log`；`character_simple_move` 遇到只有 `physics.character` 的旧实体先补 `core.velocity`（`AddComponent` 走 replace，旧 `EntityKey` 会失效，按 `EntityId` 重新取）；UI 颜色 setter 的 sRGB 参数经唯一的 `srgb_to_linear()`（同旧端 0.04045 分段，alpha 不转）换算后写入组件，少这一步会在 sRGB 目标上二次编码；层栈 setter（`set_anim_layer_weight` / `set_anim_layer_param`）真写 `animation.layers`，同帧多次改层栈在命令队列里合并；UI 布局 / 文本 / 样式绑定已拆到 `ui_api.rs`（见下）；音频等暂无实现为 no-op |
 | `crates/xgc-script/src/ui_api.rs` | UI 脚本布局 / 文本 / 样式 / 图片 API：29 个函数（布局 5 / 文本 4 / 样式 2 / 状态 2 / 读取 4 / 交互 2 / 图片 3 / 运行时创建 4）；焦点在 `ui_focus_api.rs`、创建在 `ui_spawn_api.rs`、默认值在 `component_data.rs`；语义照旧端 `ui_ctx.rs`：`ui_set_size` = `offset_min + size`、`ui_set_pos` 保持尺寸、文本尺寸 clamp 1..512、半径 max 0、对齐小写后只认 left/center|centre|middle/right、颜色 sRGB→线性（`srgb_to_linear`，alpha 不转）、缺 `ui.element` 一律 no-op；同帧多次写先看命令队列未结算 `SetField` 再退回快照 |
 | `crates/xgc-script/tests/ui_layout.rs` | UI setter 回归：size 保持左上角 / 同帧 size+pos 两种顺序都成立 / 文本样式与 getter 同帧可见 / 缺元素与不存在 id no-op |
 | `crates/xgc-script/src/ui_focus_api.rs` | UI 焦点三件套：`ui_focused` / `ui_set_focus` / `ui_clear_focus`；只写 `ui.interaction.focused`（0x0603，`SetField` 帧末结算），目标必须是 Button + visible + interactable 否则彻底 no-op，排他 = 同帧给其它 UI 实体写 false |
@@ -103,7 +103,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/tests/ui_image_fill.rs` | 图片渲染回归：tint 乘色 / fill 从左侧裁 / fill=0 不画（GPU lock） |
 | `crates/xgc-render/tests/ui_border.rs` | UI 覆盖层 SDF 回归：圆角描边用边框色 / 透明背景 + 描边仍绘制 / 圆角边缘有抗锯齿过渡（像素介于空与实心之间） |
 | `crates/xgc-script/tests/anim_layers.rs` | 脚本混合层回归：同帧权重 + 参数都落地（命令队列合并）/ 缺层与非有限值静默 |
-| `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` 生命周期分派与回退 |
+| `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` / `fixed_update(ctx)` 生命周期分派与回退；每次调用前 `reset_budget()`，`fixed_update` 每个固定步一次且不传 dt（dt 走 `delta(ctx)`） |
+| `crates/xgc-script/src/character_api.rs` | 角色脚本 API：`axis`（读 `ScriptView.axes`，编辑器按 `input.ron` 的轴桥）、`character_is_grounded` / `character_velocity`（读快照）、`character_simple_move`（写 `Velocity.linear` 水平两轴，缺组件先 `AddComponent`，同帧查队列去重）、`character_jump`（仅 grounded 时写 `jump_velocity` + `jump`）；写操作全部走帧末命令队列 |
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载；`take_error()` 把本帧第一处脚本错误交给宿主（只打 stderr 时宿主看不到失败） |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 |
 | `crates/xgc-editor/src/play.rs` | Play / Play Scripts / input.ron 动作桥 / step / stop |
