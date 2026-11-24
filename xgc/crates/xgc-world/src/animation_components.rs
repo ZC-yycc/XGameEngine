@@ -2,9 +2,16 @@
 
 use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
 
+use crate::AnimEvent;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Animator {
     pub clip: String,
+    /// 作者写下的动画事件表；空 = 没有事件。
+    ///
+    /// 它是配置而不是运行时状态：非空时进 `WorldData`，但
+    /// `World::animation_events` 的瞬态队列不进快照 / `state_hash`。
+    pub events: Vec<AnimEvent>,
     pub speed: f32,
     pub looping: bool,
     pub autoplay: bool,
@@ -44,6 +51,7 @@ impl Default for Animator {
     fn default() -> Self {
         Self {
             clip: String::new(),
+            events: Vec::new(),
             speed: 1.0,
             looping: true,
             autoplay: true,
@@ -85,6 +93,8 @@ impl Component for Animator {
         vec![
             FieldDescriptor::new("clip", FieldType::String, Value::String(String::new()))
                 .doc("glTF 动画剪辑名；空 = 绑定姿势"),
+            FieldDescriptor::new("events", FieldType::String, Value::String(String::new()))
+                .doc("动画事件 RON 表（time + name）；空 = 没有事件"),
             FieldDescriptor::new("speed", FieldType::F32, Value::F64(1.0)).doc("播放速度倍率"),
             FieldDescriptor::new("looping", FieldType::Bool, Value::Bool(true)).doc("是否循环"),
             FieldDescriptor::new("autoplay", FieldType::Bool, Value::Bool(true))
@@ -147,9 +157,25 @@ impl Component for Animator {
         ]
     }
 
+    /// `events` 是作者配置，不是运行时状态：保留在 `fields()`（落盘 / schema /
+    /// 校验都要它），但不进 `state_hash`，否则给任意 Animator 加一行事件都会
+    /// 让验收参考哈希整体漂移。
+    fn state_fields() -> Vec<FieldDescriptor> {
+        Self::fields()
+            .into_iter()
+            .filter(|field| field.name != "events")
+            .collect()
+    }
+
     fn get_field(&self, field: &str) -> Option<Value> {
         match field {
             "clip" => Some(Value::String(self.clip.clone())),
+            // 空事件表刻意不落字段：老场景 / 老验收参考的字节形态不变，
+            // 只有真的配了事件才多出这一项。
+            "events" if !self.events.is_empty() => {
+                Some(Value::String(ron::to_string(&self.events).ok()?))
+            }
+            "events" => None,
             "speed" => Some(Value::F64(f64::from(self.speed))),
             "looping" => Some(Value::Bool(self.looping)),
             "autoplay" => Some(Value::Bool(self.autoplay)),
@@ -200,6 +226,24 @@ impl Component for Animator {
                         )
                     })?
                     .to_string();
+                Ok(())
+            }
+            "events" => {
+                let text = value
+                    .as_string()
+                    .ok_or_else(|| {
+                        format!(
+                            "animation.animator.events 期望 string，得到 {}",
+                            value.type_name()
+                        )
+                    })?
+                    .trim();
+                if text.is_empty() {
+                    self.events.clear();
+                    return Ok(());
+                }
+                self.events = ron::from_str::<Vec<AnimEvent>>(text)
+                    .map_err(|error| format!("animation.animator.events 不是事件 RON：{error}"))?;
                 Ok(())
             }
             "speed" => {

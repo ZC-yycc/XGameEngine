@@ -13,6 +13,8 @@
 mod error;
 mod scenario;
 
+mod animation_events;
+
 pub use error::SimError;
 pub use scenario::{FrameCommands, FrameRecord, Scenario, Trace, TRACE_FORMAT_VERSION};
 

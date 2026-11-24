@@ -15,7 +15,7 @@ fn additive_layer_has_its_own_clock() {
             ..Animator::default()
         },
     ));
-    let mut system = AnimatorSystem;
+    let mut system = AnimatorSystem::default();
     system.run(&mut world, 1.0 / 60.0);
     let animator = world.get::<Animator>(entity).unwrap();
     // 基础剪辑 speed 缺省 1.0；叠加层按自己的 1.5 推进。
@@ -39,7 +39,7 @@ fn additive_clock_keeps_running_when_base_speed_is_zero() {
             ..Animator::default()
         },
     ));
-    let mut system = AnimatorSystem;
+    let mut system = AnimatorSystem::default();
     system.run(&mut world, 0.5);
     let animator = world.get::<Animator>(entity).unwrap();
     assert_eq!(animator.time, 0.0);
@@ -74,7 +74,7 @@ fn empty_clip_zero_speed_or_no_autoplay_freeze_the_additive_clock() {
             ..Animator::default()
         },
     ));
-    let mut system = AnimatorSystem;
+    let mut system = AnimatorSystem::default();
     system.run(&mut world, 1.0);
     for entity in [empty, stopped, manual] {
         assert_eq!(world.get::<Animator>(entity).unwrap().additive_time, 0.0);

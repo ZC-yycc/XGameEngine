@@ -100,6 +100,28 @@ impl LuaHost {
             .map_err(|err| format!("Lua 钩子 {hook} 失败：{err}"))?;
         Ok(true)
     }
+
+    /// 旧生命周期：`on_anim_event(ctx, name)`。
+    ///
+    /// 事件由 `AnimatorSystem` 在动画时钟推进后写入 `World` 的瞬态队列；宿主
+    /// 阶段在动画之前，所以脚本在**下一个固定步**的 update/fixed_update 之后
+    /// 收到它（一帧延迟，见 `AnimatorSystem` 文档）。
+    pub fn anim_event_legacy(&self, name: &str) -> Result<bool, String> {
+        let value: LuaValue = self
+            .lua
+            .globals()
+            .get("on_anim_event")
+            .map_err(|err| format!("读取 on_anim_event 失败：{err}"))?;
+        let LuaValue::Function(function) = value else {
+            return Ok(false);
+        };
+        self.reset_budget();
+        let ctx = self.legacy_context()?;
+        function
+            .call::<()>((ctx, name.to_string()))
+            .map_err(|err| format!("Lua 钩子 on_anim_event 失败：{err}"))?;
+        Ok(true)
+    }
 }
 
 impl std::fmt::Debug for LuaHost {

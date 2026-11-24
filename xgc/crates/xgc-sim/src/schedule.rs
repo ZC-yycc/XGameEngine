@@ -154,7 +154,7 @@ impl Schedule {
         // 宿主阶段在这里：脚本本帧写的动画参数，状态机同帧就要看到（旧端
         // `Update` 钩子先于动画 tick）。下面这些系统都声明 runs_after_host()。
         schedule.add(AnimationStateSystem);
-        schedule.add(AnimatorSystem);
+        schedule.add(AnimatorSystem::default());
         schedule.add(AnimationPlaybackSystem::default());
         schedule.add(AnimationLayerSystem);
         schedule.add(SkeletonPoseSystem);

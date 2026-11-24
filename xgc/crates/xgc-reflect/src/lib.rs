@@ -36,6 +36,16 @@ pub trait Component: Any + Clone + Send + Sync {
     fn fields() -> Vec<FieldDescriptor> {
         Vec::new()
     }
+
+    /// 参与 `World::state_hash` 的字段（缺省 = 全部字段）。
+    ///
+    /// 作者数据（例如 `animation.animator.events`）不是运行时状态：把它从
+    /// 这里排掉，才能让「只加配置、不改运行时」的改动不移动验收参考哈希。
+    /// 序列化 / schema / 校验仍然走 [`Component::fields`]。
+    fn state_fields() -> Vec<FieldDescriptor> {
+        Self::fields()
+    }
+
     fn doc() -> &'static str {
         ""
     }

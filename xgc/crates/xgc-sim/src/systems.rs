@@ -7,6 +7,7 @@ use xgc_world::{
 };
 
 use super::{System, SystemAccess};
+use crate::animation_events::crossed_events;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PhysicsSystem {
@@ -125,8 +126,19 @@ impl System for CharacterJumpSystem {
 }
 
 /// 动画时钟：自动播放的 Animator 按 speed 推进，duration 有效时循环 / 截断。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AnimatorSystem;
+///
+/// 时钟推进后立刻做一次事件穿越判定（`from → to` 用**钳制前**的原始时间），
+/// 命中写进 `World` 的瞬态动画事件队列。宿主阶段在动画系统之前，所以这批
+/// 事件由**下一个固定步**的宿主消费——与旧端"动画 tick 后当帧派发"差一帧。
+/// 调度里没有第二个宿主阶段；把动画系统挪到宿主前会反过来打乱脚本驱动的
+/// 状态机时序，代价更大，因此接受这一帧延迟并写进不变量。
+#[derive(Clone, Debug, Default)]
+pub struct AnimatorSystem {
+    /// 每帧复用的命中缓冲；稳态不分配。
+    fired: Vec<(xgc_base::EntityKey, String)>,
+    /// 每个实体复用的下标缓冲；稳态不分配。
+    indices: Vec<usize>,
+}
 
 impl System for AnimatorSystem {
     fn runs_after_host(&self) -> bool {
@@ -145,11 +157,18 @@ impl System for AnimatorSystem {
     }
 
     fn run(&mut self, world: &mut World, dt: f32) {
-        world.for_each_mut::<Animator>(|_, animator| {
+        // 旧的瞬态事件已被本步的宿主消费完（宿主在动画之前），这里才是
+        // "安全清空点"：清早了宿主看不到，清晚了下一帧会重复派发。
+        world.clear_animation_events();
+        let mut fired = std::mem::take(&mut self.fired);
+        let mut indices = std::mem::take(&mut self.indices);
+        fired.clear();
+        world.for_each_mut::<Animator>(|key, animator| {
             if !animator.autoplay {
                 return;
             }
-            animator.time += animator.speed * dt;
+            let from = animator.time;
+            let to = from + animator.speed * dt;
             // 叠加层有自己的时钟：基础层速度被冻住时呼吸 / 弹跳仍按自己的速度走，
             // 与旧端 `AnimatorSystem` 的 additive 通道一致。
             if !animator.additive_clip.is_empty() && animator.additive_speed > 0.0 {
@@ -171,12 +190,39 @@ impl System for AnimatorSystem {
             }
             if animator.duration > 0.0 {
                 if animator.looping {
-                    animator.time = animator.time.rem_euclid(animator.duration);
+                    animator.time = to.rem_euclid(animator.duration);
                 } else {
-                    animator.time = animator.time.min(animator.duration);
+                    animator.time = to.min(animator.duration);
+                }
+            } else {
+                animator.time = to;
+            }
+            if animator.events.is_empty() {
+                return;
+            }
+            indices.clear();
+            crossed_events(
+                &animator.events,
+                from,
+                to,
+                animator.duration,
+                animator.looping,
+                from == 0.0,
+                &mut indices,
+            );
+            for &index in &indices {
+                if let Some(event) = animator.events.get(index) {
+                    fired.push((key, event.name.clone()));
                 }
             }
         });
+        for (key, name) in fired.drain(..) {
+            if let Some(entity) = world.entity(key) {
+                world.push_animation_event(xgc_world::FiredAnimEvent { entity, name });
+            }
+        }
+        self.fired = fired;
+        self.indices = indices;
     }
 }
 

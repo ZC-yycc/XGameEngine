@@ -157,3 +157,10 @@ fn default_range() -> f32 {
 fn default_casts_shadow() -> bool {
     true
 }
+
+impl super::World {
+    /// 场景级环境（光 / 环境光）；不是实体，跟着世界一起存取。
+    pub fn environment(&self) -> &SceneEnvironment {
+        &self.environment
+    }
+}

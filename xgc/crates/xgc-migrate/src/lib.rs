@@ -212,7 +212,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         let mut animator = None;
         let mut animator_additive = None;
         let mut animator_root_motion = None;
-        let mut animator_layers = String::new();
+        let (mut animator_layers, mut animator_events) = (String::new(), String::new());
         let mut character = None;
         let mut ui = None;
         let mut particle = None;
@@ -305,6 +305,8 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                         None => None,
                     };
                     animator_additive = old.additive.clone();
+                    animator_events = old_animator::events_to_component_field(&old.events)
+                        .map_err(MigrationError::Parse)?;
                     animator_layers = old_animator::layers_to_component_field(&old.layers)
                         .map_err(MigrationError::Parse)?;
                     if let Some(root) = &old.root_motion {
@@ -390,7 +392,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
         if let Some((clip, speed, looping, autoplay, fade_time, machine)) = animator {
             let additive = animator_additive.unwrap_or_default();
             let root_motion = animator_root_motion.unwrap_or_default();
-            let layers = animator_layers.clone();
+            let (layers, events) = (animator_layers.clone(), animator_events);
             let position = old.transform.position.to_array();
             let rotation = old.transform.rotation.to_array();
             let scale = old.transform.scale.to_array();
@@ -408,6 +410,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
                     additive_looping: additive.looping,
                     root_motion,
                     layers,
+                    events,
                     position: [
                         f64::from(position[0]),
                         f64::from(position[1]),

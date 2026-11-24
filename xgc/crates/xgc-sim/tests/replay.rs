@@ -355,7 +355,7 @@ fn animation_system_advances_and_loops() {
         ..Animator::default()
     },));
     let mut schedule = Schedule::new();
-    schedule.add(AnimatorSystem);
+    schedule.add(AnimatorSystem::default());
     schedule.run(&mut world, 0.3);
     assert!((world.get::<Animator>(entity).unwrap().time - 0.6).abs() < 1e-5);
     schedule.run(&mut world, 0.3);

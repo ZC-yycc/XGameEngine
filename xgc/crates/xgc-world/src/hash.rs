@@ -20,7 +20,7 @@ impl Archetype {
             components.sort_by_key(|(component, _)| component.0);
             components
                 .into_iter()
-                .map(|(component, column)| (*component, column.field_names()))
+                .map(|(component, column)| (*component, column.state_field_names()))
                 .collect()
         });
         // 布局在第一次哈希时定型：archetype 的列只在 spawn / 快照恢复时整份建好，

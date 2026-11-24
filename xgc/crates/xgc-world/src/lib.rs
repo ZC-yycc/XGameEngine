@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use xgc_base::{EntityId, EntityKey};
 pub use xgc_reflect::Component;
 mod animation_components;
+mod animation_events;
 mod character_components;
 mod collision;
 mod command;
@@ -33,6 +34,7 @@ mod state_machine_components;
 mod ui_components;
 mod validate;
 pub use animation_components::Animator;
+pub use animation_events::{AnimEvent, FiredAnimEvent};
 pub use character_components::{
     CharacterController, HEIGHT_DEFAULT, HEIGHT_MAX, RADIUS_DEFAULT, RADIUS_MAX, RADIUS_MIN,
     SKIN_WIDTH_DEFAULT, SKIN_WIDTH_MAX, SKIN_WIDTH_MIN, SLOPE_LIMIT_DEFAULT, SLOPE_LIMIT_MAX,
@@ -75,9 +77,7 @@ pub use state_machine_components::{
 };
 pub use ui_components::{UiElement, UiInput, UiInteraction, UiLayout};
 pub use xgc_reflect::{ComponentId, Value};
-/// 列：任意组件的连续存储。只暴露类型擦除后的最小操作。
-///
-/// 这是 crate 内部接口；`Bundle` 的签名需要它，所以公开但不对使用方承诺稳定性。
+/// 列：任意组件的连续存储；crate 内部接口，公开但不承诺稳定性。
 #[doc(hidden)]
 pub trait Column: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
@@ -91,6 +91,8 @@ pub trait Column: Any + Send + Sync {
     fn set_field(&mut self, row: usize, field: &str, value: &Value) -> Result<(), String>;
     fn validate_field(&self, row: usize, field: &str, value: &Value) -> Result<(), String>;
     fn field_names(&self) -> Vec<&'static str>;
+    /// 只给 `state_hash` 用的字段名：作者数据字段可以在这里排除。
+    fn state_field_names(&self) -> Vec<&'static str>;
     fn clone_box(&self) -> Box<dyn Column>;
     fn empty_like(&self) -> Box<dyn Column>;
     fn push_from(&mut self, source: &dyn Column, row: usize);
@@ -141,6 +143,10 @@ impl<T: Component> Column for Vec<T> {
 
     fn field_names(&self) -> Vec<&'static str> {
         T::fields().into_iter().map(|field| field.name).collect()
+    }
+
+    fn state_field_names(&self) -> Vec<&'static str> {
+        T::state_fields().into_iter().map(|field| field.name).collect()
     }
 
     fn clone_box(&self) -> Box<dyn Column> {
@@ -287,9 +293,10 @@ pub struct World {
     revision: u64,
     /// 场景级环境（光 / 环境光）：不是实体，跟着世界一起存取。
     environment: SceneEnvironment,
-    /// 本帧碰撞事件。**瞬态**：不进 `WorldData`、不进 `state_hash`、不进快照；
-    /// 由物理系统写入，宿主（脚本）在本帧结算后读取。
+    /// 本帧碰撞事件（瞬态；不进 `WorldData` / `state_hash` / 快照）。
     collision_events: Vec<CollisionEvent>,
+    /// 本步命中的动画事件（瞬态；`step_with` 每步开头清空）。
+    animation_events: Vec<FiredAnimEvent>,
 }
 
 impl Default for World {
@@ -311,13 +318,10 @@ impl World {
             revision: 0,
             environment: SceneEnvironment::default(),
             collision_events: Vec::new(),
+            animation_events: Vec::new(),
         };
         world.register_builtin_components();
         world
-    }
-
-    pub fn environment(&self) -> &SceneEnvironment {
-        &self.environment
     }
 
     /// 换环境不推进 revision：它是场景配置，不是实体状态，`state_hash` 也不含它。

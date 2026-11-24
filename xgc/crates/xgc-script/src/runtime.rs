@@ -137,6 +137,24 @@ impl ScriptRuntime {
                 self.note_error(&err);
             }
         }
+        // 动画事件由 `AnimatorSystem` 在上一步末尾写入（动画在宿主之后）；宿主
+        // 在这里消费，所以脚本看到的是一步之前跨过的事件——CLI / 编辑器 Play
+        // 的固定步是 60 Hz，差一帧不影响"按事件名做反应"的语义。
+        let anim_events: Vec<_> = world
+            .animation_events()
+            .iter()
+            .map(|event| (event.entity, event.name.clone()))
+            .collect();
+        for (entity, name) in anim_events {
+            let result = self.entries.get_mut(&entity).map(|entry| {
+                let result = entry.host.anim_event_legacy(&name);
+                pending.extend(entry.host.take_commands());
+                result
+            });
+            if let Some(Err(err)) = result {
+                self.note_error(&err);
+            }
+        }
         if pending.is_empty() {
             return;
         }

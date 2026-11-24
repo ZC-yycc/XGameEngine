@@ -9,8 +9,9 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use xgc_world::{
-    layers_to_ron, AnimLayer, AnimationLayers, AnimationState, Animator, Component, ComponentData,
-    LayerMode, RootMotion, StateDef, StateMachine, TransitionCondition, TransitionDef, Value,
+    layers_to_ron, AnimEvent, AnimLayer, AnimationLayers, AnimationState, Animator, Component,
+    ComponentData, LayerMode, RootMotion, StateDef, StateMachine, TransitionCondition,
+    TransitionDef, Value,
 };
 
 /// 旧 Animator 本体（`components.entries[].data: Animator(...)`）。
@@ -31,9 +32,20 @@ pub struct OldAnimator {
     /// 根运动：节点名 + 参与轴；旧端缺省不写，写了才迁。
     #[serde(default)]
     pub root_motion: Option<OldRootMotion>,
+    /// 作者写在 Animator 上的动画事件；旧端缺省不写。
+    #[serde(default)]
+    pub events: Vec<OldAnimEvent>,
     /// 混合层栈；旧端缺省不写（空 = 没有层）。
     #[serde(default)]
     pub layers: Vec<OldLayer>,
+}
+
+/// 旧 `Animator.events` 的一条：从剪辑 0 起算的秒数 + 事件名。
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct OldAnimEvent {
+    pub time: f32,
+    pub name: String,
 }
 
 /// 旧 `Animator.root_motion`：显式节点名 + 参与根运动的轴。
@@ -148,6 +160,18 @@ impl OldLayer {
         }
         Ok(layer)
     }
+}
+
+/// 旧事件表 → 组件字符串（空表返回空串 = 不写 `events` 字段）。
+pub fn events_to_component_field(events: &[OldAnimEvent]) -> Result<String, String> {
+    if events.is_empty() {
+        return Ok(String::new());
+    }
+    let migrated: Vec<AnimEvent> = events
+        .iter()
+        .map(|event| AnimEvent::new(event.name.clone(), event.time))
+        .collect();
+    ron::ser::to_string(&migrated).map_err(|err| format!("动画事件序列化失败：{err}"))
 }
 
 /// 旧层栈 → 组件字符串（空栈返回空串 = 组件不生成）。
@@ -273,6 +297,8 @@ pub struct AnimatorInput {
     pub additive_speed: f32,
     pub additive_looping: bool,
     pub root_motion: String,
+    /// 动画事件 RON；空 = 不写 `events` 字段（老场景字节形态不变）。
+    pub events: String,
     /// 混合层栈 RON；空 = 不生成 `animation.layers`。
     pub layers: String,
 }
@@ -312,6 +338,11 @@ pub fn animator_components(input: AnimatorInput) -> Vec<ComponentData> {
             ("root_motion".to_string(), Value::String(input.root_motion)),
         ],
     }];
+    if !input.events.is_empty() {
+        components[0]
+            .fields
+            .push(("events".to_string(), Value::String(input.events)));
+    }
     if !input.layers.is_empty() {
         components.push(ComponentData {
             component: AnimationLayers::ID,

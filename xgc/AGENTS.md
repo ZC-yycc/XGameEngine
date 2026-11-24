@@ -30,7 +30,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 |---|---|
 | `crates/xgc-base/src/lib.rs` | `EntityId` / `EntityKey` / `Tick` / `Diagnostic` |
 | `crates/xgc-base/src/diagnostics.rs` | 诊断码常量 + `engine.diagnostics` 目录 |
-| `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、`Value`、动态字段读写 |
+| `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、`Value`、动态字段读写；`state_fields()` 缺省 = `fields()`，只用于 `state_hash`，作者数据字段可在此排除 |
 | `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 / `reserve_entity_ids` |
 | `crates/xgc-world/src/query.rs` | 双 / 三组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/parts.rs` | 跨系统并行写视图 `WriteSet` / `extract_writes` / `restore_writes` |
@@ -43,7 +43,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/state_machine_components.rs` | 动画状态机组件 `animation.state`（machine / state / time / parameters）+ 机器类型 `StateMachine` / `StateDef` / `TransitionDef` / `TransitionCondition` / `parse_machine` / `parse_parameters`（sim / migrate 共用，一个概念一个类型） |
 | `crates/xgc-world/src/layer_components.rs` | 动画混合层组件 `animation.layers`：RON 层栈（`AnimLayer`：name / mode(Additive|Override) / clip / weight / speed / looping / fade_time / mask / machine + 运行时 state / time / parameters / fade_*），`parse_layers` / `layers_to_ron` / `find_layer` / `set_layer_parameter`；mask 是沿 parent 链匹配的节点名子树根名单 |
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source`（含 bus）/ `audio.listener` / `audio.gain` / `audio.mixer` |
-| `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / time / blend_from / blend_elapsed / blend_duration / additive_clip / additive_weight / additive_speed / additive_looping / additive_time / root_motion） |
+| `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / time / blend_from / blend_elapsed / blend_duration / additive_clip / additive_weight / additive_speed / additive_looping / additive_time / root_motion / events）；`events` 空表不落字段，老场景字节形态不变；`events` 走 `state_fields()` 排除，不进 `state_hash` |
 | `crates/xgc-world/src/root_motion.rs` | 根运动纯函数：`RootMotion`（显式节点名 + 轴开关，RON 配置）、`RootMotionTrack` 采样与循环展开轨迹、`root_motion_delta`（fade 混合两段增量）、`to_world_delta` / `to_local_position`（TRS 近似，无剪切项） |
 | `crates/xgc-world/src/character_components.rs` | 角色组件：`physics.character`；缺省值（1.8 / 0.3 / 0.35 / 45 / 0.02 / 0.3）与旧端 `xgame_core` 逐项对齐，`sanitized()` / `half_height()` / `center_height()` 是唯一消毒与几何派生真相源（`character_kcc` 全部委托）；改常量记得同步 `fields()` 的 schema 缺省值（有 `schema_defaults_match_the_component_defaults` 守着），区间常量之间的咬合由编译期 `const _: ()` 断言守着 |
 | `crates/xgc-world/src/ui_components.rs` | UI 组件：`ui.element` / `ui.layout` / `ui.interaction` / `ui.input`；`background` / `border_color` / `text_color` 存**线性** RGB（旧脚本 UI 颜色 setter 的 sRGB 在入口换算；通用字段写入按线性原值落库；渲染端写 sRGB 目标由硬件编码） |
@@ -53,13 +53,15 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/physics_components.rs` | `physics.body`：类型 / 形状 / 摩擦 / 弹性 / 质量 / 传感器；`BodyKind` / `PhysicsBody::kind()` / `is_dynamic()` 是「什么算动态体」的唯一判据（`rapier_world` 建体与回写、`GravitySystem`、`GroundCollisionSystem`、`AabbCollisionSystem` 共用，未知字符串按旧端兜底一律当 Dynamic） |
 | `crates/xgc-world/src/slope_components.rs` | `physics.slope`：沿 +X 线性抬升的坡面；`rapier_world/slopes.rs` 按同一参数给坡面建静态楔形薄壳碰撞体（`SLOPE_THICKNESS = 0.1`、上表面与 `height_at` 重合，ECS 与 rapier 看同一个坡面）；`degrees()` / `base_x_at()` 是角色坡限判定的唯一口径（`base_x_at` 结果夹进坡面 X 跨度，`rise <= 0` 的下坡一律当地面、没有立面） |
 | `crates/xgc-world/src/collision.rs` | 瞬态碰撞事件 `CollisionEvent { entity, other, enter }`：一对接触给双方各一条有向事件；World 用 `collision_events` 存本步事件，`Simulation::step_with` 每步开头清空。**不进 `WorldData` / 快照 / `state_hash`**（只服务脚本钩子，回放对表不应看到它） |
+| `crates/xgc-world/src/animation_events.rs` | 瞬态动画事件 `FiredAnimEvent { entity, name }`：`Animator.events` 由 `AnimatorSystem` 跨帧穿越判定后写入，脚本宿主下一步消费；**不进 `WorldData` / 快照 / `state_hash`**。`AnimEvent { time, name }` 是作者数据（挂在 `animation.animator` 的 `events` 字段，空表不落盘） |
 | `crates/xgc-world/src/command.rs` | `Command` / `Plan` / `Applied`：plan / apply / revert / Replace（含组件增删与计划内预测集合） |
 | `crates/xgc-world/src/command/replace.rs` | 回滚与实体整份替换内部实现 |
 | `crates/xgc-world/src/data.rs` | `EntityData` / `ComponentData` / 组件工厂 |
 | `crates/xgc-world/src/journal.rs` | `Journal` / `TxRecord`：事务日志与重放 |
 | `crates/xgc-world/src/snapshot.rs` | `EntitySnapshot` / `WorldSnapshot` / 恢复 |
 | `crates/xgc-world/src/validate.rs` | `World::validate_data`：组件 / 字段 / 类型 / 重复项体检 |
-| `crates/xgc-world/src/hash.rs` | `World::state_hash`：实体按 ID、组件按 ID、字段按声明序混入；实体行号走 `thread_local` scratch、组件 / 字段布局缓存在 `Archetype::hash_layout`（数值型组件世界 60 次调用零分配） |
+| `crates/xgc-world/src/hash.rs` | `World::state_hash`：实体按 ID、组件按 ID、字段按声明序混入；字段名取 `Column::state_field_names()`（`Component::state_fields()`，缺省 = `fields()`），作者数据字段（如 `Animator.events`）在这里排除 ⇒ 加作者字段不改老场景哈希；实体行号走 `thread_local` scratch、组件 / 字段布局缓存在 `Archetype::hash_layout`（数值型组件世界 60 次调用零分配） |
+| `crates/xgc-world/tests/hash.rs` | 作者字段与状态哈希的分离回归：`Animator.events` 变化不改 `state_hash`，但 `WorldData` 仍落盘、恢复后事件仍在 |
 | `crates/xgc-cli/tests/image_diff.rs` | `image-diff … report` 集成回归：真实 PPM 的分桶与通道均值 / 不写 report 时保持旧输出 / 未知第四参数退出码 2 |
 | `crates/xgc-cli/tests/trace.rs` | 逐帧 trace 集成回归：与进程内重放逐步对表 / 两次运行逐字节相同 / 不同世界第 0 帧即不同 / 参数错误退出码 2 / 汇总行与 `run-world` 末行逐字一致 / 带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致 / 坏脚本与 `update` 期抛错都退出码 2 且点名出错帧 |
 | `crates/xgc-cli/tests/gate.rs` | 割接门禁集成回归：参考匹配通过 / 哈希分歧退出码 1 并点名帧 / 空参考目录退出码 2 / 参考帧号不从 0 开始退出码 2 |
@@ -84,7 +86,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/mixer.rs` | `SoftwareMixer` / `write_wav_mono`：总线增益混音与 WAV 写出 |
 | `crates/xgc-sim/src/ui.rs` | `UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `hit_test`：布局、裁剪、可见性、命中、`ui.input` 驱动的交互 / Tab / 方向键焦点 |
 | `crates/xgc-sim/src/character_kcc.rs` | 角色胶囊 / rapier KCC / 竖直阶段的唯一真相源：`radius` / `half_height` / `center_height` / `rest_gap = skin_width × 1.1` / `character_capsule` / `build_character_controller`（`offset = Absolute(skin)`、`autostep: None`、两个坡角、`snap_to_ground: None`、nudge 1e-4）/ `move_character`（水平 collide-and-slide + 竖直位移，events 收集接触法线）/ `probe_ground`（向下射线，间隙是法向距离 `(toi - half_height) * n.y - radius`，y=0 解析兜底）/ `try_step_up`（旧端三段扫掠：升 / 前进 / 落，落点不是坡面才采纳）/ `GRAVITY_Y` / `SLIDE_BAND_DEGREES` + `slip_limit`（`(slope_limit + 10).min(89)`，旧端 `min_slope_slide_angle` 同式；超过迟滞带的坡不清竖直速度、沿坡面投影下滑）；消毒委托 `CharacterController::sanitized()`（本文件不再自带区间常量）；`owned_by_kcc` 是「有 `CharacterController`、无 `PhysicsBody`、有 `Transform`」的唯一判据 |
-| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem`（对带 `CharacterController` 的实体**整份跳过** —— 角色三轴位移都在 `RapierPhysicsSystem` 的角色阶段，一帧只能有一处积分）/ `GroundCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem`；`CharacterSystem` / `CharacterStepSystem` 已删除，竖直 / 地面 / 台阶搬进 `character_kcc` 的 rapier 角色阶段（`rapier_world/characters.rs`） |
+| `crates/xgc-sim/src/systems.rs` | `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem`（对带 `CharacterController` 的实体**整份跳过** —— 角色三轴位移都在 `RapierPhysicsSystem` 的角色阶段，一帧只能有一处积分）/ `GroundCollisionSystem` / `AnimatorSystem` / `GravitySystem` / `HierarchySystem`；`AnimatorSystem` 推进时钟前记 `from`，推进后按 `crossed_events` 写瞬态 `FiredAnimEvent`（`fired` / `indices` 缓冲复用），并在**本系统开头**清空上一步事件；`CharacterSystem` / `CharacterStepSystem` 已删除，竖直 / 地面 / 台阶搬进 `character_kcc` 的 rapier 角色阶段（`rapier_world/characters.rs`） |
+| `crates/xgc-sim/src/animation_events.rs` | `crossed_events`：旧端穿越算法的唯一移植（非有限 / `duration <= 0` / 倒走不触发；空名 / 负时间 / 非有限跳过；循环 `time >= duration` 不可达；`started` 额外派发零时刻；一帧多事件按时间排序）；`EVENT_EPS = 1e-6` |
 | `crates/xgc-sim/src/aabb.rs` | `AabbCollisionSystem`：动态刚体两两分离 / 动态 vs 静态推出，接触时清掉沿分离轴的接近速度（落地 / 堆叠稳定）；接触对按 `(min id, max id)` 排序去重、跨帧 diff，进 / 出各推一条**有向** `CollisionEvent`（双方各一条）；`is_sensor` 只记接触、不做分离（否则触发器会把动态体推出去）；`previous` / `current` 两块缓冲互换复用，稳态零分配 |
 | `crates/xgc-sim/src/rapier_world.rs` | `RapierWorld` + `RapierPhysicsSystem`：与旧引擎同版本同参数的 rapier3d 0.22 刚体后端（`physics.body` 实体），建体规则按旧端 `body_from_scene`（Auto 形状取缩放绝对值 ×0.5、mass 换密度、角阻尼 0.05）；动态体回写 Transform / Velocity，运动学体每步按**世界**变换推送位姿（旧端 `push_kinematic_bodies` 同义）；建体签名 = `BodySignature`（`EntityId` + `EntityKey` + `kind`/`shape` 的 FNV-1a + 尺寸 / 半径 / 半高 / 摩擦 / 弹性 / 质量 / 重力缩放 / 传感器 的位模式；位置 / 旋转 / 缩放不进签名）；改任一构建参数都会重建那一个刚体、稳态帧不动；刚体表 / 角色 / 坡面子模块分别在 `rapier_world/{bodies,characters,slopes}.rs`（诊断口径见 bodies 行）；`ground_under` 是只读向下射线探地；`RapierPhysicsSystem::prepare` 在帧首（命令结算后、计划前，只读世界）先 `ensure_built` 建刚体表——旧端 `sync_bodies()` 同序；别把建体挪回 `run`，新刚体会吃到本帧 `VelocitySystem` 积分，整条物理轨迹多出 g·dt² |
 | `crates/xgc-sim/src/rapier_world/bodies.rs` | `RapierWorld` 的刚体表子模块（从 `rapier_world.rs` 拆出守 600 行）：`BodySignature` / `BodyLink`、第一次按 ID 排序整份建表（`rebuild`）、之后按签名 ID 序列增量修补（`patch_bodies`：只重建新增 / 换代 / 构建参数变了的条目、删掉消失的条目，未变化刚体保留 handle；动过表才 `query.update`）；`rebuild_count()`（整表重建，稳态 1）与 `body_patch_count()`（增量修补，稳态 0）是诊断口径；建体位置 / 旋转 / Auto 尺寸取 `world_transform`（父链 `local_matrix` 合成 → `decompose`，非单位四元数归一化，与旧端 `Transform::from_matrix` 同口径） |
@@ -104,9 +107,11 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/tests/ui_image_fill.rs` | 图片渲染回归：tint 乘色 / fill 从左侧裁 / fill=0 不画（GPU lock） |
 | `crates/xgc-render/tests/ui_border.rs` | UI 覆盖层 SDF 回归：圆角描边用边框色 / 透明背景 + 描边仍绘制 / 圆角边缘有抗锯齿过渡（像素介于空与实心之间） |
 | `crates/xgc-script/tests/anim_layers.rs` | 脚本混合层回归：同帧权重 + 参数都落地（命令队列合并）/ 缺层与非有限值静默 |
-| `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` / `fixed_update(ctx)` / `on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)` 生命周期分派与回退；每次调用前 `reset_budget()`，`fixed_update` 每个固定步一次且不传 dt（dt 走 `delta(ctx)`），碰撞钩子多传对方 `EntityId` |
+| `crates/xgc-script/tests/anim_event_hook.rs` | 动画事件钩子回归：`on_anim_event` 收到事件名并写速度 / 不匹配名字不写 |
+| `crates/xgc-sim/tests/animator_events.rs` | 动画事件运行时回归：跨帧只触发一次 / 循环跨圈命中 / 非循环不重复 |
+| `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` / `fixed_update(ctx)` / `on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)` / `on_anim_event(ctx, name)` 生命周期分派与回退；每次调用前 `reset_budget()`，`fixed_update` 每个固定步一次且不传 dt（dt 走 `delta(ctx)`），碰撞钩子多传对方 `EntityId`，动画钩子多传事件名 |
 | `crates/xgc-script/src/character_api.rs` | 角色脚本 API：`axis`（读 `ScriptView.axes`，编辑器按 `input.ron` 的轴桥）、`character_is_grounded` / `character_velocity`（读快照）、`character_simple_move`（写 `Velocity.linear` 水平两轴，缺组件先 `AddComponent`，同帧查队列去重）、`character_jump`（仅 grounded 时写 `jump_velocity` + `jump`）；写操作全部走帧末命令队列 |
-| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载；`run_frame` 在 update/fixed_update 之后消费 `World::collision_events()` 派发 `on_collision_enter/exit`，命令并进同一帧结算；`take_error()` 把本帧第一处脚本错误交给宿主（只打 stderr 时宿主看不到失败） |
+| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载；`run_frame` 在 update/fixed_update 之后消费 `World::collision_events()` 派发 `on_collision_enter/exit`，再消费 `World::animation_events()` 派发 `on_anim_event`，命令并进同一帧结算；`take_error()` 把本帧第一处脚本错误交给宿主（只打 stderr 时宿主看不到失败） |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 / 项目场景切换（脏场景与 Play 期间拒绝） |
 | `crates/xgc-editor/src/scene_ops.rs` | 项目场景切换：清单登记名 → 场景世界；脏场景与 Play 期间拒绝，切换后清空选择 / 撤销 / 重做 |
 | `crates/xgc-editor/src/play.rs` | Play / Play Scripts / input.ron 动作桥 / step / stop |
@@ -122,8 +127,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/old_character.rs` | 旧 `Character` → `physics.character` 的输入投影：六个字段都带旧端 serde 缺省（1.8 / 0.3 / 0.35 / 45 / 0.02 / 0.3），手写旧 RON 省略字段也能迁出 |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
 | `crates/xgc-migrate/src/environment.rs` | 场景级光 / 环境光 → `SceneEnvironment` 映射 |
-| `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态）；旧 `machine`（entry / parameters / states / transitions / duration）一次性翻成 `animation.state` 的 machine RON + parameters；旧 `additive` 一次性搬进 Animator 的 additive_* 字段 |
-| `crates/xgc-migrate/tests/animation.rs` | 机器迁移回归：旧 Animator `machine` → `animation.state`（machine 可回读、状态 / 转移 / 参数齐全） |
+| `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态）；旧 `machine`（entry / parameters / states / transitions / duration）一次性翻成 `animation.state` 的 machine RON + parameters；旧 `additive` 一次性搬进 Animator 的 additive_* 字段；旧 `events` 一次性翻成 `events` 字段（空表不生成） |
+| `crates/xgc-migrate/tests/animation.rs` | 机器迁移回归：旧 Animator `machine` → `animation.state`（machine 可回读、状态 / 转移 / 参数齐全），旧 `events` → `animation.animator.events` 可回读 |
 | `crates/xgc-migrate/src/old_lod.rs` | 旧 `LodGroup` → `render.lod`（RON 快照） |
 | `crates/xgc-migrate/src/old_rust.rs` | 旧 Rust 插件组件 → `plugin.rust` |
 | `crates/xgc-migrate/src/old_particle.rs` | 旧 `ParticleEmitter` → `particle.emitter` |
@@ -251,6 +256,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 - **帧首准备**：`System::prepare(&World)` 是命令结算之后、执行计划之前的**只读**阶段（按注册顺序调用，只重建派生缓存，不能改语义）；刚体表等派生状态必须在这里建，别挪进 `run`——会吃到本帧 `VelocitySystem` 的积分，整条物理轨迹多出 g·dt²。
 - **宿主阶段位置**：`Schedule::plan()` 把 `PlanStage::Host` 插在第一个 `System::runs_after_host()` 系统之前（没有这种系统才落最后）；动画系统（`animation_state` / `animation` / `animation_apply` / `animation_layers` / `skeleton_pose`）都声明 `runs_after_host`，UI 系统排在宿主之前（旧端 `update_ui()` 先于 `Update` 钩子）。不要再假设宿主阶段恒在最后。
 - **碰撞事件**：`World::collision_events` 是瞬态、`Simulation::step_with` 每步开头清空，**不进 `WorldData` / 快照 / `state_hash`**；AABB 接触表与角色-传感器接触表各自跨帧 diff，一对接触给双方各一条有向 `CollisionEvent`；sensor 只记接触、不做分离（否则触发器会把动态体推出去）；脚本在 `update` / `fixed_update` 之后按 `entity` 派发 `on_collision_enter/exit(ctx, other)`，命令与 update 的命令同帧结算。静态 sensor 改 `Transform` 不会推给 rapier（只有 kinematic 体每帧 `set_position`），只有增删 / 换体才变更接触。
+- **动画事件**：`Animator.events` 是作者数据（`(time, name)`，空表不落字段，老场景字节不变）；`AnimatorSystem` 推进时钟后按 `crossed_events` 跨帧判定并写瞬态 `World::animation_events`（**不进 `WorldData` / 快照 / `state_hash`**），本系统开头清空上一步；脚本宿主在动画系统**之前**，所以 `on_anim_event(ctx, name)` 比旧端晚一个固定步收到（别把动画挪到宿主前，会打乱状态机时序）。循环剪辑只在真的跨圈时触发；`started`（首帧）额外派发零时刻事件。新增作者数据字段一律走 `Component::state_fields()` 排除，别只加进 `fields()` 让老场景哈希漂移（`Animator.events` 就是这么做的，回归 `crates/xgc-world/tests/hash.rs`）。
 - **glTF 动画**：剪辑挂 `Mesh.animations`（模型内部节点层级），`animated_pose::resolve` 按 `Animator.clip` / `time` 采样成 pose 喂蒙皮路径，不为迁移世界伪造骨骼实体；旧状态机迁移成 `animation.state`（sim / migrate 共用 `StateMachine`；`AnimationStateSystem` 支持 `AtLeast` / `Below` + 迟滞、时长缺省 `fade_time`）。`additive`（参考 = 叠加剪辑第 0 帧、权重 0 逐位等于基础）、`layers`（`animation.layers` RON 层栈；mask 沿 parent 链匹配节点名；基础 + crossfade + additive 之后叠 Override / Additive）、渲染侧交叉淡入（`Animator.blend_from*` 定格旧剪辑时钟 + `glb/crossfade.rs` 局部 TRS 按 alpha 混合）、`root_motion` 均已迁移；宿主阶段夹在固定步与动画之间（脚本当帧参数当帧生效）；渲染侧在 crossfade 后 additive 前剥离根轴；CLI / editor / player 三宿主均已接根运动。细节 / 逐刀数字见 STATUS / CUTOVER。
 - **根运动**：`Animator.root_motion` 是 RON 快照（`(node:"b_Hip_01", axes:(true,false,true))`，空 = 关；节点名必须显式写，不能猜根节点）；world 侧 `root_motion.rs` 是纯函数（循环剪辑用展开轨迹算跨度增量、fade 按 alpha 混两段增量、轴过滤）；实体位移由宿主在 `step_with` 之后调 `apply_root_motion`（不进默认调度：轨道表来自模型资产，默认调度保持零资产依赖）；轨道表统一由 `MeshCache::root_motion_library` 建一次、CLI / editor / player 同源（去掉任一宿主的应用行都会让该宿主的哈希 / 位移回归变红）；渲染侧在基础 + crossfade 之后、additive/layers 之前把开关轴平移换回绑定值（否则蒙皮与实体双倍前进）；local→world 用 TRS 线性部分（无剪切项）近似，父级非均匀缩放 + 子级旋转与旧端完整矩阵有细微差。
 - 热路径先保证正确；性能数字必须写进 README / 基准，不许凭感觉写"更快"。
