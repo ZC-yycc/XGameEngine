@@ -10,6 +10,8 @@ use xgc_script::ScriptRuntime;
 use xgc_sim::{apply_root_motion, ParticleSystem, Simulation};
 use xgc_world::{RootMotionLibrary, World};
 
+use crate::input::PlayerInput;
+
 struct Viewport {
     texture: wgpu::Texture,
     id: egui::TextureId,
@@ -24,6 +26,7 @@ struct PlayerApp {
     runtime: Option<ScriptRuntime>,
     /// 根运动轨道表：进入播放时建一次，每帧在系统 / 脚本之后应用（与 CLI 同序）。
     root_motion: RootMotionLibrary,
+    input: PlayerInput,
     error: Option<String>,
     viewport: Option<Viewport>,
     frames: u64,
@@ -37,6 +40,7 @@ impl PlayerApp {
             particles: ParticleSystem::new(),
             runtime: None,
             root_motion: RootMotionLibrary::new(),
+            input: PlayerInput::load(dir),
             error: None,
             viewport: None,
             frames: 0,
@@ -132,6 +136,9 @@ impl PlayerApp {
 
 impl eframe::App for PlayerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(runtime) = &mut self.runtime {
+            self.input.apply(ctx, runtime);
+        }
         self.step();
         if let Some(render_state) = frame.wgpu_render_state() {
             self.ensure_viewport(render_state);

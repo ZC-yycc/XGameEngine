@@ -1,0 +1,195 @@
+//! 播放器输入桥：把 egui 的键盘 / 鼠标状态折叠成 `input.ron` 的动作与轴。
+//!
+//! 编辑器 Play 走 `EditorState::apply_input`，播放器窗口走这里；两条路径都只
+//! 调 `ScriptRuntime::set_action` / `set_axis`，脚本层不认 egui 类型。
+
+use std::path::Path;
+
+use eframe::egui;
+use xgc_script::ScriptRuntime;
+use xgc_sim::{InputMap, InputState, KeyCode, MouseButton};
+
+/// `egui::Key` 与项目键位表的对应关系；表里没有的键（标点、Insert 等）不映射。
+const KEY_CODES: &[(egui::Key, KeyCode)] = &[
+    (egui::Key::ArrowUp, KeyCode::ArrowUp),
+    (egui::Key::ArrowDown, KeyCode::ArrowDown),
+    (egui::Key::ArrowLeft, KeyCode::ArrowLeft),
+    (egui::Key::ArrowRight, KeyCode::ArrowRight),
+    (egui::Key::Escape, KeyCode::Escape),
+    (egui::Key::Tab, KeyCode::Tab),
+    (egui::Key::Backspace, KeyCode::Backspace),
+    (egui::Key::Enter, KeyCode::Enter),
+    (egui::Key::Space, KeyCode::Space),
+    (egui::Key::Delete, KeyCode::Delete),
+    (egui::Key::Num0, KeyCode::Digit0),
+    (egui::Key::Num1, KeyCode::Digit1),
+    (egui::Key::Num2, KeyCode::Digit2),
+    (egui::Key::Num3, KeyCode::Digit3),
+    (egui::Key::Num4, KeyCode::Digit4),
+    (egui::Key::Num5, KeyCode::Digit5),
+    (egui::Key::Num6, KeyCode::Digit6),
+    (egui::Key::Num7, KeyCode::Digit7),
+    (egui::Key::Num8, KeyCode::Digit8),
+    (egui::Key::Num9, KeyCode::Digit9),
+    (egui::Key::A, KeyCode::KeyA),
+    (egui::Key::B, KeyCode::KeyB),
+    (egui::Key::C, KeyCode::KeyC),
+    (egui::Key::D, KeyCode::KeyD),
+    (egui::Key::E, KeyCode::KeyE),
+    (egui::Key::F, KeyCode::KeyF),
+    (egui::Key::G, KeyCode::KeyG),
+    (egui::Key::H, KeyCode::KeyH),
+    (egui::Key::I, KeyCode::KeyI),
+    (egui::Key::J, KeyCode::KeyJ),
+    (egui::Key::K, KeyCode::KeyK),
+    (egui::Key::L, KeyCode::KeyL),
+    (egui::Key::M, KeyCode::KeyM),
+    (egui::Key::N, KeyCode::KeyN),
+    (egui::Key::O, KeyCode::KeyO),
+    (egui::Key::P, KeyCode::KeyP),
+    (egui::Key::Q, KeyCode::KeyQ),
+    (egui::Key::R, KeyCode::KeyR),
+    (egui::Key::S, KeyCode::KeyS),
+    (egui::Key::T, KeyCode::KeyT),
+    (egui::Key::U, KeyCode::KeyU),
+    (egui::Key::V, KeyCode::KeyV),
+    (egui::Key::W, KeyCode::KeyW),
+    (egui::Key::X, KeyCode::KeyX),
+    (egui::Key::Y, KeyCode::KeyY),
+    (egui::Key::Z, KeyCode::KeyZ),
+    (egui::Key::F1, KeyCode::F1),
+    (egui::Key::F2, KeyCode::F2),
+    (egui::Key::F3, KeyCode::F3),
+    (egui::Key::F4, KeyCode::F4),
+    (egui::Key::F5, KeyCode::F5),
+    (egui::Key::F6, KeyCode::F6),
+    (egui::Key::F7, KeyCode::F7),
+    (egui::Key::F8, KeyCode::F8),
+    (egui::Key::F9, KeyCode::F9),
+    (egui::Key::F10, KeyCode::F10),
+    (egui::Key::F11, KeyCode::F11),
+    (egui::Key::F12, KeyCode::F12),
+];
+
+pub(crate) struct PlayerInput {
+    map: Option<InputMap>,
+}
+
+impl PlayerInput {
+    /// 读 `<root>/input.ron`；没有或解析失败就不驱动输入（不是致命错误）。
+    pub(crate) fn load(root: &Path) -> Self {
+        let map = std::fs::read_to_string(root.join("input.ron"))
+            .ok()
+            .and_then(|text| InputMap::parse_ron(&text).ok());
+        Self { map }
+    }
+
+    pub(crate) fn apply(&self, ctx: &egui::Context, runtime: &mut ScriptRuntime) {
+        let Some(map) = &self.map else {
+            return;
+        };
+        let mut state = InputState::default();
+        ctx.input(|input| {
+            for (key, code) in KEY_CODES {
+                if input.key_down(*key) {
+                    state.keys.insert(*code);
+                }
+            }
+            if input.pointer.button_down(egui::PointerButton::Primary) {
+                state.mouse.insert(MouseButton::Left);
+            }
+            if input.pointer.button_down(egui::PointerButton::Secondary) {
+                state.mouse.insert(MouseButton::Right);
+            }
+            if input.pointer.button_down(egui::PointerButton::Middle) {
+                state.mouse.insert(MouseButton::Middle);
+            }
+        });
+        apply_state(map, &state, runtime);
+    }
+}
+
+/// 每个固定步都重写全部动作 / 轴：松开键要把 false / 0 送进脚本，
+/// 不能靠 `clear_actions` 之类的显式清理。
+fn apply_state(map: &InputMap, state: &InputState, runtime: &mut ScriptRuntime) {
+    for name in map.action_names() {
+        runtime.set_action(&name, map.action_pressed(&name, state));
+    }
+    for name in map.axis_names() {
+        runtime.set_axis(&name, map.axis_value(&name, state));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xgc_world::{Script, Transform, Velocity, World};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xgc_player_input_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn maps_wasd_space_and_mouse() {
+        assert!(KEY_CODES.contains(&(egui::Key::W, KeyCode::KeyW)));
+        assert!(KEY_CODES.contains(&(egui::Key::Space, KeyCode::Space)));
+        assert!(!KEY_CODES.iter().any(|(key, _)| *key == egui::Key::Comma));
+    }
+
+    #[test]
+    fn loads_the_project_input_map() {
+        let dir = temp_dir("load");
+        std::fs::write(
+            dir.join("input.ron"),
+            "InputMap(actions: {\"Jump\": [Key(Space)]}, axes: {})",
+        )
+        .unwrap();
+        assert!(PlayerInput::load(&dir).map.is_some());
+        std::fs::remove_file(dir.join("input.ron")).unwrap();
+        assert!(PlayerInput::load(&dir).map.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn applies_actions_and_axes_to_the_script_view() {
+        let dir = temp_dir("apply");
+        std::fs::write(
+            dir.join("move.lua"),
+            "function update(ctx)\n  local x = axis(ctx, 'MoveX')\n  local jump = action_pressed(ctx, 'Jump')\n  set_velocity(ctx, self_id(ctx), x, jump and 9.0 or 0.0, 0.0)\nend\n",
+        )
+        .unwrap();
+        let map = InputMap::parse_ron(
+            "InputMap(actions: {\"Jump\": [Key(Space)]}, axes: {\"MoveX\": (positive: [Key(KeyD)], negative: [Key(KeyA)])})",
+        )
+        .unwrap();
+        let mut world = World::new();
+        let entity = world.spawn((
+            Transform::default(),
+            Velocity::default(),
+            Script {
+                path: "move.lua".to_string(),
+            },
+        ));
+        let mut runtime = ScriptRuntime::new(&dir);
+        let mut state = InputState::default();
+        state.keys.insert(KeyCode::KeyD);
+        state.keys.insert(KeyCode::Space);
+        apply_state(&map, &state, &mut runtime);
+        runtime.run_frame(&mut world, 1.0 / 60.0);
+        assert!(runtime.take_error().is_none());
+        assert_eq!(
+            world.get::<Velocity>(entity).unwrap().linear,
+            [1.0, 9.0, 0.0]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

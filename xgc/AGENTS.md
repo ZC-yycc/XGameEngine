@@ -220,7 +220,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
 | `crates/xgc-player/src/lib.rs` | `load_world_dir` / `runtime_for` / `run_cooked`：manifest 校验、优先 XGCB、脚本驱动 |
-| `crates/xgc-player/src/window.rs` | eframe + wgpu 视口：每帧仿真 / 脚本 / 粒子并贴图到窗口 |
+| `crates/xgc-player/src/window.rs` | eframe + wgpu 视口：每帧先按 `input.ron` 折叠键鼠动作 / 轴再仿真，贴图到窗口 |
+| `crates/xgc-player/src/input.rs` | 播放器输入桥：`egui::Key` / `PointerButton` → `InputState`，读 `<root>/input.ron`，每固定步重写全部动作 / 轴 |
 | `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录> [帧数]`：无帧数打开窗口，有帧数 headless |
 | `crates/xgc-cli/src/main.rs` | CLI 参数分派；文件预算拆分后的轻量入口 |
 | `crates/xgc-cli/src/plan_cmd.rs` | `xgc plan`：默认调度的确定性 JSON 执行计划（系统访问声明 + 连续批次 + 宿主阶段） |
@@ -256,6 +257,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 - **帧首准备**：`System::prepare(&World)` 是命令结算之后、执行计划之前的**只读**阶段（按注册顺序调用，只重建派生缓存，不能改语义）；刚体表等派生状态必须在这里建，别挪进 `run`——会吃到本帧 `VelocitySystem` 的积分，整条物理轨迹多出 g·dt²。
 - **宿主阶段位置**：`Schedule::plan()` 把 `PlanStage::Host` 插在第一个 `System::runs_after_host()` 系统之前（没有这种系统才落最后）；动画系统（`animation_state` / `animation` / `animation_apply` / `animation_layers` / `skeleton_pose`）都声明 `runs_after_host`，UI 系统排在宿主之前（旧端 `update_ui()` 先于 `Update` 钩子）。不要再假设宿主阶段恒在最后。
 - **碰撞事件**：`World::collision_events` 是瞬态、`Simulation::step_with` 每步开头清空，**不进 `WorldData` / 快照 / `state_hash`**；AABB 接触表与角色-传感器接触表各自跨帧 diff，一对接触给双方各一条有向 `CollisionEvent`；sensor 只记接触、不做分离（否则触发器会把动态体推出去）；脚本在 `update` / `fixed_update` 之后按 `entity` 派发 `on_collision_enter/exit(ctx, other)`，命令与 update 的命令同帧结算。静态 sensor 改 `Transform` 不会推给 rapier（只有 kinematic 体每帧 `set_position`），只有增删 / 换体才变更接触。
+- **播放器输入**：独立播放器窗口只把 `input.ron` 折叠成 `ScriptRuntime::set_action` / `set_axis`，与编辑器 Play 同源；每固定步**重写全部**动作 / 轴（松开键必须把 false / 0 送进脚本，不能靠清空）；键位表之外的键（标点 / Insert）不映射，缺 `input.ron` 时静默不驱动输入。回归 `crates/xgc-player/src/input.rs` 的单元测试。
 - **动画事件**：`Animator.events` 是作者数据（`(time, name)`，空表不落字段，老场景字节不变）；`AnimatorSystem` 推进时钟后按 `crossed_events` 跨帧判定并写瞬态 `World::animation_events`（**不进 `WorldData` / 快照 / `state_hash`**），本系统开头清空上一步；脚本宿主在动画系统**之前**，所以 `on_anim_event(ctx, name)` 比旧端晚一个固定步收到（别把动画挪到宿主前，会打乱状态机时序）。循环剪辑只在真的跨圈时触发；`started`（首帧）额外派发零时刻事件。新增作者数据字段一律走 `Component::state_fields()` 排除，别只加进 `fields()` 让老场景哈希漂移（`Animator.events` 就是这么做的，回归 `crates/xgc-world/tests/hash.rs`）。
 - **glTF 动画**：剪辑挂 `Mesh.animations`（模型内部节点层级），`animated_pose::resolve` 按 `Animator.clip` / `time` 采样成 pose 喂蒙皮路径，不为迁移世界伪造骨骼实体；旧状态机迁移成 `animation.state`（sim / migrate 共用 `StateMachine`；`AnimationStateSystem` 支持 `AtLeast` / `Below` + 迟滞、时长缺省 `fade_time`）。`additive`（参考 = 叠加剪辑第 0 帧、权重 0 逐位等于基础）、`layers`（`animation.layers` RON 层栈；mask 沿 parent 链匹配节点名；基础 + crossfade + additive 之后叠 Override / Additive）、渲染侧交叉淡入（`Animator.blend_from*` 定格旧剪辑时钟 + `glb/crossfade.rs` 局部 TRS 按 alpha 混合）、`root_motion` 均已迁移；宿主阶段夹在固定步与动画之间（脚本当帧参数当帧生效）；渲染侧在 crossfade 后 additive 前剥离根轴；CLI / editor / player 三宿主均已接根运动。细节 / 逐刀数字见 STATUS / CUTOVER。
 - **根运动**：`Animator.root_motion` 是 RON 快照（`(node:"b_Hip_01", axes:(true,false,true))`，空 = 关；节点名必须显式写，不能猜根节点）；world 侧 `root_motion.rs` 是纯函数（循环剪辑用展开轨迹算跨度增量、fade 按 alpha 混两段增量、轴过滤）；实体位移由宿主在 `step_with` 之后调 `apply_root_motion`（不进默认调度：轨道表来自模型资产，默认调度保持零资产依赖）；轨道表统一由 `MeshCache::root_motion_library` 建一次、CLI / editor / player 同源（去掉任一宿主的应用行都会让该宿主的哈希 / 位移回归变红）；渲染侧在基础 + crossfade 之后、additive/layers 之前把开关轴平移换回绑定值（否则蒙皮与实体双倍前进）；local→world 用 TRS 线性部分（无剪切项）近似，父级非均匀缩放 + 子级旋转与旧端完整矩阵有细微差。
