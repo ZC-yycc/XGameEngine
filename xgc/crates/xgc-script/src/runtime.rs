@@ -120,6 +120,23 @@ impl ScriptRuntime {
                 self.note_error(&err);
             }
         }
+        // 碰撞事件由物理系统在本步写入；宿主阶段在所有系统之后，所以这里看到的就是本步
+        // 的接触。先于命令结算派发：钩子写的命令与 update / fixed_update 写的命令同批结算。
+        let collisions: Vec<_> = world
+            .collision_events()
+            .iter()
+            .map(|event| (event.entity, event.other, event.enter))
+            .collect();
+        for (entity, other, enter) in collisions {
+            let result = self.entries.get_mut(&entity).map(|entry| {
+                let result = entry.host.collision_legacy(enter, other);
+                pending.extend(entry.host.take_commands());
+                result
+            });
+            if let Some(Err(err)) = result {
+                self.note_error(&err);
+            }
+        }
         if pending.is_empty() {
             return;
         }

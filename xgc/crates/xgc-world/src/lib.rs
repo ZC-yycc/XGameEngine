@@ -7,6 +7,7 @@ use xgc_base::{EntityId, EntityKey};
 pub use xgc_reflect::Component;
 mod animation_components;
 mod character_components;
+mod collision;
 mod command;
 mod components;
 mod data;
@@ -37,6 +38,7 @@ pub use character_components::{
     SKIN_WIDTH_DEFAULT, SKIN_WIDTH_MAX, SKIN_WIDTH_MIN, SLOPE_LIMIT_DEFAULT, SLOPE_LIMIT_MAX,
     SNAP_TO_GROUND_DEFAULT, SNAP_TO_GROUND_MAX, STEP_OFFSET_DEFAULT,
 };
+pub use collision::CollisionEvent;
 pub use command::{Applied, Command, Plan};
 pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
 use data::ComponentFactory;
@@ -285,6 +287,9 @@ pub struct World {
     revision: u64,
     /// 场景级环境（光 / 环境光）：不是实体，跟着世界一起存取。
     environment: SceneEnvironment,
+    /// 本帧碰撞事件。**瞬态**：不进 `WorldData`、不进 `state_hash`、不进快照；
+    /// 由物理系统写入，宿主（脚本）在本帧结算后读取。
+    collision_events: Vec<CollisionEvent>,
 }
 
 impl Default for World {
@@ -305,6 +310,7 @@ impl World {
             next_id: 0,
             revision: 0,
             environment: SceneEnvironment::default(),
+            collision_events: Vec::new(),
         };
         world.register_builtin_components();
         world

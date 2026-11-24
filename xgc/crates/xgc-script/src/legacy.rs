@@ -469,6 +469,24 @@ fn register_script_state(lua: &Lua, view: &View, self_id: u64) -> Result<(), Str
             .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
+
+    // `entity_name(ctx, id)`：`on_collision_*` 的 `other` 是数字 ID，旧脚本靠它认对面是谁。
+    // 实体已销毁 / 没有名字组件时返回空串（旧端同口径，不抛错）。
+    let name_view = Rc::clone(view);
+    globals
+        .set(
+            "entity_name",
+            lua.create_function(move |_, (_ctx, id): (mlua::Value, i64)| {
+                let name = name_view
+                    .borrow()
+                    .entity(id as u64)
+                    .map(|entity| entity.name.clone())
+                    .unwrap_or_default();
+                Ok(name)
+            })
+            .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
     Ok(())
 }
 

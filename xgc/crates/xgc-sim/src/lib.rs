@@ -180,6 +180,8 @@ impl Simulation {
         commands: Vec<Command>,
         after: impl FnMut(&mut World),
     ) -> Result<FrameRecord, SimError> {
+        // 碰撞事件是"本步"的瞬态数据：先清上一帧，再让物理系统写。
+        self.world.clear_collision_events();
         let world_plan = self.world.plan(commands);
         if !world_plan.is_valid() {
             return Err(SimError::InvalidPlan {

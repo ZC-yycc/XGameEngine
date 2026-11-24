@@ -140,7 +140,7 @@ impl Schedule {
         schedule.add(CharacterJumpSystem);
         schedule.add(VelocitySystem::new(threads));
         schedule.add(GroundCollisionSystem::default());
-        schedule.add(AabbCollisionSystem);
+        schedule.add(AabbCollisionSystem::default());
         // 刚体走与旧引擎相同的 rapier 求解器（角动量 / 接触力矩 / 堆叠才与旧图可比）。
         // 放在这里：上面的简化系统先跑，对 rapier 接管的 `physics.body` 实体的
         // Transform 改动会被这一步整帧覆盖回物理结果。刚体表由 `prepare` 在本帧

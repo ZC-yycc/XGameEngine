@@ -80,6 +80,10 @@ pub struct RapierWorld {
     slope_probe: SlopeSignature,
     /// 坡面收集阶段的临时表，跨帧复用。
     slope_entries: Vec<SlopeEntry>,
+    /// 角色 vs 传感器的上一帧接触对（`(角色, 传感器)`，按 ID 排序）。
+    sensor_previous: Vec<(u64, u64)>,
+    /// 角色 vs 传感器的本帧接触对；跨帧复用，避免每帧分配。
+    sensor_current: Vec<(u64, u64)>,
 }
 
 impl Default for RapierWorld {
@@ -116,6 +120,8 @@ impl RapierWorld {
             slope_signature: None,
             slope_probe: Vec::new(),
             slope_entries: Vec::new(),
+            sensor_previous: Vec::new(),
+            sensor_current: Vec::new(),
         }
     }
 

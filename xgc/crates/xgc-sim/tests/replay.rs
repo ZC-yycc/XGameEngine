@@ -437,7 +437,7 @@ fn aabb_separates_overlapping_dynamic_boxes() {
         PhysicsBody::default(),
     ));
     let mut schedule = Schedule::new();
-    schedule.add(AabbCollisionSystem);
+    schedule.add(AabbCollisionSystem::default());
     schedule.run(&mut world, 0.016);
     let a = world.get::<Transform>(a).unwrap();
     let b = world.get::<Transform>(b).unwrap();
@@ -471,7 +471,7 @@ fn spheres_separate_along_center_line() {
         },
     ));
     let mut schedule = Schedule::new();
-    schedule.add(AabbCollisionSystem);
+    schedule.add(AabbCollisionSystem::default());
     schedule.run(&mut world, 0.016);
     let a = world.get::<Transform>(a).unwrap();
     let b = world.get::<Transform>(b).unwrap();

@@ -74,6 +74,32 @@ impl LuaHost {
             .map_err(|err| format!("Lua 钩子 fixed_update 失败：{err}"))?;
         Ok(true)
     }
+
+    /// 旧生命周期：`on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)`。
+    ///
+    /// `other` 是对面实体的数字 ID（旧端 `LuaCtx` 之后的第二个参数）。每个接触对
+    /// 双方各收一次；持续接触不刷新，只在进入 / 离开那一步各调一次。
+    pub fn collision_legacy(&self, enter: bool, other: xgc_base::EntityId) -> Result<bool, String> {
+        let hook = if enter {
+            "on_collision_enter"
+        } else {
+            "on_collision_exit"
+        };
+        let value: LuaValue = self
+            .lua
+            .globals()
+            .get(hook)
+            .map_err(|err| format!("读取 {hook} 失败：{err}"))?;
+        let LuaValue::Function(function) = value else {
+            return Ok(false);
+        };
+        self.reset_budget();
+        let ctx = self.legacy_context()?;
+        function
+            .call::<()>((ctx, other.raw() as i64))
+            .map_err(|err| format!("Lua 钩子 {hook} 失败：{err}"))?;
+        Ok(true)
+    }
 }
 
 impl std::fmt::Debug for LuaHost {

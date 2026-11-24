@@ -4,13 +4,20 @@
 //! 来回抖、堆叠永远静不下来（实测贴地后速度仍每帧 +0.16 m/s）。
 
 use xgc_base::{EntityId, EntityKey};
-use xgc_world::{Component, PhysicsBody, Transform, Velocity, World};
+use xgc_world::{CollisionEvent, Component, PhysicsBody, Transform, Velocity, World};
 
 use crate::{System, SystemAccess};
 
 /// AABB 碰撞：动态刚体两两分离，最小穿透轴推出；static 不动。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AabbCollisionSystem;
+///
+/// 接触对跨帧保存，用来产出 `on_collision_enter/exit`：只在开始 / 结束那帧
+/// 各发一次，持续接触不刷新。传感器只记录接触、不做分离（rapier 的 sensor
+/// 也不挡路，AABB 不能比它更硬）。
+#[derive(Clone, Debug, Default)]
+pub struct AabbCollisionSystem {
+    previous: Vec<(u64, u64)>,
+    current: Vec<(u64, u64)>,
+}
 
 struct BodyBox {
     key: EntityKey,
@@ -21,6 +28,7 @@ struct BodyBox {
     half: [f32; 3],
     sphere: Option<f32>,
     dynamic: bool,
+    sensor: bool,
 }
 
 impl System for AabbCollisionSystem {
@@ -36,6 +44,7 @@ impl System for AabbCollisionSystem {
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
+        self.current.clear();
         let mut bodies = Vec::new();
         world.for_each2::<Transform, PhysicsBody>(|key, transform, body| {
             let Some(entity) = world.entity(key) else {
@@ -50,6 +59,7 @@ impl System for AabbCollisionSystem {
                 half: box_half(body),
                 sphere: (body.shape == "ball").then_some(body.radius),
                 dynamic: body.is_dynamic(),
+                sensor: body.is_sensor,
             });
         });
         bodies.sort_by_key(|body| body.id.raw());
@@ -58,14 +68,26 @@ impl System for AabbCollisionSystem {
                 if !bodies[i].dynamic && !bodies[j].dynamic {
                     continue;
                 }
+                let pair = (
+                    bodies[i].id.raw().min(bodies[j].id.raw()),
+                    bodies[i].id.raw().max(bodies[j].id.raw()),
+                );
                 if let (Some(ra), Some(rb)) = (bodies[i].sphere, bodies[j].sphere) {
+                    let separate = !bodies[i].sensor && !bodies[j].sensor;
                     let (left, right) = bodies.split_at_mut(j);
-                    resolve_spheres(&mut left[i], &mut right[0], ra, rb);
+                    let hit = resolve_spheres(&mut left[i], &mut right[0], ra, rb, separate);
+                    if hit {
+                        self.current.push(pair);
+                    }
                     continue;
                 }
                 let Some((axis, penetration)) = overlap(&bodies[i], &bodies[j]) else {
                     continue;
                 };
+                self.current.push(pair);
+                if bodies[i].sensor || bodies[j].sensor {
+                    continue;
+                }
                 let direction =
                     if (bodies[i].position[axis] - bodies[j].position[axis]).abs() < f32::EPSILON {
                         1.0
@@ -101,7 +123,60 @@ impl System for AabbCollisionSystem {
                 velocity.linear = linear;
             }
         }
+
+        self.current.sort_unstable();
+        self.current.dedup();
+        let previous = std::mem::take(&mut self.previous);
+        let current = std::mem::take(&mut self.current);
+        emit_contacts(world, &previous, &current);
+        // 两块缓冲互换：上一帧的 current 变成下一帧写接触的 scratch，避免每帧分配。
+        self.previous = current;
+        self.current = previous;
+        self.current.clear();
     }
+}
+
+/// 有向事件：每对接触给双方各发一条，脚本按自己的实体查即可。
+pub(crate) fn emit_contacts(world: &mut World, previous: &[(u64, u64)], current: &[(u64, u64)]) {
+    let (mut left, mut right) = (0, 0);
+    while left < previous.len() || right < current.len() {
+        match (previous.get(left), current.get(right)) {
+            (Some(old), Some(new)) if old == new => {
+                left += 1;
+                right += 1;
+            }
+            (Some(old), Some(new)) if old < new => {
+                push_pair(world, *old, false);
+                left += 1;
+            }
+            (Some(_), Some(new)) => {
+                push_pair(world, *new, true);
+                right += 1;
+            }
+            (Some(old), None) => {
+                push_pair(world, *old, false);
+                left += 1;
+            }
+            (None, Some(new)) => {
+                push_pair(world, *new, true);
+                right += 1;
+            }
+            (None, None) => break,
+        }
+    }
+}
+
+fn push_pair(world: &mut World, pair: (u64, u64), enter: bool) {
+    world.push_collision_event(CollisionEvent {
+        entity: EntityId::from_raw(pair.0),
+        other: EntityId::from_raw(pair.1),
+        enter,
+    });
+    world.push_collision_event(CollisionEvent {
+        entity: EntityId::from_raw(pair.1),
+        other: EntityId::from_raw(pair.0),
+        enter,
+    });
 }
 
 /// 沿 `axis` 把动态刚体的接近速度清零（完全非弹性接触）。
@@ -117,7 +192,7 @@ fn stop_along(body: &mut BodyBox, axis: usize) {
     }
 }
 
-fn resolve_spheres(a: &mut BodyBox, b: &mut BodyBox, ra: f32, rb: f32) {
+fn resolve_spheres(a: &mut BodyBox, b: &mut BodyBox, ra: f32, rb: f32, separate: bool) -> bool {
     let delta = [
         a.position[0] - b.position[0],
         a.position[1] - b.position[1],
@@ -126,7 +201,10 @@ fn resolve_spheres(a: &mut BodyBox, b: &mut BodyBox, ra: f32, rb: f32) {
     let distance = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
     let minimum = ra + rb;
     if distance >= minimum {
-        return;
+        return false;
+    }
+    if !separate {
+        return true;
     }
     let normal = if distance > f32::EPSILON {
         [
@@ -161,6 +239,7 @@ fn resolve_spheres(a: &mut BodyBox, b: &mut BodyBox, ra: f32, rb: f32) {
         }
         (false, false) => {}
     }
+    true
 }
 
 /// 只去掉沿法向的接近速度分量，切向（摩擦前）保留。

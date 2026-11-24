@@ -7,11 +7,12 @@
 use rapier3d::control::KinematicCharacterController;
 use rapier3d::na::{Isometry3, Translation3, Vector3};
 
-use xgc_base::EntityKey;
+use xgc_base::{EntityId, EntityKey};
 use xgc_world::{CharacterController, Transform, Velocity, World};
 
 use super::bodies::rotation;
 use super::RapierWorld;
+use crate::aabb::emit_contacts;
 use crate::character_kcc;
 
 /// 一个角色实体的运行时托管：刚体 + 胶囊 + 本帧要用的控制器。
@@ -147,6 +148,10 @@ impl RapierWorld {
         if dt <= 0.0 {
             return;
         }
+        // 角色-传感器接触与 AABB 的接触表分开：角色没有 `physics.body`，AABB 根本看不到它。
+        // 复用上一帧的缓冲，避免每步分配；接触对按 ID 排序后交给同一份 diff。
+        let mut contacts = std::mem::take(&mut self.sensor_current);
+        contacts.clear();
         for link in &self.characters {
             let Some(mut transform) = world.get::<Transform>(link.key).copied() else {
                 continue;
@@ -383,6 +388,57 @@ impl RapierWorld {
             }
             if let Some(slot) = world.get_mut::<CharacterController>(link.key) {
                 slot.grounded = grounded;
+            }
+            if let Some(entity) = world.entity(link.key) {
+                self.collect_sensor_contacts(world, link, &next, entity, &mut contacts);
+            }
+        }
+        contacts.sort_unstable();
+        contacts.dedup();
+        emit_contacts(world, &self.sensor_previous, &contacts);
+        std::mem::swap(&mut self.sensor_previous, &mut contacts);
+        self.sensor_current = contacts;
+    }
+
+    /// 收集一个角色本帧压到的所有传感器（trigger）。
+    ///
+    /// 用 rapier 的 `intersections_with_shape` 而不是自己写盒/球判定：传感器可以是
+    /// cuboid / ball / 带旋转的静态体，胶囊与它们求交的口径必须和物理引擎一致。
+    /// 传感器不挡路（`is_sensor`），所以这里只记录，不做分离。
+    fn collect_sensor_contacts(
+        &self,
+        world: &World,
+        link: &CharacterLink,
+        position: &Isometry3<f32>,
+        entity: EntityId,
+        out: &mut Vec<(u64, u64)>,
+    ) {
+        for sensor in &self.links {
+            if !sensor.sensor {
+                continue;
+            }
+            let Some(sensor_entity) = world.entity(sensor.key) else {
+                continue;
+            };
+            let mut hit = false;
+            self.query.intersections_with_shape(
+                &self.bodies,
+                &self.colliders,
+                position,
+                &link.capsule,
+                rapier3d::prelude::QueryFilter::default().exclude_rigid_body(link.body),
+                |handle| {
+                    if handle == sensor.collider {
+                        hit = true;
+                        false
+                    } else {
+                        true
+                    }
+                },
+            );
+            if hit {
+                let (left, right) = (entity.raw(), sensor_entity.raw());
+                out.push((left.min(right), left.max(right)));
             }
         }
     }

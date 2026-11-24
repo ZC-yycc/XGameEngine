@@ -21,7 +21,7 @@ fn run_frame(world: &mut World) {
     let mut physics = PhysicsSystem::default();
     let mut velocity = VelocitySystem::new(1);
     let mut ground = GroundCollisionSystem::default();
-    let mut aabb = AabbCollisionSystem;
+    let mut aabb = AabbCollisionSystem::default();
     physics.run(world, DT);
     velocity.run(world, DT);
     ground.run(world, DT);
@@ -133,4 +133,56 @@ fn two_dynamic_boxes_stack_without_drifting_apart() {
             "堆叠位置在漂：{before} → {after}"
         );
     }
+}
+
+#[test]
+fn contacts_emit_enter_once_and_exit_after_separation() {
+    let mut world = World::new();
+    let dynamic = world.spawn((
+        Transform {
+            position: [0.0, 3.0, 0.0],
+            ..Transform::default()
+        },
+        Velocity::default(),
+        body("dynamic", [0.5; 3]),
+    ));
+    let mut sensor_body = body("static", [1.0; 3]);
+    sensor_body.is_sensor = true;
+    let sensor = world.spawn((
+        Transform {
+            position: [0.0, 3.0, 0.0],
+            ..Transform::default()
+        },
+        sensor_body,
+    ));
+    let dynamic_id = world.entity(dynamic).unwrap();
+    let sensor_id = world.entity(sensor).unwrap();
+
+    let mut aabb = AabbCollisionSystem::default();
+    aabb.run(&mut world, DT);
+    let enter: Vec<_> = world.collision_events().to_vec();
+    assert_eq!(enter.len(), 2, "一对接触要给双方各一条事件：{enter:?}");
+    assert!(enter.iter().all(|event| event.enter));
+    assert!(enter
+        .iter()
+        .any(|event| event.entity == dynamic_id && event.other == sensor_id));
+    assert!(enter
+        .iter()
+        .any(|event| event.entity == sensor_id && event.other == dynamic_id));
+
+    // 持续接触不刷新：第二帧不能再发 enter。
+    world.clear_collision_events();
+    aabb.run(&mut world, DT);
+    assert!(
+        world.collision_events().is_empty(),
+        "持续接触不应重复发事件"
+    );
+
+    // 移开后发 exit；传感器不挡路，所以动态体在重叠期间没有被推走。
+    world.get_mut::<Transform>(sensor).unwrap().position[0] = 10.0;
+    world.clear_collision_events();
+    aabb.run(&mut world, DT);
+    let exit: Vec<_> = world.collision_events().to_vec();
+    assert_eq!(exit.len(), 2, "离开接触要给双方各一条事件：{exit:?}");
+    assert!(exit.iter().all(|event| !event.enter));
 }

@@ -32,8 +32,10 @@ pub(super) type BodySignature = (u64, EntityKey, [u32; 16]);
 pub(super) struct BodyLink {
     pub(super) key: EntityKey,
     pub(super) body: RigidBodyHandle,
+    pub(super) collider: ColliderHandle,
     pub(super) dynamic: bool,
     pub(super) kinematic: bool,
+    pub(super) sensor: bool,
 }
 
 impl RapierWorld {
@@ -129,14 +131,17 @@ impl RapierWorld {
         let world_transform = world_transform(world, key)?;
         let (body, collider) = build_body(&def, &world_transform);
         let handle = self.bodies.insert(body);
-        self.colliders
+        let collider = self
+            .colliders
             .insert_with_parent(collider, handle, &mut self.bodies);
         let kind = def.kind();
         Some(BodyLink {
             key,
             body: handle,
+            collider,
             dynamic: kind == BodyKind::Dynamic,
             kinematic: kind == BodyKind::Kinematic,
+            sensor: def.is_sensor,
         })
     }
 
