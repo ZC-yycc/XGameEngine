@@ -47,13 +47,39 @@ fn main() -> ExitCode {
             args.next().as_deref(),
             args.next().as_deref(),
         ),
-        Some("gate") => gate_cmd::gate(
-            args.next().as_deref(),
-            args.next().as_deref(),
-            args.next().as_deref(),
-            args.next().as_deref(),
-            args.next().as_deref(),
-        ),
+        Some("gate") => {
+            let mut world = None;
+            let mut assets = None;
+            let mut references = None;
+            let mut total = None;
+            let mut structural = None;
+            let mut strict_total = false;
+            let mut position = 0usize;
+            for arg in args {
+                if arg == "--strict-total" {
+                    strict_total = true;
+                    continue;
+                }
+                match position {
+                    0 => world = Some(arg),
+                    1 => assets = Some(arg),
+                    2 => references = Some(arg),
+                    3 => total = Some(arg),
+                    4 => structural = Some(arg),
+                    _ => {}
+                }
+                position += 1;
+            }
+            gate_cmd::gate(
+                world.as_deref(),
+                assets.as_deref(),
+                references.as_deref(),
+                total.as_deref(),
+                structural.as_deref(),
+                strict_total,
+            )
+        }
+        Some("gpu-env") => gate_cmd::write_env(args.next().as_deref()),
         Some("run-world") => world_cmd::run_world(
             args.next().as_deref(),
             args.next().as_deref(),
@@ -118,13 +144,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]|parity <旧图> <新图> [结构性%] [内部%]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]|parity <旧图> <新图> [结构性%] [内部%]>"
+                "用法：xgc <schema|check [路径]|bench|plan|serve|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }

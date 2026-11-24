@@ -12,7 +12,19 @@ cargo run -q -p xgc-cli -- gate ../tmp/showcase.json ../projects/XGame acceptanc
 ```
 
 退出码：`0` 全部通过；`1` 有检查未过（门禁不通过）；`2` 用法 / IO / GPU 错误。
-截图两条判定线缺省为总差异 `2%`、结构性（单通道 ≥8）`0.5%`，可用第 4 / 5 个参数覆盖：
+
+截图判定分两条线：
+
+- **结构性（单通道 ≥8）始终按 `0.5%` 硬判**；
+- **总差异 `2%` 只在参考可信时硬判**：参考目录带 `env.json` 且与本机 GPU / 后端 / 驱动一致、或显式给第 4 个参数、或加 `--strict-total`。否则只打印诊断——跨 GPU 的整片 ±1 编码舍入差不是回归。
+
+记录本机验收指纹（写 `<参考目录>/env.json`，缺省 `acceptance`）：
+
+```sh
+cargo run -q -p xgc-cli -- gpu-env acceptance
+```
+
+换机器 / 换 GPU / 换驱动后，重生成参考图并重写 `env.json`。显式覆盖阈值：
 
 ```sh
 cargo run -q -p xgc-cli -- gate ../tmp/showcase.json ../projects/XGame acceptance 1.5 0.4
@@ -41,7 +53,8 @@ cargo run -q -p xgame-editor --offline -- \
 
 **换机器 / 换 GPU / 换驱动必须重新生成截图参考。** 旧端参考跨 GPU 环境会有整片
 ±1 的编码舍入差（本仓库历史上用另一台机器的参考得到过 18% 的假回归）；不重生
-成就等于把门禁变成噪声。`trace.txt` 则相反：它只依赖 CPU 侧确定性，换机器不必重跑，
+成就等于把门禁变成噪声。`env.json` 只记录参考机的 GPU / 后端 / 驱动，不参与像素
+比较；没有它时 `xgc gate` 把总差异降级为诊断，结构性仍硬判。`trace.txt` 则相反：它只依赖 CPU 侧确定性，换机器不必重跑，
 但**代码改动确实影响了状态轨迹时必须与改动同一次提交更新**，否则门禁会红。
 
 ## 为什么不在 CI 跑这整条

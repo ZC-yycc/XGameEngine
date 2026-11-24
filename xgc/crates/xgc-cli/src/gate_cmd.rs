@@ -1,4 +1,5 @@
-//! `xgc gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]`：割接门禁。
+//! `xgc gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]`：
+//! 割接门禁。
 //!
 //! 把 CUTOVER 里靠人眼 + 一次性脚本判断的两件事做成可复现命令：
 //!
@@ -9,9 +10,13 @@
 //!   为了区分「数量变了」和「取值变了」。
 //! - **截图阈值判定**：参考目录里的 `frame-<N>.png|ppm` 是旧端在验收机生成的
 //!   参考截图。门禁按 `render-frame` 同一条渲染路径（同一份 `render_world_rgba`）
-//!   渲染第 N 帧，再用总差异比例与结构性（单通道 ≥8）比例两条线判定。阈值缺省
-//!   2% / 0.5%，可用第 4 / 5 个参数覆盖；机器换了参考图就必须重新生成——
-//!   旧端参考跨 GPU 环境会有整片 ±1 的舍入差，不重生成会把门禁变成噪声。
+//!   渲染第 N 帧，再用总差异比例与结构性（单通道 ≥8）比例两条线判定。
+//!
+//! **跨机器的总差异不可信**：旧端参考换 GPU / 驱动会有整片 ±1 的舍入差。参考
+//! 目录里的 `env.json`（由 `xgc gpu-env <参考目录>` 写入）记录生成参考时的 GPU
+//! 指纹；只有指纹一致（或显式给了总差异阈值 / `--strict-total`）才把总差异当
+//! 硬阈值，否则它只打印为诊断，结构性阈值仍然判定。这样仓库里的参考图在别的
+//! 机器上不会变成 16% 的假回归，也不会把真正的结构性变化放过去。
 //!
 //! 退出码：0 全部通过；1 有检查未过（门禁判不通过）；2 用法 / IO / GPU 错误。
 //! 目录里两类参考都没有时按 2 处理：空目录不能当成「通过」。
@@ -19,7 +24,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use xgc_render::{diff_breakdown, diff_images, ImageData};
+use serde::{Deserialize, Serialize};
+use xgc_render::{diff_breakdown, diff_images, GpuContext, ImageData};
 use xgc_sim::{HierarchySystem, System, UiLayoutSystem};
 
 use super::render::render_world_rgba;
@@ -29,12 +35,30 @@ use super::world_cmd::load_world_state;
 /// 缺省判定线：总差异像素比例与结构性（单通道 ≥8）比例。
 const DEFAULT_MAX_TOTAL_PCT: f64 = 2.0;
 const DEFAULT_MAX_STRUCTURAL_PCT: f64 = 0.5;
+const ENV_FILE: &str = "env.json";
 
-/// 单个参考截图的判定线（比例 0..1）。
+/// 单个参考截图的判定线（比例 0..1）。`total_ratio = None` 表示只打印诊断。
 #[derive(Clone, Copy, Debug)]
 struct VisualLimits {
-    total_ratio: f32,
+    total_ratio: Option<f32>,
     structural_ratio: f32,
+}
+
+/// 生成参考截图时的 GPU 指纹。`driver` 允许为空（旧参考没有记录驱动）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GateEnv {
+    pub gpu: String,
+    pub backend: String,
+    #[serde(default)]
+    pub driver: String,
+}
+
+impl GateEnv {
+    fn matches(&self, other: &Self) -> bool {
+        self.gpu == other.gpu
+            && self.backend == other.backend
+            && (self.driver.is_empty() || other.driver.is_empty() || self.driver == other.driver)
+    }
 }
 
 /// `trace.txt` 里一帧的期望值。
@@ -50,19 +74,15 @@ pub fn gate(
     references: Option<&str>,
     max_total: Option<&str>,
     max_structural: Option<&str>,
+    strict_total: bool,
 ) -> ExitCode {
     let (Some(world_path), Some(assets_root), Some(references)) =
         (world_path, assets_root, references)
     else {
-        eprintln!("用法：xgc gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%]");
+        eprintln!(
+            "用法：xgc gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]"
+        );
         return ExitCode::from(2);
-    };
-    let limits = match visual_limits(max_total, max_structural) {
-        Ok(limits) => limits,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::from(2);
-        }
     };
     let references = Path::new(references);
     let expected = match read_trace_reference(&references.join("trace.txt")) {
@@ -85,6 +105,62 @@ pub fn gate(
             references.display()
         );
         return ExitCode::from(2);
+    }
+
+    // 只有结构性差异跨机器稳定；总差异要靠环境指纹确认参考图是同一种
+    // 舍入口径，否则整片 ±1 会把门禁变成假回归。
+    let current_env = if visuals.is_empty() {
+        None
+    } else {
+        match gpu_env() {
+            Ok(env) => Some(env),
+            Err(message) => {
+                eprintln!("{message}");
+                return ExitCode::from(2);
+            }
+        }
+    };
+    let reference_env = match read_gate_env(&references.join(ENV_FILE)) {
+        Ok(env) => env,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::from(2);
+        }
+    };
+    let env_matches = matches!(
+        (&current_env, &reference_env),
+        (Some(current), Some(reference)) if current.matches(reference)
+    );
+    let enforce_total = strict_total || max_total.is_some() || env_matches;
+    let limits = match visual_limits(max_total, max_structural, enforce_total) {
+        Ok(limits) => limits,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Some(current) = &current_env {
+        println!(
+            "gate: gpu={} backend={} driver={}",
+            current.gpu, current.backend, current.driver
+        );
+        match (&reference_env, env_matches) {
+            (Some(reference), true) => println!(
+                "gate: 参考环境指纹一致（{} / {}），总差异按阈值判定",
+                reference.gpu, reference.backend
+            ),
+            (Some(reference), false) => println!(
+                "gate: 参考环境是 {} / {}（本机 {} / {}），总差异仅诊断",
+                reference.gpu, reference.backend, current.gpu, current.backend
+            ),
+            (None, _) => println!(
+                "gate: 参考目录没有 {}，总差异仅诊断（要强制请加 --strict-total）",
+                ENV_FILE
+            ),
+        }
+        if strict_total || max_total.is_some() {
+            println!("gate: 显式要求总差异阈值，按硬判定执行");
+        }
     }
 
     let mut failures = 0usize;
@@ -126,6 +202,7 @@ pub fn gate(
 fn visual_limits(
     max_total: Option<&str>,
     max_structural: Option<&str>,
+    enforce_total: bool,
 ) -> Result<VisualLimits, String> {
     fn percent(value: Option<&str>, default: f64, label: &str) -> Result<f32, String> {
         let percent = match value {
@@ -139,10 +216,77 @@ fn visual_limits(
         }
         Ok((percent / 100.0) as f32)
     }
+    let total_ratio = if enforce_total {
+        Some(percent(max_total, DEFAULT_MAX_TOTAL_PCT, "总差异阈值")?)
+    } else {
+        if max_total.is_some() {
+            return Err("总差异阈值已给定，必须同时按硬阈值执行".to_string());
+        }
+        None
+    };
     Ok(VisualLimits {
-        total_ratio: percent(max_total, DEFAULT_MAX_TOTAL_PCT, "总差异阈值")?,
+        total_ratio,
         structural_ratio: percent(max_structural, DEFAULT_MAX_STRUCTURAL_PCT, "结构性阈值")?,
     })
+}
+
+/// 当前机器的 GPU 指纹；入队与参考记录用同一个来源。
+fn gpu_env() -> Result<GateEnv, String> {
+    let context = GpuContext::headless().map_err(|err| format!("GPU 不可用：{err}"))?;
+    let info = context.adapter_info();
+    Ok(GateEnv {
+        gpu: info.name.clone(),
+        backend: format!("{:?}", info.backend),
+        driver: info.driver.clone(),
+    })
+}
+
+fn read_gate_env(path: &Path) -> Result<Option<GateEnv>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("读取 {} 失败：{err}", path.display())),
+    };
+    let env: GateEnv = serde_json::from_str(&text)
+        .map_err(|err| format!("{} 不是合法的环境指纹：{err}", path.display()))?;
+    Ok(Some(env))
+}
+
+/// `xgc gpu-env <参考目录>`：把本机指纹写进参考目录，之后在同一台机器上
+/// `gate` 才会把总差异当硬阈值。参考图换机器生成时必须重跑这一步。
+pub fn write_env(reference_dir: Option<&str>) -> ExitCode {
+    let dir = Path::new(reference_dir.unwrap_or("acceptance"));
+    let env = match gpu_env() {
+        Ok(env) => env,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::from(1);
+        }
+    };
+    let path = dir.join(ENV_FILE);
+    let text = match serde_json::to_string_pretty(&env) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("环境指纹序列化失败：{err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        eprintln!("创建 {} 失败：{err}", dir.display());
+        return ExitCode::from(1);
+    }
+    if let Err(err) = std::fs::write(&path, text + "\n") {
+        eprintln!("写入 {} 失败：{err}", path.display());
+        return ExitCode::from(1);
+    }
+    println!(
+        "gpu-env: {} / {} / {} -> {}",
+        env.gpu,
+        env.backend,
+        env.driver,
+        path.display()
+    );
+    ExitCode::SUCCESS
 }
 
 /// 读 `trace.txt`；文件不存在返回 `Ok(None)`（参考目录只放截图是合法的）。
@@ -306,11 +450,20 @@ fn check_visual(
     let diff = diff_images(&expected, &actual, 0)?;
     let report = diff_breakdown(&expected, &actual)?;
     let structural = report.buckets.structural_ratio(report.pixels);
-    let ok = diff.ratio <= limits.total_ratio && structural <= limits.structural_ratio;
+    // 总差异在参考环境不一致时只作诊断；结构性差异不受舍入口径影响，始终硬判。
+    let total_ok = match limits.total_ratio {
+        Some(limit) => diff.ratio <= limit,
+        None => true,
+    };
+    let ok = total_ok && structural <= limits.structural_ratio;
+    let total_note = match limits.total_ratio {
+        Some(limit) => format!("（限 {:.2}%）", limit * 100.0),
+        None => "（仅诊断，未判）".to_string(),
+    };
     println!(
-        "gate: frame-{frame} 差异 {:.2}%（限 {:.2}%）结构性 {:.2}%（限 {:.2}%）mean_abs {:.2} max {} -> {}",
+        "gate: frame-{frame} 差异 {:.2}%{} 结构性 {:.2}%（限 {:.2}%）mean_abs {:.2} max {} -> {}",
         diff.ratio * 100.0,
-        limits.total_ratio * 100.0,
+        total_note,
         structural * 100.0,
         limits.structural_ratio * 100.0,
         diff.mean_abs,
@@ -326,19 +479,52 @@ mod tests {
 
     #[test]
     fn limits_default_to_the_recorded_visual_baseline() {
-        let limits = visual_limits(None, None).unwrap();
-        assert!((limits.total_ratio - 0.02).abs() < 1e-6);
+        let limits = visual_limits(None, None, true).unwrap();
+        assert!((limits.total_ratio.unwrap() - 0.02).abs() < 1e-6);
         assert!((limits.structural_ratio - 0.005).abs() < 1e-6);
     }
 
     #[test]
+    fn total_is_diagnostic_only_when_environment_is_unknown() {
+        let limits = visual_limits(None, None, false).unwrap();
+        assert!(limits.total_ratio.is_none());
+        assert!((limits.structural_ratio - 0.005).abs() < 1e-6);
+        // 显式给了总差异阈值却又不判，是调用方错误。
+        assert!(visual_limits(Some("2"), None, false).is_err());
+    }
+
+    #[test]
     fn limits_reject_out_of_range_and_garbage() {
-        assert!(visual_limits(Some("101"), None).is_err());
-        assert!(visual_limits(None, Some("-1")).is_err());
-        assert!(visual_limits(Some("abc"), None).is_err());
-        let limits = visual_limits(Some("1.5"), Some("0.25")).unwrap();
-        assert!((limits.total_ratio - 0.015).abs() < 1e-6);
+        assert!(visual_limits(Some("101"), None, true).is_err());
+        assert!(visual_limits(None, Some("-1"), true).is_err());
+        assert!(visual_limits(Some("abc"), None, true).is_err());
+        let limits = visual_limits(Some("1.5"), Some("0.25"), true).unwrap();
+        assert!((limits.total_ratio.unwrap() - 0.015).abs() < 1e-6);
         assert!((limits.structural_ratio - 0.0025).abs() < 1e-6);
+    }
+
+    #[test]
+    fn env_match_requires_the_same_adapter_and_tolerates_a_missing_driver() {
+        let recorded = GateEnv {
+            gpu: "GPU A".to_string(),
+            backend: "Vulkan".to_string(),
+            driver: "1.0".to_string(),
+        };
+        let same = GateEnv {
+            gpu: "GPU A".to_string(),
+            backend: "Vulkan".to_string(),
+            driver: "1.0".to_string(),
+        };
+        assert!(recorded.matches(&same));
+        let mut no_driver = same.clone();
+        no_driver.driver.clear();
+        assert!(recorded.matches(&no_driver));
+        let mut other_backend = same.clone();
+        other_backend.backend = "Dx12".to_string();
+        assert!(!recorded.matches(&other_backend));
+        let mut other_gpu = same.clone();
+        other_gpu.gpu = "GPU B".to_string();
+        assert!(!recorded.matches(&other_gpu));
     }
 
     #[test]
