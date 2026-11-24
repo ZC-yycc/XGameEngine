@@ -22,7 +22,8 @@ pub use binary::{decode_world, encode_world, load_world_binary, save_world_binar
 
 mod project;
 pub use project::{
-    load_project, save_project, ProjectContent, ProjectManifest, PROJECT_FORMAT_VERSION,
+    load_project, save_project, ProjectContent, ProjectManifest, ProjectSession,
+    PROJECT_FORMAT_VERSION,
 };
 
 #[derive(Debug)]

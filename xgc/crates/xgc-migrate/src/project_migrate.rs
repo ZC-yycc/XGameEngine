@@ -19,8 +19,8 @@ use xgc_store::{
     save_project, save_world, ProjectContent, ProjectManifest, PROJECT_FORMAT_VERSION,
 };
 
-use crate::project_check::{check_old_project, read_old_project, ProjectCheckError};
 use crate::migrate_str;
+use crate::project_check::{check_old_project, read_old_project, ProjectCheckError};
 
 #[derive(Debug)]
 pub enum ProjectMigrationError {
@@ -28,9 +28,18 @@ pub enum ProjectMigrationError {
     /// 项目体检有问题；迁移拒绝开始，输出目录不会被创建。
     Problems(Vec<String>),
     OutputExists(PathBuf),
-    Io { path: PathBuf, message: String },
-    Scene { scene: String, message: String },
-    Write { path: PathBuf, message: String },
+    Io {
+        path: PathBuf,
+        message: String,
+    },
+    Scene {
+        scene: String,
+        message: String,
+    },
+    Write {
+        path: PathBuf,
+        message: String,
+    },
     Manifest(String),
 }
 
@@ -76,7 +85,11 @@ pub struct ProjectMigrationReport {
 
 impl ProjectMigrationReport {
     pub fn render(&self) -> String {
-        let suffix = if self.dry_run { "（dry-run，未写盘）" } else { "" };
+        let suffix = if self.dry_run {
+            "（dry-run，未写盘）"
+        } else {
+            ""
+        };
         format!(
             "migrate: project={} scenes={} entities={} copied={} -> {}{}",
             self.name,
@@ -170,7 +183,12 @@ fn plan_project(
 
     let mut ordered = Vec::new();
     let mut seen = BTreeSet::new();
-    if !project.build.scenes.iter().any(|scene| scene.trim() == project.entry_scene.trim()) {
+    if !project
+        .build
+        .scenes
+        .iter()
+        .any(|scene| scene.trim() == project.entry_scene.trim())
+    {
         ordered.push(entry.clone());
         seen.insert(entry.clone());
     }
@@ -266,7 +284,9 @@ fn plan_project(
         search_paths,
         input: copy_files.first().cloned(),
     };
-    manifest.validate().map_err(|err| ProjectMigrationError::Manifest(err.to_string()))?;
+    manifest
+        .validate()
+        .map_err(|err| ProjectMigrationError::Manifest(err.to_string()))?;
 
     let mut copied_files = 0;
     for dir in &copy_dirs {
@@ -288,14 +308,14 @@ fn plan_project(
 
 fn scene_output(old: &str, scenes_dir: &str) -> Result<String, ProjectMigrationError> {
     let prefix = format!("{scenes_dir}/");
-    let relative = old.strip_prefix(&prefix).unwrap_or_else(|| {
-        old.rsplit_once('/')
-            .map(|(_, file)| file)
-            .unwrap_or(old)
-    });
+    let relative = old
+        .strip_prefix(&prefix)
+        .unwrap_or_else(|| old.rsplit_once('/').map(|(_, file)| file).unwrap_or(old));
     let stem = relative.strip_suffix(".ron").unwrap_or(relative);
     if stem.is_empty() {
-        return Err(ProjectMigrationError::Manifest(format!("场景路径没有文件名：{old}")));
+        return Err(ProjectMigrationError::Manifest(format!(
+            "场景路径没有文件名：{old}"
+        )));
     }
     Ok(format!("scenes/{stem}.json"))
 }
@@ -373,10 +393,12 @@ fn copy_file(source: &Path, target: &Path) -> Result<(), ProjectMigrationError> 
             message: err.to_string(),
         })?;
     }
-    fs::copy(source, target).map(|_| ()).map_err(|err| ProjectMigrationError::Io {
-        path: source.to_path_buf(),
-        message: err.to_string(),
-    })
+    fs::copy(source, target)
+        .map(|_| ())
+        .map_err(|err| ProjectMigrationError::Io {
+            path: source.to_path_buf(),
+            message: err.to_string(),
+        })
 }
 
 fn count_files(path: &Path) -> std::io::Result<usize> {
@@ -394,9 +416,8 @@ fn count_files(path: &Path) -> std::io::Result<usize> {
 }
 
 fn normalize(raw: &str) -> Result<String, ProjectMigrationError> {
-    normalize_project_relative(raw).map_err(|defect| {
-        ProjectMigrationError::Manifest(format!("路径不合法（{raw}）：{defect}"))
-    })
+    normalize_project_relative(raw)
+        .map_err(|defect| ProjectMigrationError::Manifest(format!("路径不合法（{raw}）：{defect}")))
 }
 
 fn staging_path(output: &Path) -> PathBuf {

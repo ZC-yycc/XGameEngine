@@ -361,3 +361,65 @@ fn editor_play_applies_root_motion_like_the_cli() {
     editor.stop().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn opens_a_migrated_project_through_its_manifest() {
+    use xgc_store::{save_project, ProjectContent, ProjectManifest};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_editor_project_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut world = World::new();
+    world.spawn((
+        Name {
+            value: "hero".to_string(),
+        },
+        Transform::default(),
+    ));
+    xgc_store::save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();
+    save_project(
+        &dir.join("project.xgc"),
+        &ProjectManifest {
+            format_version: xgc_store::PROJECT_FORMAT_VERSION,
+            name: "demo".to_string(),
+            entry_scene: "scenes/main.json".to_string(),
+            scenes: vec!["scenes/main.json".to_string()],
+            content: ProjectContent {
+                models: "Resources".to_string(),
+                textures: "Resources".to_string(),
+                audio: "Resources".to_string(),
+                shaders: None,
+                prefabs: "Prefabs".to_string(),
+                scripts: "Scripts".to_string(),
+            },
+            search_paths: Vec::new(),
+            input: None,
+        },
+    )
+    .unwrap();
+
+    let mut editor = EditorState::open(&dir).unwrap();
+    assert_eq!(editor.project_name(), Some("demo"));
+    assert_eq!(editor.project_root(), Some(dir.as_path()));
+    assert_eq!(editor.entities().len(), 1);
+    assert!(editor.path().unwrap().ends_with("scenes/main.json"));
+    editor
+        .edit_field(
+            editor.entities()[0].id,
+            0x0101,
+            "position",
+            Value::Vec3([1.0, 2.0, 3.0]),
+        )
+        .unwrap();
+    editor.save().unwrap();
+    let reloaded = EditorState::open(&dir).unwrap();
+    assert_eq!(reloaded.project_name(), Some("demo"));
+    assert_eq!(reloaded.entities().len(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

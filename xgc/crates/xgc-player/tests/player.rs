@@ -101,3 +101,57 @@ fn player_applies_root_motion_in_the_same_order_as_the_cli() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn runs_project_entry_scene_from_manifest() {
+    use xgc_store::{save_project, ProjectContent, ProjectManifest};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_player_project_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+    std::fs::write(
+        dir.join("Scripts/move.lua"),
+        "function update(ctx)\n  local p = entity_pos(ctx, self_id(ctx))\n  set_pos(ctx, p.x + 1.0, p.y, p.z)\nend\n",
+    )
+    .unwrap();
+    let mut world = World::new();
+    world.spawn((
+        Transform::default(),
+        Script {
+            path: "Scripts/move.lua".to_string(),
+        },
+    ));
+    xgc_store::save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();
+    save_project(
+        &dir.join("project.xgc"),
+        &ProjectManifest {
+            format_version: xgc_store::PROJECT_FORMAT_VERSION,
+            name: "demo".to_string(),
+            entry_scene: "scenes/main.json".to_string(),
+            scenes: vec!["scenes/main.json".to_string()],
+            content: ProjectContent {
+                models: "Resources".to_string(),
+                textures: "Resources".to_string(),
+                audio: "Resources".to_string(),
+                shaders: None,
+                prefabs: "Prefabs".to_string(),
+                scripts: "Scripts".to_string(),
+            },
+            search_paths: Vec::new(),
+            input: None,
+        },
+    )
+    .unwrap();
+
+    let stats = xgc_player::run_cooked(&dir, 3).unwrap();
+    assert_eq!(stats.frames, 3);
+    assert_eq!(stats.entities, 1);
+    assert_eq!(stats.scripts, 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

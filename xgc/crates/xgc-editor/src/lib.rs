@@ -16,7 +16,7 @@ use xgc_base::EntityId;
 use xgc_reflect::{Registry, Value};
 use xgc_script::ScriptRuntime;
 use xgc_sim::{InputMap, ParticleSystem, Simulation};
-use xgc_store::{load_world, save_world};
+use xgc_store::{load_world, save_world, ProjectSession};
 use xgc_world::{
     builtin_registry, Camera, Command, ComponentData, ComponentId, GlobalTransform, Material,
     MeshRenderer, Name, RootMotionLibrary, Transform, World, WorldData,
@@ -54,6 +54,8 @@ pub struct EditorState {
     world: World,
     registry: Registry,
     path: Option<PathBuf>,
+    /// 从项目打开时才有；`path` 此时是入口场景路径，保存仍写场景本身。
+    project: Option<ProjectSession>,
     selected: Option<EntityId>,
     dirty: bool,
     play: Option<PlaySession>,
@@ -73,6 +75,7 @@ impl EditorState {
             world,
             registry: builtin_registry(),
             path: None,
+            project: None,
             selected: None,
             dirty: false,
             play: None,
@@ -116,7 +119,24 @@ impl EditorState {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
-        let data = load_world(path).map_err(|err| format!("读取世界失败：{err}"))?;
+        let is_project = path.is_dir()
+            || path
+                .file_name()
+                .is_some_and(|name| name == std::ffi::OsStr::new("project.xgc"));
+        let (data, scene_path, project) = if is_project {
+            let session =
+                ProjectSession::open(path).map_err(|err| format!("读取项目失败：{err}"))?;
+            let scene_path = session
+                .scene_path(session.entry_scene())
+                .map_err(|err| format!("入口场景路径不合法：{err}"))?;
+            let data = session
+                .load_entry()
+                .map_err(|err| format!("读取入口场景失败：{err}"))?;
+            (data, scene_path, Some(session))
+        } else {
+            let data = load_world(path).map_err(|err| format!("读取世界失败：{err}"))?;
+            (data, path.to_path_buf(), None)
+        };
         let mut world = World::new();
         world
             .restore_world_data(&data)
@@ -124,7 +144,8 @@ impl EditorState {
         Ok(Self {
             world,
             registry: builtin_registry(),
-            path: Some(path.to_path_buf()),
+            path: Some(scene_path),
+            project,
             selected: None,
             dirty: false,
             play: None,
@@ -135,6 +156,18 @@ impl EditorState {
 
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    /// 项目名；单场景打开时为 None。
+    pub fn project_name(&self) -> Option<&str> {
+        self.project
+            .as_ref()
+            .map(|session| session.manifest().name.as_str())
+    }
+
+    /// 项目根；单场景打开时为 None。Play Scripts 默认用它。
+    pub fn project_root(&self) -> Option<&Path> {
+        self.project.as_ref().map(ProjectSession::root)
     }
 
     pub fn is_dirty(&self) -> bool {

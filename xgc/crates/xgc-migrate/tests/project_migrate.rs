@@ -43,7 +43,11 @@ fn write(root: &Path, rel: &str, text: &str) {
 }
 
 fn write_meta(root: &Path, rel: &str, guid: &str) {
-    write(root, &format!("{rel}.meta"), &format!("(guid: \"{guid}\")\n"));
+    write(
+        root,
+        &format!("{rel}.meta"),
+        &format!("(guid: \"{guid}\")\n"),
+    );
 }
 
 fn setup(label: &str, project_ron: &str, scenes: &[(&str, &str)]) -> PathBuf {
@@ -68,7 +72,10 @@ fn standard_project(label: &str) -> (PathBuf, PathBuf) {
         label,
         &project("Scenes/a.ron", &["Scenes/a.ron", "Scenes/b.ron"]),
         &[
-            ("Scenes/a.ron", &scene(&format!("{},{}", entity(1), entity(2)))),
+            (
+                "Scenes/a.ron",
+                &scene(&format!("{},{}", entity(1), entity(2))),
+            ),
             ("Scenes/b.ron", &scene(&entity(3))),
             ("Prefabs/P.prefab.ron", &scene(&entity(7))),
             ("Scripts/main.lua", "function update(ctx) end\n"),
@@ -123,9 +130,24 @@ fn migrates_listed_scenes_and_content() {
     assert_eq!(manifest.input.as_deref(), Some("input.ron"));
     assert_eq!(manifest.content.shaders, None);
 
-    assert_eq!(load_world(&out.join("scenes/a.json")).unwrap().entities.len(), 2);
-    assert_eq!(load_world(&out.join("scenes/b.json")).unwrap().entities.len(), 1);
-    assert_eq!(fs::read_to_string(out.join("Resources/model.bin")).unwrap(), "mesh");
+    assert_eq!(
+        load_world(&out.join("scenes/a.json"))
+            .unwrap()
+            .entities
+            .len(),
+        2
+    );
+    assert_eq!(
+        load_world(&out.join("scenes/b.json"))
+            .unwrap()
+            .entities
+            .len(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(out.join("Resources/model.bin")).unwrap(),
+        "mesh"
+    );
     assert!(out.join("Resources/model.bin.meta").is_file());
     assert!(out.join("Scripts/main.lua").is_file());
     assert!(out.join("Prefabs/P.prefab.ron").is_file());
@@ -141,7 +163,10 @@ fn refuses_existing_output() {
     let (root, out) = standard_project("exists");
     fs::create_dir_all(&out).unwrap();
     let err = migrate_old_project(&root, &out, false).unwrap_err();
-    assert!(matches!(err, ProjectMigrationError::OutputExists(_)), "{err}");
+    assert!(
+        matches!(err, ProjectMigrationError::OutputExists(_)),
+        "{err}"
+    );
     assert!(!staging_of(&out).exists());
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&out);
@@ -154,7 +179,10 @@ fn refuses_a_project_with_check_problems() {
         &project("Scenes/a.ron", &["Scenes/a.ron", "Scenes/missing.ron"]),
         &[("Scenes/a.ron", &scene(&entity(1)))],
     );
-    let out = std::env::temp_dir().join(format!("xgc-project-migrate-bad-out-{}", std::process::id()));
+    let out = std::env::temp_dir().join(format!(
+        "xgc-project-migrate-bad-out-{}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&out);
     let err = migrate_old_project(&root, &out, false).unwrap_err();
     assert!(matches!(err, ProjectMigrationError::Problems(_)), "{err}");
@@ -173,7 +201,10 @@ fn prepends_entry_when_build_omits_it() {
             ("Scenes/b.ron", &scene(&entity(2))),
         ],
     );
-    let out = std::env::temp_dir().join(format!("xgc-project-migrate-entry-out-{}", std::process::id()));
+    let out = std::env::temp_dir().join(format!(
+        "xgc-project-migrate-entry-out-{}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&out);
     let report = migrate_old_project(&root, &out, false).unwrap();
     assert_eq!(report.scenes, 2);
@@ -203,7 +234,10 @@ fn nested_scene_keeps_subdirectory() {
         &project("Scenes/Levels/a.ron", &["Scenes/Levels/a.ron"]),
         &[("Scenes/Levels/a.ron", &scene(&entity(1)))],
     );
-    let out = std::env::temp_dir().join(format!("xgc-project-migrate-nested-out-{}", std::process::id()));
+    let out = std::env::temp_dir().join(format!(
+        "xgc-project-migrate-nested-out-{}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&out);
     migrate_old_project(&root, &out, false).unwrap();
     assert!(out.join("scenes/Levels/a.json").is_file());

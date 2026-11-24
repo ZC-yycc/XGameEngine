@@ -64,6 +64,10 @@ pub struct EditorApp {
 
 impl EditorApp {
     pub fn new(state: EditorState) -> Self {
+        let script_root = state
+            .project_root()
+            .map(|root| root.display().to_string())
+            .unwrap_or_default();
         Self {
             state,
             status: None,
@@ -79,7 +83,7 @@ impl EditorApp {
             scale_step: 0.1,
             prefab_path: String::new(),
             prefab_position: [0.0; 3],
-            script_root: String::new(),
+            script_root,
         }
     }
 

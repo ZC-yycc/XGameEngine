@@ -6,12 +6,12 @@
 //! 路径一律是项目相对路径（正斜杠），读写边界都走
 //! `xgc_base::path::normalize_project_relative`，不在这里另写一套。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use xgc_base::path::normalize_project_relative;
 
-use crate::{write_atomic, Result, StoreError};
+use crate::{load_world, write_atomic, Result, StoreError};
 
 /// 清单格式版本；新增必填字段必须同时上调。
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
@@ -65,7 +65,9 @@ impl ProjectManifest {
         for scene in &self.scenes {
             let scene = self.normalized("scenes", scene)?;
             if !seen.insert(scene.clone()) {
-                return Err(StoreError::Format(format!("project.xgc 重复登记场景：{scene}")));
+                return Err(StoreError::Format(format!(
+                    "project.xgc 重复登记场景：{scene}"
+                )));
             }
         }
         if !seen.contains(&entry) {
@@ -112,4 +114,67 @@ pub fn load_project(path: &Path) -> Result<ProjectManifest> {
         .map_err(|err| StoreError::Format(format!("project.xgc 解析失败：{err}")))?;
     manifest.validate()?;
     Ok(manifest)
+}
+
+/// 已打开的项目：清单 + 根目录。三个宿主都从这里取入口场景与内容根，
+/// 不再各自拼 `entry_scene` 的路径。
+#[derive(Clone, Debug)]
+pub struct ProjectSession {
+    root: PathBuf,
+    manifest: ProjectManifest,
+}
+
+impl ProjectSession {
+    /// `path` 可以是项目目录，也可以直接是 `project.xgc`。
+    pub fn open(path: &Path) -> Result<Self> {
+        let manifest_path = if path.is_dir() {
+            path.join("project.xgc")
+        } else {
+            path.to_path_buf()
+        };
+        let manifest = load_project(&manifest_path)?;
+        let root = manifest_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Ok(Self { root, manifest })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn manifest(&self) -> &ProjectManifest {
+        &self.manifest
+    }
+
+    pub fn entry_scene(&self) -> &str {
+        &self.manifest.entry_scene
+    }
+
+    /// 场景路径一律由清单的相对路径拼根目录；未登记的场景直接拒绝，
+    /// 避免拼出项目外路径。
+    pub fn scene_path(&self, scene: &str) -> Result<PathBuf> {
+        let scene = normalize_project_relative(scene)
+            .map_err(|defect| StoreError::Format(format!("场景路径不合法（{scene}）：{defect}")))?;
+        let registered = self.manifest.scenes.iter().any(|known| {
+            normalize_project_relative(known)
+                .map(|known| known == scene)
+                .unwrap_or(false)
+        });
+        if !registered {
+            return Err(StoreError::Format(format!(
+                "场景没有登记在 project.xgc 里：{scene}"
+            )));
+        }
+        Ok(self.root.join(scene))
+    }
+
+    pub fn load_scene(&self, scene: &str) -> Result<xgc_world::WorldData> {
+        load_world(&self.scene_path(scene)?)
+    }
+
+    pub fn load_entry(&self) -> Result<xgc_world::WorldData> {
+        self.load_scene(&self.manifest.entry_scene)
+    }
 }

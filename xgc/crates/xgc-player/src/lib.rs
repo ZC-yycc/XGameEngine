@@ -6,7 +6,7 @@ use xgc_asset::scan;
 use xgc_render::MeshCache;
 use xgc_script::ScriptRuntime;
 use xgc_sim::{apply_root_motion, Simulation};
-use xgc_store::load_world;
+use xgc_store::{load_world, ProjectSession};
 use xgc_world::{World, WorldData};
 
 pub mod window;
@@ -20,7 +20,16 @@ pub struct PlayerStats {
 }
 
 /// 固定 60Hz 跑 `frames` 帧；`world.json`、脚本与资产都从 `dir` 读取。
+///
+/// `dir` 里有 `project.xgc` 时按项目打开：入口场景来自清单，资产与脚本根
+/// 仍是 `dir`。项目与 cooked 目录都不认单文件参数——资产相对路径需要一个根。
 pub fn load_world_dir(dir: &Path) -> Result<WorldData, String> {
+    if dir.join("project.xgc").is_file() {
+        let session = ProjectSession::open(dir).map_err(|err| format!("读取项目失败：{err}"))?;
+        return session
+            .load_entry()
+            .map_err(|err| format!("读取入口场景失败：{err}"));
+    }
     xgc_asset::verify_manifest(dir)
         .map_err(|differences| format!("cooked 文件校验失败：{}", differences.join("；")))?;
     let binary = dir.join("world.xgcb");

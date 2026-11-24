@@ -1,4 +1,6 @@
-//! `xgc-player <cooked 目录> [帧数]`。
+//! `xgc-player <cooked 目录 | 项目目录> [帧数]`。
+//!
+//! 项目目录以 `project.xgc` 为标记；此时入口场景由清单给出，资产根仍是目录本身。
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -6,7 +8,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(dir) = args.next() else {
-        eprintln!("用法：xgc-player <cooked 目录> [帧数]");
+        eprintln!("用法：xgc-player <cooked 目录 | 项目目录> [帧数]");
         return ExitCode::from(2);
     };
     let frames = match args.next() {

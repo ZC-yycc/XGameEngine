@@ -42,9 +42,7 @@ pub use prefab::{instantiate_prefab, revert_prefab};
 pub use project_check::{
     check_old_project, ProjectCheckError, ProjectCheckReport, OLD_PROJECT_FORMAT_VERSION,
 };
-pub use project_migrate::{
-    migrate_old_project, ProjectMigrationError, ProjectMigrationReport,
-};
+pub use project_migrate::{migrate_old_project, ProjectMigrationError, ProjectMigrationReport};
 pub use report::{component_id_name, MigrationBatch, MigrationError, MigrationReport};
 pub use verify::verify_migration;
 #[derive(Debug, Default, Deserialize)]
