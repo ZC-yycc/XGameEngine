@@ -11,12 +11,15 @@ use mlua::{
     Value as LuaValue, VmState,
 };
 use xgc_base::EntityId;
-use xgc_world::{builtin_registry, Command, Transform, Value, World};
+use xgc_world::{builtin_registry, Command, Transform, World};
+
+use lua_value::{lua_to_value, value_to_lua};
 
 mod character_api;
 mod component_data;
 mod legacy;
 mod lifecycle;
+mod lua_value;
 mod runtime;
 mod ui_api;
 mod ui_focus_api;
@@ -532,66 +535,4 @@ fn component_id(name: &str) -> mlua::Result<xgc_world::ComponentId> {
         .by_name(name)
         .map(|schema| xgc_world::ComponentId(schema.id))
         .ok_or_else(|| mlua::Error::RuntimeError(format!("未知组件：{name}")))
-}
-
-fn value_to_lua(lua: &Lua, value: &Value) -> mlua::Result<mlua::Value> {
-    Ok(match value {
-        Value::Bool(value) => mlua::Value::Boolean(*value),
-        Value::I64(value) => mlua::Value::Integer(*value),
-        Value::F64(value) => mlua::Value::Number(*value),
-        Value::String(value) => mlua::Value::String(lua.create_string(value)?),
-        Value::Vec2(value) => vec_table(lua, value)?,
-        Value::Vec3(value) => vec_table(lua, value)?,
-        Value::Vec4(value) | Value::Quat(value) => vec_table(lua, value)?,
-        Value::Entity(value) => mlua::Value::Integer(*value as i64),
-        Value::List(items) => {
-            let table = lua.create_table_with_capacity(items.len(), 0)?;
-            for (index, item) in items.iter().enumerate() {
-                table.raw_set(index + 1, value_to_lua(lua, item)?)?;
-            }
-            mlua::Value::Table(table)
-        }
-        Value::Struct(fields) => {
-            let table = lua.create_table_with_capacity(0, fields.len())?;
-            for (name, value) in fields {
-                table.raw_set(name.as_str(), value_to_lua(lua, value)?)?;
-            }
-            mlua::Value::Table(table)
-        }
-    })
-}
-
-fn vec_table(lua: &Lua, values: &[f64]) -> mlua::Result<mlua::Value> {
-    let table = lua.create_table()?;
-    for (name, value) in ["x", "y", "z", "w"].into_iter().zip(values) {
-        table.set(name, *value)?;
-    }
-    Ok(mlua::Value::Table(table))
-}
-
-fn lua_to_value(value: &mlua::Value) -> mlua::Result<Value> {
-    match value {
-        mlua::Value::Boolean(value) => Ok(Value::Bool(*value)),
-        mlua::Value::Integer(value) => Ok(Value::I64(*value)),
-        mlua::Value::Number(value) => Ok(Value::F64(*value)),
-        mlua::Value::String(value) => Ok(Value::String(value.to_str()?.to_string())),
-        mlua::Value::Table(table) => {
-            let x = table.get::<Option<f64>>("x")?;
-            let y = table.get::<Option<f64>>("y")?;
-            let z = table.get::<Option<f64>>("z")?;
-            let w = table.get::<Option<f64>>("w")?;
-            match (x, y, z, w) {
-                (Some(x), Some(y), Some(z), Some(w)) => Ok(Value::Vec4([x, y, z, w])),
-                (Some(x), Some(y), Some(z), None) => Ok(Value::Vec3([x, y, z])),
-                (Some(x), Some(y), None, None) => Ok(Value::Vec2([x, y])),
-                _ => Err(mlua::Error::RuntimeError(
-                    "向量表需要 x/y[/z[/w]] 字段".to_string(),
-                )),
-            }
-        }
-        other => Err(mlua::Error::RuntimeError(format!(
-            "不支持的 Lua 值：{}",
-            other.type_name()
-        ))),
-    }
 }

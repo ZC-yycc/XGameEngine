@@ -20,11 +20,13 @@ pub struct FieldSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
     pub doc: String,
-    /// 元素节点的默认值供列表插入使用，即使列表本身缺省为空。
+    /// 列表元素或映射值的描述，其默认值供插入使用。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub element: Option<Box<FieldSchema>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<FieldSchema>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<FieldSchema>,
 }
 
 impl FieldSchema {
@@ -38,8 +40,19 @@ impl FieldSchema {
             ("struct", Value::Struct(values)) => {
                 struct_fits(values, &self.fields, |field| &field.name, FieldSchema::fits)
             }
+            ("map", Value::Map(values)) => self
+                .element
+                .as_ref()
+                .is_some_and(|element| values.values().all(|value| element.fits(value))),
+            ("enum", Value::Enum { variant, payload }) => self
+                .variant(variant)
+                .is_some_and(|branch| branch.fits(payload)),
             (ty, value) => FieldType::parse(ty).is_some_and(|ty| value.fits(&ty)),
         }
+    }
+
+    pub fn variant(&self, name: &str) -> Option<&Self> {
+        self.variants.iter().find(|branch| branch.name == name)
     }
 }
 
@@ -49,10 +62,21 @@ impl From<FieldDescriptor> for FieldSchema {
             .range
             .map_or((None, None), |(min, max)| (Some(min), Some(max)));
         let ty = field.ty.as_str().to_string();
-        let (element, fields) = match field.ty {
-            FieldType::List(element) => (Some(Box::new(Self::from(*element))), Vec::new()),
-            FieldType::Struct(fields) => (None, fields.into_iter().map(Self::from).collect()),
-            _ => (None, Vec::new()),
+        let (element, fields, variants) = match field.ty {
+            FieldType::List(element) | FieldType::Map(element) => {
+                (Some(Box::new(Self::from(*element))), Vec::new(), Vec::new())
+            }
+            FieldType::Struct(fields) => (
+                None,
+                fields.into_iter().map(Self::from).collect(),
+                Vec::new(),
+            ),
+            FieldType::Enum(variants) => (
+                None,
+                Vec::new(),
+                variants.into_iter().map(Self::from).collect(),
+            ),
+            _ => (None, Vec::new(), Vec::new()),
         };
         Self {
             name: field.name.to_string(),
@@ -65,6 +89,7 @@ impl From<FieldDescriptor> for FieldSchema {
             doc: field.doc.to_string(),
             element,
             fields,
+            variants,
         }
     }
 }
@@ -114,4 +139,17 @@ fn validate_field(field: &FieldSchema, path: &str, diagnostics: &mut Vec<Diagnos
         validate_field(element, &format!("{path}[]"), diagnostics);
     }
     validate_fields(&field.fields, path, diagnostics);
+    validate_fields(&field.variants, path, diagnostics);
+    for branch in &field.variants {
+        if !branch.name.is_empty()
+            && !super::FieldPath::parse(&branch.name).is_ok_and(|path| path.is_root())
+        {
+            diagnostics.push(Diagnostic::new(
+                "SCHEMA.INVALID_VARIANT",
+                Severity::Error,
+                Subject::Field(format!("{path}.{}", branch.name)),
+                "分支名不能用于字段路径",
+            ));
+        }
+    }
 }

@@ -88,6 +88,10 @@ pub enum FieldType {
     Entity,
     List(Box<FieldDescriptor>),
     Struct(Vec<FieldDescriptor>),
+    /// 键是字符串，所有值共用同一份描述。
+    Map(Box<FieldDescriptor>),
+    /// 每个分支的名字和载荷由描述节点提供；无载荷用空结构体。
+    Enum(Vec<FieldDescriptor>),
 }
 
 impl FieldType {
@@ -106,6 +110,8 @@ impl FieldType {
             Self::Entity => "entity",
             Self::List(_) => "list",
             Self::Struct(_) => "struct",
+            Self::Map(_) => "map",
+            Self::Enum(_) => "enum",
         }
     }
 
@@ -146,6 +152,11 @@ pub enum Value {
     Entity(u64),
     List(Vec<Value>),
     Struct(BTreeMap<String, Value>),
+    Map(BTreeMap<String, Value>),
+    Enum {
+        variant: String,
+        payload: Box<Value>,
+    },
 }
 
 /// 字段描述：字段名、类型、默认值、单位、范围、文档。

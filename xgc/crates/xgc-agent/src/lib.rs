@@ -18,6 +18,9 @@ mod mcp;
 mod query;
 mod snapshot;
 
+#[cfg(test)]
+mod container_tests;
+
 pub use mcp::Mcp;
 use query::{axis_index, FieldRef, Filter, FilterOp};
 

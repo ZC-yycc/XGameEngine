@@ -53,7 +53,6 @@ fn malformed_paths_are_rejected() {
         "events]",
         "events[0]]",
         "events[0]time",
-        "events[\"name\"]",
         "events[0].",
         " events",
         "events ",
@@ -73,6 +72,7 @@ fn failed_traversal_leaves_the_value_untouched() {
         "events.time",
         "events[0].missing",
         "events[0][0]",
+        "events[\"name\"]",
         "events[0].time.x",
     ] {
         let path = FieldPath::parse(path).unwrap();

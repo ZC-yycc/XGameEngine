@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use xgc_base::diagnostics as codes;
 use xgc_base::{Diagnostic, Severity, Subject};
-use xgc_reflect::{FieldSchema, FieldType, Registry, Value};
+use xgc_reflect::{FieldPath, FieldSchema, FieldType, Registry, Value};
 
 use super::{World, WorldData};
 
@@ -66,7 +66,7 @@ impl World {
                         ));
                         continue;
                     };
-                    if !matches!(field.ty.as_str(), "list" | "struct")
+                    if !matches!(field.ty.as_str(), "list" | "struct" | "map" | "enum")
                         && FieldType::parse(&field.ty).is_none()
                     {
                         diagnostics.push(field_diag(
@@ -146,6 +146,32 @@ fn validate_ranges(
                         diagnostics,
                     );
                 }
+            }
+            return;
+        }
+        Value::Map(values) => {
+            if let Some(element) = &field.element {
+                for (key, item) in values {
+                    validate_ranges(
+                        element,
+                        item,
+                        component,
+                        &format!("{path}{}", FieldPath::key_segment(key)),
+                        diagnostics,
+                    );
+                }
+            }
+            return;
+        }
+        Value::Enum { variant, payload } => {
+            if let Some(branch) = field.variant(variant) {
+                validate_ranges(
+                    branch,
+                    payload,
+                    component,
+                    &format!("{path}.{variant}"),
+                    diagnostics,
+                );
             }
             return;
         }

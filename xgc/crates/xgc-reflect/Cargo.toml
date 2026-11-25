@@ -9,6 +9,4 @@ description = "XGame Core 组件注册表与 schema 生成"
 [dependencies]
 xgc-base = { path = "../xgc-base" }
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

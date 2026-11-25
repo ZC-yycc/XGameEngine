@@ -5,6 +5,8 @@ use xgc_reflect::{FieldSchema, Value};
 
 use super::EditorApp;
 
+mod containers;
+
 #[cfg(test)]
 mod tests;
 
@@ -70,7 +72,7 @@ impl EditorApp {
                 });
             }
         });
-        // 所有控件看同一份快照；增删列表项时，索引不会在遍历中途移动。
+        // 所有控件看同一份快照，容器结构改动等遍历结束再提交。
         if let Some(action) = action {
             self.status = match action {
                 InspectorAction::Add(name) => Some(match self.state.add_component(entity, &name) {
@@ -124,6 +126,10 @@ fn field_row(
             response.body_returned.flatten()
         }
         Value::List(items) => list_rows(ui, schema, items, label, path, editable),
+        Value::Map(entries) => containers::map_rows(ui, schema, entries, label, path, editable),
+        Value::Enum { variant, payload } => {
+            containers::enum_rows(ui, schema, variant, payload, label, path, editable)
+        }
         leaf => {
             ui.horizontal(|ui| {
                 let label = match &schema.unit {
@@ -257,7 +263,9 @@ fn value_editor(ui: &mut egui::Ui, value: &Value) -> Option<Value> {
             let mut edited = *current;
             edit_vector(ui, &mut edited).then_some(Value::Quat(edited))
         }
-        Value::List(_) | Value::Struct(_) => unreachable!("容器字段已递归展开"),
+        Value::List(_) | Value::Struct(_) | Value::Map(_) | Value::Enum { .. } => {
+            unreachable!("容器字段已递归展开")
+        }
     }
 }
 

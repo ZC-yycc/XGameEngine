@@ -27,6 +27,13 @@ impl Value {
                 |field| field.name,
                 |field, value| value.fits(&field.ty),
             ),
+            (Self::Map(values), FieldType::Map(element)) => {
+                values.values().all(|value| value.fits(&element.ty))
+            }
+            (Self::Enum { variant, payload }, FieldType::Enum(variants)) => variants
+                .iter()
+                .find(|branch| branch.name == variant)
+                .is_some_and(|branch| payload.fits(&branch.ty)),
             _ => false,
         }
     }
@@ -48,6 +55,8 @@ impl Value {
             Self::Entity(_) => "entity",
             Self::List(_) => "list",
             Self::Struct(_) => "struct",
+            Self::Map(_) => "map",
+            Self::Enum { .. } => "enum",
         }
     }
 
@@ -149,16 +158,28 @@ impl Value {
                     mix_child(hash, value);
                 }
             }
-            Self::Struct(fields) => {
-                mix(hash, u64::from(b'{'));
-                mix(hash, fields.len() as u64);
-                for (name, value) in fields {
-                    mix(hash, name.len() as u64);
-                    for byte in name.bytes() {
-                        mix(hash, u64::from(byte));
-                    }
-                    mix_child(hash, value);
-                }
+            Self::Struct(fields) => mix_fields(hash, b'{', fields),
+            Self::Map(fields) => mix_fields(hash, b'm', fields),
+            Self::Enum { variant, payload } => {
+                mix(hash, u64::from(b'e'));
+                mix_name(hash, variant);
+                mix_child(hash, payload);
+            }
+        }
+
+        fn mix_fields(hash: &mut u64, tag: u8, fields: &BTreeMap<String, Value>) {
+            mix(hash, u64::from(tag));
+            mix(hash, fields.len() as u64);
+            for (name, value) in fields {
+                mix_name(hash, name);
+                mix_child(hash, value);
+            }
+        }
+
+        fn mix_name(hash: &mut u64, name: &str) {
+            mix(hash, name.len() as u64);
+            for byte in name.bytes() {
+                mix(hash, u64::from(byte));
             }
         }
 

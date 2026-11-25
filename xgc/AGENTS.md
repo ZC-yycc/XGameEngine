@@ -30,7 +30,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 |---|---|
 | `crates/xgc-base/src/lib.rs` | `EntityId` / `EntityKey` / `Tick` / `Diagnostic` |
 | `crates/xgc-base/src/diagnostics.rs` | 诊断码常量 + `engine.diagnostics` 目录 |
-| `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、递归 `Value`；`path.rs` 解析字段路径，`schema.rs` 导出和校验类型结构；`state_fields()` 只用于 `state_hash` |
+| `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、递归 `Value`（结构体、列表、字符串键映射、带载荷枚举）；`path.rs` 解析字段路径，JSON 引号键和当前枚举分支只寻址已有值；`schema.rs` 导出和校验类型结构；`state_fields()` 只用于 `state_hash` |
 | `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 / `reserve_entity_ids` |
 | `crates/xgc-world/src/query.rs` | 双 / 三组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/parts.rs` | 跨系统并行写视图 `WriteSet` / `extract_writes` / `restore_writes` |
@@ -67,7 +67,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/tests/gate.rs` | 割接门禁集成回归：参考匹配通过 / 哈希分歧退出码 1 并点名帧 / 空参考目录退出码 2 / 参考帧号不从 0 开始退出码 2 |
 | `crates/xgc-sim/tests/steady_state.rs` | 热路径分配门禁：线程本地计数分配器（每个测试线程只看自己的分配）+ 稳态帧预算（60 × (实体数 + 64)），数值型组件世界 `state_hash` 60 次零分配；另有一条 release 吞吐用例默认 `#[ignore]` |
 | `crates/xgc-store/src/lib.rs` | JSON 包络 v3、原子写、WorldData / Prefab / Journal 存取 |
-| `crates/xgc-store/src/binary.rs` | `XGCB` v4 二进制世界：encode / decode / save / load；固定小端、递归值带标签 |
+| `crates/xgc-store/src/binary.rs` | `XGCB` v4 二进制世界：encode / decode / save / load；固定小端、递归值带标签；映射和枚举分别用 11 和 12，沿用原有递归深度限额 |
 | `crates/xgc-sim/src/schedule.rs` | 执行计划与调度器：连续分批、宿主阶段、`run_plan_threaded` / 分区执行（`supports_parted` 的系统并行、其余串行；默认 1 线程）；回归 `crates/xgc-sim/tests/parallel_batch.rs` |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with`（调度器 / 场景 / 错误已拆到 `schedule.rs` / `scenario.rs` / `error.rs`） |
 | `crates/xgc-sim/tests/schedule_plan.rs` | 执行计划回归：连续批次、同批两两无冲突、摊平 == 注册顺序、宿主阶段位置（插在首个 `runs_after_host` 系统之前）、构造时固化计划 |
@@ -122,7 +122,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-editor/src/transform_ops.rs` | 位置 / 缩放 / 旋转 setter 与 Gizmo 旋转；无父节点同步 GlobalTransform；`snap` |
 | `crates/xgc-editor/src/prefab_ops.rs` | 从 `.prefab.json` 实例化并选中根，按所选成员的 GUID 或项目相对路径加载来源并 Revert |
 | `crates/xgc-editor/src/gizmo.rs` | 视口 MVP 投影与线段命中距离 |
-| `crates/xgc-editor/src/app.rs` | eframe 窗口：层级 / 场景列表 / 资产浏览 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y / 底部状态栏；`app/inspector.rs` 按 schema 递归生成控件并提交编辑事务 |
+| `crates/xgc-editor/src/app.rs` | eframe 窗口：层级 / 场景列表 / 资产浏览 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y / 底部状态栏；`app/inspector.rs` 按 schema 递归生成控件并提交编辑事务，`app/inspector/containers.rs` 处理映射增删和枚举切换 |
 | `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |

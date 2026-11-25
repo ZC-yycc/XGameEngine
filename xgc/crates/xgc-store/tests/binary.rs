@@ -99,22 +99,53 @@ fn binary_world_roundtrips_nested_values() {
 }
 
 #[test]
+fn binary_world_roundtrips_mixed_containers() {
+    let bytes = cooked_with_raw_value(&[
+        9, 2, 0, 0, 0, // 包含结构体和映射的列表
+        10, 0, 0, 0, 0, // 空结构体
+        11, 2, 0, 0, 0, // 映射按键排序
+        1, 0, 0, 0, b'a', 12, 1, 0, 0, 0, b'v', // a 是带列表载荷的枚举
+        9, 1, 0, 0, 0, 0, 1, // 枚举载荷是 [true]
+        1, 0, 0, 0, b'z', 11, 0, 0, 0, 0, // z 是空映射
+    ]);
+    let decoded = xgc_store::decode_world(&bytes).unwrap();
+    let expected = serde_json::json!({"kind": "list", "value": [
+        {"kind": "struct", "value": {}},
+        {"kind": "map", "value": {
+            "a": {"kind": "enum", "value": {"variant": "v", "payload": {
+                "kind": "list", "value": [{"kind": "bool", "value": true}]
+            }}},
+            "z": {"kind": "map", "value": {}}
+        }}
+    ]});
+    let data = world_data_with_value(serde_json::from_value(expected.clone()).unwrap());
+    assert_eq!(decoded, data);
+    assert_eq!(xgc_store::encode_world(&data).unwrap(), bytes);
+    assert_eq!(
+        serde_json::to_value(&decoded.entities[0].components[0].fields[0].1).unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn binary_world_rejects_invalid_nested_lengths_and_duplicate_keys() {
-    for tag in [9, 10] {
+    for tag in [9, 10, 11] {
         let mut value = vec![tag];
         value.extend_from_slice(&u32::MAX.to_le_bytes());
         let err = xgc_store::decode_world(&cooked_with_raw_value(&value)).unwrap_err();
         assert!(err.contains("条目数量超过"), "{err}");
     }
 
-    let mut value = vec![10];
-    value.extend_from_slice(&2_u32.to_le_bytes());
-    for boolean in [0, 1] {
-        value.extend_from_slice(&1_u32.to_le_bytes());
-        value.extend_from_slice(&[b'x', 0, boolean]);
+    for (tag, diagnostic) in [(10, "结构字段重复：x"), (11, "映射键重复：x")] {
+        let mut value = vec![tag];
+        value.extend_from_slice(&2_u32.to_le_bytes());
+        for boolean in [0, 1] {
+            value.extend_from_slice(&1_u32.to_le_bytes());
+            value.extend_from_slice(&[b'x', 0, boolean]);
+        }
+        let err = xgc_store::decode_world(&cooked_with_raw_value(&value)).unwrap_err();
+        assert!(err.contains(diagnostic), "{err}");
     }
-    let err = xgc_store::decode_world(&cooked_with_raw_value(&value)).unwrap_err();
-    assert!(err.contains("结构字段重复：x"), "{err}");
 }
 
 #[test]
@@ -135,5 +166,28 @@ fn binary_world_bounds_nested_values_on_read_and_write() {
 
     raw.extend_from_slice(&[9, 1, 0, 0, 0, 0, 0]);
     let err = xgc_store::decode_world(&cooked_with_raw_value(&raw)).unwrap_err();
+    assert!(err.contains("嵌套超过 64 层"), "{err}");
+}
+
+#[test]
+fn binary_world_counts_map_entries_and_enum_payloads_toward_depth_limit() {
+    let mut raw = Vec::new();
+    for _ in 0..31 {
+        raw.extend_from_slice(&[11, 1, 0, 0, 0, 1, 0, 0, 0, b'k']);
+        raw.extend_from_slice(&[12, 1, 0, 0, 0, b'v']);
+    }
+    raw.extend_from_slice(&[12, 1, 0, 0, 0, b'v', 0, 0]);
+    let bytes = cooked_with_raw_value(&raw);
+    let mut decoded = xgc_store::decode_world(&bytes).unwrap();
+    assert_eq!(xgc_store::encode_world(&decoded).unwrap(), bytes);
+
+    let value = &mut decoded.entities[0].components[0].fields[0].1;
+    *value = Value::List(vec![std::mem::replace(value, Value::Bool(false))]);
+    let err = xgc_store::encode_world(&decoded).unwrap_err();
+    assert!(err.contains("嵌套超过 64 层"), "{err}");
+
+    let mut too_deep = vec![9, 1, 0, 0, 0];
+    too_deep.extend(raw);
+    let err = xgc_store::decode_world(&cooked_with_raw_value(&too_deep)).unwrap_err();
     assert!(err.contains("嵌套超过 64 层"), "{err}");
 }

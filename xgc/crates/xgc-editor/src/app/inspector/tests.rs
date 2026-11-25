@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use egui::epaint::Shape;
 use xgc_base::EntityId;
-use xgc_reflect::{FieldDescriptor, FieldType};
+use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldPath, FieldType};
 use xgc_world::{AnimEvent, Animator, World};
 
 use super::*;
@@ -172,4 +174,210 @@ fn inspector_adds_a_typed_default_to_a_sublist() {
     let edit = edit.unwrap();
     assert_eq!(edit.path, "flags[0]");
     assert_eq!(edit.value, Value::List(vec![Value::Bool(true)]));
+}
+
+const ESCAPED_KEY: &str = "a.\"b\\c]";
+
+#[derive(Clone)]
+struct Containers {
+    entries: Value,
+    mode: Value,
+}
+
+impl Component for Containers {
+    const ID: ComponentId = ComponentId(0xffff);
+    const NAME: &'static str = "test.containers";
+
+    fn default_value() -> Self {
+        Self {
+            entries: Value::Map(BTreeMap::from([(ESCAPED_KEY.to_string(), weight(4.55))])),
+            mode: mode("Disabled", Value::Struct(BTreeMap::new())),
+        }
+    }
+
+    fn fields() -> Vec<FieldDescriptor> {
+        let weight_field = FieldDescriptor::new("weight", FieldType::F64, Value::F64(0.25));
+        let entry =
+            FieldDescriptor::new("entry", FieldType::Struct(vec![weight_field]), weight(0.25));
+        let disabled = FieldDescriptor::new(
+            "Disabled",
+            FieldType::Struct(vec![]),
+            Value::Struct(BTreeMap::new()),
+        );
+        let threshold = FieldDescriptor::new("threshold", FieldType::F64, Value::F64(0.75));
+        let tuned = FieldDescriptor::new("Tuned", FieldType::Struct(vec![threshold]), tuning(0.75));
+        let default = Self::default_value();
+        vec![
+            FieldDescriptor::new("entries", FieldType::Map(Box::new(entry)), default.entries),
+            FieldDescriptor::new("mode", FieldType::Enum(vec![disabled, tuned]), default.mode),
+        ]
+    }
+
+    fn get_field(&self, field: &str) -> Option<Value> {
+        match field {
+            "entries" => Some(self.entries.clone()),
+            "mode" => Some(self.mode.clone()),
+            _ => None,
+        }
+    }
+
+    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
+        match (field, value) {
+            ("entries", Value::Map(_)) => self.entries = value.clone(),
+            ("mode", Value::Enum { .. }) => self.mode = value.clone(),
+            _ => return Err(format!("无效的测试字段：{field}")),
+        }
+        Ok(())
+    }
+}
+
+fn weight(value: f64) -> Value {
+    Value::Struct(BTreeMap::from([("weight".into(), Value::F64(value))]))
+}
+
+fn tuning(value: f64) -> Value {
+    Value::Struct(BTreeMap::from([("threshold".into(), Value::F64(value))]))
+}
+
+fn mode(variant: &str, payload: Value) -> Value {
+    Value::Enum {
+        variant: variant.to_string(),
+        payload: Box::new(payload),
+    }
+}
+
+impl Inspector {
+    fn with_containers() -> Self {
+        let mut world = World::new();
+        world.register_component::<Containers>();
+        let key = world.spawn((Containers::default_value(),));
+        let entity = world.entity(key).unwrap();
+        let mut state = EditorState::new(world);
+        state.registry.register::<Containers>().unwrap();
+        state.select(Some(entity));
+        let ctx = egui::Context::default();
+        ctx.style_mut(|style| style.animation_time = 0.0);
+        Self {
+            app: EditorApp::new(state),
+            ctx,
+            entity,
+        }
+    }
+
+    fn container_value(&self, path: &str) -> Value {
+        let world = self.app.state.world();
+        world.get_field(self.entity, Containers::ID, path).unwrap()
+    }
+
+    fn click_text(&mut self, text: &str) {
+        let output = self.render(Vec::new());
+        self.click(text_position(&output, text));
+    }
+
+    fn drag_right(&mut self, text: &str) {
+        let output = self.render(Vec::new());
+        let start = text_position(&output, text);
+        let end = start + egui::vec2(30.0, 0.0);
+        self.pointer_button(start, true);
+        self.render(vec![egui::Event::PointerMoved(end)]);
+        self.pointer_button(end, false);
+    }
+}
+
+#[test]
+fn inspector_map_edits_escaped_key_and_adds_or_removes_entries() {
+    let mut inspector = Inspector::with_containers();
+    let before = inspector.app.state.world().world_data();
+    let revision = inspector.app.state.world().revision();
+    let escaped = FieldPath::key_segment(ESCAPED_KEY);
+
+    inspector.drag_right("4.55");
+    let updated = inspector.container_value(&format!("entries{escaped}.weight"));
+    assert!(matches!(updated, Value::F64(value) if value > 4.55));
+
+    inspector.click_text("Key");
+    inspector.render(vec![egui::Event::Text("second".into())]);
+    inspector.click_text("Add entry");
+    assert_eq!(
+        inspector.container_value("entries[\"second\"]"),
+        weight(0.25)
+    );
+
+    inspector.click_text("Key");
+    inspector.render(vec![egui::Event::Text("second".into())]);
+    inspector.click_text("Add entry");
+    assert_eq!(inspector.app.state.world().revision(), revision + 2);
+
+    inspector.click_text(&format!("Remove {escaped}"));
+    assert_eq!(
+        inspector.container_value("entries"),
+        Value::Map(BTreeMap::from([("second".into(), weight(0.25))])),
+    );
+    assert_eq!(inspector.app.state.world().revision(), revision + 3);
+    assert_eq!(inspector.app.state.undo.len(), 3);
+    assert_eq!(inspector.app.state.undo.first(), Some(&before));
+}
+
+#[test]
+fn inspector_enum_switches_and_edits_active_payload() {
+    let mut inspector = Inspector::with_containers();
+    let revision = inspector.app.state.world().revision();
+
+    inspector.click_text("Disabled");
+    inspector.click_text("Tuned");
+    assert_eq!(
+        inspector.container_value("mode"),
+        mode("Tuned", tuning(0.75))
+    );
+
+    inspector.drag_right("0.75");
+    let updated = inspector.container_value("mode.Tuned.threshold");
+    assert!(matches!(updated, Value::F64(value) if value > 0.75));
+
+    inspector.click_text("Tuned");
+    inspector.click_text("Disabled");
+    assert_eq!(
+        inspector.container_value("mode"),
+        Containers::default_value().mode
+    );
+
+    inspector.click_text("Disabled");
+    inspector.click_text("Tuned");
+    assert_eq!(
+        inspector.container_value("mode"),
+        mode("Tuned", tuning(0.75))
+    );
+    assert_eq!(inspector.app.state.world().revision(), revision + 4);
+    assert_eq!(inspector.app.state.undo.len(), 4);
+}
+
+#[test]
+fn inspector_container_controls_are_disabled_in_play() {
+    let mut inspector = Inspector::with_containers();
+    let state = &mut inspector.app.state;
+    let world = std::mem::take(&mut state.world);
+    let before = world.world_data();
+    // 测试组件只注册在夹具世界里，直接用该世界构造播放副本。
+    state.play = Some(crate::PlaySession {
+        before: before.clone(),
+        simulation: xgc_sim::Simulation::new(world),
+        particles: xgc_sim::ParticleSystem::new(),
+        runtime: None,
+        input: None,
+        root_motion: xgc_world::RootMotionLibrary::new(),
+    });
+
+    inspector.drag_right("4.55");
+    inspector.click_text("Key");
+    inspector.render(vec![egui::Event::Text("second".into())]);
+    inspector.click_text("Add entry");
+    inspector.click_text(&format!("Remove {}", FieldPath::key_segment(ESCAPED_KEY)));
+    inspector.click_text("Disabled");
+    let output = inspector.render(Vec::new());
+    assert!(!output.shapes.iter().any(|shape| {
+        matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Tuned")
+    }));
+    assert_eq!(inspector.app.state.world().world_data(), before);
+    assert!(!inspector.app.state.can_undo());
+    assert!(inspector.app.status.is_none());
 }

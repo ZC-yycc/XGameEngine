@@ -12,10 +12,11 @@ pub struct FieldPath {
 enum Step {
     Field(String),
     Index(usize),
+    Key(String),
 }
 
 impl FieldPath {
-    /// 字段名以字母或下划线开头，后接字母、数字或下划线；索引为十进制非负整数。
+    /// 字段名和枚举分支使用 `.name`，列表使用 `[0]`，映射使用 `["key"]`（JSON 字符串）。
     pub fn parse(path: &str) -> Result<Self, String> {
         let invalid = || format!("字段路径语法无效：{path:?}");
         let mut rest = path;
@@ -27,17 +28,20 @@ impl FieldPath {
                 let field = take_field(&mut rest).ok_or_else(invalid)?;
                 steps.push(Step::Field(field.to_string()));
             } else if let Some(tail) = rest.strip_prefix('[') {
-                let (index, tail) = tail.split_once(']').ok_or_else(invalid)?;
-                if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
-                    return Err(invalid());
-                }
-                steps.push(Step::Index(index.parse().map_err(|_| invalid())?));
+                let (step, tail) = bracket(tail).ok_or_else(invalid)?;
+                steps.push(step);
                 rest = tail;
             } else {
                 return Err(invalid());
             }
         }
         Ok(Self { root, steps })
+    }
+
+    /// 生成可拼接的映射键段。路径生产方和解析方必须使用相同的转义规则。
+    pub fn key_segment(key: &str) -> String {
+        let quoted = serde_json::to_string(key).expect("字符串总能编码成 JSON");
+        format!("[{quoted}]")
     }
 
     pub fn root(&self) -> &str {
@@ -55,6 +59,10 @@ impl FieldPath {
             current = match (step, current) {
                 (Step::Field(field), Value::Struct(fields)) => fields.get(field),
                 (Step::Index(index), Value::List(values)) => values.get(*index),
+                (Step::Key(key), Value::Map(values)) => values.get(key),
+                (Step::Field(name), Value::Enum { variant, payload }) => {
+                    (name == variant).then_some(payload.as_ref())
+                }
                 (_, value) => return Err(step.wrong_kind(value.kind())),
             }
             .ok_or_else(|| step.missing())?;
@@ -69,6 +77,10 @@ impl FieldPath {
             current = match (step, current) {
                 (Step::Field(field), Value::Struct(fields)) => fields.get_mut(field),
                 (Step::Index(index), Value::List(values)) => values.get_mut(*index),
+                (Step::Key(key), Value::Map(values)) => values.get_mut(key),
+                (Step::Field(name), Value::Enum { variant, payload }) => {
+                    (name == variant).then_some(payload.as_mut())
+                }
                 (_, value) => return Err(step.wrong_kind(value.kind())),
             }
             .ok_or_else(|| step.missing())?;
@@ -84,7 +96,8 @@ impl FieldPath {
                 (Step::Field(name), "struct") => {
                     current.fields.iter().find(|field| field.name == *name)
                 }
-                (Step::Index(_), "list") => current.element.as_deref(),
+                (Step::Index(_), "list") | (Step::Key(_), "map") => current.element.as_deref(),
+                (Step::Field(name), "enum") => current.variant(name),
                 (_, kind) => return Err(step.wrong_kind(kind)),
             }
             .ok_or_else(|| step.missing())?;
@@ -96,17 +109,35 @@ impl FieldPath {
 impl Step {
     fn wrong_kind(&self, actual: &str) -> String {
         match self {
-            Self::Field(field) => format!("访问字段 {field:?} 需要结构体，实际为 {actual}"),
+            Self::Field(field) => {
+                format!("访问字段或分支 {field:?} 需要结构体或枚举，实际为 {actual}")
+            }
             Self::Index(index) => format!("访问索引 [{index}] 需要列表，实际为 {actual}"),
+            Self::Key(key) => format!("访问键 {key:?} 需要映射，实际为 {actual}"),
         }
     }
 
     fn missing(&self) -> String {
         match self {
-            Self::Field(field) => format!("不存在字段 {field:?}"),
+            Self::Field(field) => format!("字段或枚举分支 {field:?} 不可访问"),
             Self::Index(index) => format!("列表索引 [{index}] 不可访问"),
+            Self::Key(key) => format!("映射键 {key:?} 不存在"),
         }
     }
+}
+
+fn bracket(tail: &str) -> Option<(Step, &str)> {
+    if tail.starts_with('"') {
+        let mut json = serde_json::Deserializer::from_str(tail).into_iter::<String>();
+        let key = json.next()?.ok()?;
+        let rest = tail[json.byte_offset()..].strip_prefix(']')?;
+        return Some((Step::Key(key), rest));
+    }
+    let (index, rest) = tail.split_once(']')?;
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((Step::Index(index.parse().ok()?), rest))
 }
 
 fn take_field<'a>(path: &mut &'a str) -> Option<&'a str> {

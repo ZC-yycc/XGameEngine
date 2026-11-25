@@ -74,7 +74,7 @@ fn scalar(value: &Value, axis: Option<usize>) -> Option<Scalar> {
         Value::F64(value) => Some(Scalar::Num(*value)),
         Value::Entity(value) => Some(Scalar::Num(*value as f64)),
         Value::String(value) => Some(Scalar::Text(value.clone())),
-        Value::List(_) | Value::Struct(_) => None,
+        Value::List(_) | Value::Struct(_) | Value::Map(_) | Value::Enum { .. } => None,
         Value::Vec2(values) => axis
             .and_then(|axis| values.get(axis))
             .map(|value| Scalar::Num(*value)),

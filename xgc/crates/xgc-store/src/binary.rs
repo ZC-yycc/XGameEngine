@@ -14,6 +14,8 @@ use crate::{write_atomic, Result, StoreError};
 const MAGIC: &[u8; 4] = b"XGCB";
 /// 4：LOD 层级改为结构化列表。
 const VERSION: u32 = 4;
+const MAP_TAG: u8 = 11;
+const ENUM_TAG: u8 = 12;
 // 读写共用限制，防止深层反射值耗尽线程栈。
 const MAX_VALUE_DEPTH: usize = 64;
 
@@ -217,6 +219,19 @@ impl Writer {
         Ok(())
     }
 
+    fn keyed_values(
+        &mut self,
+        values: &BTreeMap<String, Value>,
+        levels: usize,
+    ) -> std::result::Result<(), String> {
+        self.length(values.len())?;
+        for (name, value) in values {
+            self.string(name)?;
+            self.value(value, levels)?;
+        }
+        Ok(())
+    }
+
     fn value(&mut self, value: &Value, levels: usize) -> std::result::Result<(), String> {
         if levels == 0 {
             return Err(format!("XGCB 值嵌套超过 {MAX_VALUE_DEPTH} 层"));
@@ -274,11 +289,16 @@ impl Writer {
             }
             Value::Struct(fields) => {
                 self.u8(10);
-                self.length(fields.len())?;
-                for (name, value) in fields {
-                    self.string(name)?;
-                    self.value(value, levels - 1)?;
-                }
+                self.keyed_values(fields, levels - 1)?;
+            }
+            Value::Map(entries) => {
+                self.u8(MAP_TAG);
+                self.keyed_values(entries, levels - 1)?;
+            }
+            Value::Enum { variant, payload } => {
+                self.u8(ENUM_TAG);
+                self.string(variant)?;
+                self.value(payload, levels - 1)?;
             }
         }
         Ok(())
@@ -337,6 +357,27 @@ impl<'a> Reader<'a> {
         Ok(count)
     }
 
+    fn keyed_values(
+        &mut self,
+        levels: usize,
+        key_kind: &str,
+    ) -> std::result::Result<BTreeMap<String, Value>, String> {
+        let count = self.count(4 + 2)?;
+        let mut values = BTreeMap::new();
+        for _ in 0..count {
+            let key = self.string()?;
+            match values.entry(key) {
+                Entry::Vacant(entry) => {
+                    entry.insert(self.value(levels)?);
+                }
+                Entry::Occupied(entry) => {
+                    return Err(format!("XGCB {key_kind}重复：{}", entry.key()));
+                }
+            }
+        }
+        Ok(values)
+    }
+
     fn value(&mut self, levels: usize) -> std::result::Result<Value, String> {
         if levels == 0 {
             return Err(format!("XGCB 值嵌套超过 {MAX_VALUE_DEPTH} 层"));
@@ -359,22 +400,12 @@ impl<'a> Reader<'a> {
                 }
                 Value::List(values)
             }
-            10 => {
-                let count = self.count(4 + 2)?;
-                let mut fields = BTreeMap::new();
-                for _ in 0..count {
-                    let name = self.string()?;
-                    match fields.entry(name) {
-                        Entry::Vacant(entry) => {
-                            entry.insert(self.value(levels - 1)?);
-                        }
-                        Entry::Occupied(entry) => {
-                            return Err(format!("XGCB 结构字段重复：{}", entry.key()));
-                        }
-                    }
-                }
-                Value::Struct(fields)
-            }
+            10 => Value::Struct(self.keyed_values(levels - 1, "结构字段")?),
+            MAP_TAG => Value::Map(self.keyed_values(levels - 1, "映射键")?),
+            ENUM_TAG => Value::Enum {
+                variant: self.string()?,
+                payload: Box::new(self.value(levels - 1)?),
+            },
             tag => return Err(format!("XGCB 未知值标签：{tag}")),
         })
     }
