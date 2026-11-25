@@ -3,12 +3,14 @@
 //! UI 层只读这里的状态并发编辑命令；这样编辑器逻辑可以脱离窗口测试。
 
 mod app;
+mod assets_ops;
 mod gizmo;
 mod play;
 mod prefab_ops;
 mod scene_ops;
 mod transform_ops;
 pub use app::run;
+pub use assets_ops::{AssetEntry, AssetKind};
 pub use transform_ops::snap;
 
 use std::path::{Path, PathBuf};

@@ -507,3 +507,74 @@ fn switches_scenes_through_the_project_manifest() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn lists_project_assets_without_meta_files() {
+    use xgc_editor::AssetKind;
+    use xgc_store::{save_project, ProjectContent, ProjectManifest};
+
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_editor_assets_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join("scenes")).unwrap();
+    std::fs::create_dir_all(dir.join("Resources/Characters")).unwrap();
+    std::fs::create_dir_all(dir.join("Prefabs")).unwrap();
+    std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+    std::fs::write(dir.join("Resources/Characters/hero.glb"), b"glb").unwrap();
+    std::fs::write(dir.join("Resources/Characters/hero.glb.meta"), b"guid").unwrap();
+    std::fs::write(dir.join("Resources/hero.png"), b"png").unwrap();
+    std::fs::write(dir.join("Prefabs/Pillar.prefab.ron"), b"prefab").unwrap();
+    std::fs::write(dir.join("Scripts/move.lua"), b"function update() end").unwrap();
+    let mut world = World::new();
+    world.spawn((
+        Name {
+            value: "main".to_string(),
+        },
+        Transform::default(),
+    ));
+    xgc_store::save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();
+    save_project(
+        &dir.join("project.xgc"),
+        &ProjectManifest {
+            format_version: xgc_store::PROJECT_FORMAT_VERSION,
+            name: "assets".to_string(),
+            entry_scene: "scenes/main.json".to_string(),
+            scenes: vec!["scenes/main.json".to_string()],
+            content: ProjectContent {
+                models: "./Resources//".to_string(),
+                textures: "Resources/Characters".to_string(),
+                audio: "Resources".to_string(),
+                shaders: None,
+                prefabs: "Prefabs".to_string(),
+                scripts: "Scripts".to_string(),
+            },
+            search_paths: Vec::new(),
+            input: None,
+        },
+    )
+    .unwrap();
+
+    let editor = EditorState::open(&dir).unwrap();
+    let assets = editor.assets();
+    assert_eq!(assets.len(), 4, "同目录别名与嵌套内容根不能重复列出资产");
+    assert!(assets.iter().any(|asset| {
+        asset.path == "Resources/Characters/hero.glb" && asset.kind == AssetKind::Model
+    }));
+    assert!(assets
+        .iter()
+        .any(|asset| { asset.path == "Resources/hero.png" && asset.kind == AssetKind::Texture }));
+    assert!(assets.iter().any(|asset| {
+        asset.path == "Prefabs/Pillar.prefab.ron" && asset.kind == AssetKind::Prefab
+    }));
+    assert!(assets
+        .iter()
+        .any(|asset| { asset.path == "Scripts/move.lua" && asset.kind == AssetKind::Script }));
+    assert!(assets.iter().all(|asset| !asset.path.ends_with(".meta")));
+    assert!(EditorState::demo().assets().is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -115,11 +115,14 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载；`run_frame` 在 update/fixed_update 之后消费 `World::collision_events()` 派发 `on_collision_enter/exit`，再消费 `World::animation_events()` 派发 `on_anim_event`，命令并进同一帧结算；`take_error()` 把本帧第一处脚本错误交给宿主（只打 stderr 时宿主看不到失败） |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 / 项目场景切换（脏场景与 Play 期间拒绝） |
 | `crates/xgc-editor/src/scene_ops.rs` | 项目场景切换：清单登记名 → 场景世界；脏场景与 Play 期间拒绝，切换后清空选择 / 撤销 / 重做 |
+| `crates/xgc-editor/src/assets_ops.rs` | `EditorState::assets()`：只读扫描清单内容目录，规范化与去重、确定性截断、隐藏 / 链接 / `.meta` 排除；不生成元数据 |
+| `crates/xgc-editor/src/app/assets_panel.rs` | 资产折叠面板：首次展开缓存，Refresh 手动刷新，虚拟列表与长路径省略；点选预制体只回填工具栏路径 |
+| `crates/xgc-editor/src/app/assets_panel/tests.rs` | 资产回归：2000 条上限与排序、只读、Windows 隐藏属性、折叠 / 缓存 / 刷新、有效预制体点选不实例化 |
 | `crates/xgc-editor/src/play.rs` | Play / Play Scripts / input.ron 动作桥 / step / stop |
 | `crates/xgc-editor/src/transform_ops.rs` | 位置 / 缩放 / 旋转 setter 与 Gizmo 旋转；无父节点同步 GlobalTransform；`snap` |
 | `crates/xgc-editor/src/prefab_ops.rs` | `instantiate_prefab_file` / `revert_prefab_file`：旧 PrefabV2 → 新 ID 实例并选中根 |
 | `crates/xgc-editor/src/gizmo.rs` | 视口 MVP 投影与线段命中距离 |
-| `crates/xgc-editor/src/app.rs` | eframe 窗口：层级 / 场景列表 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y / 底部状态栏 |
+| `crates/xgc-editor/src/app.rs` | eframe 窗口：层级 / 场景列表 / 资产浏览 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y / 底部状态栏 |
 | `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
@@ -245,6 +248,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `.github/workflows/xgc.yml` | XGC CI：`check`（fmt / clippy / xtask / CLI 冒烟）+ `test`（12 个不碰 GPU 的包 + 14 个 CPU-only render 目标 + release 基线）；toolchain 钉 1.95.0 |
 
 ## 不变量（改代码前先看）
+
+- **编辑器资产浏览**：`EditorState::assets()` 只读清单内容目录，路径先走 `normalize_project_relative`，重叠根按规范目录去重；每层先排序再递归截到 2000 条，隐藏文件 / Windows Hidden / 符号链接与 reparse point / `.meta` 不进入清单。UI 只在首次展开或点击 Refresh 时扫描（每帧只读缓存），长路径截断并以悬停显示全文；点选预制体只回填路径，实例化仍由工具栏 Prefab 按钮发起。不得在浏览时生成 `.meta` 或改世界。
 
 - 一个组件一个稳定 `ComponentId`；注册表按 ID 排序输出，schema 必须确定性。
 - **新增组件要同时改两处**：`registry.rs::builtin_registry`（schema/Agent）与 `data.rs::register_builtin_components`（World 工厂），缺一不可。

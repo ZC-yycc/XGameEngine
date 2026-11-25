@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+mod assets_panel;
 mod toolbar;
 
 use eframe::egui;
@@ -13,7 +14,7 @@ use xgc_render::{GpuContext, MeshCache, Renderer};
 
 use crate::gizmo::{distance_to_segment, project};
 use crate::transform_ops::snap;
-use crate::{EditorState, FieldRow};
+use crate::{AssetEntry, EditorState, FieldRow};
 use xgc_base::EntityId;
 use xgc_reflect::Value;
 use xgc_render::camera_view_projection;
@@ -60,6 +61,8 @@ pub struct EditorApp {
     prefab_path: String,
     prefab_position: [f32; 3],
     script_root: String,
+    assets: Option<Vec<AssetEntry>>,
+    selected_asset: Option<String>,
 }
 
 impl EditorApp {
@@ -84,6 +87,8 @@ impl EditorApp {
             prefab_path: String::new(),
             prefab_position: [0.0; 3],
             script_root,
+            assets: None,
+            selected_asset: None,
         }
     }
 
@@ -297,6 +302,7 @@ impl EditorApp {
             }
             ui.separator();
         }
+        self.assets_panel(ui);
         let selected = self.state.selected();
         let rows = self.state.entities();
         egui::ScrollArea::vertical().show(ui, |ui| {
