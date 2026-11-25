@@ -72,10 +72,11 @@ impl AssetCatalog {
 
 pub fn scan(root: &Path) -> Result<AssetCatalog, AssetError> {
     let mut catalog = AssetCatalog::default();
-    let mut metas = Vec::new();
-    collect_meta(root, &mut metas)
-        .map_err(|err| AssetError::Io(format!("{}：{err}", root.display())))?;
-    metas.sort();
+    let metas = find_files(root, |path| {
+        path.extension()
+            .is_some_and(|extension| extension == "meta")
+    })
+    .map_err(|err| AssetError::Io(format!("{}：{err}", root.display())))?;
 
     for meta_path in metas {
         let text = match std::fs::read_to_string(&meta_path) {
@@ -116,18 +117,33 @@ struct MetaFile {
     guid: String,
 }
 
-fn collect_meta(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_meta(&path, out)?;
-        } else if path
-            .extension()
-            .is_some_and(|extension| extension == "meta")
-        {
-            out.push(path);
+/// 按路径排序枚举普通资产文件。目录链接可能越出项目或形成环，扫描不跟随。
+pub fn find_files(dir: &Path, matches: impl Fn(&Path) -> bool) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut directories = vec![dir.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    // 目录 junction 同样可能指向祖先目录。
+                    const REPARSE_POINT: u32 = 0x400;
+                    if entry.metadata()?.file_attributes() & REPARSE_POINT != 0 {
+                        continue;
+                    }
+                }
+                directories.push(entry.path());
+            } else if kind.is_file() {
+                let path = entry.path();
+                if matches(&path) {
+                    files.push(path);
+                }
+            }
         }
     }
-    Ok(())
+    files.sort();
+    Ok(files)
 }

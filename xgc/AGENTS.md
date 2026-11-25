@@ -230,6 +230,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-player/src/input.rs` | 播放器输入桥：`egui::Key` / `PointerButton` → `InputState`，读 `<root>/input.ron`，每固定步重写全部动作 / 轴 |
 | `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录 | 项目目录> [帧数] [--scene <场景名>]`：无帧数打开窗口，有帧数 headless |
 | `crates/xgc-cli/src/main.rs` | CLI 参数分派；文件预算拆分后的轻量入口 |
+| `crates/xgc-cli/src/check_cmd.rs` | `xgc check` 分派：schema / 单世界 / 旧迁移源 / 原生项目；原生清单存在就按原生格式检查 |
+| `crates/xgc-cli/src/check_cmd/project.rs` | 原生项目只读体检：清单与世界 schema、跨文件 ID、父链、预制体来源、资产及输入映射 |
 | `crates/xgc-cli/src/plan_cmd.rs` | `xgc plan`：默认调度的确定性 JSON 执行计划（系统访问声明 + 连续批次 + 宿主阶段） |
 | `crates/xgc-cli/src/clips_cmd.rs` | `xgc clips <剪辑目录|模型.glb|模型.gltf>`：目录走 `.ron` 剪辑库，模型走 glTF 剪辑列表（按名字排序、确定性输出） |
 | `crates/xgc-cli/tests/clips.rs` | clips 两层输入回归：Fox.gltf 列出 Survey/Walk/Run + 逐字节确定；Box.glb 报「没有 glTF 动画」 |

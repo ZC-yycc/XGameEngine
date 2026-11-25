@@ -135,6 +135,7 @@ impl ProjectSession {
         let manifest = load_project(&manifest_path)?;
         let root = manifest_path
             .parent()
+            .filter(|path| !path.as_os_str().is_empty())
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         Ok(Self { root, manifest })
