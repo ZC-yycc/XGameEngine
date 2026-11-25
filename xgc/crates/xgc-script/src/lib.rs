@@ -540,21 +540,31 @@ fn value_to_lua(lua: &Lua, value: &Value) -> mlua::Result<mlua::Value> {
         Value::I64(value) => mlua::Value::Integer(*value),
         Value::F64(value) => mlua::Value::Number(*value),
         Value::String(value) => mlua::Value::String(lua.create_string(value)?),
-        Value::Vec2(value) => vec_table(lua, &[value[0], value[1]], &["x", "y"])?,
-        Value::Vec3(value) => vec_table(lua, &[value[0], value[1], value[2]], &["x", "y", "z"])?,
-        Value::Vec4(value) | Value::Quat(value) => vec_table(
-            lua,
-            &[value[0], value[1], value[2], value[3]],
-            &["x", "y", "z", "w"],
-        )?,
+        Value::Vec2(value) => vec_table(lua, value)?,
+        Value::Vec3(value) => vec_table(lua, value)?,
+        Value::Vec4(value) | Value::Quat(value) => vec_table(lua, value)?,
         Value::Entity(value) => mlua::Value::Integer(*value as i64),
+        Value::List(items) => {
+            let table = lua.create_table_with_capacity(items.len(), 0)?;
+            for (index, item) in items.iter().enumerate() {
+                table.raw_set(index + 1, value_to_lua(lua, item)?)?;
+            }
+            mlua::Value::Table(table)
+        }
+        Value::Struct(fields) => {
+            let table = lua.create_table_with_capacity(0, fields.len())?;
+            for (name, value) in fields {
+                table.raw_set(name.as_str(), value_to_lua(lua, value)?)?;
+            }
+            mlua::Value::Table(table)
+        }
     })
 }
 
-fn vec_table(lua: &Lua, values: &[f64], names: &[&str]) -> mlua::Result<mlua::Value> {
+fn vec_table(lua: &Lua, values: &[f64]) -> mlua::Result<mlua::Value> {
     let table = lua.create_table()?;
-    for (name, value) in names.iter().zip(values) {
-        table.set(*name, *value)?;
+    for (name, value) in ["x", "y", "z", "w"].into_iter().zip(values) {
+        table.set(name, *value)?;
     }
     Ok(mlua::Value::Table(table))
 }

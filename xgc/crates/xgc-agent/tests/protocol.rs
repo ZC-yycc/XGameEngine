@@ -263,6 +263,81 @@ fn query_projection_filter_and_stable_pagination() {
 }
 
 #[test]
+fn queries_and_edits_reflected_event_paths() {
+    let mut agent = Agent::new();
+    let event = Value::Struct(
+        [
+            ("time".into(), Value::F64(0.25)),
+            ("name".into(), Value::String("footstep".into())),
+        ]
+        .into(),
+    );
+    let spawn = Command::Spawn {
+        data: EntityData {
+            id: EntityId::from_raw(1),
+            revision: 0,
+            components: vec![ComponentData {
+                component: ComponentId(1281),
+                fields: vec![("events".into(), Value::List(vec![event]))],
+            }],
+        },
+    };
+    let plan = result(call(&mut agent, "edit.plan", json!({"commands": [spawn]})));
+    result(call(
+        &mut agent,
+        "edit.apply",
+        json!({"plan_id": plan["plan_id"]}),
+    ));
+
+    let time = "animation.animator:events[0].time";
+    let absent = "animation.animator:events[2].name";
+    let params = json!({
+        "select": [time, absent],
+        "filter": {"path": "animation.animator:events[0].name", "op": "eq", "value": "footstep"}
+    });
+    let before = result(call(&mut agent, "world.query", params.clone()));
+    assert_eq!(before["total"], 1);
+    assert_eq!(
+        before["rows"][0]["values"][time],
+        json!({"kind": "f64", "value": 0.25})
+    );
+    assert!(before["rows"][0]["values"].get(absent).unwrap().is_null());
+    let unknown = call(
+        &mut agent,
+        "world.query",
+        json!({"select": ["animation.animator:events[0].missing"]}),
+    );
+    assert!(unknown.get("error").is_some());
+
+    let command = Command::SetField {
+        entity: EntityId::from_raw(1),
+        component: ComponentId(1281),
+        field: "events[0].time".into(),
+        value: Value::F64(0.75),
+    };
+    let plan = result(call(
+        &mut agent,
+        "edit.plan",
+        json!({"commands": [command]}),
+    ));
+    assert_eq!(plan["preview"][0]["before"]["value"], 0.25);
+    let applied = result(call(
+        &mut agent,
+        "edit.apply",
+        json!({"plan_id": plan["plan_id"]}),
+    ));
+    let after = result(call(&mut agent, "world.query", params.clone()));
+    assert_eq!(after["rows"][0]["values"][time]["value"], 0.75);
+    result(call(
+        &mut agent,
+        "edit.revert",
+        json!({"tx_id": applied["tx_id"]}),
+    ));
+    let reverted = result(call(&mut agent, "world.query", params));
+    assert_eq!(reverted["rows"], before["rows"]);
+}
+
+#[test]
 fn save_load_and_unknown_method() {
     let mut agent = Agent::new();
     let commands = serde_json::to_value(vec![spawn_command()]).unwrap();

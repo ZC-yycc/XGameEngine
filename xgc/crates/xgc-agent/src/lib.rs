@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{json, Value as Json};
-use xgc_reflect::{ComponentId, Registry};
+use xgc_reflect::{ComponentId, FieldPath, Registry};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Applied, Command, Journal, Plan, World, WorldSnapshot};
 
@@ -206,23 +206,10 @@ impl Agent {
                 .map(|entity| {
                     let mut values = serde_json::Map::new();
                     for field in &fields {
-                        let value = entity
-                            .components
-                            .iter()
-                            .find(|component| component.component == field.component)
-                            .and_then(|component| {
-                                component
-                                    .fields
-                                    .iter()
-                                    .find(|(name, _)| name == &field.field)
-                                    .map(|(_, value)| value)
-                            });
-                        values.insert(
-                            field.label(),
-                            value
-                                .and_then(|value| serde_json::to_value(value).ok())
-                                .unwrap_or(Json::Null),
-                        );
+                        let value = field
+                            .read(entity)
+                            .and_then(|value| serde_json::to_value(value).ok());
+                        values.insert(field.label.clone(), value.unwrap_or(Json::Null));
                     }
                     json!({"id": entity.id.to_string(), "values": values})
                 })
@@ -314,13 +301,17 @@ impl Agent {
             .registry
             .by_name(component)
             .ok_or_else(|| format!("未知组件：{component}"))?;
-        if !schema.fields.iter().any(|item| item.name == field) {
-            return Err(format!("组件 {component} 没有字段 {field}"));
-        }
+        let field = FieldPath::parse(field)?;
+        let root = schema
+            .fields
+            .iter()
+            .find(|item| item.name == field.root())
+            .ok_or_else(|| format!("组件 {component} 没有字段 {}", field.root()))?;
+        field.schema(root)?;
         Ok(FieldRef {
             component: ComponentId(schema.id),
-            component_name: component.to_string(),
-            field: field.to_string(),
+            label: path.to_string(),
+            path: field,
         })
     }
 

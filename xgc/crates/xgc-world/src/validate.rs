@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use xgc_base::diagnostics as codes;
 use xgc_base::{Diagnostic, Severity, Subject};
-use xgc_reflect::{FieldType, Registry};
+use xgc_reflect::{FieldSchema, FieldType, Registry, Value};
 
 use super::{World, WorldData};
 
@@ -66,7 +66,9 @@ impl World {
                         ));
                         continue;
                     };
-                    let Some(ty) = FieldType::parse(&field.ty) else {
+                    if !matches!(field.ty.as_str(), "list" | "struct")
+                        && FieldType::parse(&field.ty).is_none()
+                    {
                         diagnostics.push(field_diag(
                             codes::WORLD_UNKNOWN_TYPE,
                             &schema.name,
@@ -74,8 +76,8 @@ impl World {
                             format!("字段 {}.{name} 声明了未知类型 {}", schema.name, field.ty),
                         ));
                         continue;
-                    };
-                    if !value.fits(ty) {
+                    }
+                    if !field.fits(value) {
                         diagnostics.push(field_diag(
                             codes::WORLD_TYPE_MISMATCH,
                             &schema.name,
@@ -89,21 +91,7 @@ impl World {
                         ));
                         continue;
                     }
-                    if let Some(number) = numeric(value) {
-                        if field.min.is_some_and(|min| number < min)
-                            || field.max.is_some_and(|max| number > max)
-                        {
-                            diagnostics.push(field_diag(
-                                codes::WORLD_RANGE,
-                                &schema.name,
-                                name,
-                                format!(
-                                    "字段 {}.{name} 超出范围 [{:?}, {:?}]：{number}",
-                                    schema.name, field.min, field.max
-                                ),
-                            ));
-                        }
-                    }
+                    validate_ranges(field, value, &schema.name, name, &mut diagnostics);
                 }
             }
         }
@@ -125,10 +113,61 @@ fn field_diag(code: &'static str, component: &str, field: &str, message: String)
     )
 }
 
-fn numeric(value: &xgc_reflect::Value) -> Option<f64> {
-    match value {
-        xgc_reflect::Value::I64(value) => Some(*value as f64),
-        xgc_reflect::Value::F64(value) => Some(*value),
-        _ => None,
+fn validate_ranges(
+    field: &FieldSchema,
+    value: &Value,
+    component: &str,
+    path: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let number = match value {
+        Value::List(values) => {
+            if let Some(element) = &field.element {
+                for (index, item) in values.iter().enumerate() {
+                    validate_ranges(
+                        element,
+                        item,
+                        component,
+                        &format!("{path}[{index}]"),
+                        diagnostics,
+                    );
+                }
+            }
+            return;
+        }
+        Value::Struct(values) => {
+            for child in &field.fields {
+                if let Some(item) = values.get(&child.name) {
+                    validate_ranges(
+                        child,
+                        item,
+                        component,
+                        &format!("{path}.{}", child.name),
+                        diagnostics,
+                    );
+                }
+            }
+            return;
+        }
+        Value::I64(value) => *value as f64,
+        Value::F64(value) => *value,
+        _ => return,
+    };
+    if field
+        .min
+        .is_some_and(|min| !number.is_finite() || number < min)
+        || field
+            .max
+            .is_some_and(|max| !number.is_finite() || number > max)
+    {
+        diagnostics.push(field_diag(
+            codes::WORLD_RANGE,
+            component,
+            path,
+            format!(
+                "字段 {component}.{path} 超出范围 [{:?}, {:?}]：{number}",
+                field.min, field.max
+            ),
+        ));
     }
 }

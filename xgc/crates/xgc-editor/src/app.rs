@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 mod assets_panel;
+mod inspector;
 mod toolbar;
 
 use eframe::egui;
@@ -14,9 +15,8 @@ use xgc_render::{GpuContext, MeshCache, Renderer};
 
 use crate::gizmo::{distance_to_segment, project};
 use crate::transform_ops::snap;
-use crate::{AssetEntry, EditorState, FieldRow};
+use crate::{AssetEntry, EditorState};
 use xgc_base::EntityId;
-use xgc_reflect::Value;
 use xgc_render::camera_view_projection;
 
 struct Viewport {
@@ -328,128 +328,6 @@ impl EditorApp {
                 }
             }
         });
-    }
-
-    fn inspector(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Inspector");
-        let Some(id) = self.state.selected() else {
-            ui.label("未选择实体");
-            return;
-        };
-        ui.label(format!("Entity {}", id.raw()));
-        let names = self.state.component_names();
-        let mut chosen = None;
-        egui::ComboBox::from_id_salt("xgc-add-component")
-            .selected_text("Add Component")
-            .show_ui(ui, |ui| {
-                for name in &names {
-                    if ui.selectable_label(false, name).clicked() {
-                        chosen = Some(name.clone());
-                    }
-                }
-            });
-        if let Some(name) = chosen {
-            self.status = Some(match self.state.add_component(id, &name) {
-                Ok(()) => format!("已添加 {name}"),
-                Err(err) => err,
-            });
-        }
-        let components = self.state.inspector();
-        for component in components {
-            let mut remove = false;
-            ui.horizontal(|ui| {
-                ui.strong(&component.name);
-                if ui.small_button("Remove").clicked() {
-                    remove = true;
-                }
-            });
-            if remove {
-                self.status = Some(match self.state.remove_component(id, component.id) {
-                    Ok(()) => format!("已移除 {}", component.name),
-                    Err(err) => err,
-                });
-                continue;
-            }
-            for field in &component.fields {
-                field_row(ui, &mut self.state, id, component.id, field);
-            }
-            ui.separator();
-        }
-    }
-}
-
-fn field_row(
-    ui: &mut egui::Ui,
-    state: &mut EditorState,
-    entity: xgc_base::EntityId,
-    component: u32,
-    field: &FieldRow,
-) {
-    ui.horizontal(|ui| {
-        ui.label(format!("{} ({})", field.name, field.ty));
-        let Some(edited) = value_editor(ui, &field.value, &field.ty) else {
-            return;
-        };
-        if edited != field.value {
-            if let Err(err) = state.edit_field(entity, component, &field.name, edited) {
-                ui.colored_label(egui::Color32::RED, err);
-            }
-        }
-    });
-}
-
-fn value_editor(ui: &mut egui::Ui, value: &Value, ty: &str) -> Option<Value> {
-    match value {
-        Value::Bool(current) => {
-            let mut edited = *current;
-            ui.checkbox(&mut edited, "");
-            edited.ne(current).then_some(Value::Bool(edited))
-        }
-        Value::I64(current) => {
-            let mut edited = *current;
-            ui.add(egui::DragValue::new(&mut edited).speed(1.0));
-            edited.ne(current).then_some(Value::I64(edited))
-        }
-        Value::F64(current) => {
-            let mut edited = *current;
-            ui.add(egui::DragValue::new(&mut edited).speed(0.01));
-            edited.ne(current).then_some(Value::F64(edited))
-        }
-        Value::String(current) => {
-            let mut edited = current.clone();
-            ui.text_edit_singleline(&mut edited);
-            edited.ne(current).then_some(Value::String(edited))
-        }
-        Value::Entity(current) => {
-            ui.label(format!("entity {current}"));
-            None
-        }
-        Value::Vec2(current) => {
-            let mut edited = *current;
-            for component in &mut edited {
-                ui.add(egui::DragValue::new(component).speed(0.01));
-            }
-            edited.ne(current).then_some(Value::Vec2(edited))
-        }
-        Value::Vec3(current) => {
-            let mut edited = *current;
-            for component in &mut edited {
-                ui.add(egui::DragValue::new(component).speed(0.01));
-            }
-            edited.ne(current).then_some(Value::Vec3(edited))
-        }
-        Value::Vec4(current) | Value::Quat(current) => {
-            let mut edited = *current;
-            for component in &mut edited {
-                ui.add(egui::DragValue::new(component).speed(0.01));
-            }
-            let next = if ty == "quat" {
-                Value::Quat(edited)
-            } else {
-                Value::Vec4(edited)
-            };
-            (edited != *current).then_some(next)
-        }
     }
 }
 

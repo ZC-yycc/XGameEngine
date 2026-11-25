@@ -15,7 +15,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use xgc_world::{Journal, WorldData};
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 mod binary;
 pub use binary::{decode_world, encode_world, load_world_binary, save_world_binary};

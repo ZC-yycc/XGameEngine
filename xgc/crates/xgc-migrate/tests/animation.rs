@@ -177,18 +177,24 @@ fn animator_machine_becomes_animation_state_component() {
     assert_eq!(field("additive_looping"), &xgc_world::Value::Bool(true));
 
     // 旧 Animator.events 必须搬进组件字段，不能静默丢。
-    let events = match field("events") {
-        xgc_world::Value::String(text) => text,
-        other => panic!("events 应是字符串，得到 {other:?}"),
-    };
-    let events: Vec<xgc_world::AnimEvent> = ron::from_str(events).expect("events 必须能再解析");
     assert_eq!(
-        events,
-        vec![
-            xgc_world::AnimEvent::new("footstep", 0.25),
-            xgc_world::AnimEvent::new("hit", 0.5),
-        ]
+        serde_json::to_value(field("events")).unwrap(),
+        serde_json::json!({
+            "kind": "list",
+            "value": [
+                {"kind": "struct", "value": {
+                    "name": {"kind": "string", "value": "footstep"},
+                    "time": {"kind": "f64", "value": 0.25},
+                }},
+                {"kind": "struct", "value": {
+                    "name": {"kind": "string", "value": "hit"},
+                    "time": {"kind": "f64", "value": 0.5},
+                }},
+            ],
+        })
     );
+
+    xgc_migrate::verify_migration(SCENE, &world).unwrap();
 
     // 根运动只存 RON 字符串，解析必须回到 world 侧唯一类型。
     let root_motion = match field("root_motion") {

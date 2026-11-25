@@ -1,5 +1,6 @@
 //! 二进制 cooked 世界：`XGCB` 固定小端格式，省掉 JSON 解析。
 
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::path::Path;
 
 use xgc_base::EntityId;
@@ -11,31 +12,33 @@ use xgc_world::{
 use crate::{write_atomic, Result, StoreError};
 
 const MAGIC: &[u8; 4] = b"XGCB";
-/// 2：`next_id` 之后追加场景环境（光 / 环境光）。
-const VERSION: u32 = 2;
+/// 3：反射值支持递归列表与结构。
+const VERSION: u32 = 3;
+// 读写共用限制，防止深层反射值耗尽线程栈。
+const MAX_VALUE_DEPTH: usize = 64;
 
-pub fn encode_world(data: &WorldData) -> Vec<u8> {
+pub fn encode_world(data: &WorldData) -> std::result::Result<Vec<u8>, String> {
     let mut writer = Writer::default();
     writer.bytes.extend_from_slice(MAGIC);
     writer.u32(VERSION);
     writer.u64(data.revision);
     writer.u64(data.next_id);
-    write_environment(&mut writer, &data.environment);
-    writer.u32(data.entities.len() as u32);
+    write_environment(&mut writer, &data.environment)?;
+    writer.length(data.entities.len())?;
     for entity in &data.entities {
         writer.u64(entity.id.raw());
         writer.u64(entity.revision);
-        writer.u32(entity.components.len() as u32);
+        writer.length(entity.components.len())?;
         for component in &entity.components {
             writer.u32(component.component.0);
-            writer.u32(component.fields.len() as u32);
+            writer.length(component.fields.len())?;
             for (name, value) in &component.fields {
-                writer.string(name);
-                writer.value(value);
+                writer.string(name)?;
+                writer.value(value, MAX_VALUE_DEPTH)?;
             }
         }
     }
-    writer.bytes
+    Ok(writer.bytes)
 }
 
 pub fn decode_world(bytes: &[u8]) -> std::result::Result<WorldData, String> {
@@ -50,20 +53,20 @@ pub fn decode_world(bytes: &[u8]) -> std::result::Result<WorldData, String> {
     let revision = reader.u64()?;
     let next_id = reader.u64()?;
     let environment = read_environment(&mut reader)?;
-    let entity_count = reader.u32()? as usize;
+    let entity_count = reader.count(8 + 8 + 4)?;
     let mut entities = Vec::with_capacity(entity_count);
     for _ in 0..entity_count {
         let id = EntityId::from_raw(reader.u64()?);
         let revision = reader.u64()?;
-        let component_count = reader.u32()? as usize;
+        let component_count = reader.count(4 + 4)?;
         let mut components = Vec::with_capacity(component_count);
         for _ in 0..component_count {
             let component = ComponentId(reader.u32()?);
-            let field_count = reader.u32()? as usize;
+            let field_count = reader.count(4 + 2)?;
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
                 let name = reader.string()?;
-                fields.push((name, reader.value()?));
+                fields.push((name, reader.value(MAX_VALUE_DEPTH)?));
             }
             components.push(ComponentData { component, fields });
         }
@@ -87,13 +90,16 @@ pub fn decode_world(bytes: &[u8]) -> std::result::Result<WorldData, String> {
     })
 }
 
-fn write_environment(writer: &mut Writer, environment: &SceneEnvironment) {
+fn write_environment(
+    writer: &mut Writer,
+    environment: &SceneEnvironment,
+) -> std::result::Result<(), String> {
     for value in environment.ambient {
         writer.f64(f64::from(value));
     }
-    writer.u32(environment.lights.len() as u32);
+    writer.length(environment.lights.len())?;
     for light in &environment.lights {
-        writer.string(&light.name);
+        writer.string(&light.name)?;
         writer.u8(match light.kind {
             LightKind::Directional => 0,
             LightKind::Point => 1,
@@ -112,6 +118,7 @@ fn write_environment(writer: &mut Writer, environment: &SceneEnvironment) {
         writer.u8(u8::from(light.casts_shadow));
         writer.u32(light.shadow_resolution);
     }
+    Ok(())
 }
 
 fn read_environment(reader: &mut Reader<'_>) -> std::result::Result<SceneEnvironment, String> {
@@ -120,7 +127,7 @@ fn read_environment(reader: &mut Reader<'_>) -> std::result::Result<SceneEnviron
         reader.f64()? as f32,
         reader.f64()? as f32,
     ];
-    let light_count = reader.u32()? as usize;
+    let light_count = reader.count(4 + 1 + 11 * 8 + 1 + 4)?;
     let mut lights = Vec::with_capacity(light_count);
     for _ in 0..light_count {
         let name = reader.string()?;
@@ -164,7 +171,8 @@ fn read_environment(reader: &mut Reader<'_>) -> std::result::Result<SceneEnviron
 }
 
 pub fn save_world_binary(path: &Path, data: &WorldData) -> Result<()> {
-    write_atomic(path, &encode_world(data))
+    let bytes = encode_world(data).map_err(StoreError::Format)?;
+    write_atomic(path, &bytes)
 }
 
 pub fn load_world_binary(path: &Path) -> Result<WorldData> {
@@ -198,12 +206,21 @@ impl Writer {
         self.u64(value.to_bits());
     }
 
-    fn string(&mut self, value: &str) {
-        self.u32(value.len() as u32);
-        self.bytes(value.as_bytes());
+    fn length(&mut self, length: usize) -> std::result::Result<(), String> {
+        self.u32(u32::try_from(length).map_err(|_| "XGCB 长度溢出".to_string())?);
+        Ok(())
     }
 
-    fn value(&mut self, value: &Value) {
+    fn string(&mut self, value: &str) -> std::result::Result<(), String> {
+        self.length(value.len())?;
+        self.bytes(value.as_bytes());
+        Ok(())
+    }
+
+    fn value(&mut self, value: &Value, levels: usize) -> std::result::Result<(), String> {
+        if levels == 0 {
+            return Err(format!("XGCB 值嵌套超过 {MAX_VALUE_DEPTH} 层"));
+        }
         match value {
             Value::Bool(value) => {
                 self.u8(0);
@@ -219,7 +236,7 @@ impl Writer {
             }
             Value::String(value) => {
                 self.u8(3);
-                self.string(value);
+                self.string(value)?;
             }
             Value::Vec2(value) => {
                 self.u8(4);
@@ -248,7 +265,23 @@ impl Writer {
                 self.u8(8);
                 self.u64(*value);
             }
+            Value::List(values) => {
+                self.u8(9);
+                self.length(values.len())?;
+                for value in values {
+                    self.value(value, levels - 1)?;
+                }
+            }
+            Value::Struct(fields) => {
+                self.u8(10);
+                self.length(fields.len())?;
+                for (name, value) in fields {
+                    self.string(name)?;
+                    self.value(value, levels - 1)?;
+                }
+            }
         }
+        Ok(())
     }
 }
 
@@ -295,7 +328,19 @@ impl<'a> Reader<'a> {
         String::from_utf8(bytes.to_vec()).map_err(|err| format!("XGCB 字符串不是 UTF-8：{err}"))
     }
 
-    fn value(&mut self) -> std::result::Result<Value, String> {
+    fn count(&mut self, min_entry_size: usize) -> std::result::Result<usize, String> {
+        let count = self.u32()? as usize;
+        // 在分配前确认剩余数据至少能容纳声明的条目数。
+        if count > (self.bytes.len() - self.cursor) / min_entry_size {
+            return Err("XGCB 条目数量超过剩余数据长度".to_string());
+        }
+        Ok(count)
+    }
+
+    fn value(&mut self, levels: usize) -> std::result::Result<Value, String> {
+        if levels == 0 {
+            return Err(format!("XGCB 值嵌套超过 {MAX_VALUE_DEPTH} 层"));
+        }
         Ok(match self.u8()? {
             0 => Value::Bool(self.u8()? != 0),
             1 => Value::I64(self.u64()? as i64),
@@ -306,6 +351,30 @@ impl<'a> Reader<'a> {
             6 => Value::Vec4([self.f64()?, self.f64()?, self.f64()?, self.f64()?]),
             7 => Value::Quat([self.f64()?, self.f64()?, self.f64()?, self.f64()?]),
             8 => Value::Entity(self.u64()?),
+            9 => {
+                let count = self.count(2)?;
+                let mut values = Vec::new();
+                for _ in 0..count {
+                    values.push(self.value(levels - 1)?);
+                }
+                Value::List(values)
+            }
+            10 => {
+                let count = self.count(4 + 2)?;
+                let mut fields = BTreeMap::new();
+                for _ in 0..count {
+                    let name = self.string()?;
+                    match fields.entry(name) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(self.value(levels - 1)?);
+                        }
+                        Entry::Occupied(entry) => {
+                            return Err(format!("XGCB 结构字段重复：{}", entry.key()));
+                        }
+                    }
+                }
+                Value::Struct(fields)
+            }
             tag => return Err(format!("XGCB 未知值标签：{tag}")),
         })
     }

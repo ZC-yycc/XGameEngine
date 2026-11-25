@@ -11,7 +11,7 @@ use super::{Column, World};
 pub struct EntitySnapshot {
     id: EntityId,
     revision: u64,
-    components: Vec<(ComponentId, Box<dyn Column>)>,
+    pub(crate) components: Vec<(ComponentId, Box<dyn Column>)>,
 }
 
 impl EntitySnapshot {

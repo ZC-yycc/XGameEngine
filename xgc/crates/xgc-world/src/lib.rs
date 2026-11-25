@@ -11,6 +11,7 @@ mod command;
 mod components;
 mod data;
 mod environment;
+mod field_edit;
 mod gameplay_components;
 mod hash;
 mod journal;
@@ -485,56 +486,8 @@ impl World {
         self.archetypes.len()
     }
 
-    pub fn get_field(&self, id: EntityId, component: ComponentId, field: &str) -> Option<Value> {
-        let (_, meta) = self.meta_by_id(id)?;
-        let arch = self.archetypes.get(meta.archetype as usize)?;
-        arch.columns
-            .get(&component)?
-            .get_field(meta.row as usize, field)
-    }
-
-    /// 单字段写入：结构不变，revision +1，实体 revision 跟着更新。
-    pub fn set_field(
-        &mut self,
-        id: EntityId,
-        component: ComponentId,
-        field: &str,
-        value: &Value,
-    ) -> Result<(), String> {
-        self.set_field_raw(id, component, field, value)?;
-        let revision = self.bump_revision();
-        self.touch(id, revision);
-        Ok(())
-    }
-
     pub fn entity_revision(&self, id: EntityId) -> Option<u64> {
         self.meta_by_id(id).map(|(_, meta)| meta.revision)
-    }
-
-    pub(crate) fn set_field_raw(
-        &mut self,
-        id: EntityId,
-        component: ComponentId,
-        field: &str,
-        value: &Value,
-    ) -> Result<Value, String> {
-        let (_, meta) = self
-            .meta_by_id(id)
-            .ok_or_else(|| format!("实体不存在：{id}"))?;
-        let arch = self
-            .archetypes
-            .get_mut(meta.archetype as usize)
-            .ok_or_else(|| "archetype 不存在".to_string())?;
-        let column = arch
-            .columns
-            .get_mut(&component)
-            .ok_or_else(|| format!("实体 {id} 没有组件 {component}"))?;
-        let row = meta.row as usize;
-        let before = column
-            .get_field(row, field)
-            .ok_or_else(|| format!("组件 {component} 没有字段 {field}"))?;
-        column.set_field(row, field, value)?;
-        Ok(before)
     }
 
     pub(crate) fn meta_by_id(&self, id: EntityId) -> Option<(usize, EntityMeta)> {

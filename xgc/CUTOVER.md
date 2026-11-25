@@ -36,6 +36,12 @@
 
 从 `xgc/` 运行 `cargo run -p xgc-editor --offline -- ../tmp/xgc-project` 打开入口场景。在层级面板的 `Scenes` 中切换关卡，用 `Play Scripts` 运行项目脚本。播放器可用 `cargo run -p xgc-player --offline -- ../tmp/xgc-project/project.xgc --scene character` 打开角色场景，加入帧数可无头运行。两个宿主都支持项目目录和清单文件，视口与脚本从项目根解析 GUID。窗口输入使用清单的 `input` 路径，未登记时不绑定动作，登记的文件读取或解析失败时报告错误。
 
+## 结构化反射与文件版本
+
+Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑时间和名称，并撤销修改。Agent 使用 `animation.animator:events[0].time` 查询，在 `edit.plan` 的组件字段中写 `events[0].time`。路径下标从 0 起。Lua `xgc.get` 返回的列表按 Lua 约定从 1 起，`xgc.set` 可以按零基路径改写叶字段。
+
+世界、预制体与事务日志使用 JSON 包络 v2，cooked 世界使用 XGCB v3。旧版本文件会被拒绝。已有迁移输出可用上文的 `xgc migrate` 从旧 RON 重新生成到新目录。新版本会把事件直接写成列表与结构体，仓库内原生世界样例已一次性重写。提交前生成的原生文件如有手工编辑，先保留原件，重新迁移旧 RON 只包含旧工程原有内容。
+
 ## 可复现命令
 
 在验收机从仓库根目录运行 [截图参考重生成流程](acceptance/README.md#在验收机重生成截图)。脚本从旧引擎的实际截图报告提取适配器指纹，用仓库轨迹和严格截图阈值校验完整参考集。下列命令用于单项对照。

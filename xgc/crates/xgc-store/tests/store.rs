@@ -66,7 +66,7 @@ fn prefab_uses_its_own_envelope_kind() {
     save_prefab(&prefab, &data).unwrap();
     save_world(&scene, &data).unwrap();
     let document: serde_json::Value = serde_json::from_slice(&fs::read(&prefab).unwrap()).unwrap();
-    assert_eq!(document["format_version"], 1);
+    assert_eq!(document["format_version"], 2);
     assert_eq!(document["kind"], "prefab");
     assert_eq!(load_prefab(&prefab).unwrap(), data);
     assert_eq!(load_world(&scene).unwrap(), data);
@@ -108,6 +108,36 @@ fn journal_roundtrip_and_replay() {
     assert_eq!(hash, world.state_hash());
 
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn previous_json_envelope_version_is_rejected() {
+    let dir = temp_dir("previous_version");
+    let data = demo_world().world_data();
+    let world = dir.join("world.json");
+    let prefab = dir.join("prefab.json");
+    let journal = dir.join("journal.json");
+    save_world(&world, &data).unwrap();
+    save_prefab(&prefab, &data).unwrap();
+    save_journal(&journal, &Journal::new()).unwrap();
+    for path in [&world, &prefab, &journal] {
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        document["format_version"] = 1.into();
+        fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+    }
+    let errors = [
+        load_world(&world).err(),
+        load_prefab(&prefab).err(),
+        load_journal(&journal).err(),
+    ];
+    fs::remove_dir_all(dir).unwrap();
+    for (kind, error) in ["world", "prefab", "journal"].into_iter().zip(errors) {
+        assert!(
+            matches!(error, Some(xgc_store::StoreError::Format(ref message)) if message.contains("格式版本 1")),
+            "{kind}: {error:?}"
+        );
+    }
 }
 
 #[test]

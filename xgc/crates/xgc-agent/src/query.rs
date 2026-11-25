@@ -1,19 +1,27 @@
 //! Agent 查询 IR 的字段路径、过滤器与标量比较。
 
 use serde_json::Value as Json;
-use xgc_reflect::ComponentId;
+use xgc_reflect::{ComponentId, FieldPath};
 use xgc_world::{EntityData, Value};
 
 #[derive(Clone, Debug)]
 pub(super) struct FieldRef {
     pub(super) component: ComponentId,
-    pub(super) component_name: String,
-    pub(super) field: String,
+    pub(super) label: String,
+    pub(super) path: FieldPath,
 }
 
 impl FieldRef {
-    pub(super) fn label(&self) -> String {
-        format!("{}:{}", self.component_name, self.field)
+    pub(super) fn read<'a>(&self, entity: &'a EntityData) -> Option<&'a Value> {
+        let component = entity
+            .components
+            .iter()
+            .find(|item| item.component == self.component)?;
+        let (_, root) = component
+            .fields
+            .iter()
+            .find(|(name, _)| name == self.path.root())?;
+        self.path.read(root).ok()
     }
 }
 
@@ -26,17 +34,8 @@ pub(super) struct Filter {
 
 impl Filter {
     pub(super) fn matches(&self, entity: &EntityData) -> bool {
-        entity
-            .components
-            .iter()
-            .find(|component| component.component == self.path.component)
-            .and_then(|component| {
-                component
-                    .fields
-                    .iter()
-                    .find(|(name, _)| name == &self.path.field)
-                    .map(|(_, value)| value)
-            })
+        self.path
+            .read(entity)
             .is_some_and(|value| compare(value, self.axis, self.op, &self.value))
     }
 }
@@ -75,6 +74,7 @@ fn scalar(value: &Value, axis: Option<usize>) -> Option<Scalar> {
         Value::F64(value) => Some(Scalar::Num(*value)),
         Value::Entity(value) => Some(Scalar::Num(*value as f64)),
         Value::String(value) => Some(Scalar::Text(value.clone())),
+        Value::List(_) | Value::Struct(_) => None,
         Value::Vec2(values) => axis
             .and_then(|axis| values.get(axis))
             .map(|value| Scalar::Num(*value)),

@@ -178,6 +178,15 @@ fn values_close(expected: &xgc_world::Value, actual: &xgc_world::Value) -> bool 
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Entity(a), Value::Entity(b)) => a == b,
+        (Value::List(a), Value::List(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| values_close(a, b))
+        }
+        (Value::Struct(a), Value::Struct(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|((a_key, a), (b_key, b))| a_key == b_key && values_close(a, b))
+        }
         _ => false,
     }
 }

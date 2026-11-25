@@ -211,7 +211,7 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
         let mut animator = None;
         let mut animator_additive = None;
         let mut animator_root_motion = None;
-        let (mut animator_layers, mut animator_events) = (String::new(), String::new());
+        let mut animator_layers = String::new();
         let mut character = None;
         let mut ui = None;
         let mut particle = None;
@@ -304,22 +304,13 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                         None => None,
                     };
                     animator_additive = old.additive.clone();
-                    animator_events = old_animator::events_to_component_field(&old.events)
-                        .map_err(MigrationError::Parse)?;
                     animator_layers = old_animator::layers_to_component_field(&old.layers)
                         .map_err(MigrationError::Parse)?;
                     if let Some(root) = &old.root_motion {
                         animator_root_motion =
                             Some(root.to_component_field().map_err(MigrationError::Parse)?);
                     }
-                    animator = Some((
-                        old.clip.clone(),
-                        old.speed,
-                        old.looping,
-                        old.autoplay,
-                        old.fade_time,
-                        machine,
-                    ));
+                    animator = Some((old, machine));
                     report.mapped_components += 1;
                 }
             }
@@ -388,46 +379,48 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                 ],
             });
         }
-        if let Some((clip, speed, looping, autoplay, fade_time, machine)) = animator {
+        if let Some((old_animator, machine)) = animator {
             let additive = animator_additive.unwrap_or_default();
             let root_motion = animator_root_motion.unwrap_or_default();
-            let (layers, events) = (animator_layers.clone(), animator_events);
             let position = old.transform.position.to_array();
             let rotation = old.transform.rotation.to_array();
             let scale = old.transform.scale.to_array();
-            components.extend(old_animator::animator_components(
-                old_animator::AnimatorInput {
-                    clip,
-                    speed,
-                    looping,
-                    autoplay,
-                    fade_time,
-                    machine,
-                    additive_clip: additive.clip,
-                    additive_weight: additive.weight,
-                    additive_speed: additive.speed,
-                    additive_looping: additive.looping,
-                    root_motion,
-                    layers,
-                    events,
-                    position: [
-                        f64::from(position[0]),
-                        f64::from(position[1]),
-                        f64::from(position[2]),
-                    ],
-                    rotation: [
-                        f64::from(rotation[0]),
-                        f64::from(rotation[1]),
-                        f64::from(rotation[2]),
-                        f64::from(rotation[3]),
-                    ],
-                    scale: [
-                        f64::from(scale[0]),
-                        f64::from(scale[1]),
-                        f64::from(scale[2]),
-                    ],
-                },
-            ));
+            components.extend(
+                old_animator::animator_components(
+                    old_animator::AnimatorInput {
+                        clip: old_animator.clip.clone(),
+                        speed: old_animator.speed,
+                        looping: old_animator.looping,
+                        autoplay: old_animator.autoplay,
+                        fade_time: old_animator.fade_time,
+                        machine,
+                        additive_clip: additive.clip,
+                        additive_weight: additive.weight,
+                        additive_speed: additive.speed,
+                        additive_looping: additive.looping,
+                        root_motion,
+                        layers: animator_layers,
+                        position: [
+                            f64::from(position[0]),
+                            f64::from(position[1]),
+                            f64::from(position[2]),
+                        ],
+                        rotation: [
+                            f64::from(rotation[0]),
+                            f64::from(rotation[1]),
+                            f64::from(rotation[2]),
+                            f64::from(rotation[3]),
+                        ],
+                        scale: [
+                            f64::from(scale[0]),
+                            f64::from(scale[1]),
+                            f64::from(scale[2]),
+                        ],
+                    },
+                    &old_animator.events,
+                )
+                .map_err(MigrationError::Parse)?,
+            );
         }
         if let Some(character) = character {
             components.push(ComponentData {

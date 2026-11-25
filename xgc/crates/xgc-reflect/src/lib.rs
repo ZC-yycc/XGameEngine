@@ -7,13 +7,18 @@
 #![deny(unsafe_code)]
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use xgc_base::{Diagnostic, Severity, Subject};
 
+mod path;
+mod schema;
 mod value;
+
+pub use path::FieldPath;
+pub use schema::FieldSchema;
 
 /// 组件类型的稳定编号。落盘、协议、archetype 匹配都用它，不用类型名。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -67,7 +72,7 @@ pub trait Component: Any + Clone + Send + Sync {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
     Bool,
@@ -81,10 +86,12 @@ pub enum FieldType {
     Vec4,
     Quat,
     Entity,
+    List(Box<FieldDescriptor>),
+    Struct(Vec<FieldDescriptor>),
 }
 
 impl FieldType {
-    pub const fn as_str(self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Bool => "bool",
             Self::I64 => "i64",
@@ -97,9 +104,12 @@ impl FieldType {
             Self::Vec4 => "vec4",
             Self::Quat => "quat",
             Self::Entity => "entity",
+            Self::List(_) => "list",
+            Self::Struct(_) => "struct",
         }
     }
 
+    /// 标量可直接从类型名还原，容器的类型还取决于子字段。
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
             "bool" => Self::Bool,
@@ -134,43 +144,12 @@ pub enum Value {
     Vec4([f64; 4]),
     Quat([f64; 4]),
     Entity(u64),
-}
-
-impl Value {
-    /// schema 声明类型与动态值是否相容；校验 / 迁移 / Agent 共用这一份判断。
-    pub fn fits(&self, ty: FieldType) -> bool {
-        match (self, ty) {
-            (Self::Bool(_), FieldType::Bool) => true,
-            (Self::I64(_), FieldType::I64) => true,
-            (Self::I64(value), FieldType::U32) => (0..=u32::MAX as i64).contains(value),
-            (Self::F64(_), FieldType::F32 | FieldType::F64) => true,
-            (Self::String(_), FieldType::String) => true,
-            (Self::Vec2(_), FieldType::Vec2) => true,
-            (Self::Vec3(_), FieldType::Vec3) => true,
-            (Self::Vec4(_), FieldType::Vec4) => true,
-            (Self::Quat(_), FieldType::Quat) => true,
-            (Self::Entity(_), FieldType::Entity) => true,
-            _ => false,
-        }
-    }
-
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::Bool(_) => "bool",
-            Self::I64(_) => "i64",
-            Self::F64(_) => "f64",
-            Self::String(_) => "string",
-            Self::Vec2(_) => "vec2",
-            Self::Vec3(_) => "vec3",
-            Self::Vec4(_) => "vec4",
-            Self::Quat(_) => "quat",
-            Self::Entity(_) => "entity",
-        }
-    }
+    List(Vec<Value>),
+    Struct(BTreeMap<String, Value>),
 }
 
 /// 字段描述：字段名、类型、默认值、单位、范围、文档。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FieldDescriptor {
     pub name: &'static str,
     pub ty: FieldType,
@@ -206,22 +185,6 @@ impl FieldDescriptor {
         self.doc = doc;
         self
     }
-}
-
-/// 可序列化的字段 schema。
-#[derive(Clone, Debug, Serialize)]
-pub struct FieldSchema {
-    pub name: String,
-    pub ty: String,
-    pub default: Value,
-    pub required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max: Option<f64>,
-    pub doc: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -278,25 +241,7 @@ impl Registry {
             return Err(RegistryError::DuplicateName(T::NAME.to_string()));
         }
 
-        let fields = T::fields()
-            .into_iter()
-            .map(|f| {
-                let (min, max) = match f.range {
-                    Some((min, max)) => (Some(min), Some(max)),
-                    None => (None, None),
-                };
-                FieldSchema {
-                    name: f.name.to_string(),
-                    ty: f.ty.as_str().to_string(),
-                    default: f.default,
-                    required: true,
-                    unit: f.unit.map(str::to_string),
-                    min,
-                    max,
-                    doc: f.doc.to_string(),
-                }
-            })
-            .collect();
+        let fields = T::fields().into_iter().map(FieldSchema::from).collect();
 
         let index = self.components.len();
         self.by_id.insert(id, index);
@@ -349,55 +294,9 @@ impl Registry {
                     "组件名为空",
                 ));
             }
-            let mut names = HashSet::new();
-            for field in &component.fields {
-                let subject = Subject::Field(format!("{}.{}", component.name, field.name));
-                if field.name.is_empty() {
-                    diagnostics.push(Diagnostic::new(
-                        "SCHEMA.EMPTY_FIELD",
-                        Severity::Error,
-                        subject,
-                        "字段名为空",
-                    ));
-                }
-                if !names.insert(field.name.as_str()) {
-                    diagnostics.push(Diagnostic::new(
-                        "SCHEMA.DUP_FIELD",
-                        Severity::Error,
-                        Subject::Field(format!("{}.{}", component.name, field.name)),
-                        "字段名重复",
-                    ));
-                }
-                if !default_matches(&field.default, &field.ty) {
-                    diagnostics.push(Diagnostic::new(
-                        "SCHEMA.DEFAULT_TYPE",
-                        Severity::Error,
-                        Subject::Field(format!("{}.{}", component.name, field.name)),
-                        format!(
-                            "默认值类型 {} 与字段类型 {} 不一致",
-                            field.default.type_name(),
-                            field.ty
-                        ),
-                    ));
-                }
-            }
+            schema::validate_fields(&component.fields, &component.name, &mut diagnostics);
         }
         diagnostics
-    }
-}
-
-fn default_matches(value: &Value, ty: &str) -> bool {
-    match ty {
-        "bool" => matches!(value, Value::Bool(_)),
-        "i64" | "u32" => matches!(value, Value::I64(_)),
-        "f32" | "f64" => matches!(value, Value::F64(_)),
-        "string" => matches!(value, Value::String(_)),
-        "vec2" => matches!(value, Value::Vec2(_)),
-        "vec3" => matches!(value, Value::Vec3(_)),
-        "vec4" => matches!(value, Value::Vec4(_)),
-        "quat" => matches!(value, Value::Quat(_)),
-        "entity" => matches!(value, Value::Entity(_)),
-        _ => false,
     }
 }
 

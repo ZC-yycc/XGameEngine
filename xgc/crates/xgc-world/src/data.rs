@@ -83,11 +83,6 @@ impl ComponentFactory {
         (self.create)(fields)
     }
 
-    pub(crate) fn validate_field(&self, field: &str, value: &Value) -> Result<(), String> {
-        self.create(&[(field.to_string(), value.clone())])
-            .map(|_| ())
-    }
-
     fn empty_column(&self) -> Box<dyn Column> {
         (self.empty_column)()
     }

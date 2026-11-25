@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use xgc_script::ScriptRuntime;
-use xgc_world::{FiredAnimEvent, Script, Transform, Velocity, World};
+use xgc_script::{LuaHost, ScriptRuntime};
+use xgc_world::{AnimEvent, Animator, FiredAnimEvent, Script, Transform, Velocity, World};
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -61,4 +61,38 @@ fn animation_events_reach_the_script_hook() {
         [5.0, 0.0, 0.0]
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn lua_reads_structured_events_and_writes_a_leaf_path() {
+    use std::{cell::RefCell, rc::Rc};
+
+    let mut world = World::new();
+    let key = world.spawn((Animator {
+        events: vec![AnimEvent {
+            time: 0.25,
+            name: "hit".into(),
+        }],
+        ..Animator::default()
+    },));
+    let id = world.entity(key).unwrap().raw();
+    let world = Rc::new(RefCell::new(world));
+    let host = LuaHost::with_world(Rc::clone(&world)).unwrap();
+    host.run(
+        "events",
+        &format!(
+            r#"
+        local events = xgc.get({id}, 'animation.animator', 'events')
+        assert(#events == 1 and events[1].name == 'hit' and events[1].time == 0.25)
+        xgc.set({id}, 'animation.animator', 'events[0].time', 0.5)
+        assert(xgc.get({id}, 'animation.animator', 'events[0].time') == 0.5)
+        assert(not pcall(xgc.set, {id}, 'animation.animator', 'events[0].time', -1.0))
+    "#
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        world.borrow().get::<Animator>(key).unwrap().events[0].time,
+        0.5
+    );
 }

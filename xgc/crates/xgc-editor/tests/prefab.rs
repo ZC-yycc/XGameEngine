@@ -9,11 +9,9 @@ fn instantiates_native_prefab_and_selects_root() {
         "xgc_editor_native_{}.prefab.json",
         std::process::id()
     ));
-    std::fs::write(
-        &path,
-        r#"{"format_version":1,"kind":"prefab","payload":{"revision":0,"next_id":1,"entities":[{"id":"0","revision":0,"components":[]}]}}"#,
-    )
-    .unwrap();
+    let mut asset = World::new();
+    asset.spawn(());
+    xgc_store::save_prefab(&path, &asset.world_data()).unwrap();
     let mut editor = EditorState::demo();
     let before = editor.entities().len();
     let result = editor.instantiate_prefab_file(&path);

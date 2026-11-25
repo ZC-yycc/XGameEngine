@@ -16,7 +16,7 @@ pub use transform_ops::snap;
 use std::path::{Path, PathBuf};
 
 use xgc_base::EntityId;
-use xgc_reflect::{Registry, Value};
+use xgc_reflect::{FieldSchema, Registry, Value};
 use xgc_script::ScriptRuntime;
 use xgc_sim::{InputMap, ParticleSystem, Simulation};
 use xgc_store::{load_world, save_world, ProjectSession};
@@ -32,8 +32,7 @@ pub struct EntityRow {
 }
 
 pub struct FieldRow {
-    pub name: String,
-    pub ty: String,
+    pub schema: FieldSchema,
     pub value: Value,
 }
 
@@ -495,8 +494,7 @@ impl EditorState {
                         .map(|(_, value)| value.clone())
                         .unwrap_or_else(|| field.default.clone());
                     FieldRow {
-                        name: field.name.clone(),
-                        ty: field.ty.clone(),
+                        schema: field.clone(),
                         value,
                     }
                 })
@@ -528,9 +526,14 @@ impl EditorState {
         if self.play.is_some() {
             return Err("Play 期间不能编辑".to_string());
         }
-        self.push_undo();
-        self.world
-            .set_field(entity, xgc_world::ComponentId(component), field, &value)?;
+        let before = self.world.world_data();
+        self.apply_command(Command::SetField {
+            entity,
+            component: ComponentId(component),
+            field: field.to_string(),
+            value,
+        })?;
+        self.record_undo(before);
         self.dirty = true;
         Ok(())
     }

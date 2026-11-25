@@ -93,8 +93,7 @@ impl Component for Animator {
         vec![
             FieldDescriptor::new("clip", FieldType::String, Value::String(String::new()))
                 .doc("glTF 动画剪辑名；空 = 绑定姿势"),
-            FieldDescriptor::new("events", FieldType::String, Value::String(String::new()))
-                .doc("动画事件 RON 表（time + name）；空 = 没有事件"),
+            AnimEvent::list_field(),
             FieldDescriptor::new("speed", FieldType::F32, Value::F64(1.0)).doc("播放速度倍率"),
             FieldDescriptor::new("looping", FieldType::Bool, Value::Bool(true)).doc("是否循环"),
             FieldDescriptor::new("autoplay", FieldType::Bool, Value::Bool(true))
@@ -170,12 +169,9 @@ impl Component for Animator {
     fn get_field(&self, field: &str) -> Option<Value> {
         match field {
             "clip" => Some(Value::String(self.clip.clone())),
-            // 空事件表刻意不落字段：老场景 / 老验收参考的字节形态不变，
-            // 只有真的配了事件才多出这一项。
-            "events" if !self.events.is_empty() => {
-                Some(Value::String(ron::to_string(&self.events).ok()?))
-            }
-            "events" => None,
+            "events" => Some(Value::List(
+                self.events.iter().map(AnimEvent::to_value).collect(),
+            )),
             "speed" => Some(Value::F64(f64::from(self.speed))),
             "looping" => Some(Value::Bool(self.looping)),
             "autoplay" => Some(Value::Bool(self.autoplay)),
@@ -229,21 +225,17 @@ impl Component for Animator {
                 Ok(())
             }
             "events" => {
-                let text = value
-                    .as_string()
-                    .ok_or_else(|| {
-                        format!(
-                            "animation.animator.events 期望 string，得到 {}",
-                            value.type_name()
-                        )
-                    })?
-                    .trim();
-                if text.is_empty() {
-                    self.events.clear();
-                    return Ok(());
-                }
-                self.events = ron::from_str::<Vec<AnimEvent>>(text)
-                    .map_err(|error| format!("animation.animator.events 不是事件 RON：{error}"))?;
+                let Value::List(events) = value else {
+                    return Err("animation.animator.events 期望事件列表".to_string());
+                };
+                self.events = events
+                    .iter()
+                    .enumerate()
+                    .map(|(index, event)| {
+                        AnimEvent::from_value(event)
+                            .map_err(|error| format!("animation.animator.events[{index}]: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(())
             }
             "speed" => {

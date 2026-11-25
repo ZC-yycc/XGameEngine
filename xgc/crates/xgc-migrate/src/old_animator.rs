@@ -162,18 +162,6 @@ impl OldLayer {
     }
 }
 
-/// 旧事件表 → 组件字符串（空表返回空串 = 不写 `events` 字段）。
-pub fn events_to_component_field(events: &[OldAnimEvent]) -> Result<String, String> {
-    if events.is_empty() {
-        return Ok(String::new());
-    }
-    let migrated: Vec<AnimEvent> = events
-        .iter()
-        .map(|event| AnimEvent::new(event.name.clone(), event.time))
-        .collect();
-    ron::ser::to_string(&migrated).map_err(|err| format!("动画事件序列化失败：{err}"))
-}
-
 /// 旧层栈 → 组件字符串（空栈返回空串 = 组件不生成）。
 pub fn layers_to_component_field(layers: &[OldLayer]) -> Result<String, String> {
     if layers.is_empty() {
@@ -297,14 +285,15 @@ pub struct AnimatorInput {
     pub additive_speed: f32,
     pub additive_looping: bool,
     pub root_motion: String,
-    /// 动画事件 RON；空 = 不写 `events` 字段（老场景字节形态不变）。
-    pub events: String,
     /// 混合层栈 RON；空 = 不生成 `animation.layers`。
     pub layers: String,
 }
 
 /// 生成 `animation.animator`（+ 有机器时再生成 `animation.state`）。
-pub fn animator_components(input: AnimatorInput) -> Vec<ComponentData> {
+pub fn animator_components(
+    input: AnimatorInput,
+    events: &[OldAnimEvent],
+) -> Result<Vec<ComponentData>, String> {
     let mut components = vec![ComponentData {
         component: Animator::ID,
         fields: vec![
@@ -338,10 +327,19 @@ pub fn animator_components(input: AnimatorInput) -> Vec<ComponentData> {
             ("root_motion".to_string(), Value::String(input.root_motion)),
         ],
     }];
-    if !input.events.is_empty() {
-        components[0]
-            .fields
-            .push(("events".to_string(), Value::String(input.events)));
+    if !events.is_empty() {
+        let animator = Animator {
+            events: events
+                .iter()
+                .map(|event| AnimEvent::new(event.name.clone(), event.time))
+                .collect(),
+            ..Animator::default()
+        };
+        let value = animator
+            .get_field("events")
+            .expect("Animator.events 必须可读");
+        Animator::default().set_field("events", &value)?;
+        components[0].fields.push(("events".to_string(), value));
     }
     if !input.layers.is_empty() {
         components.push(ComponentData {
@@ -360,5 +358,5 @@ pub fn animator_components(input: AnimatorInput) -> Vec<ComponentData> {
             ],
         });
     }
-    components
+    Ok(components)
 }
