@@ -18,6 +18,12 @@
 | 性能基准 + 热路径分配门禁 | **通过** | `crates/xgc-sim/tests/steady_state.rs`：稳态帧分配 13818 次 / 预算 16440（每帧 1697 → 230），数值型组件 `state_hash` 零分配；release 吞吐本机 0.043 ms/帧（210 实体、600 帧 25.97 ms；旧数字 0.057 是另一台机器口径）；CI 的 `test` job 在 windows-latest 上跑 `cargo test --release -p xgc-sim --test steady_state -- --ignored --nocapture`，只把数字留在日志里不设阈值（写死阈值等于给机器调验收线，见该测试模块文档）——运行 45245793893 结论 成功（CI toolchain 钉 1.95.0） |
 | 推送 / CI | **阻塞** | 本地切片已提交（`68e49ff` / `6132718` / `7a2dd6f` 等），但本机推送持续报 `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`（无 gh / SSH key / credential helper），远端 master 仍是 `8a4c852`；`.github/workflows/xgc.yml` 在 push / pull_request 上跑 XGC 门禁与 CPU 测试（hosted runner 无 GPU：render 只跑不创建 wgpu 设备的 14 个目标，GPU 集成测试留在带显卡机器上跑），运行 45245793893 结论 成功；CI toolchain 钉 1.95.0（首次运行 45241839406 因 stable clippy 1.100 新 lint 变红，修掉后钉版本），workflow 文件本身也修过一次重复 `with:` 键（run 45243120447 被判无效） |
 
+## 项目迁移的实体 ID
+
+从 `xgc/` 先运行 `cargo run -q -p xgc-cli --offline -- migrate ../projects/XGame ../tmp/xgc-project --dry-run` 查看计划，去掉 `--dry-run` 后迁移至新目录。项目迁移按源文件路径、文件内旧 ID 升序分配场景实体 ID，并重写场景内父引用。关卡清单仍保留原顺序。
+
+输出根目录的 `entity-id-map.json` 与场景一起发布。`files` 中每项以 `source` 和 `target` 标识源场景与目标场景，`ids` 的键和值都是十进制字符串。例如 `{"source":"Scenes/a.ron","target":"scenes/a.json","ids":{"42":"2"}}` 表示该文件的旧实体 `42` 迁为 `2`。新增实体的初始分配位置高于本次迁出的全部场景实体。预制体资产及其来源引用的重映射仍待完成。单场景迁移保留旧 ID，供下文的逐帧对表使用。
+
 ## 可复现命令
 
 在验收机从仓库根目录运行 [截图参考重生成流程](acceptance/README.md#在验收机重生成截图)。脚本从旧引擎的实际截图报告提取适配器指纹，用仓库轨迹和严格截图阈值校验完整参考集。下列命令用于单项对照。

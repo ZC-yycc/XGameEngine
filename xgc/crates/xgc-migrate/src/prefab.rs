@@ -30,7 +30,7 @@ pub fn instantiate_prefab(
         data.id = *mapping
             .get(&entity.id)
             .ok_or_else(|| format!("实体 {} 没有映射", entity.id.raw()))?;
-        remap_references(&mut data, &mapping);
+        remap_parent(&mut data, &mapping);
         if let Some(source) = source {
             data.components.push(ComponentData {
                 component: PrefabInstance::ID,
@@ -61,7 +61,7 @@ pub fn instantiate_prefab(
     Ok(mapping.into_iter().collect())
 }
 
-fn remap_references(data: &mut EntityData, mapping: &BTreeMap<EntityId, EntityId>) {
+pub(crate) fn remap_parent(data: &mut EntityData, mapping: &BTreeMap<EntityId, EntityId>) {
     for component in &mut data.components {
         if component.component.0 != PARENT_COMPONENT {
             continue;
@@ -128,7 +128,7 @@ pub fn revert_prefab(
             .get(&source_id)
             .ok_or_else(|| format!("预制体实体 {source_id} 没有目标 ID"))?;
         let mut data = entity.clone().with_id(target);
-        remap_references(&mut data, &mapping);
+        remap_parent(&mut data, &mapping);
         if let Some(existing_id) = current.get(&source_id) {
             if let Some(existing) = world.entity_data(*existing_id) {
                 preserve_component(&mut data, &existing, 0x0101);

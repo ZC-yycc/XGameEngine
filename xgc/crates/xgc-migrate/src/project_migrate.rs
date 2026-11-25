@@ -10,17 +10,23 @@
 //! 场景仍是 `save_world` 的版本化 JSON（`scenes/*.json`），不是设计文档里的
 //! `*.scene.ron`——XGC 的 store 目前只认这一种世界格式，清单也不复制场景内容。
 
-use std::collections::BTreeSet;
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use xgc_base::path::normalize_project_relative;
+use serde::Serialize;
+use xgc_base::{path::normalize_project_relative, EntityId};
 use xgc_store::{
     save_project, save_world, ProjectContent, ProjectManifest, PROJECT_FORMAT_VERSION,
 };
+use xgc_world::WorldData;
 
 use crate::migrate_str;
+use crate::prefab::remap_parent;
 use crate::project_check::{check_old_project, read_old_project, ProjectCheckError};
+
+const ID_MAP_FILE: &str = "entity-id-map.json";
 
 #[derive(Debug)]
 pub enum ProjectMigrationError {
@@ -91,7 +97,7 @@ impl ProjectMigrationReport {
             ""
         };
         format!(
-            "migrate: project={} scenes={} entities={} copied={} -> {}{}",
+            "migrate: project={} scenes={} entities={} copied={} -> {}{}\n  entity ID map: {ID_MAP_FILE}",
             self.name,
             self.scenes,
             self.entities,
@@ -118,7 +124,7 @@ pub fn migrate_old_project(
     let report = |dry_run: bool| ProjectMigrationReport {
         name: plan.manifest.name.clone(),
         scenes: plan.scenes.len(),
-        entities: check.entities,
+        entities: plan.scenes.iter().map(|scene| scene.ids.len()).sum(),
         copied_files: plan.copied_files,
         dry_run,
         output: output.to_path_buf(),
@@ -127,17 +133,11 @@ pub fn migrate_old_project(
     if dry_run {
         return Ok(report(true));
     }
-    if output.exists() {
+    if output.symlink_metadata().is_ok() {
         return Err(ProjectMigrationError::OutputExists(output.to_path_buf()));
     }
 
     let staging = staging_path(output);
-    if staging.exists() {
-        fs::remove_dir_all(&staging).map_err(|err| ProjectMigrationError::Io {
-            path: staging.clone(),
-            message: err.to_string(),
-        })?;
-    }
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|err| ProjectMigrationError::Io {
@@ -147,6 +147,11 @@ pub fn migrate_old_project(
         }
     }
 
+    // 独占拿到暂存目录后才能在失败时清理，避免删掉另一次迁移正在写的目录。
+    fs::create_dir(&staging).map_err(|err| ProjectMigrationError::Io {
+        path: staging.clone(),
+        message: err.to_string(),
+    })?;
     if let Err(err) = write_staging(root, &staging, &plan) {
         let _ = fs::remove_dir_all(&staging);
         return Err(err);
@@ -161,9 +166,19 @@ pub fn migrate_old_project(
     Ok(report(false))
 }
 
+#[derive(Serialize)]
 struct ScenePlan {
-    old: String,
-    out: String,
+    source: String,
+    target: String,
+    ids: BTreeMap<EntityId, EntityId>,
+    #[serde(skip)]
+    world: WorldData,
+}
+
+#[derive(Serialize)]
+struct IdMap<'a> {
+    format_version: u32,
+    files: &'a [ScenePlan],
 }
 
 struct Plan {
@@ -203,23 +218,25 @@ fn plan_project(
     }
 
     let mut scenes = Vec::new();
-    let mut outputs = BTreeSet::new();
+    let mut sources = BTreeMap::new();
     for old in &ordered {
-        let out = scene_output(old, &scenes_dir)?;
-        if !outputs.insert(out.clone()) {
+        let path = root.join(old);
+        let canonical = fs::canonicalize(&path).map_err(|err| ProjectMigrationError::Io {
+            path,
+            message: err.to_string(),
+        })?;
+        if let Some(first) = sources.insert(canonical, old) {
             return Err(ProjectMigrationError::Manifest(format!(
-                "两个场景会写到同一个输出路径：{out}"
+                "{first} 与 {old} 指向同一个源文件"
             )));
         }
-        scenes.push(ScenePlan {
-            old: old.clone(),
-            out,
-        });
+        let out = scene_output(old, &scenes_dir)?;
+        scenes.push(read_scene(root, old, out)?);
     }
     let entry_out = scenes
         .iter()
-        .find(|scene| scene.old == entry)
-        .map(|scene| scene.out.clone())
+        .find(|scene| scene.source == entry)
+        .map(|scene| scene.target.clone())
         .ok_or_else(|| ProjectMigrationError::Manifest("入口场景不在迁移清单里".into()))?;
 
     let name = if project.name.trim().is_empty() {
@@ -243,7 +260,7 @@ fn plan_project(
             continue;
         }
         let dir = normalize(raw)?;
-        if !copy_dirs.contains(&dir) && root.join(&dir).is_dir() {
+        if !copy_dirs.contains(&dir) {
             copy_dirs.push(dir);
         }
     }
@@ -272,7 +289,7 @@ fn plan_project(
         format_version: PROJECT_FORMAT_VERSION,
         name,
         entry_scene: entry_out,
-        scenes: scenes.iter().map(|scene| scene.out.clone()).collect(),
+        scenes: scenes.iter().map(|scene| scene.target.clone()).collect(),
         content: ProjectContent {
             models: normalize(&project.content.models_dir)?,
             textures: normalize(&project.content.textures_dir)?,
@@ -288,6 +305,8 @@ fn plan_project(
         .validate()
         .map_err(|err| ProjectMigrationError::Manifest(err.to_string()))?;
 
+    validate_output_paths(root, &manifest, &copy_dirs)?;
+    copy_dirs.retain(|dir| root.join(dir).is_dir());
     let mut copied_files = 0;
     for dir in &copy_dirs {
         copied_files += count_files(&root.join(dir)).map_err(|err| ProjectMigrationError::Io {
@@ -297,6 +316,7 @@ fn plan_project(
     }
     copied_files += copy_files.len();
 
+    remap_scene_ids(&mut scenes);
     Ok(Plan {
         manifest,
         scenes,
@@ -304,6 +324,63 @@ fn plan_project(
         copy_files,
         copied_files,
     })
+}
+
+fn validate_output_paths(
+    root: &Path,
+    manifest: &ProjectManifest,
+    copy_dirs: &[String],
+) -> Result<(), ProjectMigrationError> {
+    let mut outputs = BTreeMap::new();
+    for target in [ID_MAP_FILE, "project.xgc"]
+        .into_iter()
+        .chain(manifest.scenes.iter().map(String::as_str))
+    {
+        if outputs.insert(output_path_key(target), target).is_some() {
+            return Err(ProjectMigrationError::Manifest(format!(
+                "输出文件 {target} 重复"
+            )));
+        }
+    }
+    let copy_roots: Vec<_> = copy_dirs.iter().map(|dir| output_path_key(dir)).collect();
+    let search_roots: Vec<_> = manifest
+        .search_paths
+        .iter()
+        .map(|dir| output_path_key(dir))
+        .collect();
+    for (key, target) in &outputs {
+        let output_overlap = key
+            .ancestors()
+            .skip(1)
+            .any(|path| outputs.contains_key(path));
+        let reserved_dir = copy_roots
+            .iter()
+            .chain(&search_roots)
+            .any(|dir| dir.starts_with(key));
+        let copied_entry = Path::new(target).ancestors().any(|path| {
+            let relative = path.to_str().expect("输出路径是 UTF-8");
+            let ancestor = output_path_key(relative);
+            copy_roots.iter().any(|dir| ancestor.starts_with(dir))
+                && root.join(path).symlink_metadata().is_ok_and(|metadata| {
+                    metadata.is_file() || (&ancestor == key && metadata.is_dir())
+                })
+        });
+        if output_overlap || reserved_dir || copied_entry {
+            return Err(ProjectMigrationError::Manifest(format!(
+                "输出文件 {target} 与项目路径冲突"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn output_path_key(path: &str) -> PathBuf {
+    // Windows 输出路径按通常的大小写不敏感口径预检，避免 dry-run 漏掉冲突。
+    if cfg!(windows) {
+        PathBuf::from(path.to_lowercase())
+    } else {
+        PathBuf::from(path)
+    }
 }
 
 fn scene_output(old: &str, scenes_dir: &str) -> Result<String, ProjectMigrationError> {
@@ -320,29 +397,54 @@ fn scene_output(old: &str, scenes_dir: &str) -> Result<String, ProjectMigrationE
     Ok(format!("scenes/{stem}.json"))
 }
 
-fn write_staging(root: &Path, staging: &Path, plan: &Plan) -> Result<(), ProjectMigrationError> {
-    fs::create_dir_all(staging).map_err(|err| ProjectMigrationError::Io {
-        path: staging.to_path_buf(),
+fn read_scene(
+    root: &Path,
+    source: &str,
+    target: String,
+) -> Result<ScenePlan, ProjectMigrationError> {
+    let text =
+        fs::read_to_string(root.join(source)).map_err(|err| ProjectMigrationError::Scene {
+            scene: source.to_string(),
+            message: err.to_string(),
+        })?;
+    let (world, _) = migrate_str(&text).map_err(|err| ProjectMigrationError::Scene {
+        scene: source.to_string(),
         message: err.to_string(),
     })?;
+    let ids = world
+        .entities
+        .iter()
+        .map(|entity| (entity.id, entity.id))
+        .collect();
+    Ok(ScenePlan {
+        source: source.to_string(),
+        target,
+        ids,
+        world,
+    })
+}
 
-    for scene in &plan.scenes {
-        let source = root.join(&scene.old);
-        let text = fs::read_to_string(&source).map_err(|err| ProjectMigrationError::Scene {
-            scene: scene.old.clone(),
-            message: err.to_string(),
-        })?;
-        let (world, _) = migrate_str(&text).map_err(|err| ProjectMigrationError::Scene {
-            scene: scene.old.clone(),
-            message: err.to_string(),
-        })?;
-        let target = staging.join(&scene.out);
-        save_world(&target, &world).map_err(|err| ProjectMigrationError::Write {
-            path: target,
-            message: err.to_string(),
-        })?;
+fn remap_scene_ids(scenes: &mut [ScenePlan]) {
+    // 关卡清单的顺序可以改。用文件路径和文件内的旧 ID 排序，避免关卡改序影响映射。
+    scenes.sort_unstable_by(|left, right| left.source.cmp(&right.source));
+    let mut next_id = 1;
+    for scene in scenes.iter_mut() {
+        for mapped in scene.ids.values_mut() {
+            *mapped = EntityId::from_raw(next_id);
+            next_id += 1;
+        }
+        for entity in &mut scene.world.entities {
+            entity.id = scene.ids[&entity.id];
+            remap_parent(entity, &scene.ids);
+        }
     }
+    // 各场景第一次分配的新 ID 都必须越过本次迁移的全部实体。
+    for scene in scenes {
+        scene.world.next_id = next_id;
+    }
+}
 
+fn write_staging(root: &Path, staging: &Path, plan: &Plan) -> Result<(), ProjectMigrationError> {
     for dir in &plan.copy_dirs {
         copy_tree(&root.join(dir), &staging.join(dir))?;
     }
@@ -350,12 +452,46 @@ fn write_staging(root: &Path, staging: &Path, plan: &Plan) -> Result<(), Project
         let target = staging.join(file);
         copy_file(&root.join(file), &target)?;
     }
+    for scene in &plan.scenes {
+        let target = staging.join(&scene.target);
+        if target.exists() {
+            return Err(ProjectMigrationError::Write {
+                path: target,
+                message: "场景输出与复制的内容路径冲突".into(),
+            });
+        }
+        save_world(&target, &scene.world).map_err(|err| ProjectMigrationError::Write {
+            path: target,
+            message: err.to_string(),
+        })?;
+    }
+    write_id_map(staging, &plan.scenes)?;
     let manifest_path = staging.join("project.xgc");
     save_project(&manifest_path, &plan.manifest).map_err(|err| ProjectMigrationError::Write {
         path: manifest_path,
         message: err.to_string(),
     })?;
     Ok(())
+}
+
+fn write_id_map(staging: &Path, scenes: &[ScenePlan]) -> Result<(), ProjectMigrationError> {
+    let path = staging.join(ID_MAP_FILE);
+    let error = |message| ProjectMigrationError::Write {
+        path: path.clone(),
+        message,
+    };
+    let mapping = IdMap {
+        format_version: 1,
+        files: scenes,
+    };
+    let bytes = serde_json::to_vec_pretty(&mapping).map_err(|err| error(err.to_string()))?;
+    // 暂存目录本身就是事务边界。独占创建避免覆盖同名的用户内容。
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(&bytes))
+        .map_err(|err| error(err.to_string()))
 }
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(), ProjectMigrationError> {
