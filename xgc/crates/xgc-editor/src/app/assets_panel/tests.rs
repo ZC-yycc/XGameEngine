@@ -65,6 +65,25 @@ impl Drop for Project {
     }
 }
 
+#[test]
+fn viewport_resolves_guid_models_from_the_open_project() {
+    let project = Project::new();
+    let resources = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../projects/XGame/Resources");
+    std::fs::copy(resources.join("box.glb"), project.0.join("Assets/box.glb")).unwrap();
+    std::fs::copy(
+        resources.join("box.glb.meta"),
+        project.0.join("Assets/box.glb.meta"),
+    )
+    .unwrap();
+
+    let mut meshes = project.app().viewport_meshes();
+    assert!(meshes
+        .get("guid://43b41a2008432f77ca7fbca93854f890")
+        .unwrap()
+        .is_some());
+    assert_eq!(meshes.root(), project.0);
+}
+
 fn render(app: &mut EditorApp, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
     ctx.run(
         egui::RawInput {

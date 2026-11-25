@@ -67,10 +67,6 @@ pub struct EditorApp {
 
 impl EditorApp {
     pub fn new(state: EditorState) -> Self {
-        let script_root = state
-            .project_root()
-            .map(|root| root.display().to_string())
-            .unwrap_or_default();
         Self {
             state,
             status: None,
@@ -86,9 +82,19 @@ impl EditorApp {
             scale_step: 0.1,
             prefab_path: String::new(),
             prefab_position: [0.0; 3],
-            script_root,
+            script_root: String::new(),
             assets: None,
             selected_asset: None,
+        }
+    }
+
+    fn viewport_meshes(&self) -> MeshCache {
+        let Some(root) = self.state.project_root() else {
+            return MeshCache::new(".");
+        };
+        match xgc_asset::scan(root) {
+            Ok(catalog) => MeshCache::with_catalog(root, catalog),
+            Err(_) => MeshCache::new(root),
         }
     }
 
@@ -134,7 +140,7 @@ impl EditorApp {
             size,
             texture,
             id,
-            renderer: Renderer::new(MeshCache::new(".")),
+            renderer: Renderer::new(self.viewport_meshes()),
             context,
         });
     }

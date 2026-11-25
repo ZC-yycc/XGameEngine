@@ -58,7 +58,7 @@ fn player_applies_root_motion_in_the_same_order_as_the_cli() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    for name in ["Fox.gltf", "Fox.bin", "Texture.png"] {
+    for name in ["Fox.gltf", "Fox.gltf.meta", "Fox.bin", "Texture.png"] {
         std::fs::copy(resources.join(name), dir.join(name)).unwrap();
     }
     let mut world = World::new();
@@ -66,7 +66,7 @@ fn player_applies_root_motion_in_the_same_order_as_the_cli() {
         Transform::default(),
         GlobalTransform::default(),
         MeshRenderer {
-            model: "Fox.gltf".to_string(),
+            model: "guid://247e6655b676415d6c77cb91ceb3281b".to_string(),
         },
         Animator {
             clip: "Walk".to_string(),
@@ -85,7 +85,8 @@ fn player_applies_root_motion_in_the_same_order_as_the_cli() {
     let mut expected = World::new();
     expected.restore_world_data(&data).unwrap();
     let root_motion = {
-        let mut meshes = MeshCache::new(&dir);
+        let catalog = xgc_asset::scan(&dir).unwrap();
+        let mut meshes = MeshCache::with_catalog(&dir, catalog);
         meshes.root_motion_library(&expected)
     };
     assert_eq!(root_motion.len(), 1);
@@ -168,6 +169,8 @@ fn selects_a_named_scene_from_the_project_manifest() {
 
     let exact = xgc_player::run_cooked_scene(&dir, 3, Some("scenes/extra.json")).unwrap();
     assert_eq!(exact.entities, 2);
+    let from_manifest = xgc_player::run_cooked(&dir.join("project.xgc"), 3).unwrap();
+    assert_eq!(from_manifest, stats, "脚本和资源应从项目根加载");
 
     let missing = xgc_player::run_cooked_scene(&dir, 3, Some("nope")).unwrap_err();
     assert!(missing.contains("没有场景"), "{missing}");

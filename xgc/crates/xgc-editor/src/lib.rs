@@ -173,7 +173,7 @@ impl EditorState {
             .map(|session| session.manifest().name.as_str())
     }
 
-    /// 项目根；单场景打开时为 None。Play Scripts 默认用它。
+    /// 项目根；单场景打开时为 None。视口与 Play Scripts 从这里找项目资产。
     pub fn project_root(&self) -> Option<&Path> {
         self.project.as_ref().map(ProjectSession::root)
     }

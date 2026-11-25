@@ -120,6 +120,13 @@ pub struct InputState {
 }
 
 impl InputMap {
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        std::fs::read_to_string(path)
+            .map_err(|err| format!("读取输入映射失败：{err}"))
+            .and_then(|text| Self::parse_ron(&text))
+            .map_err(|err| format!("{}：{err}", path.display()))
+    }
+
     pub fn parse_ron(text: &str) -> Result<Self, String> {
         ron::from_str(text).map_err(|err| format!("输入映射解析失败：{err}"))
     }

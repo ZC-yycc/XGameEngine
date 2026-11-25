@@ -1,4 +1,4 @@
-//! `xgc-editor` 入口：可选场景路径，缺省为空场景。
+//! `xgc-editor` 入口：可传项目目录、`project.xgc` 或世界文件。
 
 use std::path::PathBuf;
 use std::process::ExitCode;

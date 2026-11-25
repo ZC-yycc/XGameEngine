@@ -26,6 +26,7 @@ struct PlayerApp {
     runtime: Option<ScriptRuntime>,
     /// 根运动轨道表：进入播放时建一次，每帧在系统 / 脚本之后应用（与 CLI 同序）。
     root_motion: RootMotionLibrary,
+    meshes: Option<MeshCache>,
     input: PlayerInput,
     scene: Option<String>,
     error: Option<String>,
@@ -34,42 +35,58 @@ struct PlayerApp {
 }
 
 impl PlayerApp {
-    fn new(dir: &Path, scene: Option<&str>) -> Self {
+    fn new(path: &Path, scene: Option<&str>) -> Self {
         let mut app = Self {
-            dir: dir.to_path_buf(),
+            dir: path.to_path_buf(),
             simulation: None,
             particles: ParticleSystem::new(),
             runtime: None,
             root_motion: RootMotionLibrary::new(),
-            input: PlayerInput::load(dir),
+            meshes: None,
+            input: PlayerInput::default(),
             scene: scene.map(str::to_string),
             error: None,
             viewport: None,
             frames: 0,
         };
-        match crate::load_world_dir_scene(dir, scene) {
-            Ok(data) => {
-                let mut world = World::new();
-                if let Err(err) = world.restore_world_data(&data) {
-                    app.error = Some(format!("恢复世界失败：{err}"));
-                    return app;
-                }
-                app.root_motion = {
-                    let mut meshes = MeshCache::new(dir);
-                    meshes.root_motion_library(&world)
-                };
-                app.simulation = Some(Simulation::new(world));
-                app.runtime = Some(crate::runtime_for(dir));
-            }
-            Err(err) => app.error = Some(err),
+        if let Err(err) = app.load(path, scene) {
+            app.error = Some(err);
         }
         app
     }
 
+    fn load(&mut self, path: &Path, scene: Option<&str>) -> Result<(), String> {
+        let loaded = crate::load_scene(path, scene)?;
+        let (root, input) = match &loaded.project {
+            Some(project) => {
+                let path = project
+                    .input_path()
+                    .map_err(|err| format!("读取项目输入映射失败：{err}"))?;
+                (project.root(), PlayerInput::load(path.as_deref())?)
+            }
+            None => (
+                path,
+                PlayerInput::load(Some(&path.join("input.ron"))).unwrap_or_default(),
+            ),
+        };
+        let mut world = World::new();
+        world
+            .restore_world_data(&loaded.data)
+            .map_err(|err| format!("恢复世界失败：{err}"))?;
+        let (runtime, mut meshes) = crate::assets_for(root);
+        self.root_motion = meshes.root_motion_library(&world);
+        self.dir = root.to_path_buf();
+        self.input = input;
+        self.meshes = Some(meshes);
+        self.simulation = Some(Simulation::new(world));
+        self.runtime = Some(runtime);
+        Ok(())
+    }
+
     fn ensure_viewport(&mut self, render_state: &RenderState) {
-        if self.viewport.is_some() {
+        let Some(meshes) = self.meshes.take() else {
             return;
-        }
+        };
         let size = [1280, 720];
         let context = GpuContext::from_arc(
             render_state.device.clone(),
@@ -100,7 +117,7 @@ impl PlayerApp {
         self.viewport = Some(Viewport {
             texture,
             id,
-            renderer: Renderer::new(MeshCache::new(self.dir.clone())),
+            renderer: Renderer::new(meshes),
             context,
         });
     }
@@ -191,4 +208,99 @@ pub fn run_scene(dir: &Path, scene: Option<&str>) -> eframe::Result {
         options,
         Box::new(move |_cc| Ok(Box::new(PlayerApp::new(&dir, scene.as_deref())))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xgc_store::{save_project, save_world, ProjectContent, ProjectManifest};
+    use xgc_world::{Script, Transform};
+
+    #[test]
+    fn window_uses_only_the_manifest_input_map() {
+        let root = std::env::temp_dir().join(format!(
+            "xgc_player_manifest_input_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("Config")).unwrap();
+        std::fs::write(
+            root.join("move.lua"),
+            "function update(ctx) if action_pressed(ctx, 'Jump') then set_pos(ctx, 2, 0, 0) end end",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Config/controls.ron"),
+            r#"InputMap(actions: {"Jump": [Key(Space)]})"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("input.ron"), "InputMap(actions: {})").unwrap();
+        let mut world = World::new();
+        let key = world.spawn((
+            Transform::default(),
+            Script {
+                path: "move.lua".into(),
+            },
+        ));
+        let id = world.entity(key).unwrap();
+        save_world(&root.join("scene.json"), &world.world_data()).unwrap();
+        let manifest_path = root.join("project.xgc");
+        let mut manifest = ProjectManifest {
+            format_version: xgc_store::PROJECT_FORMAT_VERSION,
+            name: "controls".into(),
+            entry_scene: "scene.json".into(),
+            scenes: vec!["scene.json".into()],
+            content: ProjectContent {
+                models: "Assets".into(),
+                textures: "Assets".into(),
+                audio: "Assets".into(),
+                shaders: None,
+                prefabs: "Assets".into(),
+                scripts: "Scripts".into(),
+            },
+            search_paths: Vec::new(),
+            input: Some("./Config\\controls.ron".into()),
+        };
+        let play_one_frame = |path: &Path| {
+            let mut app = PlayerApp::new(path, None);
+            assert!(app.error.is_none(), "{:?}", app.error);
+            let ctx = egui::Context::default();
+            let _ = ctx.run(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Space,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| app.input.apply(ctx, app.runtime.as_mut().unwrap()),
+            );
+            app.step();
+            let world = app.simulation.as_ref().unwrap().world();
+            world
+                .get::<Transform>(world.key(id).unwrap())
+                .unwrap()
+                .position[0]
+        };
+        save_project(&manifest_path, &manifest).unwrap();
+        assert_eq!(play_one_frame(&root), 2.0);
+        assert_eq!(play_one_frame(&manifest_path), 2.0);
+
+        std::fs::copy(root.join("Config/controls.ron"), root.join("input.ron")).unwrap();
+        std::fs::remove_file(root.join("Config/controls.ron")).unwrap();
+        let missing = PlayerApp::new(&root, None);
+        assert!(missing.error.as_deref().unwrap().contains("项目输入映射"));
+        assert!(missing.simulation.is_none());
+
+        manifest.input = None;
+        save_project(&manifest_path, &manifest).unwrap();
+        assert_eq!(play_one_frame(&root), 0.0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -16,7 +16,7 @@
 | 正式 System 调度（计划即执行顺序） | **通过** | `Schedule::plan()` 取代全批贪心的 `batches()`：按注册顺序**连续**分批（同批两两无访问冲突）+ 宿主阶段（插在第一个 `runs_after_host()` 系统之前；默认调度在固定步与动画之间），`run` / `step_with` 都只走计划，摊平顺序 == 注册顺序；`Simulation` 构造时固化计划（稳态分配不回归）；`xgc plan` 输出确定性 JSON（16 系统 / 12 批 + 宿主阶段；宿主阶段不恒最后，默认调度夹在固定步与动画之间；两次输出逐字节相同）。证据：`run 60` 仍 `f4bc029f5f995b91`；showcase 150 步无脚本 trace、带资产根 trace 与 `run-scripts` 末行在「宿主阶段插到固定步与动画之间」切片后分别为 `4a5cf2c54331a972` / `b6a3103f8331a972` / `b6a3103f8331a972`（layers 状态随层机器 / 脚本当帧推进，属预期）；回归 `crates/xgc-sim/tests/schedule_plan.rs`（8 条）+ `crates/xgc-cli/tests/plan.rs`（4 条） |
 | 跨系统并行执行 | **通过** | 执行计划（连续批次 + 访问声明 + `xgc plan`）与所有权拆分（`World::extract_writes` / `WriteSet` / `restore_writes`）之上，第 210 轮落**分区执行**：批内 `System::supports_parted()` 的系统组成并行子集（`animation_apply` / `animation_layers` / `skeleton_pose` / `audio_mixer` 已转），其余按注册顺序串行；批内两两无访问冲突 ⇒ 先串后并的 `state_hash` / `revision` 与纯串行逐位一致（1 / 2 / 8 线程同场景 parity 已进门禁）。默认仍 1 线程（每帧新建线程破坏零分配门禁），用 `Schedule::set_parallel_threads(n)` 或 CLI `xgc run-world <世界> [帧数] [线程数]` / `xgc trace <世界> [帧数] [资产根] [线程数]` 显式开启：`run-world … 60 4` 与默认同哈希、`trace … 4` 逐字节一致。脚本不进 `System`：`ScriptRuntime` 用 mlua 的 `Rc` / `RefCell`、mlua 0.10 无 send feature ⇒ `!Send`，且 xtask 依赖门禁不允许 `xgc-script → xgc-sim`。剩余优化：常驻线程池（让默认启动并行）、`HierarchySystem` 的 `set_field` revision 语义 |
 | 性能基准 + 热路径分配门禁 | **通过** | `crates/xgc-sim/tests/steady_state.rs`：稳态帧分配 13818 次 / 预算 16440（每帧 1697 → 230），数值型组件 `state_hash` 零分配；release 吞吐本机 0.043 ms/帧（210 实体、600 帧 25.97 ms；旧数字 0.057 是另一台机器口径）；CI 的 `test` job 在 windows-latest 上跑 `cargo test --release -p xgc-sim --test steady_state -- --ignored --nocapture`，只把数字留在日志里不设阈值（写死阈值等于给机器调验收线，见该测试模块文档）——运行 45245793893 结论 成功（CI toolchain 钉 1.95.0） |
-| 推送 / CI | **阻塞** | 本地切片已提交（`68e49ff` / `6132718` / `7a2dd6f` 等），但本机推送持续报 `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`（无 gh / SSH key / credential helper），远端 master 仍是 `8a4c852`；`.github/workflows/xgc.yml` 在 push / pull_request 上跑 XGC 门禁与 CPU 测试（hosted runner 无 GPU：render 只跑不创建 wgpu 设备的 14 个目标，GPU 集成测试留在带显卡机器上跑），运行 45245793893 结论 成功；CI toolchain 钉 1.95.0（首次运行 45241839406 因 stable clippy 1.100 新 lint 变红，修掉后钉版本），workflow 文件本身也修过一次重复 `with:` 键（run 45243120447 被判无效） |
+| 推送 / CI | **迁移与检查已推送** | 基线重生成、项目迁移与原生检查已合入远端 `master`（`35befa9`、`78853be`、`c1dbd6b`、`d8b5828`）。[XGC CI 工作流](../.github/workflows/xgc.yml) 在 push / pull_request 上跑门禁与 CPU 测试，GPU 集成测试在带显卡的验收机执行。历史成功记录见运行 `45245793893`。 |
 
 ## 项目迁移的实体 ID
 
@@ -31,6 +31,10 @@
 `xgc check <旧项目目录>` 检查迁移源。迁移后运行 `xgc check <输出目录>` 或 `xgc check <输出目录>/project.xgc`，检查清单里的场景、原生预制体、父子关系、跨文件实体 ID、预制体来源、GUID 与项目相对路径引用，以及清单登记的输入映射。检查过程只读文件，脚本只核对引用路径。目录存在原生清单时始终采用原生格式。
 
 退出码 `0` 表示检查通过，`1` 表示清单或入口场景无法读取，`2` 表示找到内容问题。随仓库提供的 XGame 项目迁移后报告 4 个场景、35 个场景实体、1 个预制体、8 个脚本引用、18 个已登记资产、0 个问题。Rust 插件组件当前不会执行，检查以提示报告。
+
+## 用编辑器与播放器打开迁移项目
+
+从 `xgc/` 运行 `cargo run -p xgc-editor --offline -- ../tmp/xgc-project` 打开入口场景。在层级面板的 `Scenes` 中切换关卡，用 `Play Scripts` 运行项目脚本。播放器可用 `cargo run -p xgc-player --offline -- ../tmp/xgc-project/project.xgc --scene character` 打开角色场景，加入帧数可无头运行。两个宿主都支持项目目录和清单文件，视口与脚本从项目根解析 GUID。窗口输入使用清单的 `input` 路径，未登记时不绑定动作，登记的文件读取或解析失败时报告错误。
 
 ## 可复现命令
 

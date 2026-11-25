@@ -71,17 +71,15 @@ const KEY_CODES: &[(egui::Key, KeyCode)] = &[
     (egui::Key::F12, KeyCode::F12),
 ];
 
+#[derive(Default)]
 pub(crate) struct PlayerInput {
     map: Option<InputMap>,
 }
 
 impl PlayerInput {
-    /// 读 `<root>/input.ron`；没有或解析失败就不驱动输入（不是致命错误）。
-    pub(crate) fn load(root: &Path) -> Self {
-        let map = std::fs::read_to_string(root.join("input.ron"))
-            .ok()
-            .and_then(|text| InputMap::parse_ron(&text).ok());
-        Self { map }
+    pub(crate) fn load(path: Option<&Path>) -> Result<Self, String> {
+        let map = path.map(InputMap::load).transpose()?;
+        Ok(Self { map })
     }
 
     pub(crate) fn apply(&self, ctx: &egui::Context, runtime: &mut ScriptRuntime) {
@@ -146,16 +144,14 @@ mod tests {
     }
 
     #[test]
-    fn loads_the_project_input_map() {
+    fn distinguishes_a_missing_mapping_from_no_mapping() {
         let dir = temp_dir("load");
-        std::fs::write(
-            dir.join("input.ron"),
-            "InputMap(actions: {\"Jump\": [Key(Space)]}, axes: {})",
-        )
-        .unwrap();
-        assert!(PlayerInput::load(&dir).map.is_some());
-        std::fs::remove_file(dir.join("input.ron")).unwrap();
-        assert!(PlayerInput::load(&dir).map.is_none());
+        let path = dir.join("input.ron");
+        std::fs::write(&path, "InputMap(actions: {\"Jump\": [Key(Space)]})").unwrap();
+        assert!(PlayerInput::load(Some(&path)).unwrap().map.is_some());
+        std::fs::remove_file(&path).unwrap();
+        assert!(PlayerInput::load(Some(&path)).is_err());
+        assert!(PlayerInput::load(None).unwrap().map.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

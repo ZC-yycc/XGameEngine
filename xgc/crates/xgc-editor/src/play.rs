@@ -30,8 +30,8 @@ impl EditorState {
         Ok(())
     }
 
-    /// 进入 Play 并在每帧驱动 `script.lua`；可选读取 `<root>/input.ron`。
-    pub fn play_with_scripts(&mut self, root: &Path) -> Result<(), String> {
+    /// 项目的脚本根与输入路径由清单确定，单场景才使用调用方提供的根。
+    pub fn play_with_scripts(&mut self, standalone_root: &Path) -> Result<(), String> {
         if self.play.is_some() {
             return Ok(());
         }
@@ -40,19 +40,30 @@ impl EditorState {
         world
             .restore_world_data(&before)
             .map_err(|err| format!("进入 Play 失败：{err}"))?;
-        let runtime = match xgc_asset::scan(root) {
-            Ok(catalog) => ScriptRuntime::with_catalog(root, catalog),
-            Err(_) => ScriptRuntime::new(root),
+        let (root, input) = match &self.project {
+            Some(project) => {
+                let path = project
+                    .input_path()
+                    .map_err(|err| format!("读取项目输入映射失败：{err}"))?;
+                (
+                    project.root(),
+                    path.as_deref().map(InputMap::load).transpose()?,
+                )
+            }
+            None => (
+                standalone_root,
+                InputMap::load(&standalone_root.join("input.ron")).ok(),
+            ),
         };
-        let input = std::fs::read_to_string(root.join("input.ron"))
-            .ok()
-            .and_then(|text| InputMap::parse_ron(&text).ok());
-        // 根运动表在进入 Play 时建一次：Editor 与 CLI / player 必须同源，
-        // 否则同一份 Fox 在编辑器里会比命令行少走一段路。
-        let root_motion = {
-            let mut meshes = MeshCache::new(root);
-            meshes.root_motion_library(&world)
+        let (runtime, mut meshes) = match xgc_asset::scan(root) {
+            Ok(catalog) => (
+                ScriptRuntime::with_catalog(root, catalog.clone()),
+                MeshCache::with_catalog(root, catalog),
+            ),
+            Err(_) => (ScriptRuntime::new(root), MeshCache::new(root)),
         };
+        // GUID 模型与脚本共用同一份资产目录，否则根运动会随宿主而变。
+        let root_motion = meshes.root_motion_library(&world);
         self.play = Some(PlaySession {
             before,
             simulation: Simulation::new(world),

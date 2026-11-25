@@ -118,7 +118,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-editor/src/assets_ops.rs` | `EditorState::assets()`：只读扫描清单内容目录，规范化与去重、确定性截断、隐藏 / 链接 / `.meta` 排除；不生成元数据 |
 | `crates/xgc-editor/src/app/assets_panel.rs` | 资产折叠面板：首次展开缓存，Refresh 手动刷新，虚拟列表与长路径省略；点选预制体只回填工具栏路径 |
 | `crates/xgc-editor/src/app/assets_panel/tests.rs` | 资产回归：2000 条上限与排序、只读、Windows 隐藏属性、折叠 / 缓存 / 刷新、有效预制体点选不实例化 |
-| `crates/xgc-editor/src/play.rs` | Play / Play Scripts / input.ron 动作桥 / step / stop |
+| `crates/xgc-editor/src/play.rs` | Play / Play Scripts / 清单输入映射 / step / stop，项目脚本与根运动共用 GUID 目录 |
 | `crates/xgc-editor/src/transform_ops.rs` | 位置 / 缩放 / 旋转 setter 与 Gizmo 旋转；无父节点同步 GlobalTransform；`snap` |
 | `crates/xgc-editor/src/prefab_ops.rs` | 从 `.prefab.json` 实例化并选中根，按所选成员的 GUID 或项目相对路径加载来源并 Revert |
 | `crates/xgc-editor/src/gizmo.rs` | 视口 MVP 投影与线段命中距离 |
@@ -225,10 +225,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/assets.rs` | `MeshCache`：builtin / 相对路径 GLB / AssetCatalog `guid://` 解析 / 越界拒绝；`.mat` 材质按引用缓存，读不到退回模型材质；`root_motion_library` 建根运动轨道表（CLI / editor / player 三宿主共用） |
 | `crates/xgc-render/src/resources.rs` | `ResourceDesc` / `ResourceKind` / `ResourceUsage` / `ResourceTable` |
 | `crates/xgc-world/tests/` | world / commands / journal / query / snapshot 回归 |
-| `crates/xgc-player/src/lib.rs` | `load_world_dir_scene` / `runtime_for` / `run_cooked_scene`：manifest 校验、优先 XGCB、脚本驱动；项目可按清单登记名或唯一文件名主干选场景，cooked 目录传场景直接报错 |
-| `crates/xgc-player/src/window.rs` | eframe + wgpu 视口：每帧先按 `input.ron` 折叠键鼠动作 / 轴再仿真；`run_scene` 可加载指定场景，状态栏显示场景名 |
-| `crates/xgc-player/src/input.rs` | 播放器输入桥：`egui::Key` / `PointerButton` → `InputState`，读 `<root>/input.ron`，每固定步重写全部动作 / 轴 |
-| `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录 | 项目目录> [帧数] [--scene <场景名>]`：无帧数打开窗口，有帧数 headless |
+| `crates/xgc-player/src/lib.rs` | 窗口与无头共用场景加载和 GUID 目录；原生项目可按登记名或唯一文件名主干选场景，cooked 校验清单并优先读 XGCB |
+| `crates/xgc-player/src/window.rs` | eframe + wgpu 视口：原生项目读清单的输入路径，cooked 读根目录默认映射；模型与根运动共用网格缓存 |
+| `crates/xgc-player/src/input.rs` | 播放器输入桥：`egui::Key` / `PointerButton` → `InputState`，每固定步重写全部动作 / 轴 |
+| `crates/xgc-player/src/main.rs` | `xgc-player <cooked 目录 | 项目目录 | project.xgc> [帧数] [--scene <场景名>]`：无帧数打开窗口，有帧数 headless |
 | `crates/xgc-cli/src/main.rs` | CLI 参数分派；文件预算拆分后的轻量入口 |
 | `crates/xgc-cli/src/check_cmd.rs` | `xgc check` 分派：schema / 单世界 / 旧迁移源 / 原生项目；原生清单存在就按原生格式检查 |
 | `crates/xgc-cli/src/check_cmd/project.rs` | 原生项目只读体检：清单与世界 schema、跨文件 ID、父链、预制体来源、资产及输入映射 |
@@ -267,8 +267,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 - **帧首准备**：`System::prepare(&World)` 是命令结算之后、执行计划之前的**只读**阶段（按注册顺序调用，只重建派生缓存，不能改语义）；刚体表等派生状态必须在这里建，别挪进 `run`——会吃到本帧 `VelocitySystem` 的积分，整条物理轨迹多出 g·dt²。
 - **宿主阶段位置**：`Schedule::plan()` 把 `PlanStage::Host` 插在第一个 `System::runs_after_host()` 系统之前（没有这种系统才落最后）；动画系统（`animation_state` / `animation` / `animation_apply` / `animation_layers` / `skeleton_pose`）都声明 `runs_after_host`，UI 系统排在宿主之前（旧端 `update_ui()` 先于 `Update` 钩子）。不要再假设宿主阶段恒在最后。
 - **碰撞事件**：`World::collision_events` 是瞬态、`Simulation::step_with` 每步开头清空，**不进 `WorldData` / 快照 / `state_hash`**；AABB 接触表与角色-传感器接触表各自跨帧 diff，一对接触给双方各一条有向 `CollisionEvent`；sensor 只记接触、不做分离（否则触发器会把动态体推出去）；脚本在 `update` / `fixed_update` 之后按 `entity` 派发 `on_collision_enter/exit(ctx, other)`，命令与 update 的命令同帧结算。静态 sensor 改 `Transform` 不会推给 rapier（只有 kinematic 体每帧 `set_position`），只有增删 / 换体才变更接触。
-- **播放器输入**：独立播放器窗口只把 `input.ron` 折叠成 `ScriptRuntime::set_action` / `set_axis`，与编辑器 Play 同源；每固定步**重写全部**动作 / 轴（松开键必须把 false / 0 送进脚本，不能靠清空）；键位表之外的键（标点 / Insert）不映射，缺 `input.ron` 时静默不驱动输入。回归 `crates/xgc-player/src/input.rs` 的单元测试。
-- **播放器场景选择**：`--scene` 只对项目目录有效；先按 `project.xgc` 登记名精确匹配，再按**唯一**文件名主干匹配（`character` → `scenes/character.json`），同名主干多于一个必须写完整路径。cooked 目录没有清单，传 `--scene` 报错而不是静默回入口。回归 `crates/xgc-player/tests/player.rs` 的 `selects_a_named_scene_from_the_project_manifest`。
+- **项目宿主**：编辑器与播放器以 `ProjectSession` 确定项目根、场景与输入路径，视口、脚本和根运动以项目根加载 GUID 资产。窗口的原生项目输入以清单登记为准，未登记则无映射，登记文件读失败或解析失败则报错。cooked 窗口与单世界编辑器使用各自根目录下的可选 `input.ron`。播放器每次把所有动作 / 轴（包括松开后的 false / 0）送入脚本。回归见 `crates/xgc-player/src/window.rs` 和 `crates/xgc-editor/tests/editor.rs`。
+- **播放器场景选择**：项目目录和 `project.xgc` 均支持 `--scene`。先按清单登记名精确匹配，再按唯一文件名主干匹配（`character` → `scenes/character.json`）。多个同名主干必须写完整路径。cooked 目录传 `--scene` 返回错误。回归见 `crates/xgc-player/tests/player.rs`。
 - **MCP 适配器**：`xgc mcp` 只做 `initialize` / `tools/list` / `tools/call` 封装，工具名 = `xgc.agent/1` 方法名把 `.` 换成 `_`，参数与结果原样透传；**不要在这里复制查询 / 编辑逻辑**。工具执行失败放 `isError`，未知工具 -32602，未知方法 / 坏 JSON 走 JSON-RPC 错误码；通知（无 id）不回应。回归 `crates/xgc-agent/tests/mcp.rs`。
 - **动画事件**：`Animator.events` 是作者数据（`(time, name)`，空表不落字段，老场景字节不变）；`AnimatorSystem` 推进时钟后按 `crossed_events` 跨帧判定并写瞬态 `World::animation_events`（**不进 `WorldData` / 快照 / `state_hash`**），本系统开头清空上一步；脚本宿主在动画系统**之前**，所以 `on_anim_event(ctx, name)` 比旧端晚一个固定步收到（别把动画挪到宿主前，会打乱状态机时序）。循环剪辑只在真的跨圈时触发；`started`（首帧）额外派发零时刻事件。新增作者数据字段一律走 `Component::state_fields()` 排除，别只加进 `fields()` 让老场景哈希漂移（`Animator.events` 就是这么做的，回归 `crates/xgc-world/tests/hash.rs`）。
 - **glTF 动画**：剪辑挂 `Mesh.animations`（模型内部节点层级），`animated_pose::resolve` 按 `Animator.clip` / `time` 采样成 pose 喂蒙皮路径，不为迁移世界伪造骨骼实体；旧状态机迁移成 `animation.state`（sim / migrate 共用 `StateMachine`；`AnimationStateSystem` 支持 `AtLeast` / `Below` + 迟滞、时长缺省 `fade_time`）。`additive`（参考 = 叠加剪辑第 0 帧、权重 0 逐位等于基础）、`layers`（`animation.layers` RON 层栈；mask 沿 parent 链匹配节点名；基础 + crossfade + additive 之后叠 Override / Additive）、渲染侧交叉淡入（`Animator.blend_from*` 定格旧剪辑时钟 + `glb/crossfade.rs` 局部 TRS 按 alpha 混合）、`root_motion` 均已迁移；宿主阶段夹在固定步与动画之间（脚本当帧参数当帧生效）；渲染侧在 crossfade 后 additive 前剥离根轴；CLI / editor / player 三宿主均已接根运动。细节 / 逐刀数字见 STATUS / CUTOVER。

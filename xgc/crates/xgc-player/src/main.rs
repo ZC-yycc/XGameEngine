@@ -1,7 +1,7 @@
-//! `xgc-player <cooked 目录 | 项目目录> [帧数] [--scene <场景名>]`。
+//! `xgc-player <cooked 目录 | 项目目录 | project.xgc> [帧数] [--scene <场景名>]`。
 //!
-//! 项目目录以 `project.xgc` 为标记；此时入口场景由清单给出，资产根仍是目录本身。
-//! `--scene` 只对项目目录有效，写清单登记名或唯一文件名主干（`character`）。
+//! 原生项目从清单读取入口场景，清单所在目录是资产根。
+//! `--scene` 仅适用于原生项目，写清单登记名或唯一文件名主干（`character`）。
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -9,7 +9,9 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(dir) = args.next() else {
-        eprintln!("用法：xgc-player <cooked 目录 | 项目目录> [帧数] [--scene <场景名>]");
+        eprintln!(
+            "用法：xgc-player <cooked 目录 | 项目目录 | project.xgc> [帧数] [--scene <场景名>]"
+        );
         return ExitCode::from(2);
     };
     let mut frames: Option<u64> = None;

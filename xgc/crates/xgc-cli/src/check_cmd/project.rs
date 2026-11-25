@@ -85,7 +85,7 @@ pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckRepo
         audit.document(&document, "prefab", &data);
     }
     if let Some(input) = &manifest.input {
-        audit.input(input);
+        audit.input(input, project.input_path());
     }
     audit.report.scripts = audit.scripts.len();
     Ok(audit.report)
@@ -314,17 +314,15 @@ impl Audit<'_> {
         }
     }
 
-    fn input(&mut self, reference: &str) {
-        match self
-            .resolve(reference)
-            .and_then(|path| fs::read_to_string(path).map_err(|err| err.to_string()))
-        {
-            Ok(text) => {
+    fn input(&mut self, reference: &str, path: Result<Option<PathBuf>, StoreError>) {
+        match path.and_then(|path| Ok(path.map(fs::read_to_string).transpose()?)) {
+            Ok(Some(text)) => {
                 if let Err(err) = InputMap::parse_ron(&text) {
                     self.problem("input.parse", reference, &err);
                 }
             }
-            Err(err) => self.problem("input.read", reference, &err),
+            Ok(None) => {}
+            Err(err) => self.problem("input.read", reference, &err.to_string()),
         }
     }
 }

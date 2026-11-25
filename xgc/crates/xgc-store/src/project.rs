@@ -27,7 +27,7 @@ pub struct ProjectManifest {
     pub content: ProjectContent,
     #[serde(default)]
     pub search_paths: Vec<String>,
-    /// 旧 `input.ron` 原样复制后的位置；没有输入映射时为 None。
+    /// 输入映射的项目相对路径；没有输入映射时为 None。
     #[serde(default)]
     pub input: Option<String>,
 }
@@ -151,6 +151,22 @@ impl ProjectSession {
 
     pub fn entry_scene(&self) -> &str {
         &self.manifest.entry_scene
+    }
+
+    /// 文件经规范化和实际路径校验后才交给宿主，确保目录链接不会把输入读到项目之外。
+    pub fn input_path(&self) -> Result<Option<PathBuf>> {
+        let Some(input) = &self.manifest.input else {
+            return Ok(None);
+        };
+        let relative = self.manifest.normalized("input", input)?;
+        let root = self.root.canonicalize()?;
+        let path = root.join(relative).canonicalize()?;
+        if !path.starts_with(&root) || !path.is_file() {
+            return Err(StoreError::Format(format!(
+                "输入映射 {input} 必须是项目内的文件"
+            )));
+        }
+        Ok(Some(path))
     }
 
     /// 场景路径一律由清单的相对路径拼根目录；未登记的场景直接拒绝，

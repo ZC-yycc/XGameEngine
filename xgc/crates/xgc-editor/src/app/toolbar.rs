@@ -85,8 +85,17 @@ impl EditorApp {
                     Err(err) => err,
                 });
             }
-            ui.add(egui::TextEdit::singleline(&mut self.script_root).hint_text("脚本根目录"));
-            if ui.button("Play Scripts").clicked() && !self.script_root.is_empty() {
+            let in_project = self.state.project_root().is_some();
+            if !in_project {
+                ui.add(egui::TextEdit::singleline(&mut self.script_root).hint_text("脚本根目录"));
+            }
+            if ui
+                .add_enabled(
+                    in_project || !self.script_root.is_empty(),
+                    egui::Button::new("Play Scripts"),
+                )
+                .clicked()
+            {
                 self.status = Some(
                     match self
                         .state

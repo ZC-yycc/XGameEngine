@@ -350,8 +350,20 @@ fn opens_a_migrated_project_through_its_manifest() {
         Transform::default(),
     ));
     xgc_store::save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();
+    std::fs::create_dir_all(dir.join("Config")).unwrap();
+    std::fs::write(
+        dir.join("Config/controls.ron"),
+        r#"InputMap(actions: {"Jump": [Key(Space)]})"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("input.ron"),
+        r#"InputMap(actions: {"WrongMap": [Key(Space)]})"#,
+    )
+    .unwrap();
+    let manifest_path = dir.join("project.xgc");
     save_project(
-        &dir.join("project.xgc"),
+        &manifest_path,
         &ProjectManifest {
             format_version: xgc_store::PROJECT_FORMAT_VERSION,
             name: "demo".to_string(),
@@ -366,13 +378,16 @@ fn opens_a_migrated_project_through_its_manifest() {
                 scripts: "Scripts".to_string(),
             },
             search_paths: Vec::new(),
-            input: None,
+            input: Some("./Config\\controls.ron".to_string()),
         },
     )
     .unwrap();
 
     let mut editor = EditorState::open(&dir).unwrap();
     assert_eq!(editor.project_name(), Some("demo"));
+    editor.play_with_scripts(&dir).unwrap();
+    assert_eq!(editor.input_map().unwrap().action_names(), ["Jump"]);
+    editor.stop().unwrap();
     assert_eq!(editor.project_root(), Some(dir.as_path()));
     assert_eq!(editor.entities().len(), 1);
     assert!(editor.path().unwrap().ends_with("scenes/main.json"));
