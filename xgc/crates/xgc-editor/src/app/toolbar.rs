@@ -54,7 +54,13 @@ impl EditorApp {
             for value in &mut self.prefab_position {
                 ui.add(egui::DragValue::new(value).speed(0.1));
             }
-            if ui.button("Prefab").clicked() && !self.prefab_path.is_empty() {
+            if ui
+                .add_enabled(
+                    !self.state.is_playing() && !self.prefab_path.is_empty(),
+                    egui::Button::new("Prefab"),
+                )
+                .clicked()
+            {
                 match self
                     .state
                     .instantiate_prefab_file(std::path::Path::new(&self.prefab_path))
@@ -70,16 +76,14 @@ impl EditorApp {
                     Err(err) => self.status = Some(err),
                 }
             }
-            if ui.button("Revert").clicked() && !self.prefab_path.is_empty() {
-                self.status = Some(
-                    match self
-                        .state
-                        .revert_prefab_file(std::path::Path::new(&self.prefab_path))
-                    {
-                        Ok(count) => format!("已还原 {count} 个实体"),
-                        Err(err) => err,
-                    },
-                );
+            if ui
+                .add_enabled(self.state.can_revert_prefab(), egui::Button::new("Revert"))
+                .clicked()
+            {
+                self.status = Some(match self.state.revert_selected_prefab() {
+                    Ok(count) => format!("已还原 {count} 个实体"),
+                    Err(err) => err,
+                });
             }
             ui.add(egui::TextEdit::singleline(&mut self.script_root).hint_text("脚本根目录"));
             if ui.button("Play Scripts").clicked() && !self.script_root.is_empty() {

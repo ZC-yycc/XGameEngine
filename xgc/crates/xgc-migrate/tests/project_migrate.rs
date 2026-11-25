@@ -107,7 +107,9 @@ fn dry_run_reports_without_writing() {
     assert!(report.dry_run);
     assert_eq!(report.scenes, 2);
     assert_eq!(report.entities, 3);
-    assert!(report.copied_files >= 5, "{}", report.copied_files);
+    assert_eq!(report.prefabs, 1);
+    assert_eq!(report.prefab_entities, 1);
+    assert_eq!(report.copied_files, 4);
     assert!(!out.exists());
     assert!(!staging_of(&out).exists());
     assert!(report.render().contains("dry-run"));
@@ -150,12 +152,91 @@ fn migrates_listed_scenes_and_content() {
     );
     assert!(out.join("Resources/model.bin.meta").is_file());
     assert!(out.join("Scripts/main.lua").is_file());
-    assert!(out.join("Prefabs/P.prefab.ron").is_file());
+    let prefab = xgc_store::load_prefab(&out.join("Prefabs/P.prefab.json")).unwrap();
+    assert_eq!(prefab.entities.len(), 1);
+    assert!(!out.join("Prefabs/P.prefab.ron").exists());
     assert!(out.join("input.ron").is_file());
     // 输出目录里只有清单、场景和内容，不再出现旧 project.ron。
     assert!(!out.join("project.ron").exists());
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&out);
+}
+
+#[test]
+fn migrates_nested_prefabs_and_rewrites_both_reference_spellings() {
+    use xgc_world::{Parent, PrefabInstance, World};
+
+    let (root, out) = standard_project("prefab-ids");
+    let source = "Prefabs/Nested/Pillar.prefab.ron";
+    let target = "Prefabs/Nested/Pillar.prefab.json";
+    let prefab = scene(&format!(
+        "{},{}",
+        entity(1),
+        entity(2).replace("parent: None", "parent: Some((1))")
+    ));
+    write(&root, source, &prefab);
+    write_meta(&root, source, "1234abcd");
+    let root_instance = entity(1).replace(
+        "prefab: None",
+        "prefab: Some((source: \"guid://1234abcd\", source_id: (1), is_root: true))",
+    );
+    let child = entity(2)
+        .replace("parent: None", "parent: Some((1))")
+        .replace(
+            "prefab: None",
+            &format!("prefab: Some((source: \"{source}\", source_id: (2), is_root: false))"),
+        );
+    write(
+        &root,
+        "Scenes/a.ron",
+        &scene(&format!("{root_instance},{child}")),
+    );
+    migrate_old_project(&root, &out, false).unwrap();
+    assert!(out.join(target).is_file(), "预制体未转换为原生资产");
+    assert!(!out.join(source).exists());
+    assert!(!out.join(format!("{source}.meta")).exists());
+    assert_eq!(
+        xgc_asset::scan(&out).unwrap().resolve("guid://1234abcd"),
+        Some(out.join(target).as_path())
+    );
+    let map: serde_json::Value =
+        serde_json::from_slice(&fs::read(out.join("entity-id-map.json")).unwrap()).unwrap();
+    let files = map["files"].as_array().unwrap();
+    let prefab_map = files
+        .iter()
+        .find(|entry| entry["source"] == source)
+        .unwrap();
+    let instance_data = load_world(&out.join("scenes/a.json")).unwrap();
+    let mut world = World::new();
+    world.restore_world_data(&instance_data).unwrap();
+    let root_id = instance_data.entities[0].id;
+    let child_id = instance_data.entities[1].id;
+    for (entity, old_source_id, is_root) in [(root_id, "1", true), (child_id, "2", false)] {
+        let key = world.key(entity).unwrap();
+        let link = world.get::<PrefabInstance>(key).unwrap();
+        assert_eq!(link.source, "guid://1234abcd");
+        assert_eq!(link.source_id.to_string(), prefab_map["ids"][old_source_id]);
+        assert!(world
+            .key(xgc_base::EntityId::from_raw(link.source_id))
+            .is_none());
+        assert_eq!(link.root, is_root);
+    }
+    let key = world.key(child_id).unwrap();
+    assert_eq!(world.get::<Parent>(key).unwrap().entity, root_id);
+    assert_eq!(fs::read_to_string(root.join(source)).unwrap(), prefab);
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+#[test]
+fn reports_native_prefab_path_collision_during_dry_run() {
+    let (root, out) = standard_project("prefab-conflict");
+    write(&root, "Prefabs/P.prefab.json", "existing asset");
+    let error = migrate_old_project(&root, &out, true).unwrap_err();
+    assert!(error.to_string().contains("Prefabs/P.prefab.json"));
+    assert!(!out.exists());
+    assert!(!staging_of(&out).exists());
+    fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
@@ -302,7 +383,7 @@ fn remaps_reused_scene_ids_and_records_file_scoped_references() {
             parent
         );
         let added = world.spawn((xgc_world::Name::default(),));
-        assert_eq!(world.entity(added).unwrap().raw(), 5);
+        assert_eq!(world.entity(added).unwrap().raw(), 6);
     }
 
     let map_path = out.join("entity-id-map.json");
@@ -314,7 +395,8 @@ fn remaps_reused_scene_ids_and_records_file_scoped_references() {
             "format_version": 1,
             "files": [
                 {"source": "Scenes/a.ron", "target": "scenes/a.json", "ids": {"12": "1", "42": "2"}},
-                {"source": "Scenes/b.ron", "target": "scenes/b.json", "ids": {"12": "3", "42": "4"}}
+                {"source": "Scenes/b.ron", "target": "scenes/b.json", "ids": {"12": "3", "42": "4"}},
+                {"source": "Prefabs/P.prefab.ron", "target": "Prefabs/P.prefab.json", "ids": {"7": "5"}}
             ]
         })
     );

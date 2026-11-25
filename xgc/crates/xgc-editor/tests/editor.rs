@@ -226,39 +226,6 @@ fn snapping_quantizes_to_step() {
 }
 
 #[test]
-fn instantiates_real_prefab_and_selects_root() {
-    let path = std::path::Path::new("../../../projects/XGame/Prefabs/Pillar.prefab.ron");
-    if !path.exists() {
-        eprintln!("skip: 没有旧项目 Pillar 预制体");
-        return;
-    }
-    let mut editor = EditorState::demo();
-    let before = editor.entities().len();
-    let root = editor.instantiate_prefab_file(path).unwrap();
-    assert_eq!(editor.entities().len(), before + 3);
-    assert_eq!(editor.selected(), Some(root));
-    assert!(editor.is_dirty());
-}
-
-#[test]
-fn reverts_prefab_preserving_root_id_and_transform() {
-    let path = std::path::Path::new("../../../projects/XGame/Prefabs/Pillar.prefab.ron");
-    if !path.exists() {
-        eprintln!("skip: 没有旧项目 Pillar 预制体");
-        return;
-    }
-    let mut editor = EditorState::demo();
-    let root = editor.instantiate_prefab_file(path).unwrap();
-    editor.set_entity_position(root, [7.0, 8.0, 9.0]).unwrap();
-    let count = editor.entities().len();
-    let reverted = editor.revert_prefab_file(path).unwrap();
-    assert_eq!(reverted, 3);
-    assert_eq!(editor.entities().len(), count);
-    assert!(editor.entities().iter().any(|entity| entity.id == root));
-    assert_eq!(editor.entity_position(root), Some([7.0, 8.0, 9.0]));
-}
-
-#[test]
 fn editor_play_runs_scripts_and_reads_input() {
     use xgc_sim::{InputState, KeyCode};
     use xgc_world::{Script, Transform};
@@ -528,7 +495,7 @@ fn lists_project_assets_without_meta_files() {
     std::fs::write(dir.join("Resources/Characters/hero.glb"), b"glb").unwrap();
     std::fs::write(dir.join("Resources/Characters/hero.glb.meta"), b"guid").unwrap();
     std::fs::write(dir.join("Resources/hero.png"), b"png").unwrap();
-    std::fs::write(dir.join("Prefabs/Pillar.prefab.ron"), b"prefab").unwrap();
+    std::fs::write(dir.join("Prefabs/Pillar.prefab.json"), b"prefab").unwrap();
     std::fs::write(dir.join("Scripts/move.lua"), b"function update() end").unwrap();
     let mut world = World::new();
     world.spawn((
@@ -569,7 +536,7 @@ fn lists_project_assets_without_meta_files() {
         .iter()
         .any(|asset| { asset.path == "Resources/hero.png" && asset.kind == AssetKind::Texture }));
     assert!(assets.iter().any(|asset| {
-        asset.path == "Prefabs/Pillar.prefab.ron" && asset.kind == AssetKind::Prefab
+        asset.path == "Prefabs/Pillar.prefab.json" && asset.kind == AssetKind::Prefab
     }));
     assert!(assets
         .iter()

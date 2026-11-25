@@ -82,6 +82,14 @@ pub fn load_world(path: &Path) -> Result<WorldData> {
     load(path, "world")
 }
 
+pub fn save_prefab(path: &Path, data: &WorldData) -> Result<()> {
+    save(path, "prefab", data)
+}
+
+pub fn load_prefab(path: &Path) -> Result<WorldData> {
+    load(path, "prefab")
+}
+
 pub fn save_journal(path: &Path, journal: &Journal) -> Result<()> {
     save(path, "journal", journal)
 }

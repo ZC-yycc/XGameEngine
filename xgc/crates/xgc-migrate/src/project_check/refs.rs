@@ -47,7 +47,7 @@ pub(super) fn check_prefab_ref(
     }
 }
 
-fn resolve_prefab_path(
+pub(crate) fn resolve_prefab_path(
     root: &Path,
     source: &str,
     catalog: &AssetCatalog,
@@ -182,36 +182,24 @@ pub(super) fn scene_files(
     scenes
 }
 
-/// 扫 `Prefabs/` 下的预制体文件；解析与 GUID 引用检查交给 `prefab_ids` 缓存。
-pub(super) fn prefab_files(
-    root: &Path,
-    prefabs_dir: &str,
-    report: &mut ProjectCheckReport,
-) -> Vec<PathBuf> {
-    let absolute = root.join(prefabs_dir);
-    let entries = match fs::read_dir(&absolute) {
-        Ok(entries) => entries,
-        Err(err) => {
-            report.problems.push(format!(
-                "[content.prefabs_dir] 读不了 {}：{err}",
-                absolute.display()
-            ));
-            return Vec::new();
-        }
-    };
+/// 项目检查和迁移共用遍历，避免嵌套资产只被其中一边发现。
+pub(crate) fn prefab_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut prefabs = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file()
-            && path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with(".prefab.ron"))
-        {
-            prefabs.push(path);
+    let mut directories = vec![dir.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                directories.push(entry.path());
+            } else if kind.is_file() && entry.file_name().to_string_lossy().ends_with(".prefab.ron")
+            {
+                prefabs.push(entry.path());
+            }
         }
     }
     prefabs.sort();
-    prefabs
+    Ok(prefabs)
 }
 
 /// 从 RON 文本里抠出 `guid://<hex>` 引用；只做字面扫描，不猜意图。

@@ -187,7 +187,7 @@ fn resolves_guid_script_and_prefab() {
                         2,
                         None,
                         0,
-                        "Some((source: \"guid://p1\", source_id: (7)))",
+                        "Some((source: \"guid://p1\", source_id: (7), is_root: true))",
                         ""
                     )
                 )),
@@ -254,7 +254,7 @@ fn reports_a_prefab_source_id_that_does_not_exist() {
                     1,
                     None,
                     0,
-                    "Some((source: \"guid://p1\", source_id: (9)))",
+                    "Some((source: \"guid://p1\", source_id: (9), is_root: true))",
                     "",
                 )),
             ),

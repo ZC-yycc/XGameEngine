@@ -344,14 +344,21 @@ pub fn check_old_project(root: &Path) -> Result<ProjectCheckReport, ProjectCheck
         }
     }
     if let Some(prefabs_dir) = &prefabs_dir {
-        let prefabs = prefab_files(root, prefabs_dir, &mut report);
-        report.prefabs = prefabs.len();
-        for path in &prefabs {
-            if let Err(message) = prefab_ids(path, &catalog, &mut prefab_cache, &mut report) {
-                report
-                    .problems
-                    .push(format!("[prefab.parse] {}: {message}", path.display()));
+        match prefab_files(&root.join(prefabs_dir)) {
+            Ok(prefabs) => {
+                report.prefabs = prefabs.len();
+                for path in &prefabs {
+                    if let Err(message) = prefab_ids(path, &catalog, &mut prefab_cache, &mut report)
+                    {
+                        report
+                            .problems
+                            .push(format!("[prefab.parse] {}: {message}", path.display()));
+                    }
+                }
             }
+            Err(err) => report
+                .problems
+                .push(format!("[content.prefabs_dir] 读不了 {prefabs_dir}：{err}")),
         }
     }
     Ok(report)
@@ -515,7 +522,7 @@ fn check_entity(
     }
 }
 
-mod refs;
+pub(crate) mod refs;
 
 use self::refs::{
     check_prefab_ref, guid_refs, normalize_into, prefab_files, prefab_ids, resolve_read,

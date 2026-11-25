@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use xgc_base::EntityId;
-use xgc_migrate::{instantiate_prefab, migrate_str, revert_prefab};
-use xgc_world::{Parent, Transform, World};
+use xgc_migrate::migrate_str;
+use xgc_world::{instantiate_prefab, revert_prefab, Parent, Transform, World};
 
 #[test]
 fn pillar_prefab_instantiates_with_remapped_parents() {
@@ -88,7 +88,7 @@ fn revert_preserves_instance_ids_and_transforms() {
     let mut modified = data.clone();
     modified.entities.pop();
     let before = world.len();
-    let reverted = revert_prefab(&mut world, &modified, "Pillar").unwrap();
+    let reverted = revert_prefab(&mut world, &modified, root).unwrap();
     assert_eq!(reverted.len(), 2);
     assert_eq!(world.len(), before - 1);
     assert_eq!(
@@ -120,11 +120,12 @@ fn revert_spawns_entities_added_to_asset() {
         .unwrap()
         .clone();
     let mut world = World::new();
-    instantiate_prefab(&mut world, &data, Some("Pillar")).unwrap();
+    let mapping = instantiate_prefab(&mut world, &data, Some("Pillar")).unwrap();
+    let root_instance = mapping.iter().find(|(old, _)| *old == root.id).unwrap().1;
     let before = world.len();
     let mut modified = data.clone();
     modified.entities.push(root.with_id(EntityId::from_raw(99)));
-    let reverted = revert_prefab(&mut world, &modified, "Pillar").unwrap();
+    let reverted = revert_prefab(&mut world, &modified, root_instance).unwrap();
     assert_eq!(reverted.len(), 4);
     assert_eq!(world.len(), before + 1);
     assert!(world.world_data().entities.iter().any(|entity| {

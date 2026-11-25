@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use xgc_base::EntityId;
-use xgc_store::{load_journal, load_world, save_journal, save_world};
+use xgc_store::{load_journal, load_prefab, load_world, save_journal, save_prefab, save_world};
 use xgc_world::{Command, ComponentId, Journal, Name, Transform, Value, World};
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -52,6 +52,32 @@ fn world_data_roundtrip_and_no_rewrite() {
     let mut restored = World::new();
     restored.restore_world_data(&loaded).unwrap();
     assert_eq!(restored.state_hash(), world.state_hash());
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn prefab_uses_its_own_envelope_kind() {
+    let dir = temp_dir("prefab");
+    let prefab = dir.join("asset.prefab.json");
+    let scene = dir.join("scene.json");
+    let data = demo_world().world_data();
+
+    save_prefab(&prefab, &data).unwrap();
+    save_world(&scene, &data).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&prefab).unwrap()).unwrap();
+    assert_eq!(document["format_version"], 1);
+    assert_eq!(document["kind"], "prefab");
+    assert_eq!(load_prefab(&prefab).unwrap(), data);
+    assert_eq!(load_world(&scene).unwrap(), data);
+    assert!(matches!(
+        load_world(&prefab),
+        Err(xgc_store::StoreError::Format(_))
+    ));
+    assert!(matches!(
+        load_prefab(&scene),
+        Err(xgc_store::StoreError::Format(_))
+    ));
 
     fs::remove_dir_all(dir).unwrap();
 }

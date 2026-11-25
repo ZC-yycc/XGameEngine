@@ -60,10 +60,7 @@ impl EditorApp {
                             {
                                 self.selected_asset = Some(asset.path.clone());
                                 if asset.kind == AssetKind::Prefab {
-                                    if let Some(root) = self.state.project_root() {
-                                        self.prefab_path =
-                                            root.join(&asset.path).display().to_string();
-                                    }
+                                    self.prefab_path = asset.path.clone();
                                 }
                                 self.status = Some(format!("asset: {}", asset.path));
                             }

@@ -1,8 +1,6 @@
 //! 旧 XGameEngine `SceneV2` RON → XGC `WorldData` 的第一层迁移。
 //!
-//! 这一层只搬实体身份、名称、父子关系、`Transform`，并补默认
-//! `GlobalTransform` 让层级系统能工作。Mesh / Material / Camera 等旧组件先不搬，
-//! 迁移报告里给出数量，后续按组件逐步补齐，不造"看起来完整"的假数据。
+//! 单文件投影保留场景 ID，供逐帧验收使用。项目级迁移另分配项目内 ID 并恢复预制体来源。
 
 #![deny(unsafe_code)]
 
@@ -31,14 +29,12 @@ mod old_particle;
 mod old_rust;
 mod old_scene;
 mod old_ui;
-mod prefab;
 mod project_check;
 mod project_migrate;
 mod report;
 mod transform_migrate;
 mod verify;
 pub use compare::{compare_headless, CompareReport, Stats};
-pub use prefab::{instantiate_prefab, revert_prefab};
 pub use project_check::{
     check_old_project, ProjectCheckError, ProjectCheckReport, OLD_PROJECT_FORMAT_VERSION,
 };
@@ -177,8 +173,11 @@ struct OldCamera {
 }
 
 pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), MigrationError> {
-    let scene: OldScene =
-        ron::from_str(text).map_err(|err| MigrationError::Parse(err.to_string()))?;
+    let scene = ron::from_str(text).map_err(|err| MigrationError::Parse(err.to_string()))?;
+    migrate_parsed(&scene)
+}
+
+fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), MigrationError> {
     if scene.format_version != OLD_SCENE_FORMAT_VERSION {
         return Err(MigrationError::UnsupportedVersion(scene.format_version));
     }
@@ -589,7 +588,7 @@ pub fn migrate_str(text: &str) -> Result<(WorldData, MigrationReport), Migration
             revision: 0,
             next_id: max_id.saturating_add(1),
             entities,
-            environment: scene_environment(&scene),
+            environment: scene_environment(scene),
         },
         report,
     ))

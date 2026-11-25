@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, epaint::Shape};
-use xgc_store::{save_project, ProjectContent, ProjectManifest};
+use xgc_store::{save_prefab, save_project, ProjectContent, ProjectManifest};
+use xgc_world::{Name, Parent, PrefabInstance, Transform, World};
 
 use super::super::EditorApp;
 use crate::{assets_ops::MAX_ASSETS, AssetKind, EditorState};
@@ -142,12 +143,12 @@ fn assets_scan_is_bounded_deterministic_and_read_only() {
 #[test]
 fn asset_names_cannot_normalize_into_a_different_file() {
     let project = Project::new();
-    project.write("Assets/nested\\fake.prefab.ron");
-    project.write("Assets/nested/fake.prefab.ron");
+    project.write("Assets/nested\\fake.prefab.json");
+    project.write("Assets/nested/fake.prefab.json");
     project.write("Assets/NUL.lua");
     let assets = project.app().state.assets();
     assert_eq!(assets.len(), 1);
-    assert_eq!(assets[0].path, "Assets/nested/fake.prefab.ron");
+    assert_eq!(assets[0].path, "Assets/nested/fake.prefab.json");
 }
 
 #[cfg(windows)]
@@ -178,22 +179,21 @@ fn assets_skip_windows_hidden_files_directories_and_content_roots() {
 #[test]
 fn assets_expand_cache_refresh_and_prefab_selection_do_not_edit_the_scene() {
     let project = Project::new();
-    let prefab = "Assets/Pillar.prefab.ron";
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../projects/XGame/Prefabs/Pillar.prefab.ron"),
-        project.0.join(prefab),
-    )
-    .unwrap();
+    let prefab = "Assets/Pillar.prefab.json";
+    let mut asset = World::new();
+    asset.spawn((Transform::default(),));
+    save_prefab(&project.0.join(prefab), &asset.world_data()).unwrap();
     let mut probe = project.app();
-    probe
+    let root = probe
         .state
-        .instantiate_prefab_file(&project.0.join(prefab))
+        .instantiate_prefab_file(Path::new("./Assets//Pillar.prefab.json"))
         .unwrap();
-    assert!(
-        !probe.state.world().is_empty(),
-        "夹具必须能实例化，避免解析失败造成假绿"
-    );
+    let world = probe.state.world();
+    let instance = world
+        .get::<PrefabInstance>(world.key(root).unwrap())
+        .unwrap();
+    assert_eq!(instance.source, prefab);
+    assert_eq!(probe.state.revert_selected_prefab().unwrap(), 1);
     let mut app = project.app();
     let ctx = egui::Context::default();
     ctx.style_mut(|style| style.animation_time = 0.0);
@@ -206,7 +206,7 @@ fn assets_expand_cache_refresh_and_prefab_selection_do_not_edit_the_scene() {
     assert_eq!(app.assets.as_ref().unwrap().len(), 1);
     click(&mut app, &ctx, text_position(&output, "[prefab]"));
     assert_eq!(app.selected_asset.as_deref(), Some(prefab));
-    assert_eq!(Path::new(&app.prefab_path), project.0.join(prefab));
+    assert_eq!(app.prefab_path, prefab);
     assert_eq!(app.state.world().len(), 0, "选择预制体不能自动实例化");
     assert!(!app.state.is_dirty());
 
@@ -218,4 +218,127 @@ fn assets_expand_cache_refresh_and_prefab_selection_do_not_edit_the_scene() {
     assert_eq!(app.assets.as_ref().unwrap()[0].path, "Assets/move.lua");
     assert_eq!(app.selected_asset, None);
     assert!(!app.state.is_dirty());
+}
+
+#[test]
+fn prefab_revert_resolves_guid_and_targets_only_the_selected_instance() {
+    let project = Project::new();
+    let path = "Assets/Pillar.prefab.json";
+    let moved = "Assets/nested/Renamed.prefab.json";
+    let guid = "0123456789abcdef0123456789abcdef";
+    let mut asset = World::new();
+    let asset_root = asset.spawn((
+        Name {
+            value: "Pillar".into(),
+        },
+        Transform::default(),
+    ));
+    let asset_child = asset.spawn((
+        Name {
+            value: "Child".into(),
+        },
+        Parent {
+            entity: asset.entity(asset_root).unwrap(),
+        },
+    ));
+    let mut app = project.app();
+    save_prefab(&project.0.join(path), &asset.world_data()).unwrap();
+    let source = |state: &EditorState, id| {
+        let world = state.world();
+        world
+            .get::<PrefabInstance>(world.key(id).unwrap())
+            .unwrap()
+            .source
+            .clone()
+    };
+    std::fs::write(
+        project.0.join(format!("{path}.meta")),
+        format!("(guid: \"{guid}\")"),
+    )
+    .unwrap();
+    let first = app.state.instantiate_prefab_file(Path::new(path)).unwrap();
+    let second = app
+        .state
+        .instantiate_prefab_file(&project.0.join(path))
+        .unwrap();
+    assert_eq!(source(&app.state, first), format!("guid://{guid}"));
+    assert_eq!(source(&app.state, first), source(&app.state, second));
+    let child = |state: &EditorState, root| {
+        let world = state.world();
+        let mut child = None;
+        world.for_each::<Parent>(|key, parent| {
+            if parent.entity == root {
+                child = world.entity(key);
+            }
+        });
+        child.unwrap()
+    };
+    let first_child = child(&app.state, first);
+    let second_child = child(&app.state, second);
+    app.state
+        .set_entity_position(second, [7.0, 8.0, 9.0])
+        .unwrap();
+    app.state.save().unwrap();
+    app = project.app();
+    std::fs::rename(project.0.join(path), project.0.join(moved)).unwrap();
+    std::fs::rename(
+        project.0.join(format!("{path}.meta")),
+        project.0.join(format!("{moved}.meta")),
+    )
+    .unwrap();
+    asset.get_mut::<Name>(asset_child).unwrap().value = "Renamed Child".into();
+    save_prefab(&project.0.join(moved), &asset.world_data()).unwrap();
+
+    app.state.select(Some(second_child));
+    assert!(app.prefab_path.is_empty());
+    let ctx = egui::Context::default();
+    let render_toolbar = |app: &mut EditorApp, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 720.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.toolbar(ui));
+            },
+        )
+    };
+    let output = render_toolbar(&mut app, Vec::new());
+    let pos = text_position(&output, "Revert");
+    for pressed in [true, false] {
+        render_toolbar(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert_eq!(app.status.as_deref(), Some("已还原 2 个实体"));
+    assert_eq!(app.state.selected(), Some(second_child));
+    let name = |state: &EditorState, child| {
+        let world = state.world();
+        world
+            .get::<Name>(world.key(child).unwrap())
+            .unwrap()
+            .value
+            .clone()
+    };
+    assert_eq!(name(&app.state, second_child), "Renamed Child");
+    assert_eq!(name(&app.state, first_child), "Child");
+    assert_eq!(app.state.entity_position(second), Some([7.0, 8.0, 9.0]));
+    assert!(app.state.is_dirty());
+    assert!(app.state.undo().unwrap());
+    assert_eq!(name(&app.state, second_child), "Child");
+    assert!(app.state.redo().unwrap());
+    assert_eq!(name(&app.state, second_child), "Renamed Child");
 }

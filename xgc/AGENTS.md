@@ -120,7 +120,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-editor/src/app/assets_panel/tests.rs` | 资产回归：2000 条上限与排序、只读、Windows 隐藏属性、折叠 / 缓存 / 刷新、有效预制体点选不实例化 |
 | `crates/xgc-editor/src/play.rs` | Play / Play Scripts / input.ron 动作桥 / step / stop |
 | `crates/xgc-editor/src/transform_ops.rs` | 位置 / 缩放 / 旋转 setter 与 Gizmo 旋转；无父节点同步 GlobalTransform；`snap` |
-| `crates/xgc-editor/src/prefab_ops.rs` | `instantiate_prefab_file` / `revert_prefab_file`：旧 PrefabV2 → 新 ID 实例并选中根 |
+| `crates/xgc-editor/src/prefab_ops.rs` | 从 `.prefab.json` 实例化并选中根，按所选成员的 GUID 或项目相对路径加载来源并 Revert |
 | `crates/xgc-editor/src/gizmo.rs` | 视口 MVP 投影与线段命中距离 |
 | `crates/xgc-editor/src/app.rs` | eframe 窗口：层级 / 场景列表 / 资产浏览 / Inspector 编辑 / 组件增删 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y / 底部状态栏 |
 | `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
@@ -137,7 +137,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/old_rust.rs` | 旧 Rust 插件组件 → `plugin.rust` |
 | `crates/xgc-migrate/src/old_particle.rs` | 旧 `ParticleEmitter` → `particle.emitter` |
 | `crates/xgc-migrate/src/old_ui.rs` | 旧 `UiElement` → `ui.element`（kind 由内容推断） |
-| `crates/xgc-migrate/src/prefab.rs` | `instantiate_prefab` / `revert_prefab`：新 ID、Parent 重写、按 source_id 认回并保留 Transform |
+| `crates/xgc-world/src/prefab_ops.rs` | 预制体实例化与 Revert 走同一世界事务；按所选成员定位最近实例根，保留已有 ID、变换与根的外部父节点 |
+| `crates/xgc-migrate/src/project_migrate/documents.rs` | 场景与预制体共享一次性投影，重写父节点与预制体来源 ID，伴生 `.meta` 随资产改名 |
+| `crates/xgc-migrate/src/project_migrate/files.rs` | 干跑与事务发布共用拷贝清单，预检生成文件和项目内容冲突 |
 | `crates/xgc-migrate/src/transform_migrate.rs` | 旧 Transform → XGC Transform + GlobalTransform（同值，层级系统随后重算） |
 | `crates/xgc-migrate/src/compare.rs` | `compare_headless`：旧引擎 `--headless` JSON 与 XGC 世界的 entities / bodies / colliders / emitters / audio 对照 |
 | `crates/xgc-migrate/src/verify.rs` | `verify_migration`：重新迁移旧场景与目标 `WorldData` 逐实体 / 字段对比，浮点按 f32 容差 |

@@ -92,7 +92,7 @@ pub(crate) struct OldEntity {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) parent: Option<OldId>,
-    /// 旧场景的预制体实例标记；迁移不消费，项目检查用来核对 `source_id`。
+    /// 来源资产和文件内 ID 在项目迁移阶段一并重写。
     #[serde(default)]
     pub(crate) prefab: Option<OldPrefabRef>,
     /// 旧场景的碰撞层（0..=31）；迁移不消费，项目检查用来点名越界值。
@@ -107,6 +107,7 @@ pub(crate) struct OldEntity {
 pub(crate) struct OldPrefabRef {
     pub(crate) source: String,
     pub(crate) source_id: OldId,
+    pub(crate) is_root: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

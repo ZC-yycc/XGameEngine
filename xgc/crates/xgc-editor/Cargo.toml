@@ -13,7 +13,6 @@ xgc-world = { path = "../xgc-world" }
 xgc-store = { path = "../xgc-store" }
 xgc-sim = { path = "../xgc-sim" }
 xgc-render = { path = "../xgc-render" }
-xgc-migrate = { path = "../xgc-migrate" }
 xgc-script = { path = "../xgc-script" }
 xgc-asset = { path = "../xgc-asset" }
 eframe = { version = "0.30", default-features = false, features = ["wgpu", "default_fonts"] }

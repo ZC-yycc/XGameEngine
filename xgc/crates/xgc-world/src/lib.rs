@@ -1,10 +1,8 @@
 //! XGame Core 的世界：archetype 列式存储 + 生成 / 回收 + 查询。
-//!
 #![deny(unsafe_code)]
 use std::any::Any;
 use std::collections::HashMap;
 use xgc_base::{EntityId, EntityKey};
-pub use xgc_reflect::Component;
 mod animation_components;
 mod animation_events;
 mod character_components;
@@ -23,6 +21,7 @@ mod parts;
 mod physics_components;
 mod plugin_components;
 mod prefab_components;
+mod prefab_ops;
 mod query;
 mod registry;
 mod render_components;
@@ -61,6 +60,7 @@ pub use parts::WriteSet;
 pub use physics_components::{BodyKind, PhysicsBody};
 pub use plugin_components::PluginComponent;
 pub use prefab_components::PrefabInstance;
+pub use prefab_ops::{instantiate_prefab, remap_parent, revert_prefab};
 pub use registry::builtin_registry;
 pub use render_components::{Camera, Material, MeshRenderer};
 pub use root_motion::{
@@ -76,7 +76,7 @@ pub use state_machine_components::{
     TransitionDef,
 };
 pub use ui_components::{UiElement, UiInput, UiInteraction, UiLayout};
-pub use xgc_reflect::{ComponentId, Value};
+pub use xgc_reflect::{Component, ComponentId, Value};
 /// 列：任意组件的连续存储；crate 内部接口，公开但不承诺稳定性。
 #[doc(hidden)]
 pub trait Column: Any + Send + Sync {

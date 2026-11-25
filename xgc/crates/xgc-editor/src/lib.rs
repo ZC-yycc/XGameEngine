@@ -291,7 +291,10 @@ impl EditorState {
     }
 
     fn push_undo(&mut self) {
-        let snapshot = self.world.world_data();
+        self.record_undo(self.world.world_data());
+    }
+
+    fn record_undo(&mut self, snapshot: WorldData) {
         if self.undo.last() == Some(&snapshot) {
             return;
         }

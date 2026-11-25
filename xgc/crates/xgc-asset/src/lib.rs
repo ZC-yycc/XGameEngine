@@ -57,6 +57,13 @@ impl AssetCatalog {
         self.by_guid.get(guid).map(PathBuf::as_path)
     }
 
+    /// 按扫描时的路径查找对应资产身份，供从文件浏览器选中的路径使用。
+    pub fn guid_for_path(&self, path: &Path) -> Option<&str> {
+        self.by_guid
+            .iter()
+            .find_map(|(guid, asset)| (asset == path).then_some(guid.as_str()))
+    }
+
     pub fn contains(&self, guid: &str) -> bool {
         let guid = guid.strip_prefix("guid://").unwrap_or(guid);
         self.by_guid.contains_key(guid)

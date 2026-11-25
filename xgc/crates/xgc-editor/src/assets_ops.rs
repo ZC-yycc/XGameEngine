@@ -21,9 +21,9 @@ pub enum AssetKind {
 }
 
 impl AssetKind {
-    fn from_path(path: &str) -> Self {
+    pub(crate) fn from_path(path: &str) -> Self {
         let path = path.to_ascii_lowercase();
-        if path.ends_with(".prefab.ron") {
+        if path.ends_with(".prefab.json") {
             Self::Prefab
         } else if path.ends_with(".glb") || path.ends_with(".gltf") {
             Self::Model

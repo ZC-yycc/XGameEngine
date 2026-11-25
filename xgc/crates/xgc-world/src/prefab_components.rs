@@ -2,6 +2,8 @@
 
 use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
 
+use crate::ComponentData;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PrefabInstance {
     /// 来源预制体路径（项目相对路径）。
@@ -10,6 +12,21 @@ pub struct PrefabInstance {
     pub source_id: u64,
     /// 是否为实例根。
     pub root: bool,
+}
+
+impl PrefabInstance {
+    pub fn into_data(self) -> ComponentData {
+        ComponentData {
+            component: Self::ID,
+            fields: Self::fields()
+                .into_iter()
+                .map(|field| {
+                    let value = self.get_field(field.name).expect("实例标记字段必须可读取");
+                    (field.name.to_string(), value)
+                })
+                .collect(),
+        }
+    }
 }
 
 impl Component for PrefabInstance {
