@@ -45,6 +45,7 @@ impl Component for AnimationLayers {
 
 impl AnimLayer {
     fn descriptor() -> FieldDescriptor {
+        const BLEND_STATE: &str = "Blend State";
         let layer = Self::default();
         let mut machine = StateMachine::descriptor();
         machine.name = "Enabled";
@@ -71,12 +72,25 @@ impl AnimLayer {
                 text_field("state").doc("当前状态名；空表示从机器入口开始"),
                 number_field("time", layer.time).unit("s"),
                 parameters_field(),
-                text_field("fade_from"),
-                number_field("fade_from_time", layer.fade_from_time).unit("s"),
-                number_field("fade_from_speed", layer.fade_from_speed),
-                bool_field("fade_from_looping", layer.fade_from_looping),
-                number_field("fade_elapsed", layer.fade_elapsed).unit("s"),
-                number_field("fade_duration", layer.fade_duration).unit("s"),
+                text_field("fade_from").group(BLEND_STATE).read_only(),
+                number_field("fade_from_time", layer.fade_from_time)
+                    .unit("s")
+                    .group(BLEND_STATE)
+                    .read_only(),
+                number_field("fade_from_speed", layer.fade_from_speed)
+                    .group(BLEND_STATE)
+                    .read_only(),
+                bool_field("fade_from_looping", layer.fade_from_looping)
+                    .group(BLEND_STATE)
+                    .read_only(),
+                number_field("fade_elapsed", layer.fade_elapsed)
+                    .unit("s")
+                    .group(BLEND_STATE)
+                    .read_only(),
+                number_field("fade_duration", layer.fade_duration)
+                    .unit("s")
+                    .group(BLEND_STATE)
+                    .read_only(),
             ]),
             layer.to_value(),
         )

@@ -19,6 +19,7 @@ impl Inspector {
         let mut world = World::new();
         let key = world.spawn((Animator {
             events: vec![AnimEvent::new("footstep", 0.25)],
+            blend_elapsed: 42.75,
             ..Animator::default()
         },));
         let entity = world.entity(key).unwrap();
@@ -107,17 +108,93 @@ fn inspector_drags_nested_event_time() {
     let output = inspector.render(Vec::new());
     text_position(&output, "time (f32, s)");
     let start = text_position(&output, "0.25");
-    let end = start + egui::vec2(30.0, 0.0);
+    // 对齐整值，让断言测步长，而不是 egui 的智能舍入。
+    let end = start + egui::vec2(35.0, 0.0);
     inspector.pointer_button(start, true);
     inspector.render(vec![egui::Event::PointerMoved(end)]);
     inspector.pointer_button(end, false);
 
     assert_eq!(inspector.events()[0].name, "footstep");
-    assert!(inspector.events()[0].time > 0.25);
+    assert_eq!(inspector.events()[0].time, 2.0);
     assert_eq!(inspector.app.state.world().revision(), before + 1);
     assert!(inspector.app.state.undo().unwrap());
     assert_eq!(inspector.events(), &[AnimEvent::new("footstep", 0.25)]);
     assert!(!inspector.app.state.can_undo());
+}
+
+#[test]
+fn inspector_clamps_dragged_event_time_to_the_schema_range() {
+    let mut inspector = Inspector::seeded();
+    let output = inspector.render(Vec::new());
+    let start = text_position(&output, "0.25");
+    let end = start - egui::vec2(80.0, 0.0);
+    inspector.pointer_button(start, true);
+    inspector.render(vec![egui::Event::PointerMoved(end)]);
+    inspector.pointer_button(end, false);
+
+    assert_eq!(inspector.events()[0].time, 0.0);
+    assert!(inspector.app.state.undo().unwrap());
+    assert_eq!(inspector.events()[0].time, 0.25);
+}
+
+#[test]
+fn inspector_does_not_rewrite_out_of_range_snapshot_values() {
+    let ctx = egui::Context::default();
+    let schema = FieldSchema::from(
+        FieldDescriptor::new("weight", FieldType::F64, Value::F64(0.0)).range(0.0, 1.0),
+    );
+    render(&ctx, vec![], |ui| {
+        assert!(field_row(ui, &schema, &Value::F64(1.5), "weight", "weight", true).is_none());
+    });
+}
+
+#[test]
+fn inspector_clamps_keyboard_edits_to_the_schema_range() {
+    let ctx = egui::Context::default();
+    let schema = FieldSchema::from(
+        FieldDescriptor::new("weight", FieldType::F64, Value::F64(0.0))
+            .range(0.0, 1.0)
+            .step(0.05),
+    );
+    let mut edited = None;
+    let mut draw = |ui: &mut egui::Ui| {
+        edited = value_editor(ui, &Value::F64(0.02), &schema);
+    };
+    let initial = render(&ctx, vec![], &mut draw);
+    let pos = text_position(&initial, "0.02");
+    render(&ctx, button_events(pos, true), &mut draw);
+    render(&ctx, button_events(pos, false), &mut draw);
+    render(
+        &ctx,
+        vec![egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        &mut draw,
+    );
+    assert_eq!(edited, Some(Value::F64(0.0)));
+}
+
+#[test]
+fn inspector_leaves_runtime_blend_state_read_only() {
+    let mut inspector = Inspector::seeded();
+    let before = inspector.app.state.world().world_data();
+    let output = inspector.render(Vec::new());
+    let start = text_position(&output, "42.75");
+    let end = start + egui::vec2(30.0, 0.0);
+    inspector.pointer_button(start, true);
+    inspector.render(vec![egui::Event::PointerMoved(end)]);
+    inspector.pointer_button(end, false);
+
+    assert_eq!(inspector.app.state.world().world_data(), before);
+    assert!(!inspector.app.state.can_undo());
+    let headings = output.shapes.iter().filter(
+        |shape| matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Blend State"),
+    );
+    assert_eq!(headings.count(), 1);
 }
 
 #[test]

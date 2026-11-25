@@ -19,6 +19,12 @@ pub struct FieldSchema {
     pub min: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub doc: String,
     /// 列表元素或映射值的描述，其默认值供插入使用。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,6 +92,9 @@ impl From<FieldDescriptor> for FieldSchema {
             unit: field.unit.map(str::to_string),
             min,
             max,
+            step: field.step,
+            read_only: field.read_only,
+            group: field.group.map(str::to_string),
             doc: field.doc.to_string(),
             element,
             fields,
@@ -114,6 +123,40 @@ pub(super) fn validate_fields(
     }
 }
 
+fn validate_edit_metadata(field: &FieldSchema, path: &str, diagnostics: &mut Vec<Diagnostic>) {
+    let scalar = matches!(field.ty.as_str(), "i64" | "u32" | "f32" | "f64");
+    let draggable = scalar || matches!(field.ty.as_str(), "vec2" | "vec3" | "vec4" | "quat");
+    let error = |code, message| {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            Subject::Field(path.to_string()),
+            message,
+        )
+    };
+    if field
+        .step
+        .is_some_and(|step| !draggable || !step.is_finite() || step <= 0.0)
+    {
+        diagnostics.push(error("SCHEMA.INVALID_STEP", "步长必须是数值控件的正有限数"));
+    }
+    if let (Some(min), Some(max)) = (field.min, field.max) {
+        if !scalar || !min.is_finite() || !max.is_finite() || min > max {
+            diagnostics.push(error(
+                "SCHEMA.INVALID_RANGE",
+                "范围必须是有序的有限标量边界",
+            ));
+        }
+    }
+    if field
+        .group
+        .as_deref()
+        .is_some_and(|group| group.trim().is_empty())
+    {
+        diagnostics.push(error("SCHEMA.EMPTY_GROUP", "字段分组名不能为空"));
+    }
+}
+
 fn validate_field(field: &FieldSchema, path: &str, diagnostics: &mut Vec<Diagnostic>) {
     if field.name.is_empty() {
         diagnostics.push(Diagnostic::new(
@@ -135,6 +178,7 @@ fn validate_field(field: &FieldSchema, path: &str, diagnostics: &mut Vec<Diagnos
             ),
         ));
     }
+    validate_edit_metadata(field, path, diagnostics);
     if let Some(element) = &field.element {
         validate_field(element, &format!("{path}[]"), diagnostics);
     }
@@ -151,5 +195,33 @@ fn validate_field(field: &FieldSchema, path: &str, diagnostics: &mut Vec<Diagnos
                 "分支名不能用于字段路径",
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_metadata_on_nested_fields() {
+        let number = FieldDescriptor::new("number", FieldType::F64, Value::F64(0.0))
+            .range(2.0, 1.0)
+            .step(f64::NAN)
+            .group(" ");
+        let list = FieldDescriptor::new(
+            "items",
+            FieldType::List(Box::new(number)),
+            Value::List(vec![]),
+        );
+        let mut diagnostics = Vec::new();
+        validate_fields(&[FieldSchema::from(list)], "test", &mut diagnostics);
+        assert_eq!(
+            diagnostics.iter().map(|item| item.code).collect::<Vec<_>>(),
+            [
+                "SCHEMA.INVALID_STEP",
+                "SCHEMA.INVALID_RANGE",
+                "SCHEMA.EMPTY_GROUP",
+            ]
+        );
     }
 }

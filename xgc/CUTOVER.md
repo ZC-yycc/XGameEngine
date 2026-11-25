@@ -48,6 +48,8 @@ Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑�
 
 `animation.layers → layers` 是有序混合层列表。每层可以按路径编辑模式、遮罩、参数和机器，例如 `layers[0].machine.Enabled.states[0].clip` 与 `layers[0].parameters["survey"]`。基础和分层状态机共享字段定义。模拟和渲染直接使用类型化的层栈，Lua 的按名 setter 与 `xgc.set` 按调用顺序结算。
 
+生成式 Inspector 从反射 schema 读取数值边界、单位、步长、分组和只读标记。动画事件时间以秒显示，方向键步长为 0.05 秒，普通拖动按每逻辑像素 0.05 秒换算并由 egui 智能取整，输入最低为 0。基础和分层动画的转场运行状态显示在 `Blend State`，可查看但不能通过面板逐项写入。CLI 的 `schema` 和 Agent 的 `engine.describe` 输出可选的 `step`、`group`、`read_only`。只读标记描述界面行为，现有命令、运行时及存储仍使用原字段和校验。
+
 世界、预制体与事务日志使用 JSON 包络 v5，cooked 世界使用 XGCB v6。仓库内原生世界样例已一次性重写，旧版本文件会被拒绝。已有迁移输出可用上文的 `xgc migrate` 从旧 RON 重新生成到新目录。旧原生文件如有手工编辑，先保留原件，重新迁移旧 RON 只包含旧工程原有内容。
 
 ## 可复现命令

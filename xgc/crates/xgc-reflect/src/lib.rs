@@ -159,7 +159,7 @@ pub enum Value {
     },
 }
 
-/// 字段描述：字段名、类型、默认值、单位、范围、文档。
+/// 字段描述同时供校验、schema 导出和生成式编辑器使用。
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FieldDescriptor {
     pub name: &'static str,
@@ -167,6 +167,12 @@ pub struct FieldDescriptor {
     pub default: Value,
     pub unit: Option<&'static str>,
     pub range: Option<(f64, f64)>,
+    /// 数值控件每个方向键步进或拖动一个逻辑像素的增量。
+    pub step: Option<f64>,
+    /// 生成式编辑器只显示该值及其子树，持久化和模拟仍读写同一字段。
+    pub read_only: bool,
+    /// 同层字段的显示分组。
+    pub group: Option<&'static str>,
     pub doc: &'static str,
 }
 
@@ -178,6 +184,9 @@ impl FieldDescriptor {
             default,
             unit: None,
             range: None,
+            step: None,
+            read_only: false,
+            group: None,
             doc: "",
         }
     }
@@ -189,6 +198,21 @@ impl FieldDescriptor {
 
     pub fn range(mut self, min: f64, max: f64) -> Self {
         self.range = Some((min, max));
+        self
+    }
+
+    pub fn step(mut self, step: f64) -> Self {
+        self.step = Some(step);
+        self
+    }
+
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
+    pub fn group(mut self, group: &'static str) -> Self {
+        self.group = Some(group);
         self
     }
 

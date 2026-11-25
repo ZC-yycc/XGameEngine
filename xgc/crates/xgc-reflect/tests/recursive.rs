@@ -16,6 +16,9 @@ impl Component for Timeline {
         let time = FieldDescriptor::new("time", FieldType::F32, Value::F64(0.0))
             .unit("s")
             .range(0.0, 60.0)
+            .step(0.05)
+            .group("Timing")
+            .read_only()
             .doc("事件时刻");
         let name = FieldDescriptor::new("name", FieldType::String, Value::String("marker".into()));
         let event = FieldDescriptor::new(
@@ -57,7 +60,8 @@ fn recursive_schema_exposes_the_insertion_default_and_leaf_metadata() {
         serde_json::to_value(&element.fields[0]).unwrap(),
         json!({
             "name": "time", "ty": "f32", "default": {"kind": "f64", "value": 0.0},
-            "required": true, "unit": "s", "min": 0.0, "max": 60.0, "doc": "事件时刻"
+            "required": true, "unit": "s", "min": 0.0, "max": 60.0,
+            "step": 0.05, "read_only": true, "group": "Timing", "doc": "事件时刻"
         })
     );
 }
@@ -86,7 +90,11 @@ fn schema_lookup_resolves_nested_paths_and_rejects_impossible_steps() {
     registry.register::<Timeline>().unwrap();
     let events = &registry.get(Timeline::ID).unwrap().fields[0];
     let path = FieldPath::parse("events[99].time").unwrap();
-    assert_eq!(path.schema(events).unwrap().ty, "f32");
+    let time = path.schema(events).unwrap();
+    assert_eq!(time.ty, "f32");
+    assert_eq!(time.step, Some(0.05));
+    assert!(time.read_only);
+    assert_eq!(time.group.as_deref(), Some("Timing"));
     assert!(FieldPath::parse("events[0].missing")
         .unwrap()
         .schema(events)

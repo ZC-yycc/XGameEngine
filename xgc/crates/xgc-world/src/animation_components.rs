@@ -90,6 +90,8 @@ impl Component for Animator {
     }
 
     fn fields() -> Vec<FieldDescriptor> {
+        // 转场来源和进度由动画系统成组更新，逐项改写会留下不一致的运行状态。
+        const BLEND_STATE: &str = "Blend State";
         vec![
             FieldDescriptor::new("clip", FieldType::String, Value::String(String::new()))
                 .doc("glTF 动画剪辑名；空 = 绑定姿势"),
@@ -122,16 +124,31 @@ impl Component for Animator {
                 FieldType::String,
                 Value::String(String::new()),
             )
+            .group(BLEND_STATE)
+            .read_only()
             .doc("转场来源剪辑；空 = 无转场"),
             FieldDescriptor::new("blend_elapsed", FieldType::F32, Value::F64(0.0))
-                .doc("转场已进行时间（秒）"),
+                .group(BLEND_STATE)
+                .read_only()
+                .unit("s")
+                .doc("转场已进行时间"),
             FieldDescriptor::new("blend_duration", FieldType::F32, Value::F64(0.0))
-                .doc("转场总时长（秒）；0 = 硬切"),
+                .group(BLEND_STATE)
+                .read_only()
+                .unit("s")
+                .doc("转场总时长；0 = 硬切"),
             FieldDescriptor::new("blend_from_time", FieldType::F32, Value::F64(0.0))
-                .doc("转场来源剪辑的播放时间（秒），按旧剪辑自己的时钟推进"),
+                .group(BLEND_STATE)
+                .read_only()
+                .unit("s")
+                .doc("转场来源剪辑的播放时间，按旧剪辑自己的时钟推进"),
             FieldDescriptor::new("blend_from_speed", FieldType::F32, Value::F64(1.0))
+                .group(BLEND_STATE)
+                .read_only()
                 .doc("转场来源剪辑的播放速度（切换时刻定格）"),
             FieldDescriptor::new("blend_from_looping", FieldType::Bool, Value::Bool(true))
+                .group(BLEND_STATE)
+                .read_only()
                 .doc("转场来源剪辑是否循环（切换时刻定格）"),
             FieldDescriptor::new(
                 "additive_clip",

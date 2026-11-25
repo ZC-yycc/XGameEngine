@@ -35,6 +35,7 @@ impl AnimEvent {
                 FieldDescriptor::new("time", FieldType::F32, Value::F64(0.0))
                     .unit("s")
                     .range(0.0, f64::from(f32::MAX))
+                    .step(0.05)
                     .doc("从剪辑开始计算的触发时刻"),
                 FieldDescriptor::new("name", FieldType::String, Value::String("event".into()))
                     .doc("传给 on_anim_event 的事件名；空名不派发"),
