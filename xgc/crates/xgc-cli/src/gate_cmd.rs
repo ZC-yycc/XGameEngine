@@ -13,8 +13,8 @@
 //!   渲染第 N 帧，再用总差异比例与结构性（单通道 ≥8）比例两条线判定。
 //!
 //! **跨机器的总差异不可信**：旧端参考换 GPU / 驱动会有整片 ±1 的舍入差。参考
-//! 目录里的 `env.json`（由 `xgc gpu-env <参考目录>` 写入）记录生成参考时的 GPU
-//! 指纹；只有指纹一致（或显式给了总差异阈值 / `--strict-total`）才把总差异当
+//! 目录里的 `env.json` 记录实际生成参考的 GPU 与驱动指纹；完整指纹一致
+//! （或显式给了总差异阈值 / `--strict-total`）时，才把总差异当
 //! 硬阈值，否则它只打印为诊断，结构性阈值仍然判定。这样仓库里的参考图在别的
 //! 机器上不会变成 16% 的假回归，也不会把真正的结构性变化放过去。
 //!
@@ -44,20 +44,30 @@ struct VisualLimits {
     structural_ratio: f32,
 }
 
-/// 生成参考截图时的 GPU 指纹。`driver` 允许为空（旧参考没有记录驱动）。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct GateEnv {
-    pub gpu: String,
-    pub backend: String,
+/// 缺少驱动信息的参考仍可对照结构差异，不能确认总差异的舍入口径。
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct GateEnv {
+    gpu: String,
+    backend: String,
     #[serde(default)]
-    pub driver: String,
+    driver: String,
+    #[serde(default)]
+    driver_info: String,
 }
 
 impl GateEnv {
+    fn from_context(context: &GpuContext) -> Self {
+        let info = context.adapter_info();
+        Self {
+            gpu: info.name.clone(),
+            backend: format!("{:?}", info.backend),
+            driver: info.driver.clone(),
+            driver_info: info.driver_info.clone(),
+        }
+    }
+
     fn matches(&self, other: &Self) -> bool {
-        self.gpu == other.gpu
-            && self.backend == other.backend
-            && (self.driver.is_empty() || other.driver.is_empty() || self.driver == other.driver)
+        self == other && !self.driver.trim().is_empty() && !self.driver_info.trim().is_empty()
     }
 }
 
@@ -109,17 +119,18 @@ pub fn gate(
 
     // 只有结构性差异跨机器稳定；总差异要靠环境指纹确认参考图是同一种
     // 舍入口径，否则整片 ±1 会把门禁变成假回归。
-    let current_env = if visuals.is_empty() {
+    let context = if visuals.is_empty() {
         None
     } else {
-        match gpu_env() {
-            Ok(env) => Some(env),
-            Err(message) => {
-                eprintln!("{message}");
+        match GpuContext::headless() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                eprintln!("GPU 不可用：{err}");
                 return ExitCode::from(2);
             }
         }
     };
+    let current_env = context.as_ref().map(GateEnv::from_context);
     let reference_env = match read_gate_env(&references.join(ENV_FILE)) {
         Ok(env) => env,
         Err(message) => {
@@ -141,25 +152,18 @@ pub fn gate(
     };
     if let Some(current) = &current_env {
         println!(
-            "gate: gpu={} backend={} driver={}",
-            current.gpu, current.backend, current.driver
+            "gate: gpu={} backend={} driver={} driver_info={}",
+            current.gpu, current.backend, current.driver, current.driver_info
         );
         match (&reference_env, env_matches) {
-            (Some(reference), true) => println!(
-                "gate: 参考环境指纹一致（{} / {}），总差异按阈值判定",
-                reference.gpu, reference.backend
-            ),
-            (Some(reference), false) => println!(
-                "gate: 参考环境是 {} / {}（本机 {} / {}），总差异仅诊断",
-                reference.gpu, reference.backend, current.gpu, current.backend
-            ),
-            (None, _) => println!(
-                "gate: 参考目录没有 {}，总差异仅诊断（要强制请加 --strict-total）",
-                ENV_FILE
-            ),
+            (Some(_), true) => println!("gate: 参考环境指纹一致"),
+            (Some(reference), false) => println!("gate: 参考环境指纹不同或不完整：{reference:?}"),
+            (None, _) => println!("gate: 参考目录没有 {ENV_FILE}"),
         }
-        if strict_total || max_total.is_some() {
-            println!("gate: 显式要求总差异阈值，按硬判定执行");
+        if enforce_total {
+            println!("gate: 总差异按阈值判定");
+        } else {
+            println!("gate: 总差异仅诊断（要强制请加 --strict-total）");
         }
     }
 
@@ -173,19 +177,22 @@ pub fn gate(
             }
         }
     }
-    for (frame, reference) in visuals {
-        match check_visual(
-            Path::new(world_path),
-            assets_root,
-            frame,
-            &reference,
-            limits,
-        ) {
-            Ok(true) => {}
-            Ok(false) => failures += 1,
-            Err(message) => {
-                eprintln!("{message}");
-                return ExitCode::from(2);
+    if let Some(context) = &context {
+        for (frame, reference) in visuals {
+            match check_visual(
+                context,
+                Path::new(world_path),
+                assets_root,
+                frame,
+                &reference,
+                limits,
+            ) {
+                Ok(true) => {}
+                Ok(false) => failures += 1,
+                Err(message) => {
+                    eprintln!("{message}");
+                    return ExitCode::from(2);
+                }
             }
         }
     }
@@ -230,17 +237,6 @@ fn visual_limits(
     })
 }
 
-/// 当前机器的 GPU 指纹；入队与参考记录用同一个来源。
-fn gpu_env() -> Result<GateEnv, String> {
-    let context = GpuContext::headless().map_err(|err| format!("GPU 不可用：{err}"))?;
-    let info = context.adapter_info();
-    Ok(GateEnv {
-        gpu: info.name.clone(),
-        backend: format!("{:?}", info.backend),
-        driver: info.driver.clone(),
-    })
-}
-
 fn read_gate_env(path: &Path) -> Result<Option<GateEnv>, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -252,14 +248,13 @@ fn read_gate_env(path: &Path) -> Result<Option<GateEnv>, String> {
     Ok(Some(env))
 }
 
-/// `xgc gpu-env <参考目录>`：把本机指纹写进参考目录，之后在同一台机器上
-/// `gate` 才会把总差异当硬阈值。参考图换机器生成时必须重跑这一步。
+/// `xgc gpu-env <参考目录>`：记录 XGC 当前选择的适配器。
 pub fn write_env(reference_dir: Option<&str>) -> ExitCode {
     let dir = Path::new(reference_dir.unwrap_or("acceptance"));
-    let env = match gpu_env() {
-        Ok(env) => env,
-        Err(message) => {
-            eprintln!("{message}");
+    let env = match GpuContext::headless() {
+        Ok(context) => GateEnv::from_context(&context),
+        Err(err) => {
+            eprintln!("GPU 不可用：{err}");
             return ExitCode::from(1);
         }
     };
@@ -280,10 +275,11 @@ pub fn write_env(reference_dir: Option<&str>) -> ExitCode {
         return ExitCode::from(1);
     }
     println!(
-        "gpu-env: {} / {} / {} -> {}",
+        "gpu-env: {} / {} / {} / {} -> {}",
         env.gpu,
         env.backend,
         env.driver,
+        env.driver_info,
         path.display()
     );
     ExitCode::SUCCESS
@@ -415,6 +411,7 @@ fn check_trace(
 }
 
 fn check_visual(
+    context: &GpuContext,
     world_path: &Path,
     assets_root: &str,
     frame: u64,
@@ -438,7 +435,8 @@ fn check_visual(
         viewport: [width as f32, height as f32],
     }
     .run(&mut world, 0.0);
-    let (pixels, _) = render_world_rgba(Some(assets_root), &world, particles, width, height)?;
+    let (pixels, _) =
+        render_world_rgba(context, Some(assets_root), &world, particles, width, height)?;
     let actual = ImageData {
         width,
         height,
@@ -504,27 +502,44 @@ mod tests {
     }
 
     #[test]
-    fn env_match_requires_the_same_adapter_and_tolerates_a_missing_driver() {
+    fn an_unrecorded_or_different_driver_version_cannot_enable_the_total_limit() {
+        let fingerprint = |driver_info: Option<&str>| {
+            let mut json = serde_json::json!({
+                "gpu": "GPU A",
+                "backend": "Vulkan",
+                "driver": "NVIDIA",
+            });
+            if let Some(version) = driver_info {
+                json["driver_info"] = version.into();
+            }
+            serde_json::from_value::<GateEnv>(json).unwrap()
+        };
+        let current = fingerprint(Some("572.16"));
+        assert!(current.matches(&fingerprint(Some("572.16"))));
+        assert!(!current.matches(&fingerprint(Some("566.36"))));
+        assert!(!current.matches(&fingerprint(None)));
+    }
+
+    #[test]
+    fn env_match_requires_the_same_adapter_backend_and_driver() {
         let recorded = GateEnv {
             gpu: "GPU A".to_string(),
             backend: "Vulkan".to_string(),
-            driver: "1.0".to_string(),
+            driver: "NVIDIA".to_string(),
+            driver_info: "572.16".to_string(),
         };
-        let same = GateEnv {
-            gpu: "GPU A".to_string(),
-            backend: "Vulkan".to_string(),
-            driver: "1.0".to_string(),
-        };
-        assert!(recorded.matches(&same));
-        let mut no_driver = same.clone();
-        no_driver.driver.clear();
-        assert!(recorded.matches(&no_driver));
-        let mut other_backend = same.clone();
-        other_backend.backend = "Dx12".to_string();
-        assert!(!recorded.matches(&other_backend));
-        let mut other_gpu = same.clone();
-        other_gpu.gpu = "GPU B".to_string();
-        assert!(!recorded.matches(&other_gpu));
+        let mut current: GateEnv =
+            serde_json::from_value(serde_json::to_value(&recorded).unwrap()).unwrap();
+        assert!(recorded.matches(&current));
+        current.backend = "Dx12".to_string();
+        assert!(!recorded.matches(&current));
+        current.backend.clone_from(&recorded.backend);
+        current.gpu = "GPU B".to_string();
+        assert!(!recorded.matches(&current));
+        current.gpu.clone_from(&recorded.gpu);
+        current.driver.clear();
+        assert!(!recorded.matches(&current));
+        assert!(!current.matches(&current));
     }
 
     #[test]

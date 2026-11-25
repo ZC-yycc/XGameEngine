@@ -172,6 +172,7 @@ pub fn clip_planes(camera: &ShotCamera, scene_radius: f32) -> (f32, f32) {
 /// 生命周期由调用方决定：一次性截图（CLI）就建一次用一次；将来若要
 /// "每帧截图"再谈复用。
 pub struct ScreenshotRenderer {
+    adapter_info: wgpu::AdapterInfo,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: ScenePipeline,
@@ -279,9 +280,10 @@ impl ScreenshotRenderer {
             .map(|project| project.manifest().content.search_paths.clone())
             .unwrap_or_default();
         let sample_count = forced_sample_count.unwrap_or(quality.msaa).max(1);
+        let adapter_info = adapter.get_info();
         log::info!(
             "截图渲染：{}（MSAA x{sample_count}）{width}x{height}",
-            adapter.get_info().name
+            adapter_info.name
         );
 
         let extent = wgpu::Extent3d {
@@ -322,6 +324,7 @@ impl ScreenshotRenderer {
         let ui = crate::ui_renderer::UiRenderer::new(&device, format);
 
         Ok(Self {
+            adapter_info,
             device,
             queue,
             pipeline,
@@ -349,6 +352,11 @@ impl ScreenshotRenderer {
 
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// 实际产图的适配器，供截图报告记录参考图的环境。
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter_info
     }
 
     /// 上一次 `render_scene` 的 UI 绘制读数（批数 / 图元数）。

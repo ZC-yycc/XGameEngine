@@ -473,6 +473,8 @@ pub struct ShotInfo {
     /// 机位是怎么定的：`"explicit"`（命令行给）/ `"scene"`（场景相机实体）/
     /// `"auto"`（自动取景）。智能体据此判断"这张图是不是玩家视角"。
     pub camera_mode: String,
+    /// 实际产图的适配器，供截图基线对比确认 GPU 与驱动环境。
+    pub adapter: wgpu::AdapterInfo,
     /// 这一帧的绘制读数（见 [`ShotRenderStats`]）。
     pub render_stats: ShotRenderStats,
 }
@@ -580,6 +582,12 @@ impl HeadlessReport {
                     "mode": s.camera_mode,
                     "eye": s.eye,
                     "target": s.target,
+                },
+                "adapter": {
+                    "gpu": s.adapter.name,
+                    "backend": format!("{:?}", s.adapter.backend),
+                    "driver": s.adapter.driver,
+                    "driver_info": s.adapter.driver_info,
                 },
                 "render_stats": {
                     "draw_calls": s.render_stats.draw_calls,
@@ -884,6 +892,7 @@ pub fn run(args: &HeadlessArgs) -> Result<HeadlessReport, String> {
                 eye: used.eye.to_array(),
                 target: used.target.to_array(),
                 camera_mode: camera_mode.to_owned(),
+                adapter: renderer.adapter_info().clone(),
                 render_stats: {
                     let mut stats = ShotRenderStats::from(renderer.frame_stats());
                     stats.ui = renderer.ui_stats();
@@ -1722,6 +1731,12 @@ mod tests {
         assert_eq!(shot.render_stats.cull_ratio, 0.0);
         // render_stats 的字段名是报告契约的一部分（消费方：CI / MCP）。
         let value = report.to_json();
+        let adapter = &value["screenshot"]["adapter"];
+        for key in ["gpu", "backend", "driver", "driver_info"] {
+            assert!(adapter[key].is_string(), "screenshot.adapter 缺字段 {key}");
+        }
+        assert!(!adapter["gpu"].as_str().unwrap().is_empty());
+        assert!(!adapter["backend"].as_str().unwrap().is_empty());
         for key in [
             "draw_calls",
             "opaque_batches",

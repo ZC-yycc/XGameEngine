@@ -56,13 +56,13 @@ fn prepare_frame_world_with_particles(
 /// 割接门禁就会在一条「和交付不一样」的渲染路径上判定通过。相机优先级由
 /// `Renderer::render_shot` 决定（显式机位 > 场景相机 > 顺光取景）。
 pub(crate) fn render_world_rgba(
+    context: &GpuContext,
     assets_root: Option<&str>,
     world: &World,
     particles: Vec<xgc_world::ParticleQuad>,
     width: u32,
     height: u32,
 ) -> Result<(Vec<u8>, xgc_render::RenderStats), String> {
-    let context = GpuContext::headless().map_err(|err| format!("GPU 不可用：{err}"))?;
     let desc = ResourceDesc::texture2d(
         "frame",
         "rgba8unorm-srgb",
@@ -116,7 +116,7 @@ pub(crate) fn render_world_rgba(
         }
     }
     let stats = renderer
-        .render_shot(&context, texture, world)
+        .render_shot(context, texture, world)
         .map_err(|err| format!("渲染失败：{err}"))?;
     let pixels = context
         .read_texture_rgba8(texture, width, height)
@@ -329,7 +329,12 @@ pub(crate) fn render_frame(
             return ExitCode::from(1);
         }
     };
-    let (pixels, stats) = match render_world_rgba(assets_root, &world, particles, width, height) {
+    let rendered = GpuContext::headless()
+        .map_err(|err| format!("GPU 不可用：{err}"))
+        .and_then(|context| {
+            render_world_rgba(&context, assets_root, &world, particles, width, height)
+        });
+    let (pixels, stats) = match rendered {
         Ok(rendered) => rendered,
         Err(err) => {
             eprintln!("{err}");

@@ -20,6 +20,8 @@
 
 ## 可复现命令
 
+在验收机从仓库根目录运行 [截图参考重生成流程](acceptance/README.md#在验收机重生成截图)。脚本从旧引擎的实际截图报告提取适配器指纹，用仓库轨迹和严格截图阈值校验完整参考集。下列命令用于单项对照。
+
 ```sh
 # 迁移 + 数据对照
 cargo run -q -p xgc-cli --offline -- migrate ..\projects\XGame\Scenes\showcase.ron ..\tmp\showcase.json

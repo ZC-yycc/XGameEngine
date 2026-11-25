@@ -5,9 +5,10 @@
 - **逐帧 trace / 状态哈希对照**：`trace.txt`
 - **截图阈值判定**：`frame-<帧号>.png`
 
-判定命令是同一条（在 `xgc/` 下跑）：
+在 `xgc/` 下迁移当前 showcase，再用仓库参考运行门禁：
 
 ```sh
+cargo run -q -p xgc-cli -- migrate ../projects/XGame/Scenes/showcase.ron ../tmp/showcase.json
 cargo run -q -p xgc-cli -- gate ../tmp/showcase.json ../projects/XGame acceptance
 ```
 
@@ -16,15 +17,11 @@ cargo run -q -p xgc-cli -- gate ../tmp/showcase.json ../projects/XGame acceptanc
 截图判定分两条线：
 
 - **结构性（单通道 ≥8）始终按 `0.5%` 硬判**；
-- **总差异 `2%` 只在参考可信时硬判**：参考目录带 `env.json` 且与本机 GPU / 后端 / 驱动一致、或显式给第 4 个参数、或加 `--strict-total`。否则只打印诊断——跨 GPU 的整片 ±1 编码舍入差不是回归。
+- **总差异默认阈值为 `2%`**。参考指纹与本机完整指纹一致、显式给出总差异阈值或加 `--strict-total` 时，超阈值判为失败。跨 GPU 或驱动版本时，整片 ±1 的舍入差会推高总差异比例，此时默认仅报告该比例。
 
-记录本机验收指纹（写 `<参考目录>/env.json`，缺省 `acceptance`）：
+`env.json` 记录**生成参考图**的 GPU、后端、驱动名称和版本信息。缺少驱动信息或指纹不一致时，总差异仅作诊断。`xgc gpu-env` 可探测 XGC 当前适配器，旧端截图的指纹由下方脚本从实际产图报告写入。
 
-```sh
-cargo run -q -p xgc-cli -- gpu-env acceptance
-```
-
-换机器 / 换 GPU / 换驱动后，重生成参考图并重写 `env.json`。显式覆盖阈值：
+显式覆盖阈值：
 
 ```sh
 cargo run -q -p xgc-cli -- gate ../tmp/showcase.json ../projects/XGame acceptance 1.5 0.4
@@ -33,29 +30,23 @@ cargo run -q -p xgc-cli -- gate ../tmp/showcase.json ../projects/XGame acceptanc
 `trace.txt` 的第 0 帧是「装载后、未步进」的状态；帧号必须从 0 连续递增，
 否则门禁直接按配置错误退出（空目录也不能算通过）。
 
-## 参考数据怎么来的
+## 在验收机重生成截图
 
-`trace.txt` 由 XGC 自己生成（`xgc trace` 与门禁重放走同一条 `ScriptedRunner` 路径）：
+在仓库根目录执行以下命令，指定一个尚不存在的输出目录：
 
-```sh
-cargo run -q -p xgc-cli -- trace ../tmp/showcase.json 150 ../projects/XGame > acceptance/trace.txt
+```powershell
+powershell -File tools/regenerate-xgc-acceptance.ps1 -OutDir tmp/xgc-acceptance-local
 ```
 
-`frame-<帧号>.png` 必须由**旧引擎在验收机**生成（旧端 `--headless` 没有逐帧输出，
-只有终态 dump；但截图口径就是验收口径）：
+脚本迁移当前 showcase 场景、用旧引擎渲染第 1、150、200、300 帧（1280×720），从四次截图报告确认并记录实际适配器。随后使用仓库里的 `trace.txt` 和 `xgc gate --strict-total` 校验。门禁通过后才发布 `showcase.json`、`trace.txt`、`env.json` 和四张 PNG。换机器、GPU 或驱动后，在新目录重跑。
 
-```sh
-# 在仓库根目录
-cargo run -q -p xgame-editor --offline -- \
-  --headless --frames 150 --screenshot tmp/old-150-now.png projects/XGame
-# 再拷到 xgc/acceptance/frame-150.png
+状态轨迹确实发生预期变更时，先用 `xgc trace <世界.json> 150 <资产根>` 生成候选轨迹，核对变化后随代码提交更新 `trace.txt`。
+
+可用这条命令复查本机生成的参考：
+
+```powershell
+cargo run --locked --manifest-path xgc/Cargo.toml -p xgc-cli -- gate tmp/xgc-acceptance-local/showcase.json projects/XGame tmp/xgc-acceptance-local --strict-total
 ```
-
-**换机器 / 换 GPU / 换驱动必须重新生成截图参考。** 旧端参考跨 GPU 环境会有整片
-±1 的编码舍入差（本仓库历史上用另一台机器的参考得到过 18% 的假回归）；不重生
-成就等于把门禁变成噪声。`env.json` 只记录参考机的 GPU / 后端 / 驱动，不参与像素
-比较；没有它时 `xgc gate` 把总差异降级为诊断，结构性仍硬判。`trace.txt` 则相反：它只依赖 CPU 侧确定性，换机器不必重跑，
-但**代码改动确实影响了状态轨迹时必须与改动同一次提交更新**，否则门禁会红。
 
 ## 为什么不在 CI 跑这整条
 

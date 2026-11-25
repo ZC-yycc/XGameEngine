@@ -279,7 +279,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 
 - **刚体建体取世界变换**：位置 / 旋转 / `Auto` 尺寸一律走 `rapier_world/bodies.rs::world_transform`（父链 `local_matrix` 相乘 → `decompose`），与旧端 `body_from_scene(def, scene.world_transform())` 同口径；非单位四元数在这里被矩阵分解归一化 —— 直接把它塞给 `UnitQuaternion::from_quaternion` 会得到非正交旋转矩阵（落地接触分叉，2026-11 修过一次）。子实体刚体因此建在世界位置；运动学体每帧推送也用世界变换。分解来源是 glam 语义，XGC 用 nalgebra 实现（残差 ~1e-5 级）。
 - **截图裁剪面**：相机优先级 = 显式机位 > 场景相机实体 > 顺光自动取景；**近 / 远裁剪面一律由 `shot::clip_planes` 按场景包围球重算**（旧端 `screenshot.rs` 同口径），不要读相机组件 `near` / `far`——差 0.08 就能把高处投射体裁出 CSM 第 0 / 1 级深度图。回归 `crates/xgc-render/tests/shot.rs`。
-- **割接门禁**：逐帧 trace 对表与截图阈值判定统一走 `xgc gate <世界.json> <资产根> <参考目录>`；参考在 `xgc/acceptance/`（`trace.txt` 逐帧 `frame / entities / hash`，忽略内部计数器 `revision`；`frame-<N>.png` 是旧端截图，**必须在验收机同 GPU 环境重生成**）。结构性（单通道 ≥8）始终按缺省 0.5% 硬判；总差异（缺省 2%）只在参考目录带同环境 `env.json`、显式给阈值或 `--strict-total` 时硬判，否则仅诊断；`xgc gpu-env [参考目录]` 写指纹。退出码 0/1/2；门禁与 `render-frame` 共用 `render_world_rgba`。回归 `crates/xgc-cli/tests/gate.rs`。
+- **割接门禁**：`xgc gate <世界.json> <资产根> <参考目录>` 逐帧比对 `trace.txt` 的 `frame / entities / hash`，忽略内部计数器 `revision`。截图结构性差异（单通道 ≥8）始终按默认 0.5% 判定。总差异默认 2%，在参考指纹完整一致、显式给总差异阈值或 `--strict-total` 时判定，否则只报告比例。`tools/regenerate-xgc-acceptance.ps1` 从旧端实际截图报告提取 GPU、后端、驱动与版本，通过仓库轨迹和严格门禁后发布参考集。门禁对所有帧复用同一次 GPU 选择。退出码 0/1/2。回归 `crates/xgc-cli/tests/gate.rs`。
 
 - **视觉对等判定**：`xgc parity <旧图> <新图>` 用 `diff::parity_report` 把结构性差异（单通道 ≥8）拆成「轮廓 1 px 带内」与「内部」：轮廓像素 = 中心像素与 8 邻域任一分量差 > `PARITY_EDGE_THRESHOLD = 40`（与 ≥8 是两个独立口径），两张图各判一次取并集；门槛 = 内部结构性 ≤ 0.01% 且总结构性 ≤ 0.1%（`mean_abs` / `max` 只记录）。状态对齐帧（第 1 / 150 帧）内部仅 9 / 30 像素；第 200 / 300 帧的内部差异来自动态体状态漂移（软阴影边缘 / 面着色），由 `xgc gate` 端到端口径守。旧端参考必须在验收机重生成。回归 `crates/xgc-cli/tests/parity.rs`。
 
