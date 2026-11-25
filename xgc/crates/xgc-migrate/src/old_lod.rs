@@ -1,15 +1,15 @@
 //! 旧 `LodGroup` RON → `render.lod` 组件数据。
 
-use serde::{Deserialize, Serialize};
-use xgc_world::{Component, ComponentData, LodGroup, Value};
+use serde::Deserialize;
+use xgc_world::{Component, ComponentData, LodGroup, LodLevel};
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize)]
 #[serde(default)]
 struct OldLodGroup {
     levels: Vec<OldLodLevel>,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize)]
 #[serde(default)]
 struct OldLodLevel {
     model: String,
@@ -23,10 +23,23 @@ pub fn convert(value: ron::Value) -> Result<Option<ComponentData>, String> {
     if old.levels.iter().all(|level| level.model.is_empty()) {
         return Ok(None);
     }
-    let levels =
-        ron::to_string(&old.levels).map_err(|err| format!("render.lod 序列化失败：{err}"))?;
+    let lod = LodGroup {
+        levels: old
+            .levels
+            .into_iter()
+            .map(|level| LodLevel {
+                model: level.model,
+                // 旧端把非有限距离当作无限级，JSON 用同义的 0 表示。
+                max_distance: if level.max_distance.is_finite() {
+                    level.max_distance
+                } else {
+                    0.0
+                },
+            })
+            .collect(),
+    };
     Ok(Some(ComponentData {
         component: LodGroup::ID,
-        fields: vec![("levels".to_string(), Value::String(levels))],
+        fields: vec![("levels".into(), lod.get_field("levels").unwrap())],
     }))
 }

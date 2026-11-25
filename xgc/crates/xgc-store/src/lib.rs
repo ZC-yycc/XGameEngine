@@ -15,7 +15,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use xgc_world::{Journal, WorldData};
 
-const FORMAT_VERSION: u32 = 2;
+// LOD 层级直接存储模型与距离字段，原生世界只读当前表示。
+const FORMAT_VERSION: u32 = 3;
 
 mod binary;
 pub use binary::{decode_world, encode_world, load_world_binary, save_world_binary};

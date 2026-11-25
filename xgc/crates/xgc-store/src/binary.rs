@@ -12,8 +12,8 @@ use xgc_world::{
 use crate::{write_atomic, Result, StoreError};
 
 const MAGIC: &[u8; 4] = b"XGCB";
-/// 3：反射值支持递归列表与结构。
-const VERSION: u32 = 3;
+/// 4：LOD 层级改为结构化列表。
+const VERSION: u32 = 4;
 // 读写共用限制，防止深层反射值耗尽线程栈。
 const MAX_VALUE_DEPTH: usize = 64;
 

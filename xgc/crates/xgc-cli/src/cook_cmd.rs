@@ -5,10 +5,13 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use xgc_asset::scan;
+use xgc_base::path::normalize_project_relative;
 use xgc_script::ScriptRuntime;
 use xgc_sim::Simulation;
 use xgc_store::{load_world, save_world, save_world_binary};
-use xgc_world::{Value, World, WorldData};
+use xgc_world::{Component, LodGroup, World, WorldData};
+
+use crate::assets_cmd::lod_models;
 
 pub fn cook(root: Option<&str>, out: Option<&str>) -> ExitCode {
     let (Some(root), Some(out)) = (root, out) else {
@@ -46,7 +49,7 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
             return ExitCode::from(2);
         }
     };
-    let keep = guid_paths(Path::new(root), &data);
+    let keep = referenced_paths(Path::new(root), &data);
     let mut manifest =
         match xgc_asset::cook_project_filtered(Path::new(root), Path::new(out), keep.as_ref()) {
             Ok(manifest) => manifest,
@@ -144,25 +147,32 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn guid_paths(root: &Path, data: &WorldData) -> Option<BTreeSet<String>> {
+fn referenced_paths(root: &Path, data: &WorldData) -> Option<BTreeSet<String>> {
     let catalog = scan(root).ok()?;
     let mut keep = BTreeSet::new();
     for entity in &data.entities {
         for component in &entity.components {
-            for (_, value) in &component.fields {
-                let Value::String(value) = value else {
-                    continue;
-                };
-                if !value.starts_with("guid://") {
-                    continue;
+            let guids = component.fields.iter().filter_map(|(_, value)| {
+                value
+                    .as_string()
+                    .filter(|value| value.starts_with("guid://"))
+            });
+            let lod = (component.component == LodGroup::ID)
+                .then(|| lod_models(component))
+                .into_iter()
+                .flatten()
+                .map(|(_, model)| model);
+            for reference in guids.chain(lod) {
+                if reference.starts_with("guid://") {
+                    let Some(path) = catalog.resolve(reference) else {
+                        continue;
+                    };
+                    if let Ok(relative) = path.strip_prefix(root) {
+                        keep.insert(relative.to_string_lossy().replace('\\', "/"));
+                    }
+                } else if let Ok(relative) = normalize_project_relative(reference) {
+                    keep.insert(relative);
                 }
-                let Some(path) = catalog.resolve(value) else {
-                    continue;
-                };
-                let Ok(relative) = path.strip_prefix(root) else {
-                    continue;
-                };
-                keep.insert(relative.to_string_lossy().replace('\\', "/"));
             }
         }
     }

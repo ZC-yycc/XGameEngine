@@ -6,7 +6,89 @@ use std::process::{Command, Output};
 
 use xgc_reflect::{Component, Value};
 use xgc_store::{save_prefab, save_project, save_world, ProjectContent, ProjectManifest};
-use xgc_world::{MeshRenderer, Parent, PrefabInstance, Script, World};
+use xgc_world::{LodGroup, MeshRenderer, Parent, PrefabInstance, Script, World};
+
+#[test]
+fn pack_copies_models_referenced_only_by_lod() {
+    let root = Temp::new("pack-lod");
+    let assets = root.0.join("source");
+    fs::create_dir_all(assets.join("Resources")).unwrap();
+    fs::write(assets.join("Resources/far.glb"), "far").unwrap();
+    fs::write(
+        assets.join("Resources/far.glb.meta"),
+        "(guid: \"aabbccdd\")",
+    )
+    .unwrap();
+    fs::write(assets.join("Resources/near.glb"), "near").unwrap();
+    fs::write(assets.join("Resources/unused.glb"), "unused").unwrap();
+
+    let mut scene = World::new();
+    scene.spawn((LodGroup::default(),));
+    let mut data = scene.world_data();
+    data.entities[0].components[0].fields[0].1 =
+        lod_levels(&["Resources/near.glb", "guid://aabbccdd"]);
+    let world = root.0.join("scene.json");
+    save_world(&world, &data).unwrap();
+    let out = root.0.join("cooked");
+    let output = xgc()
+        .arg("pack")
+        .args([&world, &assets, &out])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    for path in [
+        "Resources/near.glb",
+        "Resources/far.glb",
+        "Resources/far.glb.meta",
+    ] {
+        assert!(out.join(path).is_file(), "缺少 {path}");
+    }
+    assert!(!out.join("Resources/unused.glb").exists());
+    assert_eq!(
+        xgc_store::load_world_binary(&out.join("world.xgcb")).unwrap(),
+        data
+    );
+}
+
+#[test]
+fn checks_models_at_lod_field_paths() {
+    let root = Temp::new("lod-models");
+    let mut manifest = manifest(&root.0);
+    manifest.scenes.truncate(1);
+    manifest.input = None;
+    save_project(&root.0.join("project.xgc"), &manifest).unwrap();
+
+    let mut scene = World::new();
+    scene.spawn((LodGroup::default(),));
+    let mut data = scene.world_data();
+    data.entities[0].components[0].fields[0].1 =
+        lod_levels(&["builtin://cube", "guid://aabbccdd", "Resources/missing.glb"]);
+    save_world(&root.0.join(&manifest.entry_scene), &data).unwrap();
+    let text = String::from_utf8(check(&root.0, 2).stdout).unwrap();
+    assert!(text.contains("levels[1].model guid://aabbccdd"), "{text}");
+    assert!(
+        text.contains("levels[2].model Resources/missing.glb"),
+        "{text}"
+    );
+    assert!(!text.contains("levels[0].model"), "{text}");
+}
+
+fn lod_levels(models: &[&str]) -> Value {
+    Value::List(
+        models
+            .iter()
+            .map(|model| {
+                Value::Struct(
+                    [
+                        ("model".into(), Value::String((*model).into())),
+                        ("max_distance".into(), Value::F64(30.0)),
+                    ]
+                    .into(),
+                )
+            })
+            .collect(),
+    )
+}
 
 struct Temp(PathBuf);
 

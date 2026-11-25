@@ -487,7 +487,8 @@ fn maps_lod() {
                             data: Lod((
                                 levels: [
                                     (model: "builtin://cube", max_distance: 10.0),
-                                    (model: "builtin://sphere", max_distance: 30.0),
+                                    (model: "guid://aabbccdd", max_distance: 30.0),
+                                    (model: "Resources/horizon.glb", max_distance: inf),
                                 ],
                             )),
                         ),
@@ -507,8 +508,21 @@ fn maps_lod() {
         .fields
         .iter()
         .find(|(field, _)| field == "levels")
-        .map(|(_, value)| value.as_string().unwrap())
+        .map(|(_, value)| value)
         .unwrap();
-    assert!(levels.contains("builtin://cube"));
-    assert!(levels.contains("30.0"));
+    let Value::List(levels) = levels else {
+        panic!("LOD 层级应是结构化列表，实际为 {levels:?}");
+    };
+    assert_eq!(levels.len(), 3);
+    for (level, model, distance) in [
+        (&levels[0], "builtin://cube", 10.0),
+        (&levels[1], "guid://aabbccdd", 30.0),
+        (&levels[2], "Resources/horizon.glb", 0.0),
+    ] {
+        let Value::Struct(fields) = level else {
+            panic!("LOD 层级条目应是结构体，实际为 {level:?}");
+        };
+        assert_eq!(fields["model"], Value::String(model.into()));
+        assert_eq!(fields["max_distance"], Value::F64(distance));
+    }
 }

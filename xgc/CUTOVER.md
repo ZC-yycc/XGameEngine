@@ -40,7 +40,9 @@
 
 Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑时间和名称，并撤销修改。Agent 使用 `animation.animator:events[0].time` 查询，在 `edit.plan` 的组件字段中写 `events[0].time`。路径下标从 0 起。Lua `xgc.get` 返回的列表按 Lua 约定从 1 起，`xgc.set` 可以按零基路径改写叶字段。
 
-世界、预制体与事务日志使用 JSON 包络 v2，cooked 世界使用 XGCB v3。旧版本文件会被拒绝。已有迁移输出可用上文的 `xgc migrate` 从旧 RON 重新生成到新目录。新版本会把事件直接写成列表与结构体，仓库内原生世界样例已一次性重写。提交前生成的原生文件如有手工编辑，先保留原件，重新迁移旧 RON 只包含旧工程原有内容。
+`render.lod → levels` 同样可以增删和逐项编辑。模型与最大距离分别是 `levels[0].model` 和 `levels[0].max_distance`，距离单位为米，零或负值代表无限距离。项目检查会报告具体层级的模型引用，打包会保留仅由 LOD 引用的相对路径和 GUID 资产。此处交付编辑和资产引用，XGC 的运行时 LOD 选级待接入。
+
+世界、预制体与事务日志使用 JSON 包络 v3，cooked 世界使用 XGCB v4。旧版本文件会被拒绝。已有迁移输出可用上文的 `xgc migrate` 从旧 RON 重新生成到新目录。动画事件和 LOD 层级都直接写成列表与结构体，仓库内原生世界样例已一次性重写。旧原生文件如有手工编辑，先保留原件，重新迁移旧 RON 只包含旧工程原有内容。
 
 ## 可复现命令
 

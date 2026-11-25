@@ -1,7 +1,59 @@
 //! 字段路径必须沿事务中的当前值解析，逆命令按同一路径还原。
 
 use xgc_base::{diagnostics as codes, EntityId};
-use xgc_world::{AnimEvent, Animator, Command, Component, Value, World};
+use xgc_world::{AnimEvent, Animator, Command, Component, LodGroup, Value, World};
+
+#[test]
+fn edits_and_reverts_lod_levels() {
+    let mut world = World::new();
+    let key = world.spawn((LodGroup::default(),));
+    let entity = world.entity(key).unwrap();
+    let levels = |distance| {
+        Value::List(vec![Value::Struct(
+            [
+                ("model".into(), Value::String("guid://aabbccdd".into())),
+                ("max_distance".into(), Value::F64(distance)),
+            ]
+            .into(),
+        )])
+    };
+    let set = |field: &str, value| Command::SetField {
+        entity,
+        component: LodGroup::ID,
+        field: field.into(),
+        value,
+    };
+    let before = world.world_data();
+    let plan = world.plan(vec![
+        set("levels", levels(30.0)),
+        set("levels[0].max_distance", Value::F64(-1.0)),
+    ]);
+    assert!(plan.is_valid(), "{:?}", plan.diagnostics);
+    let applied = world.apply(&plan).unwrap();
+    assert_eq!(
+        world.get_field(entity, LodGroup::ID, "levels"),
+        Some(levels(-1.0))
+    );
+    let current = world.world_data();
+    let invalid = world.plan(vec![set(
+        "levels[0].max_distance",
+        Value::F64(f64::INFINITY),
+    )]);
+    assert_eq!(invalid.diagnostics[0].code, codes::EDIT_TYPE_MISMATCH);
+    assert!(world.apply(&invalid).is_err());
+    assert_eq!(world.world_data(), current);
+    world.revert(&applied).unwrap();
+    assert_eq!(
+        world.get_field(entity, LodGroup::ID, "levels"),
+        Some(Value::List(Vec::new()))
+    );
+    // 撤销恢复组件值，同时给实体记下新的修订号。
+    let after = world.world_data();
+    assert_eq!(after.entities.len(), 1);
+    assert_eq!(after.entities[0].id, before.entities[0].id);
+    assert_eq!(after.entities[0].components, before.entities[0].components);
+    assert!(after.entities[0].revision > current.entities[0].revision);
+}
 
 fn event_world() -> (World, EntityId) {
     let mut world = World::new();

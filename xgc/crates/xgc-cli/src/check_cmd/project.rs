@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 use xgc_asset::{find_files, AssetCatalog};
 use xgc_base::{path::normalize_project_relative, EntityId};
 use xgc_migrate::ProjectCheckReport;
-use xgc_reflect::{Component, Registry, Value};
+use xgc_reflect::{Component, ComponentId, Registry, Value};
 use xgc_sim::InputMap;
 use xgc_store::{load_prefab, load_world, ProjectSession, StoreError};
 use xgc_world::{
-    AudioSource, ComponentData, Material, MeshRenderer, Parent, PluginComponent, PrefabInstance,
-    Script, UiElement, World, WorldData,
+    AudioSource, ComponentData, LodGroup, Material, MeshRenderer, Parent, PluginComponent,
+    PrefabInstance, Script, UiElement, World, WorldData,
 };
+
+use crate::assets_cmd::lod_models;
 
 pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckReport, String> {
     let project = ProjectSession::open(path).map_err(|err| format!("{}：{err}", path.display()))?;
@@ -286,31 +288,58 @@ impl Audit<'_> {
     }
 
     fn asset_field(&mut self, location: &str, component: &ComponentData) {
-        let (name, code) = match component.component {
-            Script::ID => ("path", "script.missing"),
-            MeshRenderer::ID => ("model", "asset.missing"),
-            Material::ID => ("asset", "asset.missing"),
-            AudioSource::ID => ("clip", "asset.missing"),
-            UiElement::ID => ("image_path", "asset.missing"),
+        if component.component == LodGroup::ID {
+            for (index, reference) in lod_models(component) {
+                self.asset_reference(
+                    location,
+                    &format!("levels[{index}].model"),
+                    reference,
+                    LodGroup::ID,
+                );
+            }
+            return;
+        }
+        let name = match component.component {
+            Script::ID => "path",
+            MeshRenderer::ID => "model",
+            Material::ID => "asset",
+            AudioSource::ID => "clip",
+            UiElement::ID => "image_path",
             _ => return,
         };
-        let Some(reference) = field(component, name).and_then(Value::as_string) else {
-            return;
-        };
+        if let Some(reference) = field(component, name).and_then(Value::as_string) {
+            self.asset_reference(location, name, reference, component.component);
+        }
+    }
+
+    fn asset_reference(
+        &mut self,
+        location: &str,
+        name: &str,
+        reference: &str,
+        component: ComponentId,
+    ) {
         if reference.is_empty()
-            || (component.component == MeshRenderer::ID
+            || (matches!(component, MeshRenderer::ID | LodGroup::ID)
                 && reference.starts_with("builtin://")
                 && xgc_render::builtin_mesh(reference).is_some())
         {
             return;
         }
+        let script = component == Script::ID;
         match self.resolve(reference) {
-            Ok(path) => {
-                if component.component == Script::ID {
-                    self.scripts.insert(path);
-                }
+            Ok(path) if script => {
+                self.scripts.insert(path);
             }
-            Err(err) => self.problem(code, location, &format!("{name} {reference}：{err}")),
+            Ok(_) => {}
+            Err(err) => {
+                let code = if script {
+                    "script.missing"
+                } else {
+                    "asset.missing"
+                };
+                self.problem(code, location, &format!("{name} {reference}：{err}"));
+            }
         }
     }
 

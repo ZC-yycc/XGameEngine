@@ -52,7 +52,7 @@ pub use layer_components::{
     find_layer, layer_parameters, layers_to_ron, parse_layers, set_layer_parameter, AnimLayer,
     AnimationLayers, LayerMode,
 };
-pub use lod_components::LodGroup;
+pub use lod_components::{LodGroup, LodLevel};
 pub use particle_components::{
     EmissionShape, ParticleBlend, ParticleConfig, ParticleEmitter, ParticleQuad,
     MAX_PARTICLES_LIMIT,

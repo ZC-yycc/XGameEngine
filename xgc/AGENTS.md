@@ -36,7 +36,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/parts.rs` | 跨系统并行写视图 `WriteSet` / `extract_writes` / `restore_writes` |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` |
 | `crates/xgc-world/src/render_components.rs` | 渲染侧组件：`render.mesh` / `render.material` / `render.camera` |
-| `crates/xgc-world/src/lod_components.rs` | LOD 组件：`render.lod` |
+| `crates/xgc-world/src/lod_components.rs` | `render.lod`：按原顺序存放 `LodLevel`，模型与最大距离为反射字段，零或负值表示无限距离 |
 | `crates/xgc-world/src/environment.rs` | 场景级环境 `SceneEnvironment` / `SceneLight` / `LightKind`：光源与环境光（不是实体，随 `WorldData.environment` 存取，缺省不落盘） |
 | `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
 | `crates/xgc-world/src/skeleton_components.rs` | 骨架组件：`animation.skeleton` / `animation.bone` / `animation.pose` |
@@ -66,8 +66,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/tests/trace.rs` | 逐帧 trace 集成回归：与进程内重放逐步对表 / 两次运行逐字节相同 / 不同世界第 0 帧即不同 / 参数错误退出码 2 / 汇总行与 `run-world` 末行逐字一致 / 带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致 / 坏脚本与 `update` 期抛错都退出码 2 且点名出错帧 |
 | `crates/xgc-cli/tests/gate.rs` | 割接门禁集成回归：参考匹配通过 / 哈希分歧退出码 1 并点名帧 / 空参考目录退出码 2 / 参考帧号不从 0 开始退出码 2 |
 | `crates/xgc-sim/tests/steady_state.rs` | 热路径分配门禁：线程本地计数分配器（每个测试线程只看自己的分配）+ 稳态帧预算（60 × (实体数 + 64)），数值型组件世界 `state_hash` 60 次零分配；另有一条 release 吞吐用例默认 `#[ignore]` |
-| `crates/xgc-store/src/lib.rs` | JSON 包络 v2、原子写、WorldData / Prefab / Journal 存取 |
-| `crates/xgc-store/src/binary.rs` | `XGCB` v3 二进制世界：encode / decode / save / load；固定小端、递归值带标签 |
+| `crates/xgc-store/src/lib.rs` | JSON 包络 v3、原子写、WorldData / Prefab / Journal 存取 |
+| `crates/xgc-store/src/binary.rs` | `XGCB` v4 二进制世界：encode / decode / save / load；固定小端、递归值带标签 |
 | `crates/xgc-sim/src/schedule.rs` | 执行计划与调度器：连续分批、宿主阶段、`run_plan_threaded` / 分区执行（`supports_parted` 的系统并行、其余串行；默认 1 线程）；回归 `crates/xgc-sim/tests/parallel_batch.rs` |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with`（调度器 / 场景 / 错误已拆到 `schedule.rs` / `scenario.rs` / `error.rs`） |
 | `crates/xgc-sim/tests/schedule_plan.rs` | 执行计划回归：连续批次、同批两两无冲突、摊平 == 注册顺序、宿主阶段位置（插在首个 `runs_after_host` 系统之前）、构造时固化计划 |
@@ -133,7 +133,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/environment.rs` | 场景级光 / 环境光 → `SceneEnvironment` 映射 |
 | `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态）；旧 `machine`（entry / parameters / states / transitions / duration）一次性翻成 `animation.state` 的 machine RON + parameters；旧 `additive` 一次性搬进 Animator 的 additive_* 字段；旧 `events` 一次性转为反射列表（空表使用组件默认值） |
 | `crates/xgc-migrate/tests/animation.rs` | 机器迁移回归：旧 Animator `machine` → `animation.state`（machine 可回读、状态 / 转移 / 参数齐全），旧 `events` → `animation.animator.events` 可回读 |
-| `crates/xgc-migrate/src/old_lod.rs` | 旧 `LodGroup` → `render.lod`（RON 快照） |
+| `crates/xgc-migrate/src/old_lod.rs` | 旧 `LodGroup` → `render.lod` 的结构化层级；非有限距离转为表示无限距离的零值 |
 | `crates/xgc-migrate/src/old_rust.rs` | 旧 Rust 插件组件 → `plugin.rust` |
 | `crates/xgc-migrate/src/old_particle.rs` | 旧 `ParticleEmitter` → `particle.emitter` |
 | `crates/xgc-migrate/src/old_ui.rs` | 旧 `UiElement` → `ui.element`（kind 由内容推断） |
