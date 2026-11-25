@@ -1,12 +1,12 @@
 //! 每帧只读快照：脚本在 `update(ctx)` 里看到的实体状态。
 //!
 //! 写操作一律进命令队列，不直接改 `World`；视图在每帧脚本调用前刷新一次
-//! （`runtime::refresh_view`）。基础动画参数保留本帧待结算的最新值，层栈 setter
-//! 则从命令队列读取待结算的值。
+//! （`runtime::refresh_view`）。动画参数和层栈保留本帧待结算的最新值，供按名
+//! 的 Lua setter 和动态路径写入按调用顺序累积。
 
 use std::collections::BTreeMap;
 
-use xgc_world::{FieldPath, Value};
+use xgc_world::{AnimationLayers, AnimationState, Component, ComponentId, FieldPath, Value};
 
 /// `ui.element`（comp `0x0601`）的只读快照：布局 setter 需要「当前尺寸 / 位置」
 /// 做增量修改，getter 需要文本 / 可见 / 可交互。
@@ -35,8 +35,8 @@ pub struct EntityView {
     /// 角色控制器是否贴地（没有 `physics.character` 的实体恒为 false）。
     pub grounded: bool,
     pub anim_parameters: Option<Value>,
-    /// `animation.layers` 的 RON 层栈（脚本按层名改权重 / 参数）。
-    pub anim_layers: Option<String>,
+    /// `animation.layers` 的结构化帧内视图。
+    pub anim_layers: Option<Value>,
     /// `ui.element` 快照（非 UI 实体为 `None`）。
     pub ui: Option<UiElementView>,
     pub clicked: bool,
@@ -84,19 +84,30 @@ impl ScriptView {
             .or_else(|| self.pending_spawns.get_mut(&id))
     }
 
-    pub(crate) fn stage_animation_parameter(&mut self, id: u64, field: &str, value: &Value) {
-        // 动态路径和按名 setter 共用本帧最新参数。实际校验及提交仍由世界事务负责。
+    pub(crate) fn stage_animation_field(
+        &mut self,
+        id: u64,
+        component: ComponentId,
+        field: &str,
+        value: &Value,
+    ) {
+        // 视图跟随调用顺序，实际校验与提交由世界事务负责。
+        if component != AnimationState::ID && component != AnimationLayers::ID {
+            return;
+        }
         let Ok(path) = FieldPath::parse(field) else {
             return;
         };
-        if path.root() != "parameters" || path.is_root() {
+        let Some(row) = self.entity_mut(id) else {
             return;
-        }
-        if let Some(parameters) = self
-            .entity_mut(id)
-            .and_then(|row| row.anim_parameters.as_mut())
-        {
-            let _ = path.replace(parameters, value.clone());
+        };
+        let staged = match (component, path.root()) {
+            (AnimationState::ID, "parameters") => row.anim_parameters.as_mut(),
+            (AnimationLayers::ID, "layers") => row.anim_layers.as_mut(),
+            _ => None,
+        };
+        if let Some(staged) = staged {
+            let _ = path.replace(staged, value.clone());
         }
     }
 

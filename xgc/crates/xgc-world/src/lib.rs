@@ -48,10 +48,7 @@ pub use data::{ComponentData, EntityData, WorldData};
 pub use environment::{LightKind, SceneEnvironment, SceneLight};
 pub use gameplay_components::{AudioGain, AudioListener, AudioMixer, AudioSource, Script};
 pub use journal::{Journal, TxRecord};
-pub use layer_components::{
-    find_layer, layer_parameters, layers_to_ron, parse_layers, set_layer_parameter, AnimLayer,
-    AnimationLayers, LayerMode,
-};
+pub use layer_components::{AnimLayer, AnimationLayers, LayerMode};
 pub use lod_components::{LodGroup, LodLevel};
 pub use particle_components::{
     EmissionShape, ParticleBlend, ParticleConfig, ParticleEmitter, ParticleQuad,
@@ -73,7 +70,7 @@ pub use skeleton_components::{Bone, Skeleton, SkeletonPose};
 pub use slope_components::Slope;
 pub use snapshot::{EntitySnapshot, WorldSnapshot};
 pub use state_machine_components::{
-    parse_parameters, AnimationState, StateDef, StateMachine, TransitionCondition, TransitionDef,
+    AnimationState, StateDef, StateMachine, TransitionCondition, TransitionDef,
 };
 pub use ui_components::{UiElement, UiInput, UiInteraction, UiLayout};
 pub use xgc_reflect::{Component, ComponentId, FieldPath, Value};

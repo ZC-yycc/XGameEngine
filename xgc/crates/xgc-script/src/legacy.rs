@@ -303,27 +303,16 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
                     if !weight.is_finite() {
                         return Ok(());
                     }
-                    // 同帧先 py 一次「读 → 改 → 写」：`current_layers_text` 会看到
-                    // 本帧已排队但未结算的写入，权重与参数依次累积。
-                    let current = current_layers_text(
+                    edit_animation_layer(
                         &layer_weight_commands,
-                        &layer_weight_view.borrow(),
+                        &mut layer_weight_view.borrow_mut(),
                         self_id,
-                    );
-                    let Some(current) = current else {
-                        return Ok(());
-                    };
-                    let Ok(mut parsed) = xgc_world::parse_layers(&current) else {
-                        return Ok(());
-                    };
-                    let Some(target) = xgc_world::find_layer(&mut parsed, &layer) else {
-                        return Ok(());
-                    };
-                    target.weight = weight.clamp(0.0, 1.0);
-                    push_layers_text(
-                        &layer_weight_commands,
-                        self_id,
-                        xgc_world::layers_to_ron(&parsed),
+                        &layer,
+                        |fields| {
+                            *fields.get_mut("weight")? =
+                                FieldValue::F64(f64::from(weight.clamp(0.0, 1.0)));
+                            Some(())
+                        },
                     );
                     Ok(())
                 },
@@ -342,29 +331,25 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
                     if !value.is_finite() {
                         return Ok(());
                     }
-                    let current = current_layers_text(
+                    edit_animation_layer(
                         &layer_param_commands,
-                        &layer_param_view.borrow(),
+                        &mut layer_param_view.borrow_mut(),
                         self_id,
-                    );
-                    let Some(current) = current else {
-                        return Ok(());
-                    };
-                    let Ok(mut parsed) = xgc_world::parse_layers(&current) else {
-                        return Ok(());
-                    };
-                    let Some(target) = xgc_world::find_layer(&mut parsed, &layer) else {
-                        return Ok(());
-                    };
-                    // 旧端只对带机器的层写参数（层机器的转移条件读它）。
-                    if target.machine.is_none() {
-                        return Ok(());
-                    }
-                    xgc_world::set_layer_parameter(target, &name, value);
-                    push_layers_text(
-                        &layer_param_commands,
-                        self_id,
-                        xgc_world::layers_to_ron(&parsed),
+                        &layer,
+                        |fields| {
+                            // 层机器关闭时没有转移条件消费这些参数。
+                            let FieldValue::Enum { variant, .. } = fields.get("machine")? else {
+                                return None;
+                            };
+                            if variant != "Enabled" {
+                                return None;
+                            }
+                            let FieldValue::Map(parameters) = fields.get_mut("parameters")? else {
+                                return None;
+                            };
+                            parameters.insert(name, FieldValue::F64(f64::from(value)));
+                            Some(())
+                        },
                     );
                     Ok(())
                 },
@@ -499,56 +484,53 @@ pub(crate) fn vector_table(lua: &Lua, value: [f32; 3]) -> mlua::Result<Table> {
     Ok(table)
 }
 
-/// 读当前层栈文本：先看命令队列里同实体 / 同字段尚未结算的写入（同帧多次改层
-/// 必须依次累积），没有才退回帧首视图快照。
-///
-/// 少了这一步，`FoxLocomotion.lua` 同一帧里的 `set_anim_layer_param` +
-/// `set_anim_layer_weight` 会各自从帧首快照构造整份 RON，后结算的那条把前一条
-/// 覆盖掉（层权重永远回到 0）。旧端两个 setter 直接改运行时层结构，不存在这问题。
-fn current_layers_text(commands: &Commands, view: &ScriptView, id: u64) -> Option<String> {
-    let entity = EntityId::from_raw(id);
-    let queued = commands
-        .borrow()
-        .iter()
-        .rev()
-        .find_map(|command| match command {
-            Command::SetField {
-                entity: target,
-                component,
-                field,
-                value: FieldValue::String(text),
-            } if *target == entity && *component == AnimationLayers::ID && field == "layers" => {
-                Some(text.clone())
-            }
-            _ => None,
-        });
-    queued.or_else(|| view.entity(id).and_then(|row| row.anim_layers.clone()))
-}
-
-/// 写层栈文本：命令队列里已有同实体 / 同字段的写入就替换它的值（保持一条命令），
-/// 否则追加。与 `current_layers_text` 配对，保证同帧多次修改只落一份最终文本。
-fn push_layers_text(commands: &Commands, id: u64, text: String) {
-    let entity = EntityId::from_raw(id);
-    let mut queue = commands.borrow_mut();
-    for command in queue.iter_mut().rev() {
-        if let Command::SetField {
-            entity: target,
-            component,
-            field,
-            value,
-        } = command
+/// 按名选第一层，沿用动态路径写入更新过的帧内视图。
+fn edit_animation_layer(
+    commands: &Commands,
+    view: &mut ScriptView,
+    id: u64,
+    name: &str,
+    edit: impl FnOnce(&mut std::collections::BTreeMap<String, FieldValue>) -> Option<()>,
+) {
+    let Some(FieldValue::List(layers)) =
+        view.entity_mut(id).and_then(|row| row.anim_layers.as_mut())
+    else {
+        return;
+    };
+    let Some(fields) = layers.iter_mut().find_map(|layer| match layer {
+        FieldValue::Struct(fields)
+            if matches!(fields.get("name"), Some(FieldValue::String(value)) if value == name) =>
         {
-            if *target == entity && *component == AnimationLayers::ID && field == "layers" {
-                *value = FieldValue::String(text);
-                return;
-            }
+            Some(fields)
+        }
+        _ => None,
+    }) else {
+        return;
+    };
+    if edit(fields).is_none() {
+        return;
+    }
+    let entity = EntityId::from_raw(id);
+    let updated = FieldValue::List(layers.clone());
+    let mut queue = commands.borrow_mut();
+    // 连续的整栈写入可以合并。遇到动态路径命令时保留它在事务中的顺序。
+    if let Some(Command::SetField {
+        entity: target,
+        component: AnimationLayers::ID,
+        field,
+        value,
+    }) = queue.last_mut()
+    {
+        if *target == entity && field == "layers" {
+            *value = updated;
+            return;
         }
     }
     queue.push(Command::SetField {
         entity,
         component: AnimationLayers::ID,
         field: "layers".to_string(),
-        value: FieldValue::String(text),
+        value: updated,
     });
 }
 

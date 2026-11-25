@@ -2,8 +2,8 @@
 
 use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
-    parse_layers, AnimationLayers, AnimationState, Animator, Component, LayerMode,
-    TransitionCondition, Value, World,
+    AnimationLayers, AnimationState, Animator, Component, LayerMode, TransitionCondition, Value,
+    World,
 };
 
 const SCENE: &str = r#"(
@@ -265,19 +265,12 @@ fn animator_machine_becomes_animation_state_component() {
         .iter()
         .find(|component| component.component == AnimationLayers::ID)
         .expect("Fox 迁移后应有 animation.layers 组件");
-    let text = layers
-        .fields
-        .iter()
-        .find(|(name, _)| name == "layers")
-        .map(|(_, value)| value)
-        .expect("缺 layers 字段");
-    let text = match text {
-        xgc_world::Value::String(text) => text,
-        other => panic!("layers 应是字符串，得到 {other:?}"),
+    let [(name, Value::List(layers))] = layers.fields.as_slice() else {
+        panic!("迁移出的混合层应是结构化列表");
     };
-    let parsed = parse_layers(text).expect("迁移出的层栈必须能再解析");
-    assert_eq!(parsed.len(), 1);
-    let layer = &parsed[0];
+    assert_eq!(name, "layers");
+    assert_eq!(layers.len(), 1);
+    let layer = &restored.get::<AnimationLayers>(key).unwrap().layers[0];
     assert_eq!(layer.name, "upper");
     assert_eq!(layer.mode, LayerMode::Override);
     assert_eq!(layer.clip, "Walk");
@@ -286,6 +279,7 @@ fn animator_machine_becomes_animation_state_component() {
     let layer_machine = layer.machine.as_ref().expect("层机器必须一并迁移");
     assert_eq!(layer_machine.initial, "Natural");
     assert_eq!(layer_machine.states.len(), 2);
+    assert_eq!(layer.parameters["survey"], 0.0);
     assert_eq!(layer.state, "", "运行时状态不落盘，从零起");
     assert_eq!(layer.time, 0.0);
 }

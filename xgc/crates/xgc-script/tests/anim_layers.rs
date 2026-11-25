@@ -1,15 +1,11 @@
-//! 脚本侧混合层：`set_anim_layer_weight` / `set_anim_layer_param` 读当前层栈、
-//! 改值后写回 `animation.layers` 组件；层名不存在 / 非有限值静默 no-op。
+//! 按名 setter 与动态字段写入按脚本调用顺序落到同一层栈。
 
-use xgc_world::{
-    find_layer, layer_parameters, parse_layers, AnimationLayers, Animator, Script, Transform, World,
-};
+use xgc_base::EntityKey;
+use xgc_world::{AnimLayer, AnimationLayers, Animator, Script, StateMachine, Transform, World};
 
-const LAYERS: &str = r#"[(name:"upper", mode:Override, clip:"Walk", weight:0.0, speed:1.0, looping:true, machine:Some((initial:"Natural", parameters:{"survey":0.0}, states:[(name:"Natural", clip:"Walk"), (name:"Survey", clip:"Survey")], transitions:[(from:Some("Natural"), to:"Survey", when:Some(AtLeast(parameter:"survey", value:0.5)), duration:0.35)])), mask:["b_Spine01_02"])]"#;
-
-fn temp_dir(label: &str) -> std::path::PathBuf {
+fn run_script(body: &str) -> Vec<AnimLayer> {
     let dir = std::env::temp_dir().join(format!(
-        "xgc_lua_layers_{label}_{}_{}",
+        "xgc_lua_layers_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -17,68 +13,85 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn write_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-    let path = dir.join("layers.lua");
-    std::fs::write(&path, format!("function update(ctx) {body} end\n")).unwrap();
-    path
-}
-
-fn spawn(world: &mut World) -> xgc_base::EntityKey {
-    world.spawn((
+    std::fs::write(
+        dir.join("layers.lua"),
+        format!("function update(ctx) {body} end\n"),
+    )
+    .unwrap();
+    let mut world = World::new();
+    let key: EntityKey = world.spawn((
         Transform::default(),
         Animator::default(),
         AnimationLayers {
-            layers: LAYERS.to_string(),
+            layers: vec![
+                AnimLayer {
+                    name: "upper".into(),
+                    weight: 0.0,
+                    machine: Some(StateMachine::default()),
+                    parameters: [("survey".into(), 0.0)].into(),
+                    ..AnimLayer::default()
+                },
+                AnimLayer {
+                    name: "single".into(),
+                    ..AnimLayer::default()
+                },
+            ],
         },
         Script {
-            path: "layers.lua".to_string(),
+            path: "layers.lua".into(),
         },
-    ))
-}
-
-fn layers(world: &World, key: xgc_base::EntityKey) -> Vec<xgc_world::AnimLayer> {
-    parse_layers(&world.get::<AnimationLayers>(key).unwrap().layers).unwrap()
+    ));
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    runtime.run_frame(&mut world, 1.0 / 60.0);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(runtime.take_error(), None);
+    world.get::<AnimationLayers>(key).unwrap().layers.clone()
 }
 
 #[test]
 fn script_writes_layer_weight_and_parameters() {
-    let dir = temp_dir("weight");
-    write_script(
-        &dir,
-        r#"set_anim_layer_weight(ctx, "upper", 2.0) set_anim_layer_param(ctx, "upper", "survey", 1.0)"#,
+    let layers = run_script(
+        r#"
+        set_anim_layer_weight(ctx, "upper", 2.0)
+        set_anim_layer_param(ctx, "upper", "survey", 1.0)
+        set_anim_layer_param(ctx, "upper", "new", 0.25)
+    "#,
     );
-    let mut world = World::new();
-    let key = spawn(&mut world);
-    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
-    runtime.run_frame(&mut world, 1.0 / 60.0);
-
-    let parsed = layers(&world, key);
-    let layer = find_layer(&mut parsed.clone(), "upper").cloned().unwrap();
-    assert!((layer.weight - 1.0).abs() < 1e-6, "超界权重钳到 1");
-    let parameters = layer_parameters(&layer);
-    assert!((parameters["survey"] - 1.0).abs() < 1e-6, "参数写进层机器");
-
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(layers[0].weight, 1.0);
+    assert_eq!(layers[0].parameters["survey"], 1.0);
+    assert_eq!(layers[0].parameters["new"], 0.25);
 }
 
 #[test]
-fn missing_layer_and_non_finite_values_are_silent() {
-    let dir = temp_dir("silent");
-    write_script(
-        &dir,
-        r#"set_anim_layer_weight(ctx, "missing", 0.5) set_anim_layer_weight(ctx, "upper", 0.0/0.0)"#,
+fn named_setters_respect_dynamic_paths_in_call_order() {
+    let layers = run_script(
+        r#"
+        local id = self_id(ctx)
+        set_anim_layer_weight(ctx, "upper", 0.75)
+        xgc.set(id, 'animation.layers', 'layers[0].weight', 0.25)
+        set_anim_layer_param(ctx, "upper", "survey", 0.5)
+        xgc.set(id, 'animation.layers', 'layers[0].parameters["survey"]', 0.125)
+        xgc.set(id, 'animation.layers', 'layers[0].name', 'renamed')
+        set_anim_layer_param(ctx, "renamed", "second", 0.75)
+    "#,
     );
-    let mut world = World::new();
-    let key = spawn(&mut world);
-    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
-    runtime.run_frame(&mut world, 1.0 / 60.0);
+    assert_eq!(layers[0].name, "renamed");
+    assert_eq!(layers[0].weight, 0.25);
+    assert_eq!(layers[0].parameters["survey"], 0.125);
+    assert_eq!(layers[0].parameters["second"], 0.75);
+}
 
-    let parsed = layers(&world, key);
-    let layer = find_layer(&mut parsed.clone(), "upper").cloned().unwrap();
-    assert!(layer.weight.abs() < 1e-6, "缺层 / NaN 都不改权重");
-
-    std::fs::remove_dir_all(&dir).unwrap();
+#[test]
+fn missing_layer_disabled_machine_and_non_finite_values_are_silent() {
+    let layers = run_script(
+        r#"
+        set_anim_layer_weight(ctx, "missing", 0.5)
+        set_anim_layer_weight(ctx, "upper", 0.0/0.0)
+        set_anim_layer_param(ctx, "upper", "survey", 0.0/0.0)
+        set_anim_layer_param(ctx, "single", "survey", 1.0)
+    "#,
+    );
+    assert_eq!(layers[0].weight, 0.0);
+    assert_eq!(layers[0].parameters["survey"], 0.0);
+    assert!(layers[1].parameters.is_empty());
 }

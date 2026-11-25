@@ -2,8 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
 use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
+
+#[path = "layer_reflection.rs"]
+mod reflected_layers;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AnimationState {
@@ -32,12 +34,7 @@ impl Component for AnimationState {
             number_field("time", 0.0)
                 .unit("s")
                 .doc("当前状态已持续时间"),
-            FieldDescriptor::new(
-                "parameters",
-                FieldType::Map(Box::new(number_field("parameter", 0.0))),
-                Value::Map(BTreeMap::new()),
-            )
-            .doc("按名字保存的状态机参数；条件中未设定的参数按零处理"),
+            parameters_field(),
         ]
     }
 
@@ -46,12 +43,7 @@ impl Component for AnimationState {
             "machine" => Some(self.machine.to_value()),
             "state" => Some(text_value(&self.state)),
             "time" => Some(number_value(self.time)),
-            "parameters" => Some(Value::Map(
-                self.parameters
-                    .iter()
-                    .map(|(key, value)| (key.clone(), number_value(*value)))
-                    .collect(),
-            )),
+            "parameters" => Some(parameters_value(&self.parameters)),
             _ => None,
         }
     }
@@ -61,15 +53,7 @@ impl Component for AnimationState {
             "machine" => self.machine = StateMachine::from_value(value)?,
             "state" => self.state = text(value, "state")?,
             "time" => self.time = number(value, "time")?,
-            "parameters" => {
-                let Value::Map(entries) = value else {
-                    return Err("parameters 必须是字符串键映射".into());
-                };
-                self.parameters = entries
-                    .iter()
-                    .map(|(key, value)| number(value, key).map(|value| (key.clone(), value)))
-                    .collect::<Result<_, _>>()?;
-            }
+            "parameters" => self.parameters = read_parameters(value)?,
             _ => return Err(format!("animation.state 没有字段 {field}")),
         }
         Ok(())
@@ -77,22 +61,18 @@ impl Component for AnimationState {
 }
 
 /// 基础状态机与混合层共用的机器定义。
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct StateMachine {
     pub initial: String,
-    #[serde(default)]
     pub states: Vec<StateDef>,
-    #[serde(default)]
     pub transitions: Vec<TransitionDef>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StateDef {
     pub name: String,
     pub clip: String,
-    #[serde(default = "default_looping")]
     pub looping: bool,
-    #[serde(default = "default_speed")]
     pub speed: f32,
 }
 
@@ -107,20 +87,17 @@ impl Default for StateDef {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TransitionDef {
-    #[serde(default)]
     pub from: Option<String>,
     pub to: String,
     /// 触发条件；`None` = 无条件。
-    #[serde(default)]
     pub when: Option<TransitionCondition>,
     /// 过渡时长（秒）；`0` = 用 `Animator.fade_time` 的缺省值。
-    #[serde(default)]
     pub duration: f32,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TransitionCondition {
     AtLeast { parameter: String, value: f32 },
     Below { parameter: String, value: f32 },
@@ -453,8 +430,32 @@ fn number(value: &Value, field: &str) -> Result<f32, String> {
     }
 }
 
-pub fn parse_parameters(text: &str) -> BTreeMap<String, f32> {
-    ron::from_str(text).unwrap_or_default()
+fn parameters_field() -> FieldDescriptor {
+    FieldDescriptor::new(
+        "parameters",
+        FieldType::Map(Box::new(number_field("parameter", 0.0))),
+        Value::Map(BTreeMap::new()),
+    )
+    .doc("按名字保存的状态机参数；条件中未设定的参数按零处理")
+}
+
+fn parameters_value(parameters: &BTreeMap<String, f32>) -> Value {
+    Value::Map(
+        parameters
+            .iter()
+            .map(|(key, value)| (key.clone(), number_value(*value)))
+            .collect(),
+    )
+}
+
+fn read_parameters(value: &Value) -> Result<BTreeMap<String, f32>, String> {
+    let Value::Map(entries) = value else {
+        return Err("parameters 必须是字符串键映射".into());
+    };
+    entries
+        .iter()
+        .map(|(key, value)| number(value, key).map(|value| (key.clone(), value)))
+        .collect()
 }
 
 fn default_looping() -> bool {

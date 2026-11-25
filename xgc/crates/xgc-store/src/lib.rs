@@ -15,8 +15,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use xgc_world::{Journal, WorldData};
 
-// 动画状态机定义和参数直接存储为结构体与映射。
-const FORMAT_VERSION: u32 = 4;
+// 动画混合层直接存储为结构化列表。
+const FORMAT_VERSION: u32 = 5;
 
 mod binary;
 pub use binary::{decode_world, encode_world, load_world_binary, save_world_binary};

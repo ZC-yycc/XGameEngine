@@ -11,7 +11,7 @@ use mlua::{
     Value as LuaValue, VmState,
 };
 use xgc_base::EntityId;
-use xgc_world::{builtin_registry, AnimationState, Command, Component, Transform, World};
+use xgc_world::{builtin_registry, Command, Transform, World};
 
 use lua_value::{lua_to_value, value_to_lua};
 
@@ -106,9 +106,9 @@ impl LuaHost {
                 move |_, (id, component, field, value): (u64, String, String, mlua::Value)| {
                     let component = component_id(&component)?;
                     let value = lua_to_value(&value)?;
-                    if let Some(view) = view.as_ref().filter(|_| component == AnimationState::ID) {
+                    if let Some(view) = &view {
                         view.borrow_mut()
-                            .stage_animation_parameter(id, &field, &value);
+                            .stage_animation_field(id, component, &field, &value);
                     }
                     set_commands.borrow_mut().push(Command::SetField {
                         entity: EntityId::from_raw(id),

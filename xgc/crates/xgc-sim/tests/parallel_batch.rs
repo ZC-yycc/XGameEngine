@@ -10,11 +10,27 @@ use xgc_sim::{
     TranslationKey,
 };
 use xgc_world::{
-    AnimationLayers, Animator, AudioGain, AudioListener, AudioMixer, AudioSource, Bone, Component,
-    Parent, Skeleton, SkeletonPose, Transform, Velocity, World, WriteSet,
+    AnimLayer, AnimationLayers, Animator, AudioGain, AudioListener, AudioMixer, AudioSource, Bone,
+    Component, Parent, Skeleton, SkeletonPose, StateDef, StateMachine, Transform, Velocity, World,
+    WriteSet,
 };
 
-const MACHINE_LAYERS: &str = r#"[(name:"upper", mode:Override, clip:"Walk", weight:0.0, speed:1.0, looping:true, machine:Some((initial:"Natural", parameters:{"survey":0.0}, states:[(name:"Natural", clip:"Walk"), (name:"Survey", clip:"Survey")], transitions:[(from:Some("Natural"), to:"Survey", when:Some(AtLeast(parameter:"survey", value:0.5)), duration:0.35), (from:Some("Survey"), to:"Natural", when:Some(Below(parameter:"survey", value:0.5)), duration:0.15)])), mask:["b_Spine01_02"])]"#;
+fn machine_layers() -> AnimationLayers {
+    AnimationLayers {
+        layers: vec![AnimLayer {
+            machine: Some(StateMachine {
+                initial: "Walk".into(),
+                states: vec![StateDef {
+                    name: "Walk".into(),
+                    clip: "walk".into(),
+                    ..StateDef::default()
+                }],
+                ..StateMachine::default()
+            }),
+            ..AnimLayer::default()
+        }],
+    }
+}
 
 /// 记录自己被哪条路径调用的写 `core.velocity` 系统。
 struct RecordingBump {
@@ -236,9 +252,7 @@ fn default_schedule_parallel_matches_serial() {
                 autoplay: true,
                 ..Animator::default()
             },
-            AnimationLayers {
-                layers: MACHINE_LAYERS.to_string(),
-            },
+            machine_layers(),
         ));
         world
     };
@@ -314,9 +328,7 @@ fn layer_system_writes_the_same_layers_when_parted() {
     let build = || {
         let mut world = World::new();
         world.spawn((
-            AnimationLayers {
-                layers: MACHINE_LAYERS.to_string(),
-            },
+            machine_layers(),
             Animator {
                 autoplay: true,
                 ..Animator::default()

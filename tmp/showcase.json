@@ -1,5 +1,5 @@
 {
-  "format_version": 4,
+  "format_version": 5,
   "kind": "world",
   "payload": {
     "revision": 0,
@@ -2924,8 +2924,249 @@
               [
                 "layers",
                 {
-                  "kind": "string",
-                  "value": "[(name:\"upper\",mode:Override,clip:\"Walk\",weight:0.0,speed:1.0,looping:true,fade_time:0.25,mask:[\"b_Spine01_02\"],machine:Some((initial:\"Natural\",states:[(name:\"Natural\",clip:\"Walk\",looping:true,speed:1.0),(name:\"Survey\",clip:\"Survey\",looping:true,speed:1.0)],transitions:[(from:Some(\"Natural\"),to:\"Survey\",when:Some(AtLeast(parameter:\"survey\",value:0.5)),duration:0.35),(from:Some(\"Survey\"),to:\"Natural\",when:Some(Below(parameter:\"survey\",value:0.5)),duration:0.15)])),state:\"\",time:0.0,parameters:\"{\\\"survey\\\":0.0}\",fade_from:\"\",fade_from_time:0.0,fade_from_speed:1.0,fade_from_looping:true,fade_elapsed:0.0,fade_duration:0.0)]"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "struct",
+                      "value": {
+                        "clip": {
+                          "kind": "string",
+                          "value": "Walk"
+                        },
+                        "fade_duration": {
+                          "kind": "f64",
+                          "value": 0.0
+                        },
+                        "fade_elapsed": {
+                          "kind": "f64",
+                          "value": 0.0
+                        },
+                        "fade_from": {
+                          "kind": "string",
+                          "value": ""
+                        },
+                        "fade_from_looping": {
+                          "kind": "bool",
+                          "value": true
+                        },
+                        "fade_from_speed": {
+                          "kind": "f64",
+                          "value": 1.0
+                        },
+                        "fade_from_time": {
+                          "kind": "f64",
+                          "value": 0.0
+                        },
+                        "fade_time": {
+                          "kind": "f64",
+                          "value": 0.25
+                        },
+                        "looping": {
+                          "kind": "bool",
+                          "value": true
+                        },
+                        "machine": {
+                          "kind": "enum",
+                          "value": {
+                            "variant": "Enabled",
+                            "payload": {
+                              "kind": "struct",
+                              "value": {
+                                "initial": {
+                                  "kind": "string",
+                                  "value": "Natural"
+                                },
+                                "states": {
+                                  "kind": "list",
+                                  "value": [
+                                    {
+                                      "kind": "struct",
+                                      "value": {
+                                        "clip": {
+                                          "kind": "string",
+                                          "value": "Walk"
+                                        },
+                                        "looping": {
+                                          "kind": "bool",
+                                          "value": true
+                                        },
+                                        "name": {
+                                          "kind": "string",
+                                          "value": "Natural"
+                                        },
+                                        "speed": {
+                                          "kind": "f64",
+                                          "value": 1.0
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "kind": "struct",
+                                      "value": {
+                                        "clip": {
+                                          "kind": "string",
+                                          "value": "Survey"
+                                        },
+                                        "looping": {
+                                          "kind": "bool",
+                                          "value": true
+                                        },
+                                        "name": {
+                                          "kind": "string",
+                                          "value": "Survey"
+                                        },
+                                        "speed": {
+                                          "kind": "f64",
+                                          "value": 1.0
+                                        }
+                                      }
+                                    }
+                                  ]
+                                },
+                                "transitions": {
+                                  "kind": "list",
+                                  "value": [
+                                    {
+                                      "kind": "struct",
+                                      "value": {
+                                        "duration": {
+                                          "kind": "f64",
+                                          "value": 0.3499999940395355
+                                        },
+                                        "from": {
+                                          "kind": "enum",
+                                          "value": {
+                                            "variant": "State",
+                                            "payload": {
+                                              "kind": "string",
+                                              "value": "Natural"
+                                            }
+                                          }
+                                        },
+                                        "to": {
+                                          "kind": "string",
+                                          "value": "Survey"
+                                        },
+                                        "when": {
+                                          "kind": "enum",
+                                          "value": {
+                                            "variant": "AtLeast",
+                                            "payload": {
+                                              "kind": "struct",
+                                              "value": {
+                                                "parameter": {
+                                                  "kind": "string",
+                                                  "value": "survey"
+                                                },
+                                                "value": {
+                                                  "kind": "f64",
+                                                  "value": 0.5
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "kind": "struct",
+                                      "value": {
+                                        "duration": {
+                                          "kind": "f64",
+                                          "value": 0.15000000596046448
+                                        },
+                                        "from": {
+                                          "kind": "enum",
+                                          "value": {
+                                            "variant": "State",
+                                            "payload": {
+                                              "kind": "string",
+                                              "value": "Survey"
+                                            }
+                                          }
+                                        },
+                                        "to": {
+                                          "kind": "string",
+                                          "value": "Natural"
+                                        },
+                                        "when": {
+                                          "kind": "enum",
+                                          "value": {
+                                            "variant": "Below",
+                                            "payload": {
+                                              "kind": "struct",
+                                              "value": {
+                                                "parameter": {
+                                                  "kind": "string",
+                                                  "value": "survey"
+                                                },
+                                                "value": {
+                                                  "kind": "f64",
+                                                  "value": 0.5
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "mask": {
+                          "kind": "list",
+                          "value": [
+                            {
+                              "kind": "string",
+                              "value": "b_Spine01_02"
+                            }
+                          ]
+                        },
+                        "mode": {
+                          "kind": "enum",
+                          "value": {
+                            "variant": "Override",
+                            "payload": {
+                              "kind": "struct",
+                              "value": {}
+                            }
+                          }
+                        },
+                        "name": {
+                          "kind": "string",
+                          "value": "upper"
+                        },
+                        "parameters": {
+                          "kind": "map",
+                          "value": {
+                            "survey": {
+                              "kind": "f64",
+                              "value": 0.0
+                            }
+                          }
+                        },
+                        "speed": {
+                          "kind": "f64",
+                          "value": 1.0
+                        },
+                        "state": {
+                          "kind": "string",
+                          "value": ""
+                        },
+                        "time": {
+                          "kind": "f64",
+                          "value": 0.0
+                        },
+                        "weight": {
+                          "kind": "f64",
+                          "value": 0.0
+                        }
+                      }
+                    }
+                  ]
                 }
               ]
             ]

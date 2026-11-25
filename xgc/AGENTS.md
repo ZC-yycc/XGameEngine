@@ -41,7 +41,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
 | `crates/xgc-world/src/skeleton_components.rs` | 骨架组件：`animation.skeleton` / `animation.bone` / `animation.pose` |
 | `crates/xgc-world/src/state_machine_components.rs` | 基础动画状态机组件 `animation.state`：类型化 `StateMachine` 与数值参数映射，状态和转移可按路径编辑；基础状态机和混合层共用 `StateMachine` / `StateDef` / `TransitionDef` / `TransitionCondition` |
-| `crates/xgc-world/src/layer_components.rs` | 动画混合层组件 `animation.layers`：RON 层栈（`AnimLayer`：name / mode(Additive|Override) / clip / weight / speed / looping / fade_time / mask / machine + 运行时 state / time / parameters / fade_*），`parse_layers` / `layers_to_ron` / `find_layer` / `set_layer_parameter`；mask 是沿 parent 链匹配的节点名子树根名单 |
+| `crates/xgc-world/src/layer_components.rs` | 动画混合层组件 `animation.layers` 的唯一内存类型 `Vec<AnimLayer>`，供模拟和渲染直接读取；mask 是沿 parent 链匹配的节点名子树根名单 |
+| `crates/xgc-world/src/layer_reflection.rs` | 混合层的结构化反射，含模式、遮罩、参数和淡入状态；Enabled 分支复用基础状态机的字段定义与校验 |
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source`（含 bus）/ `audio.listener` / `audio.gain` / `audio.mixer` |
 | `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / time / blend_from / blend_elapsed / blend_duration / additive_clip / additive_weight / additive_speed / additive_looping / additive_time / root_motion / events）；`events` 是结构化列表，作者配置由 `state_fields()` 排除，不进 `state_hash` |
 | `crates/xgc-world/src/root_motion.rs` | 根运动纯函数：`RootMotion`（显式节点名 + 轴开关，RON 配置）、`RootMotionTrack` 采样与循环展开轨迹、`root_motion_delta`（fade 混合两段增量）、`to_world_delta` / `to_local_position`（TRS 近似，无剪切项） |
@@ -66,8 +67,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/tests/trace.rs` | 逐帧 trace 集成回归：与进程内重放逐步对表 / 两次运行逐字节相同 / 不同世界第 0 帧即不同 / 参数错误退出码 2 / 汇总行与 `run-world` 末行逐字一致 / 带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致 / 坏脚本与 `update` 期抛错都退出码 2 且点名出错帧 |
 | `crates/xgc-cli/tests/gate.rs` | 割接门禁集成回归：参考匹配通过 / 哈希分歧退出码 1 并点名帧 / 空参考目录退出码 2 / 参考帧号不从 0 开始退出码 2 |
 | `crates/xgc-sim/tests/steady_state.rs` | 热路径分配门禁：线程本地计数分配器（每个测试线程只看自己的分配）+ 稳态帧预算（60 × (实体数 + 64)），数值型组件世界 `state_hash` 60 次零分配；另有一条 release 吞吐用例默认 `#[ignore]` |
-| `crates/xgc-store/src/lib.rs` | JSON 包络 v4、原子写、WorldData / Prefab / Journal 存取 |
-| `crates/xgc-store/src/binary.rs` | `XGCB` v5 二进制世界：encode / decode / save / load；固定小端、递归值带标签；映射和枚举分别用 11 和 12，沿用原有递归深度限额 |
+| `crates/xgc-store/src/lib.rs` | JSON 包络 v5、原子写、WorldData / Prefab / Journal 存取 |
+| `crates/xgc-store/src/binary.rs` | `XGCB` v6 二进制世界：encode / decode / save / load；固定小端、递归值带标签；映射和枚举分别用 11 和 12，沿用原有递归深度限额 |
 | `crates/xgc-sim/src/schedule.rs` | 执行计划与调度器：连续分批、宿主阶段、`run_plan_threaded` / 分区执行（`supports_parted` 的系统并行、其余串行；默认 1 线程）；回归 `crates/xgc-sim/tests/parallel_batch.rs` |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with`（调度器 / 场景 / 错误已拆到 `schedule.rs` / `scenario.rs` / `error.rs`） |
 | `crates/xgc-sim/tests/schedule_plan.rs` | 执行计划回归：连续批次、同批两两无冲突、摊平 == 注册顺序、宿主阶段位置（插在首个 `runs_after_host` 系统之前）、构造时固化计划 |
@@ -78,8 +79,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-sim/src/animation.rs` | 根变换剪辑采样 + `AnimationPlaybackSystem`；关节轨道在 `animation/joints.rs` |
 | `crates/xgc-sim/src/animation/joints.rs` | `JointTrack`：按 joint 索引采样骨骼本地平移 / 旋转 / 缩放；播放系统按 Parent 链找骨骼并写入 |
 | `crates/xgc-sim/src/animation_state.rs` | `StateMachine` / `AnimationStateSystem`：参数阈值转换、转场时长写 blend 字段、状态写回 Animator.clip |
-| `crates/xgc-sim/src/animation_layers.rs` | `AnimationLayerSystem`：每帧推进层自己的机器 / 参数 / 时钟 / 淡入（转移时长缺省用 `fade_time`、旧状态时钟定格），只写 `animation.layers`；姿势混合在渲染侧 `glb/layers.rs`；`set_layer_weight` 按名钳制权重 |
-| `crates/xgc-sim/tests/animation_layers.rs` | 混合层状态回归：层机器转移并定格旧时钟 / 淡入结束清空 / 权重钳制与缺失名静默 / 非 autoplay 不推进 / 坏 RON 跳过 / RON 快照往返 |
+| `crates/xgc-sim/src/animation_layers.rs` | `AnimationLayerSystem`：每帧推进层自己的机器 / 参数 / 时钟 / 淡入（转移时长缺省用 `fade_time`、旧状态时钟定格），只写 `animation.layers`；姿势混合在渲染侧 `glb/layers.rs`，按名写权重由 Lua 宿主处理 |
+| `crates/xgc-sim/tests/animation_layers.rs` | 混合层状态回归：层机器转移并定格旧时钟 / 淡入结束清空 / 非 autoplay 不推进 |
 | `crates/xgc-sim/src/input.rs` | `InputMap` / `InputState` / `KeyCode` / `Binding`：解析 `input.ron` 并折叠动作与轴 |
 | `crates/xgc-sim/src/audio.rs` | `AudioMixerSystem`（支持 `supports_parted`）+ WAV 解码 / `AudioLibrary`：监听者距离 + 总线音量写 `audio.gain` |
 | `crates/xgc-sim/src/skeleton.rs` | `SkeletonPoseSystem`（支持 `supports_parted`）/ `parse_pose`：关节父链合成世界矩阵 |
@@ -99,7 +100,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-agent/src/query.rs` | 查询 IR：字段路径、过滤算子、标量比较 |
 | `crates/xgc-audio/src/lib.rs` | cpal 音频设备输出：设备枚举、PCM 重采样、F32 / I16 输出队列、`play_clip` |
 | `crates/xgc-script/src/lib.rs` | Lua 宿主：安全标准库、执行 / 调用、`xgc` 表（字段 / 实体 / 组件增删）、预算、内存上限、热重载 |
-| `crates/xgc-script/src/legacy.rs` | 旧脚本钩子与 API：`update(ctx)` / `fixed_update(ctx)`（每个固定步一次，dt 仍走 `delta(ctx)`）/ `on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)` / `entity_name(ctx, id)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at`（俯仰必须放欧拉角 X 分量，放 Z 会变滚转）/ `velocity` / `set_anim_param` / `ui_*` / `action_pressed` / `axis` / `character_*` / `state_*` / `pos` / `log`；`character_simple_move` 遇到只有 `physics.character` 的旧实体先补 `core.velocity`（`AddComponent` 走 replace，旧 `EntityKey` 会失效，按 `EntityId` 重新取）；UI 颜色 setter 的 sRGB 参数经唯一的 `srgb_to_linear()`（同旧端 0.04045 分段，alpha 不转）换算后写入组件，少这一步会在 sRGB 目标上二次编码；层栈 setter（`set_anim_layer_weight` / `set_anim_layer_param`）真写 `animation.layers`，同帧多次改层栈在命令队列里合并；UI 布局 / 文本 / 样式绑定已拆到 `ui_api.rs`（见下）；音频等暂无实现为 no-op |
+| `crates/xgc-script/src/legacy.rs` | 旧脚本钩子与 API：`update(ctx)` / `fixed_update(ctx)`（每个固定步一次，dt 仍走 `delta(ctx)`）/ `on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)` / `entity_name(ctx, id)` / `rot` / `set_rot` / `delta` / `entity_id` / `entity_pos` / `set_pos` / `look_at`（俯仰必须放欧拉角 X 分量，放 Z 会变滚转）/ `velocity` / `set_anim_param` / `ui_*` / `action_pressed` / `axis` / `character_*` / `state_*` / `pos` / `log`；`character_simple_move` 遇到只有 `physics.character` 的旧实体先补 `core.velocity`（`AddComponent` 走 replace，旧 `EntityKey` 会失效，按 `EntityId` 重新取）；UI 颜色 setter 的 sRGB 参数经唯一的 `srgb_to_linear()`（同旧端 0.04045 分段，alpha 不转）换算后写入组件，少这一步会在 sRGB 目标上二次编码；层栈 setter（`set_anim_layer_weight` / `set_anim_layer_param`）按名称选择帧内最新层，连续整栈写入合并，动态路径命令保持调用顺序；UI 布局 / 文本 / 样式绑定已拆到 `ui_api.rs`（见下）；音频等暂无实现为 no-op |
 | `crates/xgc-script/src/ui_api.rs` | UI 脚本布局 / 文本 / 样式 / 图片 API：29 个函数（布局 5 / 文本 4 / 样式 2 / 状态 2 / 读取 4 / 交互 2 / 图片 3 / 运行时创建 4）；焦点在 `ui_focus_api.rs`、创建在 `ui_spawn_api.rs`、默认值在 `component_data.rs`；语义照旧端 `ui_ctx.rs`：`ui_set_size` = `offset_min + size`、`ui_set_pos` 保持尺寸、文本尺寸 clamp 1..512、半径 max 0、对齐小写后只认 left/center|centre|middle/right、颜色 sRGB→线性（`srgb_to_linear`，alpha 不转）、缺 `ui.element` 一律 no-op；同帧多次写先看命令队列未结算 `SetField` 再退回快照 |
 | `crates/xgc-script/tests/ui_layout.rs` | UI setter 回归：size 保持左上角 / 同帧 size+pos 两种顺序都成立 / 文本样式与 getter 同帧可见 / 缺元素与不存在 id no-op |
 | `crates/xgc-script/src/ui_focus_api.rs` | UI 焦点三件套：`ui_focused` / `ui_set_focus` / `ui_clear_focus`；只写 `ui.interaction.focused`（0x0603，`SetField` 帧末结算），目标必须是 Button + visible + interactable 否则彻底 no-op，排他 = 同帧给其它 UI 实体写 false |
@@ -107,7 +108,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-script/tests/ui_image.rs` | 图片三件套回归：setter 写 `image_path` / 线性 tint / fill 钳制 / 缺元素 no-op |
 | `crates/xgc-render/tests/ui_image_fill.rs` | 图片渲染回归：tint 乘色 / fill 从左侧裁 / fill=0 不画（GPU lock） |
 | `crates/xgc-render/tests/ui_border.rs` | UI 覆盖层 SDF 回归：圆角描边用边框色 / 透明背景 + 描边仍绘制 / 圆角边缘有抗锯齿过渡（像素介于空与实心之间） |
-| `crates/xgc-script/tests/anim_layers.rs` | 脚本混合层回归：同帧权重 + 参数都落地（命令队列合并）/ 缺层与非有限值静默 |
+| `crates/xgc-script/tests/anim_layers.rs` | 脚本混合层回归：同帧权重和参数累积 / 按名 setter 与动态路径按序执行 / 权重钳制、缺层与非有限值静默 |
 | `crates/xgc-script/tests/anim_event_hook.rs` | 动画事件钩子回归：`on_anim_event` 收到事件名并写速度 / 不匹配名字不写 |
 | `crates/xgc-sim/tests/animator_events.rs` | 动画事件运行时回归：跨帧只触发一次 / 循环跨圈命中 / 非循环不重复 |
 | `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` / `fixed_update(ctx)` / `on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)` / `on_anim_event(ctx, name)` 生命周期分派与回退；每次调用前 `reset_budget()`，`fixed_update` 每个固定步一次且不传 dt（dt 走 `delta(ctx)`），碰撞钩子多传对方 `EntityId`，动画钩子多传事件名 |
@@ -131,7 +132,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/old_character.rs` | 旧 `Character` → `physics.character` 的输入投影：六个字段都带旧端 serde 缺省（1.8 / 0.3 / 0.35 / 45 / 0.02 / 0.3），手写旧 RON 省略字段也能迁出 |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
 | `crates/xgc-migrate/src/environment.rs` | 场景级光 / 环境光 → `SceneEnvironment` 映射 |
-| `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态）；旧 `machine`（entry / parameters / states / transitions / duration）一次性投影成 `animation.state` 的机器结构与参数映射；旧 `additive` 一次性搬进 Animator 的 additive_* 字段；旧 `events` 一次性转为反射列表（空表使用组件默认值） |
+| `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态）；旧 `machine`（entry / parameters / states / transitions / duration）一次性投影成 `animation.state` 的机器结构与参数映射；旧 `layers` 一次性投影成结构化 `animation.layers`；旧 `additive` 一次性搬进 Animator 的 additive_* 字段；旧 `events` 一次性转为反射列表（空表使用组件默认值） |
 | `crates/xgc-migrate/tests/animation.rs` | 机器迁移回归：旧 Animator `machine` → `animation.state`（machine 可回读、状态 / 转移 / 参数齐全），旧 `events` → `animation.animator.events` 可回读 |
 | `crates/xgc-migrate/src/old_lod.rs` | 旧 `LodGroup` → `render.lod` 的结构化层级；非有限距离转为表示无限距离的零值 |
 | `crates/xgc-migrate/src/old_rust.rs` | 旧 Rust 插件组件 → `plugin.rust` |
@@ -210,7 +211,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/glb/normals.rs` | `NORMAL` 访问器读取：只接受 float VEC3、逐顶点三份、不提前归一（归一在片元）；读之前按 `checked_add` / `saturating_mul` 校验偏移与 BIN 长度（JSON 的 `count` 不可信，坏资产必须是 `MeshError` 而不是 panic）；另含 `face_normals`（缺 `NORMAL` 时的生成算法：逐三角形叉积 · 长度即两倍面积 · 累加到三顶点再归一，非索引图元按 `POSITION` 顺序展开）与 4 条纯函数单测 |
 | `crates/xgc-render/src/glb.rs` | GLB / GLTF 解析：POSITION / 索引 / `NORMAL`（装配在 `glb/attributes.rs`，条数必须与 POSITION 一致）/ JOINTS_0 / WEIGHTS_0 / 首图元材质 / `load_glb_skeleton`；`.gltf` + 外部 bin 经内存 GLB 合并；缺 `NORMAL` 的模型加载期会补齐顶点法线（不再是空），片元导数回退只剩内建图元 / 手工构造 |
 | `crates/xgc-render/src/glb/animation.rs` | glTF 动画解析：node 层级 / 默认 TRS、channel 时间与值、LINEAR / STEP 采样（CUBICSPLINE 明确 Unsupported）、`AnimationSet::joint_pose` 沿 parent 链算关节全局矩阵；`AnimationNode.name` 供遮罩匹配、`bind_locals` 给空基础剪辑当基底；叠加层混合在 `glb/additive.rs`（见下），`root_motion_set` 在 `glb/root_motion.rs` |
-| `crates/xgc-render/src/glb/additive.rs` | additive 叠加层混合：局部空间平移 / 缩放差 + `ref⁻¹·current` 旋转增量向单位四元数 slerp（weight clamp [0,1]，权重 0 逐位等于基础姿势），参考 = 叠加剪辑第 0 帧；RON 层栈的 Additive 层复用同一份 `blend_additive` |
+| `crates/xgc-render/src/glb/additive.rs` | additive 叠加层混合：局部空间平移 / 缩放差 + `ref⁻¹·current` 旋转增量向单位四元数 slerp（weight clamp [0,1]，权重 0 逐位等于基础姿势），参考 = 叠加剪辑第 0 帧；层栈的 Additive 层复用同一份 `blend_additive` |
 | `crates/xgc-render/src/glb/crossfade.rs` | 交叉淡入：`CrossfadeLayer`（旧剪辑 + 按旧剪辑自己时钟走的旧时间 + alpha）；`joint_pose_played` 在局部 TRS 上按 alpha 把旧剪辑姿势混进新剪辑（T/S lerp、R slerp），再叠 additive 后转关节矩阵；旧剪辑缺失退回新剪辑；根运动剥离在 `glb/root_motion.rs`（crossfade 后、additive 前把开关轴平移换回绑定值）；层栈参数在 additive 之后叠加（`layers`） |
 | `crates/xgc-render/src/glb/root_motion.rs` | 根运动渲染剥离：按节点名把 `root_motion` 开关轴的平移换回绑定值；未知节点 / 空名字 no-op |
 | `crates/xgc-sim/src/root_motion.rs` | `apply_root_motion`：宿主在 `step_with` 之后按 Animator 时钟推进实体位置（有 Parent 转回局部），不进默认调度（轨道表来自模型资产） |
@@ -271,7 +272,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 - **播放器场景选择**：项目目录和 `project.xgc` 均支持 `--scene`。先按清单登记名精确匹配，再按唯一文件名主干匹配（`character` → `scenes/character.json`）。多个同名主干必须写完整路径。cooked 目录传 `--scene` 返回错误。回归见 `crates/xgc-player/tests/player.rs`。
 - **MCP 适配器**：`xgc mcp` 只做 `initialize` / `tools/list` / `tools/call` 封装，工具名 = `xgc.agent/1` 方法名把 `.` 换成 `_`，参数与结果原样透传；**不要在这里复制查询 / 编辑逻辑**。工具执行失败放 `isError`，未知工具 -32602，未知方法 / 坏 JSON 走 JSON-RPC 错误码；通知（无 id）不回应。回归 `crates/xgc-agent/tests/mcp.rs`。
 - **动画事件**：`Animator.events` 是作者数据（`time` 秒数和 `name` 组成结构，Inspector 和 Agent 用同一条 `events[0].time` 路径读写）；`AnimatorSystem` 推进时钟后按 `crossed_events` 跨帧判定并写瞬态 `World::animation_events`（**不进 `WorldData` / 快照 / `state_hash`**），本系统开头清空上一步；脚本宿主在动画系统**之前**，所以 `on_anim_event(ctx, name)` 比旧端晚一个固定步收到（别把动画挪到宿主前，会打乱状态机时序）。循环剪辑只在真的跨圈时触发；`started`（首帧）额外派发零时刻事件。新增作者数据字段一律走 `Component::state_fields()` 排除，别只加进 `fields()` 让老场景哈希漂移（`Animator.events` 就是这么做的，回归 `crates/xgc-world/tests/hash.rs`）。
-- **glTF 动画**：剪辑挂 `Mesh.animations`（模型内部节点层级），`animated_pose::resolve` 按 `Animator.clip` / `time` 采样成 pose 喂蒙皮路径，不为迁移世界伪造骨骼实体；旧状态机迁移成 `animation.state`（sim / migrate 共用 `StateMachine`；`AnimationStateSystem` 支持 `AtLeast` / `Below` + 迟滞、时长缺省 `fade_time`）。`additive`（参考 = 叠加剪辑第 0 帧、权重 0 逐位等于基础）、`layers`（`animation.layers` RON 层栈；mask 沿 parent 链匹配节点名；基础 + crossfade + additive 之后叠 Override / Additive）、渲染侧交叉淡入（`Animator.blend_from*` 定格旧剪辑时钟 + `glb/crossfade.rs` 局部 TRS 按 alpha 混合）、`root_motion` 均已迁移；宿主阶段夹在固定步与动画之间（脚本当帧参数当帧生效）；渲染侧在 crossfade 后 additive 前剥离根轴；CLI / editor / player 三宿主均已接根运动。细节 / 逐刀数字见 STATUS / CUTOVER。
+- **glTF 动画**：剪辑挂 `Mesh.animations`（模型内部节点层级），`animated_pose::resolve` 按 `Animator.clip` / `time` 采样成 pose 喂蒙皮路径，不为迁移世界伪造骨骼实体；旧状态机迁移成 `animation.state`（sim / migrate 共用 `StateMachine`；`AnimationStateSystem` 支持 `AtLeast` / `Below` + 迟滞、时长缺省 `fade_time`）。`additive`（参考 = 叠加剪辑第 0 帧、权重 0 逐位等于基础）、`layers`（`animation.layers` 结构化层栈；mask 沿 parent 链匹配节点名；基础 + crossfade + additive 之后叠 Override / Additive）、渲染侧交叉淡入（`Animator.blend_from*` 定格旧剪辑时钟 + `glb/crossfade.rs` 局部 TRS 按 alpha 混合）、`root_motion` 均已迁移；宿主阶段夹在固定步与动画之间（脚本当帧参数当帧生效）；渲染侧在 crossfade 后 additive 前剥离根轴；CLI / editor / player 三宿主均已接根运动。细节 / 逐刀数字见 STATUS / CUTOVER。
 - **根运动**：`Animator.root_motion` 是 RON 快照（`(node:"b_Hip_01", axes:(true,false,true))`，空 = 关；节点名必须显式写，不能猜根节点）；world 侧 `root_motion.rs` 是纯函数（循环剪辑用展开轨迹算跨度增量、fade 按 alpha 混两段增量、轴过滤）；实体位移由宿主在 `step_with` 之后调 `apply_root_motion`（不进默认调度：轨道表来自模型资产，默认调度保持零资产依赖）；轨道表统一由 `MeshCache::root_motion_library` 建一次、CLI / editor / player 同源（去掉任一宿主的应用行都会让该宿主的哈希 / 位移回归变红）；渲染侧在基础 + crossfade 之后、additive/layers 之前把开关轴平移换回绑定值（否则蒙皮与实体双倍前进）；local→world 用 TRS 线性部分（无剪切项）近似，父级非均匀缩放 + 子级旋转与旧端完整矩阵有细微差。
 - 热路径先保证正确；性能数字必须写进 README / 基准，不许凭感觉写"更快"。
 - **CI**：`.github/workflows/xgc.yml` 只跑不碰 wgpu 的测试，GPU 集成测试留在带显卡机器；release 基线只记数字不设阈值；toolchain 钉 1.95.0（stable 漂移会让新 lint 变红）。

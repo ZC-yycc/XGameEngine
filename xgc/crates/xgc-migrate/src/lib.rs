@@ -211,7 +211,7 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
         let mut animator = None;
         let mut animator_additive = None;
         let mut animator_root_motion = None;
-        let mut animator_layers = String::new();
+        let mut animator_layers = Vec::new();
         let mut character = None;
         let mut ui = None;
         let mut particle = None;
@@ -297,8 +297,11 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                 }
                 OldComponentData::Animator(old) => {
                     animator_additive = old.additive.clone();
-                    animator_layers = old_animator::layers_to_component_field(&old.layers)
-                        .map_err(MigrationError::Parse)?;
+                    animator_layers = old
+                        .layers
+                        .iter()
+                        .map(old_animator::OldLayer::to_anim_layer)
+                        .collect();
                     if let Some(root) = &old.root_motion {
                         animator_root_motion =
                             Some(root.to_component_field().map_err(MigrationError::Parse)?);

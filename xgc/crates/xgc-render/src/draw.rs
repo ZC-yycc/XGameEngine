@@ -174,7 +174,7 @@ fn skeleton_pose(world: &World, mut key: xgc_base::EntityKey) -> Option<Vec<[f32
     None
 }
 
-/// 把 `animation.layers` 的 RON 快照投影成渲染侧层参数。
+/// 从 `animation.layers` 读取当前姿势采样参数。
 ///
 /// 权重在这里只剩「是否生效」的判断，真正的混合在 `glb::layers`；层状态机 /
 /// 时钟 / 淡入进度由模拟侧 `AnimationLayerSystem` 推进，渲染不重复算。
@@ -182,10 +182,8 @@ fn build_layers(world: &World, key: xgc_base::EntityKey) -> Vec<LayerSample> {
     let Some(component) = world.get::<AnimationLayers>(key) else {
         return Vec::new();
     };
-    let Ok(parsed) = xgc_world::parse_layers(&component.layers) else {
-        return Vec::new();
-    };
-    parsed
+    component
+        .layers
         .iter()
         .map(|layer| LayerSample {
             mode: layer.mode,
