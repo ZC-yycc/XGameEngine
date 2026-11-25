@@ -1,9 +1,9 @@
 //! 旧 Animator 状态机 → `animation.state` 组件迁移。
 
-use xgc_migrate::migrate_str;
+use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
-    parse_layers, parse_machine, parse_parameters, AnimationLayers, AnimationState, Animator,
-    Component, LayerMode, StateMachine,
+    parse_layers, AnimationLayers, AnimationState, Animator, Component, LayerMode,
+    TransitionCondition, Value, World,
 };
 
 const SCENE: &str = r#"(
@@ -84,7 +84,7 @@ const SCENE: &str = r#"(
                                 },
                                 states: [
                                     (name: "Idle", clip: "Survey", speed: 1.0, looping: true),
-                                    (name: "Walk", clip: "Walk", speed: 1.0, looping: true),
+                                    (name: "Walk", clip: "Walk", speed: 1.5, looping: false),
                                 ],
                                 transitions: [
                                     (
@@ -92,6 +92,11 @@ const SCENE: &str = r#"(
                                         to: "Walk",
                                         when: AtLeast(param: "speed", value: 0.5),
                                         duration: Some(0.35),
+                                    ),
+                                    (
+                                        from: "Walk",
+                                        to: "Idle",
+                                        when: Below(param: "speed", value: 0.25),
                                     ),
                                 ],
                             )),
@@ -107,7 +112,9 @@ const SCENE: &str = r#"(
 fn animator_machine_becomes_animation_state_component() {
     let (world, report) = migrate_str(SCENE).unwrap();
     assert_eq!(report.entities, 1);
+    assert_eq!(world.next_id, 2);
     let entity = &world.entities[0];
+    assert_eq!(entity.id.raw(), 1);
     let state = entity
         .components
         .iter()
@@ -120,19 +127,44 @@ fn animator_machine_becomes_animation_state_component() {
         .find(|(name, _)| name == "machine")
         .map(|(_, value)| value)
         .expect("缺 machine 字段");
-    let machine = match machine {
-        xgc_world::Value::String(text) => text,
-        other => panic!("machine 应是字符串，得到 {other:?}"),
+    let Value::Struct(machine) = machine else {
+        panic!("machine 应是结构体，得到 {machine:?}");
     };
-    let machine: StateMachine = parse_machine(machine).expect("迁移出的机器必须能再解析");
-    assert_eq!(machine.initial, "Idle");
-    assert_eq!(machine.states.len(), 2);
-    assert_eq!(machine.transitions.len(), 1);
-    let transition = &machine.transitions[0];
-    assert_eq!(transition.from.as_deref(), Some("Idle"));
-    assert_eq!(transition.to, "Walk");
+    assert_eq!(machine["initial"].as_string(), Some("Idle"));
+    let Value::List(states) = &machine["states"] else {
+        panic!("states 应是列表");
+    };
+    assert_eq!(states.len(), 2);
+    let Value::List(transitions) = &machine["transitions"] else {
+        panic!("transitions 应是列表");
+    };
+    assert_eq!(transitions.len(), 2);
+    let Value::Struct(transition) = &transitions[0] else {
+        panic!("转移应是结构体");
+    };
+    assert_eq!(
+        transition["from"],
+        Value::Enum {
+            variant: "State".to_string(),
+            payload: Box::new(Value::String("Idle".to_string())),
+        }
+    );
+    assert_eq!(transition["to"].as_string(), Some("Walk"));
+    assert_eq!(
+        transition["when"],
+        Value::Enum {
+            variant: "AtLeast".to_string(),
+            payload: Box::new(Value::Struct(
+                [
+                    ("parameter".to_string(), Value::String("speed".to_string())),
+                    ("value".to_string(), Value::F64(0.5)),
+                ]
+                .into(),
+            )),
+        }
+    );
     // 旧转移自己写了 duration 就保留，不写才回落到 Animator.fade_time。
-    assert_eq!(transition.duration, 0.35);
+    assert_eq!(transition["duration"].as_f32(), Some(0.35));
 
     let parameters = state
         .fields
@@ -140,12 +172,34 @@ fn animator_machine_becomes_animation_state_component() {
         .find(|(name, _)| name == "parameters")
         .map(|(_, value)| value)
         .expect("缺 parameters 字段");
-    let parameters = match parameters {
-        xgc_world::Value::String(text) => text,
-        other => panic!("parameters 应是字符串，得到 {other:?}"),
-    };
-    let parameters = parse_parameters(parameters);
-    assert_eq!(parameters.get("speed"), Some(&0.0));
+    assert_eq!(
+        parameters,
+        &Value::Map([("speed".to_string(), Value::F64(0.0))].into())
+    );
+
+    let mut restored = World::new();
+    restored.restore_world_data(&world).unwrap();
+    let key = restored.key(entity.id).unwrap();
+    let state = restored.get::<AnimationState>(key).unwrap();
+    assert_eq!(state.state, "");
+    assert_eq!(state.time, 0.0);
+    assert_eq!(state.parameters.get("speed"), Some(&0.0));
+    let walk = &state.machine.states[1];
+    assert_eq!(walk.name, "Walk");
+    assert_eq!(walk.clip, "Walk");
+    assert_eq!(walk.speed, 1.5);
+    assert!(!walk.looping);
+    let back = &state.machine.transitions[1];
+    assert_eq!(back.from.as_deref(), Some("Walk"));
+    assert_eq!(back.to, "Idle");
+    assert_eq!(
+        back.when,
+        Some(TransitionCondition::Below {
+            parameter: "speed".to_string(),
+            value: 0.25,
+        })
+    );
+    assert_eq!(back.duration, 0.0);
 
     // 叠加层配置一并搬进 Animator 组件；运行时相位（additive_time）不落盘。
     let animator = entity
@@ -234,4 +288,26 @@ fn animator_machine_becomes_animation_state_component() {
     assert_eq!(layer_machine.states.len(), 2);
     assert_eq!(layer.state, "", "运行时状态不落盘，从零起");
     assert_eq!(layer.time, 0.0);
+}
+
+#[test]
+fn rejects_non_finite_base_machine_values() {
+    for (original, invalid, field) in [
+        (r#""speed": 0.0"#, r#""speed": NaN"#, "parameters"),
+        (
+            r#"when: Below(param: "speed", value: 0.25)"#,
+            r#"when: Below(param: "speed", value: inf)"#,
+            "machine",
+        ),
+    ] {
+        let scene = SCENE.replacen(original, invalid, 1);
+        let Err(MigrationError::Parse(message)) = migrate_str(&scene) else {
+            panic!("animation.state.{field} 中的非有限值应在迁移时被拒绝");
+        };
+        assert!(
+            message.starts_with(&format!("animation.state.{field}：")),
+            "应点名出错的组件字段，得到 {message:?}"
+        );
+        assert!(message.contains("有限"), "应报非有限数，得到 {message:?}");
+    }
 }

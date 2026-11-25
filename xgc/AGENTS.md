@@ -40,7 +40,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-world/src/environment.rs` | 场景级环境 `SceneEnvironment` / `SceneLight` / `LightKind`：光源与环境光（不是实体，随 `WorldData.environment` 存取，缺省不落盘） |
 | `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
 | `crates/xgc-world/src/skeleton_components.rs` | 骨架组件：`animation.skeleton` / `animation.bone` / `animation.pose` |
-| `crates/xgc-world/src/state_machine_components.rs` | 动画状态机组件 `animation.state`（machine / state / time / parameters）+ 机器类型 `StateMachine` / `StateDef` / `TransitionDef` / `TransitionCondition` / `parse_machine` / `parse_parameters`（sim / migrate 共用，一个概念一个类型） |
+| `crates/xgc-world/src/state_machine_components.rs` | 基础动画状态机组件 `animation.state`：类型化 `StateMachine` 与数值参数映射，状态和转移可按路径编辑；基础状态机和混合层共用 `StateMachine` / `StateDef` / `TransitionDef` / `TransitionCondition` |
 | `crates/xgc-world/src/layer_components.rs` | 动画混合层组件 `animation.layers`：RON 层栈（`AnimLayer`：name / mode(Additive|Override) / clip / weight / speed / looping / fade_time / mask / machine + 运行时 state / time / parameters / fade_*），`parse_layers` / `layers_to_ron` / `find_layer` / `set_layer_parameter`；mask 是沿 parent 链匹配的节点名子树根名单 |
 | `crates/xgc-world/src/gameplay_components.rs` | 玩法侧组件：`script.lua` / `audio.source`（含 bus）/ `audio.listener` / `audio.gain` / `audio.mixer` |
 | `crates/xgc-world/src/animation_components.rs` | 动画组件：`animation.animator`（clip / speed / time / blend_from / blend_elapsed / blend_duration / additive_clip / additive_weight / additive_speed / additive_looping / additive_time / root_motion / events）；`events` 是结构化列表，作者配置由 `state_fields()` 排除，不进 `state_hash` |
@@ -66,8 +66,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/tests/trace.rs` | 逐帧 trace 集成回归：与进程内重放逐步对表 / 两次运行逐字节相同 / 不同世界第 0 帧即不同 / 参数错误退出码 2 / 汇总行与 `run-world` 末行逐字一致 / 带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致 / 坏脚本与 `update` 期抛错都退出码 2 且点名出错帧 |
 | `crates/xgc-cli/tests/gate.rs` | 割接门禁集成回归：参考匹配通过 / 哈希分歧退出码 1 并点名帧 / 空参考目录退出码 2 / 参考帧号不从 0 开始退出码 2 |
 | `crates/xgc-sim/tests/steady_state.rs` | 热路径分配门禁：线程本地计数分配器（每个测试线程只看自己的分配）+ 稳态帧预算（60 × (实体数 + 64)），数值型组件世界 `state_hash` 60 次零分配；另有一条 release 吞吐用例默认 `#[ignore]` |
-| `crates/xgc-store/src/lib.rs` | JSON 包络 v3、原子写、WorldData / Prefab / Journal 存取 |
-| `crates/xgc-store/src/binary.rs` | `XGCB` v4 二进制世界：encode / decode / save / load；固定小端、递归值带标签；映射和枚举分别用 11 和 12，沿用原有递归深度限额 |
+| `crates/xgc-store/src/lib.rs` | JSON 包络 v4、原子写、WorldData / Prefab / Journal 存取 |
+| `crates/xgc-store/src/binary.rs` | `XGCB` v5 二进制世界：encode / decode / save / load；固定小端、递归值带标签；映射和枚举分别用 11 和 12，沿用原有递归深度限额 |
 | `crates/xgc-sim/src/schedule.rs` | 执行计划与调度器：连续分批、宿主阶段、`run_plan_threaded` / 分区执行（`supports_parted` 的系统并行、其余串行；默认 1 线程）；回归 `crates/xgc-sim/tests/parallel_batch.rs` |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with`（调度器 / 场景 / 错误已拆到 `schedule.rs` / `scenario.rs` / `error.rs`） |
 | `crates/xgc-sim/tests/schedule_plan.rs` | 执行计划回归：连续批次、同批两两无冲突、摊平 == 注册顺序、宿主阶段位置（插在首个 `runs_after_host` 系统之前）、构造时固化计划 |
@@ -131,7 +131,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-migrate/src/old_character.rs` | 旧 `Character` → `physics.character` 的输入投影：六个字段都带旧端 serde 缺省（1.8 / 0.3 / 0.35 / 45 / 0.02 / 0.3），手写旧 RON 省略字段也能迁出 |
 | `crates/xgc-migrate/src/old_scene.rs` | 旧 `SceneV2` 顶层结构 |
 | `crates/xgc-migrate/src/environment.rs` | 场景级光 / 环境光 → `SceneEnvironment` 映射 |
-| `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态）；旧 `machine`（entry / parameters / states / transitions / duration）一次性翻成 `animation.state` 的 machine RON + parameters；旧 `additive` 一次性搬进 Animator 的 additive_* 字段；旧 `events` 一次性转为反射列表（空表使用组件默认值） |
+| `crates/xgc-migrate/src/old_animator.rs` | 旧 `Animator` → `animation.animator`（含基础姿态）；旧 `machine`（entry / parameters / states / transitions / duration）一次性投影成 `animation.state` 的机器结构与参数映射；旧 `additive` 一次性搬进 Animator 的 additive_* 字段；旧 `events` 一次性转为反射列表（空表使用组件默认值） |
 | `crates/xgc-migrate/tests/animation.rs` | 机器迁移回归：旧 Animator `machine` → `animation.state`（machine 可回读、状态 / 转移 / 参数齐全），旧 `events` → `animation.animator.events` 可回读 |
 | `crates/xgc-migrate/src/old_lod.rs` | 旧 `LodGroup` → `render.lod` 的结构化层级；非有限距离转为表示无限距离的零值 |
 | `crates/xgc-migrate/src/old_rust.rs` | 旧 Rust 插件组件 → `plugin.rust` |

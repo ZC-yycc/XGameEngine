@@ -15,8 +15,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use xgc_world::{Journal, WorldData};
 
-// LOD 层级直接存储模型与距离字段，原生世界只读当前表示。
-const FORMAT_VERSION: u32 = 3;
+// 动画状态机定义和参数直接存储为结构体与映射。
+const FORMAT_VERSION: u32 = 4;
 
 mod binary;
 pub use binary::{decode_world, encode_world, load_world_binary, save_world_binary};

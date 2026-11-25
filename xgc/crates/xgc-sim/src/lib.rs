@@ -65,9 +65,7 @@ pub use systems::{
     PhysicsSystem, VelocitySystem,
 };
 pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem, UiNav};
-pub use xgc_world::{
-    parse_machine, parse_parameters, StateDef, StateMachine, TransitionCondition, TransitionDef,
-};
+pub use xgc_world::{StateDef, StateMachine, TransitionCondition, TransitionDef};
 
 pub struct Simulation {
     world: World,

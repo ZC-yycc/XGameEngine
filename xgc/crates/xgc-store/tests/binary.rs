@@ -21,7 +21,7 @@ fn binary_world_roundtrips_and_is_deterministic() {
     let first = xgc_store::encode_world(&data).unwrap();
     let second = xgc_store::encode_world(&data).unwrap();
     assert_eq!(first, second);
-    assert_eq!(&first[..8], b"XGCB\x04\0\0\0");
+    assert_eq!(&first[..8], b"XGCB\x05\0\0\0");
     let decoded = xgc_store::decode_world(&first).unwrap();
     assert_eq!(decoded, data);
 
@@ -44,9 +44,9 @@ fn binary_world_roundtrips_and_is_deterministic() {
 #[test]
 fn binary_world_rejects_previous_version() {
     let mut bytes = xgc_store::encode_world(&World::new().world_data()).unwrap();
-    bytes[4..8].copy_from_slice(&3_u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&4_u32.to_le_bytes());
     let err = xgc_store::decode_world(&bytes).unwrap_err();
-    assert!(err.contains("不支持的 XGCB 版本：3"), "{err}");
+    assert!(err.contains("不支持的 XGCB 版本：4"), "{err}");
 }
 
 #[test]

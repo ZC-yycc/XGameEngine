@@ -1,9 +1,7 @@
 //! 旧 Animator / 状态机 → `animation.animator` + `animation.state` 组件数据。
 //!
-//! 旧端的动画状态机挂在 Animator 里（`machine` 是内嵌结构），XGC 把它拆成
-//! 独立组件 `animation.state`：机器 RON + 当前状态 + 参数 RON。拆开是因为
-//! 运行时要独立推进状态时间、脚本要直接改参数，没必要每次连剪辑一起重写。
-//! 转换就发生在这一层——磁盘格式一次性换成新形状，不做运行期双读。
+//! 旧 Animator 内嵌的机器迁为独立的 `animation.state`，让运行时和脚本能分别
+//! 更新状态时间与参数，无需重写剪辑配置。机器与参数由组件反射导出为结构化值。
 
 use std::collections::BTreeMap;
 
@@ -133,10 +131,6 @@ pub enum OldLayerMode {
 impl OldLayer {
     /// 旧层 → 新层：机器翻成同一份 `StateMachine`，运行时状态从零起。
     pub fn to_anim_layer(&self) -> Result<AnimLayer, String> {
-        let machine = match &self.machine {
-            Some(machine) => Some(machine.to_state_machine()?),
-            None => None,
-        };
         let mut layer = AnimLayer {
             name: self.name.clone(),
             mode: match self.mode {
@@ -149,7 +143,7 @@ impl OldLayer {
             looping: self.looping,
             fade_time: self.fade_time.unwrap_or(0.25),
             mask: self.mask.clone(),
-            machine,
+            machine: self.machine.as_ref().map(OldMachine::to_state_machine),
             ..AnimLayer::default()
         };
         // 入口参数：旧机器自带的 parameters 一次性写进本层参数字符串；
@@ -212,17 +206,18 @@ enum OldWhen {
     Below { param: String, value: f32 },
 }
 
-/// 迁移后的机器：机器本身与初始参数各是一份 RON 字符串（与 `animation.state`
-/// 组件的两个字段同形）。
-pub struct MigratedMachine {
-    pub machine: String,
-    pub parameters: String,
-}
-
 impl OldMachine {
+    pub fn to_animation_state(&self) -> AnimationState {
+        AnimationState {
+            machine: self.to_state_machine(),
+            parameters: self.parameters.clone(),
+            ..AnimationState::default()
+        }
+    }
+
     /// 旧机器 → `xgc_world::StateMachine`（基础机器与混合层的机器共用这一处）。
-    pub fn to_state_machine(&self) -> Result<StateMachine, String> {
-        Ok(StateMachine {
+    fn to_state_machine(&self) -> StateMachine {
+        StateMachine {
             initial: self.entry.clone(),
             states: self
                 .states
@@ -253,20 +248,7 @@ impl OldMachine {
                     duration: transition.duration.unwrap_or(0.0),
                 })
                 .collect(),
-        })
-    }
-}
-
-impl MigratedMachine {
-    pub fn new(old: &OldMachine) -> Result<Self, String> {
-        let machine = ron::ser::to_string(&old.to_state_machine()?)
-            .map_err(|err| format!("状态机序列化失败：{err}"))?;
-        let parameters = ron::ser::to_string(&old.parameters)
-            .map_err(|err| format!("状态机参数序列化失败：{err}"))?;
-        Ok(Self {
-            machine,
-            parameters,
-        })
+        }
     }
 }
 
@@ -279,7 +261,7 @@ pub struct AnimatorInput {
     pub position: [f64; 3],
     pub rotation: [f64; 4],
     pub scale: [f64; 3],
-    pub machine: Option<MigratedMachine>,
+    pub state: Option<AnimationState>,
     pub additive_clip: String,
     pub additive_weight: f32,
     pub additive_speed: f32,
@@ -347,15 +329,23 @@ pub fn animator_components(
             fields: vec![("layers".to_string(), Value::String(input.layers))],
         });
     }
-    if let Some(machine) = input.machine {
+    if let Some(state) = input.state {
+        // 复用组件写入校验，避免旧 RON 中的 NaN / inf 落盘成 JSON null。
+        let mut validated = AnimationState::default();
+        let mut fields = Vec::new();
+        for field in AnimationState::fields() {
+            let name = field.name;
+            let value = state
+                .get_field(name)
+                .expect("AnimationState 声明的字段必须可读");
+            validated
+                .set_field(name, &value)
+                .map_err(|err| format!("{}.{name}：{err}", AnimationState::NAME))?;
+            fields.push((name.to_string(), value));
+        }
         components.push(ComponentData {
             component: AnimationState::ID,
-            fields: vec![
-                ("machine".to_string(), Value::String(machine.machine)),
-                ("state".to_string(), Value::String(String::new())),
-                ("time".to_string(), Value::F64(0.0)),
-                ("parameters".to_string(), Value::String(machine.parameters)),
-            ],
+            fields,
         });
     }
     Ok(components)

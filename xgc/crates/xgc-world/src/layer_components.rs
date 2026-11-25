@@ -3,8 +3,8 @@
 //! 旧端把层栈挂在 `Animator.layers` 里：每层有自己的剪辑 / 权重 / 时钟 /
 //! 可选状态机 / 骨骼遮罩，脚本按层名写权重与参数。XGC 把它落成一个组件字符串：
 //! 配置与运行时状态（当前状态、状态时间、淡入进度、参数）都在同一份 RON 里，
-//! 由 `AnimationLayerSystem` 每帧推进、脚本按层名读改写——与 `animation.state`
-//! 把机器状态落在组件字符串是同一套做法，不另立第二份表示。
+//! 由 `AnimationLayerSystem` 每帧推进，脚本按层名读改写。
+//! 机器定义与 `animation.state` 共用 `StateMachine`。
 //!
 //! 渲染侧只消费这份数据（在模型节点局部空间做 Override / Additive × 遮罩），
 //! 模拟侧只负责时钟与状态机推进；两边都不再改实体根 `Transform`。

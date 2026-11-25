@@ -224,10 +224,8 @@ fn runtime_drives_script_entities_and_reloads() {
 }
 
 #[test]
-fn missing_animation_state_does_not_block_other_scripts() {
-    use std::collections::BTreeMap;
-
-    use xgc_world::{AnimationState, Script, Transform, World};
+fn animation_parameter_writes_accumulate_and_skip_missing_components() {
+    use xgc_world::{AnimationState, FiredAnimEvent, Name, Script, Transform, World};
 
     let dir = std::env::temp_dir().join(format!(
         "xgc_lua_optional_anim_{}_{}",
@@ -240,7 +238,19 @@ fn missing_animation_state_does_not_block_other_scripts() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("anim.lua"),
-        "function update(ctx) set_anim_param(ctx, 'speed', 1.0) end\n",
+        r#"function update(ctx)
+            set_anim_param(ctx, 'speed', 1.0)
+            set_anim_param(ctx, 'turn', -0.5)
+            set_anim_param(ctx, 'speed', 2.0)
+            if entity_name(ctx, self_id(ctx)) == 'animated' then
+                xgc.set(self_id(ctx), 'animation.state', 'parameters["speed"]', 2.5)
+            end
+            set_anim_param(ctx, 'speed', 0.0 / 0.0)
+            set_anim_param(ctx, 'invalid', math.huge)
+        end
+        function on_anim_event(ctx, name)
+            set_anim_param(ctx, name, 1.0)
+        end"#,
     )
     .unwrap();
     std::fs::write(
@@ -257,8 +267,14 @@ fn missing_animation_state_does_not_block_other_scripts() {
         },
     ));
     let animated = world.spawn((
+        Name {
+            value: "animated".into(),
+        },
         Transform::default(),
-        AnimationState::default(),
+        AnimationState {
+            parameters: [("grounded".into(), 1.0)].into(),
+            ..AnimationState::default()
+        },
         Script {
             path: "anim.lua".to_string(),
         },
@@ -269,14 +285,27 @@ fn missing_animation_state_does_not_block_other_scripts() {
             path: "move.lua".to_string(),
         },
     ));
+    world.push_animation_event(FiredAnimEvent {
+        entity: world.entity(animated).unwrap(),
+        name: "landed".into(),
+    });
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);
 
     runtime.run_frame(&mut world, 1.0 / 60.0);
 
+    assert!(runtime.take_error().is_none());
     assert_eq!(world.get::<Transform>(mover).unwrap().position[0], 7.0);
-    let parameters: BTreeMap<String, f32> =
-        ron::from_str(&world.get::<AnimationState>(animated).unwrap().parameters).unwrap();
-    assert_eq!(parameters.get("speed"), Some(&1.0));
+    let parameters = &world.get::<AnimationState>(animated).unwrap().parameters;
+    assert_eq!(
+        *parameters,
+        [
+            ("grounded".into(), 1.0),
+            ("landed".into(), 1.0),
+            ("speed".into(), 2.5),
+            ("turn".into(), -0.5),
+        ]
+        .into()
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

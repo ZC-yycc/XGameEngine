@@ -296,13 +296,6 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                     report.mapped_components += 1;
                 }
                 OldComponentData::Animator(old) => {
-                    let machine = match &old.machine {
-                        Some(machine) => Some(
-                            old_animator::MigratedMachine::new(machine)
-                                .map_err(MigrationError::Parse)?,
-                        ),
-                        None => None,
-                    };
                     animator_additive = old.additive.clone();
                     animator_layers = old_animator::layers_to_component_field(&old.layers)
                         .map_err(MigrationError::Parse)?;
@@ -310,7 +303,7 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                         animator_root_motion =
                             Some(root.to_component_field().map_err(MigrationError::Parse)?);
                     }
-                    animator = Some((old, machine));
+                    animator = Some(old);
                     report.mapped_components += 1;
                 }
             }
@@ -379,7 +372,7 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                 ],
             });
         }
-        if let Some((old_animator, machine)) = animator {
+        if let Some(old_animator) = animator {
             let additive = animator_additive.unwrap_or_default();
             let root_motion = animator_root_motion.unwrap_or_default();
             let position = old.transform.position.to_array();
@@ -393,7 +386,10 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                         looping: old_animator.looping,
                         autoplay: old_animator.autoplay,
                         fade_time: old_animator.fade_time,
-                        machine,
+                        state: old_animator
+                            .machine
+                            .as_ref()
+                            .map(old_animator::OldMachine::to_animation_state),
                         additive_clip: additive.clip,
                         additive_weight: additive.weight,
                         additive_speed: additive.speed,

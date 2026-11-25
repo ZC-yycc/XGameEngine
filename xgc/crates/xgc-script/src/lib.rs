@@ -11,7 +11,7 @@ use mlua::{
     Value as LuaValue, VmState,
 };
 use xgc_base::EntityId;
-use xgc_world::{builtin_registry, Command, Transform, World};
+use xgc_world::{builtin_registry, AnimationState, Command, Component, Transform, World};
 
 use lua_value::{lua_to_value, value_to_lua};
 
@@ -59,7 +59,7 @@ impl LuaHost {
     /// 脚本只产生命令；由调用方在帧末 plan / apply，保证事务边界。
     pub fn with_commands(commands: Rc<RefCell<Vec<Command>>>) -> Result<Self, String> {
         let host = Self::new()?;
-        host.register_commands(&commands)?;
+        host.register_commands(&commands, None)?;
         Ok(Self {
             lua: host.lua,
             world: None,
@@ -77,7 +77,7 @@ impl LuaHost {
         self_id: u64,
     ) -> Result<Self, String> {
         let host = Self::new()?;
-        host.register_commands(&commands)?;
+        host.register_commands(&commands, Some(Rc::clone(&view)))?;
         legacy::register(&host.lua, &commands, &view, self_id)?;
         Ok(Self {
             lua: host.lua,
@@ -90,7 +90,11 @@ impl LuaHost {
         })
     }
 
-    fn register_commands(&self, commands: &Rc<RefCell<Vec<Command>>>) -> Result<(), String> {
+    fn register_commands(
+        &self,
+        commands: &Rc<RefCell<Vec<Command>>>,
+        view: Option<Rc<RefCell<ScriptView>>>,
+    ) -> Result<(), String> {
         let api = self
             .lua
             .create_table()
@@ -102,6 +106,10 @@ impl LuaHost {
                 move |_, (id, component, field, value): (u64, String, String, mlua::Value)| {
                     let component = component_id(&component)?;
                     let value = lua_to_value(&value)?;
+                    if let Some(view) = view.as_ref().filter(|_| component == AnimationState::ID) {
+                        view.borrow_mut()
+                            .stage_animation_parameter(id, &field, &value);
+                    }
                     set_commands.borrow_mut().push(Command::SetField {
                         entity: EntityId::from_raw(id),
                         component,

@@ -1,6 +1,6 @@
 //! 动画状态机：按数值参数选择转换，把状态对应的 clip 写回 Animator。
 
-use xgc_world::{parse_machine, parse_parameters, AnimationState, Animator, Component, World};
+use xgc_world::{AnimationState, Animator, Component, World};
 
 use super::{System, SystemAccess};
 
@@ -25,21 +25,16 @@ impl System for AnimationStateSystem {
 
     fn run(&mut self, world: &mut World, dt: f32) {
         world.for_each2_mut::<AnimationState, Animator>(|_, state, animator| {
-            if state.machine.is_empty() {
+            let machine = &state.machine;
+            if machine.is_empty() {
                 return;
             }
-            let Ok(machine) = parse_machine(&state.machine) else {
-                return;
-            };
             if state.state.is_empty() {
-                state.state = machine.initial.clone();
+                state.state.clone_from(&machine.initial);
             }
-            let parameters = parse_parameters(&state.parameters);
-            let current = state.state.clone();
-            let transition = machine.transition_for(&current, &parameters);
-            if let Some(transition) = transition {
-                let next = transition.to.clone();
-                if next != current {
+            let current = state.state.as_str();
+            if let Some(transition) = machine.transition_for(current, &state.parameters) {
+                if transition.to != current {
                     // 旧端：转移没写 duration 时用 Animator.fade_time 兜底——两者都是
                     // "这一刀换剪辑的淡入时长"，只是作用域不同。
                     let duration = if transition.duration > 0.0 {
@@ -50,7 +45,7 @@ impl System for AnimationStateSystem {
                     // 旧端 `Prev` 把旧剪辑的时钟 / 速度 / 循环方式一起定格：淡出的
                     // 那半边按旧状态自己的节奏走，不跟新状态事后调速。
                     let from = machine
-                        .state_def(&current)
+                        .state_def(current)
                         .map(|definition| definition.clip.clone())
                         .unwrap_or_else(|| animator.clip.clone());
                     if duration > 0.0 {
@@ -69,7 +64,7 @@ impl System for AnimationStateSystem {
                         animator.blend_elapsed = 0.0;
                         animator.blend_duration = 0.0;
                     }
-                    state.state = next;
+                    state.state.clone_from(&transition.to);
                     state.time = 0.0;
                     // 新剪辑从第 0 帧起播：旧端换状态后播放相位重置，否则同一个
                     // Walk 循环会从旧剪辑的相位中途接上。

@@ -1,10 +1,12 @@
 //! 每帧只读快照：脚本在 `update(ctx)` 里看到的实体状态。
 //!
-//! 写操作一律进命令队列，不直接改 `World`；快照在每帧脚本调用前刷新一次
-//! （`runtime::refresh_view`），所以脚本看到的是**帧首**状态。脚本同帧多次
-//! 写同一字段时，层栈那两个 setter 会看命令队列里未结算的写入（见 `legacy`）。
+//! 写操作一律进命令队列，不直接改 `World`；视图在每帧脚本调用前刷新一次
+//! （`runtime::refresh_view`）。基础动画参数保留本帧待结算的最新值，层栈 setter
+//! 则从命令队列读取待结算的值。
 
 use std::collections::BTreeMap;
+
+use xgc_world::{FieldPath, Value};
 
 /// `ui.element`（comp `0x0601`）的只读快照：布局 setter 需要「当前尺寸 / 位置」
 /// 做增量修改，getter 需要文本 / 可见 / 可交互。
@@ -32,7 +34,7 @@ pub struct EntityView {
     pub has_velocity: bool,
     /// 角色控制器是否贴地（没有 `physics.character` 的实体恒为 false）。
     pub grounded: bool,
-    pub anim_parameters: Option<String>,
+    pub anim_parameters: Option<Value>,
     /// `animation.layers` 的 RON 层栈（脚本按层名改权重 / 参数）。
     pub anim_layers: Option<String>,
     /// `ui.element` 快照（非 UI 实体为 `None`）。
@@ -73,6 +75,29 @@ impl ScriptView {
             .iter()
             .find(|entity| entity.id == id)
             .or_else(|| self.pending_spawns.get(&id))
+    }
+
+    pub(crate) fn entity_mut(&mut self, id: u64) -> Option<&mut EntityView> {
+        self.entities
+            .iter_mut()
+            .find(|entity| entity.id == id)
+            .or_else(|| self.pending_spawns.get_mut(&id))
+    }
+
+    pub(crate) fn stage_animation_parameter(&mut self, id: u64, field: &str, value: &Value) {
+        // 动态路径和按名 setter 共用本帧最新参数。实际校验及提交仍由世界事务负责。
+        let Ok(path) = FieldPath::parse(field) else {
+            return;
+        };
+        if path.root() != "parameters" || path.is_root() {
+            return;
+        }
+        if let Some(parameters) = self
+            .entity_mut(id)
+            .and_then(|row| row.anim_parameters.as_mut())
+        {
+            let _ = path.replace(parameters, value.clone());
+        }
     }
 
     pub fn by_name(&self, name: &str) -> Option<&EntityView> {

@@ -2,9 +2,12 @@
 
 use xgc_sim::{
     AnimationClip, AnimationLibrary, AnimationPlaybackSystem, AnimationStateSystem, System,
-    TransitionDef, TranslationKey,
+    TranslationKey,
 };
-use xgc_world::{AnimationState, Animator, Transform, World};
+use xgc_world::{
+    AnimationState, Animator, StateDef, StateMachine, Transform, TransitionCondition,
+    TransitionDef, World,
+};
 
 fn clip(name: &str, x: f32) -> AnimationClip {
     AnimationClip::new(
@@ -19,21 +22,31 @@ fn clip(name: &str, x: f32) -> AnimationClip {
 
 #[test]
 fn state_transition_records_blend_and_playback_mixes() {
-    let machine = r#"(
-        initial: "idle",
-        states: [
-            (name: "idle", clip: "idle"),
-            (name: "run", clip: "run"),
-        ],
-        transitions: [
-            (from: Some("idle"), to: "run", when: Some(AtLeast(parameter: "speed", value: 0.5)), duration: 1.0),
-        ],
-    )"#;
+    let machine = StateMachine {
+        initial: "idle".into(),
+        states: ["idle", "run"]
+            .into_iter()
+            .map(|name| StateDef {
+                name: name.into(),
+                clip: name.into(),
+                ..Default::default()
+            })
+            .collect(),
+        transitions: vec![TransitionDef {
+            from: Some("idle".into()),
+            to: "run".into(),
+            when: Some(TransitionCondition::AtLeast {
+                parameter: "speed".into(),
+                value: 0.5,
+            }),
+            duration: 1.0,
+        }],
+    };
     let mut world = World::new();
     let key = world.spawn((
         AnimationState {
-            machine: machine.to_string(),
-            parameters: "{\"speed\": 1.0}".to_string(),
+            machine,
+            parameters: [("speed".into(), 1.0)].into(),
             ..Default::default()
         },
         Animator::default(),
@@ -52,17 +65,4 @@ fn state_transition_records_blend_and_playback_mixes() {
     playback.run(&mut world, 0.0);
     let position = world.get::<Transform>(key).unwrap().position;
     assert!((position[0] - 2.5).abs() < 1e-5, "{position:?}");
-}
-
-#[test]
-fn transition_fields_are_optional() {
-    let transition: TransitionDef = ron::from_str(
-        r#"(from: None, to: "run", when: Some(AtLeast(parameter: "speed", value: 0.5)))"#,
-    )
-    .unwrap();
-    assert_eq!(transition.duration, 0.0);
-    assert!(transition.from.is_none());
-    let bare: TransitionDef = ron::from_str(r#"(to: "run")"#).unwrap();
-    assert!(bare.when.is_none());
-    assert!(bare.from.is_none());
 }

@@ -3,7 +3,6 @@
 //! 只读数据来自每帧快照 `ScriptView`，写操作一律进命令队列。
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use mlua::{Lua, Table};
@@ -231,26 +230,28 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
         .set(
             "set_anim_param",
             lua.create_function(move |_, (_ctx, name, value): (mlua::Value, String, f32)| {
-                let current = {
-                    let view = anim_view.borrow();
-                    let Some(entity) = view.entity(self_id) else {
-                        return Ok(());
-                    };
-                    let Some(parameters) = &entity.anim_parameters else {
-                        return Ok(());
-                    };
-                    parameters.clone()
+                if !value.is_finite() {
+                    return Ok(());
+                }
+                let mut view = anim_view.borrow_mut();
+                let Some(parameters) = view
+                    .entity_mut(self_id)
+                    .and_then(|entity| entity.anim_parameters.as_mut())
+                else {
+                    return Ok(());
                 };
-                let mut parameters: BTreeMap<String, f32> =
-                    ron::from_str(&current).unwrap_or_default();
-                parameters.insert(name, value);
-                let text = ron::ser::to_string(&parameters).unwrap_or_else(|_| "{}".to_string());
+                // 事件钩子运行前宿主会取走 update 的命令。把待结算的值留在本帧视图，
+                // 后续钩子写新参数时才不会用帧首快照覆盖前一笔。
+                let FieldValue::Map(entries) = parameters else {
+                    return Ok(());
+                };
+                entries.insert(name, FieldValue::F64(f64::from(value)));
                 push_set(
                     &anim_commands,
                     self_id,
                     AnimationState::ID,
                     "parameters",
-                    FieldValue::String(text),
+                    parameters.clone(),
                 );
                 Ok(())
             })

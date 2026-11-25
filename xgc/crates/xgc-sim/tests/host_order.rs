@@ -7,7 +7,10 @@
 use std::sync::{Arc, Mutex};
 
 use xgc_sim::{PlanStage, Schedule, Simulation, System};
-use xgc_world::{AnimationState, Animator, GlobalTransform, Transform, World};
+use xgc_world::{
+    AnimationState, Animator, GlobalTransform, StateDef, StateMachine, Transform,
+    TransitionCondition, TransitionDef, World,
+};
 
 struct Recorder {
     name: &'static str,
@@ -96,26 +99,36 @@ fn host_runs_between_the_fixed_simulation_and_post_host_systems() {
     assert_eq!(*log.lock().unwrap(), vec!["sim", "host", "animation"]);
 }
 
-const MACHINE: &str = r#"(
-    initial: "idle",
-    states: [
-        (name: "idle", clip: "Survey"),
-        (name: "walk", clip: "Walk"),
-    ],
-    transitions: [
-        (from: Some("idle"), to: "walk", when: Some(AtLeast(parameter: "speed", value: 0.5))),
-    ],
-)"#;
-
 #[test]
 fn script_parameters_reach_the_state_machine_in_the_same_frame() {
+    let machine = StateMachine {
+        initial: "idle".into(),
+        states: [("idle", "Survey"), ("walk", "Walk")]
+            .into_iter()
+            .map(|(name, clip)| StateDef {
+                name: name.into(),
+                clip: clip.into(),
+                looping: true,
+                speed: 1.0,
+            })
+            .collect(),
+        transitions: vec![TransitionDef {
+            from: Some("idle".into()),
+            to: "walk".into(),
+            when: Some(TransitionCondition::AtLeast {
+                parameter: "speed".into(),
+                value: 0.5,
+            }),
+            duration: 0.0,
+        }],
+    };
     let mut world = World::new();
     let key = world.spawn((
         Transform::default(),
         GlobalTransform::default(),
         AnimationState {
-            machine: MACHINE.to_string(),
-            parameters: "{\"speed\": 0.0}".to_string(),
+            machine,
+            parameters: [("speed".into(), 0.0)].into(),
             ..Default::default()
         },
         Animator::default(),
@@ -123,8 +136,11 @@ fn script_parameters_reach_the_state_machine_in_the_same_frame() {
     let mut simulation = Simulation::with_fixed_dt(world, 1.0 / 60.0);
     simulation
         .step_with(Vec::new(), |world| {
-            world.get_mut::<AnimationState>(key).unwrap().parameters =
-                "{\"speed\": 1.0}".to_string();
+            world
+                .get_mut::<AnimationState>(key)
+                .unwrap()
+                .parameters
+                .insert("speed".into(), 1.0);
         })
         .expect("步进失败");
     let animator = simulation.world().get::<Animator>(key).unwrap();

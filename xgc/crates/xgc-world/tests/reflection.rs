@@ -1,7 +1,89 @@
 //! 字段路径必须沿事务中的当前值解析，逆命令按同一路径还原。
 
 use xgc_base::{diagnostics as codes, EntityId};
-use xgc_world::{AnimEvent, Animator, Command, Component, LodGroup, Value, World};
+use xgc_world::{AnimEvent, AnimationState, Animator, Command, Component, LodGroup, Value, World};
+
+#[test]
+fn edits_machine_conditions_and_parameters_in_one_transaction() {
+    let mut world = World::new();
+    let key = world.spawn((AnimationState::default(),));
+    let entity = world.entity(key).unwrap();
+    let get = |world: &World, path| world.get_field(entity, AnimationState::ID, path);
+    assert_eq!(
+        get(&world, "machine.initial"),
+        Some(Value::String(String::new()))
+    );
+    let initial = world.world_data();
+    let hash = world.state_hash();
+    let set = |path: &str, value| Command::SetField {
+        entity,
+        component: AnimationState::ID,
+        field: path.into(),
+        value,
+    };
+    let enum_value = |variant: &str, payload| Value::Enum {
+        variant: variant.into(),
+        payload: Box::new(payload),
+    };
+    let transition = Value::Struct(
+        [
+            (
+                "from".into(),
+                enum_value("Any", Value::Struct(Default::default())),
+            ),
+            ("to".into(), Value::String("Walk".into())),
+            (
+                "when".into(),
+                enum_value(
+                    "AtLeast",
+                    Value::Struct(
+                        [
+                            ("parameter".into(), Value::String("speed:main".into())),
+                            ("value".into(), Value::F64(0.5)),
+                        ]
+                        .into(),
+                    ),
+                ),
+            ),
+            ("duration".into(), Value::F64(0.0)),
+        ]
+        .into(),
+    );
+    let condition = "machine.transitions[0].when.AtLeast.value";
+    let parameter = r#"parameters["speed:main"]"#;
+    let plan = world.plan(vec![
+        set("machine.transitions", Value::List(vec![transition])),
+        set(
+            "parameters",
+            Value::Map([("speed:main".into(), Value::F64(0.0))].into()),
+        ),
+        set(condition, Value::F64(1.25)),
+        set(parameter, Value::F64(2.0)),
+    ]);
+    assert!(plan.is_valid(), "{:?}", plan.diagnostics);
+    let applied = world.apply(&plan).unwrap();
+    assert_eq!(get(&world, condition), Some(Value::F64(1.25)));
+    assert_eq!(get(&world, parameter), Some(Value::F64(2.0)));
+    assert_ne!(world.state_hash(), hash);
+    let mut restored = World::new();
+    restored.restore_world_data(&world.world_data()).unwrap();
+    assert_eq!(get(&restored, condition), Some(Value::F64(1.25)));
+    assert_eq!(restored.state_hash(), world.state_hash());
+
+    let before = world.world_data();
+    for (path, value) in [(condition, f64::MAX), (parameter, f64::INFINITY)] {
+        let rejected = world.plan(vec![set(path, Value::F64(value))]);
+        assert!(!rejected.is_valid(), "{path}");
+        assert!(world.apply(&rejected).is_err());
+    }
+    assert_eq!(world.world_data(), before);
+    world.revert(&applied).unwrap();
+    assert_eq!(
+        world.world_data().entities[0].components,
+        initial.entities[0].components
+    );
+    assert_eq!(world.state_hash(), hash);
+}
 
 #[test]
 fn edits_and_reverts_lod_levels() {

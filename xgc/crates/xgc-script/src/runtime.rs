@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use xgc_asset::AssetCatalog;
 use xgc_base::EntityId;
-use xgc_world::{Command, Script, Value, World};
+use xgc_world::{AnimationState, Command, Component, Script, Value, World};
 
 use crate::legacy::{EntityView, ScriptView};
 use crate::view::UiElementView;
@@ -257,9 +257,9 @@ impl ScriptRuntime {
                             }
                         }
                     }
-                    0x0505 => {
+                    id if id == AnimationState::ID.0 => {
                         for (field, value) in &component.fields {
-                            if let ("parameters", Value::String(value)) = (field.as_str(), value) {
+                            if let ("parameters", Value::Map(_)) = (field.as_str(), value) {
                                 row.anim_parameters = Some(value.clone());
                             }
                         }

@@ -118,6 +118,22 @@ fn broken_ron_is_skipped_without_touching_the_component() {
 }
 
 #[test]
+fn layer_transition_fields_are_optional_in_ron() {
+    let layers = parse_layers(
+        r#"[(name:"upper", machine:Some((initial:"idle", transitions:[
+            (from:None, to:"run", when:Some(AtLeast(parameter:"speed", value:0.5))),
+            (to:"idle"),
+        ])))]"#,
+    )
+    .unwrap();
+    let transitions = &layers[0].machine.as_ref().unwrap().transitions;
+    assert_eq!(transitions[0].duration, 0.0);
+    assert!(transitions[0].from.is_none());
+    assert!(transitions[1].when.is_none());
+    assert!(transitions[1].from.is_none());
+}
+
+#[test]
 fn layer_snapshot_roundtrips_through_ron() {
     let mut layers = parse_layers(MACHINE_LAYERS).unwrap();
     layers[0].weight = 0.6;

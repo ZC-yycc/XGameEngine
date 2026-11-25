@@ -12,8 +12,8 @@ use xgc_world::{
 use crate::{write_atomic, Result, StoreError};
 
 const MAGIC: &[u8; 4] = b"XGCB";
-/// 4：LOD 层级改为结构化列表。
-const VERSION: u32 = 4;
+/// 5：动画状态机定义与参数改为结构体和映射。
+const VERSION: u32 = 5;
 const MAP_TAG: u8 = 11;
 const ENUM_TAG: u8 = 12;
 // 读写共用限制，防止深层反射值耗尽线程栈。

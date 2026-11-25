@@ -1,5 +1,5 @@
 {
-  "format_version": 3,
+  "format_version": 4,
   "kind": "world",
   "payload": {
     "revision": 21900,
@@ -2979,8 +2979,254 @@
               [
                 "machine",
                 {
-                  "kind": "string",
-                  "value": "(initial:\"Idle\",states:[(name:\"Idle\",clip:\"Survey\",looping:true,speed:1.0),(name:\"Walk\",clip:\"Walk\",looping:true,speed:1.0),(name:\"Run\",clip:\"Run\",looping:true,speed:1.0)],transitions:[(from:Some(\"Idle\"),to:\"Walk\",when:Some(AtLeast(parameter:\"speed\",value:0.5)),duration:0.0),(from:Some(\"Walk\"),to:\"Idle\",when:Some(Below(parameter:\"speed\",value:0.3)),duration:0.0),(from:Some(\"Walk\"),to:\"Run\",when:Some(AtLeast(parameter:\"speed\",value:2.0)),duration:0.0),(from:Some(\"Run\"),to:\"Walk\",when:Some(Below(parameter:\"speed\",value:1.8)),duration:0.0)])"
+                  "kind": "struct",
+                  "value": {
+                    "initial": {
+                      "kind": "string",
+                      "value": "Idle"
+                    },
+                    "states": {
+                      "kind": "list",
+                      "value": [
+                        {
+                          "kind": "struct",
+                          "value": {
+                            "clip": {
+                              "kind": "string",
+                              "value": "Survey"
+                            },
+                            "looping": {
+                              "kind": "bool",
+                              "value": true
+                            },
+                            "name": {
+                              "kind": "string",
+                              "value": "Idle"
+                            },
+                            "speed": {
+                              "kind": "f64",
+                              "value": 1.0
+                            }
+                          }
+                        },
+                        {
+                          "kind": "struct",
+                          "value": {
+                            "clip": {
+                              "kind": "string",
+                              "value": "Walk"
+                            },
+                            "looping": {
+                              "kind": "bool",
+                              "value": true
+                            },
+                            "name": {
+                              "kind": "string",
+                              "value": "Walk"
+                            },
+                            "speed": {
+                              "kind": "f64",
+                              "value": 1.0
+                            }
+                          }
+                        },
+                        {
+                          "kind": "struct",
+                          "value": {
+                            "clip": {
+                              "kind": "string",
+                              "value": "Run"
+                            },
+                            "looping": {
+                              "kind": "bool",
+                              "value": true
+                            },
+                            "name": {
+                              "kind": "string",
+                              "value": "Run"
+                            },
+                            "speed": {
+                              "kind": "f64",
+                              "value": 1.0
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "transitions": {
+                      "kind": "list",
+                      "value": [
+                        {
+                          "kind": "struct",
+                          "value": {
+                            "duration": {
+                              "kind": "f64",
+                              "value": 0.0
+                            },
+                            "from": {
+                              "kind": "enum",
+                              "value": {
+                                "variant": "State",
+                                "payload": {
+                                  "kind": "string",
+                                  "value": "Idle"
+                                }
+                              }
+                            },
+                            "to": {
+                              "kind": "string",
+                              "value": "Walk"
+                            },
+                            "when": {
+                              "kind": "enum",
+                              "value": {
+                                "variant": "AtLeast",
+                                "payload": {
+                                  "kind": "struct",
+                                  "value": {
+                                    "parameter": {
+                                      "kind": "string",
+                                      "value": "speed"
+                                    },
+                                    "value": {
+                                      "kind": "f64",
+                                      "value": 0.5
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "kind": "struct",
+                          "value": {
+                            "duration": {
+                              "kind": "f64",
+                              "value": 0.0
+                            },
+                            "from": {
+                              "kind": "enum",
+                              "value": {
+                                "variant": "State",
+                                "payload": {
+                                  "kind": "string",
+                                  "value": "Walk"
+                                }
+                              }
+                            },
+                            "to": {
+                              "kind": "string",
+                              "value": "Idle"
+                            },
+                            "when": {
+                              "kind": "enum",
+                              "value": {
+                                "variant": "Below",
+                                "payload": {
+                                  "kind": "struct",
+                                  "value": {
+                                    "parameter": {
+                                      "kind": "string",
+                                      "value": "speed"
+                                    },
+                                    "value": {
+                                      "kind": "f64",
+                                      "value": 0.30000001192092896
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "kind": "struct",
+                          "value": {
+                            "duration": {
+                              "kind": "f64",
+                              "value": 0.0
+                            },
+                            "from": {
+                              "kind": "enum",
+                              "value": {
+                                "variant": "State",
+                                "payload": {
+                                  "kind": "string",
+                                  "value": "Walk"
+                                }
+                              }
+                            },
+                            "to": {
+                              "kind": "string",
+                              "value": "Run"
+                            },
+                            "when": {
+                              "kind": "enum",
+                              "value": {
+                                "variant": "AtLeast",
+                                "payload": {
+                                  "kind": "struct",
+                                  "value": {
+                                    "parameter": {
+                                      "kind": "string",
+                                      "value": "speed"
+                                    },
+                                    "value": {
+                                      "kind": "f64",
+                                      "value": 2.0
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "kind": "struct",
+                          "value": {
+                            "duration": {
+                              "kind": "f64",
+                              "value": 0.0
+                            },
+                            "from": {
+                              "kind": "enum",
+                              "value": {
+                                "variant": "State",
+                                "payload": {
+                                  "kind": "string",
+                                  "value": "Run"
+                                }
+                              }
+                            },
+                            "to": {
+                              "kind": "string",
+                              "value": "Walk"
+                            },
+                            "when": {
+                              "kind": "enum",
+                              "value": {
+                                "variant": "Below",
+                                "payload": {
+                                  "kind": "struct",
+                                  "value": {
+                                    "parameter": {
+                                      "kind": "string",
+                                      "value": "speed"
+                                    },
+                                    "value": {
+                                      "kind": "f64",
+                                      "value": 1.7999999523162842
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
                 }
               ],
               [
@@ -3000,8 +3246,13 @@
               [
                 "parameters",
                 {
-                  "kind": "string",
-                  "value": "{\"speed\":3.0}"
+                  "kind": "map",
+                  "value": {
+                    "speed": {
+                      "kind": "f64",
+                      "value": 3.0
+                    }
+                  }
                 }
               ]
             ]
