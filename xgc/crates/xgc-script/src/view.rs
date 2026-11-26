@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 use xgc_world::{AnimationLayers, AnimationState, Component, ComponentId, FieldPath, Value};
 
+use crate::audio_api::ScriptAudio;
+
 /// `ui.element`（comp `0x0601`）的只读快照：布局 setter 需要「当前尺寸 / 位置」
 /// 做增量修改，getter 需要文本 / 可见 / 可交互。
 #[derive(Clone, Debug, Default)]
@@ -56,6 +58,8 @@ pub struct ScriptView {
     pub actions: BTreeMap<String, bool>,
     /// 模拟量轴：`axis(ctx, "MoveX")` 读这里。与动作一样由宿主每帧写入。
     pub axes: BTreeMap<String, f32>,
+    /// 同一播放会话内所有脚本共用音量与命令队列。
+    pub audio: ScriptAudio,
     /// 下一帧可用的实体 ID（每帧从 `WorldData::next_id` 重置）。
     ///
     /// 旧端 `ui_spawn` 用 `EntityId::new()` 单调分配；这里用世界计数器派生，

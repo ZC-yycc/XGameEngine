@@ -317,10 +317,11 @@ fn mix(input: Option<&str>, output: Option<&str>) -> ExitCode {
         }
     };
     let frames = clip.frames();
-    let mut mixer = SoftwareMixer::new(clip.sample_rate);
-    mixer.play(&clip, 1.0, "sfx", false);
+    let rate = clip.sample_rate;
+    let mut mixer = SoftwareMixer::new(rate);
+    mixer.play(std::sync::Arc::new(clip), xgc_world::PlaySound::new(input));
     let samples = mixer.mix(frames);
-    if let Err(err) = write_wav_mono(Path::new(output), clip.sample_rate, &samples) {
+    if let Err(err) = write_wav_mono(Path::new(output), rate, &samples) {
         eprintln!("写出混音失败：{err}");
         return ExitCode::from(2);
     }
@@ -330,7 +331,7 @@ fn mix(input: Option<&str>, output: Option<&str>) -> ExitCode {
     println!(
         "mix: {} 帧 @ {} Hz -> {}，peak={:.3}",
         samples.len(),
-        clip.sample_rate,
+        rate,
         output,
         peak
     );

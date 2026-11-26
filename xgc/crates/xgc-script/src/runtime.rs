@@ -7,7 +7,10 @@ use std::rc::Rc;
 
 use xgc_asset::{AssetCatalog, AssetPaths, SearchPaths};
 use xgc_base::EntityId;
-use xgc_world::{AnimationLayers, AnimationState, Component, Script, Value, World};
+use xgc_world::{
+    AnimationLayers, AnimationState, AudioCommand, AudioMixer, Component, ListenerPose, Script,
+    Value, World,
+};
 
 use crate::legacy::{EntityView, ScriptView};
 use crate::view::UiElementView;
@@ -174,6 +177,21 @@ impl ScriptRuntime {
         self.frame_error.take()
     }
 
+    /// 帧末结算播放命令，保留队列容量。脚本设置的音量覆盖作者缺省值。
+    pub fn finish_audio_frame(
+        &mut self,
+        authored_mix: AudioMixer,
+        consume: impl FnOnce(AudioMixer, Option<ListenerPose>, std::vec::Drain<'_, AudioCommand>),
+    ) {
+        let mut view = self.view.borrow_mut();
+        let audio = &mut view.audio;
+        consume(
+            audio.mix(authored_mix),
+            audio.listener,
+            audio.commands.drain(..),
+        );
+    }
+
     fn note_error(&mut self, err: &str) {
         eprintln!("script: {err}");
         if self.frame_error.is_none() {
@@ -320,6 +338,9 @@ impl ScriptRuntime {
         view.entities = entities;
         view.spawn_cursor = data.next_id;
         view.pending_spawns.clear();
+        view.audio.authored_mix = world.audio_mixer();
+        // 脚本帧失败或独立脚本调用方未消费时，旧请求不能漏进下一帧。
+        view.audio.commands.clear();
     }
 
     /// 重新读取磁盘并执行所有已加载脚本；场景脚本热重载入口。

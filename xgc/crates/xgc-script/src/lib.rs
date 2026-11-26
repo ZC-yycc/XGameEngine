@@ -13,6 +13,7 @@ use xgc_world::{builtin_registry, Command, Transform, World};
 
 use lua_value::{lua_to_value, value_to_lua};
 
+mod audio_api;
 mod budget;
 mod character_api;
 mod compile;
@@ -26,6 +27,7 @@ mod ui_api;
 mod ui_focus_api;
 mod ui_spawn_api;
 mod view;
+pub use audio_api::ScriptAudio;
 pub use compile::check_source;
 pub use legacy::{euler_to_quat, EntityView, ScriptView};
 pub use runtime::ScriptRuntime;

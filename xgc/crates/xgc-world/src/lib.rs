@@ -46,7 +46,10 @@ pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
 use data::ComponentFactory;
 pub use data::{ComponentData, EntityData, WorldData};
 pub use environment::{LightKind, SceneEnvironment, SceneLight};
-pub use gameplay_components::{AudioGain, AudioListener, AudioMixer, AudioSource, Script};
+pub use gameplay_components::{
+    audio_volume, AudioBus, AudioCommand, AudioGain, AudioListener, AudioMixer, AudioSource,
+    ListenerPose, PlaySound, Script,
+};
 pub use journal::{Journal, TxRecord};
 pub use layer_components::{AnimLayer, AnimationLayers, LayerMode};
 pub use lod_components::{LodGroup, LodLevel};

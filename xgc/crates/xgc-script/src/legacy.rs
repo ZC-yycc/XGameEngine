@@ -283,13 +283,7 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
         )
         .map_err(|err| err.to_string())?;
 
-    // 旧脚本里出现但当前无实现的调用：静默 no-op，避免迁移脚本直接报错。
-    let function = lua
-        .create_function(|_, _: mlua::MultiValue| Ok(()))
-        .map_err(|err| err.to_string())?;
-    globals
-        .set("play_sound", function)
-        .map_err(|err| err.to_string())?;
+    crate::audio_api::register(lua, view).map_err(|err| err.to_string())?;
 
     // 混合层：脚本读当前层栈 → 改权重 / 参数 → 写回组件。命令在宿主阶段结算，
     // `animation_layers` 系统排在宿主之后，所以本帧写的权重当帧生效。

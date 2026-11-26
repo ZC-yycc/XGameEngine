@@ -2,13 +2,17 @@
 
 #![deny(unsafe_code)]
 
+mod audio;
 mod clock;
 #[cfg(feature = "window-input")]
 pub mod window;
 
+pub use audio::AUDIO_SAMPLE_RATE;
 pub use clock::FixedStepClock;
 
 use std::path::Path;
+
+use audio::AudioStage;
 
 use xgc_asset::{AssetPaths, SearchPaths};
 use xgc_render::MeshCache;
@@ -37,20 +41,24 @@ pub struct ScriptedRunner {
     runtime: ScriptRuntime,
     particles: ParticleSystem,
     root_motion: RootMotionLibrary,
+    audio: AudioStage,
 }
 
 impl ScriptedRunner {
     /// 复用脚本与模型的 GUID 目录，并把预热后的网格缓存交给窗口渲染器。
     pub fn with_assets(world: World, assets: AssetPaths) -> (Self, MeshCache) {
         let runtime = ScriptRuntime::with_assets(assets.clone());
-        let mut meshes = MeshCache::with_assets(assets);
+        let mut meshes = MeshCache::with_assets(assets.clone());
         let root_motion = meshes.root_motion_library(&world);
+        let simulation = Simulation::new(world);
+        let audio = AudioStage::new(assets, simulation.fixed_dt());
         (
             Self {
-                simulation: Simulation::new(world),
+                simulation,
                 runtime,
                 particles: ParticleSystem::new(),
                 root_motion,
+                audio,
             },
             meshes,
         )
@@ -76,12 +84,18 @@ impl ScriptedRunner {
         let frame = self
             .simulation
             .advance_with(Vec::new(), |world| self.runtime.run_frame(world, dt))
-            .map_err(|err| format!("运行失败：{err:?}"))?;
+            .map_err(|err| {
+                self.audio.clear_samples();
+                format!("运行失败：{err:?}")
+            })?;
         if let Some(err) = self.runtime.take_error() {
+            self.audio.clear_samples();
             return Err(format!("第 {} 帧运行失败：{err}", frame + 1));
         }
         apply_root_motion(self.simulation.world_mut(), dt, &self.root_motion);
         self.particles.update(dt, self.simulation.world());
+        self.audio
+            .update(&mut self.runtime, self.simulation.world());
         Ok(frame)
     }
 
@@ -114,6 +128,11 @@ impl ScriptedRunner {
 
     pub fn particle_quads(&self) -> &[ParticleQuad] {
         self.particles.quads()
+    }
+
+    /// 最近一次固定步的单声道 PCM，采样率为 [`AUDIO_SAMPLE_RATE`]。
+    pub fn audio_samples(&self) -> &[f32] {
+        self.audio.samples()
     }
 
     pub fn into_parts(self) -> (World, Vec<ParticleQuad>) {

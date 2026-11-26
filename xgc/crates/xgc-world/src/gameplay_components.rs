@@ -3,6 +3,82 @@
 
 use xgc_reflect::{AssetKind, Component, ComponentId, FieldDescriptor, FieldType, Value};
 
+use crate::{Transform, World};
+
+/// 声源所属的三个音量总线。主音量单独作用于混音结果。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioBus {
+    #[default]
+    Sfx,
+    Bgm,
+    Voice,
+}
+
+impl AudioBus {
+    pub const ALL: [Self; 3] = [Self::Sfx, Self::Bgm, Self::Voice];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Sfx => 0,
+            Self::Bgm => 1,
+            Self::Voice => 2,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        [
+            (Self::Sfx, &["sfx", "s"][..]),
+            (Self::Bgm, &["bgm", "music", "m"][..]),
+            (Self::Voice, &["voice", "v"][..]),
+        ]
+        .into_iter()
+        .find_map(|(bus, aliases)| {
+            aliases
+                .iter()
+                .any(|alias| name.eq_ignore_ascii_case(alias))
+                .then_some(bus)
+        })
+    }
+}
+
+/// 脚本和宿主之间的一次播放请求，属于播放会话。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlaySound {
+    pub clip: String,
+    pub volume: f32,
+    pub pitch: f32,
+    pub bus: AudioBus,
+    pub position: Option<[f32; 3]>,
+    pub looping: bool,
+}
+
+impl PlaySound {
+    pub fn new(clip: impl Into<String>) -> Self {
+        Self {
+            clip: clip.into(),
+            volume: 1.0,
+            pitch: 1.0,
+            bus: AudioBus::default(),
+            position: None,
+            looping: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AudioCommand {
+    Play(PlaySound),
+    StopClip(String),
+    StopAll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ListenerPose {
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+}
+
 /// 脚本引用：项目相对路径；M1 只迁移 / 存盘，Lua 运行时后续接。
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Script {
@@ -298,6 +374,7 @@ impl Default for AudioMixer {
 
 impl AudioMixer {
     pub fn bus(&self, bus: &str) -> f32 {
+        // 作者组件的 schema 仍允许直接取主音量，Lua 总线名字走 AudioBus。
         let value = match bus {
             "master" => self.master,
             "bgm" => self.bgm,
@@ -305,6 +382,52 @@ impl AudioMixer {
             _ => self.sfx,
         };
         value.clamp(0.0, 1.0)
+    }
+
+    pub fn bus_volume(&self, bus: AudioBus) -> f32 {
+        audio_volume(match bus {
+            AudioBus::Sfx => self.sfx,
+            AudioBus::Bgm => self.bgm,
+            AudioBus::Voice => self.voice,
+        })
+    }
+
+    pub fn set_bus_volume(&mut self, bus: AudioBus, gain: f32) {
+        let volume = match bus {
+            AudioBus::Sfx => &mut self.sfx,
+            AudioBus::Bgm => &mut self.bgm,
+            AudioBus::Voice => &mut self.voice,
+        };
+        *volume = audio_volume(gain);
+    }
+}
+
+/// 让非有限值静音，避免一个声源污染整块 PCM。
+pub fn audio_volume(gain: f32) -> f32 {
+    if gain.is_finite() {
+        gain.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+impl World {
+    pub fn audio_mixer(&self) -> AudioMixer {
+        let mut mixer = AudioMixer::default();
+        self.for_each::<AudioMixer>(|_, config| mixer = *config);
+        mixer
+    }
+
+    pub fn audio_listener_position(&self) -> Option<[f32; 3]> {
+        let mut position = None;
+        self.for_each::<AudioListener>(|key, config| {
+            if config.active && position.is_none() {
+                position = self
+                    .get::<Transform>(key)
+                    .map(|transform| transform.position);
+            }
+        });
+        position
     }
 }
 

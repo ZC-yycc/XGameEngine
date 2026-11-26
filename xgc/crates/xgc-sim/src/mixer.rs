@@ -1,23 +1,56 @@
 //! 软件混音：把 `AudioClip` 按总线 / 增益混成单声道 PCM，可写回 WAV。
 
-use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use super::audio::AudioClip;
+use xgc_world::{audio_volume, AudioMixer, PlaySound};
+
+use super::audio::{spatial_gain, AudioClip};
 
 #[derive(Clone, Debug)]
 struct Voice {
-    samples: Vec<f32>,
-    frame: usize,
-    gain: f32,
-    bus: String,
-    looping: bool,
+    clip: Arc<AudioClip>,
+    sound: PlaySound,
+    frames: usize,
+    phase: f64,
+    step: f64,
+}
+
+impl Voice {
+    fn mono_frame(&self, index: usize) -> f32 {
+        let channels = usize::from(self.clip.channels);
+        let offset = index * channels;
+        let sum: f32 = self.clip.samples[offset..offset + channels].iter().sum();
+        if sum.is_finite() {
+            sum / channels as f32
+        } else {
+            0.0
+        }
+    }
+
+    fn sample(&self, rate: f64) -> f32 {
+        let cursor = self.phase / rate;
+        let index = (cursor as usize).min(self.frames - 1);
+        let start = self.mono_frame(index);
+        let weight = (cursor - index as f64) as f32;
+        if weight == 0.0 {
+            return start;
+        }
+        let next = if index + 1 < self.frames {
+            index + 1
+        } else if self.sound.looping {
+            0
+        } else {
+            return start;
+        };
+        start * (1.0 - weight) + self.mono_frame(next) * weight
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SoftwareMixer {
-    pub sample_rate: u32,
-    pub master: f32,
-    buses: BTreeMap<String, f32>,
+    sample_rate: u32,
+    mix: AudioMixer,
+    listener_position: [f32; 3],
     voices: Vec<Voice>,
 }
 
@@ -25,31 +58,48 @@ impl SoftwareMixer {
     pub fn new(sample_rate: u32) -> Self {
         Self {
             sample_rate: sample_rate.max(1),
-            master: 1.0,
-            buses: BTreeMap::new(),
+            mix: AudioMixer::default(),
+            listener_position: [0.0; 3],
             voices: Vec::new(),
         }
     }
 
-    pub fn set_bus(&mut self, bus: impl Into<String>, volume: f32) {
-        self.buses.insert(bus.into(), volume.clamp(0.0, 1.0));
+    pub fn set_mix(&mut self, mix: AudioMixer) {
+        self.mix = mix;
     }
 
-    pub fn play(&mut self, clip: &AudioClip, gain: f32, bus: &str, looping: bool) -> usize {
-        let channels = usize::from(clip.channels.max(1));
-        let mut samples = Vec::with_capacity(clip.frames());
-        for frame in clip.samples.chunks(channels) {
-            let sum: f32 = frame.iter().sum();
-            samples.push(sum / channels as f32);
+    pub fn set_listener_position(&mut self, position: [f32; 3]) {
+        self.listener_position = position;
+    }
+
+    pub fn play(&mut self, clip: Arc<AudioClip>, mut sound: PlaySound) {
+        let frames = clip.frames();
+        if frames == 0 || clip.sample_rate == 0 {
+            return;
         }
+        sound.volume = audio_volume(sound.volume);
+        let pitch = if sound.pitch.is_finite() {
+            sound.pitch.clamp(0.05, 16.0)
+        } else {
+            1.0
+        };
+        // 相位以输出采样率为单位，整数步进无需逐帧累加除法的舍入误差。
+        let step = f64::from(clip.sample_rate) * f64::from(pitch);
         self.voices.push(Voice {
-            samples,
-            frame: 0,
-            gain: gain.clamp(0.0, 4.0),
-            bus: bus.to_string(),
-            looping,
+            clip,
+            sound,
+            frames,
+            phase: 0.0,
+            step,
         });
-        self.voices.len() - 1
+    }
+
+    pub fn stop_clip(&mut self, clip: &str) {
+        self.voices.retain(|voice| voice.sound.clip != clip);
+    }
+
+    pub fn stop_all(&mut self) {
+        self.voices.clear();
     }
 
     pub fn voices(&self) -> usize {
@@ -58,29 +108,43 @@ impl SoftwareMixer {
 
     /// 混出 `frames` 个单声道采样；结束后停止的声部自动移除。
     pub fn mix(&mut self, frames: usize) -> Vec<f32> {
-        let bus =
-            |buses: &BTreeMap<String, f32>, name: &str| buses.get(name).copied().unwrap_or(1.0);
-        let mut output = Vec::with_capacity(frames);
-        for _ in 0..frames {
-            let mut sample = 0.0_f32;
-            for voice in &mut self.voices {
-                if let Some(value) = voice.samples.get(voice.frame) {
-                    sample += *value * voice.gain * bus(&self.buses, &voice.bus);
+        let mut output = vec![0.0; frames];
+        self.mix_into(&mut output);
+        output
+    }
+
+    /// 覆盖调用方的单声道缓冲，按声部加入顺序累加，结束的声部原地移除。
+    pub fn mix_into(&mut self, output: &mut [f32]) {
+        output.fill(0.0);
+        let rate = f64::from(self.sample_rate);
+        self.voices.retain_mut(|voice| {
+            let end = voice.frames as f64 * rate;
+            let volume = voice.sound.volume;
+            let volume = voice.sound.position.map_or(volume, |source| {
+                spatial_gain(volume, source, self.listener_position)
+            });
+            let gain = audio_volume(volume) * self.mix.bus_volume(voice.sound.bus);
+            for sample in output.iter_mut() {
+                if voice.phase >= end {
+                    break;
                 }
-                voice.frame += 1;
-                if voice.frame >= voice.samples.len() {
-                    if voice.looping && !voice.samples.is_empty() {
-                        voice.frame = 0;
-                    } else {
-                        voice.frame = voice.samples.len();
-                    }
+                *sample += voice.sample(rate) * gain;
+                voice.phase += voice.step;
+                if voice.sound.looping && voice.phase >= end {
+                    voice.phase %= end;
                 }
             }
-            output.push((sample * self.master).clamp(-1.0, 1.0));
+            voice.phase < end
+        });
+        let master = audio_volume(self.mix.master);
+        for sample in output {
+            let value = *sample * master;
+            *sample = if value.is_nan() {
+                0.0
+            } else {
+                value.clamp(-1.0, 1.0)
+            };
         }
-        self.voices
-            .retain(|voice| voice.looping || voice.frame < voice.samples.len());
-        output
     }
 }
 

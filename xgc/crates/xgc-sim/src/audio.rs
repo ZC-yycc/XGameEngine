@@ -54,18 +54,8 @@ impl System for AudioMixerSystem {
 impl AudioMixerSystem {
     /// 只读世界算出每条声源的新增益。两个执行入口共用同一份计算。
     fn compute(&self, world: &World) -> Vec<(EntityKey, f32)> {
-        let mut mixer = AudioMixer::default();
-        world.for_each::<AudioMixer>(|_, config| {
-            mixer = *config;
-        });
-        let mut listener = None;
-        world.for_each::<AudioListener>(|key, config| {
-            if config.active && listener.is_none() {
-                listener = world
-                    .get::<Transform>(key)
-                    .map(|transform| transform.position);
-            }
-        });
+        let mixer = world.audio_mixer();
+        let listener = world.audio_listener_position();
         let mut updates = Vec::new();
         // 不在这里检查 `AudioGain` 是否存在：并行入口里写集合已从世界取出，
         // 读不到自己写的列。写回阶段 `get_mut` 对没有该组件的实体自然返回 None。
@@ -74,13 +64,7 @@ impl AudioMixerSystem {
                 return;
             };
             let gain = match (source.spatial, listener) {
-                (true, Some(listener)) => {
-                    let dx = transform.position[0] - listener[0];
-                    let dy = transform.position[1] - listener[1];
-                    let dz = transform.position[2] - listener[2];
-                    let distance = (dx * dx + dy * dy + dz * dz).sqrt();
-                    source.volume / (1.0 + distance)
-                }
+                (true, Some(listener)) => spatial_gain(source.volume, transform.position, listener),
                 _ => source.volume,
             };
             let bus = mixer.bus(&source.bus) * mixer.master;
@@ -88,6 +72,15 @@ impl AudioMixerSystem {
         });
         updates
     }
+}
+
+/// 衰减用音量除法，保留逐帧 `AudioGain` 运算的舍入顺序。
+pub(super) fn spatial_gain(volume: f32, source: [f32; 3], listener: [f32; 3]) -> f32 {
+    let dx = source[0] - listener[0];
+    let dy = source[1] - listener[1];
+    let dz = source[2] - listener[2];
+    let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+    volume / (1.0 + distance)
 }
 
 /// 解码后的单声道 / 多声道 PCM 素材；采样按帧交错。
