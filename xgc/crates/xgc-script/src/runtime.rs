@@ -6,14 +6,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use xgc_asset::{AssetCatalog, AssetPaths, SearchPaths};
-use xgc_base::EntityId;
-use xgc_world::{
-    AnimationLayers, AnimationState, AudioCommand, AudioMixer, Component, ListenerPose, Script,
-    Value, World,
-};
+use xgc_base::{EntityId, EntityKey};
+use xgc_world::{AudioCommand, AudioMixer, ListenerPose, Script, World};
 
-use crate::legacy::{EntityView, ScriptView};
-use crate::view::UiElementView;
+use crate::view::{EntityView, ScriptView};
 use crate::LuaHost;
 
 struct Entry {
@@ -34,6 +30,7 @@ pub struct ScriptRuntime {
     entries: HashMap<EntityId, Entry>,
     started: HashSet<EntityId>,
     view: Rc<RefCell<ScriptView>>,
+    entity_keys: Vec<(EntityId, EntityKey)>,
     time: f32,
     /// 本帧第一处脚本错误。只打 stderr 不够：宿主（`run-scripts` / `trace`）要看得到
     /// 失败并退出 2，否则坏脚本会静默退化成"什么都没发生"。
@@ -55,6 +52,7 @@ impl ScriptRuntime {
             entries: HashMap::new(),
             started: HashSet::new(),
             view: Rc::new(RefCell::new(ScriptView::default())),
+            entity_keys: Vec::new(),
             time: 0.0,
             frame_error: None,
         }
@@ -218,125 +216,22 @@ impl ScriptRuntime {
         })
     }
 
-    fn refresh_view(&self, world: &World, dt: f32) {
-        let data = world.world_data();
-        let mut entities = Vec::with_capacity(data.entities.len());
-        for entity in &data.entities {
-            let mut row = EntityView {
-                id: entity.id.raw(),
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                ..Default::default()
-            };
-            for component in &entity.components {
-                match component.component.0 {
-                    0x0101 => {
-                        for (field, value) in &component.fields {
-                            match (field.as_str(), value) {
-                                ("position", Value::Vec3(value)) => {
-                                    row.position =
-                                        [value[0] as f32, value[1] as f32, value[2] as f32];
-                                }
-                                ("rotation", Value::Quat(value)) => {
-                                    row.rotation = [
-                                        value[0] as f32,
-                                        value[1] as f32,
-                                        value[2] as f32,
-                                        value[3] as f32,
-                                    ];
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    0x0102 => {
-                        row.has_velocity = true;
-                        for (field, value) in &component.fields {
-                            if let ("linear", Value::Vec3(value)) = (field.as_str(), value) {
-                                row.velocity = [value[0] as f32, value[1] as f32, value[2] as f32];
-                            }
-                        }
-                    }
-                    0x0103 => {
-                        for (field, value) in &component.fields {
-                            if let ("value", Value::String(value)) = (field.as_str(), value) {
-                                row.name = value.clone();
-                            }
-                        }
-                    }
-                    0x0402 => {
-                        for (field, value) in &component.fields {
-                            if let ("grounded", Value::Bool(value)) = (field.as_str(), value) {
-                                row.grounded = *value;
-                            }
-                        }
-                    }
-                    id if id == AnimationLayers::ID.0 => {
-                        for (field, value) in &component.fields {
-                            if let ("layers", Value::List(_)) = (field.as_str(), value) {
-                                row.anim_layers = Some(value.clone());
-                            }
-                        }
-                    }
-                    id if id == AnimationState::ID.0 => {
-                        for (field, value) in &component.fields {
-                            if let ("parameters", Value::Map(_)) = (field.as_str(), value) {
-                                row.anim_parameters = Some(value.clone());
-                            }
-                        }
-                    }
-                    0x0601 => {
-                        let mut ui = UiElementView {
-                            visible: true,
-                            interactable: true,
-                            ..Default::default()
-                        };
-                        for (field, value) in &component.fields {
-                            match (field.as_str(), value) {
-                                ("anchor_min", Value::Vec2(value)) => {
-                                    ui.anchor_min = [value[0] as f32, value[1] as f32];
-                                }
-                                ("anchor_max", Value::Vec2(value)) => {
-                                    ui.anchor_max = [value[0] as f32, value[1] as f32];
-                                }
-                                ("offset_min", Value::Vec2(value)) => {
-                                    ui.offset_min = [value[0] as f32, value[1] as f32];
-                                }
-                                ("offset_max", Value::Vec2(value)) => {
-                                    ui.offset_max = [value[0] as f32, value[1] as f32];
-                                }
-                                ("text", Value::String(value)) => ui.text = value.clone(),
-                                ("kind", Value::String(value)) => ui.kind = value.clone(),
-                                ("visible", Value::Bool(value)) => ui.visible = *value,
-                                ("interactable", Value::Bool(value)) => ui.interactable = *value,
-                                _ => {}
-                            }
-                        }
-                        row.ui = Some(ui);
-                    }
-                    0x0603 => {
-                        row.has_interaction = true;
-                        for (field, value) in &component.fields {
-                            if let Value::Bool(value) = value {
-                                match field.as_str() {
-                                    "clicked" => row.clicked = *value,
-                                    "hovered" => row.hovered = *value,
-                                    "pressed" => row.pressed = *value,
-                                    "focused" => row.focused = *value,
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            entities.push(row);
-        }
+    fn refresh_view(&mut self, world: &World, dt: f32) {
+        self.entity_keys.clear();
+        self.entity_keys.reserve(world.len());
+        self.entity_keys.extend(world.entity_keys());
+        // 同名实体按最小持久 ID 首占；回收运行时槽位后这个顺序仍需保持。
+        self.entity_keys.sort_unstable_by_key(|&(id, _)| id);
+
         let mut view = self.view.borrow_mut();
         view.delta = dt;
         view.time = self.time;
-        view.entities = entities;
-        view.spawn_cursor = data.next_id;
+        view.entities
+            .resize_with(self.entity_keys.len(), EntityView::default);
+        for (row, &(id, key)) in view.entities.iter_mut().zip(&self.entity_keys) {
+            row.refresh(world, id, key);
+        }
+        view.spawn_cursor = world.next_entity_id().raw();
         view.pending_spawns.clear();
         view.audio.authored_mix = world.audio_mixer();
         // 脚本帧失败或独立脚本调用方未消费时，旧请求不能漏进下一帧。

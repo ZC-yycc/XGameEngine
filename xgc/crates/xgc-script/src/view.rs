@@ -6,7 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use xgc_world::{AnimationLayers, AnimationState, Component, ComponentId, FieldPath, Value};
+use xgc_base::{EntityId, EntityKey};
+use xgc_world::{
+    AnimationLayers, AnimationState, CharacterController, Component, ComponentId, FieldPath, Name,
+    Transform, UiElement, UiInteraction, Value, Velocity, World,
+};
 
 use crate::audio_api::ScriptAudio;
 
@@ -50,6 +54,56 @@ pub struct EntityView {
     pub has_interaction: bool,
 }
 
+impl EntityView {
+    pub(crate) fn refresh(&mut self, world: &World, id: EntityId, key: EntityKey) {
+        self.id = id.raw();
+        let transform = world.get::<Transform>(key).copied().unwrap_or_default();
+        self.position = transform.position;
+        self.rotation = transform.rotation;
+
+        let velocity = world.get::<Velocity>(key);
+        self.has_velocity = velocity.is_some();
+        self.velocity = velocity.map_or([0.0; 3], |velocity| velocity.linear);
+        self.grounded = world
+            .get::<CharacterController>(key)
+            .is_some_and(|character| character.grounded);
+        if let Some(name) = world.get::<Name>(key) {
+            self.name.clone_from(&name.value);
+        } else {
+            self.name.clear();
+        }
+
+        // 动态字段路径和按名 setter 共享待结算的 Value，只投影它们实际会改的字段。
+        self.anim_layers = world
+            .get::<AnimationLayers>(key)
+            .and_then(|layers| layers.get_field("layers"));
+        self.anim_parameters = world
+            .get::<AnimationState>(key)
+            .and_then(|state| state.get_field("parameters"));
+
+        if let Some(element) = world.get::<UiElement>(key) {
+            let ui = self.ui.get_or_insert_with(UiElementView::default);
+            ui.kind.clone_from(&element.kind);
+            ui.text.clone_from(&element.text);
+            ui.anchor_min = element.anchor_min;
+            ui.anchor_max = element.anchor_max;
+            ui.offset_min = element.offset_min;
+            ui.offset_max = element.offset_max;
+            ui.visible = element.visible;
+            ui.interactable = element.interactable;
+        } else {
+            self.ui = None;
+        }
+        let interaction = world.get::<UiInteraction>(key);
+        self.has_interaction = interaction.is_some();
+        let interaction = interaction.copied().unwrap_or_default();
+        self.clicked = interaction.clicked;
+        self.hovered = interaction.hovered;
+        self.pressed = interaction.pressed;
+        self.focused = interaction.focused;
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ScriptView {
     pub delta: f32,
@@ -60,7 +114,7 @@ pub struct ScriptView {
     pub axes: BTreeMap<String, f32>,
     /// 同一播放会话内所有脚本共用音量与命令队列。
     pub audio: ScriptAudio,
-    /// 下一帧可用的实体 ID（每帧从 `WorldData::next_id` 重置）。
+    /// 下一帧可用的实体 ID（每帧从世界的 ID 分配游标重置）。
     ///
     /// 旧端 `ui_spawn` 用 `EntityId::new()` 单调分配；这里用世界计数器派生，
     /// 保证同一帧多次 spawn 与已有的待结算实体不撞号。

@@ -8,7 +8,7 @@ use std::any::Any;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use xgc_base::EntityId;
+use xgc_base::{EntityId, EntityKey};
 use xgc_reflect::{Component, ComponentId, Value};
 
 use super::{Column, EntitySnapshot, SceneEnvironment, World};
@@ -118,6 +118,20 @@ fn push_component<T: Component>(
 impl World {
     pub fn register_component<T: Component>(&mut self) {
         self.factories.insert(T::ID, ComponentFactory::new::<T>());
+    }
+
+    /// 只读遍历存活实体及其当前句柄，顺序随运行时槽位变化。
+    pub fn entity_keys(&self) -> impl Iterator<Item = (EntityId, EntityKey)> + '_ {
+        self.metas
+            .iter()
+            .enumerate()
+            .filter(|(_, meta)| meta.alive)
+            .map(|(index, meta)| (meta.id, EntityKey::new(index as u32, meta.generation)))
+    }
+
+    /// 查看分配游标，包含已预留但尚未生成实体的 ID；不预留或推进它。
+    pub fn next_entity_id(&self) -> EntityId {
+        EntityId::from_raw(self.next_id)
     }
 
     /// 把实体转成可序列化的稳定形态。
