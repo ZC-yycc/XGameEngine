@@ -106,7 +106,10 @@ jobs:
           cargo test --locked
           -p xgc-base -p xgc-reflect -p xgc-world -p xgc-store
           -p xgc-sim -p xgc-agent -p xgc-asset -p xgc-migrate
-          -p xgc-script -p xgc-cli -p xgc-editor -p xgc-player
+          -p xgc-script -p xgc-host -p xgc-cli -p xgc-editor -p xgc-player
+
+      - name: PCM buffer tests
+        run: cargo test --locked -p xgc-audio --lib
 
       - name: Render cpu-only test targets
         run: >-

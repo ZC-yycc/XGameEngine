@@ -7,7 +7,7 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use xgc_host::window::{fit_viewport, WindowInput};
-use xgc_host::{FixedStepClock, ScriptedRunner};
+use xgc_host::{FixedStepClock, ScriptedRunner, WindowAudio};
 use xgc_render::{GpuContext, MeshCache, Renderer};
 use xgc_sim::{InputMap, DEFAULT_UI_VIEWPORT};
 use xgc_world::World;
@@ -30,6 +30,7 @@ struct PlayerApp {
     meshes: Option<MeshCache>,
     input_map: Option<InputMap>,
     input: WindowInput,
+    audio: WindowAudio,
     scene: Option<String>,
     error: Option<String>,
     viewport: Option<Viewport>,
@@ -47,6 +48,7 @@ impl PlayerApp {
             meshes: None,
             input_map: None,
             input: WindowInput::default(),
+            audio: WindowAudio::default(),
             scene: scene.map(str::to_string),
             error: None,
             viewport: None,
@@ -140,8 +142,12 @@ impl PlayerApp {
             runner.apply_input(map, self.input.gameplay());
         }
         match runner.step_with_ui_input(self.input.take_ui_input()) {
-            Ok(_) => self.frames += 1,
+            Ok(_) => {
+                self.frames += 1;
+                self.audio.submit(runner.audio_samples());
+            }
             Err(err) => {
+                self.audio.clear();
                 self.failed = true;
                 self.error = Some(err);
             }

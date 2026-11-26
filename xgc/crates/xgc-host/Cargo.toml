@@ -8,10 +8,12 @@ description = "XGC 的共用脚本帧宿主"
 
 [features]
 window-input = ["dep:egui"]
+window-audio = ["dep:xgc-audio"]
 
 [dependencies]
 egui = { version = "0.30", default-features = false, optional = true }
 xgc-asset = { path = "../xgc-asset" }
+xgc-audio = { path = "../xgc-audio", optional = true }
 xgc-render = { path = "../xgc-render" }
 xgc-script = { path = "../xgc-script" }
 xgc-sim = { path = "../xgc-sim" }

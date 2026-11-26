@@ -6,9 +6,13 @@ mod audio;
 mod clock;
 #[cfg(feature = "window-input")]
 pub mod window;
+#[cfg(feature = "window-audio")]
+mod window_audio;
 
 pub use audio::AUDIO_SAMPLE_RATE;
 pub use clock::FixedStepClock;
+#[cfg(feature = "window-audio")]
+pub use window_audio::WindowAudio;
 
 use std::path::Path;
 

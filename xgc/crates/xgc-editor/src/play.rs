@@ -104,13 +104,14 @@ impl EditorState {
 
     /// 按经过的真实时间运行固定步，返回下一步前的重绘等待时间。
     pub fn advance_play(&mut self, elapsed: Duration) -> Result<Option<Duration>, String> {
-        self.advance_play_with_ui(elapsed, || None)
+        self.advance_play_with_io(elapsed, || None, |_| {})
     }
 
-    pub(crate) fn advance_play_with_ui(
+    pub(crate) fn advance_play_with_io(
         &mut self,
         elapsed: Duration,
         mut input: impl FnMut() -> Option<HostUiInput>,
+        mut audio: impl FnMut(&[f32]),
     ) -> Result<Option<Duration>, String> {
         let Some(session) = self.play.as_mut().filter(|session| !session.paused) else {
             return Ok(None);
@@ -125,6 +126,7 @@ impl EditorState {
                 self.pause();
                 return Err(err);
             }
+            audio(session.runner.audio_samples());
         }
         Ok(Some(wait))
     }
@@ -146,5 +148,55 @@ impl EditorState {
     /// 编辑世界、选择和历史一直留在编辑态，退出只丢弃播放副本。
     pub fn stop(&mut self) {
         self.play = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xgc_host::AUDIO_SAMPLE_RATE;
+    use xgc_world::Script;
+
+    #[test]
+    fn submitting_audio_delivers_each_catch_up_step_in_order() {
+        let root = std::env::temp_dir().join(format!("xgc_play_pcm_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let wave = root.join("tone.wav");
+        xgc_sim::write_wav_mono(&wave, AUDIO_SAMPLE_RATE, &[0.5; 2400]).unwrap();
+        let sample = xgc_sim::load_wav(&wave).unwrap().samples[0];
+        std::fs::write(
+            root.join("tone.lua"),
+            r#"
+            local frame = 0
+            function start(ctx) play_sound(ctx, 'tone.wav', 1, 1) end
+            function update(ctx)
+                frame = frame + 1
+                set_master_volume(ctx, frame * 0.25)
+            end
+            "#,
+        )
+        .unwrap();
+        let mut world = World::new();
+        world.spawn((Script {
+            path: "tone.lua".into(),
+        },));
+        let path = root.join("scene.json");
+        xgc_store::save_world(&path, &world.world_data()).unwrap();
+        let mut editor = EditorState::open(&path).unwrap();
+        editor.play().unwrap();
+
+        let mut blocks = Vec::new();
+        let dt = Duration::from_secs_f32(1.0 / 60.0);
+        editor
+            .advance_play_with_io(dt * 3, || None, |pcm| blocks.push((pcm.len(), pcm[0])))
+            .unwrap();
+        assert_eq!(blocks, [0.25, 0.5, 0.75].map(|gain| (800, sample * gain)));
+        editor.pause();
+        assert_eq!(
+            editor.advance_play_with_io(dt, || None, |_| panic!("暂停不能输出新块")),
+            Ok(None)
+        );
+        editor.stop();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -14,6 +14,7 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use xgc_host::window::{fit_viewport, WindowInput};
+use xgc_host::WindowAudio;
 use xgc_sim::DEFAULT_UI_VIEWPORT;
 
 use xgc_render::{GpuContext, MeshCache, Renderer};
@@ -68,6 +69,7 @@ pub struct EditorApp {
     prefab_position: [f32; 3],
     last_play_update: Option<Instant>,
     play_input: WindowInput,
+    play_audio: WindowAudio,
     assets: Option<Vec<AssetEntry>>,
     selected_asset: Option<String>,
 }
@@ -92,6 +94,7 @@ impl EditorApp {
             prefab_position: [0.0; 3],
             last_play_update: None,
             play_input: WindowInput::default(),
+            play_audio: WindowAudio::default(),
             assets: None,
             selected_asset: None,
         }
@@ -352,14 +355,18 @@ impl EditorApp {
     }
     fn tick_play(&mut self, ctx: &egui::Context, now: Instant, viewport: Option<egui::Rect>) {
         if !self.state.is_playing() {
-            self.last_play_update = None;
+            if self.last_play_update.take().is_some() {
+                self.play_audio.clear();
+            }
             self.play_input = WindowInput::default();
             return;
         }
         self.play_input.sample(ctx, viewport);
         self.state.apply_input(self.play_input.gameplay());
         if self.state.is_paused() {
-            self.last_play_update = None;
+            if self.last_play_update.take().is_some() {
+                self.play_audio.clear();
+            }
             self.play_input.discard_ui_edges();
             return;
         }
@@ -369,15 +376,17 @@ impl EditorApp {
             .map_or(Duration::ZERO, |previous| {
                 now.saturating_duration_since(previous)
             });
-        match self
-            .state
-            .advance_play_with_ui(elapsed, || Some(self.play_input.take_ui_input()))
-        {
+        match self.state.advance_play_with_io(
+            elapsed,
+            || Some(self.play_input.take_ui_input()),
+            |samples| self.play_audio.submit(samples),
+        ) {
             Ok(Some(wait)) => ctx.request_repaint_after(wait.saturating_sub(now.elapsed())),
             Ok(None) => self.last_play_update = None,
             Err(err) => {
                 self.last_play_update = None;
                 self.play_input.discard_ui_edges();
+                self.play_audio.clear();
                 self.status = Some(err);
                 ctx.request_repaint();
             }

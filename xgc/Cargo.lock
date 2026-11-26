@@ -3351,6 +3351,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "xgc-asset",
+ "xgc-audio",
  "xgc-render",
  "xgc-script",
  "xgc-sim",

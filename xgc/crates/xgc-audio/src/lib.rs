@@ -1,11 +1,16 @@
 //! 音频设备输出：把 PCM 样本推到默认输出设备；无设备时返回可诊断错误。
 
-use std::collections::VecDeque;
+mod pcm;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, SizedSample};
 use xgc_sim::AudioClip;
+
+pub use pcm::PcmStream;
+use pcm::{access_queue, PcmQueue, SharedQueue};
 
 pub fn output_devices() -> Result<Vec<String>, String> {
     let host = cpal::default_host();
@@ -47,49 +52,62 @@ pub fn play_clip(clip: &AudioClip) -> Result<Player, String> {
     if clip.samples.is_empty() {
         return Err("音频为空".to_string());
     }
-    let host = cpal::default_host();
-    let device = host
+    let (device, config) = default_output()?;
+    let output_rate = config.sample_rate();
+    let samples = resample(clip, output_rate);
+    let duration = Duration::from_secs_f64(samples.len() as f64 / f64::from(output_rate.max(1)));
+    let queue = Arc::new(Mutex::new(PcmQueue::from_device_samples(
+        samples,
+        output_rate,
+    )));
+    let stream = start_output(&device, config, &queue)?;
+    Ok(Player { stream, duration })
+}
+
+fn default_output() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
+    let device = cpal::default_host()
         .default_output_device()
         .ok_or_else(|| "没有默认输出设备".to_string())?;
     let supported = device
         .default_output_config()
         .map_err(|err| format!("读取输出配置失败：{err}"))?;
-    let sample_format = supported.sample_format();
-    let config: cpal::StreamConfig = supported.into();
-    let channels = usize::from(config.channels);
-    let output_rate = config.sample_rate;
-    let samples = resample(clip, output_rate);
-    let duration = Duration::from_secs_f64(samples.len() as f64 / f64::from(output_rate.max(1)));
-    let buffer = Arc::new(Mutex::new(VecDeque::from(samples)));
-    let err_fn = move |err| {
-        eprintln!("音频输出错误：{err}");
-    };
-    let stream = match sample_format {
-        cpal::SampleFormat::F32 => {
-            let queue = Arc::clone(&buffer);
-            device.build_output_stream(
-                config,
-                move |data: &mut [f32], _| fill_f32(data, channels, &queue),
-                err_fn,
-                None,
-            )
-        }
-        cpal::SampleFormat::I16 => {
-            let queue = Arc::clone(&buffer);
-            device.build_output_stream(
-                config,
-                move |data: &mut [i16], _| fill_i16(data, channels, &queue),
-                err_fn,
-                None,
-            )
-        }
+    Ok((device, supported))
+}
+
+fn start_output(
+    device: &cpal::Device,
+    supported: cpal::SupportedStreamConfig,
+    queue: &SharedQueue,
+) -> Result<cpal::Stream, String> {
+    let format = supported.sample_format();
+    let config = supported.config();
+    let queue = Arc::clone(queue);
+    let stream = match format {
+        cpal::SampleFormat::F32 => build_output::<f32>(device, config, queue),
+        cpal::SampleFormat::I16 => build_output::<i16>(device, config, queue),
+        cpal::SampleFormat::U16 => build_output::<u16>(device, config, queue),
         other => return Err(format!("不支持的输出样本格式：{other:?}")),
-    }
-    .map_err(|err| format!("创建输出流失败：{err}"))?;
+    }?;
     stream
         .play()
         .map_err(|err| format!("启动输出流失败：{err}"))?;
-    Ok(Player { stream, duration })
+    Ok(stream)
+}
+
+fn build_output<T: SizedSample + FromSample<f32>>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    queue: SharedQueue,
+) -> Result<cpal::Stream, String> {
+    let channels = usize::from(config.channels);
+    device
+        .build_output_stream(
+            config,
+            move |data: &mut [T], _| access_queue(&queue).fill(data, channels),
+            |err| eprintln!("音频输出错误：{err}"),
+            None,
+        )
+        .map_err(|err| format!("创建输出流失败：{err}"))
 }
 
 fn resample(clip: &AudioClip, output_rate: u32) -> Vec<f32> {
@@ -113,25 +131,4 @@ fn resample(clip: &AudioClip, output_rate: u32) -> Vec<f32> {
         output.push(mono[left.min(mono.len() - 1)] * (1.0 - t) + mono[right] * t);
     }
     output
-}
-
-fn fill_f32(data: &mut [f32], channels: usize, queue: &Arc<Mutex<VecDeque<f32>>>) {
-    let mut queue = queue.lock().unwrap_or_else(|error| error.into_inner());
-    for frame in data.chunks_mut(channels.max(1)) {
-        let sample = queue.pop_front().unwrap_or(0.0);
-        for value in frame {
-            *value = sample;
-        }
-    }
-}
-
-fn fill_i16(data: &mut [i16], channels: usize, queue: &Arc<Mutex<VecDeque<f32>>>) {
-    let mut queue = queue.lock().unwrap_or_else(|error| error.into_inner());
-    for frame in data.chunks_mut(channels.max(1)) {
-        let sample = queue.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0);
-        let value = (sample * f32::from(i16::MAX)) as i16;
-        for slot in frame {
-            *slot = value;
-        }
-    }
 }
