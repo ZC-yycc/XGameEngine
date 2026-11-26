@@ -1,75 +1,23 @@
 //! MCP stdio 适配器：把 `xgc.agent/1` 的方法原样暴露成 MCP 工具。
 //!
-//! 这一层**不实现任何世界逻辑**：工具名 = 方法名把 `.` 换成 `_`，参数与返回值
-//! 直接透传 `Agent::dispatch`。这样做是为了守住「协议是源、MCP 是适配器」的
-//! 约定（`Docs/引擎框架设计-AI操作面.md` §协议），也避免两份能力表漂移。
-//!
+//! 从 Agent 方法目录生成工具列表，参数和返回值直接交给该目录对应的方法。
 //! 帧格式与 MCP 的 stdio 传输一致：一行一条 JSON-RPC 消息，空行忽略。
 
 use serde_json::{json, Value as Json};
 
-use crate::{Agent, PROTOCOL};
-
-/// MCP 工具名 → `xgc.agent/1` 方法名：只替换第一个下划线。
-fn method_for(tool: &str) -> Option<&'static str> {
-    const METHODS: [&str; 17] = [
-        "engine.describe",
-        "engine.diagnostics",
-        "engine.history",
-        "engine.replay",
-        "world.query",
-        "world.get",
-        "world.digest",
-        "world.stats",
-        "world.validate",
-        "world.load",
-        "world.save",
-        "world.snapshot",
-        "world.restore",
-        "edit.plan",
-        "edit.apply",
-        "edit.revert",
-        "edit.undo",
-    ];
-    METHODS
-        .into_iter()
-        .find(|method| method.replace('.', "_") == tool)
-}
-
-const TOOL_DESCRIPTION: &str = "xgc.agent/1 方法的 MCP 包装；`arguments` 原样作为该方法参数。";
+use crate::{methods, Agent, PROTOCOL};
 
 fn tools() -> Json {
-    let tools: Vec<Json> = [
-        "engine.describe",
-        "engine.diagnostics",
-        "engine.history",
-        "engine.replay",
-        "world.query",
-        "world.get",
-        "world.digest",
-        "world.stats",
-        "world.validate",
-        "world.load",
-        "world.save",
-        "world.snapshot",
-        "world.restore",
-        "edit.plan",
-        "edit.apply",
-        "edit.revert",
-        "edit.undo",
-    ]
-    .into_iter()
-    .map(|method| {
-        json!({
-            "name": method.replace('.', "_"),
-            "description": format!("{TOOL_DESCRIPTION}（{method}）"),
-            "inputSchema": {
-                "type": "object",
-                "additionalProperties": true
-            }
+    let tools: Vec<_> = methods::METHODS
+        .iter()
+        .map(|method| {
+            json!({
+                "name": method.tool_name(),
+                "description": method.description,
+                "inputSchema": (method.input_schema)(),
+            })
         })
-    })
-    .collect();
+        .collect();
     json!({ "tools": tools })
 }
 
@@ -135,12 +83,12 @@ impl Mcp {
             .get("name")
             .and_then(Json::as_str)
             .ok_or((-32602, "缺少工具名".to_string()))?;
-        let method = method_for(name).ok_or((-32602, format!("未知工具：{name}")))?;
+        let method = methods::by_tool_name(name).ok_or((-32602, format!("未知工具：{name}")))?;
         let arguments = params
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let text = match self.agent.call(method, &arguments) {
+        let text = match method.call(&mut self.agent, &arguments) {
             // 工具执行失败按 MCP 约定放进 isError，而不是 JSON-RPC 错误。
             Ok(value) => {
                 let text = serde_json::to_string_pretty(&value)

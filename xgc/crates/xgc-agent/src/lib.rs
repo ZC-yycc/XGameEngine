@@ -1,8 +1,7 @@
 //! XGC Agent 协议最小集：一行一条 JSON-RPC 2.0，stdin/stdout。
 //!
-//! 方法：`engine.describe` / `world.query` / `world.load` / `world.save` /
-//! `edit.plan` / `edit.apply` / `edit.revert`。会话持有内存世界；命令与数据都
-//! 走已经可序列化的 `Command` / `WorldData`，不另造一套。
+//! `engine.describe` 从方法目录公开协议能力。会话持有内存世界，编辑与快照
+//! 共用 `Command` / `WorldData` 的序列化格式。
 
 #![deny(unsafe_code)]
 
@@ -15,14 +14,16 @@ use xgc_store::{load_world, save_world};
 use xgc_world::{Applied, Command, Journal, Plan, World, WorldSnapshot};
 
 mod mcp;
+mod methods;
 mod query;
+mod schemas;
 mod snapshot;
 
 #[cfg(test)]
 mod container_tests;
 
 pub use mcp::Mcp;
-use query::{axis_index, FieldRef, Filter, FilterOp};
+use query::{axis_index, FieldRef, Filter, FilterOp, QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT};
 
 pub const PROTOCOL: &str = "xgc.agent/1";
 
@@ -62,9 +63,10 @@ impl Agent {
         &self.world
     }
 
-    /// 直接调用一个协议方法。MCP 适配器用它复用同一套实现。
-    pub(crate) fn call(&mut self, method: &str, params: &Json) -> Result<Json, String> {
-        self.dispatch(method, params)
+    fn call(&mut self, method: &str, params: &Json) -> Result<Json, String> {
+        methods::by_name(method)
+            .ok_or_else(|| format!("未知方法：{method}"))?
+            .call(self, params)
     }
 
     /// 处理一行；通知（无 id）返回 None。
@@ -87,35 +89,12 @@ impl Agent {
             .to_string();
         let params = request.get("params").cloned().unwrap_or(Json::Null);
 
-        let result = self.dispatch(&method, &params);
+        let result = self.call(&method, &params);
         let id = id?;
         Some(match result {
             Ok(value) => json!({"jsonrpc": "2.0", "id": id, "result": value}).to_string(),
             Err(message) => error_response(id, message),
         })
-    }
-
-    fn dispatch(&mut self, method: &str, params: &Json) -> Result<Json, String> {
-        match method {
-            "engine.describe" => self.describe(),
-            "engine.diagnostics" => self.diagnostics(),
-            "engine.history" => self.history(),
-            "engine.replay" => self.replay(),
-            "world.query" => self.query(params),
-            "world.get" => self.get(params),
-            "world.digest" => self.digest(),
-            "world.stats" => self.stats(),
-            "world.validate" => self.validate(),
-            "world.load" => self.load(params),
-            "world.save" => self.save(params),
-            "world.snapshot" => self.snapshot(),
-            "world.restore" => self.restore(params),
-            "edit.plan" => self.plan(params),
-            "edit.apply" => self.apply(params),
-            "edit.revert" => self.revert(params),
-            "edit.undo" => self.undo(),
-            other => Err(format!("未知方法：{other}")),
-        }
     }
 
     fn describe(&self) -> Result<Json, String> {
@@ -131,25 +110,8 @@ impl Agent {
                 "spawn",
                 "despawn"
             ],
-            "methods": [
-                "engine.describe",
-                "engine.diagnostics",
-                "engine.history",
-                "engine.replay",
-                "world.query",
-                "world.get",
-                "world.digest",
-                "world.stats",
-                "world.validate",
-                "world.load",
-                "world.save",
-                "world.snapshot",
-                "world.restore",
-                "edit.plan",
-                "edit.apply",
-                "edit.revert",
-                "edit.undo"
-            ],
+            "methods": methods::METHODS.iter().map(|method| method.name).collect::<Vec<_>>(),
+            "method_details": methods::METHODS.iter().map(methods::Method::describe).collect::<Vec<_>>(),
             "world": {
                 "revision": self.world.revision(),
                 "entities": self.world.len(),
@@ -160,7 +122,7 @@ impl Agent {
                 "migration": ["all_old_component_types"],
                 "agent": ["query", "plan", "apply", "revert", "save_load"],
             },
-            "limits": {"query_default": 100, "query_max": 1000},
+            "limits": {"query_default": QUERY_DEFAULT_LIMIT, "query_max": QUERY_MAX_LIMIT},
         }))
     }
 
@@ -169,8 +131,8 @@ impl Agent {
         let limit = params
             .get("limit")
             .and_then(Json::as_u64)
-            .unwrap_or(100)
-            .min(1000) as usize;
+            .unwrap_or(QUERY_DEFAULT_LIMIT)
+            .min(QUERY_MAX_LIMIT) as usize;
         let component = match params.get("component").and_then(Json::as_str) {
             Some(name) => Some(
                 self.registry

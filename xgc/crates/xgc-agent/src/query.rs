@@ -4,6 +4,9 @@ use serde_json::Value as Json;
 use xgc_reflect::{ComponentId, FieldPath};
 use xgc_world::{EntityData, Value};
 
+pub(super) const QUERY_DEFAULT_LIMIT: u64 = 100;
+pub(super) const QUERY_MAX_LIMIT: u64 = 1000;
+
 #[derive(Clone, Debug)]
 pub(super) struct FieldRef {
     pub(super) component: ComponentId,
