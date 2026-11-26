@@ -10,6 +10,8 @@ use xgc_store::{load_project, load_world};
 
 #[path = "project_migrate/render.rs"]
 mod render;
+#[path = "project_migrate/scripts.rs"]
+mod scripts;
 #[path = "project_migrate/search_paths.rs"]
 mod search_paths;
 

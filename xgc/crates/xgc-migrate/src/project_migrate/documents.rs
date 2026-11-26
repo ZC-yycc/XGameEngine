@@ -38,13 +38,15 @@ impl WorldPlan {
         };
         let text = fs::read_to_string(root.join(source)).map_err(|err| error(err.to_string()))?;
         let scene: OldScene = ron::from_str(&text).map_err(|err| error(err.to_string()))?;
-        let (world, _) = crate::migrate_parsed(&scene).map_err(|err| error(err.to_string()))?;
+        let (world, report) =
+            crate::migrate_parsed(&scene).map_err(|err| error(err.to_string()))?;
         let ids = world
             .entities
             .iter()
             .map(|entity| (entity.id, entity.id))
             .collect();
-        let unmatched = unmatched_fields(source, &scene);
+        let mut unmatched = unmatched_fields(source, &scene);
+        unmatched.extend(report.unmatched(source));
         let references = scene
             .entities
             .into_iter()

@@ -257,7 +257,13 @@ fn migrate_dir_writes_each_scene_and_reports_failures() {
     let input = dir.join("Scenes");
     let output = dir.join("out");
     std::fs::create_dir_all(&input).unwrap();
-    std::fs::write(input.join("good.ron"), SCENE).unwrap();
+    let scripted = SCENE.replacen(
+        "entries: [],",
+        r#"entries: [(data: Lua(path: "first.lua")), (data: Lua(path: "last.lua"))],"#,
+        1,
+    );
+    let source = input.join("good.ron");
+    std::fs::write(&source, scripted).unwrap();
     std::fs::write(
         input.join("bad.ron"),
         SCENE.replace("format_version: 2", "format_version: 1"),
@@ -267,7 +273,11 @@ fn migrate_dir_writes_each_scene_and_reports_failures() {
     let batch = xgc_migrate::migrate_dir(&input, &output).unwrap();
     assert_eq!(batch.scenes, 1);
     assert_eq!(batch.entities, 2);
+    assert_eq!(batch.mapped_components, 1);
     assert_eq!(batch.failures.len(), 1);
+    assert_eq!(batch.unmatched.len(), 1);
+    assert!(batch.unmatched[0].contains(source.to_string_lossy().as_ref()));
+    assert!(batch.unmatched[0].contains("实体 1 保留 \"last.lua\"，未挂载 [\"first.lua\"]"));
     let migrated = xgc_store::load_world(&output.join("good.json")).unwrap();
     assert_eq!(migrated.entities.len(), 2);
 

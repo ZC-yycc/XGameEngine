@@ -44,6 +44,9 @@ pub fn migrate_dir(input: &Path, output: &Path) -> Result<MigrationBatch, Migrat
                 batch.with_old_components += report.with_old_components;
                 batch.mapped_components += report.mapped_components;
                 batch.missing_parents += report.missing_parents;
+                batch
+                    .unmatched
+                    .extend(report.unmatched(&path.to_string_lossy()));
             }
             Err(err) => batch.failures.push(format!("{}：{err}", path.display())),
         }

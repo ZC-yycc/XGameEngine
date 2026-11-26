@@ -192,14 +192,13 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
         }
     }
 
-    let mut report = MigrationReport {
-        entities: scene.entities.len(),
-        ..MigrationReport::default()
-    };
+    let mut report = MigrationReport::default();
     let mut entities = Vec::with_capacity(scene.entities.len());
+    let mut script_paths = Vec::new();
     let mut max_id = 0;
 
     for old in &scene.entities {
+        report.entities += 1;
         max_id = max_id.max(old.id.0);
         if !old.components.entries.is_empty() {
             report.with_old_components += 1;
@@ -208,7 +207,7 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
         let mut mesh_model = None;
         let mut material = None;
         let mut camera = None;
-        let mut script_path = None;
+        script_paths.clear();
         let mut audio = None;
         let mut physics = None;
         let mut animator = None;
@@ -252,10 +251,7 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                     camera = Some(old_camera);
                     report.mapped_components += 1;
                 }
-                OldComponentData::Lua { path } => {
-                    script_path = Some(path.clone());
-                    report.mapped_components += 1;
-                }
+                OldComponentData::Lua { path } => script_paths.push(path.as_str()),
                 OldComponentData::Audio(old_audio) => {
                     audio = Some(AudioSource {
                         clip: old_audio.clip.clone(),
@@ -475,10 +471,10 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
         if let Some(lod) = lod {
             components.push(lod);
         }
-        if let Some(path) = script_path {
+        if let Some(path) = report.map_lua(old.id.0, &script_paths) {
             components.push(ComponentData {
                 component: Script::ID,
-                fields: vec![("path".to_string(), Value::String(path))],
+                fields: vec![("path".to_string(), Value::String(path.to_string()))],
             });
         }
         if let Some(audio) = audio {

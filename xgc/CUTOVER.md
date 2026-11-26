@@ -36,6 +36,8 @@
 
 从 `xgc/` 先运行 `cargo run -q -p xgc-cli --offline -- migrate ../projects/XGame ../tmp/xgc-project --dry-run` 查看计划，去掉 `--dry-run` 后迁移至新目录。两种模式共用预检与报告，包含实际生成的组件数、项目资产引用数、实体 ID 引用数，以及按源文件和旧实体 ID 定位的待移植项。项目清单的内容根和有序 `search_paths` 共用复制清单，兜底资产及其伴生文件保留源项目的相对目录。GUID 冲突在预检时报出两条路径。XGame 实测生成 230 个组件、26 处资产引用和 16 处实体引用，组件场景中的 Spinner 与 Bobber 仍需移植运行逻辑。
 
+旧实体挂载多个 Lua 脚本时，迁移当前只挂载最后一个。单场景、批量和整项目的报告都用 `[migration.lua.attachment]` 点名旧文件、实体、保留路径和遗漏路径。整项目迁移会照原字节复制脚本，方便处理遗漏的挂载。[迁移回归](crates/xgc-migrate/tests/project_migrate/scripts.rs)
+
 项目先为场景分配 ID，再为预制体分配 ID。两组都按源文件路径和文件内旧 ID 排序。父节点和场景中的预制体成员来源 ID 随之重写，关卡清单保留原顺序。
 
 预制体输出为 `.prefab.json`，伴生 `.meta` 随文件改名并保留 GUID。场景成员沿用 GUID，未登记 GUID 的成员使用目标项目相对路径。编辑器用所选成员的来源加载资产并 Revert。已有成员保留实体 ID，根节点保留放置变换与外部父节点，子节点恢复资产局部变换并重算世界变换。

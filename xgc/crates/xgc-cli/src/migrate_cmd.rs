@@ -45,6 +45,9 @@ pub(crate) fn migrate(input: Option<&str>, output: Option<&str>, flag: Option<&s
                     batch.failures.len(),
                     output
                 );
+                for note in &batch.unmatched {
+                    println!("  migration: {note}");
+                }
                 if batch.failures.is_empty() {
                     ExitCode::SUCCESS
                 } else {
@@ -71,29 +74,25 @@ pub(crate) fn migrate(input: Option<&str>, output: Option<&str>, flag: Option<&s
             return ExitCode::from(1);
         }
     };
-    if dry_run {
-        println!(
-            "migrate: {} 个实体，{} 个带旧组件，{} 个组件已映射，{} 个父节点缺失 -> {}（dry-run，未写盘）",
-            report.entities,
-            report.with_old_components,
-            report.mapped_components,
-            report.missing_parents,
-            output
-        );
-        return ExitCode::SUCCESS;
-    }
-    if let Err(err) = save_world(Path::new(output), &data) {
-        eprintln!("写入迁移结果失败：{err}");
-        return ExitCode::from(1);
-    }
+    let suffix = if dry_run {
+        "（dry-run，未写盘）"
+    } else {
+        if let Err(err) = save_world(Path::new(output), &data) {
+            eprintln!("写入迁移结果失败：{err}");
+            return ExitCode::from(1);
+        }
+        ""
+    };
     println!(
-        "migrate: {} 个实体，{} 个带旧组件，{} 个组件已映射，{} 个父节点缺失 -> {}",
+        "migrate: {} 个实体，{} 个带旧组件，{} 个组件已映射，{} 个父节点缺失 -> {output}{suffix}",
         report.entities,
         report.with_old_components,
         report.mapped_components,
         report.missing_parents,
-        output
     );
+    for note in report.unmatched(input) {
+        println!("  migration: {note}");
+    }
     ExitCode::SUCCESS
 }
 
