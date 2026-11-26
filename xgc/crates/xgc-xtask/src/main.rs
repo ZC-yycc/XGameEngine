@@ -122,7 +122,8 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> 
 fn deps(root: &Path) -> Result<(), String> {
     let allowed: &[(&str, &[&str])] = &[
         ("xgc-base", &[]),
-        ("xgc-reflect", &["xgc-base"]),
+        ("xgc-reflect", &["xgc-base", "xgc-reflect-derive"]),
+        ("xgc-reflect-derive", &[]),
         ("xgc-world", &["xgc-base", "xgc-reflect"]),
         ("xgc-store", &["xgc-base", "xgc-world"]),
         ("xgc-sim", &["xgc-base", "xgc-world"]),

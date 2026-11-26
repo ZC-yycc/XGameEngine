@@ -1,8 +1,8 @@
 //! 组件注册表与 schema 生成。
 //!
 //! 一个组件 = 一个稳定 `ComponentId` + 一组字段描述 + 默认值。注册表是
-//! schema、Inspector、Agent 工具、序列化的**唯一描述源**；这里先做 M0 需要的
-//! 最小版本，derive 宏与命令 / 查询生成在 M1 接上。
+//! schema、Inspector、Agent 工具、序列化的唯一描述源。派生宏从 Rust 字段声明
+//! 生成本文的接口，读取、写入和容器值沿用同一套反射模型。
 
 #![deny(unsafe_code)]
 
@@ -15,10 +15,13 @@ use xgc_base::{Diagnostic, Severity, Subject};
 
 mod path;
 mod schema;
+mod typed;
 mod value;
 
 pub use path::FieldPath;
 pub use schema::FieldSchema;
+pub use typed::ReflectValue;
+pub use xgc_reflect_derive::{Component, ReflectValue};
 
 /// 组件类型的稳定编号。落盘、协议、archetype 匹配都用它，不用类型名。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -30,9 +33,7 @@ impl fmt::Display for ComponentId {
     }
 }
 
-/// 纯数据组件。
-///
-/// `fields()` 目前手写；M1 用 derive 生成，并加编译期穷举测试防漂移。
+/// 纯数据组件。具名结构体可通过同名派生宏生成描述与字段访问。
 pub trait Component: Any + Clone + Send + Sync {
     const ID: ComponentId;
     const NAME: &'static str;

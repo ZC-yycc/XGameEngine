@@ -154,56 +154,26 @@ impl Component for Velocity {
 }
 
 /// 内建：名字（验证 String 组件的 clone / drop 与 schema）。
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Component)]
+#[component(
+    id = 0x0103,
+    name = "core.name",
+    doc = "显示名；不是身份，身份只认 EntityId"
+)]
 pub struct Name {
+    #[field(doc = "显示名")]
     pub value: String,
 }
 
-impl Component for Name {
-    const ID: ComponentId = ComponentId(0x0103);
-    const NAME: &'static str = "core.name";
-
-    fn default_value() -> Self {
-        Self::default()
-    }
-
-    fn doc() -> &'static str {
-        "显示名；不是身份，身份只认 EntityId"
-    }
-
-    fn fields() -> Vec<FieldDescriptor> {
-        vec![
-            FieldDescriptor::new("value", FieldType::String, Value::String(String::new()))
-                .doc("显示名"),
-        ]
-    }
-
-    fn get_field(&self, field: &str) -> Option<Value> {
-        match field {
-            "value" => Some(Value::String(self.value.clone())),
-            _ => None,
-        }
-    }
-
-    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
-        match field {
-            "value" => {
-                self.value = value
-                    .as_string()
-                    .ok_or_else(|| {
-                        format!("core.name.value 期望 string，得到 {}", value.type_name())
-                    })?
-                    .to_string();
-                Ok(())
-            }
-            _ => Err(format!("core.name 没有字段 {field}")),
-        }
-    }
-}
-
 /// 内建：父节点引用；层级系统据此算 `GlobalTransform`。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[component(
+    id = 0x0104,
+    name = "core.parent",
+    doc = "父实体；只认 EntityId，不认运行时句柄"
+)]
 pub struct Parent {
+    #[field(doc = "父实体 ID")]
     pub entity: EntityId,
 }
 
@@ -211,46 +181,6 @@ impl Default for Parent {
     fn default() -> Self {
         Self {
             entity: EntityId::from_raw(0),
-        }
-    }
-}
-
-impl Component for Parent {
-    const ID: ComponentId = ComponentId(0x0104);
-    const NAME: &'static str = "core.parent";
-
-    fn default_value() -> Self {
-        Self::default()
-    }
-
-    fn doc() -> &'static str {
-        "父实体；只认 EntityId，不认运行时句柄"
-    }
-
-    fn fields() -> Vec<FieldDescriptor> {
-        vec![FieldDescriptor::new("entity", FieldType::Entity, Value::Entity(0)).doc("父实体 ID")]
-    }
-
-    fn get_field(&self, field: &str) -> Option<Value> {
-        match field {
-            "entity" => Some(Value::Entity(self.entity.raw())),
-            _ => None,
-        }
-    }
-
-    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
-        match field {
-            "entity" => {
-                let Value::Entity(id) = value else {
-                    return Err(format!(
-                        "core.parent.entity 期望 entity，得到 {}",
-                        value.type_name()
-                    ));
-                };
-                self.entity = EntityId::from_raw(*id);
-                Ok(())
-            }
-            _ => Err(format!("core.parent 没有字段 {field}")),
         }
     }
 }

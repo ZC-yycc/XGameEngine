@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/xgc-base",
     "crates/xgc-reflect",
+    "crates/xgc-reflect-derive",
     "crates/xgc-world",
     "crates/xgc-store",
     "crates/xgc-sim",

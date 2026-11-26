@@ -50,6 +50,8 @@ Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑�
 
 生成式 Inspector 从反射 schema 读取数值边界、单位、步长、分组和只读标记。动画事件时间以秒显示，方向键步长为 0.05 秒，普通拖动按每逻辑像素 0.05 秒换算并由 egui 智能取整，输入最低为 0。基础和分层动画的转场运行状态显示在 `Blend State`，可查看但不能通过面板逐项写入。CLI 的 `schema` 和 Agent 的 `engine.describe` 输出可选的 `step`、`group`、`read_only`。只读标记描述界面行为，现有命令、运行时及存储仍使用原字段和校验。
 
+`render.lod` 从 Rust 声明派生字段描述、读取和写入。`#[derive(Component)]` 从组件的 `Default` 取得缺省值，`#[derive(ReflectValue)]` 描述列表里的具名结构体，列表和字符串键映射复用元素的投影。字段声明旁可设置单位、边界、步长、分组、只读与说明，组件字段可用 `skip_hash` 标记不计入回放哈希的作者数据。生成代码继续使用已有的 `FieldDescriptor`、`Value` 和 `Component` 接口，LOD 的字段名、顺序和缺省值保持原契约。
+
 世界、预制体与事务日志使用 JSON 包络 v5，cooked 世界使用 XGCB v6。仓库内原生世界样例已一次性重写，旧版本文件会被拒绝。已有迁移输出可用上文的 `xgc migrate` 从旧 RON 重新生成到新目录。旧原生文件如有手工编辑，先保留原件，重新迁移旧 RON 只包含旧工程原有内容。
 
 ## 可复现命令

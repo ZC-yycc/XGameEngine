@@ -30,13 +30,14 @@ cargo run -q --release -p xgc-cli --offline -- bench
 |---|---|
 | `crates/xgc-base/src/lib.rs` | `EntityId` / `EntityKey` / `Tick` / `Diagnostic` |
 | `crates/xgc-base/src/diagnostics.rs` | 诊断码常量 + `engine.diagnostics` 目录 |
-| `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、递归 `Value`（结构体、列表、字符串键映射、带载荷枚举）；`path.rs` 解析字段路径，JSON 引号键和当前枚举分支只寻址已有值；`schema.rs` 导出和校验类型结构；`state_fields()` 只用于 `state_hash` |
+| `crates/xgc-reflect/src/lib.rs` | `Component`、`Registry`、`SchemaDoc`、递归 `Value`（结构体、列表、字符串键映射、带载荷枚举）；`path.rs` 解析字段路径，JSON 引号键和当前枚举分支只寻址已有值；`schema.rs` 导出和校验类型结构；`typed.rs` 把 Rust 标量和容器投影到同一 `Value`；`state_fields()` 只用于 `state_hash` |
+| `crates/xgc-reflect-derive/src/lib.rs` | 从具名字段生成 `Component` 和 `ReflectValue`，按声明顺序取字段，缺省值以 `Default` 为准。读取、校验与写入生成后仍走同一套反射模型 |
 | `crates/xgc-world/src/lib.rs` | `World` / `Bundle` / `Archetype` / `Column` / 单组件查询 / `reserve_entity_ids` |
 | `crates/xgc-world/src/query.rs` | 双 / 三组件不可变 / 可变 / archetype 分片并行查询 |
 | `crates/xgc-world/src/parts.rs` | 跨系统并行写视图 `WriteSet` / `extract_writes` / `restore_writes` |
 | `crates/xgc-world/src/components.rs` | 内建 `Transform` / `Velocity` / `Name` / `Parent` / `GlobalTransform` |
 | `crates/xgc-world/src/render_components.rs` | 渲染侧组件：`render.mesh` / `render.material` / `render.camera` |
-| `crates/xgc-world/src/lod_components.rs` | `render.lod`：按原顺序存放 `LodLevel`，模型与最大距离为反射字段，零或负值表示无限距离 |
+| `crates/xgc-world/src/lod_components.rs` | `render.lod`：按原顺序存放 `LodLevel`，字段描述与读写由派生生成，零或负值表示无限距离 |
 | `crates/xgc-world/src/environment.rs` | 场景级环境 `SceneEnvironment` / `SceneLight` / `LightKind`：光源与环境光（不是实体，随 `WorldData.environment` 存取，缺省不落盘） |
 | `crates/xgc-world/src/registry.rs` | `builtin_registry`：CLI / Agent / xtask 唯一组件清单 |
 | `crates/xgc-world/src/skeleton_components.rs` | 骨架组件：`animation.skeleton` / `animation.bone` / `animation.pose` |
