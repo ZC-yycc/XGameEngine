@@ -47,7 +47,7 @@ fn ui_image_nine_slice_draws_nine_cells() {
     let mut world = World::new();
     world.spawn((
         UiElement {
-            image_path: path.to_string_lossy().into_owned(),
+            image_path: path.file_name().unwrap().to_str().unwrap().to_owned(),
             image_mode: "nine_slice".to_string(),
             image_slice: 1.0,
             background: [0.0; 4],
@@ -58,7 +58,7 @@ fn ui_image_nine_slice_draws_nine_cells() {
             ..UiLayout::default()
         },
     ));
-    let mut renderer = Renderer::new(MeshCache::new("."));
+    let mut renderer = Renderer::new(MeshCache::new(path.parent().unwrap()));
     assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 9);
     let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
     assert_eq!(&pixels[..4], &[255, 0, 0, 255]);

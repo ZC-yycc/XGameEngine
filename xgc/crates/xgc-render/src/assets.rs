@@ -1,4 +1,4 @@
-//! 网格和材质缓存。项目文件统一经资产目录解析，只有模型读取使用搜索根兜底。
+//! 渲染资产读取入口。项目文件统一经资产目录解析，只有模型读取使用搜索根兜底。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,6 +7,7 @@ use xgc_asset::{AssetCatalog, AssetPaths, ReadPathError, SearchPaths};
 use xgc_world::{Animator, RootMotion, RootMotionLibrary, World};
 
 use super::glb::{load_model, MeshError};
+use super::image::ImageData;
 use super::material::MaterialAsset;
 use super::mesh::{builtin_mesh, Mesh};
 
@@ -91,6 +92,12 @@ impl MeshCache {
                 .insert(reference.to_string(), asset.sanitized());
         }
         Ok(self.materials.get(reference))
+    }
+
+    /// HUD 与体检、打包共用项目直达规则，解析和解码的结果由 Renderer 缓存。
+    pub(crate) fn load_ui_image(&self, reference: &str) -> Option<ImageData> {
+        let path = self.assets.resolve_direct(reference).ok()?;
+        ImageData::load(&path).ok()
     }
 
     /// 按世界里的 `Animator.root_motion` 配置收集各模型的基础剪辑平移轨道。

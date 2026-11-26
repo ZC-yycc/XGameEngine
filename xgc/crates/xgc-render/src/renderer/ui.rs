@@ -6,7 +6,6 @@
 
 use crate::font::{FontAtlas, GlyphQuad};
 use crate::gpu::{GpuContext, GpuError};
-use crate::image::ImageData;
 use crate::mesh::Mesh;
 use crate::pipeline::{RoundedMeshDraw, TrianglePipeline};
 use crate::text_draw::{TextDraw, TextPipeline};
@@ -228,7 +227,7 @@ impl Renderer {
         _scissor: [u32; 4],
     ) -> Result<usize, GpuError> {
         if !self.images.contains_key(&item.image_path) {
-            let loaded = ImageData::load(std::path::Path::new(&item.image_path)).ok();
+            let loaded = self.meshes.load_ui_image(&item.image_path);
             self.images.insert(item.image_path.clone(), loaded);
         }
         if !self.ui_textures.contains_key(&item.image_path) {

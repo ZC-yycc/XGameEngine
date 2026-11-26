@@ -334,7 +334,7 @@ fn ppm_image_loads_and_renders_cells() {
     let mut world = World::new();
     world.spawn((
         UiElement {
-            image_path: path.to_string_lossy().into_owned(),
+            image_path: path.file_name().unwrap().to_str().unwrap().to_owned(),
             background: [0.0; 4],
             ..UiElement::default()
         },
@@ -343,7 +343,7 @@ fn ppm_image_loads_and_renders_cells() {
             ..UiLayout::default()
         },
     ));
-    let mut renderer = Renderer::new(MeshCache::new("."));
+    let mut renderer = Renderer::new(MeshCache::new(path.parent().unwrap()));
     assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 1);
     let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
     assert!(pixels.chunks_exact(4).any(|pixel| pixel[0] > 0));
@@ -392,7 +392,7 @@ fn png_image_loads_and_renders_texture() {
         let mut world = World::new();
         world.spawn((
             UiElement {
-                image_path: path.to_string_lossy().into_owned(),
+                image_path: path.file_name().unwrap().to_str().unwrap().to_owned(),
                 background: [0.0; 4],
                 ..UiElement::default()
             },
@@ -401,7 +401,7 @@ fn png_image_loads_and_renders_texture() {
                 ..UiLayout::default()
             },
         ));
-        let mut renderer = Renderer::new(MeshCache::new("."));
+        let mut renderer = Renderer::new(MeshCache::new(path.parent().unwrap()));
         assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 1);
     }
     std::fs::remove_file(&path).unwrap();
@@ -441,7 +441,7 @@ fn ui_image_preserve_keeps_aspect() {
     let mut world = World::new();
     world.spawn((
         UiElement {
-            image_path: path.to_string_lossy().into_owned(),
+            image_path: path.file_name().unwrap().to_str().unwrap().to_owned(),
             image_mode: "preserve".to_string(),
             background: [0.0; 4],
             ..UiElement::default()
@@ -451,7 +451,7 @@ fn ui_image_preserve_keeps_aspect() {
             ..UiLayout::default()
         },
     ));
-    let mut renderer = Renderer::new(MeshCache::new("."));
+    let mut renderer = Renderer::new(MeshCache::new(path.parent().unwrap()));
     assert_eq!(renderer.render_ui(&context, &texture, &world).unwrap(), 1);
     let pixels = context.read_texture_rgba8(&texture, 16, 16).unwrap();
     assert_eq!(&pixels[..4], &[0, 0, 0, 0], "上下应留黑边");
