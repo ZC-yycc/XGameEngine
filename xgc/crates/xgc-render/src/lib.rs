@@ -66,7 +66,7 @@ pub use diff::{
 };
 pub use draw::{build_draw_list, AnimatorSample, DrawItem, DrawList};
 pub use exposure::{sanitize_exposure, EXPOSURE_DEFAULT, MAX_EXPOSURE, MIN_EXPOSURE};
-pub use font::{FontAtlas, GlyphQuad};
+pub use font::{load_system_cjk_font, FontAtlas, GlyphQuad};
 pub use fxaa::FxaaSettings;
 pub use glb::{
     load_glb, load_glb_skeleton, load_gltf, load_model, AdditiveLayer, AnimationClip,

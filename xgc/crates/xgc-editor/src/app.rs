@@ -1,4 +1,4 @@
-//! 最小 eframe 编辑器：顶部工具栏、左侧层级、中央 Inspector。
+//! eframe 编辑器窗口：工具栏、层级、Inspector 和 3D 视口。
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -49,6 +49,7 @@ struct GizmoDrag {
 pub struct EditorApp {
     state: EditorState,
     status: Option<String>,
+    fonts_installed: bool,
     viewport: Option<Viewport>,
     yaw: f32,
     pitch: f32,
@@ -71,6 +72,7 @@ impl EditorApp {
         Self {
             state,
             status: None,
+            fonts_installed: false,
             viewport: None,
             yaw: 0.0,
             pitch: 0.0,
@@ -164,10 +166,10 @@ impl EditorApp {
 
     fn paint_gizmo(
         &mut self,
-        _ui: &mut egui::Ui,
         painter: &egui::Painter,
         image_rect: egui::Rect,
         response: &egui::Response,
+        render_size: [u32; 2],
     ) {
         let Some(entity) = self.state.selected() else {
             return;
@@ -176,7 +178,8 @@ impl EditorApp {
             return;
         };
         let size = [image_rect.width(), image_rect.height()];
-        let Some(mvp) = camera_view_projection(self.state.world(), 800, 450) else {
+        let Some(mvp) = camera_view_projection(self.state.world(), render_size[0], render_size[1])
+        else {
             return;
         };
         let Some(origin) =
@@ -350,6 +353,10 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if !self.fonts_installed {
+            install_fonts(ctx);
+            self.fonts_installed = true;
+        }
         if self.state.is_playing() {
             self.state.apply_input(&input_state(ctx));
         }
@@ -383,35 +390,55 @@ impl eframe::App for EditorApp {
             self.render_viewport();
         }
         egui::TopBottomPanel::bottom("xgc-status").show(ctx, |ui| {
-            let mut text = self.status.clone().unwrap_or_else(|| {
-                self.state
-                    .path()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "未打开场景".to_string())
+            let mode = if self.state.is_paused() {
+                "PAUSED"
+            } else if self.state.is_playing() {
+                "PLAY"
+            } else {
+                "EDIT"
+            };
+            ui.horizontal(|ui| {
+                ui.strong(mode);
+                if self.state.is_dirty() {
+                    ui.label("未保存");
+                }
+                ui.separator();
+                let path = self.state.path().map(|path| path.to_string_lossy());
+                let text = self
+                    .status
+                    .as_deref()
+                    .or(path.as_deref())
+                    .unwrap_or("未打开场景");
+                ui.add(egui::Label::new(text).truncate())
+                    .on_hover_text(text);
             });
-            if self.state.is_dirty() {
-                text.push_str("  *");
-            }
-            ui.label(text);
         });
         egui::SidePanel::left("xgc-hierarchy")
             .default_width(260.0)
             .show(ctx, |ui| self.hierarchy(ui));
         egui::SidePanel::right("xgc-inspector")
-            .default_width(380.0)
-            .show(ctx, |ui| self.inspector(ui));
+            .default_width(360.0)
+            .width_range(280.0..=460.0)
+            .show(ctx, |ui| {
+                ui.set_min_width(ui.available_width());
+                self.inspector(ui);
+            });
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(viewport) = &self.viewport else {
                 ui.label("没有 wgpu 渲染后端，视口不可用");
                 return;
             };
             let rect = ui.available_rect_before_wrap();
-            let image_rect = egui::Rect::from_min_size(
-                rect.min,
-                egui::vec2(viewport.size[0] as f32, viewport.size[1] as f32),
-            );
-            let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-            let painter = ui.painter_at(rect);
+            let render_size = viewport.size;
+            let size = egui::vec2(render_size[0] as f32, render_size[1] as f32);
+            let scale = (rect.width() / size.x).min(rect.height() / size.y);
+            if scale <= 0.0 {
+                return;
+            }
+            // 画面和 Gizmo 共用内接矩形，窄窗口不裁掉右边的场景。
+            let image_rect = egui::Rect::from_center_size(rect.center(), size * scale);
+            let response = ui.allocate_rect(image_rect, egui::Sense::click_and_drag());
+            let painter = ui.painter_at(image_rect);
             painter.image(
                 viewport.id,
                 image_rect,
@@ -422,7 +449,7 @@ impl eframe::App for EditorApp {
                 self.gizmo = None;
                 return;
             }
-            self.paint_gizmo(ui, &painter, image_rect, &response);
+            self.paint_gizmo(&painter, image_rect, &response, render_size);
             if response.hovered() {
                 let scroll = ui.input(|input| input.raw_scroll_delta.y);
                 if scroll != 0.0 {
@@ -437,6 +464,26 @@ impl eframe::App for EditorApp {
             }
         });
     }
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    let Some(bytes) = xgc_render::load_system_cjk_font() else {
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    let name = "system-cjk";
+    fonts
+        .font_data
+        .insert(name.to_owned(), egui::FontData::from_owned(bytes).into());
+    // 保留西文和图标的内置字体，只有缺字时才访问系统字体。
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push(name.to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 fn input_state(ctx: &egui::Context) -> InputState {

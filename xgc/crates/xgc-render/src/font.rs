@@ -7,9 +7,8 @@
 //! 图集是 RGBA8：rgb 恒为 255、alpha 存覆盖率，绘制时乘文本颜色即可。
 
 use std::collections::HashMap;
-use std::path::Path;
 
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+use ab_glyph::{Font, FontRef, FontVec, PxScale, ScaleFont};
 
 /// 中文字体候选，与旧端 `xgame-ui::text` 同一套（找不到时不崩，只是不画字）。
 const FONT_CANDIDATES: &[&str] = &[
@@ -18,7 +17,10 @@ const FONT_CANDIDATES: &[&str] = &[
     r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\simsun.ttc",
     "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ];
 
@@ -333,21 +335,22 @@ impl FontAtlas {
     }
 }
 
+/// 供原生编辑器安装中文回退字体，跳过只有西文字形的候选。
+pub fn load_system_cjk_font() -> Option<Vec<u8>> {
+    font_candidates(FONT_CANDIDATES).find(|bytes| {
+        FontRef::try_from_slice_and_index(bytes, 0).is_ok_and(|font| font.glyph_id('中').0 != 0)
+    })
+}
+
+fn font_candidates<'a>(candidates: &'a [&str]) -> impl Iterator<Item = Vec<u8>> + 'a {
+    candidates
+        .iter()
+        .filter_map(|path| std::fs::read(path).ok())
+}
+
 fn load_face(candidates: &[&str]) -> Option<FontVec> {
-    for path in candidates {
-        let path = Path::new(path);
-        if !path.is_file() {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        // `.ttc` 是字体集合，取第 0 面（微软雅黑 / 苹方都是集合）。
-        if let Ok(font) = FontVec::try_from_vec_and_index(bytes, 0) {
-            return Some(font);
-        }
-    }
-    None
+    // `.ttc` 是字体集合，取第 0 面（微软雅黑 / 苹方都是集合）。
+    font_candidates(candidates).find_map(|bytes| FontVec::try_from_vec_and_index(bytes, 0).ok())
 }
 
 /// 贪心换行：CJK 按字断行，ASCII 尽量在空格处断（不追求旧端的全部细节）。

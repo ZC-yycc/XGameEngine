@@ -9,29 +9,14 @@ mod tests;
 
 impl EditorApp {
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             self.play_controls(ui);
             ui.separator();
             ui.add_enabled_ui(!self.state.is_playing(), |ui| self.edit_controls(ui));
-            let mode = if self.state.is_paused() {
-                "PAUSED"
-            } else if self.state.is_playing() {
-                "PLAY"
-            } else {
-                "EDIT"
-            };
-            ui.label(format!(
-                "{mode}  dirty={}  {}",
-                self.state.is_dirty(),
-                self.state
-                    .path()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "<未命名>".to_string())
-            ));
         });
-        if let Some(status) = &self.status {
-            ui.label(status);
-        }
+        ui.add_enabled_ui(!self.state.is_playing(), |ui| {
+            ui.horizontal_wrapped(|ui| self.prefab_controls(ui));
+        });
     }
 
     fn play_controls(&mut self, ui: &mut egui::Ui) {
@@ -122,7 +107,14 @@ impl EditorApp {
                 Err(err) => err,
             });
         }
-        ui.add(egui::TextEdit::singleline(&mut self.prefab_path).hint_text("预制体路径"));
+    }
+
+    fn prefab_controls(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::TextEdit::singleline(&mut self.prefab_path)
+                .desired_width(240.0)
+                .hint_text("预制体路径"),
+        );
         for value in &mut self.prefab_position {
             ui.add(egui::DragValue::new(value).speed(0.1));
         }
