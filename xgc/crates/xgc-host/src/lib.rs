@@ -3,6 +3,8 @@
 #![deny(unsafe_code)]
 
 mod clock;
+#[cfg(feature = "window-input")]
+pub mod window;
 
 pub use clock::FixedStepClock;
 
@@ -11,7 +13,7 @@ use std::path::Path;
 use xgc_render::MeshCache;
 use xgc_script::ScriptRuntime;
 use xgc_sim::{apply_root_motion, InputMap, InputState, ParticleSystem, Simulation};
-use xgc_world::{ParticleQuad, RootMotionLibrary, World};
+use xgc_world::{ParticleQuad, RootMotionLibrary, UiInput, World};
 
 pub struct ScriptedRunner {
     simulation: Simulation,
@@ -66,6 +68,17 @@ impl ScriptedRunner {
         apply_root_motion(self.simulation.world_mut(), dt, &self.root_motion);
         self.particles.update(dt, self.simulation.world());
         Ok(frame)
+    }
+
+    /// 窗口边沿只在当前固定步可见，手动步进也不会再次消费旧边沿。
+    pub fn step_with_ui_input(&mut self, input: UiInput) -> Result<u64, String> {
+        self.simulation.set_ui_input(input);
+        let result = self.step();
+        self.simulation.set_ui_input(UiInput {
+            cursor: input.cursor,
+            ..UiInput::default()
+        });
+        result
     }
 
     pub fn world(&self) -> &World {

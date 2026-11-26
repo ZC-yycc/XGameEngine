@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
+use xgc_host::window::{fit_viewport, WindowInput};
 use xgc_host::{FixedStepClock, ScriptedRunner};
 use xgc_render::{GpuContext, MeshCache, Renderer};
+use xgc_sim::{InputMap, DEFAULT_UI_VIEWPORT};
 use xgc_world::World;
-
-use crate::input::PlayerInput;
 
 struct Viewport {
     texture: wgpu::Texture,
@@ -26,7 +26,8 @@ struct PlayerApp {
     last_update: Option<Instant>,
     failed: bool,
     meshes: Option<MeshCache>,
-    input: PlayerInput,
+    input_map: Option<InputMap>,
+    input: WindowInput,
     scene: Option<String>,
     error: Option<String>,
     viewport: Option<Viewport>,
@@ -42,7 +43,8 @@ impl PlayerApp {
             last_update: None,
             failed: false,
             meshes: None,
-            input: PlayerInput::default(),
+            input_map: None,
+            input: WindowInput::default(),
             scene: scene.map(str::to_string),
             error: None,
             viewport: None,
@@ -61,12 +63,12 @@ impl PlayerApp {
                 let path = project
                     .input_path()
                     .map_err(|err| format!("读取项目输入映射失败：{err}"))?;
-                (project.root(), PlayerInput::load(path.as_deref())?)
+                (
+                    project.root(),
+                    path.as_deref().map(InputMap::load).transpose()?,
+                )
             }
-            None => (
-                path,
-                PlayerInput::load(Some(&path.join("input.ron"))).unwrap_or_default(),
-            ),
+            None => (path, InputMap::load(&path.join("input.ron")).ok()),
         };
         let mut world = World::new();
         world
@@ -74,7 +76,7 @@ impl PlayerApp {
             .map_err(|err| format!("恢复世界失败：{err}"))?;
         let (runner, meshes) = ScriptedRunner::with_assets(world, Some(root));
         self.dir = root.to_path_buf();
-        self.input = input;
+        self.input_map = input;
         self.meshes = Some(meshes);
         self.clock = Some(FixedStepClock::new(runner.fixed_dt()));
         self.runner = Some(runner);
@@ -85,7 +87,7 @@ impl PlayerApp {
         let Some(meshes) = self.meshes.take() else {
             return;
         };
-        let size = [1280, 720];
+        let size = DEFAULT_UI_VIEWPORT;
         let context = GpuContext::from_arc(
             render_state.device.clone(),
             render_state.queue.clone(),
@@ -124,7 +126,10 @@ impl PlayerApp {
         let Some(runner) = self.runner.as_mut().filter(|_| !self.failed) else {
             return;
         };
-        match runner.step() {
+        if let Some(map) = &self.input_map {
+            runner.apply_input(map, self.input.gameplay());
+        }
+        match runner.step_with_ui_input(self.input.take_ui_input()) {
             Ok(_) => self.frames += 1,
             Err(err) => {
                 self.failed = true;
@@ -164,9 +169,6 @@ impl PlayerApp {
 
 impl eframe::App for PlayerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if let Some(runner) = &mut self.runner {
-            self.input.apply(ctx, runner);
-        }
         let now = Instant::now();
         let elapsed = self
             .last_update
@@ -174,10 +176,8 @@ impl eframe::App for PlayerApp {
             .map_or(Duration::ZERO, |previous| {
                 now.saturating_duration_since(previous)
             });
-        let wait = self.tick(elapsed);
         if let Some(render_state) = frame.wgpu_render_state() {
             self.ensure_viewport(render_state);
-            self.render_viewport();
         }
         egui::TopBottomPanel::top("xgc-player-status").show(ctx, |ui| {
             let entities = self
@@ -199,13 +199,25 @@ impl eframe::App for PlayerApp {
                 ui.colored_label(egui::Color32::RED, error);
             }
         });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(viewport) = &self.viewport {
-                ui.image((viewport.id, ui.available_size()));
-            } else {
-                ui.label("等待 GPU 视口…");
-            }
-        });
+        let wait = egui::CentralPanel::default()
+            .show(ctx, |ui| {
+                let image_rect = fit_viewport(ui.available_rect_before_wrap(), DEFAULT_UI_VIEWPORT)
+                    .filter(|_| self.viewport.is_some());
+                self.input.sample(ctx, image_rect);
+                let was_running = !self.failed;
+                let wait = self.tick(elapsed);
+                self.render_viewport();
+                if was_running && self.failed {
+                    ctx.request_repaint();
+                }
+                if let (Some(viewport), Some(rect)) = (&self.viewport, image_rect) {
+                    ui.put(rect, egui::Image::new((viewport.id, rect.size())));
+                } else if self.viewport.is_none() {
+                    ui.label("等待 GPU 视口…");
+                }
+                wait
+            })
+            .inner;
         if let Some(wait) = wait {
             ctx.request_repaint_after(wait.saturating_sub(now.elapsed()));
         }
@@ -300,7 +312,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                |ctx| app.input.apply(ctx, app.runner.as_mut().unwrap()),
+                |ctx| app.input.sample(ctx, None),
             );
             let step = Duration::from_secs_f32(app.runner.as_ref().unwrap().fixed_dt());
             let short_redraw = Duration::from_millis(2);

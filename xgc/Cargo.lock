@@ -3349,6 +3349,7 @@ dependencies = [
 name = "xgc-host"
 version = "0.1.0"
 dependencies = [
+ "egui",
  "xgc-asset",
  "xgc-render",
  "xgc-script",

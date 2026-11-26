@@ -8,6 +8,8 @@ use xgc_world::{Component, Parent, UiElement, UiInput, UiInteraction, UiLayout, 
 
 use super::{System, SystemAccess};
 
+pub const DEFAULT_UI_VIEWPORT: [u32; 2] = [1280, 720];
+
 #[derive(Clone, Copy, Debug)]
 pub struct UiLayoutSystem {
     pub viewport: [f32; 2],
@@ -16,7 +18,7 @@ pub struct UiLayoutSystem {
 impl Default for UiLayoutSystem {
     fn default() -> Self {
         Self {
-            viewport: [1280.0, 720.0],
+            viewport: DEFAULT_UI_VIEWPORT.map(|length| length as f32),
         }
     }
 }

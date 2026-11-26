@@ -6,7 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 description = "XGC 的共用脚本帧宿主"
 
+[features]
+window-input = ["dep:egui"]
+
 [dependencies]
+egui = { version = "0.30", default-features = false, optional = true }
 xgc-asset = { path = "../xgc-asset" }
 xgc-render = { path = "../xgc-render" }
 xgc-script = { path = "../xgc-script" }

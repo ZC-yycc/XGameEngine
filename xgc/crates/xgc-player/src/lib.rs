@@ -6,7 +6,6 @@ use xgc_host::ScriptedRunner;
 use xgc_store::{load_world, ProjectSession};
 use xgc_world::{World, WorldData};
 
-mod input;
 pub mod window;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

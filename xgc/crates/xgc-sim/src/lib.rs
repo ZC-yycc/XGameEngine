@@ -64,7 +64,9 @@ pub use systems::{
     AnimatorSystem, CharacterJumpSystem, GravitySystem, GroundCollisionSystem, HierarchySystem,
     PhysicsSystem, VelocitySystem,
 };
-pub use ui::{hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem, UiNav};
+pub use ui::{
+    hit_test, UiFocusSystem, UiInteractionSystem, UiLayoutSystem, UiNav, DEFAULT_UI_VIEWPORT,
+};
 pub use xgc_world::{StateDef, StateMachine, TransitionCondition, TransitionDef};
 
 pub struct Simulation {

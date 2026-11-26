@@ -30,7 +30,7 @@ fn toolbar_controls_drive_the_play_clock() {
             },
             |ctx| {
                 egui::TopBottomPanel::top("xgc-toolbar").show(ctx, |ui| app.toolbar(ui));
-                app.tick_play(ctx, now);
+                app.tick_play(ctx, now, None);
             },
         )
     };

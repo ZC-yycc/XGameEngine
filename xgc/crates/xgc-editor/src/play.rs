@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use xgc_host::{FixedStepClock, ScriptedRunner};
 use xgc_sim::{FrameRecord, InputMap, InputState};
-use xgc_world::World;
+use xgc_world::{UiInput, World};
 
 use crate::{EditorState, PlaySession};
 
@@ -97,12 +97,24 @@ impl EditorState {
 
     /// 按经过的真实时间运行固定步，返回下一步前的重绘等待时间。
     pub fn advance_play(&mut self, elapsed: Duration) -> Result<Option<Duration>, String> {
+        self.advance_play_with_ui(elapsed, || None)
+    }
+
+    pub(crate) fn advance_play_with_ui(
+        &mut self,
+        elapsed: Duration,
+        mut input: impl FnMut() -> Option<UiInput>,
+    ) -> Result<Option<Duration>, String> {
         let Some(session) = self.play.as_mut().filter(|session| !session.paused) else {
             return Ok(None);
         };
         let (steps, wait) = session.clock.advance(elapsed);
         for _ in 0..steps {
-            if let Err(err) = session.runner.step() {
+            let result = match input() {
+                Some(input) => session.runner.step_with_ui_input(input),
+                None => session.runner.step(),
+            };
+            if let Err(err) = result {
                 self.pause();
                 return Err(err);
             }

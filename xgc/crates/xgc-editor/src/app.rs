@@ -7,10 +7,14 @@ mod assets_panel;
 mod inspector;
 mod toolbar;
 
+#[cfg(test)]
+mod hud_tests;
+
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
-use xgc_sim::{InputState, KeyCode, MouseButton};
+use xgc_host::window::{fit_viewport, WindowInput};
+use xgc_sim::DEFAULT_UI_VIEWPORT;
 
 use xgc_render::{GpuContext, MeshCache, Renderer};
 
@@ -63,6 +67,7 @@ pub struct EditorApp {
     prefab_path: String,
     prefab_position: [f32; 3],
     last_play_update: Option<Instant>,
+    play_input: WindowInput,
     assets: Option<Vec<AssetEntry>>,
     selected_asset: Option<String>,
 }
@@ -86,6 +91,7 @@ impl EditorApp {
             prefab_path: String::new(),
             prefab_position: [0.0; 3],
             last_play_update: None,
+            play_input: WindowInput::default(),
             assets: None,
             selected_asset: None,
         }
@@ -102,7 +108,11 @@ impl EditorApp {
     }
 
     fn ensure_viewport(&mut self, render_state: &RenderState) {
-        let size = [800, 450];
+        let size = if self.state.is_playing() {
+            DEFAULT_UI_VIEWPORT
+        } else {
+            [800, 450]
+        };
         if self
             .viewport
             .as_ref()
@@ -110,15 +120,21 @@ impl EditorApp {
         {
             return;
         }
-        if let Some(old) = self.viewport.take() {
-            render_state.renderer.write().free_texture(&old.id);
-        }
-        let context = GpuContext::from_arc(
-            render_state.device.clone(),
-            render_state.queue.clone(),
-            render_state.adapter.get_info(),
-            xgc_render::preferred_sample_count(&render_state.adapter),
-        );
+        let (renderer, context) = match self.viewport.take() {
+            Some(old) => {
+                render_state.renderer.write().free_texture(&old.id);
+                (old.renderer, old.context)
+            }
+            None => (
+                Renderer::new(self.viewport_meshes()),
+                GpuContext::from_arc(
+                    render_state.device.clone(),
+                    render_state.queue.clone(),
+                    render_state.adapter.get_info(),
+                    xgc_render::preferred_sample_count(&render_state.adapter),
+                ),
+            ),
+        };
         let texture = context.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("xgc-editor-viewport"),
             size: wgpu::Extent3d {
@@ -143,7 +159,7 @@ impl EditorApp {
             size,
             texture,
             id,
-            renderer: Renderer::new(self.viewport_meshes()),
+            renderer,
             context,
         });
     }
@@ -154,12 +170,19 @@ impl EditorApp {
             return;
         };
         viewport.renderer.set_particles(particles);
-        if let Err(err) = viewport.renderer.render_selected(
-            &viewport.context,
-            &viewport.texture,
-            self.state.world(),
-            self.state.selected(),
-        ) {
+        let result = if self.state.is_playing() {
+            viewport
+                .renderer
+                .render(&viewport.context, &viewport.texture, self.state.world())
+        } else {
+            viewport.renderer.render_selected(
+                &viewport.context,
+                &viewport.texture,
+                self.state.world(),
+                self.state.selected(),
+            )
+        };
+        if let Err(err) = result {
             self.status = Some(format!("视口渲染失败：{err}"));
         }
     }
@@ -333,19 +356,36 @@ impl EditorApp {
             }
         });
     }
-    fn tick_play(&mut self, ctx: &egui::Context, now: Instant) {
+    fn tick_play(&mut self, ctx: &egui::Context, now: Instant, viewport: Option<egui::Rect>) {
+        if !self.state.is_playing() {
+            self.last_play_update = None;
+            self.play_input = WindowInput::default();
+            return;
+        }
+        self.play_input.sample(ctx, viewport);
+        self.state.apply_input(self.play_input.gameplay());
+        if self.state.is_paused() {
+            self.last_play_update = None;
+            self.play_input.discard_ui_edges();
+            return;
+        }
         let elapsed = self
             .last_play_update
             .replace(now)
             .map_or(Duration::ZERO, |previous| {
                 now.saturating_duration_since(previous)
             });
-        match self.state.advance_play(elapsed) {
+        match self
+            .state
+            .advance_play_with_ui(elapsed, || Some(self.play_input.take_ui_input()))
+        {
             Ok(Some(wait)) => ctx.request_repaint_after(wait.saturating_sub(now.elapsed())),
             Ok(None) => self.last_play_update = None,
             Err(err) => {
                 self.last_play_update = None;
+                self.play_input.discard_ui_edges();
                 self.status = Some(err);
+                ctx.request_repaint();
             }
         }
     }
@@ -356,9 +396,6 @@ impl eframe::App for EditorApp {
         if !self.fonts_installed {
             install_fonts(ctx);
             self.fonts_installed = true;
-        }
-        if self.state.is_playing() {
-            self.state.apply_input(&input_state(ctx));
         }
         let (undo, redo) = ctx.input(|input| {
             let command = input.modifiers.command;
@@ -384,10 +421,8 @@ impl eframe::App for EditorApp {
             });
         }
         egui::TopBottomPanel::top("xgc-toolbar").show(ctx, |ui| self.toolbar(ui));
-        self.tick_play(ctx, Instant::now());
         if let Some(render_state) = frame.wgpu_render_state() {
             self.ensure_viewport(render_state);
-            self.render_viewport();
         }
         egui::TopBottomPanel::bottom("xgc-status").show(ctx, |ui| {
             let mode = if self.state.is_paused() {
@@ -424,19 +459,20 @@ impl eframe::App for EditorApp {
                 self.inspector(ui);
             });
         egui::CentralPanel::default().show(ctx, |ui| {
+            let image_rect = self
+                .viewport
+                .as_ref()
+                .and_then(|viewport| fit_viewport(ui.available_rect_before_wrap(), viewport.size));
+            self.tick_play(ctx, Instant::now(), image_rect);
+            self.render_viewport();
             let Some(viewport) = &self.viewport else {
                 ui.label("没有 wgpu 渲染后端，视口不可用");
                 return;
             };
-            let rect = ui.available_rect_before_wrap();
-            let render_size = viewport.size;
-            let size = egui::vec2(render_size[0] as f32, render_size[1] as f32);
-            let scale = (rect.width() / size.x).min(rect.height() / size.y);
-            if scale <= 0.0 {
+            let Some(image_rect) = image_rect else {
                 return;
-            }
-            // 画面和 Gizmo 共用内接矩形，窄窗口不裁掉右边的场景。
-            let image_rect = egui::Rect::from_center_size(rect.center(), size * scale);
+            };
+            let render_size = viewport.size;
             let response = ui.allocate_rect(image_rect, egui::Sense::click_and_drag());
             let painter = ui.painter_at(image_rect);
             painter.image(
@@ -486,42 +522,6 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-fn input_state(ctx: &egui::Context) -> InputState {
-    let mut state = InputState::default();
-    ctx.input(|input| {
-        let mut key = |code: egui::Key, mapped: KeyCode| {
-            if input.key_down(code) {
-                state.keys.insert(mapped);
-            }
-        };
-        key(egui::Key::Space, KeyCode::Space);
-        key(egui::Key::W, KeyCode::KeyW);
-        key(egui::Key::A, KeyCode::KeyA);
-        key(egui::Key::S, KeyCode::KeyS);
-        key(egui::Key::D, KeyCode::KeyD);
-        key(egui::Key::E, KeyCode::KeyE);
-        key(egui::Key::Q, KeyCode::KeyQ);
-        key(egui::Key::R, KeyCode::KeyR);
-        key(egui::Key::P, KeyCode::KeyP);
-        key(egui::Key::ArrowUp, KeyCode::ArrowUp);
-        key(egui::Key::ArrowDown, KeyCode::ArrowDown);
-        key(egui::Key::ArrowLeft, KeyCode::ArrowLeft);
-        key(egui::Key::ArrowRight, KeyCode::ArrowRight);
-        if input.modifiers.shift {
-            state.keys.insert(KeyCode::ShiftLeft);
-        }
-        if input.pointer.primary_down() {
-            state.mouse.insert(MouseButton::Left);
-        }
-        if input.pointer.secondary_down() {
-            state.mouse.insert(MouseButton::Right);
-        }
-        if input.pointer.middle_down() {
-            state.mouse.insert(MouseButton::Middle);
-        }
-    });
-    state
-}
 pub fn run(path: Option<PathBuf>) -> eframe::Result {
     let state = match path {
         Some(path) => match EditorState::open(&path) {
