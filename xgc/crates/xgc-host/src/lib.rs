@@ -2,6 +2,10 @@
 
 #![deny(unsafe_code)]
 
+mod clock;
+
+pub use clock::FixedStepClock;
+
 use std::path::Path;
 
 use xgc_render::MeshCache;

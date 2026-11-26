@@ -435,12 +435,13 @@ fn inspector_container_controls_are_disabled_in_play() {
     let world = std::mem::take(&mut state.world);
     let before = world.world_data();
     // 测试组件只注册在夹具世界里，直接用该世界构造播放副本。
+    let runner = xgc_host::ScriptedRunner::with_assets(world, None).0;
     state.play = Some(crate::PlaySession {
         selected: state.selected,
-        runner: xgc_host::ScriptedRunner::with_assets(world, None).0,
+        clock: xgc_host::FixedStepClock::new(runner.fixed_dt()),
+        runner,
         input: None,
         paused: false,
-        elapsed: std::time::Duration::ZERO,
     });
 
     inspector.drag_right("4.55");

@@ -14,10 +14,9 @@ pub use assets_ops::{AssetEntry, AssetKind};
 pub use transform_ops::snap;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use xgc_base::EntityId;
-use xgc_host::ScriptedRunner;
+use xgc_host::{FixedStepClock, ScriptedRunner};
 use xgc_reflect::{FieldSchema, Registry, Value};
 use xgc_sim::InputMap;
 use xgc_store::{load_world, save_world, ProjectSession};
@@ -48,7 +47,7 @@ struct PlaySession {
     runner: ScriptedRunner,
     input: Option<InputMap>,
     paused: bool,
-    elapsed: Duration,
+    clock: FixedStepClock,
 }
 
 pub struct EditorState {

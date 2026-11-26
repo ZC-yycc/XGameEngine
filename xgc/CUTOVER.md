@@ -36,7 +36,7 @@
 
 ## 用编辑器与播放器打开迁移项目
 
-从 `xgc/` 运行 `cargo run -p xgc-editor --offline -- ../tmp/xgc-project` 打开入口场景。在层级面板的 `Scenes` 中切换关卡。`Play` 用项目脚本按 60 Hz 运行编辑世界的副本，`Pause` 后可 `Step` 一次或 `Resume`，`Stop` 返回原编辑世界、选择及历史。播放器可用 `cargo run -p xgc-player --offline -- ../tmp/xgc-project/project.xgc --scene character` 打开角色场景，加入帧数可无头运行。两个宿主都支持项目目录和清单文件，视口与脚本从项目根解析 GUID。窗口输入使用清单的 `input` 路径，未登记时不绑定动作，登记的文件读取或解析失败时报告错误。
+从 `xgc/` 运行 `cargo run -p xgc-editor --offline -- ../tmp/xgc-project` 打开入口场景。在层级面板的 `Scenes` 中切换关卡。`Play` 用项目脚本按 60 Hz 运行编辑世界的副本，`Pause` 后可 `Step` 一次或 `Resume`，`Stop` 返回原编辑世界、选择及历史。播放器可用 `cargo run -p xgc-player --offline -- ../tmp/xgc-project/project.xgc --scene character` 打开角色场景，加入帧数可无头运行。两个宿主都支持项目目录和清单文件，视口与脚本从项目根解析 GUID。两个窗口按同一 60 Hz 时钟推进，每次最多补 4 步。窗口输入使用清单的 `input` 路径，未登记时不绑定动作，登记的文件读取或解析失败时报告错误。
 
 编辑器、播放器和 CLI 共用脚本步进、根运动和粒子结算。迁移后的角色场景在 `run-scripts`、`run-cooked`、原生及 cooked 播放器中各运行 120 帧，终态均为 6 个实体、哈希 `c0f893f81c462fcd`。脚本出错时宿主报告脚本名及帧号。showcase 的 151 个轨迹检查点与四张同机严格截图通过。
 

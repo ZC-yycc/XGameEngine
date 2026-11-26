@@ -3,14 +3,11 @@
 use std::path::Path;
 use std::time::Duration;
 
-use xgc_host::ScriptedRunner;
+use xgc_host::{FixedStepClock, ScriptedRunner};
 use xgc_sim::{FrameRecord, InputMap, InputState};
 use xgc_world::World;
 
 use crate::{EditorState, PlaySession};
-
-/// 窗口卡顿后只追有限步，避免补跑积压拖住编辑器。
-const MAX_CATCH_UP_STEPS: u32 = 4;
 
 impl EditorState {
     pub(crate) fn asset_root(&self) -> Option<&Path> {
@@ -50,10 +47,10 @@ impl EditorState {
         let (runner, _) = ScriptedRunner::with_assets(world, asset_root);
         self.play = Some(PlaySession {
             selected: self.selected,
+            clock: FixedStepClock::new(runner.fixed_dt()),
             runner,
             input,
             paused: false,
-            elapsed: Duration::ZERO,
         });
         Ok(())
     }
@@ -88,7 +85,7 @@ impl EditorState {
     pub fn pause(&mut self) {
         if let Some(session) = &mut self.play {
             session.paused = true;
-            session.elapsed = Duration::ZERO;
+            session.clock.reset();
         }
     }
 
@@ -103,19 +100,14 @@ impl EditorState {
         let Some(session) = self.play.as_mut().filter(|session| !session.paused) else {
             return Ok(None);
         };
-        let fixed_step = Duration::from_secs_f32(session.runner.fixed_dt());
-        session.elapsed = session
-            .elapsed
-            .saturating_add(elapsed)
-            .min(fixed_step * MAX_CATCH_UP_STEPS);
-        while session.elapsed >= fixed_step {
-            session.elapsed -= fixed_step;
+        let (steps, wait) = session.clock.advance(elapsed);
+        for _ in 0..steps {
             if let Err(err) = session.runner.step() {
                 self.pause();
                 return Err(err);
             }
         }
-        Ok(Some(fixed_step - session.elapsed))
+        Ok(Some(wait))
     }
 
     pub fn step(&mut self) -> Result<Option<FrameRecord>, String> {

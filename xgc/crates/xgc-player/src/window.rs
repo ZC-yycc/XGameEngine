@@ -1,11 +1,12 @@
 //! 图形播放器窗口：每帧仿真 + 脚本 + wgpu 视口。
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
-use xgc_host::ScriptedRunner;
+use xgc_host::{FixedStepClock, ScriptedRunner};
 use xgc_render::{GpuContext, MeshCache, Renderer};
 use xgc_world::World;
 
@@ -21,6 +22,8 @@ struct Viewport {
 struct PlayerApp {
     dir: PathBuf,
     runner: Option<ScriptedRunner>,
+    clock: Option<FixedStepClock>,
+    last_update: Option<Instant>,
     failed: bool,
     meshes: Option<MeshCache>,
     input: PlayerInput,
@@ -35,6 +38,8 @@ impl PlayerApp {
         let mut app = Self {
             dir: path.to_path_buf(),
             runner: None,
+            clock: None,
+            last_update: None,
             failed: false,
             meshes: None,
             input: PlayerInput::default(),
@@ -71,6 +76,7 @@ impl PlayerApp {
         self.dir = root.to_path_buf();
         self.input = input;
         self.meshes = Some(meshes);
+        self.clock = Some(FixedStepClock::new(runner.fixed_dt()));
         self.runner = Some(runner);
         Ok(())
     }
@@ -127,6 +133,18 @@ impl PlayerApp {
         }
     }
 
+    fn tick(&mut self, elapsed: Duration) -> Option<Duration> {
+        let clock = self.clock.as_mut().filter(|_| !self.failed)?;
+        let (steps, wait) = clock.advance(elapsed);
+        for _ in 0..steps {
+            self.step();
+            if self.failed {
+                return None;
+            }
+        }
+        Some(wait)
+    }
+
     fn render_viewport(&mut self) {
         let (Some(runner), Some(viewport)) = (&self.runner, &mut self.viewport) else {
             return;
@@ -149,7 +167,14 @@ impl eframe::App for PlayerApp {
         if let Some(runner) = &mut self.runner {
             self.input.apply(ctx, runner);
         }
-        self.step();
+        let now = Instant::now();
+        let elapsed = self
+            .last_update
+            .replace(now)
+            .map_or(Duration::ZERO, |previous| {
+                now.saturating_duration_since(previous)
+            });
+        let wait = self.tick(elapsed);
         if let Some(render_state) = frame.wgpu_render_state() {
             self.ensure_viewport(render_state);
             self.render_viewport();
@@ -181,7 +206,9 @@ impl eframe::App for PlayerApp {
                 ui.label("等待 GPU 视口…");
             }
         });
-        ctx.request_repaint();
+        if let Some(wait) = wait {
+            ctx.request_repaint_after(wait.saturating_sub(now.elapsed()));
+        }
     }
 }
 
@@ -275,7 +302,13 @@ mod tests {
                 },
                 |ctx| app.input.apply(ctx, app.runner.as_mut().unwrap()),
             );
-            app.step();
+            let step = Duration::from_secs_f32(app.runner.as_ref().unwrap().fixed_dt());
+            let short_redraw = Duration::from_millis(2);
+            app.tick(Duration::ZERO);
+            app.tick(short_redraw);
+            assert_eq!(app.frames, 0, "重绘频率不能推进固定步");
+            app.tick(step - short_redraw);
+            assert_eq!(app.frames, 1);
             let world = app.runner.as_ref().unwrap().world();
             world
                 .get::<Transform>(world.key(id).unwrap())
