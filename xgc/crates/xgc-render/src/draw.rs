@@ -87,22 +87,70 @@ pub(crate) fn build_draw_list_for_camera(world: &World, eye: [f32; 3], bias: f32
     collect_draw_list(world, Some((eye, bias)))
 }
 
+/// 模型抽取阶段排除实体的原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelExtractionFailure {
+    MissingModelComponent,
+    MissingGlobalTransform,
+    EmptyModel,
+    OutsideLodDistance,
+}
+
+/// 解释现有实体在给定相机位置和有效 LOD 偏置下的模型抽取结果。
+/// 返回的是选中的模型引用，后续资产加载和绘制由渲染器处理。
+pub fn explain_draw_model(
+    world: &World,
+    key: EntityKey,
+    eye: [f32; 3],
+    lod_bias: f32,
+) -> Result<&str, ModelExtractionFailure> {
+    match draw_candidate(world, key, Some((eye, lod_bias))) {
+        Some(DrawCandidate {
+            model: Some(model), ..
+        }) => Ok(model),
+        _ if world.get::<MeshRenderer>(key).is_none() && world.get::<LodGroup>(key).is_none() => {
+            Err(ModelExtractionFailure::MissingModelComponent)
+        }
+        None => Err(ModelExtractionFailure::MissingGlobalTransform),
+        // 关掉距离选择能取到模型，说明只有配置距离排除了它。正常抽取只查一次。
+        Some(_) if world.primary_model(key).is_some() => {
+            Err(ModelExtractionFailure::OutsideLodDistance)
+        }
+        Some(_) => Err(ModelExtractionFailure::EmptyModel),
+    }
+}
+
+struct DrawCandidate<'a> {
+    transform: &'a GlobalTransform,
+    model: Option<&'a str>,
+}
+
+fn draw_candidate(
+    world: &World,
+    key: EntityKey,
+    camera: Option<([f32; 3], f32)>,
+) -> Option<DrawCandidate<'_>> {
+    let transform = world.get::<GlobalTransform>(key)?;
+    let model = match camera {
+        Some((eye, bias)) => {
+            world.model_at_distance(key, || length(sub(transform.position, eye)), bias)
+        }
+        None => world.primary_model(key),
+    };
+    Some(DrawCandidate { transform, model })
+}
+
 fn collect_draw_list(world: &World, camera: Option<([f32; 3], f32)>) -> DrawList {
     let mut items = Vec::new();
     let mut push = |key: EntityKey| {
         let Some(entity) = world.entity(key) else {
             return;
         };
-        let Some(transform) = world.get::<GlobalTransform>(key) else {
-            return;
-        };
-        let model = match camera {
-            Some((eye, bias)) => {
-                world.model_at_distance(key, || length(sub(transform.position, eye)), bias)
-            }
-            None => world.primary_model(key),
-        };
-        let Some(model) = model else {
+        let Some(DrawCandidate {
+            transform,
+            model: Some(model),
+        }) = draw_candidate(world, key, camera)
+        else {
             return;
         };
         let material = world.get::<Material>(key);
@@ -214,7 +262,7 @@ fn build_layers(world: &World, key: EntityKey) -> Vec<LayerSample> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_draw_list_for_camera;
+    use super::{build_draw_list_for_camera, explain_draw_model, ModelExtractionFailure};
     use xgc_world::{GlobalTransform, LodGroup, LodLevel, World};
 
     #[test]
@@ -240,11 +288,18 @@ mod tests {
             },
         ));
         let selected = |world: &World, distance: f32, bias: f32| {
-            build_draw_list_for_camera(world, [distance, 0.0, 0.0], bias)
+            let eye = [distance, 0.0, 0.0];
+            let model = build_draw_list_for_camera(world, eye, bias)
                 .items
                 .into_iter()
                 .next()
-                .map(|item| item.model)
+                .map(|item| item.model);
+            let explained = explain_draw_model(world, key, eye, bias);
+            match model.as_deref() {
+                Some(model) => assert_eq!(explained, Ok(model)),
+                None => assert_eq!(explained, Err(ModelExtractionFailure::OutsideLodDistance)),
+            }
+            model
         };
         for (distance, bias, expected) in [
             (4.0, 1.0, "near"),

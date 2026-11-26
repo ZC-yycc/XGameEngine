@@ -13,6 +13,7 @@ use xgc_reflect::{ComponentId, FieldPath, Registry};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Applied, Command, Journal, Plan, World, WorldSnapshot};
 
+mod explain;
 mod mcp;
 mod methods;
 mod query;

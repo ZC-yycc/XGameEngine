@@ -3276,6 +3276,7 @@ dependencies = [
  "serde_json",
  "xgc-base",
  "xgc-reflect",
+ "xgc-render",
  "xgc-script",
  "xgc-sim",
  "xgc-store",

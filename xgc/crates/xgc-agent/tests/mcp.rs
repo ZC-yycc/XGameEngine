@@ -61,6 +61,7 @@ fn tools_list_exposes_every_agent_method() {
         "edit.revert",
         "edit.undo",
         "script.check",
+        "world.explain",
     ];
     assert_eq!(description["methods"], json!(methods));
     let details = description["method_details"].as_array().unwrap();
@@ -132,6 +133,7 @@ fn tools_advertise_their_actual_inputs() {
         ("edit_apply", "plan_id"),
         ("edit_revert", "tx_id"),
         ("script_check", "source"),
+        ("world_explain", "id"),
     ] {
         assert_eq!(schema(name)["required"], json!([field]), "{name}");
         assert!(schema(name)["properties"][field].is_object(), "{name}");
@@ -150,6 +152,16 @@ fn tools_advertise_their_actual_inputs() {
     assert_eq!(script["source"]["type"], "string");
     assert_eq!(script["name"]["type"], json!(["string", "null"]));
     assert_eq!(script["name"]["default"], "inline.lua");
+
+    let explain = schema("world_explain");
+    assert_eq!(
+        explain["properties"]["camera"]["oneOf"][1]["type"],
+        "string"
+    );
+    assert_eq!(explain["properties"]["eye"]["minItems"], 3);
+    assert_eq!(explain["properties"]["eye"]["maxItems"], 3);
+    assert_eq!(explain["properties"]["lod_bias"]["default"], 1.0);
+    assert_eq!(explain["not"]["required"], json!(["camera", "eye"]));
 
     let variants = schema("edit_plan")["properties"]["commands"]["items"]["oneOf"]
         .as_array()
@@ -222,6 +234,9 @@ fn tools_forward_commands_snapshots_and_string_ids() {
     );
     let entity = invoke(&mut mcp, "world_get", json!({"id": id}));
     assert_eq!(entity["entity"]["id"], id);
+    let explanation = invoke(&mut mcp, "world_explain", json!({"id": id, "eye": null}));
+    assert_eq!(explanation["entity"], id);
+    assert_eq!(explanation["render"]["reason"], "missing_model_component");
     let snapshot = invoke(&mut mcp, "world_snapshot", json!({}));
     let reverted = invoke(
         &mut mcp,

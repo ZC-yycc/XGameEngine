@@ -2,6 +2,7 @@
 
 use serde_json::{json, Value as Json};
 
+use crate::explain::DEFAULT_LOD_BIAS;
 use crate::query::{QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT};
 use crate::script_check::INLINE_NAME;
 
@@ -73,6 +74,35 @@ pub(super) fn query() -> Json {
 
 pub(super) fn get() -> Json {
     required_param("id", id_param("持久实体 ID。"))
+}
+
+pub(super) fn explain() -> Json {
+    let max = f64::from(f32::MAX);
+    let mut schema = object(
+        json!({
+            "id": id_param("要检查的持久实体 ID。"),
+            "camera": {
+                "description": "带 render.camera 和 core.global_transform 的相机实体 ID。缺少或为 null 时按眼点或默认相机计算。",
+                "oneOf": [unsigned(u64::MAX), decimal_id(), {"type": "null"}]
+            },
+            "eye": {
+                "type": ["array", "null"], "minItems": 3, "maxItems": 3,
+                "items": {"type": "number", "minimum": -max, "maximum": max},
+                "description": "世界空间的眼点，与 camera 互斥。都未提供时使用首台活动相机，或回退到原点。"
+            },
+            "lod_bias": {
+                "type": ["number", "null"], "minimum": -max, "maximum": max,
+                "default": DEFAULT_LOD_BIAS,
+                "description": "渲染器使用的有效 LOD 距离倍率，非正值固定使用首个可用级。"
+            }
+        }),
+        &["id"],
+    );
+    schema["not"] = json!({
+        "required": ["camera", "eye"],
+        "properties": {"camera": {"type": ["integer", "string"]}, "eye": {"type": "array"}}
+    });
+    schema
 }
 
 pub(super) fn world_path() -> Json {

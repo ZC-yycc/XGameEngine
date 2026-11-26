@@ -52,6 +52,8 @@
 
 `edit.undo` 与 `edit.revert` 成功后会记录逆向事务。回归覆盖误删、恢复、后续编辑与重放，逐项比对世界状态、哈希及 revision。[协议回归](crates/xgc-agent/tests/protocol.rs)
 
+`world.explain` 与 MCP 的 `world_explain` 共用渲染器的模型抽取判据。给定相机实体或眼点时返回选中的模型，或报告缺少组件、全局变换、模型引用以及超出有限 LOD 距离等排除原因。结果覆盖资产加载前的抽取阶段。[诊断回归](crates/xgc-agent/tests/explain.rs)
+
 `script.check` 及 MCP 的 `script_check` 接受内联 Lua 源码，`xgc script-check <脚本.lua>` 读取单文件。这两个入口和项目体检都调用运行时的 Lua 5.4 文本编译器，语法错误为 `SCRIPT.COMPILE`，包含可确定的脚本名与行号。检查不执行脚本。 [脚本检查回归](crates/xgc-agent/tests/script_check.rs)
 
 ## 结构化反射与文件版本

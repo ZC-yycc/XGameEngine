@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value as Json};
 
-use crate::{schemas, script_check, Agent};
+use crate::{explain, schemas, script_check, Agent};
 
 pub(super) struct Method {
     pub(super) name: &'static str,
@@ -43,7 +43,7 @@ impl Method {
     }
 }
 
-pub(super) static METHODS: [Method; 18] = [
+pub(super) static METHODS: [Method; 19] = [
     Method::new(
         "engine.describe",
         "查看协议版本、方法、组件与能力目录，以及当前世界的摘要。",
@@ -151,6 +151,12 @@ pub(super) static METHODS: [Method; 18] = [
         "编译内联 Lua 源码，返回语法检查结果和诊断。",
         schemas::script_check,
         |_, params| script_check::check(params),
+    ),
+    Method::new(
+        "world.explain",
+        "解释实体的渲染模型抽取，返回选中的模型引用或排除原因。",
+        schemas::explain,
+        |agent, params| explain::explain(agent.world(), params),
     ),
 ];
 

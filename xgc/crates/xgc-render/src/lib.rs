@@ -57,14 +57,16 @@ mod ui_draw;
 pub use assets::MeshCache;
 pub use bloom::{BloomSettings, BLOOM_LEVELS, BLOOM_WEIGHTS};
 pub use camera::{
-    camera_view_projection, invert, look_at_rh, model_matrix, mul, orthographic_rh,
-    perspective_rh_zo, transform_point, Mat4, IDENTITY,
+    camera_view_projection, camera_view_projection_with_eye, invert, look_at_rh, model_matrix, mul,
+    orthographic_rh, perspective_rh_zo, transform_point, Mat4, IDENTITY,
 };
 pub use diff::{
     diff_breakdown, diff_images, parity_report, BlockDiff, DiffBuckets, ImageDiff, ImageDiffReport,
     ParityReport, PARITY_EDGE_THRESHOLD,
 };
-pub use draw::{build_draw_list, AnimatorSample, DrawItem, DrawList};
+pub use draw::{
+    build_draw_list, explain_draw_model, AnimatorSample, DrawItem, DrawList, ModelExtractionFailure,
+};
 pub use exposure::{sanitize_exposure, EXPOSURE_DEFAULT, MAX_EXPOSURE, MIN_EXPOSURE};
 pub use font::{load_system_cjk_font, FontAtlas, GlyphQuad};
 pub use fxaa::FxaaSettings;
