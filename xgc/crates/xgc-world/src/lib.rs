@@ -72,7 +72,8 @@ pub use snapshot::{EntitySnapshot, WorldSnapshot};
 pub use state_machine_components::{
     AnimationState, StateDef, StateMachine, TransitionCondition, TransitionDef,
 };
-pub use ui_components::{UiElement, UiInput, UiInteraction, UiLayout};
+use ui_components::HostUiState;
+pub use ui_components::{HostUiInput, UiElement, UiInput, UiInteraction, UiLayout, UiPointerEdge};
 pub use xgc_reflect::{AssetKind, Component, ComponentId, FieldPath, Value};
 /// 列：任意组件的连续存储；crate 内部接口，公开但不承诺稳定性。
 #[doc(hidden)]
@@ -305,7 +306,7 @@ pub struct World {
     /// 本步命中的动画事件（瞬态；`step_with` 每步开头清空）。
     animation_events: Vec<FiredAnimEvent>,
     /// 宿主设备状态属于当前播放会话，不参与场景序列化或哈希。
-    host_ui_input: Option<UiInput>,
+    host_ui_input: Option<HostUiState>,
 }
 
 impl Default for World {

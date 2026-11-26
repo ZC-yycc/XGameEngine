@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use xgc_host::{asset_paths, FixedStepClock, ScriptedRunner};
 use xgc_sim::{FrameRecord, InputMap, InputState};
-use xgc_world::{UiInput, World};
+use xgc_world::{HostUiInput, World};
 
 use crate::{EditorState, PlaySession};
 
@@ -110,7 +110,7 @@ impl EditorState {
     pub(crate) fn advance_play_with_ui(
         &mut self,
         elapsed: Duration,
-        mut input: impl FnMut() -> Option<UiInput>,
+        mut input: impl FnMut() -> Option<HostUiInput>,
     ) -> Result<Option<Duration>, String> {
         let Some(session) = self.play.as_mut().filter(|session| !session.paused) else {
             return Ok(None);

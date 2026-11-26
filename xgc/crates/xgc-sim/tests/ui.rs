@@ -40,8 +40,11 @@ fn ui_layout_is_parent_relative_and_inherits_visibility() {
         UiLayout::default(),
     ));
     let parent_id = world.entity(parent).unwrap();
+    let middle = world.spawn((Parent { entity: parent_id },));
     let child = world.spawn((
-        Parent { entity: parent_id },
+        Parent {
+            entity: world.entity(middle).unwrap(),
+        },
         UiElement {
             offset_min: [10.0, 20.0],
             offset_max: [60.0, 50.0],
@@ -57,7 +60,8 @@ fn ui_layout_is_parent_relative_and_inherits_visibility() {
     schedule.run(&mut world, 0.016);
     let layout = world.get::<UiLayout>(child).unwrap();
     assert_eq!(layout.rect, [110.0, 70.0, 50.0, 30.0]);
-    assert!(!layout.visible, "隐藏父节点应让子节点不可见");
+    assert!(!layout.visible, "隐藏祖先应让子节点不可见");
+    assert_eq!(hit_test(&world, [120.0, 80.0]), None);
 }
 
 #[test]
@@ -211,7 +215,7 @@ fn ui_focus_direction_picks_geometric_neighbor() {
 #[test]
 fn simulation_host_input_drives_ui() {
     use xgc_sim::Simulation;
-    use xgc_world::UiInput;
+    use xgc_world::{HostUiInput, UiPointerEdge};
 
     let mut world = World::new();
     let element = world.spawn((
@@ -223,15 +227,25 @@ fn simulation_host_input_drives_ui() {
         UiLayout::default(),
         UiInteraction::default(),
     ));
+    let upper = world.spawn((
+        UiElement {
+            offset_max: [100.0, 50.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+        UiInteraction::default(),
+    ));
     let mut simulation = Simulation::new(world);
-    simulation.set_ui_input(UiInput {
-        cursor: [10.0, 10.0],
-        click: true,
-        ..UiInput::default()
+    let point = Some([10.0, 10.0]);
+    simulation.set_ui_input(HostUiInput {
+        position: point,
+        pointer_edges: vec![UiPointerEdge::Press(point), UiPointerEdge::Release(point)],
+        ..HostUiInput::default()
     });
     simulation.step(Vec::new()).unwrap();
-    let state = simulation.world().get::<UiInteraction>(element).unwrap();
-    assert!(state.hovered);
-    assert!(state.clicked);
-    assert_eq!(simulation.ui_input().unwrap().cursor, [10.0, 10.0]);
+    let lower = simulation.world().get::<UiInteraction>(element).unwrap();
+    assert!(!lower.hovered && !lower.clicked, "下层只在上层不接收时命中");
+    let upper = simulation.world().get::<UiInteraction>(upper).unwrap();
+    assert!(upper.hovered && upper.clicked);
+    assert_eq!(simulation.world().host_ui_input().unwrap().position, point);
 }

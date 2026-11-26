@@ -2,7 +2,7 @@
 
 use egui::{Event, Key, PointerButton, Pos2, Rect, Vec2};
 use xgc_sim::{InputState, KeyCode, MouseButton, DEFAULT_UI_VIEWPORT};
-use xgc_world::UiInput;
+use xgc_world::{HostUiInput, UiPointerEdge};
 
 const KEY_CODES: &[(Key, KeyCode)] = &[
     (Key::ArrowUp, KeyCode::ArrowUp),
@@ -72,10 +72,9 @@ pub fn fit_viewport(available: Rect, size: [u32; 2]) -> Option<Rect> {
         .then(|| Rect::from_center_size(available.center(), size * scale))
 }
 
-fn logical_point(viewport: Option<Rect>, point: Pos2) -> Option<[f32; 2]> {
-    let viewport = viewport.filter(|rect| rect.contains(point))?;
+fn logical_point(viewport: Rect, point: Pos2) -> Option<[f32; 2]> {
     let offset = point - viewport.min;
-    Some([
+    viewport.contains(point).then_some([
         offset.x * DEFAULT_UI_VIEWPORT[0] as f32 / viewport.width(),
         offset.y * DEFAULT_UI_VIEWPORT[1] as f32 / viewport.height(),
     ])
@@ -85,8 +84,9 @@ fn logical_point(viewport: Option<Rect>, point: Pos2) -> Option<[f32; 2]> {
 pub struct WindowInput {
     gameplay: InputState,
     pointer: Option<[f32; 2]>,
-    pressed_inside: bool,
-    click: Option<[f32; 2]>,
+    primary_down: bool,
+    cancel_pointer: bool,
+    pointer_edges: Vec<UiPointerEdge>,
     navigation: Option<&'static str>,
     confirm: bool,
 }
@@ -94,14 +94,27 @@ pub struct WindowInput {
 impl WindowInput {
     pub fn sample(&mut self, ctx: &egui::Context, viewport: Option<Rect>) {
         ctx.input(|input| {
-            if !input.focused {
-                *self = Self::default();
+            if !input.focused
+                || input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::WindowFocused(false)))
+            {
+                self.gameplay.keys.clear();
+                self.gameplay.mouse.clear();
+                self.pointer = None;
+                self.discard_ui_edges();
+                self.primary_down = false;
                 return;
             }
             self.pointer = input
                 .pointer
                 .hover_pos()
-                .and_then(|pos| logical_point(viewport, pos));
+                .and_then(|pos| logical_point(viewport?, pos));
+            self.primary_down = input.pointer.button_down(PointerButton::Primary);
+            if viewport.is_none() {
+                self.discard_ui_edges();
+            }
             for &(key, code) in KEY_CODES {
                 self.set_key(code, input.key_down(key));
             }
@@ -120,6 +133,9 @@ impl WindowInput {
                     self.gameplay.mouse.remove(&code);
                 }
             }
+            let Some(viewport) = viewport else {
+                return;
+            };
             for event in &input.events {
                 match event {
                     Event::PointerButton {
@@ -129,14 +145,11 @@ impl WindowInput {
                         ..
                     } => {
                         let point = logical_point(viewport, *pos);
-                        if *pressed {
-                            self.pressed_inside = point.is_some();
-                        } else if std::mem::take(&mut self.pressed_inside)
-                            && input.pointer.button_clicked(PointerButton::Primary)
-                            && self.click.is_none()
-                        {
-                            self.click = point;
-                        }
+                        self.pointer_edges.push(if *pressed {
+                            UiPointerEdge::Press(point)
+                        } else {
+                            UiPointerEdge::Release(point)
+                        });
                     }
                     Event::Key {
                         key,
@@ -144,7 +157,7 @@ impl WindowInput {
                         repeat: false,
                         modifiers,
                         ..
-                    } if viewport.is_some() && !modifiers.command && !modifiers.alt => match key {
+                    } if !modifiers.command && !modifiers.alt => match key {
                         Key::Tab => self.navigation = Some("tab"),
                         Key::ArrowUp => self.navigation = Some("up"),
                         Key::ArrowDown => self.navigation = Some("down"),
@@ -172,19 +185,23 @@ impl WindowInput {
     }
 
     /// 重绘比固定步快时保留边沿，一次补多步时也只取走一次。
-    pub fn take_ui_input(&mut self) -> UiInput {
-        let click = self.click.take();
-        UiInput {
-            cursor: click.or(self.pointer).unwrap_or([-1.0, -1.0]),
-            click: click.is_some(),
-            nav: self.navigation.take().unwrap_or("none"),
+    pub fn take_ui_input(&mut self) -> HostUiInput {
+        if std::mem::take(&mut self.cancel_pointer) {
+            self.pointer_edges.insert(0, UiPointerEdge::Release(None));
+        }
+        HostUiInput {
+            position: self.pointer,
+            primary_down: self.primary_down,
+            pointer_edges: std::mem::take(&mut self.pointer_edges),
+            navigation: self.navigation.take(),
             confirm: std::mem::take(&mut self.confirm),
         }
     }
 
     pub fn discard_ui_edges(&mut self) {
-        self.pressed_inside = false;
-        self.click = None;
+        self.pointer_edges.clear();
+        // Pause、失焦和视口消失时取消已有捕获，不能在原位置合成点击。
+        self.cancel_pointer = true;
         self.navigation = None;
         self.confirm = false;
     }
@@ -229,8 +246,8 @@ mod tests {
             ],
         );
         let input = state.take_ui_input();
-        assert_eq!(input.cursor, [640.0, 360.0]);
-        assert_eq!(input.nav, "right");
+        assert_eq!(input.position, Some([640.0, 360.0]));
+        assert_eq!(input.navigation, Some("right"));
         assert!(input.confirm);
         assert!(state.gameplay().keys.contains(&KeyCode::ArrowRight));
 
@@ -242,7 +259,7 @@ mod tests {
                 key(Key::Enter, true, true),
             ],
         );
-        assert_eq!(state.take_ui_input(), UiInput::default());
+        assert_eq!(state.take_ui_input(), HostUiInput::default());
         assert!(state.gameplay().keys.contains(&KeyCode::ArrowRight));
         sample(
             &mut state,

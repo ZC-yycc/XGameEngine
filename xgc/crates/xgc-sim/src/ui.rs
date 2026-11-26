@@ -3,8 +3,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use xgc_base::EntityId;
-use xgc_world::{Component, Parent, UiElement, UiInput, UiInteraction, UiLayout, World};
+use xgc_base::{EntityId, EntityKey};
+use xgc_world::{
+    Component, Parent, UiElement, UiInput, UiInteraction, UiLayout, UiPointerEdge, World,
+};
 
 use super::{System, SystemAccess};
 
@@ -72,11 +74,11 @@ impl System for UiLayoutSystem {
             let LayoutScratch { nodes, ids } = &mut *scratch;
             nodes.clear();
             ids.clear();
-            world.for_each2::<UiElement, UiLayout>(|key, element, _| {
+            world.for_each::<UiElement>(|key, element| {
                 let Some(entity) = world.entity(key) else {
                     return;
                 };
-                let parent = world.get::<Parent>(key).map(|parent| parent.entity);
+                let parent = nearest_ui_parent(world, key);
                 ids.push(entity);
                 nodes.insert(
                     entity,
@@ -116,7 +118,19 @@ impl System for UiLayoutSystem {
     }
 }
 
-/// 交互状态：按 `ui.input` 的光标 / 点击更新 hover / press / click。
+fn nearest_ui_parent(world: &World, mut key: EntityKey) -> Option<EntityId> {
+    // UI 可经过普通变换实体挂在画布上，父链成环时在实体数内收口。
+    for _ in 0..world.len() {
+        let parent = world.get::<Parent>(key)?.entity;
+        key = world.key(parent)?;
+        if world.get::<UiElement>(key).is_some() {
+            return Some(parent);
+        }
+    }
+    None
+}
+
+/// 先结算指针，再把本帧悬停、按下和点击写给脚本。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UiInteractionSystem;
 
@@ -133,7 +147,12 @@ impl System for UiInteractionSystem {
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
-        let input = world.ui_input();
+        if let Some(input) = world.host_ui_input() {
+            update_pointer(world, input.position, input.primary_down);
+            return;
+        }
+        // 场景/Agent 可直接写入一次点击，用同一调度实现确定性回放。
+        let input = world.authored_ui_input();
         let cursor = input.and_then(|input| {
             (input.cursor[0] >= 0.0 && input.cursor[1] >= 0.0).then_some(input.cursor)
         });
@@ -153,6 +172,52 @@ impl System for UiInteractionSystem {
             state.pressed = hovered && click;
             state.clicked = hovered && click;
         });
+    }
+}
+
+fn update_pointer(world: &mut World, position: Option<[f32; 2]>, down: bool) {
+    world.for_each_mut::<UiInteraction>(|_, state| {
+        state.hovered = false;
+        state.pressed = false;
+        state.clicked = false;
+    });
+
+    let mut capture = world.ui_pointer_capture().filter(|&key| {
+        world
+            .get::<UiElement>(key)
+            .is_some_and(|element| element.interactable)
+            && world
+                .get::<UiLayout>(key)
+                .is_some_and(|layout| layout.visible)
+    });
+    for edge in world.take_ui_pointer_edges() {
+        match edge {
+            UiPointerEdge::Press(point) => {
+                capture = point.and_then(|point| hit_test(world, point));
+            }
+            UiPointerEdge::Release(point) => {
+                let clicked = capture.take().filter(|&target| {
+                    point.and_then(|point| hit_test(world, point)) == Some(target)
+                });
+                if let Some(state) = clicked.and_then(|key| world.get_mut::<UiInteraction>(key)) {
+                    state.clicked = true;
+                }
+            }
+        }
+    }
+    if !down {
+        capture = None;
+    }
+    world.set_ui_pointer_capture(capture);
+
+    if let Some(state) = position
+        .and_then(|point| hit_test(world, point))
+        .and_then(|key| world.get_mut::<UiInteraction>(key))
+    {
+        state.hovered = true;
+    }
+    if let Some(state) = capture.and_then(|key| world.get_mut::<UiInteraction>(key)) {
+        state.pressed = true;
     }
 }
 
@@ -193,11 +258,11 @@ impl System for UiFocusSystem {
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
-        let Some(input) = world.ui_input() else {
+        let Some((navigation, confirm)) = world.take_ui_navigation() else {
             return;
         };
-        let nav = nav_from(input.nav);
-        if nav.is_none() && !input.confirm {
+        let nav = nav_from(navigation);
+        if nav.is_none() && !confirm {
             return;
         }
         let mut interactable = HashMap::new();
@@ -246,21 +311,18 @@ impl System for UiFocusSystem {
         let key = focusable[target].1;
         world.for_each_mut::<UiInteraction>(|_, state| {
             state.focused = false;
-            if input.confirm {
+            if confirm {
                 state.clicked = false;
             }
         });
         if let Some(state) = world.get_mut::<UiInteraction>(key) {
             state.focused = true;
-            if input.confirm {
+            if confirm {
                 state.clicked = true;
                 state.pressed = true;
             }
         }
-        if let Some(input) = world.ui_input_mut() {
-            input.nav = "none";
-            input.confirm = false;
-        }
+        world.consume_authored_ui_navigation();
     }
 }
 
@@ -345,15 +407,13 @@ fn intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 }
 
 /// 命中测试：可见、可交互、点在矩形与裁剪区内的最上层（EntityId 最大）元素。
-pub fn hit_test(world: &World, point: [f32; 2]) -> Option<xgc_base::EntityKey> {
-    let mut best: Option<(EntityId, xgc_base::EntityKey)> = None;
-    world.for_each::<UiLayout>(|key, layout| {
-        if !layout.visible || !contains(layout.rect, point) || !contains(layout.clip, point) {
-            return;
-        }
-        if world
-            .get::<UiElement>(key)
-            .is_some_and(|element| !element.interactable)
+pub fn hit_test(world: &World, point: [f32; 2]) -> Option<EntityKey> {
+    let mut best: Option<(EntityId, EntityKey)> = None;
+    world.for_each2::<UiElement, UiLayout>(|key, element, layout| {
+        if !element.interactable
+            || !layout.visible
+            || !hit_rect(layout.rect, point)
+            || !hit_rect(layout.clip, point)
         {
             return;
         }
@@ -365,6 +425,10 @@ pub fn hit_test(world: &World, point: [f32; 2]) -> Option<xgc_base::EntityKey> {
         }
     });
     best.map(|(_, key)| key)
+}
+
+fn hit_rect(rect: [f32; 4], point: [f32; 2]) -> bool {
+    rect[2] > 0.0 && rect[3] > 0.0 && contains(rect, point)
 }
 
 fn contains(rect: [f32; 4], point: [f32; 2]) -> bool {

@@ -19,7 +19,7 @@ pub use error::SimError;
 pub use scenario::{FrameCommands, FrameRecord, Scenario, Trace, TRACE_FORMAT_VERSION};
 
 use scenario::default_fixed_dt;
-use xgc_world::{Command, UiInput, World, WorldData};
+use xgc_world::{Command, HostUiInput, World, WorldData};
 
 mod schedule;
 
@@ -117,12 +117,8 @@ impl Simulation {
     }
 
     /// 宿主在固定步前写入设备输入。无头回放仍可读取场景里的 `ui.input`。
-    pub fn set_ui_input(&mut self, input: UiInput) {
+    pub fn set_ui_input(&mut self, input: HostUiInput) {
         self.world.set_host_ui_input(input);
-    }
-
-    pub fn ui_input(&self) -> Option<UiInput> {
-        self.world.ui_input()
     }
 
     pub fn trace(&self) -> &Trace {

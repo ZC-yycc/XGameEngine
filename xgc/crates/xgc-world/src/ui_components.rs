@@ -413,24 +413,87 @@ impl Default for UiInput {
     }
 }
 
+/// 原生指针边沿。越过视口后坐标为 `None`，边沿仍然参与结算。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UiPointerEdge {
+    Press(Option<[f32; 2]>),
+    Release(Option<[f32; 2]>),
+}
+
+/// 宿主每个固定步送入的设备状态，独立于可序列化的 `UiInput`。
+#[derive(Debug, Default, PartialEq)]
+pub struct HostUiInput {
+    pub position: Option<[f32; 2]>,
+    pub primary_down: bool,
+    pub pointer_edges: Vec<UiPointerEdge>,
+    pub navigation: Option<&'static str>,
+    pub confirm: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct HostUiState {
+    input: HostUiInput,
+    capture: Option<EntityKey>,
+}
+
 impl World {
-    /// 设备输入优先于场景里的输入组件。写入设备输入不会改动实体表。
-    pub fn set_host_ui_input(&mut self, input: UiInput) {
-        self.host_ui_input = Some(input);
-    }
-
-    pub fn ui_input(&self) -> Option<UiInput> {
+    /// 写入设备输入不会改动实体表，捕获由 UI 阶段随边沿更新。
+    pub fn set_host_ui_input(&mut self, input: HostUiInput) {
         self.host_ui_input
-            .or_else(|| self.ui_input_key().and_then(|key| self.get(key).copied()))
+            .get_or_insert_with(HostUiState::default)
+            .input = input;
     }
 
-    /// UI 阶段只结算当前输入源的边沿，播放时不改动场景里的输入组件。
-    pub fn ui_input_mut(&mut self) -> Option<&mut UiInput> {
-        if self.host_ui_input.is_some() {
-            self.host_ui_input.as_mut()
+    pub fn host_ui_input(&self) -> Option<&HostUiInput> {
+        self.host_ui_input.as_ref().map(|state| &state.input)
+    }
+
+    pub fn take_ui_pointer_edges(&mut self) -> Vec<UiPointerEdge> {
+        self.host_ui_input.as_mut().map_or_else(Vec::new, |state| {
+            std::mem::take(&mut state.input.pointer_edges)
+        })
+    }
+
+    /// 捕获跟随句柄世代，删除或替换实体后旧输入不能激活同 ID 的新按钮。
+    pub fn ui_pointer_capture(&self) -> Option<EntityKey> {
+        self.host_ui_input
+            .as_ref()?
+            .capture
+            .filter(|&key| self.entity(key).is_some())
+    }
+
+    pub fn set_ui_pointer_capture(&mut self, capture: Option<EntityKey>) {
+        if let Some(state) = &mut self.host_ui_input {
+            state.capture = capture;
+        }
+    }
+
+    pub fn authored_ui_input(&self) -> Option<UiInput> {
+        self.ui_input_key().and_then(|key| self.get(key).copied())
+    }
+
+    /// 导航只读取当前输入源，窗口运行时保留场景的作者输入。
+    pub fn take_ui_navigation(&mut self) -> Option<(&'static str, bool)> {
+        if let Some(state) = &mut self.host_ui_input {
+            Some((
+                state.input.navigation.take().unwrap_or("none"),
+                std::mem::take(&mut state.input.confirm),
+            ))
         } else {
-            let key = self.ui_input_key()?;
-            self.get_mut(key)
+            self.authored_ui_input()
+                .map(|input| (input.nav, input.confirm))
+        }
+    }
+
+    pub fn consume_authored_ui_navigation(&mut self) {
+        if self.host_ui_input.is_none() {
+            if let Some(input) = self
+                .ui_input_key()
+                .and_then(|key| self.get_mut::<UiInput>(key))
+            {
+                input.nav = "none";
+                input.confirm = false;
+            }
         }
     }
 

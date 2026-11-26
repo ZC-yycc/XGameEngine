@@ -1,5 +1,5 @@
 use xgc_sim::Simulation;
-use xgc_world::{UiElement, UiInput, UiInteraction, UiLayout, World};
+use xgc_world::{HostUiInput, UiElement, UiInput, UiInteraction, UiLayout, UiPointerEdge, World};
 
 #[test]
 fn host_ui_input_keeps_the_entity_table_and_author_input_intact() {
@@ -24,20 +24,22 @@ fn host_ui_input_keeps_the_entity_table_and_author_input_intact() {
         let element = world.key(element_id).unwrap();
         let hash = world.state_hash();
         let mut sim = Simulation::new(world);
-        let host = UiInput {
-            cursor: [10.0, 10.0],
-            click: true,
-            nav: "tab",
-            ..UiInput::default()
-        };
-        sim.set_ui_input(host);
+        let point = Some([10.0, 10.0]);
+        sim.set_ui_input(HostUiInput {
+            position: point,
+            pointer_edges: vec![UiPointerEdge::Press(point), UiPointerEdge::Release(point)],
+            navigation: Some("tab"),
+            ..HostUiInput::default()
+        });
         assert_eq!(sim.world().world_data(), before);
         assert_eq!(sim.world().state_hash(), hash);
-        assert_eq!(sim.ui_input(), Some(host));
+        assert_eq!(sim.world().host_ui_input().unwrap().position, point);
         sim.step(Vec::new()).unwrap();
         let interaction = sim.world().get::<UiInteraction>(element).unwrap();
         assert!(interaction.hovered && interaction.clicked && interaction.focused);
-        assert_eq!(sim.ui_input().unwrap().nav, "none");
+        let input = sim.world().host_ui_input().unwrap();
+        assert_eq!(input.navigation, None);
+        assert!(input.pointer_edges.is_empty());
         assert_eq!(sim.world().len(), before.entities.len());
         assert_eq!(sim.world().revision(), before.revision);
         if let Some(key) = author_key {
@@ -45,11 +47,11 @@ fn host_ui_input_keeps_the_entity_table_and_author_input_intact() {
         }
         world = sim.into_world();
         world.restore_snapshot(&snapshot);
-        assert_eq!(world.ui_input(), author, "恢复快照必须丢弃设备状态");
-        world.set_host_ui_input(host);
+        assert!(world.host_ui_input().is_none(), "恢复快照必须丢弃设备状态");
+        assert_eq!(world.authored_ui_input(), author);
+        world.set_host_ui_input(HostUiInput::default());
         world.restore_world_data(&before).unwrap();
-        let sim = Simulation::new(world);
-        assert_eq!(sim.ui_input(), author, "恢复世界必须丢弃设备状态");
-        world = sim.into_world();
+        assert!(world.host_ui_input().is_none(), "恢复世界必须丢弃设备状态");
+        assert_eq!(world.authored_ui_input(), author);
     }
 }

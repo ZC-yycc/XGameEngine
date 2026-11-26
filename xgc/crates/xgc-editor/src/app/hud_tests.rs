@@ -54,8 +54,8 @@ fn hud_click_between_fixed_steps_reaches_the_script_once() {
             |ctx| app.tick_play(ctx, time, Some(viewport)),
         );
     };
-    let click = |pressed| egui::Event::PointerButton {
-        pos: cursor,
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
         button: egui::PointerButton::Primary,
         pressed,
         modifiers: egui::Modifiers::NONE,
@@ -72,12 +72,12 @@ fn hud_click_between_fixed_steps_reaches_the_script_once() {
     repaint(
         &mut app,
         start + Duration::from_millis(2),
-        vec![egui::Event::PointerMoved(cursor), click(true)],
+        vec![egui::Event::PointerMoved(cursor), button(cursor, true)],
     );
     repaint(
         &mut app,
         start + Duration::from_millis(4),
-        vec![click(false)],
+        vec![button(cursor, false)],
     );
     assert_eq!(text(&app), "0");
     repaint(&mut app, start + fixed * 3, Vec::new());
@@ -87,6 +87,73 @@ fn hud_click_between_fixed_steps_reaches_the_script_once() {
         "固定步应消费且只消费一次待处理点击，状态：{:?}",
         app.status
     );
+    let interaction = |app: &EditorApp| {
+        let world = app.state.world();
+        *world
+            .get::<UiInteraction>(world.key(entity).unwrap())
+            .unwrap()
+    };
+    let captured = |app: &EditorApp| app.state.world().ui_pointer_capture().is_some();
+    let outside = viewport.right_bottom() + egui::vec2(12.0, 12.0);
+    repaint(&mut app, start + fixed * 4, vec![button(cursor, true)]);
+    assert!(interaction(&app).pressed, "固定步应接收原生按下边沿");
+    assert!(captured(&app));
+    repaint(
+        &mut app,
+        start + fixed * 5,
+        vec![egui::Event::PointerMoved(outside)],
+    );
+    assert!(interaction(&app).pressed);
+    assert!(!interaction(&app).hovered);
+    repaint(&mut app, start + fixed * 6, vec![button(outside, false)]);
+    assert!(!captured(&app), "在视口外释放必须清掉捕获句柄");
+    assert!(!interaction(&app).pressed);
+    assert!(!interaction(&app).clicked);
+    assert_eq!(text(&app), "1");
+    repaint(
+        &mut app,
+        start + fixed * 7,
+        vec![egui::Event::PointerMoved(cursor)],
+    );
+    assert!(interaction(&app).hovered);
+    assert!(!interaction(&app).pressed);
+
+    // 已被 egui 识别为拖动，也应允许回到捕获目标并在原目标上松开。
+    repaint(
+        &mut app,
+        start + fixed * 8,
+        vec![
+            button(cursor, true),
+            egui::Event::PointerMoved(outside),
+            egui::Event::PointerMoved(cursor),
+            button(cursor, false),
+        ],
+    );
+    assert_eq!(text(&app), "2");
+
+    repaint(&mut app, start + fixed * 9, vec![button(cursor, true)]);
+    assert!(captured(&app));
+    repaint(
+        &mut app,
+        start + fixed * 10,
+        vec![egui::Event::WindowFocused(false)],
+    );
+    assert!(!captured(&app));
+    repaint(
+        &mut app,
+        start + fixed * 11,
+        vec![egui::Event::WindowFocused(true), button(cursor, false)],
+    );
+    assert_eq!(text(&app), "2", "失焦前的按下不能组成点击");
+
+    repaint(&mut app, start + fixed * 12, vec![button(cursor, true)]);
+    assert!(captured(&app));
+    app.state.pause();
+    repaint(&mut app, start + fixed * 13, vec![button(cursor, false)]);
+    assert!(app.state.step().unwrap().is_some());
+    assert!(!captured(&app), "暂停后的手动步进必须清掉旧捕获");
+    assert!(!interaction(&app).pressed);
+    assert_eq!(text(&app), "2");
     assert_eq!(app.state.world().len(), 1);
     app.state.stop();
     assert_eq!(text(&app), "0");

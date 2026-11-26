@@ -14,7 +14,7 @@ use xgc_asset::{AssetPaths, SearchPaths};
 use xgc_render::MeshCache;
 use xgc_script::ScriptRuntime;
 use xgc_sim::{apply_root_motion, InputMap, InputState, ParticleSystem, Simulation};
-use xgc_world::{ParticleQuad, RootMotionLibrary, UiInput, World};
+use xgc_world::{HostUiInput, ParticleQuad, RootMotionLibrary, World};
 
 /// 宿主只有在明确知道内容根时才扫描 GUID 目录，避免空白编辑世界扫描工作目录。
 pub fn asset_paths(root: Option<&Path>, search_paths: &[String]) -> AssetPaths {
@@ -58,6 +58,20 @@ impl ScriptedRunner {
 
     /// 世界与脚本在调度计划的各自阶段执行，根运动和粒子在步末结算。返回零基帧号。
     pub fn step(&mut self) -> Result<u64, String> {
+        // 手动单步没有新的设备采样，不能沿用上个窗口步的按住状态。
+        if self.world().host_ui_input().is_some() {
+            return self.step_with_ui_input(HostUiInput::default());
+        }
+        self.advance()
+    }
+
+    /// 窗口边沿只在当前固定步可见。
+    pub fn step_with_ui_input(&mut self, input: HostUiInput) -> Result<u64, String> {
+        self.simulation.set_ui_input(input);
+        self.advance()
+    }
+
+    fn advance(&mut self) -> Result<u64, String> {
         let dt = self.simulation.fixed_dt();
         let frame = self
             .simulation
@@ -69,17 +83,6 @@ impl ScriptedRunner {
         apply_root_motion(self.simulation.world_mut(), dt, &self.root_motion);
         self.particles.update(dt, self.simulation.world());
         Ok(frame)
-    }
-
-    /// 窗口边沿只在当前固定步可见，手动步进也不会再次消费旧边沿。
-    pub fn step_with_ui_input(&mut self, input: UiInput) -> Result<u64, String> {
-        self.simulation.set_ui_input(input);
-        let result = self.step();
-        self.simulation.set_ui_input(UiInput {
-            cursor: input.cursor,
-            ..UiInput::default()
-        });
-        result
     }
 
     pub fn world(&self) -> &World {
