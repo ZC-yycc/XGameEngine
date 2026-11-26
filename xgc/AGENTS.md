@@ -67,7 +67,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/tests/image_diff.rs` | `image-diff … report` 集成回归：真实 PPM 的分桶与通道均值 / 不写 report 时保持旧输出 / 未知第四参数退出码 2 |
 | `crates/xgc-cli/tests/trace.rs` | 逐帧 trace 集成回归：与进程内重放逐步对表 / 两次运行逐字节相同 / 不同世界第 0 帧即不同 / 参数错误退出码 2 / 汇总行与 `run-world` 末行逐字一致 / 带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致 / 坏脚本与 `update` 期抛错都退出码 2 且点名出错帧 |
 | `crates/xgc-cli/tests/gate.rs` | 割接门禁集成回归：参考匹配通过 / 哈希分歧退出码 1 并点名帧 / 空参考目录退出码 2 / 参考帧号不从 0 开始退出码 2 |
-| `crates/xgc-sim/tests/steady_state.rs` | 热路径分配门禁：线程本地计数分配器（每个测试线程只看自己的分配）；210 实体场景 60 帧分配预算为 1,920 次，名字与刚体场景哈希和 1 万实体乱序哈希预热后零分配。实测与局限见 [CUTOVER.md](CUTOVER.md)。另有一条 release 吞吐用例默认 `#[ignore]` |
+| `crates/xgc-sim/tests/steady_state.rs` | 线程本地分配计数：仿真整帧预算、混合串行批和 AABB、名字与刚体哈希、1 万乱序实体哈希。实测见 [CUTOVER.md](CUTOVER.md)。另有一条 release 吞吐用例默认 `#[ignore]` |
 | `crates/xgc-store/src/lib.rs` | JSON 包络 v5、原子写、WorldData / Prefab / Journal 存取 |
 | `crates/xgc-store/src/binary.rs` | `XGCB` v6 二进制世界：encode / decode / save / load；固定小端、递归值带标签；映射和枚举分别用 11 和 12，沿用原有递归深度限额 |
 | `crates/xgc-sim/src/schedule.rs` | 执行计划与调度器：连续分批、宿主阶段、`run_plan_threaded` / 分区执行（`supports_parted` 的系统并行、其余串行；默认 1 线程）；回归 `crates/xgc-sim/tests/parallel_batch.rs` |

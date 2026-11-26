@@ -15,10 +15,12 @@ use crate::{System, SystemAccess};
 /// 也不挡路，AABB 不能比它更硬）。
 #[derive(Clone, Debug, Default)]
 pub struct AabbCollisionSystem {
+    bodies: Vec<BodyBox>,
     previous: Vec<(u64, u64)>,
     current: Vec<(u64, u64)>,
 }
 
+#[derive(Clone, Debug)]
 struct BodyBox {
     key: EntityKey,
     id: EntityId,
@@ -45,7 +47,8 @@ impl System for AabbCollisionSystem {
 
     fn run(&mut self, world: &mut World, _dt: f32) {
         self.current.clear();
-        let mut bodies = Vec::new();
+        let bodies = &mut self.bodies;
+        bodies.clear();
         world.for_each2::<Transform, PhysicsBody>(|key, transform, body| {
             let Some(entity) = world.entity(key) else {
                 return;
@@ -62,7 +65,8 @@ impl System for AabbCollisionSystem {
                 sensor: body.is_sensor,
             });
         });
-        bodies.sort_by_key(|body| body.id.raw());
+        // ID 唯一，原地排序可保留求解顺序并省去排序临时区。
+        bodies.sort_unstable_by_key(|body| body.id.raw());
         for i in 0..bodies.len() {
             for j in (i + 1)..bodies.len() {
                 if !bodies[i].dynamic && !bodies[j].dynamic {
@@ -113,7 +117,7 @@ impl System for AabbCollisionSystem {
                 }
             }
         }
-        for body in &bodies {
+        for body in bodies.iter() {
             if let Some(transform) = world.get_mut::<Transform>(body.key) {
                 transform.position = body.position;
             }

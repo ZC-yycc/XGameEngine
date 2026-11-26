@@ -17,7 +17,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::time::Instant;
 
-use xgc_sim::Simulation;
+use xgc_sim::{AabbCollisionSystem, AnimationLayerSystem, Schedule, Simulation};
 use xgc_world::{Name, PhysicsBody, Transform, Velocity, World};
 
 thread_local! {
@@ -128,12 +128,58 @@ fn steady_state_frames_stay_within_the_allocation_budget() {
         "steady-state: 60 帧 {allocations} 次分配 / {bytes} 字节，实体 {}",
         simulation.world().len()
     );
-    // 这个固定场景实测约 23 次/帧。给刚体后端和 trace 扩容留余量，同时让
-    // 每实体分配重新出现时越过门禁。
-    let budget = 60 * 32;
+    // 这个固定场景实测约 7.3 次/帧。给刚体后端与 trace 扩容留余量，
+    // 调度或碰撞收集恢复每帧分配时仍会由下方的零分配用例检出。
+    let budget = 60 * 12;
     assert!(
         allocations <= budget,
         "稳态帧分配超预算：60 帧分配了 {allocations} 次（{bytes} 字节），预算 {budget} 次"
+    );
+}
+
+#[test]
+fn mixed_serial_batch_and_aabb_reuse_working_storage() {
+    let mut world = World::new();
+    // 给排序施加足够的行数压力；静态体之间不会产生接触。
+    for index in 0..256 {
+        world.spawn((
+            Transform {
+                position: [index as f32 * 2.0, 0.0, 0.0],
+                ..Transform::default()
+            },
+            PhysicsBody {
+                kind: "static".into(),
+                ..PhysicsBody::default()
+            },
+        ));
+    }
+    let dynamic = world.spawn((Transform::default(), PhysicsBody::default()));
+    let mut schedule = Schedule::new();
+    schedule.add(AnimationLayerSystem);
+    schedule.add(AabbCollisionSystem::default());
+    let plan = schedule.plan();
+    let [xgc_sim::PlanStage::Host, xgc_sim::PlanStage::Batch(indices)] = plan.stages() else {
+        panic!("两个系统应位于同一批：{:?}", plan.stages());
+    };
+    assert_eq!(indices, &[0, 1]);
+    let step = |schedule: &mut Schedule, world: &mut World| {
+        // 每帧重叠一次，持续走接触求解和位姿回写。
+        world.get_mut::<Transform>(dynamic).unwrap().position[0] = 0.25;
+        schedule.run_plan(&plan, world, 1.0 / 60.0, |_| {});
+        assert_eq!(world.get::<Transform>(dynamic).unwrap().position[0], 1.0);
+    };
+    for _ in 0..2 {
+        step(&mut schedule, &mut world);
+    }
+
+    reset_counter();
+    for _ in 0..60 {
+        step(&mut schedule, &mut world);
+    }
+    let (allocations, bytes) = snapshot().expect("量测线程的计数器");
+    assert_eq!(
+        allocations, 0,
+        "串行混合批和 AABB 预热后必须零分配：60 帧 {allocations} 次 / {bytes} 字节"
     );
 }
 

@@ -18,8 +18,7 @@ pub fn default_system_names() -> Vec<&'static str> {
     Schedule::default_schedule(1).names()
 }
 
-/// 系统声明的读写集。计划分批用它判冲突；跨系统并行还差世界所有权拆分，
-/// 同批系统当前仍按注册顺序串行执行——批是将来并行的确定性输入。
+/// 系统声明的读写集。计划分批用它判冲突，同批系统的写视图才能独立执行。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SystemAccess {
     pub reads: Vec<ComponentId>,
@@ -71,7 +70,7 @@ pub trait System: Send {
 
     /// 批内并行执行能力：`run_parted` 只拿只读世界 + 自己那份 `WriteSet`。
     ///
-    /// 返回 false（默认）时调度器不会把该批拆成并行，整批仍按注册顺序串行。
+    /// 返回 false（默认）的系统按注册顺序串行，其余系统在它们之后执行。
     fn supports_parted(&self) -> bool {
         false
     }
@@ -85,7 +84,7 @@ pub trait System: Send {
 /// 执行计划的一段：系统批，或宿主帧末阶段。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanStage {
-    /// 同一段内连续的一段系统：两两无访问冲突，批内按注册顺序执行。
+    /// 同一段内连续的一组系统下标，按注册顺序保留。批内两两无访问冲突。
     Batch(Vec<usize>),
     /// 宿主阶段（脚本等 `!Send` 状态）。独占，插在第一个声明
     /// [`System::runs_after_host`] 的系统之前（默认调度里是动画系统之前）；
@@ -123,9 +122,10 @@ impl Plan {
 #[derive(Default)]
 pub struct Schedule {
     systems: Vec<Box<dyn System>>,
-    /// 批内并行线程数：1 = 串行（默认）。>1 时同批系统必须都实现
-    /// `System::run_parted`，否则整批退回串行。
+    /// 批内并行线程数：1 = 串行（默认）。同批至少两个系统支持分区时才启用并行。
     parallel_threads: usize,
+    serial_indices: Vec<usize>,
+    parted_indices: Vec<usize>,
 }
 
 impl Schedule {
@@ -245,8 +245,8 @@ impl Schedule {
 
     /// 按计划执行一帧，显式指定批内并行线程数（1 = 串行）。
     ///
-    /// 并行只发生在「批内系统全部 `supports_parted`」的段；宿主阶段仍在调用线程
-    /// 上执行。同批写集合不相交 ⇒ 与串行路径的 `state_hash` / `revision` 一致。
+    /// 同批至少两个 `supports_parted` 的系统才并行。宿主阶段在调用线程执行。
+    /// 同批写集合不相交，因此两种执行方式的 `state_hash` / `revision` 一致。
     pub fn run_plan_threaded(
         &mut self,
         plan: &Plan,
@@ -274,28 +274,29 @@ impl Schedule {
     /// 线程 panic 时先还原已 join 的列再原样传播；未 join 的线程由
     /// `std::thread::scope` 负责收尾（此时世界可能缺列，调用方应放弃本帧）。
     fn run_batch(&mut self, indices: &[usize], world: &mut World, dt: f32, threads: usize) {
-        let mut serial: Vec<usize> = Vec::new();
-        let mut parted: Vec<usize> = Vec::new();
+        // 分类按帧重算，缓冲跨批次和帧复用。先完成分类，避免系统运行影响当批分区。
+        self.serial_indices.clear();
+        self.parted_indices.clear();
         for &index in indices {
             if self.systems[index].supports_parted() {
-                parted.push(index);
+                self.parted_indices.push(index);
             } else {
-                serial.push(index);
+                self.serial_indices.push(index);
             }
         }
-        for &index in &serial {
+        for &index in &self.serial_indices {
             self.systems[index].run(world, dt);
         }
-        let parallel = threads > 1 && parted.len() > 1;
+        let parallel = threads > 1 && self.parted_indices.len() > 1;
         if !parallel {
-            for &index in &parted {
+            for &index in &self.parted_indices {
                 self.systems[index].run(world, dt);
             }
             return;
         }
 
-        let mut sets: Vec<(usize, WriteSet)> = Vec::with_capacity(parted.len());
-        for &index in &parted {
+        let mut sets: Vec<(usize, WriteSet)> = Vec::with_capacity(self.parted_indices.len());
+        for &index in &self.parted_indices {
             let writes = self.systems[index].access().writes;
             sets.push((index, world.extract_writes(&writes)));
         }
