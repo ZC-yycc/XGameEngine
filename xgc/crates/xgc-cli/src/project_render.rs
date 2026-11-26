@@ -1,4 +1,4 @@
-//! `project.ron` 的画面设置读取：曝光、天空、光晕、FXAA、阴影画质与 TAA。
+//! `project.ron` 的画面设置读取，含 LOD 距离倍率和质量档位。
 //!
 //! 旧引擎把画面设置放在项目级而不是场景级，XGC 也按项目级读；缺省值必须逐项
 //! 等于旧端 `RenderConfig::default` 的曝光 1.0 与 `SkyConfig` / `BloomConfig` /
@@ -13,18 +13,49 @@ use xgc_render::{
     TaaSettings,
 };
 
-/// `project.ron` 的 `render` 节里 XGC 目前真正消费的部分
-/// （曝光 + 天空 + 光晕 + FXAA + 阴影画质 + TAA）。
 #[derive(Debug, Default, Deserialize)]
 struct OldProjectFile {
     #[serde(default)]
     render: OldProjectRender,
+    #[serde(default)]
+    quality: OldProjectQuality,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OldProjectQuality {
+    preset: Option<QualityPreset>,
+    lod_scale: Option<f32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+enum QualityPreset {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl OldProjectQuality {
+    fn lod_scale(self) -> f32 {
+        // 显式覆盖优先于预设。非有限值回退到预设，非正值仍用质量档的下界。
+        let base = match self.preset.unwrap_or_default() {
+            QualityPreset::Low => 0.6,
+            QualityPreset::Medium => 1.0,
+            QualityPreset::High => 1.25,
+        };
+        self.lod_scale
+            .filter(|scale| scale.is_finite())
+            .unwrap_or(base)
+            .clamp(0.05, 10.0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct OldProjectRender {
     #[serde(default = "exposure_default")]
     exposure: f32,
+    #[serde(default = "lod_bias_default")]
+    lod_bias: f32,
     #[serde(default)]
     sky: OldSkyConfig,
     #[serde(default)]
@@ -45,6 +76,7 @@ impl Default for OldProjectRender {
     fn default() -> Self {
         Self {
             exposure: exposure_default(),
+            lod_bias: lod_bias_default(),
             sky: OldSkyConfig::default(),
             bloom: OldBloomConfig::default(),
             fxaa: OldFxaaConfig::default(),
@@ -57,6 +89,10 @@ impl Default for OldProjectRender {
 
 fn exposure_default() -> f32 {
     xgc_render::EXPOSURE_DEFAULT
+}
+
+fn lod_bias_default() -> f32 {
+    1.0
 }
 
 /// 缺省值必须逐项等于旧 `FxaaConfig::default`（抗锯齿默认关）。
@@ -215,23 +251,20 @@ impl Default for OldSkyConfig {
     }
 }
 
-/// `project.ron` 投影出来的画面设置：三个宿主（CLI / 编辑器 / 游戏）都消费这一份，
-/// 新增节只改这里，不再往元组末尾追加字段。
+/// CLI 截图与对表门禁共用的 `project.ron` 画面设置。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ProjectRenderSettings {
     pub(crate) sky: SkySettings,
     pub(crate) bloom: BloomSettings,
     pub(crate) fxaa: FxaaSettings,
     pub(crate) exposure: f32,
+    pub(crate) lod_bias: f32,
     pub(crate) shadow: ShadowSettings,
     pub(crate) taa: TaaSettings,
     pub(crate) ssao: SsaoSettings,
 }
 
-/// 读 `project.ron` 的画面设置（曝光 + 天空 + 光晕 + FXAA + 阴影画质 + TAA + SSAO）。
-///
-/// 没有 `project.ron` 时返回 `None`；文件在但缺节则按旧端缺省读出来
-/// （曝光 1.0、其余都是"关"），与缺节等于关 / 不增不减的语义一致。
+/// 读 `project.ron` 的画面设置。缺文件返回 `None`，缺节使用旧端缺省。
 pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> {
     let path = project_root.join("project.ron");
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -277,6 +310,7 @@ pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> 
             enabled: fxaa.enabled,
         },
         exposure,
+        lod_bias: project.render.lod_bias * project.quality.lod_scale(),
         // 软阴影 / 级间混合都默认关；非有限 / 负值在消费边界落回关。
         shadow: ShadowSettings {
             softness: shadow.softness,
@@ -366,6 +400,41 @@ mod tests {
             super::OldProjectFile::default().render.exposure,
             xgc_render::EXPOSURE_DEFAULT
         );
+    }
+
+    #[test]
+    fn reads_lod_bias_and_quality_through_the_project_entry() {
+        let root =
+            std::env::temp_dir().join(format!("xgc-project-render-lod-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("建临时项目目录");
+        for (ron, expected) in [
+            ("()", 1.0),
+            ("(render: (lod_bias: 2.0))", 2.0),
+            ("(quality: (preset: Some(Low)))", 0.6),
+            (
+                "(render: (lod_bias: 2.0), quality: (preset: Some(High)))",
+                2.5,
+            ),
+            (
+                "(quality: (preset: Some(High), lod_scale: Some(0.75)))",
+                0.75,
+            ),
+            (
+                "(quality: (preset: Some(High), lod_scale: Some(NaN)))",
+                1.25,
+            ),
+            ("(quality: (lod_scale: Some(-1.0)))", 0.05),
+            ("(quality: (lod_scale: Some(11.0)))", 10.0),
+            (
+                "(render: (lod_bias: 0.0), quality: (preset: Some(Low)))",
+                0.0,
+            ),
+        ] {
+            std::fs::write(root.join("project.ron"), ron).expect("写临时 project.ron");
+            let settings = super::load_render(&root).expect("临时项目应能读出画面设置");
+            assert_eq!(settings.lod_bias, expected, "{ron}");
+        }
+        std::fs::remove_dir_all(root).expect("清理临时项目目录");
     }
 
     /// 阴影节走真实入口 `load_render`（而不是「先反序列化、再本地消毒」）：将来漏接

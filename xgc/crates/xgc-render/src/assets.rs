@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use xgc_asset::AssetCatalog;
-use xgc_world::{Animator, MeshRenderer, RootMotion, RootMotionLibrary, World};
+use xgc_world::{Animator, RootMotion, RootMotionLibrary, World};
 
 use super::glb::{load_model, MeshError};
 use super::material::MaterialAsset;
@@ -105,27 +105,17 @@ impl MeshCache {
     /// （那会把每次启动都拖成整包 GLTF 解析）。三个宿主（CLI / editor / player）
     /// 共用这一份，避免某个宿主漏接而让同一份世界在不同宿主里跑出两种位置。
     pub fn root_motion_library(&mut self, world: &World) -> RootMotionLibrary {
-        let mut wanted = std::collections::HashSet::new();
+        let mut models = std::collections::BTreeSet::new();
         world.for_each::<Animator>(|key, animator| {
             if RootMotion::parse(&animator.root_motion).is_some() {
-                if let Some(id) = world.entity(key) {
-                    wanted.insert(id);
+                if let Some(model) = world.primary_model(key) {
+                    models.insert(model);
                 }
             }
         });
-        let mut models = std::collections::BTreeSet::new();
-        if !wanted.is_empty() {
-            world.for_each::<MeshRenderer>(|key, renderer| {
-                if let Some(id) = world.entity(key) {
-                    if wanted.contains(&id) {
-                        models.insert(renderer.model.clone());
-                    }
-                }
-            });
-        }
         let mut library = RootMotionLibrary::new();
         for model in models {
-            let Ok(Some(mesh)) = self.get(&model) else {
+            let Ok(Some(mesh)) = self.get(model) else {
                 continue;
             };
             let Some(animations) = mesh.animations.as_ref() else {
@@ -133,7 +123,7 @@ impl MeshCache {
             };
             let set = animations.root_motion_set();
             if !set.is_empty() {
-                library.insert(model, set);
+                library.insert(model.to_owned(), set);
             }
         }
         library

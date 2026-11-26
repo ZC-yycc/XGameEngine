@@ -96,6 +96,7 @@ pub(crate) fn render_world_rgba(
             renderer.set_clear_color([f64::from(r), f64::from(g), f64::from(b), 1.0]);
         }
         renderer.set_sky(settings.sky);
+        renderer.set_lod_bias(settings.lod_bias);
         // 曝光缺省 1.0；光晕默认关（旧端 `render.bloom` 省略时 intensity = 0）。
         renderer.set_exposure(settings.exposure);
         renderer.set_bloom(settings.bloom);

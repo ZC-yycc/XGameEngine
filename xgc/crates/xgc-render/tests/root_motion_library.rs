@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use xgc_render::MeshCache;
-use xgc_world::{Animator, MeshRenderer, Transform, World};
+use xgc_world::{Animator, LodGroup, LodLevel, MeshRenderer, Transform, World};
 
 const RESOURCES: &str = "../../../projects/XGame/Resources";
 
@@ -39,6 +39,30 @@ fn a_world_with_root_motion_builds_the_library() {
     assert_eq!(library.len(), 1, "Fox 有根运动配置，表里应有它的轨道");
     let set = library.set("Fox.gltf").expect("模型应有根运动轨道");
     assert!(!set.is_empty(), "轨道集不能为空");
+}
+
+#[test]
+fn lod_model_provides_the_root_motion_tracks() {
+    let mut world = World::new();
+    world.spawn((
+        Transform::default(),
+        LodGroup {
+            levels: vec![LodLevel {
+                model: "Fox.gltf".into(),
+                max_distance: 10.0,
+            }],
+        },
+        Animator {
+            clip: "Walk".into(),
+            autoplay: true,
+            root_motion: r#"(node:"b_Hip_01",axes:(true,false,true))"#.into(),
+            ..Animator::default()
+        },
+    ));
+    let mut meshes = MeshCache::new(RESOURCES);
+    let library = meshes.root_motion_library(&world);
+    assert_eq!(library.len(), 1);
+    assert!(library.set("Fox.gltf").is_some());
 }
 
 #[test]

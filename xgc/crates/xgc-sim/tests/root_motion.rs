@@ -2,7 +2,7 @@
 
 use xgc_sim::apply_root_motion;
 use xgc_world::{
-    Animator, GlobalTransform, MeshRenderer, RootMotionClip, RootMotionLibrary,
+    Animator, GlobalTransform, LodGroup, LodLevel, MeshRenderer, RootMotionClip, RootMotionLibrary,
     RootMotionNodeTrack, RootMotionSet, RootMotionTrack, Transform, World,
 };
 
@@ -75,6 +75,36 @@ fn moves_the_entity_by_the_clip_delta() {
     assert!((position[0] - 1.0).abs() < 1e-6, "{position:?}");
     let global = world.get::<GlobalTransform>(key).unwrap();
     assert!((global.position[0] - 1.0).abs() < 1e-6, "{global:?}");
+}
+
+#[test]
+fn lod_only_entity_uses_the_primary_model_for_root_motion() {
+    let mut world = World::new();
+    let key = world.spawn((
+        Transform::default(),
+        GlobalTransform::default(),
+        LodGroup {
+            levels: vec![
+                LodLevel::default(),
+                LodLevel {
+                    model: MODEL.to_string(),
+                    max_distance: 10.0,
+                },
+                LodLevel {
+                    model: "far.gltf".to_string(),
+                    max_distance: 0.0,
+                },
+            ],
+        },
+        animator(0.5, true, r#"(node: "hip", axes: (true, false, true))"#),
+    ));
+    let library = library(set(
+        vec![0.0, 1.0],
+        vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        "hip",
+    ));
+    apply_root_motion(&mut world, 0.5, &library);
+    assert_eq!(position(&world, key), [1.0, 0.0, 0.0]);
 }
 
 #[test]

@@ -11,6 +11,11 @@ use crate::sky::SkySettings;
 use crate::taa::TaaSettings;
 
 impl super::Renderer {
+    /// 设置乘到各级距离上的倍率（包含质量档位的缩放）。非正值固定使用首个可用级。
+    pub fn set_lod_bias(&mut self, bias: f32) {
+        self.lod_bias = bias;
+    }
+
     /// 设置天空（等价于旧 `project.ron` 的 `render.sky`）。
     pub fn set_sky(&mut self, sky: SkySettings) {
         self.sky = sky.sanitized();

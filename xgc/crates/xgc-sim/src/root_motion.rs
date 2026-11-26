@@ -14,8 +14,8 @@
 //! `GlobalTransform`。
 
 use xgc_world::{
-    root_motion_delta, to_local_position, to_world_delta, Animator, GlobalTransform, MeshRenderer,
-    MotionFade, MotionSpan, Parent, RootMotion, RootMotionLibrary, Transform, World,
+    root_motion_delta, to_local_position, to_world_delta, Animator, GlobalTransform, MotionFade,
+    MotionSpan, Parent, RootMotion, RootMotionLibrary, Transform, World,
 };
 
 /// 逐实体应用根运动；没有配置 / 没有轨道 / 数据非法的实体原样不动。
@@ -28,10 +28,10 @@ pub fn apply_root_motion(world: &mut World, dt: f32, library: &RootMotionLibrary
         let Some(motion) = RootMotion::parse(&animator.root_motion) else {
             return;
         };
-        let Some(renderer) = world.get::<MeshRenderer>(key) else {
-            return;
-        };
-        let Some(set) = library.set(&renderer.model) else {
+        let Some(set) = world
+            .primary_model(key)
+            .and_then(|model| library.set(model))
+        else {
             return;
         };
         let Some(delta) = frame_delta(animator, &motion, set, dt) else {

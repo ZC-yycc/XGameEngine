@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use super::assets::MeshCache;
 use super::bloom::{BloomSettings, BloomStage};
 use super::camera::{camera_view_projection_with_eye, Mat4, IDENTITY};
-use super::draw::{build_draw_list, DrawList};
+use super::draw::{build_draw_list_for_camera, DrawList};
 use super::exposure::EXPOSURE_DEFAULT;
 use super::frame_color::compose_colors;
 use super::frame_uniform::{create_frame_bind, FrameLighting, FrameTextures};
@@ -73,6 +73,7 @@ pub struct Renderer {
     hdr: Option<hdr::HdrStage>,
     /// 显式指定的场景采样数；`None` 跟适配器（`GpuContext::scene_sample_count`）。
     sample_count: Option<u32>,
+    lod_bias: f32,
     /// 画面设置里的曝光（`render.exposure`，缺省 1.0）：曲线前的线性光乘子。
     exposure: f32,
     /// 画面设置里的光晕节：开着时场景在 tone-map 前多跑一遍三级光晕链。
@@ -131,6 +132,7 @@ impl Renderer {
             particle_pipeline: None,
             hdr: None,
             sample_count: None,
+            lod_bias: 1.0,
             exposure: EXPOSURE_DEFAULT,
             bloom: BloomSettings::default(),
             bloom_stage: None,
@@ -222,7 +224,7 @@ impl Renderer {
         let view_proj = frame.view_projection(width, height);
         let eye = frame.camera.eye;
         let lighting = self.frame_lighting(world, eye);
-        let list = self.prepared_list(world, None)?;
+        let list = self.prepared_list(world, eye, None)?;
         let scene_view_proj = self.taa_begin(context, width, height, view_proj);
         let scene = self.hdr_scene_texture(context, width, height);
         let mut stats = self.render_list(
@@ -254,9 +256,9 @@ impl Renderer {
     ) -> Result<RenderStats, GpuError> {
         let width = target.width();
         let height = target.height();
-        let list = self.prepared_list(world, selected)?;
         let (view_proj, eye) =
             camera_view_projection_with_eye(world, width, height).unwrap_or((IDENTITY, [0.0; 3]));
+        let list = self.prepared_list(world, eye, selected)?;
         let lighting = self.frame_lighting(world, eye);
         let scene_view_proj = self.taa_begin(context, width, height, view_proj);
         let scene = self.hdr_scene_texture(context, width, height);
@@ -291,9 +293,10 @@ impl Renderer {
     fn prepared_list(
         &mut self,
         world: &World,
+        eye: [f32; 3],
         selected: Option<xgc_base::EntityId>,
     ) -> Result<DrawList, GpuError> {
-        let mut list = build_draw_list(world);
+        let mut list = build_draw_list_for_camera(world, eye, self.lod_bias);
         compose_colors(&mut self.meshes, &mut list, selected)
             .map_err(|err| GpuError::Mesh(err.to_string()))?;
         super::animated_pose::resolve(&mut self.meshes, &mut list)?;

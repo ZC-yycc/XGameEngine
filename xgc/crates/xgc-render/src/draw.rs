@@ -1,15 +1,12 @@
-//! 从世界抽取渲染 draw list：`render.mesh` + `render.material` + `GlobalTransform`。
-//!
-//! 当前还没有真实网格资产，`model` 只作为 key 记录；GPU 执行层先用内建三角形
-//! 验证"按实体出 draw call"的路径，网格加载在资产管线接上后替换。
+//! 从世界抽取网格、材质和变换，主绘制与阴影共用选定的网格。
 
-use xgc_base::EntityId;
+use xgc_base::{EntityId, EntityKey};
 use xgc_world::{
-    AnimationLayers, Animator, GlobalTransform, Material, MeshRenderer, Parent, Skeleton,
+    AnimationLayers, Animator, GlobalTransform, LodGroup, Material, MeshRenderer, Parent, Skeleton,
     SkeletonPose, World,
 };
 
-use super::camera::{model_matrix, Mat4};
+use super::camera::{length, model_matrix, sub, Mat4};
 use super::glb::LayerSample;
 
 /// 实体要播的 glTF 剪辑（`animation.animator` 的渲染侧投影）。
@@ -81,18 +78,34 @@ impl DrawList {
     }
 }
 
-/// 只收同时有 `GlobalTransform` 与 `render.mesh` 的实体；结果按 EntityId 排序，
-/// 与 archetype / 行序无关。
+/// 使用首个可用 LOD 构造取景、裁剪和拾取所需的网格列表，顺序与 archetype / 行序无关。
 pub fn build_draw_list(world: &World) -> DrawList {
+    collect_draw_list(world, None)
+}
+
+pub(crate) fn build_draw_list_for_camera(world: &World, eye: [f32; 3], bias: f32) -> DrawList {
+    collect_draw_list(world, Some((eye, bias)))
+}
+
+fn collect_draw_list(world: &World, camera: Option<([f32; 3], f32)>) -> DrawList {
     let mut items = Vec::new();
-    world.for_each::<MeshRenderer>(|key, mesh| {
+    let mut push = |key: EntityKey| {
         let Some(entity) = world.entity(key) else {
             return;
         };
         let Some(transform) = world.get::<GlobalTransform>(key) else {
             return;
         };
-        let material = world.get::<Material>(key).cloned();
+        let model = match camera {
+            Some((eye, bias)) => {
+                world.model_at_distance(key, || length(sub(transform.position, eye)), bias)
+            }
+            None => world.primary_model(key),
+        };
+        let Some(model) = model else {
+            return;
+        };
+        let material = world.get::<Material>(key);
         let pose = skeleton_pose(world, key);
         // 场景骨骼姿态优先：迁移过来的 glTF 角色没有 Skeleton 实体，走模型自带动画。
         // 混合层：状态机 / 时钟已由 `AnimationLayerSystem` 推进，这里只把组件
@@ -136,18 +149,11 @@ pub fn build_draw_list(world: &World) -> DrawList {
         };
         items.push(DrawItem {
             entity,
-            model: mesh.model.clone(),
-            color: material
-                .as_ref()
-                .map(|material| material.base_color)
-                .unwrap_or([1.0; 4]),
-            roughness: material
-                .as_ref()
-                .map(|material| material.roughness)
-                .unwrap_or(0.0),
+            model: model.to_owned(),
+            color: material.map_or([1.0; 4], |material| material.base_color),
+            roughness: material.map_or(0.0, |material| material.roughness),
             metallic: 0.0,
             material_asset: material
-                .as_ref()
                 .map(|material| material.asset.clone())
                 .unwrap_or_default(),
             has_material: material.is_some(),
@@ -156,13 +162,20 @@ pub fn build_draw_list(world: &World) -> DrawList {
             animation,
             layers,
         });
+    };
+    world.for_each::<MeshRenderer>(|key, _| push(key));
+    world.for_each::<LodGroup>(|key, _| {
+        // 迁移时可能只带 LOD；有基础模型的实体已在上一趟处理。
+        if world.get::<MeshRenderer>(key).is_none() {
+            push(key);
+        }
     });
     items.sort_by_key(|item| item.entity);
     DrawList { items }
 }
 
 /// 蒙皮网格约定：沿 Parent 向上找到 Skeleton 根，读取该根的 `animation.pose`。
-fn skeleton_pose(world: &World, mut key: xgc_base::EntityKey) -> Option<Vec<[f32; 16]>> {
+fn skeleton_pose(world: &World, mut key: EntityKey) -> Option<Vec<[f32; 16]>> {
     for _ in 0..64 {
         if world.get::<Skeleton>(key).is_some() {
             let pose = world.get::<SkeletonPose>(key)?;
@@ -178,7 +191,7 @@ fn skeleton_pose(world: &World, mut key: xgc_base::EntityKey) -> Option<Vec<[f32
 ///
 /// 权重在这里只剩「是否生效」的判断，真正的混合在 `glb::layers`；层状态机 /
 /// 时钟 / 淡入进度由模拟侧 `AnimationLayerSystem` 推进，渲染不重复算。
-fn build_layers(world: &World, key: xgc_base::EntityKey) -> Vec<LayerSample> {
+fn build_layers(world: &World, key: EntityKey) -> Vec<LayerSample> {
     let Some(component) = world.get::<AnimationLayers>(key) else {
         return Vec::new();
     };
@@ -197,4 +210,59 @@ fn build_layers(world: &World, key: xgc_base::EntityKey) -> Vec<LayerSample> {
             mask: layer.mask.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_draw_list_for_camera;
+    use xgc_world::{GlobalTransform, LodGroup, LodLevel, World};
+
+    #[test]
+    fn camera_lod_prefers_smallest_fitting_limit_and_stable_ties() {
+        let mut world = World::new();
+        let key = world.spawn((
+            GlobalTransform::default(),
+            LodGroup {
+                levels: [
+                    ("", 1.0),
+                    ("wide", 12.0),
+                    ("unlimited", -1.0),
+                    ("near", 4.0),
+                    ("tied", 4.0),
+                    ("nan", f32::NAN),
+                ]
+                .into_iter()
+                .map(|(model, max_distance)| LodLevel {
+                    model: model.into(),
+                    max_distance,
+                })
+                .collect(),
+            },
+        ));
+        let selected = |world: &World, distance: f32, bias: f32| {
+            build_draw_list_for_camera(world, [distance, 0.0, 0.0], bias)
+                .items
+                .into_iter()
+                .next()
+                .map(|item| item.model)
+        };
+        for (distance, bias, expected) in [
+            (4.0, 1.0, "near"),
+            (4.01, 1.0, "wide"),
+            (13.0, 1.0, "unlimited"),
+            (8.0, 2.0, "near"),
+            (5.0, f32::NAN, "wide"),
+            (f32::NAN, 1.0, "near"),
+            (13.0, 0.0, "wide"),
+            (13.0, -1.0, "wide"),
+        ] {
+            assert_eq!(selected(&world, distance, bias).as_deref(), Some(expected));
+        }
+
+        let levels = &mut world.get_mut::<LodGroup>(key).unwrap().levels;
+        levels.remove(2);
+        assert_eq!(selected(&world, 13.0, 1.0).as_deref(), Some("nan"));
+        world.get_mut::<LodGroup>(key).unwrap().levels.pop();
+        assert_eq!(selected(&world, 13.0, 1.0), None);
+    }
 }

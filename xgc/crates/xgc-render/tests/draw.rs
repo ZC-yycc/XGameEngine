@@ -1,7 +1,7 @@
-//! Draw list 抽取回归：只收带 GlobalTransform 的 render.mesh，按 EntityId 稳定排序。
+//! Draw list 抽取回归：收集带 GlobalTransform 的渲染实体，按 EntityId 稳定排序。
 
-use xgc_render::build_draw_list;
-use xgc_world::{GlobalTransform, Material, MeshRenderer, Transform, World};
+use xgc_render::{build_draw_list, scene_bounds, Bounds, MeshCache};
+use xgc_world::{GlobalTransform, LodGroup, LodLevel, Material, MeshRenderer, Transform, World};
 
 #[test]
 fn draw_list_extracts_mesh_material_and_skips_missing_global() {
@@ -64,4 +64,64 @@ fn draw_item_carries_global_transform() {
     assert_eq!(list.items[0].transform[12], 2.0);
     assert_eq!(list.items[0].transform[13], 3.0);
     assert_eq!(list.items[0].transform[14], 4.0);
+}
+
+#[test]
+fn first_lod_supplies_geometry_and_bounds_with_no_base_mesh() {
+    let mut world = World::new();
+    let lod = LodGroup {
+        levels: vec![
+            LodLevel::default(),
+            LodLevel {
+                model: "builtin://cube".into(),
+                max_distance: 8.0,
+            },
+            LodLevel {
+                model: "builtin://plane".into(),
+                max_distance: 0.0,
+            },
+        ],
+    };
+    let only_lod = world.spawn((GlobalTransform::default(), lod.clone()));
+    let with_base = world.spawn((
+        GlobalTransform {
+            position: [2.0, 0.0, 0.0],
+            ..GlobalTransform::default()
+        },
+        MeshRenderer {
+            model: "../unused-base.glb".into(),
+        },
+        lod,
+    ));
+    let empty_lod = world.spawn((
+        GlobalTransform::default(),
+        MeshRenderer {
+            model: "builtin://quad".into(),
+        },
+        LodGroup {
+            levels: vec![LodLevel::default()],
+        },
+    ));
+
+    let list = build_draw_list(&world);
+    let models: Vec<_> = list
+        .items
+        .iter()
+        .map(|item| (item.entity, item.model.as_str()))
+        .collect();
+    assert_eq!(
+        models,
+        [
+            (world.entity(only_lod).unwrap(), "builtin://cube"),
+            (world.entity(with_base).unwrap(), "builtin://cube"),
+            (world.entity(empty_lod).unwrap(), "builtin://quad"),
+        ]
+    );
+    assert_eq!(
+        scene_bounds(&world, &mut MeshCache::new(".")).unwrap(),
+        Some(Bounds {
+            min: [-0.5; 3],
+            max: [2.5, 0.5, 0.5],
+        })
+    );
 }
