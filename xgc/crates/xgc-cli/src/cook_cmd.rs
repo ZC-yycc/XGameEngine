@@ -4,10 +4,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
-use xgc_asset::{resolve_read_path, AssetCatalog, CookRuntime, SearchPaths};
+use xgc_asset::{resolve_read_path, AssetCatalog, CookRuntime, PackTarget, SearchPaths};
 use xgc_base::path::normalize_project_relative;
 use xgc_host::{asset_paths, ScriptedRunner};
-use xgc_store::{load_world, save_world, save_world_binary};
+use xgc_store::{load_world, load_world_binary, save_world, save_world_binary};
 use xgc_world::{builtin_registry, World, WorldData};
 
 use crate::runtime_cmd::load_native_project;
@@ -59,14 +59,17 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
         eprintln!("用法：xgc pack <世界.json> <项目根> <输出目录>");
         return ExitCode::from(2);
     };
-    let data = match load_world(Path::new(world_path)) {
+    let root = Path::new(root);
+    let world_path = Path::new(world_path);
+    // 先执行恢复，读取入参的错误仍保留原来的退出码和优先级。
+    let target = PackTarget::prepare(root, world_path, Path::new(out));
+    let data = match load_world(world_path) {
         Ok(data) => data,
         Err(err) => {
             eprintln!("读取世界失败：{err}");
             return ExitCode::from(2);
         }
     };
-    let root = Path::new(root);
     let runtime = match cook_runtime(root) {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -74,11 +77,17 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
             return ExitCode::from(2);
         }
     };
+    let target = match target {
+        Ok(target) => target,
+        Err(err) => {
+            eprintln!("烹饪失败：{err}");
+            return ExitCode::from(1);
+        }
+    };
     let search = SearchPaths::new(&runtime.search_paths);
     let registry = builtin_registry();
-    let mut manifest = match xgc_asset::cook_project_with_dependencies(
-        root,
-        Path::new(out),
+    let (manifest, warning) = match xgc_asset::pack_project(
+        &target,
         runtime,
         |root, catalog| referenced_paths(root, &data, catalog, &search, &registry),
         |root, catalog, path| {
@@ -87,34 +96,16 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
             };
             referenced_paths(root, &prefab, catalog, &search, &registry)
         },
+        |package| write_and_check_worlds(package, &data),
     ) {
-        Ok(manifest) => manifest,
+        Ok(result) => result,
         Err(err) => {
             eprintln!("烹饪失败：{err}");
             return ExitCode::from(1);
         }
     };
-    if let Err(err) = save_world(&Path::new(out).join("world.json"), &data) {
-        eprintln!("写入 cooked world 失败：{err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = save_world_binary(&Path::new(out).join("world.xgcb"), &data) {
-        eprintln!("写入二进制 cooked world 失败：{err}");
-        return ExitCode::from(1);
-    }
-    for name in ["world.json", "world.xgcb"] {
-        match xgc_asset::file_entry(Path::new(out), name) {
-            Ok(entry) => manifest.files.push(entry),
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        }
-    }
-    manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
-    if let Err(err) = xgc_asset::write_manifest(Path::new(out), &mut manifest) {
-        eprintln!("写入 manifest 失败：{err}");
-        return ExitCode::from(1);
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
     }
     println!(
         "pack: {} 个文件（含 world.json） -> {}",
@@ -122,6 +113,23 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
         out
     );
     ExitCode::SUCCESS
+}
+
+fn write_and_check_worlds(package: &Path, data: &WorldData) -> Result<(), String> {
+    let json = package.join("world.json");
+    let binary = package.join("world.xgcb");
+    save_world(&json, data).map_err(|err| format!("写入 cooked world 失败：{err}"))?;
+    save_world_binary(&binary, data)
+        .map_err(|err| format!("写入二进制 cooked world 失败：{err}"))?;
+    let text_copy = load_world(&json).map_err(|err| format!("校验 cooked world 失败：{err}"))?;
+    let binary_copy =
+        load_world_binary(&binary).map_err(|err| format!("校验二进制 cooked world 失败：{err}"))?;
+    if text_copy != binary_copy {
+        return Err("cooked JSON 与二进制世界内容不同".into());
+    }
+    World::new()
+        .restore_world_data(&binary_copy)
+        .map_err(|err| format!("恢复 cooked world 失败：{err}"))
 }
 
 /// `xgc run-cooked <输出目录> [帧]`：从 cooked 目录加载世界并跑脚本。

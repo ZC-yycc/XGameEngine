@@ -7,10 +7,23 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use xgc_base::path::normalize_project_relative;
 
-use crate::{catalog_from_metas, find_files_in, is_meta, AssetCatalog};
+use crate::{catalog_from_metas, find_files_in, is_link, is_meta, AssetCatalog};
+
+use self::publish::conflict;
+
+mod publish;
+
+pub use publish::PackTarget;
 
 const COOK_VERSION: u32 = 2;
 const MANIFEST: &str = "cook.json";
+const WORLDS: [&str; 2] = ["world.json", "world.xgcb"];
+
+fn has_reserved_name(name: &str, names: &[&str]) -> bool {
+    names
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
 const EXTENSIONS: &[&str] = &[
     "glb", "gltf", "bin", "wav", "lua", "png", "ppm", "ron", "meta", "ttf", "mat",
 ];
@@ -81,20 +94,44 @@ pub fn cook_project_with_runtime(
     runtime: CookRuntime,
     keep: Option<&BTreeSet<String>>,
 ) -> Result<CookManifest, String> {
-    cook(root, out, runtime, |_, sources| {
+    let runtime = runtime.normalized()?;
+    if !root.is_dir() {
+        return Err(format!("项目根不是目录：{}", root.display()));
+    }
+    fs::create_dir_all(out).map_err(|err| format!("创建输出目录失败：{err}"))?;
+    let source = root
+        .canonicalize()
+        .map_err(|err| format!("定位项目根失败：{err}"))?;
+    let output = out
+        .canonicalize()
+        .map_err(|err| format!("定位输出目录失败：{err}"))?;
+    if source == output {
+        return Err("输出目录不能是项目根目录".into());
+    }
+    let mut manifest = cook(&source, &output, &output, runtime, |sources| {
         dependency_closure(sources, keep, |_| BTreeSet::new())
-    })
+    })?;
+    write_manifest(&output, &mut manifest)?;
+    Ok(manifest)
 }
 
-/// 两个回调返回世界 / 预制体的项目相对引用，源目录与 GUID 目录共用同一文件表。
-pub fn cook_project_with_dependencies(
-    root: &Path,
-    out: &Path,
+/// 只在完整组包并自检成功后替换正式输出。世界的文件格式由调用方负责。
+pub fn pack_project(
+    target: &PackTarget,
     runtime: CookRuntime,
     world_dependencies: impl FnOnce(&Path, &AssetCatalog) -> BTreeSet<String>,
     mut prefab_dependencies: impl FnMut(&Path, &AssetCatalog, &Path) -> BTreeSet<String>,
-) -> Result<CookManifest, String> {
-    cook(root, out, runtime, |source_root, sources| {
+    write_worlds: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(CookManifest, Option<String>), String> {
+    let runtime = runtime.normalized()?;
+    let source_root = &target.source;
+    if !source_root.is_dir() {
+        return Err(format!("项目根不是目录：{}", source_root.display()));
+    }
+    let staging = target.staging()?;
+    let package = staging.package();
+    fs::create_dir(&package).map_err(|err| format!("创建组包目录失败：{err}"))?;
+    let mut manifest = cook(source_root, &package, &target.output, runtime, |sources| {
         let mut metas: Vec<_> = sources
             .values()
             .map(PathBuf::as_path)
@@ -107,31 +144,39 @@ pub fn cook_project_with_dependencies(
         dependency_closure(sources, Some(&keep), |path| {
             prefab_dependencies(source_root, &catalog, path)
         })
-    })
+    })?;
+    if manifest.files.iter().any(|file| {
+        has_reserved_name(
+            file.path.split('/').next().expect("资产路径已校验"),
+            &[MANIFEST, publish::MARKER],
+        )
+    }) {
+        return Err("资产路径占用 cooked 保留名称".into());
+    }
+    write_worlds(&package)?;
+    for name in WORLDS {
+        manifest.files.push(file_entry(&package, name)?);
+    }
+    manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
+    write_manifest(&package, &mut manifest)?;
+    check_package_entries(&package, &manifest)?;
+    let readback = verify_manifest(&package).map_err(|errors| errors.join("\n"))?;
+    if readback.as_ref() != Some(&manifest) {
+        return Err("回读的 cook.json 与暂存清单不同".into());
+    }
+    let warning = target.release(&staging)?;
+    Ok((manifest, warning))
 }
 
 fn cook(
-    root: &Path,
+    source_root: &Path,
     out: &Path,
+    published: &Path,
     runtime: CookRuntime,
-    select: impl FnOnce(&Path, &BTreeMap<String, PathBuf>) -> BTreeSet<String>,
+    select: impl FnOnce(&BTreeMap<String, PathBuf>) -> BTreeSet<String>,
 ) -> Result<CookManifest, String> {
-    let runtime = runtime.normalized()?;
-    if !root.is_dir() {
-        return Err(format!("项目根不是目录：{}", root.display()));
-    }
-    fs::create_dir_all(out).map_err(|err| format!("创建输出目录失败：{err}"))?;
-    let source_root = root
-        .canonicalize()
-        .map_err(|err| format!("定位项目根失败：{err}"))?;
-    let output_root = out
-        .canonicalize()
-        .map_err(|err| format!("定位输出目录失败：{err}"))?;
-    if source_root == output_root {
-        return Err("输出目录不能是项目根目录".into());
-    }
-    let sources = collect_sources(&source_root, &output_root)?;
-    let mut files = select(&source_root, &sources);
+    let sources = collect_sources(source_root, published)?;
+    let mut files = select(&sources);
     if let Some(input) = &runtime.input {
         if !sources.contains_key(input) {
             return Err(format!("缺少项目输入映射：{input}"));
@@ -184,7 +229,6 @@ fn cook(
             let _ = fs::remove_file(out.join(stale));
         }
     }
-    write_manifest(out, &mut manifest)?;
     Ok(manifest)
 }
 
@@ -192,7 +236,8 @@ fn collect_sources(root: &Path, out: &Path) -> Result<BTreeMap<String, PathBuf>,
     let paths = find_files_in(
         root,
         |directory| {
-            directory != out
+            !publish::within(directory, out)
+                && !publish::internal_directory(directory)
                 && !matches!(
                     directory.file_name().and_then(|name| name.to_str()),
                     Some(".git" | "target" | ".autosave" | "dist")
@@ -207,7 +252,7 @@ fn collect_sources(root: &Path, out: &Path) -> Result<BTreeMap<String, PathBuf>,
             let relative = path.strip_prefix(root).ok()?.to_str()?;
             let key = normalize_project_relative(relative).ok()?;
             // 打包生成的顶层文件不能被外链重新解释为源资产。
-            if matches!(key.as_str(), MANIFEST | "world.json" | "world.xgcb") {
+            if has_reserved_name(&key, &WORLDS) || has_reserved_name(&key, &[MANIFEST]) {
                 return None;
             }
             Some((key, path))
@@ -321,7 +366,7 @@ fn signature(manifest: &CookManifest) -> String {
     fnv_hex(&data)
 }
 
-pub fn file_entry(out: &Path, relative: &str) -> Result<CookedFile, String> {
+fn file_entry(out: &Path, relative: &str) -> Result<CookedFile, String> {
     let path = out.join(relative);
     let bytes = fs::read(&path).map_err(|err| format!("读取 {} 失败：{err}", path.display()))?;
     Ok(CookedFile {
@@ -331,7 +376,7 @@ pub fn file_entry(out: &Path, relative: &str) -> Result<CookedFile, String> {
     })
 }
 
-pub fn write_manifest(out: &Path, manifest: &mut CookManifest) -> Result<(), String> {
+fn write_manifest(out: &Path, manifest: &mut CookManifest) -> Result<(), String> {
     manifest.signature = signature(manifest);
     let text = serde_json::to_string_pretty(manifest)
         .map_err(|err| format!("manifest 序列化失败：{err}"))?;
@@ -345,25 +390,30 @@ pub fn verify_manifest(out: &Path) -> Result<Option<CookManifest>, Vec<String>> 
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(vec![format!("读取 cook.json 失败：{err}")]),
     };
+    let manifest = parse_manifest(&text).map_err(|err| vec![err])?;
+    verify_files(out, &manifest)?;
+    Ok(Some(manifest))
+}
+
+fn parse_manifest(text: &str) -> Result<CookManifest, String> {
     let manifest: CookManifest =
-        serde_json::from_str(&text).map_err(|err| vec![format!("cook.json 解析失败：{err}")])?;
+        serde_json::from_str(text).map_err(|err| format!("cook.json 解析失败：{err}"))?;
     if manifest.version != COOK_VERSION {
-        return Err(vec![format!(
+        return Err(format!(
             "cook.json 版本 {} 不受支持，当前版本为 {COOK_VERSION}，请重新打包",
             manifest.version
-        )]);
+        ));
     }
     if manifest.signature != signature(&manifest) {
-        return Err(vec!["manifest 签名不匹配".to_string()]);
+        return Err("manifest 签名不匹配".into());
     }
-    let normalized = manifest
-        .runtime
-        .clone()
-        .normalized()
-        .map_err(|err| vec![err])?;
-    if normalized != manifest.runtime {
-        return Err(vec!["cook.json 的运行配置路径未规范化".to_string()]);
+    if manifest.runtime.clone().normalized()? != manifest.runtime {
+        return Err("cook.json 的运行配置路径未规范化".into());
     }
+    Ok(manifest)
+}
+
+fn verify_files(out: &Path, manifest: &CookManifest) -> Result<(), Vec<String>> {
     let mut differences = Vec::new();
     if let Some(input) = &manifest.runtime.input {
         if !manifest.files.iter().any(|file| &file.path == input) {
@@ -382,10 +432,55 @@ pub fn verify_manifest(out: &Path) -> Result<Option<CookManifest>, Vec<String>> 
         }
     }
     if differences.is_empty() {
-        Ok(Some(manifest))
+        Ok(())
     } else {
         Err(differences)
     }
+}
+
+/// 只回收清单登记的文件及其父目录。无关文件、空目录和链接都留给原有者。
+fn check_package_entries(out: &Path, manifest: &CookManifest) -> Result<(), String> {
+    let mut files = BTreeSet::from([Path::new(MANIFEST)]);
+    let mut directories = BTreeSet::new();
+    for file in &manifest.files {
+        let top = file.path.split('/').next().unwrap_or_default();
+        if normalize_project_relative(&file.path).as_deref() != Ok(file.path.as_str())
+            || has_reserved_name(top, &[MANIFEST, publish::MARKER])
+            || !files.insert(Path::new(&file.path))
+        {
+            return Err(conflict(&out.join(&file.path)));
+        }
+        directories.extend(
+            Path::new(&file.path)
+                .ancestors()
+                .skip(1)
+                .filter(|path| !path.as_os_str().is_empty()),
+        );
+    }
+    if WORLDS.iter().any(|name| !files.contains(Path::new(name))) {
+        return Err(conflict(out));
+    }
+    let mut pending = vec![out.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|err| format!("读取 {} 失败：{err}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("读取 {} 失败：{err}", directory.display()))?;
+            let path = entry.path();
+            let relative = path.strip_prefix(out).expect("扫描路径来自输出目录");
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|err| format!("读取 {} 失败：{err}", path.display()))?;
+            if is_link(&metadata) {
+                return Err(conflict(&path));
+            }
+            if metadata.is_dir() && directories.contains(relative) {
+                pending.push(path);
+            } else if !metadata.is_file() || !files.contains(relative) {
+                return Err(conflict(&path));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn fnv_hex(bytes: &[u8]) -> String {

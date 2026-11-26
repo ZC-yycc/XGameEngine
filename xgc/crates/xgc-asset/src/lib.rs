@@ -9,8 +9,8 @@ mod cook;
 mod read_path;
 
 pub use cook::{
-    cook_project, cook_project_filtered, cook_project_with_dependencies, cook_project_with_runtime,
-    file_entry, verify_manifest, write_manifest, CookManifest, CookRuntime, CookedFile,
+    cook_project, cook_project_filtered, cook_project_with_runtime, pack_project, verify_manifest,
+    CookManifest, CookRuntime, CookedFile, PackTarget,
 };
 pub use read_path::{resolve_read_path, AssetPaths, ReadPathError, SearchPaths};
 
@@ -140,24 +140,36 @@ fn find_files_in(
     while let Some(directory) = directories.pop() {
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
-            let kind = entry.file_type()?;
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                // junction 可以绕过 is_symlink，目录和文件都检查属性。
-                const REPARSE_POINT: u32 = 0x400;
-                if entry.metadata()?.file_attributes() & REPARSE_POINT != 0 {
-                    continue;
-                }
-            }
             let path = entry.path();
-            if kind.is_dir() && descend(&path) {
+            let kind = entry.file_type()?;
+            if !(kind.is_dir() && descend(&path) || kind.is_file() && matches(&path)) {
+                continue;
+            }
+            // 先排除构建目录，再检查属性。并行发布可能在枚举后移走这些目录。
+            #[cfg(windows)]
+            if is_link(&entry.metadata()?) {
+                continue;
+            }
+            if kind.is_dir() {
                 directories.push(path);
-            } else if kind.is_file() && matches(&path) {
+            } else {
                 files.push(path);
             }
         }
     }
     files.sort();
     Ok(files)
+}
+
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // 目录 junction 不一定会被 is_symlink 识别。
+        const REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    meta.is_symlink()
 }
