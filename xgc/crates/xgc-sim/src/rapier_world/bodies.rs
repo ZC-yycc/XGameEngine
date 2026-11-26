@@ -128,7 +128,7 @@ impl RapierWorld {
     /// 直接当 `UnitQuaternion` 用会得到非正交矩阵（落地接触分叉的根因）。
     fn insert_body(&mut self, world: &World, key: EntityKey) -> Option<BodyLink> {
         let def = world.get::<PhysicsBody>(key)?.clone();
-        let world_transform = world_transform(world, key)?;
+        let world_transform = world_transform(world, key, &mut self.body_transform_chain)?;
         let (body, collider) = build_body(&def, &world_transform);
         let handle = self.bodies.insert(body);
         let collider = self
@@ -307,8 +307,12 @@ fn build_body(def: &PhysicsBody, world: &Transform) -> (RigidBody, Collider) {
 /// 分解按 glam 语义：平移取第四列；缩放取三列长度（行列式为负时翻转 X 轴缩放）；
 /// 旋转 = 归一化后的列基（`Rotation3` → 单位四元数）。这一步顺带把非单位四元数
 /// 归一化，与旧端建体口径一致。
-pub(super) fn world_transform(world: &World, key: EntityKey) -> Option<Transform> {
-    let mut chain = Vec::new();
+pub(super) fn world_transform(
+    world: &World,
+    key: EntityKey,
+    chain: &mut Vec<Transform>,
+) -> Option<Transform> {
+    chain.clear();
     let mut cursor = key;
     loop {
         chain.push(world.get::<Transform>(cursor).copied()?);
@@ -322,9 +326,8 @@ pub(super) fn world_transform(world: &World, key: EntityKey) -> Option<Transform
         }
         cursor = world.key(parent.entity)?;
     }
-    chain.reverse();
     let mut matrix = Matrix4::identity();
-    for transform in &chain {
+    for transform in chain.iter().rev() {
         matrix *= local_matrix(transform);
     }
     Some(decompose(&matrix))
@@ -516,7 +519,8 @@ mod tests {
             },
             Parent { entity: parent_id },
         ));
-        let world_transform = super::world_transform(&world, child).expect("子实体有变换");
+        let world_transform =
+            super::world_transform(&world, child, &mut Vec::new()).expect("子实体有变换");
         assert!(
             (world_transform.position[0] + 5.0).abs() < 1e-5,
             "{world_transform:?}"

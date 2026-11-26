@@ -55,6 +55,8 @@ pub struct RapierWorld {
     built_signature: Option<Vec<BodySignature>>,
     /// `ensure_built` 的每帧探针，跨帧复用避免热路径分配。
     body_probe: Vec<BodySignature>,
+    /// 建体和运动学同步串行复用父链缓冲，深度增大时才扩容。
+    body_transform_chain: Vec<Transform>,
     /// 建体表整份重建的次数（诊断口径）：同一份世界稳态下应恒为 1。
     rebuilds: u64,
     /// 建体表被增量修补的次数（诊断口径）：每次修补各算一次（同帧多处增删合并为一次）。
@@ -109,6 +111,7 @@ impl RapierWorld {
             links: Vec::new(),
             built_signature: None,
             body_probe: Vec::new(),
+            body_transform_chain: Vec::new(),
             rebuilds: 0,
             body_patches: 0,
             characters: Vec::new(),
@@ -139,7 +142,8 @@ impl RapierWorld {
             }
             // 旧端 `push_kinematic_bodies` 用的是世界矩阵；子实体的运动学体只有按世界
             // 变换推才算对位置（局部推等于把子物体瞬移回父节点坐标系）。
-            let Some(transform) = world_transform(world, link.key) else {
+            let Some(transform) = world_transform(world, link.key, &mut self.body_transform_chain)
+            else {
                 continue;
             };
             if let Some(body) = self.bodies.get_mut(link.body) {

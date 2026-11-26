@@ -225,6 +225,55 @@ fn hashing_many_entities_reuses_the_sort_buffer() {
     assert_eq!(allocations, 0, "大世界哈希的排序不能分配临时缓冲");
 }
 
+#[test]
+fn kinematic_parent_chain_reuses_working_storage() {
+    use xgc_sim::{RapierWorld, FIXED_DT};
+    use xgc_world::Parent;
+
+    let mut world = World::new();
+    let root = world.spawn((Transform::default(),));
+    let mut parent = world.entity(root).unwrap();
+    // 八层链会超过临时 Vec 首次分配的容量，覆盖扩容后的复用。
+    for _ in 0..6 {
+        let node = world.spawn((Transform::default(), Parent { entity: parent }));
+        parent = world.entity(node).unwrap();
+    }
+    world.spawn((
+        Transform::default(),
+        Parent { entity: parent },
+        PhysicsBody {
+            kind: "kinematic".into(),
+            ..PhysicsBody::default()
+        },
+    ));
+
+    let mut physics = RapierWorld::new();
+    let mut step = |frame| {
+        let y = 2.0 + (frame % 4) as f32 * 0.5;
+        world.get_mut::<Transform>(root).unwrap().position[1] = y;
+        physics.step(&mut world, FIXED_DT);
+        // 每一步都从碰撞世界读父节点的新位置，避免建体后跳过同步时假绿。
+        assert_eq!(physics.ground_under(0.0, 0.0, 16.0), Some(y + 0.5));
+    };
+    for frame in 0..8 {
+        step(frame);
+    }
+
+    reset_counter();
+    for frame in 8..68 {
+        step(frame);
+    }
+    let (allocations, bytes) = snapshot().expect("量测线程的计数器");
+    eprintln!("kinematic parent chain: 60 帧 {allocations} 次分配 / {bytes} 字节");
+    assert_eq!(physics.rebuild_count(), 1);
+    assert_eq!(physics.body_patch_count(), 0);
+    // 为固定负载保留 Rapier 单步的分配预算；父链扩容只需在预热阶段发生。
+    assert!(
+        allocations <= 60 * 3,
+        "运动学刚体父链超预算：60 帧 {allocations} 次分配 / {bytes} 字节"
+    );
+}
+
 /// 默认忽略：帧耗时只在 `--release` 下有意义。
 #[test]
 #[ignore = "计时只在 release 下有意义：cargo test -p xgc-sim --release --test steady_state -- --ignored --nocapture"]
