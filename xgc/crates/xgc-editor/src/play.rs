@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use xgc_host::{FixedStepClock, ScriptedRunner};
+use xgc_host::{asset_paths, FixedStepClock, ScriptedRunner};
 use xgc_sim::{FrameRecord, InputMap, InputState};
 use xgc_world::{UiInput, World};
 
@@ -20,6 +20,13 @@ impl EditorState {
                 }
             })
         })
+    }
+
+    pub(crate) fn asset_paths(&self) -> xgc_asset::AssetPaths {
+        let search_paths = self.project.as_ref().map_or(&[][..], |project| {
+            project.manifest().search_paths.as_slice()
+        });
+        asset_paths(self.asset_root(), search_paths)
     }
 
     pub fn play(&mut self) -> Result<(), String> {
@@ -44,7 +51,7 @@ impl EditorState {
         world
             .restore_world_data(&self.world.world_data())
             .map_err(|err| format!("进入 Play 失败：{err}"))?;
-        let (runner, _) = ScriptedRunner::with_assets(world, asset_root);
+        let (runner, _) = ScriptedRunner::with_assets(world, self.asset_paths());
         self.play = Some(PlaySession {
             selected: self.selected,
             clock: FixedStepClock::new(runner.fixed_dt()),

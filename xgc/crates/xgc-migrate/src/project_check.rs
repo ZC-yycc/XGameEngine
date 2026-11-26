@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use xgc_asset::{scan, AssetCatalog};
+use xgc_asset::{resolve_read_path, scan, AssetCatalog, ReadPathError, SearchPaths};
 use xgc_base::path::normalize_project_relative;
 
 use crate::old_scene::{OldEntity, OldScene};
@@ -243,12 +243,10 @@ pub fn check_old_project(root: &Path) -> Result<ProjectCheckReport, ProjectCheck
     ] {
         let _ = normalize_into(&mut report, dir, "content.dir");
     }
-    let mut search_paths = Vec::new();
     for search in &content.search_paths {
-        if let Some(normalized) = normalize_into(&mut report, search, "content.search_path") {
-            search_paths.push(normalized);
-        }
+        normalize_into(&mut report, search, "content.search_path");
     }
+    let search_paths = SearchPaths::new(&content.search_paths);
 
     let entry = match normalize_project_relative(&project.entry_scene) {
         Ok(entry) => entry,
@@ -387,7 +385,7 @@ fn check_scene(
     text: &str,
     scene: &OldScene,
     catalog: &AssetCatalog,
-    search_paths: &[String],
+    search_paths: &SearchPaths,
     prefab_cache: &mut BTreeMap<PathBuf, Result<HashSet<u64>, String>>,
     script_paths: &mut BTreeSet<String>,
     rust_components: &mut usize,
@@ -442,7 +440,7 @@ fn check_entity(
     entity: &OldEntity,
     ids: &HashSet<u64>,
     catalog: &AssetCatalog,
-    search_paths: &[String],
+    search_paths: &SearchPaths,
     prefab_cache: &mut BTreeMap<PathBuf, Result<HashSet<u64>, String>>,
     script_paths: &mut BTreeSet<String>,
     rust_components: &mut usize,
@@ -486,34 +484,24 @@ fn check_entity(
     for entry in &entity.components.entries {
         match &entry.data {
             OldComponentData::Lua { path } => {
-                if let Some(guid) = path.strip_prefix("guid://") {
-                    match catalog.resolve(guid) {
-                        Some(resolved) if resolved.is_file() => {
-                            script_paths.insert(format!("guid://{guid}"));
-                        }
-                        _ => report.problems.push(format!(
-                            "[script.missing] {rel}: 实体 {} 引用的脚本 GUID 没有对应文件：{path}",
-                            entity.id.0
-                        )),
+                match resolve_read_path(root, path, search_paths, Some(catalog)) {
+                    Ok(_) => {
+                        let reference = if path.starts_with("guid://") {
+                            path.clone()
+                        } else {
+                            normalize_project_relative(path).expect("读取前已校验脚本路径")
+                        };
+                        script_paths.insert(reference);
                     }
-                } else {
-                    match normalize_project_relative(path) {
-                        Ok(normalized) => {
-                            if resolve_read(root, &normalized, search_paths).is_some() {
-                                script_paths.insert(normalized);
-                            } else {
-                                report.problems.push(format!(
-                                    "[script.missing] {rel}: 实体 {} 引用的脚本不存在：{path}",
-                                    entity.id.0
-                                ));
-                            }
-                        }
-                        Err(defect) => report.problems.push(format!(
-                            "[script.path] {rel}: 实体 {} 的脚本路径不合法（{}）：{path}",
-                            entity.id.0,
-                            defect.ascii()
-                        )),
-                    }
+                    Err(ReadPathError::Invalid(defect)) => report.problems.push(format!(
+                        "[script.path] {rel}: 实体 {} 的脚本路径不合法（{}）：{path}",
+                        entity.id.0,
+                        defect.ascii()
+                    )),
+                    Err(err) => report.problems.push(format!(
+                        "[script.missing] {rel}: 实体 {} 引用的脚本 {path}：{err}",
+                        entity.id.0
+                    )),
                 }
             }
             OldComponentData::Rust { .. } => *rust_components += 1,
@@ -525,6 +513,5 @@ fn check_entity(
 pub(crate) mod refs;
 
 use self::refs::{
-    check_prefab_ref, guid_refs, normalize_into, prefab_files, prefab_ids, resolve_read,
-    scene_files,
+    check_prefab_ref, guid_refs, normalize_into, prefab_files, prefab_ids, scene_files,
 };

@@ -18,6 +18,13 @@ pub enum AssetKind {
     Prefab,
 }
 
+impl AssetKind {
+    /// 项目搜索根只兜底模型、脚本和音频；其他引用仍显式指向项目内的文件。
+    pub fn uses_search_paths(self) -> bool {
+        matches!(self, Self::Model | Self::Script | Self::Audio)
+    }
+}
+
 /// 可序列化的字段 schema。
 #[derive(Clone, Debug, Serialize)]
 pub struct FieldSchema {

@@ -144,9 +144,9 @@ fn selects_a_named_scene_from_the_project_manifest() {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+    std::fs::create_dir_all(dir.join("Shared/Scripts")).unwrap();
     std::fs::write(
-        dir.join("Scripts/move.lua"),
+        dir.join("Shared/Scripts/move.lua"),
         "function update(ctx)\n  local p = entity_pos(ctx, self_id(ctx))\n  set_pos(ctx, p.x + 1.0, p.y, p.z)\nend\n",
     )
     .unwrap();
@@ -180,7 +180,7 @@ fn selects_a_named_scene_from_the_project_manifest() {
                 prefabs: "Prefabs".to_string(),
                 scripts: "Scripts".to_string(),
             },
-            search_paths: Vec::new(),
+            search_paths: vec!["Shared".into()],
             input: None,
         },
     )

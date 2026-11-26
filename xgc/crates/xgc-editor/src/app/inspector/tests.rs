@@ -435,7 +435,7 @@ fn inspector_container_controls_are_disabled_in_play() {
     let world = std::mem::take(&mut state.world);
     let before = world.world_data();
     // 测试组件只注册在夹具世界里，直接用该世界构造播放副本。
-    let runner = xgc_host::ScriptedRunner::with_assets(world, None).0;
+    let runner = xgc_host::ScriptedRunner::with_assets(world, xgc_host::asset_paths(None, &[])).0;
     state.play = Some(crate::PlaySession {
         selected: state.selected,
         clock: xgc_host::FixedStepClock::new(runner.fixed_dt()),

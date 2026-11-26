@@ -9,10 +9,10 @@ mod cook;
 mod read_path;
 
 pub use cook::{
-    cook_project, cook_project_filtered, cook_project_with_dependencies, file_entry,
-    verify_manifest, write_manifest, CookManifest, CookedFile,
+    cook_project, cook_project_filtered, cook_project_with_dependencies, cook_project_with_runtime,
+    file_entry, verify_manifest, write_manifest, CookManifest, CookRuntime, CookedFile,
 };
-pub use read_path::{resolve_read_path, ReadPathError, SearchPaths};
+pub use read_path::{resolve_read_path, AssetPaths, ReadPathError, SearchPaths};
 
 use std::collections::BTreeMap;
 use std::fmt;

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use xgc_asset::scan as scan_assets;
+use xgc_asset::{scan as scan_assets, AssetPaths, SearchPaths};
 use xgc_render::{
     build_draw_list, load_glb, GpuContext, MeshCache, Pass, RenderGraph, Renderer, ResourceDesc,
     ResourceUsage,
@@ -11,7 +11,7 @@ use xgc_store::load_world;
 use xgc_world::World;
 
 use crate::project_render::load_render;
-use crate::runtime_cmd::advance_world_with_particles;
+use crate::runtime_cmd::{advance_world_with_particles, load_search_paths};
 
 fn parse_frame_count(value: Option<&str>) -> Result<u64, &'static str> {
     value
@@ -77,17 +77,16 @@ pub(crate) fn render_world_rgba(
         Some(texture) => texture,
         None => return Err("渲染目标不是纹理".to_string()),
     };
-    let root = assets_root.unwrap_or(".");
-    let meshes = match scan_assets(Path::new(root)) {
-        Ok(catalog) => MeshCache::with_catalog(root, catalog),
-        Err(err) => return Err(format!("扫描资产失败：{err}")),
-    };
+    let root = Path::new(assets_root.unwrap_or("."));
+    let search = SearchPaths::new(&load_search_paths(root)?);
+    let catalog = scan_assets(root).map_err(|err| format!("扫描资产失败：{err}"))?;
+    let meshes = MeshCache::with_assets(AssetPaths::new(root, search, Some(catalog)));
     let mut renderer = Renderer::new(meshes);
     renderer.set_particles(particles);
     renderer.set_clear_color([0.62, 0.72, 0.84, 1.0]);
     // 天空开着的项目：背景取地平线色（旧端天空盒在地平线附近就是它），
     // 环境照明由渲染器从同一份解析天空投影出来。
-    if let Some(settings) = load_render(Path::new(root)) {
+    if let Some(settings) = load_render(root) {
         if settings.sky.enabled {
             let [r, g, b] = settings
                 .sky

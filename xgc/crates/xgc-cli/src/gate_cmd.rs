@@ -30,7 +30,7 @@ use xgc_sim::{HierarchySystem, System, UiLayoutSystem};
 
 use super::render::render_world_rgba;
 use super::world_cmd::load_world_state;
-use xgc_host::ScriptedRunner;
+use crate::runtime_cmd::scripted_runner;
 
 /// 缺省判定线：总差异像素比例与结构性（单通道 ≥8）比例。
 const DEFAULT_MAX_TOTAL_PCT: f64 = 2.0;
@@ -381,7 +381,7 @@ fn check_trace(
 ) -> Result<usize, String> {
     let world = load_world_state(&world_path.to_string_lossy())
         .map_err(|_| format!("加载世界 {} 失败", world_path.display()))?;
-    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(assets_root));
+    let mut runner = scripted_runner(world, assets_root)?;
     let mut failures = 0usize;
     let last = expected.last().map(|(frame, _)| *frame).unwrap_or(0);
     for frame in 0..=last {
@@ -420,7 +420,7 @@ fn check_visual(
     let (width, height) = (expected.width, expected.height);
     let world = load_world_state(&world_path.to_string_lossy())
         .map_err(|_| format!("加载世界 {} 失败", world_path.display()))?;
-    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(Path::new(assets_root)));
+    let mut runner = scripted_runner(world, Path::new(assets_root))?;
     for _ in 0..frame {
         runner.step()?;
     }

@@ -1,8 +1,9 @@
 //! XGC 独立播放器核心：从原生项目或 cooked 目录加载世界并驱动脚本。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use xgc_host::ScriptedRunner;
+use xgc_asset::{AssetPaths, CookRuntime};
+use xgc_host::{asset_paths, ScriptedRunner};
 use xgc_store::{load_world, ProjectSession};
 use xgc_world::{World, WorldData};
 
@@ -28,7 +29,34 @@ pub fn load_world_dir_scene(path: &Path, scene: Option<&str>) -> Result<WorldDat
 
 struct LoadedScene {
     data: WorldData,
-    project: Option<ProjectSession>,
+    source: SceneSource,
+}
+
+enum SceneSource {
+    Project(Box<ProjectSession>),
+    Cooked {
+        root: PathBuf,
+        runtime: Option<CookRuntime>,
+    },
+}
+
+impl SceneSource {
+    fn root(&self) -> &Path {
+        match self {
+            Self::Project(project) => project.root(),
+            Self::Cooked { root, .. } => root,
+        }
+    }
+
+    fn asset_paths(&self) -> AssetPaths {
+        let search: &[String] = match self {
+            Self::Project(project) => &project.manifest().search_paths,
+            Self::Cooked { runtime, .. } => runtime
+                .as_ref()
+                .map_or(&[][..], |runtime| runtime.search_paths.as_slice()),
+        };
+        asset_paths(Some(self.root()), search)
+    }
 }
 
 fn load_scene(path: &Path, scene: Option<&str>) -> Result<LoadedScene, String> {
@@ -45,14 +73,14 @@ fn load_scene(path: &Path, scene: Option<&str>) -> Result<LoadedScene, String> {
             .map_err(|err| format!("读取场景 {scene} 失败：{err}"))?;
         return Ok(LoadedScene {
             data,
-            project: Some(project),
+            source: SceneSource::Project(Box::new(project)),
         });
     }
     let dir = path;
     if scene.is_some() {
         return Err("cooked 目录没有场景清单，不能按名字选择场景".to_string());
     }
-    xgc_asset::verify_manifest(dir)
+    let manifest = xgc_asset::verify_manifest(dir)
         .map_err(|differences| format!("cooked 文件校验失败：{}", differences.join("；")))?;
     let binary = dir.join("world.xgcb");
     let data = if binary.exists() {
@@ -63,7 +91,10 @@ fn load_scene(path: &Path, scene: Option<&str>) -> Result<LoadedScene, String> {
     .map_err(|err| format!("读取 cooked world 失败：{err}"))?;
     Ok(LoadedScene {
         data,
-        project: None,
+        source: SceneSource::Cooked {
+            root: dir.to_path_buf(),
+            runtime: manifest.map(|manifest| manifest.runtime),
+        },
     })
 }
 
@@ -103,12 +134,11 @@ pub fn run_cooked_scene(
     scene: Option<&str>,
 ) -> Result<PlayerStats, String> {
     let loaded = load_scene(path, scene)?;
-    let root = loaded.project.as_ref().map_or(path, ProjectSession::root);
     let mut world = World::new();
     world
         .restore_world_data(&loaded.data)
         .map_err(|err| format!("恢复世界失败：{err}"))?;
-    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(root));
+    let (mut runner, _) = ScriptedRunner::with_assets(world, loaded.source.asset_paths());
     for _ in 0..frames {
         runner.step()?;
     }

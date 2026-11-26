@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use xgc_asset::{find_files, AssetCatalog};
+use xgc_asset::{find_files, resolve_read_path, AssetCatalog, SearchPaths};
 use xgc_base::{path::normalize_project_relative, EntityId};
 use xgc_migrate::ProjectCheckReport;
 use xgc_reflect::{AssetKind, Component, Registry, Value};
@@ -46,6 +46,7 @@ pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckRepo
         root,
         registry,
         catalog,
+        search_paths: SearchPaths::new(&manifest.search_paths),
         report,
         scripts: BTreeSet::new(),
         seen_ids: BTreeMap::new(),
@@ -102,6 +103,7 @@ struct Audit<'a> {
     root: PathBuf,
     registry: &'a Registry,
     catalog: AssetCatalog,
+    search_paths: SearchPaths,
     report: ProjectCheckReport,
     scripts: BTreeSet<PathBuf>,
     seen_ids: BTreeMap<EntityId, String>,
@@ -116,16 +118,15 @@ impl Audit<'_> {
             .push(format!("[{code}] {subject}：{message}"));
     }
 
-    fn resolve(&self, reference: &str) -> Result<PathBuf, String> {
-        let path = if reference.starts_with("guid://") {
-            self.catalog
-                .resolve(reference)
-                .ok_or("未登记 GUID")?
-                .to_path_buf()
+    fn resolve(&self, kind: AssetKind, reference: &str) -> Result<PathBuf, String> {
+        let direct = SearchPaths::default();
+        let paths = if kind.uses_search_paths() {
+            &self.search_paths
         } else {
-            let relative = normalize_project_relative(reference).map_err(|err| err.to_string())?;
-            self.root.join(relative)
+            &direct
         };
+        let path = resolve_read_path(&self.root, reference, paths, Some(&self.catalog))
+            .map_err(|err| err.to_string())?;
         checked_file(&self.root, &path).map_err(|err| err.to_string())
     }
 
@@ -262,7 +263,7 @@ impl Audit<'_> {
         let reference = field(component, "source")
             .and_then(Value::as_string)
             .unwrap_or_default();
-        let path = match self.resolve(reference) {
+        let path = match self.resolve(AssetKind::Prefab, reference) {
             Ok(path) => path,
             Err(err) => {
                 self.problem("prefab.source", location, &format!("{reference}：{err}"));
@@ -299,7 +300,7 @@ impl Audit<'_> {
             return;
         }
         let script = kind == AssetKind::Script;
-        match self.resolve(reference) {
+        match self.resolve(kind, reference) {
             Ok(path) if script => {
                 self.scripts.insert(path);
             }

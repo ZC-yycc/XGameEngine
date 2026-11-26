@@ -1,13 +1,9 @@
-//! 网格缓存 + 模型路径解析：`render.mesh.model` 可以是 `builtin://…` 或
-//! 相对 asset root 的 `.glb`。GUID 解析属于资产目录，留给后续 `xgc-asset`。
-//!
-//! 材质资产（`.mat`）也在这里按引用缓存：模型与材质的解析规则（`guid://` /
-//! 相对路径 / 拒绝越界）完全相同，分两套只会漂移。
+//! 网格和材质缓存。项目文件统一经资产目录解析，只有模型读取使用搜索根兜底。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use xgc_asset::AssetCatalog;
+use xgc_asset::{AssetCatalog, AssetPaths, ReadPathError, SearchPaths};
 use xgc_world::{Animator, RootMotion, RootMotionLibrary, World};
 
 use super::glb::{load_model, MeshError};
@@ -15,33 +11,30 @@ use super::material::MaterialAsset;
 use super::mesh::{builtin_mesh, Mesh};
 
 pub struct MeshCache {
-    root: PathBuf,
-    catalog: Option<AssetCatalog>,
+    assets: AssetPaths,
     meshes: HashMap<String, Mesh>,
     materials: HashMap<String, MaterialAsset>,
 }
 
 impl MeshCache {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            catalog: None,
-            meshes: HashMap::new(),
-            materials: HashMap::new(),
-        }
+        Self::with_assets(AssetPaths::new(root, SearchPaths::default(), None))
     }
 
     pub fn with_catalog(root: impl Into<PathBuf>, catalog: AssetCatalog) -> Self {
+        Self::with_assets(AssetPaths::new(root, SearchPaths::default(), Some(catalog)))
+    }
+
+    pub fn with_assets(assets: AssetPaths) -> Self {
         Self {
-            root: root.into(),
-            catalog: Some(catalog),
+            assets,
             meshes: HashMap::new(),
             materials: HashMap::new(),
         }
     }
 
     pub fn root(&self) -> &Path {
-        &self.root
+        self.assets.root()
     }
 
     pub fn len(&self) -> usize {
@@ -64,8 +57,10 @@ impl MeshCache {
             self.meshes.insert(model.to_string(), mesh);
             return Ok(self.meshes.get(model));
         }
-        let Some(path) = self.resolve_reference(model, "模型路径")? else {
-            return Ok(None);
+        let path = match self.assets.resolve(model) {
+            Ok(path) => path,
+            Err(ReadPathError::Missing { .. }) => return Ok(None),
+            Err(err) => return Err(mesh_path_error(err)),
         };
         let mesh = load_model(&path)?;
         self.meshes.insert(model.to_string(), mesh);
@@ -78,14 +73,13 @@ impl MeshCache {
     /// 不让整个实体从画面消失（`--check` 才负责把悬空引用点名）。
     pub fn material(&mut self, reference: &str) -> Result<Option<&MaterialAsset>, MeshError> {
         if !self.materials.contains_key(reference) {
-            let path = match self.resolve_reference(reference, "材质路径") {
+            let path = match self.assets.resolve_direct(reference) {
                 Ok(path) => path,
-                // 悬空引用：渲染退回模型材质（`--check` 负责把坏引用点名），不让实体消失。
-                Err(MeshError::Missing(_)) => None,
-                Err(err) => return Err(err),
-            };
-            let Some(path) = path else {
-                return Ok(None);
+                Err(err) => match mesh_path_error(err) {
+                    // 悬空引用由体检点名，渲染仍保留模型材质。
+                    MeshError::Missing(_) => return Ok(None),
+                    err => return Err(err),
+                },
             };
             let Ok(text) = std::fs::read_to_string(&path) else {
                 return Ok(None);
@@ -128,28 +122,13 @@ impl MeshCache {
         }
         library
     }
+}
 
-    /// `guid://` 或相对 asset root 的路径；`subject` 只用于错误文案。
-    fn resolve_reference(
-        &self,
-        reference: &str,
-        subject: &str,
-    ) -> Result<Option<PathBuf>, MeshError> {
-        if reference.starts_with("guid://") {
-            let Some(catalog) = &self.catalog else {
-                return Err(MeshError::Unsupported("guid:// 需要资产目录".to_string()));
-            };
-            let path = catalog
-                .resolve(reference)
-                .ok_or_else(|| MeshError::Missing(format!("资产目录没有 {reference}")))?;
-            return Ok(Some(path.to_path_buf()));
+fn mesh_path_error(err: ReadPathError) -> MeshError {
+    match err {
+        ReadPathError::Invalid(_) | ReadPathError::GuidRequiresCatalog => {
+            MeshError::Unsupported(err.to_string())
         }
-        if reference.split(['/', '\\']).any(|part| part == "..") {
-            return Err(MeshError::Unsupported(format!(
-                "{subject}不能越出 asset root"
-            )));
-        }
-        let path = self.root.join(reference);
-        Ok(path.exists().then_some(path))
+        err => MeshError::Missing(err.to_string()),
     }
 }

@@ -44,7 +44,7 @@
 
 ## 打包依赖
 
-`xgc pack <世界.json> <项目根> <输出目录>` 从组件 schema 识别的资产引用出发，递归保留预制体、材质、glTF 外部缓冲和贴图及对应的 `.meta`。依赖成环时每个文件只处理一次。回归用含外部缓冲与贴图的狐狸模型验证 cooked 目录可独立加载，并对比重复打包的清单。 [打包回归](crates/xgc-cli/tests/native_project_check.rs)
+`xgc pack <世界.json> <项目根> <输出目录>` 从组件 schema 识别的资产引用出发，递归保留预制体、材质、glTF 外部缓冲和贴图及对应的 `.meta`。依赖成环时每个文件只处理一次。模型、脚本和音频的引用先查项目根，再按清单中的 `search_paths` 顺序查找。体检、宿主和打包共用该解析规则。打包保留实际命中的文件位置，`cook.json` 第 2 版签名包含搜索顺序及输入映射，旧包须重新生成。回归将源项目移开后运行 cooked 世界，验证脚本仍按原顺序命中、终态哈希一致、登记的输入映射可用。另以带外部缓冲与贴图的狐狸模型验证依赖可独立加载，并对比重复打包的清单。[搜索根回归](crates/xgc-cli/tests/cooked_search_paths.rs) · [依赖回归](crates/xgc-cli/tests/native_project_check.rs)
 
 ## Agent 查询与重放
 

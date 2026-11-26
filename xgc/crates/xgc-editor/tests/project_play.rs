@@ -122,5 +122,15 @@ end
     let reloaded = EditorState::open(&dir).unwrap();
     assert_eq!(reloaded.project_name(), Some("demo"));
     assert_eq!(reloaded.entity_position(entity), Some([1.0, 2.0, 3.0]));
+
+    world.get_mut::<Script>(key).unwrap().path = "move.lua".into();
+    save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();
+    std::fs::write(&script, "function update(ctx) set_pos(ctx, 4, 0, 0) end").unwrap();
+    manifest.search_paths = vec!["Scripts".into()];
+    save_project(&manifest_path, &manifest).unwrap();
+    let mut fallback = EditorState::open(&dir).unwrap();
+    fallback.play().unwrap();
+    fallback.advance_play(fixed).unwrap();
+    assert_eq!(fallback.entity_position(entity), Some([4.0, 0.0, 0.0]));
     std::fs::remove_dir_all(&dir).unwrap();
 }

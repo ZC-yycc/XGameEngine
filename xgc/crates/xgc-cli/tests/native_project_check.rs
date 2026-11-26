@@ -202,6 +202,71 @@ fn pack_follows_native_prefabs_and_keeps_material_assets() {
 }
 
 #[test]
+fn check_and_script_runtime_use_the_same_ordered_search_roots() {
+    let root = Temp::new("search-order");
+    let mut project = manifest(&root.0);
+    project.scenes.truncate(1);
+    project.input = None;
+    project.search_paths = vec!["First".into(), "Second".into()];
+    save_project(&root.0.join("project.xgc"), &project).unwrap();
+    for dir in ["First", "Second"] {
+        fs::create_dir(root.0.join(dir)).unwrap();
+    }
+    fs::write(
+        root.0.join("First/move.lua"),
+        "function update(ctx) set_pos(ctx, 3, 0, 0) end",
+    )
+    .unwrap();
+    fs::write(root.0.join("Second/move.lua"), "local =").unwrap();
+    fs::write(root.0.join("Second/model.glb"), "model fixture").unwrap();
+    let mut world = World::new();
+    let key = world.spawn((
+        xgc_world::Transform::default(),
+        MeshRenderer {
+            model: "model.glb".into(),
+        },
+        Script {
+            path: "move.lua".into(),
+        },
+    ));
+    let entity = world.entity(key).unwrap();
+    let scene = root.0.join(&project.entry_scene);
+    save_world(&scene, &world.world_data()).unwrap();
+    let result = root.0.join("result.json");
+    let verify = |expected_x| {
+        let before = snapshot(&root.0);
+        let report = String::from_utf8(check(&root.0, 0).stdout).unwrap();
+        assert!(report.contains("scripts=1 assets=0 problems=0"), "{report}");
+        assert_eq!(snapshot(&root.0), before, "体检必须只读");
+        let output = xgc()
+            .arg("run-scripts")
+            .args([&scene, &root.0])
+            .args(["1", result.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let data = xgc_store::load_world(&result).unwrap();
+        let mut after = World::new();
+        after.restore_world_data(&data).unwrap();
+        let transform = after
+            .get::<xgc_world::Transform>(after.key(entity).unwrap())
+            .unwrap();
+        assert_eq!(transform.position, [expected_x, 0.0, 0.0]);
+    };
+    verify(3.0);
+    fs::write(
+        root.0.join("move.lua"),
+        "function update(ctx) set_pos(ctx, 7, 0, 0) end",
+    )
+    .unwrap();
+    verify(7.0);
+}
+
+#[test]
 fn checks_models_at_lod_field_paths() {
     let root = Temp::new("lod-models");
     let mut manifest = manifest(&root.0);

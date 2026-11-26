@@ -12,6 +12,8 @@ use xgc_render::{GpuContext, MeshCache, Renderer};
 use xgc_sim::{InputMap, DEFAULT_UI_VIEWPORT};
 use xgc_world::World;
 
+use crate::SceneSource;
+
 struct Viewport {
     texture: wgpu::Texture,
     id: egui::TextureId,
@@ -58,24 +60,32 @@ impl PlayerApp {
 
     fn load(&mut self, path: &Path, scene: Option<&str>) -> Result<(), String> {
         let loaded = crate::load_scene(path, scene)?;
-        let (root, input) = match &loaded.project {
-            Some(project) => {
-                let path = project
-                    .input_path()
-                    .map_err(|err| format!("读取项目输入映射失败：{err}"))?;
-                (
-                    project.root(),
-                    path.as_deref().map(InputMap::load).transpose()?,
-                )
-            }
-            None => (path, InputMap::load(&path.join("input.ron")).ok()),
+        let input = match &loaded.source {
+            SceneSource::Project(project) => project
+                .input_path()
+                .map_err(|err| format!("读取项目输入映射失败：{err}"))?
+                .as_deref()
+                .map(InputMap::load)
+                .transpose()?,
+            SceneSource::Cooked {
+                root,
+                runtime: Some(runtime),
+            } => runtime
+                .input
+                .as_ref()
+                .map(|input| InputMap::load(&root.join(input)))
+                .transpose()?,
+            SceneSource::Cooked {
+                root,
+                runtime: None,
+            } => InputMap::load(&root.join("input.ron")).ok(),
         };
         let mut world = World::new();
         world
             .restore_world_data(&loaded.data)
             .map_err(|err| format!("恢复世界失败：{err}"))?;
-        let (runner, meshes) = ScriptedRunner::with_assets(world, Some(root));
-        self.dir = root.to_path_buf();
+        let (runner, meshes) = ScriptedRunner::with_assets(world, loaded.source.asset_paths());
+        self.dir = loaded.source.root().to_path_buf();
         self.input_map = input;
         self.meshes = Some(meshes);
         self.clock = Some(FixedStepClock::new(runner.fixed_dt()));
@@ -327,9 +337,25 @@ mod tests {
                 .unwrap()
                 .position[0]
         };
+        let cooked = root.join("cooked");
+        let pack = |manifest: &ProjectManifest| {
+            xgc_asset::cook_project_with_runtime(
+                &root,
+                &cooked,
+                xgc_asset::CookRuntime {
+                    search_paths: manifest.search_paths.clone(),
+                    input: manifest.input.clone(),
+                },
+                None,
+            )
+            .unwrap();
+            save_world(&cooked.join("world.json"), &world.world_data()).unwrap();
+        };
         save_project(&manifest_path, &manifest).unwrap();
         assert_eq!(play_one_frame(&root), 2.0);
         assert_eq!(play_one_frame(&manifest_path), 2.0);
+        pack(&manifest);
+        assert_eq!(play_one_frame(&cooked), 2.0);
 
         std::fs::copy(root.join("Config/controls.ron"), root.join("input.ron")).unwrap();
         std::fs::remove_file(root.join("Config/controls.ron")).unwrap();
@@ -340,6 +366,8 @@ mod tests {
         manifest.input = None;
         save_project(&manifest_path, &manifest).unwrap();
         assert_eq!(play_one_frame(&root), 0.0);
+        pack(&manifest);
+        assert_eq!(play_one_frame(&cooked), 0.0);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -134,17 +134,6 @@ pub(super) fn normalize_into(
     }
 }
 
-pub(super) fn resolve_read(root: &Path, rel: &str, search_paths: &[String]) -> Option<PathBuf> {
-    let direct = root.join(rel);
-    if direct.is_file() {
-        return Some(direct);
-    }
-    search_paths
-        .iter()
-        .map(|search| root.join(search).join(rel))
-        .find(|candidate| candidate.is_file())
-}
-
 /// 扫 `Scenes/` 下的场景文件（`.ron`，不含 `.prefab.ron`），返回项目相对路径。
 pub(super) fn scene_files(
     root: &Path,

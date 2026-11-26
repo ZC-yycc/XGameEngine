@@ -10,10 +10,27 @@ pub use clock::FixedStepClock;
 
 use std::path::Path;
 
+use xgc_asset::{AssetPaths, SearchPaths};
 use xgc_render::MeshCache;
 use xgc_script::ScriptRuntime;
 use xgc_sim::{apply_root_motion, InputMap, InputState, ParticleSystem, Simulation};
 use xgc_world::{ParticleQuad, RootMotionLibrary, UiInput, World};
+
+/// 宿主只有在明确知道内容根时才扫描 GUID 目录，避免空白编辑世界扫描工作目录。
+pub fn asset_paths(root: Option<&Path>, search_paths: &[String]) -> AssetPaths {
+    let catalog = root.and_then(|root| match xgc_asset::scan(root) {
+        Ok(catalog) => Some(catalog),
+        Err(err) => {
+            eprintln!("warning: 资产根 {} 扫描失败（{err}）", root.display());
+            None
+        }
+    });
+    AssetPaths::new(
+        root.unwrap_or_else(|| Path::new(".")),
+        SearchPaths::new(search_paths),
+        catalog,
+    )
+}
 
 pub struct ScriptedRunner {
     simulation: Simulation,
@@ -24,25 +41,9 @@ pub struct ScriptedRunner {
 
 impl ScriptedRunner {
     /// 复用脚本与模型的 GUID 目录，并把预热后的网格缓存交给窗口渲染器。
-    pub fn with_assets(world: World, asset_root: Option<&Path>) -> (Self, MeshCache) {
-        let root = asset_root.unwrap_or_else(|| Path::new("."));
-        let catalog = asset_root.and_then(|root| match xgc_asset::scan(root) {
-            Ok(catalog) => Some(catalog),
-            Err(err) => {
-                eprintln!(
-                    "warning: 资产根 {} 扫描失败（{err}），脚本按项目相对路径解析",
-                    root.display()
-                );
-                None
-            }
-        });
-        let (runtime, mut meshes) = match catalog {
-            Some(catalog) => (
-                ScriptRuntime::with_catalog(root, catalog.clone()),
-                MeshCache::with_catalog(root, catalog),
-            ),
-            None => (ScriptRuntime::new(root), MeshCache::new(root)),
-        };
+    pub fn with_assets(world: World, assets: AssetPaths) -> (Self, MeshCache) {
+        let runtime = ScriptRuntime::with_assets(assets.clone());
+        let mut meshes = MeshCache::with_assets(assets);
         let root_motion = meshes.root_motion_library(&world);
         (
             Self {

@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use xgc_base::path::{normalize_project_relative, PathDefect};
 
@@ -22,6 +23,45 @@ impl SearchPaths {
                 .filter_map(|path| normalize_project_relative(path).ok())
                 .collect(),
         }
+    }
+}
+
+/// 宿主加载模型与脚本时共享一个 GUID 目录，解析本身仍走同一入口。
+#[derive(Clone, Debug)]
+pub struct AssetPaths {
+    root: PathBuf,
+    search: SearchPaths,
+    catalog: Option<Arc<AssetCatalog>>,
+}
+
+impl AssetPaths {
+    pub fn new(
+        root: impl Into<PathBuf>,
+        search: SearchPaths,
+        catalog: Option<AssetCatalog>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            search,
+            catalog: catalog.map(Arc::new),
+        }
+    }
+
+    pub fn resolve(&self, reference: &str) -> Result<PathBuf, ReadPathError> {
+        resolve_read_path(&self.root, reference, &self.search, self.catalog.as_deref())
+    }
+
+    pub fn resolve_direct(&self, reference: &str) -> Result<PathBuf, ReadPathError> {
+        resolve_read_path(
+            &self.root,
+            reference,
+            &SearchPaths::default(),
+            self.catalog.as_deref(),
+        )
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 }
 

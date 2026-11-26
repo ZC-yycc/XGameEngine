@@ -30,7 +30,8 @@ fn applies_actions_and_axes_until_the_keys_are_released() {
             path: "move.lua".to_string(),
         },
     ));
-    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(&dir));
+    let (mut runner, _) =
+        ScriptedRunner::with_assets(world, xgc_host::asset_paths(Some(&dir), &[]));
     let mut state = InputState::default();
     state.keys.extend([KeyCode::KeyD, KeyCode::Space]);
     runner.apply_input(&map, &state);

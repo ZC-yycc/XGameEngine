@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use xgc_host::ScriptedRunner;
+use crate::runtime_cmd::scripted_runner;
 use xgc_world::World;
 
 use super::world_cmd::{load_simulation, load_world_state, parse_frames, parse_threads};
@@ -94,7 +94,13 @@ fn trace_scripts(path: &str, frames: u64, assets_root: &Path, threads: usize) ->
         Ok(world) => world,
         Err(code) => return code,
     };
-    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(assets_root));
+    let mut runner = match scripted_runner(world, assets_root) {
+        Ok(runner) => runner,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(2);
+        }
+    };
     runner.set_parallel_threads(threads);
     print_frame(0, runner.world());
     for frame in 1..=frames {

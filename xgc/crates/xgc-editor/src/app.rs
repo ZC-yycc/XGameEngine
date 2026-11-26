@@ -98,13 +98,7 @@ impl EditorApp {
     }
 
     fn viewport_meshes(&self) -> MeshCache {
-        let Some(root) = self.state.asset_root() else {
-            return MeshCache::new(".");
-        };
-        match xgc_asset::scan(root) {
-            Ok(catalog) => MeshCache::with_catalog(root, catalog),
-            Err(_) => MeshCache::new(root),
-        }
+        MeshCache::with_assets(self.state.asset_paths())
     }
 
     fn ensure_viewport(&mut self, render_state: &RenderState) {

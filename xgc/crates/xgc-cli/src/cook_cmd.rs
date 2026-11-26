@@ -4,17 +4,38 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
+use xgc_asset::{resolve_read_path, AssetCatalog, CookRuntime, SearchPaths};
 use xgc_base::path::normalize_project_relative;
-use xgc_host::ScriptedRunner;
+use xgc_host::{asset_paths, ScriptedRunner};
 use xgc_store::{load_world, save_world, save_world_binary};
 use xgc_world::{builtin_registry, World, WorldData};
+
+use crate::runtime_cmd::load_native_project;
+
+fn cook_runtime(root: &Path) -> Result<CookRuntime, String> {
+    Ok(match load_native_project(root)? {
+        Some(project) => CookRuntime {
+            search_paths: project.search_paths,
+            input: project.input,
+        },
+        None => CookRuntime::standalone(root),
+    })
+}
 
 pub fn cook(root: Option<&str>, out: Option<&str>) -> ExitCode {
     let (Some(root), Some(out)) = (root, out) else {
         eprintln!("用法：xgc cook <项目根> <输出目录>");
         return ExitCode::from(2);
     };
-    match xgc_asset::cook_project(Path::new(root), Path::new(out)) {
+    let root = Path::new(root);
+    let runtime = match cook_runtime(root) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(2);
+        }
+    };
+    match xgc_asset::cook_project_with_runtime(root, Path::new(out), runtime, None) {
         Ok(manifest) => {
             let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
             println!(
@@ -45,16 +66,26 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
             return ExitCode::from(2);
         }
     };
+    let root = Path::new(root);
+    let runtime = match cook_runtime(root) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(2);
+        }
+    };
+    let search = SearchPaths::new(&runtime.search_paths);
     let registry = builtin_registry();
     let mut manifest = match xgc_asset::cook_project_with_dependencies(
-        Path::new(root),
+        root,
         Path::new(out),
-        |root, catalog| referenced_paths(root, &data, catalog, &registry),
+        runtime,
+        |root, catalog| referenced_paths(root, &data, catalog, &search, &registry),
         |root, catalog, path| {
             let Ok(prefab) = xgc_store::load_prefab(path) else {
                 return BTreeSet::new();
             };
-            referenced_paths(root, &prefab, catalog, &registry)
+            referenced_paths(root, &prefab, catalog, &search, &registry)
         },
     ) {
         Ok(manifest) => manifest,
@@ -81,7 +112,7 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
         }
     }
     manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
-    if let Err(err) = xgc_asset::write_manifest(Path::new(out), &manifest) {
+    if let Err(err) = xgc_asset::write_manifest(Path::new(out), &mut manifest) {
         eprintln!("写入 manifest 失败：{err}");
         return ExitCode::from(1);
     }
@@ -100,12 +131,15 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
         return ExitCode::from(2);
     };
     let dir = Path::new(dir);
-    if let Err(differences) = xgc_asset::verify_manifest(dir) {
-        for line in &differences {
-            eprintln!("{line}");
+    let search_paths = match xgc_asset::verify_manifest(dir) {
+        Ok(manifest) => manifest.map_or_else(Vec::new, |manifest| manifest.runtime.search_paths),
+        Err(differences) => {
+            for line in &differences {
+                eprintln!("{line}");
+            }
+            return ExitCode::from(1);
         }
-        return ExitCode::from(1);
-    }
+    };
     let frames: u64 = match frames.map(str::parse::<u64>).transpose() {
         Ok(frames) => frames.unwrap_or(60),
         Err(_) => {
@@ -129,7 +163,7 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
         eprintln!("恢复世界失败：{err}");
         return ExitCode::from(2);
     }
-    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(dir));
+    let (mut runner, _) = ScriptedRunner::with_assets(world, asset_paths(Some(dir), &search_paths));
     for _ in 0..frames {
         if let Err(err) = runner.step() {
             eprintln!("{err}");
@@ -149,22 +183,29 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
 fn referenced_paths(
     root: &Path,
     data: &WorldData,
-    catalog: &xgc_asset::AssetCatalog,
+    catalog: &AssetCatalog,
+    search: &SearchPaths,
     registry: &xgc_reflect::Registry,
 ) -> BTreeSet<String> {
     let mut keep = BTreeSet::new();
+    let direct = SearchPaths::default();
     for component in data.entities.iter().flat_map(|entity| &entity.components) {
         if let Some(schema) = registry.get(component.component) {
-            schema.visit_asset_references(&component.fields, |_, _, reference| {
-                if reference.starts_with("guid://") {
-                    if let Some(relative) = catalog
-                        .resolve(reference)
-                        .and_then(|path| path.strip_prefix(root).ok())
-                        .and_then(Path::to_str)
-                    {
-                        keep.insert(relative.replace(std::path::MAIN_SEPARATOR, "/"));
-                    }
-                } else if let Ok(relative) = normalize_project_relative(reference) {
+            schema.visit_asset_references(&component.fields, |kind, _, reference| {
+                let search = if kind.uses_search_paths() {
+                    search
+                } else {
+                    &direct
+                };
+                let Ok(path) = resolve_read_path(root, reference, search, Some(catalog)) else {
+                    return;
+                };
+                if let Some(relative) = path
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(Path::to_str)
+                    .and_then(|path| normalize_project_relative(path).ok())
+                {
                     keep.insert(relative);
                 }
             });

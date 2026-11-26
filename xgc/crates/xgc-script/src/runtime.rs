@@ -2,10 +2,10 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
-use xgc_asset::AssetCatalog;
+use xgc_asset::{AssetCatalog, AssetPaths, SearchPaths};
 use xgc_base::EntityId;
 use xgc_world::{AnimationLayers, AnimationState, Command, Component, Script, Value, World};
 
@@ -20,8 +20,7 @@ struct Entry {
 }
 
 pub struct ScriptRuntime {
-    root: PathBuf,
-    catalog: Option<AssetCatalog>,
+    assets: AssetPaths,
     entries: HashMap<EntityId, Entry>,
     started: HashSet<EntityId>,
     view: Rc<RefCell<ScriptView>>,
@@ -33,22 +32,16 @@ pub struct ScriptRuntime {
 
 impl ScriptRuntime {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            catalog: None,
-            entries: HashMap::new(),
-            started: HashSet::new(),
-            view: Rc::new(RefCell::new(ScriptView::default())),
-            time: 0.0,
-            frame_error: None,
-        }
+        Self::with_assets(AssetPaths::new(root, SearchPaths::default(), None))
     }
 
-    /// 旧场景脚本路径可能是 `guid://`；传资产目录后按 guid 解析。
     pub fn with_catalog(root: impl Into<PathBuf>, catalog: AssetCatalog) -> Self {
+        Self::with_assets(AssetPaths::new(root, SearchPaths::default(), Some(catalog)))
+    }
+
+    pub fn with_assets(assets: AssetPaths) -> Self {
         Self {
-            root: root.into(),
-            catalog: Some(catalog),
+            assets,
             entries: HashMap::new(),
             started: HashSet::new(),
             view: Rc::new(RefCell::new(ScriptView::default())),
@@ -181,7 +174,10 @@ impl ScriptRuntime {
     }
 
     fn load_entity(&self, entity: EntityId, path: &str) -> Result<Entry, String> {
-        let resolved = self.resolve(path)?;
+        let resolved = self
+            .assets
+            .resolve(path)
+            .map_err(|err| format!("读取脚本 {path} 失败：{err}"))?;
         let source = std::fs::read_to_string(&resolved)
             .map_err(|err| format!("读取 {} 失败：{err}", resolved.display()))?;
         let commands = Rc::new(RefCell::new(Vec::new()));
@@ -318,20 +314,6 @@ impl ScriptRuntime {
         view.entities = entities;
         view.spawn_cursor = data.next_id;
         view.pending_spawns.clear();
-    }
-
-    fn resolve(&self, path: &str) -> Result<PathBuf, String> {
-        if path.starts_with("guid://") {
-            let catalog = self
-                .catalog
-                .as_ref()
-                .ok_or_else(|| format!("{path} 需要资产目录"))?;
-            return catalog
-                .resolve(path)
-                .map(Path::to_path_buf)
-                .ok_or_else(|| format!("资产目录没有 {path}"));
-        }
-        Ok(self.root.join(path))
     }
 
     /// 重新读取磁盘并执行所有已加载脚本；场景脚本热重载入口。

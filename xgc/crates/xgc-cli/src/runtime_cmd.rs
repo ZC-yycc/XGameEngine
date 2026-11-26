@@ -3,11 +3,29 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use xgc_host::ScriptedRunner;
-use xgc_store::save_world;
+use xgc_host::{asset_paths, ScriptedRunner};
+use xgc_store::{load_project, save_world, ProjectManifest, StoreError};
 use xgc_world::World;
 
 use crate::world_cmd::{load_world_state, parse_frames};
+
+/// 单世界可以没有清单，存在清单时把读盘和格式错误交还给调用方。
+pub(crate) fn load_native_project(root: &Path) -> Result<Option<ProjectManifest>, String> {
+    match load_project(&root.join("project.xgc")) {
+        Ok(manifest) => Ok(Some(manifest)),
+        Err(StoreError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("读取项目清单失败：{err}")),
+    }
+}
+
+pub(crate) fn load_search_paths(root: &Path) -> Result<Vec<String>, String> {
+    Ok(load_native_project(root)?.map_or_else(Vec::new, |manifest| manifest.search_paths))
+}
+
+pub(crate) fn scripted_runner(world: World, root: &Path) -> Result<ScriptedRunner, String> {
+    let assets = asset_paths(Some(root), &load_search_paths(root)?);
+    Ok(ScriptedRunner::with_assets(world, assets).0)
+}
 
 pub(crate) fn advance_world(
     world: World,
@@ -26,7 +44,7 @@ pub(crate) fn advance_world_with_particles(
     if frames == 0 {
         return Ok((world, Vec::new()));
     }
-    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(assets_root));
+    let mut runner = scripted_runner(world, assets_root)?;
     for _ in 0..frames {
         runner.step()?;
     }
