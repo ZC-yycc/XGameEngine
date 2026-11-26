@@ -2,8 +2,8 @@
 
 use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
-    AudioSource, Camera, Component, ComponentId, GlobalTransform, Material, MeshRenderer, Name,
-    Parent, PhysicsBody, Script, Transform, Value,
+    AudioSource, Camera, Component, GlobalTransform, Material, MeshRenderer, Name, Parent,
+    PhysicsBody, Script, Transform, Value,
 };
 
 const SCENE: &str = r#"(
@@ -86,11 +86,6 @@ fn migrates_identity_transform_and_parent() {
         .unwrap();
     assert_eq!(transform.fields[0].1, Value::Vec3([1.0, 2.0, 3.0]));
     assert_eq!(transform.fields[2].1, Value::Vec3([2.0, 2.0, 2.0]));
-
-    assert_eq!(
-        xgc_migrate::component_id_name(ComponentId(0x0101)),
-        "core.transform"
-    );
 }
 
 #[test]

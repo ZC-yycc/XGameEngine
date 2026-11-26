@@ -226,6 +226,10 @@ fn named_fields(input: &DeriveInput, is_component: bool) -> syn::Result<Vec<Fiel
                                 let number: Expr = meta.value()?.parse()?;
                                 quote!(.step(#number))
                             }
+                            "asset" => {
+                                let kind: Ident = meta.value()?.parse()?;
+                                quote!(.asset(::xgc_reflect::AssetKind::#kind))
+                            }
                             "range" => {
                                 let Expr::Tuple(tuple) = meta.value()?.parse()? else {
                                     return Err(meta.error("range 需要 (min, max)"));

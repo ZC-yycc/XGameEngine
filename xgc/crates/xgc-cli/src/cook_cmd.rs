@@ -9,9 +9,7 @@ use xgc_base::path::normalize_project_relative;
 use xgc_script::ScriptRuntime;
 use xgc_sim::Simulation;
 use xgc_store::{load_world, save_world, save_world_binary};
-use xgc_world::{Component, LodGroup, World, WorldData};
-
-use crate::assets_cmd::lod_models;
+use xgc_world::{builtin_registry, World, WorldData};
 
 pub fn cook(root: Option<&str>, out: Option<&str>) -> ExitCode {
     let (Some(root), Some(out)) = (root, out) else {
@@ -149,31 +147,22 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
 
 fn referenced_paths(root: &Path, data: &WorldData) -> Option<BTreeSet<String>> {
     let catalog = scan(root).ok()?;
+    let registry = builtin_registry();
     let mut keep = BTreeSet::new();
-    for entity in &data.entities {
-        for component in &entity.components {
-            let guids = component.fields.iter().filter_map(|(_, value)| {
-                value
-                    .as_string()
-                    .filter(|value| value.starts_with("guid://"))
-            });
-            let lod = (component.component == LodGroup::ID)
-                .then(|| lod_models(component))
-                .into_iter()
-                .flatten()
-                .map(|(_, model)| model);
-            for reference in guids.chain(lod) {
+    for component in data.entities.iter().flat_map(|entity| &entity.components) {
+        if let Some(schema) = registry.get(component.component) {
+            schema.visit_asset_references(&component.fields, |_, _, reference| {
                 if reference.starts_with("guid://") {
-                    let Some(path) = catalog.resolve(reference) else {
-                        continue;
-                    };
-                    if let Ok(relative) = path.strip_prefix(root) {
+                    if let Some(relative) = catalog
+                        .resolve(reference)
+                        .and_then(|path| path.strip_prefix(root).ok())
+                    {
                         keep.insert(relative.to_string_lossy().replace('\\', "/"));
                     }
                 } else if let Ok(relative) = normalize_project_relative(reference) {
                     keep.insert(relative);
                 }
-            }
+            });
         }
     }
     Some(keep)

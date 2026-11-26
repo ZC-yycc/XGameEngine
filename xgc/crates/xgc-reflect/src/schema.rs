@@ -4,7 +4,19 @@ use serde::Serialize;
 use xgc_base::{Diagnostic, Severity, Subject};
 
 use super::value::struct_fits;
-use super::{FieldDescriptor, FieldType, Value};
+use super::{ComponentSchema, FieldDescriptor, FieldPath, FieldType, Value};
+
+/// 资产字段的用途由声明处标记，检查、迁移和打包共用同一目录。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetKind {
+    Model,
+    Material,
+    Script,
+    Audio,
+    Image,
+    Prefab,
+}
 
 /// 可序列化的字段 schema。
 #[derive(Clone, Debug, Serialize)]
@@ -25,6 +37,8 @@ pub struct FieldSchema {
     pub read_only: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset: Option<AssetKind>,
     pub doc: String,
     /// 列表元素或映射值的描述，其默认值供插入使用。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,6 +73,68 @@ impl FieldSchema {
 
     pub fn variant(&self, name: &str) -> Option<&Self> {
         self.variants.iter().find(|branch| branch.name == name)
+    }
+
+    fn visit_asset_references(
+        &self,
+        value: &Value,
+        path: &str,
+        visit: &mut impl FnMut(AssetKind, &str, &str),
+    ) {
+        match value {
+            Value::String(reference) => {
+                if let Some(kind) = self.asset {
+                    visit(kind, path, reference);
+                }
+            }
+            Value::List(values) => {
+                if let Some(element) = &self.element {
+                    for (index, value) in values.iter().enumerate() {
+                        element.visit_asset_references(value, &format!("{path}[{index}]"), visit);
+                    }
+                }
+            }
+            Value::Struct(values) => {
+                for field in &self.fields {
+                    if let Some(value) = values.get(&field.name) {
+                        field.visit_asset_references(
+                            value,
+                            &format!("{path}.{}", field.name),
+                            visit,
+                        );
+                    }
+                }
+            }
+            Value::Map(values) => {
+                if let Some(element) = &self.element {
+                    for (key, value) in values {
+                        let segment = FieldPath::key_segment(key);
+                        element.visit_asset_references(value, &format!("{path}{segment}"), visit);
+                    }
+                }
+            }
+            Value::Enum { variant, payload } => {
+                if let Some(branch) = self.variant(variant) {
+                    branch.visit_asset_references(payload, &format!("{path}.{variant}"), visit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl ComponentSchema {
+    /// 只遍历数据中实际出现的资产字段。空串由消费方按字段用途处理。
+    pub fn visit_asset_references(
+        &self,
+        values: &[(String, Value)],
+        mut visit: impl FnMut(AssetKind, &str, &str),
+    ) {
+        for field in &self.fields {
+            if let Some((_, value)) = values.iter().find(|(name, _)| *name == field.name) {
+                field.visit_asset_references(value, &field.name, &mut visit);
+            }
+        }
     }
 }
 
@@ -95,6 +171,7 @@ impl From<FieldDescriptor> for FieldSchema {
             step: field.step,
             read_only: field.read_only,
             group: field.group.map(str::to_string),
+            asset: field.asset,
             doc: field.doc.to_string(),
             element,
             fields,
@@ -154,6 +231,9 @@ fn validate_edit_metadata(field: &FieldSchema, path: &str, diagnostics: &mut Vec
         .is_some_and(|group| group.trim().is_empty())
     {
         diagnostics.push(error("SCHEMA.EMPTY_GROUP", "字段分组名不能为空"));
+    }
+    if field.asset.is_some() && field.ty != "string" {
+        diagnostics.push(error("SCHEMA.INVALID_ASSET", "资产引用必须是字符串字段"));
     }
 }
 

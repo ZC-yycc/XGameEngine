@@ -1,7 +1,7 @@
 //! 玩法侧数据组件：脚本引用 / 音频源。这里只存作者数据，运行时由脚本 /
 //! 音频系统消费。
 
-use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
+use xgc_reflect::{AssetKind, Component, ComponentId, FieldDescriptor, FieldType, Value};
 
 /// 脚本引用：项目相对路径；M1 只迁移 / 存盘，Lua 运行时后续接。
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -24,7 +24,8 @@ impl Component for Script {
     fn fields() -> Vec<FieldDescriptor> {
         vec![
             FieldDescriptor::new("path", FieldType::String, Value::String(String::new()))
-                .doc("项目相对路径"),
+                .asset(AssetKind::Script)
+                .doc("项目相对路径或 GUID"),
         ]
     }
 
@@ -92,6 +93,7 @@ impl Component for AudioSource {
     fn fields() -> Vec<FieldDescriptor> {
         vec![
             FieldDescriptor::new("clip", FieldType::String, Value::String(String::new()))
+                .asset(AssetKind::Audio)
                 .doc("音频路径"),
             FieldDescriptor::new("volume", FieldType::F32, Value::F64(1.0)).doc("线性音量 0..1"),
             FieldDescriptor::new("pitch", FieldType::F32, Value::F64(1.0)).doc("播放速率 / 音高"),

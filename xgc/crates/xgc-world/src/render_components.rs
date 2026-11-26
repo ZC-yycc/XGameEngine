@@ -1,6 +1,6 @@
 //! 渲染侧内建组件：网格引用 / 最小材质 / 相机。
 
-use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
+use xgc_reflect::{AssetKind, Component, ComponentId, FieldDescriptor, FieldType, Value};
 
 /// 内建：可渲染网格引用；模型路径是项目相对路径 / builtin URI。
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -23,6 +23,7 @@ impl Component for MeshRenderer {
     fn fields() -> Vec<FieldDescriptor> {
         vec![
             FieldDescriptor::new("model", FieldType::String, Value::String(String::new()))
+                .asset(AssetKind::Model)
                 .doc("模型路径 / builtin URI"),
         ]
     }
@@ -91,6 +92,7 @@ impl Component for Material {
                 .doc("线性基色 RGBA 乘子"),
             FieldDescriptor::new("roughness", FieldType::F32, Value::F64(0.5)).doc("粗糙度 0..1"),
             FieldDescriptor::new("asset", FieldType::String, Value::String(String::new()))
+                .asset(AssetKind::Material)
                 .doc("材质资产引用（guid:// 或项目相对路径；空 = 不用）"),
         ]
     }

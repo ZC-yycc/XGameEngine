@@ -20,7 +20,9 @@
 
 ## 项目迁移的实体 ID
 
-从 `xgc/` 先运行 `cargo run -q -p xgc-cli --offline -- migrate ../projects/XGame ../tmp/xgc-project --dry-run` 查看计划，去掉 `--dry-run` 后迁移至新目录。项目先为场景分配 ID，再为预制体分配 ID。两组都按源文件路径和文件内旧 ID 排序。父节点和场景中的预制体成员来源 ID 随之重写，关卡清单保留原顺序。
+从 `xgc/` 先运行 `cargo run -q -p xgc-cli --offline -- migrate ../projects/XGame ../tmp/xgc-project --dry-run` 查看计划，去掉 `--dry-run` 后迁移至新目录。两种模式共用预检与报告，包含实际生成的组件数、项目资产引用数、实体 ID 引用数，以及按源文件和旧实体 ID 定位的待移植项。GUID 冲突在预检时报出两条路径。XGame 实测生成 230 个组件、26 处资产引用和 16 处实体引用，组件场景中的 Spinner 与 Bobber 仍需移植运行逻辑。
+
+项目先为场景分配 ID，再为预制体分配 ID。两组都按源文件路径和文件内旧 ID 排序。父节点和场景中的预制体成员来源 ID 随之重写，关卡清单保留原顺序。
 
 预制体输出为 `.prefab.json`，伴生 `.meta` 随文件改名并保留 GUID。场景成员沿用 GUID，未登记 GUID 的成员使用目标项目相对路径。编辑器用所选成员的来源加载资产并 Revert，已有成员保留实体 ID 和变换。
 
@@ -50,7 +52,7 @@ Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑�
 
 生成式 Inspector 从反射 schema 读取数值边界、单位、步长、分组和只读标记。动画事件时间以秒显示，方向键步长为 0.05 秒，普通拖动按每逻辑像素 0.05 秒换算并由 egui 智能取整，输入最低为 0。基础和分层动画的转场运行状态显示在 `Blend State`，可查看但不能通过面板逐项写入。CLI 的 `schema` 和 Agent 的 `engine.describe` 输出可选的 `step`、`group`、`read_only`。只读标记描述界面行为，现有命令、运行时及存储仍使用原字段和校验。
 
-`render.lod` 从 Rust 声明派生字段描述、读取和写入。`#[derive(Component)]` 从组件的 `Default` 取得缺省值，`#[derive(ReflectValue)]` 描述列表里的具名结构体，列表和字符串键映射复用元素的投影。字段声明旁可设置单位、边界、步长、分组、只读与说明，组件字段可用 `skip_hash` 标记不计入回放哈希的作者数据。生成代码继续使用已有的 `FieldDescriptor`、`Value` 和 `Component` 接口，LOD 的字段名、顺序和缺省值保持原契约。
+`render.lod` 从 Rust 声明派生字段描述、读取和写入。`#[derive(Component)]` 从组件的 `Default` 取得缺省值，`#[derive(ReflectValue)]` 描述列表里的具名结构体，列表和字符串键映射复用元素的投影。字段声明旁可设置单位、边界、步长、分组、只读、说明与资产用途，组件字段可用 `skip_hash` 标记不计入回放哈希的作者数据。项目检查、迁移报告和打包共用 `asset` 字段元数据遍历引用，包括 LOD 列表里的模型引用。生成代码继续使用已有的 `FieldDescriptor`、`Value` 和 `Component` 接口，LOD 的字段名、顺序和缺省值保持原契约。
 
 世界、预制体与事务日志使用 JSON 包络 v5，cooked 世界使用 XGCB v6。仓库内原生世界样例已一次性重写，旧版本文件会被拒绝。已有迁移输出可用上文的 `xgc migrate` 从旧 RON 重新生成到新目录。旧原生文件如有手工编辑，先保留原件，重新迁移旧 RON 只包含旧工程原有内容。
 

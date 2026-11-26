@@ -21,6 +21,8 @@ pub(super) struct WorldPlan {
     #[serde(skip)]
     pub world: WorldData,
     #[serde(skip)]
+    pub unmatched: Vec<String>,
+    #[serde(skip)]
     references: Vec<(usize, OldPrefabRef)>,
 }
 
@@ -42,6 +44,7 @@ impl WorldPlan {
             .iter()
             .map(|entity| (entity.id, entity.id))
             .collect();
+        let unmatched = unmatched_fields(source, &scene);
         let references = scene
             .entities
             .into_iter()
@@ -53,6 +56,7 @@ impl WorldPlan {
             target,
             ids,
             world,
+            unmatched,
             references,
         })
     }
@@ -79,6 +83,44 @@ impl WorldPlan {
             message: err.to_string(),
         })
     }
+}
+
+fn unmatched_fields(source: &str, scene: &OldScene) -> Vec<String> {
+    use crate::OldComponentData;
+
+    let mut notes = Vec::new();
+    for entity in &scene.entities {
+        let id = entity.id.0;
+        if entity.layer != 0 {
+            notes.push(format!(
+                "[migration.layer] {source} 实体 {id} 的 layer={} 需要重设碰撞过滤",
+                entity.layer
+            ));
+        }
+        if source.ends_with(".prefab.ron") && entity.prefab.is_some() {
+            notes.push(format!(
+                "[migration.nested_prefab] {source} 实体 {id} 保留展开内容，来源链接需要重建"
+            ));
+        }
+        for entry in &entity.components.entries {
+            match &entry.data {
+                OldComponentData::Mesh(mesh) if !mesh.morph_weights.is_empty() => {
+                    notes.push(format!(
+                        "[migration.morph] {source} 实体 {id} 的 morph_weights 需要重设"
+                    ));
+                }
+                OldComponentData::Rust {
+                    registered_name, ..
+                } => {
+                    notes.push(format!(
+                        "[plugin.unsupported] {source} 实体 {id} 的 {registered_name} 仅保留字段，需移植运行逻辑"
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    notes
 }
 
 pub(super) struct PrefabPlans {

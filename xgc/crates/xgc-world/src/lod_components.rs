@@ -5,7 +5,7 @@ use xgc_reflect::{Component, ReflectValue};
 #[derive(Clone, Debug, PartialEq, Default, ReflectValue)]
 #[reflect(element_name = "level")]
 pub struct LodLevel {
-    #[field(doc = "内建图元、模型 GUID 或项目相对路径")]
+    #[field(asset = Model, doc = "内建图元、模型 GUID 或项目相对路径")]
     pub model: String,
     #[field(unit = "m", range = (-(f32::MAX as f64), f32::MAX as f64), doc = "此级的最大距离，零或负值表示无限距离")]
     pub max_distance: f32,

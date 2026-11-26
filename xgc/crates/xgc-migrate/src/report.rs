@@ -1,11 +1,5 @@
 use std::fmt;
 
-use xgc_world::{
-    Animator as XgcAnimator, CharacterController as XgcCharacter, Component, ComponentId,
-    GlobalTransform, LodGroup, Name, Parent, ParticleEmitter as XgcParticle, PluginComponent,
-    Transform,
-};
-
 use crate::OLD_SCENE_FORMAT_VERSION;
 
 #[derive(Debug)]
@@ -50,19 +44,4 @@ pub struct MigrationBatch {
     pub mapped_components: usize,
     pub missing_parents: usize,
     pub failures: Vec<String>,
-}
-
-pub fn component_id_name(id: ComponentId) -> &'static str {
-    match id {
-        Transform::ID => "core.transform",
-        Name::ID => "core.name",
-        Parent::ID => "core.parent",
-        GlobalTransform::ID => "core.global_transform",
-        XgcAnimator::ID => "animation.animator",
-        XgcCharacter::ID => "physics.character",
-        XgcParticle::ID => "particle.emitter",
-        PluginComponent::ID => "plugin.rust",
-        LodGroup::ID => "render.lod",
-        _ => "unknown",
-    }
 }

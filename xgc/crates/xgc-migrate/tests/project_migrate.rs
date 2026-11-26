@@ -117,6 +117,81 @@ fn dry_run_reports_without_writing() {
 }
 
 #[test]
+fn reports_project_components_references_and_unmapped_fields() {
+    let (root, out) = standard_project("report");
+    write_meta(&root, "Resources/model.bin", "abcd");
+    let instance = entity(1)
+        .replace(
+            "prefab: None",
+            r#"prefab: Some((source: "Prefabs/P.prefab.ron", source_id: (7), is_root: true))"#,
+        )
+        .replace(
+            "entries: []",
+            r#"entries: [(data: Mesh((model: "guid://abcd", morph_weights: [0.25])))]"#,
+        );
+    let child = entity(2)
+        .replace("parent: None", "parent: Some((1))")
+        .replace("layer: 0", "layer: 4")
+        .replace(
+            "entries: []",
+            r#"entries: [(data: Lua(path: "Scripts/main.lua"))]"#,
+        );
+    write(
+        &root,
+        "Scenes/a.ron",
+        &scene(&format!("{instance},{child}")),
+    );
+    let prefab = entity(7).replace(
+        "entries: []",
+        r#"entries: [
+            (data: Lod((levels: [(model: "builtin://cube", max_distance: 10.0),
+                                (model: "Resources/model.bin", max_distance: 30.0)]))),
+            (data: Rust(registered_name: "Spinner", fields: None)),
+        ]"#,
+    );
+    write(&root, "Prefabs/P.prefab.ron", &scene(&prefab));
+
+    let dry = migrate_old_project(&root, &out, true).unwrap().render();
+    assert!(!out.exists());
+    for expected in [
+        "components=18",
+        "asset_references=4",
+        "entity_references=2",
+        "[migration.morph] Scenes/a.ron 实体 1",
+        "[migration.layer] Scenes/a.ron 实体 2",
+        "[plugin.unsupported] Prefabs/P.prefab.ron 实体 7",
+        "Spinner",
+    ] {
+        assert!(dry.contains(expected), "缺少 {expected}：{dry}");
+    }
+    let written = migrate_old_project(&root, &out, false).unwrap().render();
+    assert_eq!(dry.replace("（dry-run，未写盘）", ""), written);
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(out).unwrap();
+}
+
+#[test]
+fn migrate_rejects_duplicate_guids_before_creating_an_output() {
+    let (root, out) = standard_project("conflict");
+    write(&root, "Resources/other.bin", "asset");
+    write_meta(&root, "Resources/other.bin", "g1");
+    for dry_run in [true, false] {
+        let error = migrate_old_project(&root, &out, dry_run).unwrap_err();
+        let ProjectMigrationError::Problems(problems) = error else {
+            panic!("GUID 冲突应是项目体检问题：{error}");
+        };
+        assert!(problems.iter().any(|line| {
+            line.contains("GUID g1 重复")
+                && line.contains("model.bin")
+                && line.contains("other.bin")
+        }));
+        assert!(!out.exists());
+        assert!(!staging_of(&out).exists());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn migrates_listed_scenes_and_content() {
     let (root, out) = standard_project("full");
     let report = migrate_old_project(&root, &out, false).unwrap();

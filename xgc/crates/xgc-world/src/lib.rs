@@ -73,7 +73,7 @@ pub use state_machine_components::{
     AnimationState, StateDef, StateMachine, TransitionCondition, TransitionDef,
 };
 pub use ui_components::{UiElement, UiInput, UiInteraction, UiLayout};
-pub use xgc_reflect::{Component, ComponentId, FieldPath, Value};
+pub use xgc_reflect::{AssetKind, Component, ComponentId, FieldPath, Value};
 /// 列：任意组件的连续存储；crate 内部接口，公开但不承诺稳定性。
 #[doc(hidden)]
 pub trait Column: Any + Send + Sync {

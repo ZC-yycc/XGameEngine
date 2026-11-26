@@ -8,15 +8,10 @@ use std::path::{Path, PathBuf};
 use xgc_asset::{find_files, AssetCatalog};
 use xgc_base::{path::normalize_project_relative, EntityId};
 use xgc_migrate::ProjectCheckReport;
-use xgc_reflect::{Component, ComponentId, Registry, Value};
+use xgc_reflect::{AssetKind, Component, Registry, Value};
 use xgc_sim::InputMap;
 use xgc_store::{load_prefab, load_world, ProjectSession, StoreError};
-use xgc_world::{
-    AudioSource, ComponentData, LodGroup, Material, MeshRenderer, Parent, PluginComponent,
-    PrefabInstance, Script, UiElement, World, WorldData,
-};
-
-use crate::assets_cmd::lod_models;
+use xgc_world::{ComponentData, Parent, PluginComponent, PrefabInstance, World, WorldData};
 
 pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckReport, String> {
     let project = ProjectSession::open(path).map_err(|err| format!("{}：{err}", path.display()))?;
@@ -288,45 +283,22 @@ impl Audit<'_> {
     }
 
     fn asset_field(&mut self, location: &str, component: &ComponentData) {
-        if component.component == LodGroup::ID {
-            for (index, reference) in lod_models(component) {
-                self.asset_reference(
-                    location,
-                    &format!("levels[{index}].model"),
-                    reference,
-                    LodGroup::ID,
-                );
-            }
-            return;
-        }
-        let name = match component.component {
-            Script::ID => "path",
-            MeshRenderer::ID => "model",
-            Material::ID => "asset",
-            AudioSource::ID => "clip",
-            UiElement::ID => "image_path",
-            _ => return,
-        };
-        if let Some(reference) = field(component, name).and_then(Value::as_string) {
-            self.asset_reference(location, name, reference, component.component);
+        if let Some(schema) = self.registry.get(component.component) {
+            schema.visit_asset_references(&component.fields, |kind, name, reference| {
+                self.asset_reference(location, name, reference, kind);
+            });
         }
     }
 
-    fn asset_reference(
-        &mut self,
-        location: &str,
-        name: &str,
-        reference: &str,
-        component: ComponentId,
-    ) {
+    fn asset_reference(&mut self, location: &str, name: &str, reference: &str, kind: AssetKind) {
         if reference.is_empty()
-            || (matches!(component, MeshRenderer::ID | LodGroup::ID)
+            || (kind == AssetKind::Model
                 && reference.starts_with("builtin://")
                 && xgc_render::builtin_mesh(reference).is_some())
         {
             return;
         }
-        let script = component == Script::ID;
+        let script = kind == AssetKind::Script;
         match self.resolve(reference) {
             Ok(path) if script => {
                 self.scripts.insert(path);

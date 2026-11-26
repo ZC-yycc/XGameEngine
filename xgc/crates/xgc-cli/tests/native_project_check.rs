@@ -6,10 +6,10 @@ use std::process::{Command, Output};
 
 use xgc_reflect::{Component, Value};
 use xgc_store::{save_prefab, save_project, save_world, ProjectContent, ProjectManifest};
-use xgc_world::{LodGroup, MeshRenderer, Parent, PrefabInstance, Script, World};
+use xgc_world::{LodGroup, MeshRenderer, Name, Parent, PrefabInstance, Script, World};
 
 #[test]
-fn pack_copies_models_referenced_only_by_lod() {
+fn pack_uses_schema_to_find_model_references() {
     let root = Temp::new("pack-lod");
     let assets = root.0.join("source");
     fs::create_dir_all(assets.join("Resources")).unwrap();
@@ -20,10 +20,24 @@ fn pack_copies_models_referenced_only_by_lod() {
     )
     .unwrap();
     fs::write(assets.join("Resources/near.glb"), "near").unwrap();
+    fs::write(assets.join("Resources/base.glb"), "base").unwrap();
     fs::write(assets.join("Resources/unused.glb"), "unused").unwrap();
+    fs::write(
+        assets.join("Resources/unused.glb.meta"),
+        "(guid: \"feedface\")",
+    )
+    .unwrap();
 
     let mut scene = World::new();
     scene.spawn((LodGroup::default(),));
+    scene.spawn((
+        MeshRenderer {
+            model: "Resources/base.glb".into(),
+        },
+        Name {
+            value: "guid://feedface".into(),
+        },
+    ));
     let mut data = scene.world_data();
     data.entities[0].components[0].fields[0].1 =
         lod_levels(&["Resources/near.glb", "guid://aabbccdd"]);
@@ -40,10 +54,12 @@ fn pack_copies_models_referenced_only_by_lod() {
         "Resources/near.glb",
         "Resources/far.glb",
         "Resources/far.glb.meta",
+        "Resources/base.glb",
     ] {
         assert!(out.join(path).is_file(), "缺少 {path}");
     }
     assert!(!out.join("Resources/unused.glb").exists());
+    assert!(!out.join("Resources/unused.glb.meta").exists());
     assert_eq!(
         xgc_store::load_world_binary(&out.join("world.xgcb")).unwrap(),
         data

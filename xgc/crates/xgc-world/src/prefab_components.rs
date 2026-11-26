@@ -1,6 +1,6 @@
 //! 预制体实例标记：记录来源资产与源实体 ID。
 
-use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
+use xgc_reflect::{AssetKind, Component, ComponentId, FieldDescriptor, FieldType, Value};
 
 use crate::ComponentData;
 
@@ -40,7 +40,8 @@ impl Component for PrefabInstance {
     fn fields() -> Vec<FieldDescriptor> {
         vec![
             FieldDescriptor::new("source", FieldType::String, Value::String(String::new()))
-                .doc("来源预制体路径"),
+                .asset(AssetKind::Prefab)
+                .doc("来源预制体路径或 GUID"),
             FieldDescriptor::new("source_id", FieldType::Entity, Value::Entity(0))
                 .doc("预制体内的源实体 ID"),
             FieldDescriptor::new("root", FieldType::Bool, Value::Bool(false))

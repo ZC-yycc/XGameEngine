@@ -14,6 +14,7 @@ use xgc_base::path::normalize_project_relative;
 use xgc_store::{
     save_project, save_world, ProjectContent, ProjectManifest, PROJECT_FORMAT_VERSION,
 };
+use xgc_world::{builtin_registry, AssetKind, Value};
 
 use self::documents::{canonical, PrefabPlans, WorldPlan};
 use self::files::Copies;
@@ -80,6 +81,14 @@ pub struct ProjectMigrationReport {
     pub prefabs: usize,
     pub prefab_entities: usize,
     pub copied_files: usize,
+    /// 目标场景和预制体里实际写入的组件，包括身份、变换和运行所需的缺省组件。
+    pub components: usize,
+    /// 目标组件的项目文件引用按出现次数计数，忽略空引用和内建模型。
+    pub asset_references: usize,
+    /// 父节点和预制体来源等实体 ID 引用按出现次数计数。
+    pub entity_references: usize,
+    /// 需要移植的行为和需要重新配置的字段，使用旧文件与实体 ID 定位。
+    pub unmatched: Vec<String>,
     pub dry_run: bool,
     pub output: PathBuf,
 }
@@ -91,17 +100,26 @@ impl ProjectMigrationReport {
         } else {
             ""
         };
-        format!(
-            "migrate: project={} scenes={} entities={} copied={} prefabs={} prefab_entities={} -> {}{}\n  entity ID map: {ID_MAP_FILE}",
+        let mut text = format!(
+            "migrate: project={} scenes={} entities={} copied={} prefabs={} prefab_entities={} components={} asset_references={} entity_references={} unmatched={} -> {}{}\n  entity ID map: {ID_MAP_FILE}",
             self.name,
             self.scenes,
             self.entities,
             self.copied_files,
             self.prefabs,
             self.prefab_entities,
+            self.components,
+            self.asset_references,
+            self.entity_references,
+            self.unmatched.len(),
             self.output.display(),
             suffix
-        )
+        );
+        for note in &self.unmatched {
+            text.push_str("\n  migration: ");
+            text.push_str(note);
+        }
+        text
     }
 }
 
@@ -116,21 +134,7 @@ pub fn migrate_old_project(
         return Err(ProjectMigrationError::Problems(check.problems));
     }
     let plan = plan_project(root, &read_old_project(root)?)?;
-    let report = ProjectMigrationReport {
-        name: plan.manifest.name.clone(),
-        scenes: plan.scenes.len(),
-        entities: plan.scenes.iter().map(|scene| scene.ids.len()).sum(),
-        prefabs: plan.prefabs.documents.len(),
-        prefab_entities: plan
-            .prefabs
-            .documents
-            .values()
-            .map(|prefab| prefab.document.ids.len())
-            .sum(),
-        copied_files: plan.copies.len() + plan.prefabs.meta_count(),
-        dry_run,
-        output: output.to_path_buf(),
-    };
+    let report = plan.report(output, dry_run);
 
     if dry_run {
         return Ok(report);
@@ -176,6 +180,58 @@ struct Plan {
     scenes: Vec<WorldPlan>,
     prefabs: PrefabPlans,
     copies: Copies,
+}
+
+impl Plan {
+    fn report(&self, output: &Path, dry_run: bool) -> ProjectMigrationReport {
+        let prefabs = self
+            .prefabs
+            .documents
+            .values()
+            .map(|prefab| &prefab.document);
+        let mut report = ProjectMigrationReport {
+            name: self.manifest.name.clone(),
+            scenes: self.scenes.len(),
+            entities: self.scenes.iter().map(|scene| scene.ids.len()).sum(),
+            prefabs: self.prefabs.documents.len(),
+            prefab_entities: prefabs.clone().map(|document| document.ids.len()).sum(),
+            copied_files: self.copies.len() + self.prefabs.meta_count(),
+            components: 0,
+            asset_references: 0,
+            entity_references: 0,
+            unmatched: Vec::new(),
+            dry_run,
+            output: output.to_path_buf(),
+        };
+        let registry = builtin_registry();
+        for document in self.scenes.iter().chain(prefabs) {
+            report.unmatched.extend(document.unmatched.iter().cloned());
+            for component in document
+                .world
+                .entities
+                .iter()
+                .flat_map(|entity| &entity.components)
+            {
+                report.components += 1;
+                report.entity_references += component
+                    .fields
+                    .iter()
+                    .filter(|(_, value)| matches!(value, Value::Entity(_)))
+                    .count();
+                if let Some(schema) = registry.get(component.component) {
+                    schema.visit_asset_references(&component.fields, |kind, _, reference| {
+                        if !reference.is_empty()
+                            && !(kind == AssetKind::Model && reference.starts_with("builtin://"))
+                        {
+                            report.asset_references += 1;
+                        }
+                    });
+                }
+            }
+        }
+        report.unmatched.sort_unstable();
+        report
+    }
 }
 
 fn plan_project(root: &Path, project: &OldProject) -> Result<Plan, ProjectMigrationError> {

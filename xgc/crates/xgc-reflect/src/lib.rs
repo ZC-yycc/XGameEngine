@@ -19,7 +19,7 @@ mod typed;
 mod value;
 
 pub use path::FieldPath;
-pub use schema::FieldSchema;
+pub use schema::{AssetKind, FieldSchema};
 pub use typed::ReflectValue;
 pub use xgc_reflect_derive::{Component, ReflectValue};
 
@@ -181,6 +181,7 @@ pub struct FieldDescriptor {
     pub read_only: bool,
     /// 同层字段的显示分组。
     pub group: Option<&'static str>,
+    pub asset: Option<AssetKind>,
     pub doc: &'static str,
 }
 
@@ -195,6 +196,7 @@ impl FieldDescriptor {
             step: None,
             read_only: false,
             group: None,
+            asset: None,
             doc: "",
         }
     }
@@ -221,6 +223,11 @@ impl FieldDescriptor {
 
     pub fn group(mut self, group: &'static str) -> Self {
         self.group = Some(group);
+        self
+    }
+
+    pub fn asset(mut self, asset: AssetKind) -> Self {
+        self.asset = Some(asset);
         self
     }
 

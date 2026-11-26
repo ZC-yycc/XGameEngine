@@ -1,6 +1,6 @@
 //! UI 内建组件：屏幕空间矩形 + 文本 / 图片引用。
 
-use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
+use xgc_reflect::{AssetKind, Component, ComponentId, FieldDescriptor, FieldType, Value};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiElement {
@@ -130,7 +130,8 @@ impl Component for UiElement {
                 "image_path",
                 FieldType::String,
                 Value::String(String::new()),
-            ),
+            )
+            .asset(AssetKind::Image),
             FieldDescriptor::new("clip_children", FieldType::Bool, Value::Bool(true))
                 .doc("是否把后代裁剪到本元素矩形"),
             FieldDescriptor::new(

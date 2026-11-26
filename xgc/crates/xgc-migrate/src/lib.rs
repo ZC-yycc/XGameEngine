@@ -39,7 +39,7 @@ pub use project_check::{
     check_old_project, ProjectCheckError, ProjectCheckReport, OLD_PROJECT_FORMAT_VERSION,
 };
 pub use project_migrate::{migrate_old_project, ProjectMigrationError, ProjectMigrationReport};
-pub use report::{component_id_name, MigrationBatch, MigrationError, MigrationReport};
+pub use report::{MigrationBatch, MigrationError, MigrationReport};
 pub use verify::verify_migration;
 #[derive(Debug, Default, Deserialize)]
 struct OldComponents {
@@ -149,6 +149,8 @@ fn default_friction() -> f32 {
 #[derive(Debug, Deserialize)]
 struct OldMesh {
     model: String,
+    #[serde(default)]
+    morph_weights: Vec<f32>,
 }
 
 #[derive(Debug, Deserialize)]
