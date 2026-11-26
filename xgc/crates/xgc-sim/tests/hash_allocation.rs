@@ -1,51 +1,15 @@
 //! 测量带真实结构化组件的世界哈希，只计预热后的调用。
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+mod support;
+
 use std::hint::black_box;
 use std::time::Instant;
 
+use support::{reset_counter, snapshot};
 use xgc_world::{
     AnimLayer, AnimationLayers, AnimationState, LayerMode, LodGroup, LodLevel, StateDef,
     StateMachine, TransitionCondition, TransitionDef, World,
 };
-
-thread_local! {
-    static COUNTER: Cell<(u64, usize)> = const { Cell::new((0, 0)) };
-}
-
-struct CountingAllocator;
-
-// SAFETY: 每项操作保留原指针和布局约定，计数器只记录成功的系统分配。
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc(layout) };
-        record_allocation(ptr, layout.size());
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        let ptr = unsafe { System.realloc(ptr, layout, size) };
-        record_allocation(ptr, size);
-        ptr
-    }
-}
-
-fn record_allocation(ptr: *mut u8, size: usize) {
-    if !ptr.is_null() {
-        let _ = COUNTER.try_with(|counter| {
-            let (calls, bytes) = counter.get();
-            counter.set((calls + 1, bytes + size));
-        });
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn machine() -> StateMachine {
     StateMachine {
@@ -164,14 +128,14 @@ fn lods() -> World {
 fn measure(label: &str, world: &World, expected: u64) {
     const HASHES: u64 = 60;
     assert_eq!(world.state_hash(), expected, "{label} 的旧哈希应保持不变");
-    COUNTER.set((0, 0));
+    reset_counter();
     let start = Instant::now();
     let mut hashes = 0u64;
     for _ in 0..HASHES {
         hashes = hashes.wrapping_add(black_box(world).state_hash());
     }
     let elapsed = start.elapsed();
-    let (allocations, bytes) = COUNTER.get();
+    let (allocations, bytes) = snapshot().expect("量测线程的计数器");
     eprintln!("{label}: hash={expected:016x}, {} entities × {HASHES} hashes, {allocations} allocations, {bytes} bytes, {elapsed:?}", world.len());
     assert_eq!(hashes, expected.wrapping_mul(HASHES));
     assert_eq!((allocations, bytes), (0, 0), "{label} 的稳态哈希分配");
