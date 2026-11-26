@@ -543,24 +543,24 @@ impl Agent {
             .copied()
             .max()
             .ok_or_else(|| "没有可撤销的事务".to_string())?;
-        let applied = self.applied.remove(&tx_id).expect("刚查到的事务");
-        let revision = self
-            .world
-            .revert(&applied)
-            .map_err(|diagnostics| format!("撤销失败：{diagnostics:?}"))?;
-        Ok(json!({"tx_id": tx_id, "revision": revision}))
+        self.revert_transaction(tx_id, "撤销失败")
     }
 
     fn revert(&mut self, params: &Json) -> Result<Json, String> {
         let tx_id = required_u64(params, "tx_id")?;
+        self.revert_transaction(tx_id, "回滚失败")
+    }
+
+    fn revert_transaction(&mut self, tx_id: u64, error_prefix: &str) -> Result<Json, String> {
         let applied = self
             .applied
-            .remove(&tx_id)
+            .get(&tx_id)
             .ok_or_else(|| format!("未知 tx_id：{tx_id}"))?;
         let revision = self
             .world
-            .revert(&applied)
-            .map_err(|diagnostics| format!("回滚失败：{diagnostics:?}"))?;
+            .revert_logged(applied, &mut self.journal)
+            .map_err(|diagnostics| format!("{error_prefix}：{diagnostics:?}"))?;
+        self.applied.remove(&tx_id);
         Ok(json!({"tx_id": tx_id, "revision": revision}))
     }
 }

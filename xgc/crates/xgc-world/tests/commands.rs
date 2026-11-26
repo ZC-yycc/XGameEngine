@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use xgc_base::EntityId;
 use xgc_reflect::{ComponentId, Value};
-use xgc_world::{Command, ComponentData, EntityData, Transform, Velocity, World};
+use xgc_world::{Applied, Command, ComponentData, EntityData, Journal, Transform, Velocity, World};
 
 fn transform() -> ComponentId {
     ComponentId(0x0101)
@@ -109,6 +109,42 @@ fn stale_plan_conflicts_instead_of_overwriting() {
         .unwrap();
     let err = world.revert(&applied).unwrap_err();
     assert_eq!(err[0].code, "EDIT.REVISION_CONFLICT");
+}
+
+#[test]
+fn failed_revert_restores_earlier_inverse_changes() {
+    let (mut world, id) = world_with_one();
+    let before = world.world_data();
+    let before_hash = world.state_hash();
+    let mut journal = Journal::new();
+    let applied = Applied {
+        revision: world.revision(),
+        inverse: vec![
+            Command::Despawn {
+                entity: EntityId::from_raw(99),
+            },
+            Command::Replace {
+                data: EntityData {
+                    id,
+                    revision: 0,
+                    components: Vec::new(),
+                },
+            },
+            set_position(id, 1.0),
+            Command::Spawn {
+                data: before.entities[0]
+                    .clone()
+                    .with_id(EntityId::from_raw(1_000)),
+            },
+        ],
+    };
+
+    let error = world.revert_logged(&applied, &mut journal).unwrap_err();
+    assert_eq!(error[0].code, "EDIT.UNKNOWN_ENTITY");
+    assert!(journal.is_empty());
+    // WorldData 同时检查组件值、实体 revision、世界 revision 与 next_id。
+    assert_eq!(world.world_data(), before);
+    assert_eq!(world.state_hash(), before_hash);
 }
 
 #[test]

@@ -96,16 +96,3 @@ impl Journal {
         Ok(world.state_hash())
     }
 }
-
-impl World {
-    /// 应用并记账；日志记在内存里，落盘由上层负责。
-    pub fn apply_logged(
-        &mut self,
-        plan: &Plan,
-        journal: &mut Journal,
-    ) -> Result<Applied, Vec<xgc_base::Diagnostic>> {
-        let applied = self.apply(plan)?;
-        journal.record(plan, &applied);
-        Ok(applied)
-    }
-}

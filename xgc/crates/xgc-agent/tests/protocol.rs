@@ -452,6 +452,76 @@ fn replay_rebuilds_world_from_journal() {
     assert_eq!(queried["total"], 1);
 }
 
+fn apply_commands(agent: &mut Agent, commands: &[Command]) -> Json {
+    let plan = result(call(agent, "edit.plan", json!({"commands": commands})));
+    assert_eq!(plan["valid"], true, "{plan}");
+    result(call(
+        agent,
+        "edit.apply",
+        json!({"plan_id": plan["plan_id"]}),
+    ))
+}
+
+#[test]
+fn replay_preserves_reverted_deletion() {
+    for method in ["edit.revert", "edit.undo"] {
+        let mut agent = Agent::new();
+        let id = EntityId::from_raw(1);
+        apply_commands(&mut agent, &[spawn_at(1, 1.0, "original")]);
+        let initial = result(call(&mut agent, "world.digest", Json::Null));
+
+        // 撤销必须先恢复实体，再替换回删除之前的原值。
+        let Command::Spawn { data } = spawn_at(1, 9.0, "replacement") else {
+            unreachable!();
+        };
+        let deleted = apply_commands(
+            &mut agent,
+            &[Command::Replace { data }, Command::Despawn { entity: id }],
+        );
+        let params = if method == "edit.revert" {
+            json!({"tx_id": deleted["tx_id"]})
+        } else {
+            Json::Null
+        };
+        let reverted = result(call(&mut agent, method, params));
+        assert_eq!(reverted["tx_id"], deleted["tx_id"]);
+        assert_eq!(reverted["revision"], 3);
+        let restored = result(call(&mut agent, "world.digest", Json::Null));
+        assert_eq!(restored["state_hash"], initial["state_hash"]);
+        assert_eq!(restored["entities"], 1);
+
+        // 下一笔事务以撤销后的 revision 为起点，日志必须覆盖中间这一步。
+        let edited = apply_commands(
+            &mut agent,
+            &[Command::SetField {
+                entity: id,
+                component: ComponentId(0x0101),
+                field: "position".to_string(),
+                value: Value::Vec3([2.0, 0.0, 0.0]),
+            }],
+        );
+        assert_eq!(edited["revision"], 4);
+        let expected = result(call(&mut agent, "world.snapshot", Json::Null));
+        let hash = agent.world().state_hash();
+        let replay = result(call(&mut agent, "engine.replay", Json::Null));
+        assert_eq!(replay["revision"], 4);
+        assert_eq!(replay["records"], 4);
+        assert_eq!(replay["hash"], json!(hash));
+        assert_eq!(
+            result(call(&mut agent, "world.snapshot", Json::Null)),
+            expected
+        );
+        let history = result(call(&mut agent, "engine.history", Json::Null));
+        let rollback = &history["records"][2];
+        assert_eq!(rollback["tx_id"], 2);
+        assert_eq!(rollback["base_revision"], 2);
+        assert_eq!(rollback["revision"], 3);
+        let mut commands = deleted["inverse"].as_array().unwrap().clone();
+        commands.reverse();
+        assert_eq!(rollback["commands"], json!(commands));
+    }
+}
+
 #[test]
 fn snapshot_and_restore_roundtrip() {
     let mut agent = Agent::new();

@@ -121,7 +121,8 @@ impl Planner<'_> {
             }
             Command::Replace { data } => {
                 let id = data.id;
-                if self.dead.contains(&id) || !self.world.by_id.contains_key(&id) {
+                // 删除的逆命令可以在本事务内恢复实体，再替换回删除前的内容。
+                if !self.exists(id) {
                     return Err(diag(
                         codes::EDIT_UNKNOWN_ENTITY,
                         Subject::Entity(id),
