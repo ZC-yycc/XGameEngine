@@ -1,12 +1,11 @@
 //! 播放器输入桥：把 egui 的键盘 / 鼠标状态折叠成 `input.ron` 的动作与轴。
 //!
-//! 编辑器 Play 走 `EditorState::apply_input`，播放器窗口走这里；两条路径都只
-//! 调 `ScriptRuntime::set_action` / `set_axis`，脚本层不认 egui 类型。
+//! 窗口只收集设备状态，动作与轴由共用脚本帧宿主结算。
 
 use std::path::Path;
 
 use eframe::egui;
-use xgc_script::ScriptRuntime;
+use xgc_host::ScriptedRunner;
 use xgc_sim::{InputMap, InputState, KeyCode, MouseButton};
 
 /// `egui::Key` 与项目键位表的对应关系；表里没有的键（标点、Insert 等）不映射。
@@ -82,7 +81,7 @@ impl PlayerInput {
         Ok(Self { map })
     }
 
-    pub(crate) fn apply(&self, ctx: &egui::Context, runtime: &mut ScriptRuntime) {
+    pub(crate) fn apply(&self, ctx: &egui::Context, runner: &mut ScriptedRunner) {
         let Some(map) = &self.map else {
             return;
         };
@@ -103,18 +102,7 @@ impl PlayerInput {
                 state.mouse.insert(MouseButton::Middle);
             }
         });
-        apply_state(map, &state, runtime);
-    }
-}
-
-/// 每个固定步都重写全部动作 / 轴：松开键要把 false / 0 送进脚本，
-/// 不能靠 `clear_actions` 之类的显式清理。
-fn apply_state(map: &InputMap, state: &InputState, runtime: &mut ScriptRuntime) {
-    for name in map.action_names() {
-        runtime.set_action(&name, map.action_pressed(&name, state));
-    }
-    for name in map.axis_names() {
-        runtime.set_axis(&name, map.axis_value(&name, state));
+        runner.apply_input(map, &state);
     }
 }
 
@@ -175,15 +163,14 @@ mod tests {
                 path: "move.lua".to_string(),
             },
         ));
-        let mut runtime = ScriptRuntime::new(&dir);
+        let (mut runner, _) = ScriptedRunner::with_assets(world, Some(&dir));
         let mut state = InputState::default();
         state.keys.insert(KeyCode::KeyD);
         state.keys.insert(KeyCode::Space);
-        apply_state(&map, &state, &mut runtime);
-        runtime.run_frame(&mut world, 1.0 / 60.0);
-        assert!(runtime.take_error().is_none());
+        runner.apply_input(&map, &state);
+        runner.step().unwrap();
         assert_eq!(
-            world.get::<Velocity>(entity).unwrap().linear,
+            runner.world().get::<Velocity>(entity).unwrap().linear,
             [1.0, 9.0, 0.0]
         );
         std::fs::remove_dir_all(&dir).unwrap();

@@ -1,0 +1,14 @@
+[package]
+name = "xgc-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XGC 的共用脚本帧宿主"
+
+[dependencies]
+xgc-asset = { path = "../xgc-asset" }
+xgc-render = { path = "../xgc-render" }
+xgc-script = { path = "../xgc-script" }
+xgc-sim = { path = "../xgc-sim" }
+xgc-world = { path = "../xgc-world" }

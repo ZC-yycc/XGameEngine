@@ -3,12 +3,9 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use xgc_asset::scan as scan_assets;
-use xgc_render::MeshCache;
-use xgc_script::ScriptRuntime;
-use xgc_sim::{apply_root_motion, ParticleSystem, Simulation};
+use xgc_host::ScriptedRunner;
 use xgc_store::save_world;
-use xgc_world::{RootMotionLibrary, World};
+use xgc_world::World;
 
 use crate::world_cmd::{load_world_state, parse_frames};
 
@@ -20,94 +17,6 @@ pub(crate) fn advance_world(
     advance_world_with_particles(world, assets_root, frames).map(|(world, _)| world)
 }
 
-/// 脚本 + 粒子驱动的固定步进器。
-///
-/// `advance_world*` 与 `xgc trace <世界.json> [帧] [资产根]` 共用这一条逐帧路径：顺序（系统 → 脚本 →
-/// 粒子）只有脚本帧才看得出来，两处各写一遍迟早会分叉；trace 也要能逐步拿到世界，
-/// 不能等跑完再读最终状态。
-pub(crate) struct ScriptedRunner {
-    runtime: ScriptRuntime,
-    simulation: Simulation,
-    particles: ParticleSystem,
-    fixed_dt: f32,
-    /// 根运动轨道表：来自模型资产（GLTF 解析后的平移通道），不属于世界数据；
-    /// 每帧在系统 / 脚本之后由宿主应用一次（旧端同一序：动画 tick → 根运动）。
-    root_motion: RootMotionLibrary,
-}
-
-impl ScriptedRunner {
-    pub(crate) fn new(world: World, assets_root: &Path) -> Self {
-        let (runtime, catalog) = match scan_assets(assets_root) {
-            Ok(catalog) => (
-                ScriptRuntime::with_catalog(assets_root, catalog.clone()),
-                Some(catalog),
-            ),
-            Err(err) => {
-                // 退化成项目相对路径解析是既有行为；但传错资产根时不能静默——
-                // 不然 `xgc trace … <资产根>` 会看起来「脚本没生效」而不是「根传错了」。
-                eprintln!(
-                    "warning: 资产根 {} 扫描失败（{err}），脚本按项目相对路径解析",
-                    assets_root.display()
-                );
-                (ScriptRuntime::new(assets_root), None)
-            }
-        };
-        let mut meshes = match catalog.as_ref() {
-            Some(catalog) => MeshCache::with_catalog(assets_root, catalog.clone()),
-            None => MeshCache::new(assets_root),
-        };
-        let root_motion = meshes.root_motion_library(&world);
-        let simulation = Simulation::new(world);
-        let fixed_dt = simulation.fixed_dt();
-        Self {
-            runtime,
-            simulation,
-            particles: ParticleSystem::new(),
-            fixed_dt,
-            root_motion,
-        }
-    }
-
-    /// 推进一帧。脚本错误必须往上传：静默跳过会让 trace 与真实运行悄悄分叉。
-    ///
-    /// `ScriptRuntime::run_frame` 自己只打 stderr（旧宿主依赖这个提示），所以这里再
-    /// `take_error()` 取第一处错误转成 `Err`；调用方负责补帧号。
-    pub(crate) fn step(&mut self) -> Result<(), String> {
-        let Self {
-            runtime,
-            simulation,
-            particles,
-            fixed_dt,
-            root_motion,
-        } = self;
-        simulation
-            .step_with(Vec::new(), |world| runtime.run_frame(world, *fixed_dt))
-            .map_err(|err| format!("{err:?}"))?;
-        if let Some(err) = runtime.take_error() {
-            return Err(err);
-        }
-        apply_root_motion(simulation.world_mut(), *fixed_dt, root_motion);
-        particles.update(*fixed_dt, simulation.world());
-        Ok(())
-    }
-
-    /// 打开批内并行（默认 1 = 串行）。同一份世界在同线程数下哈希必须不变。
-    pub(crate) fn set_parallel_threads(&mut self, threads: usize) {
-        self.simulation.set_parallel_threads(threads);
-    }
-
-    pub(crate) fn world(&self) -> &World {
-        self.simulation.world()
-    }
-
-    pub(crate) fn into_parts(self) -> (World, Vec<xgc_world::ParticleQuad>) {
-        (
-            self.simulation.into_world(),
-            self.particles.quads().to_vec(),
-        )
-    }
-}
-
 /// 粒子运行态不落进 `WorldData`；截图宿主要拿最终四边形，而普通 headless 宿主只丢掉它。
 pub(crate) fn advance_world_with_particles(
     world: World,
@@ -117,11 +26,9 @@ pub(crate) fn advance_world_with_particles(
     if frames == 0 {
         return Ok((world, Vec::new()));
     }
-    let mut runner = ScriptedRunner::new(world, assets_root);
-    for frame in 0..frames {
-        runner
-            .step()
-            .map_err(|err| format!("第 {} 帧运行失败：{err}", frame + 1))?;
+    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(assets_root));
+    for _ in 0..frames {
+        runner.step()?;
     }
     Ok(runner.into_parts())
 }

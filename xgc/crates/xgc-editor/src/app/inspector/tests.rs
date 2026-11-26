@@ -437,13 +437,10 @@ fn inspector_container_controls_are_disabled_in_play() {
     // 测试组件只注册在夹具世界里，直接用该世界构造播放副本。
     state.play = Some(crate::PlaySession {
         selected: state.selected,
-        simulation: xgc_sim::Simulation::new(world),
-        particles: xgc_sim::ParticleSystem::new(),
-        runtime: xgc_script::ScriptRuntime::new("."),
+        runner: xgc_host::ScriptedRunner::with_assets(world, None).0,
         input: None,
         paused: false,
         elapsed: std::time::Duration::ZERO,
-        root_motion: xgc_world::RootMotionLibrary::new(),
     });
 
     inspector.drag_right("4.55");

@@ -29,8 +29,8 @@ use xgc_render::{diff_breakdown, diff_images, GpuContext, ImageData};
 use xgc_sim::{HierarchySystem, System, UiLayoutSystem};
 
 use super::render::render_world_rgba;
-use super::runtime_cmd::ScriptedRunner;
 use super::world_cmd::load_world_state;
+use xgc_host::ScriptedRunner;
 
 /// 缺省判定线：总差异像素比例与结构性（单通道 ≥8）比例。
 const DEFAULT_MAX_TOTAL_PCT: f64 = 2.0;
@@ -381,14 +381,12 @@ fn check_trace(
 ) -> Result<usize, String> {
     let world = load_world_state(&world_path.to_string_lossy())
         .map_err(|_| format!("加载世界 {} 失败", world_path.display()))?;
-    let mut runner = ScriptedRunner::new(world, assets_root);
+    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(assets_root));
     let mut failures = 0usize;
     let last = expected.last().map(|(frame, _)| *frame).unwrap_or(0);
     for frame in 0..=last {
         if frame > 0 {
-            runner
-                .step()
-                .map_err(|err| format!("第 {frame} 帧运行失败：{err}"))?;
+            runner.step()?;
         }
         let want = expected[frame as usize].1;
         let world = runner.world();
@@ -422,11 +420,9 @@ fn check_visual(
     let (width, height) = (expected.width, expected.height);
     let world = load_world_state(&world_path.to_string_lossy())
         .map_err(|_| format!("加载世界 {} 失败", world_path.display()))?;
-    let mut runner = ScriptedRunner::new(world, Path::new(assets_root));
-    for step in 1..=frame {
-        runner
-            .step()
-            .map_err(|err| format!("第 {step} 帧运行失败：{err}"))?;
+    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(Path::new(assets_root)));
+    for _ in 0..frame {
+        runner.step()?;
     }
     let (mut world, particles) = runner.into_parts();
     // 与 `render-frame` 同序：先推进到第 N 帧，再补派生全局变换与 UI 布局。

@@ -6,8 +6,7 @@ use std::process::ExitCode;
 
 use xgc_asset::scan;
 use xgc_base::path::normalize_project_relative;
-use xgc_script::ScriptRuntime;
-use xgc_sim::Simulation;
+use xgc_host::ScriptedRunner;
 use xgc_store::{load_world, save_world, save_world_binary};
 use xgc_world::{builtin_registry, World, WorldData};
 
@@ -122,24 +121,18 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
         eprintln!("恢复世界失败：{err}");
         return ExitCode::from(2);
     }
-    let mut runtime = match scan(dir) {
-        Ok(catalog) => ScriptRuntime::with_catalog(dir, catalog),
-        Err(_) => ScriptRuntime::new(dir),
-    };
-    let mut simulation = Simulation::new(world);
+    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(dir));
     for _ in 0..frames {
-        if let Err(err) =
-            simulation.step_with(Vec::new(), |world| runtime.run_frame(world, 1.0 / 60.0))
-        {
-            eprintln!("运行失败：{err:?}");
+        if let Err(err) = runner.step() {
+            eprintln!("{err}");
             return ExitCode::from(2);
         }
     }
-    let world = simulation.world();
+    let world = runner.world();
     println!(
         "run-cooked: frames={frames} entities={} scripts={} hash={:016x}",
         world.len(),
-        runtime.entity_count(),
+        runner.script_count(),
         world.state_hash()
     );
     ExitCode::SUCCESS

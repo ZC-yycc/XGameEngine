@@ -17,13 +17,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use xgc_base::EntityId;
+use xgc_host::ScriptedRunner;
 use xgc_reflect::{FieldSchema, Registry, Value};
-use xgc_script::ScriptRuntime;
-use xgc_sim::{InputMap, ParticleSystem, Simulation};
+use xgc_sim::InputMap;
 use xgc_store::{load_world, save_world, ProjectSession};
 use xgc_world::{
     builtin_registry, Camera, Command, ComponentData, ComponentId, GlobalTransform, Material,
-    MeshRenderer, Name, RootMotionLibrary, Transform, World, WorldData,
+    MeshRenderer, Name, Transform, World, WorldData,
 };
 
 pub struct EntityRow {
@@ -45,14 +45,10 @@ pub struct ComponentRow {
 
 struct PlaySession {
     selected: Option<EntityId>,
-    simulation: Simulation,
-    particles: ParticleSystem,
-    runtime: ScriptRuntime,
+    runner: ScriptedRunner,
     input: Option<InputMap>,
     paused: bool,
     elapsed: Duration,
-    /// 根运动轨道表：进入 Play 时从播放世界的模型资产建一次（与 CLI 宿主同源）。
-    root_motion: RootMotionLibrary,
 }
 
 pub struct EditorState {
@@ -190,7 +186,7 @@ impl EditorState {
 
     pub fn world(&self) -> &World {
         match &self.play {
-            Some(session) => session.simulation.world(),
+            Some(session) => session.runner.world(),
             None => &self.world,
         }
     }
@@ -199,7 +195,7 @@ impl EditorState {
     pub fn particle_quads(&self) -> &[xgc_world::ParticleQuad] {
         self.play
             .as_ref()
-            .map_or(&[], |session| session.particles.quads())
+            .map_or(&[], |session| session.runner.particle_quads())
     }
 
     /// Play 期间禁止直接编辑；Inspector 只读。
@@ -478,7 +474,7 @@ impl EditorState {
 
     fn world_data_for_view(&self) -> Option<WorldData> {
         Some(match &self.play {
-            Some(session) => session.simulation.world().world_data(),
+            Some(session) => session.runner.world().world_data(),
             None => self.world.world_data(),
         })
     }
@@ -523,7 +519,7 @@ impl EditorState {
 
     fn entity_data(&self, id: EntityId) -> Option<xgc_world::EntityData> {
         match &self.play {
-            Some(session) => session.simulation.world().entity_data(id),
+            Some(session) => session.runner.world().entity_data(id),
             None => self.world.entity_data(id),
         }
     }

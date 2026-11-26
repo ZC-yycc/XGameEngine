@@ -2,10 +2,7 @@
 
 use std::path::Path;
 
-use xgc_asset::scan;
-use xgc_render::MeshCache;
-use xgc_script::ScriptRuntime;
-use xgc_sim::{apply_root_motion, Simulation};
+use xgc_host::ScriptedRunner;
 use xgc_store::{load_world, ProjectSession};
 use xgc_world::{World, WorldData};
 
@@ -96,16 +93,6 @@ fn resolve_scene_name(session: &ProjectSession, requested: &str) -> Result<Strin
     }
 }
 
-fn assets_for(root: &Path) -> (ScriptRuntime, MeshCache) {
-    match scan(root) {
-        Ok(catalog) => (
-            ScriptRuntime::with_catalog(root, catalog.clone()),
-            MeshCache::with_catalog(root, catalog),
-        ),
-        Err(_) => (ScriptRuntime::new(root), MeshCache::new(root)),
-    }
-}
-
 pub fn run_cooked(dir: &Path, frames: u64) -> Result<PlayerStats, String> {
     run_cooked_scene(dir, frames, None)
 }
@@ -122,21 +109,15 @@ pub fn run_cooked_scene(
     world
         .restore_world_data(&loaded.data)
         .map_err(|err| format!("恢复世界失败：{err}"))?;
-    let (mut runtime, mut meshes) = assets_for(root);
-    // 旧端的 `apply_root_motion` 在动画之后、渲染之前；三个宿主保持同序。
-    let root_motion = meshes.root_motion_library(&world);
-    let mut simulation = Simulation::new(world);
+    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(root));
     for _ in 0..frames {
-        simulation
-            .step_with(Vec::new(), |world| runtime.run_frame(world, 1.0 / 60.0))
-            .map_err(|err| format!("运行失败：{err:?}"))?;
-        apply_root_motion(simulation.world_mut(), 1.0 / 60.0, &root_motion);
+        runner.step()?;
     }
-    let world = simulation.world();
+    let world = runner.world();
     Ok(PlayerStats {
         frames,
         entities: world.len(),
-        scripts: runtime.entity_count(),
+        scripts: runner.script_count(),
         state_hash: world.state_hash(),
     })
 }

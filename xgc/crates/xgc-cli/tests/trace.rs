@@ -338,6 +338,35 @@ fn update_errors_are_reported_like_load_errors() {
 }
 
 #[test]
+fn run_cooked_reports_script_errors_as_exit_code_two() {
+    let (path, assets) = scripted_world_with(
+        "cooked-update-error",
+        "function update(ctx) error('cooked update failed') end",
+    );
+    let dir = path.parent().unwrap();
+    let cooked = dir.join("cooked");
+    let pack = Command::new(binary())
+        .arg("pack")
+        .args([&path, &assets, &cooked])
+        .output()
+        .unwrap();
+    assert!(pack.status.success(), "{pack:?}");
+    let run = Command::new(binary())
+        .arg("run-cooked")
+        .arg(&cooked)
+        .arg("3")
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(2), "{error}");
+    assert!(
+        error.contains("第 1 帧运行失败") && error.contains("cooked update failed"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn run_scripts_can_write_the_final_world() {
     // 割接对表的入口：旧端用 `--dump-scene` 落终态，XGC 侧必须能在同一条
     // 「系统 → 脚本 → 粒子」路径跑完后把世界原样落盘，否则只能比截图。

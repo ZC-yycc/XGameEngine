@@ -39,6 +39,35 @@ fn runs_cooked_world_and_scripts() {
 }
 
 #[test]
+fn headless_player_reports_the_frame_and_script_error() {
+    let dir = std::env::temp_dir().join(format!(
+        "xgc_player_script_error_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("broken.lua"),
+        "function update(ctx) error('fixture failure') end",
+    )
+    .unwrap();
+    let mut world = World::new();
+    world.spawn((Script {
+        path: "broken.lua".into(),
+    },));
+    xgc_store::save_world(&dir.join("world.json"), &world.world_data()).unwrap();
+    let result = xgc_player::run_cooked(&dir, 3);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let error = result.expect_err("脚本帧失败时应拒绝报告成功");
+    for text in ["第 1 帧", "broken.lua", "fixture failure"] {
+        assert!(error.contains(text), "缺 {text}：{error}");
+    }
+}
+
+#[test]
 fn player_applies_root_motion_in_the_same_order_as_the_cli() {
     use xgc_render::MeshCache;
     use xgc_sim::{apply_root_motion, Simulation};

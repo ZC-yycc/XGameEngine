@@ -13,6 +13,7 @@ members = [
     "crates/xgc-migrate",
     "crates/xgc-script",
     "crates/xgc-editor",
+    "crates/xgc-host",
     "crates/xgc-audio",
     "crates/xgc-cli",
     "crates/xgc-player",

@@ -95,7 +95,7 @@ end
     editor.play().unwrap();
     let err = editor.advance_play(fixed * 2).unwrap_err();
     assert!(
-        err.contains("第 0 帧") && err.contains("play-regression"),
+        err.contains("第 1 帧") && err.contains("play-regression"),
         "{err}"
     );
     assert!(editor.is_paused());

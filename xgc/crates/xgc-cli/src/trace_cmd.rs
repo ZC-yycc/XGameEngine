@@ -12,9 +12,10 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use super::runtime_cmd::ScriptedRunner;
-use super::world_cmd::{load_simulation, load_world_state, parse_frames, parse_threads};
+use xgc_host::ScriptedRunner;
 use xgc_world::World;
+
+use super::world_cmd::{load_simulation, load_world_state, parse_frames, parse_threads};
 
 /// 打印一行帧状态。`hash` 是 `World::state_hash()`，与 `run-world` / `run-scripts`
 /// 末行同一口径；实体数 / revision 一起带出来，哈希变了能立刻看出是"数量变了"还是
@@ -93,12 +94,12 @@ fn trace_scripts(path: &str, frames: u64, assets_root: &Path, threads: usize) ->
         Ok(world) => world,
         Err(code) => return code,
     };
-    let mut runner = ScriptedRunner::new(world, assets_root);
+    let (mut runner, _) = ScriptedRunner::with_assets(world, Some(assets_root));
     runner.set_parallel_threads(threads);
     print_frame(0, runner.world());
     for frame in 1..=frames {
         if let Err(err) = runner.step() {
-            eprintln!("第 {frame} 帧运行失败：{err}");
+            eprintln!("{err}");
             return ExitCode::from(2);
         }
         print_frame(frame, runner.world());

@@ -3,9 +3,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use xgc_render::MeshCache;
-use xgc_script::ScriptRuntime;
-use xgc_sim::{apply_root_motion, FrameRecord, InputMap, InputState, ParticleSystem, Simulation};
+use xgc_host::ScriptedRunner;
+use xgc_sim::{FrameRecord, InputMap, InputState};
 use xgc_world::World;
 
 use crate::{EditorState, PlaySession};
@@ -48,24 +47,13 @@ impl EditorState {
         world
             .restore_world_data(&self.world.world_data())
             .map_err(|err| format!("进入 Play 失败：{err}"))?;
-        let (runtime, mut meshes) = match asset_root.and_then(|root| xgc_asset::scan(root).ok()) {
-            Some(catalog) => (
-                ScriptRuntime::with_catalog(root, catalog.clone()),
-                MeshCache::with_catalog(root, catalog),
-            ),
-            None => (ScriptRuntime::new(root), MeshCache::new(root)),
-        };
-        // GUID 模型与脚本共用同一份资产目录，否则根运动会随宿主而变。
-        let root_motion = meshes.root_motion_library(&world);
+        let (runner, _) = ScriptedRunner::with_assets(world, asset_root);
         self.play = Some(PlaySession {
             selected: self.selected,
-            simulation: Simulation::new(world),
-            particles: ParticleSystem::new(),
-            runtime,
+            runner,
             input,
             paused: false,
             elapsed: Duration::ZERO,
-            root_motion,
         });
         Ok(())
     }
@@ -78,14 +66,7 @@ impl EditorState {
         let Some(map) = &session.input else {
             return;
         };
-        for name in map.actions.keys() {
-            session
-                .runtime
-                .set_action(name, map.action_pressed(name, state));
-        }
-        for name in map.axes.keys() {
-            session.runtime.set_axis(name, map.axis_value(name, state));
-        }
+        session.runner.apply_input(map, state);
     }
 
     pub fn input_map(&self) -> Option<&InputMap> {
@@ -97,7 +78,7 @@ impl EditorState {
     pub fn script_entity_count(&self) -> usize {
         self.play
             .as_ref()
-            .map_or(0, |session| session.runtime.entity_count())
+            .map_or(0, |session| session.runner.script_count())
     }
 
     pub fn is_paused(&self) -> bool {
@@ -122,14 +103,14 @@ impl EditorState {
         let Some(session) = self.play.as_mut().filter(|session| !session.paused) else {
             return Ok(None);
         };
-        let fixed_step = Duration::from_secs_f32(session.simulation.fixed_dt());
+        let fixed_step = Duration::from_secs_f32(session.runner.fixed_dt());
         session.elapsed = session
             .elapsed
             .saturating_add(elapsed)
             .min(fixed_step * MAX_CATCH_UP_STEPS);
         while session.elapsed >= fixed_step {
             session.elapsed -= fixed_step;
-            if let Err(err) = session.run_frame() {
+            if let Err(err) = session.runner.step() {
                 self.pause();
                 return Err(err);
             }
@@ -138,31 +119,21 @@ impl EditorState {
     }
 
     pub fn step(&mut self) -> Result<Option<FrameRecord>, String> {
-        self.play
-            .as_mut()
-            .filter(|session| session.paused)
-            .map(PlaySession::run_frame)
-            .transpose()
+        let Some(session) = self.play.as_mut().filter(|session| session.paused) else {
+            return Ok(None);
+        };
+        let frame = session.runner.step()?;
+        let world = session.runner.world();
+        Ok(Some(FrameRecord {
+            frame,
+            revision: world.revision(),
+            state_hash: world.state_hash(),
+            entities: world.len(),
+        }))
     }
 
     /// 编辑世界、选择和历史一直留在编辑态，退出只丢弃播放副本。
     pub fn stop(&mut self) {
         self.play = None;
-    }
-}
-
-impl PlaySession {
-    fn run_frame(&mut self) -> Result<FrameRecord, String> {
-        let dt = self.simulation.fixed_dt();
-        let record = self
-            .simulation
-            .step_with(Vec::new(), |world| self.runtime.run_frame(world, dt))
-            .map_err(|err| format!("Play 帧失败：{err:?}"))?;
-        apply_root_motion(self.simulation.world_mut(), dt, &self.root_motion);
-        self.particles.update(dt, self.simulation.world());
-        if let Some(err) = self.runtime.take_error() {
-            return Err(format!("Play 第 {} 帧脚本失败：{err}", record.frame));
-        }
-        Ok(record)
     }
 }

@@ -5,10 +5,9 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
+use xgc_host::ScriptedRunner;
 use xgc_render::{GpuContext, MeshCache, Renderer};
-use xgc_script::ScriptRuntime;
-use xgc_sim::{apply_root_motion, ParticleSystem, Simulation};
-use xgc_world::{RootMotionLibrary, World};
+use xgc_world::World;
 
 use crate::input::PlayerInput;
 
@@ -21,11 +20,8 @@ struct Viewport {
 
 struct PlayerApp {
     dir: PathBuf,
-    simulation: Option<Simulation>,
-    particles: ParticleSystem,
-    runtime: Option<ScriptRuntime>,
-    /// 根运动轨道表：进入播放时建一次，每帧在系统 / 脚本之后应用（与 CLI 同序）。
-    root_motion: RootMotionLibrary,
+    runner: Option<ScriptedRunner>,
+    failed: bool,
     meshes: Option<MeshCache>,
     input: PlayerInput,
     scene: Option<String>,
@@ -38,10 +34,8 @@ impl PlayerApp {
     fn new(path: &Path, scene: Option<&str>) -> Self {
         let mut app = Self {
             dir: path.to_path_buf(),
-            simulation: None,
-            particles: ParticleSystem::new(),
-            runtime: None,
-            root_motion: RootMotionLibrary::new(),
+            runner: None,
+            failed: false,
             meshes: None,
             input: PlayerInput::default(),
             scene: scene.map(str::to_string),
@@ -73,13 +67,11 @@ impl PlayerApp {
         world
             .restore_world_data(&loaded.data)
             .map_err(|err| format!("恢复世界失败：{err}"))?;
-        let (runtime, mut meshes) = crate::assets_for(root);
-        self.root_motion = meshes.root_motion_library(&world);
+        let (runner, meshes) = ScriptedRunner::with_assets(world, Some(root));
         self.dir = root.to_path_buf();
         self.input = input;
         self.meshes = Some(meshes);
-        self.simulation = Some(Simulation::new(world));
-        self.runtime = Some(runtime);
+        self.runner = Some(runner);
         Ok(())
     }
 
@@ -123,30 +115,29 @@ impl PlayerApp {
     }
 
     fn step(&mut self) {
-        let (Some(simulation), Some(runtime)) = (&mut self.simulation, &mut self.runtime) else {
+        let Some(runner) = self.runner.as_mut().filter(|_| !self.failed) else {
             return;
         };
-        if let Err(err) =
-            simulation.step_with(Vec::new(), |world| runtime.run_frame(world, 1.0 / 60.0))
-        {
-            self.error = Some(format!("运行失败：{err:?}"));
-        } else {
-            apply_root_motion(simulation.world_mut(), 1.0 / 60.0, &self.root_motion);
-            self.particles.update(1.0 / 60.0, simulation.world());
-            self.frames += 1;
+        match runner.step() {
+            Ok(_) => self.frames += 1,
+            Err(err) => {
+                self.failed = true;
+                self.error = Some(err);
+            }
         }
     }
 
     fn render_viewport(&mut self) {
-        let particles = self.particles.quads().to_vec();
-        let (Some(simulation), Some(viewport)) = (&self.simulation, &mut self.viewport) else {
+        let (Some(runner), Some(viewport)) = (&self.runner, &mut self.viewport) else {
             return;
         };
-        viewport.renderer.set_particles(particles);
+        viewport
+            .renderer
+            .set_particles(runner.particle_quads().to_vec());
         if let Err(err) =
             viewport
                 .renderer
-                .render(&viewport.context, &viewport.texture, simulation.world())
+                .render(&viewport.context, &viewport.texture, runner.world())
         {
             self.error = Some(format!("渲染失败：{err}"));
         }
@@ -155,8 +146,8 @@ impl PlayerApp {
 
 impl eframe::App for PlayerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if let Some(runtime) = &mut self.runtime {
-            self.input.apply(ctx, runtime);
+        if let Some(runner) = &mut self.runner {
+            self.input.apply(ctx, runner);
         }
         self.step();
         if let Some(render_state) = frame.wgpu_render_state() {
@@ -164,7 +155,10 @@ impl eframe::App for PlayerApp {
             self.render_viewport();
         }
         egui::TopBottomPanel::top("xgc-player-status").show(ctx, |ui| {
-            let entities = self.simulation.as_ref().map_or(0, |sim| sim.world().len());
+            let entities = self
+                .runner
+                .as_ref()
+                .map_or(0, |runner| runner.world().len());
             let scene = self
                 .scene
                 .as_deref()
@@ -279,10 +273,10 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                |ctx| app.input.apply(ctx, app.runtime.as_mut().unwrap()),
+                |ctx| app.input.apply(ctx, app.runner.as_mut().unwrap()),
             );
             app.step();
-            let world = app.simulation.as_ref().unwrap().world();
+            let world = app.runner.as_ref().unwrap().world();
             world
                 .get::<Transform>(world.key(id).unwrap())
                 .unwrap()
@@ -296,7 +290,7 @@ mod tests {
         std::fs::remove_file(root.join("Config/controls.ron")).unwrap();
         let missing = PlayerApp::new(&root, None);
         assert!(missing.error.as_deref().unwrap().contains("项目输入映射"));
-        assert!(missing.simulation.is_none());
+        assert!(missing.runner.is_none());
 
         manifest.input = None;
         save_project(&manifest_path, &manifest).unwrap();

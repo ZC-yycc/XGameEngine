@@ -20,6 +20,7 @@ xgc-agent = { path = "../xgc-agent" }
 xgc-asset = { path = "../xgc-asset" }
 xgc-render = { path = "../xgc-render" }
 xgc-migrate = { path = "../xgc-migrate" }
+xgc-host = { path = "../xgc-host" }
 xgc-script = { path = "../xgc-script" }
 xgc-audio = { path = "../xgc-audio" }
 serde.workspace = true

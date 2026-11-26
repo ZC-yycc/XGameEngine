@@ -172,14 +172,29 @@ impl Simulation {
         self.step_with(commands, |_| {})
     }
 
-    /// 跑一帧，并在记录 trace 前执行 `after`（脚本 / 外部输入接入点）。
-    ///
-    /// `after` 是计划里的宿主阶段：紧跟在所有系统之后、记录帧号之前。
+    /// 跑一帧，在计划里的宿主阶段执行回调并记录步末状态。
     pub fn step_with(
         &mut self,
         commands: Vec<Command>,
-        after: impl FnMut(&mut World),
+        host: impl FnMut(&mut World),
     ) -> Result<FrameRecord, SimError> {
+        let frame = self.advance_with(commands, host)?;
+        let record = FrameRecord {
+            frame,
+            revision: self.world.revision(),
+            state_hash: self.world.state_hash(),
+            entities: self.world.len(),
+        };
+        self.trace.frames.push(record.clone());
+        Ok(record)
+    }
+
+    /// 与 `step_with` 共用固定步，供自行采样状态的宿主避免持续累积 trace。
+    pub fn advance_with(
+        &mut self,
+        commands: Vec<Command>,
+        host: impl FnMut(&mut World),
+    ) -> Result<u64, SimError> {
         // 碰撞事件是"本步"的瞬态数据：先清上一帧，再让物理系统写。
         self.world.clear_collision_events();
         let world_plan = self.world.plan(commands);
@@ -198,17 +213,11 @@ impl Simulation {
         // 帧首准备必须在执行计划之前：刚体表要用**本帧积分前**的位姿建体。
         self.schedule.prepare(&self.world);
         self.schedule
-            .run_plan(&self.plan, &mut self.world, self.fixed_dt, after);
+            .run_plan(&self.plan, &mut self.world, self.fixed_dt, host);
 
-        let record = FrameRecord {
-            frame: self.frame,
-            revision: self.world.revision(),
-            state_hash: self.world.state_hash(),
-            entities: self.world.len(),
-        };
-        self.trace.frames.push(record.clone());
+        let frame = self.frame;
         self.frame += 1;
-        Ok(record)
+        Ok(frame)
     }
 
     pub fn run(&mut self, frames: u64) -> Result<(), SimError> {

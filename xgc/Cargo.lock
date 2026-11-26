@@ -3316,6 +3316,7 @@ dependencies = [
  "xgc-asset",
  "xgc-audio",
  "xgc-base",
+ "xgc-host",
  "xgc-migrate",
  "xgc-reflect",
  "xgc-render",
@@ -3333,11 +3334,22 @@ dependencies = [
  "pxfm",
  "xgc-asset",
  "xgc-base",
+ "xgc-host",
  "xgc-reflect",
+ "xgc-render",
+ "xgc-sim",
+ "xgc-store",
+ "xgc-world",
+]
+
+[[package]]
+name = "xgc-host"
+version = "0.1.0"
+dependencies = [
+ "xgc-asset",
  "xgc-render",
  "xgc-script",
  "xgc-sim",
- "xgc-store",
  "xgc-world",
 ]
 
@@ -3361,8 +3373,8 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "xgc-asset",
+ "xgc-host",
  "xgc-render",
- "xgc-script",
  "xgc-sim",
  "xgc-store",
  "xgc-world",
